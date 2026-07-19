@@ -133,6 +133,14 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
         e.null_page_excluded_pages,
         e.unknown_type_pages,
     ));
+    // 容量に対してどれだけ余裕があるかを実測で把握するため、使用した
+    // 範囲数と容量を必ずログへ残す（ADR-0011）。容量超過時は build() が
+    // Err を返し、上の unwrap_or_else で既にエラー出力 + halt している。
+    logger.info(format_args!(
+        "frame allocator: {} / {} free ranges used",
+        allocator.free_range_count(),
+        frame_allocator::DEFAULT_CAPACITY
+    ));
 
     // 実地スモークテスト: 1フレーム確保して解放し、空きフレーム数が
     // 元通りになることを確認する（.bss ゼロ埋め検証と同じ考え方）。
