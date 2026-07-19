@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# kernel と同じ理由（独自の #[panic_handler] が std と衝突する）で、bin は
+# ホストのテスト対象から外す。
+[[bin]]
+name = "bootloader"
+test = false
+bench = false
+
 [dependencies]
 common = { path = "../common" }
 # M2-0c: kernel.elf を読み込むために uefi::fs::FileSystem (Vec<u8> を返す)

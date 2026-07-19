@@ -188,3 +188,22 @@
   得られる情報がある場合は、それをメモリマップとは独立の「明示的に
   マップすべき領域」として扱う設計にしておくと、こうした不整合を
   実行時の充足検証で機械的に検出できる（今回まさにその検証が機能した）。
+
+## 2026-07-20 `cargo test` がワークスペース全体で失敗する（M3-b）
+- 症状: `cargo test -p kernel`（`--lib` 無し）および workspace ルートでの
+  `cargo test` が `error[E0152]: found duplicate lang item panic_impl` で
+  失敗する。`cargo test -p kernel --lib` なら通るため、それまで気づいて
+  いなかった。
+- 原因: `kernel` と `bootloader` は bin ターゲットが `no_std`/`no_main` で
+  独自の `#[panic_handler]` を持つ。`cargo test` は既定で bin ターゲットも
+  テストバイナリとしてビルドしようとするが、テストバイナリは `std` に
+  依存するため、`std` 側の `panic_impl` と衝突する。lib ターゲットは
+  `#![cfg_attr(not(test), no_std)]` としてあるため影響を受けない。
+- 解法: 両クレートの `Cargo.toml` に `[[bin]] test = false, bench = false`
+  を指定し、bin をホストのテスト対象から外した。ホストで検証するロジックは
+  もともと lib 側（`src/lib.rs` 配下）に置く方針なので、bin を外しても
+  検証範囲は変わらない。
+- 教訓 / 再発防止: `no_std` の bin と、ホストテスト用の lib を同じクレートに
+  同居させる場合は、bin を `test = false` にしておく。`--lib` を付ければ
+  通るという回避策で済ませると、標準的な `cargo test` が通らない状態が
+  放置され、CI や他人の手元で最初につまずく。

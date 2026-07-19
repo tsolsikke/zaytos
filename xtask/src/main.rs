@@ -12,6 +12,8 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 
+mod font;
+
 const OVMF_CODE_PATH: &str = "/usr/share/OVMF/OVMF_CODE_4M.fd";
 const OVMF_VARS_TEMPLATE_PATH: &str = "/usr/share/OVMF/OVMF_VARS_4M.fd";
 const BOOTLOADER_PACKAGE: &str = "bootloader";
@@ -33,7 +35,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask run [--panic-test] [--gui]\n       cargo xtask screenshot [output.png] [--wait-secs N]";
+    const USAGE: &str = "usage: cargo xtask run [--panic-test] [--gui]\n       cargo xtask screenshot [output.png] [--wait-secs N]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -44,6 +46,7 @@ fn main() -> Result<()> {
             cmd_run(panic_test, gui)
         }
         Some("screenshot") => cmd_screenshot(&args[1..]),
+        Some("gen-font") => font::generate(&workspace_root()?),
         Some(other) => bail!("unknown xtask subcommand: {other}\n\n{USAGE}"),
         None => bail!("missing xtask subcommand\n\n{USAGE}"),
     }

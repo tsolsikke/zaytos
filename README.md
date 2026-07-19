@@ -34,5 +34,10 @@ cargo xtask run
 端末へ流す。画面を出す場合は `--gui`、パニック経路の回帰確認は
 `--panic-test`、画面のキャプチャは `cargo xtask screenshot`。
 
+## 同梱している第三者のデータ
+コンソールフォントとして GNU Unifont のビットマップグリフを使っている
+（SIL Open Font License 1.1）。出典・ライセンス全文・収録範囲の広げ方は
+[third_party/unifont/](third_party/unifont/) を参照。
+
 ## ライセンス
-（未定）
+（未定。決める際は、OFL のフォントデータを同梱している点を前提にすること）

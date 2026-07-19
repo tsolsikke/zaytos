@@ -16,7 +16,7 @@ use common::cpu;
 use common::log::{LogLevel, Logger};
 use common::serial::SerialPort;
 use kernel::frame_allocator;
-use kernel::graphics::{Color, Framebuffer, FramebufferLayout};
+use kernel::graphics::{self, Color, Framebuffer, FramebufferLayout};
 use kernel::heap;
 use kernel::paging;
 use kernel::paging::plan::{resolve_pages, MappedRanges};
@@ -650,8 +650,65 @@ fn draw_startup_test_pattern(logger: &mut Logger<SerialPort>, framebuffer: &mut 
         Color::rgb(0xFF, 0xC0, 0x00),
     );
 
+    draw_startup_text(framebuffer, BACKGROUND);
+
     logger.info(format_args!(
         "framebuffer: startup test pattern drawn ({width}x{height}); verify with \
          cargo xtask screenshot"
     ));
+}
+
+/// 起動時のテストパターンに文字を描く（M3-b）。
+///
+/// 目視で次を確認できるように選んである。
+/// - 印字可能な ASCII が 3 行すべて欠けずに並ぶ: グリフテーブルの検索と
+///   ビットの並びが正しい。左右が反転していれば字形が鏡像になる。
+/// - 日本語が代替グリフ（U+FFFD）として描かれる: 未収録文字のフォールバックが
+///   効いており、落ちない。日本語を収録した時点でここが本来の字形に変わる。
+/// - 右端から始まる行が、画面内に収まる分だけ描かれて落ちない: 文字単位の
+///   切り詰めが効いている。
+///
+/// ヒープ初期化より前に呼ばれるため、動的な文字列は組み立てられない。
+/// 静的な文字列だけで確認できる内容にしてある。
+fn draw_startup_text(framebuffer: &mut Framebuffer, background: Color) {
+    const TEXT_LEFT: u32 = 16;
+    const TEXT_TOP: u32 = 112;
+    const LINE_HEIGHT: u32 = 20;
+    const FOREGROUND: Color = Color::rgb(0xE0, 0xE0, 0xE0);
+    const ACCENT: Color = Color::rgb(0x66, 0xD0, 0xFF);
+
+    let lines: [(&str, Color); 6] = [
+        ("ZaytOS", ACCENT),
+        (" !\"#$%&'()*+,-./0123456789:;<=>?", FOREGROUND),
+        ("@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_", FOREGROUND),
+        ("`abcdefghijklmnopqrstuvwxyz{|}~", FOREGROUND),
+        ("not yet embedded: (japanese)", FOREGROUND),
+        ("fallback check: ", FOREGROUND),
+    ];
+
+    for (index, (text, color)) in lines.iter().enumerate() {
+        let y = TEXT_TOP + (index as u32) * LINE_HEIGHT;
+        framebuffer.draw_str(TEXT_LEFT, y, text, *color, Some(background));
+    }
+
+    // 未収録文字が代替グリフになることの確認。上の最終行の続きに描く。
+    let fallback_x = TEXT_LEFT + graphics::text_width_pixels("fallback check: ");
+    let fallback_y = TEXT_TOP + 5 * LINE_HEIGHT;
+    framebuffer.draw_str(
+        fallback_x,
+        fallback_y,
+        "あア漢",
+        Color::rgb(0xFF, 0xA0, 0xA0),
+        Some(background),
+    );
+
+    // 右端をまたぐ位置から描き、画面内の分だけが出ることを確認する。
+    let clipped_y = TEXT_TOP + 7 * LINE_HEIGHT;
+    framebuffer.draw_str(
+        framebuffer.layout().width() - 24,
+        clipped_y,
+        "CLIPPED",
+        Color::rgb(0xFF, 0xC0, 0x00),
+        Some(background),
+    );
 }

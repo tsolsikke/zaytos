@@ -5,6 +5,15 @@ edition = "2021"
 publish = false
 build = "build.rs"
 
+# この bin は no_std / no_main で独自の #[panic_handler] を持つため、ホスト向けの
+# テストバイナリとしてはビルドできない（std の panic_impl と衝突する）。
+# 既定のままだと `cargo test` がワークスペース全体で失敗するので、bin は
+# テスト対象から外す。ホストで検証するロジックは lib 側（src/lib.rs）に置く。
+[[bin]]
+name = "kernel"
+test = false
+bench = false
+
 [dependencies]
 common = { path = "../common" }
 
