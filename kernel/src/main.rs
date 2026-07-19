@@ -1,6 +1,6 @@
 //! ZaytOS kernel（M2-0c: bootloader からの引き渡しを受けて起動。
-//! M2-c: 物理フレームアロケータ。M2-d (d-1): 新規ページテーブル構築、
-//! CR3 はまだ切り替えない）。
+//! M2-c: 物理フレームアロケータ。M2-d: 新規ページテーブル構築 (d-1) と
+//! CR3 切り替え (d-2)）。
 
 #![no_std]
 #![no_main]
@@ -10,6 +10,7 @@ use common::cpu;
 use common::log::{LogLevel, Logger};
 use common::serial::SerialPort;
 use kernel::frame_allocator;
+use kernel::paging;
 use kernel::paging::plan::{resolve_pages, MappedRanges};
 use kernel::paging::table::PageTableBuilder;
 
@@ -326,7 +327,146 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
     }
 
     logger.info(format_args!(
-        "paging: all required ranges mapped. NOT switching CR3 yet (d-1 stops here)."
+        "paging: all required ranges mapped. proceeding to CR3 switch (d-2)."
+    ));
+
+    // === M2-d (d-2): CR3 を新しいページテーブルへ切り替える ===
+
+    let old_cr3 = paging::switch::read_cr3();
+    logger.info(format_args!("paging: current CR3 = {old_cr3:#x}"));
+
+    // pml4_phys は alloc_zeroed_table がフレームアロケータから確保した
+    // フレームの先頭アドレス（frame * FRAME_SIZE）であるため下位12ビットは
+    // 常に 0 のはずだが、CR3 に書き込む値の PWT/PCD ビット（bit 3, 4）を
+    // 含む下位ビットが確実に 0 であることを実行時にも検証する。
+    if pml4_phys & 0xFFF != 0 {
+        logger.error(format_args!(
+            "paging: new PML4 {pml4_phys:#x} is not 4KiB aligned; refusing to switch CR3"
+        ));
+        cpu::halt_forever();
+    }
+    let cr3_value = pml4_phys;
+
+    // 切り替え前スナップショット(切り替え後の整合性確認に使う)。
+    // SAFETY: kernel_start は必須領域検証により読み取り可能であることを
+    // 確認済み。
+    let kernel_first_byte_before = unsafe { core::ptr::read_volatile(kernel_start as *const u8) };
+
+    // SAFETY: 直前の必須領域検証(all_required_ok)により、現在実行中の
+    // コード・現在のスタック・pml4_phys 自身のフレームがすべて新しい
+    // ページテーブルでも恒等マッピングされていることを確認済み。
+    unsafe {
+        paging::switch::switch_to(cr3_value);
+    }
+
+    // ここが出れば CR3 切り替え命令自体は実行できた(トリプルフォルト
+    // していない)ことが分かる。
+    logger.info(format_args!("paging: CR3 switch instruction executed"));
+
+    let new_cr3 = paging::switch::read_cr3();
+    let cr3_ok = new_cr3 == cr3_value;
+    logger.info(format_args!(
+        "paging: CR3 readback {new_cr3:#x} (expected {cr3_value:#x}): {}",
+        if cr3_ok { "OK" } else { "NG" }
+    ));
+    if !cr3_ok {
+        logger.error(format_args!("paging: CR3 readback mismatch; halting"));
+        cpu::halt_forever();
+    }
+
+    let mut post_switch_ok = true;
+
+    // (a) kernel イメージの読み取り検証。
+    logger.info(format_args!("paging: about to test: kernel image read"));
+    // SAFETY: kernel_start は必須領域検証により読み取り可能であることを
+    // 確認済み。
+    let kernel_first_byte_after = unsafe { core::ptr::read_volatile(kernel_start as *const u8) };
+    let kernel_read_ok = kernel_first_byte_after == kernel_first_byte_before;
+    logger.info(format_args!(
+        "paging: kernel image read: {}",
+        if kernel_read_ok { "OK" } else { "NG" }
+    ));
+    post_switch_ok &= kernel_read_ok;
+
+    // (b) スタックの読み書き検証。ローカル変数は volatile アクセスでも
+    // レジスタに割り当てられうるため、それでは実際にスタックへ触った
+    // ことにならない。現在の RSP を実レジスタ値として読み、その少し下
+    // (未使用側、生きているスタックフレームより低いアドレス)へ生
+    // ポインタで直接書き書き・読み戻しする。
+    logger.info(format_args!("paging: about to test: stack read/write"));
+    let stack_probe_addr = cpu::read_rsp().wrapping_sub(256);
+    const STACK_PROBE_PATTERN: u64 = 0xDEAD_BEEF_CAFE_0000;
+    // SAFETY: stack_probe_addr は現在の RSP より低いアドレス(スタックが
+    // まだ使っていない未使用領域)であり、かつ必須領域検証で確認した
+    // "current RSP" と同じスタック領域内(同じマップ済み範囲)にある。
+    // 使用中のスタックフレームには重ならない。
+    let stack_read_back = unsafe {
+        core::ptr::write_volatile(stack_probe_addr as *mut u64, STACK_PROBE_PATTERN);
+        core::ptr::read_volatile(stack_probe_addr as *const u64)
+    };
+    let stack_ok = stack_read_back == STACK_PROBE_PATTERN;
+    logger.info(format_args!(
+        "paging: stack read/write: {}",
+        if stack_ok { "OK" } else { "NG" }
+    ));
+    post_switch_ok &= stack_ok;
+
+    // (c) BootInfo の再検証(マジック値の再チェックを流用)。
+    logger.info(format_args!("paging: about to test: BootInfo read"));
+    let boot_info_ok = boot_info.validate().is_ok();
+    logger.info(format_args!(
+        "paging: BootInfo read: {}",
+        if boot_info_ok { "OK" } else { "NG" }
+    ));
+    post_switch_ok &= boot_info_ok;
+
+    // (d) フレームバッファへの実描画。読み戻しだけでは、読めた値が実際に
+    // フレームバッファのものかキャッシュ上の値かを区別できないため、
+    // 左上に目視可能な色付きブロックを描画する(PCD が機能していれば
+    // screenshot で実際に見えるはず)。
+    if fb_start != 0 {
+        logger.info(format_args!(
+            "paging: about to test: framebuffer 64x64 block draw"
+        ));
+        match boot_info.framebuffer.pixel_format {
+            common::boot_info::PixelFormat::Rgb | common::boot_info::PixelFormat::Bgr => {
+                let stride = boot_info.framebuffer.stride as u64;
+                let block_w = 64u64.min(boot_info.framebuffer.width as u64);
+                let block_h = 64u64.min(boot_info.framebuffer.height as u64);
+                const TEST_COLOR: u32 = 0x00FF_3366;
+                for y in 0..block_h {
+                    let row_ptr = (fb_start + y * stride * 4) as *mut u32;
+                    for x in 0..block_w {
+                        // SAFETY: (x, y) は framebuffer.width/height 以内、
+                        // row_ptr は framebuffer の必須領域検証で確認済みの
+                        // 範囲内(size_bytes = height * stride * 4 に収まる)。
+                        unsafe {
+                            core::ptr::write_volatile(row_ptr.add(x as usize), TEST_COLOR);
+                        }
+                    }
+                }
+                logger.info(format_args!(
+                    "paging: framebuffer 64x64 block draw: OK (see screenshot)"
+                ));
+            }
+            other => {
+                logger.info(format_args!(
+                    "paging: framebuffer 64x64 block draw: SKIPPED (pixel_format={other:?} \
+                     is not directly writable)"
+                ));
+            }
+        }
+    }
+
+    if !post_switch_ok {
+        logger.error(format_args!(
+            "paging: one or more post-switch checks failed (see NG above); halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "paging: CR3 switch verified. now running under self-built page tables."
     ));
 
     logger.info(format_args!("kernel: halting"));
