@@ -1,10 +1,7 @@
 /*
  * ZaytOS kernel リンカスクリプト。
  *
- * KERNEL_LOAD_ADDR は暫定値（ADR-0009、確定は人間のレビュー待ち）。
- * 詳細な検討は ADR-0009 を参照。この時点では ELF ローダー（M2-0c）が
- * 未実装のため、ここでの値は「readelf/objdump でセクション配置を検証する
- * ための土台」であり、まだ実行はされない。
+ * KERNEL_LOAD_ADDR は ADR-0009 で確定した低位固定アドレス。
  *
  * 低位アドレス（0x100000 = 1MiB）を選んだ理由:
  *   - ExitBootServices 直後は UEFI が構築した既存のページテーブル
@@ -28,6 +25,12 @@ SECTIONS
 {
     . = KERNEL_LOAD_ADDR;
 
+    /* kernel イメージ全体（bootloader が配置・zero-fill する範囲）の開始。
+     * M2-d の物理フレームアロケータが、この範囲を「空き」として誤って
+     * 配ってしまわないよう、kernel 自身がこのシンボルから自分の占有範囲を
+     * 把握できるようにする（docs/architecture.md 申し送り参照）。 */
+    __kernel_start = .;
+
     .text : ALIGN(4K) {
         *(.text .text.*)
     }
@@ -46,6 +49,8 @@ SECTIONS
         *(COMMON)
         __bss_end = .;
     }
+
+    __kernel_end = .;
 
     /DISCARD/ : {
         *(.eh_frame)

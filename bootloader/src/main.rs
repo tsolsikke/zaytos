@@ -1,13 +1,15 @@
 #![no_std]
 #![no_main]
 
-#[cfg(not(feature = "panic-test"))]
-use common::cpu;
+extern crate alloc;
+
 use common::log::{LogLevel, Logger};
 use common::serial::SerialPort;
 use uefi::prelude::*;
 use uefi::println;
 
+#[cfg(not(feature = "panic-test"))]
+mod loader;
 mod panic;
 
 #[entry]
@@ -16,18 +18,19 @@ fn efi_main() -> Status {
     serial.init();
     let mut logger = Logger::new(serial, LogLevel::Trace);
 
-    logger.info(format_args!("ZaytOS M1: serial log established (COM1)"));
+    logger.info(format_args!(
+        "ZaytOS bootloader: serial log established (COM1)"
+    ));
 
     println!("Hello, ZaytOS!");
     logger.info(format_args!("printed \"Hello, ZaytOS!\" to UEFI console"));
 
-    logger.info(format_args!("M1 bring-up complete; halting"));
-
     // `cargo xtask run --panic-test` によるパニックハンドラの回帰チェック用。
     // 通常ビルドではこの分岐は含まれず、fail-fast 方針 (ADR-0004) に影響しない。
+    // ELF ローダー一式を経由せず、素早くパニック経路だけを検証する。
     #[cfg(feature = "panic-test")]
     panic!("xtask panic-test: deliberate panic to exercise the panic handler");
 
     #[cfg(not(feature = "panic-test"))]
-    cpu::halt_forever();
+    loader::run(logger);
 }

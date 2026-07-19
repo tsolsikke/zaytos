@@ -9,6 +9,8 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod boot_info;
 pub mod cpu;
+pub mod elf;
 pub mod log;
 pub mod serial;

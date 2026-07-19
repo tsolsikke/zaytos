@@ -6,7 +6,11 @@ publish = false
 
 [dependencies]
 common = { path = "../common" }
-uefi = "0.39.0"
+# M2-0c: kernel.elf を読み込むために uefi::fs::FileSystem (Vec<u8> を返す)
+# を使う。これには alloc とヒープ (global_allocator) が必要。この
+# ヒープは Boot Services のプールアロケータ経由であり、ExitBootServices
+# より前のロード処理でのみ使う（ExitBootServices 後は使わない）。
+uefi = { version = "0.39.0", features = ["alloc", "global_allocator"] }
 
 [features]
 # 起動完了直後に意図的に panic! し、パニックハンドラの動作を検証するための

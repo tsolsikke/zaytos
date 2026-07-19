@@ -91,7 +91,70 @@ kernel クレートが使う `x86_64-unknown-none` は、ビルトインター�
 
 ---
 
-## 6. 同期・並行性方針（シングルコア前提）
+## 6. bootloader→kernel 引き渡し（M2-0c）に関する申し送り事項
+
+### 6.1 ExitBootServices の呼び出し方針
+
+`bootloader/src/loader.rs` は `unsafe { uefi::boot::exit_boot_services(...) }`
+（uefi-rs 組み込みの実装）をそのまま使い、自前でリトライループを実装して
+いない。理由:
+
+- `uefi::boot::exit_boot_services` は「メモリマップ取得 →
+  `ExitBootServices()` 呼び出し」を、間に他の Boot Services 呼び出しを
+  一切挟まず一つの関数内で行う。マップキー不整合で失敗した場合は
+  最大 2 回まで再試行し（Linux カーネルの実装と同じ方針）、それでも
+  失敗した場合はコールドリセットする。
+- **前提**: この安全性は「メモリマップ取得と `ExitBootServices` 呼び出しの
+  間に何もアロケーションを挟まない」ことに依存している。そのため
+  `BootInfo` に埋め込むメモリマップは、`exit_boot_services()` が返す
+  `MemoryMapOwned` をそのまま使い、別途 `uefi::boot::memory_map()` を
+  自前で呼び直してはいけない（呼び直すと、そのタイミングでアロケーション
+  が発生し、それより前に取得したマップキーが古くなる可能性がある）。
+  この関数は「呼ぶ側が独自にリトライや二重取得をしない」ことを前提に
+  安全性を担保しているため、uefi-rs をアップデートする際は、この
+  呼び出しパターン（取得と exit を分離しない）が変わっていないかを
+  確認すること。
+- `MemoryMapOwned` はスコープを抜けると `free_pool`（Boot Services）を
+  呼ぼうとする Drop 実装を持つ。ExitBootServices 成功後にこれが走ると
+  未定義動作になるため、`bootloader/src/loader.rs` では必要な値を
+  `BootInfo` へコピーした直後に `core::mem::forget` で明示的にリークして
+  いる（uefi-rs 側にも `are_boot_services_active()` によるガードは
+  あるが、それに依存しない）。
+
+### 6.2 メモリ種別に関する M2-d への申し送り（重要）
+
+kernel 本体・`BootInfo`・メモリマップバッファは、いずれも
+`MemoryType::LOADER_DATA` としてページ確保される。**`LOADER_DATA` は
+一般に「OS が後で回収してよい領域」として扱われるが、M2-d の物理フレーム
+アロケータが素朴に「`LOADER_DATA` は空き」と判断すると、実行中の
+kernel 自身・受け取った `BootInfo`・メモリマップを空きメモリとして
+配ってしまう。** 症状は即座には現れず、「しばらく動いた後に突然壊れる」
+という最も診断しにくい形になる。
+
+M2-d のフレームアロケータ実装時、以下の 3 範囲は必ず予約済み扱いにする
+こと。kernel 側からそれぞれ次の方法で特定できる。
+
+| 範囲 | 特定方法 |
+|---|---|
+| kernel イメージ本体 | リンカスクリプト（`kernel/link.ld`）が定義する `__kernel_start`/`__kernel_end` シンボル |
+| `BootInfo` 自身 | `_start` が受け取るポインタ + `common::boot_info::BOOT_INFO_PAGE_COUNT * 4096` バイト |
+| メモリマップバッファ | `BootInfo.memory_map.descriptors_ptr` + `descriptors_len` |
+
+bootloader 自身が使っていたコード・スタック領域（`EfiLoaderCode`/
+`EfiLoaderData` の一部）も同様に ExitBootServices 後はメモリマップ上
+「使用中」として残る。kernel がこれを再利用したい場合（bootloader の
+メモリ回収）は M2-d 以降、必要になった時点で別途設計する。
+
+### 6.3 kernel のスタックについて（対応不要、認識の共有のみ）
+
+kernel へジャンプした直後、kernel は bootloader が実行していた UEFI 由来の
+スタックをそのまま使い続けている。kernel 自身専用のスタックは用意して
+いない。対応時期（M2-c のページング整備時か、M4 の割り込み対応時か）は
+その時点で判断する。
+
+---
+
+## 7. 同期・並行性方針（シングルコア前提）
 
 - 共有データ保護は割り込み禁止（`cli`/`sti`）によるクリティカルセクション。
 - 割り込みハンドラが触る共有データは、シングルコアでもクリティカルセクションで守る。
@@ -101,7 +164,7 @@ kernel クレートが使う `x86_64-unknown-none` は、ビルトインター�
 
 ---
 
-## 7. テスト戦略
+## 8. テスト戦略
 
 - ハードウェア依存部（IDT、ページテーブル、MMIO）と純粋ロジック
   （スケジューラ判断、アロケータのビット演算、データ構造）を分離する。
@@ -111,7 +174,7 @@ kernel クレートが使う `x86_64-unknown-none` は、ビルトインター�
 
 ---
 
-## 8. スコープ外（現段階では着手しない）
+## 9. スコープ外（現段階では着手しない）
 
 - マルチコア（SMP）
 - x86_64 以外への移植・抽象化
