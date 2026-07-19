@@ -7,3 +7,11 @@ build = "build.rs"
 
 [dependencies]
 common = { path = "../common" }
+
+[features]
+default = ["heap-poison"]
+# 解放したヒープブロックを毒値(0xDE)で埋める。use-after-free を
+# 「もっともらしい値が読めてしまう」形ではなく明確な異常値として
+# 検出できるようにする(ADR-0012)。性能上の懸念が生じた場合はこの
+# featureを外してビルドできる。
+heap-poison = []

@@ -275,6 +275,36 @@ impl<const CAP: usize> FrameAllocator<CAP> {
     pub fn deallocate_frame(&mut self, frame: u64) -> Result<(), FrameAllocatorError> {
         self.insert_free_range(frame, 1)
     }
+
+    /// 連続する `count` 個のフレームを1つの範囲として確保する（first-fit）。
+    /// `count` 以上の大きさを持つ最初の空き範囲の先頭から切り出す。
+    /// 十分な大きさの「連続した」空き範囲が見つからなければ `None` を返す
+    /// （複数の小さい範囲の合計が `count` 以上でも、それだけでは確保しない）。
+    ///
+    /// M2-e のヒープ初期アリーナ（連続領域が必要）と、将来 M3 で想定される
+    /// フレームバッファ用の大きな連続確保（ヒープを経由しない経路）の
+    /// 両方から使われることを想定している。
+    pub fn allocate_contiguous(&mut self, count: u64) -> Option<u64> {
+        if count == 0 {
+            return None;
+        }
+        for i in 0..self.range_count {
+            if self.ranges[i].frame_count >= count {
+                let start = self.ranges[i].start_frame;
+                if self.ranges[i].frame_count == count {
+                    for j in i..(self.range_count - 1) {
+                        self.ranges[j] = self.ranges[j + 1];
+                    }
+                    self.range_count -= 1;
+                } else {
+                    self.ranges[i].start_frame += count;
+                    self.ranges[i].frame_count -= count;
+                }
+                return Some(start);
+            }
+        }
+        None
+    }
 }
 
 impl<const CAP: usize> Default for FrameAllocator<CAP> {
@@ -435,6 +465,53 @@ mod tests {
         assert_eq!(result, Err(FrameAllocatorError::CapacityExceeded));
         // 失敗時も既存の状態は破壊されていない。
         assert_eq!(allocator.free_frame_count(), 2);
+    }
+
+    #[test]
+    fn allocate_contiguous_carves_out_the_front_of_a_range() {
+        let mut allocator = FrameAllocator::<8>::new();
+        allocator.insert_free_range(10, 20).unwrap(); // [10, 30)
+        assert_eq!(allocator.allocate_contiguous(5), Some(10));
+        assert_eq!(allocator.free_frame_count(), 15);
+        assert_eq!(allocator.free_range_count(), 1);
+        // 残りは [15, 30) のまま連続している。
+        assert_eq!(allocator.allocate_frame(), Some(15));
+    }
+
+    #[test]
+    fn allocate_contiguous_exact_size_removes_the_range() {
+        let mut allocator = FrameAllocator::<8>::new();
+        allocator.insert_free_range(10, 5).unwrap();
+        allocator.insert_free_range(100, 5).unwrap();
+        assert_eq!(allocator.allocate_contiguous(5), Some(10));
+        assert_eq!(allocator.free_range_count(), 1);
+        assert_eq!(allocator.free_frame_count(), 5);
+    }
+
+    #[test]
+    fn allocate_contiguous_does_not_combine_separate_ranges() {
+        let mut allocator = FrameAllocator::<8>::new();
+        // 合計は10だが、どちらの範囲も単独では8に満たない。
+        allocator.insert_free_range(0, 4).unwrap();
+        allocator.insert_free_range(100, 4).unwrap();
+        assert_eq!(allocator.allocate_contiguous(8), None);
+        assert_eq!(allocator.free_frame_count(), 8); // 何も消費していない
+    }
+
+    #[test]
+    fn allocate_contiguous_picks_first_fitting_range_not_largest() {
+        let mut allocator = FrameAllocator::<8>::new();
+        allocator.insert_free_range(0, 6).unwrap(); // 先に見つかる、十分な大きさ
+        allocator.insert_free_range(100, 100).unwrap(); // より大きいが後ろにある
+        assert_eq!(allocator.allocate_contiguous(5), Some(0));
+    }
+
+    #[test]
+    fn allocate_contiguous_zero_count_returns_none() {
+        let mut allocator = FrameAllocator::<8>::new();
+        allocator.insert_free_range(0, 10).unwrap();
+        assert_eq!(allocator.allocate_contiguous(0), None);
+        assert_eq!(allocator.free_frame_count(), 10);
     }
 
     #[test]

@@ -1,20 +1,30 @@
 //! ZaytOS kernel（M2-0c: bootloader からの引き渡しを受けて起動。
 //! M2-c: 物理フレームアロケータ。M2-d: 新規ページテーブル構築 (d-1) と
-//! CR3 切り替え (d-2)）。
+//! CR3 切り替え (d-2)。M2-e: カーネルヒープ）。
 
 #![no_std]
 #![no_main]
+
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 use common::boot_info::{BootInfo, BOOT_INFO_PAGE_COUNT};
 use common::cpu;
 use common::log::{LogLevel, Logger};
 use common::serial::SerialPort;
 use kernel::frame_allocator;
+use kernel::heap;
 use kernel::paging;
 use kernel::paging::plan::{resolve_pages, MappedRanges};
 use kernel::paging::table::PageTableBuilder;
 
 mod panic;
+
+#[global_allocator]
+static ALLOCATOR: heap::allocator::LockedHeap = heap::allocator::LockedHeap::empty();
 
 // `kernel/link.ld` が定義するシンボル。kernel イメージ自身の占有範囲を
 // 実行時に把握するために使う（M2-d の必須マッピング検証）。
@@ -486,6 +496,84 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
 
     logger.info(format_args!(
         "paging: CR3 switch verified. now running under self-built page tables."
+    ));
+
+    // === M2-e: カーネルヒープ ===
+
+    let heap_frame_count = heap::DEFAULT_HEAP_FRAME_COUNT;
+    let heap_start_frame = allocator
+        .allocate_contiguous(heap_frame_count)
+        .unwrap_or_else(|| {
+            logger.error(format_args!(
+                "heap: failed to reserve a contiguous arena of {heap_frame_count} frames"
+            ));
+            cpu::halt_forever();
+        });
+    let heap_start = heap_start_frame * frame_allocator::FRAME_SIZE;
+    let heap_size = heap_frame_count * frame_allocator::FRAME_SIZE;
+    let heap_end = heap_start + heap_size;
+    let heap_mapped = mapped_ranges.contains_range(heap_start, heap_end);
+    logger.info(format_args!(
+        "heap: arena {heap_start:#x}..{heap_end:#x} ({heap_frame_count} frames, \
+         {} MiB), mapped={heap_mapped}",
+        heap_size / (1024 * 1024)
+    ));
+    if !heap_mapped {
+        logger.error(format_args!("heap: arena is not fully mapped; halting"));
+        cpu::halt_forever();
+    }
+
+    // SAFETY: heap_start..heap_end はフレームアロケータから今切り出した
+    // ばかりの、他の誰も使っていない領域であり、直前に mapped_ranges で
+    // マップ済みであることも確認済み。このヒープに対する `init` 呼び出しは
+    // これが最初で最後(1回のみ)。
+    unsafe {
+        ALLOCATOR.init(heap_start, heap_size);
+    }
+    logger.info(format_args!(
+        "heap: initialized ({} bytes free, {} block(s))",
+        ALLOCATOR.free_bytes(),
+        ALLOCATOR.free_block_count()
+    ));
+
+    // 実地スモークテスト: Vec/Box/String を実際に確保・追記・解放する。
+    let mut v: Vec<u32> = Vec::new();
+    for i in 0..10u32 {
+        v.push(i * i);
+    }
+    let v_ptr = v.as_ptr() as u64;
+    let v_len_bytes = (v.len() * core::mem::size_of::<u32>()) as u64;
+    logger.info(format_args!(
+        "heap smoke test: Vec<u32> len={} ptr={v_ptr:#x} mapped={}",
+        v.len(),
+        mapped_ranges.contains_range(v_ptr, v_ptr + v_len_bytes)
+    ));
+    drop(v);
+
+    let b = Box::new(0x1234_5678u32);
+    let b_ptr = &*b as *const u32 as u64;
+    logger.info(format_args!(
+        "heap smoke test: Box<u32> value={:#x} ptr={b_ptr:#x} mapped={}",
+        *b,
+        mapped_ranges.contains_range(b_ptr, b_ptr + 4)
+    ));
+    drop(b);
+
+    let mut s = String::from("ZaytOS heap");
+    s.push_str(" is alive");
+    let s_ptr = s.as_ptr() as u64;
+    let s_len = s.len() as u64;
+    logger.info(format_args!(
+        "heap smoke test: String={:?} ptr={s_ptr:#x} mapped={}",
+        s.as_str(),
+        mapped_ranges.contains_range(s_ptr, s_ptr + s_len)
+    ));
+    drop(s);
+
+    logger.info(format_args!(
+        "heap: after smoke test, {} bytes free, {} block(s)",
+        ALLOCATOR.free_bytes(),
+        ALLOCATOR.free_block_count()
     ));
 
     logger.info(format_args!("kernel: halting"));
