@@ -14,6 +14,8 @@ const OVMF_CODE_PATH: &str = "/usr/share/OVMF/OVMF_CODE_4M.fd";
 const OVMF_VARS_TEMPLATE_PATH: &str = "/usr/share/OVMF/OVMF_VARS_4M.fd";
 const BOOTLOADER_PACKAGE: &str = "bootloader";
 const UEFI_TARGET: &str = "x86_64-unknown-uefi";
+const KERNEL_PACKAGE: &str = "kernel";
+const KERNEL_TARGET: &str = "x86_64-unknown-none";
 const PANIC_TEST_FEATURE: &str = "panic-test";
 
 // パニックハンドラの出力（bootloader/src/panic.rs）と対応する、回帰チェック用の
@@ -48,7 +50,8 @@ fn cmd_run(panic_test: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
     let bootloader_efi = build_bootloader(&workspace_root, panic_test)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi)?;
+    let kernel_elf = build_kernel(&workspace_root)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
 
     if panic_test {
         run_panic_test(&workspace_root, &ovmf_vars, &esp_dir)
@@ -176,6 +179,45 @@ fn build_bootloader(workspace_root: &Path, panic_test: bool) -> Result<PathBuf> 
     Ok(efi_path)
 }
 
+/// `kernel` パッケージを `x86_64-unknown-none` ターゲット向けにビルドし、
+/// 生成された ELF バイナリのパスを返す。
+///
+/// M2-0c で ELF ローダーが実装されるまで、この kernel.elf は bootloader
+/// から実際にロード・実行されない。ここではビルドして ESP に配置する
+/// ところまでを行う（readelf/objdump による構造検証は開発時に別途行う）。
+fn build_kernel(workspace_root: &Path) -> Result<PathBuf> {
+    let status = Command::new("cargo")
+        .current_dir(workspace_root)
+        .args([
+            "build",
+            "--target",
+            KERNEL_TARGET,
+            "-p",
+            KERNEL_PACKAGE,
+            "--bin",
+            KERNEL_PACKAGE,
+        ])
+        .status()
+        .context("failed to invoke cargo to build the kernel")?;
+
+    if !status.success() {
+        bail!("kernel build failed ({status})");
+    }
+
+    let elf_path = workspace_root
+        .join("target")
+        .join(KERNEL_TARGET)
+        .join("debug")
+        .join(KERNEL_PACKAGE);
+    if !elf_path.exists() {
+        bail!(
+            "kernel build reported success but {} is missing",
+            elf_path.display()
+        );
+    }
+    Ok(elf_path)
+}
+
 /// このプロジェクトで使う OVMF ビルド（Ubuntu の `ovmf` パッケージ）は、
 /// ブート可能な `\EFI\BOOT\BOOTX64.EFI` を自動探索するのではなく、既定で
 /// 組み込みの UEFI Interactive Shell を起動する（docs/troubleshooting.md
@@ -188,7 +230,7 @@ const STARTUP_NSH: &str = "FS0:\\EFI\\BOOT\\BOOTX64.EFI\r\n";
 /// した ESP (EFI System Partition) 相当のディレクトリを用意する。QEMU の
 /// `fat:` ドライバでこのディレクトリをそのまま仮想 FAT ドライブとして渡せる
 /// ため、ディスクイメージファイルを別途作成する必要はない。
-fn stage_esp(workspace_root: &Path, bootloader_efi: &Path) -> Result<PathBuf> {
+fn stage_esp(workspace_root: &Path, bootloader_efi: &Path, kernel_elf: &Path) -> Result<PathBuf> {
     let esp_dir = workspace_root.join("target").join("esp");
     let boot_dir = esp_dir.join("EFI").join("BOOT");
     fs::create_dir_all(&boot_dir)
@@ -206,6 +248,20 @@ fn stage_esp(workspace_root: &Path, bootloader_efi: &Path) -> Result<PathBuf> {
     let startup_nsh = esp_dir.join("startup.nsh");
     fs::write(&startup_nsh, STARTUP_NSH)
         .with_context(|| format!("failed to write {}", startup_nsh.display()))?;
+
+    // M2-0c で bootloader 側の ELF ローダーがここから読み込む想定の配置先。
+    // 現時点ではまだ誰もこのファイルを読まない（ロード・実行は行われない）。
+    let kernel_dir = esp_dir.join("zaytos");
+    fs::create_dir_all(&kernel_dir)
+        .with_context(|| format!("failed to create {}", kernel_dir.display()))?;
+    let staged_kernel_elf = kernel_dir.join("kernel.elf");
+    fs::copy(kernel_elf, &staged_kernel_elf).with_context(|| {
+        format!(
+            "failed to copy {} to {}",
+            kernel_elf.display(),
+            staged_kernel_elf.display()
+        )
+    })?;
 
     Ok(esp_dir)
 }

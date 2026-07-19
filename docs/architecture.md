@@ -53,11 +53,16 @@
 ```
 [QEMU]                      … フルシステムエミュレータ（テスト環境）
   └─ [OVMF]                 … UEFI ファームウェア（既製ビルドを導入して使用）
-       └─ [ZaytOS bootloader (.efi)]  … uefi クレートで実装
-            └─ [ZaytOS kernel]        … モノリシックカーネル本体
+       └─ [bootloader crate (.efi)]  … x86_64-unknown-uefi, uefi クレートで実装
+            └─ [kernel crate (ELF)]  … x86_64-unknown-none, モノリシックカーネル本体
+                 （bootloader が ELF ローダー経由でロードし制御を渡す。ADR-0008）
+
+[common crate] … bootloader / kernel の両方から使う共有ロジック
+                 （serial, log, cpu。#[panic_handler] は含まない）
 ```
 
-- 言語: Rust（`x86_64-unknown-uefi` / カーネルは `x86_64-unknown-none` 想定）
+- 言語: Rust。bootloader は `x86_64-unknown-uefi`、kernel は
+  `x86_64-unknown-none`（ADR-0008）。
 - UEFI: `uefi` クレート（uefi-rs）。EDK2 のビルドシステムは使わない。
 - ファームウェア: OVMF（`apt install ovmf` 等でパッケージ導入）
 - エミュレータ: QEMU（`-serial stdio -no-reboot -no-shutdown -d int,cpu_reset`）
@@ -66,7 +71,27 @@
 
 ---
 
-## 5. 同期・並行性方針（シングルコア前提）
+## 5. `x86_64-unknown-none` ターゲットの既定値（M2-0b で確認）
+
+kernel クレートが使う `x86_64-unknown-none` は、ビルトインターゲットとして
+以下の既定値を持つ（`rustc -Z unstable-options --print target-spec-json`
+で確認、Rust 1.99.0-nightly 時点）。M4（割り込みハンドラ）・M5（コンテキスト
+スイッチ）で影響しうるため記録する。
+
+| 項目 | 既定値 | 意味・影響 |
+|---|---|---|
+| `disable-redzone` | `true` | レッドゾーン無効。割り込みハンドラが現在のスタックをそのまま使っても、呼び出し元のレッドゾーン領域を破壊する心配がない（追加の対応不要）。 |
+| `features` | `-sse,-sse2,...,-avx2,+soft-float` | SSE/AVX 全無効・ソフトウェア浮動小数点。通常のコード生成が XMM/YMM レジスタを一切使わないため、M4 の割り込みハンドラで FPU/SSE レジスタの退避・復帰は不要（今後 SSE を明示的に有効化する場合を除く）。 |
+| `panic-strategy` | `abort` | unwind 情報不要。bootloader 側の判断（M1）と一致。 |
+| `code-model` | `kernel`（高位負アドレス前提） | kernel を higher-half（例: `0xffffffff80000000` 付近）にリンクする前提の設定。ADR-0009 で低位アドレスを採用したため、`small` へ明示的に上書きしている（`.cargo/config.toml`）。 |
+| `position-independent-executables` | `true`（PIE既定） | ADR-0009 の低位固定アドレスリンクと相性が悪いため、`relocation-model=static` で無効化している（`.cargo/config.toml`）。 |
+
+上記の `code-model` / `relocation-model` の上書きは `.cargo/config.toml` の
+`[target.x86_64-unknown-none]` セクションに集約している。
+
+---
+
+## 6. 同期・並行性方針（シングルコア前提）
 
 - 共有データ保護は割り込み禁止（`cli`/`sti`）によるクリティカルセクション。
 - 割り込みハンドラが触る共有データは、シングルコアでもクリティカルセクションで守る。
@@ -76,7 +101,7 @@
 
 ---
 
-## 6. テスト戦略
+## 7. テスト戦略
 
 - ハードウェア依存部（IDT、ページテーブル、MMIO）と純粋ロジック
   （スケジューラ判断、アロケータのビット演算、データ構造）を分離する。
@@ -86,7 +111,7 @@
 
 ---
 
-## 7. スコープ外（現段階では着手しない）
+## 8. スコープ外（現段階では着手しない）
 
 - マルチコア（SMP）
 - x86_64 以外への移植・抽象化
