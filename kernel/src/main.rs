@@ -16,6 +16,7 @@ use common::cpu;
 use common::log::{LogLevel, Logger};
 use common::serial::SerialPort;
 use kernel::frame_allocator;
+use kernel::graphics::{Color, Framebuffer, FramebufferLayout};
 use kernel::heap;
 use kernel::paging;
 use kernel::paging::plan::{resolve_pages, MappedRanges};
@@ -449,42 +450,13 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
     ));
     post_switch_ok &= boot_info_ok;
 
-    // (d) フレームバッファへの実描画。読み戻しだけでは、読めた値が実際に
-    // フレームバッファのものかキャッシュ上の値かを区別できないため、
-    // 左上に目視可能な色付きブロックを描画する(PCD が機能していれば
-    // screenshot で実際に見えるはず)。
-    if fb_start != 0 {
-        logger.info(format_args!(
-            "paging: about to test: framebuffer 64x64 block draw"
-        ));
-        match boot_info.framebuffer.pixel_format {
-            common::boot_info::PixelFormat::Rgb | common::boot_info::PixelFormat::Bgr => {
-                let stride = boot_info.framebuffer.stride as u64;
-                let block_w = 64u64.min(boot_info.framebuffer.width as u64);
-                let block_h = 64u64.min(boot_info.framebuffer.height as u64);
-                const TEST_COLOR: u32 = 0x00FF_3366;
-                for y in 0..block_h {
-                    let row_ptr = (fb_start + y * stride * 4) as *mut u32;
-                    for x in 0..block_w {
-                        // SAFETY: (x, y) は framebuffer.width/height 以内、
-                        // row_ptr は framebuffer の必須領域検証で確認済みの
-                        // 範囲内(size_bytes = height * stride * 4 に収まる)。
-                        unsafe {
-                            core::ptr::write_volatile(row_ptr.add(x as usize), TEST_COLOR);
-                        }
-                    }
-                }
-                logger.info(format_args!(
-                    "paging: framebuffer 64x64 block draw: OK (see screenshot)"
-                ));
-            }
-            other => {
-                logger.info(format_args!(
-                    "paging: framebuffer 64x64 block draw: SKIPPED (pixel_format={other:?} \
-                     is not directly writable)"
-                ));
-            }
-        }
+    // (d) フレームバッファへの実描画（M3-a）。読み戻しだけでは、読めた値が
+    // 実際にフレームバッファのものかキャッシュ上の値かを区別できないため、
+    // 目視できるテストパターンを実際に描く。ここで描けることが、CR3 切り替え
+    // 後もフレームバッファへ到達できていることの証明も兼ねる。
+    let mut framebuffer = init_framebuffer(&mut logger, boot_info, &mapped_ranges);
+    if let Some(fb) = framebuffer.as_mut() {
+        draw_startup_test_pattern(&mut logger, fb);
     }
 
     if !post_switch_ok {
@@ -578,4 +550,108 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
 
     logger.info(format_args!("kernel: halting"));
     cpu::halt_forever();
+}
+
+/// フレームバッファを検証し、描画ハンドルを作る（M3-a）。
+///
+/// bootloader から渡された形状をそのまま信じず、[`FramebufferLayout`] の
+/// 検証を通す。通らなかった場合は理由を ERROR で残して `None` を返し、
+/// 描画せずに以降の処理を続ける。ここで halt しないのは、フレームバッファが
+/// 使えない環境でも、それ以外の起動シーケンスの診断ログは最後まで取りたい
+/// ため（ADR-0013）。画面が主たる出力手段になる M3-c では方針を見直す。
+fn init_framebuffer(
+    logger: &mut Logger<SerialPort>,
+    boot_info: &BootInfo,
+    mapped_ranges: &MappedRanges,
+) -> Option<Framebuffer> {
+    let info = &boot_info.framebuffer;
+    let layout = match FramebufferLayout::from_info(info) {
+        Ok(layout) => layout,
+        Err(e) => {
+            logger.error(format_args!(
+                "framebuffer: validation failed ({e:?}); drawing is disabled"
+            ));
+            return None;
+        }
+    };
+
+    // 検証は「GOP の申告に内部矛盾が無いこと」しか見ていない。その範囲が
+    // 実際に現在のページテーブルでマップされているかは別問題なので、ここで
+    // 確認する（`Framebuffer::new` の安全性要件）。
+    if !mapped_ranges.contains_range(layout.base(), layout.end()) {
+        logger.error(format_args!(
+            "framebuffer: {:#x}..{:#x} is not fully mapped; drawing is disabled",
+            layout.base(),
+            layout.end()
+        ));
+        return None;
+    }
+
+    logger.info(format_args!(
+        "framebuffer: validated {}x{} stride={} format={:?} {:#x}..{:#x}",
+        layout.width(),
+        layout.height(),
+        layout.stride(),
+        layout.format(),
+        layout.base(),
+        layout.end()
+    ));
+
+    // SAFETY: layout は FramebufferLayout の検証を通っており、最終行の末尾まで
+    // size_bytes に収まることが保証されている。base..end が現在のページ
+    // テーブルでマップ済みであることは直前に contains_range で確認した。
+    // フレームバッファは他の誰も使っておらず、この Framebuffer が唯一の
+    // 書き込み手段になる（作るのはこの 1 箇所のみ）。
+    Some(unsafe { Framebuffer::new(layout) })
+}
+
+/// 起動時のテストパターンを描く（M3-a）。
+///
+/// 目視で次を確認できるように選んである。
+/// - 画面全体が塗られる: 形状の検証（`height * stride * 4 <= size_bytes`）が
+///   正しく、全画面を描いても範囲外へ出ない。
+/// - 外周 1px の枠が四辺すべてに出る: stride の扱いが正しい。stride を width と
+///   取り違えていると枠が斜めにずれる。
+/// - 赤・緑・青の順に正しい色で並ぶ: ピクセルフォーマット変換が正しい。
+///   Rgb/Bgr を取り違えていると赤と青が入れ替わる。
+/// - 右下からはみ出した矩形が、画面内の分だけ描かれて落ちない: 切り詰めが
+///   効いており、範囲外へ書いていない。
+fn draw_startup_test_pattern(logger: &mut Logger<SerialPort>, framebuffer: &mut Framebuffer) {
+    const BACKGROUND: Color = Color::rgb(0x10, 0x10, 0x18);
+    const BORDER: Color = Color::WHITE;
+    const SWATCH_SIZE: u32 = 64;
+    const SWATCH_MARGIN: u32 = 16;
+
+    let width = framebuffer.layout().width();
+    let height = framebuffer.layout().height();
+
+    framebuffer.clear(BACKGROUND);
+
+    // 外周 1px の枠。四辺を個別に塗る。
+    framebuffer.fill_rect(0, 0, width, 1, BORDER);
+    framebuffer.fill_rect(0, height - 1, width, 1, BORDER);
+    framebuffer.fill_rect(0, 0, 1, height, BORDER);
+    framebuffer.fill_rect(width - 1, 0, 1, height, BORDER);
+
+    // 原色の並び。左から赤・緑・青。
+    for (index, color) in [Color::RED, Color::GREEN, Color::BLUE].iter().enumerate() {
+        let x = SWATCH_MARGIN + (index as u32) * (SWATCH_SIZE + SWATCH_MARGIN);
+        framebuffer.fill_rect(x, SWATCH_MARGIN, SWATCH_SIZE, SWATCH_SIZE, *color);
+    }
+
+    // 右下からわざとはみ出させる。切り詰めが効いていれば、画面内に収まる
+    // 部分だけが描かれる。効いていなければ範囲外へ書き込んでページ
+    // フォルトするか、無関係なメモリを壊す。
+    framebuffer.fill_rect(
+        width - SWATCH_SIZE / 2,
+        height - SWATCH_SIZE / 2,
+        SWATCH_SIZE * 4,
+        SWATCH_SIZE * 4,
+        Color::rgb(0xFF, 0xC0, 0x00),
+    );
+
+    logger.info(format_args!(
+        "framebuffer: startup test pattern drawn ({width}x{height}); verify with \
+         cargo xtask screenshot"
+    ));
 }

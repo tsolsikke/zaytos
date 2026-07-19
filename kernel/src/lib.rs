@@ -9,6 +9,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod frame_allocator;
+pub mod graphics;
 pub mod heap;
 pub mod memory_map;
 pub mod paging;

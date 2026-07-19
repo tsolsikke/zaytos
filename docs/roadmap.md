@@ -60,11 +60,20 @@ M2-0a〜M2-0c で bootloader/kernel 分離（ADR-0008）と ELF ローダーを�
   GDT/IDT がすべて揃うまで（M4 以降が目安）保留する。
 
 ## M3. 画面描画
-- [ ] GOP（Graphics Output Protocol）でフレームバッファ取得
+
+描画方式は ADR-0013。扱うのは `Rgb`/`Bgr` の 32bpp のみで、bootloader から
+渡された形状は kernel 側で検証してから使う。
+
+- [x] GOP（Graphics Output Protocol）でフレームバッファ取得
   （情報自体は M2-0c で `BootInfo.framebuffer` として取得・kernel へ
-  引き渡し済み。ここでの残作業は kernel 側でそれを使った実際の描画）
-- [ ] ピクセル描画・フォント描画
-- [ ] コンソール抽象（文字出力を画面にも出す）
+  引き渡し済み）
+- [x] M3-a: 描画の基盤（`kernel::graphics`）。形状の検証、色とピクセル
+  フォーマットの変換、点・矩形の描画と画面外の切り詰め。起動時テスト
+  パターンを実機で目視確認済み
+- [ ] M3-b: 8x16 ビットマップフォントによる文字描画（ASCII、範囲外は
+  `?` へフォールバック）
+- [ ] M3-c: コンソール抽象（`core::fmt::Write`、スクロール）。ここで
+  バックバッファを導入する（ADR-0013）
 
 ## M4. 割り込み
 - [ ] GDT / TSS 設定
