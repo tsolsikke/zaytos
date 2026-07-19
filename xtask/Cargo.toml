@@ -6,3 +6,5 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+# screenshot サブコマンド: QEMU の screendump が出力する PPM を PNG へ変換する。
+image = { version = "0.25", default-features = false, features = ["png", "pnm"] }

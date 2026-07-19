@@ -2,6 +2,8 @@ use std::{
     env,
     ffi::OsString,
     fs,
+    io::Write,
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -25,28 +27,58 @@ const PANIC_MARKER_HALT: &str = "halting (cli + hlt loop)";
 const PANIC_TEST_TIMEOUT: Duration = Duration::from_secs(10);
 const PANIC_TEST_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+const DEFAULT_SCREENSHOT_WAIT: Duration = Duration::from_secs(8);
+const MONITOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 fn main() -> Result<()> {
-    let mut args = env::args().skip(1);
-    match args.next().as_deref() {
+    const USAGE: &str = "usage: cargo xtask run [--panic-test] [--gui]\n       cargo xtask screenshot [output.png] [--wait-secs N]";
+
+    let args: Vec<String> = env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
         Some("run") => {
-            let panic_test = args.any(|a| a == "--panic-test");
-            cmd_run(panic_test)
+            let rest = &args[1..];
+            let panic_test = rest.iter().any(|a| a == "--panic-test");
+            let gui = rest.iter().any(|a| a == "--gui");
+            cmd_run(panic_test, gui)
         }
-        Some(other) => {
-            bail!("unknown xtask subcommand: {other}\n\nusage: cargo xtask run [--panic-test]")
-        }
-        None => bail!("missing xtask subcommand\n\nusage: cargo xtask run [--panic-test]"),
+        Some("screenshot") => cmd_screenshot(&args[1..]),
+        Some(other) => bail!("unknown xtask subcommand: {other}\n\n{USAGE}"),
+        None => bail!("missing xtask subcommand\n\n{USAGE}"),
     }
 }
 
 /// QEMU の `-serial` に渡す送り先。通常運用は人間がその場で読める `stdio`、
-/// panic-test 回帰チェックはプログラムから内容を検査できる `file` を使う。
+/// panic-test 回帰チェック・screenshot はプログラムから内容を検査できる
+/// `file` を使う。
 enum SerialSink {
     Stdio,
     File(PathBuf),
 }
 
-fn cmd_run(panic_test: bool) -> Result<()> {
+/// QEMU の `-display` バックエンド。既定は `none`（ADR-0003: シリアルログを
+/// 唯一の観測手段とする）。`--gui` 指定時のみ実際のウィンドウを開く。
+enum DisplayMode {
+    None,
+    Gui,
+}
+
+/// `qemu_launch_args` に渡す設定一式。引数が増えてきたため、位置引数の
+/// 取り違えを避けるためにまとめている。
+struct QemuLaunchOptions<'a> {
+    ovmf_code: &'a Path,
+    ovmf_vars: &'a Path,
+    esp_dir: &'a Path,
+    serial: &'a SerialSink,
+    debug_log: &'a Path,
+    display: DisplayMode,
+    /// `Some` の場合、この UNIX ソケットパスで QEMU monitor (HMP) を
+    /// server モードで待ち受けさせる（screenshot サブコマンド用）。
+    monitor_socket: Option<&'a Path>,
+}
+
+fn cmd_run(panic_test: bool, gui: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
     let bootloader_efi = build_bootloader(&workspace_root, panic_test)?;
@@ -56,19 +88,30 @@ fn cmd_run(panic_test: bool) -> Result<()> {
     if panic_test {
         run_panic_test(&workspace_root, &ovmf_vars, &esp_dir)
     } else {
-        run_interactive(&workspace_root, &ovmf_vars, &esp_dir)
+        run_interactive(&workspace_root, &ovmf_vars, &esp_dir, gui)
     }
 }
 
-fn run_interactive(workspace_root: &Path, ovmf_vars: &Path, esp_dir: &Path) -> Result<()> {
+fn run_interactive(
+    workspace_root: &Path,
+    ovmf_vars: &Path,
+    esp_dir: &Path,
+    gui: bool,
+) -> Result<()> {
     let debug_log = workspace_root.join("target").join("qemu-debug.log");
-    let qemu_args = qemu_launch_args(
-        Path::new(OVMF_CODE_PATH),
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars,
         esp_dir,
-        &SerialSink::Stdio,
-        &debug_log,
-    );
+        serial: &SerialSink::Stdio,
+        debug_log: &debug_log,
+        display: if gui {
+            DisplayMode::Gui
+        } else {
+            DisplayMode::None
+        },
+        monitor_socket: None,
+    });
     println!("qemu debug log (-d int,cpu_reset): {}", debug_log.display());
 
     let status = Command::new("qemu-system-x86_64")
@@ -95,13 +138,15 @@ fn run_panic_test(workspace_root: &Path, ovmf_vars: &Path, esp_dir: &Path) -> Re
     let _ = fs::remove_file(&serial_log_path);
     let debug_log = workspace_root.join("target").join("qemu-debug.log");
 
-    let qemu_args = qemu_launch_args(
-        Path::new(OVMF_CODE_PATH),
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars,
         esp_dir,
-        &SerialSink::File(serial_log_path.clone()),
-        &debug_log,
-    );
+        serial: &SerialSink::File(serial_log_path.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+    });
 
     let mut child = Command::new("qemu-system-x86_64")
         .args(&qemu_args)
@@ -140,6 +185,146 @@ fn panic_markers_present(serial_log_path: &Path) -> bool {
         return false;
     };
     contents.contains(PANIC_MARKER_HEADER) && contents.contains(PANIC_MARKER_HALT)
+}
+
+/// `cargo xtask screenshot [output.png] [--wait-secs N]` の引数を解釈する。
+fn cmd_screenshot(args: &[String]) -> Result<()> {
+    let mut wait = DEFAULT_SCREENSHOT_WAIT;
+    let mut output_path = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--wait-secs" => {
+                i += 1;
+                let value = args
+                    .get(i)
+                    .context("--wait-secs requires a value (seconds)")?;
+                let secs: u64 = value
+                    .parse()
+                    .with_context(|| format!("invalid --wait-secs value: {value}"))?;
+                wait = Duration::from_secs(secs);
+            }
+            other => output_path = Some(PathBuf::from(other)),
+        }
+        i += 1;
+    }
+
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let kernel_elf = build_kernel(&workspace_root)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let output_path =
+        output_path.unwrap_or_else(|| workspace_root.join("target").join("screenshot.png"));
+
+    take_screenshot(&workspace_root, &ovmf_vars, &esp_dir, wait, &output_path)
+}
+
+/// QEMU を monitor (HMP) 付きで起動し、`wait` だけ待ってから `screendump` を
+/// 発行し、結果の PPM を PNG へ変換して `output_path` に保存する。
+///
+/// 既存のシリアル出力（`SerialSink`）・デバッグログ（`-D`）の分離は崩さない:
+/// このコマンド専用のシリアルログファイルへ出力させ、ターミナルには
+/// このコマンド自身の進捗メッセージのみを出す。
+fn take_screenshot(
+    workspace_root: &Path,
+    ovmf_vars: &Path,
+    esp_dir: &Path,
+    wait: Duration,
+    output_path: &Path,
+) -> Result<()> {
+    // AF_UNIX のパス長制限 (108 バイト程度) を避けるため、ワークスペース内の
+    // 長いパスではなく /tmp 配下の短い一意なパスを使う。
+    let monitor_socket =
+        PathBuf::from(format!("/tmp/zaytos-xtask-mon-{}.sock", std::process::id()));
+    let _ = fs::remove_file(&monitor_socket);
+    let serial_log = workspace_root.join("target").join("screenshot-serial.log");
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let ppm_path = workspace_root.join("target").join("screenshot.ppm");
+    let _ = fs::remove_file(&ppm_path);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars,
+        esp_dir,
+        serial: &SerialSink::File(serial_log),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: Some(&monitor_socket),
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for screenshot")?;
+
+    println!("waiting {wait:?} for the boot sequence to settle before capturing...");
+    thread::sleep(wait);
+
+    let result = capture_screendump(&monitor_socket, &ppm_path);
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = fs::remove_file(&monitor_socket);
+
+    result?;
+
+    let img = image::open(&ppm_path)
+        .with_context(|| format!("failed to decode {}", ppm_path.display()))?;
+    img.save(output_path)
+        .with_context(|| format!("failed to save {}", output_path.display()))?;
+
+    println!(
+        "screenshot saved: {} ({}x{})",
+        output_path.display(),
+        img.width(),
+        img.height()
+    );
+    Ok(())
+}
+
+/// QEMU monitor (HMP) へ接続し `screendump <ppm_path>` を発行、ファイルが
+/// 現れるまで待つ。
+fn capture_screendump(monitor_socket: &Path, ppm_path: &Path) -> Result<()> {
+    let mut stream = connect_monitor_with_retry(monitor_socket)?;
+    writeln!(stream, "screendump {}", ppm_path.display())
+        .context("failed to send screendump command to the QEMU monitor")?;
+    stream.flush().ok();
+    wait_for_file(ppm_path, SCREENDUMP_FILE_TIMEOUT)
+}
+
+fn connect_monitor_with_retry(socket_path: &Path) -> Result<UnixStream> {
+    let deadline = Instant::now() + MONITOR_CONNECT_TIMEOUT;
+    loop {
+        match UnixStream::connect(socket_path) {
+            Ok(stream) => return Ok(stream),
+            Err(_) if Instant::now() < deadline => thread::sleep(POLL_INTERVAL),
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "failed to connect to QEMU monitor socket at {}",
+                        socket_path.display()
+                    )
+                })
+            }
+        }
+    }
+}
+
+fn wait_for_file(path: &Path, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    while !path.exists() {
+        if Instant::now() >= deadline {
+            bail!(
+                "timed out after {timeout:?} waiting for {} to be created",
+                path.display()
+            );
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+    Ok(())
 }
 
 /// `bootloader` パッケージを UEFI ターゲット向けにビルドし、生成された
@@ -186,10 +371,6 @@ fn build_bootloader(workspace_root: &Path, panic_test: bool) -> Result<PathBuf> 
 
 /// `kernel` パッケージを `x86_64-unknown-none` ターゲット向けにビルドし、
 /// 生成された ELF バイナリのパスを返す。
-///
-/// M2-0c で ELF ローダーが実装されるまで、この kernel.elf は bootloader
-/// から実際にロード・実行されない。ここではビルドして ESP に配置する
-/// ところまでを行う（readelf/objdump による構造検証は開発時に別途行う）。
 fn build_kernel(workspace_root: &Path) -> Result<PathBuf> {
     let status = Command::new("cargo")
         .current_dir(workspace_root)
@@ -305,14 +486,8 @@ fn prepare_ovmf_vars(workspace_root: &Path) -> Result<PathBuf> {
 /// `-no-reboot -no-shutdown -d int,cpu_reset` は常時付与する: これらが無いと
 /// 致命的例外発生時に QEMU が無言でリブートを
 /// 繰り返し、原因を外部から観測できなくなる。
-fn qemu_launch_args(
-    ovmf_code: &Path,
-    ovmf_vars: &Path,
-    esp_dir: &Path,
-    serial: &SerialSink,
-    debug_log: &Path,
-) -> Vec<OsString> {
-    vec![
+fn qemu_launch_args(opts: &QemuLaunchOptions) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec![
         // デフォルトの i440FX/PIIX チップセット（レガシー IDE を持つ）を使う。
         // q35 では OVMF がドライブを既定の起動先として自動認識しなかった
         // ため（ADR-0007）、単純な IDE 接続のほうが確実である。
@@ -321,24 +496,27 @@ fn qemu_launch_args(
         "-drive".into(),
         format!(
             "if=pflash,format=raw,readonly=on,file={}",
-            ovmf_code.display()
+            opts.ovmf_code.display()
         )
         .into(),
         "-drive".into(),
-        format!("if=pflash,format=raw,file={}", ovmf_vars.display()).into(),
+        format!("if=pflash,format=raw,file={}", opts.ovmf_vars.display()).into(),
         // ESP 相当のディレクトリを仮想 FAT ドライブとして渡す。OVMF は既定の
         // 起動パス `\EFI\BOOT\BOOTX64.EFI` を自動的に見つけて起動する。
         "-drive".into(),
-        format!("format=raw,file=fat:rw:{}", esp_dir.display()).into(),
+        format!("format=raw,file=fat:rw:{}", opts.esp_dir.display()).into(),
         "-serial".into(),
-        match serial {
+        match opts.serial {
             SerialSink::Stdio => "stdio".into(),
             SerialSink::File(path) => format!("file:{}", path.display()).into(),
         },
-        // GOP 経由の画面描画は M3 まで実装しないため、現段階では表示は不要。
-        // シリアルログを唯一の観測手段として扱う (ADR-0003)。
+        // 既定は none（ADR-0003: シリアルログを唯一の観測手段とする）。
+        // `--gui` 指定時のみ実際のウィンドウ（WSLg 経由）を開く。
         "-display".into(),
-        "none".into(),
+        match opts.display {
+            DisplayMode::None => "none".into(),
+            DisplayMode::Gui => "gtk".into(),
+        },
         "-no-reboot".into(),
         "-no-shutdown".into(),
         "-d".into(),
@@ -347,27 +525,44 @@ fn qemu_launch_args(
         // stderr に出て、`-serial stdio` のシリアル出力と混ざってしまい、
         // ターミナルでの可読性が大きく落ちる。
         "-D".into(),
-        debug_log.into(),
-    ]
+        opts.debug_log.into(),
+    ];
+
+    if let Some(monitor_socket) = opts.monitor_socket {
+        args.push("-monitor".into());
+        args.push(format!("unix:{},server,nowait", monitor_socket.display()).into());
+    }
+
+    args
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn base_options<'a>(serial: &'a SerialSink, debug_log: &'a Path) -> QemuLaunchOptions<'a> {
+        QemuLaunchOptions {
+            ovmf_code: Path::new("/x/CODE.fd"),
+            ovmf_vars: Path::new("/y/VARS.fd"),
+            esp_dir: Path::new("/z/esp"),
+            serial,
+            debug_log,
+            display: DisplayMode::None,
+            monitor_socket: None,
+        }
+    }
+
+    fn joined_args(args: &[OsString]) -> Vec<String> {
+        args.iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
     #[test]
     fn qemu_args_always_include_failure_visibility_flags() {
-        let args = qemu_launch_args(
-            Path::new("/dummy/CODE.fd"),
-            Path::new("/dummy/VARS.fd"),
-            Path::new("/dummy/esp"),
-            &SerialSink::Stdio,
-            Path::new("/dummy/qemu-debug.log"),
-        );
-        let joined: Vec<String> = args
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
+        let debug_log = PathBuf::from("/dummy/qemu-debug.log");
+        let opts = base_options(&SerialSink::Stdio, &debug_log);
+        let joined = joined_args(&qemu_launch_args(&opts));
 
         assert!(joined.iter().any(|a| a == "-no-reboot"));
         assert!(joined.iter().any(|a| a == "-no-shutdown"));
@@ -381,17 +576,9 @@ mod tests {
 
     #[test]
     fn qemu_args_reference_given_ovmf_and_esp_paths() {
-        let args = qemu_launch_args(
-            Path::new("/x/CODE.fd"),
-            Path::new("/y/VARS.fd"),
-            Path::new("/z/esp"),
-            &SerialSink::Stdio,
-            Path::new("/z/qemu-debug.log"),
-        );
-        let joined: Vec<String> = args
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
+        let debug_log = PathBuf::from("/z/qemu-debug.log");
+        let opts = base_options(&SerialSink::Stdio, &debug_log);
+        let joined = joined_args(&qemu_launch_args(&opts));
 
         assert!(joined.iter().any(|a| a.contains("/x/CODE.fd")));
         assert!(joined.iter().any(|a| a.contains("/y/VARS.fd")));
@@ -400,40 +587,76 @@ mod tests {
 
     #[test]
     fn qemu_args_use_serial_file_sink_when_requested() {
-        let args = qemu_launch_args(
-            Path::new("/x/CODE.fd"),
-            Path::new("/y/VARS.fd"),
-            Path::new("/z/esp"),
-            &SerialSink::File(PathBuf::from("/tmp/serial.log")),
-            Path::new("/z/qemu-debug.log"),
-        );
-        let joined: Vec<String> = args
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
+        let debug_log = PathBuf::from("/z/qemu-debug.log");
+        let sink = SerialSink::File(PathBuf::from("/tmp/serial.log"));
+        let opts = base_options(&sink, &debug_log);
+        let joined = joined_args(&qemu_launch_args(&opts));
 
         assert!(joined.iter().any(|a| a == "file:/tmp/serial.log"));
     }
 
     #[test]
     fn qemu_args_separate_debug_log_from_serial() {
-        let args = qemu_launch_args(
-            Path::new("/x/CODE.fd"),
-            Path::new("/y/VARS.fd"),
-            Path::new("/z/esp"),
-            &SerialSink::Stdio,
-            Path::new("/z/qemu-debug.log"),
-        );
-        let joined: Vec<String> = args
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
+        let debug_log = PathBuf::from("/z/qemu-debug.log");
+        let opts = base_options(&SerialSink::Stdio, &debug_log);
+        let joined = joined_args(&qemu_launch_args(&opts));
 
         let d_capital_pos = joined
             .iter()
             .position(|a| a == "-D")
             .expect("-D flag missing");
         assert_eq!(joined[d_capital_pos + 1], "/z/qemu-debug.log");
+    }
+
+    #[test]
+    fn qemu_args_default_display_is_none() {
+        let debug_log = PathBuf::from("/z/qemu-debug.log");
+        let opts = base_options(&SerialSink::Stdio, &debug_log);
+        let joined = joined_args(&qemu_launch_args(&opts));
+
+        let pos = joined
+            .iter()
+            .position(|a| a == "-display")
+            .expect("-display flag missing");
+        assert_eq!(joined[pos + 1], "none");
+    }
+
+    #[test]
+    fn qemu_args_gui_display_selects_gtk() {
+        let debug_log = PathBuf::from("/z/qemu-debug.log");
+        let mut opts = base_options(&SerialSink::Stdio, &debug_log);
+        opts.display = DisplayMode::Gui;
+        let joined = joined_args(&qemu_launch_args(&opts));
+
+        let pos = joined
+            .iter()
+            .position(|a| a == "-display")
+            .expect("-display flag missing");
+        assert_eq!(joined[pos + 1], "gtk");
+    }
+
+    #[test]
+    fn qemu_args_include_monitor_socket_when_requested() {
+        let debug_log = PathBuf::from("/z/qemu-debug.log");
+        let monitor_socket = PathBuf::from("/tmp/mon.sock");
+        let mut opts = base_options(&SerialSink::Stdio, &debug_log);
+        opts.monitor_socket = Some(&monitor_socket);
+        let joined = joined_args(&qemu_launch_args(&opts));
+
+        let pos = joined
+            .iter()
+            .position(|a| a == "-monitor")
+            .expect("-monitor flag missing");
+        assert_eq!(joined[pos + 1], "unix:/tmp/mon.sock,server,nowait");
+    }
+
+    #[test]
+    fn qemu_args_omit_monitor_by_default() {
+        let debug_log = PathBuf::from("/z/qemu-debug.log");
+        let opts = base_options(&SerialSink::Stdio, &debug_log);
+        let joined = joined_args(&qemu_launch_args(&opts));
+
+        assert!(!joined.iter().any(|a| a == "-monitor"));
     }
 
     #[test]
