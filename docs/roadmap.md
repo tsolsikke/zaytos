@@ -44,10 +44,17 @@ M2-0a〜M2-0c で bootloader/kernel 分離（ADR-0008）と ELF ローダーを�
 - [ ] M2-c: 物理フレームアロケータ（`BootInfo` のメモリマップを解析し、
   空き物理フレームを管理。ハードウェア依存から分離し、ホスト
   `cargo test` で検証。kernel 本体・`BootInfo`・メモリマップバッファの
-  除外を含む。`docs/architecture.md` §6.2 の申し送り参照）
+  除外を含む。`docs/architecture.md` §6.2 の申し送り参照。「空き」の
+  判定は `EfiConventionalMemory` のみとし、`EfiBootServicesCode`/`Data`
+  は ADR-0010 により当面除外する）
 - [ ] M2-d: 自前ページテーブル構築（M2-c のフレームアロケータから物理
   フレームを受け取って構築する）
 - [ ] M2-e: カーネルヒープ（`alloc` クレート有効化）
+
+### 将来の検討項目（今は着手しない）
+- **BootServices 領域の回収**（ADR-0010）: `EfiBootServicesCode`/`Data` を
+  空き物理メモリとして回収することは、自前のページテーブル・スタック・
+  GDT/IDT がすべて揃うまで（M4 以降が目安）保留する。
 
 ## M3. 画面描画
 - [ ] GOP（Graphics Output Protocol）でフレームバッファ取得
