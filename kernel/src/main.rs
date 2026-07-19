@@ -50,6 +50,25 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
 
     logger.info(format_args!("ZaytOS kernel: entered _start"));
 
+    // 自前の IDT・例外ハンドラ（M4）を導入するまで、割り込みは常に禁止
+    // しておく。UEFI が ExitBootServices 前に設定した IDT が現在も生きて
+    // おり、割り込みが発生すればそのハンドラ（恒等マッピングにより
+    // "たまたま" 到達可能なだけの、自前で検証していないコード）に制御が
+    // 渡ってしまうため（docs/architecture.md §6.5 参照）。
+    let rflags_before = cpu::read_rflags();
+    logger.info(format_args!(
+        "interrupts: RFLAGS.IF before cli = {} (raw RFLAGS={:#x})",
+        rflags_before & cpu::RFLAGS_INTERRUPT_FLAG != 0,
+        rflags_before
+    ));
+    cpu::disable_interrupts();
+    let rflags_after = cpu::read_rflags();
+    logger.info(format_args!(
+        "interrupts: RFLAGS.IF after cli = {} (raw RFLAGS={:#x})",
+        rflags_after & cpu::RFLAGS_INTERRUPT_FLAG != 0,
+        rflags_after
+    ));
+
     // SAFETY: 呼び出し元契約（上記 # Safety）により、boot_info は有効な
     // BootInfo を指す。ここでは読み取り専用の参照を作るのみ。
     let boot_info = unsafe { &*boot_info };

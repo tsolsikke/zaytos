@@ -42,6 +42,32 @@ pub fn read_rip() -> u64 {
     rip
 }
 
+/// RFLAGS レジスタのうち、割り込みフラグ（IF, bit 9）を表すビットマスク。
+pub const RFLAGS_INTERRUPT_FLAG: u64 = 1 << 9;
+
+/// 現在の RFLAGS レジスタの値を読み取る。
+pub fn read_rflags() -> u64 {
+    let rflags: u64;
+    // SAFETY: `pushfq` で RFLAGS をスタックへ積み、`pop` で読み出すだけ。
+    // スタックを一時的に使うため `nomem`/`nostack` は指定しない。
+    unsafe {
+        core::arch::asm!("pushfq", "pop {}", out(reg) rflags);
+    }
+    rflags
+}
+
+/// 割り込みを禁止する（`cli`）。呼び出し元がその状態を維持する責任を負う
+/// （`sti` で戻す処理はここには含まない。M4 で自前 IDT を導入するまで、
+/// kernel は起動直後からこの状態を維持し続ける方針。
+/// `docs/architecture.md` §6.5 参照）。
+pub fn disable_interrupts() {
+    // SAFETY: `cli` はマスク可能割り込みの受付を止めるだけで、メモリ
+    // レイアウトや制御フローを変えない。
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+    }
+}
+
 /// 割り込みを禁止し、`hlt` ループで停止し続ける。
 ///
 /// ADR-0004 の fail-fast 方針（パニック時は即停止する）と、M1 の
