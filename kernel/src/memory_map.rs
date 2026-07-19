@@ -32,6 +32,52 @@ pub mod memory_type {
     pub const VENDOR_RESERVED_START: u32 = 0x7000_0000;
 }
 
+/// メモリ型ごとの扱い方針。**フレームアロケータ（空きフレーム判定）と
+/// ページング（恒等マッピング対象判定）の両方が、必ずこの一つの関数
+/// （[`classify`]）を経由して判定すること。** 判定基準を個別に実装すると
+/// 両者がずれ、「アロケータが配ったフレームがページテーブルにマップ
+/// されていない」という致命的な不整合を生む（QEMU のメモリ量を増やすと
+/// 顕在化するような、後から気づきにくい形で）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionPolicy {
+    /// `EfiConventionalMemory`。フレームアロケータの空きプールになりうる
+    /// （物理アドレス 0 を含むページの個別除外は別途アロケータ側で行う）。
+    /// ページングでは、通常のキャッシュ可能な RAM としてマップする。
+    Free,
+    /// 空きプールには含めないが、実行継続のために必ずマップし続ける必要が
+    /// ある領域（kernel/BootInfo/メモリマップバッファ、bootloader の
+    /// 残存コード・スタック、Runtime Services、ACPI テーブル、
+    /// フレームバッファ等の MMIO）。
+    ReservedButMapped { cacheable: bool },
+    /// マップ不要（触れる予定がない）。`EfiReservedMemoryType` や
+    /// ベンダー予約領域はここに分類される。これらは非常に大きい
+    /// アドレス空間の予約（例: PCI 64bit MMIO 窓、実測で 1TB 付近に
+    /// 及ぶことがある。`docs/troubleshooting.md` 参照）でありうるため、
+    /// マップ対象から積極的に外す。
+    Unmapped,
+}
+
+/// メモリ型の値から [`RegionPolicy`] を決定する。
+pub const fn classify(ty: u32) -> RegionPolicy {
+    match ty {
+        memory_type::CONVENTIONAL => RegionPolicy::Free,
+        memory_type::LOADER_CODE
+        | memory_type::LOADER_DATA
+        | memory_type::BOOT_SERVICES_CODE
+        | memory_type::BOOT_SERVICES_DATA
+        | memory_type::RUNTIME_SERVICES_CODE
+        | memory_type::RUNTIME_SERVICES_DATA
+        | memory_type::ACPI_RECLAIM
+        | memory_type::ACPI_NVS => RegionPolicy::ReservedButMapped { cacheable: true },
+        memory_type::MMIO | memory_type::MMIO_PORT_SPACE => {
+            RegionPolicy::ReservedButMapped { cacheable: false }
+        }
+        // RESERVED, UNUSABLE, PAL_CODE, PERSISTENT, UNACCEPTED,
+        // ベンダー予約 (>= VENDOR_RESERVED_START) はすべて Unmapped。
+        _ => RegionPolicy::Unmapped,
+    }
+}
+
 /// `EFI_MEMORY_DESCRIPTOR` のうち、空き判定に必要な最小限のフィールド。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryMapEntry {
@@ -163,5 +209,60 @@ mod tests {
         let entries: Vec<_> = parse_entries(&bytes, 48).unwrap().collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].page_count, 0);
+    }
+
+    #[test]
+    fn classify_conventional_is_free() {
+        assert_eq!(classify(memory_type::CONVENTIONAL), RegionPolicy::Free);
+    }
+
+    #[test]
+    fn classify_ram_like_reserved_types_are_cacheable_reserved_but_mapped() {
+        for ty in [
+            memory_type::LOADER_CODE,
+            memory_type::LOADER_DATA,
+            memory_type::BOOT_SERVICES_CODE,
+            memory_type::BOOT_SERVICES_DATA,
+            memory_type::RUNTIME_SERVICES_CODE,
+            memory_type::RUNTIME_SERVICES_DATA,
+            memory_type::ACPI_RECLAIM,
+            memory_type::ACPI_NVS,
+        ] {
+            assert_eq!(
+                classify(ty),
+                RegionPolicy::ReservedButMapped { cacheable: true },
+                "type {ty} should be cacheable ReservedButMapped"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_mmio_types_are_uncacheable_reserved_but_mapped() {
+        for ty in [memory_type::MMIO, memory_type::MMIO_PORT_SPACE] {
+            assert_eq!(
+                classify(ty),
+                RegionPolicy::ReservedButMapped { cacheable: false },
+                "type {ty} should be uncacheable ReservedButMapped"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_reserved_and_friends_are_unmapped() {
+        for ty in [
+            memory_type::RESERVED,
+            memory_type::UNUSABLE,
+            memory_type::PAL_CODE,
+            memory_type::PERSISTENT,
+            memory_type::UNACCEPTED,
+            memory_type::VENDOR_RESERVED_START,
+            0x8000_0000,
+        ] {
+            assert_eq!(
+                classify(ty),
+                RegionPolicy::Unmapped,
+                "type {ty:#x} should be Unmapped"
+            );
+        }
     }
 }

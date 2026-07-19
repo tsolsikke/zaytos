@@ -1,15 +1,26 @@
-//! ZaytOS kernel（M2-0c: bootloader からの引き渡しを受けて起動）。
+//! ZaytOS kernel（M2-0c: bootloader からの引き渡しを受けて起動。
+//! M2-c: 物理フレームアロケータ。M2-d (d-1): 新規ページテーブル構築、
+//! CR3 はまだ切り替えない）。
 
 #![no_std]
 #![no_main]
 
-use common::boot_info::BootInfo;
+use common::boot_info::{BootInfo, BOOT_INFO_PAGE_COUNT};
 use common::cpu;
 use common::log::{LogLevel, Logger};
 use common::serial::SerialPort;
 use kernel::frame_allocator;
+use kernel::paging::plan::{resolve_pages, MappedRanges};
+use kernel::paging::table::PageTableBuilder;
 
 mod panic;
+
+// `kernel/link.ld` が定義するシンボル。kernel イメージ自身の占有範囲を
+// 実行時に把握するために使う（M2-d の必須マッピング検証）。
+extern "C" {
+    static __kernel_start: u8;
+    static __kernel_end: u8;
+}
 
 /// .bss ゼロ埋めが実際に機能しているかを実地検証するための、意図的に
 /// 非ゼロサイズの `.bss` を作る静的変数（M2-0c 固有の要求）。全要素 0
@@ -166,6 +177,157 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
             ));
         }
     }
+
+    // === M2-d (d-1): 新しいページテーブルを構築する（CR3 は切り替えない） ===
+
+    // フレームバッファは実機検証の結果、UEFI メモリマップに現れないことが
+    // 判明した（PCI BAR はシステムメモリマップとは別扱いのため）。
+    // メモリマップ由来の判定だけに頼らず、BootInfo から得た範囲を明示的に
+    // 追加する（`physical_address == 0` は BltOnly 等で無効なため除く）。
+    let fb_start = boot_info.framebuffer.physical_address;
+    let fb_end = fb_start + boot_info.framebuffer.size_bytes;
+    let extra_ranges: &[(u64, u64, bool)] = if fb_start != 0 {
+        &[(fb_start, fb_end, false)]
+    } else {
+        &[]
+    };
+
+    // マップ対象範囲の計画（純粋ロジック、frame_allocator::build と同じ
+    // classify() を経由するため、判定基準が独自にずれることはない）。
+    let mapped_ranges = MappedRanges::<{ kernel::paging::plan::DEFAULT_CAPACITY }>::build(
+        raw_map,
+        boot_info.memory_map.descriptor_size,
+        extra_ranges,
+    )
+    .unwrap_or_else(|e| {
+        logger.error(format_args!("paging plan build failed: {e}"));
+        cpu::halt_forever();
+    });
+
+    // 不変条件: アロケータが配りうる全フレームは、必ずこの計画に
+    // 含まれている（さもないと、後で配られたフレームが未マップのまま
+    // 使われ、無言で壊れる）。classify() を共有しているため理屈の上では
+    // 常に成立するはずだが、実装が今後ズレても検出できるよう実行時にも
+    // 確認する。
+    let mut allocator_ranges_covered = true;
+    for (start_frame, frame_count) in allocator.free_ranges() {
+        let start = start_frame * frame_allocator::FRAME_SIZE;
+        let end = (start_frame + frame_count) * frame_allocator::FRAME_SIZE;
+        if !mapped_ranges.contains_range(start, end) {
+            allocator_ranges_covered = false;
+            logger.error(format_args!(
+                "paging: allocator free range {start:#x}..{end:#x} is NOT fully mapped"
+            ));
+        }
+    }
+    if !allocator_ranges_covered {
+        logger.error(format_args!(
+            "paging: invariant violated (allocator free frame not mapped); halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    // マップ範囲一覧をダンプする（範囲・キャッシュ属性）。
+    logger.info(format_args!(
+        "paging: {} mapped range(s) planned:",
+        mapped_ranges.range_count()
+    ));
+    for r in mapped_ranges.iter() {
+        logger.info(format_args!(
+            "paging:   {:#x}..{:#x} cacheable={}",
+            r.start, r.end, r.cacheable
+        ));
+    }
+
+    // 実際にページテーブルへ書き込む（kernel/src/paging/table.rs 参照）。
+    let mut builder = PageTableBuilder::new(&mut allocator).unwrap_or_else(|e| {
+        logger.error(format_args!(
+            "paging: failed to start page table build: {e:?}"
+        ));
+        cpu::halt_forever();
+    });
+
+    let mut huge_page_count: u64 = 0;
+    let mut small_page_count: u64 = 0;
+    let mut map_error = None;
+    resolve_pages(&mapped_ranges, |m| {
+        if map_error.is_some() {
+            return;
+        }
+        if let Err(e) = builder.map_page(m.phys_addr, m.huge, m.cacheable) {
+            map_error = Some((m, e));
+            return;
+        }
+        if m.huge {
+            huge_page_count += 1;
+        } else {
+            small_page_count += 1;
+        }
+    });
+    if let Some((m, e)) = map_error {
+        logger.error(format_args!(
+            "paging: map_page({:#x}, huge={}) failed: {:?}",
+            m.phys_addr, m.huge, e
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "paging: {huge_page_count} huge (2MiB) page(s), {small_page_count} small (4KiB) page(s), \
+         {} frame(s) consumed for page tables",
+        builder.frames_used()
+    ));
+
+    // 必須領域の充足検証。ここに挙げる領域は、CR3 切り替え後も
+    // アクセスできる必要がある（切り替え直後のトリプルフォルトの
+    // 主要因になるため）。
+    let kernel_start = core::ptr::addr_of!(__kernel_start) as u64;
+    let kernel_end = core::ptr::addr_of!(__kernel_end) as u64;
+    let boot_info_start = boot_info as *const BootInfo as u64;
+    let boot_info_end =
+        boot_info_start + (BOOT_INFO_PAGE_COUNT as u64) * frame_allocator::FRAME_SIZE;
+    let mmap_start = boot_info.memory_map.descriptors_ptr;
+    let mmap_end = mmap_start + boot_info.memory_map.descriptors_len;
+    // fb_start/fb_end は上（extra_ranges 構築時）で計算済みのものを使う。
+    let current_rsp = cpu::read_rsp();
+    let current_rip = cpu::read_rip();
+    let pml4_phys = builder.pml4_phys();
+
+    let mut all_required_ok = true;
+    let mut check_range = |name: &str, start: u64, end: u64| {
+        let ok = mapped_ranges.contains_range(start, end);
+        logger.info(format_args!(
+            "paging: required range [{name}] {start:#x}..{end:#x}: {}",
+            if ok { "OK" } else { "NG" }
+        ));
+        if !ok {
+            all_required_ok = false;
+        }
+    };
+    check_range("kernel image", kernel_start, kernel_end);
+    check_range("BootInfo", boot_info_start, boot_info_end);
+    check_range("memory map buffer", mmap_start, mmap_end);
+    if fb_start != 0 {
+        check_range("framebuffer", fb_start, fb_end);
+    }
+    check_range(
+        "new page tables (PML4)",
+        pml4_phys,
+        pml4_phys + frame_allocator::FRAME_SIZE,
+    );
+    check_range("current RSP", current_rsp, current_rsp + 1);
+    check_range("current RIP", current_rip, current_rip + 1);
+
+    if !all_required_ok {
+        logger.error(format_args!(
+            "paging: one or more required ranges are NOT mapped; halting (see NG above)"
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "paging: all required ranges mapped. NOT switching CR3 yet (d-1 stops here)."
+    ));
 
     logger.info(format_args!("kernel: halting"));
     cpu::halt_forever();

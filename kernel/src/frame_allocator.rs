@@ -172,6 +172,15 @@ impl<const CAP: usize> FrameAllocator<CAP> {
         self.range_count
     }
 
+    /// 現在の空き範囲を `(start_frame, frame_count)` として列挙する。
+    /// ページング側で「アロケータが配りうるフレームはすべてマップ済みか」
+    /// を検証する用途を想定した、読み取り専用のアクセサ。
+    pub fn free_ranges(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.ranges[..self.range_count]
+            .iter()
+            .map(|r| (r.start_frame, r.frame_count))
+    }
+
     /// 空きフレーム範囲を1つ追加する。前後の既存範囲と隣接・重複していれば
     /// 結合する。呼び出し側は、追加する範囲が他の空き範囲と重複しないこと
     /// （ある物理フレームを二重に空き扱いしないこと）を保証すること。
@@ -277,11 +286,15 @@ impl<const CAP: usize> Default for FrameAllocator<CAP> {
 /// `BootInfo.memory_map` が指す生のメモリマップから、物理フレーム
 /// アロケータを構築する。
 ///
-/// 「空き」として扱うのは `EfiConventionalMemory` のみ（ADR-0010: 承認済み
-/// のとおり `EfiBootServicesCode`/`Data` はまだページテーブル・スタック・
-/// GDT/IDT が UEFI 由来のため除外する）。さらに物理アドレス 0 を含む
-/// ページは、型に関わらず除外する（ヌルポインタ参照がバグ検出不能に
-/// なることを防ぐ）。
+/// 「空き」として扱うかどうかは、必ず [`crate::memory_map::classify`] を
+/// 経由して判定する（[`crate::memory_map::RegionPolicy::Free`] のみが
+/// 空き）。**ページング側（M2-d, `crate::paging`）も同じ `classify` を
+/// 使って「マップすべき領域」を判定しており、判定基準を独自に持たない。**
+/// これにより「アロケータが配ったフレームが新しいページテーブルに
+/// マップされていない」という不整合を構造的に防いでいる。
+///
+/// さらに物理アドレス 0 を含むページは、型に関わらず除外する（ヌル
+/// ポインタ参照がバグ検出不能になることを防ぐ）。
 ///
 /// kernel 本体・`BootInfo`・メモリマップバッファはいずれも
 /// `EfiLoaderData` として確保されている（`bootloader/src/loader.rs` で
@@ -298,7 +311,7 @@ pub fn build(
         if entry.page_count == 0 {
             continue;
         }
-        if entry.memory_type != memory_type::CONVENTIONAL {
+        if crate::memory_map::classify(entry.memory_type) != crate::memory_map::RegionPolicy::Free {
             exclusions.add(entry.memory_type, entry.page_count);
             continue;
         }
