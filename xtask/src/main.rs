@@ -56,17 +56,20 @@ fn cmd_run(panic_test: bool) -> Result<()> {
     if panic_test {
         run_panic_test(&workspace_root, &ovmf_vars, &esp_dir)
     } else {
-        run_interactive(&ovmf_vars, &esp_dir)
+        run_interactive(&workspace_root, &ovmf_vars, &esp_dir)
     }
 }
 
-fn run_interactive(ovmf_vars: &Path, esp_dir: &Path) -> Result<()> {
+fn run_interactive(workspace_root: &Path, ovmf_vars: &Path, esp_dir: &Path) -> Result<()> {
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
     let qemu_args = qemu_launch_args(
         Path::new(OVMF_CODE_PATH),
         ovmf_vars,
         esp_dir,
         &SerialSink::Stdio,
+        &debug_log,
     );
+    println!("qemu debug log (-d int,cpu_reset): {}", debug_log.display());
 
     let status = Command::new("qemu-system-x86_64")
         .args(&qemu_args)
@@ -90,12 +93,14 @@ fn run_interactive(ovmf_vars: &Path, esp_dir: &Path) -> Result<()> {
 fn run_panic_test(workspace_root: &Path, ovmf_vars: &Path, esp_dir: &Path) -> Result<()> {
     let serial_log_path = workspace_root.join("target").join("panic-test-serial.log");
     let _ = fs::remove_file(&serial_log_path);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
 
     let qemu_args = qemu_launch_args(
         Path::new(OVMF_CODE_PATH),
         ovmf_vars,
         esp_dir,
         &SerialSink::File(serial_log_path.clone()),
+        &debug_log,
     );
 
     let mut child = Command::new("qemu-system-x86_64")
@@ -249,8 +254,8 @@ fn stage_esp(workspace_root: &Path, bootloader_efi: &Path, kernel_elf: &Path) ->
     fs::write(&startup_nsh, STARTUP_NSH)
         .with_context(|| format!("failed to write {}", startup_nsh.display()))?;
 
-    // M2-0c で bootloader 側の ELF ローダーがここから読み込む想定の配置先。
-    // 現時点ではまだ誰もこのファイルを読まない（ロード・実行は行われない）。
+    // bootloader 側の ELF ローダー（bootloader/src/loader.rs）がここから
+    // 読み込む（M2-0c）。
     let kernel_dir = esp_dir.join("zaytos");
     fs::create_dir_all(&kernel_dir)
         .with_context(|| format!("failed to create {}", kernel_dir.display()))?;
@@ -305,6 +310,7 @@ fn qemu_launch_args(
     ovmf_vars: &Path,
     esp_dir: &Path,
     serial: &SerialSink,
+    debug_log: &Path,
 ) -> Vec<OsString> {
     vec![
         // デフォルトの i440FX/PIIX チップセット（レガシー IDE を持つ）を使う。
@@ -337,6 +343,11 @@ fn qemu_launch_args(
         "-no-shutdown".into(),
         "-d".into(),
         "int,cpu_reset".into(),
+        // `-d` の出力先を明示的にファイルへ分離する。指定しない場合 QEMU 自身の
+        // stderr に出て、`-serial stdio` のシリアル出力と混ざってしまい、
+        // ターミナルでの可読性が大きく落ちる。
+        "-D".into(),
+        debug_log.into(),
     ]
 }
 
@@ -351,6 +362,7 @@ mod tests {
             Path::new("/dummy/VARS.fd"),
             Path::new("/dummy/esp"),
             &SerialSink::Stdio,
+            Path::new("/dummy/qemu-debug.log"),
         );
         let joined: Vec<String> = args
             .iter()
@@ -374,6 +386,7 @@ mod tests {
             Path::new("/y/VARS.fd"),
             Path::new("/z/esp"),
             &SerialSink::Stdio,
+            Path::new("/z/qemu-debug.log"),
         );
         let joined: Vec<String> = args
             .iter()
@@ -392,6 +405,7 @@ mod tests {
             Path::new("/y/VARS.fd"),
             Path::new("/z/esp"),
             &SerialSink::File(PathBuf::from("/tmp/serial.log")),
+            Path::new("/z/qemu-debug.log"),
         );
         let joined: Vec<String> = args
             .iter()
@@ -399,6 +413,27 @@ mod tests {
             .collect();
 
         assert!(joined.iter().any(|a| a == "file:/tmp/serial.log"));
+    }
+
+    #[test]
+    fn qemu_args_separate_debug_log_from_serial() {
+        let args = qemu_launch_args(
+            Path::new("/x/CODE.fd"),
+            Path::new("/y/VARS.fd"),
+            Path::new("/z/esp"),
+            &SerialSink::Stdio,
+            Path::new("/z/qemu-debug.log"),
+        );
+        let joined: Vec<String> = args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+
+        let d_capital_pos = joined
+            .iter()
+            .position(|a| a == "-D")
+            .expect("-D flag missing");
+        assert_eq!(joined[d_capital_pos + 1], "/z/qemu-debug.log");
     }
 
     #[test]

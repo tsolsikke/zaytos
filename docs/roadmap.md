@@ -14,20 +14,45 @@
 - [x] `rust-toolchain.toml` / `Cargo.lock` 固定
 
 ## M1. UEFI Hello World [x]
-- [x] **シリアルログ出力（COM1）を最優先で確立**（`kernel/src/serial.rs`, `kernel/src/log.rs`）
-- [x] パニックハンドラ雛形（`kernel/src/panic.rs`; RSP + `PanicInfo` ダンプ +
+- [x] **シリアルログ出力（COM1）を最優先で確立**（`common/src/serial.rs`, `common/src/log.rs`）
+- [x] パニックハンドラ雛形（`bootloader/src/panic.rs`; RSP + `PanicInfo` ダンプ +
   halt。GPR フルダンプは ADR-0004 Addendum の通り M4 に先送り）
-- [x] UEFI アプリとして起動し、画面に文字列を出力（`kernel/src/main.rs`）
+- [x] UEFI アプリとして起動し、画面に文字列を出力（`bootloader/src/main.rs`）
 - [x] パニックハンドラの回帰チェックを常設化（`cargo xtask run --panic-test`）
 
 ## M2. メモリ管理の基礎
-- [ ] UEFI メモリマップ取得
-- [ ] Boot Services 終了（ExitBootServices）
-- [ ] ページング設定（自前のページテーブル）
-- [ ] 物理フレームアロケータ / カーネルヒープ
+
+M2-0a〜M2-0c で bootloader/kernel 分離（ADR-0008）と ELF ローダーを実装した
+結果、当初の「UEFI メモリマップ取得」「ExitBootServices」は M2-0c の中で
+実質的に完了している。以降は M2-c（自前ページテーブル構築）・M2-d
+（物理フレームアロケータ）の**実装順序を入れ替えている**: ページテーブルを
+構築するにはページテーブル自身を置く物理フレームが必要であり、それを
+供給するのがフレームアロケータであるため、フレームアロケータを先に
+実装しなければ成立しない。
+
+- [x] M2-0a: crate 再編（`kernel` → `bootloader` へ改名、`serial`/`log`/`cpu`
+  を `common` クレートへ共有化、ADR-0008）
+- [x] M2-0b: kernel クレート新規作成（`x86_64-unknown-none` + リンカスクリプト、
+  最小カーネル。リンクアドレスは ADR-0009）
+- [x] M2-0c: ELF ローダー実装（bootloader が kernel.elf をロードし、GOP
+  フレームバッファ情報取得 → ExitBootServices → BootInfo 経由で kernel へ
+  ジャンプ。UEFI メモリマップ取得・ExitBootServices はここに含まれる）
+- [x] M2-a: UEFI メモリマップ取得（M2-0c で完了。`BootInfo.memory_map` 経由で
+  kernel へ引き渡し、内容をシリアルへログ出力済み）
+- [x] M2-b: ExitBootServices 実行（M2-0c で完了。以降もシリアルログが生存
+  することを確認済み）
+- [ ] M2-c: 物理フレームアロケータ（`BootInfo` のメモリマップを解析し、
+  空き物理フレームを管理。ハードウェア依存から分離し、ホスト
+  `cargo test` で検証。kernel 本体・`BootInfo`・メモリマップバッファの
+  除外を含む。`docs/architecture.md` §6.2 の申し送り参照）
+- [ ] M2-d: 自前ページテーブル構築（M2-c のフレームアロケータから物理
+  フレームを受け取って構築する）
+- [ ] M2-e: カーネルヒープ（`alloc` クレート有効化）
 
 ## M3. 画面描画
 - [ ] GOP（Graphics Output Protocol）でフレームバッファ取得
+  （情報自体は M2-0c で `BootInfo.framebuffer` として取得・kernel へ
+  引き渡し済み。ここでの残作業は kernel 側でそれを使った実際の描画）
 - [ ] ピクセル描画・フォント描画
 - [ ] コンソール抽象（文字出力を画面にも出す）
 

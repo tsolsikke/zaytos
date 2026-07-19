@@ -84,6 +84,19 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
             );
         });
 
+        // .bss ゼロ埋めの検証を意味のあるものにするため、セグメントコピー・
+        // ゼロ埋めの前に領域全体を非ゼロ値（毒値）で埋めておく。QEMU の
+        // 新規確保メモリはしばしば「たまたま」ゼロなので、これをしないと
+        // ゼロ埋め処理自体にバグがあっても検出できない。
+        // SAFETY: region_start..region_end は直前に排他的に確保した領域。
+        unsafe {
+            core::ptr::write_bytes(
+                region_start as *mut u8,
+                0xAA,
+                (region_end - region_start) as usize,
+            );
+        }
+
         for seg in elf.load_segments() {
             let file_data = elf.segment_data(&seg);
             let dst = seg.p_vaddr as *mut u8;
