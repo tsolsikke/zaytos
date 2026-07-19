@@ -160,6 +160,37 @@ kernel へジャンプした直後、kernel は bootloader が実行していた
 いない。対応時期（M2-c のページング整備時か、M4 の割り込み対応時か）は
 その時点で判断する。
 
+### 6.4 M2-d のマッピング範囲の穴について（M4 の ACPI 参照への申し送り）
+
+M2-d (d-1) で構築したマッピング計画には、`EfiConventionalMemory` の
+内部に見える領域であっても `EfiReservedMemoryType`（type=0）に該当する
+部分は意図的にマップしていない（`memory_map::classify()` が `Unmapped`
+と判定するため）。実機（QEMU + OVMF, RAM 256MiB）では
+`0xf6ed000..0xf76d000`（512KiB）がこれに該当することを確認済み。
+
+一方、`EfiACPIReclaimMemory` / `EfiACPIMemoryNVS` / `EfiRuntimeServicesCode`
+/ `EfiRuntimeServicesData` は `classify()` により `ReservedButMapped` と
+判定されるため、現時点では**すべてマップ済み**であることを実機ログで
+確認している（ACPI テーブル自体を読みに行くコードはまだ存在しないが、
+仮に読みに行ってもページフォルトにはならない）。
+
+**M4 で APIC 構成のため MADT（`EfiACPIReclaimMemory` にあることが多い）を
+読む場合の注意点:**
+
+- 上記の通り ACPI Reclaim/NVS 領域自体は現状マップ済みなので、MADT の
+  在り処がこれらの型の範囲内である限り、そのままではページフォルトは
+  起きないはずである。
+- ただし、ACPI テーブル（RSDP → XSDT/RSDT → MADT）を辿る過程で参照する
+  物理アドレスが、`EfiReservedMemoryType` や UEFI メモリマップに一切
+  現れない領域（ファームウェア実装依存）を指す可能性がある。その場合は
+  本節の穴と同じ理由（`Unmapped` 判定）でページフォルト（`v=0e`）になる。
+- 「ACPI を読もうとしたらページフォルト」となった場合は、まず
+  `qemu-debug.log` の `CR2`（フォルトしたアドレス）を確認し、それが
+  UEFI メモリマップ上どの型（またはマップ範囲外）に該当するかを
+  `docs/troubleshooting.md` の要領で切り分けること。対応としては、
+  M2-d のフレームバッファと同様に、判明した範囲を明示的な `extra` 範囲
+  としてマッピング計画に追加する形になる見込み。
+
 ---
 
 ## 7. 同期・並行性方針（シングルコア前提）

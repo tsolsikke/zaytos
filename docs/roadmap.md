@@ -66,7 +66,9 @@ M2-0a〜M2-0c で bootloader/kernel 分離（ADR-0008）と ELF ローダーを�
 ## M4. 割り込み
 - [ ] GDT / TSS 設定
 - [ ] IDT 設定・例外ハンドラ
-- [ ] タイマ割り込み（PIT / APIC タイマ）
+- [ ] タイマ割り込み（PIT / APIC タイマ）。APIC 構成のため ACPI（MADT）を
+  読む際は `docs/architecture.md` §6.4 の申し送り（マップされていない
+  領域を踏む可能性）を必ず確認する
 - [ ] キーボード割り込み
 - [ ] クリティカルセクション（`cli`/`sti`）の実装
 
