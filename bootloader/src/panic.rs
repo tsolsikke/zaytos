@@ -2,7 +2,7 @@
 //!
 //! `#[panic_handler]` はビルド全体で唯一つしか定義できず、かつ std の
 //! パニック実装と衝突するため、`no_std`/`no_main` な実バイナリである
-//! この `main.rs` 側にのみ置く（`kernel` ライブラリ側はホスト向け
+//! この `main.rs` 側にのみ置く（`common` ライブラリ側はホスト向け
 //! `cargo test` でも使うため、ここには置けない）。
 //!
 //! 起動時に確立した `Logger`/`SerialPort` の状態がパニック発生時点で
@@ -20,8 +20,8 @@
 use core::fmt::Write;
 use core::panic::PanicInfo;
 
-use kernel::cpu;
-use kernel::serial::SerialPort;
+use common::cpu;
+use common::serial::SerialPort;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {

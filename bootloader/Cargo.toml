@@ -1,10 +1,11 @@
 [package]
-name = "kernel"
+name = "bootloader"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
 [dependencies]
+common = { path = "../common" }
 uefi = "0.39.0"
 
 [features]

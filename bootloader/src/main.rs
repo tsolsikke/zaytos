@@ -2,9 +2,9 @@
 #![no_main]
 
 #[cfg(not(feature = "panic-test"))]
-use kernel::cpu;
-use kernel::log::{LogLevel, Logger};
-use kernel::serial::SerialPort;
+use common::cpu;
+use common::log::{LogLevel, Logger};
+use common::serial::SerialPort;
 use uefi::prelude::*;
 use uefi::println;
 

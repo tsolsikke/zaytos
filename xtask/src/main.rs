@@ -12,11 +12,11 @@ use anyhow::{bail, Context, Result};
 
 const OVMF_CODE_PATH: &str = "/usr/share/OVMF/OVMF_CODE_4M.fd";
 const OVMF_VARS_TEMPLATE_PATH: &str = "/usr/share/OVMF/OVMF_VARS_4M.fd";
-const KERNEL_PACKAGE: &str = "kernel";
+const BOOTLOADER_PACKAGE: &str = "bootloader";
 const UEFI_TARGET: &str = "x86_64-unknown-uefi";
 const PANIC_TEST_FEATURE: &str = "panic-test";
 
-// パニックハンドラの出力（kernel/src/panic.rs）と対応する、回帰チェック用の
+// パニックハンドラの出力（bootloader/src/panic.rs）と対応する、回帰チェック用の
 // 目印文字列。フォーマットを変更した場合はここも合わせて更新すること。
 const PANIC_MARKER_HEADER: &str = "[ERROR] panic:";
 const PANIC_MARKER_HALT: &str = "halting (cli + hlt loop)";
@@ -47,8 +47,8 @@ enum SerialSink {
 fn cmd_run(panic_test: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
-    let kernel_efi = build_kernel(&workspace_root, panic_test)?;
-    let esp_dir = stage_esp(&workspace_root, &kernel_efi)?;
+    let bootloader_efi = build_bootloader(&workspace_root, panic_test)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi)?;
 
     if panic_test {
         run_panic_test(&workspace_root, &ovmf_vars, &esp_dir)
@@ -79,10 +79,10 @@ fn run_interactive(ovmf_vars: &Path, esp_dir: &Path) -> Result<()> {
 }
 
 /// パニックハンドラの回帰チェック。`panic-test` フィーチャ付きでビルドした
-/// カーネル（起動完了直後に意図的に `panic!` する）を起動し、シリアル出力に
+/// bootloader（起動完了直後に意図的に `panic!` する）を起動し、シリアル出力に
 /// 期待どおりのパニックダンプが現れるかをポーリングで確認する。
 ///
-/// カーネルはパニック後も `hlt` ループで動き続け自然終了しないため、目印を
+/// bootloader はパニック後も `hlt` ループで動き続け自然終了しないため、目印を
 /// 検出し次第（またはタイムアウトで）QEMU プロセスを強制終了する。
 fn run_panic_test(workspace_root: &Path, ovmf_vars: &Path, esp_dir: &Path) -> Result<()> {
     let serial_log_path = workspace_root.join("target").join("panic-test-serial.log");
@@ -134,18 +134,18 @@ fn panic_markers_present(serial_log_path: &Path) -> bool {
     contents.contains(PANIC_MARKER_HEADER) && contents.contains(PANIC_MARKER_HALT)
 }
 
-/// `kernel` パッケージを UEFI ターゲット向けにビルドし、生成された
+/// `bootloader` パッケージを UEFI ターゲット向けにビルドし、生成された
 /// `.efi` バイナリのパスを返す。`panic_test` が true の場合、起動完了直後に
 /// 意図的に `panic!` する `panic-test` フィーチャを有効にする。
-fn build_kernel(workspace_root: &Path, panic_test: bool) -> Result<PathBuf> {
+fn build_bootloader(workspace_root: &Path, panic_test: bool) -> Result<PathBuf> {
     let mut args = vec![
         "build",
         "--target",
         UEFI_TARGET,
         "-p",
-        KERNEL_PACKAGE,
+        BOOTLOADER_PACKAGE,
         "--bin",
-        KERNEL_PACKAGE,
+        BOOTLOADER_PACKAGE,
     ];
     if panic_test {
         args.push("--features");
@@ -156,20 +156,20 @@ fn build_kernel(workspace_root: &Path, panic_test: bool) -> Result<PathBuf> {
         .current_dir(workspace_root)
         .args(&args)
         .status()
-        .context("failed to invoke cargo to build the kernel")?;
+        .context("failed to invoke cargo to build the bootloader")?;
 
     if !status.success() {
-        bail!("kernel build failed ({status})");
+        bail!("bootloader build failed ({status})");
     }
 
     let efi_path = workspace_root
         .join("target")
         .join(UEFI_TARGET)
         .join("debug")
-        .join(format!("{KERNEL_PACKAGE}.efi"));
+        .join(format!("{BOOTLOADER_PACKAGE}.efi"));
     if !efi_path.exists() {
         bail!(
-            "kernel build reported success but {} is missing",
+            "bootloader build reported success but {} is missing",
             efi_path.display()
         );
     }
@@ -181,24 +181,24 @@ fn build_kernel(workspace_root: &Path, panic_test: bool) -> Result<PathBuf> {
 /// 組み込みの UEFI Interactive Shell を起動する（docs/troubleshooting.md
 /// 参照。根本原因は未解明で、これは回避策）。そのシェルは起動直後に
 /// `startup.nsh` を探して自動実行するため、それを使って明示的に
-/// kernel.efi をチェインロードする。
+/// bootloader.efi をチェインロードする。
 const STARTUP_NSH: &str = "FS0:\\EFI\\BOOT\\BOOTX64.EFI\r\n";
 
-/// OVMF の既定の起動パス（`\EFI\BOOT\BOOTX64.EFI`）に kernel.efi を配置した
-/// ESP (EFI System Partition) 相当のディレクトリを用意する。QEMU の `fat:`
-/// ドライバでこのディレクトリをそのまま仮想 FAT ドライブとして渡せるため、
-/// ディスクイメージファイルを別途作成する必要はない。
-fn stage_esp(workspace_root: &Path, kernel_efi: &Path) -> Result<PathBuf> {
+/// OVMF の既定の起動パス（`\EFI\BOOT\BOOTX64.EFI`）に bootloader.efi を配置
+/// した ESP (EFI System Partition) 相当のディレクトリを用意する。QEMU の
+/// `fat:` ドライバでこのディレクトリをそのまま仮想 FAT ドライブとして渡せる
+/// ため、ディスクイメージファイルを別途作成する必要はない。
+fn stage_esp(workspace_root: &Path, bootloader_efi: &Path) -> Result<PathBuf> {
     let esp_dir = workspace_root.join("target").join("esp");
     let boot_dir = esp_dir.join("EFI").join("BOOT");
     fs::create_dir_all(&boot_dir)
         .with_context(|| format!("failed to create {}", boot_dir.display()))?;
 
     let boot_efi = boot_dir.join("BOOTX64.EFI");
-    fs::copy(kernel_efi, &boot_efi).with_context(|| {
+    fs::copy(bootloader_efi, &boot_efi).with_context(|| {
         format!(
             "failed to copy {} to {}",
-            kernel_efi.display(),
+            bootloader_efi.display(),
             boot_efi.display()
         )
     })?;
