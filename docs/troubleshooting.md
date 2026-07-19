@@ -46,3 +46,33 @@
   「ログの後半まで見て long mode 到達後もリセットが連続しているか」で行う。
   M1 以降で本物のトリプルフォルトを疑う際は、この基準ログ（起動直後 2 回で
   収束し、その後は `INT=0x20` の定常ループになる）と比較すること。
+
+## 2026-07-19 OVMF が ESP の kernel.efi を自動起動せず、内蔵 UEFI Shell で止まる（M1）
+- 症状: `target/esp/EFI/BOOT/BOOTX64.EFI` を用意し、QEMU の `fat:rw:` ドライバで
+  仮想 FAT ドライブとして渡しても、`cargo xtask run` はシリアル出力・画面
+  出力とも変化がなく、`-d int,cpu_reset` のログ上は「ブート可能デバイスが
+  ない場合」と全く同じ定常アイドルループ（`Servicing hardware INT=0x20` が
+  同一 IP アドレスで反復するだけ）に見えた。
+- 原因の切り分け: QEMU モニタ（unix ソケット経由の HMP）で `info block` を
+  確認したところ、ドライブ自体（`ide0-hd0`, vvfat 経由）は正しく認識されて
+  いた。`screendump` で実際の画面を確認すると、OVMF は ESP を自動起動する
+  のではなく、既定の起動オプションとして組み込みの **UEFI Interactive
+  Shell** を起動し、`Shell>` プロンプトで待機していることが判明した
+  （machine type を q35→pc に変更した経緯は ADR-0007 参照。この Shell への
+  フォールバック自体は machine type に依らず発生した）。
+- 対処（回避策）: シェルは起動直後に `startup.nsh` を探して自動実行する
+  （"Press ESC in N seconds to skip startup.nsh..." の表示で確認できる）。
+  そこで `xtask` から ESP のルートに `startup.nsh`
+  （内容: `FS0:\EFI\BOOT\BOOTX64.EFI`）を書き込み、シェル経由で明示的に
+  `kernel.efi` をチェインロードさせることで起動できるようにした。
+- **これは回避策であり、根本解決ではない。** なぜこの Ubuntu 配布の OVMF
+  ビルドが `\EFI\BOOT\BOOTX64.EFI` の既定起動探索より先に組み込み Shell を
+  優先するのか（ビルド時の設定・NVRAM 初期値・BootOrder の既定値など）は
+  未調査・未解明のまま。`startup.nsh` が無い環境や、OVMF のバージョン/
+  ビルド設定が変わった場合には再度この問題に当たる可能性がある。
+- 教訓 / 再発防止: 「ブートデバイスが認識されない」ように見える symptom は、
+  実際には「シェルへ既定でフォールバックしていて何も画面に出ていないだけ」
+  である場合がある。QEMU モニタ（`info block`）とスクリーンダンプ
+  （`screendump`）で実際の画面状態を確認してから原因を切り分けること。
+  根本原因の調査（OVMF のビルド設定・BDS 挙動の追跡）は、この回避策が
+  何らかの理由で崩れたときに改めて着手する。

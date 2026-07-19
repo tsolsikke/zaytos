@@ -13,10 +13,12 @@
 - [x] `cargo xtask run` で QEMU が起動する骨組み
 - [x] `rust-toolchain.toml` / `Cargo.lock` 固定
 
-## M1. UEFI Hello World
-- [ ] UEFI アプリとして起動し、画面に文字列を出力
-- [ ] **シリアルログ出力（COM1）を最優先で確立**（画面より先でもよい）
-- [ ] パニックハンドラ雛形（レジスタダンプ + halt）
+## M1. UEFI Hello World [x]
+- [x] **シリアルログ出力（COM1）を最優先で確立**（`kernel/src/serial.rs`, `kernel/src/log.rs`）
+- [x] パニックハンドラ雛形（`kernel/src/panic.rs`; RSP + `PanicInfo` ダンプ +
+  halt。GPR フルダンプは ADR-0004 Addendum の通り M4 に先送り）
+- [x] UEFI アプリとして起動し、画面に文字列を出力（`kernel/src/main.rs`）
+- [x] パニックハンドラの回帰チェックを常設化（`cargo xtask run --panic-test`）
 
 ## M2. メモリ管理の基礎
 - [ ] UEFI メモリマップ取得

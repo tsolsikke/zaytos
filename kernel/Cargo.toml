@@ -1,0 +1,14 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+uefi = "0.39.0"
+
+[features]
+# 起動完了直後に意図的に panic! し、パニックハンドラの動作を検証するための
+# フィーチャ。`cargo xtask run --panic-test` が有効化する。通常ビルドでは
+# 無効（ADR-0004 の fail-fast 挙動そのものには影響しない）。
+panic-test = []
