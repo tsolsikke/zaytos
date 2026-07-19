@@ -33,6 +33,8 @@
 | 物理フレーム管理 | 範囲リスト（固定長 256） | ADR-0011 |
 | カーネルヒープ | 侵入型連結リスト（隣接結合あり） | ADR-0012 |
 | 画面描画 | 検証済み形状に対する直接描画、`Rgb`/`Bgr` のみ | ADR-0013 |
+| 割り込み | 自前 IDT（M4）まで禁止し続ける | ADR-0014 |
+| MMIO のキャッシュ属性 | PCD（キャッシュ無効）。WC は保留 | ADR-0015 |
 
 ---
 
@@ -69,7 +71,11 @@
   `x86_64-unknown-none`（ADR-0008）。
 - UEFI: `uefi` クレート（uefi-rs）。EDK2 のビルドシステムは使わない。
 - ファームウェア: OVMF（`apt install ovmf` 等でパッケージ導入）
-- エミュレータ: QEMU（`-serial stdio -no-reboot -no-shutdown -d int,cpu_reset`）
+- エミュレータ: QEMU（`-serial stdio -no-reboot -no-shutdown -d int,cpu_reset`）。
+  後半 3 つは常時付与する。既定の QEMU はトリプルフォルト等の致命的例外で
+  無言のまま再起動を繰り返し、外から観測できなくなる。これを止めて例外と
+  CPU リセット要因をログに残すためのもの。「ハングした」と判断する前に、
+  まずこのログで例外の有無を確認する。
 - 開発環境: WSL2（Ubuntu 系）+ WSLg
 - ビルド自動化: `cargo xtask` パターン
 
