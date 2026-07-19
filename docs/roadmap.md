@@ -20,7 +20,7 @@
 - [x] UEFI アプリとして起動し、画面に文字列を出力（`bootloader/src/main.rs`）
 - [x] パニックハンドラの回帰チェックを常設化（`cargo xtask run --panic-test`）
 
-## M2. メモリ管理の基礎
+## M2. メモリ管理の基礎 [x]
 
 M2-0a〜M2-0c で bootloader/kernel 分離（ADR-0008）と ELF ローダーを実装した
 結果、当初の「UEFI メモリマップ取得」「ExitBootServices」は M2-0c の中で
@@ -41,12 +41,11 @@ M2-0a〜M2-0c で bootloader/kernel 分離（ADR-0008）と ELF ローダーを�
   kernel へ引き渡し、内容をシリアルへログ出力済み）
 - [x] M2-b: ExitBootServices 実行（M2-0c で完了。以降もシリアルログが生存
   することを確認済み）
-- [ ] M2-c: 物理フレームアロケータ（`BootInfo` のメモリマップを解析し、
-  空き物理フレームを管理。ハードウェア依存から分離し、ホスト
-  `cargo test` で検証。kernel 本体・`BootInfo`・メモリマップバッファの
-  除外を含む。`docs/architecture.md` §6.2 の申し送り参照。「空き」の
-  判定は `EfiConventionalMemory` のみとし、`EfiBootServicesCode`/`Data`
-  は ADR-0010 により当面除外する）
+- [x] M2-c: 物理フレームアロケータ（`BootInfo` のメモリマップを解析し、
+  空き物理フレームを管理。範囲リスト方式、ADR-0011）。「空き」の判定は
+  `EfiConventionalMemory` のみとし、`EfiBootServicesCode`/`Data` は
+  ADR-0010 により当面除外。kernel 本体・`BootInfo`・メモリマップバッファ
+  は予約済みとして除外する。ロジックはホスト `cargo test` で検証済み
 - [x] M2-d: 自前ページテーブル構築（M2-c のフレームアロケータから物理
   フレームを受け取って構築する）。d-1 でCR3を切り替えずに新テーブルを
   構築・検証し、d-2 で実際にCR3を切り替えて実機確認済み（マッピングの

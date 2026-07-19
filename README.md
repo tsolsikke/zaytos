@@ -7,7 +7,9 @@ ZaytOS（ゼイトス）の "Zayt" は、ドイツ語の **Zeit（時間）** �
 細く長く、時間をかけて育てるプロジェクトである、という姿勢を込めている。
 
 ## 現在地
-M0（環境構築）完了。次は M1（UEFI Hello World）。進捗は [docs/roadmap.md](docs/roadmap.md) を参照。
+M2（メモリ管理の基礎）まで完了。kernel は自前のページテーブル上で動作し、
+物理フレームアロケータとカーネルヒープが使える。次は M3（画面描画）。
+進捗は [docs/roadmap.md](docs/roadmap.md) を参照。
 
 ## 方針（要約）
 - モノリシックカーネル / メモリ保護あり / x86_64 のみ / シングルコア前提
@@ -28,9 +30,9 @@ cargo xtask run
 `x86_64-unknown-uefi` ターゲットは自動的に導入される。QEMU と OVMF は
 別途 `apt install qemu-system-x86 ovmf` で導入しておくこと。
 
-現段階（M0）ではまだブートローダー / カーネルが存在しないため、
-`cargo xtask run` は OVMF ファームウェアのみを起動する（ブート可能な
-デバイスがない状態で待機する）。実際に何かが起動するのは M1 から。
+`cargo xtask run` は QEMU を `-display none` で起動し、シリアル出力を
+端末へ流す。画面を出す場合は `--gui`、パニック経路の回帰確認は
+`--panic-test`、画面のキャプチャは `cargo xtask screenshot`。
 
 ## ライセンス
 （未定）
