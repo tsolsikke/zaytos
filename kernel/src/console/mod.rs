@@ -21,4 +21,27 @@ pub mod dirty;
 pub mod grid;
 
 pub use dirty::{DirtyRegion, Rect};
-pub use grid::{Grid, GridError, Placement, Step, TAB_WIDTH};
+pub use grid::{Grid, GridError, Placement, Step, MAX_GLYPH_WIDTH_CELLS, TAB_WIDTH};
+
+#[cfg(test)]
+mod tests {
+    use super::grid::MAX_GLYPH_WIDTH_CELLS;
+    use crate::graphics::font;
+
+    /// 格子が想定するグリフ幅の上限が、実際にフォントへ収録されている最大幅を
+    /// 下回っていないことを確かめる。
+    ///
+    /// 下回ると、折り返しても置けないグリフが生じ、`Grid` の防御的な破棄
+    /// 処理へ落ちて文字が消える。日本語（全角 2 セル）を収録した時点でも
+    /// この関係が保たれていることを、ここで機械的に検出する。
+    #[test]
+    fn the_grid_can_hold_the_widest_glyph_in_the_font() {
+        assert!(
+            font::max_width_cells() <= MAX_GLYPH_WIDTH_CELLS,
+            "フォントに {} セル幅のグリフがあるが、格子の想定上限は {} セル。\
+             console::grid::MAX_GLYPH_WIDTH_CELLS を引き上げること",
+            font::max_width_cells(),
+            MAX_GLYPH_WIDTH_CELLS
+        );
+    }
+}

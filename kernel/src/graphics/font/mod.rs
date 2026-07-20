@@ -65,6 +65,18 @@ impl Glyph {
     }
 }
 
+/// 収録されているグリフのうち、最も広いものが占めるセル数。
+///
+/// コンソールの格子は、これを収められる桁数を持つ必要がある。両者が
+/// 食い違っていないことは `console` のテストで検証している。
+pub fn max_width_cells() -> u32 {
+    GLYPH_INDEX
+        .iter()
+        .map(|&(_, width_cells)| width_cells as u32)
+        .max()
+        .unwrap_or(1)
+}
+
 /// `c` に対応するグリフを引く。収録されていなければ `None`。
 pub fn lookup(c: char) -> Option<Glyph> {
     let code_point = c as u32;

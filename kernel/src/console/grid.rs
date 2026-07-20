@@ -16,6 +16,17 @@
 /// タブ位置の間隔（セル数）。
 pub const TAB_WIDTH: u32 = 8;
 
+/// 1 つのグリフが占めうるセル数の上限。全角が 2 セルなので 2。
+///
+/// 格子はこれ以上の桁数を持つことを構築時に要求する（[`Grid::new`]）。
+/// 桁数がこれを下回ると、折り返しても収まらないグリフが生じ、「収まらない
+/// ので折り返す」を繰り返して前へ進めなくなるため。
+///
+/// フォント側の最も広いグリフがこの値を超えないことは、
+/// `console` のテストで検証している。フォントに 3 セル以上のグリフを
+/// 収録する場合は、この値も合わせて引き上げること。
+pub const MAX_GLYPH_WIDTH_CELLS: u32 = 2;
+
 /// [`Grid::new`] が拒否した理由。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GridError {
@@ -23,6 +34,9 @@ pub enum GridError {
     EmptyGrid { columns: u32, rows: u32 },
     /// セルの幅または高さが 0。桁数・行数を計算できない。
     ZeroCellSize { cell_width: u32, cell_height: u32 },
+    /// 桁数が最も広いグリフを収めるに足りない。
+    /// このまま使うと折り返しても置けないグリフが生じる。
+    TooNarrow { columns: u32, required: u32 },
 }
 
 /// 文字を置く位置。
@@ -65,9 +79,20 @@ pub struct Grid {
 
 impl Grid {
     /// 桁数・行数を直接指定して作る。
+    ///
+    /// 桁数が [`MAX_GLYPH_WIDTH_CELLS`] 未満の格子は拒否する。そのような
+    /// 格子では、折り返しても置けないグリフが生じてしまうため。この検証に
+    /// より、[`Self::advance`] が「収まらないので折り返す」を繰り返して
+    /// 前へ進めなくなる状態には到達しない。
     pub fn new(columns: u32, rows: u32) -> Result<Self, GridError> {
         if columns == 0 || rows == 0 {
             return Err(GridError::EmptyGrid { columns, rows });
+        }
+        if columns < MAX_GLYPH_WIDTH_CELLS {
+            return Err(GridError::TooNarrow {
+                columns,
+                required: MAX_GLYPH_WIDTH_CELLS,
+            });
         }
         Ok(Self {
             columns,
@@ -188,9 +213,14 @@ impl Grid {
             // 行末に収まらない。残ったセルは空白のまま残し、次行へ送る。
             step.scrolled = self.break_line();
 
-            // 折り返しても収まらない（1 行より広いグリフ）。これ以上
-            // 折り返しても収まらないので、この文字は描かずに捨てる。
-            // 描けないまま折り返しを繰り返して進まなくなるのを防ぐ。
+            // 折り返しても収まらないグリフ。防御的な措置であり、通常は
+            // 到達しない: 構築時に桁数 >= MAX_GLYPH_WIDTH_CELLS を検証して
+            // いるため、契約どおりの width_cells なら必ず収まる。
+            // 契約を破る値が渡された場合にのみここへ来る。
+            //
+            // 破棄を選ぶのは、ここで停止すると「収まらないので折り返す」を
+            // 繰り返して前へ進めなくなるため。文字は失われるが、コンソールが
+            // 進行不能になるよりはよい。
             if width_cells > self.columns {
                 return step;
             }
@@ -381,19 +411,46 @@ mod tests {
         );
     }
 
-    /// 1 行より広いグリフは、折り返しても収まらない。折り返しを繰り返して
-    /// 進まなくなるのを避けるため、描かずに捨てる。
+    /// 最も広いグリフを収められない格子は、そもそも作らせない。これにより
+    /// 「折り返しても置けない」状態には到達しなくなる。
     #[test]
-    fn a_glyph_wider_than_the_line_is_dropped_instead_of_looping() {
-        let mut grid = Grid::new(1, 5).unwrap();
-        let step = grid.advance('あ', FULL);
+    fn a_grid_too_narrow_for_the_widest_glyph_is_rejected() {
+        assert_eq!(
+            Grid::new(1, 5),
+            Err(GridError::TooNarrow {
+                columns: 1,
+                required: MAX_GLYPH_WIDTH_CELLS
+            })
+        );
+        // 最も広いグリフがちょうど収まる幅なら通る。
+        assert!(Grid::new(MAX_GLYPH_WIDTH_CELLS, 5).is_ok());
+    }
+
+    #[test]
+    fn a_screen_too_narrow_for_the_widest_glyph_is_rejected() {
+        // 8px セルで 15px 幅 = 1 桁。全角が置けないので拒否される。
+        assert_eq!(
+            Grid::from_screen(15, 800, 8, 16),
+            Err(GridError::TooNarrow {
+                columns: 1,
+                required: MAX_GLYPH_WIDTH_CELLS
+            })
+        );
+    }
+
+    /// 構築時の検証を通っていれば到達しないが、契約を破る `width_cells` が
+    /// 渡された場合の防御的な破棄。停止させず、カーソルを進めて先へ進む。
+    #[test]
+    fn a_width_breaking_the_contract_is_dropped_instead_of_looping() {
+        let mut grid = Grid::new(2, 5).unwrap();
+        let step = grid.advance('x', 5);
         assert_eq!(step.draw_at, None, "収まらない文字は描かない");
         assert_eq!(grid.cursor(), (0, 1), "カーソルは進み、停滞しない");
 
         // 何度繰り返しても停滞せず、いずれスクロールに到達する。
         let mut scrolls = 0;
         for _ in 0..10 {
-            if grid.advance('あ', FULL).scrolled {
+            if grid.advance('x', 5).scrolled {
                 scrolls += 1;
             }
         }
