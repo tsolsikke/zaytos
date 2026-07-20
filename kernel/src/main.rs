@@ -170,8 +170,7 @@ extern "sysv64" fn kernel_main() -> ! {
     report_gdt_and_stack(&mut logger, handoff.old_rsp);
     report_idt(&mut logger);
 
-    #[cfg(feature = "exception-test")]
-    trigger_exception_under_test(&mut logger);
+
 
     // SAFETY: 呼び出し元契約（`_start` の # Safety）により、boot_info は
     // 有効な BootInfo を指す。ここでは読み取り専用の参照を作るのみ。
@@ -729,6 +728,12 @@ extern "sysv64" fn kernel_main() -> ! {
         );
     }
 
+    // 例外ハンドラの回帰チェック。起動シーケンスを最後まで通してから
+    // 発火させる（mapped_ranges を使ってプローブアドレスの妥当性を
+    // 確認するため、ページング構築後である必要がある）。
+    #[cfg(feature = "exception-test")]
+    trigger_exception_under_test(&mut logger, &mapped_ranges);
+
     log_both(
         &mut logger,
         console.as_mut(),
@@ -1240,12 +1245,112 @@ fn report_idt(logger: &mut Logger<SerialPort>) {
     ));
 }
 
+/// `--exception-test` で各 GPR に入れる既知の値。
+///
+/// レジスタごとに異なる値にしてあるので、ダンプで名前と値の対応が入れ替わって
+/// いれば一目で分かる。`.bss` のゼロ埋め検証で毒値を使ったのと同じ考え方。
+/// この値は xtask 側の突き合わせ表と一致していなければならない。
+#[cfg(feature = "exception-test-invalid-opcode")]
+mod known_register_values {
+    pub const RAX: u64 = 0x1111_1111_1111_1111;
+    pub const RBX: u64 = 0x2222_2222_2222_2222;
+    pub const RCX: u64 = 0x3333_3333_3333_3333;
+    pub const RDX: u64 = 0x4444_4444_4444_4444;
+    pub const RSI: u64 = 0x5555_5555_5555_5555;
+    pub const RDI: u64 = 0x6666_6666_6666_6666;
+    pub const RBP: u64 = 0x7777_7777_7777_7777;
+    pub const R8: u64 = 0x8888_8888_8888_8888;
+    pub const R9: u64 = 0x9999_9999_9999_9999;
+    pub const R10: u64 = 0xAAAA_AAAA_AAAA_AAAA;
+    pub const R11: u64 = 0xBBBB_BBBB_BBBB_BBBB;
+    pub const R12: u64 = 0xCCCC_CCCC_CCCC_CCCC;
+    pub const R13: u64 = 0xDDDD_DDDD_DDDD_DDDD;
+    pub const R14: u64 = 0xEEEE_EEEE_EEEE_EEEE;
+    pub const R15: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+}
+
+/// 全 GPR に既知の値を入れてから `ud2` を実行する。
+///
+/// naked にしているのは、コンパイラに一切レジスタを触らせないため。通常の
+/// `asm!` では callee-saved レジスタ（rbx, rbp, r12-r15）を自由に書き換え
+/// られず、書き換えると呼び出し規約を壊す。ここは戻らないので問題ない。
+///
+/// **RSP には触れない。** 触ると例外配送そのものが失敗する。
+///
+/// # Safety
+///
+/// `ud2` により必ず #UD が発生し、ハンドラが停止するため戻らない。
+#[cfg(feature = "exception-test-invalid-opcode")]
+#[unsafe(naked)]
+unsafe extern "sysv64" fn trigger_invalid_opcode_with_known_registers() -> ! {
+    use known_register_values as v;
+    core::arch::naked_asm!(
+        "movabs rax, {rax}",
+        "movabs rbx, {rbx}",
+        "movabs rcx, {rcx}",
+        "movabs rdx, {rdx}",
+        "movabs rsi, {rsi}",
+        "movabs rdi, {rdi}",
+        "movabs rbp, {rbp}",
+        "movabs r8, {r8}",
+        "movabs r9, {r9}",
+        "movabs r10, {r10}",
+        "movabs r11, {r11}",
+        "movabs r12, {r12}",
+        "movabs r13, {r13}",
+        "movabs r14, {r14}",
+        "movabs r15, {r15}",
+        "ud2",
+        rax = const v::RAX,
+        rbx = const v::RBX,
+        rcx = const v::RCX,
+        rdx = const v::RDX,
+        rsi = const v::RSI,
+        rdi = const v::RDI,
+        rbp = const v::RBP,
+        r8 = const v::R8,
+        r9 = const v::R9,
+        r10 = const v::R10,
+        r11 = const v::R11,
+        r12 = const v::R12,
+        r13 = const v::R13,
+        r14 = const v::R14,
+        r15 = const v::R15,
+    );
+}
+
+/// ページフォルトを起こすために読みに行くアドレス。
+///
+/// 実装している物理メモリ（256MiB）からも、フレームバッファや MMIO の窓からも
+/// 遠い、明らかにマップされていない値を選ぶ。上位ビットが符号拡張された
+/// 正準アドレスなので、#GP ではなく #PF になる。
+///
+/// 使う前に `MappedRanges::contains_range` で本当にマップされていないことを
+/// 確認する。偶然マップされている領域を選ぶと、フォルトが起きずテストが
+/// 成功したように見える。
+#[cfg(any(
+    feature = "exception-test-page-fault",
+    feature = "exception-test-double-fault"
+))]
+const UNMAPPED_PROBE_ADDRESS: u64 = 0x0000_4000_0000_0000;
+
 /// `--exception-test` 用に、意図した例外をわざと発生させる。
 ///
 /// 通常ビルドには含まれない。`cargo xtask run --exception-test <kind>` が
 /// 対応する feature を有効にしてビルドする。
 #[cfg(feature = "exception-test")]
-fn trigger_exception_under_test(logger: &mut Logger<SerialPort>) -> ! {
+#[cfg_attr(
+    not(any(
+        feature = "exception-test-page-fault",
+        feature = "exception-test-double-fault"
+    )),
+    allow(unused_variables)
+)]
+#[cfg_attr(feature = "exception-test-invalid-opcode", allow(unreachable_code))]
+fn trigger_exception_under_test(
+    logger: &mut Logger<SerialPort>,
+    mapped_ranges: &MappedRanges,
+) -> ! {
     #[cfg(feature = "exception-test-divide-by-zero")]
     {
         logger.info(format_args!(
@@ -1271,11 +1376,73 @@ fn trigger_exception_under_test(logger: &mut Logger<SerialPort>) -> ! {
     #[cfg(feature = "exception-test-invalid-opcode")]
     {
         logger.info(format_args!(
-            "exception-test: about to trigger #UD (invalid opcode)"
+            "exception-test: about to trigger #UD (invalid opcode) with known registers"
         ));
-        // SAFETY: 意図的に #UD を起こすためのテスト経路。ハンドラが停止する。
+        // SAFETY: 意図的に #UD を起こすためのテスト経路。戻らない。
         unsafe {
-            core::arch::asm!("ud2", options(nostack, nomem));
+            trigger_invalid_opcode_with_known_registers();
+        }
+    }
+
+    #[cfg(any(
+        feature = "exception-test-page-fault",
+        feature = "exception-test-double-fault"
+    ))]
+    {
+        let probe = UNMAPPED_PROBE_ADDRESS;
+
+        // 本当にマップされていないことを確認してから使う。マップされて
+        // いればフォルトが起きず、テストが通ったように見えてしまう。
+        let unmapped = !mapped_ranges.contains_range(probe, probe + 8);
+        logger.info(format_args!(
+            "exception-test: probe address {probe:#x} is unmapped: {unmapped}"
+        ));
+        if !unmapped {
+            logger.error(format_args!(
+                "exception-test: the probe address is mapped; the test would silently \
+                 pass without faulting. halting"
+            ));
+            cpu::halt_forever();
+        }
+
+        #[cfg(feature = "exception-test-double-fault")]
+        {
+            // #PF のゲートを不在にしてからページフォルトを起こす。例外の
+            // 配送そのものが #NP（Contributory 分類）を引き起こすため、
+            // 「Page Fault の配送中に Contributory」の組み合わせが成立して
+            // #DF へ昇格する（ADR-0018）。
+            //
+            // スタックを溢れさせる方法は使えない。犠牲領域は .bss 内の
+            // マップ済みメモリであり、溢れてもページフォルトが起きないため。
+            logger.info(format_args!(
+                "exception-test: clearing the present bit of the #PF gate (vector 14)"
+            ));
+            // SAFETY: このあと意図的にページフォルトを起こし、#DF へ昇格
+            // させるためのテスト経路。ハンドラが停止するので復元は不要。
+            unsafe {
+                idt::clear_present(14);
+            }
+            logger.info(format_args!(
+                "exception-test: about to trigger #DF (via a page fault with no #PF handler)"
+            ));
+        }
+
+        #[cfg(all(
+            feature = "exception-test-page-fault",
+            not(feature = "exception-test-double-fault")
+        ))]
+        logger.info(format_args!(
+            "exception-test: about to trigger #PF (read from an unmapped address)"
+        ));
+
+        // SAFETY: 意図的にページフォルトを起こすためのテスト経路。直前に
+        // マップされていないことを確認済みで、ハンドラが停止する。
+        unsafe {
+            let value = core::ptr::read_volatile(probe as *const u64);
+            // 到達しないが、最適化で読み取りごと消えないよう値を使う。
+            logger.error(format_args!(
+                "exception-test: the read unexpectedly succeeded ({value:#x}); halting"
+            ));
         }
     }
 

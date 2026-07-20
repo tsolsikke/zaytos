@@ -35,3 +35,7 @@ gfx-test-pattern = []
 exception-test = []
 exception-test-divide-by-zero = ["exception-test"]
 exception-test-invalid-opcode = ["exception-test"]
+exception-test-page-fault = ["exception-test"]
+# ダブルフォルトは #PF のゲートを不在にしてからページフォルトを起こして
+# 誘発する。スタックを溢れさせる方法は使えない(ADR-0018)。
+exception-test-double-fault = ["exception-test", "exception-test-page-fault"]

@@ -35,6 +35,8 @@
 //! ダミーのエラーコードを push して揃え、共通ハンドラからは同じレイアウトに
 //! 見えるようにする。
 
+pub mod context;
+pub mod decode;
 pub mod layout;
 
 use core::ptr::addr_of;
@@ -43,6 +45,8 @@ use common::cpu;
 use common::serial::SerialPort;
 
 use crate::gdt::KERNEL_CODE_SELECTOR;
+use context::ExceptionContext;
+use decode::{error_code_kind, ErrorCodeKind, PageFaultErrorCode, SelectorErrorCode};
 use layout::{exception_name, GateType, IdtEntry};
 
 /// IDT のエントリ数。CPU が定義する 0..=31 と、それ以外も含めて全部埋める。
@@ -110,13 +114,40 @@ core::arch::global_asm!(
     "zaytos_exception_stubs_end:",
     ".p2align 4",
     "zaytos_exception_common:",
-    // スタック: [rsp]=ベクタ, [rsp+8]=エラーコード
-    "  mov rdi, [rsp]",
-    "  mov rsi, [rsp + 8]",
+    // ここに来た時点のスタック:
+    //   [rsp]=ベクタ, +8=エラーコード, +16=RIP, +24=CS, +32=RFLAGS, +40=RSP, +48=SS
+    //
+    // 汎用レジスタを退避する。**push の順序は
+    // idt::context::ExceptionContext のフィールド順と一対一で対応している。**
+    // 後に push したものほど低いアドレスに来るので、r15 から始めて rax で
+    // 終える（構造体では rax がレジスタ群の先頭になる）。
+    "  push r15",
+    "  push r14",
+    "  push r13",
+    "  push r12",
+    "  push r11",
+    "  push r10",
+    "  push r9",
+    "  push r8",
+    "  push rbp",
+    "  push rdi",
+    "  push rsi",
+    "  push rdx",
+    "  push rcx",
+    "  push rbx",
+    "  push rax",
+    // CR2 を読んで積む。**必ずここで読む。** ハンドラ内で別のページ
+    // フォルトが起きると CR2 は上書きされるため、他のメモリアクセスより
+    // 前に取る必要がある。rax は既に退避済みなので、作業用に使ってよい。
+    "  mov rax, cr2",
+    "  push rax",
+    // ここで rsp が ExceptionContext の先頭を指している。
+    "  mov rdi, rsp",
     // SysV ABI は call の直前に RSP が 16 バイト境界であることを要求する。
     // 例外入場時に CPU が RSP を 16 バイト境界へ揃えたうえで 5 個
     // （エラーコードありなら 6 個）を積み、スタブが合計 16 バイト
-    // （ありなら 8 バイト）積むため、ここでは RSP % 16 == 8 になっている。
+    // （ありなら 8 バイト）積むため、退避前は RSP % 16 == 8。
+    // 上の push は 16 個 = 128 バイトで 16 の倍数なので剰余は変わらない。
     // 8 引いて境界へ合わせる（ADR-0018 の罠 12）。
     "  sub rsp, 8",
     "  call {handler}",
@@ -322,29 +353,159 @@ pub unsafe fn clear_present(vector: usize) {
     }
 }
 
-/// 例外の共通処理（M4-b-1 では報告して停止するだけ）。
+/// 例外の共通処理。レジスタ一式をシリアルへ出して停止する。
 ///
 /// スタブから `extern "sysv64"` で呼ばれる。Rust の既定 ABI はレイアウトが
 /// 安定していないため、アセンブリから呼ぶ関数には使えない（M2-0c の
 /// カーネルエントリと同じ理由）。
 ///
-/// ロックも確保もコンソールも使わず、シリアルへ直接書く。例外ハンドラ自身が
-/// フォルトするとダブルフォルトになるため、依存を最小にする（ADR-0018）。
-extern "sysv64" fn exception_entry(vector: u64, error_code: u64) -> ! {
+/// **確保もロックもコンソールも使わない。** シリアルへ直接書く。例外
+/// ハンドラ自身がフォルトするとダブルフォルトになるため、依存を最小に
+/// する（ADR-0018）。エラーコードの解釈も `&'static str` を返すだけの
+/// 純粋関数で行い、文字列を組み立てない。
+///
+/// # Safety
+///
+/// `context` はスタブが積んだ [`ExceptionContext`] を指していること。
+extern "sysv64" fn exception_entry(context: *const ExceptionContext) -> ! {
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
     serial.init();
 
     use core::fmt::Write;
-    let name = exception_name(vector as u8);
-    let _ = writeln!(serial, "[ERROR] exception: vector={vector} ({name})");
-    if layout::pushes_error_code(vector as u8) {
-        let _ = writeln!(serial, "[ERROR]   error code = {error_code:#x}");
-    } else {
-        let _ = writeln!(serial, "[ERROR]   error code = (none)");
+
+    // SAFETY: スタブが直前に積んだ有効な ExceptionContext を指す。
+    // 読み取りのみで、この関数は戻らない。
+    let context = unsafe { &*context };
+
+    let vector = context.vector as u8;
+    let name = exception_name(vector);
+    let _ = writeln!(
+        serial,
+        "[ERROR] exception: vector={} ({name})",
+        context.vector
+    );
+
+    dump_error_code(&mut serial, vector, context.error_code);
+
+    let _ = writeln!(
+        serial,
+        "[ERROR]   rip={:#018x} cs={:#06x} rflags={:#x}",
+        context.rip, context.cs, context.rflags
+    );
+    let _ = writeln!(
+        serial,
+        "[ERROR]   rsp={:#018x} ss={:#06x} (at the time of the fault)",
+        context.rsp, context.ss
+    );
+
+    // 汎用レジスタ。4 個ずつ並べる。
+    let registers = context.general_purpose_registers();
+    for chunk in registers.chunks(4) {
+        let _ = write!(serial, "[ERROR]  ");
+        for (name, value) in chunk {
+            let _ = write!(serial, " {name}={value:#018x}");
+        }
+        let _ = writeln!(serial);
     }
+
+    // CR2 は #PF のときだけ意味を持つ。それ以外では直前の #PF の残骸か
+    // 未定義の値なので、そうと分かる形で出す。
+    if vector == 14 {
+        let _ = writeln!(
+            serial,
+            "[ERROR]   cr2={:#018x} (faulting address)",
+            context.cr2
+        );
+    } else {
+        let _ = writeln!(
+            serial,
+            "[ERROR]   cr2={:#018x} (not meaningful for this exception)",
+            context.cr2
+        );
+    }
+
+    // ダブルフォルトは IST で別スタックへ切り替わっているはず。実際に
+    // 切り替わったかを、このフレーム自身の位置で確かめる。切り替わって
+    // いなければ、壊れた可能性のあるスタックの上でハンドラが動いている。
+    if vector == 8 {
+        let handler_rsp = context as *const ExceptionContext as u64;
+        let ist = crate::stack::double_fault_stack_range();
+        let on_ist = ist.contains(handler_rsp);
+        let _ = writeln!(
+            serial,
+            "[ERROR]   handler frame at {handler_rsp:#018x}, IST1 stack {:#x}..{:#x}, on IST1={on_ist}",
+            ist.bottom, ist.top
+        );
+    }
+
     let _ = writeln!(serial, "[ERROR] halting (cli + hlt loop)");
 
     cpu::halt_forever();
+}
+
+/// エラーコードをベクタに応じて解釈して出す。
+fn dump_error_code(serial: &mut SerialPort, vector: u8, error_code: u64) {
+    use core::fmt::Write;
+
+    match error_code_kind(vector) {
+        ErrorCodeKind::None => {
+            let _ = writeln!(serial, "[ERROR]   error code = (none for this exception)");
+        }
+        ErrorCodeKind::AlwaysZero => {
+            // #DF のエラーコードは Intel SDM により常に 0 と決まっている。
+            let _ = writeln!(
+                serial,
+                "[ERROR]   error code = {error_code:#x} (always zero for #DF)"
+            );
+        }
+        ErrorCodeKind::PageFault => {
+            let code = PageFaultErrorCode(error_code);
+            let _ = writeln!(serial, "[ERROR]   error code = {error_code:#x}");
+            let _ = writeln!(
+                serial,
+                "[ERROR]     cause={} access={} mode={}",
+                code.cause(),
+                code.access(),
+                code.mode()
+            );
+            if code.is_reserved_bit_violation() {
+                let _ = writeln!(
+                    serial,
+                    "[ERROR]     reserved bit set in a page table entry (page table is malformed)"
+                );
+            }
+            if code.is_protection_key_violation() {
+                let _ = writeln!(serial, "[ERROR]     protection key violation");
+            }
+            if code.is_shadow_stack() {
+                let _ = writeln!(serial, "[ERROR]     shadow stack access");
+            }
+        }
+        ErrorCodeKind::Selector => {
+            let code = SelectorErrorCode(error_code);
+            let _ = writeln!(serial, "[ERROR]   error code = {error_code:#x}");
+            if code.is_null() {
+                let _ = writeln!(
+                    serial,
+                    "[ERROR]     not caused by a specific descriptor"
+                );
+            } else {
+                let _ = writeln!(
+                    serial,
+                    "[ERROR]     table={} index={} external={}",
+                    code.table().as_str(),
+                    code.index(),
+                    code.is_external()
+                );
+            }
+        }
+        ErrorCodeKind::Raw => {
+            let _ = writeln!(
+                serial,
+                "[ERROR]   error code = {error_code:#x} (vector specific)"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

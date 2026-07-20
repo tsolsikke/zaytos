@@ -39,7 +39,38 @@ struct ExceptionTest {
     vector: u8,
     /// `qemu-debug.log` に現れる目印（`-d int` の出力形式）。
     qemu_marker: &'static str,
+    /// シリアルログに現れることを追加で要求する文字列。
+    extra_serial_markers: &'static [&'static str],
+    /// 汎用レジスタの並び順を既知の値で突き合わせるか。
+    check_registers: bool,
+    /// `CPU Reset` の回数が起動時の 2 回から増えていないことを確認するか。
+    /// ダブルフォルトがトリプルフォルトへ落ちていないことの確認に使う。
+    check_no_extra_cpu_reset: bool,
 }
+
+/// `--exception-test invalid-opcode` が例外の直前に各 GPR へ入れる既知の値。
+///
+/// kernel 側の `known_register_values` と一致していなければならない。
+/// スタブの push 順と `ExceptionContext` のフィールド順が食い違うと、
+/// ダンプは出るのに名前と値の対応だけが入れ替わる。値がもっともらしいため
+/// 気づきにくいので、レジスタごとに異なる値を入れて突き合わせる。
+const KNOWN_REGISTERS: &[(&str, &str)] = &[
+    ("rax", "0x1111111111111111"),
+    ("rbx", "0x2222222222222222"),
+    ("rcx", "0x3333333333333333"),
+    ("rdx", "0x4444444444444444"),
+    ("rsi", "0x5555555555555555"),
+    ("rdi", "0x6666666666666666"),
+    ("rbp", "0x7777777777777777"),
+    ("r8", "0x8888888888888888"),
+    ("r9", "0x9999999999999999"),
+    ("r10", "0xaaaaaaaaaaaaaaaa"),
+    ("r11", "0xbbbbbbbbbbbbbbbb"),
+    ("r12", "0xcccccccccccccccc"),
+    ("r13", "0xdddddddddddddddd"),
+    ("r14", "0xeeeeeeeeeeeeeeee"),
+    ("r15", "0xffffffffffffffff"),
+];
 
 const EXCEPTION_TESTS: &[ExceptionTest] = &[
     ExceptionTest {
@@ -47,14 +78,54 @@ const EXCEPTION_TESTS: &[ExceptionTest] = &[
         feature: "exception-test-divide-by-zero",
         vector: 0,
         qemu_marker: "v=00",
+        extra_serial_markers: &["error code = (none for this exception)"],
+        check_registers: false,
+        check_no_extra_cpu_reset: false,
     },
     ExceptionTest {
         name: "invalid-opcode",
         feature: "exception-test-invalid-opcode",
         vector: 6,
         qemu_marker: "v=06",
+        extra_serial_markers: &[],
+        check_registers: true,
+        check_no_extra_cpu_reset: false,
+    },
+    ExceptionTest {
+        name: "page-fault",
+        feature: "exception-test-page-fault",
+        vector: 14,
+        qemu_marker: "v=0e",
+        extra_serial_markers: &[
+            // フォルトしたアドレスが CR2 から取れていること。
+            "cr2=0x0000400000000000 (faulting address)",
+            // エラーコードが人間に読める形へ展開されていること。
+            "cause=page not present access=read mode=supervisor",
+        ],
+        check_registers: false,
+        check_no_extra_cpu_reset: false,
+    },
+    ExceptionTest {
+        name: "double-fault",
+        feature: "exception-test-double-fault",
+        vector: 8,
+        qemu_marker: "v=08",
+        extra_serial_markers: &[
+            // IST1 へ切り替わっていること。切り替わっていなければ
+            // 壊れている可能性のあるスタックの上でハンドラが動いている。
+            "on IST1=true",
+            // #DF のエラーコードは常に 0。
+            "always zero for #DF",
+        ],
+        check_registers: false,
+        // IST が効いていなければトリプルフォルトになり、CPU Reset が増える。
+        check_no_extra_cpu_reset: true,
     },
 ];
+
+/// 起動時に必ず記録される `CPU Reset` の回数（電源投入シーケンス、
+/// `docs/troubleshooting.md` 参照）。これを超えたらリセットが起きている。
+const EXPECTED_CPU_RESET_COUNT: usize = 2;
 
 const EXCEPTION_TEST_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -523,7 +594,7 @@ fn cmd_exception_test(kind: &str) -> Result<()> {
     let qemu_saw_it = qemu.contains(test.qemu_marker);
 
     println!("--- exception-test {}: handler output ---", test.name);
-    for line in serial.lines().filter(|l| l.contains("exception")) {
+    for line in serial.lines().filter(|l| l.starts_with("[ERROR]")) {
         println!("{line}");
     }
     println!("--- end ---");
@@ -541,12 +612,64 @@ fn cmd_exception_test(kind: &str) -> Result<()> {
         if qemu_saw_it { "OK" } else { "NG" }
     );
 
-    if handler_ran && qemu_saw_it {
+    // 追加の目印（CR2、エラーコードの展開、IST の確認など）。
+    let mut markers_ok = true;
+    for marker in test.extra_serial_markers {
+        let present = serial.contains(marker);
+        markers_ok &= present;
+        println!(
+            "exception-test {}: serial contains {marker:?} = {}",
+            test.name,
+            if present { "OK" } else { "NG" }
+        );
+    }
+
+    // 汎用レジスタの並び順。名前と値の対応が入れ替わっていれば落ちる。
+    let mut registers_ok = true;
+    if test.check_registers {
+        let mut wrong = Vec::new();
+        for (name, value) in KNOWN_REGISTERS {
+            if !serial.contains(&format!("{name}={value}")) {
+                wrong.push(*name);
+            }
+        }
+        registers_ok = wrong.is_empty();
+        if registers_ok {
+            println!(
+                "exception-test {}: all {} general purpose registers dumped with the \
+                 expected value = OK",
+                test.name,
+                KNOWN_REGISTERS.len()
+            );
+        } else {
+            println!(
+                "exception-test {}: register mismatch for {:?} = NG (the push order in \
+                 the stub and the field order in ExceptionContext disagree)",
+                test.name, wrong
+            );
+        }
+    }
+
+    // トリプルフォルトになっていないこと。
+    let mut reset_ok = true;
+    if test.check_no_extra_cpu_reset {
+        let resets = qemu.matches("CPU Reset").count();
+        reset_ok = resets <= EXPECTED_CPU_RESET_COUNT;
+        println!(
+            "exception-test {}: CPU Reset count = {resets} (expected <= {}) = {}",
+            test.name,
+            EXPECTED_CPU_RESET_COUNT,
+            if reset_ok { "OK" } else { "NG (triple fault?)" }
+        );
+    }
+
+    if handler_ran && qemu_saw_it && markers_ok && registers_ok && reset_ok {
         println!("exception-test {}: PASS", test.name);
         Ok(())
     } else {
         bail!(
-            "exception-test {}: FAIL (handler={handler_ran}, qemu={qemu_saw_it})",
+            "exception-test {}: FAIL (handler={handler_ran}, qemu={qemu_saw_it}, \
+             markers={markers_ok}, registers={registers_ok}, cpu_reset={reset_ok})",
             test.name
         );
     }
