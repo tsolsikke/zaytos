@@ -29,3 +29,9 @@ heap-poison = []
 # しか転送しないため、描いたままにするとコンソール領域の外に残骸が残り
 # 続ける（ADR-0017）。`cargo xtask run --gfx-test` が有効化する。
 gfx-test-pattern = []
+# 起動完了後に意図的な例外を発生させ、例外ハンドラの回帰チェックを行う。
+# `cargo xtask run --exception-test <kind>` が有効化する。通常ビルドには
+# 含まれない。
+exception-test = []
+exception-test-divide-by-zero = ["exception-test"]
+exception-test-invalid-opcode = ["exception-test"]

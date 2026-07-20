@@ -25,6 +25,39 @@ const PANIC_TEST_FEATURE: &str = "panic-test";
 /// コンソールを起動しない（ADR-0017）。
 const GFX_TEST_PATTERN_FEATURE: &str = "gfx-test-pattern";
 
+/// 例外ハンドラの回帰チェック（`--exception-test <kind>`）。
+///
+/// 起動完了後に意図した例外をわざと発生させ、ハンドラが呼ばれることを
+/// 確認する。**必ず TCG で実行する。** KVM では `-d int` に何も残らず、
+/// `v=..` の突き合わせができないため（troubleshooting.md 参照）。
+struct ExceptionTest {
+    /// `--exception-test` に渡す名前。
+    name: &'static str,
+    /// kernel 側で有効化する feature。
+    feature: &'static str,
+    /// 期待するベクタ番号。
+    vector: u8,
+    /// `qemu-debug.log` に現れる目印（`-d int` の出力形式）。
+    qemu_marker: &'static str,
+}
+
+const EXCEPTION_TESTS: &[ExceptionTest] = &[
+    ExceptionTest {
+        name: "divide-by-zero",
+        feature: "exception-test-divide-by-zero",
+        vector: 0,
+        qemu_marker: "v=00",
+    },
+    ExceptionTest {
+        name: "invalid-opcode",
+        feature: "exception-test-invalid-opcode",
+        vector: 6,
+        qemu_marker: "v=06",
+    },
+];
+
+const EXCEPTION_TEST_TIMEOUT: Duration = Duration::from_secs(20);
+
 // パニックハンドラの出力（bootloader/src/panic.rs）と対応する、回帰チェック用の
 // 目印文字列。フォーマットを変更した場合はここも合わせて更新すること。
 const PANIC_MARKER_HEADER: &str = "[ERROR] panic:";
@@ -38,7 +71,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm]\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm]\n       cargo xtask run --exception-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -48,6 +81,13 @@ fn main() -> Result<()> {
             let gui = rest.iter().any(|a| a == "--gui");
             let gfx_test = rest.iter().any(|a| a == "--gfx-test");
             let kvm = rest.iter().any(|a| a == "--kvm");
+            if let Some(index) = rest.iter().position(|a| a == "--exception-test") {
+                let kind = rest.get(index + 1).with_context(|| {
+                    let names: Vec<&str> = EXCEPTION_TESTS.iter().map(|t| t.name).collect();
+                    format!("--exception-test requires a kind ({})", names.join(" | "))
+                })?;
+                return cmd_exception_test(kind);
+            }
             cmd_run(panic_test, gui, gfx_test, kvm)
         }
         Some("screenshot") => cmd_screenshot(&args[1..]),
@@ -415,6 +455,139 @@ fn build_bootloader(workspace_root: &Path, panic_test: bool) -> Result<PathBuf> 
 
 /// `kernel` パッケージを `x86_64-unknown-none` ターゲット向けにビルドし、
 /// 生成された ELF バイナリのパスを返す。
+/// 例外ハンドラの回帰チェックを 1 種類実行する。
+///
+/// シリアルログのハンドラ出力と、`qemu-debug.log` の `v=..` の両方を
+/// 突き合わせる。片方だけでは、ベクタ番号を取り違えたまま動いているように
+/// 見える事故を防げない（ADR-0018）。
+fn cmd_exception_test(kind: &str) -> Result<()> {
+    let test = EXCEPTION_TESTS
+        .iter()
+        .find(|t| t.name == kind)
+        .with_context(|| {
+            let names: Vec<&str> = EXCEPTION_TESTS.iter().map(|t| t.name).collect();
+            format!("unknown exception test {kind:?} (expected one of: {})", names.join(", "))
+        })?;
+
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let kernel_elf = build_kernel_with_features(&workspace_root, &[test.feature])?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let serial_log = workspace_root
+        .join("target")
+        .join("exception-test-serial.log");
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    // 例外の記録が要るので、この検証は常に TCG で行う。
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+    });
+
+    let expected_serial = format!("[ERROR] exception: vector={} ", test.vector);
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the exception test")?;
+
+    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    let handler_ran = loop {
+        if fs::read_to_string(&serial_log)
+            .map(|c| c.contains(&expected_serial))
+            .unwrap_or(false)
+        {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    };
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+    let qemu_saw_it = qemu.contains(test.qemu_marker);
+
+    println!("--- exception-test {}: handler output ---", test.name);
+    for line in serial.lines().filter(|l| l.contains("exception")) {
+        println!("{line}");
+    }
+    println!("--- end ---");
+
+    println!(
+        "exception-test {}: handler reported vector {} = {}",
+        test.name,
+        test.vector,
+        if handler_ran { "OK" } else { "NG" }
+    );
+    println!(
+        "exception-test {}: qemu -d int recorded {} = {}",
+        test.name,
+        test.qemu_marker,
+        if qemu_saw_it { "OK" } else { "NG" }
+    );
+
+    if handler_ran && qemu_saw_it {
+        println!("exception-test {}: PASS", test.name);
+        Ok(())
+    } else {
+        bail!(
+            "exception-test {}: FAIL (handler={handler_ran}, qemu={qemu_saw_it})",
+            test.name
+        );
+    }
+}
+
+/// 指定した feature 付きで kernel をビルドする。
+fn build_kernel_with_features(workspace_root: &Path, features: &[&str]) -> Result<PathBuf> {
+    let mut command = Command::new("cargo");
+    command.current_dir(workspace_root).args([
+        "build",
+        "--target",
+        KERNEL_TARGET,
+        "-p",
+        KERNEL_PACKAGE,
+        "--bin",
+        KERNEL_PACKAGE,
+    ]);
+    if !features.is_empty() {
+        command.args(["--features", &features.join(",")]);
+    }
+    let status = command
+        .status()
+        .context("failed to invoke cargo to build the kernel")?;
+    if !status.success() {
+        bail!("kernel build failed ({status})");
+    }
+
+    let elf_path = workspace_root
+        .join("target")
+        .join(KERNEL_TARGET)
+        .join("debug")
+        .join(KERNEL_PACKAGE);
+    if !elf_path.exists() {
+        bail!(
+            "kernel build reported success but {} is missing",
+            elf_path.display()
+        );
+    }
+    Ok(elf_path)
+}
+
 fn build_kernel(workspace_root: &Path, gfx_test: bool) -> Result<PathBuf> {
     let mut command = Command::new("cargo");
     command.current_dir(workspace_root).args([

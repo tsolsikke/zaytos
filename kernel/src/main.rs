@@ -23,6 +23,7 @@ use kernel::gdt;
 use kernel::stack;
 use kernel::graphics::{Color, Framebuffer, FramebufferLayout};
 use kernel::heap;
+use kernel::idt;
 use kernel::paging;
 use kernel::paging::plan::{resolve_pages, MappedRanges};
 use kernel::paging::table::PageTableBuilder;
@@ -94,6 +95,16 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
         gdt::init(stack::double_fault_stack_range().top);
     }
 
+    // IDT をロードする。ここも .bss の静的領域だけで完結する。
+    // 例外（フォルト）は RFLAGS.IF に関係なく発生するため、割り込みを
+    // 有効化しないままでもハンドラは働く。M4-d で sti するまでの間、
+    // 例外だけが自前のハンドラへ届く状態になる（ADR-0018）。
+    // SAFETY: 直前に cli 済みで、GDT も直前にロードした。起動時に 1 回だけ
+    // 呼ぶ。ダブルフォルト用 IST は gdt::init が TSS へ設定済み。
+    unsafe {
+        idt::init(Some(gdt::DOUBLE_FAULT_IST_INDEX as u8));
+    }
+
     // SAFETY: 起動時の単一実行文脈であり、他に誰もこの static に触れていない。
     unsafe {
         let handoff = addr_of!(BOOT_HANDOFF) as *mut BootHandoff;
@@ -130,6 +141,10 @@ static mut BOOT_HANDOFF: BootHandoff = BootHandoff {
 };
 
 /// 自前のカーネルスタックの上で動く、本体の起動シーケンス（M4-a 以降）。
+///
+/// `exception-test` を有効にしたビルドでは、例外を発生させた時点で戻らない
+/// ため、それ以降が到達不能になる。回帰チェック専用のビルドなので許容する。
+#[cfg_attr(feature = "exception-test", allow(unreachable_code))]
 extern "sysv64" fn kernel_main() -> ! {
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
     serial.init();
@@ -153,6 +168,10 @@ extern "sysv64" fn kernel_main() -> ! {
     ));
 
     report_gdt_and_stack(&mut logger, handoff.old_rsp);
+    report_idt(&mut logger);
+
+    #[cfg(feature = "exception-test")]
+    trigger_exception_under_test(&mut logger);
 
     // SAFETY: 呼び出し元契約（`_start` の # Safety）により、boot_info は
     // 有効な BootInfo を指す。ここでは読み取り専用の参照を作るのみ。
@@ -1137,4 +1156,131 @@ fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
     logger.info(format_args!(
         "stack: switched to the kernel's own stack (GDT/TSS loaded)"
     ));
+}
+
+/// IDT のロード結果をログに残す（M4-b-1）。
+///
+/// GDT と同じ作法で、設定したつもりの値ではなく `sidt` で読み戻した値を
+/// 確認する。
+fn report_idt(logger: &mut Logger<SerialPort>) {
+    let (base, limit) = idt::current_idt();
+    logger.info(format_args!(
+        "idt: base={base:#x} limit={limit} (expected base={:#x} limit={})",
+        idt::idt_base(),
+        idt::expected_limit()
+    ));
+
+    if base != idt::idt_base() || limit != idt::expected_limit() {
+        logger.error(format_args!(
+            "idt: read-back does not match what we loaded; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    // 全ベクタが present で、割り込みゲート（0xE）・DPL 0 であること。
+    // 1 つでも欠けると、そのベクタが発生したときに #NP になり、しかも
+    // #NP のハンドラも無ければ落ちる。
+    let mut all_present = true;
+    let mut all_interrupt_gates = true;
+    let mut all_dpl_zero = true;
+    for vector in 0..idt::IDT_ENTRY_COUNT {
+        let Some(entry) = idt::entry(vector) else {
+            all_present = false;
+            break;
+        };
+        all_present &= entry.is_present();
+        all_interrupt_gates &= entry.gate_type() == 0xE;
+        all_dpl_zero &= entry.descriptor_privilege_level() == 0;
+    }
+    logger.info(format_args!(
+        "idt: {} entries, all present={all_present}, all interrupt gates={all_interrupt_gates}, \
+         all DPL 0={all_dpl_zero}",
+        idt::IDT_ENTRY_COUNT
+    ));
+
+    // ダブルフォルトだけが IST を使うこと。
+    let double_fault_ist = idt::entry(8).and_then(|e| e.ist_index());
+    let divide_error_ist = idt::entry(0).and_then(|e| e.ist_index());
+    logger.info(format_args!(
+        "idt: #DF (vector 8) IST index={double_fault_ist:?}, #DE (vector 0) IST index={divide_error_ist:?}"
+    ));
+
+    if !(all_present && all_interrupt_gates && all_dpl_zero)
+        || double_fault_ist != Some(gdt::DOUBLE_FAULT_IST_INDEX as u8)
+        || divide_error_ist.is_some()
+    {
+        logger.error(format_args!("idt: entry checks failed; halting"));
+        cpu::halt_forever();
+    }
+
+    // スタブ表の刻み幅と、IDT エントリがそれを正しく指していることを検証する。
+    // IDT は base + n * STUB_SIZE でエントリを作っているため、この前提が
+    // 崩れると全エントリが誤ったアドレスを指す。同じ式で検算しても循環
+    // するので、アセンブラが付けた独立のラベルと突き合わせる。
+    let check = idt::check_stub_table();
+    logger.info(format_args!(
+        "idt: stub table {:#x}..{:#x} size={} (expected {}), stride={}, entries={}",
+        check.base,
+        check.end,
+        check.actual_size,
+        check.expected_size,
+        if check.stride_ok { "OK" } else { "NG" },
+        if check.entries_ok { "OK" } else { "NG" }
+    ));
+    if !check.is_ok() {
+        logger.error(format_args!(
+            "idt: stub table layout is broken; every IDT entry would point at the \
+             wrong address; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "idt: loaded (exceptions now reach our handlers; interrupts stay disabled until M4-d)"
+    ));
+}
+
+/// `--exception-test` 用に、意図した例外をわざと発生させる。
+///
+/// 通常ビルドには含まれない。`cargo xtask run --exception-test <kind>` が
+/// 対応する feature を有効にしてビルドする。
+#[cfg(feature = "exception-test")]
+fn trigger_exception_under_test(logger: &mut Logger<SerialPort>) -> ! {
+    #[cfg(feature = "exception-test-divide-by-zero")]
+    {
+        logger.info(format_args!(
+            "exception-test: about to trigger #DE (divide by zero)"
+        ));
+        // Rust の `/` はゼロ除算を検査してパニックするため #DE にならない。
+        // div 命令を直接実行する。
+        // SAFETY: 意図的に #DE を起こすためのテスト経路。ハンドラが停止する。
+        unsafe {
+            core::arch::asm!(
+                "xor rdx, rdx",
+                "mov rax, 1",
+                "xor rcx, rcx",
+                "div rcx",
+                out("rax") _,
+                out("rdx") _,
+                out("rcx") _,
+                options(nostack),
+            );
+        }
+    }
+
+    #[cfg(feature = "exception-test-invalid-opcode")]
+    {
+        logger.info(format_args!(
+            "exception-test: about to trigger #UD (invalid opcode)"
+        ));
+        // SAFETY: 意図的に #UD を起こすためのテスト経路。ハンドラが停止する。
+        unsafe {
+            core::arch::asm!("ud2", options(nostack, nomem));
+        }
+    }
+
+    logger.error(format_args!(
+        "exception-test: the expected exception did not fire; halting"
+    ));
+    cpu::halt_forever();
 }

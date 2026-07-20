@@ -101,8 +101,12 @@ IDT と例外ハンドラは割り込みを有効化しないまま検証しき�
 - [x] M4-a: GDT / TSS / 自前カーネルスタック（`.bss` の静的領域。通常 64KiB、
   ダブルフォルト用 IST1 が 16KiB）。切り替え後の RSP・ローカル変数の位置・
   旧スタック不参照・読み書き・カナリアを実機で検証済み
-- [ ] M4-b: IDT / 例外ハンドラ / 例外時の GPR フルダンプ。
-  `cargo xtask run --exception-test <kind>` で回帰チェックを常設化する
+- [~] M4-b: IDT / 例外ハンドラ / 例外時の GPR フルダンプ
+  - [x] M4-b-1: IDT エントリの符号化、全 256 ベクタへの割り込みゲート、
+    `lidt`/`sidt` の読み戻し検証、`--exception-test divide-by-zero` と
+    `invalid-opcode`（シリアルと `-d int` の突き合わせ）
+  - [ ] M4-b-2: GPR フルダンプ、CR2、エラーコードの解釈、IST を使う
+    ダブルフォルト（`--exception-test page-fault` / `double-fault`）
 - [ ] M4-c: クリティカルセクション、`Locked<T>` を割り込み保存版へ差し替え、
   PIC を 0x20-0x2F へ再マップ
 - [ ] M4-d: タイマ割り込み（**PIT**。ここで初めて `sti`）。APIC は ACPI を
