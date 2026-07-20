@@ -105,4 +105,47 @@ mod tests {
         logger.trace(format_args!("value = {}", 42));
         assert_eq!(logger.writer, "[TRACE] value = 42\n");
     }
+
+    /// `write_fmt` の呼び出し回数を数えるだけの writer。
+    #[derive(Default)]
+    struct CallCountingWriter {
+        text: String,
+        write_fmt_calls: usize,
+    }
+
+    impl Write for CallCountingWriter {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            self.text.push_str(s);
+            Ok(())
+        }
+
+        fn write_fmt(&mut self, args: fmt::Arguments<'_>) -> fmt::Result {
+            self.write_fmt_calls += 1;
+            fmt::write(self, args)
+        }
+    }
+
+    /// ログ 1 行が `write_fmt` 1 回で書かれることを固定する。
+    ///
+    /// 画面コンソール（M3-c）は `write_fmt` を境界にしてバックバッファを
+    /// フレームバッファへ転送する。`log` が接頭辞・本文・改行を別々の
+    /// `write_fmt` で書くようになると、ログ 1 行につき転送が複数回走る。
+    /// 転送はキャッシュ無効なフレームバッファへの書き込みで、最も高い
+    /// 工程であるため、この契約が崩れたら気づけるようにしておく
+    /// （ADR-0017）。
+    #[test]
+    fn one_log_line_is_written_with_a_single_write_fmt_call() {
+        let mut logger = Logger::new(CallCountingWriter::default(), LogLevel::Trace);
+        logger.info(format_args!("value = {}, other = {}", 42, "text"));
+        assert_eq!(logger.writer.write_fmt_calls, 1);
+        assert_eq!(logger.writer.text, "[INFO] value = 42, other = text\n");
+    }
+
+    #[test]
+    fn a_dropped_log_line_does_not_write_at_all() {
+        let mut logger = Logger::new(CallCountingWriter::default(), LogLevel::Error);
+        logger.info(format_args!("hidden"));
+        assert_eq!(logger.writer.write_fmt_calls, 0);
+        assert!(logger.writer.text.is_empty());
+    }
 }

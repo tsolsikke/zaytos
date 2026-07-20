@@ -8,6 +8,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod console;
 pub mod frame_allocator;
 pub mod graphics;
 pub mod heap;
