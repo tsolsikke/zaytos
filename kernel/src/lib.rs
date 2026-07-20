@@ -10,7 +10,9 @@
 
 pub mod console;
 pub mod frame_allocator;
+pub mod gdt;
 pub mod graphics;
 pub mod heap;
 pub mod memory_map;
 pub mod paging;
+pub mod stack;

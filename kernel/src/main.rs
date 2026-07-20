@@ -16,7 +16,11 @@ use common::cpu;
 use common::log::{LogLevel, Logger};
 use common::serial::SerialPort;
 use kernel::console::Console;
+use core::ptr::addr_of;
+
 use kernel::frame_allocator;
+use kernel::gdt;
+use kernel::stack;
 use kernel::graphics::{Color, Framebuffer, FramebufferLayout};
 use kernel::heap;
 use kernel::paging;
@@ -56,34 +60,103 @@ static mut BSS_CANARY: [u8; 256] = [0; 256];
 /// ならない。
 #[no_mangle]
 pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
+    // ここはまだ UEFI 由来のスタックの上で動いている。ログを出さずに
+    // 最小限の処理だけを行い、自前のスタックへ移ってから本番の起動
+    // シーケンスに入る（M4-a）。旧スタックの上に状態を積むほど、
+    // 切り替え後に「参照してはいけない領域」が増えるため。
+    //
+    // 引き継ぎたい値は BOOT_HANDOFF（静的領域）に置く。スタック上に
+    // 置いて渡すと、切り替え後にその参照が旧スタックを指してしまう。
+
+    // 自前の IDT・例外ハンドラ（M4-b）を導入するまで、割り込みは常に禁止
+    // しておく。UEFI が ExitBootServices 前に設定した IDT が現在も生きて
+    // おり、割り込みが発生すればそのハンドラ（恒等マッピングにより
+    // "たまたま" 到達可能なだけの、自前で検証していないコード）に制御が
+    // 渡ってしまうため（ADR-0014）。
+    let rflags_before = cpu::read_rflags();
+    cpu::disable_interrupts();
+    let rflags_after = cpu::read_rflags();
+
+    let old_rsp = cpu::read_rsp();
+
+    // スタックのカナリアを先に敷く。ここから下で自前スタックを使い始める。
+    // SAFETY: 起動時の単一実行文脈であり、まだ誰もこれらのスタックを
+    // 使っていない。呼ぶのはこの 1 回だけ。
+    unsafe {
+        stack::init_guards();
+    }
+
+    // GDT と TSS を自前のものへ切り替える。どちらも .bss の静的領域なので
+    // アロケータを必要とせず、この時点で実行できる。
+    // SAFETY: 直前に cli 済み。起動時に 1 回だけ呼ぶ。ダブルフォルト用の
+    // スタックは通常のカーネルスタックとは別の静的領域である。
+    unsafe {
+        gdt::init(stack::double_fault_stack_range().top);
+    }
+
+    // SAFETY: 起動時の単一実行文脈であり、他に誰もこの static に触れていない。
+    unsafe {
+        let handoff = addr_of!(BOOT_HANDOFF) as *mut BootHandoff;
+        (*handoff) = BootHandoff {
+            boot_info,
+            rflags_before,
+            rflags_after,
+            old_rsp,
+        };
+    }
+
+    // 自前のカーネルスタックへ移り、以降は kernel_main で動く。戻らない。
+    // SAFETY: 切り替え後に旧スタックの値は一切参照しない（引き継ぎは
+    // BOOT_HANDOFF 経由）。kernel_main は戻らない。呼ぶのはこの 1 回だけ。
+    unsafe { stack::switch_to_kernel_stack_and_run(kernel_main) }
+}
+
+/// `_start` から `kernel_main` へ引き継ぐ値。
+///
+/// スタック切り替えを跨ぐため、スタックではなく静的領域に置く。
+#[derive(Clone, Copy)]
+struct BootHandoff {
+    boot_info: *const BootInfo,
+    rflags_before: u64,
+    rflags_after: u64,
+    old_rsp: u64,
+}
+
+static mut BOOT_HANDOFF: BootHandoff = BootHandoff {
+    boot_info: core::ptr::null(),
+    rflags_before: 0,
+    rflags_after: 0,
+    old_rsp: 0,
+};
+
+/// 自前のカーネルスタックの上で動く、本体の起動シーケンス（M4-a 以降）。
+extern "sysv64" fn kernel_main() -> ! {
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
     serial.init();
     let mut logger = Logger::new(serial, LogLevel::Trace);
 
     logger.info(format_args!("ZaytOS kernel: entered _start"));
 
-    // 自前の IDT・例外ハンドラ（M4）を導入するまで、割り込みは常に禁止
-    // しておく。UEFI が ExitBootServices 前に設定した IDT が現在も生きて
-    // おり、割り込みが発生すればそのハンドラ（恒等マッピングにより
-    // "たまたま" 到達可能なだけの、自前で検証していないコード）に制御が
-    // 渡ってしまうため（docs/architecture.md §6.5 参照）。
-    let rflags_before = cpu::read_rflags();
+    // SAFETY: _start が switch_to_kernel_stack_and_run より前に書き込み済みで、
+    // 以降は誰も書き換えない。読み取りのみ。
+    let handoff = unsafe { core::ptr::read(addr_of!(BOOT_HANDOFF)) };
+
     logger.info(format_args!(
         "interrupts: RFLAGS.IF before cli = {} (raw RFLAGS={:#x})",
-        rflags_before & cpu::RFLAGS_INTERRUPT_FLAG != 0,
-        rflags_before
+        handoff.rflags_before & cpu::RFLAGS_INTERRUPT_FLAG != 0,
+        handoff.rflags_before
     ));
-    cpu::disable_interrupts();
-    let rflags_after = cpu::read_rflags();
     logger.info(format_args!(
         "interrupts: RFLAGS.IF after cli = {} (raw RFLAGS={:#x})",
-        rflags_after & cpu::RFLAGS_INTERRUPT_FLAG != 0,
-        rflags_after
+        handoff.rflags_after & cpu::RFLAGS_INTERRUPT_FLAG != 0,
+        handoff.rflags_after
     ));
 
-    // SAFETY: 呼び出し元契約（上記 # Safety）により、boot_info は有効な
-    // BootInfo を指す。ここでは読み取り専用の参照を作るのみ。
-    let boot_info = unsafe { &*boot_info };
+    report_gdt_and_stack(&mut logger, handoff.old_rsp);
+
+    // SAFETY: 呼び出し元契約（`_start` の # Safety）により、boot_info は
+    // 有効な BootInfo を指す。ここでは読み取り専用の参照を作るのみ。
+    let boot_info = unsafe { &*handoff.boot_info };
 
     if let Err(e) = boot_info.validate() {
         logger.error(format_args!("BootInfo validation failed: {e}"));
@@ -941,5 +1014,127 @@ fn announce_console_start(logger: &mut Logger<SerialPort>, console: &mut Console
     logger.info(format_args!(
         "console: {skipped} log line(s) were emitted before the console existed \
          (serial only)"
+    ));
+}
+
+/// GDT / TSS / スタック切り替えの結果をログに残す（M4-a）。
+///
+/// M2-d の CR3 切り替えと同じ作法で、切り替え後に「実際に読み戻した値」を
+/// 出す。設定したつもりの値ではなく、CPU が今参照している値を確認する。
+fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
+    let (gdt_base, gdt_limit) = gdt::current_gdt();
+    let code_selector = gdt::current_code_selector();
+    let task_register = gdt::current_task_register();
+
+    logger.info(format_args!(
+        "gdt: base={gdt_base:#x} limit={gdt_limit} (expected base={:#x})",
+        gdt::gdt_base()
+    ));
+    logger.info(format_args!(
+        "gdt: CS={code_selector:#x} (expected {:#x}), TR={task_register:#x} (expected {:#x})",
+        gdt::KERNEL_CODE_SELECTOR.bits(),
+        gdt::TSS_SELECTOR.bits()
+    ));
+
+    let gdt_ok = gdt_base == gdt::gdt_base()
+        && code_selector == gdt::KERNEL_CODE_SELECTOR.bits()
+        && task_register == gdt::TSS_SELECTOR.bits();
+    if !gdt_ok {
+        logger.error(format_args!(
+            "gdt: read-back does not match what we loaded; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "tss: base={:#x} IST{}={:#x} RSP0={:#x}",
+        gdt::tss_base(),
+        gdt::DOUBLE_FAULT_IST_INDEX,
+        gdt::double_fault_stack_top(),
+        gdt::privilege_stack_top()
+    ));
+    logger.info(format_args!(
+        "tss: RSP0 は特権レベル遷移（ユーザー -> カーネル）用で、M5 まで実際には使われない"
+    ));
+
+    // --- スタック切り替えの検証 ---
+    let kernel_stack = stack::kernel_stack_range();
+    let double_fault_stack = stack::double_fault_stack_range();
+    let current_rsp = cpu::read_rsp();
+
+    logger.info(format_args!(
+        "stack: old RSP={old_rsp:#x} (UEFI-derived), new RSP={current_rsp:#x}"
+    ));
+    logger.info(format_args!(
+        "stack: kernel stack {:#x}..{:#x} ({} KiB)",
+        kernel_stack.bottom,
+        kernel_stack.top,
+        kernel_stack.size() / 1024
+    ));
+    logger.info(format_args!(
+        "stack: double fault (IST{}) stack {:#x}..{:#x} ({} KiB)",
+        gdt::DOUBLE_FAULT_IST_INDEX,
+        double_fault_stack.bottom,
+        double_fault_stack.top,
+        double_fault_stack.size() / 1024
+    ));
+
+    // 現在のスタックポインタが自前の領域にあること。
+    let on_own_stack = kernel_stack.contains(current_rsp);
+    logger.info(format_args!(
+        "stack: RSP is inside the kernel stack: {on_own_stack}"
+    ));
+
+    // ローカル変数の置き場所も自前スタック上にあること。RSP だけでなく、
+    // 実際にコンパイラが使う退避先も移っていることの確認になる。
+    let probe = 0xA5A5_5A5Au32;
+    let probe_address = core::ptr::addr_of!(probe) as u64;
+    let locals_on_own_stack = kernel_stack.contains(probe_address);
+    logger.info(format_args!(
+        "stack: locals live at {probe_address:#x}, inside the kernel stack: {locals_on_own_stack}"
+    ));
+
+    // 旧スタックを参照していないこと。
+    let left_old_stack = !kernel_stack.contains(old_rsp) && current_rsp != old_rsp;
+    logger.info(format_args!(
+        "stack: no longer using the UEFI-derived stack: {left_old_stack}"
+    ));
+
+    // 実際に書き込めること（M2-d のスタック検証と同じ考え方）。
+    // 現在の RSP より下（未使用側）へ直接読み書きしてみる。
+    let scratch = (current_rsp - 256) as *mut u64;
+    // SAFETY: scratch は現在の RSP より 256 バイト下で、カーネルスタックの
+    // 範囲内。まだ誰も使っていない未使用領域であり、赤ゾーン（128 バイト）
+    // より外側でもある。読み書きするのはこの 8 バイトのみ。
+    let scratch_ok = if kernel_stack.contains(scratch as u64) {
+        unsafe {
+            core::ptr::write_volatile(scratch, 0x5A5A_A5A5_5A5A_A5A5);
+            core::ptr::read_volatile(scratch) == 0x5A5A_A5A5_5A5A_A5A5
+        }
+    } else {
+        false
+    };
+    logger.info(format_args!(
+        "stack: write/read-back at {:#x}: {}",
+        scratch as u64,
+        if scratch_ok { "OK" } else { "NG" }
+    ));
+
+    let guards_ok = stack::guards_intact();
+    logger.info(format_args!(
+        "stack: guards intact (kernel={}, double-fault={})",
+        stack::kernel_guard_intact(),
+        stack::double_fault_guard_intact()
+    ));
+
+    if !(on_own_stack && locals_on_own_stack && left_old_stack && scratch_ok && guards_ok) {
+        logger.error(format_args!(
+            "stack: one or more checks failed (see above); halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "stack: switched to the kernel's own stack (GDT/TSS loaded)"
     ));
 }
