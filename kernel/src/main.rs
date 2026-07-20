@@ -74,8 +74,17 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
     // おり、割り込みが発生すればそのハンドラ（恒等マッピングにより
     // "たまたま" 到達可能なだけの、自前で検証していないコード）に制御が
     // 渡ってしまうため（ADR-0014）。
+    //
+    // ここは InterruptGuard ではなく直接 cli する。M4-d で sti するまで
+    // 恒久的に禁止し続けたいのであって、スコープを抜けたら復元する
+    // クリティカルセクションとは意味が違うため（cpu::disable_interrupts
+    // の doc が言う「以降割り込みを一切戻さない」場面）。
     let rflags_before = cpu::read_rflags();
-    cpu::disable_interrupts();
+    // SAFETY: M4-d まで割り込みを恒久的に禁止する意図的な操作（ADR-0014）。
+    // この時点で張っているクリティカルセクションは存在しない。
+    unsafe {
+        cpu::disable_interrupts();
+    }
     let rflags_after = cpu::read_rflags();
 
     let old_rsp = cpu::read_rsp();
@@ -169,6 +178,7 @@ extern "sysv64" fn kernel_main() -> ! {
 
     report_gdt_and_stack(&mut logger, handoff.old_rsp);
     report_idt(&mut logger);
+    verify_critical_sections(&mut logger);
 
 
 
@@ -1167,6 +1177,79 @@ fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
 ///
 /// GDT と同じ作法で、設定したつもりの値ではなく `sidt` で読み戻した値を
 /// 確認する。
+/// クリティカルセクション（`InterruptGuard`）の入れ子を実機で検証する
+/// （M4-c-1）。
+///
+/// 各時点の IF は「設定したつもりの値」ではなく、実際の RFLAGS から読む。
+/// M4-c の時点ではまだ `sti` していない（起動時から IF=0）ため、この
+/// 検証で観測できるのは「入れ子で余計に有効化されないこと」と「Drop 後に
+/// 元の状態へ戻ること」である。IF=1 で `enter` する経路の検証は、PIC を
+/// 全マスクした M4-c-3 の後で `--critical-test` により行う（それ以前に
+/// `sti` すると未検証のハンドラへ割り込みが飛ぶため危険）。
+fn verify_critical_sections(logger: &mut Logger<SerialPort>) {
+    use common::critical::InterruptGuard;
+
+    fn if_set() -> bool {
+        cpu::read_rflags() & cpu::RFLAGS_INTERRUPT_FLAG != 0
+    }
+
+    let before = if_set();
+    logger.info(format_args!(
+        "critical: IF before any guard = {before}"
+    ));
+
+    let mut all_ok = true;
+
+    {
+        let _outer = InterruptGuard::enter();
+        let after_outer = if_set();
+        // enter で必ず IF=0 になる。
+        all_ok &= !after_outer;
+
+        {
+            let _middle = InterruptGuard::enter();
+            let after_middle = if_set();
+            all_ok &= !after_middle;
+
+            {
+                let _inner = InterruptGuard::enter();
+                let after_inner = if_set();
+                all_ok &= !after_inner;
+                logger.info(format_args!(
+                    "critical: IF after 3 nested guards = {after_inner} (expected false)"
+                ));
+            }
+            // 内側の Drop 後。保存値が IF=0 だったので復元しない = まだ IF=0。
+            let after_inner_drop = if_set();
+            all_ok &= !after_inner_drop;
+        }
+        let after_middle_drop = if_set();
+        all_ok &= !after_middle_drop;
+        logger.info(format_args!(
+            "critical: IF after inner guards dropped = {after_middle_drop} (still disabled)"
+        ));
+    }
+
+    // 一番外側の Drop 後。起動時から IF=0 なので、保存値も IF=0 で復元しない。
+    // つまり元の状態（IF=0）へ正しく戻っている。
+    let after_all = if_set();
+    all_ok &= after_all == before;
+    logger.info(format_args!(
+        "critical: IF after all guards dropped = {after_all} (expected {before}, back to start)"
+    ));
+
+    if !all_ok {
+        logger.error(format_args!(
+            "critical: nesting behaviour is wrong (see above); halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "critical: nested InterruptGuard behaves correctly (no spurious enable, restored on exit)"
+    ));
+}
+
 fn report_idt(logger: &mut Logger<SerialPort>) {
     let (base, limit) = idt::current_idt();
     logger.info(format_args!(

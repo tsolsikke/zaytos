@@ -11,6 +11,7 @@
 
 pub mod boot_info;
 pub mod cpu;
+pub mod critical;
 pub mod elf;
 pub mod log;
 pub mod serial;

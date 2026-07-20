@@ -56,16 +56,52 @@ pub fn read_rflags() -> u64 {
     rflags
 }
 
-/// 割り込みを禁止する（`cli`）。呼び出し元がその状態を維持する責任を負う
-/// （`sti` で戻す処理はここには含まない。M4 で自前 IDT を導入するまで、
-/// kernel は起動直後からこの状態を維持し続ける方針。
-/// `docs/architecture.md` §6.5 参照）。
-pub fn disable_interrupts() {
-    // SAFETY: `cli` はマスク可能割り込みの受付を止めるだけで、メモリ
-    // レイアウトや制御フローを変えない。
+/// 割り込みを禁止する（`cli`）。
+///
+/// # Safety
+///
+/// 割り込みの有効/無効は共有データの排他性の前提そのものである。素朴に
+/// 呼ぶと、呼び出し元が既に張っていたクリティカルセクションの前提を崩す。
+/// 通常は [`crate::critical::InterruptGuard`] を使うこと。直接呼んでよいのは、
+/// 停止処理やパニックハンドラのように「以降割り込みを一切戻さない」場面に
+/// 限る。
+///
+/// `preserves_flags` は付けない。`cli` は RFLAGS.IF を変更するため。
+pub unsafe fn disable_interrupts() {
+    // SAFETY: 呼び出し側の契約により、割り込みを禁止してよい文脈で呼ばれる。
+    // `cli` はマスク可能割り込みの受付を止めるだけで、メモリレイアウトや
+    // 制御フローを変えない。
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
     }
+}
+
+/// 割り込みを許可する（`sti`）。
+///
+/// # Safety
+///
+/// 割り込みを有効化してよい文脈でのみ呼ぶこと。「もともと禁止されていた
+/// 文脈」で呼ぶと、呼び出し元が守っていた排他性が失われる。無条件に呼んで
+/// はならない。通常は [`crate::critical::InterruptGuard`] の Drop が、保存
+/// した状態に応じて呼ぶ。
+///
+/// `preserves_flags` は付けない。`sti` は RFLAGS.IF を変更するため。
+pub unsafe fn enable_interrupts() {
+    // SAFETY: 呼び出し側の契約により、割り込みを有効化してよい文脈で呼ばれる。
+    unsafe {
+        core::arch::asm!("sti", options(nomem, nostack));
+    }
+}
+
+/// 保存した RFLAGS を見て、割り込みを復元すべきか判断する（純粋ロジック）。
+///
+/// クリティカルセクションを抜けるとき、**保存時に IF=1 だった場合のみ**
+/// 割り込みを再度有効化する。無条件に `sti` すると、もともと割り込みが
+/// 禁止されていた文脈で勝手に有効になり、入れ子で破綻する。
+///
+/// ハードウェアに触れないためホスト上で `cargo test` により検証する。
+pub const fn should_restore_interrupts(saved_rflags: u64) -> bool {
+    saved_rflags & RFLAGS_INTERRUPT_FLAG != 0
 }
 
 /// 割り込みを禁止し、`hlt` ループで停止し続ける。
@@ -103,4 +139,29 @@ pub fn read_timestamp_counter() -> u64 {
     // SAFETY: `rdtsc` は特権を必要とせず（CR4.TSD が立っていない限り）、
     // メモリにも制御フローにも副作用が無い。EDX:EAX に値を返すだけ。
     unsafe { core::arch::x86_64::_rdtsc() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// クリティカルセクションを抜けるときの復元判断。保存時に IF=1 なら復元、
+    /// IF=0 なら復元しない。この 2 ケースが入れ子の正しさの核心である。
+    #[test]
+    fn interrupts_are_restored_only_when_they_were_enabled_on_entry() {
+        // IF=1 で入ったなら、抜けるとき復元する。
+        assert!(should_restore_interrupts(RFLAGS_INTERRUPT_FLAG));
+        // IF=0 で入ったなら（入れ子の内側など）、抜けても復元しない。
+        assert!(!should_restore_interrupts(0));
+    }
+
+    /// IF 以外のビットが立っていても、判断は IF ビットだけで行う。
+    #[test]
+    fn only_the_interrupt_flag_bit_matters() {
+        // 予約ビット bit1 は常に 1。それ以外を色々立てても IF だけを見る。
+        let if_set = RFLAGS_INTERRUPT_FLAG | 0b10 | (1 << 0) | (1 << 6);
+        let if_clear = 0b10 | (1 << 0) | (1 << 6);
+        assert!(should_restore_interrupts(if_set));
+        assert!(!should_restore_interrupts(if_clear));
+    }
 }
