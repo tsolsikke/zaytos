@@ -106,6 +106,26 @@ impl FramebufferLayout {
         })
     }
 
+    /// 同じ形状のまま、別の先頭アドレスを指す形状を作る。
+    ///
+    /// バックバッファ（通常 RAM 上の、フレームバッファと同じ形状の面）を
+    /// 作るために使う。形状が同一なので、フラッシュは行ごとの単純なコピーに
+    /// なる（ADR-0017）。
+    ///
+    /// 元の形状は検証済みだが、先頭アドレスが変われば境界とアドレス計算の
+    /// 前提も変わるため、改めて検証し直す。
+    pub fn with_base(&self, base: u64) -> Result<Self, LayoutError> {
+        if base == 0 {
+            return Err(LayoutError::NullBaseAddress);
+        }
+        if base % BYTES_PER_PIXEL != 0 {
+            return Err(LayoutError::MisalignedBaseAddress { base });
+        }
+        base.checked_add(self.size_bytes)
+            .ok_or(LayoutError::AddressOverflow)?;
+        Ok(Self { base, ..*self })
+    }
+
     pub fn base(&self) -> u64 {
         self.base
     }
@@ -345,6 +365,43 @@ mod tests {
         assert_eq!(layout.pixel_offset_bytes(0, 1), Some(1024 * 4));
         // 幅の外は、行内にパディングとして存在していても書かせない。
         assert_eq!(layout.pixel_offset_bytes(1000, 0), None);
+    }
+
+    #[test]
+    fn a_layout_can_be_rebased_onto_a_back_buffer() {
+        let layout = FramebufferLayout::from_info(&valid_info()).unwrap();
+        let rebased = layout.with_base(0x22_8000).unwrap();
+        assert_eq!(rebased.base(), 0x22_8000);
+        assert_eq!(rebased.end(), 0x22_8000 + 4_096_000);
+        // 形状は変わらない。フラッシュが単純コピーになる前提。
+        assert_eq!(rebased.width(), layout.width());
+        assert_eq!(rebased.height(), layout.height());
+        assert_eq!(rebased.stride(), layout.stride());
+        assert_eq!(rebased.format(), layout.format());
+        assert_eq!(rebased.size_bytes(), layout.size_bytes());
+    }
+
+    #[test]
+    fn rebasing_revalidates_the_new_base_address() {
+        let layout = FramebufferLayout::from_info(&valid_info()).unwrap();
+        assert_eq!(layout.with_base(0), Err(LayoutError::NullBaseAddress));
+        assert_eq!(
+            layout.with_base(0x22_8001),
+            Err(LayoutError::MisalignedBaseAddress { base: 0x22_8001 })
+        );
+        assert_eq!(
+            layout.with_base(u64::MAX - 3),
+            Err(LayoutError::AddressOverflow)
+        );
+    }
+
+    #[test]
+    fn a_rebased_layout_computes_the_same_offsets() {
+        let layout = FramebufferLayout::from_info(&valid_info()).unwrap();
+        let rebased = layout.with_base(0x22_8000).unwrap();
+        for (x, y) in [(0, 0), (1, 0), (0, 1), (1279, 799), (1280, 0)] {
+            assert_eq!(layout.pixel_offset_bytes(x, y), rebased.pixel_offset_bytes(x, y));
+        }
     }
 
     #[test]

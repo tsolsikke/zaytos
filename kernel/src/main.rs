@@ -15,8 +15,10 @@ use common::boot_info::{BootInfo, BOOT_INFO_PAGE_COUNT};
 use common::cpu;
 use common::log::{LogLevel, Logger};
 use common::serial::SerialPort;
+#[cfg(not(feature = "gfx-test-pattern"))]
+use kernel::console::Console;
 use kernel::frame_allocator;
-use kernel::graphics::{self, Color, Framebuffer, FramebufferLayout};
+use kernel::graphics::{Color, Framebuffer, FramebufferLayout};
 use kernel::heap;
 use kernel::paging;
 use kernel::paging::plan::{resolve_pages, MappedRanges};
@@ -455,6 +457,14 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
     // 目視できるテストパターンを実際に描く。ここで描けることが、CR3 切り替え
     // 後もフレームバッファへ到達できていることの証明も兼ねる。
     let mut framebuffer = init_framebuffer(&mut logger, boot_info, &mapped_ranges);
+
+    // 起動時テストパターンは M3-a の検証手段であり、通常起動では描かない。
+    // コンソールは変更範囲しか転送しないため、描いたままにするとコンソール
+    // 領域の外に残骸が残り続ける（ADR-0017）。検証したいときは
+    // `cargo xtask run --gfx-test` で有効にする。通常起動では、この後の
+    // コンソール初期化による全面クリアが、フレームバッファへ到達できて
+    // いることの目視確認を兼ねる。
+    #[cfg(feature = "gfx-test-pattern")]
     if let Some(fb) = framebuffer.as_mut() {
         draw_startup_test_pattern(&mut logger, fb);
     }
@@ -548,6 +558,34 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
         ALLOCATOR.free_block_count()
     ));
 
+    // === M3-c-2: 画面コンソール ===
+
+    #[cfg(feature = "gfx-test-pattern")]
+    logger.info(format_args!(
+        "console: not started (gfx-test-pattern feature is enabled)"
+    ));
+
+    #[cfg(not(feature = "gfx-test-pattern"))]
+    if let Some(fb) = framebuffer.take() {
+        if let Some(mut console) = init_console(&mut logger, fb, &mut allocator, &mapped_ranges) {
+            run_console_demo(&mut console);
+
+            // ダーティ矩形が実際に効いているかを数字で残す。毎回のフラッシュで
+            // ログを出すと、ログ自体が次のフラッシュを誘発するため、起動
+            // シーケンスの最後に 1 回だけ出す。
+            let stats = console.stats();
+            logger.info(format_args!(
+                "console: {} flush(es), {} bytes transferred",
+                stats.flush_count, stats.transferred_bytes
+            ));
+            logger.info(format_args!(
+                "console: full-screen equivalent would be {} bytes ({}% actually sent)",
+                stats.full_screen_equivalent_bytes(),
+                stats.transferred_percent()
+            ));
+        }
+    }
+
     logger.info(format_args!("kernel: halting"));
     cpu::halt_forever();
 }
@@ -605,6 +643,7 @@ fn init_framebuffer(
     Some(unsafe { Framebuffer::new(layout) })
 }
 
+#[cfg(feature = "gfx-test-pattern")]
 /// 起動時のテストパターンを描く（M3-a）。
 ///
 /// 目視で次を確認できるように選んである。
@@ -658,6 +697,7 @@ fn draw_startup_test_pattern(logger: &mut Logger<SerialPort>, framebuffer: &mut 
     ));
 }
 
+#[cfg(feature = "gfx-test-pattern")]
 /// 起動時のテストパターンに文字を描く（M3-b）。
 ///
 /// 目視で次を確認できるように選んである。
@@ -692,7 +732,7 @@ fn draw_startup_text(framebuffer: &mut Framebuffer, background: Color) {
     }
 
     // 未収録文字が代替グリフになることの確認。上の最終行の続きに描く。
-    let fallback_x = TEXT_LEFT + graphics::text_width_pixels("fallback check: ");
+    let fallback_x = TEXT_LEFT + kernel::graphics::text_width_pixels("fallback check: ");
     let fallback_y = TEXT_TOP + 5 * LINE_HEIGHT;
     framebuffer.draw_str(
         fallback_x,
@@ -711,4 +751,118 @@ fn draw_startup_text(framebuffer: &mut Framebuffer, background: Color) {
         Color::rgb(0xFF, 0xC0, 0x00),
         Some(background),
     );
+}
+
+#[cfg(not(feature = "gfx-test-pattern"))]
+/// バックバッファを確保して画面コンソールを作る（M3-c-2）。
+///
+/// 確保に失敗した場合は `None` を返し、カーネルは停止せずに続行する。
+/// 画面が出なくなるだけで、シリアルログという観測手段は失われないため。
+/// 失敗の内訳（要求フレーム数・空きフレーム総数・最大連続空き範囲）を
+/// ログに出し、「空き自体が不足」なのか「空きはあるが連続領域が足りない
+/// （断片化）」なのかを判別できるようにする。
+fn init_console(
+    logger: &mut Logger<SerialPort>,
+    framebuffer: Framebuffer,
+    allocator: &mut frame_allocator::FrameAllocator,
+    mapped_ranges: &MappedRanges,
+) -> Option<Console> {
+    const FOREGROUND: Color = Color::rgb(0xD0, 0xD8, 0xE0);
+    const BACKGROUND: Color = Color::rgb(0x10, 0x10, 0x18);
+
+    let layout = *framebuffer.layout();
+    let frames_needed = layout.size_bytes().div_ceil(frame_allocator::FRAME_SIZE);
+
+    let Some(start_frame) = allocator.allocate_contiguous(frames_needed) else {
+        logger.error(format_args!(
+            "console: back buffer allocation failed; screen output is disabled"
+        ));
+        logger.error(format_args!(
+            "console:   requested {} frames ({} KiB)",
+            frames_needed,
+            frames_needed * frame_allocator::FRAME_SIZE / 1024
+        ));
+        logger.error(format_args!(
+            "console:   free total {} frames, largest contiguous run {} frames",
+            allocator.free_frame_count(),
+            allocator.largest_contiguous_free_frames()
+        ));
+        logger.info(format_args!(
+            "console: serial logging continues unaffected"
+        ));
+        return None;
+    };
+
+    let base = start_frame * frame_allocator::FRAME_SIZE;
+    let end = base + frames_needed * frame_allocator::FRAME_SIZE;
+
+    // M2 以来の不変条件: 使う領域は必ずマップ済みであることを確かめてから触る。
+    if !mapped_ranges.contains_range(base, end) {
+        logger.error(format_args!(
+            "console: back buffer {base:#x}..{end:#x} is not fully mapped; \
+             screen output is disabled"
+        ));
+        logger.info(format_args!(
+            "console: serial logging continues unaffected"
+        ));
+        return None;
+    }
+
+    // SAFETY: base..end は今確保したばかりで他の誰も使っておらず、直前に
+    // contains_range でマップ済みであることを確認した。framebuffer は
+    // init_framebuffer が検証済みの形状で作ったもので、所有権をここへ
+    // 移している（同じ領域に対する Framebuffer は他に存在しない）。
+    match unsafe { Console::new(framebuffer, base, FOREGROUND, BACKGROUND) } {
+        Ok(console) => {
+            let (columns, rows) = console.size();
+            logger.info(format_args!(
+                "console: ready ({columns}x{rows} cells), back buffer {base:#x}..{end:#x} \
+                 ({frames_needed} frames)"
+            ));
+            Some(console)
+        }
+        Err(e) => {
+            logger.error(format_args!(
+                "console: initialization failed ({e:?}); screen output is disabled"
+            ));
+            logger.info(format_args!(
+                "console: serial logging continues unaffected"
+            ));
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "gfx-test-pattern"))]
+/// コンソールの実地確認（M3-c-2）。
+///
+/// 画面いっぱいより多くの行を書き、折り返しとスクロールが実際に動くことを
+/// 目視できるようにする。M3-c-3 で起動ログ全体を画面へ流すまでの暫定。
+fn run_console_demo(console: &mut Console) {
+    use core::fmt::Write;
+
+    let (columns, rows) = console.size();
+    let _ = writeln!(console, "ZaytOS console: {columns} columns x {rows} rows");
+    let _ = writeln!(console, "font: GNU Unifont (half width 8x16 / full width 16x16)");
+    let _ = writeln!(console);
+    let _ = writeln!(console, "printable ascii:");
+    let _ = writeln!(console, " !\"#$%&'()*+,-./0123456789:;<=>?");
+    let _ = writeln!(console, "@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_");
+    let _ = writeln!(console, "`abcdefghijklmnopqrstuvwxyz{{|}}~");
+    let _ = writeln!(console);
+    let _ = writeln!(console, "tab stops:\tone\ttwo\tthree");
+    let _ = writeln!(console, "fallback (not yet embedded): japanese");
+    let _ = writeln!(console);
+
+    // 画面の行数より多く書き、スクロールを必ず起こす。行番号が飛ばずに
+    // 連続していれば、スクロールで内容が欠けていないと分かる。
+    let total = rows + 12;
+    for line in 1..=total {
+        let _ = writeln!(
+            console,
+            "line {line:>3} / {total}: the quick brown fox jumps over the lazy dog"
+        );
+    }
+    let _ = writeln!(console);
+    let _ = writeln!(console, "end of demo (console still responsive after scrolling)");
 }

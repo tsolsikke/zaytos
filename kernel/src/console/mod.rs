@@ -4,6 +4,10 @@
 //!   `cargo test` で検証）。
 //! - [`dirty`][mod@dirty]: 未転送範囲の追跡（純粋ロジック、ホスト
 //!   `cargo test` で検証）。
+//! - [`backbuffer`][mod@backbuffer]: バックバッファとフレームバッファへの
+//!   転送（unsafe）。
+//! - [`screen`][mod@screen]: 上記を束ねた [`Console`]。`core::fmt::Write`
+//!   を実装する。
 //!
 //! 設計の背景は ADR-0017 を参照。要点:
 //! - バックバッファは通常 RAM に置き、フレームバッファと同じ形式・同じ
@@ -17,11 +21,15 @@
 //!   失敗してもシリアルログは影響を受けない。
 //! - パニック時に画面へは出さない（ADR-0013 Addendum）。
 
+pub mod backbuffer;
 pub mod dirty;
 pub mod grid;
+pub mod screen;
 
+pub use backbuffer::{BackBuffer, BackBufferError};
 pub use dirty::{DirtyRegion, Rect};
 pub use grid::{Grid, GridError, Placement, Step, MAX_GLYPH_WIDTH_CELLS, TAB_WIDTH};
+pub use screen::{Console, ConsoleError, FlushStats};
 
 #[cfg(test)]
 mod tests {

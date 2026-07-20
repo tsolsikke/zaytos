@@ -80,8 +80,9 @@ M2-0a〜M2-0c で bootloader/kernel 分離（ADR-0008）と ELF ローダーを�
   - [x] M3-c-1: 純粋ロジック（カーソルと桁送り、未転送範囲の追跡）。
     全角の折り返し・制御文字・ダーティ矩形の結合をホスト `cargo test`
     で検証
-  - [ ] M3-c-2: バックバッファの確保とダーティ矩形フラッシュ、
-    `core::fmt::Write` 実装（unsafe を含む）
+  - [x] M3-c-2: バックバッファの確保とダーティ矩形フラッシュ、
+    `core::fmt::Write` 実装（unsafe を含む）。起動時テストパターンは
+    `gfx-test-pattern` feature（`cargo xtask run --gfx-test`）へ移した
   - [ ] M3-c-3: 起動ログを画面にも出す統合。シリアルは独立を維持する
 
 ## M4. 割り込み

@@ -21,6 +21,9 @@ const UEFI_TARGET: &str = "x86_64-unknown-uefi";
 const KERNEL_PACKAGE: &str = "kernel";
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 const PANIC_TEST_FEATURE: &str = "panic-test";
+/// kernel 側の feature。有効にすると M3-a の描画テストパターンを描き、
+/// コンソールを起動しない（ADR-0017）。
+const GFX_TEST_PATTERN_FEATURE: &str = "gfx-test-pattern";
 
 // パニックハンドラの出力（bootloader/src/panic.rs）と対応する、回帰チェック用の
 // 目印文字列。フォーマットを変更した場合はここも合わせて更新すること。
@@ -35,7 +38,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask run [--panic-test] [--gui]\n       cargo xtask screenshot [output.png] [--wait-secs N]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask run [--panic-test] [--gui] [--gfx-test]\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -43,7 +46,8 @@ fn main() -> Result<()> {
             let rest = &args[1..];
             let panic_test = rest.iter().any(|a| a == "--panic-test");
             let gui = rest.iter().any(|a| a == "--gui");
-            cmd_run(panic_test, gui)
+            let gfx_test = rest.iter().any(|a| a == "--gfx-test");
+            cmd_run(panic_test, gui, gfx_test)
         }
         Some("screenshot") => cmd_screenshot(&args[1..]),
         Some("gen-font") => font::generate(&workspace_root()?),
@@ -81,11 +85,11 @@ struct QemuLaunchOptions<'a> {
     monitor_socket: Option<&'a Path>,
 }
 
-fn cmd_run(panic_test: bool, gui: bool) -> Result<()> {
+fn cmd_run(panic_test: bool, gui: bool, gfx_test: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
     let bootloader_efi = build_bootloader(&workspace_root, panic_test)?;
-    let kernel_elf = build_kernel(&workspace_root)?;
+    let kernel_elf = build_kernel(&workspace_root, gfx_test)?;
     let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
 
     if panic_test {
@@ -194,10 +198,12 @@ fn panic_markers_present(serial_log_path: &Path) -> bool {
 fn cmd_screenshot(args: &[String]) -> Result<()> {
     let mut wait = DEFAULT_SCREENSHOT_WAIT;
     let mut output_path = None;
+    let mut gfx_test = false;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--gfx-test" => gfx_test = true,
             "--wait-secs" => {
                 i += 1;
                 let value = args
@@ -216,7 +222,7 @@ fn cmd_screenshot(args: &[String]) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
-    let kernel_elf = build_kernel(&workspace_root)?;
+    let kernel_elf = build_kernel(&workspace_root, gfx_test)?;
     let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
 
     let output_path =
@@ -374,18 +380,21 @@ fn build_bootloader(workspace_root: &Path, panic_test: bool) -> Result<PathBuf> 
 
 /// `kernel` パッケージを `x86_64-unknown-none` ターゲット向けにビルドし、
 /// 生成された ELF バイナリのパスを返す。
-fn build_kernel(workspace_root: &Path) -> Result<PathBuf> {
-    let status = Command::new("cargo")
-        .current_dir(workspace_root)
-        .args([
-            "build",
-            "--target",
-            KERNEL_TARGET,
-            "-p",
-            KERNEL_PACKAGE,
-            "--bin",
-            KERNEL_PACKAGE,
-        ])
+fn build_kernel(workspace_root: &Path, gfx_test: bool) -> Result<PathBuf> {
+    let mut command = Command::new("cargo");
+    command.current_dir(workspace_root).args([
+        "build",
+        "--target",
+        KERNEL_TARGET,
+        "-p",
+        KERNEL_PACKAGE,
+        "--bin",
+        KERNEL_PACKAGE,
+    ]);
+    if gfx_test {
+        command.args(["--features", GFX_TEST_PATTERN_FEATURE]);
+    }
+    let status = command
         .status()
         .context("failed to invoke cargo to build the kernel")?;
 

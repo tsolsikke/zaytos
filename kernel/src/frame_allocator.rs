@@ -181,6 +181,18 @@ impl<const CAP: usize> FrameAllocator<CAP> {
             .map(|r| (r.start_frame, r.frame_count))
     }
 
+    /// 連続して確保できる最大のフレーム数。
+    ///
+    /// 連続確保が失敗したときの診断に使う。空きフレーム総数と併せて見ることで、
+    /// 「空き自体が不足している」のか「空きはあるが連続領域が足りない
+    /// （断片化）」のかを区別できる。
+    pub fn largest_contiguous_free_frames(&self) -> u64 {
+        self.free_ranges()
+            .map(|(_, frame_count)| frame_count)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// 空きフレーム範囲を1つ追加する。前後の既存範囲と隣接・重複していれば
     /// 結合する。呼び出し側は、追加する範囲が他の空き範囲と重複しないこと
     /// （ある物理フレームを二重に空き扱いしないこと）を保証すること。
