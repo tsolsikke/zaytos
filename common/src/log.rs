@@ -36,11 +36,26 @@ impl LogLevel {
 pub struct Logger<W> {
     writer: W,
     min_level: LogLevel,
+    emitted_lines: u64,
 }
 
 impl<W: Write> Logger<W> {
     pub fn new(writer: W, min_level: LogLevel) -> Self {
-        Self { writer, min_level }
+        Self {
+            writer,
+            min_level,
+            emitted_lines: 0,
+        }
+    }
+
+    /// これまでに実際に書き出した行数。レベルで落とした行は数えない。
+    ///
+    /// 画面コンソール（M3-c）はフレームアロケータが動いた後にしか作れず、
+    /// それより前のログはシリアルにしか出ない。画面だけを見た人が「ログが
+    /// 途中から始まっている」ことを誤解しないよう、省略された行数を示す
+    /// ために使う（ADR-0017）。
+    pub fn emitted_line_count(&self) -> u64 {
+        self.emitted_lines
     }
 
     pub fn log(&mut self, level: LogLevel, args: fmt::Arguments<'_>) {
@@ -48,6 +63,7 @@ impl<W: Write> Logger<W> {
             return;
         }
         let _ = writeln!(self.writer, "[{}] {args}", level.label());
+        self.emitted_lines += 1;
     }
 
     pub fn trace(&mut self, args: fmt::Arguments<'_>) {
@@ -139,6 +155,25 @@ mod tests {
         logger.info(format_args!("value = {}, other = {}", 42, "text"));
         assert_eq!(logger.writer.write_fmt_calls, 1);
         assert_eq!(logger.writer.text, "[INFO] value = 42, other = text\n");
+    }
+
+    #[test]
+    fn emitted_lines_are_counted() {
+        let mut logger = Logger::new(String::new(), LogLevel::Trace);
+        assert_eq!(logger.emitted_line_count(), 0);
+        logger.info(format_args!("one"));
+        logger.warn(format_args!("two"));
+        assert_eq!(logger.emitted_line_count(), 2);
+    }
+
+    #[test]
+    fn lines_dropped_by_the_level_filter_are_not_counted() {
+        let mut logger = Logger::new(String::new(), LogLevel::Warn);
+        logger.debug(format_args!("dropped"));
+        logger.info(format_args!("dropped"));
+        assert_eq!(logger.emitted_line_count(), 0);
+        logger.error(format_args!("kept"));
+        assert_eq!(logger.emitted_line_count(), 1);
     }
 
     #[test]

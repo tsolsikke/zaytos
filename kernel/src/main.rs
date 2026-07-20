@@ -15,7 +15,6 @@ use common::boot_info::{BootInfo, BOOT_INFO_PAGE_COUNT};
 use common::cpu;
 use common::log::{LogLevel, Logger};
 use common::serial::SerialPort;
-#[cfg(not(feature = "gfx-test-pattern"))]
 use kernel::console::Console;
 use kernel::frame_allocator;
 use kernel::graphics::{Color, Framebuffer, FramebufferLayout};
@@ -480,6 +479,31 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
         "paging: CR3 switch verified. now running under self-built page tables."
     ));
 
+    // === M3-c-3: 画面コンソール ===
+    //
+    // ここより前のログはシリアルにしか出ない。コンソールはバックバッファの
+    // 確保にフレームアロケータを必要とし、フレームバッファへ書くには CR3
+    // 切り替え後である必要があるため、この時点より前には作れない。
+    // 実機の Linux も同じ構造で、起動初期のログは printk のバッファに溜まり、
+    // コンソールドライバが登録されるまで画面には出ない（ADR-0017）。
+
+    #[cfg(feature = "gfx-test-pattern")]
+    logger.info(format_args!(
+        "console: not started (gfx-test-pattern feature is enabled)"
+    ));
+
+    #[cfg(not(feature = "gfx-test-pattern"))]
+    let mut console = framebuffer
+        .take()
+        .and_then(|fb| init_console(&mut logger, fb, &mut allocator, &mapped_ranges));
+    #[cfg(feature = "gfx-test-pattern")]
+    let mut console: Option<Console> = None;
+
+    #[cfg(not(feature = "gfx-test-pattern"))]
+    if let Some(console) = console.as_mut() {
+        announce_console_start(&mut logger, console);
+    }
+
     // === M2-e: カーネルヒープ ===
 
     let heap_frame_count = heap::DEFAULT_HEAP_FRAME_COUNT;
@@ -495,11 +519,16 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
     let heap_size = heap_frame_count * frame_allocator::FRAME_SIZE;
     let heap_end = heap_start + heap_size;
     let heap_mapped = mapped_ranges.contains_range(heap_start, heap_end);
-    logger.info(format_args!(
-        "heap: arena {heap_start:#x}..{heap_end:#x} ({heap_frame_count} frames, \
-         {} MiB), mapped={heap_mapped}",
-        heap_size / (1024 * 1024)
-    ));
+    log_both(
+        &mut logger,
+        console.as_mut(),
+        LogLevel::Info,
+        format_args!(
+            "heap: arena {heap_start:#x}..{heap_end:#x} ({heap_frame_count} frames, \
+             {} MiB), mapped={heap_mapped}",
+            heap_size / (1024 * 1024)
+        ),
+    );
     if !heap_mapped {
         logger.error(format_args!("heap: arena is not fully mapped; halting"));
         cpu::halt_forever();
@@ -512,11 +541,16 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
     unsafe {
         ALLOCATOR.init(heap_start, heap_size);
     }
-    logger.info(format_args!(
-        "heap: initialized ({} bytes free, {} block(s))",
-        ALLOCATOR.free_bytes(),
-        ALLOCATOR.free_block_count()
-    ));
+    log_both(
+        &mut logger,
+        console.as_mut(),
+        LogLevel::Info,
+        format_args!(
+            "heap: initialized ({} bytes free, {} block(s))",
+            ALLOCATOR.free_bytes(),
+            ALLOCATOR.free_block_count()
+        ),
+    );
 
     // 実地スモークテスト: Vec/Box/String を実際に確保・追記・解放する。
     let mut v: Vec<u32> = Vec::new();
@@ -525,68 +559,90 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
     }
     let v_ptr = v.as_ptr() as u64;
     let v_len_bytes = (v.len() * core::mem::size_of::<u32>()) as u64;
-    logger.info(format_args!(
-        "heap smoke test: Vec<u32> len={} ptr={v_ptr:#x} mapped={}",
-        v.len(),
-        mapped_ranges.contains_range(v_ptr, v_ptr + v_len_bytes)
-    ));
+    log_both(
+        &mut logger,
+        console.as_mut(),
+        LogLevel::Info,
+        format_args!(
+            "heap smoke test: Vec<u32> len={} ptr={v_ptr:#x} mapped={}",
+            v.len(),
+            mapped_ranges.contains_range(v_ptr, v_ptr + v_len_bytes)
+        ),
+    );
     drop(v);
 
     let b = Box::new(0x1234_5678u32);
     let b_ptr = &*b as *const u32 as u64;
-    logger.info(format_args!(
-        "heap smoke test: Box<u32> value={:#x} ptr={b_ptr:#x} mapped={}",
-        *b,
-        mapped_ranges.contains_range(b_ptr, b_ptr + 4)
-    ));
+    log_both(
+        &mut logger,
+        console.as_mut(),
+        LogLevel::Info,
+        format_args!(
+            "heap smoke test: Box<u32> value={:#x} ptr={b_ptr:#x} mapped={}",
+            *b,
+            mapped_ranges.contains_range(b_ptr, b_ptr + 4)
+        ),
+    );
     drop(b);
 
     let mut s = String::from("ZaytOS heap");
     s.push_str(" is alive");
     let s_ptr = s.as_ptr() as u64;
     let s_len = s.len() as u64;
-    logger.info(format_args!(
-        "heap smoke test: String={:?} ptr={s_ptr:#x} mapped={}",
-        s.as_str(),
-        mapped_ranges.contains_range(s_ptr, s_ptr + s_len)
-    ));
+    log_both(
+        &mut logger,
+        console.as_mut(),
+        LogLevel::Info,
+        format_args!(
+            "heap smoke test: String={:?} ptr={s_ptr:#x} mapped={}",
+            s.as_str(),
+            mapped_ranges.contains_range(s_ptr, s_ptr + s_len)
+        ),
+    );
     drop(s);
 
-    logger.info(format_args!(
-        "heap: after smoke test, {} bytes free, {} block(s)",
-        ALLOCATOR.free_bytes(),
-        ALLOCATOR.free_block_count()
-    ));
+    log_both(
+        &mut logger,
+        console.as_mut(),
+        LogLevel::Info,
+        format_args!(
+            "heap: after smoke test, {} bytes free, {} block(s)",
+            ALLOCATOR.free_bytes(),
+            ALLOCATOR.free_block_count()
+        ),
+    );
 
-    // === M3-c-2: 画面コンソール ===
-
-    #[cfg(feature = "gfx-test-pattern")]
-    logger.info(format_args!(
-        "console: not started (gfx-test-pattern feature is enabled)"
-    ));
-
-    #[cfg(not(feature = "gfx-test-pattern"))]
-    if let Some(fb) = framebuffer.take() {
-        if let Some(mut console) = init_console(&mut logger, fb, &mut allocator, &mapped_ranges) {
-            run_console_demo(&mut console);
-
-            // ダーティ矩形が実際に効いているかを数字で残す。毎回のフラッシュで
-            // ログを出すと、ログ自体が次のフラッシュを誘発するため、起動
-            // シーケンスの最後に 1 回だけ出す。
-            let stats = console.stats();
-            logger.info(format_args!(
+    // ダーティ矩形が実際に効いているかを数字で残す。毎回のフラッシュで
+    // ログを出すと、ログ自体が次のフラッシュを誘発するため、起動
+    // シーケンスの最後に 1 回だけ出す。
+    if let Some(stats) = console.as_ref().map(Console::stats) {
+        log_both(
+            &mut logger,
+            console.as_mut(),
+            LogLevel::Info,
+            format_args!(
                 "console: {} flush(es), {} bytes transferred",
                 stats.flush_count, stats.transferred_bytes
-            ));
-            logger.info(format_args!(
+            ),
+        );
+        log_both(
+            &mut logger,
+            console.as_mut(),
+            LogLevel::Info,
+            format_args!(
                 "console: full-screen equivalent would be {} bytes ({}% actually sent)",
                 stats.full_screen_equivalent_bytes(),
                 stats.transferred_percent()
-            ));
-        }
+            ),
+        );
     }
 
-    logger.info(format_args!("kernel: halting"));
+    log_both(
+        &mut logger,
+        console.as_mut(),
+        LogLevel::Info,
+        format_args!("kernel: halting"),
+    );
     cpu::halt_forever();
 }
 
@@ -833,36 +889,57 @@ fn init_console(
     }
 }
 
-#[cfg(not(feature = "gfx-test-pattern"))]
-/// コンソールの実地確認（M3-c-2）。
+
+/// シリアルへ書き、コンソールがあれば画面にも同じ内容を書く（M3-c-3）。
 ///
-/// 画面いっぱいより多くの行を書き、折り返しとスクロールが実際に動くことを
-/// 目視できるようにする。M3-c-3 で起動ログ全体を画面へ流すまでの暫定。
-fn run_console_demo(console: &mut Console) {
+/// **必ずシリアルを先に書く。** 画面側で何が起きてもシリアルログだけは
+/// 残るようにするため。順序を入れ替えると、コンソールの不具合がシリアル
+/// ログを道連れにできる構造になり、シリアルを唯一の信頼できる観測手段と
+/// する方針（ADR-0003、ADR-0017 の決定 9）が崩れる。
+///
+/// `Logger` 自体には複数の出力先を持たせない。マルチシンクにすると
+/// シリアル出力の経路が画面出力の経路に依存してしまうため（ADR-0017）。
+fn log_both(
+    logger: &mut Logger<SerialPort>,
+    console: Option<&mut Console>,
+    level: LogLevel,
+    args: core::fmt::Arguments<'_>,
+) {
     use core::fmt::Write;
 
-    let (columns, rows) = console.size();
-    let _ = writeln!(console, "ZaytOS console: {columns} columns x {rows} rows");
-    let _ = writeln!(console, "font: GNU Unifont (half width 8x16 / full width 16x16)");
-    let _ = writeln!(console);
-    let _ = writeln!(console, "printable ascii:");
-    let _ = writeln!(console, " !\"#$%&'()*+,-./0123456789:;<=>?");
-    let _ = writeln!(console, "@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_");
-    let _ = writeln!(console, "`abcdefghijklmnopqrstuvwxyz{{|}}~");
-    let _ = writeln!(console);
-    let _ = writeln!(console, "tab stops:\tone\ttwo\tthree");
-    let _ = writeln!(console, "fallback (not yet embedded): japanese");
+    // シリアルが先。ここを入れ替えないこと。
+    logger.log(level, args);
+
+    if let Some(console) = console {
+        let _ = writeln!(console, "[{}] {args}", level.label());
+    }
+}
+
+/// コンソールが使えるようになったことを画面の先頭に示す（M3-c-3）。
+///
+/// 画面だけを見た人が「ログが途中から始まっている」ことを誤解しないよう、
+/// ここより前のログはシリアルにしか出ていないことと、その行数を明示する。
+#[cfg(not(feature = "gfx-test-pattern"))]
+fn announce_console_start(logger: &mut Logger<SerialPort>, console: &mut Console) {
+    use core::fmt::Write;
+
+    // コンソール構築までに出力した行数。これが画面に出ていない分。
+    let skipped = logger.emitted_line_count();
+
+    let _ = writeln!(console, "=== ZaytOS console started ===");
+    let _ = writeln!(
+        console,
+        "the {skipped} log line(s) above this point went to the serial port only"
+    );
+    let _ = writeln!(
+        console,
+        "(the console needs the frame allocator and the new page tables, so it"
+    );
+    let _ = writeln!(console, " cannot exist before this point)");
     let _ = writeln!(console);
 
-    // 画面の行数より多く書き、スクロールを必ず起こす。行番号が飛ばずに
-    // 連続していれば、スクロールで内容が欠けていないと分かる。
-    let total = rows + 12;
-    for line in 1..=total {
-        let _ = writeln!(
-            console,
-            "line {line:>3} / {total}: the quick brown fox jumps over the lazy dog"
-        );
-    }
-    let _ = writeln!(console);
-    let _ = writeln!(console, "end of demo (console still responsive after scrolling)");
+    logger.info(format_args!(
+        "console: {skipped} log line(s) were emitted before the console existed \
+         (serial only)"
+    ));
 }
