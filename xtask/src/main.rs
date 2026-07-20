@@ -38,7 +38,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask run [--panic-test] [--gui] [--gfx-test]\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm]\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -47,7 +47,8 @@ fn main() -> Result<()> {
             let panic_test = rest.iter().any(|a| a == "--panic-test");
             let gui = rest.iter().any(|a| a == "--gui");
             let gfx_test = rest.iter().any(|a| a == "--gfx-test");
-            cmd_run(panic_test, gui, gfx_test)
+            let kvm = rest.iter().any(|a| a == "--kvm");
+            cmd_run(panic_test, gui, gfx_test, kvm)
         }
         Some("screenshot") => cmd_screenshot(&args[1..]),
         Some("gen-font") => font::generate(&workspace_root()?),
@@ -71,6 +72,16 @@ enum DisplayMode {
     Gui,
 }
 
+/// QEMU のアクセラレータ。既定は TCG（純粋エミュレーション）。
+///
+/// 既定を TCG のままにしているのは、これまでの全マイルストーンを TCG で
+/// 検証してきており、既定を変えると挙動差の切り分け軸が増えるため。
+/// KVM は計測時にだけ `--kvm` で明示的に選ぶ（ADR-0015 Addendum）。
+enum Accelerator {
+    Tcg,
+    Kvm,
+}
+
 /// `qemu_launch_args` に渡す設定一式。引数が増えてきたため、位置引数の
 /// 取り違えを避けるためにまとめている。
 struct QemuLaunchOptions<'a> {
@@ -83,9 +94,10 @@ struct QemuLaunchOptions<'a> {
     /// `Some` の場合、この UNIX ソケットパスで QEMU monitor (HMP) を
     /// server モードで待ち受けさせる（screenshot サブコマンド用）。
     monitor_socket: Option<&'a Path>,
+    accelerator: Accelerator,
 }
 
-fn cmd_run(panic_test: bool, gui: bool, gfx_test: bool) -> Result<()> {
+fn cmd_run(panic_test: bool, gui: bool, gfx_test: bool, kvm: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
     let bootloader_efi = build_bootloader(&workspace_root, panic_test)?;
@@ -95,7 +107,7 @@ fn cmd_run(panic_test: bool, gui: bool, gfx_test: bool) -> Result<()> {
     if panic_test {
         run_panic_test(&workspace_root, &ovmf_vars, &esp_dir)
     } else {
-        run_interactive(&workspace_root, &ovmf_vars, &esp_dir, gui)
+        run_interactive(&workspace_root, &ovmf_vars, &esp_dir, gui, kvm)
     }
 }
 
@@ -104,6 +116,7 @@ fn run_interactive(
     ovmf_vars: &Path,
     esp_dir: &Path,
     gui: bool,
+    kvm: bool,
 ) -> Result<()> {
     let debug_log = workspace_root.join("target").join("qemu-debug.log");
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
@@ -118,8 +131,19 @@ fn run_interactive(
             DisplayMode::None
         },
         monitor_socket: None,
+        accelerator: if kvm {
+            Accelerator::Kvm
+        } else {
+            Accelerator::Tcg
+        },
     });
     println!("qemu debug log (-d int,cpu_reset): {}", debug_log.display());
+    if kvm {
+        println!(
+            "accelerator: KVM (measurement mode). exception logging via -d int is \
+             largely unavailable; use the default TCG for debugging."
+        );
+    }
 
     let status = Command::new("qemu-system-x86_64")
         .args(&qemu_args)
@@ -153,6 +177,9 @@ fn run_panic_test(workspace_root: &Path, ovmf_vars: &Path, esp_dir: &Path) -> Re
         debug_log: &debug_log,
         display: DisplayMode::None,
         monitor_socket: None,
+        // パニック経路の回帰チェックは例外まわりの挙動を見るものなので、
+        // 常に TCG で行う。
+        accelerator: Accelerator::Tcg,
     });
 
     let mut child = Command::new("qemu-system-x86_64")
@@ -199,11 +226,13 @@ fn cmd_screenshot(args: &[String]) -> Result<()> {
     let mut wait = DEFAULT_SCREENSHOT_WAIT;
     let mut output_path = None;
     let mut gfx_test = false;
+    let mut kvm = false;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--gfx-test" => gfx_test = true,
+            "--kvm" => kvm = true,
             "--wait-secs" => {
                 i += 1;
                 let value = args
@@ -228,7 +257,7 @@ fn cmd_screenshot(args: &[String]) -> Result<()> {
     let output_path =
         output_path.unwrap_or_else(|| workspace_root.join("target").join("screenshot.png"));
 
-    take_screenshot(&workspace_root, &ovmf_vars, &esp_dir, wait, &output_path)
+    take_screenshot(&workspace_root, &ovmf_vars, &esp_dir, wait, &output_path, kvm)
 }
 
 /// QEMU を monitor (HMP) 付きで起動し、`wait` だけ待ってから `screendump` を
@@ -243,6 +272,7 @@ fn take_screenshot(
     esp_dir: &Path,
     wait: Duration,
     output_path: &Path,
+    kvm: bool,
 ) -> Result<()> {
     // AF_UNIX のパス長制限 (108 バイト程度) を避けるため、ワークスペース内の
     // 長いパスではなく /tmp 配下の短い一意なパスを使う。
@@ -262,6 +292,11 @@ fn take_screenshot(
         debug_log: &debug_log,
         display: DisplayMode::None,
         monitor_socket: Some(&monitor_socket),
+        accelerator: if kvm {
+            Accelerator::Kvm
+        } else {
+            Accelerator::Tcg
+        },
     });
 
     let mut child = Command::new("qemu-system-x86_64")
@@ -531,6 +566,9 @@ fn qemu_launch_args(opts: &QemuLaunchOptions) -> Vec<OsString> {
         },
         "-no-reboot".into(),
         "-no-shutdown".into(),
+        // KVM では例外・割り込みの大半が CPU 側で処理され QEMU を経由しない
+        // ため、`-d int` の記録はほとんど残らない。デバッグは TCG（既定）、
+        // 計測は KVM、という使い分けをすること（troubleshooting.md 参照）。
         "-d".into(),
         "int,cpu_reset".into(),
         // `-d` の出力先を明示的にファイルへ分離する。指定しない場合 QEMU 自身の
@@ -539,6 +577,18 @@ fn qemu_launch_args(opts: &QemuLaunchOptions) -> Vec<OsString> {
         "-D".into(),
         opts.debug_log.into(),
     ];
+
+    match opts.accelerator {
+        Accelerator::Tcg => {}
+        Accelerator::Kvm => {
+            args.push("-accel".into());
+            args.push("kvm".into());
+            // KVM では TSC がホストの実周波数で進む。計測用途では
+            // ホスト側の TSC をそのまま見せる方が解釈しやすい。
+            args.push("-cpu".into());
+            args.push("host".into());
+        }
+    }
 
     if let Some(monitor_socket) = opts.monitor_socket {
         args.push("-monitor".into());
@@ -561,6 +611,7 @@ mod tests {
             debug_log,
             display: DisplayMode::None,
             monitor_socket: None,
+            accelerator: Accelerator::Tcg,
         }
     }
 
@@ -669,6 +720,46 @@ mod tests {
         let joined = joined_args(&qemu_launch_args(&opts));
 
         assert!(!joined.iter().any(|a| a == "-monitor"));
+    }
+
+    /// 既定は TCG のまま。これまでの全マイルストーンを TCG で検証してきて
+    /// おり、既定を変えると挙動差の切り分け軸が増える（ADR-0015 Addendum）。
+    #[test]
+    fn qemu_args_do_not_enable_kvm_by_default() {
+        let debug_log = PathBuf::from("/dummy/qemu-debug.log");
+        let serial = SerialSink::Stdio;
+        let args = joined_args(&qemu_launch_args(&base_options(&serial, &debug_log)));
+        assert!(!args.iter().any(|a| a == "-accel"));
+        assert!(!args.iter().any(|a| a == "kvm"));
+    }
+
+    #[test]
+    fn qemu_args_enable_kvm_when_requested() {
+        let debug_log = PathBuf::from("/dummy/qemu-debug.log");
+        let serial = SerialSink::Stdio;
+        let mut options = base_options(&serial, &debug_log);
+        options.accelerator = Accelerator::Kvm;
+        let args = joined_args(&qemu_launch_args(&options));
+
+        let accel = args.iter().position(|a| a == "-accel").expect("-accel");
+        assert_eq!(args[accel + 1], "kvm");
+        // 計測時は TSC の解釈を単純にするためホストの CPU をそのまま見せる。
+        let cpu = args.iter().position(|a| a == "-cpu").expect("-cpu");
+        assert_eq!(args[cpu + 1], "host");
+    }
+
+    /// KVM を選んでも、失敗を可視化するオプションは外さない。取れる情報は
+    /// 減るが、外すと「何も出ない」理由が分からなくなる。
+    #[test]
+    fn kvm_still_keeps_the_failure_visibility_flags() {
+        let debug_log = PathBuf::from("/dummy/qemu-debug.log");
+        let serial = SerialSink::Stdio;
+        let mut options = base_options(&serial, &debug_log);
+        options.accelerator = Accelerator::Kvm;
+        let args = joined_args(&qemu_launch_args(&options));
+        assert!(args.iter().any(|a| a == "-no-reboot"));
+        assert!(args.iter().any(|a| a == "-no-shutdown"));
+        assert!(args.iter().any(|a| a == "int,cpu_reset"));
     }
 
     #[test]

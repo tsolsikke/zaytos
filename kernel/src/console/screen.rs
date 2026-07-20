@@ -137,6 +137,11 @@ impl Console {
         Ok(console)
     }
 
+    /// フレームバッファの形状。計測や診断で参照する。
+    pub fn framebuffer_layout(&self) -> &crate::graphics::FramebufferLayout {
+        self.front.layout()
+    }
+
     pub fn stats(&self) -> FlushStats {
         self.stats
     }
