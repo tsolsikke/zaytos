@@ -168,6 +168,25 @@ pub unsafe fn enable_interrupts_and_halt() {
     }
 }
 
+/// CR4 を読む。
+///
+/// M5-a で必要になったのは **PGE（bit 7、Page Global Enable）** の状態を
+/// 知るためである。PGE が有効な状態でページテーブルエントリの G ビットが
+/// 立っていると、**CR3 のリロードでも TLB から追い出されない**。
+/// 「CR3 を書き直せば全部消える」という前提が成立するかどうかが、ここで決まる。
+pub fn read_cr4() -> u64 {
+    let value: u64;
+    // SAFETY: `mov reg, cr4` は読み取り専用で、メモリにもスタックにも副作用が
+    // 無い。CR4 の値は実行環境に依存するため、保守的に options は付けない。
+    unsafe {
+        core::arch::asm!("mov {}, cr4", out(reg) value);
+    }
+    value
+}
+
+/// CR4 の PGE（Page Global Enable）ビット。
+pub const CR4_PAGE_GLOBAL_ENABLE: u64 = 1 << 7;
+
 /// タイムスタンプカウンタ（TSC）を読む。
 ///
 /// **計測専用。時刻源として使わないこと。** TSC は CPU の起動からの

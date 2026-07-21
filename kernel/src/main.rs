@@ -516,6 +516,12 @@ extern "sysv64" fn kernel_main() -> ! {
         cpu::halt_forever();
     }
 
+    // 稼働中のページテーブルを読み戻して、`plan` が意図した内容と一致するかを
+    // 確かめる（M5-a-1）。**これは M5-a-2 の分割・アンマップを検証するための
+    // 道具でもある。** 検証手段を先に用意しておくと、後から入れる操作の結果を
+    // 「それを行ったコードとは独立に」確かめられる。
+    verify_page_tables(&mut logger, &mapped_ranges);
+
     let mut post_switch_ok = true;
 
     // (a) kernel イメージの読み取り検証。
@@ -2203,5 +2209,133 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>) {
     logger.info(format_args!(
         "keyboard: IRQ1 is unmasked; press a key (the first one must arrive as vector {:#04x})",
         keyboard::KEYBOARD_VECTOR
+    ));
+}
+
+/// 稼働中のページテーブルを読み戻し、`plan` の意図と突き合わせる（M5-a-1）。
+///
+/// M4 で `sgdt` / `sidt` / PIC の IMR に対して行ってきたのと同じことを、
+/// ページテーブルに対して行う。これまでページテーブルだけは**書きっぱなしで
+/// 読み戻す手段が無かった**。
+///
+/// あわせて、TLB の全フラッシュ（CR3 リロード）が成立する条件も実測する。
+fn verify_page_tables(
+    logger: &mut Logger<SerialPort>,
+    mapped: &MappedRanges<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
+) {
+    use kernel::paging::active::{ActivePageTable, PageSize, TranslateError};
+    use kernel::paging::entry;
+
+    // SAFETY: CR3 は直前に自前のテーブルへ切り替えて読み戻し済みで、
+    // 恒等マッピングによりテーブル自体を読める。
+    let table = unsafe { ActivePageTable::current() };
+    logger.info(format_args!(
+        "paging: walking the live tables from PML4 {:#x}",
+        table.pml4_phys()
+    ));
+
+    // --- TLB フラッシュの前提を実測する ---
+    let precondition = kernel::paging::active::tlb_flush_precondition();
+    logger.info(format_args!(
+        "paging: CR4 = {:#x}, PGE(bit 7) = {} - a CR3 reload flushes everything only when \
+         PGE is off or no entry has the global bit",
+        precondition.cr4, precondition.page_global_enabled
+    ));
+
+    // --- 各マップ済み範囲の先頭・中間・末尾を翻訳して照合する ---
+    let mut checked = 0u32;
+    let mut mismatches = 0u32;
+    let mut global_entries = 0u32;
+
+    for range in mapped.iter() {
+        let probes = [
+            range.start,
+            range.start + (range.end - range.start) / 2,
+            range.end - 1,
+        ];
+        for probe in probes {
+            match table.translate(probe) {
+                Ok(Some(translation)) => {
+                    checked += 1;
+                    // **恒等マッピングなので、物理 == 仮想でなければならない。**
+                    if translation.phys != probe {
+                        mismatches += 1;
+                        logger.error(format_args!(
+                            "paging: {probe:#x} translates to {:#x} (identity mapping broken)",
+                            translation.phys
+                        ));
+                    }
+                    // G ビットが立っていると CR3 リロードで消えない。
+                    if translation.entry & entry::PTE_GLOBAL != 0 {
+                        global_entries += 1;
+                    }
+                    // キャッシュ属性が `plan` の意図と一致すること。
+                    let expects_pcd = !range.cacheable;
+                    let has_pcd = translation.entry & entry::PTE_PCD != 0;
+                    if expects_pcd != has_pcd {
+                        mismatches += 1;
+                        logger.error(format_args!(
+                            "paging: {probe:#x} PCD={has_pcd} but the plan wanted {expects_pcd}"
+                        ));
+                    }
+                    let _ = translation.page_size;
+                }
+                Ok(None) => {
+                    mismatches += 1;
+                    logger.error(format_args!(
+                        "paging: {probe:#x} is in a mapped range but has no translation"
+                    ));
+                }
+                Err(error) => {
+                    mismatches += 1;
+                    logger.error(format_args!("paging: {probe:#x} translate failed: {error:?}"));
+                }
+            }
+        }
+    }
+
+    logger.info(format_args!(
+        "paging: walked {checked} probe(s) across {} range(s), mismatches={mismatches}, \
+         entries with the global bit={global_entries}",
+        mapped.range_count()
+    ));
+
+    // --- 翻訳の粒度を 1 つ実測して出す（分割の前後で変わることの基準）---
+    if let Ok(Some(translation)) = table.translate(0x10_0000) {
+        logger.info(format_args!(
+            "paging: 0x100000 is mapped by a {} page (entry={:#x})",
+            match translation.page_size {
+                PageSize::Size2MiB => "2MiB",
+                PageSize::Size4KiB => "4KiB",
+            },
+            translation.entry
+        ));
+    }
+
+    // --- 「マップされていない」と「アドレスが不正」を区別できること ---
+    // 非正規アドレス。CPU が受け付けない形なので、None ではなくエラー。
+    let non_canonical = table.translate(0x0000_8000_0000_0000);
+    let non_canonical_ok = non_canonical == Err(TranslateError::NonCanonicalAddress);
+    logger.info(format_args!(
+        "paging: a non-canonical address is rejected as an error, not as \"unmapped\" = {}",
+        if non_canonical_ok { "OK" } else { "NG" }
+    ));
+
+    if mismatches > 0 || !non_canonical_ok {
+        logger.error(format_args!(
+            "paging: the live tables do not match the plan; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    if global_entries > 0 {
+        logger.warn(format_args!(
+            "paging: {global_entries} entry(ies) have the global bit; a CR3 reload will NOT \
+             evict them from the TLB"
+        ));
+    }
+
+    logger.info(format_args!(
+        "paging: the live tables match the plan (read back from the tables themselves)"
     ));
 }
