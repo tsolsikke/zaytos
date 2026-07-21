@@ -39,3 +39,11 @@ exception-test-page-fault = ["exception-test"]
 # ダブルフォルトは #PF のゲートを不在にしてからページフォルトを起こして
 # 誘発する。スタックを溢れさせる方法は使えない(ADR-0018)。
 exception-test-double-fault = ["exception-test", "exception-test-page-fault"]
+# クリティカルセクションとロックの回帰チェック。
+# `cargo xtask run --critical-test <kind>` が有効化する。
+critical-test = []
+# 同じロックを保持したまま再取得し、二重取得検出が働くことを確認する。
+critical-test-double-lock = ["critical-test"]
+# 一時的に sti してから InterruptGuard に入り、IF=1 で enter した場合の
+# 復元経路を確認する。PIC を全マスクした後でないと危険なため M4-c-3 で使う。
+critical-test-restore-enabled = ["critical-test"]

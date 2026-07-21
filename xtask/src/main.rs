@@ -129,6 +129,107 @@ const EXPECTED_CPU_RESET_COUNT: usize = 2;
 
 const EXCEPTION_TEST_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// クリティカルセクションとロックの回帰チェック（`--critical-test <kind>`）。
+///
+/// 検出の仕組みを入れても、それが機能しなければ意味がない。わざと異常経路を
+/// 踏ませて、検出が働くことを確かめる（M4-b-1 のスタブ検証と同じ発想）。
+struct CriticalTest {
+    name: &'static str,
+    feature: &'static str,
+    /// シリアルログに現れることを要求する文字列。
+    expected_markers: &'static [&'static str],
+    /// 現れてはいけない文字列（検出をすり抜けたことを示すもの）。
+    forbidden_markers: &'static [&'static str],
+}
+
+const CRITICAL_TESTS: &[CriticalTest] = &[CriticalTest {
+    name: "double-lock",
+    feature: "critical-test-double-lock",
+    expected_markers: &[
+        "lock: double acquisition detected",
+        "halting (cli + hlt loop)",
+    ],
+    // 検出をすり抜けて 2 回目の lock() が戻ってきた場合に出る行。
+    forbidden_markers: &["double-lock detection FAILED"],
+}];
+
+/// カーネルが起動したことを示す、シリアルログの既知の行。
+///
+/// kernel の `kernel_main` が最初に出す行（`common::log` の INFO 形式）。
+/// これがログに無ければ、カーネルは走っていない。
+const KERNEL_STARTED_MARKER: &str = "[INFO] ZaytOS kernel: entered _start";
+
+/// bootloader が起動したことを示す、シリアルログの既知の行。
+///
+/// panic-test は bootloader を検証するもので、kernel へ到達する前に panic
+/// する。したがって kernel の marker ではなくこちらで起動を判定する。
+const BOOTLOADER_STARTED_MARKER: &str = "[INFO] ZaytOS bootloader: serial log established";
+
+/// OVMF がまれにカーネルを起動せず、シェルやアイドルループへフォールバック
+/// することがある（`docs/troubleshooting.md` 2026-07-19 の記録）。この場合
+/// ファームウェアのタイマ割り込み（ベクタ 0x20）が延々と記録され、RIP は
+/// ファームウェア領域（おおむね 0x0f00_0000 以上、実 RAM 256MiB の外）を指す。
+const FIRMWARE_REGION_START: u64 = 0x0f00_0000;
+
+/// テストの前提（カーネルが起動したか）を判定した結果。
+enum BootOutcome {
+    /// カーネルが起動した。テスト結果を信頼してよい。
+    Started,
+    /// カーネルが起動しなかった。テストの成否ではなく環境の問題。
+    DidNotStart {
+        /// ファームウェア領域を指す RIP を `-d int` ログから拾えた場合。
+        firmware_rip: Option<u64>,
+    },
+}
+
+/// シリアルログと QEMU デバッグログから、対象が起動したかを判定する。
+///
+/// `started_marker` は起動を示す既知の行（kernel なら
+/// [`KERNEL_STARTED_MARKER`]、bootloader なら [`BOOTLOADER_STARTED_MARKER`]）。
+///
+/// **テストの FAIL を報告する前に必ず呼ぶこと。** 「実装の問題」と「OVMF の
+/// 起動フレーキネス」を取り違えると、存在しないバグを追いかけることになる
+/// （実際に M4-c-1 でこの取り違えが起きかけた）。
+fn classify_boot(serial: &str, qemu_debug: &str, started_marker: &str) -> BootOutcome {
+    if serial.contains(started_marker) {
+        return BootOutcome::Started;
+    }
+
+    // 起動していない。裏付けとして、ファームウェア領域を指す RIP を探す。
+    // `-d int` の RIP 行は "RIP=000000000f6e973c ..." の形。
+    let firmware_rip = qemu_debug.lines().rev().find_map(|line| {
+        let rest = line.trim_start().strip_prefix("RIP=")?;
+        let hex = rest.split_whitespace().next()?;
+        let value = u64::from_str_radix(hex, 16).ok()?;
+        (value >= FIRMWARE_REGION_START).then_some(value)
+    });
+
+    BootOutcome::DidNotStart { firmware_rip }
+}
+
+/// 起動失敗を報告する。テスト FAIL とは別物として扱う。
+///
+/// 戻り値の `Err` は「テストが落ちた」ではなく「環境の問題で判定できない」
+/// ことを表す。呼び出し側はこのメッセージで両者を区別する。
+fn report_did_not_start(context: &str, firmware_rip: Option<u64>) -> Result<()> {
+    println!("{context}: TARGET DID NOT START (not a test failure)");
+    println!("{context}:   the serial log has no start-up marker line");
+    match firmware_rip {
+        Some(rip) => println!(
+            "{context}:   qemu -d int shows RIP={rip:#018x} in the firmware region \
+             (>= {FIRMWARE_REGION_START:#x}); OVMF fell back to its shell/idle loop"
+        ),
+        None => println!(
+            "{context}:   could not confirm a firmware RIP, but the first log line is absent"
+        ),
+    }
+    println!(
+        "{context}:   this is the OVMF boot flakiness noted in docs/troubleshooting.md; \
+         re-run the test"
+    );
+    bail!("{context}: kernel did not start (environment, not the code); re-run")
+}
+
 // パニックハンドラの出力（bootloader/src/panic.rs）と対応する、回帰チェック用の
 // 目印文字列。フォーマットを変更した場合はここも合わせて更新すること。
 const PANIC_MARKER_HEADER: &str = "[ERROR] panic:";
@@ -142,7 +243,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm]\n       cargo xtask run --exception-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -152,6 +253,13 @@ fn main() -> Result<()> {
             let gui = rest.iter().any(|a| a == "--gui");
             let gfx_test = rest.iter().any(|a| a == "--gfx-test");
             let kvm = rest.iter().any(|a| a == "--kvm");
+            if let Some(index) = rest.iter().position(|a| a == "--critical-test") {
+                let kind = rest.get(index + 1).with_context(|| {
+                    let names: Vec<&str> = CRITICAL_TESTS.iter().map(|t| t.name).collect();
+                    format!("--critical-test requires a kind ({})", names.join(" | "))
+                })?;
+                return cmd_critical_test(kind);
+            }
             if let Some(index) = rest.iter().position(|a| a == "--exception-test") {
                 let kind = rest.get(index + 1).with_context(|| {
                     let names: Vec<&str> = EXCEPTION_TESTS.iter().map(|t| t.name).collect();
@@ -313,16 +421,25 @@ fn run_panic_test(workspace_root: &Path, ovmf_vars: &Path, esp_dir: &Path) -> Re
     let _ = child.wait();
 
     let captured = fs::read_to_string(&serial_log_path).unwrap_or_default();
+    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
     println!("--- panic-test: captured serial output ---\n{captured}--- end ---");
 
     if found {
         println!("panic-test: PASS (panic handler produced the expected dump and halted)");
-        Ok(())
-    } else {
-        bail!(
-            "panic-test: FAIL (did not observe the expected panic-handler output within {PANIC_TEST_TIMEOUT:?})"
-        );
+        return Ok(());
     }
+
+    // 失敗した。実装の問題か、そもそも bootloader が起動しなかったかを分ける。
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&captured, &qemu, BOOTLOADER_STARTED_MARKER)
+    {
+        return report_did_not_start("panic-test", firmware_rip);
+    }
+
+    bail!(
+        "panic-test: FAIL (bootloader started but did not produce the expected \
+         panic-handler output within {PANIC_TEST_TIMEOUT:?})"
+    )
 }
 
 fn panic_markers_present(serial_log_path: &Path) -> bool {
@@ -526,6 +643,108 @@ fn build_bootloader(workspace_root: &Path, panic_test: bool) -> Result<PathBuf> 
 
 /// `kernel` パッケージを `x86_64-unknown-none` ターゲット向けにビルドし、
 /// 生成された ELF バイナリのパスを返す。
+/// クリティカルセクション/ロックの回帰チェックを 1 種類実行する。
+///
+/// 例外テストと同じく **TCG 固定**。
+fn cmd_critical_test(kind: &str) -> Result<()> {
+    let test = CRITICAL_TESTS
+        .iter()
+        .find(|t| t.name == kind)
+        .with_context(|| {
+            let names: Vec<&str> = CRITICAL_TESTS.iter().map(|t| t.name).collect();
+            format!("unknown critical test {kind:?} (expected one of: {})", names.join(", "))
+        })?;
+
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let kernel_elf = build_kernel_with_features(&workspace_root, &[test.feature])?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let serial_log = workspace_root.join("target").join("critical-test-serial.log");
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+    });
+
+    let sentinel = test.expected_markers[0];
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the critical test")?;
+
+    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    loop {
+        if fs::read_to_string(&serial_log)
+            .map(|c| c.contains(sentinel))
+            .unwrap_or(false)
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+
+    let context = format!("critical-test {}", test.name);
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
+    {
+        return report_did_not_start(&context, firmware_rip);
+    }
+
+    println!("--- {context}: relevant output ---");
+    for line in serial
+        .lines()
+        .filter(|l| l.contains("critical") || l.contains("lock:"))
+    {
+        println!("{line}");
+    }
+    println!("--- end ---");
+
+    let mut ok = true;
+    for marker in test.expected_markers {
+        let present = serial.contains(marker);
+        ok &= present;
+        println!(
+            "{context}: serial contains {marker:?} = {}",
+            if present { "OK" } else { "NG" }
+        );
+    }
+    for marker in test.forbidden_markers {
+        let absent = !serial.contains(marker);
+        ok &= absent;
+        println!(
+            "{context}: serial does NOT contain {marker:?} = {}",
+            if absent { "OK" } else { "NG (detection was bypassed)" }
+        );
+    }
+
+    if ok {
+        println!("{context}: PASS");
+        Ok(())
+    } else {
+        bail!("{context}: FAIL")
+    }
+}
+
 /// 例外ハンドラの回帰チェックを 1 種類実行する。
 ///
 /// シリアルログのハンドラ出力と、`qemu-debug.log` の `v=..` の両方を
@@ -591,6 +810,16 @@ fn cmd_exception_test(kind: &str) -> Result<()> {
 
     let serial = fs::read_to_string(&serial_log).unwrap_or_default();
     let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+
+    // テスト結果を読む前に、そもそもカーネルが起動したかを判定する。
+    // 起動していなければ、以降の OK/NG は意味を持たない。
+    let context = format!("exception-test {}", test.name);
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
+    {
+        return report_did_not_start(&context, firmware_rip);
+    }
+
     let qemu_saw_it = qemu.contains(test.qemu_marker);
 
     println!("--- exception-test {}: handler output ---", test.name);

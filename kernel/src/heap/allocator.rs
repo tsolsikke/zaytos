@@ -7,53 +7,14 @@
 //! そちらをテストしている。
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::cell::UnsafeCell;
 use core::fmt::Write as _;
 use core::mem::{align_of, size_of};
 use core::ptr::NonNull;
 
+use common::critical::Locked;
 use common::serial::SerialPort;
 
 use super::plan::{self, AllocPlan};
-
-/// 割り込みが常に禁止されていることに依存した、最小限の同期ラッパー。
-///
-/// 「ロックのように見えるが中身は割り込み禁止だけ」という方針通り、
-/// 中身は最小限にとどめてある。
-struct Locked<T> {
-    inner: UnsafeCell<T>,
-}
-
-impl<T> Locked<T> {
-    const fn new(value: T) -> Self {
-        Self {
-            inner: UnsafeCell::new(value),
-        }
-    }
-
-    /// 排他アクセス用の可変参照を得る。
-    ///
-    /// # Safety 的な前提（呼び出し側ではなく、この型自体の前提）
-    /// 現在は kernel 全体で割り込みが常時禁止されており
-    /// （`docs/architecture.md` §6.5）、かつシングルコア前提であるため、
-    /// この可変参照を保持している間に他の実行文脈が同時にこの値へ
-    /// アクセスすることはない。**M4 で割り込みを有効化する際は、この前提が
-    /// 崩れるため、実装を cli/sti の保存・復元、またはスピンロックへ
-    /// 差し替える必要がある**（`docs/architecture.md` §6.5 の見直し事項）。
-    // `&self` から `&mut T` を返すのはこのラッパーの意図した振る舞い
-    // （`UnsafeCell` による内部可変性）であり、単一コア・割り込み禁止と
-    // いう前提のもとでのみ安全。
-    #[allow(clippy::mut_from_ref)]
-    fn lock(&self) -> &mut T {
-        unsafe { &mut *self.inner.get() }
-    }
-}
-
-// SAFETY: 複数の実行文脈からの同時アクセスは、シングルコア前提かつ
-// kernel 全体で割り込みが常時禁止されている（`docs/architecture.md` §6.5）
-// ことによって防がれている。M4 で割り込みを有効化する際は、この前提が
-// 崩れるため `Locked` の実装ごと必ず見直すこと。
-unsafe impl<T> Sync for Locked<T> {}
 
 /// 空きブロックの先頭に書き込む、侵入型連結リストのノード。
 #[repr(C)]
@@ -180,8 +141,10 @@ fn log_directly_to_serial(args: core::fmt::Arguments<'_>) {
 }
 
 // SAFETY: `alloc`/`dealloc` はヒープアリーナ（`init` で登録した、呼び出し
-// 元が有効性を保証した領域）の中だけを読み書きする。`Locked` により
-// （現状の割り込み常時禁止という前提のもとで）排他アクセスを保証している。
+// 元が有効性を保証した領域）の中だけを読み書きする。排他は
+// `common::critical::Locked` が保証する。ガードを保持している間は割り込みが
+// 禁止されるため（M4-c-2）、シングルコアでは保持区間に割り込みハンドラが
+// 割って入って同じ状態へ触ることがない。
 unsafe impl GlobalAlloc for LockedHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if layout.size() == 0 {
@@ -200,7 +163,7 @@ unsafe impl GlobalAlloc for LockedHeap {
         let requested_size = layout.size() as u64;
         let requested_align = layout.align() as u64;
 
-        let state = self.state.lock();
+        let mut state = self.state.lock();
 
         let mut prev: Option<NonNull<FreeBlockNode>> = None;
         let mut current = state.free_list_head;
@@ -221,7 +184,7 @@ unsafe impl GlobalAlloc for LockedHeap {
                 requested_align,
                 MIN_BLOCK_SIZE,
             ) {
-                Self::consume_node(state, prev, next, found_plan);
+                Self::consume_node(&mut state, prev, next, found_plan);
 
                 let header = AllocatedBlockHeader {
                     magic: HEADER_MAGIC,
@@ -284,7 +247,7 @@ unsafe impl GlobalAlloc for LockedHeap {
         let block_start = header.block_start;
         let block_size = header.block_size;
 
-        let state = self.state.lock();
+        let mut state = self.state.lock();
 
         // アドレス順の挿入位置 (prev, next) を探す。
         let mut prev: Option<NonNull<FreeBlockNode>> = None;

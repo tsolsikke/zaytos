@@ -153,7 +153,7 @@ static mut BOOT_HANDOFF: BootHandoff = BootHandoff {
 ///
 /// `exception-test` を有効にしたビルドでは、例外を発生させた時点で戻らない
 /// ため、それ以降が到達不能になる。回帰チェック専用のビルドなので許容する。
-#[cfg_attr(feature = "exception-test", allow(unreachable_code))]
+#[cfg_attr(any(feature = "exception-test", feature = "critical-test"), allow(unreachable_code))]
 extern "sysv64" fn kernel_main() -> ! {
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
     serial.init();
@@ -653,6 +653,11 @@ extern "sysv64" fn kernel_main() -> ! {
         ),
     );
 
+    // ロック保持中は割り込みが禁止され、解放後に元へ戻ることを確認する
+    // （M4-c-2）。ヒープのロックそのものではなく同じ Locked<T> を使う。
+    // ヒープのロックを保持したままログを出すと二重取得になるため。
+    report_lock_interrupt_state(&mut logger);
+
     // 実地スモークテスト: Vec/Box/String を実際に確保・追記・解放する。
     let mut v: Vec<u32> = Vec::new();
     for i in 0..10u32 {
@@ -743,6 +748,10 @@ extern "sysv64" fn kernel_main() -> ! {
     // 確認するため、ページング構築後である必要がある）。
     #[cfg(feature = "exception-test")]
     trigger_exception_under_test(&mut logger, &mapped_ranges);
+
+    // クリティカルセクション/ロックの回帰チェック。
+    #[cfg(feature = "critical-test")]
+    trigger_critical_test(&mut logger);
 
     log_both(
         &mut logger,
@@ -1533,4 +1542,137 @@ fn trigger_exception_under_test(
         "exception-test: the expected exception did not fire; halting"
     ));
     cpu::halt_forever();
+}
+
+/// `--critical-test` 用に、ロックとクリティカルセクションの異常経路を
+/// わざと踏む。
+///
+/// 通常ビルドには含まれない。`cargo xtask run --critical-test <kind>` が
+/// 対応する feature を有効にしてビルドする。
+#[cfg(feature = "critical-test")]
+#[allow(unreachable_code)]
+fn trigger_critical_test(logger: &mut Logger<SerialPort>) -> ! {
+    #[cfg(feature = "critical-test-double-lock")]
+    {
+        use common::critical::Locked;
+
+        logger.info(format_args!(
+            "critical-test: about to acquire the same lock twice (double-lock detection)"
+        ));
+
+        // ヒープのロックではなく専用の Locked を使う。ヒープを壊すと
+        // 以降のログ出力そのものが巻き添えになるため。検出の仕組みは
+        // 同じ Locked<T> の実装なので、これで十分に検証できる。
+        static PROBE: Locked<u64> = Locked::new(0);
+
+        let _held = PROBE.lock();
+        logger.info(format_args!(
+            "critical-test: first lock acquired; the next lock() must be detected and halt"
+        ));
+        // 保持したまま再取得する。検出されればここから戻らない。
+        let _second = PROBE.lock();
+
+        logger.error(format_args!(
+            "critical-test: the second lock() returned; double-lock detection FAILED"
+        ));
+        cpu::halt_forever();
+    }
+
+    #[cfg(feature = "critical-test-restore-enabled")]
+    {
+        // IF=1 で enter した場合の復元経路。**PIC を全マスクしてからでないと
+        // 危険**（未検証のハンドラへ割り込みが飛ぶ）。M4-c-3 で PIC の
+        // マスクを確認したうえで実行する。
+        logger.info(format_args!(
+            "critical-test: enabling interrupts temporarily to exercise the restore path"
+        ));
+        // SAFETY: PIC は全 IRQ マスク済みで、IDT の全 256 ベクタに
+        // ハンドラが入っている（M4-b-1）。この区間で割り込みが届いても
+        // 「予期しないベクタ」として報告されるだけで、無言では落ちない。
+        unsafe {
+            cpu::enable_interrupts();
+        }
+        let enabled = cpu::read_rflags() & cpu::RFLAGS_INTERRUPT_FLAG != 0;
+        logger.info(format_args!(
+            "critical-test: IF after sti = {enabled} (expected true)"
+        ));
+
+        let restored = {
+            let _guard = common::critical::InterruptGuard::enter();
+            let inside = cpu::read_rflags() & cpu::RFLAGS_INTERRUPT_FLAG != 0;
+            logger.info(format_args!(
+                "critical-test: IF inside the guard = {inside} (expected false)"
+            ));
+            // ガードを抜けると、保存値が IF=1 なので復元されるはず。
+            !inside
+        };
+        let after = cpu::read_rflags() & cpu::RFLAGS_INTERRUPT_FLAG != 0;
+        logger.info(format_args!(
+            "critical-test: IF after the guard dropped = {after} (expected true, restored)"
+        ));
+
+        // 後片付け。以降は割り込みを禁止したままにする。
+        // SAFETY: 検証が終わったので、M4-d まで再び禁止しておく。
+        unsafe {
+            cpu::disable_interrupts();
+        }
+
+        if enabled && restored && after {
+            logger.info(format_args!(
+                "critical-test: restore path OK (IF=1 on enter is restored on drop)"
+            ));
+        } else {
+            logger.error(format_args!(
+                "critical-test: restore path FAILED (enabled={enabled} inside_disabled={restored} \
+                 after={after})"
+            ));
+        }
+        cpu::halt_forever();
+    }
+
+    logger.error(format_args!(
+        "critical-test: no test kind was selected; halting"
+    ));
+    cpu::halt_forever();
+}
+
+/// ロックの保持中に割り込みが禁止され、解放後に元へ戻ることを確認する
+/// （M4-c-2）。
+///
+/// `Locked<T>` は取得中に `InterruptGuard` を保持する。その効果を実 RFLAGS で
+/// 観測する。現状は起動時から IF=0 なので「保持中も IF=0、解放後も IF=0
+/// （元の状態）」になる。IF=1 から入る経路は M4-c-3 の後に
+/// `--critical-test restore-enabled` で確認する。
+fn report_lock_interrupt_state(logger: &mut Logger<SerialPort>) {
+    use common::critical::Locked;
+
+    fn if_set() -> bool {
+        cpu::read_rflags() & cpu::RFLAGS_INTERRUPT_FLAG != 0
+    }
+
+    static PROBE: Locked<u64> = Locked::new(0);
+
+    let before = if_set();
+    let (inside, value) = {
+        let mut guard = PROBE.lock();
+        *guard = 0xABCD;
+        (if_set(), *guard)
+    };
+    let after = if_set();
+
+    logger.info(format_args!(
+        "lock: IF before={before} while held={inside} after={after} (value read back = {value:#x})"
+    ));
+
+    // 保持中は必ず IF=0。解放後は元の状態へ戻る。
+    if inside || after != before || value != 0xABCD {
+        logger.error(format_args!(
+            "lock: interrupt state around the guard is wrong; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "lock: interrupts are disabled while the guard is held and restored afterwards"
+    ));
 }

@@ -268,10 +268,11 @@ ExitBootServices 後の時点で `IF` はすでに `false`（割り込み無効�
 
 **M4 で割り込みを有効化する際に見直すべき実装（一覧）**:
 - 上記の `cli`（`kernel::_start` 冒頭）自体の要否・タイミング。
-- `kernel::heap::allocator::Locked<T>` の `unsafe impl Sync`
-  （ADR-0012）。「シングルコア前提かつ割り込みが常時禁止されている」
-  ことに依存しており、この前提が崩れると排他性が失われる。cli/sti の
-  保存・復元、またはスピンロックへの差し替えが必要。
+- ~~`kernel::heap::allocator::Locked<T>` の `unsafe impl Sync`~~
+  **M4-c-2 で対応済み。** `common::critical::Locked<T>` へ移し、前提を
+  「取得中は割り込み禁止」へ差し替えた（ADR-0012 Addendum）。ガードが
+  `InterruptGuard` を保持する間だけ割り込みを禁止するため、`sti` 後も
+  排他が保たれる。二重取得検出も追加した。
 - 画面コンソール（M3-c）をグローバル状態で持つ場合、同じ前提への依存が
   もう 1 つ増える（ADR-0013）。あわせて、パニック時の画面出力を解禁する
   かどうかもこの時点で再検討する。
