@@ -64,7 +64,7 @@ SYSCALLのSTAR制約（`deferred-decisions.md`）がM5-eの判断材料から外
 
 x86-64のLinux静的バイナリ（musl / glibc）は`syscall`命令を発行する。
 `int 0x80`は32bit互換の経路であり、64bitバイナリは使わない。
-したがって`vision.md`の「静的リンクされたLinuxバイナリを動かす」を目指す限り、 **`syscall`/`sysret`の実装は選択ではなく必須**である。
+したがって`vision.md`の「静的リンクされたLinuxバイナリを動かす」を目指す限り、**`syscall`/`sysret`の実装は選択ではなく必須**である。
 
 段階の位置づけを次のように定める。
 
