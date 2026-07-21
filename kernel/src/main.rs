@@ -27,6 +27,7 @@ use kernel::idt;
 use kernel::interrupts;
 use kernel::paging;
 use kernel::pic;
+use kernel::keyboard;
 use kernel::pit;
 use kernel::paging::plan::{resolve_pages, MappedRanges};
 use kernel::paging::table::PageTableBuilder;
@@ -2053,7 +2054,7 @@ fn start_timer(
     }
 
     // --- 4. 解禁の結果を読み戻す ---
-    let expected_master = pic::MASK_ALL & !1;
+    let expected_master = pic::MASK_ALL & !(1 << 0);
     let (master_after, slave_after) = pic::read_masks();
     logger.info(format_args!(
         "pic: IMR after unmasking IRQ0 master={master_after:#04x} slave={slave_after:#04x} \
@@ -2066,6 +2067,9 @@ fn start_timer(
         ));
         cpu::halt_forever();
     }
+
+    // --- 4.5 キーボード（IRQ1）を用意する ---
+    setup_keyboard(logger);
 
     // --- 5. sti 前 7 項目を再検証する ---
     let report = interrupts::verify_ready_for_sti_with_timer(logger);
@@ -2104,4 +2108,100 @@ fn start_timer(
     }
 
     cpu::halt_forever();
+}
+
+/// i8042 を検証してから IRQ1 を解禁する（M4-e）。
+///
+/// 順序に意味がある。
+///
+/// 1. コンフィグバイトを**読んで**、翻訳（セット 1）と割り込みが有効かを見る
+/// 2. 落ちていれば立てて書き戻し、**読み直して一致を確認**する
+/// 3. 出力バッファの残留データを読み捨てる
+/// 4. IRQ1 のマスクを解除する
+/// 5. IMR を読み戻して `master=0xFC` を照合する
+///
+/// 3 を 4 より前に置くのが要点。ファームウェアが残したバイトが最初のキー
+/// 入力として現れる事故を防ぐ。OVMF はブートメニューでキーを扱っているので、
+/// 何か残っていてもおかしくない。
+fn setup_keyboard(logger: &mut Logger<SerialPort>) {
+    use keyboard::controller;
+
+    // --- 1. コンフィグバイトを読む ---
+    // SAFETY: 起動シーケンス中で IRQ1 はマスクされており、他の実行文脈が
+    // i8042 を触っていない。
+    let config = match unsafe { controller::read_config() } {
+        Ok(config) => config,
+        Err(error) => {
+            logger.error(format_args!(
+                "i8042: failed to read the configuration byte ({error:?}); halting"
+            ));
+            cpu::halt_forever();
+        }
+    };
+    logger.info(format_args!(
+        "i8042: configuration byte = {config:#010b} (keyboard interrupt={}, translation to set 1={})",
+        config & controller::CONFIG_KEYBOARD_INTERRUPT != 0,
+        config & controller::CONFIG_TRANSLATION != 0
+    ));
+
+    // --- 2. 必要なら立てて、読み直して確認する ---
+    if !controller::config_is_ready(config) {
+        let updated = controller::config_with_keyboard_enabled(config);
+        logger.info(format_args!(
+            "i8042: enabling the missing bits ({config:#04x} -> {updated:#04x})"
+        ));
+        // SAFETY: 同上。書いた後に読み直して照合する。
+        if let Err(error) = unsafe { controller::write_config(updated) } {
+            logger.error(format_args!(
+                "i8042: the configuration byte did not stick ({error:?}); halting"
+            ));
+            cpu::halt_forever();
+        }
+        logger.info(format_args!(
+            "i8042: configuration byte verified by reading it back"
+        ));
+    } else {
+        logger.info(format_args!(
+            "i8042: the configuration byte is already what we need; leaving it alone"
+        ));
+    }
+
+    // --- 3. 残留データを読み捨てる ---
+    // SAFETY: IRQ1 はまだマスクされている。
+    let discarded = unsafe { controller::drain_output_buffer() };
+    if discarded > 0 {
+        logger.info(format_args!(
+            "i8042: discarded {discarded} stale byte(s) left in the output buffer by the firmware \
+             (they would otherwise look like the first keypress)"
+        ));
+    } else {
+        logger.info(format_args!("i8042: the output buffer was already empty"));
+    }
+
+    // --- 4. IRQ1 を解禁する ---
+    // SAFETY: ベクタ 0x21 には IRQ スタイルのスタブが入っており、ハンドラは
+    // データポートを読み切ってから EOI を送る。
+    unsafe {
+        pic::unmask_irq(keyboard::KEYBOARD_IRQ);
+    }
+
+    // --- 5. IMR を読み戻す ---
+    let expected_master = pic::MASK_ALL & !(1 << 0) & !(1 << keyboard::KEYBOARD_IRQ);
+    let (master, slave) = pic::read_masks();
+    logger.info(format_args!(
+        "pic: IMR after unmasking IRQ1 master={master:#04x} slave={slave:#04x} \
+         (expected {expected_master:#04x}/{:#04x}) [read back from hardware]",
+        pic::MASK_ALL
+    ));
+    if master != expected_master || slave != pic::MASK_ALL {
+        logger.error(format_args!(
+            "pic: the mask read-back after unmasking IRQ1 does not match; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "keyboard: IRQ1 is unmasked; press a key (the first one must arrive as vector {:#04x})",
+        keyboard::KEYBOARD_VECTOR
+    ));
 }

@@ -517,6 +517,13 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) {
             TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
         }
 
+        // キーボード（IRQ1）。**EOI より先に呼ぶ。** この中でデータポートを
+        // 読み切らないと、コントローラの出力バッファが空かず次の IRQ1 が
+        // 来なくなる。
+        if vector == crate::keyboard::KEYBOARD_VECTOR {
+            crate::keyboard::handle_irq(context.vector);
+        }
+
         // スプリアス（偽）割り込みの判定。IRQ7 / IRQ15 でしか起きない。
         // 本物なら ISR の該当ビットが立っている。
         //

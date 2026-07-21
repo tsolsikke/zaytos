@@ -438,6 +438,9 @@ fn main() -> Result<()> {
             let kvm = rest.iter().any(|a| a == "--kvm");
             let no_limit = rest.iter().any(|a| a == "--no-limit");
             if let Some(index) = rest.iter().position(|a| a == "--interrupt-test") {
+                if rest.get(index + 1).map(String::as_str) == Some("keyboard") {
+                    return cmd_keyboard_test();
+                }
                 let kind = rest.get(index + 1).with_context(|| {
                     let names: Vec<&str> = INTERRUPT_TESTS.iter().map(|t| t.name).collect();
                     format!("--interrupt-test requires a kind ({})", names.join(" | "))
@@ -893,6 +896,193 @@ fn build_bootloader(workspace_root: &Path, panic_test: bool) -> Result<PathBuf> 
 /// クリティカルセクション/ロックの回帰チェックを 1 種類実行する。
 ///
 /// 例外テストと同じく **TCG 固定**。
+/// `--interrupt-test keyboard` が QEMU monitor へ流すキー列。
+///
+/// `codes` は、そのキーで i8042 が出すスキャンコードの本数。修飾つきは
+/// 「修飾の押下・本体の押下・本体の離脱・修飾の離脱」で 4 本、単独は
+/// 押下と離脱で 2 本になる。取りこぼしの検証に使うため、期待値を
+/// ここで明示的に持つ。
+struct KeyInjection {
+    monitor: &'static str,
+    codes: u64,
+}
+
+/// 送るキー列。結果は `Hello!` になる。
+///
+/// **大文字と記号の両方を含める。** どちらも Shift を伴い、英字は
+/// Shift と Caps の XOR、記号は Shift のみという非対称な経路を通る。
+const KEYBOARD_TEST_KEYS: &[KeyInjection] = &[
+    KeyInjection { monitor: "shift-h", codes: 4 },
+    KeyInjection { monitor: "e", codes: 2 },
+    KeyInjection { monitor: "l", codes: 2 },
+    KeyInjection { monitor: "l", codes: 2 },
+    KeyInjection { monitor: "o", codes: 2 },
+    KeyInjection { monitor: "shift-1", codes: 4 },
+    KeyInjection { monitor: "ret", codes: 2 },
+];
+
+/// 期待する 1 行。
+const KEYBOARD_TEST_EXPECTED_LINE: &str = "keyboard: line = \"Hello!\"";
+
+/// キーボードの回帰チェック（`--interrupt-test keyboard`）。
+///
+/// QEMU monitor の `sendkey` で既知のキー列を注入し、シリアルログを検証する。
+/// monitor への接続は `screenshot` の実装を再利用する。
+///
+/// **キーリピート（タイプマティック）は検証できない。** `sendkey` は保持時間を
+/// 指定してもリピートを模擬せず、押下と離脱を 1 組送るだけである
+/// （`sendkey a 3000` で実測）。リピートは手動確認に回す。
+fn cmd_keyboard_test() -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let kernel_elf = build_kernel(&workspace_root, false)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let serial_log = workspace_root.join("target").join("keyboard-test-serial.log");
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+    let monitor_socket = workspace_root.join("target").join("keyboard-test-monitor.sock");
+    let _ = fs::remove_file(&monitor_socket);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: Some(&monitor_socket),
+        accelerator: Accelerator::Tcg,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the keyboard test")?;
+
+    // キーを送る前に、IRQ1 が解禁されるまで待つ。**上限つき。**
+    let ready_marker = "keyboard: IRQ1 is unmasked";
+    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    let mut ready = false;
+    while Instant::now() < deadline {
+        if fs::read_to_string(&serial_log)
+            .map(|c| c.contains(ready_marker))
+            .unwrap_or(false)
+        {
+            ready = true;
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let mut expected_codes = 0u64;
+    if ready {
+        match connect_monitor_with_retry(&monitor_socket) {
+            Ok(mut stream) => {
+                for key in KEYBOARD_TEST_KEYS {
+                    if writeln!(stream, "sendkey {}", key.monitor).is_err() {
+                        break;
+                    }
+                    expected_codes += key.codes;
+                    thread::sleep(Duration::from_millis(200));
+                }
+            }
+            Err(e) => println!("keyboard-test: could not reach the QEMU monitor: {e}"),
+        }
+        // 反映とハートビートの更新を待つ。
+        thread::sleep(Duration::from_secs(3));
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = fs::remove_file(&monitor_socket);
+
+    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+
+    let context = "interrupt-test keyboard";
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
+    {
+        return report_did_not_start(context, firmware_rip);
+    }
+
+    println!("--- {context}: relevant output ---");
+    for line in serial
+        .lines()
+        .filter(|l| l.contains("keyboard") || l.contains("heartbeat") || l.contains("i8042"))
+    {
+        println!("{line}");
+    }
+    println!("--- end ---");
+
+    let mut ok = ready;
+    if !ready {
+        println!("{context}: the kernel never reached {ready_marker:?} = NG");
+    }
+
+    // 1. 期待した文字列になったか（大文字と記号の変換を含む）。
+    let line_ok = serial.contains(KEYBOARD_TEST_EXPECTED_LINE);
+    println!("{context}: serial contains {KEYBOARD_TEST_EXPECTED_LINE:?} = {}",
+        if line_ok { "OK" } else { "NG" });
+    ok &= line_ok;
+
+    // 2. IRQ1 の配送経路。
+    let vector_ok = serial.contains("keyboard: first key arrived as vector 0x21");
+    println!("{context}: the first key arrived as vector 0x21 = {}",
+        if vector_ok { "OK" } else { "NG" });
+    ok &= vector_ok;
+
+    // 3. 送った本数と受け取った本数の一致（取りこぼしなし）。
+    let expected_keys = format!("keys={expected_codes} ");
+    let count_ok = serial.contains(&expected_keys);
+    println!("{context}: received exactly {expected_codes} scancode(s) = {}",
+        if count_ok { "OK" } else { "NG" });
+    ok &= count_ok;
+
+    // 4. 会計が閉じていること、溢れていないこと。
+    let balanced_ok = serial.contains("balanced=true") && !serial.contains("balanced=false");
+    println!("{context}: the scancode accounting balances = {}",
+        if balanced_ok { "OK" } else { "NG" });
+    ok &= balanced_ok;
+
+    // 「dropped= が出ていて、そのすべてが 0」であることを見る。
+    // contains("dropped=0") だけだと、別の行に dropped=3 があっても通る。
+    let no_drop_ok = serial.contains("dropped=0")
+        && !serial
+            .lines()
+            .any(|l| l.contains("dropped=") && !l.contains("dropped=0 "));
+    println!("{context}: no scancode was dropped = {}",
+        if no_drop_ok { "OK" } else { "NG" });
+    ok &= no_drop_ok;
+
+    // 5. ティックが進み続けていること（タイマとキーボードの共存）。
+    let heartbeats = serial.matches("heartbeat: ticks=").count();
+    println!("{context}: heartbeat lines = {heartbeats} (expected at least 2)");
+    ok &= heartbeats >= 2;
+
+    // 6. 例外が起きていないこと。
+    for marker in ["v=0e", "v=08"] {
+        let present = qemu.contains(marker);
+        println!("{context}: qemu log free of {marker:?} = {}",
+            if present { "NG" } else { "OK" });
+        ok &= !present;
+    }
+
+    if ok {
+        println!("{context}: PASS");
+        println!(
+            "{context}: note - key repeat (typematic) is NOT covered here; QEMU's sendkey does \
+             not emulate it. Check it by hand with `cargo xtask run --gui`."
+        );
+        Ok(())
+    } else {
+        bail!("{context}: FAIL")
+    }
+}
+
 /// マーカー突き合わせ方式の回帰チェック（critical-test / interrupt-test 共通）。
 ///
 /// シリアルログに「出るべき行」がすべて出て、「出てはいけない行」が 1 つも

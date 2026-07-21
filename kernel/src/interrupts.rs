@@ -102,7 +102,7 @@ pub fn verify_ready_for_sti(logger: &mut Logger<SerialPort>) -> ReadinessReport 
     verify_ready(logger, pic::MASK_ALL, false)
 }
 
-/// タイマを解禁した後の 7 項目検証。
+/// タイマとキーボードを解禁した後の 7 項目検証。
 ///
 /// [`verify_ready_for_sti`] との違いは 2 点だけ。項目 5 の期待値が
 /// 「全マスク」から「IRQ0 だけ解除」へ変わることと、項目 7（EOI）が
@@ -110,7 +110,10 @@ pub fn verify_ready_for_sti(logger: &mut Logger<SerialPort>) -> ReadinessReport 
 /// 実際にティックが増え続けたときなので、この時点では
 /// 「実装済み・これから検証」として扱う。
 pub fn verify_ready_for_sti_with_timer(logger: &mut Logger<SerialPort>) -> ReadinessReport {
-    verify_ready(logger, pic::MASK_ALL & !1, true)
+    // IRQ0（タイマ）と IRQ1（キーボード）を解禁した状態。ハンドラを書いた
+    // ベクタだけが開いていることを、実際の IMR と突き合わせる。
+    let expected = pic::MASK_ALL & !(1 << 0) & !(1 << crate::keyboard::KEYBOARD_IRQ);
+    verify_ready(logger, expected, true)
 }
 
 fn verify_ready(
@@ -479,6 +482,9 @@ pub unsafe fn run_timer_loop(
     let mut last_ticks = 0u64;
     let mut next_heartbeat = HEARTBEAT_TICKS;
     let mut announced_first = false;
+    let mut announced_first_key = false;
+    let mut decoder = crate::keyboard::decode::Decoder::new();
+    let mut line = TypedLine::new();
 
     loop {
         let ticks = idt::timer_ticks();
@@ -530,18 +536,55 @@ pub unsafe fn run_timer_loop(
         }
         last_ticks = ticks;
 
+        // キーボードのリングバッファを吸い出す。**メインループが行う。**
+        // ハンドラは積むだけで表示しない（ADR-0018 §5）。
+        drain_keyboard(
+            logger,
+            console.as_deref_mut(),
+            &mut announced_first_key,
+            &mut decoder,
+            &mut line,
+        );
+
         if ticks >= next_heartbeat {
             next_heartbeat = ticks + HEARTBEAT_TICKS;
+            // **入力中は画面へ出さない。** ハートビートとエコーが同じ
+            // コンソールに出るため、打っている途中に割り込むと入力行が
+            // ぶつ切りになって読めなくなる。行が空のときだけ画面にも出す。
+            // シリアルへは常に出るので、観測手段は失われない。
+            let console_for_heartbeat = if line.is_empty() {
+                console.as_deref_mut()
+            } else {
+                None
+            };
             log_both(
                 logger,
-                console.as_deref_mut(),
+                console_for_heartbeat,
                 format_args!(
-                    "heartbeat: ticks={ticks} (about {} s at {} Hz), max tick jump per wakeup={}, \
-                     spurious={}",
+                    "heartbeat: ticks={ticks} ({} s), keys={} dropped={} stray={} spurious={}, \
+                     irq1={} balanced={}, max tick jump={}, i8042 OBF={}, PIC ISR={:#04x}",
                     ticks / crate::pit::TARGET_FREQUENCY_HZ as u64,
-                    crate::pit::TARGET_FREQUENCY_HZ,
+                    crate::keyboard::buffer::received_count(),
+                    crate::keyboard::buffer::overflow_count(),
+                    crate::keyboard::stray_irq_count(),
+                    idt::spurious_count(),
+                    // **会計。** irq1 は IDT 側のベクタ別カウンタ。
+                    // keys + stray がこれと一致しなければ経路の取り違えがある。
+                    idt::interrupt_count(crate::keyboard::KEYBOARD_VECTOR),
+                    crate::keyboard::accounting_balances(),
                     max_tick_jump(),
-                    idt::spurious_count()
+                    // **止まった理由の切り分け材料。** キーが来なくなったとき、
+                    // OBF が 1 なら「データポートを読んでいない」、
+                    // PIC ISR にビットが残っていれば「EOI を送っていない」。
+                    // どちらも「1 回動いて止まる」症状になるので、この 2 つが
+                    // 無いと区別できない。
+                    crate::keyboard::controller::output_buffer_full() as u8,
+                    // SAFETY: メインループは通常文脈で、ここは割り込み禁止中
+                    // ではないが、シングルコアなので i8042/PIC を同時に触る
+                    // 別の実行文脈は割り込みハンドラだけである。ハンドラは
+                    // ISR を読んでも元に戻す必要がない読み出し専用の操作しか
+                    // しないため、競合しても値がずれるだけで壊れない。
+                    unsafe { crate::pic::read_isr() }.0
                 ),
             );
         }
@@ -579,5 +622,163 @@ fn log_both(
     if let Some(console) = console {
         use core::fmt::Write as _;
         let _ = writeln!(console, "[INFO] {args}");
+    }
+}
+
+/// リングバッファを吸い出し、生のスキャンコードをシリアルへ出す。
+///
+/// **段階 4（ハードウェア接続の確認）で最も重要な出力である。** 変換もエコーも
+/// せず受け取ったバイトをそのまま 16 進で出すので、ここが出ていれば
+/// 「割り込みが届き、データポートが読めている」ことが確定する。以降の不具合は
+/// すべてデコード側の問題に絞り込める。
+fn drain_keyboard(
+    logger: &mut Logger<SerialPort>,
+    console: Option<&mut crate::console::Console>,
+    announced_first: &mut bool,
+    decoder: &mut crate::keyboard::decode::Decoder,
+    line: &mut TypedLine,
+) {
+    use crate::keyboard::decode::KeyEvent;
+
+    let mut console = console;
+
+    loop {
+        // ロックは 1 バイトごとに取って離す。**保持したままログを出さない。**
+        // ログ出力は長く、その間ずっと割り込みが禁止されるとティックを
+        // 取りこぼす。
+        let code = {
+            let mut ring = crate::keyboard::buffer::SCANCODES.lock();
+            ring.pop()
+        };
+        let Some(code) = code else {
+            return;
+        };
+
+        if !*announced_first {
+            *announced_first = true;
+            // **IRQ1 の配送経路の証明。** タイマで 0x20 を確認したのと同じ趣旨。
+            match crate::keyboard::first_keyboard_vector() {
+                Some(vector) if vector as usize == crate::keyboard::KEYBOARD_VECTOR => {
+                    logger.info(format_args!(
+                        "keyboard: first key arrived as vector {vector:#04x} - IRQ1 is wired \
+                         through our stub correctly"
+                    ));
+                }
+                other => {
+                    logger.error(format_args!(
+                        "keyboard: the first key arrived as vector {other:?}, expected {:#04x}; \
+                         halting",
+                        crate::keyboard::KEYBOARD_VECTOR
+                    ));
+                    cpu::halt_forever();
+                }
+            }
+        }
+
+        // 生のスキャンコード。押下と離脱で 2 回出るので、エコーと二重に
+        // なって読みにくい。既定では出さず、切り分けが要るときだけ
+        // `keyboard-raw-log` feature で有効にする。
+        #[cfg(feature = "keyboard-raw-log")]
+        logger.info(format_args!("keyboard: scancode {code:#04x}"));
+
+        let Some(event) = decoder.feed(code) else {
+            continue;
+        };
+
+        match event {
+            KeyEvent::Char(character) => {
+                line.push(character);
+                echo(console.as_deref_mut(), character);
+            }
+            KeyEvent::Enter => {
+                echo(console.as_deref_mut(), '\n');
+                // 1 行分をまとめて出す。自動テストはこの行を突き合わせる。
+                logger.info(format_args!("keyboard: line = \"{}\"", line.as_str()));
+                line.clear();
+            }
+            KeyEvent::Backspace => {
+                // **画面上の消去は行わない。** コンソール側でセルごとの
+                // 占有種別（全角の先頭 / 後続）を管理する必要があり、
+                // 割り込みとは別の仕事になる（`docs/deferred-decisions.md`）。
+                // キーとして認識していることだけ示す。
+                logger.info(format_args!(
+                    "keyboard: backspace (not applied to the screen yet)"
+                ));
+            }
+            KeyEvent::Unsupported(code) => {
+                UNSUPPORTED_KEYS.fetch_add(1, Ordering::Relaxed);
+                logger.info(format_args!("keyboard: unsupported scancode {code:#04x}"));
+            }
+        }
+    }
+}
+
+/// 対応していないキーを受けた回数。
+static UNSUPPORTED_KEYS: AtomicU64 = AtomicU64::new(0);
+
+pub fn unsupported_key_count() -> u64 {
+    UNSUPPORTED_KEYS.load(Ordering::Relaxed)
+}
+
+/// 入力された文字を画面へ出す。
+///
+/// **メインループから呼ぶ**（ADR-0018 §5）。ハンドラからは呼ばない。
+///
+/// # シリアルへは 1 文字ずつ出さない
+///
+/// シリアルへ 1 文字ずつ流すには `Logger` の内側の `SerialPort` を直接
+/// 触る必要がある。そのためのアクセサを `Logger` に足すと、**レベル判定と
+/// 接頭辞の書式を迂回する経路**を全利用者に開くことになる。ADR-0017
+/// Addendum の反省（守るべき制約と、たまたま採った手段を混同しない）に
+/// 照らして、ここは足さない。
+///
+/// 代わりにシリアルへは Enter のときに 1 行としてまとめて出す。1 文字ずつの
+/// 追跡が要る場合は `keyboard-raw-log` feature で生スキャンコードを出す。
+fn echo(console: Option<&mut crate::console::Console>, character: char) {
+    use core::fmt::Write as _;
+
+    if let Some(console) = console {
+        let _ = write!(console, "{character}");
+    }
+}
+
+/// 打ち込んだ 1 行を貯める固定長バッファ。
+///
+/// ヒープを使わない。長さを超えた分は捨てる（入力行が異常に長いのは
+/// テストの想定外で、捨てても診断に影響しない）。
+struct TypedLine {
+    buffer: [u8; Self::CAPACITY],
+    len: usize,
+}
+
+impl TypedLine {
+    const CAPACITY: usize = 128;
+
+    const fn new() -> Self {
+        Self {
+            buffer: [0; Self::CAPACITY],
+            len: 0,
+        }
+    }
+
+    const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn push(&mut self, character: char) {
+        // ASCII だけを貯める。現在のデコーダは ASCII しか返さない。
+        if character.is_ascii() && self.len < Self::CAPACITY {
+            self.buffer[self.len] = character as u8;
+            self.len += 1;
+        }
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    fn as_str(&self) -> &str {
+        // SAFETY: push で ASCII だけを入れているため、常に有効な UTF-8。
+        core::str::from_utf8(&self.buffer[..self.len]).unwrap_or("<invalid>")
     }
 }
