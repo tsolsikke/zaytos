@@ -40,12 +40,13 @@ pub mod decode;
 pub mod layout;
 
 use core::ptr::addr_of;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use common::cpu;
 use common::serial::SerialPort;
 
 use crate::gdt::KERNEL_CODE_SELECTOR;
-use context::ExceptionContext;
+use context::{ExceptionContext, IrqContext};
 use decode::{error_code_kind, ErrorCodeKind, PageFaultErrorCode, SelectorErrorCode};
 use layout::{exception_name, GateType, IdtEntry};
 
@@ -143,17 +144,143 @@ core::arch::global_asm!(
     "  push rax",
     // ここで rsp が ExceptionContext の先頭を指している。
     "  mov rdi, rsp",
-    // SysV ABI は call の直前に RSP が 16 バイト境界であることを要求する。
-    // 例外入場時に CPU が RSP を 16 バイト境界へ揃えたうえで 5 個
-    // （エラーコードありなら 6 個）を積み、スタブが合計 16 バイト
-    // （ありなら 8 バイト）積むため、退避前は RSP % 16 == 8。
-    // 上の push は 16 個 = 128 バイトで 16 の倍数なので剰余は変わらない。
-    // 8 引いて境界へ合わせる（ADR-0018 の罠 12）。
-    "  sub rsp, 8",
+    // SysV ABI は call の直前に RSP が 16 バイト境界であることを要求する
+    // （ADR-0018 の罠 12）。導出は下の STACK_ALIGN_ADJUST のコメント参照。
+    "  sub rsp, {adjust}",
+    // **実測**: 調整後の RSP そのものを第 2 引数として渡す。手計算の再現
+    // ではなくレジスタの実値を渡すので、計算が間違っていれば handler 側の
+    // 検証で捕まる。
+    "  mov rsi, rsp",
     "  call {handler}",
     // handler は戻らない契約。万一戻ってきたら未定義命令で止める。
     "  ud2",
     handler = sym exception_entry,
+    adjust = const STACK_ALIGN_ADJUST,
+);
+
+/// `call` の直前に RSP から引いて 16 バイト境界へ合わせる量。
+///
+/// # 導出（両経路に共通、単位はバイト、剰余は mod 16）
+///
+/// 長モードでは、割り込み・例外の配送時に **CPU が RSP を 16 バイト境界へ
+/// 揃えてから**スタックフレームを積む（Intel SDM Vol.3A 6.14.2）。したがって
+/// 基準点は必ず `RSP ≡ 0` である。そこから積まれる量で入場時の剰余が決まる。
+///
+/// | 経路 | CPU が積む | 入場時 | スタブが積む | 共通ルーチンが積む | call 直前 |
+/// |---|---|---|---|---|---|
+/// | 例外（エラーコードなし） | 5 個 = 40 → ≡ 8 | **8** | ダミー EC + ベクタ = 16 | GPR 15 + CR2 = 128 | 8 |
+/// | 例外（エラーコードあり） | 6 個 = 48 → ≡ 0 | **0** | ベクタのみ = 8 | GPR 15 + CR2 = 128 | 8 |
+/// | IRQ | 5 個 = 40 → ≡ 8 | **8** | ベクタのみ = 8 | GPR 15 = 120 | 8 |
+///
+/// **入場時の剰余は一定ではない。** エラーコードを積む例外だけ `≡ 0` で、
+/// 他は `≡ 8` である。エラーコードなしの例外でダミーを push しているのは
+/// `ExceptionContext` のレイアウトを揃えるためだが、結果として**剰余も
+/// 揃える**働きをしている（`8 - 16 ≡ 8`、`0 - 8 ≡ 8`）。
+///
+/// 3 経路とも `call` 直前が `≡ 8` になるので、8 引いて `≡ 0` にする。
+/// SysV ABI が要求するのは `call` **実行時点**で `RSP ≡ 0` であることで、
+/// `call` が戻りアドレスを積んだ後の関数入口では `RSP ≡ 8` になる。
+///
+/// **「エラーコードの有無が調整の要否を分ける」ではない。** 決めるのは
+/// 「入場時の剰余 − 積んだ総量」であり、たまたま 3 経路とも同じ結論に
+/// なっている。IRQ 側で GPR 15 個 + ベクタ = 128 バイト（16 の倍数）だから
+/// 調整不要、と考えるのは誤りである。入場時が `≡ 0` でないためこれは成立
+/// しない。
+///
+/// この導出が正しいことは手計算に頼らず、ハンドラ入口で実測した RSP を
+/// 検証している（[`check_stack_alignment`]）。
+#[cfg(not(feature = "misalign-test"))]
+const STACK_ALIGN_ADJUST: usize = 8;
+
+/// 境界検証がほんとうに働くかを確かめるための、意図的に壊した値
+/// （`--interrupt-test misaligned`）。
+#[cfg(feature = "misalign-test")]
+const STACK_ALIGN_ADJUST: usize = 0;
+
+// IRQ（0x20-0x2F）の入口となるスタブ表。
+//
+// **例外用スタブを流用しない。** 例外ハンドラは戻らないため GPR を退避
+// するだけで済むが、IRQ は中断した処理へ**戻る**ので、退避したものを
+// 必ず復元しなければならない。復元を忘れると、割り込まれた側のレジスタが
+// 静かに壊れる。症状は「割り込みと無関係な場所で不定期に落ちる」形になり、
+// このプロジェクトで最も診断しにくい部類である。
+//
+// 経路を分けているので、例外側を触っても IRQ 側の復元は壊れない。
+core::arch::global_asm!(
+    ".section .text",
+    ".p2align 4",
+    ".globl zaytos_irq_stubs",
+    "zaytos_irq_stubs:",
+    ".set irq_index, 0",
+    ".rept 16",
+    // スタブ表の刻み幅を独立に検証するためのラベル（例外側と同じ発想）。
+    "  .if irq_index == 0",
+    "    .globl zaytos_irq_stub_0",
+    "    zaytos_irq_stub_0:",
+    "  .endif",
+    "  .if irq_index == 15",
+    "    .globl zaytos_irq_stub_15",
+    "    zaytos_irq_stub_15:",
+    "  .endif",
+    // IRQ にエラーコードは無い。ベクタ番号だけを積む。
+    "  push irq_index + 0x20",
+    "  jmp zaytos_irq_common",
+    "  .set irq_index, irq_index + 1",
+    "  .p2align 4",
+    ".endr",
+    ".globl zaytos_irq_stubs_end",
+    "zaytos_irq_stubs_end:",
+    ".p2align 4",
+    "zaytos_irq_common:",
+    // 入場時のスタック: [rsp]=ベクタ, +8=RIP, +16=CS, +24=RFLAGS, +32=RSP, +40=SS
+    //
+    // GPR を退避する。順序は IrqContext のフィールド順と一対一。
+    "  push r15",
+    "  push r14",
+    "  push r13",
+    "  push r12",
+    "  push r11",
+    "  push r10",
+    "  push r9",
+    "  push r8",
+    "  push rbp",
+    "  push rdi",
+    "  push rsi",
+    "  push rdx",
+    "  push rcx",
+    "  push rbx",
+    "  push rax",
+    // CR2 は積まない。IRQ はページフォルトではないので意味を持たない。
+    "  mov rdi, rsp",
+    "  sub rsp, {adjust}",
+    "  mov rsi, rsp",
+    "  call {handler}",
+    // --- ここから復帰 ---
+    // 積んだものを、積んだ順序の逆に、同じ量だけ正確に取り除く。
+    // iretq は RSP が CPU の積んだフレームの先頭（RIP）を指している状態で
+    // 実行されなければならない。1 バイトでもずれると制御が飛ぶ。
+    "  add rsp, {adjust}",
+    // GPR を復元する。push の逆順（rax から r15 へ）。
+    "  pop rax",
+    "  pop rbx",
+    "  pop rcx",
+    "  pop rdx",
+    "  pop rsi",
+    "  pop rdi",
+    "  pop rbp",
+    "  pop r8",
+    "  pop r9",
+    "  pop r10",
+    "  pop r11",
+    "  pop r12",
+    "  pop r13",
+    "  pop r14",
+    "  pop r15",
+    // スタブが積んだベクタ番号を捨てる。これで RSP は RIP を指す。
+    "  add rsp, 8",
+    "  iretq",
+    handler = sym irq_entry,
+    adjust = const STACK_ALIGN_ADJUST,
 );
 
 extern "C" {
@@ -165,6 +292,195 @@ extern "C" {
     static zaytos_exception_stub_8: u8;
     static zaytos_exception_stub_14: u8;
     static zaytos_exception_stub_255: u8;
+
+    /// IRQ スタブ表の先頭・終端・刻み幅検証用ラベル。
+    ///
+    /// 例外用とは**別の領域**なので、範囲検証も別系統になる。
+    static zaytos_irq_stubs: u8;
+    static zaytos_irq_stubs_end: u8;
+    static zaytos_irq_stub_0: u8;
+    static zaytos_irq_stub_15: u8;
+}
+
+/// IRQ スタブの個数（0x20-0x2F の 16 本）。
+pub const IRQ_STUB_COUNT: usize = 16;
+
+/// IRQ に割り当てた最初のベクタ。`pic::MASTER_VECTOR_OFFSET` と一致する。
+pub const IRQ_VECTOR_BASE: usize = 0x20;
+
+/// ベクタ別の割り込み回数。
+///
+/// **通常の `static` にしてはならない。** メインループがこれを読む形になる
+/// ため、通常の変数だとコンパイラが読み出しをループの外へ巻き上げ、
+/// 値が永久に変わらないように見える。「割り込みは来ているのにメインループが
+/// 気づかない」という診断しにくい症状になる（ADR-0018 のチェックリスト 9）。
+/// `Relaxed` で十分なのは、シングルコアで順序に依存した判断をしないため。
+static INTERRUPT_COUNTS: [AtomicU64; IDT_ENTRY_COUNT] =
+    [const { AtomicU64::new(0) }; IDT_ENTRY_COUNT];
+
+/// 指定ベクタの割り込み回数を読む。
+pub fn interrupt_count(vector: usize) -> u64 {
+    if vector >= IDT_ENTRY_COUNT {
+        return 0;
+    }
+    INTERRUPT_COUNTS[vector].load(Ordering::Relaxed)
+}
+
+/// 現時点の全ベクタのカウンタを写し取る。
+///
+/// 「この時点より後に何か届いたか」を見るための基準点。**絶対値で
+/// 「全部 0 か」を見てはいけない。** 起動シーケンスの中でソフトウェア
+/// 割り込みによる経路検証（`--interrupt-test irq-path`）を通ると、その分が
+/// 既にカウントされており、絶対値では常に「何か来た」と判定されてしまう。
+pub fn snapshot_counts() -> [u64; IDT_ENTRY_COUNT] {
+    core::array::from_fn(|vector| INTERRUPT_COUNTS[vector].load(Ordering::Relaxed))
+}
+
+/// 基準点からの増加分の合計と、最初に増えたベクタを返す。
+pub fn delta_since(baseline: &[u64; IDT_ENTRY_COUNT]) -> (u64, Option<usize>) {
+    let mut total = 0u64;
+    let mut first = None;
+    for vector in 0..IDT_ENTRY_COUNT {
+        let now = INTERRUPT_COUNTS[vector].load(Ordering::Relaxed);
+        let delta = now.saturating_sub(baseline[vector]);
+        total += delta;
+        if delta != 0 && first.is_none() {
+            first = Some(vector);
+        }
+    }
+    (total, first)
+}
+
+/// 全ベクタの合計と、0 でなかった最初のベクタを返す。
+///
+/// 「全部 0 のはず」を確認する用途で、**0 でなかった場合にどのベクタかが
+/// 分かる**形にしてある。とくに NMI（ベクタ 2）は `cli` でマスクできない
+/// ため、全 IRQ をマスクした状態でも理論上は届きうる。合計だけを見ていると
+/// 「何かが来た」までしか分からず、原因の見当がつかない。
+pub fn interrupt_total_and_first_nonzero() -> (u64, Option<usize>) {
+    let mut total = 0u64;
+    let mut first = None;
+    for vector in 0..IDT_ENTRY_COUNT {
+        let count = INTERRUPT_COUNTS[vector].load(Ordering::Relaxed);
+        total += count;
+        if count != 0 && first.is_none() {
+            first = Some(vector);
+        }
+    }
+    (total, first)
+}
+
+/// `call` 直前の実測 RSP が 16 バイト境界にあることを確認する。
+///
+/// **手計算の再現ではない。** スタブが `call` の直前にレジスタから読んだ
+/// 実値を受け取って検査する。境界計算（[`STACK_ALIGN_ADJUST`] の導出）が
+/// 間違っていれば、ここで捕まる。
+///
+/// SysV ABI が要求するのは `call` 実行時点で `RSP % 16 == 0` であること。
+/// 関数入口では戻りアドレスの分だけずれて `RSP % 16 == 8` になるため、
+/// 「入口のフレームアドレス + 8 が 16 の倍数」と言っても同じである。
+///
+/// 違反は fail-fast する。SSE を無効化しているため即座にクラッシュはしない
+/// が ABI 違反であり、放置すると将来 SSE を有効化した瞬間や、コンパイラが
+/// 境界を仮定した最適化を行った瞬間に、原因不明の形で壊れる。
+fn check_stack_alignment(rsp_at_call: u64, path: &str, vector: u64) {
+    if rsp_at_call % 16 == 0 {
+        return;
+    }
+    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    serial.init();
+    use core::fmt::Write;
+    let _ = writeln!(
+        serial,
+        "[ERROR] stack alignment: {path} stub violated the SysV ABI (vector={vector})"
+    );
+    let _ = writeln!(
+        serial,
+        "[ERROR]   rsp at call = {rsp_at_call:#018x} (rsp % 16 = {}, must be 0)",
+        rsp_at_call % 16
+    );
+    let _ = writeln!(
+        serial,
+        "[ERROR]   the stub pushed an amount that does not match STACK_ALIGN_ADJUST"
+    );
+    let _ = writeln!(serial, "[ERROR] halting (cli + hlt loop)");
+    cpu::halt_forever();
+}
+
+/// IRQ の共通処理。**戻る。**
+///
+/// スタブから `extern "sysv64"` で呼ばれる（ADR-0018 のチェックリスト 11）。
+///
+/// **出力しない。** ADR-0018 §5 のとおり、ここでやるのは共有状態の更新だけ
+/// である。観測はメインループがカウンタ越しに行う。
+///
+/// M4-d-1 の時点では EOI を送らない。全 IRQ をマスクしているため実際の
+/// IRQ は届かず、ここへ来るのはソフトウェア割り込み（`int`）による経路
+/// 検証だけである。EOI は M4-d-2 で実装する。
+///
+/// # Safety
+///
+/// `context` はスタブが積んだ [`IrqContext`] を指していること。
+/// `rsp_at_call` はスタブが `call` 直前に読んだ RSP であること。
+extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) {
+    // SAFETY: スタブが直前に積んだ有効な IrqContext を指す。読み取りのみ。
+    let context = unsafe { &*context };
+
+    check_stack_alignment(rsp_at_call, "irq", context.vector);
+
+    let vector = context.vector as usize;
+    if vector < IDT_ENTRY_COUNT {
+        INTERRUPT_COUNTS[vector].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// IRQ スタブ表の配置検証。
+///
+/// 例外用（[`check_stub_table`]）と**別系統**である。表が別の領域にある
+/// ため、片方の検証がもう片方を保証しない。
+pub fn check_irq_stub_table() -> StubTableCheck {
+    let base = addr_of!(zaytos_irq_stubs) as u64;
+    let end = addr_of!(zaytos_irq_stubs_end) as u64;
+    let expected_size = (IRQ_STUB_COUNT * STUB_SIZE) as u64;
+
+    let stride_ok = addr_of!(zaytos_irq_stub_0) as u64 == base
+        && addr_of!(zaytos_irq_stub_15) as u64 == base + 15 * STUB_SIZE as u64;
+
+    // 0x20-0x2F の IDT エントリが、IRQ スタブ表の対応する位置を指すこと。
+    // 上書きに失敗して例外スタブを指したままだと、IRQ が「戻らない」経路へ
+    // 入り、最初の割り込みで停止する。
+    let mut entries_ok = true;
+    for index in 0..IRQ_STUB_COUNT {
+        let vector = IRQ_VECTOR_BASE + index;
+        let Some(entry) = entry(vector) else {
+            entries_ok = false;
+            break;
+        };
+        let handler = entry.handler_address();
+        if handler < base || handler >= end {
+            entries_ok = false;
+            break;
+        }
+        let offset = handler - base;
+        if offset % STUB_SIZE as u64 != 0 || offset / STUB_SIZE as u64 != index as u64 {
+            entries_ok = false;
+            break;
+        }
+    }
+
+    StubTableCheck {
+        base,
+        end,
+        actual_size: end - base,
+        expected_size,
+        stride_ok,
+        entries_ok,
+    }
+}
+
+/// `n` 番目の IRQ スタブのアドレス。
+fn irq_stub_address(index: usize) -> u64 {
+    addr_of!(zaytos_irq_stubs) as u64 + (index * STUB_SIZE) as u64
 }
 
 /// スタブ表の配置に関する検証結果。
@@ -209,6 +525,11 @@ pub fn check_stub_table() -> StubTableCheck {
     // 全エントリのハンドラが表の範囲内で、ベクタ番号と位置が対応すること。
     let mut entries_ok = true;
     for vector in 0..IDT_ENTRY_COUNT {
+        // 0x20-0x2F は IRQ スタブへ差し替えてあるので、こちらの範囲には
+        // 入らない。別系統の check_irq_stub_table が担当する。
+        if (IRQ_VECTOR_BASE..IRQ_VECTOR_BASE + IRQ_STUB_COUNT).contains(&vector) {
+            continue;
+        }
         let Some(entry) = entry(vector) else {
             entries_ok = false;
             break;
@@ -277,6 +598,21 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>) {
                 GateType::Interrupt,
                 0,
                 ist,
+            );
+        }
+
+        // 0x20-0x2F だけを IRQ スタブへ上書きする。**例外を IRQ 化しては
+        // ならない。** 例外ハンドラは戻ってはいけない（たとえば #DE から
+        // そのまま戻れば、同じ除算命令を再実行して無限ループになる）。
+        // 戻れるのは、原因が外部にあり再実行の必要がない IRQ だけである。
+        for index in 0..IRQ_STUB_COUNT {
+            let vector = IRQ_VECTOR_BASE + index;
+            (*idt)[vector] = IdtEntry::new(
+                irq_stub_address(index),
+                KERNEL_CODE_SELECTOR,
+                GateType::Interrupt,
+                0,
+                None,
             );
         }
     }
@@ -367,7 +703,7 @@ pub unsafe fn clear_present(vector: usize) {
 /// # Safety
 ///
 /// `context` はスタブが積んだ [`ExceptionContext`] を指していること。
-extern "sysv64" fn exception_entry(context: *const ExceptionContext) -> ! {
+extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call: u64) -> ! {
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
     serial.init();
 
@@ -376,6 +712,9 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext) -> ! {
     // SAFETY: スタブが直前に積んだ有効な ExceptionContext を指す。
     // 読み取りのみで、この関数は戻らない。
     let context = unsafe { &*context };
+
+    // 既存の境界計算が正しいことの裏取り。IRQ 側と同じ検査を通す。
+    check_stack_alignment(rsp_at_call, "exception", context.vector);
 
     let vector = context.vector as u8;
     let name = exception_name(vector);

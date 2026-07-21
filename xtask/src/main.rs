@@ -171,6 +171,61 @@ const CRITICAL_TESTS: &[CriticalTest] = &[
     },
 ];
 
+/// 割り込みを有効化する経路の回帰チェック（`--interrupt-test <kind>`）。
+///
+/// 構造は [`CriticalTest`] と同じ。判定に必要なのは「出るべき行」と
+/// 「出てはいけない行」の 2 つだけなので、型を分けずに使い回す。
+const INTERRUPT_TESTS: &[CriticalTest] = &[
+    // 全 IRQ をマスクしたまま sti し、何も届かないことを確認する。
+    // 「回っているが割り込みが来ない」と「そもそも回っていない」を
+    // 区別するため、周回回数が 0 でないことも見る。
+    CriticalTest {
+        name: "enable-only",
+        feature: "interrupt-test-enable-only",
+        expected_markers: &[
+            "interrupt-test: sti-then-idle OK",
+            "sti: interrupts are now enabled (IF=true",
+            "heartbeat: loop iterations=",
+            "sti-check summary: 4. PIC remapped to 0x20-0x2F = UNVERIFIABLE",
+        ],
+        forbidden_markers: &[
+            "sti-then-idle FAILED",
+            "the loop never iterated",
+            "an interrupt arrived while every IRQ is masked",
+            "refusing to sti",
+            "stack alignment:",
+            "exception: vector=",
+        ],
+    },
+    // int 0x20 をソフトウェア発行し、IRQ 経路が GPR を復元することを確認。
+    CriticalTest {
+        name: "irq-path",
+        feature: "interrupt-test-irq-path",
+        expected_markers: &[
+            "irq-path: OK (the IRQ stub returned via iretq",
+            "irq-path: int 0x20 handled (handler count for vector 0x20 = 1)",
+        ],
+        forbidden_markers: &[
+            "irq-path: a general purpose register was not restored",
+            "stack alignment:",
+            "exception: vector=",
+        ],
+    },
+    // 境界調整をわざと外し、境界検証が働くことを確認する。
+    // **検証が壊れていないことを確かめるためのテストなので、期待する結果は
+    // 「検出して停止する」である。**
+    CriticalTest {
+        name: "misaligned",
+        feature: "misalign-test,interrupt-test-irq-path",
+        expected_markers: &[
+            "stack alignment:",
+            "violated the SysV ABI",
+            "halting (cli + hlt loop)",
+        ],
+        forbidden_markers: &["irq-path: OK"],
+    },
+];
+
 /// カーネルが起動したことを示す、シリアルログの既知の行。
 ///
 /// kernel の `kernel_main` が最初に出す行（`common::log` の INFO 形式）。
@@ -261,7 +316,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -271,12 +326,19 @@ fn main() -> Result<()> {
             let gui = rest.iter().any(|a| a == "--gui");
             let gfx_test = rest.iter().any(|a| a == "--gfx-test");
             let kvm = rest.iter().any(|a| a == "--kvm");
+            if let Some(index) = rest.iter().position(|a| a == "--interrupt-test") {
+                let kind = rest.get(index + 1).with_context(|| {
+                    let names: Vec<&str> = INTERRUPT_TESTS.iter().map(|t| t.name).collect();
+                    format!("--interrupt-test requires a kind ({})", names.join(" | "))
+                })?;
+                return cmd_marker_test(INTERRUPT_TESTS, "interrupt-test", kind);
+            }
             if let Some(index) = rest.iter().position(|a| a == "--critical-test") {
                 let kind = rest.get(index + 1).with_context(|| {
                     let names: Vec<&str> = CRITICAL_TESTS.iter().map(|t| t.name).collect();
                     format!("--critical-test requires a kind ({})", names.join(" | "))
                 })?;
-                return cmd_critical_test(kind);
+                return cmd_marker_test(CRITICAL_TESTS, "critical-test", kind);
             }
             if let Some(index) = rest.iter().position(|a| a == "--exception-test") {
                 let kind = rest.get(index + 1).with_context(|| {
@@ -664,22 +726,29 @@ fn build_bootloader(workspace_root: &Path, panic_test: bool) -> Result<PathBuf> 
 /// クリティカルセクション/ロックの回帰チェックを 1 種類実行する。
 ///
 /// 例外テストと同じく **TCG 固定**。
-fn cmd_critical_test(kind: &str) -> Result<()> {
-    let test = CRITICAL_TESTS
+/// マーカー突き合わせ方式の回帰チェック（critical-test / interrupt-test 共通）。
+///
+/// シリアルログに「出るべき行」がすべて出て、「出てはいけない行」が 1 つも
+/// 出ていないことを確認する。起動しなかった場合はテスト失敗と区別する。
+fn cmd_marker_test(tests: &[CriticalTest], kind_label: &str, kind: &str) -> Result<()> {
+    let test = tests
         .iter()
         .find(|t| t.name == kind)
         .with_context(|| {
-            let names: Vec<&str> = CRITICAL_TESTS.iter().map(|t| t.name).collect();
-            format!("unknown critical test {kind:?} (expected one of: {})", names.join(", "))
+            let names: Vec<&str> = tests.iter().map(|t| t.name).collect();
+            format!("unknown {kind_label} {kind:?} (expected one of: {})", names.join(", "))
         })?;
 
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
-    let kernel_elf = build_kernel_with_features(&workspace_root, &[test.feature])?;
+    let features: Vec<&str> = test.feature.split(',').collect();
+    let kernel_elf = build_kernel_with_features(&workspace_root, &features)?;
     let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
 
-    let serial_log = workspace_root.join("target").join("critical-test-serial.log");
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("{kind_label}-serial.log"));
     let _ = fs::remove_file(&serial_log);
     let debug_log = workspace_root.join("target").join("qemu-debug.log");
     let _ = fs::remove_file(&debug_log);
@@ -721,7 +790,7 @@ fn cmd_critical_test(kind: &str) -> Result<()> {
     let serial = fs::read_to_string(&serial_log).unwrap_or_default();
     let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
 
-    let context = format!("critical-test {}", test.name);
+    let context = format!("{kind_label} {}", test.name);
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
     {
@@ -731,7 +800,15 @@ fn cmd_critical_test(kind: &str) -> Result<()> {
     println!("--- {context}: relevant output ---");
     for line in serial
         .lines()
-        .filter(|l| l.contains("critical") || l.contains("lock:"))
+        .filter(|l| {
+            l.contains("critical")
+                || l.contains("lock:")
+                || l.contains("sti")
+                || l.contains("irq-path")
+                || l.contains("heartbeat")
+                || l.contains("interrupt-test")
+                || l.contains("stack alignment")
+        })
     {
         println!("{line}");
     }
@@ -780,7 +857,8 @@ fn cmd_exception_test(kind: &str) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
-    let kernel_elf = build_kernel_with_features(&workspace_root, &[test.feature])?;
+    let features: Vec<&str> = test.feature.split(',').collect();
+    let kernel_elf = build_kernel_with_features(&workspace_root, &features)?;
     let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
 
     let serial_log = workspace_root

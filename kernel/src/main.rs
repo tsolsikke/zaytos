@@ -24,6 +24,10 @@ use kernel::stack;
 use kernel::graphics::{Color, Framebuffer, FramebufferLayout};
 use kernel::heap;
 use kernel::idt;
+// 7 項目の検証とメインループは `--interrupt-test` 専用。通常起動では
+// sti しないため使わない（M4-d-2 で常設の起動経路へ移す）。
+#[cfg(feature = "interrupt-test")]
+use kernel::interrupts;
 use kernel::paging;
 use kernel::pic;
 use kernel::paging::plan::{resolve_pages, MappedRanges};
@@ -154,7 +158,14 @@ static mut BOOT_HANDOFF: BootHandoff = BootHandoff {
 ///
 /// `exception-test` を有効にしたビルドでは、例外を発生させた時点で戻らない
 /// ため、それ以降が到達不能になる。回帰チェック専用のビルドなので許容する。
-#[cfg_attr(any(feature = "exception-test", feature = "critical-test"), allow(unreachable_code))]
+#[cfg_attr(
+    any(
+        feature = "exception-test",
+        feature = "critical-test",
+        feature = "interrupt-test"
+    ),
+    allow(unreachable_code)
+)]
 extern "sysv64" fn kernel_main() -> ! {
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
     serial.init();
@@ -752,6 +763,10 @@ extern "sysv64" fn kernel_main() -> ! {
     // クリティカルセクション/ロックの回帰チェック。
     #[cfg(feature = "critical-test")]
     trigger_critical_test(&mut logger);
+
+    // 割り込みを有効化する経路の回帰チェック（M4-d-1）。
+    #[cfg(feature = "interrupt-test")]
+    trigger_interrupt_test(&mut logger);
 
     log_both(
         &mut logger,
@@ -1759,5 +1774,182 @@ fn report_lock_interrupt_state(logger: &mut Logger<SerialPort>) {
 
     logger.info(format_args!(
         "lock: interrupts are disabled while the guard is held and restored afterwards"
+    ));
+}
+
+/// `--interrupt-test` 用に、割り込みを有効化する経路を踏む（M4-d-1）。
+///
+/// 通常ビルドには含まれない。`cargo xtask run --interrupt-test <kind>` が
+/// 対応する feature を有効にしてビルドする。
+#[cfg(feature = "interrupt-test")]
+#[allow(unreachable_code)]
+fn trigger_interrupt_test(logger: &mut Logger<SerialPort>) -> ! {
+    /// スピンする長さと、ハートビートの間隔（TSC サイクル）。
+    ///
+    /// TSC の周波数は環境依存で、時刻源として信用できない（`cpu` モジュール
+    /// 参照）。ここでは「だいたいこのくらい回れば十分」という目安として
+    /// 使うだけなので、絶対時間の正確さは要らない。
+    const SPIN_CYCLES: u64 = 2_000_000_000;
+    const HEARTBEAT_CYCLES: u64 = 400_000_000;
+
+    let report = interrupts::verify_ready_for_sti(logger);
+
+    if !report.may_enable_interrupts() {
+        logger.error(format_args!(
+            "interrupt-test: the pre-sti checks did not pass; refusing to sti (ADR-0018 §2)"
+        ));
+        cpu::halt_forever();
+    }
+
+    #[cfg(feature = "interrupt-test-irq-path")]
+    {
+        // IRQ 経路が GPR を復元することを、ソフトウェア割り込みで確かめる。
+        verify_irq_path_restores_registers(logger);
+    }
+
+    logger.info(format_args!(
+        "interrupt-test: all pre-sti checks passed (or are explicitly unverifiable); enabling interrupts"
+    ));
+
+    // SAFETY: 直前に 7 項目を検証し、blocks_sti() な項目が無いことを
+    // 確認した。全 IRQ はマスク済みで、IDT の全 256 ベクタに present な
+    // ハンドラが入っている。
+    unsafe {
+        interrupts::spin_with_interrupts_enabled(logger, SPIN_CYCLES, HEARTBEAT_CYCLES);
+    }
+
+    // **増加分で判定する。** 絶対値だと、irq-path のソフトウェア割り込みで
+    // 既に 1 件計上されている分を「スピン中に届いた」と誤判定する。
+    let delta = interrupts::spin_interrupt_delta();
+    let (absolute_total, _) = idt::interrupt_total_and_first_nonzero();
+    let iterations = interrupts::loop_iterations();
+    logger.info(format_args!(
+        "interrupt-test: spin finished; loop iterations={iterations}, \
+         interrupts during the spin={delta} (absolute total since boot={absolute_total})"
+    ));
+
+    // 周回回数も判定に含める。0 回なら「割り込みが来なかった」のではなく
+    // 「そもそもループが回っていない」ので、意味がまるで違う。
+    if iterations == 0 {
+        logger.error(format_args!(
+            "interrupt-test: the loop never iterated; sti-then-idle FAILED (not an interrupt problem)"
+        ));
+    } else if delta != 0 {
+        logger.error(format_args!(
+            "interrupt-test: something was delivered while every IRQ is masked; \
+             sti-then-idle FAILED"
+        ));
+    } else {
+        logger.info(format_args!(
+            "interrupt-test: sti-then-idle OK (interrupts enabled, loop ran {iterations} times, nothing arrived)"
+        ));
+    }
+
+    cpu::halt_forever();
+}
+
+/// IRQ 経路が GPR を復元することを、ソフトウェア割り込みで確かめる。
+///
+/// 全 IRQ をマスクしているため実物の IRQ は届かない。`int 0x20` は PIC を
+/// 経由せず CPU が直接 IDT を引くので、**マスク状態と無関係にハンドラ経路
+/// だけ**を試せる。
+///
+/// 各 GPR にレジスタごとに異なる既知値を入れ、`int` の前後で一致することを
+/// 見る。1 本でも復元を落とすと、そのレジスタだけ値が変わる。
+///
+/// # M4-d-2 での申し送り
+///
+/// **M4-d-2 で EOI を実装したら、このテストは見直しが必要である。**
+/// ソフトウェア割り込みは実在の IRQ ではないため、ハンドラが無条件に EOI を
+/// 送る作りになっていると、**起きてもいない割り込みに応答する**ことになる。
+/// PIC の ISR にビットが立っていない状態で EOI を送ると、優先度スタックの
+/// 状態を壊し、以降の本物の割り込みの扱いを狂わせうる。対応の選択肢は、
+/// (a) このテストを廃止して実タイマでの検証に置き換える、
+/// (b) ハンドラ側でソフトウェア割り込み由来かを判別して EOI を抑制する、
+/// のいずれか。M4-d-2 で判断すること。
+#[cfg(feature = "interrupt-test-irq-path")]
+fn verify_irq_path_restores_registers(logger: &mut Logger<SerialPort>) {
+    // レジスタごとに異なる既知値。値が入れ替わっても気づけるようにする
+    // （M4-b-2 の GPR ダンプ検証と同じ考え方）。
+    //
+    // **rbx と rbp は検査できない。** LLVM がこの 2 本を内部的に予約して
+    // おり、`asm!` のオペランドに指定できない（フレームポインタ等に使う）。
+    // 検査できるのは残る 13 本である。順序の取り違えは 13 本の相異なる値で
+    // 十分に捕まり、本数の過不足は RSP がずれて `iretq` の時点で即座に
+    // 壊れるため、この 2 本が抜けても検査の意味は保たれる。
+    let mut regs: [u64; 13] = [
+        0x0101_0101_0101_0101, // rax
+        0x0202_0202_0202_0202, // rcx
+        0x0303_0303_0303_0303, // rdx
+        0x0404_0404_0404_0404, // rsi
+        0x0505_0505_0505_0505, // rdi
+        0x0606_0606_0606_0606, // r8
+        0x0707_0707_0707_0707, // r9
+        0x0808_0808_0808_0808, // r10
+        0x0909_0909_0909_0909, // r11
+        0x0a0a_0a0a_0a0a_0a0a, // r12
+        0x0b0b_0b0b_0b0b_0b0b, // r13
+        0x0c0c_0c0c_0c0c_0c0c, // r14
+        0x0d0d_0d0d_0d0d_0d0d, // r15
+    ];
+    let before = regs;
+
+    // SAFETY: ベクタ 0x20 の IDT エントリは IRQ スタブを指しており（起動時に
+    // check_irq_stub_table で検証済み）、そのスタブは GPR を退避・復元して
+    // `iretq` で戻る。割り込みゲートなので入場時に IF はクリアされ、戻る
+    // ときに復元される。`nostack` は付けない（ハンドラがスタックを使う）。
+    unsafe {
+        core::arch::asm!(
+            "int 0x20",
+            inout("rax") regs[0],
+            inout("rcx") regs[1],
+            inout("rdx") regs[2],
+            inout("rsi") regs[3],
+            inout("rdi") regs[4],
+            inout("r8") regs[5],
+            inout("r9") regs[6],
+            inout("r10") regs[7],
+            inout("r11") regs[8],
+            inout("r12") regs[9],
+            inout("r13") regs[10],
+            inout("r14") regs[11],
+            inout("r15") regs[12],
+        );
+    }
+
+    let after = regs;
+    let count = idt::interrupt_count(0x20);
+
+    logger.info(format_args!(
+        "irq-path: int 0x20 handled (handler count for vector 0x20 = {count})"
+    ));
+    logger.info(format_args!(
+        "irq-path: rax={:#x} rcx={:#x} r15={:#x} (13 registers checked; rbx and rbp cannot be)",
+        after[0], after[1], after[12]
+    ));
+
+    if count != 1 {
+        logger.error(format_args!(
+            "irq-path: the handler ran {count} time(s), expected exactly 1; FAILED"
+        ));
+        cpu::halt_forever();
+    }
+
+    if before != after {
+        logger.error(format_args!(
+            "irq-path: a general purpose register was not restored across the IRQ; FAILED"
+        ));
+        for (index, (expected, actual)) in before.iter().zip(after.iter()).enumerate() {
+            if expected != actual {
+                logger.error(format_args!(
+                    "irq-path:   register slot {index}: expected {expected:#x}, got {actual:#x}"
+                ));
+            }
+        }
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "irq-path: OK (the IRQ stub returned via iretq and every checked register survived)"
     ));
 }

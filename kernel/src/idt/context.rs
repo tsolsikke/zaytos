@@ -217,3 +217,73 @@ mod tests {
         assert_eq!(context.general_purpose_registers(), expected);
     }
 }
+
+/// IRQ ハンドラが受け取るレジスタ一式（M4-d-1）。
+///
+/// [`ExceptionContext`] と似ているが**別の型にしてある**。IRQ には CR2 も
+/// エラーコードも無く、スタブが積むものが違うためレイアウトが一致しない。
+/// 同じ型を使い回すと、フィールドがずれたまま「もっともらしい値」が読めて
+/// しまう。
+///
+/// スタックは下へ伸びるため、最後に push した `rax` がオフセット 0 に来る。
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct IrqContext {
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rbp: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+
+    /// スタブが push したベクタ番号（0x20-0x2F）。
+    pub vector: u64,
+
+    // --- ここから下は CPU が積んだ割り込みスタックフレーム ---
+    /// 中断された命令のアドレス。`iretq` でここへ戻る。
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    /// 中断された時点のスタックポインタ。ハンドラ自身の RSP ではない。
+    pub rsp: u64,
+    pub ss: u64,
+}
+
+#[cfg(test)]
+mod irq_context_tests {
+    use super::IrqContext;
+    use core::mem::{offset_of, size_of};
+
+    /// push 順から計算される位置と、構造体のオフセットが一致すること。
+    ///
+    /// アセンブリ側は r15 から rax の順に 15 個 push し、その前にスタブが
+    /// ベクタを push している。したがって rax=0, rbx=8, ... r15=112,
+    /// vector=120, rip=128 と並ぶ。
+    #[test]
+    fn the_field_offsets_match_the_push_order() {
+        assert_eq!(offset_of!(IrqContext, rax), 0);
+        assert_eq!(offset_of!(IrqContext, rbx), 8);
+        assert_eq!(offset_of!(IrqContext, r15), 14 * 8);
+        assert_eq!(offset_of!(IrqContext, vector), 15 * 8);
+        assert_eq!(offset_of!(IrqContext, rip), 16 * 8);
+        assert_eq!(offset_of!(IrqContext, ss), 20 * 8);
+        assert_eq!(size_of::<IrqContext>(), 21 * 8);
+    }
+
+    /// GPR は 15 本。**RSP は push しない**（CPU が積むものを使う）。
+    /// ここが 16 本になると、アセンブリ側の pop と数が合わなくなる。
+    #[test]
+    fn exactly_fifteen_general_purpose_registers_are_saved() {
+        let saved_bytes = offset_of!(IrqContext, vector);
+        assert_eq!(saved_bytes / 8, 15);
+    }
+}

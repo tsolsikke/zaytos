@@ -47,3 +47,13 @@ critical-test-double-lock = ["critical-test"]
 # 一時的に sti してから InterruptGuard に入り、IF=1 で enter した場合の
 # 復元経路を確認する。PIC を全マスクした後でないと危険なため M4-c-3 で使う。
 critical-test-restore-enabled = ["critical-test"]
+# 割り込みを有効化する経路の回帰チェック。
+# `cargo xtask run --interrupt-test <kind>` が有効化する。
+interrupt-test = []
+# 全 IRQ をマスクしたまま sti し、何も届かないことを確認する(M4-d-1)。
+interrupt-test-enable-only = ["interrupt-test"]
+# int 0x20 をソフトウェア発行し、IRQ 経路が GPR を復元することを確認する。
+interrupt-test-irq-path = ["interrupt-test"]
+# スタブの 16 バイト境界調整をわざと外し、境界検証が働くことを確認する。
+# 検証そのものを壊すテストなので、通常ビルドには絶対に入れないこと。
+misalign-test = []

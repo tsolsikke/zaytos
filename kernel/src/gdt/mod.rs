@@ -192,6 +192,33 @@ pub fn current_code_selector() -> u16 {
     selector
 }
 
+/// 現在の DS と SS セレクタ（`(ds, ss)`）。
+///
+/// ADR-0018 §2 の項目 1 は「CS/DS/SS が自前ディスクリプタ」を要求している。
+/// M4-a では CS と TR しか読み戻していなかったため、`sti` 前の検証を完全に
+/// するために追加した（M4-d-1）。
+///
+/// **SS が特に重要である。** 割り込み配送時、CPU は SS:RSP をスタックへ積み、
+/// `iretq` はそれを読み戻して復元する。SS が想定と違うディスクリプタを
+/// 指していると、復帰の瞬間に #GP になる。`lgdt` の後にデータセグメントの
+/// 再ロードを忘れていても、割り込みを有効化するまでは何も起きないため、
+/// 症状が出るのは `sti` した後になる。
+pub fn current_data_selectors() -> (u16, u16) {
+    let data: u16;
+    let stack: u16;
+    // SAFETY: DS / SS の読み取りは副作用が無い。
+    unsafe {
+        core::arch::asm!(
+            "mov {ds:x}, ds",
+            "mov {ss:x}, ss",
+            ds = out(reg) data,
+            ss = out(reg) stack,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    (data, stack)
+}
+
 /// 現在の TR セレクタ（`str` の読み戻し）。
 pub fn current_task_register() -> u16 {
     let selector: u16;
