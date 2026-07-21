@@ -1,11 +1,13 @@
 //! COM1 (16550 互換 UART) 経由のシリアルポート出力。
 //!
 //! ADR-0003: 画面描画より先に確立する、最優先の観測手段。
-//! ここに閉じ込めた 2 つの `unsafe fn`（[`outb`] / [`inb`]）以外は、
-//! 呼び出し側から見て安全な API として公開する（unsafe は最小範囲に
-//! 限定する）。
+//! ハードウェアアクセスは [`crate::port`] の `unsafe fn`（`outb` / `inb`）
+//! だけに閉じ込め、それ以外は呼び出し側から見て安全な API として公開する
+//! （unsafe は最小範囲に限定する）。
 
 use core::fmt;
+
+use crate::port::{inb, outb};
 
 /// COM1 の I/O ポートベースアドレス。
 const COM1_BASE: u16 = 0x3F8;
@@ -32,50 +34,11 @@ const UART_CLOCK_HZ: u32 = 115_200;
 const BAUD_RATE: u32 = 38_400;
 const BAUD_DIVISOR: u16 = (UART_CLOCK_HZ / BAUD_RATE) as u16;
 
-/// 1 バイトをポート `port` へ書き込む。
-///
-/// # Safety
-/// 呼び出し側は `port` が意図した意味を持つ有効な I/O ポートであること、
-/// および同一ポートへの並行アクセスが競合しないことを保証しなければならない。
-#[inline]
-unsafe fn outb(port: u16, value: u8) {
-    // SAFETY: `out dx, al` は指定ポートへ1バイト出力するだけで、メモリには
-    // 触れない。呼び出し元がポート番号の妥当性・排他性を保証する契約。
-    unsafe {
-        core::arch::asm!(
-            "out dx, al",
-            in("dx") port,
-            in("al") value,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-}
-
-/// ポート `port` から1バイト読み込む。
-///
-/// # Safety
-/// [`outb`] と同様、`port` の妥当性・排他性は呼び出し側の責任。
-#[inline]
-unsafe fn inb(port: u16) -> u8 {
-    let value: u8;
-    // SAFETY: `in al, dx` は指定ポートから1バイト読み込むだけで、メモリには
-    // 触れない。呼び出し元がポート番号の妥当性・排他性を保証する契約。
-    unsafe {
-        core::arch::asm!(
-            "in al, dx",
-            out("al") value,
-            in("dx") port,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    value
-}
-
 /// COM1 シリアルポートのドライバ。
 ///
 /// `new` はポート番号を記憶するだけで実機には触れないため安全。実際の
-/// ハードウェアアクセスは [`outb`] / [`inb`] に閉じ込め、`init` /
-/// `write_byte` はその契約（固定の既知オフセットのみを、決められた
+/// ハードウェアアクセスは [`crate::port`] の `outb` / `inb` に閉じ込め、
+/// `init` / `write_byte` はその契約（固定の既知オフセットのみを、決められた
 /// 16550 初期化手順どおりに叩く）を自身で満たすことで安全な API として
 /// 公開する。
 pub struct SerialPort {
