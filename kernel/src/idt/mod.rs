@@ -197,7 +197,18 @@ const STACK_ALIGN_ADJUST: usize = 8;
 #[cfg(feature = "misalign-test")]
 const STACK_ALIGN_ADJUST: usize = 0;
 
-// IRQ（0x20-0x2F）の入口となるスタブ表。
+// IRQ スタイル（GPR を復元して `iretq` で戻る）のスタブ表。
+//
+// 0x20-0x2F の 16 本が PIC の IRQ、末尾の 1 本（0x30）は**テスト専用**で
+// PIC の範囲外にある。テスト専用ベクタを PIC の範囲外へ置いているのは、
+// GPR 復元の検証（`int` によるソフトウェア割り込み）に EOI の論理を
+// 一切絡ませないためである。PIC 経由で配送されないベクタなら、EOI を
+// 送らないことがそのまま正しい実装になる。
+//
+// 本番ハンドラ側に「ソフトウェア割り込み由来か」を判別する分岐を入れる案は
+// 採らなかった。判別に失敗すれば本物の割り込みへ EOI を送らない側へ倒れ、
+// 以降の割り込みが全部止まる。テストのために本番経路の信頼性を下げることに
+// なる（ADR-0018 Addendum 3）。
 //
 // **例外用スタブを流用しない。** 例外ハンドラは戻らないため GPR を退避
 // するだけで済むが、IRQ は中断した処理へ**戻る**ので、退避したものを
@@ -212,7 +223,7 @@ core::arch::global_asm!(
     ".globl zaytos_irq_stubs",
     "zaytos_irq_stubs:",
     ".set irq_index, 0",
-    ".rept 16",
+    ".rept 17",
     // スタブ表の刻み幅を独立に検証するためのラベル（例外側と同じ発想）。
     "  .if irq_index == 0",
     "    .globl zaytos_irq_stub_0",
@@ -221,6 +232,10 @@ core::arch::global_asm!(
     "  .if irq_index == 15",
     "    .globl zaytos_irq_stub_15",
     "    zaytos_irq_stub_15:",
+    "  .endif",
+    "  .if irq_index == 16",
+    "    .globl zaytos_irq_stub_16",
+    "    zaytos_irq_stub_16:",
     "  .endif",
     // IRQ にエラーコードは無い。ベクタ番号だけを積む。
     "  push irq_index + 0x20",
@@ -300,13 +315,29 @@ extern "C" {
     static zaytos_irq_stubs_end: u8;
     static zaytos_irq_stub_0: u8;
     static zaytos_irq_stub_15: u8;
+    static zaytos_irq_stub_16: u8;
 }
 
-/// IRQ スタブの個数（0x20-0x2F の 16 本）。
-pub const IRQ_STUB_COUNT: usize = 16;
+/// IRQ スタイルのスタブの本数。
+///
+/// PIC の 16 本（0x20-0x2F）に、テスト専用の 1 本（[`TEST_VECTOR`]）を
+/// 加えた数。
+pub const IRQ_STYLE_STUB_COUNT: usize = 17;
 
-/// IRQ に割り当てた最初のベクタ。`pic::MASTER_VECTOR_OFFSET` と一致する。
+/// IRQ スタイルのスタブが担当する最初のベクタ。
+/// `pic::MASTER_VECTOR_OFFSET` と一致する。
 pub const IRQ_VECTOR_BASE: usize = 0x20;
+
+/// PIC の IRQ に対応するベクタの本数（0x20-0x2F）。
+pub const PIC_IRQ_COUNT: usize = 16;
+
+/// GPR 復元の検証に使うテスト専用ベクタ。
+///
+/// **PIC の範囲（0x20-0x2F）の外にある。** `int 0x30` は 8259A を経由せず
+/// CPU が直接 IDT を引くため、ここへ来た割り込みに EOI を送る必要が無い。
+/// 「EOI を送らないハンドラ」がそのまま正しい実装になるので、テストと
+/// EOI の論理が干渉しない。
+pub const TEST_VECTOR: usize = 0x30;
 
 /// ベクタ別の割り込み回数。
 ///
@@ -330,8 +361,9 @@ pub fn interrupt_count(vector: usize) -> u64 {
 ///
 /// 「この時点より後に何か届いたか」を見るための基準点。**絶対値で
 /// 「全部 0 か」を見てはいけない。** 起動シーケンスの中でソフトウェア
-/// 割り込みによる経路検証（`--interrupt-test irq-path`）を通ると、その分が
-/// 既にカウントされており、絶対値では常に「何か来た」と判定されてしまう。
+/// 割り込みによる経路検証（`--interrupt-test irq-path`）を通ると、
+/// [`TEST_VECTOR`] の分が既にカウントされており、絶対値では常に
+/// 「何か来た」と判定されてしまう。
 pub fn snapshot_counts() -> [u64; IDT_ENTRY_COUNT] {
     core::array::from_fn(|vector| INTERRUPT_COUNTS[vector].load(Ordering::Relaxed))
 }
@@ -441,16 +473,17 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) {
 pub fn check_irq_stub_table() -> StubTableCheck {
     let base = addr_of!(zaytos_irq_stubs) as u64;
     let end = addr_of!(zaytos_irq_stubs_end) as u64;
-    let expected_size = (IRQ_STUB_COUNT * STUB_SIZE) as u64;
+    let expected_size = (IRQ_STYLE_STUB_COUNT * STUB_SIZE) as u64;
 
     let stride_ok = addr_of!(zaytos_irq_stub_0) as u64 == base
-        && addr_of!(zaytos_irq_stub_15) as u64 == base + 15 * STUB_SIZE as u64;
+        && addr_of!(zaytos_irq_stub_15) as u64 == base + 15 * STUB_SIZE as u64
+        && addr_of!(zaytos_irq_stub_16) as u64 == base + 16 * STUB_SIZE as u64;
 
     // 0x20-0x2F の IDT エントリが、IRQ スタブ表の対応する位置を指すこと。
     // 上書きに失敗して例外スタブを指したままだと、IRQ が「戻らない」経路へ
     // 入り、最初の割り込みで停止する。
     let mut entries_ok = true;
-    for index in 0..IRQ_STUB_COUNT {
+    for index in 0..IRQ_STYLE_STUB_COUNT {
         let vector = IRQ_VECTOR_BASE + index;
         let Some(entry) = entry(vector) else {
             entries_ok = false;
@@ -525,9 +558,9 @@ pub fn check_stub_table() -> StubTableCheck {
     // 全エントリのハンドラが表の範囲内で、ベクタ番号と位置が対応すること。
     let mut entries_ok = true;
     for vector in 0..IDT_ENTRY_COUNT {
-        // 0x20-0x2F は IRQ スタブへ差し替えてあるので、こちらの範囲には
-        // 入らない。別系統の check_irq_stub_table が担当する。
-        if (IRQ_VECTOR_BASE..IRQ_VECTOR_BASE + IRQ_STUB_COUNT).contains(&vector) {
+        // 0x20-0x30 は IRQ スタイルのスタブへ差し替えてあるので、こちらの
+        // 範囲には入らない。別系統の check_irq_stub_table が担当する。
+        if (IRQ_VECTOR_BASE..IRQ_VECTOR_BASE + IRQ_STYLE_STUB_COUNT).contains(&vector) {
             continue;
         }
         let Some(entry) = entry(vector) else {
@@ -601,11 +634,11 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>) {
             );
         }
 
-        // 0x20-0x2F だけを IRQ スタブへ上書きする。**例外を IRQ 化しては
-        // ならない。** 例外ハンドラは戻ってはいけない（たとえば #DE から
-        // そのまま戻れば、同じ除算命令を再実行して無限ループになる）。
-        // 戻れるのは、原因が外部にあり再実行の必要がない IRQ だけである。
-        for index in 0..IRQ_STUB_COUNT {
+        // 0x20-0x30 を IRQ スタイルのスタブへ上書きする。**例外を IRQ 化
+        // してはならない。** 例外ハンドラは戻ってはいけない（たとえば #DE
+        // からそのまま戻れば、同じ除算命令を再実行して無限ループになる）。
+        // 戻れるのは、原因が外部にあり再実行の必要がないものだけである。
+        for index in 0..IRQ_STYLE_STUB_COUNT {
             let vector = IRQ_VECTOR_BASE + index;
             (*idt)[vector] = IdtEntry::new(
                 irq_stub_address(index),

@@ -1818,8 +1818,15 @@ fn trigger_interrupt_test(logger: &mut Logger<SerialPort>) -> ! {
         interrupts::spin_with_interrupts_enabled(logger, SPIN_CYCLES, HEARTBEAT_CYCLES);
     }
 
-    // **増加分で判定する。** 絶対値だと、irq-path のソフトウェア割り込みで
-    // 既に 1 件計上されている分を「スピン中に届いた」と誤判定する。
+    // **増加分で判定する。** テスト用ベクタを 0x30 へ移しても、これは
+    // 必要なままである。カウンタは全 256 ベクタを対象に合計するので、
+    // irq-path の `int 0x30` で計上された 1 件は絶対値に残る。0x20 が
+    // 汚れなくなっただけで、絶対値では「スピン中に届いた」と誤判定する
+    // 構造は変わらない。
+    //
+    // 合計の対象を PIC の範囲だけに絞る案は採らない。ここで見たいのは
+    // 「何も届かないこと」であって、`cli` でマスクできない NMI（ベクタ 2）を
+    // 含む全ベクタが対象である。
     let delta = interrupts::spin_interrupt_delta();
     let (absolute_total, _) = idt::interrupt_total_and_first_nonzero();
     let iterations = interrupts::loop_iterations();
@@ -1850,23 +1857,34 @@ fn trigger_interrupt_test(logger: &mut Logger<SerialPort>) -> ! {
 
 /// IRQ 経路が GPR を復元することを、ソフトウェア割り込みで確かめる。
 ///
-/// 全 IRQ をマスクしているため実物の IRQ は届かない。`int 0x20` は PIC を
-/// 経由せず CPU が直接 IDT を引くので、**マスク状態と無関係にハンドラ経路
-/// だけ**を試せる。
+/// 使うのは **PIC の範囲外**のベクタ 0x30（`idt::TEST_VECTOR`）である。
+/// `int 0x30` は 8259A を経由せず CPU が直接 IDT を引くので、マスク状態と
+/// 無関係にハンドラ経路だけを試せるうえ、**EOI の論理が一切絡まない**。
+/// PIC 経由で配送されないベクタなので、ハンドラが EOI を送らないことが
+/// そのまま正しい実装になる。
 ///
 /// 各 GPR にレジスタごとに異なる既知値を入れ、`int` の前後で一致することを
 /// 見る。1 本でも復元を落とすと、そのレジスタだけ値が変わる。
 ///
-/// # M4-d-2 での申し送り
+/// # なぜ 0x20 ではなく 0x30 を使うのか
 ///
-/// **M4-d-2 で EOI を実装したら、このテストは見直しが必要である。**
-/// ソフトウェア割り込みは実在の IRQ ではないため、ハンドラが無条件に EOI を
-/// 送る作りになっていると、**起きてもいない割り込みに応答する**ことになる。
-/// PIC の ISR にビットが立っていない状態で EOI を送ると、優先度スタックの
-/// 状態を壊し、以降の本物の割り込みの扱いを狂わせうる。対応の選択肢は、
-/// (a) このテストを廃止して実タイマでの検証に置き換える、
-/// (b) ハンドラ側でソフトウェア割り込み由来かを判別して EOI を抑制する、
-/// のいずれか。M4-d-2 で判断すること。
+/// M4-d-1 では `int 0x20` を使っていたが、M4-d-2 で EOI を実装すると衝突する。
+/// ソフトウェア割り込みは実在の IRQ ではないため、タイマハンドラが無条件に
+/// EOI を送る作りだと**起きてもいない割り込みに応答する**ことになり、PIC の
+/// 優先度スタックを壊しうる。
+///
+/// 検討した代替案:
+///
+/// - **実タイマでの検証に置き換える**: 却下。「GPR が壊れた」ことは分かるが、
+///   壊れたのがスタブか PIT 設定か EOI かを切り分けられない。ハンドラ経路
+///   だけを単独で試せるという、この検証の価値そのものが失われる。
+/// - **ハンドラ側でソフトウェア割り込み由来かを判別して EOI を抑制する**:
+///   却下。本番経路にテスト専用の分岐が入るうえ、判別を誤れば本物の割り込みへ
+///   EOI を送らない側へ倒れ、以降の割り込みが全部止まる。テストのために
+///   本番経路の信頼性を下げることになる。
+///
+/// PIC の範囲外へ移すのが、本番経路に一切手を入れずに済む唯一の案だった
+/// （ADR-0018 Addendum 3）。
 #[cfg(feature = "interrupt-test-irq-path")]
 fn verify_irq_path_restores_registers(logger: &mut Logger<SerialPort>) {
     // レジスタごとに異なる既知値。値が入れ替わっても気づけるようにする
@@ -1900,7 +1918,10 @@ fn verify_irq_path_restores_registers(logger: &mut Logger<SerialPort>) {
     // ときに復元される。`nostack` は付けない（ハンドラがスタックを使う）。
     unsafe {
         core::arch::asm!(
-            "int 0x20",
+            // idt::TEST_VECTOR と同じ値。`int` のオペランドは即値でなければ
+            // ならず、定数を差し込めないため、ここだけ数値が重複する。
+            // 食い違いは下の const アサーションで防いでいる。
+            "int 0x30",
             inout("rax") regs[0],
             inout("rcx") regs[1],
             inout("rdx") regs[2],
@@ -1918,10 +1939,13 @@ fn verify_irq_path_restores_registers(logger: &mut Logger<SerialPort>) {
     }
 
     let after = regs;
-    let count = idt::interrupt_count(0x20);
+    // `int 0x30` の 0x30 と idt::TEST_VECTOR が食い違わないことを固定する。
+    const _: () = assert!(idt::TEST_VECTOR == 0x30);
+
+    let count = idt::interrupt_count(idt::TEST_VECTOR);
 
     logger.info(format_args!(
-        "irq-path: int 0x20 handled (handler count for vector 0x20 = {count})"
+        "irq-path: int 0x30 handled (handler count for vector 0x30 = {count})"
     ));
     logger.info(format_args!(
         "irq-path: rax={:#x} rcx={:#x} r15={:#x} (13 registers checked; rbx and rbp cannot be)",

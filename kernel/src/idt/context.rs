@@ -245,7 +245,7 @@ pub struct IrqContext {
     pub r14: u64,
     pub r15: u64,
 
-    /// スタブが push したベクタ番号（0x20-0x2F）。
+    /// スタブが push したベクタ番号（0x20-0x30）。
     pub vector: u64,
 
     // --- ここから下は CPU が積んだ割り込みスタックフレーム ---

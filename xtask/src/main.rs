@@ -203,7 +203,7 @@ const INTERRUPT_TESTS: &[CriticalTest] = &[
         feature: "interrupt-test-irq-path",
         expected_markers: &[
             "irq-path: OK (the IRQ stub returned via iretq",
-            "irq-path: int 0x20 handled (handler count for vector 0x20 = 1)",
+            "irq-path: int 0x30 handled (handler count for vector 0x30 = 1)",
         ],
         forbidden_markers: &[
             "irq-path: a general purpose register was not restored",
