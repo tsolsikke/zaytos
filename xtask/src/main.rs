@@ -140,6 +140,19 @@ struct CriticalTest {
     expected_markers: &'static [&'static str],
     /// 現れてはいけない文字列（検出をすり抜けたことを示すもの）。
     forbidden_markers: &'static [&'static str],
+    /// 期待マーカーが出た時点で打ち切らず、必ずタイムアウトまで待つか。
+    ///
+    /// **「起きないこと」を確かめるテストで必要になる。** EOI を落とした
+    /// ビルドはティック 1 回で `hlt` に入ったまま二度と起きない。カーネルは
+    /// 失敗を報告することすらできない（報告するコードが動かない）ので、
+    /// 「一定時間待ってもハートビートが 1 本も出ないこと」でしか判定できない。
+    /// 早期に打ち切ると「まだ出ていないだけ」と区別がつかない。
+    wait_for_full_timeout: bool,
+    /// シリアルログに現れるべきハートビート行の最低数。
+    ///
+    /// `hlt` で眠ったまま起きなくなる「完全停止」は、カーネル内部からは
+    /// 検出できない。外側からハートビートの本数を数えるのが唯一の手段。
+    min_heartbeats: Option<usize>,
 }
 
 const CRITICAL_TESTS: &[CriticalTest] = &[
@@ -152,6 +165,8 @@ const CRITICAL_TESTS: &[CriticalTest] = &[
         ],
         // 検出をすり抜けて 2 回目の lock() が戻ってきた場合に出る行。
         forbidden_markers: &["double-lock detection FAILED"],
+    wait_for_full_timeout: false,
+    min_heartbeats: None,
     },
     // IF=1 の状態から InterruptGuard に入り、抜けたときに復元されることを
     // 確認する。IF=0 から入る経路は通常の起動ログで毎回通っているが、
@@ -168,6 +183,8 @@ const CRITICAL_TESTS: &[CriticalTest] = &[
             "critical-test: IF after the guard dropped = true",
         ],
         forbidden_markers: &["critical-test: restore path FAILED"],
+    wait_for_full_timeout: false,
+    min_heartbeats: None,
     },
 ];
 
@@ -196,6 +213,8 @@ const INTERRUPT_TESTS: &[CriticalTest] = &[
             "stack alignment:",
             "exception: vector=",
         ],
+    wait_for_full_timeout: false,
+    min_heartbeats: None,
     },
     // int 0x20 をソフトウェア発行し、IRQ 経路が GPR を復元することを確認。
     CriticalTest {
@@ -210,6 +229,56 @@ const INTERRUPT_TESTS: &[CriticalTest] = &[
             "stack alignment:",
             "exception: vector=",
         ],
+    wait_for_full_timeout: false,
+    min_heartbeats: None,
+    },
+    // タイマを実際に動かす（M4-d-2）。ティックが増え続けることが EOI の
+    // 動作証明になる。
+    CriticalTest {
+        name: "timer",
+        feature: "interrupt-test-timer",
+        expected_markers: &[
+            "interrupt-test: timer OK",
+            // ICW2 の事後証明。M4-c-3 で未検証のまま残した論点が閉じる。
+            // これは起動しきったことの目印でもある。
+            KERNEL_BOOT_COMPLETE_MARKER,
+            "pic: IMR after unmasking IRQ0 master=0xfe slave=0xff",
+            "heartbeat: ticks=",
+        ],
+        // 500 ティックで止めるので 100 ティックごとのハートビートが 5 本。
+        // 4 本以上出ていれば、ループは最後まで起き続けている。
+        wait_for_full_timeout: false,
+        min_heartbeats: Some(4),
+        forbidden_markers: &[
+            "interrupt-test: timer FAILED",
+            "no tick arrived before the deadline",
+            "the PIC vector offset (ICW2) is wrong",
+            "configuring the PIT changed the interrupt mask",
+            "stack alignment:",
+            "exception: vector=",
+        ],
+    },
+    // EOI をわざと落とし、ティックが 1 回で止まることを確認する。
+    // **検証が実際に機能していることの確認**なので、期待する結果は失敗側。
+    CriticalTest {
+        name: "no-eoi",
+        feature: "no-eoi-test",
+        // **カーネルは失敗を報告できない。** EOI を送らないとティック 1 回で
+        // `hlt` に入ったまま二度と起きず、判定コードに到達しないためである。
+        // これは「無条件 hlt のメインループは完全停止を自己検出できない」と
+        // いう既知の限界そのものであり、その限界を逆手に取った検証になる。
+        // 期待するのは「最初のティックまでは確かに届いたこと」だけで、
+        // その後止まったことは forbidden 側で外から見る。
+        expected_markers: &[
+            KERNEL_BOOT_COMPLETE_MARKER,
+            "pit: channel 0 set to divisor=11932",
+        ],
+        // 2 回目以降が来ていればハートビートが出る。1 本でも出たら、
+        // EOI 無しでもティックが続いたことになり検証が成立しない。
+        forbidden_markers: &["interrupt-test: timer OK", "heartbeat: ticks="],
+        // 「出ないこと」の確認なので早期に打ち切らず、最後まで待つ。
+        wait_for_full_timeout: true,
+        min_heartbeats: None,
     },
     // 境界調整をわざと外し、境界検証が働くことを確認する。
     // **検証が壊れていないことを確かめるためのテストなので、期待する結果は
@@ -223,6 +292,8 @@ const INTERRUPT_TESTS: &[CriticalTest] = &[
             "halting (cli + hlt loop)",
         ],
         forbidden_markers: &["irq-path: OK"],
+    wait_for_full_timeout: false,
+    min_heartbeats: None,
     },
 ];
 
@@ -231,6 +302,19 @@ const INTERRUPT_TESTS: &[CriticalTest] = &[
 /// kernel の `kernel_main` が最初に出す行（`common::log` の INFO 形式）。
 /// これがログに無ければ、カーネルは走っていない。
 const KERNEL_STARTED_MARKER: &str = "[INFO] ZaytOS kernel: entered _start";
+
+/// カーネルが**起動しきった**ことを示す行。
+///
+/// M4-d-2 より前は `kernel: halting` が到達点の目印だった。タイマを入れて
+/// カーネルが停止しなくなったため、その行はもう出ない。代わりに
+/// 「最初のタイマ割り込みが届いた」を到達点とする。ここまで来ていれば、
+/// GDT / IDT / ページング / ヒープ / コンソール / PIC / PIT のすべてが
+/// 動いており、割り込みも配送されている。
+///
+/// [`KERNEL_STARTED_MARKER`] とは役割が違う。あちらは「そもそもカーネルが
+/// 走ったか」（OVMF の起動失敗との切り分け）を見るためのもので、こちらは
+/// 「最後まで通ったか」を見る。
+const KERNEL_BOOT_COMPLETE_MARKER: &str = "timer: first tick arrived as vector 0x20";
 
 /// bootloader が起動したことを示す、シリアルログの既知の行。
 ///
@@ -316,7 +400,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -326,6 +410,7 @@ fn main() -> Result<()> {
             let gui = rest.iter().any(|a| a == "--gui");
             let gfx_test = rest.iter().any(|a| a == "--gfx-test");
             let kvm = rest.iter().any(|a| a == "--kvm");
+            let no_limit = rest.iter().any(|a| a == "--no-limit");
             if let Some(index) = rest.iter().position(|a| a == "--interrupt-test") {
                 let kind = rest.get(index + 1).with_context(|| {
                     let names: Vec<&str> = INTERRUPT_TESTS.iter().map(|t| t.name).collect();
@@ -347,7 +432,7 @@ fn main() -> Result<()> {
                 })?;
                 return cmd_exception_test(kind);
             }
-            cmd_run(panic_test, gui, gfx_test, kvm)
+            cmd_run(panic_test, gui, gfx_test, kvm, no_limit)
         }
         Some("screenshot") => cmd_screenshot(&args[1..]),
         Some("gen-font") => font::generate(&workspace_root()?),
@@ -396,7 +481,7 @@ struct QemuLaunchOptions<'a> {
     accelerator: Accelerator,
 }
 
-fn cmd_run(panic_test: bool, gui: bool, gfx_test: bool, kvm: bool) -> Result<()> {
+fn cmd_run(panic_test: bool, gui: bool, gfx_test: bool, kvm: bool, no_limit: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
     let bootloader_efi = build_bootloader(&workspace_root, panic_test)?;
@@ -406,9 +491,21 @@ fn cmd_run(panic_test: bool, gui: bool, gfx_test: bool, kvm: bool) -> Result<()>
     if panic_test {
         run_panic_test(&workspace_root, &ovmf_vars, &esp_dir)
     } else {
-        run_interactive(&workspace_root, &ovmf_vars, &esp_dir, gui, kvm)
+        run_interactive(&workspace_root, &ovmf_vars, &esp_dir, gui, kvm, no_limit)
     }
 }
+
+/// `cargo xtask run` の既定の実行時間上限。
+///
+/// **M4-d-2 でカーネルが停止しなくなった。** タイマ割り込みで回り続けるため、
+/// 放置すると `-d int` のデバッグログが増え続ける。実測で約 137KB/秒
+/// （100Hz、1 ティックあたり 20 行強）なので、1 時間放置すれば 500MB に
+/// 達する。「知らずに放置してディスクが埋まる」経路を塞ぐため、既定で
+/// 打ち切る。`--no-limit` で解除できる。
+const RUN_TIME_LIMIT: Duration = Duration::from_secs(120);
+
+/// `-d int,cpu_reset` のログが増える概算速度（実測、TCG・100Hz）。
+const DEBUG_LOG_GROWTH_KB_PER_SEC: u64 = 137;
 
 fn run_interactive(
     workspace_root: &Path,
@@ -416,6 +513,7 @@ fn run_interactive(
     esp_dir: &Path,
     gui: bool,
     kvm: bool,
+    no_limit: bool,
 ) -> Result<()> {
     let debug_log = workspace_root.join("target").join("qemu-debug.log");
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
@@ -437,6 +535,20 @@ fn run_interactive(
         },
     });
     println!("qemu debug log (-d int,cpu_reset): {}", debug_log.display());
+    // M4-d-2 以降、カーネルは halt せずタイマで回り続ける。ログが増え続ける
+    // ことを知らせておく。
+    println!(
+        "note: the kernel no longer halts (M4-d-2). It keeps ticking, so the debug log grows \
+         at roughly {DEBUG_LOG_GROWTH_KB_PER_SEC} KB/s."
+    );
+    if no_limit {
+        println!("note: --no-limit given; qemu will run until you stop it (Ctrl-C).");
+    } else {
+        println!(
+            "note: qemu will be stopped automatically after {} s (pass --no-limit to disable).",
+            RUN_TIME_LIMIT.as_secs()
+        );
+    }
     if kvm {
         println!(
             "accelerator: KVM (measurement mode). exception logging via -d int is \
@@ -444,17 +556,46 @@ fn run_interactive(
         );
     }
 
-    let status = Command::new("qemu-system-x86_64")
+    let mut child = Command::new("qemu-system-x86_64")
         .args(&qemu_args)
-        .status()
+        .spawn()
         .context(
             "failed to launch qemu-system-x86_64 (is it installed? `apt install qemu-system-x86`)",
         )?;
 
-    if !status.success() {
-        bail!("qemu-system-x86_64 exited with {status}");
+    if no_limit {
+        let status = child.wait().context("failed to wait for qemu-system-x86_64")?;
+        if !status.success() {
+            bail!("qemu-system-x86_64 exited with {status}");
+        }
+        return Ok(());
     }
-    Ok(())
+
+    // 上限まで待つ。途中で自分から終わった（パニック等）なら、そこで抜ける。
+    let deadline = Instant::now() + RUN_TIME_LIMIT;
+    loop {
+        match child.try_wait().context("failed to poll qemu-system-x86_64")? {
+            Some(status) => {
+                if !status.success() {
+                    bail!("qemu-system-x86_64 exited with {status}");
+                }
+                return Ok(());
+            }
+            None => {
+                if Instant::now() >= deadline {
+                    println!(
+                        "\nreached the {} s limit; stopping qemu. The debug log is about {} MB.",
+                        RUN_TIME_LIMIT.as_secs(),
+                        (RUN_TIME_LIMIT.as_secs() * DEBUG_LOG_GROWTH_KB_PER_SEC) / 1024
+                    );
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Ok(());
+                }
+                thread::sleep(PANIC_TEST_POLL_INTERVAL);
+            }
+        }
+    }
 }
 
 /// パニックハンドラの回帰チェック。`panic-test` フィーチャ付きでビルドした
@@ -765,6 +906,7 @@ fn cmd_marker_test(tests: &[CriticalTest], kind_label: &str, kind: &str) -> Resu
     });
 
     let sentinel = test.expected_markers[0];
+    let wait_for_full_timeout = test.wait_for_full_timeout;
     let mut child = Command::new("qemu-system-x86_64")
         .args(&qemu_args)
         .spawn()
@@ -772,9 +914,10 @@ fn cmd_marker_test(tests: &[CriticalTest], kind_label: &str, kind: &str) -> Resu
 
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     loop {
-        if fs::read_to_string(&serial_log)
-            .map(|c| c.contains(sentinel))
-            .unwrap_or(false)
+        if !wait_for_full_timeout
+            && fs::read_to_string(&serial_log)
+                .map(|c| c.contains(sentinel))
+                .unwrap_or(false)
         {
             break;
         }
@@ -814,7 +957,28 @@ fn cmd_marker_test(tests: &[CriticalTest], kind_label: &str, kind: &str) -> Resu
     }
     println!("--- end ---");
 
-    let mut ok = true;
+    // 期待/禁止マーカーとは独立した、外側からの生存判定の結果。
+    let mut ok_override = true;
+
+    // **完全停止の外側からの検出。** メインループが `hlt` で眠ったまま
+    // 二度と起きなくなった場合、カーネル自身はそれを検出できない（検出用の
+    // コードが動かない）。QEMU も `-no-shutdown` で生き続けるため、プロセスの
+    // 生死からも判断できない。**シリアルログのハートビート回数**だけが外から
+    // 見える手掛かりになる。「カーネル内部では検出できないが、テスト基盤では
+    // 検出できる」という切り分けである。
+    if let Some(expected) = test.min_heartbeats {
+        let seen = serial.matches("heartbeat: ticks=").count();
+        println!("{context}: heartbeat lines = {seen} (expected at least {expected})");
+        if seen < expected {
+            println!(
+                "{context}: too few heartbeats - the main loop probably stopped waking up. \
+                 This is the only way to notice a permanent hlt from the outside."
+            );
+            ok_override = false;
+        }
+    }
+
+    let mut ok = ok_override;
     for marker in test.expected_markers {
         let present = serial.contains(marker);
         ok &= present;

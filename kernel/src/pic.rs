@@ -279,6 +279,77 @@ pub unsafe fn remap(master_offset: u8, slave_offset: u8) -> Result<(), OffsetErr
     Ok(())
 }
 
+/// OCW2: 非特定 EOI（End Of Interrupt）。
+///
+/// bit5 だけを立てる。「今処理中の最も優先度の高い割り込み」を終了と
+/// みなす形式で、ベクタ番号を指定する特定 EOI（0x60 | irq）より単純である。
+/// シングルコアで多重割り込みを許していない現状では両者に差が無い。
+const OCW2_END_OF_INTERRUPT: u8 = 0x20;
+
+/// 指定した IRQ の処理完了を PIC へ通知する。
+///
+/// **ハンドラの処理を終えてから送ること。** EOI を送った時点で PIC は次の
+/// 同じ割り込みを上げられるようになる。
+///
+/// **スレーブ側の IRQ（8-15）では両方へ送る必要がある。** スレーブは
+/// マスタの IRQ2 を経由して CPU へ届くため、マスタから見ても 1 件の割り込みが
+/// 進行中になっている。スレーブにだけ送るとマスタ側が処理中のまま残り、
+/// **以降マスタの全 IRQ が上がらなくなる**（EOI 忘れと同じ症状が、別の
+/// IRQ に対して起きる）。順序はスレーブ → マスタ。
+///
+/// # Safety
+///
+/// **実際に発生した割り込みに対してのみ呼ぶこと。** 発生していない割り込みに
+/// EOI を送ると、PIC の優先度スタックの状態が実態とずれる。とくに
+/// スプリアス割り込み（IRQ7 / IRQ15）へ送ってはならない。
+pub unsafe fn send_end_of_interrupt(irq: u8) {
+    // SAFETY: コマンドポートへの OCW2 書き込み。呼び出し側が「実際に発生した
+    // 割り込みである」ことを保証する契約。
+    unsafe {
+        if irq >= IRQS_PER_PIC {
+            outb(SLAVE_COMMAND_PORT, OCW2_END_OF_INTERRUPT);
+            io_wait();
+        }
+        outb(MASTER_COMMAND_PORT, OCW2_END_OF_INTERRUPT);
+        io_wait();
+    }
+}
+
+/// 現在のマスクから、指定した IRQ 1 本だけを解除した値を返す（純粋ロジック）。
+///
+/// マスタ側の IRQ を解除する場合は何も連動しない。**スレーブ側（8-15）を
+/// 解除する場合は、マスタの IRQ2（カスケード）も同時に解除しなければ
+/// ならない。** スレーブの割り込みはすべてマスタの IRQ2 を通って CPU へ
+/// 届くため、そこが閉じていればスレーブ側で開けても何も来ない。
+pub const fn masks_with_irq_unmasked(masks: (u8, u8), irq: u8) -> (u8, u8) {
+    let (master, slave) = masks;
+    if irq < IRQS_PER_PIC {
+        (master & !(1 << irq), slave)
+    } else if irq < 2 * IRQS_PER_PIC {
+        (
+            // カスケードも開ける。忘れるとスレーブ側の IRQ が一切届かない。
+            master & !(1 << CASCADE_IRQ),
+            slave & !(1 << (irq - IRQS_PER_PIC)),
+        )
+    } else {
+        masks
+    }
+}
+
+/// 指定した IRQ 1 本のマスクを解除する。
+///
+/// # Safety
+///
+/// 解除する IRQ には、EOI を発行するハンドラが IDT に入っていなければ
+/// ならない（ADR-0018 §2 の項目 5 / 7）。
+pub unsafe fn unmask_irq(irq: u8) {
+    let updated = masks_with_irq_unmasked(read_masks(), irq);
+    // SAFETY: ハンドラの用意は呼び出し側の契約。
+    unsafe {
+        set_masks(updated.0, updated.1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,6 +434,45 @@ mod tests {
         assert_eq!(vectors, expected);
         assert_eq!(irq_vector(16), None);
         assert_eq!(irq_vector(255), None);
+    }
+
+    #[test]
+    fn unmasking_a_master_irq_touches_only_the_master() {
+        assert_eq!(
+            masks_with_irq_unmasked((MASK_ALL, MASK_ALL), 0),
+            (0b1111_1110, MASK_ALL)
+        );
+        assert_eq!(
+            masks_with_irq_unmasked((MASK_ALL, MASK_ALL), 1),
+            (0b1111_1101, MASK_ALL)
+        );
+    }
+
+    /// スレーブ側を開けるとき、マスタの IRQ2 も一緒に開くこと。
+    ///
+    /// ここを忘れると、スレーブ側で該当ビットを開けても IRQ8-15 が一切
+    /// 届かない。しかも「マスクは外したのに来ない」という形で症状が出るため、
+    /// PIC ではなくデバイス側を疑って時間を溶かしやすい。
+    #[test]
+    fn unmasking_a_slave_irq_also_opens_the_cascade_on_the_master() {
+        // IRQ8（RTC）。スレーブの bit0 と、マスタの bit2 が開く。
+        assert_eq!(
+            masks_with_irq_unmasked((MASK_ALL, MASK_ALL), 8),
+            (0b1111_1011, 0b1111_1110)
+        );
+        // IRQ12（PS/2 マウス）。スレーブの bit4 と、マスタの bit2。
+        assert_eq!(
+            masks_with_irq_unmasked((MASK_ALL, MASK_ALL), 12),
+            (0b1111_1011, 0b1110_1111)
+        );
+    }
+
+    #[test]
+    fn unmasking_an_out_of_range_irq_changes_nothing() {
+        assert_eq!(
+            masks_with_irq_unmasked((MASK_ALL, MASK_ALL), 16),
+            (MASK_ALL, MASK_ALL)
+        );
     }
 
     #[test]

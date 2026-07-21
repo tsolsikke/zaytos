@@ -349,6 +349,39 @@ pub const TEST_VECTOR: usize = 0x30;
 static INTERRUPT_COUNTS: [AtomicU64; IDT_ENTRY_COUNT] =
     [const { AtomicU64::new(0) }; IDT_ENTRY_COUNT];
 
+/// タイマ（IRQ0 = ベクタ 0x20）のティック数。
+///
+/// [`INTERRUPT_COUNTS`] とは別に持つ。ティックは「時間の流れ」として
+/// 頻繁に読む値であり、ベクタ番号での添字を経由せず直接読めるほうが
+/// メインループの意図が読み取りやすい。
+static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// PIC の範囲で最初に観測した割り込みのベクタ番号。
+///
+/// **これが ICW2（PIC のベクタオフセット）を事後的に証明する唯一の手段
+/// である。** ICW2 は書き込み専用で読み戻せないため、再マップが意図どおり
+/// 効いたかは「実際にどのベクタで届いたか」でしか分からない
+/// （ADR-0018 Addendum 1）。
+///
+/// [`NO_VECTOR_YET`] は「まだ 1 件も来ていない」ことを表す番兵。
+static FIRST_PIC_VECTOR: AtomicU64 = AtomicU64::new(NO_VECTOR_YET);
+
+/// [`FIRST_PIC_VECTOR`] の「まだ来ていない」を表す値（ベクタ番号は 0-255）。
+pub const NO_VECTOR_YET: u64 = u64::MAX;
+
+/// タイマのティック数を読む。
+pub fn timer_ticks() -> u64 {
+    TIMER_TICKS.load(Ordering::Relaxed)
+}
+
+/// PIC の範囲で最初に届いた割り込みのベクタ番号。まだなら `None`。
+pub fn first_pic_vector() -> Option<u64> {
+    match FIRST_PIC_VECTOR.load(Ordering::Relaxed) {
+        NO_VECTOR_YET => None,
+        vector => Some(vector),
+    }
+}
+
 /// 指定ベクタの割り込み回数を読む。
 pub fn interrupt_count(vector: usize) -> u64 {
     if vector >= IDT_ENTRY_COUNT {
@@ -464,7 +497,37 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) {
     if vector < IDT_ENTRY_COUNT {
         INTERRUPT_COUNTS[vector].fetch_add(1, Ordering::Relaxed);
     }
+
+    // PIC の範囲で最初に届いたベクタを 1 度だけ記録する。ICW2 の検証に使う。
+    if (IRQ_VECTOR_BASE..IRQ_VECTOR_BASE + PIC_IRQ_COUNT).contains(&vector) {
+        let _ = FIRST_PIC_VECTOR.compare_exchange(
+            NO_VECTOR_YET,
+            context.vector,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
+
+    if vector == TIMER_VECTOR {
+        TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+
+        // **処理を終えてから EOI を送る。** 送った時点で PIC は次の同じ
+        // 割り込みを上げられるようになる。
+        //
+        // SAFETY: 実際に配送された IRQ0 に対する応答である。
+        #[cfg(not(feature = "no-eoi-test"))]
+        unsafe {
+            crate::pic::send_end_of_interrupt(0);
+        }
+    }
+
+    // ここで出力してはならない（ADR-0018 §5）。100Hz で毎回ログを出すと
+    // 出力自体がハンドラの処理時間を支配し、ティックを取りこぼす。観測は
+    // メインループがカウンタ越しに行う。
 }
+
+/// タイマ（IRQ0）のベクタ。`pic::MASTER_VECTOR_OFFSET` と一致する。
+pub const TIMER_VECTOR: usize = 0x20;
 
 /// IRQ スタブ表の配置検証。
 ///

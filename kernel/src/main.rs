@@ -24,12 +24,10 @@ use kernel::stack;
 use kernel::graphics::{Color, Framebuffer, FramebufferLayout};
 use kernel::heap;
 use kernel::idt;
-// 7 項目の検証とメインループは `--interrupt-test` 専用。通常起動では
-// sti しないため使わない（M4-d-2 で常設の起動経路へ移す）。
-#[cfg(feature = "interrupt-test")]
 use kernel::interrupts;
 use kernel::paging;
 use kernel::pic;
+use kernel::pit;
 use kernel::paging::plan::{resolve_pages, MappedRanges};
 use kernel::paging::table::PageTableBuilder;
 
@@ -764,17 +762,16 @@ extern "sysv64" fn kernel_main() -> ! {
     #[cfg(feature = "critical-test")]
     trigger_critical_test(&mut logger);
 
-    // 割り込みを有効化する経路の回帰チェック（M4-d-1）。
+    // 割り込みを有効化する経路の回帰チェック（M4-d-1 / M4-d-2）。
     #[cfg(feature = "interrupt-test")]
-    trigger_interrupt_test(&mut logger);
+    trigger_interrupt_test(&mut logger, console.as_mut());
 
-    log_both(
-        &mut logger,
-        console.as_mut(),
-        LogLevel::Info,
-        format_args!("kernel: halting"),
-    );
-    cpu::halt_forever();
+    // === M4-d-2: タイマを動かす ===
+    //
+    // ここから先は戻らない。ZaytOS で初めて「時間が流れる」状態に入り、
+    // メインループがハートビートを出し続ける。`stop_after_ticks` に 0 を
+    // 渡すと止まらない（回帰チェックのときだけ有限で打ち切る）。
+    start_timer(&mut logger, console.as_mut(), 0);
 }
 
 /// フレームバッファを検証し、描画ハンドルを作る（M3-a）。
@@ -1783,7 +1780,10 @@ fn report_lock_interrupt_state(logger: &mut Logger<SerialPort>) {
 /// 対応する feature を有効にしてビルドする。
 #[cfg(feature = "interrupt-test")]
 #[allow(unreachable_code)]
-fn trigger_interrupt_test(logger: &mut Logger<SerialPort>) -> ! {
+fn trigger_interrupt_test(
+    logger: &mut Logger<SerialPort>,
+    #[allow(unused)] console: Option<&mut Console>,
+) -> ! {
     /// スピンする長さと、ハートビートの間隔（TSC サイクル）。
     ///
     /// TSC の周波数は環境依存で、時刻源として信用できない（`cpu` モジュール
@@ -1805,6 +1805,18 @@ fn trigger_interrupt_test(logger: &mut Logger<SerialPort>) -> ! {
     {
         // IRQ 経路が GPR を復元することを、ソフトウェア割り込みで確かめる。
         verify_irq_path_restores_registers(logger);
+    }
+
+    #[cfg(feature = "interrupt-test-timer")]
+    {
+        /// 何ティックで止めるか。100Hz なので 500 ティック = 約 5 秒。
+        ///
+        /// TCG で `-d int` を有効にすると 1 ティックあたり 20 行強が
+        /// 記録される。500 ティックで約 1 万行・800KB 程度に収まる
+        /// （M4-b-1 のログが 14,400 行だったので同程度）。通常起動では
+        /// 止めずに回し続ける。
+        const STOP_AFTER_TICKS: u64 = 500;
+        start_timer(logger, console, STOP_AFTER_TICKS);
     }
 
     logger.info(format_args!(
@@ -1976,4 +1988,120 @@ fn verify_irq_path_restores_registers(logger: &mut Logger<SerialPort>) {
     logger.info(format_args!(
         "irq-path: OK (the IRQ stub returned via iretq and every checked register survived)"
     ));
+}
+
+/// PIT を設定し、IRQ0 を解禁してタイマを動かす（M4-d-2）。
+///
+/// # 割り込みを有効化するまでの順序
+///
+/// 設定中に割り込みが飛び込む余地を作らないため、順序を固定している。
+///
+/// 1. PIT を設定する（この時点で IRQ0 はマスクされたまま）
+/// 2. IMR を読み戻し、**まだ全マスクのまま**であることを確認する。
+///    PIT の設定が誤って IMR を触っていないことの確認。ポート 0x21（IMR）と
+///    0x40/0x43（PIT）は番号が近く、定数の書き間違いが起こりうる
+/// 3. IRQ0 のマスクを解除する（**解禁はこの 1 箇所のみ**）
+/// 4. IMR を読み戻し、master=0xFE / slave=0xFF を照合する
+/// 5. `sti` 前 7 項目を再検証する（項目 5 の期待値が 0xFF から 0xFE へ変わる）
+/// 6. `sti`（`run_timer_loop` の中で行う）
+fn start_timer(
+    logger: &mut Logger<SerialPort>,
+    console: Option<&mut Console>,
+    stop_after_ticks: u64,
+) -> ! {
+    // --- 1. PIT を設定する ---
+    // SAFETY: 起動時に 1 回だけ。この時点で IRQ0 はマスクされている
+    // （M4-c-3 の remap が全マスクで終わり、以降解除していない）。
+    let divisor = match unsafe { pit::configure_channel0(pit::TARGET_FREQUENCY_HZ) } {
+        Ok(divisor) => divisor,
+        Err(error) => {
+            logger.error(format_args!(
+                "pit: refused the requested frequency ({error:?}); halting"
+            ));
+            cpu::halt_forever();
+        }
+    };
+    let actual = pit::actual_frequency_millihertz(divisor);
+    logger.info(format_args!(
+        "pit: channel 0 set to divisor={divisor} for a requested {} Hz; actual is {}.{:03} Hz \
+         (the divisor is an integer, so the period never matches exactly)",
+        pit::TARGET_FREQUENCY_HZ,
+        actual / 1000,
+        actual % 1000
+    ));
+
+    // --- 2. PIT の設定が IMR を壊していないことを確認する ---
+    let (master_before, slave_before) = pic::read_masks();
+    logger.info(format_args!(
+        "pit: IMR after configuring the PIT master={master_before:#04x} slave={slave_before:#04x} \
+         (must still be {:#04x}/{:#04x}; the PIT ports must not touch the IMR)",
+        pic::MASK_ALL,
+        pic::MASK_ALL
+    ));
+    if master_before != pic::MASK_ALL || slave_before != pic::MASK_ALL {
+        logger.error(format_args!(
+            "pit: configuring the PIT changed the interrupt mask; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    // --- 3. IRQ0 を解禁する（ここが唯一の解禁箇所）---
+    // SAFETY: ベクタ 0x20 には IRQ スタイルのスタブが入っており（起動時に
+    // check_irq_stub_table で検証済み）、ハンドラは EOI を発行する。
+    unsafe {
+        pic::unmask_irq(0);
+    }
+
+    // --- 4. 解禁の結果を読み戻す ---
+    let expected_master = pic::MASK_ALL & !1;
+    let (master_after, slave_after) = pic::read_masks();
+    logger.info(format_args!(
+        "pic: IMR after unmasking IRQ0 master={master_after:#04x} slave={slave_after:#04x} \
+         (expected {expected_master:#04x}/{:#04x}) [read back from hardware]",
+        pic::MASK_ALL
+    ));
+    if master_after != expected_master || slave_after != pic::MASK_ALL {
+        logger.error(format_args!(
+            "pic: the mask read-back after unmasking IRQ0 does not match; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    // --- 5. sti 前 7 項目を再検証する ---
+    let report = interrupts::verify_ready_for_sti_with_timer(logger);
+    if !report.may_enable_interrupts() {
+        logger.error(format_args!(
+            "interrupt-test: the pre-sti checks did not pass; refusing to sti (ADR-0018 §2)"
+        ));
+        cpu::halt_forever();
+    }
+
+    // --- 6. sti してループへ入る ---
+    // SAFETY: 7 項目を検証し、PIT を設定し、IRQ0 のマスクを外した。
+    // ベクタ 0x20 のハンドラはティックを数えて EOI を送る。
+    unsafe {
+        interrupts::run_timer_loop(logger, console, stop_after_ticks);
+    }
+
+    // stop_after_ticks == 0 なら run_timer_loop は戻らないので、ここから先は
+    // 回帰チェック（`--interrupt-test timer`）でしか実行されない。
+    let ticks = idt::timer_ticks();
+    logger.info(format_args!(
+        "interrupt-test: timer stopped at {ticks} tick(s), max tick jump per wakeup={}",
+        interrupts::max_tick_jump()
+    ));
+
+    // EOI が出ていなければ 1 回で止まる。2 以上増えたこと自体が EOI の
+    // 動作証明である（ADR-0018 §2 の項目 7）。
+    if ticks >= 2 {
+        logger.info(format_args!(
+            "interrupt-test: timer OK (ticks kept coming, which proves the handler issues EOI)"
+        ));
+    } else {
+        logger.error(format_args!(
+            "interrupt-test: timer FAILED - only {ticks} tick(s); the handler is not issuing EOI"
+        ));
+    }
+
+    cpu::halt_forever();
 }

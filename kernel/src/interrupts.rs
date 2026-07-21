@@ -99,6 +99,25 @@ impl ReadinessReport {
 ///   マスク解除しないため、EOI を発行する対象そのものが存在しない。
 ///   M4-d-2 で実装と同時に `Verified` へ昇格させる。
 pub fn verify_ready_for_sti(logger: &mut Logger<SerialPort>) -> ReadinessReport {
+    verify_ready(logger, pic::MASK_ALL, false)
+}
+
+/// タイマを解禁した後の 7 項目検証。
+///
+/// [`verify_ready_for_sti`] との違いは 2 点だけ。項目 5 の期待値が
+/// 「全マスク」から「IRQ0 だけ解除」へ変わることと、項目 7（EOI）が
+/// `Unverifiable` ではなくなることである。項目 7 が `Verified` へ移るのは
+/// 実際にティックが増え続けたときなので、この時点では
+/// 「実装済み・これから検証」として扱う。
+pub fn verify_ready_for_sti_with_timer(logger: &mut Logger<SerialPort>) -> ReadinessReport {
+    verify_ready(logger, pic::MASK_ALL & !1, true)
+}
+
+fn verify_ready(
+    logger: &mut Logger<SerialPort>,
+    expected_master_mask: u8,
+    timer_enabled: bool,
+) -> ReadinessReport {
     // --- 1. GDT と CS/DS/SS ---
     let (gdt_base, _) = gdt::current_gdt();
     let code = gdt::current_code_selector();
@@ -170,11 +189,10 @@ pub fn verify_ready_for_sti(logger: &mut Logger<SerialPort>) -> ReadinessReport 
     let (master_mask, slave_mask) = pic::read_masks();
     logger.info(format_args!(
         "sti-check 5: PIC IMR master={master_mask:#04x} slave={slave_mask:#04x} \
-         (expected {:#04x}/{:#04x}, every IRQ masked) [read back from hardware]",
-        pic::MASK_ALL,
+         (expected {expected_master_mask:#04x}/{:#04x}) [read back from hardware]",
         pic::MASK_ALL
     ));
-    let irqs_masked = if master_mask == pic::MASK_ALL && slave_mask == pic::MASK_ALL {
+    let irqs_masked = if master_mask == expected_master_mask && slave_mask == pic::MASK_ALL {
         CheckState::Verified
     } else {
         CheckState::Failed
@@ -188,7 +206,12 @@ pub fn verify_ready_for_sti(logger: &mut Logger<SerialPort>) -> ReadinessReport 
          timer IRQ shows up as vector {:#04x}",
         pic::MASTER_VECTOR_OFFSET
     ));
-    let pic_remapped = if irqs_masked == CheckState::Verified {
+    let pic_remapped = if timer_enabled {
+        // タイマを解禁した以上、マスクによる保護はもう無い。ここから先は
+        // 「最初のティックがベクタ 0x20 で届くか」で事後的に判定する。
+        // まだ届いていないので、この時点では未検証のままである。
+        CheckState::Unverifiable
+    } else if irqs_masked == CheckState::Verified {
         CheckState::Unverifiable
     } else {
         // マスクが効いていないなら、検証不能を許す根拠そのものが失われる。
@@ -201,11 +224,18 @@ pub fn verify_ready_for_sti(logger: &mut Logger<SerialPort>) -> ReadinessReport 
     let interrupt_safe_locks = verify_lock_disables_interrupts(logger);
 
     // --- 7. EOI ---
-    logger.info(format_args!(
-        "sti-check 7: no IRQ is unmasked in M4-d-1, so there is no interrupt to acknowledge; \
-         EOI is implemented and verified in M4-d-2"
-    ));
-    let handlers_send_eoi = CheckState::Unverifiable;
+    let handlers_send_eoi = if timer_enabled {
+        logger.info(format_args!(
+            "sti-check 7: the timer handler issues EOI; this is proven only by ticks continuing \
+             to arrive, so it stays unverified until the loop has seen at least two"
+        ));
+        CheckState::Unverifiable
+    } else {
+        logger.info(format_args!(
+            "sti-check 7: no IRQ is unmasked, so there is no interrupt to acknowledge"
+        ));
+        CheckState::Unverifiable
+    };
 
     let report = ReadinessReport {
         gdt_and_segments,
@@ -366,5 +396,186 @@ pub unsafe fn spin_with_interrupts_enabled(
     // SAFETY: 観測が終わったので、割り込みを禁止した既知の状態へ戻す。
     unsafe {
         cpu::disable_interrupts();
+    }
+}
+
+/// ハートビートを出す間隔（ティック数）。
+///
+/// 100Hz なので 100 ティック = 約 1 秒。**画面で目視して変化が分かる
+/// 間隔にしてある。** これより短いと画面のスクロールが速すぎて読めず、
+/// 長いと「動いているのか止まっているのか」の判断が遅れる。
+pub const HEARTBEAT_TICKS: u64 = 100;
+
+/// 最初のティックを待つ上限（TSC サイクル）。
+///
+/// これを過ぎても 1 件も来ないなら、タイマが設定できていないか、IMR が
+/// 効いていないか、ICW2 が誤っているかのいずれかである。無言で待ち続けると
+/// ハングと区別がつかないので fail-fast する。
+const FIRST_TICK_TIMEOUT_CYCLES: u64 = 20_000_000_000;
+
+/// メインループが 1 回起きるあいだに進んだティック数の最大値。
+///
+/// **これはハードウェアのティック取りこぼしではなく、メインループが
+/// 「観測し損ねた」量である。** 1 なら毎ティック起きて観測できている。
+/// 2 以上なら、起きて処理しているあいだに次のティックが来ている。
+///
+/// 本当の意味でのティック取りこぼし（PIT が発火したのに CPU へ届かない、
+/// あるいは EOI が間に合わず次が抑止される）は、独立した第 2 の時間源が
+/// 無いと検出できない。現状 TSC しか無く、その TSC も仮想化環境では
+/// 信用できない（`common::cpu` 参照）。ここで測れるのは
+/// 「メインループの追従の遅れ」までである。
+static MAX_TICK_JUMP: AtomicU64 = AtomicU64::new(0);
+
+pub fn max_tick_jump() -> u64 {
+    MAX_TICK_JUMP.load(Ordering::Relaxed)
+}
+
+/// タイマ割り込みで駆動されるメインループ。
+///
+/// # `hlt` を無条件に使う理由
+///
+/// ADR-0018 のチェックリスト 10 は「`cli` → 条件確認 → `sti; hlt`」の並びを
+/// 求めている。あれが必要なのは**「仕事が無ければ眠る」形のループ**である。
+/// 仕事の有無を確認してから眠るまでの隙間に仕事が発生すると、次の割り込みまで
+/// 眠り続けてしまう。
+///
+/// このループは眠るかどうかを条件で決めない。タイマが 100Hz で必ず起こして
+/// くれるので、無条件に `hlt` → 起きたらティックを見る → また `hlt` で足りる。
+/// 最悪でも 10ms 後には起きるため、取りこぼしという概念が成立しない。
+/// 条件つきの形が要るのは M5 の実行キュー（仕事の有無で眠りを決める）である。
+///
+/// **限界**: この形は、起こしてくれるものが止まった瞬間に永久ハングになる。
+/// `hlt` で眠っている以上、カーネル自身はそれを検出できない（検出のための
+/// コードが動かない）。**外側からは検出できる**ので、xtask がシリアルログの
+/// ハートビート回数で判定する。カーネル内部では検出できないが、テスト基盤
+/// では検出できる、という切り分けである。
+///
+/// # Safety
+///
+/// 割り込みを有効化する。[`verify_ready_for_sti`] を通し、タイマの設定と
+/// IRQ0 の解禁が済んでいること。
+pub unsafe fn run_timer_loop(
+    logger: &mut Logger<SerialPort>,
+    console: Option<&mut crate::console::Console>,
+    stop_after_ticks: u64,
+) {
+    // 最初のティックが来るまで何も出ないとハングと区別できないので、
+    // 待ちに入ることを先に宣言する。
+    logger.info(format_args!(
+        "timer: waiting for the first tick (expected as vector {:#04x}); \
+         if nothing arrives, suspect the PIT setup, the IMR, or ICW2",
+        idt::TIMER_VECTOR
+    ));
+
+    let mut console = console;
+    let started = cpu::read_timestamp_counter();
+
+    // SAFETY: 呼び出し側の契約により、7 項目の検証とタイマ設定が済んでいる。
+    // ここが ADR-0018 §2 の言う「`sti` を実行する唯一の箇所」である。
+    unsafe {
+        cpu::enable_interrupts();
+    }
+
+    let mut last_ticks = 0u64;
+    let mut next_heartbeat = HEARTBEAT_TICKS;
+    let mut announced_first = false;
+
+    loop {
+        let ticks = idt::timer_ticks();
+
+        if ticks == 0 {
+            if cpu::read_timestamp_counter() - started > FIRST_TICK_TIMEOUT_CYCLES {
+                logger.error(format_args!(
+                    "timer: no tick arrived before the deadline; halting. \
+                     Check the PIT divisor write, the IMR (IRQ0 must be unmasked), \
+                     and the PIC vector offset (ICW2)"
+                ));
+                cpu::halt_forever();
+            }
+            // まだ 1 件も来ていない。`hlt` すると、タイマが動いていない場合に
+            // 永久に眠ってしまい上の期限判定へ戻れない。最初の 1 件だけは
+            // スピンで待つ。
+            core::hint::spin_loop();
+            continue;
+        }
+
+        if !announced_first {
+            announced_first = true;
+            // **ICW2 の事後証明。** 実際に届いたベクタ番号を実値で確認する。
+            match idt::first_pic_vector() {
+                Some(vector) if vector as usize == idt::TIMER_VECTOR => {
+                    log_both(
+                        logger,
+                        console.as_deref_mut(),
+                        format_args!(
+                            "timer: first tick arrived as vector {vector:#04x} - this is the \
+                             proof that ICW2 was written correctly (it cannot be read back)"
+                        ),
+                    );
+                }
+                other => {
+                    logger.error(format_args!(
+                        "timer: the first PIC interrupt arrived as vector {other:?}, expected \
+                         {:#04x}; the PIC vector offset (ICW2) is wrong; halting",
+                        idt::TIMER_VECTOR
+                    ));
+                    cpu::halt_forever();
+                }
+            }
+        }
+
+        let jump = ticks - last_ticks;
+        if jump > MAX_TICK_JUMP.load(Ordering::Relaxed) {
+            MAX_TICK_JUMP.store(jump, Ordering::Relaxed);
+        }
+        last_ticks = ticks;
+
+        if ticks >= next_heartbeat {
+            next_heartbeat = ticks + HEARTBEAT_TICKS;
+            log_both(
+                logger,
+                console.as_deref_mut(),
+                format_args!(
+                    "heartbeat: ticks={ticks} (about {} s at {} Hz), max tick jump per wakeup={}",
+                    ticks / crate::pit::TARGET_FREQUENCY_HZ as u64,
+                    crate::pit::TARGET_FREQUENCY_HZ,
+                    max_tick_jump()
+                ),
+            );
+        }
+
+        if stop_after_ticks != 0 && ticks >= stop_after_ticks {
+            logger.info(format_args!(
+                "timer: reached the tick limit ({stop_after_ticks}); leaving the loop"
+            ));
+            // SAFETY: 観測が終わったので、割り込みを禁止した既知の状態へ戻す。
+            unsafe {
+                cpu::disable_interrupts();
+            }
+            return;
+        }
+
+        // 次のティックまで眠る。`sti` は既に効いているが、
+        // `enable_interrupts_and_halt` を使うことで `sti; hlt` の隣接が
+        // 常に保たれる（M5 で条件つきの形へ移す際もここを変えずに済む）。
+        //
+        // SAFETY: ハンドラは用意済みで、EOI も発行している。
+        unsafe {
+            cpu::enable_interrupts_and_halt();
+        }
+    }
+}
+
+/// シリアルと画面の両方へ 1 行出す。**必ずシリアルを先に**書く
+/// （architecture.md §6.7）。
+fn log_both(
+    logger: &mut Logger<SerialPort>,
+    console: Option<&mut crate::console::Console>,
+    args: core::fmt::Arguments,
+) {
+    logger.info(args);
+    if let Some(console) = console {
+        use core::fmt::Write as _;
+        let _ = writeln!(console, "[INFO] {args}");
     }
 }
