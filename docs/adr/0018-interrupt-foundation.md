@@ -71,7 +71,7 @@ cargo xtask run --exception-test divide-by-zero | invalid-opcode | page-fault | 
 ```
 
 kernel側はfeatureで切り替え、起動完了後に意図的に該当例外を起こす。
-xtaskは**シリアルログのハンドラ出力**と**`qemu-debug.log`の`v=..`記録**の両方を突き合わせる。
+xtaskはシリアルログのハンドラ出力と`qemu-debug.log`の`v=..`記録の両方を突き合わせる。
 片方だけでは「ベクタ番号を取り違えたまま動いているように見える」事故を防げない。
 
 ダブルフォルトのテストは特に重要である。
