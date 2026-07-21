@@ -1,7 +1,7 @@
 # 0014. 自前の IDT を用意するまで割り込みを禁止し続ける
 
 ## Status
-Accepted
+Superseded by ADR-0018（M4-d で割り込みを有効化した）
 
 ## Date
 2026-07-20

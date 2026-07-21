@@ -92,9 +92,26 @@ pub const MASK_ALL: u8 = 0xFF;
 pub const IRQS_PER_PIC: u8 = 8;
 
 /// マスタ PIC を割り当てるベクタの先頭（IRQ0 = 0x20）。
+#[cfg(not(feature = "alt-offset-test"))]
 pub const MASTER_VECTOR_OFFSET: u8 = 0x20;
 /// スレーブ PIC を割り当てるベクタの先頭（IRQ8 = 0x28）。
+#[cfg(not(feature = "alt-offset-test"))]
 pub const SLAVE_VECTOR_OFFSET: u8 = 0x28;
+
+// `alt-offset-test`: わざと別のオフセットへ再マップする。
+//
+// **目的は「ZaytOS の ICW2 書き込みが実際にオフセットを動かしている」ことの
+// 確認である。** 通常構成の 0x20 は、OVMF が既に同じ値を使っていた可能性が
+// 高く（`docs/troubleshooting.md` 2026-07-21）、こちらの ICW2 が間違って
+// いてもハードウェアが既に正しい状態にあるせいで動いてしまいうる。
+// 別の値でティックが届けば、その疑いが晴れる。
+//
+// 同時に**配送元の切り分けにもなる**。8259A 経由ならベクタが移動し、
+// LAPIC 経由なら 0x20 のまま届く。
+#[cfg(feature = "alt-offset-test")]
+pub const MASTER_VECTOR_OFFSET: u8 = 0x30;
+#[cfg(feature = "alt-offset-test")]
+pub const SLAVE_VECTOR_OFFSET: u8 = 0x38;
 
 /// ベクタオフセットとして受け付けられない値。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,6 +294,118 @@ pub unsafe fn remap(master_offset: u8, slave_offset: u8) -> Result<(), OffsetErr
     }
 
     Ok(())
+}
+
+/// OCW3: 次にコマンドポートを読んだとき ISR を返させる。
+///
+/// bit3(=1) が「OCW3 である」ことを示し、bit1-0 = 11 で ISR を選ぶ
+/// （10 なら IRR）。ISR は「今 CPU へ配送中の割り込み」のビット。
+const OCW3_READ_IN_SERVICE: u8 = 0x0B;
+
+/// ISR（In-Service Register）を読む。`(マスタ, スレーブ)`。
+///
+/// スプリアス割り込みの判定に使う。**読み出しの前に OCW3 を書く必要が
+/// あり、副作用がある**（コマンドポートの読み出し対象を切り替える）ため、
+/// [`read_masks`] のように安全な関数にはしていない。
+///
+/// # Safety
+///
+/// コマンドポートの読み出し対象を変更する。他の実行文脈が同時に PIC を
+/// 触っていないこと。
+pub unsafe fn read_isr() -> (u8, u8) {
+    // SAFETY: OCW3 を書いてから同じポートを読む、8259A の規定の手順。
+    // 呼び出し側が排他を保証する契約。
+    unsafe {
+        outb(MASTER_COMMAND_PORT, OCW3_READ_IN_SERVICE);
+        outb(SLAVE_COMMAND_PORT, OCW3_READ_IN_SERVICE);
+        io_wait();
+        (inb(MASTER_COMMAND_PORT), inb(SLAVE_COMMAND_PORT))
+    }
+}
+
+/// スプリアス割り込みが現れる IRQ 番号（各 PIC の最下位優先度の線）。
+pub const MASTER_SPURIOUS_IRQ: u8 = 7;
+pub const SLAVE_SPURIOUS_IRQ: u8 = 15;
+
+/// 受けた割り込みがスプリアス（偽）かどうかを判定する（純粋ロジック）。
+///
+/// 8259A はノイズなどで、実際には要求が無いのに割り込みを上げることがある。
+/// その場合ベクタは各 PIC の最下位優先度（IRQ7 / IRQ15）として届く。
+/// **本物なら ISR の該当ビットが立っている。立っていなければ偽である。**
+///
+/// IRQ7 / IRQ15 以外はスプリアスになりえないので常に `false`。
+pub const fn is_spurious(irq: u8, isr: (u8, u8)) -> bool {
+    let (master_isr, slave_isr) = isr;
+    if irq == MASTER_SPURIOUS_IRQ {
+        master_isr & (1 << MASTER_SPURIOUS_IRQ) == 0
+    } else if irq == SLAVE_SPURIOUS_IRQ {
+        slave_isr & (1 << (SLAVE_SPURIOUS_IRQ - IRQS_PER_PIC)) == 0
+    } else {
+        false
+    }
+}
+
+/// EOI をどこへ送るか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EoiAction {
+    /// 送らない。
+    None,
+    /// マスタにだけ送る。
+    MasterOnly,
+    /// スレーブ → マスタの順に送る。
+    SlaveThenMaster,
+}
+
+/// 受けた割り込みに対して EOI をどう送るかを決める（純粋ロジック）。
+///
+/// **スプリアスの扱いがマスタ側とスレーブ側で非対称である。**
+///
+/// - **IRQ7 のスプリアス**: マスタ自身が偽の割り込みを上げただけなので、
+///   ISR にビットは立っておらず、EOI を送る相手がいない。送ってはいけない。
+/// - **IRQ15 のスプリアス**: スレーブが偽を上げた場合でも、**マスタ側は
+///   IRQ2（カスケード）を本物として受け付けており ISR のビットが立っている**。
+///   スレーブへ送ってはいけないが、**マスタへは送らなければならない**。
+///   送らないとマスタが処理中のまま残り、以降マスタの全 IRQ が上がらなくなる。
+pub const fn eoi_action_for(irq: u8, spurious: bool) -> EoiAction {
+    if spurious {
+        if irq == SLAVE_SPURIOUS_IRQ {
+            // スレーブは偽だがマスタは本物として受けている。
+            EoiAction::MasterOnly
+        } else {
+            EoiAction::None
+        }
+    } else if irq < IRQS_PER_PIC {
+        EoiAction::MasterOnly
+    } else if irq < 2 * IRQS_PER_PIC {
+        EoiAction::SlaveThenMaster
+    } else {
+        EoiAction::None
+    }
+}
+
+/// [`eoi_action_for`] が決めた宛先へ EOI を送る。
+///
+/// # Safety
+///
+/// `action` は [`eoi_action_for`] が返した値であること。独自の判断で
+/// `MasterOnly` などを渡すと、実在しない割り込みへ応答することになる。
+pub unsafe fn send_eoi_for(action: EoiAction) {
+    // SAFETY: コマンドポートへの OCW2 書き込み。宛先の妥当性は呼び出し側の契約。
+    unsafe {
+        match action {
+            EoiAction::None => {}
+            EoiAction::MasterOnly => {
+                outb(MASTER_COMMAND_PORT, OCW2_END_OF_INTERRUPT);
+                io_wait();
+            }
+            EoiAction::SlaveThenMaster => {
+                outb(SLAVE_COMMAND_PORT, OCW2_END_OF_INTERRUPT);
+                io_wait();
+                outb(MASTER_COMMAND_PORT, OCW2_END_OF_INTERRUPT);
+                io_wait();
+            }
+        }
+    }
 }
 
 /// OCW2: 非特定 EOI（End Of Interrupt）。
@@ -473,6 +602,55 @@ mod tests {
             masks_with_irq_unmasked((MASK_ALL, MASK_ALL), 16),
             (MASK_ALL, MASK_ALL)
         );
+    }
+
+    #[test]
+    fn only_irq7_and_irq15_can_be_spurious() {
+        // ISR が全部 0（何も処理中でない）でも、7 / 15 以外は偽にならない。
+        assert!(!is_spurious(0, (0, 0)));
+        assert!(!is_spurious(1, (0, 0)));
+        assert!(!is_spurious(8, (0, 0)));
+    }
+
+    #[test]
+    fn a_real_irq7_has_its_bit_set_in_the_master_isr() {
+        // bit7 が立っていれば本物。
+        assert!(!is_spurious(7, (0b1000_0000, 0)));
+        // 立っていなければ偽。
+        assert!(is_spurious(7, (0b0000_0000, 0)));
+        // 他のビットが立っていても、7 番目でなければ判定は変わらない。
+        assert!(is_spurious(7, (0b0111_1111, 0)));
+    }
+
+    #[test]
+    fn a_real_irq15_has_its_bit_set_in_the_slave_isr() {
+        // スレーブ側の bit7（= IRQ15）を見る。マスタ側ではない。
+        assert!(!is_spurious(15, (0, 0b1000_0000)));
+        assert!(is_spurious(15, (0, 0b0000_0000)));
+        // マスタ側に立っていてもスレーブ側が 0 なら偽。
+        assert!(is_spurious(15, (0b1000_0000, 0b0000_0000)));
+    }
+
+    #[test]
+    fn a_real_interrupt_gets_eoi_on_the_right_pics() {
+        assert_eq!(eoi_action_for(0, false), EoiAction::MasterOnly);
+        assert_eq!(eoi_action_for(7, false), EoiAction::MasterOnly);
+        assert_eq!(eoi_action_for(8, false), EoiAction::SlaveThenMaster);
+        assert_eq!(eoi_action_for(15, false), EoiAction::SlaveThenMaster);
+        assert_eq!(eoi_action_for(16, false), EoiAction::None);
+    }
+
+    /// **スプリアスの扱いは非対称である。**
+    ///
+    /// IRQ7 の偽には何も送らない。IRQ15 の偽には**マスタにだけ**送る。
+    /// マスタは IRQ2（カスケード）を本物として受けており、送らないと
+    /// 処理中のまま残って以降マスタの全 IRQ が止まる。
+    #[test]
+    fn a_spurious_interrupt_is_acknowledged_asymmetrically() {
+        assert_eq!(eoi_action_for(7, true), EoiAction::None);
+        assert_eq!(eoi_action_for(15, true), EoiAction::MasterOnly);
+        // 非対称であること自体を固定する。
+        assert_ne!(eoi_action_for(7, true), eoi_action_for(15, true));
     }
 
     #[test]

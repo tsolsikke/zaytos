@@ -536,10 +536,12 @@ pub unsafe fn run_timer_loop(
                 logger,
                 console.as_deref_mut(),
                 format_args!(
-                    "heartbeat: ticks={ticks} (about {} s at {} Hz), max tick jump per wakeup={}",
+                    "heartbeat: ticks={ticks} (about {} s at {} Hz), max tick jump per wakeup={}, \
+                     spurious={}",
                     ticks / crate::pit::TARGET_FREQUENCY_HZ as u64,
                     crate::pit::TARGET_FREQUENCY_HZ,
-                    max_tick_jump()
+                    max_tick_jump(),
+                    idt::spurious_count()
                 ),
             );
         }

@@ -62,3 +62,7 @@ interrupt-test-timer = ["interrupt-test"]
 # EOI の発行をわざと落とし、ティックが 1 回で止まることを確認する。
 # 検証が実際に機能していることを確かめるためのもの。
 no-eoi-test = ["interrupt-test-timer"]
+# PIC をわざと 0x30-0x3F へ再マップし、ティックがそのベクタで届くことを
+# 確認する。ICW2 書き込みが実際に効いていることと、配送元が 8259A である
+# ことを同時に示す。テスト用ベクタ 0x30 と衝突するため irq-path とは排他。
+alt-offset-test = ["interrupt-test-timer"]

@@ -280,6 +280,32 @@ const INTERRUPT_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: true,
         min_heartbeats: None,
     },
+    // PIC をわざと 0x30-0x3F へ再マップし、ティックがそのベクタで届くことを
+    // 確認する。**M4-c-3 で残した申し送りを閉じるためのテストである。**
+    // 通常構成の 0x20 は OVMF が既に使っていた可能性が高く、こちらの ICW2 が
+    // 誤っていても動いてしまいうる。別の値で届けばその疑いが晴れると同時に、
+    // 配送元が LAPIC ではなく 8259A であることも示せる（LAPIC 経由なら
+    // ベクタは移動しない）。
+    CriticalTest {
+        name: "alt-offset",
+        feature: "alt-offset-test",
+        expected_markers: &[
+            "interrupt-test: timer OK",
+            // ここが 0x20 のままなら、再マップが効いていないか LAPIC 由来。
+            "timer: first tick arrived as vector 0x30",
+            "pic: IMR after unmasking IRQ0 master=0xfe slave=0xff",
+        ],
+        forbidden_markers: &[
+            "interrupt-test: timer FAILED",
+            "no tick arrived before the deadline",
+            "the PIC vector offset (ICW2) is wrong",
+            "timer: first tick arrived as vector 0x20",
+            "stack alignment:",
+            "exception: vector=",
+        ],
+        wait_for_full_timeout: false,
+        min_heartbeats: Some(4),
+    },
     // 境界調整をわざと外し、境界検証が働くことを確認する。
     // **検証が壊れていないことを確かめるためのテストなので、期待する結果は
     // 「検出して停止する」である。**

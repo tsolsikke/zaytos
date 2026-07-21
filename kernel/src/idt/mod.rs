@@ -499,7 +499,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) {
     }
 
     // PIC の範囲で最初に届いたベクタを 1 度だけ記録する。ICW2 の検証に使う。
-    if (IRQ_VECTOR_BASE..IRQ_VECTOR_BASE + PIC_IRQ_COUNT).contains(&vector) {
+    if pic_irq_for(vector).is_some() {
         let _ = FIRST_PIC_VECTOR.compare_exchange(
             NO_VECTOR_YET,
             context.vector,
@@ -508,16 +508,34 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) {
         );
     }
 
-    if vector == TIMER_VECTOR {
-        TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+    // PIC 由来の IRQ かどうか。テスト専用ベクタ（0x30、PIC の範囲外）は
+    // ここに入らないので、EOI の論理が一切絡まない。
+    let pic_irq = pic_irq_for(vector);
+
+    if let Some(irq) = pic_irq {
+        if vector == TIMER_VECTOR {
+            TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // スプリアス（偽）割り込みの判定。IRQ7 / IRQ15 でしか起きない。
+        // 本物なら ISR の該当ビットが立っている。
+        //
+        // SAFETY: 割り込みハンドラの中であり、割り込みゲート経由で入場した
+        // ため IF=0。他の実行文脈が同時に PIC を触ることはない。
+        let isr = unsafe { crate::pic::read_isr() };
+        let spurious = crate::pic::is_spurious(irq, isr);
+        if spurious {
+            SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
 
         // **処理を終えてから EOI を送る。** 送った時点で PIC は次の同じ
-        // 割り込みを上げられるようになる。
+        // 割り込みを上げられるようになる。宛先は純粋ロジックが決める
+        // （スプリアスの扱いはマスタ側とスレーブ側で非対称）。
         //
-        // SAFETY: 実際に配送された IRQ0 に対する応答である。
+        // SAFETY: action は eoi_action_for が返した値そのものである。
         #[cfg(not(feature = "no-eoi-test"))]
         unsafe {
-            crate::pic::send_end_of_interrupt(0);
+            crate::pic::send_eoi_for(crate::pic::eoi_action_for(irq, spurious));
         }
     }
 
@@ -526,8 +544,35 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) {
     // メインループがカウンタ越しに行う。
 }
 
-/// タイマ（IRQ0）のベクタ。`pic::MASTER_VECTOR_OFFSET` と一致する。
-pub const TIMER_VECTOR: usize = 0x20;
+/// タイマ（IRQ0）のベクタ。
+///
+/// PIC のベクタオフセットに追随する。`alt-offset-test` では 0x30 になる。
+pub const TIMER_VECTOR: usize = crate::pic::MASTER_VECTOR_OFFSET as usize;
+
+/// スプリアス割り込みを受けた回数（ベクタ別ではなく合計）。
+///
+/// 8259A がノイズ等で上げる偽の割り込み。IRQ7 / IRQ15 として届く
+/// （ADR-0018 のチェックリスト 8）。EOI を送ってはいけないので、通常の
+/// 経路と分けて数える。
+static SPURIOUS_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// スプリアス割り込みを受けた回数。
+pub fn spurious_count() -> u64 {
+    SPURIOUS_COUNT.load(Ordering::Relaxed)
+}
+
+/// ベクタ番号から PIC の IRQ 番号を求める。PIC 由来でなければ `None`。
+///
+/// テスト専用ベクタ（[`TEST_VECTOR`]）は PIC の範囲外なので `None` になり、
+/// EOI の経路へ入らない。
+fn pic_irq_for(vector: usize) -> Option<u8> {
+    let base = crate::pic::MASTER_VECTOR_OFFSET as usize;
+    if (base..base + PIC_IRQ_COUNT).contains(&vector) {
+        Some((vector - base) as u8)
+    } else {
+        None
+    }
+}
 
 /// IRQ スタブ表の配置検証。
 ///
