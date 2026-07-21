@@ -26,6 +26,7 @@ pub mod gdt;
 pub mod graphics;
 pub mod heap;
 pub mod idt;
+pub mod keyboard;
 pub mod interrupts;
 pub mod memory_map;
 pub mod paging;
