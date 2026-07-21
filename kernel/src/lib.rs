@@ -16,4 +16,5 @@ pub mod heap;
 pub mod idt;
 pub mod memory_map;
 pub mod paging;
+pub mod pic;
 pub mod stack;

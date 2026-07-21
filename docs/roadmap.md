@@ -109,8 +109,18 @@ IDT と例外ハンドラは割り込みを有効化しないまま検証しき�
     ダブルフォルト（`--exception-test page-fault` / `double-fault`）。
     GPR の並び順は既知値 15 個で実値検証。ダブルフォルトは #PF ゲートの
     Present ビットを落として誘発し、IST1 の使用と CPU Reset 非増加を確認
-- [ ] M4-c: クリティカルセクション、`Locked<T>` を割り込み保存版へ差し替え、
-  PIC を 0x20-0x2F へ再マップ
+- [x] M4-c: クリティカルセクション、`Locked<T>` の差し替え、PIC 再マップ
+  - [x] M4-c-1: `InterruptGuard`（RAII の `cli`/`sti`）。入れ子でも余計に
+    有効化しないこと、Drop で元の状態へ戻ることを実機の RFLAGS で確認
+  - [x] M4-c-2: `Locked<T>` を `common::critical` へ移し、取得中だけ割り込みを
+    禁止する形に差し替え。前提が「割り込み常時禁止」から「取得中は割り込み
+    禁止」に変わった（ADR-0012 Addendum）。二重取得検出つき
+    （`--critical-test double-lock`）
+  - [x] M4-c-3: PIC を 0x20-0x2F へ再マップし、全 IRQ をマスク。再マップ前の
+    IMR を記録し、再マップ後は IMR を読み戻して照合する。**ベクタオフセット
+    自体は ICW2 が書き込み専用のため検証できず、M4-d で最初のタイマ割り込みが
+    ベクタ 0x20 で届くまで未検証のまま持ち越す**（ADR-0018 Addendum）。
+    IF=1 から入る復元経路もここで確認済み（`--critical-test restore-enabled`）
 - [ ] M4-d: タイマ割り込み（**PIT**。ここで初めて `sti`）。APIC は ACPI を
   辿る必要があり、切り分け軸が増えるため M4 の範囲外とする
 - [ ] M4-e: キーボード割り込み

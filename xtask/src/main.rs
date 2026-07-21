@@ -142,16 +142,34 @@ struct CriticalTest {
     forbidden_markers: &'static [&'static str],
 }
 
-const CRITICAL_TESTS: &[CriticalTest] = &[CriticalTest {
-    name: "double-lock",
-    feature: "critical-test-double-lock",
-    expected_markers: &[
-        "lock: double acquisition detected",
-        "halting (cli + hlt loop)",
-    ],
-    // 検出をすり抜けて 2 回目の lock() が戻ってきた場合に出る行。
-    forbidden_markers: &["double-lock detection FAILED"],
-}];
+const CRITICAL_TESTS: &[CriticalTest] = &[
+    CriticalTest {
+        name: "double-lock",
+        feature: "critical-test-double-lock",
+        expected_markers: &[
+            "lock: double acquisition detected",
+            "halting (cli + hlt loop)",
+        ],
+        // 検出をすり抜けて 2 回目の lock() が戻ってきた場合に出る行。
+        forbidden_markers: &["double-lock detection FAILED"],
+    },
+    // IF=1 の状態から InterruptGuard に入り、抜けたときに復元されることを
+    // 確認する。IF=0 から入る経路は通常の起動ログで毎回通っているが、
+    // 「保存値が IF=1 のときだけ sti する」という分岐の片側はここでしか
+    // 通らない。一時的に sti するため、PIC を全マスクした M4-c-3 の後に
+    // 実行する。
+    CriticalTest {
+        name: "restore-enabled",
+        feature: "critical-test-restore-enabled",
+        expected_markers: &[
+            "critical-test: restore path OK",
+            "critical-test: IF after sti = true",
+            "critical-test: IF inside the guard = false",
+            "critical-test: IF after the guard dropped = true",
+        ],
+        forbidden_markers: &["critical-test: restore path FAILED"],
+    },
+];
 
 /// カーネルが起動したことを示す、シリアルログの既知の行。
 ///

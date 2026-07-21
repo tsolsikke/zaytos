@@ -25,6 +25,7 @@ use kernel::graphics::{Color, Framebuffer, FramebufferLayout};
 use kernel::heap;
 use kernel::idt;
 use kernel::paging;
+use kernel::pic;
 use kernel::paging::plan::{resolve_pages, MappedRanges};
 use kernel::paging::table::PageTableBuilder;
 
@@ -179,8 +180,7 @@ extern "sysv64" fn kernel_main() -> ! {
     report_gdt_and_stack(&mut logger, handoff.old_rsp);
     report_idt(&mut logger);
     verify_critical_sections(&mut logger);
-
-
+    configure_pic(&mut logger);
 
     // SAFETY: 呼び出し元契約（`_start` の # Safety）により、boot_info は
     // 有効な BootInfo を指す。ここでは読み取り専用の参照を作るのみ。
@@ -1334,6 +1334,91 @@ fn report_idt(logger: &mut Logger<SerialPort>) {
 
     logger.info(format_args!(
         "idt: loaded (exceptions now reach our handlers; interrupts stay disabled until M4-d)"
+    ));
+}
+
+/// 8259A PIC を 0x20-0x2F へ再マップし、全 IRQ をマスクする（M4-c-3）。
+///
+/// 再マップ**前**の IMR も記録する。UEFI が何を開けたまま制御を渡してきたかは
+/// 実際に読まないと分からず、後で「誰も設定していないはずの IRQ が来る」と
+/// 悩んだときの手掛かりになる（OVMF はアイドル中もタイマ割り込みを処理して
+/// いる。`docs/troubleshooting.md` の起動ログのベースライン）。
+fn configure_pic(logger: &mut Logger<SerialPort>) {
+    let (master_before, slave_before) = pic::read_masks();
+    logger.info(format_args!(
+        "pic: IMR before remap master={master_before:#04x} ({master_before:#010b}) \
+         slave={slave_before:#04x} ({slave_before:#010b}) [0 = unmasked]"
+    ));
+
+    // 再マップ先が IDT のカバー範囲に入っており、present なハンドラを持つ
+    // ことを**再マップより先に**確かめる。順序が逆だと、検査に落ちた場合
+    // でも PIC は既に新しいベクタを向いており、halt するまでの間に IRQ が
+    // 届けば行き先の無いベクタへ飛ぶ。
+    let first = pic::MASTER_VECTOR_OFFSET as usize;
+    let last = pic::SLAVE_VECTOR_OFFSET as usize + pic::IRQS_PER_PIC as usize - 1;
+    let mut covered = true;
+    for vector in first..=last {
+        covered &= idt::entry(vector).is_some_and(|entry| entry.is_present());
+    }
+    logger.info(format_args!(
+        "pic: target vectors {first:#04x}..={last:#04x} are covered by present IDT entries={covered} \
+         (IDT has {} entries)",
+        idt::IDT_ENTRY_COUNT
+    ));
+    if !covered {
+        logger.error(format_args!(
+            "pic: refusing to remap onto vectors without a present handler; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    // SAFETY: 起動時の単一実行文脈で、呼び出しはこの 1 回だけ。`_start` 冒頭の
+    // `cli` により割り込みは禁止されたままである。行き先のベクタに present な
+    // ハンドラがあることは直前に確認した。
+    let result = unsafe { pic::remap(pic::MASTER_VECTOR_OFFSET, pic::SLAVE_VECTOR_OFFSET) };
+    if let Err(error) = result {
+        logger.error(format_args!(
+            "pic: rejected the vector offsets ({error:?}); halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    // ベクタオフセットは**書いた値であって、検証した値ではない**。ICW2 は
+    // 書き込み専用で、データポートから読めるのは IMR だけである。したがって
+    // ここは「こう書いた」以上のことを主張できない。断定形で書くと、下の
+    // マスク検証が通ったことをもって再マップ全体が正しいと読めてしまう。
+    logger.info(format_args!(
+        "pic: programmed master={:#04x}-{:#04x} slave={:#04x}-{:#04x} \
+         (ICW2 is write-only; the offset cannot be read back)",
+        pic::MASTER_VECTOR_OFFSET,
+        pic::MASTER_VECTOR_OFFSET + pic::IRQS_PER_PIC - 1,
+        pic::SLAVE_VECTOR_OFFSET,
+        pic::SLAVE_VECTOR_OFFSET + pic::IRQS_PER_PIC - 1
+    ));
+
+    // 一方 IMR は読める。「設定したつもり」ではなく実際の値を読み戻す。
+    // ICW シーケンスが途中で崩れていると、最後の OCW1 が ICW として
+    // 解釈されてマスクが掛からない。そのまま M4-d で `sti` すると、
+    // ハンドラの無い IRQ がいきなり飛んでくる。
+    let (master_after, slave_after) = pic::read_masks();
+    logger.info(format_args!(
+        "pic: IMR after remap master={master_after:#04x} slave={slave_after:#04x} \
+         (expected {:#04x}/{:#04x}) [read back from hardware]",
+        pic::MASK_ALL,
+        pic::MASK_ALL
+    ));
+    if master_after != pic::MASK_ALL || slave_after != pic::MASK_ALL {
+        logger.error(format_args!(
+            "pic: the mask read-back does not match; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "pic: all IRQs masked (nothing can fire until M4-d unmasks the timer explicitly); \
+         the vector offset stays unverified until the first timer IRQ arrives as vector \
+         {:#04x} in M4-d",
+        pic::MASTER_VECTOR_OFFSET
     ));
 }
 
