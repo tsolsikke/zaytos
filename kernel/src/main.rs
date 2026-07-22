@@ -767,6 +767,10 @@ extern "sysv64" fn kernel_main() -> ! {
         )),
     }
 
+    // kernel イメージの高位マッピングを持つ新テーブルの構築と検証（H-2）。
+    // CR3 は切り替えない。稼働中のテーブルにも手を加えない。
+    build_and_verify_high_half(&mut logger, &mut allocator, &mapped_ranges, direct_map);
+
     // 2MiB ページの分割とアンマップ（M5-a-2-1）。
     verify_split_and_unmap(&mut logger, &mut allocator);
 
@@ -2942,6 +2946,178 @@ fn report_mapping_granularity(
 /// ELF をどこへ置いたかで決まるものであって、direct map の窓とは無関係で
 /// ある。移行時にこの関数の中身をその差へ書き換えること。
 /// 詳細は `docs/deferred-decisions.md` を参照。
+/// kernel イメージの高位マッピングを持つ新しいテーブルを構築し、検証する（H-2）。
+///
+/// # この段階でやること・やらないこと
+///
+/// **CR3 は切り替えない。** 恒等マッピングで動いたまま、新しいテーブルを
+/// 組み立てて読み戻すところまでである。切り替えは H-3 で行う。
+///
+/// **稼働中のテーブルには一切手を加えない。** 新しいテーブルを別に作る。
+/// 構築の前後で稼働中テーブルの PML4 を読み戻し、変わっていないことを
+/// 確かめる。
+///
+/// direct map の高位窓はこの段階の対象外である。作るのは
+/// **kernel イメージの高位マッピング**（`KERNEL_VIRT_BASE + (phys - LMA)`）
+/// だけで、これは direct map とは別の対応である。ログでもそう明示する。
+fn build_and_verify_high_half(
+    logger: &mut Logger<SerialPort>,
+    allocator: &mut frame_allocator::FrameAllocator<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
+    mapped: &MappedRanges<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
+    direct_map: common::addr::DirectMap,
+) {
+    use kernel::paging::verify;
+
+    // 稼働中テーブルの PML4 を、構築の前に控える。
+    // SAFETY: CR3 は自前のテーブルを指しており、恒等マッピングで読める。
+    let live_pml4 =
+        unsafe { kernel::paging::active::ActivePageTable::current(direct_map) }.pml4_phys();
+    let live_before: [u64; entry_count()] = core::array::from_fn(|index| {
+        // SAFETY: 稼働中の PML4 は有効なテーブルで、添字は 512 未満。
+        unsafe { verify::read_pml4_entry(live_pml4, direct_map, index) }
+    });
+
+    let frames_before = allocator.free_frame_count();
+
+    // --- 恒等部分を作る（現在の plan と同じ結果になる）---
+    let mut builder = match PageTableBuilder::new(allocator, direct_map) {
+        Ok(builder) => builder,
+        Err(error) => {
+            logger.error(format_args!(
+                "high-half: failed to start the build: {error:?}"
+            ));
+            cpu::halt_forever();
+        }
+    };
+    let mut map_error = None;
+    resolve_pages(mapped, |m| {
+        if map_error.is_some() {
+            return;
+        }
+        if let Err(e) = builder.map_page(m.phys_addr, m.huge, m.cacheable) {
+            map_error = Some(e);
+        }
+    });
+    if let Some(error) = map_error {
+        logger.error(format_args!("high-half: identity build failed: {error:?}"));
+        cpu::halt_forever();
+    }
+
+    // --- kernel イメージの高位マッピングを張る ---
+    //
+    // 対応は virt = phys + KERNEL_VIRT_BASE。**direct map の窓とは
+    // 別の対応である。** 現在 KERNEL_VIRT_BASE は 0 なので値は一致するが、
+    // 式が違う。
+    let (image_start, image_end) = kernel_image_phys_range();
+    let image_len = image_end.as_u64() - image_start.as_u64();
+    let image_len = image_len.next_multiple_of(frame_allocator::FRAME_SIZE);
+    let high_start = kernel::kernel_virt_from_phys(image_start);
+    if let Err(error) = builder.map_range(high_start, image_start, image_len, true) {
+        logger.error(format_args!(
+            "high-half: kernel high mapping failed: {error:?}"
+        ));
+        cpu::halt_forever();
+    }
+
+    let new_pml4 = builder.pml4_phys();
+    let frames_used = frames_before - allocator.free_frame_count();
+    logger.info(format_args!(
+        "high-half: built a new table at PML4 {:#x} using {frames_used} frame(s) ({} KiB)",
+        new_pml4.as_u64(),
+        frames_used * frame_allocator::FRAME_SIZE / 1024
+    ));
+    logger.info(format_args!(
+        "high-half: kernel image {:#x}..{:#x} is also mapped at {:#x} (kernel high mapping, \
+         NOT the direct map window)",
+        image_start.as_u64(),
+        image_start.as_u64() + image_len,
+        high_start.as_u64()
+    ));
+
+    // --- 独立 walker で読み戻す ---
+    //
+    // 構築に使った関数は呼ばない。`verify::walk` は階層の降り方も
+    // ビットの解釈も別に書いてある。
+    let mut checked = 0u32;
+    let mut mismatches = 0u32;
+    let probe_count = 8u64;
+    for index in 0..probe_count {
+        let offset = image_len / probe_count * index;
+        let Some(phys) = image_start.checked_add(offset) else {
+            mismatches += 1;
+            continue;
+        };
+        let virt = kernel::kernel_virt_from_phys(phys);
+        // SAFETY: `new_pml4` は今構築したテーブルで、恒等マッピングで読める。
+        match unsafe { verify::walk(new_pml4, direct_map, virt) } {
+            Ok(resolved) => {
+                checked += 1;
+                if resolved.phys != phys {
+                    mismatches += 1;
+                    logger.error(format_args!(
+                        "high-half: {:#x} resolves to {:#x}, expected {:#x}",
+                        virt.as_u64(),
+                        resolved.phys.as_u64(),
+                        phys.as_u64()
+                    ));
+                }
+            }
+            Err(error) => {
+                mismatches += 1;
+                logger.error(format_args!(
+                    "high-half: {:#x} does not resolve: {error:?}",
+                    virt.as_u64()
+                ));
+            }
+        }
+    }
+    logger.info(format_args!(
+        "high-half: walked {checked} probe(s) through the kernel high mapping with an \
+         independent walker, mismatches={mismatches}"
+    ));
+
+    // --- 恒等部分が新テーブルでも同じ対応であること ---
+    let mut identity_mismatches = 0u32;
+    for range in mapped.iter() {
+        for probe in [range.start, range.end.checked_sub(1).unwrap_or(range.start)] {
+            let Some(virt) = common::addr::VirtAddr::new(probe.as_u64()) else {
+                identity_mismatches += 1;
+                continue;
+            };
+            // SAFETY: 上記と同じ。
+            match unsafe { verify::walk(new_pml4, direct_map, virt) } {
+                Ok(resolved) if resolved.phys == probe => {}
+                _ => identity_mismatches += 1,
+            }
+        }
+    }
+    logger.info(format_args!(
+        "high-half: the identity part of the new table matches the plan, mismatches={identity_mismatches}"
+    ));
+
+    // --- 稼働中テーブルが無傷であること ---
+    let live_after: [u64; entry_count()] = core::array::from_fn(|index| {
+        // SAFETY: 上記と同じ。
+        unsafe { verify::read_pml4_entry(live_pml4, direct_map, index) }
+    });
+    let live_untouched = live_before == live_after;
+    logger.info(format_args!(
+        "high-half: the live table's PML4 is untouched by the build = {live_untouched}"
+    ));
+
+    if mismatches > 0 || identity_mismatches > 0 || !live_untouched {
+        logger.error(format_args!(
+            "high-half: the new table does not match the plan; halting"
+        ));
+        cpu::halt_forever();
+    }
+}
+
+/// PML4 のエントリ数。`core::array::from_fn` の型引数に使う。
+const fn entry_count() -> usize {
+    512
+}
+
 fn kernel_image_phys_range() -> (common::addr::PhysAddr, common::addr::PhysAddr) {
     use common::addr::VirtAddr;
 

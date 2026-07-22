@@ -10,3 +10,4 @@ pub mod entry;
 pub mod plan;
 pub mod switch;
 pub mod table;
+pub mod verify;

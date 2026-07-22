@@ -19,6 +19,8 @@ use common::addr::{DirectMap, PhysAddr, VirtAddr};
 
 use crate::frame_allocator::{FrameAllocator, FRAME_SIZE};
 
+use super::entry::PAGE_SIZE_2M;
+
 const PTE_PRESENT: u64 = 1 << 0;
 const PTE_WRITABLE: u64 = 1 << 1;
 const PTE_PCD: u64 = 1 << 4;
@@ -36,6 +38,8 @@ pub enum PageTableError {
     /// 中間テーブルのはずのエントリが、実は huge page (PS=1) だった
     /// （本来到達しないはずの不整合。黙って上書きせず fail-fast する）。
     UnexpectedHugePageEntry,
+    /// 範囲の長さが 4KiB の倍数でない、または加算が範囲を出る。
+    MisalignedRange,
 }
 
 /// `table_phys[index]` の生エントリを読む。
@@ -173,6 +177,100 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
             );
         }
         Ok(child_phys)
+    }
+
+    /// 仮想アドレスと物理アドレスの対応を明示して、範囲をマップする。
+    ///
+    /// # 恒等ではない対応を張るための API
+    ///
+    /// 既存の [`Self::map_page`] は恒等前提で、物理アドレス 1 つしか
+    /// 受け取らない。higher-half 移行では「仮想と物理が異なる対応」が
+    /// 要るので、対応を引数で受け取る形を足した。
+    /// **既存の恒等経路は壊していない。** `map_page` はそのまま残り、
+    /// `plan` からの構築は今までどおり動く。
+    ///
+    /// # 2MiB 昇格は仮想と物理の両方の境界を見る
+    ///
+    /// **どちらか一方だけでは足りない。** 恒等マッピングでは仮想 = 物理
+    /// なので、片方を見れば済んでしまう。対応がずれた瞬間、たとえば
+    /// 物理が 2MiB 境界でも仮想がそうでない場合に、PD エントリへ
+    /// 「仮想の下位ビットを落とした」誤ったマッピングを張ることになる。
+    /// 恒等の間は決して顕在化しない誤りなので、最初から両方を見る。
+    ///
+    /// `len` は 4KiB の倍数であること。
+    pub fn map_range(
+        &mut self,
+        virt: VirtAddr,
+        phys: PhysAddr,
+        len: u64,
+        cacheable: bool,
+    ) -> Result<(), PageTableError> {
+        if !len.is_multiple_of(FRAME_SIZE) {
+            return Err(PageTableError::MisalignedRange);
+        }
+
+        let mut offset = 0u64;
+        while offset < len {
+            let virt_here = virt
+                .checked_add(offset)
+                .ok_or(PageTableError::MisalignedRange)?;
+            let phys_here = phys
+                .checked_add(offset)
+                .ok_or(PageTableError::MisalignedRange)?;
+            let remaining = len - offset;
+
+            // 仮想と物理の**両方**が 2MiB 境界に揃っていて、残りが 2MiB
+            // 以上あるときだけ昇格する。
+            let huge = remaining >= PAGE_SIZE_2M
+                && virt_here.is_aligned(PAGE_SIZE_2M)
+                && phys_here.is_aligned(PAGE_SIZE_2M);
+
+            self.map_one(virt_here, phys_here, huge, cacheable)?;
+            offset += if huge { PAGE_SIZE_2M } else { FRAME_SIZE };
+        }
+        Ok(())
+    }
+
+    /// 対応を明示して 1 ページ張る。[`Self::map_range`] の中核。
+    fn map_one(
+        &mut self,
+        virt: VirtAddr,
+        phys: PhysAddr,
+        huge: bool,
+        cacheable: bool,
+    ) -> Result<(), PageTableError> {
+        let pdpt = self.ensure_child(self.pml4_phys, virt.pml4_index())?;
+        let pd = self.ensure_child(pdpt, virt.pdpt_index())?;
+
+        let mut flags = PTE_PRESENT | PTE_WRITABLE;
+        if !cacheable {
+            flags |= PTE_PCD;
+        }
+
+        if huge {
+            // SAFETY: `pd` はこのビルダーが構築した有効な PD。添字は 512 未満。
+            // 仮想・物理とも 2MiB 境界にあることを呼び出し側で確認済み。
+            unsafe {
+                write_entry(
+                    self.direct_map,
+                    pd,
+                    virt.pd_index(),
+                    (phys.as_u64() & ADDR_MASK) | flags | PTE_PS,
+                );
+            }
+        } else {
+            let pt = self.ensure_child(pd, virt.pd_index())?;
+            // SAFETY: `pt` はこのビルダーが構築した有効な PT。
+            unsafe {
+                write_entry(
+                    self.direct_map,
+                    pt,
+                    virt.pt_index(),
+                    (phys.as_u64() & ADDR_MASK) | flags,
+                );
+            }
+        }
+        Ok(())
     }
 
     /// 恒等マッピング（仮想 = 物理）で 1 ページを割り付ける。
