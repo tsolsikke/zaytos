@@ -1697,6 +1697,10 @@ const CHECKS: &[(&str, &[&str])] = &[
 
 /// `// SAFETY:` コメントを伴わない `unsafe` ブロックを探す。
 ///
+/// `unsafe` ブロックには、なぜ safe に書けないのかと、何を前提に安全性が
+/// 保たれるのか（invariant）を `// SAFETY:` コメントとして添える決まりで
+/// ある。
+///
 /// # 走査の規則
 ///
 /// `unsafe {` の行から上へ遡り、**最初に現れる非空行**を見る。それが `//`
@@ -1736,7 +1740,6 @@ fn find_unsafe_without_safety_comment(workspace_root: &Path) -> Result<Vec<Strin
     if !output.status.success() {
         bail!("git ls-files failed while collecting Rust sources");
     }
-
     let listing = String::from_utf8(output.stdout).context("git ls-files produced non-UTF-8")?;
 
     let mut findings = Vec::new();
@@ -2055,7 +2058,9 @@ fn cmd_check(full: bool) -> Result<()> {
     let mut retries: Vec<String> = Vec::new();
     if full {
         // QEMU を起動する回帰チェック。1 種類ごとにカーネルをビルドし直して
-        // 起動するため重い。既定では走らせない。
+        // 起動するため重い。既定では走らせない。段階の完了時、`unsafe`・
+        // 割り込み・ページテーブル・GDT・IDT に触れた変更のコミット前、
+        // ツールチェインやビルド設定を変更したときに走らせる。
         for test in EXCEPTION_TESTS {
             total += 1;
             let name = format!("exception-test {}", test.name);
