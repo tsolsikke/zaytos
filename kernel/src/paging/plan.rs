@@ -10,6 +10,8 @@
 //! 同じ関数であり、判定基準が二重に実装されてズレることを構造的に防ぐ
 //! （空きフレームなのにマップされていない、という致命的な不整合の防止）。
 
+use common::addr::PhysAddr;
+
 use crate::frame_allocator::FRAME_SIZE;
 use crate::memory_map::{self, RegionPolicy};
 
@@ -27,9 +29,9 @@ pub const DEFAULT_CAPACITY: usize = 256;
 /// 同一キャッシュ属性で連続する物理アドレス範囲。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AttributedRange {
-    pub start: u64,
+    pub start: PhysAddr,
     /// 排他的な終端。
-    pub end: u64,
+    pub end: PhysAddr,
     pub cacheable: bool,
 }
 
@@ -61,8 +63,8 @@ impl<const CAP: usize> MappedRanges<CAP> {
         extra: &[(u64, u64, bool)],
     ) -> Result<Self, &'static str> {
         let mut ranges = [AttributedRange {
-            start: 0,
-            end: 0,
+            start: PhysAddr::new_const(0),
+            end: PhysAddr::new_const(0),
             cacheable: true,
         }; CAP];
         let mut count = 0usize;
@@ -85,6 +87,9 @@ impl<const CAP: usize> MappedRanges<CAP> {
             if start >= end {
                 continue;
             }
+            let (Some(start), Some(end)) = (PhysAddr::new(start), PhysAddr::new(end)) else {
+                return Err("a memory map entry does not fit in a physical address");
+            };
 
             if count >= CAP {
                 return Err("mapped-range capacity exceeded while building the paging plan");
@@ -101,6 +106,9 @@ impl<const CAP: usize> MappedRanges<CAP> {
             if start >= end {
                 continue;
             }
+            let (Some(start), Some(end)) = (PhysAddr::new(start), PhysAddr::new(end)) else {
+                return Err("an extra range does not fit in a physical address");
+            };
             if count >= CAP {
                 return Err("mapped-range capacity exceeded while adding extra ranges");
             }
@@ -144,7 +152,7 @@ impl<const CAP: usize> MappedRanges<CAP> {
     }
 
     /// 単一のアドレスがマップ対象範囲に含まれるか。
-    pub fn contains(&self, addr: u64) -> bool {
+    pub fn contains(&self, addr: PhysAddr) -> bool {
         self.ranges[..self.count]
             .iter()
             .any(|r| r.start <= addr && addr < r.end)
@@ -152,7 +160,7 @@ impl<const CAP: usize> MappedRanges<CAP> {
 
     /// `[start, end)` が、マップ対象範囲によって（複数範囲にまたがって
     /// いても良いので）隙間なく覆われているか。
-    pub fn contains_range(&self, start: u64, end: u64) -> bool {
+    pub fn contains_range(&self, start: PhysAddr, end: PhysAddr) -> bool {
         if start >= end {
             return true;
         }
@@ -175,7 +183,7 @@ impl<const CAP: usize> MappedRanges<CAP> {
 /// 1 ページ分のマッピング指示。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageMapping {
-    pub phys_addr: u64,
+    pub phys_addr: PhysAddr,
     /// `true` なら 2MiB ページ、`false` なら 4KiB ページ。
     pub huge: bool,
     pub cacheable: bool,
@@ -199,28 +207,35 @@ pub fn resolve_pages<const CAP: usize>(
     mut visit: impl FnMut(PageMapping),
 ) {
     for r in ranges.iter() {
-        let core_start = align_up(r.start, PAGE_SIZE_2M);
-        let core_end = align_down(r.end, PAGE_SIZE_2M);
+        // 端数の切り上げが物理アドレスの範囲を出たら、その範囲に 2MiB の
+        // 核は無い。`PhysAddr::align_up` は範囲外を `None` にするので、
+        // そのまま「核なし」として扱う。
+        let core_start = r.start.align_up(PAGE_SIZE_2M);
+        let core_end = r.end.align_down(PAGE_SIZE_2M);
 
-        if core_start < core_end {
-            emit_4k(r.start, core_start, r.cacheable, &mut visit);
-            let mut addr = core_start;
-            while addr < core_end {
-                visit(PageMapping {
-                    phys_addr: addr,
-                    huge: true,
-                    cacheable: r.cacheable,
-                });
-                addr += PAGE_SIZE_2M;
+        match (core_start, core_end) {
+            (Some(core_start), Some(core_end)) if core_start < core_end => {
+                emit_4k(r.start, core_start, r.cacheable, &mut visit);
+                let mut addr = core_start;
+                while addr < core_end {
+                    visit(PageMapping {
+                        phys_addr: addr,
+                        huge: true,
+                        cacheable: r.cacheable,
+                    });
+                    let Some(next) = addr.checked_add(PAGE_SIZE_2M) else {
+                        break;
+                    };
+                    addr = next;
+                }
+                emit_4k(core_end, r.end, r.cacheable, &mut visit);
             }
-            emit_4k(core_end, r.end, r.cacheable, &mut visit);
-        } else {
-            emit_4k(r.start, r.end, r.cacheable, &mut visit);
+            _ => emit_4k(r.start, r.end, r.cacheable, &mut visit),
         }
     }
 }
 
-fn emit_4k(start: u64, end: u64, cacheable: bool, visit: &mut impl FnMut(PageMapping)) {
+fn emit_4k(start: PhysAddr, end: PhysAddr, cacheable: bool, visit: &mut impl FnMut(PageMapping)) {
     let mut addr = start;
     while addr < end {
         visit(PageMapping {
@@ -228,21 +243,21 @@ fn emit_4k(start: u64, end: u64, cacheable: bool, visit: &mut impl FnMut(PageMap
             huge: false,
             cacheable,
         });
-        addr += FRAME_SIZE;
+        let Some(next) = addr.checked_add(FRAME_SIZE) else {
+            break;
+        };
+        addr = next;
     }
-}
-
-fn align_up(addr: u64, align: u64) -> u64 {
-    (addr + align - 1) & !(align - 1)
-}
-
-fn align_down(addr: u64, align: u64) -> u64 {
-    addr & !(align - 1)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// テスト内で期待値を組み立てるための補助。
+    fn p(raw: u64) -> PhysAddr {
+        PhysAddr::new(raw).unwrap()
+    }
     use crate::memory_map::{memory_type, test_support::build_map_bytes};
 
     #[test]
@@ -256,16 +271,16 @@ mod tests {
         );
         let ranges = MappedRanges::<DEFAULT_CAPACITY>::build(&bytes, 48, &[]).unwrap();
         assert_eq!(ranges.range_count(), 1);
-        assert!(ranges.contains(0x200000));
-        assert!(!ranges.contains(0x1000_0000_0000));
+        assert!(ranges.contains(p(0x200000)));
+        assert!(!ranges.contains(p(0x1000_0000_0000)));
     }
 
     #[test]
     fn null_page_is_excluded_even_when_conventional() {
         let bytes = build_map_bytes(&[(memory_type::CONVENTIONAL, 0, 4)], 48);
         let ranges = MappedRanges::<DEFAULT_CAPACITY>::build(&bytes, 48, &[]).unwrap();
-        assert!(!ranges.contains(0));
-        assert!(ranges.contains(FRAME_SIZE));
+        assert!(!ranges.contains(p(0)));
+        assert!(ranges.contains(p(FRAME_SIZE)));
     }
 
     #[test]
@@ -279,7 +294,7 @@ mod tests {
         );
         let ranges = MappedRanges::<DEFAULT_CAPACITY>::build(&bytes, 48, &[]).unwrap();
         assert_eq!(ranges.range_count(), 1);
-        assert!(ranges.contains_range(0x100000, 0x108000));
+        assert!(ranges.contains_range(p(0x100000), p(0x108000)));
     }
 
     #[test]
@@ -325,10 +340,12 @@ mod tests {
             }
         });
 
-        assert_eq!(huge_pages, vec![0x200000, 0x400000]);
+        assert_eq!(huge_pages, vec![p(0x200000), p(0x400000)]);
         // 前方の端数 [0x1000, 0x200000) は 4KiB ページで埋められる。
         assert!(!small_pages.is_empty());
-        assert!(small_pages.iter().all(|&a| (0x1000..0x200000).contains(&a)));
+        assert!(small_pages
+            .iter()
+            .all(|&a| (p(0x1000)..p(0x200000)).contains(&a)));
         // 全ページが cacheable であることも確認。
         let mut all_cacheable = true;
         resolve_pages(&ranges, |m| {
@@ -366,7 +383,7 @@ mod tests {
         resolve_pages(&ranges, |m| pages.push(m));
         assert_eq!(pages.len(), 1);
         assert!(pages[0].huge);
-        assert_eq!(pages[0].phys_addr, 0x200000);
+        assert_eq!(pages[0].phys_addr, p(0x200000));
     }
 
     #[test]
@@ -379,8 +396,8 @@ mod tests {
             48,
         );
         let ranges = MappedRanges::<DEFAULT_CAPACITY>::build(&bytes, 48, &[]).unwrap();
-        assert!(ranges.contains_range(0x100000, 0x104000));
-        assert!(!ranges.contains_range(0x100000, 0x108000));
+        assert!(ranges.contains_range(p(0x100000), p(0x104000)));
+        assert!(!ranges.contains_range(p(0x100000), p(0x108000)));
     }
 
     #[test]
@@ -392,10 +409,10 @@ mod tests {
         let framebuffer = (0x8000_0000u64, 0x8040_0000u64, false);
         let ranges = MappedRanges::<DEFAULT_CAPACITY>::build(&bytes, 48, &[framebuffer]).unwrap();
 
-        assert!(ranges.contains_range(0x100000, 0x104000));
-        assert!(ranges.contains_range(0x8000_0000, 0x8040_0000));
-        assert!(!ranges.contains(0x7fff_ffff));
-        assert!(!ranges.contains(0x8040_0000));
+        assert!(ranges.contains_range(p(0x100000), p(0x104000)));
+        assert!(ranges.contains_range(p(0x8000_0000), p(0x8040_0000)));
+        assert!(!ranges.contains(p(0x7fff_ffff)));
+        assert!(!ranges.contains(p(0x8040_0000)));
     }
 
     #[test]

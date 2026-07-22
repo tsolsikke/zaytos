@@ -19,6 +19,8 @@
 //!
 //! ADR 化するかどうかは、この説明を見た人間の判断に委ねる。
 
+use common::addr::PhysAddr;
+
 use crate::memory_map::memory_type;
 
 pub const FRAME_SIZE: u64 = 4096;
@@ -267,7 +269,7 @@ impl<const CAP: usize> FrameAllocator<CAP> {
     }
 
     /// 空きフレームを1つ確保する。確保順は先頭（最小のフレーム番号）から。
-    pub fn allocate_frame(&mut self) -> Option<u64> {
+    pub fn allocate_frame(&mut self) -> Option<PhysAddr> {
         if self.range_count == 0 {
             return None;
         }
@@ -280,11 +282,12 @@ impl<const CAP: usize> FrameAllocator<CAP> {
             }
             self.range_count -= 1;
         }
-        Some(frame)
+        PhysAddr::from_frame_number(frame)
     }
 
     /// フレームを解放し、空きリストへ戻す（隣接する空き範囲とは結合される）。
-    pub fn deallocate_frame(&mut self, frame: u64) -> Result<(), FrameAllocatorError> {
+    pub fn deallocate_frame(&mut self, addr: PhysAddr) -> Result<(), FrameAllocatorError> {
+        let frame = addr.frame_number();
         self.insert_free_range(frame, 1)
     }
 
@@ -311,7 +314,11 @@ impl<const CAP: usize> FrameAllocator<CAP> {
     ///
     /// 4MiB 取って中の揃った部分を使う、という手もあるが、余りが
     /// 恒久的に失われる。ここで揃えて取れば無駄が出ない。
-    pub fn allocate_contiguous_aligned(&mut self, count: u64, align_frames: u64) -> Option<u64> {
+    pub fn allocate_contiguous_aligned(
+        &mut self,
+        count: u64,
+        align_frames: u64,
+    ) -> Option<PhysAddr> {
         if count == 0 || align_frames == 0 || !align_frames.is_power_of_two() {
             return None;
         }
@@ -352,12 +359,12 @@ impl<const CAP: usize> FrameAllocator<CAP> {
                 };
                 self.range_count += 1;
             }
-            return Some(aligned);
+            return PhysAddr::from_frame_number(aligned);
         }
         None
     }
 
-    pub fn allocate_contiguous(&mut self, count: u64) -> Option<u64> {
+    pub fn allocate_contiguous(&mut self, count: u64) -> Option<PhysAddr> {
         if count == 0 {
             return None;
         }
@@ -373,7 +380,7 @@ impl<const CAP: usize> FrameAllocator<CAP> {
                     self.ranges[i].start_frame += count;
                     self.ranges[i].frame_count -= count;
                 }
-                return Some(start);
+                return PhysAddr::from_frame_number(start);
             }
         }
         None
@@ -447,6 +454,11 @@ pub fn build(
 mod tests {
     use super::*;
 
+    /// テスト内でフレーム番号から期待値の物理アドレスを作る補助。
+    fn f(frame: u64) -> PhysAddr {
+        PhysAddr::from_frame_number(frame).unwrap()
+    }
+
     /// 境界を揃えた確保。範囲の途中から取り、前後に空きが残る場合。
     #[test]
     fn aligned_allocation_splits_the_range_in_three() {
@@ -455,7 +467,7 @@ mod tests {
         allocator.insert_free_range(3, 1997).unwrap();
 
         let start = allocator.allocate_contiguous_aligned(512, 512).unwrap();
-        assert_eq!(start, 512, "最初に境界へ揃うフレーム");
+        assert_eq!(start, f(512), "最初に境界へ揃うフレーム");
 
         // 前（3..512）と後ろ（1024..2000）が空きとして残る。
         let ranges: Vec<(u64, u64)> = allocator.free_ranges().collect();
@@ -470,7 +482,7 @@ mod tests {
         allocator.insert_free_range(512, 1024).unwrap();
 
         let start = allocator.allocate_contiguous_aligned(512, 512).unwrap();
-        assert_eq!(start, 512);
+        assert_eq!(start, f(512));
         assert_eq!(
             allocator.free_ranges().collect::<Vec<_>>(),
             vec![(1024, 512)]
@@ -483,7 +495,10 @@ mod tests {
         let mut allocator = FrameAllocator::<8>::new();
         allocator.insert_free_range(1024, 512).unwrap();
 
-        assert_eq!(allocator.allocate_contiguous_aligned(512, 512), Some(1024));
+        assert_eq!(
+            allocator.allocate_contiguous_aligned(512, 512),
+            Some(f(1024))
+        );
         assert_eq!(allocator.free_range_count(), 0);
         assert_eq!(allocator.free_frame_count(), 0);
     }
@@ -553,10 +568,10 @@ mod tests {
         allocator.insert_free_range(10, 3).unwrap();
         assert_eq!(allocator.free_frame_count(), 3);
 
-        assert_eq!(allocator.allocate_frame(), Some(10));
-        assert_eq!(allocator.allocate_frame(), Some(11));
+        assert_eq!(allocator.allocate_frame(), Some(f(10)));
+        assert_eq!(allocator.allocate_frame(), Some(f(11)));
         assert_eq!(allocator.free_frame_count(), 1);
-        assert_eq!(allocator.allocate_frame(), Some(12));
+        assert_eq!(allocator.allocate_frame(), Some(f(12)));
         assert_eq!(allocator.free_frame_count(), 0);
         assert_eq!(allocator.allocate_frame(), None);
     }
@@ -634,11 +649,11 @@ mod tests {
     fn allocate_contiguous_carves_out_the_front_of_a_range() {
         let mut allocator = FrameAllocator::<8>::new();
         allocator.insert_free_range(10, 20).unwrap(); // [10, 30)
-        assert_eq!(allocator.allocate_contiguous(5), Some(10));
+        assert_eq!(allocator.allocate_contiguous(5), Some(f(10)));
         assert_eq!(allocator.free_frame_count(), 15);
         assert_eq!(allocator.free_range_count(), 1);
         // 残りは [15, 30) のまま連続している。
-        assert_eq!(allocator.allocate_frame(), Some(15));
+        assert_eq!(allocator.allocate_frame(), Some(f(15)));
     }
 
     #[test]
@@ -646,7 +661,7 @@ mod tests {
         let mut allocator = FrameAllocator::<8>::new();
         allocator.insert_free_range(10, 5).unwrap();
         allocator.insert_free_range(100, 5).unwrap();
-        assert_eq!(allocator.allocate_contiguous(5), Some(10));
+        assert_eq!(allocator.allocate_contiguous(5), Some(f(10)));
         assert_eq!(allocator.free_range_count(), 1);
         assert_eq!(allocator.free_frame_count(), 5);
     }
@@ -666,7 +681,7 @@ mod tests {
         let mut allocator = FrameAllocator::<8>::new();
         allocator.insert_free_range(0, 6).unwrap(); // 先に見つかる、十分な大きさ
         allocator.insert_free_range(100, 100).unwrap(); // より大きいが後ろにある
-        assert_eq!(allocator.allocate_contiguous(5), Some(0));
+        assert_eq!(allocator.allocate_contiguous(5), Some(f(0)));
     }
 
     #[test]
@@ -680,12 +695,37 @@ mod tests {
     #[test]
     fn boundary_near_top_of_address_space_does_not_overflow() {
         let mut allocator = FrameAllocator::<4>::new();
-        // 2^64 の物理アドレス空間の末尾付近（オーバーフローが起きやすい境界）。
-        let near_top_frame = (u64::MAX / FRAME_SIZE) - 2;
+        // **表現できる物理アドレス空間（52 ビット）の末尾付近。**
+        // 以前は 2^64 の末尾付近で試していたが、T-2c で確保 API が
+        // `PhysAddr` を返すようになり、52 ビットを超えるフレームは
+        // そもそも物理アドレスとして表せなくなった。境界が移っている。
+        const PHYS_LIMIT: u64 = 0x0010_0000_0000_0000;
+        let near_top_frame = (PHYS_LIMIT / FRAME_SIZE) - 2;
         allocator.insert_free_range(near_top_frame, 2).unwrap();
         assert_eq!(allocator.free_frame_count(), 2);
-        assert_eq!(allocator.allocate_frame(), Some(near_top_frame));
-        assert_eq!(allocator.allocate_frame(), Some(near_top_frame + 1));
+        assert_eq!(allocator.allocate_frame(), Some(f(near_top_frame)));
+        assert_eq!(allocator.allocate_frame(), Some(f(near_top_frame + 1)));
+    }
+
+    /// **52 ビットを超えるフレームは確保できない。**
+    ///
+    /// T-2c で確保 API が `PhysAddr` を返すようになった結果の新しい不変条件。
+    /// 表せないアドレスを返すくらいなら、確保できないと言うほうがよい。
+    /// ページテーブルへ書いた時点で CPU が弾く値を、その前に止められる。
+    #[test]
+    fn frames_beyond_the_physical_address_limit_cannot_be_allocated() {
+        let mut allocator = FrameAllocator::<4>::new();
+        const PHYS_LIMIT: u64 = 0x0010_0000_0000_0000;
+        allocator
+            .insert_free_range(PHYS_LIMIT / FRAME_SIZE, 2)
+            .unwrap();
+
+        assert_eq!(allocator.free_frame_count(), 2, "空きとしては数えられる");
+        assert_eq!(
+            allocator.allocate_frame(),
+            None,
+            "物理アドレスとして表せないので確保できない"
+        );
     }
 
     // --- build() のテスト（メモリ型ポリシーの適用） ---
@@ -728,7 +768,9 @@ mod tests {
         let loader_data_end_frame = 0x106000 / FRAME_SIZE;
         let mut allocator = allocator;
         while let Some(frame) = allocator.allocate_frame() {
-            assert!(!(loader_data_start_frame..loader_data_end_frame).contains(&frame));
+            assert!(
+                !(loader_data_start_frame..loader_data_end_frame).contains(&frame.frame_number())
+            );
         }
     }
 
@@ -755,7 +797,7 @@ mod tests {
         assert_eq!(allocator.free_frame_count(), 3);
         // フレーム 0 (物理アドレス 0) は絶対に配られない。
         while let Some(frame) = allocator.allocate_frame() {
-            assert_ne!(frame, 0);
+            assert_ne!(frame, f(0));
         }
     }
 

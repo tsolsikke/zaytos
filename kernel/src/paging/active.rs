@@ -325,9 +325,7 @@ impl ActivePageTable {
 
         // 手順 1。ここまでページテーブルを一切変更していないので、
         // 確保に失敗しても状態は元のままである。
-        let frame = frames.allocate_frame().ok_or(MapUpdateError::OutOfFrames)?;
-        let table_phys = PhysAddr::from_frame_number(frame)
-            .expect("a frame number from the allocator fits in a physical address");
+        let table_phys = frames.allocate_frame().ok_or(MapUpdateError::OutOfFrames)?;
         // SAFETY: 今このアロケータから確保したばかりの、他の誰も参照して
         // いないフレームである。アロケータの空き範囲がすべてマップ済みで
         // あることは起動時に検証済みなので、恒等マッピングで書ける。

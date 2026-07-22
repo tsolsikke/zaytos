@@ -322,7 +322,7 @@ extern "sysv64" fn kernel_main() -> ! {
         Some(frame) => {
             logger.info(format_args!(
                 "frame allocator smoke test: allocated frame {:#x}",
-                frame * frame_allocator::FRAME_SIZE
+                frame.as_u64()
             ));
             let _ = allocator.deallocate_frame(frame);
             if allocator.free_frame_count() == before {
@@ -377,7 +377,17 @@ extern "sysv64" fn kernel_main() -> ! {
     for (start_frame, frame_count) in allocator.free_ranges() {
         let start = start_frame * frame_allocator::FRAME_SIZE;
         let end = (start_frame + frame_count) * frame_allocator::FRAME_SIZE;
-        if !mapped_ranges.contains_range(start, end) {
+        let (Some(start_phys), Some(end_phys)) = (
+            common::addr::PhysAddr::new(start),
+            common::addr::PhysAddr::new(end),
+        ) else {
+            allocator_ranges_covered = false;
+            logger.error(format_args!(
+                "paging: allocator free range {start:#x}..{end:#x} does not fit in a physical address"
+            ));
+            continue;
+        };
+        if !mapped_ranges.contains_range(start_phys, end_phys) {
             allocator_ranges_covered = false;
             logger.error(format_args!(
                 "paging: allocator free range {start:#x}..{end:#x} is NOT fully mapped"
@@ -399,17 +409,20 @@ extern "sysv64" fn kernel_main() -> ! {
     for r in mapped_ranges.iter() {
         logger.info(format_args!(
             "paging:   {:#x}..{:#x} cacheable={}",
-            r.start, r.end, r.cacheable
+            r.start.as_u64(),
+            r.end.as_u64(),
+            r.cacheable
         ));
     }
 
     // 実際にページテーブルへ書き込む（kernel/src/paging/table.rs 参照）。
-    let mut builder = PageTableBuilder::new(&mut allocator).unwrap_or_else(|e| {
-        logger.error(format_args!(
-            "paging: failed to start page table build: {e:?}"
-        ));
-        cpu::halt_forever();
-    });
+    let mut builder = PageTableBuilder::new(&mut allocator, common::addr::direct_map())
+        .unwrap_or_else(|e| {
+            logger.error(format_args!(
+                "paging: failed to start page table build: {e:?}"
+            ));
+            cpu::halt_forever();
+        });
 
     let mut huge_page_count: u64 = 0;
     let mut small_page_count: u64 = 0;
@@ -431,7 +444,9 @@ extern "sysv64" fn kernel_main() -> ! {
     if let Some((m, e)) = map_error {
         logger.error(format_args!(
             "paging: map_page({:#x}, huge={}) failed: {:?}",
-            m.phys_addr, m.huge, e
+            m.phys_addr.as_u64(),
+            m.huge,
+            e
         ));
         cpu::halt_forever();
     }
@@ -445,8 +460,9 @@ extern "sysv64" fn kernel_main() -> ! {
     // 必須領域の充足検証。ここに挙げる領域は、CR3 切り替え後も
     // アクセスできる必要がある（切り替え直後のトリプルフォルトの
     // 主要因になるため）。
-    let kernel_start = core::ptr::addr_of!(__kernel_start) as u64;
-    let kernel_end = core::ptr::addr_of!(__kernel_end) as u64;
+    let (kernel_start_phys, kernel_end_phys) = kernel_image_phys_range();
+    let kernel_start = kernel_start_phys.as_u64();
+    let kernel_end = kernel_end_phys.as_u64();
     let boot_info_start = boot_info as *const BootInfo as u64;
     let boot_info_end =
         boot_info_start + (BOOT_INFO_PAGE_COUNT as u64) * frame_allocator::FRAME_SIZE;
@@ -461,7 +477,13 @@ extern "sysv64" fn kernel_main() -> ! {
 
     let mut all_required_ok = true;
     let mut check_range = |name: &str, start: u64, end: u64| {
-        let ok = mapped_ranges.contains_range(start, end);
+        let ok = match (
+            common::addr::PhysAddr::new(start),
+            common::addr::PhysAddr::new(end),
+        ) {
+            (Some(s), Some(e)) => mapped_ranges.contains_range(s, e),
+            _ => false,
+        };
         logger.info(format_args!(
             "paging: required range [{name}] {start:#x}..{end:#x}: {}",
             if ok { "OK" } else { "NG" }
@@ -478,8 +500,8 @@ extern "sysv64" fn kernel_main() -> ! {
     }
     check_range(
         "new page tables (PML4)",
-        pml4_phys,
-        pml4_phys + frame_allocator::FRAME_SIZE,
+        pml4_phys.as_u64(),
+        pml4_phys.as_u64() + frame_allocator::FRAME_SIZE,
     );
     check_range("current RSP", current_rsp, current_rsp + 1);
     check_range("current RIP", current_rip, current_rip + 1);
@@ -507,14 +529,14 @@ extern "sysv64" fn kernel_main() -> ! {
     // フレームの先頭アドレス（frame * FRAME_SIZE）であるため下位12ビットは
     // 常に 0 のはずだが、CR3 に書き込む値の PWT/PCD ビット（bit 3, 4）を
     // 含む下位ビットが確実に 0 であることを実行時にも検証する。
-    if pml4_phys & 0xFFF != 0 {
+    if !pml4_phys.is_aligned(0x1000) {
         logger.error(format_args!(
-            "paging: new PML4 {pml4_phys:#x} is not 4KiB aligned; refusing to switch CR3"
+            "paging: new PML4 {:#x} is not 4KiB aligned; refusing to switch CR3",
+            pml4_phys.as_u64()
         ));
         cpu::halt_forever();
     }
-    let cr3_value =
-        common::addr::PhysAddr::new(pml4_phys).expect("a page table frame address fits in 52 bits");
+    let cr3_value = pml4_phys;
 
     // 切り替え前スナップショット(切り替え後の整合性確認に使う)。
     // SAFETY: kernel_start は必須領域検証により読み取り可能であることを
@@ -661,10 +683,16 @@ extern "sysv64" fn kernel_main() -> ! {
             ));
             cpu::halt_forever();
         });
-    let heap_start = heap_start_frame * frame_allocator::FRAME_SIZE;
+    let heap_start = heap_start_frame.as_u64();
     let heap_size = heap_frame_count * frame_allocator::FRAME_SIZE;
     let heap_end = heap_start + heap_size;
-    let heap_mapped = mapped_ranges.contains_range(heap_start, heap_end);
+    let heap_mapped = match (
+        common::addr::PhysAddr::new(heap_start),
+        common::addr::PhysAddr::new(heap_end),
+    ) {
+        (Some(s), Some(e)) => mapped_ranges.contains_range(s, e),
+        _ => false,
+    };
     log_both(
         &mut logger,
         console.as_mut(),
@@ -741,7 +769,7 @@ extern "sysv64" fn kernel_main() -> ! {
         format_args!(
             "heap smoke test: Vec<u32> len={} ptr={v_ptr:#x} mapped={}",
             v.len(),
-            mapped_ranges.contains_range(v_ptr, v_ptr + v_len_bytes)
+            range_is_mapped(&mapped_ranges, v_ptr, v_ptr + v_len_bytes)
         ),
     );
     drop(v);
@@ -755,7 +783,7 @@ extern "sysv64" fn kernel_main() -> ! {
         format_args!(
             "heap smoke test: Box<u32> value={:#x} ptr={b_ptr:#x} mapped={}",
             *b,
-            mapped_ranges.contains_range(b_ptr, b_ptr + 4)
+            range_is_mapped(&mapped_ranges, b_ptr, b_ptr + 4)
         ),
     );
     drop(b);
@@ -771,7 +799,7 @@ extern "sysv64" fn kernel_main() -> ! {
         format_args!(
             "heap smoke test: String={:?} ptr={s_ptr:#x} mapped={}",
             s.as_str(),
-            mapped_ranges.contains_range(s_ptr, s_ptr + s_len)
+            range_is_mapped(&mapped_ranges, s_ptr, s_ptr + s_len)
         ),
     );
     drop(s);
@@ -860,7 +888,7 @@ fn init_framebuffer(
     // 検証は「GOP の申告に内部矛盾が無いこと」しか見ていない。その範囲が
     // 実際に現在のページテーブルでマップされているかは別問題なので、ここで
     // 確認する（`Framebuffer::new` の安全性要件）。
-    if !mapped_ranges.contains_range(layout.base().as_u64(), layout.end().as_u64()) {
+    if !range_is_mapped(mapped_ranges, layout.base().as_u64(), layout.end().as_u64()) {
         logger.error(format_args!(
             "framebuffer: {:#x}..{:#x} is not fully mapped; drawing is disabled",
             layout.base().as_u64(),
@@ -1035,11 +1063,11 @@ fn init_console(
         return None;
     };
 
-    let base = start_frame * frame_allocator::FRAME_SIZE;
+    let base = start_frame.as_u64();
     let end = base + frames_needed * frame_allocator::FRAME_SIZE;
 
     // M2 以来の不変条件: 使う領域は必ずマップ済みであることを確かめてから触る。
-    if !mapped_ranges.contains_range(base, end) {
+    if !range_is_mapped(mapped_ranges, base, end) {
         logger.error(format_args!(
             "console: back buffer {base:#x}..{end:#x} is not fully mapped; \
              screen output is disabled"
@@ -1051,8 +1079,7 @@ fn init_console(
     // バックバッファは物理フレームから切り出したもので、恒等マッピングの
     // 下では仮想アドレスと一致する。変換は direct map を通す（T-2c で
     // frame_allocator が PhysAddr を返すようになれば、この分岐は消える）。
-    let base_virt = common::addr::direct_map()
-        .phys_to_virt(common::addr::PhysAddr::new(base).expect("a frame address fits in 52 bits"));
+    let base_virt = common::addr::direct_map().phys_to_virt(start_frame);
     // SAFETY: base..end は今確保したばかりで他の誰も使っておらず、直前に
     // contains_range でマップ済みであることを確認した。framebuffer は
     // init_framebuffer が検証済みの形状で作ったもので、所有権をここへ
@@ -2317,8 +2344,7 @@ fn verify_split_and_unmap<const CAP: usize>(
         ));
         cpu::halt_forever();
     };
-    let base_phys = common::addr::PhysAddr::from_frame_number(start_frame)
-        .expect("a frame number from the allocator fits in a physical address");
+    let base_phys = start_frame;
     let base = base_phys.as_u64();
     logger.info(format_args!(
         "split-test: reserved {base:#x}..{:#x} as scratch ({} KiB permanently withheld from the \
@@ -2627,8 +2653,7 @@ fn run_paging_test<const CAP: usize>(
         logger.error(format_args!("paging-test: no scratch region available"));
         cpu::halt_forever();
     };
-    let pcd_phys = common::addr::PhysAddr::from_frame_number(frame)
-        .expect("a frame number from the allocator fits in a physical address");
+    let pcd_phys = frame;
     let pcd_base_virt = test_map.phys_to_virt(pcd_phys);
     let pcd_base = pcd_phys.as_u64();
     // SAFETY: 今確保したばかりの、誰も使っていない領域である。PCD を立てても
@@ -2714,8 +2739,7 @@ fn run_paging_test<const CAP: usize>(
         logger.error(format_args!("paging-test: no second scratch region"));
         cpu::halt_forever();
     };
-    let unmap_phys = common::addr::PhysAddr::from_frame_number(frame)
-        .expect("a frame number from the allocator fits in a physical address");
+    let unmap_phys = frame;
     let unmap_base = test_map.phys_to_virt(unmap_phys);
     // SAFETY: 誰も使っていないスクラッチ領域。
     if let Err(error) = unsafe { table.split_huge_page(unmap_base, allocator) } {
@@ -2863,6 +2887,57 @@ fn report_mapping_granularity(
 /// 読み戻す手段が無かった**。
 ///
 /// あわせて、TLB の全フラッシュ（CR3 リロード）が成立する条件も実測する。
+/// 物理アドレスの範囲がマップ計画に含まれるか。
+///
+/// **恒等マッピングの間の橋渡しである。** 呼び出し側はまだ `u64` で
+/// 範囲を持っており、`MappedRanges` は `PhysAddr` を扱う。物理として
+/// 表せない値は「含まれない」として扱う。
+/// リンカが定義する kernel イメージの範囲を、物理アドレスとして得る。
+///
+/// # なぜ変換を関数にするのか
+///
+/// リンカシンボルは**仮想アドレス**である。現在はリンクアドレスが
+/// `0x100000` の恒等マッピングなので、値がそのまま物理アドレスとしても
+/// 通る。そのため `as u64` で済ませても動いてしまう。
+///
+/// **higher-half 移行でここが変わる。** 移行後、リンカが返すのは
+/// `0xFFFFFFFF80100000` 付近の仮想アドレスで、物理としては使えない。
+/// 一方、フレームアロケータやマップ計画が必要とするのは物理アドレスである。
+///
+/// # この変換は direct map ではない
+///
+/// **direct physical map 経由の変換とは別の関係である。** kernel イメージの
+/// 物理位置は「リンクアドレスとロードアドレスの差」で決まる。bootloader が
+/// ELF をどこへ置いたかで決まるものであって、direct map の窓とは無関係で
+/// ある。移行時にこの関数の中身をその差へ書き換えること。
+/// 詳細は `docs/deferred-decisions.md` を参照。
+fn kernel_image_phys_range() -> (common::addr::PhysAddr, common::addr::PhysAddr) {
+    use common::addr::{PhysAddr, VirtAddr};
+
+    // リンカシンボルは仮想アドレスとして受け取る。
+    let start_virt = VirtAddr::new(core::ptr::addr_of!(__kernel_start) as u64)
+        .expect("the linker places the kernel at a canonical address");
+    let end_virt = VirtAddr::new(core::ptr::addr_of!(__kernel_end) as u64)
+        .expect("the linker places the kernel at a canonical address");
+
+    // 恒等マッピングの間は、リンクアドレスとロードアドレスが等しいので
+    // 差は 0 である。移行後はここが「差を引く」形になる。
+    let to_phys = |virt: VirtAddr| {
+        PhysAddr::new(virt.as_u64()).expect("an identity-mapped kernel address fits in 52 bits")
+    };
+    (to_phys(start_virt), to_phys(end_virt))
+}
+
+fn range_is_mapped<const CAP: usize>(mapped: &MappedRanges<CAP>, start: u64, end: u64) -> bool {
+    match (
+        common::addr::PhysAddr::new(start),
+        common::addr::PhysAddr::new(end),
+    ) {
+        (Some(s), Some(e)) => mapped.contains_range(s, e),
+        _ => false,
+    }
+}
+
 fn verify_page_tables(
     logger: &mut Logger<SerialPort>,
     mapped: &MappedRanges<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
@@ -2893,9 +2968,9 @@ fn verify_page_tables(
 
     for range in mapped.iter() {
         let probes = [
-            range.start,
-            range.start + (range.end - range.start) / 2,
-            range.end - 1,
+            range.start.as_u64(),
+            range.start.as_u64() + (range.end.as_u64() - range.start.as_u64()) / 2,
+            range.end.as_u64() - 1,
         ];
         for probe in probes {
             let Some(probe_virt) = common::addr::VirtAddr::new(probe) else {
