@@ -56,7 +56,13 @@ impl Framebuffer {
         // 構築時に検証済みで、offset は 4 の倍数なので u32 のアラインメントを
         // 満たす。
         unsafe {
-            core::ptr::write_volatile((self.layout.base() + offset) as *mut u32, pixel);
+            core::ptr::write_volatile(
+                self.layout
+                    .base()
+                    .as_mut_ptr::<u32>()
+                    .byte_add(offset as usize),
+                pixel,
+            );
         }
     }
 
@@ -90,7 +96,8 @@ impl Framebuffer {
                 row_offset + (rect.width as u64) * BYTES_PER_PIXEL <= self.layout.size_bytes(),
                 "clipped row would run past the end of the framebuffer"
             );
-            let row_ptr = (base + row_offset) as *mut u32;
+            // SAFETY: row_offset は検証済みオフセットで、base..end はマップ済み。
+            let row_ptr = unsafe { base.as_mut_ptr::<u32>().byte_add(row_offset as usize) };
             for column in 0..rect.width {
                 // SAFETY: row_offset は検証済みオフセット。column < rect.width
                 // であり、clip_rect により rect.x + rect.width <= layout.width()

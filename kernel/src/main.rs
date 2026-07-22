@@ -196,6 +196,23 @@ extern "sysv64" fn kernel_main() -> ! {
     // 有効な BootInfo を指す。ここでは読み取り専用の参照を作るのみ。
     let boot_info = unsafe { &*handoff.boot_info };
 
+    // direct physical map を登録する（T-2a）。
+    //
+    // **恒等マッピングの間は、窓が物理空間全体を覆う。** 覆う長さを
+    // `classify()` の返す最大物理アドレスから決めるのは higher-half 移行の
+    // 時点である。ここでそれを求めようとしても、メモリマップを読むために
+    // まず `descriptors_ptr` を変換する必要があり、順序が循環する。
+    //
+    // 長さを定数として型やコードに埋め込んではいない。窓は値として持ち回り、
+    // 移行時に新しい base と実測した長さで作り直す（`replace_direct_map`）。
+    let direct_map =
+        common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
+            .expect("an identity window over the representable physical space is canonical");
+    if common::addr::init_direct_map(direct_map).is_err() {
+        logger.error(format_args!("addr: the direct map was already initialised"));
+        cpu::halt_forever();
+    }
+
     if let Err(e) = boot_info.validate() {
         logger.error(format_args!("BootInfo validation failed: {e}"));
         logger.error(format_args!(
@@ -217,7 +234,7 @@ extern "sysv64" fn kernel_main() -> ! {
         boot_info.framebuffer.height,
         boot_info.framebuffer.stride,
         boot_info.framebuffer.pixel_format,
-        boot_info.framebuffer.physical_address,
+        boot_info.framebuffer.physical_address.as_u64(),
         boot_info.framebuffer.size_bytes,
     ));
 
@@ -238,7 +255,9 @@ extern "sysv64" fn kernel_main() -> ! {
     // バイトの有効なメモリマップ（恒等マッピング済み、ADR-0009）を指す。
     let raw_map = unsafe {
         core::slice::from_raw_parts(
-            boot_info.memory_map.descriptors_ptr as *const u8,
+            direct_map
+                .phys_to_virt(boot_info.memory_map.descriptors_ptr)
+                .as_ptr::<u8>(),
             boot_info.memory_map.descriptors_len as usize,
         )
     };
@@ -327,7 +346,9 @@ extern "sysv64" fn kernel_main() -> ! {
     // 判明した（PCI BAR はシステムメモリマップとは別扱いのため）。
     // メモリマップ由来の判定だけに頼らず、BootInfo から得た範囲を明示的に
     // 追加する（`physical_address == 0` は BltOnly 等で無効なため除く）。
-    let fb_start = boot_info.framebuffer.physical_address;
+    // T-2b / T-2c で `paging::plan` と `frame_allocator` に型を入れるまで、
+    // ここは生の値へ落として橋渡しする。**一時的な措置である。**
+    let fb_start = boot_info.framebuffer.physical_address.as_u64();
     let fb_end = fb_start + boot_info.framebuffer.size_bytes;
     let extra_ranges: &[(u64, u64, bool)] = if fb_start != 0 {
         &[(fb_start, fb_end, false)]
@@ -430,6 +451,8 @@ extern "sysv64" fn kernel_main() -> ! {
     let boot_info_end =
         boot_info_start + (BOOT_INFO_PAGE_COUNT as u64) * frame_allocator::FRAME_SIZE;
     let mmap_start = boot_info.memory_map.descriptors_ptr;
+    // T-2b / T-2c までの橋渡し。ここも一時的に生の値へ落とす。
+    let mmap_start = mmap_start.as_u64();
     let mmap_end = mmap_start + boot_info.memory_map.descriptors_len;
     // fb_start/fb_end は上（extra_ranges 構築時）で計算済みのものを使う。
     let current_rsp = cpu::read_rsp();
@@ -818,7 +841,7 @@ fn init_framebuffer(
     mapped_ranges: &MappedRanges,
 ) -> Option<Framebuffer> {
     let info = &boot_info.framebuffer;
-    let layout = match FramebufferLayout::from_info(info) {
+    let layout = match FramebufferLayout::from_info(info, common::addr::direct_map()) {
         Ok(layout) => layout,
         Err(e) => {
             logger.error(format_args!(
@@ -831,11 +854,11 @@ fn init_framebuffer(
     // 検証は「GOP の申告に内部矛盾が無いこと」しか見ていない。その範囲が
     // 実際に現在のページテーブルでマップされているかは別問題なので、ここで
     // 確認する（`Framebuffer::new` の安全性要件）。
-    if !mapped_ranges.contains_range(layout.base(), layout.end()) {
+    if !mapped_ranges.contains_range(layout.base().as_u64(), layout.end().as_u64()) {
         logger.error(format_args!(
             "framebuffer: {:#x}..{:#x} is not fully mapped; drawing is disabled",
-            layout.base(),
-            layout.end()
+            layout.base().as_u64(),
+            layout.end().as_u64()
         ));
         return None;
     }
@@ -846,8 +869,8 @@ fn init_framebuffer(
         layout.height(),
         layout.stride(),
         layout.format(),
-        layout.base(),
-        layout.end()
+        layout.base().as_u64(),
+        layout.end().as_u64()
     ));
 
     // SAFETY: layout は FramebufferLayout の検証を通っており、最終行の末尾まで
@@ -1019,11 +1042,16 @@ fn init_console(
         return None;
     }
 
+    // バックバッファは物理フレームから切り出したもので、恒等マッピングの
+    // 下では仮想アドレスと一致する。変換は direct map を通す（T-2c で
+    // frame_allocator が PhysAddr を返すようになれば、この分岐は消える）。
+    let base_virt = common::addr::direct_map()
+        .phys_to_virt(common::addr::PhysAddr::new(base).expect("a frame address fits in 52 bits"));
     // SAFETY: base..end は今確保したばかりで他の誰も使っておらず、直前に
     // contains_range でマップ済みであることを確認した。framebuffer は
     // init_framebuffer が検証済みの形状で作ったもので、所有権をここへ
     // 移している（同じ領域に対する Framebuffer は他に存在しない）。
-    match unsafe { Console::new(framebuffer, base, FOREGROUND, BACKGROUND) } {
+    match unsafe { Console::new(framebuffer, base_virt, FOREGROUND, BACKGROUND) } {
         Ok(console) => {
             let (columns, rows) = console.size();
             logger.info(format_args!(

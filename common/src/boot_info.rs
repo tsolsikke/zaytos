@@ -13,6 +13,8 @@ use core::fmt;
 /// 2 つのバイナリであり、どちらか一方だけ古いビルドが混ざるとレイアウトの
 /// 不一致（症状はトリプルフォルト等の無言の停止）が起こりうる。kernel は
 /// 起動直後にこれを検証し、不一致ならシリアルにエラーを出して停止する。
+use crate::addr::PhysAddr;
+
 pub const BOOT_INFO_MAGIC: u64 = u64::from_le_bytes(*b"ZAYTBOOT");
 
 /// `BootInfo` のレイアウトバージョン。フィールドを追加・変更したら上げる。
@@ -51,7 +53,7 @@ pub struct BootInfo {
 pub struct MemoryMapInfo {
     /// ディスクリプタ配列の先頭物理アドレス（= 仮想アドレス。ADR-0009 で
     /// 検証済みの恒等マッピング前提）。
-    pub descriptors_ptr: u64,
+    pub descriptors_ptr: PhysAddr,
     /// ディスクリプタ配列全体のバイトサイズ。
     pub descriptors_len: u64,
     /// 1 ディスクリプタあたりのバイトサイズ。
@@ -64,7 +66,7 @@ pub struct MemoryMapInfo {
 /// フレームバッファ情報。
 #[repr(C)]
 pub struct FramebufferInfo {
-    pub physical_address: u64,
+    pub physical_address: PhysAddr,
     pub size_bytes: u64,
     pub width: u32,
     pub height: u32,
@@ -146,13 +148,13 @@ mod tests {
             magic: BOOT_INFO_MAGIC,
             version: BOOT_INFO_VERSION,
             memory_map: MemoryMapInfo {
-                descriptors_ptr: 0,
+                descriptors_ptr: PhysAddr::new_const(0),
                 descriptors_len: 0,
                 descriptor_size: 0,
                 descriptor_version: 0,
             },
             framebuffer: FramebufferInfo {
-                physical_address: 0,
+                physical_address: PhysAddr::new_const(0),
                 size_bytes: 0,
                 width: 0,
                 height: 0,
@@ -192,5 +194,47 @@ mod tests {
                 found: BOOT_INFO_VERSION + 1
             })
         );
+    }
+
+    /// **bootloader と kernel の境界を跨ぐ構造体のレイアウトを固定する。**
+    ///
+    /// T-2a で `descriptors_ptr` と `physical_address` を `u64` から
+    /// `PhysAddr` へ変えた。`#[repr(transparent)]` によりレイアウトは
+    /// 同一のはずだが、それは前提であって検証ではない。
+    ///
+    /// 不一致は「マジック値の検証は通るが中身がずれている」という形で出る。
+    /// 最も診断しにくい部類なので、機械的に固定しておく。
+    ///
+    /// 期待値は型を変える前のコード（671e4e3）から実測した値である。
+    /// 推測で書いたところ 72 と 96 で食い違い、テストが誤りを捕まえた。
+    #[test]
+    fn the_handoff_layout_did_not_change() {
+        use core::mem::{align_of, offset_of, size_of};
+
+        assert_eq!(size_of::<BootInfo>(), 96);
+        assert_eq!(align_of::<BootInfo>(), 8);
+        assert_eq!(offset_of!(BootInfo, magic), 0);
+        assert_eq!(offset_of!(BootInfo, version), 8);
+        assert_eq!(offset_of!(BootInfo, memory_map), 16);
+        assert_eq!(offset_of!(BootInfo, framebuffer), 48);
+
+        assert_eq!(size_of::<MemoryMapInfo>(), 32);
+        assert_eq!(align_of::<MemoryMapInfo>(), 8);
+        assert_eq!(offset_of!(MemoryMapInfo, descriptors_ptr), 0);
+        assert_eq!(offset_of!(MemoryMapInfo, descriptors_len), 8);
+        assert_eq!(offset_of!(MemoryMapInfo, descriptor_size), 16);
+        assert_eq!(offset_of!(MemoryMapInfo, descriptor_version), 24);
+
+        assert_eq!(size_of::<FramebufferInfo>(), 48);
+        assert_eq!(align_of::<FramebufferInfo>(), 8);
+        assert_eq!(offset_of!(FramebufferInfo, physical_address), 0);
+        assert_eq!(offset_of!(FramebufferInfo, size_bytes), 8);
+        assert_eq!(offset_of!(FramebufferInfo, width), 16);
+        assert_eq!(offset_of!(FramebufferInfo, height), 20);
+        assert_eq!(offset_of!(FramebufferInfo, stride), 24);
+        assert_eq!(offset_of!(FramebufferInfo, pixel_format), 28);
+        assert_eq!(offset_of!(FramebufferInfo, red_mask), 32);
+        assert_eq!(offset_of!(FramebufferInfo, green_mask), 36);
+        assert_eq!(offset_of!(FramebufferInfo, blue_mask), 40);
     }
 }

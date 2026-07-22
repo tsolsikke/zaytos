@@ -305,6 +305,30 @@ impl DirectMap {
         Self::new(VirtAddr::new_const(0), length)
     }
 
+    /// 恒等窓が覆える最大の長さ。
+    ///
+    /// **物理空間全体（52 ビット）は恒等では覆えない。** base が 0 なので
+    /// 上端は長さそのものになり、`0x0000_8000_0000_0000` 以上は正規形の穴に
+    /// 入る。したがって恒等で覆えるのは下位半分（47 ビット、128 TiB）までで
+    /// ある。実装物理メモリより桁違いに広いので実害は無い。
+    ///
+    /// 4KiB 境界に丸めてあるのは、ページ単位で扱う値と揃えるためである。
+    ///
+    /// # 終端は排他である
+    ///
+    /// `length` は覆う長さであり、窓は `base .. base + length` を覆う。
+    /// **終端は含まない。** 下位半分で正規形として使える最大のアドレスは
+    /// `0x0000_7FFF_FFFF_FFFF` なので、排他の終端としては
+    /// `0x0000_8000_0000_0000` まで取れるはずだが、[`DirectMap::new`] は
+    /// `base.checked_add(length)` が正規形であることを要求する。
+    /// 終端そのものを正規形として表せる形にしてあるので、1 ページ分
+    /// 下げて `0x0000_7FFF_FFFF_F000` としている。
+    ///
+    /// 終端も正規形で表せることを要求するのは、`end()` のような
+    /// 「排他の終端」を値として持ち回れるようにするためである。
+    /// 表せないと、境界の計算のたびに特別扱いが要る。
+    pub const IDENTITY_MAX_LENGTH: u64 = 0x0000_7FFF_FFFF_F000;
+
     pub const fn base(self) -> VirtAddr {
         self.base
     }
@@ -314,6 +338,16 @@ impl DirectMap {
     }
 
     /// この窓が覆っている物理アドレスか。
+    ///
+    /// **窓の範囲内であることだけを意味する。そのアドレスが実際にマップ
+    /// されているかについては何も言わない。** マッピングの有無は
+    /// `kernel::paging::plan::MappedRanges::contains_range`（計画の側）か
+    /// `kernel::paging::active::translate`（実テーブルの側）で見る。
+    ///
+    /// 混同すると「covers が真だから触れるはず」という誤った推論が入り込む。
+    /// 恒等マッピングの間は窓が下位半分全体を覆っているため、この誤りは
+    /// 顕在化しない。higher-half 移行で窓が狭くなった瞬間、あるいは窓の外を
+    /// 触った瞬間に初めて出る。
     pub const fn covers(self, phys: PhysAddr) -> bool {
         phys.as_u64() < self.length
     }
@@ -345,6 +379,118 @@ impl DirectMap {
             return None;
         }
         PhysAddr::new(offset)
+    }
+}
+
+/// 唯一の [`DirectMap`] の出所。
+///
+/// # なぜ static なのか
+///
+/// 窓は起動時に一度決まり、以後変わらない。ページテーブル操作・フレーム
+/// アロケータ・グラフィックス層のいずれもが変換を必要とするので、各所へ
+/// 引き回すと呼び出し経路すべてに引数が増える。値が変わらない以上、
+/// 出所を 1 つに固定して、必要な型が構築時に受け取る形が素直である。
+///
+/// # 使い方
+///
+/// **static を直接参照して回らない。** [`ActivePageTable`] や
+/// `PageTableBuilder` のように変換を必要とする型は、構築時に
+/// [`direct_map`] で 1 度受け取り、以後はその値を持ち回る。
+/// そうすることで、
+///
+/// - その型がアドレス変換を必要とすることがシグネチャに現れる
+/// - ホストテストで偽の窓を渡せる余地が残る（static 直参照だと
+///   差し替えられない）
+///
+/// # パニック経路と例外ハンドラから呼んではならない
+///
+/// [`direct_map`] は未初期化なら panic する。パニックハンドラがこれを
+/// 呼ぶと無限再帰になる。現在のパニックハンドラと例外ハンドラはシリアルへ
+/// 直接書くだけでアドレス変換を必要としない。**その性質を保つこと。**
+mod direct_map_slot {
+    use core::sync::atomic::{AtomicBool, AtomicU64};
+
+    pub(super) static BASE: AtomicU64 = AtomicU64::new(0);
+    pub(super) static LENGTH: AtomicU64 = AtomicU64::new(0);
+    pub(super) static READY: AtomicBool = AtomicBool::new(false);
+}
+
+/// [`init_direct_map`] が失敗した理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectMapInitError {
+    /// 既に初期化されている。差し替えは [`replace_direct_map`] で行う。
+    AlreadyInitialised,
+    /// まだ初期化されていない。
+    NotInitialised,
+}
+
+/// 窓を最初に設定する。**未初期化のときだけ成功する。**
+pub fn init_direct_map(map: DirectMap) -> Result<(), DirectMapInitError> {
+    use core::sync::atomic::Ordering;
+
+    // 値を先に書き、最後に READY を立てる（公開パターン）。
+    direct_map_slot::BASE.store(map.base().as_u64(), Ordering::Relaxed);
+    direct_map_slot::LENGTH.store(map.length(), Ordering::Relaxed);
+    // **Release はコンパイラの並べ替えを防ぐために今必要である。**
+    // シングルコアであっても、上の 2 つのストアをこの store より後ろへ
+    // 動かされると、READY が立った後に古い値を読む経路ができる。
+    // SMP を見越した先回りではない（`docs/vision.md` の規律による）。
+    direct_map_slot::READY
+        .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed)
+        .map(|_| ())
+        .map_err(|_| DirectMapInitError::AlreadyInitialised)
+}
+
+/// 窓を差し替える。**higher-half 移行専用。**
+///
+/// # なぜ全体を `InterruptGuard` で囲むのか
+///
+/// base と length は別々の `AtomicU64` である。初期化は「値を書いてから
+/// READY を立てる」公開パターンで守られているが、**差し替えは既に
+/// READY が立った状態から 2 つの値を書き換えるので、その保護が効かない。**
+/// 2 つのストアの間に割り込みが入れば、「新しい base と古い length」という
+/// 裂けた値を観測する。
+///
+/// シングルコアなので、区間全体で割り込みを禁止すれば、読み手は差し替えの
+/// 前か後のどちらかしか観測しない。M4-c-2 の `Locked<T>` と同じ構造である。
+///
+/// # Safety
+///
+/// **CR3 を新しい窓に対応するページテーブルへ切り替えた後で呼ぶこと。**
+/// 切り替える前に呼ぶと、以後の変換がすべて誤った値を返し、それが生ポインタ
+/// として使われる。間違った時点で呼ぶと未定義動作につながるため `unsafe`
+/// にしてある（`new_const` と違い、こちらは実際に危険である）。
+pub unsafe fn replace_direct_map(map: DirectMap) -> Result<(), DirectMapInitError> {
+    use core::sync::atomic::Ordering;
+
+    let _guard = crate::critical::InterruptGuard::enter();
+    if !direct_map_slot::READY.load(Ordering::Acquire) {
+        return Err(DirectMapInitError::NotInitialised);
+    }
+    direct_map_slot::BASE.store(map.base().as_u64(), Ordering::Relaxed);
+    direct_map_slot::LENGTH.store(map.length(), Ordering::Relaxed);
+    Ok(())
+}
+
+/// 窓を取り出す。**未初期化なら panic する。**
+///
+/// 未初期化の窓で変換すると、恒等でもない誤った値が返り、それが静かに
+/// 伝播する。`Option` を返して呼び出し側に判断させると `unwrap` が
+/// 散らばるだけで実質同じなので、ここで止める（ADR-0004 の fail-fast）。
+///
+/// **パニック経路と例外ハンドラから呼んではならない。** 無限再帰になる。
+pub fn direct_map() -> DirectMap {
+    use core::sync::atomic::Ordering;
+
+    // Acquire は `init_direct_map` の Release と対になる。
+    assert!(
+        direct_map_slot::READY.load(Ordering::Acquire),
+        "the direct physical map was read before it was initialised"
+    );
+    let base = VirtAddr::new_const(direct_map_slot::BASE.load(Ordering::Relaxed));
+    DirectMap {
+        base,
+        length: direct_map_slot::LENGTH.load(Ordering::Relaxed),
     }
 }
 

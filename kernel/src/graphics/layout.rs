@@ -9,6 +9,7 @@
 //! 生ポインタを使わない純粋ロジックであり、ホスト上の `cargo test` で
 //! 検証する。実際の書き込みは [`super::framebuffer`] の責務。
 
+use common::addr::{DirectMap, VirtAddr};
 use common::boot_info::{FramebufferInfo, PixelFormat};
 
 /// 1 ピクセルあたりのバイト数。`Rgb`/`Bgr` は UEFI 仕様上 32bpp 固定。
@@ -42,7 +43,7 @@ pub enum LayoutError {
 /// 入口にしている。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FramebufferLayout {
-    base: u64,
+    base: VirtAddr,
     size_bytes: u64,
     width: u32,
     height: u32,
@@ -52,18 +53,30 @@ pub struct FramebufferLayout {
 
 impl FramebufferLayout {
     /// bootloader から受け取った情報を検証する。
-    pub fn from_info(info: &FramebufferInfo) -> Result<Self, LayoutError> {
+    /// # 保持した窓は古くなりうる
+    ///
+    /// ここで受け取った `direct_map` の変換結果を `base` として保持する。
+    /// higher-half 移行で `common::addr::replace_direct_map` を呼ぶと、
+    /// **この `base` は古い窓で計算された値のまま残る。**
+    /// 移行後は必ずこの型を作り直すこと。作り直さないと、正規形ではあるが
+    /// 誤った仮想アドレスを指したまま描画を続ける。
+    /// 詳細と対処案は `docs/deferred-decisions.md` を参照。
+    pub fn from_info(info: &FramebufferInfo, direct_map: DirectMap) -> Result<Self, LayoutError> {
         match info.pixel_format {
             PixelFormat::Rgb | PixelFormat::Bgr => {}
             other => return Err(LayoutError::UnsupportedPixelFormat(other)),
         }
 
-        if info.physical_address == 0 {
+        if info.physical_address.as_u64() == 0 {
             return Err(LayoutError::NullBaseAddress);
         }
-        if !info.physical_address.is_multiple_of(BYTES_PER_PIXEL) {
+        if !info
+            .physical_address
+            .as_u64()
+            .is_multiple_of(BYTES_PER_PIXEL)
+        {
             return Err(LayoutError::MisalignedBaseAddress {
-                base: info.physical_address,
+                base: info.physical_address.as_u64(),
             });
         }
         if info.width == 0 || info.height == 0 {
@@ -92,12 +105,15 @@ impl FramebufferLayout {
             });
         }
 
-        info.physical_address
-            .checked_add(info.size_bytes)
+        // 物理アドレスを、direct physical map を通して仮想アドレスへ写す。
+        // **ここが型分離の効いている箇所である。** 生の値をポインタにする
+        // 経路が無いので、変換を通さずに描画へ進むことができない。
+        let base = direct_map.phys_to_virt(info.physical_address);
+        base.checked_add(info.size_bytes)
             .ok_or(LayoutError::AddressOverflow)?;
 
         Ok(Self {
-            base: info.physical_address,
+            base,
             size_bytes: info.size_bytes,
             width: info.width,
             height: info.height,
@@ -114,25 +130,32 @@ impl FramebufferLayout {
     ///
     /// 元の形状は検証済みだが、先頭アドレスが変われば境界とアドレス計算の
     /// 前提も変わるため、改めて検証し直す。
-    pub fn with_base(&self, base: u64) -> Result<Self, LayoutError> {
-        if base == 0 {
+    pub fn with_base(&self, base: VirtAddr) -> Result<Self, LayoutError> {
+        if base.as_u64() == 0 {
             return Err(LayoutError::NullBaseAddress);
         }
-        if !base.is_multiple_of(BYTES_PER_PIXEL) {
-            return Err(LayoutError::MisalignedBaseAddress { base });
+        if !base.is_aligned(BYTES_PER_PIXEL) {
+            return Err(LayoutError::MisalignedBaseAddress {
+                base: base.as_u64(),
+            });
         }
         base.checked_add(self.size_bytes)
             .ok_or(LayoutError::AddressOverflow)?;
         Ok(Self { base, ..*self })
     }
 
-    pub fn base(&self) -> u64 {
+    pub fn base(&self) -> VirtAddr {
         self.base
     }
 
     /// 描画対象範囲の終端（排他）。`base + size_bytes`。
-    pub fn end(&self) -> u64 {
-        self.base + self.size_bytes
+    ///
+    /// 構築時に `base.checked_add(size_bytes)` が通っているので、ここで
+    /// 桁溢れも非正規化も起きない。
+    pub fn end(&self) -> VirtAddr {
+        self.base
+            .checked_add(self.size_bytes)
+            .expect("the layout was validated at construction")
     }
 
     pub fn size_bytes(&self) -> u64 {
@@ -199,11 +222,22 @@ pub struct ClippedRect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::addr::PhysAddr;
+
+    /// テスト用の恒等窓。static を直接参照せずに済むよう、`from_info` は
+    /// 窓を引数で受け取る形にしてある。
+    fn test_map() -> DirectMap {
+        DirectMap::identity(DirectMap::IDENTITY_MAX_LENGTH).unwrap()
+    }
+
+    fn v(raw: u64) -> VirtAddr {
+        VirtAddr::new(raw).unwrap()
+    }
 
     /// 実機（QEMU + OVMF）で実測した値をそのまま使う。
     fn valid_info() -> FramebufferInfo {
         FramebufferInfo {
-            physical_address: 0x8000_0000,
+            physical_address: PhysAddr::new_const(0x8000_0000),
             size_bytes: 4_096_000,
             width: 1280,
             height: 800,
@@ -217,11 +251,12 @@ mod tests {
 
     #[test]
     fn the_real_hardware_values_are_accepted() {
-        let layout = FramebufferLayout::from_info(&valid_info()).expect("should be accepted");
+        let layout =
+            FramebufferLayout::from_info(&valid_info(), test_map()).expect("should be accepted");
         assert_eq!(layout.width(), 1280);
         assert_eq!(layout.height(), 800);
         assert_eq!(layout.stride(), 1280);
-        assert_eq!(layout.end(), 0x8000_0000 + 4_096_000);
+        assert_eq!(layout.end(), v(0x8000_0000 + 4_096_000));
     }
 
     #[test]
@@ -230,7 +265,7 @@ mod tests {
             let mut info = valid_info();
             info.pixel_format = format;
             assert_eq!(
-                FramebufferLayout::from_info(&info),
+                FramebufferLayout::from_info(&info, test_map()),
                 Err(LayoutError::UnsupportedPixelFormat(format))
             );
         }
@@ -239,9 +274,9 @@ mod tests {
     #[test]
     fn a_null_base_address_is_rejected() {
         let mut info = valid_info();
-        info.physical_address = 0;
+        info.physical_address = PhysAddr::new_const(0);
         assert_eq!(
-            FramebufferLayout::from_info(&info),
+            FramebufferLayout::from_info(&info, test_map()),
             Err(LayoutError::NullBaseAddress)
         );
     }
@@ -249,9 +284,9 @@ mod tests {
     #[test]
     fn a_misaligned_base_address_is_rejected() {
         let mut info = valid_info();
-        info.physical_address = 0x8000_0001;
+        info.physical_address = PhysAddr::new_const(0x8000_0001);
         assert_eq!(
-            FramebufferLayout::from_info(&info),
+            FramebufferLayout::from_info(&info, test_map()),
             Err(LayoutError::MisalignedBaseAddress { base: 0x8000_0001 })
         );
     }
@@ -263,7 +298,7 @@ mod tests {
             info.width = width;
             info.height = height;
             assert_eq!(
-                FramebufferLayout::from_info(&info),
+                FramebufferLayout::from_info(&info, test_map()),
                 Err(LayoutError::ZeroDimension { width, height })
             );
         }
@@ -274,7 +309,7 @@ mod tests {
         let mut info = valid_info();
         info.stride = 1279;
         assert_eq!(
-            FramebufferLayout::from_info(&info),
+            FramebufferLayout::from_info(&info, test_map()),
             Err(LayoutError::StrideLessThanWidth {
                 stride: 1279,
                 width: 1280
@@ -289,7 +324,7 @@ mod tests {
         let mut info = valid_info();
         info.size_bytes = 4_096_000 - 1;
         assert_eq!(
-            FramebufferLayout::from_info(&info),
+            FramebufferLayout::from_info(&info, test_map()),
             Err(LayoutError::SizeTooSmall {
                 required: 4_096_000,
                 size_bytes: 4_095_999
@@ -302,7 +337,7 @@ mod tests {
         // パディングが余分にある分には安全側。
         let mut info = valid_info();
         info.size_bytes = 4_096_000 + 4096;
-        assert!(FramebufferLayout::from_info(&info).is_ok());
+        assert!(FramebufferLayout::from_info(&info, test_map()).is_ok());
     }
 
     #[test]
@@ -313,7 +348,7 @@ mod tests {
         info.width = u32::MAX;
         info.size_bytes = u64::MAX;
         assert_eq!(
-            FramebufferLayout::from_info(&info),
+            FramebufferLayout::from_info(&info, test_map()),
             Err(LayoutError::AddressOverflow)
         );
     }
@@ -321,20 +356,24 @@ mod tests {
     #[test]
     fn an_overflowing_end_address_is_rejected() {
         let mut info = valid_info();
-        info.physical_address = u64::MAX - 3;
+        // PhysAddr は 52 ビットを超える値を作れないので、以前のように
+        // `u64::MAX - 3` を先頭アドレスにはできない。代わりに、表現できる
+        // 上限に近い先頭と巨大なサイズを組み合わせて `base + size_bytes` を
+        // 桁溢れさせる。
+        info.physical_address = PhysAddr::new_const(0x000F_FFFF_FFFF_F000);
         info.width = 1;
         info.height = 1;
         info.stride = 1;
-        info.size_bytes = 8;
+        info.size_bytes = u64::MAX;
         assert_eq!(
-            FramebufferLayout::from_info(&info),
+            FramebufferLayout::from_info(&info, test_map()),
             Err(LayoutError::AddressOverflow)
         );
     }
 
     #[test]
     fn every_in_bounds_pixel_stays_inside_the_buffer() {
-        let layout = FramebufferLayout::from_info(&valid_info()).unwrap();
+        let layout = FramebufferLayout::from_info(&valid_info(), test_map()).unwrap();
         // 四隅と、stride の効き方が分かる点を確認する。
         assert_eq!(layout.pixel_offset_bytes(0, 0), Some(0));
         assert_eq!(layout.pixel_offset_bytes(1, 0), Some(4));
@@ -346,7 +385,7 @@ mod tests {
 
     #[test]
     fn out_of_bounds_pixels_return_none() {
-        let layout = FramebufferLayout::from_info(&valid_info()).unwrap();
+        let layout = FramebufferLayout::from_info(&valid_info(), test_map()).unwrap();
         assert_eq!(layout.pixel_offset_bytes(1280, 0), None);
         assert_eq!(layout.pixel_offset_bytes(0, 800), None);
         assert_eq!(layout.pixel_offset_bytes(u32::MAX, u32::MAX), None);
@@ -360,7 +399,7 @@ mod tests {
         info.stride = 1024;
         info.height = 100;
         info.size_bytes = 1024 * 100 * 4;
-        let layout = FramebufferLayout::from_info(&info).unwrap();
+        let layout = FramebufferLayout::from_info(&info, test_map()).unwrap();
         // 2 行目の先頭は width ではなく stride だけ進んだ位置。
         assert_eq!(layout.pixel_offset_bytes(0, 1), Some(1024 * 4));
         // 幅の外は、行内にパディングとして存在していても書かせない。
@@ -369,10 +408,10 @@ mod tests {
 
     #[test]
     fn a_layout_can_be_rebased_onto_a_back_buffer() {
-        let layout = FramebufferLayout::from_info(&valid_info()).unwrap();
-        let rebased = layout.with_base(0x22_8000).unwrap();
-        assert_eq!(rebased.base(), 0x22_8000);
-        assert_eq!(rebased.end(), 0x22_8000 + 4_096_000);
+        let layout = FramebufferLayout::from_info(&valid_info(), test_map()).unwrap();
+        let rebased = layout.with_base(v(0x22_8000)).unwrap();
+        assert_eq!(rebased.base(), v(0x22_8000));
+        assert_eq!(rebased.end(), v(0x22_8000 + 4_096_000));
         // 形状は変わらない。フラッシュが単純コピーになる前提。
         assert_eq!(rebased.width(), layout.width());
         assert_eq!(rebased.height(), layout.height());
@@ -383,22 +422,22 @@ mod tests {
 
     #[test]
     fn rebasing_revalidates_the_new_base_address() {
-        let layout = FramebufferLayout::from_info(&valid_info()).unwrap();
-        assert_eq!(layout.with_base(0), Err(LayoutError::NullBaseAddress));
+        let layout = FramebufferLayout::from_info(&valid_info(), test_map()).unwrap();
+        assert_eq!(layout.with_base(v(0)), Err(LayoutError::NullBaseAddress));
         assert_eq!(
-            layout.with_base(0x22_8001),
+            layout.with_base(v(0x22_8001)),
             Err(LayoutError::MisalignedBaseAddress { base: 0x22_8001 })
         );
         assert_eq!(
-            layout.with_base(u64::MAX - 3),
+            layout.with_base(v(u64::MAX - 3)),
             Err(LayoutError::AddressOverflow)
         );
     }
 
     #[test]
     fn a_rebased_layout_computes_the_same_offsets() {
-        let layout = FramebufferLayout::from_info(&valid_info()).unwrap();
-        let rebased = layout.with_base(0x22_8000).unwrap();
+        let layout = FramebufferLayout::from_info(&valid_info(), test_map()).unwrap();
+        let rebased = layout.with_base(v(0x22_8000)).unwrap();
         for (x, y) in [(0, 0), (1, 0), (0, 1), (1279, 799), (1280, 0)] {
             assert_eq!(
                 layout.pixel_offset_bytes(x, y),
@@ -409,7 +448,7 @@ mod tests {
 
     #[test]
     fn a_rect_that_hangs_off_the_edge_is_clipped() {
-        let layout = FramebufferLayout::from_info(&valid_info()).unwrap();
+        let layout = FramebufferLayout::from_info(&valid_info(), test_map()).unwrap();
         let rect = layout.clip_rect(1200, 700, 200, 200).unwrap();
         assert_eq!(
             rect,
@@ -424,7 +463,7 @@ mod tests {
 
     #[test]
     fn a_fully_offscreen_or_empty_rect_is_dropped() {
-        let layout = FramebufferLayout::from_info(&valid_info()).unwrap();
+        let layout = FramebufferLayout::from_info(&valid_info(), test_map()).unwrap();
         assert_eq!(layout.clip_rect(1280, 0, 10, 10), None);
         assert_eq!(layout.clip_rect(0, 800, 10, 10), None);
         assert_eq!(layout.clip_rect(0, 0, 0, 10), None);
@@ -433,7 +472,7 @@ mod tests {
 
     #[test]
     fn a_clipped_rect_never_leaves_the_buffer() {
-        let layout = FramebufferLayout::from_info(&valid_info()).unwrap();
+        let layout = FramebufferLayout::from_info(&valid_info(), test_map()).unwrap();
         let rect = layout.clip_rect(1279, 799, u32::MAX, u32::MAX).unwrap();
         assert_eq!(rect.width, 1);
         assert_eq!(rect.height, 1);

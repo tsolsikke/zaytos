@@ -14,6 +14,7 @@
 //! 要求は M4 で生じるため、そのロック設計は割り込み安全性のモデルと一体で
 //! 決める。
 
+use common::addr::VirtAddr;
 use core::fmt;
 
 use common::cpu;
@@ -92,7 +93,7 @@ impl Console {
     ///   いないこと（`Framebuffer::new` の契約）。
     pub unsafe fn new(
         framebuffer: Framebuffer,
-        back_buffer_base: u64,
+        back_buffer_base: VirtAddr,
         foreground: Color,
         background: Color,
     ) -> Result<Self, ConsoleError> {

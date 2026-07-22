@@ -6,6 +6,7 @@
 
 use core::mem;
 
+use common::addr::PhysAddr;
 use common::boot_info::{
     BootInfo, FramebufferInfo, KernelEntryFn, MemoryMapInfo, PixelFormat as BiPixelFormat,
     BOOT_INFO_MAGIC, BOOT_INFO_PAGE_COUNT, BOOT_INFO_VERSION,
@@ -151,7 +152,7 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
                  until this is handled"
             ));
             FramebufferInfo {
-                physical_address: 0,
+                physical_address: PhysAddr::new_const(0),
                 size_bytes: 0,
                 width: width as u32,
                 height: height as u32,
@@ -164,7 +165,10 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
         } else {
             let mut fb = gop.frame_buffer();
             FramebufferInfo {
-                physical_address: fb.as_mut_ptr() as u64,
+                // bootloader は恒等マッピングの下で動いており、GOP が返す
+                // ポインタは物理アドレスそのものである。
+                physical_address: PhysAddr::new(fb.as_mut_ptr() as u64)
+                    .expect("the GOP framebuffer address does not fit in 52 bits"),
                 size_bytes: fb.size() as u64,
                 width: width as u32,
                 height: height as u32,
@@ -182,7 +186,7 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
         framebuffer.height,
         framebuffer.stride,
         framebuffer.pixel_format,
-        framebuffer.physical_address,
+        framebuffer.physical_address.as_u64(),
         framebuffer.size_bytes
     ));
 
@@ -216,7 +220,9 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
     logger.info(format_args!("ExitBootServices: done"));
 
     let meta = memory_map.meta();
-    let descriptors_ptr = memory_map.buffer().as_ptr() as u64;
+    // 恒等マッピングの下なので、このポインタは物理アドレスそのものである。
+    let descriptors_ptr = PhysAddr::new(memory_map.buffer().as_ptr() as u64)
+        .expect("the memory map buffer address does not fit in 52 bits");
 
     // SAFETY: boot_info_ptr は直前に AllocatePages(AnyPages, ..,
     // BOOT_INFO_PAGE_COUNT) で確保した、他に誰も参照していない領域を指す。

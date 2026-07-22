@@ -13,6 +13,7 @@
 //! 全面クリアだけで 100 万回の書き込みになるため。グリフの描画は
 //! [`Framebuffer`] の描画処理をそのまま使う（描画コードを二重に持たない）。
 
+use common::addr::VirtAddr;
 use core::sync::atomic::{compiler_fence, Ordering};
 
 use crate::graphics::layout::BYTES_PER_PIXEL;
@@ -60,7 +61,7 @@ pub struct FlushRangeError {
 pub struct BackBuffer {
     /// グリフ描画用。書き込み先はバックバッファの先頭。
     surface: Framebuffer,
-    base: u64,
+    base: VirtAddr,
     pixel_count: usize,
     /// 1 行あたりのピクセル数（= stride）。
     stride: u32,
@@ -81,7 +82,7 @@ impl BackBuffer {
     /// - `front_layout` が [`FramebufferLayout::from_info`] を通ったもので
     ///   あること。
     pub unsafe fn new(
-        base: u64,
+        base: VirtAddr,
         front_layout: &FramebufferLayout,
     ) -> Result<Self, BackBufferError> {
         let layout = front_layout
@@ -94,10 +95,10 @@ impl BackBuffer {
         let (front_start, front_end) = (front_layout.base(), front_layout.end());
         if back_start < front_end && front_start < back_end {
             return Err(BackBufferError::OverlapsFramebuffer {
-                back_start,
-                back_end,
-                front_start,
-                front_end,
+                back_start: back_start.as_u64(),
+                back_end: back_end.as_u64(),
+                front_start: front_start.as_u64(),
+                front_end: front_end.as_u64(),
             });
         }
 
@@ -135,7 +136,7 @@ impl BackBuffer {
         // SAFETY: base..base + pixel_count * 4 は new の安全性要件により
         // マップ済み・排他所有であり、4 バイト境界にあることも with_base で
         // 検証済み。`&mut self` を取っているため、この期間に他の参照は無い。
-        unsafe { core::slice::from_raw_parts_mut(self.base as *mut u32, self.pixel_count) }
+        unsafe { core::slice::from_raw_parts_mut(self.base.as_mut_ptr::<u32>(), self.pixel_count) }
     }
 
     /// 全体を単色で塗る。
@@ -252,8 +253,8 @@ impl BackBuffer {
             // どちらもマップ済み・4 バイト境界（形状の検証による）。
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    (back.base() + start) as *const u32,
-                    (front.base() + start) as *mut u32,
+                    back.base().as_ptr::<u32>().byte_add(start as usize),
+                    front.base().as_mut_ptr::<u32>().byte_add(start as usize),
                     pixels as usize,
                 );
             }
@@ -291,8 +292,11 @@ impl BackBuffer {
                 // よる。
                 unsafe {
                     core::ptr::copy_nonoverlapping(
-                        (back.base() + back_offset) as *const u32,
-                        (front.base() + front_offset) as *mut u32,
+                        back.base().as_ptr::<u32>().byte_add(back_offset as usize),
+                        front
+                            .base()
+                            .as_mut_ptr::<u32>()
+                            .byte_add(front_offset as usize),
                         rect.width as usize,
                     );
                 }
