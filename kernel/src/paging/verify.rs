@@ -66,8 +66,8 @@ pub unsafe fn walk(
     direct_map: DirectMap,
     virt: VirtAddr,
 ) -> Result<Resolved, WalkError> {
-    // SAFETY: 呼び出し元契約による。読み取りのみ。
     let read = |table: PhysAddr, index: usize| -> u64 {
+        // SAFETY: 呼び出し元契約による。読み取りのみ。
         unsafe {
             core::ptr::read_volatile(direct_map.phys_to_virt(table).as_ptr::<u64>().add(index))
         }

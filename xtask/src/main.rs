@@ -1710,14 +1710,33 @@ const CHECKS: &[(&str, &[&str])] = &[
 /// ドキュメントコメント（`///` と `//!`）の中の `unsafe {` は対象外。
 /// 使用例を書いただけの行まで拾うと、直せない指摘が出続ける。
 fn find_unsafe_without_safety_comment(workspace_root: &Path) -> Result<Vec<String>> {
+    // **追跡済みだけでなく、未追跡のファイルも見る。**
+    //
+    // 以前は `git ls-files "*.rs"` で追跡済みだけを列挙していた。ところが
+    // 新しいファイルを書いてから検査を通し、その後に `git add` して
+    // コミットする、という自然な順序だと、**そのファイルの最初の検査は
+    // 追跡される前に走る。** 素通りしたまま「通った」と報告され、次に
+    // 検査が走るまで誰も気づかない。実際に `kernel/src/paging/verify.rs`
+    // がこれで 2 コミットのあいだ見逃されていた。
+    //
+    // `--cached --others --exclude-standard` にすると、追跡済みと、
+    // 無視されていない未追跡の両方が出る。`--exclude-standard` を付けるのは
+    // `target/` の中を拾わないためである。
     let output = Command::new("git")
         .current_dir(workspace_root)
-        .args(["ls-files", "*.rs"])
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "*.rs",
+        ])
         .output()
-        .context("failed to list tracked Rust sources")?;
+        .context("failed to list Rust sources")?;
     if !output.status.success() {
         bail!("git ls-files failed while collecting Rust sources");
     }
+
     let listing = String::from_utf8(output.stdout).context("git ls-files produced non-UTF-8")?;
 
     let mut findings = Vec::new();
