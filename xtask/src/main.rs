@@ -1726,37 +1726,52 @@ fn cmd_check(full: bool) -> Result<()> {
         failed.push("commit style".to_string());
     }
 
+    let mut retries: Vec<String> = Vec::new();
     if full {
         // QEMU を起動する回帰チェック。1 種類ごとにカーネルをビルドし直して
         // 起動するため重い。既定では走らせない。
         for test in EXCEPTION_TESTS {
             total += 1;
             let name = format!("exception-test {}", test.name);
-            run_regression(&name, &mut failed, || cmd_exception_test(test.name));
+            run_regression(&name, &mut failed, &mut retries, || {
+                cmd_exception_test(test.name)
+            });
         }
         for test in CRITICAL_TESTS {
             total += 1;
             let name = format!("critical-test {}", test.name);
-            run_regression(&name, &mut failed, || {
+            run_regression(&name, &mut failed, &mut retries, || {
                 cmd_marker_test(CRITICAL_TESTS, "critical-test", test.name)
             });
         }
         for test in INTERRUPT_TESTS {
             total += 1;
             let name = format!("interrupt-test {}", test.name);
-            run_regression(&name, &mut failed, || {
+            run_regression(&name, &mut failed, &mut retries, || {
                 cmd_marker_test(INTERRUPT_TESTS, "interrupt-test", test.name)
             });
         }
         total += 1;
-        run_regression("interrupt-test keyboard", &mut failed, cmd_keyboard_test);
+        run_regression(
+            "interrupt-test keyboard",
+            &mut failed,
+            &mut retries,
+            cmd_keyboard_test,
+        );
         total += 1;
-        run_regression("panic-test", &mut failed, || {
+        run_regression("panic-test", &mut failed, &mut retries, || {
             cmd_run(true, false, false, false, false)
         });
     }
 
     println!();
+    if !retries.is_empty() {
+        println!(
+            "xtask check: {} check(s) were retried because the target did not start: {}",
+            retries.len(),
+            retries.join(", ")
+        );
+    }
     if failed.is_empty() {
         println!("xtask check: all {total} check(s) passed");
         return Ok(());
@@ -1768,14 +1783,55 @@ fn cmd_check(full: bool) -> Result<()> {
     );
 }
 
+/// 起動失敗（環境要因）を表すメッセージの目印。
+///
+/// [`report_did_not_start`] が返すエラーだけがこれを含む。テストの失敗
+/// （実装の問題）とは区別されている。
+const DID_NOT_START_MARKER: &str = "kernel did not start (environment, not the code)";
+
 /// 回帰チェックを 1 件走らせ、失敗しても止めずに記録する。
 ///
 /// `--full` は「何が壊れているか」を一度に知るためのものなので、
 /// 最初の失敗で打ち切らない。
-fn run_regression(name: &str, failed: &mut Vec<String>, body: impl FnOnce() -> Result<()>) {
+///
+/// # 環境要因のときだけ 1 回だけ再試行する
+///
+/// OVMF はまれに起動に失敗し、シェル / アイドルループへ落ちる。これは
+/// 実装の問題ではないので、そのたびに手で再実行するのは無駄である。
+/// xtask が起動失敗と判定した場合に限り、自動で 1 回だけやり直す。
+///
+/// **再試行したことは必ず出力する。** 黙って通すと、環境が悪化して
+/// 起動失敗が常態化しても気づけない。回数を数えて最後にまとめて出す。
+///
+/// テストの失敗（実装の問題）では再試行しない。落ちるものは落ちたまま
+/// 報告する。
+fn run_regression(
+    name: &str,
+    failed: &mut Vec<String>,
+    retries: &mut Vec<String>,
+    mut body: impl FnMut() -> Result<()>,
+) {
     println!("=== xtask check: {name}");
+    let first = body();
+    let error = match first {
+        Ok(()) => {
+            println!("--- {name}: OK");
+            return;
+        }
+        Err(error) => error,
+    };
+
+    let did_not_start = format!("{error:#}").contains(DID_NOT_START_MARKER);
+    if !did_not_start {
+        println!("--- {name}: FAILED ({error:#})");
+        failed.push(name.to_string());
+        return;
+    }
+
+    println!("--- {name}: the target did not start; retrying once (environment, not the code)");
+    retries.push(name.to_string());
     match body() {
-        Ok(()) => println!("--- {name}: OK"),
+        Ok(()) => println!("--- {name}: OK (on the retry)"),
         Err(error) => {
             println!("--- {name}: FAILED ({error:#})");
             failed.push(name.to_string());
