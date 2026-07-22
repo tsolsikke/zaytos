@@ -2395,18 +2395,27 @@ fn verify_page_tables(
         if non_canonical_ok { "OK" } else { "NG" }
     ));
 
-    if mismatches > 0 || !non_canonical_ok {
+    // G ビットが 1 つでも立っていたら停止する。
+    //
+    // 「G ビットを一切立てていない」ことは、architecture.md と ADR-0018 が
+    // **維持していると主張している性質**であり、M5-a-1 が「CR3 リロードで
+    // TLB を全部追い出せる」と結論した根拠でもある。M5-a-2 の 2MiB ページ
+    // 分割は、その結論の上に手順を組んでいる。
+    //
+    // 数えて WARN を出すだけでは、主張の強さと検査の強さが釣り合わない。
+    // 立っていたら前提が崩れているということなので、そこで止める方が正しい。
+    // `plan` には G ビットを立てる経路が無いため、通常はここに掛からない。
+    if mismatches > 0 || !non_canonical_ok || global_entries > 0 {
+        if global_entries > 0 {
+            logger.error(format_args!(
+                "paging: {global_entries} entry(ies) have the global bit; a CR3 reload would NOT \
+                 evict them from the TLB, which breaks the assumption M5-a relies on"
+            ));
+        }
         logger.error(format_args!(
             "paging: the live tables do not match the plan; halting"
         ));
         cpu::halt_forever();
-    }
-
-    if global_entries > 0 {
-        logger.warn(format_args!(
-            "paging: {global_entries} entry(ies) have the global bit; a CR3 reload will NOT \
-             evict them from the TLB"
-        ));
     }
 
     logger.info(format_args!(
