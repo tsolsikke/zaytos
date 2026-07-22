@@ -66,7 +66,7 @@ bootloaderとkernelはターゲットが違うため`--workspace`ではまとめ
 cargo xtask check --full
 ```
 
-上記に加えて、下記の回帰チェック14種をQEMUで順に実行する。
+上記に加えて、下記の回帰チェック21種をQEMUで順に実行する。
 1種類ごとにカーネルをビルドし直して起動するため数分かかる。
 
 ### 回帰チェック
@@ -78,6 +78,7 @@ cargo xtask check --full
 - `cargo xtask run --exception-test <kind>` : 例外ハンドラ（divide-by-zero / invalid-opcode / page-fault / double-fault）
 - `cargo xtask run --critical-test <kind>` : クリティカルセクション（double-lock / restore-enabled）
 - `cargo xtask run --interrupt-test <kind>` : 割り込み・タイマ・キーボード（enable-only / irq-path / misaligned / timer / no-eoi / alt-offset / keyboard）
+- `cargo xtask run --paging-test <kind>` : ページテーブルの分割・アンマップ（pcd / drop-pcd / wrong-order / bad-index / unmap-fault / no-invlpg / split-heap）
 
 ## 同梱している第三者のコンポーネント
 

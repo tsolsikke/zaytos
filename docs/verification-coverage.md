@@ -104,6 +104,40 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 直した後は0件が続いている。
 したがって現在の位置づけは「頻繁に起きることへの対処」ではなく「起きないはずのことが起きたときの保険」である。
 
+### 意図的に壊す feature の一覧
+
+「検査が実際に働くこと」を確かめるため、意図的に壊した経路をfeatureとしてコードに残している。
+いずれも既定ビルドには入らない。
+
+| feature | 何を壊すか | 何を検証するか |
+|---|---|---|
+| `panic-test` | bootloaderで意図的にpanicする | パニックハンドラが停止とダンプを行うこと |
+| `exception-test-*` | 除算例外・不正命令・ページフォルト・ダブルフォルトを起こす | 例外ハンドラとGPRダンプ、ISTの切り替え |
+| `critical-test-double-lock` | 同じロックを保持したまま再取得する | 二重取得の検出 |
+| `critical-test-restore-enabled` | IF=1から`InterruptGuard`へ入る | 復元経路 |
+| `interrupt-test-enable-only` | 全IRQをマスクしたまま`sti`する | 何も届かないこと |
+| `interrupt-test-irq-path` | `int 0x40`を発行する | IRQ経路がGPRを復元すること |
+| `misalign-test` | IRQスタブのスタック16バイト調整を外す | 境界検証が発火すること |
+| `interrupt-test-timer` | タイマを動かす | ティックが増え続けること |
+| `no-eoi-test` | タイマハンドラのEOI発行を落とす | ティックが1回で止まること |
+| `alt-offset-test` | PICを0x30-0x3Fへ再マップする | ICW2が実際に効いていること |
+| `tiny-key-buffer` | キーバッファを極小にする | オーバーフロー検出 |
+| `paging-test` | 壊さない。追加の検証を走らせる | PCD付き2MiBページの分割で属性が残ること |
+| `paging-test-drop-pcd` | 分割時にPCDを落とす | 読み戻し照合が不一致を検出すること |
+| `paging-test-wrong-order` | 分割の順序を逆にし、中間状態を意図的に踏む | 中間状態が #PF になること。CR2が踏んだアドレスを指すこと |
+| `paging-test-bad-index` | アンマップの添字を間違える | 別のページが消えたことを検出すること |
+| `paging-test-unmap-fault` | アンマップしたページを読む | `invlpg`を発行した場合に #PF になること |
+| `paging-test-no-invlpg` | アンマップ後の`invlpg`を落とす | 古い翻訳がTLBに残り、フォルトせずに読めること |
+| `paging-test-split-heap` | 壊さない。稼働中のヒープが載るページを分割する | 使いながら分割でき、翻訳が粒度だけ変わること |
+| `gfx-test-pattern` | コンソールを起動せず描画テストパターンを描く | 描画の基盤 |
+
+これらが有効なビルドでは、起動時に`test hooks:`のWARNが出て内訳が列挙される。
+何も有効でない場合も`test hooks: none enabled (this is a normal build)`と1行出す。
+「出ていない」と「そもそも報告していない」を区別するためである。
+
+`cargo xtask check`は、`kernel/Cargo.toml`の`default`から推移的に辿って、これらのいずれにも行き着かないことを検査する。
+壊れた状態で測った結果を正常な結果として扱う事故を防ぐためのものである。
+
 ### 検査や計測が正しく機能していなかった事例
 
 検査は存在するだけでは機能しない。過去に次の形で壊れていた。

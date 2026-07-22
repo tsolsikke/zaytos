@@ -323,6 +323,96 @@ const INTERRUPT_TESTS: &[CriticalTest] = &[
     },
 ];
 
+/// ページテーブルの分割・アンマップの回帰チェック（`--paging-test <kind>`）。
+///
+/// いずれも「検査が実際に働くこと」を確かめる。正常系は通常起動の
+/// `split-test:` 行が毎回見ているので、ここには置かない。
+const PAGING_TESTS: &[CriticalTest] = &[
+    // 正しい実装で、PCD 付きの 2MiB ページを分割しても属性が残ること。
+    // わざと壊す側（drop-pcd）と対にして初めて意味を持つ。
+    CriticalTest {
+        name: "pcd",
+        feature: "paging-test",
+        expected_markers: &[
+            "paging-test: scratch",
+            "paging-test: PCD survived the split on all 512 entries = OK",
+            "paging-test: done",
+        ],
+        forbidden_markers: &["PCD was lost", "exception: vector="],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // 分割時に PCD を落とす。読み戻し照合が不一致を検出すること。
+    CriticalTest {
+        name: "drop-pcd",
+        feature: "paging-test-drop-pcd",
+        expected_markers: &["paging-test: PCD was lost on 512 of 512 entries after the split = NG"],
+        forbidden_markers: &["PCD survived the split"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // PD エントリの差し替えを先に行い、中間状態を意図的に踏む。
+    // **#PF が起きること**と、CR2 が踏んだアドレスを指すことを見る。
+    CriticalTest {
+        name: "wrong-order",
+        feature: "paging-test-wrong-order",
+        expected_markers: &["exception: vector=14", "halting (cli + hlt loop)"],
+        forbidden_markers: &["split-test: split and unmap behave as planned"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // アンマップの添字を間違える。対象が生きたまま別のページが消えること。
+    CriticalTest {
+        name: "bad-index",
+        feature: "paging-test-bad-index",
+        expected_markers: &["split-test: the split/unmap round trip did not behave as planned"],
+        forbidden_markers: &["split-test: split and unmap behave as planned"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // アンマップしたページを読む。正しい実装では #PF（vector=14）になる。
+    CriticalTest {
+        name: "unmap-fault",
+        feature: "paging-test-unmap-fault",
+        expected_markers: &[
+            "paging-test: about to read the unmapped page",
+            "exception: vector=14",
+            "halting (cli + hlt loop)",
+        ],
+        forbidden_markers: &["the read did NOT fault"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // invlpg を落とす。**アンマップ前に触ってあるので TLB にエントリが
+    // ある。** それが残っているとフォルトせずに古い値が読める。
+    // unmap-fault と対にして初めて「invlpg が効いている」と言える。
+    //
+    // 対象ページをアンマップ前に触らないと、そもそも TLB エントリが存在せず
+    // invlpg の有無が結果に現れない。最初にそう書いてしまい、両方とも #PF に
+    // なって差が出なかった。
+    CriticalTest {
+        name: "no-invlpg",
+        feature: "paging-test-no-invlpg",
+        expected_markers: &[
+            "paging-test: about to read the unmapped page",
+            "paging-test: the read did NOT fault",
+            "paging-test: done",
+        ],
+        forbidden_markers: &["exception: vector=14"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // 稼働中のヒープが載る 2MiB ページを、使いながら分割する。
+    CriticalTest {
+        name: "split-heap",
+        feature: "paging-test-split-heap",
+        expected_markers: &["paging-test: split the live heap page", "paging-test: done"],
+        forbidden_markers: &["exception: vector="],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+];
+
 /// カーネルが起動したことを示す、シリアルログの既知の行。
 ///
 /// kernel の `kernel_main` が最初に出す行（`common::log` の INFO 形式）。
@@ -479,7 +569,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -499,6 +589,13 @@ fn main() -> Result<()> {
                     format!("--interrupt-test requires a kind ({})", names.join(" | "))
                 })?;
                 return cmd_marker_test(INTERRUPT_TESTS, "interrupt-test", kind);
+            }
+            if let Some(index) = rest.iter().position(|a| a == "--paging-test") {
+                let kind = rest.get(index + 1).with_context(|| {
+                    let names: Vec<&str> = PAGING_TESTS.iter().map(|t| t.name).collect();
+                    format!("--paging-test requires a kind ({})", names.join(" | "))
+                })?;
+                return cmd_marker_test(PAGING_TESTS, "paging-test", kind);
             }
             if let Some(index) = rest.iter().position(|a| a == "--critical-test") {
                 let kind = rest.get(index + 1).with_context(|| {
@@ -1773,6 +1870,82 @@ fn is_ascii_word_end(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == ')' || c == '）'
 }
 
+/// 意図的に壊した経路を有効にする feature の接頭辞・名前。
+///
+/// **既定ビルドにこれらが入ってはならない。** 入ったまま出荷すると、
+/// 壊れた状態で測った結果を正常な結果として扱うことになる。
+const SABOTAGE_FEATURES: &[&str] = &[
+    "misalign-test",
+    "no-eoi-test",
+    "alt-offset-test",
+    "tiny-key-buffer",
+    "paging-test",
+    "exception-test",
+    "critical-test",
+    "interrupt-test",
+    "panic-test",
+    "gfx-test-pattern",
+];
+
+/// kernel の既定 feature に仕込みが混ざっていないことを確かめる。
+///
+/// `default` から推移的に辿って、[`SABOTAGE_FEATURES`] のいずれかに
+/// 行き着かないことを見る。`kernel/Cargo.toml` の `[features]` を
+/// そのまま読む（`name = ["a", "b"]` の形しか使っていない）。
+fn check_default_features_are_clean(workspace_root: &Path) -> Result<Vec<String>> {
+    let manifest = fs::read_to_string(workspace_root.join("kernel").join("Cargo.toml"))
+        .context("failed to read kernel/Cargo.toml")?;
+
+    let mut in_features = false;
+    let mut graph: Vec<(String, Vec<String>)> = Vec::new();
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_features = trimmed == "[features]";
+            continue;
+        }
+        if !in_features || trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((name, rest)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let deps: Vec<String> = rest
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .split(',')
+            .map(|d| d.trim().trim_matches('"').to_string())
+            .filter(|d| !d.is_empty())
+            .collect();
+        graph.push((name.trim().to_string(), deps));
+    }
+    if !graph.iter().any(|(name, _)| name == "default") {
+        bail!("kernel/Cargo.toml has no `default` feature; the check cannot run");
+    }
+
+    // `default` から推移的に辿る。
+    let mut reached: Vec<String> = vec!["default".to_string()];
+    let mut index = 0;
+    while index < reached.len() {
+        let current = reached[index].clone();
+        index += 1;
+        if let Some((_, deps)) = graph.iter().find(|(name, _)| *name == current) {
+            for dep in deps {
+                if !reached.contains(dep) {
+                    reached.push(dep.clone());
+                }
+            }
+        }
+    }
+
+    Ok(reached
+        .into_iter()
+        .filter(|name| SABOTAGE_FEATURES.contains(&name.as_str()))
+        .map(|name| format!("`default` reaches the sabotage feature `{name}`"))
+        .collect())
+}
+
 /// 全構成のビルド・テスト・clippy・fmt を順に実行する。
 ///
 /// **1 つ落ちてもそこで止めない。** 止めると「直しては再実行」を
@@ -1812,6 +1985,19 @@ fn cmd_check(full: bool) -> Result<()> {
     }
 
     total += 1;
+    println!("=== xtask check: the default kernel build has no sabotage features");
+    let sabotage = check_default_features_are_clean(&workspace_root)?;
+    if sabotage.is_empty() {
+        println!("--- default features: OK");
+    } else {
+        for finding in &sabotage {
+            println!("    {finding}");
+        }
+        println!("--- default features: FAILED");
+        failed.push("default features".to_string());
+    }
+
+    total += 1;
     println!("=== xtask check: commit message style (since {COMMIT_STYLE_SINCE})");
     let offenders = check_commit_message_style(&workspace_root)?;
     if offenders.is_empty() {
@@ -1840,6 +2026,13 @@ fn cmd_check(full: bool) -> Result<()> {
             let name = format!("critical-test {}", test.name);
             run_regression(&name, &mut failed, &mut retries, || {
                 cmd_marker_test(CRITICAL_TESTS, "critical-test", test.name)
+            });
+        }
+        for test in PAGING_TESTS {
+            total += 1;
+            let name = format!("paging-test {}", test.name);
+            run_regression(&name, &mut failed, &mut retries, || {
+                cmd_marker_test(PAGING_TESTS, "paging-test", test.name)
             });
         }
         for test in INTERRUPT_TESTS {

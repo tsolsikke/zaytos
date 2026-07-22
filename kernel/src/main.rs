@@ -673,8 +673,15 @@ extern "sysv64" fn kernel_main() -> ! {
     // M5-a-2 の分割対象を選ぶ材料として、ここで粒度を測る。
     report_mapping_granularity(&mut logger, heap_start, fb_start);
 
+    // 有効な仕込み feature を報告する。通常ビルドでは none と出る。
+    report_test_hooks(&mut logger);
+
     // 2MiB ページの分割とアンマップ（M5-a-2-1）。
     verify_split_and_unmap(&mut logger, &mut allocator);
+
+    // ページテーブル操作の回帰チェック（M5-a-2-2）。通常ビルドには入らない。
+    #[cfg(feature = "paging-test")]
+    run_paging_test(&mut logger, &mut allocator, heap_start);
 
     // ロック保持中は割り込みが禁止され、解放後に元へ戻ることを確認する
     // （M4-c-2）。ヒープのロックそのものではなく同じ Locked<T> を使う。
@@ -2421,6 +2428,279 @@ fn verify_split_and_unmap<const CAP: usize>(
     logger.info(format_args!(
         "split-test: split and unmap behave as planned (verified through translate())"
     ));
+}
+
+/// 意図的に壊した経路を有効にする feature の一覧。
+///
+/// **どれか 1 つでも有効なら、そのビルドの観測結果を正常な結果として
+/// 扱ってはならない。** 名前と「何を壊すか」を対にして並べる。
+///
+/// 仕込みが `paging::active` や `paging::entry` のようなレビュー必須の
+/// ファイルにも住むようになったため、実行時に一覧を出す。7 種類まで増えると、
+/// どれが有効か分からないまま実行する余地が生まれる。
+const TEST_HOOKS: &[(&str, bool, &str)] = &[
+    (
+        "misalign-test",
+        cfg!(feature = "misalign-test"),
+        "IRQ スタブのスタック 16 バイト調整を外す",
+    ),
+    (
+        "no-eoi-test",
+        cfg!(feature = "no-eoi-test"),
+        "タイマハンドラの EOI 発行を落とす",
+    ),
+    (
+        "alt-offset-test",
+        cfg!(feature = "alt-offset-test"),
+        "PIC を 0x30-0x3F へ再マップする",
+    ),
+    (
+        "tiny-key-buffer",
+        cfg!(feature = "tiny-key-buffer"),
+        "キーバッファを極小にする",
+    ),
+    (
+        "paging-test",
+        cfg!(feature = "paging-test"),
+        "ページテーブルの追加検証を走らせる（それ自体は壊さない）",
+    ),
+    (
+        "paging-test-drop-pcd",
+        cfg!(feature = "paging-test-drop-pcd"),
+        "分割時に PCD を落とす",
+    ),
+    (
+        "paging-test-wrong-order",
+        cfg!(feature = "paging-test-wrong-order"),
+        "分割の順序を逆にし、中間状態を意図的に踏む",
+    ),
+    (
+        "paging-test-bad-index",
+        cfg!(feature = "paging-test-bad-index"),
+        "アンマップの添字を間違える",
+    ),
+    (
+        "paging-test-no-invlpg",
+        cfg!(feature = "paging-test-no-invlpg"),
+        "アンマップ後の invlpg を落とす",
+    ),
+    (
+        "paging-test-unmap-fault",
+        cfg!(feature = "paging-test-unmap-fault"),
+        "アンマップしたページを読む",
+    ),
+    (
+        "paging-test-split-heap",
+        cfg!(feature = "paging-test-split-heap"),
+        "稼働中のヒープが載るページを分割する",
+    ),
+    (
+        "exception-test",
+        cfg!(feature = "exception-test"),
+        "起動完了後に意図的な例外を起こす",
+    ),
+    (
+        "critical-test",
+        cfg!(feature = "critical-test"),
+        "クリティカルセクションの回帰チェックを走らせる",
+    ),
+    (
+        "interrupt-test",
+        cfg!(feature = "interrupt-test"),
+        "割り込み経路の回帰チェックを走らせる",
+    ),
+    (
+        "gfx-test-pattern",
+        cfg!(feature = "gfx-test-pattern"),
+        "描画テストパターンを描き、コンソールを起動しない",
+    ),
+];
+
+/// 有効な仕込み feature を起動時に報告する。
+///
+/// **1 つでも有効なら WARN を出す。** 仕込みが有効なビルドで測った結果を
+/// 正常な結果として報告する事故を防ぐためのものである。何も有効でない
+/// 場合も 1 行出す。「出ていない」と「そもそも報告していない」を
+/// 区別できるようにするため。
+fn report_test_hooks(logger: &mut Logger<SerialPort>) {
+    let enabled: usize = TEST_HOOKS.iter().filter(|(_, on, _)| *on).count();
+    if enabled == 0 {
+        logger.info(format_args!(
+            "test hooks: none enabled (this is a normal build)"
+        ));
+        return;
+    }
+    logger.warn(format_args!(
+        "test hooks: {enabled} deliberately-modified feature(s) are ENABLED; \
+         do not treat this run as a normal result"
+    ));
+    for (name, _, effect) in TEST_HOOKS.iter().filter(|(_, on, _)| *on) {
+        logger.warn(format_args!("test hooks:   {name} - {effect}"));
+    }
+}
+
+/// ページテーブル操作の回帰チェック（M5-a-2-2、`paging-test` feature）。
+///
+/// **通常起動には入らない。** ここで行うのは、意図的にフォルトを起こす、
+/// 意図的に壊した状態を作る、稼働中の領域を触る、といった操作である。
+/// 通常の起動シーケンスに混ぜると、起動時の他の異常と区別しにくくなる。
+///
+/// 判定はシリアルのマーカー行で行い、xtask が突き合わせる。
+#[cfg(feature = "paging-test")]
+fn run_paging_test<const CAP: usize>(
+    logger: &mut Logger<SerialPort>,
+    allocator: &mut frame_allocator::FrameAllocator<CAP>,
+    heap_start: u64,
+) {
+    use kernel::paging::active::{ActivePageTable, PageSize};
+    use kernel::paging::entry;
+
+    const FRAMES_PER_2M: u64 = entry::PAGE_SIZE_2M / frame_allocator::FRAME_SIZE;
+
+    // SAFETY: CR3 は自前のテーブルへ切り替え済み。
+    let mut table = unsafe { ActivePageTable::current() };
+
+    // --- PCD 付きの 2MiB ページを分割する ---
+    //
+    // 実機で PCD 付きの 2MiB ページはフレームバッファだけだが、そこを
+    // 分割対象にすると失敗時に画面が壊れ、観測手段の一部を失う。誰も
+    // 使っていないスクラッチ領域に PCD を立ててから分割すれば、同じ性質を
+    // 安全に試せる。
+    let Some(frame) = allocator.allocate_contiguous_aligned(FRAMES_PER_2M, FRAMES_PER_2M) else {
+        logger.error(format_args!("paging-test: no scratch region available"));
+        cpu::halt_forever();
+    };
+    let pcd_base = frame * frame_allocator::FRAME_SIZE;
+    // SAFETY: 今確保したばかりの、誰も使っていない領域である。PCD を立てても
+    // アクセスがキャッシュされなくなるだけで、内容も配置も変わらない。
+    let before = unsafe { table.add_huge_page_flags(pcd_base, entry::PTE_PCD) };
+    let pcd_set = matches!(
+        table.translate(pcd_base),
+        Ok(Some(t)) if t.entry & entry::PTE_PCD != 0 && t.page_size == PageSize::Size2MiB
+    );
+    logger.info(format_args!(
+        "paging-test: scratch {pcd_base:#x} now has PCD as a 2MiB page = {pcd_set} (was {before:?})"
+    ));
+
+    // SAFETY: 上記のスクラッチ領域。
+    match unsafe { table.split_huge_page(pcd_base, allocator) } {
+        Ok(_) => {}
+        Err(error) => {
+            logger.error(format_args!("paging-test: split failed: {error:?}"));
+            cpu::halt_forever();
+        }
+    }
+    let mut pcd_lost = 0u32;
+    for index in 0..entry::ENTRIES_PER_TABLE {
+        let virt = pcd_base + index as u64 * entry::PAGE_SIZE_4K;
+        match table.translate(virt) {
+            Ok(Some(t)) if t.entry & entry::PTE_PCD != 0 => {}
+            _ => pcd_lost += 1,
+        }
+    }
+    if pcd_lost == 0 {
+        logger.info(format_args!(
+            "paging-test: PCD survived the split on all 512 entries = OK"
+        ));
+    } else {
+        logger.error(format_args!(
+            "paging-test: PCD was lost on {pcd_lost} of 512 entries after the split = NG"
+        ));
+    }
+
+    // --- 稼働中のヒープが載る 2MiB ページを、使いながら分割する ---
+    #[cfg(feature = "paging-test-split-heap")]
+    {
+        let heap_page = heap_start & !(entry::PAGE_SIZE_2M - 1);
+        let phys_before = table.translate(heap_start);
+        // ヒープを実際に使ってから分割し、分割後も使えることを見る。
+        let mut live: Vec<u64> = (0..64).collect();
+        // SAFETY: 稼働中のヒープが載るページだが、分割は物理アドレスも属性も
+        // 変えない。手順の途中でも古い 2MiB エントリが有効なままである
+        // （`split_huge_page` の説明を参照）。
+        let result = unsafe { table.split_huge_page(heap_page, allocator) };
+        live.push(0xDEAD);
+        let phys_after = table.translate(heap_start);
+        let same = match (phys_before, phys_after) {
+            (Ok(Some(a)), Ok(Some(b))) => {
+                a.phys == b.phys
+                    && a.page_size == PageSize::Size2MiB
+                    && b.page_size == PageSize::Size4KiB
+            }
+            _ => false,
+        };
+        logger.info(format_args!(
+            "paging-test: split the live heap page {heap_page:#x}: {result:?}, translation \
+             unchanged apart from granularity = {same}, heap still usable = {} ({} items)",
+            live.last() == Some(&0xDEAD),
+            live.len()
+        ));
+    }
+    #[cfg(not(feature = "paging-test-split-heap"))]
+    let _ = heap_start;
+
+    // --- アンマップ後のアクセス ---
+    //
+    // `paging-test-no-invlpg` では invlpg を落としてある。古い翻訳が TLB に
+    // 残っていればフォルトせずに読めてしまう。残らなければ #PF になる。
+    // QEMU の TCG が TLB をどう扱うかに依存するため、**どちらになるかは
+    // 事前に決めつけない。** 観測した結果をそのまま出す。
+    let Some(frame) = allocator.allocate_contiguous_aligned(FRAMES_PER_2M, FRAMES_PER_2M) else {
+        logger.error(format_args!("paging-test: no second scratch region"));
+        cpu::halt_forever();
+    };
+    let unmap_base = frame * frame_allocator::FRAME_SIZE;
+    // SAFETY: 誰も使っていないスクラッチ領域。
+    if let Err(error) = unsafe { table.split_huge_page(unmap_base, allocator) } {
+        logger.error(format_args!("paging-test: second split failed: {error:?}"));
+        cpu::halt_forever();
+    }
+    let target = unmap_base + 4 * entry::PAGE_SIZE_4K;
+
+    // **アンマップする前に必ず 1 度触る。** 触っていないページには TLB
+    // エントリが存在せず、`invlpg` を落としても「古い翻訳が残る」状態を
+    // 作れない。それに気づかずに書いたところ、`paging-test-no-invlpg` でも
+    // #PF になり、invlpg の有無が結果に現れなかった。検査に見えて何も
+    // 検査していない状態である。
+    // SAFETY: 直前に分割した、誰も使っていないスクラッチ領域である。
+    unsafe {
+        core::ptr::write_volatile(target as *mut u64, 0x1234_5678_9ABC_DEF0);
+    }
+
+    // SAFETY: 上記の領域。以後この 4KiB へアクセスするのは、この検証の
+    // 目的そのものである。
+    let old = unsafe { table.unmap_4kib(target) };
+    let target_none = matches!(table.translate(target), Ok(None));
+    // 添字を間違えていれば、別のページが消えているはずである。
+    let neighbour_none = matches!(table.translate(unmap_base), Ok(None));
+    logger.info(format_args!(
+        "paging-test: unmap {target:#x} -> {old:?}; target none={target_none}, \
+         region head none={neighbour_none}"
+    ));
+
+    // アンマップしたページを実際に読むのは、専用のビルドだけである。
+    //
+    // 正しい実装（invlpg を発行する）では #PF になり、そこで停止する。
+    // `paging-test-no-invlpg` では古い翻訳が TLB に残っていればフォルト
+    // しない。**この 2 つを対にして初めて「invlpg が効いている」と言える。**
+    // 片方だけでは「常にフォルトする経路」と区別できない。
+    //
+    // QEMU の TCG が TLB をどう扱うかに依存するため、no-invlpg 側が
+    // 本当にフォルトしないかは事前に決めつけない。観測した結果をそのまま出す。
+    #[cfg(any(feature = "paging-test-unmap-fault", feature = "paging-test-no-invlpg"))]
+    {
+        logger.info(format_args!(
+            "paging-test: about to read the unmapped page {target:#x}"
+        ));
+        // SAFETY: この読み取りがフォルトするかどうかを観測することが、
+        // この検証の目的そのものである。
+        let value = unsafe { core::ptr::read_volatile(target as *const u64) };
+        logger.info(format_args!(
+            "paging-test: the read did NOT fault; value={value:#x} (a stale TLB entry was used)"
+        ));
+    }
+
+    logger.info(format_args!("paging-test: done"));
 }
 
 /// カーネルが実際に使っている領域が、どの粒度でマップされているかを測る。

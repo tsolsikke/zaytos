@@ -162,6 +162,12 @@ pub const fn split_child_entry(huge_entry: u64, index: usize) -> u64 {
         flags |= PTE_PAT;
     }
 
+    // 検証用に、わざと PCD を落とす（`paging-test-drop-pcd`）。
+    // 読み戻し照合が実際にキャッシュ属性の変化を捕まえるかを確かめるための
+    // もので、通常ビルドには入らない。
+    #[cfg(feature = "paging-test-drop-pcd")]
+    let flags = flags & !PTE_PCD;
+
     address | flags
 }
 

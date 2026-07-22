@@ -72,3 +72,22 @@ tiny-key-buffer = []
 # 生のスキャンコードをシリアルへ出す。エコーと二重になって読みにくいので
 # 既定では無効。キーボード周りの切り分けが要るときだけ有効にする。
 keyboard-raw-log = []
+# ページテーブルの分割・アンマップの回帰チェック（M5-a-2-2）。
+# `cargo xtask run --paging-test <kind>` が有効化する。通常ビルドには
+# 含まれない。いずれも「検査が実際に働くこと」を確かめるためのもので、
+# 意図的に壊した状態を作る。
+paging-test = []
+# 分割時に PCD を落とす。読み戻し照合が不一致を検出することを確かめる。
+paging-test-drop-pcd = ["paging-test"]
+# PD エントリの差し替えを先に、512 エントリの書き込みを後にする。
+# 中間状態を意図的に踏むため、差し替えた直後に対象領域を 1 バイト読む。
+paging-test-wrong-order = ["paging-test"]
+# アンマップの添字を間違える（pt_index の代わりに pd_index を使う）。
+paging-test-bad-index = ["paging-test"]
+# アンマップ後の invlpg を落とす。古い翻訳が TLB に残るかを見る。
+paging-test-no-invlpg = ["paging-test-unmap-fault"]
+# アンマップしたページを実際に読む。正しい実装では #PF になる。
+# no-invlpg と対にして初めて「invlpg が効いている」と言える。
+paging-test-unmap-fault = ["paging-test"]
+# 稼働中のヒープが載る 2MiB ページを、使いながら分割する。
+paging-test-split-heap = ["paging-test"]

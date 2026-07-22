@@ -318,8 +318,27 @@ impl ActivePageTable {
             core::ptr::write_bytes(table_phys as *mut u8, 0, FRAME_SIZE as usize);
         }
 
-        // 手順 2。値の計算は純粋ロジック側（ホストテストで固定）。
         let children = entry::split_children(pde);
+
+        // 検証用に、わざと手順 3 を先に行う（`paging-test-wrong-order`）。
+        //
+        // **順序を逆にしただけでは何も起きない。** 中間状態（PD がゼロ埋めの
+        // PT を指す状態）が存在するのは 512 回の書き込みの間だけで、その間に
+        // CPU がその領域へ触らなければ、そのまま完了してしまう。
+        // 「順序を守らないと壊れる」ことを示すには、中間状態を意図的に
+        // 踏む必要がある。差し替えた直後に対象領域を 1 バイト読む。
+        #[cfg(feature = "paging-test-wrong-order")]
+        {
+            // SAFETY: `pd` は有効な PD で添字は 512 未満。
+            unsafe { Self::write(pd, pd_index, entry::table_entry_for_split(pde, table_phys)) };
+            // SAFETY: この読み取りは #PF を起こすことを期待している。
+            // ページテーブルはこの瞬間、この領域を「不在」として指している。
+            unsafe {
+                core::ptr::read_volatile((virt & !(entry::PAGE_SIZE_2M - 1)) as *const u8);
+            }
+        }
+
+        // 手順 2。値の計算は純粋ロジック側（ホストテストで固定）。
         for (index, child) in children.iter().enumerate() {
             // SAFETY: `table_phys` は直前にゼロ埋めした自前のフレームで、
             // 添字は 512 未満。まだどこからも参照されていない。
@@ -329,7 +348,10 @@ impl ActivePageTable {
         // 手順 3。8 バイト 1 回。
         // SAFETY: `pd` は有効な PD で添字は 512 未満。書く値は PT を指す
         // 正しい形式のエントリである。
-        unsafe { Self::write(pd, pd_index, entry::table_entry_for_split(pde, table_phys)) };
+        #[cfg(not(feature = "paging-test-wrong-order"))]
+        unsafe {
+            Self::write(pd, pd_index, entry::table_entry_for_split(pde, table_phys))
+        };
 
         // 手順 4。
         // SAFETY: CR3 の値をそのまま書き戻すだけで、指す先は変えていない。
@@ -340,6 +362,45 @@ impl ActivePageTable {
             table_phys,
             base_virt: virt & !(entry::PAGE_SIZE_2M - 1),
         })
+    }
+
+    /// 2MiB ページのエントリにフラグを足す（**検証用**）。
+    ///
+    /// 通常のマッピングは `plan` と `PageTableBuilder` が決める。これは
+    /// 「PCD 付きの 2MiB ページを分割したとき、512 エントリすべてに PCD が
+    /// 残るか」を実機で確かめるためだけのものである。
+    ///
+    /// 実機で PCD 付きの 2MiB ページはフレームバッファしか無いが、そこを
+    /// 分割対象にすると失敗したときに画面が壊れ、観測手段の一部を失う。
+    /// 誰も使っていないスクラッチ領域に PCD を立ててから分割すれば、
+    /// 同じ性質を安全に試せる。
+    ///
+    /// # Safety
+    ///
+    /// [`Self::split_huge_page`] と同じ。加えて `add` が、そのページに
+    /// 付けて安全なフラグであること。
+    #[cfg(feature = "paging-test")]
+    pub unsafe fn add_huge_page_flags(
+        &mut self,
+        virt: u64,
+        add: u64,
+    ) -> Result<u64, MapUpdateError> {
+        let _guard = InterruptGuard::enter();
+
+        let (pd, pd_index) = self.locate_pd(virt)?;
+        // SAFETY: `locate_pd` の契約による。
+        let pde = unsafe { Self::read(pd, pd_index) };
+        if !entry::is_present(pde) {
+            return Err(MapUpdateError::NotMapped);
+        }
+        if !entry::is_huge(pde) {
+            return Err(MapUpdateError::AlreadySmall);
+        }
+        // SAFETY: 同上。フラグを足すだけでアドレスは変えない。
+        unsafe { Self::write(pd, pd_index, pde | add) };
+        // SAFETY: CR3 の値をそのまま書き戻す。指す先は変えていない。
+        unsafe { switch::switch_to(switch::read_cr3()) };
+        Ok(pde)
     }
 
     /// `virt` を含む 4KiB ページをアンマップする。無効化前の PTE を返す。
@@ -378,6 +439,12 @@ impl ActivePageTable {
         }
 
         let pt = entry::table_address(pde);
+        // 検証用に、わざと添字を間違える（`paging-test-bad-index`）。
+        // translate() が「別のページを None にしている」ことを捕まえられるかを
+        // 確かめるためのもの。
+        #[cfg(feature = "paging-test-bad-index")]
+        let pt_index = entry::pd_index(virt);
+        #[cfg(not(feature = "paging-test-bad-index"))]
         let pt_index = entry::pt_index(virt);
         // SAFETY: `pt` は PD が指す有効な PT で、添字は 512 未満。
         let pte = unsafe { Self::read(pt, pt_index) };
@@ -387,9 +454,15 @@ impl ActivePageTable {
 
         // SAFETY: 同上。0 を書いて Present を落とす。
         unsafe { Self::write(pt, pt_index, 0) };
+        // 検証用に、わざと invlpg を落とす（`paging-test-no-invlpg`）。
+        // 古い翻訳が TLB に残っていれば、アンマップしたはずのアドレスへ
+        // アクセスしてもフォルトしない。
+        #[cfg(not(feature = "paging-test-no-invlpg"))]
         // SAFETY: テーブルの書き換えが終わってから落とす。順序を逆にすると、
         // 古い翻訳が残ったままテーブルだけ変わった状態になる。
-        unsafe { cpu::invalidate_tlb_entry(virt) };
+        unsafe {
+            cpu::invalidate_tlb_entry(virt)
+        };
 
         Ok(pte)
     }
