@@ -58,9 +58,16 @@ QEMUを`-display none`で起動し、シリアル出力を端末へ流す。
 cargo xtask check
 ```
 
-全構成のビルド、ホストテスト、clippy、`cargo fmt --check` を順に実行する。
+全構成のビルド、ホストテスト、clippy、`cargo fmt --check` に加え、`unsafe`ブロックが`// SAFETY:`コメントを伴っているかを検査する。
 bootloaderとkernelはターゲットが違うため`--workspace`ではまとめられず、構成ごとに実行している。
 1つ落ちても途中で止めず、最後に失敗した項目をまとめて報告する。
+
+```
+cargo xtask check --full
+```
+
+上記に加えて、下記の回帰チェック14種をQEMUで順に実行する。
+1種類ごとにカーネルをビルドし直して起動するため数分かかる。
 
 ### 回帰チェック
 

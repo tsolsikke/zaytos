@@ -426,7 +426,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -463,7 +463,7 @@ fn main() -> Result<()> {
             }
             cmd_run(panic_test, gui, gfx_test, kvm, no_limit)
         }
-        Some("check") => cmd_check(),
+        Some("check") => cmd_check(args[1..].iter().any(|a| a == "--full")),
         Some("screenshot") => cmd_screenshot(&args[1..]),
         Some("gen-font") => font::generate(&workspace_root()?),
         Some(other) => bail!("unknown xtask subcommand: {other}\n\n{USAGE}"),
@@ -1612,7 +1612,7 @@ fn has_safety_comment_above(lines: &[&str], index: usize) -> bool {
 ///
 /// **1 つ落ちてもそこで止めない。** 止めると「直しては再実行」を
 /// 繰り返すことになり、全体像が分からない。最後にまとめて報告する。
-fn cmd_check() -> Result<()> {
+fn cmd_check(full: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
     let mut failed: Vec<String> = Vec::new();
     let mut total = 0usize;
@@ -1646,6 +1646,36 @@ fn cmd_check() -> Result<()> {
         failed.push("unsafe/SAFETY".to_string());
     }
 
+    if full {
+        // QEMU を起動する回帰チェック。1 種類ごとにカーネルをビルドし直して
+        // 起動するため重い。既定では走らせない。
+        for test in EXCEPTION_TESTS {
+            total += 1;
+            let name = format!("exception-test {}", test.name);
+            run_regression(&name, &mut failed, || cmd_exception_test(test.name));
+        }
+        for test in CRITICAL_TESTS {
+            total += 1;
+            let name = format!("critical-test {}", test.name);
+            run_regression(&name, &mut failed, || {
+                cmd_marker_test(CRITICAL_TESTS, "critical-test", test.name)
+            });
+        }
+        for test in INTERRUPT_TESTS {
+            total += 1;
+            let name = format!("interrupt-test {}", test.name);
+            run_regression(&name, &mut failed, || {
+                cmd_marker_test(INTERRUPT_TESTS, "interrupt-test", test.name)
+            });
+        }
+        total += 1;
+        run_regression("interrupt-test keyboard", &mut failed, cmd_keyboard_test);
+        total += 1;
+        run_regression("panic-test", &mut failed, || {
+            cmd_run(true, false, false, false, false)
+        });
+    }
+
     println!();
     if failed.is_empty() {
         println!("xtask check: all {total} check(s) passed");
@@ -1656,6 +1686,21 @@ fn cmd_check() -> Result<()> {
         failed.len(),
         failed.join(", ")
     );
+}
+
+/// 回帰チェックを 1 件走らせ、失敗しても止めずに記録する。
+///
+/// `--full` は「何が壊れているか」を一度に知るためのものなので、
+/// 最初の失敗で打ち切らない。
+fn run_regression(name: &str, failed: &mut Vec<String>, body: impl FnOnce() -> Result<()>) {
+    println!("=== xtask check: {name}");
+    match body() {
+        Ok(()) => println!("--- {name}: OK"),
+        Err(error) => {
+            println!("--- {name}: FAILED ({error:#})");
+            failed.push(name.to_string());
+        }
+    }
 }
 
 fn build_kernel_with_features(workspace_root: &Path, features: &[&str]) -> Result<PathBuf> {
