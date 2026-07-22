@@ -1608,6 +1608,73 @@ fn has_safety_comment_above(lines: &[&str], index: usize) -> bool {
     false
 }
 
+/// コミットメッセージの文体規約が適用される最初のコミット。
+///
+/// これより前の 53 件は規約を定める前に書かれたもので、違反ではない。
+/// 履歴は書き換えない。
+const COMMIT_STYLE_SINCE: &str = "b22c360";
+
+/// コミットメッセージに和文と英数字の間の半角空白が無いことを見る。
+///
+/// 検出するのは「かな・カタカナ・漢字」と「英数字・括弧」が半角空白 1 個を
+/// 挟んで隣り合う形だけである。英単語どうしの空白や、コード片の内部は
+/// 対象にしない。
+fn check_commit_message_style(workspace_root: &Path) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .current_dir(workspace_root)
+        .args([
+            "log",
+            "--format=%h%x1f%s%x1e",
+            &format!("{COMMIT_STYLE_SINCE}..HEAD"),
+        ])
+        .output()
+        .context("failed to read commit subjects")?;
+    if !output.status.success() {
+        bail!("git log failed while reading commit subjects");
+    }
+    let text = String::from_utf8(output.stdout).context("git log produced non-UTF-8")?;
+
+    let mut findings = Vec::new();
+    for record in text.split('\u{1e}') {
+        let record = record.trim_start_matches('\n');
+        let Some((hash, subject)) = record.split_once('\u{1f}') else {
+            continue;
+        };
+        if japanese_ascii_gap(subject) {
+            findings.push(format!("{hash}: {subject}"));
+        }
+    }
+    Ok(findings)
+}
+
+fn japanese_ascii_gap(text: &str) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    for window in chars.windows(3) {
+        if window[1] != ' ' {
+            continue;
+        }
+        let (left, right) = (window[0], window[2]);
+        if (is_japanese(left) && is_ascii_word_start(right))
+            || (is_ascii_word_end(left) && is_japanese(right))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_japanese(c: char) -> bool {
+    matches!(c, '\u{3040}'..='\u{30FF}' | '\u{4E00}'..='\u{9FFF}')
+}
+
+fn is_ascii_word_start(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '(' || c == '（'
+}
+
+fn is_ascii_word_end(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == ')' || c == '）'
+}
+
 /// 全構成のビルド・テスト・clippy・fmt を順に実行する。
 ///
 /// **1 つ落ちてもそこで止めない。** 止めると「直しては再実行」を
@@ -1644,6 +1711,19 @@ fn cmd_check(full: bool) -> Result<()> {
         }
         println!("--- unsafe/SAFETY: FAILED ({} block(s))", missing.len());
         failed.push("unsafe/SAFETY".to_string());
+    }
+
+    total += 1;
+    println!("=== xtask check: commit message style (since {COMMIT_STYLE_SINCE})");
+    let offenders = check_commit_message_style(&workspace_root)?;
+    if offenders.is_empty() {
+        println!("--- commit style: OK");
+    } else {
+        for offender in &offenders {
+            println!("    {offender}");
+        }
+        println!("--- commit style: FAILED ({} commit(s))", offenders.len());
+        failed.push("commit style".to_string());
     }
 
     if full {
