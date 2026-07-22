@@ -673,6 +673,9 @@ extern "sysv64" fn kernel_main() -> ! {
     // M5-a-2 の分割対象を選ぶ材料として、ここで粒度を測る。
     report_mapping_granularity(&mut logger, heap_start, fb_start);
 
+    // 2MiB ページの分割とアンマップ（M5-a-2-1）。
+    verify_split_and_unmap(&mut logger, &mut allocator);
+
     // ロック保持中は割り込みが禁止され、解放後に元へ戻ることを確認する
     // （M4-c-2）。ヒープのロックそのものではなく同じ Locked<T> を使う。
     // ヒープのロックを保持したままログを出すと二重取得になるため。
@@ -2205,6 +2208,218 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>) {
     logger.info(format_args!(
         "keyboard: IRQ1 is unmasked; press a key (the first one must arrive as vector {:#04x})",
         keyboard::KEYBOARD_VECTOR
+    ));
+}
+
+/// 2MiB ページの分割とアンマップを、影響のない領域で一巡させる（M5-a-2-1）。
+///
+/// # なぜ通常起動で毎回行うのか
+///
+/// M4 までの検証（GDT / IDT / IMR の読み戻し、`sti` 前 7 項目）と同じ扱いに
+/// する。回帰として常に効くほうが、feature で囲って忘れるより価値がある。
+///
+/// # なぜ影響のない領域を使うのか
+///
+/// 失敗したときにログを最後まで出せるようにするためである。実行中のコードや
+/// スタックが載るページを対象にすると、失敗した瞬間に何も観測できないまま
+/// 落ちる。**実測ではコードもスタックも 4KiB ページに載っており**
+/// （`report_mapping_granularity`）、そもそも 2MiB の分割対象にならない。
+/// ヒープとフレームバッファは 2MiB に載っているが、どちらも稼働中なので
+/// 通常起動では触らない。
+///
+/// そこでフレームアロケータから 2MiB 境界に揃った 512 フレームを確保し、
+/// それを対象にする。アロケータが確保済みとして扱うので他の誰も使わない。
+/// 確保したまま解放しないので、その分のメモリは失われる（量はログに出す）。
+///
+/// # 照合は独立した経路で行う
+///
+/// 分割後の 512 エントリを `split_child_entry` と同じ式で検算しても、
+/// 同じ間違いを 2 回するだけで何も確かめられない。`translate()` は実際の
+/// テーブルを辿るので、分割を行ったコードとは独立している。こちらで見る。
+fn verify_split_and_unmap<const CAP: usize>(
+    logger: &mut Logger<SerialPort>,
+    allocator: &mut frame_allocator::FrameAllocator<CAP>,
+) {
+    use kernel::paging::active::{ActivePageTable, MapUpdateError, PageSize};
+    use kernel::paging::entry;
+
+    const FRAMES_PER_2M: u64 = entry::PAGE_SIZE_2M / frame_allocator::FRAME_SIZE;
+
+    /// 検証用に恒久的に予約する領域の大きさ。
+    ///
+    /// **2MiB なのは、分割の対象として 2MiB ページがちょうど 1 枚必要
+    /// だからである。** それ以上でも以下でもない。境界も 2MiB に揃える
+    /// 必要がある（`plan::resolve_pages` が 2MiB ページを作るのは 2MiB
+    /// 境界に揃った範囲だけなので、揃っていないと 4KiB に分解されていて
+    /// 分割対象にならない）。
+    ///
+    /// 確保したまま解放しないので、起動のたびにこの分だけ空きが減る。
+    /// 実測 205MiB に対して約 1 パーセントで、現状は無視できる。
+    /// メモリ需要が増えたときの見直しは `deferred-decisions.md` に挙げてある。
+    const SCRATCH_BYTES: u64 = entry::PAGE_SIZE_2M;
+
+    let Some(start_frame) = allocator
+        .allocate_contiguous_aligned(SCRATCH_BYTES / frame_allocator::FRAME_SIZE, FRAMES_PER_2M)
+    else {
+        logger.error(format_args!(
+            "split-test: could not reserve a 2MiB-aligned scratch region; halting"
+        ));
+        cpu::halt_forever();
+    };
+    let base = start_frame * frame_allocator::FRAME_SIZE;
+    logger.info(format_args!(
+        "split-test: reserved {base:#x}..{:#x} as scratch ({} KiB permanently withheld from the \
+         allocator)",
+        base + SCRATCH_BYTES,
+        SCRATCH_BYTES / 1024
+    ));
+
+    // SAFETY: CR3 は自前のテーブルへ切り替え済みで、テーブル自体は恒等
+    // マッピングで読み書きできる。
+    let mut table = unsafe { ActivePageTable::current() };
+
+    // --- 分割前の状態を記録する ---
+    let probes = [
+        base,
+        base + entry::PAGE_SIZE_2M / 2,
+        base + entry::PAGE_SIZE_2M - 1,
+    ];
+    let mut before = [0u64; 3];
+    for (slot, probe) in probes.iter().enumerate() {
+        match table.translate(*probe) {
+            Ok(Some(translation)) if translation.page_size == PageSize::Size2MiB => {
+                before[slot] = translation.phys;
+            }
+            other => {
+                logger.error(format_args!(
+                    "split-test: {probe:#x} is not mapped by a 2MiB page ({other:?}); halting"
+                ));
+                cpu::halt_forever();
+            }
+        }
+    }
+    let huge_flags = match table.translate(base) {
+        Ok(Some(translation)) => translation.entry,
+        _ => unreachable!("直前に 2MiB として翻訳できている"),
+    };
+
+    // --- 分割する ---
+    // SAFETY: `allocator` の空き範囲はすべて恒等マッピング済みであることを
+    // 起動時に検証している。テーブルは CR3 に載っているものである。
+    let outcome = match unsafe { table.split_huge_page(base, allocator) } {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            logger.error(format_args!("split-test: split failed: {error:?}; halting"));
+            cpu::halt_forever();
+        }
+    };
+    logger.info(format_args!(
+        "split-test: split {:#x} into 512 x 4KiB via a new page table at {:#x}",
+        outcome.base_virt, outcome.table_phys
+    ));
+
+    // --- 512 エントリを読み戻して照合する（translate 経由の独立した経路）---
+    let mut mismatches = 0u32;
+    for index in 0..entry::ENTRIES_PER_TABLE {
+        let virt = base + index as u64 * entry::PAGE_SIZE_4K;
+        match table.translate(virt) {
+            Ok(Some(translation)) => {
+                if translation.page_size != PageSize::Size4KiB {
+                    mismatches += 1;
+                } else if translation.phys != virt {
+                    // 恒等マッピングなので物理 == 仮想。
+                    mismatches += 1;
+                } else {
+                    // 属性が分割前と一致すること。PS は 4KiB では PAT の意味に
+                    // なるため、ここでは Present / Writable / PCD / PWT を見る。
+                    const KEPT: u64 =
+                        entry::PTE_PRESENT | entry::PTE_WRITABLE | entry::PTE_PCD | entry::PTE_PWT;
+                    if translation.entry & KEPT != huge_flags & KEPT {
+                        mismatches += 1;
+                    }
+                }
+            }
+            _ => mismatches += 1,
+        }
+    }
+    logger.info(format_args!(
+        "split-test: read back 512 entries through translate(), mismatches={mismatches}"
+    ));
+
+    // --- 粒度だけが変わったこと ---
+    for (slot, probe) in probes.iter().enumerate() {
+        match table.translate(*probe) {
+            Ok(Some(t)) if t.phys == before[slot] && t.page_size == PageSize::Size4KiB => {}
+            other => {
+                mismatches += 1;
+                logger.error(format_args!(
+                    "split-test: {probe:#x} changed more than its granularity: {other:?}"
+                ));
+            }
+        }
+    }
+
+    // --- 分割した領域を読み書きできること ---
+    let mut io_ok = true;
+    for probe in [
+        base,
+        base + entry::PAGE_SIZE_2M / 2,
+        base + entry::PAGE_SIZE_2M - 8,
+    ] {
+        // SAFETY: 直前に translate() で 4KiB としてマップ済みと確認した、
+        // アロケータから確保した誰も使っていない領域である。8 バイトだけ触る。
+        let read_back = unsafe {
+            core::ptr::write_volatile(probe as *mut u64, 0xA5A5_5A5A_A5A5_5A5A);
+            core::ptr::read_volatile(probe as *const u64)
+        };
+        io_ok &= read_back == 0xA5A5_5A5A_A5A5_5A5A;
+    }
+    logger.info(format_args!(
+        "split-test: the split region is readable and writable = {}",
+        if io_ok { "OK" } else { "NG" }
+    ));
+
+    // --- アンマップする ---
+    let target = base + entry::PAGE_SIZE_4K; // 先頭ではなく 2 本目を消す
+                                             // SAFETY: 上記と同じ領域で、以後この 4KiB へはアクセスしない。
+    let old_pte = match unsafe { table.unmap_4kib(target) } {
+        Ok(pte) => pte,
+        Err(error) => {
+            logger.error(format_args!("split-test: unmap failed: {error:?}; halting"));
+            cpu::halt_forever();
+        }
+    };
+    let unmapped_ok = matches!(table.translate(target), Ok(None));
+    // **隣が生きていること。** これを見ないと、添字を間違えて領域全体を
+    // 消していても気づけない。
+    let neighbours_ok = matches!(
+        table.translate(target - entry::PAGE_SIZE_4K),
+        Ok(Some(t)) if t.page_size == PageSize::Size4KiB
+    ) && matches!(
+        table.translate(target + entry::PAGE_SIZE_4K),
+        Ok(Some(t)) if t.page_size == PageSize::Size4KiB
+    );
+    logger.info(format_args!(
+        "split-test: unmapped {target:#x} (old pte={old_pte:#x}); translate returns none={unmapped_ok}, \
+         both neighbours still mapped={neighbours_ok}"
+    ));
+
+    // --- API が誤用を弾くこと ---
+    // SAFETY: 状態を変えない呼び出し。いずれもエラーで戻ることを期待する。
+    let already_small = unsafe { table.split_huge_page(base, allocator) };
+    let rejects_double_split = already_small == Err(MapUpdateError::AlreadySmall);
+    logger.info(format_args!(
+        "split-test: splitting an already-split page is rejected = {rejects_double_split}"
+    ));
+
+    if mismatches > 0 || !io_ok || !unmapped_ok || !neighbours_ok || !rejects_double_split {
+        logger.error(format_args!(
+            "split-test: the split/unmap round trip did not behave as planned; halting"
+        ));
+        cpu::halt_forever();
+    }
+    logger.info(format_args!(
+        "split-test: split and unmap behave as planned (verified through translate())"
     ));
 }
 

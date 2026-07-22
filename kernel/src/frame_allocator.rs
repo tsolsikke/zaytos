@@ -296,6 +296,67 @@ impl<const CAP: usize> FrameAllocator<CAP> {
     /// M2-e のヒープ初期アリーナ（連続領域が必要）と、将来 M3 で想定される
     /// フレームバッファ用の大きな連続確保（ヒープを経由しない経路）の
     /// 両方から使われることを想定している。
+    /// 境界を揃えた連続フレームを確保する。
+    ///
+    /// `align_frames` はフレーム単位の境界で、2 のべき乗であること。
+    /// 2MiB 境界に揃えたいなら 512 を渡す。
+    ///
+    /// # なぜ必要か
+    ///
+    /// [`Self::allocate_contiguous`] は境界を保証しない。M5-a-2 の分割検証は
+    /// **2MiB ページとしてマップされている領域**を対象にする必要があり、
+    /// `plan::resolve_pages` が 2MiB ページを作るのは 2MiB 境界に揃った
+    /// 範囲だけである。境界の揃っていない 512 フレームを取ると、そこは
+    /// 4KiB に分解されていて分割対象にならない。
+    ///
+    /// 4MiB 取って中の揃った部分を使う、という手もあるが、余りが
+    /// 恒久的に失われる。ここで揃えて取れば無駄が出ない。
+    pub fn allocate_contiguous_aligned(&mut self, count: u64, align_frames: u64) -> Option<u64> {
+        if count == 0 || align_frames == 0 || !align_frames.is_power_of_two() {
+            return None;
+        }
+        for i in 0..self.range_count {
+            let start = self.ranges[i].start_frame;
+            let end = start + self.ranges[i].frame_count;
+            // 範囲内で最初に境界へ揃うフレーム。
+            let aligned = start.next_multiple_of(align_frames);
+            if aligned.checked_add(count).is_none_or(|last| last > end) {
+                continue;
+            }
+
+            let leading = aligned - start;
+            let trailing = end - (aligned + count);
+
+            if leading == 0 && trailing == 0 {
+                for j in i..(self.range_count - 1) {
+                    self.ranges[j] = self.ranges[j + 1];
+                }
+                self.range_count -= 1;
+            } else if leading == 0 {
+                self.ranges[i].start_frame = aligned + count;
+                self.ranges[i].frame_count = trailing;
+            } else if trailing == 0 {
+                self.ranges[i].frame_count = leading;
+            } else {
+                // 前後に空きが残る。範囲が 1 つ増えるので容量を確認する。
+                if self.range_count == CAP {
+                    return None;
+                }
+                self.ranges[i].frame_count = leading;
+                for j in (i + 1..self.range_count).rev() {
+                    self.ranges[j + 1] = self.ranges[j];
+                }
+                self.ranges[i + 1] = FrameRange {
+                    start_frame: aligned + count,
+                    frame_count: trailing,
+                };
+                self.range_count += 1;
+            }
+            return Some(aligned);
+        }
+        None
+    }
+
     pub fn allocate_contiguous(&mut self, count: u64) -> Option<u64> {
         if count == 0 {
             return None;
@@ -385,6 +446,96 @@ pub fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 境界を揃えた確保。範囲の途中から取り、前後に空きが残る場合。
+    #[test]
+    fn aligned_allocation_splits_the_range_in_three() {
+        let mut allocator = FrameAllocator::<8>::new();
+        // フレーム 3..2000。2MiB 境界（512 フレーム）に揃うのは 512。
+        allocator.insert_free_range(3, 1997).unwrap();
+
+        let start = allocator.allocate_contiguous_aligned(512, 512).unwrap();
+        assert_eq!(start, 512, "最初に境界へ揃うフレーム");
+
+        // 前（3..512）と後ろ（1024..2000）が空きとして残る。
+        let ranges: Vec<(u64, u64)> = allocator.free_ranges().collect();
+        assert_eq!(ranges, vec![(3, 509), (1024, 976)]);
+        assert_eq!(allocator.free_frame_count(), 509 + 976);
+    }
+
+    /// 先頭が既に揃っている場合は前の空きが出ない。
+    #[test]
+    fn aligned_allocation_without_a_leading_remainder() {
+        let mut allocator = FrameAllocator::<8>::new();
+        allocator.insert_free_range(512, 1024).unwrap();
+
+        let start = allocator.allocate_contiguous_aligned(512, 512).unwrap();
+        assert_eq!(start, 512);
+        assert_eq!(
+            allocator.free_ranges().collect::<Vec<_>>(),
+            vec![(1024, 512)]
+        );
+    }
+
+    /// ちょうど使い切る場合は範囲そのものが消える。
+    #[test]
+    fn aligned_allocation_consuming_the_whole_range() {
+        let mut allocator = FrameAllocator::<8>::new();
+        allocator.insert_free_range(1024, 512).unwrap();
+
+        assert_eq!(allocator.allocate_contiguous_aligned(512, 512), Some(1024));
+        assert_eq!(allocator.free_range_count(), 0);
+        assert_eq!(allocator.free_frame_count(), 0);
+    }
+
+    /// **境界に揃わないだけで足りない場合を、確保できたことにしない。**
+    ///
+    /// 空きフレーム数は足りているが、揃った位置から連続で取れない。
+    /// ここを見落とすと、揃っていないアドレスを返して 2MiB ページでは
+    /// ない領域を分割対象にしてしまう。
+    #[test]
+    fn aligned_allocation_fails_when_only_the_alignment_is_missing() {
+        let mut allocator = FrameAllocator::<8>::new();
+        // 600 フレームあるが、512 の境界は 512 の 1 箇所だけで、
+        // そこから 512 フレームは取れない（600 - (512 - 100) = 88 しかない）。
+        allocator.insert_free_range(100, 600).unwrap();
+
+        assert_eq!(allocator.free_frame_count(), 600);
+        assert_eq!(allocator.allocate_contiguous_aligned(512, 512), None);
+        // 失敗しても空き状態を壊さないこと。
+        assert_eq!(allocator.free_frame_count(), 600);
+        assert_eq!(
+            allocator.free_ranges().collect::<Vec<_>>(),
+            vec![(100, 600)]
+        );
+    }
+
+    /// 引数の検証。0 と 2 のべき乗でない境界は拒否する。
+    #[test]
+    fn aligned_allocation_rejects_bad_arguments() {
+        let mut allocator = FrameAllocator::<8>::new();
+        allocator.insert_free_range(0, 4096).unwrap();
+
+        assert_eq!(allocator.allocate_contiguous_aligned(0, 512), None);
+        assert_eq!(allocator.allocate_contiguous_aligned(512, 0), None);
+        assert_eq!(allocator.allocate_contiguous_aligned(512, 3), None);
+        assert_eq!(allocator.free_frame_count(), 4096);
+    }
+
+    /// 範囲が 1 つ増えるため、容量が尽きていたら確保しない。
+    ///
+    /// 握りつぶして「揃っていない位置」を返すより、取れないと言う方がよい。
+    #[test]
+    fn aligned_allocation_respects_the_capacity_limit() {
+        let mut allocator = FrameAllocator::<2>::new();
+        allocator.insert_free_range(3, 1997).unwrap();
+        allocator.insert_free_range(4000, 10).unwrap();
+        assert_eq!(allocator.free_range_count(), 2);
+
+        // 前後に空きが残る形になるので範囲が 3 つ必要だが、容量は 2。
+        assert_eq!(allocator.allocate_contiguous_aligned(512, 512), None);
+        assert_eq!(allocator.free_frame_count(), 1997 + 10);
+    }
     use crate::memory_map::test_support::build_map_bytes;
 
     // --- FrameAllocator 単体のテスト（範囲リストの挙動） ---

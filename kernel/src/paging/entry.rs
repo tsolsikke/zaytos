@@ -165,6 +165,45 @@ pub const fn split_child_entry(huge_entry: u64, index: usize) -> u64 {
     address | flags
 }
 
+/// 分割後に PD へ書き戻す、PT を指すエントリを作る。
+///
+/// # 何を引き継ぎ、何を引き継がないか
+///
+/// **PRESENT と WRITABLE は立てる。USER は元エントリから引き継ぐ。**
+/// CPU は階層ごとの R/W・U/S・NX を **AND** で合成する。親が子より厳しいと、
+/// 子で許可したものが効かなくなる。2MiB ページがユーザーからアクセス可能
+/// だったなら、分割後の PT を指すエントリも USER でなければならない。
+///
+/// **PCD / PWT は引き継がない。** 中間エントリのこれらは「PT フレーム自身を
+/// 読むときのキャッシュ属性」を意味し、ページの属性ではない。ページ側の
+/// PCD / PWT は [`split_child_entry`] が各 PTE へ保存している。ここで一緒に
+/// 立てると、ページテーブルのウォークまでキャッシュ無効になる。
+///
+/// **PS は立てない。** ここが指すのは PT であってページではない。
+///
+/// **Accessed / Dirty も引き継がない。** CPU が立てるものである。
+pub const fn table_entry_for_split(huge_entry: u64, table_phys: u64) -> u64 {
+    let mut flags = PTE_PRESENT | PTE_WRITABLE;
+    if huge_entry & PTE_USER != 0 {
+        flags |= PTE_USER;
+    }
+    (table_phys & ADDR_MASK_TABLE) | flags
+}
+
+/// 分割後の PT に書き込む 512 エントリを組み立てる。
+///
+/// # なぜ配列を返す関数にするのか
+///
+/// 実際の書き込み（[`super::active`]）は生ポインタを触るのでホストテストに
+/// できない。**ビットの計算だけを切り離せば、そこはホストで固定できる。**
+/// PAT を使い始めるのは Write-Combining を導入するときで、それまで実機の
+/// 2MiB エントリにビット 12 が立つことは無い。つまり **PAT の移送が正しい
+/// ことは実機では確かめられない**（`deferred-decisions.md`）。移送する経路が
+/// 呼ばれていることまでは実機で言えるが、移送の中身はここで固定するしかない。
+pub fn split_children(huge_entry: u64) -> [u64; ENTRIES_PER_TABLE] {
+    core::array::from_fn(|index| split_child_entry(huge_entry, index))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +352,110 @@ mod tests {
         assert!(is_canonical(0));
         assert!(is_canonical(0x10_0000));
         assert!(is_canonical(u64::MAX));
+    }
+
+    /// PT を指す親エントリは PS を立てず、PRESENT と WRITABLE を持つ。
+    #[test]
+    fn the_parent_entry_points_at_a_table_and_is_not_a_page() {
+        let huge = 0x4020_0000 | PTE_PRESENT | PTE_WRITABLE | PDE_PAGE_SIZE;
+        let parent = table_entry_for_split(huge, 0x9000);
+
+        assert_eq!(parent & PDE_PAGE_SIZE, 0, "PS を立ててはならない");
+        assert_eq!(parent & PTE_PRESENT, PTE_PRESENT);
+        assert_eq!(parent & PTE_WRITABLE, PTE_WRITABLE);
+        assert_eq!(table_address(parent), 0x9000);
+    }
+
+    /// USER は引き継ぐ。CPU は階層ごとの U/S を AND で合成するため、
+    /// 親が引き継がないと子で許可しても効かない。
+    #[test]
+    fn the_parent_entry_inherits_the_user_bit() {
+        let kernel_only = 0x4020_0000 | PTE_PRESENT | PTE_WRITABLE | PDE_PAGE_SIZE;
+        assert_eq!(table_entry_for_split(kernel_only, 0x9000) & PTE_USER, 0);
+
+        let user = kernel_only | PTE_USER;
+        assert_eq!(table_entry_for_split(user, 0x9000) & PTE_USER, PTE_USER);
+    }
+
+    /// PCD / PWT は引き継がない。中間エントリのそれは PT フレーム自身の
+    /// キャッシュ属性で、ページの属性ではない。ページ側は各 PTE が持つ。
+    #[test]
+    fn the_parent_entry_does_not_inherit_the_cache_attributes() {
+        let huge = 0x8000_0000 | PTE_PRESENT | PTE_WRITABLE | PTE_PCD | PTE_PWT | PDE_PAGE_SIZE;
+        let parent = table_entry_for_split(huge, 0x9000);
+
+        assert_eq!(
+            parent & PTE_PCD,
+            0,
+            "親に PCD を立てるとウォークまで無効になる"
+        );
+        assert_eq!(parent & PTE_PWT, 0);
+
+        // ページ側では保存されていること（役割の分担を 1 つのテストで固定する）。
+        let child = split_child_entry(huge, 0);
+        assert_eq!(child & PTE_PCD, PTE_PCD);
+        assert_eq!(child & PTE_PWT, PTE_PWT);
+    }
+
+    /// 512 エントリが元の 2MiB と同じ物理範囲を、隙間なく覆うこと。
+    #[test]
+    fn the_children_cover_the_same_physical_range_without_gaps() {
+        let base = 0x0000_0000_4020_0000;
+        let huge = base | PTE_PRESENT | PTE_WRITABLE | PDE_PAGE_SIZE;
+        let children = split_children(huge);
+
+        assert_eq!(children.len(), ENTRIES_PER_TABLE);
+        for (index, child) in children.iter().enumerate() {
+            assert_eq!(
+                page_address_4k(*child),
+                base + index as u64 * PAGE_SIZE_4K,
+                "index={index}"
+            );
+            assert!(is_present(*child), "index={index}");
+        }
+        // 末尾が元の範囲の最後の 4KiB であること（覆いすぎていない）。
+        let last = page_address_4k(children[ENTRIES_PER_TABLE - 1]);
+        assert_eq!(last + PAGE_SIZE_4K, base + PAGE_SIZE_2M);
+    }
+
+    /// **PAT の移送は実機で確かめられないので、ここで厳密に固定する。**
+    ///
+    /// 現在 PAT を使っていないため、実機の 2MiB エントリにビット 12 が
+    /// 立つことは無い。Write-Combining を導入した時点で初めて効き始める
+    /// （`deferred-decisions.md`）。M5-a-1 で一度アサーションを誤った箇所
+    /// でもあるので、境界を全エントリについて見る。
+    #[test]
+    fn every_child_moves_the_pat_bit_and_keeps_the_address_intact() {
+        let base = 0x0000_0000_4020_0000;
+        let huge = base | PTE_PRESENT | PTE_WRITABLE | PDE_PAGE_SIZE | PDE_HUGE_PAT;
+        let children = split_children(huge);
+
+        for (index, child) in children.iter().enumerate() {
+            // ビット 7 は 4KiB 側の PAT。元が立っていたので全エントリで立つ。
+            assert_eq!(child & PTE_PAT, PTE_PAT, "index={index}: ビット 7");
+
+            // ビット 12 は 4KiB 側ではアドレスの一部。立つかどうかは添字だけで
+            // 決まり、元の PAT とは無関係になる。
+            let expected_bit_twelve = if index % 2 == 1 { PDE_HUGE_PAT } else { 0 };
+            assert_eq!(
+                child & PDE_HUGE_PAT,
+                expected_bit_twelve,
+                "index={index}: ビット 12 はアドレスの最下位ビット"
+            );
+
+            // アドレスが PAT に汚染されていないこと。
+            assert_eq!(
+                page_address_4k(*child),
+                base + index as u64 * PAGE_SIZE_4K,
+                "index={index}: アドレス"
+            );
+        }
+
+        // PAT を持たない元エントリでは、全エントリでビット 7 が落ちていること。
+        let without_pat = base | PTE_PRESENT | PTE_WRITABLE | PDE_PAGE_SIZE;
+        for (index, child) in split_children(without_pat).iter().enumerate() {
+            assert_eq!(child & PTE_PAT, 0, "index={index}");
+        }
     }
 
     /// 非正規アドレスでも添字計算は「それらしい」値を返してしまう。
