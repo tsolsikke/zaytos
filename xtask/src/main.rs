@@ -426,7 +426,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask check\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -463,6 +463,7 @@ fn main() -> Result<()> {
             }
             cmd_run(panic_test, gui, gfx_test, kvm, no_limit)
         }
+        Some("check") => cmd_check(),
         Some("screenshot") => cmd_screenshot(&args[1..]),
         Some("gen-font") => font::generate(&workspace_root()?),
         Some(other) => bail!("unknown xtask subcommand: {other}\n\n{USAGE}"),
@@ -1434,6 +1435,107 @@ fn cmd_exception_test(kind: &str) -> Result<()> {
 }
 
 /// 指定した feature 付きで kernel をビルドする。
+/// `cargo xtask check` が順に実行する検査。
+///
+/// # なぜ 1 コマンドに畳むのか
+///
+/// M3-b 以降、実装ループから `cargo fmt --check` と `cargo clippy` が抜け落ち、
+/// 誰も気づかないまま整形差分が 52 箇所、clippy 警告が 10 件まで積み上がった。
+/// 原因は個々の見落としではなく、**維持していることを確認する手順が
+/// どこにも無かった**ことである。手順が増えるほど飛ばされやすくなるので、
+/// 覚えるものを 1 つに減らす。
+///
+/// # 構成を明示的に並べる理由
+///
+/// bootloader と kernel は**ターゲットが違う**（`x86_64-unknown-uefi` と
+/// `x86_64-unknown-none`）。`--workspace --all-targets` でまとめて回すことは
+/// できない。ホスト向けに bootloader をビルドしようとして失敗するためである。
+/// 構成ごとに並べるほかない。
+const CHECKS: &[(&str, &[&str])] = &[
+    (
+        "build bootloader (uefi)",
+        &["build", "-p", BOOTLOADER_PACKAGE, "--target", UEFI_TARGET],
+    ),
+    (
+        "build kernel (none)",
+        &["build", "-p", KERNEL_PACKAGE, "--target", KERNEL_TARGET],
+    ),
+    ("build common (host)", &["build", "-p", "common"]),
+    ("build xtask (host)", &["build", "-p", "xtask"]),
+    ("test (host)", &["test", "--workspace"]),
+    (
+        "clippy bootloader (uefi)",
+        &[
+            "clippy",
+            "-p",
+            BOOTLOADER_PACKAGE,
+            "--target",
+            UEFI_TARGET,
+            "--",
+            "-D",
+            "warnings",
+        ],
+    ),
+    (
+        "clippy kernel (none)",
+        &[
+            "clippy",
+            "-p",
+            KERNEL_PACKAGE,
+            "--target",
+            KERNEL_TARGET,
+            "--",
+            "-D",
+            "warnings",
+        ],
+    ),
+    (
+        "clippy common (host)",
+        &["clippy", "-p", "common", "--", "-D", "warnings"],
+    ),
+    (
+        "clippy xtask (host)",
+        &["clippy", "-p", "xtask", "--", "-D", "warnings"],
+    ),
+    ("fmt --check", &["fmt", "--all", "--", "--check"]),
+];
+
+/// 全構成のビルド・テスト・clippy・fmt を順に実行する。
+///
+/// **1 つ落ちてもそこで止めない。** 止めると「直しては再実行」を
+/// 繰り返すことになり、全体像が分からない。最後にまとめて報告する。
+fn cmd_check() -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let mut failed: Vec<&str> = Vec::new();
+
+    for (name, args) in CHECKS {
+        println!("=== xtask check: {name}");
+        let status = Command::new("cargo")
+            .current_dir(&workspace_root)
+            .args(*args)
+            .status()
+            .with_context(|| format!("failed to invoke cargo for the {name} check"))?;
+        if status.success() {
+            println!("--- {name}: OK");
+        } else {
+            println!("--- {name}: FAILED ({status})");
+            failed.push(name);
+        }
+    }
+
+    println!();
+    if failed.is_empty() {
+        println!("xtask check: all {} check(s) passed", CHECKS.len());
+        return Ok(());
+    }
+    bail!(
+        "xtask check: {} of {} check(s) failed: {}",
+        failed.len(),
+        CHECKS.len(),
+        failed.join(", ")
+    );
+}
+
 fn build_kernel_with_features(workspace_root: &Path, features: &[&str]) -> Result<PathBuf> {
     let mut command = Command::new("cargo");
     command.current_dir(workspace_root).args([

@@ -52,6 +52,16 @@ QEMUを`-display none`で起動し、シリアル出力を端末へ流す。
 - `cargo xtask screenshot [out.png]` : 起動後の画面をキャプチャする
 - `cargo test` : ホスト上で純粋ロジックの単体テストを実行する
 
+### 静的検査
+
+```
+cargo xtask check
+```
+
+全構成のビルド、ホストテスト、clippy、`cargo fmt --check` を順に実行する。
+bootloaderとkernelはターゲットが違うため`--workspace`ではまとめられず、構成ごとに実行している。
+1つ落ちても途中で止めず、最後に失敗した項目をまとめて報告する。
+
 ### 回帰チェック
 
 わざと異常を起こし、検出が実際に働くことを確かめるテスト群。
