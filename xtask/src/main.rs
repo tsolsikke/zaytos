@@ -216,13 +216,13 @@ const INTERRUPT_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
-    // int 0x20 をソフトウェア発行し、IRQ 経路が GPR を復元することを確認。
+    // int 0x40 をソフトウェア発行し、IRQ 経路が GPR を復元することを確認。
     CriticalTest {
         name: "irq-path",
         feature: "interrupt-test-irq-path",
         expected_markers: &[
             "irq-path: OK (the IRQ stub returned via iretq",
-            "irq-path: int 0x30 handled (handler count for vector 0x30 = 1)",
+            "irq-path: int 0x40 handled (handler count for vector 0x40 = 1)",
         ],
         forbidden_markers: &[
             "irq-path: a general purpose register was not restored",

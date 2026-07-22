@@ -8,18 +8,6 @@
 
 #![cfg_attr(not(test), no_std)]
 
-// `alt-offset-test` は PIC を 0x30-0x3F へ再マップするため、IRQ0 のベクタが
-// 0x30 になる。それは GPR 復元テストが使うテスト専用ベクタと同じ番号であり、
-// 同時に有効にすると「タイマなのかテスト用の int なのか」が区別できなくなる。
-// テスト用ベクタを別の番号へ逃がす案もあったが、feature によってテストの
-// ベクタ番号が変わるとログを読むときの混乱要因になるため、排他にしている。
-#[cfg(all(feature = "interrupt-test-irq-path", feature = "alt-offset-test"))]
-compile_error!(
-    "interrupt-test-irq-path and alt-offset-test cannot be enabled together: \
-     alt-offset-test moves IRQ0 onto vector 0x30, which is the vector the GPR \
-     restore test uses. Run them as separate builds."
-);
-
 pub mod console;
 pub mod frame_allocator;
 pub mod gdt;

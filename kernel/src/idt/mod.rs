@@ -199,8 +199,18 @@ const STACK_ALIGN_ADJUST: usize = 0;
 
 // IRQ スタイル（GPR を復元して `iretq` で戻る）のスタブ表。
 //
-// 0x20-0x2F の 16 本が PIC の IRQ、末尾の 1 本（0x30）は**テスト専用**で
-// PIC の範囲外にある。テスト専用ベクタを PIC の範囲外へ置いているのは、
+// 0x20-0x3F の 32 本が PIC の IRQ が届きうる範囲、末尾の 1 本（0x40）は
+// **テスト専用**で PIC の範囲外にある。
+//
+// **32 本ある理由は、PIC のベクタオフセットが 1 つに固定されていないため
+// である。** 通常は 0x20-0x2F だが、`alt-offset-test` は 0x30-0x3F へ
+// 再マップする。スタブ表が 0x20 から 17 本しか無いと、再マップ時に
+// IRQ1 以降（0x31-0x3F）が例外スタブを指したままになり、最初の
+// キーボード割り込みで「unexpected vector」として停止する。実際に
+// M4-e から M5-a-1 までこの状態だった（troubleshooting.md 参照）。
+// 取りうるオフセットの両方を最初から覆っておけば、この穴は生じない。
+//
+// テスト専用ベクタを PIC の範囲外へ置いているのは、
 // GPR 復元の検証（`int` によるソフトウェア割り込み）に EOI の論理を
 // 一切絡ませないためである。PIC 経由で配送されないベクタなら、EOI を
 // 送らないことがそのまま正しい実装になる。
@@ -223,7 +233,7 @@ core::arch::global_asm!(
     ".globl zaytos_irq_stubs",
     "zaytos_irq_stubs:",
     ".set irq_index, 0",
-    ".rept 17",
+    ".rept 33",
     // スタブ表の刻み幅を独立に検証するためのラベル（例外側と同じ発想）。
     "  .if irq_index == 0",
     "    .globl zaytos_irq_stub_0",
@@ -236,6 +246,14 @@ core::arch::global_asm!(
     "  .if irq_index == 16",
     "    .globl zaytos_irq_stub_16",
     "    zaytos_irq_stub_16:",
+    "  .endif",
+    "  .if irq_index == 31",
+    "    .globl zaytos_irq_stub_31",
+    "    zaytos_irq_stub_31:",
+    "  .endif",
+    "  .if irq_index == 32",
+    "    .globl zaytos_irq_stub_32",
+    "    zaytos_irq_stub_32:",
     "  .endif",
     // IRQ にエラーコードは無い。ベクタ番号だけを積む。
     "  push irq_index + 0x20",
@@ -316,28 +334,43 @@ extern "C" {
     static zaytos_irq_stub_0: u8;
     static zaytos_irq_stub_15: u8;
     static zaytos_irq_stub_16: u8;
+    static zaytos_irq_stub_31: u8;
+    static zaytos_irq_stub_32: u8;
 }
 
 /// IRQ スタイルのスタブの本数。
 ///
-/// PIC の 16 本（0x20-0x2F）に、テスト専用の 1 本（[`TEST_VECTOR`]）を
-/// 加えた数。
-pub const IRQ_STYLE_STUB_COUNT: usize = 17;
+/// PIC が取りうるベクタ範囲 32 本（[`PIC_VECTOR_SPAN`]）に、テスト専用の
+/// 1 本（[`TEST_VECTOR`]）を加えた数。
+pub const IRQ_STYLE_STUB_COUNT: usize = PIC_VECTOR_SPAN + 1;
 
 /// IRQ スタイルのスタブが担当する最初のベクタ。
-/// `pic::MASTER_VECTOR_OFFSET` と一致する。
+///
+/// **PIC のベクタオフセットそのものではない。** オフセットは 0x20 にも
+/// 0x30 にもなりうる（`pic::MASTER_VECTOR_OFFSET`）。ここはスタブ表が
+/// 覆う範囲の下端であり、取りうるオフセットのうち最小のものである。
 pub const IRQ_VECTOR_BASE: usize = 0x20;
 
-/// PIC の IRQ に対応するベクタの本数（0x20-0x2F）。
+/// スタブ表が PIC のために覆うベクタ数（0x20-0x3F）。
+///
+/// PIC 自体の IRQ は 16 本（[`PIC_IRQ_COUNT`]）だが、オフセットが
+/// 0x20 と 0x30 のどちらにもなりうるため、その両方を覆う。
+pub const PIC_VECTOR_SPAN: usize = 32;
+
+/// PIC の IRQ 本数（マスタ 8 + スレーブ 8）。
 pub const PIC_IRQ_COUNT: usize = 16;
 
 /// GPR 復元の検証に使うテスト専用ベクタ。
 ///
-/// **PIC の範囲（0x20-0x2F）の外にある。** `int 0x30` は 8259A を経由せず
-/// CPU が直接 IDT を引くため、ここへ来た割り込みに EOI を送る必要が無い。
-/// 「EOI を送らないハンドラ」がそのまま正しい実装になるので、テストと
-/// EOI の論理が干渉しない。
-pub const TEST_VECTOR: usize = 0x30;
+/// **PIC が取りうるどのベクタ範囲の外にもある。** `int 0x40` は 8259A を
+/// 経由せず CPU が直接 IDT を引くため、ここへ来た割り込みに EOI を送る
+/// 必要が無い。「EOI を送らないハンドラ」がそのまま正しい実装になるので、
+/// テストと EOI の論理が干渉しない。
+///
+/// 以前は 0x30 だったが、それは `alt-offset-test` の IRQ0 と同じ番号で、
+/// 両者を排他にしなければならなかった。スタブ表を 0x3F まで広げたのに
+/// 合わせて、PIC の外へ恒久的に移した。
+pub const TEST_VECTOR: usize = IRQ_VECTOR_BASE + PIC_VECTOR_SPAN;
 
 /// ベクタ別の割り込み回数。
 ///
@@ -597,7 +630,9 @@ pub fn check_irq_stub_table() -> StubTableCheck {
 
     let stride_ok = addr_of!(zaytos_irq_stub_0) as u64 == base
         && addr_of!(zaytos_irq_stub_15) as u64 == base + 15 * STUB_SIZE as u64
-        && addr_of!(zaytos_irq_stub_16) as u64 == base + 16 * STUB_SIZE as u64;
+        && addr_of!(zaytos_irq_stub_16) as u64 == base + 16 * STUB_SIZE as u64
+        && addr_of!(zaytos_irq_stub_31) as u64 == base + 31 * STUB_SIZE as u64
+        && addr_of!(zaytos_irq_stub_32) as u64 == base + 32 * STUB_SIZE as u64;
 
     // 0x20-0x2F の IDT エントリが、IRQ スタブ表の対応する位置を指すこと。
     // 上書きに失敗して例外スタブを指したままだと、IRQ が「戻らない」経路へ
@@ -678,7 +713,7 @@ pub fn check_stub_table() -> StubTableCheck {
     // 全エントリのハンドラが表の範囲内で、ベクタ番号と位置が対応すること。
     let mut entries_ok = true;
     for vector in 0..IDT_ENTRY_COUNT {
-        // 0x20-0x30 は IRQ スタイルのスタブへ差し替えてあるので、こちらの
+        // 0x20-0x40 は IRQ スタイルのスタブへ差し替えてあるので、こちらの
         // 範囲には入らない。別系統の check_irq_stub_table が担当する。
         if (IRQ_VECTOR_BASE..IRQ_VECTOR_BASE + IRQ_STYLE_STUB_COUNT).contains(&vector) {
             continue;

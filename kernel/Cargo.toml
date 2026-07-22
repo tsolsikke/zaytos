@@ -64,7 +64,8 @@ interrupt-test-timer = ["interrupt-test"]
 no-eoi-test = ["interrupt-test-timer"]
 # PIC をわざと 0x30-0x3F へ再マップし、ティックがそのベクタで届くことを
 # 確認する。ICW2 書き込みが実際に効いていることと、配送元が 8259A である
-# ことを同時に示す。テスト用ベクタ 0x30 と衝突するため irq-path とは排他。
+# ことを同時に示す。IRQ スタブ表は 0x20-0x3F を覆っており、テスト用ベクタは
+# その外（0x40）にあるため、irq-path と排他にする必要は無い。
 alt-offset-test = ["interrupt-test-timer"]
 # リングバッファを極小にし、オーバーフロー検出が働くことを確認する。
 tiny-key-buffer = []

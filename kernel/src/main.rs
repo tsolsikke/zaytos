@@ -1833,9 +1833,9 @@ fn trigger_interrupt_test(
         interrupts::spin_with_interrupts_enabled(logger, SPIN_CYCLES, HEARTBEAT_CYCLES);
     }
 
-    // **増加分で判定する。** テスト用ベクタを 0x30 へ移しても、これは
+    // **増加分で判定する。** テスト用ベクタを PIC の範囲外へ移しても、これは
     // 必要なままである。カウンタは全 256 ベクタを対象に合計するので、
-    // irq-path の `int 0x30` で計上された 1 件は絶対値に残る。0x20 が
+    // irq-path の `int 0x40` で計上された 1 件は絶対値に残る。0x20 が
     // 汚れなくなっただけで、絶対値では「スピン中に届いた」と誤判定する
     // 構造は変わらない。
     //
@@ -1872,8 +1872,8 @@ fn trigger_interrupt_test(
 
 /// IRQ 経路が GPR を復元することを、ソフトウェア割り込みで確かめる。
 ///
-/// 使うのは **PIC の範囲外**のベクタ 0x30（`idt::TEST_VECTOR`）である。
-/// `int 0x30` は 8259A を経由せず CPU が直接 IDT を引くので、マスク状態と
+/// 使うのは **PIC の範囲外**のベクタ 0x40（`idt::TEST_VECTOR`）である。
+/// `int 0x40` は 8259A を経由せず CPU が直接 IDT を引くので、マスク状態と
 /// 無関係にハンドラ経路だけを試せるうえ、**EOI の論理が一切絡まない**。
 /// PIC 経由で配送されないベクタなので、ハンドラが EOI を送らないことが
 /// そのまま正しい実装になる。
@@ -1881,7 +1881,7 @@ fn trigger_interrupt_test(
 /// 各 GPR にレジスタごとに異なる既知値を入れ、`int` の前後で一致することを
 /// 見る。1 本でも復元を落とすと、そのレジスタだけ値が変わる。
 ///
-/// # なぜ 0x20 ではなく 0x30 を使うのか
+/// # なぜ 0x20 ではなく PIC の範囲外を使うのか
 ///
 /// M4-d-1 では `int 0x20` を使っていたが、M4-d-2 で EOI を実装すると衝突する。
 /// ソフトウェア割り込みは実在の IRQ ではないため、タイマハンドラが無条件に
@@ -1936,7 +1936,7 @@ fn verify_irq_path_restores_registers(logger: &mut Logger<SerialPort>) {
             // idt::TEST_VECTOR と同じ値。`int` のオペランドは即値でなければ
             // ならず、定数を差し込めないため、ここだけ数値が重複する。
             // 食い違いは下の const アサーションで防いでいる。
-            "int 0x30",
+            "int 0x40",
             inout("rax") regs[0],
             inout("rcx") regs[1],
             inout("rdx") regs[2],
@@ -1954,13 +1954,13 @@ fn verify_irq_path_restores_registers(logger: &mut Logger<SerialPort>) {
     }
 
     let after = regs;
-    // `int 0x30` の 0x30 と idt::TEST_VECTOR が食い違わないことを固定する。
-    const _: () = assert!(idt::TEST_VECTOR == 0x30);
+    // `int 0x40` の 0x40 と idt::TEST_VECTOR が食い違わないことを固定する。
+    const _: () = assert!(idt::TEST_VECTOR == 0x40);
 
     let count = idt::interrupt_count(idt::TEST_VECTOR);
 
     logger.info(format_args!(
-        "irq-path: int 0x30 handled (handler count for vector 0x30 = {count})"
+        "irq-path: int 0x40 handled (handler count for vector 0x40 = {count})"
     ));
     logger.info(format_args!(
         "irq-path: rax={:#x} rcx={:#x} r15={:#x} (13 registers checked; rbx and rbp cannot be)",
