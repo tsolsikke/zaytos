@@ -1985,8 +1985,20 @@ fn prepare_ovmf_vars(workspace_root: &Path) -> Result<PathBuf> {
     fs::create_dir_all(&ovmf_dir)
         .with_context(|| format!("failed to create {}", ovmf_dir.display()))?;
 
+    // **毎回テンプレートから作り直す。** OVMF はこの varstore を書き換える
+    // ので、使い回すと起動項目（`EFI Internal Shell`、PXE、HTTP boot）が
+    // 蓄積し、実行を重ねるほど条件が変わっていく。実際、初回だけコピーする
+    // 作りだったときは `--full` の 3 回中 3 回で「OVMF がシェルへ落ちる」
+    // 事象が起き、毎回作り直すと 2 回中 0 件になった
+    // （docs/troubleshooting.md 参照）。
+    //
+    // 原因をバイト単位まで特定したわけではない。ただ、テストのたびに状態が
+    // 持ち越される作りは、それ自体が「実行ごとに条件が変わる」という観測上の
+    // 不確実性であり、無くしておく価値がある。費用はファイルコピー 1 回で、
+    // 失うのは前回の起動で OVMF が覚えた設定だけである。ZaytOS は毎回同じ
+    // ESP から同じ構成で起動するので、覚えていてほしいものは無い。
     let vars_copy = ovmf_dir.join("OVMF_VARS_4M.fd");
-    if !vars_copy.exists() {
+    {
         fs::copy(OVMF_VARS_TEMPLATE_PATH, &vars_copy).with_context(|| {
             format!(
                 "failed to copy OVMF vars template from {} (is the `ovmf` package installed? `apt install ovmf`)",
