@@ -21,6 +21,28 @@ ENTRY(_start)
 
 KERNEL_LOAD_ADDR = 0x100000;
 
+/*
+ * kernel イメージのリンクアドレスとロードアドレスの差（VMA - LMA）。
+ *
+ * higher-half 移行の前段として導入する（H-1）。**現在は 0 である。**
+ * 恒等マッピングなので、リンクアドレスとロードアドレスが一致している。
+ *
+ * 移行でここが 0xFFFFFFFF80000000 になり、VMA = KERNEL_VIRT_BASE +
+ * KERNEL_LOAD_ADDR、LMA = KERNEL_LOAD_ADDR となる。値を変えるのは、
+ * 高位マッピングが存在する状態で起動できるようになってからである
+ * （それより早く変えると、bootloader が p_vaddr へロードして飛ぶため
+ * その場でフォルトする）。
+ *
+ * **この値は Rust 側にも同じものが必要になる。** 二重に持つと片方だけ
+ * 直したときに食い違うので、build.rs がこのファイルから読み取って
+ * Rust の定数を生成し、突き合わせる。
+ */
+KERNEL_VIRT_BASE = 0x0;
+
+/* 現時点では恒等でなければならない。移行の段階でこの ASSERT を外す。 */
+ASSERT(KERNEL_VIRT_BASE == 0x0,
+       "KERNEL_VIRT_BASE must stay 0 until the high-half mappings exist (H-1)")
+
 SECTIONS
 {
     . = KERNEL_LOAD_ADDR;

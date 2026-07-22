@@ -2943,7 +2943,7 @@ fn report_mapping_granularity(
 /// ある。移行時にこの関数の中身をその差へ書き換えること。
 /// 詳細は `docs/deferred-decisions.md` を参照。
 fn kernel_image_phys_range() -> (common::addr::PhysAddr, common::addr::PhysAddr) {
-    use common::addr::{PhysAddr, VirtAddr};
+    use common::addr::VirtAddr;
 
     // リンカシンボルは仮想アドレスとして受け取る。
     let start_virt = VirtAddr::new(core::ptr::addr_of!(__kernel_start) as u64)
@@ -2951,12 +2951,10 @@ fn kernel_image_phys_range() -> (common::addr::PhysAddr, common::addr::PhysAddr)
     let end_virt = VirtAddr::new(core::ptr::addr_of!(__kernel_end) as u64)
         .expect("the linker places the kernel at a canonical address");
 
-    // 恒等マッピングの間は、リンクアドレスとロードアドレスが等しいので
-    // 差は 0 である。移行後はここが「差を引く」形になる。
-    let to_phys = |virt: VirtAddr| {
-        PhysAddr::new(virt.as_u64()).expect("an identity-mapped kernel address fits in 52 bits")
-    };
-    (to_phys(start_virt), to_phys(end_virt))
+    (
+        kernel::kernel_phys_from_virt(start_virt),
+        kernel::kernel_phys_from_virt(end_virt),
+    )
 }
 
 fn range_is_mapped<const CAP: usize>(mapped: &MappedRanges<CAP>, start: u64, end: u64) -> bool {
