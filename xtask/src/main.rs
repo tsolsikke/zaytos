@@ -3,7 +3,7 @@ use std::{
     ffi::OsString,
     fs,
     io::Write,
-    os::unix::net::UnixStream,
+    os::unix::{ffi::OsStrExt, net::UnixStream},
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -392,25 +392,78 @@ fn classify_boot(serial: &str, qemu_debug: &str, started_marker: &str) -> BootOu
 
 /// 起動失敗を報告する。テスト FAIL とは別物として扱う。
 ///
-/// 戻り値の `Err` は「テストが落ちた」ではなく「環境の問題で判定できない」
-/// ことを表す。呼び出し側はこのメッセージで両者を区別する。
-fn report_did_not_start(context: &str, firmware_rip: Option<u64>) -> Result<()> {
+/// 戻り値の `Err` は「テストが落ちた」ではなく「起動しなかったので判定
+/// できない」ことを表す。呼び出し側はこのメッセージで両者を区別する。
+///
+/// # 原因を断定しない
+///
+/// 以前ここは「OVMF の起動フレーキネスである」と断定して書いていた。
+/// **その文言が、まったく別の原因を 2 度覆い隠した。**
+///
+/// - varstore を使い回していたため OVMF の起動項目が蓄積していた
+/// - QEMU の monitor ソケットのパスが `sun_path` の 108 バイト上限を
+///   超えており、QEMU がソケットを作れずに終了していた
+///
+/// どちらも症状は「起動マーカーが出ない」で同一だが、原因も直し方も違う。
+/// 便利なラベルを貼ると、そこで調査が止まる。断定するのは観測した事実
+/// （マーカーが無い、RIP がどこを指していた）だけにして、原因は候補を
+/// 並べるにとどめる。
+fn report_did_not_start(
+    context: &str,
+    firmware_rip: Option<u64>,
+    qemu_exit: Option<&str>,
+) -> Result<()> {
     println!("{context}: TARGET DID NOT START (not a test failure)");
-    println!("{context}:   the serial log has no start-up marker line");
+    println!("{context}:   observed: the serial log has no start-up marker line");
     match firmware_rip {
         Some(rip) => println!(
-            "{context}:   qemu -d int shows RIP={rip:#018x} in the firmware region \
-             (>= {FIRMWARE_REGION_START:#x}); OVMF fell back to its shell/idle loop"
+            "{context}:   observed: qemu -d int shows RIP={rip:#018x} in the firmware region \
+             (>= {FIRMWARE_REGION_START:#x}), so qemu ran and the firmware kept executing"
         ),
         None => println!(
-            "{context}:   could not confirm a firmware RIP, but the first log line is absent"
+            "{context}:   observed: no firmware RIP in the qemu log either, so qemu may not \
+             have reached the firmware at all"
         ),
     }
+    if let Some(status) = qemu_exit {
+        println!("{context}:   observed: qemu exited on its own ({status})");
+    }
+    println!("{context}:   this check does not identify the cause. Candidates:");
+    println!("{context}:     - OVMF booted but fell back to its shell / idle loop");
+    println!("{context}:     - qemu never started (bad arguments, missing OVMF, port in use)");
     println!(
-        "{context}:   this is the OVMF boot flakiness noted in docs/troubleshooting.md; \
-         re-run the test"
+        "{context}:     - the monitor socket path exceeded the {SOCKET_PATH_LIMIT}-byte \
+         sun_path limit"
     );
+    println!("{context}:   see docs/troubleshooting.md 2026-07-22 for two past instances");
     bail!("{context}: kernel did not start (environment, not the code); re-run")
+}
+
+/// UNIX ドメインソケットのパス長の上限（`sockaddr_un::sun_path`）。
+///
+/// 終端の NUL を含めて 108 バイト。超えると `bind` に失敗する。QEMU は
+/// エラーを出して即座に終了するため、症状は「ゲストが 1 行も出力しない」
+/// になり、起動失敗と見分けがつかない。実際にこれで 8 回連続の失敗を
+/// 「OVMF の起動フレーキネス」と誤認しかけた。
+const SOCKET_PATH_LIMIT: usize = 108;
+
+/// monitor ソケットのパスが `sun_path` の上限に収まることを確かめる。
+///
+/// **起動する前に弾く。** 超えたまま起動すると、QEMU が黙って終了して
+/// 「起動しなかった」としか分からない。ここで長さを指摘すれば、
+/// 作業ディレクトリが深すぎることがその場で分かる。
+fn ensure_socket_path_fits(socket: &Path) -> Result<()> {
+    let length = socket.as_os_str().as_bytes().len();
+    if length < SOCKET_PATH_LIMIT {
+        return Ok(());
+    }
+    bail!(
+        "the qemu monitor socket path is {length} bytes, which does not fit in the \
+         {SOCKET_PATH_LIMIT}-byte sun_path limit: {}\n\
+         move the workspace to a shorter path; qemu would exit without producing any \
+         guest output, which is indistinguishable from a boot failure",
+        socket.display()
+    )
 }
 
 // パニックハンドラの出力（bootloader/src/panic.rs）と対応する、回帰チェック用の
@@ -689,7 +742,7 @@ fn run_panic_test(workspace_root: &Path, ovmf_vars: &Path, esp_dir: &Path) -> Re
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&captured, &qemu, BOOTLOADER_STARTED_MARKER)
     {
-        return report_did_not_start("panic-test", firmware_rip);
+        return report_did_not_start("panic-test", firmware_rip, None);
     }
 
     bail!(
@@ -770,6 +823,7 @@ fn take_screenshot(
     let monitor_socket =
         PathBuf::from(format!("/tmp/zaytos-xtask-mon-{}.sock", std::process::id()));
     let _ = fs::remove_file(&monitor_socket);
+    ensure_socket_path_fits(&monitor_socket)?;
     let serial_log = workspace_root.join("target").join("screenshot-serial.log");
     let debug_log = workspace_root.join("target").join("qemu-debug.log");
     let ppm_path = workspace_root.join("target").join("screenshot.ppm");
@@ -979,10 +1033,17 @@ fn cmd_keyboard_test() -> Result<()> {
     let _ = fs::remove_file(&serial_log);
     let debug_log = workspace_root.join("target").join("qemu-debug.log");
     let _ = fs::remove_file(&debug_log);
-    let monitor_socket = workspace_root
-        .join("target")
-        .join("keyboard-test-monitor.sock");
+    // **screenshot と同じく /tmp の短いパスを使う。** workspace 配下に置くと、
+    // 作業ディレクトリが深い場所（git worktree を /tmp の下に作った場合など）で
+    // `sun_path` の 108 バイト上限を超える。超えると QEMU はソケットを作れずに
+    // 即座に終了し、ゲストの出力が 1 行も出ない。症状が起動失敗と区別できず、
+    // 実際にこれを「OVMF の起動フレーキネス」と 8 回連続で誤認しかけた。
+    let monitor_socket = PathBuf::from(format!(
+        "/tmp/zaytos-xtask-keyboard-{}.sock",
+        std::process::id()
+    ));
     let _ = fs::remove_file(&monitor_socket);
+    ensure_socket_path_fits(&monitor_socket)?;
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
@@ -1033,6 +1094,15 @@ fn cmd_keyboard_test() -> Result<()> {
         thread::sleep(Duration::from_secs(3));
     }
 
+    // **kill する前に、既に終わっていないかを見る。** 自分から終了して
+    // いたなら、それは QEMU 側の異常（引数が不正、OVMF が無い、ソケットを
+    // 作れない等）であって、ゲストが動かなかったのとは別である。この 1 行が
+    // 無いと両者を区別できない。
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
     let _ = child.kill();
     let _ = child.wait();
     let _ = fs::remove_file(&monitor_socket);
@@ -1044,7 +1114,7 @@ fn cmd_keyboard_test() -> Result<()> {
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
     {
-        return report_did_not_start(context, firmware_rip);
+        return report_did_not_start(context, firmware_rip, qemu_exit.as_deref());
     }
 
     println!("--- {context}: relevant output ---");
@@ -1203,6 +1273,15 @@ fn cmd_marker_test(tests: &[CriticalTest], kind_label: &str, kind: &str) -> Resu
         thread::sleep(PANIC_TEST_POLL_INTERVAL);
     }
 
+    // **kill する前に、既に終わっていないかを見る。** 自分から終了して
+    // いたなら、それは QEMU 側の異常（引数が不正、OVMF が無い、ソケットを
+    // 作れない等）であって、ゲストが動かなかったのとは別である。この 1 行が
+    // 無いと両者を区別できない。
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
     let _ = child.kill();
     let _ = child.wait();
 
@@ -1213,7 +1292,7 @@ fn cmd_marker_test(tests: &[CriticalTest], kind_label: &str, kind: &str) -> Resu
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
     {
-        return report_did_not_start(&context, firmware_rip);
+        return report_did_not_start(&context, firmware_rip, qemu_exit.as_deref());
     }
 
     println!("--- {context}: relevant output ---");
@@ -1345,6 +1424,15 @@ fn cmd_exception_test(kind: &str) -> Result<()> {
         thread::sleep(PANIC_TEST_POLL_INTERVAL);
     };
 
+    // **kill する前に、既に終わっていないかを見る。** 自分から終了して
+    // いたなら、それは QEMU 側の異常（引数が不正、OVMF が無い、ソケットを
+    // 作れない等）であって、ゲストが動かなかったのとは別である。この 1 行が
+    // 無いと両者を区別できない。
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
     let _ = child.kill();
     let _ = child.wait();
 
@@ -1357,7 +1445,7 @@ fn cmd_exception_test(kind: &str) -> Result<()> {
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
     {
-        return report_did_not_start(&context, firmware_rip);
+        return report_did_not_start(&context, firmware_rip, qemu_exit.as_deref());
     }
 
     let qemu_saw_it = qemu.contains(test.qemu_marker);
