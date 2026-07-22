@@ -206,13 +206,7 @@ mod tests {
             0x0000_0000_0010_9550,
             0xFFFF_FFFF_FFFF_FFFF,
         ] {
-            let entry = IdtEntry::new(
-                handler,
-                KERNEL_CODE_SELECTOR,
-                GateType::Interrupt,
-                0,
-                None,
-            );
+            let entry = IdtEntry::new(handler, KERNEL_CODE_SELECTOR, GateType::Interrupt, 0, None);
             assert_eq!(
                 entry.handler_address(),
                 handler,

@@ -71,10 +71,16 @@ impl ReadinessReport {
         [
             ("1. GDT loaded, CS/DS/SS are ours", self.gdt_and_segments),
             ("2. TSS loaded, IST stack present", self.tss_and_ist),
-            ("3. IDT loaded, all exception gates present", self.idt_and_exception_gates),
+            (
+                "3. IDT loaded, all exception gates present",
+                self.idt_and_exception_gates,
+            ),
             ("4. PIC remapped to 0x20-0x2F", self.pic_remapped),
             ("5. IRQs without a handler are masked", self.irqs_masked),
-            ("6. Locked<T> disables interrupts while held", self.interrupt_safe_locks),
+            (
+                "6. Locked<T> disables interrupts while held",
+                self.interrupt_safe_locks,
+            ),
             ("7. handlers issue EOI", self.handlers_send_eoi),
         ]
     }
@@ -165,8 +171,9 @@ fn verify_ready(
     // 32 個の CPU 例外ベクタすべてが present であること（ADR-0018 §2 項目 3）。
     let mut exception_gates_ok = idt_base == idt::idt_base() && idt_limit == idt::expected_limit();
     for vector in 0..32 {
-        exception_gates_ok &= idt::entry(vector)
-            .is_some_and(|e| e.is_present() && e.gate_type() == 0xE && e.descriptor_privilege_level() == 0);
+        exception_gates_ok &= idt::entry(vector).is_some_and(|e| {
+            e.is_present() && e.gate_type() == 0xE && e.descriptor_privilege_level() == 0
+        });
     }
     // スタブ表は 2 系統ある。片方の検証がもう片方を保証しない。
     let exception_stubs = idt::check_stub_table();
@@ -251,7 +258,10 @@ fn verify_ready(
     };
 
     for (name, state) in report.all() {
-        logger.info(format_args!("sti-check summary: {name} = {}", state.label()));
+        logger.info(format_args!(
+            "sti-check summary: {name} = {}",
+            state.label()
+        ));
     }
 
     report

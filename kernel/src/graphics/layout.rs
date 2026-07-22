@@ -400,7 +400,10 @@ mod tests {
         let layout = FramebufferLayout::from_info(&valid_info()).unwrap();
         let rebased = layout.with_base(0x22_8000).unwrap();
         for (x, y) in [(0, 0), (1, 0), (0, 1), (1279, 799), (1280, 0)] {
-            assert_eq!(layout.pixel_offset_bytes(x, y), rebased.pixel_offset_bytes(x, y));
+            assert_eq!(
+                layout.pixel_offset_bytes(x, y),
+                rebased.pixel_offset_bytes(x, y)
+            );
         }
     }
 

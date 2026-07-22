@@ -155,6 +155,12 @@ pub fn render_table(glyphs: &[ParsedGlyph], source_note: &str) -> String {
         "/// 全グリフの行データを連結したもの。各行は最上位ビットが左端のピクセル。"
     )
     .unwrap();
+    // 1 グリフ 1 行に並べ、行末へ対応する符号位置を書く形は、目で読める
+    // ようにするための意図的な整列である。rustfmt は 1 行の桁数だけを見て
+    // これを詰め直し、グリフと符号位置の対応を壊す。生成物が
+    // `cargo fmt --all -- --check` を通らない状態になるのも困るので、
+    // ここだけ整形の対象から外す。
+    writeln!(out, "#[rustfmt::skip]").unwrap();
     writeln!(out, "pub static GLYPH_ROWS: &[u16] = &[").unwrap();
     for glyph in glyphs {
         write!(out, "    ").unwrap();
@@ -196,8 +202,7 @@ pub fn generate(workspace_root: &Path) -> Result<()> {
     let parent = output_path
         .parent()
         .context("failed to resolve the output directory")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create {}", parent.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
     fs::write(&output_path, table)
         .with_context(|| format!("failed to write {}", output_path.display()))?;
 

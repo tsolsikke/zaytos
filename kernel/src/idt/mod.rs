@@ -739,7 +739,11 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>) {
         for vector in 0..IDT_ENTRY_COUNT {
             // ダブルフォルトだけ IST を使う。通常のスタックが壊れている
             // 可能性がある例外なので、無条件で別スタックへ移る。
-            let ist = if vector == 8 { double_fault_ist_index } else { None };
+            let ist = if vector == 8 {
+                double_fault_ist_index
+            } else {
+                None
+            };
             (*idt)[vector] = IdtEntry::new(
                 stub_address(vector),
                 KERNEL_CODE_SELECTOR,
@@ -972,10 +976,7 @@ fn dump_error_code(serial: &mut SerialPort, vector: u8, error_code: u64) {
             let code = SelectorErrorCode(error_code);
             let _ = writeln!(serial, "[ERROR]   error code = {error_code:#x}");
             if code.is_null() {
-                let _ = writeln!(
-                    serial,
-                    "[ERROR]     not caused by a specific descriptor"
-                );
+                let _ = writeln!(serial, "[ERROR]     not caused by a specific descriptor");
             } else {
                 let _ = writeln!(
                     serial,
@@ -1002,10 +1003,7 @@ mod tests {
     #[test]
     fn the_limit_is_the_size_minus_one() {
         // 256 エントリ x 16 バイト = 4096 バイト。limit はその 1 つ手前。
-        assert_eq!(
-            IDT_ENTRY_COUNT * core::mem::size_of::<IdtEntry>(),
-            4096
-        );
+        assert_eq!(IDT_ENTRY_COUNT * core::mem::size_of::<IdtEntry>(), 4096);
         assert_eq!(expected_limit(), 4095);
     }
 

@@ -15,22 +15,22 @@ use common::boot_info::{BootInfo, BOOT_INFO_PAGE_COUNT};
 use common::cpu;
 use common::log::{LogLevel, Logger};
 use common::serial::SerialPort;
-use kernel::console::Console;
 use core::ptr::addr_of;
+use kernel::console::Console;
 
 use kernel::frame_allocator;
 use kernel::gdt;
-use kernel::stack;
 use kernel::graphics::{Color, Framebuffer, FramebufferLayout};
 use kernel::heap;
 use kernel::idt;
 use kernel::interrupts;
-use kernel::paging;
-use kernel::pic;
 use kernel::keyboard;
-use kernel::pit;
+use kernel::paging;
 use kernel::paging::plan::{resolve_pages, MappedRanges};
 use kernel::paging::table::PageTableBuilder;
+use kernel::pic;
+use kernel::pit;
+use kernel::stack;
 
 mod panic;
 
@@ -982,9 +982,7 @@ fn init_console(
             allocator.free_frame_count(),
             allocator.largest_contiguous_free_frames()
         ));
-        logger.info(format_args!(
-            "console: serial logging continues unaffected"
-        ));
+        logger.info(format_args!("console: serial logging continues unaffected"));
         return None;
     };
 
@@ -997,9 +995,7 @@ fn init_console(
             "console: back buffer {base:#x}..{end:#x} is not fully mapped; \
              screen output is disabled"
         ));
-        logger.info(format_args!(
-            "console: serial logging continues unaffected"
-        ));
+        logger.info(format_args!("console: serial logging continues unaffected"));
         return None;
     }
 
@@ -1020,14 +1016,11 @@ fn init_console(
             logger.error(format_args!(
                 "console: initialization failed ({e:?}); screen output is disabled"
             ));
-            logger.info(format_args!(
-                "console: serial logging continues unaffected"
-            ));
+            logger.info(format_args!("console: serial logging continues unaffected"));
             None
         }
     }
 }
-
 
 /// シリアルへ書き、コンソールがあれば画面にも同じ内容を書く（M3-c-3）。
 ///
@@ -1226,9 +1219,7 @@ fn verify_critical_sections(logger: &mut Logger<SerialPort>) {
     }
 
     let before = if_set();
-    logger.info(format_args!(
-        "critical: IF before any guard = {before}"
-    ));
+    logger.info(format_args!("critical: IF before any guard = {before}"));
 
     let mut all_ok = true;
 
@@ -2368,7 +2359,9 @@ fn verify_page_tables(
                 }
                 Err(error) => {
                     mismatches += 1;
-                    logger.error(format_args!("paging: {probe:#x} translate failed: {error:?}"));
+                    logger.error(format_args!(
+                        "paging: {probe:#x} translate failed: {error:?}"
+                    ));
                 }
             }
         }

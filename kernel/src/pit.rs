@@ -186,7 +186,10 @@ mod tests {
 
     #[test]
     fn frequencies_above_the_input_clock_are_rejected() {
-        assert_eq!(divisor_for(INPUT_CLOCK_HZ + 1), Err(FrequencyError::TooHigh));
+        assert_eq!(
+            divisor_for(INPUT_CLOCK_HZ + 1),
+            Err(FrequencyError::TooHigh)
+        );
         // 入力クロックそのものなら分周値 1。
         assert_eq!(divisor_for(INPUT_CLOCK_HZ), Ok(1));
     }

@@ -5,8 +5,8 @@
 //! - [`table`][mod@table]: 実際のページテーブルへの書き込み（unsafe）。
 //! - [`switch`][mod@switch]: CR3 の読み取り・切り替え（unsafe）。
 
-pub mod entry;
 pub mod active;
+pub mod entry;
 pub mod plan;
 pub mod switch;
 pub mod table;

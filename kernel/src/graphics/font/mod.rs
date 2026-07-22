@@ -162,10 +162,7 @@ mod tests {
         let glyph = lookup('A').unwrap();
         // 横棒の行。左端と右端が空いていて内側が詰まっている。
         let crossbar: [bool; 8] = core::array::from_fn(|x| glyph.is_set(x as u32, 9));
-        assert_eq!(
-            crossbar,
-            [false, true, true, true, true, true, true, false]
-        );
+        assert_eq!(crossbar, [false, true, true, true, true, true, true, false]);
         // 頂点の行。中央 2 ピクセルだけ立っている。
         let apex: [bool; 8] = core::array::from_fn(|x| glyph.is_set(x as u32, 4));
         assert_eq!(apex, [false, false, false, true, true, false, false, false]);

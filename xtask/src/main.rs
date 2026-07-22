@@ -165,8 +165,8 @@ const CRITICAL_TESTS: &[CriticalTest] = &[
         ],
         // 検出をすり抜けて 2 回目の lock() が戻ってきた場合に出る行。
         forbidden_markers: &["double-lock detection FAILED"],
-    wait_for_full_timeout: false,
-    min_heartbeats: None,
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
     },
     // IF=1 の状態から InterruptGuard に入り、抜けたときに復元されることを
     // 確認する。IF=0 から入る経路は通常の起動ログで毎回通っているが、
@@ -183,8 +183,8 @@ const CRITICAL_TESTS: &[CriticalTest] = &[
             "critical-test: IF after the guard dropped = true",
         ],
         forbidden_markers: &["critical-test: restore path FAILED"],
-    wait_for_full_timeout: false,
-    min_heartbeats: None,
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
     },
 ];
 
@@ -213,8 +213,8 @@ const INTERRUPT_TESTS: &[CriticalTest] = &[
             "stack alignment:",
             "exception: vector=",
         ],
-    wait_for_full_timeout: false,
-    min_heartbeats: None,
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
     },
     // int 0x20 をソフトウェア発行し、IRQ 経路が GPR を復元することを確認。
     CriticalTest {
@@ -229,8 +229,8 @@ const INTERRUPT_TESTS: &[CriticalTest] = &[
             "stack alignment:",
             "exception: vector=",
         ],
-    wait_for_full_timeout: false,
-    min_heartbeats: None,
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
     },
     // タイマを実際に動かす（M4-d-2）。ティックが増え続けることが EOI の
     // 動作証明になる。
@@ -318,8 +318,8 @@ const INTERRUPT_TESTS: &[CriticalTest] = &[
             "halting (cli + hlt loop)",
         ],
         forbidden_markers: &["irq-path: OK"],
-    wait_for_full_timeout: false,
-    min_heartbeats: None,
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
     },
 ];
 
@@ -593,7 +593,9 @@ fn run_interactive(
         )?;
 
     if no_limit {
-        let status = child.wait().context("failed to wait for qemu-system-x86_64")?;
+        let status = child
+            .wait()
+            .context("failed to wait for qemu-system-x86_64")?;
         if !status.success() {
             bail!("qemu-system-x86_64 exited with {status}");
         }
@@ -603,7 +605,10 @@ fn run_interactive(
     // 上限まで待つ。途中で自分から終わった（パニック等）なら、そこで抜ける。
     let deadline = Instant::now() + RUN_TIME_LIMIT;
     loop {
-        match child.try_wait().context("failed to poll qemu-system-x86_64")? {
+        match child
+            .try_wait()
+            .context("failed to poll qemu-system-x86_64")?
+        {
             Some(status) => {
                 if !status.success() {
                     bail!("qemu-system-x86_64 exited with {status}");
@@ -735,7 +740,14 @@ fn cmd_screenshot(args: &[String]) -> Result<()> {
     let output_path =
         output_path.unwrap_or_else(|| workspace_root.join("target").join("screenshot.png"));
 
-    take_screenshot(&workspace_root, &ovmf_vars, &esp_dir, wait, &output_path, kvm)
+    take_screenshot(
+        &workspace_root,
+        &ovmf_vars,
+        &esp_dir,
+        wait,
+        &output_path,
+        kvm,
+    )
 }
 
 /// QEMU を monitor (HMP) 付きで起動し、`wait` だけ待ってから `screendump` を
@@ -912,13 +924,34 @@ struct KeyInjection {
 /// **大文字と記号の両方を含める。** どちらも Shift を伴い、英字は
 /// Shift と Caps の XOR、記号は Shift のみという非対称な経路を通る。
 const KEYBOARD_TEST_KEYS: &[KeyInjection] = &[
-    KeyInjection { monitor: "shift-h", codes: 4 },
-    KeyInjection { monitor: "e", codes: 2 },
-    KeyInjection { monitor: "l", codes: 2 },
-    KeyInjection { monitor: "l", codes: 2 },
-    KeyInjection { monitor: "o", codes: 2 },
-    KeyInjection { monitor: "shift-1", codes: 4 },
-    KeyInjection { monitor: "ret", codes: 2 },
+    KeyInjection {
+        monitor: "shift-h",
+        codes: 4,
+    },
+    KeyInjection {
+        monitor: "e",
+        codes: 2,
+    },
+    KeyInjection {
+        monitor: "l",
+        codes: 2,
+    },
+    KeyInjection {
+        monitor: "l",
+        codes: 2,
+    },
+    KeyInjection {
+        monitor: "o",
+        codes: 2,
+    },
+    KeyInjection {
+        monitor: "shift-1",
+        codes: 4,
+    },
+    KeyInjection {
+        monitor: "ret",
+        codes: 2,
+    },
 ];
 
 /// 期待する 1 行。
@@ -939,11 +972,15 @@ fn cmd_keyboard_test() -> Result<()> {
     let kernel_elf = build_kernel(&workspace_root, false)?;
     let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
 
-    let serial_log = workspace_root.join("target").join("keyboard-test-serial.log");
+    let serial_log = workspace_root
+        .join("target")
+        .join("keyboard-test-serial.log");
     let _ = fs::remove_file(&serial_log);
     let debug_log = workspace_root.join("target").join("qemu-debug.log");
     let _ = fs::remove_file(&debug_log);
-    let monitor_socket = workspace_root.join("target").join("keyboard-test-monitor.sock");
+    let monitor_socket = workspace_root
+        .join("target")
+        .join("keyboard-test-monitor.sock");
     let _ = fs::remove_file(&monitor_socket);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
@@ -1025,27 +1062,35 @@ fn cmd_keyboard_test() -> Result<()> {
 
     // 1. 期待した文字列になったか（大文字と記号の変換を含む）。
     let line_ok = serial.contains(KEYBOARD_TEST_EXPECTED_LINE);
-    println!("{context}: serial contains {KEYBOARD_TEST_EXPECTED_LINE:?} = {}",
-        if line_ok { "OK" } else { "NG" });
+    println!(
+        "{context}: serial contains {KEYBOARD_TEST_EXPECTED_LINE:?} = {}",
+        if line_ok { "OK" } else { "NG" }
+    );
     ok &= line_ok;
 
     // 2. IRQ1 の配送経路。
     let vector_ok = serial.contains("keyboard: first key arrived as vector 0x21");
-    println!("{context}: the first key arrived as vector 0x21 = {}",
-        if vector_ok { "OK" } else { "NG" });
+    println!(
+        "{context}: the first key arrived as vector 0x21 = {}",
+        if vector_ok { "OK" } else { "NG" }
+    );
     ok &= vector_ok;
 
     // 3. 送った本数と受け取った本数の一致（取りこぼしなし）。
     let expected_keys = format!("keys={expected_codes} ");
     let count_ok = serial.contains(&expected_keys);
-    println!("{context}: received exactly {expected_codes} scancode(s) = {}",
-        if count_ok { "OK" } else { "NG" });
+    println!(
+        "{context}: received exactly {expected_codes} scancode(s) = {}",
+        if count_ok { "OK" } else { "NG" }
+    );
     ok &= count_ok;
 
     // 4. 会計が閉じていること、溢れていないこと。
     let balanced_ok = serial.contains("balanced=true") && !serial.contains("balanced=false");
-    println!("{context}: the scancode accounting balances = {}",
-        if balanced_ok { "OK" } else { "NG" });
+    println!(
+        "{context}: the scancode accounting balances = {}",
+        if balanced_ok { "OK" } else { "NG" }
+    );
     ok &= balanced_ok;
 
     // 「dropped= が出ていて、そのすべてが 0」であることを見る。
@@ -1054,8 +1099,10 @@ fn cmd_keyboard_test() -> Result<()> {
         && !serial
             .lines()
             .any(|l| l.contains("dropped=") && !l.contains("dropped=0 "));
-    println!("{context}: no scancode was dropped = {}",
-        if no_drop_ok { "OK" } else { "NG" });
+    println!(
+        "{context}: no scancode was dropped = {}",
+        if no_drop_ok { "OK" } else { "NG" }
+    );
     ok &= no_drop_ok;
 
     // 5. ティックが進み続けていること（タイマとキーボードの共存）。
@@ -1066,8 +1113,10 @@ fn cmd_keyboard_test() -> Result<()> {
     // 6. 例外が起きていないこと。
     for marker in ["v=0e", "v=08"] {
         let present = qemu.contains(marker);
-        println!("{context}: qemu log free of {marker:?} = {}",
-            if present { "NG" } else { "OK" });
+        println!(
+            "{context}: qemu log free of {marker:?} = {}",
+            if present { "NG" } else { "OK" }
+        );
         ok &= !present;
     }
 
@@ -1088,13 +1137,13 @@ fn cmd_keyboard_test() -> Result<()> {
 /// シリアルログに「出るべき行」がすべて出て、「出てはいけない行」が 1 つも
 /// 出ていないことを確認する。起動しなかった場合はテスト失敗と区別する。
 fn cmd_marker_test(tests: &[CriticalTest], kind_label: &str, kind: &str) -> Result<()> {
-    let test = tests
-        .iter()
-        .find(|t| t.name == kind)
-        .with_context(|| {
-            let names: Vec<&str> = tests.iter().map(|t| t.name).collect();
-            format!("unknown {kind_label} {kind:?} (expected one of: {})", names.join(", "))
-        })?;
+    let test = tests.iter().find(|t| t.name == kind).with_context(|| {
+        let names: Vec<&str> = tests.iter().map(|t| t.name).collect();
+        format!(
+            "unknown {kind_label} {kind:?} (expected one of: {})",
+            names.join(", ")
+        )
+    })?;
 
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
@@ -1157,18 +1206,15 @@ fn cmd_marker_test(tests: &[CriticalTest], kind_label: &str, kind: &str) -> Resu
     }
 
     println!("--- {context}: relevant output ---");
-    for line in serial
-        .lines()
-        .filter(|l| {
-            l.contains("critical")
-                || l.contains("lock:")
-                || l.contains("sti")
-                || l.contains("irq-path")
-                || l.contains("heartbeat")
-                || l.contains("interrupt-test")
-                || l.contains("stack alignment")
-        })
-    {
+    for line in serial.lines().filter(|l| {
+        l.contains("critical")
+            || l.contains("lock:")
+            || l.contains("sti")
+            || l.contains("irq-path")
+            || l.contains("heartbeat")
+            || l.contains("interrupt-test")
+            || l.contains("stack alignment")
+    }) {
         println!("{line}");
     }
     println!("--- end ---");
@@ -1208,7 +1254,11 @@ fn cmd_marker_test(tests: &[CriticalTest], kind_label: &str, kind: &str) -> Resu
         ok &= absent;
         println!(
             "{context}: serial does NOT contain {marker:?} = {}",
-            if absent { "OK" } else { "NG (detection was bypassed)" }
+            if absent {
+                "OK"
+            } else {
+                "NG (detection was bypassed)"
+            }
         );
     }
 
@@ -1231,7 +1281,10 @@ fn cmd_exception_test(kind: &str) -> Result<()> {
         .find(|t| t.name == kind)
         .with_context(|| {
             let names: Vec<&str> = EXCEPTION_TESTS.iter().map(|t| t.name).collect();
-            format!("unknown exception test {kind:?} (expected one of: {})", names.join(", "))
+            format!(
+                "unknown exception test {kind:?} (expected one of: {})",
+                names.join(", ")
+            )
         })?;
 
     let workspace_root = workspace_root()?;

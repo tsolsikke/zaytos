@@ -293,9 +293,18 @@ mod tests {
         let log = Rc::new(RefCell::new(Vec::new()));
         {
             let _guard = MirroredGuard {
-                data: DropRecorder { name: "data", log: log.clone() },
-                lock: DropRecorder { name: "lock", log: log.clone() },
-                interrupts: DropRecorder { name: "interrupts", log: log.clone() },
+                data: DropRecorder {
+                    name: "data",
+                    log: log.clone(),
+                },
+                lock: DropRecorder {
+                    name: "lock",
+                    log: log.clone(),
+                },
+                interrupts: DropRecorder {
+                    name: "interrupts",
+                    log: log.clone(),
+                },
             };
         }
 
@@ -307,5 +316,4 @@ mod tests {
             "割り込みの復元は必ずガードの最後で行われなければならない"
         );
     }
-
 }

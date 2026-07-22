@@ -279,6 +279,9 @@ mod tests {
         assert_eq!(privilege_stacks, [0; 3]);
         assert_eq!(interrupt_stacks, [0; 7]);
         // iomap_base が TSS のサイズ以上なら「ビットマップ無し」。
-        assert_eq!(iomap_base as usize, core::mem::size_of::<TaskStateSegment>());
+        assert_eq!(
+            iomap_base as usize,
+            core::mem::size_of::<TaskStateSegment>()
+        );
     }
 }

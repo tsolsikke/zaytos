@@ -371,7 +371,11 @@ mod tests {
 
         // Caps Lock + Shift: 英字は小文字へ戻り、数字段は記号になる。
         let events = feed_all(&mut decoder, &[0x2A, 0x1E, 0x9E, 0x02, 0x82, 0xAA]);
-        assert_eq!(chars(&events), "a!", "英字は XOR で打ち消し、記号は Shift が効く");
+        assert_eq!(
+            chars(&events),
+            "a!",
+            "英字は XOR で打ち消し、記号は Shift が効く"
+        );
 
         // Shift だけ（Caps 解除）: 英字は大文字、数字段は記号。
         feed_all(&mut decoder, &[0x3A, 0xBA]); // Caps Lock OFF

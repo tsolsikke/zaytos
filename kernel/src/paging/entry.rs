@@ -151,8 +151,8 @@ pub const fn split_child_entry(huge_entry: u64, index: usize) -> u64 {
     let address = base + (index as u64) * PAGE_SIZE_4K;
 
     // PS・PAT(bit12)・Accessed・Dirty・アドレスを除いたフラグ。
-    let mut flags = huge_entry
-        & !(PDE_PAGE_SIZE | PDE_HUGE_PAT | PTE_ACCESSED | PTE_DIRTY | ADDR_MASK_2M);
+    let mut flags =
+        huge_entry & !(PDE_PAGE_SIZE | PDE_HUGE_PAT | PTE_ACCESSED | PTE_DIRTY | ADDR_MASK_2M);
     // 2MiB では予約だったビット 13-20 も落としておく（本来 0 のはずだが、
     // 万一立っていたら 4KiB ではアドレスの一部として解釈されてしまう）。
     flags &= !0x1F_F000;
@@ -263,12 +263,8 @@ mod tests {
     /// 「触っていないのに触ったことになっている」状態を作る。
     #[test]
     fn split_does_not_inherit_accessed_or_dirty() {
-        let huge = 0x4020_0000
-            | PTE_PRESENT
-            | PTE_WRITABLE
-            | PDE_PAGE_SIZE
-            | PTE_ACCESSED
-            | PTE_DIRTY;
+        let huge =
+            0x4020_0000 | PTE_PRESENT | PTE_WRITABLE | PDE_PAGE_SIZE | PTE_ACCESSED | PTE_DIRTY;
         let child = split_child_entry(huge, 0);
         assert_eq!(child & PTE_ACCESSED, 0);
         assert_eq!(child & PTE_DIRTY, 0);

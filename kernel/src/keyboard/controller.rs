@@ -228,7 +228,10 @@ mod tests {
         // 第 2 ポート有効(bit1)とクロック関係(bit4,5)が立っている状態を想定。
         let current = 0b0011_0010;
         let updated = config_with_keyboard_enabled(current);
-        assert_eq!(updated & CONFIG_KEYBOARD_INTERRUPT, CONFIG_KEYBOARD_INTERRUPT);
+        assert_eq!(
+            updated & CONFIG_KEYBOARD_INTERRUPT,
+            CONFIG_KEYBOARD_INTERRUPT
+        );
         assert_eq!(updated & CONFIG_TRANSLATION, CONFIG_TRANSLATION);
         // 元から立っていたビットが残っていること。
         assert_eq!(updated & 0b0011_0010, 0b0011_0010);

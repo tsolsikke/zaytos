@@ -18,8 +18,8 @@ pub mod layout;
 use core::ptr::addr_of;
 
 use layout::{
-    tss_descriptor, user_segment_descriptor, SegmentSelector, TaskStateSegment,
-    KERNEL_CODE_ACCESS, KERNEL_CODE_FLAGS, KERNEL_DATA_ACCESS, KERNEL_DATA_FLAGS,
+    tss_descriptor, user_segment_descriptor, SegmentSelector, TaskStateSegment, KERNEL_CODE_ACCESS,
+    KERNEL_CODE_FLAGS, KERNEL_DATA_ACCESS, KERNEL_DATA_FLAGS,
 };
 
 /// GDT のエントリ数。null / コード / データ / TSS（16 バイト = 2 スロット）。
