@@ -256,5 +256,8 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
     // 既定の呼び出し規約が異なるため使わない）。`boot_info_ptr` は
     // 直前に書き込み済みの有効な `BootInfo` を指す。
     let entry: KernelEntryFn = unsafe { mem::transmute(entry_point as usize) };
+    // SAFETY: 直前の `transmute` が満たした契約のもとで呼ぶ。この呼び出しは
+    // 戻らない（kernel 側の `_start` は `-> !`）。ExitBootServices は既に
+    // 済んでおり、以降 Boot Services には触れない。
     unsafe { entry(boot_info_ptr) }
 }

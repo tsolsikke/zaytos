@@ -55,6 +55,12 @@ impl SerialPort {
     /// 16550 UART の標準的な初期化手順（割り込み無効化 → ボーレート設定
     /// → 通信フォーマット設定 → FIFO 有効化 → モデム制御設定）を実行する。
     pub fn init(&mut self) {
+        // SAFETY: 触れるのは `self.base` を起点とする 16550 の既知のレジスタ
+        // だけで、オフセットはいずれもこのモジュール内の定数である。ZaytOS は
+        // COM1（0x3F8）を自分のログ出力にのみ使い、他の誰もこのポートを
+        // 触らない。ポート I/O はメモリを参照しないため、Rust の値や
+        // 借用の不変条件を壊さない。書く値も 16550 の初期化手順どおりで、
+        // 未定義の副作用を持つビットは立てていない。
         unsafe {
             outb(self.base + INTERRUPT_ENABLE_OFFSET, 0x00);
             outb(self.base + LINE_CONTROL_OFFSET, LINE_CONTROL_DLAB);
@@ -73,12 +79,16 @@ impl SerialPort {
     }
 
     fn transmit_ready(&self) -> bool {
+        // SAFETY: `init` と同じ理由。読むのは COM1 のライン状態レジスタだけで、
+        // 読み取りに副作用は無い。
         let status = unsafe { inb(self.base + LINE_STATUS_OFFSET) };
         status & LINE_STATUS_TRANSMIT_EMPTY != 0
     }
 
     pub fn write_byte(&mut self, byte: u8) {
         while !self.transmit_ready() {}
+        // SAFETY: `init` と同じ理由。書くのは COM1 のデータレジスタだけで、
+        // 直前に送信保持レジスタが空であることを確認している。
         unsafe {
             outb(self.base + DATA_OFFSET, byte);
         }

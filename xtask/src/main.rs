@@ -1500,15 +1500,125 @@ const CHECKS: &[(&str, &[&str])] = &[
     ("fmt --check", &["fmt", "--all", "--", "--check"]),
 ];
 
+/// `// SAFETY:` コメントを伴わない `unsafe` ブロックを探す。
+///
+/// # 走査の規則
+///
+/// `unsafe {` の行から上へ遡り、**最初に現れる非空行**を見る。それが `//`
+/// で始まる行なら、そこから連続するコメント塊の中に `SAFETY` があるかを見る。
+/// コメント塊でなければ、間に挟まってよいものだけを読み飛ばす。
+///
+/// 読み飛ばすのは属性（`#[...]`）と、`let ... =` のように `unsafe` ブロックを
+/// 右辺に取る行の左側だけである。これらは SAFETY コメントと `unsafe` の間に
+/// 正当に挟まりうる。それ以外の行に当たったら、コメントは無いものとする。
+///
+/// ドキュメントコメント（`///` と `//!`）の中の `unsafe {` は対象外。
+/// 使用例を書いただけの行まで拾うと、直せない指摘が出続ける。
+fn find_unsafe_without_safety_comment(workspace_root: &Path) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .current_dir(workspace_root)
+        .args(["ls-files", "*.rs"])
+        .output()
+        .context("failed to list tracked Rust sources")?;
+    if !output.status.success() {
+        bail!("git ls-files failed while collecting Rust sources");
+    }
+    let listing = String::from_utf8(output.stdout).context("git ls-files produced non-UTF-8")?;
+
+    let mut findings = Vec::new();
+    for relative in listing.lines().filter(|l| !l.is_empty()) {
+        let path = workspace_root.join(relative);
+        let source = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let lines: Vec<&str> = source.lines().collect();
+
+        for (index, line) in lines.iter().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("///") || trimmed.starts_with("//!") {
+                continue;
+            }
+            if !contains_unsafe_block_opener(line) {
+                continue;
+            }
+            if has_safety_comment_above(&lines, index) {
+                continue;
+            }
+            findings.push(format!(
+                "{relative}:{}: {}",
+                index + 1,
+                line.trim().chars().take(70).collect::<String>()
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+/// その行が `unsafe` ブロックを開いているか。
+///
+/// `unsafe fn` の宣言は対象にしない。関数側の契約は `# Safety` セクションで
+/// 書く決まりで、ブロックの `// SAFETY:` とは役割が違う。
+fn contains_unsafe_block_opener(line: &str) -> bool {
+    let mut rest = line;
+    while let Some(position) = rest.find("unsafe") {
+        let after = rest[position + "unsafe".len()..].trim_start();
+        let before_is_boundary = position == 0
+            || !rest[..position]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if before_is_boundary && after.starts_with('{') {
+            return true;
+        }
+        rest = &rest[position + "unsafe".len()..];
+    }
+    false
+}
+
+fn has_safety_comment_above(lines: &[&str], index: usize) -> bool {
+    let mut cursor = index;
+    while cursor > 0 {
+        cursor -= 1;
+        let trimmed = lines[cursor].trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        if trimmed.starts_with("//") {
+            // コメント塊に入った。塊を上へ辿って SAFETY を探す。
+            let mut scan = cursor;
+            loop {
+                let text = lines[scan].trim();
+                if !text.starts_with("//") {
+                    return false;
+                }
+                if text.contains("SAFETY") {
+                    return true;
+                }
+                if scan == 0 {
+                    return false;
+                }
+                scan -= 1;
+            }
+        }
+        // 属性と、`unsafe` ブロックを右辺に取る行の左側だけ読み飛ばす。
+        if trimmed.starts_with("#[") || trimmed.starts_with("#!") || trimmed.ends_with('=') {
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
 /// 全構成のビルド・テスト・clippy・fmt を順に実行する。
 ///
 /// **1 つ落ちてもそこで止めない。** 止めると「直しては再実行」を
 /// 繰り返すことになり、全体像が分からない。最後にまとめて報告する。
 fn cmd_check() -> Result<()> {
     let workspace_root = workspace_root()?;
-    let mut failed: Vec<&str> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    let mut total = 0usize;
 
     for (name, args) in CHECKS {
+        total += 1;
         println!("=== xtask check: {name}");
         let status = Command::new("cargo")
             .current_dir(&workspace_root)
@@ -1519,19 +1629,31 @@ fn cmd_check() -> Result<()> {
             println!("--- {name}: OK");
         } else {
             println!("--- {name}: FAILED ({status})");
-            failed.push(name);
+            failed.push((*name).to_string());
         }
+    }
+
+    total += 1;
+    println!("=== xtask check: unsafe blocks carry a SAFETY comment");
+    let missing = find_unsafe_without_safety_comment(&workspace_root)?;
+    if missing.is_empty() {
+        println!("--- unsafe/SAFETY: OK");
+    } else {
+        for finding in &missing {
+            println!("    {finding}");
+        }
+        println!("--- unsafe/SAFETY: FAILED ({} block(s))", missing.len());
+        failed.push("unsafe/SAFETY".to_string());
     }
 
     println!();
     if failed.is_empty() {
-        println!("xtask check: all {} check(s) passed", CHECKS.len());
+        println!("xtask check: all {total} check(s) passed");
         return Ok(());
     }
     bail!(
-        "xtask check: {} of {} check(s) failed: {}",
+        "xtask check: {} of {total} check(s) failed: {}",
         failed.len(),
-        CHECKS.len(),
         failed.join(", ")
     );
 }

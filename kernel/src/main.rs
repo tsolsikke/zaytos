@@ -1162,10 +1162,11 @@ fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
     // 実際に書き込めること（M2-d のスタック検証と同じ考え方）。
     // 現在の RSP より下（未使用側）へ直接読み書きしてみる。
     let scratch = (current_rsp - 256) as *mut u64;
-    // SAFETY: scratch は現在の RSP より 256 バイト下で、カーネルスタックの
-    // 範囲内。まだ誰も使っていない未使用領域であり、赤ゾーン（128 バイト）
-    // より外側でもある。読み書きするのはこの 8 バイトのみ。
     let scratch_ok = if kernel_stack.contains(scratch as u64) {
+        // SAFETY: scratch は現在の RSP より 256 バイト下で、直前の
+        // `kernel_stack.contains` によりカーネルスタックの範囲内であることを
+        // 確認済み。まだ誰も使っていない未使用領域であり、赤ゾーン
+        // （128 バイト）より外側でもある。読み書きするのはこの 8 バイトのみ。
         unsafe {
             core::ptr::write_volatile(scratch, 0x5A5A_A5A5_5A5A_A5A5);
             core::ptr::read_volatile(scratch) == 0x5A5A_A5A5_5A5A_A5A5
