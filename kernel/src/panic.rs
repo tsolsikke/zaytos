@@ -1,4 +1,4 @@
-//! パニックハンドラ（ADR-0004: fail-fast — 即停止 + レジスタダンプ）。
+//! パニックハンドラ（ADR-0004: fail-fast、即停止してレジスタをダンプする）。
 //!
 //! `#[panic_handler]` はビルド全体で唯一つしか定義できないため、
 //! bootloader（`bootloader/src/panic.rs`）とは独立して、この kernel
