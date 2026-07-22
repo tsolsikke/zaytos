@@ -80,7 +80,7 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 
 ### 2.1 ビルド・テスト・静的解析
 
-`cargo xtask check`が11項目を実行する。
+`cargo xtask check`が12項目を実行する。
 
 | 項目 | 内容 |
 |---|---|
@@ -89,8 +89,13 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 | clippy | 上記4構成すべてに`-D warnings` |
 | fmt | `cargo fmt --all -- --check` |
 | unsafe | `unsafe`ブロックの直前のコメント塊に`SAFETY`があること |
+| コミット | コミット件名に和文と英数字の間の半角空白が無いこと |
 
 `cargo xtask check --full`は、これに回帰チェック14種（例外4種、critical 2種、interrupt 6種、keyboard、panic）を加える。
+
+コミットの検査は**件名だけ**を見ており、本文は対象にしていない。
+本文にはインラインコード相当の語（`is_multiple_of`、`% 16 == 0`など）が和文と隣り合う形で含まれ、規約どおりに空白を落とすと読みにくくなる。
+どう扱うかを決めていないため、現時点では件名に限っている。
 
 ### 2.2 起動時に実機の状態を読み戻すもの
 
