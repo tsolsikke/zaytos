@@ -498,7 +498,10 @@ extern "sysv64" fn kernel_main() -> ! {
     // === M2-d (d-2): CR3 を新しいページテーブルへ切り替える ===
 
     let old_cr3 = paging::switch::read_cr3();
-    logger.info(format_args!("paging: current CR3 = {old_cr3:#x}"));
+    logger.info(format_args!(
+        "paging: current CR3 = {:#x}",
+        old_cr3.as_u64()
+    ));
 
     // pml4_phys は alloc_zeroed_table がフレームアロケータから確保した
     // フレームの先頭アドレス（frame * FRAME_SIZE）であるため下位12ビットは
@@ -510,7 +513,8 @@ extern "sysv64" fn kernel_main() -> ! {
         ));
         cpu::halt_forever();
     }
-    let cr3_value = pml4_phys;
+    let cr3_value =
+        common::addr::PhysAddr::new(pml4_phys).expect("a page table frame address fits in 52 bits");
 
     // 切り替え前スナップショット(切り替え後の整合性確認に使う)。
     // SAFETY: kernel_start は必須領域検証により読み取り可能であることを
@@ -531,7 +535,9 @@ extern "sysv64" fn kernel_main() -> ! {
     let new_cr3 = paging::switch::read_cr3();
     let cr3_ok = new_cr3 == cr3_value;
     logger.info(format_args!(
-        "paging: CR3 readback {new_cr3:#x} (expected {cr3_value:#x}): {}",
+        "paging: CR3 readback {:#x} (expected {:#x}): {}",
+        new_cr3.as_u64(),
+        cr3_value.as_u64(),
         if cr3_ok { "OK" } else { "NG" }
     ));
     if !cr3_ok {
@@ -2311,7 +2317,9 @@ fn verify_split_and_unmap<const CAP: usize>(
         ));
         cpu::halt_forever();
     };
-    let base = start_frame * frame_allocator::FRAME_SIZE;
+    let base_phys = common::addr::PhysAddr::from_frame_number(start_frame)
+        .expect("a frame number from the allocator fits in a physical address");
+    let base = base_phys.as_u64();
     logger.info(format_args!(
         "split-test: reserved {base:#x}..{:#x} as scratch ({} KiB permanently withheld from the \
          allocator)",
@@ -2319,17 +2327,19 @@ fn verify_split_and_unmap<const CAP: usize>(
         SCRATCH_BYTES / 1024
     ));
 
+    let table_map = common::addr::direct_map();
     // SAFETY: CR3 は自前のテーブルへ切り替え済みで、テーブル自体は恒等
     // マッピングで読み書きできる。
-    let mut table = unsafe { ActivePageTable::current() };
+    let mut table = unsafe { ActivePageTable::current(table_map) };
 
     // --- 分割前の状態を記録する ---
+    let base_virt = table_map.phys_to_virt(base_phys);
     let probes = [
-        base,
-        base + entry::PAGE_SIZE_2M / 2,
-        base + entry::PAGE_SIZE_2M - 1,
+        base_virt,
+        base_virt.checked_add(entry::PAGE_SIZE_2M / 2).unwrap(),
+        base_virt.checked_add(entry::PAGE_SIZE_2M - 1).unwrap(),
     ];
-    let mut before = [0u64; 3];
+    let mut before = [common::addr::PhysAddr::new_const(0); 3];
     for (slot, probe) in probes.iter().enumerate() {
         match table.translate(*probe) {
             Ok(Some(translation)) if translation.page_size == PageSize::Size2MiB => {
@@ -2337,13 +2347,14 @@ fn verify_split_and_unmap<const CAP: usize>(
             }
             other => {
                 logger.error(format_args!(
-                    "split-test: {probe:#x} is not mapped by a 2MiB page ({other:?}); halting"
+                    "split-test: {:#x} is not mapped by a 2MiB page ({other:?}); halting",
+                    probe.as_u64()
                 ));
                 cpu::halt_forever();
             }
         }
     }
-    let huge_flags = match table.translate(base) {
+    let huge_flags = match table.translate(base_virt) {
         Ok(Some(translation)) => translation.entry,
         _ => unreachable!("直前に 2MiB として翻訳できている"),
     };
@@ -2351,7 +2362,7 @@ fn verify_split_and_unmap<const CAP: usize>(
     // --- 分割する ---
     // SAFETY: `allocator` の空き範囲はすべて恒等マッピング済みであることを
     // 起動時に検証している。テーブルは CR3 に載っているものである。
-    let outcome = match unsafe { table.split_huge_page(base, allocator) } {
+    let outcome = match unsafe { table.split_huge_page(base_virt, allocator) } {
         Ok(outcome) => outcome,
         Err(error) => {
             logger.error(format_args!("split-test: split failed: {error:?}; halting"));
@@ -2360,18 +2371,21 @@ fn verify_split_and_unmap<const CAP: usize>(
     };
     logger.info(format_args!(
         "split-test: split {:#x} into 512 x 4KiB via a new page table at {:#x}",
-        outcome.base_virt, outcome.table_phys
+        outcome.base_virt.as_u64(),
+        outcome.table_phys.as_u64()
     ));
 
     // --- 512 エントリを読み戻して照合する（translate 経由の独立した経路）---
     let mut mismatches = 0u32;
     for index in 0..entry::ENTRIES_PER_TABLE {
-        let virt = base + index as u64 * entry::PAGE_SIZE_4K;
+        let virt = base_virt
+            .checked_add(index as u64 * entry::PAGE_SIZE_4K)
+            .expect("the scratch region stays canonical");
         match table.translate(virt) {
             Ok(Some(translation)) => {
                 if translation.page_size != PageSize::Size4KiB {
                     mismatches += 1;
-                } else if translation.phys != virt {
+                } else if translation.phys.as_u64() != virt.as_u64() {
                     // 恒等マッピングなので物理 == 仮想。
                     mismatches += 1;
                 } else {
@@ -2398,7 +2412,8 @@ fn verify_split_and_unmap<const CAP: usize>(
             other => {
                 mismatches += 1;
                 logger.error(format_args!(
-                    "split-test: {probe:#x} changed more than its granularity: {other:?}"
+                    "split-test: {:#x} changed more than its granularity: {other:?}",
+                    probe.as_u64()
                 ));
             }
         }
@@ -2407,15 +2422,15 @@ fn verify_split_and_unmap<const CAP: usize>(
     // --- 分割した領域を読み書きできること ---
     let mut io_ok = true;
     for probe in [
-        base,
-        base + entry::PAGE_SIZE_2M / 2,
-        base + entry::PAGE_SIZE_2M - 8,
+        base_virt,
+        base_virt.checked_add(entry::PAGE_SIZE_2M / 2).unwrap(),
+        base_virt.checked_add(entry::PAGE_SIZE_2M - 8).unwrap(),
     ] {
         // SAFETY: 直前に translate() で 4KiB としてマップ済みと確認した、
         // アロケータから確保した誰も使っていない領域である。8 バイトだけ触る。
         let read_back = unsafe {
-            core::ptr::write_volatile(probe as *mut u64, 0xA5A5_5A5A_A5A5_5A5A);
-            core::ptr::read_volatile(probe as *const u64)
+            core::ptr::write_volatile(probe.as_mut_ptr::<u64>(), 0xA5A5_5A5A_A5A5_5A5A);
+            core::ptr::read_volatile(probe.as_ptr::<u64>())
         };
         io_ok &= read_back == 0xA5A5_5A5A_A5A5_5A5A;
     }
@@ -2425,8 +2440,9 @@ fn verify_split_and_unmap<const CAP: usize>(
     ));
 
     // --- アンマップする ---
-    let target = base + entry::PAGE_SIZE_4K; // 先頭ではなく 2 本目を消す
-                                             // SAFETY: 上記と同じ領域で、以後この 4KiB へはアクセスしない。
+    // 先頭ではなく 2 本目を消す。
+    let target = base_virt.checked_add(entry::PAGE_SIZE_4K).unwrap();
+    // SAFETY: 上記と同じ領域で、以後この 4KiB へはアクセスしない。
     let old_pte = match unsafe { table.unmap_4kib(target) } {
         Ok(pte) => pte,
         Err(error) => {
@@ -2438,20 +2454,21 @@ fn verify_split_and_unmap<const CAP: usize>(
     // **隣が生きていること。** これを見ないと、添字を間違えて領域全体を
     // 消していても気づけない。
     let neighbours_ok = matches!(
-        table.translate(target - entry::PAGE_SIZE_4K),
+        table.translate(target.checked_sub(entry::PAGE_SIZE_4K).unwrap()),
         Ok(Some(t)) if t.page_size == PageSize::Size4KiB
     ) && matches!(
-        table.translate(target + entry::PAGE_SIZE_4K),
+        table.translate(target.checked_add(entry::PAGE_SIZE_4K).unwrap()),
         Ok(Some(t)) if t.page_size == PageSize::Size4KiB
     );
     logger.info(format_args!(
-        "split-test: unmapped {target:#x} (old pte={old_pte:#x}); translate returns none={unmapped_ok}, \
-         both neighbours still mapped={neighbours_ok}"
+        "split-test: unmapped {:#x} (old pte={old_pte:#x}); translate returns none={unmapped_ok}, \
+         both neighbours still mapped={neighbours_ok}",
+        target.as_u64()
     ));
 
     // --- API が誤用を弾くこと ---
     // SAFETY: 状態を変えない呼び出し。いずれもエラーで戻ることを期待する。
-    let already_small = unsafe { table.split_huge_page(base, allocator) };
+    let already_small = unsafe { table.split_huge_page(base_virt, allocator) };
     let rejects_double_split = already_small == Err(MapUpdateError::AlreadySmall);
     logger.info(format_args!(
         "split-test: splitting an already-split page is rejected = {rejects_double_split}"
@@ -2596,7 +2613,9 @@ fn run_paging_test<const CAP: usize>(
     const FRAMES_PER_2M: u64 = entry::PAGE_SIZE_2M / frame_allocator::FRAME_SIZE;
 
     // SAFETY: CR3 は自前のテーブルへ切り替え済み。
-    let mut table = unsafe { ActivePageTable::current() };
+    let test_map = common::addr::direct_map();
+    // SAFETY: CR3 は自前のテーブルへ切り替え済み。
+    let mut table = unsafe { ActivePageTable::current(test_map) };
 
     // --- PCD 付きの 2MiB ページを分割する ---
     //
@@ -2608,12 +2627,15 @@ fn run_paging_test<const CAP: usize>(
         logger.error(format_args!("paging-test: no scratch region available"));
         cpu::halt_forever();
     };
-    let pcd_base = frame * frame_allocator::FRAME_SIZE;
+    let pcd_phys = common::addr::PhysAddr::from_frame_number(frame)
+        .expect("a frame number from the allocator fits in a physical address");
+    let pcd_base_virt = test_map.phys_to_virt(pcd_phys);
+    let pcd_base = pcd_phys.as_u64();
     // SAFETY: 今確保したばかりの、誰も使っていない領域である。PCD を立てても
     // アクセスがキャッシュされなくなるだけで、内容も配置も変わらない。
-    let before = unsafe { table.add_huge_page_flags(pcd_base, entry::PTE_PCD) };
+    let before = unsafe { table.add_huge_page_flags(pcd_base_virt, entry::PTE_PCD) };
     let pcd_set = matches!(
-        table.translate(pcd_base),
+        table.translate(pcd_base_virt),
         Ok(Some(t)) if t.entry & entry::PTE_PCD != 0 && t.page_size == PageSize::Size2MiB
     );
     logger.info(format_args!(
@@ -2621,7 +2643,7 @@ fn run_paging_test<const CAP: usize>(
     ));
 
     // SAFETY: 上記のスクラッチ領域。
-    match unsafe { table.split_huge_page(pcd_base, allocator) } {
+    match unsafe { table.split_huge_page(pcd_base_virt, allocator) } {
         Ok(_) => {}
         Err(error) => {
             logger.error(format_args!("paging-test: split failed: {error:?}"));
@@ -2630,7 +2652,9 @@ fn run_paging_test<const CAP: usize>(
     }
     let mut pcd_lost = 0u32;
     for index in 0..entry::ENTRIES_PER_TABLE {
-        let virt = pcd_base + index as u64 * entry::PAGE_SIZE_4K;
+        let virt = pcd_base_virt
+            .checked_add(index as u64 * entry::PAGE_SIZE_4K)
+            .expect("the scratch region stays canonical");
         match table.translate(virt) {
             Ok(Some(t)) if t.entry & entry::PTE_PCD != 0 => {}
             _ => pcd_lost += 1,
@@ -2649,8 +2673,10 @@ fn run_paging_test<const CAP: usize>(
     // --- 稼働中のヒープが載る 2MiB ページを、使いながら分割する ---
     #[cfg(feature = "paging-test-split-heap")]
     {
-        let heap_page = heap_start & !(entry::PAGE_SIZE_2M - 1);
-        let phys_before = table.translate(heap_start);
+        let heap_page = common::addr::VirtAddr::new(heap_start & !(entry::PAGE_SIZE_2M - 1))
+            .expect("the heap address is canonical");
+        let heap_virt = common::addr::VirtAddr::new(heap_start).expect("canonical");
+        let phys_before = table.translate(heap_virt);
         // ヒープを実際に使ってから分割し、分割後も使えることを見る。
         let mut live: Vec<u64> = (0..64).collect();
         // SAFETY: 稼働中のヒープが載るページだが、分割は物理アドレスも属性も
@@ -2658,7 +2684,7 @@ fn run_paging_test<const CAP: usize>(
         // （`split_huge_page` の説明を参照）。
         let result = unsafe { table.split_huge_page(heap_page, allocator) };
         live.push(0xDEAD);
-        let phys_after = table.translate(heap_start);
+        let phys_after = table.translate(heap_virt);
         let same = match (phys_before, phys_after) {
             (Ok(Some(a)), Ok(Some(b))) => {
                 a.phys == b.phys
@@ -2668,8 +2694,9 @@ fn run_paging_test<const CAP: usize>(
             _ => false,
         };
         logger.info(format_args!(
-            "paging-test: split the live heap page {heap_page:#x}: {result:?}, translation \
+            "paging-test: split the live heap page {:#x}: {result:?}, translation \
              unchanged apart from granularity = {same}, heap still usable = {} ({} items)",
+            heap_page.as_u64(),
             live.last() == Some(&0xDEAD),
             live.len()
         ));
@@ -2687,13 +2714,15 @@ fn run_paging_test<const CAP: usize>(
         logger.error(format_args!("paging-test: no second scratch region"));
         cpu::halt_forever();
     };
-    let unmap_base = frame * frame_allocator::FRAME_SIZE;
+    let unmap_phys = common::addr::PhysAddr::from_frame_number(frame)
+        .expect("a frame number from the allocator fits in a physical address");
+    let unmap_base = test_map.phys_to_virt(unmap_phys);
     // SAFETY: 誰も使っていないスクラッチ領域。
     if let Err(error) = unsafe { table.split_huge_page(unmap_base, allocator) } {
         logger.error(format_args!("paging-test: second split failed: {error:?}"));
         cpu::halt_forever();
     }
-    let target = unmap_base + 4 * entry::PAGE_SIZE_4K;
+    let target = unmap_base.checked_add(4 * entry::PAGE_SIZE_4K).unwrap();
 
     // **アンマップする前に必ず 1 度触る。** 触っていないページには TLB
     // エントリが存在せず、`invlpg` を落としても「古い翻訳が残る」状態を
@@ -2702,7 +2731,7 @@ fn run_paging_test<const CAP: usize>(
     // 検査していない状態である。
     // SAFETY: 直前に分割した、誰も使っていないスクラッチ領域である。
     unsafe {
-        core::ptr::write_volatile(target as *mut u64, 0x1234_5678_9ABC_DEF0);
+        core::ptr::write_volatile(target.as_mut_ptr::<u64>(), 0x1234_5678_9ABC_DEF0);
     }
 
     // SAFETY: 上記の領域。以後この 4KiB へアクセスするのは、この検証の
@@ -2712,8 +2741,9 @@ fn run_paging_test<const CAP: usize>(
     // 添字を間違えていれば、別のページが消えているはずである。
     let neighbour_none = matches!(table.translate(unmap_base), Ok(None));
     logger.info(format_args!(
-        "paging-test: unmap {target:#x} -> {old:?}; target none={target_none}, \
-         region head none={neighbour_none}"
+        "paging-test: unmap {:#x} -> {old:?}; target none={target_none}, \
+         region head none={neighbour_none}",
+        target.as_u64()
     ));
 
     // アンマップしたページを実際に読むのは、専用のビルドだけである。
@@ -2728,11 +2758,12 @@ fn run_paging_test<const CAP: usize>(
     #[cfg(any(feature = "paging-test-unmap-fault", feature = "paging-test-no-invlpg"))]
     {
         logger.info(format_args!(
-            "paging-test: about to read the unmapped page {target:#x}"
+            "paging-test: about to read the unmapped page {:#x}",
+            target.as_u64()
         ));
         // SAFETY: この読み取りがフォルトするかどうかを観測することが、
         // この検証の目的そのものである。
-        let value = unsafe { core::ptr::read_volatile(target as *const u64) };
+        let value = unsafe { core::ptr::read_volatile(target.as_ptr::<u64>()) };
         logger.info(format_args!(
             "paging-test: the read did NOT fault; value={value:#x} (a stale TLB entry was used)"
         ));
@@ -2762,7 +2793,7 @@ fn report_mapping_granularity(
 
     // SAFETY: CR3 は自前のテーブルへ切り替えて読み戻し済みであり、テーブル
     // 自体は恒等マッピングで読める（`verify_page_tables` と同じ前提）。
-    let table = unsafe { ActivePageTable::current() };
+    let table = unsafe { ActivePageTable::current(common::addr::direct_map()) };
 
     // RIP と RSP は**測定時点の実値**を読む。リンカスクリプトのシンボルや
     // スタックの静的配列の番地から計算すると、「そう配置したはず」の値を
@@ -2782,7 +2813,14 @@ fn report_mapping_granularity(
             logger.info(format_args!("granularity: {name} is absent (address 0)"));
             continue;
         }
-        match table.translate(addr) {
+        let Some(virt) = common::addr::VirtAddr::new(addr) else {
+            failures += 1;
+            logger.error(format_args!(
+                "granularity: {name} {addr:#x} is not a canonical address"
+            ));
+            continue;
+        };
+        match table.translate(virt) {
             Ok(Some(translation)) => {
                 let (size_name, base) = match translation.page_size {
                     PageSize::Size2MiB => ("2MiB", addr & !(entry::PAGE_SIZE_2M - 1)),
@@ -2791,7 +2829,8 @@ fn report_mapping_granularity(
                 logger.info(format_args!(
                     "granularity: {name} {addr:#x} -> phys {:#x}, mapped by a {size_name} page \
                      at {base:#x} (entry={:#x})",
-                    translation.phys, translation.entry
+                    translation.phys.as_u64(),
+                    translation.entry
                 ));
             }
             Ok(None) => {
@@ -2828,15 +2867,15 @@ fn verify_page_tables(
     logger: &mut Logger<SerialPort>,
     mapped: &MappedRanges<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
 ) {
-    use kernel::paging::active::{ActivePageTable, PageSize, TranslateError};
+    use kernel::paging::active::{ActivePageTable, PageSize};
     use kernel::paging::entry;
 
     // SAFETY: CR3 は直前に自前のテーブルへ切り替えて読み戻し済みで、
     // 恒等マッピングによりテーブル自体を読める。
-    let table = unsafe { ActivePageTable::current() };
+    let table = unsafe { ActivePageTable::current(common::addr::direct_map()) };
     logger.info(format_args!(
         "paging: walking the live tables from PML4 {:#x}",
-        table.pml4_phys()
+        table.pml4_phys().as_u64()
     ));
 
     // --- TLB フラッシュの前提を実測する ---
@@ -2859,15 +2898,20 @@ fn verify_page_tables(
             range.end - 1,
         ];
         for probe in probes {
-            match table.translate(probe) {
+            let Some(probe_virt) = common::addr::VirtAddr::new(probe) else {
+                mismatches += 1;
+                logger.error(format_args!("paging: {probe:#x} is not canonical"));
+                continue;
+            };
+            match table.translate(probe_virt) {
                 Ok(Some(translation)) => {
                     checked += 1;
                     // **恒等マッピングなので、物理 == 仮想でなければならない。**
-                    if translation.phys != probe {
+                    if translation.phys.as_u64() != probe {
                         mismatches += 1;
                         logger.error(format_args!(
                             "paging: {probe:#x} translates to {:#x} (identity mapping broken)",
-                            translation.phys
+                            translation.phys.as_u64()
                         ));
                     }
                     // G ビットが立っていると CR3 リロードで消えない。
@@ -2908,7 +2952,7 @@ fn verify_page_tables(
     ));
 
     // --- 翻訳の粒度を 1 つ実測して出す（分割の前後で変わることの基準）---
-    if let Ok(Some(translation)) = table.translate(0x10_0000) {
+    if let Ok(Some(translation)) = table.translate(common::addr::VirtAddr::new_const(0x10_0000)) {
         logger.info(format_args!(
             "paging: 0x100000 is mapped by a {} page (entry={:#x})",
             match translation.page_size {
@@ -2920,11 +2964,14 @@ fn verify_page_tables(
     }
 
     // --- 「マップされていない」と「アドレスが不正」を区別できること ---
-    // 非正規アドレス。CPU が受け付けない形なので、None ではなくエラー。
-    let non_canonical = table.translate(0x0000_8000_0000_0000);
-    let non_canonical_ok = non_canonical == Err(TranslateError::NonCanonicalAddress);
+    //
+    // **T-2b で、この区別は実行時の検査から型へ移った。** 非正規アドレスは
+    // `VirtAddr` を構築できないので、`translate` へ渡すことがそもそも
+    // できない。したがって確認するのは「翻訳が拒否するか」ではなく
+    // 「型が構築を拒否するか」になる。
+    let non_canonical_ok = common::addr::VirtAddr::new(0x0000_8000_0000_0000).is_none();
     logger.info(format_args!(
-        "paging: a non-canonical address is rejected as an error, not as \"unmapped\" = {}",
+        "paging: a non-canonical address cannot even be built as a VirtAddr = {}",
         if non_canonical_ok { "OK" } else { "NG" }
     ));
 

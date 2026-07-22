@@ -31,6 +31,8 @@
 //! アドレスマスクも階層で違う。2MiB エントリに 4KiB 用のマスク
 //! （ビット 12 から）を当てると、**PAT ビットをアドレスの一部として読む**。
 
+use common::addr::{PhysAddr, VirtAddr};
+
 /// Present。
 pub const PTE_PRESENT: u64 = 1 << 0;
 /// 書き込み可能。
@@ -93,32 +95,35 @@ pub const fn is_huge(entry: u64) -> bool {
 }
 
 /// 中間テーブルの物理アドレス。
-pub const fn table_address(entry: u64) -> u64 {
-    entry & ADDR_MASK_TABLE
+pub const fn table_address(entry: u64) -> PhysAddr {
+    PhysAddr::new_const(entry & ADDR_MASK_TABLE)
 }
 
 /// 4KiB ページの物理アドレス。
-pub const fn page_address_4k(entry: u64) -> u64 {
-    entry & ADDR_MASK_4K
+pub const fn page_address_4k(entry: u64) -> PhysAddr {
+    PhysAddr::new_const(entry & ADDR_MASK_4K)
 }
 
 /// 2MiB ページの物理アドレス。
-pub const fn page_address_2m(entry: u64) -> u64 {
-    entry & ADDR_MASK_2M
+pub const fn page_address_2m(entry: u64) -> PhysAddr {
+    PhysAddr::new_const(entry & ADDR_MASK_2M)
 }
 
 // 仮想アドレスから各階層の添字を取り出す。
-pub const fn pml4_index(addr: u64) -> usize {
-    ((addr >> 39) & 0x1FF) as usize
+//
+// **実装は `VirtAddr` 側に集約してある（T-2b）。** ここは呼び出しを
+// 中継するだけである。二重に持つと、片方だけ直したときに食い違う。
+pub const fn pml4_index(addr: VirtAddr) -> usize {
+    addr.pml4_index()
 }
-pub const fn pdpt_index(addr: u64) -> usize {
-    ((addr >> 30) & 0x1FF) as usize
+pub const fn pdpt_index(addr: VirtAddr) -> usize {
+    addr.pdpt_index()
 }
-pub const fn pd_index(addr: u64) -> usize {
-    ((addr >> 21) & 0x1FF) as usize
+pub const fn pd_index(addr: VirtAddr) -> usize {
+    addr.pd_index()
 }
-pub const fn pt_index(addr: u64) -> usize {
-    ((addr >> 12) & 0x1FF) as usize
+pub const fn pt_index(addr: VirtAddr) -> usize {
+    addr.pt_index()
 }
 
 /// x86_64 の仮想アドレスが正規形（canonical）か。
@@ -129,8 +134,7 @@ pub const fn pt_index(addr: u64) -> usize {
 ///
 /// 「マップされていない」と「アドレスが不正」は**別の状態**である。
 pub const fn is_canonical(addr: u64) -> bool {
-    let sign_extended = ((addr as i64) << 16 >> 16) as u64;
-    sign_extended == addr
+    common::addr::is_canonical(addr)
 }
 
 /// 2MiB ページのエントリから、分割後の `index` 番目の 4KiB エントリを作る。
@@ -147,7 +151,7 @@ pub const fn is_canonical(addr: u64) -> bool {
 /// - **Accessed / Dirty は落とす。** CPU が立てるものであり、分割後の各ページに
 ///   一律で引き継ぐと「触っていないのに触ったことになっている」状態を作る
 pub const fn split_child_entry(huge_entry: u64, index: usize) -> u64 {
-    let base = page_address_2m(huge_entry);
+    let base = page_address_2m(huge_entry).as_u64();
     let address = base + (index as u64) * PAGE_SIZE_4K;
 
     // PS・PAT(bit12)・Accessed・Dirty・アドレスを除いたフラグ。
@@ -188,12 +192,12 @@ pub const fn split_child_entry(huge_entry: u64, index: usize) -> u64 {
 /// **PS は立てない。** ここが指すのは PT であってページではない。
 ///
 /// **Accessed / Dirty も引き継がない。** CPU が立てるものである。
-pub const fn table_entry_for_split(huge_entry: u64, table_phys: u64) -> u64 {
+pub const fn table_entry_for_split(huge_entry: u64, table_phys: PhysAddr) -> u64 {
     let mut flags = PTE_PRESENT | PTE_WRITABLE;
     if huge_entry & PTE_USER != 0 {
         flags |= PTE_USER;
     }
-    (table_phys & ADDR_MASK_TABLE) | flags
+    (table_phys.as_u64() & ADDR_MASK_TABLE) | flags
 }
 
 /// 分割後の PT に書き込む 512 エントリを組み立てる。
@@ -214,20 +218,25 @@ pub fn split_children(huge_entry: u64) -> [u64; ENTRIES_PER_TABLE] {
 mod tests {
     use super::*;
 
+    /// テスト内で期待値を組み立てるための補助。
+    fn p(raw: u64) -> PhysAddr {
+        PhysAddr::new(raw).unwrap()
+    }
+
     /// 分割の基本。アドレスが 4KiB 刻みで並び、両端が正しいこと。
     #[test]
     fn split_produces_four_kib_pages_covering_the_same_range() {
         let base = 0x0000_0000_4020_0000; // 2MiB アライン
         let huge = base | PTE_PRESENT | PTE_WRITABLE | PDE_PAGE_SIZE;
 
-        assert_eq!(page_address_4k(split_child_entry(huge, 0)), base);
+        assert_eq!(page_address_4k(split_child_entry(huge, 0)), p(base));
         assert_eq!(
             page_address_4k(split_child_entry(huge, 1)),
-            base + PAGE_SIZE_4K
+            p(base + PAGE_SIZE_4K)
         );
         assert_eq!(
             page_address_4k(split_child_entry(huge, ENTRIES_PER_TABLE - 1)),
-            base + PAGE_SIZE_2M - PAGE_SIZE_4K
+            p(base + PAGE_SIZE_2M - PAGE_SIZE_4K)
         );
     }
 
@@ -268,7 +277,7 @@ mod tests {
             assert_eq!(child & PTE_PAT, PTE_PAT, "index={index}: 4KiB 側の PAT");
             assert_eq!(
                 page_address_4k(child),
-                0x4020_0000 + index as u64 * PAGE_SIZE_4K,
+                p(0x4020_0000 + index as u64 * PAGE_SIZE_4K),
                 "index={index}: アドレスが PAT に汚染されていない"
             );
         }
@@ -321,19 +330,25 @@ mod tests {
     #[test]
     fn the_two_address_masks_differ_at_the_pat_bit() {
         let huge = 0x4020_0000 | PDE_HUGE_PAT | PTE_PRESENT | PDE_PAGE_SIZE;
-        assert_eq!(page_address_2m(huge), 0x4020_0000, "正しいマスク");
+        assert_eq!(page_address_2m(huge), p(0x4020_0000), "正しいマスク");
         assert_eq!(
             page_address_4k(huge),
-            0x4020_0000 | PDE_HUGE_PAT,
+            p(0x4020_0000 | PDE_HUGE_PAT),
             "誤ったマスクだと PAT がアドレスに混ざる"
         );
     }
 
     /// 添字の取り出し。既知のアドレスで各階層を固定する。
+    ///
+    /// **実装は `VirtAddr` 側にあり、ここは中継である（T-2b）。**
+    /// それでもこのテストを残すのは、中継の対応（pml4 が pml4 を呼ぶ、
+    /// 等）を取り違えていないことを見るためである。実装が同じでも、
+    /// 繋ぎ間違いは起こる。
     #[test]
     fn the_indices_decompose_a_known_address() {
         // PML4=1, PDPT=2, PD=3, PT=4 になるアドレスを組み立てる。
-        let addr = (1u64 << 39) | (2u64 << 30) | (3u64 << 21) | (4u64 << 12);
+        let addr =
+            VirtAddr::new((1u64 << 39) | (2u64 << 30) | (3u64 << 21) | (4u64 << 12)).unwrap();
         assert_eq!(pml4_index(addr), 1);
         assert_eq!(pdpt_index(addr), 2);
         assert_eq!(pd_index(addr), 3);
@@ -364,12 +379,12 @@ mod tests {
     #[test]
     fn the_parent_entry_points_at_a_table_and_is_not_a_page() {
         let huge = 0x4020_0000 | PTE_PRESENT | PTE_WRITABLE | PDE_PAGE_SIZE;
-        let parent = table_entry_for_split(huge, 0x9000);
+        let parent = table_entry_for_split(huge, p(0x9000));
 
         assert_eq!(parent & PDE_PAGE_SIZE, 0, "PS を立ててはならない");
         assert_eq!(parent & PTE_PRESENT, PTE_PRESENT);
         assert_eq!(parent & PTE_WRITABLE, PTE_WRITABLE);
-        assert_eq!(table_address(parent), 0x9000);
+        assert_eq!(table_address(parent), p(0x9000));
     }
 
     /// USER は引き継ぐ。CPU は階層ごとの U/S を AND で合成するため、
@@ -377,10 +392,10 @@ mod tests {
     #[test]
     fn the_parent_entry_inherits_the_user_bit() {
         let kernel_only = 0x4020_0000 | PTE_PRESENT | PTE_WRITABLE | PDE_PAGE_SIZE;
-        assert_eq!(table_entry_for_split(kernel_only, 0x9000) & PTE_USER, 0);
+        assert_eq!(table_entry_for_split(kernel_only, p(0x9000)) & PTE_USER, 0);
 
         let user = kernel_only | PTE_USER;
-        assert_eq!(table_entry_for_split(user, 0x9000) & PTE_USER, PTE_USER);
+        assert_eq!(table_entry_for_split(user, p(0x9000)) & PTE_USER, PTE_USER);
     }
 
     /// PCD / PWT は引き継がない。中間エントリのそれは PT フレーム自身の
@@ -388,7 +403,7 @@ mod tests {
     #[test]
     fn the_parent_entry_does_not_inherit_the_cache_attributes() {
         let huge = 0x8000_0000 | PTE_PRESENT | PTE_WRITABLE | PTE_PCD | PTE_PWT | PDE_PAGE_SIZE;
-        let parent = table_entry_for_split(huge, 0x9000);
+        let parent = table_entry_for_split(huge, p(0x9000));
 
         assert_eq!(
             parent & PTE_PCD,
@@ -414,14 +429,14 @@ mod tests {
         for (index, child) in children.iter().enumerate() {
             assert_eq!(
                 page_address_4k(*child),
-                base + index as u64 * PAGE_SIZE_4K,
+                p(base + index as u64 * PAGE_SIZE_4K),
                 "index={index}"
             );
             assert!(is_present(*child), "index={index}");
         }
         // 末尾が元の範囲の最後の 4KiB であること（覆いすぎていない）。
         let last = page_address_4k(children[ENTRIES_PER_TABLE - 1]);
-        assert_eq!(last + PAGE_SIZE_4K, base + PAGE_SIZE_2M);
+        assert_eq!(last.checked_add(PAGE_SIZE_4K), Some(p(base + PAGE_SIZE_2M)));
     }
 
     /// **PAT の移送は実機で確かめられないので、ここで厳密に固定する。**
@@ -452,7 +467,7 @@ mod tests {
             // アドレスが PAT に汚染されていないこと。
             assert_eq!(
                 page_address_4k(*child),
-                base + index as u64 * PAGE_SIZE_4K,
+                p(base + index as u64 * PAGE_SIZE_4K),
                 "index={index}: アドレス"
             );
         }
@@ -464,14 +479,16 @@ mod tests {
         }
     }
 
-    /// 非正規アドレスでも添字計算は「それらしい」値を返してしまう。
+    /// 非正規アドレスは、そもそも `VirtAddr` として構築できない。
     ///
-    /// だからこそ入口で弾く必要がある、ということを固定しておく。
+    /// **T-2b で、この保護は実行時の検査から型へ移った。** 以前は
+    /// 「非正規でも添字計算は それらしい 値を返してしまうので入口で弾く
+    /// 必要がある」ことを固定していたが、今は添字を取る関数へ渡すこと自体が
+    /// できない。
     #[test]
-    fn index_extraction_silently_succeeds_on_non_canonical_addresses() {
+    fn a_non_canonical_address_cannot_be_built() {
         let bogus = 0x0000_8000_0000_0000;
         assert!(!is_canonical(bogus));
-        // エラーにならず、もっともらしい添字が出る。
-        assert_eq!(pml4_index(bogus), 256);
+        assert!(VirtAddr::new(bogus).is_none());
     }
 }

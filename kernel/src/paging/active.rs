@@ -31,14 +31,16 @@ use common::critical::InterruptGuard;
 
 use crate::frame_allocator::{FrameAllocator, FRAME_SIZE};
 
-use super::entry::{self, ADDR_MASK_TABLE};
+use common::addr::{DirectMap, PhysAddr, VirtAddr};
+
+use super::entry;
 use super::switch;
 
 /// 翻訳の結果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Translation {
     /// 対応する物理アドレス（ページ内オフセットを加えた値）。
-    pub phys: u64,
+    pub phys: PhysAddr,
     /// どの大きさのページで翻訳されたか。
     pub page_size: PageSize,
     /// ページを指しているエントリの生の値。フラグの照合に使う。
@@ -62,12 +64,6 @@ impl PageSize {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranslateError {
-    /// 仮想アドレスが正規形（canonical）でない。
-    ///
-    /// **「マップされていない」とは別の状態である。** 非正規アドレスは
-    /// そもそも CPU が受け付けず、添字計算も意味を持たない。`None` に
-    /// 丸めると「マップし忘れ」と区別がつかなくなる。
-    NonCanonicalAddress,
     /// PDPT レベルで 1GiB ページ（PS=1）に当たった。**未対応。**
     ///
     /// ZaytOS は 1GiB ページを作らないが、確認せずに PD へ降りると
@@ -78,7 +74,16 @@ pub enum TranslateError {
 
 /// 稼働中（CR3 が指している）のページテーブル。
 pub struct ActivePageTable {
-    pml4_phys: u64,
+    pml4_phys: PhysAddr,
+    /// テーブルのフレームを読むための窓。
+    ///
+    /// **構築時に受け取った値を保持する。** higher-half 移行では、
+    /// 恒等の窓で組み立てたテーブルへ CR3 を切り替え、高位へ飛んでから
+    /// 恒等を外す。その過程で「古い窓」と「新しい窓」が同時に正しい期間が
+    /// あるため、グローバルな `direct_map()` を毎回引くのではなく、
+    /// どちらの窓を使うかを呼び出し側が決められる形にしてある
+    /// （`docs/deferred-decisions.md`）。
+    direct_map: DirectMap,
 }
 
 impl ActivePageTable {
@@ -89,13 +94,14 @@ impl ActivePageTable {
     /// CR3 が指すページテーブルが恒等マッピングされており、その物理アドレスを
     /// そのままポインタとして読めること。ZaytOS は M2-d 以降このとおりに
     /// なっている。
-    pub unsafe fn current() -> Self {
+    pub unsafe fn current(direct_map: DirectMap) -> Self {
         Self {
-            pml4_phys: switch::read_cr3() & ADDR_MASK_TABLE,
+            pml4_phys: switch::read_cr3(),
+            direct_map,
         }
     }
 
-    pub const fn pml4_phys(&self) -> u64 {
+    pub const fn pml4_phys(&self) -> PhysAddr {
         self.pml4_phys
     }
 
@@ -104,9 +110,18 @@ impl ActivePageTable {
     /// # Safety
     /// `table_phys` が有効なページテーブルフレームの物理アドレスで、
     /// 恒等マッピングにより読めること。`index < 512`。
-    unsafe fn read(table_phys: u64, index: usize) -> u64 {
-        // SAFETY: 呼び出し元契約を参照。読み取りのみ。
-        unsafe { core::ptr::read_volatile((table_phys as *const u64).add(index)) }
+    unsafe fn read(&self, table_phys: PhysAddr, index: usize) -> u64 {
+        // SAFETY: 呼び出し元契約を参照。読み取りのみ。物理アドレスから
+        // ポインタへは direct map を通す（生の値をポインタにする経路は
+        // 型として存在しない）。
+        unsafe {
+            core::ptr::read_volatile(
+                self.direct_map
+                    .phys_to_virt(table_phys)
+                    .as_ptr::<u64>()
+                    .add(index),
+            )
+        }
     }
 
     /// 仮想アドレスを翻訳する。**実際のテーブルを辿る。**
@@ -117,21 +132,17 @@ impl ActivePageTable {
     /// この関数の目的は、分割やアンマップが意図どおり効いたかを
     /// **それを行ったコードとは独立に**確かめることである。期待値は
     /// 呼び出し側が別に持つこと（同じ計算で検算すると自己参照になる）。
-    pub fn translate(&self, virt: u64) -> Result<Option<Translation>, TranslateError> {
-        if !entry::is_canonical(virt) {
-            return Err(TranslateError::NonCanonicalAddress);
-        }
-
+    pub fn translate(&self, virt: VirtAddr) -> Result<Option<Translation>, TranslateError> {
         // SAFETY: `current()` の契約により、PML4 以下のテーブルは恒等
         // マッピングで読める。添字はいずれも `& 0x1FF` で 512 未満。
         unsafe {
-            let pml4e = Self::read(self.pml4_phys, entry::pml4_index(virt));
+            let pml4e = self.read(self.pml4_phys, entry::pml4_index(virt));
             if !entry::is_present(pml4e) {
                 return Ok(None);
             }
 
             let pdpt = entry::table_address(pml4e);
-            let pdpte = Self::read(pdpt, entry::pdpt_index(virt));
+            let pdpte = self.read(pdpt, entry::pdpt_index(virt));
             if !entry::is_present(pdpte) {
                 return Ok(None);
             }
@@ -142,27 +153,31 @@ impl ActivePageTable {
             }
 
             let pd = entry::table_address(pdpte);
-            let pde = Self::read(pd, entry::pd_index(virt));
+            let pde = self.read(pd, entry::pd_index(virt));
             if !entry::is_present(pde) {
                 return Ok(None);
             }
             if entry::is_huge(pde) {
                 let base = entry::page_address_2m(pde);
                 return Ok(Some(Translation {
-                    phys: base + (virt & (entry::PAGE_SIZE_2M - 1)),
+                    phys: base
+                        .checked_add(virt.as_u64() & (entry::PAGE_SIZE_2M - 1))
+                        .expect("a 2MiB page base plus its offset stays in range"),
                     page_size: PageSize::Size2MiB,
                     entry: pde,
                 }));
             }
 
             let pt = entry::table_address(pde);
-            let pte = Self::read(pt, entry::pt_index(virt));
+            let pte = self.read(pt, entry::pt_index(virt));
             if !entry::is_present(pte) {
                 return Ok(None);
             }
             let base = entry::page_address_4k(pte);
             Ok(Some(Translation {
-                phys: base + (virt & (entry::PAGE_SIZE_4K - 1)),
+                phys: base
+                    .checked_add(virt.page_offset())
+                    .expect("a 4KiB page base plus its offset stays in range"),
                 page_size: PageSize::Size4KiB,
                 entry: pte,
             }))
@@ -173,8 +188,6 @@ impl ActivePageTable {
 /// 稼働中テーブルの書き換えが失敗した理由。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapUpdateError {
-    /// 仮想アドレスが正規形でない。
-    NonCanonicalAddress,
     /// 途中の階層のエントリが不在で、そもそもマップされていない。
     NotMapped,
     /// PDPT レベルで 1GiB ページに当たった。**分割に対応していない。**
@@ -204,9 +217,9 @@ pub struct SplitOutcome {
     /// 分割前の PDE の生の値。
     pub huge_entry: u64,
     /// 新しく確保した PT の物理アドレス。
-    pub table_phys: u64,
+    pub table_phys: PhysAddr,
     /// 分割した 2MiB 領域の先頭仮想アドレス。
-    pub base_virt: u64,
+    pub base_virt: VirtAddr,
 }
 
 impl ActivePageTable {
@@ -215,28 +228,31 @@ impl ActivePageTable {
     /// # Safety
     /// [`Self::read`] と同じ契約に加え、`value` が正しい形式のエントリで
     /// あること。
-    unsafe fn write(table_phys: u64, index: usize, value: u64) {
-        // SAFETY: 呼び出し元契約を参照。
+    unsafe fn write(&self, table_phys: PhysAddr, index: usize, value: u64) {
+        // SAFETY: 呼び出し元契約を参照。変換は direct map 経由。
         unsafe {
-            core::ptr::write_volatile((table_phys as *mut u64).add(index), value);
+            core::ptr::write_volatile(
+                self.direct_map
+                    .phys_to_virt(table_phys)
+                    .as_mut_ptr::<u64>()
+                    .add(index),
+                value,
+            );
         }
     }
 
     /// `virt` を含む PD と、その中の添字を求める。
     ///
     /// PML4 → PDPT → PD と降りる途中の検査をここへ集約する。
-    fn locate_pd(&self, virt: u64) -> Result<(u64, usize), MapUpdateError> {
-        if !entry::is_canonical(virt) {
-            return Err(MapUpdateError::NonCanonicalAddress);
-        }
+    fn locate_pd(&self, virt: VirtAddr) -> Result<(PhysAddr, usize), MapUpdateError> {
         // SAFETY: `current()` の契約により、テーブルは恒等マッピングで読める。
         unsafe {
-            let pml4e = Self::read(self.pml4_phys, entry::pml4_index(virt));
+            let pml4e = self.read(self.pml4_phys, entry::pml4_index(virt));
             if !entry::is_present(pml4e) {
                 return Err(MapUpdateError::NotMapped);
             }
             let pdpt = entry::table_address(pml4e);
-            let pdpte = Self::read(pdpt, entry::pdpt_index(virt));
+            let pdpte = self.read(pdpt, entry::pdpt_index(virt));
             if !entry::is_present(pdpte) {
                 return Err(MapUpdateError::NotMapped);
             }
@@ -286,7 +302,7 @@ impl ActivePageTable {
     ///   割り込みに対しては内部で [`InterruptGuard`] を取る
     pub unsafe fn split_huge_page<const CAP: usize>(
         &mut self,
-        virt: u64,
+        virt: VirtAddr,
         frames: &mut FrameAllocator<CAP>,
     ) -> Result<SplitOutcome, MapUpdateError> {
         // 操作全体を割り込み禁止で囲む。M5-d でタイマ割り込みからページ
@@ -296,7 +312,7 @@ impl ActivePageTable {
 
         let (pd, pd_index) = self.locate_pd(virt)?;
         // SAFETY: `locate_pd` が返す PD は有効なテーブルで、添字は 512 未満。
-        let pde = unsafe { Self::read(pd, pd_index) };
+        let pde = unsafe { self.read(pd, pd_index) };
         if !entry::is_present(pde) {
             return Err(MapUpdateError::NotMapped);
         }
@@ -310,12 +326,17 @@ impl ActivePageTable {
         // 手順 1。ここまでページテーブルを一切変更していないので、
         // 確保に失敗しても状態は元のままである。
         let frame = frames.allocate_frame().ok_or(MapUpdateError::OutOfFrames)?;
-        let table_phys = frame * FRAME_SIZE;
+        let table_phys = PhysAddr::from_frame_number(frame)
+            .expect("a frame number from the allocator fits in a physical address");
         // SAFETY: 今このアロケータから確保したばかりの、他の誰も参照して
         // いないフレームである。アロケータの空き範囲がすべてマップ済みで
         // あることは起動時に検証済みなので、恒等マッピングで書ける。
         unsafe {
-            core::ptr::write_bytes(table_phys as *mut u8, 0, FRAME_SIZE as usize);
+            core::ptr::write_bytes(
+                self.direct_map.phys_to_virt(table_phys).as_mut_ptr::<u8>(),
+                0,
+                FRAME_SIZE as usize,
+            );
         }
 
         let children = entry::split_children(pde);
@@ -330,11 +351,13 @@ impl ActivePageTable {
         #[cfg(feature = "paging-test-wrong-order")]
         {
             // SAFETY: `pd` は有効な PD で添字は 512 未満。
-            unsafe { Self::write(pd, pd_index, entry::table_entry_for_split(pde, table_phys)) };
+            unsafe { self.write(pd, pd_index, entry::table_entry_for_split(pde, table_phys)) };
             // SAFETY: この読み取りは #PF を起こすことを期待している。
             // ページテーブルはこの瞬間、この領域を「不在」として指している。
             unsafe {
-                core::ptr::read_volatile((virt & !(entry::PAGE_SIZE_2M - 1)) as *const u8);
+                let base = VirtAddr::new(virt.as_u64() & !(entry::PAGE_SIZE_2M - 1))
+                    .expect("masking low bits of a canonical address keeps it canonical");
+                core::ptr::read_volatile(base.as_ptr::<u8>());
             }
         }
 
@@ -342,7 +365,7 @@ impl ActivePageTable {
         for (index, child) in children.iter().enumerate() {
             // SAFETY: `table_phys` は直前にゼロ埋めした自前のフレームで、
             // 添字は 512 未満。まだどこからも参照されていない。
-            unsafe { Self::write(table_phys, index, *child) };
+            unsafe { self.write(table_phys, index, *child) };
         }
 
         // 手順 3。8 バイト 1 回。
@@ -350,7 +373,7 @@ impl ActivePageTable {
         // 正しい形式のエントリである。
         #[cfg(not(feature = "paging-test-wrong-order"))]
         unsafe {
-            Self::write(pd, pd_index, entry::table_entry_for_split(pde, table_phys))
+            self.write(pd, pd_index, entry::table_entry_for_split(pde, table_phys))
         };
 
         // 手順 4。
@@ -360,7 +383,8 @@ impl ActivePageTable {
         Ok(SplitOutcome {
             huge_entry: pde,
             table_phys,
-            base_virt: virt & !(entry::PAGE_SIZE_2M - 1),
+            base_virt: VirtAddr::new(virt.as_u64() & !(entry::PAGE_SIZE_2M - 1))
+                .expect("masking low bits of a canonical address keeps it canonical"),
         })
     }
 
@@ -382,14 +406,14 @@ impl ActivePageTable {
     #[cfg(feature = "paging-test")]
     pub unsafe fn add_huge_page_flags(
         &mut self,
-        virt: u64,
+        virt: VirtAddr,
         add: u64,
     ) -> Result<u64, MapUpdateError> {
         let _guard = InterruptGuard::enter();
 
         let (pd, pd_index) = self.locate_pd(virt)?;
         // SAFETY: `locate_pd` の契約による。
-        let pde = unsafe { Self::read(pd, pd_index) };
+        let pde = unsafe { self.read(pd, pd_index) };
         if !entry::is_present(pde) {
             return Err(MapUpdateError::NotMapped);
         }
@@ -397,7 +421,7 @@ impl ActivePageTable {
             return Err(MapUpdateError::AlreadySmall);
         }
         // SAFETY: 同上。フラグを足すだけでアドレスは変えない。
-        unsafe { Self::write(pd, pd_index, pde | add) };
+        unsafe { self.write(pd, pd_index, pde | add) };
         // SAFETY: CR3 の値をそのまま書き戻す。指す先は変えていない。
         unsafe { switch::switch_to(switch::read_cr3()) };
         Ok(pde)
@@ -423,12 +447,12 @@ impl ActivePageTable {
     ///
     /// [`Self::split_huge_page`] と同じ。加えて、**アンマップした領域へ
     /// 以後アクセスしないことは呼び出し側の責任**である。触れば #PF になる。
-    pub unsafe fn unmap_4kib(&mut self, virt: u64) -> Result<u64, MapUpdateError> {
+    pub unsafe fn unmap_4kib(&mut self, virt: VirtAddr) -> Result<u64, MapUpdateError> {
         let _guard = InterruptGuard::enter();
 
         let (pd, pd_index) = self.locate_pd(virt)?;
         // SAFETY: `locate_pd` の契約による。
-        let pde = unsafe { Self::read(pd, pd_index) };
+        let pde = unsafe { self.read(pd, pd_index) };
         if !entry::is_present(pde) {
             return Err(MapUpdateError::NotMapped);
         }
@@ -447,13 +471,13 @@ impl ActivePageTable {
         #[cfg(not(feature = "paging-test-bad-index"))]
         let pt_index = entry::pt_index(virt);
         // SAFETY: `pt` は PD が指す有効な PT で、添字は 512 未満。
-        let pte = unsafe { Self::read(pt, pt_index) };
+        let pte = unsafe { self.read(pt, pt_index) };
         if !entry::is_present(pte) {
             return Err(MapUpdateError::NotMapped);
         }
 
         // SAFETY: 同上。0 を書いて Present を落とす。
-        unsafe { Self::write(pt, pt_index, 0) };
+        unsafe { self.write(pt, pt_index, 0) };
         // 検証用に、わざと invlpg を落とす（`paging-test-no-invlpg`）。
         // 古い翻訳が TLB に残っていれば、アンマップしたはずのアドレスへ
         // アクセスしてもフォルトしない。
@@ -461,7 +485,7 @@ impl ActivePageTable {
         // SAFETY: テーブルの書き換えが終わってから落とす。順序を逆にすると、
         // 古い翻訳が残ったままテーブルだけ変わった状態になる。
         unsafe {
-            cpu::invalidate_tlb_entry(virt)
+            cpu::invalidate_tlb_entry(virt.as_u64())
         };
 
         Ok(pte)

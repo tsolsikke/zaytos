@@ -4,12 +4,16 @@
 //! 見えるメモリ写像そのものを変える操作であり、意図的にホスト
 //! `cargo test` の対象にしていない。
 
+use common::addr::PhysAddr;
+
+use super::entry::ADDR_MASK_TABLE;
+
 /// 現在の CR3 の値を読む。
 ///
 /// アドレス部分（bit 12〜51）に加え、PCID 関連ビットや PWT/PCD
 /// （PCID 無効時）もそのまま含めて返す。呼び出し側が必要な部分だけ
 /// マスクして使うこと。
-pub fn read_cr3() -> u64 {
+pub fn read_cr3() -> PhysAddr {
     let value: u64;
     // SAFETY: `mov reg, cr3` は読み取り専用でメモリ・スタックに副作用が
     // ない。ただし CR3 の値そのものは実行環境（ページテーブル）に
@@ -17,7 +21,10 @@ pub fn read_cr3() -> u64 {
     unsafe {
         core::arch::asm!("mov {}, cr3", out(reg) value);
     }
-    value
+    // CR3 のアドレス部分はビット 12-51。PCID や PWT/PCD のビットを
+    // 落として物理アドレスとして返す。呼び出し側がマスクを忘れる余地を
+    // 無くすため、ここで型に落とし込む。
+    PhysAddr::new(value & ADDR_MASK_TABLE).expect("CR3 の bit 12-51 は 52 ビットに収まる")
 }
 
 /// CR3 を `pml4_phys` に切り替える。
@@ -40,9 +47,9 @@ pub fn read_cr3() -> u64 {
 /// 見え方（今後のロード/ストアがどの物理アドレスを指すか）そのものを
 /// 変えるため、`nomem`（「メモリに触れない」という宣言）を付けるのは
 /// 誤りであり、コンパイラによる命令の並べ替え・最適化を許してはならない。
-pub unsafe fn switch_to(pml4_phys: u64) {
+pub unsafe fn switch_to(pml4_phys: PhysAddr) {
     // SAFETY: 呼び出し元契約を参照。
     unsafe {
-        core::arch::asm!("mov cr3, {}", in(reg) pml4_phys);
+        core::arch::asm!("mov cr3, {}", in(reg) pml4_phys.as_u64());
     }
 }
