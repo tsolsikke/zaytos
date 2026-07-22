@@ -669,6 +669,10 @@ extern "sysv64" fn kernel_main() -> ! {
         ),
     );
 
+    // ヒープが確保できた時点で、カーネルが使う主要領域が出そろう。
+    // M5-a-2 の分割対象を選ぶ材料として、ここで粒度を測る。
+    report_mapping_granularity(&mut logger, heap_start, fb_start);
+
     // ロック保持中は割り込みが禁止され、解放後に元へ戻ることを確認する
     // （M4-c-2）。ヒープのロックそのものではなく同じ Locked<T> を使う。
     // ヒープのロックを保持したままログを出すと二重取得になるため。
@@ -2210,6 +2214,82 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>) {
         "keyboard: IRQ1 is unmasked; press a key (the first one must arrive as vector {:#04x})",
         keyboard::KEYBOARD_VECTOR
     ));
+}
+
+/// カーネルが実際に使っている領域が、どの粒度でマップされているかを測る。
+///
+/// M5-a-2 で 2MiB ページを分割するにあたり、**どこが 2MiB ページに載って
+/// いるのかを推測で決めない**ために測る。`plan::resolve_pages` は 2MiB 境界に
+/// 揃った核だけを 2MiB ページにし、前後の端数を 4KiB へ分解する。どの領域が
+/// 核に入り、どれが端数になるかは実際のメモリマップ次第で、コードを読んだ
+/// だけでは決まらない。
+///
+/// 分割対象の選定材料であると同時に、恒等マッピングの現状把握そのものでも
+/// ある。ここに挙げた 4 つはいずれもカーネルが動き続けるために必要な領域で、
+/// 翻訳できないことがあってはならない。できなければ fail-fast する。
+fn report_mapping_granularity(
+    logger: &mut Logger<SerialPort>,
+    heap_start: u64,
+    framebuffer_phys: u64,
+) {
+    use kernel::paging::active::{ActivePageTable, PageSize};
+    use kernel::paging::entry;
+
+    // SAFETY: CR3 は自前のテーブルへ切り替えて読み戻し済みであり、テーブル
+    // 自体は恒等マッピングで読める（`verify_page_tables` と同じ前提）。
+    let table = unsafe { ActivePageTable::current() };
+
+    // RIP と RSP は**測定時点の実値**を読む。リンカスクリプトのシンボルや
+    // スタックの静的配列の番地から計算すると、「そう配置したはず」の値を
+    // 見ることになり、実際に実行しているアドレスの確認にならない。
+    let probes: [(&str, u64); 4] = [
+        ("executing code (RIP)", cpu::read_rip()),
+        ("kernel stack (RSP)", cpu::read_rsp()),
+        ("heap arena", heap_start),
+        ("framebuffer", framebuffer_phys),
+    ];
+
+    let mut failures = 0u32;
+    for (name, addr) in probes {
+        if addr == 0 {
+            // フレームバッファが無い構成ではここに来る。存在しないものを
+            // 「マップされていない」として数えない。
+            logger.info(format_args!("granularity: {name} is absent (address 0)"));
+            continue;
+        }
+        match table.translate(addr) {
+            Ok(Some(translation)) => {
+                let (size_name, base) = match translation.page_size {
+                    PageSize::Size2MiB => ("2MiB", addr & !(entry::PAGE_SIZE_2M - 1)),
+                    PageSize::Size4KiB => ("4KiB", addr & !(entry::PAGE_SIZE_4K - 1)),
+                };
+                logger.info(format_args!(
+                    "granularity: {name} {addr:#x} -> phys {:#x}, mapped by a {size_name} page \
+                     at {base:#x} (entry={:#x})",
+                    translation.phys, translation.entry
+                ));
+            }
+            Ok(None) => {
+                failures += 1;
+                logger.error(format_args!(
+                    "granularity: {name} {addr:#x} has no translation"
+                ));
+            }
+            Err(error) => {
+                failures += 1;
+                logger.error(format_args!(
+                    "granularity: {name} {addr:#x} translate failed: {error:?}"
+                ));
+            }
+        }
+    }
+
+    if failures > 0 {
+        logger.error(format_args!(
+            "granularity: {failures} region(s) in use are not translatable; halting"
+        ));
+        cpu::halt_forever();
+    }
 }
 
 /// 稼働中のページテーブルを読み戻し、`plan` の意図と突き合わせる（M5-a-1）。
