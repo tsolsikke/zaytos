@@ -89,7 +89,7 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 | clippy | 上記4構成すべてに`-D warnings` |
 | fmt | `cargo fmt --all -- --check` |
 | unsafe | `unsafe`ブロックの直前のコメント塊に`SAFETY`があること（追跡済みと未追跡の両方が対象） |
-| コミット | コミット件名に和文と英数字の間の半角空白が無いこと |
+| コミット | コミット件名に和文と英数字の間の半角空白が無いこと（規約を適用し始めた日時以降が対象） |
 
 `cargo xtask check --full`は、これに回帰チェック14種（例外4種、critical 2種、interrupt 6種、keyboard、panic）を加える。
 
