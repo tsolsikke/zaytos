@@ -1171,7 +1171,17 @@ fn cmd_marker_test(tests: &[CriticalTest], kind_label: &str, kind: &str) -> Resu
         accelerator: Accelerator::Tcg,
     });
 
-    let sentinel = test.expected_markers[0];
+    // **期待マーカーが全部そろうまで待つ。** 先頭 1 本を見た時点で QEMU を
+    // 落とす作りだと、残りのマーカーがまだシリアルへ流れている途中で
+    // 打ち切られる。38400 baud では 4 行で約 70ms かかり、ポーリング間隔
+    // （100ms）と同じ桁なので、たいていは間に合うが時々間に合わない。
+    // 実際に `interrupt-test misaligned` が、4 行のうち 2 行だけ出た状態で
+    // 「halting の行が無い」と判定して落ちた。テストの成否が実行ごとの
+    // タイミングで変わる状態は、失敗を見ても実装の問題か取りこぼしかを
+    // 区別できない。
+    //
+    // 全部そろうまで待てば、遅れて届く行を取りこぼさない。到達しない場合は
+    // 従来どおり `deadline` で打ち切るので、上限は変わらない。
     let wait_for_full_timeout = test.wait_for_full_timeout;
     let mut child = Command::new("qemu-system-x86_64")
         .args(&qemu_args)
@@ -1182,7 +1192,7 @@ fn cmd_marker_test(tests: &[CriticalTest], kind_label: &str, kind: &str) -> Resu
     loop {
         if !wait_for_full_timeout
             && fs::read_to_string(&serial_log)
-                .map(|c| c.contains(sentinel))
+                .map(|c| test.expected_markers.iter().all(|m| c.contains(m)))
                 .unwrap_or(false)
         {
             break;
