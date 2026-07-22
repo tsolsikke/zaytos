@@ -215,6 +215,61 @@ pub unsafe fn invalidate_tlb_entry(virt: u64) {
     }
 }
 
+/// CPU が実装している物理アドレスのビット数（MAXPHYADDR）。
+///
+/// # 観測値であって、判定には使わない
+///
+/// `PhysAddr` が弾くのは 52 ビットを超える値である（`common::addr`）。
+/// MAXPHYADDR は 52 以下の任意の値を取りうるが、**それを型の判定に使うと、
+/// 実行時の値でコンパイル時の不変条件を決めることになり、同じバイナリが
+/// 環境によって別の挙動をする。** ここはログに出すだけにする。
+///
+/// 52 未満の MAXPHYADDR を持つ環境で、MAXPHYADDR 以上 52 未満のアドレスを
+/// 作った場合は、ページテーブルへ書いた時点で CPU が予約ビット違反として
+/// 弾く。型の側で先回りはしない。
+///
+/// # 拡張リーフの対応を先に確かめる
+///
+/// `CPUID.80000008h` を読む前に、`CPUID.80000000h` の EAX が
+/// `0x8000_0008` 以上であることを確認する。**拡張リーフが未対応の CPU では、
+/// 未定義の値か別のリーフの内容が返る。** 取れなかった場合は `None` を返す。
+/// 観測が目的である以上、取れなかったことも観測結果である。
+pub fn max_physical_address_bits() -> Option<u8> {
+    // SAFETY: `cpuid` は特権を必要とせず、メモリにも制御フローにも副作用が
+    // 無い。EAX/EBX/ECX/EDX を書き換えるだけで、Rust の値や借用の不変条件を
+    // 壊さない。RBX は LLVM が予約しているため、退避・復元を明示している。
+    let highest_extended: u32 = unsafe {
+        let eax: u32;
+        core::arch::asm!(
+            "push rbx",
+            "cpuid",
+            "pop rbx",
+            inlateout("eax") 0x8000_0000u32 => eax,
+            lateout("ecx") _,
+            lateout("edx") _,
+        );
+        eax
+    };
+    if highest_extended < 0x8000_0008 {
+        return None;
+    }
+
+    // SAFETY: 上と同じ。対応していることを直前に確認した葉だけを読む。
+    let eax: u32 = unsafe {
+        let eax: u32;
+        core::arch::asm!(
+            "push rbx",
+            "cpuid",
+            "pop rbx",
+            inlateout("eax") 0x8000_0008u32 => eax,
+            lateout("ecx") _,
+            lateout("edx") _,
+        );
+        eax
+    };
+    Some((eax & 0xFF) as u8)
+}
+
 /// タイムスタンプカウンタ（TSC）を読む。
 ///
 /// **計測専用。時刻源として使わないこと。** TSC は CPU の起動からの

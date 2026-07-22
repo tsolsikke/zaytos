@@ -676,6 +676,16 @@ extern "sysv64" fn kernel_main() -> ! {
     // 有効な仕込み feature を報告する。通常ビルドでは none と出る。
     report_test_hooks(&mut logger);
 
+    // MAXPHYADDR は観測値として出すだけで、判定には使わない（T-1）。
+    match cpu::max_physical_address_bits() {
+        Some(bits) => logger.info(format_args!(
+            "cpu: MAXPHYADDR = {bits} bits (observed only; PhysAddr rejects anything above 52)"
+        )),
+        None => logger.info(format_args!(
+            "cpu: MAXPHYADDR could not be read (CPUID leaf 0x80000008 is not supported)"
+        )),
+    }
+
     // 2MiB ページの分割とアンマップ（M5-a-2-1）。
     verify_split_and_unmap(&mut logger, &mut allocator);
 
