@@ -1701,7 +1701,10 @@ fn trigger_exception_under_test(
 
         // 本当にマップされていないことを確認してから使う。マップされて
         // いればフォルトが起きず、テストが通ったように見えてしまう。
-        let unmapped = !mapped_ranges.contains_range(probe, probe + 8);
+        let to_phys = |raw: u64| {
+            common::addr::PhysAddr::new(raw).expect("the probe address fits in a physical address")
+        };
+        let unmapped = !mapped_ranges.contains_range(to_phys(probe), to_phys(probe + 8));
         logger.info(format_args!(
             "exception-test: probe address {probe:#x} is unmapped: {unmapped}"
         ));
