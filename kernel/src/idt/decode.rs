@@ -154,6 +154,13 @@ pub enum ErrorCodeKind {
 }
 
 /// ベクタ番号からエラーコードの種類を決める。
+///
+/// 各腕は連番ではなく、**個別の例外の集まり**として書いてある。
+/// 10-13 は #TS / #NP / #SS / #GP で、たまたま番号が連続しているだけである。
+/// 範囲記法にすると「10 から 13 までの何か」に見え、どの例外を指しているのか
+/// が読み取れなくなる。17 / 21 / 29 / 30 が連続していないことからも、
+/// この 4 つが集合であって範囲ではないことが分かる。
+#[allow(clippy::manual_range_patterns)]
 pub const fn error_code_kind(vector: u8) -> ErrorCodeKind {
     match vector {
         8 => ErrorCodeKind::AlwaysZero,

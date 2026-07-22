@@ -61,7 +61,7 @@ impl FramebufferLayout {
         if info.physical_address == 0 {
             return Err(LayoutError::NullBaseAddress);
         }
-        if info.physical_address % BYTES_PER_PIXEL != 0 {
+        if !info.physical_address.is_multiple_of(BYTES_PER_PIXEL) {
             return Err(LayoutError::MisalignedBaseAddress {
                 base: info.physical_address,
             });
@@ -118,7 +118,7 @@ impl FramebufferLayout {
         if base == 0 {
             return Err(LayoutError::NullBaseAddress);
         }
-        if base % BYTES_PER_PIXEL != 0 {
+        if !base.is_multiple_of(BYTES_PER_PIXEL) {
             return Err(LayoutError::MisalignedBaseAddress { base });
         }
         base.checked_add(self.size_bytes)

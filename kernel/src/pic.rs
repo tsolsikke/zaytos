@@ -133,7 +133,7 @@ const CPU_EXCEPTION_VECTOR_COUNT: u8 = 32;
 
 /// ベクタオフセットの組が使えるものかを検査する（純粋ロジック）。
 pub const fn validate_offsets(master_offset: u8, slave_offset: u8) -> Result<(), OffsetError> {
-    if master_offset % IRQS_PER_PIC != 0 || slave_offset % IRQS_PER_PIC != 0 {
+    if !master_offset.is_multiple_of(IRQS_PER_PIC) || !slave_offset.is_multiple_of(IRQS_PER_PIC) {
         return Err(OffsetError::NotEightAligned);
     }
     if master_offset < CPU_EXCEPTION_VECTOR_COUNT || slave_offset < CPU_EXCEPTION_VECTOR_COUNT {

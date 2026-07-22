@@ -425,8 +425,10 @@ pub fn delta_since(baseline: &[u64; IDT_ENTRY_COUNT]) -> (u64, Option<usize>) {
 pub fn interrupt_total_and_first_nonzero() -> (u64, Option<usize>) {
     let mut total = 0u64;
     let mut first = None;
-    for vector in 0..IDT_ENTRY_COUNT {
-        let count = INTERRUPT_COUNTS[vector].load(Ordering::Relaxed);
+    // `enumerate` の添字はベクタ番号そのものである。返り値がベクタ番号で
+    // ある以上、この対応は失いたくない。
+    for (vector, counter) in INTERRUPT_COUNTS.iter().enumerate() {
+        let count = counter.load(Ordering::Relaxed);
         total += count;
         if count != 0 && first.is_none() {
             first = Some(vector);
@@ -448,6 +450,9 @@ pub fn interrupt_total_and_first_nonzero() -> (u64, Option<usize>) {
 /// 違反は fail-fast する。SSE を無効化しているため即座にクラッシュはしない
 /// が ABI 違反であり、放置すると将来 SSE を有効化した瞬間や、コンパイラが
 /// 境界を仮定した最適化を行った瞬間に、原因不明の形で壊れる。
+// `RSP % 16 == 0` は SysV ABI と本関数の説明の書き方そのものである。
+// `is_multiple_of(16)` へ言い換えると、ABI の記述との対応が読み取りにくくなる。
+#[allow(clippy::manual_is_multiple_of)]
 fn check_stack_alignment(rsp_at_call: u64, path: &str, vector: u64) {
     if rsp_at_call % 16 == 0 {
         return;
@@ -610,7 +615,7 @@ pub fn check_irq_stub_table() -> StubTableCheck {
             break;
         }
         let offset = handler - base;
-        if offset % STUB_SIZE as u64 != 0 || offset / STUB_SIZE as u64 != index as u64 {
+        if !offset.is_multiple_of(STUB_SIZE as u64) || offset / STUB_SIZE as u64 != index as u64 {
             entries_ok = false;
             break;
         }
@@ -688,7 +693,7 @@ pub fn check_stub_table() -> StubTableCheck {
             break;
         }
         let offset = handler - base;
-        if offset % STUB_SIZE as u64 != 0 || offset / STUB_SIZE as u64 != vector as u64 {
+        if !offset.is_multiple_of(STUB_SIZE as u64) || offset / STUB_SIZE as u64 != vector as u64 {
             entries_ok = false;
             break;
         }
