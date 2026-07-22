@@ -78,7 +78,7 @@ pub unsafe fn init(double_fault_stack_top: u64) {
         // ユーザーモードを導入する M5 以降まで実際には効かないが、
         // 0 のままにしておくと、その時点で気づきにくい形で壊れる。
         // 現時点では通常のカーネルスタックと同じ場所を指しておく。
-        (*tss).privilege_stack_table[0] = crate::stack::kernel_stack_range().top;
+        (*tss).privilege_stack_table[0] = crate::stack::kernel_stack_range().top.as_u64();
     }
 
     let tss_base = addr_of!(TSS) as u64;

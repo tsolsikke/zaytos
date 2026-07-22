@@ -70,6 +70,8 @@
 //!   「停止するまでの間だけ」に限られる。ハンドラを小さく保つ限り
 //!   16KiB + 4KiB を使い切ることはない。
 
+use common::addr::VirtAddr;
+
 use core::ptr::addr_of;
 
 /// 通常実行用のカーネルスタックの大きさ。
@@ -117,59 +119,65 @@ static mut STACKS: StackBlock = StackBlock {
 /// スタックの範囲（下端と上端）。上端は排他で、スタックポインタの初期値になる。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct StackRange {
-    pub bottom: u64,
-    pub top: u64,
+    pub bottom: VirtAddr,
+    pub top: VirtAddr,
 }
 
 impl StackRange {
     /// スタックは下へ伸びるため、`top` が初期スタックポインタになる。
-    pub fn contains(&self, address: u64) -> bool {
+    pub fn contains(&self, address: VirtAddr) -> bool {
         (self.bottom..=self.top).contains(&address)
     }
 
     pub fn size(&self) -> u64 {
-        self.top - self.bottom
+        self.top.as_u64() - self.bottom.as_u64()
     }
 }
 
-fn block_base() -> u64 {
-    addr_of!(STACKS) as u64
+/// スタックブロックの先頭。
+///
+/// **`.bss` の静的配列なので、これは仮想アドレスである。** 恒等マッピングの
+/// 間は物理アドレスとしても同じ値になるが、スタックは仮想アドレスとしてしか
+/// 使わない（RSP に入る値、TSS の RSP0 / IST に入る値）。型でそれを表す。
+fn block_base() -> VirtAddr {
+    VirtAddr::new(addr_of!(STACKS) as u64).expect("a .bss address is canonical")
+}
+
+/// 範囲を組み立てる補助。桁溢れも非正規化も起きない前提を 1 箇所へ集約する。
+fn range_from(bottom: VirtAddr, size: u64) -> StackRange {
+    StackRange {
+        bottom,
+        top: bottom
+            .checked_add(size)
+            .expect("the stack block stays within the canonical range"),
+    }
 }
 
 /// 通常実行用スタックの範囲。
 pub fn kernel_stack_range() -> StackRange {
-    let bottom = block_base() + GUARD_SIZE as u64;
-    StackRange {
-        bottom,
-        top: bottom + KERNEL_STACK_SIZE as u64,
-    }
+    let bottom = block_base()
+        .checked_add(GUARD_SIZE as u64)
+        .expect("the stack block stays within the canonical range");
+    range_from(bottom, KERNEL_STACK_SIZE as u64)
 }
 
 /// カーネルスタックの直下にある犠牲領域。
 pub fn kernel_guard_range() -> StackRange {
-    let bottom = block_base();
-    StackRange {
-        bottom,
-        top: bottom + GUARD_SIZE as u64,
-    }
+    range_from(block_base(), GUARD_SIZE as u64)
 }
 
 /// ダブルフォルト用 IST スタックの範囲。
 pub fn double_fault_stack_range() -> StackRange {
-    let bottom = kernel_stack_range().top + GUARD_SIZE as u64;
-    StackRange {
-        bottom,
-        top: bottom + IST_STACK_SIZE as u64,
-    }
+    let bottom = kernel_stack_range()
+        .top
+        .checked_add(GUARD_SIZE as u64)
+        .expect("the stack block stays within the canonical range");
+    range_from(bottom, IST_STACK_SIZE as u64)
 }
 
 /// ダブルフォルトスタックの直下にある犠牲領域。
 pub fn double_fault_guard_range() -> StackRange {
-    let bottom = kernel_stack_range().top;
-    StackRange {
-        bottom,
-        top: bottom + GUARD_SIZE as u64,
-    }
+    range_from(kernel_stack_range().top, GUARD_SIZE as u64)
 }
 
 /// 両方の犠牲領域をカナリアで埋める。
@@ -186,7 +194,7 @@ pub unsafe fn init_guards() {
         // まだ誰も使っていない。書き込むのは犠牲領域だけで、スタック本体には
         // 触れない。
         unsafe {
-            core::ptr::write_bytes(range.bottom as *mut u8, CANARY_BYTE, GUARD_SIZE);
+            core::ptr::write_bytes(range.bottom.as_mut_ptr::<u8>(), CANARY_BYTE, GUARD_SIZE);
         }
     }
 }
@@ -209,7 +217,7 @@ fn guard_intact(range: StackRange) -> bool {
     for offset in (0..GUARD_SIZE).rev() {
         // SAFETY: range.bottom + offset は静的構造体の犠牲領域の範囲内。
         // 読み取りのみ。
-        let byte = unsafe { core::ptr::read_volatile((range.bottom as *const u8).add(offset)) };
+        let byte = unsafe { core::ptr::read_volatile(range.bottom.as_ptr::<u8>().add(offset)) };
         if byte != CANARY_BYTE {
             return false;
         }
@@ -233,7 +241,7 @@ pub unsafe fn switch_to_kernel_stack_and_run(continuation: extern "sysv64" fn() 
     let top = kernel_stack_range().top;
     // SAFETY: top は 16 バイト境界に載った静的配列の終端であり、
     // continuation は戻らない関数。
-    unsafe { switch_stack_and_call(top, continuation) }
+    unsafe { switch_stack_and_call(top.as_u64(), continuation) }
 }
 
 /// `rsp` を差し替えて `continuation` を呼ぶ。
@@ -268,18 +276,23 @@ unsafe extern "sysv64" fn switch_stack_and_call(
 mod tests {
     use super::*;
 
+    /// テスト内で期待値の仮想アドレスを作る補助。
+    fn v(raw: u64) -> VirtAddr {
+        VirtAddr::new(raw).unwrap()
+    }
+
     #[test]
     fn a_range_contains_its_own_bounds() {
         let range = StackRange {
-            bottom: 0x1000,
-            top: 0x2000,
+            bottom: v(0x1000),
+            top: v(0x2000),
         };
-        assert!(range.contains(0x1000));
-        assert!(range.contains(0x1800));
+        assert!(range.contains(v(0x1000)));
+        assert!(range.contains(v(0x1800)));
         // top はスタックポインタの初期値そのものなので、含まれる扱いにする。
-        assert!(range.contains(0x2000));
-        assert!(!range.contains(0x0FFF));
-        assert!(!range.contains(0x2001));
+        assert!(range.contains(v(0x2000)));
+        assert!(!range.contains(v(0x0FFF)));
+        assert!(!range.contains(v(0x2001)));
         assert_eq!(range.size(), 0x1000);
     }
 

@@ -105,7 +105,7 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
     // SAFETY: 直前に cli 済み。起動時に 1 回だけ呼ぶ。ダブルフォルト用の
     // スタックは通常のカーネルスタックとは別の静的領域である。
     unsafe {
-        gdt::init(stack::double_fault_stack_range().top);
+        gdt::init(stack::double_fault_stack_range().top.as_u64());
     }
 
     // IDT をロードする。ここも .bss の静的領域だけで完結する。
@@ -462,49 +462,73 @@ extern "sysv64" fn kernel_main() -> ! {
     // 主要因になるため）。
     let (kernel_start_phys, kernel_end_phys) = kernel_image_phys_range();
     let kernel_start = kernel_start_phys.as_u64();
-    let kernel_end = kernel_end_phys.as_u64();
+
+    // **恒等前提の箇所（1）。** BootInfo・RSP・RIP はいずれも仮想アドレス
+    // として得た値だが、物理アドレスの範囲を見る `check_range` へ渡している。
+    // 恒等マッピングだから通っているだけで、higher-half 移行では
+    // 変換を挟むか、別の検証へ分ける必要がある。
+    let identity = |virt: u64| {
+        common::addr::PhysAddr::new(virt)
+            .expect("an identity-mapped address fits in a physical address")
+    };
+
     let boot_info_start = boot_info as *const BootInfo as u64;
     let boot_info_end =
         boot_info_start + (BOOT_INFO_PAGE_COUNT as u64) * frame_allocator::FRAME_SIZE;
-    let mmap_start = boot_info.memory_map.descriptors_ptr;
-    // T-2b / T-2c までの橋渡し。ここも一時的に生の値へ落とす。
-    let mmap_start = mmap_start.as_u64();
-    let mmap_end = mmap_start + boot_info.memory_map.descriptors_len;
+    let mmap_start_phys = boot_info.memory_map.descriptors_ptr;
+    let mmap_end_phys = mmap_start_phys
+        .checked_add(boot_info.memory_map.descriptors_len)
+        .expect("the memory map buffer stays within the physical address range");
     // fb_start/fb_end は上（extra_ranges 構築時）で計算済みのものを使う。
     let current_rsp = cpu::read_rsp();
     let current_rip = cpu::read_rip();
     let pml4_phys = builder.pml4_phys();
 
     let mut all_required_ok = true;
-    let mut check_range = |name: &str, start: u64, end: u64| {
-        let ok = match (
-            common::addr::PhysAddr::new(start),
-            common::addr::PhysAddr::new(end),
-        ) {
-            (Some(s), Some(e)) => mapped_ranges.contains_range(s, e),
-            _ => false,
+    // **必須領域はいずれも物理アドレスの範囲である。** マップ計画が物理で
+    // 書かれているためで、恒等の間は仮想アドレスと値が一致するので `u64` の
+    // まま渡しても通ってしまう。ここで `PhysAddr` を要求することで、
+    // 呼び出し側が「何のアドレスを渡しているか」を意識せざるを得なくなる。
+    let mut check_range =
+        |name: &str, start: common::addr::PhysAddr, end: common::addr::PhysAddr| {
+            let ok = mapped_ranges.contains_range(start, end);
+            logger.info(format_args!(
+                "paging: required range [{name}] {:#x}..{:#x}: {}",
+                start.as_u64(),
+                end.as_u64(),
+                if ok { "OK" } else { "NG" }
+            ));
+            if !ok {
+                all_required_ok = false;
+            }
         };
-        logger.info(format_args!(
-            "paging: required range [{name}] {start:#x}..{end:#x}: {}",
-            if ok { "OK" } else { "NG" }
-        ));
-        if !ok {
-            all_required_ok = false;
-        }
-    };
-    check_range("kernel image", kernel_start, kernel_end);
-    check_range("BootInfo", boot_info_start, boot_info_end);
-    check_range("memory map buffer", mmap_start, mmap_end);
+    check_range("kernel image", kernel_start_phys, kernel_end_phys);
+    check_range(
+        "BootInfo",
+        identity(boot_info_start),
+        identity(boot_info_end),
+    );
+    check_range("memory map buffer", mmap_start_phys, mmap_end_phys);
     if fb_start != 0 {
-        check_range("framebuffer", fb_start, fb_end);
+        check_range("framebuffer", identity(fb_start), identity(fb_end));
     }
     check_range(
         "new page tables (PML4)",
-        pml4_phys.as_u64(),
-        pml4_phys.as_u64() + frame_allocator::FRAME_SIZE,
+        pml4_phys,
+        pml4_phys
+            .checked_add(frame_allocator::FRAME_SIZE)
+            .expect("a page table frame stays within the physical address range"),
     );
-    check_range("current RSP", current_rsp, current_rsp + 1);
-    check_range("current RIP", current_rip, current_rip + 1);
+    check_range(
+        "current RSP",
+        identity(current_rsp),
+        identity(current_rsp + 1),
+    );
+    check_range(
+        "current RIP",
+        identity(current_rip),
+        identity(current_rip + 1),
+    );
 
     if !all_required_ok {
         logger.error(format_args!(
@@ -1207,20 +1231,21 @@ fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
     ));
     logger.info(format_args!(
         "stack: kernel stack {:#x}..{:#x} ({} KiB)",
-        kernel_stack.bottom,
-        kernel_stack.top,
+        kernel_stack.bottom.as_u64(),
+        kernel_stack.top.as_u64(),
         kernel_stack.size() / 1024
     ));
     logger.info(format_args!(
         "stack: double fault (IST{}) stack {:#x}..{:#x} ({} KiB)",
         gdt::DOUBLE_FAULT_IST_INDEX,
-        double_fault_stack.bottom,
-        double_fault_stack.top,
+        double_fault_stack.bottom.as_u64(),
+        double_fault_stack.top.as_u64(),
         double_fault_stack.size() / 1024
     ));
 
     // 現在のスタックポインタが自前の領域にあること。
-    let on_own_stack = kernel_stack.contains(current_rsp);
+    let on_own_stack = kernel_stack
+        .contains(common::addr::VirtAddr::new(current_rsp).expect("a stack address is canonical"));
     logger.info(format_args!(
         "stack: RSP is inside the kernel stack: {on_own_stack}"
     ));
@@ -1229,13 +1254,17 @@ fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
     // 実際にコンパイラが使う退避先も移っていることの確認になる。
     let probe = 0xA5A5_5A5Au32;
     let probe_address = core::ptr::addr_of!(probe) as u64;
-    let locals_on_own_stack = kernel_stack.contains(probe_address);
+    let locals_on_own_stack = kernel_stack.contains(
+        common::addr::VirtAddr::new(probe_address).expect("a stack address is canonical"),
+    );
     logger.info(format_args!(
         "stack: locals live at {probe_address:#x}, inside the kernel stack: {locals_on_own_stack}"
     ));
 
     // 旧スタックを参照していないこと。
-    let left_old_stack = !kernel_stack.contains(old_rsp) && current_rsp != old_rsp;
+    let left_old_stack = !kernel_stack
+        .contains(common::addr::VirtAddr::new(old_rsp).expect("a stack address is canonical"))
+        && current_rsp != old_rsp;
     logger.info(format_args!(
         "stack: no longer using the UEFI-derived stack: {left_old_stack}"
     ));
@@ -1243,7 +1272,9 @@ fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
     // 実際に書き込めること（M2-d のスタック検証と同じ考え方）。
     // 現在の RSP より下（未使用側）へ直接読み書きしてみる。
     let scratch = (current_rsp - 256) as *mut u64;
-    let scratch_ok = if kernel_stack.contains(scratch as u64) {
+    let scratch_ok = if kernel_stack.contains(
+        common::addr::VirtAddr::new(scratch as u64).expect("a stack address is canonical"),
+    ) {
         // SAFETY: scratch は現在の RSP より 256 バイト下で、直前の
         // `kernel_stack.contains` によりカーネルスタックの範囲内であることを
         // 確認済み。まだ誰も使っていない未使用領域であり、赤ゾーン

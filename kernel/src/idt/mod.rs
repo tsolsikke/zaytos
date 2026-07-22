@@ -961,11 +961,12 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
     if vector == 8 {
         let handler_rsp = context as *const ExceptionContext as u64;
         let ist = crate::stack::double_fault_stack_range();
-        let on_ist = ist.contains(handler_rsp);
+        let on_ist = common::addr::VirtAddr::new(handler_rsp).is_some_and(|rsp| ist.contains(rsp));
         let _ = writeln!(
             serial,
             "[ERROR]   handler frame at {handler_rsp:#018x}, IST1 stack {:#x}..{:#x}, on IST1={on_ist}",
-            ist.bottom, ist.top
+            ist.bottom.as_u64(),
+            ist.top.as_u64()
         );
     }
 
