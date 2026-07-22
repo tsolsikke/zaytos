@@ -29,7 +29,7 @@ M5（マルチタスク）へ向けたページング拡張が進行中。
 - ハードウェア依存部と純粋ロジックを分離し、後者はホストの`cargo test`で検証する
 - 検証は「設定したつもりの値」ではなく実際の状態（レジスタやIMRの読み戻し）で行い、検査そのものが機能することを、わざと壊して確かめる
 
-設計の全体像は[docs/architecture.md](docs/architecture.md)、個々の設計判断は[docs/adr/](docs/adr/)、保留した判断は解禁条件つきで[docs/deferred-decisions.md](docs/deferred-decisions.md)、長期の構想は[docs/vision.md](docs/vision.md)、実装で詰まった記録は[docs/troubleshooting.md](docs/troubleshooting.md)にある。
+設計の全体像は[docs/architecture.md](docs/architecture.md)、個々の設計判断は[docs/adr/](docs/adr/)、保留した判断は解禁条件つきで[docs/deferred-decisions.md](docs/deferred-decisions.md)、長期の構想は[docs/vision.md](docs/vision.md)、実装で詰まった記録は[docs/troubleshooting.md](docs/troubleshooting.md)、「常に維持する」と書いた性質に検査があるかの一覧は[docs/verification-coverage.md](docs/verification-coverage.md)にある。
 
 ## 前提環境
 
@@ -58,7 +58,7 @@ QEMUを`-display none`で起動し、シリアル出力を端末へ流す。
 cargo xtask check
 ```
 
-全構成のビルド、ホストテスト、clippy、`cargo fmt --check` に加え、`unsafe`ブロックが`// SAFETY:`コメントを伴っているかを検査する。
+全構成のビルド、ホストテスト、clippy、`cargo fmt --check` に加え、`unsafe`ブロックが`// SAFETY:`コメントを伴っているか、コミットメッセージの文体が揃っているかを検査する。
 bootloaderとkernelはターゲットが違うため`--workspace`ではまとめられず、構成ごとに実行している。
 1つ落ちても途中で止めず、最後に失敗した項目をまとめて報告する。
 
