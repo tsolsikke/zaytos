@@ -121,8 +121,18 @@ pub unsafe fn init(double_fault_stack_top: u64, page_fault_stack_top: u64) {
             user_segment_descriptor(USER_CODE_ACCESS, USER_CODE32_FLAGS);
         (*gdt)[USER_DATA_INDEX as usize] =
             user_segment_descriptor(USER_DATA_ACCESS, USER_DATA_FLAGS);
-        (*gdt)[USER_CODE64_INDEX as usize] =
-            user_segment_descriptor(USER_CODE_ACCESS, USER_CODE64_FLAGS);
+        #[cfg(not(feature = "ring3-test-user-desc-dpl0"))]
+        {
+            (*gdt)[USER_CODE64_INDEX as usize] =
+                user_segment_descriptor(USER_CODE_ACCESS, USER_CODE64_FLAGS);
+        }
+        // 破壊 (M5-e-4): ucode64 の DPL を 0 にする（KERNEL_CODE_ACCESS）。RPL=3 の
+        // セレクタで iretq すると iretq 自身が #GP になり、Ring 3 に落ちない。
+        #[cfg(feature = "ring3-test-user-desc-dpl0")]
+        {
+            (*gdt)[USER_CODE64_INDEX as usize] =
+                user_segment_descriptor(KERNEL_CODE_ACCESS, USER_CODE64_FLAGS);
+        }
         (*gdt)[TSS_INDEX as usize] = tss_low;
         (*gdt)[TSS_INDEX as usize + 1] = tss_high;
     }

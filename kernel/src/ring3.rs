@@ -191,10 +191,20 @@ pub unsafe fn enter(main_rsp0_top: u64) {
     HANDLER_RSP.store(0, Ordering::SeqCst);
 
     // RSP0 を遠征専用スタックへ据える。#GP はここへ切り替わる。
+    // 破壊 (M5-e-4, drop-rsp0): 据えない。#GP がメインのスタックへ切り替わり、
+    // handler_in_excursion が false になって捕まる（M5-d の task-switch-drop-rsp0 は
+    // schedule_switch 側で別物）。
+    #[cfg(not(feature = "ring3-test-drop-rsp0"))]
     // SAFETY: excursion_top は静的な遠征スタックの上端。単一実行文脈。
     unsafe {
         gdt::set_rsp0(excursion_top);
     }
+    #[cfg(feature = "ring3-test-drop-rsp0")]
+    let _ = excursion_top;
+
+    // 遠征フラグを立てる（畳みの二重判別の条件3）。
+    // 破壊 (M5-e-4, no-fold-flag): 立てない。cli の #GP が畳まれず dump+halt する。
+    #[cfg(not(feature = "ring3-test-no-fold-flag"))]
     EXCURSION_ACTIVE.store(true, Ordering::SeqCst);
 
     // SAFETY: 偽フレームを積んで Ring 3 へ落ちる。ユーザーページは呼び出し側が

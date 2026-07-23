@@ -129,3 +129,19 @@ task-widen-preempt-window = []
 # 発火する。`depth>0 ⟹ IF=0` の構造的保証が崩れたときプリエンプトがクリティカル
 # 区間へ食い込むことの実証。`--task-test preempt-in-critical`。
 task-preempt-in-critical = ["common/preempt-in-critical-break"]
+# M5-e-4: Ring 3 遷移の破壊確認（集約）。いずれも既定ビルドには入らない。
+# ucode64 の DPL を 0 にする。M5-e-1 の DPL 読み戻しアサートをこのときだけ外し、
+# runtime で iretq 自身が #GP になる（Ring 3 に落ちない）ことを確認する。
+# `--ring3-test user-desc-dpl0`。
+ring3-test-user-desc-dpl0 = []
+# ユーザーページの USER を落とす（U=0）。M5-e-2 の両側監査が遠征前に user
+# violation として捕まえる。`--ring3-test user-page-supervisor`。
+ring3-test-user-page-supervisor = []
+# 遠征の RSP0 据え付け（ring3::enter の set_rsp0）を落とす。#GP がメインの
+# スタックへ切り替わり、handler_in_excursion が false になって捕まる。M5-d の
+# task-switch-drop-rsp0（schedule_switch 側）とは別物。`--ring3-test drop-rsp0`。
+ring3-test-drop-rsp0 = []
+# 遠征フラグ（EXCURSION_ACTIVE）を立てない。畳み条件3が欠け、cli の #GP が
+# 畳まれず dump+halt する（畳みが「立っていないのに畳む」ことがない実証）。
+# `--ring3-test no-fold-flag`。
+ring3-test-no-fold-flag = []

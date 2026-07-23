@@ -533,6 +533,50 @@ const TASK_TESTS: &[CriticalTest] = &[
     },
 ];
 
+/// Ring 3 遷移の破壊確認（M5-e-4）。いずれも遠征が verified に到達しないことを
+/// 確かめる。
+const RING3_TESTS: &[CriticalTest] = &[
+    // ucode64 の DPL を 0 にする。M5-e-1 の読み戻しアサートは cfg で外してあり、
+    // iretq 自身が #GP になる（Ring 3 に落ちない。フォルト元 Ring 0 なので畳まれない）。
+    CriticalTest {
+        name: "user-desc-dpl0",
+        feature: "ring3-test-user-desc-dpl0",
+        expected_markers: &["exception: vector=13", "halting"],
+        forbidden_markers: &["ring3: Ring 3 excursion verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // ユーザーページの USER を落とす。遠征前の両側 U/S 監査が捕まえる。
+    CriticalTest {
+        name: "user-page-supervisor",
+        feature: "ring3-test-user-page-supervisor",
+        expected_markers: &["U/S audit before the excursion failed", "halting"],
+        forbidden_markers: &["ring3: Ring 3 excursion verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // 遠征の RSP0 据え付けを落とす。#GP がメインのスタックで走り、
+    // handler_in_excursion が false になって捕まる。
+    CriticalTest {
+        name: "drop-rsp0",
+        feature: "ring3-test-drop-rsp0",
+        expected_markers: &["RSP0 did not take effect", "halting"],
+        forbidden_markers: &["ring3: Ring 3 excursion verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // 遠征フラグを立てない。cli の #GP が畳まれず dump+halt する（フォルト RIP が
+    // ユーザーコード入口なのが user-desc-dpl0 との違い）。
+    CriticalTest {
+        name: "no-fold-flag",
+        feature: "ring3-test-no-fold-flag",
+        expected_markers: &["exception: vector=13", "rip=0x0000008000000000", "halting"],
+        forbidden_markers: &["ring3: Ring 3 excursion verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+];
+
 /// カーネルが起動したことを示す、シリアルログの既知の行。
 ///
 /// kernel の `kernel_main` が最初に出す行（`common::log` の INFO 形式）。
@@ -689,7 +733,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -730,6 +774,13 @@ fn main() -> Result<()> {
                     format!("--task-test requires a kind ({})", names.join(" | "))
                 })?;
                 return cmd_marker_test(TASK_TESTS, "task-test", kind);
+            }
+            if let Some(index) = rest.iter().position(|a| a == "--ring3-test") {
+                let kind = rest.get(index + 1).with_context(|| {
+                    let names: Vec<&str> = RING3_TESTS.iter().map(|t| t.name).collect();
+                    format!("--ring3-test requires a kind ({})", names.join(" | "))
+                })?;
+                return cmd_marker_test(RING3_TESTS, "ring3-test", kind);
             }
             if let Some(index) = rest.iter().position(|a| a == "--critical-test") {
                 let kind = rest.get(index + 1).with_context(|| {
@@ -2235,6 +2286,13 @@ fn cmd_check(full: bool) -> Result<()> {
             let name = format!("task-test {}", test.name);
             run_regression(&name, &mut failed, &mut retries, || {
                 cmd_marker_test(TASK_TESTS, "task-test", test.name)
+            });
+        }
+        for test in RING3_TESTS {
+            total += 1;
+            let name = format!("ring3-test {}", test.name);
+            run_regression(&name, &mut failed, &mut retries, || {
+                cmd_marker_test(RING3_TESTS, "ring3-test", test.name)
             });
         }
         for test in INTERRUPT_TESTS {

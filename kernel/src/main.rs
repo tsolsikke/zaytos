@@ -1342,6 +1342,12 @@ fn verify_gdt_descriptors(logger: &mut Logger<SerialPort>, gdt_limit: u16) {
              accessed={accessed} (expected {expected:#018x}, accessed bit is CPU-managed)"
         ));
         let matches = (loaded & !ACCESSED) == (expected & !ACCESSED) && dpl == expected_dpl;
+        // 破壊 (M5-e-4, user-desc-dpl0): ucode64 の DPL を 0 に落とす破壊のときは、
+        // この読み戻しで先に halt しない（遠征の runtime で iretq の #GP として
+        // 捕まえる。M5-e-1 の申し送り）。この feature のときだけ ucode64 を素通しに
+        // する。
+        #[cfg(feature = "ring3-test-user-desc-dpl0")]
+        let matches = matches || name == "ucode64";
         all_ok &= matches;
     }
 
@@ -2816,12 +2822,18 @@ fn verify_ring3_excursion<const CAP: usize>(
     let pml4_phys = table.pml4_phys();
 
     // 2 ページを U=1 で張る（M5-e-2 残置の中間テーブルを再利用）。
+    // 破壊 (M5-e-4, user-page-supervisor): USER を落とす（U=0）。遠征前の両側監査が
+    // user violation として捕まえる。
+    #[cfg(not(feature = "ring3-test-user-page-supervisor"))]
+    let user_flag = true;
+    #[cfg(feature = "ring3-test-user-page-supervisor")]
+    let user_flag = false;
     for (virt, phys, what) in [
         (code_virt, code_phys, "code"),
         (stack_virt, stack_phys, "stack"),
     ] {
         // SAFETY: どちらも未マップのユーザーサブツリー内アドレス。frame は未使用。
-        if let Err(e) = unsafe { table.map_4kib(virt, phys, true, true, allocator) } {
+        if let Err(e) = unsafe { table.map_4kib(virt, phys, user_flag, true, allocator) } {
             logger.error(format_args!(
                 "ring3: map_4kib for the user {what} page failed: {e:?}; halting"
             ));
@@ -3257,6 +3269,26 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "task-preempt-in-critical",
         cfg!(feature = "task-preempt-in-critical"),
         "InterruptGuard の cli を落とし、クリティカル区間へプリエンプトを食い込ませる",
+    ),
+    (
+        "ring3-test-user-desc-dpl0",
+        cfg!(feature = "ring3-test-user-desc-dpl0"),
+        "ucode64 の DPL を 0 にして Ring 3 に落ちなくする",
+    ),
+    (
+        "ring3-test-user-page-supervisor",
+        cfg!(feature = "ring3-test-user-page-supervisor"),
+        "ユーザーページの USER を落とす",
+    ),
+    (
+        "ring3-test-drop-rsp0",
+        cfg!(feature = "ring3-test-drop-rsp0"),
+        "遠征の RSP0 据え付けを落とす",
+    ),
+    (
+        "ring3-test-no-fold-flag",
+        cfg!(feature = "ring3-test-no-fold-flag"),
+        "遠征フラグを立てず予期 #GP を畳ませない",
     ),
     (
         "exception-test",

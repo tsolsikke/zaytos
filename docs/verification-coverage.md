@@ -139,6 +139,10 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 | `task-switch-drop-rsp0` | プリエンプティブスイッチで RSP0 の更新を落とす | RSP0 読み戻し検査が食い違いを検出して止まること |
 | `task-widen-preempt-window` | プリエンプト窓の NOP そりを広げる | 窓カウントが増え、統計的レジスタ検証の判定が働くこと |
 | `task-preempt-in-critical` | InterruptGuard の cli を落とし防御スキップも外す | Locked 保持中の timer プリエンプトで二重取得検出が発火すること |
+| `ring3-test-user-desc-dpl0` | ucode64 の DPL を 0 にする（M5-e-1 の DPL 読み戻しアサートも cfg で外す） | 遠征の iretq 自身が #GP になり Ring 3 に落ちないこと（フォルト元 Ring 0 なので畳まれず halt） |
+| `ring3-test-user-page-supervisor` | ユーザーページの USER を落とす（U=0） | 遠征前の両側 U/S 監査が user violation として検出して止まること |
+| `ring3-test-drop-rsp0` | 遠征の RSP0 据え付け（`ring3::enter` の set_rsp0）を落とす | #GP がメインのスタックで走り、handler_in_excursion が false になって止まること。**この検出は「踏み潰しが `verify_ring3_excursion` のフレームに届かない」という配置依存で成立する。将来スタック深さやフレーム配置が変わると成立が崩れうる。** M5-d の `task-switch-drop-rsp0`（schedule_switch 側）とは別物 |
+| `ring3-test-no-fold-flag` | 遠征フラグ（EXCURSION_ACTIVE）を立てない | 畳み条件3が欠け、cli の #GP が畳まれず dump+halt すること（畳みが「立っていないのに畳む」ことがない実証） |
 | `gfx-test-pattern` | コンソールを起動せず描画テストパターンを描く | 描画の基盤 |
 
 これらが有効なビルドでは、起動時に`test hooks:`のWARNが出て内訳が列挙される。
