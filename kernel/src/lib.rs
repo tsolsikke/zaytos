@@ -30,6 +30,7 @@ pub mod memory_map;
 pub mod paging;
 pub mod pic;
 pub mod pit;
+pub mod ring3;
 pub mod stack;
 pub mod task;
 

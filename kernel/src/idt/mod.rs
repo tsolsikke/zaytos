@@ -978,6 +978,26 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
     // 読み取りのみで、この関数は戻らない。
     let context = unsafe { &*context };
 
+    // M5-e-3: Ring 3 遠征の予期した #GP だけを畳む。**二重判別（+RIP 照合）を
+    // 全て満たすときのみ**畳んでカーネルへ戻る。1 つでも欠ける全ての例外は、
+    // この分岐を素通りして下の dump+halt へ落ちる（従来と 1 ビットも変わらない）。
+    //   (1) ベクタ==13（#GP）
+    //   (2) 例外フレームの CS の RPL==3（Ring 3 由来。カーネル由来は CS.RPL=0 で
+    //       ここで弾かれる）
+    //   (3) 遠征フラグが立っている（遠征外の Ring 3 #GP は畳まない）
+    //   (4) フォルト RIP がユーザーコード入口である（別 RIP は畳まない）
+    // (3)(4) は crate::ring3::should_fold_gp が見る。
+    if context.vector as u8 == 13
+        && (context.cs & 0b11) == 3
+        && crate::ring3::should_fold_gp(context.rip)
+    {
+        // SAFETY: 上の 4 条件が全て真。遠征中で RECOVERY は保存済み。longjmp で
+        // 遠征の呼び出し元へ戻る（戻らない）。dump は行わない。
+        unsafe {
+            crate::ring3::record_and_fold(context.cs, context.rsp, rsp_at_call);
+        }
+    }
+
     // 既存の境界計算が正しいことの裏取り。IRQ 側と同じ検査を通す。
     check_stack_alignment(rsp_at_call, "exception", context.vector);
 

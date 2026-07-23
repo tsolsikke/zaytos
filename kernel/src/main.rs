@@ -833,6 +833,12 @@ extern "sysv64" fn kernel_main() -> ! {
     #[cfg(not(feature = "paging-test"))]
     verify_user_page_mapping(&mut logger, &mut allocator);
 
+    // Ring 3 への単発遠征の検証（M5-e-3）。M5-e-2 が残した PML4 サブツリーへ
+    // ユーザーコード/スタックを張り、iretq で Ring 3 へ落ち、cli の #GP を
+    // 予期の畳みでカーネルへ戻す。RSP0 が実挙動で初めて効く。
+    #[cfg(not(feature = "paging-test"))]
+    verify_ring3_excursion(&mut logger, &mut allocator);
+
     // ロック保持中は割り込みが禁止され、解放後に元へ戻ることを確認する
     // （M4-c-2）。ヒープのロックそのものではなく同じ Locked<T> を使う。
     // ヒープのロックを保持したままログを出すと二重取得になるため。
@@ -2766,6 +2772,171 @@ fn verify_user_page_mapping<const CAP: usize>(
     logger.info(format_args!(
         "user-map: user-page mapping verified (all levels U=1 for the user page, all kernel \
          entries U=0, Ring 0 read-back held; leaf unmapped, subtree kept for M5-e-3)"
+    ));
+}
+
+/// Ring 3 への単発遠征を検証する（M5-e-3）。
+///
+/// M5-e-2 が残した PML4[[`USER_PML4_INDEX`]] サブツリーへ、ユーザーコード
+/// （`cli` 1 命令）とユーザースタックの 2 ページを U=1 で張る。iretq で Ring 3 へ
+/// 落ち、`cli` が #GP を起こし、`exception_entry` が予期と判定して畳んでここへ
+/// 戻る。RSP0 が実挙動で効くこと（#GP が遠征専用スタックへ切り替わったこと）、
+/// Ring 3 に落ちたこと、両側 U/S 監査が成立し続けることを確かめる。
+///
+/// `paging-test` ビルドでは載せない（[`verify_user_page_mapping`] と同じ理由）。
+#[cfg(not(feature = "paging-test"))]
+fn verify_ring3_excursion<const CAP: usize>(
+    logger: &mut Logger<SerialPort>,
+    allocator: &mut frame_allocator::FrameAllocator<CAP>,
+) {
+    use kernel::paging::active::ActivePageTable;
+    use kernel::paging::verify;
+    use kernel::ring3;
+
+    let identity = common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
+        .expect("the identity window is canonical");
+
+    // ユーザーコードとユーザースタックの葉フレームを確保する。
+    let (Some(code_phys), Some(stack_phys)) =
+        (allocator.allocate_frame(), allocator.allocate_frame())
+    else {
+        logger.error(format_args!(
+            "ring3: could not reserve frames for the user code/stack pages; halting"
+        ));
+        cpu::halt_forever();
+    };
+
+    let code_virt = common::addr::VirtAddr::new(ring3::USER_CODE_VIRT)
+        .expect("the user code virtual address is canonical");
+    let stack_virt = common::addr::VirtAddr::new(ring3::USER_STACK_VIRT)
+        .expect("the user stack virtual address is canonical");
+
+    // SAFETY: CR3 は自前テーブル。配下は恒等窓で読み書きできる。
+    let mut table = unsafe { ActivePageTable::current(identity) };
+    let pml4_phys = table.pml4_phys();
+
+    // 2 ページを U=1 で張る（M5-e-2 残置の中間テーブルを再利用）。
+    for (virt, phys, what) in [
+        (code_virt, code_phys, "code"),
+        (stack_virt, stack_phys, "stack"),
+    ] {
+        // SAFETY: どちらも未マップのユーザーサブツリー内アドレス。frame は未使用。
+        if let Err(e) = unsafe { table.map_4kib(virt, phys, true, true, allocator) } {
+            logger.error(format_args!(
+                "ring3: map_4kib for the user {what} page failed: {e:?}; halting"
+            ));
+            cpu::halt_forever();
+        }
+    }
+
+    // ユーザーコードへ cli(0xFA) を書き込む。NX を立てていないので実行可能。
+    // SAFETY: code_virt は今張った writable なユーザーページ。SMAP は未有効。
+    unsafe {
+        core::ptr::write_volatile(code_virt.as_mut_ptr::<u8>(), 0xFA);
+    }
+
+    // 張った直後の両側 U/S 監査（遠征前）。
+    // SAFETY: pml4_phys は稼働中 PML4、identity 窓で読める。
+    let before = unsafe { verify::audit_user_supervisor(pml4_phys, identity, USER_PML4_INDEX) };
+    if before.user_violations != 0 || before.kernel_violations != 0 {
+        logger.error(format_args!(
+            "ring3: U/S audit before the excursion failed (user violations={}, kernel \
+             violations={}); halting",
+            before.user_violations, before.kernel_violations
+        ));
+        cpu::halt_forever();
+    }
+
+    // 遠征前の RSP0（メインのカーネルスタック上端）。遠征後にここへ戻す。
+    let main_rsp0_top = gdt::privilege_stack_top();
+    let (exc_bottom, exc_top) = ring3::excursion_stack_range();
+
+    logger.info(format_args!(
+        "ring3: entering Ring 3 (user code {:#x} with cli, user stack top {:#x}, RSP0 -> \
+         excursion stack [{exc_bottom:#x}, {exc_top:#x}))",
+        ring3::USER_CODE_VIRT,
+        ring3::USER_STACK_TOP
+    ));
+
+    // --- 遠征。iretq -> Ring 3 -> cli -> #GP -> 畳み -> ここへ戻る ---
+    // SAFETY: ユーザーページは張り済み。main_rsp0_top はメインの上端で、遠征後に
+    // RSP0 をそこへ戻せる。起動時の単一実行文脈から 1 回だけ。
+    unsafe {
+        ring3::enter(main_rsp0_top);
+    }
+
+    // --- 会計と検証 ---
+    if !ring3::folded() {
+        logger.error(format_args!(
+            "ring3: returned from the excursion without folding an expected #GP; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    let fault_cs = ring3::fault_cs();
+    let fault_rsp = ring3::fault_rsp();
+    let handler_rsp = ring3::handler_rsp();
+
+    // Ring 3 に落ちたこと: フォルト CS の RPL==3。
+    let cs_rpl = fault_cs & 0b11;
+    // フォルト時 RSP がユーザースタック範囲。
+    let fault_in_user = fault_rsp > ring3::USER_STACK_VIRT && fault_rsp <= ring3::USER_STACK_TOP;
+    // #GP ハンドラの RSP が遠征専用スタック範囲（RSP0 の実利用）。
+    let handler_in_excursion = handler_rsp >= exc_bottom && handler_rsp < exc_top;
+    // RSP0 がメインの上端へ戻っていること。
+    let rsp0_restored = gdt::privilege_stack_top() == main_rsp0_top;
+
+    logger.info(format_args!(
+        "ring3: folded expected #GP. fault CS={fault_cs:#x} (RPL={cs_rpl}), fault RSP={fault_rsp:#x} \
+         (in user stack={fault_in_user}), handler RSP={handler_rsp:#x} (in excursion \
+         stack={handler_in_excursion}), RSP0 restored={rsp0_restored}"
+    ));
+
+    if cs_rpl != 3 {
+        logger.error(format_args!(
+            "ring3: the fault did not come from Ring 3 (CS RPL={cs_rpl}); halting"
+        ));
+        cpu::halt_forever();
+    }
+    if !fault_in_user {
+        logger.error(format_args!(
+            "ring3: fault RSP {fault_rsp:#x} is not in the user stack; halting"
+        ));
+        cpu::halt_forever();
+    }
+    if !handler_in_excursion {
+        logger.error(format_args!(
+            "ring3: #GP handler did not run on the RSP0 excursion stack (handler RSP \
+             {handler_rsp:#x}); RSP0 did not take effect; halting"
+        ));
+        cpu::halt_forever();
+    }
+    if !rsp0_restored {
+        logger.error(format_args!(
+            "ring3: RSP0 was not restored to main; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    // 遠征後も両側 U/S 監査が成立すること（ユーザー 2 ページ + 中間 U=1、
+    // カーネル U=0）。
+    // SAFETY: 同上。
+    let after = unsafe { verify::audit_user_supervisor(pml4_phys, identity, USER_PML4_INDEX) };
+    logger.info(format_args!(
+        "ring3: U/S audit after the excursion: user subtree entries={} violations={}, kernel \
+         entries={} violations={}",
+        after.user_entries, after.user_violations, after.kernel_entries, after.kernel_violations
+    ));
+    if after.user_violations != 0 || after.kernel_violations != 0 {
+        logger.error(format_args!(
+            "ring3: U/S audit after the excursion failed; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "ring3: Ring 3 excursion verified (fell to Ring 3, cli faulted as #GP, RSP0 switched to \
+         the excursion stack, folded back to the kernel, permission split intact)"
     ));
 }
 
