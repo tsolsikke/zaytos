@@ -91,3 +91,8 @@ paging-test-no-invlpg = ["paging-test-unmap-fault"]
 paging-test-unmap-fault = ["paging-test"]
 # 稼働中のヒープが載る 2MiB ページを、使いながら分割する。
 paging-test-split-heap = ["paging-test"]
+# direct map の窓を高位 base ではなく低位（phys、恒等と同じ）で張る。
+# 恒等が phys->phys を張っているので起動は検証手前まで正常に進むが、
+# 独立 walker が DIRECT_MAP_BASE + phys を辿ると NotPresent で止まる。
+# 高位窓が存在することそのものを検査していることの証明（A-1）。
+paging-test-directmap-low-window = ["paging-test"]

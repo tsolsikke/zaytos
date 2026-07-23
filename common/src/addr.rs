@@ -329,6 +329,15 @@ impl DirectMap {
     /// 表せないと、境界の計算のたびに特別扱いが要る。
     pub const IDENTITY_MAX_LENGTH: u64 = 0x0000_7FFF_FFFF_F000;
 
+    /// direct physical map の高位窓の起点（ADR-0021）。
+    ///
+    /// 正規形の上半分の先頭で、512GiB 境界（当然 2MiB 境界）に載っている。
+    /// higher-half 移行の A で、`phys_to_virt(p) = DIRECT_MAP_BASE + p` の
+    /// 窓をページテーブルへ張り、A-2 で [`replace_direct_map`] により登録
+    /// 窓をこの base へ差し替える。base が 2MiB 境界にあるため、
+    /// `DIRECT_MAP_BASE + phys` のアラインメントは `phys` のそれと一致する。
+    pub const DIRECT_MAP_BASE: u64 = 0xFFFF_8000_0000_0000;
+
     pub const fn base(self) -> VirtAddr {
         self.base
     }

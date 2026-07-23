@@ -411,6 +411,20 @@ const PAGING_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // A-1 の direct map 窓を高位ではなく低位で張る。独立 walker が高位窓の
+    // 不在を検出し、CR3 を切り替えずに止まること。壊れていなければ
+    // `direct-map: verified` まで進むので、それを forbidden にして対にする。
+    CriticalTest {
+        name: "directmap-low-window",
+        feature: "paging-test-directmap-low-window",
+        expected_markers: &["does not resolve: NotPresent", "refusing to switch CR3"],
+        forbidden_markers: &[
+            "direct-map: verified",
+            "direct-map: CR3 switch instruction executed",
+        ],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
 ];
 
 /// カーネルが起動したことを示す、シリアルログの既知の行。

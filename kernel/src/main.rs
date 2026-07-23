@@ -671,6 +671,15 @@ extern "sysv64" fn kernel_main() -> ! {
         "paging: CR3 switch verified. now running under self-built page tables."
     ));
 
+    // === higher-half A-1: direct physical map の導入 ===
+    //
+    // 恒等と direct map 窓（DIRECT_MAP_BASE + phys）の両方を持つ新テーブルを
+    // 構築し、CR3 を切り替える。恒等は外さない（B の領域）。登録 DirectMap は
+    // 恒等のまま保つ（差し替えは A-2 の replace_direct_map）。ヒープ初期化より
+    // 前に置くので、載せ替えるべき低位ポインタはまだ存在しない（ADR-0021 の
+    // Addendum、判断2）。
+    build_and_switch_direct_map(&mut logger, &mut allocator, &mapped_ranges);
+
     // === M3-c-3: 画面コンソール ===
     //
     // ここより前のログはシリアルにしか出ない。コンソールはバックバッファの
@@ -2614,6 +2623,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "稼働中のヒープが載るページを分割する",
     ),
     (
+        "paging-test-directmap-low-window",
+        cfg!(feature = "paging-test-directmap-low-window"),
+        "direct map の窓を高位ではなく低位（恒等と同じ）で張る",
+    ),
+    (
         "exception-test",
         cfg!(feature = "exception-test"),
         "起動完了後に意図的な例外を起こす",
@@ -2949,6 +2963,342 @@ fn report_mapping_granularity(
 /// ELF をどこへ置いたかで決まるものであって、direct map の窓とは無関係で
 /// ある。移行時にこの関数の中身をその差へ書き換えること。
 /// 詳細は `docs/deferred-decisions.md` を参照。
+/// higher-half A-1: 恒等と direct map 窓の両方を持つ新テーブルを構築し、
+/// CR3 を切り替える（ADR-0021 の Addendum）。
+///
+/// # やること・やらないこと
+///
+/// 恒等マッピングは外さない。direct map 窓（`DIRECT_MAP_BASE + phys`）を
+/// 足すだけで、RSP・ヒープ・boot_info はすべて低位のまま動き続ける。恒等の
+/// 除去はカーネルイメージの高位化（B）と不可分なので、A では行わない。
+///
+/// 登録 DirectMap は恒等（base=0）のまま保つ。差し替えは A-2 の
+/// `replace_direct_map` で行う。したがって `direct_map()` を通す既存経路は
+/// 恒等アドレスを返し続け、新テーブルの恒等側で到達可能なままである。
+///
+/// kernel イメージの高位マッピングは含めない。それは H-2 が別テーブルで
+/// 扱う。ここが張るのは恒等と direct map 窓の 2 つだけである。
+///
+/// # 検証の独立性
+///
+/// 構築は `map_page` / `map_range`（`table` の式）で行い、検証は
+/// `verify::walk`（別に書き直した式）で辿る。恒等部分の照合は、入力の
+/// `mapped` と突き合わせるのではなく、稼働中テーブル（M2-d が切り替えた
+/// 実体）を `active::translate` で読み戻した実状態と突き合わせる。同じ入力
+/// から同じ式で作ったものを検算しないためである。
+///
+/// # 移設の余地
+///
+/// B でこの窓構築を bootloader 側へ移す可能性があるため、kernel 専用の
+/// グローバル状態に依存させず、引数（テーブルアクセス用の窓・アロケータ・
+/// マップ範囲）だけで完結させてある。登録 `direct_map()` はテーブルフレーム
+/// アクセスにのみ引く（恒等であることに依存する箇所は無い）。
+fn build_and_switch_direct_map(
+    logger: &mut Logger<SerialPort>,
+    allocator: &mut frame_allocator::FrameAllocator<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
+    mapped: &MappedRanges<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
+) {
+    use common::addr::{DirectMap, VirtAddr};
+    use kernel::paging::{active::ActivePageTable, verify};
+
+    // 構築中のテーブルフレームは、登録済みの窓（現在は恒等）を通して読み書き
+    // する。M2-d のビルダーと同じ経路である。
+    let access = common::addr::direct_map();
+
+    let mut builder = match PageTableBuilder::new(allocator, access) {
+        Ok(builder) => builder,
+        Err(error) => {
+            logger.error(format_args!(
+                "direct-map: failed to start the build: {error:?}"
+            ));
+            cpu::halt_forever();
+        }
+    };
+
+    // --- 恒等部分（現在の plan と同一） ---
+    let mut identity_error = None;
+    resolve_pages(mapped, |m| {
+        if identity_error.is_some() {
+            return;
+        }
+        if let Err(e) = builder.map_page(m.phys_addr, m.huge, m.cacheable) {
+            identity_error = Some(e);
+        }
+    });
+    if let Some(error) = identity_error {
+        logger.error(format_args!("direct-map: identity build failed: {error:?}"));
+        cpu::halt_forever();
+    }
+
+    // --- direct map 窓（DIRECT_MAP_BASE + phys） ---
+    //
+    // cacheable は classify 由来をそのまま引き継ぐ（フレームバッファ・MMIO は
+    // PCD）。`map_range` が仮想・物理の両方のアラインメントで 2MiB 昇格を
+    // 判定する。G ビットと NX（bit 63）は立てない（EFER.NXE 未有効。
+    // ADR-0021）。
+    //
+    // paging-test-directmap-low-window: 窓を高位ではなく低位（phys、恒等と
+    // 同じ）で張る。恒等が既に phys->phys を張っているので起動は検証手前まで
+    // 進むが、切り替え前の walker 検証が DIRECT_MAP_BASE + phys を辿って
+    // NotPresent で捕まえる。高位窓が存在することそのものを検査していることの
+    // 証明である。
+    let window_base = if cfg!(feature = "paging-test-directmap-low-window") {
+        0
+    } else {
+        DirectMap::DIRECT_MAP_BASE
+    };
+    for r in mapped.iter() {
+        let Some(virt) = VirtAddr::new(window_base.wrapping_add(r.start.as_u64())) else {
+            logger.error(format_args!(
+                "direct-map: window virtual base for phys {:#x} is not canonical; halting",
+                r.start.as_u64()
+            ));
+            cpu::halt_forever();
+        };
+        let len = r.end.as_u64() - r.start.as_u64();
+        if let Err(e) = builder.map_range(virt, r.start, len, r.cacheable) {
+            logger.error(format_args!(
+                "direct-map: window map_range at {:#x} (phys {:#x}, len {:#x}) failed: {e:?}",
+                virt.as_u64(),
+                r.start.as_u64(),
+                len
+            ));
+            cpu::halt_forever();
+        }
+    }
+
+    let new_pml4 = builder.pml4_phys();
+    let frames_used = builder.frames_used();
+    logger.info(format_args!(
+        "direct-map: built a new table at PML4 {:#x} using {frames_used} frame(s) ({} KiB), \
+         window base {:#x}",
+        new_pml4.as_u64(),
+        frames_used * frame_allocator::FRAME_SIZE / 1024,
+        window_base
+    ));
+
+    // --- 切り替え前の独立検証（新テーブルはまだ稼働していない） ---
+    //
+    // 新テーブルのフレームは、現在稼働中の恒等マッピングで読める。ここで
+    // 壊れた窓（low-window）を捕まえ、壊れていれば切り替えずに停止する。
+    // SAFETY: 現在の CR3 は M2-d の恒等テーブルを指しており、その配下は
+    // 恒等で読める（`current` の契約）。
+    let live = unsafe { ActivePageTable::current(access) };
+
+    let mut identity_checked = 0u32;
+    let mut identity_mismatches = 0u32;
+    let mut window_checked = 0u32;
+    let mut window_mismatches = 0u32;
+    let mut huge_seen = false;
+
+    for r in mapped.iter() {
+        // 各範囲について、先頭・末尾直前・内部の 2MiB 境界を標本にする。
+        // 2MiB 境界は昇格した窓ページ（huge=true）を踏むための位置である。
+        let last = r.end.checked_sub(1).unwrap_or(r.start);
+        let mut probes = [Some(r.start), Some(last), None];
+        if let Some(boundary) = r.start.align_up(kernel::paging::plan::PAGE_SIZE_2M) {
+            if boundary < r.end {
+                probes[2] = Some(boundary);
+            }
+        }
+
+        for probe in probes.into_iter().flatten() {
+            // 恒等側: 稼働中テーブルの実状態（active::translate、`entry` の式）と
+            // 新テーブル（verify::walk、別の式）が、同じ物理へ解決すること。
+            if let Some(virt) = VirtAddr::new(probe.as_u64()) {
+                identity_checked += 1;
+                let live_phys = match live.translate(virt) {
+                    Ok(Some(t)) => Some(t.phys),
+                    _ => None,
+                };
+                // SAFETY: new_pml4 は今構築したテーブルで、恒等で読める。
+                let new_phys = match unsafe { verify::walk(new_pml4, access, virt) } {
+                    Ok(res) => Some(res.phys),
+                    Err(_) => None,
+                };
+                if live_phys != Some(probe) || new_phys != Some(probe) {
+                    identity_mismatches += 1;
+                    logger.error(format_args!(
+                        "direct-map: identity probe {:#x}: live={:?} new={:?} (expected {:#x})",
+                        virt.as_u64(),
+                        live_phys.map(|p| p.as_u64()),
+                        new_phys.map(|p| p.as_u64()),
+                        probe.as_u64()
+                    ));
+                }
+            }
+
+            // 窓側: DIRECT_MAP_BASE + phys が phys へ解決すること。窓の base は
+            // 常に高位で辿る（構築が低位で張られていれば、ここで NotPresent に
+            // なって捕まる）。
+            if let Some(virt) =
+                VirtAddr::new(DirectMap::DIRECT_MAP_BASE.wrapping_add(probe.as_u64()))
+            {
+                window_checked += 1;
+                // SAFETY: 上と同じ。
+                match unsafe { verify::walk(new_pml4, access, virt) } {
+                    Ok(res) if res.phys == probe => {
+                        if res.huge {
+                            huge_seen = true;
+                        }
+                    }
+                    Ok(res) => {
+                        window_mismatches += 1;
+                        logger.error(format_args!(
+                            "direct-map: window probe {:#x} resolves to {:#x}, expected {:#x}",
+                            virt.as_u64(),
+                            res.phys.as_u64(),
+                            probe.as_u64()
+                        ));
+                    }
+                    Err(e) => {
+                        window_mismatches += 1;
+                        logger.error(format_args!(
+                            "direct-map: window probe {:#x} does not resolve: {e:?} (expected {:#x})",
+                            virt.as_u64(),
+                            probe.as_u64()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    logger.info(format_args!(
+        "direct-map: pre-switch check: identity {identity_checked} probe(s) mismatches={identity_mismatches}, \
+         window {window_checked} probe(s) mismatches={window_mismatches}, saw a 2MiB window page={huge_seen}"
+    ));
+    if identity_mismatches > 0 || window_mismatches > 0 {
+        logger.error(format_args!(
+            "direct-map: the new table does not match (see mismatches above); refusing to switch CR3; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    // --- CR3 を新テーブルへ切り替える（M2-d と同じ作法） ---
+    if !new_pml4.is_aligned(0x1000) {
+        logger.error(format_args!(
+            "direct-map: new PML4 {:#x} is not 4KiB aligned; refusing to switch CR3",
+            new_pml4.as_u64()
+        ));
+        cpu::halt_forever();
+    }
+
+    // 切り替え後の低位到達性を確かめる材料。恒等側の既知バイトを控える。
+    let (kernel_start_phys, _) = kernel_image_phys_range();
+    let kernel_start = kernel_start_phys.as_u64();
+    // SAFETY: kernel_start は恒等でマップ済み（M2-d の必須領域検証を通過して
+    // いる）。読み取りのみ。
+    let kernel_byte_before = unsafe { core::ptr::read_volatile(kernel_start as *const u8) };
+
+    // SAFETY: 直前の切り替え前検証により、恒等側に現在の RIP・RSP・pml4 の
+    // フレームがすべて含まれていることを確認済み（恒等は M2-d と解決が一致）。
+    unsafe {
+        paging::switch::switch_to(new_pml4);
+    }
+    logger.info(format_args!("direct-map: CR3 switch instruction executed"));
+
+    let new_cr3 = paging::switch::read_cr3();
+    if new_cr3 != new_pml4 {
+        logger.error(format_args!(
+            "direct-map: CR3 readback {:#x} (expected {:#x}); halting",
+            new_cr3.as_u64(),
+            new_pml4.as_u64()
+        ));
+        cpu::halt_forever();
+    }
+    logger.info(format_args!(
+        "direct-map: CR3 readback OK ({:#x})",
+        new_cr3.as_u64()
+    ));
+
+    let mut post_ok = true;
+
+    // (c) 低位（恒等）が切り替え後も生きていること。
+    // SAFETY: kernel_start は新テーブルの恒等側にも含まれる。読み取りのみ。
+    let kernel_byte_after = unsafe { core::ptr::read_volatile(kernel_start as *const u8) };
+    let identity_alive = kernel_byte_after == kernel_byte_before;
+    logger.info(format_args!(
+        "direct-map: identity still reachable after switch = {identity_alive}"
+    ));
+    post_ok &= identity_alive;
+
+    // (d) 窓経由の読み取りが、恒等経由と同じ物理を指すこと。
+    let Some(kernel_window_virt) =
+        VirtAddr::new(DirectMap::DIRECT_MAP_BASE.wrapping_add(kernel_start))
+    else {
+        logger.error(format_args!(
+            "direct-map: kernel window address is not canonical; halting"
+        ));
+        cpu::halt_forever();
+    };
+    // SAFETY: kernel_start は kernel image の範囲内で、その範囲は窓の構築
+    // 対象（map_range で全ページを張る）である。切り替え前の窓プローブが
+    // その範囲の境界で解決を確認している（当該アドレス自体をプローブして
+    // いるのではなく、範囲を全張りした構築と、境界での独立検証に依る）。
+    // 読み取りのみ。
+    let kernel_byte_via_window =
+        unsafe { core::ptr::read_volatile(kernel_window_virt.as_ptr::<u8>()) };
+    let window_read_ok = kernel_byte_via_window == kernel_byte_before;
+    logger.info(format_args!(
+        "direct-map: read via the window {:#x} matches identity = {window_read_ok}",
+        kernel_window_virt.as_u64()
+    ));
+    post_ok &= window_read_ok;
+
+    // (e) 別名の直接証明。窓経由で書いて、恒等経由で読む。同じ物理が 2 つの
+    // 仮想から見えることの直接の証明であり、ADR-0021 の移行が機能する核心。
+    if let Some(scratch) = allocator.allocate_frame() {
+        let scratch_phys = scratch.as_u64();
+        let Some(scratch_window_virt) =
+            VirtAddr::new(DirectMap::DIRECT_MAP_BASE.wrapping_add(scratch_phys))
+        else {
+            logger.error(format_args!(
+                "direct-map: scratch window address is not canonical; halting"
+            ));
+            cpu::halt_forever();
+        };
+        const ALIAS_PATTERN: u64 = 0xA11A_5000_D1EC_7000;
+        // SAFETY: scratch は今確保した空きフレームで、恒等側にも窓側にも
+        // マップ済み（切り替え前検証で恒等を、窓の probe で高位を確認した
+        // 範囲に属する空き RAM）。他の誰も参照していない。書いて読むだけで、
+        // このあと解放する。
+        let (via_identity, via_window) = unsafe {
+            core::ptr::write_volatile(scratch_window_virt.as_mut_ptr::<u64>(), ALIAS_PATTERN);
+            let via_identity = core::ptr::read_volatile(scratch_phys as *const u64);
+            let via_window = core::ptr::read_volatile(scratch_window_virt.as_ptr::<u64>());
+            (via_identity, via_window)
+        };
+        let alias_ok = via_identity == ALIAS_PATTERN && via_window == ALIAS_PATTERN;
+        logger.info(format_args!(
+            "direct-map: wrote {ALIAS_PATTERN:#x} via window {:#x}, read {:#x} via identity {:#x} = {alias_ok}",
+            scratch_window_virt.as_u64(),
+            via_identity,
+            scratch_phys
+        ));
+        post_ok &= alias_ok;
+        let _ = allocator.deallocate_frame(scratch);
+    } else {
+        logger.error(format_args!(
+            "direct-map: could not allocate a scratch frame for the alias proof"
+        ));
+        post_ok = false;
+    }
+
+    if !post_ok {
+        logger.error(format_args!(
+            "direct-map: one or more post-switch checks failed (see above); halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "direct-map: verified. identity kept, direct map window live at base {:#x}. \
+         the registered window stays identity until A-2.",
+        DirectMap::DIRECT_MAP_BASE
+    ));
+}
+
 /// kernel イメージの高位マッピングを持つ新しいテーブルを構築し、検証する（H-2）。
 ///
 /// # この段階でやること・やらないこと
