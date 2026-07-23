@@ -19,22 +19,38 @@ use core::ptr::addr_of;
 
 use layout::{
     tss_descriptor, user_segment_descriptor, SegmentSelector, TaskStateSegment, KERNEL_CODE_ACCESS,
-    KERNEL_CODE_FLAGS, KERNEL_DATA_ACCESS, KERNEL_DATA_FLAGS,
+    KERNEL_CODE_FLAGS, KERNEL_DATA_ACCESS, KERNEL_DATA_FLAGS, USER_CODE32_FLAGS, USER_CODE64_FLAGS,
+    USER_CODE_ACCESS, USER_DATA_ACCESS, USER_DATA_FLAGS,
 };
 
-/// GDT のエントリ数。null / コード / データ / TSS（16 バイト = 2 スロット）。
-const GDT_ENTRY_COUNT: usize = 5;
+/// GDT のエントリ数。null / カーネルコード / カーネルデータ / ユーザーコード32 /
+/// ユーザーデータ / ユーザーコード64 / TSS（16 バイト = 2 スロット）。並びは
+/// SYSCALL/SYSRET の STAR 互換順に固定する（ADR-0020）。
+const GDT_ENTRY_COUNT: usize = 8;
 
-const NULL_INDEX: u16 = 0;
-const KERNEL_CODE_INDEX: u16 = 1;
-const KERNEL_DATA_INDEX: u16 = 2;
-/// TSS は 16 バイトなので、ここから 2 スロットを占める。
-const TSS_INDEX: u16 = 3;
+pub const NULL_INDEX: u16 = 0;
+pub const KERNEL_CODE_INDEX: u16 = 1;
+pub const KERNEL_DATA_INDEX: u16 = 2;
+/// ユーザー 32bit コード。STAR 互換順を満たす枠で、M5-e/f では使わない。
+pub const USER_CODE32_INDEX: u16 = 3;
+/// ユーザーデータ（SYSRET では STAR 基準 +8）。
+pub const USER_DATA_INDEX: u16 = 4;
+/// ユーザー 64bit コード（SYSRET では STAR 基準 +16）。
+pub const USER_CODE64_INDEX: u16 = 5;
+/// TSS は 16 バイトなので、ここから 2 スロット（6, 7）を占める。ユーザー用
+/// ディスクリプタを STAR 互換順に前へ置いたため、M4-a の index 3 から後ろへ
+/// ずれた（M5-e-1）。
+const TSS_INDEX: u16 = 6;
 
 /// カーネルコードセグメントのセレクタ。M4-b の IDT エントリが参照する。
 pub const KERNEL_CODE_SELECTOR: SegmentSelector = SegmentSelector::new(KERNEL_CODE_INDEX, 0);
 /// カーネルデータセグメントのセレクタ。
 pub const KERNEL_DATA_SELECTOR: SegmentSelector = SegmentSelector::new(KERNEL_DATA_INDEX, 0);
+/// ユーザー 64bit コードのセレクタ（RPL=3）。M5-e-3 の iretq 偽フレームで CS に
+/// 積む。
+pub const USER_CODE_SELECTOR: SegmentSelector = SegmentSelector::new(USER_CODE64_INDEX, 3);
+/// ユーザーデータのセレクタ（RPL=3）。M5-e-3 の iretq 偽フレームで SS に積む。
+pub const USER_DATA_SELECTOR: SegmentSelector = SegmentSelector::new(USER_DATA_INDEX, 3);
 /// TSS のセレクタ。`ltr` に渡す。
 pub const TSS_SELECTOR: SegmentSelector = SegmentSelector::new(TSS_INDEX, 0);
 
@@ -99,6 +115,14 @@ pub unsafe fn init(double_fault_stack_top: u64, page_fault_stack_top: u64) {
             user_segment_descriptor(KERNEL_CODE_ACCESS, KERNEL_CODE_FLAGS);
         (*gdt)[KERNEL_DATA_INDEX as usize] =
             user_segment_descriptor(KERNEL_DATA_ACCESS, KERNEL_DATA_FLAGS);
+        // ユーザー用（Ring 3、DPL=3）。並びは STAR 互換順（ADR-0020）。M5-e-3 が
+        // 使うのは ucode64 と udata で、ucode32 は枠を埋めるためだけに置く。
+        (*gdt)[USER_CODE32_INDEX as usize] =
+            user_segment_descriptor(USER_CODE_ACCESS, USER_CODE32_FLAGS);
+        (*gdt)[USER_DATA_INDEX as usize] =
+            user_segment_descriptor(USER_DATA_ACCESS, USER_DATA_FLAGS);
+        (*gdt)[USER_CODE64_INDEX as usize] =
+            user_segment_descriptor(USER_CODE_ACCESS, USER_CODE64_FLAGS);
         (*gdt)[TSS_INDEX as usize] = tss_low;
         (*gdt)[TSS_INDEX as usize + 1] = tss_high;
     }
@@ -186,6 +210,25 @@ pub fn current_gdt() -> (u64, u16) {
         );
     }
     (pointer.base, pointer.limit)
+}
+
+/// GDTR が指す稼働中の GDT から、`index` 番目の 8 バイトディスクリプタを
+/// 読み戻す。
+///
+/// `sgdt` で得た base から読むので、`GDT` 静的変数ではなく CPU が今参照して
+/// いる実体を見る（A-1 / M2-d と同じく「設定したつもり」ではなく実状態を
+/// 確認する）。TSS のような 16 バイトディスクリプタは、下位・上位を別々の
+/// index で読む。
+pub fn loaded_descriptor(index: usize) -> u64 {
+    let (base, _limit) = current_gdt();
+    // SAFETY: base は sgdt が返した稼働中 GDT の先頭。index はテーブル内
+    // （呼び出し側が GDT_ENTRY_COUNT 未満で渡す）。読み取りのみ。
+    unsafe { core::ptr::read_volatile((base as *const u64).add(index)) }
+}
+
+/// 稼働中の GDT に期待される limit（バイト数 - 1）。読み戻しの照合に使う。
+pub fn expected_gdt_limit() -> u16 {
+    (GDT_ENTRY_COUNT * core::mem::size_of::<u64>() - 1) as u16
 }
 
 /// 現在の CS セレクタ。

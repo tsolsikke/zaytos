@@ -47,6 +47,9 @@ pub mod access {
     pub const READ_WRITE: u8 = 1 << 1;
     /// 使用可能な 64bit TSS を表すシステムディスクリプタ型。
     pub const TSS_AVAILABLE: u8 = 0x9;
+    /// DPL（Descriptor Privilege Level）= 3。アクセスバイトの bit 6:5 に入る。
+    /// ユーザー（Ring 3）用のコード/データディスクリプタで立てる（M5-e）。
+    pub const DPL_RING3: u8 = 3 << 5;
 }
 
 /// フラグニブル（ディスクリプタ第 6 バイトの上位 4 ビット）。
@@ -70,6 +73,25 @@ pub const KERNEL_CODE_FLAGS: u8 = flags::GRANULARITY_4K | flags::LONG_MODE;
 /// データセグメントのフラグ。ロングモードでは実質無視されるが、
 /// 32bit 互換の意味で妥当な値を入れておく。
 pub const KERNEL_DATA_FLAGS: u8 = flags::GRANULARITY_4K | flags::DEFAULT_OPERAND_32;
+
+/// ユーザー（Ring 3）64bit コードセグメントのアクセスバイト。カーネルコードと
+/// 同じく実行可能・読み取り可能で、DPL=3 だけが異なる（M5-e）。
+pub const USER_CODE_ACCESS: u8 = KERNEL_CODE_ACCESS | access::DPL_RING3;
+/// ユーザー（Ring 3）データセグメントのアクセスバイト。カーネルデータと
+/// DPL=3 だけが異なる。
+pub const USER_DATA_ACCESS: u8 = KERNEL_DATA_ACCESS | access::DPL_RING3;
+/// ユーザー 64bit コードセグメントのフラグ。カーネルコードと同じ
+/// （`DEFAULT_OPERAND_32` は立てず `LONG_MODE`）。
+pub const USER_CODE64_FLAGS: u8 = KERNEL_CODE_FLAGS;
+/// ユーザー 32bit コードセグメントのフラグ。SYSRET の STAR 互換順を満たす
+/// ためだけの枠で、M5-e/f では実際には使わない。32bit コードなので
+/// `DEFAULT_OPERAND_32` を立て `LONG_MODE` は立てない。妥当なディスクリプタに
+/// はする（`P`・コード・DPL=3）。
+pub const USER_CODE32_FLAGS: u8 = flags::GRANULARITY_4K | flags::DEFAULT_OPERAND_32;
+/// ユーザーデータセグメントのフラグ。カーネルデータと同じにする。**設計上の
+/// 仮定にとどめず、稼働中の kdata の実バイトと D/B が一致することを起動時に
+/// 読み戻しで確認する**（M5-e-1 の検証）。
+pub const USER_DATA_FLAGS: u8 = KERNEL_DATA_FLAGS;
 
 /// コード/データ用の 8 バイトディスクリプタを組み立てる。
 ///
@@ -193,6 +215,44 @@ mod tests {
     fn the_kernel_data_descriptor_matches_the_well_known_value() {
         let descriptor = user_segment_descriptor(KERNEL_DATA_ACCESS, KERNEL_DATA_FLAGS);
         assert_eq!(descriptor, 0x00CF_9200_0000_FFFF);
+    }
+
+    #[test]
+    fn the_user_descriptors_match_the_well_known_values() {
+        // ユーザー用は、対応するカーネル用と DPL=3（アクセスバイトの 0x60）
+        // だけが異なる。ucode32 は 32bit（フラグに D/B）。
+        let ucode64 = user_segment_descriptor(USER_CODE_ACCESS, USER_CODE64_FLAGS);
+        let ucode32 = user_segment_descriptor(USER_CODE_ACCESS, USER_CODE32_FLAGS);
+        let udata = user_segment_descriptor(USER_DATA_ACCESS, USER_DATA_FLAGS);
+        assert_eq!(ucode64, 0x00AF_FA00_0000_FFFF);
+        assert_eq!(ucode32, 0x00CF_FA00_0000_FFFF);
+        assert_eq!(udata, 0x00CF_F200_0000_FFFF);
+    }
+
+    #[test]
+    fn the_user_access_bytes_set_dpl_three() {
+        assert_eq!(USER_CODE_ACCESS & (0b11 << 5), access::DPL_RING3);
+        assert_eq!(USER_DATA_ACCESS & (0b11 << 5), access::DPL_RING3);
+        // DPL 以外はカーネル用と一致する。
+        assert_eq!(USER_CODE_ACCESS & !(0b11 << 5), KERNEL_CODE_ACCESS);
+        assert_eq!(USER_DATA_ACCESS & !(0b11 << 5), KERNEL_DATA_ACCESS);
+    }
+
+    #[test]
+    fn the_user_code_flavours_differ_only_in_long_versus_operand_size() {
+        // ucode64 は L=1 かつ D/B=0、ucode32 は L=0 かつ D/B=1。64bit コードで
+        // L と D/B を同時に立てるのは不正（カーネルコードの既存テストの対）。
+        assert_ne!(USER_CODE64_FLAGS & flags::LONG_MODE, 0);
+        assert_eq!(USER_CODE64_FLAGS & flags::DEFAULT_OPERAND_32, 0);
+        assert_eq!(USER_CODE32_FLAGS & flags::LONG_MODE, 0);
+        assert_ne!(USER_CODE32_FLAGS & flags::DEFAULT_OPERAND_32, 0);
+    }
+
+    #[test]
+    fn the_user_data_flags_match_the_kernel_data_flags() {
+        // 設計上は kdata と同じ。実バイトの一致（D/B を含む）は起動時に
+        // 読み戻しで確認するが、定数レベルでも揃っていることを固定する。
+        assert_eq!(USER_DATA_FLAGS, KERNEL_DATA_FLAGS);
     }
 
     /// 64bit コードセグメントで L と D/B を同時に立てると不正になる。

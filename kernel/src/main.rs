@@ -1244,6 +1244,141 @@ fn announce_console_start(logger: &mut Logger<SerialPort>, console: &mut Console
     ));
 }
 
+/// 稼働中の GDT のディスクリプタを 1 本ずつ読み戻し、期待値と照合する（M5-e-1）。
+///
+/// カーネルコード/データに加え、M5-e で足したユーザー用（ucode32 / udata /
+/// ucode64、DPL=3、STAR 互換順）と TSS を確認する。Ring 3 遷移はまだ行わない
+/// （M5-e-3）。ここでは「GDT が今持っている値」を読み、DPL・type・並びが期待
+/// どおりであることを保証する。設計上の仮定ではなく実状態を見る。
+fn verify_gdt_descriptors(logger: &mut Logger<SerialPort>, gdt_limit: u16) {
+    use gdt::layout::{
+        user_segment_descriptor, KERNEL_CODE_ACCESS, KERNEL_CODE_FLAGS, KERNEL_DATA_ACCESS,
+        KERNEL_DATA_FLAGS, USER_CODE32_FLAGS, USER_CODE64_FLAGS, USER_CODE_ACCESS,
+        USER_DATA_ACCESS, USER_DATA_FLAGS,
+    };
+
+    // limit は「サイズ - 1」。並びを変えて枠が増えた分、値も変わる。
+    let expected_limit = gdt::expected_gdt_limit();
+    logger.info(format_args!(
+        "gdt: limit={gdt_limit} (expected {expected_limit})"
+    ));
+
+    // 8 バイトのコード/データディスクリプタ 5 本。期待値は稼働中の GDT を
+    // 組んだのと同じ layout 関数から作る。
+    let entries: [(&str, usize, u64, u8); 5] = [
+        (
+            "kcode",
+            gdt::KERNEL_CODE_INDEX as usize,
+            user_segment_descriptor(KERNEL_CODE_ACCESS, KERNEL_CODE_FLAGS),
+            0,
+        ),
+        (
+            "kdata",
+            gdt::KERNEL_DATA_INDEX as usize,
+            user_segment_descriptor(KERNEL_DATA_ACCESS, KERNEL_DATA_FLAGS),
+            0,
+        ),
+        (
+            "ucode32",
+            gdt::USER_CODE32_INDEX as usize,
+            user_segment_descriptor(USER_CODE_ACCESS, USER_CODE32_FLAGS),
+            3,
+        ),
+        (
+            "udata",
+            gdt::USER_DATA_INDEX as usize,
+            user_segment_descriptor(USER_DATA_ACCESS, USER_DATA_FLAGS),
+            3,
+        ),
+        (
+            "ucode64",
+            gdt::USER_CODE64_INDEX as usize,
+            user_segment_descriptor(USER_CODE_ACCESS, USER_CODE64_FLAGS),
+            3,
+        ),
+    ];
+
+    // CPU は、セグメントセレクタをセグメントレジスタへロードした際に、その
+    // ディスクリプタの Accessed ビット（アクセスバイトの bit 0 = ディスクリプタの
+    // bit 40）を 1 にする。kdata は起動時に DS/ES/SS/FS/GS へロード済みなので、
+    // 実状態では Accessed が立ち、書き込んだ値（0x92）と食い違う（0x93）。これは
+    // 検証したい DPL/type/並びとは別の CPU 管理のビットなので照合から除外する。
+    // ユーザー用ディスクリプタはまだどのレジスタにもロードしていない（Ring 3 は
+    // M5-e-3）ため Accessed は 0 のままで、書き込んだ値と一致する。
+    const ACCESSED: u64 = 1 << 40;
+
+    let mut all_ok = expected_limit == gdt_limit;
+    for (name, index, expected, expected_dpl) in entries {
+        let loaded = gdt::loaded_descriptor(index);
+        let dpl = ((loaded >> 45) & 0b11) as u8;
+        let present = (loaded >> 47) & 1;
+        let accessed = (loaded >> 40) & 1;
+        // アクセスバイトの S（bit 44）が 1 ならコード/データ、Executable
+        // （bit 43）でコードかデータかが分かる。
+        let user_segment = (loaded >> 44) & 1;
+        let executable = (loaded >> 43) & 1;
+        let kind = if user_segment == 0 {
+            "system"
+        } else if executable == 1 {
+            "code"
+        } else {
+            "data"
+        };
+        logger.info(format_args!(
+            "gdt[{index}] {name}: {loaded:#018x} DPL={dpl} present={present} kind={kind} \
+             accessed={accessed} (expected {expected:#018x}, accessed bit is CPU-managed)"
+        ));
+        let matches = (loaded & !ACCESSED) == (expected & !ACCESSED) && dpl == expected_dpl;
+        all_ok &= matches;
+    }
+
+    // udata の D/B を、設計の仮定ではなく稼働中の kdata の実バイトへ揃えたことの
+    // 確認（運用者指示）。ロングモードでデータの D/B は無視されうるが、既知値
+    // 照合が「kdata と同じ」を前提にしているため、両者の D/B（フラグニブルの
+    // bit 2、ディスクリプタの bit 54）が一致することを実状態で確かめる。
+    let loaded_kdata = gdt::loaded_descriptor(gdt::KERNEL_DATA_INDEX as usize);
+    let loaded_udata = gdt::loaded_descriptor(gdt::USER_DATA_INDEX as usize);
+    let kdata_db = (loaded_kdata >> 54) & 1;
+    let udata_db = (loaded_udata >> 54) & 1;
+    logger.info(format_args!(
+        "gdt: kdata D/B={kdata_db}, udata D/B={udata_db} (must match; udata follows kdata)"
+    ));
+    all_ok &= kdata_db == udata_db;
+
+    // TSS は 16 バイトのシステムディスクリプタ（index 6-7）。base が実体を指し、
+    // S=0（システム）・present であることを確かめる。type は available TSS(0x9)
+    // として書くが、**ltr がロード時に busy ビットを立てて 0xB にする**ので、
+    // 実状態では 0xB になる。Accessed と同じく CPU 管理のビットなので、両方を
+    // 許容する（0x9 = available、0xB = busy、違いは bit 1 のみ）。
+    let tss_low = gdt::loaded_descriptor(gdt::TSS_SELECTOR.index() as usize);
+    let tss_present = (tss_low >> 47) & 1;
+    let tss_system = (tss_low >> 44) & 1; // S ビット。TSS は 0。
+    let tss_type = ((tss_low >> 40) & 0xF) as u8;
+    let tss_base_lo = ((tss_low >> 16) & 0xFF_FFFF) | (((tss_low >> 56) & 0xFF) << 24);
+    let tss_high = gdt::loaded_descriptor(gdt::TSS_SELECTOR.index() as usize + 1);
+    let tss_base = tss_base_lo | ((tss_high & 0xFFFF_FFFF) << 32);
+    logger.info(format_args!(
+        "gdt[{}] tss: base={tss_base:#x} (expected {:#x}) present={tss_present} S={tss_system} \
+         type={tss_type:#x} (0xb = busy, set by ltr)",
+        gdt::TSS_SELECTOR.index(),
+        gdt::tss_base()
+    ));
+    let tss_type_ok = tss_type == 0x9 || tss_type == 0xB;
+    let tss_ok = tss_present == 1 && tss_system == 0 && tss_type_ok && tss_base == gdt::tss_base();
+    all_ok &= tss_ok;
+
+    if !all_ok {
+        logger.error(format_args!(
+            "gdt: a descriptor read-back did not match the expected value (DPL/type/limit/order); \
+             halting"
+        ));
+        cpu::halt_forever();
+    }
+    logger.info(format_args!(
+        "gdt: all descriptors match (kernel + user DPL=3 in STAR-compatible order, TSS at new index)"
+    ));
+}
+
 /// GDT / TSS / スタック切り替えの結果をログに残す（M4-a）。
 ///
 /// M2-d の CR3 切り替えと同じ作法で、切り替え後に「実際に読み戻した値」を
@@ -1272,6 +1407,8 @@ fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
         ));
         cpu::halt_forever();
     }
+
+    verify_gdt_descriptors(logger, gdt_limit);
 
     logger.info(format_args!(
         "tss: base={:#x} IST{}={:#x} RSP0={:#x}",
