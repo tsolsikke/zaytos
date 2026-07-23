@@ -209,6 +209,8 @@ pub enum MapUpdateError {
     GlobalPagePresent,
     /// ページテーブル用のフレームを確保できなかった。
     OutOfFrames,
+    /// 張ろうとした葉が既に present。二重マップを黙って上書きしない（M5-e-2）。
+    AlreadyMapped,
 }
 
 /// 分割の結果。呼び出し側が照合に使う。
@@ -487,6 +489,137 @@ impl ActivePageTable {
         };
 
         Ok(pte)
+    }
+
+    /// 稼働中テーブルへ 4KiB ページを 1 枚張る（M5-e-2）。
+    ///
+    /// 途中の中間テーブル（PDPT/PD/PT）が不在なら確保して作る。`user` が真なら、
+    /// **作る中間エントリと葉 PTE の両方**で U/S ビット（[`entry::PTE_USER`]）を
+    /// 立て、Ring 3 から到達可能にする。CPU は各階層の U/S を AND で合成する
+    /// ため、ユーザーページは PML4 から PT まで全階層で U=1 が要る。
+    ///
+    /// # 既存の中間テーブルの U ビットは触らない
+    ///
+    /// [`Self::ensure_child`] は、既に present の中間テーブルを見つけたら、その
+    /// U ビットを立て直さずにそのまま使う。したがって**ユーザーページは、
+    /// カーネルと中間を共有しない専用サブツリー（空き PML4 エントリの配下）へ
+    /// 張ること**が呼び出し側の責任である。カーネルの中間へ U=1 を混ぜないのは
+    /// この設計で構造的に保証する（既存カーネルマッピングを 1 ビットも変えない）。
+    /// 逆に、既存のカーネル中間（U=0）の下にユーザーページを張ろうとしても、
+    /// AND 合成により Ring 3 からは到達できない（安全側に倒れる）。
+    ///
+    /// # 属性
+    ///
+    /// G は立てない（TLB を CR3 リロード / `invlpg` で管理する前提。
+    /// `tlb_flush_precondition` の G=0 前提）。NX も立てない（EFER.NXE 未有効。
+    /// 予約ビット違反の #PF を避ける）。キャッシュは `cacheable` で制御する。
+    ///
+    /// # Safety
+    ///
+    /// [`Self::split_huge_page`] と同じ。加えて `phys` が有効な物理フレームで、
+    /// `virt` にまだ 4KiB マッピングが無いこと（既にあれば
+    /// [`MapUpdateError::AlreadyMapped`] を返して何も変えない）。
+    pub unsafe fn map_4kib<const CAP: usize>(
+        &mut self,
+        virt: VirtAddr,
+        phys: PhysAddr,
+        user: bool,
+        cacheable: bool,
+        frames: &mut FrameAllocator<CAP>,
+    ) -> Result<(), MapUpdateError> {
+        let _guard = InterruptGuard::enter();
+
+        // 中間エントリのフラグ。U を伝播する（AND 合成のため全階層に要る）。
+        let mut table_flags = entry::PTE_PRESENT | entry::PTE_WRITABLE;
+        if user {
+            table_flags |= entry::PTE_USER;
+        }
+
+        // PML4 → PDPT → PD を辿り、不在の中間を確保して作る。
+        // SAFETY: pml4_phys は current() が読んだ稼働中 PML4。添字は 512 未満。
+        let pdpt = unsafe {
+            self.ensure_child(self.pml4_phys, entry::pml4_index(virt), table_flags, frames)?
+        };
+        // SAFETY: 直前に得た有効な PDPT。
+        let pd = unsafe { self.ensure_child(pdpt, entry::pdpt_index(virt), table_flags, frames)? };
+        // SAFETY: 直前に得た有効な PD。
+        let pt = unsafe { self.ensure_child(pd, entry::pd_index(virt), table_flags, frames)? };
+
+        // 葉。既に present なら二重マップとして弾く（黙って上書きしない）。
+        let pt_index = entry::pt_index(virt);
+        // SAFETY: pt は PD が指す有効な PT、添字は 512 未満。
+        let existing = unsafe { self.read(pt, pt_index) };
+        if entry::is_present(existing) {
+            return Err(MapUpdateError::AlreadyMapped);
+        }
+
+        let mut leaf_flags = entry::PTE_PRESENT | entry::PTE_WRITABLE;
+        if user {
+            leaf_flags |= entry::PTE_USER;
+        }
+        if !cacheable {
+            leaf_flags |= entry::PTE_PCD;
+        }
+        // SAFETY: pt/添字は上記の契約。書く値は 4KiB ページを指す正しい PTE。
+        unsafe {
+            self.write(
+                pt,
+                pt_index,
+                (phys.as_u64() & entry::ADDR_MASK_4K) | leaf_flags,
+            )
+        };
+        // SAFETY: テーブルの書き換えが終わってから、追加した 1 本を落とす。
+        unsafe { cpu::invalidate_tlb_entry(virt.as_u64()) };
+        Ok(())
+    }
+
+    /// `table_phys[index]` が指す子テーブルの物理を返す。不在なら 1 枚確保して
+    /// ゼロ埋めし、`table_flags` で親エントリを書く（M5-e-2）。
+    ///
+    /// 既に present の中間があればそれをそのまま返し、U ビットを立て直さない
+    /// （[`Self::map_4kib`] のドキュメント参照）。
+    ///
+    /// # Safety
+    ///
+    /// `table_phys` が有効なページテーブルフレーム、`index < 512`。`frames` の
+    /// 返すフレームが恒等 / direct map で読み書きできること。
+    unsafe fn ensure_child<const CAP: usize>(
+        &mut self,
+        table_phys: PhysAddr,
+        index: usize,
+        table_flags: u64,
+        frames: &mut FrameAllocator<CAP>,
+    ) -> Result<PhysAddr, MapUpdateError> {
+        // SAFETY: 呼び出し元契約による。読み取りのみ。
+        let existing = unsafe { self.read(table_phys, index) };
+        if entry::is_present(existing) {
+            if entry::is_huge(existing) {
+                // huge ページのスロットを中間テーブルとして扱わない。
+                return Err(MapUpdateError::NotSplittable);
+            }
+            return Ok(entry::table_address(existing));
+        }
+        let child = frames.allocate_frame().ok_or(MapUpdateError::OutOfFrames)?;
+        // SAFETY: 今確保したばかりの、他から参照されていないフレーム。空き集合は
+        // すべてマップ済みなので direct map で書ける。ゼロ埋めして、ゴミが
+        // Present の立った不正なエントリに解釈されるのを防ぐ。
+        unsafe {
+            core::ptr::write_bytes(
+                self.direct_map.phys_to_virt(child).as_mut_ptr::<u8>(),
+                0,
+                FRAME_SIZE as usize,
+            );
+        }
+        // SAFETY: table_phys/index は上記契約。新規に確保した child を指す
+        // 中間エントリを書く。table_flags は呼び出し側が U を含めて決める。
+        unsafe {
+            self.write(
+                table_phys,
+                index,
+                (child.as_u64() & entry::ADDR_MASK_4K) | table_flags,
+            )
+        };
+        Ok(child)
     }
 }
 

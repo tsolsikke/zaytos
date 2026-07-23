@@ -826,6 +826,13 @@ extern "sysv64" fn kernel_main() -> ! {
     // 始まるので、steady state は保護される。
     install_kernel_stack_guard_page(&mut logger);
 
+    // ユーザーページのマッピング能力の検証（M5-e-2）。専用サブツリー
+    // PML4[USER_PML4_INDEX] へ U=1 ページを張り、両側 U/S 監査で権限分離を
+    // 実状態で確かめ、葉だけ落として中間は M5-e-3 のために残す。paging-test
+    // ビルドでは unmap を全体破壊するため載せない（関数側で cfg 済み）。
+    #[cfg(not(feature = "paging-test"))]
+    verify_user_page_mapping(&mut logger, &mut allocator);
+
     // ロック保持中は割り込みが禁止され、解放後に元へ戻ることを確認する
     // （M4-c-2）。ヒープのロックそのものではなく同じ Locked<T> を使う。
     // ヒープのロックを保持したままログを出すと二重取得になるため。
@@ -2609,6 +2616,159 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>) {
 /// 分割後の 512 エントリを `split_child_entry` と同じ式で検算しても、
 /// 同じ間違いを 2 回するだけで何も確かめられない。`translate()` は実際の
 /// テーブルを辿るので、分割を行ったコードとは独立している。こちらで見る。
+/// M5-e で使うユーザー空間の PML4 インデックス。空きの下位半分の先頭。
+///
+/// **higher-half B までの暫定である。** 現在カーネルは PML4[0]（下位半分）に
+/// 恒等で居るので、Linux 型の「下位=ユーザー / 上位=カーネル」はまだ成立して
+/// いない。B でカーネルを上位へ移し恒等を外せば、ユーザー空間を通常の低位へ
+/// 広げられる（deferred-decisions.md）。
+pub const USER_PML4_INDEX: usize = 1;
+
+/// ユーザーページのマッピング能力を検証する（M5-e-2）。
+///
+/// 専用サブツリー（空き PML4[[`USER_PML4_INDEX`]]、仮想ベース 512 GiB）へ、
+/// [`ActivePageTable::map_4kib`] で U=1 のテストページを 1 枚張り、独立 walker で
+/// 「ユーザーサブツリー全階層 U=1・カーネル側全 U=0」を実走査で確かめ、Ring 0
+/// から既知値を書いて読み戻し、葉だけをアンマップする。中間テーブルは残す
+/// （M5-e-3 が同じサブツリーを再利用する。判断 b-i）。Ring 3 からのアクセスは
+/// まだ試さない（M5-e-3）。
+///
+/// `paging-test` ビルドは `unmap_4kib` を全体的にわざと壊すため、切り分け軸を
+/// 一つに保つ目的でこの検証は載せない（このユーザーマッピング検証は分割/
+/// アンマップ回帰とは独立の関心事）。
+#[cfg(not(feature = "paging-test"))]
+fn verify_user_page_mapping<const CAP: usize>(
+    logger: &mut Logger<SerialPort>,
+    allocator: &mut frame_allocator::FrameAllocator<CAP>,
+) {
+    use kernel::paging::active::ActivePageTable;
+    use kernel::paging::verify;
+
+    /// テストページの仮想アドレス（PML4[USER_PML4_INDEX] の先頭 = 512 GiB）。
+    const USER_TEST_VIRT: u64 = 0x0000_0080_0000_0000;
+    /// Ring 0 から書いて読み戻す既知値。
+    const KNOWN: u64 = 0x00E2_C0DE_1234_5678;
+
+    // テーブルの読み書きは恒等窓で行う（フレームはすべて恒等マッピング済み。
+    // verify_split_and_unmap と同じ理由。テスト対象の U/S 照合は恒等に依存しない
+    // ので B で恒等を外しても、窓を高位へ差し替えるだけでよい）。
+    let identity = common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
+        .expect("the identity window is canonical");
+
+    let Some(leaf_phys) = allocator.allocate_frame() else {
+        logger.error(format_args!(
+            "user-map: could not reserve a leaf frame for the test user page; halting"
+        ));
+        cpu::halt_forever();
+    };
+
+    let virt = common::addr::VirtAddr::new(USER_TEST_VIRT)
+        .expect("the user test virtual address is canonical");
+
+    // SAFETY: CR3 は自前テーブルへ切り替え済みで、配下は恒等窓で読み書きできる。
+    let mut table = unsafe { ActivePageTable::current(identity) };
+    let pml4_phys = table.pml4_phys();
+
+    // --- 張る（専用サブツリー、user=true で全階層 U=1） ---
+    // SAFETY: virt はまだマップされていない空き PML4 スロット配下。leaf_phys は
+    // 今確保した未使用フレーム。allocator は中間テーブルの確保に使う。
+    if let Err(e) = unsafe { table.map_4kib(virt, leaf_phys, true, true, allocator) } {
+        logger.error(format_args!(
+            "user-map: map_4kib({USER_TEST_VIRT:#x}) failed: {e:?}; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    // --- 独立 walker で物理対応を照合（構築側とは別のループ） ---
+    // SAFETY: pml4_phys は稼働中 PML4、identity 窓でテーブルを読める。
+    match unsafe { verify::walk(pml4_phys, identity, virt) } {
+        Ok(r) if r.phys.as_u64() == leaf_phys.as_u64() && !r.huge => {}
+        other => {
+            logger.error(format_args!(
+                "user-map: independent walk of {USER_TEST_VIRT:#x} did not resolve to the leaf \
+                 {:#x} ({other:?}); halting",
+                leaf_phys.as_u64()
+            ));
+            cpu::halt_forever();
+        }
+    }
+
+    // --- U/S 監査（両側）。ユーザーサブツリー全 U=1、それ以外全 U=0 ---
+    // SAFETY: 同上。テーブル全体を独立に歩くだけ。
+    let audit = unsafe { verify::audit_user_supervisor(pml4_phys, identity, USER_PML4_INDEX) };
+    logger.info(format_args!(
+        "user-map: U/S audit: user subtree PML4[{USER_PML4_INDEX}] entries={} violations(U=0)={}, \
+         kernel entries={} violations(U=1)={}",
+        audit.user_entries, audit.user_violations, audit.kernel_entries, audit.kernel_violations
+    ));
+    if audit.user_violations != 0 || audit.kernel_violations != 0 {
+        logger.error(format_args!(
+            "user-map: U/S audit failed (user page not fully U=1, or a kernel entry leaked U=1); \
+             halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    // --- Ring 0 から既知値を書いて読み戻す（present・writable・到達可能） ---
+    // SAFETY: virt は今張ったばかりの writable なページ。SMAP は未有効なので
+    // Ring 0 からユーザーページへアクセスできる。
+    unsafe {
+        core::ptr::write_volatile(virt.as_mut_ptr::<u64>(), KNOWN);
+    }
+    // SAFETY: 同上。直前に書いた値を読み戻す。
+    let got = unsafe { core::ptr::read_volatile(virt.as_ptr::<u64>()) };
+    if got != KNOWN {
+        logger.error(format_args!(
+            "user-map: read-back of the test user page mismatched (got {got:#x}, expected \
+             {KNOWN:#x}); halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    // --- 葉だけアンマップ。中間テーブルは残す（M5-e-3 が再利用） ---
+    // SAFETY: virt は今張った 4KiB ページ。以後この仮想アドレスへはアクセス
+    // しない（葉を落とした後の walk は TLB ではなくテーブルを読む）。
+    if let Err(e) = unsafe { table.unmap_4kib(virt) } {
+        logger.error(format_args!("user-map: unmap_4kib failed: {e:?}; halting"));
+        cpu::halt_forever();
+    }
+    // 葉のフレームは解放してよい（中間は残す）。
+    let _ = allocator.deallocate_frame(leaf_phys);
+
+    // 葉が消えたこと（独立 walk が NotPresent）。
+    // SAFETY: 同上。
+    match unsafe { verify::walk(pml4_phys, identity, virt) } {
+        Err(verify::WalkError::NotPresent) => {}
+        other => {
+            logger.error(format_args!(
+                "user-map: the test user page is still resolvable after unmap ({other:?}); halting"
+            ));
+            cpu::halt_forever();
+        }
+    }
+
+    // アンマップ後の再監査。中間 residue は PML4[USER_PML4_INDEX] に閉じ、
+    // カーネル側に U=1 が漏れていないことを再確認する。
+    // SAFETY: 同上。
+    let after = unsafe { verify::audit_user_supervisor(pml4_phys, identity, USER_PML4_INDEX) };
+    logger.info(format_args!(
+        "user-map: after unmap: user subtree residue entries={} (intermediates kept for M5-e-3), \
+         kernel violations(U=1)={}",
+        after.user_entries, after.kernel_violations
+    ));
+    if after.kernel_violations != 0 {
+        logger.error(format_args!(
+            "user-map: a kernel entry leaked U=1 after unmap; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "user-map: user-page mapping verified (all levels U=1 for the user page, all kernel \
+         entries U=0, Ring 0 read-back held; leaf unmapped, subtree kept for M5-e-3)"
+    ));
+}
+
 fn verify_split_and_unmap<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
     allocator: &mut frame_allocator::FrameAllocator<CAP>,

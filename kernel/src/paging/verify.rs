@@ -29,6 +29,8 @@ use common::addr::{DirectMap, PhysAddr, VirtAddr};
 mod bits {
     /// Present。
     pub const PRESENT: u64 = 1 << 0;
+    /// User/Supervisor。立っていれば Ring 3 から到達可能（M5-e-2）。
+    pub const USER: u64 = 1 << 2;
     /// PD / PDPT レベルの「ページそのもの」ビット。
     pub const PAGE_SIZE: u64 = 1 << 7;
     /// 中間テーブルと 4KiB ページのアドレス部分（ビット 12-51）。
@@ -114,6 +116,112 @@ pub unsafe fn walk(
         phys: PhysAddr::new_const(base + offset),
         huge: false,
     })
+}
+
+/// U/S 監査の結果（M5-e-2）。
+///
+/// テーブル全体を独立に歩き、present な全エントリ（中間 3 段 + 葉）の U/S を
+/// 数える。ユーザーサブツリー（`user_pml4_index` 配下）は全て U=1、それ以外は
+/// 全て U=0 が期待値。違反があれば `*_violations` が非ゼロになる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UserSupervisorAudit {
+    /// ユーザーサブツリー配下で見た present エントリ数。
+    pub user_entries: u64,
+    /// そのうち U=0 だったもの（ユーザーページなのに Ring 3 から届かない）。
+    pub user_violations: u64,
+    /// ユーザーサブツリー以外で見た present エントリ数。
+    pub kernel_entries: u64,
+    /// そのうち U=1 だったもの（カーネルへの U=1 漏れ。権限分離の穴）。
+    pub kernel_violations: u64,
+}
+
+/// 稼働中テーブルを独立に歩き、全 present エントリの U/S を監査する（M5-e-2）。
+///
+/// `user_pml4_index` の PML4 エントリとその配下（中間 + 葉）は全て U=1、
+/// それ以外の present な PML4 エントリとその配下は全て U=0 であることを、
+/// **構築側とは別のループ**で確かめる。降り方とビット定義はこのファイルの
+/// [`bits`] に独立に書いてあり、`entry` の定数を参照しない。
+///
+/// 2MiB / 1GiB ページ（huge）は葉として扱い、そこで降りるのをやめる。
+///
+/// # Safety
+///
+/// [`walk`] と同じ契約。
+pub unsafe fn audit_user_supervisor(
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    user_pml4_index: usize,
+) -> UserSupervisorAudit {
+    let read = |table: PhysAddr, index: usize| -> u64 {
+        // SAFETY: 呼び出し元契約による。読み取りのみ。
+        unsafe {
+            core::ptr::read_volatile(direct_map.phys_to_virt(table).as_ptr::<u64>().add(index))
+        }
+    };
+
+    let mut audit = UserSupervisorAudit::default();
+
+    // ある 1 本のエントリを、期待側（ユーザーかカーネルか）に応じて計上する。
+    let account = |entry: u64, in_user_subtree: bool, a: &mut UserSupervisorAudit| {
+        let is_user = entry & bits::USER != 0;
+        if in_user_subtree {
+            a.user_entries += 1;
+            if !is_user {
+                a.user_violations += 1;
+            }
+        } else {
+            a.kernel_entries += 1;
+            if is_user {
+                a.kernel_violations += 1;
+            }
+        }
+    };
+
+    for pml4_index in 0..512usize {
+        let pml4e = read(pml4_phys, pml4_index);
+        if pml4e & bits::PRESENT == 0 {
+            continue;
+        }
+        let in_user = pml4_index == user_pml4_index;
+        account(pml4e, in_user, &mut audit);
+
+        let pdpt = PhysAddr::new_const(pml4e & bits::ADDR_4K);
+        for pdpt_index in 0..512usize {
+            let pdpte = read(pdpt, pdpt_index);
+            if pdpte & bits::PRESENT == 0 {
+                continue;
+            }
+            account(pdpte, in_user, &mut audit);
+            if pdpte & bits::PAGE_SIZE != 0 {
+                // 1GiB ページ。葉として扱い、これ以上降りない。
+                continue;
+            }
+
+            let pd = PhysAddr::new_const(pdpte & bits::ADDR_4K);
+            for pd_index in 0..512usize {
+                let pde = read(pd, pd_index);
+                if pde & bits::PRESENT == 0 {
+                    continue;
+                }
+                account(pde, in_user, &mut audit);
+                if pde & bits::PAGE_SIZE != 0 {
+                    // 2MiB ページ。葉として扱う。
+                    continue;
+                }
+
+                let pt = PhysAddr::new_const(pde & bits::ADDR_4K);
+                for pt_index in 0..512usize {
+                    let pte = read(pt, pt_index);
+                    if pte & bits::PRESENT == 0 {
+                        continue;
+                    }
+                    account(pte, in_user, &mut audit);
+                }
+            }
+        }
+    }
+
+    audit
 }
 
 /// 指定した PML4 の、ある階層のエントリをそのまま読む。
