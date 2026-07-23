@@ -12,10 +12,35 @@ use core::cell::UnsafeCell;
 use core::fmt::Write as _;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::cpu;
 use crate::serial::SerialPort;
+
+/// 現在保持している [`InterruptGuard`] の数（クリティカルセクションの入れ子
+/// 深さ）。
+///
+/// **入れ子の正しさ自体はこのカウンタでは決めない**（それは各ガードが保存する
+/// RFLAGS で成立している）。このカウンタは「今クリティカルセクションの中に
+/// いるか」を、`IF` の状態とは独立に知るためだけのものである。M5-c の協調的
+/// `yield` が、`Locked` / `InterruptGuard` を保持したまま呼ばれていないかを
+/// 判定するのに使う（保持したまま `yield` すると、別タスクがクリティカル
+/// セクションの途中で走る）。
+///
+/// [`Locked`] は `lock()` の中で `InterruptGuard` を 1 つ保持するので、
+/// `InterruptGuard` の数を数えれば `Locked` の保持も覆う。
+///
+/// 増減は必ず割り込み禁止（`cli` 済み）の区間で行うため、シングルコアでは
+/// `Relaxed` で十分（メモリ順序の問題は SMP 特有。ADR-0002 のスコープ外）。
+static CRITICAL_NESTING_DEPTH: AtomicUsize = AtomicUsize::new(0);
+
+/// 現在のクリティカルセクションの入れ子深さ（保持中の `InterruptGuard` の数）。
+///
+/// `0` なら、どの `InterruptGuard` / `Locked` も保持していない。`yield` は
+/// これが `0` でなければ fail-fast する（`IF` は見ない）。
+pub fn critical_nesting_depth() -> usize {
+    CRITICAL_NESTING_DEPTH.load(Ordering::Relaxed)
+}
 
 /// 割り込みを禁止するクリティカルセクションのガード。
 ///
@@ -55,6 +80,9 @@ impl InterruptGuard {
         unsafe {
             cpu::disable_interrupts();
         }
+        // 入れ子深さを 1 増やす。**cli の後に触る**ので、この増分の最中に
+        // 割り込みは入らない。
+        CRITICAL_NESTING_DEPTH.fetch_add(1, Ordering::Relaxed);
         Self {
             saved_rflags,
             _not_send_sync: PhantomData,
@@ -69,6 +97,10 @@ impl InterruptGuard {
 
 impl Drop for InterruptGuard {
     fn drop(&mut self) {
+        // 入れ子深さを 1 減らす。**復元（sti）より前に**減らすことで、
+        // 「まだこのガードを数えているのに IF=1」という窓を作らない。この
+        // 時点ではまだ割り込み禁止なので、減算の最中に割り込みは入らない。
+        CRITICAL_NESTING_DEPTH.fetch_sub(1, Ordering::Relaxed);
         if cpu::should_restore_interrupts(self.saved_rflags) {
             // SAFETY: enter した時点で IF=1 だった、つまり呼び出し元は割り込みが
             // 有効な文脈にいた。その状態へ戻すだけなので有効化してよい。

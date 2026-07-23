@@ -289,10 +289,17 @@ core::arch::global_asm!(
     "  mov rsi, rsp",
     "  call {handler}",
     // --- ここから復帰 ---
-    // 積んだものを、積んだ順序の逆に、同じ量だけ正確に取り除く。
-    // iretq は RSP が CPU の積んだフレームの先頭（RIP）を指している状態で
-    // 実行されなければならない。1 バイトでもずれると制御が飛ぶ。
-    "  add rsp, {adjust}",
+    // irq_entry は「次に使う RSP」を RAX で返す（ADR-0019 §2.1）。それを
+    // そのまま RSP にする。**これがコンテキストスイッチの実体である。**
+    // 切り替え不要なら現在の IrqContext 先頭が返るので同じ場所へ戻り、挙動は
+    // 変わらない。切り替え時は次タスクの IrqContext 先頭が返り、以降の pop は
+    // 次タスクのレジスタを復元し、iretq が次タスクへ入る。
+    //
+    // sub した分（{adjust}）を足し戻す代わりに RAX を入れているのは、返り値が
+    // 既に「先頭を指す RSP」だからである。iretq は RSP が CPU の積んだフレーム
+    // の先頭（RIP）を指す状態で実行されねばならず、この後の pop 15 本と
+    // add rsp,8 でちょうどそこへ着く。
+    "  mov rsp, rax",
     // GPR を復元する。push の逆順（rax から r15 へ）。
     "  pop rax",
     "  pop rbx",
@@ -525,7 +532,13 @@ fn check_stack_alignment(rsp_at_call: u64, path: &str, vector: u64) {
 ///
 /// `context` はスタブが積んだ [`IrqContext`] を指していること。
 /// `rsp_at_call` はスタブが `call` 直前に読んだ RSP であること。
-extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) {
+extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u64 {
+    // 切り替え不要なときに返す RSP。**入場時の IrqContext 先頭そのもの**で、
+    // スタブの復帰部で `mov rsp, rax` してもこれなら現状と同じ場所へ戻る
+    // （ADR-0019 §2.1）。M5-c ではここが切り替えの唯一の分岐点になり、
+    // yield ベクタのときだけ別タスクの RSP を返す（下の分岐）。
+    let no_switch_rsp = context as u64;
+
     // SAFETY: スタブが直前に積んだ有効な IrqContext を指す。読み取りのみ。
     let context = unsafe { &*context };
 
@@ -587,6 +600,11 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) {
     // ここで出力してはならない（ADR-0018 §5）。100Hz で毎回ログを出すと
     // 出力自体がハンドラの処理時間を支配し、ティックを取りこぼす。観測は
     // メインループがカウンタ越しに行う。
+
+    // M5-c ではタイマ・キーボード・テストベクタはいずれも切り替えないので、
+    // 入場時の RSP をそのまま返す。yield（協調的スイッチ）は専用ベクタで、
+    // ここより後（M5-c の yield 実装）で別タスクの RSP を返す分岐が入る。
+    no_switch_rsp
 }
 
 /// タイマ（IRQ0）のベクタ。
