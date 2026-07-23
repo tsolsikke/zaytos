@@ -467,6 +467,41 @@ const STACK_TESTS: &[CriticalTest] = &[
     },
 ];
 
+/// 協調的コンテキストスイッチの回帰チェック（`--task-test <kind>`、M5-c）。
+const TASK_TESTS: &[CriticalTest] = &[
+    // スイッチで次タスクの rbx を壊す。復帰したタスクが GPR 照合で検出する。
+    CriticalTest {
+        name: "drop-reg",
+        feature: "task-switch-drop-reg",
+        expected_markers: &["GPR(s) corrupted across the switch", "halting"],
+        forbidden_markers: &["cooperative switch verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // RSP の差し替えを省く。スイッチが起きず、ワーカーが走らないまま会計が
+    // 合わないことを検出する。
+    CriticalTest {
+        name: "no-swap",
+        feature: "task-switch-no-swap",
+        expected_markers: &["accounting did not balance"],
+        forbidden_markers: &["cooperative switch verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // InterruptGuard 保持中に yield を呼ぶ。on_yield のガードが fail-fast する。
+    CriticalTest {
+        name: "in-critical",
+        feature: "task-switch-yield-in-critical",
+        expected_markers: &[
+            "yield called while holding a Locked/InterruptGuard",
+            "halting",
+        ],
+        forbidden_markers: &["cooperative switch verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+];
+
 /// カーネルが起動したことを示す、シリアルログの既知の行。
 ///
 /// kernel の `kernel_main` が最初に出す行（`common::log` の INFO 形式）。
@@ -623,7 +658,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -657,6 +692,13 @@ fn main() -> Result<()> {
                     format!("--stack-test requires a kind ({})", names.join(" | "))
                 })?;
                 return cmd_marker_test(STACK_TESTS, "stack-test", kind);
+            }
+            if let Some(index) = rest.iter().position(|a| a == "--task-test") {
+                let kind = rest.get(index + 1).with_context(|| {
+                    let names: Vec<&str> = TASK_TESTS.iter().map(|t| t.name).collect();
+                    format!("--task-test requires a kind ({})", names.join(" | "))
+                })?;
+                return cmd_marker_test(TASK_TESTS, "task-test", kind);
             }
             if let Some(index) = rest.iter().position(|a| a == "--critical-test") {
                 let kind = rest.get(index + 1).with_context(|| {
@@ -1562,6 +1604,13 @@ fn cmd_exception_test(kind: &str) -> Result<()> {
     });
 
     let expected_serial = format!("[ERROR] exception: vector={} ", test.vector);
+    // **ダンプの終端行が出るまで待つ。** 待ち条件を先頭行（vector=X）だけに
+    // すると、それが現れた瞬間に kill してしまい、後続のダンプ（GPR・CR2・
+    // on IST・halting）が serial へ書き出される前に切れることがある。実際に
+    // double-fault で「on IST1=true」が捕捉から漏れて落ちた。ハンドラは必ず
+    // 最後にこの行を出すので、これを見てから kill すれば全行がそろう
+    // （マーカーテストの「全マーカーがそろうまで待つ」と同じ考え）。
+    const DUMP_TERMINATOR: &str = "[ERROR] halting (cli + hlt loop)";
 
     let mut child = Command::new("qemu-system-x86_64")
         .args(&qemu_args)
@@ -1571,7 +1620,7 @@ fn cmd_exception_test(kind: &str) -> Result<()> {
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     let handler_ran = loop {
         if fs::read_to_string(&serial_log)
-            .map(|c| c.contains(&expected_serial))
+            .map(|c| c.contains(&expected_serial) && c.contains(DUMP_TERMINATOR))
             .unwrap_or(false)
         {
             break true;
@@ -2148,6 +2197,13 @@ fn cmd_check(full: bool) -> Result<()> {
             let name = format!("stack-test {}", test.name);
             run_regression(&name, &mut failed, &mut retries, || {
                 cmd_marker_test(STACK_TESTS, "stack-test", test.name)
+            });
+        }
+        for test in TASK_TESTS {
+            total += 1;
+            let name = format!("task-test {}", test.name);
+            run_regression(&name, &mut failed, &mut retries, || {
+                cmd_marker_test(TASK_TESTS, "task-test", test.name)
             });
         }
         for test in INTERRUPT_TESTS {
