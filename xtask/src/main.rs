@@ -425,6 +425,18 @@ const PAGING_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // A-2 の登録窓の base を 1 ページずらす。差し替え直後の phys_to_virt 検証が
+    // 食い違いを検出し、フレームバッファ・コンソールの高位アクセスへ進む前に
+    // 止まること。壊れていなければ登録窓が有効になるので、それを forbidden に
+    // して対にする。
+    CriticalTest {
+        name: "directmap-wrong-base",
+        feature: "paging-test-directmap-wrong-base",
+        expected_markers: &["phys_to_virt", "the registered window is wrong"],
+        forbidden_markers: &["direct-map A-2: registered window active"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
 ];
 
 /// カーネルが起動したことを示す、シリアルログの既知の行。

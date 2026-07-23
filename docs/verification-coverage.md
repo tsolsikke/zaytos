@@ -130,6 +130,7 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 | `paging-test-no-invlpg` | アンマップ後の`invlpg`を落とす | 古い翻訳がTLBに残り、フォルトせずに読めること |
 | `paging-test-split-heap` | 壊さない。稼働中のヒープが載るページを分割する | 使いながら分割でき、翻訳が粒度だけ変わること |
 | `paging-test-directmap-low-window` | direct map の窓を高位ではなく低位（恒等と同じ）で張る | 独立 walker が高位窓の不在を検出し、CR3 を切り替えずに止まること |
+| `paging-test-directmap-wrong-base` | A-2 の登録窓の base を 1 ページずらす | 差し替え後の phys_to_virt 検証が食い違いを検出し、高位アクセスの前に止まること |
 | `gfx-test-pattern` | コンソールを起動せず描画テストパターンを描く | 描画の基盤 |
 
 これらが有効なビルドでは、起動時に`test hooks:`のWARNが出て内訳が列挙される。

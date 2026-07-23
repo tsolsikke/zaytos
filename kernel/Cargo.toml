@@ -96,3 +96,7 @@ paging-test-split-heap = ["paging-test"]
 # 独立 walker が DIRECT_MAP_BASE + phys を辿ると NotPresent で止まる。
 # 高位窓が存在することそのものを検査していることの証明（A-1）。
 paging-test-directmap-low-window = ["paging-test"]
+# A-2 で登録 DirectMap へ差し替える窓の base をわざと 1 ページずらす。
+# 差し替え直後の phys_to_virt 検証が期待値と食い違って停止する。登録値の
+# 検証が働いていることの証明（A-1 の low-window とは層が違う）。
+paging-test-directmap-wrong-base = ["paging-test"]

@@ -680,6 +680,15 @@ extern "sysv64" fn kernel_main() -> ! {
     // Addendum、判断2）。
     build_and_switch_direct_map(&mut logger, &mut allocator, &mapped_ranges);
 
+    // === higher-half A-2: 登録 DirectMap を高位窓へ差し替える ===
+    //
+    // これ以降、direct_map().phys_to_virt は高位を返す。恒等は残す。差し替え後
+    // に phys_to_virt を呼ぶ経路（この後の init_console の base_virt など）は
+    // 自動的に高位になる。差し替え前に値を計算して保持しているフレームバッファ
+    // だけは追従しないので、明示的に高位 base へ載せ替える。
+    activate_direct_map_window(&mut logger);
+    rehome_framebuffer_to_window(&mut logger, &mut framebuffer, boot_info);
+
     // === M3-c-3: 画面コンソール ===
     //
     // ここより前のログはシリアルにしか出ない。コンソールはバックバッファの
@@ -2400,7 +2409,14 @@ fn verify_split_and_unmap<const CAP: usize>(
         SCRATCH_BYTES / 1024
     ));
 
-    let table_map = common::addr::direct_map();
+    // 明示的に恒等窓を使う。このテストは分割/アンマップの機構を検証し、
+    // 読み戻しで「物理 == 仮想」を照合する（恒等前提）。A-2 以降は登録
+    // direct_map() が高位を返すため、そのまま使うと照合が崩れる。恒等は A で
+    // 残しているので、恒等窓を明示して恒等マッピングの split/unmap を対象に
+    // する。B で恒等を外すときは対象を高位窓へ移す（deferred-decisions.md
+    // の「split/unmap テストの恒等窓依存」）。
+    let table_map = common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
+        .expect("the identity window is canonical");
     // SAFETY: CR3 は自前のテーブルへ切り替え済みで、テーブル自体は恒等
     // マッピングで読み書きできる。
     let mut table = unsafe { ActivePageTable::current(table_map) };
@@ -2628,6 +2644,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "direct map の窓を高位ではなく低位（恒等と同じ）で張る",
     ),
     (
+        "paging-test-directmap-wrong-base",
+        cfg!(feature = "paging-test-directmap-wrong-base"),
+        "A-2 の登録窓の base を 1 ページずらす",
+    ),
+    (
         "exception-test",
         cfg!(feature = "exception-test"),
         "起動完了後に意図的な例外を起こす",
@@ -2690,8 +2711,13 @@ fn run_paging_test<const CAP: usize>(
 
     const FRAMES_PER_2M: u64 = entry::PAGE_SIZE_2M / frame_allocator::FRAME_SIZE;
 
-    // SAFETY: CR3 は自前のテーブルへ切り替え済み。
-    let test_map = common::addr::direct_map();
+    // 明示的に恒等窓を使う（verify_split_and_unmap と同じ理由）。この経路も
+    // 恒等マッピングの split/unmap を対象に検証する。A-2 以降の登録
+    // direct_map() は高位を返すため、そのまま使うと対象が高位窓へずれる。
+    // B で恒等を外すときに見直す（deferred-decisions.md の「split/unmap
+    // テストの恒等窓依存」）。
+    let test_map = common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
+        .expect("the identity window is canonical");
     // SAFETY: CR3 は自前のテーブルへ切り替え済み。
     let mut table = unsafe { ActivePageTable::current(test_map) };
 
@@ -3297,6 +3323,180 @@ fn build_and_switch_direct_map(
          the registered window stays identity until A-2.",
         DirectMap::DIRECT_MAP_BASE
     ));
+}
+
+/// higher-half A-2: 登録 DirectMap を恒等から高位窓へ差し替える。
+///
+/// A-1 で高位窓を張り CR3 も切り替えてあるので、差し替えた瞬間から
+/// `direct_map().phys_to_virt` が高位を返し、その高位アドレスは有効である。
+/// 恒等は残す（A では外さない）。`replace_direct_map` の # Safety が要求する
+/// 「CR3 を新窓のテーブルへ切り替えた後で呼ぶこと」を満たしている。
+///
+/// paging-test-directmap-wrong-base: 差し替える窓の base をわざと 1 ページ
+/// ずらす。直後の phys_to_virt 検証が期待値と食い違うのを捕まえ、以降の
+/// 経路（フレームバッファ・コンソール）が誤った高位を触る前に停止する。
+/// A-1 の low-window（窓の構築を壊す）とは層が違う。こちらは登録値を壊す。
+fn activate_direct_map_window(logger: &mut Logger<SerialPort>) {
+    use common::addr::{DirectMap, PhysAddr, VirtAddr};
+
+    // 差し替え前は恒等（base=0）であることを確かめる。
+    let before = common::addr::direct_map();
+    if before.base().as_u64() != 0 {
+        logger.error(format_args!(
+            "direct-map A-2: the registered window is not identity before the swap \
+             (base={:#x}); halting",
+            before.base().as_u64()
+        ));
+        cpu::halt_forever();
+    }
+
+    let (base_raw, length) = if cfg!(feature = "paging-test-directmap-wrong-base") {
+        (
+            DirectMap::DIRECT_MAP_BASE + frame_allocator::FRAME_SIZE,
+            DirectMap::IDENTITY_MAX_LENGTH - frame_allocator::FRAME_SIZE,
+        )
+    } else {
+        (DirectMap::DIRECT_MAP_BASE, DirectMap::IDENTITY_MAX_LENGTH)
+    };
+    let Some(base) = VirtAddr::new(base_raw) else {
+        logger.error(format_args!(
+            "direct-map A-2: the window base {base_raw:#x} is not canonical; halting"
+        ));
+        cpu::halt_forever();
+    };
+    let Some(high) = DirectMap::new(base, length) else {
+        logger.error(format_args!(
+            "direct-map A-2: the window does not fit the canonical space; halting"
+        ));
+        cpu::halt_forever();
+    };
+
+    // SAFETY: A-1 が高位窓を張り CR3 を新テーブルへ切り替え済みで、恒等も
+    // 残っている。replace_direct_map の # Safety（新窓のテーブルへ切り替えた
+    // 後で呼ぶこと）を満たす。シングルコアで、この区間に他の実行文脈は無い。
+    if let Err(e) = unsafe { common::addr::replace_direct_map(high) } {
+        logger.error(format_args!(
+            "direct-map A-2: replace_direct_map failed: {e:?}; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    // 差し替え後、phys_to_virt が DIRECT_MAP_BASE + phys を返すことを数点で
+    // 確かめる。期待値は常に正しい base（DIRECT_MAP_BASE）で計算するので、
+    // wrong-base の版はここで食い違って捕まり、以降の高位アクセスへ進まない。
+    let now = common::addr::direct_map();
+    let mut mismatches = 0u32;
+    for raw in [0x1000u64, 0x20_0000, 0x8000_0000] {
+        let Some(p) = PhysAddr::new(raw) else {
+            continue;
+        };
+        let got = now.phys_to_virt(p).as_u64();
+        let expected = DirectMap::DIRECT_MAP_BASE + raw;
+        if got != expected {
+            mismatches += 1;
+            logger.error(format_args!(
+                "direct-map A-2: phys_to_virt({raw:#x}) = {got:#x}, expected {expected:#x} = NG"
+            ));
+        }
+    }
+    if mismatches > 0 {
+        logger.error(format_args!(
+            "direct-map A-2: the registered window is wrong (see NG above); \
+             halting before any high access"
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "direct-map A-2: registered window active at base {:#x}; phys_to_virt now returns \
+         high addresses. identity kept.",
+        now.base().as_u64()
+    ));
+}
+
+/// A-2: フレームバッファのハンドルを高位 base へ載せ替える。
+///
+/// `FramebufferLayout.base` は init_framebuffer の時点（差し替え前、恒等）で
+/// 計算した値を保持しており、差し替えに追従しない（layout.rs の doc が明示）。
+/// ここで高位 base で作り直す。恒等は残っているので旧ハンドル（恒等 base）でも
+/// 描けるが、B で恒等を外すことに備え、A-2 の時点で高位へ寄せておく。
+///
+/// バックバッファ側の base_virt は init_console が差し替え後に `direct_map()` を
+/// 引くため自動的に高位になる。ヒープ・RSP・boot_info は恒等を直接使うので
+/// A では触らない（B で高位化する）。
+fn rehome_framebuffer_to_window(
+    logger: &mut Logger<SerialPort>,
+    framebuffer: &mut Option<Framebuffer>,
+    boot_info: &BootInfo,
+) {
+    use kernel::paging::active::ActivePageTable;
+
+    let old_layout = match framebuffer.as_ref() {
+        Some(fb) => *fb.layout(),
+        None => return,
+    };
+    let fb_phys = boot_info.framebuffer.physical_address;
+    let high_base = common::addr::direct_map().phys_to_virt(fb_phys);
+
+    // 高位 base が実際にフレームバッファの物理を指すことを、稼働中テーブルを
+    // 独立に辿って確かめる（arithmetic だけでなくマッピングの存在を見る）。
+    // SAFETY: CR3 は A-1 のテーブルを指し、その配下は高位窓でも読める（窓は
+    // 全マップ範囲を覆い、テーブルフレームは空き RAM 上にある）。
+    let live = unsafe { ActivePageTable::current(common::addr::direct_map()) };
+    match live.translate(high_base) {
+        Ok(Some(t)) if t.phys == fb_phys => {}
+        other => {
+            logger.error(format_args!(
+                "direct-map A-2: the high framebuffer base {:#x} does not map to {:#x} \
+                 (got {other:?}); keeping the identity-based framebuffer",
+                high_base.as_u64(),
+                fb_phys.as_u64()
+            ));
+            return;
+        }
+    }
+
+    let new_layout = match old_layout.with_base(high_base) {
+        Ok(layout) => layout,
+        Err(e) => {
+            logger.error(format_args!(
+                "direct-map A-2: could not rebase the framebuffer to {:#x}: {e:?}; keeping identity",
+                high_base.as_u64()
+            ));
+            return;
+        }
+    };
+
+    // SAFETY: new_layout は with_base の再検証を通り、high_base..end が高位窓で
+    // マップ済みであることを直前に translate で確認した。フレームバッファは
+    // 排他所有で、ここで旧ハンドル（恒等 base）を捨てて新ハンドルへ差し替える。
+    // 同じ物理を指す仮想が恒等と高位の 2 つあるが、書き込み手段はこの 1 個に
+    // 統一する。
+    let mut high_fb = unsafe { Framebuffer::new(new_layout) };
+
+    // 実際に高位 base 経由で書き、高位と恒等の両方から読み戻して、同じ物理が
+    // 両窓から見えることを直接確かめる（A-1 の別名証明のフレームバッファ版）。
+    // この画素はこの直後のコンソール全面クリアで消える。
+    const PROOF: Color = Color::rgb(0xC0, 0x40, 0x80);
+    high_fb.write_pixel(0, 0, PROOF);
+    let proof_pixel = PROOF.to_pixel(new_layout.format());
+    // SAFETY: high_base と fb_phys は同じ物理フレームバッファの先頭を指し、
+    // どちらも現在のテーブルでマップ済み（高位は直前の translate で、恒等は
+    // A-1 で確認済み）。読み取りのみ。
+    let (via_high, via_identity) = unsafe {
+        (
+            core::ptr::read_volatile(high_base.as_ptr::<u32>()),
+            core::ptr::read_volatile(fb_phys.as_u64() as *const u32),
+        )
+    };
+    let readback_ok = via_high == proof_pixel && via_identity == proof_pixel;
+    logger.info(format_args!(
+        "direct-map A-2: framebuffer rehomed to {:#x}; wrote a proof pixel, read {via_high:#x}/{via_identity:#x} \
+         via high/identity = {readback_ok}",
+        high_base.as_u64()
+    ));
+
+    *framebuffer = Some(high_fb);
 }
 
 /// kernel イメージの高位マッピングを持つ新しいテーブルを構築し、検証する（H-2）。
