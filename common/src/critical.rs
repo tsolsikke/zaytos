@@ -77,11 +77,16 @@ impl InterruptGuard {
         let saved_rflags = cpu::read_rflags();
         // SAFETY: これはまさにクリティカルセクションへ入る操作であり、割り込みを
         // 禁止してよい文脈。保存した状態は Drop で復元する。
+        // preempt-in-critical-break: わざと cli を落とす。Locked 保持中も IF=1 の
+        // ままになり、timer プリエンプトがクリティカル区間へ食い込む（M5-d の
+        // 破壊確認）。depth は増やすので、on_timer_tick の防御スキップが働く
+        // 限りはプリエンプトされない。破壊確認ではその防御も併せて外す。
+        #[cfg(not(feature = "preempt-in-critical-break"))]
         unsafe {
             cpu::disable_interrupts();
         }
         // 入れ子深さを 1 増やす。**cli の後に触る**ので、この増分の最中に
-        // 割り込みは入らない。
+        // 割り込みは入らない（cli を落とす破壊ビルドを除く）。
         CRITICAL_NESTING_DEPTH.fetch_add(1, Ordering::Relaxed);
         Self {
             saved_rflags,

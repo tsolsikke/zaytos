@@ -2776,6 +2776,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "InterruptGuard 保持中に yield を呼ぶ",
     ),
     (
+        "task-switch-drop-rsp0",
+        cfg!(feature = "task-switch-drop-rsp0"),
+        "スイッチで RSP0 の更新を落とす",
+    ),
+    (
+        "task-widen-preempt-window",
+        cfg!(feature = "task-widen-preempt-window"),
+        "プリエンプト窓の NOP そりを広げる",
+    ),
+    (
+        "task-preempt-in-critical",
+        cfg!(feature = "task-preempt-in-critical"),
+        "InterruptGuard の cli を落とし、クリティカル区間へプリエンプトを食い込ませる",
+    ),
+    (
         "exception-test",
         cfg!(feature = "exception-test"),
         "起動完了後に意図的な例外を起こす",

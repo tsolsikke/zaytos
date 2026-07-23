@@ -3,3 +3,11 @@ name = "common"
 version = "0.1.0"
 edition = "2021"
 publish = false
+
+[features]
+# InterruptGuard::enter が cli しなくなる（M5-d の task-preempt-in-critical から
+# 有効化される）。Locked 保持中も IF=1 のままになり、timer プリエンプトが
+# クリティカル区間へ食い込む経路を作れる。**bootloader は critical を一切使わ
+# ないので、この feature が届いても bootloader の挙動には影響しない**（gate する
+# コードが bootloader からは到達不能。kernel ビルドでのみ effective）。
+preempt-in-critical-break = []

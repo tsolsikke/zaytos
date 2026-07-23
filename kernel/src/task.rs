@@ -19,6 +19,7 @@
 
 use core::fmt::Write as _;
 use core::ptr::addr_of;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use common::addr::VirtAddr;
 use common::critical::critical_nesting_depth;
@@ -43,6 +44,24 @@ const GUARD_SIZE: usize = 4096;
 /// 各ワーカーが GPR 照合を回すラウンド数。
 const ROUNDS_PER_WORKER: u64 = 3;
 
+/// M5-d のワーカーが「窓」を広げる遅延ループの回数。**プリエンプトが set と
+/// store の間に落ちる確率を上げ、統計的レジスタ検証の窓カウントを N > 0 に
+/// 保つため**（条件1）。widen feature で長くして、窓カウントが増えることで
+/// 判定が正しく働くことを確かめる。
+///
+/// NOP そりではなくメモリカウンタの遅延ループにしている。NOP そりだと巨大な
+/// そりが .text を膨らませ、カーネルイメージが 2MiB 境界をまたいで RIP/RSP が
+/// 2MiB ページに載り、H-2 やガードページ（4KiB 前提）を壊す（実際に踏んだ）。
+/// 遅延ループは数命令で、そりの長さがコード量に効かない。カウンタはメモリなので
+/// pattern レジスタも壊さない。
+#[cfg(feature = "task-widen-preempt-window")]
+const PREEMPT_WINDOW_SLED: usize = 4_000_000;
+#[cfg(not(feature = "task-widen-preempt-window"))]
+const PREEMPT_WINDOW_SLED: usize = 200_000;
+
+/// 窓を広げる遅延ループのカウンタ（メモリ上。レジスタを使わずに回すため）。
+static mut PREEMPT_DELAY: u64 = 0;
+
 /// `IrqContext` のバイト数（21 個の `u64`）。偽コンテキストの大きさに使う。
 const IRQ_CONTEXT_BYTES: u64 = 21 * 8;
 
@@ -55,25 +74,52 @@ const GPR_TAGS: [u64; 15] = [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15];
 
 /// ワーカー本体が往復後に 15 本の GPR を書き出す共有バッファ。
 ///
-/// 協調的で一度に 1 タスクしか走らないため、往復から照合までの straight-line
-/// 区間を別タスクが割り込むことは無い（プリエンプションは M5-d）。
+/// 一度に 1 タスクしか走らないので共有でよい。M5-c は yield の往復から照合まで、
+/// M5-d は set から store までが straight-line で、別タスクが割り込んでも
+/// スイッチが保存・復元するのが検査の対象である。
 static mut GPR_BUF: [u64; 15] = [0; 15];
+
+/// M5-d のワーカーが「15 GPR を保持している窓」に入っているかのフラグ。
+///
+/// ワーカー本体が rip 相対で、15 本を load した後 1、store した後 0 にする。
+/// [`on_timer_tick`] は、これが 1 のときにプリエンプトした回数を数える
+/// （条件1）。この回数が 0 なら統計的レジスタ検証は何も検証していない。
+static mut IN_GPR_WINDOW: u8 = 0;
+
+/// set と store の窓でプリエンプトが起きた回数（条件1）。デモ後に報告し、
+/// 0 でないことを確かめる。
+static PREEMPT_IN_WINDOW: AtomicU64 = AtomicU64::new(0);
+
+/// preempt-in-critical の破壊確認で、ワーカーが競合する共有ロック。
+///
+/// 破壊ビルドでは InterruptGuard が cli を落とす（IF=1 のまま）ので、ワーカー A が
+/// これを保持したままスピンする間に timer がプリエンプトし、ワーカー B が同じ
+/// ロックを取ろうとして二重取得検出が発火する。正常ビルドでは cli により保持中は
+/// IF=0 で timer が来ないため、この競合は起きない。
+#[cfg(feature = "task-preempt-in-critical")]
+static DEMO_LOCK: common::critical::Locked<u64> = common::critical::Locked::new(0);
 
 /// タスク 1 本ぶんの状態。
 #[derive(Clone, Copy)]
 struct Task {
     /// 保存された RSP（この値が指す先が `IrqContext`）。走行中は無効。
     saved_rsp: u64,
-    /// このタスクのカーネルスタック頂点（RSP0 用。§2.2）。
+    /// このタスクのカーネルスタック頂点（RSP0 用。§2.2、およびスタック範囲の
+    /// 上端）。
     // no-swap の破壊ビルドではスイッチしないので RSP0 更新へ進まず未読になる。
     #[cfg_attr(feature = "task-switch-no-swap", allow(dead_code))]
     stack_top: u64,
+    /// このタスクのカーネルスタック下端（スタック混在検査に使う）。
+    #[cfg_attr(feature = "task-switch-no-swap", allow(dead_code))]
+    stack_bottom: u64,
     /// 実行可能か。`false` はメイン（ワーカー終了時のみ戻る）または終了済み。
     runnable: bool,
     /// GPR 照合の基準値（タスク固有）。ワーカーのみ使う。
     base: u64,
-    /// 残りラウンド数。0 になったら終了する。
+    /// 残りラウンド数（M5-c の協調デモ用）。0 になったら終了する。
     rounds_left: u64,
+    /// このタスクが照合を回した回数（進捗の会計用）。
+    iterations: u64,
     /// このタスクが再開された回数（会計用）。
     resumes: u64,
 }
@@ -81,9 +127,11 @@ struct Task {
 const EMPTY_TASK: Task = Task {
     saved_rsp: 0,
     stack_top: 0,
+    stack_bottom: 0,
     runnable: false,
     base: 0,
     rounds_left: 0,
+    iterations: 0,
     resumes: 0,
 };
 
@@ -94,6 +142,10 @@ struct Scheduler {
     /// スイッチした総回数（会計用）。各スイッチで再開されたタスクの `resumes`
     /// も 1 増えるので、`switches == 全タスクの resumes の合計`。
     switches: u64,
+    /// M5-d のプリエンプティブデモが進行中か。
+    demo_active: bool,
+    /// プリエンプティブデモを打ち切る TIMER_TICKS の閾値。
+    demo_deadline: u64,
 }
 
 /// スケジューラのグローバル状態。
@@ -105,6 +157,8 @@ static mut SCHEDULER: Scheduler = Scheduler {
     tasks: [EMPTY_TASK; TASK_COUNT],
     current: 0,
     switches: 0,
+    demo_active: false,
+    demo_deadline: 0,
 };
 
 /// 各ワーカーのスタック（ガードページ + スタック本体）。
@@ -311,6 +365,7 @@ unsafe fn setup_tasks() {
     sched.switches = 0;
     sched.tasks[0] = Task {
         stack_top: main_top,
+        stack_bottom: crate::stack::kernel_stack_range().bottom.as_u64(),
         runnable: false, // メインはワーカーが尽きたときだけ戻る
         ..EMPTY_TASK
     };
@@ -330,9 +385,12 @@ unsafe fn setup_tasks() {
         sched.tasks[1 + w] = Task {
             saved_rsp,
             stack_top: top.as_u64(),
+            // 使えるスタックの下端はガードページの直上。
+            stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
             runnable: true,
             base,
             rounds_left: ROUNDS_PER_WORKER,
+            iterations: 0,
             resumes: 0,
         };
     }
@@ -381,30 +439,94 @@ pub fn on_yield(current_rsp: u64) -> u64 {
         common::cpu::halt_forever();
     }
 
-    // SAFETY: 割り込みゲート経由（IF=0）で入っており、シングルコアなので他の
-    // 実行文脈が同時にスケジューラを触ることはない。
+    schedule_switch(current_rsp)
+}
+
+/// timer（IRQ0）のティックで `irq_entry` から呼ばれ、プリエンプティブに切り替える
+/// （M5-d）。yield と同じ [`schedule_switch`] 中核へ合流する。
+///
+/// **明示 yield と違い、critical 区間中なら fail-fast せずスキップする。** timer
+/// が割り込むのは呼び出し側のバグではない。ただし今は譲るべきでないので現 RSP を
+/// 返してプリエンプトしない。もっとも、`InterruptGuard` は cli してから深さを
+/// 増やすので `depth>0 ⟹ IF=0 ⟹ timer は配送されない`（ADR-0019 §5）。この
+/// スキップは、その構造的保証が崩れたときの防御である（`task-preempt-in-critical`
+/// で実際に崩して発火させる）。
+pub fn on_timer_tick(current_rsp: u64) -> u64 {
+    // 防御的スキップ。critical 区間中はプリエンプトせず現タスクを続行する。
+    // preempt-in-critical の破壊確認では、この防御も外して、cli 落とし（IF=1 の
+    // まま）と併せてプリエンプトをクリティカル区間へ食い込ませる。
+    #[cfg(not(feature = "task-preempt-in-critical"))]
+    if critical_nesting_depth() != 0 {
+        return current_rsp;
+    }
+
+    // set と store の窓（ワーカーが 15 GPR を保持している区間）でプリエンプト
+    // したかを数える（条件1）。この回数が 0 なら統計的レジスタ検証は何も
+    // 検証していない。
+    // SAFETY: 読み取りのみ。ワーカー本体が rip 相対で書くフラグ。
+    if unsafe { core::ptr::read_volatile(addr_of!(IN_GPR_WINDOW)) } != 0 {
+        PREEMPT_IN_WINDOW.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // 締切に達したらワーカーを走行不可にする。次の pick_next がメインを選ぶ。
+    // SAFETY: IF=0 の割り込みハンドラ内。他の実行文脈は無い。
+    let sched = unsafe { &mut *(addr_of!(SCHEDULER) as *mut Scheduler) };
+    if sched.demo_active && crate::idt::timer_ticks() >= sched.demo_deadline {
+        for w in 0..WORKER_COUNT {
+            sched.tasks[1 + w].runnable = false;
+        }
+        sched.demo_active = false;
+    }
+
+    schedule_switch(current_rsp)
+}
+
+/// スイッチの中核（yield と timer が共有）。現タスクの RSP を保存し、次タスクを
+/// 選び、RSP0 を更新して次タスクの RSP を返す。次が現タスクと同じなら何もしない。
+fn schedule_switch(current_rsp: u64) -> u64 {
+    // SAFETY: いずれの呼び出し元も IF=0（割り込みゲート経由）で、シングルコア
+    // なので他の実行文脈が同時にスケジューラを触ることはない。
     let sched = unsafe { &mut *(addr_of!(SCHEDULER) as *mut Scheduler) };
 
     let current = sched.current;
     sched.tasks[current].saved_rsp = current_rsp;
 
     // 破壊確認 (ii): RSP の差し替えを省く。現タスクの RSP を返すのでスイッチが
-    // 起きず、同じタスクが回り続ける。デモの会計・順序で検出する。
+    // 起きず、同じタスクが回り続ける。デモの会計・進捗で検出する。
     #[cfg(feature = "task-switch-no-swap")]
     {
-        let _ = &sched.tasks; // no-swap では next を選ばない。
         return current_rsp;
     }
 
     #[cfg(not(feature = "task-switch-no-swap"))]
     {
         let next = pick_next(sched, current);
+        // 走らせるべき相手がいない（=現タスクのまま）なら何もしない。デモ後の
+        // ハートビート区間（runnable がメインだけ）ではここに来て no-op になる。
+        if next == current {
+            return current_rsp;
+        }
+
+        // スタックが混ざっていないこと。次タスクの保存 RSP がそのタスクの
+        // スタック範囲内にあること（範囲外なら別タスクのスタックを指している）。
+        let next_rsp = sched.tasks[next].saved_rsp;
+        if next_rsp < sched.tasks[next].stack_bottom || next_rsp >= sched.tasks[next].stack_top {
+            serial_line(format_args!(
+                "[ERROR] task: task {next} saved_rsp {next_rsp:#x} is outside its stack \
+                 [{:#x}, {:#x}); stacks are mixed; halting",
+                sched.tasks[next].stack_bottom, sched.tasks[next].stack_top
+            ));
+            common::cpu::halt_forever();
+        }
+
         sched.current = next;
         sched.switches += 1;
         sched.tasks[next].resumes += 1;
 
         // RSP0 を次タスクのスタック頂点へ更新する（§2.2、効くのは M5-e）。
+        // 破壊確認: drop-rsp0 では更新を落とす。読み戻し検査で捕まる。
         let expected_rsp0 = sched.tasks[next].stack_top;
+        #[cfg(not(feature = "task-switch-drop-rsp0"))]
         // SAFETY: stack_top は次タスクの有効なスタック頂点。切り替えの割り込み
         // 禁止区間から呼んでいる。
         unsafe {
@@ -412,8 +534,8 @@ pub fn on_yield(current_rsp: u64) -> u64 {
         }
         // **実際の状態を読む。** RSP0 は M5-e まで挙動に現れないので、間違った
         // 値が書かれても誰も気づかない。TSS から読み戻して期待値と一致する
-        // ことをその場で確かめる（A-1 / M5-b と同じく実状態を見る）。一致
-        // しなければ静かに壊れる前に止める。
+        // ことをその場で確かめる（A-1 / M5-b と同じく実状態を見る）。drop-rsp0
+        // では更新を落としているのでここで食い違い、halt する。
         let readback = gdt::privilege_stack_top();
         if readback != expected_rsp0 {
             serial_line(format_args!(
@@ -422,8 +544,6 @@ pub fn on_yield(current_rsp: u64) -> u64 {
             ));
             common::cpu::halt_forever();
         }
-
-        let next_rsp = sched.tasks[next].saved_rsp;
 
         // 破壊確認 (i): 次タスクの保存コンテキストの rbx スロットを壊す。
         // 復帰した次タスクは rbx が base+1 と食い違うのを GPR 照合で検出する。
@@ -583,4 +703,280 @@ core::arch::global_asm!(
     done = sym worker_done_and_yield,
     buf = sym GPR_BUF,
     yv = const YIELD_VECTOR,
+);
+
+// ============================================================================
+// M5-d: プリエンプティブ化（タイマからのスケジューリング）
+// ============================================================================
+
+/// プリエンプティブデモを回すティック数（100Hz なので 200 ≒ 2 秒）。
+const PREEMPTIVE_DEMO_TICKS: u64 = 200;
+
+extern "C" {
+    /// プリエンプティブなワーカー本体（`global_asm!`）。yield を呼ばず、GPR に
+    /// pattern を保持しながらビジーループする。timer が切り替える。
+    static zaytos_preemptive_body: u8;
+}
+
+/// プリエンプティブデモを実行し、検証する（M5-d）。
+///
+/// timer が動いている状態（sti 済み）で呼ぶこと。2 本のビジーループワーカーを
+/// 起こし、初回スイッチ（yield）でワーカーへ入る。以後 timer がワーカー間を
+/// プリエンプトで回す。締切に達すると [`on_timer_tick`] がワーカーを走行不可に
+/// してメインへ戻し、この関数が会計・進捗・レジスタ照合・窓カウントを検査して
+/// 戻る。
+pub fn run_preemptive_demo() {
+    // SAFETY: run_timer_loop の sti 直後、起動時の単一実行文脈から 1 回だけ
+    // 呼ばれる。スケジューラは M5-c のデモが終わった状態。
+    unsafe {
+        setup_preemptive_tasks();
+    }
+
+    serial_line(format_args!(
+        "task: starting preemptive demo with {WORKER_COUNT} busy-loop workers for \
+         {PREEMPTIVE_DEMO_TICKS} ticks"
+    ));
+
+    // 初回スイッチ。メインがワーカー A へ入る。以後 timer がプリエンプトする。
+    // 締切で on_timer_tick がここへ戻す。
+    yield_now();
+
+    // --- 会計・進捗・窓カウントを閉じる ---
+    // SAFETY: ワーカーは走行不可で、走行中はメインだけ。読み取りのみ。
+    let (switches, resume_sum, a_iters, b_iters) = unsafe {
+        let s = addr_of!(SCHEDULER);
+        let switches = (*s).switches;
+        let resume_sum: u64 = (*s).tasks.iter().map(|t| t.resumes).sum();
+        (
+            switches,
+            resume_sum,
+            (*s).tasks[1].iterations,
+            (*s).tasks[2].iterations,
+        )
+    };
+    let window_preempts = PREEMPT_IN_WINDOW.load(Ordering::Relaxed);
+
+    serial_line(format_args!(
+        "task: preemptive demo finished. switches={switches}, sum(resumes)={resume_sum}, \
+         A iterations={a_iters}, B iterations={b_iters}, \
+         preempts in the GPR window={window_preempts}"
+    ));
+
+    // 進捗: 両ワーカーが何度も回った。
+    let progress = a_iters > 0 && b_iters > 0;
+    // 会計: 各スイッチが 1 タスクを再開したので合計が一致する（非決定的順序でも）。
+    let accounting = switches == resume_sum;
+    // 統計的レジスタ検証が実際に窓を捉えたこと（条件1）。捉えていなければ、
+    // レジスタ照合は何も検証していない。
+    let window_meaningful = window_preempts > 0;
+
+    if !progress {
+        serial_line(format_args!(
+            "[ERROR] task: a worker made no progress (A={a_iters}, B={b_iters}); the timer did \
+             not preempt fairly; halting"
+        ));
+        common::cpu::halt_forever();
+    }
+    if !accounting {
+        serial_line(format_args!(
+            "[ERROR] task: preemptive accounting did not balance (switches != sum(resumes)); halting"
+        ));
+        common::cpu::halt_forever();
+    }
+    if !window_meaningful {
+        serial_line(format_args!(
+            "[ERROR] task: no preemption landed in the GPR window; the register check verified \
+             nothing (widen the window or run longer); halting"
+        ));
+        common::cpu::halt_forever();
+    }
+
+    serial_line(format_args!(
+        "task: preemptive switch verified (progress, accounting, and {window_preempts} \
+         register round-trips through preemption all held)"
+    ));
+}
+
+/// プリエンプティブデモ用にスケジューラを組み直し、2 本のビジーループワーカーを
+/// 起こす。
+///
+/// # Safety
+///
+/// timer が動いている状態で、起動時の単一実行文脈から 1 回だけ呼ぶこと。M5-c の
+/// デモが終わっていること（ワーカースタックのガードページは M5-c で設置済み。
+/// ここでは再設置しない）。
+unsafe fn setup_preemptive_tasks() {
+    let entry = addr_of!(zaytos_preemptive_body) as u64;
+    let main_top = crate::stack::kernel_stack_range().top.as_u64();
+
+    // SAFETY: 単一実行文脈。timer は IF=1 だが、この関数は yield する前に
+    // 走り、スケジューラの current はメイン（0）のままである。ここでの更新中に
+    // プリエンプトが起きても、current=メインで runnable なワーカーがまだ無い間は
+    // pick_next がメインを返すので no-op になる（順序の安全性は最初のワーカーを
+    // runnable にした後に yield で入ることに依存する）。
+    let _guard = common::critical::InterruptGuard::enter();
+    // SAFETY: 直前に InterruptGuard で割り込みを禁止した（IF=0）。シングルコア
+    // なので、この区間に他の実行文脈がスケジューラを触ることはない。
+    let sched = unsafe { &mut *(addr_of!(SCHEDULER) as *mut Scheduler) };
+    sched.current = 0;
+    sched.switches = 0;
+    sched.tasks[0] = Task {
+        stack_top: main_top,
+        stack_bottom: crate::stack::kernel_stack_range().bottom.as_u64(),
+        runnable: false,
+        ..EMPTY_TASK
+    };
+    for w in 0..WORKER_COUNT {
+        let (guard, top) = worker_stack_bounds(w);
+        // ガードページは M5-c で設置済み。ここでは偽コンテキストだけ作り直す。
+        // SAFETY: top はガードページ済みのワーカースタックの頂点。M5-c のデモは
+        // 終わっており、このスタックは今は誰も使っていない。
+        let saved_rsp = unsafe { build_initial_context(top, entry) };
+        let base = 0xA1A1_0000u64 + (w as u64) * 0x1111_0000;
+        sched.tasks[1 + w] = Task {
+            saved_rsp,
+            stack_top: top.as_u64(),
+            stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
+            runnable: true,
+            base,
+            rounds_left: 0,
+            iterations: 0,
+            resumes: 0,
+        };
+    }
+    sched.demo_active = true;
+    sched.demo_deadline = crate::idt::timer_ticks() + PREEMPTIVE_DEMO_TICKS;
+    PREEMPT_IN_WINDOW.store(0, Ordering::Relaxed);
+    // _guard の drop でここを抜けると割り込みが復元される（元が IF=1 なら sti）。
+}
+
+/// プリエンプティブなワーカー本体から呼ばれる。往復（プリエンプト）後の 15 本の
+/// GPR（`GPR_BUF`）を基準値と照合し、進捗カウンタを増やす。
+extern "sysv64" fn verify_preemptive_gprs() {
+    // SAFETY: 単一走行。現タスクの基準値とバッファを読む。
+    let sched = unsafe { &mut *(addr_of!(SCHEDULER) as *mut Scheduler) };
+    let current = sched.current;
+    let base = sched.tasks[current].base;
+
+    // SAFETY: ワーカー本体が直前に 15 本を書き込んだ共有バッファ。
+    let buf = unsafe { *addr_of!(GPR_BUF) };
+    for (i, &tag) in GPR_TAGS.iter().enumerate() {
+        if buf[i] != base.wrapping_add(tag) {
+            let name = if current == 1 { 'A' } else { 'B' };
+            serial_line(format_args!(
+                "[ERROR] task: {name} GPR tag {tag} corrupted across a preemptive switch; \
+                 got {:#x} expected {:#x}; halting",
+                buf[i],
+                base.wrapping_add(tag)
+            ));
+            common::cpu::halt_forever();
+        }
+    }
+    sched.tasks[current].iterations += 1;
+}
+
+/// プリエンプティブなワーカー本体のループ先頭から呼ばれる。現タスクの base を
+/// 返す。**IF=1 の地点である。**
+///
+/// preempt-in-critical の破壊確認では、ここで共有ロックを保持したまま少し
+/// スピンする。破壊ビルドでは InterruptGuard が cli を落とすので、保持中も IF=1 の
+/// ままになり、timer がプリエンプトして別ワーカーが同じロックを取ろうとし、
+/// 二重取得検出が発火する。正常ビルドではこの経路は cfg で消える。
+extern "sysv64" fn preemptive_loop_top() -> u64 {
+    #[cfg(feature = "task-preempt-in-critical")]
+    {
+        let mut held = DEMO_LOCK.lock();
+        // SAFETY: 単一走行。読み取りのみ。
+        let current = unsafe { (*addr_of!(SCHEDULER)).current };
+        *held = current as u64;
+        // timer ティックが 1 つ跨ぐ程度スピンして、保持中のプリエンプトを誘う。
+        for _ in 0..2_000_000u64 {
+            core::hint::spin_loop();
+        }
+        drop(held);
+    }
+    current_task_base()
+}
+
+// プリエンプティブなワーカー本体（アセンブリ）。yield を呼ばない。
+//
+// 各周回:
+//   1. current_task_base() で自分の base を得る（rax）
+//   2. 15 本の GPR へ base + tag を入れる
+//   3. IN_GPR_WINDOW を 1 にする（rip 相対、レジスタを使わない）
+//   4. NOP そりを挟んで窓を広げる（条件1: プリエンプトが窓に落ちる確率を上げ、
+//      N > 0 を保証する。widen feature でそりを長くして N が増えることを確かめる）
+//   5. 15 本を GPR_BUF へ書き出す
+//   6. IN_GPR_WINDOW を 0 にする
+//   7. verify_preemptive_gprs() で照合し進捗を数える
+//   8. 無限に繰り返す（締切で on_timer_tick がこのワーカーを走行不可にして
+//      スケジューラが選ばなくなることで止まる。自分では抜けない）
+// timer がこのビジーループを任意の瞬間にプリエンプトし、切り替えが 15 本を
+// 保存・復元する。set と store の間（IN_GPR_WINDOW=1）でプリエンプトした回が、
+// 保存・復元の検査として意味を持つ。
+core::arch::global_asm!(
+    ".section .text",
+    ".p2align 4",
+    ".globl zaytos_preemptive_body",
+    "zaytos_preemptive_body:",
+    "2:",
+    // ループ先頭（IF=1、プリエンプト可）。base を得る。preempt-in-critical の
+    // 破壊確認では、ここで DEMO_LOCK を保持したままスピンする（IF=1 なので
+    // timer が食い込む。正常ビルドでは何もしない）。
+    "  call {loop_top}",
+    "  lea rbx, [rax + 1]",
+    "  lea rcx, [rax + 2]",
+    "  lea rdx, [rax + 3]",
+    "  lea rsi, [rax + 4]",
+    "  lea rdi, [rax + 5]",
+    "  lea rbp, [rax + 6]",
+    "  lea r8,  [rax + 8]",
+    "  lea r9,  [rax + 9]",
+    "  lea r10, [rax + 10]",
+    "  lea r11, [rax + 11]",
+    "  lea r12, [rax + 12]",
+    "  lea r13, [rax + 13]",
+    "  lea r14, [rax + 14]",
+    "  lea r15, [rax + 15]",
+    // 窓に入る。ここから cli までの間にプリエンプトすると、保存・復元の検査に
+    // なる（15 本を保持したまま切り替わる）。
+    "  mov byte ptr [rip + {window}], 1",
+    // メモリカウンタの遅延ループで窓を広げる。dec/jnz はフラグしか使わず
+    // （フラグは IrqContext の rflags で保存・復元される）、pattern の 15 本は
+    // 触らない。カウンタはメモリなのでレジスタも使わない。コードは数命令で、
+    // そりの長さが .text を膨らませない。
+    "  mov qword ptr [rip + {delay}], {sled}",
+    "4:",
+    "  dec qword ptr [rip + {delay}]",
+    "  jnz 4b",
+    // **cli で store と照合を保護する。** GPR_BUF は A/B 共有なので、store の後
+    // 照合の前にプリエンプトされると別ワーカーが上書きし、他タスクの値を読んで
+    // しまう。cli してから store・照合すれば、その区間は別タスクが割り込めない。
+    // 検査対象の窓（set から cli まで）は cli の前なのでプリエンプト可のまま。
+    "  cli",
+    "  mov byte ptr [rip + {window}], 0",
+    "  mov qword ptr [rip + {buf} + 0],   rax",
+    "  mov qword ptr [rip + {buf} + 8],   rbx",
+    "  mov qword ptr [rip + {buf} + 16],  rcx",
+    "  mov qword ptr [rip + {buf} + 24],  rdx",
+    "  mov qword ptr [rip + {buf} + 32],  rsi",
+    "  mov qword ptr [rip + {buf} + 40],  rdi",
+    "  mov qword ptr [rip + {buf} + 48],  rbp",
+    "  mov qword ptr [rip + {buf} + 56],  r8",
+    "  mov qword ptr [rip + {buf} + 64],  r9",
+    "  mov qword ptr [rip + {buf} + 72],  r10",
+    "  mov qword ptr [rip + {buf} + 80],  r11",
+    "  mov qword ptr [rip + {buf} + 88],  r12",
+    "  mov qword ptr [rip + {buf} + 96],  r13",
+    "  mov qword ptr [rip + {buf} + 104], r14",
+    "  mov qword ptr [rip + {buf} + 112], r15",
+    "  call {verify}",
+    "  sti",
+    "  jmp 2b",
+    loop_top = sym preemptive_loop_top,
+    verify = sym verify_preemptive_gprs,
+    buf = sym GPR_BUF,
+    window = sym IN_GPR_WINDOW,
+    delay = sym PREEMPT_DELAY,
+    sled = const PREEMPT_WINDOW_SLED,
 );

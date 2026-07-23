@@ -117,3 +117,15 @@ task-switch-no-swap = []
 # InterruptGuard を保持したまま yield を呼ぶ。on_yield のガードが critical
 # nesting depth を見て fail-fast することを確認する。`--task-test in-critical`。
 task-switch-yield-in-critical = []
+# プリエンプティブスイッチで RSP0 の更新を落とす。M5-c で入れた RSP0 読み戻し
+# 検査が発火して halt することを確認する。`--task-test drop-rsp0`。
+task-switch-drop-rsp0 = []
+# プリエンプトが set/store の窓に落ちる確率を上げるため NOP そりを長くする。
+# 窓カウントが増えることで、統計的レジスタ検証の判定が働くことを確かめる
+# （条件1）。`--task-test widen-window`。
+task-widen-preempt-window = []
+# InterruptGuard の cli を落とす（common へ渡す。下記）。Locked 保持中も IF=1 の
+# ままになり、timer が割り込んで別タスクが同じ Locked を取り二重取得検出が
+# 発火する。`depth>0 ⟹ IF=0` の構造的保証が崩れたときプリエンプトがクリティカル
+# 区間へ食い込むことの実証。`--task-test preempt-in-critical`。
+task-preempt-in-critical = ["common/preempt-in-critical-break"]

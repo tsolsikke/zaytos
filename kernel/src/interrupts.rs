@@ -489,6 +489,16 @@ pub unsafe fn run_timer_loop(
         cpu::enable_interrupts();
     }
 
+    // プリエンプティブマルチタスクのデモと検証（M5-d）。timer が動き出した
+    // この時点で 1 区間だけ回す。通常起動（stop_after_ticks == 0）でのみ行う。
+    // interrupt-test の有限ループ（stop_after_ticks > 0）では回さない。デモが
+    // 終わるとワーカーは走行不可になり、以降このハートビートループは
+    // プリエンプトされない（runnable がメインだけなので on_timer_tick は
+    // no-op）。
+    if stop_after_ticks == 0 {
+        crate::task::run_preemptive_demo();
+    }
+
     let mut last_ticks = 0u64;
     let mut next_heartbeat = HEARTBEAT_TICKS;
     let mut announced_first = false;

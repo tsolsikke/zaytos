@@ -632,9 +632,13 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     // 出力自体がハンドラの処理時間を支配し、ティックを取りこぼす。観測は
     // メインループがカウンタ越しに行う。
 
-    // M5-c ではタイマ・キーボード・テストベクタはいずれも切り替えないので、
-    // 入場時の RSP をそのまま返す。yield（協調的スイッチ）は専用ベクタで、
-    // ここより後（M5-c の yield 実装）で別タスクの RSP を返す分岐が入る。
+    // タイマ（IRQ0）はプリエンプティブに切り替える（M5-d）。**EOI はここより
+    // 前で送っている**ので、次タスクは IF=1 で次ティックを受けられる。キーボード
+    // やテストベクタは切り替えない（入場時の RSP を返す）。
+    if vector == TIMER_VECTOR {
+        return crate::task::on_timer_tick(no_switch_rsp);
+    }
+
     no_switch_rsp
 }
 

@@ -500,6 +500,37 @@ const TASK_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // プリエンプティブスイッチで RSP0 の更新を落とす。M5-c の RSP0 読み戻し
+    // 検査が食い違いを検出して halt する。
+    CriticalTest {
+        name: "drop-rsp0",
+        feature: "task-switch-drop-rsp0",
+        expected_markers: &["TSS.RSP0 readback", "halting"],
+        forbidden_markers: &["preemptive switch verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // プリエンプト窓を広げると窓カウントが増えること（統計的検証の判定が働く
+    // ことの裏）。窓カウント > 0 で verified まで進めば OK。窓が広い分だけ
+    // カウントは normal より増える（値は非決定的なので verified の到達で見る）。
+    CriticalTest {
+        name: "widen-window",
+        feature: "task-widen-preempt-window",
+        expected_markers: &["preempts in the GPR window=", "preemptive switch verified"],
+        forbidden_markers: &["no preemption landed in the GPR window"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // InterruptGuard の cli を落とし、防御スキップも外す。Locked 保持中に timer が
+    // プリエンプトして別ワーカーが同じ Locked を取り、二重取得検出が発火する。
+    CriticalTest {
+        name: "preempt-in-critical",
+        feature: "task-preempt-in-critical",
+        expected_markers: &["double acquisition detected", "halting"],
+        forbidden_markers: &["preemptive switch verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
 ];
 
 /// カーネルが起動したことを示す、シリアルログの既知の行。

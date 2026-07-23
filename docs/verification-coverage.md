@@ -136,6 +136,9 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 | `task-switch-drop-reg` | 協調的スイッチで次タスクの rbx を壊す | 復帰したタスクが GPR 照合で検出して止まること |
 | `task-switch-no-swap` | 協調的スイッチで RSP の差し替えを省く | スイッチが起きず会計が合わないことを検出して止まること |
 | `task-switch-yield-in-critical` | InterruptGuard 保持中に yield を呼ぶ | on_yield のガードが critical nesting depth を見て fail-fast すること |
+| `task-switch-drop-rsp0` | プリエンプティブスイッチで RSP0 の更新を落とす | RSP0 読み戻し検査が食い違いを検出して止まること |
+| `task-widen-preempt-window` | プリエンプト窓の NOP そりを広げる | 窓カウントが増え、統計的レジスタ検証の判定が働くこと |
+| `task-preempt-in-critical` | InterruptGuard の cli を落とし防御スキップも外す | Locked 保持中の timer プリエンプトで二重取得検出が発火すること |
 | `gfx-test-pattern` | コンソールを起動せず描画テストパターンを描く | 描画の基盤 |
 
 これらが有効なビルドでは、起動時に`test hooks:`のWARNが出て内訳が列挙される。
