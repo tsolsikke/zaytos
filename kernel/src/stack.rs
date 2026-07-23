@@ -95,9 +95,18 @@ pub const CANARY_BYTE: u8 = 0xC5;
 /// **フィールドの順序に意味がある。** 各スタックの直下（アドレスが小さい側）に
 /// 犠牲領域が来るよう並べてある。`#[repr(C)]` により、この順序は言語仕様で
 /// 保証される（リンカやコンパイラの都合で入れ替わらない）。
-#[repr(C, align(16))]
+///
+/// **`align(4096)` にしてあるのは、`kernel_guard` を 1 ページとして unmap し、
+/// ガードページにするためである（M5-b）。** 先頭がページ境界に載り、各
+/// フィールドの大きさがいずれも 4KiB の倍数なので、すべてのフィールドが
+/// ページ境界に揃う。`kernel_guard` はちょうど 1 ページになり、
+/// `unmap_4kib` で 1 枚だけ落とせる。
+#[repr(C, align(4096))]
 struct StackBlock {
-    /// カーネルスタックが溢れたときに最初に壊れる犠牲領域。
+    /// カーネルスタックのガードページ。**M5-b でこの 1 ページを unmap し、
+    /// 溢れた瞬間に #PF（CR2 = このページ）として捕まえる。** それまでは
+    /// マップされたまま（unmap は起動シーケンスの中で行う）。カナリアは
+    /// 敷かない（ガードページ化がカナリアの役割を引き継ぐ）。
     kernel_guard: [u8; GUARD_SIZE],
     /// 通常実行用のカーネルスタック。
     kernel: [u8; KERNEL_STACK_SIZE],
@@ -107,6 +116,13 @@ struct StackBlock {
     /// 通常のスタックが壊れている状況でも例外ハンドラを動かすためのものなので、
     /// 通常スタックとは必ず別領域にする。
     double_fault: [u8; IST_STACK_SIZE],
+    /// ページフォルトスタックが溢れたときに最初に壊れる犠牲領域。
+    page_fault_guard: [u8; GUARD_SIZE],
+    /// ページフォルト用の IST スタック（IST2、M5-b）。ガードページに触れた
+    /// #PF が、溢れた通常スタックの上ではなくこの別スタックで動くようにする。
+    /// これがないと #PF がダブルフォルトへ昇格し、CR2 が失われる（ADR-0019
+    /// §3.1）。IST スタック自体にはガードページを付けず、カナリアで見る。
+    page_fault: [u8; IST_STACK_SIZE],
 }
 
 static mut STACKS: StackBlock = StackBlock {
@@ -114,6 +130,8 @@ static mut STACKS: StackBlock = StackBlock {
     kernel: [0; KERNEL_STACK_SIZE],
     double_fault_guard: [0; GUARD_SIZE],
     double_fault: [0; IST_STACK_SIZE],
+    page_fault_guard: [0; GUARD_SIZE],
+    page_fault: [0; IST_STACK_SIZE],
 };
 
 /// スタックの範囲（下端と上端）。上端は排他で、スタックポインタの初期値になる。
@@ -161,12 +179,16 @@ pub fn kernel_stack_range() -> StackRange {
     range_from(bottom, KERNEL_STACK_SIZE as u64)
 }
 
-/// カーネルスタックの直下にある犠牲領域。
-pub fn kernel_guard_range() -> StackRange {
+/// カーネルスタックの直下に置くガードページ（M5-b で unmap する 1 ページ）。
+///
+/// `StackBlock` が `align(4096)` なので、これはちょうど 1 ページ
+/// （`GUARD_SIZE == 4096`）で、ページ境界に載っている。カナリアは敷かず、
+/// このページを unmap してガードページにする。
+pub fn kernel_guard_page() -> StackRange {
     range_from(block_base(), GUARD_SIZE as u64)
 }
 
-/// ダブルフォルト用 IST スタックの範囲。
+/// ダブルフォルト用 IST スタック（IST1）の範囲。
 pub fn double_fault_stack_range() -> StackRange {
     let bottom = kernel_stack_range()
         .top
@@ -180,16 +202,34 @@ pub fn double_fault_guard_range() -> StackRange {
     range_from(kernel_stack_range().top, GUARD_SIZE as u64)
 }
 
-/// 両方の犠牲領域をカナリアで埋める。
+/// ページフォルト用 IST スタック（IST2）の範囲（M5-b）。
+pub fn page_fault_stack_range() -> StackRange {
+    let bottom = double_fault_stack_range()
+        .top
+        .checked_add(GUARD_SIZE as u64)
+        .expect("the stack block stays within the canonical range");
+    range_from(bottom, IST_STACK_SIZE as u64)
+}
+
+/// ページフォルトスタックの直下にある犠牲領域。
+pub fn page_fault_guard_range() -> StackRange {
+    range_from(double_fault_stack_range().top, GUARD_SIZE as u64)
+}
+
+/// IST スタックの犠牲領域をカナリアで埋める。
 ///
-/// スタックを使い始める前に呼ぶこと。
+/// スタックを使い始める前に呼ぶこと。**カーネルスタックのガードページには
+/// カナリアを敷かない**（そのページは M5-b で unmap してガードページにする。
+/// カナリアを敷いても unmap で消えるうえ、unmap 後の読み戻しは #PF になる）。
+/// カナリアを敷くのは IST1（ダブルフォルト）と IST2（ページフォルト）の
+/// 犠牲領域だけである。
 ///
 /// # Safety
 ///
 /// 犠牲領域がまだ誰にも使われていないこと。`_start` の最初期に 1 回だけ
 /// 呼ぶ前提。
 pub unsafe fn init_guards() {
-    for range in [kernel_guard_range(), double_fault_guard_range()] {
+    for range in [double_fault_guard_range(), page_fault_guard_range()] {
         // SAFETY: range は静的構造体の範囲であり、呼び出し側の契約により
         // まだ誰も使っていない。書き込むのは犠牲領域だけで、スタック本体には
         // 触れない。
@@ -199,17 +239,18 @@ pub unsafe fn init_guards() {
     }
 }
 
-/// どちらの犠牲領域も無傷かどうか。破壊されていればスタックが溢れている。
+/// IST の犠牲領域がどれも無傷かどうか。破壊されていれば IST スタックが
+/// 溢れている。カーネルスタックはガードページで見るため、ここには含めない。
 pub fn guards_intact() -> bool {
-    kernel_guard_intact() && double_fault_guard_intact()
-}
-
-pub fn kernel_guard_intact() -> bool {
-    guard_intact(kernel_guard_range())
+    double_fault_guard_intact() && page_fault_guard_intact()
 }
 
 pub fn double_fault_guard_intact() -> bool {
     guard_intact(double_fault_guard_range())
+}
+
+pub fn page_fault_guard_intact() -> bool {
+    guard_intact(page_fault_guard_range())
 }
 
 fn guard_intact(range: StackRange) -> bool {
@@ -325,28 +366,56 @@ mod tests {
         let kernel = offset_of!(StackBlock, kernel);
         let df_guard = offset_of!(StackBlock, double_fault_guard);
         let df = offset_of!(StackBlock, double_fault);
+        let pf_guard = offset_of!(StackBlock, page_fault_guard);
+        let pf = offset_of!(StackBlock, page_fault);
 
         assert_eq!(
             kernel_guard + GUARD_SIZE,
             kernel,
-            "カーネルスタックの直下は犠牲領域でなければならない"
+            "カーネルスタックの直下は犠牲領域（ガードページ）でなければならない"
         );
         assert_eq!(
             df_guard + GUARD_SIZE,
             df,
             "ダブルフォルトスタックの直下は犠牲領域でなければならない"
         );
+        assert_eq!(
+            pf_guard + GUARD_SIZE,
+            pf,
+            "ページフォルトスタックの直下は犠牲領域でなければならない"
+        );
         // カーネルスタックの上端は次の犠牲領域。重要なデータを挟まない。
         assert_eq!(kernel + KERNEL_STACK_SIZE, df_guard);
+        // ダブルフォルトスタックの上端はページフォルト側の犠牲領域。
+        assert_eq!(df + IST_STACK_SIZE, pf_guard);
+    }
+
+    /// ガードページがちょうど 1 ページで、ページ境界に載っていること。
+    /// unmap で 1 枚だけ落とすための前提。
+    #[test]
+    fn the_kernel_guard_is_exactly_one_aligned_page() {
+        use core::mem::{align_of, offset_of};
+
+        assert_eq!(GUARD_SIZE, 4096, "ガードページはちょうど 1 ページ");
+        assert!(
+            align_of::<StackBlock>() >= 4096,
+            "ブロックの先頭がページ境界に載っていること"
+        );
+        assert_eq!(
+            offset_of!(StackBlock, kernel_guard) % 4096,
+            0,
+            "ガードページがページ境界に載っていること"
+        );
     }
 
     #[test]
     fn the_block_is_exactly_the_sum_of_its_parts() {
-        // パディングが入っていないこと。入っていると、上のオフセット計算に
-        // 現れない隙間ができる。
+        // パディングが入っていないこと。入っていると、下のオフセット計算に
+        // 現れない隙間ができる。すべてのフィールドが 4KiB の倍数なので、
+        // align(4096) でもパディングは入らない。
         assert_eq!(
             core::mem::size_of::<StackBlock>(),
-            GUARD_SIZE * 2 + KERNEL_STACK_SIZE + IST_STACK_SIZE
+            GUARD_SIZE * 3 + KERNEL_STACK_SIZE + IST_STACK_SIZE * 2
         );
     }
 }

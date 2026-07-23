@@ -42,6 +42,11 @@ pub const TSS_SELECTOR: SegmentSelector = SegmentSelector::new(TSS_INDEX, 0);
 /// M4-b の IDT エントリでこの番号を指定する。
 pub const DOUBLE_FAULT_IST_INDEX: usize = 1;
 
+/// ページフォルトに割り当てる IST の番号（1 始まり、M5-b）。
+/// ガードページに触れた #PF が、溢れた通常スタックの上ではなく専用スタックで
+/// 動くようにするため、IDT の #PF ゲートでこの番号を指定する（ADR-0019 §3.1）。
+pub const PAGE_FAULT_IST_INDEX: usize = 2;
+
 static mut GDT: [u64; GDT_ENTRY_COUNT] = [0; GDT_ENTRY_COUNT];
 static mut TSS: TaskStateSegment = TaskStateSegment::new();
 
@@ -66,14 +71,15 @@ struct DescriptorTablePointer {
 /// - 起動時に 1 回だけ呼ぶこと。
 /// - 呼び出し時点で割り込みが禁止されていること。GDT の入れ替え中に割り込みが
 ///   入ると、古いセレクタと新しいテーブルが混ざった状態でハンドラへ入る。
-/// - `double_fault_stack_top` が、通常のスタックとは別の、有効でマップ済みの
-///   スタック上端であること。
-pub unsafe fn init(double_fault_stack_top: u64) {
+/// - `double_fault_stack_top` と `page_fault_stack_top` が、通常のスタックとも
+///   互いとも別の、有効でマップ済みのスタック上端であること。
+pub unsafe fn init(double_fault_stack_top: u64, page_fault_stack_top: u64) {
     // TSS を先に埋める。GDT の TSS ディスクリプタがそのアドレスを指すため。
     // SAFETY: 起動時の単一実行文脈であり、他に誰もこの static に触れていない。
     unsafe {
         let tss = addr_of!(TSS) as *mut TaskStateSegment;
         (*tss).interrupt_stack_table[DOUBLE_FAULT_IST_INDEX - 1] = double_fault_stack_top;
+        (*tss).interrupt_stack_table[PAGE_FAULT_IST_INDEX - 1] = page_fault_stack_top;
         // RSP0 は特権レベルが下がる遷移（ユーザー → カーネル）で使われる。
         // ユーザーモードを導入する M5 以降まで実際には効かないが、
         // 0 のままにしておくと、その時点で気づきにくい形で壊れる。

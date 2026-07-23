@@ -439,6 +439,34 @@ const PAGING_TESTS: &[CriticalTest] = &[
     },
 ];
 
+/// カーネルスタックのガードページの回帰チェック（`--stack-test <kind>`、M5-b）。
+const STACK_TESTS: &[CriticalTest] = &[
+    // スタックを溢れさせ、ガードページに触れた #PF が IST2 上で、CR2 =
+    // ガードページとして報告されること。#DF へ昇格しないこと。
+    CriticalTest {
+        name: "guard",
+        feature: "stack-guard-test",
+        expected_markers: &[
+            "exception: vector=14 (#PF",
+            "cr2 is in the kernel stack guard page = true",
+            "on IST2=true",
+        ],
+        forbidden_markers: &["exception: vector=8"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // #PF に IST を与えず、溢れ → 壊れたスタック上の #PF → #DF の本来の連鎖で
+    // ダブルフォルトが出ること。#PF が IST2 上で完結しないこと。
+    CriticalTest {
+        name: "df",
+        feature: "stack-overflow-df-test",
+        expected_markers: &["exception: vector=8 (#DF", "on IST1=true"],
+        forbidden_markers: &["on IST2=true"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+];
+
 /// カーネルが起動したことを示す、シリアルログの既知の行。
 ///
 /// kernel の `kernel_main` が最初に出す行（`common::log` の INFO 形式）。
@@ -595,7 +623,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -622,6 +650,13 @@ fn main() -> Result<()> {
                     format!("--paging-test requires a kind ({})", names.join(" | "))
                 })?;
                 return cmd_marker_test(PAGING_TESTS, "paging-test", kind);
+            }
+            if let Some(index) = rest.iter().position(|a| a == "--stack-test") {
+                let kind = rest.get(index + 1).with_context(|| {
+                    let names: Vec<&str> = STACK_TESTS.iter().map(|t| t.name).collect();
+                    format!("--stack-test requires a kind ({})", names.join(" | "))
+                })?;
+                return cmd_marker_test(STACK_TESTS, "stack-test", kind);
             }
             if let Some(index) = rest.iter().position(|a| a == "--critical-test") {
                 let kind = rest.get(index + 1).with_context(|| {
@@ -2106,6 +2141,13 @@ fn cmd_check(full: bool) -> Result<()> {
             let name = format!("paging-test {}", test.name);
             run_regression(&name, &mut failed, &mut retries, || {
                 cmd_marker_test(PAGING_TESTS, "paging-test", test.name)
+            });
+        }
+        for test in STACK_TESTS {
+            total += 1;
+            let name = format!("stack-test {}", test.name);
+            run_regression(&name, &mut failed, &mut retries, || {
+                cmd_marker_test(STACK_TESTS, "stack-test", test.name)
             });
         }
         for test in INTERRUPT_TESTS {

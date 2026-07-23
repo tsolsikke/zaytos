@@ -100,3 +100,11 @@ paging-test-directmap-low-window = ["paging-test"]
 # 差し替え直後の phys_to_virt 検証が期待値と食い違って停止する。登録値の
 # 検証が働いていることの証明（A-1 の low-window とは層が違う）。
 paging-test-directmap-wrong-base = ["paging-test"]
+# カーネルスタックを意図的に溢れさせ、ガードページに触れて #PF（CR2 =
+# ガードページ）が IST2 上で報告されること、#DF へ昇格しないことを確認する
+# （M5-b、ADR-0019 §3.1）。`cargo xtask run --stack-test guard` が有効化する。
+stack-guard-test = []
+# スタックオーバーフローで #DF を本来の方法で誘発する。#PF に IST を与えず
+# （下記 idt::init 参照）、溢れ → 壊れたスタック上での #PF → #DF の連鎖を出す。
+# M4-b-2 の代用（#PF ゲートの Present 落とし）とは別経路。`--stack-test df`。
+stack-overflow-df-test = ["stack-guard-test"]

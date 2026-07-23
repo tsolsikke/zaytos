@@ -761,8 +761,9 @@ struct DescriptorTablePointer {
 /// IDT を構築して `lidt` でロードする。
 ///
 /// 全 256 ベクタに割り込みゲート（DPL 0）を入れる。`double_fault_ist_index`
-/// を指定すると、ダブルフォルト（ベクタ 8）だけがその IST スタックへ
-/// 切り替わる。
+/// を指定すると、ダブルフォルト（ベクタ 8）だけがその IST スタックへ、
+/// `page_fault_ist_index` を指定すると、ページフォルト（ベクタ 14）だけが
+/// その IST スタックへ切り替わる（M5-b、ADR-0019 §3.1）。
 ///
 /// # Safety
 ///
@@ -770,19 +771,22 @@ struct DescriptorTablePointer {
 /// - 呼び出し時点で割り込みが禁止されていること。
 /// - 自前の GDT がロード済みで、[`KERNEL_CODE_SELECTOR`] が有効な 64bit
 ///   コードセグメントを指していること。
-/// - `double_fault_ist_index` を指定する場合、TSS の当該 IST エントリに
-///   有効でマップ済みのスタック上端が設定済みであること。
-pub unsafe fn init(double_fault_ist_index: Option<u8>) {
+/// - IST インデックスを指定する場合、TSS の当該 IST エントリに有効で
+///   マップ済みのスタック上端が設定済みであること。
+pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Option<u8>) {
     // SAFETY: 起動時の単一実行文脈であり、他に誰もこの static に触れていない。
     unsafe {
         let idt = addr_of!(IDT) as *mut [IdtEntry; IDT_ENTRY_COUNT];
         for vector in 0..IDT_ENTRY_COUNT {
-            // ダブルフォルトだけ IST を使う。通常のスタックが壊れている
-            // 可能性がある例外なので、無条件で別スタックへ移る。
-            let ist = if vector == 8 {
-                double_fault_ist_index
-            } else {
-                None
+            // ダブルフォルト（8）とページフォルト（14）は IST を使う。通常の
+            // スタックが壊れている可能性がある例外なので、別スタックへ移る。
+            // #PF はスタックオーバーフローで発生しうるため、溢れたスタックの
+            // 上でハンドラを動かすとさらに #PF が起きて #DF へ昇格し、CR2 が
+            // 失われる（ADR-0019 §3.1）。
+            let ist = match vector {
+                8 => double_fault_ist_index,
+                14 => page_fault_ist_index,
+                _ => None,
             };
             (*idt)[vector] = IdtEntry::new(
                 stub_address(vector),
@@ -947,6 +951,17 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
             "[ERROR]   cr2={:#018x} (faulting address)",
             context.cr2
         );
+        // スタックオーバーフローを自己識別する。CR2 がカーネルスタックの
+        // ガードページ内なら、この #PF は溢れによるものである（M5-b）。
+        let guard = crate::stack::kernel_guard_page();
+        let in_guard =
+            common::addr::VirtAddr::new(context.cr2).is_some_and(|cr2| guard.contains(cr2));
+        let _ = writeln!(
+            serial,
+            "[ERROR]   cr2 is in the kernel stack guard page = {in_guard} (guard {:#x}..{:#x})",
+            guard.bottom.as_u64(),
+            guard.top.as_u64()
+        );
     } else {
         let _ = writeln!(
             serial,
@@ -955,16 +970,22 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
         );
     }
 
-    // ダブルフォルトは IST で別スタックへ切り替わっているはず。実際に
-    // 切り替わったかを、このフレーム自身の位置で確かめる。切り替わって
-    // いなければ、壊れた可能性のあるスタックの上でハンドラが動いている。
-    if vector == 8 {
+    // ダブルフォルト（8）とページフォルト（14）は IST で別スタックへ
+    // 切り替わっているはず。実際に切り替わったかを、このフレーム自身の位置で
+    // 確かめる。切り替わっていなければ、壊れた可能性のあるスタックの上で
+    // ハンドラが動いている（#PF がスタックオーバーフローで起きた場合、これが
+    // 効いていないと #DF へ昇格して CR2 が失われる。ADR-0019 §3.1）。
+    let ist_stack = match vector {
+        8 => Some((1u8, crate::stack::double_fault_stack_range())),
+        14 => Some((2u8, crate::stack::page_fault_stack_range())),
+        _ => None,
+    };
+    if let Some((ist_number, ist)) = ist_stack {
         let handler_rsp = context as *const ExceptionContext as u64;
-        let ist = crate::stack::double_fault_stack_range();
         let on_ist = common::addr::VirtAddr::new(handler_rsp).is_some_and(|rsp| ist.contains(rsp));
         let _ = writeln!(
             serial,
-            "[ERROR]   handler frame at {handler_rsp:#018x}, IST1 stack {:#x}..{:#x}, on IST1={on_ist}",
+            "[ERROR]   handler frame at {handler_rsp:#018x}, IST{ist_number} stack {:#x}..{:#x}, on IST{ist_number}={on_ist}",
             ist.bottom.as_u64(),
             ist.top.as_u64()
         );

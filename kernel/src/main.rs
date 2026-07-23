@@ -102,20 +102,33 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
 
     // GDT と TSS を自前のものへ切り替える。どちらも .bss の静的領域なので
     // アロケータを必要とせず、この時点で実行できる。
-    // SAFETY: 直前に cli 済み。起動時に 1 回だけ呼ぶ。ダブルフォルト用の
-    // スタックは通常のカーネルスタックとは別の静的領域である。
+    // SAFETY: 直前に cli 済み。起動時に 1 回だけ呼ぶ。ダブルフォルト用と
+    // ページフォルト用の IST スタックは通常のカーネルスタックとも互いとも
+    // 別の静的領域である。
     unsafe {
-        gdt::init(stack::double_fault_stack_range().top.as_u64());
+        gdt::init(
+            stack::double_fault_stack_range().top.as_u64(),
+            stack::page_fault_stack_range().top.as_u64(),
+        );
     }
 
     // IDT をロードする。ここも .bss の静的領域だけで完結する。
     // 例外（フォルト）は RFLAGS.IF に関係なく発生するため、割り込みを
     // 有効化しないままでもハンドラは働く。M4-d で sti するまでの間、
     // 例外だけが自前のハンドラへ届く状態になる（ADR-0018）。
+    // stack-overflow-df-test では #PF に IST を与えない。ガードページに触れた
+    // #PF が溢れた（=ガードで壊れた）スタックの上で動こうとし、そこでさらに
+    // #PF が起きて #DF へ昇格する経路を、本来の方法（スタックオーバーフロー）で
+    // 出すためである（ADR-0019 §3.1、M4-b-2 の代用とは別経路）。
+    #[cfg(feature = "stack-overflow-df-test")]
+    let page_fault_ist = None;
+    #[cfg(not(feature = "stack-overflow-df-test"))]
+    let page_fault_ist = Some(gdt::PAGE_FAULT_IST_INDEX as u8);
+
     // SAFETY: 直前に cli 済みで、GDT も直前にロードした。起動時に 1 回だけ
-    // 呼ぶ。ダブルフォルト用 IST は gdt::init が TSS へ設定済み。
+    // 呼ぶ。ダブルフォルト用と #PF 用の IST は gdt::init が TSS へ設定済み。
     unsafe {
-        idt::init(Some(gdt::DOUBLE_FAULT_IST_INDEX as u8));
+        idt::init(Some(gdt::DOUBLE_FAULT_IST_INDEX as u8), page_fault_ist);
     }
 
     // SAFETY: 起動時の単一実行文脈であり、他に誰もこの static に触れていない。
@@ -161,7 +174,8 @@ static mut BOOT_HANDOFF: BootHandoff = BootHandoff {
     any(
         feature = "exception-test",
         feature = "critical-test",
-        feature = "interrupt-test"
+        feature = "interrupt-test",
+        feature = "stack-guard-test"
     ),
     allow(unreachable_code)
 )]
@@ -796,6 +810,22 @@ extern "sysv64" fn kernel_main() -> ! {
     #[cfg(feature = "paging-test")]
     run_paging_test(&mut logger, &mut allocator, heap_start);
 
+    // === M5-b: カーネルスタックのガードページ化 ===
+    //
+    // 自前のページテーブルへ切り替え済み（M2-d / A）で、かつ自前のカーネル
+    // スタックの上で動いている（_start で切り替え済み）ので、直下のガード
+    // ページを unmap できる。IST2 は _start の gdt::init / idt::init で既に
+    // 配線済みなので、この時点以降に溢れが起きても #PF は IST2 上で動く。
+    //
+    // **ページテーブルの分割・アンマップの回帰チェック（M5-a-2）より後に
+    // 置く。** これらは `paging-test-bad-index` などで `unmap_4kib` の挙動を
+    // 全体的にわざと壊すビルドがあり、ガードページ化も同じ `unmap_4kib` を
+    // 使うため、先に置くと壊れた unmap でガードが作れず fail-fast して、
+    // 回帰チェックの判定行より前に止まってしまう。回帰チェックを通してから
+    // ガードを張れば衝突しない。通常運転（タイマループ以降）はこの後に
+    // 始まるので、steady state は保護される。
+    install_kernel_stack_guard_page(&mut logger);
+
     // ロック保持中は割り込みが禁止され、解放後に元へ戻ることを確認する
     // （M4-c-2）。ヒープのロックそのものではなく同じ Locked<T> を使う。
     // ヒープのロックを保持したままログを出すと二重取得になるため。
@@ -891,6 +921,12 @@ extern "sysv64" fn kernel_main() -> ! {
     // 確認するため、ページング構築後である必要がある）。
     #[cfg(feature = "exception-test")]
     trigger_exception_under_test(&mut logger, &mapped_ranges);
+
+    // カーネルスタックのガードページの回帰チェック（M5-b）。意図的に溢れさせ、
+    // #PF（CR2 = ガードページ）が IST2 上で報告されること、または #PF に IST を
+    // 与えない構成では #DF へ昇格することを確認する。戻らない。
+    #[cfg(feature = "stack-guard-test")]
+    trigger_stack_guard_test(&mut logger);
 
     // クリティカルセクション/ロックの回帰チェック。
     #[cfg(feature = "critical-test")]
@@ -1314,11 +1350,13 @@ fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
         if scratch_ok { "OK" } else { "NG" }
     ));
 
+    // カーネルスタックの直下はガードページ（起動シーケンスの中で unmap
+    // する）なのでカナリアを読まない。IST スタックの犠牲領域だけを見る。
     let guards_ok = stack::guards_intact();
     logger.info(format_args!(
-        "stack: guards intact (kernel={}, double-fault={})",
-        stack::kernel_guard_intact(),
-        stack::double_fault_guard_intact()
+        "stack: IST guards intact (double-fault={}, page-fault={})",
+        stack::double_fault_guard_intact(),
+        stack::page_fault_guard_intact()
     ));
 
     if !(on_own_stack && locals_on_own_stack && left_old_stack && scratch_ok && guards_ok) {
@@ -1779,6 +1817,65 @@ fn trigger_exception_under_test(
         "exception-test: the expected exception did not fire; halting"
     ));
     cpu::halt_forever();
+}
+
+/// カーネルスタックを意図的に溢れさせて、ガードページの回帰チェックを行う
+/// （M5-b、`stack-guard-test` / `stack-overflow-df-test`）。
+///
+/// 無限再帰で RSP を下げ続け、ガードページ（unmap 済み）に触れる。正常な
+/// 構成（#PF に IST2）では #PF、CR2 = ガードページ、on IST2=true として
+/// 報告される。`stack-overflow-df-test`（#PF に IST 無し）では、溢れた
+/// スタックの上で #PF を配送しようとしてさらに #PF が起き、#DF へ昇格する。
+///
+/// 通常ビルドには含まれない。
+#[cfg(feature = "stack-guard-test")]
+#[allow(unreachable_code)]
+fn trigger_stack_guard_test(logger: &mut Logger<SerialPort>) -> ! {
+    let guard = stack::kernel_guard_page();
+    logger.info(format_args!(
+        "stack-guard-test: kernel stack guard page {:#x}..{:#x}; about to overflow the stack on purpose",
+        guard.bottom.as_u64(),
+        guard.top.as_u64()
+    ));
+    #[cfg(feature = "stack-overflow-df-test")]
+    logger.info(format_args!(
+        "stack-guard-test: #PF has no IST in this build; expecting escalation to #DF"
+    ));
+    #[cfg(not(feature = "stack-overflow-df-test"))]
+    logger.info(format_args!(
+        "stack-guard-test: expecting #PF (vector 14) on IST2 with CR2 in the guard page"
+    ));
+
+    // 溢れさせる。戻り値と volatile を使って末尾呼び出し最適化を潰し、
+    // 各段が実際にスタックフレームを積むようにする。
+    let sink = overflow_the_stack(0);
+    // 到達しない。最適化で溢れごと消えないよう、結果を使う。
+    logger.error(format_args!(
+        "stack-guard-test: the recursion returned ({sink:#x}); the guard did not fire; halting"
+    ));
+    cpu::halt_forever();
+}
+
+/// スタックを溢れさせるための無限再帰。各段が 64 バイトのローカルを積み、
+/// volatile で最適化に消されないようにする。`#[inline(never)]` で確実に
+/// フレームを作る。
+#[cfg(feature = "stack-guard-test")]
+#[inline(never)]
+// 意図的な無限再帰。ガードページに触れて #PF/#DF になるまで戻らない。
+#[allow(unconditional_recursion)]
+fn overflow_the_stack(depth: u64) -> u64 {
+    let mut frame = [depth; 8];
+    // SAFETY: frame はこの関数の局所配列。volatile で読み書きするのは、
+    // 末尾呼び出し最適化とデッドコード除去を防いで実フレームを積むため。
+    unsafe {
+        core::ptr::write_volatile(&mut frame[0], depth);
+    }
+    // SAFETY: frame[0] は今書き込んだ局所配列の要素。volatile 読みは
+    // 最適化に消されないため。
+    let next = unsafe { core::ptr::read_volatile(&frame[0]) }.wrapping_add(1);
+    let deeper = overflow_the_stack(next);
+    // SAFETY: 同上。戻り値とローカルの両方を使い、再帰を末尾化させない。
+    deeper.wrapping_add(unsafe { core::ptr::read_volatile(&frame[7]) })
 }
 
 /// `--critical-test` 用に、ロックとクリティカルセクションの異常経路を
@@ -2649,6 +2746,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "A-2 の登録窓の base を 1 ページずらす",
     ),
     (
+        "stack-guard-test",
+        cfg!(feature = "stack-guard-test"),
+        "カーネルスタックを溢れさせてガードページを踏む",
+    ),
+    (
+        "stack-overflow-df-test",
+        cfg!(feature = "stack-overflow-df-test"),
+        "溢れさせ、#PF に IST を与えず #DF へ昇格させる",
+    ),
+    (
         "exception-test",
         cfg!(feature = "exception-test"),
         "起動完了後に意図的な例外を起こす",
@@ -3497,6 +3604,102 @@ fn rehome_framebuffer_to_window(
     ));
 
     *framebuffer = Some(high_fb);
+}
+
+/// M5-b: カーネルスタックの直下の 1 ページを unmap してガードページにする。
+///
+/// これ以降、通常スタックが溢れて `kernel_guard` ページに触れると即座に
+/// #PF（CR2 = そのページ）になる。#PF は IST2 上で動くので、溢れた
+/// スタックの上でハンドラを走らせずに済み、#DF へ昇格しない（ADR-0019 §3.1）。
+///
+/// # ガード幅を 1 ページにした根拠
+///
+/// **単一のスタックフレームがガード幅（4KiB）を一撃で飛び越えないことを
+/// 前提にしている。** 現在コード全体でスタック上の単一配列の最大は
+/// `[u64; 512] = 4096` バイト（H-2 の PML4 スナップショット）で、これは
+/// `from_fn` が低位から要素ごとに書くのでガードに入れば必ず触れる。他は
+/// いずれも小さい。通常のフレーム伸長も暴走再帰も 1 段が 4KiB 未満なので、
+/// ガードページへ 1 段ずつ踏み込んで #PF になる。**将来 4KiB を超える
+/// ローカル配列を導入するなら、ガード幅を再検討すること**（このコメントと
+/// `deferred-decisions.md` の「大きなスタック配列とガード幅」）。
+///
+/// # 現在は 4KiB ページであることを前提にする
+///
+/// `StackBlock` は現在 `0x100000`〜`0x200000` の 4KiB フリンジにあり、
+/// `kernel_guard` は 4KiB ページで張られている。だから split せずに
+/// `unmap_4kib` だけで落とせる。2MiB ページに載る構成になったら、その場で
+/// fail-fast する（split 分岐はそのとき足す。`deferred-decisions.md` の
+/// 「ガードページの split 化」）。
+fn install_kernel_stack_guard_page(logger: &mut Logger<SerialPort>) {
+    use kernel::paging::active::{ActivePageTable, PageSize};
+
+    let guard = stack::kernel_guard_page();
+    let guard_virt = guard.bottom;
+
+    // テーブルフレームへのアクセスは登録窓（A-2 後は高位）で足りる。unmap の
+    // 対象はガードページの（低位・恒等の）仮想アドレスそのものである。
+    // SAFETY: CR3 は自前のテーブルを指し、その配下は登録窓で読み書きできる。
+    let mut table = unsafe { ActivePageTable::current(common::addr::direct_map()) };
+
+    // 事前アサート: ガードページが 4KiB で張られていること。想定外（2MiB /
+    // 解決不能）なら、bare な unmap_4kib の AlreadySmall に頼らず、原因と
+    // 対処を名指しして止める。
+    match table.translate(guard_virt) {
+        Ok(Some(t)) if t.page_size == PageSize::Size4KiB => {}
+        Ok(Some(t)) => {
+            logger.error(format_args!(
+                "stack-guard: the guard page {:#x} is mapped by a {} page, not 4KiB. \
+                 StackBlock landed on a 2MiB page; the split branch is needed \
+                 (deferred-decisions: ガードページの split 化). halting",
+                guard_virt.as_u64(),
+                match t.page_size {
+                    PageSize::Size2MiB => "2MiB",
+                    PageSize::Size4KiB => "4KiB",
+                }
+            ));
+            cpu::halt_forever();
+        }
+        other => {
+            logger.error(format_args!(
+                "stack-guard: the guard page {:#x} does not resolve ({other:?}); halting",
+                guard_virt.as_u64()
+            ));
+            cpu::halt_forever();
+        }
+    }
+
+    // ガードページを 1 枚 unmap する。unmap_4kib は内部で invlpg も行うので、
+    // 以後このページへのアクセスは即座に #PF になる。フレームは解放しない
+    // （.bss の一部で、そもそもアロケータの管理外。M5-a-2 の仕様どおり
+    // unmap はフレームを返さない）。
+    // SAFETY: guard_virt はカーネルスタックの直下のガードページで、スタック
+    // 本体（block_base + GUARD_SIZE 以上）とは別の 1 ページ。今後このページへ
+    // 正規のアクセスは無く、触れたら溢れとして #PF で捕まえるのが目的。
+    match unsafe { table.unmap_4kib(guard_virt) } {
+        Ok(old_pte) => {
+            // 会計: unmap 後にこのページが解決不能になっていること（ガードが
+            // 効いていること）を、構築とは別に translate で確かめる。
+            let unmapped = matches!(table.translate(guard_virt), Ok(None));
+            logger.info(format_args!(
+                "stack-guard: unmapped the kernel stack guard page {:#x} (old pte={old_pte:#x}); \
+                 translate returns none={unmapped}. #PF now uses IST2.",
+                guard_virt.as_u64()
+            ));
+            if !unmapped {
+                logger.error(format_args!(
+                    "stack-guard: the guard page is still resolvable after unmap; halting"
+                ));
+                cpu::halt_forever();
+            }
+        }
+        Err(e) => {
+            logger.error(format_args!(
+                "stack-guard: failed to unmap the guard page {:#x}: {e:?}; halting",
+                guard_virt.as_u64()
+            ));
+            cpu::halt_forever();
+        }
+    }
 }
 
 /// kernel イメージの高位マッピングを持つ新しいテーブルを構築し、検証する（H-2）。
