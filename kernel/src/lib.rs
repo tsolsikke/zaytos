@@ -31,6 +31,7 @@ pub mod paging;
 pub mod pic;
 pub mod pit;
 pub mod stack;
+pub mod task;
 
 /// kernel イメージ内の仮想アドレスを物理アドレスへ写す。
 ///

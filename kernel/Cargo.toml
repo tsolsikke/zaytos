@@ -108,3 +108,12 @@ stack-guard-test = []
 # （下記 idt::init 参照）、溢れ → 壊れたスタック上での #PF → #DF の連鎖を出す。
 # M4-b-2 の代用（#PF ゲートの Present 落とし）とは別経路。`--stack-test df`。
 stack-overflow-df-test = ["stack-guard-test"]
+# 協調的スイッチで、次タスクの保存コンテキストの rbx を壊す。復帰した
+# タスクが GPR 照合で検出する。`cargo xtask run --task-test drop-reg`。
+task-switch-drop-reg = []
+# 協調的スイッチで RSP の差し替えを省く。スイッチが起きず同じタスクが回り
+# 続けるのを、デモの会計・順序で検出する。`--task-test no-swap`。
+task-switch-no-swap = []
+# InterruptGuard を保持したまま yield を呼ぶ。on_yield のガードが critical
+# nesting depth を見て fail-fast することを確認する。`--task-test in-critical`。
+task-switch-yield-in-critical = []

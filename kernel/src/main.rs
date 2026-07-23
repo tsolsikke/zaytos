@@ -919,6 +919,11 @@ extern "sysv64" fn kernel_main() -> ! {
     // 例外ハンドラの回帰チェック。起動シーケンスを最後まで通してから
     // 発火させる（mapped_ranges を使ってプローブアドレスの妥当性を
     // 確認するため、ページング構築後である必要がある）。
+    // 協調的マルチタスクのデモと検証（M5-c）。2 本のワーカーが決定的に往復し、
+    // 各タスクの全 GPR が切り替えを跨いで保たれることを確認する。戻ってくると
+    // 起動シーケンスは続行する。
+    kernel::task::run_cooperative_demo();
+
     #[cfg(feature = "exception-test")]
     trigger_exception_under_test(&mut logger, &mapped_ranges);
 
@@ -2754,6 +2759,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "stack-overflow-df-test",
         cfg!(feature = "stack-overflow-df-test"),
         "溢れさせ、#PF に IST を与えず #DF へ昇格させる",
+    ),
+    (
+        "task-switch-drop-reg",
+        cfg!(feature = "task-switch-drop-reg"),
+        "協調的スイッチで次タスクの rbx を壊す",
+    ),
+    (
+        "task-switch-no-swap",
+        cfg!(feature = "task-switch-no-swap"),
+        "協調的スイッチで RSP の差し替えを省く",
+    ),
+    (
+        "task-switch-yield-in-critical",
+        cfg!(feature = "task-switch-yield-in-critical"),
+        "InterruptGuard 保持中に yield を呼ぶ",
     ),
     (
         "exception-test",

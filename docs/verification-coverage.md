@@ -133,6 +133,9 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 | `paging-test-directmap-wrong-base` | A-2 の登録窓の base を 1 ページずらす | 差し替え後の phys_to_virt 検証が食い違いを検出し、高位アクセスの前に止まること |
 | `stack-guard-test` | カーネルスタックを溢れさせてガードページを踏む | #PF（vector 14）が IST2 上で、CR2 = ガードページとして報告され、#DF へ昇格しないこと |
 | `stack-overflow-df-test` | 溢れさせ、#PF に IST を与えず #DF へ昇格させる | スタックオーバーフローが本来の連鎖で #DF になること（M4-b-2 の代用とは別経路） |
+| `task-switch-drop-reg` | 協調的スイッチで次タスクの rbx を壊す | 復帰したタスクが GPR 照合で検出して止まること |
+| `task-switch-no-swap` | 協調的スイッチで RSP の差し替えを省く | スイッチが起きず会計が合わないことを検出して止まること |
+| `task-switch-yield-in-critical` | InterruptGuard 保持中に yield を呼ぶ | on_yield のガードが critical nesting depth を見て fail-fast すること |
 | `gfx-test-pattern` | コンソールを起動せず描画テストパターンを描く | 描画の基盤 |
 
 これらが有効なビルドでは、起動時に`test hooks:`のWARNが出て内訳が列挙される。

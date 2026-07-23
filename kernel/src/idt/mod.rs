@@ -319,9 +319,24 @@ core::arch::global_asm!(
     // スタブが積んだベクタ番号を捨てる。これで RSP は RIP を指す。
     "  add rsp, 8",
     "  iretq",
+    // 協調的 yield 用の専用スタブ（M5-c）。自動生成のスタブ表とは別に、
+    // yield ベクタ 1 本ぶんを手で置く。IRQ と同じく共通ルーチンへ jmp する
+    // ので、int YIELD_VECTOR が IRQ の退避・復元・スイッチ経路にそのまま
+    // 載る。エラーコードは無いのでベクタ番号だけを積む。
+    ".p2align 4",
+    ".globl zaytos_yield_stub",
+    "zaytos_yield_stub:",
+    "  push {yield_vector}",
+    "  jmp zaytos_irq_common",
     handler = sym irq_entry,
     adjust = const STACK_ALIGN_ADJUST,
+    yield_vector = const YIELD_VECTOR,
 );
+
+extern "C" {
+    /// 協調的 yield 用スタブの先頭（M5-c）。IDT の yield ゲートが指す。
+    static zaytos_yield_stub: u8;
+}
 
 extern "C" {
     /// `global_asm!` が定義するスタブ表の先頭。
@@ -378,6 +393,15 @@ pub const PIC_IRQ_COUNT: usize = 16;
 /// 両者を排他にしなければならなかった。スタブ表を 0x3F まで広げたのに
 /// 合わせて、PIC の外へ恒久的に移した。
 pub const TEST_VECTOR: usize = IRQ_VECTOR_BASE + PIC_VECTOR_SPAN;
+
+/// 協調的 yield 用のソフトウェア割り込みベクタ（M5-c）。
+///
+/// PIC の範囲（0x20-0x2F）とテストベクタ（0x40）の外の 0x41 を 1 本使う。
+/// 専用スタブ（`zaytos_yield_stub`）が `zaytos_irq_common` へ jmp するので、
+/// `int YIELD_VECTOR` を実行すると IRQ の復元経路にそのまま載り、`irq_entry`
+/// が「次タスクの RSP」を返してコンテキストスイッチが起きる（ADR-0019 §2）。
+/// PIC 由来ではないので EOI の論理には一切絡まない。
+pub const YIELD_VECTOR: usize = 0x41;
 
 /// ベクタ別の割り込み回数。
 ///
@@ -543,6 +567,13 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     let context = unsafe { &*context };
 
     check_stack_alignment(rsp_at_call, "irq", context.vector);
+
+    // 協調的 yield（M5-c）。ここだけが切り替えの分岐点で、次タスクの RSP を
+    // 返す。それ以外（タイマ・キーボード・テストベクタ）は切り替えない。
+    if context.vector as usize == YIELD_VECTOR {
+        INTERRUPT_COUNTS[YIELD_VECTOR].fetch_add(1, Ordering::Relaxed);
+        return crate::task::on_yield(no_switch_rsp);
+    }
 
     let vector = context.vector as usize;
     if vector < IDT_ENTRY_COUNT {
@@ -736,6 +767,11 @@ pub fn check_stub_table() -> StubTableCheck {
         if (IRQ_VECTOR_BASE..IRQ_VECTOR_BASE + IRQ_STYLE_STUB_COUNT).contains(&vector) {
             continue;
         }
+        // yield ベクタ（M5-c）は専用スタブ（zaytos_yield_stub）を指す。例外
+        // 表の外なのでここでは検査しない。
+        if vector == YIELD_VECTOR {
+            continue;
+        }
         let Some(entry) = entry(vector) else {
             entries_ok = false;
             break;
@@ -829,6 +865,17 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
                 None,
             );
         }
+
+        // 協調的 yield 用のゲート（M5-c）。専用スタブが zaytos_irq_common へ
+        // jmp するので、int YIELD_VECTOR が IRQ の退避・復元・スイッチ経路に
+        // 載る。割り込みゲート（IF を落とす）にする。
+        (*idt)[YIELD_VECTOR] = IdtEntry::new(
+            addr_of!(zaytos_yield_stub) as u64,
+            KERNEL_CODE_SELECTOR,
+            GateType::Interrupt,
+            0,
+            None,
+        );
     }
 
     let pointer = DescriptorTablePointer {

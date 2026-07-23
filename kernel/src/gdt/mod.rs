@@ -254,6 +254,28 @@ pub fn double_fault_stack_top() -> u64 {
     }
 }
 
+/// TSS の RSP0 を更新する（M5-c、コンテキストスイッチのたびに呼ぶ）。
+///
+/// RSP0 は Ring 3 → Ring 0 遷移で CPU が切り替える先のスタックである。タスク
+/// ごとにカーネルスタックが分かれる以上、現在のタスクのスタック頂点へ更新
+/// しないと、あるタスクのシステムコールが別のタスクのカーネルスタックを使って
+/// 静かに壊す（ADR-0019 §2.2）。実際に効くのは Ring 3 を導入する M5-e だが、
+/// 切り替え経路には M5-c から配線しておく。
+///
+/// # Safety
+///
+/// `top` が現在のタスクの、有効でマップ済みのカーネルスタック上端であること。
+/// 起動時の単一実行文脈、またはコンテキストスイッチの割り込み禁止区間から
+/// 呼ぶこと。
+pub unsafe fn set_rsp0(top: u64) {
+    // SAFETY: 呼び出し元契約による。TSS は起動時に構築済みの静的領域で、
+    // 書き込むのは RSP0（privilege_stack_table[0]）のみ。
+    unsafe {
+        let tss = addr_of!(TSS) as *mut TaskStateSegment;
+        (*tss).privilege_stack_table[0] = top;
+    }
+}
+
 /// TSS に設定済みの RSP0。
 pub fn privilege_stack_top() -> u64 {
     // SAFETY: 読み取りのみ。
