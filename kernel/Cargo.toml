@@ -156,3 +156,14 @@ syscall-test-gate-dpl0 = []
 # 戻り値の context.rax 書き戻しを落とす。ユーザーが期待した戻り値を受け取れず、
 # ユーザースタックへ store した値が食い違う。`--syscall-test drop-retval`。
 syscall-test-drop-retval = []
+# M5-f-2-1: ユーザーポインタ検証の破壊確認。隔離して検出できる 3 種のみ（範囲/present/
+# overflow は多層防御に隠れて単独では検出できない。verification-coverage 参照）。
+# 葉/中間の U=1 判定を外す。ユーザー範囲内の U=0 ページ（無効3）が受理され battery が
+# 検出して halt する。`--syscall-test validate-skip-us`。
+syscall-test-validate-skip-us = []
+# ページ走査を先頭ページだけで打ち切る。末尾ページの無効（無効4の跨ぎ）を取り逃して
+# 受理され battery が検出して halt する。`--syscall-test validate-skip-laststep`。
+syscall-test-validate-skip-laststep = []
+# 検証器を常に受理にする。検証器の全体機能停止を battery が検出して halt する
+# （多層防御の最後の砦の確認）。`--syscall-test validate-skip-all`。
+syscall-test-validate-skip-all = []

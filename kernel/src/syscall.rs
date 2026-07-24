@@ -36,10 +36,29 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use common::addr::{DirectMap, PhysAddr};
+
 use crate::idt::context::IrqContext;
 
 /// `-ENOSYS`（未実装システムコール）の errno。失敗は `-errno` で返す。
 pub const ENOSYS: i64 = 38;
+
+/// `-EFAULT`（不正なアドレス）の errno。ユーザーポインタ検証に落ちたとき返す。
+pub const EFAULT: i64 = 14;
+
+/// ユーザーポインタを取る検証用システムコールの番号（M5-f-2-1、暫定割り当て）。
+/// 第 1 引数(RDI)=buf、第 2 引数(RSI)=len。範囲が Ring 3 からアクセス可能なら 0、
+/// 不可なら -EFAULT を返す（**この段はバイトを読まない**。copy は M5-f-2）。
+pub const SYS_CHECK_PTR: u64 = 0x2B;
+
+/// ユーザーサブツリー（PML4[[`crate::USER_PML4_INDEX`]]）の仮想範囲
+/// [USER_VIRT_MIN, USER_VIRT_MAX)。現在 PML4[1] = [512 GiB, 1 TiB)。
+///
+/// **この範囲は現在のアドレス空間レイアウト（カーネル=下位半分に恒等、ユーザー=
+/// PML4[1]）に依存する。** higher-half B でカーネルを上位半分へ移しユーザーを低位へ
+/// 広げると、この範囲は変わる（verification-coverage に再評価の申し送り）。
+pub const USER_VIRT_MIN: u64 = 1 << 39;
+pub const USER_VIRT_MAX: u64 = 2 << 39;
 
 /// 検証用 probe システムコールの番号（ZaytOS 独自の暫定割り当て）。
 pub const PROBE_NUMBER: u64 = 0x2A;
@@ -82,12 +101,108 @@ static LAST_ARGS: [AtomicU64; 6] = [
 /// `syscall_entry` が走ったときの RSP（RSP0 スタックのはず）。読み戻し検証に使う。
 static HANDLER_RSP: AtomicU64 = AtomicU64::new(0);
 
-/// 番号を実装へ振り分ける。M5-f-1 は検証用 probe だけを持つ。
+/// 指定した [buf, buf+len) が Ring 3 からアクセス可能かを、**カーネルが読み書きに
+/// 踏み込む前に**判定する（M5-f-2-1）。
 ///
-/// probe は既知の戻り値 [`PROBE_RETURN`] を返す。それ以外は未実装で `-ENOSYS`。
-fn dispatch(number: u64, _args: &[u64; 6]) -> u64 {
+/// **len==0 は常に受理する。** 0 バイトのアクセスは buf を問わず安全であり、この
+/// 契約はこの検証器を共有する全 syscall が継承する（呼び出し側で短絡しない）。
+/// それ以外は次を満たすとき true:
+///   (a) 長さの加算にオーバーフローが無い（`checked_add`）。
+///   (b) buf と末尾(buf+len-1) が [USER_VIRT_MIN, USER_VIRT_MAX)。
+///   (c) 範囲を跨ぐ全 4KiB ページが present && 全階層 U=1
+///       （[`crate::paging::verify::walk_user_accessible`]）。
+///
+/// (a)(b)(c-present) は多層防御として (c-U=1) に冗長で、単独では隔離した破壊確認が
+/// できない（詳細は verification-coverage）。それらは default battery の first-line
+/// 拒否者として実運用・実証される。
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が walk_user_accessible の契約を満たすこと。
+pub unsafe fn user_range_accessible(
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    buf: u64,
+    len: u64,
+) -> bool {
+    // 破壊 (M5-f-2-1, skip-all): 検証器を常に受理にする。検証器の全体機能停止を
+    // battery が検出して halt する（多層防御の最後の砦の確認）。
+    #[cfg(feature = "syscall-test-validate-skip-all")]
+    {
+        let _ = (pml4_phys, direct_map, buf, len);
+        return true;
+    }
+    #[cfg(not(feature = "syscall-test-validate-skip-all"))]
+    {
+        // (a) len==0 は常に受理（契約）。
+        if len == 0 {
+            return true;
+        }
+        // (a) 加算オーバーフロー無し。end は排他的上端（buf+len）。
+        let Some(end) = buf.checked_add(len) else {
+            return false;
+        };
+        // (b) buf と末尾（end-1）がユーザー範囲内。end <= USER_VIRT_MAX で末尾も範囲内。
+        if buf < USER_VIRT_MIN || end > USER_VIRT_MAX {
+            return false;
+        }
+        // (c) 範囲を跨ぐ全 4KiB ページを walk。境界非整列でも先頭・末尾を覆う。
+        let first_page = buf & !0xFFF;
+        let full_last_page = (end - 1) & !0xFFF;
+        // 破壊 (M5-f-2-1, skip-laststep): 走査上端を先頭ページに潰し、先頭ページだけを
+        // 検証する。無効4（跨ぎ）の末尾無効を取り逃し、battery が検出して halt する。
+        let last_page = if cfg!(feature = "syscall-test-validate-skip-laststep") {
+            first_page
+        } else {
+            full_last_page
+        };
+        let mut page = first_page;
+        while page <= last_page {
+            let Some(virt) = common::addr::VirtAddr::new(page) else {
+                return false;
+            };
+            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。読み取りのみ。
+            if unsafe { crate::paging::verify::walk_user_accessible(pml4_phys, direct_map, virt) }
+                .is_err()
+            {
+                return false;
+            }
+            page += 0x1000;
+        }
+        true
+    }
+}
+
+/// 番号を実装へ振り分ける（M5-f-1-2 / M5-f-2-1）。
+///
+/// probe は既知の戻り値 [`PROBE_RETURN`] を返す。SYS_CHECK_PTR はユーザーポインタの
+/// 範囲を検証し、可なら 0、不可なら -EFAULT を返す（**バイトは読まない**）。それ以外は
+/// 未実装で `-ENOSYS`。`pml4_phys` / `direct_map` は稼働中テーブルのもの（syscall_entry
+/// が用意する）で、ポインタ検証にのみ使う。
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`user_range_accessible`] の契約を満たすこと。
+unsafe fn dispatch(
+    number: u64,
+    args: &[u64; 6],
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+) -> u64 {
     match number {
         PROBE_NUMBER => PROBE_RETURN,
+        SYS_CHECK_PTR => {
+            let buf = args[0];
+            let len = args[1];
+            // **踏み込む前に**範囲を検証する。可なら 0、不可なら -EFAULT。この段は
+            // バイトを読まない（copy は M5-f-2）。
+            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+            if unsafe { user_range_accessible(pml4_phys, direct_map, buf, len) } {
+                0
+            } else {
+                (-EFAULT) as u64
+            }
+        }
         // 失敗は -errno（-1..-4095）。
         _ => (-ENOSYS) as u64,
     }
@@ -135,7 +250,14 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     }
     HANDLER_RSP.store(rsp_at_call, Ordering::SeqCst);
 
-    let ret = dispatch(number, &args);
+    // ポインタ検証のため、稼働中テーブルの PML4 物理と登録 direct map を用意する。
+    let direct_map = common::addr::direct_map();
+    // SAFETY: CR3 を読んで現在のテーブルを構築するだけ（読み取り）。IF=0 の単一文脈。
+    let pml4_phys =
+        unsafe { crate::paging::active::ActivePageTable::current(direct_map) }.pml4_phys();
+
+    // SAFETY: pml4_phys / direct_map は稼働中テーブルのもので、walk の契約を満たす。
+    let ret = unsafe { dispatch(number, &args, pml4_phys, direct_map) };
 
     // 戻り値を RAX へ書き戻す。復元経路の pop rax がこれをユーザー RAX へ載せる。
     // 破壊 (M5-f-1-2, drop-retval): 書き戻しを落とす。ctx.rax は番号のままで、

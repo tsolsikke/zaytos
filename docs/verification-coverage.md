@@ -146,6 +146,9 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 | `syscall-test-arg4-rcx` | 第 4 引数を `context.r10` でなく `context.rcx` から読む | probe が記録した第 4 引数が期待値と食い違い、`argument register mismatch` で止まること（第 4 引数が R10 である規約の実証） |
 | `syscall-test-gate-dpl0` | syscall ゲート（0x80）の DPL を 0 にする（起動時 DPL 検査の期待値も同じ定数から 0 になるので検査は通る） | Ring 3 からの int 0x80 がゲート DPL<CPL で #GP になり `syscall_entry` に到達しないこと（`exception: vector=13` + halting。DPL=3 が Ring 3 から呼べる唯一の条件であることの実証） |
 | `syscall-test-drop-retval` | 戻り値の `context.rax` 書き戻しを落とす | ユーザーが store した値が `PROBE_RETURN` と食い違い、`return value mismatch` で止まること（戻り値が RAX 経由でユーザーへ返ることの実証） |
+| `syscall-test-validate-skip-us` | ユーザーポインタ検証の U=1 判定を外す | 無効3（supervisor in user range）が受理され、battery が `pointer validation battery failed` で止まること（U 判定の隔離実証。`walk_user_accessible` を新設した中核） |
+| `syscall-test-validate-skip-laststep` | ページ走査を先頭ページだけで打ち切る | 無効4（straddle）の末尾無効を取り逃して受理され、battery が止まること（全ページ走査の隔離実証） |
+| `syscall-test-validate-skip-all` | 検証器を常に受理にする | 最初の拒否ケース（kernel pointer）が受理され、battery が止まること（検証器全体の機能停止を battery が検出する、最後の砦の実証） |
 | `gfx-test-pattern` | コンソールを起動せず描画テストパターンを描く | 描画の基盤 |
 
 これらが有効なビルドでは、起動時に`test hooks:`のWARNが出て内訳が列挙される。
@@ -159,6 +162,14 @@ int 0x80システムコールの検証（M5-f-1-2）について、2点を明記
 
 - **RCX/R11はクロバー扱いで、保存に依存する検査を書かない。** ADR-0020のとおり、`int 0x80`の間はRCX/R11が実際には保存されるが、`syscall`/`sysret`へ移る段でこれらは命令が破壊する。ここでRCX/R11の保存を検査に固定すると、移行時の破壊が検査に守られて表面化しなくなる。probe発行ルーチンはRCXへ番兵を入れるが、これは`syscall-test-arg4-rcx`が第4引数をRCXから誤読したときに決定的な食い違いを起こすためで、RCX/R11が保存されることを確かめる検査ではない。
 - **RSP0スタックでの走行の破壊featureは新設せず、`ring3-test-drop-rsp0`を指す（判断B）。** syscall経路のRSP0据え付けは`ring3::enter`の`set_rsp0`を再利用しているため、これを落とす破壊は`ring3-test-drop-rsp0`と同一で、重複featureを作らない。一方で**検証項目は新規に持つ**: syscall経路では「`syscall_entry`のRSP（`rsp_at_call`）が遠征スタック範囲内にある」ことを読み戻す。`ring3-test-drop-rsp0`が見るのは#GP例外ハンドラの着地で、syscallが見るのは`syscall_entry`の着地であり、破壊featureは共通でも検証対象が違う。
+
+ユーザーポインタ検証（M5-f-2-1、`user_range_accessible`）について、3点を明記する。
+
+- **単独破壊で隔離できるのはU=1判定と全ページ走査だけである。** 検証器は (a)長さのオーバーフロー、(b)ユーザー範囲、(c-present)各ページのpresent、(c-U=1)各階層のU=1、を見る。このうち (a)(b)(c-present) は互いに、そして (c-U=1) に**冗長**（多層防御）で、1つだけ外しても別のチェックが後追いで拒否するため、単独破壊ではhaltしない。具体的には、範囲下限外（カーネルポインタ、PML4[0]）はpresentだがU=0なので範囲判定を外してもU判定が弾く。未マップはゼロ埋め（U=0）なのでpresent判定を外してもU判定が弾く。長さオーバーフローはbufがユーザー範囲（< 2^40）にあるため、wrap後の末尾が範囲外になり範囲判定が、あるいは上端先が未マップなのでpresent判定が後追いで弾く。したがって破壊featureは隔離できる `skip-us`（U=1判定）・`skip-laststep`（全ページ走査）・`skip-all`（検証器全体）の3種とする。範囲/present/overflowの各チェックは、defaultのbatteryでfirst-lineの拒否者として実運用・実証される（batteryの無効1〜5が拒否されること自体が、これらのチェックの正しさを担保する）が、単独破壊testとしては設けない。
+- **この隔離不能は現在のアドレス空間レイアウトに依存する。** 「U=1はユーザーサブツリー`PML4[USER_PML4_INDEX]`の外に一切存在しない」（`audit_user_supervisor`が`kernel_violations==0`を毎起動でアサート）ため、範囲外・未マップが必ずU=0になり、U判定が範囲判定・present判定を後追いで肩代わりする。**higher-half B後にレイアウトが変わり（カーネルを上位半分へ、ユーザーを低位へ拡張）「カーネル=必ずU=0」の前提が変われば、この冗長性は再評価が要る。** `syscall::USER_VIRT_MIN`/`USER_VIRT_MAX`もPML4[1]前提なので同時に見直す。M5-e-2で`drop-rsp0`の配置依存を記録したのと同じ、検査の成立が構造条件に依存することの記録である。
+- **`user_range_accessible`はlen==0を常に受理する契約である。** 0バイトのアクセスはbufを問わず安全であり、この短絡は検証器の内部に置く（呼び出し側で短絡しない）ので、この検証器を共有する全syscallが同じ契約を継承する。batteryはlen=0を有効bufと無効bufの両方でテストする。
+
+`walk_user_accessible`が中間階層U=0（葉U=1でも中間U=0なら`translate`の葉Uでは見逃す穴）を弾くことは、一度きりの確認（中間テーブルのUビットを直接落として`walk`が`SupervisorOnly`で弾く一方`translate`の葉Uでは通してしまうことの対比）で実証した。侵襲的setupを恒久コードに残さないため恒久featureにはせず、確認後に戻している。
 
 ### 検査や計測が正しく機能していなかった事例
 

@@ -224,6 +224,82 @@ pub unsafe fn audit_user_supervisor(
     audit
 }
 
+/// ユーザーアクセス可能性の walk の失敗理由（M5-f-2-1）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserAccessError {
+    /// 途中の階層または葉が不在。
+    NotPresent,
+    /// present だが、ある階層で U=0（Ring 3 から到達不可）。**U/S は全階層の AND**
+    /// なので、中間階層が U=0 でも Ring 3 からは届かない。
+    SupervisorOnly,
+    /// PDPT レベルで 1GiB ページ。ZaytOS は作らない。
+    GiantPage,
+    /// PD レベルで 2MiB ページ。ユーザーページは 4KiB のみを想定し、想定外として弾く。
+    HugePage,
+}
+
+/// 指定 VA が Ring 3 からアクセス可能な 4KiB ユーザーページに解決されることを、
+/// **各階層で present かつ U=1** を確かめながら独立に walk して判定する（M5-f-2-1）。
+///
+/// 既存の [`walk`] は present のみを見る（M5-e-2 の呼び出し元がそれを前提にする）ため
+/// 別関数にする。**U/S は全階層の AND であり、葉の U だけを見る `translate` では中間
+/// 階層の U=0 を見逃す。** ここは PML4→PT の全階層で U=1 を要求してその穴を塞ぐ。
+/// 既存 walk / audit_user_supervisor の契約は一切変えない。
+///
+/// # Safety
+///
+/// [`walk`] と同じ契約。
+pub unsafe fn walk_user_accessible(
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    virt: VirtAddr,
+) -> Result<(), UserAccessError> {
+    let read = |table: PhysAddr, index: usize| -> u64 {
+        // SAFETY: 呼び出し元契約による。読み取りのみ。
+        unsafe {
+            core::ptr::read_volatile(direct_map.phys_to_virt(table).as_ptr::<u64>().add(index))
+        }
+    };
+
+    // ある階層のエントリが present && U=1 であることを確かめる。
+    let present_and_user = |entry: u64| -> Result<(), UserAccessError> {
+        if entry & bits::PRESENT == 0 {
+            return Err(UserAccessError::NotPresent);
+        }
+        // 破壊 (M5-f-2-1, skip-us): U=1 判定を外す。ユーザー範囲内で present だが U=0 の
+        // ページ（無効3）が誤って受理され、battery が「拒否すべきを受理」を検出して halt
+        // する。walk_user_accessible を新設した中核（U 判定）そのものの破壊確認。
+        #[cfg(not(feature = "syscall-test-validate-skip-us"))]
+        if entry & bits::USER == 0 {
+            return Err(UserAccessError::SupervisorOnly);
+        }
+        Ok(())
+    };
+
+    let pml4e = read(pml4_phys, virt.pml4_index());
+    present_and_user(pml4e)?;
+
+    let pdpt = PhysAddr::new_const(pml4e & bits::ADDR_4K);
+    let pdpte = read(pdpt, virt.pdpt_index());
+    present_and_user(pdpte)?;
+    if pdpte & bits::PAGE_SIZE != 0 {
+        return Err(UserAccessError::GiantPage);
+    }
+
+    let pd = PhysAddr::new_const(pdpte & bits::ADDR_4K);
+    let pde = read(pd, virt.pd_index());
+    present_and_user(pde)?;
+    if pde & bits::PAGE_SIZE != 0 {
+        return Err(UserAccessError::HugePage);
+    }
+
+    let pt = PhysAddr::new_const(pde & bits::ADDR_4K);
+    let pte = read(pt, virt.pt_index());
+    present_and_user(pte)?;
+
+    Ok(())
+}
+
 /// 指定した PML4 の、ある階層のエントリをそのまま読む。
 ///
 /// 恒等側のテーブルが構築処理で書き換わっていないことを確かめるために使う。

@@ -610,6 +610,48 @@ const SYSCALL_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // ユーザーポインタ検証（M5-f-2-1）。葉/中間の U=1 判定を外す。無効3（supervisor in
+    // user range）が受理され、battery が検出して halt する。
+    CriticalTest {
+        name: "validate-skip-us",
+        feature: "syscall-test-validate-skip-us",
+        expected_markers: &[
+            "syscall: pointer validation battery failed",
+            "supervisor in user range",
+            "halting",
+        ],
+        forbidden_markers: &["syscall: pointer validation battery verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // ページ走査を先頭ページだけで打ち切る。無効4（straddle）の末尾無効を取り逃して
+    // 受理され、battery が検出して halt する。
+    CriticalTest {
+        name: "validate-skip-laststep",
+        feature: "syscall-test-validate-skip-laststep",
+        expected_markers: &[
+            "syscall: pointer validation battery failed",
+            "straddle last page",
+            "halting",
+        ],
+        forbidden_markers: &["syscall: pointer validation battery verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // 検証器を常に受理にする。最初の拒否ケース（kernel pointer）が受理され、battery が
+    // 検出して halt する（多層防御の最後の砦の確認）。
+    CriticalTest {
+        name: "validate-skip-all",
+        feature: "syscall-test-validate-skip-all",
+        expected_markers: &[
+            "syscall: pointer validation battery failed",
+            "kernel pointer",
+            "halting",
+        ],
+        forbidden_markers: &["syscall: pointer validation battery verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
 ];
 
 /// カーネルが起動したことを示す、シリアルログの既知の行。

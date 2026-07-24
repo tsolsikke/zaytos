@@ -846,6 +846,12 @@ extern "sysv64" fn kernel_main() -> ! {
     #[cfg(not(feature = "paging-test"))]
     verify_syscall_roundtrip(&mut logger);
 
+    // ユーザーポインタ検証の検証（M5-f-2-1）。Ring 3 が (buf, len) を渡す syscall で、
+    // カーネルが読み書きに踏み込む前に範囲を実 PTE で検証する。正常系 + 異常系5ケースの
+    // battery を回す。
+    #[cfg(not(feature = "paging-test"))]
+    verify_syscall_pointer(&mut logger, &mut allocator);
+
     // ロック保持中は割り込みが禁止され、解放後に元へ戻ることを確認する
     // （M4-c-2）。ヒープのロックそのものではなく同じ Locked<T> を使う。
     // ヒープのロックを保持したままログを出すと二重取得になるため。
@@ -3196,6 +3202,206 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
         "syscall: probe int 0x80 round-trip verified (6 args reached syscall_entry per the R10 \
          convention, the return value came back through RAX to Ring 3 and was stored, syscall_entry \
          ran on the RSP0 stack, and the cli #GP folded back to the kernel)"
+    ));
+}
+
+/// SYS_CHECK_PTR を (buf, len) で 1 回発行し、ユーザーが store した戻り値を返す
+/// （M5-f-2-1）。verify_syscall_roundtrip と同じ遠征機構（enter → int 0x80 → 戻り値
+/// store → cli 畳み）を再利用する。ユーザーコード/スタックページは
+/// verify_ring3_excursion が張ったものを再利用する（呼び出し側が確認済み前提）。
+fn issue_pointer_syscall(logger: &mut Logger<SerialPort>, buf: u64, len: u64) -> u64 {
+    use kernel::ring3;
+    use kernel::syscall;
+
+    let code_virt = common::addr::VirtAddr::new(ring3::USER_CODE_VIRT)
+        .expect("the user code virtual address is canonical");
+
+    // ユーザールーチン: movabs rdi, buf; movabs rsi, len; mov eax, SYS_CHECK_PTR;
+    //   int 0x80; mov [rsp-8], rax; cli。buf は 512 GiB 付近で 32bit に収まらないため
+    //   movabs（imm64）で積む。
+    let mut code = [0u8; 64];
+    let mut n = 0usize;
+    let emit = |bytes: &[u8], code: &mut [u8; 64], n: &mut usize| {
+        code[*n..*n + bytes.len()].copy_from_slice(bytes);
+        *n += bytes.len();
+    };
+    emit(&[0x48, 0xBF], &mut code, &mut n); // movabs rdi, imm64
+    emit(&buf.to_le_bytes(), &mut code, &mut n);
+    emit(&[0x48, 0xBE], &mut code, &mut n); // movabs rsi, imm64
+    emit(&len.to_le_bytes(), &mut code, &mut n);
+    emit(&[0xB8], &mut code, &mut n); // mov eax, imm32
+    emit(
+        &(syscall::SYS_CHECK_PTR as u32).to_le_bytes(),
+        &mut code,
+        &mut n,
+    );
+    emit(&[0xCD, 0x80], &mut code, &mut n); // int 0x80
+    emit(&[0x48, 0x89, 0x44, 0x24, 0xF8], &mut code, &mut n); // mov [rsp-8], rax
+    let cli_offset = n;
+    emit(&[0xFA], &mut code, &mut n); // cli
+    let code_len = n;
+
+    // SAFETY: code_virt は verify_ring3_excursion が張ったユーザーコードページ。NX 未設定で
+    // 実行可能、SMAP 未有効で書き込み可能。code_len <= 64 <= 4096。
+    unsafe {
+        let p = code_virt.as_mut_ptr::<u8>();
+        for (i, byte) in code[..code_len].iter().enumerate() {
+            core::ptr::write_volatile(p.add(i), *byte);
+        }
+    }
+    let cli_rip = ring3::USER_CODE_VIRT + cli_offset as u64;
+
+    let store_slot = ring3::USER_STACK_TOP - 8;
+    const STORE_POISON: u64 = 0x0BAD_0BAD_0BAD_0BAD;
+    // SAFETY: store_slot はマップ済みのユーザースタックページ内。SMAP 未有効。
+    unsafe {
+        core::ptr::write_volatile(store_slot as *mut u64, STORE_POISON);
+    }
+
+    syscall::reset_counters();
+    let main_rsp0_top = gdt::privilege_stack_top();
+
+    // SAFETY: ユーザーページは張り済み。Ring 3 は cli_rip で cli を実行して #GP を起こす。
+    // main_rsp0_top はメインの上端。起動時の単一実行文脈から呼ぶ。
+    unsafe {
+        ring3::enter(main_rsp0_top, cli_rip);
+    }
+
+    if !ring3::folded() {
+        logger.error(format_args!(
+            "syscall: pointer syscall (buf={buf:#x}, len={len:#x}) did not fold; halting"
+        ));
+        cpu::halt_forever();
+    }
+    if syscall::invocation_count() != 1 {
+        logger.error(format_args!(
+            "syscall: pointer syscall issued but syscall_entry ran {} times (expected 1); halting",
+            syscall::invocation_count()
+        ));
+        cpu::halt_forever();
+    }
+    // SAFETY: store_slot はマップ済みのユーザースタックページ内。読み取りのみ。
+    unsafe { core::ptr::read_volatile(store_slot as *const u64) }
+}
+
+/// ユーザーポインタ検証の検証（M5-f-2-1）。正常系 + 異常系5ケースの battery を回す。
+///
+/// verify_ring3_excursion が残したユーザーページを再利用し、無効3（supervisor in user
+/// range）のために U=0 ページを1枚張る。各ケースで SYS_CHECK_PTR を発行し、有効ポインタは
+/// 受理（戻り値 0）、無効ポインタは拒否（-EFAULT）されることを確かめる。この段は copy 未
+/// 実装なので、拒否は「踏み込む前に弾いた」ことそのものである（バイトを読む経路が無い）。
+///
+/// 異常系は多層防御のどのチェックが弾いても「拒否」は成立する。単独チェックの隔離破壊は
+/// skip-us / skip-laststep / skip-all（verification-coverage 参照）。
+fn verify_syscall_pointer<const CAP: usize>(
+    logger: &mut Logger<SerialPort>,
+    allocator: &mut frame_allocator::FrameAllocator<CAP>,
+) {
+    use kernel::paging::active::{ActivePageTable, PageSize};
+    use kernel::ring3;
+    use kernel::syscall;
+
+    let identity = common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
+        .expect("the identity window is canonical");
+    let code_virt = common::addr::VirtAddr::new(ring3::USER_CODE_VIRT)
+        .expect("the user code virtual address is canonical");
+
+    // ユーザーコードページが再利用できることを実状態で確認する。
+    // SAFETY: CR3 は自前テーブル。配下は恒等窓で読める。
+    let mut table = unsafe { ActivePageTable::current(identity) };
+    match table.translate(code_virt) {
+        Ok(Some(t)) if t.page_size == PageSize::Size4KiB => {}
+        other => {
+            logger.error(format_args!(
+                "syscall: user code page {:#x} is not a 4KiB mapping ({other:?}); halting",
+                code_virt.as_u64()
+            ));
+            cpu::halt_forever();
+        }
+    }
+
+    // 無効3の setup: ユーザー範囲内に U=0（supervisor）のページを1枚張る。code/stack が
+    // 載る PD[0]（オフセット 0〜2MiB）とは別の 2MiB 領域、PD[1]（オフセット 2MiB）の
+    // 0x8000200000 に置く。map_4kib(user=false) なので中間 PD[1] も葉も U=0 になる。
+    let sup = common::addr::VirtAddr::new(0x8000200000).expect("SUP_VIRT is canonical");
+    let Some(sup_phys) = allocator.allocate_frame() else {
+        logger.error(format_args!(
+            "syscall: could not reserve a frame for the supervisor test page; halting"
+        ));
+        cpu::halt_forever();
+    };
+    // SAFETY: sup はユーザーサブツリー内の未マップ VA。user=false で張るので Ring 3 から
+    // 到達不可（walk_user_accessible が SupervisorOnly で弾く）。frame は未使用。
+    if let Err(e) = unsafe { table.map_4kib(sup, sup_phys, false, true, allocator) } {
+        logger.error(format_args!(
+            "syscall: map_4kib for the supervisor test page failed: {e:?}; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    let efault = (-syscall::EFAULT) as u64;
+    let kernel_ptr: u64 = 0x10_0000; // カーネルイメージ領域（PML4[0]、U=0、範囲下限外）
+    let unmapped: u64 = 0x8000400000; // PML4[1]、PD[2]、未マップ
+    let over_long_len: u64 = syscall::USER_VIRT_MAX - ring3::USER_CODE_VIRT + 0x1000;
+
+    // (buf, len, 受理を期待するか, 名前)
+    let cases: [(u64, u64, bool, &str); 8] = [
+        (ring3::USER_CODE_VIRT, 1, true, "valid page"),
+        (kernel_ptr, 1, false, "kernel pointer"),
+        (unmapped, 1, false, "unmapped user-range"),
+        (0x8000200000, 1, false, "supervisor in user range"),
+        (
+            ring3::USER_CODE_VIRT + 0xFFF,
+            2,
+            false,
+            "straddle last page",
+        ),
+        (ring3::USER_CODE_VIRT, over_long_len, false, "over-long"),
+        (ring3::USER_CODE_VIRT, 0, true, "len=0 valid buf"),
+        (kernel_ptr, 0, true, "len=0 invalid buf"),
+    ];
+
+    for (buf, len, expect_accept, name) in cases {
+        let stored = issue_pointer_syscall(logger, buf, len);
+        let accepted = stored == 0;
+        let rejected = stored == efault;
+        let ok = if expect_accept { accepted } else { rejected };
+        logger.info(format_args!(
+            "syscall: ptr case '{name}' buf={buf:#x} len={len:#x} -> stored={stored:#x} \
+             (expect {}, ok={ok})",
+            if expect_accept {
+                "accept(0)"
+            } else {
+                "reject(-EFAULT)"
+            }
+        ));
+        if !ok {
+            logger.error(format_args!(
+                "syscall: pointer validation battery failed: case '{name}' buf={buf:#x} \
+                 len={len:#x} expected {} but syscall returned {stored:#x}; halting",
+                if expect_accept {
+                    "accept(0)"
+                } else {
+                    "reject(-EFAULT)"
+                }
+            ));
+            cpu::halt_forever();
+        }
+    }
+
+    // 無効3の teardown: 葉を落とす（中間は残す）。
+    // SAFETY: sup は今張ったユーザーページ。以後アクセスしない。
+    if let Err(e) = unsafe { table.unmap_4kib(sup) } {
+        logger.error(format_args!(
+            "syscall: failed to unmap the supervisor test page: {e:?}; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "syscall: pointer validation battery verified (valid pointer accepted; kernel pointer, \
+         unmapped, supervisor, straddle, and over-long all rejected before touching; len=0 \
+         accepted regardless of buf)"
     ));
 }
 
