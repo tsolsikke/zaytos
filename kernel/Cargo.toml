@@ -145,3 +145,14 @@ ring3-test-drop-rsp0 = []
 # 畳まれず dump+halt する（畳みが「立っていないのに畳む」ことがない実証）。
 # `--ring3-test no-fold-flag`。
 ring3-test-no-fold-flag = []
+# M5-f-1-2: int 0x80 システムコールの破壊確認。いずれも既定ビルドには入らない。
+# 第 4 引数を context.r10 でなく context.rcx から読む。probe が記録した第 4 引数が
+# 期待値と食い違い、R10 規約であることが実証される。`--syscall-test arg4-rcx`。
+syscall-test-arg4-rcx = []
+# syscall ゲート（0x80）の DPL を 0 にする。Ring 3 からの int 0x80 がゲート DPL<CPL で
+# #GP になり、syscall_entry に到達しない。起動時 DPL 検査は期待値も 0 になるので通り、
+# 異常は runtime の #GP として現れる。`--syscall-test gate-dpl0`。
+syscall-test-gate-dpl0 = []
+# 戻り値の context.rax 書き戻しを落とす。ユーザーが期待した戻り値を受け取れず、
+# ユーザースタックへ store した値が食い違う。`--syscall-test drop-retval`。
+syscall-test-drop-retval = []

@@ -1645,7 +1645,13 @@ fn report_idt(logger: &mut Logger<SerialPort>) {
         };
         all_present &= entry.is_present();
         all_interrupt_gates &= entry.gate_type() == 0xE;
-        let expected_dpl = if vector == idt::SYSCALL_VECTOR { 3 } else { 0 };
+        // syscall ベクタの期待 DPL はゲート登録と同じ定数から出す（gate-dpl0 の
+        // 破壊では両方が 0 になり、この検査は通って runtime で #GP になる）。
+        let expected_dpl = if vector == idt::SYSCALL_VECTOR {
+            idt::SYSCALL_GATE_DPL
+        } else {
+            0
+        };
         dpl_layout_ok &= entry.descriptor_privilege_level() == expected_dpl;
     }
     let syscall_dpl = idt::entry(idt::SYSCALL_VECTOR).map(|e| e.descriptor_privilege_level());
@@ -2967,18 +2973,21 @@ fn verify_ring3_excursion<const CAP: usize>(
     ));
 }
 
-/// int 0x80 システムコールの往復を検証する（M5-f-1）。
+/// int 0x80 システムコールの往復を検証する（M5-f-1-2）。
 ///
 /// [`verify_ring3_excursion`] が残したユーザーコード/スタックページ
 /// （`PML4[USER_PML4_INDEX]` サブツリー）を再利用する。ユーザーコードを
-/// 「mov eax, PROBE_NUMBER; int 0x80; cli」に書き換え、Ring 3 から int 0x80 を
-/// 発行する。syscall_entry（空ディスパッチャ）が番号を記録して `-ENOSYS` を返し、
-/// iretq で Ring 3 へ戻り、続く cli の #GP を予期の畳みでカーネルへ戻す。
+/// 「6 引数を既知値でセット → int 0x80 → 戻り値をユーザースタックへ store → cli」に
+/// 書き換え、Ring 3 から probe システムコールを 1 回発行する。syscall_entry は
+/// 番号と 6 引数を記録し、既知の戻り値 [`syscall::PROBE_RETURN`] を返す。iretq で
+/// Ring 3 へ戻ると、その戻り値がユーザー RAX に入り、ユーザーがスタックへ store する。
+/// 続く cli の #GP を予期の畳みでカーネルへ戻す。
 ///
-/// 確かめること: int 0x80 が syscall_entry に届いたこと（呼び出し 1 回、番号が
-/// `PROBE_NUMBER`）、syscall_entry が RSP0（遠征）スタックで走ったこと（handler RSP を
-/// 読み戻し）、畳みで戻り RSP0 がメインへ復帰したこと。**戻り値がユーザー RAX へ
-/// 入ることの検証は M5-f-2 で行う**（この段は往復の成立までを見る）。
+/// 確かめること: 6 引数（RDI/RSI/RDX/R10/R8/R9）が規約どおり syscall_entry に届いた
+/// こと（記録した 6 値が発行側の既知値と一致。同じ式の自己検算ではなく、発行側の
+/// 既知値とハンドラの独立読み戻しの突き合わせ）、戻り値が RAX で Ring 3 へ返った
+/// こと（ユーザースタックへ store された値が [`syscall::PROBE_RETURN`] と一致）、
+/// syscall_entry が RSP0（遠征）スタックで走ったこと、畳みで戻り RSP0 が復帰したこと。
 fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     use kernel::paging::active::{ActivePageTable, PageSize};
     use kernel::ring3;
@@ -3007,25 +3016,77 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
         }
     }
 
-    // ユーザーコードを「mov eax, PROBE_NUMBER(B8 imm32); int 0x80(CD 80); cli(FA)」に
-    // 書き換える。mov eax は 64bit で RAX へゼロ拡張されるので番号がそのまま RAX に
-    // 入る。cli は int 0x80 の直後（オフセット 7）に来るので、予期する #GP の
-    // フォルト RIP は USER_CODE_VIRT + 7 である。
-    let nr = syscall::PROBE_NUMBER as u32;
+    // ユーザールーチンの機械語を組み立てる。imm32 は手書きせず to_le_bytes で埋める。
+    //   mov edi, ARGS[0]     BF id            RDI = 第 1 引数
+    //   mov esi, ARGS[1]     BE id            RSI = 第 2 引数
+    //   mov edx, ARGS[2]     BA id            RDX = 第 3 引数
+    //   mov r10d, ARGS[3]    41 BA id         R10 = 第 4 引数（RCX ではない）
+    //   mov r8d, ARGS[4]     41 B8 id         R8  = 第 5 引数
+    //   mov r9d, ARGS[5]     41 B9 id         R9  = 第 6 引数
+    //   mov ecx, SENTINEL    B9 id            RCX = 番兵（引数ではない。クロバー扱い）
+    //   mov eax, NUMBER      B8 id            RAX = 番号
+    //   int 0x80             CD 80
+    //   mov [rsp-8], rax     48 89 44 24 F8   戻り値をユーザースタックへ store
+    //   cli                  FA               予期の #GP（畳み出口）
+    // mov r32, imm32 は 64bit で上位ゼロ拡張されるので、32bit に収まる既知値をそのまま
+    // 使える。
+    let mut code = [0u8; 64];
+    let mut n = 0usize;
+    let emit = |bytes: &[u8], code: &mut [u8; 64], n: &mut usize| {
+        code[*n..*n + bytes.len()].copy_from_slice(bytes);
+        *n += bytes.len();
+    };
+    let a: [u32; 6] = core::array::from_fn(|i| syscall::PROBE_ARGS[i] as u32);
+    emit(&[0xBF], &mut code, &mut n);
+    emit(&a[0].to_le_bytes(), &mut code, &mut n);
+    emit(&[0xBE], &mut code, &mut n);
+    emit(&a[1].to_le_bytes(), &mut code, &mut n);
+    emit(&[0xBA], &mut code, &mut n);
+    emit(&a[2].to_le_bytes(), &mut code, &mut n);
+    emit(&[0x41, 0xBA], &mut code, &mut n);
+    emit(&a[3].to_le_bytes(), &mut code, &mut n);
+    emit(&[0x41, 0xB8], &mut code, &mut n);
+    emit(&a[4].to_le_bytes(), &mut code, &mut n);
+    emit(&[0x41, 0xB9], &mut code, &mut n);
+    emit(&a[5].to_le_bytes(), &mut code, &mut n);
+    emit(&[0xB9], &mut code, &mut n);
+    emit(
+        &(syscall::SENTINEL_RCX as u32).to_le_bytes(),
+        &mut code,
+        &mut n,
+    );
+    emit(&[0xB8], &mut code, &mut n);
+    emit(
+        &(syscall::PROBE_NUMBER as u32).to_le_bytes(),
+        &mut code,
+        &mut n,
+    );
+    let int_offset = n;
+    emit(&[0xCD, 0x80], &mut code, &mut n);
+    emit(&[0x48, 0x89, 0x44, 0x24, 0xF8], &mut code, &mut n);
+    let cli_offset = n;
+    emit(&[0xFA], &mut code, &mut n);
+    let code_len = n;
+
     // SAFETY: code_virt は今マップを確認したユーザーページ。NX 未設定で実行可能、
-    // SMAP 未有効で書き込み可能。
+    // SMAP 未有効で書き込み可能。code_len <= 64 <= 4096。
     unsafe {
         let p = code_virt.as_mut_ptr::<u8>();
-        core::ptr::write_volatile(p, 0xB8);
-        core::ptr::write_volatile(p.add(1), (nr & 0xFF) as u8);
-        core::ptr::write_volatile(p.add(2), ((nr >> 8) & 0xFF) as u8);
-        core::ptr::write_volatile(p.add(3), ((nr >> 16) & 0xFF) as u8);
-        core::ptr::write_volatile(p.add(4), ((nr >> 24) & 0xFF) as u8);
-        core::ptr::write_volatile(p.add(5), 0xCD);
-        core::ptr::write_volatile(p.add(6), 0x80);
-        core::ptr::write_volatile(p.add(7), 0xFA);
+        for (i, byte) in code[..code_len].iter().enumerate() {
+            core::ptr::write_volatile(p.add(i), *byte);
+        }
     }
-    let cli_rip = ring3::USER_CODE_VIRT + 7;
+    let cli_rip = ring3::USER_CODE_VIRT + cli_offset as u64;
+    let int_rip = ring3::USER_CODE_VIRT + int_offset as u64;
+
+    // ユーザーが戻り値を store する先（ユーザースタック頂点の直下）。事前に毒値を
+    // 入れておき、畳み後に読み戻す。毒値のままなら store が起きていない。
+    let store_slot = ring3::USER_STACK_TOP - 8;
+    const STORE_POISON: u64 = 0x0BAD_0BAD_0BAD_0BAD;
+    // SAFETY: store_slot はマップ済みのユーザースタックページ内。SMAP 未有効。
+    unsafe {
+        core::ptr::write_volatile(store_slot as *mut u64, STORE_POISON);
+    }
 
     syscall::reset_counters();
 
@@ -3033,13 +3094,15 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     let (exc_bottom, exc_top) = ring3::excursion_stack_range();
 
     logger.info(format_args!(
-        "syscall: entering Ring 3 to issue int 0x80 (number={:#x}, cli fold at {cli_rip:#x}, \
-         RSP0 -> excursion stack [{exc_bottom:#x}, {exc_top:#x}))",
+        "syscall: entering Ring 3 to issue probe int 0x80 (number={:#x}, int at {int_rip:#x}, \
+         cli fold at {cli_rip:#x}, RSP0 -> excursion stack [{exc_bottom:#x}, {exc_top:#x}))",
         syscall::PROBE_NUMBER
     ));
 
-    // --- 遠征。iretq -> Ring 3 -> int 0x80 -> syscall_entry -> iretq -> cli -> #GP ->
-    //     畳み -> ここへ戻る ---
+    // --- 遠征。iretq -> Ring 3 -> 6 引数セット -> int 0x80 -> syscall_entry -> iretq ->
+    //     戻り値 store -> cli -> #GP -> 畳み -> ここへ戻る ---
+    // int 0x80 は 1 回だけ発行する。probe の記録はこの単一の呼び出しのものである
+    // （invocations=1 と整合）。
     // SAFETY: ユーザーページは張り済み。Ring 3 は cli_rip で cli を実行して #GP を
     // 起こす。main_rsp0_top はメインの上端。起動時の単一実行文脈から 1 回だけ。
     unsafe {
@@ -3055,16 +3118,30 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     }
 
     let count = syscall::invocation_count();
-    let seen = syscall::last_number();
+    let seen_number = syscall::last_number();
+    let seen_args = syscall::last_args();
     let handler_rsp = syscall::handler_rsp();
     let handler_in_rsp0 = handler_rsp >= exc_bottom && handler_rsp < exc_top;
     let rsp0_restored = gdt::privilege_stack_top() == main_rsp0_top;
+    // SAFETY: store_slot はマップ済みのユーザースタックページ内。読み取りのみ。
+    let stored = unsafe { core::ptr::read_volatile(store_slot as *const u64) };
 
     logger.info(format_args!(
-        "syscall: int 0x80 returned. syscall_entry invocations={count}, number seen={seen:#x} \
-         (expected {:#x}), handler RSP={handler_rsp:#x} (on RSP0 excursion stack={handler_in_rsp0}), \
-         RSP0 restored={rsp0_restored}",
+        "syscall: probe int 0x80 returned. invocations={count} (issued exactly 1), number \
+         seen={seen_number:#x} (expected {:#x}), handler RSP={handler_rsp:#x} (on RSP0 \
+         excursion stack={handler_in_rsp0}), RSP0 restored={rsp0_restored}",
         syscall::PROBE_NUMBER
+    ));
+    logger.info(format_args!(
+        "syscall: args seen=[{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}], user stored={stored:#x} \
+         (expected return {:#x})",
+        seen_args[0],
+        seen_args[1],
+        seen_args[2],
+        seen_args[3],
+        seen_args[4],
+        seen_args[5],
+        syscall::PROBE_RETURN
     ));
 
     if count != 1 {
@@ -3073,13 +3150,24 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
         ));
         cpu::halt_forever();
     }
-    if seen != syscall::PROBE_NUMBER {
+    if seen_number != syscall::PROBE_NUMBER {
         logger.error(format_args!(
-            "syscall: number seen {seen:#x} != expected {:#x}; RAX did not carry the number; \
-             halting",
+            "syscall: number seen {seen_number:#x} != expected {:#x}; RAX did not carry the \
+             number; halting",
             syscall::PROBE_NUMBER
         ));
         cpu::halt_forever();
+    }
+    // 6 引数を規約どおり受け取ったか。発行側の既知値 PROBE_ARGS とハンドラの独立
+    // 読み戻し seen_args の突き合わせ（同じ式での自己検算ではない）。
+    for (i, (&got, &expected)) in seen_args.iter().zip(syscall::PROBE_ARGS.iter()).enumerate() {
+        if got != expected {
+            logger.error(format_args!(
+                "syscall: argument register mismatch (arg{i} seen {got:#x}, expected \
+                 {expected:#x}); the register convention is wrong; halting"
+            ));
+            cpu::halt_forever();
+        }
     }
     if !handler_in_rsp0 {
         logger.error(format_args!(
@@ -3094,10 +3182,20 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
         ));
         cpu::halt_forever();
     }
+    // 戻り値が RAX 経由で Ring 3 へ返り、ユーザーが store したか。
+    if stored != syscall::PROBE_RETURN {
+        logger.error(format_args!(
+            "syscall: return value mismatch (user stored {stored:#x}, expected {:#x}); the \
+             return value did not reach the user RAX; halting",
+            syscall::PROBE_RETURN
+        ));
+        cpu::halt_forever();
+    }
 
     logger.info(format_args!(
-        "syscall: int 0x80 round-trip verified (Ring 3 issued int 0x80, syscall_entry ran on the \
-         RSP0 stack and returned via iretq to Ring 3, then the cli #GP folded back to the kernel)"
+        "syscall: probe int 0x80 round-trip verified (6 args reached syscall_entry per the R10 \
+         convention, the return value came back through RAX to Ring 3 and was stored, syscall_entry \
+         ran on the RSP0 stack, and the cli #GP folded back to the kernel)"
     ));
 }
 

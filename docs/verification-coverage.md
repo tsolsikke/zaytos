@@ -143,6 +143,9 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 | `ring3-test-user-page-supervisor` | ユーザーページの USER を落とす（U=0） | 遠征前の両側 U/S 監査が user violation として検出して止まること |
 | `ring3-test-drop-rsp0` | 遠征の RSP0 据え付け（`ring3::enter` の set_rsp0）を落とす | #GP がメインのスタックで走り、handler_in_excursion が false になって止まること。**この検出は「踏み潰しが `verify_ring3_excursion` のフレームに届かない」という配置依存で成立する。将来スタック深さやフレーム配置が変わると成立が崩れうる。** M5-d の `task-switch-drop-rsp0`（schedule_switch 側）とは別物 |
 | `ring3-test-no-fold-flag` | 遠征フラグ（EXCURSION_ACTIVE）を立てない | 畳み条件3が欠け、cli の #GP が畳まれず dump+halt すること（畳みが「立っていないのに畳む」ことがない実証） |
+| `syscall-test-arg4-rcx` | 第 4 引数を `context.r10` でなく `context.rcx` から読む | probe が記録した第 4 引数が期待値と食い違い、`argument register mismatch` で止まること（第 4 引数が R10 である規約の実証） |
+| `syscall-test-gate-dpl0` | syscall ゲート（0x80）の DPL を 0 にする（起動時 DPL 検査の期待値も同じ定数から 0 になるので検査は通る） | Ring 3 からの int 0x80 がゲート DPL<CPL で #GP になり `syscall_entry` に到達しないこと（`exception: vector=13` + halting。DPL=3 が Ring 3 から呼べる唯一の条件であることの実証） |
+| `syscall-test-drop-retval` | 戻り値の `context.rax` 書き戻しを落とす | ユーザーが store した値が `PROBE_RETURN` と食い違い、`return value mismatch` で止まること（戻り値が RAX 経由でユーザーへ返ることの実証） |
 | `gfx-test-pattern` | コンソールを起動せず描画テストパターンを描く | 描画の基盤 |
 
 これらが有効なビルドでは、起動時に`test hooks:`のWARNが出て内訳が列挙される。
@@ -151,6 +154,11 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 
 `cargo xtask check`は、`kernel/Cargo.toml`の`default`から推移的に辿って、これらのいずれにも行き着かないことを検査する。
 壊れた状態で測った結果を正常な結果として扱う事故を防ぐためのものである。
+
+int 0x80システムコールの検証（M5-f-1-2）について、2点を明記する。
+
+- **RCX/R11はクロバー扱いで、保存に依存する検査を書かない。** ADR-0020のとおり、`int 0x80`の間はRCX/R11が実際には保存されるが、`syscall`/`sysret`へ移る段でこれらは命令が破壊する。ここでRCX/R11の保存を検査に固定すると、移行時の破壊が検査に守られて表面化しなくなる。probe発行ルーチンはRCXへ番兵を入れるが、これは`syscall-test-arg4-rcx`が第4引数をRCXから誤読したときに決定的な食い違いを起こすためで、RCX/R11が保存されることを確かめる検査ではない。
+- **RSP0スタックでの走行の破壊featureは新設せず、`ring3-test-drop-rsp0`を指す（判断B）。** syscall経路のRSP0据え付けは`ring3::enter`の`set_rsp0`を再利用しているため、これを落とす破壊は`ring3-test-drop-rsp0`と同一で、重複featureを作らない。一方で**検証項目は新規に持つ**: syscall経路では「`syscall_entry`のRSP（`rsp_at_call`）が遠征スタック範囲内にある」ことを読み戻す。`ring3-test-drop-rsp0`が見るのは#GP例外ハンドラの着地で、syscallが見るのは`syscall_entry`の着地であり、破壊featureは共通でも検証対象が違う。
 
 ### 検査や計測が正しく機能していなかった事例
 

@@ -577,6 +577,41 @@ const RING3_TESTS: &[CriticalTest] = &[
     },
 ];
 
+/// int 0x80 システムコールの破壊確認（M5-f-1-2）。いずれも probe の往復が verified に
+/// 到達しないことを確かめる。
+const SYSCALL_TESTS: &[CriticalTest] = &[
+    // 第 4 引数を context.r10 でなく context.rcx から読む。probe が記録した第 4 引数が
+    // 期待値と食い違い、検証が argument register mismatch で止まる（R10 規約の実証）。
+    CriticalTest {
+        name: "arg4-rcx",
+        feature: "syscall-test-arg4-rcx",
+        expected_markers: &["syscall: argument register mismatch", "halting"],
+        forbidden_markers: &["syscall: probe int 0x80 round-trip verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // ゲート 0x80 を DPL=0 にする。Ring 3 からの int 0x80 がゲート DPL<CPL で #GP になり、
+    // syscall_entry に到達しない。畳みの予期 RIP は cli 位置なので畳まれず dump+halt。
+    CriticalTest {
+        name: "gate-dpl0",
+        feature: "syscall-test-gate-dpl0",
+        expected_markers: &["exception: vector=13", "halting"],
+        forbidden_markers: &["syscall: probe int 0x80 round-trip verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // 戻り値の context.rax 書き戻しを落とす。ユーザーが store した値が PROBE_RETURN と
+    // 食い違い、検証が return value mismatch で止まる。
+    CriticalTest {
+        name: "drop-retval",
+        feature: "syscall-test-drop-retval",
+        expected_markers: &["syscall: return value mismatch", "halting"],
+        forbidden_markers: &["syscall: probe int 0x80 round-trip verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+];
+
 /// カーネルが起動したことを示す、シリアルログの既知の行。
 ///
 /// kernel の `kernel_main` が最初に出す行（`common::log` の INFO 形式）。
@@ -733,7 +768,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -781,6 +816,13 @@ fn main() -> Result<()> {
                     format!("--ring3-test requires a kind ({})", names.join(" | "))
                 })?;
                 return cmd_marker_test(RING3_TESTS, "ring3-test", kind);
+            }
+            if let Some(index) = rest.iter().position(|a| a == "--syscall-test") {
+                let kind = rest.get(index + 1).with_context(|| {
+                    let names: Vec<&str> = SYSCALL_TESTS.iter().map(|t| t.name).collect();
+                    format!("--syscall-test requires a kind ({})", names.join(" | "))
+                })?;
+                return cmd_marker_test(SYSCALL_TESTS, "syscall-test", kind);
             }
             if let Some(index) = rest.iter().position(|a| a == "--critical-test") {
                 let kind = rest.get(index + 1).with_context(|| {
@@ -2293,6 +2335,13 @@ fn cmd_check(full: bool) -> Result<()> {
             let name = format!("ring3-test {}", test.name);
             run_regression(&name, &mut failed, &mut retries, || {
                 cmd_marker_test(RING3_TESTS, "ring3-test", test.name)
+            });
+        }
+        for test in SYSCALL_TESTS {
+            total += 1;
+            let name = format!("syscall-test {}", test.name);
+            run_regression(&name, &mut failed, &mut retries, || {
+                cmd_marker_test(SYSCALL_TESTS, "syscall-test", test.name)
             });
         }
         for test in INTERRUPT_TESTS {

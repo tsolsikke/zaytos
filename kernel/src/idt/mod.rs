@@ -487,6 +487,19 @@ pub const YIELD_VECTOR: usize = 0x41;
 /// 一切絡まない。
 pub const SYSCALL_VECTOR: usize = 0x80;
 
+/// syscall ゲート（0x80）の DPL。**DPL=3** が Ring 3 から int 0x80 を呼べる唯一の
+/// 条件である。起動時の DPL 配置検査（`main.rs`）もこの値を期待値として使うので、
+/// ゲート登録と検査の期待値が単一の定数から出る。
+///
+/// 破壊 (M5-f-1-2, gate-dpl0): DPL=0 にする。Ring 3 からの int 0x80 がゲート
+/// DPL<CPL で #GP になり、`syscall_entry` に到達しない。起動時検査は期待値も 0 に
+/// なるので通り、異常は int 0x80 発行時の #GP として runtime に現れる（M5-e-1 の
+/// user-desc-dpl0 と同じ作りで、検査を先に発火させず runtime で捕まえる）。
+#[cfg(not(feature = "syscall-test-gate-dpl0"))]
+pub const SYSCALL_GATE_DPL: u8 = 3;
+#[cfg(feature = "syscall-test-gate-dpl0")]
+pub const SYSCALL_GATE_DPL: u8 = 0;
+
 /// ベクタ別の割り込み回数。
 ///
 /// **通常の `static` にしてはならない。** メインループがこれを読む形になる
@@ -970,15 +983,16 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
             None,
         );
 
-        // システムコール用ゲート（M5-f-1、ADR-0020）。ベクタ 0x80。**DPL=3** で
-        // Ring 3 から int 0x80 を呼べるようにする（他のゲートは DPL=0）。割り込み
-        // ゲート（IF を落とす）で ADR-0018 の「入場時 IF=0」を保つ。IST は使わず、
-        // 特権変化のたびに CPU が TSS.RSP0 のスタックへ切り替える。
+        // システムコール用ゲート（M5-f-1、ADR-0020）。ベクタ 0x80。DPL は
+        // SYSCALL_GATE_DPL（通常 3）。**DPL=3** で Ring 3 から int 0x80 を呼べる
+        // ようにする（他のゲートは DPL=0）。割り込みゲート（IF を落とす）で ADR-0018
+        // の「入場時 IF=0」を保つ。IST は使わず、特権変化のたびに CPU が TSS.RSP0 の
+        // スタックへ切り替える。
         (*idt)[SYSCALL_VECTOR] = IdtEntry::new(
             addr_of!(zaytos_syscall_stub) as u64,
             KERNEL_CODE_SELECTOR,
             GateType::Interrupt,
-            3,
+            SYSCALL_GATE_DPL,
             None,
         );
     }

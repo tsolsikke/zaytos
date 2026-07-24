@@ -20,10 +20,19 @@
 //!
 //! # M5-f-1 の範囲
 //!
-//! この段は**空ディスパッチャ**である。番号を読み取って記録し、未知番号として
-//! `-ENOSYS` を返す。6 引数の取り出しとユーザーポインタ検証は後段（M5-f-2）で
-//! 足す。この段で確かめるのは「Ring 3 から `int 0x80` が届き、`syscall_entry` が
-//! RSP0 スタックで走り、`iretq` で Ring 3 へ戻る」往復の成立である。
+//! ディスパッチャは検証用の probe システムコール 1 つだけを持つ（M5-f-1-2）。
+//! probe は 6 引数と番号を静的領域へ記録し、既知の戻り値 [`PROBE_RETURN`] を返す。
+//! これにより「6 引数が規約どおり届き、戻り値が RAX で Ring 3 へ返る」ことを実証
+//! する。ユーザーポインタを取るシステムコールは後段（M5-f-2）で足す。
+//!
+//! # 破壊 feature（M5-f-1-2）
+//!
+//! - `syscall-test-arg4-rcx`: 第 4 引数を `context.r10` でなく `context.rcx` から
+//!   読む。R10 規約の実証（記録した第 4 引数が期待値と食い違う）。
+//! - `syscall-test-drop-retval`: 戻り値の `context.rax` 書き戻しを落とす。ユーザーが
+//!   期待した戻り値を受け取れない（ユーザースタックへ store した値が食い違う）。
+//! - `syscall-test-gate-dpl0`: ゲートを DPL=0 にする（[`crate::idt`] 側）。Ring 3 から
+//!   の `int 0x80` がゲート DPL<CPL で #GP になり、`syscall_entry` に到達しない。
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -32,33 +41,65 @@ use crate::idt::context::IrqContext;
 /// `-ENOSYS`（未実装システムコール）の errno。失敗は `-errno` で返す。
 pub const ENOSYS: i64 = 38;
 
-/// M5-f-1 の往復検証でユーザールーチンが積む番号。空ディスパッチャなので未知番号
-/// として扱われ `-ENOSYS` が返るが、`syscall_entry` が記録した番号がこれと一致する
-/// ことで、RAX（番号）が規約どおり届いたことを実証する。
+/// 検証用 probe システムコールの番号（ZaytOS 独自の暫定割り当て）。
 pub const PROBE_NUMBER: u64 = 0x2A;
+
+/// probe が返す既知の戻り値。ユーザーはこれを RAX で受け取り、ユーザースタックへ
+/// store する。カーネルが畳み後に読み戻して一致を確かめることで、戻り値が RAX 経由で
+/// Ring 3 へ渡ったことを実証する。`-errno` の範囲（`-1..-4095`）と紛れない値にする。
+pub const PROBE_RETURN: u64 = 0x00C0_FFEE;
+
+/// probe の呼び出しでユーザーが各引数レジスタ（RDI/RSI/RDX/R10/R8/R9）へ入れる
+/// 既知値。**レジスタごとに区別できる値**にする（第 4 引数を R10 でなく RCX から
+/// 読む破壊が、記録した第 4 引数の食い違いとして必ず現れるように）。
+pub const PROBE_ARGS: [u64; 6] = [
+    0x1111_1111,
+    0x2222_2222,
+    0x3333_3333,
+    0x4444_4444,
+    0x5555_5555,
+    0x6666_6666,
+];
+
+/// probe の呼び出しでユーザーが RCX へ入れる番兵。RCX は引数ではない（クロバー扱い）。
+/// `syscall-test-arg4-rcx` が第 4 引数を RCX から読むと、この値が第 4 引数として
+/// 記録され、`PROBE_ARGS[3]` と決定的に食い違う。
+pub const SENTINEL_RCX: u64 = 0xCCCC_CCCC;
 
 /// `syscall_entry` が呼ばれた回数（会計用）。
 static INVOCATION_COUNT: AtomicU64 = AtomicU64::new(0);
 /// 直近に受け取った番号（RAX）。往復検証で PROBE_NUMBER と突き合わせる。
 static LAST_NUMBER: AtomicU64 = AtomicU64::new(0);
+/// 直近に受け取った 6 引数（RDI/RSI/RDX/R10/R8/R9）。PROBE_ARGS と突き合わせる。
+static LAST_ARGS: [AtomicU64; 6] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
 /// `syscall_entry` が走ったときの RSP（RSP0 スタックのはず）。読み戻し検証に使う。
 static HANDLER_RSP: AtomicU64 = AtomicU64::new(0);
 
-/// 番号を実装へ振り分ける。M5-f-1 は空で、常に `-ENOSYS` を返す。
+/// 番号を実装へ振り分ける。M5-f-1 は検証用 probe だけを持つ。
 ///
-/// 後段で `match number { ... }` に各システムコールを足す。
-fn dispatch(number: u64) -> u64 {
-    let _ = number;
-    // 失敗は -errno（-1..-4095）。ここでは常に未実装。
-    (-ENOSYS) as u64
+/// probe は既知の戻り値 [`PROBE_RETURN`] を返す。それ以外は未実装で `-ENOSYS`。
+fn dispatch(number: u64, _args: &[u64; 6]) -> u64 {
+    match number {
+        PROBE_NUMBER => PROBE_RETURN,
+        // 失敗は -errno（-1..-4095）。
+        _ => (-ENOSYS) as u64,
+    }
 }
 
 /// `zaytos_syscall_common` から `extern "sysv64"` で呼ばれる。**戻る。**
 ///
-/// 番号を読み、ディスパッチし、戻り値を `context.rax` へ書き戻して、復元経路が
-/// 使う RSP を返す。M5-f-1 は切り替えないので入場時の `IrqContext` 先頭をそのまま
-/// 返す（`irq_entry` の no-switch と同じ）。復元経路が `pop rax` で `context.rax`
-/// を復元するので、書き戻した戻り値がユーザーの RAX に入る。
+/// 番号（RAX）と 6 引数（RDI/RSI/RDX/R10/R8/R9）を読み、記録し、ディスパッチして、
+/// 戻り値を `context.rax` へ書き戻し、復元経路が使う RSP を返す。M5-f-1 は切り替え
+/// ないので入場時の `IrqContext` 先頭をそのまま返す（`irq_entry` の no-switch と
+/// 同じ）。復元経路が `pop rax` で `context.rax` を復元するので、書き戻した戻り値が
+/// ユーザーの RAX に入る。
 ///
 /// **出力しない。** 例外・IRQ ハンドラと同じく、ここでは共有状態の更新だけを行う。
 /// 観測は畳んで戻った後にカーネルが記録越しに行う。
@@ -67,7 +108,7 @@ fn dispatch(number: u64) -> u64 {
 ///
 /// `context` はスタブが積んだ有効な [`IrqContext`] を指していること。
 /// `rsp_at_call` はスタブが `call` 直前に読んだ RSP であること。
-pub(crate) extern "sysv64" fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
+pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     // SAFETY: スタブが直前に積んだ有効な IrqContext を指す。読み書きともこの
     // フレームに限る。
     let ctx = unsafe { &mut *context };
@@ -78,14 +119,33 @@ pub(crate) extern "sysv64" fn syscall_entry(context: *mut IrqContext, rsp_at_cal
     // 番号は RAX。**書き戻しの前に読む。**
     let number = ctx.rax;
 
+    // 第 4 引数は R10（RCX ではない。ADR-0020）。
+    // 破壊 (M5-f-1-2, arg4-rcx): 第 4 引数を RCX から読む。記録した第 4 引数が
+    // PROBE_ARGS[3] と食い違い、R10 規約であることが実証される。
+    #[cfg(not(feature = "syscall-test-arg4-rcx"))]
+    let arg3 = ctx.r10;
+    #[cfg(feature = "syscall-test-arg4-rcx")]
+    let arg3 = ctx.rcx;
+    let args = [ctx.rdi, ctx.rsi, ctx.rdx, arg3, ctx.r8, ctx.r9];
+
     INVOCATION_COUNT.fetch_add(1, Ordering::SeqCst);
     LAST_NUMBER.store(number, Ordering::SeqCst);
+    for (slot, value) in LAST_ARGS.iter().zip(args.iter()) {
+        slot.store(*value, Ordering::SeqCst);
+    }
     HANDLER_RSP.store(rsp_at_call, Ordering::SeqCst);
 
-    let ret = dispatch(number);
+    let ret = dispatch(number, &args);
 
     // 戻り値を RAX へ書き戻す。復元経路の pop rax がこれをユーザー RAX へ載せる。
-    ctx.rax = ret;
+    // 破壊 (M5-f-1-2, drop-retval): 書き戻しを落とす。ctx.rax は番号のままで、
+    // ユーザーは期待した戻り値を受け取れない。
+    #[cfg(not(feature = "syscall-test-drop-retval"))]
+    {
+        ctx.rax = ret;
+    }
+    #[cfg(feature = "syscall-test-drop-retval")]
+    let _ = ret;
 
     // M5-f-1 は切り替えない。入場時の IrqContext 先頭を返す。
     context as u64
@@ -95,6 +155,9 @@ pub(crate) extern "sysv64" fn syscall_entry(context: *mut IrqContext, rsp_at_cal
 pub fn reset_counters() {
     INVOCATION_COUNT.store(0, Ordering::SeqCst);
     LAST_NUMBER.store(0, Ordering::SeqCst);
+    for slot in LAST_ARGS.iter() {
+        slot.store(0, Ordering::SeqCst);
+    }
     HANDLER_RSP.store(0, Ordering::SeqCst);
 }
 
@@ -106,6 +169,11 @@ pub fn invocation_count() -> u64 {
 /// 直近に受け取った番号（RAX）。
 pub fn last_number() -> u64 {
     LAST_NUMBER.load(Ordering::SeqCst)
+}
+
+/// 直近に受け取った 6 引数（RDI/RSI/RDX/R10/R8/R9 の順）。
+pub fn last_args() -> [u64; 6] {
+    core::array::from_fn(|i| LAST_ARGS[i].load(Ordering::SeqCst))
 }
 
 /// `syscall_entry` が走ったときの RSP。RSP0 スタック範囲との照合に使う。
