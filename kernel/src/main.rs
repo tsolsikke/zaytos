@@ -3512,16 +3512,15 @@ fn verify_split_and_unmap<const CAP: usize>(
         SCRATCH_BYTES / 1024
     ));
 
-    // 明示的に恒等窓を使う。このテストは分割/アンマップの機構を検証し、
-    // 読み戻しで「物理 == 仮想」を照合する（恒等前提）。A-2 以降は登録
-    // direct_map() が高位を返すため、そのまま使うと照合が崩れる。恒等は A で
-    // 残しているので、恒等窓を明示して恒等マッピングの split/unmap を対象に
-    // する。B で恒等を外すときは対象を高位窓へ移す（deferred-decisions.md
-    // の「split/unmap テストの恒等窓依存」）。
-    let table_map = common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
-        .expect("the identity window is canonical");
-    // SAFETY: CR3 は自前のテーブルへ切り替え済みで、テーブル自体は恒等
-    // マッピングで読み書きできる。
+    // 登録 direct map の高位窓を使う（B-0）。A-2 以降 direct_map() は高位窓
+    // （DIRECT_MAP_BASE + phys、PML4[256]、B でも残る）を返す。分割/アンマップの対象と
+    // 読み戻しを高位窓へ移し、照合を「phys == 高位窓の virt_to_phys(virt)」へ一般化する
+    // （恒等窓を base=0 の特殊ケースに含む一般形）。これにより B で恒等（PML4[0]）を
+    // 外してもこのテストは生存する（deferred-decisions.md の「split/unmap テストの
+    // 恒等窓依存」を B-0 で解消）。
+    let table_map = common::addr::direct_map();
+    // SAFETY: CR3 は自前のテーブルへ切り替え済みで、テーブルフレームは高位窓で読み書き
+    // できる（窓は全マップ範囲を覆い、テーブルフレームは空き RAM 上にある）。
     let mut table = unsafe { ActivePageTable::current(table_map) };
 
     // --- 分割前の状態を記録する ---
@@ -3577,8 +3576,8 @@ fn verify_split_and_unmap<const CAP: usize>(
             Ok(Some(translation)) => {
                 if translation.page_size != PageSize::Size4KiB {
                     mismatches += 1;
-                } else if translation.phys.as_u64() != virt.as_u64() {
-                    // 恒等マッピングなので物理 == 仮想。
+                } else if table_map.virt_to_phys(virt) != Some(translation.phys) {
+                    // 高位窓なので phys == 窓の virt_to_phys(virt)（恒等窓 base=0 を含む一般形）。
                     mismatches += 1;
                 } else {
                     // 属性が分割前と一致すること。PS は 4KiB では PAT の意味に
@@ -3874,14 +3873,13 @@ fn run_paging_test<const CAP: usize>(
 
     const FRAMES_PER_2M: u64 = entry::PAGE_SIZE_2M / frame_allocator::FRAME_SIZE;
 
-    // 明示的に恒等窓を使う（verify_split_and_unmap と同じ理由）。この経路も
-    // 恒等マッピングの split/unmap を対象に検証する。A-2 以降の登録
-    // direct_map() は高位を返すため、そのまま使うと対象が高位窓へずれる。
-    // B で恒等を外すときに見直す（deferred-decisions.md の「split/unmap
-    // テストの恒等窓依存」）。
-    let test_map = common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
-        .expect("the identity window is canonical");
-    // SAFETY: CR3 は自前のテーブルへ切り替え済み。
+    // 登録 direct map の高位窓を使う（B-0、verify_split_and_unmap と同じ）。A-2 以降
+    // direct_map() は高位を返す。この経路のスクラッチ VA は既に窓相対
+    // （test_map.phys_to_virt）なので、窓を高位へ替えるだけで恒等前提が外れ、対象が
+    // 高位窓の split/unmap になる。B で恒等（PML4[0]）を外してもこの経路は生存する
+    // （deferred-decisions.md の「split/unmap テストの恒等窓依存」を B-0 で解消）。
+    let test_map = common::addr::direct_map();
+    // SAFETY: CR3 は自前のテーブルへ切り替え済み。テーブルフレームは高位窓で読める。
     let mut table = unsafe { ActivePageTable::current(test_map) };
 
     // --- PCD 付きの 2MiB ページを分割する ---
