@@ -652,6 +652,29 @@ const SYSCALL_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // copy_from_user が検証を経ずに読む（M5-f-2-2）。カーネルポインタで -EFAULT のはずが総和が
+    // 返り、内容往復の検証が「-EFAULT のはずが値」を検出して halt する。
+    CriticalTest {
+        name: "copy-skip-validate",
+        feature: "syscall-test-copy-skip-validate",
+        expected_markers: &[
+            "syscall: checksum case 'kernel pointer' expected reject",
+            "halting",
+        ],
+        forbidden_markers: &["syscall: checksum round-trip verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // copy_from_user が len を 1 バイト超えて読む（M5-f-2-2）。末尾の余分な既知バイトが総和へ
+    // 混ざり、内容往復のチェックサムが決定的に食い違って halt する。
+    CriticalTest {
+        name: "copy-overrun",
+        feature: "syscall-test-copy-overrun",
+        expected_markers: &["syscall: checksum mismatch", "halting"],
+        forbidden_markers: &["syscall: checksum round-trip verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
 ];
 
 /// カーネルが起動したことを示す、シリアルログの既知の行。

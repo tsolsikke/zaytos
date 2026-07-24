@@ -852,6 +852,12 @@ extern "sysv64" fn kernel_main() -> ! {
     #[cfg(not(feature = "paging-test"))]
     verify_syscall_pointer(&mut logger, &mut allocator);
 
+    // ユーザーバッファの内容往復の検証（M5-f-2-2）。カーネルが既知内容をユーザーバッファへ
+    // 書き、SYS_CHECKSUM を発行して、カーネルが検証 → copy_from_user → 総和を返し、期待値と
+    // 一致することを確かめる。
+    #[cfg(not(feature = "paging-test"))]
+    verify_syscall_checksum(&mut logger);
+
     // ロック保持中は割り込みが禁止され、解放後に元へ戻ることを確認する
     // （M4-c-2）。ヒープのロックそのものではなく同じ Locked<T> を使う。
     // ヒープのロックを保持したままログを出すと二重取得になるため。
@@ -3205,18 +3211,18 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     ));
 }
 
-/// SYS_CHECK_PTR を (buf, len) で 1 回発行し、ユーザーが store した戻り値を返す
-/// （M5-f-2-1）。verify_syscall_roundtrip と同じ遠征機構（enter → int 0x80 → 戻り値
-/// store → cli 畳み）を再利用する。ユーザーコード/スタックページは
+/// ポインタ系 syscall（`number`）を (buf, len) で 1 回発行し、ユーザーが store した戻り値を
+/// 返す（M5-f-2-1 / M5-f-2-2）。verify_syscall_roundtrip と同じ遠征機構（enter → int 0x80 →
+/// 戻り値 store → cli 畳み）を再利用する。ユーザーコード/スタックページは
 /// verify_ring3_excursion が張ったものを再利用する（呼び出し側が確認済み前提）。
-fn issue_pointer_syscall(logger: &mut Logger<SerialPort>, buf: u64, len: u64) -> u64 {
+fn issue_ptr_len_syscall(logger: &mut Logger<SerialPort>, number: u64, buf: u64, len: u64) -> u64 {
     use kernel::ring3;
     use kernel::syscall;
 
     let code_virt = common::addr::VirtAddr::new(ring3::USER_CODE_VIRT)
         .expect("the user code virtual address is canonical");
 
-    // ユーザールーチン: movabs rdi, buf; movabs rsi, len; mov eax, SYS_CHECK_PTR;
+    // ユーザールーチン: movabs rdi, buf; movabs rsi, len; mov eax, number;
     //   int 0x80; mov [rsp-8], rax; cli。buf は 512 GiB 付近で 32bit に収まらないため
     //   movabs（imm64）で積む。
     let mut code = [0u8; 64];
@@ -3230,11 +3236,7 @@ fn issue_pointer_syscall(logger: &mut Logger<SerialPort>, buf: u64, len: u64) ->
     emit(&[0x48, 0xBE], &mut code, &mut n); // movabs rsi, imm64
     emit(&len.to_le_bytes(), &mut code, &mut n);
     emit(&[0xB8], &mut code, &mut n); // mov eax, imm32
-    emit(
-        &(syscall::SYS_CHECK_PTR as u32).to_le_bytes(),
-        &mut code,
-        &mut n,
-    );
+    emit(&(number as u32).to_le_bytes(), &mut code, &mut n);
     emit(&[0xCD, 0x80], &mut code, &mut n); // int 0x80
     emit(&[0x48, 0x89, 0x44, 0x24, 0xF8], &mut code, &mut n); // mov [rsp-8], rax
     let cli_offset = n;
@@ -3362,7 +3364,7 @@ fn verify_syscall_pointer<const CAP: usize>(
     ];
 
     for (buf, len, expect_accept, name) in cases {
-        let stored = issue_pointer_syscall(logger, buf, len);
+        let stored = issue_ptr_len_syscall(logger, kernel::syscall::SYS_CHECK_PTR, buf, len);
         let accepted = stored == 0;
         let rejected = stored == efault;
         let ok = if expect_accept { accepted } else { rejected };
@@ -3402,6 +3404,72 @@ fn verify_syscall_pointer<const CAP: usize>(
         "syscall: pointer validation battery verified (valid pointer accepted; kernel pointer, \
          unmapped, supervisor, straddle, and over-long all rejected before touching; len=0 \
          accepted regardless of buf)"
+    ));
+}
+
+/// ユーザーバッファの内容往復の検証（M5-f-2-2）。
+///
+/// カーネルが既知内容をユーザーバッファ（ユーザースタックページの下部。Ring 3 の RSP は
+/// 頂点付近しか使わないので下部は空き）へ書き、SYS_CHECKSUM を発行する。カーネルは検証 →
+/// copy_from_user → バイト総和を返す。ユーザーが store し、カーネルが畳み後に読み戻して、
+/// **発行側の既知内容から計算した期待総和と一致**することを確かめる（自己検算でなく、発行側
+/// 既知値とカーネルの独立読みの突き合わせ）。加えて、カーネルポインタを渡すと copy 前の検証で
+/// -EFAULT が返る（読みに踏み込まない）ことを確かめる。
+fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
+    use kernel::ring3;
+    use kernel::syscall;
+
+    // 内容バッファはユーザースタックページの下部に置く。余分バイトは copy-overrun 検出用に
+    // len の直後（同じ有効ページ内）へ置く。
+    let buf_va = ring3::USER_STACK_VIRT;
+    const N: usize = 8;
+    let content: [u8; N] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+    const OVERRUN_MARK: u8 = 0xEE;
+
+    // カーネルが既知内容 + 余分バイトをユーザーバッファへ書く（マップ済み、SMAP 未有効）。
+    // SAFETY: buf_va は verify_ring3_excursion が張ったユーザースタックページ内。N+1 <= ページ。
+    unsafe {
+        for (i, b) in content.iter().enumerate() {
+            core::ptr::write_volatile((buf_va + i as u64) as *mut u8, *b);
+        }
+        core::ptr::write_volatile((buf_va + N as u64) as *mut u8, OVERRUN_MARK);
+    }
+    let expected_sum: u64 = content.iter().map(|b| *b as u64).sum();
+
+    // 正常系: 検証を通し、total を返す。
+    let stored = issue_ptr_len_syscall(logger, syscall::SYS_CHECKSUM, buf_va, N as u64);
+    logger.info(format_args!(
+        "syscall: checksum case 'valid buffer' buf={buf_va:#x} len={N} -> stored={stored:#x} \
+         (expected sum {expected_sum:#x})"
+    ));
+    if stored != expected_sum {
+        logger.error(format_args!(
+            "syscall: checksum mismatch (stored {stored:#x} != expected {expected_sum:#x}); the \
+             kernel read the wrong bytes (e.g. an overrun); halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    // 異常系: カーネルポインタは copy 前の検証で -EFAULT。読みに踏み込まない。
+    let efault = (-syscall::EFAULT) as u64;
+    let kernel_ptr: u64 = 0x10_0000;
+    let bad = issue_ptr_len_syscall(logger, syscall::SYS_CHECKSUM, kernel_ptr, N as u64);
+    logger.info(format_args!(
+        "syscall: checksum case 'kernel pointer' buf={kernel_ptr:#x} len={N} -> stored={bad:#x} \
+         (expect -EFAULT {efault:#x})"
+    ));
+    if bad != efault {
+        logger.error(format_args!(
+            "syscall: checksum case 'kernel pointer' expected reject (-EFAULT) but got {bad:#x}; \
+             copy_from_user read without validating; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "syscall: checksum round-trip verified (the kernel read the user buffer through a \
+         validated UserSlice and returned the correct byte sum; a kernel pointer was rejected \
+         before reading)"
     ));
 }
 

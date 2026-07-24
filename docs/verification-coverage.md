@@ -149,6 +149,8 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 | `syscall-test-validate-skip-us` | ユーザーポインタ検証の U=1 判定を外す | 無効3（supervisor in user range）が受理され、battery が `pointer validation battery failed` で止まること（U 判定の隔離実証。`walk_user_accessible` を新設した中核） |
 | `syscall-test-validate-skip-laststep` | ページ走査を先頭ページだけで打ち切る | 無効4（straddle）の末尾無効を取り逃して受理され、battery が止まること（全ページ走査の隔離実証） |
 | `syscall-test-validate-skip-all` | 検証器を常に受理にする | 最初の拒否ケース（kernel pointer）が受理され、battery が止まること（検証器全体の機能停止を battery が検出する、最後の砦の実証） |
+| `syscall-test-copy-skip-validate` | `copy_from_user` が検証を経ず `UserSlice` をモジュール内で直接構築して読む | カーネルポインタで `-EFAULT` のはずが総和が返り、内容往復の検証が `checksum case 'kernel pointer' expected reject` で止まること（copy が検証を尊重することの実証） |
+| `syscall-test-copy-overrun` | `copy_from_user` が `len` を 1 バイト超えて読む | 末尾の余分な既知バイトが総和へ混ざり、`checksum mismatch` で決定的に止まること（bounded read が範囲を守ることの実証。#PF は副次的位置づけ） |
 | `gfx-test-pattern` | コンソールを起動せず描画テストパターンを描く | 描画の基盤 |
 
 これらが有効なビルドでは、起動時に`test hooks:`のWARNが出て内訳が列挙される。
@@ -170,6 +172,12 @@ int 0x80システムコールの検証（M5-f-1-2）について、2点を明記
 - **`user_range_accessible`はlen==0を常に受理する契約である。** 0バイトのアクセスはbufを問わず安全であり、この短絡は検証器の内部に置く（呼び出し側で短絡しない）ので、この検証器を共有する全syscallが同じ契約を継承する。batteryはlen=0を有効bufと無効bufの両方でテストする。
 
 `walk_user_accessible`が中間階層U=0（葉U=1でも中間U=0なら`translate`の葉Uでは見逃す穴）を弾くことは、一度きりの確認（中間テーブルのUビットを直接落として`walk`が`SupervisorOnly`で弾く一方`translate`の葉Uでは通してしまうことの対比）で実証した。侵襲的setupを恒久コードに残さないため恒久featureにはせず、確認後に戻している。
+
+`copy_from_user`と検証済みトークン`UserSlice`（M5-f-2-2）について、3点を明記する。
+
+- **型で保証される範囲と、規律で守る範囲の境界。** `UserSlice`はフィールドprivateで公開コンストラクタを持たず、構築できるのは検証器`validate_user_range`だけである。`copy_from_user`が`&UserSlice`を要求するので、**モジュール外の全呼び出し元に対しては「検証を経ないとユーザーメモリを読めない」ことが型で保証される。** ただしこの保証はモジュール境界に依存する。同一`syscall.rs`モジュール内からはprivateフィールドに触れるため`UserSlice { .. }`を直接構築できてしまう。したがってモジュール内の直接構築は`copy-skip-validate`破壊feature専用であり、通常コードでは行わない（この規律は型ではなくレビューで守る）。`copy-skip-validate`はまさにこの境界を突く破壊である。
+- **TOCTOU（検証と読みのアトミック性）は構造条件に依存する。** 検証と読みが実質アトミックなのは、`syscall_entry`が割り込みゲート（IF=0）で入りプリエンプトが来ないこと、シングルコアであること、ユーザーページをアンマップする経路が`syscall`中に走らないこと、の構造条件による。**将来IFを立てる`syscall`（長時間ブロッキング等）を導入すると、この前提が崩れTOCTOU（検証後・読み前にアンマップ/再マップ）が現実化する**ため再検証が要る。`user_range_accessible`のレイアウト依存と同じ、安全性の成立が構造条件に依存することの記録である。
+- **`UserSlice`の有効期間は同一`syscall`内・同一アドレス空間に限る。** 跨いで保持しない（staticに置かない）。higher-half B後のプロセス別アドレス空間では、トークンは「そのCR3の下でのみ有効」になるため、CR3を跨いで使わない制約をf-3で型（世代/CR3を持たせる等）またはdocで担保する（再確認の申し送り）。加えて、`SYS_CHECKSUM`のバッファ容量超過（`len > CHECKSUM_BUF_LEN`）を現状`-EFAULT`で代用しているが、意味的には「容量超過」でありポインタ不正（Bad address）とは異なる。errno体系が育つ段（POSIX互換の構想）で見直す。
 
 ### 検査や計測が正しく機能していなかった事例
 

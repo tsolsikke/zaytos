@@ -48,8 +48,21 @@ pub const EFAULT: i64 = 14;
 
 /// ユーザーポインタを取る検証用システムコールの番号（M5-f-2-1、暫定割り当て）。
 /// 第 1 引数(RDI)=buf、第 2 引数(RSI)=len。範囲が Ring 3 からアクセス可能なら 0、
-/// 不可なら -EFAULT を返す（**この段はバイトを読まない**。copy は M5-f-2）。
+/// 不可なら -EFAULT を返す（**この段はバイトを読まない**。copy は M5-f-2-2）。
 pub const SYS_CHECK_PTR: u64 = 0x2B;
+
+/// ユーザーバッファのバイト総和（チェックサム）を返すシステムコールの番号
+/// （M5-f-2-2、暫定割り当て）。第 1 引数(RDI)=buf、第 2 引数(RSI)=len。範囲を検証してから
+/// 範囲内バイトを読み総和を返す。不正な範囲なら -EFAULT。バッファ容量超過も -EFAULT で
+/// 代用する（下記 [`CHECKSUM_BUF_LEN`] のコメント参照）。
+pub const SYS_CHECKSUM: u64 = 0x2C;
+
+/// SYS_CHECKSUM がユーザーバイトを読み込む固定カーネルバッファの大きさ。
+///
+/// これを超える len は現状 -EFAULT で弾く。**意味的には「バッファ容量超過」であり、
+/// ポインタ不正（EFAULT = Bad address）とは異なる。** errno 体系がまだ最小なので -EFAULT で
+/// 代用しているが、errno を増やす段（POSIX 互換の構想）で見直す。
+pub const CHECKSUM_BUF_LEN: usize = 64;
 
 /// ユーザーサブツリー（PML4[[`crate::USER_PML4_INDEX`]]）の仮想範囲
 /// [USER_VIRT_MIN, USER_VIRT_MAX)。現在 PML4[1] = [512 GiB, 1 TiB)。
@@ -101,12 +114,54 @@ static LAST_ARGS: [AtomicU64; 6] = [
 /// `syscall_entry` が走ったときの RSP（RSP0 スタックのはず）。読み戻し検証に使う。
 static HANDLER_RSP: AtomicU64 = AtomicU64::new(0);
 
+/// 検証済みのユーザー範囲を表す証明トークン（M5-f-2-2、案T）。
+///
+/// **フィールドは private で、公開コンストラクタを持たない。** 構築できるのは同一
+/// モジュール内の [`validate_user_range`] だけである。したがって [`copy_from_user`] が
+/// `&UserSlice` を要求することで、**モジュール外の全呼び出し元に対しては「検証を経ないと
+/// ユーザーメモリを読めない」ことが型で保証される。**
+///
+/// # 型で保証される範囲と、規律で守る範囲
+///
+/// この保証はモジュール境界に依存する。同一 `syscall.rs` モジュール内からは private
+/// フィールドに触れるため `UserSlice { .. }` を直接構築できてしまう。したがって:
+/// - モジュール外: 検証を経ないと `UserSlice` が作れない（型で保証）。
+/// - モジュール内: 直接構築は `copy-skip-validate` 破壊 feature 専用であり、通常コードでは
+///   行わない（この規律は型ではなくレビューで守る）。`copy-skip-validate` はまさにこの境界を
+///   突く破壊である。
+///
+/// # 有効期間
+///
+/// `UserSlice` は**同一 syscall 内・同一アドレス空間でのみ有効**。跨いで保持しない
+/// （static 等に置かない）。higher-half B 後のプロセス別アドレス空間では、トークンは
+/// 「その CR3 の下でのみ有効」になるため、CR3 を跨いで使わない制約を f-3 で型（世代/CR3 を
+/// 持たせる等）または doc で担保する（再確認の申し送り。verification-coverage 参照）。
+pub struct UserSlice {
+    buf: u64,
+    len: u64,
+}
+
+impl UserSlice {
+    /// 範囲の先頭アドレス（ユーザー VA）。
+    pub fn buf(&self) -> u64 {
+        self.buf
+    }
+    /// 範囲の長さ（バイト）。
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+    /// 範囲が空（len==0）か。len==0 は常に受理されるので有効なトークンとして存在しうる。
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
 /// 指定した [buf, buf+len) が Ring 3 からアクセス可能かを、**カーネルが読み書きに
-/// 踏み込む前に**判定する（M5-f-2-1）。
+/// 踏み込む前に**判定し、可なら証明トークン [`UserSlice`] を返す（M5-f-2-1 / M5-f-2-2）。
 ///
 /// **len==0 は常に受理する。** 0 バイトのアクセスは buf を問わず安全であり、この
 /// 契約はこの検証器を共有する全 syscall が継承する（呼び出し側で短絡しない）。
-/// それ以外は次を満たすとき true:
+/// それ以外は次を満たすとき `Some`:
 ///   (a) 長さの加算にオーバーフローが無い（`checked_add`）。
 ///   (b) buf と末尾(buf+len-1) が [USER_VIRT_MIN, USER_VIRT_MAX)。
 ///   (c) 範囲を跨ぐ全 4KiB ページが present && 全階層 U=1
@@ -119,32 +174,30 @@ static HANDLER_RSP: AtomicU64 = AtomicU64::new(0);
 /// # Safety
 ///
 /// `pml4_phys` / `direct_map` が walk_user_accessible の契約を満たすこと。
-pub unsafe fn user_range_accessible(
+pub unsafe fn validate_user_range(
     pml4_phys: PhysAddr,
     direct_map: DirectMap,
     buf: u64,
     len: u64,
-) -> bool {
+) -> Option<UserSlice> {
     // 破壊 (M5-f-2-1, skip-all): 検証器を常に受理にする。検証器の全体機能停止を
     // battery が検出して halt する（多層防御の最後の砦の確認）。
     #[cfg(feature = "syscall-test-validate-skip-all")]
     {
-        let _ = (pml4_phys, direct_map, buf, len);
-        return true;
+        let _ = (pml4_phys, direct_map);
+        return Some(UserSlice { buf, len });
     }
     #[cfg(not(feature = "syscall-test-validate-skip-all"))]
     {
         // (a) len==0 は常に受理（契約）。
         if len == 0 {
-            return true;
+            return Some(UserSlice { buf, len });
         }
         // (a) 加算オーバーフロー無し。end は排他的上端（buf+len）。
-        let Some(end) = buf.checked_add(len) else {
-            return false;
-        };
+        let end = buf.checked_add(len)?;
         // (b) buf と末尾（end-1）がユーザー範囲内。end <= USER_VIRT_MAX で末尾も範囲内。
         if buf < USER_VIRT_MIN || end > USER_VIRT_MAX {
-            return false;
+            return None;
         }
         // (c) 範囲を跨ぐ全 4KiB ページを walk。境界非整列でも先頭・末尾を覆う。
         let first_page = buf & !0xFFF;
@@ -158,19 +211,67 @@ pub unsafe fn user_range_accessible(
         };
         let mut page = first_page;
         while page <= last_page {
-            let Some(virt) = common::addr::VirtAddr::new(page) else {
-                return false;
-            };
+            let virt = common::addr::VirtAddr::new(page)?;
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。読み取りのみ。
             if unsafe { crate::paging::verify::walk_user_accessible(pml4_phys, direct_map, virt) }
                 .is_err()
             {
-                return false;
+                return None;
             }
             page += 0x1000;
         }
-        true
+        Some(UserSlice { buf, len })
     }
+}
+
+/// [`validate_user_range`] の bool 版（M5-f-2-1 の SYS_CHECK_PTR 用）。可なら true。
+///
+/// # Safety
+///
+/// [`validate_user_range`] と同じ契約。
+pub unsafe fn user_range_accessible(
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    buf: u64,
+    len: u64,
+) -> bool {
+    // SAFETY: 呼び出し元契約による。
+    unsafe { validate_user_range(pml4_phys, direct_map, buf, len) }.is_some()
+}
+
+/// 検証済みの [`UserSlice`] から `dst` へ、範囲内バイトだけを読む bounded read
+/// （M5-f-2-2）。**`UserSlice` を要求するので、検証を経ないと呼べない。**
+///
+/// ユーザーバイトは稼働中アドレス空間の VA を直接参照する（present・U=1 でマップ済み、
+/// SMAP 未有効なのでカーネルが直接読める。テーブル walk は検証で使うが、データ読みに
+/// direct_map は要らない）。読んだバイト数を返す。
+///
+/// **TOCTOU について。** 検証と読みが実質アトミックなのは、syscall_entry が割り込みゲート
+/// （IF=0）で入りプリエンプトが来ないこと、シングルコアであること、ユーザーページを
+/// アンマップする経路が syscall 中に走らないこと、の構造条件に依存する。将来 IF を立てる
+/// syscall（長時間ブロッキング等）を入れると、この前提が崩れ TOCTOU（検証後・読み前に
+/// アンマップ/再マップ）が現実化するため再検証が要る（verification-coverage の申し送り）。
+///
+/// # Safety
+///
+/// `slice` が現在のアドレス空間に対して有効に検証されていること（[`validate_user_range`]
+/// が返したものであること）。`dst` が読むバイト数を収められること。
+pub unsafe fn copy_from_user(dst: &mut [u8], slice: &UserSlice) -> usize {
+    // 破壊 (M5-f-2-2, copy-overrun): len を 1 バイト超えて読む。末尾の有効ページ内に置いた
+    // 余分な既知バイトが総和へ混ざり、内容往復のチェックサムが決定的に食い違う（#PF は副次）。
+    let n = slice.len as usize
+        + if cfg!(feature = "syscall-test-copy-overrun") {
+            1
+        } else {
+            0
+        };
+    // dst に収まる分だけ読む（copy-overrun で n が dst を超えても範囲外にしない）。
+    let count = n.min(dst.len());
+    for (i, slot) in dst.iter_mut().enumerate().take(count) {
+        // SAFETY: slice は検証済みで、buf+i は present・U=1 のユーザーページ。SMAP 未有効。
+        *slot = unsafe { core::ptr::read_volatile((slice.buf as *const u8).add(i)) };
+    }
+    count
 }
 
 /// 番号を実装へ振り分ける（M5-f-1-2 / M5-f-2-1）。
@@ -195,13 +296,37 @@ unsafe fn dispatch(
             let buf = args[0];
             let len = args[1];
             // **踏み込む前に**範囲を検証する。可なら 0、不可なら -EFAULT。この段は
-            // バイトを読まない（copy は M5-f-2）。
+            // バイトを読まない（copy は M5-f-2-2）。
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
             if unsafe { user_range_accessible(pml4_phys, direct_map, buf, len) } {
                 0
             } else {
                 (-EFAULT) as u64
             }
+        }
+        SYS_CHECKSUM => {
+            let buf = args[0];
+            let len = args[1];
+            // バッファ容量超過は -EFAULT で代用（上記 CHECKSUM_BUF_LEN のコメント）。
+            if len as usize > CHECKSUM_BUF_LEN {
+                return (-EFAULT) as u64;
+            }
+            // **踏み込む前に検証する。** 検証済みトークン UserSlice を得てから読む。
+            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+            #[cfg(not(feature = "syscall-test-copy-skip-validate"))]
+            let slice = unsafe { validate_user_range(pml4_phys, direct_map, buf, len) };
+            // 破壊 (M5-f-2-2, copy-skip-validate): 検証を経ずに UserSlice をモジュール内で
+            // 直接構築する（型保証の境界を突く。モジュール内なので private フィールドに触れる）。
+            // カーネルポインタを渡すと、-EFAULT のはずが総和が返り verify が検出して halt する。
+            #[cfg(feature = "syscall-test-copy-skip-validate")]
+            let slice = Some(UserSlice { buf, len });
+            let Some(slice) = slice else {
+                return (-EFAULT) as u64;
+            };
+            let mut kbuf = [0u8; CHECKSUM_BUF_LEN];
+            // SAFETY: slice は検証済み（copy-skip-validate を除く）。dst は len+破壊1 を収める。
+            let read = unsafe { copy_from_user(&mut kbuf, &slice) };
+            kbuf[..read].iter().map(|b| *b as u64).sum()
         }
         // 失敗は -errno（-1..-4095）。
         _ => (-ENOSYS) as u64,

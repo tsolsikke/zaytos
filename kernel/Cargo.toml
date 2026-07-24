@@ -167,3 +167,11 @@ syscall-test-validate-skip-laststep = []
 # 検証器を常に受理にする。検証器の全体機能停止を battery が検出して halt する
 # （多層防御の最後の砦の確認）。`--syscall-test validate-skip-all`。
 syscall-test-validate-skip-all = []
+# M5-f-2-2: copy_from_user の破壊確認。既定ビルドには入らない。
+# SYS_CHECKSUM が validate を経ずに UserSlice をモジュール内で直接構築して読む（型保証の
+# 境界を突く）。カーネルポインタで -EFAULT のはずが総和が返り、verify が検出して halt する。
+# `--syscall-test copy-skip-validate`。
+syscall-test-copy-skip-validate = []
+# copy_from_user が len を 1 バイト超えて読む。末尾の有効ページ内に置いた余分な既知バイトが
+# 総和へ混ざり、内容往復のチェックサムが決定的に食い違う。`--syscall-test copy-overrun`。
+syscall-test-copy-overrun = []
