@@ -338,6 +338,82 @@ extern "C" {
     static zaytos_yield_stub: u8;
 }
 
+// システムコール（int 0x80）用のスタブと共通経路（M5-f-1、ADR-0020）。
+//
+// **IRQ スタイルの復元経路（zaytos_irq_common）を写した別ブロックである。**
+// 退避・整列・call・復元・iretq の骨格は同じで、違うのは call 先が
+// `crate::syscall::syscall_entry` で、context を *mut で渡し、戻り値を RAX へ
+// 書き戻す点だけである。本番 IRQ 経路（irq_entry）へ syscall 固有の分岐を
+// 持ち込まないために経路を分ける（このモジュール先頭の説明と ADR-0018 Addendum 3
+// の「テストのために本番経路の信頼性を下げない」方針と揃える）。
+//
+// Ring 3 からの int 0x80 は特権変化（3→0）なので、CPU が TSS.RSP0 のスタックへ
+// 自動で切り替えてから 5 語（SS/RSP/RFLAGS/CS/RIP）を積む。押し込む語数は IRQ と
+// 同じ（CPU 5 語 + スタブのベクタ 1 語 + GPR 15 本）なので、STACK_ALIGN_ADJUST も
+// 共通で正しい。導出に頼らず syscall_entry が実測 RSP を裏取りする。
+core::arch::global_asm!(
+    ".section .text",
+    ".p2align 4",
+    ".globl zaytos_syscall_stub",
+    "zaytos_syscall_stub:",
+    // int 0x80 にエラーコードは無い。ベクタ番号だけを積む。
+    "  push {syscall_vector}",
+    "  jmp zaytos_syscall_common",
+    ".p2align 4",
+    "zaytos_syscall_common:",
+    // 入場時のスタック: [rsp]=ベクタ, +8=RIP, +16=CS, +24=RFLAGS, +32=RSP, +40=SS
+    // GPR を退避する。順序は IrqContext のフィールド順と一対一（IRQ と同じ）。
+    "  push r15",
+    "  push r14",
+    "  push r13",
+    "  push r12",
+    "  push r11",
+    "  push r10",
+    "  push r9",
+    "  push r8",
+    "  push rbp",
+    "  push rdi",
+    "  push rsi",
+    "  push rdx",
+    "  push rcx",
+    "  push rbx",
+    "  push rax",
+    "  mov rdi, rsp",
+    "  sub rsp, {adjust}",
+    "  mov rsi, rsp",
+    "  call {handler}",
+    // syscall_entry は「復元経路が使う RSP」を RAX で返す（M5-f-1 は入場時の
+    // IrqContext 先頭）。ユーザー RAX に載る戻り値は context.rax に書き戻し済みで、
+    // 下の pop rax がそれを復元する。
+    "  mov rsp, rax",
+    "  pop rax",
+    "  pop rbx",
+    "  pop rcx",
+    "  pop rdx",
+    "  pop rsi",
+    "  pop rdi",
+    "  pop rbp",
+    "  pop r8",
+    "  pop r9",
+    "  pop r10",
+    "  pop r11",
+    "  pop r12",
+    "  pop r13",
+    "  pop r14",
+    "  pop r15",
+    // スタブが積んだベクタ番号を捨てる。これで RSP は RIP を指す。
+    "  add rsp, 8",
+    "  iretq",
+    handler = sym crate::syscall::syscall_entry,
+    adjust = const STACK_ALIGN_ADJUST,
+    syscall_vector = const SYSCALL_VECTOR,
+);
+
+extern "C" {
+    /// システムコール用スタブの先頭（M5-f-1）。IDT の 0x80 ゲートが指す。
+    static zaytos_syscall_stub: u8;
+}
+
 extern "C" {
     /// `global_asm!` が定義するスタブ表の先頭。
     static zaytos_exception_stubs: u8;
@@ -402,6 +478,14 @@ pub const TEST_VECTOR: usize = IRQ_VECTOR_BASE + PIC_VECTOR_SPAN;
 /// が「次タスクの RSP」を返してコンテキストスイッチが起きる（ADR-0019 §2）。
 /// PIC 由来ではないので EOI の論理には一切絡まない。
 pub const YIELD_VECTOR: usize = 0x41;
+
+/// システムコール用のソフトウェア割り込みベクタ（M5-f-1、ADR-0020）。
+///
+/// `int 0x80` の 0x80。専用スタブ（`zaytos_syscall_stub`）が
+/// `zaytos_syscall_common` へ jmp する。ゲートは **DPL=3** で登録し、Ring 3 から
+/// 呼べるようにする（他のゲートは DPL=0）。PIC 由来ではないので EOI の論理には
+/// 一切絡まない。
+pub const SYSCALL_VECTOR: usize = 0x80;
 
 /// ベクタ別の割り込み回数。
 ///
@@ -517,7 +601,7 @@ pub fn interrupt_total_and_first_nonzero() -> (u64, Option<usize>) {
 // `RSP % 16 == 0` は SysV ABI と本関数の説明の書き方そのものである。
 // `is_multiple_of(16)` へ言い換えると、ABI の記述との対応が読み取りにくくなる。
 #[allow(clippy::manual_is_multiple_of)]
-fn check_stack_alignment(rsp_at_call: u64, path: &str, vector: u64) {
+pub(crate) fn check_stack_alignment(rsp_at_call: u64, path: &str, vector: u64) {
     if rsp_at_call % 16 == 0 {
         return;
     }
@@ -776,6 +860,11 @@ pub fn check_stub_table() -> StubTableCheck {
         if vector == YIELD_VECTOR {
             continue;
         }
+        // syscall ベクタ（M5-f-1）も専用スタブ（zaytos_syscall_stub）を指す。
+        // 同じく例外表の外なので検査しない。
+        if vector == SYSCALL_VECTOR {
+            continue;
+        }
         let Some(entry) = entry(vector) else {
             entries_ok = false;
             break;
@@ -878,6 +967,18 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
             KERNEL_CODE_SELECTOR,
             GateType::Interrupt,
             0,
+            None,
+        );
+
+        // システムコール用ゲート（M5-f-1、ADR-0020）。ベクタ 0x80。**DPL=3** で
+        // Ring 3 から int 0x80 を呼べるようにする（他のゲートは DPL=0）。割り込み
+        // ゲート（IF を落とす）で ADR-0018 の「入場時 IF=0」を保つ。IST は使わず、
+        // 特権変化のたびに CPU が TSS.RSP0 のスタックへ切り替える。
+        (*idt)[SYSCALL_VECTOR] = IdtEntry::new(
+            addr_of!(zaytos_syscall_stub) as u64,
+            KERNEL_CODE_SELECTOR,
+            GateType::Interrupt,
+            3,
             None,
         );
     }

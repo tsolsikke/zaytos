@@ -32,6 +32,7 @@ pub mod pic;
 pub mod pit;
 pub mod ring3;
 pub mod stack;
+pub mod syscall;
 pub mod task;
 
 /// kernel イメージ内の仮想アドレスを物理アドレスへ写す。

@@ -839,6 +839,13 @@ extern "sysv64" fn kernel_main() -> ! {
     #[cfg(not(feature = "paging-test"))]
     verify_ring3_excursion(&mut logger, &mut allocator);
 
+    // int 0x80 システムコールの往復の検証（M5-f-1）。verify_ring3_excursion が
+    // 残したユーザーページを再利用し、Ring 3 から int 0x80 を発行して
+    // syscall_entry（空ディスパッチャ）が RSP0 スタックで走り、iretq で Ring 3 へ
+    // 戻り、続く cli の #GP を予期の畳みでカーネルへ戻すまでを確かめる。
+    #[cfg(not(feature = "paging-test"))]
+    verify_syscall_roundtrip(&mut logger);
+
     // ロック保持中は割り込みが禁止され、解放後に元へ戻ることを確認する
     // （M4-c-2）。ヒープのロックそのものではなく同じ Locked<T> を使う。
     // ヒープのロックを保持したままログを出すと二重取得になるため。
@@ -1622,12 +1629,15 @@ fn report_idt(logger: &mut Logger<SerialPort>) {
         cpu::halt_forever();
     }
 
-    // 全ベクタが present で、割り込みゲート（0xE）・DPL 0 であること。
-    // 1 つでも欠けると、そのベクタが発生したときに #NP になり、しかも
-    // #NP のハンドラも無ければ落ちる。
+    // 全ベクタが present で割り込みゲート（0xE）であること。1 つでも欠けると、
+    // そのベクタが発生したときに #NP になり、しかも #NP のハンドラも無ければ落ちる。
+    //
+    // DPL は「syscall ベクタ（0x80）だけ DPL 3、他は全て DPL 0」であること。DPL=3 は
+    // Ring 3 から int 0x80 を呼べる唯一の条件で、これを名指しで確かめる。逆に他の
+    // ゲートに DPL 3 が紛れると、そのベクタを Ring 3 から任意に発火できてしまう。
     let mut all_present = true;
     let mut all_interrupt_gates = true;
-    let mut all_dpl_zero = true;
+    let mut dpl_layout_ok = true;
     for vector in 0..idt::IDT_ENTRY_COUNT {
         let Some(entry) = idt::entry(vector) else {
             all_present = false;
@@ -1635,12 +1645,15 @@ fn report_idt(logger: &mut Logger<SerialPort>) {
         };
         all_present &= entry.is_present();
         all_interrupt_gates &= entry.gate_type() == 0xE;
-        all_dpl_zero &= entry.descriptor_privilege_level() == 0;
+        let expected_dpl = if vector == idt::SYSCALL_VECTOR { 3 } else { 0 };
+        dpl_layout_ok &= entry.descriptor_privilege_level() == expected_dpl;
     }
+    let syscall_dpl = idt::entry(idt::SYSCALL_VECTOR).map(|e| e.descriptor_privilege_level());
     logger.info(format_args!(
         "idt: {} entries, all present={all_present}, all interrupt gates={all_interrupt_gates}, \
-         all DPL 0={all_dpl_zero}",
-        idt::IDT_ENTRY_COUNT
+         DPL layout ok={dpl_layout_ok} (syscall vector {:#x} DPL={syscall_dpl:?}, others DPL 0)",
+        idt::IDT_ENTRY_COUNT,
+        idt::SYSCALL_VECTOR,
     ));
 
     // ダブルフォルトだけが IST を使うこと。
@@ -1650,7 +1663,7 @@ fn report_idt(logger: &mut Logger<SerialPort>) {
         "idt: #DF (vector 8) IST index={double_fault_ist:?}, #DE (vector 0) IST index={divide_error_ist:?}"
     ));
 
-    if !(all_present && all_interrupt_gates && all_dpl_zero)
+    if !(all_present && all_interrupt_gates && dpl_layout_ok)
         || double_fault_ist != Some(gdt::DOUBLE_FAULT_IST_INDEX as u8)
         || divide_error_ist.is_some()
     {
@@ -2871,10 +2884,12 @@ fn verify_ring3_excursion<const CAP: usize>(
     ));
 
     // --- 遠征。iretq -> Ring 3 -> cli -> #GP -> 畳み -> ここへ戻る ---
+    // cli はユーザーコード入口（USER_CODE_VIRT）に置いてあるので、予期する #GP の
+    // フォルト RIP はそこである。
     // SAFETY: ユーザーページは張り済み。main_rsp0_top はメインの上端で、遠征後に
     // RSP0 をそこへ戻せる。起動時の単一実行文脈から 1 回だけ。
     unsafe {
-        ring3::enter(main_rsp0_top);
+        ring3::enter(main_rsp0_top, ring3::USER_CODE_VIRT);
     }
 
     // --- 会計と検証 ---
@@ -2949,6 +2964,140 @@ fn verify_ring3_excursion<const CAP: usize>(
     logger.info(format_args!(
         "ring3: Ring 3 excursion verified (fell to Ring 3, cli faulted as #GP, RSP0 switched to \
          the excursion stack, folded back to the kernel, permission split intact)"
+    ));
+}
+
+/// int 0x80 システムコールの往復を検証する（M5-f-1）。
+///
+/// [`verify_ring3_excursion`] が残したユーザーコード/スタックページ
+/// （`PML4[USER_PML4_INDEX]` サブツリー）を再利用する。ユーザーコードを
+/// 「mov eax, PROBE_NUMBER; int 0x80; cli」に書き換え、Ring 3 から int 0x80 を
+/// 発行する。syscall_entry（空ディスパッチャ）が番号を記録して `-ENOSYS` を返し、
+/// iretq で Ring 3 へ戻り、続く cli の #GP を予期の畳みでカーネルへ戻す。
+///
+/// 確かめること: int 0x80 が syscall_entry に届いたこと（呼び出し 1 回、番号が
+/// `PROBE_NUMBER`）、syscall_entry が RSP0（遠征）スタックで走ったこと（handler RSP を
+/// 読み戻し）、畳みで戻り RSP0 がメインへ復帰したこと。**戻り値がユーザー RAX へ
+/// 入ることの検証は M5-f-2 で行う**（この段は往復の成立までを見る）。
+fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
+    use kernel::paging::active::{ActivePageTable, PageSize};
+    use kernel::ring3;
+    use kernel::syscall;
+
+    let identity = common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
+        .expect("the identity window is canonical");
+
+    let code_virt = common::addr::VirtAddr::new(ring3::USER_CODE_VIRT)
+        .expect("the user code virtual address is canonical");
+
+    // verify_ring3_excursion が張ったユーザーコードページを再利用する。前段の
+    // 副作用に暗黙依存しないよう、実状態を読んで 4KiB でマップされていることを
+    // 確かめてから書き換える（外れていれば静かに壊れる代わりに止まる）。
+    // SAFETY: CR3 は自前テーブル。配下は恒等窓で読める。
+    let table = unsafe { ActivePageTable::current(identity) };
+    match table.translate(code_virt) {
+        Ok(Some(t)) if t.page_size == PageSize::Size4KiB => {}
+        other => {
+            logger.error(format_args!(
+                "syscall: user code page {:#x} is not a 4KiB mapping ({other:?}); \
+                 verify_ring3_excursion must run first; halting",
+                code_virt.as_u64()
+            ));
+            cpu::halt_forever();
+        }
+    }
+
+    // ユーザーコードを「mov eax, PROBE_NUMBER(B8 imm32); int 0x80(CD 80); cli(FA)」に
+    // 書き換える。mov eax は 64bit で RAX へゼロ拡張されるので番号がそのまま RAX に
+    // 入る。cli は int 0x80 の直後（オフセット 7）に来るので、予期する #GP の
+    // フォルト RIP は USER_CODE_VIRT + 7 である。
+    let nr = syscall::PROBE_NUMBER as u32;
+    // SAFETY: code_virt は今マップを確認したユーザーページ。NX 未設定で実行可能、
+    // SMAP 未有効で書き込み可能。
+    unsafe {
+        let p = code_virt.as_mut_ptr::<u8>();
+        core::ptr::write_volatile(p, 0xB8);
+        core::ptr::write_volatile(p.add(1), (nr & 0xFF) as u8);
+        core::ptr::write_volatile(p.add(2), ((nr >> 8) & 0xFF) as u8);
+        core::ptr::write_volatile(p.add(3), ((nr >> 16) & 0xFF) as u8);
+        core::ptr::write_volatile(p.add(4), ((nr >> 24) & 0xFF) as u8);
+        core::ptr::write_volatile(p.add(5), 0xCD);
+        core::ptr::write_volatile(p.add(6), 0x80);
+        core::ptr::write_volatile(p.add(7), 0xFA);
+    }
+    let cli_rip = ring3::USER_CODE_VIRT + 7;
+
+    syscall::reset_counters();
+
+    let main_rsp0_top = gdt::privilege_stack_top();
+    let (exc_bottom, exc_top) = ring3::excursion_stack_range();
+
+    logger.info(format_args!(
+        "syscall: entering Ring 3 to issue int 0x80 (number={:#x}, cli fold at {cli_rip:#x}, \
+         RSP0 -> excursion stack [{exc_bottom:#x}, {exc_top:#x}))",
+        syscall::PROBE_NUMBER
+    ));
+
+    // --- 遠征。iretq -> Ring 3 -> int 0x80 -> syscall_entry -> iretq -> cli -> #GP ->
+    //     畳み -> ここへ戻る ---
+    // SAFETY: ユーザーページは張り済み。Ring 3 は cli_rip で cli を実行して #GP を
+    // 起こす。main_rsp0_top はメインの上端。起動時の単一実行文脈から 1 回だけ。
+    unsafe {
+        ring3::enter(main_rsp0_top, cli_rip);
+    }
+
+    // --- 会計と検証 ---
+    if !ring3::folded() {
+        logger.error(format_args!(
+            "syscall: returned without folding the expected #GP after int 0x80; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    let count = syscall::invocation_count();
+    let seen = syscall::last_number();
+    let handler_rsp = syscall::handler_rsp();
+    let handler_in_rsp0 = handler_rsp >= exc_bottom && handler_rsp < exc_top;
+    let rsp0_restored = gdt::privilege_stack_top() == main_rsp0_top;
+
+    logger.info(format_args!(
+        "syscall: int 0x80 returned. syscall_entry invocations={count}, number seen={seen:#x} \
+         (expected {:#x}), handler RSP={handler_rsp:#x} (on RSP0 excursion stack={handler_in_rsp0}), \
+         RSP0 restored={rsp0_restored}",
+        syscall::PROBE_NUMBER
+    ));
+
+    if count != 1 {
+        logger.error(format_args!(
+            "syscall: syscall_entry ran {count} times, expected exactly 1; halting"
+        ));
+        cpu::halt_forever();
+    }
+    if seen != syscall::PROBE_NUMBER {
+        logger.error(format_args!(
+            "syscall: number seen {seen:#x} != expected {:#x}; RAX did not carry the number; \
+             halting",
+            syscall::PROBE_NUMBER
+        ));
+        cpu::halt_forever();
+    }
+    if !handler_in_rsp0 {
+        logger.error(format_args!(
+            "syscall: syscall_entry did not run on the RSP0 excursion stack (handler RSP \
+             {handler_rsp:#x}); halting"
+        ));
+        cpu::halt_forever();
+    }
+    if !rsp0_restored {
+        logger.error(format_args!(
+            "syscall: RSP0 was not restored to main; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "syscall: int 0x80 round-trip verified (Ring 3 issued int 0x80, syscall_entry ran on the \
+         RSP0 stack and returned via iretq to Ring 3, then the cli #GP folded back to the kernel)"
     ));
 }
 

@@ -82,6 +82,12 @@ static mut RECOVERY: Recovery = Recovery {
 /// 遠征中か。**畳みの二重判別の 1 つ。** 遠征に入る前に立て、畳みで降ろす。
 /// これが false のときの Ring 3 由来 #GP は「想定外」として畳まず halt する。
 static EXCURSION_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// 畳む #GP のフォルト RIP（**畳みの二重判別の 1 つ**）。遠征のたびに [`enter`] が
+/// 「予期する #GP の発生アドレス」を据える。cli 一発の遠征（M5-e）では cli を
+/// 置いた [`USER_CODE_VIRT`]、syscall 往復（M5-f-1）では int 0x80 の直後に置く
+/// cli のアドレスになる。**この 1 アドレスとの厳密一致だけを畳む**（範囲では
+/// 畳まない）。別 RIP の #GP はこの判定で落ちて dump+halt する。
+static EXPECTED_FOLD_RIP: AtomicU64 = AtomicU64::new(0);
 /// 畳みが実際に起きたか（会計用。遠征後に true になっているはず）。
 static FOLDED: AtomicBool = AtomicBool::new(false);
 /// フォルト時の RSP（Ring 3 のユーザースタックのはず）。ハンドラが記録する。
@@ -173,22 +179,28 @@ pub fn excursion_stack_range() -> (u64, u64) {
 
 /// Ring 3 へ 1 回遠征する。戻ってきたら（畳みで）会計を返す。
 ///
-/// RSP0 を遠征専用スタックへ据え、遠征フラグを立て、iretq で Ring 3 へ落ちる。
-/// Ring 3 の `cli` が #GP を起こし、`exception_entry` が予期と判定して畳み、
-/// ここへ戻る。戻ったら RSP0 をメインの上端へ戻す。
+/// RSP0 を遠征専用スタックへ据え、遠征フラグと予期する #GP のフォルト RIP を
+/// 据え、iretq で Ring 3 へ落ちる。Ring 3 で `expected_fold_rip` に置いた `cli` が
+/// #GP を起こし、`exception_entry` が予期と判定して畳み、ここへ戻る。戻ったら
+/// RSP0 をメインの上端へ戻す。
+///
+/// `expected_fold_rip` は畳む #GP の発生アドレス。cli 一発の遠征（M5-e）では
+/// [`USER_CODE_VIRT`]、syscall 往復（M5-f-1）では int 0x80 の直後に置く cli の
+/// アドレスを渡す。
 ///
 /// # Safety
 ///
-/// 呼び出し前に、ユーザーコード（`cli`）とユーザースタックが `PML4` の
-/// ユーザーサブツリーに U=1 で張られていること。`main_rsp0_top` が呼び出し元
-/// （メイン）のカーネルスタック上端で、遠征後に RSP0 をそこへ戻せること。
-/// 起動時の単一実行文脈から 1 回だけ呼ぶこと。
-pub unsafe fn enter(main_rsp0_top: u64) {
+/// 呼び出し前に、ユーザーコードとユーザースタックが `PML4` のユーザーサブツリーに
+/// U=1 で張られており、Ring 3 が `expected_fold_rip` で `cli` を実行して #GP を
+/// 起こすこと。`main_rsp0_top` が呼び出し元（メイン）のカーネルスタック上端で、
+/// 遠征後に RSP0 をそこへ戻せること。起動時の単一実行文脈から呼ぶこと。
+pub unsafe fn enter(main_rsp0_top: u64, expected_fold_rip: u64) {
     let (_, excursion_top) = excursion_stack_range();
 
     FOLDED.store(false, Ordering::SeqCst);
     FAULT_RSP.store(0, Ordering::SeqCst);
     HANDLER_RSP.store(0, Ordering::SeqCst);
+    EXPECTED_FOLD_RIP.store(expected_fold_rip, Ordering::SeqCst);
 
     // RSP0 を遠征専用スタックへ据える。#GP はここへ切り替わる。
     // 破壊 (M5-e-4, drop-rsp0): 据えない。#GP がメインのスタックへ切り替わり、
@@ -243,10 +255,11 @@ pub unsafe fn enter(main_rsp0_top: u64) {
 /// `exception_entry` が呼ぶ。この #GP が予期した遠征のものかを判定する。
 ///
 /// **二重判別の一部。** 呼び出し側で「ベクタ==13」「CS.RPL==3」を確認済みで、
-/// ここでは「遠征中である」ことと「フォルト RIP がユーザーコード入口である」ことを
-/// 見る。全て満たすときだけ true。
+/// ここでは「遠征中である」ことと「フォルト RIP が今回の遠征で予期した 1 点に
+/// 厳密一致する」ことを見る。全て満たすときだけ true。予期アドレスは [`enter`] が
+/// 遠征のたびに据える（[`EXPECTED_FOLD_RIP`]）。
 pub fn should_fold_gp(fault_rip: u64) -> bool {
-    EXCURSION_ACTIVE.load(Ordering::SeqCst) && fault_rip == USER_CODE_VIRT
+    EXCURSION_ACTIVE.load(Ordering::SeqCst) && fault_rip == EXPECTED_FOLD_RIP.load(Ordering::SeqCst)
 }
 
 /// 予期した #GP を畳む。フォルト RSP とハンドラ RSP を記録し、遠征フラグを
