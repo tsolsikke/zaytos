@@ -677,6 +677,25 @@ const SYSCALL_TESTS: &[CriticalTest] = &[
     },
 ];
 
+/// higher-half B-1（高位実行の機構実証）の破壊確認。
+const HIGHHALF_TESTS: &[CriticalTest] = &[
+    // プローブ用テーブルの高位マッピングを低位 base 0 で張る。TEST_HIGH_BASE の高位 VA が存在せず、
+    // 切替前の独立 walker が捕まえて CR3 を切り替えず halt する。高位マッピングが正しい base に
+    // 存在すること自体を検査していることの実証。
+    CriticalTest {
+        name: "low-base",
+        feature: "highhalf-test-low-base",
+        expected_markers: &[
+            "high-probe: the probe table does not map a required region",
+            "refusing to switch CR3",
+            "halting",
+        ],
+        forbidden_markers: &["high-probe: executed at high RIP"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+];
+
 /// カーネルが起動したことを示す、シリアルログの既知の行。
 ///
 /// kernel の `kernel_main` が最初に出す行（`common::log` の INFO 形式）。
@@ -833,7 +852,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -888,6 +907,13 @@ fn main() -> Result<()> {
                     format!("--syscall-test requires a kind ({})", names.join(" | "))
                 })?;
                 return cmd_marker_test(SYSCALL_TESTS, "syscall-test", kind);
+            }
+            if let Some(index) = rest.iter().position(|a| a == "--highhalf-test") {
+                let kind = rest.get(index + 1).with_context(|| {
+                    let names: Vec<&str> = HIGHHALF_TESTS.iter().map(|t| t.name).collect();
+                    format!("--highhalf-test requires a kind ({})", names.join(" | "))
+                })?;
+                return cmd_marker_test(HIGHHALF_TESTS, "highhalf-test", kind);
             }
             if let Some(index) = rest.iter().position(|a| a == "--critical-test") {
                 let kind = rest.get(index + 1).with_context(|| {
@@ -2407,6 +2433,13 @@ fn cmd_check(full: bool) -> Result<()> {
             let name = format!("syscall-test {}", test.name);
             run_regression(&name, &mut failed, &mut retries, || {
                 cmd_marker_test(SYSCALL_TESTS, "syscall-test", test.name)
+            });
+        }
+        for test in HIGHHALF_TESTS {
+            total += 1;
+            let name = format!("highhalf-test {}", test.name);
+            run_regression(&name, &mut failed, &mut retries, || {
+                cmd_marker_test(HIGHHALF_TESTS, "highhalf-test", test.name)
             });
         }
         for test in INTERRUPT_TESTS {

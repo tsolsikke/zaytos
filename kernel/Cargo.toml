@@ -175,3 +175,8 @@ syscall-test-copy-skip-validate = []
 # copy_from_user が len を 1 バイト超えて読む。末尾の有効ページ内に置いた余分な既知バイトが
 # 総和へ混ざり、内容往復のチェックサムが決定的に食い違う。`--syscall-test copy-overrun`。
 syscall-test-copy-overrun = []
+# B-1: 高位実行の機構実証の破壊。既定ビルドには入らない。
+# プローブ用テーブルの高位マッピングを低位 base 0（恒等と同じ）で張る。TEST_HIGH_BASE の
+# 高位 VA が存在せず、切替前の独立 walker が NotPresent で捕まえて CR3 を切り替えず halt する。
+# `--highhalf-test low-base`。
+highhalf-test-low-base = []

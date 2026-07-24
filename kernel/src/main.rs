@@ -803,6 +803,10 @@ extern "sysv64" fn kernel_main() -> ! {
     // CR3 は切り替えない。稼働中のテーブルにも手を加えない。
     build_and_verify_high_half(&mut logger, &mut allocator, &mapped_ranges, direct_map);
 
+    // 高位実行の機構実証（B-1、H-3）。恒等 + テスト高位ベースのテーブルへ切り替え、高位 VA で
+    // プローブを実行し、元テーブルへ戻す。恒等は外さない（可逆）。再リンクはしない（B-2）。
+    build_switch_probe_high_half(&mut logger, &mut allocator, &mapped_ranges, direct_map);
+
     // 2MiB ページの分割とアンマップ（M5-a-2-1）。
     verify_split_and_unmap(&mut logger, &mut allocator);
 
@@ -3826,6 +3830,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "割り込み経路の回帰チェックを走らせる",
     ),
     (
+        "highhalf-test-low-base",
+        cfg!(feature = "highhalf-test-low-base"),
+        "B-1 のプローブ用高位マッピングを低位 base で張る",
+    ),
+    (
         "gfx-test-pattern",
         cfg!(feature = "gfx-test-pattern"),
         "描画テストパターンを描き、コンソールを起動しない",
@@ -4926,6 +4935,227 @@ fn build_and_verify_high_half(
 /// PML4 のエントリ数。`core::array::from_fn` の型引数に使う。
 const fn entry_count() -> usize {
     512
+}
+
+// B-1: 高位実行の機構実証プローブ。
+//
+// **RIP 相対で自分の RIP を返すだけ。内部絶対参照を持たない。** 高位 VA へ間接 call すると、
+// lea が高位の RIP を rax に載せて返す。これが「高位 VA でコードが実行された」ことの読み戻し
+// 証明になる。ret は呼び出し元（低位）へ戻る。
+core::arch::global_asm!(
+    ".section .text",
+    ".p2align 4",
+    ".globl zaytos_high_probe",
+    "zaytos_high_probe:",
+    "  lea rax, [rip]",
+    "  ret",
+);
+
+extern "C" {
+    /// B-1 の高位実行プローブの先頭。物理アドレス（KERNEL_VIRT_BASE=0 なので低位==物理）を取る。
+    static zaytos_high_probe: u8;
+}
+
+/// B-1: カーネルイメージをテスト高位ベースへ張った別テーブルへ CR3 を切り替え、高位 VA で
+/// プローブを実行し、元テーブルへ戻す（機構実証）。
+///
+/// # 到達点の区別（B-1 と B-2）
+///
+/// テスト高位ベースは `0xFFFF_FFFF_8000_0000`（将来のカーネル base、PML4[511]）。**B-1 は
+/// ここへテスト張りするだけで再リンクしない**（KERNEL_VIRT_BASE=0、code-model=small のまま）。
+/// 実証するのは「その base に高位マッピングを張り、高位 VA でコードが実行できる（RIP が高位に
+/// なれる）」こと。プローブの内部絶対参照は依然低位で、恒等が支える。**同じ base でも
+/// B-2 は内部参照ごと再リンク（code-model=kernel、KERNEL_VIRT_BASE=高位）して恒等なしで動く**、
+/// と到達点が違う。B-1 は機構、B-2 が本体。
+///
+/// # 可逆性
+///
+/// 恒等を外さない。プローブ後に元テーブル（A-1/A-2）へ CR3 を戻すので、起動の定常状態は不変。
+/// 切替も戻しも恒等が両テーブルにあるので、call が積む戻りアドレス・ret の戻り先（低位）・
+/// 実行中の RSP がすべて present で往復が成立する。
+fn build_switch_probe_high_half(
+    logger: &mut Logger<SerialPort>,
+    allocator: &mut frame_allocator::FrameAllocator<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
+    mapped: &MappedRanges<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
+    direct_map: common::addr::DirectMap,
+) {
+    use common::addr::VirtAddr;
+    use kernel::paging::verify;
+
+    /// テスト高位ベース。プローブが実行される高位 VA の base。
+    const TEST_HIGH_BASE: u64 = 0xFFFF_FFFF_8000_0000;
+
+    // 高位マッピングを張る base。
+    // 破壊 (B-1, low-base): 低位 base 0（恒等と同じ）で張る。TEST_HIGH_BASE の高位 VA は
+    // マップされず、切替前 walker が NotPresent で捕まえて halt する（A-1 の low-window と同種。
+    // 「高位マッピングが正しい base に存在すること自体を検査している」実証）。
+    #[cfg(not(feature = "highhalf-test-low-base"))]
+    let map_base = TEST_HIGH_BASE;
+    #[cfg(feature = "highhalf-test-low-base")]
+    let map_base = 0u64;
+
+    let (image_start, image_end) = kernel_image_phys_range();
+    let image_len =
+        (image_end.as_u64() - image_start.as_u64()).next_multiple_of(frame_allocator::FRAME_SIZE);
+
+    // --- プローブ用テーブルを構築（恒等 + テスト高位。H-2 の型を踏襲） ---
+    let frames_before = allocator.free_frame_count();
+    let mut builder = match PageTableBuilder::new(allocator, direct_map) {
+        Ok(builder) => builder,
+        Err(error) => {
+            logger.error(format_args!(
+                "high-probe: failed to start the build: {error:?}; halting"
+            ));
+            cpu::halt_forever();
+        }
+    };
+    let mut map_error = None;
+    resolve_pages(mapped, |m| {
+        if map_error.is_some() {
+            return;
+        }
+        if let Err(e) = builder.map_page(m.phys_addr, m.huge, m.cacheable) {
+            map_error = Some(e);
+        }
+    });
+    if let Some(error) = map_error {
+        logger.error(format_args!(
+            "high-probe: identity build failed: {error:?}; halting"
+        ));
+        cpu::halt_forever();
+    }
+    let Some(high_start) = VirtAddr::new(map_base.wrapping_add(image_start.as_u64())) else {
+        logger.error(format_args!(
+            "high-probe: the high image base is not canonical; halting"
+        ));
+        cpu::halt_forever();
+    };
+    if let Err(error) = builder.map_range(high_start, image_start, image_len, true) {
+        logger.error(format_args!(
+            "high-probe: kernel high mapping failed: {error:?}; halting"
+        ));
+        cpu::halt_forever();
+    }
+    let new_pml4 = builder.pml4_phys();
+    let frames_used = frames_before - allocator.free_frame_count();
+    logger.info(format_args!(
+        "high-probe: built probe table at PML4 {:#x} using {frames_used} frame(s) ({} KiB, \
+         permanently held; B-2 reclaims when the real high-half lands)",
+        new_pml4.as_u64(),
+        frames_used * frame_allocator::FRAME_SIZE / 1024
+    ));
+
+    // プローブの物理と、これから CALL する高位 VA（常に TEST_HIGH_BASE。破壊時は張られていない）。
+    let probe_phys = core::ptr::addr_of!(zaytos_high_probe) as u64;
+    let probe_high = TEST_HIGH_BASE.wrapping_add(probe_phys);
+
+    // 現 RSP を読む（必須領域検証に使う）。
+    let rsp: u64;
+    // SAFETY: rsp を読むだけ。メモリ・スタックに副作用は無い。
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));
+    }
+
+    // --- 切替前の独立 walker 検証 ---
+    // 必須領域は「切替後テーブルで、プローブの往復が実際に触る先」がすべて解決できること:
+    //   - カーネルイメージ（恒等）: 戻り低位 RIP とプローブの内部参照を覆う。
+    //   - 現 RSP と、call が戻りアドレス(8B)を積むスロット（RSP-8）（恒等）: 実行中スタックと
+    //     戻りアドレス書き込み先。call 時と実行中で RSP は 8B ずれるので両方を覆う。ページ境界を
+    //     またぐ稀なケース（RSP がページ先頭付近で call）にも、この範囲検証が追随する。
+    //   - 高位プローブ VA（高位）: probe_phys へ解決すること。
+    // 指定 addr が新テーブルの present な葉へ解決し、その物理が expect と一致するか（独立 walker）。
+    let resolves_to = |addr: u64, expect: u64| -> bool {
+        let Some(v) = VirtAddr::new(addr) else {
+            return false;
+        };
+        // SAFETY: new_pml4 は今構築したテーブルで、direct_map（高位窓）で読める。読み取りのみ。
+        let resolved = unsafe { verify::walk(new_pml4, direct_map, v) };
+        matches!(resolved, Ok(r) if r.phys.as_u64() == expect)
+    };
+    // 恒等側は addr==phys。
+    let rsp_ok = resolves_to(rsp, rsp);
+    let rsp_push_ok = resolves_to(rsp.wrapping_sub(8), rsp.wrapping_sub(8));
+    let image_lo_ok = resolves_to(image_start.as_u64(), image_start.as_u64());
+    let image_hi_ok = resolves_to(
+        image_end.as_u64().wrapping_sub(1),
+        image_end.as_u64().wrapping_sub(1),
+    );
+    // 高位プローブ VA は probe_phys へ解決すること。
+    let high_probe_ok = resolves_to(probe_high, probe_phys);
+    logger.info(format_args!(
+        "high-probe: pre-switch check: rsp={rsp_ok}, rsp_push={rsp_push_ok}, image={}, \
+         high probe VA {probe_high:#x} present={high_probe_ok}",
+        image_lo_ok && image_hi_ok
+    ));
+    if !(rsp_ok && rsp_push_ok && image_lo_ok && image_hi_ok && high_probe_ok) {
+        logger.error(format_args!(
+            "high-probe: the probe table does not map a required region (high VA not present or \
+             identity gap); refusing to switch CR3; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    // 切替前の恒等側の既知バイト（戻し後の恒等生存の照合に使う）。
+    // SAFETY: image_start は恒等でマップ済み。読み取りのみ。
+    let byte_before = unsafe { core::ptr::read_volatile(image_start.as_u64() as *const u8) };
+
+    // --- CR3 を保存してプローブ用テーブルへ切り替える ---
+    let saved = paging::switch::read_cr3();
+    // SAFETY: 切替前検証で、切替後テーブルに現 RSP・戻りアドレススロット・カーネルイメージ（恒等）と
+    // 高位プローブ VA が present であることを確認済み。割り込みは無効（早期起動、sti 前）。
+    unsafe {
+        paging::switch::switch_to(new_pml4);
+    }
+    let cr3_after = paging::switch::read_cr3();
+    if cr3_after != new_pml4 {
+        logger.error(format_args!(
+            "high-probe: CR3 readback {:#x} != probe table {:#x}; halting",
+            cr3_after.as_u64(),
+            new_pml4.as_u64()
+        ));
+        cpu::halt_forever();
+    }
+
+    // --- 高位 VA でプローブを実行 ---
+    // SAFETY: 切替後テーブルは probe_high を probe_phys（プローブコード）へ張っている。恒等も
+    // 含むので、間接 call が積む戻りアドレス・ret の戻り先（低位 RIP）・実行中の RSP はすべて
+    // present。プローブは lea/ret のみで内部絶対参照を持たない。
+    let rip = unsafe {
+        let f: extern "C" fn() -> u64 = core::mem::transmute(probe_high);
+        f()
+    };
+    let high_lo = TEST_HIGH_BASE.wrapping_add(image_start.as_u64());
+    let high_hi = high_lo.wrapping_add(image_len);
+    let executed_high = rip >= high_lo && rip < high_hi;
+
+    // --- 元テーブルへ戻す ---
+    // SAFETY: saved は切替前の稼働テーブルで、B-1 は改変していない（PageTableBuilder は別フレームへ
+    // 書くだけ）。恒等が両テーブルにあるので戻しも安全。
+    unsafe {
+        paging::switch::switch_to(saved);
+    }
+    let cr3_restored = paging::switch::read_cr3();
+    let restored = cr3_restored == saved;
+    // SAFETY: image_start は元テーブルの恒等側。読み取りのみ。
+    let byte_after = unsafe { core::ptr::read_volatile(image_start.as_u64() as *const u8) };
+    let identity_alive = byte_after == byte_before;
+
+    logger.info(format_args!(
+        "high-probe: switched to the probe table, called the probe at high VA {probe_high:#x}; it \
+         ran at RIP {rip:#x} (in high range [{high_lo:#x}, {high_hi:#x})={executed_high}); restored \
+         CR3 to {:#x} (restored={restored}), identity alive={identity_alive}",
+        saved.as_u64()
+    ));
+    if !executed_high || !restored || !identity_alive {
+        logger.error(format_args!(
+            "high-probe: high execution, CR3 restore, or identity survival failed; halting"
+        ));
+        cpu::halt_forever();
+    }
+    logger.info(format_args!(
+        "high-probe: executed at high RIP; folded back to the low table (B-1 mechanism verified: a \
+         high VA is executable. test mapping only, no relink; the real high-half is B-2)"
+    ));
 }
 
 fn kernel_image_phys_range() -> (common::addr::PhysAddr, common::addr::PhysAddr) {
