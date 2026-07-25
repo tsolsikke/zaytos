@@ -99,9 +99,6 @@ unsafe fn write_entry(direct_map: DirectMap, table_phys: PhysAddr, index: usize,
 ///   継続でき書き戻しも効く。これが恒等除去を「検証可能で復帰可能な前段付きの
 ///   不可逆な一手」にしている契約である（`docs/verification-coverage.md` の
 ///   「higher-half B-2b」）。
-// B-2b-4 の (b)〜(d) で恒等除去パスから使う。既定パスへ配線する (d) でこの
-// allow を外す。
-#[allow(dead_code)]
 pub(crate) unsafe fn clear_pml4_entry(pml4_phys: PhysAddr, direct_map: DirectMap, index: usize) {
     // SAFETY: 呼び出し元契約による。稼働 PML4 の1エントリだけを、direct map
     // 経由で 0 にする。
@@ -123,8 +120,6 @@ pub(crate) unsafe fn clear_pml4_entry(pml4_phys: PhysAddr, direct_map: DirectMap
 /// 書けるため、名前が意図を示すだけで craft する経路は型では塞がれていない。
 /// この一行の契約で塞ぐ（`pub(crate)`・`unsafe`・呼び出し箇所が恒等除去の
 /// 1 箇所のみ、で実リスクは低い）。
-// clear_pml4_entry と同じく (d) で allow を外す。
-#[allow(dead_code)]
 pub(crate) unsafe fn restore_pml4_entry(
     pml4_phys: PhysAddr,
     direct_map: DirectMap,

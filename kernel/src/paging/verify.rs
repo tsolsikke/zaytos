@@ -318,3 +318,80 @@ pub unsafe fn read_pml4_entry(pml4_phys: PhysAddr, direct_map: DirectMap, index:
         )
     }
 }
+
+/// 指定した PML4 インデックス配下の中間テーブルフレーム（PDPT/PD/PT）の物理
+/// アドレスを、重複を除いて `out` へ集める。葉（1GiB/2MiB/4KiB ページ）が指す
+/// データフレームは含めない。返り値は集めた枚数。`out` に収まらなければ `None`。
+///
+/// 恒等除去（B-2b-4）のフレーム会計に使う。`PML4[0]` 配下の何枚が到達不能に
+/// なるか（意図的リーク）、また `PML4[0]/[256]/[511]` 各配下のフレーム集合が
+/// 交わらないか（共有があると「落とせば到達不能になる」前提が崩れる。bootstrap
+/// 表は PD_shared を `[0]` と `[511]` で共有していた前例がある）を、落とす前に
+/// 実測する。重複除去しているので、共有された表フレームがあっても二重に数えない。
+///
+/// # Safety
+///
+/// [`walk`] と同じ契約。
+pub(crate) unsafe fn collect_subtree_table_frames(
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    pml4_index: usize,
+    out: &mut [PhysAddr],
+) -> Option<usize> {
+    let read = |table: PhysAddr, index: usize| -> u64 {
+        // SAFETY: 呼び出し元契約による。読み取りのみ。
+        unsafe {
+            core::ptr::read_volatile(direct_map.phys_to_virt(table).as_ptr::<u64>().add(index))
+        }
+    };
+
+    let mut count = 0usize;
+    // 既に `out[..count]` にあれば何もしない。無ければ push する。溢れたら None。
+    let mut push = |frame: PhysAddr, count: &mut usize| -> Option<()> {
+        if out[..*count].contains(&frame) {
+            return Some(());
+        }
+        if *count >= out.len() {
+            return None;
+        }
+        out[*count] = frame;
+        *count += 1;
+        Some(())
+    };
+
+    let pml4e = read(pml4_phys, pml4_index);
+    if pml4e & bits::PRESENT == 0 {
+        return Some(0);
+    }
+    let pdpt = PhysAddr::new_const(pml4e & bits::ADDR_4K);
+    push(pdpt, &mut count)?;
+
+    for pdpt_index in 0..512usize {
+        let pdpte = read(pdpt, pdpt_index);
+        if pdpte & bits::PRESENT == 0 {
+            continue;
+        }
+        if pdpte & bits::PAGE_SIZE != 0 {
+            // 1GiB ページ（葉）。データフレームなので数えない。
+            continue;
+        }
+        let pd = PhysAddr::new_const(pdpte & bits::ADDR_4K);
+        push(pd, &mut count)?;
+
+        for pd_index in 0..512usize {
+            let pde = read(pd, pd_index);
+            if pde & bits::PRESENT == 0 {
+                continue;
+            }
+            if pde & bits::PAGE_SIZE != 0 {
+                // 2MiB ページ（葉）。
+                continue;
+            }
+            let pt = PhysAddr::new_const(pde & bits::ADDR_4K);
+            push(pt, &mut count)?;
+            // PT 配下は 4KiB 葉のみ。表フレームではないので降りない。
+        }
+    }
+
+    Some(count)
+}
