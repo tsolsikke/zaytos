@@ -459,7 +459,7 @@ extern "sysv64" fn kernel_main() -> ! {
     verify_critical_sections(&mut logger);
     configure_pic(&mut logger);
 
-    // **恒等前提の箇所。** handoff.boot_info は UEFI が低位に置いた物理ポインタで、
+    // **未解決の恒等前提。** handoff.boot_info は UEFI が低位に置いた物理ポインタで、
     // 恒等マッピングの間だけ低位 VA として参照できる。B-2b で恒等を外す前に
     // direct map 高位窓経由へ移す（恒等前提の網羅列挙は
     // docs/verification-coverage.md の「higher-half B-2b」を参照）。
@@ -746,7 +746,7 @@ extern "sysv64" fn kernel_main() -> ! {
     let (kernel_start_phys, kernel_end_phys) = kernel_image_phys_range();
     let kernel_start = kernel_start_phys.as_u64();
 
-    // **恒等前提の箇所。** BootInfo・RSP・RIP はいずれも仮想アドレス
+    // **未解決の恒等前提。** BootInfo・RSP・RIP はいずれも仮想アドレス
     // として得た値だが、物理アドレスの範囲を見る `check_range` へ渡している。
     // 恒等マッピングだから通っているだけで、higher-half 移行では
     // 変換を挟むか、別の検証へ分ける必要がある。
@@ -802,7 +802,7 @@ extern "sysv64" fn kernel_main() -> ! {
             .checked_add(frame_allocator::FRAME_SIZE)
             .expect("a page table frame stays within the physical address range"),
     );
-    // **恒等前提だった箇所（B-2a-2で解消）。** RSP と RIP は kernel イメージ内
+    // **解消済みの恒等前提（B-2a-2で解消）。** RSP と RIP は kernel イメージ内
     // （スタックは .bss、コードは .text）を指すので、恒等ではなくイメージのリンク差
     // （KERNEL_VIRT_BASE）で物理へ変換する（この image_phys 自体が恒等前提の解消）。
     // 再リンク（B-2a-3）で RSP/RIP が高位になっても、この変換なら物理へ戻せる。
@@ -857,7 +857,7 @@ extern "sysv64" fn kernel_main() -> ! {
     let cr3_value = pml4_phys;
 
     // 切り替え前スナップショット(切り替え後の整合性確認に使う)。
-    // **恒等前提の箇所（順序依存。記録でしか守れない）。** kernel_start は物理値で、
+    // **未解決の恒等前提（順序依存。記録でしか守れない）。** kernel_start は物理値で、
     // ここでは低位 VA として read する。これは A-2（activate_direct_map_window）より
     // 前なので、この時点で direct_map() は base=0 を返し phys_to_virt しても同じ低位 VA
     // になる（boot_info が 468 行で高位化できなかったのと同じ構造）。したがって高位化
@@ -1059,7 +1059,7 @@ extern "sysv64" fn kernel_main() -> ! {
         cpu::halt_forever();
     }
 
-    // **恒等前提だった箇所（B-2b-2で解消）。** かつては heap_start（物理値）を
+    // **解消済みの恒等前提（B-2b-2で解消）。** かつては heap_start（物理値）を
     // そのままヒープ基底 VA として渡していた。恒等の間だけ低位 VA として通り、
     // 恒等除去（B-2b-4）後はデレフでフォルトする。ヒープは除去後もタイマループ・
     // タスク・コンソールの全アロケーションで使われ続けるので、direct map の高位窓
