@@ -79,6 +79,62 @@ unsafe fn write_entry(direct_map: DirectMap, table_phys: PhysAddr, index: usize,
     }
 }
 
+/// 恒等マッピング（`PML4[0]`）を落とすために、稼働中 PML4 の1エントリを 0 にする。
+///
+/// **恒等除去（B-2b-4）専用。汎用のエントリ書き込みではない。** 新しい
+/// マッピングを張る用途にはこれを使わず、[`PageTableBuilder`] の
+/// [`map_range`][PageTableBuilder::map_range] /
+/// [`map_page`][PageTableBuilder::map_page] を使う。この関数は値を 0 にする
+/// （present を落とす）ことしかできないので、誤って別の写像を作れない。読み出しは
+/// [`super::verify::read_pml4_entry`] と対になり、引数の並びも合わせてある。
+///
+/// # Safety
+/// - `pml4_phys` は稼働中の有効な PML4 フレームを指し、`direct_map` でその
+///   フレームを読み書きできること。`index < 512`。
+/// - **このエントリを落とすと、それが覆っていた仮想範囲の新規翻訳が失われる。**
+///   呼び出し側は、現在の実行文脈（RIP・RSP・この時点で参照するデータ）が
+///   その範囲に依存しないこと、または依存する場合は TLB フラッシュ（`mov cr3`）
+///   より前に [`restore_pml4_entry`] で書き戻せることを保証すること。落として
+///   からフラッシュまでは TLB が古い翻訳を保持するので、フラッシュ前なら実行を
+///   継続でき書き戻しも効く。これが恒等除去を「検証可能で復帰可能な前段付きの
+///   不可逆な一手」にしている契約である（`docs/verification-coverage.md` の
+///   「higher-half B-2b」）。
+// B-2b-4 の (b)〜(d) で恒等除去パスから使う。既定パスへ配線する (d) でこの
+// allow を外す。
+#[allow(dead_code)]
+pub(crate) unsafe fn clear_pml4_entry(pml4_phys: PhysAddr, direct_map: DirectMap, index: usize) {
+    // SAFETY: 呼び出し元契約による。稼働 PML4 の1エントリだけを、direct map
+    // 経由で 0 にする。
+    unsafe { write_entry(direct_map, pml4_phys, index, 0) }
+}
+
+/// [`clear_pml4_entry`] で落とした PML4 エントリを、控えておいた値へ戻す。
+///
+/// **恒等除去（B-2b-4）専用。** 検証に失敗したとき、または TLB フラッシュより
+/// 前に巻き戻すときに使う。`saved` は同じエントリを [`clear_pml4_entry`] で
+/// 落とす前に [`super::verify::read_pml4_entry`] で控えた値であること。任意の
+/// 値を書くための道具ではない。
+///
+/// # Safety
+/// [`clear_pml4_entry`] と同じ契約。加えて `saved` が、そのエントリを
+/// [`clear_pml4_entry`] で落とす直前に [`super::verify::read_pml4_entry`] で
+/// 控えた値であること。**それ以外の値を渡さないこと。** `clear` は 0 しか
+/// 書けないので構造的に別写像を作れないが、`restore` は任意の `saved` を
+/// 書けるため、名前が意図を示すだけで craft する経路は型では塞がれていない。
+/// この一行の契約で塞ぐ（`pub(crate)`・`unsafe`・呼び出し箇所が恒等除去の
+/// 1 箇所のみ、で実リスクは低い）。
+// clear_pml4_entry と同じく (d) で allow を外す。
+#[allow(dead_code)]
+pub(crate) unsafe fn restore_pml4_entry(
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    index: usize,
+    saved: u64,
+) {
+    // SAFETY: 呼び出し元契約による。控えておいたエントリ値を書き戻すだけ。
+    unsafe { write_entry(direct_map, pml4_phys, index, saved) }
+}
+
 /// 新規ページテーブル（PML4/PDPT/PD/PT）を構築するビルダー。
 pub struct PageTableBuilder<'a, const CAP: usize> {
     frames: &'a mut FrameAllocator<CAP>,
