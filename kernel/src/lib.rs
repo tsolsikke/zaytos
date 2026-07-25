@@ -74,13 +74,15 @@ mod link_symbol_tests {
     use super::*;
     use common::addr::{PhysAddr, VirtAddr};
 
-    /// 現在は恒等である。移行でここが変わる。
+    /// 再リンク（B-2a-3）でベースが高位（0xFFFFFFFF80000000）になった。
+    /// イメージ VMA から物理を引き、物理から高位 VMA を足す。
     #[test]
-    fn the_conversion_is_identity_while_the_base_is_zero() {
-        assert_eq!(link_symbols::KERNEL_VIRT_BASE, 0);
+    fn the_conversion_uses_the_high_link_base() {
+        assert_eq!(link_symbols::KERNEL_VIRT_BASE, 0xFFFF_FFFF_8000_0000);
         assert_eq!(link_symbols::KERNEL_LOAD_ADDR, 0x100000);
 
-        let virt = VirtAddr::new(0x10_0000).unwrap();
+        // イメージ先頭の VMA = base + load addr → 物理 0x100000。
+        let virt = VirtAddr::new(0xFFFF_FFFF_8010_0000).unwrap();
         assert_eq!(
             kernel_phys_from_virt(virt),
             PhysAddr::new(0x10_0000).unwrap()
@@ -91,17 +93,17 @@ mod link_symbol_tests {
         );
     }
 
-    /// 往復すること。境界（ロードアドレスそのもの、0、上限付近）で見る。
+    /// 往復すること。高位側の境界（ベースそのもの、イメージ先頭、上限付近）で見る。
+    /// kernel_phys_from_virt はイメージ VMA（base 以上）にしか使えないので、
+    /// 入力はすべて高位にする。
     #[test]
     fn the_conversion_round_trips_at_the_boundaries() {
         for raw in [
-            0u64,
-            link_symbols::KERNEL_LOAD_ADDR,
-            link_symbols::KERNEL_LOAD_ADDR + 0xFFF,
-            // 下位半分の上端。0x000F_FFFF_FFFF_F000 は物理としては表せるが
-            // 仮想としては非正規なので使えない。境界の取り方を間違えて
-            // 一度ここで落ちた。
-            0x0000_7FFF_FFFF_F000,
+            link_symbols::KERNEL_VIRT_BASE,
+            link_symbols::KERNEL_VIRT_BASE + link_symbols::KERNEL_LOAD_ADDR,
+            link_symbols::KERNEL_VIRT_BASE + link_symbols::KERNEL_LOAD_ADDR + 0xFFF,
+            // 上位半分の上端付近（正規な高位 VA）。
+            0xFFFF_FFFF_FFFF_F000,
         ] {
             let virt = VirtAddr::new(raw).unwrap();
             assert_eq!(kernel_virt_from_phys(kernel_phys_from_virt(virt)), virt);

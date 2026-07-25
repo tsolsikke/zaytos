@@ -18,7 +18,11 @@
  *     （.cargo/config.toml 参照）。再リンク（B-2a-3）で "kernel" へ戻す。
  */
 
-ENTRY(_start)
+/* 再リンク後（B-2a-3）の入口はトランポリン。bootloader は p_paddr へ配置し、
+ * elf.entry_point（トランポリンの VMA=高位）を LMA へ変換した低位アドレス
+ * （KERNEL_LOAD_ADDR）へ飛ぶ。トランポリンが CR3 を静的初期テーブルへ切り替え、
+ * 高位 _start へ jmp する。 */
+ENTRY(zaytos_trampoline)
 
 KERNEL_LOAD_ADDR = 0x100000;
 
@@ -28,20 +32,16 @@ KERNEL_LOAD_ADDR = 0x100000;
  * higher-half 移行の前段として導入する。**現在は 0 である。**
  * 恒等マッピングなので、リンクアドレスとロードアドレスが一致している。
  *
- * 再リンク（B-2a-3）でここが 0xFFFFFFFF80000000 になり、
+ * B-2a-3 でここを 0xFFFFFFFF80000000 にした。
  * VMA = KERNEL_VIRT_BASE + KERNEL_LOAD_ADDR、LMA = KERNEL_LOAD_ADDR となる。
- * 値を変えるのは、bootloader が p_paddr（LMA）へ配置し、トランポリンが
- * 高位へ移れるようになってからである（B-2a-1 で p_paddr 配置は導入済み）。
+ * bootloader は p_paddr（LMA）へ配置し（B-2a-1）、トランポリンが静的初期
+ * テーブルで高位へ移る（B-2a-2）。
  *
  * **この値は Rust 側にも同じものが必要になる。** 二重に持つと片方だけ
  * 直したときに食い違うので、build.rs がこのファイルから読み取って
  * Rust の定数を生成し、突き合わせる。
  */
-KERNEL_VIRT_BASE = 0x0;
-
-/* 現時点では恒等でなければならない。再リンク（B-2a-3）でこの ASSERT を外す。 */
-ASSERT(KERNEL_VIRT_BASE == 0x0,
-       "KERNEL_VIRT_BASE must stay 0 until the relink (B-2a-3)")
+KERNEL_VIRT_BASE = 0xFFFFFFFF80000000;
 
 SECTIONS
 {
@@ -95,6 +95,13 @@ SECTIONS
     }
 
     __kernel_end = .;
+
+    /* イメージ全体（物理）が静的初期テーブルの覆う範囲（恒等・高位とも
+     * [0, 1GiB)）に収まること。収まらないと、トランポリンが高位 _start へ
+     * 飛んだ瞬間、または恒等で低位ポインタを触った瞬間に未マップでフォルトする。
+     * 物理イメージ末尾 = __kernel_end - KERNEL_VIRT_BASE。 */
+    ASSERT(__kernel_end - KERNEL_VIRT_BASE <= 0x40000000,
+           "kernel image must fit within the bootstrap tables' 1GiB coverage")
 
     /DISCARD/ : {
         *(.eh_frame)

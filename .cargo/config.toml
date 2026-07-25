@@ -1,9 +1,10 @@
 [alias]
 xtask = "run --package xtask --"
 
-# x86_64-unknown-none は既定で PIE (position-independent-executables) +
-# code-model=kernel（高位負アドレス前提）を使う。kernel は低位アドレス
-# （link.ld 参照、ADR-0009）に固定リンクするため、PIE を無効化し
-# code-model を low アドレスと整合する small へ上書きする。
+# x86_64-unknown-none は既定で PIE (position-independent-executables) を使う。
+# kernel は固定アドレスへ静的リンクするため PIE を無効化する。code-model は
+# higher-half 化（B-2a-3）で既定の kernel（高位負アドレス前提、上位2GiB配置）へ
+# 戻した。link.ld の KERNEL_VIRT_BASE=0xFFFFFFFF80000000 と整合する。
+# 恒等リンクの間は small を使っていた（ADR-0009。B-2a-3 で見直し）。
 [target.x86_64-unknown-none]
-rustflags = ["-C", "relocation-model=static", "-C", "code-model=small"]
+rustflags = ["-C", "relocation-model=static", "-C", "code-model=kernel"]

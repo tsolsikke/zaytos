@@ -124,6 +124,10 @@ core::arch::global_asm!(
 /// `_start` 序盤（プロローグ・gdt/idt::init・BOOT_HANDOFF 書き込み・
 /// switch_to_kernel_stack_and_run 呼び）だけで使う浅いスタック。深さは
 /// [`report_boot_stack_usage`] が実測する（要確認2）。
+///
+/// B-2a-3 の実測では 632 バイトしか使わなかったが、16KiB のまま据え置く。
+/// B-2b で早期起動経路（低位ポインタの高位化）が変わるため、縮小の判断は
+/// B-2b 完了後の最終的な high-water で行う。余剰は 4 フレームで些細。
 const BOOT_STACK_SIZE: usize = 16 * 1024;
 
 /// ブートスタックの毒値。既存のカーネルスタックのカナリア（`stack::CANARY_BYTE`）
@@ -143,12 +147,15 @@ core::arch::global_asm!(
     "zaytos_boot_stack_top:",
 );
 
-// `zaytos_trampoline` / `zaytos_boot_pml4` は asm 内で参照され `.globl` で
-// エクスポートされる（静的検査で nm/objdump が拾う）。Rust からは触らないので
-// extern 宣言は置かない。`zaytos_boot_stack` だけ深さ実測で読むため宣言する。
+// `zaytos_trampoline` は asm 内で参照され `.globl` でエクスポートされる（静的
+// 検査で nm/objdump が拾う）。Rust からは触らないので extern 宣言は置かない。
+// `zaytos_boot_stack`（深さ実測）と `zaytos_boot_pml4`（高位到達実証で CR3 と
+// 突き合わせる）は Rust から読むため宣言する。
 extern "C" {
     /// ブートスタックの下端（低位側）。深さ実測の走査起点。
     static zaytos_boot_stack: u8;
+    /// 静的初期 PML4 の先頭。CR3 との突き合わせに使う。
+    static zaytos_boot_pml4: u8;
 }
 
 /// ブートスタックの最大深さを実測してログに出す（要確認2）。
@@ -174,6 +181,60 @@ fn report_boot_stack_usage(logger: &mut Logger<SerialPort>) {
     logger.info(format_args!(
         "boot stack: {used} of {BOOT_STACK_SIZE} bytes used (high-water; {unused} bytes poison intact)"
     ));
+}
+
+/// 高位到達の実証（B-2a-3）。再リンク後、`kernel_main` が高位 VA で走って
+/// いることを読み戻しで確かめる。ここへ到達できていること自体が「高位で実行
+/// できている」証拠だが、RIP/RSP/CR3 と恒等の生存を数字で残す。M2-d の
+/// CR3 切り替えより前に呼ぶこと（この時点では CR3 は静的初期 PML4 を指す）。
+fn report_high_half_arrival(logger: &mut Logger<SerialPort>) {
+    use common::addr::VirtAddr;
+
+    let rip = cpu::read_rip();
+    let rsp = cpu::read_rsp();
+    let cr3 = paging::switch::read_cr3();
+
+    // 期待する高位範囲（イメージの VMA）。
+    let image_lo = kernel::link_symbols::KERNEL_VIRT_BASE + kernel::link_symbols::KERNEL_LOAD_ADDR;
+    let image_hi = addr_of!(__kernel_end) as u64;
+    let rip_high = rip >= image_lo && rip < image_hi;
+    let rsp_high = rsp >= kernel::link_symbols::KERNEL_VIRT_BASE;
+
+    // CR3 は静的初期 PML4 の物理を指しているはず（まだ M2-d へ切り替える前）。
+    let boot_pml4_phys = kernel::kernel_phys_from_virt(
+        VirtAddr::new(addr_of!(zaytos_boot_pml4) as u64)
+            .expect("the boot PML4 symbol is canonical"),
+    );
+    let cr3_is_bootstrap = cr3 == boot_pml4_phys;
+
+    // 恒等がまだ生きていること（別名の直接証明）: 同じ物理を低位 VA（恒等）と
+    // 高位 VA（カーネル高位）の両方から読んで一致するか。
+    let (image_start, _) = kernel_image_phys_range();
+    let phys = image_start.as_u64();
+    let high_va = kernel::kernel_virt_from_phys(image_start).as_u64();
+    // SAFETY: phys（低位、恒等）と high_va（高位）はともに静的初期テーブルで
+    // present（PML4[0] と PML4[511] が同じ PD を共有）。読み取りのみ。
+    let (via_low, via_high) = unsafe {
+        (
+            core::ptr::read_volatile(phys as *const u8),
+            core::ptr::read_volatile(high_va as *const u8),
+        )
+    };
+    let identity_alive = via_low == via_high;
+
+    logger.info(format_args!(
+        "higher-half: arrived at high VA. RIP={rip:#x} in [{image_lo:#x}, {image_hi:#x})={rip_high}, \
+         RSP={rsp:#x} high={rsp_high}, CR3={:#x} == bootstrap PML4 {:#x} = {cr3_is_bootstrap}, \
+         identity alive (phys {phys:#x} read via low==high) = {identity_alive}",
+        cr3.as_u64(),
+        boot_pml4_phys.as_u64()
+    ));
+    if !(rip_high && rsp_high && cr3_is_bootstrap && identity_alive) {
+        logger.error(format_args!(
+            "higher-half: high-arrival invariants failed; halting"
+        ));
+        cpu::halt_forever();
+    }
 }
 
 /// .bss ゼロ埋めが実際に機能しているかを実地検証するための、意図的に
@@ -318,9 +379,13 @@ extern "sysv64" fn kernel_main() -> ! {
 
     logger.info(format_args!("ZaytOS kernel: entered _start"));
 
-    // ブートスタックの深さ会計（B-2a）。トランポリンがまだ稼働しない B-2a-2 では
-    // 使用量 0 と出る（機構の確認）。B-2a-3 で実際の深さが出る。
+    // ブートスタックの深さ会計（B-2a）。B-2a-3 で実際の深さが出る。
     report_boot_stack_usage(&mut logger);
+
+    // 高位到達の実証（B-2a-3）。M2-d の CR3 切り替えより前に呼ぶ（CR3 が
+    // 静的初期 PML4 を指している間に確かめる）。到達できなければここより前で
+    // トリプルフォルトしている。
+    report_high_half_arrival(&mut logger);
 
     // SAFETY: _start が switch_to_kernel_stack_and_run より前に書き込み済みで、
     // 以降は誰も書き換えない。読み取りのみ。
