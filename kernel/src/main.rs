@@ -802,12 +802,12 @@ extern "sysv64" fn kernel_main() -> ! {
             .checked_add(frame_allocator::FRAME_SIZE)
             .expect("a page table frame stays within the physical address range"),
     );
-    // **恒等前提の箇所。** RSP と RIP は kernel イメージ内（スタックは
-    // .bss、コードは .text）を指すので、恒等ではなくイメージのリンク差
-    // （KERNEL_VIRT_BASE）で物理へ変換する。再リンク（B-2a-3）で RSP/RIP が
-    // 高位になっても、この変換なら物理へ戻せる。base=0 では素通し。BootInfo・
-    // メモリマップ・フレームバッファは kernel イメージ外（低位のまま）なので
-    // 恒等のままにする（上の check_range 参照）。
+    // **恒等前提だった箇所（B-2a-2で解消）。** RSP と RIP は kernel イメージ内
+    // （スタックは .bss、コードは .text）を指すので、恒等ではなくイメージのリンク差
+    // （KERNEL_VIRT_BASE）で物理へ変換する（この image_phys 自体が恒等前提の解消）。
+    // 再リンク（B-2a-3）で RSP/RIP が高位になっても、この変換なら物理へ戻せる。
+    // base=0 では素通し。BootInfo・メモリマップ・フレームバッファは kernel イメージ外
+    // （低位のまま）なので恒等のままにする（上の check_range と 745 行のマーカー参照）。
     let image_phys = |virt: u64| {
         kernel::kernel_phys_from_virt(
             common::addr::VirtAddr::new(virt).expect("an rsp/rip value is canonical"),
@@ -857,6 +857,16 @@ extern "sysv64" fn kernel_main() -> ! {
     let cr3_value = pml4_phys;
 
     // 切り替え前スナップショット(切り替え後の整合性確認に使う)。
+    // **恒等前提の箇所（順序依存。記録でしか守れない）。** kernel_start は物理値で、
+    // ここでは低位 VA として read する。これは A-2（activate_direct_map_window）より
+    // 前なので、この時点で direct_map() は base=0 を返し phys_to_virt しても同じ低位 VA
+    // になる（boot_info が 468 行で高位化できなかったのと同じ構造）。したがって高位化
+    // できず、「恒等除去（B-2b-4）より前に走ること」に依存する。反転関門
+    // （DirectMap::new の IDENTITY_REMOVED）は DirectMap 構築を捕まえるが、この生の
+    // 低位 read は経由しないので捕まえない。**この read（862/900 行）が恒等除去点より
+    // 後ろへ来ないこと。** 具体的には、この read を除去点の後ろへ動かす、または除去点を
+    // この read の前へ動かす、のどちらも違反（除去点をさらに後ろへ動かすのは安全）。
+    // 一覧は docs/verification-coverage.md の「higher-half B-2b」を参照。
     // SAFETY: kernel_start は必須領域検証により読み取り可能であることを
     // 確認済み。
     let kernel_first_byte_before = unsafe { core::ptr::read_volatile(kernel_start as *const u8) };
@@ -982,6 +992,11 @@ extern "sysv64" fn kernel_main() -> ! {
     // だけは追従しないので、明示的に高位 base へ載せ替える。
     activate_direct_map_window(&mut logger);
     rehome_framebuffer_to_window(&mut logger, &mut framebuffer, boot_info);
+    // **boot_info の最終利用はここ（rehome）。以降 boot_info を触らない。** boot_info は
+    // 低位 VA（handoff.boot_info、恒等前提）で、恒等除去（B-2b-4）後は無効になる。有用な
+    // データ（memory_map→フレームアロケータ、framebuffer→ここで高位窓へ rehome）は抽出
+    // 済み。除去点より後ろで boot_info を参照するコードを足さないこと（反転関門は生の低位
+    // 参照を捕まえない。docs/verification-coverage.md の「higher-half B-2b」参照）。
 
     // === M3-c-3: 画面コンソール ===
     //
@@ -1149,6 +1164,14 @@ extern "sysv64" fn kernel_main() -> ! {
     // 一致することを確かめる。
     #[cfg(not(feature = "paging-test"))]
     verify_syscall_checksum(&mut logger);
+
+    // === higher-half B-2b-4（恒等除去）の予定位置 ===
+    //
+    // ここが恒等（PML4[0]）を外す点になる（実装は B-2b-4）。恒等窓を握る4検証サイト
+    // （verify_user_page_mapping / verify_ring3_excursion / verify_syscall_roundtrip /
+    // verify_syscall_pointer）と verify_syscall_checksum が全て走り終えた後、start_timer
+    // より前。**この時点で boot_info は無効**（低位 VA、最終利用は上の rehome）。順序依存の
+    // 詳細と除去手順は docs/verification-coverage.md の「higher-half B-2b」を参照。
 
     // ロック保持中は割り込みが禁止され、解放後に元へ戻ることを確認する
     // （M4-c-2）。ヒープのロックそのものではなく同じ Locked<T> を使う。
