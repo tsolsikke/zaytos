@@ -6,5 +6,8 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+# トランポリンのバイト単位一致検査で、ビルド済み kernel.elf の入口バイトを読むために
+# 既存の ELF パーサを再利用する（新規クレート依存を増やさない。B-2a-5）。
+common = { path = "../common" }
 # screenshot サブコマンド: QEMU の screendump が出力する PPM を PNG へ変換する。
 image = { version = "0.25", default-features = false, features = ["png", "pnm"] }

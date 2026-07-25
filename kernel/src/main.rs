@@ -61,6 +61,54 @@ extern "C" {
 // mov cr3 の直後は次の命令フェッチが新テーブル・RIP はまだ低位なので、静的
 // テーブルの PML4[0] 恒等（1GiB）がトランポリンの低位 VA を覆う。切り替え後に
 // 高位 `_start` へ jmp してから、以降を高位で実行する（恒等は B-2b まで残す）。
+// === B-2a-5: higher-half の破壊 feature（sabotage）===
+//
+// いずれも既定ビルドには入らない（default-features 検査が担保）。静的初期
+// テーブル・トランポリンはリンク時計算の global_asm なので、破壊は const
+// オペランド（(a)(b)）と、同一 asm 内へ 1 行挿入するマクロ（(d)）で行う。
+// これで検査対象の asm を複製せず、sabotage を局所化する（提案2）。
+
+/// (a) highhalf-no-identity-in-boot-pt: 静的 PML4[0] の存在ビットを落とす。
+/// 既定 0x03（P|RW）/ feature 0x02（P クリア）。恒等 PML4[0] が not-present に
+/// なり、mov cr3 直後の低位命令フェッチ（次命令）が解決できずトリプルフォルトする。
+const BOOT_PML4_0_FLAGS: u64 = if cfg!(feature = "highhalf-no-identity-in-boot-pt") {
+    0x02
+} else {
+    0x03
+};
+
+/// (b) highhalf-bad-high-slot: PDPT_high のエントリを 510→509 へずらす。前後の
+/// fill 数（合計 512 を保つ）を切り替える。PML4[511]→PDPT_high[510] が空になり、
+/// 高位 _start への jmp 先が未マップでトリプルフォルトする。
+const BOOT_PDPT_HIGH_BEFORE: u64 = if cfg!(feature = "highhalf-bad-high-slot") {
+    509
+} else {
+    510
+};
+const BOOT_PDPT_HIGH_AFTER: u64 = if cfg!(feature = "highhalf-bad-high-slot") {
+    2
+} else {
+    1
+};
+
+/// (d) highhalf-trampoline-absolute-ref: トランポリンに絶対メモリ参照命令を 1 行
+/// 挿入する。**実行時ではなく静的なバイト単位一致検査で捕まえる。** 既定は空文字列
+/// で、トランポリンのバイト列は不変。feature 時のみ `mov rbx, [0x2000]`（disp32 の
+/// 絶対参照）が入り、コード先頭 24 バイトが期待リテラルと食い違う。同一 asm 内の
+/// 1 行なので、トランポリン本体を変えたときに sabotage 側が置き去りにならない。
+#[cfg(feature = "highhalf-trampoline-absolute-ref")]
+macro_rules! tramp_sabotage {
+    () => {
+        "  mov rbx, [0x2000]\n"
+    };
+}
+#[cfg(not(feature = "highhalf-trampoline-absolute-ref"))]
+macro_rules! tramp_sabotage {
+    () => {
+        ""
+    };
+}
+
 core::arch::global_asm!(
     ".section .text.trampoline,\"ax\",@progbits",
     ".p2align 12",
@@ -68,6 +116,7 @@ core::arch::global_asm!(
     "zaytos_trampoline:",
     "  mov rax, [rip + zaytos_tramp_pml4]",   // 48 8B 05 <rel32>: PML4 物理をロード
     "  mov cr3, rax",                          // 0F 22 D8: 切り替え
+    tramp_sabotage!(),                         // (d) 既定は空。feature 時のみ絶対参照を 1 行挿入
     "  mov rsp, [rip + zaytos_tramp_stack]",   // 48 8B 25 <rel32>: 高位ブートスタック頂点を RSP へ
     "  jmp [rip + zaytos_tramp_entry]",        // FF 25 <rel32>: 高位 _start へ間接 jmp
     ".p2align 3",
@@ -98,7 +147,7 @@ core::arch::global_asm!(
     ".p2align 12",
     ".globl zaytos_boot_pml4",
     "zaytos_boot_pml4:",
-    "  .quad zaytos_boot_pdpt_low - {kvb} + 0x03",
+    "  .quad zaytos_boot_pdpt_low - {kvb} + {pml4_0}",   // (a) 既定 0x03 / feature 0x02（P クリア）
     "  .fill 510, 8, 0",
     "  .quad zaytos_boot_pdpt_high - {kvb} + 0x03",
     ".p2align 12",
@@ -107,9 +156,9 @@ core::arch::global_asm!(
     "  .fill 511, 8, 0",
     ".p2align 12",
     "zaytos_boot_pdpt_high:",
-    "  .fill 510, 8, 0",
+    "  .fill {hi_before}, 8, 0",                          // (b) 既定 510 / feature 509
     "  .quad zaytos_boot_pd_shared - {kvb} + 0x03",
-    "  .fill 1, 8, 0",
+    "  .fill {hi_after}, 8, 0",                           // (b) 既定 1 / feature 2（合計 512 を保つ）
     ".p2align 12",
     "zaytos_boot_pd_shared:",
     "  .set idx, 0",
@@ -118,6 +167,9 @@ core::arch::global_asm!(
     "    .set idx, idx + 1",
     "  .endr",
     kvb = const kernel::link_symbols::KERNEL_VIRT_BASE,
+    pml4_0 = const BOOT_PML4_0_FLAGS,
+    hi_before = const BOOT_PDPT_HIGH_BEFORE,
+    hi_after = const BOOT_PDPT_HIGH_AFTER,
 );
 
 /// ブートスタックの大きさ。トランポリンが CR3 切り替え後に RSP をここへ移す。
@@ -673,6 +725,9 @@ extern "sysv64" fn kernel_main() -> ! {
     // （ensure_child の UnexpectedHugePageEntry）は起きない。再リンク（B-2a-3）後は
     // PML4[511] 配下に実マッピングを作る。これがないと、再リンク後にこのテーブルへ
     // CR3 を切り替えた瞬間、高位で走るコードが見えなくなって即死する。
+    // (c) highhalf-no-kernel-high-in-live-table: この呼び出しを外すと本流テーブルに
+    // 高位マッピングが無くなり、下の CR3 切り替えで死ぬ（期待署名は実測で確定）。
+    #[cfg(not(feature = "highhalf-no-kernel-high-in-live-table"))]
     map_kernel_high_half(&mut builder, &mut logger);
 
     logger.info(format_args!(
@@ -4478,6 +4533,8 @@ fn build_and_switch_direct_map(
     // higher-half（B-2a）: この本流テーブルにも kernel イメージの高位マッピングを
     // 張る。base=0 では冪等（新規フレーム 0）。base=高位（B-2a-3）では再リンク後に
     // このテーブルへ CR3 を切り替えても高位コードが見え続けるようにする。
+    // (c) highhalf-no-kernel-high-in-live-table: A-1 の本流テーブルからも外す。
+    #[cfg(not(feature = "highhalf-no-kernel-high-in-live-table"))]
     map_kernel_high_half(&mut builder, logger);
 
     let new_pml4 = builder.pml4_phys();

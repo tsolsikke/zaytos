@@ -677,6 +677,93 @@ const SYSCALL_TESTS: &[CriticalTest] = &[
     },
 ];
 
+/// higher-half（B-2a-5）の破壊確認。「cpu_reset が起きた」だけを合格条件に
+/// しない（どんな理由で死んでも合格になり検査にならない）。各テストが「期待した
+/// 箇所で死んだ」ことを、シリアルの位置署名（到達した行 present / その先へ進んで
+/// いない行 absent）と「定常状態に到達していない（heartbeat が 1 本も出ない）」の
+/// AND で判定する。
+///
+/// **実測メモ（B-2a-5）**: これらはトリプルフォルト（cpu_reset）しない。
+/// (a)(b) はトランポリン/最初期の #PF が我々の IDT 導入前に起きるため UEFI の IDT が
+/// 拾い、ファームウェアが制御を取り戻す（-d int に firmware 領域の RIP が残る）。
+/// (c) は M2-d 切り替え後に高位で #PF し、定常へ進めず停止する。いずれも cpu_reset は
+/// 増えない。したがって判定は位置署名 + 定常未到達で行い、cpu_reset 数と firmware RIP は
+/// 参考情報として出す（cpu_reset を必須条件にしない、が実測でより強く正当化された）。
+struct HighhalfTest {
+    name: &'static str,
+    feature: &'static str,
+    /// シリアルに現れるべき行（そこまで到達した証拠）。
+    present_markers: &'static [&'static str],
+    /// シリアルに現れてはいけない行（その先へ進んでいないことの証拠）。
+    absent_markers: &'static [&'static str],
+}
+
+const HIGHHALF_TESTS: &[HighhalfTest] = &[
+    // (a) 初期 PML4[0]（恒等）を not-present にする。mov cr3 直後の低位命令フェッチが
+    // 解決できず #PF。我々の IDT 導入前なので UEFI の IDT が拾い、ファームウェアへ戻る。
+    // bootloader はトランポリンへ到達しているが、カーネルの最初のログは出ない。
+    // (a) と (b) は同一署名（トランポリンとカーネルの間で死ぬ）。
+    HighhalfTest {
+        name: "no-identity-in-boot-pt",
+        feature: "highhalf-no-identity-in-boot-pt",
+        present_markers: &["kernel entry: VMA"],
+        absent_markers: &["ZaytOS kernel: entered _start"],
+    },
+    // (b) PDPT_high のエントリを 510→509 へずらす。高位 _start への jmp 先が未マップで
+    // #PF。署名は (a) と同じ。
+    HighhalfTest {
+        name: "bad-high-slot",
+        feature: "highhalf-bad-high-slot",
+        present_markers: &["kernel entry: VMA"],
+        absent_markers: &["ZaytOS kernel: entered _start"],
+    },
+    // (c) 本流テーブルからカーネル高位マッピングを外す。高位到達し、切替前の必須マッピング
+    // 検証も通過（それは物理範囲を見るので高位マッピングの欠落を捕まえない。実測で確定）した
+    // うえで、M2-d の CR3 切り替え後に高位で #PF して停止する。
+    HighhalfTest {
+        name: "no-kernel-high-in-live-table",
+        feature: "highhalf-no-kernel-high-in-live-table",
+        present_markers: &["higher-half: arrived at high VA"],
+        absent_markers: &["paging: CR3 switch verified"],
+    },
+];
+
+/// トランポリンのコード先頭 24 バイト（B-2a-2/B-2a-3b で 2 度、再リンク・
+/// B-1 撤去を跨いで不変を実証した期待リテラル）。rel32 はすべて .text.trampoline
+/// 内なので、他の変更で動かない。sabotage (d) はここへ 1 命令挿入して食い違わせる。
+const EXPECTED_TRAMPOLINE_BYTES: [u8; 24] = [
+    0x48, 0x8b, 0x05, 0x11, 0x00, 0x00, 0x00, // mov rax, [rip + zaytos_tramp_pml4]
+    0x0f, 0x22, 0xd8, // mov cr3, rax
+    0x48, 0x8b, 0x25, 0x0f, 0x00, 0x00, 0x00, // mov rsp, [rip + zaytos_tramp_stack]
+    0xff, 0x25, 0x11, 0x00, 0x00, 0x00, // jmp [rip + zaytos_tramp_entry]
+    0x90, // p2align 3 のパディング
+];
+
+/// ビルド済み kernel.elf の入口（トランポリン）先頭 24 バイトを読む。
+///
+/// 新規クレート依存を増やさず、既存の `common::elf` を再利用する。入口は
+/// `.text.trampoline` の先頭に置いてあり、入口を含む PT_LOAD セグメントの
+/// ファイル内容から `entry - p_vaddr` オフセットで取り出す。
+fn trampoline_bytes(kernel_elf: &Path) -> Result<[u8; 24]> {
+    let bytes =
+        fs::read(kernel_elf).with_context(|| format!("failed to read {}", kernel_elf.display()))?;
+    let elf = common::elf::Elf::parse(&bytes)
+        .map_err(|e| anyhow::anyhow!("failed to parse {} as ELF: {e:?}", kernel_elf.display()))?;
+    let entry = elf.entry_point;
+    let seg = elf
+        .load_segments()
+        .find(|s| entry >= s.p_vaddr && entry < s.p_vaddr + s.p_memsz)
+        .context("no PT_LOAD segment contains the entry point")?;
+    let data = elf.segment_data(&seg);
+    let offset = (entry - seg.p_vaddr) as usize;
+    let slice = data
+        .get(offset..offset + 24)
+        .context("the entry point is too close to the end of its segment")?;
+    let mut out = [0u8; 24];
+    out.copy_from_slice(slice);
+    Ok(out)
+}
+
 /// カーネルが起動したことを示す、シリアルログの既知の行。
 ///
 /// kernel の `kernel_main` が最初に出す行（`common::log` の INFO 形式）。
@@ -833,7 +920,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -888,6 +975,24 @@ fn main() -> Result<()> {
                     format!("--syscall-test requires a kind ({})", names.join(" | "))
                 })?;
                 return cmd_marker_test(SYSCALL_TESTS, "syscall-test", kind);
+            }
+            if let Some(index) = rest.iter().position(|a| a == "--highhalf-test") {
+                let kind = rest.get(index + 1).with_context(|| {
+                    let names: Vec<&str> = HIGHHALF_TESTS.iter().map(|t| t.name).collect();
+                    format!(
+                        "--highhalf-test requires a kind ({} | trampoline-absolute-ref)",
+                        names.join(" | ")
+                    )
+                })?;
+                // (d) はビルド + 静的バイト検査（QEMU 不要）。(a)(b)(c) は QEMU で判定。
+                if kind == "trampoline-absolute-ref" {
+                    return cmd_highhalf_trampoline_check(
+                        &workspace_root()?,
+                        &["highhalf-trampoline-absolute-ref"],
+                        false,
+                    );
+                }
+                return cmd_highhalf_test(kind);
             }
             if let Some(index) = rest.iter().position(|a| a == "--critical-test") {
                 let kind = rest.get(index + 1).with_context(|| {
@@ -1592,6 +1697,176 @@ fn cmd_keyboard_test() -> Result<()> {
     }
 }
 
+/// higher-half（B-2a-5）の破壊確認を走らせる。
+///
+/// トリプルフォルト系は「cpu_reset が起きた」だけでなく、位置署名（到達した/
+/// していない行）との AND で「期待した箇所で死んだ」ことを判定する。カーネルが
+/// 起動しないのは (a)(b) では期待挙動なので、基盤の生死は bootloader の起動
+/// マーカーで判定する。
+fn cmd_highhalf_test(kind: &str) -> Result<()> {
+    let test = HIGHHALF_TESTS
+        .iter()
+        .find(|t| t.name == kind)
+        .with_context(|| {
+            let names: Vec<&str> = HIGHHALF_TESTS.iter().map(|t| t.name).collect();
+            format!(
+                "unknown highhalf-test {kind:?} (expected one of: {})",
+                names.join(", ")
+            )
+        })?;
+
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let features: Vec<&str> = test.feature.split(',').collect();
+    let kernel_elf = build_kernel_with_features(&workspace_root, &features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let serial_log = workspace_root
+        .join("target")
+        .join("highhalf-test-serial.log");
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+    });
+
+    // **必ずタイムアウトまで待つ。** 破壊ビルドは「死んで止まる」ので、present
+    // marker が出た時点で kill すると、死亡直前までのシリアルが流れ切る前に切って
+    // しまい、absent marker（死亡点の手前）まで届かないことがある。full timeout まで
+    // 待てば、死ぬまでに出るログがすべて流れ、かつ定常（heartbeat）へ進まないことも
+    // 確かめられる。到達しても heartbeat が延々出るだけなので上限は変わらない。
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the highhalf test")?;
+
+    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    while Instant::now() < deadline {
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+
+    let context = format!("highhalf-test {}", test.name);
+
+    // テスト基盤自体が動いたか（bootloader が起動したか）を先に確かめる。
+    // カーネルが起動しないのは (a)(b) では期待挙動なので、KERNEL ではなく
+    // BOOTLOADER の起動マーカーで基盤の生死を判定する。
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu, BOOTLOADER_STARTED_MARKER)
+    {
+        return report_did_not_start(&context, firmware_rip, qemu_exit.as_deref());
+    }
+
+    println!("--- {context}: relevant output ---");
+    for line in serial.lines().filter(|l| {
+        l.contains("kernel entry")
+            || l.contains("higher-half")
+            || l.contains("entered _start")
+            || l.contains("CR3 switch")
+            || l.contains("required range")
+            || l.contains("halting")
+    }) {
+        println!("{line}");
+    }
+    println!("--- end ---");
+
+    let mut ok = true;
+    for marker in test.present_markers {
+        let present = serial.contains(marker);
+        ok &= present;
+        println!(
+            "{context}: serial contains {marker:?} = {}",
+            if present { "OK" } else { "NG" }
+        );
+    }
+    for marker in test.absent_markers {
+        let absent = !serial.contains(marker);
+        ok &= absent;
+        println!(
+            "{context}: serial does NOT contain {marker:?} = {}",
+            if absent { "OK" } else { "NG" }
+        );
+    }
+
+    // **定常状態（heartbeat）へ到達していないこと。** 破壊が効いていれば起動は死んで
+    // 止まり、タイマループへ入らない。これが「期待箇所で死んだ」ことの最終的な裏づけ。
+    let heartbeats = serial.matches("heartbeat: ticks=").count();
+    let no_steady_state = heartbeats == 0;
+    ok &= no_steady_state;
+    println!(
+        "{context}: heartbeat lines = {heartbeats} (expected 0, boot must not reach steady state) = {}",
+        if no_steady_state { "OK" } else { "NG" }
+    );
+
+    // 参考情報（判定条件ではない。実測でこれらは cpu_reset しないため）。
+    let resets = qemu.matches("CPU Reset").count();
+    let firmware_rip = matches!(
+        classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER),
+        BootOutcome::DidNotStart {
+            firmware_rip: Some(_)
+        }
+    );
+    println!(
+        "{context}: (info) CPU Reset count = {resets} (baseline {EXPECTED_CPU_RESET_COUNT}; these \
+         sabotages fault without a reset), reverted to firmware = {firmware_rip}"
+    );
+
+    if ok {
+        println!("{context}: PASS");
+        Ok(())
+    } else {
+        bail!("{context}: FAILED")
+    }
+}
+
+/// トランポリンのバイト単位一致検査（B-2a-5）。
+///
+/// `expect_match` が真なら既定ビルドで一致すること、偽なら sabotage
+/// （trampoline-absolute-ref）で不一致になることを確かめる。QEMU 不要の静的検査。
+fn cmd_highhalf_trampoline_check(
+    workspace_root: &Path,
+    features: &[&str],
+    expect_match: bool,
+) -> Result<()> {
+    let kernel_elf = build_kernel_with_features(workspace_root, features)?;
+    let bytes = trampoline_bytes(&kernel_elf)?;
+    let matches = bytes == EXPECTED_TRAMPOLINE_BYTES;
+    let label = if features.is_empty() {
+        "default build".to_string()
+    } else {
+        format!("features [{}]", features.join(","))
+    };
+    println!(
+        "trampoline byte check ({label}): matches expected = {matches} (wanted {expect_match})"
+    );
+    if matches != expect_match {
+        println!("  expected: {:02x?}", EXPECTED_TRAMPOLINE_BYTES);
+        println!("  actual:   {:02x?}", bytes);
+        bail!("trampoline byte check ({label}): the trampoline code does not match expectations");
+    }
+    Ok(())
+}
+
 /// マーカー突き合わせ方式の回帰チェック（critical-test / interrupt-test 共通）。
 ///
 /// シリアルログに「出るべき行」がすべて出て、「出てはいけない行」が 1 つも
@@ -2229,6 +2504,10 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "interrupt-test",
     "panic-test",
     "gfx-test-pattern",
+    "highhalf-no-identity-in-boot-pt",
+    "highhalf-bad-high-slot",
+    "highhalf-no-kernel-high-in-live-table",
+    "highhalf-trampoline-absolute-ref",
 ];
 
 /// kernel の既定 feature に仕込みが混ざっていないことを確かめる。
@@ -2354,6 +2633,19 @@ fn cmd_check(full: bool) -> Result<()> {
         failed.push("commit style".to_string());
     }
 
+    // トランポリンのバイト単位一致検査（B-2a-5、静的）。既定ビルドの入口 24 バイトが
+    // 期待リテラルと一致すること。base 検査なので `--full` でなくても毎回走る。
+    total += 1;
+    println!("=== xtask check: trampoline byte match (default build)");
+    match cmd_highhalf_trampoline_check(&workspace_root, &[], true) {
+        Ok(()) => println!("--- trampoline byte match: OK"),
+        Err(e) => {
+            println!("    {e}");
+            println!("--- trampoline byte match: FAILED");
+            failed.push("trampoline byte match".to_string());
+        }
+    }
+
     let mut retries: Vec<String> = Vec::new();
     if full {
         // QEMU を起動する回帰チェック。1 種類ごとにカーネルをビルドし直して
@@ -2427,6 +2719,28 @@ fn cmd_check(full: bool) -> Result<()> {
         run_regression("panic-test", &mut failed, &mut retries, || {
             cmd_run(true, false, false, false, false)
         });
+        // higher-half の破壊確認（B-2a-5）。(a)(b)(c) は QEMU で位置署名 + 定常未到達を
+        // 判定、(d) はビルド + トランポリンのバイト不一致を静的に判定。
+        for test in HIGHHALF_TESTS {
+            total += 1;
+            let name = format!("highhalf-test {}", test.name);
+            run_regression(&name, &mut failed, &mut retries, || {
+                cmd_highhalf_test(test.name)
+            });
+        }
+        total += 1;
+        run_regression(
+            "highhalf-test trampoline-absolute-ref",
+            &mut failed,
+            &mut retries,
+            || {
+                cmd_highhalf_trampoline_check(
+                    &workspace_root,
+                    &["highhalf-trampoline-absolute-ref"],
+                    false,
+                )
+            },
+        );
     }
 
     println!();

@@ -175,3 +175,17 @@ syscall-test-copy-skip-validate = []
 # copy_from_user が len を 1 バイト超えて読む。末尾の有効ページ内に置いた余分な既知バイトが
 # 総和へ混ざり、内容往復のチェックサムが決定的に食い違う。`--syscall-test copy-overrun`。
 syscall-test-copy-overrun = []
+# B-2a-5: higher-half の破壊確認。いずれも既定ビルドには入らない。`--highhalf-test <kind>`。
+# (a) 静的 PML4[0] の存在ビットを落とす。恒等が not-present になり、mov cr3 直後の低位命令
+# フェッチが解決できずトリプルフォルトする。`--highhalf-test no-identity-in-boot-pt`。
+highhalf-no-identity-in-boot-pt = []
+# (b) PDPT_high のエントリを 510→509 へずらす。高位 _start への jmp 先が未マップで
+# トリプルフォルトする。`--highhalf-test bad-high-slot`。
+highhalf-bad-high-slot = []
+# (c) M2-d/A-1 の本流テーブルからカーネル高位マッピングを外す。そのテーブルへの CR3 切り替えで
+# 高位コードが見えなくなる。期待署名は実測で確定（切替前検証が捕まえる可能性がある）。
+# `--highhalf-test no-kernel-high-in-live-table`。
+highhalf-no-kernel-high-in-live-table = []
+# (d) トランポリンに絶対メモリ参照命令を 1 行挿入する。**実行時ではなく静的なバイト単位一致
+# 検査で捕まえる。** `--highhalf-test trampoline-absolute-ref`。
+highhalf-trampoline-absolute-ref = []
