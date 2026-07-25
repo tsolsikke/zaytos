@@ -170,6 +170,7 @@ Bは段階分割で進めている（B調査の合意による）。
 | SMP対応 | ADR-0002 / ADR-0023 | seam整備は先行（振る舞い不変）、BKL本体はhigher-half B完了後 | ADR-0023でBKLファーストと決定し`roadmap.md`の「その先」へ移した。現在はシングルコア前提（`Locked<T>`はIF=0=排他=暗黙のジャイアントロック）。BKL導入時に`Locked<T>`の中身をスピンロック/アトミック併用へ差し替える（呼び出し側インターフェースは安定。ADR-0002）。APIC / ACPI（MADT）・AP起こし・TLBシュートダウンはBKLでも消えない新規作業（ADR-0023 §2） |
 | 最初のファイルシステムの選定 | `roadmap.md`の「その先」/ ADR-0020 | ファイルシステム実装に着手する時点 | FAT / ext2 / 独自簡易のいずれを最初にするか未決。薄いVFSトレイト境界を先に引くかと併せて着手時に決める。syscall ABI（`int 0x80`）は確定済みなので選定は加算的で、システムコール本体には手が入らない |
 | 他アーキテクチャへの移植 | ADR-0006 | 移植を実際に行う時点 | アーキ依存部の切り出しが必要になる。先回りの抽象化はしない |
+| `task-test preempt-in-critical`の確率性 | `verification-coverage.md`（確率的なテストとフレークの署名）/ `task-widen-preempt-window` | **higher-half B完了後** | このテストはタイマプリエンプトが cli 除去窓に当たるかに依存する確率的テストで、稀に「double acquisition detected が出ず halt」して落ちる（フレーク。署名と判断手順はverification-coverage）。決定的にする（窓を確実に踏ませる、`task-widen-preempt-window`と併用する等）ことはタスク／クリティカルという別サブシステムへの変更なので、B-2b-4の最中、特に最も危険な(d)の直前には行わない（切り分け軸を一度に一つ）。B完了後に対応する |
 
 ---
 
