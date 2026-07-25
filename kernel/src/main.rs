@@ -1044,15 +1044,24 @@ extern "sysv64" fn kernel_main() -> ! {
         cpu::halt_forever();
     }
 
-    // SAFETY: heap_start..heap_end はフレームアロケータから今切り出した
-    // ばかりの、他の誰も使っていない領域であり、直前に mapped_ranges で
-    // マップ済みであることも確認済み。このヒープに対する `init` 呼び出しは
-    // これが最初で最後(1回のみ)。
-    // **恒等前提の箇所。** heap_start は物理値で、恒等の間だけ低位 VA として通る。
-    // B-2b で phys_to_virt(heap_start) の高位 VA で init する（網羅列挙は
-    // docs/verification-coverage.md の「higher-half B-2b」を参照）。
+    // **恒等前提だった箇所（B-2b-2で解消）。** かつては heap_start（物理値）を
+    // そのままヒープ基底 VA として渡していた。恒等の間だけ低位 VA として通り、
+    // 恒等除去（B-2b-4）後はデレフでフォルトする。ヒープは除去後もタイマループ・
+    // タスク・コンソールの全アロケーションで使われ続けるので、direct map の高位窓
+    // 上へ載せる。以降アロケーションは高位 VA を返し、恒等除去を跨いで生き残る。
+    // 網羅列挙は docs/verification-coverage.md の「higher-half B-2b」を参照。
+    let heap_virt_base = common::addr::direct_map()
+        .phys_to_virt(
+            common::addr::PhysAddr::new(heap_start)
+                .expect("heap arena is a valid physical address"),
+        )
+        .as_u64();
+    // SAFETY: [heap_start, heap_end) はフレームアロケータから今切り出したばかりの、
+    // 他の誰も使っていない領域で、直前に mapped_ranges でマップ済みを確認済み。
+    // heap_virt_base はその物理を direct map 高位窓へ写した VA で、窓は RW・マップ
+    // 済み。このヒープに対する `init` 呼び出しはこれが最初で最後(1回のみ)。
     unsafe {
-        ALLOCATOR.init(heap_start, heap_size);
+        ALLOCATOR.init(heap_virt_base, heap_size);
     }
     log_both(
         &mut logger,
@@ -1147,6 +1156,17 @@ extern "sysv64" fn kernel_main() -> ! {
     report_lock_interrupt_state(&mut logger);
 
     // 実地スモークテスト: Vec/Box/String を実際に確保・追記・解放する。
+    // **ヒープは direct map 高位窓上にある（B-2b-2）ので、確保したポインタは高位 VA。**
+    // `range_is_mapped` は物理範囲を見るので、高位窓経由で物理へ戻してから照合する
+    // （恒等の間は高位 VA と低位 VA が同じ物理を指すので結果は不変）。
+    let heap_mapped = |va: u64, len: u64| -> bool {
+        match common::addr::VirtAddr::new(va)
+            .and_then(|v| common::addr::direct_map().virt_to_phys(v))
+        {
+            Some(p) => range_is_mapped(&mapped_ranges, p.as_u64(), p.as_u64() + len),
+            None => false,
+        }
+    };
     let mut v: Vec<u32> = Vec::new();
     for i in 0..10u32 {
         v.push(i * i);
@@ -1160,7 +1180,7 @@ extern "sysv64" fn kernel_main() -> ! {
         format_args!(
             "heap smoke test: Vec<u32> len={} ptr={v_ptr:#x} mapped={}",
             v.len(),
-            range_is_mapped(&mapped_ranges, v_ptr, v_ptr + v_len_bytes)
+            heap_mapped(v_ptr, v_len_bytes)
         ),
     );
     drop(v);
@@ -1174,7 +1194,7 @@ extern "sysv64" fn kernel_main() -> ! {
         format_args!(
             "heap smoke test: Box<u32> value={:#x} ptr={b_ptr:#x} mapped={}",
             *b,
-            range_is_mapped(&mapped_ranges, b_ptr, b_ptr + 4)
+            heap_mapped(b_ptr, 4)
         ),
     );
     drop(b);
@@ -1190,7 +1210,7 @@ extern "sysv64" fn kernel_main() -> ! {
         format_args!(
             "heap smoke test: String={:?} ptr={s_ptr:#x} mapped={}",
             s.as_str(),
-            range_is_mapped(&mapped_ranges, s_ptr, s_ptr + s_len)
+            heap_mapped(s_ptr, s_len)
         ),
     );
     drop(s);
