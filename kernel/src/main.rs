@@ -44,6 +44,138 @@ extern "C" {
     static __kernel_end: u8;
 }
 
+// === higher-half B-2a: トランポリンと静的初期ページテーブルとブートスタック ===
+//
+// これらは B-2a-2 で追加するが、**まだ稼働経路に載らない**（ENTRY は `_start`
+// のまま、再リンクもしない）。B-2a-3 で ENTRY をトランポリンへ切り替え、再リンク
+// （KERNEL_VIRT_BASE=高位、code-model=kernel）して初めて使われる。base=0 の間は
+// 追加されるだけで振る舞いは変わらない。
+//
+// トランポリンは RIP 相対のみで、絶対アドレスはコードに一切現れず、隣接する
+// データ語（`.quad`）にだけ入る。低位で実行している間、RIP 相対の結果は物理
+// アドレスになる（VMA - VMA = リンク時距離）。3 つの `.quad` は次を保持する。
+//   - PML4 の物理（LMA = VMA - KERNEL_VIRT_BASE）: CR3 に載せる値
+//   - ブートスタック頂点の高位 VA: CR3 切り替え後に RSP へ移す（UEFI スタック
+//     の物理位置への依存を断つ。要確認1/重要1）
+//   - `_start` の高位 VA: 切り替え後に間接 jmp する先
+// mov cr3 の直後は次の命令フェッチが新テーブル・RIP はまだ低位なので、静的
+// テーブルの PML4[0] 恒等（1GiB）がトランポリンの低位 VA を覆う。切り替え後に
+// 高位 `_start` へ jmp してから、以降を高位で実行する（恒等は B-2b まで残す）。
+core::arch::global_asm!(
+    ".section .text.trampoline,\"ax\",@progbits",
+    ".p2align 12",
+    ".globl zaytos_trampoline",
+    "zaytos_trampoline:",
+    "  mov rax, [rip + zaytos_tramp_pml4]",   // 48 8B 05 <rel32>: PML4 物理をロード
+    "  mov cr3, rax",                          // 0F 22 D8: 切り替え
+    "  mov rsp, [rip + zaytos_tramp_stack]",   // 48 8B 25 <rel32>: 高位ブートスタック頂点を RSP へ
+    "  jmp [rip + zaytos_tramp_entry]",        // FF 25 <rel32>: 高位 _start へ間接 jmp
+    ".p2align 3",
+    "zaytos_tramp_pml4:  .quad zaytos_boot_pml4 - {kvb}",   // PML4 の LMA（= 物理）
+    "zaytos_tramp_stack: .quad zaytos_boot_stack_top",       // 高位 VA
+    "zaytos_tramp_entry: .quad _start",                      // 高位 VA
+    kvb = const kernel::link_symbols::KERNEL_VIRT_BASE,
+);
+
+// 静的初期ページテーブル。リンク時計算で全エントリを確定する（フレーム
+// アロケータ不使用）。2MiB ページのみ。フレーム共有で 4 フレーム = 16KiB。
+//   PML4[0]    -> PDPT_low     恒等（松葉杖。切り替えの瞬間と M2-d 切り替えまで）
+//   PML4[511]  -> PDPT_high    高位カーネル（0xFFFFFFFF80000000 起点）
+//   PDPT_low[0]   -> PD_shared
+//   PDPT_high[510]-> PD_shared （**同一 PD を共有**）
+//   PD_shared[i]  = (i << 21) | 0x83   物理 i*2MiB、P|RW|PS
+// PD エントリは「到達した仮想パス」ではなく「物理ターゲット + フラグ」だけを
+// 符号化するため、恒等窓（VA=i*2MiB）と高位窓（VA=0xFFFFFFFF80000000+i*2MiB）が
+// 1 枚の PD を共有できる。恒等・高位とも cacheable RW・NX なし（NXE 未有効）で
+// フラグが同一なので成立する。恒等・高位とも [0,1GiB) を覆う。フレームバッファ
+// （物理 2GiB）は範囲外なのでキャッシュ属性の別名は生じない（ADR-0021）。
+// 高位窓が [0,1GiB) を覆うのはカーネルイメージだけあれば足りる範囲を PD 共有の
+// 副作用で超えているが、bootstrap を使うのは M2-d 切り替えまでで、その間高位 VA に
+// 触れるのはコード・データ・ブートスタック（すべてイメージ内）なので実害はない
+// （指摘5）。M2-d 切り替え後は本流テーブルへ移り、高位の可視範囲はイメージ長へ狭まる。
+core::arch::global_asm!(
+    ".section .data.bootpt,\"aw\",@progbits",
+    ".p2align 12",
+    ".globl zaytos_boot_pml4",
+    "zaytos_boot_pml4:",
+    "  .quad zaytos_boot_pdpt_low - {kvb} + 0x03",
+    "  .fill 510, 8, 0",
+    "  .quad zaytos_boot_pdpt_high - {kvb} + 0x03",
+    ".p2align 12",
+    "zaytos_boot_pdpt_low:",
+    "  .quad zaytos_boot_pd_shared - {kvb} + 0x03",
+    "  .fill 511, 8, 0",
+    ".p2align 12",
+    "zaytos_boot_pdpt_high:",
+    "  .fill 510, 8, 0",
+    "  .quad zaytos_boot_pd_shared - {kvb} + 0x03",
+    "  .fill 1, 8, 0",
+    ".p2align 12",
+    "zaytos_boot_pd_shared:",
+    "  .set idx, 0",
+    "  .rept 512",
+    "    .quad (idx << 21) | 0x83",
+    "    .set idx, idx + 1",
+    "  .endr",
+    kvb = const kernel::link_symbols::KERNEL_VIRT_BASE,
+);
+
+/// ブートスタックの大きさ。トランポリンが CR3 切り替え後に RSP をここへ移す。
+/// `_start` 序盤（プロローグ・gdt/idt::init・BOOT_HANDOFF 書き込み・
+/// switch_to_kernel_stack_and_run 呼び）だけで使う浅いスタック。深さは
+/// [`report_boot_stack_usage`] が実測する（要確認2）。
+const BOOT_STACK_SIZE: usize = 16 * 1024;
+
+/// ブートスタックの毒値。既存のカーネルスタックのカナリア（`stack::CANARY_BYTE`）
+/// と同じ 0xC5 にして、ログに出たときに同種の会計だと分かるようにする。
+const BOOT_STACK_POISON: u8 = 0xC5;
+
+// ブートスタックは 0xC5 で初期化する（.bss ではなく初期化データ）。使用後に
+// 未使用部分を数えて最大深さを実測するため。ガードページは無いので、この会計が
+// オーバーフローの唯一の観測手段になる。
+core::arch::global_asm!(
+    ".section .data.bootstack,\"aw\",@progbits",
+    ".p2align 12",
+    ".globl zaytos_boot_stack",
+    "zaytos_boot_stack:",
+    "  .fill 16384, 1, 0xC5",
+    ".globl zaytos_boot_stack_top",
+    "zaytos_boot_stack_top:",
+);
+
+// `zaytos_trampoline` / `zaytos_boot_pml4` は asm 内で参照され `.globl` で
+// エクスポートされる（静的検査で nm/objdump が拾う）。Rust からは触らないので
+// extern 宣言は置かない。`zaytos_boot_stack` だけ深さ実測で読むため宣言する。
+extern "C" {
+    /// ブートスタックの下端（低位側）。深さ実測の走査起点。
+    static zaytos_boot_stack: u8;
+}
+
+/// ブートスタックの最大深さを実測してログに出す（要確認2）。
+///
+/// ブートスタックは 0xC5 で初期化してあり、`_start` が上端から下へ使う。
+/// 下端から走査して連続する毒値の数（未使用バイト数）を数え、使用量を出す。
+/// ガードページを持たないブートスタックの、オーバーフロー検出を兼ねた会計。
+/// トランポリンがまだ稼働しない B-2a-2 では、ブートスタックは未使用のままなので
+/// 使用量 0 と出る（会計機構そのものの確認）。B-2a-3 で実際の深さが出る。
+fn report_boot_stack_usage(logger: &mut Logger<SerialPort>) {
+    let base = addr_of!(zaytos_boot_stack);
+    let mut unused = 0usize;
+    while unused < BOOT_STACK_SIZE {
+        // SAFETY: base..base+BOOT_STACK_SIZE は静的なブートスタックの範囲内。
+        // 読み取りのみ。
+        let byte = unsafe { core::ptr::read_volatile(base.add(unused)) };
+        if byte != BOOT_STACK_POISON {
+            break;
+        }
+        unused += 1;
+    }
+    let used = BOOT_STACK_SIZE - unused;
+    logger.info(format_args!(
+        "boot stack: {used} of {BOOT_STACK_SIZE} bytes used (high-water; {unused} bytes poison intact)"
+    ));
+}
+
 /// .bss ゼロ埋めが実際に機能しているかを実地検証するための、意図的に
 /// 非ゼロサイズの `.bss` を作る静的変数（M2-0c 固有の要求）。全要素 0
 /// 初期化のため通常 `.bss`（NOBITS）に配置される。
@@ -185,6 +317,10 @@ extern "sysv64" fn kernel_main() -> ! {
     let mut logger = Logger::new(serial, LogLevel::Trace);
 
     logger.info(format_args!("ZaytOS kernel: entered _start"));
+
+    // ブートスタックの深さ会計（B-2a）。トランポリンがまだ稼働しない B-2a-2 では
+    // 使用量 0 と出る（機構の確認）。B-2a-3 で実際の深さが出る。
+    report_boot_stack_usage(&mut logger);
 
     // SAFETY: _start が switch_to_kernel_stack_and_run より前に書き込み済みで、
     // 以降は誰も書き換えない。読み取りのみ。
@@ -465,6 +601,15 @@ extern "sysv64" fn kernel_main() -> ! {
         cpu::halt_forever();
     }
 
+    // higher-half（B-2a）: kernel イメージを高位（KERNEL_VIRT_BASE + phys）にも張る。
+    // base=0 では高位 VA == 恒等 VA で、既にこのビルダーが恒等で張った 4KiB PT を
+    // 同一物理・同一フラグで上書きするだけ（冪等、新規フレーム 0）。イメージは
+    // [0x100000, 0x200000) の 4KiB 領域に収まるので、2MiB huge との衝突
+    // （ensure_child の UnexpectedHugePageEntry）は起きない。再リンク（B-2a-3）後は
+    // PML4[511] 配下に実マッピングを作る。これがないと、再リンク後にこのテーブルへ
+    // CR3 を切り替えた瞬間、高位で走るコードが見えなくなって即死する。
+    map_kernel_high_half(&mut builder, &mut logger);
+
     logger.info(format_args!(
         "paging: {huge_page_count} huge (2MiB) page(s), {small_page_count} small (4KiB) page(s), \
          {} frame(s) consumed for page tables",
@@ -533,15 +678,26 @@ extern "sysv64" fn kernel_main() -> ! {
             .checked_add(frame_allocator::FRAME_SIZE)
             .expect("a page table frame stays within the physical address range"),
     );
+    // **恒等前提の箇所（2）。** RSP と RIP は kernel イメージ内（スタックは
+    // .bss、コードは .text）を指すので、恒等ではなくイメージのリンク差
+    // （KERNEL_VIRT_BASE）で物理へ変換する。再リンク（B-2a-3）で RSP/RIP が
+    // 高位になっても、この変換なら物理へ戻せる。base=0 では素通し。BootInfo・
+    // メモリマップ・フレームバッファは kernel イメージ外（低位のまま）なので
+    // 恒等のままにする（上の check_range 参照）。
+    let image_phys = |virt: u64| {
+        kernel::kernel_phys_from_virt(
+            common::addr::VirtAddr::new(virt).expect("an rsp/rip value is canonical"),
+        )
+    };
     check_range(
         "current RSP",
-        identity(current_rsp),
-        identity(current_rsp + 1),
+        image_phys(current_rsp),
+        image_phys(current_rsp + 1),
     );
     check_range(
         "current RIP",
-        identity(current_rip),
-        identity(current_rip + 1),
+        image_phys(current_rip),
+        image_phys(current_rip + 1),
     );
 
     if !all_required_ok {
@@ -4263,6 +4419,11 @@ fn build_and_switch_direct_map(
         }
     }
 
+    // higher-half（B-2a）: この本流テーブルにも kernel イメージの高位マッピングを
+    // 張る。base=0 では冪等（新規フレーム 0）。base=高位（B-2a-3）では再リンク後に
+    // このテーブルへ CR3 を切り替えても高位コードが見え続けるようにする。
+    map_kernel_high_half(&mut builder, logger);
+
     let new_pml4 = builder.pml4_phys();
     let frames_used = builder.frames_used();
     logger.info(format_args!(
@@ -4777,6 +4938,47 @@ fn install_kernel_stack_guard_page(logger: &mut Logger<SerialPort>) {
 /// 確かめる。
 ///
 /// direct map の高位窓はこの段階の対象外である。作るのは
+/// kernel イメージを高位（`KERNEL_VIRT_BASE + phys`）へ張る（B-2a）。
+///
+/// M2-d・A-1 の両テーブルで共通に使う。base=0 では、ビルダーが既に恒等で
+/// 張った 4KiB PT を同一物理・同一フラグで上書きするだけで冪等になる（新規
+/// フレーム 0）。イメージは `[0x100000, 0x200000)` の 4KiB 領域に収まるので、
+/// 2MiB huge との衝突（`ensure_child` の `UnexpectedHugePageEntry`）は起きない。
+/// base=高位（B-2a-3）では `PML4[511]` 配下に実マッピングを作り、再リンク後に
+/// このテーブルへ CR3 を切り替えても高位で走るコードが見え続けるようにする。
+/// 丸めは 4KiB（H-2 と同一。要確認1）。
+fn map_kernel_high_half<const CAP: usize>(
+    builder: &mut PageTableBuilder<'_, CAP>,
+    logger: &mut Logger<SerialPort>,
+) {
+    let (image_start, image_end) = kernel_image_phys_range();
+    let image_len =
+        (image_end.as_u64() - image_start.as_u64()).next_multiple_of(frame_allocator::FRAME_SIZE);
+    let high_start = kernel::kernel_virt_from_phys(image_start);
+    // 高位マッピングが消費した中間テーブルのフレーム数を会計する。base=0 では
+    // 恒等が既に張った PT を上書きするだけなので 0 のはずで、それをログで確かめる。
+    // base=高位（B-2a-3）では PML4[511] 配下の新規部分木の分だけ増える。
+    let frames_before = builder.frames_used();
+    if let Err(e) = builder.map_range(high_start, image_start, image_len, true) {
+        logger.error(format_args!(
+            "higher-half: kernel high mapping ({:#x} -> phys {:#x}, len {:#x}) failed: {e:?}",
+            high_start.as_u64(),
+            image_start.as_u64(),
+            image_len
+        ));
+        cpu::halt_forever();
+    }
+    let high_frames = builder.frames_used() - frames_before;
+    logger.info(format_args!(
+        "higher-half: kernel image {:#x}..{:#x} mapped at {:#x} (len {:#x}), \
+         {high_frames} new page-table frame(s)",
+        image_start.as_u64(),
+        image_end.as_u64(),
+        high_start.as_u64(),
+        image_len
+    ));
+}
+
 /// **kernel イメージの高位マッピング**（`KERNEL_VIRT_BASE + (phys - LMA)`）
 /// だけで、これは direct map とは別の対応である。ログでもそう明示する。
 fn build_and_verify_high_half(
@@ -5046,7 +5248,13 @@ fn build_switch_probe_high_half(
     ));
 
     // プローブの物理と、これから CALL する高位 VA（常に TEST_HIGH_BASE。破壊時は張られていない）。
-    let probe_phys = core::ptr::addr_of!(zaytos_high_probe) as u64;
+    // addr_of! はリンクアドレス（VMA）を返す。再リンク（B-2a-3）後は高位になるので、
+    // イメージのリンク差で物理へ戻す。base=0 では素通し。
+    let probe_phys = kernel::kernel_phys_from_virt(
+        common::addr::VirtAddr::new(core::ptr::addr_of!(zaytos_high_probe) as u64)
+            .expect("the probe symbol is canonical"),
+    )
+    .as_u64();
     let probe_high = TEST_HIGH_BASE.wrapping_add(probe_phys);
 
     // 現 RSP を読む（必須領域検証に使う）。
