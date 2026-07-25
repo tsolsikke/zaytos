@@ -459,6 +459,10 @@ extern "sysv64" fn kernel_main() -> ! {
     verify_critical_sections(&mut logger);
     configure_pic(&mut logger);
 
+    // **恒等前提の箇所。** handoff.boot_info は UEFI が低位に置いた物理ポインタで、
+    // 恒等マッピングの間だけ低位 VA として参照できる。B-2b で恒等を外す前に
+    // direct map 高位窓経由へ移す（恒等前提の網羅列挙は
+    // docs/verification-coverage.md の「higher-half B-2b」を参照）。
     // SAFETY: 呼び出し元契約（`_start` の # Safety）により、boot_info は
     // 有効な BootInfo を指す。ここでは読み取り専用の参照を作るのみ。
     let boot_info = unsafe { &*handoff.boot_info };
@@ -742,7 +746,7 @@ extern "sysv64" fn kernel_main() -> ! {
     let (kernel_start_phys, kernel_end_phys) = kernel_image_phys_range();
     let kernel_start = kernel_start_phys.as_u64();
 
-    // **恒等前提の箇所（1）。** BootInfo・RSP・RIP はいずれも仮想アドレス
+    // **恒等前提の箇所。** BootInfo・RSP・RIP はいずれも仮想アドレス
     // として得た値だが、物理アドレスの範囲を見る `check_range` へ渡している。
     // 恒等マッピングだから通っているだけで、higher-half 移行では
     // 変換を挟むか、別の検証へ分ける必要がある。
@@ -798,7 +802,7 @@ extern "sysv64" fn kernel_main() -> ! {
             .checked_add(frame_allocator::FRAME_SIZE)
             .expect("a page table frame stays within the physical address range"),
     );
-    // **恒等前提の箇所（2）。** RSP と RIP は kernel イメージ内（スタックは
+    // **恒等前提の箇所。** RSP と RIP は kernel イメージ内（スタックは
     // .bss、コードは .text）を指すので、恒等ではなくイメージのリンク差
     // （KERNEL_VIRT_BASE）で物理へ変換する。再リンク（B-2a-3）で RSP/RIP が
     // 高位になっても、この変換なら物理へ戻せる。base=0 では素通し。BootInfo・
@@ -1044,6 +1048,9 @@ extern "sysv64" fn kernel_main() -> ! {
     // ばかりの、他の誰も使っていない領域であり、直前に mapped_ranges で
     // マップ済みであることも確認済み。このヒープに対する `init` 呼び出しは
     // これが最初で最後(1回のみ)。
+    // **恒等前提の箇所。** heap_start は物理値で、恒等の間だけ低位 VA として通る。
+    // B-2b で phys_to_virt(heap_start) の高位 VA で init する（網羅列挙は
+    // docs/verification-coverage.md の「higher-half B-2b」を参照）。
     unsafe {
         ALLOCATOR.init(heap_start, heap_size);
     }

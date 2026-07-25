@@ -293,15 +293,31 @@ pub struct DirectMap {
 
 impl DirectMap {
     /// 窓を作る。上端が正規形に収まらなければ `None`。
-    pub const fn new(base: VirtAddr, length: u64) -> Option<Self> {
-        match base.checked_add(length) {
-            Some(_) => Some(Self { base, length }),
-            None => None,
+    ///
+    /// **恒等窓（`base==0`）は恒等除去（B-2b）の後に作ってはならない。** 除去後の
+    /// 恒等窓構築は「低位ポインタを除去後に使おうとしている」ことの兆候なので、
+    /// [`mark_identity_removed`] が呼ばれていれば fail-fast する。これが恒等の
+    /// 利用を守る単一の関門である（`identity()` もここを通る。`new(base==0)` の
+    /// 直接呼び出しも捕まる）。高位窓（`base!=0`、direct map など）は対象外。
+    ///
+    /// **この関門のため `const fn` にできない**（実行時にフラグを読む）。const 文脈
+    /// での利用が無いことを確認して外した。**const へ戻すには関門を外すことになり、
+    /// 恒等除去後の誤用を捕まえる安全網が静かに消える。** 戻さないこと。
+    pub fn new(base: VirtAddr, length: u64) -> Option<Self> {
+        if base.as_u64() == 0 {
+            use core::sync::atomic::Ordering;
+            assert!(
+                !direct_map_slot::IDENTITY_REMOVED.load(Ordering::SeqCst),
+                "identity DirectMap (base==0) constructed after the identity mapping was \
+                 removed (B-2b): a low pointer is being used past the removal point"
+            );
         }
+        base.checked_add(length).map(|_| Self { base, length })
     }
 
-    /// 恒等マッピング用（T-1 から higher-half 移行まで）。
-    pub const fn identity(length: u64) -> Option<Self> {
+    /// 恒等マッピング用（T-1 から higher-half 移行まで）。恒等除去後は
+    /// [`Self::new`] の関門で fail-fast する。
+    pub fn identity(length: u64) -> Option<Self> {
         Self::new(VirtAddr::new_const(0), length)
     }
 
@@ -422,6 +438,22 @@ mod direct_map_slot {
     pub(super) static BASE: AtomicU64 = AtomicU64::new(0);
     pub(super) static LENGTH: AtomicU64 = AtomicU64::new(0);
     pub(super) static READY: AtomicBool = AtomicBool::new(false);
+
+    /// 恒等マッピング（`PML4[0]`）を除去した後 `true` になる（B-2b）。
+    /// 除去後に恒等窓（`DirectMap::new(base==0)`、`identity()`を含む）を作ろうと
+    /// する試みを [`super::DirectMap::new`] が fail-fast で捕まえる（反転設計:
+    /// 恒等の利用者を列挙して守るのではなく、除去済みかを構築の関門で見る）。
+    pub(super) static IDENTITY_REMOVED: AtomicBool = AtomicBool::new(false);
+}
+
+/// 恒等マッピングを除去したことを記録する（B-2b-4）。以降、恒等窓
+/// （`DirectMap::new(base==0)` / `DirectMap::identity`）の構築は fail-fast する。
+///
+/// **除去（`PML4[0]`を落とし CR3 リロードで TLB を流す）が完了した後に呼ぶこと。**
+/// これより前に呼ぶと、まだ恒等が生きているのに恒等窓の構築が止まる。
+pub fn mark_identity_removed() {
+    use core::sync::atomic::Ordering;
+    direct_map_slot::IDENTITY_REMOVED.store(true, Ordering::SeqCst);
 }
 
 /// [`init_direct_map`] が失敗した理由。
@@ -488,6 +520,12 @@ pub unsafe fn replace_direct_map(map: DirectMap) -> Result<(), DirectMapInitErro
 /// 散らばるだけで実質同じなので、ここで止める（ADR-0004 の fail-fast）。
 ///
 /// **パニック経路と例外ハンドラから呼んではならない。** 無限再帰になる。
+///
+/// この関数は登録窓をモジュール内の構造体リテラルで再構築するので、
+/// [`DirectMap::new`] の恒等除去の関門を通らない。恒等除去（B-2b）の後に
+/// `direct_map()` が恒等窓（`base==0`）を返すことは起きない。登録窓は A-2
+/// （[`replace_direct_map`]）が高位窓（`base!=0`）へ差し替え済みで、除去より
+/// はるか前だからである。A-2 の順序を変えるとこの前提が崩れる。
 pub fn direct_map() -> DirectMap {
     use core::sync::atomic::Ordering;
 
