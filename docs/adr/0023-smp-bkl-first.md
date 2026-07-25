@@ -67,6 +67,6 @@ BKLを分割して性能を上げる（細粒度ロック化）のはroadmapに�
 ## Consequences
 
 - ADR-0002の「シングルコア前提」は当面有効。本ADRはその「将来のマイルストーン」をBKLで具体化し、roadmapへ移す。ADR-0002はSupersededにしない。
-- ADR-0009のSupersede / ADR-0021のAddendum（higher-half B、B-2着手時）で書く「SMP非閉塞」（PML4[257..510]をper-CPU用に温存、GSベース温存）は、"非閉塞"から"BKLで実装する"根拠へ更新する。この接続はB-2のADRで書く。
+- ADR-0009のSupersede / ADR-0021のAddendum（higher-half B、B-2着手時）で書く「SMP非閉塞」（PML4[257..510]をper-CPU用に温存、GSベース温存）は、"非閉塞"から"BKLで実装する"根拠へ更新する。この接続はB-2のADRで書く。**この申し送りはADR-0024（ADR-0009をSupersede）で果たした**（PML4[256]=direct map、PML4[511]=kernel、PML4[257..510]=BKLのper-CPU用に温存、を数値で記録）。
 - `Locked<T>`の中身は、BKL導入時に「IF=0だけ」からスピンロック/アトミック併用へ差し替える。呼び出し側インターフェースを安定させてきた（ADR-0002）ことで影響範囲が狭い。
 - APIC / ACPI（MADT）の解禁条件が「BKL本体着手時」に定まる。`deferred-decisions.md`の該当行に申し送りを追記する（BKL本体は未着手のため、確定的な書き換えは着手時に行う）。

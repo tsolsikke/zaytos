@@ -152,6 +152,10 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 | `syscall-test-copy-skip-validate` | `copy_from_user` が検証を経ず `UserSlice` をモジュール内で直接構築して読む | カーネルポインタで `-EFAULT` のはずが総和が返り、内容往復の検証が `checksum case 'kernel pointer' expected reject` で止まること（copy が検証を尊重することの実証） |
 | `syscall-test-copy-overrun` | `copy_from_user` が `len` を 1 バイト超えて読む | 末尾の余分な既知バイトが総和へ混ざり、`checksum mismatch` で決定的に止まること（bounded read が範囲を守ることの実証。#PF は副次的位置づけ） |
 | `gfx-test-pattern` | コンソールを起動せず描画テストパターンを描く | 描画の基盤 |
+| `highhalf-no-identity-in-boot-pt` | 静的初期テーブルの `PML4[0]`（恒等）の P ビットをクリアする（`0x03`→`0x02`） | `mov cr3` 直後の低位命令フェッチが解決できず起動が進まないこと。判定=位置署名（bootloader の `kernel entry: VMA` present / カーネルの `entered _start` absent）+ heartbeat=0（下記注記参照。cpu_reset では判定しない） |
+| `highhalf-bad-high-slot` | 静的初期テーブルの `PDPT_high` のエントリを `510`→`509` へずらす | 高位 `_start` への jmp 先が未マップで起動が進まないこと。判定は `no-identity-in-boot-pt` と同一署名 |
+| `highhalf-no-kernel-high-in-live-table` | M2-d/A-1 の `map_kernel_high_half` 呼び出しを外す（本流テーブルにカーネル高位マッピングを張らない） | M2-d の CR3 切替後に高位で #PF して停止すること。判定=`higher-half: arrived at high VA` present / `paging: CR3 switch verified` absent + heartbeat=0 |
+| `highhalf-trampoline-absolute-ref` | トランポリンに絶対メモリ参照命令（`mov rbx, [0x2000]`）を 1 命令挿入する | トランポリンのバイト単位一致検査が落ちること（**静的検査。QEMU 不要**。実行時は `0x2000` が恒等で読めるので落ちない） |
 
 これらが有効なビルドでは、起動時に`test hooks:`のWARNが出て内訳が列挙される。
 何も有効でない場合も`test hooks: none enabled (this is a normal build)`と1行出す。
@@ -178,6 +182,16 @@ int 0x80システムコールの検証（M5-f-1-2）について、2点を明記
 - **型で保証される範囲と、規律で守る範囲の境界。** `UserSlice`はフィールドprivateで公開コンストラクタを持たず、構築できるのは検証器`validate_user_range`だけである。`copy_from_user`が`&UserSlice`を要求するので、**モジュール外の全呼び出し元に対しては「検証を経ないとユーザーメモリを読めない」ことが型で保証される。** ただしこの保証はモジュール境界に依存する。同一`syscall.rs`モジュール内からはprivateフィールドに触れるため`UserSlice { .. }`を直接構築できてしまう。したがってモジュール内の直接構築は`copy-skip-validate`破壊feature専用であり、通常コードでは行わない（この規律は型ではなくレビューで守る）。`copy-skip-validate`はまさにこの境界を突く破壊である。
 - **TOCTOU（検証と読みのアトミック性）は構造条件に依存する。** 検証と読みが実質アトミックなのは、`syscall_entry`が割り込みゲート（IF=0）で入りプリエンプトが来ないこと、シングルコアであること、ユーザーページをアンマップする経路が`syscall`中に走らないこと、の構造条件による。**将来IFを立てる`syscall`（長時間ブロッキング等）を導入すると、この前提が崩れTOCTOU（検証後・読み前にアンマップ/再マップ）が現実化する**ため再検証が要る。`user_range_accessible`のレイアウト依存と同じ、安全性の成立が構造条件に依存することの記録である。
 - **`UserSlice`の有効期間は同一`syscall`内・同一アドレス空間に限る。** 跨いで保持しない（staticに置かない）。higher-half B後のプロセス別アドレス空間では、トークンは「そのCR3の下でのみ有効」になるため、CR3を跨いで使わない制約をf-3で型（世代/CR3を持たせる等）またはdocで担保する（再確認の申し送り）。加えて、`SYS_CHECKSUM`のバッファ容量超過（`len > CHECKSUM_BUF_LEN`）を現状`-EFAULT`で代用しているが、意味的には「容量超過」でありポインタ不正（Bad address）とは異なる。errno体系が育つ段（POSIX互換の構想）で見直す。
+
+higher-halfの破壊feature（B-2a-5、破壊feature `highhalf-*`）について、5点を明記する。
+
+- **(a)(b)(c)はトリプルフォルト（cpu_reset）しない。判定にcpu_resetを使わない。** これは直感に反するので明記する。(a)(b)はトランポリン/最初期の#PFが**我々のIDT導入前**に起きるため、UEFIのIDTが拾いファームウェアが制御を取り戻す（-d intにファームウェア領域のRIP、CR3=firmware、INT 0x20 servicingが残る）。(c)はM2-d切替後に高位で#PFして停止する（ファームウェア復帰もしない）。いずれもCPU Resetは起動時の2回のまま増えない。**cpu_resetを判定条件にすると4種すべてFALSEで通ってしまう（実際に最初cpu_resetで判定して4種FAILした）。** したがって判定は位置署名（present/absentマーカー）+定常未到達（heartbeat=0）で行い、cpu_reset数とファームウェア復帰の有無は参考情報として出す。将来「cpu_resetで判定すべきでは」と誤って直さないための記録である。
+- **(a)(b)がファームウェアへ制御を渡す機構は完全には解明していない。** UEFIのIDTが#PFをどう処理して自身のアイドルループへ戻すのかは追っていない。テストの妥当性（位置署名+定常未到達）には影響しないが、解明済みではない。
+- **(a)(b)の失敗モードはファームウェアへ逃げる形なので、OVMFのバージョン更新時にこの2テストの挙動が変わりうる。** UEFIのIDT/フォルト処理が変われば、位置署名やheartbeat=0の成立が崩れる可能性がある。OVMFを更新したときの確認対象とする。
+- **M2-d/A-1の切替前検査は物理範囲のメンバシップ検査のみで、高位マッピングの欠落を検出しない。** `highhalf-no-kernel-high-in-live-table`(c)がこれを実証した。必須マッピング検証は「切替後の必須領域が物理範囲に属するか」を見るだけで、A-1/B-1が持つ「新テーブルを独立walkerで実際に引く」検査を持たない。恒等が物理を覆っている限り高位マッピングの欠落を見逃す。walkベースへの強化はB-2bの検討事項（ADR-0024 / ADR-0021 B Addendum）。
+- **トランポリンのバイト単位一致検査（base検査）。** ビルド済みkernel.elfの入口24バイトを期待リテラルと比較する（`common::elf`再利用、新規外部クレートなし）。既定ビルドで一致（B-2a-2/B-2a-3b/B-2a-5で3度、再リンク・B-1撤去を跨いで不変を実証）、`highhalf-trampoline-absolute-ref`で不一致。rel32がすべて`.text.trampoline`内なので配置非依存で安定。`cargo xtask check`のbase検査なので`--full`でなくても毎回走る。
+
+**項目会計（B-2a-5）**: base検査は13→14（トランポリンのバイト一致検査を追加）。`cargo xtask check`=14項目。`cargo xtask check --full`=56→61（base14 + QEMU43 + highhalf4[a/b/cのQEMU + dの静的]）。以前の報告にあった「QEMU 42」は43が正しい（56 = base13 + QEMU43）。
 
 ### 検査や計測が正しく機能していなかった事例
 

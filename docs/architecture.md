@@ -29,7 +29,7 @@
 | デバッグ観測 | シリアルログ最優先 | ADR-0003 |
 | パニック方針 | 即停止 + レジスタダンプ（fail-fast） | ADR-0004 |
 | 開発言語 | Rust | ADR-0005 |
-| kernelリンクアドレス | 低位固定`0x100000`（非PIE） | ADR-0009 |
+| kernelリンクアドレス | higher-half`0xFFFFFFFF80000000`（VMA、LMAは低位`0x100000`、非PIE） | ADR-0024（ADR-0009をSupersede） |
 | 物理フレーム管理 | 範囲リスト（固定長256） | ADR-0011 |
 | カーネルヒープ | 侵入型連結リスト（隣接結合あり） | ADR-0012 |
 | 画面描画 | 検証済み形状に対する直接描画、`Rgb`/`Bgr`のみ | ADR-0013 |
@@ -88,8 +88,8 @@ M4（割り込みハンドラ）・M5（コンテキストスイッチ）で影�
 | `disable-redzone` | `true` | レッドゾーン無効。割り込みハンドラが現在のスタックをそのまま使っても、呼び出し元のレッドゾーン領域を破壊する心配がない。**M4の割り込みハンドラはこの設定に依存している**（下記参照）。 |
 | `features` | `-sse,-sse2,...,-avx2,+soft-float` | SSE/AVX全無効・ソフトウェア浮動小数点。通常のコード生成がXMM/YMMレジスタを一切使わないため、M4の割り込みハンドラでFPU/SSEレジスタの退避・復帰は不要（今後SSEを明示的に有効化する場合を除く）。 |
 | `panic-strategy` | `abort` | unwind情報不要。bootloader側の判断（M1）と一致。 |
-| `code-model` | `kernel`（高位負アドレス前提） | kernelをhigher-half（例: `0xffffffff80000000`付近）にリンクする前提の設定。ADR-0009で低位アドレスを採用したため、`small`へ明示的に上書きしている（`.cargo/config.toml`）。 |
-| `position-independent-executables` | `true`（PIE既定） | ADR-0009の低位固定アドレスリンクと相性が悪いため、`relocation-model=static`で無効化している（`.cargo/config.toml`）。 |
+| `code-model` | `kernel`（高位負アドレス前提） | kernelをhigher-half（`0xffffffff80000000`）へリンクするので、既定の`kernel`をそのまま使う（ADR-0024）。恒等リンクの間は`small`へ上書きしていたが、B-2a-3の再リンクで既定へ戻した（ADR-0009、`.cargo/config.toml`）。 |
+| `position-independent-executables` | `true`（PIE既定） | 固定アドレスへの静的リンク（higher-half、ADR-0024）と相性が悪いため、`relocation-model=static`で無効化している（`.cargo/config.toml`）。 |
 
 上記の`code-model` / `relocation-model`の上書きは`.cargo/config.toml`の`[target.x86_64-unknown-none]`セクションに集約している。
 
