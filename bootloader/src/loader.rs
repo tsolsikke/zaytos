@@ -53,16 +53,37 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
             elf.entry_point
         ));
 
+        // kernel は higher-half（VMA=高位のリンクアドレス、LMA=低位のロード
+        // アドレス）へリンクされうる。ELF の p_vaddr はリンクアドレス（VMA）、
+        // p_paddr はロードアドレス（LMA）である。bootloader が実際にセグメントを
+        // 置くのは物理メモリ = LMA なので、配置とゼロ埋めには p_paddr を使う。
+        // 恒等リンク（KERNEL_VIRT_BASE=0）では p_vaddr == p_paddr なので、この
+        // 変更は振る舞いを変えない。
         let mut region_start = u64::MAX;
         let mut region_end = 0u64;
+        let mut load_delta: Option<u64> = None;
         for seg in elf.load_segments() {
-            region_start = region_start.min(seg.p_vaddr);
-            region_end = region_end.max(seg.p_vaddr + seg.p_memsz);
+            region_start = region_start.min(seg.p_paddr);
+            region_end = region_end.max(seg.p_paddr + seg.p_memsz);
+            // VMA と LMA の差（= KERNEL_VIRT_BASE）は全 PT_LOAD で一致する。
+            // 食い違えばリンカスクリプトが壊れているので、握りつぶさず落とす。
+            let delta = seg
+                .p_vaddr
+                .checked_sub(seg.p_paddr)
+                .expect("a PT_LOAD segment has p_vaddr below p_paddr");
+            match load_delta {
+                None => load_delta = Some(delta),
+                Some(existing) => assert_eq!(
+                    existing, delta,
+                    "PT_LOAD segments disagree on p_vaddr - p_paddr"
+                ),
+            }
         }
         assert!(
             region_start < region_end,
             "kernel.elf has no PT_LOAD segments"
         );
+        let load_delta = load_delta.expect("kernel.elf has no PT_LOAD segments");
         region_start = align_down(region_start, PAGE_SIZE);
         region_end = align_up(region_end, PAGE_SIZE);
         let page_count = ((region_end - region_start) / PAGE_SIZE) as usize;
@@ -100,7 +121,7 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
 
         for seg in elf.load_segments() {
             let file_data = elf.segment_data(&seg);
-            let dst = seg.p_vaddr as *mut u8;
+            let dst = seg.p_paddr as *mut u8;
             // SAFETY: `dst..dst + p_memsz` lies within `region_start..region_end`,
             // which we just exclusively allocated above via AllocatePages(Address).
             // `file_data.len() == p_filesz <= p_memsz` is guaranteed by the ELF
@@ -116,7 +137,20 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
             "kernel segments placed and .bss zeroed ({region_start:#x}..{region_end:#x})"
         ));
 
-        elf.entry_point
+        // entry_point は VMA（higher-half では高位のリンクアドレス）である。
+        // bootloader は物理メモリの上で動いており、まだ高位マッピングを張って
+        // いないため、飛び先は LMA に変換した低位アドレスにする。恒等リンクでは
+        // load_delta=0 なので素通しで、entry_point と一致する。higher-half では
+        // これがトランポリンの低位アドレスになる。
+        let low_entry = elf
+            .entry_point
+            .checked_sub(load_delta)
+            .expect("the ELF entry point is below the kernel's link base");
+        logger.info(format_args!(
+            "kernel entry: VMA {:#x} -> load address {low_entry:#x} (delta {load_delta:#x})",
+            elf.entry_point
+        ));
+        low_entry
     };
 
     // --- 2. GOP フレームバッファ情報の取得（ExitBootServices 前のみ可能） ---
