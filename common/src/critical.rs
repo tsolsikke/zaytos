@@ -15,6 +15,7 @@ use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::cpu;
+use crate::percpu::{PerCpu, MAX_CPUS};
 use crate::serial::SerialPort;
 
 /// 現在保持している [`InterruptGuard`] の数（クリティカルセクションの入れ子
@@ -30,16 +31,34 @@ use crate::serial::SerialPort;
 /// [`Locked`] は `lock()` の中で `InterruptGuard` を 1 つ保持するので、
 /// `InterruptGuard` の数を数えれば `Locked` の保持も覆う。
 ///
-/// 増減は必ず割り込み禁止（`cli` 済み）の区間で行うため、シングルコアでは
-/// `Relaxed` で十分（メモリ順序の問題は SMP 特有。ADR-0002 のスコープ外）。
-static CRITICAL_NESTING_DEPTH: AtomicUsize = AtomicUsize::new(0);
+/// # CPUごとに持つ（seam整備3b、ADR-0023）
+///
+/// 入れ子深さは [`PerCpu`] でCPUごとに持つ。各コアは自分のスロットだけを
+/// 触る。「このコアが今クリティカルセクションの中にいるか」「保持したまま
+/// `yield` していないか」はいずれもコアローカルな問いなので、per-CPU が正しい
+/// 単位である（別コアの入れ子深さは、このコアの `yield` 判定に無関係）。
+/// シングルコア（[`crate::percpu::MAX_CPUS`]` = 1`）では [`PerCpu::this_cpu`] が
+/// 常に唯一のスロットを返すので、振る舞いは従来の単一カウンタと同一である。
+///
+/// 増減は必ず割り込み禁止（`cli` 済み）の区間で、かつ自コアのスロットに対して
+/// のみ行うため、`Relaxed` で十分。他コアが同じスロットへ触ることはないので、
+/// SMP でもメモリ順序の考慮は要らない（隣接スロットの false sharing は性能の
+/// 問題で、この値の正しさには影響しない。[`crate::percpu::MAX_CPUS`] の注意）。
+///
+/// **将来の条件**: 他コアからこのスロットを読む用途（パニック時に全コアの
+/// 入れ子深さをダンプする診断など）を足すなら、`Relaxed` の根拠が変わるので
+/// 見直すこと。上の「他コアが同じスロットへ触ることはない」は現在の不変条件で
+/// あり、クロスコア読みが入ると成り立たなくなる（BKL本体では複数コアの
+/// デバッグをするので、この種の診断は実際に欲しくなりうる）。
+static CRITICAL_NESTING_DEPTH: PerCpu<AtomicUsize> =
+    PerCpu::new([const { AtomicUsize::new(0) }; MAX_CPUS]);
 
 /// 現在のクリティカルセクションの入れ子深さ（保持中の `InterruptGuard` の数）。
 ///
 /// `0` なら、どの `InterruptGuard` / `Locked` も保持していない。`yield` は
 /// これが `0` でなければ fail-fast する（`IF` は見ない）。
 pub fn critical_nesting_depth() -> usize {
-    CRITICAL_NESTING_DEPTH.load(Ordering::Relaxed)
+    CRITICAL_NESTING_DEPTH.this_cpu().load(Ordering::Relaxed)
 }
 
 /// preempt-in-critical の破壊確認（M5-d）で、サボタージュ（[`InterruptGuard`] の
@@ -146,8 +165,11 @@ impl InterruptGuard {
             }
         }
         // 入れ子深さを 1 増やす。**cli の後に触る**ので、この増分の最中に割り込みは
-        // 入らない（cli を落とす破壊ビルド + arm 中を除く）。
-        CRITICAL_NESTING_DEPTH.fetch_add(1, Ordering::Relaxed);
+        // 入らない（cli を落とす破壊ビルド + arm 中を除く）。自コアのスロットだけを
+        // 触る（[`PerCpu::this_cpu`]）。
+        CRITICAL_NESTING_DEPTH
+            .this_cpu()
+            .fetch_add(1, Ordering::Relaxed);
         Self {
             saved_rflags,
             _not_send_sync: PhantomData,
@@ -165,7 +187,9 @@ impl Drop for InterruptGuard {
         // 入れ子深さを 1 減らす。**復元（sti）より前に**減らすことで、
         // 「まだこのガードを数えているのに IF=1」という窓を作らない。この
         // 時点ではまだ割り込み禁止なので、減算の最中に割り込みは入らない。
-        CRITICAL_NESTING_DEPTH.fetch_sub(1, Ordering::Relaxed);
+        CRITICAL_NESTING_DEPTH
+            .this_cpu()
+            .fetch_sub(1, Ordering::Relaxed);
         if cpu::should_restore_interrupts(self.saved_rflags) {
             // SAFETY: enter した時点で IF=1 だった、つまり呼び出し元は割り込みが
             // 有効な文脈にいた。その状態へ戻すだけなので有効化してよい。
