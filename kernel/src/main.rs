@@ -1200,25 +1200,57 @@ extern "sysv64" fn kernel_main() -> ! {
         #[cfg(feature = "highhalf-remove-verify-fail")]
         let heap_high_va = VirtAddr::new(0xFFFF_8080_0000_0000)
             .expect("the sabotaged heap VA is canonical (empty PML4[257])");
-        let mut high_mapped = Vec::new();
-        high_mapped.push(RequiredRegion {
-            name: "heap high VA",
-            va: heap_high_va,
-        });
-        if fb_start != 0 {
-            high_mapped.push(RequiredRegion {
-                name: "framebuffer high VA",
-                va: direct_map
-                    .phys_to_virt(PhysAddr::new(fb_start).expect("the framebuffer phys is valid")),
-            });
-        }
+
+        // **不可逆な除去操作はヒープに依存しない。フラッシュ後にヒープが使えない可能性が
+        // あるため、high_mapped はヒープ確保（Vec）でなくスタックの固定配列で持つ。** これを
+        // Vec にしていたとき、remove-before-highify（ヒープを低位のまま除去）が「除去自身の
+        // step6 が、低位ヒープ上の Vec をフラッシュ後に辿って #PF で復帰不能になる」経路を
+        // 露呈した。step4 はヒープの高位VAが解決するかは見るが、除去自身のデータ構造が高位に
+        // あるかは見ない。生き残ることが構造的に保証されたもの（スタック=.bss、再リンクで高位化
+        // 済み）だけに依存する。将来「ここで Vec を使えば楽」と戻さないための不変条件である
+        // （`const fn` を失った理由・マーカー文字列を変えた理由と同じ性質の記録）。
+        //
+        // **除去の実体側は構造的に確保できない。** `remove_identity`（`paging::remove`）と、それが
+        // 呼ぶ `paging::verify` / `paging::table` / `paging::switch` はいずれも `alloc` を import
+        // しないので、Vec/Box/String の確保が構造的に不可能である（grep より強い保証）。残る確保の
+        // 可能性はこの呼び出し側（`main.rs` は `alloc` を使う）だけで、それを high_mapped の
+        // スタック配列化で断つ。したがって除去経路全体でヒープ確保はゼロである。
+        //
+        // **配列サイズは必須領域リストと同期する。** 現在は 2（ヒープ・フレームバッファ）。
+        // 新しく高位化した低位ポインタを渡すときは、この配列サイズ・下の `n`・
+        // `remove_identity` 内部の `always`・docs/verification-coverage.md の「解消済み」群を
+        // 同時に増やすこと（配列とリストの対応をコンパイル時に縛る手段は、リストが呼び出し側と
+        // lib 内部にまたがるため単純には作れない。ここのコメントと doc で守る）。
+        let regions: [RequiredRegion; 2] = [
+            RequiredRegion {
+                name: "heap high VA",
+                va: heap_high_va,
+            },
+            if fb_start != 0 {
+                RequiredRegion {
+                    name: "framebuffer high VA",
+                    va: direct_map.phys_to_virt(
+                        PhysAddr::new(fb_start).expect("the framebuffer phys is valid"),
+                    ),
+                }
+            } else {
+                // フレームバッファ無し: この要素はスライス（`..n`）で落とす。配列を埋める
+                // ためだけに有効な RequiredRegion を置く（ヒープの高位VAで埋める）。
+                RequiredRegion {
+                    name: "heap high VA",
+                    va: heap_high_va,
+                }
+            },
+        ];
+        let n = if fb_start != 0 { 2 } else { 1 };
+        let high_mapped: &[RequiredRegion] = &regions[..n];
 
         // SAFETY: 恒等窓を握る全検証サイトと boot_info の消費、除去点より前に走るべき生の
         // 低位 read（kernel_start）はいずれも既に終えている。direct_map は登録高位窓で稼働
         // PML4 配下を読み書きできる。呼び出し時点の順序前提は上のコメントと
         // docs/verification-coverage.md の「higher-half B-2b」に従う。
         unsafe {
-            remove_identity(&mut logger, direct_map, &high_mapped);
+            remove_identity(&mut logger, direct_map, high_mapped);
         }
     }
 
