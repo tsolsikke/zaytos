@@ -344,8 +344,15 @@ pub unsafe fn spin_with_interrupts_enabled(
     duration_tsc: u64,
     heartbeat_interval: u64,
 ) {
-    // SAFETY: 呼び出し側の契約により 7 項目の検証を通っている。ここが
-    // ADR-0018 §2 の言う「`sti` を実行する唯一の箇所」である。
+    // SAFETY: 呼び出し側の契約により 7 項目の検証を通っている。
+    //
+    // **`sti` を実行するのはここと [`run_timer_loop`] の 2 箇所だけである。**
+    // ADR-0018 §2 は「`sti` は 1 箇所だけ」と決めたが、M4-d を d-1（期限つき
+    // スピンで sti 自体を検証する）と d-2（タイマループ。`hlt` で待つ本来の形）へ
+    // 分けた結果、実装は 2 箇所になった（ADR-0018 Addendum 5）。どちらも
+    // 7 項目の検証を通った後にしか実行しない、という §2 の本質は保たれている。
+    // かつてこのコメントは両方が自分を「唯一の箇所」と書いており、実際の数と
+    // 食い違っていた。**「唯一」を前提に検査を設計すると許可対象を数え違える。**
     unsafe {
         cpu::enable_interrupts();
     }
@@ -484,7 +491,11 @@ pub unsafe fn run_timer_loop(
     let started = cpu::read_timestamp_counter();
 
     // SAFETY: 呼び出し側の契約により、7 項目の検証とタイマ設定が済んでいる。
-    // ここが ADR-0018 §2 の言う「`sti` を実行する唯一の箇所」である。
+    //
+    // **`sti` を実行するのはここと [`spin_with_interrupts_enabled`] の 2 箇所
+    // だけである**（数と経緯は spin 側のコメントと ADR-0018 Addendum 5 を参照）。
+    // こちらが「`hlt` で待つ本来の形」で、起こしてくれるタイマが実在する
+    // M4-d-2 で初めて成立した（ADR-0018 Addendum 2 §3）。
     unsafe {
         cpu::enable_interrupts();
     }

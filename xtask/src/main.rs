@@ -2314,6 +2314,265 @@ const CHECKS: &[(&str, &[&str])] = &[
     ("fmt --check", &["fmt", "--all", "--", "--check"]),
 ];
 
+/// 直接の割り込み制御（`InterruptGuard` 非経由の `cli`/`sti`）を許可する箇所。
+///
+/// 排他は `common::critical` の [`InterruptGuard`]/`Locked<T>` の裏に閉じる決まりで
+/// ある（ADR-0023 §3 の seam整備）。それでも直接 `cli`/`sti` が要る箇所は存在し、
+/// **いずれも「共有データの排他」以外の目的**である。目的別に許可し、リスト外の
+/// 出現は FAIL させる。
+///
+/// # 行番号ではなく所属アイテム名で識別する
+///
+/// 行番号は編集のたびに動くので使わない。所属する関数名（`global_asm!` の中は
+/// `global_asm!`）で識別する。**関数名を変えると検査が落ちる**が、これは欠点では
+/// なく利点である。許可リストは「意図的に承認したもの」の記録なので、コードが
+/// 変わったら再承認を求めるのが正しい。
+///
+/// # この検査が守れないこと
+///
+/// 検出できるのは「新しい直接 `cli`/`sti` の追加」だけである。**許可済み箇所の
+/// 中身が排他目的に変質したことは検出できない**（文字列走査では意図は見えない）。
+struct DirectInterruptControlSite {
+    /// ワークスペース相対パス。
+    file: &'static str,
+    /// 所属する関数名。`global_asm!` の中は `"global_asm!"`。
+    item: &'static str,
+    /// なぜ直接触ってよいのか。
+    reason: &'static str,
+}
+
+/// 直接 `cli`/`sti` の許可リスト（[`DirectInterruptControlSite`] 参照）。
+const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
+    // (a) 排他の実装本体。ここが「排他の所在」であり、他は全部これを使う。
+    DirectInterruptControlSite {
+        file: "common/src/critical.rs",
+        item: "enter",
+        reason: "InterruptGuard::enter そのもの（排他の実装本体）",
+    },
+    DirectInterruptControlSite {
+        file: "common/src/critical.rs",
+        item: "drop",
+        reason: "InterruptGuard::drop の復元（排他の実装本体）",
+    },
+    // (b) 起動の一度きり。スコープを抜けたら復元する意味を持たない恒久的な禁止。
+    DirectInterruptControlSite {
+        file: "kernel/src/main.rs",
+        item: "_start",
+        reason: "M4-d まで恒久的に禁止する起動時の一度きり（ADR-0014）",
+    },
+    // (c)(d)(e) 割り込み許可状態の遷移。sti は検証 7 項目通過後のみ（ADR-0018 §2）。
+    DirectInterruptControlSite {
+        file: "kernel/src/interrupts.rs",
+        item: "spin_with_interrupts_enabled",
+        reason: "sti する箇所の 1 つ（M4-d-1 の期限つきスピン）と観測後の復帰 cli",
+    },
+    DirectInterruptControlSite {
+        file: "kernel/src/interrupts.rs",
+        item: "run_timer_loop",
+        reason: "sti する箇所の 1 つ（M4-d-2 のタイマループ）と sti;hlt 隣接・上限到達時の cli",
+    },
+    // (f) テスト経路。復元経路そのものを実証するので直接触る必要がある。
+    DirectInterruptControlSite {
+        file: "kernel/src/main.rs",
+        item: "trigger_critical_test",
+        reason: "IF=1 で enter した場合の復元経路を実証する検査（critical-test）",
+    },
+    // (g) **例外: ここは共有データの排他である。** InterruptGuard を使えない asm 文脈
+    // なので生の cli/sti で守っている。**BKL では同一コアの割り込みしか防げないため
+    // 再検討が要る**（deferred-decisions.md の「per-CPU seam が MAX_CPUS > 1 で…」の
+    // 隣に論点として記録した）。
+    DirectInterruptControlSite {
+        file: "kernel/src/task.rs",
+        item: "global_asm!",
+        reason: "GPR_BUF（A/B 共有）の store と照合を守る排他。asm 文脈で InterruptGuard を \
+                 使えないための例外。BKL で再検討（複数コアでは防げない）",
+    },
+];
+
+/// 許可リストに無い直接の割り込み制御を探す。
+///
+/// 対象は `cpu::disable_interrupts` / `cpu::enable_interrupts`
+/// （`enable_interrupts_and_halt` を含む）の呼び出しと、`asm!`/`global_asm!` 内の
+/// 生の `"cli"` / `"sti"`。
+///
+/// `common/src/cpu.rs` は除外する（primitive の定義本体で、命令そのものはここに
+/// 集約されている）。`halt_forever` の `cli; hlt` も同ファイルなので自動的に外れる
+/// （停止用であって排他ではない）。
+/// # 数の単位
+///
+/// 許可リストのエントリ数（`file` + `item` の組）と、実際の**出現数**（`cli`/`sti` を
+/// 含む行数）は別の単位である。1 つの関数に複数の出現があれば 1 エントリで複数
+/// 出現になる（例: `run_timer_loop` は `sti` / `sti;hlt` / 上限到達時の `cli`）。
+/// 数字を並べたときに取り違えないよう、`approved_occurrences` で出現数を数えて
+/// 呼び出し側が両方を表示できるようにする。
+fn find_unapproved_interrupt_control(
+    workspace_root: &Path,
+    approved_occurrences: &mut usize,
+) -> Result<Vec<String>> {
+    // SAFETY 検査と同じ理由で、追跡済みだけでなく未追跡のファイルも見る
+    // （新規ファイルの最初の検査が素通りするのを防ぐ）。
+    let output = Command::new("git")
+        .current_dir(workspace_root)
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "*.rs",
+        ])
+        .output()
+        .context("failed to list Rust sources")?;
+    if !output.status.success() {
+        bail!("git ls-files failed while collecting Rust sources");
+    }
+    let listing = String::from_utf8(output.stdout).context("git ls-files produced non-UTF-8")?;
+
+    let mut findings = Vec::new();
+    for relative in listing.lines().filter(|l| !l.is_empty()) {
+        // primitive の定義本体は対象外。
+        if relative == "common/src/cpu.rs" {
+            continue;
+        }
+        // xtask はホスト上のビルドツールで、ring 0 の命令を実行しえない。この
+        // 検査自身の実装（needle の文字列リテラルを含む）もここに入る。
+        if relative.starts_with("xtask/") {
+            continue;
+        }
+        let path = workspace_root.join(relative);
+        let source = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+
+        let mut current_item = "<file scope>";
+        let mut in_global_asm = false;
+        // `asm!` / `global_asm!` の**塊の中にいるか**。生の命令は `asm!(` と別の行に
+        // 書かれるので、塊全体を追う必要がある（`asm!` を含む行だけを見ていたときは
+        // 複数行の `asm!` 内の `cli` を取りこぼした）。開き `asm!(` から、trim 後に
+        // `);` で始まる行までを塊とする。
+        let mut in_asm = false;
+        for (index, line) in source.lines().enumerate() {
+            let trimmed = line.trim_start();
+
+            if line.contains("asm!(") {
+                in_asm = true;
+                if line.contains("global_asm!(") {
+                    in_global_asm = true;
+                    current_item = "global_asm!";
+                }
+            } else if in_asm && trimmed.starts_with(");") {
+                in_asm = false;
+                if in_global_asm {
+                    in_global_asm = false;
+                    current_item = "<file scope>";
+                }
+            } else if !in_global_asm {
+                if let Some(name) = function_name_declared_on(line) {
+                    current_item = name;
+                }
+            }
+
+            // ドキュメントコメントと行コメントは対象外（説明文で言及するのは自由）。
+            if trimmed.starts_with("///") || trimmed.starts_with("//!") || trimmed.starts_with("//")
+            {
+                continue;
+            }
+
+            let hit =
+                in_asm && mentions_raw_instruction(line) || mentions_interrupt_primitive(line);
+
+            if !hit {
+                continue;
+            }
+
+            let approved = DIRECT_INTERRUPT_CONTROL_ALLOWLIST
+                .iter()
+                .any(|site| site.file == relative && site.item == current_item);
+            if approved {
+                *approved_occurrences += 1;
+                continue;
+            }
+            findings.push(format!(
+                "{relative}:{} (in {current_item}): {}",
+                index + 1,
+                line.trim().chars().take(60).collect::<String>()
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+/// その行の文字列リテラルが生の `cli` / `sti` 命令を含むか（`asm!` の中）。
+///
+/// # 引用符の内側の空白まで見る必要がある
+///
+/// asm のオペランドは `"  cli",` のように**引用符の内側にインデントを付けて**
+/// 書かれる。当初 `"cli"` の完全一致で探していたため、`kernel/src/task.rs` の
+/// `global_asm!` にある `"  cli"` / `"  sti"`（GPR_BUF を守る唯一の「排他目的」の
+/// 直接操作）を**取りこぼしていた**。許可リストに載っているのに検出されない、
+/// つまりその許可エントリが死んでいて、同じ書き方で新しく追加された `cli` も
+/// 素通りする状態だった。
+///
+/// そこで各文字列リテラルを取り出して trim し、先頭トークン（`;` `,` を除く）が
+/// `cli` / `sti` かで判定する。`"sti-check 1: ..."` のようなログ文字列は先頭
+/// トークンが `sti-check` になるので一致しない。
+fn mentions_raw_instruction(line: &str) -> bool {
+    line.split('"').skip(1).step_by(2).any(|literal| {
+        literal
+            .trim()
+            .split(|c: char| c.is_whitespace() || c == ';' || c == ',')
+            .next()
+            .is_some_and(|token| token == "cli" || token == "sti")
+    })
+}
+
+/// その行が割り込み制御 primitive を呼んでいるか。
+///
+/// `may_enable_interrupts` のような別の識別子の一部を拾わないよう、直前の文字が
+/// 識別子構成文字でないことを確かめる。
+fn mentions_interrupt_primitive(line: &str) -> bool {
+    ["disable_interrupts", "enable_interrupts"]
+        .iter()
+        .any(|needle| {
+            let mut rest = line;
+            let mut base = 0usize;
+            while let Some(position) = rest.find(needle) {
+                let absolute = base + position;
+                let preceded_by_identifier = line[..absolute]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
+                if !preceded_by_identifier {
+                    return true;
+                }
+                base = absolute + needle.len();
+                rest = &line[base..];
+            }
+            false
+        })
+}
+
+/// その行が宣言している関数名（`fn` の直後の識別子）。宣言でなければ `None`。
+fn function_name_declared_on(line: &str) -> Option<&str> {
+    let position = line.find("fn ")?;
+    // `fn` の前が識別子構成文字なら別の語の一部（`asm_fn` など）。
+    if line[..position]
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    let rest = line[position + "fn ".len()..].trim_start();
+    let end = rest
+        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .unwrap_or(rest.len());
+    let name = &rest[..end];
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
 /// `// SAFETY:` コメントを伴わない `unsafe` ブロックを探す。
 ///
 /// `unsafe` ブロックには、なぜ safe に書けないのかと、何を前提に安全性が
@@ -2653,6 +2912,33 @@ fn cmd_check(full: bool) -> Result<()> {
         }
         println!("--- unsafe/SAFETY: FAILED ({} block(s))", missing.len());
         failed.push("unsafe/SAFETY".to_string());
+    }
+
+    total += 1;
+    println!("=== xtask check: direct cli/sti stays on the approved list");
+    let mut approved_occurrences = 0usize;
+    let unapproved = find_unapproved_interrupt_control(&workspace_root, &mut approved_occurrences)?;
+    if unapproved.is_empty() {
+        println!(
+            "--- direct cli/sti: OK ({} approved entr(y/ies) = file+item pairs, covering {} \
+             occurrence(s) = cli/sti lines)",
+            DIRECT_INTERRUPT_CONTROL_ALLOWLIST.len(),
+            approved_occurrences
+        );
+    } else {
+        for finding in &unapproved {
+            println!("    {finding}");
+        }
+        println!("    approved sites (file / item / reason):");
+        for site in DIRECT_INTERRUPT_CONTROL_ALLOWLIST {
+            println!("      {} / {} / {}", site.file, site.item, site.reason);
+        }
+        println!(
+            "--- direct cli/sti: FAILED ({} unapproved site(s); exclusion belongs behind \
+             InterruptGuard/Locked, or add an entry with a reason)",
+            unapproved.len()
+        );
+        failed.push("direct cli/sti".to_string());
     }
 
     total += 1;
