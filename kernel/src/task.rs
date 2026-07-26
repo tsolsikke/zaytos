@@ -19,10 +19,11 @@
 
 use core::fmt::Write as _;
 use core::ptr::addr_of;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use common::addr::VirtAddr;
 use common::critical::critical_nesting_depth;
+use common::percpu::{PerCpu, MAX_CPUS};
 use common::serial::SerialPort;
 
 use crate::gdt;
@@ -137,8 +138,6 @@ const EMPTY_TASK: Task = Task {
 
 struct Scheduler {
     tasks: [Task; TASK_COUNT],
-    /// 現在走行中のタスク。
-    current: usize,
     /// スイッチした総回数（会計用）。各スイッチで再開されたタスクの `resumes`
     /// も 1 増えるので、`switches == 全タスクの resumes の合計`。
     switches: u64,
@@ -155,11 +154,66 @@ struct Scheduler {
 /// 単一実行文脈から呼ぶ。シングルコアなのでこれで排他が成立する。
 static mut SCHEDULER: Scheduler = Scheduler {
     tasks: [EMPTY_TASK; TASK_COUNT],
-    current: 0,
     switches: 0,
     demo_active: false,
     demo_deadline: 0,
 };
+
+/// 現在走行中のタスクのインデックス（コアごと。seam整備3d、ADR-0023）。
+///
+/// M5-c の当初は `Scheduler` の `current` フィールドだった。「現在のタスク」は
+/// コアローカルな概念（各コアが別のタスクを走らせる）なので、per-CPU が正しい
+/// 単位である。`tasks` 配列は BKL 下で共有しうる（全コアが同じタスク表を見る）
+/// が、「そのうちどれを今走らせているか」はコアごとに異なる。
+///
+/// # `AtomicUsize` にする理由（`static mut usize` ではなく）
+///
+/// 読み手にはプリエンプティブデモのワーカー（[`preemptive_loop_top`] /
+/// [`verify_preemptive_gprs`] 経由）が含まれ、そこは **IF=1**（プリエンプト可）で
+/// 走る。その読みと、timer 割り込み（[`on_timer_tick`] → [`schedule_switch`] →
+/// [`set_current_index`]）の書きは、同一コアでも Rust のメモリモデル上「並行」で
+/// あり、非アトミックだとデータ競合＝未定義動作になる。x86 で整列 `usize` の読みが
+/// 分割されないのは事実だが、それは Rust の規則を満たす根拠にはならない。よって
+/// `AtomicUsize` にし、`Relaxed` で読み書きする（GDT/TSS の 3c と違い、`usize` は
+/// アトミックにできる。3b の `CRITICAL_NESTING_DEPTH` と同じ形）。x86 では
+/// `Relaxed` の load/store は素の `mov` にコンパイルされるので実行時コストは無い。
+/// 非mut static になるので `static mut` も不要になる。
+///
+/// # 型検査が証明すること / 人間が確認すること（分けて書く）
+///
+/// - **型検査が証明した**: `Scheduler` に `current` フィールドは存在せず、それを
+///   参照するコードも存在しない（フィールドごと削除したので、旧 `sched.current` が
+///   1 つでも残ればコンパイルが通らない。構造で二重化を禁じている）。
+/// - **grep と構造レビューが確認した（コンパイラは証明していない）**: 「現在の
+///   タスク」に相当する別の状態が他に無いこと。仮に別の `static` が「最後に走った
+///   タスク」等を持っていてもコンパイルは通るので、これは人間の確認である
+///   （`docs/verification-coverage.md` の「二重の真実」）。
+///
+/// # `MAX_CPUS > 1` で顕在化する前提
+///
+/// 初期値 `[0; MAX_CPUS]` は「全コアがタスク 0 を current として始まる」を意味する。
+/// `MAX_CPUS = 1` では正しいが、`MAX_CPUS > 1` では各 AP の起動時に別途 current を
+/// 設定するか sentinel を置く必要がある。この前提は `cpu_id() < MAX_CPUS` の境界
+/// （`common::percpu`）と同じクラスタで、`docs/deferred-decisions.md` の
+/// 「per-CPU seam が MAX_CPUS > 1 で顕在化する前提」に一覧化してある。
+static CURRENT: PerCpu<AtomicUsize> = PerCpu::new([const { AtomicUsize::new(0) }; MAX_CPUS]);
+
+/// 自コアの現在タスクインデックスを読む（旧 `sched.current` の読みと同じ意味）。
+///
+/// IF=1 のワーカーからも呼ばれるので `Relaxed` のアトミック読みにする（上の
+/// [`CURRENT`] のドキュメント参照）。
+fn current_index() -> usize {
+    CURRENT.this_cpu().load(Ordering::Relaxed)
+}
+
+/// 自コアの現在タスクインデックスを書く（旧 `sched.current = ...` と同じ意味）。
+///
+/// アトミックなので `unsafe` は要らない。書きは論理的には [`schedule_switch`] の
+/// IF=0 区間か起動時に限るが、それはメモリ安全性の契約ではなくスケジューリングの
+/// 都合である。
+fn set_current_index(next: usize) {
+    CURRENT.this_cpu().store(next, Ordering::Relaxed);
+}
 
 /// 各ワーカーのスタック（ガードページ + スタック本体）。
 ///
@@ -361,7 +415,7 @@ unsafe fn setup_tasks() {
 
     // SAFETY: 起動時の単一実行文脈。スケジューラはまだ誰も触っていない。
     let sched = unsafe { &mut *(addr_of!(SCHEDULER) as *mut Scheduler) };
-    sched.current = 0;
+    set_current_index(0);
     sched.switches = 0;
     sched.tasks[0] = Task {
         stack_top: main_top,
@@ -495,7 +549,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
     // なので他の実行文脈が同時にスケジューラを触ることはない。
     let sched = unsafe { &mut *(addr_of!(SCHEDULER) as *mut Scheduler) };
 
-    let current = sched.current;
+    let current = current_index();
     sched.tasks[current].saved_rsp = current_rsp;
 
     // 破壊確認 (ii): RSP の差し替えを省く。現タスクの RSP を返すのでスイッチが
@@ -526,7 +580,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
             common::cpu::halt_forever();
         }
 
-        sched.current = next;
+        set_current_index(next);
         sched.switches += 1;
         sched.tasks[next].resumes += 1;
 
@@ -586,7 +640,7 @@ fn pick_next(sched: &Scheduler, current: usize) -> usize {
 extern "sysv64" fn current_task_base() -> u64 {
     // SAFETY: ワーカー本体（IF=0 ではないが単一走行）から呼ばれる。読み取りのみ。
     let sched = unsafe { &*addr_of!(SCHEDULER) };
-    sched.tasks[sched.current].base
+    sched.tasks[current_index()].base
 }
 
 /// ワーカー本体から呼ばれる。往復後の 15 本の GPR（`GPR_BUF`）を基準値と照合し、
@@ -594,7 +648,7 @@ extern "sysv64" fn current_task_base() -> u64 {
 extern "sysv64" fn verify_gprs_and_advance() -> u64 {
     // SAFETY: 単一走行。現タスクの基準値とバッファを読む。
     let sched = unsafe { &mut *(addr_of!(SCHEDULER) as *mut Scheduler) };
-    let current = sched.current;
+    let current = current_index();
     let base = sched.tasks[current].base;
 
     // SAFETY: ワーカー本体が直前に 15 本を書き込んだ共有バッファ。
@@ -641,7 +695,7 @@ extern "sysv64" fn verify_gprs_and_advance() -> u64 {
 extern "sysv64" fn worker_done_and_yield() {
     // SAFETY: 単一走行。現タスクを走行不可にする。
     let sched = unsafe { &mut *(addr_of!(SCHEDULER) as *mut Scheduler) };
-    let current = sched.current;
+    let current = current_index();
     sched.tasks[current].runnable = false;
     let name = if current == 1 { 'A' } else { 'B' };
     serial_line(format_args!(
@@ -825,7 +879,7 @@ unsafe fn setup_preemptive_tasks() {
     // SAFETY: 直前に InterruptGuard で割り込みを禁止した（IF=0）。シングルコア
     // なので、この区間に他の実行文脈がスケジューラを触ることはない。
     let sched = unsafe { &mut *(addr_of!(SCHEDULER) as *mut Scheduler) };
-    sched.current = 0;
+    set_current_index(0);
     sched.switches = 0;
     sched.tasks[0] = Task {
         stack_top: main_top,
@@ -862,7 +916,7 @@ unsafe fn setup_preemptive_tasks() {
 extern "sysv64" fn verify_preemptive_gprs() {
     // SAFETY: 単一走行。現タスクの基準値とバッファを読む。
     let sched = unsafe { &mut *(addr_of!(SCHEDULER) as *mut Scheduler) };
-    let current = sched.current;
+    let current = current_index();
     let base = sched.tasks[current].base;
 
     // SAFETY: ワーカー本体が直前に 15 本を書き込んだ共有バッファ。
@@ -898,8 +952,7 @@ extern "sysv64" fn preemptive_loop_top() -> u64 {
         // 大域的に壊していた。verification-coverage 参照）。
         let _armed = common::critical::arm_sabotage();
         let mut held = DEMO_LOCK.lock();
-        // SAFETY: 単一走行。読み取りのみ。
-        let current = unsafe { (*addr_of!(SCHEDULER)).current };
+        let current = current_index();
         *held = current as u64;
         // timer ティックが 1 つ跨ぐ程度スピンして、保持中のプリエンプトを誘う。arm 中
         // なので IF=1 のままで、この窓で timer が食い込み、別ワーカーが同じ DEMO_LOCK を

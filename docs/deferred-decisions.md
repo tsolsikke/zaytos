@@ -175,6 +175,13 @@ Bは段階分割で進めている（B調査の合意による）。
 - **SMP-BKL**（ADR-0023）: seam整備は先行済みでなく未着手。BKL本体はB完了が前提だったので解禁。per-CPUデータは`PML4[257..510]`へ置く（下の最終レイアウト参照）。
 - **`user_range_accessible`/`copy_from_user`のレイアウト・構造条件依存の再評価**（`verification-coverage.md`）: 後回しだがM5-f-3で必須。「カーネル=必ずU=0」「単一アドレス空間」の前提がプロセス別アドレス空間で変わるため、M5-f-3着手時に再検証する。
 
+### per-CPU seamが`MAX_CPUS > 1`で顕在化する前提（BKL本体で確認する一覧）
+
+seam整備（項目3、`common::percpu`）は`MAX_CPUS = 1`・`cpu_id()`が定数`0`で振る舞い不変に導入した。次の前提は`MAX_CPUS = 1`でのみ自明に成立し、BKL本体で`cpu_id()`が実CPU idを返し`MAX_CPUS > 1`にすると顕在化する。APを起こすときにこの一覧を見れば漏れない。
+
+- **`cpu_id() < MAX_CPUS`の境界**（`common::percpu`の`this_cpu_ptr`）: `this_cpu_ptr`は`cpu_id()`分ポインタを進めるので、`cpu_id() >= MAX_CPUS`だと配列外でUB。現在は`cpu_id()`が定数`0`で自明。BKL本体で、誰が境界を保証するかを決める（`cpu_id()`側で`0..MAX_CPUS`に収める / `this_cpu_ptr`で`debug_assert!` / 起動時にコア数`> MAX_CPUS`なら halt）。
+- **per-CPU初期値の「全コアがタスク0」問題**（`kernel::task`の`CURRENT`）: `CURRENT = [AtomicUsize(0); MAX_CPUS]`は「全コアがタスク0をcurrentとして始まる」を意味する。`MAX_CPUS = 1`では正しいが、`MAX_CPUS > 1`では各APの起動時に別途currentを設定するか sentinel を置く必要がある（setup前の読み出しが無いことは実コードで確認済み）。BKL本体でどれを採るか（AP初期化時の明示設定 / sentinel値 / Option相当）を決める。
+
 ---
 
 ## 規模・要件が変わったら見直すもの
