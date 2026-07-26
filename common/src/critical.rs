@@ -42,6 +42,59 @@ pub fn critical_nesting_depth() -> usize {
     CRITICAL_NESTING_DEPTH.load(Ordering::Relaxed)
 }
 
+/// preempt-in-critical の破壊確認（M5-d）で、サボタージュ（[`InterruptGuard`] の
+/// cli 省略と on_timer_tick の防御スキップ bypass）を「今だけ」有効にするフラグ。
+///
+/// **かつてサボタージュは大域的だった。** feature を有効にすると全区間で cli を
+/// 落とし防御スキップを外していた。それだとデモ開始（setup / yield）時まで perturb
+/// して、検査対象（保持窓）へ到達する前に `switches=0` の startup レースで約10%落ちた
+/// （既定ビルドは20/20健全なので、カーネルではなくサボタージュが原因と実測で確定）。
+/// arm 窓へ絞ることで、デモ開始は正常な cli の下で走り、二重取得を狙う保持窓だけを
+/// 壊す。**再び大域化すると startup レースが再発する**（`docs/verification-coverage.md`
+/// の「確率的なテストとフレークの署名」）。
+///
+/// arm/disarm を `Release`、読み出しを `Acquire` にする。**厳密には `Relaxed` でも
+/// 正しい**: 同一スレッドが同一アトミックへアクセスする限り、arm の store と直後の
+/// [`InterruptGuard`] の load は Ordering に依らず program order で順序付き、guard は
+/// 必ず armed を見る。それでも、このフラグは cli を**省く**区間で割り込みコンテキスト
+/// （on_timer_tick）から読まれるので、`Relaxed` で足りる理由を都度たどるより
+/// **保守的に強い順序を選ぶ**（`CRITICAL_NESTING_DEPTH` は cli 済み区間で触るので
+/// `Relaxed` で足りるのと対照的である。害は無く、意図が読み手に伝わる）。
+#[cfg(feature = "preempt-in-critical-break")]
+static SABOTAGE_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// サボタージュが今 arm されているか（on_timer_tick が防御スキップを bypass するかの
+/// 判定に使う）。
+#[cfg(feature = "preempt-in-critical-break")]
+pub fn sabotage_armed() -> bool {
+    SABOTAGE_ARMED.load(Ordering::Acquire)
+}
+
+/// サボタージュを arm する。返すガードを保持している間だけ有効で、**Drop で disarm
+/// する**。手動の arm/disarm ペアはパニックや早期リターンで disarm が漏れるので、
+/// [`InterruptGuard`] と同じく「規律より構造」で RAII にする。
+#[cfg(feature = "preempt-in-critical-break")]
+#[must_use = "arm はガードを保持している間だけ有効。すぐ drop すると即 disarm される"]
+pub fn arm_sabotage() -> SabotageArmGuard {
+    SABOTAGE_ARMED.store(true, Ordering::Release);
+    SabotageArmGuard {
+        _not_send_sync: PhantomData,
+    }
+}
+
+/// [`arm_sabotage`] のガード。Drop で disarm する。
+#[cfg(feature = "preempt-in-critical-break")]
+pub struct SabotageArmGuard {
+    _not_send_sync: PhantomData<*const ()>,
+}
+
+#[cfg(feature = "preempt-in-critical-break")]
+impl Drop for SabotageArmGuard {
+    fn drop(&mut self) {
+        SABOTAGE_ARMED.store(false, Ordering::Release);
+    }
+}
+
 /// 割り込みを禁止するクリティカルセクションのガード。
 ///
 /// [`InterruptGuard::enter`] で現在の RFLAGS を保存して `cli` し、Drop で
@@ -75,18 +128,25 @@ impl InterruptGuard {
                   ends the section right away"]
     pub fn enter() -> Self {
         let saved_rflags = cpu::read_rflags();
-        // SAFETY: これはまさにクリティカルセクションへ入る操作であり、割り込みを
-        // 禁止してよい文脈。保存した状態は Drop で復元する。
-        // preempt-in-critical-break: わざと cli を落とす。Locked 保持中も IF=1 の
-        // ままになり、timer プリエンプトがクリティカル区間へ食い込む（M5-d の
-        // 破壊確認）。depth は増やすので、on_timer_tick の防御スキップが働く
-        // 限りはプリエンプトされない。破壊確認ではその防御も併せて外す。
+        // preempt-in-critical-break: サボタージュが arm されている間だけ cli を落とす。
+        // Locked 保持中も IF=1 のままになり、timer プリエンプトがクリティカル区間へ
+        // 食い込む（M5-d の破壊確認）。**かつては大域的に落としていたが、それだと
+        // デモ開始時まで perturb して startup レースを起こした**（[`SABOTAGE_ARMED`]
+        // 参照）。arm 窓の外は通常どおり cli する。既定ビルドは feature オフなのでこの
+        // 判定ごと消え、常に cli する = production は不変。
+        #[cfg(feature = "preempt-in-critical-break")]
+        let drop_cli = SABOTAGE_ARMED.load(Ordering::Acquire);
         #[cfg(not(feature = "preempt-in-critical-break"))]
-        unsafe {
-            cpu::disable_interrupts();
+        let drop_cli = false;
+        if !drop_cli {
+            // SAFETY: これはまさにクリティカルセクションへ入る操作であり、割り込みを
+            // 禁止してよい文脈。保存した状態は Drop で復元する。
+            unsafe {
+                cpu::disable_interrupts();
+            }
         }
-        // 入れ子深さを 1 増やす。**cli の後に触る**ので、この増分の最中に
-        // 割り込みは入らない（cli を落とす破壊ビルドを除く）。
+        // 入れ子深さを 1 増やす。**cli の後に触る**ので、この増分の最中に割り込みは
+        // 入らない（cli を落とす破壊ビルド + arm 中を除く）。
         CRITICAL_NESTING_DEPTH.fetch_add(1, Ordering::Relaxed);
         Self {
             saved_rflags,

@@ -104,26 +104,15 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 直した後は0件が続いている。
 したがって現在の位置づけは「頻繁に起きることへの対処」ではなく「起きないはずのことが起きたときの保険」である。
 
-### 確率的なテストとフレークの署名
+### かつての確率的フレークと、サボタージュを arm 窓へ絞った理由
 
-基準線は0件だが、確率的に稀に落ちるテストが1つある。
-`task-test preempt-in-critical`は、タイマプリエンプトが`InterruptGuard`の cli を落とした窓に当たるかに依存する。
-窓に当たる確率を上げる`task-widen-preempt-window`が別にあるのが、当たり外れがあることの証拠である。
+`task-test preempt-in-critical`はかつて約10%で落ちた。**原因は当初の想定（タイマプリエンプトが cli 除去窓に当たるか）ではなかった。** 実測で判明した真因と解消を記録する。将来「この分岐は複雑だから消そう」とサボタージュを大域へ戻すと再発するため、なぜ今の形かを残す（`const fn`を失った理由やマーカー文字列を変えた理由と同じ性質の記録）。
 
-**フレークと判断してよい署名は「double acquisition detected が出ずに halt」のときだけである。**
-これはサボタージュが窓に当たらず二重取得検出を発火させられなかった形で、回帰ではない。
-例外（`exception: vector=`）・cpu_reset の増加・別マーカーの欠落は、フレークではなく回帰の疑いとして扱う。
+**真因。** このテストのサボタージュは2つある（`preempt-in-critical-break`＝`InterruptGuard`の cli 省略、`task-preempt-in-critical`＝`on_timer_tick`の防御スキップ除去）。当初は**どちらも大域的**で、プリエンプティブデモの開始（`setup_preemptive_tasks`の`InterruptGuard`区間や`yield`付近）まで perturb した。そのため検査対象（二重取得を狙う保持窓）へ到達する前に、ワーカーが1度も走らず`switches=0, iterations=0`で「the timer did not preempt fairly; halting」と落ちた。観測される失敗署名は「double acquisition detected が出ず halt」だが、実体はこの startup レースである。既定ビルドは20/20健全で、サボタージュ有効時だけ約10%落ちたことから、カーネル本体ではなくサボタージュが原因と実測で確定した。1回目に当てた修正（保持窓を tick 条件化）は無変更と同率で no-op だった（真因が保持窓ではなかったため）。
 
-判断手順は次のとおり。
+**解消（案E）。** サボタージュを大域から**arm 窓へ絞った**。`common::critical`に`SABOTAGE_ARMED`を置き、`InterruptGuard`は arm されている間だけ cli を省く。`on_timer_tick`の防御スキップも arm 中だけ bypass する。ワーカーは`preemptive_loop_top`で`DEMO_LOCK`を握る直前に arm し（RAII、Drop で disarm）、その保持窓だけを壊す。デモ開始は arm の外なので正常な cli の下で走り、startup レースが起きない。**production は不変**（arm 判定はすべて feature 下で、既定ビルドでは cli も防御スキップも常時有効）。修正後、単体30回連続 PASS（全て二重取得経由、`made no progress`は0回）・`--full`の全通過・既定20回で`made no progress`=0 を確認した。
 
-1. 失敗した項目と失敗署名を確認する。上記の署名でなければ回帰として調査する
-2. その項目を単体で数回再実行する（`cargo xtask run --task-test preempt-in-critical`）
-3. `cargo xtask check --full`を再実行し、全通過（B-2b-4完了後は64）を確認する
-4. 同じ項目が同じ署名で繰り返し落ちるなら確率が高すぎる。確率性そのものを潰す（`deferred-decisions.md`の該当項目）まで先へ進めない
-
-これがないと、将来のセッションが同じ赤を見て毎回悩むか、逆に本物の失敗をフレーク扱いして見逃す。
-2026-07-26、B-2b-4(b)の`--full`で1度顕在化し、単体5回連続 PASS と`--full`再実行の全通過で回帰でないことを確認した。
-確率性そのものの解消はB完了後の課題として`deferred-decisions.md`に置く（B-2b-4の最中に別サブシステムへ手を入れない）。
+**フレーク判断の手順（この種の確率的取りこぼしが再発したとき用に残す）。** 失敗署名を確認し、`exception: vector=`・cpu_reset の増加・別マーカーの欠落なら回帰として調査する。取りこぼし署名（`made no progress`・`switches=0`等）なら、単体で数回再実行し、`cargo xtask check --full`（B-2b-4完了後は64）の全通過を確認する。同じ署名で繰り返すなら確率が高すぎるので、確率性そのものを潰すまで先へ進めない。
 
 ### 意図的に壊す feature の一覧
 

@@ -453,10 +453,17 @@ pub fn on_yield(current_rsp: u64) -> u64 {
 /// で実際に崩して発火させる）。
 pub fn on_timer_tick(current_rsp: u64) -> u64 {
     // 防御的スキップ。critical 区間中はプリエンプトせず現タスクを続行する。
-    // preempt-in-critical の破壊確認では、この防御も外して、cli 落とし（IF=1 の
-    // まま）と併せてプリエンプトをクリティカル区間へ食い込ませる。
+    // 既定ビルド（と feature 下で arm されていないとき）はここで守る。
     #[cfg(not(feature = "task-preempt-in-critical"))]
     if critical_nesting_depth() != 0 {
+        return current_rsp;
+    }
+    // preempt-in-critical の破壊確認では、**サボタージュが arm されている間だけ**この
+    // 防御を bypass して、cli 落とし（IF=1 のまま）と併せてプリエンプトをクリティカル
+    // 区間へ食い込ませる。arm 窓の外（デモ開始など）は通常どおり守るので startup
+    // レースが起きない（かつては大域的に外していた。verification-coverage 参照）。
+    #[cfg(feature = "task-preempt-in-critical")]
+    if critical_nesting_depth() != 0 && !common::critical::sabotage_armed() {
         return current_rsp;
     }
 
@@ -885,14 +892,23 @@ extern "sysv64" fn verify_preemptive_gprs() {
 extern "sysv64" fn preemptive_loop_top() -> u64 {
     #[cfg(feature = "task-preempt-in-critical")]
     {
+        // サボタージュをこの保持窓の間だけ arm する（Drop で disarm）。arm 中だけ
+        // Locked の cli が省かれ、on_timer_tick の防御スキップが bypass される。arm 窓の
+        // 外＝デモ開始は正常な cli の下で走るので startup レースが起きない（かつては
+        // 大域的に壊していた。verification-coverage 参照）。
+        let _armed = common::critical::arm_sabotage();
         let mut held = DEMO_LOCK.lock();
         // SAFETY: 単一走行。読み取りのみ。
         let current = unsafe { (*addr_of!(SCHEDULER)).current };
         *held = current as u64;
-        // timer ティックが 1 つ跨ぐ程度スピンして、保持中のプリエンプトを誘う。
+        // timer ティックが 1 つ跨ぐ程度スピンして、保持中のプリエンプトを誘う。arm 中
+        // なので IF=1 のままで、この窓で timer が食い込み、別ワーカーが同じ DEMO_LOCK を
+        // 取って二重取得検出が発火する。
         for _ in 0..2_000_000u64 {
             core::hint::spin_loop();
         }
+        // 明示的にロックを解放してから、_armed が block 末で drop されて disarm する
+        // （宣言の逆順なので必ずロック解放の後に disarm）。
         drop(held);
     }
     current_task_base()
