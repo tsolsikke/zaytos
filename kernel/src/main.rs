@@ -1173,10 +1173,11 @@ extern "sysv64" fn kernel_main() -> ! {
     // boot_info は無効**（低位 VA、最終利用は上の rehome）。順序依存の詳細と除去手順は
     // docs/verification-coverage.md の「higher-half B-2b」を参照。
     //
-    // 段階: (c)=highhalf-remove-verify-fail のときだけ remove_identity を呼び、5a の
-    // 書き戻しと恒等復活を実証する。既定ビルドではこのブロックは存在せず振る舞い不変。
-    // (d) でこの `#[cfg]` を `not(feature = "paging-test")` へ変え、既定でも呼ぶ。
-    #[cfg(feature = "highhalf-remove-verify-fail")]
+    // (d) で既定有効化した。paging-test は split/unmap の破壊検査が目的で恒等除去まで
+    // 通す必要がないため除外する（そのビルドでは恒等除去が検査されない＝カバレッジ穴。
+    // verification-coverage に記録）。highhalf-remove-verify-fail のときは下でヒープの高位
+    // VA を解決不能値へ差し替え、step4 失敗→5a 復帰を実証する（除去は既定と同じく走る）。
+    #[cfg(not(feature = "paging-test"))]
     {
         use common::addr::{PhysAddr, VirtAddr};
         use kernel::paging::remove::{remove_identity, RequiredRegion};
@@ -1191,8 +1192,12 @@ extern "sysv64" fn kernel_main() -> ! {
         // **新しく低位ポインタを高位化したら、この列にも足すこと**（verification-coverage の
         // 「解消済み」群と同期）。
         //
-        // (c) のサボタージュ: ヒープの高位 VA を解決不能な高位 VA（空の PML4[257]）へ
-        // 差し替え、step4 を失敗させて 5a の復帰経路を通す。(d) では heap_virt_base を渡す。
+        // 既定はヒープの高位 VA（heap_virt_base）を渡す。highhalf-remove-verify-fail のとき
+        // だけ解決不能な高位 VA（空の PML4[257]）へ差し替え、step4 を失敗させて 5a の復帰
+        // 経路を実証する。
+        #[cfg(not(feature = "highhalf-remove-verify-fail"))]
+        let heap_high_va = VirtAddr::new(heap_virt_base).expect("the heap high VA is canonical");
+        #[cfg(feature = "highhalf-remove-verify-fail")]
         let heap_high_va = VirtAddr::new(0xFFFF_8080_0000_0000)
             .expect("the sabotaged heap VA is canonical (empty PML4[257])");
         let mut high_mapped = Vec::new();

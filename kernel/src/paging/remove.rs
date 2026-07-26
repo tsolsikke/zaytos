@@ -254,17 +254,27 @@ pub unsafe fn remove_identity(
 
     // (6) フラッシュ後の読み戻し（walk。デレフしない）。高位が健全、低位が未マップ。
     let mut post_ok = true;
+    let mut reresolved = 0usize;
+    let total_regions = always.len() + high_mapped.len();
     for region in always.iter().chain(high_mapped.iter()) {
         // SAFETY: cr3 は稼働テーブル、direct_map で辿れる。読み取りのみ。
-        if let Err(e) = unsafe { verify::walk(cr3, direct_map, region.va) } {
-            post_ok = false;
-            logger.error(format_args!(
-                "identity-removal: post-flush [{}] {:#x} unexpectedly unmapped ({e:?})",
-                region.name,
-                region.va.as_u64()
-            ));
+        match unsafe { verify::walk(cr3, direct_map, region.va) } {
+            Ok(_) => reresolved += 1,
+            Err(e) => {
+                post_ok = false;
+                logger.error(format_args!(
+                    "identity-removal: post-flush [{}] {:#x} unexpectedly unmapped ({e:?})",
+                    region.name,
+                    region.va.as_u64()
+                ));
+            }
         }
     }
+    // 高位の必須領域がフラッシュ後も全て再解決したことを、推論でなく観測として残す
+    // （最も危険な操作の直後の実状態を読む）。
+    logger.info(format_args!(
+        "identity-removal: post-flush required regions re-resolved OK: {reresolved}/{total_regions}"
+    ));
     // 低位 VA は未マップであること（デレフするとフォルトするので walk で読む）。
     // SAFETY: cr3 は稼働テーブル、direct_map で読める。読み取りのみ。
     let low_after = unsafe { verify::walk(cr3, direct_map, low_probe) };
