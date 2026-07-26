@@ -15,7 +15,9 @@
 
 pub mod layout;
 
-use core::ptr::addr_of;
+use core::ptr::addr_of_mut;
+
+use common::percpu::{PerCpu, MAX_CPUS};
 
 use layout::{
     tss_descriptor, user_segment_descriptor, SegmentSelector, TaskStateSegment, KERNEL_CODE_ACCESS,
@@ -63,8 +65,18 @@ pub const DOUBLE_FAULT_IST_INDEX: usize = 1;
 /// 動くようにするため、IDT の #PF ゲートでこの番号を指定する（ADR-0019 §3.1）。
 pub const PAGE_FAULT_IST_INDEX: usize = 2;
 
-static mut GDT: [u64; GDT_ENTRY_COUNT] = [0; GDT_ENTRY_COUNT];
-static mut TSS: TaskStateSegment = TaskStateSegment::new();
+/// GDT と TSS はコアごとに持つ（seam整備3c、ADR-0023）。各コアが自分の GDT を
+/// 構築して `lgdt`/`ltr` し、自分の TSS（RSP0・IST）を持つ。GDT も per-CPU に
+/// するのは、共有 GDT にすると TSS ディスクリプタ（long mode で 16 バイト = 2
+/// エントリ）をコアごとに別スロットへ置く必要が生じ、GDT レイアウトが MAX_CPUS
+/// に比例して STAR 互換順（ADR-0020）と絡むため。per-CPU なら各コアの GDT
+/// レイアウトが従来のまま保たれる。1 コアあたり 64 バイトで増分は無視できる。
+///
+/// シングルコア（`MAX_CPUS = 1`）では [`PerCpu::this_cpu_ptr`] が常に唯一の
+/// スロットを指すので、構築・ロードされるテーブルは従来と同一である。
+static mut GDT: PerCpu<[u64; GDT_ENTRY_COUNT]> = PerCpu::new([[0; GDT_ENTRY_COUNT]; MAX_CPUS]);
+static mut TSS: PerCpu<TaskStateSegment> =
+    PerCpu::new([const { TaskStateSegment::new() }; MAX_CPUS]);
 
 /// `lgdt` / `sgdt` が扱うディスクリプタテーブルレジスタの形。
 ///
@@ -92,8 +104,10 @@ struct DescriptorTablePointer {
 pub unsafe fn init(double_fault_stack_top: u64, page_fault_stack_top: u64) {
     // TSS を先に埋める。GDT の TSS ディスクリプタがそのアドレスを指すため。
     // SAFETY: 起動時の単一実行文脈であり、他に誰もこの static に触れていない。
+    // 自コアのスロットへ書く（`this_cpu_ptr` の契約: `this` は有効な static、
+    // 書き込みは単一文脈内）。
     unsafe {
-        let tss = addr_of!(TSS) as *mut TaskStateSegment;
+        let tss = PerCpu::this_cpu_ptr(addr_of_mut!(TSS));
         (*tss).interrupt_stack_table[DOUBLE_FAULT_IST_INDEX - 1] = double_fault_stack_top;
         (*tss).interrupt_stack_table[PAGE_FAULT_IST_INDEX - 1] = page_fault_stack_top;
         // RSP0 は特権レベルが下がる遷移（ユーザー → カーネル）で使われる。
@@ -103,13 +117,15 @@ pub unsafe fn init(double_fault_stack_top: u64, page_fault_stack_top: u64) {
         (*tss).privilege_stack_table[0] = crate::stack::kernel_stack_range().top.as_u64();
     }
 
-    let tss_base = addr_of!(TSS) as u64;
+    // SAFETY: 同上（起動時の単一文脈、自コアのスロット）。読み取り目的で
+    // アドレスを取る。
+    let tss_base = unsafe { PerCpu::this_cpu_ptr(addr_of_mut!(TSS)) } as u64;
     let tss_limit = (core::mem::size_of::<TaskStateSegment>() - 1) as u32;
     let (tss_low, tss_high) = tss_descriptor(tss_base, tss_limit);
 
-    // SAFETY: 同上。GDT はこの関数でのみ書き込む。
+    // SAFETY: 同上。GDT はこの関数でのみ書き込む。自コアのスロットへ書く。
     unsafe {
-        let gdt = addr_of!(GDT) as *mut [u64; GDT_ENTRY_COUNT];
+        let gdt = PerCpu::this_cpu_ptr(addr_of_mut!(GDT));
         (*gdt)[NULL_INDEX as usize] = 0;
         (*gdt)[KERNEL_CODE_INDEX as usize] =
             user_segment_descriptor(KERNEL_CODE_ACCESS, KERNEL_CODE_FLAGS);
@@ -137,9 +153,11 @@ pub unsafe fn init(double_fault_stack_top: u64, page_fault_stack_top: u64) {
         (*gdt)[TSS_INDEX as usize + 1] = tss_high;
     }
 
+    // SAFETY: 自コアの GDT スロットのアドレスを lgdt へ渡す（起動時の単一文脈）。
+    let gdt_slot_base = unsafe { PerCpu::this_cpu_ptr(addr_of_mut!(GDT)) } as u64;
     let pointer = DescriptorTablePointer {
         limit: (GDT_ENTRY_COUNT * core::mem::size_of::<u64>() - 1) as u16,
-        base: addr_of!(GDT) as u64,
+        base: gdt_slot_base,
     };
 
     // SAFETY: pointer は今組み立てた有効な GDT を指す。呼び出し側の契約により
@@ -288,21 +306,24 @@ pub fn current_task_register() -> u16 {
     selector
 }
 
-/// 自前の GDT の先頭アドレス。読み戻しの照合に使う。
+/// 自前の GDT（現在のコアのスロット）の先頭アドレス。読み戻しの照合に使う。
 pub fn gdt_base() -> u64 {
-    addr_of!(GDT) as u64
+    // SAFETY: addr_of_mut! は参照を作らない。自コアのスロットのアドレスを
+    // 読み取り目的で取る（`this_cpu_ptr` の契約: `this` は有効な static）。
+    unsafe { PerCpu::this_cpu_ptr(addr_of_mut!(GDT)) as u64 }
 }
 
-/// 自前の TSS の先頭アドレス。
+/// 自前の TSS（現在のコアのスロット）の先頭アドレス。
 pub fn tss_base() -> u64 {
-    addr_of!(TSS) as u64
+    // SAFETY: 同上。読み取り目的でアドレスを取る。
+    unsafe { PerCpu::this_cpu_ptr(addr_of_mut!(TSS)) as u64 }
 }
 
 /// TSS に設定済みのダブルフォルト用スタック上端。読み戻しの照合に使う。
 pub fn double_fault_stack_top() -> u64 {
-    // SAFETY: 読み取りのみ。init 以降は書き換えない。
+    // SAFETY: 読み取りのみ。init 以降は書き換えない。自コアのスロットを読む。
     unsafe {
-        let tss = addr_of!(TSS);
+        let tss = PerCpu::this_cpu_ptr(addr_of_mut!(TSS));
         (*tss).interrupt_stack_table[DOUBLE_FAULT_IST_INDEX - 1]
     }
 }
@@ -322,18 +343,18 @@ pub fn double_fault_stack_top() -> u64 {
 /// 呼ぶこと。
 pub unsafe fn set_rsp0(top: u64) {
     // SAFETY: 呼び出し元契約による。TSS は起動時に構築済みの静的領域で、
-    // 書き込むのは RSP0（privilege_stack_table[0]）のみ。
+    // 書き込むのは自コアのスロットの RSP0（privilege_stack_table[0]）のみ。
     unsafe {
-        let tss = addr_of!(TSS) as *mut TaskStateSegment;
+        let tss = PerCpu::this_cpu_ptr(addr_of_mut!(TSS));
         (*tss).privilege_stack_table[0] = top;
     }
 }
 
 /// TSS に設定済みの RSP0。
 pub fn privilege_stack_top() -> u64 {
-    // SAFETY: 読み取りのみ。
+    // SAFETY: 読み取りのみ。自コアのスロットを読む。
     unsafe {
-        let tss = addr_of!(TSS);
+        let tss = PerCpu::this_cpu_ptr(addr_of_mut!(TSS));
         (*tss).privilege_stack_table[0]
     }
 }
