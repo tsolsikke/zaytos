@@ -2448,15 +2448,27 @@ fn find_unapproved_interrupt_control(
         // 書かれるので、塊全体を追う必要がある（`asm!` を含む行だけを見ていたときは
         // 複数行の `asm!` 内の `cli` を取りこぼした）。開き `asm!(` から、trim 後に
         // `);` で始まる行までを塊とする。
+        //
+        // **同じ行で閉じる呼び出し（`asm!("cli")` の 1 行形）では塊に入れない。**
+        // 入れてしまうと閉じ `);` が独立した行に現れないため `in_asm` が解除されず、
+        // **そのファイルの残り全部を asm の中と誤認する**。実測では、単一行の
+        // `global_asm!` を 1 つ置くだけで `current_item` が固定され、`interrupts.rs` の
+        // 許可済み 5 箇所すべてが所属名の不一致で未許可と判定された（FAIL する方向
+        // なので静かには壊れないが、正当な 1 行形を書くと検査が使えなくなる）。
         let mut in_asm = false;
         for (index, line) in source.lines().enumerate() {
             let trimmed = line.trim_start();
+            // この行が `asm!` 呼び出しを開いているか（1 行で閉じる形を含む）。
+            let opens_asm = line.contains("asm!(");
+            let closes_on_same_line = opens_asm && asm_call_closes_on_same_line(line);
 
-            if line.contains("asm!(") {
-                in_asm = true;
-                if line.contains("global_asm!(") {
-                    in_global_asm = true;
-                    current_item = "global_asm!";
+            if opens_asm {
+                if !closes_on_same_line {
+                    in_asm = true;
+                    if line.contains("global_asm!(") {
+                        in_global_asm = true;
+                        current_item = "global_asm!";
+                    }
                 }
             } else if in_asm && trimmed.starts_with(");") {
                 in_asm = false;
@@ -2476,8 +2488,9 @@ fn find_unapproved_interrupt_control(
                 continue;
             }
 
-            let hit =
-                in_asm && mentions_raw_instruction(line) || mentions_interrupt_primitive(line);
+            // 1 行で閉じる形は `in_asm` に入れないので、その行自体は `opens_asm` で拾う。
+            let hit = (in_asm || opens_asm) && mentions_raw_instruction(line)
+                || mentions_interrupt_primitive(line);
 
             if !hit {
                 continue;
@@ -2498,6 +2511,43 @@ fn find_unapproved_interrupt_control(
         }
     }
     Ok(findings)
+}
+
+/// `asm!` 呼び出しがその行の中で閉じているか（`asm!("cli")` の 1 行形）。
+///
+/// `asm!(` の `(` から括弧を数え、その行の終わりで残高が 0 なら閉じている。
+/// 文字列リテラルの中の括弧は数えない（asm のオペランド文字列に `(` が現れても
+/// 残高を狂わせないため）。
+///
+/// # 守れない範囲
+///
+/// - `line.find("asm!(")` は**最初の 1 つ**しか見ない。1 行に複数の `asm!` 呼び出しが
+///   あると 2 つ目以降を見落とす。
+/// - 文字列内のエスケープ `\"` で `in_string` が誤って反転する。
+///
+/// どちらも現在のコードには該当箇所が無く実害は無い。これらは
+/// `docs/verification-coverage.md` に挙げた「検出をブロック追跡から切り離す」提案の
+/// 根拠 3 件目でもある（その場しのぎのスキャナでソースを解析していることが原因）。
+fn asm_call_closes_on_same_line(line: &str) -> bool {
+    let Some(position) = line.find("asm!(") else {
+        return false;
+    };
+    let mut depth = 0i32;
+    let mut in_string = false;
+    for character in line[position + "asm!".len()..].chars() {
+        match character {
+            '"' => in_string = !in_string,
+            '(' if !in_string => depth += 1,
+            ')' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// その行の文字列リテラルが生の `cli` / `sti` 命令を含むか（`asm!` の中）。
