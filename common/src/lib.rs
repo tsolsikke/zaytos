@@ -15,5 +15,6 @@ pub mod cpu;
 pub mod critical;
 pub mod elf;
 pub mod log;
+pub mod percpu;
 pub mod port;
 pub mod serial;
