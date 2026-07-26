@@ -237,9 +237,10 @@ pub unsafe fn remove_identity(
         // halt する（「書き戻した」だけでなく「恒等が実際に復活した」ことまで見る）。
         // SAFETY: cr3 は稼働テーブル、direct_map で読める。読み取りのみ。
         let low_after = unsafe { verify::walk(cr3, direct_map, low_probe) };
+        let revived = low_after.is_ok();
         logger.error(format_args!(
             "identity-removal: verification FAILED. restored PML4[0]; low VA {:#x} walk after restore = \
-             {low_after:?} (expected Ok = identity revived). halting",
+             {low_after:?} revived={revived} (expected Ok = identity revived). halting",
             low_probe.as_u64()
         ));
         cpu::halt_forever();

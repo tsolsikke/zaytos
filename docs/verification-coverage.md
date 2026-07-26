@@ -112,7 +112,7 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 
 **解消（案E）。** サボタージュを大域から**arm 窓へ絞った**。`common::critical`に`SABOTAGE_ARMED`を置き、`InterruptGuard`は arm されている間だけ cli を省く。`on_timer_tick`の防御スキップも arm 中だけ bypass する。ワーカーは`preemptive_loop_top`で`DEMO_LOCK`を握る直前に arm し（RAII、Drop で disarm）、その保持窓だけを壊す。デモ開始は arm の外なので正常な cli の下で走り、startup レースが起きない。**production は不変**（arm 判定はすべて feature 下で、既定ビルドでは cli も防御スキップも常時有効）。修正後、単体30回連続 PASS（全て二重取得経由、`made no progress`は0回）・`--full`の全通過・既定20回で`made no progress`=0 を確認した。
 
-**フレーク判断の手順（この種の確率的取りこぼしが再発したとき用に残す）。** 失敗署名を確認し、`exception: vector=`・cpu_reset の増加・別マーカーの欠落なら回帰として調査する。取りこぼし署名（`made no progress`・`switches=0`等）なら、単体で数回再実行し、`cargo xtask check --full`（B-2b-4完了後は64）の全通過を確認する。同じ署名で繰り返すなら確率が高すぎるので、確率性そのものを潰すまで先へ進めない。
+**フレーク判断の手順（この種の確率的取りこぼしが再発したとき用に残す）。** 失敗署名を確認し、`exception: vector=`・cpu_reset の増加・別マーカーの欠落なら回帰として調査する。取りこぼし署名（`made no progress`・`switches=0`等）なら、単体で数回再実行し、`cargo xtask check --full`の全通過を確認する。同じ署名で繰り返すなら確率が高すぎるので、確率性そのものを潰すまで先へ進めない。
 
 ### 意図的に壊す feature の一覧
 
@@ -166,6 +166,7 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 | `highhalf-bad-high-slot` | 静的初期テーブルの `PDPT_high` のエントリを `510`→`509` へずらす | 高位 `_start` への jmp 先が未マップで起動が進まないこと。判定は `no-identity-in-boot-pt` と同一署名 |
 | `highhalf-no-kernel-high-in-live-table` | M2-d/A-1 の `map_kernel_high_half` 呼び出しを外す（本流テーブルにカーネル高位マッピングを張らない） | M2-d の CR3 切替後に高位で #PF して停止すること。判定=`higher-half: arrived at high VA` present / `paging: CR3 switch verified` absent + heartbeat=0 |
 | `highhalf-trampoline-absolute-ref` | トランポリンに絶対メモリ参照命令（`mov rbx, [0x2000]`）を 1 命令挿入する | トランポリンのバイト単位一致検査が落ちること（**静的検査。QEMU 不要**。実行時は `0x2000` が恒等で読めるので落ちない） |
+| `highhalf-remove-verify-fail` | 恒等除去点で `remove_identity` を呼び、必須領域のヒープ高位VAを解決不能な高位VA（空の `PML4[257]` = `0xffff808000000000`）へ差し替えて step4 を失敗させる | 5a が `PML4[0]` を書き戻し（`restored PML4[0]`）、恒等が実際に復活し（`revived=true`）、除去を完了せず（`done` は出ない）halt すること。判定=present（`required [heap high VA] … FAILED` / `verification FAILED. restored PML4[0]` / `revived=true`）+ absent（`identity-removal: done`）+ heartbeat=0。**サボタージュVA `0xffff808000000000` は `PML4[257]` が空であることに依存する。`[257..510]` はSMPのper-CPU用に温存している範囲で、BKLでper-CPUデータがそこへ載るとこのVAが解決してstep4が失敗しなくなる（マーカーが出ずFAILするので静かには壊れないが検査の意味を失う）。SMPのper-CPU配置を決めるときに再確認する。** |
 
 これらが有効なビルドでは、起動時に`test hooks:`のWARNが出て内訳が列挙される。
 何も有効でない場合も`test hooks: none enabled (this is a normal build)`と1行出す。
@@ -201,7 +202,7 @@ higher-halfの破壊feature（B-2a-5、破壊feature `highhalf-*`）について
 - **M2-d/A-1の切替前検査は物理範囲のメンバシップ検査のみで、高位マッピングの欠落を検出しない。** `highhalf-no-kernel-high-in-live-table`(c)がこれを実証した。必須マッピング検証は「切替後の必須領域が物理範囲に属するか」を見るだけで、A-1/B-1が持つ「新テーブルを独立walkerで実際に引く」検査を持たない。恒等が物理を覆っている限り高位マッピングの欠落を見逃す。walkベースへの強化はB-2bの検討事項（ADR-0024 / ADR-0021 B Addendum）。
 - **トランポリンのバイト単位一致検査（base検査）。** ビルド済みkernel.elfの入口24バイトを期待リテラルと比較する（`common::elf`再利用、新規外部クレートなし）。既定ビルドで一致（B-2a-2/B-2a-3b/B-2a-5で3度、再リンク・B-1撤去を跨いで不変を実証）、`highhalf-trampoline-absolute-ref`で不一致。rel32がすべて`.text.trampoline`内なので配置非依存で安定。`cargo xtask check`のbase検査なので`--full`でなくても毎回走る。
 
-**項目会計（B-2a-5）**: base検査は13→14（トランポリンのバイト一致検査を追加）。`cargo xtask check`=14項目。`cargo xtask check --full`=56→61（base14 + QEMU43 + highhalf4[a/b/cのQEMU + dの静的]）。以前の報告にあった「QEMU 42」は43が正しい（56 = base13 + QEMU43）。
+**項目会計（B-2a-5）**: base検査は13→14（トランポリンのバイト一致検査を追加）。`cargo xtask check`=14項目。`cargo xtask check --full`=56→61（base14 + QEMU43 + highhalf4[a/b/cのQEMU + dの静的]）。以前の報告にあった「QEMU 42」は43が正しい（56 = base13 + QEMU43）。**B-2b-4(c)で `highhalf-remove-verify-fail` を追加し highhalf5、`cargo xtask check --full`=62。**（(e)で残り破壊2種を足して64が最終見込み。）
 
 ### higher-half B-2b: 恒等除去の設計（着手前の棚卸し）
 

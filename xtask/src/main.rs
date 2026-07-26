@@ -726,6 +726,21 @@ const HIGHHALF_TESTS: &[HighhalfTest] = &[
         present_markers: &["higher-half: arrived at high VA"],
         absent_markers: &["paging: CR3 switch verified"],
     },
+    // B-2b-4: 恒等除去の 5a 復帰。他の highhalf 破壊と違い「どこかで死ぬ」テストではなく、
+    // 恒等除去点で remove_identity を呼び、必須領域のヒープ高位 VA を解決不能な高位 VA
+    // （空の PML4[257] = 0xffff808000000000）へ差し替えて step4 を失敗させる。5a が PML4[0] を
+    // 書き戻し（restored PML4[0]）、恒等が実際に復活し（revived=true）、除去を完了せず
+    // （done は出ない）halt する。除去点は start_timer より前なので heartbeat=0 も成立する。
+    HighhalfTest {
+        name: "remove-verify-fail",
+        feature: "highhalf-remove-verify-fail",
+        present_markers: &[
+            "required [heap high VA] 0xffff808000000000: FAILED",
+            "verification FAILED. restored PML4[0]",
+            "revived=true",
+        ],
+        absent_markers: &["identity-removal: done"],
+    },
 ];
 
 /// トランポリンのコード先頭 24 バイト（B-2a-2/B-2a-3b で 2 度、再リンク・
@@ -1784,6 +1799,7 @@ fn cmd_highhalf_test(kind: &str) -> Result<()> {
             || l.contains("entered _start")
             || l.contains("CR3 switch")
             || l.contains("required range")
+            || l.contains("identity-removal")
             || l.contains("halting")
     }) {
         println!("{line}");
@@ -2508,6 +2524,7 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "highhalf-bad-high-slot",
     "highhalf-no-kernel-high-in-live-table",
     "highhalf-trampoline-absolute-ref",
+    "highhalf-remove-verify-fail",
 ];
 
 /// kernel の既定 feature に仕込みが混ざっていないことを確かめる。

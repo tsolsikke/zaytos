@@ -189,3 +189,8 @@ highhalf-no-kernel-high-in-live-table = []
 # (d) トランポリンに絶対メモリ参照命令を 1 行挿入する。**実行時ではなく静的なバイト単位一致
 # 検査で捕まえる。** `--highhalf-test trampoline-absolute-ref`。
 highhalf-trampoline-absolute-ref = []
+# B-2b-4: 恒等除去の 5a 復帰の検証。恒等除去点で remove_identity を呼び、必須領域のヒープ高位 VA
+# を解決不能な高位 VA（空の PML4[257]）へ差し替えて step4 を失敗させる。5a が PML4[0] を書き戻して
+# 原因を報告し halt すること、書き戻しで恒等が実際に復活すること（低位 VA が walk で present に戻る）
+# を実証する。`--highhalf-test remove-verify-fail`。
+highhalf-remove-verify-fail = []

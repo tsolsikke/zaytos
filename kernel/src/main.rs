@@ -1165,13 +1165,57 @@ extern "sysv64" fn kernel_main() -> ! {
     #[cfg(not(feature = "paging-test"))]
     verify_syscall_checksum(&mut logger);
 
-    // === higher-half B-2b-4（恒等除去）の予定位置 ===
+    // === higher-half B-2b-4（恒等除去） ===
     //
-    // ここが恒等（PML4[0]）を外す点になる（実装は B-2b-4）。恒等窓を握る4検証サイト
-    // （verify_user_page_mapping / verify_ring3_excursion / verify_syscall_roundtrip /
-    // verify_syscall_pointer）と verify_syscall_checksum が全て走り終えた後、start_timer
-    // より前。**この時点で boot_info は無効**（低位 VA、最終利用は上の rehome）。順序依存の
-    // 詳細と除去手順は docs/verification-coverage.md の「higher-half B-2b」を参照。
+    // ここが恒等（PML4[0]）を外す点。恒等窓を握る4検証サイト（verify_user_page_mapping /
+    // verify_ring3_excursion / verify_syscall_roundtrip / verify_syscall_pointer）と
+    // verify_syscall_checksum が全て走り終えた後、start_timer より前。**この時点で
+    // boot_info は無効**（低位 VA、最終利用は上の rehome）。順序依存の詳細と除去手順は
+    // docs/verification-coverage.md の「higher-half B-2b」を参照。
+    //
+    // 段階: (c)=highhalf-remove-verify-fail のときだけ remove_identity を呼び、5a の
+    // 書き戻しと恒等復活を実証する。既定ビルドではこのブロックは存在せず振る舞い不変。
+    // (d) でこの `#[cfg]` を `not(feature = "paging-test")` へ変え、既定でも呼ぶ。
+    #[cfg(feature = "highhalf-remove-verify-fail")]
+    {
+        use common::addr::{PhysAddr, VirtAddr};
+        use kernel::paging::remove::{remove_identity, RequiredRegion};
+
+        let direct_map = common::addr::direct_map();
+
+        // lib が導ける領域（RIP/RSP/direct map 窓/カーネルイメージ）は remove_identity が
+        // 内部で足す。ここで渡すのは lib が知り得ない高位 VA だけである:
+        //   - ヒープの高位 VA（heap_virt_base、B-2b-2）
+        //   - フレームバッファの高位 VA。`framebuffer` 変数は console へ move 済みなので、
+        //     rehome と同じ式で fb_start（物理）から `phys_to_virt` で再計算する
+        // **新しく低位ポインタを高位化したら、この列にも足すこと**（verification-coverage の
+        // 「解消済み」群と同期）。
+        //
+        // (c) のサボタージュ: ヒープの高位 VA を解決不能な高位 VA（空の PML4[257]）へ
+        // 差し替え、step4 を失敗させて 5a の復帰経路を通す。(d) では heap_virt_base を渡す。
+        let heap_high_va = VirtAddr::new(0xFFFF_8080_0000_0000)
+            .expect("the sabotaged heap VA is canonical (empty PML4[257])");
+        let mut high_mapped = Vec::new();
+        high_mapped.push(RequiredRegion {
+            name: "heap high VA",
+            va: heap_high_va,
+        });
+        if fb_start != 0 {
+            high_mapped.push(RequiredRegion {
+                name: "framebuffer high VA",
+                va: direct_map
+                    .phys_to_virt(PhysAddr::new(fb_start).expect("the framebuffer phys is valid")),
+            });
+        }
+
+        // SAFETY: 恒等窓を握る全検証サイトと boot_info の消費、除去点より前に走るべき生の
+        // 低位 read（kernel_start）はいずれも既に終えている。direct_map は登録高位窓で稼働
+        // PML4 配下を読み書きできる。呼び出し時点の順序前提は上のコメントと
+        // docs/verification-coverage.md の「higher-half B-2b」に従う。
+        unsafe {
+            remove_identity(&mut logger, direct_map, &high_mapped);
+        }
+    }
 
     // ロック保持中は割り込みが禁止され、解放後に元へ戻ることを確認する
     // （M4-c-2）。ヒープのロックそのものではなく同じ Locked<T> を使う。
