@@ -194,3 +194,10 @@ highhalf-trampoline-absolute-ref = []
 # 原因を報告し halt すること、書き戻しで恒等が実際に復活すること（低位 VA が walk で present に戻る）
 # を実証する。`--highhalf-test remove-verify-fail`。
 highhalf-remove-verify-fail = []
+# B-2b-4(e): ヒープ初期化を低位（heap_start=物理）へ戻す。恒等除去は既定位置のまま走り、除去後に
+# 低位ヒープを触るスモークテストがデレフして死ぬ。除去より前にヒープを高位化する順序の必要性を実証する。
+# 期待署名は #PF（vector 14、CR2=低位ヒープ）。`--highhalf-test remove-before-highify`。
+highhalf-remove-before-highify = []
+# B-2b-4(e): 恒等除去の直後に意図的 panic する。パニック経路（シリアル I/O・レジスタ値のみ・walk なし）が
+# 恒等非依存であることを、除去後の実状態で確認する。期待署名はパニックダンプ。`--highhalf-test panic-after-remove`。
+highhalf-panic-after-remove = []

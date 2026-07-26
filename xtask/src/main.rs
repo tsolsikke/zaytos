@@ -741,6 +741,35 @@ const HIGHHALF_TESTS: &[HighhalfTest] = &[
         ],
         absent_markers: &["identity-removal: done"],
     },
+    // B-2b-4(e): ヒープ初期化を低位（heap_start=物理）へ戻す。恒等除去は begin→clear まで進み、
+    // 5b のフラッシュ後に step6 が high_mapped（低位ヒープ上）を辿って #PF で死ぬ（removal は
+    // 除去は既定どおり done まで完走し（high_mapped はスタックなので除去自身は生き残る）、その後
+    // 1181 のヒープスモークテストが低位ヒープ（`heap_start` 物理）をデレフして #PF で死ぬ。**この
+    // テストは #PF ダンプ（vector=14 + cr2 が低位＝物理ヒープ域）が出ることが成功署名**であり、
+    // フレーク判断の一般手順（`exception: vector=` は回帰）とは区別される意図的破壊（除去より前に
+    // ヒープを高位化する順序の必要性を実証。verification-coverage 参照）。cr2=0x00000000… で低位を確認。
+    HighhalfTest {
+        name: "remove-before-highify",
+        feature: "highhalf-remove-before-highify",
+        present_markers: &[
+            "identity-removal: done",
+            "exception: vector=14",
+            "cr2=0x00000000",
+        ],
+        absent_markers: &[],
+    },
+    // B-2b-4(e): 恒等除去の直後に意図的 panic。除去は done まで完走し、その後パニックダンプが出る。
+    // **パニックダンプが出ることが成功署名**（パニック経路がシリアル I/O・レジスタ値のみ・walk
+    // なしで恒等非依存であり、恒等を外した後も動くことの実証）。同じく一般手順とは区別される。
+    HighhalfTest {
+        name: "panic-after-remove",
+        feature: "highhalf-panic-after-remove",
+        present_markers: &[
+            "identity-removal: done",
+            "intentional panic right after identity removal",
+        ],
+        absent_markers: &[],
+    },
 ];
 
 /// トランポリンのコード先頭 24 バイト（B-2a-2/B-2a-3b で 2 度、再リンク・
@@ -2525,6 +2554,8 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "highhalf-no-kernel-high-in-live-table",
     "highhalf-trampoline-absolute-ref",
     "highhalf-remove-verify-fail",
+    "highhalf-remove-before-highify",
+    "highhalf-panic-after-remove",
 ];
 
 /// kernel の既定 feature に仕込みが混ざっていないことを確かめる。

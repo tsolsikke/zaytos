@@ -167,6 +167,8 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 | `highhalf-no-kernel-high-in-live-table` | M2-d/A-1 の `map_kernel_high_half` 呼び出しを外す（本流テーブルにカーネル高位マッピングを張らない） | M2-d の CR3 切替後に高位で #PF して停止すること。判定=`higher-half: arrived at high VA` present / `paging: CR3 switch verified` absent + heartbeat=0 |
 | `highhalf-trampoline-absolute-ref` | トランポリンに絶対メモリ参照命令（`mov rbx, [0x2000]`）を 1 命令挿入する | トランポリンのバイト単位一致検査が落ちること（**静的検査。QEMU 不要**。実行時は `0x2000` が恒等で読めるので落ちない） |
 | `highhalf-remove-verify-fail` | 恒等除去点で `remove_identity` を呼び、必須領域のヒープ高位VAを解決不能な高位VA（空の `PML4[257]` = `0xffff808000000000`）へ差し替えて step4 を失敗させる | 5a が `PML4[0]` を書き戻し（`restored PML4[0]`）、恒等が実際に復活し（`revived=true`）、除去を完了せず（`done` は出ない）halt すること。判定=present（`required [heap high VA] … FAILED` / `verification FAILED. restored PML4[0]` / `revived=true`）+ absent（`identity-removal: done`）+ heartbeat=0。**サボタージュVA `0xffff808000000000` は `PML4[257]` が空であることに依存する。`[257..510]` はSMPのper-CPU用に温存している範囲で、BKLでper-CPUデータがそこへ載るとこのVAが解決してstep4が失敗しなくなる（マーカーが出ずFAILするので静かには壊れないが検査の意味を失う）。SMPのper-CPU配置を決めるときに再確認する。** |
+| `highhalf-remove-before-highify` | ヒープ初期化を低位（`heap_start`=物理）へ戻す。恒等除去は `done` まで完走し（`high_mapped` はスタックなので除去自身は生き残る。除去のヒープ非依存化を参照）、その後 1181 のヒープスモークテストが低位ヒープをデレフして死ぬ | 除去より前にヒープを高位化する順序の必要性を実証。除去は `done` まで完走し、その後フラッシュ済みの低位ヒープを触って #PF で死ぬ。判定=present（`identity-removal: done` / `exception: vector=14` / `cr2=0x00000000…`=低位＝物理ヒープ域 `0x584000`）+ heartbeat=0。**#PFダンプが出ることが成功署名**（下記の注記参照）。当初は除去自身の低位ヒープ Vec を step6 で辿って死んでいた（除去が完了しなかった）が、除去をヒープ非依存にした（`high_mapped` をスタック配列化）ことで、死亡点が想定どおりスモークテストへ移った |
+| `highhalf-panic-after-remove` | 恒等除去の直後に意図的 `panic!` する | パニック経路（シリアル I/O・レジスタ値のみ・walk なし）が恒等非依存で、恒等を外した後も動くことを実証。除去は `done` まで完走し、その後パニックダンプが出る。判定=present（`identity-removal: done` / `intentional panic right after identity removal`）+ heartbeat=0。**パニックダンプが出ることが成功署名**（下記の注記参照） |
 
 これらが有効なビルドでは、起動時に`test hooks:`のWARNが出て内訳が列挙される。
 何も有効でない場合も`test hooks: none enabled (this is a normal build)`と1行出す。
@@ -202,7 +204,7 @@ higher-halfの破壊feature（B-2a-5、破壊feature `highhalf-*`）について
 - **M2-d/A-1の切替前検査は物理範囲のメンバシップ検査のみで、高位マッピングの欠落を検出しない。** `highhalf-no-kernel-high-in-live-table`(c)がこれを実証した。必須マッピング検証は「切替後の必須領域が物理範囲に属するか」を見るだけで、A-1/B-1が持つ「新テーブルを独立walkerで実際に引く」検査を持たない。恒等が物理を覆っている限り高位マッピングの欠落を見逃す。walkベースへの強化はB-2bの検討事項（ADR-0024 / ADR-0021 B Addendum）。
 - **トランポリンのバイト単位一致検査（base検査）。** ビルド済みkernel.elfの入口24バイトを期待リテラルと比較する（`common::elf`再利用、新規外部クレートなし）。既定ビルドで一致（B-2a-2/B-2a-3b/B-2a-5で3度、再リンク・B-1撤去を跨いで不変を実証）、`highhalf-trampoline-absolute-ref`で不一致。rel32がすべて`.text.trampoline`内なので配置非依存で安定。`cargo xtask check`のbase検査なので`--full`でなくても毎回走る。
 
-**項目会計（B-2a-5）**: base検査は13→14（トランポリンのバイト一致検査を追加）。`cargo xtask check`=14項目。`cargo xtask check --full`=56→61（base14 + QEMU43 + highhalf4[a/b/cのQEMU + dの静的]）。以前の報告にあった「QEMU 42」は43が正しい（56 = base13 + QEMU43）。**B-2b-4(c)で `highhalf-remove-verify-fail` を追加し highhalf5、`cargo xtask check --full`=62。**（(e)で残り破壊2種を足して64が最終見込み。）
+**項目会計（B-2a-5）**: base検査は13→14（トランポリンのバイト一致検査を追加）。`cargo xtask check`=14項目。`cargo xtask check --full`=56→61（base14 + QEMU43 + highhalf4[a/b/cのQEMU + dの静的]）。以前の報告にあった「QEMU 42」は43が正しい（56 = base13 + QEMU43）。**B-2b-4(c)で `highhalf-remove-verify-fail` を追加し highhalf5、`cargo xtask check --full`=62。B-2b-4(e)で `highhalf-remove-before-highify` と `highhalf-panic-after-remove` を追加し highhalf7、`cargo xtask check --full`=64。**
 
 ### higher-half B-2b: 恒等除去の設計（着手前の棚卸し）
 
@@ -241,7 +243,9 @@ higher-halfの破壊feature（B-2a-5、破壊feature `highhalf-*`）について
 
 **網羅の限界（正直に記録する）。** このsweepはgrep（`PhysAddr::new`/`VirtAddr::new`/`as *const`・`*mut`）+ パニック経路の目視。テストは実行された経路しか覆わない。feature下のみ到達する経路（(4)paging-test）、エラー処理、まだ発火させていないパニックは、grepが主たる保証でテストで完全性は証明できない。これは弱点の告白ではなく保証範囲の明示である。paging-testビルドでは検証サイト(5-8)がcfg除外される。B-2b-4(d)で恒等除去を `#[cfg(not(feature="paging-test"))]` で除外すると決めた（paging-testはsplit/unmapの破壊検査が目的で、恒等除去まで通す必要がない）。したがって**paging-testビルドでは恒等除去が検査されない**（カバレッジ穴として明示する）。**恒等除去が実際に走るビルド**は、除去点（`start_timer`より前・4検証サイト+checksumより後の1168付近）へ到達する `not(paging-test)` ビルドである。B-2b-4(d)の実測で確認した例: 既定（6段完走→定常到達=heartbeat）、`highhalf-remove-verify-fail`（step4失敗→5a復帰でhalt）、`preempt-in-critical`（除去`done`まで完走→その後デモの二重取得が発火＝CR3リロード後もデモ健全）、`exception-test`（除去`done`まで完走→その後に意図した例外が発火）。除去より前でhaltする破壊（highhalf a/b/c、検証サイト系のring3/syscall）は除去に到達しない。
 
-**パニック/例外経路が恒等非依存である理由（load-bearingな性質。壊さないこと）。** 初期の設計判断（シリアルログ最優先、ADR-0003）の成果であり偶然ではない。(a) 出力がI/Oポート経由のシリアルのみ（ページング非依存）、(b) レジスタ値のみでメモリをデレフしない（CR2も値として読むだけ）、(c) テーブルwalkをしない、ため恒等除去後も動く。将来パニック経路に画面出力やテーブルwalkを足すとこの性質を壊す。恒等除去後の意図的パニック検査（B-2b-4）で実測で閉じる。
+**パニック/例外経路が恒等非依存である理由（load-bearingな性質。壊さないこと）。** 初期の設計判断（シリアルログ最優先、ADR-0003）の成果であり偶然ではない。(a) 出力がI/Oポート経由のシリアルのみ（ページング非依存）、(b) レジスタ値のみでメモリをデレフしない（CR2も値として読むだけ）、(c) テーブルwalkをしない、ため恒等除去後も動く。将来パニック経路に画面出力やテーブルwalkを足すとこの性質を壊す。**B-2b-4(e)の `highhalf-panic-after-remove` で実測で閉じた**（恒等を外した後に `panic!` して、パニックハンドラがシリアルへメッセージと `rsp` を出して halt する＝恒等非依存で動くことを確認）。
+
+**`highhalf-remove-before-highify` と `highhalf-panic-after-remove` は「例外/パニックのダンプが出ることが成功署名」であり、フレーク判断の一般手順とは区別される。** 「確率的なテストとフレークの署名」の手順は「`exception: vector=` が出たら回帰として調査」と書いているが、この2種は**意図的に**例外/パニックを起こす破壊featureで、ダンプが出るのが正常である（before-highify は除去後に低位ヒープを触る #PF、panic-after-remove は意図的 `panic!`）。両者を混同して「例外が出ているから回帰では」と誤読しないこと。判定は各featureの present/absent マーカー（before-highify は `cr2=0x00000000…` で低位フォルトを、panic-after-remove は固有のパニックメッセージを確認）で行い、一般手順の対象ではない。この2種が有効なビルドは `test hooks:` のWARNに列挙されるので、そこで「意図的破壊ビルドか」を先に判別できる。
 
 ### 検査や計測が正しく機能していなかった事例
 

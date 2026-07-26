@@ -1071,12 +1071,21 @@ extern "sysv64" fn kernel_main() -> ! {
                 .expect("heap arena is a valid physical address"),
         )
         .as_u64();
+    // B-2b-4(e) remove-before-highify: ヒープ基底を低位（heap_start=物理）へ戻す。恒等除去
+    // 後に低位ヒープを触ると死ぬので、除去より前に高位化する順序の必要性を実証する。既定は
+    // 高位（heap_virt_base）。heap_virt_base は下の恒等除去の必須領域チェックでも使うので、
+    // このビルドでも計算だけは残す（そのため step4 は高位VAで通り、除去は完了する。死ぬのは
+    // 除去後に低位ヒープを触った瞬間で、順序依存を実証する）。
+    #[cfg(not(feature = "highhalf-remove-before-highify"))]
+    let heap_init_base = heap_virt_base;
+    #[cfg(feature = "highhalf-remove-before-highify")]
+    let heap_init_base = heap_start;
     // SAFETY: [heap_start, heap_end) はフレームアロケータから今切り出したばかりの、
-    // 他の誰も使っていない領域で、直前に mapped_ranges でマップ済みを確認済み。
-    // heap_virt_base はその物理を direct map 高位窓へ写した VA で、窓は RW・マップ
-    // 済み。このヒープに対する `init` 呼び出しはこれが最初で最後(1回のみ)。
+    // 他の誰も使っていない領域で、直前に mapped_ranges でマップ済みを確認済み。既定の
+    // heap_init_base はその物理を direct map 高位窓へ写した VA で、窓は RW・マップ済み。
+    // このヒープに対する `init` 呼び出しはこれが最初で最後(1回のみ)。
     unsafe {
-        ALLOCATOR.init(heap_virt_base, heap_size);
+        ALLOCATOR.init(heap_init_base, heap_size);
     }
     log_both(
         &mut logger,
@@ -1253,6 +1262,12 @@ extern "sysv64" fn kernel_main() -> ! {
             remove_identity(&mut logger, direct_map, high_mapped);
         }
     }
+
+    // B-2b-4(e) panic-after-remove: 恒等除去の直後に意図的 panic する。パニック経路
+    // （シリアル I/O・レジスタ値のみ・walk なし。ADR-0003）が恒等非依存であることを、
+    // 恒等を外した実状態で確認する。既定ビルドではこのブロックは存在しない。
+    #[cfg(feature = "highhalf-panic-after-remove")]
+    panic!("intentional panic right after identity removal (highhalf-panic-after-remove)");
 
     // ロック保持中は割り込みが禁止され、解放後に元へ戻ることを確認する
     // （M4-c-2）。ヒープのロックそのものではなく同じ Locked<T> を使う。
