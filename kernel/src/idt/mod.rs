@@ -445,7 +445,7 @@ pub const IRQ_STYLE_STUB_COUNT: usize = PIC_VECTOR_SPAN + 1;
 /// IRQ スタイルのスタブが担当する最初のベクタ。
 ///
 /// **PIC のベクタオフセットそのものではない。** オフセットは 0x20 にも
-/// 0x30 にもなりうる（`pic::MASTER_VECTOR_OFFSET`）。ここはスタブ表が
+/// 0x30 にもなりうる（`irq::vector_for`）。ここはスタブ表が
 /// 覆う範囲の下端であり、取りうるオフセットのうち最小のものである。
 pub const IRQ_VECTOR_BASE: usize = 0x20;
 
@@ -707,9 +707,8 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         // 本物なら ISR の該当ビットが立っている。
         //
         // SAFETY: 割り込みハンドラの中であり、割り込みゲート経由で入場した
-        // ため IF=0。他の実行文脈が同時に PIC を触ることはない。
-        let isr = unsafe { crate::irq::pic::read_isr() };
-        let spurious = crate::irq::pic::is_spurious(irq, isr);
+        // ため IF=0。他の実行文脈が同時にコントローラを触ることはない。
+        let spurious = unsafe { crate::irq::is_spurious(irq) };
         if spurious {
             SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
         }
@@ -718,10 +717,11 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         // 割り込みを上げられるようになる。宛先は純粋ロジックが決める
         // （スプリアスの扱いはマスタ側とスレーブ側で非対称）。
         //
-        // SAFETY: action は eoi_action_for が返した値そのものである。
+        // SAFETY: 実際に発生した割り込みに対してのみ呼んでいる。宛先の決定は
+        // 境界の内側の純粋ロジックが行う。
         #[cfg(not(feature = "no-eoi-test"))]
         unsafe {
-            crate::irq::pic::send_eoi_for(crate::irq::pic::eoi_action_for(irq, spurious));
+            crate::irq::end_of_interrupt(irq, spurious);
         }
     }
 
@@ -741,8 +741,14 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
 
 /// タイマ（IRQ0）のベクタ。
 ///
-/// PIC のベクタオフセットに追随する。`alt-offset-test` では 0x30 になる。
-pub const TIMER_VECTOR: usize = crate::irq::pic::MASTER_VECTOR_OFFSET as usize;
+/// コントローラのベクタ採番に追随する。`alt-offset-test` では 0x30 になる。
+///
+/// `match` で剥がしているのは、失敗時のメッセージが読めるためである
+/// （`unwrap()` も固定トールチェインで const 評価できることは確認済み）。
+pub const TIMER_VECTOR: usize = match crate::irq::vector_for(0) {
+    Some(vector) => vector as usize,
+    None => panic!("the timer IRQ has no vector"),
+};
 
 /// スプリアス割り込みを受けた回数（ベクタ別ではなく合計）。
 ///
@@ -761,12 +767,10 @@ pub fn spurious_count() -> u64 {
 /// テスト専用ベクタ（[`TEST_VECTOR`]）は PIC の範囲外なので `None` になり、
 /// EOI の経路へ入らない。
 fn pic_irq_for(vector: usize) -> Option<u8> {
-    let base = crate::irq::pic::MASTER_VECTOR_OFFSET as usize;
-    if (base..base + PIC_IRQ_COUNT).contains(&vector) {
-        Some((vector - base) as u8)
-    } else {
-        None
+    if vector > u8::MAX as usize {
+        return None;
     }
+    crate::irq::irq_for(vector as u8)
 }
 
 /// IRQ スタブ表の配置検証。

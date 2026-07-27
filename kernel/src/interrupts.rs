@@ -16,7 +16,7 @@ use common::serial::SerialPort;
 
 use crate::gdt;
 use crate::idt;
-use crate::irq::pic;
+use crate::irq;
 
 /// 検証項目 1 件の結果。
 ///
@@ -105,7 +105,7 @@ impl ReadinessReport {
 ///   マスク解除しないため、EOI を発行する対象そのものが存在しない。
 ///   M4-d-2 で実装と同時に `Verified` へ昇格させる。
 pub fn verify_ready_for_sti(logger: &mut Logger<SerialPort>) -> ReadinessReport {
-    verify_ready(logger, pic::MASK_ALL, false)
+    verify_ready(logger, &[], false)
 }
 
 /// タイマとキーボードを解禁した後の 7 項目検証。
@@ -118,13 +118,12 @@ pub fn verify_ready_for_sti(logger: &mut Logger<SerialPort>) -> ReadinessReport 
 pub fn verify_ready_for_sti_with_timer(logger: &mut Logger<SerialPort>) -> ReadinessReport {
     // IRQ0（タイマ）と IRQ1（キーボード）を解禁した状態。ハンドラを書いた
     // ベクタだけが開いていることを、実際の IMR と突き合わせる。
-    let expected = pic::MASK_ALL & !(1 << 0) & !(1 << crate::keyboard::KEYBOARD_IRQ);
-    verify_ready(logger, expected, true)
+    verify_ready(logger, &[0, crate::keyboard::KEYBOARD_IRQ], true)
 }
 
 fn verify_ready(
     logger: &mut Logger<SerialPort>,
-    expected_master_mask: u8,
+    unmasked: &[u8],
     timer_enabled: bool,
 ) -> ReadinessReport {
     // --- 1. GDT と CS/DS/SS ---
@@ -196,13 +195,11 @@ fn verify_ready(
         };
 
     // --- 5. IRQ マスク（項目 4 の判断に必要なので先に評価する）---
-    let (master_mask, slave_mask) = pic::read_masks();
-    logger.info(format_args!(
-        "sti-check 5: PIC IMR master={master_mask:#04x} slave={slave_mask:#04x} \
-         (expected {expected_master_mask:#04x}/{:#04x}) [read back from hardware]",
-        pic::MASK_ALL
-    ));
-    let irqs_masked = if master_mask == expected_master_mask && slave_mask == pic::MASK_ALL {
+    // 判定と表示は同じ 1 回の読み出しから導く（`MaskCheck`）。別々に読むと
+    // ログの値と判定の根拠が食い違いうる。
+    let masks = irq::check_masks(unmasked);
+    logger.info(format_args!("sti-check 5: PIC IMR {masks}"));
+    let irqs_masked = if masks.matches() {
         CheckState::Verified
     } else {
         CheckState::Failed
@@ -214,7 +211,7 @@ fn verify_ready(
          offset cannot be read back. Proceeding is safe only because check 5 holds: with every \
          IRQ masked, a wrong offset delivers nothing. Proof arrives in M4-d-2 when the first \
          timer IRQ shows up as vector {:#04x}",
-        pic::MASTER_VECTOR_OFFSET
+        idt::TIMER_VECTOR
     ));
     let pic_remapped = if timer_enabled {
         // タイマを解禁した以上、マスクによる保護はもう無い。ここから先は
@@ -593,8 +590,8 @@ pub unsafe fn run_timer_loop(
                 console_for_heartbeat,
                 format_args!(
                     "heartbeat: ticks={ticks} ({} s), keys={} dropped={} stray={} spurious={}, \
-                     irq1={} balanced={}, max tick jump={}, i8042 OBF={}, PIC ISR={:#04x}",
-                    ticks / crate::irq::pit::TARGET_FREQUENCY_HZ as u64,
+                     irq1={} balanced={}, max tick jump={}, i8042 OBF={}, PIC ISR={}",
+                    ticks / crate::irq::timer_frequency_hz() as u64,
                     crate::keyboard::buffer::received_count(),
                     crate::keyboard::buffer::overflow_count(),
                     crate::keyboard::stray_irq_count(),
@@ -615,7 +612,7 @@ pub unsafe fn run_timer_loop(
                     // 別の実行文脈は割り込みハンドラだけである。ハンドラは
                     // ISR を読んでも元に戻す必要がない読み出し専用の操作しか
                     // しないため、競合しても値がずれるだけで壊れない。
-                    unsafe { crate::irq::pic::read_isr() }.0
+                    unsafe { crate::irq::service_snapshot() }
                 ),
             );
         }

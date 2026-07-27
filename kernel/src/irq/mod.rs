@@ -138,36 +138,30 @@ pub const fn irq_for(vector: u8) -> Option<u8> {
     }
 }
 
-/// この IRQ はマスクされているか。
-pub fn is_masked(irq: u8) -> bool {
-    let (master, slave) = pic::read_masks();
-    if irq < pic::IRQS_PER_PIC {
-        master & (1 << irq) != 0
-    } else if irq < 2 * pic::IRQS_PER_PIC {
-        slave & (1 << (irq - pic::IRQS_PER_PIC)) != 0
-    } else {
-        true
-    }
-}
-
-/// すべての IRQ がマスクされているか。
+/// マスクの実状態を 1 回読み、`unmasked` だけが開いているかを判定する。
 ///
-/// **点の問い（[`is_masked`]）を 16 回呼ぶ形にしない。** PIC ではマスクの
-/// 読み出しが 2 回の I/O ポート読みであり、16 回呼ぶと 32 回になる。検証が
-/// 主張しているのは「全部閉じているか」という 1 つの命題なので、それを
-/// そのまま問いにする。読み出し回数は現在と同じ 1 回（2 ポート）である。
-pub fn all_irqs_masked() -> bool {
-    pic::read_masks() == (pic::MASK_ALL, pic::MASK_ALL)
-}
-
-/// 開いている IRQ が `unmasked` に挙げたものと正確に一致するか。
+/// **判定と表示を同じ観測から導くための型である。** 判定用に 1 回・表示用に
+/// もう 1 回読むと、ログに出る値と判定の根拠が食い違いうる（「expected と
+/// actual が一致して見えるのに判定は Failed」）。デバッグを最も誤らせる形
+/// なので、読み出しも期待値の計算も 1 回にまとめ、[`MaskCheck::matches`] と
+/// `Display` の両方がその 1 つの値から導かれるようにしてある。
 ///
-/// 解禁の前後で確かめたい命題は「開いたのはこの IRQ だけか」である。
-/// スライスを受けるのは、S2 の IO-APIC が 24 本以上を扱うため。
+/// 点の問い（「この IRQ は閉じているか」）を 16 回呼ぶ形にはしない。PIC では
+/// マスクの読み出しが 2 回の I/O ポート読みであり、16 回呼ぶと 32 回になる。
+/// 検証が主張しているのは「開いたのはこの IRQ だけか」という 1 つの命題で、
+/// それをそのまま 1 回の読み出しで確かめる。
+///
+/// `unmasked` がスライスなのは、S2 の IO-APIC が 24 本以上を扱うためである。
 /// `u16` のビットマップにすると「16 本」をシグネチャに焼き込むことになる。
-pub fn only_irqs_unmasked(unmasked: &[u8]) -> bool {
-    let expected = expected_masks(unmasked);
-    pic::read_masks() == expected
+pub fn check_masks(unmasked: &[u8]) -> MaskCheck {
+    let (master, slave) = pic::read_masks();
+    let (expected_master, expected_slave) = expected_masks(unmasked);
+    MaskCheck {
+        master,
+        slave,
+        expected_master,
+        expected_slave,
+    }
 }
 
 /// `unmasked` を開けたときに IMR がとるはずの値（純粋な計算）。
@@ -267,43 +261,45 @@ impl fmt::Display for TimerSetup {
     }
 }
 
-/// マスクの実状態の観測値。読み戻した値を持つ。
+/// [`check_masks`] の結果。実測と期待の両方を、同じ 1 回の読み出しから持つ。
 ///
 /// # 検査との関係（変更するとテストが落ちる）
 ///
-/// この出力の文言と値に `interrupt-test timer` と `interrupt-test no-eoi` が
-/// 依存している（期待マーカー
+/// この `Display` の文言と値に `interrupt-test timer` と
+/// `interrupt-test no-eoi` が依存している（期待マーカー
 /// `pic: IMR after unmasking IRQ0 master=0xfe slave=0xff`）。IMR の 2 バイト
 /// という形は PIC 固有で、IO-APIC の redirection table では成り立たない。
-/// S2 ではマーカー側を問い（[`only_irqs_unmasked`]）ベースへ移すこと。
+/// S2 ではマーカー側を [`MaskCheck::matches`] の結果ベースへ移すこと。
 ///
-/// **判定には使わない。表示専用である。** 開いている IRQ が期待どおりかを
-/// 判断するのは [`only_irqs_unmasked`] の仕事で、そちらは値を比較して `bool`
-/// を返す。書式を判定に載せると、書式を変えた瞬間に静かに壊れる。
-pub struct MaskSnapshot(u8, u8);
+/// # 期待を決めるのは呼び出し側である
+///
+/// [`check_masks`] が引数で「どの IRQ を開けたか」を受け取り、そこから
+/// 期待値を計算する。境界が独自に期待を持つことはない。検証の主語は
+/// 呼び出し側のままである。
+pub struct MaskCheck {
+    master: u8,
+    slave: u8,
+    expected_master: u8,
+    expected_slave: u8,
+}
 
-impl fmt::Display for MaskSnapshot {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "master={:#04x} slave={:#04x}", self.0, self.1)
+impl MaskCheck {
+    /// 実測が期待と一致しているか。**判定はこの値の比較で行い、`Display` の
+    /// 文字列を突き合わせる形にはしない。** 書式を判定に載せると、書式を
+    /// 変えた瞬間に静かに壊れる。
+    pub fn matches(&self) -> bool {
+        self.master == self.expected_master && self.slave == self.expected_slave
     }
 }
 
-/// 現在のマスクを読み戻す（ログ用）。
-pub fn mask_snapshot() -> MaskSnapshot {
-    let (master, slave) = pic::read_masks();
-    MaskSnapshot(master, slave)
-}
-
-/// `unmasked` だけが開いているときに期待されるマスク（ログ用）。
-///
-/// **期待を決めるのは呼び出し側である。** 引数で「どの IRQ を開けたか」を
-/// 受け取り、そこから IMR の期待値を計算するだけで、境界が独自に期待を
-/// 持つことはない。検証の主語は呼び出し側のままである。
-///
-/// これも表示専用で、判定は [`only_irqs_unmasked`] が値の比較で行う。
-pub fn expected_mask_snapshot(unmasked: &[u8]) -> MaskSnapshot {
-    let (master, slave) = expected_masks(unmasked);
-    MaskSnapshot(master, slave)
+impl fmt::Display for MaskCheck {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "master={:#04x} slave={:#04x} (expected {:#04x}/{:#04x}) [read back from hardware]",
+            self.master, self.slave, self.expected_master, self.expected_slave
+        )
+    }
 }
 
 /// 配送中の割り込みの観測値（ハートビートの診断用）。
