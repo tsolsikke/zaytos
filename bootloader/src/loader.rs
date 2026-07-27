@@ -19,6 +19,7 @@ use uefi::cstr16;
 use uefi::fs::{FileSystem, Path};
 use uefi::mem::memory_map::MemoryMap;
 use uefi::proto::console::gop::{GraphicsOutput, PixelFormat as GopPixelFormat};
+use uefi::table::cfg::ConfigTableEntry;
 
 const PAGE_SIZE: u64 = 4096;
 const KERNEL_ELF_PATH: &uefi::CStr16 = cstr16!("\\zaytos\\kernel.elf");
@@ -237,6 +238,12 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
     .as_ptr()
     .cast::<BootInfo>();
 
+    // --- 3.5. ACPI の RSDP を引く（ExitBootServices より前）---
+    //
+    // **ここでしか引けない。** RSDP のアドレスは UEFI の configuration table に
+    // あり、Boot Services が終わった後の kernel からは探す手段が無い。
+    let acpi_rsdp = find_acpi_rsdp(&mut logger);
+
     // --- 4. ExitBootServices ---
     // uefi-rs の `exit_boot_services` 自身が「メモリマップ取得 →
     // ExitBootServices 呼び出し」をアロケーションを挟まず一体で行い、
@@ -273,6 +280,7 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
                 descriptor_version: meta.desc_version,
             },
             framebuffer,
+            acpi_rsdp,
         });
     }
 
@@ -300,4 +308,64 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
     // 戻らない（kernel 側の `_start` は `-> !`）。ExitBootServices は既に
     // 済んでおり、以降 Boot Services には触れない。
     unsafe { entry(boot_info_ptr) }
+}
+
+/// UEFI の configuration table から ACPI の RSDP の物理アドレスを引く。
+///
+/// **検証はしない。** 署名（`"RSD PTR "`）・チェックサム・revision の検査は
+/// kernel 側で行う（S1-b）。ここが薄いのは手抜きではなく、ADR-0008
+/// 「ローダは薄く」に従った分担である。ローダが検証まで担うと、同じ検査が
+/// 2 箇所に育つか、kernel が「ローダが検証済みのはず」という前提を持つことになる。
+///
+/// ACPI 2.0（XSDT を指す）を優先し、無ければ ACPI 1.0（RSDT を指す）を使う。
+/// **片方に絞らない。** OVMF は 2.0 を出すが、1.0 しか出さないファームウェアで
+/// 静かに「ACPI 無し」になるのを避けるためである。どちらで見つけたかはログへ出す。
+///
+/// configuration table が持つのはポインタだが、**ExitBootServices より前の UEFI は
+/// 恒等写像なので、その値をそのまま物理アドレスとして扱える。** 自明ではないうえ、
+/// 前提が崩れれば静かに間違ったアドレスを渡すことになるので明記する。
+///
+/// 見つからなければ 0 を返す。**停止しない**（S1 は情報を集める段で、ACPI が
+/// 無くても現在のカーネルは動く。致命として扱うのは S2 である）。
+fn find_acpi_rsdp(logger: &mut Logger<SerialPort>) -> PhysAddr {
+    let found = uefi::system::with_config_table(|entries| {
+        let mut acpi1 = None;
+        let mut acpi2 = None;
+        for entry in entries {
+            if entry.guid == ConfigTableEntry::ACPI2_GUID {
+                acpi2 = Some(entry.address as u64);
+            } else if entry.guid == ConfigTableEntry::ACPI_GUID {
+                acpi1 = Some(entry.address as u64);
+            }
+        }
+        // 2.0 を優先する。
+        acpi2.map(|a| (a, 2)).or(acpi1.map(|a| (a, 1)))
+    });
+
+    match found {
+        Some((address, revision)) => match PhysAddr::new(address) {
+            Some(rsdp) => {
+                logger.info(format_args!(
+                    "acpi: RSDP found at {:#x} via the ACPI {}.0 configuration table entry",
+                    rsdp.as_u64(),
+                    revision
+                ));
+                rsdp
+            }
+            None => {
+                logger.error(format_args!(
+                    "acpi: the RSDP address {address:#x} does not fit in a physical address; \
+                     reporting none"
+                ));
+                PhysAddr::new_const(0)
+            }
+        },
+        None => {
+            logger.error(format_args!(
+                "acpi: no RSDP in the UEFI configuration table (neither ACPI 1.0 nor 2.0); \
+                 continuing without ACPI. S2 (APIC) will need it"
+            ));
+            PhysAddr::new_const(0)
+        }
+    }
 }

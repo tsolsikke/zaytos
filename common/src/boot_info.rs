@@ -18,7 +18,7 @@ use crate::addr::PhysAddr;
 pub const BOOT_INFO_MAGIC: u64 = u64::from_le_bytes(*b"ZAYTBOOT");
 
 /// `BootInfo` のレイアウトバージョン。フィールドを追加・変更したら上げる。
-pub const BOOT_INFO_VERSION: u32 = 1;
+pub const BOOT_INFO_VERSION: u32 = 2;
 
 /// bootloader が `BootInfo` 自身のために確保するページ数。kernel はこの値と
 /// 受け取った `BootInfo` へのポインタから、bootloader が確保した領域の
@@ -40,6 +40,19 @@ pub struct BootInfo {
     pub version: u32,
     pub memory_map: MemoryMapInfo,
     pub framebuffer: FramebufferInfo,
+    /// ACPI の RSDP（Root System Description Pointer）の物理アドレス。
+    /// 見つからなければ 0。
+    ///
+    /// **ExitBootServices の前にしか引けない。** RSDP は UEFI の configuration
+    /// table から得るもので、Boot Services が終わった後の kernel からは辿れない
+    /// （テーブル自体は Runtime 領域に残るが、探す手段が無い）。したがって
+    /// bootloader が渡すしかない。
+    ///
+    /// **bootloader は検証しない。** 署名（`"RSD PTR "`）・チェックサム・revision の
+    /// 検査は kernel 側で行う（S1-b）。ADR-0008「ローダは薄く」に従い、ここは
+    /// 「引いたアドレスをそのまま渡す」だけである。**フィールドは末尾に足す**
+    /// （既存のオフセットを動かさないため）。
+    pub acpi_rsdp: PhysAddr,
 }
 
 /// UEFI メモリマップ（ExitBootServices 呼び出し時に確定した最終スナップショット）
@@ -164,6 +177,7 @@ mod tests {
                 green_mask: 0,
                 blue_mask: 0,
             },
+            acpi_rsdp: PhysAddr::new_const(0),
         }
     }
 
@@ -211,12 +225,15 @@ mod tests {
     fn the_handoff_layout_did_not_change() {
         use core::mem::{align_of, offset_of, size_of};
 
-        assert_eq!(size_of::<BootInfo>(), 96);
+        assert_eq!(size_of::<BootInfo>(), 104);
         assert_eq!(align_of::<BootInfo>(), 8);
         assert_eq!(offset_of!(BootInfo, magic), 0);
         assert_eq!(offset_of!(BootInfo, version), 8);
         assert_eq!(offset_of!(BootInfo, memory_map), 16);
         assert_eq!(offset_of!(BootInfo, framebuffer), 48);
+        assert_eq!(offset_of!(BootInfo, acpi_rsdp), 96);
+        // 1 ページ（BOOT_INFO_PAGE_COUNT * 4096）に収まり続けること。
+        assert!(size_of::<BootInfo>() <= BOOT_INFO_PAGE_COUNT * 4096);
 
         assert_eq!(size_of::<MemoryMapInfo>(), 32);
         assert_eq!(align_of::<MemoryMapInfo>(), 8);

@@ -492,6 +492,19 @@ extern "sysv64" fn kernel_main() -> ! {
     }
     logger.info(format_args!("BootInfo validated (magic/version OK)"));
 
+    // S1-a: bootloader が引いた RSDP の物理アドレス。**まだ検証も走査もしない。**
+    // 署名・チェックサム・revision の検査と XSDT/MADT の走査は S1-b で行う。
+    if boot_info.acpi_rsdp.as_u64() == 0 {
+        logger.error(format_args!(
+            "acpi: the bootloader reported no RSDP; S2 (APIC) will need it"
+        ));
+    } else {
+        logger.info(format_args!(
+            "acpi: RSDP physical address from the bootloader = {:#x} (not validated yet; S1-b)",
+            boot_info.acpi_rsdp.as_u64()
+        ));
+    }
+
     logger.info(format_args!(
         "memory map: descriptors_len={} descriptor_size={} descriptor_version={}",
         boot_info.memory_map.descriptors_len,
