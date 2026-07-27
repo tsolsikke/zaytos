@@ -43,8 +43,8 @@
 //! 生の値を取り上げる**ためである。呼び出し側は `"pic: IMR after unmasking
 //! IRQ0 {}"` のように前置きだけを持ち、値の書式は実装が決める。
 
-pub mod pic;
-pub mod pit;
+mod pic;
+mod pit;
 
 use core::fmt;
 
@@ -290,6 +290,78 @@ impl MaskCheck {
     pub fn matches(&self) -> bool {
         self.master == self.expected_master && self.slave == self.expected_slave
     }
+
+    /// 実測部分だけの表示。期待値の書き方が呼び出し側ごとに違う場合に使う
+    /// （「must still be …」のように前置きではなく後置きで書く行がある）。
+    /// **同じ [`MaskCheck`] から導くので、判定と別の読み出しにはならない。**
+    pub fn observed(&self) -> ObservedMasks {
+        ObservedMasks {
+            master: self.master,
+            slave: self.slave,
+            with_bits: false,
+        }
+    }
+
+    /// 実測部分を 2 進表記つきで表示する。再マップ前の IMR は「どのビットが
+    /// 開いていたか」を後から読むための記録なので、ビット列で残している。
+    pub fn observed_with_bits(&self) -> ObservedMasks {
+        ObservedMasks {
+            master: self.master,
+            slave: self.slave,
+            with_bits: true,
+        }
+    }
+}
+
+/// 実測部分だけを表示する観測値（[`MaskCheck::observed`]）。
+///
+/// # 検査との関係
+///
+/// この表示を使う 2 行（`pic: IMR before remap …` と
+/// `pit: IMR after configuring the PIT …`）に一致を取っているテストは
+/// **現時点で無い**（xtask の期待マーカーを実測で確認した）。依存があるのは
+/// [`MaskCheck`] の全体表示（`interrupt-test timer` / `no-eoi`）の方である。
+pub struct ObservedMasks {
+    master: u8,
+    slave: u8,
+    with_bits: bool,
+}
+
+impl fmt::Display for ObservedMasks {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.with_bits {
+            write!(
+                f,
+                "master={:#04x} ({:#010b}) slave={:#04x} ({:#010b})",
+                self.master, self.master, self.slave, self.slave
+            )
+        } else {
+            write!(f, "master={:#04x} slave={:#04x}", self.master, self.slave)
+        }
+    }
+}
+
+/// このコントローラが担当するベクタ番号の範囲。
+///
+/// **ベクタ番号は境界の共通語彙である。** `idt` 側も
+/// [`crate::idt::TIMER_VECTOR`] のようにベクタ番号で話すので、これを出すのは
+/// 「生の値を出さない」方針に反しない。反するのは IMR のビットや ISR のような
+/// **コントローラ内部の状態**であって、ベクタ番号ではない。
+///
+/// 返すのは連続範囲の下端と上端であって、**IRQ の本数ではない**。本数を返す
+/// 形にすると「16 本」がシグネチャに焼き込まれ、24 本以上を扱う IO-APIC で
+/// 合わなくなる（[`check_masks`] がスライスを受けるのと同じ理由）。
+/// 呼び出し側はこの範囲を IDT の覆う範囲と突き合わせるだけで、本数を知る
+/// 必要が無い。
+///
+/// # 検査との関係
+///
+/// この値を使う行（`pic: target vectors 0x20..=0x2f are covered …`）に一致を
+/// 取っているテストは現時点で無い。
+pub const fn managed_vectors() -> (u8, u8) {
+    let first = pic::MASTER_VECTOR_OFFSET;
+    let last = pic::SLAVE_VECTOR_OFFSET + pic::IRQS_PER_PIC - 1;
+    (first, last)
 }
 
 impl fmt::Display for MaskCheck {

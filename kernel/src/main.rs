@@ -24,8 +24,7 @@ use kernel::graphics::{Color, Framebuffer, FramebufferLayout};
 use kernel::heap;
 use kernel::idt;
 use kernel::interrupts;
-use kernel::irq::pic;
-use kernel::irq::pit;
+use kernel::irq;
 use kernel::keyboard;
 use kernel::paging;
 use kernel::paging::plan::{resolve_pages, MappedRanges};
@@ -2145,18 +2144,18 @@ fn report_idt(logger: &mut Logger<SerialPort>) {
 /// 悩んだときの手掛かりになる（OVMF はアイドル中もタイマ割り込みを処理して
 /// いる。`docs/troubleshooting.md` の起動ログのベースライン）。
 fn configure_pic(logger: &mut Logger<SerialPort>) {
-    let (master_before, slave_before) = pic::read_masks();
     logger.info(format_args!(
-        "pic: IMR before remap master={master_before:#04x} ({master_before:#010b}) \
-         slave={slave_before:#04x} ({slave_before:#010b}) [0 = unmasked]"
+        "pic: IMR before remap {} [0 = unmasked]",
+        irq::check_masks(&[]).observed_with_bits()
     ));
 
     // 再マップ先が IDT のカバー範囲に入っており、present なハンドラを持つ
     // ことを**再マップより先に**確かめる。順序が逆だと、検査に落ちた場合
     // でも PIC は既に新しいベクタを向いており、halt するまでの間に IRQ が
     // 届けば行き先の無いベクタへ飛ぶ。
-    let first = pic::MASTER_VECTOR_OFFSET as usize;
-    let last = pic::SLAVE_VECTOR_OFFSET as usize + pic::IRQS_PER_PIC as usize - 1;
+    let (first_vector, last_vector) = irq::managed_vectors();
+    let first = first_vector as usize;
+    let last = last_vector as usize;
     let mut covered = true;
     for vector in first..=last {
         covered &= idt::entry(vector).is_some_and(|entry| entry.is_present());
@@ -2176,39 +2175,29 @@ fn configure_pic(logger: &mut Logger<SerialPort>) {
     // SAFETY: 起動時の単一実行文脈で、呼び出しはこの 1 回だけ。`_start` 冒頭の
     // `cli` により割り込みは禁止されたままである。行き先のベクタに present な
     // ハンドラがあることは直前に確認した。
-    let result = unsafe { pic::remap(pic::MASTER_VECTOR_OFFSET, pic::SLAVE_VECTOR_OFFSET) };
-    if let Err(error) = result {
-        logger.error(format_args!(
-            "pic: rejected the vector offsets ({error:?}); halting"
-        ));
-        cpu::halt_forever();
-    }
+    let programming = match unsafe { irq::init() } {
+        Ok(programming) => programming,
+        Err(error) => {
+            logger.error(format_args!(
+                "pic: rejected the vector offsets ({error:?}); halting"
+            ));
+            cpu::halt_forever();
+        }
+    };
 
     // ベクタオフセットは**書いた値であって、検証した値ではない**。ICW2 は
     // 書き込み専用で、データポートから読めるのは IMR だけである。したがって
     // ここは「こう書いた」以上のことを主張できない。断定形で書くと、下の
     // マスク検証が通ったことをもって再マップ全体が正しいと読めてしまう。
-    logger.info(format_args!(
-        "pic: programmed master={:#04x}-{:#04x} slave={:#04x}-{:#04x} \
-         (ICW2 is write-only; the offset cannot be read back)",
-        pic::MASTER_VECTOR_OFFSET,
-        pic::MASTER_VECTOR_OFFSET + pic::IRQS_PER_PIC - 1,
-        pic::SLAVE_VECTOR_OFFSET,
-        pic::SLAVE_VECTOR_OFFSET + pic::IRQS_PER_PIC - 1
-    ));
+    logger.info(format_args!("pic: programmed {programming}"));
 
     // 一方 IMR は読める。「設定したつもり」ではなく実際の値を読み戻す。
     // ICW シーケンスが途中で崩れていると、最後の OCW1 が ICW として
     // 解釈されてマスクが掛からない。そのまま M4-d で `sti` すると、
     // ハンドラの無い IRQ がいきなり飛んでくる。
-    let (master_after, slave_after) = pic::read_masks();
-    logger.info(format_args!(
-        "pic: IMR after remap master={master_after:#04x} slave={slave_after:#04x} \
-         (expected {:#04x}/{:#04x}) [read back from hardware]",
-        pic::MASK_ALL,
-        pic::MASK_ALL
-    ));
-    if master_after != pic::MASK_ALL || slave_after != pic::MASK_ALL {
+    let after_remap = irq::check_masks(&[]);
+    logger.info(format_args!("pic: IMR after remap {after_remap}"));
+    if !after_remap.matches() {
         logger.error(format_args!(
             "pic: the mask read-back does not match; halting"
         ));
@@ -2219,7 +2208,7 @@ fn configure_pic(logger: &mut Logger<SerialPort>) {
         "pic: all IRQs masked (nothing can fire until M4-d unmasks the timer explicitly); \
          the vector offset stays unverified until the first timer IRQ arrives as vector \
          {:#04x} in M4-d",
-        pic::MASTER_VECTOR_OFFSET
+        idt::TIMER_VECTOR
     ));
 }
 
@@ -2863,8 +2852,8 @@ fn start_timer(
     // --- 1. PIT を設定する ---
     // SAFETY: 起動時に 1 回だけ。この時点で IRQ0 はマスクされている
     // （M4-c-3 の remap が全マスクで終わり、以降解除していない）。
-    let divisor = match unsafe { pit::configure_channel0(pit::TARGET_FREQUENCY_HZ) } {
-        Ok(divisor) => divisor,
+    let timer = match unsafe { irq::configure_timer(irq::timer_frequency_hz()) } {
+        Ok(timer) => timer,
         Err(error) => {
             logger.error(format_args!(
                 "pit: refused the requested frequency ({error:?}); halting"
@@ -2872,24 +2861,16 @@ fn start_timer(
             cpu::halt_forever();
         }
     };
-    let actual = pit::actual_frequency_millihertz(divisor);
-    logger.info(format_args!(
-        "pit: channel 0 set to divisor={divisor} for a requested {} Hz; actual is {}.{:03} Hz \
-         (the divisor is an integer, so the period never matches exactly)",
-        pit::TARGET_FREQUENCY_HZ,
-        actual / 1000,
-        actual % 1000
-    ));
+    logger.info(format_args!("pit: channel 0 set to {timer}"));
 
     // --- 2. PIT の設定が IMR を壊していないことを確認する ---
-    let (master_before, slave_before) = pic::read_masks();
+    let before_unmask = irq::check_masks(&[]);
     logger.info(format_args!(
-        "pit: IMR after configuring the PIT master={master_before:#04x} slave={slave_before:#04x} \
-         (must still be {:#04x}/{:#04x}; the PIT ports must not touch the IMR)",
-        pic::MASK_ALL,
-        pic::MASK_ALL
+        "pit: IMR after configuring the PIT {} \
+         (must still be 0xff/0xff; the PIT ports must not touch the IMR)",
+        before_unmask.observed()
     ));
-    if master_before != pic::MASK_ALL || slave_before != pic::MASK_ALL {
+    if !before_unmask.matches() {
         logger.error(format_args!(
             "pit: configuring the PIT changed the interrupt mask; halting"
         ));
@@ -2900,18 +2881,13 @@ fn start_timer(
     // SAFETY: ベクタ 0x20 には IRQ スタイルのスタブが入っており（起動時に
     // check_irq_stub_table で検証済み）、ハンドラは EOI を発行する。
     unsafe {
-        pic::unmask_irq(0);
+        irq::unmask(0);
     }
 
     // --- 4. 解禁の結果を読み戻す ---
-    let expected_master = pic::MASK_ALL & !(1 << 0);
-    let (master_after, slave_after) = pic::read_masks();
-    logger.info(format_args!(
-        "pic: IMR after unmasking IRQ0 master={master_after:#04x} slave={slave_after:#04x} \
-         (expected {expected_master:#04x}/{:#04x}) [read back from hardware]",
-        pic::MASK_ALL
-    ));
-    if master_after != expected_master || slave_after != pic::MASK_ALL {
+    let after_unmask = irq::check_masks(&[0]);
+    logger.info(format_args!("pic: IMR after unmasking IRQ0 {after_unmask}"));
+    if !after_unmask.matches() {
         logger.error(format_args!(
             "pic: the mask read-back after unmasking IRQ0 does not match; halting"
         ));
@@ -3032,18 +3008,13 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>) {
     // SAFETY: ベクタ 0x21 には IRQ スタイルのスタブが入っており、ハンドラは
     // データポートを読み切ってから EOI を送る。
     unsafe {
-        pic::unmask_irq(keyboard::KEYBOARD_IRQ);
+        irq::unmask(keyboard::KEYBOARD_IRQ);
     }
 
     // --- 5. IMR を読み戻す ---
-    let expected_master = pic::MASK_ALL & !(1 << 0) & !(1 << keyboard::KEYBOARD_IRQ);
-    let (master, slave) = pic::read_masks();
-    logger.info(format_args!(
-        "pic: IMR after unmasking IRQ1 master={master:#04x} slave={slave:#04x} \
-         (expected {expected_master:#04x}/{:#04x}) [read back from hardware]",
-        pic::MASK_ALL
-    ));
-    if master != expected_master || slave != pic::MASK_ALL {
+    let after_unmask = irq::check_masks(&[0, keyboard::KEYBOARD_IRQ]);
+    logger.info(format_args!("pic: IMR after unmasking IRQ1 {after_unmask}"));
+    if !after_unmask.matches() {
         logger.error(format_args!(
             "pic: the mask read-back after unmasking IRQ1 does not match; halting"
         ));
