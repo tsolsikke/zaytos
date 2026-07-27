@@ -964,7 +964,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -983,42 +983,57 @@ fn main() -> Result<()> {
                     let names: Vec<&str> = INTERRUPT_TESTS.iter().map(|t| t.name).collect();
                     format!("--interrupt-test requires a kind ({})", names.join(" | "))
                 })?;
-                return cmd_marker_test(INTERRUPT_TESTS, "interrupt-test", kind);
+                return cmd_marker_test(INTERRUPT_TESTS, "interrupt-test", kind, None);
             }
             if let Some(index) = rest.iter().position(|a| a == "--paging-test") {
                 let kind = rest.get(index + 1).with_context(|| {
                     let names: Vec<&str> = PAGING_TESTS.iter().map(|t| t.name).collect();
                     format!("--paging-test requires a kind ({})", names.join(" | "))
                 })?;
-                return cmd_marker_test(PAGING_TESTS, "paging-test", kind);
+                return cmd_marker_test(PAGING_TESTS, "paging-test", kind, None);
             }
             if let Some(index) = rest.iter().position(|a| a == "--stack-test") {
                 let kind = rest.get(index + 1).with_context(|| {
                     let names: Vec<&str> = STACK_TESTS.iter().map(|t| t.name).collect();
                     format!("--stack-test requires a kind ({})", names.join(" | "))
                 })?;
-                return cmd_marker_test(STACK_TESTS, "stack-test", kind);
+                return cmd_marker_test(STACK_TESTS, "stack-test", kind, None);
             }
             if let Some(index) = rest.iter().position(|a| a == "--task-test") {
                 let kind = rest.get(index + 1).with_context(|| {
                     let names: Vec<&str> = TASK_TESTS.iter().map(|t| t.name).collect();
                     format!("--task-test requires a kind ({})", names.join(" | "))
                 })?;
-                return cmd_marker_test(TASK_TESTS, "task-test", kind);
+                return cmd_marker_test(TASK_TESTS, "task-test", kind, None);
             }
             if let Some(index) = rest.iter().position(|a| a == "--ring3-test") {
                 let kind = rest.get(index + 1).with_context(|| {
                     let names: Vec<&str> = RING3_TESTS.iter().map(|t| t.name).collect();
                     format!("--ring3-test requires a kind ({})", names.join(" | "))
                 })?;
-                return cmd_marker_test(RING3_TESTS, "ring3-test", kind);
+                return cmd_marker_test(RING3_TESTS, "ring3-test", kind, None);
             }
             if let Some(index) = rest.iter().position(|a| a == "--syscall-test") {
                 let kind = rest.get(index + 1).with_context(|| {
                     let names: Vec<&str> = SYSCALL_TESTS.iter().map(|t| t.name).collect();
                     format!("--syscall-test requires a kind ({})", names.join(" | "))
                 })?;
-                return cmd_marker_test(SYSCALL_TESTS, "syscall-test", kind);
+                return cmd_marker_test(SYSCALL_TESTS, "syscall-test", kind, None);
+            }
+            if rest.iter().any(|a| a == "--acpi-smp-test") {
+                return cmd_marker_test(
+                    ACPI_SMP_TESTS,
+                    "acpi-smp-test",
+                    ACPI_SMP_TESTS[0].name,
+                    Some(2),
+                );
+            }
+            if let Some(index) = rest.iter().position(|a| a == "--acpi-test") {
+                let kind = rest.get(index + 1).with_context(|| {
+                    let names: Vec<&str> = ACPI_TESTS.iter().map(|t| t.name).collect();
+                    format!("--acpi-test requires a kind ({})", names.join(" | "))
+                })?;
+                return cmd_marker_test(ACPI_TESTS, "acpi-test", kind, None);
             }
             if let Some(index) = rest.iter().position(|a| a == "--highhalf-test") {
                 let kind = rest.get(index + 1).with_context(|| {
@@ -1043,7 +1058,7 @@ fn main() -> Result<()> {
                     let names: Vec<&str> = CRITICAL_TESTS.iter().map(|t| t.name).collect();
                     format!("--critical-test requires a kind ({})", names.join(" | "))
                 })?;
-                return cmd_marker_test(CRITICAL_TESTS, "critical-test", kind);
+                return cmd_marker_test(CRITICAL_TESTS, "critical-test", kind, None);
             }
             if let Some(index) = rest.iter().position(|a| a == "--exception-test") {
                 let kind = rest.get(index + 1).with_context(|| {
@@ -1762,7 +1777,14 @@ fn cmd_highhalf_test(kind: &str) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
-    let features: Vec<&str> = test.feature.split(',').collect();
+    // **空文字は「既定ビルド」を意味する。** 破壊 feature を持たない構成
+    // （`-smp 2` での列挙の確認）が既定のまま走れるようにする。空要素をそのまま
+    // 渡すと `--features ""` になってしまう。
+    let features: Vec<&str> = test
+        .feature
+        .split(',')
+        .filter(|feature| !feature.is_empty())
+        .collect();
     let kernel_elf = build_kernel_with_features(&workspace_root, &features)?;
     let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
 
@@ -1916,7 +1938,12 @@ fn cmd_highhalf_trampoline_check(
 ///
 /// シリアルログに「出るべき行」がすべて出て、「出てはいけない行」が 1 つも
 /// 出ていないことを確認する。起動しなかった場合はテスト失敗と区別する。
-fn cmd_marker_test(tests: &[CriticalTest], kind_label: &str, kind: &str) -> Result<()> {
+fn cmd_marker_test(
+    tests: &[CriticalTest],
+    kind_label: &str,
+    kind: &str,
+    smp: Option<u32>,
+) -> Result<()> {
     let test = tests.iter().find(|t| t.name == kind).with_context(|| {
         let names: Vec<&str> = tests.iter().map(|t| t.name).collect();
         format!(
@@ -1939,7 +1966,7 @@ fn cmd_marker_test(tests: &[CriticalTest], kind_label: &str, kind: &str) -> Resu
     let debug_log = workspace_root.join("target").join("qemu-debug.log");
     let _ = fs::remove_file(&debug_log);
 
-    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+    let mut qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
@@ -1949,6 +1976,13 @@ fn cmd_marker_test(tests: &[CriticalTest], kind_label: &str, kind: &str) -> Resu
         monitor_socket: None,
         accelerator: Accelerator::Tcg,
     });
+    // コア数を指定する構成（現在は ACPI の列挙が `-smp` と一致することの確認だけ）。
+    // **既定は指定しない。** `QemuLaunchOptions` へ足さずここで付けるのは、
+    // 他の起動経路の引数を一切変えないためである。
+    if let Some(count) = smp {
+        qemu_args.push("-smp".into());
+        qemu_args.push(count.to_string().into());
+    }
 
     // **期待マーカーが全部そろうまで待つ。** 先頭 1 本を見た時点で QEMU を
     // 落とす作りだと、残りのマーカーがまだシリアルへ流れている途中で
@@ -2013,6 +2047,7 @@ fn cmd_marker_test(tests: &[CriticalTest], kind_label: &str, kind: &str) -> Resu
             || l.contains("heartbeat")
             || l.contains("interrupt-test")
             || l.contains("stack alignment")
+            || l.contains("acpi")
     }) {
         println!("{line}");
     }
@@ -2843,6 +2878,117 @@ fn is_ascii_word_end(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == ')' || c == '）'
 }
 
+/// ACPI の検証経路の破壊確認（S1-b-2）。
+///
+/// **観測は panic ではない。** S1 の ACPI 経路は異常を見つけても停止しないので、
+/// 「検出のログが出ること」と「MADT の列挙が完了しないこと」の 2 つで判定する。
+/// さらにハートビートを期待マーカーに入れて、**検出した後もカーネルが動き続ける
+/// こと**まで見る。停止してしまえば機能的な後退であり、それはそれで異常である。
+///
+/// 禁止マーカーの `acpi: MADT enumeration complete` は、**列挙が最後まで通った
+/// ときにだけ出る行**である。検出をすり抜けた場合にこれが出る。
+const ACPI_TESTS: &[CriticalTest] = &[
+    CriticalTest {
+        name: "bad-signature",
+        feature: "acpi-test-bad-signature",
+        expected_markers: &[
+            "acpi: the MADT at",
+            "has the wrong signature",
+            "heartbeat: ticks=",
+        ],
+        forbidden_markers: &["acpi: MADT enumeration complete"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    CriticalTest {
+        name: "bad-checksum",
+        feature: "acpi-test-bad-checksum",
+        expected_markers: &["failed its checksum", "heartbeat: ticks="],
+        forbidden_markers: &["acpi: MADT enumeration complete"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    CriticalTest {
+        name: "bad-length",
+        feature: "acpi-test-bad-length",
+        // 署名の破れ（`the wrong signature`）とは別の経路であることを、
+        // 期待する文言そのもので示す。
+        expected_markers: &["failed validation: LengthTooSmall", "heartbeat: ticks="],
+        forbidden_markers: &["acpi: MADT enumeration complete"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    CriticalTest {
+        name: "zero-entry-length",
+        feature: "acpi-test-zero-entry-length",
+        // **チェックサムではなくエントリ長で止まったことを確かめる。** 破壊側で
+        // チェックサムを合わせ直してあるので、`failed its checksum` は出ない。
+        expected_markers: &[
+            "acpi: the MADT entry walk stopped",
+            "ZeroLength",
+            "heartbeat: ticks=",
+        ],
+        forbidden_markers: &["acpi: MADT enumeration complete", "failed its checksum"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    CriticalTest {
+        name: "unmapped-rsdp",
+        feature: "acpi-test-unmapped-rsdp",
+        expected_markers: &[
+            "[acpi-test-unmapped-rsdp] redirecting",
+            "which the live page table does not map",
+            "heartbeat: ticks=",
+        ],
+        // 差し替え先が見つからなければ破壊が成立しない。**「壊したつもり」で
+        // 緑になる形を塞ぐ。**
+        forbidden_markers: &[
+            "acpi: MADT enumeration complete",
+            "the sabotage did nothing",
+        ],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    CriticalTest {
+        name: "rsdp-outside-window",
+        feature: "acpi-test-rsdp-outside-window",
+        expected_markers: &[
+            "[acpi-test-rsdp-outside-window] redirecting",
+            "outside the direct map window",
+            "heartbeat: ticks=",
+        ],
+        forbidden_markers: &[
+            "acpi: MADT enumeration complete",
+            "the sabotage did nothing",
+        ],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+];
+
+/// `-smp 2` での ACPI 列挙の確認（S1-b-2）。
+///
+/// **既定ビルドである**（`feature` が空）。壊すのではなく、コア数を変えた構成で
+/// 列挙結果が QEMU の指定と一致することを見る。roadmap の S1 到達条件に
+/// 「`-smp 2` で起動しても列挙結果が QEMU の指定と一致すること」とあるのに、
+/// **手動実行でしか確かめていなかった。手動確認は再現されず、必ず腐る。**
+///
+/// 全項目を複数のコア数で回すと項目数も所要時間もそのまま倍になるので、
+/// **この 1 項目だけを 2 コアで回す。** 費用は QEMU 起動 1 回である。
+const ACPI_SMP_TESTS: &[CriticalTest] = &[CriticalTest {
+    name: "smp2-enumeration",
+    feature: "",
+    expected_markers: &[
+        "acpi: MADT enumeration complete",
+        "2 local APIC(s) of which 2 usable",
+    ],
+    // 1 個しか出ないのは、`-smp` が効いていないか列挙が取りこぼしているかの
+    // どちらかである。**どちらも見逃したくない。**
+    forbidden_markers: &["1 local APIC(s) of which 1 usable"],
+    wait_for_full_timeout: false,
+    min_heartbeats: None,
+}];
+
 /// 意図的に壊した経路を有効にする feature の接頭辞・名前。
 ///
 /// **既定ビルドにこれらが入ってはならない。** 入ったまま出荷すると、
@@ -2865,6 +3011,7 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "highhalf-remove-verify-fail",
     "highhalf-remove-before-highify",
     "highhalf-panic-after-remove",
+    "acpi-test",
 ];
 
 /// 内部を隠す約束のディレクトリ。
@@ -3230,49 +3377,63 @@ fn cmd_check(full: bool) -> Result<()> {
             total += 1;
             let name = format!("critical-test {}", test.name);
             run_regression(&name, &mut failed, &mut retries, || {
-                cmd_marker_test(CRITICAL_TESTS, "critical-test", test.name)
+                cmd_marker_test(CRITICAL_TESTS, "critical-test", test.name, None)
             });
         }
         for test in PAGING_TESTS {
             total += 1;
             let name = format!("paging-test {}", test.name);
             run_regression(&name, &mut failed, &mut retries, || {
-                cmd_marker_test(PAGING_TESTS, "paging-test", test.name)
+                cmd_marker_test(PAGING_TESTS, "paging-test", test.name, None)
             });
         }
         for test in STACK_TESTS {
             total += 1;
             let name = format!("stack-test {}", test.name);
             run_regression(&name, &mut failed, &mut retries, || {
-                cmd_marker_test(STACK_TESTS, "stack-test", test.name)
+                cmd_marker_test(STACK_TESTS, "stack-test", test.name, None)
             });
         }
         for test in TASK_TESTS {
             total += 1;
             let name = format!("task-test {}", test.name);
             run_regression(&name, &mut failed, &mut retries, || {
-                cmd_marker_test(TASK_TESTS, "task-test", test.name)
+                cmd_marker_test(TASK_TESTS, "task-test", test.name, None)
             });
         }
         for test in RING3_TESTS {
             total += 1;
             let name = format!("ring3-test {}", test.name);
             run_regression(&name, &mut failed, &mut retries, || {
-                cmd_marker_test(RING3_TESTS, "ring3-test", test.name)
+                cmd_marker_test(RING3_TESTS, "ring3-test", test.name, None)
             });
         }
         for test in SYSCALL_TESTS {
             total += 1;
             let name = format!("syscall-test {}", test.name);
             run_regression(&name, &mut failed, &mut retries, || {
-                cmd_marker_test(SYSCALL_TESTS, "syscall-test", test.name)
+                cmd_marker_test(SYSCALL_TESTS, "syscall-test", test.name, None)
+            });
+        }
+        for test in ACPI_TESTS {
+            total += 1;
+            let name = format!("acpi-test {}", test.name);
+            run_regression(&name, &mut failed, &mut retries, || {
+                cmd_marker_test(ACPI_TESTS, "acpi-test", test.name, None)
+            });
+        }
+        for test in ACPI_SMP_TESTS {
+            total += 1;
+            let name = format!("acpi-smp-test {}", test.name);
+            run_regression(&name, &mut failed, &mut retries, || {
+                cmd_marker_test(ACPI_SMP_TESTS, "acpi-smp-test", test.name, Some(2))
             });
         }
         for test in INTERRUPT_TESTS {
             total += 1;
             let name = format!("interrupt-test {}", test.name);
             run_regression(&name, &mut failed, &mut retries, || {
-                cmd_marker_test(INTERRUPT_TESTS, "interrupt-test", test.name)
+                cmd_marker_test(INTERRUPT_TESTS, "interrupt-test", test.name, None)
             });
         }
         total += 1;

@@ -32,7 +32,10 @@
 //! （実測で `0xf6ed000..0xf76d000`）の中に落ちる可能性が構造的にある。
 //! そこを踏んだときに #PF で落ちるのではなく、検出して報告する。
 
+mod madt;
 mod rsdp;
+mod sabotage;
+mod sdt;
 
 use common::addr::{DirectMap, PhysAddr};
 use common::log::Logger;
@@ -41,6 +44,29 @@ use common::serial::SerialPort;
 use crate::frame_allocator::FRAME_SIZE;
 use crate::memory_map;
 use crate::paging::active::{ActivePageTable, TranslateError};
+
+/// テーブル 1 つを読むためのバッファの大きさ。
+///
+/// **この値に外部の根拠は無い。我々が選んだバッファの大きさである**
+/// （[`rsdp::READ_BUFFER_LENGTH`] と同じ性質）。実測では XSDT が 100 バイト前後、
+/// MADT が 200 バイト未満だが、CPU 数に比例して伸びる。これを超える長さを
+/// 名乗るテーブルは**「不正」ではなく「検証不能」**として扱い、中身を使わない。
+///
+/// 1KiB をカーネルスタック（64KiB）の上に取る。ルートテーブルと MADT で
+/// 同時に 2 枚使うことはない（ルートを走査し終えてから MADT を読む）。
+///
+/// **S3 への申し送り: 限界が存在する。** MADT は概ね `44 + N×8` バイトなので、
+/// **100 コア規模でこのバッファを超え、「検証不能」に落ちる。** ZaytOS が
+/// その規模を扱う日は遠いが、限界を知らずに踏むのとは違う。
+const TABLE_READ_BUFFER_LENGTH: usize = 1024;
+
+/// 署名や OEM ID を、そのままログへ出せる形にする。
+///
+/// **UTF-8 でないバイト列は実在する。** 壊れたテーブルを読んだときにここで
+/// panic すると、報告するための経路がカーネルを落とす。
+fn as_text(bytes: &[u8]) -> &str {
+    core::str::from_utf8(bytes).unwrap_or("<not utf-8>")
+}
 
 /// 物理メモリを読もうとして断念した理由。**「読めなかった」を一色に丸めない。**
 /// 窓の外・未マップ・別の物理を指している、は原因も対処も違う。
@@ -260,6 +286,9 @@ pub fn survey(
         return;
     }
 
+    // 破壊確認（未マップ / 窓の外）。既定ビルドでは受け取った値をそのまま返す。
+    let rsdp_phys = sabotage::redirect_rsdp(logger, rsdp_phys, memory_map_bytes, descriptor_size);
+
     // SAFETY: 呼び出し位置の契約（この関数の doc）により、CR3 は自前の
     // ページテーブルを指し、登録 direct map 窓は高位で稼働している。
     let reader = unsafe { PhysReader::new() };
@@ -310,23 +339,432 @@ pub fn survey(
         None
     };
 
-    match rsdp::root_table(&header, extended.as_ref()) {
-        Some(rsdp::RootTable::Xsdt { phys }) => logger.info(format_args!(
-            "acpi: following the XSDT at {phys:#x} (64-bit entries)"
-        )),
+    let (root_phys, width) = match rsdp::root_table(&header, extended.as_ref()) {
+        Some(rsdp::RootTable::Xsdt { phys }) => {
+            logger.info(format_args!(
+                "acpi: following the XSDT at {phys:#x} (64-bit entries)"
+            ));
+            (phys, sdt::EntryWidth::Xsdt)
+        }
         // **RSDT へ落ちる形も残す。** revision 0 のファームウェアで XSDT だけを
         // 実装していると、ここで静かに「テーブル無し」になる。
-        Some(rsdp::RootTable::Rsdt { phys }) => logger.info(format_args!(
-            "acpi: following the RSDT at {phys:#x} (32-bit entries)"
-        )),
-        None => logger.error(format_args!(
-            "acpi: the RSDP names neither an XSDT nor an RSDT; there is no table to follow"
-        )),
+        Some(rsdp::RootTable::Rsdt { phys }) => {
+            logger.info(format_args!(
+                "acpi: following the RSDT at {phys:#x} (32-bit entries)"
+            ));
+            (phys as u64, sdt::EntryWidth::Rsdt)
+        }
+        None => {
+            logger.error(format_args!(
+                "acpi: the RSDP names neither an XSDT nor an RSDT; there is no table to follow"
+            ));
+            return;
+        }
+    };
+
+    let Some(madt_phys) = walk_root_table(
+        logger,
+        &reader,
+        root_phys,
+        width,
+        memory_map_bytes,
+        descriptor_size,
+    ) else {
+        return;
+    };
+
+    walk_madt(
+        logger,
+        &reader,
+        madt_phys,
+        memory_map_bytes,
+        descriptor_size,
+    );
+}
+
+/// 物理アドレスを [`PhysAddr`] にする。表せない値は報告して `None`。
+///
+/// **ファームウェアが書いた値をそのまま信じない。** `PhysAddr::new` は 52 ビットを
+/// 超える値を弾くので、ここで落ちるということは表として壊れているということである。
+fn checked_phys(logger: &mut Logger<SerialPort>, what: &str, raw: u64) -> Option<PhysAddr> {
+    match PhysAddr::new(raw) {
+        Some(phys) => Some(phys),
+        None => {
+            logger.error(format_args!(
+                "acpi: {what} names {raw:#x}, which is not a representable physical address"
+            ));
+            None
+        }
+    }
+}
+
+/// テーブルを読み、署名・長さ・チェックサムを検証してバッファへ載せる。
+///
+/// **`length` が示す範囲全体を読むことが、そのまま「全体がマップ済み」の確認に
+/// なる。** [`PhysReader::read`] が跨ぐページを 1 枚ずつ walk するので、範囲の
+/// どこか一部だけが未マップという状態はここで捕まる。
+///
+/// 戻り値は検証済みの長さ。バッファの `..length` が使える。
+struct TableRequest<'a> {
+    /// ログに出す表示名。
+    what: &'a str,
+    /// 破壊確認の対象。**表示名では照合しない**（`sabotage::Target` の doc を参照）。
+    target: sabotage::Target,
+    phys: PhysAddr,
+    expected_signature: &'a [u8; sdt::SIGNATURE_LENGTH],
+    /// このテーブルが名乗ってよい最小の長さ。テーブルごとに違う。
+    minimum_length: u32,
+}
+
+fn read_and_verify_table(
+    logger: &mut Logger<SerialPort>,
+    reader: &PhysReader,
+    request: TableRequest<'_>,
+    buffer: &mut [u8; TABLE_READ_BUFFER_LENGTH],
+) -> Option<usize> {
+    let TableRequest {
+        what,
+        target,
+        phys,
+        expected_signature,
+        minimum_length,
+    } = request;
+    if let Err(e) = reader.read(phys, &mut buffer[..sdt::HEADER_LENGTH]) {
+        report_read_error(logger, what, e);
+        return None;
     }
 
-    // **ここまでが S1-b-1 である。** XSDT/RSDT と MADT の走査は S1-b-2 で足す。
+    // 破壊確認（署名 / 長さ）はヘッダを読んだ直後、検証の直前に効かせる。
+    sabotage::corrupt_table_header(target, &mut buffer[..sdt::HEADER_LENGTH]);
+
+    let header = match sdt::parse_header(&buffer[..sdt::HEADER_LENGTH], minimum_length) {
+        Ok(header) => header,
+        Err(e) => {
+            logger.error(format_args!(
+                "acpi: the header of {what} at {:#x} failed validation: {e:?}",
+                phys.as_u64()
+            ));
+            return None;
+        }
+    };
+    if let Err(e) = sdt::check_signature(&header, expected_signature) {
+        logger.error(format_args!(
+            "acpi: {what} at {:#x} has the wrong signature: {e:?}",
+            phys.as_u64()
+        ));
+        return None;
+    }
+
+    let length = header.length as usize;
+    // 長すぎるテーブルは「不正」ではなく「検証不能」である（RSDP と同じ区分。
+    // rsdp::READ_BUFFER_LENGTH の doc を参照）。読めないだけで、壊れているとは
+    // 限らない。検証していない以上、中身は使わない。
+    if length > TABLE_READ_BUFFER_LENGTH {
+        logger.warn(format_args!(
+            "acpi: {what} at {:#x} declares {length} bytes, more than our \
+             {TABLE_READ_BUFFER_LENGTH}-byte read buffer, so its checksum was NOT verified and \
+             its contents are left unused. this is not necessarily a broken table",
+            phys.as_u64()
+        ));
+        return None;
+    }
+
+    if let Err(e) = reader.read(phys, &mut buffer[..length]) {
+        report_read_error(logger, what, e);
+        return None;
+    }
+
+    // 破壊確認（チェックサム / エントリ長 0）は本体を読んだ直後、検算の直前。
+    sabotage::corrupt_table_body(target, &mut buffer[..length]);
+
+    if let Err(e) = sdt::verify_checksum(&buffer[..length], header.length) {
+        logger.error(format_args!(
+            "acpi: {what} at {:#x} failed its checksum: {e:?}",
+            phys.as_u64()
+        ));
+        return None;
+    }
+
     logger.info(format_args!(
-        "acpi: S1-b-1 stops here; the root table itself is not walked yet (S1-b-2)"
+        "acpi: {what} at {:#x} validated: signature={:?} length={length} revision={} oem_id={:?}",
+        phys.as_u64(),
+        as_text(&header.signature),
+        header.revision,
+        as_text(&header.oem_id),
+    ));
+    Some(length)
+}
+
+/// ルートテーブル（XSDT / RSDT）を走査し、MADT の物理アドレスを返す。
+///
+/// 各エントリが指すテーブルのヘッダを読んで署名を出す。**黙って MADT だけを
+/// 探して他を捨てない。** 何が置かれているかは S2 以降で効いてくる情報である。
+fn walk_root_table(
+    logger: &mut Logger<SerialPort>,
+    reader: &PhysReader,
+    root_phys: u64,
+    width: sdt::EntryWidth,
+    memory_map_bytes: &[u8],
+    descriptor_size: u64,
+) -> Option<PhysAddr> {
+    let root_phys = checked_phys(logger, "the root table pointer", root_phys)?;
+    report_memory_type(
+        logger,
+        width.name(),
+        root_phys,
+        memory_map_bytes,
+        descriptor_size,
+    );
+
+    let mut buffer = [0u8; TABLE_READ_BUFFER_LENGTH];
+    let length = read_and_verify_table(
+        logger,
+        reader,
+        TableRequest {
+            what: width.name(),
+            target: sabotage::Target::RootTable,
+            phys: root_phys,
+            expected_signature: &width.signature(),
+            minimum_length: sdt::HEADER_LENGTH as u32,
+        },
+        &mut buffer,
+    )?;
+
+    let entries = sdt::RootEntries::new(&buffer, length as u32, width);
+    logger.info(format_args!(
+        "acpi: {} lists {} table(s){}",
+        width.name(),
+        entries.entry_count(),
+        if entries.trailing_bytes() == 0 {
+            ""
+        } else {
+            " (with a trailing partial entry, see below)"
+        }
+    ));
+    if entries.trailing_bytes() != 0 {
+        logger.warn(format_args!(
+            "acpi: {} has {} byte(s) left over after the last whole entry; \
+             the declared length and the entry width do not agree",
+            width.name(),
+            entries.trailing_bytes()
+        ));
+    }
+
+    let mut madt_phys: Option<PhysAddr> = None;
+    let mut madt_count = 0usize;
+    let mut header_buffer = [0u8; sdt::HEADER_LENGTH];
+    for (index, raw) in entries.enumerate() {
+        let Some(phys) = checked_phys(logger, "a root table entry", raw) else {
+            continue;
+        };
+        if let Err(e) = reader.read(phys, &mut header_buffer) {
+            logger.error(format_args!(
+                "acpi:   [{index}] {:#x}: header not readable",
+                phys.as_u64()
+            ));
+            report_read_error(logger, "a table listed by the root table", e);
+            continue;
+        }
+        match sdt::parse_header(&header_buffer, sdt::HEADER_LENGTH as u32) {
+            Ok(header) => {
+                logger.info(format_args!(
+                    "acpi:   [{index}] {:#x} signature={:?} length={}",
+                    phys.as_u64(),
+                    as_text(&header.signature),
+                    header.length
+                ));
+                if header.has_signature(&madt::SIGNATURE) {
+                    madt_count += 1;
+                    // **最初のものを採る。複数あったことは下で報告する。**
+                    if madt_phys.is_none() {
+                        madt_phys = Some(phys);
+                    }
+                }
+            }
+            Err(e) => logger.error(format_args!(
+                "acpi:   [{index}] {:#x}: the header is not usable: {e:?}",
+                phys.as_u64()
+            )),
+        }
+    }
+
+    // **黙って 1 つ目を使わない。** 同じ署名の表が複数あるのは想定外であり、
+    // どちらを読むかで結論が変わりうる。
+    if madt_count > 1 {
+        logger.warn(format_args!(
+            "acpi: the root table lists {madt_count} tables with the signature {:?}; \
+             using the first one at {:#x} and ignoring the rest",
+            as_text(&madt::SIGNATURE),
+            madt_phys.map(|p| p.as_u64()).unwrap_or(0)
+        ));
+    }
+    if madt_phys.is_none() {
+        logger.error(format_args!(
+            "acpi: no table with the signature {:?} (MADT) is listed; \
+             S2 and S3 will have no APIC information",
+            as_text(&madt::SIGNATURE)
+        ));
+    }
+    madt_phys
+}
+
+/// MADT を検証して列挙する。
+fn walk_madt(
+    logger: &mut Logger<SerialPort>,
+    reader: &PhysReader,
+    madt_phys: PhysAddr,
+    memory_map_bytes: &[u8],
+    descriptor_size: u64,
+) {
+    report_memory_type(
+        logger,
+        "the MADT",
+        madt_phys,
+        memory_map_bytes,
+        descriptor_size,
+    );
+
+    let mut buffer = [0u8; TABLE_READ_BUFFER_LENGTH];
+    let Some(length) = read_and_verify_table(
+        logger,
+        reader,
+        TableRequest {
+            what: "the MADT",
+            target: sabotage::Target::Madt,
+            phys: madt_phys,
+            expected_signature: &madt::SIGNATURE,
+            minimum_length: madt::FIXED_LENGTH as u32,
+        },
+        &mut buffer,
+    ) else {
+        return;
+    };
+
+    let fixed = match madt::parse_header(&buffer[..length]) {
+        Ok(fixed) => fixed,
+        Err(e) => {
+            logger.error(format_args!(
+                "acpi: the fixed part of the MADT is not usable: {e:?}"
+            ));
+            return;
+        }
+    };
+    // PCAT_COMPAT は S1 では解釈しない。S2 が「PIC をマスクする必要があるか」を
+    // 決める入力になるので、値として記録しておく。
+    logger.info(format_args!(
+        "acpi: MADT fixed part: local_apic_address={:#x} flags={:#x} (PCAT_COMPAT={})",
+        fixed.local_apic_address,
+        fixed.flags,
+        fixed.pcat_compat()
+    ));
+
+    let mut entry_count = 0usize;
+    let mut local_apic_count = 0usize;
+    let mut usable_local_apic_count = 0usize;
+    let mut io_apic_count = 0usize;
+    let mut stopped_early = false;
+
+    for step in madt::Entries::new(&buffer[madt::FIXED_LENGTH..length]) {
+        let entry = match step {
+            Ok(entry) => entry,
+            Err(e) => {
+                // 壊れたエントリの先は位置が同期していないので読み進めない。
+                logger.error(format_args!(
+                    "acpi: the MADT entry walk stopped after {entry_count} entr(y/ies): {e:?}"
+                ));
+                stopped_early = true;
+                break;
+            }
+        };
+        entry_count += 1;
+        match entry.entry_type {
+            madt::TYPE_LOCAL_APIC => {
+                if let Some(local) = madt::parse_local_apic(&entry) {
+                    local_apic_count += 1;
+                    if local.usable() {
+                        usable_local_apic_count += 1;
+                    }
+                    logger.info(format_args!(
+                        "acpi:   entry type={} ({}) len={} apic_id={} processor_uid={} \
+                         flags={:#x} usable={}",
+                        entry.entry_type,
+                        madt::entry_type_name(entry.entry_type),
+                        entry.length,
+                        local.apic_id,
+                        local.processor_uid,
+                        local.flags,
+                        local.usable()
+                    ));
+                }
+            }
+            madt::TYPE_LOCAL_X2APIC => {
+                if let Some(x2) = madt::parse_local_x2apic(&entry) {
+                    local_apic_count += 1;
+                    if x2.flags & (madt::FLAG_ENABLED | madt::FLAG_ONLINE_CAPABLE) != 0 {
+                        usable_local_apic_count += 1;
+                    }
+                    logger.info(format_args!(
+                        "acpi:   entry type={} ({}) len={} x2apic_id={} processor_uid={} \
+                         flags={:#x}",
+                        entry.entry_type,
+                        madt::entry_type_name(entry.entry_type),
+                        entry.length,
+                        x2.apic_id,
+                        x2.processor_uid,
+                        x2.flags
+                    ));
+                }
+            }
+            madt::TYPE_IO_APIC => {
+                if let Some(io) = madt::parse_io_apic(&entry) {
+                    io_apic_count += 1;
+                    logger.info(format_args!(
+                        "acpi:   entry type={} ({}) len={} id={} address={:#x} gsi_base={}",
+                        entry.entry_type,
+                        madt::entry_type_name(entry.entry_type),
+                        entry.length,
+                        io.id,
+                        io.address,
+                        io.global_system_interrupt_base
+                    ));
+                }
+            }
+            madt::TYPE_LOCAL_APIC_ADDRESS_OVERRIDE => {
+                // **あれば固定部の 32 ビット値より優先される。** S2 が使う。
+                if let Some(address) = madt::parse_local_apic_address_override(&entry) {
+                    logger.info(format_args!(
+                        "acpi:   entry type={} ({}) len={} address={address:#x} \
+                         (overrides the fixed part's local_apic_address)",
+                        entry.entry_type,
+                        madt::entry_type_name(entry.entry_type),
+                        entry.length
+                    ));
+                }
+            }
+            // 残りは種別と長さだけを出す。**未知の種別を黙って読み飛ばさない。**
+            // 名前の付いた種別（type 4 の Local APIC NMI など）もここへ来る。
+            // S1 は解釈せず、あったことだけを記録する。
+            _ => logger.info(format_args!(
+                "acpi:   entry type={} ({}) len={} (recorded, not interpreted)",
+                entry.entry_type,
+                madt::entry_type_name(entry.entry_type),
+                entry.length
+            )),
+        }
+    }
+
+    if stopped_early {
+        // **完了行を出さない。** 破壊確認はこの行が出ないことを見る。
+        logger.error(format_args!(
+            "acpi: the MADT was not fully enumerated; the APIC inventory is incomplete"
+        ));
+        return;
+    }
+
+    logger.info(format_args!(
+        "acpi: MADT enumeration complete: {entry_count} entr(y/ies), \
+         {local_apic_count} local APIC(s) of which {usable_local_apic_count} usable, \
+         {io_apic_count} I/O APIC(s)"
     ));
 }
 

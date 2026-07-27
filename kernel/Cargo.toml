@@ -175,6 +175,24 @@ syscall-test-copy-skip-validate = []
 # copy_from_user が len を 1 バイト超えて読む。末尾の有効ページ内に置いた余分な既知バイトが
 # 総和へ混ざり、内容往復のチェックサムが決定的に食い違う。`--syscall-test copy-overrun`。
 syscall-test-copy-overrun = []
+# S1-b-2: ACPI の検証経路の破壊確認。いずれも既定ビルドには入らない。
+# `cargo xtask run --acpi-test <kind>` が有効化する。観測は panic ではなく、
+# 「検出のログが出て、MADT の列挙が完了しないこと」である。
+acpi-test = []
+# MADT の署名を壊す。署名の照合が長さやチェックサムより先に弾く。
+acpi-test-bad-signature = ["acpi-test"]
+# MADT のチェックサムを壊す（署名と長さは無傷）。
+acpi-test-bad-checksum = ["acpi-test"]
+# MADT の length を仕様の最小長（44）未満にする。
+acpi-test-bad-length = ["acpi-test"]
+# MADT の最初のエントリの length を 0 にする。守っていなければ無限ループになる。
+# チェックサムは合わせ直すので、検出されるのはエントリ長 0 の経路である。
+acpi-test-zero-entry-length = ["acpi-test"]
+# RSDP の物理アドレスを、classify() が Unmapped にする最大の記述子の中点へ
+# 差し替える。#PF にならず検出されることの実証。アドレスは実行時に導く。
+acpi-test-unmapped-rsdp = ["acpi-test"]
+# RSDP の物理アドレスを direct map 窓の外（窓長そのもの）へ差し替える。
+acpi-test-rsdp-outside-window = ["acpi-test"]
 # B-2a-5: higher-half の破壊確認。いずれも既定ビルドには入らない。`--highhalf-test <kind>`。
 # (a) 静的 PML4[0] の存在ビットを落とす。恒等が not-present になり、mov cr3 直後の低位命令
 # フェッチが解決できずトリプルフォルトする。`--highhalf-test no-identity-in-boot-pt`。

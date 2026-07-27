@@ -4292,6 +4292,36 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         cfg!(feature = "gfx-test-pattern"),
         "描画テストパターンを描き、コンソールを起動しない",
     ),
+    (
+        "acpi-test-bad-signature",
+        cfg!(feature = "acpi-test-bad-signature"),
+        "MADT の署名を壊す",
+    ),
+    (
+        "acpi-test-bad-checksum",
+        cfg!(feature = "acpi-test-bad-checksum"),
+        "MADT のチェックサムを壊す",
+    ),
+    (
+        "acpi-test-bad-length",
+        cfg!(feature = "acpi-test-bad-length"),
+        "MADT の length を最小長未満にする",
+    ),
+    (
+        "acpi-test-zero-entry-length",
+        cfg!(feature = "acpi-test-zero-entry-length"),
+        "MADT の最初のエントリの length を 0 にする",
+    ),
+    (
+        "acpi-test-unmapped-rsdp",
+        cfg!(feature = "acpi-test-unmapped-rsdp"),
+        "RSDP を未マップの物理アドレスへ差し替える",
+    ),
+    (
+        "acpi-test-rsdp-outside-window",
+        cfg!(feature = "acpi-test-rsdp-outside-window"),
+        "RSDP を direct map 窓の外へ差し替える",
+    ),
 ];
 
 /// 有効な仕込み feature を起動時に報告する。
