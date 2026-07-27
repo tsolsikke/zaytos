@@ -80,18 +80,22 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 
 ### 2.1 ビルド・テスト・静的解析
 
-`cargo xtask check`が12項目を実行する。
+`cargo xtask check`は次を実行する。
 
 | 項目 | 内容 |
 |---|---|
 | build | bootloader（`x86_64-unknown-uefi`）/ kernel（`x86_64-unknown-none`）/ common / xtask |
-| test | `cargo test --workspace`（289件） |
+| test | `cargo test --workspace` |
 | clippy | 上記4構成すべてに`-D warnings` |
 | fmt | `cargo fmt --all -- --check` |
 | unsafe | `unsafe`ブロックの直前のコメント塊に`SAFETY`があること（追跡済みと未追跡の両方が対象） |
+| cli/sti | 直接の`cli`/`sti`が許可リストの`(file, item)`に載っていること |
+| 既定feature | 既定のkernelビルドにサボタージュfeatureが混ざっていないこと |
+| トランポリン | ビルド済みkernel.elfの入口24バイトが期待リテラルと一致すること |
 | コミット | コミット件名に和文と英数字の間の半角空白が無いこと（規約を適用し始めた日時以降が対象） |
 
-`cargo xtask check --full`は、これに回帰チェック14種（例外4種、critical 2種、interrupt 6種、keyboard、panic）を加える。
+`cargo xtask check --full`は、これにQEMUを起動する回帰チェック（exception / critical / paging / stack / task / ring3 / syscall / interruptの各表と、keyboard・panic）と、higher-halfの破壊確認（`highhalf-*`と`highhalf-trampoline-absolute-ref`の静的検査）を加える。
+種類の一覧は`xtask/src/main.rs`の各テスト表を正とし、項目数は下の項目会計に従う。
 
 `--full`は、xtaskが「起動しなかった」と判定した項目に限り、自動で1回だけ再試行する。
 テストの失敗（実装の問題）では再試行しない。落ちるものは落ちたまま報告する。
@@ -204,7 +208,11 @@ higher-halfの破壊feature（B-2a-5、破壊feature `highhalf-*`）について
 - **M2-d/A-1の切替前検査は物理範囲のメンバシップ検査のみで、高位マッピングの欠落を検出しない。** `highhalf-no-kernel-high-in-live-table`(c)がこれを実証した。必須マッピング検証は「切替後の必須領域が物理範囲に属するか」を見るだけで、A-1/B-1が持つ「新テーブルを独立walkerで実際に引く」検査を持たない。恒等が物理を覆っている限り高位マッピングの欠落を見逃す。walkベースへの強化はB-2bの検討事項（ADR-0024 / ADR-0021 B Addendum）。
 - **トランポリンのバイト単位一致検査（base検査）。** ビルド済みkernel.elfの入口24バイトを期待リテラルと比較する（`common::elf`再利用、新規外部クレートなし）。既定ビルドで一致（B-2a-2/B-2a-3b/B-2a-5で3度、再リンク・B-1撤去を跨いで不変を実証）、`highhalf-trampoline-absolute-ref`で不一致。rel32がすべて`.text.trampoline`内なので配置非依存で安定。`cargo xtask check`のbase検査なので`--full`でなくても毎回走る。
 
-**項目会計（B-2a-5）**: base検査は13→14（トランポリンのバイト一致検査を追加）。`cargo xtask check`=14項目。`cargo xtask check --full`=56→61（base14 + QEMU43 + highhalf4[a/b/cのQEMU + dの静的]）。以前の報告にあった「QEMU 42」は43が正しい（56 = base13 + QEMU43）。**B-2b-4(c)で `highhalf-remove-verify-fail` を追加し highhalf5、`cargo xtask check --full`=62。B-2b-4(e)で `highhalf-remove-before-highify` と `highhalf-panic-after-remove` を追加し highhalf7、`cargo xtask check --full`=64。**
+**項目会計**: 検査を足したとき数が閉じていることを、この行だけで追う。**現在の項目数は`cargo xtask check`の出力（`all N check(s) passed`）を正とし、docsの他の場所には書かない。** 総数は検査を足すたびに増えるので、導出元から離れた場所に書けば必ずstaleになる（実際に`--full`=64がroadmapとdeferred-decisionsに残り、同じ型の誤りの3件目になった）。数え方は、base = `CHECKS`（build 4 / test 1 / clippy 4 / fmt 1）+ 静的検査、`--full` = base + QEMU + highhalfである。
+
+推移: base 13→14（B-2a-5でトランポリンのバイト一致検査を追加）→15（seam整備の項目2で直接`cli`/`sti`の許可リスト検査を追加）。`--full` 56→61（B-2a-5でhighhalf 4種）→62（B-2b-4(c)で`highhalf-remove-verify-fail`）→64（B-2b-4(e)で`highhalf-remove-before-highify`と`highhalf-panic-after-remove`）→65（上のbase 15）。以前の報告にあった「QEMU 42」は43が正しい（56 = base 13 + QEMU 43）。
+
+**会計行の数をxtaskが照合する案は検討して見送った（記録）。** 同じ案が再び出たときに分析をやり直さずに済むよう残す。期待値をxtask側の定数に持つ形は二重持ちの場所が変わるだけで、docの更新を強制しない。docを機械で読む形はxtaskをMarkdownの書式へ結合させる。どちらも現在値をdocsに書くことを前提にするが、現在値は`cargo xtask check`が毎回印字しているので複製する必要がない。仮に将来採るなら、走らせずに総数を出せるよう`cmd_check`を「検査記述子のリストを作る→数える→走らせる」形へ組み替えるのが前提になる（現在は走らせながら数えており、base検査自身も数に入るため定数を置くと自己参照的な二重持ちになる）。
 
 ### higher-half B-2b: 恒等除去の設計（着手前の棚卸し）
 
@@ -300,6 +308,12 @@ higher-halfの破壊feature（B-2a-5、破壊feature `highhalf-*`）について
 
 3件目は対処していない。**分離すれば、これらはいずれも「所属名が分からない」だけの問題に落ちて見逃しにはならなくなる。** 上の「fmt検査への依存」も同時に消える。
 急がないので、項目1の後か気づいたときに扱う。
+
+**【論点・未着手】許可エントリごとに出現数を宣言する。** 許可リストの各エントリに、そのエントリが覆う出現数を持たせ（`{ file, item, reason, occurrences }`）、検査は実測の出現数と宣言値を照合して、食い違えばFAILする。
+上の静かな見逃し（`in_global_asm`が漏れて未許可の`cli`/`sti`が`(task.rs, "global_asm!")`のエントリへ吸収される）は、痕跡が出現数の増加だけだった。宣言値と照合すれば実測3に対し宣言2でFAILするので、**静かな見逃しがうるさい失敗に変わる**。
+`cargo fmt`への依存もload-bearingでなくなる。fmt検査を外しても`#[rustfmt::skip]`を使っても、静かな経路は数の照合で塞がれ、壊れ方がうるさい側に収まるためである。
+「時点依存の数字を離れた場所に書かない」原則には反しない。数はエントリごとの局所的な事実であり、宣言は対象の隣に置かれる。正当な変更で数が変われば照合がFAILして再承認が強制される（許可エントリを行番号ではなく関数名で識別する利点と同じ論理である）。
+上の分離提案とは直交する。分離は所属名の精度を、数の照合は取りこぼしの検出を守るので、分離を実施しても無駄にならない。変更としては分離より小さい。
 
 **ここから一般則を1つ立てる。検出経路が複数あるなら、破壊は経路ごとに行う。**
 1経路で発火したことは、他の経路の健全性を何も意味しない。
