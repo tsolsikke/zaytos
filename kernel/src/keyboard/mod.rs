@@ -15,7 +15,7 @@ pub mod decode;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// キーボード（IRQ1）のベクタ。PIC のベクタオフセットに追随する。
-pub const KEYBOARD_VECTOR: usize = crate::pic::MASTER_VECTOR_OFFSET as usize + 1;
+pub const KEYBOARD_VECTOR: usize = crate::irq::pic::MASTER_VECTOR_OFFSET as usize + 1;
 
 /// キーボードの IRQ 番号。
 pub const KEYBOARD_IRQ: u8 = 1;

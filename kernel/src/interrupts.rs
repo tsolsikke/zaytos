@@ -16,7 +16,7 @@ use common::serial::SerialPort;
 
 use crate::gdt;
 use crate::idt;
-use crate::pic;
+use crate::irq::pic;
 
 /// 検証項目 1 件の結果。
 ///
@@ -594,7 +594,7 @@ pub unsafe fn run_timer_loop(
                 format_args!(
                     "heartbeat: ticks={ticks} ({} s), keys={} dropped={} stray={} spurious={}, \
                      irq1={} balanced={}, max tick jump={}, i8042 OBF={}, PIC ISR={:#04x}",
-                    ticks / crate::pit::TARGET_FREQUENCY_HZ as u64,
+                    ticks / crate::irq::pit::TARGET_FREQUENCY_HZ as u64,
                     crate::keyboard::buffer::received_count(),
                     crate::keyboard::buffer::overflow_count(),
                     crate::keyboard::stray_irq_count(),
@@ -615,7 +615,7 @@ pub unsafe fn run_timer_loop(
                     // 別の実行文脈は割り込みハンドラだけである。ハンドラは
                     // ISR を読んでも元に戻す必要がない読み出し専用の操作しか
                     // しないため、競合しても値がずれるだけで壊れない。
-                    unsafe { crate::pic::read_isr() }.0
+                    unsafe { crate::irq::pic::read_isr() }.0
                 ),
             );
         }

@@ -708,8 +708,8 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         //
         // SAFETY: 割り込みハンドラの中であり、割り込みゲート経由で入場した
         // ため IF=0。他の実行文脈が同時に PIC を触ることはない。
-        let isr = unsafe { crate::pic::read_isr() };
-        let spurious = crate::pic::is_spurious(irq, isr);
+        let isr = unsafe { crate::irq::pic::read_isr() };
+        let spurious = crate::irq::pic::is_spurious(irq, isr);
         if spurious {
             SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
         }
@@ -721,7 +721,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         // SAFETY: action は eoi_action_for が返した値そのものである。
         #[cfg(not(feature = "no-eoi-test"))]
         unsafe {
-            crate::pic::send_eoi_for(crate::pic::eoi_action_for(irq, spurious));
+            crate::irq::pic::send_eoi_for(crate::irq::pic::eoi_action_for(irq, spurious));
         }
     }
 
@@ -742,7 +742,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
 /// タイマ（IRQ0）のベクタ。
 ///
 /// PIC のベクタオフセットに追随する。`alt-offset-test` では 0x30 になる。
-pub const TIMER_VECTOR: usize = crate::pic::MASTER_VECTOR_OFFSET as usize;
+pub const TIMER_VECTOR: usize = crate::irq::pic::MASTER_VECTOR_OFFSET as usize;
 
 /// スプリアス割り込みを受けた回数（ベクタ別ではなく合計）。
 ///
@@ -761,7 +761,7 @@ pub fn spurious_count() -> u64 {
 /// テスト専用ベクタ（[`TEST_VECTOR`]）は PIC の範囲外なので `None` になり、
 /// EOI の経路へ入らない。
 fn pic_irq_for(vector: usize) -> Option<u8> {
-    let base = crate::pic::MASTER_VECTOR_OFFSET as usize;
+    let base = crate::irq::pic::MASTER_VECTOR_OFFSET as usize;
     if (base..base + PIC_IRQ_COUNT).contains(&vector) {
         Some((vector - base) as u8)
     } else {

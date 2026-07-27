@@ -203,7 +203,7 @@ struct Scheduler {
 /// `Locked<Scheduler>` 化より小さい修正で済む。
 ///
 /// 協調デモ（[`run_cooperative_demo`]）側のワーカーコールバックも IF=1 で走るが、
-/// そちらはタイマ解禁前（`pic::unmask_irq(0)` より前）に完結するので、並行する
+/// そちらはタイマ解禁前（`irq::pic::unmask_irq(0)` より前）に完結するので、並行する
 /// 書き手が存在しない。
 ///
 /// # なぜ seam整備で直さないか

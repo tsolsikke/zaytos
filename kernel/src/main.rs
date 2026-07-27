@@ -24,12 +24,12 @@ use kernel::graphics::{Color, Framebuffer, FramebufferLayout};
 use kernel::heap;
 use kernel::idt;
 use kernel::interrupts;
+use kernel::irq::pic;
+use kernel::irq::pit;
 use kernel::keyboard;
 use kernel::paging;
 use kernel::paging::plan::{resolve_pages, MappedRanges};
 use kernel::paging::table::PageTableBuilder;
-use kernel::pic;
-use kernel::pit;
 use kernel::stack;
 
 mod panic;
