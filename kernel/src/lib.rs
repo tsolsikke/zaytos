@@ -30,6 +30,7 @@ pub mod keyboard;
 pub mod memory_map;
 pub mod paging;
 pub mod ring3;
+pub mod smp;
 pub mod stack;
 pub mod syscall;
 pub mod task;

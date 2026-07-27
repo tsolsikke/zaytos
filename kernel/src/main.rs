@@ -610,6 +610,30 @@ extern "sysv64" fn kernel_main() -> ! {
         }
     }
 
+    // === S1-d: AP トランポリン用フレームの予約 ===
+    //
+    // **ここでしか取れない。** `allocate_frame` は最小のフレーム番号から配るので、
+    // この直後に始まるページテーブル構築が低位から食っていく。SIPI のベクタは
+    // 8 ビットで、AP は `vector << 12` から走り始めるため、トランポリンは物理
+    // 1MiB 未満に要る（`smp::TRAMPOLINE_MAX_START` の doc を参照）。
+    //
+    // **失敗しても停止しない。** S1 は情報を集める段で、AP はまだ起こさない。
+    // 致命として扱うのは S3（AP 起こし）である。
+    match kernel::smp::reserve_trampoline_frame(&mut allocator) {
+        Ok(frame) => logger.info(format_args!(
+            "smp: reserved the AP trampoline frame at {:#x} (below {:#x}, SIPI-addressable={})",
+            frame.as_u64(),
+            kernel::smp::TRAMPOLINE_MAX_START,
+            kernel::smp::is_sipi_addressable(frame)
+        )),
+        Err(error) => logger.error(format_args!(
+            "smp: could not reserve an AP trampoline frame ({error:?}); AP startup (S3) needs a \
+             frame below {:#x} because the SIPI vector is 8 bits and the AP starts at vector << 12. \
+             continuing: S1 only collects information and does not start APs",
+            kernel::smp::TRAMPOLINE_MAX_START
+        )),
+    }
+
     // === M2-d (d-1): 新しいページテーブルを構築する（CR3 は切り替えない） ===
 
     // フレームバッファは実機検証の結果、UEFI メモリマップに現れないことが
