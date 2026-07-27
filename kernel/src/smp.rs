@@ -43,8 +43,8 @@ static TRAMPOLINE_FRAME: AtomicU64 = AtomicU64::new(NO_FRAME);
 pub enum TrampolineError {
     /// 空きフレームが 1 枚も無い。
     NoFreeFrame,
-    /// 取れたが 1MiB 未満ではない。**取れたフレームは返さずに保持する**
-    /// （返すと次の確保が同じものを返し、同じ失敗を繰り返すだけである）。
+    /// 取れたが 1MiB 未満ではない。**取れたフレームはアロケータへ返してある**
+    /// ので、この失敗で空きが減ることはない。
     TooHigh { got: PhysAddr },
 }
 
@@ -70,6 +70,8 @@ pub fn reserve_trampoline_frame<const CAP: usize>(
         return Err(TrampolineError::NoFreeFrame);
     };
     if frame.as_u64() >= TRAMPOLINE_MAX_START {
+        // 取ったものを返す。失敗で空きが減らないようにする。
+        let _ = allocator.deallocate_frame(frame);
         return Err(TrampolineError::TooHigh { got: frame });
     }
     TRAMPOLINE_FRAME.store(frame.as_u64(), Ordering::Relaxed);
@@ -122,6 +124,8 @@ mod tests {
         }
         // 予約は成立していない。
         assert_eq!(trampoline_frame(), None);
+        // 取ったフレームは返してあるので、空きは減っていない。
+        assert_eq!(allocator.free_frame_count(), 16);
     }
 
     #[test]
