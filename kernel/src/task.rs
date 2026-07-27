@@ -18,6 +18,8 @@
 //! 形で並んでいる。復元は復元経路が行う。
 
 use core::fmt::Write as _;
+mod scheduler;
+
 use core::ptr::addr_of;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -136,92 +138,36 @@ const EMPTY_TASK: Task = Task {
     resumes: 0,
 };
 
-struct Scheduler {
-    tasks: [Task; TASK_COUNT],
-    /// スイッチした総回数（会計用）。各スイッチで再開されたタスクの `resumes`
-    /// も 1 増えるので、`switches == 全タスクの resumes の合計`。
-    switches: u64,
-    /// M5-d のプリエンプティブデモが進行中か。
-    demo_active: bool,
-    /// プリエンプティブデモを打ち切る TIMER_TICKS の閾値。
-    demo_deadline: u64,
-}
-
-/// スケジューラのグローバル状態。
-///
-/// # 保護の契約（seam整備の項目2で実測して書き直した）
-///
-/// **かつてここには「触るのは割り込み禁止の区間だけである」と書いてあった。
-/// それは誤りだった。** 実際には次の 3 つの文脈から触られる。
-///
-/// 1. **起動時の単一文脈**: [`setup_tasks`]（他に誰も走っていない）と
-///    [`setup_preemptive_tasks`]（`InterruptGuard` で IF=0 にしてから触る）。
-/// 2. **IF=0 の割り込みハンドラ**: [`on_yield`] / [`on_timer_tick`] は割り込み
-///    ゲート経由で入るので IF=0。そこから [`schedule_switch`] が `tasks[].saved_rsp`
-///    `tasks[].resumes` `switches` を書く。
-/// 3. **IF=1 のワーカーコールバック**: [`current_task_base`] / [`verify_preemptive_gprs`]
-///    などがワーカー本体（`global_asm!`）から呼ばれる。偽 `IrqContext` の RFLAGS は
-///    `0x202`（IF=1）なので、**ここは割り込み許可のまま走る。**
-///
-/// **文脈 2 と 3 は同一コア上で本当に並行する。** プリエンプティブデモ
-/// （[`run_preemptive_demo`]）はタイマ稼働後（`run_timer_loop` の `sti` 後）に
-/// 始まるので、IF=1 のワーカーが `tasks[]` を触っている最中にタイマが入って
-/// [`schedule_switch`] が同じ `SCHEDULER` を触りうる。
-///
-/// # これは「SMP で問題になる」ではなく「現在も UB」である
-///
-/// 文脈 2 と 3 はどちらも `&mut *(addr_of!(SCHEDULER) as *mut Scheduler)` で
-/// **`Scheduler` 全体への `&mut` を作る**。両者が並行しうるということは、
-/// **2 つの `&mut` が同時に生きている**ということであり、これは触るフィールドが
-/// 別であっても Rust の別名規則違反（未定義動作）である。
-///
-/// **動いているのは健全性の根拠があるからではない。** 実際に壊れていない理由は
-/// 2 つだけで、どちらも保証ではない。
-///
-/// - 両者が別のフィールドを触る（ワーカー側は `tasks[current].base` の読みと
-///   `tasks[current].iterations` の加算、タイマ側は `saved_rsp` / `resumes` /
-///   `switches`）ので、値としては失われる更新が無い。
-/// - x86 の整列アクセスが分割されない。
-/// - そして**コンパイラが割り込み境界を越えて解析しない**ので、別名を前提にした
-///   最適化が今のところ起きていない。
-///
-/// つまり「単一コアかつ最適化の都合で顕在化していないだけ」であって、`MAX_CPUS > 1`
-/// を待たずに現在も形式的には UB である。3d で `current` を [`PerCpu`] の
-/// `AtomicUsize` へ出したのは、まさにこの理由による。残りのフィールドは同じ問題を
-/// 抱えたままである。
-///
-/// この扱いは `roadmap.md` §21（`unsafe` を追加する場合は SMP 時のデータ競合・
-/// **参照の別名**・CPU 移動・割り込みや例外による再入まで含めて SAFETY 根拠を書く）
-/// の「参照の別名」に正面から該当する。したがって BKL 本体の**必須項目**として
-/// 直す（「検討する」ではない）。
-///
-/// # 直し方の候補（BKL 本体で選ぶ）
-///
-/// 両文脈で `&mut Scheduler` を作らず、**フィールド単位の生ポインタアクセス**にする
-/// （`addr_of_mut!((*s).tasks[i].iterations)` のように、必要なフィールドだけを指す）。
-/// `&mut` を作らなければ別名違反そのものが消える。`Scheduler` の分解や
-/// `Locked<Scheduler>` 化より小さい修正で済む。
-///
-/// 協調デモ（[`run_cooperative_demo`]）側のワーカーコールバックも IF=1 で走るが、
-/// そちらはタイマ解禁前（`irq::unmask(0)` より前）に完結するので、並行する
-/// 書き手が存在しない。
-///
-/// # なぜ seam整備で直さないか
-///
-/// 残りのフィールドを健全化するには、`Scheduler` の分解（フィールドごとの
-/// アトミック化）かワーカーコールバックの制約が要り、**振る舞い不変では収まらない。**
-/// また `Locked<Scheduler>` にすると `InterruptGuard` の取得で入れ子深さが増え、
-/// [`on_timer_tick`] の防御スキップ条件（深さが 0 でなければプリエンプトしない）と
-/// 既存検査（sti-check 6 / critical-test）の観測値が変わる。seam整備の原則
-/// （振る舞い不変）に反するので、ここでは契約を正確に記録するにとどめる。
-/// 扱いは BKL 本体（`Locked<T>` の中身をスピンロック併用へ差し替え、防御スキップの
-/// 方針を再設計する段）で決める（`docs/deferred-decisions.md`）。
-static mut SCHEDULER: Scheduler = Scheduler {
-    tasks: [EMPTY_TASK; TASK_COUNT],
-    switches: 0,
-    demo_active: false,
-    demo_deadline: 0,
-};
+// スケジューラのグローバル状態は [`scheduler`] モジュールが持つ。
+//
+// # 保護の契約（S0-bで別名違反を解消した）
+//
+// かつてここには `static mut SCHEDULER` があり、次の 3 つの文脈から
+// **構造体全体への `&mut`** を作っていた。
+//
+// 1. **起動時の単一文脈**: [`setup_tasks`] と [`setup_preemptive_tasks`]
+//    （後者は `InterruptGuard` で IF=0 にしてから触る）。
+// 2. **IF=0 の割り込みハンドラ**: [`on_yield`] / [`on_timer_tick`] は割り込み
+//    ゲート経由で入るので IF=0。そこから [`schedule_switch`] が触る。
+// 3. **IF=1 のワーカーコールバック**: [`current_task_base`] /
+//    [`verify_preemptive_gprs`] などがワーカー本体（`global_asm!`）から
+//    呼ばれる。偽 `IrqContext` の RFLAGS は `0x202`（IF=1）なので、
+//    **ここは割り込み許可のまま走る。**
+//
+// **文脈 2 と 3 は同一コア上で本当に並行する。** プリエンプティブデモは
+// タイマ稼働後に始まるので、IF=1 のワーカーがスケジューラを触っている最中に
+// タイマが入る。触るフィールドが別でも、2 つの `&mut` が同時に生きること
+// 自体が Rust の別名規則違反であり、`MAX_CPUS > 1` を待たずに**現在も
+// 未定義動作**だった。
+//
+// S0-b で実体を [`scheduler`] モジュールへ移し、外へはフィールド単位の操作
+// だけを出した。**構造体全体への参照は、モジュールの外からは書こうとしても
+// 書けない。** フィールドごとにどの文脈が触るか、どれが volatile を要するかは
+// [`scheduler`] のモジュールコメントの表にある。
+//
+// 例外・NMI・パニックの各経路はスケジューラを触らない（`idt` から
+// `crate::task` を呼ぶのは `on_yield` と `on_timer_tick` の 2 箇所だけで、
+// どちらも IRQ 経路である。実測で確認した）。
 
 /// 現在走行中のタスクのインデックス（コアごと。seam整備3d、ADR-0023）。
 ///
@@ -425,17 +371,14 @@ pub fn run_cooperative_demo() {
     yield_now();
 
     // --- 会計を閉じる ---
-    // SAFETY: ワーカーは終了済みで、走行中はメインだけ。読み取りのみ。
-    let (switches, resume_sum, a_rounds, b_rounds) = unsafe {
-        let s = addr_of!(SCHEDULER);
-        let switches = (*s).switches;
-        let resume_sum: u64 = (*s).tasks.iter().map(|t| t.resumes).sum();
-        // ワーカーは rounds_left が 0 になっているはず。走った回数は
-        // ROUNDS_PER_WORKER。
-        let a_done = (*s).tasks[1].rounds_left == 0;
-        let b_done = (*s).tasks[2].rounds_left == 0;
-        (switches, resume_sum, a_done, b_done)
-    };
+    // ワーカーは終了済みで、走行中はメインだけ。フィールド単位で読む
+    // （配列全体への参照を作らない。S0-b）。
+    let switches = scheduler::switches();
+    let resume_sum: u64 = (0..TASK_COUNT).map(scheduler::resumes).sum();
+    // ワーカーは rounds_left が 0 になっているはず。走った回数は
+    // ROUNDS_PER_WORKER。
+    let a_rounds = scheduler::rounds_left(1) == 0;
+    let b_rounds = scheduler::rounds_left(2) == 0;
     let accounting_ok = switches == resume_sum && a_rounds && b_rounds;
     serial_line(format_args!(
         "task: demo finished. switches={switches}, sum(resumes)={resume_sum}, \
@@ -477,16 +420,17 @@ unsafe fn setup_tasks() {
     // メインのスタック頂点は通常のカーネルスタック（RSP0 用）。
     let main_top = crate::stack::kernel_stack_range().top.as_u64();
 
-    // SAFETY: 起動時の単一実行文脈。スケジューラはまだ誰も触っていない。
-    let sched = unsafe { &mut *(addr_of!(SCHEDULER) as *mut Scheduler) };
     set_current_index(0);
-    sched.switches = 0;
-    sched.tasks[0] = Task {
-        stack_top: main_top,
-        stack_bottom: crate::stack::kernel_stack_range().bottom.as_u64(),
-        runnable: false, // メインはワーカーが尽きたときだけ戻る
-        ..EMPTY_TASK
-    };
+    scheduler::set_switches(0);
+    scheduler::init_task(
+        0,
+        Task {
+            stack_top: main_top,
+            stack_bottom: crate::stack::kernel_stack_range().bottom.as_u64(),
+            runnable: false, // メインはワーカーが尽きたときだけ戻る
+            ..EMPTY_TASK
+        },
+    );
 
     for w in 0..WORKER_COUNT {
         let (guard, top) = worker_stack_bounds(w);
@@ -500,17 +444,20 @@ unsafe fn setup_tasks() {
         let saved_rsp = unsafe { build_initial_context(top, entry) };
         // タスク固有の base。A=0xA1A1_0000、B=0xB2B2_0000 のように区別する。
         let base = 0xA1A1_0000u64 + (w as u64) * 0x1111_0000;
-        sched.tasks[1 + w] = Task {
-            saved_rsp,
-            stack_top: top.as_u64(),
-            // 使えるスタックの下端はガードページの直上。
-            stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
-            runnable: true,
-            base,
-            rounds_left: ROUNDS_PER_WORKER,
-            iterations: 0,
-            resumes: 0,
-        };
+        scheduler::init_task(
+            1 + w,
+            Task {
+                saved_rsp,
+                stack_top: top.as_u64(),
+                // 使えるスタックの下端はガードページの直上。
+                stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
+                runnable: true,
+                base,
+                rounds_left: ROUNDS_PER_WORKER,
+                iterations: 0,
+                resumes: 0,
+            },
+        );
     }
 }
 
@@ -594,13 +541,11 @@ pub fn on_timer_tick(current_rsp: u64) -> u64 {
     }
 
     // 締切に達したらワーカーを走行不可にする。次の pick_next がメインを選ぶ。
-    // SAFETY: IF=0 の割り込みハンドラ内。他の実行文脈は無い。
-    let sched = unsafe { &mut *(addr_of!(SCHEDULER) as *mut Scheduler) };
-    if sched.demo_active && crate::idt::timer_ticks() >= sched.demo_deadline {
+    if scheduler::demo_active() && crate::idt::timer_ticks() >= scheduler::demo_deadline() {
         for w in 0..WORKER_COUNT {
-            sched.tasks[1 + w].runnable = false;
+            scheduler::set_runnable(1 + w, false);
         }
-        sched.demo_active = false;
+        scheduler::set_demo_active(false);
     }
 
     schedule_switch(current_rsp)
@@ -609,12 +554,8 @@ pub fn on_timer_tick(current_rsp: u64) -> u64 {
 /// スイッチの中核（yield と timer が共有）。現タスクの RSP を保存し、次タスクを
 /// 選び、RSP0 を更新して次タスクの RSP を返す。次が現タスクと同じなら何もしない。
 fn schedule_switch(current_rsp: u64) -> u64 {
-    // SAFETY: いずれの呼び出し元も IF=0（割り込みゲート経由）で、シングルコア
-    // なので他の実行文脈が同時にスケジューラを触ることはない。
-    let sched = unsafe { &mut *(addr_of!(SCHEDULER) as *mut Scheduler) };
-
     let current = current_index();
-    sched.tasks[current].saved_rsp = current_rsp;
+    scheduler::set_saved_rsp(current, current_rsp);
 
     // 破壊確認 (ii): RSP の差し替えを省く。現タスクの RSP を返すのでスイッチが
     // 起きず、同じタスクが回り続ける。デモの会計・進捗で検出する。
@@ -625,7 +566,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
 
     #[cfg(not(feature = "task-switch-no-swap"))]
     {
-        let next = pick_next(sched, current);
+        let next = pick_next(scheduler::runnable_flags(), current);
         // 走らせるべき相手がいない（=現タスクのまま）なら何もしない。デモ後の
         // ハートビート区間（runnable がメインだけ）ではここに来て no-op になる。
         if next == current {
@@ -634,23 +575,25 @@ fn schedule_switch(current_rsp: u64) -> u64 {
 
         // スタックが混ざっていないこと。次タスクの保存 RSP がそのタスクの
         // スタック範囲内にあること（範囲外なら別タスクのスタックを指している）。
-        let next_rsp = sched.tasks[next].saved_rsp;
-        if next_rsp < sched.tasks[next].stack_bottom || next_rsp >= sched.tasks[next].stack_top {
+        let next_rsp = scheduler::saved_rsp(next);
+        let next_bottom = scheduler::stack_bottom(next);
+        let next_top = scheduler::stack_top(next);
+        if next_rsp < next_bottom || next_rsp >= next_top {
             serial_line(format_args!(
                 "[ERROR] task: task {next} saved_rsp {next_rsp:#x} is outside its stack \
                  [{:#x}, {:#x}); stacks are mixed; halting",
-                sched.tasks[next].stack_bottom, sched.tasks[next].stack_top
+                next_bottom, next_top
             ));
             common::cpu::halt_forever();
         }
 
         set_current_index(next);
-        sched.switches += 1;
-        sched.tasks[next].resumes += 1;
+        scheduler::add_switch();
+        scheduler::add_resume(next);
 
         // RSP0 を次タスクのスタック頂点へ更新する（§2.2、効くのは M5-e）。
         // 破壊確認: drop-rsp0 では更新を落とす。読み戻し検査で捕まる。
-        let expected_rsp0 = sched.tasks[next].stack_top;
+        let expected_rsp0 = next_top;
         #[cfg(not(feature = "task-switch-drop-rsp0"))]
         // SAFETY: stack_top は次タスクの有効なスタック頂点。切り替えの割り込み
         // 禁止区間から呼んでいる。
@@ -686,14 +629,14 @@ fn schedule_switch(current_rsp: u64) -> u64 {
 /// メイン（0）へ戻る。
 // no-swap の破壊ビルドではスイッチしないので、次タスクを選ばず未使用になる。
 #[cfg_attr(feature = "task-switch-no-swap", allow(dead_code))]
-fn pick_next(sched: &Scheduler, current: usize) -> usize {
+fn pick_next(runnable: [bool; TASK_COUNT], current: usize) -> usize {
     for offset in 1..=WORKER_COUNT {
         let cand = if current == 0 {
             ((offset - 1) % WORKER_COUNT) + 1
         } else {
             ((current - 1 + offset) % WORKER_COUNT) + 1
         };
-        if sched.tasks[cand].runnable {
+        if runnable[cand] {
             return cand;
         }
     }
@@ -702,18 +645,14 @@ fn pick_next(sched: &Scheduler, current: usize) -> usize {
 
 /// ワーカー本体（`global_asm!`）から呼ばれる。現タスクの GPR 基準値を返す。
 extern "sysv64" fn current_task_base() -> u64 {
-    // SAFETY: ワーカー本体（IF=0 ではないが単一走行）から呼ばれる。読み取りのみ。
-    let sched = unsafe { &*addr_of!(SCHEDULER) };
-    sched.tasks[current_index()].base
+    scheduler::base(current_index())
 }
 
 /// ワーカー本体から呼ばれる。往復後の 15 本の GPR（`GPR_BUF`）を基準値と照合し、
 /// 結果を出す。残りラウンドがあれば 1、無ければ 0 を返す。
 extern "sysv64" fn verify_gprs_and_advance() -> u64 {
-    // SAFETY: 単一走行。現タスクの基準値とバッファを読む。
-    let sched = unsafe { &mut *(addr_of!(SCHEDULER) as *mut Scheduler) };
     let current = current_index();
-    let base = sched.tasks[current].base;
+    let base = scheduler::base(current);
 
     // SAFETY: ワーカー本体が直前に 15 本を書き込んだ共有バッファ。
     let buf = unsafe { *addr_of!(GPR_BUF) };
@@ -729,8 +668,9 @@ extern "sysv64" fn verify_gprs_and_advance() -> u64 {
         }
     }
 
-    sched.tasks[current].rounds_left = sched.tasks[current].rounds_left.saturating_sub(1);
-    let round = ROUNDS_PER_WORKER - sched.tasks[current].rounds_left;
+    let remaining = scheduler::rounds_left(current).saturating_sub(1);
+    scheduler::set_rounds_left(current, remaining);
+    let round = ROUNDS_PER_WORKER - remaining;
     let name = if current == 1 { 'A' } else { 'B' };
 
     if mismatches == 0 {
@@ -747,7 +687,7 @@ extern "sysv64" fn verify_gprs_and_advance() -> u64 {
         common::cpu::halt_forever();
     }
 
-    if sched.tasks[current].rounds_left == 0 {
+    if remaining == 0 {
         0
     } else {
         1
@@ -757,10 +697,8 @@ extern "sysv64" fn verify_gprs_and_advance() -> u64 {
 /// ワーカー本体から、全ラウンドを終えたときに呼ばれる。現タスクを終了扱いに
 /// して yield する。以後スケジューラはこのタスクを選ばない。
 extern "sysv64" fn worker_done_and_yield() {
-    // SAFETY: 単一走行。現タスクを走行不可にする。
-    let sched = unsafe { &mut *(addr_of!(SCHEDULER) as *mut Scheduler) };
     let current = current_index();
-    sched.tasks[current].runnable = false;
+    scheduler::set_runnable(current, false);
     let name = if current == 1 { 'A' } else { 'B' };
     serial_line(format_args!(
         "task: {name} finished all rounds; yielding for good"
@@ -867,18 +805,13 @@ pub fn run_preemptive_demo() {
     yield_now();
 
     // --- 会計・進捗・窓カウントを閉じる ---
-    // SAFETY: ワーカーは走行不可で、走行中はメインだけ。読み取りのみ。
-    let (switches, resume_sum, a_iters, b_iters) = unsafe {
-        let s = addr_of!(SCHEDULER);
-        let switches = (*s).switches;
-        let resume_sum: u64 = (*s).tasks.iter().map(|t| t.resumes).sum();
-        (
-            switches,
-            resume_sum,
-            (*s).tasks[1].iterations,
-            (*s).tasks[2].iterations,
-        )
-    };
+    // ワーカーは走行不可だが**タイマは動き続けている**ので、`switches` と
+    // `resumes` は IF=0 の経路が加算しうる。フィールド単位の volatile な
+    // 読みで取る（S0-b。`scheduler` の表を参照）。
+    let switches = scheduler::switches();
+    let resume_sum: u64 = (0..TASK_COUNT).map(scheduler::resumes).sum();
+    let a_iters = scheduler::iterations(1);
+    let b_iters = scheduler::iterations(2);
     let window_preempts = PREEMPT_IN_WINDOW.load(Ordering::Relaxed);
 
     serial_line(format_args!(
@@ -940,17 +873,17 @@ unsafe fn setup_preemptive_tasks() {
     // pick_next がメインを返すので no-op になる（順序の安全性は最初のワーカーを
     // runnable にした後に yield で入ることに依存する）。
     let _guard = common::critical::InterruptGuard::enter();
-    // SAFETY: 直前に InterruptGuard で割り込みを禁止した（IF=0）。シングルコア
-    // なので、この区間に他の実行文脈がスケジューラを触ることはない。
-    let sched = unsafe { &mut *(addr_of!(SCHEDULER) as *mut Scheduler) };
     set_current_index(0);
-    sched.switches = 0;
-    sched.tasks[0] = Task {
-        stack_top: main_top,
-        stack_bottom: crate::stack::kernel_stack_range().bottom.as_u64(),
-        runnable: false,
-        ..EMPTY_TASK
-    };
+    scheduler::set_switches(0);
+    scheduler::init_task(
+        0,
+        Task {
+            stack_top: main_top,
+            stack_bottom: crate::stack::kernel_stack_range().bottom.as_u64(),
+            runnable: false,
+            ..EMPTY_TASK
+        },
+    );
     for w in 0..WORKER_COUNT {
         let (guard, top) = worker_stack_bounds(w);
         // ガードページは M5-c で設置済み。ここでは偽コンテキストだけ作り直す。
@@ -958,19 +891,22 @@ unsafe fn setup_preemptive_tasks() {
         // 終わっており、このスタックは今は誰も使っていない。
         let saved_rsp = unsafe { build_initial_context(top, entry) };
         let base = 0xA1A1_0000u64 + (w as u64) * 0x1111_0000;
-        sched.tasks[1 + w] = Task {
-            saved_rsp,
-            stack_top: top.as_u64(),
-            stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
-            runnable: true,
-            base,
-            rounds_left: 0,
-            iterations: 0,
-            resumes: 0,
-        };
+        scheduler::init_task(
+            1 + w,
+            Task {
+                saved_rsp,
+                stack_top: top.as_u64(),
+                stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
+                runnable: true,
+                base,
+                rounds_left: 0,
+                iterations: 0,
+                resumes: 0,
+            },
+        );
     }
-    sched.demo_active = true;
-    sched.demo_deadline = crate::idt::timer_ticks() + PREEMPTIVE_DEMO_TICKS;
+    scheduler::set_demo_active(true);
+    scheduler::set_demo_deadline(crate::idt::timer_ticks() + PREEMPTIVE_DEMO_TICKS);
     PREEMPT_IN_WINDOW.store(0, Ordering::Relaxed);
     // _guard の drop でここを抜けると割り込みが復元される（元が IF=1 なら sti）。
 }
@@ -978,10 +914,8 @@ unsafe fn setup_preemptive_tasks() {
 /// プリエンプティブなワーカー本体から呼ばれる。往復（プリエンプト）後の 15 本の
 /// GPR（`GPR_BUF`）を基準値と照合し、進捗カウンタを増やす。
 extern "sysv64" fn verify_preemptive_gprs() {
-    // SAFETY: 単一走行。現タスクの基準値とバッファを読む。
-    let sched = unsafe { &mut *(addr_of!(SCHEDULER) as *mut Scheduler) };
     let current = current_index();
-    let base = sched.tasks[current].base;
+    let base = scheduler::base(current);
 
     // SAFETY: ワーカー本体が直前に 15 本を書き込んだ共有バッファ。
     let buf = unsafe { *addr_of!(GPR_BUF) };
@@ -997,7 +931,7 @@ extern "sysv64" fn verify_preemptive_gprs() {
             common::cpu::halt_forever();
         }
     }
-    sched.tasks[current].iterations += 1;
+    scheduler::add_iteration(current);
 }
 
 /// プリエンプティブなワーカー本体のループ先頭から呼ばれる。現タスクの base を

@@ -2867,8 +2867,35 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "highhalf-panic-after-remove",
 ];
 
-/// 割り込み層の境界（`kernel/src/irq/`）の内部が、外へ公開されていないことを
-/// 確かめる（seam整備の項目1、S0-a）。
+/// 内部を隠す約束のディレクトリ。
+///
+/// - `kernel/src/irq/`: 割り込みコントローラとタイマ源の境界（S0-a）。外から
+///   `pic` / `pit` を参照できないことをコンパイラが保証する。
+/// - `kernel/src/task/`: スケジューラの実体（`static mut SCHEDULER`）。外から
+///   構造体全体への参照を作れないことをコンパイラが保証する（S0-b）。
+/// - `kernel/src/task.rs`: 上の `mod scheduler;` 宣言がここにある。**ディレクトリ
+///   だけを見る形では、この 1 行が対象から外れる**（`irq` は宣言が
+///   `irq/mod.rs` にあるので中に入るが、`task` は `task.rs` が外にある）。
+///   実測で気づいた穴なので、ファイルを明示して対象に入れる。`task.rs` を
+///   `task/mod.rs` へ改名すれば対称になるが、**このパスは docs から 6 箇所で
+///   参照されている**（`verification-coverage` 4 / `roadmap` 1 /
+///   `deferred-decisions` 1）ため改名しない。M5-f-3 を改名しなかったのと同じ
+///   理由である。
+///
+/// `task` 側について 1 つ正確に書いておく。`mod scheduler;` を `pub mod` にしても、
+/// アクセサが `pub(super) fn` なので外からは呼べない（実測では
+/// `E0603: function switches is private` になった）。**この対象追加が捕まえるのは
+/// 「漏れる形」ではなく「漏れる条件の片方」である。** `irq` の
+/// `pub(crate) use super::pic::*;` と同じく、保守的に禁じている側に当たる。
+/// 検査は `fn` の可視性を見ない（見ると境界の公開 API まで禁じることになる）。
+///
+/// **どちらも「コンパイラが保証し、検査はその保証が外されるのを防ぐ」形である。**
+/// 保証の作り方が同じなので、検査も 1 つで足りる。
+static PRIVATE_BOUNDARY_DIRS: &[&str] =
+    &["kernel/src/irq/", "kernel/src/task/", "kernel/src/task.rs"];
+
+/// 内部を隠す約束のモジュール（[`PRIVATE_BOUNDARY_DIRS`]）が、その内部を外へ
+/// 公開していないことを確かめる（seam整備の項目1=S0-a、S0-b）。
 ///
 /// # コンパイラが保証することと、この検査が守ること
 ///
@@ -2944,7 +2971,10 @@ fn find_boundary_visibility_leaks(workspace_root: &Path) -> Result<Vec<String>> 
 
     let mut findings = Vec::new();
     for relative in listing.lines().filter(|l| !l.is_empty()) {
-        if !relative.starts_with("kernel/src/irq/") {
+        if !PRIVATE_BOUNDARY_DIRS
+            .iter()
+            .any(|dir| relative.starts_with(dir))
+        {
             continue;
         }
         let path = workspace_root.join(relative);
@@ -3115,19 +3145,22 @@ fn cmd_check(full: bool) -> Result<()> {
     }
 
     total += 1;
-    println!("=== xtask check: the interrupt-layer boundary keeps its internals private");
+    println!("=== xtask check: private-by-design modules keep their internals private");
     let leaks = find_boundary_visibility_leaks(&workspace_root)?;
     if leaks.is_empty() {
-        println!("--- irq boundary: OK (no visibility qualifier on mod/use under kernel/src/irq/)");
+        println!(
+            "--- private boundaries: OK (no visibility qualifier on mod/use/type under {})",
+            PRIVATE_BOUNDARY_DIRS.join(", ")
+        );
     } else {
         for finding in &leaks {
             println!("    {finding}");
         }
         println!(
-            "--- irq boundary: FAILED ({} export(s); the boundary must be the only way in)",
+            "--- private boundaries: FAILED ({} export(s); the boundary must be the only way in)",
             leaks.len()
         );
-        failed.push("irq boundary".to_string());
+        failed.push("private boundaries".to_string());
     }
 
     total += 1;
