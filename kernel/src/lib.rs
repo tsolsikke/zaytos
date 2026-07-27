@@ -18,6 +18,7 @@ pub mod link_symbols {
     include!(concat!(env!("OUT_DIR"), "/link_symbols.rs"));
 }
 
+pub mod acpi;
 pub mod console;
 pub mod frame_allocator;
 pub mod gdt;

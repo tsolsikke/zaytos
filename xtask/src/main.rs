@@ -2873,6 +2873,10 @@ const SABOTAGE_FEATURES: &[&str] = &[
 ///   `pic` / `pit` を参照できないことをコンパイラが保証する。
 /// - `kernel/src/task/`: スケジューラの実体（`static mut SCHEDULER`）。外から
 ///   構造体全体への参照を作れないことをコンパイラが保証する（S0-b）。
+/// - `kernel/src/acpi/`: ファームウェアが提示する構成表の境界（S1-b）。外へ
+///   出るのは問いの形だけで、テーブルの生バイト・パーサの型・物理アドレスは
+///   境界の中に留まる。宣言（`mod rsdp;`）は `acpi/mod.rs` にあるので、
+///   `irq` と同じくディレクトリ指定で中に入る。
 /// - `kernel/src/task.rs`: 上の `mod scheduler;` 宣言がここにある。**ディレクトリ
 ///   だけを見る形では、この 1 行が対象から外れる**（`irq` は宣言が
 ///   `irq/mod.rs` にあるので中に入るが、`task` は `task.rs` が外にある）。
@@ -2891,8 +2895,12 @@ const SABOTAGE_FEATURES: &[&str] = &[
 ///
 /// **どちらも「コンパイラが保証し、検査はその保証が外されるのを防ぐ」形である。**
 /// 保証の作り方が同じなので、検査も 1 つで足りる。
-static PRIVATE_BOUNDARY_DIRS: &[&str] =
-    &["kernel/src/irq/", "kernel/src/task/", "kernel/src/task.rs"];
+static PRIVATE_BOUNDARY_DIRS: &[&str] = &[
+    "kernel/src/irq/",
+    "kernel/src/task/",
+    "kernel/src/task.rs",
+    "kernel/src/acpi/",
+];
 
 /// 内部を隠す約束のモジュール（[`PRIVATE_BOUNDARY_DIRS`]）が、その内部を外へ
 /// 公開していないことを確かめる（seam整備の項目1=S0-a、S0-b）。
@@ -2984,7 +2992,10 @@ fn find_boundary_visibility_leaks(workspace_root: &Path) -> Result<Vec<String>> 
             let trimmed = line.trim_start();
             if let Some(item) = visibility_qualified_mod_or_use(trimmed) {
                 findings.push(format!(
-                    "{relative}:{}: {item} is exported out of the interrupt-layer boundary: {}",
+                    // 文言は境界の名前を書かない。対象は`PRIVATE_BOUNDARY_DIRS`で
+                    // 増えるので、特定の境界（かつては割り込み層だけだった）を
+                    // 名指しすると、対象が増えたときに事実と食い違う。
+                    "{relative}:{}: {item} is exported out of a private-by-design boundary: {}",
                     index + 1,
                     trimmed.trim_end()
                 ));

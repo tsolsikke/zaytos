@@ -492,15 +492,18 @@ extern "sysv64" fn kernel_main() -> ! {
     }
     logger.info(format_args!("BootInfo validated (magic/version OK)"));
 
-    // S1-a: bootloader が引いた RSDP の物理アドレス。**まだ検証も走査もしない。**
-    // 署名・チェックサム・revision の検査と XSDT/MADT の走査は S1-b で行う。
+    // S1-a: bootloader が引いた RSDP の物理アドレス。**この時点では検証も走査も
+    // していない。** 署名・チェックサム・revision の検査と辿る先の決定は、
+    // 起動シーケンスの後方（direct map 窓の高位化より後）で `acpi::survey` が行う。
+    // ここへ持ってこられないのは、物理を読むのに窓と稼働中のページテーブルが要るためである。
     if boot_info.acpi_rsdp.as_u64() == 0 {
         logger.error(format_args!(
             "acpi: the bootloader reported no RSDP; S2 (APIC) will need it"
         ));
     } else {
         logger.info(format_args!(
-            "acpi: RSDP physical address from the bootloader = {:#x} (not validated yet; S1-b)",
+            "acpi: RSDP physical address from the bootloader = {:#x} (validated later in this \
+             boot; see the acpi: lines below)",
             boot_info.acpi_rsdp.as_u64()
         ));
     }
@@ -544,6 +547,13 @@ extern "sysv64" fn kernel_main() -> ! {
             boot_info.memory_map.descriptors_len as usize,
         )
     };
+
+    // ACPI の走査（S1-b）が使う値をここで抜き出しておく。**boot_info の最終利用は
+    // A-2 の rehome であり、それより後ろで boot_info を参照してはならない**（低位 VA で、
+    // 恒等除去後は無効になる）。走査は除去より前だが、rehome より後ろに置くため、
+    // 抽出済みの値だけで完結させる。`raw_map` も同じ理由で既に抽出済みである。
+    let acpi_rsdp = boot_info.acpi_rsdp;
+    let memory_map_descriptor_size = boot_info.memory_map.descriptor_size;
 
     let (mut allocator, stats) =
         frame_allocator::build(raw_map, boot_info.memory_map.descriptor_size).unwrap_or_else(|e| {
@@ -1209,6 +1219,28 @@ extern "sysv64" fn kernel_main() -> ! {
     // 一致することを確かめる。
     #[cfg(not(feature = "paging-test"))]
     verify_syscall_checksum(&mut logger);
+
+    // === S1-b-1: ACPI テーブルの検証つき走査 ===
+    //
+    // **置ける区間が上下から挟まれている。**
+    //   - 下限は A-2（direct map 窓の高位化）。物理を読むのに窓を使う。
+    //   - 上限は恒等除去（すぐ下）。`raw_map` は低位 VA のスライスで、除去後は
+    //     無効になる。ACPI の物理アドレスがどのメモリ型に載っているかを見るのに
+    //     使うので、除去より前でなければならない。
+    // 検査そのものは高位窓の翻訳を見るため、除去を跨いでも結論は変わらない
+    // （除去が落とすのは `PML4[0]` だけである）。**呼び出し位置を動かすときは、
+    // この 2 つの境界の両方を確かめること。** どちらを踏み外しても、症状は
+    // 「ACPI が読めない」ではなく低位 VA のデレフによる #PF になる。
+    //
+    // **異常があっても停止しない。** S1 は情報を集める段で、ACPI が読めない
+    // だけで単一コアのカーネルが起動しなくなるのは機能的な後退である。致命へ
+    // 格上げするのは S2（APIC 移行）である。
+    //
+    // ログはシリアルのみ（`log_both` を使わない）。この近傍の検証サイト
+    // （verify_user_page_mapping 以降と remove_identity）はいずれもシリアルのみで、
+    // `log_both` は人が読む要約（ヒープの確保・スモークテスト・コンソールの統計）に
+    // 使われている。ACPI の走査は検証の材料なので前者に揃える。
+    kernel::acpi::survey(&mut logger, acpi_rsdp, raw_map, memory_map_descriptor_size);
 
     // === higher-half B-2b-4（恒等除去） ===
     //

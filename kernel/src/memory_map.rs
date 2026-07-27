@@ -78,6 +78,32 @@ pub const fn classify(ty: u32) -> RegionPolicy {
     }
 }
 
+/// メモリ型の名前。**ログにのみ使う。** 判定は必ず [`classify`] を通すこと。
+///
+/// 型の値だけを出しても、`9` と `10` のどちらが reclaim だったかを毎回
+/// 仕様書で引き直すことになる。観測値を読んで判断できる形にしておく。
+pub const fn type_name(ty: u32) -> &'static str {
+    match ty {
+        memory_type::RESERVED => "EfiReservedMemoryType",
+        memory_type::LOADER_CODE => "EfiLoaderCode",
+        memory_type::LOADER_DATA => "EfiLoaderData",
+        memory_type::BOOT_SERVICES_CODE => "EfiBootServicesCode",
+        memory_type::BOOT_SERVICES_DATA => "EfiBootServicesData",
+        memory_type::RUNTIME_SERVICES_CODE => "EfiRuntimeServicesCode",
+        memory_type::RUNTIME_SERVICES_DATA => "EfiRuntimeServicesData",
+        memory_type::CONVENTIONAL => "EfiConventionalMemory",
+        memory_type::UNUSABLE => "EfiUnusableMemory",
+        memory_type::ACPI_RECLAIM => "EfiACPIReclaimMemory",
+        memory_type::ACPI_NVS => "EfiACPIMemoryNVS",
+        memory_type::MMIO => "EfiMemoryMappedIO",
+        memory_type::MMIO_PORT_SPACE => "EfiMemoryMappedIOPortSpace",
+        memory_type::PAL_CODE => "EfiPalCode",
+        memory_type::PERSISTENT => "EfiPersistentMemory",
+        memory_type::UNACCEPTED => "EfiUnacceptedMemoryType",
+        _ => "vendor-reserved or unknown",
+    }
+}
+
 /// `EFI_MEMORY_DESCRIPTOR` のうち、空き判定に必要な最小限のフィールド。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryMapEntry {
@@ -126,6 +152,39 @@ pub fn parse_entries(
                 .unwrap(),
         ),
     }))
+}
+
+/// UEFI のページサイズ。`NumberOfPages` の単位であり、仕様で 4KiB に
+/// 固定されている。`frame_allocator::FRAME_SIZE` とは出所が違う（あちらは
+/// x86_64 のフレームサイズである）。値が同じなのは偶然ではないが、意味の
+/// 違うものを 1 つの定数で兼ねると、片方が変わったときに追随できない。
+pub const UEFI_PAGE_SIZE: u64 = 4096;
+
+/// `phys` を含むディスクリプタを探す。無ければ `Ok(None)`。
+///
+/// **メモリマップに現れない物理アドレスは実在する。** フレームバッファ
+/// （PCI BAR）がそうであり、`None` は異常ではなく観測結果である。
+///
+/// 重なりのあるマップは想定していないので、最初に見つかったものを返す。
+pub fn find_entry(
+    raw: &[u8],
+    descriptor_size: u64,
+    phys: u64,
+) -> Result<Option<MemoryMapEntry>, &'static str> {
+    for entry in parse_entries(raw, descriptor_size)? {
+        // 桁溢れするディスクリプタは「含まない」として飛ばす。ログを出す
+        // ためだけの経路が panic でカーネルを落とすことがないようにする。
+        let Some(bytes) = entry.page_count.checked_mul(UEFI_PAGE_SIZE) else {
+            continue;
+        };
+        let Some(end) = entry.phys_start.checked_add(bytes) else {
+            continue;
+        };
+        if phys >= entry.phys_start && phys < end {
+            return Ok(Some(entry));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -245,6 +304,74 @@ mod tests {
                 "type {ty} should be uncacheable ReservedButMapped"
             );
         }
+    }
+
+    #[test]
+    fn find_entry_locates_the_descriptor_that_covers_an_address() {
+        let bytes = build_map_bytes(
+            &[
+                (memory_type::CONVENTIONAL, 0x1000, 4),
+                (memory_type::ACPI_RECLAIM, 0x5000, 2),
+                (memory_type::RESERVED, 0x7000, 1),
+            ],
+            48,
+        );
+        let entry = find_entry(&bytes, 48, 0x5FFF).unwrap().unwrap();
+        assert_eq!(entry.memory_type, memory_type::ACPI_RECLAIM);
+        assert_eq!(entry.phys_start, 0x5000);
+    }
+
+    /// 終端は排他である。次のディスクリプタの先頭に当たること。
+    #[test]
+    fn find_entry_treats_the_descriptor_end_as_exclusive() {
+        let bytes = build_map_bytes(
+            &[
+                (memory_type::ACPI_RECLAIM, 0x5000, 2),
+                (memory_type::RESERVED, 0x7000, 1),
+            ],
+            48,
+        );
+        assert_eq!(
+            find_entry(&bytes, 48, 0x7000).unwrap().unwrap().memory_type,
+            memory_type::RESERVED
+        );
+    }
+
+    #[test]
+    fn find_entry_returns_none_for_an_address_no_descriptor_covers() {
+        let bytes = build_map_bytes(&[(memory_type::CONVENTIONAL, 0x1000, 4)], 48);
+        assert_eq!(find_entry(&bytes, 48, 0x8000_0000).unwrap(), None);
+    }
+
+    /// 桁溢れするディスクリプタで panic しないこと。ログのための経路が
+    /// カーネルを落とすのは本末転倒である。
+    #[test]
+    fn find_entry_skips_a_descriptor_whose_extent_overflows() {
+        let bytes = build_map_bytes(
+            &[(memory_type::CONVENTIONAL, u64::MAX - 0xFFF, u64::MAX)],
+            48,
+        );
+        assert_eq!(find_entry(&bytes, 48, 0x1000).unwrap(), None);
+    }
+
+    #[test]
+    fn find_entry_propagates_a_malformed_descriptor_size() {
+        assert!(find_entry(&[0u8; 16], 16, 0).is_err());
+    }
+
+    #[test]
+    fn type_names_cover_the_values_the_specification_defines() {
+        assert_eq!(
+            type_name(memory_type::CONVENTIONAL),
+            "EfiConventionalMemory"
+        );
+        assert_eq!(type_name(memory_type::ACPI_RECLAIM), "EfiACPIReclaimMemory");
+        assert_eq!(type_name(memory_type::ACPI_NVS), "EfiACPIMemoryNVS");
+        assert_eq!(type_name(memory_type::RESERVED), "EfiReservedMemoryType");
+        assert_eq!(
+            type_name(memory_type::VENDOR_RESERVED_START),
+            "vendor-reserved or unknown"
+        );
     }
 
     #[test]
