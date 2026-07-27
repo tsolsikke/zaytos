@@ -2867,6 +2867,129 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "highhalf-panic-after-remove",
 ];
 
+/// 割り込み層の境界（`kernel/src/irq/`）の内部が、外へ公開されていないことを
+/// 確かめる（seam整備の項目1、S0-a）。
+///
+/// # コンパイラが保証することと、この検査が守ること
+///
+/// `irq/mod.rs` が `mod pic;`（非公開）と宣言している限り、境界の外から
+/// `crate::irq::pic::…` と書くとビルドが落ちる。**参照が無いこと自体は
+/// コンパイラが保証する。** この検査が守るのは、その保証が将来の単純化で
+/// 外されないことである。可視性修飾を 1 つ足すだけで保証は消えるが、
+/// ビルドは通り続けるので、検査が無ければ気づけない。
+///
+/// # 見るもの
+///
+/// `irq/` 配下の**全ファイル**を対象に、`mod` 宣言と `use` に private 以外の
+/// 可視性修飾（`pub` / `pub(crate)` / `pub(super)` / `pub(in …)`）が付いて
+/// いないことを見る。`mod.rs` だけを見る形だと、配下に新しいファイルを作って
+/// そこから再公開する経路を捕まえられない。
+///
+/// # 守らないもの（実態より強く書かない）
+///
+/// - **境界の公開関数が生の値を返す形は捕まらない。** `pub fn read_masks()
+///   -> (u8, u8)` を `irq` に足せば、可視性は private のままでも呼び出し側は
+///   PIC の語彙を持てる。これはレビューで守る。
+/// - **コメント内の言及は対象外。** コメントは実行されないので結合を作らない。
+///   `pic` は `topic` の部分文字列でもあり、素朴な一致は誤検出源になる。
+/// - **生の I/O ポート直叩きは対象外。** 境界の外から `outb(0x21, …)` と書けば
+///   IMR は触れる。現在そのような箇所は無いことを実測で確認しているが、
+///   この検査はそれを見ていない。
+///
+/// # 保守的に禁じている形もある（実態より強く書かない）
+///
+/// 禁じている形のうち、**外から実際に到達できるものと、保守的に禁じている
+/// だけのものが混ざっている。** 前者だけを見て「全部が穴だった」と読まない
+/// ように、実測（S0-a の 1c）の結果をそのまま残す。
+///
+/// - **判定は行頭だけを見るが、インデントされた宣言を見逃す穴にはならない。**
+///   インデントされるのはインライン `mod` の内側であり、その親が非公開なら
+///   下と同じ理屈で外から到達できず、親が公開なら**親の行が行頭で拾われる**。
+///   「行頭だけなのは手抜きでは」と考えて作り直すと、この性質が失われる。
+/// - `pub(self) mod pic;` は実際には非公開と同義だが FAIL させる。これも下の
+///   「保守的に禁じている形」に含まれる。
+///
+/// 実測（S0-a の 1c）の結果は次のとおり。
+///
+/// - `pub mod pic;` → 到達できる（`crate::irq::pic::MASK_ALL` がビルドを通る）
+/// - `pub(crate) mod pic;` → クレート内から到達できる
+/// - `irq/mod.rs` での `pub use pic::…` → 到達できる
+/// - `irq/mod.rs` での `pub type Alias = pic::Inner;` → 到達できる（別名を通して
+///   内部の型を掴める。`pub use` と同じ性質の実在の穴である）
+/// - **配下の非公開ファイルからの `pub(crate) use super::pic::*;` → 到達できない。**
+///   Rust の実効可視性は親モジュールの可視性で頭打ちになるので、
+///   `crate::irq::compat::MASK_ALL` は `E0603: module compat is private` になる。
+///   これは漏れる穴ではなく、**保守的に禁じているだけ**である。禁じたままに
+///   するのは、`mod compat;` を `pub mod compat;` にするだけで漏れる形へ
+///   変わるためで、その 1 文字の差を検査の外に置きたくない。
+fn find_boundary_visibility_leaks(workspace_root: &Path) -> Result<Vec<String>> {
+    // 列挙は SAFETY 検査と同じ理由で `--cached --others --exclude-standard`
+    // にする。**未追跡の新規ファイルこそ検査が要る**（配下に新しいファイルを
+    // 作って再公開する経路が、追跡される前に素通りするのを防ぐ）。
+    let output = Command::new("git")
+        .current_dir(workspace_root)
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "*.rs",
+        ])
+        .output()
+        .context("failed to list Rust sources")?;
+    if !output.status.success() {
+        bail!("git ls-files failed while collecting Rust sources");
+    }
+    let listing = String::from_utf8(output.stdout).context("git ls-files produced non-UTF-8")?;
+
+    let mut findings = Vec::new();
+    for relative in listing.lines().filter(|l| !l.is_empty()) {
+        if !relative.starts_with("kernel/src/irq/") {
+            continue;
+        }
+        let path = workspace_root.join(relative);
+        let source = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        for (index, line) in source.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if let Some(item) = visibility_qualified_mod_or_use(trimmed) {
+                findings.push(format!(
+                    "{relative}:{}: {item} is exported out of the interrupt-layer boundary: {}",
+                    index + 1,
+                    trimmed.trim_end()
+                ));
+            }
+        }
+    }
+    Ok(findings)
+}
+
+/// 行頭が「private 以外の可視性修飾 + `mod` / `use`」なら、その語を返す。
+///
+/// 判定は行の先頭だけを見る。`mod` と `use` はアイテム宣言なので、可視性修飾は
+/// 必ず行頭に来る（インラインモジュールの中でも、その行の先頭に来る）。
+fn visibility_qualified_mod_or_use(trimmed: &str) -> Option<&'static str> {
+    let rest = trimmed.strip_prefix("pub")?;
+    // `pub(crate)` / `pub(super)` / `pub(in …)` の括弧を読み飛ばす。
+    let rest = match rest.strip_prefix('(') {
+        Some(after) => after.split_once(')')?.1,
+        None => rest,
+    };
+    let rest = rest.trim_start();
+    if rest.starts_with("mod ") {
+        Some("mod")
+    } else if rest.starts_with("use ") {
+        Some("use")
+    } else if rest.starts_with("type ") {
+        // `pub type Alias = pic::Inner;` は `mod` でも `use` でもないが、
+        // **別名を通して内部の型を外から掴める**（実測で到達を確認した）。
+        // `pub use` と同じ性質の実在の穴なので拾う。
+        Some("type")
+    } else {
+        None
+    }
+}
+
 /// kernel の既定 feature に仕込みが混ざっていないことを確かめる。
 ///
 /// `default` から推移的に辿って、[`SABOTAGE_FEATURES`] のいずれかに
@@ -2989,6 +3112,22 @@ fn cmd_check(full: bool) -> Result<()> {
             unapproved.len()
         );
         failed.push("direct cli/sti".to_string());
+    }
+
+    total += 1;
+    println!("=== xtask check: the interrupt-layer boundary keeps its internals private");
+    let leaks = find_boundary_visibility_leaks(&workspace_root)?;
+    if leaks.is_empty() {
+        println!("--- irq boundary: OK (no visibility qualifier on mod/use under kernel/src/irq/)");
+    } else {
+        for finding in &leaks {
+            println!("    {finding}");
+        }
+        println!(
+            "--- irq boundary: FAILED ({} export(s); the boundary must be the only way in)",
+            leaks.len()
+        );
+        failed.push("irq boundary".to_string());
     }
 
     total += 1;
