@@ -1261,6 +1261,14 @@ extern "sysv64" fn kernel_main() -> ! {
     // セレクタで割り込みの設定ではないが、**S2 で最初の書き込みがここである。**
     if let Some(mapped_apic) = mapped_apic.as_ref() {
         kernel::apic::survey_registers(&mut logger, mapped_apic);
+
+        // === S2-b: スプリアスベクタを予約例外ベクタの外へ移す ===
+        //
+        // **ここが LAPIC への最初の書き込みである。** 書くのは SVR のベクタ欄
+        // だけで、bit 8（有効化）は読んだ値から保つ。bit 8 を落とすと LINT0 経由で
+        // 届いている 8259 の IRQ0 が止まる。**危険なのは bit 8 であって、
+        // ベクタ欄ではない。** 振る舞いは変わらない（スプリアスは現在発生しない）。
+        kernel::apic::set_spurious_vector(&mut logger, mapped_apic);
     }
 
     // === higher-half B-2b-4（恒等除去） ===

@@ -825,3 +825,126 @@ unsafe fn read_io_apic(base_virt: u64, index: u8) -> u32 {
         ((base_virt + IOAPIC_REGISTER_WINDOW) as *const u32).read_volatile()
     }
 }
+
+// ===========================================================================
+// S2-b: スプリアスベクタを、CPU の予約例外ベクタの外へ移す
+// ===========================================================================
+
+/// Local APIC のスプリアス割り込みに使うベクタ。
+///
+/// # なぜ `0xFF` なのか
+///
+/// **ファームウェアが残した値は `0x0f` で、CPU の予約例外ベクタの範囲
+/// （0 から 31）の中にある**（S2-a の実測）。今は Local APIC 由来の割り込みを
+/// 1 つも構成していないので潜在的だが、LAPIC が配送を担い始める S2-d-1 より前に
+/// 移しておかないと、スプリアスが起きたときに予約例外として解釈される。
+///
+/// **下位 4 ビットが `F` の値を採る。** 古い CPU では SVR の下位 4 ビットが 1 に
+/// 固定されており、書いた値がそのまま読み戻せなかった。現行の CPU では書ける
+/// が、慣例に合わせておけば読み戻しが書いた値と食い違わない。
+///
+/// `0xFF` は PIC の担当範囲（`0x20`-`0x2F`、`alt-offset-test` では `0x30`-`0x3F`）の
+/// 外で、syscall（`0x80`）とも重ならない。
+pub const SPURIOUS_VECTOR: u8 = 0xFF;
+
+/// SVR のうちベクタ欄だけを [`SPURIOUS_VECTOR`] へ書き換える（S2-b）。
+///
+/// # 振る舞いは変わらない
+///
+/// スプリアス割り込みは現在発生しない（Local APIC 由来の割り込みを 1 つも
+/// 構成していない）。したがってベクタ欄を動かしても配送は変わらない。
+///
+/// # 安全条件
+///
+/// **read-modify-write で bit 8 を保つ。** bit 8 を落とすと Local APIC が
+/// 無効になり、LINT0 経由で届いている 8259 の IRQ0 が即座に止まる
+/// （`verification-coverage.md` の「APICのレジスタの現在値（S2-a）」）。
+/// **危険なのは bit 8 であって、ベクタ欄ではない。**
+pub fn set_spurious_vector(logger: &mut Logger<SerialPort>, mapped: &MappedApic) {
+    let direct_map = common::addr::direct_map();
+    let lapic_virt = direct_map.phys_to_virt(mapped.local_apic).as_u64();
+
+    // SAFETY: `map_and_probe` が写像を確認したページの中を読む。
+    let before = unsafe { read_lapic(lapic_virt, LAPIC_REGISTER_SVR) };
+
+    // **ベクタ欄以外を 1 ビットも変えない。** bit 8（有効化）はもちろん、
+    // bit 9（focus processor checking）や bit 12（EOI broadcast suppression）も
+    // ファームウェアが立てているかもしれないので、読んだ値を土台にする。
+    let after_intended = (before & !ENTRY_VECTOR_MASK) | u32::from(SPURIOUS_VECTOR);
+
+    // SAFETY: 上と同じページの 16 バイト境界に載ったレジスタへ、読んだ値の
+    // ベクタ欄だけを差し替えて書き戻す。割り込みは禁止されている起動シーケンス
+    // 中で、他の実行文脈はこの LAPIC を触っていない。
+    unsafe {
+        ((lapic_virt + LAPIC_REGISTER_SVR) as *mut u32).write_volatile(after_intended);
+    }
+
+    // SAFETY: 上と同じ。書いた結果を読み戻す。
+    let after = unsafe { read_lapic(lapic_virt, LAPIC_REGISTER_SVR) };
+
+    let enabled_kept = after & LAPIC_SVR_SOFTWARE_ENABLE != 0;
+    let vector_now = (after & ENTRY_VECTOR_MASK) as u8;
+    logger.info(format_args!(
+        "apic: SVR spurious vector {:#04x} -> {vector_now:#04x} (raw {before:#010x} -> \
+         {after:#010x}); software_enabled kept = {enabled_kept}",
+        before & ENTRY_VECTOR_MASK
+    ));
+
+    // **bit 8 を落としていないことを読み戻しで確かめる。** ここが落ちていれば
+    // タイマが止まるので、黙って進まない。
+    if !enabled_kept {
+        logger.error(format_args!(
+            "apic: the SVR software-enable bit is no longer set after writing the spurious \
+             vector; the local APIC is disabled and 8259 delivery through LINT0 has stopped"
+        ));
+    }
+    if vector_now != SPURIOUS_VECTOR {
+        logger.error(format_args!(
+            "apic: the SVR vector field reads {vector_now:#04x} after writing \
+             {SPURIOUS_VECTOR:#04x}; the write did not take"
+        ));
+    }
+
+    // IDT のゲートを読み戻す。
+    //
+    // **ゲートを新しく足す必要は無かった。** IDT は 256 本すべてが present で
+    // （起動ログの `idt: 256 entries, all present=true`）、`0xFF` にも既に
+    // スタブが入っている。**したがってここで確かめるのは「足したこと」ではなく
+    // 「既にあること」である。**
+    match crate::idt::entry(SPURIOUS_VECTOR as usize) {
+        Some(entry) if entry.is_present() => logger.info(format_args!(
+            "apic: the IDT gate for the spurious vector {SPURIOUS_VECTOR:#04x} is present \
+             (gate type {:#x}, DPL {}); it was already there because the IDT fills all 256 \
+             entries",
+            entry.gate_type(),
+            entry.descriptor_privilege_level()
+        )),
+        _ => logger.error(format_args!(
+            "apic: the IDT has no present gate for the spurious vector {SPURIOUS_VECTOR:#04x}"
+        )),
+    }
+
+    // **このベクタは今のところ「起きたら止まる」経路にある。**
+    //
+    // `idt::init` は 256 本すべてを例外スタイルのスタブで埋めてから、IRQ
+    // スタイルのスタブで上書きするのは `0x20`-`0x3F` と yield / syscall だけである。
+    // **`0xFF` はどれにも当たらないので、例外スタイルのスタブのままである。**
+    // その先の `exception_entry` は `-> !` で、レジスタを出して `halt_forever` する
+    // （ADR-0004 の Halt and Dump）。
+    //
+    // したがって EOI は送られないが、**それは「スプリアスだから送らない」のでも
+    // 「PIC 由来でないから送らない」のでもなく、そもそも戻ってこないからである。**
+    // ベクタを `0x0f` から動かしたことで「予約例外として解釈される」問題は消えたが、
+    // **「起きたら止まる」は残っている。**
+    //
+    // **S2-d-1 で直すこと。** Local APIC が配送を担い始めると、スプリアスは実際に
+    // 起こりうる（ADR-0018 §6 は PIC について同じ理由で先に実装している）。
+    // 要るのは、`0xFF` を IRQ スタイルのスタブへ載せ、EOI を送らずに戻り、
+    // 回数を数える形である。
+    logger.warn(format_args!(
+        "apic: vector {SPURIOUS_VECTOR:#04x} is still on the exception-style stub, which dumps \
+         and halts; no EOI is sent only because that path never returns. spurious interrupts \
+         cannot happen yet (nothing is delivered by the local APIC), but S2-d-1 must move this \
+         vector onto an IRQ-style stub that returns without sending EOI"
+    ));
+}
