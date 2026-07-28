@@ -1252,7 +1252,16 @@ extern "sysv64" fn kernel_main() -> ! {
     // **APIC へは移行しない。割り込みは PIC のままである**（移行は S2）。
     // ここでやるのは写像と、Local APIC を読めることの確認だけで、APIC の
     // レジスタへは一切書き込まない。
-    kernel::apic::map_and_probe(&mut logger, &mut allocator, &apic_mmio);
+    let mapped_apic = kernel::apic::map_and_probe(&mut logger, &mut allocator, &apic_mmio);
+
+    // === S2-a: APIC のレジスタを読んで現在値を記録する ===
+    //
+    // **読むだけの段である。割り込みの経路は一切変えない**（PIC / PIT のまま）。
+    // I/O APIC の IOREGSEL への書き込みだけは伴う。読みたいレジスタを選ぶ
+    // セレクタで割り込みの設定ではないが、**S2 で最初の書き込みがここである。**
+    if let Some(mapped_apic) = mapped_apic.as_ref() {
+        kernel::apic::survey_registers(&mut logger, mapped_apic);
+    }
 
     // === higher-half B-2b-4（恒等除去） ===
     //

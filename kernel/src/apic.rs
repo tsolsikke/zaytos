@@ -36,7 +36,7 @@ use common::cpu;
 use common::log::Logger;
 use common::serial::SerialPort;
 
-use crate::acpi::ApicMmio;
+use crate::acpi::{ApicMmio, IoApicLocation};
 use crate::frame_allocator::{FrameAllocator, FRAME_SIZE};
 use crate::paging::active::{ActivePageTable, MapUpdateError};
 use crate::paging::entry;
@@ -68,6 +68,20 @@ struct MappedPage {
     already_mapped: bool,
 }
 
+/// 写像できた APIC の MMIO。**S2-a のレジスタ読みが使う。**
+///
+/// `acpi::ApicMmio` が「MADT が名乗った所在」であるのに対し、こちらは
+/// **実際に写像を確認できた所在**である。読む側が「MADT にあったが写像に
+/// 失敗したもの」を触らないよう、区別してある。
+pub struct MappedApic {
+    local_apic: PhysAddr,
+    io_apics: [Option<IoApicLocation>; MAX_MAPPED_IO_APICS],
+    io_apic_count: usize,
+}
+
+/// 写像を記録する I/O APIC の上限。`acpi` 側の上限と同じ理由で置く。
+const MAX_MAPPED_IO_APICS: usize = 4;
+
 /// APIC の MMIO を写像し、Local APIC を読めることを確かめる。
 ///
 /// # 呼ぶ位置
@@ -81,14 +95,14 @@ pub fn map_and_probe<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
     allocator: &mut FrameAllocator<CAP>,
     mmio: &ApicMmio,
-) {
+) -> Option<MappedApic> {
     // --- 1. IA32_APIC_BASE を読む。MMIO へ触る前に必ず通る関門である ---
     let Some(base) = cpu::apic_base() else {
         logger.error(format_args!(
             "apic: CPUID reports no local APIC, so IA32_APIC_BASE does not exist; \
              nothing is mapped and nothing is read"
         ));
-        return;
+        return None;
     };
     logger.info(format_args!(
         "apic: IA32_APIC_BASE raw={:#x} base={:#x} enabled={} x2apic={} bsp={}",
@@ -99,7 +113,7 @@ pub fn map_and_probe<const CAP: usize>(
         logger.error(format_args!(
             "apic: the MADT gave no local APIC address; nothing is mapped and nothing is read"
         ));
-        return;
+        return None;
     };
 
     // 破壊確認（突き合わせ）。既定ビルドでは受け取った値をそのまま返す。
@@ -116,7 +130,7 @@ pub fn map_and_probe<const CAP: usize>(
              an S2 concern",
             base.enabled, base.x2apic
         ));
-        return;
+        return None;
     }
 
     // --- 3. MSR と MADT を突き合わせる ---
@@ -133,7 +147,7 @@ pub fn map_and_probe<const CAP: usize>(
             base.base,
             lapic_phys.as_u64()
         ));
-        return;
+        return None;
     }
     logger.info(format_args!(
         "apic: IA32_APIC_BASE and the MADT agree on {:#x}",
@@ -145,15 +159,27 @@ pub fn map_and_probe<const CAP: usize>(
 
     let lapic_mapping = map_mmio_page(logger, allocator, "the local APIC", lapic_phys);
 
+    let mut mapped = MappedApic {
+        local_apic: lapic_phys,
+        io_apics: [None; MAX_MAPPED_IO_APICS],
+        io_apic_count: 0,
+    };
+
     for io_apic in mmio.io_apics() {
         // **写像はするが読まない**（S1-c の範囲）。IO-APIC のレジスタを読むには
         // IOREGSEL へ書いてから IOWIN を読む必要があり、それは書き込みである。
         // セレクタであって割り込みの設定ではないと主張はできるが、書き込みで
         // あることは事実なので、この段では避ける。
         //
-        // **したがって IO-APIC の MMIO が本当にデコードされるかは S2 まで
-        // 未確認である。** ここで確かめられるのは翻訳が張られたことだけである。
-        map_mmio_page(logger, allocator, "an I/O APIC", io_apic.phys);
+        // **したがって IO-APIC の MMIO が本当にデコードされるかは S2-a の
+        // レジスタ読みまで未確認である。** ここで確かめられるのは翻訳が
+        // 張られたことだけである。
+        if map_mmio_page(logger, allocator, "an I/O APIC", io_apic.phys).is_some() {
+            if let Some(slot) = mapped.io_apics.get_mut(mapped.io_apic_count) {
+                *slot = Some(io_apic);
+                mapped.io_apic_count += 1;
+            }
+        }
     }
 
     let frames_after = allocator.free_frame_count();
@@ -170,7 +196,7 @@ pub fn map_and_probe<const CAP: usize>(
         logger.error(format_args!(
             "apic: the local APIC MMIO page is not mapped, so its registers are NOT read"
         ));
-        return;
+        return None;
     };
     if mapping.already_mapped {
         logger.info(format_args!(
@@ -180,6 +206,8 @@ pub fn map_and_probe<const CAP: usize>(
     }
 
     probe_local_apic(logger, lapic_phys, mmio.bsp_candidate_apic_id());
+
+    Some(mapped)
 }
 
 /// MMIO の 1 ページを direct map 窓へ 4KiB・PCD で張る。
@@ -471,5 +499,329 @@ fn sabotage_map_target(logger: &mut Logger<SerialPort>, what: &str, phys: PhysAd
     #[cfg(not(feature = "apic-test-wrong-target"))]
     {
         phys
+    }
+}
+
+// ===========================================================================
+// S2-a: レジスタを読むだけの棚卸し
+//
+// **割り込みの経路は一切変えない。** ここでやるのは、S2-b 以降の設計に要る
+// 現在値を実測して記録することだけである。PIC / PIT はそのまま動き続ける。
+// ===========================================================================
+
+/// Local APIC の Spurious Interrupt Vector Register。
+///
+/// **bit 8 がソフトウェア有効化**で、bits 7:0 がスプリアス割り込みのベクタである。
+const LAPIC_REGISTER_SVR: u64 = 0xF0;
+
+/// SVR の bit 8（APIC Software Enable）。
+const LAPIC_SVR_SOFTWARE_ENABLE: u32 = 1 << 8;
+
+/// Task Priority Register。
+const LAPIC_REGISTER_TPR: u64 = 0x80;
+
+/// In-Service Register / Interrupt Request Register の先頭。
+///
+/// **どちらも 32 ビット × 8 本が 16 バイト間隔で並ぶ。** 連続していないので、
+/// 添字に 0x10 を掛けて進める。
+const LAPIC_REGISTER_ISR_BASE: u64 = 0x100;
+const LAPIC_REGISTER_IRR_BASE: u64 = 0x200;
+const LAPIC_STATUS_REGISTER_COUNT: u64 = 8;
+const LAPIC_STATUS_REGISTER_STRIDE: u64 = 0x10;
+
+/// LVT の並び。**存在する本数は Max LVT Entry + 1 で決まる**ので、
+/// 添字がその範囲に収まるものだけを読む。
+///
+/// 実測（Max LVT Entry = 5、すなわち 6 本）では Timer から Error までが存在し、
+/// CMCI（`0x2F0`）は存在しない。**存在しないレジスタを読まない**のは、
+/// 未定義の値を観測値として記録しないためである。
+const LAPIC_LVT_ENTRIES: [(&str, u64); 6] = [
+    ("Timer", 0x320),
+    ("Thermal", 0x330),
+    ("PMC", 0x340),
+    ("LINT0", 0x350),
+    ("LINT1", 0x360),
+    ("Error", 0x370),
+];
+
+/// LVT / redirection entry の共通ビット。
+const ENTRY_VECTOR_MASK: u32 = 0xFF;
+const ENTRY_DELIVERY_MODE_SHIFT: u32 = 8;
+const ENTRY_DELIVERY_MODE_MASK: u32 = 0b111;
+const ENTRY_DELIVERY_STATUS_BIT: u32 = 1 << 12;
+const ENTRY_ACTIVE_LOW_BIT: u32 = 1 << 13;
+const ENTRY_REMOTE_IRR_BIT: u32 = 1 << 14;
+const ENTRY_LEVEL_TRIGGERED_BIT: u32 = 1 << 15;
+const ENTRY_MASKED_BIT: u32 = 1 << 16;
+
+/// LVT Timer だけが持つタイマモード（bits 18:17）。
+///
+/// **他の LVT には無いビットである**ので、Timer のときだけ復号する。
+const LVT_TIMER_MODE_SHIFT: u32 = 17;
+const LVT_TIMER_MODE_MASK: u32 = 0b11;
+
+/// タイマモードの名前。
+///
+/// **生値だけを残さない。** 報告のために人が復号するなら、それはログが復号
+/// すべき値である。生値も併記して、復号の側が誤っていても原資料が残る形にする
+/// （`max_lvt_entry` / `max_redirection_entry` と同じ扱い）。
+const fn timer_mode_name(mode: u32) -> &'static str {
+    match mode {
+        0b00 => "one-shot",
+        0b01 => "periodic",
+        0b10 => "TSC-deadline",
+        _ => "reserved",
+    }
+}
+
+/// 配送モードの名前。**ExtINT かどうかが S2-d の刻みを左右する**ので、
+/// 数値だけでなく名前で出す。
+const fn delivery_mode_name(mode: u32) -> &'static str {
+    match mode {
+        0b000 => "Fixed",
+        0b001 => "LowestPriority",
+        0b010 => "SMI",
+        0b100 => "NMI",
+        0b101 => "INIT",
+        0b111 => "ExtINT",
+        _ => "reserved",
+    }
+}
+
+/// I/O APIC の IOREGSEL（書き込む添字）と IOWIN（読み書きする窓）。
+const IOAPIC_REGISTER_SELECT: u64 = 0x00;
+const IOAPIC_REGISTER_WINDOW: u64 = 0x10;
+
+/// I/O APIC の内部レジスタ番号。
+const IOAPIC_INDEX_ID: u8 = 0x00;
+const IOAPIC_INDEX_VERSION: u8 = 0x01;
+const IOAPIC_INDEX_REDIRECTION_BASE: u8 = 0x10;
+
+/// ID レジスタ内での I/O APIC ID の位置（bits 27:24）。
+const IOAPIC_ID_SHIFT: u32 = 24;
+const IOAPIC_ID_MASK: u32 = 0xF;
+
+/// Version レジスタ内での Max Redirection Entry の位置。
+///
+/// **Max LVT Entry と同じ罠がある。** SDM はこれを**エントリの個数から 1 を
+/// 引いた値**と定義している。名前を `max_redirection_entry` にしてあるのは、
+/// `..._count` と書くと個数を 1 つ少なく主張することになるためである。
+const IOAPIC_MAX_REDIRECTION_SHIFT: u32 = 16;
+
+/// APIC のレジスタを読んで現在値を記録する（S2-a）。
+///
+/// # 何もしない
+///
+/// **割り込みの構成は一切変えない。** Local APIC へは書き込まない。
+/// I/O APIC へは IOREGSEL（添字レジスタ）にだけ書く。これは読みたい
+/// レジスタを選ぶセレクタで、割り込みの設定ではないが、**書き込みである
+/// ことは事実である。S2 で最初の書き込みがここである。**
+pub fn survey_registers(logger: &mut Logger<SerialPort>, mapped: &MappedApic) {
+    let direct_map = common::addr::direct_map();
+    let lapic_virt = direct_map.phys_to_virt(mapped.local_apic);
+
+    // --- Local APIC ---
+    //
+    // SAFETY: `map_and_probe` が写像を確認したページの中だけを読む。APIC の
+    // レジスタは 16 バイト境界に載った 32 ビット幅で、`read_volatile` なので
+    // コンパイラが読みをまとめたり消したりしない。**書き込みは行わない。**
+    let (svr, tpr, version_raw) = unsafe {
+        (
+            read_lapic(lapic_virt.as_u64(), LAPIC_REGISTER_SVR),
+            read_lapic(lapic_virt.as_u64(), LAPIC_REGISTER_TPR),
+            read_lapic(lapic_virt.as_u64(), LAPIC_REGISTER_VERSION),
+        )
+    };
+    let max_lvt_entry = (version_raw >> LAPIC_MAX_LVT_SHIFT) & 0xFF;
+    let lvt_present = (max_lvt_entry as usize).saturating_add(1);
+
+    logger.info(format_args!(
+        "apic: LAPIC SVR={svr:#010x} software_enabled={} spurious_vector={:#04x} TPR={tpr:#010x}",
+        svr & LAPIC_SVR_SOFTWARE_ENABLE != 0,
+        svr & ENTRY_VECTOR_MASK
+    ));
+
+    // **LINT0 が ExtINT かどうかが S2-d の刻みを決める。** LAPIC を
+    // ソフトウェア有効化した後も 8259 経由の割り込みが届くのは、LINT0 が
+    // ExtINT に設定されている場合（virtual wire mode）だけである。
+    logger.info(format_args!(
+        "apic: LAPIC has {lvt_present} LVT entr(y/ies) (Max LVT Entry = {max_lvt_entry}); \
+         reading only those"
+    ));
+    for (index, (name, offset)) in LAPIC_LVT_ENTRIES.iter().enumerate() {
+        if index >= lvt_present {
+            logger.info(format_args!(
+                "apic:   LVT {name}: not present on this LAPIC; not read"
+            ));
+            continue;
+        }
+        // SAFETY: 上と同じ。存在する本数の範囲内だけを読む。
+        let value = unsafe { read_lapic(lapic_virt.as_u64(), *offset) };
+        let mode = (value >> ENTRY_DELIVERY_MODE_SHIFT) & ENTRY_DELIVERY_MODE_MASK;
+        logger.info(format_args!(
+            "apic:   LVT {name}: raw={value:#010x} vector={:#04x} delivery={} ({}) \
+             masked={} level_triggered={} active_low={} pending={}",
+            value & ENTRY_VECTOR_MASK,
+            mode,
+            delivery_mode_name(mode),
+            value & ENTRY_MASKED_BIT != 0,
+            value & ENTRY_LEVEL_TRIGGERED_BIT != 0,
+            value & ENTRY_ACTIVE_LOW_BIT != 0,
+            value & ENTRY_DELIVERY_STATUS_BIT != 0
+        ));
+        // タイマモードは Timer にしか無いので、そこでだけ復号する。
+        if *name == "Timer" {
+            let timer_mode = (value >> LVT_TIMER_MODE_SHIFT) & LVT_TIMER_MODE_MASK;
+            logger.info(format_args!(
+                "apic:     LVT Timer mode={timer_mode} ({}) [bits 18:17 of the raw value above]",
+                timer_mode_name(timer_mode)
+            ));
+        }
+    }
+
+    // ISR / IRR。**sti-check の項目 7（ハンドラが EOI を発行）を UNVERIFIABLE
+    // から格上げできるかの材料である。** ここで読めることは「読み戻せる」を
+    // 示すだけで、EOI が効いていることの証明ではない。それには**ハンドラの
+    // 中で**読む必要があり、S2-a はハンドラに触らない。
+    let mut isr_any = 0u32;
+    let mut irr_any = 0u32;
+    for index in 0..LAPIC_STATUS_REGISTER_COUNT {
+        let offset = index * LAPIC_STATUS_REGISTER_STRIDE;
+        // SAFETY: 上と同じ。ISR / IRR は 8 本が 16 バイト間隔で並ぶ。
+        let (isr, irr) = unsafe {
+            (
+                read_lapic(lapic_virt.as_u64(), LAPIC_REGISTER_ISR_BASE + offset),
+                read_lapic(lapic_virt.as_u64(), LAPIC_REGISTER_IRR_BASE + offset),
+            )
+        };
+        isr_any |= isr;
+        irr_any |= irr;
+    }
+    logger.info(format_args!(
+        "apic: LAPIC ISR/IRR are readable (OR of all 8 dwords: ISR={isr_any:#010x} \
+         IRR={irr_any:#010x}); read outside any handler, so this shows readability only, \
+         not that EOI works"
+    ));
+
+    // --- I/O APIC ---
+    for slot in mapped.io_apics.iter().take(mapped.io_apic_count) {
+        let Some(io_apic) = slot else { continue };
+        survey_io_apic(
+            logger,
+            direct_map.phys_to_virt(io_apic.phys).as_u64(),
+            io_apic,
+        );
+    }
+}
+
+/// I/O APIC 1 台のレジスタを読む。
+fn survey_io_apic(logger: &mut Logger<SerialPort>, base_virt: u64, io_apic: &IoApicLocation) {
+    // SAFETY: `map_and_probe` が写像を確認したページの中だけを触る。
+    // IOREGSEL への書き込みと IOWIN からの読み出しは、この 1 ページに閉じる。
+    let (id_raw, version_raw) = unsafe {
+        (
+            read_io_apic(base_virt, IOAPIC_INDEX_ID),
+            read_io_apic(base_virt, IOAPIC_INDEX_VERSION),
+        )
+    };
+
+    // **個数ではなく添字の最大値である**（`IOAPIC_MAX_REDIRECTION_SHIFT` の doc）。
+    let max_redirection_entry = (version_raw >> IOAPIC_MAX_REDIRECTION_SHIFT) & 0xFF;
+    let entry_count = max_redirection_entry.saturating_add(1);
+
+    logger.info(format_args!(
+        "apic: I/O APIC id={} at {:#x}: ID reg={id_raw:#010x} VER reg={version_raw:#010x} \
+         version={:#x} max_redirection_entry={max_redirection_entry} \
+         (SDM defines this as the entry count minus one, so there are {entry_count}) \
+         gsi_base={}",
+        io_apic.id,
+        io_apic.phys.as_u64(),
+        version_raw & 0xFF,
+        io_apic.global_system_interrupt_base
+    ));
+
+    // **判定を 1 行にまとめる。** S1-c では「IO-APIC の MMIO が実際にデコードされるか」
+    // を未確認のまま残していた（読むには IOREGSEL への書き込みが要り、S1-c は書き込みを
+    // 行わない段だったため）。ここがその積み残しを閉じる行である。
+    //
+    // **根拠を 2 つ独立に取る。**
+    //   version レジスタが未デコードの見え方（全 0 / 全 1）でないこと
+    //   ID レジスタの名乗る ID が、MADT が名乗った ID と一致すること
+    // 後者は出所が別（MMIO とファームウェアの表）なので、偶然の一致になりにくい。
+    // 片方だけでは弱い。全 0 のページでも ID は 0 に見えるので、MADT の ID が 0 の
+    // 環境では ID の一致だけでは未デコードと区別できない。
+    let version_plausible = version_raw != 0 && version_raw != u32::MAX;
+    let reported_id = ((id_raw >> IOAPIC_ID_SHIFT) & IOAPIC_ID_MASK) as u8;
+    let id_matches = reported_id == io_apic.id;
+
+    if version_plausible && id_matches {
+        logger.info(format_args!(
+            "apic: I/O APIC MMIO decodes: the version register is not an undecoded read and \
+             the ID register reports {reported_id}, matching the MADT; \
+             {entry_count} redirection entr(y/ies)"
+        ));
+    } else {
+        logger.error(format_args!(
+            "apic: the I/O APIC MMIO does not look decoded (version={version_raw:#010x} \
+             plausible={version_plausible}, ID register reports {reported_id} while the MADT \
+             says {}, matching={id_matches}); the redirection entries below are not trustworthy",
+            io_apic.id
+        ));
+    }
+
+    for entry in 0..entry_count {
+        let index = IOAPIC_INDEX_REDIRECTION_BASE.wrapping_add((entry as u8).wrapping_mul(2));
+        // SAFETY: 上と同じ。エントリは低位 32 ビットと高位 32 ビットの 2 本組で、
+        // 添字は version レジスタが名乗った本数の範囲に収めてある。
+        let (low, high) = unsafe {
+            (
+                read_io_apic(base_virt, index),
+                read_io_apic(base_virt, index.wrapping_add(1)),
+            )
+        };
+        let mode = (low >> ENTRY_DELIVERY_MODE_SHIFT) & ENTRY_DELIVERY_MODE_MASK;
+        logger.info(format_args!(
+            "apic:   redirection entry {entry:>2} (gsi {}): low={low:#010x} high={high:#010x} \
+             vector={:#04x} delivery={} masked={} level_triggered={} active_low={} \
+             remote_irr={} destination={:#04x}",
+            io_apic.global_system_interrupt_base + entry,
+            low & ENTRY_VECTOR_MASK,
+            delivery_mode_name(mode),
+            low & ENTRY_MASKED_BIT != 0,
+            low & ENTRY_LEVEL_TRIGGERED_BIT != 0,
+            low & ENTRY_ACTIVE_LOW_BIT != 0,
+            low & ENTRY_REMOTE_IRR_BIT != 0,
+            high >> 24
+        ));
+    }
+}
+
+/// Local APIC のレジスタを 1 本読む。
+///
+/// # Safety
+///
+/// `base_virt` が写像済みの Local APIC ページの先頭で、`offset` がその
+/// ページ内の 16 バイト境界に載ったレジスタであること。
+unsafe fn read_lapic(base_virt: u64, offset: u64) -> u32 {
+    // SAFETY: 呼び出し元契約。MMIO なので `read_volatile` で読む。
+    unsafe { ((base_virt + offset) as *const u32).read_volatile() }
+}
+
+/// I/O APIC の内部レジスタを 1 本読む。
+///
+/// **IOREGSEL への書き込みを伴う。** これが S2 で最初の書き込みである。
+/// 書くのは「次に窓から読む対象」を選ぶ添字だけで、割り込みの設定ではない。
+///
+/// # Safety
+///
+/// `base_virt` が写像済みの I/O APIC ページの先頭であること。
+/// **他の実行文脈が同時に同じ I/O APIC を触っていないこと**（IOREGSEL は
+/// 台ごとに 1 本しかない共有の状態なので、割り込まれると読む対象が変わる）。
+/// 現在は単一コアで、この経路は割り込み禁止の起動シーケンス中にだけ通る。
+unsafe fn read_io_apic(base_virt: u64, index: u8) -> u32 {
+    // SAFETY: 呼び出し元契約。添字を選んでから窓を読む、の順序が必須である。
+    unsafe {
+        ((base_virt + IOAPIC_REGISTER_SELECT) as *mut u32).write_volatile(index as u32);
+        ((base_virt + IOAPIC_REGISTER_WINDOW) as *const u32).read_volatile()
     }
 }

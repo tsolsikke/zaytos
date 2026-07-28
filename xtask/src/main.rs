@@ -964,7 +964,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -1041,6 +1041,14 @@ fn main() -> Result<()> {
                     format!("--apic-test requires a kind ({})", names.join(" | "))
                 })?;
                 return cmd_marker_test(APIC_TESTS, "apic-test", kind, None);
+            }
+            if rest.iter().any(|a| a == "--apic-decode-test") {
+                return cmd_marker_test(
+                    APIC_DECODE_TESTS,
+                    "apic-decode-test",
+                    APIC_DECODE_TESTS[0].name,
+                    None,
+                );
             }
             if let Some(index) = rest.iter().position(|a| a == "--highhalf-test") {
                 let kind = rest.get(index + 1).with_context(|| {
@@ -2996,6 +3004,27 @@ const ACPI_SMP_TESTS: &[CriticalTest] = &[CriticalTest {
     min_heartbeats: None,
 }];
 
+/// I/O APIC のレジスタが実際にデコードされることの確認（S2-a）。
+///
+/// **既定ビルドである**（`feature` が空）。壊すのではなく、読み経路が生きている
+/// ことを見る。S1-c の時点では翻訳が張られたことしか確かめられておらず、
+/// 「MMIO が本当にデコードされるか」は未確認のまま残っていた。S2-a で IOREGSEL
+/// への書き込みを解禁して読めるようになったので、ここで閉じる。
+///
+/// **生の値をマーカーにしない。** `0x00170020` のような実測値そのものを書くと、
+/// 構成が変わったときに「何を主張していた検査なのか」が読めないまま落ちる。
+/// 主張が読める文言（デコードしていること、エントリが 24 本あること）に一致を取る。
+///
+/// 禁止マーカーは、判定が否側へ落ちたときにだけ出る行である。
+const APIC_DECODE_TESTS: &[CriticalTest] = &[CriticalTest {
+    name: "ioapic-decodes",
+    feature: "",
+    expected_markers: &["apic: I/O APIC MMIO decodes", "24 redirection entr(y/ies)"],
+    forbidden_markers: &["does not look decoded"],
+    wait_for_full_timeout: false,
+    min_heartbeats: None,
+}];
+
 /// APIC MMIO の写像の破壊確認（S1-c）。
 ///
 /// **観測は panic ではない。** `acpi` と同じく S1 の経路は異常を見つけても
@@ -3504,6 +3533,13 @@ fn cmd_check(full: bool) -> Result<()> {
             let name = format!("apic-test {}", test.name);
             run_regression(&name, &mut failed, &mut retries, || {
                 cmd_marker_test(APIC_TESTS, "apic-test", test.name, None)
+            });
+        }
+        for test in APIC_DECODE_TESTS {
+            total += 1;
+            let name = format!("apic-decode-test {}", test.name);
+            run_regression(&name, &mut failed, &mut retries, || {
+                cmd_marker_test(APIC_DECODE_TESTS, "apic-decode-test", test.name, None)
             });
         }
         for test in INTERRUPT_TESTS {
