@@ -270,6 +270,159 @@ pub fn max_physical_address_bits() -> Option<u8> {
     Some((eax & 0xFF) as u8)
 }
 
+/// `IA32_APIC_BASE` の MSR 番号。
+///
+/// 出典: Intel SDM Vol.3A 「Local APIC Status and Location」および
+/// Vol.4 の MSR 一覧（`IA32_APIC_BASE`、アドレス `1BH`）。
+const IA32_APIC_BASE: u32 = 0x1B;
+
+/// `IA32_APIC_BASE` のビット位置（出典は [`IA32_APIC_BASE`] と同じ）。
+///
+/// **ビットの意味をここ 1 か所に集める。** 呼び出し側は
+/// [`ApicBase`] のフィールドを見るだけで済み、ビット位置を知る必要がない。
+const APIC_BASE_BSP: u64 = 1 << 8;
+const APIC_BASE_EXTD: u64 = 1 << 10;
+const APIC_BASE_ENABLE: u64 = 1 << 11;
+
+/// ベースアドレスが載る最下位ビット。これ未満はフラグ領域である。
+const APIC_BASE_ADDRESS_SHIFT: u32 = 12;
+
+/// MSR を 1 つ読む。
+///
+/// **公開しない。** 生の MSR 番号と生の 64 ビット値を境界の外へ出すと、
+/// ビット位置の知識が呼び出し側へ散る。外へ出すのは解釈済みの型
+/// （[`ApicBase`]）だけにする。
+///
+/// # Safety
+///
+/// `msr` がこの CPU に実在すること。**実在しない MSR を読むと `#GP` になる。**
+/// 呼び出し側は CPUID 等で存在を確かめてから呼ぶこと。
+unsafe fn read_msr(msr: u32) -> u64 {
+    let low: u32;
+    let high: u32;
+    // SAFETY: `rdmsr` は ECX が指す MSR を EDX:EAX へ読むだけで、メモリにも
+    // 制御フローにも副作用が無い。実在する MSR であることは呼び出し元契約。
+    // CPL 0 で実行していることは、カーネルからのみ呼ばれることによる。
+    unsafe {
+        core::arch::asm!(
+            "rdmsr",
+            in("ecx") msr,
+            out("eax") low,
+            out("edx") high,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    ((high as u64) << 32) | low as u64
+}
+
+/// CPU が Local APIC を持つか（`CPUID.01H:EDX[9]`）。
+///
+/// **`IA32_APIC_BASE` を読む前に確かめる。** Local APIC を持たない CPU では
+/// この MSR が実在せず、読むと `#GP` になる。
+fn has_local_apic() -> bool {
+    const LEAF_FEATURE_FLAGS: u32 = 1;
+    const EDX_APIC_BIT: u32 = 1 << 9;
+
+    // SAFETY: `cpuid` は特権を必要とせず、メモリにも制御フローにも副作用が
+    // 無い。RBX は LLVM が予約しているため退避・復元を明示する
+    // （`max_physical_address_bits` と同じ形）。リーフ 1 は x86_64 を名乗る
+    // CPU に必ず存在する。
+    let edx: u32 = unsafe {
+        let edx: u32;
+        core::arch::asm!(
+            "push rbx",
+            "cpuid",
+            "pop rbx",
+            inlateout("eax") LEAF_FEATURE_FLAGS => _,
+            lateout("ecx") _,
+            lateout("edx") edx,
+        );
+        edx
+    };
+    edx & EDX_APIC_BIT != 0
+}
+
+/// `IA32_APIC_BASE` を解釈した結果。
+///
+/// **生のビットではなく問いの形で公開する。** 呼び出し側がビット位置を
+/// 知る必要がないようにするためで、`irq`（S0-a）や `acpi`（S1-b）と同じ方針である。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApicBase {
+    /// APIC グローバル有効（bit 11）。**落ちていると MMIO も MSR も使えない。**
+    pub enabled: bool,
+    /// x2APIC モード（bit 10）。
+    ///
+    /// **立っていると MMIO によるアクセスは無効化される。** x2APIC では
+    /// Local APIC を MSR 経由で触るので、MMIO を読むと `#GP` になる。
+    /// 「`enabled` が立っているから MMIO で読める」は成立しない。
+    pub x2apic: bool,
+    /// この CPU が BSP（bit 8）。S3（AP 起こし）の入力になる。
+    pub bootstrap_processor: bool,
+    /// ベースアドレス（bit 12 以上、MAXPHYADDR まで）をマスクして取り出した値。
+    pub base: u64,
+    /// 生の値。ログへ出して、上の解釈と突き合わせられるようにする。
+    pub raw: u64,
+}
+
+impl ApicBase {
+    /// Local APIC を MMIO 経由で読んでよいか。
+    ///
+    /// **`enabled` だけでは足りない。** x2APIC が有効だと MMIO は無効化されて
+    /// いるので、両方を見る。
+    pub const fn mmio_accessible(&self) -> bool {
+        self.enabled && !self.x2apic
+    }
+}
+
+/// `IA32_APIC_BASE` の生の値を解釈する。**純粋関数。**
+///
+/// `rdmsr` は CPL 0 でしか実行できないため、[`apic_base`] そのものはホスト上の
+/// `cargo test` で走らせられない。**解釈だけを切り出して、ここをホストで検証する**
+/// （ハードウェア依存部と純粋ロジックの分離）。
+///
+/// # ベースアドレスのマスク
+///
+/// ベースは bit 12 から MAXPHYADDR-1 までに載る。**桁を取り違えると、
+/// 突き合わせが常に食い違って見える。** `address_bits` は
+/// [`max_physical_address_bits`] の値で、取れなかった場合の 52 は `PhysAddr` の
+/// 上限と同じである（それ以上のビットはどのみち物理アドレスとして表せない）。
+const fn interpret_apic_base(raw: u64, address_bits: u8) -> ApicBase {
+    // `clamp` は const fn ではないので手で畳む。下限が 12 なのは、それ未満だと
+    // アドレス部が空になりマスクが 0 になるためである。
+    let bits = if address_bits < 12 {
+        12
+    } else if address_bits > 52 {
+        52
+    } else {
+        address_bits
+    };
+    let address_mask = ((1u64 << bits) - 1) & !((1u64 << APIC_BASE_ADDRESS_SHIFT) - 1);
+
+    ApicBase {
+        enabled: raw & APIC_BASE_ENABLE != 0,
+        x2apic: raw & APIC_BASE_EXTD != 0,
+        bootstrap_processor: raw & APIC_BASE_BSP != 0,
+        base: raw & address_mask,
+        raw,
+    }
+}
+
+/// `IA32_APIC_BASE` を読んで解釈する。Local APIC を持たない CPU では `None`。
+pub fn apic_base() -> Option<ApicBase> {
+    if !has_local_apic() {
+        return None;
+    }
+
+    // SAFETY: 直前に `CPUID.01H:EDX[9]` を確認したので、この CPU に
+    // `IA32_APIC_BASE` は実在する。
+    let raw = unsafe { read_msr(IA32_APIC_BASE) };
+
+    Some(interpret_apic_base(
+        raw,
+        max_physical_address_bits().unwrap_or(52),
+    ))
+}
+
 /// タイムスタンプカウンタ（TSC）を読む。
 ///
 /// **計測専用。時刻源として使わないこと。** TSC は CPU の起動からの
@@ -295,6 +448,68 @@ pub fn read_timestamp_counter() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// QEMU + OVMF の実測にあたる形。EN が立ち、x2APIC は落ち、BSP である。
+    #[test]
+    fn a_typical_bsp_value_decodes_to_an_mmio_accessible_local_apic() {
+        let raw = 0xFEE0_0000 | APIC_BASE_ENABLE | APIC_BASE_BSP;
+        let decoded = interpret_apic_base(raw, 40);
+        assert!(decoded.enabled);
+        assert!(!decoded.x2apic);
+        assert!(decoded.bootstrap_processor);
+        assert_eq!(decoded.base, 0xFEE0_0000);
+        assert!(decoded.mmio_accessible());
+    }
+
+    /// **x2APIC が有効なら MMIO では読めない。** EN が立っていても、である。
+    /// ここを `enabled` だけで判断すると `#GP` を踏む。
+    #[test]
+    fn x2apic_mode_is_not_mmio_accessible_even_though_it_is_enabled() {
+        let raw = 0xFEE0_0000 | APIC_BASE_ENABLE | APIC_BASE_EXTD;
+        let decoded = interpret_apic_base(raw, 40);
+        assert!(decoded.enabled);
+        assert!(decoded.x2apic);
+        assert!(!decoded.mmio_accessible());
+    }
+
+    #[test]
+    fn a_disabled_local_apic_is_not_mmio_accessible() {
+        let decoded = interpret_apic_base(0xFEE0_0000, 40);
+        assert!(!decoded.enabled);
+        assert!(!decoded.mmio_accessible());
+    }
+
+    /// **フラグのビットがベースアドレスに混ざらない。** ここを取り違えると、
+    /// MADT との突き合わせが常に食い違う。
+    #[test]
+    fn the_flag_bits_are_not_part_of_the_base_address() {
+        let raw = 0xFEE0_0000 | APIC_BASE_ENABLE | APIC_BASE_EXTD | APIC_BASE_BSP;
+        assert_eq!(interpret_apic_base(raw, 52).base, 0xFEE0_0000);
+    }
+
+    /// MAXPHYADDR より上のビットはベースに含めない。
+    #[test]
+    fn bits_above_maxphyaddr_are_masked_out_of_the_base() {
+        // bit 40 が立った値を、MAXPHYADDR = 36 の CPU として解釈する。
+        let raw = (1u64 << 40) | 0xFEE0_0000 | APIC_BASE_ENABLE;
+        assert_eq!(interpret_apic_base(raw, 36).base, 0xFEE0_0000);
+        // 同じ値でも MAXPHYADDR が 52 なら bit 40 はベースの一部である。
+        assert_eq!(
+            interpret_apic_base(raw, 52).base,
+            (1u64 << 40) | 0xFEE0_0000
+        );
+    }
+
+    /// 極端な `address_bits` でもマスクが壊れない（`1 << bits` の桁あふれや、
+    /// アドレス部が空になる形を作らない）。
+    #[test]
+    fn the_address_mask_is_clamped_for_implausible_maxphyaddr_values() {
+        assert_eq!(interpret_apic_base(u64::MAX, 0).base, 0);
+        assert_eq!(
+            interpret_apic_base(u64::MAX, 255).base,
+            ((1u64 << 52) - 1) & !0xFFF
+        );
+    }
 
     /// クリティカルセクションを抜けるときの復元判断。保存時に IF=1 なら復元、
     /// IF=0 なら復元しない。この 2 ケースが入れ子の正しさの核心である。

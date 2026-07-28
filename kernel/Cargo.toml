@@ -193,6 +193,20 @@ acpi-test-zero-entry-length = ["acpi-test"]
 acpi-test-unmapped-rsdp = ["acpi-test"]
 # RSDP の物理アドレスを direct map 窓の外（窓長そのもの）へ差し替える。
 acpi-test-rsdp-outside-window = ["acpi-test"]
+# S1-c: APIC MMIO の写像の破壊確認。いずれも既定ビルドには入らない。
+# `cargo xtask run --apic-test <kind>` が有効化する。観測は panic ではなく、
+# 「検出のログが出て、LAPIC の読みが行われないこと」である。
+# 検出経路ごとに分けてある（写像の有無 / 写像先の正しさ / MSR との突き合わせ）。
+apic-test = []
+# 写像そのものを省く。「張った後」の translate が捕まえる。読みが写像に
+# 依存していることの実証。
+apic-test-skip-map = ["apic-test"]
+# 写像先の物理だけを稼働中の PML4 へ差し替える。翻訳は張られるので、
+# 「翻訳がある」だけを見る検査では通ってしまう形である。
+apic-test-wrong-target = ["apic-test"]
+# MADT が名乗る Local APIC のアドレスを 1 ページずらし、IA32_APIC_BASE と
+# 食い違わせる。突き合わせが働き、写像も読みも行われないことを見る。
+apic-test-base-mismatch = ["apic-test"]
 # B-2a-5: higher-half の破壊確認。いずれも既定ビルドには入らない。`--highhalf-test <kind>`。
 # (a) 静的 PML4[0] の存在ビットを落とす。恒等が not-present になり、mov cr3 直後の低位命令
 # フェッチが解決できずトリプルフォルトする。`--highhalf-test no-identity-in-boot-pt`。

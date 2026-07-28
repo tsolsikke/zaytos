@@ -964,7 +964,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -1034,6 +1034,13 @@ fn main() -> Result<()> {
                     format!("--acpi-test requires a kind ({})", names.join(" | "))
                 })?;
                 return cmd_marker_test(ACPI_TESTS, "acpi-test", kind, None);
+            }
+            if let Some(index) = rest.iter().position(|a| a == "--apic-test") {
+                let kind = rest.get(index + 1).with_context(|| {
+                    let names: Vec<&str> = APIC_TESTS.iter().map(|t| t.name).collect();
+                    format!("--apic-test requires a kind ({})", names.join(" | "))
+                })?;
+                return cmd_marker_test(APIC_TESTS, "apic-test", kind, None);
             }
             if let Some(index) = rest.iter().position(|a| a == "--highhalf-test") {
                 let kind = rest.get(index + 1).with_context(|| {
@@ -2989,6 +2996,66 @@ const ACPI_SMP_TESTS: &[CriticalTest] = &[CriticalTest {
     min_heartbeats: None,
 }];
 
+/// APIC MMIO の写像の破壊確認（S1-c）。
+///
+/// **観測は panic ではない。** `acpi` と同じく S1 の経路は異常を見つけても
+/// 停止しないので、「検出のログが出ること」と「Local APIC の読みが行われない
+/// こと」の 2 つで判定する。ハートビートを期待マーカーに入れて、**検出した後も
+/// カーネルが動き続けること**まで見る。
+///
+/// 禁止マーカーの `apic: LAPIC probe:` は、**写像が確認できたときにだけ出る行**
+/// である。検出をすり抜けた場合にこれが出る。
+///
+/// **3 種は検出経路が別である。** 写像の有無 / 写像先の正しさ / MSR との
+/// 突き合わせで、1 つの破壊で複数の経路が同時に落ちない形にしてある。
+const APIC_TESTS: &[CriticalTest] = &[
+    CriticalTest {
+        name: "skip-map",
+        feature: "apic-test-skip-map",
+        expected_markers: &[
+            "[apic-test-skip-map] skipping the mapping",
+            "still has no translation",
+            "registers are NOT read",
+            "heartbeat: ticks=",
+        ],
+        forbidden_markers: &["apic: LAPIC probe:"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    CriticalTest {
+        name: "wrong-target",
+        feature: "apic-test-wrong-target",
+        // **「翻訳がある」だけでは通らないことを、この文言で示す。** 翻訳は
+        // 張られているので、`still has no translation` は出ない。
+        expected_markers: &[
+            "[apic-test-wrong-target] pointing the mapping",
+            "not the expected physical address",
+            "registers are NOT read",
+            "heartbeat: ticks=",
+        ],
+        forbidden_markers: &["apic: LAPIC probe:", "still has no translation"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    CriticalTest {
+        name: "base-mismatch",
+        feature: "apic-test-base-mismatch",
+        // 突き合わせで止まるので、**写像そのものへ到達しない。**
+        expected_markers: &[
+            "[apic-test-base-mismatch] moving the MADT local APIC address",
+            "the two disagree, so nothing is mapped and nothing is read",
+            "heartbeat: ticks=",
+        ],
+        forbidden_markers: &[
+            "apic: LAPIC probe:",
+            "apic: mapped the local APIC",
+            "the sabotage did nothing",
+        ],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+];
+
 /// 意図的に壊した経路を有効にする feature の接頭辞・名前。
 ///
 /// **既定ビルドにこれらが入ってはならない。** 入ったまま出荷すると、
@@ -3012,6 +3079,7 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "highhalf-remove-before-highify",
     "highhalf-panic-after-remove",
     "acpi-test",
+    "apic-test",
 ];
 
 /// 内部を隠す約束のディレクトリ。
@@ -3020,9 +3088,11 @@ const SABOTAGE_FEATURES: &[&str] = &[
 ///   `pic` / `pit` を参照できないことをコンパイラが保証する。
 /// - `kernel/src/task/`: スケジューラの実体（`static mut SCHEDULER`）。外から
 ///   構造体全体への参照を作れないことをコンパイラが保証する（S0-b）。
-/// - `kernel/src/acpi/`: ファームウェアが提示する構成表の境界（S1-b）。外へ
-///   出るのは問いの形だけで、テーブルの生バイト・パーサの型・物理アドレスは
-///   境界の中に留まる。宣言（`mod rsdp;`）は `acpi/mod.rs` にあるので、
+/// - `kernel/src/acpi/`: ファームウェアが提示する構成表の境界（S1-b）。
+///   テーブルの生バイトとパーサの型は境界の中に留まる。**物理アドレスは
+///   S1-c で出るようになった**（`ApicMmio`。APIC の MMIO を写像するには
+///   所在そのものが要る）ので、「物理アドレスも留まる」はもう成り立たない。
+///   宣言（`mod rsdp;`）は `acpi/mod.rs` にあるので、
 ///   `irq` と同じくディレクトリ指定で中に入る。
 /// - `kernel/src/task.rs`: 上の `mod scheduler;` 宣言がここにある。**ディレクトリ
 ///   だけを見る形では、この 1 行が対象から外れる**（`irq` は宣言が
@@ -3427,6 +3497,13 @@ fn cmd_check(full: bool) -> Result<()> {
             let name = format!("acpi-smp-test {}", test.name);
             run_regression(&name, &mut failed, &mut retries, || {
                 cmd_marker_test(ACPI_SMP_TESTS, "acpi-smp-test", test.name, Some(2))
+            });
+        }
+        for test in APIC_TESTS {
+            total += 1;
+            let name = format!("apic-test {}", test.name);
+            run_regression(&name, &mut failed, &mut retries, || {
+                cmd_marker_test(APIC_TESTS, "apic-test", test.name, None)
             });
         }
         for test in INTERRUPT_TESTS {

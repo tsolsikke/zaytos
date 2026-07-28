@@ -19,6 +19,7 @@ pub mod link_symbols {
 }
 
 pub mod acpi;
+pub mod apic;
 pub mod console;
 pub mod frame_allocator;
 pub mod gdt;

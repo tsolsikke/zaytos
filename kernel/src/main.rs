@@ -1240,7 +1240,19 @@ extern "sysv64" fn kernel_main() -> ! {
     // （verify_user_page_mapping 以降と remove_identity）はいずれもシリアルのみで、
     // `log_both` は人が読む要約（ヒープの確保・スモークテスト・コンソールの統計）に
     // 使われている。ACPI の走査は検証の材料なので前者に揃える。
-    kernel::acpi::survey(&mut logger, acpi_rsdp, raw_map, memory_map_descriptor_size);
+    let apic_mmio =
+        kernel::acpi::survey(&mut logger, acpi_rsdp, raw_map, memory_map_descriptor_size);
+
+    // === S1-c: APIC MMIO を direct map 窓へ 4KiB 粒度で写像する ===
+    //
+    // **survey の直後に置く。** 写像に使う所在は survey が返した値そのもので、
+    // 値の産地と利用点を離さないためである。survey と違って恒等除去より前で
+    // ある必要は無い（UEFI メモリマップのスライスを使わない）が、離す理由も無い。
+    //
+    // **APIC へは移行しない。割り込みは PIC のままである**（移行は S2）。
+    // ここでやるのは写像と、Local APIC を読めることの確認だけで、APIC の
+    // レジスタへは一切書き込まない。
+    kernel::apic::map_and_probe(&mut logger, &mut allocator, &apic_mmio);
 
     // === higher-half B-2b-4（恒等除去） ===
     //

@@ -9,11 +9,27 @@
 //!
 //! # 何を公開するか
 //!
-//! **問いの形だけを公開する。** 生の物理アドレスやテーブルの生バイトを外へ
-//! 出さない（S0-a の「境界は生の値を出さない」の適用）。S1-b の時点で外から
-//! 要る問いは「ACPI に何があったか」だけで、それはログに出る。値を返す API は
-//! 消費者（S2 の `irq`、S3 の `smp`）が現れた時点で、その消費者が必要とする
-//! 形で足す。先回りして作らない。
+//! **テーブルの生バイトとパーサの型は外へ出さない**（S0-a の「境界は生の値を
+//! 出さない」の適用）。出すのは、消費者が現れた時点で、その消費者が必要とする
+//! 形だけである。先回りして作らない。
+//!
+//! S1-b の時点で外から要る問いは「ACPI に何があったか」だけで、それはログに
+//! 出ていたので、この関数は何も返していなかった。**S1-c で最初の消費者が
+//! 現れた。** APIC の MMIO を写像するには物理アドレスそのものが要るので、
+//! [`ApicMmio`] として出す。**したがって「物理アドレスは境界の中に留まる」は
+//! もう成り立たない。** 留まるのは生バイトとパーサの型である。
+//!
+//! **物理アドレスなら出してよい理由。** 物理アドレスは `acpi` と `paging` が
+//! 共有する語彙であり、**写像する側がそれを受け取らなければ仕事ができない。**
+//! 境界が隠すべきなのは、その境界の内側だけで意味を持つ表現（テーブルの生バイト、
+//! パーサの型、エントリの並び）である。S0-a で `managed_vectors` がベクタ番号を
+//! 露出してよかったのと同じ理由で、ベクタ番号は `irq` と `idt` が共有する語彙
+//! だった。**「生の値を出さない」を、共有語彙まで隠す意味に取らないこと。**
+//! 取ると、受け渡すためだけの抽象を挟むことになる。
+//!
+//! 出すのは写像に要る所在だけで、エントリの解釈（Interrupt Source Override の
+//! 対応付けなど）は出さない。それが要るのは S2 で、そのとき S2 が必要とする形で
+//! 足す。
 //!
 //! # 異常はすべて報告して継続する
 //!
@@ -59,6 +75,83 @@ use crate::paging::active::{ActivePageTable, TranslateError};
 /// **100 コア規模でこのバッファを超え、「検証不能」に落ちる。** ZaytOS が
 /// その規模を扱う日は遠いが、限界を知らずに踏むのとは違う。
 const TABLE_READ_BUFFER_LENGTH: usize = 1024;
+
+/// 記録する I/O APIC の上限。
+///
+/// **超えた分は黙って捨てない。** 実測（QEMU + OVMF）では 1 個だが、実機では
+/// 複数ありうる。捨てた数を [`ApicMmio::io_apics_dropped`] で数え、呼び出し側が
+/// 報告できるようにしてある。上限を設けること自体は避けられない（ヒープを
+/// 使わない）が、上限に当たったことを隠すのは避けられる。
+const MAX_IO_APICS: usize = 4;
+
+/// I/O APIC 1 個の所在。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IoApicLocation {
+    /// MADT が名乗る ID。
+    pub id: u8,
+    /// MMIO の物理アドレス。**既定値をハードコードせず MADT から取った値である。**
+    pub phys: PhysAddr,
+    /// この I/O APIC が担当する割り込みの先頭 GSI。S2 の入力になる。
+    pub global_system_interrupt_base: u32,
+}
+
+/// S1-c が写像するために必要な APIC の MMIO の所在。
+///
+/// **`survey` が MADT から読み取った値だけを持つ。** 既定値のハードコードは
+/// 一切含まない。MADT が読めなかった場合や壊れていた場合は、すべて空になる
+/// （[`ApicMmio::empty`]）。**「読めなかった」と「無かった」を、呼び出し側が
+/// 区別する必要はない。** どちらの場合も写像すべきものが無いという結論は同じで、
+/// 理由はすでに `survey` がログへ出している。
+#[derive(Debug, Clone, Copy)]
+pub struct ApicMmio {
+    local_apic: Option<PhysAddr>,
+    io_apics: [Option<IoApicLocation>; MAX_IO_APICS],
+    io_apics_found: usize,
+    bsp_candidate_apic_id: Option<u8>,
+}
+
+impl ApicMmio {
+    const fn empty() -> Self {
+        Self {
+            local_apic: None,
+            io_apics: [None; MAX_IO_APICS],
+            io_apics_found: 0,
+            bsp_candidate_apic_id: None,
+        }
+    }
+
+    /// Local APIC の MMIO 物理アドレス。
+    ///
+    /// 固定部の 32 ビット値か、Local APIC Address Override（type 5）があれば
+    /// そちらである。
+    pub const fn local_apic(&self) -> Option<PhysAddr> {
+        self.local_apic
+    }
+
+    /// 記録できた I/O APIC。
+    pub fn io_apics(&self) -> impl Iterator<Item = IoApicLocation> + '_ {
+        self.io_apics.iter().filter_map(|slot| *slot)
+    }
+
+    /// MADT にあった I/O APIC の総数（上限で捨てた分を含む）。
+    pub const fn io_apics_found(&self) -> usize {
+        self.io_apics_found
+    }
+
+    /// 上限を超えて記録できなかった I/O APIC の数。
+    pub const fn io_apics_dropped(&self) -> usize {
+        self.io_apics_found.saturating_sub(MAX_IO_APICS)
+    }
+
+    /// 最初の使用可能な Local APIC の ID。
+    ///
+    /// **BSP の ID とは限らない。** MADT のエントリ順が BSP を先頭にする保証は
+    /// 仕様に無い。読み取った Local APIC ID との突き合わせに使うが、
+    /// **この突き合わせは弱い**（[`crate::apic`] の該当箇所に理由がある）。
+    pub const fn bsp_candidate_apic_id(&self) -> Option<u8> {
+        self.bsp_candidate_apic_id
+    }
+}
 
 /// 署名や OEM ID を、そのままログへ出せる形にする。
 ///
@@ -273,17 +366,23 @@ fn report_memory_type(
 ///
 /// `rsdp_phys` が 0 のときは bootloader が RSDP を見つけられなかった場合で、
 /// 何も走査せずにその旨を報告する。
+///
+/// # 戻り値
+///
+/// 見つかった APIC の MMIO の所在（S1-c が写像に使う）。走査のどこかで
+/// 断念した場合は空を返す。**理由はこの関数がログへ出しているので、
+/// 呼び出し側が「なぜ空か」を再構成する必要はない。**
 pub fn survey(
     logger: &mut Logger<SerialPort>,
     rsdp_phys: PhysAddr,
     memory_map_bytes: &[u8],
     descriptor_size: u64,
-) {
+) -> ApicMmio {
     if rsdp_phys.as_u64() == 0 {
         logger.error(format_args!(
             "acpi: the bootloader reported no RSDP; nothing to survey (S2 will need it)"
         ));
-        return;
+        return ApicMmio::empty();
     }
 
     // 破壊確認（未マップ / 窓の外）。既定ビルドでは受け取った値をそのまま返す。
@@ -308,7 +407,7 @@ pub fn survey(
     let mut buffer = [0u8; rsdp::READ_BUFFER_LENGTH];
     if let Err(e) = reader.read(rsdp_phys, &mut buffer[..rsdp::V1_LENGTH]) {
         report_read_error(logger, "the RSDP", e);
-        return;
+        return ApicMmio::empty();
     }
 
     let header = match rsdp::parse_header(&buffer[..rsdp::V1_LENGTH]) {
@@ -318,7 +417,7 @@ pub fn survey(
                 "acpi: the RSDP at {:#x} failed validation: {e:?}",
                 rsdp_phys.as_u64()
             ));
-            return;
+            return ApicMmio::empty();
         }
     };
     logger.info(format_args!(
@@ -358,7 +457,7 @@ pub fn survey(
             logger.error(format_args!(
                 "acpi: the RSDP names neither an XSDT nor an RSDT; there is no table to follow"
             ));
-            return;
+            return ApicMmio::empty();
         }
     };
 
@@ -370,7 +469,7 @@ pub fn survey(
         memory_map_bytes,
         descriptor_size,
     ) else {
-        return;
+        return ApicMmio::empty();
     };
 
     walk_madt(
@@ -379,7 +478,7 @@ pub fn survey(
         madt_phys,
         memory_map_bytes,
         descriptor_size,
-    );
+    )
 }
 
 /// 物理アドレスを [`PhysAddr`] にする。表せない値は報告して `None`。
@@ -615,7 +714,9 @@ fn walk_madt(
     madt_phys: PhysAddr,
     memory_map_bytes: &[u8],
     descriptor_size: u64,
-) {
+) -> ApicMmio {
+    let mut mmio = ApicMmio::empty();
+
     report_memory_type(
         logger,
         "the MADT",
@@ -637,7 +738,7 @@ fn walk_madt(
         },
         &mut buffer,
     ) else {
-        return;
+        return mmio;
     };
 
     let fixed = match madt::parse_header(&buffer[..length]) {
@@ -646,7 +747,7 @@ fn walk_madt(
             logger.error(format_args!(
                 "acpi: the fixed part of the MADT is not usable: {e:?}"
             ));
-            return;
+            return mmio;
         }
     };
     // PCAT_COMPAT は S1 では解釈しない。S2 が「PIC をマスクする必要があるか」を
@@ -657,6 +758,9 @@ fn walk_madt(
         fixed.flags,
         fixed.pcat_compat()
     ));
+    // 固定部の値をまず採る。type 5（Address Override）があれば、下の走査で
+    // 上書きされる。**32 ビット幅なので `PhysAddr` に必ず収まる。**
+    mmio.local_apic = PhysAddr::new(fixed.local_apic_address as u64);
 
     let mut entry_count = 0usize;
     let mut local_apic_count = 0usize;
@@ -683,6 +787,9 @@ fn walk_madt(
                     local_apic_count += 1;
                     if local.usable() {
                         usable_local_apic_count += 1;
+                        if mmio.bsp_candidate_apic_id.is_none() {
+                            mmio.bsp_candidate_apic_id = Some(local.apic_id);
+                        }
                     }
                     logger.info(format_args!(
                         "acpi:   entry type={} ({}) len={} apic_id={} processor_uid={} \
@@ -718,6 +825,15 @@ fn walk_madt(
             madt::TYPE_IO_APIC => {
                 if let Some(io) = madt::parse_io_apic(&entry) {
                     io_apic_count += 1;
+                    // **上限を超えた分は捨てるが、数えてある**（`io_apics_dropped`）。
+                    // アドレスは 32 ビット幅なので `PhysAddr` に必ず収まる。
+                    if let Some(slot) = mmio.io_apics.get_mut(io_apic_count - 1) {
+                        *slot = PhysAddr::new(io.address as u64).map(|phys| IoApicLocation {
+                            id: io.id,
+                            phys,
+                            global_system_interrupt_base: io.global_system_interrupt_base,
+                        });
+                    }
                     logger.info(format_args!(
                         "acpi:   entry type={} ({}) len={} id={} address={:#x} gsi_base={}",
                         entry.entry_type,
@@ -732,6 +848,12 @@ fn walk_madt(
             madt::TYPE_LOCAL_APIC_ADDRESS_OVERRIDE => {
                 // **あれば固定部の 32 ビット値より優先される。** S2 が使う。
                 if let Some(address) = madt::parse_local_apic_address_override(&entry) {
+                    // **固定部の値を置き換える。** 64 ビット幅なので、表せない
+                    // 値が来たら `checked_phys` が報告して `None` にする。その
+                    // 場合は写像すべき所在が無いという結論になり、固定部の値へ
+                    // 戻さない（壊れた表の一部だけを信じる形を作らない）。
+                    mmio.local_apic =
+                        checked_phys(logger, "the MADT Local APIC Address Override", address);
                     logger.info(format_args!(
                         "acpi:   entry type={} ({}) len={} address={address:#x} \
                          (overrides the fixed part's local_apic_address)",
@@ -755,17 +877,33 @@ fn walk_madt(
 
     if stopped_early {
         // **完了行を出さない。** 破壊確認はこの行が出ないことを見る。
+        //
+        // **所在も返さない。** 走査が途中で止まったということは、後続の
+        // エントリを読めていないということである。Local APIC Address Override
+        // （type 5）が未読の位置にあれば、固定部の値は誤りになる。**部分的に
+        // 読めた表から一部だけを信じない。**
         logger.error(format_args!(
             "acpi: the MADT was not fully enumerated; the APIC inventory is incomplete"
         ));
-        return;
+        return ApicMmio::empty();
     }
+
+    mmio.io_apics_found = io_apic_count;
 
     logger.info(format_args!(
         "acpi: MADT enumeration complete: {entry_count} entr(y/ies), \
          {local_apic_count} local APIC(s) of which {usable_local_apic_count} usable, \
          {io_apic_count} I/O APIC(s)"
     ));
+    if mmio.io_apics_dropped() > 0 {
+        logger.warn(format_args!(
+            "acpi: only {MAX_IO_APICS} I/O APIC(s) were recorded; {} more were found and \
+             dropped, so the mapping below does not cover them",
+            mmio.io_apics_dropped()
+        ));
+    }
+
+    mmio
 }
 
 /// 拡張部（ACPI 2.0 以降）を読んで検証する。失敗しても `None` を返すだけで、
