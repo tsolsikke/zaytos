@@ -604,13 +604,15 @@ pub unsafe fn run_timer_loop(
                 logger,
                 console_for_heartbeat,
                 format_args!(
-                    "heartbeat: ticks={ticks} ({} s), keys={} dropped={} stray={} spurious={}, \
+                    "heartbeat: ticks={ticks} ({} s), keys={} dropped={} stray={} \
+                     spurious={} lapic_spurious={}, \
                      irq1={} balanced={}, max tick jump={}, i8042 OBF={}, PIC ISR={}",
                     ticks / crate::irq::timer_frequency_hz() as u64,
                     crate::keyboard::buffer::received_count(),
                     crate::keyboard::buffer::overflow_count(),
                     crate::keyboard::stray_irq_count(),
                     idt::spurious_count(),
+                    idt::lapic_spurious_count(),
                     // **会計。** irq1 は IDT 側のベクタ別カウンタ。
                     // keys + stray がこれと一致しなければ経路の取り違えがある。
                     idt::interrupt_count(crate::keyboard::KEYBOARD_VECTOR),

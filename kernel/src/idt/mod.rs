@@ -264,6 +264,23 @@ core::arch::global_asm!(
     ".globl zaytos_irq_stubs_end",
     "zaytos_irq_stubs_end:",
     ".p2align 4",
+    // Local APIC のスプリアス割り込み用スタブ（S2-d-1）。**表の外に置く。**
+    //
+    // 表は `0x20` から 33 本の連続範囲しか覆っておらず、スプリアスの
+    // `0xFF`（`crate::apic::SPURIOUS_VECTOR`）は範囲外である。`zaytos_yield_stub` と
+    // `zaytos_syscall_stub` が同じ形の前例で、非連続のベクタには専用スタブを置いて
+    // `zaytos_irq_common` へ合流させる。
+    //
+    // **`push 0xff` の符号拡張に注意が要る。** `push imm8` は 64 ビットへ符号拡張
+    // されるので、`0xff` を imm8 で積むと `-1` になる。表の中のベクタ（`0x20`-`0x40`）は
+    // どれも `0x80` 未満なので、この問題は今まで現れなかった。**アセンブラが
+    // imm32 を選ぶことに依存しない**よう、符号なしで安全な形を明示する。
+    // 値が正しいことはビルド後に逆アセンブルで確かめる（`verification-coverage.md`）。
+    ".globl zaytos_spurious_stub",
+    "zaytos_spurious_stub:",
+    "  .byte 0x68, 0xff, 0x00, 0x00, 0x00",
+    "  jmp zaytos_irq_common",
+    ".p2align 4",
     "zaytos_irq_common:",
     // 入場時のスタック: [rsp]=ベクタ, +8=RIP, +16=CS, +24=RFLAGS, +32=RSP, +40=SS
     //
@@ -429,6 +446,7 @@ extern "C" {
     /// 例外用とは**別の領域**なので、範囲検証も別系統になる。
     static zaytos_irq_stubs: u8;
     static zaytos_irq_stubs_end: u8;
+    static zaytos_spurious_stub: u8;
     static zaytos_irq_stub_0: u8;
     static zaytos_irq_stub_15: u8;
     static zaytos_irq_stub_16: u8;
@@ -687,6 +705,20 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         );
     }
 
+    // Local APIC のスプリアス割り込み（S2-d-1）。**EOI を送らずに戻る。**
+    //
+    // **判定を明示にした。** 以前このベクタに EOI が送られなかったのは
+    // 「PIC の担当範囲の外だから」であって、スプリアスだからではなかった。
+    // S2-d で Local APIC が配送を担うと LAPIC 由来のベクタには EOI が要るので、
+    // **その偶然の一致は壊れる。** ここで問いの形にしておく。
+    //
+    // 回数は PIC のスプリアス（IRQ7 / IRQ15）とは**別に数える。** 機序が違い、
+    // 合流させるとどちらが起きたのかハートビートから分からなくなる。
+    if vector == crate::apic::SPURIOUS_VECTOR as usize {
+        LAPIC_SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
+        return no_switch_rsp;
+    }
+
     // PIC 由来の IRQ かどうか。テスト専用ベクタ（0x30、PIC の範囲外）は
     // ここに入らないので、EOI の論理が一切絡まない。
     let pic_irq = pic_irq_for(vector);
@@ -760,6 +792,19 @@ static SPURIOUS_COUNT: AtomicU64 = AtomicU64::new(0);
 /// スプリアス割り込みを受けた回数。
 pub fn spurious_count() -> u64 {
     SPURIOUS_COUNT.load(Ordering::Relaxed)
+}
+
+/// Local APIC のスプリアス割り込みを受けた回数（S2-d-1）。
+///
+/// **[`SPURIOUS_COUNT`] とは別に数える。** あちらは 8259A が IRQ7 / IRQ15 として
+/// 上げる偽の割り込みで、こちらは Local APIC が SVR のベクタで上げるものである。
+/// **機序が違うので合流させない。** 合流させると、ハートビートを見たときに
+/// どちらが起きたのか分からなくなる。
+static LAPIC_SPURIOUS_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Local APIC のスプリアス割り込みを受けた回数。
+pub fn lapic_spurious_count() -> u64 {
+    LAPIC_SPURIOUS_COUNT.load(Ordering::Relaxed)
 }
 
 /// ベクタ番号から PIC の IRQ 番号を求める。PIC 由来でなければ `None`。
@@ -882,6 +927,17 @@ pub fn check_stub_table() -> StubTableCheck {
         if vector == SYSCALL_VECTOR {
             continue;
         }
+        // Local APIC のスプリアスベクタ（S2-d-1）も専用スタブ
+        // （zaytos_spurious_stub）を指す。同じく例外表の外である。
+        //
+        // **この検査は実際に働いた。** 専用スタブへ差し替えたとき、ここへ追加する
+        // のを忘れたまま起動したところ、`entries=NG` で停止した。
+        // **列挙で守る検査は列挙に無い形を静かに通す**のが常だが、ここは逆に
+        // 「表の中にあるはず」を検査しているので、**列挙から漏れると落ちる側**である。
+        // 漏れが静かに通らない向きに書かれていたことになる。
+        if vector == crate::apic::SPURIOUS_VECTOR as usize {
+            continue;
+        }
         let Some(entry) = entry(vector) else {
             entries_ok = false;
             break;
@@ -981,6 +1037,19 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
         // 載る。割り込みゲート（IF を落とす）にする。
         (*idt)[YIELD_VECTOR] = IdtEntry::new(
             addr_of!(zaytos_yield_stub) as u64,
+            KERNEL_CODE_SELECTOR,
+            GateType::Interrupt,
+            0,
+            None,
+        );
+
+        // Local APIC のスプリアス割り込み用ゲート（S2-d-1）。**IRQ スタイルの
+        // スタブへ載せる。** 既定では例外スタイルのスタブが入っており、
+        // 起きるとダンプして停止する。Local APIC が配送を担い始めるとスプリアスは
+        // 実際に起こりうるので、戻れる経路へ移す（EOI は送らない。判定は
+        // `irq_entry` にある）。
+        (*idt)[crate::apic::SPURIOUS_VECTOR as usize] = IdtEntry::new(
+            addr_of!(zaytos_spurious_stub) as u64,
             KERNEL_CODE_SELECTOR,
             GateType::Interrupt,
             0,

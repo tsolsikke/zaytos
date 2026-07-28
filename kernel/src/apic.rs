@@ -931,28 +931,23 @@ pub fn set_spurious_vector(logger: &mut Logger<SerialPort>, mapped: &MappedApic)
         )),
     }
 
-    // **このベクタは今のところ「起きたら止まる」経路にある。**
+    // **S2-d-1 でこのベクタを IRQ スタイルのスタブへ移した。**
     //
-    // `idt::init` は 256 本すべてを例外スタイルのスタブで埋めてから、IRQ
-    // スタイルのスタブで上書きするのは `0x20`-`0x3F` と yield / syscall だけである。
-    // **`0xFF` はどれにも当たらないので、例外スタイルのスタブのままである。**
-    // その先の `exception_entry` は `-> !` で、レジスタを出して `halt_forever` する
-    // （ADR-0004 の Halt and Dump）。
+    // S2-b の時点では例外スタイルのスタブのままで、起きればダンプして停止する
+    // 状態だった（`idt::init` は 256 本を例外スタイルで埋め、IRQ スタイルで
+    // 上書きするのは `0x20`-`0x40` と yield / syscall だけで、`0xFF` はどれにも
+    // 当たらなかった）。**専用スタブ（`zaytos_spurious_stub`）を置いて
+    // `zaytos_irq_common` へ合流させ、戻れる経路にした。**
     //
-    // したがって EOI は送られないが、**それは「スプリアスだから送らない」のでも
-    // 「PIC 由来でないから送らない」のでもなく、そもそも戻ってこないからである。**
-    // ベクタを `0x0f` から動かしたことで「予約例外として解釈される」問題は消えたが、
-    // **「起きたら止まる」は残っている。**
-    //
-    // **S2-d-1 で直すこと。** Local APIC が配送を担い始めると、スプリアスは実際に
-    // 起こりうる（ADR-0018 §6 は PIC について同じ理由で先に実装している）。
-    // 要るのは、`0xFF` を IRQ スタイルのスタブへ載せ、EOI を送らずに戻り、
-    // 回数を数える形である。
-    logger.warn(format_args!(
-        "apic: vector {SPURIOUS_VECTOR:#04x} is still on the exception-style stub, which dumps \
-         and halts; no EOI is sent only because that path never returns. spurious interrupts \
-         cannot happen yet (nothing is delivered by the local APIC), but S2-d-1 must move this \
-         vector onto an IRQ-style stub that returns without sending EOI"
+    // EOI を送らない判定も明示にした。以前送られなかったのは「PIC の担当範囲の
+    // 外だから」という偶然で、S2-d で Local APIC が配送を担うと壊れる一致だった。
+    // 現在は `idt::irq_entry` がこのベクタを名指しで判定し、回数を
+    // PIC のスプリアスとは別に数えて、EOI を送らずに戻る。
+    logger.info(format_args!(
+        "apic: vector {SPURIOUS_VECTOR:#04x} is on the dedicated IRQ-style stub; the dispatch \
+         recognises it by name, counts it separately from the 8259 spurious IRQs, and returns \
+         without sending EOI. spurious interrupts cannot happen yet (nothing is delivered by \
+         the local APIC), so this path has not been exercised at runtime"
     ));
 }
 
