@@ -890,6 +890,69 @@ impl StubTableCheck {
     }
 }
 
+/// 例外スタブ表の外に置いた専用スタブの本数。
+pub const DEDICATED_STUB_COUNT: usize = 3;
+
+/// 例外スタブ表の外に置いた専用スタブと、それを指すべきゲートの対応。
+///
+/// **この一覧が唯一の出所である。** [`check_stub_table`] は表の中に無い
+/// ベクタとしてここに載っているものを飛ばし、[`check_dedicated_stubs`] は
+/// 同じ一覧について「専用スタブを指していること」を確かめる。**飛ばす側と
+/// 確かめる側が同じ配列を読むので、片方だけを更新して食い違わせられない。**
+///
+/// 分けて持つと、飛ばす側にだけ足したときに「何も見ないベクタ」が生まれる。
+/// 実際に S2-d-1a でスプリアスベクタを飛ばす側にだけ足しており、その時点では
+/// ゲートの指す先を誰も見ていなかった（`verification-coverage.md`）。
+///
+/// `addr_of!` は const ではないので、定数ではなく関数として持つ。
+fn dedicated_stubs() -> [(usize, u64); DEDICATED_STUB_COUNT] {
+    [
+        (YIELD_VECTOR, addr_of!(zaytos_yield_stub) as u64),
+        (SYSCALL_VECTOR, addr_of!(zaytos_syscall_stub) as u64),
+        (
+            crate::apic::SPURIOUS_VECTOR as usize,
+            addr_of!(zaytos_spurious_stub) as u64,
+        ),
+    ]
+}
+
+/// 専用スタブ 1 本ぶんの検証結果。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DedicatedStubCheck {
+    pub vector: usize,
+    /// アセンブラが付けたラベルのアドレス。
+    pub expected_handler: u64,
+    /// IDT ゲートが実際に指しているアドレス。ゲートが読めなければ 0。
+    pub actual_handler: u64,
+}
+
+impl DedicatedStubCheck {
+    pub fn is_ok(&self) -> bool {
+        self.actual_handler == self.expected_handler
+    }
+}
+
+/// 例外スタブ表の外のベクタが、それぞれの専用スタブを指していることを検証する。
+///
+/// **[`check_stub_table`] の除外リストが空けた穴を塞ぐための検査である。**
+/// あちらは「全ベクタが例外スタブ表の対応する位置を指す」を見て、そこから
+/// 外れるベクタを飛ばす。飛ばされたベクタについては**何も見ない**ので、
+/// ゲートの代入を落としても、既定の例外スタイルのスタブを指したまま静かに
+/// 通る。yield と syscall は「戻らない」経路へ落ち、スプリアスは S2-b 以前の
+/// 「起きたら止まる」状態へ戻る。いずれも起動時には現れない。
+///
+/// **見るのはハンドラのアドレスだけである。** present / ゲート種別 / DPL は
+/// 全 256 ベクタを対象にした別の検査が既に見ており、syscall の DPL は
+/// [`SYSCALL_GATE_DPL`] という本ごとの期待値を持っている。ここで属性を
+/// 一律に見ると、DPL 3 が正しい syscall で落ちる。
+pub fn check_dedicated_stubs() -> [DedicatedStubCheck; DEDICATED_STUB_COUNT] {
+    dedicated_stubs().map(|(vector, expected_handler)| DedicatedStubCheck {
+        vector,
+        expected_handler,
+        actual_handler: entry(vector).map_or(0, |e| e.handler_address()),
+    })
+}
+
 /// スタブ表の刻み幅と、IDT エントリがそれを正しく指していることを検証する。
 ///
 /// IDT は `base + n * STUB_SIZE` という式でエントリを作っているため、この
@@ -910,6 +973,16 @@ pub fn check_stub_table() -> StubTableCheck {
         && addr_of!(zaytos_exception_stub_255) as u64 == base + 255 * STUB_SIZE as u64;
 
     // 全エントリのハンドラが表の範囲内で、ベクタ番号と位置が対応すること。
+    //
+    // **この検査は実際に働いた。** S2-d-1a でスプリアスベクタを専用スタブへ
+    // 差し替えたとき、下の除外へ追加するのを忘れたまま起動したところ、
+    // `entries=NG` で停止した。**列挙で守る検査は列挙に無い形を静かに通す**のが
+    // 常だが、ここは逆に「表の中にあるはず」を検査しているので、**列挙から
+    // 漏れると落ちる側**である。
+    //
+    // **ただし除外リストのほうは、静かに通す向きである。** 除外したベクタに
+    // ついてここは何も見ない。その穴は check_dedicated_stubs が塞ぐ。
+    let dedicated = dedicated_stubs();
     let mut entries_ok = true;
     for vector in 0..IDT_ENTRY_COUNT {
         // 0x20-0x40 は IRQ スタイルのスタブへ差し替えてあるので、こちらの
@@ -917,25 +990,13 @@ pub fn check_stub_table() -> StubTableCheck {
         if (IRQ_VECTOR_BASE..IRQ_VECTOR_BASE + IRQ_STYLE_STUB_COUNT).contains(&vector) {
             continue;
         }
-        // yield ベクタ（M5-c）は専用スタブ（zaytos_yield_stub）を指す。例外
-        // 表の外なのでここでは検査しない。
-        if vector == YIELD_VECTOR {
-            continue;
-        }
-        // syscall ベクタ（M5-f-1）も専用スタブ（zaytos_syscall_stub）を指す。
-        // 同じく例外表の外なので検査しない。
-        if vector == SYSCALL_VECTOR {
-            continue;
-        }
-        // Local APIC のスプリアスベクタ（S2-d-1）も専用スタブ
-        // （zaytos_spurious_stub）を指す。同じく例外表の外である。
-        //
-        // **この検査は実際に働いた。** 専用スタブへ差し替えたとき、ここへ追加する
-        // のを忘れたまま起動したところ、`entries=NG` で停止した。
-        // **列挙で守る検査は列挙に無い形を静かに通す**のが常だが、ここは逆に
-        // 「表の中にあるはず」を検査しているので、**列挙から漏れると落ちる側**である。
-        // 漏れが静かに通らない向きに書かれていたことになる。
-        if vector == crate::apic::SPURIOUS_VECTOR as usize {
+        // yield（M5-c）・syscall（M5-f-1）・スプリアス（S2-d-1a）は例外表の外の
+        // 専用スタブを指す。**飛ばす根拠と、その先を確かめる検査が同じ配列を
+        // 読む**ので、片方だけ更新して食い違わせられない。
+        if dedicated
+            .iter()
+            .any(|(dedicated_vector, _)| *dedicated_vector == vector)
+        {
             continue;
         }
         let Some(entry) = entry(vector) else {

@@ -2230,6 +2230,32 @@ fn report_idt(logger: &mut Logger<SerialPort>) {
         cpu::halt_forever();
     }
 
+    // 例外スタブ表の外のベクタが、それぞれの専用スタブを指すこと。
+    //
+    // 上の検査はこれらのベクタを除外しており、除外したものについては何も
+    // 見ない。ゲートの代入を落としても既定の例外スタブを指したまま静かに
+    // 通るので、肯定的な主張のほうを別に置く。yield と syscall は「戻らない」
+    // 経路へ落ち、スプリアスは S2-b 以前の「起きたら止まる」状態へ戻る。
+    let dedicated = idt::check_dedicated_stubs();
+    let dedicated_ok = dedicated.iter().all(idt::DedicatedStubCheck::is_ok);
+    logger.info(format_args!(
+        "idt: dedicated stubs outside the exception table: {} checked, \
+         every gate points at its own stub={dedicated_ok}",
+        dedicated.len()
+    ));
+    if !dedicated_ok {
+        for entry in dedicated.iter().filter(|entry| !entry.is_ok()) {
+            logger.error(format_args!(
+                "idt: vector {:#04x} points at {:#x}, expected its dedicated stub at {:#x}",
+                entry.vector, entry.actual_handler, entry.expected_handler
+            ));
+        }
+        logger.error(format_args!(
+            "idt: a vector outside the exception stub table does not reach its own stub; halting"
+        ));
+        cpu::halt_forever();
+    }
+
     logger.info(format_args!(
         "idt: loaded (exceptions now reach our handlers; interrupts stay disabled until M4-d)"
     ));
