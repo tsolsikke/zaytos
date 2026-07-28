@@ -1497,7 +1497,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // ここから先は戻らない。ZaytOS で初めて「時間が流れる」状態に入り、
     // メインループがハートビートを出し続ける。`stop_after_ticks` に 0 を
     // 渡すと止まらない（回帰チェックのときだけ有限で打ち切る）。
-    start_timer(&mut logger, console.as_mut(), 0);
+    start_timer(&mut logger, console.as_mut(), 0, mapped_apic.as_ref());
 }
 
 /// フレームバッファを検証し、描画ハンドルを作る（M3-a）。
@@ -2754,7 +2754,7 @@ fn trigger_interrupt_test(
         /// （M4-b-1 のログが 14,400 行だったので同程度）。通常起動では
         /// 止めずに回し続ける。
         const STOP_AFTER_TICKS: u64 = 500;
-        start_timer(logger, console, STOP_AFTER_TICKS);
+        start_timer(logger, console, STOP_AFTER_TICKS, None);
     }
 
     logger.info(format_args!(
@@ -2946,6 +2946,7 @@ fn start_timer(
     logger: &mut Logger<SerialPort>,
     console: Option<&mut Console>,
     stop_after_ticks: u64,
+    apic: Option<&kernel::apic::MappedApic>,
 ) -> ! {
     // --- 1. PIT を設定する ---
     // SAFETY: 起動時に 1 回だけ。この時点で IRQ0 はマスクされている
@@ -3008,7 +3009,7 @@ fn start_timer(
     // SAFETY: 7 項目を検証し、PIT を設定し、IRQ0 のマスクを外した。
     // ベクタ 0x20 のハンドラはティックを数えて EOI を送る。
     unsafe {
-        interrupts::run_timer_loop(logger, console, stop_after_ticks);
+        interrupts::run_timer_loop(logger, console, stop_after_ticks, apic);
     }
 
     // stop_after_ticks == 0 なら run_timer_loop は戻らないので、ここから先は

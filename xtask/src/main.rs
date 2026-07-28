@@ -964,7 +964,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -1041,6 +1041,13 @@ fn main() -> Result<()> {
                     format!("--apic-test requires a kind ({})", names.join(" | "))
                 })?;
                 return cmd_marker_test(APIC_TESTS, "apic-test", kind, None);
+            }
+            if let Some(index) = rest.iter().position(|a| a == "--calibration-spread") {
+                let runs = rest
+                    .get(index + 1)
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(DEFAULT_CALIBRATION_RUNS);
+                return cmd_calibration_spread(runs);
             }
             if rest.iter().any(|a| a == "--apic-decode-test") {
                 return cmd_marker_test(
@@ -3003,6 +3010,133 @@ const ACPI_SMP_TESTS: &[CriticalTest] = &[CriticalTest {
     wait_for_full_timeout: false,
     min_heartbeats: None,
 }];
+
+/// `--calibration-spread` の既定の起動回数。
+///
+/// S1-b でメモリ型の確認に 5 回使った前例に揃えてある。
+const DEFAULT_CALIBRATION_RUNS: usize = 5;
+
+/// Local APIC タイマの較正結果を、複数回の起動にわたって集める（S2-c）。
+///
+/// **これは検査項目ではない。** 合否を判定せず、値を並べて出すだけである。
+/// 許容幅を決めるための入力を人が読む形で集めるのが目的で、`--full` には
+/// 入れていない（項目数は増えない）。
+///
+/// **手で 5 回回して記録する形を採らないのは、手動確認が再現されず必ず腐るから
+/// である**（`-smp 2` の確認を検査項目にしたのと同じ判断）。ここでは合否を
+/// 決められないので検査項目にはできないが、**手順だけはコマンドとして固定する。**
+fn cmd_calibration_spread(runs: usize) -> Result<()> {
+    println!("=== calibration spread over {runs} boot(s) ===");
+    let mut medians: Vec<u64> = Vec::new();
+
+    for run in 1..=runs {
+        let serial = capture_serial_for_calibration(run)?;
+        let mut found = false;
+        for line in serial.lines() {
+            if line.contains("apic: LAPIC timer calibration:") {
+                println!("run {run}: {}", line.trim());
+                if let Some(median) = parse_labelled_number(line, "median=") {
+                    medians.push(median);
+                    found = true;
+                }
+            } else if line.contains("calibration samples:") || line.contains("widest tick advance")
+            {
+                println!("run {run}: {}", line.trim());
+            }
+        }
+        if !found {
+            println!("run {run}: no calibration line was produced");
+        }
+    }
+
+    if medians.is_empty() {
+        return Err(anyhow::anyhow!(
+            "no calibration result was captured in {runs} run(s)"
+        ));
+    }
+
+    medians.sort_unstable();
+    let low = medians[0];
+    let high = medians[medians.len() - 1];
+    let spread = high - low;
+    // 相対ばらつきを ppm で出す。**許容幅はここから導く。**
+    let relative_ppm = spread.saturating_mul(1_000_000) / high.max(1);
+    println!(
+        "--- across {} run(s) that produced a value ---",
+        medians.len()
+    );
+    println!("min={low} Hz max={high} Hz spread={spread} Hz ({relative_ppm} ppm of max)");
+    println!(
+        "note: this command reports values only. it does not decide pass or fail, so it is \
+         not one of the `--full` check items."
+    );
+    Ok(())
+}
+
+/// `label` に続く 10 進数を取り出す。
+fn parse_labelled_number(line: &str, label: &str) -> Option<u64> {
+    let rest = line.split(label).nth(1)?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// 既定ビルドを 1 回起動して serial を返す。
+///
+/// **feature を 1 つも足さない既定ビルドである。** 較正値は既定ビルドのものを
+/// 集める（`verification-coverage.md` の「値は既定ビルドの起動ログから取ること」）。
+fn capture_serial_for_calibration(run: usize) -> Result<String> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let kernel_elf = build_kernel_with_features(&workspace_root, &[])?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("serial-calibration-{run}.log"));
+    let _ = fs::remove_file(&serial_log);
+
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        // **既定は TCG である。** KVM での較正結果は測っていない。
+        accelerator: Accelerator::Tcg,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the calibration run")?;
+
+    // 較正が出るまで待つ。**上限を必ず付ける**（CLAUDE.md §14）。
+    let deadline = Instant::now() + CALIBRATION_RUN_TIMEOUT;
+    loop {
+        if fs::read_to_string(&serial_log)
+            .map(|c| c.contains("apic: LAPIC timer calibration:"))
+            .unwrap_or(false)
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
+    Ok(fs::read_to_string(&serial_log).unwrap_or_default())
+}
+
+/// 較正 1 回あたりの上限。較正窓は 5 標本 × 100ms なので、起動と合わせて余裕を取る。
+const CALIBRATION_RUN_TIMEOUT: Duration = Duration::from_secs(40);
 
 /// I/O APIC のレジスタが実際にデコードされることの確認（S2-a）。
 ///

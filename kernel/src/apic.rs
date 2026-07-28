@@ -529,6 +529,13 @@ const LAPIC_REGISTER_IRR_BASE: u64 = 0x200;
 const LAPIC_STATUS_REGISTER_COUNT: u64 = 8;
 const LAPIC_STATUS_REGISTER_STRIDE: u64 = 0x10;
 
+/// LVT Timer と LINT0 のオフセット。
+///
+/// 一覧（[`LAPIC_LVT_ENTRIES`]）にも入っているが、名前で参照する箇所があるので
+/// 定数にしてある。**マジックナンバーを散らさない。**
+const LAPIC_REGISTER_LVT_TIMER: u64 = 0x320;
+const LAPIC_REGISTER_LVT_LINT0: u64 = 0x350;
+
 /// LVT の並び。**存在する本数は Max LVT Entry + 1 で決まる**ので、
 /// 添字がその範囲に収まるものだけを読む。
 ///
@@ -536,10 +543,10 @@ const LAPIC_STATUS_REGISTER_STRIDE: u64 = 0x10;
 /// CMCI（`0x2F0`）は存在しない。**存在しないレジスタを読まない**のは、
 /// 未定義の値を観測値として記録しないためである。
 const LAPIC_LVT_ENTRIES: [(&str, u64); 6] = [
-    ("Timer", 0x320),
+    ("Timer", LAPIC_REGISTER_LVT_TIMER),
     ("Thermal", 0x330),
     ("PMC", 0x340),
-    ("LINT0", 0x350),
+    ("LINT0", LAPIC_REGISTER_LVT_LINT0),
     ("LINT1", 0x360),
     ("Error", 0x370),
 ];
@@ -947,4 +954,288 @@ pub fn set_spurious_vector(logger: &mut Logger<SerialPort>, mapped: &MappedApic)
          cannot happen yet (nothing is delivered by the local APIC), but S2-d-1 must move this \
          vector onto an IRQ-style stub that returns without sending EOI"
     ));
+}
+
+// ===========================================================================
+// S2-c: Local APIC タイマの較正
+//
+// **タイマとしては使わない。** LVT Timer はマスクされたままで、LAPIC タイマ由来の
+// 割り込みは 1 本も発生しない。**LINT0 と SVR の bit 8 には触らない。**
+// ===========================================================================
+
+/// タイマの初期カウント。書くと数え下がりが始まる。
+const LAPIC_REGISTER_TIMER_INITIAL_COUNT: u64 = 0x380;
+
+/// 現在のカウント。読むだけ。
+const LAPIC_REGISTER_TIMER_CURRENT_COUNT: u64 = 0x390;
+
+/// 分周設定。
+const LAPIC_REGISTER_TIMER_DIVIDE: u64 = 0x3E0;
+
+/// 16 分周（Divide Configuration Register のビット 3・1・0 で `0b0011`）。
+///
+/// **32 ビットのカウンタが窓の間に一周しないことが条件である。** 仮に APIC の
+/// 入力が 1GHz でも 16 分周で 62.5MHz、`u32::MAX` からの数え下がりは約 68 秒
+/// もつ。較正窓（下記）は 100ms なので、桁が 2 つ以上余っている。
+const LAPIC_TIMER_DIVIDE_BY_16: u32 = 0b0011;
+
+/// 較正窓に使う PIT ティック数。
+///
+/// # なぜ 10 なのか（先に決めていない。誤差の見積りから決めた）
+///
+/// 窓の両端を**ティックのエッジで揃える**ので、窓の実時間は
+/// `N × 10ms ± (エッジ検出の遅延 + 割り込み遅延のばらつき + 読み取り粒度)` になる。
+/// 片端の見積りは、`timer_ticks()` のポーリング粒度を 5µs、割り込み遅延の
+/// ばらつきを 10µs（TCG なので大きめに見る）、Current Count の読み取り粒度を
+/// 1µs として **16µs**、両端で **32µs** である。
+///
+/// | N | 窓 | 相対誤差の上限 |
+/// |---|---|---|
+/// | 1 | 10ms | 0.32% |
+/// | 5 | 50ms | 0.064% |
+/// | **10** | **100ms** | **0.032%** |
+/// | 20 | 200ms | 0.016% |
+///
+/// **較正自身の誤差が、許容幅の下限を決める。** 0.032% は起動ごとのばらつきより
+/// 十分小さいと見込めるので、これ以上窓を伸ばして起動を遅くする理由が無い。
+const CALIBRATION_WINDOW_TICKS: u64 = 10;
+
+/// 1 回の起動で取る標本数。
+///
+/// 単発の外れ値と、系統的なずれを分けるために複数取る。
+const CALIBRATION_SAMPLES: usize = 5;
+
+/// エッジ待ちの上限（TSC サイクル）。
+///
+/// **上限のない待機ループを書かない。** ティックが来なければ較正を諦めて報告する。
+/// 停止はしない（S2 は情報を集める段の延長である）。10ms のティックに対して
+/// 十分に長く、かつ人が待てる範囲にしてある。
+const CALIBRATION_EDGE_TIMEOUT_CYCLES: u64 = 10_000_000_000;
+
+/// 較正の結果。
+pub struct TimerCalibration {
+    /// 標本ごとの周波数（Hz）。
+    samples: [u64; CALIBRATION_SAMPLES],
+    /// 中央の標本（ソート後）。**平均ではない。** 外れ値に引きずられない。
+    median_hz: u64,
+    /// 最小と最大の差。
+    spread_hz: u64,
+}
+
+impl TimerCalibration {
+    /// 較正で得た周波数。**S2-d-2 で初期カウントを計算するのはこの値からである。**
+    /// **リテラルで焼かない。**
+    pub const fn median_hz(&self) -> u64 {
+        self.median_hz
+    }
+
+    /// 標本のばらつき。**許容幅を決める入力である。**
+    pub const fn spread_hz(&self) -> u64 {
+        self.spread_hz
+    }
+
+    /// 標本そのもの。**中央値とばらつきだけでは分布の形が分からない**ので、
+    /// 呼び出し側が必要なら生の並びを見られるようにしておく。
+    pub fn samples(&self) -> &[u64] {
+        &self.samples
+    }
+}
+
+/// `timer_ticks()` が 1 つ進むまで待ち、進んだ直後の値を返す。
+///
+/// **エッジで揃えるための関数である。** 任意の時点でサンプルすると、10ms 刻みの
+/// カウンタに対して ±1 ティック = ±10ms の誤差が乗る。N=10 の窓なら ±10% で、
+/// 較正としては使えない。**変化した瞬間を捉えれば、誤差は µs 級へ落ちる。**
+///
+/// 読みは [`crate::idt::timer_ticks`] を通す。**`AtomicU64` のロードなので、
+/// コンパイラがループの外へ持ち上げることはない。** 素の読みだと持ち上げられて
+/// 無限ループになりうる（`verification-coverage.md` の「待ちループでの読み」）。
+///
+/// 戻り値は `(進んだ後の値, 何ティック進んだか)`。**進み幅を返すのは、
+/// 取りこぼしを較正自身が検出するためである**（[`calibrate_timer`] を参照）。
+///
+/// 期限を過ぎたら `None`。
+fn wait_for_tick_edge() -> Option<(u64, u64)> {
+    let start = crate::idt::timer_ticks();
+    let deadline_base = cpu::read_timestamp_counter();
+    loop {
+        let now = crate::idt::timer_ticks();
+        if now != start {
+            return Some((now, now.wrapping_sub(start)));
+        }
+        if cpu::read_timestamp_counter().wrapping_sub(deadline_base)
+            > CALIBRATION_EDGE_TIMEOUT_CYCLES
+        {
+            return None;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Local APIC タイマの周波数を PIT 基準で測る（S2-c）。
+///
+/// # 何に触るか
+///
+/// **書くのは Divide Configuration と Initial Count の 2 本だけである。**
+/// LVT Timer には触らない（マスクされたまま、ファームウェアが残した periodic の
+/// まま）。**LINT0 と SVR には触らない。** 呼び出しの前後で読み戻して確かめる。
+///
+/// LVT Timer がマスクされているので、Initial Count を書いて数え下がりが始まっても
+/// 割り込みは 1 本も発生しない。窓（100ms）はカウンタの一周（数十秒規模）より
+/// 遥かに短いので、periodic のままでも窓の途中で再装填されない。
+///
+/// # 呼ぶ位置
+///
+/// **`sti` の後でなければならない。** 基準に使う `TIMER_TICKS` は IRQ0 が
+/// 増やすので、割り込みが有効でないと進まない。`run_timer_loop` が `sti` した
+/// 直後、定常ループへ入る前に呼ぶ。**この位置は APIC 関連の他の処理（`kmain` の
+/// 前半）から離れている。離れている理由はこれである。**
+pub fn calibrate_timer(
+    logger: &mut Logger<SerialPort>,
+    mapped: &MappedApic,
+) -> Option<TimerCalibration> {
+    let direct_map = common::addr::direct_map();
+    let lapic = direct_map.phys_to_virt(mapped.local_apic).as_u64();
+
+    // 触らないことにしたレジスタを、触らなかったことを示すために控える。
+    // SAFETY: `map_and_probe` が写像を確認したページの中を読む。
+    let (svr_before, lint0_before, lvt_timer_before) = unsafe {
+        (
+            read_lapic(lapic, LAPIC_REGISTER_SVR),
+            read_lapic(lapic, LAPIC_REGISTER_LVT_LINT0),
+            read_lapic(lapic, LAPIC_REGISTER_LVT_TIMER),
+        )
+    };
+
+    if lvt_timer_before & ENTRY_MASKED_BIT == 0 {
+        logger.error(format_args!(
+            "apic: the LVT timer is not masked (raw {lvt_timer_before:#010x}); calibration \
+             would deliver interrupts, so it is not attempted"
+        ));
+        return None;
+    }
+
+    // SAFETY: 上と同じページ。分周設定と初期カウントだけを書く。LVT Timer が
+    // マスクされていることは直前に確かめたので、数え下がりが始まっても割り込みは
+    // 発生しない。
+    unsafe {
+        write_lapic(lapic, LAPIC_REGISTER_TIMER_DIVIDE, LAPIC_TIMER_DIVIDE_BY_16);
+        write_lapic(lapic, LAPIC_REGISTER_TIMER_INITIAL_COUNT, u32::MAX);
+    }
+
+    let mut samples = [0u64; CALIBRATION_SAMPLES];
+    // **較正自身が取りこぼしを見る。** `interrupts::max_tick_jump()` はこの時点では
+    // 使えない。あれを更新するのは `run_timer_loop` の定常ループで、較正はその
+    // 手前で走るので、前後どちらを読んでも 0 のままになる。**前後が同じ 0 なのは
+    // 「取りこぼしが無い」のではなく「まだ数えていない」である。** 一度その形で
+    // 書いてしまったので、較正の中で自前に数える形へ直した。
+    let mut widest_edge_advance = 0u64;
+    for slot in samples.iter_mut() {
+        // 窓の始まりをティックのエッジへ揃える。
+        let Some((begin_tick, _)) = wait_for_tick_edge() else {
+            logger.error(format_args!(
+                "apic: no timer tick arrived within the calibration deadline; the local APIC \
+                 timer was NOT calibrated"
+            ));
+            return None;
+        };
+        // SAFETY: 上と同じ。読み取りのみ。
+        let count_begin = unsafe { read_lapic(lapic, LAPIC_REGISTER_TIMER_CURRENT_COUNT) };
+
+        // 窓の終わりも同じくエッジで揃える。
+        let count_end;
+        let elapsed_ticks;
+        loop {
+            let Some((now, advance)) = wait_for_tick_edge() else {
+                logger.error(format_args!(
+                    "apic: the calibration window did not close within the deadline; the local \
+                     APIC timer was NOT calibrated"
+                ));
+                return None;
+            };
+            // SAFETY: 上と同じ。読み取りのみ。
+            let observed = unsafe { read_lapic(lapic, LAPIC_REGISTER_TIMER_CURRENT_COUNT) };
+            widest_edge_advance = widest_edge_advance.max(advance);
+            if now.wrapping_sub(begin_tick) >= CALIBRATION_WINDOW_TICKS {
+                count_end = observed;
+                // **名目の N ではなく、実際に進んだティック数で割る。**
+                // 取りこぼして N を飛び越えた場合、窓の実時間は N×10ms より長い。
+                // 名目で割ると較正結果が過大になる。実測で割れば、飛び越えても
+                // 結果は正しいままである（系統誤差が構造的に消える）。
+                elapsed_ticks = now.wrapping_sub(begin_tick);
+                break;
+            }
+        }
+
+        // 数え下がりなので begin > end。
+        let elapsed_counts = u64::from(count_begin.wrapping_sub(count_end));
+        // 窓は elapsed_ticks × (1 / timer_frequency_hz) 秒である。
+        // **PIT の周波数もリテラルで持たない。** 境界の問いから取る。
+        let reference_hz = u64::from(crate::irq::timer_frequency_hz());
+        *slot = elapsed_counts * reference_hz / elapsed_ticks;
+    }
+
+    let mut sorted = samples;
+    sorted.sort_unstable();
+    let median_hz = sorted[CALIBRATION_SAMPLES / 2];
+    let spread_hz = sorted[CALIBRATION_SAMPLES - 1] - sorted[0];
+
+    logger.info(format_args!(
+        "apic: LAPIC timer calibration: median={median_hz} Hz spread={spread_hz} Hz \
+         (divide by 16, window {CALIBRATION_WINDOW_TICKS} PIT tick(s) at {} Hz, \
+         {CALIBRATION_SAMPLES} sample(s), edges aligned to tick transitions)",
+        crate::irq::timer_frequency_hz()
+    ));
+    logger.info(format_args!(
+        "apic: LAPIC timer calibration samples: {:?} Hz",
+        samples
+    ));
+    // **取りこぼしは較正を過大評価させる。** 窓の実時間が名目より長くなり、
+    // そのぶん減少量が増えるためである。上の計算は実測ティック数で割っている
+    // ので系統誤差は構造的に消えているが、**取りこぼしが起きたかどうかは
+    // それ自体が観測に値する**ので出す。1 なら 1 ティックずつ捉えている。
+    logger.info(format_args!(
+        "apic: widest tick advance seen inside the calibration windows = \
+         {widest_edge_advance} (1 means every edge was caught; the frequency above divides by \
+         the observed tick count, not the nominal one, so a larger value would not inflate it)"
+    ));
+
+    // 触らないことにしたレジスタが変わっていないことを読み戻す。
+    // SAFETY: 上と同じ。読み取りのみ。
+    let (svr_after, lint0_after, lvt_timer_after) = unsafe {
+        (
+            read_lapic(lapic, LAPIC_REGISTER_SVR),
+            read_lapic(lapic, LAPIC_REGISTER_LVT_LINT0),
+            read_lapic(lapic, LAPIC_REGISTER_LVT_TIMER),
+        )
+    };
+    logger.info(format_args!(
+        "apic: untouched after calibration: SVR {svr_before:#010x}->{svr_after:#010x} \
+         (software_enabled={}), LINT0 {lint0_before:#010x}->{lint0_after:#010x}, \
+         LVT timer {lvt_timer_before:#010x}->{lvt_timer_after:#010x} (masked={})",
+        svr_after & LAPIC_SVR_SOFTWARE_ENABLE != 0,
+        lvt_timer_after & ENTRY_MASKED_BIT != 0
+    ));
+    if svr_after != svr_before || lint0_after != lint0_before {
+        logger.error(format_args!(
+            "apic: SVR or LINT0 changed during calibration; they were supposed to be untouched"
+        ));
+    }
+
+    Some(TimerCalibration {
+        samples,
+        median_hz,
+        spread_hz,
+    })
+}
+
+/// Local APIC のレジスタを 1 本書く。
+///
+/// # Safety
+///
+/// [`read_lapic`] と同じ。加えて、書き込みが割り込みの配送を変えないことを
+/// 呼び出し側が確かめていること。
+unsafe fn write_lapic(base_virt: u64, offset: u64, value: u32) {
+    // SAFETY: 呼び出し元契約。MMIO なので `write_volatile` で書く。
+    unsafe { ((base_virt + offset) as *mut u32).write_volatile(value) }
 }

@@ -475,6 +475,7 @@ pub unsafe fn run_timer_loop(
     logger: &mut Logger<SerialPort>,
     console: Option<&mut crate::console::Console>,
     stop_after_ticks: u64,
+    apic: Option<&crate::apic::MappedApic>,
 ) {
     // 最初のティックが来るまで何も出ないとハングと区別できないので、
     // 待ちに入ることを先に宣言する。
@@ -495,6 +496,20 @@ pub unsafe fn run_timer_loop(
     // M4-d-2 で初めて成立した（ADR-0018 Addendum 2 §3）。
     unsafe {
         cpu::enable_interrupts();
+    }
+
+    // === S2-c: Local APIC タイマの較正 ===
+    //
+    // **この位置でなければならない。** 基準に使う `TIMER_TICKS` は IRQ0 が
+    // 増やすので、`sti` より前では進まない。`start_timer` は `-> !` で戻らず、
+    // 通常起動では `run_timer_loop` も戻らないので、「割り込みが有効で、かつ
+    // 定常ループへ入る前」という区間はここにしか存在しない。**APIC 関連の他の
+    // 処理（`kmain` の前半）から離れているのはこのためである。まとめないこと。**
+    //
+    // 較正は測るだけで、LAPIC タイマをタイマとして使わない。LVT Timer は
+    // マスクされたままで、LINT0 と SVR にも触らない。
+    if let Some(apic) = apic {
+        let _ = crate::apic::calibrate_timer(logger, apic);
     }
 
     // プリエンプティブマルチタスクのデモと検証（M5-d）。timer が動き出した
