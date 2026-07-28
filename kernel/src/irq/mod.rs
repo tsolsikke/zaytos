@@ -128,14 +128,28 @@ pub const fn vector_for(irq: u8) -> Option<u8> {
 }
 
 /// ベクタ番号に対応する IRQ 番号。このコントローラ由来でなければ `None`。
+///
+/// # マスタとスレーブを別々に見る
+///
+/// **以前は `MASTER_VECTOR_OFFSET .. +16` という 1 つの連続範囲で見ていた。**
+/// これはスレーブのオフセットがマスタ + 8 であることへの暗黙の依存で、
+/// `deferred-decisions.md` に保留項目として記録してあった。現在の 2 構成
+/// （通常の `0x20`/`0x28` と `alt-offset-test` の `0x30`/`0x38`）ではどちらも
+/// 成立しているため実害は無かったが、**依存が崩れうる構成が出た時点で
+/// 閉じる**という条件だった。S2 で IO-APIC へ移ればスレーブという概念自体が
+/// 消えるので、ここで閉じる。
+///
+/// 2 つのオフセットを別々に見るので、スレーブがマスタ + 8 でなくても正しい。
+/// 現行の 2 構成では結果が以前と一致する（どちらもスレーブ = マスタ + 8）。
 pub const fn irq_for(vector: u8) -> Option<u8> {
-    let base = pic::MASTER_VECTOR_OFFSET;
-    let count = 2 * pic::IRQS_PER_PIC;
-    if vector >= base && vector < base + count {
-        Some(vector - base)
-    } else {
-        None
+    if vector >= pic::MASTER_VECTOR_OFFSET && vector < pic::MASTER_VECTOR_OFFSET + pic::IRQS_PER_PIC
+    {
+        return Some(vector - pic::MASTER_VECTOR_OFFSET);
     }
+    if vector >= pic::SLAVE_VECTOR_OFFSET && vector < pic::SLAVE_VECTOR_OFFSET + pic::IRQS_PER_PIC {
+        return Some(pic::IRQS_PER_PIC + (vector - pic::SLAVE_VECTOR_OFFSET));
+    }
+    None
 }
 
 /// マスクの実状態を 1 回読み、`unmasked` だけが開いているかを判定する。
@@ -157,10 +171,11 @@ pub fn check_masks(unmasked: &[u8]) -> MaskCheck {
     let (master, slave) = pic::read_masks();
     let (expected_master, expected_slave) = expected_masks(unmasked);
     MaskCheck {
-        master,
-        slave,
-        expected_master,
-        expected_slave,
+        observed: MaskState::Pic { master, slave },
+        expected: MaskState::Pic {
+            master: expected_master,
+            slave: expected_slave,
+        },
     }
 }
 
@@ -184,6 +199,39 @@ fn expected_masks(unmasked: &[u8]) -> (u8, u8) {
 pub unsafe fn unmask(irq: u8) {
     // SAFETY: ハンドラの用意は呼び出し側の契約。
     unsafe { pic::unmask_irq(irq) }
+}
+
+/// すべての IRQ をマスクする。
+///
+/// # なぜ `init()` を流用しないのか
+///
+/// [`init`] も結果として全マスクにするが、あちらは ICW1 から ICW4 を書く
+/// **初期化**である。ここで要るのは**無効化**で、意図が違う。副作用が一致する
+/// ことを理由に流用すると、後から読んだ人が「なぜ移行の途中で初期化するのか」を
+/// 毎回考えることになる。
+///
+/// # いつ使うか
+///
+/// **S2 で Local APIC / IO-APIC へ移るときに要る。** MADT の Flags で
+/// PCAT_COMPAT が立っている（実測で確定済み）ので、この系にはデュアル 8259 が
+/// あり、APIC へ移る前に黙らせる必要がある。**需要があるから足すのであって、
+/// 将来のために足すのではない。**
+///
+/// # S2-d-2 まで誰も呼ばない
+///
+/// **`dead_code` にならないのは `pub` だからであって、使われているからではない。**
+/// `smp::trampoline_frame` が S1 で置かれて S3 まで呼ばれなかったのと同じ状態で
+/// ある。**呼び忘れても警告では気づけない**ので、roadmap の S2-d-2 の到達条件に
+/// 「この関数が実際に呼ばれること」を入れてある。PIC のマスクを別の方法で書いて
+/// しまっても誰も気づかない、という形を塞ぐためである。
+///
+/// # Safety
+///
+/// 呼び出し後、マスクした IRQ は届かなくなる。タイマを含むので、**別の配送
+/// 経路を用意する前に呼ぶと時間が止まる。**
+pub unsafe fn mask_all() {
+    // SAFETY: 呼び出し側の契約。全ビットを立てるので、どの IRQ も通らない。
+    unsafe { pic::set_masks(pic::MASK_ALL, pic::MASK_ALL) }
 }
 
 /// この割り込みはスプリアス（偽）か。
@@ -222,9 +270,9 @@ pub unsafe fn configure_timer(frequency_hz: u32) -> Result<TimerSetup, TimerErro
     // SAFETY: 呼び出し側の契約をそのまま引き継ぐ。
     let divisor = unsafe { pit::configure_channel0(frequency_hz) }.map_err(TimerError)?;
     Ok(TimerSetup {
-        divisor,
         requested_hz: frequency_hz,
         actual_millihertz: pit::actual_frequency_millihertz(divisor),
+        source: TimerSourceSetup::Pit { divisor },
     })
 }
 
@@ -233,31 +281,72 @@ pub const fn timer_frequency_hz() -> u32 {
     pit::TARGET_FREQUENCY_HZ
 }
 
+/// タイマ源ごとに違う設定値。**実装が増えたら列挙子を足す。**
+///
+/// # なぜ列挙子で持つのか（S2-b）
+///
+/// 分周値は PIT の語彙で、Local APIC タイマには無い（あちらは初期カウントと
+/// 分周設定である）。境界の型が実装ごとに違う値を持つ必要があるので、その
+/// 差分をここへ閉じ込める。
+///
+/// **2 つ目の実装が来ても、この列挙子に 1 つ足すだけで済む。** 既存の列挙子と
+/// その `Display` の腕は触らないので、**PIT の出力する文字列は変わらない。**
+/// 振る舞い不変のリファクタを 2 度行わずに済ませるための形である。
+///
+/// trait の関連型にしない理由は、**切り替えが実行時に起きる**ためである。
+/// S2-d は起動の途中で PIT から Local APIC タイマへ移る。関連型にすると
+/// 呼び出し側が実装ごとに総称化され、実行時の切り替えを跨げない。
+/// trait object にしない理由は、値として返して保持したいためである。
+enum TimerSourceSetup {
+    Pit { divisor: u16 },
+    // S2-d-1 で足す: LapicTimer { initial_count: u32, divide_configuration: u8 },
+}
+
 /// [`configure_timer`] が何を設定したかの観測値。
 ///
 /// # 検査との関係（変更するとテストが落ちる）
 ///
 /// この出力の文言と値に `interrupt-test no-eoi` が依存している
 /// （期待マーカー `pit: channel 0 set to divisor=11932`）。分周値は PIT の
-/// 語彙なので、S2 で Local APIC タイマへ移ると意味を失う。そのときは
-/// マーカー側を問いベースへ移す作業が要る。
+/// 語彙なので、S2-d で Local APIC タイマへ移ると意味を失う。そのときは
+/// マーカー側を問いベース（[`TimerSetup::requested_hz`] など）へ移す作業が要る。
 pub struct TimerSetup {
-    divisor: u16,
     requested_hz: u32,
     actual_millihertz: u64,
+    source: TimerSourceSetup,
+}
+
+impl TimerSetup {
+    /// 要求した周波数。**実装に依存しない問いである。**
+    pub const fn requested_hz(&self) -> u32 {
+        self.requested_hz
+    }
+
+    /// 実際に設定された周波数（ミリヘルツ）。**実装に依存しない問いである。**
+    ///
+    /// 整数の分周や初期カウントを使う以上、要求どおりぴったりにはならない。
+    /// S2-d でマーカーを問いベースへ移すとき、一致ではなく許容幅で見るのは
+    /// この値である。
+    pub const fn actual_millihertz(&self) -> u64 {
+        self.actual_millihertz
+    }
 }
 
 impl fmt::Display for TimerSetup {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "divisor={} for a requested {} Hz; actual is {}.{:03} Hz \
-             (the divisor is an integer, so the period never matches exactly)",
-            self.divisor,
-            self.requested_hz,
-            self.actual_millihertz / 1000,
-            self.actual_millihertz % 1000
-        )
+        match self.source {
+            // **この腕の文字列を変えない。** `interrupt-test no-eoi` が
+            // `divisor=11932` に一致を取っている。
+            TimerSourceSetup::Pit { divisor } => write!(
+                f,
+                "divisor={} for a requested {} Hz; actual is {}.{:03} Hz \
+                 (the divisor is an integer, so the period never matches exactly)",
+                divisor,
+                self.requested_hz,
+                self.actual_millihertz / 1000,
+                self.actual_millihertz % 1000
+            ),
+        }
     }
 }
 
@@ -277,10 +366,22 @@ impl fmt::Display for TimerSetup {
 /// 期待値を計算する。境界が独自に期待を持つことはない。検証の主語は
 /// 呼び出し側のままである。
 pub struct MaskCheck {
-    master: u8,
-    slave: u8,
-    expected_master: u8,
-    expected_slave: u8,
+    observed: MaskState,
+    expected: MaskState,
+}
+
+/// コントローラごとのマスクの持ち方。**実装が増えたら列挙子を足す。**
+///
+/// # なぜ列挙子で持つのか（S2-b）
+///
+/// IMR の 2 バイトという形は PIC 固有で、IO-APIC の redirection table では
+/// 成り立たない（実測で 24 本ある）。[`TimerSourceSetup`] と同じ理由で、
+/// **2 つ目の実装が来ても列挙子を 1 つ足すだけで済む形**にしてある。
+/// 既存の腕を触らないので、PIC の出力する文字列は変わらない。
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum MaskState {
+    Pic { master: u8, slave: u8 },
+    // S2-d-1 で足す: IoApic { masked: [bool; MAX_REDIRECTION_ENTRIES], … },
 }
 
 impl MaskCheck {
@@ -288,7 +389,7 @@ impl MaskCheck {
     /// 文字列を突き合わせる形にはしない。** 書式を判定に載せると、書式を
     /// 変えた瞬間に静かに壊れる。
     pub fn matches(&self) -> bool {
-        self.master == self.expected_master && self.slave == self.expected_slave
+        self.observed == self.expected
     }
 
     /// 実測部分だけの表示。期待値の書き方が呼び出し側ごとに違う場合に使う
@@ -296,8 +397,7 @@ impl MaskCheck {
     /// **同じ [`MaskCheck`] から導くので、判定と別の読み出しにはならない。**
     pub fn observed(&self) -> ObservedMasks {
         ObservedMasks {
-            master: self.master,
-            slave: self.slave,
+            state: self.observed,
             with_bits: false,
         }
     }
@@ -306,8 +406,7 @@ impl MaskCheck {
     /// 開いていたか」を後から読むための記録なので、ビット列で残している。
     pub fn observed_with_bits(&self) -> ObservedMasks {
         ObservedMasks {
-            master: self.master,
-            slave: self.slave,
+            state: self.observed,
             with_bits: true,
         }
     }
@@ -322,21 +421,24 @@ impl MaskCheck {
 /// **現時点で無い**（xtask の期待マーカーを実測で確認した）。依存があるのは
 /// [`MaskCheck`] の全体表示（`interrupt-test timer` / `no-eoi`）の方である。
 pub struct ObservedMasks {
-    master: u8,
-    slave: u8,
+    state: MaskState,
     with_bits: bool,
 }
 
 impl fmt::Display for ObservedMasks {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.with_bits {
-            write!(
-                f,
-                "master={:#04x} ({:#010b}) slave={:#04x} ({:#010b})",
-                self.master, self.master, self.slave, self.slave
-            )
-        } else {
-            write!(f, "master={:#04x} slave={:#04x}", self.master, self.slave)
+        match self.state {
+            // **この腕の文字列を変えない。**
+            MaskState::Pic { master, slave } => {
+                if self.with_bits {
+                    write!(
+                        f,
+                        "master={master:#04x} ({master:#010b}) slave={slave:#04x} ({slave:#010b})"
+                    )
+                } else {
+                    write!(f, "master={master:#04x} slave={slave:#04x}")
+                }
+            }
         }
     }
 }
@@ -371,11 +473,21 @@ pub const fn managed_vectors() -> (u8, u8) {
 
 impl fmt::Display for MaskCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "master={:#04x} slave={:#04x} (expected {:#04x}/{:#04x}) [read back from hardware]",
-            self.master, self.slave, self.expected_master, self.expected_slave
-        )
+        // **この腕の文字列を変えない。** `interrupt-test timer` と
+        // `interrupt-test alt-offset` が `master=0xfe slave=0xff` に一致を取っている。
+        match (self.observed, self.expected) {
+            (
+                MaskState::Pic { master, slave },
+                MaskState::Pic {
+                    master: expected_master,
+                    slave: expected_slave,
+                },
+            ) => write!(
+                f,
+                "master={master:#04x} slave={slave:#04x} \
+                 (expected {expected_master:#04x}/{expected_slave:#04x}) [read back from hardware]"
+            ),
+        }
     }
 }
 
@@ -410,4 +522,112 @@ pub unsafe fn service_snapshot() -> ServiceSnapshot {
     // SAFETY: 排他は呼び出し側の契約。
     let (master, _slave) = unsafe { pic::read_isr() };
     ServiceSnapshot(master)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `vector_for` と `irq_for` は互いの逆である。**往復で固定する。**
+    ///
+    /// 片方だけを見るテストだと、両方を同じ向きに間違えたときに通ってしまう。
+    #[test]
+    fn the_vector_and_irq_mappings_are_inverses() {
+        for irq in 0..2 * pic::IRQS_PER_PIC {
+            let vector = vector_for(irq).expect("every IRQ of the two PICs has a vector");
+            assert_eq!(
+                irq_for(vector),
+                Some(irq),
+                "round trip failed for IRQ {irq}"
+            );
+        }
+    }
+
+    /// 担当範囲の外は `None` を返す。
+    #[test]
+    fn vectors_outside_the_managed_range_have_no_irq() {
+        let (first, last) = managed_vectors();
+        for vector in 0..=u8::MAX {
+            let inside = vector >= first && vector <= last;
+            assert_eq!(
+                irq_for(vector).is_some(),
+                inside,
+                "vector {vector:#04x} was classified wrongly"
+            );
+        }
+    }
+
+    /// **スレーブのベクタはマスタのベクタと連続している必要がない。**
+    ///
+    /// S2-b でこの依存を閉じた。以前は `MASTER_VECTOR_OFFSET .. +16` という 1 つの
+    /// 連続範囲で見ており、スレーブ = マスタ + 8 を仮定していた。ここでは
+    /// **その仮定が成り立つことを実際に確かめる**（現行の 2 構成ではどちらも
+    /// 成り立つので、この確認は今は自明に通る）。仮定が崩れた構成が入ったとき、
+    /// 上の 2 つのテストが連続範囲の実装を落とす。
+    #[test]
+    fn the_slave_range_is_derived_from_its_own_offset() {
+        // マスタの最終ベクタの次がスレーブの先頭とは限らない、という前提で書く。
+        let master_last = pic::MASTER_VECTOR_OFFSET + pic::IRQS_PER_PIC - 1;
+        let slave_first = pic::SLAVE_VECTOR_OFFSET;
+
+        assert_eq!(irq_for(master_last), Some(pic::IRQS_PER_PIC - 1));
+        assert_eq!(irq_for(slave_first), Some(pic::IRQS_PER_PIC));
+
+        // スレーブの先頭は、マスタのオフセットからの距離ではなく
+        // スレーブ自身のオフセットから導かれている。
+        assert_eq!(
+            irq_for(slave_first + pic::IRQS_PER_PIC - 1),
+            Some(2 * pic::IRQS_PER_PIC - 1)
+        );
+    }
+
+    /// 期待マスクの計算は、開けた IRQ の分だけビットを落とす。
+    #[test]
+    fn the_expected_masks_open_only_the_requested_irqs() {
+        assert_eq!(expected_masks(&[]), (pic::MASK_ALL, pic::MASK_ALL));
+        let (master, slave) = expected_masks(&[0]);
+        assert_eq!((master, slave), (0xFE, pic::MASK_ALL));
+    }
+
+    /// `TimerSetup` の問いは、実装固有の値と別に取り出せる。
+    ///
+    /// **S2-d でマーカーを問いベースへ移す先がここである。**
+    #[test]
+    fn the_timer_setup_exposes_implementation_independent_questions() {
+        let setup = TimerSetup {
+            requested_hz: 100,
+            actual_millihertz: 99_998,
+            source: TimerSourceSetup::Pit { divisor: 11_932 },
+        };
+        assert_eq!(setup.requested_hz(), 100);
+        assert_eq!(setup.actual_millihertz(), 99_998);
+    }
+
+    /// `MaskCheck` の判定は値の比較で行い、`Display` の文字列に依存しない。
+    #[test]
+    fn the_mask_check_compares_values_rather_than_formatting() {
+        let same = MaskCheck {
+            observed: MaskState::Pic {
+                master: 0xFE,
+                slave: 0xFF,
+            },
+            expected: MaskState::Pic {
+                master: 0xFE,
+                slave: 0xFF,
+            },
+        };
+        assert!(same.matches());
+
+        let different = MaskCheck {
+            observed: MaskState::Pic {
+                master: 0xFF,
+                slave: 0xFF,
+            },
+            expected: MaskState::Pic {
+                master: 0xFE,
+                slave: 0xFF,
+            },
+        };
+        assert!(!different.matches());
+    }
 }
