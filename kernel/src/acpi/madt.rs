@@ -319,6 +319,69 @@ pub fn parse_io_apic(entry: &Entry<'_>) -> Option<IoApic> {
     })
 }
 
+/// Interrupt Source Override（type 2）の中身。
+///
+/// **レガシー IRQ が、IO-APIC のどの GSI へ現れるかを述べる表である。**
+/// PIC では IRQ 番号がそのまま線の番号だったが、IO-APIC では
+/// 「レガシー IRQ n は GSI m へ配線されている」という対応が入りうる。
+/// 典型は IRQ0 が GSI2 へ移る形だが、**それは仕様が決めることではなく
+/// ファームウェアが述べることである。**表を読んで従う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterruptSourceOverride {
+    /// 常に 0（ISA）。仕様が他の値を定義していないが、読んで記録する。
+    pub bus: u8,
+    /// 元のレガシー IRQ 番号。
+    pub source: u8,
+    /// 実際に現れる GSI。
+    pub global_system_interrupt: u32,
+    /// 極性とトリガ。[`INTI_POLARITY_MASK`] / [`INTI_TRIGGER_MASK`] で取り出す。
+    pub flags: u16,
+}
+
+/// MPS INTI フラグの極性（bits 1:0）とトリガ（bits 3:2）。
+///
+/// どちらも `00` は「バスの既定に従う」で、ISA の既定は
+/// **アクティブハイ・エッジトリガ**である。
+pub const INTI_POLARITY_MASK: u16 = 0b11;
+pub const INTI_TRIGGER_MASK: u16 = 0b11 << 2;
+pub const INTI_POLARITY_ACTIVE_LOW: u16 = 0b11;
+pub const INTI_TRIGGER_LEVEL: u16 = 0b11 << 2;
+
+impl InterruptSourceOverride {
+    /// 極性の生値（bits 1:0）。
+    pub const fn polarity(&self) -> u16 {
+        self.flags & INTI_POLARITY_MASK
+    }
+
+    /// トリガの生値（bits 3:2）。
+    pub const fn trigger(&self) -> u16 {
+        self.flags & INTI_TRIGGER_MASK
+    }
+
+    /// アクティブローか。**`00`（バス既定）は ISA ではアクティブハイなので偽である。**
+    pub const fn active_low(&self) -> bool {
+        self.polarity() == INTI_POLARITY_ACTIVE_LOW
+    }
+
+    /// レベルトリガか。**`00`（バス既定）は ISA ではエッジなので偽である。**
+    pub const fn level_triggered(&self) -> bool {
+        self.trigger() == INTI_TRIGGER_LEVEL
+    }
+}
+
+/// type 2 として読む。長さが足りなければ `None`。
+pub fn parse_interrupt_source_override(entry: &Entry<'_>) -> Option<InterruptSourceOverride> {
+    if entry.entry_type != TYPE_INTERRUPT_SOURCE_OVERRIDE || entry.bytes.len() < 10 {
+        return None;
+    }
+    Some(InterruptSourceOverride {
+        bus: entry.bytes[2],
+        source: entry.bytes[3],
+        global_system_interrupt: u32::from_le_bytes(entry.bytes[4..8].try_into().unwrap()),
+        flags: u16::from_le_bytes(entry.bytes[8..10].try_into().unwrap()),
+    })
+}
+
 /// Local APIC Address Override（type 5）。**あれば固定部の 32 ビット値より優先される。**
 pub fn parse_local_apic_address_override(entry: &Entry<'_>) -> Option<u64> {
     if entry.entry_type != TYPE_LOCAL_APIC_ADDRESS_OVERRIDE || entry.bytes.len() < 12 {
@@ -514,6 +577,47 @@ mod tests {
         );
     }
 
+    fn iso_entry(source: u8, gsi: u32, flags: u16) -> Vec<u8> {
+        let mut bytes = vec![TYPE_INTERRUPT_SOURCE_OVERRIDE, 10, 0, source];
+        bytes.extend_from_slice(&gsi.to_le_bytes());
+        bytes.extend_from_slice(&flags.to_le_bytes());
+        bytes
+    }
+
+    /// 典型例（IRQ0 が GSI2 へ移る）を読める。
+    #[test]
+    fn an_interrupt_source_override_maps_a_legacy_irq_to_a_gsi() {
+        let body = iso_entry(0, 2, 0);
+        let entry = Entries::new(&body).next().unwrap().unwrap();
+        let iso = parse_interrupt_source_override(&entry).unwrap();
+        assert_eq!(iso.source, 0);
+        assert_eq!(iso.global_system_interrupt, 2);
+        assert_eq!(iso.bus, 0);
+    }
+
+    /// **`00` は「バスの既定」であって「アクティブロー」でも「レベル」でもない。**
+    /// ISA の既定はアクティブハイ・エッジなので、どちらも偽になる。
+    /// ここを取り違えると、極性を反転して割り込みが来なくなる。
+    #[test]
+    fn the_bus_default_flags_mean_active_high_edge_on_isa() {
+        let body = iso_entry(0, 2, 0);
+        let entry = Entries::new(&body).next().unwrap().unwrap();
+        let iso = parse_interrupt_source_override(&entry).unwrap();
+        assert!(!iso.active_low());
+        assert!(!iso.level_triggered());
+    }
+
+    /// 明示的なアクティブロー・レベルトリガを読める（PCI 由来で現れる形）。
+    #[test]
+    fn explicit_active_low_level_triggered_flags_are_decoded() {
+        let body = iso_entry(9, 9, INTI_POLARITY_ACTIVE_LOW | INTI_TRIGGER_LEVEL);
+        let entry = Entries::new(&body).next().unwrap().unwrap();
+        let iso = parse_interrupt_source_override(&entry).unwrap();
+        assert!(iso.active_low());
+        assert!(iso.level_triggered());
+        assert_eq!(iso.source, 9);
+    }
+
     /// 種別が違えば解釈しない。取り違えを型ではなく値で防いでいる箇所なので、
     /// 固定しておく。
     #[test]
@@ -523,6 +627,7 @@ mod tests {
         assert_eq!(parse_local_apic(&entry), None);
         assert_eq!(parse_local_x2apic(&entry), None);
         assert_eq!(parse_local_apic_address_override(&entry), None);
+        assert_eq!(parse_interrupt_source_override(&entry), None);
     }
 
     /// **残りは単調に減る。** 走査ループが止まることの一般形での確認。

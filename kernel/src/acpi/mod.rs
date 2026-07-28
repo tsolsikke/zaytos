@@ -84,6 +84,11 @@ const TABLE_READ_BUFFER_LENGTH: usize = 1024;
 /// 使わない）が、上限に当たったことを隠すのは避けられる。
 const MAX_IO_APICS: usize = 4;
 
+/// 記録する Interrupt Source Override の上限。
+///
+/// ISA の IRQ は 16 本なので、それを超える上書きは意味を持たない。実測は 5 件。
+const MAX_INTERRUPT_SOURCE_OVERRIDES: usize = 16;
+
 /// I/O APIC 1 個の所在。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IoApicLocation {
@@ -108,6 +113,9 @@ pub struct ApicMmio {
     io_apics: [Option<IoApicLocation>; MAX_IO_APICS],
     io_apics_found: usize,
     bsp_candidate_apic_id: Option<u8>,
+    interrupt_source_overrides:
+        [Option<madt::InterruptSourceOverride>; MAX_INTERRUPT_SOURCE_OVERRIDES],
+    interrupt_source_overrides_found: usize,
 }
 
 impl ApicMmio {
@@ -117,7 +125,55 @@ impl ApicMmio {
             io_apics: [None; MAX_IO_APICS],
             io_apics_found: 0,
             bsp_candidate_apic_id: None,
+            interrupt_source_overrides: [None; MAX_INTERRUPT_SOURCE_OVERRIDES],
+            interrupt_source_overrides_found: 0,
         }
+    }
+
+    /// レガシー IRQ が I/O APIC のどの GSI へ現れるか。
+    ///
+    /// Interrupt Source Override（MADT type 2）に一致があればその GSI、
+    /// 無ければ IRQ 番号をそのまま GSI とする（恒等）。
+    ///
+    /// # この構成では、配送経路からは常に恒等が返る
+    ///
+    /// **非恒等の枝は表に実在する**（実測で IRQ0 が GSI2 へ移る）。しかし
+    /// **現在の配送経路が問う IRQ には ISO が無い。** S2-d-1 が I/O APIC 経由へ
+    /// 移すのはキーボード（IRQ1）で、実測の 5 件は IRQ 0 / 5 / 9 / 10 / 11 で
+    /// あり IRQ1 を含まない。S2-d-2 のタイマは Local APIC タイマなので、
+    /// そもそも I/O APIC を経由せず IRQ0 の上書きを使わない。
+    ///
+    /// **したがって「この関数が配送経路で効いていること」は、この構成では
+    /// 破壊確認で示せない。** 無視する実装に差し替えても、配送に使う IRQ1 では
+    /// 同じ答えになるからである。非恒等の枝はホストテストで固定してあり、
+    /// 起動時には解決結果をログへ出して表が読めていることを示す。
+    /// **示せる範囲を超えて主張しないこと**（`verification-coverage.md` の
+    /// 「Interrupt Source Override の解決（S2-d-0）」）。
+    pub fn gsi_for_irq(&self, irq: u8) -> u32 {
+        let mut index = 0;
+        while index < self.interrupt_source_overrides.len() {
+            if let Some(iso) = self.interrupt_source_overrides[index] {
+                if iso.source == irq {
+                    return iso.global_system_interrupt;
+                }
+            }
+            index += 1;
+        }
+        u32::from(irq)
+    }
+
+    /// 記録できた Interrupt Source Override。
+    pub fn interrupt_source_overrides(
+        &self,
+    ) -> impl Iterator<Item = madt::InterruptSourceOverride> + '_ {
+        self.interrupt_source_overrides
+            .iter()
+            .filter_map(|slot| *slot)
+    }
+
+    /// MADT にあった Interrupt Source Override の総数（上限で捨てた分を含む）。
+    pub const fn interrupt_source_overrides_found(&self) -> usize {
+        self.interrupt_source_overrides_found
     }
 
     /// Local APIC の MMIO 物理アドレス。
@@ -766,6 +822,7 @@ fn walk_madt(
     let mut local_apic_count = 0usize;
     let mut usable_local_apic_count = 0usize;
     let mut io_apic_count = 0usize;
+    let mut interrupt_source_override_count = 0usize;
     let mut stopped_early = false;
 
     for step in madt::Entries::new(&buffer[madt::FIXED_LENGTH..length]) {
@@ -845,6 +902,33 @@ fn walk_madt(
                     ));
                 }
             }
+            madt::TYPE_INTERRUPT_SOURCE_OVERRIDE => {
+                // **S2-d-1 の入力である。** レガシー IRQ が IO-APIC のどの GSI へ
+                // 現れるかを述べる表で、S1 では「あった」ことだけを記録していた。
+                // 配送を切り替える前に中身を読む必要があるので、ここで出す。
+                if let Some(iso) = madt::parse_interrupt_source_override(&entry) {
+                    interrupt_source_override_count += 1;
+                    if let Some(slot) = mmio
+                        .interrupt_source_overrides
+                        .get_mut(interrupt_source_override_count - 1)
+                    {
+                        *slot = Some(iso);
+                    }
+                    logger.info(format_args!(
+                        "acpi:   entry type={} ({}) len={} bus={} source_irq={} gsi={} \
+                         flags={:#06x} (active_low={} level_triggered={})",
+                        entry.entry_type,
+                        madt::entry_type_name(entry.entry_type),
+                        entry.length,
+                        iso.bus,
+                        iso.source,
+                        iso.global_system_interrupt,
+                        iso.flags,
+                        iso.active_low(),
+                        iso.level_triggered()
+                    ));
+                }
+            }
             madt::TYPE_LOCAL_APIC_ADDRESS_OVERRIDE => {
                 // **あれば固定部の 32 ビット値より優先される。** S2 が使う。
                 if let Some(address) = madt::parse_local_apic_address_override(&entry) {
@@ -889,11 +973,26 @@ fn walk_madt(
     }
 
     mmio.io_apics_found = io_apic_count;
+    mmio.interrupt_source_overrides_found = interrupt_source_override_count;
+
+    // **表が読めていることの実行時の証拠。** 配送経路はまだこの解決を使わないので
+    // （キーボードの IRQ1 には上書きが無く、タイマは Local APIC タイマへ移る）、
+    // ここで解決結果そのものを出しておく。**非恒等の枝が実在することが見える。**
+    if interrupt_source_override_count > 0 {
+        logger.info(format_args!(
+            "acpi: GSI resolution: irq0 -> gsi{} irq1 -> gsi{} (identity unless an override \
+             names the irq; the delivery paths of S2-d use irq1 and the local APIC timer, \
+             so neither consumes a non-identity mapping)",
+            mmio.gsi_for_irq(0),
+            mmio.gsi_for_irq(1)
+        ));
+    }
 
     logger.info(format_args!(
         "acpi: MADT enumeration complete: {entry_count} entr(y/ies), \
          {local_apic_count} local APIC(s) of which {usable_local_apic_count} usable, \
-         {io_apic_count} I/O APIC(s)"
+         {io_apic_count} I/O APIC(s), \
+         {interrupt_source_override_count} interrupt source override(s)"
     ));
     if mmio.io_apics_dropped() > 0 {
         logger.warn(format_args!(
