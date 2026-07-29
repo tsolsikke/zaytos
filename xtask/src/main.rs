@@ -964,7 +964,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -975,6 +975,13 @@ fn main() -> Result<()> {
             let gfx_test = rest.iter().any(|a| a == "--gfx-test");
             let kvm = rest.iter().any(|a| a == "--kvm");
             let no_limit = rest.iter().any(|a| a == "--no-limit");
+            if let Some(index) = rest.iter().position(|a| a == "--lapic-timer-test") {
+                let kind = rest.get(index + 1).with_context(|| {
+                    let names: Vec<&str> = LAPIC_TIMER_TESTS.iter().map(|t| t.name).collect();
+                    format!("--lapic-timer-test requires a kind ({})", names.join(" | "))
+                })?;
+                return cmd_lapic_timer_test(kind);
+            }
             if let Some(index) = rest.iter().position(|a| a == "--ioapic-test") {
                 let kind = rest.get(index + 1).with_context(|| {
                     let names: Vec<&str> = IOAPIC_SABOTAGE_TESTS.iter().map(|t| t.name).collect();
@@ -1893,6 +1900,260 @@ fn run_keyboard_test(features: &[&str]) -> Result<KeyboardAssertions> {
          not emulate it. Check it by hand with `cargo xtask run --gui`."
     );
     Ok(assertions)
+}
+
+/// S2-d-2 の検査。**ホストの実時間を独立の基準として使う。**
+///
+/// カーネル側の許容幅の判定は「要求周波数」と「較正値から導いた実効周波数」を
+/// 比べており、**どちらも内側の値である。** 較正値が 2 倍になれば初期カウントも
+/// 2 倍になって比は変わらず、**自己無矛盾のまま通ってしまう。**
+///
+/// ここではハートビートが報告する経過秒を、**ホスト側で測った実時間**と
+/// 突き合わせる。較正値が現実とずれていれば、この比がずれる。
+struct LapicTimerTest {
+    name: &'static str,
+    /// 追加する feature。既定ビルドなら空。
+    features: &'static [&'static str],
+    /// 実時間との比がこの範囲に入るべきか。
+    expect_within_tolerance: bool,
+    /// 破壊が適用されたことを示すマーカー（空なら見ない）。
+    ///
+    /// **破壊のフックが踏まれなかった場合、破壊ビルドは正常に見えて緑になる。**
+    /// 適用の痕跡を必須にして、空振りを落とす。
+    sabotage_marker: &'static str,
+    /// 空でなければ、**カーネルがこの行を出して停止することを期待する。**
+    /// 速さの比ではなく、名指しの検出で捕まる破壊に使う。
+    expect_halt_marker: &'static str,
+}
+
+const LAPIC_TIMER_TESTS: &[LapicTimerTest] = &[
+    LapicTimerTest {
+        name: "rate",
+        features: &[],
+        expect_within_tolerance: true,
+        sabotage_marker: "",
+        expect_halt_marker: "",
+    },
+    // 較正の戻り値を 2 倍にする。**カーネル内の比は変わらないが、実時間との
+    // 比は倍になる。** これが「較正値が初期カウントへ実際に流れている」ことの
+    // 証明である。
+    LapicTimerTest {
+        name: "scaled-calibration",
+        features: &["lapic-timer-scale-calibration-test"],
+        expect_within_tolerance: false,
+        sabotage_marker: "apic: SABOTAGE applied - the calibration result is scaled",
+        expect_halt_marker: "",
+    },
+    // 較正で書く分周と、戻り値に載せる分周を食い違わせる。**較正は分周なしで
+    // 測るので周波数が 16 倍に出て、運用は 16 分周で走る。** 実時間との比が
+    // 大きく崩れる。
+    //
+    // **検出経路は `scaled-calibration` と同じ（実時間との比）である。**
+    // 主張は違う（あちらは較正値が初期カウントへ流れること、こちらは較正時と
+    // 運用時で分周が揃うこと）が、**落ちる場所は同じ**である。
+    LapicTimerTest {
+        name: "wrong-divide",
+        features: &["lapic-timer-wrong-divide-test"],
+        expect_within_tolerance: false,
+        sabotage_marker: "",
+        expect_halt_marker: "",
+    },
+    // PIC を全マスクせずに LVT を開ける。**速さの比では捕まらない。**
+    // 切り替えの直後に IMR を読み戻す検査が、IRQ0 が開いたままであることを
+    // 名指しで捕まえて停止する。**`irq::mask_all()` が実際に呼ばれている
+    // ことの裏返しの証明でもある**（呼ばれていなければこの検査が落ちる）。
+    LapicTimerTest {
+        name: "no-mask-all",
+        features: &["lapic-timer-no-mask-all-test"],
+        expect_within_tolerance: false,
+        sabotage_marker: "",
+        expect_halt_marker: "lapic-timer: the 8259 is not fully masked",
+    },
+];
+
+/// ハートビートが報告する経過秒と、ホストで測った実時間の比を見る。
+///
+/// 許容幅はカーネル側の ±0.5% より**大きく取る**。QEMU の実行そのものが
+/// 実時間に対して一定の比で進む保証が無く、起動処理やホストの負荷も混ざる
+/// ためである。**ここで見たいのは「桁が合っているか」であって、
+/// 較正の精度ではない。**
+const LAPIC_TIMER_RATE_TOLERANCE: f64 = 0.25;
+
+fn cmd_lapic_timer_test(kind: &str) -> Result<()> {
+    let test = LAPIC_TIMER_TESTS
+        .iter()
+        .find(|t| t.name == kind)
+        .with_context(|| {
+            let names: Vec<&str> = LAPIC_TIMER_TESTS.iter().map(|t| t.name).collect();
+            format!(
+                "unknown --lapic-timer-test kind: {kind} ({})",
+                names.join(" | ")
+            )
+        })?;
+    let context = format!("lapic-timer-test {}", test.name);
+
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let kernel_elf = build_kernel_with_features(&workspace_root, test.features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let serial_log = workspace_root.join("target").join("lapic-timer-serial.log");
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the lapic timer test")?;
+
+    // **最初のハートビートが出てから測り始める。** 起動処理の時間を
+    // 分母に入れると、比が起動の重さに引きずられる。
+    let first_marker = "heartbeat: ticks=";
+    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    let mut started_at = None;
+    let mut first_seconds = 0u64;
+    while Instant::now() < deadline {
+        if let Some((seconds, _)) = last_heartbeat_seconds(&serial_log) {
+            started_at = Some(Instant::now());
+            first_seconds = seconds;
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let mut measured = None;
+    if let Some(started_at) = started_at {
+        thread::sleep(LAPIC_TIMER_MEASURE_WINDOW);
+        if let Some((seconds, _)) = last_heartbeat_seconds(&serial_log) {
+            measured = Some((
+                seconds.saturating_sub(first_seconds),
+                started_at.elapsed().as_secs_f64(),
+            ));
+        }
+    }
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
+    {
+        return report_did_not_start(&context, firmware_rip, qemu_exit.as_deref());
+    }
+
+    let mut ok = true;
+
+    // 破壊が実際に適用されたこと。**空振りを落とす。**
+    if !test.sabotage_marker.is_empty() {
+        let applied = serial.contains(test.sabotage_marker);
+        println!(
+            "{context}: the sabotage was actually applied = {}",
+            if applied { "OK" } else { "NG" }
+        );
+        if !applied {
+            println!("{context}: the sabotage hook was never reached, so this run proves nothing");
+        }
+        ok &= applied;
+    }
+
+    // 名指しの検出で捕まる破壊は、速さの比を見ない。
+    if !test.expect_halt_marker.is_empty() {
+        let halted = serial.contains(test.expect_halt_marker);
+        println!(
+            "{context}: the kernel refused to proceed with the named check = {}",
+            if halted { "OK" } else { "NG" }
+        );
+        ok &= halted;
+        if ok {
+            println!("{context}: PASS");
+            return Ok(());
+        }
+        bail!("{context}: FAIL")
+    }
+
+    let ticking = serial.contains(first_marker);
+
+    match measured {
+        Some((kernel_seconds, host_seconds)) if host_seconds > 0.0 => {
+            println!(
+                "{context}: heartbeats are being produced = {}",
+                if ticking { "OK" } else { "NG" }
+            );
+            ok &= ticking;
+
+            let ratio = kernel_seconds as f64 / host_seconds;
+            let within = (ratio - 1.0).abs() <= LAPIC_TIMER_RATE_TOLERANCE;
+            println!(
+                "{context}: kernel {kernel_seconds} s vs host {host_seconds:.1} s (ratio {ratio:.3}), within {LAPIC_TIMER_RATE_TOLERANCE} = {within} (wanted {})",
+                test.expect_within_tolerance
+            );
+            ok &= within == test.expect_within_tolerance;
+        }
+        // **ハートビートが 1 本も出ないのも「比が崩れている」の一形態である。**
+        // 遅くなる向きに壊すと、測定窓の中に 1 本も入らない。**「測れなかった」
+        // で片づけると、壊れていることを検出できたのに落としてしまう。**
+        //
+        // ただし**正常であるはずの構成では失敗として扱う。** 出ないことが
+        // 正しいのは、幅の外へ出ると宣言した構成だけである。
+        _ if !test.expect_within_tolerance => {
+            println!(
+                "{context}: no heartbeat appeared within the window, which is itself out of tolerance (the timer is far too slow) = OK"
+            );
+            // 起動そのものが失敗した場合と区別する。
+            let started = serial.contains("lapic-timer: the timer now arrives as vector");
+            println!(
+                "{context}: the switch to the local APIC timer did happen = {}",
+                if started { "OK" } else { "NG" }
+            );
+            ok &= started;
+        }
+        _ => {
+            println!("{context}: could not measure the tick rate = NG");
+            ok = false;
+        }
+    }
+
+    if ok {
+        println!("{context}: PASS");
+        Ok(())
+    } else {
+        bail!("{context}: FAIL")
+    }
+}
+
+/// 測定窓。**短いとハートビートの粒度（1 秒）が効きすぎる。**
+const LAPIC_TIMER_MEASURE_WINDOW: Duration = Duration::from_secs(20);
+
+/// シリアルログの最後のハートビートが報告する経過秒とティック数。
+fn last_heartbeat_seconds(serial_log: &Path) -> Option<(u64, u64)> {
+    let content = fs::read_to_string(serial_log).ok()?;
+    let line = content.lines().rfind(|l| l.contains("heartbeat: ticks="))?;
+    // 形は `heartbeat: ticks=256 (2 s), ...`
+    let ticks_part = line.split("ticks=").nth(1)?;
+    let ticks: u64 = ticks_part.split_whitespace().next()?.parse().ok()?;
+    let seconds_part = line.split('(').nth(1)?;
+    let seconds: u64 = seconds_part.split_whitespace().next()?.parse().ok()?;
+    Some((seconds, ticks))
 }
 
 /// S2-d-1c の破壊 1 件ぶんの定義。
@@ -3477,6 +3738,9 @@ const APIC_TESTS: &[CriticalTest] = &[
 /// **既定ビルドにこれらが入ってはならない。** 入ったまま出荷すると、
 /// 壊れた状態で測った結果を正常な結果として扱うことになる。
 const SABOTAGE_FEATURES: &[&str] = &[
+    "lapic-timer-scale-calibration-test",
+    "lapic-timer-wrong-divide-test",
+    "lapic-timer-no-mask-all-test",
     "ioapic-wrong-vector-test",
     "ioapic-skip-unmask-test",
     "ioapic-keep-pic-irq1-test",
@@ -3946,6 +4210,15 @@ fn cmd_check(full: bool) -> Result<()> {
             &mut retries,
             cmd_keyboard_test,
         );
+        // S2-d-2 の検査と破壊確認。**健全な `rate` を先頭に置いてある**ので、
+        // 破壊が意図した経路だけを壊していることまで確かめられる。
+        for test in LAPIC_TIMER_TESTS {
+            total += 1;
+            let name = format!("lapic-timer-test {}", test.name);
+            run_regression(&name, &mut failed, &mut retries, || {
+                cmd_lapic_timer_test(test.name)
+            });
+        }
         // S2-d-1c の破壊確認。**落ちるべき主張だけが落ちること**を見る。
         // 健全な側も並べて指定しているので、破壊が意図した経路だけを
         // 壊していることまで確かめられる。

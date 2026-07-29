@@ -294,6 +294,16 @@ core::arch::global_asm!(
     "  .byte 0x68, 0x42, 0x00, 0x00, 0x00",
     "  jmp zaytos_irq_common",
     ".p2align 4",
+    // Local APIC タイマ用スタブ（S2-d-2）。**表の外に置く。**
+    //
+    // **`0xFE` は `0x80` 以上なので、`push imm8` だと符号拡張されて `-2` に
+    // なる。** スプリアスの `0xFF` と同じ罠で、バイトを明示して imm32 を
+    // 固定する。値が正しいことはビルド後に逆アセンブルで確かめる。
+    ".globl zaytos_lapic_timer_stub",
+    "zaytos_lapic_timer_stub:",
+    "  .byte 0x68, 0xfe, 0x00, 0x00, 0x00",
+    "  jmp zaytos_irq_common",
+    ".p2align 4",
     "zaytos_irq_common:",
     // 入場時のスタック: [rsp]=ベクタ, +8=RIP, +16=CS, +24=RFLAGS, +32=RSP, +40=SS
     //
@@ -461,6 +471,7 @@ extern "C" {
     static zaytos_irq_stubs_end: u8;
     static zaytos_spurious_stub: u8;
     static zaytos_ioapic_keyboard_stub: u8;
+    static zaytos_lapic_timer_stub: u8;
     static zaytos_irq_stub_0: u8;
     static zaytos_irq_stub_15: u8;
     static zaytos_irq_stub_16: u8;
@@ -540,6 +551,28 @@ pub const YIELD_VECTOR: usize = 0x41;
 ///
 /// スタブ表（`0x20`-`0x40`）の外なので専用スタブが要る。
 pub const IOAPIC_KEYBOARD_VECTOR: usize = 0x42;
+
+/// Local APIC タイマ用ベクタ（S2-d-2）。
+///
+/// # なぜ `0x20` のまま使わないのか
+///
+/// **キーボードを `0x42` へ移したのと同じ 2 つの理由による。**
+/// 同じベクタだと、届いたことが配送経路の証拠にならない（8259 経由でも
+/// Local APIC 経由でも `0x20` で届く）。そして「ベクタから IRQ を引く」経路が
+/// PIC の採番表に当たったままになる。**`0xFE` は 8259 が出しえない値である。**
+///
+/// # ベクタ番号の選択は、優先度クラスの選択でもある
+///
+/// `0xFE` はクラス 15 で、**タイマが最上位クラスになる。**
+/// キーボード（`0x42`、クラス 4）より高い。S2-d-1c でキーボードが
+/// タイマより高くなったのが、ここで逆転する。**実害は無い見込みである**
+/// （割り込みゲートで入れ子は起きず、TPR は 0 のまま）が、自明ではない。
+///
+/// # `0xFF` の隣である
+///
+/// スプリアス（`0xFF`）と隣り合う。どちらもスタブ表の外で専用スタブが要り、
+/// 扱いが揃う。`alt-offset` ビルドの PIC（`0x30`-`0x3F`）とも衝突しない。
+pub const LAPIC_TIMER_VECTOR: usize = 0xFE;
 
 /// システムコール用のソフトウェア割り込みベクタ（M5-f-1、ADR-0020）。
 ///
@@ -767,6 +800,24 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         return no_switch_rsp;
     }
 
+    // Local APIC タイマ（S2-d-2）。**LVT 由来なので IRQ 番号を持たない。**
+    //
+    // **判定の順序を固定する。LVT 由来を先に見る。** 後ろに置くと、
+    // このベクタが PIC の採番表に当たる構成で誤る。現行の 2 構成
+    // （`0x20`-`0x2F` と `0x30`-`0x3F`）では当たらないが、**依存を残さない。**
+    //
+    // EOI は Local APIC へ送る。**8259 は関与しない。**
+    if vector == LAPIC_TIMER_VECTOR {
+        TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: 割り込みハンドラの中であり、割り込みゲート経由なので IF=0。
+        // 実際に配送された割り込みに対してのみ呼んでいる。
+        #[cfg(not(feature = "no-eoi-test"))]
+        unsafe {
+            crate::irq::end_of_interrupt_for_lapic_timer();
+        }
+        return crate::task::on_timer_tick(no_switch_rsp);
+    }
+
     // このベクタはどの IRQ か。**移行済みの経路も含めて引く**（S2-d-1c）。
     //
     // **ここは EOI の入口ではなく、IRQ 処理全体の入口である。** 下の
@@ -856,9 +907,8 @@ pub const PIC_TIMER_VECTOR: usize = match crate::irq::vector_for(0) {
 
 /// タイマ割り込みが**現在**届くベクタ。
 ///
-/// 現時点では [`PIC_TIMER_VECTOR`] と同じ値を返す。タイマはまだ 8259 経由で
-/// 配送されているためである。**S2-d-2 で Local APIC タイマへ移したときに、
-/// ここだけを変えれば観測側の記述が追随する。**
+/// Local APIC タイマへ移った後は [`LAPIC_TIMER_VECTOR`]、それ以前は
+/// [`PIC_TIMER_VECTOR`] である。
 ///
 /// # なぜ今から関数にするのか
 ///
@@ -875,7 +925,11 @@ pub const PIC_TIMER_VECTOR: usize = match crate::irq::vector_for(0) {
 /// 立てるとビットマップの意味が「I/O APIC 経由である」から「PIC でなくなった」
 /// へ静かにずれる。S2-d-2 では別の器で持つ。
 pub fn timer_delivery_vector() -> usize {
-    PIC_TIMER_VECTOR
+    if crate::irq::timer_on_lapic() {
+        LAPIC_TIMER_VECTOR
+    } else {
+        PIC_TIMER_VECTOR
+    }
 }
 
 /// スプリアス割り込みを受けた回数（ベクタ別ではなく合計）。
@@ -990,7 +1044,7 @@ impl StubTableCheck {
 }
 
 /// 例外スタブ表の外に置いた専用スタブの本数。
-pub const DEDICATED_STUB_COUNT: usize = 4;
+pub const DEDICATED_STUB_COUNT: usize = 5;
 
 /// 例外スタブ表の外に置いた専用スタブと、それを指すべきゲートの対応。
 ///
@@ -1016,6 +1070,7 @@ fn dedicated_stubs() -> [(usize, u64); DEDICATED_STUB_COUNT] {
             IOAPIC_KEYBOARD_VECTOR,
             addr_of!(zaytos_ioapic_keyboard_stub) as u64,
         ),
+        (LAPIC_TIMER_VECTOR, addr_of!(zaytos_lapic_timer_stub) as u64),
     ]
 }
 
@@ -1225,6 +1280,17 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
         // マスクを外すと、最初のキー入力で例外スタイルのスタブへ落ちて停止する。
         (*idt)[IOAPIC_KEYBOARD_VECTOR] = IdtEntry::new(
             addr_of!(zaytos_ioapic_keyboard_stub) as u64,
+            KERNEL_CODE_SELECTOR,
+            GateType::Interrupt,
+            0,
+            None,
+        );
+
+        // Local APIC タイマ用ゲート（S2-d-2）。専用スタブへ載せる。
+        // **LVT のマスクを外す前に置く。** ゲートが無い状態で解禁すると、
+        // 最初のティックで例外スタイルのスタブへ落ちて停止する。
+        (*idt)[LAPIC_TIMER_VECTOR] = IdtEntry::new(
+            addr_of!(zaytos_lapic_timer_stub) as u64,
             KERNEL_CODE_SELECTOR,
             GateType::Interrupt,
             0,

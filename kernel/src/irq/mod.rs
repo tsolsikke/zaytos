@@ -154,6 +154,35 @@ static ROUTED_VECTOR: [AtomicU8; MAX_LEGACY_IRQS] =
 /// 割り込みの配送先として現れることはない。**
 const NO_ROUTED_VECTOR: u8 = 0;
 
+/// タイマが Local APIC タイマへ移ったか（S2-d-2）。
+///
+/// # なぜ [`ROUTED_TO_APIC`] に乗せないのか
+///
+/// **Local APIC タイマは I/O APIC ではなく LVT 経由で、IRQ 番号を持たない。**
+/// IRQ0 のビットを立てて表すと、ビットマップの意味が「I/O APIC 経由である」
+/// から「PIC でなくなった」へ**静かにずれる。** 別の器で持つ。
+///
+/// 書くのは起動時の切り替え 1 回、読むのは割り込み文脈である。
+static TIMER_ON_LAPIC: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// タイマが Local APIC タイマへ移ったか。
+pub fn timer_on_lapic() -> bool {
+    TIMER_ON_LAPIC.load(Ordering::Relaxed)
+}
+
+/// Local APIC タイマの割り込みに EOI を送る（S2-d-2）。
+///
+/// **IRQ 番号を取らない。** LVT 由来なので IRQ 番号が無い。
+///
+/// # Safety
+///
+/// 実際に配送された Local APIC タイマの割り込みのハンドラから呼ぶこと。
+pub unsafe fn end_of_interrupt_for_lapic_timer() {
+    // SAFETY: 呼び出し側の契約をそのまま引き継ぐ。宛先は Local APIC で、
+    // I/O APIC 経由の IRQ と同じ EOI レジスタである。
+    unsafe { apic::end_of_interrupt_for_routed_irq(false) }
+}
+
 /// この IRQ が I/O APIC 経由へ移っているか。
 pub fn routed_to_apic(irq: u8) -> bool {
     if irq as usize >= MAX_LEGACY_IRQS {
@@ -325,7 +354,8 @@ impl Controller for Legacy {
 impl TimerSource for Legacy {
     unsafe fn configure_timer(&self, frequency_hz: u32) -> Result<TimerSetup, TimerError> {
         // SAFETY: 呼び出し側の契約をそのまま引き継ぐ。
-        let divisor = unsafe { pit::configure_channel0(frequency_hz) }.map_err(TimerError)?;
+        let divisor = unsafe { pit::configure_channel0(frequency_hz) }
+            .map_err(|error| TimerError(TimerErrorKind::Pit(error)))?;
         Ok(TimerSetup {
             requested_hz: frequency_hz,
             actual_millihertz: pit::actual_frequency_millihertz(divisor),
@@ -362,11 +392,39 @@ impl fmt::Debug for InitError {
 }
 
 /// [`configure_timer`] の失敗。`Debug` の扱いは [`InitError`] と同じ。
-pub struct TimerError(pit::FrequencyError);
+///
+/// **列挙にしたのは実装が 2 つになったためである**（S2-d-2）。PIT の失敗は
+/// 分周値の範囲、Local APIC タイマの失敗は写像と初期カウントの範囲で、
+/// **原因が違う。** PIT の腕の `Debug` は既存の文言をそのまま委譲するので、
+/// PIT 側のログは変わらない。
+pub struct TimerError(TimerErrorKind);
+
+enum TimerErrorKind {
+    Pit(pit::FrequencyError),
+    /// Local APIC が写像できていない。
+    LapicNotMapped,
+    /// 要求周波数から妥当な初期カウントを作れない。
+    FrequencyOutOfRange,
+}
+
+impl TimerError {
+    fn lapic_not_mapped() -> Self {
+        Self(TimerErrorKind::LapicNotMapped)
+    }
+
+    fn frequency_out_of_range() -> Self {
+        Self(TimerErrorKind::FrequencyOutOfRange)
+    }
+}
 
 impl fmt::Debug for TimerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&self.0, f)
+        match &self.0 {
+            // **既存の文言を変えない。** 内側へそのまま委譲する。
+            TimerErrorKind::Pit(error) => fmt::Debug::fmt(error, f),
+            TimerErrorKind::LapicNotMapped => write!(f, "LapicNotMapped"),
+            TimerErrorKind::FrequencyOutOfRange => write!(f, "FrequencyOutOfRange"),
+        }
     }
 }
 
@@ -726,6 +784,120 @@ impl fmt::Display for RedirectionEntryView {
     }
 }
 
+/// タイマを Local APIC タイマへ移す（S2-d-2）。
+///
+/// # 順序。**守らないと最初のティックで止まる、または二重に届く**
+///
+/// 1. Local APIC タイマを設定する（**LVT はマスクしたまま**）
+/// 2. 【区間開始】**PIC を全マスクする**（[`mask_all`]）
+/// 3. 移行状態を立てる
+/// 4. **LVT のマスクを外す**【区間終了】
+///
+/// 1 でマスクしたまま設定するのは、ベクタが載る前に満了させないためである。
+/// 2 と 4 が逆だと、両方が開いた瞬間に二重にティックが来る。
+///
+/// # 2 から 4 の間はティックが 1 本も来ない
+///
+/// **この区間で [`crate::idt::timer_ticks`] を待つ処理を挟まないこと。
+/// 挟むと戻ってこない。** 較正が `wait_for_tick_edge` を使うので、
+/// 順序を誤ると実際に起こりうる。**較正はこの関数より前に済ませてある。**
+///
+/// # 区間を割り込み禁止で囲う理由
+///
+/// マスク直前に飛び込んだ最後の PIT ティックの扱いを確定させるためである。
+/// 囲まないと、「PIC を全マスクした直後・LVT を開ける前」にハンドラが走り、
+/// そのハンドラが 8259 へ EOI を送る。**その EOI 自体は無害だが、区間の中で
+/// 何が起きたかを後から説明できなくなる。** 囲めば、飛び込んだティックは
+/// 区間の**前**に処理済みか、区間の**後**に LVT 由来として来るかの
+/// どちらかに確定する。
+///
+/// # Safety
+///
+/// - [`crate::idt::LAPIC_TIMER_VECTOR`] に戻れるハンドラが IDT にあること。
+/// - 起動時に 1 回だけ呼ぶこと（割り込みを一時的に禁止する）。
+pub unsafe fn switch_timer_to_lapic(
+    calibration: crate::apic::TimerCalibration,
+    frequency_hz: u32,
+) -> Result<TimerSetup, TimerError> {
+    let source = apic::LapicTimer::new(calibration);
+
+    // 1. 設定する。**まだマスクされているので届かない。**
+    // SAFETY: 呼び出し側の契約をそのまま引き継ぐ。
+    let setup = unsafe { source.configure_timer(frequency_hz) }?;
+
+    {
+        let _critical = common::critical::InterruptGuard::enter();
+
+        // 2. 旧経路を黙らせる。**ここから 4 までティックは 1 本も来ない。**
+        //
+        // 破壊 (S2-d-2, lapic-timer-no-mask-all): ここを飛ばすと PIT と
+        // Local APIC タイマの両方が届き、二重にティックが来る。
+        //
+        // SAFETY: 呼び出し側の契約。この直後に Local APIC タイマを開けるので、
+        // 「別の配送経路を用意する前に呼ぶと時間が止まる」という `mask_all` の
+        // 契約は、区間の終わりまでに満たされる。
+        #[cfg(not(feature = "lapic-timer-no-mask-all-test"))]
+        unsafe {
+            mask_all()
+        };
+
+        // 3. 状態を立てる。**旧経路を閉じた後、新経路を開ける前である。**
+        TIMER_ON_LAPIC.store(true, Ordering::Relaxed);
+
+        // 4. 新経路を開ける。
+        // SAFETY: ゲートは用意済みで、状態も立っている。ここから届いてよい。
+        unsafe { apic::unmask_timer() };
+    }
+
+    Ok(setup)
+}
+
+/// LVT Timer を読み戻した観測値（S2-d-2）。
+///
+/// 8259 の ICW2 と違い、LVT Timer は書いた値を読み戻せる。
+///
+/// **`sti` 前の項目 4 を格上げする根拠にはならない。** あちらの検査点では
+/// タイマはまだ 8259 経由で（切り替えは較正の後、較正は `sti` の後）、
+/// この読み戻しはそれより後に起きる。**覆うのは「LVT に載せた設定」だけで、
+/// 「`sti` の時点で配送先が意図どおりか」ではない。**
+pub struct LvtTimerView {
+    raw: u32,
+}
+
+impl LvtTimerView {
+    /// 設定されているベクタ。
+    pub const fn vector(&self) -> u8 {
+        (self.raw & 0xFF) as u8
+    }
+
+    /// マスクされているか。
+    pub fn masked(&self) -> bool {
+        self.raw & crate::apic::ENTRY_MASKED_BIT != 0
+    }
+
+    /// periodic モードか。
+    pub fn periodic(&self) -> bool {
+        self.raw & crate::apic::LVT_TIMER_PERIODIC != 0
+    }
+}
+
+impl fmt::Display for LvtTimerView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "vector={:#04x} masked={} periodic={}",
+            self.vector(),
+            self.masked(),
+            self.periodic()
+        )
+    }
+}
+
+/// LVT Timer を読み戻す。Local APIC が写像できていなければ `None`。
+pub fn lvt_timer_readback() -> Option<LvtTimerView> {
+    apic::read_lvt_timer().map(|raw| LvtTimerView { raw })
+}
+
 /// [`route_to_apic`] の失敗。
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum RouteError {
@@ -770,12 +942,21 @@ pub const fn timer_frequency_hz() -> u32 {
 /// 呼び出し側が実装ごとに総称化され、実行時の切り替えを跨げない。
 /// trait object にしない理由は、値として返して保持したいためである。
 enum TimerSourceSetup {
-    Pit { divisor: u16 },
-    // S2-d-2 で足す: LapicTimer { initial_count: u32, divide_configuration: u32 }。
-    // **S2-d-1b では足していない。** 初期カウントは較正の戻り値から実行時に
-    // 求めるもので、較正値を持たないこの段では正しい値を書けない
-    // （`irq/apic.rs` の末尾に理由がある）。
+    Pit {
+        divisor: u16,
+    },
+    /// Local APIC タイマ（S2-d-2）。
+    ///
+    /// **分周設定を初期カウントと一緒に持つ。** 初期カウントだけでは周期が
+    /// 決まらないので、片方だけを見て周波数を語れないようにしてある。
+    LapicTimer {
+        initial_count: u32,
+        divide_configuration: u32,
+    },
 }
+
+/// LVT Timer のベクタ欄に載せる値。
+const LAPIC_TIMER_VECTOR_BITS: u32 = crate::idt::LAPIC_TIMER_VECTOR as u32;
 
 /// [`configure_timer`] が何を設定したかの観測値。
 ///
@@ -792,6 +973,23 @@ pub struct TimerSetup {
 }
 
 impl TimerSetup {
+    /// Local APIC タイマの設定結果を作る（S2-d-2）。
+    pub(super) const fn lapic(
+        requested_hz: u32,
+        actual_millihertz: u64,
+        initial_count: u32,
+        divide_configuration: u32,
+    ) -> Self {
+        Self {
+            requested_hz,
+            actual_millihertz,
+            source: TimerSourceSetup::LapicTimer {
+                initial_count,
+                divide_configuration,
+            },
+        }
+    }
+
     /// 要求した周波数。**実装に依存しない問いである。**
     pub const fn requested_hz(&self) -> u32 {
         self.requested_hz
@@ -817,6 +1015,20 @@ impl fmt::Display for TimerSetup {
                 "divisor={} for a requested {} Hz; actual is {}.{:03} Hz \
                  (the divisor is an integer, so the period never matches exactly)",
                 divisor,
+                self.requested_hz,
+                self.actual_millihertz / 1000,
+                self.actual_millihertz % 1000
+            ),
+            TimerSourceSetup::LapicTimer {
+                initial_count,
+                divide_configuration,
+            } => write!(
+                f,
+                "initial count={} with divide configuration {:#x} for a requested {} Hz; \
+                 actual is {}.{:03} Hz (the count is an integer, so the period never \
+                 matches exactly)",
+                initial_count,
+                divide_configuration,
                 self.requested_hz,
                 self.actual_millihertz / 1000,
                 self.actual_millihertz % 1000

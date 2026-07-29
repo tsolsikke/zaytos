@@ -223,6 +223,24 @@ ioapic-skip-unmask-test = []
 # 違う（8259 は 0x21、I/O APIC は 0x42）ので、**0x21 で届いたキーがあること**
 # として観測できるはずである。
 ioapic-keep-pic-irq1-test = []
+
+# --- S2-d-2: タイマを Local APIC タイマへ移す段の破壊 ---
+# 較正の戻り値を 2 倍にする。初期カウントは較正値を要求周波数で割って出すので
+# 2 倍になり、**タイマは半分の速さで走る**。**較正値が初期カウントへ実際に
+# 流れていることの証明**である。
+#
+# **カーネル側の許容幅では捕まらない。** 実効周波数も較正値から導くので、
+# 両辺が同じ倍率で動いて比は 100Hz のまま一致する（自己無矛盾）。
+# 捕まえるのはホストの実時間を基準にする `lapic-timer-test` である。
+#
+# 較正が呼ばれない構成では空振りするので、適用したことをログへ出し、
+# 出ていなければ xtask 側で落とす。
+lapic-timer-scale-calibration-test = []
+# 較正で書く分周と、戻り値に載せる分周を食い違わせる。分周を戻り値に含める形が
+# 塞いでいる罠を、構造ごと壊して確かめる。
+lapic-timer-wrong-divide-test = []
+# PIC を全マスクせずに LVT を開ける。PIT と Local APIC タイマの両方が届く。
+lapic-timer-no-mask-all-test = []
 # B-2a-5: higher-half の破壊確認。いずれも既定ビルドには入らない。`--highhalf-test <kind>`。
 # (a) 静的 PML4[0] の存在ビットを落とす。恒等が not-present になり、mov cr3 直後の低位命令
 # フェッチが解決できずトリプルフォルトする。`--highhalf-test no-identity-in-boot-pt`。

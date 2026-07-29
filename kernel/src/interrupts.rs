@@ -216,7 +216,21 @@ fn verify_ready(
         CheckState::Failed
     };
 
-    // --- 4. 配送先ベクタの設定（検証不能）---
+    // --- 4. 配送先ベクタの設定（この時点では検証不能）---
+    //
+    // # なぜ S2-d-2 でも格上げできないのか
+    //
+    // 設計時は「PIC が消えれば全経路を読み戻せるので Verified にできる」と
+    // 見込んでいた。**順序の制約で、この検査点では成立しない。**
+    //
+    // Local APIC タイマへの切り替えは**較正の後**でなければならず、較正は
+    // PIT のティックを基準にするので**`sti` の後**でなければ走らない。
+    // つまり**この検査点では、タイマは必ずまだ 8259 経由である。**
+    //
+    // **格上げの代わりに、切り替えの直後に LVT Timer を読み戻して照合する**
+    // （`switch_timer_to_lapic`）。8259 の ICW2 と違い LVT は読み戻せるので、
+    // そちらは実際に検証されている。**「この検査点では検証できない」と
+    // 「どこでも検証されていない」は別である。**
     //
     // **主題を書き換えた**（S2-d-1c）。以前は「PIC を 0x20-0x2F へ再マップした」
     // という PIC 固有の主題だったが、配送が 2 系統になったのでどちらの
@@ -224,15 +238,17 @@ fn verify_ready(
     //
     // **状態は UNVERIFIABLE のままである。** I/O APIC の redirection entry は
     // 読み戻せるが、**タイマはまだ 8259 を通っており、そちらの ICW2 は
-    // write-only である。** 全経路が読み戻せるようになるのは、PIC が消える
-    // S2-d-2 である。そこで Verified へ格上げする。
+    // write-only である。** 上のとおり、これは**恒久的に**そうである。
+    // （S2-d-1c の時点では「S2-d-2 で Verified へ格上げする」と書いていた。
+    // 順序の制約を見落とした見込み違いで、S2-d-2 で撤回した。）
     logger.info(format_args!(
-        "sti-check 4: cannot be verified here; the timer still goes through the 8259, whose \
-         ICW2 is write-only, so its vector offset cannot be read back. Proceeding is safe only \
-         because check 5 holds: with every IRQ masked, a wrong offset delivers nothing. Proof \
-         arrives when the first timer IRQ shows up as vector {:#04x}. The I/O APIC path is \
-         covered separately: its redirection entry is read back after routing (IRQ1)",
-        idt::timer_delivery_vector()
+        "sti-check 4: cannot be verified at this point; the timer still goes through the 8259 \
+         here (calibration needs PIT ticks, so the move to the local APIC timer happens after \
+         sti), and the 8259 ICW2 is write-only. Proceeding is safe only because check 5 holds: \
+         with every IRQ masked, a wrong offset delivers nothing. Proof arrives when the first \
+         timer IRQ shows up as vector {:#04x}. The other two paths are read back where they are \
+         set up: the I/O APIC redirection entry (IRQ1) and the LVT timer",
+        idt::PIC_TIMER_VECTOR
     ));
     let pic_remapped = if timer_enabled {
         // タイマを解禁した以上、マスクによる保護はもう無い。ここから先は
@@ -468,6 +484,125 @@ pub fn max_tick_jump() -> u64 {
     MAX_TICK_JUMP.load(Ordering::Relaxed)
 }
 
+/// タイマを Local APIC タイマへ移し、結果を観測する（S2-d-2）。
+///
+/// 順序と割り込み禁止区間の扱いは [`crate::irq::switch_timer_to_lapic`] が
+/// 持つ。ここはその前後の観測に徹する。
+fn switch_timer_to_lapic(
+    logger: &mut Logger<SerialPort>,
+    calibration: crate::apic::TimerCalibration,
+) {
+    let requested_hz = crate::irq::timer_frequency_hz();
+    let median_hz = calibration.median_hz();
+    let divide = calibration.divide_configuration();
+
+    // SAFETY: ベクタ LAPIC_TIMER_VECTOR には専用スタブのゲートが入っており
+    // （`idt::init`）、ハンドラは EOI を Local APIC へ送って戻る。
+    // 起動時の 1 回だけの呼び出しである。
+    let setup = match unsafe { crate::irq::switch_timer_to_lapic(calibration, requested_hz) } {
+        Ok(setup) => setup,
+        Err(error) => {
+            logger.error(format_args!(
+                "lapic-timer: could not switch the timer to the local APIC ({error:?}); halting"
+            ));
+            cpu::halt_forever();
+        }
+    };
+
+    logger.info(format_args!(
+        "lapic-timer: programmed from the calibration ({median_hz} Hz at divide \
+         configuration {divide:#x}): {setup}"
+    ));
+
+    // **設定の読み戻し。** 8259 の ICW2 と違い、LVT Timer は書いた値を
+    // 読み戻せる。**ただしこれは `sti` 前の項目 4 を格上げしない。**
+    // あちらは `sti` の手前の検査点の話で、その時点ではタイマはまだ 8259
+    // 経由である（切り替えは較正の後、較正は `sti` の後）。ここで示せるのは
+    // 「LVT については、設定した内容がどこかで検証されている」ことだけである。
+    match crate::irq::lvt_timer_readback() {
+        Some(lvt) => {
+            let expected_vector = idt::LAPIC_TIMER_VECTOR as u8;
+            let ok = lvt.vector() == expected_vector && !lvt.masked() && lvt.periodic();
+            logger.info(format_args!(
+                "lapic-timer: LVT timer read back: {lvt}, matches what we programmed \
+                 (vector {expected_vector:#04x}, unmasked, periodic) = {ok}"
+            ));
+            if !ok {
+                logger.error(format_args!(
+                    "lapic-timer: the LVT timer does not carry what we programmed; halting"
+                ));
+                cpu::halt_forever();
+            }
+        }
+        None => {
+            logger.error(format_args!(
+                "lapic-timer: the LVT timer could not be read back; halting"
+            ));
+            cpu::halt_forever();
+        }
+    }
+
+    // **PIC が黙っていることを読み戻す。** `irq::mask_all()` が実際に
+    // 呼ばれたことの観測でもある（S2-b で足してから呼び出し元が無かった）。
+    let masks = crate::irq::check_masks(&[]);
+    logger.info(format_args!(
+        "lapic-timer: the 8259 is fully masked after mask_all(): {masks}, all masked={}",
+        masks.matches()
+    ));
+    if !masks.matches() {
+        logger.error(format_args!(
+            "lapic-timer: the 8259 is not fully masked, so IRQ0 could still be delivered; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    // **許容幅の判定。ただし何を示しているかに注意が要る。**
+    //
+    // ここが比べているのは「要求周波数」と「較正値と初期カウントから導いた
+    // 実効周波数」で、**どちらもカーネルの内側の値である。** 整数の割り算で
+    // 生じるずれは捕まるが、**較正値そのものが間違っている場合は捕まらない。**
+    // 較正値が 2 倍になれば初期カウントも 2 倍になり、比は 100Hz のまま
+    // 一致する（自己無矛盾）。
+    //
+    // **較正値が現実と合っているかは、独立の時間基準でしか測れない。**
+    // PIT は今マスクしたので、カーネル内にはもう基準が無い。**ホスト側の
+    // 実時間と突き合わせる検査を xtask に置いてある**（`lapic-timer-test`）。
+    let requested_millihertz = u64::from(requested_hz) * 1000;
+    let actual = setup.actual_millihertz();
+    let deviation = actual.abs_diff(requested_millihertz);
+    let within_tolerance =
+        deviation * TIMER_TOLERANCE_DENOMINATOR <= requested_millihertz * TIMER_TOLERANCE_NUMERATOR;
+    logger.info(format_args!(
+        "lapic-timer: effective {}.{:03} Hz against a requested {requested_hz} Hz, deviation \
+         {deviation} mHz, within {TIMER_TOLERANCE_NUMERATOR}/{TIMER_TOLERANCE_DENOMINATOR} = \
+         {within_tolerance} (this compares two kernel-side values; it cannot show that the \
+         calibration itself matches real time)",
+        actual / 1000,
+        actual % 1000
+    ));
+    if !within_tolerance {
+        logger.error(format_args!(
+            "lapic-timer: the effective frequency is outside the tolerance; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "lapic-timer: the timer now arrives as vector {:#04x}, which the 8259 cannot produce",
+        idt::timer_delivery_vector()
+    ));
+}
+
+/// タイマの実効周波数の許容幅（±0.5%）。分子と分母で持つのは浮動小数点を
+/// 使わないためである。
+///
+/// # 導出（`verification-coverage.md` の S2-c）
+///
+/// 較正自身の誤差の上限 320 ppm と、起動をまたいだ中央値のばらつき 865 ppm
+/// （実測）を足して約 1,200 ppm。その約 4 倍が 5,000 ppm = 0.5% である。
+const TIMER_TOLERANCE_NUMERATOR: u64 = 5;
+const TIMER_TOLERANCE_DENOMINATOR: u64 = 1000;
+
 /// タイマ割り込みで駆動されるメインループ。
 ///
 /// # `hlt` を無条件に使う理由
@@ -530,7 +665,7 @@ pub unsafe fn run_timer_loop(
     // 較正は測るだけで、LAPIC タイマをタイマとして使わない。LVT Timer は
     // マスクされたままで、LINT0 と SVR にも触らない。
     if let Some(apic) = apic {
-        let _ = crate::apic::calibrate_timer(logger, apic);
+        let calibration = crate::apic::calibrate_timer(logger, apic);
 
         // === S2-d-1b: 2 つ目のコントローラ実装を 1 回だけ読ませる ===
         //
@@ -561,6 +696,21 @@ pub unsafe fn run_timer_loop(
                 "apic: no I/O APIC was mapped, so the second controller implementation \
                  could not be exercised"
             )),
+        }
+
+        // === S2-d-2: タイマを Local APIC タイマへ移す ===
+        //
+        // **較正より後でなければならない。** 初期カウントを較正の戻り値から
+        // 求めるためである。**そして切り替えの区間ではティックが 1 本も
+        // 来ない**ので、`TIMER_TICKS` を待つ処理（較正のエッジ待ち）は
+        // ここより前に済んでいる必要がある。
+        if let Some(calibration) = calibration {
+            switch_timer_to_lapic(logger, calibration);
+        } else {
+            logger.warn(format_args!(
+                "apic: the local APIC timer was not calibrated, so the timer stays on the PIT; \
+                 the 8259 keeps delivering IRQ0"
+            ));
         }
     }
 
@@ -604,7 +754,17 @@ pub unsafe fn run_timer_loop(
             announced_first = true;
             // **ICW2 の事後証明。** 実際に届いたベクタ番号を実値で確認する。
             match idt::first_pic_vector() {
-                Some(vector) if vector as usize == idt::timer_delivery_vector() => {
+                // **8259 の採番と突き合わせる。現在の配送先ではない。**
+                //
+                // `first_pic_vector` が記録するのは「PIC の採番範囲で最初に
+                // 届いたベクタ」で、定義からして 8259 由来の観測である。
+                // S2-d-2 でタイマが Local APIC へ移った後も、**移行より前に
+                // PIT が動いていた**（較正が PIT のティックを使う）ので値は
+                // 残っており、ICW2 の事後証明としては依然として有効である。
+                //
+                // **ここを `timer_delivery_vector()` にすると、移行後に
+                // `0x20` と `0xfe` を突き合わせて誤って落ちる。** 実際に落ちた。
+                Some(vector) if vector as usize == idt::PIC_TIMER_VECTOR => {
                     log_both(
                         logger,
                         console.as_deref_mut(),
@@ -618,7 +778,7 @@ pub unsafe fn run_timer_loop(
                     logger.error(format_args!(
                         "timer: the first PIC interrupt arrived as vector {other:?}, expected \
                          {:#04x}; the PIC vector offset (ICW2) is wrong; halting",
-                        idt::timer_delivery_vector()
+                        idt::PIC_TIMER_VECTOR
                     ));
                     cpu::halt_forever();
                 }

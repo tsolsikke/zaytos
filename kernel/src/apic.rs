@@ -536,6 +536,72 @@ fn sabotage_map_target(logger: &mut Logger<SerialPort>, what: &str, phys: PhysAd
     }
 }
 
+/// LVT Timer の periodic モード（bits 18:17 = 01）。
+pub(crate) const LVT_TIMER_PERIODIC: u32 = 1 << LVT_TIMER_MODE_SHIFT;
+
+/// LVT Timer の現在値。
+///
+/// # Safety
+///
+/// `lapic_virt` が写像済みの Local APIC ページの先頭であること。
+pub(crate) unsafe fn read_lvt_timer(lapic_virt: u64) -> u32 {
+    // SAFETY: 呼び出し元契約。読み取りのみ。
+    unsafe { read_lapic(lapic_virt, LAPIC_REGISTER_LVT_TIMER) }
+}
+
+/// 分周設定・LVT Timer・初期カウントを書く。
+///
+/// **順序が意味を持つ。** 分周を先に、次に LVT（ベクタとマスク）、
+/// **初期カウントは最後**である。初期カウントを書いた瞬間に数え下がりが
+/// 始まるので、先に書くとベクタが未設定のまま満了しうる。
+///
+/// # Safety
+///
+/// - `lapic_virt` が写像済みの Local APIC ページの先頭であること。
+/// - `lvt_timer` のマスクを外す場合、そのベクタに戻れるハンドラが IDT に
+///   入っていること。
+pub(crate) unsafe fn program_timer(
+    lapic_virt: u64,
+    divide_configuration: u32,
+    lvt_timer: u32,
+    initial_count: u32,
+) {
+    // SAFETY: 呼び出し元契約。順序は上の説明のとおり。
+    unsafe {
+        write_lapic(
+            lapic_virt,
+            LAPIC_REGISTER_TIMER_DIVIDE,
+            divide_configuration,
+        );
+        write_lapic(lapic_virt, LAPIC_REGISTER_LVT_TIMER, lvt_timer);
+        write_lapic(
+            lapic_virt,
+            LAPIC_REGISTER_TIMER_INITIAL_COUNT,
+            initial_count,
+        );
+    }
+}
+
+/// LVT Timer のマスクだけを落とす（read-modify-write）。
+///
+/// **ベクタとモードは触らない。** 設定と解禁を分けるためである。
+///
+/// # Safety
+///
+/// [`program_timer`] でベクタを設定済みで、そのベクタに戻れるハンドラが
+/// IDT に入っていること。**これを呼んだ瞬間からティックが届く。**
+pub(crate) unsafe fn unmask_lvt_timer(lapic_virt: u64) {
+    // SAFETY: 呼び出し元契約。マスクビットだけを落とす。
+    unsafe {
+        let current = read_lapic(lapic_virt, LAPIC_REGISTER_LVT_TIMER);
+        write_lapic(
+            lapic_virt,
+            LAPIC_REGISTER_LVT_TIMER,
+            current & !ENTRY_MASKED_BIT,
+        );
+    }
+}
+
 // ===========================================================================
 // S2-a: レジスタを読むだけの棚卸し
 //
@@ -1095,6 +1161,16 @@ const LAPIC_REGISTER_TIMER_DIVIDE: u64 = 0x3E0;
 /// もつ。較正窓（下記）は 100ms なので、桁が 2 つ以上余っている。
 const LAPIC_TIMER_DIVIDE_BY_16: u32 = 0b0011;
 
+/// 分周なし（Divide Configuration Register の `0b1011`）。**破壊専用である。**
+#[cfg(feature = "lapic-timer-wrong-divide-test")]
+const LAPIC_TIMER_DIVIDE_BY_1: u32 = 0b1011;
+
+/// 較正結果を壊すときの倍率。**破壊専用である。**
+///
+/// 2 倍にすると実効周波数が 200Hz になり、許容幅（±0.5%）の外へ確実に出る。
+#[cfg(feature = "lapic-timer-scale-calibration-test")]
+const CALIBRATION_SABOTAGE_SCALE: u64 = 2;
+
 /// 較正窓に使う PIT ティック数。
 ///
 /// # なぜ 10 なのか（先に決めていない。誤差の見積りから決めた）
@@ -1146,6 +1222,15 @@ pub struct TimerCalibration {
     median_hz: u64,
     /// 最小と最大の差。
     spread_hz: u64,
+    /// 較正中に Divide Configuration レジスタへ書いた値。
+    ///
+    /// # 周波数と同じ構造体で運ぶ。**片方だけを持ち出せない形にする**
+    ///
+    /// [`Self::median_hz`] は「この分周設定のもとで数え下がる速さ」であって、
+    /// 分周が変われば意味を失う。別々に持つと、**較正を 16 分周で行って
+    /// 運用を別の分周で設定する**という古典的な罠が開く。
+    /// **規律ではなく構造で塞ぐ。**
+    divide_configuration: u32,
 }
 
 impl TimerCalibration {
@@ -1158,6 +1243,14 @@ impl TimerCalibration {
     /// 標本のばらつき。**許容幅を決める入力である。**
     pub const fn spread_hz(&self) -> u64 {
         self.spread_hz
+    }
+
+    /// [`Self::median_hz`] が成り立つ前提となる分周設定。
+    ///
+    /// **この値を使わずにタイマを設定しないこと。** 周波数だけを持ち出すと、
+    /// 較正時と運用時で分周が食い違う。
+    pub const fn divide_configuration(&self) -> u32 {
+        self.divide_configuration
     }
 
     /// 標本そのもの。**中央値とばらつきだけでは分布の形が分からない**ので、
@@ -1241,11 +1334,19 @@ pub fn calibrate_timer(
         return None;
     }
 
+    // 破壊 (S2-d-2, lapic-timer-wrong-divide): 較正で書く分周と、戻り値に
+    // 載せる分周を食い違わせる。**戻り値に含める形が塞いでいる罠**を、
+    // 構造ごと壊して確かめる。
+    let divide = LAPIC_TIMER_DIVIDE_BY_16;
+    #[cfg(feature = "lapic-timer-wrong-divide-test")]
+    let written_divide = LAPIC_TIMER_DIVIDE_BY_1;
+    #[cfg(not(feature = "lapic-timer-wrong-divide-test"))]
+    let written_divide = divide;
     // SAFETY: 上と同じページ。分周設定と初期カウントだけを書く。LVT Timer が
-    // マスクされていることは直前に確かめたので、数え下がりが始まっても割り込みは
-    // 発生しない。
+    // マスクされていることは直前に確かめたので、数え下がりが始まっても
+    // 割り込みは発生しない。
     unsafe {
-        write_lapic(lapic, LAPIC_REGISTER_TIMER_DIVIDE, LAPIC_TIMER_DIVIDE_BY_16);
+        write_lapic(lapic, LAPIC_REGISTER_TIMER_DIVIDE, written_divide);
         write_lapic(lapic, LAPIC_REGISTER_TIMER_INITIAL_COUNT, u32::MAX);
     }
 
@@ -1306,6 +1407,25 @@ pub fn calibrate_timer(
     let median_hz = sorted[CALIBRATION_SAMPLES / 2];
     let spread_hz = sorted[CALIBRATION_SAMPLES - 1] - sorted[0];
 
+    // 破壊 (S2-d-2, lapic-timer-scale-calibration): 較正の戻り値を 2 倍にする。
+    // **初期カウントが 2 倍になるので、タイマは半分の速さで走る**（実測の比は
+    // 0.500）。カーネル内の比（要求 100Hz と実効周波数）は自己無矛盾のまま
+    // 変わらないので、**ホストの実時間と突き合わせて初めて見える。**
+    // これが「較正値が初期カウントへ実際に流れている」ことの証明になる。
+    //
+    // **この破壊が空振りする経路を塞ぐ。** 較正が呼ばれなくなった構成では、
+    // このフックは踏まれない。**踏まれなければ破壊ビルドが正常に見えて
+    // 緑になる**（壊したつもりで緑）。**適用したことを出力し、xtask 側で
+    // 出ていなければ落とす。** ACPI の未マップ破壊で採ったのと同じ形である。
+    #[cfg(feature = "lapic-timer-scale-calibration-test")]
+    let median_hz = {
+        logger.warn(format_args!(
+            "apic: SABOTAGE applied - the calibration result is scaled by \
+             {CALIBRATION_SABOTAGE_SCALE}x before it leaves calibrate_timer"
+        ));
+        median_hz * CALIBRATION_SABOTAGE_SCALE
+    };
+
     logger.info(format_args!(
         "apic: LAPIC timer calibration: median={median_hz} Hz spread={spread_hz} Hz \
          (divide by 16, window {CALIBRATION_WINDOW_TICKS} PIT tick(s) at {} Hz, \
@@ -1352,6 +1472,9 @@ pub fn calibrate_timer(
         samples,
         median_hz,
         spread_hz,
+        // **上の `write_lapic` で実際に書いた値をそのまま返す。** 定数を
+        // 再掲すると、片方だけを変えたときに食い違う。
+        divide_configuration: divide,
     })
 }
 

@@ -294,19 +294,99 @@ fn clear_bit(bitmap: &mut [u64; MASK_BITMAP_WORDS], index: u8) {
     bitmap[index / u64::BITS as usize] &= !(1u64 << (index % u64::BITS as usize));
 }
 
-// **`TimerSource` はここで実装しない。S2-d-2 で足す。**
-//
-// 実装に要る入力が 2 つとも、この段には存在しない。
-//
-// - **初期カウント**は較正の戻り値（`crate::apic::TimerCalibration`）から
-//   実行時に求める。**リテラルで焼かない**と決めてあるので、較正値を持たない
-//   この段では正しい値を書けない。
-// - **LVT Timer に載せるベクタ**（`0xFE`）は、専用スタブとハンドラを用意して
-//   から使う。順序を守らないと、最初のティックで停止する。
-//
-// 仮の実装を置く案は採らない。`Ok` を返す空実装は「設定されていないのに
-// 成功した」ように見え、`Err` を返すだけの実装は 2 つ目の実装とは呼べない。
-// **書けるようになった段で書くほうが、書けないものを置くより正しい。**
+/// Local APIC タイマ（S2-d-2）。**`TimerSource` の 2 つ目の実装である。**
+///
+/// # 較正の戻り値を丸ごと持つ
+///
+/// 周波数だけを受け取る形にしない。**分周設定と対で持たないと、較正時と
+/// 運用時で分周が食い違う罠が開く**（`TimerCalibration` の doc）。
+pub struct LapicTimer {
+    calibration: crate::apic::TimerCalibration,
+}
+
+impl LapicTimer {
+    /// 較正の結果からタイマ源を作る。
+    ///
+    /// **`Apic::new` が先に走っていること**（Local APIC のアドレスを
+    /// [`LAPIC_EOI_BASE`] へ入れるのはあちらである）。
+    pub(super) const fn new(calibration: crate::apic::TimerCalibration) -> Self {
+        Self { calibration }
+    }
+}
+
+impl super::TimerSource for LapicTimer {
+    unsafe fn configure_timer(
+        &self,
+        frequency_hz: u32,
+    ) -> Result<super::TimerSetup, super::TimerError> {
+        let base = LAPIC_EOI_BASE.load(Ordering::Relaxed);
+        if base == NOT_INSTALLED {
+            return Err(super::TimerError::lapic_not_mapped());
+        }
+        if frequency_hz == 0 {
+            return Err(super::TimerError::frequency_out_of_range());
+        }
+
+        // **初期カウントは較正の戻り値から実行時に求める。リテラルで焼かない。**
+        let initial_count = self.calibration.median_hz() / u64::from(frequency_hz);
+        let Ok(initial_count) = u32::try_from(initial_count) else {
+            return Err(super::TimerError::frequency_out_of_range());
+        };
+        if initial_count == 0 {
+            return Err(super::TimerError::frequency_out_of_range());
+        }
+
+        // **分周は較正の戻り値に含まれているものを使う。** 別の値を書くと、
+        // 較正した速さと数え下がる速さが食い違う。
+        let divide = self.calibration.divide_configuration();
+
+        // **マスクしたまま設定する。** 解禁は別（`unmask_timer`）で、
+        // その前に PIC を全マスクする必要がある。
+        let lvt = super::LAPIC_TIMER_VECTOR_BITS
+            | crate::apic::LVT_TIMER_PERIODIC
+            | crate::apic::ENTRY_MASKED_BIT;
+
+        // SAFETY: `base` は `Apic::new` が写像を確認した Local APIC のページ
+        // 先頭である。マスクを立てたまま書くので、ここでティックは始まらない。
+        unsafe { crate::apic::program_timer(base, divide, lvt, initial_count) };
+
+        // 実効周波数は**書いた初期カウントと較正値から導く。** 要求値ではない。
+        let actual_millihertz =
+            self.calibration.median_hz().saturating_mul(1000) / u64::from(initial_count);
+
+        Ok(super::TimerSetup::lapic(
+            frequency_hz,
+            actual_millihertz,
+            initial_count,
+            divide,
+        ))
+    }
+}
+
+/// LVT Timer のマスクを外す（S2-d-2）。**ここからティックが届く。**
+///
+/// # Safety
+///
+/// - ベクタが設定済みで、そのベクタに戻れるハンドラが IDT にあること。
+/// - **PIC 側のタイマが既に黙っていること。** 両方開くと二重に届く。
+pub(super) unsafe fn unmask_timer() {
+    let base = LAPIC_EOI_BASE.load(Ordering::Relaxed);
+    if base == NOT_INSTALLED {
+        return;
+    }
+    // SAFETY: 呼び出し元契約。マスクビットだけを落とす。
+    unsafe { crate::apic::unmask_lvt_timer(base) }
+}
+
+/// LVT Timer の現在値を読み戻す（S2-d-2）。
+pub(super) fn read_lvt_timer() -> Option<u32> {
+    let base = LAPIC_EOI_BASE.load(Ordering::Relaxed);
+    if base == NOT_INSTALLED {
+        return None;
+    }
+    // SAFETY: `Apic::new` が写像を確認したページである。読み取りのみ。
+    Some(unsafe { crate::apic::read_lvt_timer(base) })
+}
 
 #[cfg(test)]
 mod tests {
