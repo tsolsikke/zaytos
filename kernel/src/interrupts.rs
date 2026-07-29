@@ -510,6 +510,33 @@ pub unsafe fn run_timer_loop(
     // マスクされたままで、LINT0 と SVR にも触らない。
     if let Some(apic) = apic {
         let _ = crate::apic::calibrate_timer(logger, apic);
+
+        // === S2-d-1b: 2 つ目のコントローラ実装を 1 回だけ読ませる ===
+        //
+        // **切り替えない。読むだけである。** 配送は PIC / PIT のままで、
+        // 書き込みは一切しない。
+        //
+        // 呼ぶ理由は、2 つ目の実装が**実ハードウェアを正しく読めることを、
+        // 振る舞いが変わらないうちに確かめておく**ためである。どこからも
+        // 呼ばずに S2-d-1c（配送が変わる段）へ入ると、そこで落ちたときに
+        // 「切り替えが悪いのか、実装が悪いのか」を切り分けられない。
+        //
+        // 期待は「1 本も開いていない」である。IRQ0 と IRQ1 は PIC 側で開いて
+        // いるが、**I/O APIC 経由では 1 本も配送していない**ので、redirection
+        // entry は全本マスクされたままのはずである。**PIC のマスク状態を
+        // ここへ持ち込まないこと。** 別のコントローラの状態である。
+        match crate::irq::survey_apic_masks(apic, &[]) {
+            Some(check) => logger.info(format_args!(
+                "apic: the I/O APIC controller reads its redirection entries: {check}, \
+                 all masked={} (nothing is delivered through the I/O APIC yet; \
+                 the PIC still owns delivery)",
+                check.matches()
+            )),
+            None => logger.warn(format_args!(
+                "apic: no I/O APIC was mapped, so the second controller implementation \
+                 could not be exercised"
+            )),
+        }
     }
 
     // プリエンプティブマルチタスクのデモと検証（M5-d）。timer が動き出した

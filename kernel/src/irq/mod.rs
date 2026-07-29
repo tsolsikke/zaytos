@@ -42,11 +42,198 @@
 //! 観測値を `Display` にしているのは、**ログの文言を変えずに呼び出し側から
 //! 生の値を取り上げる**ためである。呼び出し側は `"pic: IMR after unmasking
 //! IRQ0 {}"` のように前置きだけを持ち、値の書式は実装が決める。
+//!
+//! # 公開面の内訳（trait 委譲か、そうでないか）
+//!
+//! **trait は境界の全部を覆っていない。** 覆っていると誤解すると、
+//! 「実装を差し替えれば全部が切り替わる」と読めてしまう。どれがどちらかを
+//! ここに列挙する。**公開関数を足したらこの表も足すこと。**
+//!
+//! | 公開関数 | 扱い | 理由 |
+//! |---|---|---|
+//! | [`unmask`] | [`Controller`] へ委譲 | 実装ごとに答えが変わる |
+//! | [`mask_all`] | [`Controller`] へ委譲 | 同上 |
+//! | [`end_of_interrupt`] | [`Controller`] へ委譲 | 同上 |
+//! | [`is_spurious`] | [`Controller`] へ委譲 | 同上 |
+//! | [`check_masks`] | [`Controller`] へ委譲 | 同上 |
+//! | [`configure_timer`] | [`TimerSource`] へ委譲 | 同上 |
+//! | [`init`] | **PIC 専用** | 8259 の再マップ（ICW1 から ICW4）そのもので、APIC 側に対応物が無い。I/O APIC 側の初期設定は形が違うので、**S2-d-1c で `init` の扱いと合わせて改めて判断する** |
+//! | [`service_snapshot`] | **PIC 専用** | 8259 の ISR を読む診断であり、LAPIC の ISR は 8 本で形が違う。配送が移る段（S2-d-1c 以降）で形を決める |
+//! | [`vector_for`] | モジュール関数 | `const fn` である。固定トールチェイン（1.97.1）で const trait method が安定しておらず、trait へ入れると [`crate::idt::TIMER_VECTOR`] が定義できない |
+//! | [`irq_for`] | モジュール関数 | 同上 |
+//! | [`managed_vectors`] | モジュール関数 | 同上 |
+//! | [`timer_frequency_hz`] | モジュール関数 | 同上 |
+//! | [`survey_apic_masks`] | どちらでもない | 2 つ目の実装を 1 回読ませるための一時的な入口（S2-d-1b）。切り替えが済めば要らなくなる |
+//!
+//! # `TimerSource` は実装が 1 つしかない。**これは原則の例外である**
+//!
+//! S0-a は「実装が 2 つになるまで trait を切らない」と決めており、S2-d-1b は
+//! [`Controller`] についてはそれを満たす（`Legacy` と `Apic`）。
+//! **[`TimerSource`] は満たしていない。** 実装は PIT の 1 つだけで、Local APIC
+//! タイマ側は S2-d-2 で足す。**単一実装の trait であることを、書かずに
+//! 通さない。**
+//!
+//! 遅らせなかった理由は、**2 本の trait を責務で対にして決めた**ことにある。
+//! 片方だけ S2-d-2 まで遅らせると、[`configure_timer`] だけがモジュール関数
+//! として残り、上の公開面の表がもう 1 種類増える。切り分けの軸としては、
+//! 「trait 化」を 1 回で終えて「実装を足す」を別の段に置くほうが読みやすい。
+//!
+//! Local APIC タイマの実装をこの段で書かなかった理由は `irq/apic.rs` の
+//! 末尾にある（初期カウントは較正の戻り値から求めるもので、較正値を持たない
+//! この段では正しい値を書けない）。
+//!
+//! # 境界の外に、境界が所有すべき書き込み操作がある（未解決）
+//!
+//! S0-a の「IMR への書き込みは境界の内側だけに存在する」は、**PIC については
+//! 真だが、I/O APIC については偽である。** redirection entry を読み書きする
+//! 操作は [`crate::apic`] にあり、割り込み層の外である。可視性の静的検査は
+//! `kernel/src/irq/` の内側だけを見るので、**ここは捕まらない。**
+//!
+//! **守れない箇所を守れると書かないために、非対称を明示しておく。**
+//! レジスタの配置を知るモジュールを 1 つに保つほうを優先した結果であり、
+//! 到達範囲は `pub(crate)` まで狭めてある。解禁条件つきで
+//! `deferred-decisions.md` に置いた。
+//!
+//! # まだ置き場の決まっていない操作（S2-d-1c で決める）
+//!
+//! **redirection entry の設定を担う操作が、trait にも境界にも無い。**
+//! [`Controller::unmask`] はマスクを外すだけだが、I/O APIC ではその前に
+//! **ベクタ・配送モード・宛先を entry へ書き込む**必要がある。PIC 側では
+//! この役割を [`init`] が担っていたが、その `init` は PIC 専用として残した
+//! ので、APIC 側には置き場が無い。
+//!
+//! **`unmask` の中でついでに設定する形にしないこと。** マスクを外す操作と
+//! 経路を設定する操作を 1 つに畳むことになり、後で分けたくなったときに高くつく
+//! （マスクの開け閉めは何度も起きるが、経路の設定は 1 回である）。
+//! S2-d-1c で `init` の扱いと合わせて決める。
 
+mod apic;
 mod pic;
 mod pit;
 
 use core::fmt;
+
+/// 割り込みコントローラ。**S2-d-1b で切った。**
+///
+/// # 何がこの trait に入り、何が入らないか
+///
+/// **この trait は境界の全部を覆っていない。** 境界の公開関数のうち、
+/// 実装ごとに答えが変わるものだけがここに入る。入らなかったものと理由は
+/// モジュール doc の一覧にある（[`init`] と [`service_snapshot`]、および
+/// `const fn` の 4 本）。
+///
+/// # なぜ 2 本に分けるのか
+///
+/// 「LAPIC タイマが LAPIC の一部である」のは**実装の事情であって責務では
+/// ない**。1 本に畳むと、I/O APIC が「タイマ源でもある」ことを強いられる。
+/// 1 つの型が両方を実装すればよいので、分けても手間は増えない。
+trait Controller {
+    /// 指定した IRQ 1 本を解禁する。
+    ///
+    /// # Safety
+    ///
+    /// [`unmask`] と同じ。
+    unsafe fn unmask(&self, irq: u8);
+
+    /// すべての IRQ をマスクする。
+    ///
+    /// # Safety
+    ///
+    /// [`mask_all`] と同じ。
+    unsafe fn mask_all(&self);
+
+    /// 割り込みの後始末。
+    ///
+    /// # Safety
+    ///
+    /// [`end_of_interrupt`] と同じ。
+    unsafe fn end_of_interrupt(&self, irq: u8, spurious: bool);
+
+    /// この割り込みはスプリアス（偽）か。
+    ///
+    /// # Safety
+    ///
+    /// [`is_spurious`] と同じ。
+    unsafe fn is_spurious(&self, irq: u8) -> bool;
+
+    /// マスクの実状態を 1 回読み、`unmasked` だけが開いているかを判定する。
+    fn check_masks(&self, unmasked: &[u8]) -> MaskCheck;
+}
+
+/// 周期タイマ源。
+trait TimerSource {
+    /// 周期タイマを設定する。解禁は別（[`Controller::unmask`] または LVT）。
+    ///
+    /// # Safety
+    ///
+    /// [`configure_timer`] と同じ。
+    unsafe fn configure_timer(&self, frequency_hz: u32) -> Result<TimerSetup, TimerError>;
+}
+
+/// 8259A PIC と 8254 PIT の組。**現在動いている実装である。**
+///
+/// 2 つのデバイスにまたがるが、どちらもレガシーの組で、片方だけを差し替える
+/// 場面が無いので 1 つの型にしてある。
+struct Legacy;
+
+impl Controller for Legacy {
+    unsafe fn unmask(&self, irq: u8) {
+        // SAFETY: ハンドラの用意は呼び出し側の契約。
+        unsafe { pic::unmask_irq(irq) }
+    }
+
+    unsafe fn mask_all(&self) {
+        // SAFETY: 呼び出し側の契約。全ビットを立てるので、どの IRQ も通らない。
+        unsafe { pic::set_masks(pic::MASK_ALL, pic::MASK_ALL) }
+    }
+
+    unsafe fn end_of_interrupt(&self, irq: u8, spurious: bool) {
+        // SAFETY: 呼び出し側の契約。宛先の決定は純粋ロジックに委ねる。
+        unsafe { pic::send_eoi_for(pic::eoi_action_for(irq, spurious)) }
+    }
+
+    unsafe fn is_spurious(&self, irq: u8) -> bool {
+        // SAFETY: 排他は呼び出し側の契約。
+        let isr = unsafe { pic::read_isr() };
+        pic::is_spurious(irq, isr)
+    }
+
+    fn check_masks(&self, unmasked: &[u8]) -> MaskCheck {
+        let (master, slave) = pic::read_masks();
+        let (expected_master, expected_slave) = expected_masks(unmasked);
+        MaskCheck {
+            observed: MaskState::Pic { master, slave },
+            expected: MaskState::Pic {
+                master: expected_master,
+                slave: expected_slave,
+            },
+        }
+    }
+}
+
+impl TimerSource for Legacy {
+    unsafe fn configure_timer(&self, frequency_hz: u32) -> Result<TimerSetup, TimerError> {
+        // SAFETY: 呼び出し側の契約をそのまま引き継ぐ。
+        let divisor = unsafe { pit::configure_channel0(frequency_hz) }.map_err(TimerError)?;
+        Ok(TimerSetup {
+            requested_hz: frequency_hz,
+            actual_millihertz: pit::actual_frequency_millihertz(divisor),
+            source: TimerSourceSetup::Pit { divisor },
+        })
+    }
+}
+
+/// 現在有効なコントローラ。
+///
+/// # なぜ列挙子が無いのか（S2-d-1b の時点）
+///
+/// 切り替えが実行時に起きる以上、最終的な dispatch は列挙子になる
+/// （関連型では実行時の切り替えを跨げず、trait object は値として返せない）。
+/// **ただし S2-d-1b は切り替えない段である。** 状態が 1 つしか無いうちに
+/// 列挙子を置くと、選ばれることのない腕を先回りで作ることになる。
+/// **使うから足すのであって、将来のために足すのではない。**
+/// 列挙子は、実際に 2 つの状態を持つ S2-d-1c で入れる。
+const ACTIVE: Legacy = Legacy;
 
 /// [`init`] の失敗。
 ///
@@ -168,15 +355,29 @@ pub const fn irq_for(vector: u8) -> Option<u8> {
 /// `unmasked` がスライスなのは、S2 の IO-APIC が 24 本以上を扱うためである。
 /// `u16` のビットマップにすると「16 本」をシグネチャに焼き込むことになる。
 pub fn check_masks(unmasked: &[u8]) -> MaskCheck {
-    let (master, slave) = pic::read_masks();
-    let (expected_master, expected_slave) = expected_masks(unmasked);
-    MaskCheck {
-        observed: MaskState::Pic { master, slave },
-        expected: MaskState::Pic {
-            master: expected_master,
-            slave: expected_slave,
-        },
-    }
+    ACTIVE.check_masks(unmasked)
+}
+
+/// 2 つ目のコントローラ実装（Local APIC / I/O APIC）でマスクを読み、その観測を返す。
+///
+/// **切り替えない。読むだけである。** S2-d-1b は振る舞い不変の段で、配送は
+/// PIC / PIT のままである。
+///
+/// # なぜ読むのか
+///
+/// 2 つ目の実装を書いても、どこからも呼ばなければ**実ハードウェアを正しく
+/// 読めるかが分からないまま S2-d-1c へ入る**。1c は配送が変わる段なので、
+/// そこで初めて落ちると「切り替えが悪いのか、実装が悪いのか」を切り分け
+/// られない。**振る舞いを変えない段のうちに、読めることだけを確かめておく。**
+/// S1-c で「写像したうえで読んで確かめた」のと同じ形である。
+///
+/// 読むのは I/O APIC の redirection entry のマスクビットだけで、書き込みは
+/// 一切しない。S2-a が同じレジスタを読んでいるので、新しい危険は無い。
+///
+/// I/O APIC が 1 台も写像できていなければ `None`。
+pub fn survey_apic_masks(mapped: &crate::apic::MappedApic, unmasked: &[u8]) -> Option<MaskCheck> {
+    let controller = apic::Apic::new(mapped)?;
+    Some(controller.check_masks(unmasked))
 }
 
 /// `unmasked` を開けたときに IMR がとるはずの値（純粋な計算）。
@@ -197,8 +398,8 @@ fn expected_masks(unmasked: &[u8]) -> (u8, u8) {
 /// 解禁する IRQ には、EOI を発行するハンドラが IDT に入っていること
 /// （ADR-0018 §2 の項目 5 / 7）。
 pub unsafe fn unmask(irq: u8) {
-    // SAFETY: ハンドラの用意は呼び出し側の契約。
-    unsafe { pic::unmask_irq(irq) }
+    // SAFETY: 呼び出し側の契約をそのまま実装へ引き継ぐ。
+    unsafe { ACTIVE.unmask(irq) }
 }
 
 /// すべての IRQ をマスクする。
@@ -230,8 +431,8 @@ pub unsafe fn unmask(irq: u8) {
 /// 呼び出し後、マスクした IRQ は届かなくなる。タイマを含むので、**別の配送
 /// 経路を用意する前に呼ぶと時間が止まる。**
 pub unsafe fn mask_all() {
-    // SAFETY: 呼び出し側の契約。全ビットを立てるので、どの IRQ も通らない。
-    unsafe { pic::set_masks(pic::MASK_ALL, pic::MASK_ALL) }
+    // SAFETY: 呼び出し側の契約をそのまま実装へ引き継ぐ。
+    unsafe { ACTIVE.mask_all() }
 }
 
 /// この割り込みはスプリアス（偽）か。
@@ -245,9 +446,8 @@ pub unsafe fn mask_all() {
 /// コマンドポートの読み出し対象を変更する。他の実行文脈が同時に
 /// コントローラを触っていないこと。
 pub unsafe fn is_spurious(irq: u8) -> bool {
-    // SAFETY: 排他は呼び出し側の契約。
-    let isr = unsafe { pic::read_isr() };
-    pic::is_spurious(irq, isr)
+    // SAFETY: 呼び出し側の契約をそのまま実装へ引き継ぐ。
+    unsafe { ACTIVE.is_spurious(irq) }
 }
 
 /// 割り込みの後始末。スプリアスなら偽の割り込みへ応答しない。
@@ -256,8 +456,8 @@ pub unsafe fn is_spurious(irq: u8) -> bool {
 ///
 /// 実際に発生した割り込みに対してのみ呼ぶこと。
 pub unsafe fn end_of_interrupt(irq: u8, spurious: bool) {
-    // SAFETY: 呼び出し側の契約。宛先の決定は純粋ロジックに委ねる。
-    unsafe { pic::send_eoi_for(pic::eoi_action_for(irq, spurious)) }
+    // SAFETY: 呼び出し側の契約をそのまま実装へ引き継ぐ。
+    unsafe { ACTIVE.end_of_interrupt(irq, spurious) }
 }
 
 /// 周期タイマを設定する。解禁は別（[`unmask`]）。
@@ -267,13 +467,8 @@ pub unsafe fn end_of_interrupt(irq: u8, spurious: bool) {
 /// - 起動時に 1 回だけ呼ぶこと。
 /// - 呼び出し時点でタイマの IRQ がマスクされていること。
 pub unsafe fn configure_timer(frequency_hz: u32) -> Result<TimerSetup, TimerError> {
-    // SAFETY: 呼び出し側の契約をそのまま引き継ぐ。
-    let divisor = unsafe { pit::configure_channel0(frequency_hz) }.map_err(TimerError)?;
-    Ok(TimerSetup {
-        requested_hz: frequency_hz,
-        actual_millihertz: pit::actual_frequency_millihertz(divisor),
-        source: TimerSourceSetup::Pit { divisor },
-    })
+    // SAFETY: 呼び出し側の契約をそのまま実装へ引き継ぐ。
+    unsafe { ACTIVE.configure_timer(frequency_hz) }
 }
 
 /// タイマに要求する周波数。
@@ -299,7 +494,10 @@ pub const fn timer_frequency_hz() -> u32 {
 /// trait object にしない理由は、値として返して保持したいためである。
 enum TimerSourceSetup {
     Pit { divisor: u16 },
-    // S2-d-1 で足す: LapicTimer { initial_count: u32, divide_configuration: u8 },
+    // S2-d-2 で足す: LapicTimer { initial_count: u32, divide_configuration: u32 }。
+    // **S2-d-1b では足していない。** 初期カウントは較正の戻り値から実行時に
+    // 求めるもので、較正値を持たないこの段では正しい値を書けない
+    // （`irq/apic.rs` の末尾に理由がある）。
 }
 
 /// [`configure_timer`] が何を設定したかの観測値。
@@ -380,9 +578,27 @@ pub struct MaskCheck {
 /// 既存の腕を触らないので、PIC の出力する文字列は変わらない。
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum MaskState {
-    Pic { master: u8, slave: u8 },
-    // S2-d-1 で足す: IoApic { masked: [bool; MAX_REDIRECTION_ENTRIES], … },
+    Pic {
+        master: u8,
+        slave: u8,
+    },
+    /// I/O APIC の redirection entry のマスクビット（S2-d-1b で足した）。
+    ///
+    /// **ビットマップで持つ。** `bool` の配列にすると本数ぶんの領域が要り、
+    /// この型は値として返す。添字は entry 番号 = GSI（この系では I/O APIC が
+    /// 1 台で GSI base が 0）である。
+    ///
+    /// 幅は 256 ビット固定で、**取りこぼしが起こらない**。Max Redirection
+    /// Entry は Version レジスタの 8 ビット欄なので、entry は最大 256 本である。
+    IoApic {
+        entries: usize,
+        masked: [u64; MASK_BITMAP_WORDS],
+    },
 }
+
+/// [`MaskState::IoApic`] のビットマップの語数。256 ビット = redirection entry の
+/// 取りうる最大本数。
+const MASK_BITMAP_WORDS: usize = 4;
 
 impl MaskCheck {
     /// 実測が期待と一致しているか。**判定はこの値の比較で行い、`Display` の
@@ -439,8 +655,31 @@ impl fmt::Display for ObservedMasks {
                     write!(f, "master={master:#04x} slave={slave:#04x}")
                 }
             }
+            MaskState::IoApic { entries, masked } => {
+                write!(f, "entries={entries} masked=")?;
+                write_mask_bitmap(f, entries, &masked)
+            }
         }
     }
+}
+
+/// マスクのビットマップを 16 進で書く。**必要な語だけ出す。**
+///
+/// 本数に関係なく 4 語すべてを出すと、24 本の系で意味の無い 0 が 3 語並ぶ。
+/// 上位の語から書くので、左端が最も大きい entry 番号側になる。
+fn write_mask_bitmap(
+    f: &mut fmt::Formatter<'_>,
+    entries: usize,
+    masked: &[u64; MASK_BITMAP_WORDS],
+) -> fmt::Result {
+    let words = entries
+        .div_ceil(u64::BITS as usize)
+        .clamp(1, MASK_BITMAP_WORDS);
+    write!(f, "0x")?;
+    for word in masked[..words].iter().rev() {
+        write!(f, "{word:016x}")?;
+    }
+    Ok(())
 }
 
 /// このコントローラが担当するベクタ番号の範囲。
@@ -487,6 +726,23 @@ impl fmt::Display for MaskCheck {
                 "master={master:#04x} slave={slave:#04x} \
                  (expected {expected_master:#04x}/{expected_slave:#04x}) [read back from hardware]"
             ),
+            (
+                MaskState::IoApic { entries, masked },
+                MaskState::IoApic {
+                    masked: expected_masked,
+                    ..
+                },
+            ) => {
+                write!(f, "entries={entries} masked=")?;
+                write_mask_bitmap(f, entries, &masked)?;
+                write!(f, " (expected ")?;
+                write_mask_bitmap(f, entries, &expected_masked)?;
+                write!(f, ") [read back from hardware]")
+            }
+            // **実装をまたいだ比較は行わない。** 観測と期待は同じ
+            // `check_masks` の呼び出しから作るので、腕が食い違うことはない。
+            // 食い違ったら実装の誤りなので、黙って一致扱いにせず明示する。
+            _ => write!(f, "observed and expected come from different controllers"),
         }
     }
 }

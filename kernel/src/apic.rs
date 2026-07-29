@@ -77,10 +77,43 @@ pub struct MappedApic {
     local_apic: PhysAddr,
     io_apics: [Option<IoApicLocation>; MAX_MAPPED_IO_APICS],
     io_apic_count: usize,
+    /// この写像を作る元になった MADT の読み取り結果。
+    ///
+    /// **Interrupt Source Override の解決表（S2-d-0）を運ぶために持つ。**
+    /// 割り込み層の APIC 実装は「IRQ をどの redirection entry へ向けるか」を
+    /// 決めるのにこの表が要る。写像とセットで渡せば、呼び出し側が 2 つの値を
+    /// 持ち回って取り違える形にならない。
+    mmio: ApicMmio,
 }
 
 /// 写像を記録する I/O APIC の上限。`acpi` 側の上限と同じ理由で置く。
 const MAX_MAPPED_IO_APICS: usize = 4;
+
+impl MappedApic {
+    /// Local APIC の MMIO 物理アドレス。**写像が確認できたものである。**
+    pub(crate) const fn local_apic_phys(&self) -> PhysAddr {
+        self.local_apic
+    }
+
+    /// 最初の I/O APIC の所在。1 台も写像できていなければ `None`。
+    ///
+    /// **1 台目だけを返す。** レガシー IRQ（GSI 0 から 15）を担当するのは
+    /// GSI base が 0 の 1 台で、実測でもこの系には 1 台しか無い。複数台の
+    /// 割り振りは、実際に 2 台目が現れる構成を測れるようになってから扱う。
+    /// **今要らない一般化を先回りで作らない。**
+    pub(crate) fn first_io_apic(&self) -> Option<IoApicLocation> {
+        self.io_apics
+            .iter()
+            .take(self.io_apic_count)
+            .find_map(|slot| *slot)
+    }
+
+    /// この写像を作る元になった MADT の読み取り結果（Interrupt Source Override
+    /// の解決表を含む）。
+    pub(crate) const fn mmio(&self) -> ApicMmio {
+        self.mmio
+    }
+}
 
 /// APIC の MMIO を写像し、Local APIC を読めることを確かめる。
 ///
@@ -163,6 +196,7 @@ pub fn map_and_probe<const CAP: usize>(
         local_apic: lapic_phys,
         io_apics: [None; MAX_MAPPED_IO_APICS],
         io_apic_count: 0,
+        mmio: *mmio,
     };
 
     for io_apic in mmio.io_apics() {
@@ -552,6 +586,16 @@ const LAPIC_LVT_ENTRIES: [(&str, u64); 6] = [
 ];
 
 /// LVT / redirection entry の共通ビット。
+///
+/// [`ENTRY_MASKED_BIT`] だけが `pub(crate)` なのは、割り込み層の APIC 実装
+/// （`irq` の内側）がマスクの読み書きに使うためである。**レジスタの配置を
+/// 知っているのはこのモジュールだけにする。** 割り込み層へ定数を写すと、
+/// 同じ事実が 2 箇所に出て片方だけが古くなる。
+///
+/// **`pub` ではなく `pub(crate)` である。** 現在の利用箇所は
+/// `kernel/src/irq/apic.rs` だけで、`main.rs`（別クレート）からは到達しない。
+/// 到達範囲を狭めておくと、境界の外から触られる形が increment で増えない。
+/// 下の redirection entry と EOI の操作も同じ理由で `pub(crate)` にしてある。
 const ENTRY_VECTOR_MASK: u32 = 0xFF;
 const ENTRY_DELIVERY_MODE_SHIFT: u32 = 8;
 const ENTRY_DELIVERY_MODE_MASK: u32 = 0b111;
@@ -559,7 +603,7 @@ const ENTRY_DELIVERY_STATUS_BIT: u32 = 1 << 12;
 const ENTRY_ACTIVE_LOW_BIT: u32 = 1 << 13;
 const ENTRY_REMOTE_IRR_BIT: u32 = 1 << 14;
 const ENTRY_LEVEL_TRIGGERED_BIT: u32 = 1 << 15;
-const ENTRY_MASKED_BIT: u32 = 1 << 16;
+pub(crate) const ENTRY_MASKED_BIT: u32 = 1 << 16;
 
 /// LVT Timer だけが持つタイマモード（bits 18:17）。
 ///
@@ -831,6 +875,83 @@ unsafe fn read_io_apic(base_virt: u64, index: u8) -> u32 {
         ((base_virt + IOAPIC_REGISTER_SELECT) as *mut u32).write_volatile(index as u32);
         ((base_virt + IOAPIC_REGISTER_WINDOW) as *const u32).read_volatile()
     }
+}
+
+/// I/O APIC の内部レジスタを 1 本書く。
+///
+/// # Safety
+///
+/// [`read_io_apic`] と同じ。加えて、**書いた内容が割り込みの配送を変える**。
+unsafe fn write_io_apic(base_virt: u64, index: u8, value: u32) {
+    // SAFETY: 呼び出し元契約。添字を選んでから窓を書く、の順序が必須である。
+    unsafe {
+        ((base_virt + IOAPIC_REGISTER_SELECT) as *mut u32).write_volatile(index as u32);
+        ((base_virt + IOAPIC_REGISTER_WINDOW) as *mut u32).write_volatile(value);
+    }
+}
+
+/// redirection entry `entry` の low dword が載るレジスタ添字。
+///
+/// **1 本の entry は 2 本のレジスタを占める**（low / high）ので、添字は
+/// 2 刻みになる。ここを 1 刻みで書くと、隣の entry の high 側を踏む。
+const fn redirection_entry_index(entry: u8) -> u8 {
+    IOAPIC_INDEX_REDIRECTION_BASE.wrapping_add(entry.wrapping_mul(2))
+}
+
+/// I/O APIC が持つ redirection entry の**本数**。
+///
+/// Version レジスタの Max Redirection Entry は**添字の最大値**なので、
+/// 本数はそれに 1 を足したものである（[`IOAPIC_MAX_REDIRECTION_SHIFT`]）。
+///
+/// # Safety
+///
+/// [`read_io_apic`] と同じ。
+pub(crate) unsafe fn redirection_entry_count(io_apic_virt: u64) -> u32 {
+    // SAFETY: 呼び出し元契約。読み取りのみ。
+    let version_raw = unsafe { read_io_apic(io_apic_virt, IOAPIC_INDEX_VERSION) };
+    ((version_raw >> IOAPIC_MAX_REDIRECTION_SHIFT) & 0xFF).saturating_add(1)
+}
+
+/// redirection entry の low dword を読む。マスクビットとベクタ欄はこちらにある。
+///
+/// # Safety
+///
+/// [`read_io_apic`] と同じ。
+pub(crate) unsafe fn read_redirection_entry_low(io_apic_virt: u64, entry: u8) -> u32 {
+    // SAFETY: 呼び出し元契約。読み取りのみ。
+    unsafe { read_io_apic(io_apic_virt, redirection_entry_index(entry)) }
+}
+
+/// redirection entry の low dword を書く。
+///
+/// # Safety
+///
+/// [`write_io_apic`] と同じ。**割り込みの配送が変わる。**
+pub(crate) unsafe fn write_redirection_entry_low(io_apic_virt: u64, entry: u8, value: u32) {
+    // SAFETY: 呼び出し元契約。
+    unsafe { write_io_apic(io_apic_virt, redirection_entry_index(entry), value) }
+}
+
+/// Local APIC の End Of Interrupt レジスタ。
+///
+/// **0 以外を書いてはならない**（SDM）。値そのものに意味は無く、書くという
+/// 行為が「配送中の最も優先度の高い割り込みを完了させる」を意味する。
+const LAPIC_REGISTER_EOI: u64 = 0xB0;
+
+/// Local APIC へ EOI を送る。
+///
+/// **PIC と違って IRQ 番号を取らない。** どの割り込みを終えるかは LAPIC の
+/// ISR が持っており、書き手が指定しない。**8259 の EOI とは形が違う**ので、
+/// 割り込み層の `end_of_interrupt(irq, spurious)` は irq を捨てることになる。
+///
+/// # Safety
+///
+/// `lapic_virt` が写像済みの Local APIC ページの先頭であること。
+/// **実際に配送された割り込みのハンドラの中からのみ呼ぶこと。** 配送されて
+/// いない状態で書くと、別の割り込みを誤って完了させる。
+pub(crate) unsafe fn send_end_of_interrupt(lapic_virt: u64) {
+    // SAFETY: 呼び出し元契約。0 を書くのが規約である。
+    unsafe { write_lapic(lapic_virt, LAPIC_REGISTER_EOI, 0) }
 }
 
 // ===========================================================================
