@@ -2328,11 +2328,14 @@ fn configure_pic(logger: &mut Logger<SerialPort>) {
         cpu::halt_forever();
     }
 
+    // **ここは 8259 の採番を問うている。** ICW2 に書いたオフセットが効いて
+    // いるかという話なので、現在の配送先ではなく `PIC_TIMER_VECTOR` が正しい。
+    // S2-d-2 でタイマが Local APIC へ移ると、この行の前提そのものが変わる。
     logger.info(format_args!(
         "pic: all IRQs masked (nothing can fire until M4-d unmasks the timer explicitly); \
          the vector offset stays unverified until the first timer IRQ arrives as vector \
          {:#04x} in M4-d",
-        idt::TIMER_VECTOR
+        idt::PIC_TIMER_VECTOR
     ));
 }
 

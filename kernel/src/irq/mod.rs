@@ -59,7 +59,7 @@
 //! | [`configure_timer`] | [`TimerSource`] へ委譲 | 同上 |
 //! | [`init`] | **PIC 専用** | 8259 の再マップ（ICW1 から ICW4）そのもので、APIC 側に対応物が無い。I/O APIC 側の初期設定は形が違うので、**S2-d-1c で `init` の扱いと合わせて改めて判断する** |
 //! | [`service_snapshot`] | **PIC 専用** | 8259 の ISR を読む診断であり、LAPIC の ISR は 8 本で形が違う。配送が移る段（S2-d-1c 以降）で形を決める |
-//! | [`vector_for`] | モジュール関数 | `const fn` である。固定トールチェイン（1.97.1）で const trait method が安定しておらず、trait へ入れると [`crate::idt::TIMER_VECTOR`] が定義できない |
+//! | [`vector_for`] | モジュール関数 | `const fn` である。固定トールチェイン（1.97.1）で const trait method が安定しておらず、trait へ入れると [`crate::idt::PIC_TIMER_VECTOR`] が定義できない |
 //! | [`irq_for`] | モジュール関数 | 同上 |
 //! | [`managed_vectors`] | モジュール関数 | 同上 |
 //! | [`timer_frequency_hz`] | モジュール関数 | 同上 |
@@ -178,7 +178,7 @@ pub fn routed_vector(irq: u8) -> Option<u8> {
 /// # [`irq_for`] との違い
 ///
 /// [`irq_for`] は `const fn` で、**PIC の採番表しか見ない。**
-/// [`crate::idt::TIMER_VECTOR`] が `const` 項目なので消せないが、
+/// [`crate::idt::PIC_TIMER_VECTOR`] が `const` 項目なので消せないが、
 /// I/O APIC 経由のベクタは PIC の採番表に載っていないため、あれだけでは
 /// 引けない。
 ///
@@ -416,7 +416,7 @@ impl fmt::Display for Programming {
 
 /// IRQ 番号に対応するベクタ番号。範囲外なら `None`。
 ///
-/// `const fn` を保つ。[`crate::idt::TIMER_VECTOR`] と
+/// `const fn` を保つ。[`crate::idt::PIC_TIMER_VECTOR`] と
 /// [`crate::keyboard::PIC_KEYBOARD_VECTOR`] が `const` であり、実行時関数にすると
 /// 定義できなくなる。固定トールチェイン（1.97.1）で `match` による剥がしが
 /// const 評価できることは確認済みである。`unwrap()` も通るが、不正な IRQ を
@@ -962,7 +962,7 @@ fn write_mask_bitmap(
 /// このコントローラが担当するベクタ番号の範囲。
 ///
 /// **ベクタ番号は境界の共通語彙である。** `idt` 側も
-/// [`crate::idt::TIMER_VECTOR`] のようにベクタ番号で話すので、これを出すのは
+/// [`crate::idt::PIC_TIMER_VECTOR`] のようにベクタ番号で話すので、これを出すのは
 /// 「生の値を出さない」方針に反しない。反するのは IMR のビットや ISR のような
 /// **コントローラ内部の状態**であって、ベクタ番号ではない。
 ///

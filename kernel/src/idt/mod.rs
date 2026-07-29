@@ -779,7 +779,9 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     let delivered_irq = irq_for_vector(vector);
 
     if let Some(irq) = delivered_irq {
-        if vector == TIMER_VECTOR {
+        // **配送先を問うので、8259 の採番ではなく現在の配送先を見る。**
+        // 今は同じ値だが、S2-d-2 で Local APIC タイマへ移すと変わる。
+        if vector == timer_delivery_vector() {
             TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
         }
 
@@ -822,23 +824,59 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     // タイマ（IRQ0）はプリエンプティブに切り替える（M5-d）。**EOI はここより
     // 前で送っている**ので、次タスクは IF=1 で次ティックを受けられる。キーボード
     // やテストベクタは切り替えない（入場時の RSP を返す）。
-    if vector == TIMER_VECTOR {
+    if vector == timer_delivery_vector() {
         return crate::task::on_timer_tick(no_switch_rsp);
     }
 
     no_switch_rsp
 }
 
-/// タイマ（IRQ0）のベクタ。
+/// タイマ（IRQ0）の**8259 での**ベクタ。
 ///
-/// コントローラのベクタ採番に追随する。`alt-offset-test` では 0x30 になる。
+/// 8259 のベクタ採番に追随する。`alt-offset-test` では `0x30` になる。
+///
+/// # これは現在の配送先とは限らない
+///
+/// **名前が事実と食い違わないよう改名した**（旧 `TIMER_VECTOR`）。
+/// S2-d-2 でタイマを Local APIC タイマへ移すと、実際の配送先は LVT Timer に
+/// 載せた別のベクタになる。この定数はあくまで**8259 の採番表が与える値**で
+/// あって、現在どこへ届くかではない。**改名は移行より前でも正確である**
+/// （8259 の採番表が与える値である、というのは移行前から真である）。
+///
+/// 現在の配送先を知りたい場合は [`timer_delivery_vector`] を使うこと。
+/// キーボードについて [`crate::keyboard::PIC_KEYBOARD_VECTOR`] と
+/// [`crate::keyboard::delivery_vector`] を分けたのと同じ形である。
 ///
 /// `match` で剥がしているのは、失敗時のメッセージが読めるためである
 /// （`unwrap()` も固定トールチェインで const 評価できることは確認済み）。
-pub const TIMER_VECTOR: usize = match crate::irq::vector_for(0) {
+pub const PIC_TIMER_VECTOR: usize = match crate::irq::vector_for(0) {
     Some(vector) => vector as usize,
     None => panic!("the timer IRQ has no vector"),
 };
+
+/// タイマ割り込みが**現在**届くベクタ。
+///
+/// 現時点では [`PIC_TIMER_VECTOR`] と同じ値を返す。タイマはまだ 8259 経由で
+/// 配送されているためである。**S2-d-2 で Local APIC タイマへ移したときに、
+/// ここだけを変えれば観測側の記述が追随する。**
+///
+/// # なぜ今から関数にするのか
+///
+/// **改名だけでは、値を使う側が `const` を直接読む形のままになる。**
+/// 「現在の配送先」を問う箇所と「8259 の採番」を問う箇所が同じ式で書かれて
+/// いると、移行のときにどちらの意味で書かれたのかを 1 箇所ずつ読み直す
+/// ことになる。**意味の違う 2 つを、今のうちに別の呼び出しに分けておく。**
+///
+/// # タイマは IRQ 単位の移行状態に乗らない
+///
+/// Local APIC タイマは I/O APIC ではなく **LVT 経由**で、**IRQ 番号を
+/// 持たない。** したがって `irq` の `ROUTED_TO_APIC`（I/O APIC 経由へ移した
+/// IRQ のビットマップ）では表せない。**IRQ0 のビットを立てて表現しないこと。**
+/// 立てるとビットマップの意味が「I/O APIC 経由である」から「PIC でなくなった」
+/// へ静かにずれる。S2-d-2 では別の器で持つ。
+pub fn timer_delivery_vector() -> usize {
+    PIC_TIMER_VECTOR
+}
 
 /// スプリアス割り込みを受けた回数（ベクタ別ではなく合計）。
 ///

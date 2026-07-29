@@ -232,7 +232,7 @@ fn verify_ready(
          because check 5 holds: with every IRQ masked, a wrong offset delivers nothing. Proof \
          arrives when the first timer IRQ shows up as vector {:#04x}. The I/O APIC path is \
          covered separately: its redirection entry is read back after routing (IRQ1)",
-        idt::TIMER_VECTOR
+        idt::timer_delivery_vector()
     ));
     let pic_remapped = if timer_enabled {
         // タイマを解禁した以上、マスクによる保護はもう無い。ここから先は
@@ -503,7 +503,7 @@ pub unsafe fn run_timer_loop(
     logger.info(format_args!(
         "timer: waiting for the first tick (expected as vector {:#04x}); \
          if nothing arrives, suspect the PIT setup, the IMR, or ICW2",
-        idt::TIMER_VECTOR
+        idt::timer_delivery_vector()
     ));
 
     let mut console = console;
@@ -604,7 +604,7 @@ pub unsafe fn run_timer_loop(
             announced_first = true;
             // **ICW2 の事後証明。** 実際に届いたベクタ番号を実値で確認する。
             match idt::first_pic_vector() {
-                Some(vector) if vector as usize == idt::TIMER_VECTOR => {
+                Some(vector) if vector as usize == idt::timer_delivery_vector() => {
                     log_both(
                         logger,
                         console.as_deref_mut(),
@@ -618,7 +618,7 @@ pub unsafe fn run_timer_loop(
                     logger.error(format_args!(
                         "timer: the first PIC interrupt arrived as vector {other:?}, expected \
                          {:#04x}; the PIC vector offset (ICW2) is wrong; halting",
-                        idt::TIMER_VECTOR
+                        idt::timer_delivery_vector()
                     ));
                     cpu::halt_forever();
                 }
