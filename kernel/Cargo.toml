@@ -207,6 +207,22 @@ apic-test-wrong-target = ["apic-test"]
 # MADT が名乗る Local APIC のアドレスを 1 ページずらし、IA32_APIC_BASE と
 # 食い違わせる。突き合わせが働き、写像も読みも行われないことを見る。
 apic-test-base-mismatch = ["apic-test"]
+
+# --- S2-d-1c: キーボードの配送を I/O APIC 経由へ切り替える段の破壊 ---
+# redirection entry へ、ゲートの無い別のベクタを書く。読み戻しの主張と到達の
+# 主張が**両方**落ちる。2 つの検出経路がどちらも生きていることを見る。
+ioapic-wrong-vector-test = []
+# I/O APIC 側のマスクを外さない。設定は正しいので読み戻しは通り、**到達だけが
+# 落ちる。** 2 つの主張が独立していることの証拠になる。
+ioapic-skip-unmask-test = []
+# ioapic-legacy-spurious-test は作ったが**撤回した。** 「移行済みの IRQ でも
+# 8259 の ISR を読むと誤判定する」という予測が、実測で外れたためである。
+# pic::is_spurious は IRQ7 / IRQ15 以外では ISR を見ずに false を返すので、
+# IRQ1 では読んでも判定が変わらない。**何も壊さず緑になる破壊は置かない。**
+# PIC 側の IRQ1 をマスクしない。二重配送になる。移行後は経路ごとにベクタが
+# 違う（8259 は 0x21、I/O APIC は 0x42）ので、**0x21 で届いたキーがあること**
+# として観測できるはずである。
+ioapic-keep-pic-irq1-test = []
 # B-2a-5: higher-half の破壊確認。いずれも既定ビルドには入らない。`--highhalf-test <kind>`。
 # (a) 静的 PML4[0] の存在ビットを落とす。恒等が not-present になり、mov cr3 直後の低位命令
 # フェッチが解決できずトリプルフォルトする。`--highhalf-test no-identity-in-boot-pt`。

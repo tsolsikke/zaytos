@@ -3022,6 +3022,12 @@ fn start_timer(
     // --- 4.5 キーボード（IRQ1）を用意する ---
     setup_keyboard(logger);
 
+    // --- 4.6 キーボードの配送を I/O APIC 経由へ移す（S2-d-1c）---
+    //
+    // **`sti` より前に切り替え終える。** 割り込みが有効な状態で切り替えると、
+    // 4 手の途中で IRQ1 が届く形になりうる。
+    switch_keyboard_to_io_apic(logger, apic);
+
     // --- 5. sti 前 7 項目を再検証する ---
     let report = interrupts::verify_ready_for_sti_with_timer(logger);
     if !report.may_enable_interrupts() {
@@ -3147,8 +3153,83 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>) {
     }
 
     logger.info(format_args!(
-        "keyboard: IRQ1 is unmasked; press a key (the first one must arrive as vector {:#04x})",
-        keyboard::KEYBOARD_VECTOR
+        "keyboard: IRQ1 is unmasked on the 8259; the delivery vector is {:#04x} for now \
+         (S2-d-1c re-routes it through the I/O APIC before sti, which changes the vector)",
+        keyboard::delivery_vector()
+    ));
+}
+
+/// キーボード（IRQ1）の配送を I/O APIC 経由へ切り替える（S2-d-1c）。
+///
+/// **配送が変わる。この段で最も危険な一手である。**
+///
+/// # 呼ぶ位置
+///
+/// IRQ1 を 8259 で解禁した後、`sti` より前である。**割り込みが有効に
+/// なる前に切り替え終える**ので、切り替えの途中で IRQ1 が届く形にならない。
+///
+/// # 順序
+///
+/// 実際の 4 手（経路の設定 → PIC でマスク → 状態 → I/O APIC で解禁）は
+/// [`irq::route_to_apic`] が持つ。ここはその前後の観測に徹する。
+fn switch_keyboard_to_io_apic(
+    logger: &mut Logger<SerialPort>,
+    mapped: Option<&kernel::apic::MappedApic>,
+) {
+    let Some(mapped) = mapped else {
+        logger.warn(format_args!(
+            "ioapic: no I/O APIC was mapped, so IRQ1 stays on the 8259"
+        ));
+        return;
+    };
+
+    // 破壊 (S2-d-1c, ioapic-wrong-vector): ゲートの無いベクタへ向ける。
+    // 読み戻しの主張と到達の主張が両方落ちる。
+    #[cfg(not(feature = "ioapic-wrong-vector-test"))]
+    let vector = idt::IOAPIC_KEYBOARD_VECTOR as u8;
+    #[cfg(feature = "ioapic-wrong-vector-test")]
+    let vector = idt::IOAPIC_KEYBOARD_VECTOR as u8 + 1;
+
+    // SAFETY: ベクタ IOAPIC_KEYBOARD_VECTOR には専用スタブのゲートが入っており
+    // （`idt::init`）、ハンドラはデータポートを読み切ってから EOI を送る。
+    // 割り込みはまだ禁止されている。
+    if let Err(error) = unsafe { irq::route_to_apic(mapped, keyboard::KEYBOARD_IRQ, vector) } {
+        logger.error(format_args!(
+            "ioapic: could not route IRQ1 to the I/O APIC ({error:?}); halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    // **設定の読み戻し。** 書いた値が entry に載っていることを、到達とは
+    // 独立に確かめる。読み戻しだけだと配送されない形（マスクの外し忘れ、
+    // 宛先の誤り）を通し、到達だけだと保持されているかを見ていない。
+    let readback = irq::routed_entry_readback(mapped, keyboard::KEYBOARD_IRQ);
+    match readback {
+        Some(entry) => {
+            let vector_ok = entry.vector() == vector;
+            logger.info(format_args!(
+                "ioapic: IRQ1 redirection entry read back: {entry}, vector matches what we wrote \
+                 ({vector:#04x}) = {vector_ok}"
+            ));
+            if !vector_ok {
+                logger.error(format_args!(
+                    "ioapic: the redirection entry does not carry the vector we wrote; halting"
+                ));
+                cpu::halt_forever();
+            }
+        }
+        None => {
+            logger.error(format_args!(
+                "ioapic: the redirection entry for IRQ1 could not be read back; halting"
+            ));
+            cpu::halt_forever();
+        }
+    }
+
+    logger.info(format_args!(
+        "ioapic: IRQ1 now goes through the I/O APIC as vector {:#04x}; the 8259 line is \
+         masked (the first key must arrive as that vector, which the 8259 cannot produce)",
+        keyboard::delivery_vector()
     ));
 }
 

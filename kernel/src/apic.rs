@@ -600,9 +600,9 @@ const ENTRY_VECTOR_MASK: u32 = 0xFF;
 const ENTRY_DELIVERY_MODE_SHIFT: u32 = 8;
 const ENTRY_DELIVERY_MODE_MASK: u32 = 0b111;
 const ENTRY_DELIVERY_STATUS_BIT: u32 = 1 << 12;
-const ENTRY_ACTIVE_LOW_BIT: u32 = 1 << 13;
+pub(crate) const ENTRY_ACTIVE_LOW_BIT: u32 = 1 << 13;
 const ENTRY_REMOTE_IRR_BIT: u32 = 1 << 14;
-const ENTRY_LEVEL_TRIGGERED_BIT: u32 = 1 << 15;
+pub(crate) const ENTRY_LEVEL_TRIGGERED_BIT: u32 = 1 << 15;
 pub(crate) const ENTRY_MASKED_BIT: u32 = 1 << 16;
 
 /// LVT Timer だけが持つタイマモード（bits 18:17）。

@@ -112,6 +112,90 @@ mod pic;
 mod pit;
 
 use core::fmt;
+use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+
+/// レガシー IRQ の本数（2 台の 8259 で 16 本）。移行状態の器の大きさを決める。
+const MAX_LEGACY_IRQS: usize = 16;
+
+/// I/O APIC 経由へ移した IRQ のビットマップ（S2-d-1c）。
+///
+/// # なぜ IRQ 単位なのか。**単一の状態では成立しない**
+///
+/// S2-d-1c の中間状態では、**IRQ1 が I/O APIC 経由、IRQ0 が依然として
+/// 8259 経由**である。この 2 つは **EOI の宛先が違う。** 8259 経由の割り込みは
+/// ExtINT 配送なので LAPIC の ISR に載らず、LAPIC EOI は要らない代わりに
+/// 8259 への EOI が要る。I/O APIC 経由の割り込みは LAPIC の ISR に載るので
+/// LAPIC EOI が要る。
+///
+/// **「どちらのコントローラが有効か」を 1 つの状態で持つと、それを APIC へ
+/// 倒した瞬間にタイマ割り込みの EOI が LAPIC へ送られ、8259 は EOI を
+/// 受け取らない。タイマが止まる。**
+///
+/// # 書き手と読み手
+///
+/// 書くのは起動時の切り替えだけ（[`route_to_apic`]）。読むのは**割り込み
+/// ハンドラ**である（`idt::irq_entry` から EOI とスプリアス判定の経路）。
+/// **素の `static mut` にしない。** 書き手 1 人・読み手が割り込み文脈という
+/// 形は `TIMER_TICKS` と同じなので、同じ道具（アトミック）を使う。
+///
+/// **アトミック 1 つでは足りない。** 切り替えは 3 操作（PIC でマスク →
+/// 状態を立てる → I/O APIC で解禁）に分かれ、その途中で割り込みが入ると
+/// 古い状態で EOI を送る経路が成立する。**3 操作を割り込み禁止区間で囲う。**
+static ROUTED_TO_APIC: AtomicU32 = AtomicU32::new(0);
+
+/// I/O APIC 経由へ移した IRQ の配送先ベクタ。移していない IRQ は
+/// [`NO_ROUTED_VECTOR`]。
+///
+/// [`irq_for_vector`] がベクタから IRQ を逆引きするのに使う。
+static ROUTED_VECTOR: [AtomicU8; MAX_LEGACY_IRQS] =
+    [const { AtomicU8::new(NO_ROUTED_VECTOR) }; MAX_LEGACY_IRQS];
+
+/// 「この IRQ は移していない」を表す番兵。**ベクタ 0 は CPU の #DE なので、
+/// 割り込みの配送先として現れることはない。**
+const NO_ROUTED_VECTOR: u8 = 0;
+
+/// この IRQ が I/O APIC 経由へ移っているか。
+pub fn routed_to_apic(irq: u8) -> bool {
+    if irq as usize >= MAX_LEGACY_IRQS {
+        return false;
+    }
+    ROUTED_TO_APIC.load(Ordering::Relaxed) & (1u32 << irq) != 0
+}
+
+/// この IRQ の配送先ベクタ。移していなければ `None`。
+pub fn routed_vector(irq: u8) -> Option<u8> {
+    if irq as usize >= MAX_LEGACY_IRQS {
+        return None;
+    }
+    match ROUTED_VECTOR[irq as usize].load(Ordering::Relaxed) {
+        NO_ROUTED_VECTOR => None,
+        vector => Some(vector),
+    }
+}
+
+/// ベクタ番号に対応する IRQ 番号。**移行済みの経路も含めて引く。**
+///
+/// # [`irq_for`] との違い
+///
+/// [`irq_for`] は `const fn` で、**PIC の採番表しか見ない。**
+/// [`crate::idt::TIMER_VECTOR`] が `const` 項目なので消せないが、
+/// I/O APIC 経由のベクタは PIC の採番表に載っていないため、あれだけでは
+/// 引けない。
+///
+/// **これは EOI だけの問題ではない。** `idt::irq_entry` は
+/// 「ベクタから IRQ が引けたか」で IRQ 処理全体を分岐しており、
+/// タイマのティック加算もキーボードのハンドラ呼び出しもその中にある。
+/// **引けなければ、キーボードのハンドラごと呼ばれない。**
+///
+/// 移行済みの表を先に見るのは、そちらが現在の事実だからである。
+pub fn irq_for_vector(vector: u8) -> Option<u8> {
+    for (irq, slot) in ROUTED_VECTOR.iter().enumerate() {
+        if slot.load(Ordering::Relaxed) == vector && vector != NO_ROUTED_VECTOR {
+            return u8::try_from(irq).ok();
+        }
+    }
+    irq_for(vector)
+}
 
 /// 割り込みコントローラ。**S2-d-1b で切った。**
 ///
@@ -158,6 +242,19 @@ trait Controller {
 
     /// マスクの実状態を 1 回読み、`unmasked` だけが開いているかを判定する。
     fn check_masks(&self, unmasked: &[u8]) -> MaskCheck;
+
+    /// この IRQ の配送先ベクタを設定する。**マスクは触らない。**
+    ///
+    /// # マスクを外す操作と分けてある
+    ///
+    /// [`Controller::unmask`] は何度も起きるが、**経路の設定は 1 回である。**
+    /// 1 つに畳むと、後で分けたくなったときに高くつく。
+    ///
+    /// # Safety
+    ///
+    /// - 配送先のベクタに、戻れるハンドラが IDT に入っていること。
+    /// - この IRQ がマスクされていること（設定の途中で届かせない）。
+    unsafe fn route(&self, irq: u8, vector: u8);
 }
 
 /// 周期タイマ源。
@@ -196,6 +293,20 @@ impl Controller for Legacy {
         // SAFETY: 排他は呼び出し側の契約。
         let isr = unsafe { pic::read_isr() };
         pic::is_spurious(irq, isr)
+    }
+
+    unsafe fn route(&self, _irq: u8, _vector: u8) {
+        // **何もしない。8259 は IRQ 単位で行き先を選べない。**
+        //
+        // 経路はベクタオフセット（ICW2）で決まり、IRQ 番号を足したものが
+        // ベクタになる。1 本だけ別のベクタへ向けることはできないので、
+        // ここに書けることが無い。**空実装は「できない」の表現であって、
+        // 未実装ではない。** `Apic::is_spurious` が定数 `false` を返すのと
+        // 同じ扱いである。
+        //
+        // ベクタオフセットそのものを変えるのは [`init`] の仕事で、
+        // あれは「1 本の経路を決める」ではなく「コントローラを初期化する」
+        // である。役割が違うので同じ名前へ寄せていない。
     }
 
     fn check_masks(&self, unmasked: &[u8]) -> MaskCheck {
@@ -284,7 +395,7 @@ pub unsafe fn init() -> Result<Programming, InitError> {
 ///
 /// この出力そのものに一致を取っているテストは無い（xtask の期待マーカーを
 /// 実測で確認した）。ただし**同じベクタ範囲**が `sti-check` の要約行
-/// （`4. PIC remapped to 0x20-0x2F = UNVERIFIABLE`）に埋まっており、そちらは
+/// （`4. interrupt delivery vectors are set as intended = UNVERIFIABLE`）に隣接しており、そちらは
 /// `interrupt-test enable-only` が一致を取っている。範囲を変えるならその行も
 /// 一緒に見ること。
 pub struct Programming;
@@ -306,7 +417,7 @@ impl fmt::Display for Programming {
 /// IRQ 番号に対応するベクタ番号。範囲外なら `None`。
 ///
 /// `const fn` を保つ。[`crate::idt::TIMER_VECTOR`] と
-/// [`crate::keyboard::KEYBOARD_VECTOR`] が `const` であり、実行時関数にすると
+/// [`crate::keyboard::PIC_KEYBOARD_VECTOR`] が `const` であり、実行時関数にすると
 /// 定義できなくなる。固定トールチェイン（1.97.1）で `match` による剥がしが
 /// const 評価できることは確認済みである。`unwrap()` も通るが、不正な IRQ を
 /// 渡したときのメッセージが読める `match` を使う。
@@ -446,6 +557,25 @@ pub unsafe fn mask_all() {
 /// コマンドポートの読み出し対象を変更する。他の実行文脈が同時に
 /// コントローラを触っていないこと。
 pub unsafe fn is_spurious(irq: u8) -> bool {
+    // **移行済みの IRQ を、もう所有していないコントローラに問い合わせない。**
+    //
+    // # 予測は外れた。外れたことを書いておく
+    //
+    // 設計時は「8259 の ISR を読むと、その IRQ は載っていないのでビットが
+    // 立っておらず、スプリアスと誤判定して EOI を送らない側へ倒れる」と
+    // 予測していた。**破壊で確かめたところ、そうならなかった。**
+    // [`pic::is_spurious`] は **IRQ7 と IRQ15 以外では ISR を見ずに `false` を
+    // 返す**ので、IRQ1 では読んでも判定が変わらない。
+    //
+    // **したがってこの分岐は、現在の構成では観測可能な効果を持たない。**
+    // 残してあるのは、(1) 所有していないコントローラの I/O ポートを割り込み
+    // ハンドラの中で読まずに済むこと、(2) IRQ7 か IRQ15 を I/O APIC 経由へ
+    // 移した場合には**実際に判定が変わる**ことによる。
+    // **「必要だから入れた」ではなく「今は効果を観測できない」と書く。**
+    if routed_to_apic(irq) {
+        // SAFETY: 呼び出し側の契約をそのまま実装へ引き継ぐ。
+        return unsafe { apic::spurious_for_routed_irq(irq) };
+    }
     // SAFETY: 呼び出し側の契約をそのまま実装へ引き継ぐ。
     unsafe { ACTIVE.is_spurious(irq) }
 }
@@ -456,8 +586,155 @@ pub unsafe fn is_spurious(irq: u8) -> bool {
 ///
 /// 実際に発生した割り込みに対してのみ呼ぶこと。
 pub unsafe fn end_of_interrupt(irq: u8, spurious: bool) {
+    // **宛先は IRQ 単位で決まる。** 中間状態では 8259 経由と I/O APIC 経由が
+    // 併存し、前者は 8259 への EOI、後者は LAPIC への EOI が要る。
+    // 単一の状態で切り替えると、倒した瞬間にもう片方が EOI を受け取らなくなる。
+    if routed_to_apic(irq) {
+        // SAFETY: 呼び出し側の契約をそのまま実装へ引き継ぐ。
+        unsafe { apic::end_of_interrupt_for_routed_irq(spurious) };
+        return;
+    }
     // SAFETY: 呼び出し側の契約をそのまま実装へ引き継ぐ。
     unsafe { ACTIVE.end_of_interrupt(irq, spurious) }
+}
+
+/// 1 本の IRQ を I/O APIC 経由へ移す（S2-d-1c）。
+///
+/// # 順序
+///
+/// 1. redirection entry へ配送先を書く（マスクは立てたまま）
+/// 2. **PIC 側でその IRQ をマスクする**
+/// 3. 移行状態を立てる（ビットマップと配送先ベクタ）
+/// 4. **I/O APIC 側でマスクを外す**
+///
+/// 2 と 4 が逆だと、両方が開いた瞬間に二重配送しうる。1 でマスクを立てた
+/// まま書くのは、設定の途中で届かせないためである。
+///
+/// # 2 から 4 は割り込み禁止区間で行う
+///
+/// 状態そのものはアトミックだが、**3 操作の途中で割り込みが入ると、
+/// 古い状態で EOI を送る経路が成立する。** アトミック 1 つでは足りない。
+///
+/// # Safety
+///
+/// - 配送先のベクタに、戻れるハンドラが IDT に入っていること。
+/// - 起動時に呼ぶこと（この関数は割り込みを一時的に禁止する）。
+pub unsafe fn route_to_apic(
+    mapped: &crate::apic::MappedApic,
+    irq: u8,
+    vector: u8,
+) -> Result<(), RouteError> {
+    if irq as usize >= MAX_LEGACY_IRQS {
+        return Err(RouteError::IrqOutOfRange);
+    }
+    if vector == NO_ROUTED_VECTOR {
+        return Err(RouteError::VectorReserved);
+    }
+    let controller = apic::Apic::new(mapped).ok_or(RouteError::NoIoApic)?;
+
+    // 1. 経路を設定する。**マスクは立てたまま**なので、まだ届かない。
+    // SAFETY: ゲートの用意は呼び出し側の契約。この IRQ は I/O APIC 側で
+    // マスクされたままである（起動時の redirection entry は全本マスク）。
+    unsafe { controller.route(irq, vector) };
+
+    // 2 から 4 をひとまとめにする。区間内でログも確保も行わない。
+    {
+        let _critical = common::critical::InterruptGuard::enter();
+
+        // 2. 旧経路を閉じる。
+        // SAFETY: 8259 側のマスクを立てるだけ。新経路はまだマスクされている
+        // ので、この瞬間からこの IRQ はどこにも届かない。
+        //
+        // 破壊 (S2-d-1c, ioapic-keep-pic-irq1): ここを飛ばすと両経路が開き、
+        // 二重配送になる。経路ごとにベクタが違うので、旧ベクタで届いたキーが
+        // あることとして観測できるはずである。
+        #[cfg(not(feature = "ioapic-keep-pic-irq1-test"))]
+        unsafe {
+            pic::mask_irq(irq)
+        };
+
+        // 3. 状態を立てる。**旧経路を閉じた後、新経路を開ける前である。**
+        ROUTED_VECTOR[irq as usize].store(vector, Ordering::Relaxed);
+        ROUTED_TO_APIC.fetch_or(1u32 << irq, Ordering::Relaxed);
+
+        // 4. 新経路を開ける。
+        // SAFETY: ゲートは用意済みで、状態も立っている。ここから届いてよい。
+        //
+        // 破壊 (S2-d-1c, ioapic-skip-unmask): ここを飛ばすと、設定は正しいが
+        // 配送されない。読み戻しの主張は通り、到達の主張だけが落ちる。
+        #[cfg(not(feature = "ioapic-skip-unmask-test"))]
+        unsafe {
+            controller.unmask(irq)
+        };
+    }
+    Ok(())
+}
+
+/// 移行済み IRQ の redirection entry を読み戻す（S2-d-1c）。
+///
+/// **到達の観測とは独立した検出経路である。** 読み戻しは「書いた値が
+/// entry に載っているか」、到達は「そのベクタで実際に届くか」を見る。
+/// 片方だけでは、設定できても配送されない形（マスクの外し忘れ）と、
+/// 保持されているかを見ていない形を、それぞれ通す。
+///
+/// 移していない IRQ や、I/O APIC が無い場合は `None`。
+pub fn routed_entry_readback(
+    mapped: &crate::apic::MappedApic,
+    irq: u8,
+) -> Option<RedirectionEntryView> {
+    if !routed_to_apic(irq) {
+        return None;
+    }
+    apic::Apic::new(mapped)?.read_entry(irq)
+}
+
+/// redirection entry 1 本の観測値（[`routed_entry_readback`]）。
+///
+/// **生の `u32` を出さない。** 呼び出し側が必要なのは「我々が書いたベクタか」
+/// という問いと、ログへ流せる表示だけである。
+pub struct RedirectionEntryView {
+    low: u32,
+}
+
+impl RedirectionEntryView {
+    /// 生の low dword から作る。**`irq` の内側からのみ作れる。**
+    const fn new(low: u32) -> Self {
+        Self { low }
+    }
+
+    /// この entry の配送先ベクタ。
+    pub const fn vector(&self) -> u8 {
+        (self.low & 0xFF) as u8
+    }
+
+    /// この entry はマスクされているか。
+    pub fn masked(&self) -> bool {
+        self.low & crate::apic::ENTRY_MASKED_BIT != 0
+    }
+}
+
+impl fmt::Display for RedirectionEntryView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "vector={:#04x} masked={} level_triggered={} active_low={}",
+            self.vector(),
+            self.masked(),
+            self.low & crate::apic::ENTRY_LEVEL_TRIGGERED_BIT != 0,
+            self.low & crate::apic::ENTRY_ACTIVE_LOW_BIT != 0
+        )
+    }
+}
+
+/// [`route_to_apic`] の失敗。
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum RouteError {
+    /// レガシー IRQ の範囲外。
+    IrqOutOfRange,
+    /// I/O APIC が 1 台も写像できていない。
+    NoIoApic,
+    /// 番兵と衝突するベクタ（0）を指定した。
+    VectorReserved,
 }
 
 /// 周期タイマを設定する。解禁は別（[`unmask`]）。

@@ -17,18 +17,80 @@
 //! オフセットとビット位置は [`crate::apic`] が持ち、こちらはそこが出す
 //! 名前付きの操作だけを呼ぶ。**同じ事実を 2 箇所に置かない。**
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use super::{Controller, MaskCheck, MaskState, MASK_BITMAP_WORDS};
+
+/// 割り込み文脈から EOI を送るための Local APIC のアドレス（S2-d-1c）。
+///
+/// # なぜ [`Apic`] の値を持たないのか
+///
+/// EOI は**割り込みハンドラの中**から送る。そこで `Apic` の値を持つには
+/// 内部可変性が要り、ロックを取れば割り込み文脈でのロックになる。
+/// **EOI に要るのは Local APIC のアドレス 1 つだけ**なので、それだけを
+/// アトミックで持つ。書き手は起動時の 1 回、読み手は割り込み文脈という形は
+/// `TIMER_TICKS` と同じである。
+///
+/// [`Apic::new`] が設定する。[`NOT_INSTALLED`] は「まだ設定されていない」で、
+/// その状態では EOI を送らない（送り先が無いので送りようがない）。
+static LAPIC_EOI_BASE: AtomicU64 = AtomicU64::new(NOT_INSTALLED);
+
+/// [`LAPIC_EOI_BASE`] の「未設定」。Local APIC が物理アドレス 0 に載ることは無い。
+const NOT_INSTALLED: u64 = 0;
+
+/// I/O APIC 経由へ移した IRQ の EOI を送る。
+///
+/// **IRQ 番号を取らない。** LAPIC の EOI は宛先を取らず、ISR が持つ最も
+/// 優先度の高い割り込みを終わらせる。8259 のように書き手が指定する形ではない。
+///
+/// # Safety
+///
+/// 実際に配送された割り込みのハンドラの中から呼ぶこと。
+pub(super) unsafe fn end_of_interrupt_for_routed_irq(spurious: bool) {
+    // **スプリアスには EOI を送らない。** ただし下の関数が常に false を返すので、
+    // この分岐が真になることは現時点で無い。**判定を書いておくのは、
+    // 「送らない」が偶然ではなく判断の結果であることを残すためである。**
+    if spurious {
+        return;
+    }
+    let base = LAPIC_EOI_BASE.load(Ordering::Relaxed);
+    if base == NOT_INSTALLED {
+        // 経路が移っているのにアドレスが無い、という組み合わせは
+        // `route_to_apic` の順序では起こらない（`Apic::new` が先に走る）。
+        // それでも黙って 0 番地へ書かないよう、ここで止める。
+        return;
+    }
+    // SAFETY: `Apic::new` が写像を確認した Local APIC のページ先頭を入れている。
+    unsafe { crate::apic::send_end_of_interrupt(base) }
+}
+
+/// I/O APIC 経由へ移した IRQ がスプリアスか。**常に `false` である。**
+///
+/// 理由は [`Controller::is_spurious`] の実装と同じで、そちらに書いてある。
+///
+/// # Safety
+///
+/// 呼び出し側の契約は [`super::is_spurious`] と同じ。**実際には何も読まない**
+/// ので危険は無いが、シグネチャを揃えてある。
+pub(super) unsafe fn spurious_for_routed_irq(_irq: u8) -> bool {
+    false
+}
 
 /// Local APIC と I/O APIC の組。
 ///
 /// # 不変条件
 ///
-/// `lapic_virt` と `io_apic_virt` は、[`crate::apic::map_and_probe`] が写像を
-/// 確認したページの先頭である。**この型を作れるのは
-/// [`Self::new`] だけ**で、そこが `MappedApic` を要求するので、
-/// 写像されていないアドレスから作ることはできない。
+/// `io_apic_virt` は、[`crate::apic::map_and_probe`] が写像を確認したページの
+/// 先頭である。**この型を作れるのは [`Self::new`] だけ**で、そこが
+/// `MappedApic` を要求するので、写像されていないアドレスから作ることはできない。
+///
+/// # Local APIC のアドレスを持たない
+///
+/// EOI に要る Local APIC のアドレスは [`LAPIC_EOI_BASE`] が持つ。
+/// **割り込み文脈から読む必要があるので、値ではなくアトミックに置いてある。**
+/// この型にも同じ値を持たせると、EOI の送り先が 2 箇所に出る。
+/// [`Self::new`] がアトミックへ書き込み、以後はそちらだけを読む。
 pub struct Apic {
-    lapic_virt: u64,
     io_apic_virt: u64,
     /// この I/O APIC が担当する先頭の GSI。entry 添字への変換に要る。
     gsi_base: u32,
@@ -53,8 +115,11 @@ impl Apic {
         // 単一コアで、他の実行文脈がこの I/O APIC を触っていない。
         let entry_count = unsafe { crate::apic::redirection_entry_count(io_apic_virt) };
 
+        let lapic_virt = direct_map.phys_to_virt(mapped.local_apic_phys()).as_u64();
+        // 割り込み文脈から EOI を送るために控える（S2-d-1c）。
+        LAPIC_EOI_BASE.store(lapic_virt, Ordering::Relaxed);
+
         Some(Self {
-            lapic_virt: direct_map.phys_to_virt(mapped.local_apic_phys()).as_u64(),
             io_apic_virt,
             gsi_base: io_apic.global_system_interrupt_base,
             entry_count,
@@ -75,6 +140,14 @@ impl Apic {
             return None;
         }
         u8::try_from(index).ok()
+    }
+
+    /// この IRQ の redirection entry を読み戻す。担当外なら `None`。
+    pub(super) fn read_entry(&self, irq: u8) -> Option<super::RedirectionEntryView> {
+        let entry = self.entry_for_irq(irq)?;
+        // SAFETY: 型の不変条件により写像済みのページである。読み取りのみ。
+        let low = unsafe { crate::apic::read_redirection_entry_low(self.io_apic_virt, entry) };
+        Some(super::RedirectionEntryView::new(low))
     }
 
     /// 全 entry のマスクビットを 1 回ずつ読む。
@@ -140,19 +213,12 @@ impl Controller for Apic {
     }
 
     unsafe fn end_of_interrupt(&self, _irq: u8, spurious: bool) {
-        // **スプリアスには EOI を送らない。** PIC と同じ結論だが理由は違い、
-        // こちらは「LAPIC がスプリアスを ISR に載せないので、送ると別の
-        // 割り込みを終わらせてしまう」である。
-        if spurious {
-            return;
-        }
-        // **IRQ 番号を捨てる。** LAPIC の EOI は宛先を取らず、ISR が持つ
-        // 最も優先度の高い割り込みを終わらせる。PIC のように「どの IRQ か」を
-        // 書き手が指定する形ではない。
+        // **割り込み文脈の経路と同じ関数を通す。** ここで `self.lapic_virt` を
+        // 直接使うと、EOI の送り方が 2 箇所に出る。値の出所は同じ
+        // （`Apic::new` が控えたもの）なので、実装を 1 つに寄せてある。
         //
-        // SAFETY: 型の不変条件により写像済みのページである。実際に配送された
-        // 割り込みのハンドラからのみ呼ばれることは、呼び出し側の契約である。
-        unsafe { crate::apic::send_end_of_interrupt(self.lapic_virt) }
+        // SAFETY: 呼び出し側の契約をそのまま引き継ぐ。
+        unsafe { end_of_interrupt_for_routed_irq(spurious) }
     }
 
     unsafe fn is_spurious(&self, _irq: u8) -> bool {
@@ -169,6 +235,24 @@ impl Controller for Apic {
         // 1 だけだと「LAPIC にスプリアスは無い」と読めて誤りであり、2 だけだと
         // 「いずれここへ来る」と読めて誤る。**両方を残すこと。**
         false
+    }
+
+    unsafe fn route(&self, irq: u8, vector: u8) {
+        let Some(entry) = self.entry_for_irq(irq) else {
+            return;
+        };
+        // 配送モードは Fixed（`000`）、宛先は物理モードで destination 0 = BSP。
+        // **極性とトリガは Interrupt Source Override の解決に従う。**
+        // この構成の IRQ1 には上書きが無いのでバス既定（active high・edge）に
+        // なるが、**恒等であることに依存した書き方をしない。**
+        let low = u32::from(vector)
+            | self.mmio.redirection_flags_for_irq(irq)
+            | crate::apic::ENTRY_MASKED_BIT;
+
+        // SAFETY: 型の不変条件により写像済みのページである。**マスクビットを
+        // 立てたまま書く**ので、この書き込みで割り込みが届き始めることはない。
+        // high dword（宛先）は起動時の実測で全 entry が destination 0 なので触らない。
+        unsafe { crate::apic::write_redirection_entry_low(self.io_apic_virt, entry, low) }
     }
 
     fn check_masks(&self, unmasked: &[u8]) -> MaskCheck {

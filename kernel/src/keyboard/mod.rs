@@ -14,11 +14,32 @@ pub mod decode;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-/// キーボード（IRQ1）のベクタ。コントローラのベクタ採番に追随する。
-pub const KEYBOARD_VECTOR: usize = match crate::irq::vector_for(KEYBOARD_IRQ) {
+/// キーボード（IRQ1）の**8259 での**ベクタ。PIC のベクタ採番に追随する。
+///
+/// # これは現在の配送先とは限らない（S2-d-1c）
+///
+/// **名前が事実と食い違わないよう改名した**（旧 `KEYBOARD_VECTOR`）。
+/// S2-d-1c で IRQ1 を I/O APIC 経由へ移すと、実際の配送先は
+/// [`crate::idt::IOAPIC_KEYBOARD_VECTOR`] になる。この定数はあくまで
+/// **8259 の採番表が与える値**であって、現在どこへ届くかではない。
+///
+/// 現在の配送先を知りたい場合は [`delivery_vector`] を使うこと。
+pub const PIC_KEYBOARD_VECTOR: usize = match crate::irq::vector_for(KEYBOARD_IRQ) {
     Some(vector) => vector as usize,
     None => panic!("the keyboard IRQ has no vector"),
 };
+
+/// キーボード割り込みが**現在**届くベクタ。
+///
+/// 移行前は [`PIC_KEYBOARD_VECTOR`]、移行後は
+/// [`crate::idt::IOAPIC_KEYBOARD_VECTOR`] である。**実行時に決まる**ので
+/// `const` にできない。
+pub fn delivery_vector() -> usize {
+    match crate::irq::routed_vector(KEYBOARD_IRQ) {
+        Some(vector) => vector as usize,
+        None => PIC_KEYBOARD_VECTOR,
+    }
+}
 
 /// キーボードの IRQ 番号。
 pub const KEYBOARD_IRQ: u8 = 1;
@@ -26,7 +47,8 @@ pub const KEYBOARD_IRQ: u8 = 1;
 /// 最初のキー入力が届いたベクタ番号。まだなら [`NO_VECTOR_YET`]。
 ///
 /// **IRQ1 の配送経路が正しいことの証明になる。** タイマで 0x20 を確認したのと
-/// 同じ趣旨で、こちらは 0x21 を実値で確かめる。
+/// 同じ趣旨で、こちらは実値で確かめる。**S2-d-1c 以降は 8259 が出しえない
+/// ベクタになるので、この値がそのまま配送経路の証拠になる。**
 static FIRST_KEYBOARD_VECTOR: AtomicU64 = AtomicU64::new(NO_VECTOR_YET);
 
 /// 「まだ届いていない」を表す番兵。

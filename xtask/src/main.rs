@@ -203,7 +203,7 @@ const INTERRUPT_TESTS: &[CriticalTest] = &[
             "interrupt-test: sti-then-idle OK",
             "sti: interrupts are now enabled (IF=true",
             "heartbeat: loop iterations=",
-            "sti-check summary: 4. PIC remapped to 0x20-0x2F = UNVERIFIABLE",
+            "sti-check summary: 4. interrupt delivery vectors are set as intended = UNVERIFIABLE",
         ],
         forbidden_markers: &[
             "sti-then-idle FAILED",
@@ -964,7 +964,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -975,6 +975,17 @@ fn main() -> Result<()> {
             let gfx_test = rest.iter().any(|a| a == "--gfx-test");
             let kvm = rest.iter().any(|a| a == "--kvm");
             let no_limit = rest.iter().any(|a| a == "--no-limit");
+            if let Some(index) = rest.iter().position(|a| a == "--ioapic-test") {
+                let kind = rest.get(index + 1).with_context(|| {
+                    let names: Vec<&str> = IOAPIC_SABOTAGE_TESTS.iter().map(|t| t.name).collect();
+                    format!("--ioapic-test requires a kind ({})", names.join(" | "))
+                })?;
+                let test = IOAPIC_SABOTAGE_TESTS
+                    .iter()
+                    .find(|t| t.name == kind)
+                    .with_context(|| format!("unknown --ioapic-test kind: {kind}"))?;
+                return cmd_ioapic_sabotage(test.name, test.feature, test.expected);
+            }
             if let Some(index) = rest.iter().position(|a| a == "--interrupt-test") {
                 if rest.get(index + 1).map(String::as_str) == Some("keyboard") {
                     return cmd_keyboard_test();
@@ -1595,11 +1606,59 @@ const KEYBOARD_TEST_EXPECTED_LINE: &str = "keyboard: line = \"Hello!\"";
 /// **キーリピート（タイプマティック）は検証できない。** `sendkey` は保持時間を
 /// 指定してもリピートを模擬せず、押下と離脱を 1 組送るだけである
 /// （`sendkey a 3000` で実測）。リピートは手動確認に回す。
+/// キーボードの回帰チェックの個別主張。**破壊確認が「どれが落ちたか」を
+/// 見るために、合否をまとめずに返す。**
+#[derive(Debug, Clone, Copy)]
+struct KeyboardAssertions {
+    /// 期待した文字列になったか。
+    line: bool,
+    /// 新しいベクタ（0x42）で届いたか。**到達の検出経路。**
+    arrived_on_new_vector: bool,
+    /// 旧ベクタ（0x21）で届いたキーが無いか。**二重配送の検出。**
+    no_legacy_delivery: bool,
+    /// redirection entry のベクタ欄が書いた値か。**設定の検出経路。**
+    readback_vector: bool,
+    /// redirection entry のマスクが外れているか。**解禁の検出経路。**
+    readback_unmasked: bool,
+    /// 送った本数と受け取った本数が一致するか。
+    count: bool,
+    /// 会計が閉じているか。
+    balanced: bool,
+    /// `sti` 前の検査が落ちて、割り込みを有効にせず止まったか。
+    ///
+    /// **正常な起動では `false` である。** 破壊確認で「何も届かない」だけを
+    /// 見ると、原因を問わず通ってしまう。**どこで止まったかを名指しする。**
+    refused_sti: bool,
+}
+
+impl KeyboardAssertions {
+    fn all_ok(&self) -> bool {
+        self.line
+            && self.arrived_on_new_vector
+            && self.no_legacy_delivery
+            && self.readback_vector
+            && self.readback_unmasked
+            && self.count
+            && self.balanced
+            && !self.refused_sti
+    }
+}
+
 fn cmd_keyboard_test() -> Result<()> {
+    let assertions = run_keyboard_test(&[])?;
+    if assertions.all_ok() {
+        println!("interrupt-test keyboard: OK");
+        Ok(())
+    } else {
+        bail!("interrupt-test keyboard: FAILED")
+    }
+}
+
+fn run_keyboard_test(features: &[&str]) -> Result<KeyboardAssertions> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
-    let kernel_elf = build_kernel(&workspace_root, false)?;
+    let kernel_elf = build_kernel_with_features(&workspace_root, features)?;
     let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
 
     let serial_log = workspace_root
@@ -1689,7 +1748,9 @@ fn cmd_keyboard_test() -> Result<()> {
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
     {
-        return report_did_not_start(context, firmware_rip, qemu_exit.as_deref());
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        // 上は必ず Err を返すので、ここには来ない。
+        bail!("{context}: the kernel did not start");
     }
 
     println!("--- {context}: relevant output ---");
@@ -1705,6 +1766,7 @@ fn cmd_keyboard_test() -> Result<()> {
     if !ready {
         println!("{context}: the kernel never reached {ready_marker:?} = NG");
     }
+    let ready_ok = ready;
 
     // 1. 期待した文字列になったか（大文字と記号の変換を含む）。
     let line_ok = serial.contains(KEYBOARD_TEST_EXPECTED_LINE);
@@ -1714,13 +1776,56 @@ fn cmd_keyboard_test() -> Result<()> {
     );
     ok &= line_ok;
 
-    // 2. IRQ1 の配送経路。
-    let vector_ok = serial.contains("keyboard: first key arrived as vector 0x21");
+    // 2. IRQ1 の配送経路（**到達**）。S2-d-1c で 0x21 から 0x42 へ変えた。
+    //
+    // **0x42 は 8259 が出しえないベクタである。** ベクタオフセットは
+    // 0x20（alt-offset では 0x30）で、そこに IRQ 番号を足したものしか出ない。
+    // したがって**このベクタで届いたこと自体が、I/O APIC 経由である証拠**になる。
+    // 0x21 のままだとどちらの経路でも同じ値になり、何も示さなかった。
+    let vector_ok = serial.contains("keyboard: first key arrived as vector 0x42");
     println!(
-        "{context}: the first key arrived as vector 0x21 = {}",
+        "{context}: the first key arrived as vector 0x42, which the 8259 cannot produce = {}",
         if vector_ok { "OK" } else { "NG" }
     );
     ok &= vector_ok;
+
+    // 2b. 二重配送が起きていないこと（PPP'）。
+    //
+    // 移行後は経路ごとにベクタが違うので、旧ベクタで届いたキーがあれば
+    // **PIC 側の線が開いたままである。** 移行前は区別できなかった形である。
+    let no_legacy_delivery = !serial.contains("keyboard: first key arrived as vector 0x21");
+    println!(
+        "{context}: no key arrived on the old 8259 vector 0x21 = {}",
+        if no_legacy_delivery { "OK" } else { "NG" }
+    );
+    ok &= no_legacy_delivery;
+
+    // 2c. 設定の読み戻し（**到達とは独立した検出経路**）。
+    //
+    // 読み戻しだけだと、設定できても配送されない形（マスクの外し忘れ、
+    // 宛先の誤り）を通す。到達だけだと、書いた値が entry に保持されて
+    // いるかを見ていない。**両方あって初めて経路が閉じる。**
+    //
+    // **ベクタ欄とマスクビットを別々に見る。** 1 つに畳むと、マスクを外し
+    // 忘れた構成で「設定が書けていない」と読めてしまい、2 つの経路が
+    // 独立していることを示せない（実際に畳んだ形で測って気づいた）。
+    let readback_line = serial
+        .lines()
+        .find(|l| l.contains("ioapic: IRQ1 redirection entry read back:"))
+        .unwrap_or_default();
+    let readback_vector_ok = readback_line.contains("vector=0x42");
+    println!(
+        "{context}: the redirection entry carries the vector we wrote = {}",
+        if readback_vector_ok { "OK" } else { "NG" }
+    );
+    ok &= readback_vector_ok;
+
+    let readback_unmasked_ok = readback_line.contains("masked=false");
+    println!(
+        "{context}: the redirection entry is unmasked = {}",
+        if readback_unmasked_ok { "OK" } else { "NG" }
+    );
+    ok &= readback_unmasked_ok;
 
     // 3. 送った本数と受け取った本数の一致（取りこぼしなし）。
     let expected_keys = format!("keys={expected_codes} ");
@@ -1766,12 +1871,160 @@ fn cmd_keyboard_test() -> Result<()> {
         ok &= !present;
     }
 
+    // ready / no_drop / heartbeats / 例外の 4 つは、どの構成でも成り立つべき
+    // 前提として `line` へ畳んでいる。破壊確認が見分けたいのは、
+    // 到達・二重配送・読み戻し・本数の 4 つである。
+    let assertions = KeyboardAssertions {
+        line: ready_ok && line_ok && no_drop_ok && heartbeats >= 2 && ok,
+        arrived_on_new_vector: vector_ok,
+        no_legacy_delivery,
+        readback_vector: readback_vector_ok,
+        readback_unmasked: readback_unmasked_ok,
+        count: count_ok,
+        balanced: balanced_ok,
+        refused_sti: serial.contains("refusing to sti"),
+    };
+    println!(
+        "{context}: {}",
+        if assertions.all_ok() { "PASS" } else { "FAIL" }
+    );
+    println!(
+        "{context}: note - key repeat (typematic) is NOT covered here; QEMU's sendkey does \
+         not emulate it. Check it by hand with `cargo xtask run --gui`."
+    );
+    Ok(assertions)
+}
+
+/// S2-d-1c の破壊 1 件ぶんの定義。
+struct IoApicSabotage {
+    name: &'static str,
+    feature: &'static str,
+    /// 壊れたビルドで**期待される**主張の値。`false` が「落ちるはず」。
+    expected: KeyboardAssertions,
+}
+
+/// S2-d-1c の破壊一覧。
+///
+/// **`line` と `balanced` は判定に使っていない**（`cmd_ioapic_sabotage` が
+/// 見るのは到達・二重配送・読み戻し・本数の 4 つ）。値は埋めるが意味を持たない。
+const IOAPIC_SABOTAGE_TESTS: &[IoApicSabotage] = &[
+    // ゲートの無いベクタへ向ける。**読み戻しも到達も落ちる。**
+    IoApicSabotage {
+        name: "wrong-vector",
+        feature: "ioapic-wrong-vector-test",
+        expected: KeyboardAssertions {
+            line: false,
+            arrived_on_new_vector: false,
+            no_legacy_delivery: true,
+            readback_vector: false,
+            readback_unmasked: true,
+            count: false,
+            balanced: false,
+            refused_sti: false,
+        },
+    },
+    // I/O APIC 側のマスクを外さない。**設定は正しいので読み戻しは通り、
+    // 到達だけが落ちる。** 2 つの主張が独立している証拠になる。
+    IoApicSabotage {
+        name: "skip-unmask",
+        feature: "ioapic-skip-unmask-test",
+        expected: KeyboardAssertions {
+            line: false,
+            arrived_on_new_vector: false,
+            no_legacy_delivery: true,
+            readback_vector: true,
+            readback_unmasked: false,
+            count: false,
+            balanced: false,
+            refused_sti: false,
+        },
+    },
+    // PIC 側の IRQ1 をマスクしない。
+    //
+    // # 何を検出するか。**二重配送の検出ではない**
+    //
+    // この破壊が示すのは「**二重配送に至る状態へ進むことを拒否する**」で
+    // あって、「二重配送が起きたら検出できる」ではない。**別の主張である。**
+    //
+    // 設計時の予測は「二重配送が旧ベクタ `0x21` で観測できる」だったが、
+    // 実測で外れた。**そこへ至る前に `sti` 前の項目 5 が落ちる。** 8259 の IMR が
+    // `0xfc`（IRQ1 が開いたまま）で、移行後の期待値 `0xfe` と食い違うため、
+    // カーネルは割り込みを有効にせず停止する。**予測より早く、より強い。**
+    //
+    // **二重配送そのものは依然として未観測である。** 起こす手段が無いので、
+    // 「起きたときに検出できるか」はこの破壊では何も言えない。
+    //
+    // 主張は「1 本も届かない」側になるが、**それだけだと原因を問わず通る。**
+    // `sti` を拒否した痕跡を併せて見る。**どこで止まったかを名指ししない
+    // 破壊は、壊れ方を区別できない。**
+    IoApicSabotage {
+        name: "keep-pic-irq1",
+        feature: "ioapic-keep-pic-irq1-test",
+        expected: KeyboardAssertions {
+            line: false,
+            arrived_on_new_vector: false,
+            no_legacy_delivery: true,
+            readback_vector: true,
+            readback_unmasked: true,
+            count: false,
+            balanced: false,
+            refused_sti: true,
+        },
+    },
+];
+
+/// S2-d-1c の破壊確認。**キーボードの回帰チェックを壊れたビルドで走らせ、
+/// 落ちるべき主張だけが落ちることを見る。**
+///
+/// `expected` は「この主張は落ちるはず」を並べたもので、`true` は健全な側で
+/// ある。**「どれかが落ちた」ではなく「これが落ちてこれは落ちない」を見る**
+/// ので、破壊が意図した経路だけを壊していることまで確かめられる。
+fn cmd_ioapic_sabotage(name: &str, feature: &str, expected: KeyboardAssertions) -> Result<()> {
+    let context = format!("ioapic-test {name}");
+    println!("=== {context}: building with feature {feature:?} ===");
+    let actual = run_keyboard_test(&[feature])?;
+
+    let checks: [(&str, bool, bool); 6] = [
+        (
+            "arrived on the new vector",
+            actual.arrived_on_new_vector,
+            expected.arrived_on_new_vector,
+        ),
+        (
+            "no delivery on the old vector",
+            actual.no_legacy_delivery,
+            expected.no_legacy_delivery,
+        ),
+        (
+            "redirection entry carries our vector",
+            actual.readback_vector,
+            expected.readback_vector,
+        ),
+        (
+            "redirection entry is unmasked",
+            actual.readback_unmasked,
+            expected.readback_unmasked,
+        ),
+        ("scancode count matches", actual.count, expected.count),
+        (
+            "refused to sti before enabling interrupts",
+            actual.refused_sti,
+            expected.refused_sti,
+        ),
+    ];
+
+    let mut ok = true;
+    for (label, got, want) in checks {
+        let matched = got == want;
+        println!(
+            "{context}: {label} = {got} (wanted {want}) = {}",
+            if matched { "OK" } else { "NG" }
+        );
+        ok &= matched;
+    }
+
     if ok {
         println!("{context}: PASS");
-        println!(
-            "{context}: note - key repeat (typematic) is NOT covered here; QEMU's sendkey does \
-             not emulate it. Check it by hand with `cargo xtask run --gui`."
-        );
         Ok(())
     } else {
         bail!("{context}: FAIL")
@@ -3224,6 +3477,9 @@ const APIC_TESTS: &[CriticalTest] = &[
 /// **既定ビルドにこれらが入ってはならない。** 入ったまま出荷すると、
 /// 壊れた状態で測った結果を正常な結果として扱うことになる。
 const SABOTAGE_FEATURES: &[&str] = &[
+    "ioapic-wrong-vector-test",
+    "ioapic-skip-unmask-test",
+    "ioapic-keep-pic-irq1-test",
     "misalign-test",
     "no-eoi-test",
     "alt-offset-test",
@@ -3690,6 +3946,16 @@ fn cmd_check(full: bool) -> Result<()> {
             &mut retries,
             cmd_keyboard_test,
         );
+        // S2-d-1c の破壊確認。**落ちるべき主張だけが落ちること**を見る。
+        // 健全な側も並べて指定しているので、破壊が意図した経路だけを
+        // 壊していることまで確かめられる。
+        for sabotage in IOAPIC_SABOTAGE_TESTS {
+            total += 1;
+            let name = format!("ioapic-test {}", sabotage.name);
+            run_regression(&name, &mut failed, &mut retries, || {
+                cmd_ioapic_sabotage(sabotage.name, sabotage.feature, sabotage.expected)
+            });
+        }
         total += 1;
         run_regression("panic-test", &mut failed, &mut retries, || {
             cmd_run(true, false, false, false, false)

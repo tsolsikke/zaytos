@@ -162,6 +162,36 @@ impl ApicMmio {
         u32::from(irq)
     }
 
+    /// この IRQ を I/O APIC の redirection entry へ書くときの、極性とトリガの
+    /// ビット（S2-d-1c）。
+    ///
+    /// **Interrupt Source Override に一致があればその指定、無ければバス既定
+    /// （ISA なので active high・edge）である。** 既定は両ビットとも 0 なので、
+    /// 一致が無ければ 0 を返す。
+    ///
+    /// **恒等（上書きが無い）であることに依存した書き方をしないために、
+    /// 常にこの関数を通す。** この構成の IRQ1 には上書きが無く戻り値は 0 に
+    /// なるが、上書きのある IRQ を扱った瞬間に静かに誤る形を避ける。
+    ///
+    /// 返すのは `crate::apic` の redirection entry のビット位置に合わせた値で、
+    /// **MADT の生の flags ではない。** 両者はビット位置が違う。
+    pub fn redirection_flags_for_irq(&self, irq: u8) -> u32 {
+        let mut flags = 0;
+        for iso in self.interrupt_source_overrides() {
+            if iso.source != irq {
+                continue;
+            }
+            if iso.active_low() {
+                flags |= crate::apic::ENTRY_ACTIVE_LOW_BIT;
+            }
+            if iso.level_triggered() {
+                flags |= crate::apic::ENTRY_LEVEL_TRIGGERED_BIT;
+            }
+            break;
+        }
+        flags
+    }
+
     /// 記録できた Interrupt Source Override。
     pub fn interrupt_source_overrides(
         &self,

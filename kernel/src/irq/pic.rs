@@ -464,6 +464,37 @@ pub unsafe fn unmask_irq(irq: u8) {
     }
 }
 
+/// 現在のマスクから、指定した IRQ 1 本だけをマスクした値を返す（純粋ロジック）。
+///
+/// **カスケードは連動させない。** 解除の側（[`masks_with_irq_unmasked`]）は
+/// スレーブ側を開けるときにマスタの IRQ2 も開けるが、閉じる側で IRQ2 を
+/// 閉じると**他のスレーブ側 IRQ まで巻き添えで止まる。** 非対称なのは
+/// 意図であって、書き忘れではない。
+pub const fn masks_with_irq_masked(masks: (u8, u8), irq: u8) -> (u8, u8) {
+    let (master, slave) = masks;
+    if irq < IRQS_PER_PIC {
+        (master | (1 << irq), slave)
+    } else if irq < 2 * IRQS_PER_PIC {
+        (master, slave | (1 << (irq - IRQS_PER_PIC)))
+    } else {
+        masks
+    }
+}
+
+/// 指定した IRQ 1 本をマスクする。
+///
+/// # Safety
+///
+/// 呼び出し後、その IRQ は 8259 経由では届かなくなる。**別の配送経路を
+/// 用意する前に呼ぶと、その割り込みが失われる。**
+pub unsafe fn mask_irq(irq: u8) {
+    let updated = masks_with_irq_masked(read_masks(), irq);
+    // SAFETY: 呼び出し側の契約。マスクビットを立てるだけ。
+    unsafe {
+        set_masks(updated.0, updated.1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

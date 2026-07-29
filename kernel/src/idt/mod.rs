@@ -281,6 +281,19 @@ core::arch::global_asm!(
     "  .byte 0x68, 0xff, 0x00, 0x00, 0x00",
     "  jmp zaytos_irq_common",
     ".p2align 4",
+    // I/O APIC 経由のキーボード用スタブ（S2-d-1c）。**表の外に置く。**
+    //
+    // `0x42` は表（`0x20` から 33 本）の範囲外である。スプリアスと同じ形で、
+    // 専用スタブを置いて `zaytos_irq_common` へ合流させる。
+    //
+    // **バイトを明示するのはスプリアスと揃えるためである。** `0x42` は
+    // `0x80` 未満なので `push imm8` でも符号拡張の問題は起きないが、
+    // 書き方を揃えておけば「どちらの形だったか」を毎回考えずに済む。
+    ".globl zaytos_ioapic_keyboard_stub",
+    "zaytos_ioapic_keyboard_stub:",
+    "  .byte 0x68, 0x42, 0x00, 0x00, 0x00",
+    "  jmp zaytos_irq_common",
+    ".p2align 4",
     "zaytos_irq_common:",
     // 入場時のスタック: [rsp]=ベクタ, +8=RIP, +16=CS, +24=RFLAGS, +32=RSP, +40=SS
     //
@@ -447,6 +460,7 @@ extern "C" {
     static zaytos_irq_stubs: u8;
     static zaytos_irq_stubs_end: u8;
     static zaytos_spurious_stub: u8;
+    static zaytos_ioapic_keyboard_stub: u8;
     static zaytos_irq_stub_0: u8;
     static zaytos_irq_stub_15: u8;
     static zaytos_irq_stub_16: u8;
@@ -496,6 +510,36 @@ pub const TEST_VECTOR: usize = IRQ_VECTOR_BASE + PIC_VECTOR_SPAN;
 /// が「次タスクの RSP」を返してコンテキストスイッチが起きる（ADR-0019 §2）。
 /// PIC 由来ではないので EOI の論理には一切絡まない。
 pub const YIELD_VECTOR: usize = 0x41;
+
+/// I/O APIC 経由のキーボード（IRQ1）用ベクタ（S2-d-1c）。
+///
+/// # なぜ `0x21` のまま使わないのか
+///
+/// **理由は 2 つあり、どちらか片方では足りない。**
+///
+/// 1. **観測。** `0x21` のままだと、届いたことが配送経路の証拠にならない。
+///    8259 経由でも I/O APIC 経由でも同じベクタで届くので、
+///    `keyboard: first key arrived as vector 0x21` は移行の前後で同じまま通り、
+///    **何も新しいことを示さない。** 8259 が出しえないベクタで届けば、
+///    到達がそのまま経路の証拠になる。
+/// 2. **構造。** ベクタから IRQ を引く経路が PIC の採番表
+///    （`irq::irq_for`）に依存していた。同じベクタを使うとその依存が
+///    残ったまま動いてしまう。**動く理由が正しい理由でなくなる。**
+///
+/// # ベクタ番号の選択は、優先度クラスの選択でもある
+///
+/// x86 では**ベクタ番号を 16 で割った値が割り込みの優先度クラス**である。
+/// `0x21` はクラス 2、**`0x42` はクラス 4** なので、この移行で
+/// **キーボードがタイマ（`0x20`、クラス 2）より高い優先度になる。**
+///
+/// **実害は無い見込みである。** ゲートは割り込みゲート（IF を落とす）なので
+/// 入れ子は起きず、TPR は 0 のままでどのクラスも遮断していない。
+/// ただし**自明ではない**ので書いておく。S2-d-2 でタイマを `0xFE`
+/// （クラス 15）へ移すと、今度はタイマが最上位クラスになる。同じ性質の
+/// 副作用である。
+///
+/// スタブ表（`0x20`-`0x40`）の外なので専用スタブが要る。
+pub const IOAPIC_KEYBOARD_VECTOR: usize = 0x42;
 
 /// システムコール用のソフトウェア割り込みベクタ（M5-f-1、ADR-0020）。
 ///
@@ -696,7 +740,11 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     }
 
     // PIC の範囲で最初に届いたベクタを 1 度だけ記録する。ICW2 の検証に使う。
-    if pic_irq_for(vector).is_some() {
+    if u8::try_from(vector)
+        .ok()
+        .and_then(crate::irq::irq_for)
+        .is_some()
+    {
         let _ = FIRST_PIC_VECTOR.compare_exchange(
             NO_VECTOR_YET,
             context.vector,
@@ -719,11 +767,18 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         return no_switch_rsp;
     }
 
-    // PIC 由来の IRQ かどうか。テスト専用ベクタ（0x30、PIC の範囲外）は
-    // ここに入らないので、EOI の論理が一切絡まない。
-    let pic_irq = pic_irq_for(vector);
+    // このベクタはどの IRQ か。**移行済みの経路も含めて引く**（S2-d-1c）。
+    //
+    // **ここは EOI の入口ではなく、IRQ 処理全体の入口である。** 下の
+    // ブロックにはティックの加算もキーボードのハンドラも入っており、
+    // **引けなければハンドラごと呼ばれない。** I/O APIC 経由のベクタは
+    // PIC の採番表に載っていないので、`irq::irq_for` では引けない。
+    //
+    // テスト専用ベクタ（`0x40`、どちらの表にも無い）はここに入らないので、
+    // EOI の論理が一切絡まない。
+    let delivered_irq = irq_for_vector(vector);
 
-    if let Some(irq) = pic_irq {
+    if let Some(irq) = delivered_irq {
         if vector == TIMER_VECTOR {
             TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
         }
@@ -731,7 +786,10 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         // キーボード（IRQ1）。**EOI より先に呼ぶ。** この中でデータポートを
         // 読み切らないと、コントローラの出力バッファが空かず次の IRQ1 が
         // 来なくなる。
-        if vector == crate::keyboard::KEYBOARD_VECTOR {
+        //
+        // **ベクタではなく IRQ 番号で判定する**（S2-d-1c）。配送先ベクタは
+        // 8259 経由と I/O APIC 経由で違うが、IRQ 番号は移行しても変わらない。
+        if irq == crate::keyboard::KEYBOARD_IRQ {
             crate::keyboard::handle_irq(context.vector);
         }
 
@@ -807,15 +865,18 @@ pub fn lapic_spurious_count() -> u64 {
     LAPIC_SPURIOUS_COUNT.load(Ordering::Relaxed)
 }
 
-/// ベクタ番号から PIC の IRQ 番号を求める。PIC 由来でなければ `None`。
+/// ベクタ番号から IRQ 番号を求める。どのコントローラにも属さなければ `None`。
 ///
-/// テスト専用ベクタ（[`TEST_VECTOR`]）は PIC の範囲外なので `None` になり、
+/// **`pic_irq_for` から改名した**（S2-d-1c）。I/O APIC 経由へ移した IRQ も
+/// 引くようになり、「PIC 由来か」という名前が事実と合わなくなったためである。
+///
+/// テスト専用ベクタ（[`TEST_VECTOR`]）はどちらの表にも無いので `None` になり、
 /// EOI の経路へ入らない。
-fn pic_irq_for(vector: usize) -> Option<u8> {
+fn irq_for_vector(vector: usize) -> Option<u8> {
     if vector > u8::MAX as usize {
         return None;
     }
-    crate::irq::irq_for(vector as u8)
+    crate::irq::irq_for_vector(vector as u8)
 }
 
 /// IRQ スタブ表の配置検証。
@@ -891,7 +952,7 @@ impl StubTableCheck {
 }
 
 /// 例外スタブ表の外に置いた専用スタブの本数。
-pub const DEDICATED_STUB_COUNT: usize = 3;
+pub const DEDICATED_STUB_COUNT: usize = 4;
 
 /// 例外スタブ表の外に置いた専用スタブと、それを指すべきゲートの対応。
 ///
@@ -912,6 +973,10 @@ fn dedicated_stubs() -> [(usize, u64); DEDICATED_STUB_COUNT] {
         (
             crate::apic::SPURIOUS_VECTOR as usize,
             addr_of!(zaytos_spurious_stub) as u64,
+        ),
+        (
+            IOAPIC_KEYBOARD_VECTOR,
+            addr_of!(zaytos_ioapic_keyboard_stub) as u64,
         ),
     ]
 }
@@ -1111,6 +1176,17 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
         // `irq_entry` にある）。
         (*idt)[crate::apic::SPURIOUS_VECTOR as usize] = IdtEntry::new(
             addr_of!(zaytos_spurious_stub) as u64,
+            KERNEL_CODE_SELECTOR,
+            GateType::Interrupt,
+            0,
+            None,
+        );
+
+        // I/O APIC 経由のキーボード用ゲート（S2-d-1c）。専用スタブへ載せる。
+        // **配送を切り替える前に置く。** ゲートが無い状態で redirection entry の
+        // マスクを外すと、最初のキー入力で例外スタイルのスタブへ落ちて停止する。
+        (*idt)[IOAPIC_KEYBOARD_VECTOR] = IdtEntry::new(
+            addr_of!(zaytos_ioapic_keyboard_stub) as u64,
             KERNEL_CODE_SELECTOR,
             GateType::Interrupt,
             0,

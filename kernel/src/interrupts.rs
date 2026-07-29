@@ -75,7 +75,10 @@ impl ReadinessReport {
                 "3. IDT loaded, all exception gates present",
                 self.idt_and_exception_gates,
             ),
-            ("4. PIC remapped to 0x20-0x2F", self.pic_remapped),
+            (
+                "4. interrupt delivery vectors are set as intended",
+                self.pic_remapped,
+            ),
             ("5. IRQs without a handler are masked", self.irqs_masked),
             (
                 "6. Locked<T> disables interrupts while held",
@@ -118,6 +121,14 @@ pub fn verify_ready_for_sti(logger: &mut Logger<SerialPort>) -> ReadinessReport 
 pub fn verify_ready_for_sti_with_timer(logger: &mut Logger<SerialPort>) -> ReadinessReport {
     // IRQ0（タイマ）と IRQ1（キーボード）を解禁した状態。ハンドラを書いた
     // ベクタだけが開いていることを、実際の IMR と突き合わせる。
+    //
+    // **8259 に残っている IRQ だけを数える**（S2-d-1c）。IRQ1 を I/O APIC 経由へ
+    // 移すと、8259 側では**マスクされているのが正しい。** 移行後も IRQ1 を
+    // 「開いているはず」と期待すると、正しい状態でこの検査が落ちる。
+    // **移行状態を見て期待を作る**ので、移行の前後どちらでも成立する。
+    if crate::irq::routed_to_apic(crate::keyboard::KEYBOARD_IRQ) {
+        return verify_ready(logger, &[0], true);
+    }
     verify_ready(logger, &[0, crate::keyboard::KEYBOARD_IRQ], true)
 }
 
@@ -205,12 +216,22 @@ fn verify_ready(
         CheckState::Failed
     };
 
-    // --- 4. PIC 再マップ（検証不能）---
+    // --- 4. 配送先ベクタの設定（検証不能）---
+    //
+    // **主題を書き換えた**（S2-d-1c）。以前は「PIC を 0x20-0x2F へ再マップした」
+    // という PIC 固有の主題だったが、配送が 2 系統になったのでどちらの
+    // コントローラでも意味を持つ主題にしてある。
+    //
+    // **状態は UNVERIFIABLE のままである。** I/O APIC の redirection entry は
+    // 読み戻せるが、**タイマはまだ 8259 を通っており、そちらの ICW2 は
+    // write-only である。** 全経路が読み戻せるようになるのは、PIC が消える
+    // S2-d-2 である。そこで Verified へ格上げする。
     logger.info(format_args!(
-        "sti-check 4: cannot be verified here; the 8259 ICW2 is write-only, so the vector \
-         offset cannot be read back. Proceeding is safe only because check 5 holds: with every \
-         IRQ masked, a wrong offset delivers nothing. Proof arrives in M4-d-2 when the first \
-         timer IRQ shows up as vector {:#04x}",
+        "sti-check 4: cannot be verified here; the timer still goes through the 8259, whose \
+         ICW2 is write-only, so its vector offset cannot be read back. Proceeding is safe only \
+         because check 5 holds: with every IRQ masked, a wrong offset delivers nothing. Proof \
+         arrives when the first timer IRQ shows up as vector {:#04x}. The I/O APIC path is \
+         covered separately: its redirection entry is read back after routing (IRQ1)",
         idt::TIMER_VECTOR
     ));
     let pic_remapped = if timer_enabled {
@@ -521,15 +542,19 @@ pub unsafe fn run_timer_loop(
         // 呼ばずに S2-d-1c（配送が変わる段）へ入ると、そこで落ちたときに
         // 「切り替えが悪いのか、実装が悪いのか」を切り分けられない。
         //
-        // 期待は「1 本も開いていない」である。IRQ0 と IRQ1 は PIC 側で開いて
-        // いるが、**I/O APIC 経由では 1 本も配送していない**ので、redirection
-        // entry は全本マスクされたままのはずである。**PIC のマスク状態を
-        // ここへ持ち込まないこと。** 別のコントローラの状態である。
-        match crate::irq::survey_apic_masks(apic, &[]) {
+        // 期待は「I/O APIC 経由へ移した IRQ だけが開いている」である。
+        // **PIC のマスク状態をここへ持ち込まないこと。** 別のコントローラの
+        // 状態である。S2-d-1c で IRQ1 を移したので、開いているのはそれだけに
+        // なる。**期待は呼び出し側が持つ**（境界が独自に期待を持たない）。
+        let routed: &[u8] = if crate::irq::routed_to_apic(crate::keyboard::KEYBOARD_IRQ) {
+            &[crate::keyboard::KEYBOARD_IRQ]
+        } else {
+            &[]
+        };
+        match crate::irq::survey_apic_masks(apic, routed) {
             Some(check) => logger.info(format_args!(
                 "apic: the I/O APIC controller reads its redirection entries: {check}, \
-                 all masked={} (nothing is delivered through the I/O APIC yet; \
-                 the PIC still owns delivery)",
+                 only the routed IRQs are open={} (the PIC still owns every other line)",
                 check.matches()
             )),
             None => logger.warn(format_args!(
@@ -642,7 +667,7 @@ pub unsafe fn run_timer_loop(
                     idt::lapic_spurious_count(),
                     // **会計。** irq1 は IDT 側のベクタ別カウンタ。
                     // keys + stray がこれと一致しなければ経路の取り違えがある。
-                    idt::interrupt_count(crate::keyboard::KEYBOARD_VECTOR),
+                    idt::interrupt_count(crate::keyboard::delivery_vector()),
                     crate::keyboard::accounting_balances(),
                     max_tick_jump(),
                     // **止まった理由の切り分け材料。** キーが来なくなったとき、
@@ -730,7 +755,7 @@ fn drain_keyboard(
             *announced_first = true;
             // **IRQ1 の配送経路の証明。** タイマで 0x20 を確認したのと同じ趣旨。
             match crate::keyboard::first_keyboard_vector() {
-                Some(vector) if vector as usize == crate::keyboard::KEYBOARD_VECTOR => {
+                Some(vector) if vector as usize == crate::keyboard::delivery_vector() => {
                     logger.info(format_args!(
                         "keyboard: first key arrived as vector {vector:#04x} - IRQ1 is wired \
                          through our stub correctly"
@@ -740,7 +765,7 @@ fn drain_keyboard(
                     logger.error(format_args!(
                         "keyboard: the first key arrived as vector {other:?}, expected {:#04x}; \
                          halting",
-                        crate::keyboard::KEYBOARD_VECTOR
+                        crate::keyboard::delivery_vector()
                     ));
                     cpu::halt_forever();
                 }
