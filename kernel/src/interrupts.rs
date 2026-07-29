@@ -250,6 +250,11 @@ fn verify_ready(
          set up: the I/O APIC redirection entry (IRQ1) and the LVT timer",
         idt::PIC_TIMER_VECTOR
     ));
+    // **結論が固定でも、そこへ至る枝には意味が残る。単純化しないこと。**
+    // 項目 4 は恒久的に `Unverifiable` だが、無条件に `Unverifiable` を返す形へ
+    // 畳むと、下の `Failed` の枝が守っている性質が消える。**マスクが効いて
+    // いないなら、検証不能を許す根拠そのものが失われる**（項目 5 が
+    // `Verified` でない限り項目 4 の `Unverifiable` は許されない）。
     let pic_remapped = if timer_enabled {
         // タイマを解禁した以上、マスクによる保護はもう無い。ここから先は
         // 「最初のティックがベクタ 0x20 で届くか」で事後的に判定する。
