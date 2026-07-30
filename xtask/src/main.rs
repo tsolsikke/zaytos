@@ -1054,6 +1054,14 @@ fn main() -> Result<()> {
                     Some(4),
                 );
             }
+            if rest.iter().any(|a| a == "--smp-tramp-test") {
+                return cmd_marker_test(
+                    SMP_TRAMP_TESTS,
+                    "smp-tramp-test",
+                    SMP_TRAMP_TESTS[0].name,
+                    Some(2),
+                );
+            }
             if rest.iter().any(|a| a == "--percpu-test") {
                 return cmd_marker_test(PERCPU_TESTS, "percpu-test", PERCPU_TESTS[0].name, None);
             }
@@ -2968,8 +2976,10 @@ const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
         item: "global_asm!",
         reason: "AP トランポリンの入口。**排他ではない。** SIPI 直後の AP は \
                  リアルモードで IDT を持たないので、割り込みが来ても行き先が無い。 \
-                 InterruptGuard は 16 ビットの asm からは使えず、そもそもこの cli に \
-                 対応する sti は無い（AP は IDT を載せずに halt する）",
+                 InterruptGuard は 16 ビットの asm からは使えない。**対応する sti が \
+                 無いのは設計である**（AP は IDT を載せずに halt するので、割り込みを \
+                 有効化する地点が存在しない）。この検査を将来「cli と sti が対になって \
+                 いること」へ強化するなら、**このエントリは意図的な例外として扱うこと。**",
     },
     DirectInterruptControlSite {
         file: "kernel/src/task.rs",
@@ -3684,6 +3694,20 @@ const ACPI_TESTS: &[CriticalTest] = &[
 /// **破壊が別の未定義動作を作ってしまう。** S3-b-2a で `MAX_CPUS` を 2 へ
 /// 上げたので初めて構成できるようになった。**tripwire の破壊確認には、
 /// tripwire が守ろうとしている能力そのものが必要である。**
+/// 設置した AP トランポリンが雛形と一致することの破壊確認（S3-b-2b-1）。
+///
+/// **壊すのはコピーであって雛形ではない。** 雛形を壊すとコピー元が変わるだけで
+/// 両方が同じ値になり、比較は通ってしまう。**検査が見ているのは「コピーとパッチが
+/// 正しく行われたか」なので、壊すべきはコピー側である。**
+const SMP_TRAMP_TESTS: &[CriticalTest] = &[CriticalTest {
+    name: "corrupt-copy",
+    feature: "smp-tramp-corrupt-copy-test",
+    expected_markers: &["diverges from the template at offset", "halting"],
+    forbidden_markers: &["application processor 1 started", "heartbeat: ticks="],
+    wait_for_full_timeout: false,
+    min_heartbeats: None,
+}];
+
 const PERCPU_TESTS: &[CriticalTest] = &[CriticalTest {
     name: "fake-nonzero-cpu-id",
     feature: "percpu-fake-nonzero-cpu-id",
@@ -3990,6 +4014,7 @@ const APIC_TESTS: &[CriticalTest] = &[
 /// 壊れた状態で測った結果を正常な結果として扱うことになる。
 const SABOTAGE_FEATURES: &[&str] = &[
     "percpu-fake-nonzero-cpu-id",
+    "smp-tramp-corrupt-copy-test",
     "lapic-timer-scale-calibration-test",
     "lapic-timer-wrong-divide-test",
     "lapic-timer-no-mask-all-test",
@@ -4493,6 +4518,14 @@ fn cmd_check(full: bool) -> Result<()> {
                 cmd_lapic_timer_test(test.name)
             });
         }
+        // S3-b-2b-1 の雛形一致検査の破壊確認。
+        for test in SMP_TRAMP_TESTS {
+            total += 1;
+            let name = format!("smp-tramp-test {}", test.name);
+            run_regression(&name, &mut failed, &mut retries, || {
+                cmd_marker_test(SMP_TRAMP_TESTS, "smp-tramp-test", test.name, Some(2))
+            });
+        }
         // S3-b-2a の tripwire の破壊確認。
         for test in PERCPU_TESTS {
             total += 1;
@@ -4605,7 +4638,7 @@ struct ExpectedCheckCount {
 }
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
-const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount { base: 17, full: 87 };
+const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount { base: 17, full: 88 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
 ///

@@ -298,8 +298,10 @@ core::arch::global_asm!(
     "  .quad 0x00AF9A000000FFFF",      // 0x08: 64bit code, DPL0, L=1
     "  .quad 0x00CF92000000FFFF",      // 0x10: data
     ".org 0xF20",
+    ".globl zaytos_ap_tramp_gdtr",
+    "zaytos_ap_tramp_gdtr:",
     "  .word 23",                      // limit = 3*8 - 1
-    "  .long 0",                       // base（PATCH_GDTR_BASE）
+    "  .long 0",                       // base（BSP が書き込む）
     ".org 0xF40",
     // データブロック。**64 ビット側は RIP 相対でここを指す**ので、
     // 各フィールドにラベルを置く。オフセット定数（BSP が書き込む側）と
@@ -739,6 +741,18 @@ unsafe fn install_trampoline(
         );
     }
 
+    // 破壊 (S3-b-2b-1, smp-tramp-corrupt-copy): 設置済みのコピーを 1 バイト壊す。
+    // **パッチされる 3 領域の外**を狙うので、雛形との比較が捕まえるはずである。
+    #[cfg(feature = "smp-tramp-corrupt-copy-test")]
+    // SAFETY: コピー済みのフレーム内。オフセット 0 は `cli` のバイトである。
+    unsafe {
+        (direct_map_base as *mut u8).write_volatile(0x90);
+    }
+
+    if !verify_installed_trampoline(logger, &installed, src, len, farjmp_offset) {
+        cpu::halt_forever();
+    }
+
     logger.info(format_args!(
         "smp: AP trampoline installed at {:#x} ({len} of {FRAME_SIZE} bytes used, fits in one \
          page={}), gdt at {:#x}, 64-bit entry at {:#x}, cr3 {:#x}, rust entry {:#x}",
@@ -751,4 +765,91 @@ unsafe fn install_trampoline(
     ));
 
     installed
+}
+
+/// 設置したトランポリンが雛形と一致することを確かめる（S3-b-2b-1）。
+///
+/// # なぜ要るのか
+///
+/// この段の実装では、**16 ビット / 64 ビットの符号化の取り違えを 4 件踏んだ**
+/// （`.org` の詰め物が `mov cr0` の直後に入る、`lgdtw` になる、整列を仮定した
+/// 書き込み、64 ビットの `[disp32]` が RIP 相対になる）。**いずれも AP 側でしか
+/// 落ちず、BSP 側は正常に見える。** コードを触ったときに静かに戻るのを、
+/// **設置後のバイト比較で捕まえる。**
+///
+/// # 比較の形。**パッチされる箇所は除外し、位置はシンボルから導く**
+///
+/// 比較するのは「設置済みのコピー」と「`.rodata.aptramp` の雛形」である。
+/// BSP が書き込む 3 領域だけを除外する。
+///
+/// **除外位置を定数で持たない。** far jump の位置は `mov cr0` の直後という制約
+/// から決まり、**コードを 1 バイト変えるたびに動く。** 実際に `0x40` と置いた
+/// 定数が実は `0x42` だった。**シンボルから導けば、動いても追随する。**
+fn verify_installed_trampoline(
+    logger: &mut Logger<SerialPort>,
+    installed: &InstalledTrampoline,
+    src: u64,
+    len: u64,
+    farjmp_offset: u64,
+) -> bool {
+    extern "C" {
+        static zaytos_ap_tramp_gdtr: u8;
+        static zaytos_ap_tramp_data_cr3: u8;
+        static zaytos_ap_tramp_data_started: u8;
+    }
+    let gdtr_off = core::ptr::addr_of!(zaytos_ap_tramp_gdtr) as u64 - src;
+    let data_off = core::ptr::addr_of!(zaytos_ap_tramp_data_cr3) as u64 - src;
+    let data_end = core::ptr::addr_of!(zaytos_ap_tramp_data_started) as u64 - src + 8;
+
+    // BSP が書き込む領域。**ここだけを除外する。**
+    let patched: [(u64, u64); 3] = [
+        (gdtr_off + 2, gdtr_off + 6),
+        (
+            farjmp_offset + layout::FARJMP_OPCODE_LEN,
+            farjmp_offset + layout::FARJMP_OPCODE_LEN + 4,
+        ),
+        (data_off, data_end),
+    ];
+
+    let mut mismatches = 0usize;
+    let mut first_mismatch = 0u64;
+    for offset in 0..len {
+        if patched.iter().any(|(lo, hi)| offset >= *lo && offset < *hi) {
+            continue;
+        }
+        // SAFETY: どちらも長さ `len` の有効な領域である（雛形はセクション、
+        // コピー先は予約フレーム）。読み取りのみ。
+        let (a, b) = unsafe {
+            (
+                ((src + offset) as *const u8).read_volatile(),
+                ((installed.direct_map_base + offset) as *const u8).read_volatile(),
+            )
+        };
+        if a != b {
+            if mismatches == 0 {
+                first_mismatch = offset;
+            }
+            mismatches += 1;
+        }
+    }
+
+    let excluded: u64 = patched.iter().map(|(lo, hi)| hi - lo).sum();
+    logger.info(format_args!(
+        "smp: the installed AP trampoline matches the template outside the patched fields: \
+         {} byte(s) compared, {excluded} excluded (gdtr base at {:#x}, far jump target at {:#x}, \
+         data block {:#x}..{:#x}), mismatches={mismatches}",
+        len - excluded,
+        gdtr_off + 2,
+        farjmp_offset + layout::FARJMP_OPCODE_LEN,
+        data_off,
+        data_end
+    ));
+    if mismatches != 0 {
+        logger.error(format_args!(
+            "smp: the installed AP trampoline diverges from the template at offset \
+             {first_mismatch:#x} ({mismatches} byte(s) differ); the copy or a patch is wrong; \
+             halting"
+        ));
+    }
+    mismatches == 0
 }
