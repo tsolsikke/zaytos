@@ -3654,10 +3654,24 @@ const ACPI_SMP_TESTS: &[CriticalTest] = &[CriticalTest {
     expected_markers: &[
         "acpi: MADT enumeration complete",
         "2 local APIC(s) of which 2 usable",
+        // **`-smp 2` で定常状態まで到達すること**（S3-b-1）。
+        //
+        // この 1 行を足す前は、上の 2 つが出た時点で打ち切っていたので、
+        // **打ち切りより後で起動が止まる退行を構造的に捕まえられなかった。**
+        // 実際に踏んだ: per-CPU スロットの覆いの検査を停止付きで入れたところ、
+        // 「2 コア列挙 / スロット 1」で halt して `-smp 2` の起動が止まったが、
+        // **この項目は緑のままだった**（見ているマーカーが停止点より前にある）。
+        //
+        // 期待マーカーに入れると、打ち切りの条件が「これも出るまで待つ」に
+        // 変わるので、**定常状態まで進むことが要求される。**
+        "heartbeat: ticks=",
     ],
     // 1 個しか出ないのは、`-smp` が効いていないか列挙が取りこぼしているかの
     // どちらかである。**どちらも見逃したくない。**
-    forbidden_markers: &["1 local APIC(s) of which 1 usable"],
+    //
+    // `halting` は fail-fast の停止（`cpu::halt_forever`）で必ず出る語である。
+    // **`-smp 2` の構成で停止する経路が増えたら、ここで落ちる。**
+    forbidden_markers: &["1 local APIC(s) of which 1 usable", "halting"],
     wait_for_full_timeout: false,
     min_heartbeats: None,
 }];
