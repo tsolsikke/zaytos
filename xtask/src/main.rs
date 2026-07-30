@@ -2964,6 +2964,14 @@ const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
     // 再検討が要る**（deferred-decisions.md の「per-CPU seam が MAX_CPUS > 1 で…」の
     // 隣に論点として記録した）。
     DirectInterruptControlSite {
+        file: "kernel/src/smp.rs",
+        item: "global_asm!",
+        reason: "AP トランポリンの入口。**排他ではない。** SIPI 直後の AP は \
+                 リアルモードで IDT を持たないので、割り込みが来ても行き先が無い。 \
+                 InterruptGuard は 16 ビットの asm からは使えず、そもそもこの cli に \
+                 対応する sti は無い（AP は IDT を載せずに halt する）",
+    },
+    DirectInterruptControlSite {
         file: "kernel/src/task.rs",
         item: "global_asm!",
         reason: "GPR_BUF（A/B 共有）の store と照合を守る排他。asm 文脈で InterruptGuard を \
@@ -3713,6 +3721,11 @@ const ACPI_SMP4_TESTS: &[CriticalTest] = &[CriticalTest {
         // 覆いの報告の `false` 側。**MAX_CPUS を 4 以上へ上げると出なくなるので、
         // そのとき この項目が落ちる**（意図した破壊確認である）。
         "there are more usable CPUs than per-CPU slots",
+        // **`MAX_CPUS` を超えるコアは起こさない**（S3-b-2b-1 の方針）。
+        // 起こした分は署名を出し、**起こさなかった分があること**も主張する。
+        // **後者が無いと「全部起こしてしまった」を捕まえられない。**
+        "smp: application processor 1 started",
+        "1 AP(s) attempted, 1 started, 2 skipped",
         // 警告を出しても停止しないこと。
         "heartbeat: ticks=",
     ],
@@ -3727,6 +3740,9 @@ const ACPI_SMP_TESTS: &[CriticalTest] = &[CriticalTest {
     expected_markers: &[
         "acpi: MADT enumeration complete",
         "2 local APIC(s) of which 2 usable",
+        // **AP が実際に起きて署名を出すこと**（S3-b-2b-1）。
+        "smp: application processor 1 started",
+        "1 AP(s) attempted, 1 started, 0 skipped",
         // **`-smp 2` で定常状態まで到達すること**（S3-b-1）。
         //
         // この 1 行を足す前は、上の 2 つが出た時点で打ち切っていたので、

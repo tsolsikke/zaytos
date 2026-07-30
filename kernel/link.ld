@@ -66,6 +66,15 @@ SECTIONS
         *(.text .text.*)
     }
 
+    /* AP トランポリンの雛形（S3-b-2b-1）。予約フレームへ**コピーして**使うので、
+     * ここに置かれた版が実行されることはない。フレーム内オフセットで自己完結して
+     * おり（.org でレイアウトを固定）、絶対値が要る箇所は BSP がコピー後に書く。
+     * .rodata より前に置くのは、ちょうど 1 ページであることを readelf で
+     * 確かめやすくするためである。KEEP で守る（誰も参照しないと捨てられる）。 */
+    .rodata.aptramp : AT(ADDR(.rodata.aptramp) - KERNEL_VIRT_BASE) ALIGN(4K) {
+        KEEP(*(.rodata.aptramp))
+    }
+
     .rodata : AT(ADDR(.rodata) - KERNEL_VIRT_BASE) ALIGN(4K) {
         *(.rodata .rodata.*)
     }

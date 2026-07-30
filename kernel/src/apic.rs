@@ -975,6 +975,96 @@ pub fn report_per_cpu_slot_coverage(logger: &mut Logger<SerialPort>, enumerated_
     }
 }
 
+/// Interrupt Command Register の下位（S3-b-2b-1）。**書くと IPI が飛ぶ。**
+const LAPIC_REGISTER_ICR_LOW: u64 = 0x300;
+/// Interrupt Command Register の上位（宛先の APIC ID）。
+const LAPIC_REGISTER_ICR_HIGH: u64 = 0x310;
+/// ICR: delivery status（送信中なら 1）。
+const ICR_DELIVERY_STATUS: u32 = 1 << 12;
+/// ICR: level assert。
+const ICR_LEVEL_ASSERT: u32 = 1 << 14;
+/// ICR: delivery mode INIT。
+const ICR_DELIVERY_INIT: u32 = 0b101 << 8;
+/// ICR: delivery mode Startup（SIPI）。
+const ICR_DELIVERY_STARTUP: u32 = 0b110 << 8;
+
+/// AP を起こす IPI を 1 本送る（S3-b-2b-1）。
+///
+/// # なぜ送信完了を待つのか
+///
+/// ICR の delivery status が 1 の間は前の IPI がまだ送信中である。**待たずに次を
+/// 書くと前の IPI を壊す。** 上限つきで待ち、抜けたら `false` を返す
+/// （呼び出し側が停止するかを決める）。
+///
+/// # Safety
+///
+/// `lapic_virt` が写像済みの Local APIC ページの先頭であること。
+unsafe fn send_ipi(lapic_virt: u64, apic_id: u8, command: u32) -> bool {
+    // SAFETY: 呼び出し元契約。宛先を先に書き、次に command を書くと送信される。
+    unsafe {
+        write_lapic(
+            lapic_virt,
+            LAPIC_REGISTER_ICR_HIGH,
+            u32::from(apic_id) << 24,
+        );
+        write_lapic(lapic_virt, LAPIC_REGISTER_ICR_LOW, command);
+    }
+    // 送信完了を上限つきで待つ。**上限のない待ちを書かない**（CLAUDE.md §14）。
+    for _ in 0..IPI_DELIVERY_POLL_LIMIT {
+        // SAFETY: 同じページの読み取りのみ。
+        let icr = unsafe { read_lapic(lapic_virt, LAPIC_REGISTER_ICR_LOW) };
+        if icr & ICR_DELIVERY_STATUS == 0 {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
+}
+
+/// [`send_ipi`] が送信完了を待つ回数の上限。
+///
+/// 送信は数百サイクルで終わる。桁で余裕を取ってある。
+const IPI_DELIVERY_POLL_LIMIT: u32 = 1_000_000;
+
+/// INIT IPI を送る（S3-b-2b-1）。
+///
+/// # Safety
+///
+/// [`send_ipi`] と同じ。**AP をリセット状態へ落とすので、起動時に 1 回だけ。**
+pub unsafe fn send_init_ipi(lapic_virt: u64, apic_id: u8) -> bool {
+    // SAFETY: 呼び出し元契約。
+    unsafe { send_ipi(lapic_virt, apic_id, ICR_DELIVERY_INIT | ICR_LEVEL_ASSERT) }
+}
+
+/// Startup IPI（SIPI）を送る（S3-b-2b-1）。
+///
+/// `vector` は **`vector << 12` が AP の開始物理アドレスになる。**
+///
+/// # Safety
+///
+/// [`send_ipi`] と同じ。`vector << 12` に実行可能なトランポリンが置かれていること。
+pub unsafe fn send_startup_ipi(lapic_virt: u64, apic_id: u8, vector: u8) -> bool {
+    // SAFETY: 呼び出し元契約。
+    unsafe {
+        send_ipi(
+            lapic_virt,
+            apic_id,
+            ICR_DELIVERY_STARTUP | ICR_LEVEL_ASSERT | u32::from(vector),
+        )
+    }
+}
+
+/// Local APIC の MMIO を読める仮想アドレス（S3-b-2b-1）。
+///
+/// # Safety
+///
+/// `mapped` が [`map_and_probe`] の戻り値であること。
+pub fn lapic_virt_of(mapped: &MappedApic) -> u64 {
+    common::addr::direct_map()
+        .phys_to_virt(mapped.local_apic_phys())
+        .as_u64()
+}
+
 /// Local APIC のレジスタを 1 本読む。
 ///
 /// # Safety

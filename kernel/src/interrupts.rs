@@ -727,6 +727,36 @@ pub unsafe fn run_timer_loop(
     // no-op）。
     if stop_after_ticks == 0 {
         crate::task::run_preemptive_demo();
+
+        // === S3-b-2b-1: AP を起こす ===
+        //
+        // **位置は 2 つの制約で決まっている。** `sti` より後でなければならない
+        // （10ms の待ちをタイマのティックで作る）。そして**プリエンプティブ
+        // デモの後**でなければならない（デモの最中に AP が起きると、周回数や
+        // 窓カウントの観測に混ざる）。
+        //
+        // **ここに `cli` / `sti` は追加していない。** 許可リストの数は変わらない。
+        if let Some(apic) = apic {
+            let mmio = apic.mmio();
+            // SAFETY: `apic` は写像済み、タイマは動いている（直前まで
+            // デモが走った）、起動時の 1 回だけである。
+            let report = unsafe { crate::smp::wake_application_processors(logger, apic, &mmio) };
+            logger.info(format_args!(
+                "smp: application processors: {} usable CPU(s) reported, {} AP(s) attempted, \
+                 {} started, {} skipped for lack of a per-CPU slot (MAX_CPUS={})",
+                report.usable,
+                report.attempted,
+                report.started,
+                report.skipped_no_slot,
+                common::percpu::MAX_CPUS
+            ));
+            if report.started != report.attempted {
+                logger.error(format_args!(
+                    "smp: only {} of {} application processor(s) reported their start signature",
+                    report.started, report.attempted
+                ));
+            }
+        }
     }
 
     let mut last_ticks = 0u64;

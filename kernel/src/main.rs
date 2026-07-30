@@ -675,6 +675,20 @@ extern "sysv64" fn kernel_main() -> ! {
         )),
     }
 
+    // === S3-b-2b-1: AP 用スタックのフレームを予約する ===
+    //
+    // **ここで取るのは、`run_timer_loop` にフレームアロケータが無いからである**
+    // （トランポリン用フレームと同じ理由）。**恒等 VA で使うので低位でなければ
+    // ならず**、アロケータが最小のフレーム番号から配るうちに取る。
+    match kernel::smp::reserve_ap_stacks(&mut allocator) {
+        Ok(count) => logger.info(format_args!(
+            "smp: reserved {count} AP stack frame(s), all below the identity limit"
+        )),
+        Err(error) => logger.error(format_args!(
+            "smp: could not reserve AP stack frames ({error:?}); AP startup will halt"
+        )),
+    }
+
     // === M2-d (d-1): 新しいページテーブルを構築する（CR3 は切り替えない） ===
 
     // フレームバッファは実機検証の結果、UEFI メモリマップに現れないことが

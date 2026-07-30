@@ -89,6 +89,15 @@ const MAX_IO_APICS: usize = 4;
 /// ISA の IRQ は 16 本なので、それを超える上書きは意味を持たない。実測は 5 件。
 const MAX_INTERRUPT_SOURCE_OVERRIDES: usize = 16;
 
+/// 記録する使用可能な Local APIC ID の上限（S3-b-2b-1）。
+///
+/// **`MAX_CPUS` とは別の上限である。** ここは「MADT が報告したものを何本覚えるか」で、
+/// `MAX_CPUS` は「per-CPU スロットが何本あるか」である。**覚えた本数のうち
+/// `MAX_CPUS` を超える分は起こさない**（`roadmap.md` の S3-b-2b-1）。
+/// **超えた分を記録できずに落とすと、起こさなかったコアがあることを報告できない**
+/// ので、`MAX_CPUS` より広く取る。
+const MAX_LOCAL_APIC_IDS: usize = 8;
+
 /// I/O APIC 1 個の所在。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IoApicLocation {
@@ -116,6 +125,12 @@ pub struct ApicMmio {
     interrupt_source_overrides:
         [Option<madt::InterruptSourceOverride>; MAX_INTERRUPT_SOURCE_OVERRIDES],
     interrupt_source_overrides_found: usize,
+    /// 使用可能な Local APIC の ID（S3-b-2b-1）。**AP を起こすのに要る。**
+    ///
+    /// 先頭は bootstrap processor の候補である（MADT の並び順）。
+    local_apic_ids: [Option<u8>; MAX_LOCAL_APIC_IDS],
+    /// 記録できずに落とした本数。**落としたことを黙らせない。**
+    local_apic_ids_dropped: usize,
     /// MADT が報告した「使用可能な」Local APIC の本数（S3-b-1）。
     ///
     /// **per-CPU スロットの境界を起動時に保証するために持つ。** `MAX_CPUS` を
@@ -133,7 +148,21 @@ impl ApicMmio {
             interrupt_source_overrides: [None; MAX_INTERRUPT_SOURCE_OVERRIDES],
             interrupt_source_overrides_found: 0,
             usable_local_apics: 0,
+            local_apic_ids: [None; MAX_LOCAL_APIC_IDS],
+            local_apic_ids_dropped: 0,
         }
+    }
+
+    /// 使用可能な Local APIC の ID を、MADT の並び順で返す。
+    ///
+    /// **先頭が bootstrap processor の候補である。** AP はそれ以降である。
+    pub fn local_apic_ids(&self) -> impl Iterator<Item = u8> + '_ {
+        self.local_apic_ids.iter().flatten().copied()
+    }
+
+    /// 記録できずに落とした Local APIC ID の本数。
+    pub const fn local_apic_ids_dropped(&self) -> usize {
+        self.local_apic_ids_dropped
     }
 
     /// MADT が報告した使用可能な Local APIC の本数（= 起動しうるコア数）。
@@ -887,6 +916,10 @@ fn walk_madt(
                         usable_local_apic_count += 1;
                         if mmio.bsp_candidate_apic_id.is_none() {
                             mmio.bsp_candidate_apic_id = Some(local.apic_id);
+                        }
+                        match mmio.local_apic_ids.iter_mut().find(|slot| slot.is_none()) {
+                            Some(slot) => *slot = Some(local.apic_id),
+                            None => mmio.local_apic_ids_dropped += 1,
                         }
                     }
                     logger.info(format_args!(
