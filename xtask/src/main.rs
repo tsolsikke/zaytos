@@ -1046,6 +1046,14 @@ fn main() -> Result<()> {
                     Some(2),
                 );
             }
+            if rest.iter().any(|a| a == "--acpi-smp4-test") {
+                return cmd_marker_test(
+                    ACPI_SMP4_TESTS,
+                    "acpi-smp-test",
+                    ACPI_SMP4_TESTS[0].name,
+                    Some(4),
+                );
+            }
             if rest.iter().any(|a| a == "--percpu-test") {
                 return cmd_marker_test(PERCPU_TESTS, "percpu-test", PERCPU_TESTS[0].name, None);
             }
@@ -3678,6 +3686,41 @@ const PERCPU_TESTS: &[CriticalTest] = &[CriticalTest {
     min_heartbeats: None,
 }];
 
+/// per-CPU スロットが足りない構成の確認（`-smp 4`、S3-b-2a）。
+///
+/// # なぜ `-smp 4` を別に置くのか
+///
+/// **覆いの報告の「覆えていない」側を評価する構成を残すためである。**
+/// `MAX_CPUS = 2` なので `-smp 2` では覆えてしまい、`false` の枝が通らない。
+///
+/// **これを置かないと、同じ失敗が再発しても次の段まで気づけない。** S3-b-1 で
+/// 覆いの検査を `halt_forever` で入れたときに `-smp 2` の起動が止まり、
+/// **既存の検査は緑のままだった**（見ているマーカーが停止点より前にあった）。
+/// **`false` 側を評価する構成が無い状態を作らない。**
+///
+/// # 主張は 2 つある。**片方だけでは足りない**
+///
+/// - 警告が出ること（`false` 側が実際に評価されている）
+/// - **完走すること**（`heartbeat: ticks=`）。**警告だけを見ると、また停止に
+///   戻ったときに捕まらない。**
+///
+/// コア数は `cmd_marker_test` の引数なので、`-smp 2` の表とは別に持つ。
+const ACPI_SMP4_TESTS: &[CriticalTest] = &[CriticalTest {
+    name: "smp4-more-cpus-than-slots",
+    feature: "",
+    expected_markers: &[
+        "4 local APIC(s) of which 4 usable",
+        // 覆いの報告の `false` 側。**MAX_CPUS を 4 以上へ上げると出なくなるので、
+        // そのとき この項目が落ちる**（意図した破壊確認である）。
+        "there are more usable CPUs than per-CPU slots",
+        // 警告を出しても停止しないこと。
+        "heartbeat: ticks=",
+    ],
+    forbidden_markers: &["halting"],
+    wait_for_full_timeout: false,
+    min_heartbeats: None,
+}];
+
 const ACPI_SMP_TESTS: &[CriticalTest] = &[CriticalTest {
     name: "smp2-enumeration",
     feature: "",
@@ -4388,6 +4431,15 @@ fn cmd_check(full: bool) -> Result<()> {
                 cmd_marker_test(ACPI_SMP_TESTS, "acpi-smp-test", test.name, Some(2))
             });
         }
+        // per-CPU スロットが足りない構成（S3-b-2a）。覆いの報告の `false` 側を
+        // 評価する構成をここで残す。
+        for test in ACPI_SMP4_TESTS {
+            total += 1;
+            let name = format!("acpi-smp-test {}", test.name);
+            run_regression(&name, &mut failed, &mut retries, || {
+                cmd_marker_test(ACPI_SMP4_TESTS, "acpi-smp-test", test.name, Some(4))
+            });
+        }
         for test in APIC_TESTS {
             total += 1;
             let name = format!("apic-test {}", test.name);
@@ -4537,7 +4589,7 @@ struct ExpectedCheckCount {
 }
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
-const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount { base: 17, full: 86 };
+const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount { base: 17, full: 87 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
 ///
