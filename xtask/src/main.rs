@@ -4440,6 +4440,11 @@ fn cmd_check(full: bool) -> Result<()> {
             retries.join(", ")
         );
     }
+    // **項目数が会計行と一致すること。** 検査を足して会計行を更新し忘れる形を
+    // 構造で止める（`EXPECTED_CHECK_COUNT` の doc）。**`total` はここで確定して
+    // いるので、`cmd_check` の組み替えは要らない。**
+    check_count_matches_accounting(total, full)?;
+
     if failed.is_empty() {
         println!("xtask check: all {total} check(s) passed");
         return Ok(());
@@ -4449,6 +4454,72 @@ fn cmd_check(full: bool) -> Result<()> {
         failed.len(),
         failed.join(", ")
     );
+}
+
+/// 会計行に記録されている項目数（`docs/verification-coverage.md` の「項目会計」）。
+///
+/// # なぜ二重に持つのか。**片方が機械で強制されるなら、両方が腐るのとは違う**
+///
+/// 会計行は「検査を足したとき数が閉じていることを、この行だけで追う」場所である。
+/// **ところがその行自体が 2 段ぶん古くなっていた**（S2-d-1c の 3 種と S2-d-2 の
+/// 4 種を足したときに更新しておらず、`--full` が 77 のまま残っていた）。
+/// **単一の出所と決めた場所が古くなると、他のすべての参照が正しくても会計は止まる。**
+///
+/// 以前この案を「二重持ちの場所が変わるだけ」として見送った記録があるが、
+/// **weigh きれていなかった点がある。** この定数は**合わないとビルド（検査）が
+/// 落ちる**。docs の 2 箇所が両方とも静かに腐るのとは性質が違う。
+///
+/// # **強制されるのは定数の更新だけである。会計行の更新は強制されない**
+///
+/// 検査を足すとここが落ち、直すには定数を上げる必要がある。**そのとき この doc が
+/// 会計行を指しているので、「検査を足したら会計行を見る」が手順ではなく構造から
+/// 促される。** ただし**促されるだけで、強制ではない。** 定数だけ上げて会計行を
+/// 放置することはできる。**半分だけ構造へ移った状態である。** 残りの半分は
+/// 依然として規律なので、そう書いておく（守れない箇所を守れると書かない）。
+///
+/// # 会計行を機械で読んで完全に強制する案は採らない
+///
+/// 数字を Markdown から抜き出せば強制できるが、**xtask が会計行の書式へ結合する。**
+/// 見出しの文言・強調・推移の書き方を変えると検査が落ちるようになり、
+/// **文書の書き方が検査の都合で固定される。** 会計行は人が読んで経緯を辿るための
+/// 散文なので、その代償は釣り合わない。
+///
+/// # 走らせる前に総数を出す必要は無い
+///
+/// 以前の記録は「走らせずに総数を出せるよう `cmd_check` を組み替えるのが前提」と
+/// 書いていたが、**照合するだけなら要らない。** `total` は `cmd_check` の末尾で
+/// 既に確定している（`all {total} check(s) passed` がそれを印字している）。
+/// 組み替えが要るのは「走らせる前に印字する」形の場合だけである。
+struct ExpectedCheckCount {
+    /// `cargo xtask check`（QEMU を起動しない検査だけ）。
+    base: usize,
+    /// `cargo xtask check --full`。
+    full: usize,
+}
+
+/// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
+const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount { base: 17, full: 85 };
+
+/// 実際に走った項目数が会計行と一致するかを見る。
+///
+/// 一致しないときは**検査の失敗として扱う。** 項目を足したのに会計行を更新して
+/// いない状態でコミットへ進めないようにするためである。
+fn check_count_matches_accounting(total: usize, full: bool) -> Result<()> {
+    let expected = if full {
+        EXPECTED_CHECK_COUNT.full
+    } else {
+        EXPECTED_CHECK_COUNT.base
+    };
+    if total == expected {
+        return Ok(());
+    }
+    let field = if full { "full" } else { "base" };
+    bail!(
+        "xtask check: ran {total} check(s) but EXPECTED_CHECK_COUNT.{field} is {expected}. \
+         If you added or removed a check, update that constant in xtask AND the item-accounting \
+         line in docs/verification-coverage.md. The constant is machine-enforced; the doc is \
+         not, so updating only the constant will silence this without fixing the record"
+    )
 }
 
 /// 起動失敗（環境要因）を表すメッセージの目印。
