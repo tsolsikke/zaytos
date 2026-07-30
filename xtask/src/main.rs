@@ -3352,6 +3352,143 @@ fn has_safety_comment_above(lines: &[&str], index: usize) -> bool {
 /// 検査対象が静かに変わることになる。ISO 8601 でオフセットまで書く。
 const COMMIT_STYLE_SINCE: &str = "2026-07-22T08:30:00+09:00";
 
+/// Markdown ドキュメントの機械的に判定できる文体規則を見る（`docs/coding-standards.md` §1）。
+///
+/// # なぜ xtask に持つのか。ローカルの補助スクリプトでは規律のままである
+///
+/// 文体の検査にはローカル専用の補助スクリプトがあるが、**それは追跡対象外なので
+/// `cargo xtask check` から呼べない**（呼ぶと、公開されるリポジトリの中から
+/// 存在しないファイルを指すことになる）。回し忘れが実際に起き、閉じ括弧の直後に
+/// 半角空白が入った差分がコミットされた。**規律で守っている箇所が残っていた**ので、
+/// 機械で判定できる 2 つだけをここへ移し、コミット前に構造的に止まるようにする。
+///
+/// # ここで見るのは 2 つだけである。**補助スクリプトの代わりにはならない**
+///
+/// - S1: GFM タスクリストのマーカー直後に半角空白があること
+/// - S2: 行結合の痕跡（和文の句読点・閉じ括弧の直後の半角空白、および直前に
+///   空白の無い `/` の直後の半角空白）
+///
+/// **レンダリング結果を要する検査は移していない**（閉じない強調、タグ列の比較、
+/// 見出しレベルの飛び、リンク先の生存）。Markdown レンダラが必要で、そのために
+/// 新しいクレート依存を増やす判断はしていない。**したがって補助スクリプトは
+/// 引き続き要る。** ここが覆うのは「回し忘れても落ちる」範囲だけである。
+///
+/// # 対象は追跡対象の `.md` だけ
+///
+/// `git ls-files` で引く。未追跡の作業メモを対象にすると、コミットに関係のない
+/// ファイルで落ちる。
+fn check_markdown_prose_style(workspace_root: &Path) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .current_dir(workspace_root)
+        .args(["ls-files", "*.md"])
+        .output()
+        .context("failed to run git ls-files for the markdown style check")?;
+    if !output.status.success() {
+        bail!("git ls-files failed for the markdown style check");
+    }
+    let listing = String::from_utf8_lossy(&output.stdout);
+
+    let mut findings = Vec::new();
+    for rel in listing.lines().filter(|l| !l.trim().is_empty()) {
+        let path = workspace_root.join(rel);
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let mut in_fence = false;
+        for (index, line) in text.lines().enumerate() {
+            let number = index + 1;
+
+            // S1 はコードフェンスの内外を問わず全行を見る（補助スクリプトと同じ）。
+            if let Some(rest) = task_list_marker_rest(line) {
+                if !rest.starts_with(' ') && !rest.is_empty() {
+                    findings.push(format!(
+                        "{rel}:{number}: S1 タスクリストのマーカー直後に空白が無い: {}",
+                        line.trim()
+                    ));
+                }
+            }
+
+            if line.trim_start().starts_with("```") {
+                in_fence = !in_fence;
+                continue;
+            }
+            // フェンス内・インデントコード・表の行は S2 の対象にしない。
+            if in_fence || line.starts_with("    ") || line.trim_start().starts_with('|') {
+                continue;
+            }
+            if let Some(column) = join_trace_column(line) {
+                findings.push(format!(
+                    "{rel}:{number}: S2 行結合の痕跡（列 {column}）: {}",
+                    line.trim()
+                ));
+            }
+        }
+    }
+    Ok(findings)
+}
+
+/// GFM タスクリストのマーカー（`- [ ]` / `- [x]`）に一致したら、その直後を返す。
+fn task_list_marker_rest(line: &str) -> Option<&str> {
+    let rest = line.trim_start();
+    let rest = rest.strip_prefix(['-', '*', '+'])?;
+    let rest = rest.strip_prefix(' ')?;
+    let rest = rest.strip_prefix('[')?;
+    let mut chars = rest.chars();
+    let marker = chars.next()?;
+    if !matches!(marker, ' ' | 'x' | 'X') {
+        return None;
+    }
+    chars.as_str().strip_prefix(']')
+}
+
+/// 行結合の痕跡を探し、見つかった位置（1 起点の文字数）を返す。
+///
+/// 探すのは 2 形である。**コードスパン（バッククォート）の中は対象にしない。**
+///
+/// - 和文の句読点・閉じ括弧（`、。」』）`）の直後が半角空白 1 個 + 非空白
+/// - `/` の直後が半角空白 1 個 + 非空白で、かつ `/` の直前が空白でも `/` でもない
+///
+/// 後者の条件は、箇条書きの区切りに使う ` / ` を許し、行を結合したときに現れる
+/// `語/ 語` の形だけを捕まえるためである。
+fn join_trace_column(line: &str) -> Option<usize> {
+    let masked = mask_code_spans(line);
+    for (index, window) in masked.windows(3).enumerate() {
+        let [current, next, after] = [window[0], window[1], window[2]];
+        if next != ' ' || after.is_whitespace() {
+            continue;
+        }
+        if matches!(current, '、' | '。' | '」' | '』' | '）') {
+            return Some(index + 1);
+        }
+        if current == '/' {
+            let previous = index.checked_sub(1).map(|i| masked[i]);
+            let guarded = matches!(previous, Some(' ') | Some('/'));
+            if !guarded {
+                return Some(index + 1);
+            }
+        }
+    }
+    None
+}
+
+/// バッククォートで囲まれた範囲を、判定に引っかからない文字で潰す。
+///
+/// 潰す先は `\0` にしてある。**空白にはしない。** 空白にすると、コードスパンの
+/// 直後にある区切りが「直前が空白」に見えて、S2 の条件が変わってしまう。
+fn mask_code_spans(line: &str) -> Vec<char> {
+    let mut out: Vec<char> = Vec::new();
+    let mut in_span = false;
+    for ch in line.chars() {
+        if ch == '`' {
+            in_span = !in_span;
+            out.push('\0');
+            continue;
+        }
+        out.push(if in_span { '\0' } else { ch });
+    }
+    out
+}
+
 /// コミットメッセージに和文と英数字の間の半角空白が無いことを見る。
 ///
 /// 検出するのは「かな・カタカナ・漢字」と「英数字・括弧」が半角空白 1 個を
@@ -4085,6 +4222,19 @@ fn cmd_check(full: bool) -> Result<()> {
         }
         println!("--- default features: FAILED");
         failed.push("default features".to_string());
+    }
+
+    total += 1;
+    println!("=== xtask check: markdown prose style (tracked .md)");
+    let prose = check_markdown_prose_style(&workspace_root)?;
+    if prose.is_empty() {
+        println!("--- markdown prose style: OK");
+    } else {
+        for finding in &prose {
+            println!("    {finding}");
+        }
+        println!("--- markdown prose style: FAILED ({} line(s))", prose.len());
+        failed.push("markdown prose style".to_string());
     }
 
     total += 1;
