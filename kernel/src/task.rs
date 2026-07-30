@@ -1047,3 +1047,61 @@ core::arch::global_asm!(
     delay = sym PREEMPT_DELAY,
     sled = const PREEMPT_WINDOW_SLED,
 );
+
+#[cfg(test)]
+mod tests {
+    use super::{pick_next, TASK_COUNT, WORKER_COUNT};
+
+    /// この表が前提にしている形。崩れたら下の期待値を引き直すこと。
+    #[test]
+    fn the_demo_has_two_workers_and_one_main() {
+        assert_eq!(WORKER_COUNT, 2);
+        assert_eq!(TASK_COUNT, 3);
+    }
+
+    #[test]
+    fn main_is_chosen_when_no_worker_can_run() {
+        assert_eq!(pick_next([false, false, false], 0), 0);
+        assert_eq!(pick_next([false, false, false], 1), 0);
+        assert_eq!(pick_next([false, false, false], 2), 0);
+    }
+
+    /// **タスク 0（メイン）は候補として巡回されない。** 走行可能と印を付けても
+    /// 選ばれるのは「他に誰もいないとき」の帰り先としてだけである。
+    #[test]
+    fn main_is_never_picked_as_a_rotation_candidate() {
+        // メインだけが走行可能でも、返るのは 0（フォールバック経路）。
+        assert_eq!(pick_next([true, false, false], 1), 0);
+    }
+
+    #[test]
+    fn from_main_the_first_runnable_worker_is_chosen() {
+        assert_eq!(pick_next([false, true, true], 0), 1);
+        assert_eq!(pick_next([false, false, true], 0), 2);
+        assert_eq!(pick_next([false, true, false], 0), 1);
+    }
+
+    /// ワーカーの間は巡回する（round-robin）。
+    #[test]
+    fn workers_rotate() {
+        assert_eq!(pick_next([false, true, true], 1), 2);
+        assert_eq!(pick_next([false, true, true], 2), 1);
+    }
+
+    /// **現タスクが再選択されうる。** 他に走れるワーカーがおらず自分だけが
+    /// 走行可能なら、`pick_next` は現タスクを返す。呼び出し側
+    /// （`schedule_switch`）が `next == current` を no-op として扱うことで
+    /// 成立している契約なので、**状態機械化でもこの性質を保つこと。**
+    #[test]
+    fn the_current_worker_is_returned_when_it_is_the_only_runnable_one() {
+        assert_eq!(pick_next([false, true, false], 1), 1);
+        assert_eq!(pick_next([false, false, true], 2), 2);
+    }
+
+    /// 走行不可のワーカーは飛ばされる。
+    #[test]
+    fn an_unrunnable_worker_is_skipped() {
+        assert_eq!(pick_next([false, false, true], 1), 2);
+        assert_eq!(pick_next([false, true, false], 2), 1);
+    }
+}
