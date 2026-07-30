@@ -185,6 +185,8 @@ seam整備（項目3、`common::percpu`）は`MAX_CPUS = 1`・`cpu_id()`が定�
 
 - **`cpu_id() < MAX_CPUS`の境界**（`common::percpu`の`this_cpu_ptr`）: `this_cpu_ptr`は`cpu_id()`分ポインタを進めるので、`cpu_id() >= MAX_CPUS`だと配列外でUB。現在は`cpu_id()`が定数`0`で自明。S3で、誰が境界を保証するかを決める（`cpu_id()`側で`0..MAX_CPUS`に収める / `this_cpu_ptr`で`debug_assert!` / 起動時にコア数`> MAX_CPUS`なら halt）。
 - **per-CPU初期値の「全コアがタスク0」問題**（`kernel::task`の`CURRENT`）: `CURRENT = [AtomicUsize(0); MAX_CPUS]`は「全コアがタスク0をcurrentとして始まる」を意味する。`MAX_CPUS = 1`では正しいが、`MAX_CPUS > 1`では各APの起動時に別途currentを設定するか sentinel を置く必要がある（setup前の読み出しが無いことは実コードで確認済み）。S3でどれを採るか（AP初期化時の明示設定 / sentinel値 / Option相当）を決める。
+
+  **S3-aで入れた`TaskState`が、この問題を検出可能にするかもしれない。S3-bで評価すること**（記録のみ。S3-aでは作業していない）。`CURRENT[cpu]`が指すタスクの状態に対する不変条件を置ければ、APが初期値`0`のまま動き出したことを捕まえられる。**ただし単純な形は成立しない。** 「走行中のタスクは`Ready`である」は不変条件にならない。**メインは`Blocked`のまま走る**（`pick_next`がメインを候補にしないのはループ範囲によるもので、状態による除外ではない。`TaskState::Blocked`のdoc）。成立する形があるかどうかも含めて評価対象とする。
 - **`GPR_BUF`の排他がasmの生`cli`/`sti`である**（`kernel::task`の`global_asm!`。項目2の許可リストの例外(g)）: プリエンプティブワーカーが15本のGPRを`GPR_BUF`へ store して照合する区間を、asm内の生`cli`…`sti`で守っている。`InterruptGuard`を使えないasm文脈のための例外で、**これは他の許可箇所と違い本当に共有データの排他である**。`GPR_BUF`はワーカーA/Bで共有。`cli`が止められるのは同一コアの割り込みだけなので、**複数コアでタスクを走らせると別コアのタスクからの並行アクセスを防げない**。
 
   **解禁条件を書き換えた。旧: 「per-CPU化なら振る舞い不変で先にできるのでS3-aで扱う」。新: 「asmが自コアのスロットを選べる手段ができた時点（GS相対または集約ブロック形式）」。** 旧条件は前提が誤っていた。

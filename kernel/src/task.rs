@@ -319,6 +319,45 @@ fn serial_line(args: core::fmt::Arguments) {
     let _ = writeln!(serial, "{args}");
 }
 
+/// GPR 照合デモを走らせてよいコアか確かめる（S3-a）。走れないなら停止する。
+///
+/// # なぜ要るのか。[`GPR_BUF`] が per-CPU ではない
+///
+/// [`GPR_BUF`] はワーカー A / B で共有され、排他はワーカー本体の `global_asm!`
+/// 内の生 `cli`…`sti` である。**`cli` が止められるのは同一コアの割り込みだけ
+/// なので、別のコアで走るタスクからの並行アクセスは防げない。**
+///
+/// per-CPU 化はできない。**あの区間では 15 本の GPR 全部が検査対象のパターンを
+/// 保持しており、アドレス計算に使えるレジスタが 1 本も無い**（だから rip 相対で
+/// 触っている）。自コアのスロットを選ぶには GS 相対か集約ブロック形式が必要で、
+/// どちらも現時点では無い（`deferred-decisions.md` の `GPR_BUF` の項目）。
+///
+/// **配列にして `MAX_CPUS` 本持たせるだけでは解決しない。** rip 相対のままだと
+/// 全コアがスロット 0 を叩くので、per-CPU 化が済んだように見えて共有のままに
+/// なる。そこで**形を変える代わりに、前提が破れたら落ちる形にしてある。**
+///
+/// # この検査の性格
+///
+/// **現在は常に成立する。** `MAX_CPUS = 1` で [`common::percpu::cpu_id`] が
+/// 常に `0` を返すためである。**目的は、AP がタスクを実行し始めた段で落ちること**
+/// であって、今なにかを捕まえることではない。
+///
+/// **破壊確認は現時点では構成できない。** `cpu_id()` に非 `0` を返させる手段が
+/// まだ無い。**S3-b で `cpu_id()` が実 ID を返すようになった時点で構成可能に
+/// なるので、S3-b の到達条件に入れてある**（`roadmap.md`）。
+/// `smp::trampoline_frame()` や `irq::mask_all()` と同じ扱いである。
+fn require_bootstrap_processor(what: &str) {
+    let cpu = common::percpu::cpu_id();
+    if cpu != 0 {
+        serial_line(format_args!(
+            "task: {what} may only run on the bootstrap processor (cpu 0), but cpu_id()={cpu}; \
+             GPR_BUF is shared and its asm exclusion is a bare cli, which cannot keep another \
+             core out; halting"
+        ));
+        common::cpu::halt_forever();
+    }
+}
+
 /// あるワーカーのスタックのガードページを unmap する（M5-b と同じ機構）。
 ///
 /// # Safety
@@ -403,6 +442,7 @@ unsafe fn build_initial_context(top: VirtAddr, entry: u64) -> u64 {
 // 到達不能になる。回帰チェック専用のビルドなので許容する。
 #[cfg_attr(feature = "task-switch-yield-in-critical", allow(unreachable_code))]
 pub fn run_cooperative_demo() {
+    require_bootstrap_processor("the cooperative demo");
     // SAFETY: 起動時の単一実行文脈。まだ誰もスケジューラを触っていない。
     unsafe {
         setup_tasks();
@@ -854,6 +894,7 @@ extern "C" {
 /// してメインへ戻し、この関数が会計・進捗・レジスタ照合・窓カウントを検査して
 /// 戻る。
 pub fn run_preemptive_demo() {
+    require_bootstrap_processor("the preemptive demo");
     // SAFETY: run_timer_loop の sti 直後、起動時の単一実行文脈から 1 回だけ
     // 呼ばれる。スケジューラは M5-c のデモが終わった状態。
     unsafe {
