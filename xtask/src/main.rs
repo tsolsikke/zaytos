@@ -3669,8 +3669,11 @@ const ACPI_SMP_TESTS: &[CriticalTest] = &[CriticalTest {
     // 1 個しか出ないのは、`-smp` が効いていないか列挙が取りこぼしているかの
     // どちらかである。**どちらも見逃したくない。**
     //
-    // `halting` は fail-fast の停止（`cpu::halt_forever`）で必ず出る語である。
-    // **`-smp 2` の構成で停止する経路が増えたら、ここで落ちる。**
+    // `halting` は**二次的な網である。** `cpu::halt_forever()` 自身はこの語を
+    // 出さない（呼び出し側がログへ書いたときにだけ現れる）ので、**ログを書かずに
+    // 停止する経路は捕まえられない。** 実測で確認した（停止を一時的に戻すと、
+    // 落としたのは `heartbeat: ticks=` のほうで、この禁止マーカーは素通りした）。
+    // **停止を捕まえている主たる根拠は、上の `heartbeat: ticks=` である。**
     forbidden_markers: &["1 local APIC(s) of which 1 usable", "halting"],
     wait_for_full_timeout: false,
     min_heartbeats: None,
@@ -3818,7 +3821,15 @@ const CALIBRATION_RUN_TIMEOUT: Duration = Duration::from_secs(40);
 const APIC_DECODE_TESTS: &[CriticalTest] = &[CriticalTest {
     name: "ioapic-decodes",
     feature: "",
-    expected_markers: &["apic: I/O APIC MMIO decodes", "24 redirection entr(y/ies)"],
+    expected_markers: &[
+        "apic: I/O APIC MMIO decodes",
+        "24 redirection entr(y/ies)",
+        // **定常状態まで到達すること。** この行が無いと、上の 2 つが出た時点で
+        // 打ち切るので**その後で起動が止まる退行を捕まえられない**（`-smp 2` の
+        // 項目で実際に踏んだ形と同じ死角である）。既定ビルドを走らせる項目は
+        // これを入れておく。`APIC_TESTS` が同じ理由で入れてあるのに揃える。
+        "heartbeat: ticks=",
+    ],
     forbidden_markers: &["does not look decoded"],
     wait_for_full_timeout: false,
     min_heartbeats: None,
