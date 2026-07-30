@@ -913,6 +913,68 @@ fn survey_io_apic(logger: &mut Logger<SerialPort>, base_virt: u64, io_apic: &IoA
     }
 }
 
+// ===========================================================================
+// S3-b-1: per-CPU スロットの境界を起動時に保証する
+//
+// **`cpu_id()` の実 ID 化はこの段では行わない。** 器（`common::percpu` の
+// `install_cpu_id_reader`）だけを置き、実装を据えるのは S3-b-2a である。
+//
+// 理由は実測である。Local APIC の ID レジスタを `cpu_id()` から読む形を実装して
+// 測ったところ、プリエンプティブデモの周回数が **2214 から 374 へ落ちた**
+// （3 回ずつ起動。幅は 2180-2254 と 368-380 で重ならない）。**約 5.9 倍の退行**
+// である。TCG は MMIO 読みをメモリリージョンのディスパッチとして処理し、
+// `cpu_id()` は `critical_nesting_depth` 経由でクリティカルガードの出入りごとに
+// 通るためである。
+//
+// **`MAX_CPUS = 1` の間、この読みは費用だけで便益がゼロである**（答えは常に 0）。
+// 安い機構は 2 つあり、どちらも S3-b-2a の設備を要する（per-CPU スタックから
+// RSP で導く形、または GS ベース）。**便益が生じる段で、安い機構と一緒に入れる。**
+// 詳細は `docs/deferred-decisions.md` と `docs/roadmap.md` の S3-b。
+// ===========================================================================
+
+/// per-CPU スロットが、起動しうるコア数を覆っているかを報告する（S3-b-1）。
+///
+/// # **この段では停止しない。警告だけである。理由を正確に書く**
+///
+/// [`common::percpu::PerCpu::this_cpu_ptr`] は `cpu_id()` 分ポインタを進めるので、
+/// `cpu_id() >= MAX_CPUS` だと配列外でありUBである。**しかしこの段では
+/// `cpu_id()` は定数 `0` を返し、カーネルコードを実行するのは bootstrap
+/// processor だけである。** AP は起こしていない。したがって
+/// **列挙されたコアが `MAX_CPUS` を超えていても、配列外の索引は発生しない。**
+///
+/// **当初ここで停止させたが、それは過剰だった。** `-smp 2` で起動すると
+/// 「2 コア列挙 / スロット 1」で停止し、**それまで完走していた構成が起動
+/// しなくなった。** しかも `acpi-smp-test smp2-enumeration` は MADT の行だけを
+/// 見ているので、**検査は緑のままだった**（`verification-coverage.md` の
+/// 「検査が緑でも、系が悪くなっていることはある」）。
+///
+/// **停止が正しくなるのは `cpu_id()` が非 `0` を返しうる段（S3-b-2a）である。**
+/// そこで初めて「スロットが足りない」が「配列外を索引する」に直結する。
+/// **保証をその段へ置き、ここでは事実を報告するだけにする。**
+///
+/// # それでもここに置く価値
+///
+/// **`MAX_CPUS` を上げ忘れたまま AP を起こす段へ進むことを、起動ログで見える
+/// ようにしておく。** `-smp 2` / `-smp 4` の構成で警告が出るので、
+/// S3-b-2a に入る時点で気づける。
+pub fn report_per_cpu_slot_coverage(logger: &mut Logger<SerialPort>, enumerated_cpu_count: usize) {
+    let slots = common::percpu::MAX_CPUS;
+    let covered = enumerated_cpu_count <= slots;
+    logger.info(format_args!(
+        "percpu: {enumerated_cpu_count} usable CPU(s) enumerated, {slots} per-CPU slot(s) \
+         available, every CPU has a slot={covered} (cpu_id() is the constant 0 and only the \
+         bootstrap processor runs, so no slot is indexed out of range yet)"
+    ));
+    if !covered {
+        logger.warn(format_args!(
+            "percpu: there are more usable CPUs than per-CPU slots. This is not fatal yet \
+             because cpu_id() is the constant 0 and the APs are never started. It becomes fatal \
+             in the stage where cpu_id() can return a non-zero value; raise MAX_CPUS before \
+             starting APs"
+        ));
+    }
+}
+
 /// Local APIC のレジスタを 1 本読む。
 ///
 /// # Safety

@@ -116,6 +116,11 @@ pub struct ApicMmio {
     interrupt_source_overrides:
         [Option<madt::InterruptSourceOverride>; MAX_INTERRUPT_SOURCE_OVERRIDES],
     interrupt_source_overrides_found: usize,
+    /// MADT が報告した「使用可能な」Local APIC の本数（S3-b-1）。
+    ///
+    /// **per-CPU スロットの境界を起動時に保証するために持つ。** `MAX_CPUS` を
+    /// 超えていたら `this_cpu_ptr` が配列外を指しうるので、進む前に落とす。
+    usable_local_apics: usize,
 }
 
 impl ApicMmio {
@@ -127,7 +132,13 @@ impl ApicMmio {
             bsp_candidate_apic_id: None,
             interrupt_source_overrides: [None; MAX_INTERRUPT_SOURCE_OVERRIDES],
             interrupt_source_overrides_found: 0,
+            usable_local_apics: 0,
         }
+    }
+
+    /// MADT が報告した使用可能な Local APIC の本数（= 起動しうるコア数）。
+    pub const fn usable_local_apics(&self) -> usize {
+        self.usable_local_apics
     }
 
     /// レガシー IRQ が I/O APIC のどの GSI へ現れるか。
@@ -1024,6 +1035,8 @@ fn walk_madt(
          {io_apic_count} I/O APIC(s), \
          {interrupt_source_override_count} interrupt source override(s)"
     ));
+    mmio.usable_local_apics = usable_local_apic_count;
+
     if mmio.io_apics_dropped() > 0 {
         logger.warn(format_args!(
             "acpi: only {MAX_IO_APICS} I/O APIC(s) were recorded; {} more were found and \

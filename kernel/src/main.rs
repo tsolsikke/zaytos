@@ -1269,7 +1269,24 @@ extern "sysv64" fn kernel_main() -> ! {
         // 届いている 8259 の IRQ0 が止まる。**危険なのは bit 8 であって、
         // ベクタ欄ではない。** 振る舞いは変わらない（スプリアスは現在発生しない）。
         kernel::apic::set_spurious_vector(&mut logger, mapped_apic);
+
+        // === S3-b-1: cpu_id() を Local APIC ID 由来へ差し替える ===
+        //
+        // **ここより前は cpu_id() が定数 0 を返す経路である。** gdt::init が
+        // this_cpu_ptr を通るのは Local APIC を写像するより前なので、据わる前に
+        // 呼ばれることが避けられない。MAX_CPUS = 1 では据える前も後も 0 なので
+        // 振る舞いは変わらない。**GS ベースは使わない**（apic.rs の該当節）。
     }
+
+    // === S3-b-1: per-CPU スロットが起動しうるコア数を覆っているかを報告する ===
+    //
+    // **停止はしない。** この段では cpu_id() が定数 0 で、走るのは bootstrap
+    // processor だけなので、列挙が MAX_CPUS を超えても配列外の索引は起きない。
+    // **停止が正しくなるのは cpu_id() が非 0 を返しうる S3-b-2a である**
+    // （当初ここで停止させたら -smp 2 の起動が止まった。apic.rs の doc）。
+    // **`mapped_apic` の有無に依らず行う。** 覆えているかを問うのはコア数と
+    // MAX_CPUS の関係で、APIC の写像が成功したかとは別である。
+    kernel::apic::report_per_cpu_slot_coverage(&mut logger, apic_mmio.usable_local_apics());
 
     // === higher-half B-2b-4（恒等除去） ===
     //

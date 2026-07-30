@@ -46,6 +46,8 @@
 /// コアごとの別領域へ置く集約ブロック形式（モジュールドキュメントのGS化の節を
 /// 参照）へ移す必要がある。単に [`cpu_id`] をGS読みへ差し替えるだけでは、
 /// 配列索引が残るためfalse sharingは解消しないことに注意する。
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 pub const MAX_CPUS: usize = 1;
 
 /// 現在実行中のCPUの番号（`0..MAX_CPUS`）を返す。
@@ -61,9 +63,71 @@ pub const MAX_CPUS: usize = 1;
 /// 直接触ったりしてはならない。そうしたコードは `MAX_CPUS > 1` にした瞬間に
 /// 静かに壊れる。per-CPUデータへは必ず [`PerCpu::this_cpu`] 経由でアクセスし、
 /// 索引はこの関数の戻り値を使う。
+/// 自コアの CPU 番号を読む実装を差し替えるための器（S3-b-1）。
+///
+/// `0` は「未設定」を表す。**関数ポインタの値が `0` になることはない**ので、
+/// 有効な実装と衝突しない。
+static CPU_ID_READER: AtomicUsize = AtomicUsize::new(READER_NOT_INSTALLED);
+
+/// [`CPU_ID_READER`] が未設定であることを表す値。
+const READER_NOT_INSTALLED: usize = 0;
+
+/// 自コアの CPU 番号を読む実装を据える（S3-b-1）。
+///
+/// # なぜ関数ポインタで差し替えるのか。**`common` に APIC の知識を置かないため**
+///
+/// 実 ID の出所は Local APIC の ID レジスタで、その仮想アドレスとビット位置は
+/// `kernel` 側の知識である。`common` は bootloader からも使われるので、
+/// レジスタのオフセットやシフト量をここへ写すと、**同じ事実が 2 箇所に出て
+/// 片方が古くなる。** 器だけをここに置き、中身は `kernel` が据える。
+///
+/// 間接呼び出しの費用は、実装が行う MMIO 読みに比べて小さい。
+///
+/// # Safety
+///
+/// - `reader` は常に `0..`[`MAX_CPUS`] の値を返すこと。**範囲外を返すと
+///   [`PerCpu::this_cpu_ptr`] が配列外を指す。**
+/// - **割り込み文脈から呼ばれうる。** `reader` は再入可能で、ロックを取らず、
+///   パニックしないこと（[`crate::critical`] の入れ子深さの読みから通る）。
+/// - 起動時に 1 回だけ呼ぶこと。
+pub unsafe fn install_cpu_id_reader(reader: fn() -> usize) {
+    CPU_ID_READER.store(reader as usize, Ordering::Relaxed);
+}
+
+/// 自コアの CPU 番号を読む実装が据えられているか。
+///
+/// **据える前と後で戻り値が変わらないことを確かめる**ために公開している
+/// （`MAX_CPUS = 1` ではどちらも `0` を返すので、値だけでは区別できない）。
+pub fn cpu_id_reader_installed() -> bool {
+    CPU_ID_READER.load(Ordering::Relaxed) != READER_NOT_INSTALLED
+}
+
+/// 現在実行中のCPUの番号（`0..MAX_CPUS`）を返す。
+///
+/// # 据える前は `0` を返す
+///
+/// GDT/TSS の構築（`gdt::init`）は Local APIC を写像するより前に
+/// [`PerCpu::this_cpu_ptr`] を通るので、**実装が据わる前に呼ばれる。**
+/// その時点で走っているのは bootstrap processor だけなので `0` が正しい。
+///
+/// # `MAX_CPUS = 1` の間は、据える前と後で値が変わらない
+///
+/// どちらも `0` を返すため、**値だけでは「実装が据わって MMIO 読みが成立して
+/// いる」ことを確かめられない**（「同値である間は分類の誤りが観測できない」）。
+/// 据えた側で、読み取りが成立していることを**`0` 以外の値**で示すこと
+/// （`kernel` は Local APIC の Version レジスタを併読している）。
 #[inline]
 pub fn cpu_id() -> usize {
-    0
+    let raw = CPU_ID_READER.load(Ordering::Relaxed);
+    if raw == READER_NOT_INSTALLED {
+        return 0;
+    }
+    // SAFETY: `install_cpu_id_reader` は `fn() -> usize` の値だけを格納し、
+    // 未設定を表す 0 は関数ポインタとして現れない。したがって raw は
+    // 有効な関数ポインタである。呼び出し側契約により reader は再入可能で
+    // 範囲内の値を返す。
+    let reader: fn() -> usize = unsafe { core::mem::transmute::<usize, fn() -> usize>(raw) };
+    reader()
 }
 
 /// CPUごとに 1 つずつ値を持つ器。
