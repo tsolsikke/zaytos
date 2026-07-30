@@ -36,7 +36,7 @@
 //! |---|---|---|---|---|---|
 //! | `saved_rsp` | 読み書き | - | - | - | 書き |
 //! | `stack_top` / `stack_bottom` | 読み | - | - | - | 書き |
-//! | `runnable` | 書き / 読み | 書き | - | - | 書き |
+//! | `state` | 書き / 読み | 書き | - | - | 書き |
 //! | `base` | - | 読み | 読み | - | 書き |
 //! | `rounds_left` | - | 読み書き | - | 読み | 書き |
 //! | `iterations` | - | - | **加算** | **読み** | 書き |
@@ -69,7 +69,7 @@
 
 use core::ptr::addr_of_mut;
 
-use super::{Task, EMPTY_TASK, TASK_COUNT};
+use super::{Task, TaskState, EMPTY_TASK, TASK_COUNT};
 
 /// スケジューラのグローバル状態。**このモジュールの外からは名前が見えない。**
 static mut SCHEDULER: Scheduler = Scheduler {
@@ -133,23 +133,26 @@ pub(super) fn stack_bottom(index: usize) -> u64 {
     unsafe { addr_of_mut!((*slot(index)).stack_bottom).read() }
 }
 
-pub(super) fn runnable(index: usize) -> bool {
+pub(super) fn state(index: usize) -> TaskState {
     // SAFETY: 有効なポインタ。書き手と時間的に分離している（表参照）。
-    unsafe { addr_of_mut!((*slot(index)).runnable).read() }
+    unsafe { addr_of_mut!((*slot(index)).state).read() }
 }
 
-pub(super) fn set_runnable(index: usize, value: bool) {
+pub(super) fn set_state(index: usize, value: TaskState) {
     // SAFETY: 有効なポインタ。書き手と時間的に分離している（表参照）。
-    unsafe { addr_of_mut!((*slot(index)).runnable).write(value) }
+    unsafe { addr_of_mut!((*slot(index)).state).write(value) }
 }
 
-/// 走行可能フラグをまとめて読む。`pick_next` を純粋関数のまま保つための値。
-pub(super) fn runnable_flags() -> [bool; TASK_COUNT] {
-    let mut flags = [false; TASK_COUNT];
-    for (index, flag) in flags.iter_mut().enumerate() {
-        *flag = runnable(index);
+/// 状態をまとめて読む。`pick_next` を純粋関数のまま保つための値。
+///
+/// **状態そのものを渡す**（`bool` へ潰さない）。潰すと、`pick_next` の側で
+/// 「なぜ選ばれないのか」が区別できなくなる。
+pub(super) fn states() -> [TaskState; TASK_COUNT] {
+    let mut states = [TaskState::Uninitialized; TASK_COUNT];
+    for (index, slot) in states.iter_mut().enumerate() {
+        *slot = state(index);
     }
-    flags
+    states
 }
 
 pub(super) fn base(index: usize) -> u64 {

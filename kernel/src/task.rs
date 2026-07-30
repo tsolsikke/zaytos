@@ -102,6 +102,65 @@ static PREEMPT_IN_WINDOW: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "task-preempt-in-critical")]
 static DEMO_LOCK: common::critical::Locked<u64> = common::critical::Locked::new(0);
 
+/// タスクの状態（S3-a）。
+///
+/// # なぜ `Running` を持たないのか
+///
+/// **「どのCPUがどのタスクを走らせているか」は [`CURRENT`] が既に持っている。**
+/// `Running(cpu)` はその逆写像なので、置くと同じ事実が 2 箇所に出て片方が必ず
+/// 古くなる。**走っているかは [`CURRENT`] から導く。**
+///
+/// 走行中のタスクは [`Self::Ready`] のままである。`pick_next` が現タスクを
+/// 返しうる契約（ホストテストで固定）がそれを要求する。**`Ready` は「走行可能」で
+/// あって「走っていない」ではない。**
+///
+/// # なぜ `cpu_id` をペイロードに持たないのか
+///
+/// `MAX_CPUS = 1` の現在はどの状態でも `cpu_id` が常に `0` で、**値が分かれない
+/// 間は分類の誤りが観測できない**（`verification-coverage.md`の一般則）。
+/// 値が分かれるのは `cpu_id()` が実 ID を返す S3-b なので、**そこで必要性を
+/// 判断する。** 先回りして置かない。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TaskState {
+    /// スロットがまだ作られていない（`static` の初期値）。
+    ///
+    /// **`Finished` と区別する。** 「まだ作られていない」を「終了済み」と
+    /// 書くのは嘘であり、会計でこの 2 つを足し合わせると意味を持たない。
+    ///
+    /// **この値は `pick_next` から観測されない。** 全 3 スロットは
+    /// `run_cooperative_demo`（`main.rs` で `irq::unmask(0)` より前に呼ばれる）
+    /// が `init_task` で埋めるので、最初のティックが来る時点では残っていない。
+    /// 観測されないことに依存はしていない（`pick_next` は `Ready` 以外を
+    /// 選ばないので、残っていても安全側に倒れる）。
+    Uninitialized,
+    /// 走行可能。走行中のタスクもこの状態である（上記）。
+    Ready,
+    /// 走行不可だが終了はしていない。メイン（ワーカーが尽きたときだけ戻る）と、
+    /// 締切でデモを止められたワーカーがこれである。
+    ///
+    /// **メイン（タスク 0）が候補にならないのは `pick_next` のループ範囲による。
+    /// 状態が `Blocked` であることは除外の理由ではない。** `pick_next` は
+    /// `1..=WORKER_COUNT` しか候補にせず、タスク 0 は「他に誰もいないとき」の
+    /// 帰り先としてしか返らない（ホストテスト
+    /// `main_is_never_picked_as_a_rotation_candidate` が固定している）。
+    /// **したがってメインを `Ready` にしても走るようにはならない。**
+    /// 動く理由を取り違えないよう書いておく。
+    Blocked,
+    /// 全ラウンドを終えた。以後スケジューラはこのタスクを選ばない。
+    Finished,
+}
+
+impl TaskState {
+    /// `pick_next` が選んでよい状態か。
+    ///
+    /// **`runnable: bool` からの置き換えで、この 1 関数が旧フィールドの
+    /// 役割を担う。** 判定を 1 箇所に集めてあるので、状態を増やしたときに
+    /// 選択可否を決め忘れることがない。
+    const fn is_runnable(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
 /// タスク 1 本ぶんの状態。
 #[derive(Clone, Copy)]
 struct Task {
@@ -115,8 +174,12 @@ struct Task {
     /// このタスクのカーネルスタック下端（スタック混在検査に使う）。
     #[cfg_attr(feature = "task-switch-no-swap", allow(dead_code))]
     stack_bottom: u64,
-    /// 実行可能か。`false` はメイン（ワーカー終了時のみ戻る）または終了済み。
-    runnable: bool,
+    /// このタスクの状態（S3-a）。
+    ///
+    /// **以前は `runnable: bool` だった。** `false` が「メイン（ワーカー終了時のみ
+    /// 戻る）」と「終了済み」の 2 つの意味を畳んでいたので、状態機械へ広げて
+    /// 分けた。選択可否は [`TaskState::is_runnable`] が決める。
+    state: TaskState,
     /// GPR 照合の基準値（タスク固有）。ワーカーのみ使う。
     base: u64,
     /// 残りラウンド数（M5-c の協調デモ用）。0 になったら終了する。
@@ -131,7 +194,7 @@ const EMPTY_TASK: Task = Task {
     saved_rsp: 0,
     stack_top: 0,
     stack_bottom: 0,
-    runnable: false,
+    state: TaskState::Uninitialized,
     base: 0,
     rounds_left: 0,
     iterations: 0,
@@ -427,7 +490,8 @@ unsafe fn setup_tasks() {
         Task {
             stack_top: main_top,
             stack_bottom: crate::stack::kernel_stack_range().bottom.as_u64(),
-            runnable: false, // メインはワーカーが尽きたときだけ戻る
+            // メインはワーカーが尽きたときだけ戻る。終了済みではない。
+            state: TaskState::Blocked,
             ..EMPTY_TASK
         },
     );
@@ -451,7 +515,7 @@ unsafe fn setup_tasks() {
                 stack_top: top.as_u64(),
                 // 使えるスタックの下端はガードページの直上。
                 stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
-                runnable: true,
+                state: TaskState::Ready,
                 base,
                 rounds_left: ROUNDS_PER_WORKER,
                 iterations: 0,
@@ -543,7 +607,8 @@ pub fn on_timer_tick(current_rsp: u64) -> u64 {
     // 締切に達したらワーカーを走行不可にする。次の pick_next がメインを選ぶ。
     if scheduler::demo_active() && crate::idt::timer_ticks() >= scheduler::demo_deadline() {
         for w in 0..WORKER_COUNT {
-            scheduler::set_runnable(1 + w, false);
+            // 締切で止めるだけで、ラウンドを終えたわけではない。
+            scheduler::set_state(1 + w, TaskState::Blocked);
         }
         scheduler::set_demo_active(false);
     }
@@ -566,9 +631,9 @@ fn schedule_switch(current_rsp: u64) -> u64 {
 
     #[cfg(not(feature = "task-switch-no-swap"))]
     {
-        let next = pick_next(scheduler::runnable_flags(), current);
+        let next = pick_next(scheduler::states(), current);
         // 走らせるべき相手がいない（=現タスクのまま）なら何もしない。デモ後の
-        // ハートビート区間（runnable がメインだけ）ではここに来て no-op になる。
+        // ハートビート区間（走行可能なワーカーが無い）ではここに来て no-op になる。
         if next == current {
             return current_rsp;
         }
@@ -629,14 +694,14 @@ fn schedule_switch(current_rsp: u64) -> u64 {
 /// メイン（0）へ戻る。
 // no-swap の破壊ビルドではスイッチしないので、次タスクを選ばず未使用になる。
 #[cfg_attr(feature = "task-switch-no-swap", allow(dead_code))]
-fn pick_next(runnable: [bool; TASK_COUNT], current: usize) -> usize {
+fn pick_next(states: [TaskState; TASK_COUNT], current: usize) -> usize {
     for offset in 1..=WORKER_COUNT {
         let cand = if current == 0 {
             ((offset - 1) % WORKER_COUNT) + 1
         } else {
             ((current - 1 + offset) % WORKER_COUNT) + 1
         };
-        if runnable[cand] {
+        if states[cand].is_runnable() {
             return cand;
         }
     }
@@ -698,7 +763,7 @@ extern "sysv64" fn verify_gprs_and_advance() -> u64 {
 /// して yield する。以後スケジューラはこのタスクを選ばない。
 extern "sysv64" fn worker_done_and_yield() {
     let current = current_index();
-    scheduler::set_runnable(current, false);
+    scheduler::set_state(current, TaskState::Finished);
     let name = if current == 1 { 'A' } else { 'B' };
     serial_line(format_args!(
         "task: {name} finished all rounds; yielding for good"
@@ -869,9 +934,9 @@ unsafe fn setup_preemptive_tasks() {
 
     // SAFETY: 単一実行文脈。timer は IF=1 だが、この関数は yield する前に
     // 走り、スケジューラの current はメイン（0）のままである。ここでの更新中に
-    // プリエンプトが起きても、current=メインで runnable なワーカーがまだ無い間は
+    // プリエンプトが起きても、current=メインで走行可能なワーカーがまだ無い間は
     // pick_next がメインを返すので no-op になる（順序の安全性は最初のワーカーを
-    // runnable にした後に yield で入ることに依存する）。
+    // 走行可能にした後に yield で入ることに依存する）。
     let _guard = common::critical::InterruptGuard::enter();
     set_current_index(0);
     scheduler::set_switches(0);
@@ -880,7 +945,7 @@ unsafe fn setup_preemptive_tasks() {
         Task {
             stack_top: main_top,
             stack_bottom: crate::stack::kernel_stack_range().bottom.as_u64(),
-            runnable: false,
+            state: TaskState::Blocked,
             ..EMPTY_TASK
         },
     );
@@ -897,7 +962,7 @@ unsafe fn setup_preemptive_tasks() {
                 saved_rsp,
                 stack_top: top.as_u64(),
                 stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
-                runnable: true,
+                state: TaskState::Ready,
                 base,
                 rounds_left: 0,
                 iterations: 0,
@@ -1050,7 +1115,20 @@ core::arch::global_asm!(
 
 #[cfg(test)]
 mod tests {
-    use super::{pick_next, TASK_COUNT, WORKER_COUNT};
+    use super::{pick_next, TaskState, TASK_COUNT, WORKER_COUNT};
+
+    /// 旧 `runnable: bool` に対応する短縮。`true` = 走行可能。
+    fn states(flags: [bool; TASK_COUNT]) -> [TaskState; TASK_COUNT] {
+        let mut out = [TaskState::Uninitialized; TASK_COUNT];
+        for (slot, flag) in out.iter_mut().zip(flags) {
+            *slot = if flag {
+                TaskState::Ready
+            } else {
+                TaskState::Blocked
+            };
+        }
+        out
+    }
 
     /// この表が前提にしている形。崩れたら下の期待値を引き直すこと。
     #[test]
@@ -1061,9 +1139,9 @@ mod tests {
 
     #[test]
     fn main_is_chosen_when_no_worker_can_run() {
-        assert_eq!(pick_next([false, false, false], 0), 0);
-        assert_eq!(pick_next([false, false, false], 1), 0);
-        assert_eq!(pick_next([false, false, false], 2), 0);
+        assert_eq!(pick_next(states([false, false, false]), 0), 0);
+        assert_eq!(pick_next(states([false, false, false]), 1), 0);
+        assert_eq!(pick_next(states([false, false, false]), 2), 0);
     }
 
     /// **タスク 0（メイン）は候補として巡回されない。** 走行可能と印を付けても
@@ -1071,21 +1149,21 @@ mod tests {
     #[test]
     fn main_is_never_picked_as_a_rotation_candidate() {
         // メインだけが走行可能でも、返るのは 0（フォールバック経路）。
-        assert_eq!(pick_next([true, false, false], 1), 0);
+        assert_eq!(pick_next(states([true, false, false]), 1), 0);
     }
 
     #[test]
     fn from_main_the_first_runnable_worker_is_chosen() {
-        assert_eq!(pick_next([false, true, true], 0), 1);
-        assert_eq!(pick_next([false, false, true], 0), 2);
-        assert_eq!(pick_next([false, true, false], 0), 1);
+        assert_eq!(pick_next(states([false, true, true]), 0), 1);
+        assert_eq!(pick_next(states([false, false, true]), 0), 2);
+        assert_eq!(pick_next(states([false, true, false]), 0), 1);
     }
 
     /// ワーカーの間は巡回する（round-robin）。
     #[test]
     fn workers_rotate() {
-        assert_eq!(pick_next([false, true, true], 1), 2);
-        assert_eq!(pick_next([false, true, true], 2), 1);
+        assert_eq!(pick_next(states([false, true, true]), 1), 2);
+        assert_eq!(pick_next(states([false, true, true]), 2), 1);
     }
 
     /// **現タスクが再選択されうる。** 他に走れるワーカーがおらず自分だけが
@@ -1094,14 +1172,43 @@ mod tests {
     /// 成立している契約なので、**状態機械化でもこの性質を保つこと。**
     #[test]
     fn the_current_worker_is_returned_when_it_is_the_only_runnable_one() {
-        assert_eq!(pick_next([false, true, false], 1), 1);
-        assert_eq!(pick_next([false, false, true], 2), 2);
+        assert_eq!(pick_next(states([false, true, false]), 1), 1);
+        assert_eq!(pick_next(states([false, false, true]), 2), 2);
     }
 
     /// 走行不可のワーカーは飛ばされる。
     #[test]
     fn an_unrunnable_worker_is_skipped() {
-        assert_eq!(pick_next([false, false, true], 1), 2);
-        assert_eq!(pick_next([false, true, false], 2), 1);
+        assert_eq!(pick_next(states([false, false, true]), 1), 2);
+        assert_eq!(pick_next(states([false, true, false]), 2), 1);
+    }
+
+    /// **`Ready` 以外はすべて選ばれない。** 状態を増やしたときに
+    /// `is_runnable` の更新を忘れると、ここが落ちる。
+    #[test]
+    fn only_ready_is_runnable() {
+        assert!(TaskState::Ready.is_runnable());
+        assert!(!TaskState::Uninitialized.is_runnable());
+        assert!(!TaskState::Blocked.is_runnable());
+        assert!(!TaskState::Finished.is_runnable());
+    }
+
+    /// **`Uninitialized` が残っていても安全側に倒れる。** `static` の初期値が
+    /// `pick_next` から観測されないことに依存していないことの確認である。
+    #[test]
+    fn uninitialized_slots_are_never_chosen() {
+        let all_empty = [TaskState::Uninitialized; TASK_COUNT];
+        assert_eq!(pick_next(all_empty, 0), 0);
+        assert_eq!(pick_next(all_empty, 1), 0);
+    }
+
+    /// **`Blocked` と `Finished` は選択可否では区別されない。** 区別が要るのは
+    /// 会計と記録であって、選択ではない（畳んでいた `false` を分けた目的）。
+    #[test]
+    fn blocked_and_finished_are_both_unselectable_but_distinct() {
+        let mut with_blocked = [TaskState::Blocked; TASK_COUNT];
+        with_blocked[1] = TaskState::Finished;
+        assert_eq!(pick_next(with_blocked, 0), 0);
+        assert_ne!(TaskState::Blocked, TaskState::Finished);
     }
 }
