@@ -33,8 +33,30 @@
 
 /// サポートするCPU数の上限。
 ///
-/// シングルコア前提（ADR-0002）なので現状は `1`。BKL本体でAP起こしを実装する
-/// 際に、実際のコア数の上限へ引き上げる。
+/// **S3-b-2a で `1` から `2` へ上げた。** AP はまだ起こさないので、実際に走るのは
+/// bootstrap processor だけである。上げた理由は 2 つある。
+///
+/// - **`cpu_id()` が非 `0` を返しても配列外にならない状態を作るため。**
+///   S3-a の tripwire（`task::require_bootstrap_processor`）の破壊確認は
+///   `cpu_id()` に非 `0` を返させる形で行うが、`MAX_CPUS = 1` のままだと
+///   `this_cpu_ptr` が配列外を指し、**破壊が別の未定義動作を作ってしまう。**
+/// - **`2` は最小の必要値である。** tripwire の破壊に必要なのは「非 `0` が配列内で
+///   あること」だけなので、`1` より大きい最小の値で足りる。**必要以上に上げない。**
+///
+/// # **上げた副作用: 覆いの報告の「覆えていない」側が、どの構成でも評価されなくなった**
+///
+/// `MAX_CPUS = 1` のときは `-smp 2` の項目が「2 コア列挙 / 1 スロット」で警告側を
+/// 通していた。**`2` へ上げるとそれが「2 コア列挙 / 2 スロット」になり、覆えている
+/// 側しか通らない。** `-smp 4` の項目は**存在しない**（`-smp` を渡す項目は
+/// `acpi-smp-test` の 1 つで、コア数は `2` 固定である）。
+///
+/// **したがって警告側は現在どの構成でも評価されていない。** 覆いの報告そのものは
+/// 毎回出るが、`false` の枝は通らない。**b-2b で `-smp 4` の構成を足すときに
+/// 再び評価される**ので、そちらの到達条件に入れてある（`roadmap.md`）。
+/// **記録しておくのは、「検査はあるが片側が通っていない」状態を見えなくしない
+/// ためである。**
+///
+/// **b-2b で AP を起こすときは、実際のコア数の上限へ引き上げる必要がある。**
 ///
 /// # `MAX_CPUS > 1` にするときの注意
 ///
@@ -48,7 +70,7 @@
 /// 配列索引が残るためfalse sharingは解消しないことに注意する。
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-pub const MAX_CPUS: usize = 1;
+pub const MAX_CPUS: usize = 2;
 
 /// 現在実行中のCPUの番号（`0..MAX_CPUS`）を返す。
 ///
@@ -118,6 +140,31 @@ pub fn cpu_id_reader_installed() -> bool {
 /// （`kernel` は Local APIC の Version レジスタを併読している）。
 #[inline]
 pub fn cpu_id() -> usize {
+    // 破壊 (S3-b-2a, percpu-fake-nonzero-cpu-id): 非 `0` を返す。
+    //
+    // **`MAX_CPUS > 1` でなければこの破壊は作れない。** `MAX_CPUS = 1` のまま
+    // 非 `0` を返すと [`PerCpu::this_cpu_ptr`] が配列外を指し、**破壊が別の
+    // 未定義動作を作ってしまう。** S3-b-2a で `MAX_CPUS` を 2 へ上げたので、
+    // `1` は配列内であり安全に作れる。
+    //
+    // **これが示すのは「分岐が働くこと」だけである。** `task` 側の tripwire
+    // （`require_bootstrap_processor`）が非 `0` を見て停止する経路を通ることを
+    // 確かめるだけで、**実際の並行アクセスは示さない。** 機序の直接観測は
+    // AP がタスクを実行する段の到達条件である。
+    #[cfg(feature = "percpu-fake-nonzero-cpu-id")]
+    return 1;
+
+    #[cfg(not(feature = "percpu-fake-nonzero-cpu-id"))]
+    {
+        cpu_id_inner()
+    }
+}
+
+/// [`cpu_id`] の本体。破壊 feature が本体を差し替えるので分けてある。
+// 破壊ビルドでは [`cpu_id`] が定数を返して本体へ到達しないので未使用になる。
+#[cfg_attr(feature = "percpu-fake-nonzero-cpu-id", allow(dead_code))]
+#[inline]
+fn cpu_id_inner() -> usize {
     let raw = CPU_ID_READER.load(Ordering::Relaxed);
     if raw == READER_NOT_INSTALLED {
         return 0;

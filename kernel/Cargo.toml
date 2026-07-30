@@ -241,6 +241,16 @@ lapic-timer-scale-calibration-test = []
 lapic-timer-wrong-divide-test = []
 # PIC を全マスクせずに LVT を開ける。PIT と Local APIC タイマの両方が届く。
 lapic-timer-no-mask-all-test = []
+
+# --- S3-b-2a: cpu_id() の tripwire の破壊 ---
+# cpu_id() に非 0 を返させ、GPR 照合デモが bootstrap processor 以外で走ることを
+# 拒む tripwire（`task::require_bootstrap_processor`）が停止することを確かめる。
+#
+# **MAX_CPUS > 1 でなければこの破壊は作れない。** MAX_CPUS = 1 のまま非 0 を
+# 返すと this_cpu_ptr が配列外を指し、破壊が別の未定義動作を作ってしまう。
+#
+# **示すのは「分岐が働くこと」だけである。** 実際の並行アクセスは示さない。
+percpu-fake-nonzero-cpu-id = ["common/percpu-fake-nonzero-cpu-id"]
 # B-2a-5: higher-half の破壊確認。いずれも既定ビルドには入らない。`--highhalf-test <kind>`。
 # (a) 静的 PML4[0] の存在ビットを落とす。恒等が not-present になり、mov cr3 直後の低位命令
 # フェッチが解決できずトリプルフォルトする。`--highhalf-test no-identity-in-boot-pt`。

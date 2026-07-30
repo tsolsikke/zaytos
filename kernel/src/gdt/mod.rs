@@ -15,9 +15,13 @@
 
 pub mod layout;
 
-use core::ptr::addr_of_mut;
+use core::fmt::Write as _;
+use core::ptr::{addr_of, addr_of_mut};
 
+use common::cpu;
+use common::log::Logger;
 use common::percpu::{PerCpu, MAX_CPUS};
+use common::serial::SerialPort;
 
 use layout::{
     tss_descriptor, user_segment_descriptor, SegmentSelector, TaskStateSegment, KERNEL_CODE_ACCESS,
@@ -357,4 +361,110 @@ pub fn privilege_stack_top() -> u64 {
         let tss = PerCpu::this_cpu_ptr(addr_of_mut!(TSS));
         (*tss).privilege_stack_table[0]
     }
+}
+
+// ===========================================================================
+// S3-b-2a: cpu_id() を GDTR 由来にする
+// ===========================================================================
+
+/// 自コアの CPU 番号を GDTR のベースから導く（S3-b-2a）。
+///
+/// # 逆写像であること
+///
+/// [`init`] は `lgdt` へ **自コアの [`GDT`] スロットの先頭**を渡す
+/// （`PerCpu::this_cpu_ptr(addr_of_mut!(GDT))`）。したがって
+/// `GDTR.base == &GDT[cpu_id]` であり、**引き算とストライドの除算がその逆写像**
+/// になる。ストライドは `GDT_ENTRY_COUNT * 8` = 64 バイトで一定である。
+///
+/// `addr_of!(GDT)` が `&GDT[0]` であることは偶然ではない。[`PerCpu`] は
+/// `#[repr(transparent)]` で `[T; MAX_CPUS]` と同一レイアウトであることが
+/// **言語仕様レベルで保証**されている（`common::percpu` のモジュール doc）。
+///
+/// **前提は既に毎回照合されている。** [`init`] が `sgdt` で読み戻して
+/// 「GDTR が自分のスロットを指していること」を確かめる行を出している
+/// （`gdt: base=… (expected base=…)`）。**新しい検査を足さずに、既にある
+/// 検査へ乗る形である。**
+///
+/// # **載荷条件: 自コアの GDT がロードされた後でなければ正しくない**
+///
+/// これがこの機構の載荷条件である。**`lgdt` より前に呼ぶと、GDTR は
+/// ファームウェア（UEFI）の GDT を指しているので、引き算が無意味な値になる。**
+///
+/// bootstrap processor ではこの窓を「[`install_cpu_id_from_gdtr`] を [`init`] の
+/// 後に据える」で閉じている。据える前の `cpu_id()` は定数 `0` を返す経路を通り、
+/// **その時点で走っているのは bootstrap processor だけなので `0` が正しい。**
+///
+/// # **据える前の定数 `0` は、bootstrap processor では正しいが AP では誤りである**
+///
+/// この非対称を明記しておく。AP は自分の GDT をロードするまで自分の番号を
+/// この経路から得られず、**フォールバックの `0` は「bootstrap processor の
+/// スロット」を指すので誤りである。** つまり **AP では窓が再び開く。**
+///
+/// b-2b では「AP が `cpu_id()` を呼ぶ前に自分の GDT をロードする」順序を守るか、
+/// **身元の出所を別に用意する**必要がある（`roadmap.md` の S3-b-2b への申し送り）。
+/// **「bootstrap processor で動いたから同じ順序でよい」と読まないこと。**
+///
+/// # 検証で誤認ではなく停止へ倒す
+///
+/// 引き算が 64 で割り切れない、または商が [`MAX_CPUS`] 以上なら**停止する。**
+/// `0` へ丸めない。丸めると別コアが同じ per-CPU スロットを静かに共有し、
+/// per-CPU の意味が壊れる。**AP の GDTR がまだ自分のスロットを指していない
+/// 状態で呼んでも、誤認ではなく停止する側に倒れる**のがこの検証の価値である。
+fn cpu_id_from_gdtr() -> usize {
+    let (base, _limit) = current_gdt();
+    let first = addr_of!(GDT) as u64;
+    let stride = (GDT_ENTRY_COUNT * core::mem::size_of::<u64>()) as u64;
+
+    let offset = base.wrapping_sub(first);
+    let index = offset / stride;
+    if offset % stride == 0 && (index as usize) < MAX_CPUS {
+        return index as usize;
+    }
+
+    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    serial.init();
+    let _ = writeln!(
+        serial,
+        "[ERROR] percpu: cpu_id() could not derive a slot from GDTR (base={base:#018x}, \
+         first slot={first:#018x}, stride={stride}); the GDT loaded is not one of our per-CPU \
+         slots, so the CPU identity is unknown; halting"
+    );
+    cpu::halt_forever();
+}
+
+/// `cpu_id()` を GDTR 由来へ差し替える（S3-b-2a）。
+///
+/// # 呼ぶ位置。**[`init`] の後でなければならない**
+///
+/// 載荷条件（[`cpu_id_from_gdtr`] の doc）がそれを要求する。`lgdt` より前に
+/// 据えると、`gdt::init` 自身が `this_cpu_ptr` を通るときに
+/// ファームウェアの GDT から引き算することになる。
+///
+/// # Safety
+///
+/// 自コアの GDT を `lgdt` でロード済みであること（[`init`] が戻っていること）。
+pub unsafe fn install_cpu_id_from_gdtr(logger: &mut Logger<SerialPort>) {
+    let (base, _limit) = current_gdt();
+    let first = addr_of!(GDT) as u64;
+    let stride = (GDT_ENTRY_COUNT * core::mem::size_of::<u64>()) as u64;
+
+    let before = common::percpu::cpu_id();
+    let installed_before = common::percpu::cpu_id_reader_installed();
+    // SAFETY: `cpu_id_from_gdtr` は 0..MAX_CPUS を返すか停止する。`sgdt` と
+    // 引き算だけなので再入可能で、ロックを取らずパニックもしない。
+    unsafe { common::percpu::install_cpu_id_reader(cpu_id_from_gdtr) };
+    let after = common::percpu::cpu_id();
+
+    // **読んだ結果であることを `0` 以外の値で示す。** `MAX_CPUS` が小さいうちは
+    // `cpu_id()` の値が `0` のままなので、**値だけでは据わったことを示せない**
+    // （「同値である間は分類の誤りが観測できない」）。GDTR のベースと先頭
+    // スロットの実値、ストライド、差分を出す。**差分と `0` 以外の実アドレスが、
+    // 読みが成立している証拠である。**
+    logger.info(format_args!(
+        "percpu: cpu_id() now derives the slot from GDTR: base={base:#018x} \
+         first slot={first:#018x} stride={stride} offset={} index={after} \
+         (reader installed: {installed_before} -> {}, cpu_id() {before} -> {after})",
+        base.wrapping_sub(first),
+        common::percpu::cpu_id_reader_installed()
+    ));
 }

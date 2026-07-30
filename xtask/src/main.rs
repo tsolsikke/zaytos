@@ -1046,6 +1046,9 @@ fn main() -> Result<()> {
                     Some(2),
                 );
             }
+            if rest.iter().any(|a| a == "--percpu-test") {
+                return cmd_marker_test(PERCPU_TESTS, "percpu-test", PERCPU_TESTS[0].name, None);
+            }
             if let Some(index) = rest.iter().position(|a| a == "--acpi-test") {
                 let kind = rest.get(index + 1).with_context(|| {
                     let names: Vec<&str> = ACPI_TESTS.iter().map(|t| t.name).collect();
@@ -3648,6 +3651,33 @@ const ACPI_TESTS: &[CriticalTest] = &[
 ///
 /// 全項目を複数のコア数で回すと項目数も所要時間もそのまま倍になるので、
 /// **この 1 項目だけを 2 コアで回す。** 費用は QEMU 起動 1 回である。
+/// S3-b-2a の tripwire の破壊確認（`--percpu-test <kind>`）。
+///
+/// `task::require_bootstrap_processor` は GPR 照合デモが bootstrap processor 以外で
+/// 走ることを拒む。`cpu_id()` に非 `0` を返させて、**その分岐が働くこと**を見る。
+///
+/// # **示すのは分岐が働くことだけである**
+///
+/// **実際の並行アクセスは示さない。** `GPR_BUF` が別コアから同時に触られる状況を
+/// 作ってはおらず、AP は起こしていない。**機序の直接観測は「AP がタスクを実行する
+/// 段」の到達条件である**（`roadmap.md`）。
+///
+/// # この破壊は `MAX_CPUS > 1` でなければ作れない
+///
+/// `MAX_CPUS = 1` のまま非 `0` を返すと `this_cpu_ptr` が配列外を指し、
+/// **破壊が別の未定義動作を作ってしまう。** S3-b-2a で `MAX_CPUS` を 2 へ
+/// 上げたので初めて構成できるようになった。**tripwire の破壊確認には、
+/// tripwire が守ろうとしている能力そのものが必要である。**
+const PERCPU_TESTS: &[CriticalTest] = &[CriticalTest {
+    name: "fake-nonzero-cpu-id",
+    feature: "percpu-fake-nonzero-cpu-id",
+    expected_markers: &["may only run on the bootstrap processor", "halting"],
+    // 停止せずにデモへ進んでいたら、tripwire が働いていない。
+    forbidden_markers: &["task: cooperative switch verified", "heartbeat: ticks="],
+    wait_for_full_timeout: false,
+    min_heartbeats: None,
+}];
+
 const ACPI_SMP_TESTS: &[CriticalTest] = &[CriticalTest {
     name: "smp2-enumeration",
     feature: "",
@@ -3900,6 +3930,7 @@ const APIC_TESTS: &[CriticalTest] = &[
 /// **既定ビルドにこれらが入ってはならない。** 入ったまま出荷すると、
 /// 壊れた状態で測った結果を正常な結果として扱うことになる。
 const SABOTAGE_FEATURES: &[&str] = &[
+    "percpu-fake-nonzero-cpu-id",
     "lapic-timer-scale-calibration-test",
     "lapic-timer-wrong-divide-test",
     "lapic-timer-no-mask-all-test",
@@ -4394,6 +4425,14 @@ fn cmd_check(full: bool) -> Result<()> {
                 cmd_lapic_timer_test(test.name)
             });
         }
+        // S3-b-2a の tripwire の破壊確認。
+        for test in PERCPU_TESTS {
+            total += 1;
+            let name = format!("percpu-test {}", test.name);
+            run_regression(&name, &mut failed, &mut retries, || {
+                cmd_marker_test(PERCPU_TESTS, "percpu-test", test.name, None)
+            });
+        }
         // S2-d-1c の破壊確認。**落ちるべき主張だけが落ちること**を見る。
         // 健全な側も並べて指定しているので、破壊が意図した経路だけを
         // 壊していることまで確かめられる。
@@ -4498,7 +4537,7 @@ struct ExpectedCheckCount {
 }
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
-const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount { base: 17, full: 85 };
+const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount { base: 17, full: 86 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
 ///

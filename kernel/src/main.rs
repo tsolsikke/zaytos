@@ -438,6 +438,24 @@ extern "sysv64" fn kernel_main() -> ! {
     // トリプルフォルトしている。
     report_high_half_arrival(&mut logger);
 
+    // === S3-b-2a: cpu_id() を GDTR 由来へ差し替える ===
+    //
+    // **gdt::init（`lgdt`）より後でなければならない。** 載荷条件が「自コアの
+    // GDT がロードされた後」だからである（`gdt::cpu_id_from_gdtr` の doc）。
+    // `gdt::init` は `_start` の最初期に済んでいるので、ここは条件を満たす。
+    //
+    // **据えるのをここまで遅らせても正しい。** それより前の `cpu_id()` は
+    // 定数 0 を返す経路を通り、**その間走っているのは bootstrap processor だけ
+    // なので 0 が正しい。** 窓が広いこと自体は害にならない。
+    //
+    // **AP では窓が再び開く。** フォールバックの 0 は AP では「bootstrap
+    // processor のスロット」を指すので誤りである。b-2b への申し送りにしてある
+    // （`roadmap.md`）。
+    // SAFETY: `gdt::init` は既に戻っており、自コアの GDT はロード済みである。
+    unsafe {
+        gdt::install_cpu_id_from_gdtr(&mut logger);
+    }
+
     // SAFETY: _start が switch_to_kernel_stack_and_run より前に書き込み済みで、
     // 以降は誰も書き換えない。読み取りのみ。
     let handoff = unsafe { core::ptr::read(addr_of!(BOOT_HANDOFF)) };
