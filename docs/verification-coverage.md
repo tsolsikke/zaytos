@@ -159,9 +159,24 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 | `syscall-test-validate-skip-all` | 検証器を常に受理にする | 最初の拒否ケース（kernel pointer）が受理され、battery が止まること（検証器全体の機能停止を battery が検出する、最後の砦の実証） |
 | `syscall-test-copy-skip-validate` | `copy_from_user` が検証を経ず `UserSlice` をモジュール内で直接構築して読む | カーネルポインタで `-EFAULT` のはずが総和が返り、内容往復の検証が `checksum case 'kernel pointer' expected reject` で止まること（copy が検証を尊重することの実証） |
 | `syscall-test-copy-overrun` | `copy_from_user` が `len` を 1 バイト超えて読む | 末尾の余分な既知バイトが総和へ混ざり、`checksum mismatch` で決定的に止まること（bounded read が範囲を守ることの実証。#PF は副次的位置づけ） |
+| `acpi-test-bad-signature` | MADTの署名を壊す | 署名の照合が、長さやチェックサムより先に弾くこと |
+| `acpi-test-bad-checksum` | MADTのチェックサムを壊す（署名と長さは無傷） | チェックサムの検算が働くこと |
+| `acpi-test-bad-length` | MADTの`length`を仕様の最小長（44）未満にする | 最小長の判定が「不正」として弾くこと |
+| `acpi-test-zero-entry-length` | MADTの最初のエントリの`length`を0にする（チェックサムは合わせ直す） | エントリ走査が不変条件で止まること。守っていなければ無限ループになる |
+| `acpi-test-unmapped-rsdp` | RSDPの物理アドレスを、`classify()`が`Unmapped`にする最大の記述子の中点へ差し替える（アドレスは実行時に導く） | #PFにならず、読む前の`translate`が検出すること |
+| `acpi-test-rsdp-outside-window` | RSDPの物理アドレスをdirect map窓の外（窓長そのもの）へ差し替える | 窓の外の経路が、未マップの経路と分けて検出されること |
+| `apic-test-skip-map` | Local APIC MMIOの写像そのものを省く | 「張った後」の`translate`が翻訳なしを見て、読みが行われないこと。読みが写像に依存していることの実証 |
+| `apic-test-wrong-target` | 写像先の物理だけを稼働中のPML4へ差し替える | 翻訳は張られるので、「翻訳がある」だけを見る検査では通る形であること。写像先の正しさを別に見ていることの実証 |
+| `apic-test-base-mismatch` | MADTが名乗るLocal APICのアドレスを1ページずらし、`IA32_APIC_BASE`と食い違わせる | MSRとの突き合わせが働き、写像も読みも行われないこと |
+| `ioapic-wrong-vector-test` | redirection entryへ、ゲートの無い別のベクタを書く | 読み戻しの主張と到達の主張が**両方**落ちること。2つの検出経路がどちらも生きていること |
+| `ioapic-skip-unmask-test` | I/O APIC側のマスクを外さない | 設定は正しいので読み戻しは通り、**到達だけが落ちる**こと。2つの主張が独立していることの証拠 |
+| `ioapic-keep-pic-irq1-test` | PIC側のIRQ1をマスクしない | 二重配送になること。経路ごとにベクタが違う（8259は`0x21`、I/O APICは`0x42`）ので、`0x21`で届いたキーがあることとして観測できる |
 | `lapic-timer-scale-calibration-test` | 較正の戻り値を2倍にする（初期カウントも2倍になるのでタイマは半分の速さで走る） | 較正値が初期カウントへ実際に流れていること。**カーネル側の許容幅では捕まらない**（両辺を同じ較正値から導くので比が変わらない）。ホストの実時間との比が捕まえる。空振りを防ぐため適用の痕跡を必須にしてある |
 | `lapic-timer-wrong-divide-test` | 較正で書く分周（分周なし）と、戻り値に載せる分周（16分周）を食い違わせる | 較正時と運用時で分周が揃うこと。**分周を較正の戻り値に含める構造**が塞いでいる罠を、構造ごと壊して確かめる。検出経路は`scaled-calibration`と同じだが守っている構造が違う（下記「破壊は、守っている構造ごとに要る」） |
 | `lapic-timer-no-mask-all-test` | 8259を全マスクせずにLVTを開ける | 切り替え直後のIMRの読み戻しが、IRQ0が開いたままであることを名指しで捕まえて停止すること。**`irq::mask_all()`が実際に呼ばれていることの裏返しの証明でもある** |
+| `percpu-fake-nonzero-cpu-id` | `cpu_id()`が非`0`を返すよう、tripwireが見る値だけを偽る | GPR照合デモがbootstrap processor以外で走ることを拒むtripwire（`task::require_bootstrap_processor`）が停止すること。**`MAX_CPUS > 1`でなければこの破壊は作れない**（`MAX_CPUS = 1`のまま非`0`を返すと`this_cpu_ptr`が配列外を指し、破壊が別の未定義動作を作る）。**示すのは分岐が働くことだけで、実際の並行アクセスは示さない** |
+| `smp-tramp-corrupt-copy-test` | 設置済みのAPトランポリンのコピーを1バイト壊す（パッチされる3領域の外を狙う） | 雛形とのバイト比較が捕まえること。**雛形を壊しても意味が無い**（コピー元なので両方が動く） |
+| `smp-ap-touch-scheduler-test` | APからスケジューラの現在タスクを読む | `CURRENT`のsentinelを読んで停止すること。丸めていたら「タスク0が走っている」と静かに答えていた |
 | `gfx-test-pattern` | コンソールを起動せず描画テストパターンを描く | 描画の基盤 |
 | `highhalf-no-identity-in-boot-pt` | 静的初期テーブルの `PML4[0]`（恒等）の P ビットをクリアする（`0x03`→`0x02`） | `mov cr3` 直後の低位命令フェッチが解決できず起動が進まないこと。判定=位置署名（bootloader の `kernel entry: VMA` present / カーネルの `entered _start` absent）+ heartbeat=0（下記注記参照。cpu_reset では判定しない） |
 | `highhalf-bad-high-slot` | 静的初期テーブルの `PDPT_high` のエントリを `510`→`509` へずらす | 高位 `_start` への jmp 先が未マップで起動が進まないこと。判定は `no-identity-in-boot-pt` と同一署名 |
@@ -170,6 +185,8 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 | `highhalf-remove-verify-fail` | 恒等除去点で `remove_identity` を呼び、必須領域のヒープ高位VAを解決不能な高位VA（空の `PML4[257]` = `0xffff808000000000`）へ差し替えて step4 を失敗させる | 5a が `PML4[0]` を書き戻し（`restored PML4[0]`）、恒等が実際に復活し（`revived=true`）、除去を完了せず（`done` は出ない）halt すること。判定=present（`required [heap high VA] … FAILED` / `verification FAILED. restored PML4[0]` / `revived=true`）+ absent（`identity-removal: done`）+ heartbeat=0。**サボタージュVA `0xffff808000000000` は `PML4[257]` が空であることに依存する。`[257..510]` はSMPのper-CPU用に温存している範囲で、BKLでper-CPUデータがそこへ載るとこのVAが解決してstep4が失敗しなくなる（マーカーが出ずFAILするので静かには壊れないが検査の意味を失う）。SMPのper-CPU配置を決めるときに再確認する。** |
 | `highhalf-remove-before-highify` | ヒープ初期化を低位（`heap_start`=物理）へ戻す。恒等除去は `done` まで完走し（`high_mapped` はスタックなので除去自身は生き残る。除去のヒープ非依存化を参照）、その後 1181 のヒープスモークテストが低位ヒープをデレフして死ぬ | 除去より前にヒープを高位化する順序の必要性を実証。除去は `done` まで完走し、その後フラッシュ済みの低位ヒープを触って #PF で死ぬ。判定=present（`identity-removal: done` / `exception: vector=14` / `cr2=0x00000000…`=低位＝物理ヒープ域 `0x584000`）+ heartbeat=0。**#PFダンプが出ることが成功署名**（下記の注記参照）。当初は除去自身の低位ヒープ Vec を step6 で辿って死んでいた（除去が完了しなかった）が、除去をヒープ非依存にした（`high_mapped` をスタック配列化）ことで、死亡点が想定どおりスモークテストへ移った |
 | `highhalf-panic-after-remove` | 恒等除去の直後に意図的 `panic!` する | パニック経路（シリアル I/O・レジスタ値のみ・walk なし）が恒等非依存で、恒等を外した後も動くことを実証。除去は `done` まで完走し、その後パニックダンプが出る。判定=present（`identity-removal: done` / `intentional panic right after identity removal`）+ heartbeat=0。**パニックダンプが出ることが成功署名**（下記の注記参照） |
+
+**この表は`kernel`と`bootloader`のfeatureを載せている。`common`にも1つある。** `preempt-in-critical-break`は`InterruptGuard::enter`が`cli`しなくなる破壊で、`task-preempt-in-critical`が有効化する。単独で選ぶものではないので行を分けていないが、featureとしては別に存在する。
 
 これらが有効なビルドでは、起動時に`test hooks:`のWARNが出て内訳が列挙される。
 何も有効でない場合も`test hooks: none enabled (this is a normal build)`と1行出す。
@@ -458,6 +475,12 @@ BKL本体で新しい検査を作るときも、まず検出経路を数え、�
   **2箇所に警告が書いてあったので気づけた**（この文書と`deferred-decisions.md`に「per-CPUデータを`PML4[257]`へ置くとこの破壊が意味を失う。置き場所を決めるときにサボタージュVAの移動をセットで扱う」）。**サボタージュVAを移さずに済む`PML4[258]`を選んだ。**
 
   **一般則は「破壊が何に依存しているかを、破壊の側に書いておく」である。** 依存先（ここではVAの空き）を触る人は、破壊のコードを読まない。**触られる側に警告を置かなければ届かない。**
+
+- **一覧は、足したときに更新されないと静かに狭くなる**（S3を閉じるときのgrepで発覚）。上の「意図的に壊すfeatureの一覧」は、実態より15件狭かった。入っていなかったのは`acpi-test-*`6種（S1-b-2）、`apic-test-*`3種（S1-c）、`ioapic-*`3種（S2-d-1c）、S3の3種である。**表の書きぶりは「意図的に壊した経路をfeatureとしてコードに残している」で範囲を限定していないので、狭いこと自体が主張の誤りだった。**
+
+  **落ちても何も落ちない。** 一覧が狭くても、破壊feature自体は`xtask`の表から回るので`--full`は緑である。**緑が嘘をつかないぶん、狭くなったことに気づく機会が無い。**
+
+  **機序は項目会計の行が2度古くなったのと同じである**（上の「項目会計」）。どちらも「足したときに、同じコミットで一覧を更新する」を規律で守っており、**足す作業の側からは一覧が見えない。** 実際に破れた回数は、会計行が2回、この表が4段ぶんである。
 
 - **公開範囲が広いと、未使用のコードが見えない。** 割り込み層の境界（S0-a）で`pub mod pic;`を`mod pic;`へ落とした瞬間、`pic::send_end_of_interrupt`が`dead_code`として現れた。公開モジュールの中では「外から呼ばれうる」と見なされて警告されないためである。**境界を閉じることは、死にコードの自動的な露出でもある。** 実際にはEOIの経路は`send_eoi_for(eoi_action_for(...))`だけで、この関数はどこからも呼ばれていなかった。
 
