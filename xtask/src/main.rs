@@ -1054,8 +1054,12 @@ fn main() -> Result<()> {
                     Some(4),
                 );
             }
-            if rest.iter().any(|a| a == "--smp-ap-test") {
-                return cmd_marker_test(SMP_AP_TESTS, "smp-ap-test", SMP_AP_TESTS[0].name, Some(2));
+            if let Some(index) = rest.iter().position(|a| a == "--smp-ap-test") {
+                let kind = rest
+                    .get(index + 1)
+                    .map(String::as_str)
+                    .unwrap_or(SMP_AP_TESTS[0].name);
+                return cmd_marker_test(SMP_AP_TESTS, "smp-ap-test", kind, Some(2));
             }
             if rest.iter().any(|a| a == "--smp-tramp-test") {
                 return cmd_marker_test(
@@ -3703,21 +3707,33 @@ const ACPI_TESTS: &[CriticalTest] = &[
 /// 両方が同じ値になり、比較は通ってしまう。**検査が見ているのは「コピーとパッチが
 /// 正しく行われたか」なので、壊すべきはコピー側である。**
 /// AP の per-CPU 資産と CURRENT の sentinel の破壊確認（S3-b-2b-2）。
-const SMP_AP_TESTS: &[CriticalTest] = &[CriticalTest {
-    name: "ap-touch-scheduler",
-    feature: "smp-ap-touch-scheduler-test",
-    expected_markers: &[
-        "is about to read the scheduler",
-        "CURRENT is still the sentinel",
-        "halting",
-    ],
-    // **BSP は走り続ける**（止まるのは AP だけ）ので、ハートビートは出る。
-    // 禁止するのは **AP が最後まで進んだこと**である。丸めていたら停止せず、
-    // タスク 0 を走らせているように見えたまま、ここまで来たはずである。
-    forbidden_markers: &["is parked with its own per-CPU state"],
-    wait_for_full_timeout: false,
-    min_heartbeats: None,
-}];
+const SMP_AP_TESTS: &[CriticalTest] = &[
+    CriticalTest {
+        name: "ap-touch-scheduler",
+        feature: "smp-ap-touch-scheduler-test",
+        expected_markers: &[
+            "is about to read the scheduler",
+            "CURRENT is still the sentinel",
+            "halting",
+        ],
+        // **BSP は走り続ける**（止まるのは AP だけ）ので、ハートビートは出る。
+        // 禁止するのは **AP が最後まで進んだこと**である。丸めていたら停止せず、
+        // タスク 0 を走らせているように見えたまま、ここまで来たはずである。
+        forbidden_markers: &["is parked with its own per-CPU state"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // **宛先の主張の破壊（S4-a）。** 確実に落ちるのは読み戻しの主張のほうで、
+    // 配送が実際にどうなるかは観測していない。
+    CriticalTest {
+        name: "ioapic-keyboard-broadcast",
+        feature: "ioapic-keyboard-broadcast-test",
+        expected_markers: &["IRQ1 is not aimed at the bootstrap processor in physical mode"],
+        forbidden_markers: &["heartbeat: ticks="],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+];
 
 const SMP_TRAMP_TESTS: &[CriticalTest] = &[CriticalTest {
     name: "corrupt-copy",
@@ -4686,7 +4702,7 @@ struct ExpectedCheckCount {
 }
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
-const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount { base: 17, full: 89 };
+const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount { base: 17, full: 90 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
 ///

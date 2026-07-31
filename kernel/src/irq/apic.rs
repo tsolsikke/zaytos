@@ -147,7 +147,10 @@ impl Apic {
         let entry = self.entry_for_irq(irq)?;
         // SAFETY: 型の不変条件により写像済みのページである。読み取りのみ。
         let low = unsafe { crate::apic::read_redirection_entry_low(self.io_apic_virt, entry) };
-        Some(super::RedirectionEntryView::new(low))
+        // **high dword も読む（S4-a）。宛先はこちらにある。**
+        // SAFETY: 同上。読み取りのみ。
+        let high = unsafe { crate::apic::read_redirection_entry_high(self.io_apic_virt, entry) };
+        Some(super::RedirectionEntryView::new(low, high))
     }
 
     /// 全 entry のマスクビットを 1 回ずつ読む。
@@ -245,14 +248,32 @@ impl Controller for Apic {
         // **極性とトリガは Interrupt Source Override の解決に従う。**
         // この構成の IRQ1 には上書きが無いのでバス既定（active high・edge）に
         // なるが、**恒等であることに依存した書き方をしない。**
+        //
+        // **宛先は S4-a から主張になった。** それまでは「起動時の実測で全 entry が
+        // destination 0 なので high dword を触らない」と書いていたが、
+        // **実測の記憶であって主張ではなかった。** AP が割り込みを受けられるように
+        // なると、「この IRQ は AP へ届かない」が安全の根拠になるので、physical
+        // モードと宛先を読み戻して主張する（`main.rs` の読み戻し）。
         let low = u32::from(vector)
             | self.mmio.redirection_flags_for_irq(irq)
             | crate::apic::ENTRY_MASKED_BIT;
 
+        // 破壊 (S4-a, ioapic-keyboard-broadcast): 宛先を logical の broadcast に
+        // する。**確実に落ちるのは読み戻しの主張のほうである。** 配送が実際に
+        // どうなるか（AP が受けて共有リングバッファへ積むか）は観測していない。
+        #[cfg(feature = "ioapic-keyboard-broadcast-test")]
+        let low = low | crate::apic::ENTRY_DESTINATION_MODE_BIT;
+
         // SAFETY: 型の不変条件により写像済みのページである。**マスクビットを
         // 立てたまま書く**ので、この書き込みで割り込みが届き始めることはない。
-        // high dword（宛先）は起動時の実測で全 entry が destination 0 なので触らない。
         unsafe { crate::apic::write_redirection_entry_low(self.io_apic_virt, entry, low) }
+
+        // 破壊 (S4-a, ioapic-keyboard-broadcast): high dword の宛先も broadcast へ。
+        // SAFETY: 同上。既定ビルドではこのブロックごと消える。
+        #[cfg(feature = "ioapic-keyboard-broadcast-test")]
+        unsafe {
+            crate::apic::write_redirection_entry_high(self.io_apic_virt, entry, 0xFF00_0000)
+        }
     }
 
     fn check_masks(&self, unmasked: &[u8]) -> MaskCheck {

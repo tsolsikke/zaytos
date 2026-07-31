@@ -752,12 +752,13 @@ pub fn routed_entry_readback(
 /// という問いと、ログへ流せる表示だけである。
 pub struct RedirectionEntryView {
     low: u32,
+    high: u32,
 }
 
 impl RedirectionEntryView {
-    /// 生の low dword から作る。**`irq` の内側からのみ作れる。**
-    const fn new(low: u32) -> Self {
-        Self { low }
+    /// 生の dword 2 本から作る。**`irq` の内側からのみ作れる。**
+    const fn new(low: u32, high: u32) -> Self {
+        Self { low, high }
     }
 
     /// この entry の配送先ベクタ。
@@ -769,17 +770,33 @@ impl RedirectionEntryView {
     pub fn masked(&self) -> bool {
         self.low & crate::apic::ENTRY_MASKED_BIT != 0
     }
+
+    /// 宛先が physical モードか（S4-a）。
+    ///
+    /// **この IRQ が bootstrap processor にしか届かないことの根拠である。**
+    /// logical になると宛先の解釈が変わり、その前提が崩れる。
+    pub fn physical_destination_mode(&self) -> bool {
+        self.low & crate::apic::ENTRY_DESTINATION_MODE_BIT == 0
+    }
+
+    /// 宛先（high dword の bit 31:24）。physical モードなら Local APIC ID である。
+    pub const fn destination(&self) -> u8 {
+        crate::apic::redirection_destination(self.high)
+    }
 }
 
 impl fmt::Display for RedirectionEntryView {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "vector={:#04x} masked={} level_triggered={} active_low={}",
+            "vector={:#04x} masked={} level_triggered={} active_low={} destination_mode={} \
+             destination={:#04x}",
             self.vector(),
             self.masked(),
             self.low & crate::apic::ENTRY_LEVEL_TRIGGERED_BIT != 0,
-            self.low & crate::apic::ENTRY_ACTIVE_LOW_BIT != 0
+            self.low & crate::apic::ENTRY_ACTIVE_LOW_BIT != 0,
+            crate::apic::destination_mode_name(self.low),
+            self.destination()
         )
     }
 }

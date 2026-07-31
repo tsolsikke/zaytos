@@ -110,7 +110,7 @@ impl MappedApic {
 
     /// この写像を作る元になった MADT の読み取り結果（Interrupt Source Override
     /// の解決表を含む）。
-    pub(crate) const fn mmio(&self) -> ApicMmio {
+    pub const fn mmio(&self) -> ApicMmio {
         self.mmio
     }
 }
@@ -665,6 +665,12 @@ const LAPIC_LVT_ENTRIES: [(&str, u64); 6] = [
 const ENTRY_VECTOR_MASK: u32 = 0xFF;
 const ENTRY_DELIVERY_MODE_SHIFT: u32 = 8;
 const ENTRY_DELIVERY_MODE_MASK: u32 = 0b111;
+/// Destination Mode（bit 11）。**欄の名前であって値の名前ではない。**
+///
+/// set = logical、clear = physical。physical では high dword の bit 31:24 が
+/// 宛先の Local APIC ID そのものになる。**S4-a の安全は clear であることに
+/// 依存している**（キーボードが BSP にしか届かないこと）。
+pub(crate) const ENTRY_DESTINATION_MODE_BIT: u32 = 1 << 11;
 const ENTRY_DELIVERY_STATUS_BIT: u32 = 1 << 12;
 pub(crate) const ENTRY_ACTIVE_LOW_BIT: u32 = 1 << 13;
 const ENTRY_REMOTE_IRR_BIT: u32 = 1 << 14;
@@ -702,6 +708,17 @@ const fn delivery_mode_name(mode: u32) -> &'static str {
         0b101 => "INIT",
         0b111 => "ExtINT",
         _ => "reserved",
+    }
+}
+
+/// low dword の Destination Mode を読める名前にする。
+///
+/// **値ではなく欄の名前で判定する**（[`ENTRY_DESTINATION_MODE_BIT`]）。
+pub(crate) const fn destination_mode_name(low: u32) -> &'static str {
+    if low & ENTRY_DESTINATION_MODE_BIT != 0 {
+        "logical"
+    } else {
+        "physical"
     }
 }
 
@@ -900,7 +917,7 @@ fn survey_io_apic(logger: &mut Logger<SerialPort>, base_virt: u64, io_apic: &IoA
         logger.info(format_args!(
             "apic:   redirection entry {entry:>2} (gsi {}): low={low:#010x} high={high:#010x} \
              vector={:#04x} delivery={} masked={} level_triggered={} active_low={} \
-             remote_irr={} destination={:#04x}",
+             remote_irr={} destination_mode={} destination={:#04x}",
             io_apic.global_system_interrupt_base + entry,
             low & ENTRY_VECTOR_MASK,
             delivery_mode_name(mode),
@@ -908,7 +925,8 @@ fn survey_io_apic(logger: &mut Logger<SerialPort>, base_virt: u64, io_apic: &IoA
             low & ENTRY_LEVEL_TRIGGERED_BIT != 0,
             low & ENTRY_ACTIVE_LOW_BIT != 0,
             low & ENTRY_REMOTE_IRR_BIT != 0,
-            high >> 24
+            destination_mode_name(low),
+            redirection_destination(high)
         ));
     }
 }
@@ -1139,6 +1157,51 @@ pub(crate) unsafe fn read_redirection_entry_low(io_apic_virt: u64, entry: u8) ->
     // SAFETY: 呼び出し元契約。読み取りのみ。
     unsafe { read_io_apic(io_apic_virt, redirection_entry_index(entry)) }
 }
+
+/// redirection entry の high dword を読む。**宛先はこちらにある。**
+///
+/// bit 31:24 が Destination である。physical モード（low dword の
+/// [`ENTRY_DESTINATION_MODE_BIT`] が clear）では、これが宛先の Local APIC ID
+/// そのものになる。
+///
+/// # Safety
+///
+/// [`read_io_apic`] と同じ。
+pub(crate) unsafe fn read_redirection_entry_high(io_apic_virt: u64, entry: u8) -> u32 {
+    // SAFETY: 呼び出し元契約。読み取りのみ。high は low の隣の添字である。
+    unsafe { read_io_apic(io_apic_virt, redirection_entry_index(entry).wrapping_add(1)) }
+}
+
+/// redirection entry の high dword を書く。**破壊 feature 専用である。**
+///
+/// # 既定ビルドには宛先を書く経路が無い
+///
+/// 宛先はファームウェアが置いた値のまま使い、我々は読んで主張するだけである
+/// （`RedirectionEntryView::destination`）。**書く関数が既定ビルドに無ければ、
+/// 宛先が我々の書き込みで変わることはありえない。** 規律ではなく構造で閉じる。
+///
+/// # Safety
+///
+/// [`write_io_apic`] と同じ。**割り込みの宛先が変わる。**
+#[cfg(feature = "ioapic-keyboard-broadcast-test")]
+pub(crate) unsafe fn write_redirection_entry_high(io_apic_virt: u64, entry: u8, value: u32) {
+    // SAFETY: 呼び出し元契約。
+    unsafe {
+        write_io_apic(
+            io_apic_virt,
+            redirection_entry_index(entry).wrapping_add(1),
+            value,
+        )
+    }
+}
+
+/// high dword から宛先（bit 31:24）を取り出す。
+pub(crate) const fn redirection_destination(high: u32) -> u8 {
+    (high >> IOAPIC_DESTINATION_SHIFT) as u8
+}
+
+/// high dword の Destination 欄の位置。
+const IOAPIC_DESTINATION_SHIFT: u32 = 24;
 
 /// redirection entry の low dword を書く。
 ///

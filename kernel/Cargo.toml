@@ -262,6 +262,11 @@ smp-tramp-corrupt-copy-test = []
 # sentinel を読んで停止するのが正しい。丸めていたら「タスク 0 が走っている」と
 # 静かに答えていた。
 smp-ap-touch-scheduler-test = []
+
+# --- S4-a: キーボードの配送先の破壊 ---
+# redirection entry の宛先を logical の broadcast にする。**確実に落ちるのは
+# 読み戻しの主張のほうである。** 配送が実際にどうなるかは観測していない。
+ioapic-keyboard-broadcast-test = []
 # B-2a-5: higher-half の破壊確認。いずれも既定ビルドには入らない。`--highhalf-test <kind>`。
 # (a) 静的 PML4[0] の存在ビットを落とす。恒等が not-present になり、mov cr3 直後の低位命令
 # フェッチが解決できずトリプルフォルトする。`--highhalf-test no-identity-in-boot-pt`。

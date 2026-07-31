@@ -3278,13 +3278,34 @@ fn switch_keyboard_to_io_apic(
     match readback {
         Some(entry) => {
             let vector_ok = entry.vector() == vector;
+            // **宛先を主張にする（S4-a）。**
+            //
+            // 「キーボードは bootstrap processor にしか届かない」は、AP が割り込みを
+            // 受けられるようになった段の**安全の根拠**である。それまでは起動時の
+            // 棚卸しのログに `destination=0x00` が出ているだけで、**実測の記憶で
+            // あって主張ではなかった。**
+            //
+            // physical モードなら high dword の宛先は Local APIC ID そのものである。
+            // BSP の APIC ID は MADT の最初の使用可能なエントリから取る
+            // （**その値が BSP とは限らない**という制約は `smp.rs` の該当箇所にある）。
+            let expected_destination = mapped.mmio().bsp_candidate_apic_id().unwrap_or(0);
+            let destination_ok =
+                entry.physical_destination_mode() && entry.destination() == expected_destination;
             logger.info(format_args!(
                 "ioapic: IRQ1 redirection entry read back: {entry}, vector matches what we wrote \
-                 ({vector:#04x}) = {vector_ok}"
+                 ({vector:#04x}) = {vector_ok}, destination is physical mode and equals the \
+                 bootstrap processor ({expected_destination:#04x}) = {destination_ok}"
             ));
             if !vector_ok {
                 logger.error(format_args!(
                     "ioapic: the redirection entry does not carry the vector we wrote; halting"
+                ));
+                cpu::halt_forever();
+            }
+            if !destination_ok {
+                logger.error(format_args!(
+                    "ioapic: IRQ1 is not aimed at the bootstrap processor in physical mode, so \
+                     an application processor could receive it; halting"
                 ));
                 cpu::halt_forever();
             }
@@ -4529,6 +4550,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "acpi-test-rsdp-outside-window",
         cfg!(feature = "acpi-test-rsdp-outside-window"),
         "RSDP を direct map 窓の外へ差し替える",
+    ),
+    (
+        "ioapic-keyboard-broadcast-test",
+        cfg!(feature = "ioapic-keyboard-broadcast-test"),
+        "キーボードの redirection entry の宛先を logical broadcast にする",
     ),
 ];
 
