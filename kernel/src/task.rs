@@ -188,6 +188,24 @@ struct Task {
     iterations: u64,
     /// このタスクが再開された回数（会計用）。
     resumes: u64,
+    /// このタスクを走らせてよいコア（S4-c-1）。
+    ///
+    /// # なぜ静的な担当なのか
+    ///
+    /// **タスクのコア間移動を実装しないと決めてある**（ADR-0023 Addendum §5）。
+    /// `GPR_BUF` の安全がそれに依存するためで、負荷分散を実装しないこととは
+    /// 理由が別である。**動的な affinity は負荷分散へ踏み込むので採らない。**
+    ///
+    /// # これが第 1 層である
+    ///
+    /// 同じタスクが 2 コアから選ばれる危険に対する守りは 2 層あり、
+    /// **こちらが先に防ぐ。** 第 2 層（候補が他コアの `CURRENT` に入っていない
+    /// こと）は S4-c-3 で入れる予定で、**本番では発火条件が無い構造的な
+    /// ガードになる。**
+    ///
+    /// **この段（S4-c-1）では全タスクが bootstrap processor の担当である。**
+    /// したがって候補集合は今までと同じで、**振る舞いは変わらない。**
+    owner: usize,
 }
 
 const EMPTY_TASK: Task = Task {
@@ -199,6 +217,9 @@ const EMPTY_TASK: Task = Task {
     rounds_left: 0,
     iterations: 0,
     resumes: 0,
+    // **既定は bootstrap processor。** S4-c-2 で新設する AP 用タスクだけが
+    // これを上書きする。
+    owner: common::percpu::BOOTSTRAP_PROCESSOR_SLOT,
 };
 
 // スケジューラのグローバル状態は [`scheduler`] モジュールが持つ。
@@ -604,6 +625,9 @@ unsafe fn setup_tasks() {
                 // 使えるスタックの下端はガードページの直上。
                 stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
                 state: TaskState::Ready,
+                // **BSP のワーカーである。** `GPR_BUF` に触るので AP へ渡さない
+                // （ADR-0023 Addendum §5。タスクのコア間移動を実装しない）。
+                owner: common::percpu::BOOTSTRAP_PROCESSOR_SLOT,
                 base,
                 rounds_left: ROUNDS_PER_WORKER,
                 iterations: 0,
@@ -719,7 +743,12 @@ fn schedule_switch(current_rsp: u64) -> u64 {
 
     #[cfg(not(feature = "task-switch-no-swap"))]
     {
-        let next = pick_next(scheduler::states(), current);
+        let next = pick_next(
+            scheduler::states(),
+            scheduler::owners(),
+            common::percpu::cpu_id(),
+            current,
+        );
         // 走らせるべき相手がいない（=現タスクのまま）なら何もしない。デモ後の
         // ハートビート区間（走行可能なワーカーが無い）ではここに来て no-op になる。
         if next == current {
@@ -782,17 +811,36 @@ fn schedule_switch(current_rsp: u64) -> u64 {
 /// メイン（0）へ戻る。
 // no-swap の破壊ビルドではスイッチしないので、次タスクを選ばず未使用になる。
 #[cfg_attr(feature = "task-switch-no-swap", allow(dead_code))]
-fn pick_next(states: [TaskState; TASK_COUNT], current: usize) -> usize {
+fn pick_next(
+    states: [TaskState; TASK_COUNT],
+    owners: [usize; TASK_COUNT],
+    cpu: usize,
+    current: usize,
+) -> usize {
     for offset in 1..=WORKER_COUNT {
         let cand = if current == 0 {
             ((offset - 1) % WORKER_COUNT) + 1
         } else {
             ((current - 1 + offset) % WORKER_COUNT) + 1
         };
+        // **第 1 層: 自コアが担当のタスクだけを候補にする（S4-c-1）。**
+        //
+        // **破壊はこの段では置かない。** `sched-ignore-owner` は第 2 層
+        // （`CURRENT` 条件）と組んで初めて事象を作るので、**第 2 層が入る
+        // S4-c-3 で一緒に置く。** 片方だけ置いても何も示せない。
+        if owners[cand] != cpu {
+            continue;
+        }
         if states[cand].is_runnable() {
             return cand;
         }
     }
+    // 走行可能な担当ワーカーが無い。**この経路は新設ではない。**
+    // 従来から「タスク 0（メイン）を返す」形で、ホストテストで固定されている。
+    //
+    // **AP にとってのタスク 0 に相当するものは S4-c-2 で新設する。**
+    // この段では全タスクが bootstrap processor の担当なので、ここへ来るのは
+    // bootstrap processor だけである。
     0
 }
 
@@ -1052,6 +1100,9 @@ unsafe fn setup_preemptive_tasks() {
                 stack_top: top.as_u64(),
                 stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
                 state: TaskState::Ready,
+                // **BSP のワーカーである。** `GPR_BUF` に触るので AP へ渡さない
+                // （ADR-0023 Addendum §5。タスクのコア間移動を実装しない）。
+                owner: common::percpu::BOOTSTRAP_PROCESSOR_SLOT,
                 base,
                 rounds_left: 0,
                 iterations: 0,
@@ -1204,7 +1255,52 @@ core::arch::global_asm!(
 
 #[cfg(test)]
 mod tests {
-    use super::{pick_next, TaskState, TASK_COUNT, WORKER_COUNT};
+    use super::{TaskState, TASK_COUNT, WORKER_COUNT};
+
+    /// 全タスクが bootstrap processor 担当（S4-c-1 の実態）。
+    const ALL_BSP: [usize; TASK_COUNT] = [common::percpu::BOOTSTRAP_PROCESSOR_SLOT; TASK_COUNT];
+
+    /// 担当コアを既定（全部 BSP）にして bootstrap processor から呼ぶ短縮。
+    ///
+    /// **既存の契約を書き換えないための薄い包みである。** S4-c-1 は振る舞い
+    /// 不変の段なので、**既存の表明はそのまま残し、担当コアつきの表明を足す。**
+    fn pick_next(states: [TaskState; TASK_COUNT], current: usize) -> usize {
+        super::pick_next(
+            states,
+            ALL_BSP,
+            common::percpu::BOOTSTRAP_PROCESSOR_SLOT,
+            current,
+        )
+    }
+
+    /// **担当コアが違うタスクは候補にならない（S4-c-1）。**
+    ///
+    /// 第 1 層そのものの表明である。全員走行可能でも、担当が別コアなら
+    /// 選ばれず、**走行可能な担当が無いときの既存の経路（タスク 0）へ落ちる。**
+    #[test]
+    fn a_task_owned_by_another_cpu_is_not_a_candidate() {
+        let all_ready = states([true, true, true]);
+        // 全部 AP 担当にすると、bootstrap processor から見て候補が無い。
+        let all_ap = [1usize; TASK_COUNT];
+        assert_eq!(super::pick_next(all_ready, all_ap, 0, 0), 0);
+        assert_eq!(super::pick_next(all_ready, all_ap, 0, 1), 0);
+        // 逆に、AP から見れば選べる。
+        assert_eq!(super::pick_next(all_ready, all_ap, 1, 0), 1);
+    }
+
+    /// **担当が混ざっていても、自コアのぶんだけを回す（S4-c-1）。**
+    #[test]
+    fn only_the_tasks_owned_by_this_cpu_are_rotated() {
+        let all_ready = states([true, true, true]);
+        // ワーカー 1 = BSP、ワーカー 2 = AP。
+        let mixed = [0usize, 0, 1];
+        // BSP はワーカー 1 しか選べない。**現タスクが 1 でも 1 を返す**
+        // （`pick_next` は現タスクを返しうるという既存の契約）。
+        assert_eq!(super::pick_next(all_ready, mixed, 0, 0), 1);
+        assert_eq!(super::pick_next(all_ready, mixed, 0, 1), 1);
+        // AP はワーカー 2 しか選べない。
+        assert_eq!(super::pick_next(all_ready, mixed, 1, 0), 2);
+    }
 
     /// 旧 `runnable: bool` に対応する短縮。`true` = 走行可能。
     fn states(flags: [bool; TASK_COUNT]) -> [TaskState; TASK_COUNT] {

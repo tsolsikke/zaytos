@@ -155,6 +155,16 @@ pub(super) fn states() -> [TaskState; TASK_COUNT] {
     states
 }
 
+/// 各タスクの担当コア（S4-c-1）。**起動時に書いた後は読むだけである。**
+pub(super) fn owners() -> [usize; TASK_COUNT] {
+    let mut owners = [common::percpu::BOOTSTRAP_PROCESSOR_SLOT; TASK_COUNT];
+    for (index, slot_out) in owners.iter_mut().enumerate() {
+        // SAFETY: 有効なポインタ。起動時に書いた後は読むだけ。
+        *slot_out = unsafe { addr_of_mut!((*slot(index)).owner).read() };
+    }
+    owners
+}
+
 pub(super) fn base(index: usize) -> u64 {
     // SAFETY: 有効なポインタ。起動時に書いた後は読むだけ。
     unsafe { addr_of_mut!((*slot(index)).base).read() }
