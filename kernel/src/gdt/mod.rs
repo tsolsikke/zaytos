@@ -106,12 +106,43 @@ struct DescriptorTablePointer {
 /// - `double_fault_stack_top` と `page_fault_stack_top` が、通常のスタックとも
 ///   互いとも別の、有効でマップ済みのスタック上端であること。
 pub unsafe fn init(double_fault_stack_top: u64, page_fault_stack_top: u64) {
+    // SAFETY: 呼び出し側の契約をそのまま引き継ぐ。bootstrap processor は
+    // スロット 0 である（`cpu_id()` が据わる前も 0 を返す）。
+    unsafe { init_for_cpu(0, double_fault_stack_top, page_fault_stack_top) }
+}
+
+/// 指定したスロットの GDT / TSS を構築してロードする（S3-b-2b-2）。
+///
+/// # **なぜ索引を引数で受けるのか。`cpu_id()` を使えない**
+///
+/// [`PerCpu::this_cpu_ptr`] は `cpu_id()` を呼ぶが、**AP は自分の GDT を
+/// ロードするまで `cpu_id()` を使えない**（`sgdt` 由来の実装は自コアの GDT が
+/// 載った後でなければ正しくない。[`cpu_id_from_gdtr`] の doc）。
+///
+/// **循環している**——AP は索引を知らないと自分のスロットへ書けず、
+/// `cpu_id()` は GDT が載った後でないと正しくない。
+///
+/// **解くのは、最初の一押しを別の出所から供給することである。** AP は自分の索引を
+/// **トランポリンのデータブロック**から受け取っている（`smp::zaytos_ap_entry` の
+/// 引数）。それをここへ渡す。**この関数から戻った時点で GDTR が自分のスロットを
+/// 指すので、以降は `cpu_id()` が正しい値を返す。**
+///
+/// **GDT が身元の担い手になり、その最初の一押しだけをデータブロックが供給する。**
+///
+/// # Safety
+///
+/// - `index` が `0..MAX_CPUS` であり、**実行中の CPU に割り当てられたスロット**で
+///   あること。**他コアのスロットを渡してはならない。**
+/// - IST の頂点が、**このコアから見えるアドレス**であること（AP が本番 CR3 へ
+///   移った後に使うなら、本番テーブルに存在する VA であること）。
+/// - 各コアにつき 1 回だけ呼ぶこと。割り込みは禁止されていること。
+pub unsafe fn init_for_cpu(index: usize, double_fault_stack_top: u64, page_fault_stack_top: u64) {
     // TSS を先に埋める。GDT の TSS ディスクリプタがそのアドレスを指すため。
     // SAFETY: 起動時の単一実行文脈であり、他に誰もこの static に触れていない。
     // 自コアのスロットへ書く（`this_cpu_ptr` の契約: `this` は有効な static、
     // 書き込みは単一文脈内）。
     unsafe {
-        let tss = PerCpu::this_cpu_ptr(addr_of_mut!(TSS));
+        let tss = PerCpu::slot_ptr(addr_of_mut!(TSS), index);
         (*tss).interrupt_stack_table[DOUBLE_FAULT_IST_INDEX - 1] = double_fault_stack_top;
         (*tss).interrupt_stack_table[PAGE_FAULT_IST_INDEX - 1] = page_fault_stack_top;
         // RSP0 は特権レベルが下がる遷移（ユーザー → カーネル）で使われる。
@@ -123,13 +154,13 @@ pub unsafe fn init(double_fault_stack_top: u64, page_fault_stack_top: u64) {
 
     // SAFETY: 同上（起動時の単一文脈、自コアのスロット）。読み取り目的で
     // アドレスを取る。
-    let tss_base = unsafe { PerCpu::this_cpu_ptr(addr_of_mut!(TSS)) } as u64;
+    let tss_base = unsafe { PerCpu::slot_ptr(addr_of_mut!(TSS), index) } as u64;
     let tss_limit = (core::mem::size_of::<TaskStateSegment>() - 1) as u32;
     let (tss_low, tss_high) = tss_descriptor(tss_base, tss_limit);
 
     // SAFETY: 同上。GDT はこの関数でのみ書き込む。自コアのスロットへ書く。
     unsafe {
-        let gdt = PerCpu::this_cpu_ptr(addr_of_mut!(GDT));
+        let gdt = PerCpu::slot_ptr(addr_of_mut!(GDT), index);
         (*gdt)[NULL_INDEX as usize] = 0;
         (*gdt)[KERNEL_CODE_INDEX as usize] =
             user_segment_descriptor(KERNEL_CODE_ACCESS, KERNEL_CODE_FLAGS);
@@ -158,7 +189,7 @@ pub unsafe fn init(double_fault_stack_top: u64, page_fault_stack_top: u64) {
     }
 
     // SAFETY: 自コアの GDT スロットのアドレスを lgdt へ渡す（起動時の単一文脈）。
-    let gdt_slot_base = unsafe { PerCpu::this_cpu_ptr(addr_of_mut!(GDT)) } as u64;
+    let gdt_slot_base = unsafe { PerCpu::slot_ptr(addr_of_mut!(GDT), index) } as u64;
     let pointer = DescriptorTablePointer {
         limit: (GDT_ENTRY_COUNT * core::mem::size_of::<u64>() - 1) as u16,
         base: gdt_slot_base,

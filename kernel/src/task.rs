@@ -269,14 +269,49 @@ const EMPTY_TASK: Task = Task {
 /// 設定するか sentinel を置く必要がある。この前提は `cpu_id() < MAX_CPUS` の境界
 /// （`common::percpu`）と同じクラスタで、`docs/deferred-decisions.md` の
 /// 「per-CPU seam が MAX_CPUS > 1 で顕在化する前提」に一覧化してある。
-static CURRENT: PerCpu<AtomicUsize> = PerCpu::new([const { AtomicUsize::new(0) }; MAX_CPUS]);
+static CURRENT: PerCpu<AtomicUsize> =
+    PerCpu::new([const { AtomicUsize::new(NO_CURRENT_TASK) }; MAX_CPUS]);
+
+/// 破壊確認から現在タスクを読む（S3-b-2b-2、`smp-ap-touch-scheduler-test`）。
+///
+/// **AP から呼ぶと sentinel を読んで停止するのが正しい。**
+#[cfg(feature = "smp-ap-touch-scheduler-test")]
+pub fn debug_read_current_index() -> usize {
+    current_index()
+}
+
+/// [`CURRENT`] の「まだ誰も走らせていない」を表す値（S3-b-2b-2）。
+///
+/// # なぜ `0` を初期値にしないのか
+///
+/// `0` はメイン（[`TaskState::Blocked`]）である。**初期値を `0` にすると、
+/// 「メインを走らせている」と「まだ何も決めていない」が同じ値になる。**
+/// `MAX_CPUS > 1` では AP のスロットが `0` のまま残るので、**誤って読めば
+/// 「タスク 0 が走っている」と静かに答える。**
+///
+/// **bootstrap processor も起動時に明示的に `0` を書く**（`setup_tasks`）。
+/// これで **`CURRENT[0] == 0` が「既定値の 0」ではなく「メインを走らせている
+/// という宣言」になる。読まれる値はすべて誰かが書いた値である。**
+///
+/// S3-a で `TaskState::Uninitialized` を足したのと同じ判断である。
+const NO_CURRENT_TASK: usize = usize::MAX;
 
 /// 自コアの現在タスクインデックスを読む（旧 `sched.current` の読みと同じ意味）。
 ///
 /// IF=1 のワーカーからも呼ばれるので `Relaxed` のアトミック読みにする（上の
 /// [`CURRENT`] のドキュメント参照）。
 fn current_index() -> usize {
-    CURRENT.this_cpu().load(Ordering::Relaxed)
+    let value = CURRENT.this_cpu().load(Ordering::Relaxed);
+    if value == NO_CURRENT_TASK {
+        // **このコアはまだタスクを割り当てられていない。** S3-b-2b-2 の段では
+        // AP はタスクを実行しないので、ここへ来るのは「AP がスケジューラへ
+        // 入った」ことを意味する。**丸めず、落とす。**
+        serial_line(format_args!(
+            "[ERROR] task: current_index() was read on a CPU with no current task              (CURRENT is still the sentinel); this stage does not run tasks on application              processors; halting"
+        ));
+        common::cpu::halt_forever();
+    }
+    value
 }
 
 /// 自コアの現在タスクインデックスを書く（旧 `sched.current = ...` と同じ意味）。
@@ -347,6 +382,19 @@ fn serial_line(args: core::fmt::Arguments) {
 /// なるので、S3-b の到達条件に入れてある**（`roadmap.md`）。
 /// `smp::trampoline_frame()` や `irq::mask_all()` と同じ扱いである。
 fn require_bootstrap_processor(what: &str) {
+    // 破壊 (S3-a, percpu-fake-nonzero-cpu-id): この tripwire が見る値だけを偽る。
+    //
+    // **`cpu_id()` そのものを偽る形は S3-b-2a で使えなくなった。** `cpu_id()` が
+    // GDTR 由来になったので、「`cpu_id()` は 1 と言うが GDTR はスロット 0 を
+    // 指している」は**本物の不整合**であり、`gdt::init` の読み戻しが**この
+    // tripwire より前に**捕まえて停止する。**より基本的な検査が先に働く。**
+    //
+    // **したがって破壊は tripwire が読む値に限定する。** そうしないと、
+    // 「tripwire の分岐が働くこと」ではなく「GDT の読み戻しが働くこと」を
+    // 確かめてしまう。**何を確かめたいかで破壊の位置が決まる。**
+    #[cfg(feature = "percpu-fake-nonzero-cpu-id")]
+    let cpu = 1usize;
+    #[cfg(not(feature = "percpu-fake-nonzero-cpu-id"))]
     let cpu = common::percpu::cpu_id();
     if cpu != 0 {
         serial_line(format_args!(

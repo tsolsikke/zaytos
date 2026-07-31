@@ -250,12 +250,18 @@ lapic-timer-no-mask-all-test = []
 # 返すと this_cpu_ptr が配列外を指し、破壊が別の未定義動作を作ってしまう。
 #
 # **示すのは「分岐が働くこと」だけである。** 実際の並行アクセスは示さない。
-percpu-fake-nonzero-cpu-id = ["common/percpu-fake-nonzero-cpu-id"]
+percpu-fake-nonzero-cpu-id = []
 
 # --- S3-b-2b-1: 設置したトランポリンの雛形一致検査の破壊 ---
 # 設置済みのコピーを 1 バイト壊す。パッチされる 3 領域の外を狙うので、雛形との
 # バイト比較が捕まえる。**雛形を壊しても意味が無い**（コピー元なので両方が動く）。
 smp-tramp-corrupt-copy-test = []
+
+# --- S3-b-2b-2: CURRENT の sentinel の破壊 ---
+# AP からスケジューラの現在タスクを読む。この段は AP でタスクを実行しないので、
+# sentinel を読んで停止するのが正しい。丸めていたら「タスク 0 が走っている」と
+# 静かに答えていた。
+smp-ap-touch-scheduler-test = []
 # B-2a-5: higher-half の破壊確認。いずれも既定ビルドには入らない。`--highhalf-test <kind>`。
 # (a) 静的 PML4[0] の存在ビットを落とす。恒等が not-present になり、mov cr3 直後の低位命令
 # フェッチが解決できずトリプルフォルトする。`--highhalf-test no-identity-in-boot-pt`。

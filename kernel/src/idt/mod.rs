@@ -1327,6 +1327,33 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
     }
 }
 
+/// 既に構築済みの IDT を、このコアの IDTR へ載せる（S3-b-2b-2）。
+///
+/// # **IDT は 1 本を共有する。GDT / TSS と違って per-CPU ではない**
+///
+/// ゲートの中身はコアに依存しない（ハンドラも、IST の**番号**も同じ）。
+/// **コアごとに違うのは IST が指す先で、それは TSS が持つ。**
+/// したがって IDT の実体は共有し、**各コアが `lidt` でそれを指すだけでよい。**
+///
+/// # Safety
+///
+/// [`init`] が既に走って IDT が構築済みであること。割り込みは禁止されていること。
+/// 各コアにつき 1 回だけ呼ぶこと。
+pub unsafe fn load_shared() {
+    let pointer = DescriptorTablePointer {
+        limit: (IDT_ENTRY_COUNT * core::mem::size_of::<IdtEntry>() - 1) as u16,
+        base: addr_of!(IDT) as u64,
+    };
+    // SAFETY: 呼び出し側の契約により IDT は構築済みで、割り込みは禁止されている。
+    unsafe {
+        core::arch::asm!(
+            "lidt [{ptr}]",
+            ptr = in(reg) &pointer,
+            options(readonly, nostack, preserves_flags),
+        );
+    }
+}
+
 /// 現在ロードされている IDT の位置と limit（`sidt` の読み戻し）。
 pub fn current_idt() -> (u64, u16) {
     let mut pointer = DescriptorTablePointer { limit: 0, base: 0 };

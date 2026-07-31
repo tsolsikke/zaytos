@@ -158,29 +158,10 @@ pub fn cpu_id_reader_installed() -> bool {
 /// （`kernel` は Local APIC の Version レジスタを併読している）。
 #[inline]
 pub fn cpu_id() -> usize {
-    // 破壊 (S3-b-2a, percpu-fake-nonzero-cpu-id): 非 `0` を返す。
-    //
-    // **`MAX_CPUS > 1` でなければこの破壊は作れない。** `MAX_CPUS = 1` のまま
-    // 非 `0` を返すと [`PerCpu::this_cpu_ptr`] が配列外を指し、**破壊が別の
-    // 未定義動作を作ってしまう。** S3-b-2a で `MAX_CPUS` を 2 へ上げたので、
-    // `1` は配列内であり安全に作れる。
-    //
-    // **これが示すのは「分岐が働くこと」だけである。** `task` 側の tripwire
-    // （`require_bootstrap_processor`）が非 `0` を見て停止する経路を通ることを
-    // 確かめるだけで、**実際の並行アクセスは示さない。** 機序の直接観測は
-    // AP がタスクを実行する段の到達条件である。
-    #[cfg(feature = "percpu-fake-nonzero-cpu-id")]
-    return 1;
-
-    #[cfg(not(feature = "percpu-fake-nonzero-cpu-id"))]
-    {
-        cpu_id_inner()
-    }
+    cpu_id_inner()
 }
 
-/// [`cpu_id`] の本体。破壊 feature が本体を差し替えるので分けてある。
-// 破壊ビルドでは [`cpu_id`] が定数を返して本体へ到達しないので未使用になる。
-#[cfg_attr(feature = "percpu-fake-nonzero-cpu-id", allow(dead_code))]
+/// [`cpu_id`] の本体。
 #[inline]
 fn cpu_id_inner() -> usize {
     let raw = CPU_ID_READER.load(Ordering::Relaxed);
@@ -289,6 +270,30 @@ impl<T> PerCpu<T> {
         unsafe {
             let base = core::ptr::addr_of_mut!((*this).slots) as *mut T;
             base.add(cpu_id())
+        }
+    }
+
+    /// 指定したスロットへの生ポインタ（S3-b-2b-2）。
+    ///
+    /// # なぜ [`this_cpu_ptr`][Self::this_cpu_ptr] と分けるのか
+    ///
+    /// あちらは `cpu_id()` を呼ぶ。**`cpu_id()` がまだ正しくない文脈がある**——
+    /// AP は自分の GDT をロードするまで `cpu_id()` を使えないのに、
+    /// **その GDT を書くのにスロットを指す必要がある**（循環）。
+    /// **索引を外から与える経路を分けて開ける。**
+    ///
+    /// # Safety
+    ///
+    /// [`this_cpu_ptr`][Self::this_cpu_ptr] の契約に加えて、
+    /// **`index < MAX_CPUS` であること。** こちらは `cpu_id()` を通さないので、
+    /// **範囲を保証するのは呼び出し側である。**
+    #[inline]
+    pub unsafe fn slot_ptr(this: *mut Self, index: usize) -> *mut T {
+        debug_assert!(index < MAX_CPUS, "per-CPU slot index out of range");
+        // SAFETY: 呼び出し側契約により `this` は有効で `index < MAX_CPUS`。
+        unsafe {
+            let base = core::ptr::addr_of_mut!((*this).slots) as *mut T;
+            base.add(index)
         }
     }
 }

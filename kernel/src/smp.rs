@@ -7,7 +7,10 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use core::fmt::Write as _;
 
-use common::addr::PhysAddr;
+use crate::paging::active::ActivePageTable;
+#[allow(unused_imports)]
+use crate::paging::verify;
+use common::addr::{PhysAddr, VirtAddr};
 use common::cpu;
 use common::log::Logger;
 use common::serial::SerialPort;
@@ -402,6 +405,21 @@ pub extern "C" fn zaytos_ap_entry(index: u64) -> ! {
          static boot page table; no per-CPU GDT/TSS/IDT yet, so cpu_id() is not used here)"
     );
     AP_STARTED.fetch_add(1, Ordering::SeqCst);
+
+    // === S3-b-2b-2: 本番の世界へ移る ===
+    //
+    // **ここまでが b-2b-1 の範囲である**（恒等 VA の 1 枚のスタック、共有の一時
+    // GDT、IDT 無し）。引き継ぎ表があれば、自分の per-CPU 資産を載せて本番 CR3 へ移る。
+    if let Some(info) = load_bringup(index as usize) {
+        // SAFETY: トランポリンで入った直後で、割り込みは禁止のままである。
+        // このコアにつき 1 回だけ呼ぶ。
+        unsafe { bring_up_application_processor(info) }
+    }
+
+    let _ = writeln!(
+        serial,
+        "[WARN] smp: ap {index} has no bring-up information, so it stays on the static boot          page table and halts here"
+    );
     // **割り込みは有効化しない。** IDT を持たないので、来ても行き先が無い。
     cpu::halt_forever()
 }
@@ -852,4 +870,369 @@ fn verify_installed_trampoline(
         ));
     }
     mismatches == 0
+}
+
+// ===========================================================================
+// S3-b-2b-2: AP の per-CPU スタックを PML4[258] へ張る
+// ===========================================================================
+
+/// AP の per-CPU スタックを置く仮想アドレス空間の先頭（`PML4[258]`）。
+///
+/// # **なぜ `PML4[257]` ではないのか**
+///
+/// `[257..510]` は SMP の per-CPU 用に温存してきた範囲で、ここがその**目的どおりの
+/// 初使用**である。しかし **`PML4[257]`（`0xffff808000000000`）は使えない。**
+/// あれは破壊 feature `highhalf-remove-verify-fail` の**サボタージュ VA そのもの**で、
+/// **あの破壊は「そこが空であること」に依存している。** 使うと破壊が静かに意味を失う
+/// （`docs/verification-coverage.md` と `docs/deferred-decisions.md` の 2 箇所に
+/// 警告がある）。**サボタージュ VA を移さずに済むほうを選んだ。**
+///
+/// # なぜ静的配列にしないのか
+///
+/// `StackBlock` は 108.0 KiB で、**静的に二重化すると `MAX_CPUS = 4` で 2MiB 境界を
+/// 越える**（`common/src/percpu.rs` の `MAX_CPUS` の doc）。フレームアロケータから
+/// 取って写像すれば**イメージが増えない。**
+const AP_STACK_REGION_BASE: u64 = 0xffff_8100_0000_0000;
+
+/// 1 コアぶんのスタック領域の大きさ。**BSP の `StackBlock` と同じ構成にする。**
+///
+/// ガード（4KiB）+ kernel（64KiB）+ ガード + IST1（16KiB）+ ガード + IST2（16KiB）。
+/// **ガードは各スタックの下に置く**（スタックは下へ伸びるので、溢れると下のガードに
+/// 当たる）。BSP の `StackBlock` と同じ並びである。
+const AP_STACK_STRIDE: u64 = (crate::stack::GUARD_SIZE
+    + crate::stack::KERNEL_STACK_SIZE
+    + crate::stack::GUARD_SIZE
+    + crate::stack::IST_STACK_SIZE
+    + crate::stack::GUARD_SIZE
+    + crate::stack::IST_STACK_SIZE) as u64;
+
+/// AP 1 本ぶんのスタックの所在（S3-b-2b-2）。
+///
+/// **仮想アドレスは本番テーブルにしか存在しない。** AP は本番 CR3 へ移った後に
+/// しか使えない（それより前は b-2b-1 の恒等 VA の 1 枚で走る）。
+#[derive(Clone, Copy)]
+pub struct ApStacks {
+    /// 通常スタックの頂点。
+    pub kernel_top: u64,
+    /// IST1（ダブルフォルト）の頂点。
+    pub double_fault_top: u64,
+    /// IST2（ページフォルト）の頂点。
+    pub page_fault_top: u64,
+}
+
+/// AP 用スタックを写像する（S3-b-2b-2）。
+///
+/// # ガードページは張らずに「開けておく」
+///
+/// 3 本のスタックの**下**に 1 ページずつ、**写像しない穴**を残す。BSP 側は静的配置の
+/// 上で `unmap_4kib` して穴を開けているが、こちらは**最初から張らない**ので
+/// 分割も解除も要らない。**direct map（2MiB ページ）に手を入れずに済むのが、
+/// この置き方を選んだ理由の 1 つである。**
+///
+/// # Safety
+///
+/// 起動時の単一文脈から、AP を起こす前に呼ぶこと。
+pub unsafe fn map_ap_stacks<const CAP: usize>(
+    logger: &mut Logger<SerialPort>,
+    slot: usize,
+    allocator: &mut FrameAllocator<CAP>,
+) -> Option<ApStacks> {
+    let base = AP_STACK_REGION_BASE + (slot as u64) * AP_STACK_STRIDE;
+    // SAFETY: CR3 は本番テーブルを指しており、その配下は direct map 窓から
+    // 読み書きできる。起動時の単一文脈で、AP はまだ走っていない。
+    let mut table = unsafe { ActivePageTable::current(common::addr::direct_map()) };
+
+    // (ガードのページ数, 本体のバイト数) を下から順に。
+    let layout = [
+        crate::stack::KERNEL_STACK_SIZE as u64,
+        crate::stack::IST_STACK_SIZE as u64,
+        crate::stack::IST_STACK_SIZE as u64,
+    ];
+
+    let mut cursor = base;
+    let mut tops = [0u64; 3];
+    let free_before = allocator.free_frame_count();
+    for (index, size) in layout.iter().enumerate() {
+        // ガードぶんを空けたまま進める（**張らない**ので穴になる）。
+        cursor += crate::stack::GUARD_SIZE as u64;
+        let bottom = cursor;
+        let mut offset = 0;
+        while offset < *size {
+            let Some(frame) = allocator.allocate_frame() else {
+                logger.error(format_args!(
+                    "smp: ran out of frames while mapping the per-CPU stacks for slot {slot}"
+                ));
+                return None;
+            };
+            let virt = VirtAddr::new(bottom + offset)?;
+            // SAFETY: 稼働中のテーブルへ、まだ誰も使っていない VA を張る。
+            // user=false, cacheable=true（通常のカーネルメモリ）。
+            if let Err(error) = unsafe { table.map_4kib(virt, frame, false, true, allocator) } {
+                logger.error(format_args!(
+                    "smp: could not map the per-CPU stack page at {:#x} for slot {slot}: \
+                     {error:?}",
+                    virt.as_u64()
+                ));
+                return None;
+            }
+            offset += crate::frame_allocator::FRAME_SIZE;
+        }
+        cursor = bottom + *size;
+        tops[index] = cursor;
+    }
+    let free_after = allocator.free_frame_count();
+
+    logger.info(format_args!(
+        "smp: mapped per-CPU stacks for slot {slot} at {base:#x} (PML4[258], not [257] which a \
+         sabotage VA depends on): kernel top {:#x}, IST1 top {:#x}, IST2 top {:#x}; \
+         {} frame(s) consumed (pages plus page tables), guards left unmapped",
+        tops[0],
+        tops[1],
+        tops[2],
+        free_before - free_after
+    ));
+
+    Some(ApStacks {
+        kernel_top: tops[0],
+        double_fault_top: tops[1],
+        page_fault_top: tops[2],
+    })
+}
+
+/// AP が本番の世界へ移るときに BSP から受け取るもの（S3-b-2b-2）。
+///
+/// **恒等 VA と本番 VA が混在する。** どちらの空間の値かを名前で区別する
+/// （取り違えると BSP 側では正常に見え、AP 側でだけ落ちる）。
+#[derive(Clone, Copy)]
+struct ApBringUp {
+    /// 本番テーブルの物理（`mov cr3` に載せる）。
+    production_cr3: u64,
+    /// **本番テーブルにしか存在しない** per-CPU スタック。
+    stacks: ApStacks,
+    /// このコアのスロット。
+    slot: usize,
+}
+
+/// BSP が各スロットぶん用意する引き継ぎ表。AP が自分のスロットを読む。
+static AP_BRINGUP: [AtomicU64; MAX_APS * 4] = [const { AtomicU64::new(0) }; MAX_APS * 4];
+
+/// 引き継ぎ表へ書く（BSP 側）。
+fn store_bringup(slot: usize, info: &ApBringUp) {
+    let base = (slot - 1) * 4;
+    AP_BRINGUP[base].store(info.production_cr3, Ordering::SeqCst);
+    AP_BRINGUP[base + 1].store(info.stacks.kernel_top, Ordering::SeqCst);
+    AP_BRINGUP[base + 2].store(info.stacks.double_fault_top, Ordering::SeqCst);
+    AP_BRINGUP[base + 3].store(info.stacks.page_fault_top, Ordering::SeqCst);
+}
+
+/// 引き継ぎ表から読む（AP 側）。
+fn load_bringup(slot: usize) -> Option<ApBringUp> {
+    let base = (slot - 1) * 4;
+    let cr3 = AP_BRINGUP.get(base)?.load(Ordering::SeqCst);
+    if cr3 == 0 {
+        return None;
+    }
+    Some(ApBringUp {
+        production_cr3: cr3,
+        stacks: ApStacks {
+            kernel_top: AP_BRINGUP[base + 1].load(Ordering::SeqCst),
+            double_fault_top: AP_BRINGUP[base + 2].load(Ordering::SeqCst),
+            page_fault_top: AP_BRINGUP[base + 3].load(Ordering::SeqCst),
+        },
+        slot,
+    })
+}
+
+/// AP を本番 CR3 と per-CPU スタックへ移す（S3-b-2b-2）。**戻らない。**
+///
+/// # 順序。**`mov cr3` と `mov rsp` の間に 1 命令も挟まない**
+///
+/// 本番テーブルには恒等（`PML4[0]`）が無いので、**`mov cr3` の瞬間に今のスタック
+/// （b-2b-1 の恒等 VA の 1 枚）が消える。** その状態で push・呼び出し・割り込みが
+/// 起きると落ちる。**b-2b-1 で `.org` の詰め物が `mov cr0` の直後に入って落ちたのと
+/// 同じ型である。**
+///
+/// したがって切り替えは asm で連続して行い、**新しい RSP を先にレジスタへ載せて
+/// おく。** 割り込みは禁止のままである（AP はまだ `sti` しない）。
+///
+/// # GDT / TSS / IDTR を先に載せる
+///
+/// 高位 VA（`.bss`）にあり、**静的初期テーブルでも本番テーブルでも見える**
+/// （どちらも `PML4[511]` を持つ）。**切り替えの前に載せれば、`cpu_id()` が
+/// 早く正しくなる。**
+///
+/// # **IDTR を載せてから CR3 を切り替えるまでの窓（受け入れて記録する）**
+///
+/// IDTR を載せた後、CR3 を切り替えるまでの数命令の間、**IST の VA（本番テーブルに
+/// しか無い）はまだ見えない。** そこで IST 経由の例外（`#DF` / `#PF`）が起きると
+/// ハンドラのスタックへ飛べない。**割り込みは禁止だが、例外は禁止できない。**
+///
+/// **受け入れる。** 理由は 3 つである。
+///
+/// - **この区間に例外を起こす操作を置いていない**（`mov cr3` / `mov rsp` / `jmp` だけ）
+/// - 順序を入れ替える案（IST なしの IDT を先に載せ、CR3 の後で差し替える）は
+///   **IDT を 2 回載せることになり、「IDT は 1 本を共有する」という単純さを壊す**
+/// - 窓は数命令で、b-2b-1 の教訓どおり**間に何も置かない**形にしてある
+///
+/// **この区間に命令を足すときは、この判断を再評価すること。** 上の 1 つ目の理由は
+/// 「今は mov が 3 つだけ」に依存している。**足した瞬間に前提が崩れる。**
+///
+/// # Safety
+///
+/// AP 自身から、b-2b-1 のトランポリンで入った直後に 1 回だけ呼ぶこと。
+unsafe fn bring_up_application_processor(info: ApBringUp) -> ! {
+    // 1. 自分の GDT / TSS を載せる。**索引は引数で受け取ったものである**
+    //    （`cpu_id()` はまだ使えない。GDT が載って初めて正しくなる）。
+    // SAFETY: slot は BSP が割り当てた 0..MAX_CPUS の値。IST の頂点は本番
+    // テーブルの VA なので、**CR3 を移した後にしか実際には触れない**が、
+    // TSS へ書くだけならここで問題ない。割り込みは禁止のままである。
+    unsafe {
+        crate::gdt::init_for_cpu(
+            info.slot,
+            info.stacks.double_fault_top,
+            info.stacks.page_fault_top,
+        );
+    }
+
+    // **ここから `cpu_id()` が正しい。** GDTR が自分のスロットを指している。
+    let derived = common::percpu::cpu_id();
+
+    // 2. IDT を載せる。BSP が作った静的な IDT を共有する（高位 VA）。
+    // SAFETY: 同上。IST の番号は BSP と同じ割り当てである。
+    unsafe {
+        crate::idt::load_shared();
+    }
+
+    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    serial.init();
+    let _ = writeln!(
+        serial,
+        "[INFO] smp: ap {} loaded its own GDT/TSS/IDT; cpu_id() now reads {} from GDTR \
+         (the index handed over in the trampoline data block was {}, match={})",
+        info.slot,
+        derived,
+        info.slot,
+        derived == info.slot
+    );
+    if derived != info.slot {
+        let _ = writeln!(
+            serial,
+            "[ERROR] smp: ap {} derived cpu_id {} from GDTR but was handed {}; the two \
+             independent sources disagree; halting",
+            info.slot, derived, info.slot
+        );
+        cpu::halt_forever();
+    }
+
+    // 3. **CR3 と RSP を隣接して切り替える。**
+    // SAFETY: `production_cr3` は BSP が動いている本番テーブルの物理で、
+    // `kernel_top` はそのテーブルに存在する VA である。**間に何も置かない。**
+    // `noreturn` なので戻り先は要らない。
+    unsafe {
+        core::arch::asm!(
+            "mov cr3, {cr3}",
+            "mov rsp, {rsp}",
+            "jmp {entry}",
+            cr3 = in(reg) info.production_cr3,
+            rsp = in(reg) info.stacks.kernel_top,
+            entry = sym ap_after_switch,
+            in("rdi") info.slot,
+            options(noreturn),
+        )
+    }
+}
+
+/// 本番 CR3 と per-CPU スタックへ移った後の AP（S3-b-2b-2）。**戻らない。**
+extern "C" fn ap_after_switch(slot: usize) -> ! {
+    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    serial.init();
+
+    // **恒等が無いことを AP 側で読み戻す**（b-2b-1 から移した到達条件）。
+    // SAFETY: 稼働中のテーブルを読むだけ。
+    let cr3_phys = crate::paging::switch::read_cr3();
+    let cr3 = cr3_phys.as_u64();
+    // SAFETY: 稼働中のテーブルを direct map 越しに読むだけ（本番テーブルには
+    // direct map がある）。読み取りのみ。
+    let pml4_0 =
+        unsafe { crate::paging::verify::read_pml4_entry(cr3_phys, common::addr::direct_map(), 0) };
+    let identity_gone = pml4_0 & 1 == 0;
+
+    let _ = writeln!(
+        serial,
+        "[INFO] smp: ap {slot} switched to the production page table (cr3={cr3:#x}) and its own \
+         per-CPU stack; PML4[0] read back from this core = empty:{identity_gone} (the identity \
+         mapping is gone here too, so the trampoline's identity VA stack is no longer usable)"
+    );
+    if !identity_gone {
+        let _ = writeln!(
+            serial,
+            "[ERROR] smp: ap {slot} still sees an identity mapping in the production table; \
+             halting"
+        );
+        cpu::halt_forever();
+    }
+
+    // 破壊 (S3-b-2b-2, smp-ap-touch-scheduler): AP からスケジューラの現在タスクを
+    // 読む。**この段は AP でタスクを実行しないので、sentinel を読んで落ちるのが
+    // 正しい。** 丸めていたら「タスク 0 が走っている」と静かに答えていた。
+    #[cfg(feature = "smp-ap-touch-scheduler-test")]
+    {
+        let _ = writeln!(
+            serial,
+            "[INFO] smp: ap {slot} is about to read the scheduler's current task (sabotage)"
+        );
+        crate::task::debug_read_current_index();
+    }
+
+    AP_BROUGHT_UP.fetch_add(1, Ordering::SeqCst);
+    let _ = writeln!(
+        serial,
+        "[INFO] smp: ap {slot} is parked with its own per-CPU state (own GDT/TSS/IDT, own          stacks in PML4[258], production CR3); it runs no tasks in this stage"
+    );
+    // **割り込みは有効化しない。** BKL が無いので、AP はここで待つ。
+    cpu::halt_forever()
+}
+
+/// 本番の世界へ移った AP の本数。
+static AP_BROUGHT_UP: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// 本番の世界へ移った AP の本数。
+pub fn brought_up_ap_count() -> usize {
+    AP_BROUGHT_UP.load(Ordering::SeqCst)
+}
+
+/// AP の per-CPU 資産を用意する（S3-b-2b-2）。**BSP が起動最初期に呼ぶ。**
+///
+/// # なぜここで用意するのか
+///
+/// **フレームアロケータと本番テーブルの両方が要る。** AP を起こすのは
+/// `run_timer_loop` の中だが、そこにはアロケータが無い（トランポリン用フレームと
+/// AP スタック用フレームを最初期に予約したのと同じ理由）。
+///
+/// # Safety
+///
+/// 起動時の単一文脈から、本番テーブルへ切り替えた後・AP を起こす前に 1 回だけ呼ぶこと。
+pub unsafe fn prepare_ap_per_cpu<const CAP: usize>(
+    logger: &mut Logger<SerialPort>,
+    allocator: &mut FrameAllocator<CAP>,
+) {
+    let production_cr3 = crate::paging::switch::read_cr3().as_u64();
+    for slot in 1..common::percpu::MAX_CPUS {
+        // SAFETY: 呼び出し元契約。まだ AP は走っていない。
+        let Some(stacks) = (unsafe { map_ap_stacks(logger, slot, allocator) }) else {
+            logger.error(format_args!(
+                "smp: could not map the per-CPU stacks for slot {slot}; that AP will stay on \
+                 the static boot page table"
+            ));
+            continue;
+        };
+        store_bringup(
+            slot,
+            &ApBringUp {
+                production_cr3,
+                stacks,
+                slot,
+            },
+        );
+    }
 }

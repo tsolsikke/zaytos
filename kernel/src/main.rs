@@ -1286,6 +1286,25 @@ extern "sysv64" fn kernel_main() -> ! {
     // レジスタへは一切書き込まない。
     let mapped_apic = kernel::apic::map_and_probe(&mut logger, &mut allocator, &apic_mmio);
 
+    // === S3-b-2b-2: AP の per-CPU 資産を用意する ===
+    //
+    // **位置が正しさの条件である。** 要るのは
+    // (1) フレームアロケータ（`run_timer_loop` には無い。AP を起こすのはそこである）と
+    // (2) **本番テーブルが CR3 に載っていること**である。
+    //
+    // **早すぎると壊れる。実際に踏んだ。** 最初はトランポリン用フレームの予約の
+    // 直後（M2-d の CR3 切り替えより前）に置いたので、`read_cr3()` が
+    // **bootstrap PML4** を返し、AP をそちらへ移してしまった。AP は自分の
+    // スタック（PML4[258]）までは動いたが、**direct map（PML4[256]）が無いので
+    // 最初の direct map 参照で #PF になった。**
+    //
+    // **PML4[258] へ張る**（`PML4[257]` は破壊 feature のサボタージュ VA である）。
+    // SAFETY: A-1 の切り替えが済んで本番テーブルが CR3 に載っており、起動時の
+    // 単一文脈で AP はまだ走っていない。
+    unsafe {
+        kernel::smp::prepare_ap_per_cpu(&mut logger, &mut allocator);
+    }
+
     // === S2-a: APIC のレジスタを読んで現在値を記録する ===
     //
     // **読むだけの段である。割り込みの経路は一切変えない**（PIC / PIT のまま）。

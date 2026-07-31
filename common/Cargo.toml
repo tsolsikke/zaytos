@@ -5,10 +5,6 @@ edition = "2021"
 publish = false
 
 [features]
-# S3-b-2a の破壊: cpu_id() が非 0 を返す。task 側の tripwire
-# (require_bootstrap_processor) が停止することを確かめる。MAX_CPUS > 1 でなければ
-# this_cpu_ptr が配列外を指すので、この破壊自体が作れない。
-percpu-fake-nonzero-cpu-id = []
 # InterruptGuard::enter が cli しなくなる（M5-d の task-preempt-in-critical から
 # 有効化される）。Locked 保持中も IF=1 のままになり、timer プリエンプトが
 # クリティカル区間へ食い込む経路を作れる。**bootloader は critical を一切使わ
