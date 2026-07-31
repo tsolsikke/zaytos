@@ -987,6 +987,9 @@ fn main() -> Result<()> {
             if rest.iter().any(|a| a == "--ap-timer-rate") {
                 return cmd_ap_timer_rate();
             }
+            if rest.iter().any(|a| a == "--kernel-entry-concurrency") {
+                return cmd_kernel_entry_concurrency();
+            }
             if let Some(index) = rest.iter().position(|a| a == "--ioapic-test") {
                 let kind = rest.get(index + 1).with_context(|| {
                     let names: Vec<&str> = IOAPIC_SABOTAGE_TESTS.iter().map(|t| t.name).collect();
@@ -2316,6 +2319,138 @@ fn cmd_ap_timer_rate() -> Result<()> {
         bail!("{context}: FAIL")
     }
 }
+
+/// カーネル入口への同時進入を実測する（S4-a）。**KVM でしか観測できない。**
+///
+/// # なぜ TCG では駄目なのか
+///
+/// **TCG は 2 つの vCPU を並行に走らせない**（実測）。`-smp 2` を 86 秒
+/// （17,060 ティック）回しても同時進入数は 1 のままで、入口の窓を 3,000 回の
+/// `spin_loop` ぶん意図的に広げても 0 回だった。**「稀」ではなく「起きない」である。**
+/// KVM では 2 になる。
+///
+/// # **検査項目ではない。手動で回す観測である**
+///
+/// **KVM でも決定的ではない。** 同じ構成で 4 回回して 3 回は 2 が出たが、
+/// 1 回は 116 秒（両コアで約 23,000 回の入口通過）のあいだ 1 のままだった。
+/// ホスト側のスケジューリング次第で重なるかどうかが変わる。
+/// **確率的なものを `--full` に入れると、落ちたときに退行か揺らぎかが
+/// 区別できなくなる。** したがって `--full` からは外し、
+/// `cargo xtask run --kernel-entry-concurrency` で手で回す形にしてある。
+///
+/// # なぜこれが要るのか。**S4-b の証明がこれに乗る**
+///
+/// BKL を入れた後、TCG で「同時進入数が 1」を観測しても**それは BKL の証明に
+/// ならない。** BKL が無くても 1 だからである。**「同値である間は分類の誤りが
+/// 観測できない」**の、まさにその形に入る。
+/// **S4-a で「BKL が無ければ 2 になる」を KVM で押さえておく**ことが、
+/// S4-b で「BKL を入れると 1 になる」を意味のある主張にする。
+///
+/// # 環境要因と主張の失敗を混ぜない
+///
+/// `/dev/kvm` が使えない環境でこの項目が落ちたとき、**BKL の退行と誤読されては
+/// ならない。** 使えない場合は `environment: KVM unavailable` と明示して、
+/// 主張が落ちたのではないことを出力で区別する。
+fn cmd_kernel_entry_concurrency() -> Result<()> {
+    let context = "smp-ap-test kernel-entry-concurrency";
+    let workspace_root = workspace_root()?;
+
+    if !Path::new(KVM_DEVICE_PATH).exists() {
+        println!(
+            "{context}: environment: KVM unavailable ({KVM_DEVICE_PATH} does not exist). \
+             This check needs real parallel execution; TCG serialises the vCPUs, so the \
+             observation cannot be made here. THIS IS NOT AN ASSERTION FAILURE"
+        );
+        bail!("{context}: SKIPPED (environment: KVM unavailable)")
+    }
+
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let kernel_elf = build_kernel_with_features(&workspace_root, &[])?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let serial_log = workspace_root
+        .join("target")
+        .join("smp-ap-concurrency-serial.log");
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let mut qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Kvm,
+    });
+    qemu_args.push("-smp".into());
+    qemu_args.push("2".into());
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the kernel entry concurrency test")?;
+
+    // **深さ 2 が出るまで待つ。** 出た時点で打ち切る（それ以上待っても
+    // 主張は強くならない）。出なければ期限で打ち切る。
+    let deadline = Instant::now() + KERNEL_ENTRY_CONCURRENCY_TIMEOUT;
+    let mut observed = false;
+    while Instant::now() < deadline {
+        if let Ok(text) = fs::read_to_string(&serial_log) {
+            if text.contains(KERNEL_ENTRY_DEPTH_TWO_MARKER) {
+                observed = true;
+                break;
+            }
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
+    {
+        return report_did_not_start(context, firmware_rip, qemu_exit.as_deref());
+    }
+
+    // **起動そのものが進んだことを分けて見る。** 深さ 2 が出ないのが
+    // 「並行しなかった」なのか「定常状態へ来なかった」なのかを区別する。
+    let steady = serial.contains("heartbeat: ticks=");
+    println!(
+        "{context}: the run reached steady state = {}",
+        if steady { "OK" } else { "NG" }
+    );
+    println!(
+        "{context}: two cores were inside a kernel entry at the same time \
+         ({KERNEL_ENTRY_DEPTH_TWO_MARKER}) = {}",
+        if observed { "OK" } else { "NG" }
+    );
+    if steady && observed {
+        println!("{context}: PASS");
+        return Ok(());
+    }
+    bail!("{context}: FAIL")
+}
+
+/// KVM のデバイスノード。**存在しなければ環境要因として扱う。**
+const KVM_DEVICE_PATH: &str = "/dev/kvm";
+
+/// 同時進入が観測されるまでの上限。
+const KERNEL_ENTRY_CONCURRENCY_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// ハートビートが出す同時進入数の最大値が 2 になった形。
+const KERNEL_ENTRY_DEPTH_TWO_MARKER: &str = "max kernel entry depth=2";
 
 /// AP のティックの期待レート。**BSP と同じ要求周波数である。**
 ///

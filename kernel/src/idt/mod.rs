@@ -648,6 +648,62 @@ fn timer_ticks_slot() -> &'static AtomicU64 {
     }
 }
 
+/// 今カーネル入口の中にいるコアの数（S4-a）。
+///
+/// # 数える前に、数える対象を定義する
+///
+/// **S4-a の定義は「`irq_entry` の先頭から戻るまでの区間にいるコアの数」である。**
+/// BKL がまだ無いので、この定義しか立てられない。
+///
+/// **S4-b で定義が変わる。** あちらでは「BKL を取得してから解放するまでの区間に
+/// いるコアの数」になる。**値は 2 から 1 へ落ちるが、落ちる理由は 2 つある**——
+/// BKL が効いたからでもあり、定義が変わったからでもある。
+/// **したがって定義の移動と BKL の導入は別のコミットに分ける。**
+static KERNEL_ENTRY_DEPTH: AtomicU64 = AtomicU64::new(0);
+
+/// [`KERNEL_ENTRY_DEPTH`] がこれまでに取った最大値（S4-a）。
+///
+/// **`fetch_max` で更新する。** 「今の値を読んで比べて書く」形にすると、
+/// 2 コアが同時に更新したときに片方が消える。**同時進入を数える装置そのものが
+/// 競合で壊れていては本末転倒である。**
+static MAX_KERNEL_ENTRY_DEPTH: AtomicU64 = AtomicU64::new(0);
+
+/// カーネル入口にいる間だけ生きるガード（S4-a）。
+///
+/// # なぜ RAII なのか
+///
+/// [`irq_entry`] には早期 return が複数ある（スプリアス、LAPIC タイマ、yield）。
+/// **減算を各 return の手前へ書く形にすると、1 つ落としたときに静かに壊れる。**
+/// カウンタが下がらないまま増え続け、**同時進入数が実際より多く見える。**
+/// 規律ではなく構造で対にする（`InterruptGuard` と同じ形である）。
+pub struct KernelEntryGuard {
+    /// `!Send` + `!Sync` にするためのマーカー。**この区間はコアに固定である。**
+    _not_send_sync: core::marker::PhantomData<*const ()>,
+}
+
+impl KernelEntryGuard {
+    /// カーネル入口へ入ったことを記録する。
+    #[must_use = "ガードを保持している間だけ「入口の中」として数えられる"]
+    pub fn enter() -> Self {
+        let depth = KERNEL_ENTRY_DEPTH.fetch_add(1, Ordering::Relaxed) + 1;
+        MAX_KERNEL_ENTRY_DEPTH.fetch_max(depth, Ordering::Relaxed);
+        Self {
+            _not_send_sync: core::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for KernelEntryGuard {
+    fn drop(&mut self) {
+        KERNEL_ENTRY_DEPTH.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// 同時進入数のこれまでの最大値（S4-a）。
+pub fn max_kernel_entry_depth() -> u64 {
+    MAX_KERNEL_ENTRY_DEPTH.load(Ordering::Relaxed)
+}
+
 /// PIC の範囲で最初に観測した割り込みのベクタ番号。
 ///
 /// **これが ICW2（PIC のベクタオフセット）を事後的に証明する唯一の手段
@@ -859,6 +915,10 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     // （ADR-0019 §2.1）。M5-c ではここが切り替えの唯一の分岐点になり、
     // yield ベクタのときだけ別タスクの RSP を返す（下の分岐）。
     let no_switch_rsp = context as u64;
+
+    // **カーネル入口に入った（S4-a）。** ガードが落ちるまでこのコアは
+    // 「入口の中」として数えられる。**早期 return が複数あるので RAII にする。**
+    let _entry = KernelEntryGuard::enter();
 
     // SAFETY: スタブが直前に積んだ有効な IrqContext を指す。読み取りのみ。
     let context = unsafe { &*context };

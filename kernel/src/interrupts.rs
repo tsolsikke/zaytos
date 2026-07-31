@@ -858,7 +858,7 @@ pub unsafe fn run_timer_loop(
                 format_args!(
                     "heartbeat: ticks={ticks} ({} s), cpu={}, ap_ticks={}, ticks_total={}, \
                      lapic_timer_deliveries={}, timer_accounting_balanced={}, \
-                     keys={} dropped={} \
+                     max kernel entry depth={}, keys={} dropped={} \
                      stray={} spurious={} lapic_spurious={}, \
                      irq1={} balanced={}, max tick jump={}, i8042 OBF={}, PIC ISR={}",
                     ticks / crate::irq::timer_frequency_hz() as u64,
@@ -869,6 +869,7 @@ pub unsafe fn run_timer_loop(
                     // スロットと、このベクタ別カウンタの両方を増やす。
                     idt::timer_delivery_count(),
                     idt::timer_accounting_balances(),
+                    idt::max_kernel_entry_depth(),
                     crate::keyboard::buffer::received_count(),
                     crate::keyboard::buffer::overflow_count(),
                     crate::keyboard::stray_irq_count(),
