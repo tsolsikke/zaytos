@@ -490,6 +490,19 @@ pub unsafe fn wake_application_processors(
     // BSP は本番 CR3 で走るので direct map 越しに触る（AP は恒等で触る）。
     let installed = unsafe { install_trampoline(logger, frame) };
 
+    // **この値は BSP の ID とは限らない。** MADT の最初の使用可能な Local APIC
+    // エントリであって、エントリ順が BSP を先頭にする保証は仕様に無い
+    // （[`crate::acpi::ApicMmio::bsp_candidate_apic_id`] の doc）。**BSP が先頭で
+    // ない実装では、下の `continue` が BSP を素通りさせ、BSP 自身へ INIT-SIPI を
+    // 送ることになる。**
+    //
+    // **権威のある出所は 2 つあり、どちらも既に読んでいる**——`IA32_APIC_BASE` の
+    // bit 8（`common::cpu::ApicBase::bootstrap_processor`）と、自コアの Local APIC
+    // ID レジスタ（[`crate::apic`] が読んでいる）である。**どちらも今はログへ出す
+    // だけで、判定には使っていない。**
+    //
+    // **直さない判断と解禁条件は `docs/deferred-decisions.md` にある。** 要点は、
+    // QEMU で MADT の並びを変える手段が無く、**破壊確認を構成できない**ことである。
     let bsp = mmio.bsp_candidate_apic_id();
     let mut report = WakeReport {
         usable,

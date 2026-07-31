@@ -356,7 +356,14 @@ pub struct ApicBase {
     /// Local APIC を MSR 経由で触るので、MMIO を読むと `#GP` になる。
     /// 「`enabled` が立っているから MMIO で読める」は成立しない。
     pub x2apic: bool,
-    /// この CPU が BSP（bit 8）。S3（AP 起こし）の入力になる。
+    /// この CPU が BSP（bit 8）。
+    ///
+    /// **S3（AP 起こし）の入力になると書いていたが、S3 は使わなかった。**
+    /// AP 起こしは MADT の最初の使用可能なエントリで BSP を判定しており、
+    /// このビットは**ログへ出すだけである**（`kernel::apic`）。MADT の順序に
+    /// 依存する形なので潜在的な欠陥であり、直さない判断と解禁条件は
+    /// `docs/deferred-decisions.md` にある。**このビットは、直すときの
+    /// 権威のある出所の 1 つである。**
     pub bootstrap_processor: bool,
     /// ベースアドレス（bit 12 以上、MAXPHYADDR まで）をマスクして取り出した値。
     pub base: u64,
