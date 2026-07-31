@@ -15,7 +15,7 @@ use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::cpu;
-use crate::percpu::{PerCpu, MAX_CPUS};
+use crate::percpu::{cpu_id, PerCpu, MAX_CPUS};
 use crate::serial::SerialPort;
 
 /// 現在保持している [`InterruptGuard`] の数（クリティカルセクションの入れ子
@@ -213,14 +213,32 @@ impl Drop for InterruptGuard {
 /// 差し替えである（ADR-0012 の Addendum）。
 pub struct Locked<T> {
     inner: UnsafeCell<T>,
-    /// デバッグ用の二重取得検出フラグ。取得中は `true`。
+    /// 取得中かどうか。取得中は `true`。
     ///
-    /// シングルコアかつ取得中は割り込み禁止なので、通常の並行アクセスでは
-    /// 二重取得は起きない。起きるのは「同じロックを保持したまま同じスレッドが
-    /// 再度 `lock` を呼ぶ」というコードのバグのときで、これは無言のデータ競合に
-    /// なるため検出して停止する。
+    /// 起きうる「既に取られている」は 2 通りある。**同じコアが保持したまま
+    /// 再度 `lock` を呼んだ**（コードのバグ）か、**別のコアが保持している**
+    /// （競合）かである。**このフラグだけでは区別できない**ので、
+    /// [`Self::holder`] を併せて持つ（S4-b-1）。
     acquired: AtomicBool,
+    /// 取得中のコアの番号。未取得なら [`NO_HOLDER`]。
+    ///
+    /// # なぜ足したのか。**同値である間は分類の誤りが観測できない**
+    ///
+    /// シングルコアの間は「既に取られている」が必ず同一コアの二重取得だった
+    /// ので、両者は**同じ観測**だった。複数コアでは別の原因になるが、
+    /// **観測が同じままだと、どちらが起きたのかをログから決められない。**
+    /// 保持者を持てば、その場で分かれる。
+    ///
+    /// **この段（S4-b-1）ではまだ競合は起きない。** 本番経路で `Locked<T>` を
+    /// 触るのは bootstrap processor だけである（キーボードのリングバッファも
+    /// ヒープもそうである）。**起きない競合への備えを先に入れているので、
+    /// そう書いておく。** 競合が実際に起きうるのは、BKL が入って AP が
+    /// カーネルの共有物へ触るようになる段である。
+    holder: AtomicUsize,
 }
+
+/// [`Locked::holder`] の「誰も保持していない」。**CPU 番号として現れない値である。**
+const NO_HOLDER: usize = usize::MAX;
 
 // SAFETY: 複数の実行文脈からの同時アクセスは、シングルコア前提かつ「取得中は
 // 割り込みを禁止する」ことによって防がれている。lock() がガードを返す前に
@@ -234,6 +252,7 @@ impl<T> Locked<T> {
         Self {
             inner: UnsafeCell::new(value),
             acquired: AtomicBool::new(false),
+            holder: AtomicUsize::new(NO_HOLDER),
         }
     }
 
@@ -261,11 +280,27 @@ impl<T> Locked<T> {
         // 検査と更新が不可分に行える。
         let interrupts = InterruptGuard::enter();
 
-        // 取得中は割り込み禁止なので、Relaxed で十分（メモリ順序の問題は
-        // SMP 特有）。既に true なら二重取得。
-        if self.acquired.swap(true, Ordering::Relaxed) {
-            report_double_lock_and_halt();
+        // **順序を `Acquire` / `Release` にした（S4-b-1）。**
+        //
+        // ここには「Relaxed で十分（メモリ順序の問題は SMP 特有）」と書いて
+        // あったが、**その SMP になったので根拠が失効した。** x86 の TSO では
+        // 生成される命令が変わらないので**振る舞いは不変**だが、
+        // 根拠のほうを実態に合わせておく。
+        if self.acquired.swap(true, Ordering::Acquire) {
+            // **既に取られている。原因は 2 通りある（S4-b-1）。**
+            //
+            // 保持者の読みは競合しうる（読んだ瞬間に解放されているかもしれない）。
+            // **ただしこの段ではどちらの原因でも停止する**ので、判断が変わる
+            // のは出力する文言だけである。**分類は診断のためにある。**
+            let holder = self.holder.load(Ordering::Relaxed);
+            if holder == cpu_id() {
+                report_double_lock_and_halt();
+            }
+            report_contended_lock_and_halt(holder);
         }
+        // 勝った側だけがここへ来る。**保持者を記録するのはフラグを立てた後**で、
+        // 解放では逆順に落とす。
+        self.holder.store(cpu_id(), Ordering::Relaxed);
 
         // SAFETY: swap で false→true にできたのはこのガードだけであり、
         // かつ取得中は割り込み禁止。したがってこの &mut T を使っている間、
@@ -315,7 +350,12 @@ impl<T> Drop for LockGuard<'_, T> {
     fn drop(&mut self) {
         // フラグのクリアは、まだ割り込みが禁止されているうちに行う
         // （`interrupts` フィールドはこの後に落ちる）。
-        self.lock.acquired.store(false, Ordering::Relaxed);
+        //
+        // **保持者を先に消し、フラグを後で落とす。** 逆にすると、フラグが
+        // 落ちた後も保持者が残る窓ができ、次に取ったコアが上書きするまでの間、
+        // 診断が古い値を指す。
+        self.lock.holder.store(NO_HOLDER, Ordering::Relaxed);
+        self.lock.acquired.store(false, Ordering::Release);
         // ここで暗黙に `interrupts` が落ち、保存状態に応じて sti する。
     }
 }
@@ -325,6 +365,36 @@ impl<T> Drop for LockGuard<'_, T> {
 /// パニックハンドラや例外ハンドラと同じく、確保もロックもコンソールも
 /// 使わずにシリアルへ直接書く。ヒープのロックで二重取得が起きた場合、
 /// panic 経路が確保を試みるとさらに壊れるため（ADR-0004、ADR-0012）。
+/// 別のコアが保持しているロックを取ろうとしたことを報告して停止する（S4-b-1）。
+///
+/// # なぜ二重取得と分けるのか
+///
+/// **原因が違う。** 二重取得は「同じコアが保持したまま再度呼んだ」コードのバグで、
+/// 競合は「別のコアが同時に触った」である。**どちらも停止するが、直し方が違う。**
+/// 同じ文言で報告すると、ログを読む人が誤った方向を調べることになる。
+///
+/// # この段では起きない
+///
+/// 本番経路で `Locked<T>` を触るのは bootstrap processor だけなので、
+/// **この関数はまだ呼ばれない。** 呼ばれうるのは BKL が入る段からである。
+fn report_contended_lock_and_halt(holder: usize) -> ! {
+    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    serial.init();
+    let _ = writeln!(
+        serial,
+        "[ERROR] lock: contended acquisition detected (a Locked<T> is held by cpu {holder} \
+         while cpu {} tried to take it)",
+        cpu_id()
+    );
+    let _ = writeln!(
+        serial,
+        "[ERROR]   this is NOT the same as a double acquisition: the holder is another core, \
+         so the fix is exclusion between cores, not a re-entrant call path"
+    );
+    let _ = writeln!(serial, "[ERROR] halting (cli + hlt loop)");
+    cpu::halt_forever();
+}
+
 fn report_double_lock_and_halt() -> ! {
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
     serial.init();
