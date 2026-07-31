@@ -3281,9 +3281,9 @@ fn switch_keyboard_to_io_apic(
             // **宛先を主張にする（S4-a）。**
             //
             // 「キーボードは bootstrap processor にしか届かない」は、AP が割り込みを
-            // 受けられるようになった段の**安全の根拠**である。それまでは起動時の
-            // 棚卸しのログに `destination=0x00` が出ているだけで、**実測の記憶で
-            // あって主張ではなかった。**
+            // 受けられるようになった段（S4-a）の**安全の根拠**である。それまでは
+            // 起動時の棚卸しのログに `destination=0x00` が出ているだけで、
+            // **実測の記憶であって主張ではなかった。**
             //
             // physical モードなら high dword の宛先は Local APIC ID そのものである。
             // BSP の APIC ID は MADT の最初の使用可能なエントリから取る
@@ -3305,7 +3305,8 @@ fn switch_keyboard_to_io_apic(
             if !destination_ok {
                 logger.error(format_args!(
                     "ioapic: IRQ1 is not aimed at the bootstrap processor in physical mode, so \
-                     an application processor could receive it; halting"
+                     an application processor could receive it; the S4-a safety argument (the \
+                     AP handler touches only per-CPU and atomic state) depends on this; halting"
                 ));
                 cpu::halt_forever();
             }
@@ -4570,6 +4571,196 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "ioapic-keyboard-broadcast-test",
         cfg!(feature = "ioapic-keyboard-broadcast-test"),
         "キーボードの redirection entry の宛先を logical broadcast にする",
+    ),
+    (
+        "acpi-test",
+        cfg!(feature = "acpi-test"),
+        "傘。ACPI の破壊一式を有効にする",
+    ),
+    (
+        "apic-test",
+        cfg!(feature = "apic-test"),
+        "傘。APIC 写像の破壊一式を有効にする",
+    ),
+    (
+        "apic-test-skip-map",
+        cfg!(feature = "apic-test-skip-map"),
+        "Local APIC MMIO の写像を省く",
+    ),
+    (
+        "apic-test-wrong-target",
+        cfg!(feature = "apic-test-wrong-target"),
+        "写像先の物理をずらす",
+    ),
+    (
+        "apic-test-base-mismatch",
+        cfg!(feature = "apic-test-base-mismatch"),
+        "MADT の Local APIC アドレスを 1 ページずらす",
+    ),
+    (
+        "critical-test-double-lock",
+        cfg!(feature = "critical-test-double-lock"),
+        "同じロックを保持したまま再取得する",
+    ),
+    (
+        "critical-test-restore-enabled",
+        cfg!(feature = "critical-test-restore-enabled"),
+        "IF=1 から InterruptGuard へ入る",
+    ),
+    (
+        "exception-test-divide-by-zero",
+        cfg!(feature = "exception-test-divide-by-zero"),
+        "除算例外を起こす",
+    ),
+    (
+        "exception-test-invalid-opcode",
+        cfg!(feature = "exception-test-invalid-opcode"),
+        "不正命令例外を起こす",
+    ),
+    (
+        "exception-test-page-fault",
+        cfg!(feature = "exception-test-page-fault"),
+        "ページフォルトを起こす",
+    ),
+    (
+        "exception-test-double-fault",
+        cfg!(feature = "exception-test-double-fault"),
+        "ダブルフォルトを起こす",
+    ),
+    (
+        "highhalf-no-identity-in-boot-pt",
+        cfg!(feature = "highhalf-no-identity-in-boot-pt"),
+        "静的初期テーブルの PML4[0] の存在ビットを落とす",
+    ),
+    (
+        "highhalf-bad-high-slot",
+        cfg!(feature = "highhalf-bad-high-slot"),
+        "PDPT_high のエントリを 510 から 509 へずらす",
+    ),
+    (
+        "highhalf-no-kernel-high-in-live-table",
+        cfg!(feature = "highhalf-no-kernel-high-in-live-table"),
+        "本流テーブルへカーネル高位マッピングを張らない",
+    ),
+    (
+        "highhalf-trampoline-absolute-ref",
+        cfg!(feature = "highhalf-trampoline-absolute-ref"),
+        "トランポリンへ絶対メモリ参照命令を 1 つ入れる",
+    ),
+    (
+        "highhalf-remove-verify-fail",
+        cfg!(feature = "highhalf-remove-verify-fail"),
+        "恒等除去の必須領域の検証を失敗させる",
+    ),
+    (
+        "highhalf-remove-before-highify",
+        cfg!(feature = "highhalf-remove-before-highify"),
+        "ヒープを高位化せずに恒等を除去する",
+    ),
+    (
+        "highhalf-panic-after-remove",
+        cfg!(feature = "highhalf-panic-after-remove"),
+        "恒等除去の直後に panic する",
+    ),
+    (
+        "interrupt-test-enable-only",
+        cfg!(feature = "interrupt-test-enable-only"),
+        "全 IRQ をマスクしたまま sti する",
+    ),
+    (
+        "interrupt-test-irq-path",
+        cfg!(feature = "interrupt-test-irq-path"),
+        "int 0x40 を発行する",
+    ),
+    (
+        "interrupt-test-timer",
+        cfg!(feature = "interrupt-test-timer"),
+        "タイマを動かす",
+    ),
+    (
+        "ioapic-wrong-vector-test",
+        cfg!(feature = "ioapic-wrong-vector-test"),
+        "redirection entry へゲートの無いベクタを書く",
+    ),
+    (
+        "ioapic-skip-unmask-test",
+        cfg!(feature = "ioapic-skip-unmask-test"),
+        "I/O APIC 側のマスクを外さない",
+    ),
+    (
+        "ioapic-keep-pic-irq1-test",
+        cfg!(feature = "ioapic-keep-pic-irq1-test"),
+        "PIC 側の IRQ1 をマスクしない",
+    ),
+    (
+        "lapic-timer-scale-calibration-test",
+        cfg!(feature = "lapic-timer-scale-calibration-test"),
+        "較正の戻り値を 2 倍にする",
+    ),
+    (
+        "lapic-timer-wrong-divide-test",
+        cfg!(feature = "lapic-timer-wrong-divide-test"),
+        "較正時と運用時の分周を食い違わせる",
+    ),
+    (
+        "lapic-timer-no-mask-all-test",
+        cfg!(feature = "lapic-timer-no-mask-all-test"),
+        "8259 を全マスクせずに LVT を開ける",
+    ),
+    (
+        "percpu-fake-nonzero-cpu-id",
+        cfg!(feature = "percpu-fake-nonzero-cpu-id"),
+        "tripwire が見る cpu_id を非 0 に偽る",
+    ),
+    (
+        "smp-tramp-corrupt-copy-test",
+        cfg!(feature = "smp-tramp-corrupt-copy-test"),
+        "設置した AP トランポリンのコピーを 1 バイト壊す",
+    ),
+    (
+        "smp-ap-touch-scheduler-test",
+        cfg!(feature = "smp-ap-touch-scheduler-test"),
+        "AP からスケジューラの現在タスクを読む",
+    ),
+    (
+        "syscall-test-arg4-rcx",
+        cfg!(feature = "syscall-test-arg4-rcx"),
+        "第 4 引数を R10 ではなく RCX から読む",
+    ),
+    (
+        "syscall-test-gate-dpl0",
+        cfg!(feature = "syscall-test-gate-dpl0"),
+        "syscall ゲートの DPL を 0 にする",
+    ),
+    (
+        "syscall-test-drop-retval",
+        cfg!(feature = "syscall-test-drop-retval"),
+        "戻り値の RAX 書き戻しを落とす",
+    ),
+    (
+        "syscall-test-validate-skip-us",
+        cfg!(feature = "syscall-test-validate-skip-us"),
+        "ユーザーポインタ検証の U=1 判定を外す",
+    ),
+    (
+        "syscall-test-validate-skip-laststep",
+        cfg!(feature = "syscall-test-validate-skip-laststep"),
+        "ページ走査を先頭ページで打ち切る",
+    ),
+    (
+        "syscall-test-validate-skip-all",
+        cfg!(feature = "syscall-test-validate-skip-all"),
+        "検証器を常に受理にする",
+    ),
+    (
+        "syscall-test-copy-skip-validate",
+        cfg!(feature = "syscall-test-copy-skip-validate"),
+        "copy_from_user が検証を経ずに読む",
+    ),
+    (
+        "syscall-test-copy-overrun",
+        cfg!(feature = "syscall-test-copy-overrun"),
+        "copy_from_user が len を 1 バイト超えて読む",
     ),
 ];
 

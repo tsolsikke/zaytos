@@ -4753,6 +4753,30 @@ fn cmd_check(full: bool) -> Result<()> {
     }
 
     total += 1;
+    println!("=== xtask check: every kernel feature appears in the runtime TEST_HOOKS table");
+    let uncovered = find_features_missing_from_test_hooks(&workspace_root)?;
+    if uncovered.is_empty() {
+        println!(
+            "--- test hooks coverage: OK (every feature in kernel/Cargo.toml is either in \
+             TEST_HOOKS or on the {}-entry exclusion list)",
+            TEST_HOOKS_EXCLUSIONS.len()
+        );
+    } else {
+        for finding in &uncovered {
+            println!("    {finding}");
+        }
+        println!("    exclusions (feature / reason):");
+        for (feature, reason) in TEST_HOOKS_EXCLUSIONS {
+            println!("      {feature} / {reason}");
+        }
+        println!(
+            "--- test hooks coverage: FAILED ({} feature(s) not reported at boot)",
+            uncovered.len()
+        );
+        failed.push("test hooks coverage".to_string());
+    }
+
+    total += 1;
     println!("=== xtask check: the default kernel build has no sabotage features");
     let sabotage = check_default_features_are_clean(&workspace_root)?;
     if sabotage.is_empty() {
@@ -5069,7 +5093,7 @@ struct ExpectedCheckCount {
 }
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
-const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount { base: 17, full: 95 };
+const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount { base: 18, full: 96 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
 ///
@@ -5091,6 +5115,113 @@ fn check_count_matches_accounting(workspace_root: &Path, total: usize, full: boo
     }
     check_accounting_line_lists_current_counts(workspace_root)
 }
+
+/// `TEST_HOOKS` に載せなくてよい feature と、その理由。
+///
+/// **除外は列挙だが、向きが逆である。** 「列挙に無い形を静かに通す」形ではなく、
+/// **列挙に無い feature は TEST_HOOKS に在るはず**という向きに書いてある。
+/// 新しい feature を足して両方に入れ忘れれば、静かに通らず落ちる。
+const TEST_HOOKS_EXCLUSIONS: &[(&str, &str)] = &[
+    ("default", "feature の既定値であって、壊す経路ではない"),
+    (
+        "heap-poison",
+        "解放したメモリを毒値で埋める開発時の補助。壊す経路ではない",
+    ),
+    (
+        "keyboard-raw-log",
+        "スキャンコードを生のままログへ出すだけ。壊す経路ではない",
+    ),
+];
+
+/// `kernel/Cargo.toml` の feature のうち、`TEST_HOOKS` にも除外リストにも
+/// 無いものを挙げる。
+///
+/// # なぜ数ではなく名前の集合で見るのか
+///
+/// **数を数えるだけの検査は、足した数と消した数が釣り合うと素通りする。**
+/// 名前の集合の一致なら、入れ替わりも捕まる。**会計行の強制（数字が在るだけで
+/// 満たせる）より強い保証である**（`ExpectedCheckCount` の doc に、あちらで
+/// 強制できるのが数字の鮮度だけであることを書いてある）。
+///
+/// # 3 度目である
+///
+/// 「一覧が足したときに更新されず静かに狭くなる」は、会計行・
+/// `verification-coverage.md` の破壊 feature 一覧に続いて 3 件目である。
+/// **今回は機械で守れる形なので、規律に戻さない。**
+///
+/// # 逆向きは別の機構が守っている。**両向きが揃っている**
+///
+/// この関数が見るのは片側だけである（Cargo.toml の feature → 表に在ること）。
+/// **逆向き、すなわち表に在るのに Cargo.toml に無い feature は、ここでは
+/// 捕まらない。**
+///
+/// **その逆向きは `unexpected_cfgs` lint が構造的に覆っている**（実測）。
+/// 存在しない feature 名で `cfg!(feature = "…")` を書くと、`-D warnings` の
+/// clippy が落ちる。
+///
+///     error: unexpected `cfg` condition value: `zzz-not-a-real-feature`
+///          = note: `-D unexpected-cfgs` implied by `-D warnings`
+///
+/// `cargo xtask check` は 4 構成すべてに `-D warnings` を掛けているので、
+/// **この経路は既に検査に入っている。**
+///
+/// **したがって両向きが、別々の機構で守られている。** 片側はこの関数、
+/// 逆側は lint である。**逆向きの検査を足さない理由はこれである**（同じことを
+/// 言う検査を 2 つ置かない）。**lint を緩める変更（`allow(unexpected_cfgs)` を
+/// 足す、`-D warnings` を外す）は、この保証を落とす。**
+fn find_features_missing_from_test_hooks(workspace_root: &Path) -> Result<Vec<String>> {
+    let manifest = workspace_root.join("kernel").join("Cargo.toml");
+    let manifest_text = fs::read_to_string(&manifest)
+        .with_context(|| format!("could not read {}", manifest.display()))?;
+    let source = workspace_root.join("kernel").join("src").join("main.rs");
+    let source_text = fs::read_to_string(&source)
+        .with_context(|| format!("could not read {}", source.display()))?;
+
+    let Some(start) = source_text.find(TEST_HOOKS_TABLE_MARKER) else {
+        bail!(
+            "xtask check: could not find {TEST_HOOKS_TABLE_MARKER:?} in kernel/src/main.rs. \
+             If the table was renamed, update TEST_HOOKS_TABLE_MARKER in xtask along with it"
+        );
+    };
+    let table = &source_text[start..];
+    let table = match table.find("\n];") {
+        Some(end) => &table[..end],
+        None => table,
+    };
+
+    let mut findings = Vec::new();
+    for line in manifest_text.lines() {
+        // `feature-name = [...]` の形だけを feature とみなす。
+        let Some((name, rest)) = line.split_once(" = ") else {
+            continue;
+        };
+        if !rest.starts_with('[') || name.is_empty() {
+            continue;
+        }
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            continue;
+        }
+        if TEST_HOOKS_EXCLUSIONS.iter().any(|(f, _)| *f == name) {
+            continue;
+        }
+        // **`cfg!` の形で探す。** 表示名だけを見ると、名前と `cfg!` が食い違って
+        // いても通ってしまう（別の feature の状態を、この名前で報告する形）。
+        let needle = format!("cfg!(feature = \"{name}\")");
+        if !table.contains(&needle) {
+            findings.push(format!(
+                "kernel/Cargo.toml: feature {name:?} is not reported by TEST_HOOKS \
+                 (add an entry, or put it on the exclusion list with a reason)"
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+/// `TEST_HOOKS` の表を探す目印。**この形に結合しているのはここだけである。**
+const TEST_HOOKS_TABLE_MARKER: &str = "const TEST_HOOKS: &[(&str, bool, &str)] = &[";
 
 /// 会計行がある文書。
 const ACCOUNTING_DOC_PATH: &str = "docs/verification-coverage.md";
