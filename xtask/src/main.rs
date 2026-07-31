@@ -992,7 +992,13 @@ fn main() -> Result<()> {
                     .get(index + 1)
                     .map(String::as_str)
                     .unwrap_or(BKL_TESTS[0].name);
+                if let Some(test) = BKL_TIMEOUT_TESTS.iter().find(|t| t.name == kind) {
+                    return cmd_marker_test(BKL_TIMEOUT_TESTS, "bkl-test", test.name, Some(2));
+                }
                 return cmd_marker_test(BKL_TESTS, "bkl-test", kind, None);
+            }
+            if rest.iter().any(|a| a == "--bkl-exclusion-proof") {
+                return cmd_bkl_exclusion_proof();
             }
             if rest.iter().any(|a| a == "--kernel-entry-concurrency") {
                 return cmd_kernel_entry_concurrency();
@@ -2449,6 +2455,117 @@ fn cmd_kernel_entry_concurrency() -> Result<()> {
     }
     bail!("{context}: FAIL")
 }
+
+/// BKL の相互排除の証明（S4-b-4）。**KVM を要し、無ければ落とす。**
+///
+/// # 2 構成を同じ増幅器の上で比べる
+///
+/// `bkl-widen-entry-window` を**両方の構成で固定**し、`bkl-skip-timer-entry` の
+/// 有無だけを変える。**同じ条件で比べていることが構成から保証される。**
+///
+/// | 構成 | 期待 |
+/// |---|---|
+/// | widen だけ | 同時進入数の最大 = 1 |
+/// | widen + skip | 同時進入数の最大 = 2 |
+///
+/// **前者が「BKL が効いている」、後者が「取らなければ 2 になる」である。**
+/// 片方だけでは「重なりが少ないから 1」と読める余地が残る。
+///
+/// # KVM が無ければ落とす。**`SKIPPED` にしない**
+///
+/// **この項目は S4 の相互排除の証明そのものを担っている。** 走っていないのに
+/// 緑になれば、**「検査が緑」と「系が悪くなっていない」を取り違える。**
+/// 手動の `kernel-entry-concurrency` が `SKIPPED` でよいのは、あちらが
+/// **補助実証であって主張を担っていない**からである。**扱いが違うのは、
+/// 担っているものが違うからである。**
+///
+/// # 判定は heartbeat の値で行う
+///
+/// 同時進入が起きた瞬間に出る `bkl: kernel entry depth reached 2` は
+/// **判定に使わない。** BKL の外から書かれるので**他コアの行と混線しうる**
+/// （5 回のうち 1 回、実際にバイト単位で混ざって一致しなかった）。
+/// heartbeat の `max kernel entry depth=` は BKL の内側で書かれるので混ざらない。
+fn cmd_bkl_exclusion_proof() -> Result<()> {
+    let context = "bkl-test exclusion-proof";
+    let workspace_root = workspace_root()?;
+
+    if !Path::new(KVM_DEVICE_PATH).exists() {
+        println!(
+            "{context}: environment: KVM unavailable ({KVM_DEVICE_PATH} does not exist).              This check IS the mutual-exclusion proof, so it is NOT skipped: TCG never runs              two vCPUs in parallel, and a green result without this check would mean the              proof did not run at all"
+        );
+        bail!("{context}: FAIL (environment: KVM unavailable)")
+    }
+
+    let cases = [
+        ("widen only", "bkl-widen-entry-window-test", 1u64),
+        (
+            "widen + skip",
+            "bkl-widen-entry-window-test,bkl-skip-timer-entry-test",
+            2,
+        ),
+    ];
+    let mut ok = true;
+    for (label, features, expected) in cases {
+        let observed = run_for_max_entry_depth(&workspace_root, features)?;
+        println!("{context}: {label}: max kernel entry depth = {observed:?} (expected {expected})");
+        ok &= observed == Some(expected);
+    }
+    if ok {
+        println!("{context}: PASS");
+        return Ok(());
+    }
+    bail!("{context}: FAIL")
+}
+
+/// 1 構成を KVM の `-smp 2` で起動し、heartbeat が報告する最大の同時進入数を返す。
+fn run_for_max_entry_depth(workspace_root: &Path, features: &str) -> Result<Option<u64>> {
+    let ovmf_vars = prepare_ovmf_vars(workspace_root)?;
+    let bootloader_efi = build_bootloader(workspace_root, false)?;
+    let feature_list: Vec<&str> = features.split(',').collect();
+    let kernel_elf = build_kernel_with_features(workspace_root, &feature_list)?;
+    let esp_dir = stage_esp(workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let serial_log = workspace_root
+        .join("target")
+        .join("bkl-exclusion-serial.log");
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+
+    let mut qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Kvm,
+    });
+    qemu_args.push("-smp".into());
+    qemu_args.push("2".into());
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the BKL exclusion proof")?;
+    thread::sleep(BKL_EXCLUSION_WINDOW);
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    Ok(serial
+        .lines()
+        .filter_map(|line| line.split("max kernel entry depth=").nth(1))
+        .filter_map(|rest| {
+            rest.split(|c: char| !c.is_ascii_digit())
+                .next()
+                .and_then(|d| d.parse::<u64>().ok())
+        })
+        .max())
+}
+
+/// 各構成の観測窓。**5 回の測定で 40 秒を使い、全一致した。**
+const BKL_EXCLUSION_WINDOW: Duration = Duration::from_secs(40);
 
 /// KVM のデバイスノード。**存在しなければ環境要因として扱う。**
 const KVM_DEVICE_PATH: &str = "/dev/kvm";
@@ -4120,6 +4237,30 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
     },
 ];
 
+/// BKL 待ちのタイムアウト（S4-b-4）。**TCG で回る。**
+///
+/// # KVM を要さない
+///
+/// タイムアウトの機序は「保持者が離さない + 待ち側の TSC が進む」であって、
+/// **同時実行を要さない。** 実測でも TCG のラウンドロビンで発火した
+/// （起動を含めて約 15 秒）。**KVM 必須の項目を最小に保つ。**
+const BKL_TIMEOUT_TESTS: &[CriticalTest] = &[CriticalTest {
+    name: "hold-forever",
+    feature: "bkl-hold-forever-test",
+    expected_markers: &[
+        "took the lock and will never release it (sabotage)",
+        // **待ちの上限に達したことと、原因の中身。**
+        "has waited",
+        "without acquiring the lock",
+        "the lock reads as held by cpu",
+        "halting",
+    ],
+    // **完走しない構成である。** AP が止まるので定常状態へ来ない。
+    forbidden_markers: &[],
+    wait_for_full_timeout: false,
+    min_heartbeats: None,
+}];
+
 /// BKL の破壊（S4-b-2）。**いずれも名指しの検出で停止する。**
 const BKL_TESTS: &[CriticalTest] = &[
     CriticalTest {
@@ -4955,6 +5096,22 @@ fn cmd_check(full: bool) -> Result<()> {
                 cmd_marker_test(ACPI_SMP_TESTS, "acpi-smp-test", test.name, Some(2))
             });
         }
+        // **BKL の相互排除の証明（S4-b-4）。KVM を要する。**
+        total += 1;
+        run_regression(
+            "bkl-test exclusion-proof",
+            &mut failed,
+            &mut retries,
+            cmd_bkl_exclusion_proof,
+        );
+        // BKL 待ちのタイムアウト（S4-b-4）。**-smp 2 が要る**（別コアが保持する）。
+        for test in BKL_TIMEOUT_TESTS {
+            total += 1;
+            let name = format!("bkl-test {}", test.name);
+            run_regression(&name, &mut failed, &mut retries, || {
+                cmd_marker_test(BKL_TIMEOUT_TESTS, "bkl-test", test.name, Some(2))
+            });
+        }
         // BKL の破壊（S4-b-2）。
         for test in BKL_TESTS {
             total += 1;
@@ -5159,7 +5316,10 @@ struct ExpectedCheckCount {
 }
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
-const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount { base: 18, full: 98 };
+const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
+    base: 18,
+    full: 100,
+};
 
 /// 実際に走った項目数が会計行と一致するかを見る。
 ///

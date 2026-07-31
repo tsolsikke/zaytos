@@ -181,6 +181,9 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 | `smp-ap-timer-share-ticks-test` | `TIMER_TICKS`をper-CPUにせず1つを共有する | コアごとの合計がタイマの配送数のおよそ2倍になり、会計が閉じないこと。**per-CPU化が「済んだように見えて共有のまま」を、名前ではなく数で捕まえる** |
 | `smp-ap-enter-scheduler-test` | APをスケジューラへ入れる | `CURRENT`のsentinelが止めること。**S3-b-2b-2で置いた防衛線が、APが実際に割り込みを受けるようになった段で初めて本番経路から踏まれる** |
 | `bkl-hold-with-if-set-test` | BKLを保持したままIF=1にする | **保持区間=IF=0の不変条件そのものの破壊である。** タイマが入り、同じコアが`irq_entry`からBKLを取ろうとして再帰検出が発火すること |
+| `bkl-hold-forever-test` | APがBKLを取ったまま二度と離さない | **待ちの上限に達して原因を出すこと。** 既存の2破壊はどちらも再帰検出が先に鳴るので、**タイムアウトの経路を通す唯一の形である。** 同時実行を要さないのでTCGで回る（起動を含めて約15秒で発火する） |
+| `bkl-skip-timer-entry-test` | タイマ入口でBKLを取らない（**計数は残す**） | **同時進入数が2になること。** ロックだけを飛ばして計数を残すので、**破壊ビルドのカウンタは「守られるはずだった区間」を数えており、本番の定義とは別物である** |
+| `bkl-widen-entry-window-test` | 入口の保持区間を広げて重なりを増幅する | 増幅器であって単独では何も主張しない。`skip`の有無と組んで「取れば1、取らなければ2」を示す。**広げた窓の重なりであって、素の重なりの頻度は別である**（KVMで4回に1回、TCGで0回）。**「BKLが無ければ常に2になる」を意味しない** |
 | `bkl-hold-across-hlt-test` | 定常ループが`hlt`の前にBKLを離さない | 保持したまま眠り、次に自分が入口へ入るときに再帰検出が発火すること。**単一コアでも観測できる**（もう一方のコアが要らない）|
 | `ioapic-keyboard-broadcast-test` | キーボードのredirection entryの宛先をlogicalのbroadcastにする | 宛先の読み戻しの主張が落ちること。**配送が実際にどうなるか（APが受けて共有リングバッファへ積むか）は観測していない。** 確実に落ちるのは読み戻しのほうである |
 | `gfx-test-pattern` | コンソールを起動せず描画テストパターンを描く | 描画の基盤 |
@@ -230,7 +233,7 @@ higher-halfの破壊feature（B-2a-5、破壊feature `highhalf-*`）について
 
 **項目会計**: 検査を足したとき数が閉じていることを、この行だけで追う。**現在の項目数は`cargo xtask check`の出力（`all N check(s) passed`）を正とし、docsの他の場所には書かない。** 総数は検査を足すたびに増えるので、導出元から離れた場所に書けば必ずstaleになる（実際に`--full`=64がroadmapとdeferred-decisionsに残り、同じ型の誤りの3件目になった）。数え方は、base = `CHECKS`（build 4 / test 1 / clippy 4 / fmt 1）+ 静的検査、`--full` = base + QEMU + highhalfである。
 
-推移: base 13→14（B-2a-5でトランポリンのバイト一致検査を追加）→15（seam整備の項目2で直接`cli`/`sti`の許可リスト検査を追加）→16（seam整備の項目1で割り込み層の境界の可視性検査を追加）→**17**（S3-aの後にMarkdownの文体検査を追加。下記「文体の検査を補助スクリプトからxtaskへ移した範囲」）→**18**（S4-aでTEST_HOOKSの網羅検査を追加）。`--full` 56→61（B-2a-5でhighhalf 4種）→62（B-2b-4(c)で`highhalf-remove-verify-fail`）→64（B-2b-4(e)で`highhalf-remove-before-highify`と`highhalf-panic-after-remove`）→65（base 15）→66（上のbase 16）→73（S1-b-2でacpi-test 6種と`-smp 2`での列挙の確認1種）→76（S1-cでapic-test 3種）→77（S2-aでI/O APICのデコード確認1種）→**80**（S2-d-1cでioapic-test 3種）→**84**（S2-d-2でlapic-timer-test 4種）→**85**（上のbase 17）→**86**（S3-b-2aでpercpu-test 1種）→**87**（同じ段で`-smp 4`の1種）→**88**（S3-b-2b-1でsmp-tramp-test 1種）→**89**（S3-b-2b-2でsmp-ap-test 1種）→**90**（S4-aでioapic-keyboard-broadcast 1種）→**95**（S4-aでsmp-ap-test 4種とAPのティックのレート1種）→**96**（base 18）→**98**（S4-b-2でbkl-test 2種）。以前の報告にあった「QEMU 42」は43が正しい（56 = base 13 + QEMU 43）。
+推移: base 13→14（B-2a-5でトランポリンのバイト一致検査を追加）→15（seam整備の項目2で直接`cli`/`sti`の許可リスト検査を追加）→16（seam整備の項目1で割り込み層の境界の可視性検査を追加）→**17**（S3-aの後にMarkdownの文体検査を追加。下記「文体の検査を補助スクリプトからxtaskへ移した範囲」）→**18**（S4-aでTEST_HOOKSの網羅検査を追加）。`--full` 56→61（B-2a-5でhighhalf 4種）→62（B-2b-4(c)で`highhalf-remove-verify-fail`）→64（B-2b-4(e)で`highhalf-remove-before-highify`と`highhalf-panic-after-remove`）→65（base 15）→66（上のbase 16）→73（S1-b-2でacpi-test 6種と`-smp 2`での列挙の確認1種）→76（S1-cでapic-test 3種）→77（S2-aでI/O APICのデコード確認1種）→**80**（S2-d-1cでioapic-test 3種）→**84**（S2-d-2でlapic-timer-test 4種）→**85**（上のbase 17）→**86**（S3-b-2aでpercpu-test 1種）→**87**（同じ段で`-smp 4`の1種）→**88**（S3-b-2b-1でsmp-tramp-test 1種）→**89**（S3-b-2b-2でsmp-ap-test 1種）→**90**（S4-aでioapic-keyboard-broadcast 1種）→**95**（S4-aでsmp-ap-test 4種とAPのティックのレート1種）→**96**（base 18）→**98**（S4-b-2でbkl-test 2種）→**99**（S4-b-4でタイムアウト1種）→**100**（S4-b-4で相互排除の証明1種。**KVMを要する**）。以前の報告にあった「QEMU 42」は43が正しい（56 = base 13 + QEMU 43）。
 
 **この推移の行自体が2段ぶん古くなっていた。** S2-d-1cの3種とS2-d-2の4種を足したときに更新しておらず、`--full`が77のまま残っていた（**80と84は遡って埋めた**）。項目会計は「この行だけで追う」と決めてある行なので、**ここが古くなると会計の機能そのものが止まる。** 検査を足す段では、この行の更新を同じコミットに入れること。
 
@@ -1387,6 +1390,17 @@ TCGで守れるもの
 - **再帰検出**（`bkl-hold-with-if-set`と`bkl-hold-across-hlt`の2破壊）。どちらも単一コアで発火する
 - **`Locked<T>`の二重取得検出**（既存の`critical-test`2種）
 - 待ちのタイムアウト（**まだ実行していない。TCGで発火するかは未測定である**）
+
+**BKLの外から書いた行が混線する実物を観測した（S4-b-4）。** S4-bでは「ログの規約は規律で守る。許可された箇所どうしの混線は防げない」と書いたが、**それは予測だった。** `widen` + `skip`の5回の測定のうち**1回**、同時進入を報せる行がBSPの行とバイト単位で混ざった。
+
+    [WARN] bkl: kern[IeNlF Oe]n tsrmyp :d eapptphl rieaccatiohn epdr oces2; msore
+    than one coore is inrssi:d 2e  uas akblernel ee CPnUt(s) reported, 1 ArPy ...
+
+**行が消えたのではなく、2つの行のバイトが交互に並んでいる。** シリアルにもロガーにもロックが無いので、こうなる。
+**帰結が2つある。**
+
+- **この行は検査の判定に使えない。** 5回に1回一致しないものを合否に使うと、退行と揺らぎが区別できなくなる。判定はハートビートの`max kernel entry depth=`で行う（**BKLの内側で書かれるので混ざらない。**5/5で一致した）
+- **S6の到達条件「BKLの外からシリアルへ書いてよい箇所の許可リストを静的検査で固定する」の標本がこれである。** 許可リストは「どこから書いてよいか」を固定するだけで、**許可された箇所どうしの混線は防げない。** 上の実物がその範囲を示している
 
 **KVMに依存する項目が2つになるが、扱いが違う。** 軸は**主張を担っているかどうか**である。
 - `smp-ap-test kernel-entry-concurrency`（手動）は**補助実証**である。素の重なりが実在することを示すだけで、**何かの主張を担っていない。** KVMが無ければ`SKIPPED`にして緑のまま進んでよい

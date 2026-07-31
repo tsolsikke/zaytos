@@ -39,6 +39,7 @@ pub mod context;
 pub mod decode;
 pub mod layout;
 
+use core::fmt::Write as _;
 use core::ptr::addr_of;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -703,6 +704,9 @@ impl KernelEntryGuard {
     pub fn enter() -> Self {
         let depth = KERNEL_ENTRY_DEPTH.fetch_add(1, Ordering::Relaxed) + 1;
         MAX_KERNEL_ENTRY_DEPTH.fetch_max(depth, Ordering::Relaxed);
+        if depth > 1 {
+            report_concurrent_entry_once(depth);
+        }
         Self {
             _not_send_sync: core::marker::PhantomData,
         }
@@ -718,6 +722,35 @@ impl Drop for KernelEntryGuard {
 /// 同時進入数のこれまでの最大値（S4-a）。
 pub fn max_kernel_entry_depth() -> u64 {
     MAX_KERNEL_ENTRY_DEPTH.load(Ordering::Relaxed)
+}
+
+/// 同時進入を 1 度だけ報告したか。
+static CONCURRENT_ENTRY_REPORTED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// 同時進入を**起きた瞬間に**1 度だけ報告する（S4-b-4）。
+///
+/// # なぜハートビートを待たないのか
+///
+/// ハートビートは 100 ティック（約 1 秒）ごとにしか出ない。**その前に別の理由で
+/// 停止すると、同時進入が起きていたことが観測されないまま終わる。**
+/// `bkl-skip-timer-entry` の構成では `Locked<T>` の競合による停止がありうるので、
+/// **観測とその後の停止の順序がタイミング次第になる。**
+///
+/// **起きた瞬間に出せば、後で何が起きても順序は決まる。**
+///
+/// 1 度だけにするのは、2 コアが 100Hz で重なり続けるとログが埋まるためである。
+fn report_concurrent_entry_once(depth: u64) {
+    if CONCURRENT_ENTRY_REPORTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    serial.init();
+    let _ = writeln!(
+        serial,
+        "[WARN] bkl: kernel entry depth reached {depth}; more than one core is inside a \
+         kernel entry at the same time"
+    );
 }
 
 /// PIC の範囲で最初に観測した割り込みのベクタ番号。
@@ -938,7 +971,19 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     //
     // **同時進入は BKL の中で数える（S4-b-3）。** ここで別に数えると、
     // 定義が 2 つになる。
+    // 破壊 (S4-b-4, bkl-skip-timer-entry): ロックを取らず計数だけ行う。
+    // **数えているものが本番と違う**（`acquire_counting_only` の doc）。
+    #[cfg(feature = "bkl-skip-timer-entry-test")]
+    let _bkl = crate::bkl::acquire_counting_only(crate::bkl::KernelEntry::Irq);
+    #[cfg(not(feature = "bkl-skip-timer-entry-test"))]
     let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::Irq);
+
+    // 破壊 (S4-b-4, bkl-widen-entry-window): 入口の保持区間を広げる。
+    // **重なりの増幅器であって、素の重なりの頻度とは別である**（feature の doc）。
+    #[cfg(feature = "bkl-widen-entry-window-test")]
+    for _ in 0..crate::bkl::WIDENED_ENTRY_WINDOW_SPINS {
+        core::hint::spin_loop();
+    }
 
     // SAFETY: スタブが直前に積んだ有効な IrqContext を指す。読み取りのみ。
     let context = unsafe { &*context };

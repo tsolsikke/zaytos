@@ -1300,6 +1300,13 @@ unsafe fn start_local_timer(serial: &mut SerialPort, slot: usize) -> ! {
     // **BKL はまだ無い。** この段の安全は「AP のハンドラが触るものが per-CPU か
     // アトミックだけである」ことに依存する条件つきのものである（`roadmap.md` の
     // S4-a に一覧がある）。**S4-b で BKL が入れば、この一覧は不要になる。**
+    // 破壊 (S4-b-4, bkl-hold-forever): AP が BKL を取ったまま二度と離さない。
+    // **BSP がタイムアウトして原因を出す。** 再帰検出ではなく待ちの上限を通す
+    // 唯一の形である（既存の 2 破壊はどちらも同じコアが取り直すので再帰が先に鳴る）。
+    #[cfg(feature = "bkl-hold-forever-test")]
+    crate::bkl::sabotage_hold_forever();
+
+    #[cfg(not(feature = "bkl-hold-forever-test"))]
     ap_heartbeat_loop(serial, slot)
 }
 
@@ -1316,6 +1323,7 @@ unsafe fn start_local_timer(serial: &mut SerialPort, slot: usize) -> ! {
 /// **BKL の外からシリアルへ書く。** シリアルにもロガーにもロックが無いので、
 /// BSP の出力と混線しうる。**行頭にコア番号を必ず置く**ことで、混ざっても
 /// どのコアの行かが分かるようにしてある。**行の途中で混ざることは防げない。**
+#[cfg_attr(feature = "bkl-hold-forever-test", allow(dead_code))]
 fn ap_heartbeat_loop(serial: &mut SerialPort, slot: usize) -> ! {
     let mut next_heartbeat = crate::interrupts::HEARTBEAT_TICKS;
     loop {

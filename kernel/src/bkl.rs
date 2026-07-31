@@ -157,6 +157,27 @@ static BKL: BigKernelLock = BigKernelLock {
 /// 上限に達したら原因を出して停止する。
 const WAIT_TIMEOUT_CYCLES: u64 = 20_000_000_000;
 
+/// 破壊 `bkl-widen-entry-window` が入口へ入れるスピン回数（S4-b-4）。
+///
+/// # **これは増幅器であって、素の重なりの頻度ではない**
+///
+/// 広げた窓での重なりを見ているのであって、**既定ビルドで重なる頻度とは別である。**
+/// **「BKL が無ければ常に 2 になる」を意味しない。**
+///
+/// 素の重なりの実測は次のとおりである。
+///
+/// - KVM: 4 回のうち 3 回で観測、1 回は 116 秒（約 23,000 回の入口通過）で観測できず
+/// - TCG: 86 秒（17,060 ティック）で 0 回。**3,000 スピンまで広げても 0 回**
+///
+/// # 幅の根拠
+///
+/// **既知の両端**——TCG で 3,000 では 0 回、60,000 では起動が定常状態へ到達しない。
+/// **中間は未測定である。** 60,000 で起動しない機序も**未特定**である
+/// （窓が 100Hz の周期を食い潰している可能性があるが、確かめていない）。
+/// **KVM での幅は着手時に測って決める。**
+#[cfg(feature = "bkl-widen-entry-window-test")]
+pub const WIDENED_ENTRY_WINDOW_SPINS: u64 = 20_000;
+
 /// BKL を保持している間だけ生きるガード。
 ///
 /// # なぜ RAII なのか
@@ -309,6 +330,67 @@ fn report_timeout_and_halt(entry: KernelEntry, started: u64) -> ! {
     );
     let _ = writeln!(serial, "[ERROR] halting (cli + hlt loop)");
     common::cpu::halt_forever();
+}
+
+/// 破壊 (S4-b-4, bkl-skip-timer-entry): **ロックは取らず、計数だけ行う。**
+///
+/// # 数えているものが本番と違う
+///
+/// **S4-b-3 の定義は「BKL を取得してから解放するまでの区間」である。**
+/// 取得を飛ばせば、その定義では区間そのものが存在しない。**それでは
+/// 「取らなければ 2 になる」を観測できない。**
+///
+/// そこでこの破壊は、**ロックだけを飛ばして計数は残す。** したがって
+/// **破壊ビルドのカウンタが数えているのは「守られるはずだった区間」であり、
+/// 本番の定義とは別物である。**
+///
+/// **増分の位置**——`irq_entry` の先頭（本番で `acquire` を呼ぶのと同じ位置）で
+/// 増え、同じガードの drop で減る。**区間の始まりと終わりは本番と同じで、
+/// 違うのは「その区間が排他されているかどうか」だけである。**
+/// だから「取らなければ 2 になる」の比較が成立する。
+///
+/// **IF=0 は保つ。** 割り込みゲート経由で入るので元から IF=0 だが、
+/// ガードを取ることで本番と同じ状態にしてある。**変える軸を 1 つに絞る。**
+#[cfg(feature = "bkl-skip-timer-entry-test")]
+#[must_use = "ガードを保持している間だけ数えられる"]
+pub fn acquire_counting_only(_entry: KernelEntry) -> BklGuard {
+    let interrupts = EntryInterruptGuard::enter();
+    let entered = Some(crate::idt::KernelEntryGuard::enter());
+    BklGuard {
+        entered,
+        interrupts,
+        _not_send_sync: PhantomData,
+    }
+}
+
+/// 破壊 (S4-b-4, bkl-hold-forever): BKL を取ったまま二度と離さない。
+///
+/// # タイムアウトの経路を通す唯一の形
+///
+/// 再帰検出は**同じコアが**取ろうとしたときに発火する。既存の 2 破壊はどちらも
+/// そちらが先に鳴るので、**待ちの上限に達する経路は一度も通っていない。**
+/// **別のコアが解放しないまま保持し続ける**形が要る。
+///
+/// **同時実行を要さない。** 待っている側の TSC が進めばよい。
+///
+/// # Safety
+///
+/// **戻らない。** 呼んだコアはそこで止まる。既定ビルドには存在しない。
+#[cfg(feature = "bkl-hold-forever-test")]
+pub fn sabotage_hold_forever() -> ! {
+    let guard = acquire(KernelEntry::ApBringUp);
+    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    serial.init();
+    let _ = writeln!(
+        serial,
+        "[WARN] bkl: cpu {} took the lock and will never release it (sabotage); another core \
+         should time out",
+        cpu_id()
+    );
+    // **離さない。** ガードを忘れることで解放を起こさない。
+    core::mem::forget(guard);
+    // **IF=0 のまま止まる。** 割り込みで抜けると解放が走りうる形にしない。
+    common::cpu::halt_forever()
 }
 
 /// 破壊 (S4-b-2, bkl-hold-with-if-set): 保持したまま IF=1 にする。

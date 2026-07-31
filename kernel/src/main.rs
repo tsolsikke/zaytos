@@ -4583,6 +4583,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "定常ループが hlt の前に BKL を離さない",
     ),
     (
+        "bkl-hold-forever-test",
+        cfg!(feature = "bkl-hold-forever-test"),
+        "AP が BKL を取ったまま二度と離さない",
+    ),
+    (
+        "bkl-skip-timer-entry-test",
+        cfg!(feature = "bkl-skip-timer-entry-test"),
+        "タイマ入口で BKL を取らない（計数は残す）",
+    ),
+    (
+        "bkl-widen-entry-window-test",
+        cfg!(feature = "bkl-widen-entry-window-test"),
+        "入口の保持区間を広げて重なりを増幅する",
+    ),
+    (
         "acpi-test",
         cfg!(feature = "acpi-test"),
         "傘。ACPI の破壊一式を有効にする",
