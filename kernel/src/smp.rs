@@ -1200,10 +1200,140 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
     AP_BROUGHT_UP.fetch_add(1, Ordering::SeqCst);
     let _ = writeln!(
         serial,
-        "[INFO] smp: ap {slot} is parked with its own per-CPU state (own GDT/TSS/IDT, own          stacks in PML4[258], production CR3); it runs no tasks in this stage"
+        "[INFO] smp: ap {slot} is up with its own per-CPU state (own GDT/TSS/IDT, own stacks          in PML4[258], production CR3); it runs no tasks in this stage"
     );
-    // **割り込みは有効化しない。** BKL が無いので、AP はここで待つ。
-    cpu::halt_forever()
+
+    // === S4-a: 自分の Local APIC とタイマを開ける ===
+    // SAFETY: 自コアの単一文脈で、割り込みはまだ禁止されている。
+    unsafe { start_local_timer(&mut serial, slot) }
+}
+
+/// AP が自分の Local APIC タイマを開けて定常ループへ入る（S4-a）。**戻らない。**
+///
+/// # SVR は BSP の設定を引き継がない
+///
+/// **`apic::set_spurious_vector` は BSP の Local APIC にしか効いていない。**
+/// SVR はコアごとにあるので、AP は自分で書く。bit 8（ソフトウェア有効化）が
+/// 落ちていると **LVT が 1 本も届かない**ので、書いた後に読み戻して確かめる。
+///
+/// # 較正はやり直さない。**それは仮定である**
+///
+/// BSP が測った分周と初期カウントをそのまま自分の LVT へ書く。これは
+/// **「Local APIC タイマの周波数がコア間で同じ」という仮定**である。
+/// 仮定なので、**AP 側のティックのレートをホストの実時間と突き合わせて実測検証
+/// する**（`lapic-timer-test` と同型の独立基準）。仮定が崩れる環境ではそこで捕まる。
+///
+/// # Safety
+///
+/// 自コアの GDT / TSS / IDT が載っており、本番 CR3 と per-CPU スタックへ
+/// 移った後であること。割り込みが禁止されていること。各コアにつき 1 回だけ。
+unsafe fn start_local_timer(serial: &mut SerialPort, slot: usize) -> ! {
+    // 1. 自分の Local APIC を有効にする。
+    //
+    // 破壊 (S4-a, smp-ap-timer-no-svr): ここを飛ばす。BSP が書いた SVR は
+    // このコアには効いていないので、**ティックが 1 本も来ない。**
+    #[cfg(not(feature = "smp-ap-timer-no-svr-test"))]
+    {
+        // SAFETY: 自コアの単一文脈で、割り込みは禁止されている。
+        match unsafe { crate::irq::enable_local_apic_for_this_cpu() } {
+            Some(enable) => {
+                let _ = writeln!(
+                    serial,
+                    "[INFO] smp: ap {slot} wrote its own SVR: spurious vector {:#04x}, \
+                     software_enabled={} (the BSP's write only reached the BSP's local APIC)",
+                    enable.spurious_vector(),
+                    enable.software_enabled()
+                );
+                if !enable.software_enabled() {
+                    let _ = writeln!(
+                        serial,
+                        "[ERROR] smp: ap {slot} has its local APIC software-disabled, so no LVT \
+                         interrupt can be delivered; halting"
+                    );
+                    cpu::halt_forever();
+                }
+            }
+            None => {
+                let _ = writeln!(
+                    serial,
+                    "[ERROR] smp: ap {slot} could not reach its local APIC to write the SVR; \
+                     halting"
+                );
+                cpu::halt_forever();
+            }
+        }
+    }
+    #[cfg(feature = "smp-ap-timer-no-svr-test")]
+    let _ = writeln!(
+        serial,
+        "[WARN] smp: ap {slot} is skipping its own SVR write (sabotage)"
+    );
+
+    // 2. 自分の LVT Timer を、BSP と同じ設定で開ける。
+    // SAFETY: 自コアの IDT は載っており、LAPIC_TIMER_VECTOR には戻れるハンドラが
+    // ある。割り込みはまだ禁止されているので、`sti` するまでは届かない。
+    match unsafe { crate::irq::arm_lapic_timer_for_this_cpu() } {
+        Some((divide, initial_count)) => {
+            let _ = writeln!(
+                serial,
+                "[INFO] smp: ap {slot} armed its own LAPIC timer with the BSP's calibration \
+                 (divide configuration {divide:#x}, initial count {initial_count}); sharing the \
+                 calibration ASSUMES the LAPIC timer frequency is the same on every core, and \
+                 that assumption is checked against host wall-clock time, not from inside"
+            );
+        }
+        None => {
+            let _ = writeln!(
+                serial,
+                "[ERROR] smp: ap {slot} could not arm its LAPIC timer (the BSP has not moved the \
+                 timer to the local APIC yet); halting"
+            );
+            cpu::halt_forever();
+        }
+    }
+
+    // 3. 割り込みを有効にして定常ループへ入る。
+    //
+    // **S3 ではここが `cli; hlt` だった。** BKL が無いので AP は待つだけで、
+    // 割り込みを有効化しなかった。**S4-a で前提が変わる。**
+    //
+    // **BKL はまだ無い。** この段の安全は「AP のハンドラが触るものが per-CPU か
+    // アトミックだけである」ことに依存する条件つきのものである（`roadmap.md` の
+    // S4-a に一覧がある）。**S4-b で BKL が入れば、この一覧は不要になる。**
+    ap_heartbeat_loop(serial, slot)
+}
+
+/// AP の定常ループ（S4-a）。**戻らない。**
+///
+/// # `sti; hlt` の隣接
+///
+/// BSP の `run_timer_loop` と同じく `cpu::enable_interrupts_and_halt` を使う。
+/// **このループは眠るかどうかを条件で決めない**ので、条件確認と `hlt` の間で
+/// 仕事を取りこぼす形にならない（あちらの doc と同じ理由である）。
+///
+/// # ログの規約
+///
+/// **BKL の外からシリアルへ書く。** シリアルにもロガーにもロックが無いので、
+/// BSP の出力と混線しうる。**行頭にコア番号を必ず置く**ことで、混ざっても
+/// どのコアの行かが分かるようにしてある。**行の途中で混ざることは防げない。**
+fn ap_heartbeat_loop(serial: &mut SerialPort, slot: usize) -> ! {
+    let mut next_heartbeat = crate::interrupts::HEARTBEAT_TICKS;
+    loop {
+        let ticks = crate::idt::timer_ticks_for(slot);
+        if ticks >= next_heartbeat {
+            next_heartbeat = ticks + crate::interrupts::HEARTBEAT_TICKS;
+            let _ = writeln!(
+                serial,
+                "[INFO] smp: ap heartbeat: cpu={slot} ticks={ticks} tsc={}",
+                cpu::read_timestamp_counter()
+            );
+        }
+        // SAFETY: 自コアの IDT は載っており、タイマのハンドラは EOI を送って戻る。
+        // `sti; hlt` が隣接しているので、有効化と停止の間に窓が開かない。
+        unsafe {
+            cpu::enable_interrupts_and_halt();
+        }
+    }
 }
 
 /// 本番の世界へ移った AP の本数。

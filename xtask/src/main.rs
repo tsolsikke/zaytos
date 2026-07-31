@@ -982,6 +982,11 @@ fn main() -> Result<()> {
                 })?;
                 return cmd_lapic_timer_test(kind);
             }
+            // **AP のティックのレートをホストの実時間と突き合わせる（S4-a）。**
+            // 表を持たない単独の検査なので、種別を取らない。
+            if rest.iter().any(|a| a == "--ap-timer-rate") {
+                return cmd_ap_timer_rate();
+            }
             if let Some(index) = rest.iter().position(|a| a == "--ioapic-test") {
                 let kind = rest.get(index + 1).with_context(|| {
                     let names: Vec<&str> = IOAPIC_SABOTAGE_TESTS.iter().map(|t| t.name).collect();
@@ -2182,6 +2187,143 @@ fn last_heartbeat_seconds(serial_log: &Path) -> Option<(u64, u64)> {
     Some((seconds, ticks))
 }
 
+/// AP のハートビートが報告するティック数（S4-a）。
+fn last_ap_heartbeat_ticks(serial_log: &Path) -> Option<u64> {
+    let content = fs::read_to_string(serial_log).ok()?;
+    let line = content
+        .lines()
+        .rfind(|l| l.contains("smp: ap heartbeat: cpu=1 ticks="))?;
+    // 形は `smp: ap heartbeat: cpu=1 ticks=8400 tsc=...`
+    let ticks_part = line.split("ticks=").nth(1)?;
+    ticks_part.split_whitespace().next()?.parse().ok()
+}
+
+/// AP のティックのレートをホストの実時間と突き合わせる（S4-a）。
+///
+/// # これが検証しているのは仮定である
+///
+/// AP は較正をやり直さず、**BSP が測った分周と初期カウントをそのまま自分の LVT へ
+/// 書く。** それは「Local APIC タイマの周波数がコア間で同じ」という**仮定**である。
+///
+/// **カーネルの内側では確かめられない。** 要求周波数も実効周波数も同じ較正値から
+/// 導くので自己無矛盾になる（`lapic-timer-scale-calibration-test` が示した形と
+/// 同じである）。**独立な基準はホストの実時間しかない。**
+///
+/// 仮定が崩れる環境（コアごとに LAPIC タイマの周波数が違う機械）では、
+/// **AP のティックのレートがホスト時間と合わなくなり、ここで捕まる。**
+fn cmd_ap_timer_rate() -> Result<()> {
+    let context = "smp-ap-test ap-timer-rate";
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let kernel_elf = build_kernel_with_features(&workspace_root, &[])?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let serial_log = workspace_root.join("target").join("smp-ap-rate-serial.log");
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let mut qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+    });
+    qemu_args.push("-smp".into());
+    qemu_args.push("2".into());
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the AP timer rate test")?;
+
+    // **AP の最初のハートビートが出てから測り始める。** 起動処理の時間を
+    // 分母に入れると、比が起動の重さに引きずられる（BSP 側の測り方と同じ）。
+    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    let mut started_at = None;
+    let mut first_ticks = 0u64;
+    while Instant::now() < deadline {
+        if let Some(ticks) = last_ap_heartbeat_ticks(&serial_log) {
+            started_at = Some(Instant::now());
+            first_ticks = ticks;
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let mut measured = None;
+    if let Some(started_at) = started_at {
+        thread::sleep(LAPIC_TIMER_MEASURE_WINDOW);
+        if let Some(ticks) = last_ap_heartbeat_ticks(&serial_log) {
+            measured = Some((
+                ticks.saturating_sub(first_ticks),
+                started_at.elapsed().as_secs_f64(),
+            ));
+        }
+    }
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
+    {
+        return report_did_not_start(context, firmware_rip, qemu_exit.as_deref());
+    }
+
+    let mut ok = true;
+    let Some((ap_ticks, host_seconds)) = measured else {
+        println!("{context}: could not measure the AP tick rate = NG");
+        bail!("{context}: FAIL")
+    };
+    if host_seconds <= 0.0 {
+        println!("{context}: the measurement window was empty = NG");
+        bail!("{context}: FAIL")
+    }
+
+    // **要求周波数はカーネルの外へ出ていない。** ハートビートの粒度から導く。
+    // AP のハートビートは 100 ティックごとなので、ティック数そのものを使う。
+    let measured_hz = ap_ticks as f64 / host_seconds;
+    let ratio = measured_hz / AP_EXPECTED_TICK_HZ;
+    let within = (ratio - 1.0).abs() <= LAPIC_TIMER_RATE_TOLERANCE;
+    println!(
+        "{context}: AP produced {ap_ticks} tick(s) in {host_seconds:.1} host second(s) = \
+         {measured_hz:.2} Hz, expected {AP_EXPECTED_TICK_HZ:.0} Hz (ratio {ratio:.3}), \
+         within {LAPIC_TIMER_RATE_TOLERANCE} = {within}"
+    );
+    println!(
+        "{context}: this is the check that the shared calibration is a valid ASSUMPTION; the \
+         kernel cannot check it from inside because both sides come from the same calibration"
+    );
+    ok &= within;
+
+    if ok {
+        println!("{context}: PASS");
+        Ok(())
+    } else {
+        bail!("{context}: FAIL")
+    }
+}
+
+/// AP のティックの期待レート。**BSP と同じ要求周波数である。**
+///
+/// カーネル側の `irq::timer_frequency_hz()` と同じ値を、**外側の基準として
+/// ここに置く。** カーネルから読んだ値と突き合わせると、両辺が同じ出所から
+/// 導かれてしまい自己無矛盾になる。
+const AP_EXPECTED_TICK_HZ: f64 = 100.0;
+
 /// S2-d-1c の破壊 1 件ぶんの定義。
 struct IoApicSabotage {
     name: &'static str,
@@ -2968,6 +3110,14 @@ const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
         item: "run_timer_loop",
         reason: "sti する箇所の 1 つ（M4-d-2 のタイマループ）と sti;hlt 隣接・上限到達時の cli",
     },
+    DirectInterruptControlSite {
+        file: "kernel/src/smp.rs",
+        item: "ap_heartbeat_loop",
+        reason: "AP の定常ループ（S4-a）。sti;hlt 隣接で、BSP の run_timer_loop と同じ形で \
+                 ある。**排他ではない。** この段の AP はタスクを実行せず、ハンドラが触る \
+                 のは per-CPU かアトミックだけである（roadmap.md の S4-a）。**BKL が \
+                 入る S4-b で、この一覧に依存した安全は不要になる。**",
+    },
     // (f) テスト経路。復元経路そのものを実証するので直接触る必要がある。
     DirectInterruptControlSite {
         file: "kernel/src/main.rs",
@@ -3719,7 +3869,80 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
         // **BSP は走り続ける**（止まるのは AP だけ）ので、ハートビートは出る。
         // 禁止するのは **AP が最後まで進んだこと**である。丸めていたら停止せず、
         // タスク 0 を走らせているように見えたまま、ここまで来たはずである。
-        forbidden_markers: &["is parked with its own per-CPU state"],
+        forbidden_markers: &["is up with its own per-CPU state"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    CriticalTest {
+        name: "ap-timer",
+        feature: "",
+        expected_markers: &[
+            // AP が自分の SVR を書き、**ソフトウェア有効化が立つこと**。
+            "ap 1 wrote its own SVR",
+            "software_enabled=true",
+            // AP が自分の LVT タイマを開けたこと。
+            "ap 1 armed its own LAPIC timer",
+            // **コアごとのハートビート。** AP 側は BSP と別の行である。
+            "smp: ap heartbeat: cpu=1",
+            // **AP のティックが進んでいること。** `cpu1=0` を禁止マーカーで落とす
+            // だけだと、行そのものが出ない構成を通してしまう。
+            "ap_ticks=cpu1=",
+            // **会計が閉じること。**
+            "timer_accounting_balanced=true",
+            // 定常状態まで到達すること。
+            "heartbeat: ticks=",
+        ],
+        // **AP のティックが 1 本も進んでいない状態を落とす。** ハートビートは
+        // 100 ティックごとなので、1 本目のハートビートが出る時点で AP は既に
+        // 数え始めている。
+        forbidden_markers: &[
+            "ap_ticks=cpu1=0,",
+            "timer_accounting_balanced=false",
+            "halting",
+        ],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    CriticalTest {
+        name: "ap-no-svr",
+        feature: "smp-ap-timer-no-svr-test",
+        expected_markers: &[
+            "is skipping its own SVR write (sabotage)",
+            // **落ちるのは「開けられない」ではなく「届かない」である。**
+            // LVT への書き込みそのものは成功する（実測）。SVR の bit 8 が
+            // 落ちているので Local APIC が無効で、**割り込みが 1 本も配送されない。**
+            // したがって AP のティックが 0 のまま止まる。
+            //
+            // **BSP の書き込みが AP に効いていないことの実証でもある。**
+            // 効いていれば、AP が書かなくてもティックが来てしまう。
+            "ap_ticks=cpu1=0,",
+            // BSP は走り続ける。**起動が死んだのではないことを分けて見る。**
+            "heartbeat: ticks=",
+        ],
+        forbidden_markers: &["smp: ap heartbeat: cpu=1"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    CriticalTest {
+        name: "ap-share-ticks",
+        feature: "smp-ap-timer-share-ticks-test",
+        expected_markers: &[
+            // **会計が閉じないことを名指しで見る。** 合計が配送数のおよそ 2 倍になる。
+            "timer_accounting_balanced=false",
+        ],
+        forbidden_markers: &["timer_accounting_balanced=true"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    CriticalTest {
+        name: "ap-enter-scheduler",
+        feature: "smp-ap-enter-scheduler-test",
+        expected_markers: &[
+            // **sentinel が止める。** S3-b-2b-2 で置いた防衛線が、AP が実際に
+            // 割り込みを受けるようになった段で初めて本番経路から踏まれる。
+            "CURRENT is still the sentinel",
+        ],
+        forbidden_markers: &["smp: ap heartbeat: cpu=1"],
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
@@ -3808,7 +4031,7 @@ const ACPI_SMP_TESTS: &[CriticalTest] = &[CriticalTest {
         "cpu_id() now reads 1 from GDTR",
         "match=true",
         "PML4[0] read back from this core = empty:true",
-        "ap 1 is parked with its own per-CPU state",
+        "ap 1 is up with its own per-CPU state",
         // **`-smp 2` で定常状態まで到達すること**（S3-b-1）。
         //
         // この 1 行を足す前は、上の 2 つが出た時点で打ち切っていたので、
@@ -4515,6 +4738,15 @@ fn cmd_check(full: bool) -> Result<()> {
                 cmd_marker_test(ACPI_SMP_TESTS, "acpi-smp-test", test.name, Some(2))
             });
         }
+        // **AP のティックのレートをホストの実時間と突き合わせる（S4-a）。**
+        // 較正値を BSP と共有するのは仮定なので、**カーネルの外の基準で確かめる。**
+        total += 1;
+        run_regression(
+            "smp-ap-test ap-timer-rate",
+            &mut failed,
+            &mut retries,
+            cmd_ap_timer_rate,
+        );
         // per-CPU スロットが足りない構成（S3-b-2a）。覆いの報告の `false` 側を
         // 評価する構成をここで残す。
         for test in ACPI_SMP4_TESTS {
@@ -4702,7 +4934,7 @@ struct ExpectedCheckCount {
 }
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
-const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount { base: 17, full: 90 };
+const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount { base: 17, full: 95 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
 ///

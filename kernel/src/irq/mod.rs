@@ -773,8 +773,9 @@ impl RedirectionEntryView {
 
     /// 宛先が physical モードか（S4-a）。
     ///
-    /// **この IRQ が bootstrap processor にしか届かないことの根拠である。**
-    /// logical になると宛先の解釈が変わり、その前提が崩れる。
+    /// **S4-a の安全がこれに依存している。** physical で宛先が bootstrap
+    /// processor なら、この IRQ は AP へ届かない。logical になると宛先の解釈が
+    /// 変わり、その前提が崩れる。
     pub fn physical_destination_mode(&self) -> bool {
         self.low & crate::apic::ENTRY_DESTINATION_MODE_BIT == 0
     }
@@ -867,6 +868,62 @@ pub unsafe fn switch_timer_to_lapic(
     }
 
     Ok(setup)
+}
+
+/// このコアの Local APIC を有効にした結果（S4-a）。
+///
+/// **生の `u32` を出さない。** 呼び出し側が必要なのは 2 つの問いだけである。
+pub struct LocalApicEnable {
+    vector: u8,
+    software_enabled: bool,
+}
+
+impl LocalApicEnable {
+    /// SVR に載ったスプリアスベクタ。
+    pub const fn spurious_vector(&self) -> u8 {
+        self.vector
+    }
+
+    /// bit 8（ソフトウェア有効化）が立っているか。
+    ///
+    /// **落ちていると LVT が 1 本も届かない。** AP のタイマを開ける前に
+    /// 確かめる先はここである。
+    pub const fn software_enabled(&self) -> bool {
+        self.software_enabled
+    }
+}
+
+/// このコアの Local APIC の SVR を設定する（S4-a）。
+///
+/// **AP が呼ぶ。** BSP の設定は BSP の Local APIC にしか効いていない。
+///
+/// # Safety
+///
+/// 自コアの単一文脈から、割り込み禁止で呼ぶこと。
+pub unsafe fn enable_local_apic_for_this_cpu() -> Option<LocalApicEnable> {
+    // SAFETY: 呼び出し側の契約をそのまま引き継ぐ。
+    let write = unsafe { apic::set_spurious_vector_for_this_cpu() }?;
+    Some(LocalApicEnable {
+        vector: write.vector(),
+        software_enabled: write.software_enabled(),
+    })
+}
+
+/// このコアの Local APIC タイマを、BSP と同じ設定で開ける（S4-a）。
+///
+/// **AP が呼ぶ。** LVT はコアごとに独立なので、AP が自分の LVT を開ければ
+/// 自分にティックが来る。**IPI を使わずに AP をカーネルへ入れる唯一の道である。**
+///
+/// 戻り値は書いた `(分周設定, 初期カウント)`。`None` は「BSP がまだ Local APIC
+/// タイマへ移していない」で、その場合は何も書かない。
+///
+/// # Safety
+///
+/// [`apic::arm_timer_for_this_cpu`] の契約をそのまま引き継ぐ。**戻った時点から
+/// ティックが届きうる。**
+pub unsafe fn arm_lapic_timer_for_this_cpu() -> Option<(u32, u32)> {
+    // SAFETY: 呼び出し側の契約をそのまま引き継ぐ。
+    unsafe { apic::arm_timer_for_this_cpu() }
 }
 
 /// LVT Timer を読み戻した観測値（S2-d-2）。

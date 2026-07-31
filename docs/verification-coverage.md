@@ -177,6 +177,9 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 | `percpu-fake-nonzero-cpu-id` | `cpu_id()`が非`0`を返すよう、tripwireが見る値だけを偽る | GPR照合デモがbootstrap processor以外で走ることを拒むtripwire（`task::require_bootstrap_processor`）が停止すること。**`MAX_CPUS > 1`でなければこの破壊は作れない**（`MAX_CPUS = 1`のまま非`0`を返すと`this_cpu_ptr`が配列外を指し、破壊が別の未定義動作を作る）。**示すのは分岐が働くことだけで、実際の並行アクセスは示さない** |
 | `smp-tramp-corrupt-copy-test` | 設置済みのAPトランポリンのコピーを1バイト壊す（パッチされる3領域の外を狙う） | 雛形とのバイト比較が捕まえること。**雛形を壊しても意味が無い**（コピー元なので両方が動く） |
 | `smp-ap-touch-scheduler-test` | APからスケジューラの現在タスクを読む | `CURRENT`のsentinelを読んで停止すること。丸めていたら「タスク0が走っている」と静かに答えていた |
+| `smp-ap-timer-no-svr-test` | APが自分のLocal APICのSVRを書かない | APにティックが1本も来ないこと。**LVTへの書き込みそのものは成功する。** SVRのbit 8が落ちているのでLocal APICが無効で、割り込みが配送されない。**BSPのSVRへの書き込みがAPには効いていないことの実証でもある** |
+| `smp-ap-timer-share-ticks-test` | `TIMER_TICKS`をper-CPUにせず1つを共有する | コアごとの合計がタイマの配送数のおよそ2倍になり、会計が閉じないこと。**per-CPU化が「済んだように見えて共有のまま」を、名前ではなく数で捕まえる** |
+| `smp-ap-enter-scheduler-test` | APをスケジューラへ入れる | `CURRENT`のsentinelが止めること。**S3-b-2b-2で置いた防衛線が、APが実際に割り込みを受けるようになった段で初めて本番経路から踏まれる** |
 | `ioapic-keyboard-broadcast-test` | キーボードのredirection entryの宛先をlogicalのbroadcastにする | 宛先の読み戻しの主張が落ちること。**配送が実際にどうなるか（APが受けて共有リングバッファへ積むか）は観測していない。** 確実に落ちるのは読み戻しのほうである |
 | `gfx-test-pattern` | コンソールを起動せず描画テストパターンを描く | 描画の基盤 |
 | `highhalf-no-identity-in-boot-pt` | 静的初期テーブルの `PML4[0]`（恒等）の P ビットをクリアする（`0x03`→`0x02`） | `mov cr3` 直後の低位命令フェッチが解決できず起動が進まないこと。判定=位置署名（bootloader の `kernel entry: VMA` present / カーネルの `entered _start` absent）+ heartbeat=0（下記注記参照。cpu_reset では判定しない） |
@@ -225,7 +228,7 @@ higher-halfの破壊feature（B-2a-5、破壊feature `highhalf-*`）について
 
 **項目会計**: 検査を足したとき数が閉じていることを、この行だけで追う。**現在の項目数は`cargo xtask check`の出力（`all N check(s) passed`）を正とし、docsの他の場所には書かない。** 総数は検査を足すたびに増えるので、導出元から離れた場所に書けば必ずstaleになる（実際に`--full`=64がroadmapとdeferred-decisionsに残り、同じ型の誤りの3件目になった）。数え方は、base = `CHECKS`（build 4 / test 1 / clippy 4 / fmt 1）+ 静的検査、`--full` = base + QEMU + highhalfである。
 
-推移: base 13→14（B-2a-5でトランポリンのバイト一致検査を追加）→15（seam整備の項目2で直接`cli`/`sti`の許可リスト検査を追加）→16（seam整備の項目1で割り込み層の境界の可視性検査を追加）→**17**（S3-aの後にMarkdownの文体検査を追加。下記「文体の検査を補助スクリプトからxtaskへ移した範囲」）。`--full` 56→61（B-2a-5でhighhalf 4種）→62（B-2b-4(c)で`highhalf-remove-verify-fail`）→64（B-2b-4(e)で`highhalf-remove-before-highify`と`highhalf-panic-after-remove`）→65（base 15）→66（上のbase 16）→73（S1-b-2でacpi-test 6種と`-smp 2`での列挙の確認1種）→76（S1-cでapic-test 3種）→77（S2-aでI/O APICのデコード確認1種）→**80**（S2-d-1cでioapic-test 3種）→**84**（S2-d-2でlapic-timer-test 4種）→**85**（上のbase 17）→**86**（S3-b-2aでpercpu-test 1種）→**87**（同じ段で`-smp 4`の1種）→**88**（S3-b-2b-1でsmp-tramp-test 1種）→**89**（S3-b-2b-2でsmp-ap-test 1種）→**90**（S4-aでioapic-keyboard-broadcast 1種）。以前の報告にあった「QEMU 42」は43が正しい（56 = base 13 + QEMU 43）。
+推移: base 13→14（B-2a-5でトランポリンのバイト一致検査を追加）→15（seam整備の項目2で直接`cli`/`sti`の許可リスト検査を追加）→16（seam整備の項目1で割り込み層の境界の可視性検査を追加）→**17**（S3-aの後にMarkdownの文体検査を追加。下記「文体の検査を補助スクリプトからxtaskへ移した範囲」）。`--full` 56→61（B-2a-5でhighhalf 4種）→62（B-2b-4(c)で`highhalf-remove-verify-fail`）→64（B-2b-4(e)で`highhalf-remove-before-highify`と`highhalf-panic-after-remove`）→65（base 15）→66（上のbase 16）→73（S1-b-2でacpi-test 6種と`-smp 2`での列挙の確認1種）→76（S1-cでapic-test 3種）→77（S2-aでI/O APICのデコード確認1種）→**80**（S2-d-1cでioapic-test 3種）→**84**（S2-d-2でlapic-timer-test 4種）→**85**（上のbase 17）→**86**（S3-b-2aでpercpu-test 1種）→**87**（同じ段で`-smp 4`の1種）→**88**（S3-b-2b-1でsmp-tramp-test 1種）→**89**（S3-b-2b-2でsmp-ap-test 1種）→**90**（S4-aでioapic-keyboard-broadcast 1種）→**95**（S4-aでsmp-ap-test 4種とAPのティックのレート1種）。以前の報告にあった「QEMU 42」は43が正しい（56 = base 13 + QEMU 43）。
 
 **この推移の行自体が2段ぶん古くなっていた。** S2-d-1cの3種とS2-d-2の4種を足したときに更新しておらず、`--full`が77のまま残っていた（**80と84は遡って埋めた**）。項目会計は「この行だけで追う」と決めてある行なので、**ここが古くなると会計の機能そのものが止まる。** 検査を足す段では、この行の更新を同じコミットに入れること。
 

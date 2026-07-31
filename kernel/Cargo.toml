@@ -263,9 +263,20 @@ smp-tramp-corrupt-copy-test = []
 # 静かに答えていた。
 smp-ap-touch-scheduler-test = []
 
-# --- S4-a: キーボードの配送先の破壊 ---
-# redirection entry の宛先を logical の broadcast にする。**確実に落ちるのは
-# 読み戻しの主張のほうである。** 配送が実際にどうなるかは観測していない。
+# --- S4-a: AP の LAPIC タイマと per-CPU ティックの破壊 ---
+# AP が自分の SVR を書かない。BSP の set_spurious_vector は BSP の Local APIC に
+# しか効いていないので、**AP にティックが 1 本も来ない。**
+smp-ap-timer-no-svr-test = []
+# TIMER_TICKS を per-CPU にせず 1 つを共有する。**per-CPU 化が「済んだように
+# 見えて共有のまま」という形を捕まえる**（GPR_BUF で見たのと同じ形）。
+# コアごとの合計がベクタ別カウンタの 2 倍になり、会計が閉じない。
+smp-ap-timer-share-ticks-test = []
+# AP がスケジューラへ入る。この段は AP でタスクを実行しないので、CURRENT の
+# sentinel を読んで停止するのが正しい。
+smp-ap-enter-scheduler-test = []
+# キーボードの redirection entry の宛先を logical の broadcast にする。
+# **確実に落ちるのは読み戻しの主張のほうである。** 配送が実際にどうなるか
+# （AP が受けて共有リングバッファへ積むか）は観測していない。
 ioapic-keyboard-broadcast-test = []
 # B-2a-5: higher-half の破壊確認。いずれも既定ビルドには入らない。`--highhalf-test <kind>`。
 # (a) 静的 PML4[0] の存在ビットを落とす。恒等が not-present になり、mov cr3 直後の低位命令

@@ -252,8 +252,8 @@ impl Controller for Apic {
         // **宛先は S4-a から主張になった。** それまでは「起動時の実測で全 entry が
         // destination 0 なので high dword を触らない」と書いていたが、
         // **実測の記憶であって主張ではなかった。** AP が割り込みを受けられるように
-        // なると、「この IRQ は AP へ届かない」が安全の根拠になるので、physical
-        // モードと宛先を読み戻して主張する（`main.rs` の読み戻し）。
+        // なると、「この IRQ は AP へ届かない」が S4-a の安全の根拠になるので、
+        // physical モードと宛先を読み戻して主張する（`main.rs` の読み戻し）。
         let low = u32::from(vector)
             | self.mmio.redirection_flags_for_irq(irq)
             | crate::apic::ENTRY_MASKED_BIT;
@@ -371,6 +371,13 @@ impl super::TimerSource for LapicTimer {
         // 先頭である。マスクを立てたまま書くので、ここでティックは始まらない。
         unsafe { crate::apic::program_timer(base, divide, lvt, initial_count) };
 
+        // **AP が同じ設定を自分の LVT へ書けるように控える（S4-a）。**
+        // **較正はやり直さない。** BSP の較正値を共有するのは「LAPIC タイマの
+        // 周波数がコア間で同じ」という**仮定**である。仮定なので、AP 側の
+        // ティックのレートをホストの実時間と突き合わせて実測検証する
+        // （`lapic-timer-test` と同型の独立基準）。
+        LAPIC_TIMER_PROGRAM.store(pack_timer_program(divide, initial_count), Ordering::Release);
+
         // 実効周波数は**書いた初期カウントと較正値から導く。** 要求値ではない。
         let actual_millihertz =
             self.calibration.median_hz().saturating_mul(1000) / u64::from(initial_count);
@@ -382,6 +389,89 @@ impl super::TimerSource for LapicTimer {
             divide,
         ))
     }
+}
+
+/// BSP が Local APIC タイマへ書いた設定（S4-a）。**AP が同じ値を自分へ書く。**
+///
+/// # なぜ 2 つを 1 語に詰めるのか
+///
+/// **分周と初期カウントは対でなければ意味を持たない**（`TimerCalibration` の
+/// doc と同じ理由である）。別々のアトミックにすると、AP が「新しい分周と古い
+/// 初期カウント」を読む窓が開く。**1 語なら、その組み合わせは作れない。**
+static LAPIC_TIMER_PROGRAM: AtomicU64 = AtomicU64::new(NOT_PROGRAMMED);
+
+/// [`LAPIC_TIMER_PROGRAM`] の「まだ設定されていない」。
+///
+/// 初期カウント `0` はタイマを止める値なので、正当な設定として現れない。
+const NOT_PROGRAMMED: u64 = 0;
+
+/// 分周と初期カウントを 1 語へ詰める。
+const fn pack_timer_program(divide_configuration: u32, initial_count: u32) -> u64 {
+    ((divide_configuration as u64) << 32) | (initial_count as u64)
+}
+
+/// [`pack_timer_program`] の逆。
+const fn unpack_timer_program(packed: u64) -> (u32, u32) {
+    ((packed >> 32) as u32, packed as u32)
+}
+
+/// このコアの Local APIC の SVR を設定する（S4-a）。
+///
+/// **BSP の `apic::set_spurious_vector` は BSP の Local APIC にしか効いていない。**
+/// SVR はコアごとにあるので、AP は自分で書く。
+///
+/// # Safety
+///
+/// 自コアの単一文脈から、割り込み禁止で呼ぶこと。
+pub(super) unsafe fn set_spurious_vector_for_this_cpu() -> Option<crate::apic::SpuriousVectorWrite>
+{
+    let base = LAPIC_EOI_BASE.load(Ordering::Relaxed);
+    if base == NOT_INSTALLED {
+        return None;
+    }
+    // SAFETY: `Apic::new` が写像を確認したページである。書き込みはベクタ欄だけ。
+    // **AP は bit 8 を立てる。** INIT-SIPI で起きたコアの Local APIC はリセット
+    // 状態から始まり、SVR は `0x000000FF` で **bit 8 が落ちている**。
+    // 実測でそうだった（`SoftwareEnable` の doc）。
+    Some(unsafe { crate::apic::write_spurious_vector(base, crate::apic::SoftwareEnable::Set) })
+}
+
+/// このコアの Local APIC タイマを、BSP と同じ設定で開ける（S4-a）。
+///
+/// # 何をして、何をしないか
+///
+/// **するのは自コアの LVT・分周・初期カウントの設定と解禁だけである。**
+/// 8259 の全マスクはしない（BSP が済ませた大域の操作で、コアごとではない）。
+/// 移行状態も立てない（`TIMER_ON_LAPIC` は大域で、BSP が立てている）。
+///
+/// # Safety
+///
+/// - 自コアの IDT が載っており、`LAPIC_TIMER_VECTOR` に戻れるハンドラがあること。
+/// - 自コアの SVR がソフトウェア有効であること（bit 8）。
+/// - 割り込みが禁止されていること。**戻った時点からティックが届きうる。**
+pub(super) unsafe fn arm_timer_for_this_cpu() -> Option<(u32, u32)> {
+    let base = LAPIC_EOI_BASE.load(Ordering::Relaxed);
+    if base == NOT_INSTALLED {
+        return None;
+    }
+    let packed = LAPIC_TIMER_PROGRAM.load(Ordering::Acquire);
+    if packed == NOT_PROGRAMMED {
+        return None;
+    }
+    let (divide, initial_count) = unpack_timer_program(packed);
+
+    let lvt = super::LAPIC_TIMER_VECTOR_BITS
+        | crate::apic::LVT_TIMER_PERIODIC
+        | crate::apic::ENTRY_MASKED_BIT;
+
+    // SAFETY: 呼び出し元契約。**マスクを立てたまま設定してから外す**ので、
+    // ベクタが載る前に満了することはない。base は自コアの Local APIC を指す
+    // （この物理アドレスは実行中のコア自身の LAPIC に別名づけられている）。
+    unsafe {
+        crate::apic::program_timer(base, divide, lvt, initial_count);
+        crate::apic::unmask_lvt_timer(base);
+    }
+    Some((divide, initial_count))
 }
 
 /// LVT Timer のマスクを外す（S2-d-2）。**ここからティックが届く。**

@@ -43,6 +43,7 @@ use core::ptr::addr_of;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use common::cpu;
+use common::percpu::{PerCpu, MAX_CPUS};
 use common::serial::SerialPort;
 
 use crate::gdt::KERNEL_CODE_SELECTOR;
@@ -605,12 +606,47 @@ pub const SYSCALL_GATE_DPL: u8 = 0;
 static INTERRUPT_COUNTS: [AtomicU64; IDT_ENTRY_COUNT] =
     [const { AtomicU64::new(0) }; IDT_ENTRY_COUNT];
 
-/// タイマ（IRQ0 = ベクタ 0x20）のティック数。
+/// タイマのティック数。**コアごとに持つ（S4-a）。**
 ///
 /// [`INTERRUPT_COUNTS`] とは別に持つ。ティックは「時間の流れ」として
 /// 頻繁に読む値であり、ベクタ番号での添字を経由せず直接読めるほうが
 /// メインループの意図が読み取りやすい。
-static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
+///
+/// # なぜ per-CPU なのか
+///
+/// **「このコアが何回起きたか」は、コアごとの問いである。** 大域のままだと、
+/// 2 コアが 100Hz で数えたとき合計が 200Hz で増え、**どちらのコアも自分の
+/// 経過時間を知らない。** S4 の到達条件「コアごとのハートビート」は、
+/// この値がコアごとであることを要求している。
+///
+/// **`INTERRUPT_COUNTS` は大域のままである。** あちらは「ベクタごとに何本
+/// 配送されたか」で、コアの帰属を持たない別の問いである。**この 2 つは
+/// 合計で閉じる**（[`timer_ticks_total`] の doc）。
+///
+/// 増減は自コアのスロットに対してのみ行う。読み手には他コアのスロットを読む
+/// 会計があるが、`Relaxed` で足りる（順序に依存した判断をせず、数を見るだけ
+/// である）。
+static TIMER_TICKS: PerCpu<AtomicU64> = PerCpu::new([const { AtomicU64::new(0) }; MAX_CPUS]);
+
+/// 破壊 (S4-a, smp-ap-timer-share-ticks): per-CPU をやめて 1 つを共有する。
+///
+/// **per-CPU 化が「済んだように見えて共有のまま」という形を捕まえる**
+/// （`GPR_BUF` で見たのと同じ形である）。共有すると 2 コアぶんが 1 つの
+/// カウンタへ入るので、**コアごとの合計がベクタ別カウンタの 2 倍になる。**
+#[cfg(feature = "smp-ap-timer-share-ticks-test")]
+static SHARED_TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// このコアのティックカウンタ。
+fn timer_ticks_slot() -> &'static AtomicU64 {
+    #[cfg(feature = "smp-ap-timer-share-ticks-test")]
+    {
+        &SHARED_TIMER_TICKS
+    }
+    #[cfg(not(feature = "smp-ap-timer-share-ticks-test"))]
+    {
+        TIMER_TICKS.this_cpu()
+    }
+}
 
 /// PIC の範囲で最初に観測した割り込みのベクタ番号。
 ///
@@ -625,9 +661,78 @@ static FIRST_PIC_VECTOR: AtomicU64 = AtomicU64::new(NO_VECTOR_YET);
 /// [`FIRST_PIC_VECTOR`] の「まだ来ていない」を表す値（ベクタ番号は 0-255）。
 pub const NO_VECTOR_YET: u64 = u64::MAX;
 
-/// タイマのティック数を読む。
+/// **このコアの**タイマのティック数を読む（S4-a）。
+///
+/// 較正（`apic::calibrate_timer`）も定常ループもこれを読む。どちらも BSP で
+/// 走り、そのとき数えているのも BSP のスロットなので、**両辺が同じスロットで
+/// あり意味は変わらない。**
 pub fn timer_ticks() -> u64 {
-    TIMER_TICKS.load(Ordering::Relaxed)
+    timer_ticks_slot().load(Ordering::Relaxed)
+}
+
+/// 指定したコアのティック数（S4-a）。**ハートビートと会計が使う。**
+///
+/// 範囲外は `0` を返す。
+pub fn timer_ticks_for(cpu: usize) -> u64 {
+    #[cfg(feature = "smp-ap-timer-share-ticks-test")]
+    {
+        let _ = cpu;
+        SHARED_TIMER_TICKS.load(Ordering::Relaxed)
+    }
+    #[cfg(not(feature = "smp-ap-timer-share-ticks-test"))]
+    {
+        TIMER_TICKS
+            .slot(cpu)
+            .map_or(0, |slot| slot.load(Ordering::Relaxed))
+    }
+}
+
+/// 全コアのティック数の合計（S4-a）。
+///
+/// # これは会計の片辺である
+///
+/// **もう片辺は [`timer_delivery_count`] である。** 1 本のティックは
+/// 必ずどこか 1 コアのスロットを増やし、同時にベクタ別カウンタも増やすので、
+/// **合計は一致する。** 一致しなければ「どこかのコアぶんが別のスロットへ入って
+/// いる」ことになる。
+///
+/// **厳密な同時刻の一致は取れない。** 2 つの値を続けて読む間にも両コアが
+/// 数えるので、**進行中のぶんだけずれる。** ずれの上限はコア数程度である。
+pub fn timer_ticks_total() -> u64 {
+    let mut total = 0;
+    for cpu in 0..MAX_CPUS {
+        total += timer_ticks_for(cpu);
+    }
+    total
+}
+
+/// タイマとして配送された割り込みの総数（S4-a）。**会計のもう片辺である。**
+///
+/// # なぜ 2 本のベクタを足すのか
+///
+/// **タイマは起動途中で配送経路が変わる。** PIT で起動し、較正の後に Local APIC
+/// タイマへ移る（S2-d-2）。したがって**移行より前のティックは
+/// [`PIC_TIMER_VECTOR`] に、後のティックは [`LAPIC_TIMER_VECTOR`] に積まれる。**
+/// 片方だけを見ると、移行前のぶんが丸ごと欠けて会計が閉じない。
+pub fn timer_delivery_count() -> u64 {
+    interrupt_count(PIC_TIMER_VECTOR) + interrupt_count(LAPIC_TIMER_VECTOR)
+}
+
+/// 進行中のぶんとして許すずれ（S4-a）。
+///
+/// **統計的な許容ではない。** 2 つの値を続けて読む間に、各コアが最大 1 本ずつ
+/// 数えうる、という**上限**である。標本を増やしても縮まない類の値ではなく、
+/// コア数で決まる。余裕を見て 2 倍にしてある。
+const TIMER_ACCOUNTING_SLACK: u64 = (MAX_CPUS as u64) * 2;
+
+/// コアごとのティックの合計と、配送された本数が一致するか（S4-a）。
+///
+/// **`smp-ap-timer-share-ticks` が捕まる先はここである。** per-CPU をやめて
+/// 1 つを共有すると、合計が配送数のおよそ 2 倍になり、[`TIMER_ACCOUNTING_SLACK`]
+/// をはるかに超える。**「per-CPU 化が済んだように見えて共有のまま」を、
+/// 名前ではなく数で捕まえる。**
+pub fn timer_accounting_balances() -> bool {
+    timer_ticks_total().abs_diff(timer_delivery_count()) <= TIMER_ACCOUNTING_SLACK
 }
 
 /// PIC の範囲で最初に届いた割り込みのベクタ番号。まだなら `None`。
@@ -808,12 +913,29 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     //
     // EOI は Local APIC へ送る。**8259 は関与しない。**
     if vector == LAPIC_TIMER_VECTOR {
-        TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+        timer_ticks_slot().fetch_add(1, Ordering::Relaxed);
         // SAFETY: 割り込みハンドラの中であり、割り込みゲート経由なので IF=0。
         // 実際に配送された割り込みに対してのみ呼んでいる。
+        //
+        // **EOI は自コアの Local APIC へ届く。** 送り先の VA は 1 つだが、
+        // その物理アドレスは実行しているコア自身の LAPIC に別名づけられている。
+        // **共有 IDT で両コアが同じハンドラに入っても、EOI の宛先は分かれる。**
         #[cfg(not(feature = "no-eoi-test"))]
         unsafe {
             crate::irq::end_of_interrupt_for_lapic_timer();
+        }
+        // **AP はスケジューラへ入らない（S4-a）。**
+        //
+        // この段の AP はタスクを実行しない。入れば `CURRENT` の sentinel を
+        // 読んで停止する（S3-b-2b-2 で置いた防衛線）。**手前で戻るのは、
+        // 停止させないためであって、sentinel を信用していないからではない。**
+        // 外し忘れても静かには壊れない。参加は S4-c である。
+        //
+        // 破壊 (S4-a, smp-ap-enter-scheduler): この分岐を外して AP を
+        // スケジューラへ入れる。sentinel が止めることを確かめる。
+        #[cfg(not(feature = "smp-ap-enter-scheduler-test"))]
+        if !common::percpu::is_bootstrap_processor() {
+            return no_switch_rsp;
         }
         return crate::task::on_timer_tick(no_switch_rsp);
     }
@@ -833,7 +955,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         // **配送先を問うので、8259 の採番ではなく現在の配送先を見る。**
         // 今は同じ値だが、S2-d-2 で Local APIC タイマへ移すと変わる。
         if vector == timer_delivery_vector() {
-            TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+            timer_ticks_slot().fetch_add(1, Ordering::Relaxed);
         }
 
         // キーボード（IRQ1）。**EOI より先に呼ぶ。** この中でデータポートを

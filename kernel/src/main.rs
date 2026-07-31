@@ -4552,6 +4552,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "RSDP を direct map 窓の外へ差し替える",
     ),
     (
+        "smp-ap-timer-no-svr-test",
+        cfg!(feature = "smp-ap-timer-no-svr-test"),
+        "AP が自分の SVR を書かない",
+    ),
+    (
+        "smp-ap-timer-share-ticks-test",
+        cfg!(feature = "smp-ap-timer-share-ticks-test"),
+        "TIMER_TICKS を per-CPU にせず 1 つを共有する",
+    ),
+    (
+        "smp-ap-enter-scheduler-test",
+        cfg!(feature = "smp-ap-enter-scheduler-test"),
+        "AP をスケジューラへ入れる",
+    ),
+    (
         "ioapic-keyboard-broadcast-test",
         cfg!(feature = "ioapic-keyboard-broadcast-test"),
         "キーボードの redirection entry の宛先を logical broadcast にする",

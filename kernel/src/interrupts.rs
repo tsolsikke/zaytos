@@ -850,11 +850,25 @@ pub unsafe fn run_timer_loop(
             log_both(
                 logger,
                 console_for_heartbeat,
+                // **`heartbeat: ticks=` を行頭に保つ。** この部分文字列は xtask の
+                // 期待・禁止マーカーとして 30 箇所近くで使われており、`last_heartbeat_seconds`
+                // が `heartbeat: ticks=256 (2 s), ...` の形を解析している。
+                // **S4-a で足す `cpu=` は、その後ろに置く。**
+                // AP 側は別の行（`smp: ap heartbeat: cpu=`）なので、この数え上げに混ざらない。
                 format_args!(
-                    "heartbeat: ticks={ticks} ({} s), keys={} dropped={} stray={} \
-                     spurious={} lapic_spurious={}, \
+                    "heartbeat: ticks={ticks} ({} s), cpu={}, ap_ticks={}, ticks_total={}, \
+                     lapic_timer_deliveries={}, timer_accounting_balanced={}, \
+                     keys={} dropped={} \
+                     stray={} spurious={} lapic_spurious={}, \
                      irq1={} balanced={}, max tick jump={}, i8042 OBF={}, PIC ISR={}",
                     ticks / crate::irq::timer_frequency_hz() as u64,
+                    common::percpu::cpu_id(),
+                    ap_tick_summary(),
+                    idt::timer_ticks_total(),
+                    // **合計で閉じる相手である。** 1 本のティックはどこか 1 コアの
+                    // スロットと、このベクタ別カウンタの両方を増やす。
+                    idt::timer_delivery_count(),
+                    idt::timer_accounting_balances(),
                     crate::keyboard::buffer::received_count(),
                     crate::keyboard::buffer::overflow_count(),
                     crate::keyboard::stray_irq_count(),
@@ -901,6 +915,34 @@ pub unsafe fn run_timer_loop(
             cpu::enable_interrupts_and_halt();
         }
     }
+}
+
+/// AP のティック数を 1 つの表示へまとめる（S4-a）。
+///
+/// **BSP 自身のぶんは含めない。** ハートビートの `ticks=` が既に BSP のぶんで、
+/// 同じ数を 2 度出すと、どちらが合計かが読めなくなる。
+struct ApTickSummary;
+
+impl core::fmt::Display for ApTickSummary {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut first = true;
+        for cpu in 1..common::percpu::MAX_CPUS {
+            if !first {
+                write!(f, " ")?;
+            }
+            first = false;
+            write!(f, "cpu{cpu}={}", idt::timer_ticks_for(cpu))?;
+        }
+        if first {
+            write!(f, "none")?;
+        }
+        Ok(())
+    }
+}
+
+/// [`ApTickSummary`] を作る。
+const fn ap_tick_summary() -> ApTickSummary {
+    ApTickSummary
 }
 
 /// シリアルと画面の両方へ 1 行出す。**必ずシリアルを先に**書く

@@ -161,6 +161,24 @@ pub fn cpu_id() -> usize {
     cpu_id_inner()
 }
 
+/// このコアが bootstrap processor か（S4-a）。
+///
+/// # スロット `0` を BSP と呼べる根拠
+///
+/// **スロットの割り当ては`kernel::smp`が行い、BSP を除いた AP へ `1` から順に
+/// 配る。** したがってスロット `0` は BSP である。**これは Local APIC ID が
+/// `0` であることとは別の事実である**——スロット番号と APIC ID は一致しなくてよい。
+///
+/// **`cpu_id() == 0` を直接書かない。** 「`0` は BSP」という知識が呼び出し側へ
+/// 散ると、割り当ての規則を変えたときに追随しそこねる箇所が出る。
+#[inline]
+pub fn is_bootstrap_processor() -> bool {
+    cpu_id() == BOOTSTRAP_PROCESSOR_SLOT
+}
+
+/// bootstrap processor に割り当てる per-CPU スロット。
+pub const BOOTSTRAP_PROCESSOR_SLOT: usize = 0;
+
 /// [`cpu_id`] の本体。
 #[inline]
 fn cpu_id_inner() -> usize {
@@ -219,6 +237,26 @@ impl<T> PerCpu<T> {
     #[inline]
     pub fn this_cpu(&self) -> &T {
         &self.slots[cpu_id()]
+    }
+
+    /// 指定したCPUのスロットへの参照。範囲外なら `None`（S4-a）。
+    ///
+    /// # なぜ安全な関数でよいのか
+    ///
+    /// `&self` を取るので器が有効であることは型が保証し、索引は中で範囲検査する。
+    /// [`slot_ptr`][Self::slot_ptr] が `unsafe` なのは生ポインタを受け取って
+    /// **書き込み**に使うためで、こちらは共有参照を返すだけである。
+    ///
+    /// # これは per-CPU の原則の例外である
+    ///
+    /// per-CPU データは「各コアが自分のスロットだけを触る」ものだが、
+    /// **会計とハートビートは他コアのスロットを読む必要がある**（合計を出す、
+    /// どのコアが進んでいるかを見る）。**読みだけであること**と、
+    /// **読む側が数の正しさしか要求しないこと**が成立の条件である。
+    /// 順序に依存した判断へ使わないこと。
+    #[inline]
+    pub fn slot(&self, index: usize) -> Option<&T> {
+        self.slots.get(index)
     }
 
     /// 現在のCPU（[`cpu_id`]）のスロットへの生ポインタ。

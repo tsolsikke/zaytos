@@ -1256,6 +1256,87 @@ pub(crate) unsafe fn send_end_of_interrupt(lapic_virt: u64) {
 /// 外で、syscall（`0x80`）とも重ならない。
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
 
+/// SVR へ書く前後の観測（S4-a で切り出した）。
+///
+/// # なぜ切り出したのか
+///
+/// **SVR はコアごとにある。** BSP の [`set_spurious_vector`] は BSP の Local APIC
+/// にしか効いていない。**AP は自分で書く必要がある**（S4-a）。
+/// 読み書きの本体を 2 箇所へ写すと片方が古くなるので、ここに 1 つだけ置く。
+/// **ログの出し方は呼び出し側が決める**（BSP は `Logger`、AP はシリアルへ直接）。
+pub(crate) struct SpuriousVectorWrite {
+    /// 書く前の生値。
+    pub(crate) before: u32,
+    /// 書いた後に読み戻した生値。
+    pub(crate) after: u32,
+}
+
+impl SpuriousVectorWrite {
+    /// 書き戻した値のベクタ欄。
+    pub(crate) const fn vector(&self) -> u8 {
+        (self.after & ENTRY_VECTOR_MASK) as u8
+    }
+
+    /// bit 8（ソフトウェア有効化）が保たれているか。**落ちていると LVT が届かない。**
+    pub(crate) const fn software_enabled(&self) -> bool {
+        self.after & LAPIC_SVR_SOFTWARE_ENABLE != 0
+    }
+}
+
+/// SVR の bit 8（ソフトウェア有効化）をどう扱うか。
+///
+/// # **「保つ」と「立てる」は違う。実測で分かれた**
+///
+/// BSP の Local APIC はファームウェアが有効にしてから引き渡してくる。
+/// **そこで bit 8 を書き換えるのは危険だけで、利得が無い**（落とすと LINT0
+/// 経由の 8259 配送が即座に止まる）。だから BSP は [`Self::Preserve`] である。
+///
+/// **AP は違う。** INIT-SIPI で起こしたコアの Local APIC はリセット状態から
+/// 始まり、**SVR は `0x000000FF`、すなわち bit 8 が落ちている。**
+/// 実測でそうだった——AP が [`Self::Preserve`] で書いたところ、読み戻しが
+/// `software_enabled=false` になり、**LVT が 1 本も届かない状態のまま進もうと
+/// した。** AP は [`Self::Set`] で立てなければならない。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SoftwareEnable {
+    /// 読んだ値の bit 8 をそのまま残す（BSP）。
+    Preserve,
+    /// bit 8 を立てる（AP）。
+    Set,
+}
+
+/// **このコアの** Local APIC の SVR のベクタ欄を [`SPURIOUS_VECTOR`] へ書く。
+///
+/// # Safety
+///
+/// `lapic_virt` が写像済みの Local APIC ページの先頭であること。**書き込みは
+/// ベクタ欄と、`enable` が [`SoftwareEnable::Set`] のときの bit 8 だけである。**
+/// 同じコアから同時に別の文脈が SVR を触っていないこと。
+pub(crate) unsafe fn write_spurious_vector(
+    lapic_virt: u64,
+    enable: SoftwareEnable,
+) -> SpuriousVectorWrite {
+    // SAFETY: 呼び出し元契約。読み取りのみ。
+    let before = unsafe { read_lapic(lapic_virt, LAPIC_REGISTER_SVR) };
+
+    // **ベクタ欄以外を 1 ビットも変えない。** bit 9（focus processor checking）や
+    // bit 12（EOI broadcast suppression）はファームウェアが立てているかも
+    // しれないので、読んだ値を土台にする。**bit 8 だけが `enable` の対象である。**
+    let mut after_intended = (before & !ENTRY_VECTOR_MASK) | u32::from(SPURIOUS_VECTOR);
+    if enable == SoftwareEnable::Set {
+        after_intended |= LAPIC_SVR_SOFTWARE_ENABLE;
+    }
+
+    // SAFETY: 同じページの 16 バイト境界に載ったレジスタへ、読んだ値のベクタ欄
+    // だけを差し替えて書き戻す。
+    unsafe {
+        ((lapic_virt + LAPIC_REGISTER_SVR) as *mut u32).write_volatile(after_intended);
+    }
+
+    // SAFETY: 上と同じ。書いた結果を読み戻す。
+    let after = unsafe { read_lapic(lapic_virt, LAPIC_REGISTER_SVR) };
+    SpuriousVectorWrite { before, after }
+}
+
 /// SVR のうちベクタ欄だけを [`SPURIOUS_VECTOR`] へ書き換える（S2-b）。
 ///
 /// # 振る舞いは変わらない
@@ -1273,26 +1354,15 @@ pub fn set_spurious_vector(logger: &mut Logger<SerialPort>, mapped: &MappedApic)
     let direct_map = common::addr::direct_map();
     let lapic_virt = direct_map.phys_to_virt(mapped.local_apic).as_u64();
 
-    // SAFETY: `map_and_probe` が写像を確認したページの中を読む。
-    let before = unsafe { read_lapic(lapic_virt, LAPIC_REGISTER_SVR) };
+    // SAFETY: `map_and_probe` が写像を確認したページである。書き込みはベクタ欄
+    // だけで、起動シーケンス中の単一文脈から呼ぶ。
+    // **BSP は bit 8 を保つ。** ファームウェアが既に有効にして引き渡してくるので、
+    // ここで書き換えるのは危険だけで利得が無い（[`SoftwareEnable`] の doc）。
+    let observation = unsafe { write_spurious_vector(lapic_virt, SoftwareEnable::Preserve) };
+    let (before, after) = (observation.before, observation.after);
 
-    // **ベクタ欄以外を 1 ビットも変えない。** bit 8（有効化）はもちろん、
-    // bit 9（focus processor checking）や bit 12（EOI broadcast suppression）も
-    // ファームウェアが立てているかもしれないので、読んだ値を土台にする。
-    let after_intended = (before & !ENTRY_VECTOR_MASK) | u32::from(SPURIOUS_VECTOR);
-
-    // SAFETY: 上と同じページの 16 バイト境界に載ったレジスタへ、読んだ値の
-    // ベクタ欄だけを差し替えて書き戻す。割り込みは禁止されている起動シーケンス
-    // 中で、他の実行文脈はこの LAPIC を触っていない。
-    unsafe {
-        ((lapic_virt + LAPIC_REGISTER_SVR) as *mut u32).write_volatile(after_intended);
-    }
-
-    // SAFETY: 上と同じ。書いた結果を読み戻す。
-    let after = unsafe { read_lapic(lapic_virt, LAPIC_REGISTER_SVR) };
-
-    let enabled_kept = after & LAPIC_SVR_SOFTWARE_ENABLE != 0;
-    let vector_now = (after & ENTRY_VECTOR_MASK) as u8;
+    let enabled_kept = observation.software_enabled();
+    let vector_now = observation.vector();
     logger.info(format_args!(
         "apic: SVR spurious vector {:#04x} -> {vector_now:#04x} (raw {before:#010x} -> \
          {after:#010x}); software_enabled kept = {enabled_kept}",
