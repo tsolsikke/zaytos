@@ -4618,7 +4618,7 @@ fn cmd_check(full: bool) -> Result<()> {
     // **項目数が会計行と一致すること。** 検査を足して会計行を更新し忘れる形を
     // 構造で止める（`EXPECTED_CHECK_COUNT` の doc）。**`total` はここで確定して
     // いるので、`cmd_check` の組み替えは要らない。**
-    check_count_matches_accounting(total, full)?;
+    check_count_matches_accounting(&workspace_root, total, full)?;
 
     if failed.is_empty() {
         println!("xtask check: all {total} check(s) passed");
@@ -4652,12 +4652,25 @@ fn cmd_check(full: bool) -> Result<()> {
 /// 放置することはできる。**半分だけ構造へ移った状態である。** 残りの半分は
 /// 依然として規律なので、そう書いておく（守れない箇所を守れると書かない）。
 ///
-/// # 会計行を機械で読んで完全に強制する案は採らない
+/// # 会計行を機械で読む案は、2 度目が起きたので採った
 ///
-/// 数字を Markdown から抜き出せば強制できるが、**xtask が会計行の書式へ結合する。**
-/// 見出しの文言・強調・推移の書き方を変えると検査が落ちるようになり、
-/// **文書の書き方が検査の都合で固定される。** 会計行は人が読んで経緯を辿るための
-/// 散文なので、その代償は釣り合わない。
+/// **以前はこの案を採らなかった。** 理由は「xtask が会計行の書式へ結合し、
+/// 文書の書き方が検査の都合で固定される。会計行は人が読んで経緯を辿るための
+/// 散文なので釣り合わない」だった。**その判断のあとで、同じ規律が 2 度目に破れた**
+/// （S3-b-2b-2 が定数を 88 から 89 へ上げ、会計行は 88 のまま残った）。
+///
+/// **天秤の重みが変わった。** 促されるだけでは足りないことが、同じ行で 2 度
+/// 示された。そこで [`check_accounting_line_lists_current_counts`] を足した。
+/// **結合を最小にしてある**——見るのは「`推移: ` で始まる行に、現在の base と
+/// full が太字の数字として現れること」だけで、推移の書き方・順序・理由の文言には
+/// 触れない。歴史の数字は残るので、**行を消さない**運用とも噛み合う。
+///
+/// # **強制できるのは数字の鮮度だけである。経緯の正しさは強制されない**
+///
+/// この検査は `**89**` という文字列が行に在ることしか見ない。**理由を書かずに
+/// 数字だけ足せば通る。** 会計行の価値は「どの段が何を足したか」の側にあり、
+/// そこは依然として規律である。**守れない箇所を守れると書かないために明示する。**
+/// 検査が保証するのは「数が変わったときに、この行が触られること」までである。
 ///
 /// # 走らせる前に総数を出す必要は無い
 ///
@@ -4679,22 +4692,65 @@ const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount { base: 17, 
 ///
 /// 一致しないときは**検査の失敗として扱う。** 項目を足したのに会計行を更新して
 /// いない状態でコミットへ進めないようにするためである。
-fn check_count_matches_accounting(total: usize, full: bool) -> Result<()> {
+fn check_count_matches_accounting(workspace_root: &Path, total: usize, full: bool) -> Result<()> {
     let expected = if full {
         EXPECTED_CHECK_COUNT.full
     } else {
         EXPECTED_CHECK_COUNT.base
     };
-    if total == expected {
-        return Ok(());
+    if total != expected {
+        let field = if full { "full" } else { "base" };
+        bail!(
+            "xtask check: ran {total} check(s) but EXPECTED_CHECK_COUNT.{field} is {expected}. \
+             If you added or removed a check, update that constant in xtask AND the \
+             item-accounting line in docs/verification-coverage.md"
+        );
     }
-    let field = if full { "full" } else { "base" };
-    bail!(
-        "xtask check: ran {total} check(s) but EXPECTED_CHECK_COUNT.{field} is {expected}. \
-         If you added or removed a check, update that constant in xtask AND the item-accounting \
-         line in docs/verification-coverage.md. The constant is machine-enforced; the doc is \
-         not, so updating only the constant will silence this without fixing the record"
-    )
+    check_accounting_line_lists_current_counts(workspace_root)
+}
+
+/// 会計行がある文書。
+const ACCOUNTING_DOC_PATH: &str = "docs/verification-coverage.md";
+
+/// 会計行の目印。**この行の書式に結合しているのはここだけである。**
+const ACCOUNTING_LINE_PREFIX: &str = "推移: ";
+
+/// 会計行が現在の項目数を載せているかを見る。
+///
+/// **見るのは数字が在ることだけである。** 推移の書き方・順序・理由の文言には
+/// 触れない（[`ExpectedCheckCount`] の doc に、何が強制され何が強制されないかを
+/// 書いてある）。**歴史の数字は残ってよい**ので、含むことだけを条件にしてある。
+fn check_accounting_line_lists_current_counts(workspace_root: &Path) -> Result<()> {
+    let path = workspace_root.join(ACCOUNTING_DOC_PATH);
+    let text = fs::read_to_string(&path)
+        .with_context(|| format!("could not read the accounting doc {}", path.display()))?;
+
+    let Some(line) = text
+        .lines()
+        .find(|line| line.starts_with(ACCOUNTING_LINE_PREFIX))
+    else {
+        bail!(
+            "xtask check: {ACCOUNTING_DOC_PATH} has no line starting with \
+             {ACCOUNTING_LINE_PREFIX:?}. That line is the item-accounting record. If it was \
+             renamed, update ACCOUNTING_LINE_PREFIX in xtask along with it"
+        );
+    };
+
+    for (field, value) in [
+        ("base", EXPECTED_CHECK_COUNT.base),
+        ("full", EXPECTED_CHECK_COUNT.full),
+    ] {
+        let needle = format!("**{value}**");
+        if !line.contains(&needle) {
+            bail!(
+                "xtask check: EXPECTED_CHECK_COUNT.{field} is {value}, but the item-accounting \
+                 line in {ACCOUNTING_DOC_PATH} does not carry {needle} . Append the new count to \
+                 that line, with the stage that added the check(s). Only the digits are enforced; \
+                 the reason next to them is not, and it is the part worth having"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// 起動失敗（環境要因）を表すメッセージの目印。
