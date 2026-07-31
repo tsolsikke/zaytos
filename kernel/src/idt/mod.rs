@@ -916,8 +916,17 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     // yield ベクタのときだけ別タスクの RSP を返す（下の分岐）。
     let no_switch_rsp = context as u64;
 
+    // **BKL を取る（S4-b-2）。** ここから戻るまでカーネルへ入れるのは 1 コアだけ
+    // である。**早期 return が複数あるので RAII にする**（解放を各 return の手前へ
+    // 書くと、1 つ落としたときに保持したまま戻り、系全体が止まる）。
+    //
+    // **ガードの順序に意味がある。** BKL を先に取り、その内側で同時進入を数える。
+    // 逆にすると、待っている間も「入口の中」として数えられてしまう
+    // （`KERNEL_ENTRY_DEPTH` の定義は「取得してから解放するまでの区間」である）。
+    let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::Irq);
+
     // **カーネル入口に入った（S4-a）。** ガードが落ちるまでこのコアは
-    // 「入口の中」として数えられる。**早期 return が複数あるので RAII にする。**
+    // 「入口の中」として数えられる。
     let _entry = KernelEntryGuard::enter();
 
     // SAFETY: スタブが直前に積んだ有効な IrqContext を指す。読み取りのみ。

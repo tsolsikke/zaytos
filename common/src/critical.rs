@@ -201,6 +201,70 @@ impl Drop for InterruptGuard {
     }
 }
 
+/// カーネル入口が自分で張る割り込み禁止区間のガード（S4-b-2）。
+///
+/// # なぜ [`InterruptGuard`] を使わないのか。**カウンタの意味が違う**
+///
+/// [`InterruptGuard`] は [`critical_nesting_depth`] を増やす。その値の意味は
+/// 「割り込みが禁止されているか」ではなく、**「呼び出し側が自発的にクリティカル
+/// セクションを保持しているか」**である。`kernel::task::on_yield` のコメントが
+/// 既にその線を引いている——「int ゲート自身が積んだぶんは `InterruptGuard` では
+/// ないのでカウンタには乗らない。したがってここが 0 でなければ、呼び出し側が
+/// `Locked` / `InterruptGuard` を保持している」。
+///
+/// **BKL は入口自身が取るものなので、「int ゲート自身が積んだぶん」と同じ側に
+/// 落ちる。** 数えると意味が変わり、実際に 2 つ壊れる（実装前にコードから確かめた）。
+///
+/// - `on_timer_tick` の防御スキップが毎回発火し、**プリエンプトが 1 度も起きなくなる**
+/// - `on_yield` が「保持したまま yield した」と判定して**停止する**
+///
+/// # 数えないが `cli` はする
+///
+/// **「保持区間 = IF=0」の不変条件は保たれる。** 数えないだけである。
+/// 再帰の検出はカウンタではなく保持者の CPU 番号で行う（`kernel::bkl`）。
+///
+/// # スレッド安全性
+///
+/// [`InterruptGuard`] と同じ理由で `!Send` かつ `!Sync` にしてある。
+pub struct EntryInterruptGuard {
+    saved_rflags: u64,
+    _not_send_sync: PhantomData<*const ()>,
+}
+
+impl EntryInterruptGuard {
+    /// 現在の割り込み状態を保存して割り込みを禁止する。**深さは数えない。**
+    #[must_use = "the guard must be held for the entry; dropping it immediately ends the \
+                  interrupt-disabled section right away"]
+    pub fn enter() -> Self {
+        let saved_rflags = cpu::read_rflags();
+        // SAFETY: カーネル入口の排他区間へ入る操作であり、割り込みを禁止して
+        // よい文脈である。保存した状態は Drop で復元する。
+        unsafe {
+            cpu::disable_interrupts();
+        }
+        Self {
+            saved_rflags,
+            _not_send_sync: PhantomData,
+        }
+    }
+
+    /// 保存した RFLAGS（診断用）。
+    pub fn saved_rflags(&self) -> u64 {
+        self.saved_rflags
+    }
+}
+
+impl Drop for EntryInterruptGuard {
+    fn drop(&mut self) {
+        if cpu::should_restore_interrupts(self.saved_rflags) {
+            // SAFETY: enter した時点で IF=1 だった文脈へ戻すだけである。
+            unsafe {
+                cpu::enable_interrupts();
+            }
+        }
+    }
+}
+
 /// 割り込み禁止で保護する内部可変ラッパー。
 ///
 /// シングルコア前提では、[`lock`][Self::lock] が返すガードが生きている間だけ

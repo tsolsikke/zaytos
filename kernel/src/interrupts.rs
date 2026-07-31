@@ -826,75 +826,96 @@ pub unsafe fn run_timer_loop(
         }
         last_ticks = ticks;
 
-        // キーボードのリングバッファを吸い出す。**メインループが行う。**
-        // ハンドラは積むだけで表示しない（ADR-0018 §5）。
-        drain_keyboard(
-            logger,
-            console.as_deref_mut(),
-            &mut announced_first_key,
-            &mut decoder,
-            &mut line,
-        );
+        // === S4-b-2: 共有物を触る区間だけ BKL を保持する ===
+        //
+        // **この 1 周は入口ではない。定常ループはタスクである**（ADR-0023
+        // Addendum §2）。触る共有物は `SCANCODES`・コンソール・i8042 と PIC の
+        // ポート・シリアルの 4 種類で、**`hlt` はそのどれにも触らない。**
+        //
+        // **ガードのスコープに `hlt` を含めない。** 含めると、保持したまま眠って
+        // もう一方のコアが IF=0 で永久に待つ。**構造で起きないようにしてある。**
+        {
+            let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
 
-        if ticks >= next_heartbeat {
-            next_heartbeat = ticks + HEARTBEAT_TICKS;
-            // **入力中は画面へ出さない。** ハートビートとエコーが同じ
-            // コンソールに出るため、打っている途中に割り込むと入力行が
-            // ぶつ切りになって読めなくなる。行が空のときだけ画面にも出す。
-            // シリアルへは常に出るので、観測手段は失われない。
-            let console_for_heartbeat = if line.is_empty() {
-                console.as_deref_mut()
-            } else {
-                None
+            // 破壊 (S4-b-2, bkl-hold-with-if-set): 保持したまま IF=1 にする。
+            // 次のティックで同じコアが irq_entry から取ろうとして再帰検出が発火する。
+            #[cfg(feature = "bkl-hold-with-if-set-test")]
+            // SAFETY: 破壊 feature 専用。BKL を保持している区間である。
+            unsafe {
+                crate::bkl::sabotage_enable_interrupts_while_held()
             };
-            log_both(
+
+            // キーボードのリングバッファを吸い出す。**メインループが行う。**
+            // ハンドラは積むだけで表示しない（ADR-0018 §5）。
+            drain_keyboard(
                 logger,
-                console_for_heartbeat,
-                // **`heartbeat: ticks=` を行頭に保つ。** この部分文字列は xtask の
-                // 期待・禁止マーカーとして 30 箇所近くで使われており、`last_heartbeat_seconds`
-                // が `heartbeat: ticks=256 (2 s), ...` の形を解析している。
-                // **S4-a で足す `cpu=` は、その後ろに置く。**
-                // AP 側は別の行（`smp: ap heartbeat: cpu=`）なので、この数え上げに混ざらない。
-                format_args!(
-                    "heartbeat: ticks={ticks} ({} s), cpu={}, ap_ticks={}, ticks_total={}, \
+                console.as_deref_mut(),
+                &mut announced_first_key,
+                &mut decoder,
+                &mut line,
+            );
+
+            if ticks >= next_heartbeat {
+                next_heartbeat = ticks + HEARTBEAT_TICKS;
+                // **入力中は画面へ出さない。** ハートビートとエコーが同じ
+                // コンソールに出るため、打っている途中に割り込むと入力行が
+                // ぶつ切りになって読めなくなる。行が空のときだけ画面にも出す。
+                // シリアルへは常に出るので、観測手段は失われない。
+                let console_for_heartbeat = if line.is_empty() {
+                    console.as_deref_mut()
+                } else {
+                    None
+                };
+                log_both(
+                    logger,
+                    console_for_heartbeat,
+                    // **`heartbeat: ticks=` を行頭に保つ。** この部分文字列は xtask の
+                    // 期待・禁止マーカーとして 30 箇所近くで使われており、`last_heartbeat_seconds`
+                    // が `heartbeat: ticks=256 (2 s), ...` の形を解析している。
+                    // **S4-a で足す `cpu=` は、その後ろに置く。**
+                    // AP 側は別の行（`smp: ap heartbeat: cpu=`）なので、この数え上げに混ざらない。
+                    format_args!(
+                        "heartbeat: ticks={ticks} ({} s), cpu={}, ap_ticks={}, ticks_total={}, \
                      lapic_timer_deliveries={}, timer_accounting_balanced={}, \
                      max kernel entry depth={}, keys={} dropped={} \
                      stray={} spurious={} lapic_spurious={}, \
                      irq1={} balanced={}, max tick jump={}, i8042 OBF={}, PIC ISR={}",
-                    ticks / crate::irq::timer_frequency_hz() as u64,
-                    common::percpu::cpu_id(),
-                    ap_tick_summary(),
-                    idt::timer_ticks_total(),
-                    // **合計で閉じる相手である。** 1 本のティックはどこか 1 コアの
-                    // スロットと、このベクタ別カウンタの両方を増やす。
-                    idt::timer_delivery_count(),
-                    idt::timer_accounting_balances(),
-                    idt::max_kernel_entry_depth(),
-                    crate::keyboard::buffer::received_count(),
-                    crate::keyboard::buffer::overflow_count(),
-                    crate::keyboard::stray_irq_count(),
-                    idt::spurious_count(),
-                    idt::lapic_spurious_count(),
-                    // **会計。** irq1 は IDT 側のベクタ別カウンタ。
-                    // keys + stray がこれと一致しなければ経路の取り違えがある。
-                    idt::interrupt_count(crate::keyboard::delivery_vector()),
-                    crate::keyboard::accounting_balances(),
-                    max_tick_jump(),
-                    // **止まった理由の切り分け材料。** キーが来なくなったとき、
-                    // OBF が 1 なら「データポートを読んでいない」、
-                    // PIC ISR にビットが残っていれば「EOI を送っていない」。
-                    // どちらも「1 回動いて止まる」症状になるので、この 2 つが
-                    // 無いと区別できない。
-                    crate::keyboard::controller::output_buffer_full() as u8,
-                    // SAFETY: メインループは通常文脈で、ここは割り込み禁止中
-                    // ではないが、シングルコアなので i8042/PIC を同時に触る
-                    // 別の実行文脈は割り込みハンドラだけである。ハンドラは
-                    // ISR を読んでも元に戻す必要がない読み出し専用の操作しか
-                    // しないため、競合しても値がずれるだけで壊れない。
-                    unsafe { crate::irq::service_snapshot() }
-                ),
-            );
+                        ticks / crate::irq::timer_frequency_hz() as u64,
+                        common::percpu::cpu_id(),
+                        ap_tick_summary(),
+                        idt::timer_ticks_total(),
+                        // **合計で閉じる相手である。** 1 本のティックはどこか 1 コアの
+                        // スロットと、このベクタ別カウンタの両方を増やす。
+                        idt::timer_delivery_count(),
+                        idt::timer_accounting_balances(),
+                        idt::max_kernel_entry_depth(),
+                        crate::keyboard::buffer::received_count(),
+                        crate::keyboard::buffer::overflow_count(),
+                        crate::keyboard::stray_irq_count(),
+                        idt::spurious_count(),
+                        idt::lapic_spurious_count(),
+                        // **会計。** irq1 は IDT 側のベクタ別カウンタ。
+                        // keys + stray がこれと一致しなければ経路の取り違えがある。
+                        idt::interrupt_count(crate::keyboard::delivery_vector()),
+                        crate::keyboard::accounting_balances(),
+                        max_tick_jump(),
+                        // **止まった理由の切り分け材料。** キーが来なくなったとき、
+                        // OBF が 1 なら「データポートを読んでいない」、
+                        // PIC ISR にビットが残っていれば「EOI を送っていない」。
+                        // どちらも「1 回動いて止まる」症状になるので、この 2 つが
+                        // 無いと区別できない。
+                        crate::keyboard::controller::output_buffer_full() as u8,
+                        // SAFETY: メインループは通常文脈で、ここは割り込み禁止中
+                        // ではないが、シングルコアなので i8042/PIC を同時に触る
+                        // 別の実行文脈は割り込みハンドラだけである。ハンドラは
+                        // ISR を読んでも元に戻す必要がない読み出し専用の操作しか
+                        // しないため、競合しても値がずれるだけで壊れない。
+                        unsafe { crate::irq::service_snapshot() }
+                    ),
+                );
+            }
         }
+        // ← ここで BKL を離す。**`hlt` はこの外にある。**
 
         if stop_after_ticks != 0 && ticks >= stop_after_ticks {
             logger.info(format_args!(
@@ -906,6 +927,12 @@ pub unsafe fn run_timer_loop(
             }
             return;
         }
+
+        // 破壊 (S4-b-2, bkl-hold-across-hlt): 離さずに `hlt` する。
+        // **もう一方のコアが IF=0 で待ち続け、タイムアウトして原因を出す。**
+        // 「静かに止まる」を「うるさく止まる」へ変えた形の実証である。
+        #[cfg(feature = "bkl-hold-across-hlt-test")]
+        let _bkl_held_across_hlt = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
 
         // 次のティックまで眠る。`sti` は既に効いているが、
         // `enable_interrupts_and_halt` を使うことで `sti; hlt` の隣接が

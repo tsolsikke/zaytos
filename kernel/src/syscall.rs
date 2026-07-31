@@ -349,6 +349,10 @@ unsafe fn dispatch(
 /// `context` はスタブが積んだ有効な [`IrqContext`] を指していること。
 /// `rsp_at_call` はスタブが `call` 直前に読んだ RSP であること。
 pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
+    // **BKL を取る（S4-b-2）。** 割り込みゲート経由なので入場時点で IF=0 だが、
+    // BKL の保持区間であることを型で表すためにガードを取る。
+    let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::Syscall);
+
     // SAFETY: スタブが直前に積んだ有効な IrqContext を指す。読み書きともこの
     // フレームに限る。
     let ctx = unsafe { &mut *context };

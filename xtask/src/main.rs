@@ -987,6 +987,13 @@ fn main() -> Result<()> {
             if rest.iter().any(|a| a == "--ap-timer-rate") {
                 return cmd_ap_timer_rate();
             }
+            if let Some(index) = rest.iter().position(|a| a == "--bkl-test") {
+                let kind = rest
+                    .get(index + 1)
+                    .map(String::as_str)
+                    .unwrap_or(BKL_TESTS[0].name);
+                return cmd_marker_test(BKL_TESTS, "bkl-test", kind, None);
+            }
             if rest.iter().any(|a| a == "--kernel-entry-concurrency") {
                 return cmd_kernel_entry_concurrency();
             }
@@ -3253,6 +3260,26 @@ const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
                  のは per-CPU かアトミックだけである（roadmap.md の S4-a）。**BKL が \
                  入る S4-b で、この一覧に依存した安全は不要になる。**",
     },
+    // (h) BKL の排他（S4-b-2）。**自発的なクリティカルセクションではないので
+    // 深さを数えない。** 数えると `on_timer_tick` の防御スキップと `on_yield` の
+    // 判定が壊れる（`EntryInterruptGuard` の doc）。
+    DirectInterruptControlSite {
+        file: "common/src/critical.rs",
+        item: "EntryInterruptGuard::enter",
+        reason: "BKL の排他。カーネル入口が自分で張る区間であり、自発的な \
+                 クリティカルセクションではない。**排他の実装本体である**",
+    },
+    DirectInterruptControlSite {
+        file: "common/src/critical.rs",
+        item: "EntryInterruptGuard::drop",
+        reason: "同上の復元（排他の実装本体）",
+    },
+    DirectInterruptControlSite {
+        file: "kernel/src/bkl.rs",
+        item: "sabotage_enable_interrupts_while_held",
+        reason: "破壊 feature 専用（bkl-hold-with-if-set）。**保持区間 = IF=0 の \
+                 不変条件そのものを壊す。** 既定ビルドには存在しない",
+    },
     // (f) テスト経路。復元経路そのものを実証するので直接触る必要がある。
     DirectInterruptControlSite {
         file: "kernel/src/main.rs",
@@ -4093,6 +4120,37 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
     },
 ];
 
+/// BKL の破壊（S4-b-2）。**いずれも名指しの検出で停止する。**
+const BKL_TESTS: &[CriticalTest] = &[
+    CriticalTest {
+        name: "hold-with-if-set",
+        feature: "bkl-hold-with-if-set-test",
+        expected_markers: &[
+            "enabling interrupts while holding the lock (sabotage)",
+            // **再帰検出が発火する。** 保持区間 = IF=0 の不変条件が崩れると、
+            // 同じコアが irq_entry から取ろうとする。
+            "bkl: recursive acquisition on cpu",
+            "halting",
+        ],
+        forbidden_markers: &[],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    CriticalTest {
+        name: "hold-across-hlt",
+        feature: "bkl-hold-across-hlt-test",
+        expected_markers: &[
+            // **保持したまま `hlt` すると、次に自分が入口へ入るときに再帰になる。**
+            // 単一コアでも観測できるのはこのためである（もう一方のコアが要らない）。
+            "bkl: recursive acquisition on cpu",
+            "halting",
+        ],
+        forbidden_markers: &[],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+];
+
 const SMP_TRAMP_TESTS: &[CriticalTest] = &[CriticalTest {
     name: "corrupt-copy",
     feature: "smp-tramp-corrupt-copy-test",
@@ -4897,6 +4955,14 @@ fn cmd_check(full: bool) -> Result<()> {
                 cmd_marker_test(ACPI_SMP_TESTS, "acpi-smp-test", test.name, Some(2))
             });
         }
+        // BKL の破壊（S4-b-2）。
+        for test in BKL_TESTS {
+            total += 1;
+            let name = format!("bkl-test {}", test.name);
+            run_regression(&name, &mut failed, &mut retries, || {
+                cmd_marker_test(BKL_TESTS, "bkl-test", test.name, None)
+            });
+        }
         // **AP のティックのレートをホストの実時間と突き合わせる（S4-a）。**
         // 較正値を BSP と共有するのは仮定なので、**カーネルの外の基準で確かめる。**
         total += 1;
@@ -5093,7 +5159,7 @@ struct ExpectedCheckCount {
 }
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
-const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount { base: 18, full: 96 };
+const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount { base: 18, full: 98 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
 ///

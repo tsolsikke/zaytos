@@ -180,6 +180,8 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 | `smp-ap-timer-no-svr-test` | APが自分のLocal APICのSVRを書かない | APにティックが1本も来ないこと。**LVTへの書き込みそのものは成功する。** SVRのbit 8が落ちているのでLocal APICが無効で、割り込みが配送されない。**BSPのSVRへの書き込みがAPには効いていないことの実証でもある** |
 | `smp-ap-timer-share-ticks-test` | `TIMER_TICKS`をper-CPUにせず1つを共有する | コアごとの合計がタイマの配送数のおよそ2倍になり、会計が閉じないこと。**per-CPU化が「済んだように見えて共有のまま」を、名前ではなく数で捕まえる** |
 | `smp-ap-enter-scheduler-test` | APをスケジューラへ入れる | `CURRENT`のsentinelが止めること。**S3-b-2b-2で置いた防衛線が、APが実際に割り込みを受けるようになった段で初めて本番経路から踏まれる** |
+| `bkl-hold-with-if-set-test` | BKLを保持したままIF=1にする | **保持区間=IF=0の不変条件そのものの破壊である。** タイマが入り、同じコアが`irq_entry`からBKLを取ろうとして再帰検出が発火すること |
+| `bkl-hold-across-hlt-test` | 定常ループが`hlt`の前にBKLを離さない | 保持したまま眠り、次に自分が入口へ入るときに再帰検出が発火すること。**単一コアでも観測できる**（もう一方のコアが要らない）|
 | `ioapic-keyboard-broadcast-test` | キーボードのredirection entryの宛先をlogicalのbroadcastにする | 宛先の読み戻しの主張が落ちること。**配送が実際にどうなるか（APが受けて共有リングバッファへ積むか）は観測していない。** 確実に落ちるのは読み戻しのほうである |
 | `gfx-test-pattern` | コンソールを起動せず描画テストパターンを描く | 描画の基盤 |
 | `highhalf-no-identity-in-boot-pt` | 静的初期テーブルの `PML4[0]`（恒等）の P ビットをクリアする（`0x03`→`0x02`） | `mov cr3` 直後の低位命令フェッチが解決できず起動が進まないこと。判定=位置署名（bootloader の `kernel entry: VMA` present / カーネルの `entered _start` absent）+ heartbeat=0（下記注記参照。cpu_reset では判定しない） |
@@ -228,7 +230,7 @@ higher-halfの破壊feature（B-2a-5、破壊feature `highhalf-*`）について
 
 **項目会計**: 検査を足したとき数が閉じていることを、この行だけで追う。**現在の項目数は`cargo xtask check`の出力（`all N check(s) passed`）を正とし、docsの他の場所には書かない。** 総数は検査を足すたびに増えるので、導出元から離れた場所に書けば必ずstaleになる（実際に`--full`=64がroadmapとdeferred-decisionsに残り、同じ型の誤りの3件目になった）。数え方は、base = `CHECKS`（build 4 / test 1 / clippy 4 / fmt 1）+ 静的検査、`--full` = base + QEMU + highhalfである。
 
-推移: base 13→14（B-2a-5でトランポリンのバイト一致検査を追加）→15（seam整備の項目2で直接`cli`/`sti`の許可リスト検査を追加）→16（seam整備の項目1で割り込み層の境界の可視性検査を追加）→**17**（S3-aの後にMarkdownの文体検査を追加。下記「文体の検査を補助スクリプトからxtaskへ移した範囲」）→**18**（S4-aでTEST_HOOKSの網羅検査を追加）。`--full` 56→61（B-2a-5でhighhalf 4種）→62（B-2b-4(c)で`highhalf-remove-verify-fail`）→64（B-2b-4(e)で`highhalf-remove-before-highify`と`highhalf-panic-after-remove`）→65（base 15）→66（上のbase 16）→73（S1-b-2でacpi-test 6種と`-smp 2`での列挙の確認1種）→76（S1-cでapic-test 3種）→77（S2-aでI/O APICのデコード確認1種）→**80**（S2-d-1cでioapic-test 3種）→**84**（S2-d-2でlapic-timer-test 4種）→**85**（上のbase 17）→**86**（S3-b-2aでpercpu-test 1種）→**87**（同じ段で`-smp 4`の1種）→**88**（S3-b-2b-1でsmp-tramp-test 1種）→**89**（S3-b-2b-2でsmp-ap-test 1種）→**90**（S4-aでioapic-keyboard-broadcast 1種）→**95**（S4-aでsmp-ap-test 4種とAPのティックのレート1種）→**96**（base 18）。以前の報告にあった「QEMU 42」は43が正しい（56 = base 13 + QEMU 43）。
+推移: base 13→14（B-2a-5でトランポリンのバイト一致検査を追加）→15（seam整備の項目2で直接`cli`/`sti`の許可リスト検査を追加）→16（seam整備の項目1で割り込み層の境界の可視性検査を追加）→**17**（S3-aの後にMarkdownの文体検査を追加。下記「文体の検査を補助スクリプトからxtaskへ移した範囲」）→**18**（S4-aでTEST_HOOKSの網羅検査を追加）。`--full` 56→61（B-2a-5でhighhalf 4種）→62（B-2b-4(c)で`highhalf-remove-verify-fail`）→64（B-2b-4(e)で`highhalf-remove-before-highify`と`highhalf-panic-after-remove`）→65（base 15）→66（上のbase 16）→73（S1-b-2でacpi-test 6種と`-smp 2`での列挙の確認1種）→76（S1-cでapic-test 3種）→77（S2-aでI/O APICのデコード確認1種）→**80**（S2-d-1cでioapic-test 3種）→**84**（S2-d-2でlapic-timer-test 4種）→**85**（上のbase 17）→**86**（S3-b-2aでpercpu-test 1種）→**87**（同じ段で`-smp 4`の1種）→**88**（S3-b-2b-1でsmp-tramp-test 1種）→**89**（S3-b-2b-2でsmp-ap-test 1種）→**90**（S4-aでioapic-keyboard-broadcast 1種）→**95**（S4-aでsmp-ap-test 4種とAPのティックのレート1種）→**96**（base 18）→**98**（S4-b-2でbkl-test 2種）。以前の報告にあった「QEMU 42」は43が正しい（56 = base 13 + QEMU 43）。
 
 **この推移の行自体が2段ぶん古くなっていた。** S2-d-1cの3種とS2-d-2の4種を足したときに更新しておらず、`--full`が77のまま残っていた（**80と84は遡って埋めた**）。項目会計は「この行だけで追う」と決めてある行なので、**ここが古くなると会計の機能そのものが止まる。** 検査を足す段では、この行の更新を同じコミットに入れること。
 
@@ -1045,6 +1047,7 @@ S2-cの較正はこの形の待ちループを持つ（`TIMER_TICKS`のエッジ
 **この段で実行していない経路を明示する。**
 
 - `Apic`の`unmask` / `mask_all` / `end_of_interrupt` / `is_spurious`は**一度も実行していない**。書き込み経路は動かしていない
+- **`bkl::KernelEntry::ApBringUp`は列挙にあるが取得箇所が無い**（S4-b-2）。APが共有物へ触るのはS4-cなので、そこで取得箇所ができる。**「書いたが実行されていない」ものをここへ集める**——別々の場所に散らすと、次の段で拾い損ねる（`Apic::mask_all`が`pub`だから`dead_code`にならず、S2-d-2まで呼び出し元が無いことに気づけなかったのと同じ形である）
 - **IRQからGSIへの解決（`entry_for_irq`）も一度も通っていない。** `check_masks`へ渡すIRQが空だからである。**S2-d-1cの到達条件に「実際に通ること」を入れてある**（`roadmap.md`。`irq::mask_all()`と`smp::trampoline_frame()`と同じ扱いである）。通らないまま終えると、「解決表を通している」という設計上の主張が実行で裏付けられないまま残る
 
 **境界の非対称が1つ残った。** S0-aの「IMRへの書き込みは境界の内側だけに存在する」は、**PICについては真だが、IO-APICについては偽である。** redirection entryの読み書きは`crate::apic`にあり、割り込み層の外である。可視性の静的検査は`kernel/src/irq/`の内側だけを見るので捕まらない。レジスタの配置を知るモジュールを1つに保つほうを優先した結果で、到達範囲は`pub(crate)`まで狭めてある。解禁条件つきで`deferred-decisions.md`へ置いた。**記録済みの「境界の公開関数が生の値を返す形は捕まらない」とは性質が違う。** あちらは境界自身の公開関数、こちらは別のモジュールが境界の持ち物を公開している形である。

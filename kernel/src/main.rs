@@ -4573,6 +4573,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "キーボードの redirection entry の宛先を logical broadcast にする",
     ),
     (
+        "bkl-hold-with-if-set-test",
+        cfg!(feature = "bkl-hold-with-if-set-test"),
+        "BKL を保持したまま IF=1 にする",
+    ),
+    (
+        "bkl-hold-across-hlt-test",
+        cfg!(feature = "bkl-hold-across-hlt-test"),
+        "定常ループが hlt の前に BKL を離さない",
+    ),
+    (
         "acpi-test",
         cfg!(feature = "acpi-test"),
         "傘。ACPI の破壊一式を有効にする",

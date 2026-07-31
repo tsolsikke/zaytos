@@ -278,6 +278,14 @@ smp-ap-enter-scheduler-test = []
 # **確実に落ちるのは読み戻しの主張のほうである。** 配送が実際にどうなるか
 # （AP が受けて共有リングバッファへ積むか）は観測していない。
 ioapic-keyboard-broadcast-test = []
+
+# --- S4-b-2: BKL の破壊 ---
+# BKL を保持したまま IF=1 にする。**不変条件「保持区間 = IF=0」そのものの破壊で
+# ある。** タイマが入り、同じコアが irq_entry から取ろうとして再帰検出が発火する。
+bkl-hold-with-if-set-test = []
+# 定常ループが hlt の前に BKL を離さない。**もう一方のコアが IF=0 で待ち続け、
+# タイムアウトして原因を出す。**「静かに止まる」を「うるさく止まる」へ変えた形の実証。
+bkl-hold-across-hlt-test = []
 # B-2a-5: higher-half の破壊確認。いずれも既定ビルドには入らない。`--highhalf-test <kind>`。
 # (a) 静的 PML4[0] の存在ビットを落とす。恒等が not-present になり、mov cr3 直後の低位命令
 # フェッチが解決できずトリプルフォルトする。`--highhalf-test no-identity-in-boot-pt`。
