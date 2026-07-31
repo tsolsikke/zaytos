@@ -172,6 +172,18 @@ const WAIT_TIMEOUT_CYCLES: u64 = 20_000_000_000;
 /// もう一方のコアが IF=0 で永久に待つ。** ガードの寿命がブロックで決まるので、
 /// `hlt` をブロックの外に置けば構造的に起きない（Addendum §2）。
 pub struct BklGuard {
+    /// 同時進入の計数（S4-b-3）。**`held` を落とす前に、明示的に落とす。**
+    ///
+    /// # `Option` にしている理由
+    ///
+    /// **`Drop for BklGuard` はフィールドの drop より先に走る。** したがって
+    /// フィールドとして持つだけでは「`held` を落としてから数を抜ける」順序になり、
+    /// **その窓で別のコアが取得して数を増やすと、排他が効いているのに 2 と
+    /// 読めてしまう。** 同時進入の観測そのものが壊れる。
+    ///
+    /// `Option` にして [`Drop`] の先頭で `take()` すれば、**数から抜けてから
+    /// フラグを落とす**順序を明示できる。
+    entered: Option<crate::idt::KernelEntryGuard>,
     /// 読み出さないが、保持していること自体に意味がある（Drop で割り込みを復元する）。
     ///
     /// **最後のフィールドであることが drop 順の要件である。** BKL のフラグを
@@ -216,7 +228,12 @@ pub fn acquire(entry: KernelEntry) -> BklGuard {
     BKL.acquired_tsc
         .store(common::cpu::read_timestamp_counter(), Ordering::Relaxed);
 
+    // **同時進入をここで数える（S4-b-3）。** 定義は「取得してから解放するまでの
+    // 区間にいるコアの数」なので、**待っている間は入らない。**
+    let entered = Some(crate::idt::KernelEntryGuard::enter());
+
     BklGuard {
+        entered,
         interrupts,
         _not_send_sync: PhantomData,
     }
@@ -224,9 +241,15 @@ pub fn acquire(entry: KernelEntry) -> BklGuard {
 
 impl Drop for BklGuard {
     fn drop(&mut self) {
-        // **診断を先に消し、フラグを後で落とす。** 逆にすると、フラグが落ちた後も
-        // 保持者が残る窓ができ、次に取ったコアが上書きするまで診断が古い値を指す。
+        // **1. 数から抜ける（S4-b-3）。フラグを落とす前である。**
+        //
+        // 逆にすると、フラグが落ちてから数が減るまでの窓で別のコアが取得し、
+        // **排他が効いているのに同時進入数が 2 と読める。** 観測が壊れる。
+        drop(self.entered.take());
+        // 2. 診断を消す。**フラグより先である**（フラグが落ちた後も保持者が
+        // 残る窓ができると、次に取ったコアが上書きするまで診断が古い値を指す）。
         BKL.holder_cpu.store(NO_HOLDER, Ordering::Relaxed);
+        // 3. フラグを落とす。ここから他コアが取れる。
         BKL.held.store(false, Ordering::Release);
         // ここで暗黙に `interrupts` が落ち、保存状態に応じて復元する。
     }
