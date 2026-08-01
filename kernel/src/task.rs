@@ -415,43 +415,50 @@ const EMPTY_WORKER_STACK: WorkerStack = WorkerStack {
 
 static mut WORKER_STACKS: [WorkerStack; WORKER_COUNT] = [EMPTY_WORKER_STACK; WORKER_COUNT];
 
-/// AP 用アイドルタスクのスタック（S4-c-2）。
+/// コアごとの、スケジューラを通った回数（S4-c-3-2a）。
 ///
-/// **ワーカーの配列に足さない。** ワーカーは `GPR_BUF` に触る BSP 専用のタスクで、
-/// **AP 用は別の性質のものである**（ADR-0023 Addendum §5）。同じ配列に入れると
-/// `WORKER_COUNT` の意味が「BSP のワーカー数」から曖昧になる。
-static mut AP_IDLE_STACK: WorkerStack = EMPTY_WORKER_STACK;
+/// # なぜ「アイドルタスクが回った回数」を捨てたのか
+///
+/// S4-c-2 は AP 用アイドルタスクの専用ループ（`ap_idle_entry`）が回した回数を
+/// 数えていた。**S4-c-3-2a でそのループを廃したので、数える対象が無くなった。**
+///
+/// **それ以上に、あの観測量では「参加した」を示せなかった。** 枝 1 では AP は
+/// 文脈切り替えを 1 度も行わず、既存のハートビートのループがそのまま
+/// アイドルタスクの本体になる。**そのループは早期リターンを残した構成でも
+/// 同じように回る**ので、**「スケジューラへ参加した」と「従来どおりループして
+/// いる」を区別できない。** 「同値である間は分類の誤りが観測できない」の形である。
+///
+/// **区別できる量に置き換えた。** これは [`schedule_switch`] を通った回数で、
+/// **早期リターンが残っている間、AP のスロットは 0 のままである**（AP は
+/// `irq_entry` で手前に戻るので `schedule_switch` へ到達しない）。
+/// **0 であることを実測してから、次段で外す。**
+static SCHEDULE_PASSES: PerCpu<AtomicU64> = PerCpu::new([const { AtomicU64::new(0) }; MAX_CPUS]);
 
-/// AP 用アイドルタスクが回った回数（S4-c-2）。
+/// AP（スロット 1）がスケジューラを通った回数（S4-c-3-2a）。**ハートビートが読む。**
 ///
-/// # なぜ `Task::iterations` を使わないのか
+/// # 「参加」の観測の定義
 ///
-/// あちらは volatile な素の読み書きで、**「単一コアで割り込みハンドラとスカラを
-/// 共有している」ことを根拠にしている**（`scheduler` のモジュール doc）。
-/// **AP がタスク文脈から書き、BSP がハートビートで読む形は、その根拠の外である**
-/// （タスク本体は BKL の外を走る）。**アトミックにして根拠を要らなくする。**
+/// **2 回のハートビートの差が正であること**を「参加している」とする。
+/// **「0 でないこと」では足りない**——一度だけ通って止まった形を通してしまう。
 ///
-/// **「割り当てられた」と「走った」は別である。** 占有は `CURRENT` が示し、
-/// **実行はこの値が増えることが示す。** 片方では足りない。
-static AP_IDLE_ITERATIONS: AtomicU64 = AtomicU64::new(0);
-
-/// AP 用アイドルタスクが回った回数（S4-c-2）。**ハートビートが読む。**
+/// 折り返しは実用上起きない（`u64`）。**それでも差は `wrapping_sub` で取る。**
 ///
-/// # 「実行」の観測の定義
-///
-/// **2 回のハートビートの差が正であること**を「走っている」とする。
-/// **「0 でないこと」では足りない**——一度だけ動いて止まった形を通してしまう。
-///
-/// 折り返しは実用上起きない（`u64` で、増分はティックあたり高々数百万である）。
-/// **それでも差は `wrapping_sub` で取る**ので、折り返しても正しい差になる。
-pub fn ap_idle_iterations() -> u64 {
-    AP_IDLE_ITERATIONS.load(Ordering::Relaxed)
+/// **この段では 0 でなければならない。** 早期リターンがあるので AP は
+/// `schedule_switch` へ到達しない。**0 でなければ、外したつもりのない経路から
+/// 入っている。**
+pub fn ap_schedule_passes() -> u64 {
+    SCHEDULE_PASSES
+        .slot(AP_IDLE_TASK_OWNER)
+        .map_or(0, |slot| slot.load(Ordering::Relaxed))
 }
 
 /// AP（スロット 1）が今どのタスクを走らせているか（S4-c-2）。
 ///
-/// **「割り当てられた」の観測である。** 実行は [`ap_idle_iterations`] が示す。
+/// **「割り当てられた」の観測である。** 参加は [`ap_schedule_passes`] が示す。
 /// sentinel のままなら「まだ何も割り当てられていない」。
+///
+/// **こちらは早期リターンの有無で変わる**（sentinel から添字へ動くのは
+/// 次段で sentinel を解いたときである）ので、到達条件として有効である。
 ///
 /// **これは表現を返す。** ログへ出すのは [`ap_current_display`] のほうである。
 pub fn ap_current_index() -> usize {
@@ -491,56 +498,66 @@ pub fn ap_current_display() -> ApCurrent {
     ApCurrent(ap_current_index())
 }
 
-/// AP 用アイドルタスクの本体（S4-c-2）。**戻らない。**
+/// AP 用アイドルタスクを登録する（S4-c-2、形は S4-c-3-2a で作り替えた）。
 ///
-/// # 何を触るか
+/// # なぜ専用の本体とスタックを廃したのか
 ///
-/// **`AP_IDLE_ITERATIONS` だけである。** `GPR_BUF` にも `Locked<T>` にも
-/// コンソールにも触らない。**タスク本体は BKL の外を走る**ので、
-/// 触るものを増やすと守りを別に用意する必要が出る。
+/// **S4-c-2 は専用のループ（`ap_idle_entry`）と専用のスタック（`AP_IDLE_STACK`、
+/// 20,480 バイト）を用意し、初期コンテキストを組んで登録していた。**
+/// 「登録するが誰も走らせない」段だったので、**走らせ方が決まる前に形を決めていた。**
 ///
-/// # この段では走らない
+/// **走らせ方を決めた時点で、その形では走らないと分かった。** AP の `CURRENT` へ
+/// この添字を書くと、AP の最初のティックで [`schedule_switch`] は
+/// 「現タスク = 次タスク」になり**切り替えを行わない。** したがって
+/// **組んだ初期コンテキストは `set_saved_rsp` に上書きされ、`ap_idle_entry` へは
+/// 永久に入らない。** 専用スタックも使われない。
 ///
-/// `pick_next` はワーカーしか候補にしないので、**S4-c-2 では誰もここへ来ない。**
-/// 走るのは S4-c-3 からである。
-extern "sysv64" fn ap_idle_entry() -> ! {
-    loop {
-        AP_IDLE_ITERATIONS.fetch_add(1, Ordering::Relaxed);
-        // **タイマがプリエンプトするのを待つ。** 明示的な yield はしない
-        // （`on_yield` は BSP のデモが使う経路である）。
-        core::hint::spin_loop();
-    }
-}
-
-/// AP 用アイドルタスクの所在（S4-c-2）。
-fn ap_idle_stack_bounds() -> (VirtAddr, VirtAddr) {
-    let base = addr_of!(AP_IDLE_STACK) as u64;
-    let guard = VirtAddr::new(base).expect("a .bss address is canonical");
-    let top = VirtAddr::new(base + GUARD_SIZE as u64 + TASK_STACK_SIZE as u64)
-        .expect("the AP idle stack stays within the canonical range");
-    (guard, top)
-}
-
-/// AP 用アイドルタスクを登録する（S4-c-2）。**BSP が起動時に 1 回だけ呼ぶ。**
+/// **bootstrap processor と同じ形に揃えた。** あちらは起動コンテキストが
+/// そのままタスク 0（メイン）であり、専用の本体もスタックも持たない。
+/// **AP も同じで、`smp` の per-CPU スタックの上を走っているループが、
+/// そのままこのタスクの本体である。**
+///
+/// # ガードページはどこへ行ったか
+///
+/// **失われていない。出所が変わった。** S4-c-2 は `AP_IDLE_STACK` の直下へ
+/// `install_worker_guard_page` で穴を開けていた。per-CPU スタックには
+/// **最初から張らない穴**が下にある（`smp::map_ap_stacks`）。**写像の不在で
+/// 作ったガードなので、こちらのほうが解除の手数が少ない。**
 ///
 /// # Safety
 ///
-/// 起動時の単一実行文脈から、ページテーブルが自前のものへ切り替わった後に
-/// 1 回だけ呼ぶこと（ガードページを外すため）。
+/// 起動時の単一実行文脈から 1 回だけ呼ぶこと。スケジューラの静的領域へ書く。
+/// **`smp::prepare_ap_per_cpu` より後**でなければならない（per-CPU スタックの
+/// 範囲を読むため）。
 pub unsafe fn init_ap_idle_task() {
-    let (guard, top) = ap_idle_stack_bounds();
-    // SAFETY: 呼び出し側の契約。ワーカーと同じ手順である。
-    unsafe { install_worker_guard_page(guard) };
-    // SAFETY: top は今ガードページを張ったスタックの頂点で、まだ誰も使っていない。
-    let saved_rsp = unsafe { build_initial_context(top, ap_idle_entry as *const () as u64) };
+    // **本当に走るスタックを記述する。** ここを嘘にすると、`schedule_switch` の
+    // 「保存 RSP がそのタスクのスタック範囲内か」の検査が、**切り替えが起きた
+    // ときにだけ**誤って落ちる（この段では切り替えが起きないので鳴らない）。
+    //
+    // **実際に保存される値がこの範囲へ入ることも確かめてある。** 保存されるのは
+    // 割り込み入口の `rsp` なので、**タイマのベクタが IST を使うなら範囲の外へ
+    // 出る。** `idt::init` が IST を割り当てるのは**ベクタ 8（#DF）と 14（#PF）
+    // だけ**で、タイマは `None` である。Ring 0 から Ring 0 への割り込みでは
+    // スタックが切り替わらないので、**入口の `rsp` はこの通常スタックの内側に
+    // ある。** **IST を使うベクタが増えたら、この根拠は失効する。**
+    let Some((bottom, top)) = crate::smp::ap_kernel_stack_range(AP_IDLE_TASK_OWNER) else {
+        serial_line(format_args!(
+            "[ERROR] task: the per-CPU stack for cpu {AP_IDLE_TASK_OWNER} is not mapped yet; \
+             init_ap_idle_task must run after smp::prepare_ap_per_cpu; halting"
+        ));
+        common::cpu::halt_forever();
+    };
     scheduler::init_task(
         AP_IDLE_TASK,
         Task {
-            saved_rsp,
-            stack_top: top.as_u64(),
-            stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
-            // **`Ready` にしておく。** `pick_next` が候補にしないので選ばれないが、
-            // S4-c-3 で候補に入れたときに状態を変える必要が無い形にしておく。
+            // **`saved_rsp` は 0 のままでよい。** メイン（タスク 0）と同じ理由で、
+            // **このタスクは登録された時点で既に走っている。** 値は AP が
+            // `schedule_switch` を最初に通ったときに埋まり、**埋まるのは
+            // `pick_next` より前**なので、読まれる前に必ず書かれる。
+            stack_top: top,
+            stack_bottom: bottom,
+            // **`Ready` にしておく。** `pick_next` が巡回の候補にしないので
+            // 選ばれないが、落ち先としては選ばれる（`default_task_for`）。
             state: TaskState::Ready,
             // **担当は AP である。** これが第 1 層の実体で、
             // **AP がワーカーを選べない理由でもある。**
@@ -550,8 +567,8 @@ pub unsafe fn init_ap_idle_task() {
     );
     serial_line(format_args!(
         "task: registered the AP idle task as index {AP_IDLE_TASK} owned by cpu \
-         {AP_IDLE_TASK_OWNER}; nobody runs it in this stage (pick_next only considers \
-         workers 1..={WORKER_COUNT})"
+         {AP_IDLE_TASK_OWNER} on its per-CPU stack [{bottom:#x}, {top:#x}); the application \
+         processor does not reach the scheduler yet (irq_entry still returns early)"
     ));
 }
 
@@ -931,6 +948,11 @@ pub fn on_timer_tick(current_rsp: u64) -> u64 {
 /// スイッチの中核（yield と timer が共有）。現タスクの RSP を保存し、次タスクを
 /// 選び、RSP0 を更新して次タスクの RSP を返す。次が現タスクと同じなら何もしない。
 fn schedule_switch(current_rsp: u64) -> u64 {
+    // **このコアがスケジューラを通った回数**（S4-c-3-2a）。`current_index()` より
+    // 前で数える。あちらは sentinel を読むと停止するので、後ろに置くと
+    // **「入ったが数えられていない」**が生じる（`smp-ap-no-sentinel-clear` の
+    // 破壊はまさにその形で止まる）。
+    SCHEDULE_PASSES.this_cpu().fetch_add(1, Ordering::Relaxed);
     let current = current_index();
     scheduler::set_saved_rsp(current, current_rsp);
 

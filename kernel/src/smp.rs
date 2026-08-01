@@ -122,6 +122,59 @@ mod tests {
         allocator
     }
 
+    /// `map_ap_stacks` が実際に張る並びから、通常スタックの頂点を導く。
+    ///
+    /// **本番のコードではなくテスト側に置いてある。** production 側に同じ式を
+    /// 2 本持つと片方だけが古くなるので、**照合する側にだけ独立に書く。**
+    /// 並び = ガード + kernel + ガード + IST1 + ガード + IST2（`AP_STACK_STRIDE`）。
+    fn kernel_top_from_the_layout(slot: usize) -> u64 {
+        AP_STACK_REGION_BASE
+            + (slot as u64) * AP_STACK_STRIDE
+            + crate::stack::GUARD_SIZE as u64
+            + crate::stack::KERNEL_STACK_SIZE as u64
+    }
+
+    /// **AP 用アイドルタスクへ記述する範囲が、実際に張った通常スタックと一致する
+    /// （S4-c-3-2a）。**
+    ///
+    /// # なぜホストテストで守るのか
+    ///
+    /// `schedule_switch` の範囲検査は**切り替えが起きたときにしか走らない。**
+    /// AP 用アイドルタスクでは切り替えが起きないので、**この記述が嘘でも実行時
+    /// には誰も気づかない**（気づくのは将来ここで切り替えが起きたときで、
+    /// そのとき初めて落ちる）。**実行時に照合されない記述を守れるのは、ここだけ
+    /// である。**
+    #[test]
+    fn the_recorded_ap_kernel_stack_range_matches_the_mapped_layout() {
+        let slot = 1usize;
+        let top = kernel_top_from_the_layout(slot);
+        let (bottom, recorded_top) = kernel_stack_bounds_from_top(top);
+
+        assert_eq!(recorded_top, top);
+        // 幅はちょうど通常スタック 1 本ぶんで、IST を含んでいない。
+        assert_eq!(
+            recorded_top - bottom,
+            crate::stack::KERNEL_STACK_SIZE as u64
+        );
+
+        // **下端はガードの穴より上にある。** ガードは張らない穴なので、
+        // 範囲がそこへ食い込むと「ガードの上で走ってよい」と記述したことになる。
+        let slot_base = AP_STACK_REGION_BASE + (slot as u64) * AP_STACK_STRIDE;
+        assert_eq!(bottom, slot_base + crate::stack::GUARD_SIZE as u64);
+
+        // **IST1 の下端より下にある**（範囲が IST へ食い込んでいない）。
+        let ist1_bottom = recorded_top + crate::stack::GUARD_SIZE as u64;
+        assert!(recorded_top <= ist1_bottom);
+
+        // **次のスロットの領域へはみ出していない。**
+        assert!(recorded_top <= AP_STACK_REGION_BASE + ((slot + 1) as u64) * AP_STACK_STRIDE);
+
+        // 起動ログで実測した値に釘付けする（S4-c-3-2a、`-smp 2`、スロット 1）。
+        // **算術が合っていても定数がずれれば動くので、実測値を 1 点持っておく。**
+        assert_eq!(bottom, 0xffff_8100_0001_c000);
+        assert_eq!(recorded_top, 0xffff_8100_0002_c000);
+    }
+
     #[test]
     fn a_high_only_allocator_is_rejected() {
         let mut allocator = allocator_with_only_high_frames();
@@ -1036,6 +1089,42 @@ fn store_bringup(slot: usize, info: &ApBringUp) {
     AP_BRINGUP[base + 1].store(info.stacks.kernel_top, Ordering::SeqCst);
     AP_BRINGUP[base + 2].store(info.stacks.double_fault_top, Ordering::SeqCst);
     AP_BRINGUP[base + 3].store(info.stacks.page_fault_top, Ordering::SeqCst);
+}
+
+/// AP（`slot`）の通常カーネルスタックの範囲を返す（S4-c-3-2a）。
+///
+/// **`prepare_ap_per_cpu` の後でだけ意味を持つ。** それ以前は引き継ぎ表が
+/// 空なので `None` を返す。
+///
+/// 用途は `task::init_ap_idle_task` で、**AP 用アイドルタスクが実際に走る
+/// スタックを `Task` に記述するため**である。**IST は含めない**——
+/// `schedule_switch` の範囲検査が見るのは通常スタックだけである。
+///
+/// # **IST を含めなくてよい根拠**
+///
+/// タイマのベクタは IST を使わない。`idt::init` が IST を割り当てるのは
+/// **ベクタ 8（#DF）と 14（#PF）だけ**で、他はすべて `None` である。
+/// Ring 0 から Ring 0 への割り込みではスタックが切り替わらないので、
+/// **AP がタイマで入ったときの `rsp` は、この通常スタックの内側にある。**
+/// したがって `schedule_switch` が保存する値も範囲の内側に入る。
+/// **IST を使うベクタが増えたら、この根拠は失効する。**
+pub fn ap_kernel_stack_range(slot: usize) -> Option<(u64, u64)> {
+    Some(kernel_stack_bounds_from_top(
+        load_bringup(slot)?.stacks.kernel_top,
+    ))
+}
+
+/// 通常カーネルスタックの頂点から `[下端, 頂点)` を導く（S4-c-3-2a）。
+///
+/// **純粋な算術として切り出してある。** この範囲は
+/// `schedule_switch` の範囲検査が使うが、**AP 用アイドルタスクでは
+/// 切り替えが起きないので実行時には照合されない**（`task::init_ap_idle_task`）。
+/// **実行時に照合されない記述なので、誤りを捕まえられるのはホストテストだけである。**
+const fn kernel_stack_bounds_from_top(kernel_top: u64) -> (u64, u64) {
+    (
+        kernel_top - crate::stack::KERNEL_STACK_SIZE as u64,
+        kernel_top,
+    )
 }
 
 /// 引き継ぎ表から読む（AP 側）。

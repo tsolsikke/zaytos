@@ -877,7 +877,7 @@ pub unsafe fn run_timer_loop(
                     format_args!(
                         "heartbeat: ticks={ticks} ({} s), cpu={}, ap_ticks={}, ticks_total={}, \
                      lapic_timer_deliveries={}, timer_accounting_balanced={}, \
-                     max kernel entry depth={}, ap_current={} ap_task_iterations={}, \
+                     max kernel entry depth={}, ap_current={} ap_sched_passes={}, \
                      keys={} dropped={} \
                      stray={} spurious={} lapic_spurious={}, \
                      irq1={} balanced={}, max tick jump={}, i8042 OBF={}, PIC ISR={}",
@@ -890,13 +890,19 @@ pub unsafe fn run_timer_loop(
                         idt::timer_delivery_count(),
                         idt::timer_accounting_balances(),
                         idt::max_kernel_entry_depth(),
-                        // **「割り当てられた」と「走った」は別である（S4-c-2）。**
-                        // 占有は `CURRENT` が示し、実行は反復カウンタが示す。
+                        // **「割り当てられた」と「参加した」は別である（S4-c-2、
+                        // 観測量は S4-c-3-2a で置き換えた）。** 占有は `CURRENT` が
+                        // 示し、参加は `schedule_switch` を通った回数が示す。
                         // **片方では足りない**——占有だけなら「割り当てたが一度も
-                        // 走っていない」を通し、実行だけなら「誰の担当か分からない
+                        // 通っていない」を通し、参加だけなら「誰の担当か分からない
                         // まま数字が増えている」を通す。
+                        //
+                        // **前の観測量（アイドルループの反復回数）は捨てた。**
+                        // 早期リターンを残した構成でも同じように増えるので、
+                        // **「参加した」と「従来どおりループしている」を区別
+                        // できなかった。**
                         crate::task::ap_current_display(),
-                        crate::task::ap_idle_iterations(),
+                        crate::task::ap_schedule_passes(),
                         crate::keyboard::buffer::received_count(),
                         crate::keyboard::buffer::overflow_count(),
                         crate::keyboard::stray_irq_count(),
