@@ -35,7 +35,6 @@ use crate::paging::active::{ActivePageTable, PageSize};
 /// ワーカータスクの本数（M5-c は 2 本）。
 pub const WORKER_COUNT: usize = 2;
 
-/// タスクの総数（メイン + ワーカー）。インデックス 0 がメイン。
 /// タスクの総数。メイン（0）+ ワーカー（`1..=WORKER_COUNT`）+ AP 用アイドル（末尾）。
 ///
 /// **S4-c-2 で 1 つ増えた。** 担当コアを入れると、**AP にとっての「タスク 0」に
@@ -43,11 +42,55 @@ pub const WORKER_COUNT: usize = 2;
 /// タスク 0 は bootstrap processor の担当である）。
 const TASK_COUNT: usize = WORKER_COUNT + 2;
 
-/// AP 用アイドルタスクの添字（S4-c-2）。**この段では誰も走らせない。**
+/// メインタスクの添字。**bootstrap processor の既定タスクでもある**（S4-c-3-1）。
+const MAIN_TASK: usize = 0;
+
+/// AP 用アイドルタスクの添字（S4-c-2）。**AP の既定タスクである**（S4-c-3-1）。
 ///
-/// `pick_next` はワーカー（`1..=WORKER_COUNT`）しか候補にしないので、
-/// **足しただけでは選ばれない。** 選ばれるようにするのは S4-c-3 である。
+/// `pick_next` はワーカー（`1..=WORKER_COUNT`）しか巡回の候補にしないので、
+/// **これが巡回で選ばれることはない。** [`MAIN_TASK`] と同じ扱いで、
+/// **落ち先としてだけ選ばれる**（[`default_task_for`]）。
 const AP_IDLE_TASK: usize = WORKER_COUNT + 1;
+
+/// そのコアの既定タスク（アイドル）を返す（S4-c-3-1）。
+///
+/// # なぜ「候補ゼロなら 0」ではいけないのか
+///
+/// **固定の `0` は第 1 層も第 2 層も素通りする。** `0` は bootstrap processor の
+/// 担当なので、AP がここへ落ちると**他コアのタスクを走らせる。** しかも
+/// 落ち先は候補のフィルタを通らないので、**担当（第 1 層）も `CURRENT` 条件
+/// （第 2 層）も参照されない。** さらに BSP がワーカーを走らせている間、
+/// タスク 0 は誰の `CURRENT` にも入っていないので、**二重選択の検出器も鳴らない。**
+/// **静かに壊れる形である。**
+///
+/// # 検査ではなく、選べない形にした
+///
+/// 落ち先を**コアごとに持たせる**ことで、「落ち先が自コアの担当であること」を
+/// 定義から成り立たせる。**他コアのタスクへ落ちる経路が存在しない。**
+/// 対応は下の表明（`the_fallback_of_every_core_is_a_task_that_core_owns`）が
+/// 固定する。
+///
+/// **メインが bootstrap processor のアイドルである。** 専用のアイドルタスクを
+/// もう 1 本足さないのは、タスク 0 が既にその役（走行可能な担当が無いときの
+/// 落ち先）を果たしているためである。
+///
+/// # **これは `MAX_CPUS = 2` でしか成り立たない**
+///
+/// `else` が AP をコアで区別していないので、**`MAX_CPUS` が 3 以上になると
+/// 複数の AP が同じアイドルタスクへ落ちる。** タスクが同じならスタックも同じ
+/// なので、**「2 つ以上のコアが同一スタックを走る」が復活する。** しかも
+/// **その経路は第 1 層も第 2 層も通らない**（上のとおり落ち先は候補ではない）
+/// ので、**検出器も鳴らない。**
+///
+/// **`MAX_CPUS` を上げるなら、コアごとにアイドルタスクを持たせる作業が要る。**
+/// [`AP_IDLE_TASK_OWNER`] の doc にも同じことが書いてある。
+const fn default_task_for(cpu: usize) -> usize {
+    if cpu == common::percpu::BOOTSTRAP_PROCESSOR_SLOT {
+        MAIN_TASK
+    } else {
+        AP_IDLE_TASK
+    }
+}
 
 /// 各ワーカーのカーネルスタックの大きさ。デモは浅いので 16KiB で足りる。
 const TASK_STACK_SIZE: usize = 16 * 1024;
@@ -992,13 +1035,17 @@ fn pick_next(
             return cand;
         }
     }
-    // 走行可能な担当ワーカーが無い。**この経路は新設ではない。**
-    // 従来から「タスク 0（メイン）を返す」形で、ホストテストで固定されている。
+    // 走行可能な担当ワーカーが無いので、**自コアの既定タスクへ落ちる**（S4-c-3-1）。
     //
-    // **AP にとってのタスク 0 に相当するものは S4-c-2 で新設する。**
-    // この段では全タスクが bootstrap processor の担当なので、ここへ来るのは
-    // bootstrap processor だけである。
-    0
+    // **固定の `0` から変えた。** `0` は bootstrap processor の担当なので、
+    // AP がここへ落ちると他コアのタスクを走らせる。**しかもこの経路は候補の
+    // フィルタを通らないので、第 1 層も第 2 層も参照されず、検出器も鳴らない**
+    // （[`default_task_for`] の doc）。**落ち先をコアごとに持たせて、他コアの
+    // タスクへ落ちる経路そのものを無くしてある。**
+    //
+    // **bootstrap processor から見た振る舞いは変わらない**（`default_task_for(0)`
+    // は `MAIN_TASK` = 0）。既存の表明の期待値は 1 つも動いていない。
+    default_task_for(cpu)
 }
 
 /// ワーカー本体（`global_asm!`）から呼ばれる。現タスクの GPR 基準値を返す。
@@ -1454,6 +1501,75 @@ mod tests {
             common::percpu::BOOTSTRAP_PROCESSOR_SLOT,
             current,
         )
+    }
+
+    /// 本番の担当割り（S4-c-2 以降）。メイン + ワーカーが BSP、AP 用アイドルが AP。
+    ///
+    /// **[`ALL_BSP`] と違い、これは本番と一致する。** 下の 2 本はこちらを使う。
+    const PRODUCTION_OWNERS: [usize; TASK_COUNT] = {
+        let mut owners = [common::percpu::BOOTSTRAP_PROCESSOR_SLOT; TASK_COUNT];
+        owners[AP_IDLE_TASK] = super::AP_IDLE_TASK_OWNER;
+        owners
+    };
+
+    /// **どのコアの落ち先も、そのコアが担当しているタスクである（S4-c-3-1）。**
+    ///
+    /// これが `default_task_for` の存在理由そのものである。**固定の `0` だと
+    /// AP の落ち先が他コアの担当になり、しかもその経路は第 1 層も第 2 層も
+    /// 通らないので、検出器も鳴らずに静かに壊れる。**
+    ///
+    /// # **`MAX_CPUS` を上げるとこの表明は落ちる。それが正しい**
+    ///
+    /// `0..MAX_CPUS` を回しているので、**`MAX_CPUS` を 3 以上にした瞬間に
+    /// ここが落ちる。** `default_task_for` は AP をコアで区別しておらず、
+    /// 2 つ目以降の AP も `AP_IDLE_TASK` へ落ちるためである（同じタスク =
+    /// 同じスタックなので、**複数コアが同一スタックを走る**）。
+    ///
+    /// **落ちるのは退行ではなく、この表明が仕事をしたということである。**
+    /// **通すために表明のほうを弱めないこと**——`0..MAX_CPUS` を
+    /// `0..2` に狭めたり、AP 側を除外したりすると、**危険がそのまま残って
+    /// 検査だけが緑になる。** 正しい直し方は
+    /// **コアごとにアイドルタスクを持たせること**で、それは `MAX_CPUS` を
+    /// 上げる作業に含まれる（`docs/deferred-decisions.md` の当該項目）。
+    #[test]
+    fn the_fallback_of_every_core_is_a_task_that_core_owns() {
+        for cpu in 0..common::percpu::MAX_CPUS {
+            let fallback = super::default_task_for(cpu);
+            assert_eq!(
+                PRODUCTION_OWNERS[fallback], cpu,
+                "cpu {cpu} falls back to task {fallback}, which it does not own"
+            );
+        }
+    }
+
+    /// **AP は自分のアイドルタスクへ落ちる。メインへは落ちない（S4-c-3-1）。**
+    ///
+    /// 走行可能な担当ワーカーが無い AP を `pick_next` に通す。**`MAIN_TASK` が
+    /// 返ったら、AP が bootstrap processor のタスクを走らせることになる。**
+    #[test]
+    fn an_application_processor_falls_back_to_its_own_idle_task() {
+        let all_ready = states([true, true, true, true]);
+        let ap = super::AP_IDLE_TASK_OWNER;
+        // ワーカーは 2 本とも BSP 担当なので、AP から見た候補は 0 本である。
+        assert_eq!(
+            super::pick_next(all_ready, PRODUCTION_OWNERS, ap, 0),
+            AP_IDLE_TASK
+        );
+        assert_eq!(
+            super::pick_next(all_ready, PRODUCTION_OWNERS, ap, AP_IDLE_TASK),
+            AP_IDLE_TASK
+        );
+        // ワーカーが全部走行不可でも同じ落ち先である。
+        let none_ready = states([false, false, false, true]);
+        assert_eq!(
+            super::pick_next(none_ready, PRODUCTION_OWNERS, ap, 0),
+            AP_IDLE_TASK
+        );
+        // **bootstrap processor 側は従来どおりメインへ落ちる。**
+        assert_eq!(
+            super::pick_next(none_ready, PRODUCTION_OWNERS, 0, 0),
+            super::MAIN_TASK
+        );
     }
 
     /// **表示を変えても表現は変わらない（S4-c-2）。**
