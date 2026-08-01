@@ -1549,10 +1549,9 @@ extern "sysv64" fn kernel_main() -> ! {
     // **協調デモより前に置く。** デモはスケジューラを触るので、登録を後ろへ
     // 置くと「デモ中にタスクが増える」形になる。**増えるのは起動時の 1 回だけ**
     // にしておく。
-    // SAFETY: 起動時の単一実行文脈で、ページテーブルは自前のものへ切り替え済み。
-    unsafe {
-        kernel::task::init_ap_idle_task();
-    }
+    // **`smp::prepare_ap_per_cpu` より後**でなければならない（per-CPU スタックの
+    // 範囲を読む）。**守れていなければ停止する**ので、順序は実行時に見える。
+    kernel::task::init_ap_idle_task();
 
     kernel::task::run_cooperative_demo();
 
