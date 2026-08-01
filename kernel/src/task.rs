@@ -36,7 +36,18 @@ use crate::paging::active::{ActivePageTable, PageSize};
 pub const WORKER_COUNT: usize = 2;
 
 /// タスクの総数（メイン + ワーカー）。インデックス 0 がメイン。
-const TASK_COUNT: usize = WORKER_COUNT + 1;
+/// タスクの総数。メイン（0）+ ワーカー（`1..=WORKER_COUNT`）+ AP 用アイドル（末尾）。
+///
+/// **S4-c-2 で 1 つ増えた。** 担当コアを入れると、**AP にとっての「タスク 0」に
+/// 相当するものが要る**（`pick_next` は走行可能な担当が無いときタスク 0 を返すが、
+/// タスク 0 は bootstrap processor の担当である）。
+const TASK_COUNT: usize = WORKER_COUNT + 2;
+
+/// AP 用アイドルタスクの添字（S4-c-2）。**この段では誰も走らせない。**
+///
+/// `pick_next` はワーカー（`1..=WORKER_COUNT`）しか候補にしないので、
+/// **足しただけでは選ばれない。** 選ばれるようにするのは S4-c-3 である。
+const AP_IDLE_TASK: usize = WORKER_COUNT + 1;
 
 /// 各ワーカーのカーネルスタックの大きさ。デモは浅いので 16KiB で足りる。
 const TASK_STACK_SIZE: usize = 16 * 1024;
@@ -360,6 +371,152 @@ const EMPTY_WORKER_STACK: WorkerStack = WorkerStack {
 };
 
 static mut WORKER_STACKS: [WorkerStack; WORKER_COUNT] = [EMPTY_WORKER_STACK; WORKER_COUNT];
+
+/// AP 用アイドルタスクのスタック（S4-c-2）。
+///
+/// **ワーカーの配列に足さない。** ワーカーは `GPR_BUF` に触る BSP 専用のタスクで、
+/// **AP 用は別の性質のものである**（ADR-0023 Addendum §5）。同じ配列に入れると
+/// `WORKER_COUNT` の意味が「BSP のワーカー数」から曖昧になる。
+static mut AP_IDLE_STACK: WorkerStack = EMPTY_WORKER_STACK;
+
+/// AP 用アイドルタスクが回った回数（S4-c-2）。
+///
+/// # なぜ `Task::iterations` を使わないのか
+///
+/// あちらは volatile な素の読み書きで、**「単一コアで割り込みハンドラとスカラを
+/// 共有している」ことを根拠にしている**（`scheduler` のモジュール doc）。
+/// **AP がタスク文脈から書き、BSP がハートビートで読む形は、その根拠の外である**
+/// （タスク本体は BKL の外を走る）。**アトミックにして根拠を要らなくする。**
+///
+/// **「割り当てられた」と「走った」は別である。** 占有は `CURRENT` が示し、
+/// **実行はこの値が増えることが示す。** 片方では足りない。
+static AP_IDLE_ITERATIONS: AtomicU64 = AtomicU64::new(0);
+
+/// AP 用アイドルタスクが回った回数（S4-c-2）。**ハートビートが読む。**
+///
+/// # 「実行」の観測の定義
+///
+/// **2 回のハートビートの差が正であること**を「走っている」とする。
+/// **「0 でないこと」では足りない**——一度だけ動いて止まった形を通してしまう。
+///
+/// 折り返しは実用上起きない（`u64` で、増分はティックあたり高々数百万である）。
+/// **それでも差は `wrapping_sub` で取る**ので、折り返しても正しい差になる。
+pub fn ap_idle_iterations() -> u64 {
+    AP_IDLE_ITERATIONS.load(Ordering::Relaxed)
+}
+
+/// AP（スロット 1）が今どのタスクを走らせているか（S4-c-2）。
+///
+/// **「割り当てられた」の観測である。** 実行は [`ap_idle_iterations`] が示す。
+/// sentinel のままなら「まだ何も割り当てられていない」。
+///
+/// **これは表現を返す。** ログへ出すのは [`ap_current_display`] のほうである。
+pub fn ap_current_index() -> usize {
+    CURRENT
+        .slot(AP_IDLE_TASK_OWNER)
+        .map_or(NO_CURRENT_TASK, |slot| slot.load(Ordering::Relaxed))
+}
+
+/// sentinel をログへ出すときの綴り（S4-c-2）。
+///
+/// **表示と表現は別である。** 表現は [`NO_CURRENT_TASK`]（`usize::MAX`）のまま
+/// 変えない。変えるのは出し方だけで、`18446744073709551615` という 20 桁が
+/// ハートビートの 1 行を押し広げて目視で追いにくいことへの対処である。
+///
+/// **綴りを 1 箇所に置くのは、sentinel を出す箇所が増えたときに揃えるためである。**
+/// 現時点で sentinel を**値として**出すのはハートビートだけで、
+/// [`current_index`] は語（`the sentinel`）で書いていて値を出さない。
+const NO_CURRENT_TASK_DISPLAY: &str = "none";
+
+/// [`ap_current_index`] をログ向けに整形する（S4-c-2）。
+///
+/// sentinel なら [`NO_CURRENT_TASK_DISPLAY`]、それ以外は添字をそのまま出す。
+pub struct ApCurrent(usize);
+
+impl core::fmt::Display for ApCurrent {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.0 == NO_CURRENT_TASK {
+            formatter.write_str(NO_CURRENT_TASK_DISPLAY)
+        } else {
+            write!(formatter, "{}", self.0)
+        }
+    }
+}
+
+/// AP の現在タスクを、ハートビートへ出す形で返す（S4-c-2）。
+pub fn ap_current_display() -> ApCurrent {
+    ApCurrent(ap_current_index())
+}
+
+/// AP 用アイドルタスクの本体（S4-c-2）。**戻らない。**
+///
+/// # 何を触るか
+///
+/// **`AP_IDLE_ITERATIONS` だけである。** `GPR_BUF` にも `Locked<T>` にも
+/// コンソールにも触らない。**タスク本体は BKL の外を走る**ので、
+/// 触るものを増やすと守りを別に用意する必要が出る。
+///
+/// # この段では走らない
+///
+/// `pick_next` はワーカーしか候補にしないので、**S4-c-2 では誰もここへ来ない。**
+/// 走るのは S4-c-3 からである。
+extern "sysv64" fn ap_idle_entry() -> ! {
+    loop {
+        AP_IDLE_ITERATIONS.fetch_add(1, Ordering::Relaxed);
+        // **タイマがプリエンプトするのを待つ。** 明示的な yield はしない
+        // （`on_yield` は BSP のデモが使う経路である）。
+        core::hint::spin_loop();
+    }
+}
+
+/// AP 用アイドルタスクの所在（S4-c-2）。
+fn ap_idle_stack_bounds() -> (VirtAddr, VirtAddr) {
+    let base = addr_of!(AP_IDLE_STACK) as u64;
+    let guard = VirtAddr::new(base).expect("a .bss address is canonical");
+    let top = VirtAddr::new(base + GUARD_SIZE as u64 + TASK_STACK_SIZE as u64)
+        .expect("the AP idle stack stays within the canonical range");
+    (guard, top)
+}
+
+/// AP 用アイドルタスクを登録する（S4-c-2）。**BSP が起動時に 1 回だけ呼ぶ。**
+///
+/// # Safety
+///
+/// 起動時の単一実行文脈から、ページテーブルが自前のものへ切り替わった後に
+/// 1 回だけ呼ぶこと（ガードページを外すため）。
+pub unsafe fn init_ap_idle_task() {
+    let (guard, top) = ap_idle_stack_bounds();
+    // SAFETY: 呼び出し側の契約。ワーカーと同じ手順である。
+    unsafe { install_worker_guard_page(guard) };
+    // SAFETY: top は今ガードページを張ったスタックの頂点で、まだ誰も使っていない。
+    let saved_rsp = unsafe { build_initial_context(top, ap_idle_entry as *const () as u64) };
+    scheduler::init_task(
+        AP_IDLE_TASK,
+        Task {
+            saved_rsp,
+            stack_top: top.as_u64(),
+            stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
+            // **`Ready` にしておく。** `pick_next` が候補にしないので選ばれないが、
+            // S4-c-3 で候補に入れたときに状態を変える必要が無い形にしておく。
+            state: TaskState::Ready,
+            // **担当は AP である。** これが第 1 層の実体で、
+            // **AP がワーカーを選べない理由でもある。**
+            owner: AP_IDLE_TASK_OWNER,
+            ..EMPTY_TASK
+        },
+    );
+    serial_line(format_args!(
+        "task: registered the AP idle task as index {AP_IDLE_TASK} owned by cpu \
+         {AP_IDLE_TASK_OWNER}; nobody runs it in this stage (pick_next only considers \
+         workers 1..={WORKER_COUNT})"
+    ));
+}
+
+/// AP 用アイドルタスクの担当コア。**`MAX_CPUS = 2` の前提でスロット 1 である。**
+///
+/// **`MAX_CPUS` を上げるなら、AP ごとにアイドルタスクが要る。** そのときは
+/// この定数では足りない。**上げる前にここを見ること。**
+const AP_IDLE_TASK_OWNER: usize = 1;
 
 extern "C" {
     /// ワーカー本体（`global_asm!` で定義）。偽 `IrqContext` の RIP が指す。
@@ -1255,9 +1412,21 @@ core::arch::global_asm!(
 
 #[cfg(test)]
 mod tests {
-    use super::{TaskState, TASK_COUNT, WORKER_COUNT};
+    use super::{TaskState, AP_IDLE_TASK, TASK_COUNT, WORKER_COUNT};
 
-    /// 全タスクが bootstrap processor 担当（S4-c-1 の実態）。
+    /// 全タスクを bootstrap processor 担当に置いた構成。
+    ///
+    /// # **S4-c-2 以降、これは本番の実態ではない**
+    ///
+    /// S4-c-1 の時点では全タスクが bootstrap processor 担当だったので、
+    /// これは実態そのものだった。**S4-c-2 で AP 用アイドルタスク（添字
+    /// [`AP_IDLE_TASK`]）の担当が AP になったので、その一致は失われている。**
+    /// **本番では起こらない構成になった**ということである。
+    ///
+    /// **それでも残す。** 下の [`pick_next`] を通る既存の表明は「担当が全部
+    /// 自コアなら、担当コアを入れる前と同じに振る舞う」ことを言っており、
+    /// **その主張自体は本番と一致するかどうかに依らない。** ただし
+    /// **一致していると読まれると困る**ので、一致が切れたことを書いておく。
     const ALL_BSP: [usize; TASK_COUNT] = [common::percpu::BOOTSTRAP_PROCESSOR_SLOT; TASK_COUNT];
 
     /// 担当コアを既定（全部 BSP）にして bootstrap processor から呼ぶ短縮。
@@ -1270,6 +1439,9 @@ mod tests {
     /// 包みは担当を全部 bootstrap processor に、呼び出しコアを bootstrap
     /// processor に固定する。**したがってこれらの表明が拘束するのは
     /// 「全タスクが BSP 担当で、BSP から呼んだとき」の契約だけである。**
+    ///
+    /// **S4-c-2 以降、この固定は本番の担当割りとも一致しない**（[`ALL_BSP`] の
+    /// doc）。**「包みを通る表明が緑」から本番について言えることは、さらに狭まった。**
     ///
     /// **担当が混ざる場合や AP から呼ぶ場合は覆っていない。** そちらは
     /// `super::pick_next` を直に呼ぶ表明（`a_task_owned_by_another_cpu_is_not_a_candidate`
@@ -1284,13 +1456,31 @@ mod tests {
         )
     }
 
+    /// **表示を変えても表現は変わらない（S4-c-2）。**
+    ///
+    /// sentinel は `usize::MAX` のままで、出し方だけが `none` になる。
+    /// **この 2 つが一緒に動いてしまうと、`CURRENT` を読む側の契約が変わる。**
+    #[test]
+    fn the_sentinel_is_displayed_as_a_word_but_still_stored_as_usize_max() {
+        use super::{ApCurrent, NO_CURRENT_TASK, NO_CURRENT_TASK_DISPLAY};
+
+        assert_eq!(NO_CURRENT_TASK, usize::MAX);
+        assert_eq!(
+            format!("{}", ApCurrent(NO_CURRENT_TASK)),
+            NO_CURRENT_TASK_DISPLAY
+        );
+        // sentinel 以外は添字がそのまま出る。**`none` に丸めない。**
+        assert_eq!(format!("{}", ApCurrent(AP_IDLE_TASK)), "3");
+        assert_eq!(format!("{}", ApCurrent(0)), "0");
+    }
+
     /// **担当コアが違うタスクは候補にならない（S4-c-1）。**
     ///
     /// 第 1 層そのものの表明である。全員走行可能でも、担当が別コアなら
     /// 選ばれず、**走行可能な担当が無いときの既存の経路（タスク 0）へ落ちる。**
     #[test]
     fn a_task_owned_by_another_cpu_is_not_a_candidate() {
-        let all_ready = states([true, true, true]);
+        let all_ready = states([true, true, true, true]);
         // 全部 AP 担当にすると、bootstrap processor から見て候補が無い。
         let all_ap = [1usize; TASK_COUNT];
         assert_eq!(super::pick_next(all_ready, all_ap, 0, 0), 0);
@@ -1302,9 +1492,9 @@ mod tests {
     /// **担当が混ざっていても、自コアのぶんだけを回す（S4-c-1）。**
     #[test]
     fn only_the_tasks_owned_by_this_cpu_are_rotated() {
-        let all_ready = states([true, true, true]);
+        let all_ready = states([true, true, true, true]);
         // ワーカー 1 = BSP、ワーカー 2 = AP。
-        let mixed = [0usize, 0, 1];
+        let mixed = [0usize, 0, 1, 1];
         // BSP はワーカー 1 しか選べない。**現タスクが 1 でも 1 を返す**
         // （`pick_next` は現タスクを返しうるという既存の契約）。
         assert_eq!(super::pick_next(all_ready, mixed, 0, 0), 1);
@@ -1314,6 +1504,14 @@ mod tests {
     }
 
     /// 旧 `runnable: bool` に対応する短縮。`true` = 走行可能。
+    ///
+    /// # **S4-c-2 で入力が 1 要素増えた**
+    ///
+    /// `TASK_COUNT` が 3 から 4 へ増えたので、既存の表明の入力も 1 つ伸びた。
+    /// **足した要素は AP 用アイドルタスクで、値は本番と同じ `Ready` にしてある。**
+    /// `pick_next` はワーカー（`1..=WORKER_COUNT`）しか候補にしないので結果は
+    /// 変わらないが、**既存の表明はすべて「AP 用アイドルタスクが選ばれないこと」も
+    /// 同時に主張するようになった。** 入力が変わったことを書いておく。
     fn states(flags: [bool; TASK_COUNT]) -> [TaskState; TASK_COUNT] {
         let mut out = [TaskState::Uninitialized; TASK_COUNT];
         for (slot, flag) in out.iter_mut().zip(flags) {
@@ -1327,17 +1525,29 @@ mod tests {
     }
 
     /// この表が前提にしている形。崩れたら下の期待値を引き直すこと。
+    ///
+    /// # **S4-c-2 で実際に崩れ、この表明が止めた**
+    ///
+    /// `TASK_COUNT` を 3 から 4 へ増やしたとき（AP 用アイドルタスクの新設）、
+    /// **この表明が落ちて期待値の引き直しを促した。** 引き直した内容は
+    /// [`states`] の doc に書いてある（入力に 1 要素増え、値は本番と同じ `Ready`）。
+    /// **「崩れたら引き直せ」と書いておいた表明が、実際にその役目を果たした。**
     #[test]
     fn the_demo_has_two_workers_and_one_main() {
         assert_eq!(WORKER_COUNT, 2);
-        assert_eq!(TASK_COUNT, 3);
+        // メイン（0）+ ワーカー 2 + AP 用アイドル 1。
+        assert_eq!(TASK_COUNT, 4);
+        // **AP 用アイドルはワーカーの後ろに置く。** `pick_next` の走査範囲
+        // （`1..=WORKER_COUNT`）の外であることが、選ばれない理由である。
+        assert_eq!(AP_IDLE_TASK, WORKER_COUNT + 1);
+        assert!(AP_IDLE_TASK > WORKER_COUNT);
     }
 
     #[test]
     fn main_is_chosen_when_no_worker_can_run() {
-        assert_eq!(pick_next(states([false, false, false]), 0), 0);
-        assert_eq!(pick_next(states([false, false, false]), 1), 0);
-        assert_eq!(pick_next(states([false, false, false]), 2), 0);
+        assert_eq!(pick_next(states([false, false, false, true]), 0), 0);
+        assert_eq!(pick_next(states([false, false, false, true]), 1), 0);
+        assert_eq!(pick_next(states([false, false, false, true]), 2), 0);
     }
 
     /// **タスク 0（メイン）は候補として巡回されない。** 走行可能と印を付けても
@@ -1345,21 +1555,21 @@ mod tests {
     #[test]
     fn main_is_never_picked_as_a_rotation_candidate() {
         // メインだけが走行可能でも、返るのは 0（フォールバック経路）。
-        assert_eq!(pick_next(states([true, false, false]), 1), 0);
+        assert_eq!(pick_next(states([true, false, false, true]), 1), 0);
     }
 
     #[test]
     fn from_main_the_first_runnable_worker_is_chosen() {
-        assert_eq!(pick_next(states([false, true, true]), 0), 1);
-        assert_eq!(pick_next(states([false, false, true]), 0), 2);
-        assert_eq!(pick_next(states([false, true, false]), 0), 1);
+        assert_eq!(pick_next(states([false, true, true, true]), 0), 1);
+        assert_eq!(pick_next(states([false, false, true, true]), 0), 2);
+        assert_eq!(pick_next(states([false, true, false, true]), 0), 1);
     }
 
     /// ワーカーの間は巡回する（round-robin）。
     #[test]
     fn workers_rotate() {
-        assert_eq!(pick_next(states([false, true, true]), 1), 2);
-        assert_eq!(pick_next(states([false, true, true]), 2), 1);
+        assert_eq!(pick_next(states([false, true, true, true]), 1), 2);
+        assert_eq!(pick_next(states([false, true, true, true]), 2), 1);
     }
 
     /// **現タスクが再選択されうる。** 他に走れるワーカーがおらず自分だけが
@@ -1368,15 +1578,15 @@ mod tests {
     /// 成立している契約なので、**状態機械化でもこの性質を保つこと。**
     #[test]
     fn the_current_worker_is_returned_when_it_is_the_only_runnable_one() {
-        assert_eq!(pick_next(states([false, true, false]), 1), 1);
-        assert_eq!(pick_next(states([false, false, true]), 2), 2);
+        assert_eq!(pick_next(states([false, true, false, true]), 1), 1);
+        assert_eq!(pick_next(states([false, false, true, true]), 2), 2);
     }
 
     /// 走行不可のワーカーは飛ばされる。
     #[test]
     fn an_unrunnable_worker_is_skipped() {
-        assert_eq!(pick_next(states([false, false, true]), 1), 2);
-        assert_eq!(pick_next(states([false, true, false]), 2), 1);
+        assert_eq!(pick_next(states([false, false, true, true]), 1), 2);
+        assert_eq!(pick_next(states([false, true, false, true]), 2), 1);
     }
 
     /// **`Ready` 以外はすべて選ばれない。** 状態を増やしたときに

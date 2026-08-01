@@ -877,7 +877,8 @@ pub unsafe fn run_timer_loop(
                     format_args!(
                         "heartbeat: ticks={ticks} ({} s), cpu={}, ap_ticks={}, ticks_total={}, \
                      lapic_timer_deliveries={}, timer_accounting_balanced={}, \
-                     max kernel entry depth={}, keys={} dropped={} \
+                     max kernel entry depth={}, ap_current={} ap_task_iterations={}, \
+                     keys={} dropped={} \
                      stray={} spurious={} lapic_spurious={}, \
                      irq1={} balanced={}, max tick jump={}, i8042 OBF={}, PIC ISR={}",
                         ticks / crate::irq::timer_frequency_hz() as u64,
@@ -889,6 +890,13 @@ pub unsafe fn run_timer_loop(
                         idt::timer_delivery_count(),
                         idt::timer_accounting_balances(),
                         idt::max_kernel_entry_depth(),
+                        // **「割り当てられた」と「走った」は別である（S4-c-2）。**
+                        // 占有は `CURRENT` が示し、実行は反復カウンタが示す。
+                        // **片方では足りない**——占有だけなら「割り当てたが一度も
+                        // 走っていない」を通し、実行だけなら「誰の担当か分からない
+                        // まま数字が増えている」を通す。
+                        crate::task::ap_current_display(),
+                        crate::task::ap_idle_iterations(),
                         crate::keyboard::buffer::received_count(),
                         crate::keyboard::buffer::overflow_count(),
                         crate::keyboard::stray_irq_count(),
