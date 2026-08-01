@@ -4213,18 +4213,44 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // **S4-a の `ap-enter-scheduler` はここにあった。S4-c-3-2b で引退した。**
+    // 破壊の対象だった「AP を手前で返す分岐」が本番から消えたので、
+    // **「分岐を外す」破壊は構成できない。** 役目（sentinel が止めることの実証）は
+    // 下の `ap-no-sentinel-clear` が引き継いでいる。**引退の記録は
+    // `docs/verification-coverage.md` の破壊 feature 一覧にある。**
     CriticalTest {
-        name: "ap-enter-scheduler",
-        feature: "smp-ap-enter-scheduler-test",
+        name: "ap-no-sentinel-clear",
+        feature: "smp-ap-no-sentinel-clear",
         expected_markers: &[
-            // **sentinel が止める。** S3-b-2b-2 で置いた防衛線が、AP が実際に
-            // 割り込みを受けるようになった段で初めて本番経路から踏まれる。
+            // **sentinel が止める。** `ap-enter-scheduler` から引き継いだ主張で、
+            // **同じ行**を見ている（引き継ぎが成立していることの担保）。
             "CURRENT is still the sentinel",
         ],
+        // AP は最初のティックで止まるので、AP のハートビートは出ない。
         forbidden_markers: &["smp: ap heartbeat: cpu=1"],
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // **`sched-ignore-owner` と `sched-ignore-current` の項目はまだ置けない。**
+    //
+    // **現在の起動の時系列では、どちらも事象を作れない。** 実測で確かめた——
+    // AP が起きるのはプリエンプティブデモが**終わった後**で（`interrupts.rs`
+    // の位置は「デモの最中に AP が起きると周回数や窓カウントの観測に混ざる」
+    // という理由で決まっている）、その時点でワーカーは 2 本とも `Blocked` で
+    // ある。**`pick_next` の巡回候補はワーカーだけなので、AP から見て走行可能な
+    // 候補が 0 本になり、2 層とも外しても落ち先（AP 用アイドル）へ行くだけで
+    // ある。**
+    //
+    // **したがって項目を置くと「緑だが何も検査していない」形になる。** 2 層とも
+    // 外して二重選択が起きないのは守りが効いたからではなく、**衝突しうる対象が
+    // 存在しないから**である。`verification-coverage.md` の「検査があるように
+    // 見えて何も検査していない」の型そのものなので、**置かずに空けてある。**
+    //
+    // **cfg は本番コードに入っている**（`task::pick_next`）。**足りないのは
+    // 検査項目であって、破壊の実装ではない。** 事象を作るには「AP がスケジューラ
+    // を回している間に、bootstrap processor 担当のタスクが走行可能かつ
+    // `CURRENT` である」窓が要る。**その窓は S4-c-4（AP に `run_preemptive_demo`
+    // を呼ばせる構成）で初めて生まれる。**
     // **宛先の主張の破壊（S4-a）。** 確実に落ちるのは読み戻しの主張のほうで、
     // 配送が実際にどうなるかは観測していない。
     CriticalTest {
@@ -4607,6 +4633,57 @@ const APIC_TESTS: &[CriticalTest] = &[
     },
 ];
 
+/// 二重選択の検出器が**既定ビルドのバイナリに在ること**を見る（S4-c-3-2b）。
+///
+/// # なぜこの検査が要るのか
+///
+/// 検出器は**本番ビルドにも置いてある。** 守りが 2 層とも効いている限り鳴らない
+/// ので、**「鳴らないこと」が主張になる。** ところが**コードが無くても鳴らない。**
+/// 「本番で出ない」と「コードが無い」を区別するために、シンボルの存在を見る。
+///
+/// # **主たる論拠は構造の側にある。これは裏取りである**
+///
+/// 破壊 `sched-ignore-current` が触るのは `pick_next` のフィルタでの参照だけで、
+/// **検出器の呼び出しに `cfg` は付かない。** よって検出器は構成によらず全ビルドに
+/// 在る。**この検査はそれを機械的に確かめるだけである。**
+///
+/// # **限界: 「呼ばれうる位置に在る」までしか見えない**
+///
+/// シンボルが在ることは、**正しい位置で呼ばれることを示さない。** それを示すのは
+/// 2 層とも壊した構成（`smp-ap-test sched-ignore-both-layers`）で実際に鳴るほうで
+/// ある。**この検査だけが緑でも、検出器が働いていることの証明にはならない。**
+fn check_detector_symbol_present(workspace_root: &Path) -> Result<String> {
+    let kernel_elf = build_kernel(workspace_root, false)?;
+    let output = Command::new("nm")
+        .arg(&kernel_elf)
+        .output()
+        .context("failed to invoke nm (is binutils installed?)")?;
+    if !output.status.success() {
+        bail!("nm failed on {}", kernel_elf.display());
+    }
+    let listing = String::from_utf8_lossy(&output.stdout);
+    let found = listing
+        .lines()
+        .find(|line| line.contains(DETECTOR_SYMBOL_FRAGMENT))
+        .map(|line| line.split_whitespace().last().unwrap_or(line).to_string());
+    match found {
+        Some(symbol) => Ok(symbol),
+        None => bail!(
+            "the default kernel build has no symbol containing {DETECTOR_SYMBOL_FRAGMENT:?}. \
+             The double-selection detector must exist in the production build: \"it does not \
+             fire\" is only a claim if the code is there. If the detector was renamed, update \
+             DETECTOR_SYMBOL_FRAGMENT; if it was removed or inlined away, restore it (it is \
+             marked #[inline(never)] for exactly this reason)."
+        ),
+    }
+}
+
+/// 検出器のシンボル名に必ず現れる断片（S4-c-3-2b）。
+///
+/// Rust のシンボルはマングルされるので、**関数名の断片で照合する。**
+/// 改名したらここも直すこと（検査の失敗メッセージがそう言う）。
+const DETECTOR_SYMBOL_FRAGMENT: &str = "report_double_selection";
+
 /// 意図的に壊した経路を有効にする feature の接頭辞・名前。
 ///
 /// **既定ビルドにこれらが入ってはならない。** 入ったまま出荷すると、
@@ -4640,6 +4717,9 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "highhalf-panic-after-remove",
     "acpi-test",
     "apic-test",
+    "smp-ap-no-sentinel-clear",
+    "sched-ignore-owner",
+    "sched-ignore-current",
 ];
 
 /// 内部を隠す約束のディレクトリ。
@@ -5014,6 +5094,18 @@ fn cmd_check(full: bool) -> Result<()> {
         failed.push("commit style".to_string());
     }
 
+    // 二重選択の検出器が既定ビルドに在ること（S4-c-3-2b、静的）。
+    total += 1;
+    println!("=== xtask check: the double-selection detector is present in the default build");
+    match check_detector_symbol_present(&workspace_root) {
+        Ok(symbol) => println!("--- detector symbol: OK ({symbol})"),
+        Err(e) => {
+            println!("    {e}");
+            println!("--- detector symbol: FAILED");
+            failed.push("detector symbol".to_string());
+        }
+    }
+
     // トランポリンのバイト単位一致検査（B-2a-5、静的）。既定ビルドの入口 24 バイトが
     // 期待リテラルと一致すること。base 検査なので `--full` でなくても毎回走る。
     total += 1;
@@ -5317,8 +5409,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 18,
-    full: 100,
+    base: 19,
+    full: 101,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

@@ -1049,19 +1049,17 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         unsafe {
             crate::irq::end_of_interrupt_for_lapic_timer();
         }
-        // **AP はスケジューラへ入らない（S4-a）。**
+        // **AP もスケジューラへ入る（S4-c-3-2b）。**
         //
-        // この段の AP はタスクを実行しない。入れば `CURRENT` の sentinel を
-        // 読んで停止する（S3-b-2b-2 で置いた防衛線）。**手前で戻るのは、
-        // 停止させないためであって、sentinel を信用していないからではない。**
-        // 外し忘れても静かには壊れない。参加は S4-c である。
+        // S4-a から S4-c-3-2a までは、ここで AP を手前へ返していた。当時の AP は
+        // タスクを実行せず、入れば `CURRENT` の sentinel を読んで停止したためで
+        // ある。**S4-c-3-2b で AP に担当タスク（AP 用アイドルタスク）ができ、
+        // 起動時に sentinel を解くようになったので、その分岐は不要になった。**
         //
-        // 破壊 (S4-a, smp-ap-enter-scheduler): この分岐を外して AP を
-        // スケジューラへ入れる。sentinel が止めることを確かめる。
-        #[cfg(not(feature = "smp-ap-enter-scheduler-test"))]
-        if !common::percpu::is_bootstrap_processor() {
-            return no_switch_rsp;
-        }
+        // **破壊 `smp-ap-enter-scheduler` はここで引退した。** 分岐そのものが
+        // 無くなったので「分岐を外す」破壊は**構成できない。** 役目
+        // （sentinel が止めることの実証）は `smp-ap-no-sentinel-clear` が
+        // 引き継いでいる（あちらは分岐ではなく sentinel の解除を落とす）。
         return crate::task::on_timer_tick(no_switch_rsp);
     }
 

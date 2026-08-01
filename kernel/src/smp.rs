@@ -1287,9 +1287,34 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
     }
 
     AP_BROUGHT_UP.fetch_add(1, Ordering::SeqCst);
+
+    // === S4-c-3-2b: このコアの `CURRENT` を sentinel から解く ===
+    //
+    // **`start_local_timer` より前でなければならない。** あちらは戻らず、その先で
+    // `sti` する。**そこを過ぎると、このコアはいつでもタイマを受ける。** sentinel
+    // のまま受けると `current_index()` が sentinel を読んで停止する。
+    //
+    // **BKL をここで取る。** `CURRENT` は共有物で、書く時点で bootstrap processor
+    // が走っている。**これが `KernelEntry::ApBringUp` の唯一の取得箇所であり、
+    // 列挙にあって取得箇所が無い状態がここで解消する。**
+    //
+    // **取る区間は書き込みだけに絞る。** この関数はシリアルを直に使っており、
+    // そこは BKL の外のままである（S6 のログ規約の許可リストの対象であって、
+    // この段の対象ではない）。
+    //
+    // 破壊 (S4-c-3-2b, smp-ap-no-sentinel-clear): この解除を落とす。**AP は最初の
+    // ティックで sentinel を読んで停止する。** S4-a の `smp-ap-enter-scheduler`
+    // から役目を引き継いだ破壊である。
+    #[cfg(not(feature = "smp-ap-no-sentinel-clear"))]
+    {
+        let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::ApBringUp);
+        crate::task::adopt_idle_task_on_this_cpu();
+    }
+
     let _ = writeln!(
         serial,
-        "[INFO] smp: ap {slot} is up with its own per-CPU state (own GDT/TSS/IDT, own stacks          in PML4[258], production CR3); it runs no tasks in this stage"
+        "[INFO] smp: ap {slot} is up with its own per-CPU state (own GDT/TSS/IDT, own stacks \
+         in PML4[258], production CR3); it now takes part in scheduling on its own idle task"
     );
 
     // === S4-a: 自分の Local APIC とタイマを開ける ===

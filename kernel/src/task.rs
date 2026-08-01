@@ -21,7 +21,7 @@ use core::fmt::Write as _;
 mod scheduler;
 
 use core::ptr::addr_of;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use common::addr::VirtAddr;
 use common::critical::critical_nesting_depth;
@@ -583,8 +583,24 @@ pub fn init_ap_idle_task() {
     serial_line(format_args!(
         "task: registered the AP idle task as index {AP_IDLE_TASK} owned by cpu \
          {AP_IDLE_TASK_OWNER} on its per-CPU stack [{bottom:#x}, {top:#x}); the application \
-         processor does not reach the scheduler yet (irq_entry still returns early)"
+         processor adopts it at bring-up and schedules on it from then on"
     ));
+}
+
+/// **このコアの `CURRENT` を、自分の既定タスクにする**（S4-c-3-2b）。
+///
+/// AP が本番の世界へ移った直後に 1 回だけ呼ぶ。**sentinel を解く唯一の箇所である。**
+///
+/// # 呼び出しの前提
+///
+/// **BKL を保持した状態で呼ぶこと**（`KernelEntry::ApBringUp`）。`CURRENT` は
+/// 共有物で、書く時点で bootstrap processor が走っている。
+///
+/// **自コアのタイマを開ける前に呼ぶこと。** 開けた後だと、解く前にティックが
+/// 来て [`current_index`] が sentinel を読んで停止しうる。
+pub fn adopt_idle_task_on_this_cpu() {
+    let cpu = common::percpu::cpu_id();
+    set_current_index(default_task_for(cpu));
 }
 
 /// AP 用アイドルタスクの担当コア。**`MAX_CPUS = 2` の前提でスロット 1 である。**
@@ -980,12 +996,36 @@ fn schedule_switch(current_rsp: u64) -> u64 {
 
     #[cfg(not(feature = "task-switch-no-swap"))]
     {
+        let cpu = common::percpu::cpu_id();
+        // **`CURRENT` を読むのはここ 1 回だけである。** 同じスナップショットを
+        // フィルタ（[`pick_next`]）と検出器（[`report_double_selection`]）の
+        // 両方へ渡す。
+        //
+        // **読み直さない理由は、検出器の根拠を明確にするためである。** 別々に
+        // 読むと、フィルタが見た状態と検出器が見た状態が違いうる。そうなると
+        // 「フィルタが通したのに検出器が鳴った」が**守りの破れなのか読んだ時点の
+        // ずれなのか**を区別できない。**1 回の読みから両方を導けば、その曖昧さが
+        // 構造的に無くなる。**
+        //
+        // BKL の内側なので実害は無いはずだが、**「無いはず」に依らない形にして
+        // ある**（借りている保証を減らす）。
+        let currents = current_indices();
         let next = pick_next(
             scheduler::states(),
             scheduler::owners(),
-            common::percpu::cpu_id(),
+            currents,
+            cpu,
             current,
         );
+        // **検出器（S4-c-3-2b）。** 2 層とも迂回されたときだけ鳴る。
+        //
+        // **BKL の内側である**——`irq_entry` が入口で取っており、ここはその中
+        // である。**BKL の外の行は判定に使えない**（S4-b-4 でバイト混線の実物を
+        // 観測している）。
+        //
+        // **フィルタより後に置く。** フィルタが効いていればここは通らないので、
+        // 鳴ったこと自体が「フィルタが通さなかったはずのものが通った」を意味する。
+        report_double_selection(next, cpu, &currents);
         // 走らせるべき相手がいない（=現タスクのまま）なら何もしない。デモ後の
         // ハートビート区間（走行可能なワーカーが無い）ではここに来て no-op になる。
         if next == current {
@@ -1048,9 +1088,82 @@ fn schedule_switch(current_rsp: u64) -> u64 {
 /// メイン（0）へ戻る。
 // no-swap の破壊ビルドではスイッチしないので、次タスクを選ばず未使用になる。
 #[cfg_attr(feature = "task-switch-no-swap", allow(dead_code))]
+/// **あるタスクが、自分以外のコアの `CURRENT` に入っているか**（S4-c-3-2b）。
+///
+/// 第 2 層のフィルタと、二重選択の検出器が**共有する述語である。**
+///
+/// # **この述語自体には `cfg` を付けない**
+///
+/// 破壊 `sched-ignore-current` が無効にするのは**フィルタでの参照だけ**で、
+/// **検出器の参照は生かす。** 述語ごと `cfg` で消すと**検出器も一緒に死に、
+/// 2 層とも壊した構成で主マーカーが出なくなる。** 壊したい対象は「フィルタが
+/// 見ること」であって「見る手段が在ること」ではない。
+///
+/// # 限界
+///
+/// **フィルタと検出器は同じ出所（`CURRENT`）から両辺を導く。** したがって
+/// **この述語自体の誤りは検出できない**（`currents` の読み方が間違っていれば、
+/// フィルタも検出器も同じように間違う）。**検出できるのは「2 層とも迂回された
+/// こと」だけである。** `docs/verification-coverage.md` の「同一の出所から
+/// 両辺を導く検査はその出所の誤りを検出できない」と同じ型である。
+fn is_running_on_another_cpu(task: usize, cpu: usize, currents: &[usize; MAX_CPUS]) -> bool {
+    currents
+        .iter()
+        .enumerate()
+        .any(|(other, &running)| other != cpu && running == task)
+}
+
+/// 全コアの `CURRENT` を読む（S4-c-3-2b）。**第 2 層と検出器の入力である。**
+fn current_indices() -> [usize; MAX_CPUS] {
+    let mut out = [NO_CURRENT_TASK; MAX_CPUS];
+    for (cpu, slot) in out.iter_mut().enumerate() {
+        if let Some(current) = CURRENT.slot(cpu) {
+            *slot = current.load(Ordering::Relaxed);
+        }
+    }
+    out
+}
+
+/// 二重選択の検出器が既に鳴ったか。**系全体で 1 度だけ出す。**
+static DOUBLE_SELECTION_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// **同じタスクが 2 つのコアから選ばれたことを、1 度だけ報告する**（S4-c-3-2b）。
+///
+/// # 本番ビルドにも在る
+///
+/// **発火条件が無いことに意味がある。** 守りが 2 層とも効いている限りここは
+/// 鳴らないので、**「鳴らないこと」が主張になる。** そのためには**コードが
+/// 在ること**が要る。「本番で出ない」と「コードが無い」を区別できるように、
+/// `cargo xtask check` が**既定ビルドのバイナリにこのシンボルが在ること**を
+/// 見る（`detector-symbol-present`）。
+///
+/// **主たる論拠は構造の側にある。** 破壊 `sched-ignore-current` が触るのは
+/// [`pick_next`] のフィルタでの参照だけで、**ここの呼び出しに `cfg` は付かない。**
+/// よって検出器は構成によらず全ビルドに在る。**シンボル検査はその裏取りである。**
+///
+/// **シンボル検査の限界も書いておく。** 見えるのは「呼ばれうる位置に在る」まで
+/// で、**「正しい位置で呼ばれる」ことは示さない。** それを示すのは
+/// 2 層とも壊した構成（`sched-ignore-owner` + `sched-ignore-current`）で
+/// 実際に鳴ることのほうである。
+#[inline(never)]
+fn report_double_selection(next: usize, cpu: usize, currents: &[usize; MAX_CPUS]) {
+    if !is_running_on_another_cpu(next, cpu, currents) {
+        return;
+    }
+    if DOUBLE_SELECTION_REPORTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    serial_line(format_args!(
+        "[ERROR] task: double selection detected: cpu {cpu} picked task {next}, which is \
+         already the current task of another cpu (currents={currents:?}); both guard layers \
+         were bypassed"
+    ));
+}
+
 fn pick_next(
     states: [TaskState; TASK_COUNT],
     owners: [usize; TASK_COUNT],
+    currents: [usize; MAX_CPUS],
     cpu: usize,
     current: usize,
 ) -> usize {
@@ -1062,10 +1175,23 @@ fn pick_next(
         };
         // **第 1 層: 自コアが担当のタスクだけを候補にする（S4-c-1）。**
         //
-        // **破壊はこの段では置かない。** `sched-ignore-owner` は第 2 層
-        // （`CURRENT` 条件）と組んで初めて事象を作るので、**第 2 層が入る
-        // S4-c-3 で一緒に置く。** 片方だけ置いても何も示せない。
+        // 破壊 (S4-c-3-2b, sched-ignore-owner): この層だけを外す。**それだけでは
+        // 二重選択は起きない**——第 2 層が防ぐ。**第 2 層が働いていることの
+        // 実証がこの破壊の役目である。**
+        #[cfg(not(feature = "sched-ignore-owner"))]
         if owners[cand] != cpu {
+            continue;
+        }
+        // **第 2 層: 他コアが今走らせているタスクは選ばない（S4-c-3-2b）。**
+        //
+        // **本番では発火条件が無い。** 担当が互いに素なので、自コア担当のタスクが
+        // 他コアの `CURRENT` に入ることがない。**発火条件が無いことに意味がある**
+        // ので、本番ビルドにも置く。
+        //
+        // 破壊 (S4-c-3-2b, sched-ignore-current): **ここの参照だけを外す。**
+        // 述語も検出器もそのまま残る（[`is_running_on_another_cpu`] の doc）。
+        #[cfg(not(feature = "sched-ignore-current"))]
+        if is_running_on_another_cpu(cand, cpu, &currents) {
             continue;
         }
         if states[cand].is_runnable() {
@@ -1513,6 +1639,68 @@ mod tests {
     /// **一致していると読まれると困る**ので、一致が切れたことを書いておく。
     const ALL_BSP: [usize; TASK_COUNT] = [common::percpu::BOOTSTRAP_PROCESSOR_SLOT; TASK_COUNT];
 
+    /// どのコアも何も走らせていない `CURRENT`（S4-c-3-2b）。
+    ///
+    /// **第 2 層が何も弾かない入力である。** 既存の表明はすべてこれを通すので、
+    /// **第 2 層を足しても期待値が 1 つも動かない。**
+    const NOBODY_RUNNING: [usize; common::percpu::MAX_CPUS] =
+        [super::NO_CURRENT_TASK; common::percpu::MAX_CPUS];
+
+    /// **第 2 層の述語は、自コアを数えない（S4-c-3-2b）。**
+    ///
+    /// 自分の `CURRENT` に入っているのは当たり前なので、そこで弾くと
+    /// **現タスクを選び直せなくなる**（`pick_next` が現タスクを返しうるという
+    /// 既存の契約が壊れる）。
+    #[test]
+    fn the_layer_two_predicate_ignores_the_calling_cpu() {
+        let mut currents = NOBODY_RUNNING;
+        currents[0] = 1;
+        // bootstrap processor 自身がタスク 1 を走らせている。自分は数えない。
+        assert!(!super::is_running_on_another_cpu(1, 0, &currents));
+        // AP から見ると、タスク 1 は他コアが走らせている。
+        assert!(super::is_running_on_another_cpu(1, 1, &currents));
+        // 誰も走らせていないタスクは、どちらから見ても弾かれない。
+        assert!(!super::is_running_on_another_cpu(2, 0, &currents));
+        assert!(!super::is_running_on_another_cpu(2, 1, &currents));
+    }
+
+    /// **sentinel は「走っている」に数えない（S4-c-3-2b）。**
+    ///
+    /// sentinel は `usize::MAX` で、**どのタスクの添字とも一致しない。**
+    /// 一致してしまうと、まだ何も割り当てていないコアが、**全タスクを
+    /// 「他コアが走らせている」ことにしてしまう。**
+    #[test]
+    fn the_sentinel_is_not_treated_as_a_running_task() {
+        for task in 0..TASK_COUNT {
+            assert!(!super::is_running_on_another_cpu(task, 0, &NOBODY_RUNNING));
+        }
+    }
+
+    /// **第 2 層は、他コアが走らせているタスクを候補から外す（S4-c-3-2b）。**
+    ///
+    /// **本番では発火条件が無い**（担当が互いに素）ので、担当を意図的に
+    /// そろえて第 2 層だけを働かせる。**`sched-ignore-owner` を入れた構成が
+    /// これにあたる。**
+    #[test]
+    fn layer_two_skips_a_task_that_another_cpu_is_running() {
+        let all_ready = states([true, true, true, true]);
+        // 全部 bootstrap processor 担当（= 第 1 層が何も弾かない構成）。
+        let mut currents = NOBODY_RUNNING;
+
+        // AP がワーカー 1 を走らせている。bootstrap processor はワーカー 2 を選ぶ。
+        currents[1] = 1;
+        assert_eq!(super::pick_next(all_ready, ALL_BSP, currents, 0, 0), 2);
+
+        // AP がワーカー 2 を走らせている。bootstrap processor はワーカー 1 を選ぶ。
+        currents[1] = 2;
+        assert_eq!(super::pick_next(all_ready, ALL_BSP, currents, 0, 0), 1);
+
+        // **`MAX_CPUS = 2` では、塞がるワーカーは同時に 1 本までである。**
+        // 他コアは 1 つで、1 コアは 1 タスクしか走らせないためで、
+        // **「2 本とも塞がって落ち先へ行く」は現在の構成では作れない。**
+        // `MAX_CPUS` を上げたらここに 1 件足せる。
+    }
+
     /// 担当コアを既定（全部 BSP）にして bootstrap processor から呼ぶ短縮。
     ///
     /// **既存の契約を書き換えないための薄い包みである。** S4-c-1 は振る舞い
@@ -1535,6 +1723,7 @@ mod tests {
         super::pick_next(
             states,
             ALL_BSP,
+            NOBODY_RUNNING,
             common::percpu::BOOTSTRAP_PROCESSOR_SLOT,
             current,
         )
@@ -1589,22 +1778,28 @@ mod tests {
         let ap = super::AP_IDLE_TASK_OWNER;
         // ワーカーは 2 本とも BSP 担当なので、AP から見た候補は 0 本である。
         assert_eq!(
-            super::pick_next(all_ready, PRODUCTION_OWNERS, ap, 0),
+            super::pick_next(all_ready, PRODUCTION_OWNERS, NOBODY_RUNNING, ap, 0),
             AP_IDLE_TASK
         );
         assert_eq!(
-            super::pick_next(all_ready, PRODUCTION_OWNERS, ap, AP_IDLE_TASK),
+            super::pick_next(
+                all_ready,
+                PRODUCTION_OWNERS,
+                NOBODY_RUNNING,
+                ap,
+                AP_IDLE_TASK
+            ),
             AP_IDLE_TASK
         );
         // ワーカーが全部走行不可でも同じ落ち先である。
         let none_ready = states([false, false, false, true]);
         assert_eq!(
-            super::pick_next(none_ready, PRODUCTION_OWNERS, ap, 0),
+            super::pick_next(none_ready, PRODUCTION_OWNERS, NOBODY_RUNNING, ap, 0),
             AP_IDLE_TASK
         );
         // **bootstrap processor 側は従来どおりメインへ落ちる。**
         assert_eq!(
-            super::pick_next(none_ready, PRODUCTION_OWNERS, 0, 0),
+            super::pick_next(none_ready, PRODUCTION_OWNERS, NOBODY_RUNNING, 0, 0),
             super::MAIN_TASK
         );
     }
@@ -1636,10 +1831,10 @@ mod tests {
         let all_ready = states([true, true, true, true]);
         // 全部 AP 担当にすると、bootstrap processor から見て候補が無い。
         let all_ap = [1usize; TASK_COUNT];
-        assert_eq!(super::pick_next(all_ready, all_ap, 0, 0), 0);
-        assert_eq!(super::pick_next(all_ready, all_ap, 0, 1), 0);
+        assert_eq!(super::pick_next(all_ready, all_ap, NOBODY_RUNNING, 0, 0), 0);
+        assert_eq!(super::pick_next(all_ready, all_ap, NOBODY_RUNNING, 0, 1), 0);
         // 逆に、AP から見れば選べる。
-        assert_eq!(super::pick_next(all_ready, all_ap, 1, 0), 1);
+        assert_eq!(super::pick_next(all_ready, all_ap, NOBODY_RUNNING, 1, 0), 1);
     }
 
     /// **担当が混ざっていても、自コアのぶんだけを回す（S4-c-1）。**
@@ -1650,10 +1845,10 @@ mod tests {
         let mixed = [0usize, 0, 1, 1];
         // BSP はワーカー 1 しか選べない。**現タスクが 1 でも 1 を返す**
         // （`pick_next` は現タスクを返しうるという既存の契約）。
-        assert_eq!(super::pick_next(all_ready, mixed, 0, 0), 1);
-        assert_eq!(super::pick_next(all_ready, mixed, 0, 1), 1);
+        assert_eq!(super::pick_next(all_ready, mixed, NOBODY_RUNNING, 0, 0), 1);
+        assert_eq!(super::pick_next(all_ready, mixed, NOBODY_RUNNING, 0, 1), 1);
         // AP はワーカー 2 しか選べない。
-        assert_eq!(super::pick_next(all_ready, mixed, 1, 0), 2);
+        assert_eq!(super::pick_next(all_ready, mixed, NOBODY_RUNNING, 1, 0), 2);
     }
 
     /// 旧 `runnable: bool` に対応する短縮。`true` = 走行可能。

@@ -273,7 +273,9 @@ smp-ap-timer-no-svr-test = []
 smp-ap-timer-share-ticks-test = []
 # AP がスケジューラへ入る。この段は AP でタスクを実行しないので、CURRENT の
 # sentinel を読んで停止するのが正しい。
-smp-ap-enter-scheduler-test = []
+smp-ap-no-sentinel-clear = []
+sched-ignore-owner = []
+sched-ignore-current = []
 # キーボードの redirection entry の宛先を logical の broadcast にする。
 # **確実に落ちるのは読み戻しの主張のほうである。** 配送が実際にどうなるか
 # （AP が受けて共有リングバッファへ積むか）は観測していない。

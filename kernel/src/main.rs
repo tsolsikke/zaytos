@@ -4575,9 +4575,19 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "TIMER_TICKS を per-CPU にせず 1 つを共有する",
     ),
     (
-        "smp-ap-enter-scheduler-test",
-        cfg!(feature = "smp-ap-enter-scheduler-test"),
-        "AP をスケジューラへ入れる",
+        "smp-ap-no-sentinel-clear",
+        cfg!(feature = "smp-ap-no-sentinel-clear"),
+        "AP 起動時に CURRENT の sentinel を解かない",
+    ),
+    (
+        "sched-ignore-owner",
+        cfg!(feature = "sched-ignore-owner"),
+        "pick_next の第 1 層（担当コア）を無効にする",
+    ),
+    (
+        "sched-ignore-current",
+        cfg!(feature = "sched-ignore-current"),
+        "pick_next の第 2 層（CURRENT 条件）のフィルタでの参照だけを無効にする",
     ),
     (
         "ioapic-keyboard-broadcast-test",
