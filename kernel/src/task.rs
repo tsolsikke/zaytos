@@ -1264,6 +1264,17 @@ mod tests {
     ///
     /// **既存の契約を書き換えないための薄い包みである。** S4-c-1 は振る舞い
     /// 不変の段なので、**既存の表明はそのまま残し、担当コアつきの表明を足す。**
+    ///
+    /// # **この包みを通る表明が拘束する範囲は狭い**
+    ///
+    /// 包みは担当を全部 bootstrap processor に、呼び出しコアを bootstrap
+    /// processor に固定する。**したがってこれらの表明が拘束するのは
+    /// 「全タスクが BSP 担当で、BSP から呼んだとき」の契約だけである。**
+    ///
+    /// **担当が混ざる場合や AP から呼ぶ場合は覆っていない。** そちらは
+    /// `super::pick_next` を直に呼ぶ表明（`a_task_owned_by_another_cpu_is_not_a_candidate`
+    /// と `only_the_tasks_owned_by_this_cpu_are_rotated`）が別に持つ。
+    /// **包みを通る表明が全部緑でも、担当コアの振る舞いは何も言えない。**
     fn pick_next(states: [TaskState; TASK_COUNT], current: usize) -> usize {
         super::pick_next(
             states,
