@@ -565,10 +565,23 @@ pub fn init_ap_idle_task() {
     scheduler::init_task(
         AP_IDLE_TASK,
         Task {
-            // **`saved_rsp` は 0 のままでよい。** メイン（タスク 0）と同じ理由で、
-            // **このタスクは登録された時点で既に走っている。** 値は AP が
-            // `schedule_switch` を最初に通ったときに埋まり、**埋まるのは
-            // `pick_next` より前**なので、読まれる前に必ず書かれる。
+            // **`saved_rsp` は 0 のままにしてある。** メイン（タスク 0）と同じ形で、
+            // **このタスクは登録された時点で既に走っている。**
+            //
+            // **「読まれる前に必ず書かれる」は条件つきである（S4-c-4-2 で判明）。**
+            // 成り立つのは**この AP の `CURRENT` がこのタスクのままである間**だけ
+            // である。`schedule_switch` は `set_saved_rsp(current, ...)` を
+            // `pick_next` より前に行うので、`current` がこのタスクなら確かに
+            // 先に埋まる。**ところが `CURRENT` を外から別のタスクへ移されると、
+            // このタスクは「切り替え先」になり、0 のままの `saved_rsp` が
+            // 読まれる。** 実際に踏んだ——`smp-ap-runs-preemptive-demo` +
+            // `sched-ignore-bootstrap-tripwire` では `setup_preemptive_tasks` が
+            // `set_current_index(0)` を呼ぶので AP の `CURRENT` が 0 になり、
+            // **次の `pick_next` がこのタスクを選んだ時点で範囲検査が
+            // 「saved_rsp 0x0 は範囲外」で停止する。**
+            //
+            // **停止するのは正しい。** 0 は本当にこのタスクのスタックの外である。
+            // **ここで書いておくのは、「必ず書かれる」を無条件と読まないためである。**
             stack_top: top,
             stack_bottom: bottom,
             // **`Ready` にしておく。** `pick_next` が巡回の候補にしないので
@@ -665,6 +678,15 @@ fn require_bootstrap_processor(what: &str) {
     let cpu = 1usize;
     #[cfg(not(feature = "percpu-fake-nonzero-cpu-id"))]
     let cpu = common::percpu::cpu_id();
+    // 破壊 (S4-c-4-2, sched-ignore-bootstrap-tripwire): **この見張りを外す。**
+    //
+    // **単独では意味を持たない。** `smp-ap-runs-preemptive-demo` と組んで初めて
+    // 「AP がデモを実際に走らせる」形になり、そこで**二重選択の窓が生まれる。**
+    // S4-c-4-1 は逆に**この見張りが在ること**を要求するので、
+    // **同じ起動では両立しない。**
+    #[cfg(feature = "sched-ignore-bootstrap-tripwire")]
+    let _ = cpu;
+    #[cfg(not(feature = "sched-ignore-bootstrap-tripwire"))]
     if cpu != 0 {
         serial_line(format_args!(
             "task: {what} may only run on the bootstrap processor (cpu 0), but cpu_id()={cpu}; \
@@ -1010,13 +1032,19 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         // BKL の内側なので実害は無いはずだが、**「無いはず」に依らない形にして
         // ある**（借りている保証を減らす）。
         let currents = current_indices();
-        let next = pick_next(
-            scheduler::states(),
-            scheduler::owners(),
-            currents,
-            cpu,
-            current,
-        );
+        // `owners` も 1 回だけ読み、`pick_next` と下の観測の両方へ渡す
+        // （`currents` と同じ理由。上のコメント）。
+        let owners = scheduler::owners();
+        let next = pick_next(scheduler::states(), owners, currents, cpu, current);
+        // **第 1 層の実証（S4-c-4-2）。** 自コアが担当していないタスクを選んだら
+        // 1 度だけ出す。**本番では鳴らない**——第 1 層が候補から外し、落ち先も
+        // 定義上自コアの担当だからである（`default_task_for`）。
+        //
+        // **検出器とは別の事象を見ている。** あちらは「他コアが今走らせている
+        // タスクを選んだ」、こちらは「自分のものでないタスクを選んだ」である。
+        // **前者は後者を含むが、逆は含まない**——他コアがまだ走らせていない
+        // よそのタスクを選ぶ形は、こちらだけが捉える。
+        report_foreign_task_adoption(next, cpu, &owners);
         // **検出器（S4-c-3-2b）。** 2 層とも迂回されたときだけ鳴る。
         //
         // **BKL の内側である**——`irq_entry` が入口で取っており、ここはその中
@@ -1122,6 +1150,43 @@ fn current_indices() -> [usize; MAX_CPUS] {
         }
     }
     out
+}
+
+/// 担当外のタスクを選んだことを既に報告したか。**系全体で 1 度だけ出す。**
+static FOREIGN_ADOPTION_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// **自コアが担当していないタスクを選んだことを、1 度だけ報告する**（S4-c-4-2）。
+///
+/// # なぜ検出器と別に要るのか
+///
+/// **「窓があること」を運に依らず観測するためである。** 二重選択の検出器は
+/// 「他コアが**今**走らせているタスクを選んだ」ときにしか鳴らないので、
+/// **第 1 層だけを外した構成（第 2 層が防ぐ）では鳴らない。** そこで
+/// 「AP がワーカーを走らせられたのか、そもそも走らせていないのか」を
+/// 区別する手段が無くなる。**区別できないと、対照が
+/// 「窓が無いから鳴らない」に戻る**（S4-c-3-2b で実際に踏んだ形）。
+///
+/// # **ハートビートの標本抽出に依存しない**
+///
+/// `ap_current` は 1 秒ごとのスナップショットなので、**短時間だけワーカーを
+/// 走らせた場合に取り逃す。** こちらは**起きた瞬間に 1 度だけ行を出す**ので、
+/// **観測が運に依存しない。**
+///
+/// **本番では鳴らない。** 第 1 層が候補から外し、落ち先も定義上自コアの担当で
+/// ある。**発火条件が無いことに意味があるので、本番ビルドに置く。**
+#[inline(never)]
+fn report_foreign_task_adoption(next: usize, cpu: usize, owners: &[usize; TASK_COUNT]) {
+    let owner = owners[next];
+    if owner == cpu {
+        return;
+    }
+    if FOREIGN_ADOPTION_REPORTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    serial_line(format_args!(
+        "[ERROR] task: cpu {cpu} selected task {next}, which is owned by cpu {owner}; the \
+         first guard layer did not keep it out"
+    ));
 }
 
 /// 二重選択の検出器が既に鳴ったか。**系全体で 1 度だけ出す。**

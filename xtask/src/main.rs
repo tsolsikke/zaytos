@@ -4248,26 +4248,66 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
-    // **`sched-ignore-owner` と `sched-ignore-current` の項目はまだ置けない。**
+    // **S4-c-4-2 の梯子。ここに置けたのは下 2 段だけである。**
     //
-    // **現在の起動の時系列では、どちらも事象を作れない。** 実測で確かめた——
-    // AP が起きるのはプリエンプティブデモが**終わった後**で（`interrupts.rs`
-    // の位置は「デモの最中に AP が起きると周回数や窓カウントの観測に混ざる」
-    // という理由で決まっている）、その時点でワーカーは 2 本とも `Blocked` で
-    // ある。**`pick_next` の巡回候補はワーカーだけなので、AP から見て走行可能な
-    // 候補が 0 本になり、2 層とも外しても落ち先（AP 用アイドル）へ行くだけで
-    // ある。**
+    //   tripwire 外し                 → AP がワーカーを取れない = 第 1 層の実証（対照）
+    //   tripwire 外し + ignore-owner  → AP がワーカーを取れる   = 第 1 層の実証（本命）
     //
-    // **したがって項目を置くと「緑だが何も検査していない」形になる。** 2 層とも
-    // 外して二重選択が起きないのは守りが効いたからではなく、**衝突しうる対象が
-    // 存在しないから**である。`verification-coverage.md` の「検査があるように
-    // 見えて何も検査していない」の型そのものなので、**置かずに空けてある。**
+    // **この 2 つは対になって第 1 層の効きを直接示す。** 差は第 1 層 1 つだけで、
+    // 「取れない」と「取れる」が `selected task ... owned by cpu` の 1 行で分かれる。
     //
-    // **cfg は本番コードに入っている**（`task::pick_next`）。**足りないのは
-    // 検査項目であって、破壊の実装ではない。** 事象を作るには「AP がスケジューラ
-    // を回している間に、bootstrap processor 担当のタスクが走行可能かつ
-    // `CURRENT` である」窓が要る。**その窓は S4-c-4（AP に `run_preemptive_demo`
-    // を呼ばせる構成）で初めて生まれる。**
+    // **第 2 層と検出器の実証はここには置けなかった。** デモ経由では窓が閉じる——
+    // `setup_preemptive_tasks` が `demo_deadline` を**呼んだコアのティック**で
+    // 決めるのに対し、`on_timer_tick` の締切判定は**各コアが自分のティック**で
+    // 行う。AP のティックは 0、bootstrap processor は既に数百なので、
+    // **BSP は次のティックでワーカーを `Blocked` に戻す。** 競合が起きないまま
+    // 窓が閉じるので、「検出行が出ない」は守りの効きを示さない。
+    // 詳細と代案は `docs/verification-coverage.md` にある。
+    //
+    // **「窓があるか」は `selected task ... owned by cpu` の 1 行で見る。**
+    // ハートビートの `ap_current` は 1 秒ごとの標本なので取り逃しうる。
+    // **こちらは起きた瞬間に 1 度だけ出るので、観測が運に依存しない。**
+    //
+    // **判定に使わない観測量**（走らせる前に決めてある）:
+    // GPR 照合の結果、`switches`、`sum(resumes)`。第 1 層を外すと `GPR_BUF` が
+    // コア間で競合し、デモの会計もコア別ではないので合わない。**どちらも構成の
+    // 帰結であって退行ではない。**
+    CriticalTest {
+        name: "ap-demo-layer1-holds",
+        feature: "smp-ap-runs-preemptive-demo,sched-ignore-bootstrap-tripwire",
+        // **AP は落ち先（自分のアイドルタスク）へ回され、そこで停止する。**
+        // `setup_preemptive_tasks` が `set_current_index(0)` を呼ぶので AP の
+        // `CURRENT` が 0 になり、次の選択でアイドルタスクが**切り替え先**に
+        // なる。その `saved_rsp` は 0 のままなので範囲検査が捕まえる。
+        // **停止まで含めて表明する**——書かないと「穏やかに落ち先へ回った」と
+        // 読まれるが、実際には止まっている。
+        expected_markers: &[
+            "starting preemptive demo",
+            "is outside its stack",
+            "stacks are mixed",
+        ],
+        forbidden_markers: &[
+            // 第 1 層が効いているので、AP は担当外のワーカーを取れない。
+            "the first guard layer did not keep it out",
+            "double selection detected",
+        ],
+        wait_for_full_timeout: true,
+        min_heartbeats: None,
+    },
+    CriticalTest {
+        name: "ap-demo-layer1-off",
+        feature: "smp-ap-runs-preemptive-demo,sched-ignore-bootstrap-tripwire,sched-ignore-owner",
+        // **第 1 層を外すと AP が担当外のワーカーを取れる。** 上の項目との差は
+        // 第 1 層 1 つだけで、この行の有無が第 1 層の効きそのものである。
+        //
+        // **`double selection detected` が出ないことは、第 2 層の実証ではない。**
+        // 上のコメントのとおり窓が閉じるので競合が起きない。**禁止マーカーには
+        // 入れるが、「第 2 層が防いだ」とは読まないこと。**
+        expected_markers: &["the first guard layer did not keep it out"],
+        forbidden_markers: &["double selection detected"],
+        wait_for_full_timeout: true,
+        min_heartbeats: None,
+    },
     // **宛先の主張の破壊（S4-a）。** 確実に落ちるのは読み戻しの主張のほうで、
     // 配送が実際にどうなるかは観測していない。
     CriticalTest {
@@ -4679,27 +4719,28 @@ fn check_detector_symbol_present(workspace_root: &Path) -> Result<String> {
         bail!("nm failed on {}", kernel_elf.display());
     }
     let listing = String::from_utf8_lossy(&output.stdout);
-    let found = listing
-        .lines()
-        .find(|line| line.contains(DETECTOR_SYMBOL_FRAGMENT))
-        .map(|line| line.split_whitespace().last().unwrap_or(line).to_string());
-    match found {
-        Some(symbol) => Ok(symbol),
-        None => bail!(
-            "the default kernel build has no symbol containing {DETECTOR_SYMBOL_FRAGMENT:?}. \
-             The double-selection detector must exist in the production build: \"it does not \
-             fire\" is only a claim if the code is there. If the detector was renamed, update \
-             DETECTOR_SYMBOL_FRAGMENT; if it was removed or inlined away, restore it (it is \
-             marked #[inline(never)] for exactly this reason)."
-        ),
+    let mut found = Vec::new();
+    for fragment in DETECTOR_SYMBOL_FRAGMENTS {
+        match listing.lines().find(|line| line.contains(fragment)) {
+            Some(line) => found.push(line.split_whitespace().last().unwrap_or(line).to_string()),
+            None => bail!(
+                "the default kernel build has no symbol containing {fragment:?}. The production \
+                 observers must exist in the default build: \"it does not fire\" is only a claim \
+                 if the code is there. If it was renamed, update DETECTOR_SYMBOL_FRAGMENTS; if it \
+                 was removed or inlined away, restore it (both are marked #[inline(never)] for \
+                 exactly this reason)."
+            ),
+        }
     }
+    Ok(found.join(", "))
 }
 
 /// 検出器のシンボル名に必ず現れる断片（S4-c-3-2b）。
 ///
 /// Rust のシンボルはマングルされるので、**関数名の断片で照合する。**
 /// 改名したらここも直すこと（検査の失敗メッセージがそう言う）。
-const DETECTOR_SYMBOL_FRAGMENT: &str = "report_double_selection";
+const DETECTOR_SYMBOL_FRAGMENTS: &[&str] =
+    &["report_double_selection", "report_foreign_task_adoption"];
 
 /// 意図的に壊した経路を有効にする feature の接頭辞・名前。
 ///
@@ -4738,6 +4779,7 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "sched-ignore-owner",
     "sched-ignore-current",
     "smp-ap-runs-preemptive-demo",
+    "sched-ignore-bootstrap-tripwire",
 ];
 
 /// 内部を隠す約束のディレクトリ。
@@ -5428,7 +5470,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 19,
-    full: 102,
+    full: 104,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

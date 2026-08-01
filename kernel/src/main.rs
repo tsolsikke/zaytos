@@ -4595,6 +4595,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "AP にプリエンプティブデモを呼ばせ、入口の tripwire を踏ませる",
     ),
     (
+        "sched-ignore-bootstrap-tripwire",
+        cfg!(feature = "sched-ignore-bootstrap-tripwire"),
+        "デモ入口の bootstrap processor 見張りを外す",
+    ),
+    (
         "ioapic-keyboard-broadcast-test",
         cfg!(feature = "ioapic-keyboard-broadcast-test"),
         "キーボードの redirection entry の宛先を logical broadcast にする",
