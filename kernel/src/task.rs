@@ -600,6 +600,44 @@ pub fn init_ap_idle_task() {
     ));
 }
 
+/// **デモ後のワーカーを走行可能へ戻す**（S4-c-4-3、`sched-keep-workers-runnable`）。
+///
+/// # これは増幅器であって、単独では何も主張しない
+///
+/// **本番の判断（[`pick_next`] の 2 層、`CURRENT` の更新、スイッチの機序）には
+/// 一切触らない。** 触るのはワーカーの状態だけで、**既定ビルドにこの経路は無い。**
+///
+/// **これだけ入れても何も起きない。** bootstrap processor がデモ後もワーカーを
+/// 巡回し続けるようになるだけで、**第 1 層が AP を弾くので競合しない。**
+/// **主張が生まれるのは `sched-ignore-owner` と組んだときで**、そこで初めて
+/// AP がワーカーを取り、2 コアが同じ集合を奪い合う。
+/// `bkl-widen-entry-window-test` と同じ位置づけである。
+///
+/// # なぜ締切を止める形にしなかったのか
+///
+/// **`on_timer_tick` の締切分岐を無効にすると、起動が進まない。**
+/// [`run_preemptive_demo`] はワーカーが走行不可になることで戻るので、
+/// **締切を止めると bootstrap processor がデモから戻らず、その後ろにある
+/// AP 起こしへ到達しない。** **AP が起きなければ窓も生まれない。**
+/// そこで**デモは普通に終わらせ、AP が起きた後で戻す**形にした。
+///
+/// # 窓の長さ
+///
+/// **戻した後はずっと開いている。** `demo_active` は既に `false` なので
+/// 締切分岐は走らず、誰もワーカーを `Blocked` へ戻さない。**一度きりの短い窓を
+/// 狙う構成と違い、取り逃しにくい。**
+#[cfg(feature = "sched-keep-workers-runnable")]
+pub fn rearm_workers_for_smp_stimulus() {
+    let _guard = common::critical::InterruptGuard::enter();
+    for w in 0..WORKER_COUNT {
+        scheduler::set_state(1 + w, TaskState::Ready);
+    }
+    serial_line(format_args!(
+        "task: stimulus: the {WORKER_COUNT} demo workers are runnable again after the \
+         application processors came up; this amplifies contention but asserts nothing on its own"
+    ));
+}
+
 /// **このコアの `CURRENT` を、自分の既定タスクにする**（S4-c-3-2b）。
 ///
 /// AP が本番の世界へ移った直後に 1 回だけ呼ぶ。**sentinel を解く唯一の箇所である。**
@@ -1054,6 +1092,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         // **フィルタより後に置く。** フィルタが効いていればここは通らないので、
         // 鳴ったこと自体が「フィルタが通さなかったはずのものが通った」を意味する。
         report_double_selection(next, cpu, &currents);
+        report_layer_two_skip();
         // 走らせるべき相手がいない（=現タスクのまま）なら何もしない。デモ後の
         // ハートビート区間（走行可能なワーカーが無い）ではここに来て no-op になる。
         if next == current {
@@ -1150,6 +1189,37 @@ fn current_indices() -> [usize; MAX_CPUS] {
         }
     }
     out
+}
+
+/// 第 2 層が候補を弾いたか（S4-c-4-3）。[`pick_next`] が立て、
+/// [`schedule_switch`] が 1 度だけ報告する。
+static LAYER_TWO_SKIPPED: AtomicBool = AtomicBool::new(false);
+
+/// 第 2 層が働いたことを既に報告したか。**系全体で 1 度だけ出す。**
+static LAYER_TWO_SKIP_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// **第 2 層が候補を弾いたことを、1 度だけ報告する**（S4-c-4-3）。
+///
+/// # なぜ「鳴らないこと」では足りないのか
+///
+/// 第 2 層の実証を「二重選択の検出行が出ないこと」で行うと、**系が別の理由で
+/// 止まった場合と区別できない。** 実際、第 1 層を外した構成では `GPR_BUF` が
+/// コア間で競合し、**GPR 照合が停止する**（毎回起きることを実測した）。
+/// 止まった後は何も起きないので、**検出行が出ないのは当たり前になる。**
+///
+/// **働いた側を直接観測すれば、この曖昧さが消える。** この行が出ていれば、
+/// **第 2 層は確かに候補を弾いている。**
+#[inline(never)]
+fn report_layer_two_skip() {
+    if !LAYER_TWO_SKIPPED.load(Ordering::Relaxed) {
+        return;
+    }
+    if LAYER_TWO_SKIP_REPORTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    serial_line(format_args!(
+        "task: the second guard layer skipped a candidate that another cpu is running"
+    ));
 }
 
 /// 担当外のタスクを選んだことを既に報告したか。**系全体で 1 度だけ出す。**
@@ -1257,6 +1327,17 @@ fn pick_next(
         // 述語も検出器もそのまま残る（[`is_running_on_another_cpu`] の doc）。
         #[cfg(not(feature = "sched-ignore-current"))]
         if is_running_on_another_cpu(cand, cpu, &currents) {
+            // **第 2 層が実際に働いたことを記録する（S4-c-4-3）。**
+            //
+            // **ここでは行を出さない。** `pick_next` は純粋関数でホストテストが
+            // 直に呼ぶので、シリアルへ触ると host で動かなくなる。**旗だけ立てて、
+            // 行は `schedule_switch` から出す。**
+            //
+            // **「鳴らないこと」ではなく「働いたこと」を観測するために要る。**
+            // 競合中に別の検査が系を止めうるので、**検出行が出ないことは
+            // 「第 2 層が防いだ」の証明にならない**（`GPR_BUF` の競合で
+            // 実際に停止する）。**働いた側を直接観測する。**
+            LAYER_TWO_SKIPPED.store(true, Ordering::Relaxed);
             continue;
         }
         if states[cand].is_runnable() {

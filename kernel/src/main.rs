@@ -4600,6 +4600,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "デモ入口の bootstrap processor 見張りを外す",
     ),
     (
+        "sched-keep-workers-runnable",
+        cfg!(feature = "sched-keep-workers-runnable"),
+        "AP 起動後にデモのワーカーを走行可能へ戻す（増幅器）",
+    ),
+    (
         "ioapic-keyboard-broadcast-test",
         cfg!(feature = "ioapic-keyboard-broadcast-test"),
         "キーボードの redirection entry の宛先を logical broadcast にする",

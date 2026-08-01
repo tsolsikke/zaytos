@@ -757,6 +757,16 @@ pub unsafe fn run_timer_loop(
                 ));
             }
         }
+
+        // 増幅器 (S4-c-4-3, sched-keep-workers-runnable): **AP が起きた後で**
+        // デモのワーカーを走行可能へ戻す。**単独では何も主張しない**——
+        // bootstrap processor が巡回を続けるだけで、第 1 層が AP を弾く。
+        //
+        // **位置はここでなければならない。** デモより前だとデモの観測に混ざり、
+        // 締切分岐を止める形にすると `run_preemptive_demo` が戻らず**AP 起こしへ
+        // 到達しない**（`task::rearm_workers_for_smp_stimulus` の doc）。
+        #[cfg(feature = "sched-keep-workers-runnable")]
+        crate::task::rearm_workers_for_smp_stimulus();
     }
 
     let mut last_ticks = 0u64;

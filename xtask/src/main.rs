@@ -4272,10 +4272,18 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
     // GPR 照合の結果、`switches`、`sum(resumes)`。第 1 層を外すと `GPR_BUF` が
     // コア間で競合し、デモの会計もコア別ではないので合わない。**どちらも構成の
     // 帰結であって退行ではない。**
+    // **名前は主張を指す（S4-c-4-3で改名した）。**
+    //
+    // 旧名は `ap-demo-layer1-holds` で「第1層が保つ」と読めたが、**第1層の実証は
+    // S4-c-4-3 の梯子が担っている。** この項目が表明しているのは
+    // **「`CURRENT` を外から 0 にされると、AP のアイドルタスクの `saved_rsp` が
+    // 0 のまま切り替え先になり、範囲検査が止めること」**である。
+    // **名前が主張を指さないと、一覧を読んだ人が誤って引退させる。**
     CriticalTest {
-        name: "ap-demo-layer1-holds",
+        name: "ap-forced-current-range-check",
         feature: "smp-ap-runs-preemptive-demo,sched-ignore-bootstrap-tripwire",
         // **AP は落ち先（自分のアイドルタスク）へ回され、そこで停止する。**
+        //
         // `setup_preemptive_tasks` が `set_current_index(0)` を呼ぶので AP の
         // `CURRENT` が 0 になり、次の選択でアイドルタスクが**切り替え先**に
         // なる。その `saved_rsp` は 0 のままなので範囲検査が捕まえる。
@@ -4294,18 +4302,70 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: true,
         min_heartbeats: None,
     },
+    // **`ap-demo-layer1-off` はここにあった。S4-c-4-3 で引退した。**
+    //
+    // **主張が重なったためである。** あれは「第 1 層を外すと AP が担当外の
+    // ワーカーを取れる」を示していたが、**同じ主張を S4-c-4-3 の梯子がより強い
+    // 構成で示す**——あちらの窓は「bootstrap processor がワーカーを回している
+    // 間ずっと」開くのに対し、こちらはデモ経由で**締切の食い違いに依存する
+    // 短い窓**だった。**弱いほうを引退させる。**
+    //
+    // **上の `ap-demo-layer1-holds` は残す。** あちらは第 1 層の実証ではなく、
+    // **`CURRENT` を外から 0 にされたときにアイドルタスクの `saved_rsp` が 0 の
+    // まま読まれ、範囲検査が止めること**を表明している。**S4-c-4-3 の梯子は
+    // その事象を作らないので、主張は重ならない。**
+    // **S4-c-4-3 の梯子。隣り合う 2 つが層 1 つぶんだけ違う。**
+    //
+    //   刺激のみ                          → 担当外選択なし・検出行なし = 刺激は単独で何も起こさない
+    //   刺激 + ignore-owner               → 担当外選択あり・検出行なし = 第 1 層と第 2 層の実証
+    //   刺激 + ignore-owner + ignore-current → 検出行あり              = 検出器の実証
+    //
+    // **窓は 3 構成すべてに在る**（ワーカーが `Ready` で bootstrap processor が
+    // 回している）。**1 段目で担当外選択が出ないのは、窓が無いからではなく
+    // 第 1 層が働いているからである。** ここが S4-c-3-2b で踏んだ形との違いで、
+    // **「緑だが何も検査していない」に戻らない。**
+    //
+    // **判定に使わない観測量**（走らせる前に決めてある）: GPR 照合の結果、
+    // `switches`、`sum(resumes)`、デモの進捗判定。第 1 層を外すと `GPR_BUF` が
+    // コア間で競合し、会計もコア別ではないので合わない。**構成の帰結であって
+    // 退行ではない。**
     CriticalTest {
-        name: "ap-demo-layer1-off",
-        feature: "smp-ap-runs-preemptive-demo,sched-ignore-bootstrap-tripwire,sched-ignore-owner",
-        // **第 1 層を外すと AP が担当外のワーカーを取れる。** 上の項目との差は
-        // 第 1 層 1 つだけで、この行の有無が第 1 層の効きそのものである。
-        //
-        // **`double selection detected` が出ないことは、第 2 層の実証ではない。**
-        // 上のコメントのとおり窓が閉じるので競合が起きない。**禁止マーカーには
-        // 入れるが、「第 2 層が防いだ」とは読まないこと。**
-        expected_markers: &["the first guard layer did not keep it out"],
+        name: "smp-stimulus-only",
+        feature: "sched-keep-workers-runnable",
+        expected_markers: &["demo workers are runnable again"],
+        forbidden_markers: &[
+            "the first guard layer did not keep it out",
+            "double selection detected",
+        ],
+        wait_for_full_timeout: true,
+        min_heartbeats: None,
+    },
+    CriticalTest {
+        name: "smp-stimulus-layer1-off",
+        feature: "sched-keep-workers-runnable,sched-ignore-owner",
+        // **働いた側を直接観測する。** 「検出行が出ないこと」だけだと、
+        // `GPR_BUF` の競合で系が止まった場合と区別できない（毎回止まることを
+        // 実測した）。**第 2 層が候補を弾いた行を要求する。**
+        expected_markers: &[
+            "the first guard layer did not keep it out",
+            "the second guard layer skipped a candidate",
+        ],
+        // **観測は停止までの範囲に限られる。** この構成では `GPR_BUF` が
+        // コア間で競合し、**GPR 照合が毎回停止する**（5/5 で実測）。
+        // **停止後に出るはずの行を期待マーカーへ足さないこと。**
         forbidden_markers: &["double selection detected"],
         wait_for_full_timeout: true,
+        min_heartbeats: None,
+    },
+    CriticalTest {
+        name: "smp-stimulus-both-layers-off",
+        feature: "sched-keep-workers-runnable,sched-ignore-owner,sched-ignore-current",
+        expected_markers: &[
+            "the first guard layer did not keep it out",
+            "double selection detected",
+        ],
+        forbidden_markers: &[],
+        wait_for_full_timeout: false,
         min_heartbeats: None,
     },
     // **宛先の主張の破壊（S4-a）。** 確実に落ちるのは読み戻しの主張のほうで、
@@ -4739,8 +4799,11 @@ fn check_detector_symbol_present(workspace_root: &Path) -> Result<String> {
 ///
 /// Rust のシンボルはマングルされるので、**関数名の断片で照合する。**
 /// 改名したらここも直すこと（検査の失敗メッセージがそう言う）。
-const DETECTOR_SYMBOL_FRAGMENTS: &[&str] =
-    &["report_double_selection", "report_foreign_task_adoption"];
+const DETECTOR_SYMBOL_FRAGMENTS: &[&str] = &[
+    "report_double_selection",
+    "report_foreign_task_adoption",
+    "report_layer_two_skip",
+];
 
 /// 意図的に壊した経路を有効にする feature の接頭辞・名前。
 ///
@@ -4780,6 +4843,7 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "sched-ignore-current",
     "smp-ap-runs-preemptive-demo",
     "sched-ignore-bootstrap-tripwire",
+    "sched-keep-workers-runnable",
 ];
 
 /// 内部を隠す約束のディレクトリ。
@@ -5470,7 +5534,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 19,
-    full: 104,
+    full: 106,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
