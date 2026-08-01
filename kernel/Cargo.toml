@@ -276,6 +276,7 @@ smp-ap-timer-share-ticks-test = []
 smp-ap-no-sentinel-clear = []
 sched-ignore-owner = []
 sched-ignore-current = []
+smp-ap-runs-preemptive-demo = []
 # キーボードの redirection entry の宛先を logical の broadcast にする。
 # **確実に落ちるのは読み戻しの主張のほうである。** 配送が実際にどうなるか
 # （AP が受けて共有リングバッファへ積むか）は観測していない。

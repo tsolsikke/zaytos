@@ -4590,6 +4590,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "pick_next の第 2 層（CURRENT 条件）のフィルタでの参照だけを無効にする",
     ),
     (
+        "smp-ap-runs-preemptive-demo",
+        cfg!(feature = "smp-ap-runs-preemptive-demo"),
+        "AP にプリエンプティブデモを呼ばせ、入口の tripwire を踏ませる",
+    ),
+    (
         "ioapic-keyboard-broadcast-test",
         cfg!(feature = "ioapic-keyboard-broadcast-test"),
         "キーボードの redirection entry の宛先を logical broadcast にする",

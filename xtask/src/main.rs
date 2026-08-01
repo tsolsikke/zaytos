@@ -4231,6 +4231,23 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // **tripwire の機序の直接観測（S4-c-4-1）。**
+    //
+    // 主マーカーは**停止行そのもの**である。AP のハートビートが出ないことは
+    // **補助**であって、主マーカーにはしない（回数より機序の直接観測）。
+    CriticalTest {
+        name: "ap-runs-preemptive-demo",
+        feature: "smp-ap-runs-preemptive-demo",
+        expected_markers: &["may only run on the bootstrap processor"],
+        forbidden_markers: &[
+            // tripwire が鳴らずに戻ってきた形。
+            "the tripwire did not fire",
+            // 補助: 入口で止まるので AP はタイマを開けず、ハートビートも出ない。
+            "smp: ap heartbeat: cpu=1",
+        ],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // **`sched-ignore-owner` と `sched-ignore-current` の項目はまだ置けない。**
     //
     // **現在の起動の時系列では、どちらも事象を作れない。** 実測で確かめた——
@@ -4720,6 +4737,7 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "smp-ap-no-sentinel-clear",
     "sched-ignore-owner",
     "sched-ignore-current",
+    "smp-ap-runs-preemptive-demo",
 ];
 
 /// 内部を隠す約束のディレクトリ。
@@ -5410,7 +5428,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 19,
-    full: 101,
+    full: 102,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

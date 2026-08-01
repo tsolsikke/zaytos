@@ -1317,6 +1317,38 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
          in PML4[258], production CR3); it now takes part in scheduling on its own idle task"
     );
 
+    // 破壊 (S4-c-4-1, smp-ap-runs-preemptive-demo): **AP にデモを呼ばせる。**
+    //
+    // **tripwire の機序の直接観測である。** `require_bootstrap_processor` は
+    // `run_preemptive_demo` の入口にあり、**ワーカーの継続では鳴らない。開始で
+    // だけ鳴る。** 呼び出しは 2 箇所しか無く（協調デモとプリエンプティブデモの
+    // 開始）、**本番経路では bootstrap processor しか通らないので、この tripwire
+    // は一度も踏まれていない。** 踏ませて、実際に停止することを見る。
+    //
+    // **止まるのは入口である。** `require_bootstrap_processor` が
+    // `halt_forever` するので、**`setup_preemptive_tasks` へは到達しない。**
+    // したがって**ワーカーは `Ready` にならず、二重選択の窓も生まれない。**
+    // 窓が要るのは S4-c-4-2 で、あちらは**この tripwire を外した**構成である
+    // （`docs/verification-coverage.md`。**同じ起動では両立しない**——
+    // 一方は tripwire が在ることを、他方は無いことを要求する）。
+    //
+    // **タイマを開ける前に置く。** `start_local_timer` は戻らない。
+    #[cfg(feature = "smp-ap-runs-preemptive-demo")]
+    {
+        let _ = writeln!(
+            serial,
+            "[INFO] smp: ap {slot} is about to call the preemptive demo (sabotage); the \
+             bootstrap-processor tripwire at its entry must stop this core"
+        );
+        crate::task::run_preemptive_demo();
+        let _ = writeln!(
+            serial,
+            "[ERROR] smp: ap {slot} returned from the preemptive demo; the tripwire did not \
+             fire; halting"
+        );
+        cpu::halt_forever();
+    }
+
     // === S4-a: 自分の Local APIC とタイマを開ける ===
     // SAFETY: 自コアの単一文脈で、割り込みはまだ禁止されている。
     unsafe { start_local_timer(&mut serial, slot) }
