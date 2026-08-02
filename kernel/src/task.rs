@@ -76,14 +76,8 @@ const AP_IDLE_TASK: usize = WORKER_COUNT + 1;
 ///
 /// # **これは `MAX_CPUS = 2` でしか成り立たない**
 ///
-/// `else` が AP をコアで区別していないので、**`MAX_CPUS` が 3 以上になると
-/// 複数の AP が同じアイドルタスクへ落ちる。** タスクが同じならスタックも同じ
-/// なので、**「2 つ以上のコアが同一スタックを走る」が復活する。** しかも
-/// **その経路は第 1 層も第 2 層も通らない**（上のとおり落ち先は候補ではない）
-/// ので、**検出器も鳴らない。**
-///
-/// **`MAX_CPUS` を上げるなら、コアごとにアイドルタスクを持たせる作業が要る。**
-/// [`AP_IDLE_TASK_OWNER`] の doc にも同じことが書いてある。
+/// 失効条件と、上げるときに要る作業は **ADR-0026 の「条件つきの安全」が正である。**
+/// 対応は下の表明（`the_fallback_of_every_core_is_a_task_that_core_owns`）が固定する。
 const fn default_task_for(cpu: usize) -> usize {
     if cpu == common::percpu::BOOTSTRAP_PROCESSOR_SLOT {
         MAIN_TASK
@@ -656,8 +650,7 @@ pub fn adopt_idle_task_on_this_cpu() {
 
 /// AP 用アイドルタスクの担当コア。**`MAX_CPUS = 2` の前提でスロット 1 である。**
 ///
-/// **`MAX_CPUS` を上げるなら、AP ごとにアイドルタスクが要る。** そのときは
-/// この定数では足りない。**上げる前にここを見ること。**
+/// 上げるときに要る作業は **ADR-0026 の「条件つきの安全」が正である。**
 const AP_IDLE_TASK_OWNER: usize = 1;
 
 extern "C" {
@@ -1170,11 +1163,8 @@ fn schedule_switch(current_rsp: u64) -> u64 {
 ///
 /// # 限界
 ///
-/// **フィルタと検出器は同じ出所（`CURRENT`）から両辺を導く。** したがって
-/// **この述語自体の誤りは検出できない**（`currents` の読み方が間違っていれば、
-/// フィルタも検出器も同じように間違う）。**検出できるのは「2 層とも迂回された
-/// こと」だけである。** `docs/verification-coverage.md` の「同一の出所から
-/// 両辺を導く検査はその出所の誤りを検出できない」と同じ型である。
+/// **フィルタと検出器は同じ出所（`CURRENT`）から両辺を導くので、この述語自体の
+/// 誤りは検出できない。** 詳細は **ADR-0026 の「条件つきの安全」が正である。**
 fn is_running_on_another_cpu(task: usize, cpu: usize, currents: &[usize; MAX_CPUS]) -> bool {
     currents
         .iter()
@@ -1348,11 +1338,7 @@ fn pick_next(
     }
     // 走行可能な担当ワーカーが無いので、**自コアの既定タスクへ落ちる**（S4-c-3-1）。
     //
-    // **固定の `0` から変えた。** `0` は bootstrap processor の担当なので、
-    // AP がここへ落ちると他コアのタスクを走らせる。**しかもこの経路は候補の
-    // フィルタを通らないので、第 1 層も第 2 層も参照されず、検出器も鳴らない**
-    // （[`default_task_for`] の doc）。**落ち先をコアごとに持たせて、他コアの
-    // タスクへ落ちる経路そのものを無くしてある。**
+    // **固定の `0` から変えた理由は [`default_task_for`] の doc が正である。**
     //
     // **bootstrap processor から見た振る舞いは変わらない**（`default_task_for(0)`
     // は `MAIN_TASK` = 0）。既存の表明の期待値は 1 つも動いていない。
