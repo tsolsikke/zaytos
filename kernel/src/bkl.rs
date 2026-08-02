@@ -43,7 +43,7 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use common::critical::EntryInterruptGuard;
-use common::percpu::cpu_id;
+use common::percpu::{cpu_id, PerCpu, MAX_CPUS};
 use common::serial::SerialPort;
 
 /// カーネル入口の分類（S4-b-2）。
@@ -221,6 +221,125 @@ pub struct BklGuard {
 ///
 /// 安全な関数である。**ただし呼び出し側は、このガードを `hlt` を含む区間へ
 /// 持ち込まないこと。** それは型では防げない（doc とレビューで守る）。
+/// **写像が変わった世代（S5-b）。** 写像を変えたコアが、**BKL を保持したまま**
+/// 上げる。
+///
+/// # 何のためにあるか
+///
+/// **ack を待たずに TLB の整合を取るためである。** 送信側が待機中のコアへ ack を
+/// 求めると、**待機側は IF=0 でスピンしているので応答できず、デッドロックする**
+/// （`docs/deferred-decisions.md` の「BKL取得待ちのIF=0とIPIのデッドロック」）。
+///
+/// **代わりに、取得する側が自分でフラッシュする。** コアの状態は
+/// **(i) タスク実行中で IF=1（IPI が届く）**、
+/// **(ii) BKL 待ちで IF=0（取得するまで写像を使わない）**、
+/// **(iii) BKL 保持中（変更した本人）** のいずれかで、
+/// **(ii) は取得時のフラッシュで閉じる。** したがって
+/// **待機中のコアから ack を待つ必要が消える。**
+///
+/// # **この 3 つが尽きている根拠は篩にある**
+///
+/// **自明ではない。** BKL を保持も待機もしない IF=0 の区間は他にもある
+/// （`Locked<T>` のクリティカル区間など）。**それらが問題にならないのは、
+/// 「AP が起きた後に到達しうるか」「BKL を保持せずに到達しうるか」の 2 問で
+/// 篩うと既定ビルドでは 0 件になるからである**
+/// （`docs/verification-coverage.md` の「S5の機構は、現時点では発火条件の無い
+/// 備えである」）。**篩の結果に依存しているので、篩が変われば列挙も変わる。**
+///
+/// 篩に現れなかった 2 つについても書いておく。
+///
+/// - **AP 起こしの途中**（`ap_after_switch`）。CR3 を積み直した直後で、
+///   **`KernelEntry::ApBringUp` の取得を通ってから定常の仕事に入る。**
+///   その取得でフラッシュを通るので、**古い翻訳を持ち越さない。**
+/// - **例外・ダブルフォルト・パニックの経路**（ADR-0023 により BKL を取らない）。
+///   **これらは戻らない経路である**（ダンプして停止する）。**戻って写像を使い続ける
+///   ことが無いので、古い翻訳が問題にならない。** **戻る経路を作ったら失効する。**
+///
+/// # 世代が正しさの土台であり、IPI は早めるための手段である
+///
+/// **入口はティックごとに BKL を取る**ので、走っている全コアは 100Hz で必ず
+/// [`acquire`] を通る。**したがって世代方式だけで「遅くとも 1 ティックで整合する」
+/// が保証される。** IPI はそれを早めるだけなので、**IPI が 1 つ落ちても正しさは
+/// 保たれる。**
+///
+/// # 追加のバリアが要らない理由
+///
+/// **順序は BKL 自身が与える。** 変更側は**保持したまま**写像を外して世代を上げ、
+/// 解放は `held.store(false, Ordering::Release)` である。取得側は
+/// `held.swap(true, Ordering::Acquire)` を通るので、**解放を観測してからでないと
+/// 取得できない。** Acquire/Release の対がそのまま happens-before を作るので、
+/// **取得した側は必ず上がった世代を読む。**
+/// **`acquire` の順序を触るときは、この依存を壊していないか見ること。**
+///
+/// # 失効条件
+///
+/// **ack 無しが健全なのは「解放も再利用もしない」間だけである。** 写像を外すだけなら、
+/// 古い翻訳が残っていても指す先は同じフレームで差は観測されない。**外したフレームを
+/// アロケータへ返して再利用すると、その窓で古い翻訳が生きたページを別用途に
+/// 使われる。** **解放・再利用を伴う操作を導入したら、この設計は失効する。**
+static TLB_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// このコアがフラッシュ済みの世代（S5-b）。
+static SEEN_GENERATION: PerCpu<AtomicU64> = PerCpu::new([const { AtomicU64::new(0) }; MAX_CPUS]);
+
+/// このコアが世代の食い違いで行ったフラッシュの回数（S5-b）。**観測用。**
+static GENERATION_FLUSHES: PerCpu<AtomicU64> = PerCpu::new([const { AtomicU64::new(0) }; MAX_CPUS]);
+
+/// **写像を変えたことを知らせる（S5-b）。BKL を保持したまま呼ぶこと。**
+///
+/// **現時点で本番の呼び出し元は無い。** 写像を変える操作はすべて AP が起きる前の
+/// 単一コアの区間にあるためである（`verification-coverage.md`）。
+/// **呼び出し元ができるのは、実行中に写像を変える段（S5-c 以降）である。**
+pub fn note_mapping_changed() {
+    TLB_GENERATION.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 現在の世代（S5-b）。**観測用。**
+pub fn tlb_generation() -> u64 {
+    TLB_GENERATION.load(Ordering::Relaxed)
+}
+
+/// 指定コアのフラッシュ回数（S5-b）。**範囲外は 0。**
+pub fn generation_flushes_for(cpu: usize) -> u64 {
+    GENERATION_FLUSHES
+        .slot(cpu)
+        .map_or(0, |slot| slot.load(Ordering::Relaxed))
+}
+
+/// **自コアの見た世代が古ければ TLB を落とす（S5-b）。**
+///
+/// [`acquire`] が勝った直後に呼ぶ。**取得してから写像を使い始めるまでの間に置く**
+/// ので、**古い翻訳のまま走り出す経路が無い。**
+fn flush_if_generation_is_stale() {
+    let current = TLB_GENERATION.load(Ordering::Relaxed);
+    let seen = SEEN_GENERATION.this_cpu();
+    if seen.load(Ordering::Relaxed) == current {
+        return;
+    }
+    // **CR3 の載せ替えで全部落とす。変わった範囲が分からないので `invlpg` は使えない。**
+    //
+    // **載せ替えでグローバルページは落ちない。** G ビットが立っているエントリは
+    // CR3 の書き換えでは無効化されない（CR4.PGE のトグルか `invlpg` が要る）。
+    // **本カーネルは G ビットを立てない**ので載せ替えで足りるが、
+    // **それは仮定ではなく起動時に検査している**——`CR4` と PGE を読み出して出し
+    // （実測で `CR4 = 0x668, PGE(bit 7) = false`）、**写像に G ビットが 1 つでも
+    // 立っていたら停止する**（`main.rs`）。
+    // **失効条件——CR4.PGE を使い始めるか、G ビットを立て始めたら、
+    // ここは載せ替えでは足りなくなる。**
+    // **読み→フラッシュ→書き戻しが不可分でなくてよい。**
+    // **世代を上げられるのは BKL を保持しているコアだけ**で、この列は BKL を
+    // 取った後に走る。**したがってこの間に誰も上げられない。**
+    // **これは「順序は BKL 自身が与える」（[`TLB_GENERATION`] の doc）とは
+    // 別の命題である**——あちらは可視性、こちらは排他の話である。
+    let cr3 = crate::paging::switch::read_cr3();
+    // SAFETY: 今読んだ値をそのまま書き戻すだけで、写像は変えない。
+    unsafe { crate::paging::switch::switch_to(cr3) };
+    seen.store(current, Ordering::Relaxed);
+    GENERATION_FLUSHES
+        .this_cpu()
+        .fetch_add(1, Ordering::Relaxed);
+}
+
 #[must_use = "ガードを保持している間だけ BKL を保持する。すぐ drop すると即解放される"]
 pub fn acquire(entry: KernelEntry) -> BklGuard {
     // **1. cli が先である。** 逆にすると、フラグを立ててから cli するまでの窓に
@@ -248,6 +367,10 @@ pub fn acquire(entry: KernelEntry) -> BklGuard {
     BKL.holder_entry.store(entry.as_u64(), Ordering::Relaxed);
     BKL.acquired_tsc
         .store(common::cpu::read_timestamp_counter(), Ordering::Relaxed);
+
+    // **写像が変わっていれば、ここで落とす（S5-b）。**
+    // **取得してから写像を使い始めるまでの間である。**
+    flush_if_generation_is_stale();
 
     // **同時進入をここで数える（S4-b-3）。** 定義は「取得してから解放するまでの
     // 区間にいるコアの数」なので、**待っている間は入らない。**
