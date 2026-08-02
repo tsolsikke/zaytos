@@ -4600,6 +4600,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "デモ入口の bootstrap processor 見張りを外す",
     ),
     (
+        "smp-ipi-probe",
+        cfg!(feature = "smp-ipi-probe"),
+        "測定用 IPI を AP へ送る（S5-a。既定では送らない）",
+    ),
+    (
         "sched-keep-workers-runnable",
         cfg!(feature = "sched-keep-workers-runnable"),
         "AP 起動後にデモのワーカーを走行可能へ戻す（増幅器）",

@@ -1006,6 +1006,24 @@ const ICR_DELIVERY_INIT: u32 = 0b101 << 8;
 /// ICR: delivery mode Startup（SIPI）。
 const ICR_DELIVERY_STARTUP: u32 = 0b110 << 8;
 
+/// **Fixed 配送の IPI を 1 本送る（S5-a）。**
+///
+/// # 何のためにあるか
+///
+/// **「IPI が届くか」を測るためだけのものである。** 宛先のコアは
+/// [`crate::idt::IPI_PROBE_VECTOR`] のハンドラへ入り、**per-CPU の受信カウンタを
+/// 増やして EOI を送るだけ**である。**BKL は要求しない**——BKL 待ちと IPI の
+/// 相性は未解決なので、**その罠を踏まない形にしてある。**
+///
+/// # Safety
+///
+/// `lapic_virt` が写像済みの Local APIC ページの先頭であること。
+pub unsafe fn send_fixed_ipi(lapic_virt: u64, apic_id: u8, vector: u8) -> bool {
+    // SAFETY: 呼び出し元契約。delivery mode は Fixed（`000`）なので、
+    // ビットを足さずにベクタだけを載せる。
+    unsafe { send_ipi(lapic_virt, apic_id, ICR_LEVEL_ASSERT | u32::from(vector)) }
+}
+
 /// AP を起こす IPI を 1 本送る（S3-b-2b-1）。
 ///
 /// # なぜ送信完了を待つのか

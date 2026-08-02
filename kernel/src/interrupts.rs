@@ -18,6 +18,14 @@ use crate::gdt;
 use crate::idt;
 use crate::irq;
 
+/// 測定用 IPI を何本送るか（S5-a）。**会計を主張できる程度の本数にする。**
+#[cfg(feature = "smp-ipi-probe")]
+const IPI_PROBE_ROUNDS: u32 = 4;
+
+/// 1 本ぶんの受け取りを待つスピン上限（S5-a）。**上限の無い待ちを書かない。**
+#[cfg(feature = "smp-ipi-probe")]
+const IPI_PROBE_WAIT_SPINS: u32 = 10_000_000;
+
 /// 検証項目 1 件の結果。
 ///
 /// **`bool` にしていない。** ADR-0018 §2 の項目 4（PIC のベクタオフセット）は
@@ -767,6 +775,82 @@ pub unsafe fn run_timer_loop(
         // 到達しない**（`task::rearm_workers_for_smp_stimulus` の doc）。
         #[cfg(feature = "sched-keep-workers-runnable")]
         crate::task::rearm_workers_for_smp_stimulus();
+
+        // === S5-a: 測定用 IPI を送る（feature `smp-ipi-probe` のときだけ）===
+        //
+        // **既定ビルドでは送らない。** 送る側は上限つきとはいえスピンで待つので、
+        // **他の検査の時間の形を変える。** 実際に踏んだ——既定ビルドへ入れたところ、
+        // S4-c-4-3 の梯子（第 2 層の実証）が 5 回中 4 回しか通らなくなった。
+        // **位置を刺激の後ろへ動かしても揺れは残った。** 測るためのものが別の検査の
+        // 前提を壊すので、**測るときだけ入れる形にする。**
+        //
+        // **位置も刺激より後ろにしてある**（前に置くと AP 起こしから刺激までが延びる）。
+        #[cfg(feature = "smp-ipi-probe")]
+        {
+            // === S5-a: 測定用 IPI を 1 本送る ===
+            //
+            // **目的は「TCG で IPI が届くか」を測ることだけである。**
+            // 宛先は起こした AP で、ハンドラは per-CPU カウンタと EOI だけを行う
+            // （`idt::IPI_PROBE_VECTOR`）。**BKL は要求しない。**
+            //
+            // **送信完了（ICR の delivery status）と、相手が受け取ったこと（受信
+            // カウンタ）は別の量である。** 前者は既存の AP 起こしが見ているものと
+            // 同じで、**後者が測りたいものである。**
+            if let Some(apic) = apic {
+                for slot in 1..common::percpu::MAX_CPUS {
+                    let Some(apic_id) = crate::smp::started_ap_apic_id(slot) else {
+                        continue;
+                    };
+                    // **1 本ずつ、受け取りを確かめてから次を送る。**
+                    //
+                    // **まとめて送ると数が合わない。** 同じベクタの IPI は Local APIC の
+                    // IRR の 1 ビットなので、**処理より速く送ると畳まれる。**
+                    // 「送った数と受け取った数が一致する」を主張したいなら、
+                    // **畳まれない送り方にする必要がある。**
+                    for _ in 0..IPI_PROBE_ROUNDS {
+                        let before = idt::ipi_probe_received_for(slot);
+                        // SAFETY: `apic` は写像済みで、宛先は起動を確認した AP である。
+                        let accepted = unsafe {
+                            crate::apic::send_fixed_ipi(
+                                crate::apic::lapic_virt_of(apic),
+                                apic_id,
+                                idt::IPI_PROBE_VECTOR as u8,
+                            )
+                        };
+                        if !accepted {
+                            logger.error(format_args!(
+                                "smp: the ICR did not accept a probe IPI for apic id {apic_id}"
+                            ));
+                            break;
+                        }
+                        idt::record_ipi_probe_sent();
+                        // **上限つきで待つ**（上限の無い待ちを書かない）。
+                        let mut spun = 0u32;
+                        while idt::ipi_probe_received_for(slot) == before
+                            && spun < IPI_PROBE_WAIT_SPINS
+                        {
+                            core::hint::spin_loop();
+                            spun += 1;
+                        }
+                        if idt::ipi_probe_received_for(slot) == before {
+                            logger.error(format_args!(
+                                "smp: a probe IPI to apic id {apic_id} was accepted by the ICR but \
+                                 the target did not handle it within the spin limit"
+                            ));
+                            break;
+                        }
+                    }
+                    logger.info(format_args!(
+                        "smp: probe IPI (vector {:#04x}) to apic id {apic_id}: sent={} received={} \
+                         (one at a time; the same vector coalesces in the IRR if sent faster than \
+                         it is handled, so they are not batched)",
+                        idt::IPI_PROBE_VECTOR,
+                        idt::ipi_probe_sent(),
+                        idt::ipi_probe_received_for(slot)
+                    ));
+                }
+            }
+        }
     }
 
     let mut last_ticks = 0u64;
@@ -888,6 +972,7 @@ pub unsafe fn run_timer_loop(
                         "heartbeat: ticks={ticks} ({} s), cpu={}, ap_ticks={}, ticks_total={}, \
                      lapic_timer_deliveries={}, timer_accounting_balanced={}, \
                      max kernel entry depth={}, ap_current={} ap_sched_passes={}, \
+                     ipi_sent={} ipi_recv_cpu1={}, \
                      keys={} dropped={} \
                      stray={} spurious={} lapic_spurious={}, \
                      irq1={} balanced={}, max tick jump={}, i8042 OBF={}, PIC ISR={}",
@@ -913,6 +998,8 @@ pub unsafe fn run_timer_loop(
                         // できなかった。**
                         crate::task::ap_current_display(),
                         crate::task::ap_schedule_passes(),
+                        idt::ipi_probe_sent(),
+                        idt::ipi_probe_received_for(1),
                         crate::keyboard::buffer::received_count(),
                         crate::keyboard::buffer::overflow_count(),
                         crate::keyboard::stray_irq_count(),

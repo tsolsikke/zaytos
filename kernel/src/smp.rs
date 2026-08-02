@@ -480,6 +480,22 @@ pub extern "C" fn zaytos_ap_entry(index: u64) -> ! {
 /// 起動署名を出した AP の本数。**BSP が会計に使う。**
 static AP_STARTED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
+/// 起こした AP の APIC ID（S5-a）。スロット 1 以降ぶん。**`u16` の番兵で
+/// 「未設定」を表す**（APIC ID は `u8` なので `0` も有効な値である）。
+static STARTED_AP_APIC_ID: [core::sync::atomic::AtomicU16; MAX_APS] =
+    [const { core::sync::atomic::AtomicU16::new(NO_APIC_ID) }; MAX_APS];
+
+/// 「まだ起こしていない」を表す番兵（S5-a）。
+const NO_APIC_ID: u16 = u16::MAX;
+
+/// 起こした AP の APIC ID を返す（S5-a）。**起こしていなければ `None`。**
+pub fn started_ap_apic_id(slot: usize) -> Option<u8> {
+    let raw = STARTED_AP_APIC_ID
+        .get(slot.checked_sub(1)?)?
+        .load(Ordering::SeqCst);
+    (raw != NO_APIC_ID).then_some(raw as u8)
+}
+
 /// 起動署名を出した AP の本数。
 pub fn started_ap_count() -> usize {
     AP_STARTED.load(Ordering::SeqCst)
@@ -596,6 +612,7 @@ pub unsafe fn wake_application_processors(
         unsafe { installed.set_ap_parameters(stack_top_identity, slot as u64) };
 
         report.attempted += 1;
+        STARTED_AP_APIC_ID[slot - 1].store(u16::from(apic_id), Ordering::SeqCst);
         let before = started_ap_count();
         logger.info(format_args!(
             "smp: starting application processor apic id {apic_id} as slot {slot} \

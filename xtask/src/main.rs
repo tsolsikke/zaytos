@@ -4374,6 +4374,27 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // **IPI が届くことの主張（S5-a）。** 破壊ではなく、**機能そのものの検査**である。
+    //
+    // **判定は 2 つとも要る**——「受け取った本数が送った本数と一致すること」と
+    // 「AP が生き続けること」。**前者だけだと、AP が死んでいても 0 と 0 で
+    // 一致してしまう。** 実際、受け口を用意する前は AP が死んで両方 0 だった。
+    CriticalTest {
+        name: "ipi-probe",
+        feature: "smp-ipi-probe",
+        expected_markers: &[
+            // 送受信が一致した要約行。**本数まで含めて固定する。**
+            "sent=4 received=4",
+            // AP が生き続けている証拠。**ハートビートが出るのは死んでいない側だけ。**
+            "smp: ap heartbeat: cpu=1",
+        ],
+        forbidden_markers: &[
+            "did not accept a probe IPI",
+            "did not handle it within the spin limit",
+        ],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // **宛先の主張の破壊（S4-a）。** 確実に落ちるのは読み戻しの主張のほうで、
     // 配送が実際にどうなるかは観測していない。
     CriticalTest {
@@ -4850,6 +4871,7 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "smp-ap-runs-preemptive-demo",
     "sched-ignore-bootstrap-tripwire",
     "sched-keep-workers-runnable",
+    "smp-ipi-probe",
 ];
 
 /// 内部を隠す約束のディレクトリ。
@@ -5540,7 +5562,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 19,
-    full: 106,
+    full: 107,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

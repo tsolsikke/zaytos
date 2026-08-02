@@ -306,6 +306,7 @@ core::arch::global_asm!(
     "  .byte 0x68, 0xfe, 0x00, 0x00, 0x00",
     "  jmp zaytos_irq_common",
     // 測定用 IPI の専用スタブ（S5-a）。**既存の専用スタブと同じ形である。**
+    // `IRQ_STYLE_STUB_COUNT` の範囲外のベクタは、この形で 1 本ずつ載せる。
     ".globl zaytos_ipi_probe_stub",
     "zaytos_ipi_probe_stub:",
     "  .byte 0x68, 0x43, 0x00, 0x00, 0x00",
@@ -521,12 +522,35 @@ pub const PIC_IRQ_COUNT: usize = 16;
 /// 合わせて、PIC の外へ恒久的に移した。
 pub const TEST_VECTOR: usize = IRQ_VECTOR_BASE + PIC_VECTOR_SPAN;
 
-/// **測定用 IPI を受けるベクタ（S5-a）。**
+/// **IPI の配送を測るためのベクタ（S5-a）。**
 ///
-/// **`IRQ_STYLE_STUB_COUNT` の範囲外である。** 範囲外のベクタは
-/// yield・スプリアス・キーボード・LAPIC タイマと同じく、
-/// **専用スタブ 1 本と `IdtEntry` の個別代入で載せる。**
+/// **無害である。** ハンドラは per-CPU の受信カウンタを増やして EOI を送るだけで、
+/// **BKL を要求しない。** BKL 待ちと IPI の相性が未解決のうちに罠を踏まないため、
+/// **`irq_entry` の BKL 取得より前**で処理して戻る。
 pub const IPI_PROBE_VECTOR: usize = 0x43;
+
+/// このコアが受け取った測定用 IPI の本数（S5-a）。
+static IPI_PROBE_RECEIVED: PerCpu<AtomicU64> = PerCpu::new([const { AtomicU64::new(0) }; MAX_CPUS]);
+
+/// 送った測定用 IPI の本数（S5-a）。**送信側は 1 コアなので大域でよい。**
+static IPI_PROBE_SENT: AtomicU64 = AtomicU64::new(0);
+
+/// 測定用 IPI を送ったことを記録する（S5-a）。
+pub fn record_ipi_probe_sent() {
+    IPI_PROBE_SENT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 送った本数（S5-a）。
+pub fn ipi_probe_sent() -> u64 {
+    IPI_PROBE_SENT.load(Ordering::Relaxed)
+}
+
+/// 指定コアが受け取った本数（S5-a）。**範囲外は 0。**
+pub fn ipi_probe_received_for(cpu: usize) -> u64 {
+    IPI_PROBE_RECEIVED
+        .slot(cpu)
+        .map_or(0, |slot| slot.load(Ordering::Relaxed))
+}
 
 /// 協調的 yield 用のソフトウェア割り込みベクタ（M5-c）。
 ///
@@ -977,6 +1001,23 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     // （ADR-0019 §2.1）。M5-c ではここが切り替えの唯一の分岐点になり、
     // yield ベクタのときだけ別タスクの RSP を返す（下の分岐）。
     let no_switch_rsp = context as u64;
+
+    // **測定用 IPI（S5-a）は BKL を取る前に処理して戻る。**
+    //
+    // **BKL 待ちと IPI の相性は未解決である**（`deferred-decisions.md` の
+    // 「BKL取得待ちのIF=0とIPIのデッドロック」）。ここで BKL を取ると、
+    // **測るためだけのベクタでその罠を踏むことになる。**
+    // 触るのは自コアのカウンタと自コアの Local APIC だけなので、**BKL は要らない。**
+    //
+    // SAFETY: スタブが直前に積んだ有効な `IrqContext` を指す。読み取りのみ。
+    if unsafe { (*context).vector } as usize == IPI_PROBE_VECTOR {
+        IPI_PROBE_RECEIVED
+            .this_cpu()
+            .fetch_add(1, Ordering::Relaxed);
+        // SAFETY: 実際に配送された割り込みに対してのみ、自コアの LAPIC へ送る。
+        unsafe { crate::irq::end_of_interrupt_for_lapic_timer() };
+        return no_switch_rsp;
+    }
 
     // **BKL を取る（S4-b-2）。** ここから戻るまでカーネルへ入れるのは 1 コアだけ
     // である。**早期 return が複数あるので RAII にする**（解放を各 return の手前へ
@@ -1557,9 +1598,10 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
         );
 
         // 測定用 IPI 用ゲート（S5-a）。専用スタブへ載せる。
-        // **`IRQ_STYLE_STUB_COUNT` の範囲外なので個別に置く**（yield・スプリアス・
-        // キーボード・LAPIC タイマと同じ扱い）。**載せずに IPI を送ると、
-        // 例外スタイルのスタブへ落ちて停止する。実際に踏んだ。**
+        // **`IRQ_STYLE_STUB_COUNT` の範囲外なので、`IdtEntry` を個別に置く**
+        // （yield・スプリアス・キーボード・LAPIC タイマと同じ扱い）。
+        // **載せずに IPI を送ると、例外スタイルのスタブへ落ちて停止する。**
+        // 実際に踏んだ——載せる前に送ったところ、AP が 1 ティックで死んだ。
         (*idt)[IPI_PROBE_VECTOR] = IdtEntry::new(
             addr_of!(zaytos_ipi_probe_stub) as u64,
             KERNEL_CODE_SELECTOR,
