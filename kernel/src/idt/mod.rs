@@ -305,6 +305,11 @@ core::arch::global_asm!(
     "zaytos_lapic_timer_stub:",
     "  .byte 0x68, 0xfe, 0x00, 0x00, 0x00",
     "  jmp zaytos_irq_common",
+    // 測定用 IPI の専用スタブ（S5-a）。**既存の専用スタブと同じ形である。**
+    ".globl zaytos_ipi_probe_stub",
+    "zaytos_ipi_probe_stub:",
+    "  .byte 0x68, 0x43, 0x00, 0x00, 0x00",
+    "  jmp zaytos_irq_common",
     ".p2align 4",
     "zaytos_irq_common:",
     // 入場時のスタック: [rsp]=ベクタ, +8=RIP, +16=CS, +24=RFLAGS, +32=RSP, +40=SS
@@ -474,6 +479,7 @@ extern "C" {
     static zaytos_spurious_stub: u8;
     static zaytos_ioapic_keyboard_stub: u8;
     static zaytos_lapic_timer_stub: u8;
+    static zaytos_ipi_probe_stub: u8;
     static zaytos_irq_stub_0: u8;
     static zaytos_irq_stub_15: u8;
     static zaytos_irq_stub_16: u8;
@@ -514,6 +520,13 @@ pub const PIC_IRQ_COUNT: usize = 16;
 /// 両者を排他にしなければならなかった。スタブ表を 0x3F まで広げたのに
 /// 合わせて、PIC の外へ恒久的に移した。
 pub const TEST_VECTOR: usize = IRQ_VECTOR_BASE + PIC_VECTOR_SPAN;
+
+/// **測定用 IPI を受けるベクタ（S5-a）。**
+///
+/// **`IRQ_STYLE_STUB_COUNT` の範囲外である。** 範囲外のベクタは
+/// yield・スプリアス・キーボード・LAPIC タイマと同じく、
+/// **専用スタブ 1 本と `IdtEntry` の個別代入で載せる。**
+pub const IPI_PROBE_VECTOR: usize = 0x43;
 
 /// 協調的 yield 用のソフトウェア割り込みベクタ（M5-c）。
 ///
@@ -1289,7 +1302,7 @@ impl StubTableCheck {
 }
 
 /// 例外スタブ表の外に置いた専用スタブの本数。
-pub const DEDICATED_STUB_COUNT: usize = 5;
+pub const DEDICATED_STUB_COUNT: usize = 6;
 
 /// 例外スタブ表の外に置いた専用スタブと、それを指すべきゲートの対応。
 ///
@@ -1316,6 +1329,7 @@ fn dedicated_stubs() -> [(usize, u64); DEDICATED_STUB_COUNT] {
             addr_of!(zaytos_ioapic_keyboard_stub) as u64,
         ),
         (LAPIC_TIMER_VECTOR, addr_of!(zaytos_lapic_timer_stub) as u64),
+        (IPI_PROBE_VECTOR, addr_of!(zaytos_ipi_probe_stub) as u64),
     ]
 }
 
@@ -1536,6 +1550,18 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
         // 最初のティックで例外スタイルのスタブへ落ちて停止する。
         (*idt)[LAPIC_TIMER_VECTOR] = IdtEntry::new(
             addr_of!(zaytos_lapic_timer_stub) as u64,
+            KERNEL_CODE_SELECTOR,
+            GateType::Interrupt,
+            0,
+            None,
+        );
+
+        // 測定用 IPI 用ゲート（S5-a）。専用スタブへ載せる。
+        // **`IRQ_STYLE_STUB_COUNT` の範囲外なので個別に置く**（yield・スプリアス・
+        // キーボード・LAPIC タイマと同じ扱い）。**載せずに IPI を送ると、
+        // 例外スタイルのスタブへ落ちて停止する。実際に踏んだ。**
+        (*idt)[IPI_PROBE_VECTOR] = IdtEntry::new(
+            addr_of!(zaytos_ipi_probe_stub) as u64,
             KERNEL_CODE_SELECTOR,
             GateType::Interrupt,
             0,
