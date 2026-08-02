@@ -776,6 +776,27 @@ pub unsafe fn run_timer_loop(
         #[cfg(feature = "sched-keep-workers-runnable")]
         crate::task::rearm_workers_for_smp_stimulus();
 
+        // === S5-b: 世代を 1 つ上げて、AP が次の取得でフラッシュすることを見る ===
+        //
+        // **本番には写像を変える経路が無いので、そのままでは一度も発火しない。**
+        // **発火させて機序を見るためだけの feature である。**
+        //
+        // **BKL を保持したまま上げる**——それが `note_mapping_changed` の契約で、
+        // 順序（Acquire/Release の対）が成り立つ前提でもある。
+        #[cfg(feature = "smp-tlb-generation-probe")]
+        {
+            {
+                let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
+                crate::bkl::note_mapping_changed();
+            }
+            logger.info(format_args!(
+                "smp: bumped the tlb generation to {} while holding the BKL; every core must \
+                 flush at its next acquire (the entry takes the BKL on every tick, so this \
+                 settles within one tick)",
+                crate::bkl::tlb_generation()
+            ));
+        }
+
         // === S5-a: 測定用 IPI を送る（feature `smp-ipi-probe` のときだけ）===
         //
         // **既定ビルドでは送らない。** 送る側は上限つきとはいえスピンで待つので、
@@ -972,7 +993,7 @@ pub unsafe fn run_timer_loop(
                         "heartbeat: ticks={ticks} ({} s), cpu={}, ap_ticks={}, ticks_total={}, \
                      lapic_timer_deliveries={}, timer_accounting_balanced={}, \
                      max kernel entry depth={}, ap_current={} ap_sched_passes={}, \
-                     ipi_sent={} ipi_recv_cpu1={}, \
+                     ipi_sent={} ipi_recv_cpu1={}, tlb_gen={} flush_cpu1={}, \
                      keys={} dropped={} \
                      stray={} spurious={} lapic_spurious={}, \
                      irq1={} balanced={}, max tick jump={}, i8042 OBF={}, PIC ISR={}",
@@ -1000,6 +1021,8 @@ pub unsafe fn run_timer_loop(
                         crate::task::ap_schedule_passes(),
                         idt::ipi_probe_sent(),
                         idt::ipi_probe_received_for(1),
+                        crate::bkl::tlb_generation(),
+                        crate::bkl::generation_flushes_for(1),
                         crate::keyboard::buffer::received_count(),
                         crate::keyboard::buffer::overflow_count(),
                         crate::keyboard::stray_irq_count(),

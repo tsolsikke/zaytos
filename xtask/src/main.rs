@@ -4395,6 +4395,25 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // **世代方式の実証（S5-b）。** 世代を 1 つ上げると、**AP が次の取得で
+    // フラッシュする。** 入口はティックごとに BKL を取るので、**遅くとも
+    // 1 ティックで整合する。**
+    //
+    // **判定は 2 つとも要る**——AP がフラッシュしたことと、AP が生き続けること。
+    // **前者だけだと、フラッシュして死んでいても通る。**
+    CriticalTest {
+        name: "tlb-generation",
+        feature: "smp-tlb-generation-probe",
+        expected_markers: &[
+            "bumped the tlb generation to 1",
+            // AP が世代の食い違いで 1 回フラッシュした。
+            "tlb_gen=1 flush_cpu1=1",
+            "smp: ap heartbeat: cpu=1",
+        ],
+        forbidden_markers: &[],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // **宛先の主張の破壊（S4-a）。** 確実に落ちるのは読み戻しの主張のほうで、
     // 配送が実際にどうなるかは観測していない。
     CriticalTest {
@@ -4872,6 +4891,7 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "sched-ignore-bootstrap-tripwire",
     "sched-keep-workers-runnable",
     "smp-ipi-probe",
+    "smp-tlb-generation-probe",
 ];
 
 /// 内部を隠す約束のディレクトリ。
@@ -5562,7 +5582,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 19,
-    full: 107,
+    full: 108,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

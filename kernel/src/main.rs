@@ -4600,6 +4600,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "デモ入口の bootstrap processor 見張りを外す",
     ),
     (
+        "smp-tlb-generation-probe",
+        cfg!(feature = "smp-tlb-generation-probe"),
+        "TLB の世代を 1 つ上げ、各コアが次の取得でフラッシュすることを見る（S5-b）",
+    ),
+    (
         "smp-ipi-probe",
         cfg!(feature = "smp-ipi-probe"),
         "測定用 IPI を AP へ送る（S5-a。既定では送らない）",
