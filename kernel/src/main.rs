@@ -1303,6 +1303,12 @@ extern "sysv64" fn kernel_main() -> ! {
     // 単一文脈で AP はまだ走っていない。
     unsafe {
         kernel::smp::prepare_ap_per_cpu(&mut logger, &mut allocator);
+        // 探り用ページは**アロケータのあるここで**張る（S5-c）。
+        // SAFETY: 本番テーブルへ切り替え済みで、direct map 窓が使える。
+        #[cfg(feature = "smp-tlb-shootdown-probe")]
+        unsafe {
+            kernel::smp::prepare_shootdown_probe(&mut logger, &mut allocator)
+        };
     }
 
     // === S2-a: APIC のレジスタを読んで現在値を記録する ===
@@ -4598,6 +4604,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "sched-ignore-bootstrap-tripwire",
         cfg!(feature = "sched-ignore-bootstrap-tripwire"),
         "デモ入口の bootstrap processor 見張りを外す",
+    ),
+    (
+        "smp-tlb-shootdown-probe",
+        cfg!(feature = "smp-tlb-shootdown-probe"),
+        "APに探り用ページを触らせ、写像を外した後の見え方を比べる（S5-c）",
+    ),
+    (
+        "smp-tlb-no-generation-bump",
+        cfg!(feature = "smp-tlb-no-generation-bump"),
+        "写像を外しても世代を上げない（S5-c の破壊。APは古い翻訳で成功する）",
     ),
     (
         "smp-tlb-generation-probe",

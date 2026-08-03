@@ -488,6 +488,142 @@ static STARTED_AP_APIC_ID: [core::sync::atomic::AtomicU16; MAX_APS] =
 /// 「まだ起こしていない」を表す番兵（S5-a）。
 const NO_APIC_ID: u16 = u16::MAX;
 
+/// 探り用ページの仮想アドレス（S5-c）。**AP スタックの領域とは別の PML4 の穴**に
+/// 置く（`PML4[258]` の遥か上）。**本番の写像と重ならない場所を選ぶ。**
+#[cfg(feature = "smp-tlb-shootdown-probe")]
+const SHOOTDOWN_PROBE_VIRT: u64 = 0xffff_8180_0000_0000;
+
+/// 探り用ページを 1 枚張る（S5-c）。**BSP が起動時、アロケータのある場所で呼ぶ。**
+///
+/// **定常ループにはアロケータが無い**ので、張るのはここでしかできない。
+/// **外すのは定常ループ側である**（`unmap_4kib` はアロケータを要らない）。
+///
+/// # Safety
+///
+/// 本番テーブルへ切り替え済みで、direct map 窓が使えること。
+#[cfg(feature = "smp-tlb-shootdown-probe")]
+pub unsafe fn prepare_shootdown_probe<const CAP: usize>(
+    logger: &mut Logger<SerialPort>,
+    allocator: &mut FrameAllocator<CAP>,
+) {
+    // SAFETY: 呼び出し側の契約。
+    let mut table = unsafe { ActivePageTable::current(common::addr::direct_map()) };
+    let Some(frame) = allocator.allocate_frame() else {
+        logger.error(format_args!("smp: no frame for the shootdown probe page"));
+        return;
+    };
+    let Some(virt) = VirtAddr::new(SHOOTDOWN_PROBE_VIRT) else {
+        logger.error(format_args!("smp: the shootdown probe VA is not canonical"));
+        return;
+    };
+    // SAFETY: 稼働中のテーブルへ、まだ誰も使っていない VA を張る。
+    if let Err(error) = unsafe { table.map_4kib(virt, frame, false, true, allocator) } {
+        logger.error(format_args!(
+            "smp: could not map the shootdown probe page: {error:?}"
+        ));
+        return;
+    }
+    shootdown_probe::set_virt(SHOOTDOWN_PROBE_VIRT);
+    logger.info(format_args!(
+        "smp: mapped the shootdown probe page at {SHOOTDOWN_PROBE_VIRT:#x} -> {:#x}",
+        frame.as_u64()
+    ));
+}
+
+/// TLB シュートダウンの実証で使う探り用ページ（S5-c）。
+///
+/// # なぜ 4 段の手順が要るか
+///
+/// **「AP が触って #PF になる」だけでは差が出ない。** AP の TLB にその翻訳が
+/// **載っていなければ**、シュートダウンを送らない構成でも**ページテーブルを歩いて
+/// #PF になる。**両構成が同じ結果になり、比較が消える。**
+///
+/// 手順は次の 4 段である。
+///
+/// 1. **AP がそのアドレスを触る**（翻訳を TLB へ載せる）
+/// 2. **触れたことを確かめる**（載せられなかったら以降の比較は無意味である）
+/// 3. bootstrap processor が **BKL を保持したまま**写像を外し、**世代を上げる**
+///    （破壊構成では**世代を上げない**）
+/// 4. **AP がもう一度触る**——世代が上がっていれば次の取得でフラッシュ済みなので
+///    **#PF**、上がっていなければ**古い翻訳で成功する**
+///
+/// **どちらの側にも「触ったことの積極的な証拠」が要る。** 「落ちなかった」は
+/// **「触っていない」でも満たされる**（S5-a で「0 と 0 が一致する」を踏んだのと
+/// 同じ形である）。**そのため触った回数を数える。**
+#[cfg(feature = "smp-tlb-shootdown-probe")]
+pub mod shootdown_probe {
+    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+    /// 何もしない。
+    pub const IDLE: u32 = 0;
+    /// 触れ（1 回目。翻訳を TLB へ載せる）。
+    pub const TOUCH_FIRST: u32 = 1;
+    /// 触れ（2 回目。写像を外した後）。
+    pub const TOUCH_AGAIN: u32 = 2;
+
+    static COMMAND: AtomicU32 = AtomicU32::new(IDLE);
+    static SERVED: AtomicU32 = AtomicU32::new(IDLE);
+    static TOUCHES: AtomicU64 = AtomicU64::new(0);
+    static ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+    static PROBE_VIRT: AtomicU64 = AtomicU64::new(0);
+
+    /// 探り用ページの仮想アドレスを覚える（BSP が起動時に呼ぶ）。
+    pub fn set_virt(virt: u64) {
+        PROBE_VIRT.store(virt, Ordering::SeqCst);
+    }
+
+    /// 探り用ページの仮想アドレス。**未設定なら 0。**
+    pub fn virt() -> u64 {
+        PROBE_VIRT.load(Ordering::SeqCst)
+    }
+
+    /// AP へ指示を出す。
+    pub fn command(next: u32) {
+        COMMAND.store(next, Ordering::SeqCst);
+    }
+
+    /// AP が触った回数。**これが「触れたことの積極的な証拠」である。**
+    pub fn touches() -> u64 {
+        TOUCHES.load(Ordering::SeqCst)
+    }
+
+    /// AP が**触ろうとした**回数。**アクセスの直前に増える。**
+    ///
+    /// # なぜ「触れた回数」だけでは足りないか
+    ///
+    /// **「2 回目で数が増えなかった」は「触ろうとして触れなかった」と
+    /// 「そもそも 2 回目を試みなかった」の両方で成り立つ。** AP が段 4 へ
+    /// 到達する前に別の理由で死んでいても、触れた回数は 1 のままである。
+    /// **試みた側にも積極的な証拠が要る。**
+    pub fn attempts() -> u64 {
+        ATTEMPTS.load(Ordering::SeqCst)
+    }
+
+    /// AP 側。指示があれば触って数える。**戻り値は触ったかどうか。**
+    ///
+    /// # Safety
+    ///
+    /// `PROBE_VIRT` が写像済みであること（外された後に呼ぶと #PF になる。
+    /// **それがこの探りの目的である**）。
+    pub unsafe fn service() {
+        let cmd = COMMAND.load(Ordering::SeqCst);
+        if cmd == IDLE || SERVED.load(Ordering::SeqCst) == cmd {
+            return;
+        }
+        let virt = PROBE_VIRT.load(Ordering::SeqCst);
+        if virt == 0 {
+            return;
+        }
+        // **触る「前」に試行を数える。** ここで #PF になると以降は実行されないので、
+        // **試行と成功の差が「触ろうとして触れなかった」の証拠になる。**
+        ATTEMPTS.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: 呼び出し側の契約。読み取りのみ。**外された後はここで #PF になる。**
+        let _ = unsafe { core::ptr::read_volatile(virt as *const u64) };
+        TOUCHES.fetch_add(1, Ordering::SeqCst);
+        SERVED.store(cmd, Ordering::SeqCst);
+    }
+}
+
 /// 起こした AP の APIC ID を返す（S5-a）。**起こしていなければ `None`。**
 pub fn started_ap_apic_id(slot: usize) -> Option<u8> {
     let raw = STARTED_AP_APIC_ID
@@ -1499,6 +1635,14 @@ fn ap_heartbeat_loop(serial: &mut SerialPort, slot: usize) -> ! {
                 cpu::read_timestamp_counter()
             );
         }
+        // TLB シュートダウンの探り（S5-c）。**指示があるときだけ触る。**
+        // SAFETY: 探り用ページは BSP が起動時に写像している。**外された後に触ると
+        // #PF になるが、それがこの探りの目的である。**
+        #[cfg(feature = "smp-tlb-shootdown-probe")]
+        unsafe {
+            shootdown_probe::service()
+        };
+
         // SAFETY: 自コアの IDT は載っており、タイマのハンドラは EOI を送って戻る。
         // `sti; hlt` が隣接しているので、有効化と停止の間に窓が開かない。
         unsafe {

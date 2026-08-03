@@ -281,6 +281,8 @@ sched-ignore-bootstrap-tripwire = []
 sched-keep-workers-runnable = []
 smp-ipi-probe = []
 smp-tlb-generation-probe = []
+smp-tlb-shootdown-probe = []
+smp-tlb-no-generation-bump = []
 # キーボードの redirection entry の宛先を logical の broadcast にする。
 # **確実に落ちるのは読み戻しの主張のほうである。** 配送が実際にどうなるか
 # （AP が受けて共有リングバッファへ積むか）は観測していない。
