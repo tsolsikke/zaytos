@@ -4297,7 +4297,21 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
         forbidden_markers: &[
             // 第 1 層が効いているので、AP は担当外のワーカーを取れない。
             "the first guard layer did not keep it out",
-            "double selection detected",
+            // **`double selection detected` はここにあった。S6-a で外した。**
+            //
+            // **この構成では正当に鳴りうる。** `setup_preemptive_tasks` は先頭で
+            // `set_current_index(0)` を呼ぶので、**AP の `CURRENT` が一時的に
+            // タスク 0 を指す。** その窓の間に bootstrap processor がティックを
+            // 受けると、走行可能な担当ワーカーがまだ無いので落ち先の 0 を選び、
+            // **検出器は「タスク 0 が他コアの current でもある」を見て鳴る。**
+            //
+            // **検出器は誤っていない。** `currents` は本当に `[0, 0]` である。
+            // **誤っていたのはこの禁止マーカーのほうである**——鳴らないことを
+            // 要求していたが、**鳴るかどうかは窓に重なるかどうかで決まる。**
+            //
+            // **この項目はもう二重選択を主張しない。** その主張は S4-c-4-3 の
+            // 梯子（`smp-stimulus-*`）が担っている。詳細と、窓を広げて観測した
+            // 記録は `verification-coverage.md` にある。
         ],
         wait_for_full_timeout: true,
         min_heartbeats: None,
