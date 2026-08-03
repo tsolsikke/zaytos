@@ -4414,6 +4414,25 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // **TLB シュートダウンの実証（S5-c）。** 世代を上げた側は、AP が
+    // フラッシュ済みなので **2 回目の触りで #PF になる。**
+    CriticalTest {
+        name: "tlb-shootdown",
+        feature: "smp-tlb-shootdown-probe",
+        expected_markers: &["the ap touched the probe page 1 time(s)", "touches 1 -> 1"],
+        forbidden_markers: &["touches 1 -> 2"],
+        wait_for_full_timeout: true,
+        min_heartbeats: None,
+    },
+    // **破壊: 世代を上げない。** AP はフラッシュしないので、**古い翻訳で成功する。**
+    CriticalTest {
+        name: "tlb-no-shootdown",
+        feature: "smp-tlb-shootdown-probe,smp-tlb-no-generation-bump",
+        expected_markers: &["the ap touched the probe page 1 time(s)", "touches 1 -> 2"],
+        forbidden_markers: &[],
+        wait_for_full_timeout: true,
+        min_heartbeats: None,
+    },
     // **宛先の主張の破壊（S4-a）。** 確実に落ちるのは読み戻しの主張のほうで、
     // 配送が実際にどうなるかは観測していない。
     CriticalTest {
@@ -4892,6 +4911,8 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "sched-keep-workers-runnable",
     "smp-ipi-probe",
     "smp-tlb-generation-probe",
+    "smp-tlb-shootdown-probe",
+    "smp-tlb-no-generation-bump",
 ];
 
 /// 内部を隠す約束のディレクトリ。
@@ -5582,7 +5603,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 19,
-    full: 108,
+    full: 110,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
