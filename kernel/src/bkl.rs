@@ -310,6 +310,14 @@ pub fn generation_flushes_for(cpu: usize) -> u64 {
 ///
 /// [`acquire`] が勝った直後に呼ぶ。**取得してから写像を使い始めるまでの間に置く**
 /// ので、**古い翻訳のまま走り出す経路が無い。**
+///
+/// # 既定ビルドに在ることは何が主張しているか
+///
+/// **主たる論拠は構造の側である**——ここにも [`acquire`] からの呼び出しにも
+/// **`cfg` が付かない**ので、構成によらず在る。
+/// **`cargo xtask check` がその裏取りをする**（既定ビルドのバイナリにこの関数の
+/// シンボルが在ることを見る）。**`#[inline(never)]` はそのために付けてある。**
+#[inline(never)]
 fn flush_if_generation_is_stale() {
     let current = TLB_GENERATION.load(Ordering::Relaxed);
     let seen = SEEN_GENERATION.this_cpu();

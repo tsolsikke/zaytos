@@ -4815,7 +4815,10 @@ const APIC_TESTS: &[CriticalTest] = &[
     },
 ];
 
-/// 二重選択の検出器が**既定ビルドのバイナリに在ること**を見る（S4-c-3-2b）。
+/// **構造的なガードが既定ビルドのバイナリに在ること**を見る（S4-c-3-2b、S5-bで拡張）。
+///
+/// **名前は主張を指す。** 当初は検出器だけを見ていたが、**世代フラッシュ（S5-b）も
+/// 同じ問いなので同じ検査へ入れた。** **「検出器のシンボル」では主張とずれる。**
 ///
 /// # なぜこの検査が要るのか
 ///
@@ -4829,12 +4832,20 @@ const APIC_TESTS: &[CriticalTest] = &[
 /// **検出器の呼び出しに `cfg` は付かない。** よって検出器は構成によらず全ビルドに
 /// 在る。**この検査はそれを機械的に確かめるだけである。**
 ///
+/// # 世代フラッシュも同じ問いである（S5-b）
+///
+/// `bkl` の世代フラッシュは、**探りが feature 越しなので、既定ビルドに在ることを
+/// 探りでは示せない。** 検出器と同じく、**主たる論拠は構造の側**（`cfg` が付かない）
+/// で、**ここはその裏取りである。**
+///
 /// # **限界: 「呼ばれうる位置に在る」までしか見えない**
 ///
 /// シンボルが在ることは、**正しい位置で呼ばれることを示さない。** それを示すのは
 /// 2 層とも壊した構成（`smp-ap-test sched-ignore-both-layers`）で実際に鳴るほうで
 /// ある。**この検査だけが緑でも、検出器が働いていることの証明にはならない。**
-fn check_detector_symbol_present(workspace_root: &Path) -> Result<String> {
+/// **世代フラッシュも同じで、「正しい位置で呼ばれる」ことは
+/// `smp-ap-test tlb-generation` と `tlb-shootdown` が示す。**
+fn check_structural_guard_symbols_present(workspace_root: &Path) -> Result<String> {
     let kernel_elf = build_kernel(workspace_root, false)?;
     let output = Command::new("nm")
         .arg(&kernel_elf)
@@ -4845,14 +4856,14 @@ fn check_detector_symbol_present(workspace_root: &Path) -> Result<String> {
     }
     let listing = String::from_utf8_lossy(&output.stdout);
     let mut found = Vec::new();
-    for fragment in DETECTOR_SYMBOL_FRAGMENTS {
+    for fragment in STRUCTURAL_GUARD_SYMBOL_FRAGMENTS {
         match listing.lines().find(|line| line.contains(fragment)) {
             Some(line) => found.push(line.split_whitespace().last().unwrap_or(line).to_string()),
             None => bail!(
                 "the default kernel build has no symbol containing {fragment:?}. The production \
-                 observers must exist in the default build: \"it does not fire\" is only a claim \
-                 if the code is there. If it was renamed, update DETECTOR_SYMBOL_FRAGMENTS; if it \
-                 was removed or inlined away, restore it (both are marked #[inline(never)] for \
+                 guards must exist in the default build: \"it does not fire\" is only a claim \
+                 if the code is there. If it was renamed, update \
+                 STRUCTURAL_GUARD_SYMBOL_FRAGMENTS; if it was removed or inlined away, restore it (both are marked #[inline(never)] for \
                  exactly this reason)."
             ),
         }
@@ -4860,14 +4871,17 @@ fn check_detector_symbol_present(workspace_root: &Path) -> Result<String> {
     Ok(found.join(", "))
 }
 
-/// 検出器のシンボル名に必ず現れる断片（S4-c-3-2b）。
+/// **構造的なガード**のシンボル名に必ず現れる断片（S4-c-3-2b、S5-bで拡張）。
 ///
 /// Rust のシンボルはマングルされるので、**関数名の断片で照合する。**
 /// 改名したらここも直すこと（検査の失敗メッセージがそう言う）。
-const DETECTOR_SYMBOL_FRAGMENTS: &[&str] = &[
+const STRUCTURAL_GUARD_SYMBOL_FRAGMENTS: &[&str] = &[
     "report_double_selection",
     "report_foreign_task_adoption",
     "report_layer_two_skip",
+    // 世代フラッシュ（S5-b）。**探りは feature 越しなので、既定ビルドに在ることは
+    // 探りでは示せない。** ここで裏取りする。
+    "flush_if_generation_is_stale",
 ];
 
 /// 意図的に壊した経路を有効にする feature の接頭辞・名前。
@@ -5289,13 +5303,13 @@ fn cmd_check(full: bool) -> Result<()> {
 
     // 二重選択の検出器が既定ビルドに在ること（S4-c-3-2b、静的）。
     total += 1;
-    println!("=== xtask check: the double-selection detector is present in the default build");
-    match check_detector_symbol_present(&workspace_root) {
-        Ok(symbol) => println!("--- detector symbol: OK ({symbol})"),
+    println!("=== xtask check: the structural guards are present in the default build");
+    match check_structural_guard_symbols_present(&workspace_root) {
+        Ok(symbol) => println!("--- guard symbols: OK ({symbol})"),
         Err(e) => {
             println!("    {e}");
-            println!("--- detector symbol: FAILED");
-            failed.push("detector symbol".to_string());
+            println!("--- guard symbols: FAILED");
+            failed.push("guard symbols".to_string());
         }
     }
 
