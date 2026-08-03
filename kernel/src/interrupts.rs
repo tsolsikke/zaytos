@@ -18,6 +18,10 @@ use crate::gdt;
 use crate::idt;
 use crate::irq;
 
+/// 探りの各段で待つスピン上限（S5-c）。**上限の無い待ちを書かない。**
+#[cfg(feature = "smp-tlb-shootdown-probe")]
+const SHOOTDOWN_PROBE_WAIT_SPINS: u32 = 3_000_000;
+
 /// 測定用 IPI を何本送るか（S5-a）。**会計を主張できる程度の本数にする。**
 #[cfg(feature = "smp-ipi-probe")]
 const IPI_PROBE_ROUNDS: u32 = 4;
@@ -775,6 +779,86 @@ pub unsafe fn run_timer_loop(
         // 到達しない**（`task::rearm_workers_for_smp_stimulus` の doc）。
         #[cfg(feature = "sched-keep-workers-runnable")]
         crate::task::rearm_workers_for_smp_stimulus();
+
+        // === S5-c: TLB シュートダウンの実証（4 段の手順）===
+        //
+        // **手順の理由は `smp::shootdown_probe` の doc にある。**
+        // **「AP が触って #PF」だけでは差が出ない**——TLB に翻訳が載っていなければ、
+        // 世代を上げない構成でもページテーブルを歩いて #PF になる。
+        #[cfg(feature = "smp-tlb-shootdown-probe")]
+        {
+            use crate::smp::shootdown_probe;
+
+            // (1)(2) AP に触らせ、**触れたことを確かめる。**
+            shootdown_probe::command(shootdown_probe::TOUCH_FIRST);
+            let mut spun = 0u32;
+            while shootdown_probe::touches() == 0 && spun < SHOOTDOWN_PROBE_WAIT_SPINS {
+                core::hint::spin_loop();
+                spun += 1;
+            }
+            let first = shootdown_probe::touches();
+            logger.info(format_args!(
+                "smp: shootdown probe step 1-2: the ap touched the probe page {first} time(s) \
+                 (this is the positive evidence that the translation is in its TLB; without it \
+                 the comparison below is meaningless)"
+            ));
+            if first == 0 {
+                logger.error(format_args!(
+                    "smp: the ap never touched the probe page; the shootdown comparison is void"
+                ));
+            } else {
+                // (3) **BKL を保持したまま**写像を外し、世代を上げる。
+                let flushes_before = crate::bkl::generation_flushes_for(1);
+                {
+                    let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
+                    // SAFETY: 稼働中のテーブルから、探り用に張った 1 ページを外す。
+                    let mut table = unsafe {
+                        crate::paging::active::ActivePageTable::current(common::addr::direct_map())
+                    };
+                    if let Some(virt) = common::addr::VirtAddr::new(shootdown_probe::virt()) {
+                        // SAFETY: 探り用に張ったページで、他の誰も使っていない。
+                        let _ = unsafe { table.unmap_4kib(virt) };
+                    }
+                    // 破壊 (S5-c, smp-tlb-no-generation-bump): **世代を上げない。**
+                    // **AP はフラッシュしないので、古い翻訳で成功する。**
+                    #[cfg(not(feature = "smp-tlb-no-generation-bump"))]
+                    crate::bkl::note_mapping_changed();
+                }
+                // **世代方式が土台である。** 上げた場合、AP は次の取得でフラッシュする。
+                // **その完了を待ってから触らせる**ので、勝負が時間に依らない。
+                let mut spun = 0u32;
+                while crate::bkl::generation_flushes_for(1) == flushes_before
+                    && spun < SHOOTDOWN_PROBE_WAIT_SPINS
+                {
+                    core::hint::spin_loop();
+                    spun += 1;
+                }
+                logger.info(format_args!(
+                    "smp: shootdown probe step 3: unmapped the probe page; ap flushes {} -> {}",
+                    flushes_before,
+                    crate::bkl::generation_flushes_for(1)
+                ));
+
+                // (4) もう一度触らせる。**世代を上げていれば #PF、上げていなければ成功。**
+                shootdown_probe::command(shootdown_probe::TOUCH_AGAIN);
+                let mut spun = 0u32;
+                let attempts_before = shootdown_probe::attempts();
+                while shootdown_probe::attempts() == attempts_before
+                    && spun < SHOOTDOWN_PROBE_WAIT_SPINS
+                {
+                    core::hint::spin_loop();
+                    spun += 1;
+                }
+                logger.info(format_args!(
+                    "smp: shootdown probe step 4: attempts={} touches {first} -> {} (a stale \
+                     translation lets the second touch succeed; a flushed one faults. The \
+                     attempt count is the evidence that the ap tried: touches staying put is \
+                     also what a dead ap looks like)",
+                    shootdown_probe::attempts(),
+                    shootdown_probe::touches()
+                ));
+            }
+        }
 
         // === S5-b: 世代を 1 つ上げて、AP が次の取得でフラッシュすることを見る ===
         //
