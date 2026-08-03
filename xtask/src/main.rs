@@ -3360,6 +3360,154 @@ struct DirectInterruptControlSite {
     reason: &'static str,
 }
 
+/// シリアルへの口を直接開けてよい箇所（[`DIRECT_SERIAL_PORT_ALLOWLIST`] 参照）。
+struct DirectSerialPortSite {
+    /// ワークスペース相対のパス。
+    file: &'static str,
+    /// その中の所属名（関数名）。
+    item: &'static str,
+    /// なぜ BKL の外から書いてよいのか。
+    reason: &'static str,
+}
+
+/// シリアルへの口を直接開けてよい箇所の許可リスト（S6-b）。
+///
+/// # 名前は、見ているものを指す
+///
+/// **動機は「BKL の外から書いてよい箇所を固定する」だが、実際に見ているのは
+/// `SerialPort::new(` を書いた箇所である。** 書き込みでも BKL の状態でもない。
+/// **守りたいことではなく、見ているものを名前にしてある**（同じずれを 3 度
+/// 起こしている。`verification-coverage.md` の失敗類型）。
+///
+/// # 何を固定していて、何を固定していないか
+///
+/// **固定するのは「どこから書いてよいか」だけである。** **許可された箇所どうしの
+/// 混線は防げない**——S4-b-4 で、BKL の外の 2 行がバイト単位で混ざる実物を観測して
+/// いる（`docs/verification-coverage.md`）。**この許可リストはその範囲を狭めるもので
+/// あって、混線を無くすものではない。**
+///
+/// # 粒度の限界
+///
+/// **見ているのは `SerialPort::new(` を書いた箇所である。** `kernel/src/task.rs` の
+/// `serial_line` のように**多数の呼び出しをまとめる出口**があると、**1 エントリが
+/// その全部を覆う**（実測で 31 箇所）。**「どのファイルのどの関数が口を開けるか」は
+/// 固定できるが、「その口を誰が使うか」は固定できない。**
+///
+/// # bootloader が対象外である理由
+///
+/// **bootloader には BKL が存在しない。** 「BKL の外」という区別自体が無いので、
+/// 許可リストの意味が無い。**対象は `kernel/` と `common/` である。**
+const DIRECT_SERIAL_PORT_ALLOWLIST: &[DirectSerialPortSite] = &[
+    // (a) BKL 自身。**取れない**——ここで取ると、報せようとしている当の対象を
+    // もう一度取ることになる。
+    DirectSerialPortSite {
+        file: "kernel/src/bkl.rs",
+        item: "report_recursive_acquire_and_halt",
+        reason: "BKL の再帰取得の報告。BKL を取れない当の経路である",
+    },
+    DirectSerialPortSite {
+        file: "kernel/src/bkl.rs",
+        item: "report_timeout_and_halt",
+        reason: "BKL の待ちがタイムアウトした報告。取れないから報せている",
+    },
+    DirectSerialPortSite {
+        file: "kernel/src/bkl.rs",
+        item: "sabotage_hold_forever",
+        reason: "破壊 bkl-hold-forever-test の実装。保持したまま報せる",
+    },
+    DirectSerialPortSite {
+        file: "kernel/src/bkl.rs",
+        item: "sabotage_enable_interrupts_while_held",
+        reason: "破壊 bkl-hold-with-if-set-test の実装。保持したまま報せる",
+    },
+    // (b) 戻らない経路。**ADR-0023 で BKL を取らないと決めてある。**
+    // 取らないと決めた以上、その経路の行も BKL の外にしかなりえない。
+    DirectSerialPortSite {
+        file: "kernel/src/panic.rs",
+        item: "panic",
+        reason: "パニックハンドラ（ADR-0004 の halt and dump、ADR-0023 で BKL を取らない）",
+    },
+    DirectSerialPortSite {
+        file: "kernel/src/idt/mod.rs",
+        item: "exception_entry",
+        reason: "例外ハンドラ。依存を最小にする（ADR-0018）",
+    },
+    DirectSerialPortSite {
+        file: "kernel/src/idt/mod.rs",
+        item: "check_stack_alignment",
+        reason: "スタブ入口の境界違反の報告。違反した状態で呼び出しを増やさない",
+    },
+    DirectSerialPortSite {
+        file: "common/src/critical.rs",
+        item: "report_contended_lock_and_halt",
+        reason: "Locked<T> の競合の報告。停止する経路である",
+    },
+    DirectSerialPortSite {
+        file: "common/src/critical.rs",
+        item: "report_double_lock_and_halt",
+        reason: "Locked<T> の二重取得の報告。停止する経路である",
+    },
+    DirectSerialPortSite {
+        file: "kernel/src/console/screen.rs",
+        item: "report_flush_failure_and_halt",
+        reason: "画面への書き出しが失敗したときの報告。停止する経路である",
+    },
+    // (c) BKL より下位の機構。**BKL がこれらに依存しているので、逆向きに
+    // 依存させられない。**
+    DirectSerialPortSite {
+        file: "kernel/src/main.rs",
+        item: "kernel_main",
+        reason: "ロガーを組み立てる起点。BKL はまだ無い",
+    },
+    DirectSerialPortSite {
+        file: "kernel/src/gdt/mod.rs",
+        item: "cpu_id_from_gdtr",
+        reason: "cpu_id() 自身の失敗経路。BKL は cpu_id に依存する",
+    },
+    DirectSerialPortSite {
+        file: "kernel/src/heap/allocator.rs",
+        item: "log_directly_to_serial",
+        reason: "確保に失敗したときの報告。ヒープ経由のログは再帰的に確保しうる",
+    },
+    // (d) AP の起動経路。**BKL に参加する前である。**
+    DirectSerialPortSite {
+        file: "kernel/src/smp.rs",
+        item: "zaytos_ap_entry",
+        reason: "AP の入口。per-CPU もスタックもまだ整っていない",
+    },
+    DirectSerialPortSite {
+        file: "kernel/src/smp.rs",
+        item: "bring_up_application_processor",
+        reason: "AP の起こし。BKL へ参加する前の経過を出す",
+    },
+    DirectSerialPortSite {
+        file: "kernel/src/smp.rs",
+        item: "ap_after_switch",
+        reason: "AP がスタックを切り替えた直後。BKL を取る区間は書き込みだけに絞ってある",
+    },
+    // (e) 同時進入の報告。**BKL の外にいることを報せる行なので、取れない。**
+    DirectSerialPortSite {
+        file: "kernel/src/idt/mod.rs",
+        item: "report_concurrent_entry_once",
+        reason: "カーネル内の同時進入の報告。BKL の外にいることが報告内容である",
+    },
+    // (f) **ここだけ性質が違う。**
+    //
+    // `serial_line` は**スケジューラの観測行の出口**で、31 箇所から呼ばれる
+    // （S6-b で数えた）。**呼び出し元は BKL の内側と外側にまたがっている**——
+    // `schedule_switch` や検出器は内側、デモの進行を出す行は外側である。
+    //
+    // **したがってこの 1 エントリは「BKL の外から書いてよい」を主張していない。**
+    // 主張しているのは「シリアルへの口をここに 1 つだけ開ける」である。
+    // **許可リストの粒度がこの出口までしか届かないことが、この検査の限界である**
+    // （型の doc の「粒度の限界」）。
+    DirectSerialPortSite {
+        file: "kernel/src/task.rs",
+        item: "serial_line",
+        reason: "スケジューラの観測行の唯一の出口（31 箇所の呼び出しを覆う。粒度の限界）",
+    },
+];
+
 /// 直接 `cli`/`sti` の許可リスト（[`DirectInterruptControlSite`] 参照）。
 const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
     // (a) 排他の実装本体。ここが「排他の所在」であり、他は全部これを使う。
@@ -3554,6 +3702,76 @@ fn find_unapproved_interrupt_control(
             }
 
             let approved = DIRECT_INTERRUPT_CONTROL_ALLOWLIST
+                .iter()
+                .any(|site| site.file == relative && site.item == current_item);
+            if approved {
+                *approved_occurrences += 1;
+                continue;
+            }
+            findings.push(format!(
+                "{relative}:{} (in {current_item}): {}",
+                index + 1,
+                line.trim().chars().take(60).collect::<String>()
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+/// 許可リストに無い場所でシリアルの口を開けている箇所を探す（S6-b）。
+///
+/// **`cli`/`sti` の走査と同じ形にしてある**（同じ `function_name_declared_on` で
+/// 所属名を追い、コメント行を飛ばし、追跡済みと未追跡の両方を見る）。
+/// **`asm!` の塊を追う必要はない**——シリアルは Rust の式でしか触らない。
+fn find_unapproved_direct_serial_ports(
+    workspace_root: &Path,
+    approved_occurrences: &mut usize,
+) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .current_dir(workspace_root)
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "*.rs",
+        ])
+        .output()
+        .context("failed to list Rust sources")?;
+    if !output.status.success() {
+        bail!("git ls-files failed while collecting Rust sources");
+    }
+    let listing = String::from_utf8(output.stdout).context("git ls-files produced non-UTF-8")?;
+
+    let mut findings = Vec::new();
+    for relative in listing.lines().filter(|l| !l.is_empty()) {
+        // 対象は kernel と common だけ（許可リストの doc の「bootloader が対象外で
+        // ある理由」）。xtask はホスト側で、この検査自身の文字列リテラルも入る。
+        if !(relative.starts_with("kernel/") || relative.starts_with("common/")) {
+            continue;
+        }
+        // ポートの実装本体は対象外。
+        if relative == "common/src/serial.rs" {
+            continue;
+        }
+        let path = workspace_root.join(relative);
+        let source = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+
+        let mut current_item = "<file scope>";
+        for (index, line) in source.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if let Some(name) = function_name_declared_on(line) {
+                current_item = name;
+            }
+            if trimmed.starts_with("///") || trimmed.starts_with("//!") || trimmed.starts_with("//")
+            {
+                continue;
+            }
+            if !line.contains("SerialPort::new(") {
+                continue;
+            }
+            let approved = DIRECT_SERIAL_PORT_ALLOWLIST
                 .iter()
                 .any(|site| site.file == relative && site.item == current_item);
             if approved {
@@ -5256,6 +5474,36 @@ fn cmd_check(full: bool) -> Result<()> {
     }
 
     total += 1;
+    println!("=== xtask check: direct serial ports stay on the approved list");
+    let mut approved_direct_serial_occurrences = 0usize;
+    let unapproved_direct_serial = find_unapproved_direct_serial_ports(
+        &workspace_root,
+        &mut approved_direct_serial_occurrences,
+    )?;
+    if unapproved_direct_serial.is_empty() {
+        println!(
+            "--- direct serial ports: OK ({} approved entr(y/ies) = file+item pairs, covering {} \
+             occurrence(s) = SerialPort::new lines)",
+            DIRECT_SERIAL_PORT_ALLOWLIST.len(),
+            approved_direct_serial_occurrences
+        );
+    } else {
+        for finding in &unapproved_direct_serial {
+            println!("    {finding}");
+        }
+        println!("    approved sites (file / item / reason):");
+        for site in DIRECT_SERIAL_PORT_ALLOWLIST {
+            println!("      {} / {} / {}", site.file, site.item, site.reason);
+        }
+        println!(
+            "--- direct serial ports: FAILED ({} unapproved site(s); route the line through the \
+             logger held inside the BKL, or add an entry with a reason)",
+            unapproved_direct_serial.len()
+        );
+        failed.push("direct serial ports".to_string());
+    }
+
+    total += 1;
     println!("=== xtask check: private-by-design modules keep their internals private");
     let leaks = find_boundary_visibility_leaks(&workspace_root)?;
     if leaks.is_empty() {
@@ -5652,8 +5900,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 19,
-    full: 111,
+    base: 20,
+    full: 112,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
