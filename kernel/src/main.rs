@@ -4401,6 +4401,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "IRQ スタブのスタック 16 バイト調整を外す",
     ),
     (
+        "idt-irq-stub-offset-test",
+        cfg!(feature = "idt-irq-stub-offset-test"),
+        "IRQ スタブ表の索引を 1 本ずらす",
+    ),
+    (
         "no-eoi-test",
         cfg!(feature = "no-eoi-test"),
         "タイマハンドラの EOI 発行を落とす",

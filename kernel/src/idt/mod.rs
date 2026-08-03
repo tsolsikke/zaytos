@@ -1317,8 +1317,27 @@ pub fn check_irq_stub_table() -> StubTableCheck {
     }
 }
 
+/// ずらす対象の索引（`idt-irq-stub-offset-test`）。ベクタ `0x3F` にあたる。
+///
+/// **既定ビルドでこのベクタへ割り込みが届くことは無い。** PIC は `0x20` から
+/// 16 本を使い、`0x30`-`0x3F` を使うのは `alt-offset-test` のときだけである。
+/// **振る舞いを変えずに検査だけを落とすために、届かない位置を選んである。**
+#[cfg(feature = "idt-irq-stub-offset-test")]
+const SABOTAGED_STUB_INDEX: usize = PIC_VECTOR_SPAN - 1;
+
 /// `n` 番目の IRQ スタブのアドレス。
+///
+/// 破壊（S6-a、`idt-irq-stub-offset-test`）: [`SABOTAGED_STUB_INDEX`] のときだけ
+/// 1 本先を指す。**[`check_irq_stub_table`] の `entries_ok` を落とすためのもので
+/// ある。** この検査は「落ちるところを一度も見ていない」側だったので、
+/// 見るための破壊を置いた（`verification-coverage.md`）。
 fn irq_stub_address(index: usize) -> u64 {
+    #[cfg(feature = "idt-irq-stub-offset-test")]
+    let index = if index == SABOTAGED_STUB_INDEX {
+        index + 1
+    } else {
+        index
+    };
     addr_of!(zaytos_irq_stubs) as u64 + (index * STUB_SIZE) as u64
 }
 

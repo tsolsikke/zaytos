@@ -306,6 +306,27 @@ const INTERRUPT_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: Some(4),
     },
+    // IRQ スタブ表の索引を 1 本ずらし、配置検証が働くことを確認する。
+    //
+    // **この検査は S6-a まで「落ちるところを一度も見ていない」側だった。**
+    // 既存の破壊 38 件のいずれもこの検査を落としていないことを確かめたうえで
+    // 置いた（`verification-coverage.md`）。
+    //
+    // **ずらすのはベクタ `0x3F` の 1 本だけである。** 既定ビルドでそこへ
+    // 割り込みは届かないので、**振る舞いは変わらず検査だけが落ちる。**
+    // 落ちた結果として ADR-0018 §2 の門が `sti` を拒む。
+    CriticalTest {
+        name: "irq-stub-offset",
+        feature: "idt-irq-stub-offset-test",
+        expected_markers: &[
+            "irq stub table ok=false",
+            "sti-check summary: 3. IDT loaded, all exception gates present = FAILED",
+            "the pre-sti checks did not pass; refusing to sti",
+        ],
+        forbidden_markers: &["irq stub table ok=true", "sti: interrupts are now enabled"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // 境界調整をわざと外し、境界検証が働くことを確認する。
     // **検証が壊れていないことを確かめるためのテストなので、期待する結果は
     // 「検出して停止する」である。**
@@ -4913,6 +4934,7 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "ioapic-skip-unmask-test",
     "ioapic-keep-pic-irq1-test",
     "misalign-test",
+    "idt-irq-stub-offset-test",
     "no-eoi-test",
     "alt-offset-test",
     "tiny-key-buffer",
@@ -5631,7 +5653,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 19,
-    full: 110,
+    full: 111,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

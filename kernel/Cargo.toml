@@ -57,6 +57,9 @@ interrupt-test-irq-path = ["interrupt-test"]
 # スタブの 16 バイト境界調整をわざと外し、境界検証が働くことを確認する。
 # 検証そのものを壊すテストなので、通常ビルドには絶対に入れないこと。
 misalign-test = []
+
+# IRQ スタブ表の索引を 1 本ずらす。check_irq_stub_table の entries_ok を落とす。
+idt-irq-stub-offset-test = []
 # タイマを実際に動かす(M4-d-2)。
 interrupt-test-timer = ["interrupt-test"]
 # EOI の発行をわざと落とし、ティックが 1 回で止まることを確認する。
