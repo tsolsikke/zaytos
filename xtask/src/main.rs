@@ -986,6 +986,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
     const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
+       cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
@@ -1088,6 +1089,10 @@ fn main() -> Result<()> {
                     ACPI_SMP_TESTS[0].name,
                     Some(2),
                 );
+            }
+            if rest.iter().any(|a| a == "--boot-log-diff") {
+                let update = rest.iter().any(|a| a == "--update-reference");
+                return cmd_boot_log_diff(update);
             }
             if let Some(index) = rest.iter().position(|a| a == "--drift-test") {
                 let minutes = rest
@@ -2935,6 +2940,252 @@ fn cmd_highhalf_trampoline_check(
 ///
 /// シリアルログに「出るべき行」がすべて出て、「出てはいけない行」が 1 つも
 /// 出ていないことを確認する。起動しなかった場合はテスト失敗と区別する。
+/// 起動ログのうち、**起動ごとに値が変わる行**（S6-d）。
+///
+/// # なぜ捨てるのか——問いが違うからである
+///
+/// **起動間の変動と起動内の変動は別の問いである。**
+/// **起動ログの差分が問うのは「この起動は参照と同じ形か」**で、ここは
+/// **環境由来の揺れが支配する**（OVMF が返すメモリマップの大きさ、TSC の較正）。
+/// **漂流が問うのは「1 回の起動の中でこの量が動くか」**で、**環境は固定されている。**
+///
+/// **同じ量でも問いが違うので扱いが違う。** 空きフレーム数はここでは捨てるが、
+/// 漂流の測定では値として見る（`docs/verification-coverage.md`）。
+/// **捨てる理由は「どうでもいいから」ではない。**
+const BOOT_LOG_VOLATILE_MARKERS: &[&str] = &[
+    // OVMF が返すメモリマップの大きさと、そこから導かれる量。
+    "memory map: descriptors_len=",
+    "frame allocator:",
+    "paging: required range [BootInfo]",
+    "paging: required range [memory map buffer]",
+    "apic: frame accounting:",
+    // TSC の較正。実行ごとに揺れる。
+    "apic: LAPIC timer calibration",
+    "lapic-timer: programmed from the calibration",
+    "armed its own LAPIC timer with the BSP's calibration",
+    // デモの反復回数。走った時間で変わる。
+    "task: preemptive demo finished",
+    "preemptive switch verified",
+    // **OVMF が出す行。** カーネルの出力ではない。**参照に含めると、参照が
+    // インストール済みの OVMF の版に縛られる**（別の機械で偽の失敗になる）。
+    "BdsDxe",
+    // ハートビート。**打ち切った時点のティック数が載るので、実行ごとに変わる。**
+    //
+    // **落とした結果、この行の形は参照の対象外である。** 形を見ているのは
+    // マーカーで解析している既存の項目群のほうで、**ここは覆っていない。**
+    "heartbeat",
+];
+
+/// 起動ログのうち、**コア数で変わる行**（S6-d の定義 3）。
+///
+/// # 定義 3 が主張していること
+///
+/// **「コア数に依らない部分が、コア数を変えても同じであること」**である。
+/// **ここに挙げた行は主張の対象外である**——`-smp 1` には AP が無く、
+/// `-smp 4` は `MAX_CPUS` を超えた分を起こさずに警告を出すので、**行そのものが
+/// 変わるのが正しい。**
+///
+/// **対象外にした部分は、既存の `smp-ap-test` の項目群が見ている。** 定義 3 は
+/// **それ以外の起動経路がコア数に汚染されていないこと**を見る。
+const BOOT_LOG_CORE_COUNT_MARKERS: &[&str] = &[
+    "smp:",
+    // **`usable CPU(s)` はここにあった。S6-d の空振り点検で外した。**
+    // **`smp:` を含む行にしか現れず、1 度も効いていなかった**（外しても
+    // 定義 3 の判定が変わらない）。**効かない項目は「覆っている」と読まれる。**
+    "per-CPU slot",
+    "entry type=0 (Processor Local APIC)",
+    "signature=\"APIC\" length=",
+    "acpi: MADT enumeration complete",
+];
+
+/// 起動ログを正規化する（S6-d）。
+///
+/// **値を消すのではなく、行ごと落とす。** 桁や書式に結合しないためである
+/// （`docstyle` の正規化差分で、書式へ結合させると検査が文書の書き方を縛ると
+/// 分かっている）。
+fn normalize_boot_log(serial: &str, drop_core_count_lines: bool) -> Vec<String> {
+    serial
+        .lines()
+        .filter(|line| !BOOT_LOG_VOLATILE_MARKERS.iter().any(|m| line.contains(m)))
+        .filter(|line| {
+            !drop_core_count_lines || !BOOT_LOG_CORE_COUNT_MARKERS.iter().any(|m| line.contains(m))
+        })
+        .map(|line| line.to_string())
+        .collect()
+}
+
+/// 起動ログを 1 本取る（S6-d）。QEMU を起こし、`marker` が出るまで待って落とす。
+fn capture_boot_log(workspace_root: &Path, smp: Option<u32>, tag: &str) -> Result<String> {
+    let ovmf_vars = prepare_ovmf_vars(workspace_root)?;
+    let bootloader_efi = build_bootloader(workspace_root, false)?;
+    let kernel_elf = build_kernel(workspace_root, false)?;
+    let esp_dir = stage_esp(workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("boot-log-{tag}.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let mut qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+    });
+    if let Some(count) = smp {
+        qemu_args.push("-smp".into());
+        qemu_args.push(count.to_string().into());
+    }
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the boot log capture")?;
+
+    // **ハートビートが 3 本出るまで待つ。** 起動が終わって定常状態へ入った
+    // ことの目印である。**上限は付ける**（出ない場合に無限に待たない）。
+    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    loop {
+        let seen = fs::read_to_string(&serial_log)
+            .map(|c| c.matches("heartbeat: ticks=").count())
+            .unwrap_or(0);
+        if seen >= 3 || Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
+    {
+        bail!("boot log capture ({tag}): the kernel did not start (firmware rip {firmware_rip:?})");
+    }
+    Ok(serial)
+}
+
+/// 参照となる正規化済み起動ログの置き場所（S6-d）。
+const REFERENCE_BOOT_LOG: &str = "xtask/reference/boot-log-smp2.txt";
+
+/// 起動ログの突き合わせ（S6-d）。**2 つの主張を 1 つの機構で見る。**
+///
+/// - **参照との一致。** `-smp 2` の正規化済み起動ログが、記録した参照と一致すること。
+///   **これまで段ごとに手で行っていた行形の全件比較を機械にしたものである。**
+/// - **定義 3。** `-smp 1` / `2` / `4` の正規化済み起動ログが、**コア数で変わる行を
+///   除いて**一致すること。
+///
+/// `--update-reference` を付けると参照を書き換える。**意図した変更のときだけ付ける。**
+fn cmd_boot_log_diff(update_reference: bool) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let reference_path = workspace_root.join(REFERENCE_BOOT_LOG);
+
+    println!("=== boot log diff: capturing -smp 1 / 2 / 4");
+    let smp1 = capture_boot_log(&workspace_root, Some(1), "smp1")?;
+    let smp2 = capture_boot_log(&workspace_root, Some(2), "smp2")?;
+    let smp4 = capture_boot_log(&workspace_root, Some(4), "smp4")?;
+
+    let mut failed = false;
+
+    // --- 1. 参照との一致 ---
+    let current = normalize_boot_log(&smp2, false);
+    if update_reference {
+        if let Some(parent) = reference_path.parent() {
+            fs::create_dir_all(parent).context("failed to create the reference directory")?;
+        }
+        fs::write(&reference_path, format!("{}\n", current.join("\n")))
+            .context("failed to write the reference boot log")?;
+        println!(
+            "--- boot log diff: reference updated ({} line(s)) at {REFERENCE_BOOT_LOG}",
+            current.len()
+        );
+    } else {
+        let reference: Vec<String> = fs::read_to_string(&reference_path)
+            .with_context(|| {
+                format!(
+                    "failed to read {REFERENCE_BOOT_LOG}; run `cargo xtask run --boot-log-diff \
+                     --update-reference` once to record it"
+                )
+            })?
+            .lines()
+            .map(|l| l.to_string())
+            .collect();
+        match first_difference(&reference, &current) {
+            None => println!(
+                "--- boot log diff: matches the reference ({} normalized line(s)): OK",
+                current.len()
+            ),
+            Some(report) => {
+                println!("{report}");
+                println!(
+                    "--- boot log diff: differs from the reference: FAILED (if the change is \
+                     intended, re-record with --update-reference and say so in the commit)"
+                );
+                failed = true;
+            }
+        }
+    }
+
+    // --- 2. 定義 3: コア数を変えても、コア数に依らない部分は同じ ---
+    let core_free1 = normalize_boot_log(&smp1, true);
+    let core_free2 = normalize_boot_log(&smp2, true);
+    let core_free4 = normalize_boot_log(&smp4, true);
+    for (label, other) in [("-smp 1", &core_free1), ("-smp 4", &core_free4)] {
+        match first_difference(&core_free2, other) {
+            None => println!(
+                "--- boot log diff: {label} matches -smp 2 outside the core-count lines ({} \
+                 line(s)): OK",
+                core_free2.len()
+            ),
+            Some(report) => {
+                println!("{report}");
+                println!("--- boot log diff: {label} differs from -smp 2: FAILED");
+                failed = true;
+            }
+        }
+    }
+
+    if failed {
+        bail!("boot log diff: FAILED");
+    }
+    println!("boot log diff: PASS");
+    Ok(())
+}
+
+/// 2 つの行列の最初の食い違いを、前後の文脈つきで報告する。
+///
+/// **全部の差分を出さない。** 1 行ずれると以降が全部ずれて出るので、
+/// **最初の 1 箇所だけを見せるほうが原因へ近い。**
+fn first_difference(expected: &[String], actual: &[String]) -> Option<String> {
+    let limit = expected.len().min(actual.len());
+    for index in 0..limit {
+        if expected[index] != actual[index] {
+            return Some(format!(
+                "    line {}:\n      expected: {}\n      actual:   {}",
+                index + 1,
+                expected[index],
+                actual[index]
+            ));
+        }
+    }
+    if expected.len() != actual.len() {
+        return Some(format!(
+            "    line count differs: expected {} line(s), got {}",
+            expected.len(),
+            actual.len()
+        ));
+    }
+    None
+}
+
 /// 漂流の測定の既定の長さ（分）。**S6 の設計で先に固定した数である。**
 const DRIFT_TEST_DEFAULT_MINUTES: u64 = 10;
 
@@ -3723,17 +3974,15 @@ const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
     // (h) BKL の排他（S4-b-2）。**自発的なクリティカルセクションではないので
     // 深さを数えない。** 数えると `on_timer_tick` の防御スキップと `on_yield` の
     // 判定が壊れる（`EntryInterruptGuard` の doc）。
-    DirectInterruptControlSite {
-        file: "common/src/critical.rs",
-        item: "EntryInterruptGuard::enter",
-        reason: "BKL の排他。カーネル入口が自分で張る区間であり、自発的な \
-                 クリティカルセクションではない。**排他の実装本体である**",
-    },
-    DirectInterruptControlSite {
-        file: "common/src/critical.rs",
-        item: "EntryInterruptGuard::drop",
-        reason: "同上の復元（排他の実装本体）",
-    },
+    // **`EntryInterruptGuard::enter` と `::drop` のエントリはここにあった。**
+    // **S6-d の死んだエントリの検査が見つけて外した。** 走査が作る所属名は
+    // **裸の関数名**（`function_name_declared_on`）なので、**`型::メソッド` の
+    // 書き方は一致しようがない。1 度も効いていなかった。**
+    //
+    // **実体は上の `enter` / `drop` の 2 件が覆っている**（同じファイルの同じ
+    // 関数名なので、`InterruptGuard` と `EntryInterruptGuard` を**区別できない**）。
+    // **これは粒度の限界である**——`serial_line` の 1 エントリが 31 箇所を覆うのと
+    // 同じ形で、`docs/verification-coverage.md` に書いてある。
     DirectInterruptControlSite {
         file: "kernel/src/bkl.rs",
         item: "sabotage_enable_interrupts_while_held",
@@ -3788,6 +4037,10 @@ fn find_unapproved_interrupt_control(
     workspace_root: &Path,
     approved_occurrences: &mut usize,
 ) -> Result<Vec<String>> {
+    // **死んだエントリも探す（S6-d）。** 一致しなかったエントリが残っていると、
+    // **検査は緑のまま通り、一覧を読んだ人は「この箇所は許可されている」と読む。**
+    // **一覧が静かに狭くなることの鏡像である。**
+    let mut used = vec![false; DIRECT_INTERRUPT_CONTROL_ALLOWLIST.len()];
     // SAFETY 検査と同じ理由で、追跡済みだけでなく未追跡のファイルも見る
     // （新規ファイルの最初の検査が素通りするのを防ぐ）。
     let output = Command::new("git")
@@ -3875,17 +4128,27 @@ fn find_unapproved_interrupt_control(
                 continue;
             }
 
-            let approved = DIRECT_INTERRUPT_CONTROL_ALLOWLIST
+            let matched = DIRECT_INTERRUPT_CONTROL_ALLOWLIST
                 .iter()
-                .any(|site| site.file == relative && site.item == current_item);
-            if approved {
+                .position(|site| site.file == relative && site.item == current_item);
+            if let Some(index) = matched {
                 *approved_occurrences += 1;
+                used[index] = true;
                 continue;
             }
             findings.push(format!(
                 "{relative}:{} (in {current_item}): {}",
                 index + 1,
                 line.trim().chars().take(60).collect::<String>()
+            ));
+        }
+    }
+    for (index, hit) in used.iter().enumerate() {
+        if !hit {
+            let site = &DIRECT_INTERRUPT_CONTROL_ALLOWLIST[index];
+            findings.push(format!(
+                "dead allowlist entry (nothing matched): {} / {} / {}",
+                site.file, site.item, site.reason
             ));
         }
     }
@@ -3901,6 +4164,8 @@ fn find_unapproved_direct_serial_ports(
     workspace_root: &Path,
     approved_occurrences: &mut usize,
 ) -> Result<Vec<String>> {
+    // 死んだエントリも探す（`find_unapproved_interrupt_control` と同じ理由）。
+    let mut used = vec![false; DIRECT_SERIAL_PORT_ALLOWLIST.len()];
     let output = Command::new("git")
         .current_dir(workspace_root)
         .args([
@@ -3945,17 +4210,27 @@ fn find_unapproved_direct_serial_ports(
             if !line.contains("SerialPort::new(") {
                 continue;
             }
-            let approved = DIRECT_SERIAL_PORT_ALLOWLIST
+            let matched = DIRECT_SERIAL_PORT_ALLOWLIST
                 .iter()
-                .any(|site| site.file == relative && site.item == current_item);
-            if approved {
+                .position(|site| site.file == relative && site.item == current_item);
+            if let Some(index) = matched {
                 *approved_occurrences += 1;
+                used[index] = true;
                 continue;
             }
             findings.push(format!(
                 "{relative}:{} (in {current_item}): {}",
                 index + 1,
                 line.trim().chars().take(60).collect::<String>()
+            ));
+        }
+    }
+    for (index, hit) in used.iter().enumerate() {
+        if !hit {
+            let site = &DIRECT_SERIAL_PORT_ALLOWLIST[index];
+            findings.push(format!(
+                "dead allowlist entry (nothing matched): {} / {} / {}",
+                site.file, site.item, site.reason
             ));
         }
     }
@@ -5647,6 +5922,18 @@ fn cmd_check(full: bool) -> Result<()> {
         failed.push("direct cli/sti".to_string());
     }
 
+    if full {
+        total += 1;
+        println!("=== xtask check: the boot log matches the reference and does not depend on the core count");
+        match cmd_boot_log_diff(false) {
+            Ok(()) => println!("--- boot log diff: OK"),
+            Err(error) => {
+                println!("--- boot log diff: FAILED ({error})");
+                failed.push("boot log diff".to_string());
+            }
+        }
+    }
+
     total += 1;
     println!("=== xtask check: direct serial ports stay on the approved list");
     let mut approved_direct_serial_occurrences = 0usize;
@@ -6075,7 +6362,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 20,
-    full: 112,
+    full: 113,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

@@ -1,0 +1,302 @@
+[INFO] ZaytOS bootloader: serial log established (COM1)
+Hello, ZaytOS!
+[INFO] printed "Hello, ZaytOS!" to UEFI console
+[INFO] ELF parsed: entry point = 0xffffffff80100000
+[INFO] kernel segments placed and .bss zeroed (0x100000..0x1cd000)
+[INFO] kernel entry: VMA 0xffffffff80100000 -> load address 0x100000 (delta 0xffffffff80000000)
+[INFO] GOP framebuffer acquired: 1280x800 stride=1280 format=Bgr phys=0x80000000 size=4096000
+[INFO] acpi: RSDP found at 0xf77e014 via the ACPI 2.0 configuration table entry
+[INFO] ExitBootServices: about to exit boot services
+[INFO] ExitBootServices: done
+[INFO] jumping to kernel entry point 0x100000
+[INFO] ZaytOS kernel: entered _start
+[INFO] boot stack: 632 of 16384 bytes used (high-water; 15752 bytes poison intact)
+[INFO] higher-half: arrived at high VA. RIP=0xffffffff80173018 in [0xffffffff80100000, 0xffffffff801cc338)=true, RSP=0xffffffff801aade0 high=true, CR3=0x197000 == bootstrap PML4 0x197000 = true, identity alive (phys 0x100000 read via low==high) = true
+[INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff801bd058 first slot=0xffffffff801bd058 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
+[INFO] interrupts: RFLAGS.IF before cli = false (raw RFLAGS=0x96)
+[INFO] interrupts: RFLAGS.IF after cli = false (raw RFLAGS=0x96)
+[INFO] gdt: base=0xffffffff801bd058 limit=63 (expected base=0xffffffff801bd058)
+[INFO] gdt: CS=0x8 (expected 0x8), TR=0x30 (expected 0x30)
+[INFO] gdt: limit=63 (expected 63)
+[INFO] gdt[1] kcode: 0x00af9a000000ffff DPL=0 present=1 kind=code accessed=0 (expected 0x00af9a000000ffff, accessed bit is CPU-managed)
+[INFO] gdt[2] kdata: 0x00cf93000000ffff DPL=0 present=1 kind=data accessed=1 (expected 0x00cf92000000ffff, accessed bit is CPU-managed)
+[INFO] gdt[3] ucode32: 0x00cffa000000ffff DPL=3 present=1 kind=code accessed=0 (expected 0x00cffa000000ffff, accessed bit is CPU-managed)
+[INFO] gdt[4] udata: 0x00cff2000000ffff DPL=3 present=1 kind=data accessed=0 (expected 0x00cff2000000ffff, accessed bit is CPU-managed)
+[INFO] gdt[5] ucode64: 0x00affa000000ffff DPL=3 present=1 kind=code accessed=0 (expected 0x00affa000000ffff, accessed bit is CPU-managed)
+[INFO] gdt: kdata D/B=1, udata D/B=1 (must match; udata follows kdata)
+[INFO] gdt[6] tss: base=0xffffffff8019f028 (expected 0xffffffff8019f028) present=1 S=0 type=0xb (0xb = busy, set by ltr)
+[INFO] gdt: all descriptors match (kernel + user DPL=3 in STAR-compatible order, TSS at new index)
+[INFO] tss: base=0xffffffff8019f028 IST1=0xffffffff801b8000 RSP0=0xffffffff801b3000
+[INFO] tss: RSP0 は特権レベル遷移（ユーザー -> カーネル）用で、M5 まで実際には使われない
+[INFO] stack: old RSP=0xffffffff8019ef78 (UEFI-derived), new RSP=0xffffffff801aaab0
+[INFO] stack: kernel stack 0xffffffff801a3000..0xffffffff801b3000 (64 KiB)
+[INFO] stack: double fault (IST1) stack 0xffffffff801b4000..0xffffffff801b8000 (16 KiB)
+[INFO] stack: RSP is inside the kernel stack: true
+[INFO] stack: locals live at 0xffffffff801aaebc, inside the kernel stack: true
+[INFO] stack: no longer using the UEFI-derived stack: true
+[INFO] stack: write/read-back at 0xffffffff801aa9b0: OK
+[INFO] stack: IST guards intact (double-fault=true, page-fault=true)
+[INFO] stack: switched to the kernel's own stack (GDT/TSS loaded)
+[INFO] idt: base=0xffffffff801a0969 limit=4095 (expected base=0xffffffff801a0969 limit=4095)
+[INFO] idt: 256 entries, all present=true, all interrupt gates=true, DPL layout ok=true (syscall vector 0x80 DPL=Some(3), others DPL 0)
+[INFO] idt: #DF (vector 8) IST index=Some(1), #DE (vector 0) IST index=None
+[INFO] idt: stub table 0xffffffff8012e8d0..0xffffffff8012f8d0 size=4096 (expected 4096), stride=OK, entries=OK
+[INFO] idt: dedicated stubs outside the exception table: 6 checked, every gate points at its own stub=true
+[INFO] idt: loaded (exceptions now reach our handlers; interrupts stay disabled until M4-d)
+[INFO] critical: IF before any guard = false
+[INFO] critical: IF after 3 nested guards = false (expected false)
+[INFO] critical: IF after inner guards dropped = false (still disabled)
+[INFO] critical: IF after all guards dropped = false (expected false, back to start)
+[INFO] critical: nested InterruptGuard behaves correctly (no spurious enable, restored on exit)
+[INFO] pic: IMR before remap master=0xff (0b11111111) slave=0xff (0b11111111) [0 = unmasked]
+[INFO] pic: target vectors 0x20..=0x2f are covered by present IDT entries=true (IDT has 256 entries)
+[INFO] pic: programmed master=0x20-0x27 slave=0x28-0x2f (ICW2 is write-only; the offset cannot be read back)
+[INFO] pic: IMR after remap master=0xff slave=0xff (expected 0xff/0xff) [read back from hardware]
+[INFO] pic: all IRQs masked (nothing can fire until M4-d unmasks the timer explicitly); the vector offset stays unverified until the first timer IRQ arrives as vector 0x20 in M4-d
+[INFO] BootInfo validated (magic/version OK)
+[INFO] acpi: RSDP physical address from the bootloader = 0xf77e014 (validated later in this boot; see the acpi: lines below)
+[INFO] framebuffer: 1280x800 stride=1280 format=Bgr phys=0x80000000 size=4096000
+[INFO] .bss zero-fill check: PASS (all zero)
+[INFO] frame allocator smoke test: allocated frame 0x1000
+[INFO] frame allocator smoke test: PASS
+[INFO] smp: reserved the AP trampoline frame at 0x1000 (below 0x9f000, SIPI-addressable=true)
+[INFO] smp: reserved 1 AP stack frame(s), all below the identity limit
+[INFO] paging: 5 mapped range(s) planned:
+[INFO] paging:   0x1000..0xa0000 cacheable=true
+[INFO] paging:   0x100000..0xf6ed000 cacheable=true
+[INFO] paging:   0xf76d000..0x10000000 cacheable=true
+[INFO] paging:   0x80000000..0x803e8000 cacheable=false
+[INFO] paging:   0xffc00000..0x100000000 cacheable=false
+[INFO] higher-half: kernel image 0x100000..0x1cc338 mapped at 0xffffffff80100000 (len 0xcd000), 3 new page-table frame(s)
+[INFO] paging: 129 huge (2MiB) page(s), 1287 small (4KiB) page(s), 11 frame(s) consumed for page tables
+[INFO] paging: required range [kernel image] 0x100000..0x1cc338: OK
+[INFO] paging: required range [framebuffer] 0x80000000..0x803e8000: OK
+[INFO] paging: required range [new page tables (PML4)] 0x3000..0x4000: OK
+[INFO] paging: required range [current RSP] 0x1ab040..0x1ab041: OK
+[INFO] paging: required range [current RIP] 0x173018..0x173019: OK
+[INFO] paging: all required ranges mapped. proceeding to CR3 switch (d-2).
+[INFO] paging: current CR3 = 0x197000
+[INFO] paging: CR3 switch instruction executed
+[INFO] paging: CR3 readback 0x3000 (expected 0x3000): OK
+[INFO] paging: walking the live tables from PML4 0x3000
+[INFO] paging: CR4 = 0x668, PGE(bit 7) = false - a CR3 reload flushes everything only when PGE is off or no entry has the global bit
+[INFO] paging: walked 15 probe(s) across 5 range(s), mismatches=0, entries with the global bit=0
+[INFO] paging: 0x100000 is mapped by a 4KiB page (entry=0x100003)
+[INFO] paging: a non-canonical address cannot even be built as a VirtAddr = OK
+[INFO] paging: the live tables match the plan (read back from the tables themselves)
+[INFO] paging: about to test: kernel image read
+[INFO] paging: kernel image read: OK
+[INFO] paging: about to test: stack read/write
+[INFO] paging: stack read/write: OK
+[INFO] paging: about to test: BootInfo read
+[INFO] paging: BootInfo read: OK
+[INFO] framebuffer: validated 1280x800 stride=1280 format=Bgr 0x80000000..0x803e8000
+[INFO] paging: CR3 switch verified. now running under self-built page tables.
+[INFO] higher-half: kernel image 0x100000..0x1cc338 mapped at 0xffffffff80100000 (len 0xcd000), 3 new page-table frame(s)
+[INFO] direct-map: built a new table at PML4 0xe000 using 18 frame(s) (72 KiB), window base 0xffff800000000000
+[INFO] direct-map: pre-switch check: identity 14 probe(s) mismatches=0, window 14 probe(s) mismatches=0, saw a 2MiB window page=true
+[INFO] direct-map: CR3 switch instruction executed
+[INFO] direct-map: CR3 readback OK (0xe000)
+[INFO] direct-map: identity still reachable after switch = true
+[INFO] direct-map: read via the window 0xffff800000100000 matches identity = true
+[INFO] direct-map: wrote 0xa11a5000d1ec7000 via window 0xffff800000020000, read 0xa11a5000d1ec7000 via identity 0x20000 = true
+[INFO] direct-map: verified. identity kept, direct map window live at base 0xffff800000000000. the registered window stays identity until A-2.
+[INFO] direct-map A-2: registered window active at base 0xffff800000000000; phys_to_virt now returns high addresses. identity kept.
+[INFO] direct-map A-2: framebuffer rehomed to 0xffff800080000000; wrote a proof pixel, read 0xc04080/0xc04080 via high/identity = true
+[INFO] console: ready (160x50 cells), back buffer 0x1cd000..0x5b5000 (1000 frames)
+[INFO] console: 102 log line(s) were emitted before the console existed (serial only)
+[INFO] heap: arena 0x5b5000..0x6b5000 (256 frames, 1 MiB), mapped=true
+[INFO] heap: initialized (1048576 bytes free, 1 block(s))
+[INFO] granularity: executing code (RIP) 0xffffffff80173018 -> phys 0x173018, mapped by a 4KiB page at 0xffffffff80173000 (entry=0x173023)
+[INFO] granularity: kernel stack (RSP) 0xffffffff801aaac0 -> phys 0x1aaac0, mapped by a 4KiB page at 0xffffffff801aa000 (entry=0x1aa063)
+[INFO] granularity: heap arena 0x5b5000 -> phys 0x5b5000, mapped by a 2MiB page at 0x400000 (entry=0x400083)
+[INFO] granularity: framebuffer 0x80000000 -> phys 0x80000000, mapped by a 2MiB page at 0x80000000 (entry=0x800000b3)
+[INFO] test hooks: none enabled (this is a normal build)
+[INFO] cpu: MAXPHYADDR = 40 bits (observed only; PhysAddr rejects anything above 52)
+[INFO] high-half: built a new table at PML4 0x20000 using 11 frame(s) (44 KiB)
+[INFO] high-half: kernel image 0x100000..0x1cd000 is also mapped at 0xffffffff80100000 (kernel high mapping, NOT the direct map window)
+[INFO] high-half: walked 8 probe(s) through the kernel high mapping with an independent walker, mismatches=0
+[INFO] high-half: the identity part of the new table matches the plan, mismatches=0
+[INFO] high-half: the live table's PML4 is untouched by the build = true
+[INFO] split-test: reserved 0x1800000..0x1a00000 as scratch (2048 KiB permanently withheld from the allocator)
+[INFO] split-test: split 0xffff800001800000 into 512 x 4KiB via a new page table at 0x2b000
+[INFO] split-test: read back 512 entries through translate(), mismatches=0
+[INFO] split-test: the split region is readable and writable = OK
+[INFO] split-test: unmapped 0xffff800001801000 (old pte=0x1801003); translate returns none=true, both neighbours still mapped=true
+[INFO] split-test: splitting an already-split page is rejected = true
+[INFO] split-test: split and unmap behave as planned (verified through translate())
+[INFO] stack-guard: unmapped the kernel stack guard page 0xffffffff801a2000 (old pte=0x1a2003); translate returns none=true. #PF now uses IST2.
+[INFO] user-map: U/S audit: user subtree PML4[1] entries=4 violations(U=0)=0, kernel entries=3564 violations(U=1)=0
+[INFO] user-map: after unmap: user subtree residue entries=3 (intermediates kept for M5-e-3), kernel violations(U=1)=0
+[INFO] user-map: user-page mapping verified (all levels U=1 for the user page, all kernel entries U=0, Ring 0 read-back held; leaf unmapped, subtree kept for M5-e-3)
+[INFO] ring3: entering Ring 3 (user code 0x8000000000 with cli, user stack top 0x8000101000, RSP0 -> excursion stack [0xffffffff801c80b0, 0xffffffff801cc0b0))
+[INFO] ring3: folded expected #GP. fault CS=0x2b (RPL=3), fault RSP=0x8000101000 (in user stack=true), handler RSP=0xffffffff801cbff0 (in excursion stack=true), RSP0 restored=true
+[INFO] ring3: U/S audit after the excursion: user subtree entries=5 violations=0, kernel entries=3564 violations=0
+[INFO] ring3: Ring 3 excursion verified (fell to Ring 3, cli faulted as #GP, RSP0 switched to the excursion stack, folded back to the kernel, permission split intact)
+[INFO] syscall: entering Ring 3 to issue probe int 0x80 (number=0x2a, int at 0x800000002b, cli fold at 0x8000000032, RSP0 -> excursion stack [0xffffffff801c80b0, 0xffffffff801cc0b0))
+[INFO] syscall: probe int 0x80 returned. invocations=1 (issued exactly 1), number seen=0x2a (expected 0x2a), handler RSP=0xffffffff801cc000 (on RSP0 excursion stack=true), RSP0 restored=true
+[INFO] syscall: args seen=[0x11111111, 0x22222222, 0x33333333, 0x44444444, 0x55555555, 0x66666666], user stored=0xc0ffee (expected return 0xc0ffee)
+[INFO] syscall: probe int 0x80 round-trip verified (6 args reached syscall_entry per the R10 convention, the return value came back through RAX to Ring 3 and was stored, syscall_entry ran on the RSP0 stack, and the cli #GP folded back to the kernel)
+[INFO] syscall: ptr case 'valid page' buf=0x8000000000 len=0x1 -> stored=0x0 (expect accept(0), ok=true)
+[INFO] syscall: ptr case 'kernel pointer' buf=0x100000 len=0x1 -> stored=0xfffffffffffffff2 (expect reject(-EFAULT), ok=true)
+[INFO] syscall: ptr case 'unmapped user-range' buf=0x8000400000 len=0x1 -> stored=0xfffffffffffffff2 (expect reject(-EFAULT), ok=true)
+[INFO] syscall: ptr case 'supervisor in user range' buf=0x8000200000 len=0x1 -> stored=0xfffffffffffffff2 (expect reject(-EFAULT), ok=true)
+[INFO] syscall: ptr case 'straddle last page' buf=0x8000000fff len=0x2 -> stored=0xfffffffffffffff2 (expect reject(-EFAULT), ok=true)
+[INFO] syscall: ptr case 'over-long' buf=0x8000000000 len=0x8000001000 -> stored=0xfffffffffffffff2 (expect reject(-EFAULT), ok=true)
+[INFO] syscall: ptr case 'len=0 valid buf' buf=0x8000000000 len=0x0 -> stored=0x0 (expect accept(0), ok=true)
+[INFO] syscall: ptr case 'len=0 invalid buf' buf=0x100000 len=0x0 -> stored=0x0 (expect accept(0), ok=true)
+[INFO] syscall: pointer validation battery verified (valid pointer accepted; kernel pointer, unmapped, supervisor, straddle, and over-long all rejected before touching; len=0 accepted regardless of buf)
+[INFO] syscall: checksum case 'valid buffer' buf=0x8000100000 len=8 -> stored=0x264 (expected sum 0x264)
+[INFO] syscall: checksum case 'kernel pointer' buf=0x100000 len=8 -> stored=0xfffffffffffffff2 (expect -EFAULT 0xfffffffffffffff2)
+[INFO] syscall: checksum round-trip verified (the kernel read the user buffer through a validated UserSlice and returned the correct byte sum; a kernel pointer was rejected before reading)
+[INFO] acpi: the RSDP at 0xf77e014 lies in UEFI memory type 9 (EfiACPIReclaimMemory), descriptor 0xf76d000..0xf77f000; classify() = ReservedButMapped { cacheable: true }
+[INFO] acpi: RSDP at 0xf77e014 validated: revision=2 oem_id="BOCHS " rsdt_address=0xf77d074
+[INFO] acpi: the extended part of the RSDP validated: length=36 xsdt_address=0xf77d0e8
+[INFO] acpi: following the XSDT at 0xf77d0e8 (64-bit entries)
+[INFO] acpi: XSDT at 0xf77d0e8 lies in UEFI memory type 9 (EfiACPIReclaimMemory), descriptor 0xf76d000..0xf77f000; classify() = ReservedButMapped { cacheable: true }
+[INFO] acpi: XSDT at 0xf77d0e8 validated: signature="XSDT" length=76 revision=1 oem_id="BOCHS "
+[INFO] acpi: XSDT lists 5 table(s)
+[INFO] acpi:   [0] 0xf77a000 signature="FACP" length=116
+[INFO] acpi:   [1] 0xf779000 signature="APIC" length=128
+[INFO] acpi:   [2] 0xf778000 signature="HPET" length=56
+[INFO] acpi:   [3] 0xf777000 signature="WAET" length=40
+[INFO] acpi:   [4] 0xf776000 signature="BGRT" length=56
+[INFO] acpi: the MADT at 0xf779000 lies in UEFI memory type 9 (EfiACPIReclaimMemory), descriptor 0xf76d000..0xf77f000; classify() = ReservedButMapped { cacheable: true }
+[INFO] acpi: the MADT at 0xf779000 validated: signature="APIC" length=128 revision=3 oem_id="BOCHS "
+[INFO] acpi: MADT fixed part: local_apic_address=0xfee00000 flags=0x1 (PCAT_COMPAT=true)
+[INFO] acpi:   entry type=0 (Processor Local APIC) len=8 apic_id=0 processor_uid=0 flags=0x1 usable=true
+[INFO] acpi:   entry type=0 (Processor Local APIC) len=8 apic_id=1 processor_uid=1 flags=0x1 usable=true
+[INFO] acpi:   entry type=1 (I/O APIC) len=12 id=0 address=0xfec00000 gsi_base=0
+[INFO] acpi:   entry type=2 (Interrupt Source Override) len=10 bus=0 source_irq=0 gsi=2 flags=0x0000 (active_low=false level_triggered=false)
+[INFO] acpi:   entry type=2 (Interrupt Source Override) len=10 bus=0 source_irq=5 gsi=5 flags=0x000d (active_low=false level_triggered=true)
+[INFO] acpi:   entry type=2 (Interrupt Source Override) len=10 bus=0 source_irq=9 gsi=9 flags=0x000d (active_low=false level_triggered=true)
+[INFO] acpi:   entry type=2 (Interrupt Source Override) len=10 bus=0 source_irq=10 gsi=10 flags=0x000d (active_low=false level_triggered=true)
+[INFO] acpi:   entry type=2 (Interrupt Source Override) len=10 bus=0 source_irq=11 gsi=11 flags=0x000d (active_low=false level_triggered=true)
+[INFO] acpi:   entry type=4 (Local APIC NMI) len=6 (recorded, not interpreted)
+[INFO] acpi: GSI resolution: irq0 -> gsi2 irq1 -> gsi1 (identity unless an override names the irq; the delivery paths of S2-d use irq1 and the local APIC timer, so neither consumes a non-identity mapping)
+[INFO] acpi: MADT enumeration complete: 9 entr(y/ies), 2 local APIC(s) of which 2 usable, 1 I/O APIC(s), 5 interrupt source override(s)
+[INFO] apic: IA32_APIC_BASE raw=0xfee00900 base=0xfee00000 enabled=true x2apic=false bsp=true
+[INFO] apic: IA32_APIC_BASE and the MADT agree on 0xfee00000
+[INFO] apic: before mapping, the local APIC at 0xfee00000 (virt 0xffff8000fee00000) has no translation, as expected
+[INFO] apic: mapped the local APIC at 0xfee00000 to virt 0xffff8000fee00000 as Size4KiB, PCD=true, already_mapped=false
+[INFO] apic: before mapping, an I/O APIC at 0xfec00000 (virt 0xffff8000fec00000) has no translation, as expected
+[INFO] apic: mapped an I/O APIC at 0xfec00000 to virt 0xffff8000fec00000 as Size4KiB, PCD=true, already_mapped=false
+[INFO] apic: LAPIC probe: id_raw=0x00000000 id=0 version_raw=0x00050014 version=0x14 max_lvt_entry=5 (SDM defines this as the LVT entry count minus one)
+[INFO] apic: the local APIC ID 0 matches the first usable MADT entry (both are 0; on the BSP this comparison is degenerate, see the code)
+[INFO] smp: mapped per-CPU stacks for slot 1 at 0xffff81000001b000 (PML4[258], not [257] which a sabotage VA depends on): kernel top 0xffff81000002c000, IST1 top 0xffff810000031000, IST2 top 0xffff810000036000; 27 frame(s) consumed (pages plus page tables), guards left unmapped
+[INFO] apic: LAPIC SVR=0x0000010f software_enabled=true spurious_vector=0x0f TPR=0x00000000
+[INFO] apic: LAPIC has 6 LVT entr(y/ies) (Max LVT Entry = 5); reading only those
+[INFO] apic:   LVT Timer: raw=0x00030020 vector=0x20 delivery=0 (Fixed) masked=true level_triggered=false active_low=false pending=false
+[INFO] apic:     LVT Timer mode=1 (periodic) [bits 18:17 of the raw value above]
+[INFO] apic:   LVT Thermal: raw=0x00010000 vector=0x00 delivery=0 (Fixed) masked=true level_triggered=false active_low=false pending=false
+[INFO] apic:   LVT PMC: raw=0x00010000 vector=0x00 delivery=0 (Fixed) masked=true level_triggered=false active_low=false pending=false
+[INFO] apic:   LVT LINT0: raw=0x00000700 vector=0x00 delivery=7 (ExtINT) masked=false level_triggered=false active_low=false pending=false
+[INFO] apic:   LVT LINT1: raw=0x00000400 vector=0x00 delivery=4 (NMI) masked=false level_triggered=false active_low=false pending=false
+[INFO] apic:   LVT Error: raw=0x00010000 vector=0x00 delivery=0 (Fixed) masked=true level_triggered=false active_low=false pending=false
+[INFO] apic: LAPIC ISR/IRR are readable (OR of all 8 dwords: ISR=0x00000000 IRR=0x00000000); read outside any handler, so this shows readability only, not that EOI works
+[INFO] apic: I/O APIC id=0 at 0xfec00000: ID reg=0x00000000 VER reg=0x00170020 version=0x20 max_redirection_entry=23 (SDM defines this as the entry count minus one, so there are 24) gsi_base=0
+[INFO] apic: I/O APIC MMIO decodes: the version register is not an undecoded read and the ID register reports 0, matching the MADT; 24 redirection entr(y/ies)
+[INFO] apic:   redirection entry  0 (gsi 0): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry  1 (gsi 1): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry  2 (gsi 2): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry  3 (gsi 3): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry  4 (gsi 4): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry  5 (gsi 5): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry  6 (gsi 6): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry  7 (gsi 7): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry  8 (gsi 8): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry  9 (gsi 9): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry 10 (gsi 10): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry 11 (gsi 11): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry 12 (gsi 12): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry 13 (gsi 13): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry 14 (gsi 14): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry 15 (gsi 15): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry 16 (gsi 16): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry 17 (gsi 17): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry 18 (gsi 18): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry 19 (gsi 19): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry 20 (gsi 20): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry 21 (gsi 21): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry 22 (gsi 22): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic:   redirection entry 23 (gsi 23): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
+[INFO] apic: SVR spurious vector 0x0f -> 0xff (raw 0x0000010f -> 0x000001ff); software_enabled kept = true
+[INFO] apic: the IDT gate for the spurious vector 0xff is present (gate type 0xe, DPL 0); it was already there because the IDT fills all 256 entries
+[INFO] apic: vector 0xff is on the dedicated IRQ-style stub; the dispatch recognises it by name, counts it separately from the 8259 spurious IRQs, and returns without sending EOI. spurious interrupts cannot happen yet (nothing is delivered by the local APIC), so this path has not been exercised at runtime
+[INFO] percpu: 2 usable CPU(s) enumerated, 2 per-CPU slot(s) available, every CPU has a slot=true (cpu_id() is the constant 0 and only the bootstrap processor runs, so no slot is indexed out of range yet)
+[INFO] identity-removal: begin. live PML4=0xe000, saved PML4[0]=0xf023
+[INFO] identity-removal: PML4[0] subtree table frames = 7 (28 KiB) become unreachable; intentional leak. subtree frames [256]=10 [511]=3. disjoint(0,256)=true disjoint(0,511)=true disjoint(256,511)=true
+[INFO] identity-removal: required [RIP] 0xffffffff80173018 -> phys 0x173018 (huge=false): OK
+[INFO] identity-removal: required [RSP] 0xffffffff801aa930 -> phys 0x1aa930 (huge=false): OK
+[INFO] identity-removal: required [direct map window] 0xffff80000000e000 -> phys 0xe000 (huge=false): OK
+[INFO] identity-removal: required [kernel image] 0xffffffff80100000 -> phys 0x100000 (huge=false): OK
+[INFO] identity-removal: required [heap high VA] 0xffff8000005b5000 -> phys 0x5b5000 (huge=true): OK
+[INFO] identity-removal: required [framebuffer high VA] 0xffff800080000000 -> phys 0x80000000 (huge=true): OK
+[INFO] identity-removal: PML4[0] after clear = 0x0 (empty=true)
+[INFO] identity-removal: post-flush required regions re-resolved OK: 6/6
+[INFO] identity-removal: post-flush low VA 0xe000 walk = Err(NotPresent) (unmapped=true)
+[INFO] identity-removal: done. identity (PML4[0]) removed; IDENTITY_REMOVED gate armed
+[INFO] lock: IF before=false while held=false after=false (value read back = 0xabcd)
+[INFO] lock: interrupts are disabled while the guard is held and restored afterwards
+[INFO] heap smoke test: Vec<u32> len=10 ptr=0xffff8000005b5090 mapped=true
+[INFO] heap smoke test: Box<u32> value=0x12345678 ptr=0xffff8000005b5020 mapped=true
+[INFO] heap smoke test: String="ZaytOS heap is alive" ptr=0xffff8000005b5050 mapped=true
+[INFO] heap: after smoke test, 1048576 bytes free, 1 block(s)
+[INFO] console: 11 flush(es), 4418560 bytes transferred
+[INFO] console: full-screen equivalent would be 45056000 bytes (9% actually sent)
+task: registered the AP idle task as index 3 owned by cpu 1 on its per-CPU stack [0xffff81000001c000, 0xffff81000002c000); the application processor adopts it at bring-up and schedules on it from then on
+task: starting cooperative demo with 2 workers, 3 rounds each
+task: A round 1/3: all 15 GPRs survived the switch (base=0xa1a10000)
+task: B round 1/3: all 15 GPRs survived the switch (base=0xb2b20000)
+task: A round 2/3: all 15 GPRs survived the switch (base=0xa1a10000)
+task: B round 2/3: all 15 GPRs survived the switch (base=0xb2b20000)
+task: A round 3/3: all 15 GPRs survived the switch (base=0xa1a10000)
+task: A finished all rounds; yielding for good
+task: B round 3/3: all 15 GPRs survived the switch (base=0xb2b20000)
+task: B finished all rounds; yielding for good
+task: demo finished. switches=9, sum(resumes)=9, A done=true, B done=true, accounting balanced=true
+task: TSS.RSP0 tracked every switch; now 0xffffffff801b3000 (main stack top 0xffffffff801b3000, match=true)
+task: cooperative switch verified
+[INFO] pit: channel 0 set to divisor=11932 for a requested 100 Hz; actual is 99.998 Hz (the divisor is an integer, so the period never matches exactly)
+[INFO] pit: IMR after configuring the PIT master=0xff slave=0xff (must still be 0xff/0xff; the PIT ports must not touch the IMR)
+[INFO] pic: IMR after unmasking IRQ0 master=0xfe slave=0xff (expected 0xfe/0xff) [read back from hardware]
+[INFO] i8042: configuration byte = 0b01100111 (keyboard interrupt=true, translation to set 1=true)
+[INFO] i8042: the configuration byte is already what we need; leaving it alone
+[INFO] i8042: the output buffer was already empty
+[INFO] pic: IMR after unmasking IRQ1 master=0xfc slave=0xff (expected 0xfc/0xff) [read back from hardware]
+[INFO] keyboard: IRQ1 is unmasked on the 8259; the delivery vector is 0x21 for now (S2-d-1c re-routes it through the I/O APIC before sti, which changes the vector)
+[INFO] ioapic: IRQ1 redirection entry read back: vector=0x42 masked=false level_triggered=false active_low=false destination_mode=physical destination=0x00, vector matches what we wrote (0x42) = true, destination is physical mode and equals the bootstrap processor (0x00) = true
+[INFO] ioapic: IRQ1 now goes through the I/O APIC as vector 0x42; the 8259 line is masked (the first key must arrive as that vector, which the 8259 cannot produce)
+[INFO] sti-check 1: GDT base=0xffffffff801bd058 (expected 0xffffffff801bd058), CS=0x0008 (expected 0x0008), DS=0x0010 SS=0x0010 (expected 0x0010)
+[INFO] sti-check 2: TR=0x0030 (expected 0x0030), IST1 top=0xffffffff801b8000, #DF gate IST index=Some(1)
+[INFO] sti-check 3: IDT base=0xffffffff801a0969 limit=4095, first 32 gates ok=true, exception stub table ok=true, irq stub table ok=true (0xffffffff8012f900..0xffffffff8012fb10, size=528 expected=528)
+[INFO] sti-check 5: PIC IMR master=0xfe slave=0xff (expected 0xfe/0xff) [read back from hardware]
+[INFO] sti-check 4: cannot be verified at this point; the timer still goes through the 8259 here (calibration needs PIT ticks, so the move to the local APIC timer happens after sti), and the 8259 ICW2 is write-only. Proceeding is safe only because check 5 holds: with every IRQ masked, a wrong offset delivers nothing. Proof arrives when the first timer IRQ shows up as vector 0x20. The other two paths are read back where they are set up: the I/O APIC redirection entry (IRQ1) and the LVT timer
+[INFO] sti-check 6: IF before=false while holding the lock=false after=false (must be false while held, and back to the entry value afterwards)
+[INFO] sti-check 7: the timer handler issues EOI; this is proven only by ticks continuing to arrive, so it stays unverified until the loop has seen at least two
+[INFO] sti-check summary: 1. GDT loaded, CS/DS/SS are ours = VERIFIED
+[INFO] sti-check summary: 2. TSS loaded, IST stack present = VERIFIED
+[INFO] sti-check summary: 3. IDT loaded, all exception gates present = VERIFIED
+[INFO] sti-check summary: 4. interrupt delivery vectors are set as intended = UNVERIFIABLE
+[INFO] sti-check summary: 5. IRQs without a handler are masked = VERIFIED
+[INFO] sti-check summary: 6. Locked<T> disables interrupts while held = VERIFIED
+[INFO] sti-check summary: 7. handlers issue EOI = UNVERIFIABLE
+[INFO] timer: waiting for the first tick (expected as vector 0x20); if nothing arrives, suspect the PIT setup, the IMR, or ICW2
+[INFO] apic: widest tick advance seen inside the calibration windows = 1 (1 means every edge was caught; the frequency above divides by the observed tick count, not the nominal one, so a larger value would not inflate it)
+[INFO] apic: untouched after calibration: SVR 0x000001ff->0x000001ff (software_enabled=true), LINT0 0x00000700->0x00000700, LVT timer 0x00030020->0x00030020 (masked=true)
+[INFO] apic: the I/O APIC controller reads its redirection entries: entries=24 masked=0x0000000000fffffd (expected 0x0000000000fffffd) [read back from hardware], only the routed IRQs are open=true (the PIC still owns every other line)
+[INFO] lapic-timer: LVT timer read back: vector=0xfe masked=false periodic=true, matches what we programmed (vector 0xfe, unmasked, periodic) = true
+[INFO] lapic-timer: the 8259 is fully masked after mask_all(): master=0xff slave=0xff (expected 0xff/0xff) [read back from hardware], all masked=true
+[INFO] lapic-timer: effective 100.000 Hz against a requested 100 Hz, deviation 0 mHz, within 5/1000 = true (this compares two kernel-side values; it cannot show that the calibration itself matches real time)
+[INFO] lapic-timer: the timer now arrives as vector 0xfe, which the 8259 cannot produce
+task: starting preemptive demo with 2 busy-loop workers for 200 ticks
+[INFO] smp: the installed AP trampoline matches the template outside the patched fields: 4048 byte(s) compared, 48 excluded (gdtr base at 0xf22, far jump target at 0x3b, data block 0xf40..0xf68), mismatches=0
+[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x197000, rust entry 0xffffffff80152670
+[INFO] smp: starting application processor apic id 1 as slot 1 (trampoline at 0x1000, vector 0x01, stack top 0x3000 identity-mapped, cr3 0x197000 = the static boot page table)
+[INFO] smp: application processor 1 started (long mode reached, running on the static boot page table; no per-CPU GDT/TSS/IDT yet, so cpu_id() is not used here)
+[INFO] smp: ap 1 loaded its own GDT/TSS/IDT; cpu_id() now reads 1 from GDTR (the index handed over in the trampoline data block was 1, match=true)
+[INFO] smp: ap 1 switched to the production page table (cr3=0xe000) and its own per-CPU stack; PML4[0] read back from this core = empty:true (the identity mapping is gone here too, so the trampoline's identity VA stack is no longer usable)
+[INFO] smp: ap 1 is up with its own per-CPU state (own GDT/TSS/IDT, own stacks in PML4[258], production CR3); it now takes part in scheduling on its own idle task
+[INFO] smp: ap 1 wrote its own SVR: spurious vector 0xff, software_enabled=true (the BSP's write only reached the BSP's local APIC)
+[INFO] smp: application processors: 2 usable CPU(s) reported, 1 AP(s) attempted, 1 started, 0 skipped for lack of a per-CPU slot (MAX_CPUS=2)
+[INFO] timer: first tick arrived as vector 0x20 - this is the proof that ICW2 was written correctly (it cannot be read back)
