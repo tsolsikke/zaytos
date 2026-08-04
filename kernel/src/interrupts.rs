@@ -1078,6 +1078,7 @@ pub unsafe fn run_timer_loop(
                      lapic_timer_deliveries={}, timer_accounting_balanced={}, \
                      max kernel entry depth={}, ap_current={} ap_sched_passes={}, \
                      ipi_sent={} ipi_recv_cpu1={}, tlb_gen={} flush_cpu1={}, \
+                     heap_free={} heap_blocks={}, \
                      keys={} dropped={} \
                      stray={} spurious={} lapic_spurious={}, \
                      irq1={} balanced={}, max tick jump={}, i8042 OBF={}, PIC ISR={}",
@@ -1107,6 +1108,17 @@ pub unsafe fn run_timer_loop(
                         idt::ipi_probe_received_for(1),
                         crate::bkl::tlb_generation(),
                         crate::bkl::generation_flushes_for(1),
+                        // **漂流の観測量（S6-c）。** 定常状態では動かないはずの量で、
+                        // **動いたら「解放されない確保がある」ことになる。**
+                        //
+                        // **専用の出力経路を作らない。** 既にBKLの内側で出ている
+                        // この行へ相乗りする。行を増やすと混線の機会が増える。
+                        //
+                        // **判定は「全標本が同一であること」である**（`docs/verification-coverage.md`）。
+                        // 整数なので傾きの推定は要らない。**多点の価値は「いつ動いたか」
+                        // が特定できることにある。**
+                        crate::heap::ALLOCATOR.free_bytes(),
+                        crate::heap::ALLOCATOR.free_block_count(),
                         crate::keyboard::buffer::received_count(),
                         crate::keyboard::buffer::overflow_count(),
                         crate::keyboard::stray_irq_count(),

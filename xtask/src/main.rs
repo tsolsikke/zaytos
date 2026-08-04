@@ -985,7 +985,8 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
+       cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -1087,6 +1088,18 @@ fn main() -> Result<()> {
                     ACPI_SMP_TESTS[0].name,
                     Some(2),
                 );
+            }
+            if let Some(index) = rest.iter().position(|a| a == "--drift-test") {
+                let minutes = rest
+                    .get(index + 1)
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(DRIFT_TEST_DEFAULT_MINUTES);
+                let smp = rest
+                    .iter()
+                    .position(|a| a == "--smp")
+                    .and_then(|i| rest.get(i + 1))
+                    .and_then(|v| v.parse::<u32>().ok());
+                return cmd_drift_test(minutes, smp);
             }
             if rest.iter().any(|a| a == "--acpi-smp4-test") {
                 return cmd_marker_test(
@@ -2922,6 +2935,167 @@ fn cmd_highhalf_trampoline_check(
 ///
 /// シリアルログに「出るべき行」がすべて出て、「出てはいけない行」が 1 つも
 /// 出ていないことを確認する。起動しなかった場合はテスト失敗と区別する。
+/// 漂流の測定の既定の長さ（分）。**S6 の設計で先に固定した数である。**
+const DRIFT_TEST_DEFAULT_MINUTES: u64 = 10;
+
+/// 標本の間隔（ハートビート何本ごとか）。ハートビートは 1 秒に 1 本なので 10 秒。
+const DRIFT_SAMPLE_STRIDE: usize = 10;
+
+/// 漂流の測定（S6-c）。
+///
+/// # 何を主張するか
+///
+/// **定常状態で動かないはずの量が、実際に動かないこと。** 判定は
+/// **「全標本が同一であること」**である。**傾きの推定はしない**——量は厳密な
+/// 整数なので、揺れない。**多点の価値は「いつ動いたか」が特定できることにある。**
+///
+/// # 専用の出力経路を作っていない
+///
+/// **既に BKL の内側で出ているハートビートの行へ相乗りする**（`heap_free=` と
+/// `heap_blocks=`）。行を増やせば混線の機会が増えるので増やさない。
+/// **間引きはこちら側で行う**——カーネルには新しい周期の定数を置かない。
+///
+/// # 覆う範囲と、覆わない範囲
+///
+/// **覆うのは漂流であって、デッドロックではない。** BKL の待ちは
+/// `WAIT_TIMEOUT_CYCLES`（実測で約 15 秒）で自分から報せて止まるので、
+/// 10 分を要しない。
+///
+/// **10 分は導出値ではなく標本の予算である。** 10 分より長い周期で起きる事象は
+/// 見えない。**フレームアロケータの量は測っていない**（下記）。
+fn cmd_drift_test(minutes: u64, smp: Option<u32>) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let kernel_elf = build_kernel(&workspace_root, false)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let serial_log = workspace_root.join("target").join("drift-serial.log");
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let mut qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+    });
+    if let Some(count) = smp {
+        qemu_args.push("-smp".into());
+        qemu_args.push(count.to_string().into());
+    }
+
+    let cores = smp.map_or("default".to_string(), |c| c.to_string());
+    println!("=== drift test: {minutes} minute(s), -smp {cores}, sampling every {DRIFT_SAMPLE_STRIDE} heartbeat(s)");
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the drift test")?;
+
+    let deadline = Instant::now() + Duration::from_secs(minutes * 60);
+    while Instant::now() < deadline {
+        if child.try_wait().ok().flatten().is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_secs(5));
+    }
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
+    {
+        return report_did_not_start("drift test", firmware_rip, qemu_exit.as_deref());
+    }
+
+    let heartbeats: Vec<&str> = serial
+        .lines()
+        .filter(|l| l.contains("heartbeat: ticks="))
+        .collect();
+    let samples: Vec<&&str> = heartbeats.iter().step_by(DRIFT_SAMPLE_STRIDE).collect();
+    println!(
+        "--- drift test: {} heartbeat(s), {} sample(s)",
+        heartbeats.len(),
+        samples.len()
+    );
+
+    // **動かないはずの量。** 増える量（ティック等）はここに入れない。
+    const INVARIANTS: &[&str] = &["heap_free=", "heap_blocks="];
+    let mut failed = false;
+    for field in INVARIANTS {
+        let values: Vec<String> = samples
+            .iter()
+            .filter_map(|line| field_value(line, field))
+            .collect();
+        if values.len() != samples.len() {
+            println!(
+                "--- drift test: {field} missing from {} of {} sample(s): FAILED",
+                samples.len() - values.len(),
+                samples.len()
+            );
+            failed = true;
+            continue;
+        }
+        let first = &values[0];
+        match values.iter().position(|v| v != first) {
+            None => println!(
+                "--- drift test: {field}{first} identical across all {} sample(s): OK",
+                values.len()
+            ),
+            Some(index) => {
+                println!(
+                    "--- drift test: {field} changed at sample {index} ({first} -> {}): FAILED",
+                    values[index]
+                );
+                failed = true;
+            }
+        }
+    }
+
+    // **停止していないこと。** 動かない量が動かないだけでは足りない
+    // （止まっていても動かない）。**進んでいる量が進んでいることを併せて見る。**
+    let last_ticks = samples.last().and_then(|l| field_value(l, "ticks="));
+    let first_ticks = samples.first().and_then(|l| field_value(l, "ticks="));
+    match (first_ticks, last_ticks) {
+        (Some(a), Some(b)) if a != b => println!("--- drift test: ticks advanced {a} -> {b}: OK"),
+        (Some(a), Some(b)) => {
+            println!("--- drift test: ticks did not advance ({a} -> {b}): FAILED");
+            failed = true;
+        }
+        _ => {
+            println!("--- drift test: could not read ticks from the samples: FAILED");
+            failed = true;
+        }
+    }
+
+    if failed {
+        bail!("drift test: FAILED");
+    }
+    println!("drift test: PASS");
+    Ok(())
+}
+
+/// ハートビートの行から `field=` に続く値を取り出す（区切りは空白かカンマ）。
+fn field_value(line: &str, field: &str) -> Option<String> {
+    let start = line.find(field)? + field.len();
+    let rest = &line[start..];
+    let end = rest.find([',', ' ']).unwrap_or(rest.len());
+    Some(rest[..end].to_string())
+}
+
 fn cmd_marker_test(
     tests: &[CriticalTest],
     kind_label: &str,
