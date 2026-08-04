@@ -33,8 +33,7 @@ use kernel::stack;
 
 mod panic;
 
-#[global_allocator]
-static ALLOCATOR: heap::allocator::LockedHeap = heap::allocator::LockedHeap::empty();
+use kernel::heap::ALLOCATOR;
 
 // `kernel/link.ld` が定義するシンボル。kernel イメージ自身の占有範囲を
 // 実行時に把握するために使う（M2-d の必須マッピング検証）。

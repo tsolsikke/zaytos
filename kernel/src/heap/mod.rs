@@ -22,3 +22,16 @@ pub mod plan;
 /// パニックする（ADR-0012）。その時点で必要サイズを見積もり直し、この値を
 /// 調整するか、拡張方式を別 ADR として検討する。
 pub const DEFAULT_HEAP_FRAME_COUNT: u64 = 256;
+
+/// ヒープ本体。
+///
+/// **`kernel/src/main.rs` から lib 側へ移した（S6-c）。** 移した理由は、
+/// **ハートビートの行が空きバイト数を読むためである**——`interrupts` は lib 側に
+/// あり、bin 側の静的は見えない。**登録（`#[global_allocator]`）ごと移している**
+/// ので、プログラム全体でのアロケータは 1 つのままである。
+/// **ホストテストでは登録しない。** このクレートは `cargo test` でホスト向けにも
+/// ビルドされ、**登録するとテストの実行ファイル自身がこの空のヒープを使って
+/// SIGSEGV で落ちる**（実際に踏んだ）。ベアメタル側では `cfg(test)` が偽なので
+/// 登録される。
+#[cfg_attr(not(test), global_allocator)]
+pub static ALLOCATOR: allocator::LockedHeap = allocator::LockedHeap::empty();
