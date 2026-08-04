@@ -5586,7 +5586,10 @@ const STRUCTURAL_GUARD_SYMBOL_FRAGMENTS: &[&str] = &[
     "flush_if_generation_is_stale",
 ];
 
-/// 意図的に壊した経路を有効にする feature の接頭辞・名前。
+/// 意図的に壊した経路を有効にする feature の名前。
+///
+/// **接頭辞ではない。** 照合は完全一致である（`contains`）。**以前この doc は
+/// 「接頭辞・名前」と書いていたが、コードは一度も接頭辞として扱っていない**（S6-e）。
 ///
 /// **既定ビルドにこれらが入ってはならない。** 入ったまま出荷すると、
 /// 壊れた状態で測った結果を正常な結果として扱うことになる。
@@ -5801,11 +5804,46 @@ fn visibility_qualified_mod_or_use(trimmed: &str) -> Option<&'static str> {
 /// kernel の既定 feature に仕込みが混ざっていないことを確かめる。
 ///
 /// `default` から推移的に辿って、[`SABOTAGE_FEATURES`] のいずれかに
-/// 行き着かないことを見る。`kernel/Cargo.toml` の `[features]` を
-/// そのまま読む（`name = ["a", "b"]` の形しか使っていない）。
+/// 行き着かないことを見る。`[features]` を そのまま読む
+/// （`name = ["a", "b"]` の形しか使っていない）。
+///
+/// **kernel と bootloader の両方を見る（S6-e で広げた）。** 以前は kernel だけを
+/// 読んでおり、**`panic-test`（bootloader の feature）は一覧にあっても照合の
+/// 対象に一度も入っていなかった。** **bootloader の `default` が壊す feature へ
+/// 行き着いても、誰も落とさない状態だった。**
+///
+/// **あわせて死んだエントリも見る**——[`SABOTAGE_FEATURES`] に、どちらの
+/// マニフェストにも無い名前が載っていないこと。**許可リストの死んだエントリと
+/// 同じ穴である**（S6-d）。
 fn check_default_features_are_clean(workspace_root: &Path) -> Result<Vec<String>> {
-    let manifest = fs::read_to_string(workspace_root.join("kernel").join("Cargo.toml"))
-        .context("failed to read kernel/Cargo.toml")?;
+    let mut findings = Vec::new();
+    let mut declared: Vec<String> = Vec::new();
+    for crate_name in ["kernel", "bootloader"] {
+        findings.extend(check_one_manifest_default_features(
+            workspace_root,
+            crate_name,
+            &mut declared,
+        )?);
+    }
+    for feature in SABOTAGE_FEATURES {
+        if !declared.iter().any(|d| d == feature) {
+            findings.push(format!(
+                "dead SABOTAGE_FEATURES entry (no such feature in kernel/ or bootloader/): \
+                 `{feature}`"
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+/// 1 つのマニフェストについて上を行う。宣言されている feature 名を `declared` へ足す。
+fn check_one_manifest_default_features(
+    workspace_root: &Path,
+    crate_name: &str,
+    declared: &mut Vec<String>,
+) -> Result<Vec<String>> {
+    let manifest = fs::read_to_string(workspace_root.join(crate_name).join("Cargo.toml"))
+        .with_context(|| format!("failed to read {crate_name}/Cargo.toml"))?;
 
     let mut in_features = false;
     let mut graph: Vec<(String, Vec<String>)> = Vec::new();
@@ -5831,8 +5869,11 @@ fn check_default_features_are_clean(workspace_root: &Path) -> Result<Vec<String>
             .collect();
         graph.push((name.trim().to_string(), deps));
     }
+    declared.extend(graph.iter().map(|(name, _)| name.clone()));
+    // **bootloader には `default` が無い。** 無い場合は「`default` から辿れる
+    // ものは何も無い」ので、辿る側の検査は空で正しい。
     if !graph.iter().any(|(name, _)| name == "default") {
-        bail!("kernel/Cargo.toml has no `default` feature; the check cannot run");
+        return Ok(Vec::new());
     }
 
     // `default` から推移的に辿る。
@@ -5853,7 +5894,7 @@ fn check_default_features_are_clean(workspace_root: &Path) -> Result<Vec<String>
     Ok(reached
         .into_iter()
         .filter(|name| SABOTAGE_FEATURES.contains(&name.as_str()))
-        .map(|name| format!("`default` reaches the sabotage feature `{name}`"))
+        .map(|name| format!("{crate_name}: `default` reaches the sabotage feature `{name}`"))
         .collect())
 }
 
