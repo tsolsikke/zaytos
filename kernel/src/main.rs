@@ -4405,6 +4405,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "IRQ スタブ表の索引を 1 本ずらす",
     ),
     (
+        "addrspace-no-kernel-share",
+        cfg!(feature = "addrspace-no-kernel-share"),
+        "新しいアドレス空間へカーネルの上位を写さない",
+    ),
+    (
         "no-eoi-test",
         cfg!(feature = "no-eoi-test"),
         "タイマハンドラの EOI 発行を落とす",

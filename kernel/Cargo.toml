@@ -60,6 +60,9 @@ misalign-test = []
 
 # IRQ スタブ表の索引を 1 本ずらす。check_irq_stub_table の entries_ok を落とす。
 idt-irq-stub-offset-test = []
+
+# S7-c: 新しいアドレス空間へカーネルの上位を写さない。切り替えた瞬間に死ぬ。
+addrspace-no-kernel-share = []
 # タイマを実際に動かす(M4-d-2)。
 interrupt-test-timer = ["interrupt-test"]
 # EOI の発行をわざと落とし、ティックが 1 回で止まることを確認する。

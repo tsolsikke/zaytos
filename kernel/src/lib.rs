@@ -19,6 +19,7 @@ pub mod link_symbols {
 }
 
 pub mod acpi;
+pub mod address_space;
 pub mod apic;
 pub mod bkl;
 pub mod console;
