@@ -349,6 +349,22 @@ const INTERRUPT_TESTS: &[CriticalTest] = &[
 /// いずれも「検査が実際に働くこと」を確かめる。正常系は通常起動の
 /// `split-test:` 行が毎回見ているので、ここには置かない。
 const PAGING_TESTS: &[CriticalTest] = &[
+    // S7-c: 新しいアドレス空間へカーネルの上位を写さずに CR3 を差し替える。
+    //
+    // **到達条件4（CR3 切り替え後もカーネルが動くこと）の対照である。** 既定ビルドでは
+    // 切り替えた後の行が出る。**上位を写さないと、切り替えた瞬間に命令フェッチが
+    // 翻訳できなくなり、その行が出ない。**
+    //
+    // **「動いた」を主張する検査には、動かない側が要る。** 既定ビルドの行だけでは、
+    // 切り替えが実際に効いているのか何もしていないのかを区別できない。
+    CriticalTest {
+        name: "addrspace-no-kernel-share",
+        feature: "addrspace-no-kernel-share",
+        expected_markers: &["address-space: built a second address space"],
+        forbidden_markers: &["address-space: still running after the switch"],
+        wait_for_full_timeout: true,
+        min_heartbeats: None,
+    },
     // 正しい実装で、PCD 付きの 2MiB ページを分割しても属性が残ること。
     // わざと壊す側（drop-pcd）と対にして初めて意味を持つ。
     CriticalTest {
@@ -5605,6 +5621,7 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "ioapic-keep-pic-irq1-test",
     "misalign-test",
     "idt-irq-stub-offset-test",
+    "addrspace-no-kernel-share",
     "no-eoi-test",
     "alt-offset-test",
     "tiny-key-buffer",
@@ -6403,7 +6420,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 20,
-    full: 113,
+    full: 114,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

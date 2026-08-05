@@ -1577,6 +1577,16 @@ extern "sysv64" fn kernel_main() -> ! {
     #[cfg(feature = "interrupt-test")]
     trigger_interrupt_test(&mut logger, console.as_mut());
 
+    // === S7-c: プロセス別アドレス空間の切り替えを1往復する ===
+    //
+    // **到達条件4（CR3切り替え後もカーネルが動くこと）の観測である。**
+    // 新しい PML4 を作り、カーネルの上位だけを写し、切り替え、戻す。
+    //
+    // **ここに置く理由は、下位を失っても困らない位置だからである。** ring3 と
+    // syscall のデモは終わっており、AP はまだ起きていない。**新しい空間の下位は
+    // 空なので、切り替えている間にユーザー空間へ触ると #PF になる。触らない。**
+    demo_address_space_switch(&mut logger, &mut allocator);
+
     // === M4-d-2: タイマを動かす ===
     //
     // ここから先は戻らない。ZaytOS で初めて「時間が流れる」状態に入り、
@@ -3040,6 +3050,75 @@ fn verify_irq_path_restores_registers(logger: &mut Logger<SerialPort>) {
     logger.info(format_args!(
         "irq-path: OK (the IRQ stub returned via iretq and every checked register survived)"
     ));
+}
+
+/// アドレス空間を1つ作り、切り替えて、戻す（S7-c）。
+///
+/// **主張は「上位を共有していれば、CR3 を差し替えてもカーネルは動き続ける」である。**
+/// 切り替えた後にこの関数がログを出せること自体が、その証拠になる——**命令フェッチも
+/// スタックも direct map も、新しい CR3 の下で引き続き翻訳できている。**
+///
+/// 破壊 (S7-c, addrspace-no-kernel-share): 上位を写さない。**切り替えた瞬間に死ぬ**ので、
+/// 「切り替えた後」の行が出ない。
+fn demo_address_space_switch(
+    logger: &mut Logger<SerialPort>,
+    allocator: &mut kernel::frame_allocator::FrameAllocator,
+) {
+    let direct_map = common::addr::direct_map();
+    let production = kernel::paging::switch::read_cr3();
+
+    // SAFETY: 稼働中の PML4 を読み、direct map が覆っている新しいフレームへ写すだけ。
+    // AP はまだ起きておらず、他コアが写像を変えることはない。
+    let space = match unsafe {
+        kernel::address_space::AddressSpace::new(allocator, direct_map, production)
+    } {
+        Ok(space) => space,
+        Err(error) => {
+            logger.error(format_args!(
+                "address-space: could not build a second address space ({error:?}); halting"
+            ));
+            cpu::halt_forever();
+        }
+    };
+
+    logger.info(format_args!(
+        "address-space: built a second address space (pml4={:#x}); the production one is {:#x}; \
+         about to switch",
+        space.pml4().as_u64(),
+        production.as_u64()
+    ));
+
+    // SAFETY: 上位 256 本を写してあるので、実行中のコード・スタック・direct map は
+    // 同じ物理を指し続ける。下位は空だが、この区間ではユーザー空間へ触らない。
+    unsafe { space.activate() };
+
+    // **この行が出ること自体が到達条件4の観測である。**
+    let after = kernel::paging::switch::read_cr3();
+    logger.info(format_args!(
+        "address-space: still running after the switch (cr3 read back = {:#x}, expected {:#x}, \
+         matches={})",
+        after.as_u64(),
+        space.pml4().as_u64(),
+        after.as_u64() == space.pml4().as_u64()
+    ));
+
+    // SAFETY: 本番のテーブルへ戻すだけ。こちらは起動以来使っているものである。
+    unsafe { kernel::paging::switch::switch_to(production) };
+
+    let restored = kernel::paging::switch::read_cr3();
+    logger.info(format_args!(
+        "address-space: switched back to the production table (cr3 read back = {:#x}, \
+         matches={})",
+        restored.as_u64(),
+        restored.as_u64() == production.as_u64()
+    ));
+
+    // **作った空間は捨てない。破棄は S7-d である。** ここで返すと、隔離を通さずに
+    // 返すことになる（ADR-0027 の Addendum の不変条件を破る）。
+    //
+    // **`AddressSpace` は `Drop` を持たないので、落ちてもフレームは返らない。**
+    // **フレーム 1 枚を意図的に漏らしている。** 破棄を実装する S7-d で解消する。
+    let _leaked_until_s7d = space;
 }
 
 /// PIT を設定し、IRQ0 を解禁してタイマを動かす（M4-d-2）。
