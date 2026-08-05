@@ -306,6 +306,44 @@ pub fn generation_flushes_for(cpu: usize) -> u64 {
         .map_or(0, |slot| slot.load(Ordering::Relaxed))
 }
 
+/// 指定コアが見た世代（S7-b）。**範囲外は 0。**
+///
+/// **`generation_flushes_for` と同じ形にしてある。** あちらは観測用だが、
+/// **こちらは判定に使う**——[`generation_is_retired`] が「誰の TLB にも古い翻訳が
+/// 残っていない」を導く入力である。
+pub fn seen_generation_for(cpu: usize) -> u64 {
+    SEEN_GENERATION
+        .slot(cpu)
+        .map_or(0, |slot| slot.load(Ordering::Relaxed))
+}
+
+/// **世代 `generation` の時点の翻訳が、どのコアにも残っていないか（S7-b）。**
+///
+/// ADR-0027 の Addendum の不変条件——**フレームは、全コアの `SEEN_GENERATION` が
+/// 解放時の世代を追い越すまで配られない**——の判定である。
+///
+/// # 対象は「参加しているコア」である
+///
+/// **起きていないコアの `SEEN_GENERATION` は 0 のままである。** 素直に `MAX_CPUS`
+/// まで見ると、**`-smp 1` では永久に真にならない。** 対象は bootstrap processor と
+/// **起こした AP** である（`smp::started_ap_count`）。
+///
+/// # 後から起きた AP を待つのは、安全側の空振りである
+///
+/// AP が起きるのは解放より後でも、そのコアの `SEEN_GENERATION` は 0 から始まる。
+/// **したがって判定は「まだ追い越していない」と読み、余計に待つ。**
+/// **待ちすぎるのは安全側である**——**早すぎることだけが危険で、遅いのは遅いだけ。**
+/// **正しさは、後から起きたコアが古い翻訳を持たないことに依存していない。**
+///
+/// # BKL を保持したまま呼ぶこと
+///
+/// 判定と再利用の間に他コアが割り込むと、追い越しの判定が古くなる
+/// （Addendum の失効条件）。
+pub fn generation_is_retired(generation: u64) -> bool {
+    let participating = 1 + crate::smp::started_ap_count();
+    (0..participating).all(|cpu| seen_generation_for(cpu) > generation)
+}
+
 /// **自コアの見た世代が古ければ TLB を落とす（S5-b）。**
 ///
 /// [`acquire`] が勝った直後に呼ぶ。**取得してから写像を使い始めるまでの間に置く**

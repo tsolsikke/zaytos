@@ -32,6 +32,7 @@ pub mod irq;
 pub mod keyboard;
 pub mod memory_map;
 pub mod paging;
+pub mod quarantine;
 pub mod ring3;
 pub mod smp;
 pub mod stack;
