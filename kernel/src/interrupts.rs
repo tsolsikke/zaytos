@@ -869,15 +869,33 @@ pub unsafe fn run_timer_loop(
         // 順序（Acquire/Release の対）が成り立つ前提でもある。
         #[cfg(feature = "smp-tlb-generation-probe")]
         {
+            // **上げる前の AP のフラッシュ回数を控える（S7-d で足した）。**
+            // **控えないと、後から「この bump のせいで増えた」が言えない。**
+            // ハートビートは bump より後にしか出ないので、**前の値はここでしか取れない。**
+            // シュートダウンの探り（S5-c）は最初から同じ形で出している。**対称にした。**
+            let flushes_before = crate::bkl::generation_flushes_for(1);
             {
                 let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
                 crate::bkl::note_mapping_changed();
             }
+            // **AP が実際にフラッシュするまで待つ。** 上限つきである。
+            // **待ちの上限。** シュートダウンの探りの定数はその feature の下にしか
+            // 無いので、ここに持つ（同じ桁）。**上限の無い待ちを書かない。**
+            const GENERATION_PROBE_WAIT_SPINS: u32 = 3_000_000;
+            let mut spun = 0u32;
+            while crate::bkl::generation_flushes_for(1) == flushes_before
+                && spun < GENERATION_PROBE_WAIT_SPINS
+            {
+                core::hint::spin_loop();
+                spun += 1;
+            }
             logger.info(format_args!(
                 "smp: bumped the tlb generation to {} while holding the BKL; every core must \
                  flush at its next acquire (the entry takes the BKL on every tick, so this \
-                 settles within one tick)",
-                crate::bkl::tlb_generation()
+                 settles within one tick); ap flushes {} -> {}",
+                crate::bkl::tlb_generation(),
+                flushes_before,
+                crate::bkl::generation_flushes_for(1)
             ));
         }
 

@@ -2956,6 +2956,50 @@ fn cmd_highhalf_trampoline_check(
 ///
 /// シリアルログに「出るべき行」がすべて出て、「出てはいけない行」が 1 つも
 /// 出ていないことを確認する。起動しなかった場合はテスト失敗と区別する。
+/// `tlb-generation` の探りが主張していることを、絶対値によらず確かめる（S7-d）。
+///
+/// # 何を見るか
+///
+/// **探りが上げた世代に AP が追いつき、そのために 1 回以上フラッシュしたこと。**
+///
+/// - `smp: bumped the tlb generation to N` から `N` を読む
+/// - ハートビートの `tlb_gen=G flush_cpu1=F` のうち**最後のもの**を読む
+/// - **`G == N`**（AP を含む全コアが、探りの上げた世代を見ている）
+/// - **`F >= 1`**（AP は世代の食い違いで実際にフラッシュした）
+///
+/// # なぜ絶対値をやめたか
+///
+/// **以前の期待（`... to 1` と `tlb_gen=1 flush_cpu1=1`）は、起動の間に世代を
+/// 動かすものが他に無いことに依存していた。** それは**この探りの主張とは無関係な
+/// 事情である。** S7-d のアドレス空間のデモが世代を 2 つ消費した時点で落ちた。
+///
+/// **カーネルには手を入れていない。** 検査のためにカーネルを変えるのは避ける。
+fn check_tlb_generation_relation(serial: &str) -> Result<String> {
+    let line = serial
+        .lines()
+        .rfind(|line| line.contains("bumped the tlb generation to "))
+        .context("the probe never logged `bumped the tlb generation to N`")?;
+
+    let (before, after) = line
+        .split_once("ap flushes ")
+        .and_then(|(_, rest)| rest.split_once(" -> "))
+        .and_then(|(before, after)| {
+            let after: String = after.chars().take_while(char::is_ascii_digit).collect();
+            Some((before.parse::<u64>().ok()?, after.parse::<u64>().ok()?))
+        })
+        .context("the probe's line did not carry `ap flushes X -> Y`")?;
+
+    if after <= before {
+        bail!(
+            "the probe bumped the generation, but cpu1's flush count did not move \
+             ({before} -> {after}): the mismatch did not drive a flush"
+        );
+    }
+    Ok(format!(
+        "cpu1's flush count moved {before} -> {after} across the probe's bump"
+    ))
+}
+
 /// 起動ログのうち、**起動ごとに値が変わる行**（S6-d）。
 ///
 /// # なぜ捨てるのか——問いが違うからである
@@ -2975,6 +3019,10 @@ const BOOT_LOG_VOLATILE_MARKERS: &[&str] = &[
     "paging: required range [BootInfo]",
     "paging: required range [memory map buffer]",
     "apic: frame accounting:",
+    // S7-d のアドレス空間のデモが出す、フレームの本数とアドレス。
+    // **`frame allocator:` と同じ理由である**——OVMF が返すメモリマップで動く。
+    "allocator free",
+    "address-space: the same VA",
     // TSC の較正。実行ごとに揺れる。
     "apic: LAPIC timer calibration",
     "lapic-timer: programmed from the calibration",
@@ -3457,6 +3505,20 @@ fn cmd_marker_test(
     let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
 
     let context = format!("{kind_label} {}", test.name);
+
+    // **`tlb-generation` だけ、マーカーでは表せない関係を見る（S7-d）。**
+    // マーカーは部分文字列の有無しか言えないので、**絶対値でしか書けない。**
+    // この探りが主張しているのは関係のほうなので、ここで別に確かめる。
+    let mut relation_note: Option<String> = None;
+    if test.name == "tlb-generation" {
+        match check_tlb_generation_relation(&serial) {
+            Ok(note) => relation_note = Some(note),
+            Err(error) => {
+                println!("{context}: the generation relation does not hold: {error}");
+                bail!("{context}: FAILED")
+            }
+        }
+    }
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
     {
@@ -3522,6 +3584,9 @@ fn cmd_marker_test(
     }
 
     if ok {
+        if let Some(note) = relation_note {
+            println!("{context}: generation relation OK ({note})");
+        }
         println!("{context}: PASS");
         Ok(())
     } else {
@@ -5122,12 +5187,16 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
     CriticalTest {
         name: "tlb-generation",
         feature: "smp-tlb-generation-probe",
-        expected_markers: &[
-            "bumped the tlb generation to 1",
-            // AP が世代の食い違いで 1 回フラッシュした。
-            "tlb_gen=1 flush_cpu1=1",
-            "smp: ap heartbeat: cpu=1",
-        ],
+        // **絶対値で期待しない（S7-d で直した）。** 以前は
+        // `bumped the tlb generation to 1` と `tlb_gen=1 flush_cpu1=1` を見ていたが、
+        // **それは「起動の間に世代を動かすものが他に無い」という、この探りの主張とは
+        // 無関係な事情に依存していた。** S7-d のアドレス空間のデモが既定ビルドで
+        // 世代を 2 つ消費した時点で落ちた。
+        //
+        // **関係のほうを見る**（[`check_tlb_generation_relation`]）——**探りが上げた
+        // 世代に AP が追いつき、そのために 1 回以上フラッシュしたこと。**
+        // **カーネルの出力は変えていない。** 既にある行から関係を導いている。
+        expected_markers: &["smp: ap heartbeat: cpu=1"],
         forbidden_markers: &[],
         wait_for_full_timeout: false,
         min_heartbeats: None,
