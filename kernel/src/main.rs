@@ -3052,6 +3052,16 @@ fn verify_irq_path_restores_registers(logger: &mut Logger<SerialPort>) {
     ));
 }
 
+/// デモのアドレス空間が使うユーザーサブツリーの添字（S7-e）。
+///
+/// **`DEMO_VIRT` の添字と一致していなければならない。** 一致しないと
+/// `map_user_4kib` が `NotPrivate` で弾く（**弾くのが正しい**——別の添字へ張れば、
+/// その空間の監査の主張が破れる）。
+///
+/// **本番の `USER_PML4_INDEX` とは別でよい。** プロセスごとにアドレス空間が
+/// 分かれる以上、**ユーザーサブツリーの添字も空間ごとの性質である**（S7-e）。
+const DEMO_USER_PML4_INDEX: usize = 0;
+
 /// アドレス空間を1つ作り、切り替えて、戻す（S7-c）。
 ///
 /// **主張は「上位を共有していれば、CR3 を差し替えてもカーネルは動き続ける」である。**
@@ -3070,7 +3080,12 @@ fn demo_address_space_switch(
     // SAFETY: 稼働中の PML4 を読み、direct map が覆っている新しいフレームへ写すだけ。
     // AP はまだ起きておらず、他コアが写像を変えることはない。
     let space = match unsafe {
-        kernel::address_space::AddressSpace::new(allocator, direct_map, production)
+        kernel::address_space::AddressSpace::new(
+            allocator,
+            direct_map,
+            production,
+            DEMO_USER_PML4_INDEX,
+        )
     } {
         Ok(space) => space,
         Err(error) => {
@@ -3134,7 +3149,12 @@ fn demo_two_address_spaces(
 ) {
     use kernel::address_space::{is_shared_kernel_index, AddressSpace, PML4_ENTRY_COUNT};
 
-    // 下位の、どのデモとも重ならない VA。**PML4[2] は誰も使っていない。**
+    // 下位の、どのデモとも重ならない VA。
+    //
+    // **添字は 0 である**（`0x1_0000_0000 >> 39 == 0`）。**S7-d の時点では
+    // 「PML4[2] は誰も使っていない」と書いていたが、算が誤っていた**——通ったのは
+    // **恒等除去（B-2b）で PML4[0] が空いていたから**であって、書いてあった理由に
+    // よるのではない。**S7-e で訂正した。**
     const DEMO_VIRT: u64 = 0x1_0000_0000;
     const VALUE_A: u64 = 0xAAAA_AAAA_AAAA_AAAA;
     const VALUE_B: u64 = 0xBBBB_BBBB_BBBB_BBBB;
@@ -3147,15 +3167,17 @@ fn demo_two_address_spaces(
     };
 
     // SAFETY: 稼働中の PML4 を読み、direct map が覆う新しいフレームへ写すだけ。
-    let mut space_b = match unsafe { AddressSpace::new(allocator, direct_map, production) } {
-        Ok(space) => space,
-        Err(error) => {
-            logger.error(format_args!(
-                "address-space: second space failed ({error:?}); halting"
-            ));
-            cpu::halt_forever();
-        }
-    };
+    let mut space_b =
+        match unsafe { AddressSpace::new(allocator, direct_map, production, DEMO_USER_PML4_INDEX) }
+        {
+            Ok(space) => space,
+            Err(error) => {
+                logger.error(format_args!(
+                    "address-space: second space failed ({error:?}); halting"
+                ));
+                cpu::halt_forever();
+            }
+        };
 
     let (Some(frame_a), Some(frame_b)) = (allocator.allocate_frame(), allocator.allocate_frame())
     else {
@@ -3234,6 +3256,33 @@ fn demo_two_address_spaces(
         "address-space: shared kernel PML4 entries compared across 3 tables: mismatches={shared_mismatches} \
          (expected 0)"
     ));
+
+    // **U/S の監査を、それぞれの空間について行う（S7-e）。**
+    //
+    // **主張が言い換わっている。** 単一アドレス空間のときは「U=1 はユーザー
+    // サブツリーの外に一切存在しない」という大域の主張だった。**プロセスごとに
+    // なると、どの空間について言っているかが付いて回る。**
+    //
+    // **添字は空間が持っている。** ここから渡していない。
+    for (label, space) in [("A", &space_a), ("B", &space_b)] {
+        // SAFETY: どちらも direct map が覆う、稼働可能な PML4 である。読み取りのみ。
+        let audit = unsafe { space.audit_user_supervisor(direct_map) };
+        logger.info(format_args!(
+            "address-space: U/S audit of {label} (user subtree PML4[{}]): user entries={} \
+             violations(U=0)={}, kernel entries={} violations(U=1)={}",
+            space.user_pml4_index(),
+            audit.user_entries,
+            audit.user_violations,
+            audit.kernel_entries,
+            audit.kernel_violations
+        ));
+        if audit.user_violations != 0 || audit.kernel_violations != 0 {
+            logger.error(format_args!(
+                "address-space: the U/S audit of {label} found violations; halting"
+            ));
+            cpu::halt_forever();
+        }
+    }
 
     // 到達条件 5 の機構: 破棄して隔離へ入れ、退くまで配られないこと。
     let mut quarantine = kernel::quarantine::Quarantine::new();

@@ -68,6 +68,15 @@ pub enum AddressSpaceError {
 /// 無いまま返す形が書けてしまう。**
 pub struct AddressSpace {
     pml4: PhysAddr,
+    /// **この空間のユーザーサブツリーの添字（S7-e）。**
+    ///
+    /// **空間が自分で持つ。** 監査（[`AddressSpace::audit_user_supervisor`]）は
+    /// これを空間から取るので、**呼び出し側が別の添字を渡す余地が無い。**
+    /// **渡し間違いが構造的に起きない形にしてある**（「ガードは写像の不在で作る」）。
+    ///
+    /// **プロセスごとに違ってよい。** 全空間が同じ添字を使う前提は、
+    /// **プロセス別アドレス空間の目的と逆を向いている**（S7-e で言い換えた）。
+    user_pml4_index: usize,
 }
 
 impl AddressSpace {
@@ -83,7 +92,11 @@ impl AddressSpace {
         allocator: &mut FrameAllocator,
         direct_map: DirectMap,
         current_pml4: PhysAddr,
+        user_pml4_index: usize,
     ) -> Result<Self, AddressSpaceError> {
+        if is_shared_kernel_index(user_pml4_index) {
+            return Err(AddressSpaceError::NotPrivate);
+        }
         let pml4 = allocator
             .allocate_frame()
             .ok_or(AddressSpaceError::OutOfFrames)?;
@@ -118,12 +131,47 @@ impl AddressSpace {
             unsafe { new_table.add(index).write_volatile(value) };
         }
 
-        Ok(Self { pml4 })
+        Ok(Self {
+            pml4,
+            user_pml4_index,
+        })
     }
 
     /// この空間の PML4 の物理アドレス。
     pub fn pml4(&self) -> PhysAddr {
         self.pml4
+    }
+
+    /// この空間のユーザーサブツリーの添字。
+    pub fn user_pml4_index(&self) -> usize {
+        self.user_pml4_index
+    }
+
+    /// **この空間について U/S の監査を行う（S7-e）。**
+    ///
+    /// 主張は**「U=1 は、この空間のユーザーサブツリーの外に存在しない」**である。
+    ///
+    /// **前提が言い換わっている。** 単一アドレス空間のときは「U=1 はユーザー
+    /// サブツリーの外に一切存在しない」という**大域の主張**だった。**プロセスごとに
+    /// なると、主張は空間ごとになる**——**どの空間について言っているかが付いて回る。**
+    ///
+    /// **添字は空間から取る。** 呼び出し側は渡せない。
+    ///
+    /// # Safety
+    ///
+    /// [`crate::paging::verify::audit_user_supervisor`] と同じ契約。
+    pub unsafe fn audit_user_supervisor(
+        &self,
+        direct_map: DirectMap,
+    ) -> crate::paging::verify::UserSupervisorAudit {
+        // SAFETY: 呼び出し元契約。添字はこの空間のものである。
+        unsafe {
+            crate::paging::verify::audit_user_supervisor(
+                self.pml4,
+                direct_map,
+                self.user_pml4_index,
+            )
+        }
     }
 
     /// この空間へ切り替える。
@@ -172,7 +220,10 @@ impl AddressSpace {
     ) -> Result<(), AddressSpaceError> {
         use crate::paging::entry;
 
-        if is_shared_kernel_index(entry::pml4_index(virt)) {
+        // **この空間のユーザーサブツリーの中でなければ弾く（S7-e）。**
+        // 共有側でないことだけでは足りない——**別の添字へ張ると、監査の主張
+        // （U=1 はこの空間のユーザーサブツリーの外に存在しない）が破れる。**
+        if entry::pml4_index(virt) != self.user_pml4_index {
             return Err(AddressSpaceError::NotPrivate);
         }
         if !direct_map.covers(frame) {
