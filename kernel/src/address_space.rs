@@ -55,6 +55,10 @@ pub enum AddressSpaceError {
     OutOfFrames,
     /// direct map 越しに PML4 を触れなかった（写像の外を指している）。
     Unreachable,
+    /// 共有側（上位）へ張ろうとした。**下位にしか張れない。**
+    NotPrivate,
+    /// 下位に巨大ページがあった。**張る経路が無いので、前提が崩れている。**
+    UnexpectedHugePage,
 }
 
 /// プロセス 1 つ分のアドレス空間。
@@ -135,6 +139,229 @@ impl AddressSpace {
     pub unsafe fn activate(&self) {
         // SAFETY: 上記の契約。上位を写してあるので、実行中のコードとスタックは見え続ける。
         unsafe { crate::paging::switch::switch_to(self.pml4) }
+    }
+}
+
+/// 下位（ユーザー側）の PML4 添字の範囲。**破棄が触ってよいのはここだけである。**
+const PRIVATE_INDEX_RANGE: core::ops::Range<usize> = 0..KERNEL_PML4_FIRST_INDEX;
+
+/// 1 回の破棄で集められるフレームの本数。
+///
+/// **集めてから世代を上げるので、一時的に置く場所が要る。** 溢れたら漏らす
+/// （返すより安全である）。**隔離の容量と同じ桁にしてある。**
+const MAX_FRAMES_PER_DESTROY: usize = crate::quarantine::QUARANTINE_CAPACITY;
+
+impl AddressSpace {
+    /// 4KiB のユーザーページを 1 枚張る（S7-d）。
+    ///
+    /// **下位にしか張れない。** 上位は共有なので、ここから触ると全アドレス空間へ
+    /// 波及する。**添字で弾く**（[`is_shared_kernel_index`]）。
+    ///
+    /// # Safety
+    ///
+    /// - `direct_map` が、これから取る中間テーブルと `frame` を覆っていること。
+    /// - **この空間がどのコアでも稼働していないこと。** 稼働中に張ると、そのコアの
+    ///   TLB との整合を別に取る必要がある。**S7-d の使い方では、作ってから
+    ///   切り替えるまでの間に張るので満たされる。**
+    pub unsafe fn map_user_4kib(
+        &mut self,
+        allocator: &mut FrameAllocator,
+        direct_map: DirectMap,
+        virt: common::addr::VirtAddr,
+        frame: PhysAddr,
+    ) -> Result<(), AddressSpaceError> {
+        use crate::paging::entry;
+
+        if is_shared_kernel_index(entry::pml4_index(virt)) {
+            return Err(AddressSpaceError::NotPrivate);
+        }
+        if !direct_map.covers(frame) {
+            return Err(AddressSpaceError::Unreachable);
+        }
+
+        let mut table = self.pml4;
+        for index in [
+            entry::pml4_index(virt),
+            entry::pdpt_index(virt),
+            entry::pd_index(virt),
+        ] {
+            // SAFETY: `table` は覆いを確かめたテーブルで、添字は 512 未満。
+            let existing = unsafe { read_entry(direct_map, table, index) };
+            let child = if entry::is_present(existing) {
+                if entry::is_huge(existing) {
+                    // **巨大ページは扱わない。** 下位に 2MiB を張る経路が無いので、
+                    // ここへ来るのは前提が崩れたときである。
+                    return Err(AddressSpaceError::UnexpectedHugePage);
+                }
+                entry::table_address(existing)
+            } else {
+                let fresh = allocator
+                    .allocate_frame()
+                    .ok_or(AddressSpaceError::OutOfFrames)?;
+                if !direct_map.covers(fresh) {
+                    let _ = allocator.deallocate_frame(fresh);
+                    return Err(AddressSpaceError::Unreachable);
+                }
+                // SAFETY: いま取ったフレームで、direct map が覆っている。
+                unsafe { zero_table(direct_map, fresh) };
+                // SAFETY: 中間テーブルなので U ビットを立てる。立てないと、葉で
+                // 立てても CPU は全階層の AND を見るのでユーザーから触れない。
+                unsafe {
+                    write_entry(
+                        direct_map,
+                        table,
+                        index,
+                        fresh.as_u64() | entry::PTE_PRESENT | entry::PTE_WRITABLE | entry::PTE_USER,
+                    )
+                };
+                fresh
+            };
+            table = child;
+        }
+
+        // SAFETY: 葉。ユーザーから読み書きできる 4KiB ページ。
+        unsafe {
+            write_entry(
+                direct_map,
+                table,
+                entry::pt_index(virt),
+                frame.as_u64() | entry::PTE_PRESENT | entry::PTE_WRITABLE | entry::PTE_USER,
+            )
+        };
+        Ok(())
+    }
+
+    /// この空間を破棄し、**下位で使っていたフレームをすべて隔離へ入れる**（S7-d）。
+    ///
+    /// **アロケータへ直接は返さない。** 他コアの TLB に古い翻訳が残りうるので、
+    /// **ADR-0027 の Addendum の不変条件どおり、世代が退くまで隔離する。**
+    ///
+    /// **触るのは下位だけである**（[`PRIVATE_INDEX_RANGE`]）。上位は共有なので、
+    /// ここで返したら他のアドレス空間の写像を壊す。
+    ///
+    /// 返すのは (隔離へ入れた本数, 隔離が溢れて漏らした本数)。
+    ///
+    /// # Safety
+    ///
+    /// - **この空間がどのコアでも稼働していないこと。** 稼働中の CR3 を破棄すると、
+    ///   そのコアは次の翻訳で死ぬ。
+    /// - `guard` が示すとおり BKL を保持していること。**写像の変更と世代の更新は
+    ///   BKL の内側でしか行わない**（ADR-0027 の Addendum の失効条件）。
+    pub unsafe fn destroy(
+        self,
+        direct_map: DirectMap,
+        quarantine: &mut crate::quarantine::Quarantine,
+        _guard: &crate::bkl::BklGuard,
+    ) -> (usize, usize) {
+        use crate::paging::entry;
+
+        // **順序が要である。** (1) 写像を外し、(2) 集め終えてから世代を上げ、
+        // (3) その世代で隔離へ入れる。
+        //
+        // **上げてから外すと、上げた直後にフラッシュしたコアが、まだ生きている
+        // 写像を読み直しうる。** **外し終えてから上げれば、その世代以降に
+        // フラッシュしたコアは、外れた後の状態しか見ていない。**
+        // **判定が `>=` で足りるのはこの順序による**（[`crate::bkl::generation_is_retired`]）。
+        let mut collected = [None; MAX_FRAMES_PER_DESTROY];
+        let mut count = 0usize;
+        let mut leaked = 0usize;
+
+        let mut collect = |frame: PhysAddr, count: &mut usize, leaked: &mut usize| {
+            if *count < MAX_FRAMES_PER_DESTROY {
+                collected[*count] = Some(frame);
+                *count += 1;
+            } else {
+                // **入れ物が足りなければ漏らす。** 早く返すより漏らすほうが安全である。
+                *leaked += 1;
+            }
+        };
+
+        for pml4_index in PRIVATE_INDEX_RANGE {
+            // SAFETY: 自分の PML4。添字は 512 未満。
+            let pml4_entry = unsafe { read_entry(direct_map, self.pml4, pml4_index) };
+            if !entry::is_present(pml4_entry) {
+                continue;
+            }
+            let pdpt = entry::table_address(pml4_entry);
+            for pdpt_index in 0..entry::ENTRIES_PER_TABLE {
+                // SAFETY: 上で present を確かめたテーブル。
+                let pdpt_entry = unsafe { read_entry(direct_map, pdpt, pdpt_index) };
+                if !entry::is_present(pdpt_entry) || entry::is_huge(pdpt_entry) {
+                    continue;
+                }
+                let pd = entry::table_address(pdpt_entry);
+                for pd_index in 0..entry::ENTRIES_PER_TABLE {
+                    // SAFETY: 上で present を確かめたテーブル。
+                    let pd_entry = unsafe { read_entry(direct_map, pd, pd_index) };
+                    if !entry::is_present(pd_entry) || entry::is_huge(pd_entry) {
+                        continue;
+                    }
+                    let pt = entry::table_address(pd_entry);
+                    for pt_index in 0..entry::ENTRIES_PER_TABLE {
+                        // SAFETY: 上で present を確かめたテーブル。
+                        let pt_entry = unsafe { read_entry(direct_map, pt, pt_index) };
+                        if entry::is_present(pt_entry) {
+                            collect(entry::page_address_4k(pt_entry), &mut count, &mut leaked);
+                        }
+                    }
+                    collect(pt, &mut count, &mut leaked);
+                }
+                collect(pd, &mut count, &mut leaked);
+            }
+            collect(pdpt, &mut count, &mut leaked);
+            // **エントリを落としてから次へ行く。** 落とさずに返すと、隔離が解けた
+            // 後に残骸を辿れてしまう。
+            // SAFETY: 自分の PML4 の下位エントリ。
+            unsafe { write_entry(direct_map, self.pml4, pml4_index, 0) };
+        }
+
+        collect(self.pml4, &mut count, &mut leaked);
+
+        // (2) ここまでで写像は外れている。**外し終えてから上げる。**
+        crate::bkl::note_mapping_changed();
+        let generation = crate::bkl::tlb_generation();
+
+        // (3) その世代で隔離へ入れる。
+        let mut held = 0usize;
+        for frame in collected.iter().take(count).flatten() {
+            if quarantine.push(*frame, generation) {
+                held += 1;
+            } else {
+                leaked += 1;
+            }
+        }
+        (held, leaked)
+    }
+}
+
+/// direct map 越しにテーブルのエントリを読む。
+///
+/// # Safety
+/// `table` を `direct_map` が覆っていること。`index` が 512 未満であること。
+unsafe fn read_entry(direct_map: DirectMap, table: PhysAddr, index: usize) -> u64 {
+    let base = direct_map.phys_to_virt(table).as_u64() as *const u64;
+    // SAFETY: 呼び出し元契約。
+    unsafe { base.add(index).read_volatile() }
+}
+
+/// direct map 越しにテーブルのエントリを書く。
+///
+/// # Safety
+/// `table` を `direct_map` が覆っていること。`index` が 512 未満であること。
+unsafe fn write_entry(direct_map: DirectMap, table: PhysAddr, index: usize, value: u64) {
+    let base = direct_map.phys_to_virt(table).as_u64() as *mut u64;
+    // SAFETY: 呼び出し元契約。
+    unsafe { base.add(index).write_volatile(value) };
+}
+
+/// direct map 越しにテーブルを 0 で埋める。
+///
+/// # Safety
+/// `table` を `direct_map` が覆っていること。
+unsafe fn zero_table(direct_map: DirectMap, table: PhysAddr) {
+    for index in 0..crate::paging::entry::ENTRIES_PER_TABLE {
+        // SAFETY: 呼び出し元契約。添字は 512 未満。
+        unsafe { write_entry(direct_map, table, index, 0) };
     }
 }
 

@@ -3113,12 +3113,172 @@ fn demo_address_space_switch(
         restored.as_u64() == production.as_u64()
     ));
 
-    // **作った空間は捨てない。破棄は S7-d である。** ここで返すと、隔離を通さずに
-    // 返すことになる（ADR-0027 の Addendum の不変条件を破る）。
-    //
-    // **`AddressSpace` は `Drop` を持たないので、落ちてもフレームは返らない。**
-    // **フレーム 1 枚を意図的に漏らしている。** 破棄を実装する S7-d で解消する。
-    let _leaked_until_s7d = space;
+    // === S7-d: 2 つの空間で同じ VA が別の物理を指すこと（到達条件 1・2・6）===
+    demo_two_address_spaces(logger, allocator, direct_map, production, space);
+}
+
+/// 2 つのアドレス空間を作り、同じ VA を別の物理へ張って読み分ける（S7-d）。
+///
+/// **到達条件 1（同じ VA が別の物理を指す）・2（A の書き込みが B から見えない）・
+/// 6（共有カーネル部分が一致する）・5（破棄後に古い翻訳で触れない）の観測である。**
+///
+/// **ユーザーモードへは行かない。** 張るのはユーザーページだが、読むのは Ring 0 から
+/// である。**権限の検査は S8 以降の仕事で、ここで見たいのは「翻訳が別である」こと
+/// だけである。**
+fn demo_two_address_spaces(
+    logger: &mut Logger<SerialPort>,
+    allocator: &mut kernel::frame_allocator::FrameAllocator,
+    direct_map: common::addr::DirectMap,
+    production: common::addr::PhysAddr,
+    mut space_a: kernel::address_space::AddressSpace,
+) {
+    use kernel::address_space::{is_shared_kernel_index, AddressSpace, PML4_ENTRY_COUNT};
+
+    // 下位の、どのデモとも重ならない VA。**PML4[2] は誰も使っていない。**
+    const DEMO_VIRT: u64 = 0x1_0000_0000;
+    const VALUE_A: u64 = 0xAAAA_AAAA_AAAA_AAAA;
+    const VALUE_B: u64 = 0xBBBB_BBBB_BBBB_BBBB;
+
+    let Some(virt) = common::addr::VirtAddr::new(DEMO_VIRT) else {
+        logger.error(format_args!(
+            "address-space: the demo VA is not canonical; halting"
+        ));
+        cpu::halt_forever();
+    };
+
+    // SAFETY: 稼働中の PML4 を読み、direct map が覆う新しいフレームへ写すだけ。
+    let mut space_b = match unsafe { AddressSpace::new(allocator, direct_map, production) } {
+        Ok(space) => space,
+        Err(error) => {
+            logger.error(format_args!(
+                "address-space: second space failed ({error:?}); halting"
+            ));
+            cpu::halt_forever();
+        }
+    };
+
+    let (Some(frame_a), Some(frame_b)) = (allocator.allocate_frame(), allocator.allocate_frame())
+    else {
+        logger.error(format_args!(
+            "address-space: no frames for the demo; halting"
+        ));
+        cpu::halt_forever();
+    };
+
+    // **direct map 越しに、既知の値を置く。** ユーザー VA からではなく物理から書く。
+    for (frame, value) in [(frame_a, VALUE_A), (frame_b, VALUE_B)] {
+        let ptr = direct_map.phys_to_virt(frame).as_u64() as *mut u64;
+        // SAFETY: いま取ったフレームで、direct map が覆っている。誰も使っていない。
+        unsafe { ptr.write_volatile(value) };
+    }
+
+    for (space, frame) in [(&mut space_a, frame_a), (&mut space_b, frame_b)] {
+        // SAFETY: どちらもまだ稼働していない。direct map は覆っている。
+        if let Err(error) = unsafe { space.map_user_4kib(allocator, direct_map, virt, frame) } {
+            logger.error(format_args!(
+                "address-space: mapping failed ({error:?}); halting"
+            ));
+            cpu::halt_forever();
+        }
+    }
+
+    logger.info(format_args!(
+        "address-space: the same VA {DEMO_VIRT:#x} is backed by {:#x} in A and {:#x} in B \
+         (different={})",
+        frame_a.as_u64(),
+        frame_b.as_u64(),
+        frame_a.as_u64() != frame_b.as_u64()
+    ));
+
+    // 到達条件 1・2: 切り替えて読み分ける。
+    let ptr = DEMO_VIRT as *const u64;
+    // SAFETY: 上位を共有しているので切り替えてもカーネルは動く。読むのは張った VA。
+    let read_a = unsafe {
+        space_a.activate();
+        ptr.read_volatile()
+    };
+    // SAFETY: 同上。
+    let read_b = unsafe {
+        space_b.activate();
+        ptr.read_volatile()
+    };
+    // SAFETY: 本番のテーブルへ戻す。
+    unsafe { kernel::paging::switch::switch_to(production) };
+
+    logger.info(format_args!(
+        "address-space: read {read_a:#x} in A and {read_b:#x} in B (A sees only its own={}, \
+         B sees only its own={})",
+        read_a == VALUE_A,
+        read_b == VALUE_B
+    ));
+
+    // 到達条件 6: 共有カーネル部分が 3 つのテーブルで一致すること。
+    let mut shared_mismatches = 0usize;
+    for index in 0..PML4_ENTRY_COUNT {
+        if !is_shared_kernel_index(index) {
+            continue;
+        }
+        // SAFETY: いずれも direct map が覆う稼働可能な PML4。添字は 512 未満。
+        let (p, a, b) = unsafe {
+            (
+                kernel::paging::verify::read_pml4_entry(production, direct_map, index),
+                kernel::paging::verify::read_pml4_entry(space_a.pml4(), direct_map, index),
+                kernel::paging::verify::read_pml4_entry(space_b.pml4(), direct_map, index),
+            )
+        };
+        if p != a || p != b {
+            shared_mismatches += 1;
+        }
+    }
+    logger.info(format_args!(
+        "address-space: shared kernel PML4 entries compared across 3 tables: mismatches={shared_mismatches} \
+         (expected 0)"
+    ));
+
+    // 到達条件 5 の機構: 破棄して隔離へ入れ、退くまで配られないこと。
+    let mut quarantine = kernel::quarantine::Quarantine::new();
+    let generation_before = kernel::bkl::tlb_generation();
+    let free_before = allocator.free_frame_count();
+    let (held, leaked) = {
+        let guard = kernel::bkl::acquire(kernel::bkl::KernelEntry::SteadyLoop);
+        // SAFETY: A はいま稼働していない（本番へ戻してある）。BKL を保持している。
+        unsafe { space_a.destroy(direct_map, &mut quarantine, &guard) }
+    };
+    let free_after_destroy = allocator.free_frame_count();
+    logger.info(format_args!(
+        "address-space: destroyed A. generation {generation_before} -> {}, quarantined={held} \
+         leaked={leaked}, allocator free {free_before} -> {free_after_destroy} (unchanged={})",
+        kernel::bkl::tlb_generation(),
+        free_before == free_after_destroy
+    ));
+
+    // **まだ退いていない**——このコアの `SEEN_GENERATION` は次の `acquire` で進む。
+    let released_now = quarantine.release_retired(allocator, kernel::bkl::generation_is_retired);
+    // 1 度 BKL を取れば、このコアは新しい世代を見る。**単一コアなのでこれで退く。**
+    drop(kernel::bkl::acquire(kernel::bkl::KernelEntry::SteadyLoop));
+    let released_after = quarantine.release_retired(allocator, kernel::bkl::generation_is_retired);
+    logger.info(format_args!(
+        "address-space: quarantine released {released_now} before the cores caught up and \
+         {released_after} after; still held={}, allocator free {free_after_destroy} -> {}",
+        quarantine.held_count(),
+        allocator.free_frame_count()
+    ));
+
+    // B は生かしたままにしない。**同じ経路で片付ける。**
+    let (held_b, leaked_b) = {
+        let guard = kernel::bkl::acquire(kernel::bkl::KernelEntry::SteadyLoop);
+        // SAFETY: B も稼働していない。BKL を保持している。
+        unsafe { space_b.destroy(direct_map, &mut quarantine, &guard) }
+    };
+    drop(kernel::bkl::acquire(kernel::bkl::KernelEntry::SteadyLoop));
+    let released_b = quarantine.release_retired(allocator, kernel::bkl::generation_is_retired);
+    logger.info(format_args!(
+        "address-space: destroyed B too (quarantined={held_b} leaked={leaked_b} released={released_b}); \
+         quarantine now holds {} with {} overflow(s); allocator free {}",
+        quarantine.held_count(),
+        quarantine.overflow_count(),
+        allocator.free_frame_count()
+    ));
 }
 
 /// PIT を設定し、IRQ0 を解禁してタイマを動かす（M4-d-2）。
