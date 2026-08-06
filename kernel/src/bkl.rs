@@ -328,6 +328,17 @@ pub fn seen_generation_for(cpu: usize) -> u64 {
 /// まで見ると、**`-smp 1` では永久に真にならない。** 対象は bootstrap processor と
 /// **起こした AP** である（`smp::started_ap_count`）。
 ///
+/// # 比較は `>=` である。`>` は行き過ぎである
+///
+/// [`flush_if_generation_is_stale`] は、見た世代が現在より古ければ**フラッシュして
+/// から**自分の見た世代を現在へ進める。**したがって「見た世代が `generation` 以上」
+/// は「`generation` へ上げた後にフラッシュ済み」を意味する。** 呼び出し側が
+/// **写像を外し終えてから世代を上げる**ので、これで足りる。
+///
+/// **`>` にすると、世代がもう 1 つ進むまで解けない。** 写像を変える操作が他に
+/// 無ければ**永久に解けない**——**遅いのではなく、返らない。** **S7-d の実測で
+/// 踏んだ**（`docs/verification-coverage.md`）。
+///
 /// # 後から起きた AP を待つのは、安全側の空振りである
 ///
 /// AP が起きるのは解放より後でも、そのコアの `SEEN_GENERATION` は 0 から始まる。
@@ -341,7 +352,7 @@ pub fn seen_generation_for(cpu: usize) -> u64 {
 /// （Addendum の失効条件）。
 pub fn generation_is_retired(generation: u64) -> bool {
     let participating = 1 + crate::smp::started_ap_count();
-    (0..participating).all(|cpu| seen_generation_for(cpu) > generation)
+    (0..participating).all(|cpu| seen_generation_for(cpu) >= generation)
 }
 
 /// **自コアの見た世代が古ければ TLB を落とす（S5-b）。**
