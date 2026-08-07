@@ -789,10 +789,12 @@ extern "sysv64" fn kernel_main() -> ! {
     let (kernel_start_phys, kernel_end_phys) = kernel_image_phys_range();
     let kernel_start = kernel_start_phys.as_u64();
 
-    // **未解決の恒等前提。** BootInfo・RSP・RIP はいずれも仮想アドレス
-    // として得た値だが、物理アドレスの範囲を見る `check_range` へ渡している。
-    // 恒等マッピングだから通っているだけで、higher-half 移行では
-    // 変換を挟むか、別の検証へ分ける必要がある。
+    // **未解決の恒等前提。** BootInfo とフレームバッファは仮想アドレスとして
+    // 得た値だが、物理アドレスの範囲を見る `check_range` へ渡している。
+    // 恒等マッピングだから通っているだけで、解消するには変換を挟むか、
+    // 別の検証へ分ける必要がある。どちらも kernel イメージ外にあるので、
+    // 下の image_phys（リンク差で物理へ戻す）は使えない。
+    // **RSP と RIP はここを通らない。** B-2a-2 で image_phys へ移した（下を参照）。
     let identity = |virt: u64| {
         common::addr::PhysAddr::new(virt)
             .expect("an identity-mapped address fits in a physical address")
@@ -850,7 +852,8 @@ extern "sysv64" fn kernel_main() -> ! {
     // （KERNEL_VIRT_BASE）で物理へ変換する（この image_phys 自体が恒等前提の解消）。
     // 再リンク（B-2a-3）で RSP/RIP が高位になっても、この変換なら物理へ戻せる。
     // base=0 では素通し。BootInfo・メモリマップ・フレームバッファは kernel イメージ外
-    // （低位のまま）なので恒等のままにする（上の check_range と 745 行のマーカー参照）。
+    // （低位のまま）なので恒等のままにする（上の check_range と、その手前の
+    // 「未解決の恒等前提」マーカーを参照）。
     let image_phys = |virt: u64| {
         kernel::kernel_phys_from_virt(
             common::addr::VirtAddr::new(virt).expect("an rsp/rip value is canonical"),
@@ -903,10 +906,12 @@ extern "sysv64" fn kernel_main() -> ! {
     // **未解決の恒等前提（順序依存。記録でしか守れない）。** kernel_start は物理値で、
     // ここでは低位 VA として read する。これは A-2（activate_direct_map_window）より
     // 前なので、この時点で direct_map() は base=0 を返し phys_to_virt しても同じ低位 VA
-    // になる（boot_info が 468 行で高位化できなかったのと同じ構造）。したがって高位化
+    // になる（handoff.boot_info の「未解決の恒等前提」が高位化できなかったのと
+    // 同じ構造）。したがって高位化
     // できず、「恒等除去（B-2b-4）より前に走ること」に依存する。反転関門
     // （DirectMap::new の IDENTITY_REMOVED）は DirectMap 構築を捕まえるが、この生の
-    // 低位 read は経由しないので捕まえない。**この read（862/900 行）が恒等除去点より
+    // 低位 read は経由しないので捕まえない。**この2つの read
+    // （`kernel_first_byte_before` と `kernel_first_byte_after`）が恒等除去点より
     // 後ろへ来ないこと。** 具体的には、この read を除去点の後ろへ動かす、または除去点を
     // この read の前へ動かす、のどちらも違反（除去点をさらに後ろへ動かすのは安全）。
     // 一覧は docs/verification-coverage.md の「higher-half B-2b」を参照。
@@ -914,9 +919,16 @@ extern "sysv64" fn kernel_main() -> ! {
     // 確認済み。
     let kernel_first_byte_before = unsafe { core::ptr::read_volatile(kernel_start as *const u8) };
 
-    // SAFETY: 直前の必須領域検証(all_required_ok)により、現在実行中の
-    // コード・現在のスタック・pml4_phys 自身のフレームがすべて新しい
-    // ページテーブルでも恒等マッピングされていることを確認済み。
+    // SAFETY: switch_to が要求する3つを、別々の機構が満たす。
+    // - 実行中のコードと現在のスタック: 再リンク（B-2a-3）後の RIP と RSP は
+    //   kernel イメージ内の高位 VA（.text と .bss のカーネルスタック）なので、
+    //   これを引けるようにしているのは上の map_kernel_high_half である。恒等ではない。
+    //   必須領域検証の "current RIP" / "current RSP" が見たのは image_phys で
+    //   落とした物理の側で、高位が引けることまでは見ていない。
+    // - pml4_phys 自身のフレーム: こちらは恒等である。必須領域検証の
+    //   "new page tables (PML4)" が計画に入っていることを確認済みで、恒等を外す
+    //   B-2b-4 はずっと後にある。直後の verify_page_tables も A-2 より前で
+    //   direct_map() の base が 0 なので、同じ恒等でテーブルを読む。
     unsafe {
         paging::switch::switch_to(cr3_value);
     }
