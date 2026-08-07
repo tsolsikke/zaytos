@@ -1295,14 +1295,15 @@ extern "sysv64" fn kernel_main() -> ! {
     //
     // ここが恒等（PML4[0]）を外す点。恒等窓を握る4検証サイト（verify_user_page_mapping /
     // verify_ring3_excursion / verify_syscall_roundtrip / verify_syscall_pointer）と
-    // verify_syscall_checksum が全て走り終えた後、start_timer より前。**この時点で
-    // boot_info は無効**（低位 VA、最終利用は上の rehome）。順序依存の詳細と除去手順は
-    // docs/verification-coverage.md の「higher-half B-2b」を参照。
+    // verify_syscall_checksum が全て走り終えた後、start_timer より前。この時点で
+    // boot_info は無効である（低位 VA、最終利用は上の rehome）。順序依存の詳細と除去
+    // 手順は docs/verification-coverage.md の「higher-half B-2b」。
     //
     // (d) で既定有効化した。paging-test は split/unmap の破壊検査が目的で恒等除去まで
-    // 通す必要がないため除外する（そのビルドでは恒等除去が検査されない＝カバレッジ穴。
-    // verification-coverage に記録）。highhalf-remove-verify-fail のときは下でヒープの高位
-    // VA を解決不能値へ差し替え、step4 失敗→5a 復帰を実証する（除去は既定と同じく走る）。
+    // 通さないので除外する（そのビルドでは恒等除去が検査されない＝カバレッジ穴。
+    // verification-coverage に記録）。highhalf-remove-verify-fail のときは下でヒープの
+    // 高位 VA を解決不能値へ差し替え、step4 失敗から 5a 復帰を実証する（除去は既定と
+    // 同じく走る）。
     #[cfg(not(feature = "paging-test"))]
     {
         use common::addr::{PhysAddr, VirtAddr};
@@ -1311,42 +1312,40 @@ extern "sysv64" fn kernel_main() -> ! {
         let direct_map = common::addr::direct_map();
 
         // lib が導ける領域（RIP/RSP/direct map 窓/カーネルイメージ）は remove_identity が
-        // 内部で足す。ここで渡すのは lib が知り得ない高位 VA だけである:
+        // 内部で足す。ここで渡すのは lib が知り得ない高位 VA だけである。
         //   - ヒープの高位 VA（heap_virt_base、B-2b-2）
         //   - フレームバッファの高位 VA。`framebuffer` 変数は console へ move 済みなので、
         //     rehome と同じ式で fb_start（物理）から `phys_to_virt` で再計算する
-        // **新しく低位ポインタを高位化したら、この列にも足すこと**（verification-coverage の
-        // 「解消済み」群と同期）。
+        // 新しく低位ポインタを高位化したら、この列にも足すこと
+        // （verification-coverage の「解消済み」群と同期）。
         //
-        // 既定はヒープの高位 VA（heap_virt_base）を渡す。highhalf-remove-verify-fail のとき
-        // だけ解決不能な高位 VA（空の PML4[257]）へ差し替え、step4 を失敗させて 5a の復帰
-        // 経路を実証する。
+        // 破壊 (highhalf-remove-verify-fail): 解決不能な高位 VA（空の PML4[257]）へ
+        // 差し替え、step4 を失敗させて 5a の復帰経路を実証する。既定は heap_virt_base。
         #[cfg(not(feature = "highhalf-remove-verify-fail"))]
         let heap_high_va = VirtAddr::new(heap_virt_base).expect("the heap high VA is canonical");
         #[cfg(feature = "highhalf-remove-verify-fail")]
         let heap_high_va = VirtAddr::new(0xFFFF_8080_0000_0000)
             .expect("the sabotaged heap VA is canonical (empty PML4[257])");
 
-        // **不可逆な除去操作はヒープに依存しない。フラッシュ後にヒープが使えない可能性が
-        // あるため、high_mapped はヒープ確保（Vec）でなくスタックの固定配列で持つ。** これを
-        // Vec にしていたとき、remove-before-highify（ヒープを低位のまま除去）が「除去自身の
-        // step6 が、低位ヒープ上の Vec をフラッシュ後に辿って #PF で復帰不能になる」経路を
-        // 露呈した。step4 はヒープの高位VAが解決するかは見るが、除去自身のデータ構造が高位に
-        // あるかは見ない。生き残ることが構造的に保証されたもの（スタック=.bss、再リンクで高位化
-        // 済み）だけに依存する。将来「ここで Vec を使えば楽」と戻さないための不変条件である
-        // （`const fn` を失った理由・マーカー文字列を変えた理由と同じ性質の記録）。
+        // 不可逆な除去操作はヒープに依存しない。フラッシュ後にヒープが使えない可能性が
+        // あるので、high_mapped は Vec でなくスタックの固定配列で持つ。Vec にしていた
+        // とき、remove-before-highify（ヒープを低位のまま除去）が「除去自身の step6 が、
+        // 低位ヒープ上の Vec をフラッシュ後に辿って #PF で復帰不能になる」経路を露呈した。
+        // step4 はヒープの高位 VA が解決するかを見るが、除去自身のデータ構造が高位に
+        // あるかは見ない。生き残ることが構造的に保証されたもの（スタック = .bss、再リンクで
+        // 高位化済み）だけに依存する。「ここで Vec を使えば楽」と戻さないための不変条件。
         //
-        // **除去の実体側は構造的に確保できない。** `remove_identity`（`paging::remove`）と、それが
-        // 呼ぶ `paging::verify` / `paging::table` / `paging::switch` はいずれも `alloc` を import
-        // しないので、Vec/Box/String の確保が構造的に不可能である（grep より強い保証）。残る確保の
-        // 可能性はこの呼び出し側（`main.rs` は `alloc` を使う）だけで、それを high_mapped の
-        // スタック配列化で断つ。したがって除去経路全体でヒープ確保はゼロである。
+        // 除去の実体側は構造的に確保できない。`remove_identity`（`paging::remove`）と、それが
+        // 呼ぶ `paging::verify` / `paging::table` / `paging::switch` はいずれも `alloc` を
+        // import しないので、Vec/Box/String の確保が不可能である（grep より強い保証）。残る
+        // 確保の可能性はこの呼び出し側だけで、それを high_mapped のスタック配列化で断つ。
+        // 除去経路全体でヒープ確保はゼロである。
         //
-        // **配列サイズは必須領域リストと同期する。** 現在は 2（ヒープ・フレームバッファ）。
-        // 新しく高位化した低位ポインタを渡すときは、この配列サイズ・下の `n`・
-        // `remove_identity` 内部の `always`・docs/verification-coverage.md の「解消済み」群を
-        // 同時に増やすこと（配列とリストの対応をコンパイル時に縛る手段は、リストが呼び出し側と
-        // lib 内部にまたがるため単純には作れない。ここのコメントと doc で守る）。
+        // 配列サイズは必須領域リストと同期する。現在は 2（ヒープ・フレームバッファ）。
+        // 高位化した低位ポインタを増やすときは、この配列サイズ・下の `n`・`remove_identity`
+        // 内部の `always`・docs/verification-coverage.md の「解消済み」群を同時に増やす。
+        // 配列とリストの対応をコンパイル時に縛る手段は、リストが呼び出し側と lib 内部に
+        // またがるため単純には作れない。
         let regions: [RequiredRegion; 2] = [
             RequiredRegion {
                 name: "heap high VA",
@@ -1360,8 +1359,8 @@ extern "sysv64" fn kernel_main() -> ! {
                     ),
                 }
             } else {
-                // フレームバッファ無し: この要素はスライス（`..n`）で落とす。配列を埋める
-                // ためだけに有効な RequiredRegion を置く（ヒープの高位VAで埋める）。
+                // フレームバッファ無し。この要素はスライス（`..n`）で落とすので、
+                // 配列を埋めるためだけにヒープの高位 VA を置く。
                 RequiredRegion {
                     name: "heap high VA",
                     va: heap_high_va,
@@ -1371,28 +1370,28 @@ extern "sysv64" fn kernel_main() -> ! {
         let n = if fb_start != 0 { 2 } else { 1 };
         let high_mapped: &[RequiredRegion] = &regions[..n];
 
-        // SAFETY: 恒等窓を握る全検証サイトと boot_info の消費、除去点より前に走るべき生の
-        // 低位 read（kernel_start）はいずれも既に終えている。direct_map は登録高位窓で稼働
-        // PML4 配下を読み書きできる。呼び出し時点の順序前提は上のコメントと
+        // SAFETY: 恒等窓を握る全検証サイトと boot_info の消費、除去点より前に走るべき
+        // 生の低位 read（kernel_start）はいずれも終えている。direct_map は登録高位窓で、
+        // 稼働 PML4 配下を読み書きできる。順序前提は上のコメントと
         // docs/verification-coverage.md の「higher-half B-2b」に従う。
         unsafe {
             remove_identity(&mut logger, direct_map, high_mapped);
         }
     }
 
-    // B-2b-4(e) panic-after-remove: 恒等除去の直後に意図的 panic する。パニック経路
+    // 破壊 (highhalf-panic-after-remove): 恒等除去の直後に意図的 panic する。パニック経路
     // （シリアル I/O・レジスタ値のみ・walk なし。ADR-0003）が恒等非依存であることを、
-    // 恒等を外した実状態で確認する。既定ビルドではこのブロックは存在しない。
+    // 恒等を外した実状態で確認する（B-2b-4(e)）。
     #[cfg(feature = "highhalf-panic-after-remove")]
     panic!("intentional panic right after identity removal (highhalf-panic-after-remove)");
 
-    // ロック保持中は割り込みが禁止され、解放後に元へ戻ることを確認する
-    // （M4-c-2）。ヒープのロックそのものではなく同じ Locked<T> を使う。
-    // ヒープのロックを保持したままログを出すと二重取得になるため。
+    // ロック保持中は割り込みが禁止され、解放後に元へ戻ることを確認する（M4-c-2）。
+    // ヒープのロックそのものではなく同じ Locked<T> を使う。ヒープのロックを保持した
+    // ままログを出すと二重取得になるため。
     report_lock_interrupt_state(&mut logger);
 
-    // 実地スモークテスト: Vec/Box/String を実際に確保・追記・解放する。
-    // **ヒープは direct map 高位窓上にある（B-2b-2）ので、確保したポインタは高位 VA。**
+    // 実地スモークテスト: Vec/Box/String を確保・追記・解放する。
+    // ヒープは direct map 高位窓上にある（B-2b-2）ので、確保したポインタは高位 VA。
     // `range_is_mapped` は物理範囲を見るので、高位窓経由で物理へ戻してから照合する
     // （恒等の間は高位 VA と低位 VA が同じ物理を指すので結果は不変）。
     let heap_mapped = |va: u64, len: u64| -> bool {
@@ -1462,9 +1461,8 @@ extern "sysv64" fn kernel_main() -> ! {
         ),
     );
 
-    // ダーティ矩形が実際に効いているかを数字で残す。毎回のフラッシュで
-    // ログを出すと、ログ自体が次のフラッシュを誘発するため、起動
-    // シーケンスの最後に 1 回だけ出す。
+    // ダーティ矩形が効いているかを数字で残す。毎回のフラッシュでログを出すと、ログ
+    // 自体が次のフラッシュを誘発するので、起動シーケンスの最後に 1 回だけ出す。
     if let Some(stats) = console.as_ref().map(Console::stats) {
         log_both(
             &mut logger,
@@ -1489,14 +1487,14 @@ extern "sysv64" fn kernel_main() -> ! {
 
     // === S4-c-2: AP 用アイドルタスクを登録する ===
     //
-    // **まだ誰も走らせない。** `pick_next` はワーカーしか候補にしないので、
-    // 足しただけでは選ばれない。選ばれるようにするのは S4-c-3 である。
+    // まだ誰も走らせない。`pick_next` はワーカーしか候補にしないので、足しただけでは
+    // 選ばれない。選ばれるようにするのは S4-c-3 である。
     //
-    // **協調デモより前に置く。** デモはスケジューラを触るので、登録を後ろへ
-    // 置くと「デモ中にタスクが増える」形になる。**増えるのは起動時の 1 回だけ**
-    // にしておく。
-    // **`smp::prepare_ap_per_cpu` より後**でなければならない（per-CPU スタックの
-    // 範囲を読む）。**守れていなければ停止する**ので、順序は実行時に見える。
+    // 協調デモより前に置く。デモはスケジューラを触るので、登録を後ろへ置くと「デモ中に
+    // タスクが増える」形になる。増えるのは起動時の 1 回だけにしておく。
+    //
+    // `smp::prepare_ap_per_cpu` より後でなければならない（per-CPU スタックの範囲を
+    // 読む）。守れていなければ停止するので、順序は実行時に見える。
     kernel::task::init_ap_idle_task();
 
     // 協調的マルチタスクのデモと検証（M5-c）。2 本のワーカーが決定的に往復し、
@@ -1504,9 +1502,8 @@ extern "sysv64" fn kernel_main() -> ! {
     // 起動シーケンスは続行する。
     kernel::task::run_cooperative_demo();
 
-    // 例外ハンドラの回帰チェック。起動シーケンスを最後まで通してから
-    // 発火させる（mapped_ranges を使ってプローブアドレスの妥当性を
-    // 確認するため、ページング構築後である必要がある）。
+    // 例外ハンドラの回帰チェック。起動シーケンスを最後まで通してから発火させる。
+    // mapped_ranges でプローブアドレスの妥当性を見るので、ページング構築後に置く。
     #[cfg(feature = "exception-test")]
     trigger_exception_under_test(&mut logger, &mapped_ranges);
 
@@ -1526,12 +1523,12 @@ extern "sysv64" fn kernel_main() -> ! {
 
     // === S7-c: プロセス別アドレス空間の切り替えを1往復する ===
     //
-    // **到達条件4（CR3切り替え後もカーネルが動くこと）の観測である。**
-    // 新しい PML4 を作り、カーネルの上位だけを写し、切り替え、戻す。
+    // 到達条件4（CR3切り替え後もカーネルが動くこと）の観測である。新しい PML4 を作り、
+    // カーネルの上位だけを写し、切り替え、戻す。
     //
-    // **ここに置く理由は、下位を失っても困らない位置だからである。** ring3 と
-    // syscall のデモは終わっており、AP はまだ起きていない。**新しい空間の下位は
-    // 空なので、切り替えている間にユーザー空間へ触ると #PF になる。触らない。**
+    // ここに置くのは、下位を失っても困らない位置だからである。ring3 と syscall のデモは
+    // 終わっており、AP はまだ起きていない。新しい空間の下位は空なので、切り替えている
+    // 間にユーザー空間へ触ると #PF になる。触らない。
     demo_address_space_switch(&mut logger, &mut allocator);
 
     // === M4-d-2: タイマを動かす ===
@@ -2407,11 +2404,11 @@ mod known_register_values {
 
 /// 全 GPR に既知の値を入れてから `ud2` を実行する。
 ///
-/// naked にしているのは、コンパイラに一切レジスタを触らせないため。通常の
-/// `asm!` では callee-saved レジスタ（rbx, rbp, r12-r15）を自由に書き換え
-/// られず、書き換えると呼び出し規約を壊す。ここは戻らないので問題ない。
+/// naked にしているのは、コンパイラにレジスタを触らせないため。通常の `asm!` では
+/// callee-saved レジスタ（rbx, rbp, r12-r15）を書き換えると呼び出し規約を壊すが、
+/// ここは戻らないので問題ない。
 ///
-/// **RSP には触れない。** 触ると例外配送そのものが失敗する。
+/// RSP には触れない。触ると例外配送そのものが失敗する。
 ///
 /// # Safety
 ///
@@ -2457,13 +2454,11 @@ unsafe extern "sysv64" fn trigger_invalid_opcode_with_known_registers() -> ! {
 
 /// ページフォルトを起こすために読みに行くアドレス。
 ///
-/// 実装している物理メモリ（256MiB）からも、フレームバッファや MMIO の窓からも
-/// 遠い、明らかにマップされていない値を選ぶ。上位ビットが符号拡張された
-/// 正準アドレスなので、#GP ではなく #PF になる。
+/// 実装している物理メモリ（256MiB）からも、フレームバッファや MMIO の窓からも遠い値を
+/// 選ぶ。上位ビットが符号拡張された正準アドレスなので、#GP ではなく #PF になる。
 ///
-/// 使う前に `MappedRanges::contains_range` で本当にマップされていないことを
-/// 確認する。偶然マップされている領域を選ぶと、フォルトが起きずテストが
-/// 成功したように見える。
+/// 使う前に `MappedRanges::contains_range` でマップされていないことを確認する。偶然
+/// マップされている領域を選ぶと、フォルトが起きずテストが成功したように見える。
 #[cfg(any(
     feature = "exception-test-page-fault",
     feature = "exception-test-double-fault"
@@ -2527,8 +2522,8 @@ fn trigger_exception_under_test(
     {
         let probe = UNMAPPED_PROBE_ADDRESS;
 
-        // 本当にマップされていないことを確認してから使う。マップされて
-        // いればフォルトが起きず、テストが通ったように見えてしまう。
+        // マップされていないことを確認してから使う。マップされていればフォルトが
+        // 起きず、テストが通ったように見えてしまう。
         let to_phys = |raw: u64| {
             common::addr::PhysAddr::new(raw).expect("the probe address fits in a physical address")
         };
@@ -2546,18 +2541,17 @@ fn trigger_exception_under_test(
 
         #[cfg(feature = "exception-test-double-fault")]
         {
-            // #PF のゲートを不在にしてからページフォルトを起こす。例外の
-            // 配送そのものが #NP（Contributory 分類）を引き起こすため、
-            // 「Page Fault の配送中に Contributory」の組み合わせが成立して
-            // #DF へ昇格する（ADR-0018）。
+            // #PF のゲートを不在にしてからページフォルトを起こす。配送そのものが
+            // #NP（Contributory 分類）を引き起こし、「Page Fault の配送中に
+            // Contributory」が成立して #DF へ昇格する（ADR-0018）。
             //
-            // スタックを溢れさせる方法は使えない。犠牲領域は .bss 内の
-            // マップ済みメモリであり、溢れてもページフォルトが起きないため。
+            // スタックを溢れさせる方法は使えない。犠牲領域は .bss 内のマップ済み
+            // メモリなので、溢れてもページフォルトが起きない。
             logger.info(format_args!(
                 "exception-test: clearing the present bit of the #PF gate (vector 14)"
             ));
-            // SAFETY: このあと意図的にページフォルトを起こし、#DF へ昇格
-            // させるためのテスト経路。ハンドラが停止するので復元は不要。
+            // SAFETY: このあと意図的にページフォルトを起こして #DF へ昇格させる
+            // テスト経路。ハンドラが停止するので復元は要らない。
             unsafe {
                 idt::clear_present(14);
             }
@@ -2574,8 +2568,8 @@ fn trigger_exception_under_test(
             "exception-test: about to trigger #PF (read from an unmapped address)"
         ));
 
-        // SAFETY: 意図的にページフォルトを起こすためのテスト経路。直前に
-        // マップされていないことを確認済みで、ハンドラが停止する。
+        // SAFETY: 意図的にページフォルトを起こすテスト経路。直前にマップされて
+        // いないことを確認済みで、ハンドラが停止する。
         unsafe {
             let value = core::ptr::read_volatile(probe as *const u64);
             // 到達しないが、最適化で読み取りごと消えないよう値を使う。
@@ -2594,10 +2588,10 @@ fn trigger_exception_under_test(
 /// カーネルスタックを意図的に溢れさせて、ガードページの回帰チェックを行う
 /// （M5-b、`stack-guard-test` / `stack-overflow-df-test`）。
 ///
-/// 無限再帰で RSP を下げ続け、ガードページ（unmap 済み）に触れる。正常な
-/// 構成（#PF に IST2）では #PF、CR2 = ガードページ、on IST2=true として
-/// 報告される。`stack-overflow-df-test`（#PF に IST 無し）では、溢れた
-/// スタックの上で #PF を配送しようとしてさらに #PF が起き、#DF へ昇格する。
+/// 無限再帰で RSP を下げ続け、ガードページ（unmap 済み）に触れる。正常な構成
+/// （#PF に IST2）では #PF、CR2 = ガードページ、on IST2=true として報告される。
+/// `stack-overflow-df-test`（#PF に IST 無し）では、溢れたスタックの上で #PF を
+/// 配送しようとしてさらに #PF が起き、#DF へ昇格する。
 ///
 /// 通常ビルドには含まれない。
 #[cfg(feature = "stack-guard-test")]
@@ -2618,8 +2612,8 @@ fn trigger_stack_guard_test(logger: &mut Logger<SerialPort>) -> ! {
         "stack-guard-test: expecting #PF (vector 14) on IST2 with CR2 in the guard page"
     ));
 
-    // 溢れさせる。戻り値と volatile を使って末尾呼び出し最適化を潰し、
-    // 各段が実際にスタックフレームを積むようにする。
+    // 溢れさせる。戻り値と volatile で末尾呼び出し最適化を潰し、各段が実際に
+    // スタックフレームを積むようにする。
     let sink = overflow_the_stack(0);
     // 到達しない。最適化で溢れごと消えないよう、結果を使う。
     logger.error(format_args!(
@@ -2628,22 +2622,20 @@ fn trigger_stack_guard_test(logger: &mut Logger<SerialPort>) -> ! {
     cpu::halt_forever();
 }
 
-/// スタックを溢れさせるための無限再帰。各段が 64 バイトのローカルを積み、
-/// volatile で最適化に消されないようにする。`#[inline(never)]` で確実に
-/// フレームを作る。
+/// スタックを溢れさせるための無限再帰。各段が 64 バイトのローカルを積み、volatile で
+/// 最適化に消されないようにする。`#[inline(never)]` で確実にフレームを作る。
 #[cfg(feature = "stack-guard-test")]
 #[inline(never)]
 // 意図的な無限再帰。ガードページに触れて #PF/#DF になるまで戻らない。
 #[allow(unconditional_recursion)]
 fn overflow_the_stack(depth: u64) -> u64 {
     let mut frame = [depth; 8];
-    // SAFETY: frame はこの関数の局所配列。volatile で読み書きするのは、
-    // 末尾呼び出し最適化とデッドコード除去を防いで実フレームを積むため。
+    // SAFETY: frame はこの関数の局所配列。volatile で読み書きするのは、末尾呼び出し
+    // 最適化とデッドコード除去を防いで実フレームを積むため。
     unsafe {
         core::ptr::write_volatile(&mut frame[0], depth);
     }
-    // SAFETY: frame[0] は今書き込んだ局所配列の要素。volatile 読みは
-    // 最適化に消されないため。
+    // SAFETY: frame[0] は今書き込んだ局所配列の要素。volatile 読みは最適化に消されない。
     let next = unsafe { core::ptr::read_volatile(&frame[0]) }.wrapping_add(1);
     let deeper = overflow_the_stack(next);
     // SAFETY: 同上。戻り値とローカルの両方を使い、再帰を末尾化させない。
@@ -2666,9 +2658,8 @@ fn trigger_critical_test(logger: &mut Logger<SerialPort>) -> ! {
             "critical-test: about to acquire the same lock twice (double-lock detection)"
         ));
 
-        // ヒープのロックではなく専用の Locked を使う。ヒープを壊すと
-        // 以降のログ出力そのものが巻き添えになるため。検出の仕組みは
-        // 同じ Locked<T> の実装なので、これで十分に検証できる。
+        // ヒープのロックではなく専用の Locked を使う。ヒープを壊すと以降のログ出力
+        // まで巻き添えになるため。検出の仕組みは同じ Locked<T> の実装である。
         static PROBE: Locked<u64> = Locked::new(0);
 
         let _held = PROBE.lock();
@@ -2686,15 +2677,15 @@ fn trigger_critical_test(logger: &mut Logger<SerialPort>) -> ! {
 
     #[cfg(feature = "critical-test-restore-enabled")]
     {
-        // IF=1 で enter した場合の復元経路。**PIC を全マスクしてからでないと
-        // 危険**（未検証のハンドラへ割り込みが飛ぶ）。M4-c-3 で PIC の
-        // マスクを確認したうえで実行する。
+        // IF=1 で enter した場合の復元経路。PIC を全マスクしてからでないと危険で
+        // ある（未検証のハンドラへ割り込みが飛ぶ）。M4-c-3 で PIC のマスクを
+        // 確認したうえで実行する。
         logger.info(format_args!(
             "critical-test: enabling interrupts temporarily to exercise the restore path"
         ));
-        // SAFETY: PIC は全 IRQ マスク済みで、IDT の全 256 ベクタに
-        // ハンドラが入っている（M4-b-1）。この区間で割り込みが届いても
-        // 「予期しないベクタ」として報告されるだけで、無言では落ちない。
+        // SAFETY: PIC は全 IRQ マスク済みで、IDT の全 256 ベクタにハンドラが入って
+        // いる（M4-b-1）。この区間で割り込みが届いても「予期しないベクタ」として
+        // 報告されるだけで、無言では落ちない。
         unsafe {
             cpu::enable_interrupts();
         }
@@ -2745,10 +2736,9 @@ fn trigger_critical_test(logger: &mut Logger<SerialPort>) -> ! {
 /// ロックの保持中に割り込みが禁止され、解放後に元へ戻ることを確認する
 /// （M4-c-2）。
 ///
-/// `Locked<T>` は取得中に `InterruptGuard` を保持する。その効果を実 RFLAGS で
-/// 観測する。現状は起動時から IF=0 なので「保持中も IF=0、解放後も IF=0
-/// （元の状態）」になる。IF=1 から入る経路は M4-c-3 の後に
-/// `--critical-test restore-enabled` で確認する。
+/// `Locked<T>` は取得中に `InterruptGuard` を保持する。その効果を実 RFLAGS で観測する。
+/// 現状は起動時から IF=0 なので、保持中も解放後も IF=0（元の状態）になる。IF=1 から
+/// 入る経路は `--critical-test restore-enabled` で確認する。
 fn report_lock_interrupt_state(logger: &mut Logger<SerialPort>) {
     use common::critical::Locked;
 
@@ -2795,9 +2785,8 @@ fn trigger_interrupt_test(
 ) -> ! {
     /// スピンする長さと、ハートビートの間隔（TSC サイクル）。
     ///
-    /// TSC の周波数は環境依存で、時刻源として信用できない（`cpu` モジュール
-    /// 参照）。ここでは「だいたいこのくらい回れば十分」という目安として
-    /// 使うだけなので、絶対時間の正確さは要らない。
+    /// TSC の周波数は環境依存で、時刻源として信用できない（`cpu` モジュール）。
+    /// ここでは回る量の目安として使うだけなので、絶対時間の正確さは要らない。
     const SPIN_CYCLES: u64 = 2_000_000_000;
     const HEARTBEAT_CYCLES: u64 = 400_000_000;
 
@@ -2820,10 +2809,9 @@ fn trigger_interrupt_test(
     {
         /// 何ティックで止めるか。100Hz なので 500 ティック = 約 5 秒。
         ///
-        /// TCG で `-d int` を有効にすると 1 ティックあたり 20 行強が
-        /// 記録される。500 ティックで約 1 万行・800KB 程度に収まる
-        /// （M4-b-1 のログが 14,400 行だったので同程度）。通常起動では
-        /// 止めずに回し続ける。
+        /// TCG で `-d int` を有効にすると 1 ティックあたり 20 行強が記録される。
+        /// 500 ティックで約 1 万行・800KB 程度に収まる（M4-b-1 のログが 14,400 行
+        /// だったので同程度）。通常起動では止めずに回し続ける。
         const STOP_AFTER_TICKS: u64 = 500;
         start_timer(logger, console, STOP_AFTER_TICKS, None);
     }
@@ -2832,22 +2820,19 @@ fn trigger_interrupt_test(
         "interrupt-test: all pre-sti checks passed (or are explicitly unverifiable); enabling interrupts"
     ));
 
-    // SAFETY: 直前に 7 項目を検証し、blocks_sti() な項目が無いことを
-    // 確認した。全 IRQ はマスク済みで、IDT の全 256 ベクタに present な
-    // ハンドラが入っている。
+    // SAFETY: 直前に 7 項目を検証し、blocks_sti() な項目が無いことを確認した。
+    // 全 IRQ はマスク済みで、IDT の全 256 ベクタに present なハンドラが入っている。
     unsafe {
         interrupts::spin_with_interrupts_enabled(logger, SPIN_CYCLES, HEARTBEAT_CYCLES);
     }
 
-    // **増加分で判定する。** テスト用ベクタを PIC の範囲外へ移しても、これは
-    // 必要なままである。カウンタは全 256 ベクタを対象に合計するので、
-    // irq-path の `int 0x40` で計上された 1 件は絶対値に残る。0x20 が
-    // 汚れなくなっただけで、絶対値では「スピン中に届いた」と誤判定する
+    // 増加分で判定する。テスト用ベクタを PIC の範囲外へ移しても同じである。カウンタは
+    // 全 256 ベクタの合計なので、irq-path の `int 0x40` で計上された 1 件が絶対値に
+    // 残る。0x20 が汚れなくなっただけで、絶対値では「スピン中に届いた」と誤判定する
     // 構造は変わらない。
     //
-    // 合計の対象を PIC の範囲だけに絞る案は採らない。ここで見たいのは
-    // 「何も届かないこと」であって、`cli` でマスクできない NMI（ベクタ 2）を
-    // 含む全ベクタが対象である。
+    // 合計の対象を PIC の範囲だけに絞る案は採らない。ここで見たいのは「何も届かない
+    // こと」で、`cli` でマスクできない NMI（ベクタ 2）を含む全ベクタが対象である。
     let delta = interrupts::spin_interrupt_delta();
     let (absolute_total, _) = idt::interrupt_total_and_first_nonzero();
     let iterations = interrupts::loop_iterations();
@@ -2856,8 +2841,8 @@ fn trigger_interrupt_test(
          interrupts during the spin={delta} (absolute total since boot={absolute_total})"
     ));
 
-    // 周回回数も判定に含める。0 回なら「割り込みが来なかった」のではなく
-    // 「そもそもループが回っていない」ので、意味がまるで違う。
+    // 周回回数も判定に含める。0 回なら「割り込みが来なかった」ではなく「ループが
+    // 回っていない」で、意味がまるで違う。
     if iterations == 0 {
         logger.error(format_args!(
             "interrupt-test: the loop never iterated; sti-then-idle FAILED (not an interrupt problem)"
@@ -2878,31 +2863,28 @@ fn trigger_interrupt_test(
 
 /// IRQ 経路が GPR を復元することを、ソフトウェア割り込みで確かめる。
 ///
-/// 使うのは **PIC の範囲外**のベクタ 0x40（`idt::TEST_VECTOR`）である。
-/// `int 0x40` は 8259A を経由せず CPU が直接 IDT を引くので、マスク状態と
-/// 無関係にハンドラ経路だけを試せるうえ、**EOI の論理が一切絡まない**。
-/// PIC 経由で配送されないベクタなので、ハンドラが EOI を送らないことが
-/// そのまま正しい実装になる。
+/// 使うのは PIC の範囲外のベクタ 0x40（`idt::TEST_VECTOR`）である。`int 0x40` は 8259A を
+/// 経由せず CPU が直接 IDT を引くので、マスク状態と無関係にハンドラ経路だけを試せ、
+/// EOI の論理が絡まない。PIC 経由で配送されないベクタなので、ハンドラが EOI を送らない
+/// ことがそのまま正しい実装になる。
 ///
-/// 各 GPR にレジスタごとに異なる既知値を入れ、`int` の前後で一致することを
-/// 見る。1 本でも復元を落とすと、そのレジスタだけ値が変わる。
+/// 各 GPR にレジスタごとに異なる既知値を入れ、`int` の前後で一致することを見る。
+/// 1 本でも復元を落とすと、そのレジスタだけ値が変わる。
 ///
 /// # なぜ 0x20 ではなく PIC の範囲外を使うのか
 ///
 /// M4-d-1 では `int 0x20` を使っていたが、M4-d-2 で EOI を実装すると衝突する。
-/// ソフトウェア割り込みは実在の IRQ ではないため、タイマハンドラが無条件に
-/// EOI を送る作りだと**起きてもいない割り込みに応答する**ことになり、PIC の
-/// 優先度スタックを壊しうる。
+/// ソフトウェア割り込みは実在の IRQ ではないので、タイマハンドラが無条件に EOI を送る
+/// 作りだと起きてもいない割り込みに応答することになり、PIC の優先度スタックを壊しうる。
 ///
 /// 検討した代替案:
 ///
-/// - **実タイマでの検証に置き換える**: 却下。「GPR が壊れた」ことは分かるが、
-///   壊れたのがスタブか PIT 設定か EOI かを切り分けられない。ハンドラ経路
-///   だけを単独で試せるという、この検証の価値そのものが失われる。
-/// - **ハンドラ側でソフトウェア割り込み由来かを判別して EOI を抑制する**:
-///   却下。本番経路にテスト専用の分岐が入るうえ、判別を誤れば本物の割り込みへ
-///   EOI を送らない側へ倒れ、以降の割り込みが全部止まる。テストのために
-///   本番経路の信頼性を下げることになる。
+/// - 実タイマでの検証に置き換える: 却下。「GPR が壊れた」ことは分かるが、壊れたのが
+///   スタブか PIT 設定か EOI かを切り分けられない。ハンドラ経路だけを単独で試せると
+///   いう、この検証の価値そのものが失われる。
+/// - ハンドラ側でソフトウェア割り込み由来かを判別して EOI を抑制する: 却下。本番経路に
+///   テスト専用の分岐が入るうえ、判別を誤れば本物の割り込みへ EOI を送らない側へ倒れ、
+///   以降の割り込みが全部止まる。テストのために本番経路の信頼性を下げることになる。
 ///
 /// PIC の範囲外へ移すのが、本番経路に一切手を入れずに済む唯一の案だった
 /// （ADR-0018 Addendum 3）。
@@ -2911,11 +2893,10 @@ fn verify_irq_path_restores_registers(logger: &mut Logger<SerialPort>) {
     // レジスタごとに異なる既知値。値が入れ替わっても気づけるようにする
     // （M4-b-2 の GPR ダンプ検証と同じ考え方）。
     //
-    // **rbx と rbp は検査できない。** LLVM がこの 2 本を内部的に予約して
-    // おり、`asm!` のオペランドに指定できない（フレームポインタ等に使う）。
-    // 検査できるのは残る 13 本である。順序の取り違えは 13 本の相異なる値で
-    // 十分に捕まり、本数の過不足は RSP がずれて `iretq` の時点で即座に
-    // 壊れるため、この 2 本が抜けても検査の意味は保たれる。
+    // rbx と rbp は検査できない。LLVM がこの 2 本を内部的に予約しており、`asm!` の
+    // オペランドに指定できない。検査できるのは残る 13 本である。順序の取り違えは
+    // 13 本の相異なる値で捕まり、本数の過不足は RSP がずれて `iretq` の時点で壊れる
+    // ので、この 2 本が抜けても検査の意味は保たれる。
     let mut regs: [u64; 13] = [
         0x0101_0101_0101_0101, // rax
         0x0202_0202_0202_0202, // rcx
@@ -2934,14 +2915,14 @@ fn verify_irq_path_restores_registers(logger: &mut Logger<SerialPort>) {
     let before = regs;
 
     // SAFETY: ベクタ 0x20 の IDT エントリは IRQ スタブを指しており（起動時に
-    // check_irq_stub_table で検証済み）、そのスタブは GPR を退避・復元して
-    // `iretq` で戻る。割り込みゲートなので入場時に IF はクリアされ、戻る
-    // ときに復元される。`nostack` は付けない（ハンドラがスタックを使う）。
+    // check_irq_stub_table で検証済み）、そのスタブは GPR を退避・復元して `iretq` で
+    // 戻る。割り込みゲートなので入場時に IF はクリアされ、戻るときに復元される。
+    // `nostack` は付けない（ハンドラがスタックを使う）。
     unsafe {
         core::arch::asm!(
-            // idt::TEST_VECTOR と同じ値。`int` のオペランドは即値でなければ
-            // ならず、定数を差し込めないため、ここだけ数値が重複する。
-            // 食い違いは下の const アサーションで防いでいる。
+            // idt::TEST_VECTOR と同じ値。`int` のオペランドは即値でなければならず
+            // 定数を差し込めないので、ここだけ数値が重複する。食い違いは下の
+            // const アサーションで防ぐ。
             "int 0x40",
             inout("rax") regs[0],
             inout("rcx") regs[1],
@@ -3001,22 +2982,21 @@ fn verify_irq_path_restores_registers(logger: &mut Logger<SerialPort>) {
 
 /// デモのアドレス空間が使うユーザーサブツリーの添字（S7-e）。
 ///
-/// **`DEMO_VIRT` の添字と一致していなければならない。** 一致しないと
-/// `map_user_4kib` が `NotPrivate` で弾く（**弾くのが正しい**——別の添字へ張れば、
-/// その空間の監査の主張が破れる）。
+/// `DEMO_VIRT` の添字と一致していなければならない。一致しないと `map_user_4kib` が
+/// `NotPrivate` で弾く。弾くのが正しい。別の添字へ張れば、その空間の監査の主張が破れる。
 ///
-/// **本番の `USER_PML4_INDEX` とは別でよい。** プロセスごとにアドレス空間が
-/// 分かれる以上、**ユーザーサブツリーの添字も空間ごとの性質である**（S7-e）。
+/// 本番の `USER_PML4_INDEX` とは別でよい。プロセスごとにアドレス空間が分かれる以上、
+/// ユーザーサブツリーの添字も空間ごとの性質である（S7-e）。
 const DEMO_USER_PML4_INDEX: usize = 0;
 
 /// アドレス空間を1つ作り、切り替えて、戻す（S7-c）。
 ///
-/// **主張は「上位を共有していれば、CR3 を差し替えてもカーネルは動き続ける」である。**
-/// 切り替えた後にこの関数がログを出せること自体が、その証拠になる——**命令フェッチも
-/// スタックも direct map も、新しい CR3 の下で引き続き翻訳できている。**
+/// 主張は「上位を共有していれば、CR3 を差し替えてもカーネルは動き続ける」である。
+/// 切り替えた後にこの関数がログを出せること自体が証拠になる。命令フェッチもスタックも
+/// direct map も、新しい CR3 の下で引き続き翻訳できているということである。
 ///
-/// 破壊 (S7-c, addrspace-no-kernel-share): 上位を写さない。**切り替えた瞬間に死ぬ**ので、
-/// 「切り替えた後」の行が出ない。
+/// 破壊 (addrspace-no-kernel-share): 上位を写さない。切り替えた瞬間に死ぬので、
+/// 「切り替えた後」の行が出ない（S7-c）。
 fn demo_address_space_switch(
     logger: &mut Logger<SerialPort>,
     allocator: &mut kernel::frame_allocator::FrameAllocator,
@@ -3054,7 +3034,7 @@ fn demo_address_space_switch(
     // 同じ物理を指し続ける。下位は空だが、この区間ではユーザー空間へ触らない。
     unsafe { space.activate() };
 
-    // **この行が出ること自体が到達条件4の観測である。**
+    // この行が出ること自体が到達条件4の観測である。
     let after = kernel::paging::switch::read_cr3();
     logger.info(format_args!(
         "address-space: still running after the switch (cr3 read back = {:#x}, expected {:#x}, \
@@ -3081,12 +3061,11 @@ fn demo_address_space_switch(
 
 /// 2 つのアドレス空間を作り、同じ VA を別の物理へ張って読み分ける（S7-d）。
 ///
-/// **到達条件 1（同じ VA が別の物理を指す）・2（A の書き込みが B から見えない）・
-/// 6（共有カーネル部分が一致する）・5（破棄後に古い翻訳で触れない）の観測である。**
+/// 到達条件 1（同じ VA が別の物理を指す）・2（A の書き込みが B から見えない）・
+/// 6（共有カーネル部分が一致する）・5（破棄後に古い翻訳で触れない）の観測である。
 ///
-/// **ユーザーモードへは行かない。** 張るのはユーザーページだが、読むのは Ring 0 から
-/// である。**権限の検査は S8 以降の仕事で、ここで見たいのは「翻訳が別である」こと
-/// だけである。**
+/// ユーザーモードへは行かない。張るのはユーザーページだが、読むのは Ring 0 からである。
+/// 権限の検査は S8 以降の仕事で、ここで見たいのは翻訳が別であることだけである。
 fn demo_two_address_spaces(
     logger: &mut Logger<SerialPort>,
     allocator: &mut kernel::frame_allocator::FrameAllocator,
@@ -3098,10 +3077,10 @@ fn demo_two_address_spaces(
 
     // 下位の、どのデモとも重ならない VA。
     //
-    // **添字は 0 である**（`0x1_0000_0000 >> 39 == 0`）。**S7-d の時点では
-    // 「PML4[2] は誰も使っていない」と書いていたが、算が誤っていた**——通ったのは
-    // **恒等除去（B-2b）で PML4[0] が空いていたから**であって、書いてあった理由に
-    // よるのではない。**S7-e で訂正した。**
+    // 添字は 0 である（`0x1_0000_0000 >> 39 == 0`）。S7-d の時点では「PML4[2] は
+    // 誰も使っていない」と書いていたが、算が誤っていた。通ったのは恒等除去（B-2b）で
+    // PML4[0] が空いていたからであって、書いてあった理由によるのではない。
+    // S7-e で訂正した。
     const DEMO_VIRT: u64 = 0x1_0000_0000;
     const VALUE_A: u64 = 0xAAAA_AAAA_AAAA_AAAA;
     const VALUE_B: u64 = 0xBBBB_BBBB_BBBB_BBBB;
@@ -3134,7 +3113,7 @@ fn demo_two_address_spaces(
         cpu::halt_forever();
     };
 
-    // **direct map 越しに、既知の値を置く。** ユーザー VA からではなく物理から書く。
+    // direct map 越しに既知の値を置く。ユーザー VA からではなく物理から書く。
     for (frame, value) in [(frame_a, VALUE_A), (frame_b, VALUE_B)] {
         let ptr = direct_map.phys_to_virt(frame).as_u64() as *mut u64;
         // SAFETY: いま取ったフレームで、direct map が覆っている。誰も使っていない。
@@ -3204,13 +3183,13 @@ fn demo_two_address_spaces(
          (expected 0)"
     ));
 
-    // **U/S の監査を、それぞれの空間について行う（S7-e）。**
+    // U/S の監査を、それぞれの空間について行う（S7-e）。
     //
-    // **主張が言い換わっている。** 単一アドレス空間のときは「U=1 はユーザー
-    // サブツリーの外に一切存在しない」という大域の主張だった。**プロセスごとに
-    // なると、どの空間について言っているかが付いて回る。**
+    // 主張が言い換わっている。単一アドレス空間のときは「U=1 はユーザーサブツリーの外に
+    // 一切存在しない」という大域の主張だった。プロセスごとになると、どの空間について
+    // 言っているかが付いて回る。
     //
-    // **添字は空間が持っている。** ここから渡していない。
+    // 添字は空間が持っているので、ここから渡していない。
     for (label, space) in [("A", &space_a), ("B", &space_b)] {
         // SAFETY: どちらも direct map が覆う、稼働可能な PML4 である。読み取りのみ。
         let audit = unsafe { space.audit_user_supervisor(direct_map) };
@@ -3248,9 +3227,9 @@ fn demo_two_address_spaces(
         free_before == free_after_destroy
     ));
 
-    // **まだ退いていない**——このコアの `SEEN_GENERATION` は次の `acquire` で進む。
+    // まだ退いていない。このコアの `SEEN_GENERATION` は次の `acquire` で進む。
     let released_now = quarantine.release_retired(allocator, kernel::bkl::generation_is_retired);
-    // 1 度 BKL を取れば、このコアは新しい世代を見る。**単一コアなのでこれで退く。**
+    // 1 度 BKL を取れば、このコアは新しい世代を見る。単一コアなのでこれで退く。
     drop(kernel::bkl::acquire(kernel::bkl::KernelEntry::SteadyLoop));
     let released_after = quarantine.release_retired(allocator, kernel::bkl::generation_is_retired);
     logger.info(format_args!(
@@ -3260,7 +3239,7 @@ fn demo_two_address_spaces(
         allocator.free_frame_count()
     ));
 
-    // B は生かしたままにしない。**同じ経路で片付ける。**
+    // B は生かしたままにしない。同じ経路で片付ける。
     let (held_b, leaked_b) = {
         let guard = kernel::bkl::acquire(kernel::bkl::KernelEntry::SteadyLoop);
         // SAFETY: B も稼働していない。BKL を保持している。
@@ -3284,10 +3263,10 @@ fn demo_two_address_spaces(
 /// 設定中に割り込みが飛び込む余地を作らないため、順序を固定している。
 ///
 /// 1. PIT を設定する（この時点で IRQ0 はマスクされたまま）
-/// 2. IMR を読み戻し、**まだ全マスクのまま**であることを確認する。
-///    PIT の設定が誤って IMR を触っていないことの確認。ポート 0x21（IMR）と
-///    0x40/0x43（PIT）は番号が近く、定数の書き間違いが起こりうる
-/// 3. IRQ0 のマスクを解除する（**解禁はこの 1 箇所のみ**）
+/// 2. IMR を読み戻し、まだ全マスクのままであることを確認する。PIT の設定が誤って IMR を
+///    触っていないことの確認。ポート 0x21（IMR）と 0x40/0x43（PIT）は番号が近く、
+///    定数の書き間違いが起こりうる
+/// 3. IRQ0 のマスクを解除する（解禁はこの 1 箇所のみ）
 /// 4. IMR を読み戻し、master=0xFE / slave=0xFF を照合する
 /// 5. `sti` 前 7 項目を再検証する（項目 5 の期待値が 0xFF から 0xFE へ変わる）
 /// 6. `sti`（`run_timer_loop` の中で行う）
@@ -3347,8 +3326,8 @@ fn start_timer(
 
     // --- 4.6 キーボードの配送を I/O APIC 経由へ移す（S2-d-1c）---
     //
-    // **`sti` より前に切り替え終える。** 割り込みが有効な状態で切り替えると、
-    // 4 手の途中で IRQ1 が届く形になりうる。
+    // `sti` より前に切り替え終える。割り込みが有効な状態で切り替えると、4 手の途中で
+    // IRQ1 が届く形になりうる。
     switch_keyboard_to_io_apic(logger, apic);
 
     // --- 5. sti 前 7 項目を再検証する ---
