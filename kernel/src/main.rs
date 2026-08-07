@@ -656,12 +656,11 @@ extern "sysv64" fn kernel_main() -> ! {
 
     // === M2-d (d-1): 新しいページテーブルを構築する（CR3 は切り替えない） ===
 
-    // フレームバッファは実機検証の結果、UEFI メモリマップに現れないことが
-    // 判明した（PCI BAR はシステムメモリマップとは別扱いのため）。
-    // メモリマップ由来の判定だけに頼らず、BootInfo から得た範囲を明示的に
-    // 追加する（`physical_address == 0` は BltOnly 等で無効なため除く）。
-    // T-2b / T-2c で `paging::plan` と `frame_allocator` に型を入れるまで、
-    // ここは生の値へ落として橋渡しする。**一時的な措置である。**
+    // フレームバッファは UEFI メモリマップに現れない（PCI BAR は別扱い。実機で確認）。
+    // メモリマップだけに頼らず、BootInfo の範囲を明示的に足す
+    // （`physical_address == 0` は BltOnly 等で無効なので除く）。
+    // 生の値へ落とすのは一時的な措置で、T-2b / T-2c で `paging::plan` と
+    // `frame_allocator` に型を入れるまでの橋渡しである。
     let fb_start = boot_info.framebuffer.physical_address.as_u64();
     let fb_end = fb_start + boot_info.framebuffer.size_bytes;
     let extra_ranges: &[(u64, u64, bool)] = if fb_start != 0 {
@@ -670,8 +669,8 @@ extern "sysv64" fn kernel_main() -> ! {
         &[]
     };
 
-    // マップ対象範囲の計画（純粋ロジック、frame_allocator::build と同じ
-    // classify() を経由するため、判定基準が独自にずれることはない）。
+    // マップ対象範囲の計画。frame_allocator::build と同じ classify() を通るので、
+    // 判定基準がずれることはない。
     let mapped_ranges = MappedRanges::<{ kernel::paging::plan::DEFAULT_CAPACITY }>::build(
         raw_map,
         boot_info.memory_map.descriptor_size,
@@ -682,11 +681,9 @@ extern "sysv64" fn kernel_main() -> ! {
         cpu::halt_forever();
     });
 
-    // 不変条件: アロケータが配りうる全フレームは、必ずこの計画に
-    // 含まれている（さもないと、後で配られたフレームが未マップのまま
-    // 使われ、無言で壊れる）。classify() を共有しているため理屈の上では
-    // 常に成立するはずだが、実装が今後ズレても検出できるよう実行時にも
-    // 確認する。
+    // 不変条件: アロケータが配りうる全フレームがこの計画に含まれる。破れると、後で
+    // 配られたフレームが未マップのまま使われて無言で壊れる。classify() を共有して
+    // いるので理屈の上では常に成立するが、実装がずれても気づけるよう実行時にも見る。
     let mut allocator_ranges_covered = true;
     for (start_frame, frame_count) in allocator.free_ranges() {
         let start = start_frame * frame_allocator::FRAME_SIZE;
@@ -715,7 +712,6 @@ extern "sysv64" fn kernel_main() -> ! {
         cpu::halt_forever();
     }
 
-    // マップ範囲一覧をダンプする（範囲・キャッシュ属性）。
     logger.info(format_args!(
         "paging: {} mapped range(s) planned:",
         mapped_ranges.range_count()
@@ -729,7 +725,7 @@ extern "sysv64" fn kernel_main() -> ! {
         ));
     }
 
-    // 実際にページテーブルへ書き込む（kernel/src/paging/table.rs 参照）。
+    // ここから実際にページテーブルへ書き込む（`paging::table`）。
     let mut builder = PageTableBuilder::new(&mut allocator, common::addr::direct_map())
         .unwrap_or_else(|e| {
             logger.error(format_args!(
@@ -783,18 +779,16 @@ extern "sysv64" fn kernel_main() -> ! {
         builder.frames_used()
     ));
 
-    // 必須領域の充足検証。ここに挙げる領域は、CR3 切り替え後も
-    // アクセスできる必要がある（切り替え直後のトリプルフォルトの
-    // 主要因になるため）。
+    // 必須領域の充足検証。ここに挙げる領域は CR3 切り替え後も引けなければならず、
+    // 欠けると切り替え直後にトリプルフォルトする。
     let (kernel_start_phys, kernel_end_phys) = kernel_image_phys_range();
     let kernel_start = kernel_start_phys.as_u64();
 
-    // **未解決の恒等前提。** BootInfo とフレームバッファは仮想アドレスとして
-    // 得た値だが、物理アドレスの範囲を見る `check_range` へ渡している。
-    // 恒等マッピングだから通っているだけで、解消するには変換を挟むか、
-    // 別の検証へ分ける必要がある。どちらも kernel イメージ外にあるので、
-    // 下の image_phys（リンク差で物理へ戻す）は使えない。
-    // **RSP と RIP はここを通らない。** B-2a-2 で image_phys へ移した（下を参照）。
+    // **未解決の恒等前提。** BootInfo とフレームバッファは仮想アドレスとして得た値を、
+    // 物理アドレスの範囲を見る `check_range` へ渡している。恒等マッピングだから通って
+    // いるだけである。どちらも kernel イメージ外なので、下の image_phys（リンク差で
+    // 物理へ戻す）は使えない。解消するには変換を挟むか検証を分ける。
+    // RSP と RIP はここを通らない。B-2a-2 で image_phys へ移した（下を参照）。
     let identity = |virt: u64| {
         common::addr::PhysAddr::new(virt)
             .expect("an identity-mapped address fits in a physical address")
@@ -813,10 +807,9 @@ extern "sysv64" fn kernel_main() -> ! {
     let pml4_phys = builder.pml4_phys();
 
     let mut all_required_ok = true;
-    // **必須領域はいずれも物理アドレスの範囲である。** マップ計画が物理で
-    // 書かれているためで、恒等の間は仮想アドレスと値が一致するので `u64` の
-    // まま渡しても通ってしまう。ここで `PhysAddr` を要求することで、
-    // 呼び出し側が「何のアドレスを渡しているか」を意識せざるを得なくなる。
+    // 必須領域はいずれも物理アドレスの範囲である。マップ計画が物理で書かれているため。
+    // 恒等の間は仮想と値が一致するので `u64` のままでも通ってしまうが、`PhysAddr` を
+    // 要求すれば呼び出し側が何のアドレスかを意識せざるを得ない。
     let mut check_range =
         |name: &str, start: common::addr::PhysAddr, end: common::addr::PhysAddr| {
             let ok = mapped_ranges.contains_range(start, end);
@@ -848,12 +841,11 @@ extern "sysv64" fn kernel_main() -> ! {
             .expect("a page table frame stays within the physical address range"),
     );
     // **解消済みの恒等前提（B-2a-2で解消）。** RSP と RIP は kernel イメージ内
-    // （スタックは .bss、コードは .text）を指すので、恒等ではなくイメージのリンク差
-    // （KERNEL_VIRT_BASE）で物理へ変換する（この image_phys 自体が恒等前提の解消）。
-    // 再リンク（B-2a-3）で RSP/RIP が高位になっても、この変換なら物理へ戻せる。
-    // base=0 では素通し。BootInfo・メモリマップ・フレームバッファは kernel イメージ外
-    // （低位のまま）なので恒等のままにする（上の check_range と、その手前の
-    // 「未解決の恒等前提」マーカーを参照）。
+    // （スタックは .bss、コードは .text）を指すので、恒等ではなくリンク差
+    // （KERNEL_VIRT_BASE）で物理へ変換する。再リンク（B-2a-3）で高位になっても
+    // 物理へ戻せる。base=0 では素通し。
+    // BootInfo・メモリマップ・フレームバッファは kernel イメージ外なので恒等のまま
+    // にする（上の check_range と、その手前の「未解決の恒等前提」マーカー）。
     let image_phys = |virt: u64| {
         kernel::kernel_phys_from_virt(
             common::addr::VirtAddr::new(virt).expect("an rsp/rip value is canonical"),
@@ -889,10 +881,8 @@ extern "sysv64" fn kernel_main() -> ! {
         old_cr3.as_u64()
     ));
 
-    // pml4_phys は alloc_zeroed_table がフレームアロケータから確保した
-    // フレームの先頭アドレス（frame * FRAME_SIZE）であるため下位12ビットは
-    // 常に 0 のはずだが、CR3 に書き込む値の PWT/PCD ビット（bit 3, 4）を
-    // 含む下位ビットが確実に 0 であることを実行時にも検証する。
+    // pml4_phys はフレームの先頭（frame * FRAME_SIZE）なので下位12ビットは常に 0 の
+    // はずだが、実行時にも見る。CR3 の下位には PWT/PCD（bit 3, 4）が載るため。
     if !pml4_phys.is_aligned(0x1000) {
         logger.error(format_args!(
             "paging: new PML4 {:#x} is not 4KiB aligned; refusing to switch CR3",
@@ -902,39 +892,36 @@ extern "sysv64" fn kernel_main() -> ! {
     }
     let cr3_value = pml4_phys;
 
-    // 切り替え前スナップショット(切り替え後の整合性確認に使う)。
-    // **未解決の恒等前提（順序依存。記録でしか守れない）。** kernel_start は物理値で、
-    // ここでは低位 VA として read する。これは A-2（activate_direct_map_window）より
-    // 前なので、この時点で direct_map() は base=0 を返し phys_to_virt しても同じ低位 VA
-    // になる（handoff.boot_info の「未解決の恒等前提」が高位化できなかったのと
-    // 同じ構造）。したがって高位化
-    // できず、「恒等除去（B-2b-4）より前に走ること」に依存する。反転関門
-    // （DirectMap::new の IDENTITY_REMOVED）は DirectMap 構築を捕まえるが、この生の
-    // 低位 read は経由しないので捕まえない。**この2つの read
-    // （`kernel_first_byte_before` と `kernel_first_byte_after`）が恒等除去点より
-    // 後ろへ来ないこと。** 具体的には、この read を除去点の後ろへ動かす、または除去点を
-    // この read の前へ動かす、のどちらも違反（除去点をさらに後ろへ動かすのは安全）。
-    // 一覧は docs/verification-coverage.md の「higher-half B-2b」を参照。
-    // SAFETY: kernel_start は必須領域検証により読み取り可能であることを
-    // 確認済み。
+    // 切り替え前スナップショット（切り替え後の整合性確認に使う）。
+    // **未解決の恒等前提（順序依存。記録でしか守れない）。** kernel_start は物理値を
+    // 低位 VA として read する。ここは A-2（activate_direct_map_window）より前で
+    // direct_map() が base=0 を返すので、phys_to_virt しても同じ低位 VA になる
+    // （handoff.boot_info の「未解決の恒等前提」が高位化できなかったのと同じ構造）。
+    // したがって高位化できず、恒等除去（B-2b-4）より前に走ることに依存する。
+    // 反転関門（DirectMap::new の IDENTITY_REMOVED）は DirectMap の構築を捕まえるが、
+    // この生の低位 read は経由しないので捕まえない。
+    // 順序要件: kernel_first_byte_before と kernel_first_byte_after が恒等除去点より
+    // 後ろへ来ないこと。read を除去点の後ろへ動かすのも、除去点をこの read の前へ
+    // 動かすのも違反である（除去点をさらに後ろへ動かすのは安全）。
+    // 一覧は docs/verification-coverage.md の「higher-half B-2b」。
+    // SAFETY: kernel_start は必須領域検証で読み取り可能を確認済み。
     let kernel_first_byte_before = unsafe { core::ptr::read_volatile(kernel_start as *const u8) };
 
     // SAFETY: switch_to が要求する3つを、別々の機構が満たす。
-    // - 実行中のコードと現在のスタック: 再リンク（B-2a-3）後の RIP と RSP は
-    //   kernel イメージ内の高位 VA（.text と .bss のカーネルスタック）なので、
-    //   これを引けるようにしているのは上の map_kernel_high_half である。恒等ではない。
-    //   必須領域検証の "current RIP" / "current RSP" が見たのは image_phys で
-    //   落とした物理の側で、高位が引けることまでは見ていない。
-    // - pml4_phys 自身のフレーム: こちらは恒等である。必須領域検証の
-    //   "new page tables (PML4)" が計画に入っていることを確認済みで、恒等を外す
-    //   B-2b-4 はずっと後にある。直後の verify_page_tables も A-2 より前で
-    //   direct_map() の base が 0 なので、同じ恒等でテーブルを読む。
+    // - 実行中のコードと現在のスタック: 再リンク（B-2a-3）後の RIP と RSP は kernel
+    //   イメージ内の高位 VA（.text と .bss のカーネルスタック）で、引けるように
+    //   しているのは上の map_kernel_high_half である。恒等ではない。必須領域検証の
+    //   "current RIP" / "current RSP" が見たのは image_phys で落とした物理の側で、
+    //   高位が引けることは見ていない。
+    // - pml4_phys 自身のフレーム: こちらは恒等である。必須領域検証の "new page
+    //   tables (PML4)" が計画にあることを確認済みで、恒等を外す B-2b-4 はずっと
+    //   後にある。直後の verify_page_tables も A-2 より前で direct_map() の base が
+    //   0 なので、同じ恒等で読む。
     unsafe {
         paging::switch::switch_to(cr3_value);
     }
 
-    // ここが出れば CR3 切り替え命令自体は実行できた(トリプルフォルト
-    // していない)ことが分かる。
+    // ここが出れば CR3 切り替え命令は実行できた（トリプルフォルトしていない）。
     logger.info(format_args!("paging: CR3 switch instruction executed"));
 
     let new_cr3 = paging::switch::read_cr3();
@@ -950,18 +937,16 @@ extern "sysv64" fn kernel_main() -> ! {
         cpu::halt_forever();
     }
 
-    // 稼働中のページテーブルを読み戻して、`plan` が意図した内容と一致するかを
-    // 確かめる（M5-a-1）。**これは M5-a-2 の分割・アンマップを検証するための
-    // 道具でもある。** 検証手段を先に用意しておくと、後から入れる操作の結果を
-    // 「それを行ったコードとは独立に」確かめられる。
+    // 稼働中のページテーブルを読み戻し、`plan` が意図した内容と一致するかを確かめる
+    // （M5-a-1）。M5-a-2 の分割・アンマップを検証する道具でもある。先に用意して
+    // おけば、後から入れる操作の結果をそれを行ったコードとは独立に確かめられる。
     verify_page_tables(&mut logger, &mapped_ranges);
 
     let mut post_switch_ok = true;
 
     // (a) kernel イメージの読み取り検証。
     logger.info(format_args!("paging: about to test: kernel image read"));
-    // SAFETY: kernel_start は必須領域検証により読み取り可能であることを
-    // 確認済み。
+    // SAFETY: kernel_start は必須領域検証で読み取り可能を確認済み。
     let kernel_first_byte_after = unsafe { core::ptr::read_volatile(kernel_start as *const u8) };
     let kernel_read_ok = kernel_first_byte_after == kernel_first_byte_before;
     logger.info(format_args!(
@@ -970,18 +955,15 @@ extern "sysv64" fn kernel_main() -> ! {
     ));
     post_switch_ok &= kernel_read_ok;
 
-    // (b) スタックの読み書き検証。ローカル変数は volatile アクセスでも
-    // レジスタに割り当てられうるため、それでは実際にスタックへ触った
-    // ことにならない。現在の RSP を実レジスタ値として読み、その少し下
-    // (未使用側、生きているスタックフレームより低いアドレス)へ生
-    // ポインタで直接書き書き・読み戻しする。
+    // (b) スタックの読み書き検証。ローカル変数は volatile でもレジスタに置かれうる
+    // ので、それではスタックへ触ったことにならない。RSP を実レジスタから読み、その
+    // 少し下（生きているスタックフレームより低い未使用側）へ生ポインタで書いて
+    // 読み戻す。
     logger.info(format_args!("paging: about to test: stack read/write"));
     let stack_probe_addr = cpu::read_rsp().wrapping_sub(256);
     const STACK_PROBE_PATTERN: u64 = 0xDEAD_BEEF_CAFE_0000;
-    // SAFETY: stack_probe_addr は現在の RSP より低いアドレス(スタックが
-    // まだ使っていない未使用領域)であり、かつ必須領域検証で確認した
-    // "current RSP" と同じスタック領域内(同じマップ済み範囲)にある。
-    // 使用中のスタックフレームには重ならない。
+    // SAFETY: stack_probe_addr は現在の RSP より低い未使用側で、使用中のスタック
+    // フレームには重ならない。必須領域検証の "current RSP" と同じマップ済み範囲にある。
     let stack_read_back = unsafe {
         core::ptr::write_volatile(stack_probe_addr as *mut u64, STACK_PROBE_PATTERN);
         core::ptr::read_volatile(stack_probe_addr as *const u64)
@@ -993,7 +975,7 @@ extern "sysv64" fn kernel_main() -> ! {
     ));
     post_switch_ok &= stack_ok;
 
-    // (c) BootInfo の再検証(マジック値の再チェックを流用)。
+    // (c) BootInfo の再検証（マジック値の再チェックを流用）。
     logger.info(format_args!("paging: about to test: BootInfo read"));
     let boot_info_ok = boot_info.validate().is_ok();
     logger.info(format_args!(
@@ -1002,18 +984,15 @@ extern "sysv64" fn kernel_main() -> ! {
     ));
     post_switch_ok &= boot_info_ok;
 
-    // (d) フレームバッファへの実描画（M3-a）。読み戻しだけでは、読めた値が
-    // 実際にフレームバッファのものかキャッシュ上の値かを区別できないため、
-    // 目視できるテストパターンを実際に描く。ここで描けることが、CR3 切り替え
-    // 後もフレームバッファへ到達できていることの証明も兼ねる。
+    // (d) フレームバッファへの実描画（M3-a）。読み戻しだけでは、読めた値がフレーム
+    // バッファのものかキャッシュ上の値かを区別できない。目視できるテストパターンを
+    // 描くことが、CR3 切り替え後も到達できている証明を兼ねる。
     let mut framebuffer = init_framebuffer(&mut logger, boot_info, &mapped_ranges);
 
-    // 起動時テストパターンは M3-a の検証手段であり、通常起動では描かない。
-    // コンソールは変更範囲しか転送しないため、描いたままにするとコンソール
-    // 領域の外に残骸が残り続ける（ADR-0017）。検証したいときは
-    // `cargo xtask run --gfx-test` で有効にする。通常起動では、この後の
-    // コンソール初期化による全面クリアが、フレームバッファへ到達できて
-    // いることの目視確認を兼ねる。
+    // 起動時テストパターンは M3-a の検証手段で、通常起動では描かない。コンソールは
+    // 変更範囲しか転送しないので、描いたままだとコンソール領域の外に残骸が残る
+    // （ADR-0017）。検証は `cargo xtask run --gfx-test`。通常起動では、この後の
+    // コンソール初期化による全面クリアが到達の目視確認を兼ねる。
     #[cfg(feature = "gfx-test-pattern")]
     if let Some(fb) = framebuffer.as_mut() {
         draw_startup_test_pattern(&mut logger, fb);
@@ -1032,34 +1011,32 @@ extern "sysv64" fn kernel_main() -> ! {
 
     // === higher-half A-1: direct physical map の導入 ===
     //
-    // 恒等と direct map 窓（DIRECT_MAP_BASE + phys）の両方を持つ新テーブルを
-    // 構築し、CR3 を切り替える。恒等は外さない（B の領域）。登録 DirectMap は
-    // 恒等のまま保つ（差し替えは A-2 の replace_direct_map）。ヒープ初期化より
-    // 前に置くので、載せ替えるべき低位ポインタはまだ存在しない（ADR-0021 の
-    // Addendum、判断2）。
+    // 恒等と direct map 窓（DIRECT_MAP_BASE + phys）の両方を持つ新テーブルを構築し、
+    // CR3 を切り替える。恒等は外さない（B の領域）。登録 DirectMap も恒等のまま
+    // （差し替えは A-2 の replace_direct_map）。ヒープ初期化より前なので、載せ替える
+    // べき低位ポインタはまだ無い（ADR-0021 の Addendum、判断2）。
     build_and_switch_direct_map(&mut logger, &mut allocator, &mapped_ranges);
 
     // === higher-half A-2: 登録 DirectMap を高位窓へ差し替える ===
     //
-    // これ以降、direct_map().phys_to_virt は高位を返す。恒等は残す。差し替え後
-    // に phys_to_virt を呼ぶ経路（この後の init_console の base_virt など）は
-    // 自動的に高位になる。差し替え前に値を計算して保持しているフレームバッファ
-    // だけは追従しないので、明示的に高位 base へ載せ替える。
+    // これ以降 direct_map().phys_to_virt は高位を返す（恒等は残す）。差し替え後に
+    // phys_to_virt を呼ぶ経路（init_console の base_virt など）は自動的に高位になる。
+    // 差し替え前に値を計算して持っているフレームバッファだけは追従しないので、
+    // 明示的に高位 base へ載せ替える。
     activate_direct_map_window(&mut logger);
     rehome_framebuffer_to_window(&mut logger, &mut framebuffer, boot_info);
-    // **boot_info の最終利用はここ（rehome）。以降 boot_info を触らない。** boot_info は
-    // 低位 VA（handoff.boot_info、恒等前提）で、恒等除去（B-2b-4）後は無効になる。有用な
-    // データ（memory_map→フレームアロケータ、framebuffer→ここで高位窓へ rehome）は抽出
-    // 済み。除去点より後ろで boot_info を参照するコードを足さないこと（反転関門は生の低位
-    // 参照を捕まえない。docs/verification-coverage.md の「higher-half B-2b」参照）。
+    // boot_info の最終利用はここ（rehome）で、以降は触らない。低位 VA
+    // （handoff.boot_info、恒等前提）なので恒等除去（B-2b-4）後は無効になる。有用な
+    // データは抽出済み（memory_map はフレームアロケータへ、framebuffer は高位窓へ）。
+    // 除去点より後ろで boot_info を参照するコードを足さないこと。反転関門は生の低位
+    // 参照を捕まえない（docs/verification-coverage.md の「higher-half B-2b」）。
 
     // === M3-c-3: 画面コンソール ===
     //
-    // ここより前のログはシリアルにしか出ない。コンソールはバックバッファの
-    // 確保にフレームアロケータを必要とし、フレームバッファへ書くには CR3
-    // 切り替え後である必要があるため、この時点より前には作れない。
-    // 実機の Linux も同じ構造で、起動初期のログは printk のバッファに溜まり、
-    // コンソールドライバが登録されるまで画面には出ない（ADR-0017）。
+    // ここより前のログはシリアルにしか出ない。コンソールはバックバッファの確保に
+    // フレームアロケータを使い、フレームバッファへ書くのは CR3 切り替え後なので、
+    // ここより前には作れない。Linux も同じ構造で、起動初期のログは printk の
+    // バッファに溜まり、コンソールドライバの登録まで画面に出ない（ADR-0017）。
 
     #[cfg(feature = "gfx-test-pattern")]
     logger.info(format_args!(
@@ -1114,31 +1091,30 @@ extern "sysv64" fn kernel_main() -> ! {
         cpu::halt_forever();
     }
 
-    // **解消済みの恒等前提（B-2b-2で解消）。** かつては heap_start（物理値）を
-    // そのままヒープ基底 VA として渡していた。恒等の間だけ低位 VA として通り、
-    // 恒等除去（B-2b-4）後はデレフでフォルトする。ヒープは除去後もタイマループ・
-    // タスク・コンソールの全アロケーションで使われ続けるので、direct map の高位窓
-    // 上へ載せる。以降アロケーションは高位 VA を返し、恒等除去を跨いで生き残る。
-    // 網羅列挙は docs/verification-coverage.md の「higher-half B-2b」を参照。
+    // **解消済みの恒等前提（B-2b-2で解消）。** かつては heap_start（物理値）をその
+    // ままヒープ基底 VA として渡していた。恒等の間だけ通り、恒等除去（B-2b-4）後は
+    // デレフでフォルトする。ヒープは除去後もタイマループ・タスク・コンソールの全
+    // アロケーションで使われるので、direct map の高位窓へ載せる。以降アロケーションは
+    // 高位 VA を返し、除去を跨いで生き残る。
+    // 網羅列挙は docs/verification-coverage.md の「higher-half B-2b」。
     let heap_virt_base = common::addr::direct_map()
         .phys_to_virt(
             common::addr::PhysAddr::new(heap_start)
                 .expect("heap arena is a valid physical address"),
         )
         .as_u64();
-    // B-2b-4(e) remove-before-highify: ヒープ基底を低位（heap_start=物理）へ戻す。恒等除去
-    // 後に低位ヒープを触ると死ぬので、除去より前に高位化する順序の必要性を実証する。既定は
-    // 高位（heap_virt_base）。heap_virt_base は下の恒等除去の必須領域チェックでも使うので、
-    // このビルドでも計算だけは残す（そのため step4 は高位VAで通り、除去は完了する。死ぬのは
-    // 除去後に低位ヒープを触った瞬間で、順序依存を実証する）。
+    // 破壊 (highhalf-remove-before-highify): ヒープ基底を低位（heap_start=物理）へ戻し、
+    // 除去より前に高位化する順序の必要性を実証する（B-2b-4(e)）。heap_virt_base は下の
+    // 恒等除去の必須領域チェックでも使うので、このビルドでも計算だけ残す。したがって
+    // step4 は高位 VA で通り除去は完了し、死ぬのは除去後に低位ヒープを触った瞬間である。
     #[cfg(not(feature = "highhalf-remove-before-highify"))]
     let heap_init_base = heap_virt_base;
     #[cfg(feature = "highhalf-remove-before-highify")]
     let heap_init_base = heap_start;
-    // SAFETY: [heap_start, heap_end) はフレームアロケータから今切り出したばかりの、
-    // 他の誰も使っていない領域で、直前に mapped_ranges でマップ済みを確認済み。既定の
-    // heap_init_base はその物理を direct map 高位窓へ写した VA で、窓は RW・マップ済み。
-    // このヒープに対する `init` 呼び出しはこれが最初で最後(1回のみ)。
+    // SAFETY: [heap_start, heap_end) は今アロケータから切り出した、他の誰も使って
+    // いない領域で、直前に mapped_ranges でマップ済みを確認した。既定の heap_init_base
+    // はその物理を direct map 高位窓へ写した VA で、窓は RW・マップ済み。`init` の
+    // 呼び出しはこれが最初で最後である。
     unsafe {
         ALLOCATOR.init(heap_init_base, heap_size);
     }
@@ -1183,24 +1159,22 @@ extern "sysv64" fn kernel_main() -> ! {
 
     // === M5-b: カーネルスタックのガードページ化 ===
     //
-    // 自前のページテーブルへ切り替え済み（M2-d / A）で、かつ自前のカーネル
-    // スタックの上で動いている（_start で切り替え済み）ので、直下のガード
-    // ページを unmap できる。IST2 は _start の gdt::init / idt::init で既に
-    // 配線済みなので、この時点以降に溢れが起きても #PF は IST2 上で動く。
+    // 自前のページテーブルへ切り替え済み（M2-d / A）で、自前のカーネルスタックの上で
+    // 動いている（_start で切り替え済み）ので、直下のガードページを unmap できる。
+    // IST2 は _start の gdt::init / idt::init で配線済みなので、以降に溢れが起きても
+    // #PF は IST2 上で動く。
     //
-    // **ページテーブルの分割・アンマップの回帰チェック（M5-a-2）より後に
-    // 置く。** これらは `paging-test-bad-index` などで `unmap_4kib` の挙動を
-    // 全体的にわざと壊すビルドがあり、ガードページ化も同じ `unmap_4kib` を
-    // 使うため、先に置くと壊れた unmap でガードが作れず fail-fast して、
-    // 回帰チェックの判定行より前に止まってしまう。回帰チェックを通してから
-    // ガードを張れば衝突しない。通常運転（タイマループ以降）はこの後に
+    // 分割・アンマップの回帰チェック（M5-a-2）より後に置く。`paging-test-bad-index`
+    // などが `unmap_4kib` を全体的に壊すビルドを持ち、ガードページ化も同じ
+    // `unmap_4kib` を使う。先に置くと壊れた unmap でガードが作れず fail-fast し、
+    // 回帰チェックの判定行より前に止まる。通常運転（タイマループ以降）はこの後に
     // 始まるので、steady state は保護される。
     install_kernel_stack_guard_page(&mut logger);
 
     // ユーザーページのマッピング能力の検証（M5-e-2）。専用サブツリー
-    // PML4[USER_PML4_INDEX] へ U=1 ページを張り、両側 U/S 監査で権限分離を
-    // 実状態で確かめ、葉だけ落として中間は M5-e-3 のために残す。paging-test
-    // ビルドでは unmap を全体破壊するため載せない（関数側で cfg 済み）。
+    // PML4[USER_PML4_INDEX] へ U=1 ページを張り、両側 U/S 監査で権限分離を実状態で
+    // 確かめ、葉だけ落として中間は M5-e-3 のために残す。paging-test ビルドでは
+    // unmap を全体破壊するので載せない（関数側で cfg 済み）。
     #[cfg(not(feature = "paging-test"))]
     verify_user_page_mapping(&mut logger, &mut allocator);
 
@@ -1210,77 +1184,72 @@ extern "sysv64" fn kernel_main() -> ! {
     #[cfg(not(feature = "paging-test"))]
     verify_ring3_excursion(&mut logger, &mut allocator);
 
-    // int 0x80 システムコールの往復の検証（M5-f-1）。verify_ring3_excursion が
-    // 残したユーザーページを再利用し、Ring 3 から int 0x80 を発行して
-    // syscall_entry（空ディスパッチャ）が RSP0 スタックで走り、iretq で Ring 3 へ
-    // 戻り、続く cli の #GP を予期の畳みでカーネルへ戻すまでを確かめる。
+    // int 0x80 システムコールの往復の検証（M5-f-1）。verify_ring3_excursion が残した
+    // ユーザーページを再利用する。Ring 3 から int 0x80 を発行し、syscall_entry
+    // （空ディスパッチャ）が RSP0 スタックで走り、iretq で Ring 3 へ戻り、続く cli の
+    // #GP を予期の畳みでカーネルへ戻すまでを確かめる。
     #[cfg(not(feature = "paging-test"))]
     verify_syscall_roundtrip(&mut logger);
 
     // ユーザーポインタ検証の検証（M5-f-2-1）。Ring 3 が (buf, len) を渡す syscall で、
-    // カーネルが読み書きに踏み込む前に範囲を実 PTE で検証する。正常系 + 異常系5ケースの
-    // battery を回す。
+    // カーネルが読み書きに踏み込む前に範囲を実 PTE で検証する。正常系と異常系5ケースを
+    // 回す。
     #[cfg(not(feature = "paging-test"))]
     verify_syscall_pointer(&mut logger, &mut allocator);
 
-    // ユーザーバッファの内容往復の検証（M5-f-2-2）。カーネルが既知内容をユーザーバッファへ
-    // 書き、SYS_CHECKSUM を発行して、カーネルが検証 → copy_from_user → 総和を返し、期待値と
+    // ユーザーバッファの内容往復の検証（M5-f-2-2）。カーネルが既知内容をユーザー
+    // バッファへ書き、SYS_CHECKSUM を発行し、検証 → copy_from_user → 総和が期待値と
     // 一致することを確かめる。
     #[cfg(not(feature = "paging-test"))]
     verify_syscall_checksum(&mut logger);
 
     // === S1-b-1: ACPI テーブルの検証つき走査 ===
     //
-    // **置ける区間が上下から挟まれている。**
+    // 置ける区間が上下から挟まれている。
     //   - 下限は A-2（direct map 窓の高位化）。物理を読むのに窓を使う。
-    //   - 上限は恒等除去（すぐ下）。`raw_map` は低位 VA のスライスで、除去後は
-    //     無効になる。ACPI の物理アドレスがどのメモリ型に載っているかを見るのに
-    //     使うので、除去より前でなければならない。
-    // 検査そのものは高位窓の翻訳を見るため、除去を跨いでも結論は変わらない
-    // （除去が落とすのは `PML4[0]` だけである）。**呼び出し位置を動かすときは、
-    // この 2 つの境界の両方を確かめること。** どちらを踏み外しても、症状は
-    // 「ACPI が読めない」ではなく低位 VA のデレフによる #PF になる。
+    //   - 上限は恒等除去（すぐ下）。`raw_map` は低位 VA のスライスで、除去後は無効に
+    //     なる。ACPI の物理アドレスがどのメモリ型に載るかを見るのに使う。
+    // 検査そのものは高位窓の翻訳を見るので、除去を跨いでも結論は変わらない（除去が
+    // 落とすのは `PML4[0]` だけ）。呼び出し位置を動かすときは両方の境界を確かめること。
+    // どちらを踏み外しても、症状は「ACPI が読めない」ではなく低位 VA のデレフによる
+    // #PF になる。
     //
-    // **異常があっても停止しない。** S1 は情報を集める段で、ACPI が読めない
-    // だけで単一コアのカーネルが起動しなくなるのは機能的な後退である。致命へ
-    // 格上げするのは S2（APIC 移行）である。
+    // 異常があっても停止しない。S1 は情報を集める段で、ACPI が読めないだけで単一コアの
+    // カーネルが起動しなくなるのは機能的な後退である。致命へ格上げするのは S2 である。
     //
-    // ログはシリアルのみ（`log_both` を使わない）。この近傍の検証サイト
-    // （verify_user_page_mapping 以降と remove_identity）はいずれもシリアルのみで、
-    // `log_both` は人が読む要約（ヒープの確保・スモークテスト・コンソールの統計）に
-    // 使われている。ACPI の走査は検証の材料なので前者に揃える。
+    // ログはシリアルのみ（`log_both` を使わない）。近傍の検証サイトはいずれもシリアル
+    // のみで、`log_both` は人が読む要約に使っている。ACPI の走査は検証の材料なので
+    // 前者へ揃える。
     let apic_mmio =
         kernel::acpi::survey(&mut logger, acpi_rsdp, raw_map, memory_map_descriptor_size);
 
     // === S1-c: APIC MMIO を direct map 窓へ 4KiB 粒度で写像する ===
     //
-    // **survey の直後に置く。** 写像に使う所在は survey が返した値そのもので、
-    // 値の産地と利用点を離さないためである。survey と違って恒等除去より前で
-    // ある必要は無い（UEFI メモリマップのスライスを使わない）が、離す理由も無い。
+    // survey の直後に置く。写像に使う所在は survey が返した値そのもので、産地と利用点を
+    // 離さないため。survey と違って恒等除去より前である必要は無いが（UEFI メモリマップの
+    // スライスを使わない）、離す理由も無い。
     //
-    // **APIC へは移行しない。割り込みは PIC のままである**（移行は S2）。
-    // ここでやるのは写像と、Local APIC を読めることの確認だけで、APIC の
-    // レジスタへは一切書き込まない。
+    // APIC へは移行しない。割り込みは PIC のままである（移行は S2）。ここでやるのは
+    // 写像と、Local APIC を読めることの確認だけで、レジスタへは書き込まない。
     let mapped_apic = kernel::apic::map_and_probe(&mut logger, &mut allocator, &apic_mmio);
 
     // === S3-b-2b-2: AP の per-CPU 資産を用意する ===
     //
-    // **位置が正しさの条件である。** 要るのは
-    // (1) フレームアロケータ（`run_timer_loop` には無い。AP を起こすのはそこである）と
-    // (2) **本番テーブルが CR3 に載っていること**である。
+    // 位置が正しさの条件である。要るのは2つ。
+    //   - フレームアロケータ（`run_timer_loop` には無い。AP を起こすのはそこである）
+    //   - 本番テーブルが CR3 に載っていること
     //
-    // **早すぎると壊れる。実際に踏んだ。** 最初はトランポリン用フレームの予約の
-    // 直後（M2-d の CR3 切り替えより前）に置いたので、`read_cr3()` が
-    // **bootstrap PML4** を返し、AP をそちらへ移してしまった。AP は自分の
-    // スタック（PML4[258]）までは動いたが、**direct map（PML4[256]）が無いので
-    // 最初の direct map 参照で #PF になった。**
+    // 早すぎると壊れる。実際に踏んだ。最初はトランポリン用フレームの予約の直後
+    // （M2-d の CR3 切り替えより前）に置いたので、`read_cr3()` が bootstrap PML4 を
+    // 返し、AP をそちらへ移してしまった。AP は自分のスタック（PML4[258]）までは
+    // 動いたが、direct map（PML4[256]）が無いので最初の参照で #PF になった。
     //
-    // **PML4[258] へ張る**（`PML4[257]` は破壊 feature のサボタージュ VA である）。
+    // PML4[258] へ張る（`PML4[257]` は破壊 feature のサボタージュ VA）。
     // SAFETY: A-1 の切り替えが済んで本番テーブルが CR3 に載っており、起動時の
     // 単一文脈で AP はまだ走っていない。
     unsafe {
         kernel::smp::prepare_ap_per_cpu(&mut logger, &mut allocator);
-        // 探り用ページは**アロケータのあるここで**張る（S5-c）。
+        // 探り用ページは、アロケータのあるここで張る（S5-c）。
         // SAFETY: 本番テーブルへ切り替え済みで、direct map 窓が使える。
         #[cfg(feature = "smp-tlb-shootdown-probe")]
         unsafe {
@@ -1290,36 +1259,36 @@ extern "sysv64" fn kernel_main() -> ! {
 
     // === S2-a: APIC のレジスタを読んで現在値を記録する ===
     //
-    // **読むだけの段である。割り込みの経路は一切変えない**（PIC / PIT のまま）。
-    // I/O APIC の IOREGSEL への書き込みだけは伴う。読みたいレジスタを選ぶ
-    // セレクタで割り込みの設定ではないが、**S2 で最初の書き込みがここである。**
+    // 読むだけの段で、割り込みの経路は変えない（PIC / PIT のまま）。I/O APIC の
+    // IOREGSEL への書き込みだけは伴う。読みたいレジスタを選ぶセレクタで割り込みの
+    // 設定ではないが、S2 で最初の書き込みはここである。
     if let Some(mapped_apic) = mapped_apic.as_ref() {
         kernel::apic::survey_registers(&mut logger, mapped_apic);
 
         // === S2-b: スプリアスベクタを予約例外ベクタの外へ移す ===
         //
-        // **ここが LAPIC への最初の書き込みである。** 書くのは SVR のベクタ欄
-        // だけで、bit 8（有効化）は読んだ値から保つ。bit 8 を落とすと LINT0 経由で
-        // 届いている 8259 の IRQ0 が止まる。**危険なのは bit 8 であって、
-        // ベクタ欄ではない。** 振る舞いは変わらない（スプリアスは現在発生しない）。
+        // ここが LAPIC への最初の書き込みである。書くのは SVR のベクタ欄だけで、
+        // bit 8（有効化）は読んだ値から保つ。bit 8 を落とすと LINT0 経由で届いて
+        // いる 8259 の IRQ0 が止まる。危険なのは bit 8 であってベクタ欄ではない。
+        // 振る舞いは変わらない（スプリアスは現在発生しない）。
         kernel::apic::set_spurious_vector(&mut logger, mapped_apic);
 
         // === S3-b-1: cpu_id() を Local APIC ID 由来へ差し替える ===
         //
-        // **ここより前は cpu_id() が定数 0 を返す経路である。** gdt::init が
-        // this_cpu_ptr を通るのは Local APIC を写像するより前なので、据わる前に
-        // 呼ばれることが避けられない。MAX_CPUS = 1 では据える前も後も 0 なので
-        // 振る舞いは変わらない。**GS ベースは使わない**（apic.rs の該当節）。
+        // ここより前は cpu_id() が定数 0 を返す経路である。gdt::init が this_cpu_ptr を
+        // 通るのは Local APIC を写像するより前なので、据わる前に呼ばれるのは避けられ
+        // ない。MAX_CPUS = 1 では据える前も後も 0 で振る舞いは変わらない。GS ベースは
+        // 使わない（apic.rs の該当節）。
     }
 
     // === S3-b-1: per-CPU スロットが起動しうるコア数を覆っているかを報告する ===
     //
-    // **停止はしない。** この段では cpu_id() が定数 0 で、走るのは bootstrap
-    // processor だけなので、列挙が MAX_CPUS を超えても配列外の索引は起きない。
-    // **停止が正しくなるのは cpu_id() が非 0 を返しうる S3-b-2a である**
-    // （当初ここで停止させたら -smp 2 の起動が止まった。apic.rs の doc）。
-    // **`mapped_apic` の有無に依らず行う。** 覆えているかを問うのはコア数と
-    // MAX_CPUS の関係で、APIC の写像が成功したかとは別である。
+    // 停止はしない。この段では cpu_id() が定数 0 で、走るのは bootstrap processor
+    // だけなので、列挙が MAX_CPUS を超えても配列外の索引は起きない。停止が正しく
+    // なるのは cpu_id() が非 0 を返しうる S3-b-2a である（当初ここで停止させたら
+    // -smp 2 の起動が止まった。apic.rs の doc）。
+    // `mapped_apic` の有無に依らず行う。覆えているかを問うのはコア数と MAX_CPUS の
+    // 関係で、APIC の写像が成功したかとは別である。
     kernel::apic::report_per_cpu_slot_coverage(&mut logger, apic_mmio.usable_local_apics());
 
     // === higher-half B-2b-4（恒等除去） ===
