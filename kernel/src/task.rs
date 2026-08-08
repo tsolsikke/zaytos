@@ -1464,7 +1464,7 @@ pub fn run_preemptive_demo() {
     yield_now();
 
     // --- 会計・進捗・窓カウントを閉じる ---
-    // ワーカーは走行不可だが**タイマは動き続けている**ので、`switches` と
+    // ワーカーは走行不可だがタイマは動き続けているので、`switches` と
     // `resumes` は IF=0 の経路が加算しうる。フィールド単位の volatile な
     // 読みで取る（S0-b。`scheduler` の表を参照）。
     let switches = scheduler::switches();
@@ -1597,7 +1597,7 @@ extern "sysv64" fn verify_preemptive_gprs() {
 }
 
 /// プリエンプティブなワーカー本体のループ先頭から呼ばれる。現タスクの base を
-/// 返す。**IF=1 の地点である。**
+/// 返す。IF=1 の地点である。
 ///
 /// preempt-in-critical の破壊確認では、ここで共有ロックを保持したまま少し
 /// スピンする。破壊ビルドでは InterruptGuard が cli を落とすので、保持中も IF=1 の
@@ -1678,7 +1678,7 @@ core::arch::global_asm!(
     "4:",
     "  dec qword ptr [rip + {delay}]",
     "  jnz 4b",
-    // **cli で store と照合を保護する。** GPR_BUF は A/B 共有なので、store の後
+    // cli で store と照合を保護する。GPR_BUF は A/B 共有なので、store の後
     // 照合の前にプリエンプトされると別ワーカーが上書きし、他タスクの値を読んで
     // しまう。cli してから store・照合すれば、その区間は別タスクが割り込めない。
     // 検査対象の窓（set から cli まで）は cli の前なのでプリエンプト可のまま。
@@ -1716,30 +1716,30 @@ mod tests {
 
     /// 全タスクを bootstrap processor 担当に置いた構成。
     ///
-    /// # **S4-c-2 以降、これは本番の実態ではない**
+    /// # S4-c-2 以降、これは本番の実態ではない
     ///
     /// S4-c-1 の時点では全タスクが bootstrap processor 担当だったので、
-    /// これは実態そのものだった。**S4-c-2 で AP 用アイドルタスク（添字
-    /// [`AP_IDLE_TASK`]）の担当が AP になったので、その一致は失われている。**
-    /// **本番では起こらない構成になった**ということである。
+    /// これは実態そのものだった。S4-c-2 で AP 用アイドルタスク（添字
+    /// [`AP_IDLE_TASK`]）の担当が AP になったので、その一致は失われている。
+    /// 本番では起こらない構成になったということである。
     ///
-    /// **それでも残す。** 下の [`pick_next`] を通る既存の表明は「担当が全部
+    /// それでも残す。下の [`pick_next`] を通る既存の表明は「担当が全部
     /// 自コアなら、担当コアを入れる前と同じに振る舞う」ことを言っており、
-    /// **その主張自体は本番と一致するかどうかに依らない。** ただし
-    /// **一致していると読まれると困る**ので、一致が切れたことを書いておく。
+    /// その主張自体は本番と一致するかどうかに依らない。ただし
+    /// 一致していると読まれると困るので、一致が切れたことを書いておく。
     const ALL_BSP: [usize; TASK_COUNT] = [common::percpu::BOOTSTRAP_PROCESSOR_SLOT; TASK_COUNT];
 
     /// どのコアも何も走らせていない `CURRENT`（S4-c-3-2b）。
     ///
-    /// **第 2 層が何も弾かない入力である。** 既存の表明はすべてこれを通すので、
-    /// **第 2 層を足しても期待値が 1 つも動かない。**
+    /// 第 2 層が何も弾かない入力である。既存の表明はすべてこれを通すので、
+    /// 第 2 層を足しても期待値が 1 つも動かない。
     const NOBODY_RUNNING: [usize; common::percpu::MAX_CPUS] =
         [super::NO_CURRENT_TASK; common::percpu::MAX_CPUS];
 
-    /// **第 2 層の述語は、自コアを数えない（S4-c-3-2b）。**
+    /// 第 2 層の述語は、自コアを数えない（S4-c-3-2b）。
     ///
     /// 自分の `CURRENT` に入っているのは当たり前なので、そこで弾くと
-    /// **現タスクを選び直せなくなる**（`pick_next` が現タスクを返しうるという
+    /// 現タスクを選び直せなくなる（`pick_next` が現タスクを返しうるという
     /// 既存の契約が壊れる）。
     #[test]
     fn the_layer_two_predicate_ignores_the_calling_cpu() {
@@ -1754,11 +1754,11 @@ mod tests {
         assert!(!super::is_running_on_another_cpu(2, 1, &currents));
     }
 
-    /// **sentinel は「走っている」に数えない（S4-c-3-2b）。**
+    /// sentinel は「走っている」に数えない（S4-c-3-2b）。
     ///
-    /// sentinel は `usize::MAX` で、**どのタスクの添字とも一致しない。**
-    /// 一致してしまうと、まだ何も割り当てていないコアが、**全タスクを
-    /// 「他コアが走らせている」ことにしてしまう。**
+    /// sentinel は `usize::MAX` で、どのタスクの添字とも一致しない。
+    /// 一致してしまうと、まだ何も割り当てていないコアが、全タスクを
+    /// 「他コアが走らせている」ことにしてしまう。
     #[test]
     fn the_sentinel_is_not_treated_as_a_running_task() {
         for task in 0..TASK_COUNT {
@@ -1766,11 +1766,11 @@ mod tests {
         }
     }
 
-    /// **第 2 層は、他コアが走らせているタスクを候補から外す（S4-c-3-2b）。**
+    /// 第 2 層は、他コアが走らせているタスクを候補から外す（S4-c-3-2b）。
     ///
-    /// **本番では発火条件が無い**（担当が互いに素）ので、担当を意図的に
-    /// そろえて第 2 層だけを働かせる。**`sched-ignore-owner` を入れた構成が
-    /// これにあたる。**
+    /// 本番では発火条件が無い（担当が互いに素）ので、担当を意図的に
+    /// そろえて第 2 層だけを働かせる。`sched-ignore-owner` を入れた構成が
+    /// これにあたる。
     #[test]
     fn layer_two_skips_a_task_that_another_cpu_is_running() {
         let all_ready = states([true, true, true, true]);
@@ -1785,30 +1785,30 @@ mod tests {
         currents[1] = 2;
         assert_eq!(super::pick_next(all_ready, ALL_BSP, currents, 0, 0), 1);
 
-        // **`MAX_CPUS = 2` では、塞がるワーカーは同時に 1 本までである。**
+        // `MAX_CPUS = 2` では、塞がるワーカーは同時に 1 本までである。
         // 他コアは 1 つで、1 コアは 1 タスクしか走らせないためで、
-        // **「2 本とも塞がって落ち先へ行く」は現在の構成では作れない。**
+        // 「2 本とも塞がって落ち先へ行く」は現在の構成では作れない。
         // `MAX_CPUS` を上げたらここに 1 件足せる。
     }
 
     /// 担当コアを既定（全部 BSP）にして bootstrap processor から呼ぶ短縮。
     ///
-    /// **既存の契約を書き換えないための薄い包みである。** S4-c-1 は振る舞い
-    /// 不変の段なので、**既存の表明はそのまま残し、担当コアつきの表明を足す。**
+    /// 既存の契約を書き換えないための薄い包みである。S4-c-1 は振る舞い
+    /// 不変の段なので、既存の表明はそのまま残し、担当コアつきの表明を足す。
     ///
-    /// # **この包みを通る表明が拘束する範囲は狭い**
+    /// # この包みを通る表明が拘束する範囲は狭い
     ///
     /// 包みは担当を全部 bootstrap processor に、呼び出しコアを bootstrap
-    /// processor に固定する。**したがってこれらの表明が拘束するのは
-    /// 「全タスクが BSP 担当で、BSP から呼んだとき」の契約だけである。**
+    /// processor に固定する。したがってこれらの表明が拘束するのは
+    /// 「全タスクが BSP 担当で、BSP から呼んだとき」の契約だけである。
     ///
-    /// **S4-c-2 以降、この固定は本番の担当割りとも一致しない**（[`ALL_BSP`] の
-    /// doc）。**「包みを通る表明が緑」から本番について言えることは、さらに狭まった。**
+    /// S4-c-2 以降、この固定は本番の担当割りとも一致しない（[`ALL_BSP`] の
+    /// doc）。「包みを通る表明が緑」から本番について言えることは、さらに狭まった。
     ///
-    /// **担当が混ざる場合や AP から呼ぶ場合は覆っていない。** そちらは
+    /// 担当が混ざる場合や AP から呼ぶ場合は覆っていない。そちらは
     /// `super::pick_next` を直に呼ぶ表明（`a_task_owned_by_another_cpu_is_not_a_candidate`
     /// と `only_the_tasks_owned_by_this_cpu_are_rotated`）が別に持つ。
-    /// **包みを通る表明が全部緑でも、担当コアの振る舞いは何も言えない。**
+    /// 包みを通る表明が全部緑でも、担当コアの振る舞いは何も言えない。
     fn pick_next(states: [TaskState; TASK_COUNT], current: usize) -> usize {
         super::pick_next(
             states,
@@ -1821,31 +1821,31 @@ mod tests {
 
     /// 本番の担当割り（S4-c-2 以降）。メイン + ワーカーが BSP、AP 用アイドルが AP。
     ///
-    /// **[`ALL_BSP`] と違い、これは本番と一致する。** 下の 2 本はこちらを使う。
+    /// [`ALL_BSP`] と違い、これは本番と一致する。下の 2 本はこちらを使う。
     const PRODUCTION_OWNERS: [usize; TASK_COUNT] = {
         let mut owners = [common::percpu::BOOTSTRAP_PROCESSOR_SLOT; TASK_COUNT];
         owners[AP_IDLE_TASK] = super::AP_IDLE_TASK_OWNER;
         owners
     };
 
-    /// **どのコアの落ち先も、そのコアが担当しているタスクである（S4-c-3-1）。**
+    /// どのコアの落ち先も、そのコアが担当しているタスクである（S4-c-3-1）。
     ///
-    /// これが `default_task_for` の存在理由そのものである。**固定の `0` だと
+    /// これが `default_task_for` の存在理由そのものである。固定の `0` だと
     /// AP の落ち先が他コアの担当になり、しかもその経路は第 1 層も第 2 層も
-    /// 通らないので、検出器も鳴らずに静かに壊れる。**
+    /// 通らないので、検出器も鳴らずに静かに壊れる。
     ///
-    /// # **`MAX_CPUS` を上げるとこの表明は落ちる。それが正しい**
+    /// # `MAX_CPUS` を上げるとこの表明は落ちる。それが正しい
     ///
-    /// `0..MAX_CPUS` を回しているので、**`MAX_CPUS` を 3 以上にした瞬間に
-    /// ここが落ちる。** `default_task_for` は AP をコアで区別しておらず、
+    /// `0..MAX_CPUS` を回しているので、`MAX_CPUS` を 3 以上にした瞬間に
+    /// ここが落ちる。`default_task_for` は AP をコアで区別しておらず、
     /// 2 つ目以降の AP も `AP_IDLE_TASK` へ落ちるためである（同じタスク =
-    /// 同じスタックなので、**複数コアが同一スタックを走る**）。
+    /// 同じスタックなので、複数コアが同一スタックを走る）。
     ///
-    /// **落ちるのは退行ではなく、この表明が仕事をしたということである。**
-    /// **通すために表明のほうを弱めないこと**——`0..MAX_CPUS` を
-    /// `0..2` に狭めたり、AP 側を除外したりすると、**危険がそのまま残って
-    /// 検査だけが緑になる。** 正しい直し方は
-    /// **コアごとにアイドルタスクを持たせること**で、それは `MAX_CPUS` を
+    /// 落ちるのは退行ではなく、この表明が仕事をしたということである。
+    /// 通すために表明のほうを弱めないこと——`0..MAX_CPUS` を
+    /// `0..2` に狭めたり、AP 側を除外したりすると、危険がそのまま残って
+    /// 検査だけが緑になる。正しい直し方は
+    /// コアごとにアイドルタスクを持たせることで、それは `MAX_CPUS` を
     /// 上げる作業に含まれる（`docs/deferred-decisions.md` の当該項目）。
     #[test]
     fn the_fallback_of_every_core_is_a_task_that_core_owns() {
@@ -1858,10 +1858,10 @@ mod tests {
         }
     }
 
-    /// **AP は自分のアイドルタスクへ落ちる。メインへは落ちない（S4-c-3-1）。**
+    /// AP は自分のアイドルタスクへ落ちる。メインへは落ちない（S4-c-3-1）。
     ///
-    /// 走行可能な担当ワーカーが無い AP を `pick_next` に通す。**`MAIN_TASK` が
-    /// 返ったら、AP が bootstrap processor のタスクを走らせることになる。**
+    /// 走行可能な担当ワーカーが無い AP を `pick_next` に通す。`MAIN_TASK` が
+    /// 返ったら、AP が bootstrap processor のタスクを走らせることになる。
     #[test]
     fn an_application_processor_falls_back_to_its_own_idle_task() {
         let all_ready = states([true, true, true, true]);
@@ -1887,17 +1887,17 @@ mod tests {
             super::pick_next(none_ready, PRODUCTION_OWNERS, NOBODY_RUNNING, ap, 0),
             AP_IDLE_TASK
         );
-        // **bootstrap processor 側は従来どおりメインへ落ちる。**
+        // bootstrap processor 側は従来どおりメインへ落ちる。
         assert_eq!(
             super::pick_next(none_ready, PRODUCTION_OWNERS, NOBODY_RUNNING, 0, 0),
             super::MAIN_TASK
         );
     }
 
-    /// **表示を変えても表現は変わらない（S4-c-2）。**
+    /// 表示を変えても表現は変わらない（S4-c-2）。
     ///
     /// sentinel は `usize::MAX` のままで、出し方だけが `none` になる。
-    /// **この 2 つが一緒に動いてしまうと、`CURRENT` を読む側の契約が変わる。**
+    /// この 2 つが一緒に動いてしまうと、`CURRENT` を読む側の契約が変わる。
     #[test]
     fn the_sentinel_is_displayed_as_a_word_but_still_stored_as_usize_max() {
         use super::{ApCurrent, NO_CURRENT_TASK, NO_CURRENT_TASK_DISPLAY};
@@ -1907,15 +1907,15 @@ mod tests {
             format!("{}", ApCurrent(NO_CURRENT_TASK)),
             NO_CURRENT_TASK_DISPLAY
         );
-        // sentinel 以外は添字がそのまま出る。**`none` に丸めない。**
+        // sentinel 以外は添字がそのまま出る。`none` に丸めない。
         assert_eq!(format!("{}", ApCurrent(AP_IDLE_TASK)), "3");
         assert_eq!(format!("{}", ApCurrent(0)), "0");
     }
 
-    /// **担当コアが違うタスクは候補にならない（S4-c-1）。**
+    /// 担当コアが違うタスクは候補にならない（S4-c-1）。
     ///
     /// 第 1 層そのものの表明である。全員走行可能でも、担当が別コアなら
-    /// 選ばれず、**走行可能な担当が無いときの既存の経路（タスク 0）へ落ちる。**
+    /// 選ばれず、走行可能な担当が無いときの既存の経路（タスク 0）へ落ちる。
     #[test]
     fn a_task_owned_by_another_cpu_is_not_a_candidate() {
         let all_ready = states([true, true, true, true]);
@@ -1927,13 +1927,13 @@ mod tests {
         assert_eq!(super::pick_next(all_ready, all_ap, NOBODY_RUNNING, 1, 0), 1);
     }
 
-    /// **担当が混ざっていても、自コアのぶんだけを回す（S4-c-1）。**
+    /// 担当が混ざっていても、自コアのぶんだけを回す（S4-c-1）。
     #[test]
     fn only_the_tasks_owned_by_this_cpu_are_rotated() {
         let all_ready = states([true, true, true, true]);
         // ワーカー 1 = BSP、ワーカー 2 = AP。
         let mixed = [0usize, 0, 1, 1];
-        // BSP はワーカー 1 しか選べない。**現タスクが 1 でも 1 を返す**
+        // BSP はワーカー 1 しか選べない。現タスクが 1 でも 1 を返す
         // （`pick_next` は現タスクを返しうるという既存の契約）。
         assert_eq!(super::pick_next(all_ready, mixed, NOBODY_RUNNING, 0, 0), 1);
         assert_eq!(super::pick_next(all_ready, mixed, NOBODY_RUNNING, 0, 1), 1);
@@ -1943,13 +1943,13 @@ mod tests {
 
     /// 旧 `runnable: bool` に対応する短縮。`true` = 走行可能。
     ///
-    /// # **S4-c-2 で入力が 1 要素増えた**
+    /// # S4-c-2 で入力が 1 要素増えた
     ///
     /// `TASK_COUNT` が 3 から 4 へ増えたので、既存の表明の入力も 1 つ伸びた。
-    /// **足した要素は AP 用アイドルタスクで、値は本番と同じ `Ready` にしてある。**
+    /// 足した要素は AP 用アイドルタスクで、値は本番と同じ `Ready` にしてある。
     /// `pick_next` はワーカー（`1..=WORKER_COUNT`）しか候補にしないので結果は
-    /// 変わらないが、**既存の表明はすべて「AP 用アイドルタスクが選ばれないこと」も
-    /// 同時に主張するようになった。** 入力が変わったことを書いておく。
+    /// 変わらないが、既存の表明はすべて「AP 用アイドルタスクが選ばれないこと」も
+    /// 同時に主張するようになった。入力が変わったことを書いておく。
     fn states(flags: [bool; TASK_COUNT]) -> [TaskState; TASK_COUNT] {
         let mut out = [TaskState::Uninitialized; TASK_COUNT];
         for (slot, flag) in out.iter_mut().zip(flags) {
@@ -1964,18 +1964,18 @@ mod tests {
 
     /// この表が前提にしている形。崩れたら下の期待値を引き直すこと。
     ///
-    /// # **S4-c-2 で実際に崩れ、この表明が止めた**
+    /// # S4-c-2 で実際に崩れ、この表明が止めた
     ///
     /// `TASK_COUNT` を 3 から 4 へ増やしたとき（AP 用アイドルタスクの新設）、
-    /// **この表明が落ちて期待値の引き直しを促した。** 引き直した内容は
+    /// この表明が落ちて期待値の引き直しを促した。引き直した内容は
     /// [`states`] の doc に書いてある（入力に 1 要素増え、値は本番と同じ `Ready`）。
-    /// **「崩れたら引き直せ」と書いておいた表明が、実際にその役目を果たした。**
+    /// 「崩れたら引き直せ」と書いておいた表明が、実際にその役目を果たした。
     #[test]
     fn the_demo_has_two_workers_and_one_main() {
         assert_eq!(WORKER_COUNT, 2);
         // メイン（0）+ ワーカー 2 + AP 用アイドル 1。
         assert_eq!(TASK_COUNT, 4);
-        // **AP 用アイドルはワーカーの後ろに置く。** `pick_next` の走査範囲
+        // AP 用アイドルはワーカーの後ろに置く。`pick_next` の走査範囲
         // （`1..=WORKER_COUNT`）の外であることが、選ばれない理由である。
         assert_eq!(AP_IDLE_TASK, WORKER_COUNT + 1);
         assert!(AP_IDLE_TASK > WORKER_COUNT);
@@ -1988,7 +1988,7 @@ mod tests {
         assert_eq!(pick_next(states([false, false, false, true]), 2), 0);
     }
 
-    /// **タスク 0（メイン）は候補として巡回されない。** 走行可能と印を付けても
+    /// タスク 0（メイン）は候補として巡回されない。走行可能と印を付けても
     /// 選ばれるのは「他に誰もいないとき」の帰り先としてだけである。
     #[test]
     fn main_is_never_picked_as_a_rotation_candidate() {
@@ -2010,10 +2010,10 @@ mod tests {
         assert_eq!(pick_next(states([false, true, true, true]), 2), 1);
     }
 
-    /// **現タスクが再選択されうる。** 他に走れるワーカーがおらず自分だけが
+    /// 現タスクが再選択されうる。他に走れるワーカーがおらず自分だけが
     /// 走行可能なら、`pick_next` は現タスクを返す。呼び出し側
     /// （`schedule_switch`）が `next == current` を no-op として扱うことで
-    /// 成立している契約なので、**状態機械化でもこの性質を保つこと。**
+    /// 成立している契約なので、状態機械化でもこの性質を保つこと。
     #[test]
     fn the_current_worker_is_returned_when_it_is_the_only_runnable_one() {
         assert_eq!(pick_next(states([false, true, false, true]), 1), 1);
@@ -2027,7 +2027,7 @@ mod tests {
         assert_eq!(pick_next(states([false, true, false, true]), 2), 1);
     }
 
-    /// **`Ready` 以外はすべて選ばれない。** 状態を増やしたときに
+    /// `Ready` 以外はすべて選ばれない。状態を増やしたときに
     /// `is_runnable` の更新を忘れると、ここが落ちる。
     #[test]
     fn only_ready_is_runnable() {
@@ -2037,7 +2037,7 @@ mod tests {
         assert!(!TaskState::Finished.is_runnable());
     }
 
-    /// **`Uninitialized` が残っていても安全側に倒れる。** `static` の初期値が
+    /// `Uninitialized` が残っていても安全側に倒れる。`static` の初期値が
     /// `pick_next` から観測されないことに依存していないことの確認である。
     #[test]
     fn uninitialized_slots_are_never_chosen() {
@@ -2046,7 +2046,7 @@ mod tests {
         assert_eq!(pick_next(all_empty, 1), 0);
     }
 
-    /// **`Blocked` と `Finished` は選択可否では区別されない。** 区別が要るのは
+    /// `Blocked` と `Finished` は選択可否では区別されない。区別が要るのは
     /// 会計と記録であって、選択ではない（畳んでいた `false` を分けた目的）。
     #[test]
     fn blocked_and_finished_are_both_unselectable_but_distinct() {
