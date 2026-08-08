@@ -5343,37 +5343,6 @@ fn report_mapping_granularity(
     }
 }
 
-/// 稼働中のページテーブルを読み戻し、`plan` の意図と突き合わせる（M5-a-1）。
-///
-/// M4 で `sgdt` / `sidt` / PIC の IMR に対して行ってきたのと同じことを、
-/// ページテーブルに対して行う。これまでページテーブルだけは**書きっぱなしで
-/// 読み戻す手段が無かった**。
-///
-/// あわせて、TLB の全フラッシュ（CR3 リロード）が成立する条件も実測する。
-/// 物理アドレスの範囲がマップ計画に含まれるか。
-///
-/// **恒等マッピングの間の橋渡しである。** 呼び出し側はまだ `u64` で
-/// 範囲を持っており、`MappedRanges` は `PhysAddr` を扱う。物理として
-/// 表せない値は「含まれない」として扱う。
-/// リンカが定義する kernel イメージの範囲を、物理アドレスとして得る。
-///
-/// # なぜ変換を関数にするのか
-///
-/// リンカシンボルは**仮想アドレス**である。現在はリンクアドレスが
-/// `0x100000` の恒等マッピングなので、値がそのまま物理アドレスとしても
-/// 通る。そのため `as u64` で済ませても動いてしまう。
-///
-/// **higher-half 移行でここが変わる。** 移行後、リンカが返すのは
-/// `0xFFFFFFFF80100000` 付近の仮想アドレスで、物理としては使えない。
-/// 一方、フレームアロケータやマップ計画が必要とするのは物理アドレスである。
-///
-/// # この変換は direct map ではない
-///
-/// **direct physical map 経由の変換とは別の関係である。** kernel イメージの
-/// 物理位置は「リンクアドレスとロードアドレスの差」で決まる。bootloader が
-/// ELF をどこへ置いたかで決まるものであって、direct map の窓とは無関係で
-/// ある。移行時にこの関数の中身をその差へ書き換えること。
-/// 詳細は `docs/deferred-decisions.md` を参照。
 /// higher-half A-1: 恒等と direct map 窓の両方を持つ新テーブルを構築し、
 /// CR3 を切り替える（ADR-0021 の Addendum）。
 ///
@@ -6200,6 +6169,25 @@ const fn entry_count() -> usize {
     512
 }
 
+/// リンカが定義する kernel イメージの範囲を、物理アドレスとして得る。
+///
+/// # なぜ変換を関数にするのか
+///
+/// リンカシンボルは**仮想アドレス**である。現在はリンクアドレスが
+/// `0x100000` の恒等マッピングなので、値がそのまま物理アドレスとしても
+/// 通る。そのため `as u64` で済ませても動いてしまう。
+///
+/// **higher-half 移行でここが変わる。** 移行後、リンカが返すのは
+/// `0xFFFFFFFF80100000` 付近の仮想アドレスで、物理としては使えない。
+/// 一方、フレームアロケータやマップ計画が必要とするのは物理アドレスである。
+///
+/// # この変換は direct map ではない
+///
+/// **direct physical map 経由の変換とは別の関係である。** kernel イメージの
+/// 物理位置は「リンクアドレスとロードアドレスの差」で決まる。bootloader が
+/// ELF をどこへ置いたかで決まるものであって、direct map の窓とは無関係で
+/// ある。移行時にこの関数の中身をその差へ書き換えること。
+/// 詳細は `docs/deferred-decisions.md` を参照。
 fn kernel_image_phys_range() -> (common::addr::PhysAddr, common::addr::PhysAddr) {
     use common::addr::VirtAddr;
 
@@ -6215,6 +6203,11 @@ fn kernel_image_phys_range() -> (common::addr::PhysAddr, common::addr::PhysAddr)
     )
 }
 
+/// 物理アドレスの範囲がマップ計画に含まれるか。
+///
+/// **恒等マッピングの間の橋渡しである。** 呼び出し側はまだ `u64` で
+/// 範囲を持っており、`MappedRanges` は `PhysAddr` を扱う。物理として
+/// 表せない値は「含まれない」として扱う。
 fn range_is_mapped<const CAP: usize>(mapped: &MappedRanges<CAP>, start: u64, end: u64) -> bool {
     match (
         common::addr::PhysAddr::new(start),
@@ -6225,6 +6218,13 @@ fn range_is_mapped<const CAP: usize>(mapped: &MappedRanges<CAP>, start: u64, end
     }
 }
 
+/// 稼働中のページテーブルを読み戻し、`plan` の意図と突き合わせる（M5-a-1）。
+///
+/// M4 で `sgdt` / `sidt` / PIC の IMR に対して行ってきたのと同じことを、
+/// ページテーブルに対して行う。これまでページテーブルだけは**書きっぱなしで
+/// 読み戻す手段が無かった**。
+///
+/// あわせて、TLB の全フラッシュ（CR3 リロード）が成立する条件も実測する。
 fn verify_page_tables(
     logger: &mut Logger<SerialPort>,
     mapped: &MappedRanges<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
