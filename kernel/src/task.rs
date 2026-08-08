@@ -1109,10 +1109,6 @@ fn schedule_switch(current_rsp: u64) -> u64 {
     }
 }
 
-/// 次に走らせるタスクを選ぶ。ワーカーを巡回し、走行可能なものが無ければ
-/// メイン（0）へ戻る。
-// no-swap の破壊ビルドではスイッチしないので、次タスクを選ばず未使用になる。
-#[cfg_attr(feature = "task-switch-no-swap", allow(dead_code))]
 /// **あるタスクが、自分以外のコアの `CURRENT` に入っているか**（S4-c-3-2b）。
 ///
 /// 第 2 層のフィルタと、二重選択の検出器が**共有する述語である。**
@@ -1250,6 +1246,10 @@ fn report_double_selection(next: usize, cpu: usize, currents: &[usize; MAX_CPUS]
     ));
 }
 
+/// 次に走らせるタスクを選ぶ。ワーカーを巡回し、走行可能なものが無ければ
+/// メイン（0）へ戻る。
+// no-swap の破壊ビルドではスイッチしないので、次タスクを選ばず未使用になる。
+#[cfg_attr(feature = "task-switch-no-swap", allow(dead_code))]
 fn pick_next(
     states: [TaskState; TASK_COUNT],
     owners: [usize; TASK_COUNT],
