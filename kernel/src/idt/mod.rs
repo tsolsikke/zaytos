@@ -861,17 +861,17 @@ pub fn timer_delivery_count() -> u64 {
 
 /// 進行中のぶんとして許すずれ（S4-a）。
 ///
-/// **統計的な許容ではない。** 2 つの値を続けて読む間に、各コアが最大 1 本ずつ
-/// 数えうる、という**上限**である。標本を増やしても縮まない類の値ではなく、
+/// 統計的な許容ではない。2 つの値を続けて読む間に、各コアが最大 1 本ずつ
+/// 数えうる、という上限である。標本を増やしても縮まない類の値ではなく、
 /// コア数で決まる。余裕を見て 2 倍にしてある。
 const TIMER_ACCOUNTING_SLACK: u64 = (MAX_CPUS as u64) * 2;
 
 /// コアごとのティックの合計と、配送された本数が一致するか（S4-a）。
 ///
-/// **`smp-ap-timer-share-ticks` が捕まる先はここである。** per-CPU をやめて
+/// `smp-ap-timer-share-ticks` が捕まる先はここである。per-CPU をやめて
 /// 1 つを共有すると、合計が配送数のおよそ 2 倍になり、[`TIMER_ACCOUNTING_SLACK`]
-/// をはるかに超える。**「per-CPU 化が済んだように見えて共有のまま」を、
-/// 名前ではなく数で捕まえる。**
+/// をはるかに超える。「per-CPU 化が済んだように見えて共有のまま」を、
+/// 名前ではなく数で捕まえる。
 pub fn timer_accounting_balances() -> bool {
     timer_ticks_total().abs_diff(timer_delivery_count()) <= TIMER_ACCOUNTING_SLACK
 }
@@ -894,8 +894,8 @@ pub fn interrupt_count(vector: usize) -> u64 {
 
 /// 現時点の全ベクタのカウンタを写し取る。
 ///
-/// 「この時点より後に何か届いたか」を見るための基準点。**絶対値で
-/// 「全部 0 か」を見てはいけない。** 起動シーケンスの中でソフトウェア
+/// 「この時点より後に何か届いたか」を見るための基準点。絶対値で
+/// 「全部 0 か」を見てはいけない。起動シーケンスの中でソフトウェア
 /// 割り込みによる経路検証（`--interrupt-test irq-path`）を通ると、
 /// [`TEST_VECTOR`] の分が既にカウントされており、絶対値では常に
 /// 「何か来た」と判定されてしまう。
@@ -920,8 +920,8 @@ pub fn delta_since(baseline: &[u64; IDT_ENTRY_COUNT]) -> (u64, Option<usize>) {
 
 /// 全ベクタの合計と、0 でなかった最初のベクタを返す。
 ///
-/// 「全部 0 のはず」を確認する用途で、**0 でなかった場合にどのベクタかが
-/// 分かる**形にしてある。とくに NMI（ベクタ 2）は `cli` でマスクできない
+/// 「全部 0 のはず」を確認する用途で、0 でなかった場合にどのベクタかが
+/// 分かる形にしてある。とくに NMI（ベクタ 2）は `cli` でマスクできない
 /// ため、全 IRQ をマスクした状態でも理論上は届きうる。合計だけを見ていると
 /// 「何かが来た」までしか分からず、原因の見当がつかない。
 pub fn interrupt_total_and_first_nonzero() -> (u64, Option<usize>) {
@@ -941,7 +941,7 @@ pub fn interrupt_total_and_first_nonzero() -> (u64, Option<usize>) {
 
 /// `call` 直前の実測 RSP が 16 バイト境界にあることを確認する。
 ///
-/// **手計算の再現ではない。** スタブが `call` の直前にレジスタから読んだ
+/// 手計算の再現ではない。スタブが `call` の直前にレジスタから読んだ
 /// 実値を受け取って検査する。境界計算（[`STACK_ALIGN_ADJUST`] の導出）が
 /// 間違っていれば、ここで捕まる。
 ///
@@ -979,11 +979,11 @@ pub(crate) fn check_stack_alignment(rsp_at_call: u64, path: &str, vector: u64) {
     cpu::halt_forever();
 }
 
-/// IRQ の共通処理。**戻る。**
+/// IRQ の共通処理。戻る。
 ///
 /// スタブから `extern "sysv64"` で呼ばれる（ADR-0018 のチェックリスト 11）。
 ///
-/// **出力しない。** ADR-0018 §5 のとおり、ここでやるのは共有状態の更新だけ
+/// 出力しない。ADR-0018 §5 のとおり、ここでやるのは共有状態の更新だけ
 /// である。観測はメインループがカウンタ越しに行う。
 ///
 /// M4-d-1 の時点では EOI を送らない。全 IRQ をマスクしているため実際の
@@ -995,18 +995,18 @@ pub(crate) fn check_stack_alignment(rsp_at_call: u64, path: &str, vector: u64) {
 /// `context` はスタブが積んだ [`IrqContext`] を指していること。
 /// `rsp_at_call` はスタブが `call` 直前に読んだ RSP であること。
 extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u64 {
-    // 切り替え不要なときに返す RSP。**入場時の IrqContext 先頭そのもの**で、
+    // 切り替え不要なときに返す RSP。入場時の IrqContext 先頭そのもので、
     // スタブの復帰部で `mov rsp, rax` してもこれなら現状と同じ場所へ戻る
     // （ADR-0019 §2.1）。M5-c ではここが切り替えの唯一の分岐点になり、
     // yield ベクタのときだけ別タスクの RSP を返す（下の分岐）。
     let no_switch_rsp = context as u64;
 
-    // **測定用 IPI（S5-a）は BKL を取る前に処理して戻る。**
+    // 測定用 IPI（S5-a）は BKL を取る前に処理して戻る。
     //
-    // **BKL 待ちと IPI の相性は未解決である**（`deferred-decisions.md` の
+    // BKL 待ちと IPI の相性は未解決である（`deferred-decisions.md` の
     // 「BKL取得待ちのIF=0とIPIのデッドロック」）。ここで BKL を取ると、
-    // **測るためだけのベクタでその罠を踏むことになる。**
-    // 触るのは自コアのカウンタと自コアの Local APIC だけなので、**BKL は要らない。**
+    // 測るためだけのベクタでその罠を踏むことになる。
+    // 触るのは自コアのカウンタと自コアの Local APIC だけなので、BKL は要らない。
     //
     // SAFETY: スタブが直前に積んだ有効な `IrqContext` を指す。読み取りのみ。
     if unsafe { (*context).vector } as usize == IPI_PROBE_VECTOR {
@@ -1018,21 +1018,21 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         return no_switch_rsp;
     }
 
-    // **BKL を取る（S4-b-2）。** ここから戻るまでカーネルへ入れるのは 1 コアだけ
-    // である。**早期 return が複数あるので RAII にする**（解放を各 return の手前へ
+    // BKL を取る（S4-b-2）。ここから戻るまでカーネルへ入れるのは 1 コアだけ
+    // である。早期 return が複数あるので RAII にする（解放を各 return の手前へ
     // 書くと、1 つ落としたときに保持したまま戻り、系全体が止まる）。
     //
-    // **同時進入は BKL の中で数える（S4-b-3）。** ここで別に数えると、
+    // 同時進入は BKL の中で数える（S4-b-3）。ここで別に数えると、
     // 定義が 2 つになる。
     // 破壊 (S4-b-4, bkl-skip-timer-entry): ロックを取らず計数だけ行う。
-    // **数えているものが本番と違う**（`acquire_counting_only` の doc）。
+    // 数えているものが本番と違う（`acquire_counting_only` の doc）。
     #[cfg(feature = "bkl-skip-timer-entry-test")]
     let _bkl = crate::bkl::acquire_counting_only(crate::bkl::KernelEntry::Irq);
     #[cfg(not(feature = "bkl-skip-timer-entry-test"))]
     let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::Irq);
 
     // 破壊 (S4-b-4, bkl-widen-entry-window): 入口の保持区間を広げる。
-    // **重なりの増幅器であって、素の重なりの頻度とは別である**（feature の doc）。
+    // 重なりの増幅器であって、素の重なりの頻度とは別である（feature の doc）。
     #[cfg(feature = "bkl-widen-entry-window-test")]
     for _ in 0..crate::bkl::WIDENED_ENTRY_WINDOW_SPINS {
         core::hint::spin_loop();
@@ -1069,58 +1069,58 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         );
     }
 
-    // Local APIC のスプリアス割り込み（S2-d-1）。**EOI を送らずに戻る。**
+    // Local APIC のスプリアス割り込み（S2-d-1）。EOI を送らずに戻る。
     //
-    // **判定を明示にした。** 以前このベクタに EOI が送られなかったのは
+    // 判定を明示にした。以前このベクタに EOI が送られなかったのは
     // 「PIC の担当範囲の外だから」であって、スプリアスだからではなかった。
     // S2-d で Local APIC が配送を担うと LAPIC 由来のベクタには EOI が要るので、
-    // **その偶然の一致は壊れる。** ここで問いの形にしておく。
+    // その偶然の一致は壊れる。ここで問いの形にしておく。
     //
-    // 回数は PIC のスプリアス（IRQ7 / IRQ15）とは**別に数える。** 機序が違い、
+    // 回数は PIC のスプリアス（IRQ7 / IRQ15）とは別に数える。機序が違い、
     // 合流させるとどちらが起きたのかハートビートから分からなくなる。
     if vector == crate::apic::SPURIOUS_VECTOR as usize {
         LAPIC_SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
         return no_switch_rsp;
     }
 
-    // Local APIC タイマ（S2-d-2）。**LVT 由来なので IRQ 番号を持たない。**
+    // Local APIC タイマ（S2-d-2）。LVT 由来なので IRQ 番号を持たない。
     //
-    // **判定の順序を固定する。LVT 由来を先に見る。** 後ろに置くと、
+    // 判定の順序を固定する。LVT 由来を先に見る。後ろに置くと、
     // このベクタが PIC の採番表に当たる構成で誤る。現行の 2 構成
-    // （`0x20`-`0x2F` と `0x30`-`0x3F`）では当たらないが、**依存を残さない。**
+    // （`0x20`-`0x2F` と `0x30`-`0x3F`）では当たらないが、依存を残さない。
     //
-    // EOI は Local APIC へ送る。**8259 は関与しない。**
+    // EOI は Local APIC へ送る。8259 は関与しない。
     if vector == LAPIC_TIMER_VECTOR {
         timer_ticks_slot().fetch_add(1, Ordering::Relaxed);
         // SAFETY: 割り込みハンドラの中であり、割り込みゲート経由なので IF=0。
         // 実際に配送された割り込みに対してのみ呼んでいる。
         //
-        // **EOI は自コアの Local APIC へ届く。** 送り先の VA は 1 つだが、
+        // EOI は自コアの Local APIC へ届く。送り先の VA は 1 つだが、
         // その物理アドレスは実行しているコア自身の LAPIC に別名づけられている。
-        // **共有 IDT で両コアが同じハンドラに入っても、EOI の宛先は分かれる。**
+        // 共有 IDT で両コアが同じハンドラに入っても、EOI の宛先は分かれる。
         #[cfg(not(feature = "no-eoi-test"))]
         unsafe {
             crate::irq::end_of_interrupt_for_lapic_timer();
         }
-        // **AP もスケジューラへ入る（S4-c-3-2b）。**
+        // AP もスケジューラへ入る（S4-c-3-2b）。
         //
         // S4-a から S4-c-3-2a までは、ここで AP を手前へ返していた。当時の AP は
         // タスクを実行せず、入れば `CURRENT` の sentinel を読んで停止したためで
-        // ある。**S4-c-3-2b で AP に担当タスク（AP 用アイドルタスク）ができ、
-        // 起動時に sentinel を解くようになったので、その分岐は不要になった。**
+        // ある。S4-c-3-2b で AP に担当タスク（AP 用アイドルタスク）ができ、
+        // 起動時に sentinel を解くようになったので、その分岐は不要になった。
         //
-        // **破壊 `smp-ap-enter-scheduler` はここで引退した。** 分岐そのものが
-        // 無くなったので「分岐を外す」破壊は**構成できない。** 役目
+        // 破壊 `smp-ap-enter-scheduler` はここで引退した。分岐そのものが
+        // 無くなったので「分岐を外す」破壊は構成できない。役目
         // （sentinel が止めることの実証）は `smp-ap-no-sentinel-clear` が
         // 引き継いでいる（あちらは分岐ではなく sentinel の解除を落とす）。
         return crate::task::on_timer_tick(no_switch_rsp);
     }
 
-    // このベクタはどの IRQ か。**移行済みの経路も含めて引く**（S2-d-1c）。
+    // このベクタはどの IRQ か。移行済みの経路も含めて引く（S2-d-1c）。
     //
-    // **ここは EOI の入口ではなく、IRQ 処理全体の入口である。** 下の
+    // ここは EOI の入口ではなく、IRQ 処理全体の入口である。下の
     // ブロックにはティックの加算もキーボードのハンドラも入っており、
-    // **引けなければハンドラごと呼ばれない。** I/O APIC 経由のベクタは
+    // 引けなければハンドラごと呼ばれない。I/O APIC 経由のベクタは
     // PIC の採番表に載っていないので、`irq::irq_for` では引けない。
     //
     // テスト専用ベクタ（`0x40`、どちらの表にも無い）はここに入らないので、
@@ -1128,17 +1128,17 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     let delivered_irq = irq_for_vector(vector);
 
     if let Some(irq) = delivered_irq {
-        // **配送先を問うので、8259 の採番ではなく現在の配送先を見る。**
+        // 配送先を問うので、8259 の採番ではなく現在の配送先を見る。
         // 今は同じ値だが、S2-d-2 で Local APIC タイマへ移すと変わる。
         if vector == timer_delivery_vector() {
             timer_ticks_slot().fetch_add(1, Ordering::Relaxed);
         }
 
-        // キーボード（IRQ1）。**EOI より先に呼ぶ。** この中でデータポートを
+        // キーボード（IRQ1）。EOI より先に呼ぶ。この中でデータポートを
         // 読み切らないと、コントローラの出力バッファが空かず次の IRQ1 が
         // 来なくなる。
         //
-        // **ベクタではなく IRQ 番号で判定する**（S2-d-1c）。配送先ベクタは
+        // ベクタではなく IRQ 番号で判定する（S2-d-1c）。配送先ベクタは
         // 8259 経由と I/O APIC 経由で違うが、IRQ 番号は移行しても変わらない。
         if irq == crate::keyboard::KEYBOARD_IRQ {
             crate::keyboard::handle_irq(context.vector);
@@ -1154,7 +1154,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
             SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
         }
 
-        // **処理を終えてから EOI を送る。** 送った時点で PIC は次の同じ
+        // 処理を終えてから EOI を送る。送った時点で PIC は次の同じ
         // 割り込みを上げられるようになる。宛先は純粋ロジックが決める
         // （スプリアスの扱いはマスタ側とスレーブ側で非対称）。
         //
@@ -1170,8 +1170,8 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     // 出力自体がハンドラの処理時間を支配し、ティックを取りこぼす。観測は
     // メインループがカウンタ越しに行う。
 
-    // タイマ（IRQ0）はプリエンプティブに切り替える（M5-d）。**EOI はここより
-    // 前で送っている**ので、次タスクは IF=1 で次ティックを受けられる。キーボード
+    // タイマ（IRQ0）はプリエンプティブに切り替える（M5-d）。EOI はここより
+    // 前で送っているので、次タスクは IF=1 で次ティックを受けられる。キーボード
     // やテストベクタは切り替えない（入場時の RSP を返す）。
     if vector == timer_delivery_vector() {
         return crate::task::on_timer_tick(no_switch_rsp);
@@ -1180,16 +1180,16 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     no_switch_rsp
 }
 
-/// タイマ（IRQ0）の**8259 での**ベクタ。
+/// タイマ（IRQ0）の8259 でのベクタ。
 ///
 /// 8259 のベクタ採番に追随する。`alt-offset-test` では `0x30` になる。
 ///
 /// # これは現在の配送先とは限らない
 ///
-/// **名前が事実と食い違わないよう改名した**（旧 `TIMER_VECTOR`）。
+/// 名前が事実と食い違わないよう改名した（旧 `TIMER_VECTOR`）。
 /// S2-d-2 でタイマを Local APIC タイマへ移すと、実際の配送先は LVT Timer に
-/// 載せた別のベクタになる。この定数はあくまで**8259 の採番表が与える値**で
-/// あって、現在どこへ届くかではない。**改名は移行より前でも正確である**
+/// 載せた別のベクタになる。この定数はあくまで8259 の採番表が与える値で
+/// あって、現在どこへ届くかではない。改名は移行より前でも正確である
 /// （8259 の採番表が与える値である、というのは移行前から真である）。
 ///
 /// 現在の配送先を知りたい場合は [`timer_delivery_vector`] を使うこと。
