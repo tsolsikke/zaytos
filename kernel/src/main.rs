@@ -3354,21 +3354,21 @@ fn start_timer(
 ///
 /// 順序に意味がある。
 ///
-/// 1. コンフィグバイトを**読んで**、翻訳（セット 1）と割り込みが有効かを見る
-/// 2. 落ちていれば立てて書き戻し、**読み直して一致を確認**する
+/// 1. コンフィグバイトを読んで、翻訳（セット 1）と割り込みが有効かを見る
+/// 2. 落ちていれば立てて書き戻し、読み直して一致を確認する
 /// 3. 出力バッファの残留データを読み捨てる
 /// 4. IRQ1 のマスクを解除する
 /// 5. IMR を読み戻して `master=0xFC` を照合する
 ///
-/// 3 を 4 より前に置くのが要点。ファームウェアが残したバイトが最初のキー
-/// 入力として現れる事故を防ぐ。OVMF はブートメニューでキーを扱っているので、
-/// 何か残っていてもおかしくない。
+/// 3 を 4 より前に置くのが要点。ファームウェアが残したバイトが最初のキー入力として
+/// 現れる事故を防ぐ。OVMF はブートメニューでキーを扱っているので、何か残っていても
+/// おかしくない。
 fn setup_keyboard(logger: &mut Logger<SerialPort>) {
     use keyboard::controller;
 
     // --- 1. コンフィグバイトを読む ---
-    // SAFETY: 起動シーケンス中で IRQ1 はマスクされており、他の実行文脈が
-    // i8042 を触っていない。
+    // SAFETY: 起動シーケンス中で IRQ1 はマスクされており、他の実行文脈が i8042 を
+    // 触っていない。
     let config = match unsafe { controller::read_config() } {
         Ok(config) => config,
         Err(error) => {
@@ -3419,8 +3419,8 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>) {
     }
 
     // --- 4. IRQ1 を解禁する ---
-    // SAFETY: ベクタ 0x21 には IRQ スタイルのスタブが入っており、ハンドラは
-    // データポートを読み切ってから EOI を送る。
+    // SAFETY: ベクタ 0x21 には IRQ スタイルのスタブが入っており、ハンドラはデータ
+    // ポートを読み切ってから EOI を送る。
     unsafe {
         irq::unmask(keyboard::KEYBOARD_IRQ);
     }
@@ -3444,12 +3444,12 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>) {
 
 /// キーボード（IRQ1）の配送を I/O APIC 経由へ切り替える（S2-d-1c）。
 ///
-/// **配送が変わる。この段で最も危険な一手である。**
+/// 配送が変わる。この段で最も危険な一手である。
 ///
 /// # 呼ぶ位置
 ///
-/// IRQ1 を 8259 で解禁した後、`sti` より前である。**割り込みが有効に
-/// なる前に切り替え終える**ので、切り替えの途中で IRQ1 が届く形にならない。
+/// IRQ1 を 8259 で解禁した後、`sti` より前である。割り込みが有効になる前に切り替え
+/// 終えるので、切り替えの途中で IRQ1 が届く形にならない。
 ///
 /// # 順序
 ///
@@ -3466,8 +3466,8 @@ fn switch_keyboard_to_io_apic(
         return;
     };
 
-    // 破壊 (S2-d-1c, ioapic-wrong-vector): ゲートの無いベクタへ向ける。
-    // 読み戻しの主張と到達の主張が両方落ちる。
+    // 破壊 (ioapic-wrong-vector-test): ゲートの無いベクタへ向ける。読み戻しの主張と
+    // 到達の主張が両方落ちる（S2-d-1c）。
     #[cfg(not(feature = "ioapic-wrong-vector-test"))]
     let vector = idt::IOAPIC_KEYBOARD_VECTOR as u8;
     #[cfg(feature = "ioapic-wrong-vector-test")]
@@ -3483,23 +3483,21 @@ fn switch_keyboard_to_io_apic(
         cpu::halt_forever();
     }
 
-    // **設定の読み戻し。** 書いた値が entry に載っていることを、到達とは
-    // 独立に確かめる。読み戻しだけだと配送されない形（マスクの外し忘れ、
-    // 宛先の誤り）を通し、到達だけだと保持されているかを見ていない。
+    // 設定の読み戻し。書いた値が entry に載っていることを、到達とは独立に確かめる。
+    // 読み戻しだけだと配送されない形（マスクの外し忘れ、宛先の誤り）を通し、到達だけ
+    // だと保持されているかを見ていない。
     let readback = irq::routed_entry_readback(mapped, keyboard::KEYBOARD_IRQ);
     match readback {
         Some(entry) => {
             let vector_ok = entry.vector() == vector;
-            // **宛先を主張にする（S4-a）。**
-            //
-            // 「キーボードは bootstrap processor にしか届かない」は、AP が割り込みを
-            // 受けられるようになった段（S4-a）の**安全の根拠**である。それまでは
-            // 起動時の棚卸しのログに `destination=0x00` が出ているだけで、
-            // **実測の記憶であって主張ではなかった。**
+            // 宛先を主張にする（S4-a）。「キーボードは bootstrap processor にしか
+            // 届かない」は、AP が割り込みを受けられるようになった段の安全の根拠で
+            // ある。それまでは起動時の棚卸しのログに `destination=0x00` が出ている
+            // だけで、実測の記憶であって主張ではなかった。
             //
             // physical モードなら high dword の宛先は Local APIC ID そのものである。
-            // BSP の APIC ID は MADT の最初の使用可能なエントリから取る
-            // （**その値が BSP とは限らない**という制約は `smp.rs` の該当箇所にある）。
+            // BSP の APIC ID は MADT の最初の使用可能なエントリから取る（その値が
+            // BSP とは限らないという制約は `smp.rs` の該当箇所）。
             let expected_destination = mapped.mmio().bsp_candidate_apic_id().unwrap_or(0);
             let destination_ok =
                 entry.physical_destination_mode() && entry.destination() == expected_destination;
@@ -3540,24 +3538,23 @@ fn switch_keyboard_to_io_apic(
 
 /// M5-e で使うユーザー空間の PML4 インデックス。空きの下位半分の先頭。
 ///
-/// **higher-half B までの暫定である。** 現在カーネルは PML4[0]（下位半分）に
-/// 恒等で居るので、Linux 型の「下位=ユーザー / 上位=カーネル」はまだ成立して
-/// いない。B でカーネルを上位へ移し恒等を外せば、ユーザー空間を通常の低位へ
-/// 広げられる（deferred-decisions.md）。
+/// higher-half B までの暫定である。現在カーネルは PML4[0]（下位半分）に恒等で居るので、
+/// Linux 型の「下位=ユーザー / 上位=カーネル」はまだ成立していない。B でカーネルを
+/// 上位へ移し恒等を外せば、ユーザー空間を通常の低位へ広げられる
+/// （deferred-decisions.md）。
 pub const USER_PML4_INDEX: usize = 1;
 
 /// ユーザーページのマッピング能力を検証する（M5-e-2）。
 ///
-/// 専用サブツリー（空き PML4[[`USER_PML4_INDEX`]]、仮想ベース 512 GiB）へ、
+/// 専用サブツリー（空き PML4[[`USER_PML4_INDEX`]]、仮想ベース 512 GiB）へ
 /// [`ActivePageTable::map_4kib`] で U=1 のテストページを 1 枚張り、独立 walker で
-/// 「ユーザーサブツリー全階層 U=1・カーネル側全 U=0」を実走査で確かめ、Ring 0
-/// から既知値を書いて読み戻し、葉だけをアンマップする。中間テーブルは残す
-/// （M5-e-3 が同じサブツリーを再利用する。判断 b-i）。Ring 3 からのアクセスは
-/// まだ試さない（M5-e-3）。
+/// 「ユーザーサブツリー全階層 U=1・カーネル側全 U=0」を実走査で確かめ、Ring 0 から
+/// 既知値を書いて読み戻し、葉だけをアンマップする。中間テーブルは残す（M5-e-3 が
+/// 同じサブツリーを再利用する。判断 b-i）。Ring 3 からのアクセスはまだ試さない。
 ///
-/// `paging-test` ビルドは `unmap_4kib` を全体的にわざと壊すため、切り分け軸を
-/// 一つに保つ目的でこの検証は載せない（このユーザーマッピング検証は分割/
-/// アンマップ回帰とは独立の関心事）。
+/// `paging-test` ビルドは `unmap_4kib` を全体的にわざと壊すので、切り分け軸を一つに
+/// 保つためこの検証は載せない。ユーザーマッピングの検証は分割/アンマップの回帰とは
+/// 独立の関心事である。
 #[cfg(not(feature = "paging-test"))]
 fn verify_user_page_mapping<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
@@ -3632,8 +3629,8 @@ fn verify_user_page_mapping<const CAP: usize>(
     }
 
     // --- Ring 0 から既知値を書いて読み戻す（present・writable・到達可能） ---
-    // SAFETY: virt は今張ったばかりの writable なページ。SMAP は未有効なので
-    // Ring 0 からユーザーページへアクセスできる。
+    // SAFETY: virt は今張ったばかりの writable なページ。SMAP は未有効なので Ring 0 から
+    // ユーザーページへアクセスできる。
     unsafe {
         core::ptr::write_volatile(virt.as_mut_ptr::<u64>(), KNOWN);
     }
@@ -3648,8 +3645,8 @@ fn verify_user_page_mapping<const CAP: usize>(
     }
 
     // --- 葉だけアンマップ。中間テーブルは残す（M5-e-3 が再利用） ---
-    // SAFETY: virt は今張った 4KiB ページ。以後この仮想アドレスへはアクセス
-    // しない（葉を落とした後の walk は TLB ではなくテーブルを読む）。
+    // SAFETY: virt は今張った 4KiB ページ。以後この仮想アドレスへはアクセスしない
+    // （葉を落とした後の walk は TLB ではなくテーブルを読む）。
     if let Err(e) = unsafe { table.unmap_4kib(virt) } {
         logger.error(format_args!("user-map: unmap_4kib failed: {e:?}; halting"));
         cpu::halt_forever();
@@ -3669,8 +3666,8 @@ fn verify_user_page_mapping<const CAP: usize>(
         }
     }
 
-    // アンマップ後の再監査。中間 residue は PML4[USER_PML4_INDEX] に閉じ、
-    // カーネル側に U=1 が漏れていないことを再確認する。
+    // アンマップ後の再監査。中間 residue が PML4[USER_PML4_INDEX] に閉じ、カーネル側に
+    // U=1 が漏れていないことを再確認する。
     // SAFETY: 同上。
     let after = unsafe { verify::audit_user_supervisor(pml4_phys, identity, USER_PML4_INDEX) };
     logger.info(format_args!(
@@ -3693,11 +3690,11 @@ fn verify_user_page_mapping<const CAP: usize>(
 
 /// Ring 3 への単発遠征を検証する（M5-e-3）。
 ///
-/// M5-e-2 が残した PML4[[`USER_PML4_INDEX`]] サブツリーへ、ユーザーコード
-/// （`cli` 1 命令）とユーザースタックの 2 ページを U=1 で張る。iretq で Ring 3 へ
-/// 落ち、`cli` が #GP を起こし、`exception_entry` が予期と判定して畳んでここへ
-/// 戻る。RSP0 が実挙動で効くこと（#GP が遠征専用スタックへ切り替わったこと）、
-/// Ring 3 に落ちたこと、両側 U/S 監査が成立し続けることを確かめる。
+/// M5-e-2 が残した PML4[[`USER_PML4_INDEX`]] サブツリーへ、ユーザーコード（`cli` 1 命令）
+/// とユーザースタックの 2 ページを U=1 で張る。iretq で Ring 3 へ落ち、`cli` が #GP を
+/// 起こし、`exception_entry` が予期と判定して畳んでここへ戻る。確かめるのは、RSP0 が
+/// 実挙動で効くこと（#GP が遠征専用スタックへ切り替わったこと）、Ring 3 に落ちたこと、
+/// 両側 U/S 監査が成立し続けることの3つである。
 ///
 /// `paging-test` ビルドでは載せない（[`verify_user_page_mapping`] と同じ理由）。
 #[cfg(not(feature = "paging-test"))]
@@ -3732,7 +3729,7 @@ fn verify_ring3_excursion<const CAP: usize>(
     let pml4_phys = table.pml4_phys();
 
     // 2 ページを U=1 で張る（M5-e-2 残置の中間テーブルを再利用）。
-    // 破壊 (M5-e-4, user-page-supervisor): USER を落とす（U=0）。遠征前の両側監査が
+    // 破壊 (ring3-test-user-page-supervisor): USER を落とす（U=0）。遠征前の両側監査が
     // user violation として捕まえる。
     #[cfg(not(feature = "ring3-test-user-page-supervisor"))]
     let user_flag = true;
@@ -3783,8 +3780,8 @@ fn verify_ring3_excursion<const CAP: usize>(
     // --- 遠征。iretq -> Ring 3 -> cli -> #GP -> 畳み -> ここへ戻る ---
     // cli はユーザーコード入口（USER_CODE_VIRT）に置いてあるので、予期する #GP の
     // フォルト RIP はそこである。
-    // SAFETY: ユーザーページは張り済み。main_rsp0_top はメインの上端で、遠征後に
-    // RSP0 をそこへ戻せる。起動時の単一実行文脈から 1 回だけ。
+    // SAFETY: ユーザーページは張り済み。main_rsp0_top はメインの上端なので、遠征後に
+    // RSP0 をそこへ戻せる。起動時の単一実行文脈から 1 回だけ呼ぶ。
     unsafe {
         ring3::enter(main_rsp0_top, ring3::USER_CODE_VIRT);
     }
@@ -3842,8 +3839,7 @@ fn verify_ring3_excursion<const CAP: usize>(
         cpu::halt_forever();
     }
 
-    // 遠征後も両側 U/S 監査が成立すること（ユーザー 2 ページ + 中間 U=1、
-    // カーネル U=0）。
+    // 遠征後も両側 U/S 監査が成立すること（ユーザー 2 ページと中間が U=1、カーネルが U=0）。
     // SAFETY: 同上。
     let after = unsafe { verify::audit_user_supervisor(pml4_phys, identity, USER_PML4_INDEX) };
     logger.info(format_args!(
@@ -3874,11 +3870,15 @@ fn verify_ring3_excursion<const CAP: usize>(
 /// Ring 3 へ戻ると、その戻り値がユーザー RAX に入り、ユーザーがスタックへ store する。
 /// 続く cli の #GP を予期の畳みでカーネルへ戻す。
 ///
-/// 確かめること: 6 引数（RDI/RSI/RDX/R10/R8/R9）が規約どおり syscall_entry に届いた
-/// こと（記録した 6 値が発行側の既知値と一致。同じ式の自己検算ではなく、発行側の
-/// 既知値とハンドラの独立読み戻しの突き合わせ）、戻り値が RAX で Ring 3 へ返った
-/// こと（ユーザースタックへ store された値が [`syscall::PROBE_RETURN`] と一致）、
-/// syscall_entry が RSP0（遠征）スタックで走ったこと、畳みで戻り RSP0 が復帰したこと。
+/// 確かめること。
+///
+/// - 6 引数（RDI/RSI/RDX/R10/R8/R9）が規約どおり syscall_entry に届いたこと。記録した
+///   6 値が発行側の既知値と一致すればよい。同じ式の自己検算ではなく、発行側の既知値と
+///   ハンドラの独立読み戻しの突き合わせである
+/// - 戻り値が RAX で Ring 3 へ返ったこと（ユーザースタックへ store された値が
+///   [`syscall::PROBE_RETURN`] と一致）
+/// - syscall_entry が RSP0（遠征）スタックで走ったこと
+/// - 畳みで戻り RSP0 が復帰したこと
 fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     use kernel::paging::active::{ActivePageTable, PageSize};
     use kernel::ring3;
@@ -3890,9 +3890,9 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     let code_virt = common::addr::VirtAddr::new(ring3::USER_CODE_VIRT)
         .expect("the user code virtual address is canonical");
 
-    // verify_ring3_excursion が張ったユーザーコードページを再利用する。前段の
-    // 副作用に暗黙依存しないよう、実状態を読んで 4KiB でマップされていることを
-    // 確かめてから書き換える（外れていれば静かに壊れる代わりに止まる）。
+    // verify_ring3_excursion が張ったユーザーコードページを再利用する。前段の副作用に
+    // 暗黙依存しないよう、実状態を読んで 4KiB でマップされていることを確かめてから
+    // 書き換える。外れていれば静かに壊れる代わりに止まる。
     // SAFETY: CR3 は自前テーブル。配下は恒等窓で読める。
     let table = unsafe { ActivePageTable::current(identity) };
     match table.translate(code_virt) {
@@ -3919,8 +3919,7 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     //   int 0x80             CD 80
     //   mov [rsp-8], rax     48 89 44 24 F8   戻り値をユーザースタックへ store
     //   cli                  FA               予期の #GP（畳み出口）
-    // mov r32, imm32 は 64bit で上位ゼロ拡張されるので、32bit に収まる既知値をそのまま
-    // 使える。
+    // mov r32, imm32 は 64bit で上位ゼロ拡張されるので、32bit に収まる既知値をそのまま使う。
     let mut code = [0u8; 64];
     let mut n = 0usize;
     let emit = |bytes: &[u8], code: &mut [u8; 64], n: &mut usize| {
@@ -3970,8 +3969,8 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     let cli_rip = ring3::USER_CODE_VIRT + cli_offset as u64;
     let int_rip = ring3::USER_CODE_VIRT + int_offset as u64;
 
-    // ユーザーが戻り値を store する先（ユーザースタック頂点の直下）。事前に毒値を
-    // 入れておき、畳み後に読み戻す。毒値のままなら store が起きていない。
+    // ユーザーが戻り値を store する先（ユーザースタック頂点の直下）。事前に毒値を入れて
+    // おき、畳み後に読み戻す。毒値のままなら store が起きていない。
     let store_slot = ring3::USER_STACK_TOP - 8;
     const STORE_POISON: u64 = 0x0BAD_0BAD_0BAD_0BAD;
     // SAFETY: store_slot はマップ済みのユーザースタックページ内。SMAP 未有効。
@@ -3994,8 +3993,8 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     //     戻り値 store -> cli -> #GP -> 畳み -> ここへ戻る ---
     // int 0x80 は 1 回だけ発行する。probe の記録はこの単一の呼び出しのものである
     // （invocations=1 と整合）。
-    // SAFETY: ユーザーページは張り済み。Ring 3 は cli_rip で cli を実行して #GP を
-    // 起こす。main_rsp0_top はメインの上端。起動時の単一実行文脈から 1 回だけ。
+    // SAFETY: ユーザーページは張り済み。Ring 3 は cli_rip で cli を実行して #GP を起こす。
+    // main_rsp0_top はメインの上端。起動時の単一実行文脈から 1 回だけ呼ぶ。
     unsafe {
         ring3::enter(main_rsp0_top, cli_rip);
     }
@@ -4049,8 +4048,8 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
         ));
         cpu::halt_forever();
     }
-    // 6 引数を規約どおり受け取ったか。発行側の既知値 PROBE_ARGS とハンドラの独立
-    // 読み戻し seen_args の突き合わせ（同じ式での自己検算ではない）。
+    // 6 引数を規約どおり受け取ったか。発行側の既知値 PROBE_ARGS とハンドラの独立読み戻し
+    // seen_args を突き合わせる（同じ式での自己検算ではない）。
     for (i, (&got, &expected)) in seen_args.iter().zip(syscall::PROBE_ARGS.iter()).enumerate() {
         if got != expected {
             logger.error(format_args!(
@@ -4090,10 +4089,12 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     ));
 }
 
-/// ポインタ系 syscall（`number`）を (buf, len) で 1 回発行し、ユーザーが store した戻り値を
-/// 返す（M5-f-2-1 / M5-f-2-2）。verify_syscall_roundtrip と同じ遠征機構（enter → int 0x80 →
-/// 戻り値 store → cli 畳み）を再利用する。ユーザーコード/スタックページは
-/// verify_ring3_excursion が張ったものを再利用する（呼び出し側が確認済み前提）。
+/// ポインタ系 syscall（`number`）を (buf, len) で 1 回発行し、ユーザーが store した
+/// 戻り値を返す（M5-f-2-1 / M5-f-2-2）。
+///
+/// 遠征機構（enter → int 0x80 → 戻り値 store → cli 畳み）は verify_syscall_roundtrip と
+/// 同じものを使う。ユーザーコード/スタックページは verify_ring3_excursion が張ったものを
+/// 再利用する（呼び出し側が確認済みであることが前提）。
 fn issue_ptr_len_syscall(logger: &mut Logger<SerialPort>, number: u64, buf: u64, len: u64) -> u64 {
     use kernel::ring3;
     use kernel::syscall;
@@ -4102,8 +4103,8 @@ fn issue_ptr_len_syscall(logger: &mut Logger<SerialPort>, number: u64, buf: u64,
         .expect("the user code virtual address is canonical");
 
     // ユーザールーチン: movabs rdi, buf; movabs rsi, len; mov eax, number;
-    //   int 0x80; mov [rsp-8], rax; cli。buf は 512 GiB 付近で 32bit に収まらないため
-    //   movabs（imm64）で積む。
+    //   int 0x80; mov [rsp-8], rax; cli
+    // buf は 512 GiB 付近で 32bit に収まらないので movabs（imm64）で積む。
     let mut code = [0u8; 64];
     let mut n = 0usize;
     let emit = |bytes: &[u8], code: &mut [u8; 64], n: &mut usize| {
@@ -4165,15 +4166,15 @@ fn issue_ptr_len_syscall(logger: &mut Logger<SerialPort>, number: u64, buf: u64,
     unsafe { core::ptr::read_volatile(store_slot as *const u64) }
 }
 
-/// ユーザーポインタ検証の検証（M5-f-2-1）。正常系 + 異常系5ケースの battery を回す。
+/// ユーザーポインタ検証の検証（M5-f-2-1）。正常系と異常系5ケースを回す。
 ///
 /// verify_ring3_excursion が残したユーザーページを再利用し、無効3（supervisor in user
 /// range）のために U=0 ページを1枚張る。各ケースで SYS_CHECK_PTR を発行し、有効ポインタは
-/// 受理（戻り値 0）、無効ポインタは拒否（-EFAULT）されることを確かめる。この段は copy 未
-/// 実装なので、拒否は「踏み込む前に弾いた」ことそのものである（バイトを読む経路が無い）。
+/// 受理（戻り値 0）、無効ポインタは拒否（-EFAULT）されることを確かめる。この段は copy が
+/// 未実装なので、拒否は「踏み込む前に弾いた」ことそのものである。バイトを読む経路が無い。
 ///
-/// 異常系は多層防御のどのチェックが弾いても「拒否」は成立する。単独チェックの隔離破壊は
-/// skip-us / skip-laststep / skip-all（verification-coverage 参照）。
+/// 異常系は多層防御のどのチェックが弾いても拒否は成立する。単独チェックの隔離破壊は
+/// skip-us / skip-laststep / skip-all（verification-coverage）。
 fn verify_syscall_pointer<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
     allocator: &mut frame_allocator::FrameAllocator<CAP>,
@@ -4288,25 +4289,27 @@ fn verify_syscall_pointer<const CAP: usize>(
 
 /// ユーザーバッファの内容往復の検証（M5-f-2-2）。
 ///
-/// カーネルが既知内容をユーザーバッファ（ユーザースタックページの下部。Ring 3 の RSP は
-/// 頂点付近しか使わないので下部は空き）へ書き、SYS_CHECKSUM を発行する。カーネルは検証 →
-/// copy_from_user → バイト総和を返す。ユーザーが store し、カーネルが畳み後に読み戻して、
-/// **発行側の既知内容から計算した期待総和と一致**することを確かめる（自己検算でなく、発行側
-/// 既知値とカーネルの独立読みの突き合わせ）。加えて、カーネルポインタを渡すと copy 前の検証で
-/// -EFAULT が返る（読みに踏み込まない）ことを確かめる。
+/// カーネルが既知内容をユーザーバッファへ書き、SYS_CHECKSUM を発行する。バッファは
+/// ユーザースタックページの下部に置く（Ring 3 の RSP は頂点付近しか使わないので空き）。
+/// カーネルは検証 → copy_from_user → バイト総和を返す。ユーザーが store し、カーネルが
+/// 畳み後に読み戻して、発行側の既知内容から計算した期待総和と一致することを確かめる。
+/// 自己検算ではなく、発行側の既知値とカーネルの独立読みの突き合わせである。
+/// あわせて、カーネルポインタを渡すと copy 前の検証で -EFAULT が返る（読みに踏み込まない）
+/// ことを確かめる。
 fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
     use kernel::ring3;
     use kernel::syscall;
 
-    // 内容バッファはユーザースタックページの下部に置く。余分バイトは copy-overrun 検出用に
-    // len の直後（同じ有効ページ内）へ置く。
+    // 内容バッファはユーザースタックページの下部に置く。余分バイトは copy-overrun の
+    // 検出用に、len の直後（同じ有効ページ内）へ置く。
     let buf_va = ring3::USER_STACK_VIRT;
     const N: usize = 8;
     let content: [u8; N] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
     const OVERRUN_MARK: u8 = 0xEE;
 
-    // カーネルが既知内容 + 余分バイトをユーザーバッファへ書く（マップ済み、SMAP 未有効）。
-    // SAFETY: buf_va は verify_ring3_excursion が張ったユーザースタックページ内。N+1 <= ページ。
+    // カーネルが既知内容と余分バイトをユーザーバッファへ書く（マップ済み、SMAP 未有効）。
+    // SAFETY: buf_va は verify_ring3_excursion が張ったユーザースタックページ内で、
+    // N+1 はページに収まる。
     unsafe {
         for (i, b) in content.iter().enumerate() {
             core::ptr::write_volatile((buf_va + i as u64) as *mut u8, *b);
@@ -4361,22 +4364,21 @@ fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
 ///
 /// # なぜ影響のない領域を使うのか
 ///
-/// 失敗したときにログを最後まで出せるようにするためである。実行中のコードや
-/// スタックが載るページを対象にすると、失敗した瞬間に何も観測できないまま
-/// 落ちる。**実測ではコードもスタックも 4KiB ページに載っており**
-/// （`report_mapping_granularity`）、そもそも 2MiB の分割対象にならない。
-/// ヒープとフレームバッファは 2MiB に載っているが、どちらも稼働中なので
-/// 通常起動では触らない。
+/// 失敗したときにログを最後まで出せるようにするため。実行中のコードやスタックが載る
+/// ページを対象にすると、失敗した瞬間に何も観測できないまま落ちる。実測ではコードも
+/// スタックも 4KiB ページに載っており（`report_mapping_granularity`）、そもそも 2MiB の
+/// 分割対象にならない。ヒープとフレームバッファは 2MiB に載っているが、どちらも稼働中
+/// なので通常起動では触らない。
 ///
-/// そこでフレームアロケータから 2MiB 境界に揃った 512 フレームを確保し、
-/// それを対象にする。アロケータが確保済みとして扱うので他の誰も使わない。
-/// 確保したまま解放しないので、その分のメモリは失われる（量はログに出す）。
+/// そこでフレームアロケータから 2MiB 境界に揃った 512 フレームを確保し、それを対象に
+/// する。アロケータが確保済みとして扱うので他の誰も使わない。確保したまま解放しないので、
+/// その分のメモリは失われる（量はログに出す）。
 ///
 /// # 照合は独立した経路で行う
 ///
-/// 分割後の 512 エントリを `split_child_entry` と同じ式で検算しても、
-/// 同じ間違いを 2 回するだけで何も確かめられない。`translate()` は実際の
-/// テーブルを辿るので、分割を行ったコードとは独立している。こちらで見る。
+/// 分割後の 512 エントリを `split_child_entry` と同じ式で検算しても、同じ間違いを
+/// 2 回するだけである。`translate()` は実際のテーブルを辿るので、分割を行ったコードとは
+/// 独立している。こちらで見る。
 fn verify_split_and_unmap<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
     allocator: &mut frame_allocator::FrameAllocator<CAP>,
@@ -4388,11 +4390,9 @@ fn verify_split_and_unmap<const CAP: usize>(
 
     /// 検証用に恒久的に予約する領域の大きさ。
     ///
-    /// **2MiB なのは、分割の対象として 2MiB ページがちょうど 1 枚必要
-    /// だからである。** それ以上でも以下でもない。境界も 2MiB に揃える
-    /// 必要がある（`plan::resolve_pages` が 2MiB ページを作るのは 2MiB
-    /// 境界に揃った範囲だけなので、揃っていないと 4KiB に分解されていて
-    /// 分割対象にならない）。
+    /// 2MiB なのは、分割の対象として 2MiB ページがちょうど 1 枚要るからである。境界も
+    /// 2MiB に揃える。`plan::resolve_pages` が 2MiB ページを作るのは 2MiB 境界に揃った
+    /// 範囲だけなので、揃っていないと 4KiB に分解されていて分割対象にならない。
     ///
     /// 確保したまま解放しないので、起動のたびにこの分だけ空きが減る。
     /// 実測 205MiB に対して約 1 パーセントで、現状は無視できる。
@@ -4418,10 +4418,9 @@ fn verify_split_and_unmap<const CAP: usize>(
 
     // 登録 direct map の高位窓を使う（B-0）。A-2 以降 direct_map() は高位窓
     // （DIRECT_MAP_BASE + phys、PML4[256]、B でも残る）を返す。分割/アンマップの対象と
-    // 読み戻しを高位窓へ移し、照合を「phys == 高位窓の virt_to_phys(virt)」へ一般化する
-    // （恒等窓を base=0 の特殊ケースに含む一般形）。これにより B で恒等（PML4[0]）を
-    // 外してもこのテストは生存する（deferred-decisions.md の「split/unmap テストの
-    // 恒等窓依存」を B-0 で解消）。
+    // 読み戻しを高位窓へ移し、照合を「phys == 高位窓の virt_to_phys(virt)」へ一般化した
+    // （恒等窓を base=0 の特殊ケースとして含む形）。B で恒等（PML4[0]）を外しても
+    // このテストは生き残る。
     let table_map = common::addr::direct_map();
     // SAFETY: CR3 は自前のテーブルへ切り替え済みで、テーブルフレームは高位窓で読み書き
     // できる（窓は全マップ範囲を覆い、テーブルフレームは空き RAM 上にある）。
@@ -4455,8 +4454,8 @@ fn verify_split_and_unmap<const CAP: usize>(
     };
 
     // --- 分割する ---
-    // SAFETY: `allocator` の空き範囲はすべて恒等マッピング済みであることを
-    // 起動時に検証している。テーブルは CR3 に載っているものである。
+    // SAFETY: `allocator` の空き範囲がすべてマップ済みであることを起動時に検証している。
+    // テーブルは CR3 に載っているものである。
     let outcome = match unsafe { table.split_huge_page(base_virt, allocator) } {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -4484,8 +4483,8 @@ fn verify_split_and_unmap<const CAP: usize>(
                     // 高位窓なので phys == 窓の virt_to_phys(virt)（恒等窓 base=0 を含む一般形）。
                     mismatches += 1;
                 } else {
-                    // 属性が分割前と一致すること。PS は 4KiB では PAT の意味に
-                    // なるため、ここでは Present / Writable / PCD / PWT を見る。
+                    // 属性が分割前と一致すること。PS は 4KiB では PAT の意味になるので、
+                    // ここでは Present / Writable / PCD / PWT を見る。
                     const KEPT: u64 =
                         entry::PTE_PRESENT | entry::PTE_WRITABLE | entry::PTE_PCD | entry::PTE_PWT;
                     if translation.entry & KEPT != huge_flags & KEPT {
@@ -4521,8 +4520,8 @@ fn verify_split_and_unmap<const CAP: usize>(
         base_virt.checked_add(entry::PAGE_SIZE_2M / 2).unwrap(),
         base_virt.checked_add(entry::PAGE_SIZE_2M - 8).unwrap(),
     ] {
-        // SAFETY: 直前に translate() で 4KiB としてマップ済みと確認した、
-        // アロケータから確保した誰も使っていない領域である。8 バイトだけ触る。
+        // SAFETY: 直前に translate() で 4KiB としてマップ済みを確認した、アロケータから
+        // 確保した誰も使っていない領域である。触るのは 8 バイトだけ。
         let read_back = unsafe {
             core::ptr::write_volatile(probe.as_mut_ptr::<u64>(), 0xA5A5_5A5A_A5A5_5A5A);
             core::ptr::read_volatile(probe.as_ptr::<u64>())
@@ -4546,8 +4545,8 @@ fn verify_split_and_unmap<const CAP: usize>(
         }
     };
     let unmapped_ok = matches!(table.translate(target), Ok(None));
-    // **隣が生きていること。** これを見ないと、添字を間違えて領域全体を
-    // 消していても気づけない。
+    // 隣が生きていること。これを見ないと、添字を間違えて領域全体を消していても
+    // 気づけない。
     let neighbours_ok = matches!(
         table.translate(target.checked_sub(entry::PAGE_SIZE_4K).unwrap()),
         Ok(Some(t)) if t.page_size == PageSize::Size4KiB
@@ -4582,12 +4581,12 @@ fn verify_split_and_unmap<const CAP: usize>(
 
 /// 意図的に壊した経路を有効にする feature の一覧。
 ///
-/// **どれか 1 つでも有効なら、そのビルドの観測結果を正常な結果として
-/// 扱ってはならない。** 名前と「何を壊すか」を対にして並べる。
+/// どれか 1 つでも有効なら、そのビルドの観測結果を正常な結果として扱ってはならない。
+/// 名前と「何を壊すか」を対にして並べる。
 ///
-/// 仕込みが `paging::active` や `paging::entry` のようなレビュー必須の
-/// ファイルにも住むようになったため、実行時に一覧を出す。7 種類まで増えると、
-/// どれが有効か分からないまま実行する余地が生まれる。
+/// 仕込みが `paging::active` や `paging::entry` のようなレビュー必須のファイルにも
+/// 住むようになったので、実行時に一覧を出す。7 種類まで増えると、どれが有効か分からない
+/// まま実行する余地が生まれる。
 const TEST_HOOKS: &[(&str, bool, &str)] = &[
     (
         "misalign-test",
@@ -5058,10 +5057,9 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
 
 /// 有効な仕込み feature を起動時に報告する。
 ///
-/// **1 つでも有効なら WARN を出す。** 仕込みが有効なビルドで測った結果を
-/// 正常な結果として報告する事故を防ぐためのものである。何も有効でない
-/// 場合も 1 行出す。「出ていない」と「そもそも報告していない」を
-/// 区別できるようにするため。
+/// 1 つでも有効なら WARN を出す。仕込みが有効なビルドで測った結果を正常な結果として
+/// 報告する事故を防ぐためである。何も有効でない場合も 1 行出す。「出ていない」と
+/// 「そもそも報告していない」を区別できるようにするため。
 fn report_test_hooks(logger: &mut Logger<SerialPort>) {
     let enabled: usize = TEST_HOOKS.iter().filter(|(_, on, _)| *on).count();
     if enabled == 0 {
@@ -5081,9 +5079,9 @@ fn report_test_hooks(logger: &mut Logger<SerialPort>) {
 
 /// ページテーブル操作の回帰チェック（M5-a-2-2、`paging-test` feature）。
 ///
-/// **通常起動には入らない。** ここで行うのは、意図的にフォルトを起こす、
-/// 意図的に壊した状態を作る、稼働中の領域を触る、といった操作である。
-/// 通常の起動シーケンスに混ぜると、起動時の他の異常と区別しにくくなる。
+/// 通常起動には入らない。ここで行うのは、意図的にフォルトを起こす、意図的に壊した状態を
+/// 作る、稼働中の領域を触る、といった操作である。通常の起動シーケンスに混ぜると、起動時の
+/// 他の異常と区別しにくくなる。
 ///
 /// 判定はシリアルのマーカー行で行い、xtask が突き合わせる。
 #[cfg(feature = "paging-test")]
@@ -5097,21 +5095,19 @@ fn run_paging_test<const CAP: usize>(
 
     const FRAMES_PER_2M: u64 = entry::PAGE_SIZE_2M / frame_allocator::FRAME_SIZE;
 
-    // 登録 direct map の高位窓を使う（B-0、verify_split_and_unmap と同じ）。A-2 以降
-    // direct_map() は高位を返す。この経路のスクラッチ VA は既に窓相対
-    // （test_map.phys_to_virt）なので、窓を高位へ替えるだけで恒等前提が外れ、対象が
-    // 高位窓の split/unmap になる。B で恒等（PML4[0]）を外してもこの経路は生存する
-    // （deferred-decisions.md の「split/unmap テストの恒等窓依存」を B-0 で解消）。
+    // 登録 direct map の高位窓を使う（B-0、verify_split_and_unmap と同じ）。この経路の
+    // スクラッチ VA は既に窓相対（test_map.phys_to_virt）なので、窓を高位へ替えるだけで
+    // 恒等前提が外れ、対象が高位窓の split/unmap になる。B で恒等（PML4[0]）を外しても
+    // この経路は生き残る。
     let test_map = common::addr::direct_map();
     // SAFETY: CR3 は自前のテーブルへ切り替え済み。テーブルフレームは高位窓で読める。
     let mut table = unsafe { ActivePageTable::current(test_map) };
 
     // --- PCD 付きの 2MiB ページを分割する ---
     //
-    // 実機で PCD 付きの 2MiB ページはフレームバッファだけだが、そこを
-    // 分割対象にすると失敗時に画面が壊れ、観測手段の一部を失う。誰も
-    // 使っていないスクラッチ領域に PCD を立ててから分割すれば、同じ性質を
-    // 安全に試せる。
+    // 実機で PCD 付きの 2MiB ページはフレームバッファだけだが、そこを分割対象にすると
+    // 失敗時に画面が壊れ、観測手段の一部を失う。誰も使っていないスクラッチ領域に PCD を
+    // 立ててから分割すれば、同じ性質を安全に試せる。
     let Some(frame) = allocator.allocate_contiguous_aligned(FRAMES_PER_2M, FRAMES_PER_2M) else {
         logger.error(format_args!("paging-test: no scratch region available"));
         cpu::halt_forever();
@@ -5119,8 +5115,8 @@ fn run_paging_test<const CAP: usize>(
     let pcd_phys = frame;
     let pcd_base_virt = test_map.phys_to_virt(pcd_phys);
     let pcd_base = pcd_phys.as_u64();
-    // SAFETY: 今確保したばかりの、誰も使っていない領域である。PCD を立てても
-    // アクセスがキャッシュされなくなるだけで、内容も配置も変わらない。
+    // SAFETY: 今確保したばかりの、誰も使っていない領域である。PCD を立ててもアクセスが
+    // キャッシュされなくなるだけで、内容も配置も変わらない。
     let before = unsafe { table.add_huge_page_flags(pcd_base_virt, entry::PTE_PCD) };
     let pcd_set = matches!(
         table.translate(pcd_base_virt),
@@ -5167,9 +5163,8 @@ fn run_paging_test<const CAP: usize>(
         let phys_before = table.translate(heap_virt);
         // ヒープを実際に使ってから分割し、分割後も使えることを見る。
         let mut live: Vec<u64> = (0..64).collect();
-        // SAFETY: 稼働中のヒープが載るページだが、分割は物理アドレスも属性も
-        // 変えない。手順の途中でも古い 2MiB エントリが有効なままである
-        // （`split_huge_page` の説明を参照）。
+        // SAFETY: 稼働中のヒープが載るページだが、分割は物理アドレスも属性も変えない。
+        // 手順の途中でも古い 2MiB エントリが有効なままである（`split_huge_page`）。
         let result = unsafe { table.split_huge_page(heap_page, allocator) };
         live.push(0xDEAD);
         let phys_after = table.translate(heap_virt);
@@ -5194,10 +5189,9 @@ fn run_paging_test<const CAP: usize>(
 
     // --- アンマップ後のアクセス ---
     //
-    // `paging-test-no-invlpg` では invlpg を落としてある。古い翻訳が TLB に
-    // 残っていればフォルトせずに読めてしまう。残らなければ #PF になる。
-    // QEMU の TCG が TLB をどう扱うかに依存するため、**どちらになるかは
-    // 事前に決めつけない。** 観測した結果をそのまま出す。
+    // `paging-test-no-invlpg` では invlpg を落としてある。古い翻訳が TLB に残っていれば
+    // フォルトせずに読めてしまい、残らなければ #PF になる。QEMU の TCG が TLB をどう扱うか
+    // に依存するので、どちらになるかは事前に決めつけない。観測した結果をそのまま出す。
     let Some(frame) = allocator.allocate_contiguous_aligned(FRAMES_PER_2M, FRAMES_PER_2M) else {
         logger.error(format_args!("paging-test: no second scratch region"));
         cpu::halt_forever();
@@ -5211,18 +5205,16 @@ fn run_paging_test<const CAP: usize>(
     }
     let target = unmap_base.checked_add(4 * entry::PAGE_SIZE_4K).unwrap();
 
-    // **アンマップする前に必ず 1 度触る。** 触っていないページには TLB
-    // エントリが存在せず、`invlpg` を落としても「古い翻訳が残る」状態を
-    // 作れない。それに気づかずに書いたところ、`paging-test-no-invlpg` でも
-    // #PF になり、invlpg の有無が結果に現れなかった。検査に見えて何も
-    // 検査していない状態である。
+    // アンマップする前に必ず 1 度触る。触っていないページには TLB エントリが存在せず、
+    // `invlpg` を落としても「古い翻訳が残る」状態を作れない。それに気づかずに書いた
+    // ところ、`paging-test-no-invlpg` でも #PF になり、invlpg の有無が結果に現れな
+    // かった。検査に見えて何も検査していない状態である。
     // SAFETY: 直前に分割した、誰も使っていないスクラッチ領域である。
     unsafe {
         core::ptr::write_volatile(target.as_mut_ptr::<u64>(), 0x1234_5678_9ABC_DEF0);
     }
 
-    // SAFETY: 上記の領域。以後この 4KiB へアクセスするのは、この検証の
-    // 目的そのものである。
+    // SAFETY: 上記の領域。以後この 4KiB へアクセスするのが、この検証の目的である。
     let old = unsafe { table.unmap_4kib(target) };
     let target_none = matches!(table.translate(target), Ok(None));
     // 添字を間違えていれば、別のページが消えているはずである。
@@ -5236,20 +5228,19 @@ fn run_paging_test<const CAP: usize>(
     // アンマップしたページを実際に読むのは、専用のビルドだけである。
     //
     // 正しい実装（invlpg を発行する）では #PF になり、そこで停止する。
-    // `paging-test-no-invlpg` では古い翻訳が TLB に残っていればフォルト
-    // しない。**この 2 つを対にして初めて「invlpg が効いている」と言える。**
-    // 片方だけでは「常にフォルトする経路」と区別できない。
+    // `paging-test-no-invlpg` では古い翻訳が TLB に残っていればフォルトしない。
+    // この 2 つを対にして初めて「invlpg が効いている」と言える。片方だけでは
+    // 「常にフォルトする経路」と区別できない。
     //
-    // QEMU の TCG が TLB をどう扱うかに依存するため、no-invlpg 側が
-    // 本当にフォルトしないかは事前に決めつけない。観測した結果をそのまま出す。
+    // QEMU の TCG が TLB をどう扱うかに依存するので、no-invlpg 側が本当にフォルト
+    // しないかは事前に決めつけない。観測した結果をそのまま出す。
     #[cfg(any(feature = "paging-test-unmap-fault", feature = "paging-test-no-invlpg"))]
     {
         logger.info(format_args!(
             "paging-test: about to read the unmapped page {:#x}",
             target.as_u64()
         ));
-        // SAFETY: この読み取りがフォルトするかどうかを観測することが、
-        // この検証の目的そのものである。
+        // SAFETY: この読み取りがフォルトするかどうかの観測が、この検証の目的である。
         let value = unsafe { core::ptr::read_volatile(target.as_ptr::<u64>()) };
         logger.info(format_args!(
             "paging-test: the read did NOT fault; value={value:#x} (a stale TLB entry was used)"
@@ -5261,15 +5252,13 @@ fn run_paging_test<const CAP: usize>(
 
 /// カーネルが実際に使っている領域が、どの粒度でマップされているかを測る。
 ///
-/// M5-a-2 で 2MiB ページを分割するにあたり、**どこが 2MiB ページに載って
-/// いるのかを推測で決めない**ために測る。`plan::resolve_pages` は 2MiB 境界に
-/// 揃った核だけを 2MiB ページにし、前後の端数を 4KiB へ分解する。どの領域が
-/// 核に入り、どれが端数になるかは実際のメモリマップ次第で、コードを読んだ
-/// だけでは決まらない。
+/// M5-a-2 で 2MiB ページを分割するにあたり、どこが 2MiB ページに載っているのかを推測で
+/// 決めないために測る。`plan::resolve_pages` は 2MiB 境界に揃った核だけを 2MiB ページに
+/// し、前後の端数を 4KiB へ分解する。どの領域が核に入り、どれが端数になるかは実際の
+/// メモリマップ次第で、コードを読んだだけでは決まらない。
 ///
-/// 分割対象の選定材料であると同時に、恒等マッピングの現状把握そのものでも
-/// ある。ここに挙げた 4 つはいずれもカーネルが動き続けるために必要な領域で、
-/// 翻訳できないことがあってはならない。できなければ fail-fast する。
+/// 分割対象の選定材料であると同時に、恒等マッピングの現状把握でもある。ここに挙げた
+/// 4 つはカーネルが動き続けるために要る領域で、翻訳できなければ fail-fast する。
 fn report_mapping_granularity(
     logger: &mut Logger<SerialPort>,
     heap_start: u64,
@@ -5278,13 +5267,13 @@ fn report_mapping_granularity(
     use kernel::paging::active::{ActivePageTable, PageSize};
     use kernel::paging::entry;
 
-    // SAFETY: CR3 は自前のテーブルへ切り替えて読み戻し済みであり、テーブル
-    // 自体は恒等マッピングで読める（`verify_page_tables` と同じ前提）。
+    // SAFETY: CR3 は自前のテーブルへ切り替えて読み戻し済みで、テーブル自体は
+    // 恒等マッピングで読める（`verify_page_tables` と同じ前提）。
     let table = unsafe { ActivePageTable::current(common::addr::direct_map()) };
 
-    // RIP と RSP は**測定時点の実値**を読む。リンカスクリプトのシンボルや
-    // スタックの静的配列の番地から計算すると、「そう配置したはず」の値を
-    // 見ることになり、実際に実行しているアドレスの確認にならない。
+    // RIP と RSP は測定時点の実値を読む。リンカスクリプトのシンボルやスタックの静的配列の
+    // 番地から計算すると、「そう配置したはず」の値を見ることになり、実際に実行している
+    // アドレスの確認にならない。
     let probes: [(&str, u64); 4] = [
         ("executing code (RIP)", cpu::read_rip()),
         ("kernel stack (RSP)", cpu::read_rsp()),
@@ -5295,8 +5284,8 @@ fn report_mapping_granularity(
     let mut failures = 0u32;
     for (name, addr) in probes {
         if addr == 0 {
-            // フレームバッファが無い構成ではここに来る。存在しないものを
-            // 「マップされていない」として数えない。
+            // フレームバッファが無い構成ではここに来る。存在しないものを「マップされて
+            // いない」として数えない。
             logger.info(format_args!("granularity: {name} is absent (address 0)"));
             continue;
         }
@@ -5348,31 +5337,29 @@ fn report_mapping_granularity(
 ///
 /// # やること・やらないこと
 ///
-/// 恒等マッピングは外さない。direct map 窓（`DIRECT_MAP_BASE + phys`）を
-/// 足すだけで、RSP・ヒープ・boot_info はすべて低位のまま動き続ける。恒等の
-/// 除去はカーネルイメージの高位化（B）と不可分なので、A では行わない。
+/// 恒等マッピングは外さない。direct map 窓（`DIRECT_MAP_BASE + phys`）を足すだけで、
+/// RSP・ヒープ・boot_info はすべて低位のまま動き続ける。恒等の除去はカーネルイメージの
+/// 高位化（B）と不可分なので、A では行わない。
 ///
-/// 登録 DirectMap は恒等（base=0）のまま保つ。差し替えは A-2 の
-/// `replace_direct_map` で行う。したがって `direct_map()` を通す既存経路は
-/// 恒等アドレスを返し続け、新テーブルの恒等側で到達可能なままである。
+/// 登録 DirectMap は恒等（base=0）のまま保つ。差し替えは A-2 の `replace_direct_map` で
+/// 行う。`direct_map()` を通す既存経路は恒等アドレスを返し続け、新テーブルの恒等側で
+/// 到達可能なままである。
 ///
-/// kernel イメージの高位マッピングは含めない。それは H-2 が別テーブルで
-/// 扱う。ここが張るのは恒等と direct map 窓の 2 つだけである。
+/// kernel イメージの高位マッピングは含めない。それは H-2 が別テーブルで扱う。ここが
+/// 張るのは恒等と direct map 窓の 2 つだけである。
 ///
 /// # 検証の独立性
 ///
-/// 構築は `map_page` / `map_range`（`table` の式）で行い、検証は
-/// `verify::walk`（別に書き直した式）で辿る。恒等部分の照合は、入力の
-/// `mapped` と突き合わせるのではなく、稼働中テーブル（M2-d が切り替えた
-/// 実体）を `active::translate` で読み戻した実状態と突き合わせる。同じ入力
-/// から同じ式で作ったものを検算しないためである。
+/// 構築は `map_page` / `map_range`（`table` の式）で行い、検証は `verify::walk`
+/// （別に書き直した式）で辿る。恒等部分の照合は、入力の `mapped` とではなく、稼働中
+/// テーブル（M2-d が切り替えた実体）を `active::translate` で読み戻した実状態と突き
+/// 合わせる。同じ入力から同じ式で作ったものを検算しないためである。
 ///
 /// # 移設の余地
 ///
-/// B でこの窓構築を bootloader 側へ移す可能性があるため、kernel 専用の
-/// グローバル状態に依存させず、引数（テーブルアクセス用の窓・アロケータ・
-/// マップ範囲）だけで完結させてある。登録 `direct_map()` はテーブルフレーム
-/// アクセスにのみ引く（恒等であることに依存する箇所は無い）。
+/// B でこの窓構築を bootloader 側へ移す可能性があるので、kernel 専用のグローバル状態に
+/// 依存させず、引数（テーブルアクセス用の窓・アロケータ・マップ範囲）だけで完結させて
+/// ある。登録 `direct_map()` はテーブルフレームのアクセスにのみ引く。
 fn build_and_switch_direct_map(
     logger: &mut Logger<SerialPort>,
     allocator: &mut frame_allocator::FrameAllocator<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
@@ -5381,8 +5368,8 @@ fn build_and_switch_direct_map(
     use common::addr::{DirectMap, VirtAddr};
     use kernel::paging::{active::ActivePageTable, verify};
 
-    // 構築中のテーブルフレームは、登録済みの窓（現在は恒等）を通して読み書き
-    // する。M2-d のビルダーと同じ経路である。
+    // 構築中のテーブルフレームは、登録済みの窓（現在は恒等）を通して読み書きする。
+    // M2-d のビルダーと同じ経路である。
     let access = common::addr::direct_map();
 
     let mut builder = match PageTableBuilder::new(allocator, access) {
@@ -5412,16 +5399,14 @@ fn build_and_switch_direct_map(
 
     // --- direct map 窓（DIRECT_MAP_BASE + phys） ---
     //
-    // cacheable は classify 由来をそのまま引き継ぐ（フレームバッファ・MMIO は
-    // PCD）。`map_range` が仮想・物理の両方のアラインメントで 2MiB 昇格を
-    // 判定する。G ビットと NX（bit 63）は立てない（EFER.NXE 未有効。
-    // ADR-0021）。
+    // cacheable は classify 由来をそのまま引き継ぐ（フレームバッファ・MMIO は PCD）。
+    // `map_range` が仮想・物理の両方のアラインメントで 2MiB 昇格を判定する。G ビットと
+    // NX（bit 63）は立てない（EFER.NXE 未有効。ADR-0021）。
     //
-    // paging-test-directmap-low-window: 窓を高位ではなく低位（phys、恒等と
-    // 同じ）で張る。恒等が既に phys->phys を張っているので起動は検証手前まで
-    // 進むが、切り替え前の walker 検証が DIRECT_MAP_BASE + phys を辿って
-    // NotPresent で捕まえる。高位窓が存在することそのものを検査していることの
-    // 証明である。
+    // 破壊 (paging-test-directmap-low-window): 窓を高位ではなく低位（phys、恒等と同じ）で
+    // 張る。恒等が既に phys->phys を張っているので起動は検証手前まで進むが、切り替え前の
+    // walker 検証が DIRECT_MAP_BASE + phys を辿って NotPresent で捕まえる。高位窓が
+    // 存在すること自体を検査していることの証明である。
     let window_base = if cfg!(feature = "paging-test-directmap-low-window") {
         0
     } else {
@@ -5447,10 +5432,10 @@ fn build_and_switch_direct_map(
         }
     }
 
-    // higher-half（B-2a）: この本流テーブルにも kernel イメージの高位マッピングを
-    // 張る。base=0 では冪等（新規フレーム 0）。base=高位（B-2a-3）では再リンク後に
-    // このテーブルへ CR3 を切り替えても高位コードが見え続けるようにする。
-    // (c) highhalf-no-kernel-high-in-live-table: A-1 の本流テーブルからも外す。
+    // higher-half（B-2a）: この本流テーブルにも kernel イメージの高位マッピングを張る。
+    // base=0 では冪等（新規フレーム 0）。base=高位（B-2a-3）では再リンク後にこのテーブルへ
+    // CR3 を切り替えても高位コードが見え続けるようにする。
+    // 破壊 (highhalf-no-kernel-high-in-live-table): A-1 の本流テーブルからも外す。
     #[cfg(not(feature = "highhalf-no-kernel-high-in-live-table"))]
     map_kernel_high_half(&mut builder, logger);
 
@@ -5466,10 +5451,10 @@ fn build_and_switch_direct_map(
 
     // --- 切り替え前の独立検証（新テーブルはまだ稼働していない） ---
     //
-    // 新テーブルのフレームは、現在稼働中の恒等マッピングで読める。ここで
-    // 壊れた窓（low-window）を捕まえ、壊れていれば切り替えずに停止する。
-    // SAFETY: 現在の CR3 は M2-d の恒等テーブルを指しており、その配下は
-    // 恒等で読める（`current` の契約）。
+    // 新テーブルのフレームは、現在稼働中の恒等マッピングで読める。ここで壊れた窓
+    // （low-window）を捕まえ、壊れていれば切り替えずに停止する。
+    // SAFETY: 現在の CR3 は M2-d の恒等テーブルを指しており、その配下は恒等で読める
+    // （`current` の契約）。
     let live = unsafe { ActivePageTable::current(access) };
 
     let mut identity_checked = 0u32;
@@ -5490,8 +5475,8 @@ fn build_and_switch_direct_map(
         }
 
         for probe in probes.into_iter().flatten() {
-            // 恒等側: 稼働中テーブルの実状態（active::translate、`entry` の式）と
-            // 新テーブル（verify::walk、別の式）が、同じ物理へ解決すること。
+            // 恒等側: 稼働中テーブルの実状態（active::translate、`entry` の式）と新テーブル
+            // （verify::walk、別の式）が、同じ物理へ解決すること。
             if let Some(virt) = VirtAddr::new(probe.as_u64()) {
                 identity_checked += 1;
                 let live_phys = match live.translate(virt) {
@@ -5515,9 +5500,8 @@ fn build_and_switch_direct_map(
                 }
             }
 
-            // 窓側: DIRECT_MAP_BASE + phys が phys へ解決すること。窓の base は
-            // 常に高位で辿る（構築が低位で張られていれば、ここで NotPresent に
-            // なって捕まる）。
+            // 窓側: DIRECT_MAP_BASE + phys が phys へ解決すること。窓の base は常に高位で
+            // 辿る。構築が低位で張られていれば、ここで NotPresent になって捕まる。
             if let Some(virt) =
                 VirtAddr::new(DirectMap::DIRECT_MAP_BASE.wrapping_add(probe.as_u64()))
             {
@@ -5574,12 +5558,12 @@ fn build_and_switch_direct_map(
     // 切り替え後の低位到達性を確かめる材料。恒等側の既知バイトを控える。
     let (kernel_start_phys, _) = kernel_image_phys_range();
     let kernel_start = kernel_start_phys.as_u64();
-    // SAFETY: kernel_start は恒等でマップ済み（M2-d の必須領域検証を通過して
-    // いる）。読み取りのみ。
+    // SAFETY: kernel_start は恒等でマップ済み（M2-d の必須領域検証を通過している）。
+    // 読み取りのみ。
     let kernel_byte_before = unsafe { core::ptr::read_volatile(kernel_start as *const u8) };
 
-    // SAFETY: 直前の切り替え前検証により、恒等側に現在の RIP・RSP・pml4 の
-    // フレームがすべて含まれていることを確認済み（恒等は M2-d と解決が一致）。
+    // SAFETY: 直前の切り替え前検証で、恒等側に現在の RIP・RSP・pml4 のフレームが
+    // すべて含まれていることを確認済み（恒等は M2-d と解決が一致）。
     unsafe {
         paging::switch::switch_to(new_pml4);
     }
@@ -5619,11 +5603,10 @@ fn build_and_switch_direct_map(
         ));
         cpu::halt_forever();
     };
-    // SAFETY: kernel_start は kernel image の範囲内で、その範囲は窓の構築
-    // 対象（map_range で全ページを張る）である。切り替え前の窓プローブが
-    // その範囲の境界で解決を確認している（当該アドレス自体をプローブして
-    // いるのではなく、範囲を全張りした構築と、境界での独立検証に依る）。
-    // 読み取りのみ。
+    // SAFETY: kernel_start は kernel image の範囲内で、その範囲は窓の構築対象である
+    // （map_range で全ページを張る）。切り替え前の窓プローブがその範囲の境界で解決を
+    // 確認している。当該アドレス自体をプローブしているのではなく、範囲を全張りした構築と
+    // 境界での独立検証に依る。読み取りのみ。
     let kernel_byte_via_window =
         unsafe { core::ptr::read_volatile(kernel_window_virt.as_ptr::<u8>()) };
     let window_read_ok = kernel_byte_via_window == kernel_byte_before;
@@ -5633,8 +5616,8 @@ fn build_and_switch_direct_map(
     ));
     post_ok &= window_read_ok;
 
-    // (e) 別名の直接証明。窓経由で書いて、恒等経由で読む。同じ物理が 2 つの
-    // 仮想から見えることの直接の証明であり、ADR-0021 の移行が機能する核心。
+    // (e) 別名の直接証明。窓経由で書いて、恒等経由で読む。同じ物理が 2 つの仮想から
+    // 見えることの直接の証明で、ADR-0021 の移行が機能する核心である。
     if let Some(scratch) = allocator.allocate_frame() {
         let scratch_phys = scratch.as_u64();
         let Some(scratch_window_virt) =
@@ -5646,10 +5629,9 @@ fn build_and_switch_direct_map(
             cpu::halt_forever();
         };
         const ALIAS_PATTERN: u64 = 0xA11A_5000_D1EC_7000;
-        // SAFETY: scratch は今確保した空きフレームで、恒等側にも窓側にも
-        // マップ済み（切り替え前検証で恒等を、窓の probe で高位を確認した
-        // 範囲に属する空き RAM）。他の誰も参照していない。書いて読むだけで、
-        // このあと解放する。
+        // SAFETY: scratch は今確保した空きフレームで、恒等側にも窓側にもマップ済み
+        // （切り替え前検証で恒等を、窓の probe で高位を確認した範囲に属する空き RAM）。
+        // 他の誰も参照していない。書いて読むだけで、このあと解放する。
         let (via_identity, via_window) = unsafe {
             core::ptr::write_volatile(scratch_window_virt.as_mut_ptr::<u64>(), ALIAS_PATTERN);
             let via_identity = core::ptr::read_volatile(scratch_phys as *const u64);
@@ -5689,14 +5671,14 @@ fn build_and_switch_direct_map(
 /// higher-half A-2: 登録 DirectMap を恒等から高位窓へ差し替える。
 ///
 /// A-1 で高位窓を張り CR3 も切り替えてあるので、差し替えた瞬間から
-/// `direct_map().phys_to_virt` が高位を返し、その高位アドレスは有効である。
-/// 恒等は残す（A では外さない）。`replace_direct_map` の # Safety が要求する
-/// 「CR3 を新窓のテーブルへ切り替えた後で呼ぶこと」を満たしている。
+/// `direct_map().phys_to_virt` が高位を返し、その高位アドレスは有効である。恒等は残す
+/// （A では外さない）。`replace_direct_map` の # Safety が要求する「CR3 を新窓のテーブルへ
+/// 切り替えた後で呼ぶこと」を満たしている。
 ///
-/// paging-test-directmap-wrong-base: 差し替える窓の base をわざと 1 ページ
-/// ずらす。直後の phys_to_virt 検証が期待値と食い違うのを捕まえ、以降の
-/// 経路（フレームバッファ・コンソール）が誤った高位を触る前に停止する。
-/// A-1 の low-window（窓の構築を壊す）とは層が違う。こちらは登録値を壊す。
+/// 破壊 (paging-test-directmap-wrong-base): 差し替える窓の base をわざと 1 ページずらす。
+/// 直後の phys_to_virt 検証が期待値と食い違うのを捕まえ、以降の経路（フレームバッファ・
+/// コンソール）が誤った高位を触る前に停止する。A-1 の low-window（窓の構築を壊す）とは
+/// 層が違い、こちらは登録値を壊す。
 fn activate_direct_map_window(logger: &mut Logger<SerialPort>) {
     use common::addr::{DirectMap, PhysAddr, VirtAddr};
 
@@ -5732,9 +5714,9 @@ fn activate_direct_map_window(logger: &mut Logger<SerialPort>) {
         cpu::halt_forever();
     };
 
-    // SAFETY: A-1 が高位窓を張り CR3 を新テーブルへ切り替え済みで、恒等も
-    // 残っている。replace_direct_map の # Safety（新窓のテーブルへ切り替えた
-    // 後で呼ぶこと）を満たす。シングルコアで、この区間に他の実行文脈は無い。
+    // SAFETY: A-1 が高位窓を張り CR3 を新テーブルへ切り替え済みで、恒等も残っている。
+    // replace_direct_map の # Safety（新窓のテーブルへ切り替えた後で呼ぶこと）を満たす。
+    // シングルコアで、この区間に他の実行文脈は無い。
     if let Err(e) = unsafe { common::addr::replace_direct_map(high) } {
         logger.error(format_args!(
             "direct-map A-2: replace_direct_map failed: {e:?}; halting"
@@ -5742,9 +5724,9 @@ fn activate_direct_map_window(logger: &mut Logger<SerialPort>) {
         cpu::halt_forever();
     }
 
-    // 差し替え後、phys_to_virt が DIRECT_MAP_BASE + phys を返すことを数点で
-    // 確かめる。期待値は常に正しい base（DIRECT_MAP_BASE）で計算するので、
-    // wrong-base の版はここで食い違って捕まり、以降の高位アクセスへ進まない。
+    // 差し替え後、phys_to_virt が DIRECT_MAP_BASE + phys を返すことを数点で確かめる。
+    // 期待値は常に正しい base（DIRECT_MAP_BASE）で計算するので、wrong-base の版はここで
+    // 食い違って捕まり、以降の高位アクセスへ進まない。
     let now = common::addr::direct_map();
     let mut mismatches = 0u32;
     for raw in [0x1000u64, 0x20_0000, 0x8000_0000] {
@@ -5777,14 +5759,14 @@ fn activate_direct_map_window(logger: &mut Logger<SerialPort>) {
 
 /// A-2: フレームバッファのハンドルを高位 base へ載せ替える。
 ///
-/// `FramebufferLayout.base` は init_framebuffer の時点（差し替え前、恒等）で
-/// 計算した値を保持しており、差し替えに追従しない（layout.rs の doc が明示）。
-/// ここで高位 base で作り直す。恒等は残っているので旧ハンドル（恒等 base）でも
-/// 描けるが、B で恒等を外すことに備え、A-2 の時点で高位へ寄せておく。
+/// `FramebufferLayout.base` は init_framebuffer の時点（差し替え前、恒等）で計算した値を
+/// 保持しており、差し替えに追従しない（layout.rs の doc）。ここで高位 base で作り直す。
+/// 恒等は残っているので旧ハンドル（恒等 base）でも描けるが、B で恒等を外すことに備えて
+/// A-2 の時点で高位へ寄せておく。
 ///
-/// バックバッファ側の base_virt は init_console が差し替え後に `direct_map()` を
-/// 引くため自動的に高位になる。ヒープ・RSP・boot_info は恒等を直接使うので
-/// A では触らない（B で高位化する）。
+/// バックバッファ側の base_virt は、init_console が差し替え後に `direct_map()` を引くので
+/// 自動的に高位になる。ヒープ・RSP・boot_info は恒等を直接使うので A では触らない
+/// （B で高位化する）。
 fn rehome_framebuffer_to_window(
     logger: &mut Logger<SerialPort>,
     framebuffer: &mut Option<Framebuffer>,
@@ -5828,22 +5810,21 @@ fn rehome_framebuffer_to_window(
         }
     };
 
-    // SAFETY: new_layout は with_base の再検証を通り、high_base..end が高位窓で
-    // マップ済みであることを直前に translate で確認した。フレームバッファは
-    // 排他所有で、ここで旧ハンドル（恒等 base）を捨てて新ハンドルへ差し替える。
-    // 同じ物理を指す仮想が恒等と高位の 2 つあるが、書き込み手段はこの 1 個に
-    // 統一する。
+    // SAFETY: new_layout は with_base の再検証を通り、high_base..end が高位窓でマップ済み
+    // であることを直前に translate で確認した。フレームバッファは排他所有で、ここで旧
+    // ハンドル（恒等 base）を捨てて新ハンドルへ差し替える。同じ物理を指す仮想が恒等と
+    // 高位の 2 つあるが、書き込み手段はこの 1 個に統一する。
     let mut high_fb = unsafe { Framebuffer::new(new_layout) };
 
-    // 実際に高位 base 経由で書き、高位と恒等の両方から読み戻して、同じ物理が
-    // 両窓から見えることを直接確かめる（A-1 の別名証明のフレームバッファ版）。
-    // この画素はこの直後のコンソール全面クリアで消える。
+    // 高位 base 経由で書き、高位と恒等の両方から読み戻して、同じ物理が両窓から見える
+    // ことを直接確かめる（A-1 の別名証明のフレームバッファ版）。この画素は直後の
+    // コンソール全面クリアで消える。
     const PROOF: Color = Color::rgb(0xC0, 0x40, 0x80);
     high_fb.write_pixel(0, 0, PROOF);
     let proof_pixel = PROOF.to_pixel(new_layout.format());
-    // SAFETY: high_base と fb_phys は同じ物理フレームバッファの先頭を指し、
-    // どちらも現在のテーブルでマップ済み（高位は直前の translate で、恒等は
-    // A-1 で確認済み）。読み取りのみ。
+    // SAFETY: high_base と fb_phys は同じ物理フレームバッファの先頭を指し、どちらも現在の
+    // テーブルでマップ済みである（高位は直前の translate で、恒等は A-1 で確認済み）。
+    // 読み取りのみ。
     let (via_high, via_identity) = unsafe {
         (
             core::ptr::read_volatile(high_base.as_ptr::<u32>()),
@@ -5862,36 +5843,33 @@ fn rehome_framebuffer_to_window(
 
 /// M5-b: カーネルスタックの直下の 1 ページを unmap してガードページにする。
 ///
-/// これ以降、通常スタックが溢れて `kernel_guard` ページに触れると即座に
-/// #PF（CR2 = そのページ）になる。#PF は IST2 上で動くので、溢れた
-/// スタックの上でハンドラを走らせずに済み、#DF へ昇格しない（ADR-0019 §3.1）。
+/// これ以降、通常スタックが溢れて `kernel_guard` ページに触れると即座に #PF（CR2 = その
+/// ページ）になる。#PF は IST2 上で動くので、溢れたスタックの上でハンドラを走らせずに
+/// 済み、#DF へ昇格しない（ADR-0019 §3.1）。
 ///
 /// # ガード幅を 1 ページにした根拠
 ///
-/// **単一のスタックフレームがガード幅（4KiB）を一撃で飛び越えないことを
-/// 前提にしている。** 現在コード全体でスタック上の単一配列の最大は
-/// `[u64; 512] = 4096` バイト（H-2 の PML4 スナップショット）で、これは
-/// `from_fn` が低位から要素ごとに書くのでガードに入れば必ず触れる。他は
-/// いずれも小さい。通常のフレーム伸長も暴走再帰も 1 段が 4KiB 未満なので、
-/// ガードページへ 1 段ずつ踏み込んで #PF になる。**将来 4KiB を超える
-/// ローカル配列を導入するなら、ガード幅を再検討すること**（このコメントと
-/// `deferred-decisions.md` の「大きなスタック配列とガード幅」）。
+/// 単一のスタックフレームがガード幅（4KiB）を一撃で飛び越えないことを前提にしている。
+/// 現在コード全体でスタック上の単一配列の最大は `[u64; 512] = 4096` バイト（H-2 の PML4
+/// スナップショット）で、`from_fn` が低位から要素ごとに書くのでガードに入れば必ず触れる。
+/// 他はいずれも小さい。通常のフレーム伸長も暴走再帰も 1 段が 4KiB 未満なので、ガード
+/// ページへ 1 段ずつ踏み込んで #PF になる。4KiB を超えるローカル配列を導入するなら、
+/// ガード幅を再検討すること（`deferred-decisions.md` の「大きなスタック配列とガード幅」）。
 ///
 /// # 現在は 4KiB ページであることを前提にする
 ///
-/// `StackBlock` は現在 `0x100000`〜`0x200000` の 4KiB フリンジにあり、
-/// `kernel_guard` は 4KiB ページで張られている。だから split せずに
-/// `unmap_4kib` だけで落とせる。2MiB ページに載る構成になったら、その場で
-/// fail-fast する（split 分岐はそのとき足す。`deferred-decisions.md` の
-/// 「ガードページの split 化」）。
+/// `StackBlock` は現在 `0x100000`〜`0x200000` の 4KiB フリンジにあり、`kernel_guard` は
+/// 4KiB ページで張られている。だから split せずに `unmap_4kib` だけで落とせる。2MiB ページに
+/// 載る構成になったら、その場で fail-fast する（split 分岐はそのとき足す。
+/// `deferred-decisions.md` の「ガードページの split 化」）。
 fn install_kernel_stack_guard_page(logger: &mut Logger<SerialPort>) {
     use kernel::paging::active::{ActivePageTable, PageSize};
 
     let guard = stack::kernel_guard_page();
     let guard_virt = guard.bottom;
 
-    // テーブルフレームへのアクセスは登録窓（A-2 後は高位）で足りる。unmap の
-    // 対象はガードページの（低位・恒等の）仮想アドレスそのものである。
+    // テーブルフレームへのアクセスは登録窓（A-2 後は高位）で足りる。unmap の対象は
+    // ガードページの（低位・恒等の）仮想アドレスそのものである。
     // SAFETY: CR3 は自前のテーブルを指し、その配下は登録窓で読み書きできる。
     let mut table = unsafe { ActivePageTable::current(common::addr::direct_map()) };
 
@@ -5922,17 +5900,16 @@ fn install_kernel_stack_guard_page(logger: &mut Logger<SerialPort>) {
         }
     }
 
-    // ガードページを 1 枚 unmap する。unmap_4kib は内部で invlpg も行うので、
-    // 以後このページへのアクセスは即座に #PF になる。フレームは解放しない
-    // （.bss の一部で、そもそもアロケータの管理外。M5-a-2 の仕様どおり
-    // unmap はフレームを返さない）。
-    // SAFETY: guard_virt はカーネルスタックの直下のガードページで、スタック
-    // 本体（block_base + GUARD_SIZE 以上）とは別の 1 ページ。今後このページへ
-    // 正規のアクセスは無く、触れたら溢れとして #PF で捕まえるのが目的。
+    // ガードページを 1 枚 unmap する。unmap_4kib は内部で invlpg も行うので、以後この
+    // ページへのアクセスは即座に #PF になる。フレームは解放しない（.bss の一部で
+    // アロケータの管理外。M5-a-2 の仕様どおり unmap はフレームを返さない）。
+    // SAFETY: guard_virt はカーネルスタックの直下のガードページで、スタック本体
+    // （block_base + GUARD_SIZE 以上）とは別の 1 ページ。今後このページへ正規のアクセスは
+    // 無く、触れたら溢れとして #PF で捕まえるのが目的である。
     match unsafe { table.unmap_4kib(guard_virt) } {
         Ok(old_pte) => {
-            // 会計: unmap 後にこのページが解決不能になっていること（ガードが
-            // 効いていること）を、構築とは別に translate で確かめる。
+            // 会計: unmap 後にこのページが解決不能になっていること（ガードが効いて
+            // いること）を、構築とは別に translate で確かめる。
             let unmapped = matches!(table.translate(guard_virt), Ok(None));
             logger.info(format_args!(
                 "stack-guard: unmapped the kernel stack guard page {:#x} (old pte={old_pte:#x}); \
@@ -5958,13 +5935,12 @@ fn install_kernel_stack_guard_page(logger: &mut Logger<SerialPort>) {
 
 /// kernel イメージを高位（`KERNEL_VIRT_BASE + phys`）へ張る（B-2a）。
 ///
-/// M2-d・A-1 の両テーブルで共通に使う。base=0 では、ビルダーが既に恒等で
-/// 張った 4KiB PT を同一物理・同一フラグで上書きするだけで冪等になる（新規
-/// フレーム 0）。イメージは `[0x100000, 0x200000)` の 4KiB 領域に収まるので、
-/// 2MiB huge との衝突（`ensure_child` の `UnexpectedHugePageEntry`）は起きない。
-/// base=高位（B-2a-3）では `PML4[511]` 配下に実マッピングを作り、再リンク後に
-/// このテーブルへ CR3 を切り替えても高位で走るコードが見え続けるようにする。
-/// 丸めは 4KiB（H-2 と同一。要確認1）。
+/// M2-d・A-1 の両テーブルで共通に使う。base=0 では、ビルダーが既に恒等で張った 4KiB PT を
+/// 同一物理・同一フラグで上書きするだけで冪等になる（新規フレーム 0）。イメージは
+/// `[0x100000, 0x200000)` の 4KiB 領域に収まるので、2MiB huge との衝突（`ensure_child` の
+/// `UnexpectedHugePageEntry`）は起きない。base=高位（B-2a-3）では `PML4[511]` 配下に実
+/// マッピングを作り、再リンク後にこのテーブルへ CR3 を切り替えても高位で走るコードが
+/// 見え続けるようにする。丸めは 4KiB（H-2 と同一。要確認1）。
 fn map_kernel_high_half<const CAP: usize>(
     builder: &mut PageTableBuilder<'_, CAP>,
     logger: &mut Logger<SerialPort>,
@@ -5973,9 +5949,9 @@ fn map_kernel_high_half<const CAP: usize>(
     let image_len =
         (image_end.as_u64() - image_start.as_u64()).next_multiple_of(frame_allocator::FRAME_SIZE);
     let high_start = kernel::kernel_virt_from_phys(image_start);
-    // 高位マッピングが消費した中間テーブルのフレーム数を会計する。base=0 では
-    // 恒等が既に張った PT を上書きするだけなので 0 のはずで、それをログで確かめる。
-    // base=高位（B-2a-3）では PML4[511] 配下の新規部分木の分だけ増える。
+    // 高位マッピングが消費した中間テーブルのフレーム数を会計する。base=0 では恒等が
+    // 既に張った PT を上書きするだけなので 0 のはずで、それをログで確かめる。base=高位
+    // （B-2a-3）では PML4[511] 配下の新規部分木の分だけ増える。
     let frames_before = builder.frames_used();
     if let Err(e) = builder.map_range(high_start, image_start, image_len, true) {
         logger.error(format_args!(
@@ -6001,16 +5977,15 @@ fn map_kernel_high_half<const CAP: usize>(
 ///
 /// # この段階でやること・やらないこと
 ///
-/// **CR3 は切り替えない。** 恒等マッピングで動いたまま、新しいテーブルを
-/// 組み立てて読み戻すところまでである。切り替えは H-3 で行う。
+/// CR3 は切り替えない。恒等マッピングで動いたまま、新しいテーブルを組み立てて読み戻す
+/// ところまでである。切り替えは H-3 で行う。
 ///
-/// **稼働中のテーブルには一切手を加えない。** 新しいテーブルを別に作る。
-/// 構築の前後で稼働中テーブルの PML4 を読み戻し、変わっていないことを
-/// 確かめる。
+/// 稼働中のテーブルには一切手を加えない。新しいテーブルを別に作る。構築の前後で稼働中
+/// テーブルの PML4 を読み戻し、変わっていないことを確かめる。
 ///
-/// direct map の高位窓はこの段階の対象外である。作るのは
-/// **kernel イメージの高位マッピング**（`KERNEL_VIRT_BASE + (phys - LMA)`）
-/// だけで、これは direct map とは別の対応である。ログでもそう明示する。
+/// direct map の高位窓はこの段階の対象外である。作るのは kernel イメージの高位マッピング
+/// （`KERNEL_VIRT_BASE + (phys - LMA)`）だけで、これは direct map とは別の対応である。
+/// ログでもそう明示する。
 fn build_and_verify_high_half(
     logger: &mut Logger<SerialPort>,
     allocator: &mut frame_allocator::FrameAllocator<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
@@ -6056,9 +6031,7 @@ fn build_and_verify_high_half(
 
     // --- kernel イメージの高位マッピングを張る ---
     //
-    // 対応は virt = phys + KERNEL_VIRT_BASE。**direct map の窓とは
-    // 別の対応である。** 現在 KERNEL_VIRT_BASE は 0 なので値は一致するが、
-    // 式が違う。
+    // 対応は virt = phys + KERNEL_VIRT_BASE。direct map の窓とは別の対応である。
     let (image_start, image_end) = kernel_image_phys_range();
     let image_len = image_end.as_u64() - image_start.as_u64();
     let image_len = image_len.next_multiple_of(frame_allocator::FRAME_SIZE);
@@ -6087,8 +6060,8 @@ fn build_and_verify_high_half(
 
     // --- 独立 walker で読み戻す ---
     //
-    // 構築に使った関数は呼ばない。`verify::walk` は階層の降り方も
-    // ビットの解釈も別に書いてある。
+    // 構築に使った関数は呼ばない。`verify::walk` は階層の降り方もビットの解釈も
+    // 別に書いてある。
     let mut checked = 0u32;
     let mut mismatches = 0u32;
     let probe_count = 8u64;
@@ -6205,9 +6178,8 @@ fn kernel_image_phys_range() -> (common::addr::PhysAddr, common::addr::PhysAddr)
 
 /// 物理アドレスの範囲がマップ計画に含まれるか。
 ///
-/// **恒等マッピングの間の橋渡しである。** 呼び出し側はまだ `u64` で
-/// 範囲を持っており、`MappedRanges` は `PhysAddr` を扱う。物理として
-/// 表せない値は「含まれない」として扱う。
+/// 恒等マッピングの間の橋渡しである。呼び出し側はまだ `u64` で範囲を持っており、
+/// `MappedRanges` は `PhysAddr` を扱う。物理として表せない値は「含まれない」とする。
 fn range_is_mapped<const CAP: usize>(mapped: &MappedRanges<CAP>, start: u64, end: u64) -> bool {
     match (
         common::addr::PhysAddr::new(start),
@@ -6220,9 +6192,8 @@ fn range_is_mapped<const CAP: usize>(mapped: &MappedRanges<CAP>, start: u64, end
 
 /// 稼働中のページテーブルを読み戻し、`plan` の意図と突き合わせる（M5-a-1）。
 ///
-/// M4 で `sgdt` / `sidt` / PIC の IMR に対して行ってきたのと同じことを、
-/// ページテーブルに対して行う。これまでページテーブルだけは**書きっぱなしで
-/// 読み戻す手段が無かった**。
+/// M4 で `sgdt` / `sidt` / PIC の IMR に対して行ってきたのと同じことを、ページテーブルに
+/// 対して行う。これまでページテーブルだけは書きっぱなしで、読み戻す手段が無かった。
 ///
 /// あわせて、TLB の全フラッシュ（CR3 リロード）が成立する条件も実測する。
 fn verify_page_tables(
@@ -6268,7 +6239,7 @@ fn verify_page_tables(
             match table.translate(probe_virt) {
                 Ok(Some(translation)) => {
                     checked += 1;
-                    // **恒等マッピングなので、物理 == 仮想でなければならない。**
+                    // 恒等マッピングなので、物理 == 仮想でなければならない。
                     if translation.phys.as_u64() != probe {
                         mismatches += 1;
                         logger.error(format_args!(
@@ -6327,10 +6298,9 @@ fn verify_page_tables(
 
     // --- 「マップされていない」と「アドレスが不正」を区別できること ---
     //
-    // **T-2b で、この区別は実行時の検査から型へ移った。** 非正規アドレスは
-    // `VirtAddr` を構築できないので、`translate` へ渡すことがそもそも
-    // できない。したがって確認するのは「翻訳が拒否するか」ではなく
-    // 「型が構築を拒否するか」になる。
+    // T-2b で、この区別は実行時の検査から型へ移った。非正規アドレスは `VirtAddr` を
+    // 構築できないので、`translate` へ渡すことがそもそもできない。確認するのは
+    // 「翻訳が拒否するか」ではなく「型が構築を拒否するか」になる。
     let non_canonical_ok = common::addr::VirtAddr::new(0x0000_8000_0000_0000).is_none();
     logger.info(format_args!(
         "paging: a non-canonical address cannot even be built as a VirtAddr = {}",
@@ -6339,14 +6309,13 @@ fn verify_page_tables(
 
     // G ビットが 1 つでも立っていたら停止する。
     //
-    // 「G ビットを一切立てていない」ことは、architecture.md と ADR-0018 が
-    // **維持していると主張している性質**であり、M5-a-1 が「CR3 リロードで
-    // TLB を全部追い出せる」と結論した根拠でもある。M5-a-2 の 2MiB ページ
-    // 分割は、その結論の上に手順を組んでいる。
+    // 「G ビットを一切立てていない」は、architecture.md と ADR-0018 が維持していると
+    // 主張している性質で、M5-a-1 が「CR3 リロードで TLB を全部追い出せる」と結論した
+    // 根拠でもある。M5-a-2 の 2MiB ページ分割は、その結論の上に手順を組んでいる。
     //
-    // 数えて WARN を出すだけでは、主張の強さと検査の強さが釣り合わない。
-    // 立っていたら前提が崩れているということなので、そこで止める方が正しい。
-    // `plan` には G ビットを立てる経路が無いため、通常はここに掛からない。
+    // 数えて WARN を出すだけでは、主張の強さと検査の強さが釣り合わない。立っていたら
+    // 前提が崩れているので、そこで止める方が正しい。`plan` には G ビットを立てる経路が
+    // 無いので、通常はここに掛からない。
     if mismatches > 0 || !non_canonical_ok || global_entries > 0 {
         if global_entries > 0 {
             logger.error(format_args!(
