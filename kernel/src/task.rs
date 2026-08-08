@@ -569,32 +569,29 @@ pub fn init_ap_idle_task() {
     ));
 }
 
-/// **デモ後のワーカーを走行可能へ戻す**（S4-c-4-3、`sched-keep-workers-runnable`）。
+/// デモ後のワーカーを走行可能へ戻す（S4-c-4-3、`sched-keep-workers-runnable`）。
 ///
 /// # これは増幅器であって、単独では何も主張しない
 ///
-/// **本番の判断（[`pick_next`] の 2 層、`CURRENT` の更新、スイッチの機序）には
-/// 一切触らない。** 触るのはワーカーの状態だけで、**既定ビルドにこの経路は無い。**
+/// 本番の判断（[`pick_next`] の 2 層、`CURRENT` の更新、スイッチの機序）には触らない。
+/// 触るのはワーカーの状態だけで、既定ビルドにこの経路は無い。
 ///
-/// **これだけ入れても何も起きない。** bootstrap processor がデモ後もワーカーを
-/// 巡回し続けるようになるだけで、**第 1 層が AP を弾くので競合しない。**
-/// **主張が生まれるのは `sched-ignore-owner` と組んだときで**、そこで初めて
-/// AP がワーカーを取り、2 コアが同じ集合を奪い合う。
-/// `bkl-widen-entry-window-test` と同じ位置づけである。
+/// これだけ入れても何も起きない。bootstrap processor がデモ後もワーカーを巡回し続ける
+/// ようになるだけで、第 1 層が AP を弾くので競合しない。主張が生まれるのは
+/// `sched-ignore-owner` と組んだときで、そこで初めて AP がワーカーを取り、2 コアが
+/// 同じ集合を奪い合う。`bkl-widen-entry-window-test` と同じ位置づけである。
 ///
 /// # なぜ締切を止める形にしなかったのか
 ///
-/// **`on_timer_tick` の締切分岐を無効にすると、起動が進まない。**
-/// [`run_preemptive_demo`] はワーカーが走行不可になることで戻るので、
-/// **締切を止めると bootstrap processor がデモから戻らず、その後ろにある
-/// AP 起こしへ到達しない。** **AP が起きなければ窓も生まれない。**
-/// そこで**デモは普通に終わらせ、AP が起きた後で戻す**形にした。
+/// `on_timer_tick` の締切分岐を無効にすると、起動が進まない。[`run_preemptive_demo`] は
+/// ワーカーが走行不可になることで戻るので、締切を止めると bootstrap processor がデモから
+/// 戻らず、その後ろにある AP 起こしへ到達しない。AP が起きなければ窓も生まれない。
+/// そこでデモは普通に終わらせ、AP が起きた後で戻す形にした。
 ///
 /// # 窓の長さ
 ///
-/// **戻した後はずっと開いている。** `demo_active` は既に `false` なので
-/// 締切分岐は走らず、誰もワーカーを `Blocked` へ戻さない。**一度きりの短い窓を
-/// 狙う構成と違い、取り逃しにくい。**
+/// 戻した後はずっと開いている。`demo_active` は既に `false` なので締切分岐は走らず、
+/// 誰もワーカーを `Blocked` へ戻さない。一度きりの短い窓を狙う構成と違い、取り逃しにくい。
 #[cfg(feature = "sched-keep-workers-runnable")]
 pub fn rearm_workers_for_smp_stimulus() {
     let _guard = common::critical::InterruptGuard::enter();
@@ -607,25 +604,24 @@ pub fn rearm_workers_for_smp_stimulus() {
     ));
 }
 
-/// **このコアの `CURRENT` を、自分の既定タスクにする**（S4-c-3-2b）。
+/// このコアの `CURRENT` を、自分の既定タスクにする（S4-c-3-2b）。
 ///
-/// AP が本番の世界へ移った直後に 1 回だけ呼ぶ。**sentinel を解く唯一の箇所である。**
+/// AP が本番の世界へ移った直後に 1 回だけ呼ぶ。sentinel を解く唯一の箇所である。
 ///
 /// # 呼び出しの前提
 ///
-/// **BKL を保持した状態で呼ぶこと**（`KernelEntry::ApBringUp`）。`CURRENT` は
-/// 共有物で、書く時点で bootstrap processor が走っている。
-///
-/// **自コアのタイマを開ける前に呼ぶこと。** 開けた後だと、解く前にティックが
-/// 来て [`current_index`] が sentinel を読んで停止しうる。
+/// - BKL を保持した状態で呼ぶこと（`KernelEntry::ApBringUp`）。`CURRENT` は共有物で、
+///   書く時点で bootstrap processor が走っている
+/// - 自コアのタイマを開ける前に呼ぶこと。開けた後だと、解く前にティックが来て
+///   [`current_index`] が sentinel を読んで停止しうる
 pub fn adopt_idle_task_on_this_cpu() {
     let cpu = common::percpu::cpu_id();
     set_current_index(default_task_for(cpu));
 }
 
-/// AP 用アイドルタスクの担当コア。**`MAX_CPUS = 2` の前提でスロット 1 である。**
+/// AP 用アイドルタスクの担当コア。`MAX_CPUS = 2` の前提でスロット 1 である。
 ///
-/// 上げるときに要る作業は **ADR-0026 の「条件つきの安全」が正である。**
+/// 上げるときに要る作業は ADR-0026 の「条件つきの安全」。
 const AP_IDLE_TASK_OWNER: usize = 1;
 
 extern "C" {
@@ -646,50 +642,49 @@ fn serial_line(args: core::fmt::Arguments) {
 ///
 /// # なぜ要るのか。[`GPR_BUF`] が per-CPU ではない
 ///
-/// [`GPR_BUF`] はワーカー A / B で共有され、排他はワーカー本体の `global_asm!`
-/// 内の生 `cli`…`sti` である。**`cli` が止められるのは同一コアの割り込みだけ
-/// なので、別のコアで走るタスクからの並行アクセスは防げない。**
+/// [`GPR_BUF`] はワーカー A / B で共有され、排他はワーカー本体の `global_asm!` 内の生
+/// `cli`…`sti` である。`cli` が止められるのは同一コアの割り込みだけなので、別のコアで
+/// 走るタスクからの並行アクセスは防げない。
 ///
-/// per-CPU 化はできない。**あの区間では 15 本の GPR 全部が検査対象のパターンを
-/// 保持しており、アドレス計算に使えるレジスタが 1 本も無い**（だから rip 相対で
-/// 触っている）。自コアのスロットを選ぶには GS 相対か集約ブロック形式が必要で、
-/// どちらも現時点では無い（`deferred-decisions.md` の `GPR_BUF` の項目）。
+/// per-CPU 化はできない。あの区間では 15 本の GPR 全部が検査対象のパターンを保持して
+/// おり、アドレス計算に使えるレジスタが 1 本も無い（だから rip 相対で触っている）。
+/// 自コアのスロットを選ぶには GS 相対か集約ブロック形式が要るが、どちらも現時点では
+/// 無い（`deferred-decisions.md` の `GPR_BUF` の項目）。
 ///
-/// **配列にして `MAX_CPUS` 本持たせるだけでは解決しない。** rip 相対のままだと
-/// 全コアがスロット 0 を叩くので、per-CPU 化が済んだように見えて共有のままに
-/// なる。そこで**形を変える代わりに、前提が破れたら落ちる形にしてある。**
+/// 配列にして `MAX_CPUS` 本持たせるだけでは解決しない。rip 相対のままだと全コアが
+/// スロット 0 を叩くので、per-CPU 化が済んだように見えて共有のままになる。そこで形を
+/// 変える代わりに、前提が破れたら落ちる形にしてある。
 ///
 /// # この検査の性格
 ///
-/// **現在は常に成立する。** `MAX_CPUS = 1` で [`common::percpu::cpu_id`] が
-/// 常に `0` を返すためである。**目的は、AP がタスクを実行し始めた段で落ちること**
-/// であって、今なにかを捕まえることではない。
+/// 現在は常に成立する。`MAX_CPUS = 1` で [`common::percpu::cpu_id`] が常に `0` を返す
+/// ためである。目的は AP がタスクを実行し始めた段で落ちることであって、今なにかを
+/// 捕まえることではない。
 ///
-/// **破壊確認は現時点では構成できない。** `cpu_id()` に非 `0` を返させる手段が
-/// まだ無い。**S3-b で `cpu_id()` が実 ID を返すようになった時点で構成可能に
-/// なるので、S3-b の到達条件に入れてある**（`roadmap.md`）。
-/// `smp::trampoline_frame()` や `irq::mask_all()` と同じ扱いである。
+/// 破壊確認は現時点では構成できない。`cpu_id()` に非 `0` を返させる手段がまだ無い。
+/// S3-b で `cpu_id()` が実 ID を返すようになった時点で構成可能になるので、S3-b の
+/// 到達条件に入れてある（`roadmap.md`）。`smp::trampoline_frame()` や
+/// `irq::mask_all()` と同じ扱いである。
 fn require_bootstrap_processor(what: &str) {
-    // 破壊 (S3-a, percpu-fake-nonzero-cpu-id): この tripwire が見る値だけを偽る。
+    // 破壊 (percpu-fake-nonzero-cpu-id): この tripwire が見る値だけを偽る（S3-a）。
     //
-    // **`cpu_id()` そのものを偽る形は S3-b-2a で使えなくなった。** `cpu_id()` が
-    // GDTR 由来になったので、「`cpu_id()` は 1 と言うが GDTR はスロット 0 を
-    // 指している」は**本物の不整合**であり、`gdt::init` の読み戻しが**この
-    // tripwire より前に**捕まえて停止する。**より基本的な検査が先に働く。**
+    // `cpu_id()` そのものを偽る形は S3-b-2a で使えなくなった。`cpu_id()` が GDTR 由来に
+    // なったので、「`cpu_id()` は 1 と言うが GDTR はスロット 0 を指している」は本物の
+    // 不整合であり、`gdt::init` の読み戻しがこの tripwire より前に捕まえて停止する。
+    // より基本的な検査が先に働く。
     //
-    // **したがって破壊は tripwire が読む値に限定する。** そうしないと、
-    // 「tripwire の分岐が働くこと」ではなく「GDT の読み戻しが働くこと」を
-    // 確かめてしまう。**何を確かめたいかで破壊の位置が決まる。**
+    // したがって破壊は tripwire が読む値に限定する。そうしないと、「tripwire の分岐が
+    // 働くこと」ではなく「GDT の読み戻しが働くこと」を確かめてしまう。何を確かめたいかで
+    // 破壊の位置が決まる。
     #[cfg(feature = "percpu-fake-nonzero-cpu-id")]
     let cpu = 1usize;
     #[cfg(not(feature = "percpu-fake-nonzero-cpu-id"))]
     let cpu = common::percpu::cpu_id();
-    // 破壊 (S4-c-4-2, sched-ignore-bootstrap-tripwire): **この見張りを外す。**
+    // 破壊 (sched-ignore-bootstrap-tripwire): この見張りを外す（S4-c-4-2）。
     //
-    // **単独では意味を持たない。** `smp-ap-runs-preemptive-demo` と組んで初めて
-    // 「AP がデモを実際に走らせる」形になり、そこで**二重選択の窓が生まれる。**
-    // S4-c-4-1 は逆に**この見張りが在ること**を要求するので、
-    // **同じ起動では両立しない。**
+    // 単独では意味を持たない。`smp-ap-runs-preemptive-demo` と組んで初めて「AP がデモを
+    // 実際に走らせる」形になり、そこで二重選択の窓が生まれる。S4-c-4-1 は逆にこの見張りが
+    // 在ることを要求するので、同じ起動では両立しない。
     #[cfg(feature = "sched-ignore-bootstrap-tripwire")]
     let _ = cpu;
     #[cfg(not(feature = "sched-ignore-bootstrap-tripwire"))]
@@ -901,7 +896,7 @@ unsafe fn setup_tasks() {
                 // 使えるスタックの下端はガードページの直上。
                 stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
                 state: TaskState::Ready,
-                // **BSP のワーカーである。** `GPR_BUF` に触るので AP へ渡さない
+                // BSP のワーカーである。`GPR_BUF` に触るので AP へ渡さない
                 // （ADR-0023 Addendum §5。タスクのコア間移動を実装しない）。
                 owner: common::percpu::BOOTSTRAP_PROCESSOR_SLOT,
                 base,
@@ -915,13 +910,13 @@ unsafe fn setup_tasks() {
 
 /// 協調的 yield。専用ベクタへソフトウェア割り込みを出す。
 ///
-/// **切り替えの機序はモジュールの doc が正である。** ここには複製しない。
+/// 切り替えの機序はモジュールの doc が正である。ここには複製しない。
 ///
 /// この関数に固有なのは 2 点だけである。
 ///
-/// - **次に自分が選ばれると、この `int` の直後へ戻る。** 呼び出し側から見ると
-///   `yield_now()` が長く掛かったように見える。
-/// - **ガードの判定は [`on_yield`] 側で行う**（`int` を通る全 yield を覆うため）。
+/// - 次に自分が選ばれると、この `int` の直後へ戻る。呼び出し側から見ると
+///   `yield_now()` が長く掛かったように見える
+/// - ガードの判定は [`on_yield`] 側で行う（`int` を通る全 yield を覆うため）
 #[inline(always)]
 pub fn yield_now() {
     // SAFETY: yield_vector のゲートは IDT に登録済みで、専用スタブ経由で
@@ -940,10 +935,9 @@ pub fn yield_now() {
 /// `current_rsp` は現タスクの `IrqContext` 先頭（`irq_entry` に渡る `context`）
 /// で、現タスクの保存 RSP として記録する。
 ///
-/// **`Locked` / `InterruptGuard` を保持したまま yield してはならない。** 保持
-/// したまま切り替えると、別タスクがクリティカルセクションの途中で走る。判定は
-/// critical nesting depth で行い、IF は見ない（ADR-0019 §5、yield は IF=0 から
-/// 正当に呼ばれうる）。
+/// `Locked` / `InterruptGuard` を保持したまま yield してはならない。保持したまま
+/// 切り替えると、別タスクがクリティカルセクションの途中で走る。判定は critical nesting
+/// depth で行い、IF は見ない（ADR-0019 §5、yield は IF=0 から正当に呼ばれうる）。
 pub fn on_yield(current_rsp: u64) -> u64 {
     // 保持中の yield を fail-fast する。int ゲート自身が積んだぶんは
     // InterruptGuard ではないのでカウンタには乗らない。したがってここが 0 で
@@ -964,12 +958,11 @@ pub fn on_yield(current_rsp: u64) -> u64 {
 /// timer（IRQ0）のティックで `irq_entry` から呼ばれ、プリエンプティブに切り替える
 /// （M5-d）。yield と同じ [`schedule_switch`] 中核へ合流する。
 ///
-/// **明示 yield と違い、critical 区間中なら fail-fast せずスキップする。** timer
-/// が割り込むのは呼び出し側のバグではない。ただし今は譲るべきでないので現 RSP を
-/// 返してプリエンプトしない。もっとも、`InterruptGuard` は cli してから深さを
-/// 増やすので `depth>0 ⟹ IF=0 ⟹ timer は配送されない`（ADR-0019 §5）。この
-/// スキップは、その構造的保証が崩れたときの防御である（`task-preempt-in-critical`
-/// で実際に崩して発火させる）。
+/// 明示 yield と違い、critical 区間中なら fail-fast せずスキップする。timer が割り込む
+/// のは呼び出し側のバグではない。ただし今は譲るべきでないので現 RSP を返してプリエンプト
+/// しない。もっとも、`InterruptGuard` は cli してから深さを増やすので
+/// `depth>0 ⟹ IF=0 ⟹ timer は配送されない`（ADR-0019 §5）。このスキップは、その構造的
+/// 保証が崩れたときの防御である（`task-preempt-in-critical` で実際に崩して発火させる）。
 pub fn on_timer_tick(current_rsp: u64) -> u64 {
     // 防御的スキップ。critical 区間中はプリエンプトせず現タスクを続行する。
     // 既定ビルド（と feature 下で arm されていないとき）はここで守る。
@@ -977,7 +970,7 @@ pub fn on_timer_tick(current_rsp: u64) -> u64 {
     if critical_nesting_depth() != 0 {
         return current_rsp;
     }
-    // preempt-in-critical の破壊確認では、**サボタージュが arm されている間だけ**この
+    // preempt-in-critical の破壊確認では、サボタージュが arm されている間だけこの
     // 防御を bypass して、cli 落とし（IF=1 のまま）と併せてプリエンプトをクリティカル
     // 区間へ食い込ませる。arm 窓の外（デモ開始など）は通常どおり守るので startup
     // レースが起きない（かつては大域的に外していた。verification-coverage 参照）。
@@ -1009,10 +1002,9 @@ pub fn on_timer_tick(current_rsp: u64) -> u64 {
 /// スイッチの中核（yield と timer が共有）。現タスクの RSP を保存し、次タスクを
 /// 選び、RSP0 を更新して次タスクの RSP を返す。次が現タスクと同じなら何もしない。
 fn schedule_switch(current_rsp: u64) -> u64 {
-    // **このコアがスケジューラを通った回数**（S4-c-3-2a）。`current_index()` より
-    // 前で数える。あちらは sentinel を読むと停止するので、後ろに置くと
-    // **「入ったが数えられていない」**が生じる（`smp-ap-no-sentinel-clear` の
-    // 破壊はまさにその形で止まる）。
+    // このコアがスケジューラを通った回数（S4-c-3-2a）。`current_index()` より前で
+    // 数える。あちらは sentinel を読むと停止するので、後ろに置くと「入ったが数えられて
+    // いない」が生じる（`smp-ap-no-sentinel-clear` の破壊はまさにその形で止まる）。
     SCHEDULE_PASSES.this_cpu().fetch_add(1, Ordering::Relaxed);
     let current = current_index();
     scheduler::set_saved_rsp(current, current_rsp);
@@ -1027,40 +1019,36 @@ fn schedule_switch(current_rsp: u64) -> u64 {
     #[cfg(not(feature = "task-switch-no-swap"))]
     {
         let cpu = common::percpu::cpu_id();
-        // **`CURRENT` を読むのはここ 1 回だけである。** 同じスナップショットを
-        // フィルタ（[`pick_next`]）と検出器（[`report_double_selection`]）の
-        // 両方へ渡す。
+        // `CURRENT` を読むのはここ 1 回だけである。同じスナップショットをフィルタ
+        // （[`pick_next`]）と検出器（[`report_double_selection`]）の両方へ渡す。
         //
-        // **読み直さない理由は、検出器の根拠を明確にするためである。** 別々に
-        // 読むと、フィルタが見た状態と検出器が見た状態が違いうる。そうなると
-        // 「フィルタが通したのに検出器が鳴った」が**守りの破れなのか読んだ時点の
-        // ずれなのか**を区別できない。**1 回の読みから両方を導けば、その曖昧さが
-        // 構造的に無くなる。**
+        // 読み直さない理由は、検出器の根拠を明確にするためである。別々に読むと、
+        // フィルタが見た状態と検出器が見た状態が違いうる。そうなると「フィルタが通した
+        // のに検出器が鳴った」が、守りの破れなのか読んだ時点のずれなのかを区別できない。
+        // 1 回の読みから両方を導けば、その曖昧さが構造的に無くなる。
         //
-        // BKL の内側なので実害は無いはずだが、**「無いはず」に依らない形にして
-        // ある**（借りている保証を減らす）。
+        // BKL の内側なので実害は無いはずだが、「無いはず」に依らない形にしてある
+        // （借りている保証を減らす）。
         let currents = current_indices();
         // `owners` も 1 回だけ読み、`pick_next` と下の観測の両方へ渡す
         // （`currents` と同じ理由。上のコメント）。
         let owners = scheduler::owners();
         let next = pick_next(scheduler::states(), owners, currents, cpu, current);
-        // **第 1 層の実証（S4-c-4-2）。** 自コアが担当していないタスクを選んだら
-        // 1 度だけ出す。**本番では鳴らない**——第 1 層が候補から外し、落ち先も
-        // 定義上自コアの担当だからである（`default_task_for`）。
+        // 第 1 層の実証（S4-c-4-2）。自コアが担当していないタスクを選んだら 1 度だけ
+        // 出す。本番では鳴らない。第 1 層が候補から外し、落ち先も定義上自コアの担当だ
+        // からである（`default_task_for`）。
         //
-        // **検出器とは別の事象を見ている。** あちらは「他コアが今走らせている
-        // タスクを選んだ」、こちらは「自分のものでないタスクを選んだ」である。
-        // **前者は後者を含むが、逆は含まない**——他コアがまだ走らせていない
-        // よそのタスクを選ぶ形は、こちらだけが捉える。
+        // 検出器とは別の事象を見ている。あちらは「他コアが今走らせているタスクを選んだ」、
+        // こちらは「自分のものでないタスクを選んだ」である。前者は後者を含むが逆は含ま
+        // ない。他コアがまだ走らせていないよそのタスクを選ぶ形は、こちらだけが捉える。
         report_foreign_task_adoption(next, cpu, &owners);
-        // **検出器（S4-c-3-2b）。** 2 層とも迂回されたときだけ鳴る。
+        // 検出器（S4-c-3-2b）。2 層とも迂回されたときだけ鳴る。
         //
-        // **BKL の内側である**——`irq_entry` が入口で取っており、ここはその中
-        // である。**BKL の外の行は判定に使えない**（S4-b-4 でバイト混線の実物を
-        // 観測している）。
+        // BKL の内側である。`irq_entry` が入口で取っており、ここはその中である。
+        // BKL の外の行は判定に使えない（S4-b-4 でバイト混線の実物を観測している）。
         //
-        // **フィルタより後に置く。** フィルタが効いていればここは通らないので、
-        // 鳴ったこと自体が「フィルタが通さなかったはずのものが通った」を意味する。
+        // フィルタより後に置く。フィルタが効いていればここは通らないので、鳴ったこと
+        // 自体が「フィルタが通さなかったはずのものが通った」を意味する。
         report_double_selection(next, cpu, &currents);
         report_layer_two_skip();
         // 走らせるべき相手がいない（=現タスクのまま）なら何もしない。デモ後の
@@ -1096,10 +1084,10 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         unsafe {
             gdt::set_rsp0(expected_rsp0);
         }
-        // **実際の状態を読む。** RSP0 は M5-e まで挙動に現れないので、間違った
-        // 値が書かれても誰も気づかない。TSS から読み戻して期待値と一致する
-        // ことをその場で確かめる（A-1 / M5-b と同じく実状態を見る）。drop-rsp0
-        // では更新を落としているのでここで食い違い、halt する。
+        // 実際の状態を読む。RSP0 は M5-e まで挙動に現れないので、間違った値が書かれても
+        // 誰も気づかない。TSS から読み戻して期待値と一致することをその場で確かめる
+        // （A-1 / M5-b と同じく実状態を見る）。drop-rsp0 では更新を落としているので
+        // ここで食い違い、halt する。
         let readback = gdt::privilege_stack_top();
         if readback != expected_rsp0 {
             serial_line(format_args!(
@@ -1576,7 +1564,7 @@ unsafe fn setup_preemptive_tasks() {
                 stack_top: top.as_u64(),
                 stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
                 state: TaskState::Ready,
-                // **BSP のワーカーである。** `GPR_BUF` に触るので AP へ渡さない
+                // BSP のワーカーである。`GPR_BUF` に触るので AP へ渡さない
                 // （ADR-0023 Addendum §5。タスクのコア間移動を実装しない）。
                 owner: common::percpu::BOOTSTRAP_PROCESSOR_SLOT,
                 base,
