@@ -2109,10 +2109,6 @@ fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
     ));
 }
 
-/// IDT のロード結果をログに残す（M4-b-1）。
-///
-/// GDT と同じ作法で、設定したつもりの値ではなく `sidt` で読み戻した値を
-/// 確認する。
 /// クリティカルセクション（`InterruptGuard`）の入れ子を実機で検証する
 /// （M4-c-1）。
 ///
@@ -2184,6 +2180,10 @@ fn verify_critical_sections(logger: &mut Logger<SerialPort>) {
     ));
 }
 
+/// IDT のロード結果をログに残す（M4-b-1）。
+///
+/// GDT と同じ作法で、設定したつもりの値ではなく `sidt` で読み戻した値を
+/// 確認する。
 fn report_idt(logger: &mut Logger<SerialPort>) {
     let (base, limit) = idt::current_idt();
     logger.info(format_args!(
