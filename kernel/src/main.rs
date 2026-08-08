@@ -1541,11 +1541,10 @@ extern "sysv64" fn kernel_main() -> ! {
 
 /// フレームバッファを検証し、描画ハンドルを作る（M3-a）。
 ///
-/// bootloader から渡された形状をそのまま信じず、[`FramebufferLayout`] の
-/// 検証を通す。通らなかった場合は理由を ERROR で残して `None` を返し、
-/// 描画せずに以降の処理を続ける。ここで halt しないのは、フレームバッファが
-/// 使えない環境でも、それ以外の起動シーケンスの診断ログは最後まで取りたい
-/// ため（ADR-0013）。画面が主たる出力手段になる M3-c では方針を見直す。
+/// bootloader から渡された形状をそのまま信じず、[`FramebufferLayout`] の検証を通す。
+/// 通らなければ理由を ERROR で残して `None` を返し、描画せずに続ける。halt しないのは、
+/// フレームバッファが使えない環境でも起動シーケンスの診断ログを最後まで取りたいため
+/// （ADR-0013）。画面が主たる出力手段になる M3-c では方針を見直す。
 fn init_framebuffer(
     logger: &mut Logger<SerialPort>,
     boot_info: &BootInfo,
@@ -1562,9 +1561,9 @@ fn init_framebuffer(
         }
     };
 
-    // 検証は「GOP の申告に内部矛盾が無いこと」しか見ていない。その範囲が
-    // 実際に現在のページテーブルでマップされているかは別問題なので、ここで
-    // 確認する（`Framebuffer::new` の安全性要件）。
+    // 検証は「GOP の申告に内部矛盾が無いこと」しか見ていない。その範囲が現在の
+    // ページテーブルでマップされているかは別問題なので、ここで確認する
+    // （`Framebuffer::new` の安全性要件）。
     if !range_is_mapped(mapped_ranges, layout.base().as_u64(), layout.end().as_u64()) {
         logger.error(format_args!(
             "framebuffer: {:#x}..{:#x} is not fully mapped; drawing is disabled",
@@ -1585,9 +1584,8 @@ fn init_framebuffer(
     ));
 
     // SAFETY: layout は FramebufferLayout の検証を通っており、最終行の末尾まで
-    // size_bytes に収まることが保証されている。base..end が現在のページ
-    // テーブルでマップ済みであることは直前に contains_range で確認した。
-    // フレームバッファは他の誰も使っておらず、この Framebuffer が唯一の
+    // size_bytes に収まる。base..end がマップ済みであることは直前に contains_range で
+    // 確認した。フレームバッファは他の誰も使っておらず、この Framebuffer が唯一の
     // 書き込み手段になる（作るのはこの 1 箇所のみ）。
     Some(unsafe { Framebuffer::new(layout) })
 }
@@ -1596,14 +1594,13 @@ fn init_framebuffer(
 /// 起動時のテストパターンを描く（M3-a）。
 ///
 /// 目視で次を確認できるように選んである。
-/// - 画面全体が塗られる: 形状の検証（`height * stride * 4 <= size_bytes`）が
-///   正しく、全画面を描いても範囲外へ出ない。
-/// - 外周 1px の枠が四辺すべてに出る: stride の扱いが正しい。stride を width と
-///   取り違えていると枠が斜めにずれる。
-/// - 赤・緑・青の順に正しい色で並ぶ: ピクセルフォーマット変換が正しい。
-///   Rgb/Bgr を取り違えていると赤と青が入れ替わる。
-/// - 右下からはみ出した矩形が、画面内の分だけ描かれて落ちない: 切り詰めが
-///   効いており、範囲外へ書いていない。
+/// - 画面全体が塗られる: 形状の検証（`height * stride * 4 <= size_bytes`）が正しく、
+///   全画面を描いても範囲外へ出ない
+/// - 外周 1px の枠が四辺すべてに出る: stride の扱いが正しい。width と取り違えていると
+///   枠が斜めにずれる
+/// - 赤・緑・青の順に並ぶ: ピクセルフォーマット変換が正しい。Rgb/Bgr を取り違えて
+///   いると赤と青が入れ替わる
+/// - 右下からはみ出した矩形が画面内の分だけ描かれる: 切り詰めが効いている
 fn draw_startup_test_pattern(logger: &mut Logger<SerialPort>, framebuffer: &mut Framebuffer) {
     const BACKGROUND: Color = Color::rgb(0x10, 0x10, 0x18);
     const BORDER: Color = Color::WHITE;
@@ -1627,9 +1624,8 @@ fn draw_startup_test_pattern(logger: &mut Logger<SerialPort>, framebuffer: &mut 
         framebuffer.fill_rect(x, SWATCH_MARGIN, SWATCH_SIZE, SWATCH_SIZE, *color);
     }
 
-    // 右下からわざとはみ出させる。切り詰めが効いていれば、画面内に収まる
-    // 部分だけが描かれる。効いていなければ範囲外へ書き込んでページ
-    // フォルトするか、無関係なメモリを壊す。
+    // 右下からわざとはみ出させる。切り詰めが効いていれば画面内に収まる部分だけが
+    // 描かれ、効いていなければ範囲外へ書き込んで #PF になるか、無関係なメモリを壊す。
     framebuffer.fill_rect(
         width - SWATCH_SIZE / 2,
         height - SWATCH_SIZE / 2,
@@ -1650,15 +1646,14 @@ fn draw_startup_test_pattern(logger: &mut Logger<SerialPort>, framebuffer: &mut 
 /// 起動時のテストパターンに文字を描く（M3-b）。
 ///
 /// 目視で次を確認できるように選んである。
-/// - 印字可能な ASCII が 3 行すべて欠けずに並ぶ: グリフテーブルの検索と
-///   ビットの並びが正しい。左右が反転していれば字形が鏡像になる。
-/// - 日本語が代替グリフ（U+FFFD）として描かれる: 未収録文字のフォールバックが
-///   効いており、落ちない。日本語を収録した時点でここが本来の字形に変わる。
-/// - 右端から始まる行が、画面内に収まる分だけ描かれて落ちない: 文字単位の
-///   切り詰めが効いている。
+/// - 印字可能な ASCII が 3 行すべて欠けずに並ぶ: グリフテーブルの検索とビットの並びが
+///   正しい。左右が反転していれば字形が鏡像になる
+/// - 日本語が代替グリフ（U+FFFD）として描かれる: 未収録文字のフォールバックが効いて
+///   いる。日本語を収録した時点でここが本来の字形に変わる
+/// - 右端から始まる行が画面内に収まる分だけ描かれる: 文字単位の切り詰めが効いている
 ///
-/// ヒープ初期化より前に呼ばれるため、動的な文字列は組み立てられない。
-/// 静的な文字列だけで確認できる内容にしてある。
+/// ヒープ初期化より前に呼ばれるので、動的な文字列は組み立てられない。静的な文字列
+/// だけで確認できる内容にしてある。
 fn draw_startup_text(framebuffer: &mut Framebuffer, background: Color) {
     const TEXT_LEFT: u32 = 16;
     const TEXT_TOP: u32 = 112;
@@ -1705,11 +1700,10 @@ fn draw_startup_text(framebuffer: &mut Framebuffer, background: Color) {
 #[cfg(not(feature = "gfx-test-pattern"))]
 /// バックバッファを確保して画面コンソールを作る（M3-c-2）。
 ///
-/// 確保に失敗した場合は `None` を返し、カーネルは停止せずに続行する。
-/// 画面が出なくなるだけで、シリアルログという観測手段は失われないため。
-/// 失敗の内訳（要求フレーム数・空きフレーム総数・最大連続空き範囲）を
-/// ログに出し、「空き自体が不足」なのか「空きはあるが連続領域が足りない
-/// （断片化）」なのかを判別できるようにする。
+/// 確保に失敗したら `None` を返し、停止せずに続行する。画面が出なくなるだけで、
+/// シリアルログという観測手段は失われないため。失敗の内訳（要求フレーム数・空き
+/// フレーム総数・最大連続空き範囲）をログに出し、「空き自体が不足」と「空きはあるが
+/// 連続領域が足りない（断片化）」を判別できるようにする。
 fn init_console(
     logger: &mut Logger<SerialPort>,
     framebuffer: Framebuffer,
@@ -1753,14 +1747,13 @@ fn init_console(
         return None;
     }
 
-    // バックバッファは物理フレームから切り出したもので、恒等マッピングの
-    // 下では仮想アドレスと一致する。変換は direct map を通す（T-2c で
-    // frame_allocator が PhysAddr を返すようになれば、この分岐は消える）。
+    // バックバッファは物理フレームから切り出したもので、変換は direct map を通す
+    // （T-2c で frame_allocator が PhysAddr を返すようになれば、この分岐は消える）。
     let base_virt = common::addr::direct_map().phys_to_virt(start_frame);
     // SAFETY: base..end は今確保したばかりで他の誰も使っておらず、直前に
-    // contains_range でマップ済みであることを確認した。framebuffer は
-    // init_framebuffer が検証済みの形状で作ったもので、所有権をここへ
-    // 移している（同じ領域に対する Framebuffer は他に存在しない）。
+    // contains_range でマップ済みを確認した。framebuffer は init_framebuffer が検証済み
+    // の形状で作ったもので、所有権をここへ移している（同じ領域に対する Framebuffer は
+    // 他に存在しない）。
     match unsafe { Console::new(framebuffer, base_virt, FOREGROUND, BACKGROUND) } {
         Ok(console) => {
             let (columns, rows) = console.size();
@@ -1782,13 +1775,12 @@ fn init_console(
 
 /// シリアルへ書き、コンソールがあれば画面にも同じ内容を書く（M3-c-3）。
 ///
-/// **必ずシリアルを先に書く。** 画面側で何が起きてもシリアルログだけは
-/// 残るようにするため。順序を入れ替えると、コンソールの不具合がシリアル
-/// ログを道連れにできる構造になり、シリアルを唯一の信頼できる観測手段と
-/// する方針（ADR-0003、ADR-0017 の決定 9）が崩れる。
+/// 必ずシリアルを先に書く。画面側で何が起きてもシリアルログだけは残るようにするため。
+/// 順序を入れ替えると、コンソールの不具合がシリアルログを道連れにできる構造になり、
+/// シリアルを唯一の信頼できる観測手段とする方針（ADR-0003、ADR-0017 の決定 9）が崩れる。
 ///
-/// `Logger` 自体には複数の出力先を持たせない。マルチシンクにすると
-/// シリアル出力の経路が画面出力の経路に依存してしまうため（ADR-0017）。
+/// `Logger` 自体には複数の出力先を持たせない。マルチシンクにするとシリアル出力の経路が
+/// 画面出力の経路に依存する（ADR-0017）。
 fn log_both(
     logger: &mut Logger<SerialPort>,
     console: Option<&mut Console>,
@@ -1807,8 +1799,8 @@ fn log_both(
 
 /// コンソールが使えるようになったことを画面の先頭に示す（M3-c-3）。
 ///
-/// 画面だけを見た人が「ログが途中から始まっている」ことを誤解しないよう、
-/// ここより前のログはシリアルにしか出ていないことと、その行数を明示する。
+/// 画面だけを見た人が「ログが途中から始まっている」と誤解しないよう、ここより前の
+/// ログはシリアルにしか出ていないことと、その行数を明示する。
 #[cfg(not(feature = "gfx-test-pattern"))]
 fn announce_console_start(logger: &mut Logger<SerialPort>, console: &mut Console) {
     use core::fmt::Write;
@@ -1836,10 +1828,9 @@ fn announce_console_start(logger: &mut Logger<SerialPort>, console: &mut Console
 
 /// 稼働中の GDT のディスクリプタを 1 本ずつ読み戻し、期待値と照合する（M5-e-1）。
 ///
-/// カーネルコード/データに加え、M5-e で足したユーザー用（ucode32 / udata /
-/// ucode64、DPL=3、STAR 互換順）と TSS を確認する。Ring 3 遷移はまだ行わない
-/// （M5-e-3）。ここでは「GDT が今持っている値」を読み、DPL・type・並びが期待
-/// どおりであることを保証する。設計上の仮定ではなく実状態を見る。
+/// カーネルコード/データに加え、M5-e で足したユーザー用（ucode32 / udata / ucode64、
+/// DPL=3、STAR 互換順）と TSS を確認する。Ring 3 遷移はまだ行わない（M5-e-3）。
+/// 読むのは GDT が今持っている値で、設計上の仮定ではなく実状態を見る。
 fn verify_gdt_descriptors(logger: &mut Logger<SerialPort>, gdt_limit: u16) {
     use gdt::layout::{
         user_segment_descriptor, KERNEL_CODE_ACCESS, KERNEL_CODE_FLAGS, KERNEL_DATA_ACCESS,
@@ -1853,8 +1844,8 @@ fn verify_gdt_descriptors(logger: &mut Logger<SerialPort>, gdt_limit: u16) {
         "gdt: limit={gdt_limit} (expected {expected_limit})"
     ));
 
-    // 8 バイトのコード/データディスクリプタ 5 本。期待値は稼働中の GDT を
-    // 組んだのと同じ layout 関数から作る。
+    // 8 バイトのコード/データディスクリプタ 5 本。期待値は稼働中の GDT を組んだのと
+    // 同じ layout 関数から作る。
     let entries: [(&str, usize, u64, u8); 5] = [
         (
             "kcode",
@@ -1888,13 +1879,12 @@ fn verify_gdt_descriptors(logger: &mut Logger<SerialPort>, gdt_limit: u16) {
         ),
     ];
 
-    // CPU は、セグメントセレクタをセグメントレジスタへロードした際に、その
-    // ディスクリプタの Accessed ビット（アクセスバイトの bit 0 = ディスクリプタの
-    // bit 40）を 1 にする。kdata は起動時に DS/ES/SS/FS/GS へロード済みなので、
-    // 実状態では Accessed が立ち、書き込んだ値（0x92）と食い違う（0x93）。これは
-    // 検証したい DPL/type/並びとは別の CPU 管理のビットなので照合から除外する。
-    // ユーザー用ディスクリプタはまだどのレジスタにもロードしていない（Ring 3 は
-    // M5-e-3）ため Accessed は 0 のままで、書き込んだ値と一致する。
+    // CPU はセグメントセレクタをロードすると、そのディスクリプタの Accessed ビット
+    // （アクセスバイトの bit 0 = ディスクリプタの bit 40）を 1 にする。kdata は起動時に
+    // DS/ES/SS/FS/GS へロード済みなので、実状態では Accessed が立ち、書き込んだ値
+    // （0x92）と食い違う（0x93）。DPL/type/並びとは別の CPU 管理のビットなので照合から
+    // 除外する。ユーザー用はまだどのレジスタにもロードしていない（Ring 3 は M5-e-3）
+    // ので Accessed は 0 のままで、書き込んだ値と一致する。
     const ACCESSED: u64 = 1 << 40;
 
     let mut all_ok = expected_limit == gdt_limit;
@@ -1903,8 +1893,7 @@ fn verify_gdt_descriptors(logger: &mut Logger<SerialPort>, gdt_limit: u16) {
         let dpl = ((loaded >> 45) & 0b11) as u8;
         let present = (loaded >> 47) & 1;
         let accessed = (loaded >> 40) & 1;
-        // アクセスバイトの S（bit 44）が 1 ならコード/データ、Executable
-        // （bit 43）でコードかデータかが分かる。
+        // S（bit 44）が 1 ならコード/データ。Executable（bit 43）でどちらかが決まる。
         let user_segment = (loaded >> 44) & 1;
         let executable = (loaded >> 43) & 1;
         let kind = if user_segment == 0 {
@@ -1919,19 +1908,17 @@ fn verify_gdt_descriptors(logger: &mut Logger<SerialPort>, gdt_limit: u16) {
              accessed={accessed} (expected {expected:#018x}, accessed bit is CPU-managed)"
         ));
         let matches = (loaded & !ACCESSED) == (expected & !ACCESSED) && dpl == expected_dpl;
-        // 破壊 (M5-e-4, user-desc-dpl0): ucode64 の DPL を 0 に落とす破壊のときは、
-        // この読み戻しで先に halt しない（遠征の runtime で iretq の #GP として
-        // 捕まえる。M5-e-1 の申し送り）。この feature のときだけ ucode64 を素通しに
-        // する。
+        // 破壊 (ring3-test-user-desc-dpl0): ucode64 の DPL を 0 に落とすので、この
+        // 読み戻しで先に halt させない。遠征の runtime で iretq の #GP として捕まえる
+        // （M5-e-1 の申し送り）。この feature のときだけ ucode64 を素通しにする。
         #[cfg(feature = "ring3-test-user-desc-dpl0")]
         let matches = matches || name == "ucode64";
         all_ok &= matches;
     }
 
-    // udata の D/B を、設計の仮定ではなく稼働中の kdata の実バイトへ揃えたことの
-    // 確認（運用者指示）。ロングモードでデータの D/B は無視されうるが、既知値
-    // 照合が「kdata と同じ」を前提にしているため、両者の D/B（フラグニブルの
-    // bit 2、ディスクリプタの bit 54）が一致することを実状態で確かめる。
+    // udata の D/B を、設計の仮定ではなく稼働中の kdata の実バイトへ揃えたことの確認。
+    // ロングモードでデータの D/B は無視されうるが、既知値照合が「kdata と同じ」を
+    // 前提にしているので、両者の D/B（ディスクリプタの bit 54）の一致を実状態で見る。
     let loaded_kdata = gdt::loaded_descriptor(gdt::KERNEL_DATA_INDEX as usize);
     let loaded_udata = gdt::loaded_descriptor(gdt::USER_DATA_INDEX as usize);
     let kdata_db = (loaded_kdata >> 54) & 1;
@@ -1942,10 +1929,9 @@ fn verify_gdt_descriptors(logger: &mut Logger<SerialPort>, gdt_limit: u16) {
     all_ok &= kdata_db == udata_db;
 
     // TSS は 16 バイトのシステムディスクリプタ（index 6-7）。base が実体を指し、
-    // S=0（システム）・present であることを確かめる。type は available TSS(0x9)
-    // として書くが、**ltr がロード時に busy ビットを立てて 0xB にする**ので、
-    // 実状態では 0xB になる。Accessed と同じく CPU 管理のビットなので、両方を
-    // 許容する（0x9 = available、0xB = busy、違いは bit 1 のみ）。
+    // S=0（システム）・present であることを確かめる。type は available TSS（0x9）と
+    // して書くが、ltr がロード時に busy ビットを立てて 0xB にする。Accessed と同じく
+    // CPU 管理のビットなので両方を許容する（違いは bit 1 のみ）。
     let tss_low = gdt::loaded_descriptor(gdt::TSS_SELECTOR.index() as usize);
     let tss_present = (tss_low >> 47) & 1;
     let tss_system = (tss_low >> 44) & 1; // S ビット。TSS は 0。
@@ -1977,8 +1963,8 @@ fn verify_gdt_descriptors(logger: &mut Logger<SerialPort>, gdt_limit: u16) {
 
 /// GDT / TSS / スタック切り替えの結果をログに残す（M4-a）。
 ///
-/// M2-d の CR3 切り替えと同じ作法で、切り替え後に「実際に読み戻した値」を
-/// 出す。設定したつもりの値ではなく、CPU が今参照している値を確認する。
+/// M2-d の CR3 切り替えと同じ作法で、切り替え後に読み戻した値を出す。設定したつもりの
+/// 値ではなく、CPU が今参照している値を確認する。
 fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
     let (gdt_base, gdt_limit) = gdt::current_gdt();
     let code_selector = gdt::current_code_selector();
@@ -2046,8 +2032,8 @@ fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
         "stack: RSP is inside the kernel stack: {on_own_stack}"
     ));
 
-    // ローカル変数の置き場所も自前スタック上にあること。RSP だけでなく、
-    // 実際にコンパイラが使う退避先も移っていることの確認になる。
+    // ローカル変数の置き場所も自前スタック上にあること。RSP だけでなく、コンパイラが
+    // 使う退避先も移っていることの確認になる。
     let probe = 0xA5A5_5A5Au32;
     let probe_address = core::ptr::addr_of!(probe) as u64;
     let locals_on_own_stack = kernel_stack.contains(
@@ -2065,16 +2051,15 @@ fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
         "stack: no longer using the UEFI-derived stack: {left_old_stack}"
     ));
 
-    // 実際に書き込めること（M2-d のスタック検証と同じ考え方）。
-    // 現在の RSP より下（未使用側）へ直接読み書きしてみる。
+    // 書き込めること（M2-d のスタック検証と同じ考え方）。現在の RSP より下
+    // （未使用側）へ直接読み書きする。
     let scratch = (current_rsp - 256) as *mut u64;
     let scratch_ok = if kernel_stack.contains(
         common::addr::VirtAddr::new(scratch as u64).expect("a stack address is canonical"),
     ) {
         // SAFETY: scratch は現在の RSP より 256 バイト下で、直前の
-        // `kernel_stack.contains` によりカーネルスタックの範囲内であることを
-        // 確認済み。まだ誰も使っていない未使用領域であり、赤ゾーン
-        // （128 バイト）より外側でもある。読み書きするのはこの 8 バイトのみ。
+        // `kernel_stack.contains` でカーネルスタックの範囲内を確認済み。まだ誰も
+        // 使っておらず、赤ゾーン（128 バイト）より外側でもある。触るのは 8 バイトのみ。
         unsafe {
             core::ptr::write_volatile(scratch, 0x5A5A_A5A5_5A5A_A5A5);
             core::ptr::read_volatile(scratch) == 0x5A5A_A5A5_5A5A_A5A5
@@ -2088,8 +2073,8 @@ fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
         if scratch_ok { "OK" } else { "NG" }
     ));
 
-    // カーネルスタックの直下はガードページ（起動シーケンスの中で unmap
-    // する）なのでカナリアを読まない。IST スタックの犠牲領域だけを見る。
+    // カーネルスタックの直下はガードページ（起動シーケンスの中で unmap する）なので
+    // カナリアを読まない。IST スタックの犠牲領域だけを見る。
     let guards_ok = stack::guards_intact();
     logger.info(format_args!(
         "stack: IST guards intact (double-fault={}, page-fault={})",
@@ -2112,12 +2097,11 @@ fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
 /// クリティカルセクション（`InterruptGuard`）の入れ子を実機で検証する
 /// （M4-c-1）。
 ///
-/// 各時点の IF は「設定したつもりの値」ではなく、実際の RFLAGS から読む。
-/// M4-c の時点ではまだ `sti` していない（起動時から IF=0）ため、この
-/// 検証で観測できるのは「入れ子で余計に有効化されないこと」と「Drop 後に
-/// 元の状態へ戻ること」である。IF=1 で `enter` する経路の検証は、PIC を
-/// 全マスクした M4-c-3 の後で `--critical-test` により行う（それ以前に
-/// `sti` すると未検証のハンドラへ割り込みが飛ぶため危険）。
+/// 各時点の IF は、設定したつもりの値ではなく実際の RFLAGS から読む。M4-c の時点では
+/// まだ `sti` していない（起動時から IF=0）ので、ここで観測できるのは「入れ子で余計に
+/// 有効化されないこと」と「Drop 後に元の状態へ戻ること」である。IF=1 で `enter` する
+/// 経路は、PIC を全マスクした M4-c-3 の後に `--critical-test` で確かめる。それ以前に
+/// `sti` すると未検証のハンドラへ割り込みが飛ぶ。
 fn verify_critical_sections(logger: &mut Logger<SerialPort>) {
     use common::critical::InterruptGuard;
 
@@ -2160,8 +2144,8 @@ fn verify_critical_sections(logger: &mut Logger<SerialPort>) {
         ));
     }
 
-    // 一番外側の Drop 後。起動時から IF=0 なので、保存値も IF=0 で復元しない。
-    // つまり元の状態（IF=0）へ正しく戻っている。
+    // 一番外側の Drop 後。起動時から IF=0 なので保存値も IF=0 で、復元しないことが
+    // そのまま元の状態へ戻っていることになる。
     let after_all = if_set();
     all_ok &= after_all == before;
     logger.info(format_args!(
@@ -2199,12 +2183,12 @@ fn report_idt(logger: &mut Logger<SerialPort>) {
         cpu::halt_forever();
     }
 
-    // 全ベクタが present で割り込みゲート（0xE）であること。1 つでも欠けると、
-    // そのベクタが発生したときに #NP になり、しかも #NP のハンドラも無ければ落ちる。
+    // 全ベクタが present で割り込みゲート（0xE）であること。1 つでも欠けると、その
+    // ベクタが発生したときに #NP になり、#NP のハンドラも無ければ落ちる。
     //
     // DPL は「syscall ベクタ（0x80）だけ DPL 3、他は全て DPL 0」であること。DPL=3 は
-    // Ring 3 から int 0x80 を呼べる唯一の条件で、これを名指しで確かめる。逆に他の
-    // ゲートに DPL 3 が紛れると、そのベクタを Ring 3 から任意に発火できてしまう。
+    // Ring 3 から int 0x80 を呼べる唯一の条件なので名指しで確かめる。他のゲートに
+    // DPL 3 が紛れると、そのベクタを Ring 3 から任意に発火できてしまう。
     let mut all_present = true;
     let mut all_interrupt_gates = true;
     let mut dpl_layout_ok = true;
@@ -2247,10 +2231,10 @@ fn report_idt(logger: &mut Logger<SerialPort>) {
         cpu::halt_forever();
     }
 
-    // スタブ表の刻み幅と、IDT エントリがそれを正しく指していることを検証する。
-    // IDT は base + n * STUB_SIZE でエントリを作っているため、この前提が
-    // 崩れると全エントリが誤ったアドレスを指す。同じ式で検算しても循環
-    // するので、アセンブラが付けた独立のラベルと突き合わせる。
+    // スタブ表の刻み幅と、IDT エントリがそれを指していることを検証する。IDT は
+    // base + n * STUB_SIZE でエントリを作るので、この前提が崩れると全エントリが誤った
+    // アドレスを指す。同じ式で検算すると循環するので、アセンブラが付けた独立のラベルと
+    // 突き合わせる。
     let check = idt::check_stub_table();
     logger.info(format_args!(
         "idt: stub table {:#x}..{:#x} size={} (expected {}), stride={}, entries={}",
@@ -2271,10 +2255,10 @@ fn report_idt(logger: &mut Logger<SerialPort>) {
 
     // 例外スタブ表の外のベクタが、それぞれの専用スタブを指すこと。
     //
-    // 上の検査はこれらのベクタを除外しており、除外したものについては何も
-    // 見ない。ゲートの代入を落としても既定の例外スタブを指したまま静かに
-    // 通るので、肯定的な主張のほうを別に置く。yield と syscall は「戻らない」
-    // 経路へ落ち、スプリアスは S2-b 以前の「起きたら止まる」状態へ戻る。
+    // 上の検査はこれらのベクタを除外しており、除外したものについては何も見ない。
+    // ゲートの代入を落としても既定の例外スタブを指したまま静かに通るので、肯定的な
+    // 主張を別に置く。yield と syscall は「戻らない」経路へ落ち、スプリアスは S2-b
+    // 以前の「起きたら止まる」状態へ戻る。
     let dedicated = idt::check_dedicated_stubs();
     let dedicated_ok = dedicated.iter().all(idt::DedicatedStubCheck::is_ok);
     logger.info(format_args!(
@@ -2302,20 +2286,19 @@ fn report_idt(logger: &mut Logger<SerialPort>) {
 
 /// 8259A PIC を 0x20-0x2F へ再マップし、全 IRQ をマスクする（M4-c-3）。
 ///
-/// 再マップ**前**の IMR も記録する。UEFI が何を開けたまま制御を渡してきたかは
-/// 実際に読まないと分からず、後で「誰も設定していないはずの IRQ が来る」と
-/// 悩んだときの手掛かりになる（OVMF はアイドル中もタイマ割り込みを処理して
-/// いる。`docs/troubleshooting.md` の起動ログのベースライン）。
+/// 再マップ前の IMR も記録する。UEFI が何を開けたまま制御を渡してきたかは読まないと
+/// 分からず、後で「誰も設定していないはずの IRQ が来る」と悩んだときの手掛かりになる
+/// （OVMF はアイドル中もタイマ割り込みを処理している。`docs/troubleshooting.md` の
+/// 起動ログのベースライン）。
 fn configure_pic(logger: &mut Logger<SerialPort>) {
     logger.info(format_args!(
         "pic: IMR before remap {} [0 = unmasked]",
         irq::check_masks(&[]).observed_with_bits()
     ));
 
-    // 再マップ先が IDT のカバー範囲に入っており、present なハンドラを持つ
-    // ことを**再マップより先に**確かめる。順序が逆だと、検査に落ちた場合
-    // でも PIC は既に新しいベクタを向いており、halt するまでの間に IRQ が
-    // 届けば行き先の無いベクタへ飛ぶ。
+    // 再マップ先が IDT のカバー範囲にあり、present なハンドラを持つことを、再マップ
+    // より先に確かめる。順序が逆だと、検査に落ちても PIC は既に新しいベクタを向いて
+    // おり、halt するまでの間に IRQ が届けば行き先の無いベクタへ飛ぶ。
     let (first_vector, last_vector) = irq::managed_vectors();
     let first = first_vector as usize;
     let last = last_vector as usize;
@@ -2348,16 +2331,14 @@ fn configure_pic(logger: &mut Logger<SerialPort>) {
         }
     };
 
-    // ベクタオフセットは**書いた値であって、検証した値ではない**。ICW2 は
-    // 書き込み専用で、データポートから読めるのは IMR だけである。したがって
-    // ここは「こう書いた」以上のことを主張できない。断定形で書くと、下の
-    // マスク検証が通ったことをもって再マップ全体が正しいと読めてしまう。
+    // ベクタオフセットは書いた値であって、検証した値ではない。ICW2 は書き込み専用で、
+    // データポートから読めるのは IMR だけである。断定形で書くと、下のマスク検証が
+    // 通ったことをもって再マップ全体が正しいと読めてしまう。
     logger.info(format_args!("pic: programmed {programming}"));
 
-    // 一方 IMR は読める。「設定したつもり」ではなく実際の値を読み戻す。
-    // ICW シーケンスが途中で崩れていると、最後の OCW1 が ICW として
-    // 解釈されてマスクが掛からない。そのまま M4-d で `sti` すると、
-    // ハンドラの無い IRQ がいきなり飛んでくる。
+    // 一方 IMR は読める。設定したつもりではなく実際の値を読み戻す。ICW シーケンスが
+    // 途中で崩れていると、最後の OCW1 が ICW として解釈されてマスクが掛からない。
+    // そのまま M4-d で `sti` すると、ハンドラの無い IRQ がいきなり飛んでくる。
     let after_remap = irq::check_masks(&[]);
     logger.info(format_args!("pic: IMR after remap {after_remap}"));
     if !after_remap.matches() {
@@ -2367,9 +2348,9 @@ fn configure_pic(logger: &mut Logger<SerialPort>) {
         cpu::halt_forever();
     }
 
-    // **ここは 8259 の採番を問うている。** ICW2 に書いたオフセットが効いて
-    // いるかという話なので、現在の配送先ではなく `PIC_TIMER_VECTOR` が正しい。
-    // S2-d-2 でタイマが Local APIC へ移ると、この行の前提そのものが変わる。
+    // ここは 8259 の採番を問うている。ICW2 に書いたオフセットが効いているかという話
+    // なので、現在の配送先ではなく `PIC_TIMER_VECTOR` が正しい。S2-d-2 でタイマが
+    // Local APIC へ移ると、この行の前提そのものが変わる。
     logger.info(format_args!(
         "pic: all IRQs masked (nothing can fire until M4-d unmasks the timer explicitly); \
          the vector offset stays unverified until the first timer IRQ arrives as vector \
@@ -2380,8 +2361,8 @@ fn configure_pic(logger: &mut Logger<SerialPort>) {
 
 /// `--exception-test` で各 GPR に入れる既知の値。
 ///
-/// レジスタごとに異なる値にしてあるので、ダンプで名前と値の対応が入れ替わって
-/// いれば一目で分かる。`.bss` のゼロ埋め検証で毒値を使ったのと同じ考え方。
+/// レジスタごとに異なる値にしてあるので、ダンプで名前と値の対応が入れ替わっていれば
+/// 一目で分かる。`.bss` のゼロ埋め検証で毒値を使ったのと同じ考え方である。
 /// この値は xtask 側の突き合わせ表と一致していなければならない。
 #[cfg(feature = "exception-test-invalid-opcode")]
 mod known_register_values {
