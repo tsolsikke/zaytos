@@ -1397,12 +1397,12 @@ unsafe fn bring_up_application_processor(info: ApBringUp) -> ! {
     }
 }
 
-/// 本番 CR3 と per-CPU スタックへ移った後の AP（S3-b-2b-2）。**戻らない。**
+/// 本番 CR3 と per-CPU スタックへ移った後の AP（S3-b-2b-2）。戻らない。
 extern "C" fn ap_after_switch(slot: usize) -> ! {
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
     serial.init();
 
-    // **恒等が無いことを AP 側で読み戻す**（b-2b-1 から移した到達条件）。
+    // 恒等が無いことを AP 側で読み戻す（b-2b-1 から移した到達条件）。
     // SAFETY: 稼働中のテーブルを読むだけ。
     let cr3_phys = crate::paging::switch::read_cr3();
     let cr3 = cr3_phys.as_u64();
@@ -1428,8 +1428,8 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
     }
 
     // 破壊 (S3-b-2b-2, smp-ap-touch-scheduler): AP からスケジューラの現在タスクを
-    // 読む。**この段は AP でタスクを実行しないので、sentinel を読んで落ちるのが
-    // 正しい。** 丸めていたら「タスク 0 が走っている」と静かに答えていた。
+    // 読む。この段は AP でタスクを実行しないので、sentinel を読んで落ちるのが
+    // 正しい。丸めていたら「タスク 0 が走っている」と静かに答えていた。
     #[cfg(feature = "smp-ap-touch-scheduler-test")]
     {
         let _ = writeln!(
@@ -1443,20 +1443,20 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
 
     // === S4-c-3-2b: このコアの `CURRENT` を sentinel から解く ===
     //
-    // **`start_local_timer` より前でなければならない。** あちらは戻らず、その先で
-    // `sti` する。**そこを過ぎると、このコアはいつでもタイマを受ける。** sentinel
+    // `start_local_timer` より前でなければならない。あちらは戻らず、その先で
+    // `sti` する。そこを過ぎると、このコアはいつでもタイマを受ける。sentinel
     // のまま受けると `current_index()` が sentinel を読んで停止する。
     //
-    // **BKL をここで取る。** `CURRENT` は共有物で、書く時点で bootstrap processor
-    // が走っている。**これが `KernelEntry::ApBringUp` の唯一の取得箇所であり、
-    // 列挙にあって取得箇所が無い状態がここで解消する。**
+    // BKL をここで取る。`CURRENT` は共有物で、書く時点で bootstrap processor
+    // が走っている。これが `KernelEntry::ApBringUp` の唯一の取得箇所であり、
+    // 列挙にあって取得箇所が無い状態がここで解消する。
     //
-    // **取る区間は書き込みだけに絞る。** この関数はシリアルを直に使っており、
+    // 取る区間は書き込みだけに絞る。この関数はシリアルを直に使っており、
     // そこは BKL の外のままである（S6 のログ規約の許可リストの対象であって、
     // この段の対象ではない）。
     //
-    // 破壊 (S4-c-3-2b, smp-ap-no-sentinel-clear): この解除を落とす。**AP は最初の
-    // ティックで sentinel を読んで停止する。** S4-a の `smp-ap-enter-scheduler`
+    // 破壊 (S4-c-3-2b, smp-ap-no-sentinel-clear): この解除を落とす。AP は最初の
+    // ティックで sentinel を読んで停止する。S4-a の `smp-ap-enter-scheduler`
     // から役目を引き継いだ破壊である。
     #[cfg(not(feature = "smp-ap-no-sentinel-clear"))]
     {
@@ -1470,22 +1470,22 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
          in PML4[258], production CR3); it now takes part in scheduling on its own idle task"
     );
 
-    // 破壊 (S4-c-4-1, smp-ap-runs-preemptive-demo): **AP にデモを呼ばせる。**
+    // 破壊 (S4-c-4-1, smp-ap-runs-preemptive-demo): AP にデモを呼ばせる。
     //
-    // **tripwire の機序の直接観測である。** `require_bootstrap_processor` は
-    // `run_preemptive_demo` の入口にあり、**ワーカーの継続では鳴らない。開始で
-    // だけ鳴る。** 呼び出しは 2 箇所しか無く（協調デモとプリエンプティブデモの
-    // 開始）、**本番経路では bootstrap processor しか通らないので、この tripwire
-    // は一度も踏まれていない。** 踏ませて、実際に停止することを見る。
+    // tripwire の機序の直接観測である。`require_bootstrap_processor` は
+    // `run_preemptive_demo` の入口にあり、ワーカーの継続では鳴らない。開始で
+    // だけ鳴る。呼び出しは 2 箇所しか無く（協調デモとプリエンプティブデモの
+    // 開始）、本番経路では bootstrap processor しか通らないので、この tripwire
+    // は一度も踏まれていない。踏ませて、実際に停止することを見る。
     //
-    // **止まるのは入口である。** `require_bootstrap_processor` が
-    // `halt_forever` するので、**`setup_preemptive_tasks` へは到達しない。**
-    // したがって**ワーカーは `Ready` にならず、二重選択の窓も生まれない。**
-    // 窓が要るのは S4-c-4-2 で、あちらは**この tripwire を外した**構成である
-    // （`docs/verification-coverage.md`。**同じ起動では両立しない**——
+    // 止まるのは入口である。`require_bootstrap_processor` が
+    // `halt_forever` するので、`setup_preemptive_tasks` へは到達しない。
+    // したがってワーカーは `Ready` にならず、二重選択の窓も生まれない。
+    // 窓が要るのは S4-c-4-2 で、あちらはこの tripwire を外した構成である
+    // （`docs/verification-coverage.md`。同じ起動では両立しない——
     // 一方は tripwire が在ることを、他方は無いことを要求する）。
     //
-    // **タイマを開ける前に置く。** `start_local_timer` は戻らない。
+    // タイマを開ける前に置く。`start_local_timer` は戻らない。
     #[cfg(feature = "smp-ap-runs-preemptive-demo")]
     {
         let _ = writeln!(
@@ -1507,20 +1507,20 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
     unsafe { start_local_timer(&mut serial, slot) }
 }
 
-/// AP が自分の Local APIC タイマを開けて定常ループへ入る（S4-a）。**戻らない。**
+/// AP が自分の Local APIC タイマを開けて定常ループへ入る（S4-a）。戻らない。
 ///
 /// # SVR は BSP の設定を引き継がない
 ///
-/// **`apic::set_spurious_vector` は BSP の Local APIC にしか効いていない。**
+/// `apic::set_spurious_vector` は BSP の Local APIC にしか効いていない。
 /// SVR はコアごとにあるので、AP は自分で書く。bit 8（ソフトウェア有効化）が
-/// 落ちていると **LVT が 1 本も届かない**ので、書いた後に読み戻して確かめる。
+/// 落ちていると LVT が 1 本も届かないので、書いた後に読み戻して確かめる。
 ///
-/// # 較正はやり直さない。**それは仮定である**
+/// # 較正はやり直さない。それは仮定である
 ///
 /// BSP が測った分周と初期カウントをそのまま自分の LVT へ書く。これは
-/// **「Local APIC タイマの周波数がコア間で同じ」という仮定**である。
-/// 仮定なので、**AP 側のティックのレートをホストの実時間と突き合わせて実測検証
-/// する**（`lapic-timer-test` と同型の独立基準）。仮定が崩れる環境ではそこで捕まる。
+/// 「Local APIC タイマの周波数がコア間で同じ」という仮定である。
+/// 仮定なので、AP 側のティックのレートをホストの実時間と突き合わせて実測検証
+/// する（`lapic-timer-test` と同型の独立基準）。仮定が崩れる環境ではそこで捕まる。
 ///
 /// # Safety
 ///
@@ -1530,7 +1530,7 @@ unsafe fn start_local_timer(serial: &mut SerialPort, slot: usize) -> ! {
     // 1. 自分の Local APIC を有効にする。
     //
     // 破壊 (S4-a, smp-ap-timer-no-svr): ここを飛ばす。BSP が書いた SVR は
-    // このコアには効いていないので、**ティックが 1 本も来ない。**
+    // このコアには効いていないので、ティックが 1 本も来ない。
     #[cfg(not(feature = "smp-ap-timer-no-svr-test"))]
     {
         // SAFETY: 自コアの単一文脈で、割り込みは禁止されている。
@@ -1593,14 +1593,14 @@ unsafe fn start_local_timer(serial: &mut SerialPort, slot: usize) -> ! {
 
     // 3. 割り込みを有効にして定常ループへ入る。
     //
-    // **S3 ではここが `cli; hlt` だった。** BKL が無いので AP は待つだけで、
-    // 割り込みを有効化しなかった。**S4-a で前提が変わる。**
+    // S3 ではここが `cli; hlt` だった。BKL が無いので AP は待つだけで、
+    // 割り込みを有効化しなかった。S4-a で前提が変わる。
     //
-    // **BKL はまだ無い。** この段の安全は「AP のハンドラが触るものが per-CPU か
+    // BKL はまだ無い。この段の安全は「AP のハンドラが触るものが per-CPU か
     // アトミックだけである」ことに依存する条件つきのものである（`roadmap.md` の
-    // S4-a に一覧がある）。**S4-b で BKL が入れば、この一覧は不要になる。**
+    // S4-a に一覧がある）。S4-b で BKL が入れば、この一覧は不要になる。
     // 破壊 (S4-b-4, bkl-hold-forever): AP が BKL を取ったまま二度と離さない。
-    // **BSP がタイムアウトして原因を出す。** 再帰検出ではなく待ちの上限を通す
+    // BSP がタイムアウトして原因を出す。再帰検出ではなく待ちの上限を通す
     // 唯一の形である（既存の 2 破壊はどちらも同じコアが取り直すので再帰が先に鳴る）。
     #[cfg(feature = "bkl-hold-forever-test")]
     crate::bkl::sabotage_hold_forever();
@@ -1609,19 +1609,19 @@ unsafe fn start_local_timer(serial: &mut SerialPort, slot: usize) -> ! {
     ap_heartbeat_loop(serial, slot)
 }
 
-/// AP の定常ループ（S4-a）。**戻らない。**
+/// AP の定常ループ（S4-a）。戻らない。
 ///
 /// # `sti; hlt` の隣接
 ///
 /// BSP の `run_timer_loop` と同じく `cpu::enable_interrupts_and_halt` を使う。
-/// **このループは眠るかどうかを条件で決めない**ので、条件確認と `hlt` の間で
+/// このループは眠るかどうかを条件で決めないので、条件確認と `hlt` の間で
 /// 仕事を取りこぼす形にならない（あちらの doc と同じ理由である）。
 ///
 /// # ログの規約
 ///
-/// **BKL の外からシリアルへ書く。** シリアルにもロガーにもロックが無いので、
-/// BSP の出力と混線しうる。**行頭にコア番号を必ず置く**ことで、混ざっても
-/// どのコアの行かが分かるようにしてある。**行の途中で混ざることは防げない。**
+/// BKL の外からシリアルへ書く。シリアルにもロガーにもロックが無いので、
+/// BSP の出力と混線しうる。行頭にコア番号を必ず置くことで、混ざっても
+/// どのコアの行かが分かるようにしてある。行の途中で混ざることは防げない。
 #[cfg_attr(feature = "bkl-hold-forever-test", allow(dead_code))]
 fn ap_heartbeat_loop(serial: &mut SerialPort, slot: usize) -> ! {
     let mut next_heartbeat = crate::interrupts::HEARTBEAT_TICKS;
@@ -1635,9 +1635,9 @@ fn ap_heartbeat_loop(serial: &mut SerialPort, slot: usize) -> ! {
                 cpu::read_timestamp_counter()
             );
         }
-        // TLB シュートダウンの探り（S5-c）。**指示があるときだけ触る。**
-        // SAFETY: 探り用ページは BSP が起動時に写像している。**外された後に触ると
-        // #PF になるが、それがこの探りの目的である。**
+        // TLB シュートダウンの探り（S5-c）。指示があるときだけ触る。
+        // SAFETY: 探り用ページは BSP が起動時に写像している。外された後に触ると
+        // #PF になるが、それがこの探りの目的である。
         #[cfg(feature = "smp-tlb-shootdown-probe")]
         unsafe {
             shootdown_probe::service()
@@ -1659,11 +1659,11 @@ pub fn brought_up_ap_count() -> usize {
     AP_BROUGHT_UP.load(Ordering::SeqCst)
 }
 
-/// AP の per-CPU 資産を用意する（S3-b-2b-2）。**BSP が起動最初期に呼ぶ。**
+/// AP の per-CPU 資産を用意する（S3-b-2b-2）。BSP が起動最初期に呼ぶ。
 ///
 /// # なぜここで用意するのか
 ///
-/// **フレームアロケータと本番テーブルの両方が要る。** AP を起こすのは
+/// フレームアロケータと本番テーブルの両方が要る。AP を起こすのは
 /// `run_timer_loop` の中だが、そこにはアロケータが無い（トランポリン用フレームと
 /// AP スタック用フレームを最初期に予約したのと同じ理由）。
 ///
