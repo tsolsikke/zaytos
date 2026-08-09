@@ -384,29 +384,29 @@ core::arch::global_asm!(
 ///
 /// # なぜ起動最初期に予約するのか
 ///
-/// AP を起こすのは `run_timer_loop` の中（`sti` より後）だが、**そこには
-/// フレームアロケータが無い。** トランポリン用フレームと同じ理由で、
-/// **取れる位置で取っておく。**
+/// AP を起こすのは `run_timer_loop` の中（`sti` より後）だが、そこには
+/// フレームアロケータが無い。トランポリン用フレームと同じ理由で、
+/// 取れる位置で取っておく。
 ///
-/// # **恒等 VA で使う。だから低位でなければならない**
+/// # 恒等 VA で使う。だから低位でなければならない
 ///
 /// AP の CR3 は静的初期テーブルで、そこには `PML4[256]`（direct map）が無い。
-/// **したがって AP はこのフレームを恒等 VA（物理 == 仮想）で触る。**
-/// 恒等が覆うのは低位 1GiB なので、**予約したフレームがそこに入ることを確かめる。**
+/// したがって AP はこのフレームを恒等 VA（物理 == 仮想）で触る。
+/// 恒等が覆うのは低位 1GiB なので、予約したフレームがそこに入ることを確かめる。
 static AP_STACK_FRAMES: [AtomicU64; MAX_APS] = [const { AtomicU64::new(NO_FRAME) }; MAX_APS];
 
 /// 起こしうる AP の本数（bootstrap processor を除く）。
 const MAX_APS: usize = common::percpu::MAX_CPUS - 1;
 
 /// 恒等写像が覆う上限。静的初期テーブルの `PML4[0]` は 2MiB ページ 512 本で
-/// **低位 1GiB** を覆う（`kernel/src/main.rs` の `zaytos_boot_pd_shared`）。
+/// 低位 1GiB を覆う（`kernel/src/main.rs` の `zaytos_boot_pd_shared`）。
 const IDENTITY_LIMIT: u64 = 1024 * 1024 * 1024;
 
 /// AP 用スタックのフレームを予約する（S3-b-2b-1）。
 ///
 /// # 呼ぶ位置
 ///
-/// **トランポリン用フレームの予約の直後。** フレームアロケータが最小のフレーム
+/// トランポリン用フレームの予約の直後。フレームアロケータが最小のフレーム
 /// 番号から配るうちに取る（恒等の範囲に入ることを確実にする）。
 pub fn reserve_ap_stacks<const CAP: usize>(
     allocator: &mut FrameAllocator<CAP>,
@@ -434,20 +434,20 @@ pub fn ap_stack_frame(index: usize) -> Option<PhysAddr> {
     }
 }
 
-/// AP が最初に入る Rust の関数（S3-b-2b-1）。**戻らない。**
+/// AP が最初に入る Rust の関数（S3-b-2b-1）。戻らない。
 ///
 /// # ここで触れるものは限られている
 ///
-/// CR3 は静的初期テーブルで、**`PML4[256]`（direct map）が無い。** したがって
-/// **direct map 越しに触るものは一切使えない。** 使えるのは
-/// **ポート I/O（シリアル）と、高位 VA の静的データ**である。
+/// CR3 は静的初期テーブルで、`PML4[256]`（direct map）が無い。したがって
+/// direct map 越しに触るものは一切使えない。使えるのは
+/// ポート I/O（シリアル）と、高位 VA の静的データである。
 ///
-/// **`cpu_id()` を呼ばない。** `sgdt` 由来の実装は自コアの GDT がロードされた後
+/// `cpu_id()` を呼ばない。`sgdt` 由来の実装は自コアの GDT がロードされた後
 /// でなければ正しくないが、この段の AP は per-CPU GDT を持たない
-/// （`kernel/src/gdt/mod.rs` の載荷条件）。**身元は引数で受け取る。**
+/// （`kernel/src/gdt/mod.rs` の載荷条件）。身元は引数で受け取る。
 ///
-/// **ロックを取らない。** `Logger` と `SerialPort` にロックは無いので、
-/// **BSP が 1 つずつ起こすことで混線を避けている**（同時に書くとバイトが混ざる）。
+/// ロックを取らない。`Logger` と `SerialPort` にロックは無いので、
+/// BSP が 1 つずつ起こすことで混線を避けている（同時に書くとバイトが混ざる）。
 #[no_mangle]
 pub extern "C" fn zaytos_ap_entry(index: u64) -> ! {
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
@@ -461,7 +461,7 @@ pub extern "C" fn zaytos_ap_entry(index: u64) -> ! {
 
     // === S3-b-2b-2: 本番の世界へ移る ===
     //
-    // **ここまでが b-2b-1 の範囲である**（恒等 VA の 1 枚のスタック、共有の一時
+    // ここまでが b-2b-1 の範囲である（恒等 VA の 1 枚のスタック、共有の一時
     // GDT、IDT 無し）。引き継ぎ表があれば、自分の per-CPU 資産を載せて本番 CR3 へ移る。
     if let Some(info) = load_bringup(index as usize) {
         // SAFETY: トランポリンで入った直後で、割り込みは禁止のままである。
@@ -473,30 +473,30 @@ pub extern "C" fn zaytos_ap_entry(index: u64) -> ! {
         serial,
         "[WARN] smp: ap {index} has no bring-up information, so it stays on the static boot          page table and halts here"
     );
-    // **割り込みは有効化しない。** IDT を持たないので、来ても行き先が無い。
+    // 割り込みは有効化しない。IDT を持たないので、来ても行き先が無い。
     cpu::halt_forever()
 }
 
-/// 起動署名を出した AP の本数。**BSP が会計に使う。**
+/// 起動署名を出した AP の本数。BSP が会計に使う。
 static AP_STARTED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// 起こした AP の APIC ID（S5-a）。スロット 1 以降ぶん。**`u16` の番兵で
-/// 「未設定」を表す**（APIC ID は `u8` なので `0` も有効な値である）。
+/// 起こした AP の APIC ID（S5-a）。スロット 1 以降ぶん。`u16` の番兵で
+/// 「未設定」を表す（APIC ID は `u8` なので `0` も有効な値である）。
 static STARTED_AP_APIC_ID: [core::sync::atomic::AtomicU16; MAX_APS] =
     [const { core::sync::atomic::AtomicU16::new(NO_APIC_ID) }; MAX_APS];
 
 /// 「まだ起こしていない」を表す番兵（S5-a）。
 const NO_APIC_ID: u16 = u16::MAX;
 
-/// 探り用ページの仮想アドレス（S5-c）。**AP スタックの領域とは別の PML4 の穴**に
-/// 置く（`PML4[258]` の遥か上）。**本番の写像と重ならない場所を選ぶ。**
+/// 探り用ページの仮想アドレス（S5-c）。AP スタックの領域とは別の PML4 の穴に
+/// 置く（`PML4[258]` の遥か上）。本番の写像と重ならない場所を選ぶ。
 #[cfg(feature = "smp-tlb-shootdown-probe")]
 const SHOOTDOWN_PROBE_VIRT: u64 = 0xffff_8180_0000_0000;
 
-/// 探り用ページを 1 枚張る（S5-c）。**BSP が起動時、アロケータのある場所で呼ぶ。**
+/// 探り用ページを 1 枚張る（S5-c）。BSP が起動時、アロケータのある場所で呼ぶ。
 ///
-/// **定常ループにはアロケータが無い**ので、張るのはここでしかできない。
-/// **外すのは定常ループ側である**（`unmap_4kib` はアロケータを要らない）。
+/// 定常ループにはアロケータが無いので、張るのはここでしかできない。
+/// 外すのは定常ループ側である（`unmap_4kib` はアロケータを要らない）。
 ///
 /// # Safety
 ///
@@ -534,22 +534,22 @@ pub unsafe fn prepare_shootdown_probe<const CAP: usize>(
 ///
 /// # なぜ 4 段の手順が要るか
 ///
-/// **「AP が触って #PF になる」だけでは差が出ない。** AP の TLB にその翻訳が
-/// **載っていなければ**、シュートダウンを送らない構成でも**ページテーブルを歩いて
-/// #PF になる。**両構成が同じ結果になり、比較が消える。**
+/// 「AP が触って #PF になる」だけでは差が出ない。AP の TLB にその翻訳が
+/// 載っていなければ、シュートダウンを送らない構成でもページテーブルを歩いて
+/// #PF になる。両構成が同じ結果になり、比較が消える。
 ///
 /// 手順は次の 4 段である。
 ///
-/// 1. **AP がそのアドレスを触る**（翻訳を TLB へ載せる）
-/// 2. **触れたことを確かめる**（載せられなかったら以降の比較は無意味である）
-/// 3. bootstrap processor が **BKL を保持したまま**写像を外し、**世代を上げる**
-///    （破壊構成では**世代を上げない**）
-/// 4. **AP がもう一度触る**——世代が上がっていれば次の取得でフラッシュ済みなので
-///    **#PF**、上がっていなければ**古い翻訳で成功する**
+/// 1. AP がそのアドレスを触る（翻訳を TLB へ載せる）
+/// 2. 触れたことを確かめる（載せられなかったら以降の比較は無意味である）
+/// 3. bootstrap processor が BKL を保持したまま写像を外し、世代を上げる
+///    （破壊構成では世代を上げない）
+/// 4. AP がもう一度触る——世代が上がっていれば次の取得でフラッシュ済みなので
+///    #PF、上がっていなければ古い翻訳で成功する
 ///
-/// **どちらの側にも「触ったことの積極的な証拠」が要る。** 「落ちなかった」は
-/// **「触っていない」でも満たされる**（S5-a で「0 と 0 が一致する」を踏んだのと
-/// 同じ形である）。**そのため触った回数を数える。**
+/// どちらの側にも「触ったことの積極的な証拠」が要る。「落ちなかった」は
+/// 「触っていない」でも満たされる（S5-a で「0 と 0 が一致する」を踏んだのと
+/// 同じ形である）。そのため触った回数を数える。
 #[cfg(feature = "smp-tlb-shootdown-probe")]
 pub mod shootdown_probe {
     use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -572,7 +572,7 @@ pub mod shootdown_probe {
         PROBE_VIRT.store(virt, Ordering::SeqCst);
     }
 
-    /// 探り用ページの仮想アドレス。**未設定なら 0。**
+    /// 探り用ページの仮想アドレス。未設定なら 0。
     pub fn virt() -> u64 {
         PROBE_VIRT.load(Ordering::SeqCst)
     }
@@ -582,29 +582,29 @@ pub mod shootdown_probe {
         COMMAND.store(next, Ordering::SeqCst);
     }
 
-    /// AP が触った回数。**これが「触れたことの積極的な証拠」である。**
+    /// AP が触った回数。これが「触れたことの積極的な証拠」である。
     pub fn touches() -> u64 {
         TOUCHES.load(Ordering::SeqCst)
     }
 
-    /// AP が**触ろうとした**回数。**アクセスの直前に増える。**
+    /// AP が触ろうとした回数。アクセスの直前に増える。
     ///
     /// # なぜ「触れた回数」だけでは足りないか
     ///
-    /// **「2 回目で数が増えなかった」は「触ろうとして触れなかった」と
-    /// 「そもそも 2 回目を試みなかった」の両方で成り立つ。** AP が段 4 へ
+    /// 「2 回目で数が増えなかった」は「触ろうとして触れなかった」と
+    /// 「そもそも 2 回目を試みなかった」の両方で成り立つ。AP が段 4 へ
     /// 到達する前に別の理由で死んでいても、触れた回数は 1 のままである。
-    /// **試みた側にも積極的な証拠が要る。**
+    /// 試みた側にも積極的な証拠が要る。
     pub fn attempts() -> u64 {
         ATTEMPTS.load(Ordering::SeqCst)
     }
 
-    /// AP 側。指示があれば触って数える。**戻り値は触ったかどうか。**
+    /// AP 側。指示があれば触って数える。戻り値は触ったかどうか。
     ///
     /// # Safety
     ///
     /// `PROBE_VIRT` が写像済みであること（外された後に呼ぶと #PF になる。
-    /// **それがこの探りの目的である**）。
+    /// それがこの探りの目的である）。
     pub unsafe fn service() {
         let cmd = COMMAND.load(Ordering::SeqCst);
         if cmd == IDLE || SERVED.load(Ordering::SeqCst) == cmd {
@@ -614,17 +614,17 @@ pub mod shootdown_probe {
         if virt == 0 {
             return;
         }
-        // **触る「前」に試行を数える。** ここで #PF になると以降は実行されないので、
-        // **試行と成功の差が「触ろうとして触れなかった」の証拠になる。**
+        // 触る「前」に試行を数える。ここで #PF になると以降は実行されないので、
+        // 試行と成功の差が「触ろうとして触れなかった」の証拠になる。
         ATTEMPTS.fetch_add(1, Ordering::SeqCst);
-        // SAFETY: 呼び出し側の契約。読み取りのみ。**外された後はここで #PF になる。**
+        // SAFETY: 呼び出し側の契約。読み取りのみ。外された後はここで #PF になる。
         let _ = unsafe { core::ptr::read_volatile(virt as *const u64) };
         TOUCHES.fetch_add(1, Ordering::SeqCst);
         SERVED.store(cmd, Ordering::SeqCst);
     }
 }
 
-/// 起こした AP の APIC ID を返す（S5-a）。**起こしていなければ `None`。**
+/// 起こした AP の APIC ID を返す（S5-a）。起こしていなければ `None`。
 pub fn started_ap_apic_id(slot: usize) -> Option<u8> {
     let raw = STARTED_AP_APIC_ID
         .get(slot.checked_sub(1)?)?
