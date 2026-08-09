@@ -654,22 +654,22 @@ const LAPIC_LVT_ENTRIES: [(&str, u64); 6] = [
 /// LVT / redirection entry の共通ビット。
 ///
 /// [`ENTRY_MASKED_BIT`] だけが `pub(crate)` なのは、割り込み層の APIC 実装
-/// （`irq` の内側）がマスクの読み書きに使うためである。**レジスタの配置を
-/// 知っているのはこのモジュールだけにする。** 割り込み層へ定数を写すと、
+/// （`irq` の内側）がマスクの読み書きに使うためである。レジスタの配置を
+/// 知っているのはこのモジュールだけにする。割り込み層へ定数を写すと、
 /// 同じ事実が 2 箇所に出て片方だけが古くなる。
 ///
-/// **`pub` ではなく `pub(crate)` である。** 現在の利用箇所は
+/// `pub` ではなく `pub(crate)` である。現在の利用箇所は
 /// `kernel/src/irq/apic.rs` だけで、`main.rs`（別クレート）からは到達しない。
 /// 到達範囲を狭めておくと、境界の外から触られる形が increment で増えない。
 /// 下の redirection entry と EOI の操作も同じ理由で `pub(crate)` にしてある。
 const ENTRY_VECTOR_MASK: u32 = 0xFF;
 const ENTRY_DELIVERY_MODE_SHIFT: u32 = 8;
 const ENTRY_DELIVERY_MODE_MASK: u32 = 0b111;
-/// Destination Mode（bit 11）。**欄の名前であって値の名前ではない。**
+/// Destination Mode（bit 11）。欄の名前であって値の名前ではない。
 ///
 /// set = logical、clear = physical。physical では high dword の bit 31:24 が
-/// 宛先の Local APIC ID そのものになる。**S4-a の安全は clear であることに
-/// 依存している**（キーボードが BSP にしか届かないこと）。
+/// 宛先の Local APIC ID そのものになる。S4-a の安全は clear であることに
+/// 依存している（キーボードが BSP にしか届かないこと）。
 pub(crate) const ENTRY_DESTINATION_MODE_BIT: u32 = 1 << 11;
 const ENTRY_DELIVERY_STATUS_BIT: u32 = 1 << 12;
 pub(crate) const ENTRY_ACTIVE_LOW_BIT: u32 = 1 << 13;
@@ -679,13 +679,13 @@ pub(crate) const ENTRY_MASKED_BIT: u32 = 1 << 16;
 
 /// LVT Timer だけが持つタイマモード（bits 18:17）。
 ///
-/// **他の LVT には無いビットである**ので、Timer のときだけ復号する。
+/// 他の LVT には無いビットであるので、Timer のときだけ復号する。
 const LVT_TIMER_MODE_SHIFT: u32 = 17;
 const LVT_TIMER_MODE_MASK: u32 = 0b11;
 
 /// タイマモードの名前。
 ///
-/// **生値だけを残さない。** 報告のために人が復号するなら、それはログが復号
+/// 生値だけを残さない。報告のために人が復号するなら、それはログが復号
 /// すべき値である。生値も併記して、復号の側が誤っていても原資料が残る形にする
 /// （`max_lvt_entry` / `max_redirection_entry` と同じ扱い）。
 const fn timer_mode_name(mode: u32) -> &'static str {
@@ -697,7 +697,7 @@ const fn timer_mode_name(mode: u32) -> &'static str {
     }
 }
 
-/// 配送モードの名前。**ExtINT かどうかが S2-d の刻みを左右する**ので、
+/// 配送モードの名前。ExtINT かどうかが S2-d の刻みを左右するので、
 /// 数値だけでなく名前で出す。
 const fn delivery_mode_name(mode: u32) -> &'static str {
     match mode {
@@ -713,7 +713,7 @@ const fn delivery_mode_name(mode: u32) -> &'static str {
 
 /// low dword の Destination Mode を読める名前にする。
 ///
-/// **値ではなく欄の名前で判定する**（[`ENTRY_DESTINATION_MODE_BIT`]）。
+/// 値ではなく欄の名前で判定する（[`ENTRY_DESTINATION_MODE_BIT`]）。
 pub(crate) const fn destination_mode_name(low: u32) -> &'static str {
     if low & ENTRY_DESTINATION_MODE_BIT != 0 {
         "logical"
@@ -737,8 +737,8 @@ const IOAPIC_ID_MASK: u32 = 0xF;
 
 /// Version レジスタ内での Max Redirection Entry の位置。
 ///
-/// **Max LVT Entry と同じ罠がある。** SDM はこれを**エントリの個数から 1 を
-/// 引いた値**と定義している。名前を `max_redirection_entry` にしてあるのは、
+/// Max LVT Entry と同じ罠がある。SDM はこれをエントリの個数から 1 を
+/// 引いた値と定義している。名前を `max_redirection_entry` にしてあるのは、
 /// `..._count` と書くと個数を 1 つ少なく主張することになるためである。
 const IOAPIC_MAX_REDIRECTION_SHIFT: u32 = 16;
 
@@ -746,10 +746,10 @@ const IOAPIC_MAX_REDIRECTION_SHIFT: u32 = 16;
 ///
 /// # 何もしない
 ///
-/// **割り込みの構成は一切変えない。** Local APIC へは書き込まない。
+/// 割り込みの構成は一切変えない。Local APIC へは書き込まない。
 /// I/O APIC へは IOREGSEL（添字レジスタ）にだけ書く。これは読みたい
-/// レジスタを選ぶセレクタで、割り込みの設定ではないが、**書き込みである
-/// ことは事実である。S2 で最初の書き込みがここである。**
+/// レジスタを選ぶセレクタで、割り込みの設定ではないが、書き込みである
+/// ことは事実である。S2 で最初の書き込みがここである。
 pub fn survey_registers(logger: &mut Logger<SerialPort>, mapped: &MappedApic) {
     let direct_map = common::addr::direct_map();
     let lapic_virt = direct_map.phys_to_virt(mapped.local_apic);
@@ -758,7 +758,7 @@ pub fn survey_registers(logger: &mut Logger<SerialPort>, mapped: &MappedApic) {
     //
     // SAFETY: `map_and_probe` が写像を確認したページの中だけを読む。APIC の
     // レジスタは 16 バイト境界に載った 32 ビット幅で、`read_volatile` なので
-    // コンパイラが読みをまとめたり消したりしない。**書き込みは行わない。**
+    // コンパイラが読みをまとめたり消したりしない。書き込みは行わない。
     let (svr, tpr, version_raw) = unsafe {
         (
             read_lapic(lapic_virt.as_u64(), LAPIC_REGISTER_SVR),
@@ -775,7 +775,7 @@ pub fn survey_registers(logger: &mut Logger<SerialPort>, mapped: &MappedApic) {
         svr & ENTRY_VECTOR_MASK
     ));
 
-    // **LINT0 が ExtINT かどうかが S2-d の刻みを決める。** LAPIC を
+    // LINT0 が ExtINT かどうかが S2-d の刻みを決める。LAPIC を
     // ソフトウェア有効化した後も 8259 経由の割り込みが届くのは、LINT0 が
     // ExtINT に設定されている場合（virtual wire mode）だけである。
     logger.info(format_args!(
@@ -813,10 +813,10 @@ pub fn survey_registers(logger: &mut Logger<SerialPort>, mapped: &MappedApic) {
         }
     }
 
-    // ISR / IRR。**sti-check の項目 7（ハンドラが EOI を発行）を UNVERIFIABLE
-    // から格上げできるかの材料である。** ここで読めることは「読み戻せる」を
-    // 示すだけで、EOI が効いていることの証明ではない。それには**ハンドラの
-    // 中で**読む必要があり、S2-a はハンドラに触らない。
+    // ISR / IRR。sti-check の項目 7（ハンドラが EOI を発行）を UNVERIFIABLE
+    // から格上げできるかの材料である。ここで読めることは「読み戻せる」を
+    // 示すだけで、EOI が効いていることの証明ではない。それにはハンドラの
+    // 中で読む必要があり、S2-a はハンドラに触らない。
     let mut isr_any = 0u32;
     let mut irr_any = 0u32;
     for index in 0..LAPIC_STATUS_REGISTER_COUNT {
@@ -859,7 +859,7 @@ fn survey_io_apic(logger: &mut Logger<SerialPort>, base_virt: u64, io_apic: &IoA
         )
     };
 
-    // **個数ではなく添字の最大値である**（`IOAPIC_MAX_REDIRECTION_SHIFT` の doc）。
+    // 個数ではなく添字の最大値である（`IOAPIC_MAX_REDIRECTION_SHIFT` の doc）。
     let max_redirection_entry = (version_raw >> IOAPIC_MAX_REDIRECTION_SHIFT) & 0xFF;
     let entry_count = max_redirection_entry.saturating_add(1);
 
@@ -874,11 +874,11 @@ fn survey_io_apic(logger: &mut Logger<SerialPort>, base_virt: u64, io_apic: &IoA
         io_apic.global_system_interrupt_base
     ));
 
-    // **判定を 1 行にまとめる。** S1-c では「IO-APIC の MMIO が実際にデコードされるか」
+    // 判定を 1 行にまとめる。S1-c では「IO-APIC の MMIO が実際にデコードされるか」
     // を未確認のまま残していた（読むには IOREGSEL への書き込みが要り、S1-c は書き込みを
     // 行わない段だったため）。ここがその積み残しを閉じる行である。
     //
-    // **根拠を 2 つ独立に取る。**
+    // 根拠を 2 つ独立に取る。
     //   version レジスタが未デコードの見え方（全 0 / 全 1）でないこと
     //   ID レジスタの名乗る ID が、MADT が名乗った ID と一致すること
     // 後者は出所が別（MMIO とファームウェアの表）なので、偶然の一致になりにくい。
@@ -934,46 +934,46 @@ fn survey_io_apic(logger: &mut Logger<SerialPort>, base_virt: u64, io_apic: &IoA
 // ===========================================================================
 // S3-b-1: per-CPU スロットの境界を起動時に保証する
 //
-// **`cpu_id()` の実 ID 化はこの段では行わない。** 器（`common::percpu` の
+// `cpu_id()` の実 ID 化はこの段では行わない。器（`common::percpu` の
 // `install_cpu_id_reader`）だけを置き、実装を据えるのは S3-b-2a である。
 //
 // 理由は実測である。Local APIC の ID レジスタを `cpu_id()` から読む形を実装して
-// 測ったところ、プリエンプティブデモの周回数が **2214 から 374 へ落ちた**
-// （3 回ずつ起動。幅は 2180-2254 と 368-380 で重ならない）。**約 5.9 倍の退行**
+// 測ったところ、プリエンプティブデモの周回数が 2214 から 374 へ落ちた
+// （3 回ずつ起動。幅は 2180-2254 と 368-380 で重ならない）。約 5.9 倍の退行
 // である。TCG は MMIO 読みをメモリリージョンのディスパッチとして処理し、
 // `cpu_id()` は `critical_nesting_depth` 経由でクリティカルガードの出入りごとに
 // 通るためである。
 //
-// **`MAX_CPUS = 1` の間、この読みは費用だけで便益がゼロである**（答えは常に 0）。
+// `MAX_CPUS = 1` の間、この読みは費用だけで便益がゼロである（答えは常に 0）。
 // 安い機構は 2 つあり、どちらも S3-b-2a の設備を要する（per-CPU スタックから
-// RSP で導く形、または GS ベース）。**便益が生じる段で、安い機構と一緒に入れる。**
+// RSP で導く形、または GS ベース）。便益が生じる段で、安い機構と一緒に入れる。
 // 詳細は `docs/deferred-decisions.md` と `docs/roadmap.md` の S3-b。
 // ===========================================================================
 
 /// per-CPU スロットが、起動しうるコア数を覆っているかを報告する（S3-b-1）。
 ///
-/// # **この段では停止しない。警告だけである。理由を正確に書く**
+/// # この段では停止しない。警告だけである。理由を正確に書く
 ///
 /// [`common::percpu::PerCpu::this_cpu_ptr`] は `cpu_id()` 分ポインタを進めるので、
-/// `cpu_id() >= MAX_CPUS` だと配列外でありUBである。**しかしこの段では
+/// `cpu_id() >= MAX_CPUS` だと配列外でありUBである。しかしこの段では
 /// `cpu_id()` は定数 `0` を返し、カーネルコードを実行するのは bootstrap
-/// processor だけである。** AP は起こしていない。したがって
-/// **列挙されたコアが `MAX_CPUS` を超えていても、配列外の索引は発生しない。**
+/// processor だけである。AP は起こしていない。したがって
+/// 列挙されたコアが `MAX_CPUS` を超えていても、配列外の索引は発生しない。
 ///
-/// **当初ここで停止させたが、それは過剰だった。** `-smp 2` で起動すると
-/// 「2 コア列挙 / スロット 1」で停止し、**それまで完走していた構成が起動
-/// しなくなった。** しかも `acpi-smp-test smp2-enumeration` は MADT の行だけを
-/// 見ているので、**検査は緑のままだった**（`verification-coverage.md` の
+/// 当初ここで停止させたが、それは過剰だった。`-smp 2` で起動すると
+/// 「2 コア列挙 / スロット 1」で停止し、それまで完走していた構成が起動
+/// しなくなった。しかも `acpi-smp-test smp2-enumeration` は MADT の行だけを
+/// 見ているので、検査は緑のままだった（`verification-coverage.md` の
 /// 「検査が緑でも、系が悪くなっていることはある」）。
 ///
-/// **停止が正しくなるのは `cpu_id()` が非 `0` を返しうる段（S3-b-2a）である。**
+/// 停止が正しくなるのは `cpu_id()` が非 `0` を返しうる段（S3-b-2a）である。
 /// そこで初めて「スロットが足りない」が「配列外を索引する」に直結する。
-/// **保証をその段へ置き、ここでは事実を報告するだけにする。**
+/// 保証をその段へ置き、ここでは事実を報告するだけにする。
 ///
 /// # それでもここに置く価値
 ///
-/// **`MAX_CPUS` を上げ忘れたまま AP を起こす段へ進むことを、起動ログで見える
-/// ようにしておく。** `-smp 2` / `-smp 4` の構成で警告が出るので、
+/// `MAX_CPUS` を上げ忘れたまま AP を起こす段へ進むことを、起動ログで見える
+/// ようにしておく。`-smp 2` / `-smp 4` の構成で警告が出るので、
 /// S3-b-2a に入る時点で気づける。
 pub fn report_per_cpu_slot_coverage(logger: &mut Logger<SerialPort>, enumerated_cpu_count: usize) {
     let slots = common::percpu::MAX_CPUS;
@@ -993,7 +993,7 @@ pub fn report_per_cpu_slot_coverage(logger: &mut Logger<SerialPort>, enumerated_
     }
 }
 
-/// Interrupt Command Register の下位（S3-b-2b-1）。**書くと IPI が飛ぶ。**
+/// Interrupt Command Register の下位（S3-b-2b-1）。書くと IPI が飛ぶ。
 const LAPIC_REGISTER_ICR_LOW: u64 = 0x300;
 /// Interrupt Command Register の上位（宛先の APIC ID）。
 const LAPIC_REGISTER_ICR_HIGH: u64 = 0x310;
@@ -1006,14 +1006,14 @@ const ICR_DELIVERY_INIT: u32 = 0b101 << 8;
 /// ICR: delivery mode Startup（SIPI）。
 const ICR_DELIVERY_STARTUP: u32 = 0b110 << 8;
 
-/// **Fixed 配送の IPI を 1 本送る（S5-a）。**
+/// Fixed 配送の IPI を 1 本送る（S5-a）。
 ///
 /// # 何のためにあるか
 ///
-/// **「IPI が届くか」を測るためだけのものである。** 宛先のコアは
-/// [`crate::idt::IPI_PROBE_VECTOR`] のハンドラへ入り、**per-CPU の受信カウンタを
-/// 増やして EOI を送るだけ**である。**BKL は要求しない**——BKL 待ちと IPI の
-/// 相性は未解決なので、**その罠を踏まない形にしてある。**
+/// 「IPI が届くか」を測るためだけのものである。宛先のコアは
+/// [`crate::idt::IPI_PROBE_VECTOR`] のハンドラへ入り、per-CPU の受信カウンタを
+/// 増やして EOI を送るだけである。BKL は要求しない——BKL 待ちと IPI の
+/// 相性は未解決なので、その罠を踏まない形にしてある。
 ///
 /// # Safety
 ///
@@ -1028,8 +1028,8 @@ pub unsafe fn send_fixed_ipi(lapic_virt: u64, apic_id: u8, vector: u8) -> bool {
 ///
 /// # なぜ送信完了を待つのか
 ///
-/// ICR の delivery status が 1 の間は前の IPI がまだ送信中である。**待たずに次を
-/// 書くと前の IPI を壊す。** 上限つきで待ち、抜けたら `false` を返す
+/// ICR の delivery status が 1 の間は前の IPI がまだ送信中である。待たずに次を
+/// 書くと前の IPI を壊す。上限つきで待ち、抜けたら `false` を返す
 /// （呼び出し側が停止するかを決める）。
 ///
 /// # Safety
@@ -1045,7 +1045,7 @@ unsafe fn send_ipi(lapic_virt: u64, apic_id: u8, command: u32) -> bool {
         );
         write_lapic(lapic_virt, LAPIC_REGISTER_ICR_LOW, command);
     }
-    // 送信完了を上限つきで待つ。**上限のない待ちを書かない**（CLAUDE.md §14）。
+    // 送信完了を上限つきで待つ。上限のない待ちを書かない（CLAUDE.md §14）。
     for _ in 0..IPI_DELIVERY_POLL_LIMIT {
         // SAFETY: 同じページの読み取りのみ。
         let icr = unsafe { read_lapic(lapic_virt, LAPIC_REGISTER_ICR_LOW) };
