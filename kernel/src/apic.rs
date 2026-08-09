@@ -1066,7 +1066,7 @@ const IPI_DELIVERY_POLL_LIMIT: u32 = 1_000_000;
 ///
 /// # Safety
 ///
-/// [`send_ipi`] と同じ。**AP をリセット状態へ落とすので、起動時に 1 回だけ。**
+/// [`send_ipi`] と同じ。AP をリセット状態へ落とすので、起動時に 1 回だけ。
 pub unsafe fn send_init_ipi(lapic_virt: u64, apic_id: u8) -> bool {
     // SAFETY: 呼び出し元契約。
     unsafe { send_ipi(lapic_virt, apic_id, ICR_DELIVERY_INIT | ICR_LEVEL_ASSERT) }
@@ -1074,7 +1074,7 @@ pub unsafe fn send_init_ipi(lapic_virt: u64, apic_id: u8) -> bool {
 
 /// Startup IPI（SIPI）を送る（S3-b-2b-1）。
 ///
-/// `vector` は **`vector << 12` が AP の開始物理アドレスになる。**
+/// `vector` は `vector << 12` が AP の開始物理アドレスになる。
 ///
 /// # Safety
 ///
@@ -1114,13 +1114,13 @@ unsafe fn read_lapic(base_virt: u64, offset: u64) -> u32 {
 
 /// I/O APIC の内部レジスタを 1 本読む。
 ///
-/// **IOREGSEL への書き込みを伴う。** これが S2 で最初の書き込みである。
+/// IOREGSEL への書き込みを伴う。これが S2 で最初の書き込みである。
 /// 書くのは「次に窓から読む対象」を選ぶ添字だけで、割り込みの設定ではない。
 ///
 /// # Safety
 ///
 /// `base_virt` が写像済みの I/O APIC ページの先頭であること。
-/// **他の実行文脈が同時に同じ I/O APIC を触っていないこと**（IOREGSEL は
+/// 他の実行文脈が同時に同じ I/O APIC を触っていないこと（IOREGSEL は
 /// 台ごとに 1 本しかない共有の状態なので、割り込まれると読む対象が変わる）。
 /// 現在は単一コアで、この経路は割り込み禁止の起動シーケンス中にだけ通る。
 unsafe fn read_io_apic(base_virt: u64, index: u8) -> u32 {
@@ -1135,7 +1135,7 @@ unsafe fn read_io_apic(base_virt: u64, index: u8) -> u32 {
 ///
 /// # Safety
 ///
-/// [`read_io_apic`] と同じ。加えて、**書いた内容が割り込みの配送を変える**。
+/// [`read_io_apic`] と同じ。加えて、書いた内容が割り込みの配送を変える。
 unsafe fn write_io_apic(base_virt: u64, index: u8, value: u32) {
     // SAFETY: 呼び出し元契約。添字を選んでから窓を書く、の順序が必須である。
     unsafe {
@@ -1146,15 +1146,15 @@ unsafe fn write_io_apic(base_virt: u64, index: u8, value: u32) {
 
 /// redirection entry `entry` の low dword が載るレジスタ添字。
 ///
-/// **1 本の entry は 2 本のレジスタを占める**（low / high）ので、添字は
+/// 1 本の entry は 2 本のレジスタを占める（low / high）ので、添字は
 /// 2 刻みになる。ここを 1 刻みで書くと、隣の entry の high 側を踏む。
 const fn redirection_entry_index(entry: u8) -> u8 {
     IOAPIC_INDEX_REDIRECTION_BASE.wrapping_add(entry.wrapping_mul(2))
 }
 
-/// I/O APIC が持つ redirection entry の**本数**。
+/// I/O APIC が持つ redirection entry の本数。
 ///
-/// Version レジスタの Max Redirection Entry は**添字の最大値**なので、
+/// Version レジスタの Max Redirection Entry は添字の最大値なので、
 /// 本数はそれに 1 を足したものである（[`IOAPIC_MAX_REDIRECTION_SHIFT`]）。
 ///
 /// # Safety
@@ -1176,7 +1176,7 @@ pub(crate) unsafe fn read_redirection_entry_low(io_apic_virt: u64, entry: u8) ->
     unsafe { read_io_apic(io_apic_virt, redirection_entry_index(entry)) }
 }
 
-/// redirection entry の high dword を読む。**宛先はこちらにある。**
+/// redirection entry の high dword を読む。宛先はこちらにある。
 ///
 /// bit 31:24 が Destination である。physical モード（low dword の
 /// [`ENTRY_DESTINATION_MODE_BIT`] が clear）では、これが宛先の Local APIC ID
@@ -1190,17 +1190,17 @@ pub(crate) unsafe fn read_redirection_entry_high(io_apic_virt: u64, entry: u8) -
     unsafe { read_io_apic(io_apic_virt, redirection_entry_index(entry).wrapping_add(1)) }
 }
 
-/// redirection entry の high dword を書く。**破壊 feature 専用である。**
+/// redirection entry の high dword を書く。破壊 feature 専用である。
 ///
 /// # 既定ビルドには宛先を書く経路が無い
 ///
 /// 宛先はファームウェアが置いた値のまま使い、我々は読んで主張するだけである
-/// （`RedirectionEntryView::destination`）。**書く関数が既定ビルドに無ければ、
-/// 宛先が我々の書き込みで変わることはありえない。** 規律ではなく構造で閉じる。
+/// （`RedirectionEntryView::destination`）。書く関数が既定ビルドに無ければ、
+/// 宛先が我々の書き込みで変わることはありえない。規律ではなく構造で閉じる。
 ///
 /// # Safety
 ///
-/// [`write_io_apic`] と同じ。**割り込みの宛先が変わる。**
+/// [`write_io_apic`] と同じ。割り込みの宛先が変わる。
 #[cfg(feature = "ioapic-keyboard-broadcast-test")]
 pub(crate) unsafe fn write_redirection_entry_high(io_apic_virt: u64, entry: u8, value: u32) {
     // SAFETY: 呼び出し元契約。
@@ -1225,7 +1225,7 @@ const IOAPIC_DESTINATION_SHIFT: u32 = 24;
 ///
 /// # Safety
 ///
-/// [`write_io_apic`] と同じ。**割り込みの配送が変わる。**
+/// [`write_io_apic`] と同じ。割り込みの配送が変わる。
 pub(crate) unsafe fn write_redirection_entry_low(io_apic_virt: u64, entry: u8, value: u32) {
     // SAFETY: 呼び出し元契約。
     unsafe { write_io_apic(io_apic_virt, redirection_entry_index(entry), value) }
@@ -1233,20 +1233,20 @@ pub(crate) unsafe fn write_redirection_entry_low(io_apic_virt: u64, entry: u8, v
 
 /// Local APIC の End Of Interrupt レジスタ。
 ///
-/// **0 以外を書いてはならない**（SDM）。値そのものに意味は無く、書くという
+/// 0 以外を書いてはならない（SDM）。値そのものに意味は無く、書くという
 /// 行為が「配送中の最も優先度の高い割り込みを完了させる」を意味する。
 const LAPIC_REGISTER_EOI: u64 = 0xB0;
 
 /// Local APIC へ EOI を送る。
 ///
-/// **PIC と違って IRQ 番号を取らない。** どの割り込みを終えるかは LAPIC の
-/// ISR が持っており、書き手が指定しない。**8259 の EOI とは形が違う**ので、
+/// PIC と違って IRQ 番号を取らない。どの割り込みを終えるかは LAPIC の
+/// ISR が持っており、書き手が指定しない。8259 の EOI とは形が違うので、
 /// 割り込み層の `end_of_interrupt(irq, spurious)` は irq を捨てることになる。
 ///
 /// # Safety
 ///
 /// `lapic_virt` が写像済みの Local APIC ページの先頭であること。
-/// **実際に配送された割り込みのハンドラの中からのみ呼ぶこと。** 配送されて
+/// 実際に配送された割り込みのハンドラの中からのみ呼ぶこと。配送されて
 /// いない状態で書くと、別の割り込みを誤って完了させる。
 pub(crate) unsafe fn send_end_of_interrupt(lapic_virt: u64) {
     // SAFETY: 呼び出し元契約。0 を書くのが規約である。
@@ -1261,12 +1261,12 @@ pub(crate) unsafe fn send_end_of_interrupt(lapic_virt: u64) {
 ///
 /// # なぜ `0xFF` なのか
 ///
-/// **ファームウェアが残した値は `0x0f` で、CPU の予約例外ベクタの範囲
-/// （0 から 31）の中にある**（S2-a の実測）。今は Local APIC 由来の割り込みを
+/// ファームウェアが残した値は `0x0f` で、CPU の予約例外ベクタの範囲
+/// （0 から 31）の中にある（S2-a の実測）。今は Local APIC 由来の割り込みを
 /// 1 つも構成していないので潜在的だが、LAPIC が配送を担い始める S2-d-1 より前に
 /// 移しておかないと、スプリアスが起きたときに予約例外として解釈される。
 ///
-/// **下位 4 ビットが `F` の値を採る。** 古い CPU では SVR の下位 4 ビットが 1 に
+/// 下位 4 ビットが `F` の値を採る。古い CPU では SVR の下位 4 ビットが 1 に
 /// 固定されており、書いた値がそのまま読み戻せなかった。現行の CPU では書ける
 /// が、慣例に合わせておけば読み戻しが書いた値と食い違わない。
 ///
@@ -1278,10 +1278,10 @@ pub const SPURIOUS_VECTOR: u8 = 0xFF;
 ///
 /// # なぜ切り出したのか
 ///
-/// **SVR はコアごとにある。** BSP の [`set_spurious_vector`] は BSP の Local APIC
-/// にしか効いていない。**AP は自分で書く必要がある**（S4-a）。
+/// SVR はコアごとにある。BSP の [`set_spurious_vector`] は BSP の Local APIC
+/// にしか効いていない。AP は自分で書く必要がある（S4-a）。
 /// 読み書きの本体を 2 箇所へ写すと片方が古くなるので、ここに 1 つだけ置く。
-/// **ログの出し方は呼び出し側が決める**（BSP は `Logger`、AP はシリアルへ直接）。
+/// ログの出し方は呼び出し側が決める（BSP は `Logger`、AP はシリアルへ直接）。
 pub(crate) struct SpuriousVectorWrite {
     /// 書く前の生値。
     pub(crate) before: u32,
@@ -1295,7 +1295,7 @@ impl SpuriousVectorWrite {
         (self.after & ENTRY_VECTOR_MASK) as u8
     }
 
-    /// bit 8（ソフトウェア有効化）が保たれているか。**落ちていると LVT が届かない。**
+    /// bit 8（ソフトウェア有効化）が保たれているか。落ちていると LVT が届かない。
     pub(crate) const fn software_enabled(&self) -> bool {
         self.after & LAPIC_SVR_SOFTWARE_ENABLE != 0
     }
@@ -1303,17 +1303,17 @@ impl SpuriousVectorWrite {
 
 /// SVR の bit 8（ソフトウェア有効化）をどう扱うか。
 ///
-/// # **「保つ」と「立てる」は違う。実測で分かれた**
+/// # 「保つ」と「立てる」は違う。実測で分かれた
 ///
 /// BSP の Local APIC はファームウェアが有効にしてから引き渡してくる。
-/// **そこで bit 8 を書き換えるのは危険だけで、利得が無い**（落とすと LINT0
+/// そこで bit 8 を書き換えるのは危険だけで、利得が無い（落とすと LINT0
 /// 経由の 8259 配送が即座に止まる）。だから BSP は [`Self::Preserve`] である。
 ///
-/// **AP は違う。** INIT-SIPI で起こしたコアの Local APIC はリセット状態から
-/// 始まり、**SVR は `0x000000FF`、すなわち bit 8 が落ちている。**
+/// AP は違う。INIT-SIPI で起こしたコアの Local APIC はリセット状態から
+/// 始まり、SVR は `0x000000FF`、すなわち bit 8 が落ちている。
 /// 実測でそうだった——AP が [`Self::Preserve`] で書いたところ、読み戻しが
-/// `software_enabled=false` になり、**LVT が 1 本も届かない状態のまま進もうと
-/// した。** AP は [`Self::Set`] で立てなければならない。
+/// `software_enabled=false` になり、LVT が 1 本も届かない状態のまま進もうと
+/// した。AP は [`Self::Set`] で立てなければならない。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SoftwareEnable {
     /// 読んだ値の bit 8 をそのまま残す（BSP）。
@@ -1322,12 +1322,12 @@ pub(crate) enum SoftwareEnable {
     Set,
 }
 
-/// **このコアの** Local APIC の SVR のベクタ欄を [`SPURIOUS_VECTOR`] へ書く。
+/// このコアの Local APIC の SVR のベクタ欄を [`SPURIOUS_VECTOR`] へ書く。
 ///
 /// # Safety
 ///
-/// `lapic_virt` が写像済みの Local APIC ページの先頭であること。**書き込みは
-/// ベクタ欄と、`enable` が [`SoftwareEnable::Set`] のときの bit 8 だけである。**
+/// `lapic_virt` が写像済みの Local APIC ページの先頭であること。書き込みは
+/// ベクタ欄と、`enable` が [`SoftwareEnable::Set`] のときの bit 8 だけである。
 /// 同じコアから同時に別の文脈が SVR を触っていないこと。
 pub(crate) unsafe fn write_spurious_vector(
     lapic_virt: u64,
@@ -1336,9 +1336,9 @@ pub(crate) unsafe fn write_spurious_vector(
     // SAFETY: 呼び出し元契約。読み取りのみ。
     let before = unsafe { read_lapic(lapic_virt, LAPIC_REGISTER_SVR) };
 
-    // **ベクタ欄以外を 1 ビットも変えない。** bit 9（focus processor checking）や
+    // ベクタ欄以外を 1 ビットも変えない。bit 9（focus processor checking）や
     // bit 12（EOI broadcast suppression）はファームウェアが立てているかも
-    // しれないので、読んだ値を土台にする。**bit 8 だけが `enable` の対象である。**
+    // しれないので、読んだ値を土台にする。bit 8 だけが `enable` の対象である。
     let mut after_intended = (before & !ENTRY_VECTOR_MASK) | u32::from(SPURIOUS_VECTOR);
     if enable == SoftwareEnable::Set {
         after_intended |= LAPIC_SVR_SOFTWARE_ENABLE;
@@ -1364,17 +1364,17 @@ pub(crate) unsafe fn write_spurious_vector(
 ///
 /// # 安全条件
 ///
-/// **read-modify-write で bit 8 を保つ。** bit 8 を落とすと Local APIC が
+/// read-modify-write で bit 8 を保つ。bit 8 を落とすと Local APIC が
 /// 無効になり、LINT0 経由で届いている 8259 の IRQ0 が即座に止まる
 /// （`verification-coverage.md` の「APICのレジスタの現在値（S2-a）」）。
-/// **危険なのは bit 8 であって、ベクタ欄ではない。**
+/// 危険なのは bit 8 であって、ベクタ欄ではない。
 pub fn set_spurious_vector(logger: &mut Logger<SerialPort>, mapped: &MappedApic) {
     let direct_map = common::addr::direct_map();
     let lapic_virt = direct_map.phys_to_virt(mapped.local_apic).as_u64();
 
     // SAFETY: `map_and_probe` が写像を確認したページである。書き込みはベクタ欄
     // だけで、起動シーケンス中の単一文脈から呼ぶ。
-    // **BSP は bit 8 を保つ。** ファームウェアが既に有効にして引き渡してくるので、
+    // BSP は bit 8 を保つ。ファームウェアが既に有効にして引き渡してくるので、
     // ここで書き換えるのは危険だけで利得が無い（[`SoftwareEnable`] の doc）。
     let observation = unsafe { write_spurious_vector(lapic_virt, SoftwareEnable::Preserve) };
     let (before, after) = (observation.before, observation.after);
@@ -1387,7 +1387,7 @@ pub fn set_spurious_vector(logger: &mut Logger<SerialPort>, mapped: &MappedApic)
         before & ENTRY_VECTOR_MASK
     ));
 
-    // **bit 8 を落としていないことを読み戻しで確かめる。** ここが落ちていれば
+    // bit 8 を落としていないことを読み戻しで確かめる。ここが落ちていれば
     // タイマが止まるので、黙って進まない。
     if !enabled_kept {
         logger.error(format_args!(
@@ -1404,10 +1404,10 @@ pub fn set_spurious_vector(logger: &mut Logger<SerialPort>, mapped: &MappedApic)
 
     // IDT のゲートを読み戻す。
     //
-    // **ゲートを新しく足す必要は無かった。** IDT は 256 本すべてが present で
+    // ゲートを新しく足す必要は無かった。IDT は 256 本すべてが present で
     // （起動ログの `idt: 256 entries, all present=true`）、`0xFF` にも既に
-    // スタブが入っている。**したがってここで確かめるのは「足したこと」ではなく
-    // 「既にあること」である。**
+    // スタブが入っている。したがってここで確かめるのは「足したこと」ではなく
+    // 「既にあること」である。
     match crate::idt::entry(SPURIOUS_VECTOR as usize) {
         Some(entry) if entry.is_present() => logger.info(format_args!(
             "apic: the IDT gate for the spurious vector {SPURIOUS_VECTOR:#04x} is present \
@@ -1421,13 +1421,13 @@ pub fn set_spurious_vector(logger: &mut Logger<SerialPort>, mapped: &MappedApic)
         )),
     }
 
-    // **S2-d-1 でこのベクタを IRQ スタイルのスタブへ移した。**
+    // S2-d-1 でこのベクタを IRQ スタイルのスタブへ移した。
     //
     // S2-b の時点では例外スタイルのスタブのままで、起きればダンプして停止する
     // 状態だった（`idt::init` は 256 本を例外スタイルで埋め、IRQ スタイルで
     // 上書きするのは `0x20`-`0x40` と yield / syscall だけで、`0xFF` はどれにも
-    // 当たらなかった）。**専用スタブ（`zaytos_spurious_stub`）を置いて
-    // `zaytos_irq_common` へ合流させ、戻れる経路にした。**
+    // 当たらなかった）。専用スタブ（`zaytos_spurious_stub`）を置いて
+    // `zaytos_irq_common` へ合流させ、戻れる経路にした。
     //
     // EOI を送らない判定も明示にした。以前送られなかったのは「PIC の担当範囲の
     // 外だから」という偶然で、S2-d で Local APIC が配送を担うと壊れる一致だった。
@@ -1444,8 +1444,8 @@ pub fn set_spurious_vector(logger: &mut Logger<SerialPort>, mapped: &MappedApic)
 // ===========================================================================
 // S2-c: Local APIC タイマの較正
 //
-// **タイマとしては使わない。** LVT Timer はマスクされたままで、LAPIC タイマ由来の
-// 割り込みは 1 本も発生しない。**LINT0 と SVR の bit 8 には触らない。**
+// タイマとしては使わない。LVT Timer はマスクされたままで、LAPIC タイマ由来の
+// 割り込みは 1 本も発生しない。LINT0 と SVR の bit 8 には触らない。
 // ===========================================================================
 
 /// タイマの初期カウント。書くと数え下がりが始まる。
@@ -1459,12 +1459,12 @@ const LAPIC_REGISTER_TIMER_DIVIDE: u64 = 0x3E0;
 
 /// 16 分周（Divide Configuration Register のビット 3・1・0 で `0b0011`）。
 ///
-/// **32 ビットのカウンタが窓の間に一周しないことが条件である。** 仮に APIC の
+/// 32 ビットのカウンタが窓の間に一周しないことが条件である。仮に APIC の
 /// 入力が 1GHz でも 16 分周で 62.5MHz、`u32::MAX` からの数え下がりは約 68 秒
 /// もつ。較正窓（下記）は 100ms なので、桁が 2 つ以上余っている。
 const LAPIC_TIMER_DIVIDE_BY_16: u32 = 0b0011;
 
-/// 分周なし（Divide Configuration Register の `0b1011`）。**破壊専用である。**
+/// 分周なし（Divide Configuration Register の `0b1011`）。破壊専用である。
 #[cfg(feature = "lapic-timer-wrong-divide-test")]
 const LAPIC_TIMER_DIVIDE_BY_1: u32 = 0b1011;
 
