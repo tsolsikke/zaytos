@@ -592,12 +592,16 @@ const RING3_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
-    // 遠征の RSP0 据え付けを落とす。#GP がメインのスタックで走り、
-    // handler_in_excursion が false になって捕まる。
+    // 遠征の RSP0 据え付けを落とす。#GP がメインのスタックで走る。
+    //
+    // S8-c で捕まえる場所が変わった。フレームの健全性判定の従（ハンドラ自身が
+    // そのベクタの想定スタックにいること）が先に落ちるので、畳まずに dump+halt する。
+    // 以前は畳んだ後に遠征の呼び出し側が handler_in_excursion で捕まえていた
+    // （"RSP0 did not take effect"）。**この破壊は健全性判定の従を実証する側でもある。**
     CriticalTest {
         name: "drop-rsp0",
         feature: "ring3-test-drop-rsp0",
-        expected_markers: &["RSP0 did not take effect", "halting"],
+        expected_markers: &["exception frame is not trustworthy", "halting"],
         forbidden_markers: &["ring3: Ring 3 excursion verified"],
         wait_for_full_timeout: false,
         min_heartbeats: None,
@@ -608,6 +612,18 @@ const RING3_TESTS: &[CriticalTest] = &[
         name: "no-fold-flag",
         feature: "ring3-test-no-fold-flag",
         expected_markers: &["exception: vector=13", "rip=0x0000008000000000", "halting"],
+        forbidden_markers: &["ring3: Ring 3 excursion verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // 例外フレームの CS を既知でない値へ差し替える。畳みの3条件は通り、健全性判定の
+    // 主（CS が既知のセレクタであること）だけが落ちて dump+halt する。
+    // 畳めるはずの Ring 3 の #GP に掛けてあるので、止まったのが健全性判定のためだと
+    // 特定できる（もともと畳まない例外に掛けると区別が付かない）。
+    CriticalTest {
+        name: "corrupt-frame-cs",
+        feature: "ring3-test-corrupt-frame-cs",
+        expected_markers: &["exception frame is not trustworthy", "halting"],
         forbidden_markers: &["ring3: Ring 3 excursion verified"],
         wait_for_full_timeout: false,
         min_heartbeats: None,
@@ -6494,7 +6510,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 20,
-    full: 114,
+    full: 115,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

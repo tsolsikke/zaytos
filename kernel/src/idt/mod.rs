@@ -1741,6 +1741,53 @@ pub unsafe fn clear_present(vector: usize) {
     }
 }
 
+/// 畳むと決めたフレームが信用できるかを見る（S8-c）。
+///
+/// 畳みは例外ハンドラの外へ制御を戻す唯一の経路なので、**戻る先を決めるのに使う値が
+/// 信用できないなら畳まない。** 畳まなければ従来どおり dump+halt へ落ちる。
+///
+/// # 判定に使う量の選び方
+///
+/// **Ring 3 が自由に作れない量だけを使う**（`docs/coding-standards.md`）。
+/// フォルト RIP とフォルト RSP は Ring 3 が動かせるので、範囲外であることは
+/// **違反**であって破損ではない。それらで停止させると、Ring 3 が 1 命令で
+/// カーネルを止められる。
+///
+/// - 主: `cs` が Ring 3 から載せられる既知のコードセレクタであること。
+///   ucode64（`iretq` 偽フレームが積むもの）と ucode32 の 2 つを認める。
+///   **ucode32 は現状どこからも使わないが、GDT に DPL=3 の実体があるので
+///   Ring 3 が far jump で載せうる。** 認めないと、載せられた瞬間に
+///   「Ring 3 がカーネルを止められる」形になる。
+/// - 従: ハンドラ自身が、そのベクタで CPU が切り替えるはずのスタックにいること。
+///   これはカーネル側の状態で、Ring 3 からは作れない。
+///
+/// # ベクタごとに行き先が違う
+///
+/// #DF は IST1、#PF は IST2、それ以外は TSS.RSP0 である（`idt::init`）。
+/// 畳む区間の RSP0 は遠征専用スタックなので、そこを期待する。
+/// **S8-c で実際に通るのは #GP の腕だけである**（畳む対象がまだ #GP しかない）。
+/// 他の腕は S8-d でベクタを広げたときに通る。
+fn exception_frame_is_trustworthy(vector: u8, cs: u64, handler_rsp: u64) -> bool {
+    let cs_is_known = cs == crate::gdt::USER_CODE_SELECTOR.bits() as u64
+        || cs == crate::gdt::USER_CODE32_SELECTOR.bits() as u64;
+    if !cs_is_known {
+        return false;
+    }
+
+    let (bottom, top) = match vector {
+        8 => {
+            let ist = crate::stack::double_fault_stack_range();
+            (ist.bottom.as_u64(), ist.top.as_u64())
+        }
+        14 => {
+            let ist = crate::stack::page_fault_stack_range();
+            (ist.bottom.as_u64(), ist.top.as_u64())
+        }
+        _ => crate::ring3::excursion_stack_range(),
+    };
+    handler_rsp >= bottom && handler_rsp < top
+}
+
 /// 例外の共通処理。レジスタ一式をシリアルへ出して停止する。
 ///
 /// スタブから `extern "sysv64"` で呼ばれる。Rust の既定 ABI はレイアウトが
@@ -1776,18 +1823,40 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
     //
     // S8-a: フォルト RIP の厳密一致を条件から外した。畳んだ位置は記録して、
     // 予期と合っているかは遠征の呼び出し側が主張する（ring3.rs のモジュール doc）。
-    if context.vector as u8 == 13 && (context.cs & 0b11) == 3 && crate::ring3::should_fold() {
-        // SAFETY: 上の 3 条件が全て真。遠征中で RECOVERY は保存済み。longjmp で
-        // 遠征の呼び出し元へ戻る（戻らない）。dump は行わない。
-        unsafe {
-            crate::ring3::record_and_fold(
-                context.vector,
-                context.cs,
-                context.rip,
-                context.rsp,
-                rsp_at_call,
-            );
+    //
+    // S8-c: 3 条件を満たしても、フレームが信用できなければ畳まない。
+    //
+    // 破壊 (S8-c, corrupt-frame-cs): フレームの CS を既知でない値へ差し替える。
+    // 0x33 は GDT の index 6（TSS の枠）で RPL=3。コードセレクタとして載ることは
+    // 無いので「フレームが壊れている」の代表になる。RPL=3 は保つので条件 (2) は
+    // 通り、落ちるのが健全性判定であることが分かる。
+    #[cfg(not(feature = "ring3-test-corrupt-frame-cs"))]
+    let frame_cs = context.cs;
+    #[cfg(feature = "ring3-test-corrupt-frame-cs")]
+    let frame_cs = 0x33u64;
+
+    if context.vector as u8 == 13 && (frame_cs & 0b11) == 3 && crate::ring3::should_fold() {
+        if exception_frame_is_trustworthy(context.vector as u8, frame_cs, rsp_at_call) {
+            // SAFETY: 上の 3 条件が全て真で、フレームも信用できる。遠征中で RECOVERY は
+            // 保存済み。longjmp で遠征の呼び出し元へ戻る（戻らない）。dump は行わない。
+            unsafe {
+                crate::ring3::record_and_fold(
+                    context.vector,
+                    frame_cs,
+                    context.rip,
+                    context.rsp,
+                    rsp_at_call,
+                );
+            }
         }
+        // 畳める形の例外だが、フレームが信用できない。畳まずに下の dump+halt へ落ちる。
+        // **この行が「畳めたはずなのに畳まなかった」ことの唯一の手がかりである。**
+        // 出さないと、もともと畳まない例外との区別がログから付かない。
+        let _ = writeln!(
+            serial,
+            "[ERROR] exception frame is not trustworthy (cs={frame_cs:#x}, handler \
+             rsp={rsp_at_call:#018x}); not folding"
+        );
     }
 
     // 既存の境界計算が正しいことの裏取り。IRQ 側と同じ検査を通す。

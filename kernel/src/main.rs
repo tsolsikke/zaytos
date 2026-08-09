@@ -4787,6 +4787,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "遠征フラグを立てず予期 #GP を畳ませない",
     ),
     (
+        "ring3-test-corrupt-frame-cs",
+        cfg!(feature = "ring3-test-corrupt-frame-cs"),
+        "例外フレームの CS を既知でない値へ差し替える",
+    ),
+    (
         "exception-test",
         cfg!(feature = "exception-test"),
         "起動完了後に意図的な例外を起こす",

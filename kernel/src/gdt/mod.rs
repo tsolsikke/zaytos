@@ -57,6 +57,20 @@ pub const KERNEL_DATA_SELECTOR: SegmentSelector = SegmentSelector::new(KERNEL_DA
 pub const USER_CODE_SELECTOR: SegmentSelector = SegmentSelector::new(USER_CODE64_INDEX, 3);
 /// ユーザーデータのセレクタ（RPL=3）。M5-e-3 の iretq 偽フレームで SS に積む。
 pub const USER_DATA_SELECTOR: SegmentSelector = SegmentSelector::new(USER_DATA_INDEX, 3);
+/// ユーザー 32bit コードのセレクタ（RPL=3）。**カーネルからは載せない。**
+///
+/// 例外フレームの健全性判定（S8-c）だけが使う。**GDT に DPL=3 の実体がある以上、
+/// Ring 3 は far jump でこれを載せうる**ので、「Ring 3 が載せられる既知の CS」の
+/// 集合に入れておく必要がある。外すと、載せられた瞬間にカーネルが停止する。
+///
+/// # なぜ載せないものに実体があるのか
+///
+/// **枠は SYSRET の STAR 互換順（ADR-0020）が要求する**ので空けられない。
+/// **その枠を null で埋めず妥当なディスクリプタにしたのは意図的な選択である**
+/// （[`layout::USER_CODE32_FLAGS`] の doc。「妥当なディスクリプタにはする」）。
+/// M5-e-1（`3b44274`）で入った。
+/// **「使っていないから消す」は成立しない。** 消すと STAR 互換順が崩れる。
+pub const USER_CODE32_SELECTOR: SegmentSelector = SegmentSelector::new(USER_CODE32_INDEX, 3);
 /// TSS のセレクタ。`ltr` に渡す。
 pub const TSS_SELECTOR: SegmentSelector = SegmentSelector::new(TSS_INDEX, 0);
 
