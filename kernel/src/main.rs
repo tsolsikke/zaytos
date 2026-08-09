@@ -3688,6 +3688,39 @@ fn verify_user_page_mapping<const CAP: usize>(
     ));
 }
 
+/// 畳みが予期した位置で起きたかを主張する（S8-a）。
+///
+/// 畳みの判定はベクタと CS.RPL と遠征フラグだけを見る。**どこで畳まれたかを知って
+/// いるのは遠征を組み立てた側なので、突き合わせはここで行う。**
+/// 食い違ったら、記録した3つ（ベクタ・RIP・CS）を出して停止する。ハンドラの dump は
+/// 畳んだ時点で通っていないため、この行が唯一の手がかりになる。
+///
+/// `what` はログの接頭辞（遠征ごとに `ring3` / `syscall` と使い分ける）。
+///
+/// **`paging-test` でも載せる。** 呼び出し元3つのうち [`verify_ring3_excursion`] だけが
+/// cfg で落ち、`verify_syscall_roundtrip` と [`issue_ptr_len_syscall`] は関数自体が
+/// 残る（落ちるのは呼び出し側）。ここを落とすとその2つがコンパイルできない。
+fn assert_folded_at(
+    logger: &mut Logger<SerialPort>,
+    what: &str,
+    expected_vector: u64,
+    expected_rip: u64,
+) {
+    use kernel::ring3;
+
+    let vector = ring3::fault_vector();
+    let rip = ring3::fault_rip();
+    if vector == expected_vector && rip == expected_rip {
+        return;
+    }
+    logger.error(format_args!(
+        "{what}: folded at an unexpected place (vector={vector} rip={rip:#018x} \
+         cs={:#x}), expected vector={expected_vector} rip={expected_rip:#018x}; halting",
+        ring3::fault_cs()
+    ));
+    cpu::halt_forever();
+}
+
 /// Ring 3 への単発遠征を検証する（M5-e-3）。
 ///
 /// M5-e-2 が残した PML4[[`USER_PML4_INDEX`]] サブツリーへ、ユーザーコード（`cli` 1 命令）
@@ -3783,7 +3816,7 @@ fn verify_ring3_excursion<const CAP: usize>(
     // SAFETY: ユーザーページは張り済み。main_rsp0_top はメインの上端なので、遠征後に
     // RSP0 をそこへ戻せる。起動時の単一実行文脈から 1 回だけ呼ぶ。
     unsafe {
-        ring3::enter(main_rsp0_top, ring3::USER_CODE_VIRT);
+        ring3::enter(main_rsp0_top);
     }
 
     // --- 会計と検証 ---
@@ -3793,6 +3826,10 @@ fn verify_ring3_excursion<const CAP: usize>(
         ));
         cpu::halt_forever();
     }
+
+    // 畳んだ位置の主張（S8-a）。判定側は位置を見ないので、予期と突き合わせるのは
+    // ここである。cli はユーザーコード入口に置いたので、そこで #GP になるはず。
+    assert_folded_at(logger, "ring3", 13, ring3::USER_CODE_VIRT);
 
     let fault_cs = ring3::fault_cs();
     let fault_rsp = ring3::fault_rsp();
@@ -3996,7 +4033,7 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     // SAFETY: ユーザーページは張り済み。Ring 3 は cli_rip で cli を実行して #GP を起こす。
     // main_rsp0_top はメインの上端。起動時の単一実行文脈から 1 回だけ呼ぶ。
     unsafe {
-        ring3::enter(main_rsp0_top, cli_rip);
+        ring3::enter(main_rsp0_top);
     }
 
     // --- 会計と検証 ---
@@ -4006,6 +4043,10 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
         ));
         cpu::halt_forever();
     }
+
+    // 畳んだ位置の主張（S8-a）。int 0x80 の直後に置いた cli で #GP になるはず。
+    // ここが int_rip なら、往復せずに int の時点で落ちている。
+    assert_folded_at(logger, "syscall", 13, cli_rip);
 
     let count = syscall::invocation_count();
     let seen_number = syscall::last_number();
@@ -4146,7 +4187,7 @@ fn issue_ptr_len_syscall(logger: &mut Logger<SerialPort>, number: u64, buf: u64,
     // SAFETY: ユーザーページは張り済み。Ring 3 は cli_rip で cli を実行して #GP を起こす。
     // main_rsp0_top はメインの上端。起動時の単一実行文脈から呼ぶ。
     unsafe {
-        ring3::enter(main_rsp0_top, cli_rip);
+        ring3::enter(main_rsp0_top);
     }
 
     if !ring3::folded() {
@@ -4155,6 +4196,9 @@ fn issue_ptr_len_syscall(logger: &mut Logger<SerialPort>, number: u64, buf: u64,
         ));
         cpu::halt_forever();
     }
+
+    // 畳んだ位置の主張（S8-a）。
+    assert_folded_at(logger, "syscall", 13, cli_rip);
     if syscall::invocation_count() != 1 {
         logger.error(format_args!(
             "syscall: pointer syscall issued but syscall_entry ran {} times (expected 1); halting",

@@ -628,11 +628,16 @@ const SYSCALL_TESTS: &[CriticalTest] = &[
         min_heartbeats: None,
     },
     // ゲート 0x80 を DPL=0 にする。Ring 3 からの int 0x80 がゲート DPL<CPL で #GP になり、
-    // syscall_entry に到達しない。畳みの予期 RIP は cli 位置なので畳まれず dump+halt。
+    // syscall_entry に到達しない。
+    //
+    // S8-a で捕まえる場所が変わった。畳みの判定から RIP の厳密一致を外したので、この
+    // #GP は int の位置で畳まれてカーネルへ戻る。予期は cli の位置なので、遠征の
+    // 呼び出し側の主張（assert_folded_at）が食い違いを捕まえて停止する。
+    // 以前は畳まれずに例外ダンプへ落ちていた（"exception: vector=13"）。
     CriticalTest {
         name: "gate-dpl0",
         feature: "syscall-test-gate-dpl0",
-        expected_markers: &["exception: vector=13", "halting"],
+        expected_markers: &["folded at an unexpected place", "halting"],
         forbidden_markers: &["syscall: probe int 0x80 round-trip verified"],
         wait_for_full_timeout: false,
         min_heartbeats: None,
