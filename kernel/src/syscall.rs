@@ -34,7 +34,7 @@
 //! - `syscall-test-gate-dpl0`: ゲートを DPL=0 にする（[`crate::idt`] 側）。Ring 3 から
 //!   の `int 0x80` がゲート DPL<CPL で #GP になり、`syscall_entry` に到達しない。
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use common::addr::{DirectMap, PhysAddr};
 
@@ -113,6 +113,9 @@ static LAST_ARGS: [AtomicU64; 6] = [
 ];
 /// `syscall_entry` が走ったときの RSP（RSP0 スタックのはず）。読み戻し検証に使う。
 static HANDLER_RSP: AtomicU64 = AtomicU64::new(0);
+/// 入場時点の [`crate::ring3`] の「今 Ring 3 にいる」の値（S8-b）。**Ring 3 から
+/// 来たのなら真のはず**で、往復検証が突き合わせる。
+static IN_RING3_AT_ENTRY: AtomicBool = AtomicBool::new(false);
 
 /// 検証済みのユーザー範囲を表す証明トークン（M5-f-2-2、案T）。
 ///
@@ -353,6 +356,11 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     // BKL の保持区間であることを型で表すためにガードを取る。
     let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::Syscall);
 
+    // カーネルへ入ったので「今 Ring 3 にいる」を降ろす（S8-b）。Ring 3 へ返る直前で
+    // 立て直す。降ろす前の値を記録しておき、往復の検証で突き合わせる（Ring 3 から
+    // 来たのなら真のはず）。
+    IN_RING3_AT_ENTRY.store(crate::ring3::note_kernel_entry(), Ordering::SeqCst);
+
     // SAFETY: スタブが直前に積んだ有効な IrqContext を指す。読み書きともこの
     // フレームに限る。
     let ctx = unsafe { &mut *context };
@@ -398,6 +406,11 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     #[cfg(feature = "syscall-test-drop-retval")]
     let _ = ret;
 
+    // Ring 3 へ返る（stub の復元経路が iretq する）。立て直す（S8-b）。
+    // 立て直してから実際に iretq するまでは Ring 0 なのに真だが、畳みの判定は
+    // CS.RPL=0 を弾くので届かない（ring3.rs の IN_RING3 の doc）。
+    crate::ring3::note_return_to_ring3();
+
     // M5-f-1 は切り替えない。入場時の IrqContext 先頭を返す。
     context as u64
 }
@@ -410,6 +423,7 @@ pub fn reset_counters() {
         slot.store(0, Ordering::SeqCst);
     }
     HANDLER_RSP.store(0, Ordering::SeqCst);
+    IN_RING3_AT_ENTRY.store(false, Ordering::SeqCst);
 }
 
 /// `syscall_entry` が呼ばれた回数。
@@ -430,4 +444,9 @@ pub fn last_args() -> [u64; 6] {
 /// `syscall_entry` が走ったときの RSP。RSP0 スタック範囲との照合に使う。
 pub fn handler_rsp() -> u64 {
     HANDLER_RSP.load(Ordering::SeqCst)
+}
+
+/// 入場時点で「今 Ring 3 にいる」が立っていたか（S8-b）。
+pub fn in_ring3_at_entry() -> bool {
+    IN_RING3_AT_ENTRY.load(Ordering::SeqCst)
 }

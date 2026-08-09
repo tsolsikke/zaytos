@@ -86,9 +86,41 @@ static mut RECOVERY: Recovery = Recovery {
     resume_rip: 0,
 };
 
-/// 遠征中か。遠征に入る前に立て、畳みで降ろす。
-/// これが false のときの Ring 3 由来 #GP は「想定外」として畳まず halt する。
-static EXCURSION_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// 今 Ring 3 にいるか（S8-b）。これが false のときの Ring 3 由来の例外は
+/// 「想定外」として畳まず halt する。
+///
+/// # 「遠征中」から「今 Ring 3 にいる」へ広げた（S8-b）
+///
+/// **かつては遠征の入口で立て、畳みで降ろすだけだった。** その意味だと
+/// `int 0x80` でカーネルへ入っている間も真のままになる。**カーネルの中にいるのに
+/// 「Ring 3 にいる」と読める状態は、畳む対象を4ベクタへ広げる S8-d で危うい。**
+/// そこで Ring 3 とカーネルの境をまたぐたびに上げ下げする。
+///
+/// 上げ下げする点は3つある。
+///
+/// - [`enter`] が iretq の直前で立てる
+/// - `exception_entry` が畳むと決めた時点で降ろす（[`record_and_fold`]）
+/// - `syscall_entry` が入口で降ろし、Ring 3 へ返る直前で立て直す
+///
+/// # 今のところ振る舞いは変わらない
+///
+/// **畳みの判定は「CS.RPL==3」も見る**ので、カーネルの中で起きた例外は
+/// このフラグに関わらず弾かれる。**したがって S8-b は振る舞いを変えない。**
+/// 変えたのは、名前が指すものと実際の状態が一致することである。
+/// **2つの条件が独立に同じことを言う形にしておくと、片方を壊したときに
+/// もう片方が残る**（`Apic::is_spurious` が理由を2つ持つのと同じ形）。
+///
+/// # 残る窓は2つ、どちらもカーネル側である
+///
+/// 立ててから iretq するまでと、`syscall_entry` が立て直してから stub が
+/// iretq するまでは、**Ring 0 なのにフラグが真である。** どちらも CS.RPL=0 なので
+/// 畳みの判定には届かない。窓を閉じるには asm 側で上げ下げすることになるが、
+/// **判定が既に閉じているものを閉じるために asm を増やさない。**
+///
+/// **失効条件——窓が無害なのは判定が CS.RPL を見ているからである。**
+/// **CS.RPL の条件を緩めるなら、この 2 つの窓を閉じることを再検討すること。**
+/// 緩めた瞬間、カーネルの中で起きた例外が畳まれうる。
+static IN_RING3: AtomicBool = AtomicBool::new(false);
 /// 畳みが実際に起きたか（会計用。遠征後に true になっているはず）。
 static FOLDED: AtomicBool = AtomicBool::new(false);
 /// 畳んだ例外のベクタ。ハンドラが記録する。
@@ -225,10 +257,10 @@ pub unsafe fn enter(main_rsp0_top: u64) {
     #[cfg(feature = "ring3-test-drop-rsp0")]
     let _ = excursion_top;
 
-    // 遠征フラグを立てる（畳みの二重判別の条件3）。
+    // Ring 3 に入ることを記す（畳みの条件3）。iretq の直前で立てる。
     // 破壊 (M5-e-4, no-fold-flag): 立てない。cli の #GP が畳まれず dump+halt する。
     #[cfg(not(feature = "ring3-test-no-fold-flag"))]
-    EXCURSION_ACTIVE.store(true, Ordering::SeqCst);
+    IN_RING3.store(true, Ordering::SeqCst);
 
     // SAFETY: 偽フレームを積んで Ring 3 へ落ちる。ユーザーページは呼び出し側が
     // 張り済み。畳みで戻ってくる（callee-saved と RSP は longjmp が復元する）。
@@ -265,14 +297,30 @@ pub unsafe fn enter(main_rsp0_top: u64) {
 
 /// `exception_entry` が呼ぶ。今この例外を畳んでよいかを判定する。
 ///
-/// 呼び出し側で「ベクタ==13」「CS.RPL==3」を確認済みで、ここでは遠征中であることを
-/// 見る。**フォルト RIP は見ない**（[`FAULT_RIP`] の doc）。
+/// 呼び出し側で「ベクタ==13」「CS.RPL==3」を確認済みで、ここでは今 Ring 3 に
+/// いることを見る。**フォルト RIP は見ない**（[`FAULT_RIP`] の doc）。
 pub fn should_fold() -> bool {
-    EXCURSION_ACTIVE.load(Ordering::SeqCst)
+    IN_RING3.load(Ordering::SeqCst)
+}
+
+/// Ring 3 からカーネルへ入ったことを記す（S8-b）。**入ってすぐに呼ぶこと。**
+///
+/// 呼ぶ前の値を返す。**Ring 3 から入ったのなら真のはず**なので、呼び出し側は
+/// 記録して後から突き合わせられる。
+///
+/// 現在の呼び出し元は `syscall_entry` だけである。例外の側は
+/// [`record_and_fold`] が同じことを行う（あちらは戻らないので分けてある）。
+pub fn note_kernel_entry() -> bool {
+    IN_RING3.swap(false, Ordering::SeqCst)
+}
+
+/// Ring 3 へ返ることを記す（S8-b）。**iretq の直前で呼ぶこと。**
+pub fn note_return_to_ring3() {
+    IN_RING3.store(true, Ordering::SeqCst);
 }
 
 /// Ring 3 由来の例外を畳む。ベクタ・フォルト RIP・CS・RSP とハンドラ RSP を記録し、
-/// 遠征フラグを降ろして longjmp で遠征の呼び出し元へ戻る。**戻らない。**
+/// [`IN_RING3`] を降ろして longjmp で遠征の呼び出し元へ戻る。**戻らない。**
 ///
 /// # Safety
 ///
@@ -290,7 +338,7 @@ pub unsafe fn record_and_fold(
     FAULT_CS.store(fault_cs, Ordering::SeqCst);
     FAULT_RSP.store(fault_rsp, Ordering::SeqCst);
     HANDLER_RSP.store(handler_rsp, Ordering::SeqCst);
-    EXCURSION_ACTIVE.store(false, Ordering::SeqCst);
+    IN_RING3.store(false, Ordering::SeqCst);
     FOLDED.store(true, Ordering::SeqCst);
     // SAFETY: 呼び出し側契約により遠征中で、RECOVERY は保存済み。longjmp は
     // RSP と callee-saved を復元して復帰 RIP へ飛ぶ。戻らない。

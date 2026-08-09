@@ -4060,8 +4060,10 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     logger.info(format_args!(
         "syscall: probe int 0x80 returned. invocations={count} (issued exactly 1), number \
          seen={seen_number:#x} (expected {:#x}), handler RSP={handler_rsp:#x} (on RSP0 \
-         excursion stack={handler_in_rsp0}), RSP0 restored={rsp0_restored}",
-        syscall::PROBE_NUMBER
+         excursion stack={handler_in_rsp0}), in-Ring-3 flag at entry={}, RSP0 \
+         restored={rsp0_restored}",
+        syscall::PROBE_NUMBER,
+        syscall::in_ring3_at_entry()
     ));
     logger.info(format_args!(
         "syscall: args seen=[{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}], user stored={stored:#x} \
@@ -4104,6 +4106,23 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
         logger.error(format_args!(
             "syscall: syscall_entry did not run on the RSP0 excursion stack (handler RSP \
              {handler_rsp:#x}); halting"
+        ));
+        cpu::halt_forever();
+    }
+    // syscall_entry は Ring 3 から呼ばれたのだから、入場時点で「今 Ring 3 にいる」が
+    // 立っていたはずである（S8-b）。立っていなければ、Ring 3 へ落ちる経路か
+    // 上げ下げの位置が壊れている。
+    //
+    // この主張の反証で示した範囲を書いておく。note_kernel_entry が常に false を返す
+    // 形へ壊して、ここが止まることを確かめた。**示したのは「主張が真の値に固定されて
+    // おらず、偽の値が来れば止まる」ことである。「enter が立て損ねたときに止まる」ことは、
+    // この破壊では示していない**——その道は ring3-test no-fold-flag が塞いでおり、
+    // あちらは最初の遠征で止まるのでここまで到達しない。同じ性質を 2 つの検査が
+    // 別々の場所で見ている。
+    if !syscall::in_ring3_at_entry() {
+        logger.error(format_args!(
+            "syscall: syscall_entry was reached while the in-Ring-3 flag was down; the flag \
+             does not track the privilege boundary; halting"
         ));
         cpu::halt_forever();
     }
