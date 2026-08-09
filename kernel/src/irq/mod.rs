@@ -615,21 +615,21 @@ pub unsafe fn mask_all() {
 /// コマンドポートの読み出し対象を変更する。他の実行文脈が同時に
 /// コントローラを触っていないこと。
 pub unsafe fn is_spurious(irq: u8) -> bool {
-    // **移行済みの IRQ を、もう所有していないコントローラに問い合わせない。**
+    // 移行済みの IRQ を、もう所有していないコントローラに問い合わせない。
     //
     // # 予測は外れた。外れたことを書いておく
     //
     // 設計時は「8259 の ISR を読むと、その IRQ は載っていないのでビットが
     // 立っておらず、スプリアスと誤判定して EOI を送らない側へ倒れる」と
-    // 予測していた。**破壊で確かめたところ、そうならなかった。**
-    // [`pic::is_spurious`] は **IRQ7 と IRQ15 以外では ISR を見ずに `false` を
-    // 返す**ので、IRQ1 では読んでも判定が変わらない。
+    // 予測していた。破壊で確かめたところ、そうならなかった。
+    // [`pic::is_spurious`] は IRQ7 と IRQ15 以外では ISR を見ずに `false` を
+    // 返すので、IRQ1 では読んでも判定が変わらない。
     //
-    // **したがってこの分岐は、現在の構成では観測可能な効果を持たない。**
+    // したがってこの分岐は、現在の構成では観測可能な効果を持たない。
     // 残してあるのは、(1) 所有していないコントローラの I/O ポートを割り込み
     // ハンドラの中で読まずに済むこと、(2) IRQ7 か IRQ15 を I/O APIC 経由へ
-    // 移した場合には**実際に判定が変わる**ことによる。
-    // **「必要だから入れた」ではなく「今は効果を観測できない」と書く。**
+    // 移した場合には実際に判定が変わることによる。
+    // 「必要だから入れた」ではなく「今は効果を観測できない」と書く。
     if routed_to_apic(irq) {
         // SAFETY: 呼び出し側の契約をそのまま実装へ引き継ぐ。
         return unsafe { apic::spurious_for_routed_irq(irq) };
@@ -644,7 +644,7 @@ pub unsafe fn is_spurious(irq: u8) -> bool {
 ///
 /// 実際に発生した割り込みに対してのみ呼ぶこと。
 pub unsafe fn end_of_interrupt(irq: u8, spurious: bool) {
-    // **宛先は IRQ 単位で決まる。** 中間状態では 8259 経由と I/O APIC 経由が
+    // 宛先は IRQ 単位で決まる。中間状態では 8259 経由と I/O APIC 経由が
     // 併存し、前者は 8259 への EOI、後者は LAPIC への EOI が要る。
     // 単一の状態で切り替えると、倒した瞬間にもう片方が EOI を受け取らなくなる。
     if routed_to_apic(irq) {
@@ -661,17 +661,17 @@ pub unsafe fn end_of_interrupt(irq: u8, spurious: bool) {
 /// # 順序
 ///
 /// 1. redirection entry へ配送先を書く（マスクは立てたまま）
-/// 2. **PIC 側でその IRQ をマスクする**
+/// 2. PIC 側でその IRQ をマスクする
 /// 3. 移行状態を立てる（ビットマップと配送先ベクタ）
-/// 4. **I/O APIC 側でマスクを外す**
+/// 4. I/O APIC 側でマスクを外す
 ///
 /// 2 と 4 が逆だと、両方が開いた瞬間に二重配送しうる。1 でマスクを立てた
 /// まま書くのは、設定の途中で届かせないためである。
 ///
 /// # 2 から 4 は割り込み禁止区間で行う
 ///
-/// 状態そのものはアトミックだが、**3 操作の途中で割り込みが入ると、
-/// 古い状態で EOI を送る経路が成立する。** アトミック 1 つでは足りない。
+/// 状態そのものはアトミックだが、3 操作の途中で割り込みが入ると、
+/// 古い状態で EOI を送る経路が成立する。アトミック 1 つでは足りない。
 ///
 /// # Safety
 ///
@@ -690,7 +690,7 @@ pub unsafe fn route_to_apic(
     }
     let controller = apic::Apic::new(mapped).ok_or(RouteError::NoIoApic)?;
 
-    // 1. 経路を設定する。**マスクは立てたまま**なので、まだ届かない。
+    // 1. 経路を設定する。マスクは立てたままなので、まだ届かない。
     // SAFETY: ゲートの用意は呼び出し側の契約。この IRQ は I/O APIC 側で
     // マスクされたままである（起動時の redirection entry は全本マスク）。
     unsafe { controller.route(irq, vector) };
@@ -711,7 +711,7 @@ pub unsafe fn route_to_apic(
             pic::mask_irq(irq)
         };
 
-        // 3. 状態を立てる。**旧経路を閉じた後、新経路を開ける前である。**
+        // 3. 状態を立てる。旧経路を閉じた後、新経路を開ける前である。
         ROUTED_VECTOR[irq as usize].store(vector, Ordering::Relaxed);
         ROUTED_TO_APIC.fetch_or(1u32 << irq, Ordering::Relaxed);
 
@@ -730,7 +730,7 @@ pub unsafe fn route_to_apic(
 
 /// 移行済み IRQ の redirection entry を読み戻す（S2-d-1c）。
 ///
-/// **到達の観測とは独立した検出経路である。** 読み戻しは「書いた値が
+/// 到達の観測とは独立した検出経路である。読み戻しは「書いた値が
 /// entry に載っているか」、到達は「そのベクタで実際に届くか」を見る。
 /// 片方だけでは、設定できても配送されない形（マスクの外し忘れ）と、
 /// 保持されているかを見ていない形を、それぞれ通す。
@@ -748,7 +748,7 @@ pub fn routed_entry_readback(
 
 /// redirection entry 1 本の観測値（[`routed_entry_readback`]）。
 ///
-/// **生の `u32` を出さない。** 呼び出し側が必要なのは「我々が書いたベクタか」
+/// 生の `u32` を出さない。呼び出し側が必要なのは「我々が書いたベクタか」
 /// という問いと、ログへ流せる表示だけである。
 pub struct RedirectionEntryView {
     low: u32,
@@ -756,7 +756,7 @@ pub struct RedirectionEntryView {
 }
 
 impl RedirectionEntryView {
-    /// 生の dword 2 本から作る。**`irq` の内側からのみ作れる。**
+    /// 生の dword 2 本から作る。`irq` の内側からのみ作れる。
     const fn new(low: u32, high: u32) -> Self {
         Self { low, high }
     }
@@ -773,7 +773,7 @@ impl RedirectionEntryView {
 
     /// 宛先が physical モードか（S4-a）。
     ///
-    /// **S4-a の安全がこれに依存している。** physical で宛先が bootstrap
+    /// S4-a の安全がこれに依存している。physical で宛先が bootstrap
     /// processor なら、この IRQ は AP へ届かない。logical になると宛先の解釈が
     /// 変わり、その前提が崩れる。
     pub fn physical_destination_mode(&self) -> bool {
@@ -804,29 +804,29 @@ impl fmt::Display for RedirectionEntryView {
 
 /// タイマを Local APIC タイマへ移す（S2-d-2）。
 ///
-/// # 順序。**守らないと最初のティックで止まる、または二重に届く**
+/// # 順序。守らないと最初のティックで止まる、または二重に届く
 ///
-/// 1. Local APIC タイマを設定する（**LVT はマスクしたまま**）
-/// 2. 【区間開始】**PIC を全マスクする**（[`mask_all`]）
+/// 1. Local APIC タイマを設定する（LVT はマスクしたまま）
+/// 2. 【区間開始】PIC を全マスクする（[`mask_all`]）
 /// 3. 移行状態を立てる
-/// 4. **LVT のマスクを外す**【区間終了】
+/// 4. LVT のマスクを外す【区間終了】
 ///
 /// 1 でマスクしたまま設定するのは、ベクタが載る前に満了させないためである。
 /// 2 と 4 が逆だと、両方が開いた瞬間に二重にティックが来る。
 ///
 /// # 2 から 4 の間はティックが 1 本も来ない
 ///
-/// **この区間で [`crate::idt::timer_ticks`] を待つ処理を挟まないこと。
-/// 挟むと戻ってこない。** 較正が `wait_for_tick_edge` を使うので、
-/// 順序を誤ると実際に起こりうる。**較正はこの関数より前に済ませてある。**
+/// この区間で [`crate::idt::timer_ticks`] を待つ処理を挟まないこと。
+/// 挟むと戻ってこない。較正が `wait_for_tick_edge` を使うので、
+/// 順序を誤ると実際に起こりうる。較正はこの関数より前に済ませてある。
 ///
 /// # 区間を割り込み禁止で囲う理由
 ///
 /// マスク直前に飛び込んだ最後の PIT ティックの扱いを確定させるためである。
 /// 囲まないと、「PIC を全マスクした直後・LVT を開ける前」にハンドラが走り、
-/// そのハンドラが 8259 へ EOI を送る。**その EOI 自体は無害だが、区間の中で
-/// 何が起きたかを後から説明できなくなる。** 囲めば、飛び込んだティックは
-/// 区間の**前**に処理済みか、区間の**後**に LVT 由来として来るかの
+/// そのハンドラが 8259 へ EOI を送る。その EOI 自体は無害だが、区間の中で
+/// 何が起きたかを後から説明できなくなる。囲めば、飛び込んだティックは
+/// 区間の前に処理済みか、区間の後に LVT 由来として来るかの
 /// どちらかに確定する。
 ///
 /// # Safety
@@ -839,14 +839,14 @@ pub unsafe fn switch_timer_to_lapic(
 ) -> Result<TimerSetup, TimerError> {
     let source = apic::LapicTimer::new(calibration);
 
-    // 1. 設定する。**まだマスクされているので届かない。**
+    // 1. 設定する。まだマスクされているので届かない。
     // SAFETY: 呼び出し側の契約をそのまま引き継ぐ。
     let setup = unsafe { source.configure_timer(frequency_hz) }?;
 
     {
         let _critical = common::critical::InterruptGuard::enter();
 
-        // 2. 旧経路を黙らせる。**ここから 4 までティックは 1 本も来ない。**
+        // 2. 旧経路を黙らせる。ここから 4 までティックは 1 本も来ない。
         //
         // 破壊 (S2-d-2, lapic-timer-no-mask-all): ここを飛ばすと PIT と
         // Local APIC タイマの両方が届き、二重にティックが来る。
@@ -859,7 +859,7 @@ pub unsafe fn switch_timer_to_lapic(
             mask_all()
         };
 
-        // 3. 状態を立てる。**旧経路を閉じた後、新経路を開ける前である。**
+        // 3. 状態を立てる。旧経路を閉じた後、新経路を開ける前である。
         TIMER_ON_LAPIC.store(true, Ordering::Relaxed);
 
         // 4. 新経路を開ける。
@@ -872,7 +872,7 @@ pub unsafe fn switch_timer_to_lapic(
 
 /// このコアの Local APIC を有効にした結果（S4-a）。
 ///
-/// **生の `u32` を出さない。** 呼び出し側が必要なのは 2 つの問いだけである。
+/// 生の `u32` を出さない。呼び出し側が必要なのは 2 つの問いだけである。
 pub struct LocalApicEnable {
     vector: u8,
     software_enabled: bool,
@@ -886,7 +886,7 @@ impl LocalApicEnable {
 
     /// bit 8（ソフトウェア有効化）が立っているか。
     ///
-    /// **落ちていると LVT が 1 本も届かない。** AP のタイマを開ける前に
+    /// 落ちていると LVT が 1 本も届かない。AP のタイマを開ける前に
     /// 確かめる先はここである。
     pub const fn software_enabled(&self) -> bool {
         self.software_enabled
@@ -895,7 +895,7 @@ impl LocalApicEnable {
 
 /// このコアの Local APIC の SVR を設定する（S4-a）。
 ///
-/// **AP が呼ぶ。** BSP の設定は BSP の Local APIC にしか効いていない。
+/// AP が呼ぶ。BSP の設定は BSP の Local APIC にしか効いていない。
 ///
 /// # Safety
 ///
@@ -911,16 +911,16 @@ pub unsafe fn enable_local_apic_for_this_cpu() -> Option<LocalApicEnable> {
 
 /// このコアの Local APIC タイマを、BSP と同じ設定で開ける（S4-a）。
 ///
-/// **AP が呼ぶ。** LVT はコアごとに独立なので、AP が自分の LVT を開ければ
-/// 自分にティックが来る。**IPI を使わずに AP をカーネルへ入れる唯一の道である。**
+/// AP が呼ぶ。LVT はコアごとに独立なので、AP が自分の LVT を開ければ
+/// 自分にティックが来る。IPI を使わずに AP をカーネルへ入れる唯一の道である。
 ///
 /// 戻り値は書いた `(分周設定, 初期カウント)`。`None` は「BSP がまだ Local APIC
 /// タイマへ移していない」で、その場合は何も書かない。
 ///
 /// # Safety
 ///
-/// [`apic::arm_timer_for_this_cpu`] の契約をそのまま引き継ぐ。**戻った時点から
-/// ティックが届きうる。**
+/// [`apic::arm_timer_for_this_cpu`] の契約をそのまま引き継ぐ。戻った時点から
+/// ティックが届きうる。
 pub unsafe fn arm_lapic_timer_for_this_cpu() -> Option<(u32, u32)> {
     // SAFETY: 呼び出し側の契約をそのまま引き継ぐ。
     unsafe { apic::arm_timer_for_this_cpu() }
@@ -930,10 +930,10 @@ pub unsafe fn arm_lapic_timer_for_this_cpu() -> Option<(u32, u32)> {
 ///
 /// 8259 の ICW2 と違い、LVT Timer は書いた値を読み戻せる。
 ///
-/// **`sti` 前の項目 4 を格上げする根拠にはならない。** あちらの検査点では
+/// `sti` 前の項目 4 を格上げする根拠にはならない。あちらの検査点では
 /// タイマはまだ 8259 経由で（切り替えは較正の後、較正は `sti` の後）、
-/// この読み戻しはそれより後に起きる。**覆うのは「LVT に載せた設定」だけで、
-/// 「`sti` の時点で配送先が意図どおりか」ではない。**
+/// この読み戻しはそれより後に起きる。覆うのは「LVT に載せた設定」だけで、
+/// 「`sti` の時点で配送先が意図どおりか」ではない。
 pub struct LvtTimerView {
     raw: u32,
 }
@@ -999,7 +999,7 @@ pub const fn timer_frequency_hz() -> u32 {
     pit::TARGET_FREQUENCY_HZ
 }
 
-/// タイマ源ごとに違う設定値。**実装が増えたら列挙子を足す。**
+/// タイマ源ごとに違う設定値。実装が増えたら列挙子を足す。
 ///
 /// # なぜ列挙子で持つのか（S2-b）
 ///
@@ -1007,11 +1007,11 @@ pub const fn timer_frequency_hz() -> u32 {
 /// 分周設定である）。境界の型が実装ごとに違う値を持つ必要があるので、その
 /// 差分をここへ閉じ込める。
 ///
-/// **2 つ目の実装が来ても、この列挙子に 1 つ足すだけで済む。** 既存の列挙子と
-/// その `Display` の腕は触らないので、**PIT の出力する文字列は変わらない。**
+/// 2 つ目の実装が来ても、この列挙子に 1 つ足すだけで済む。既存の列挙子と
+/// その `Display` の腕は触らないので、PIT の出力する文字列は変わらない。
 /// 振る舞い不変のリファクタを 2 度行わずに済ませるための形である。
 ///
-/// trait の関連型にしない理由は、**切り替えが実行時に起きる**ためである。
+/// trait の関連型にしない理由は、切り替えが実行時に起きるためである。
 /// S2-d は起動の途中で PIT から Local APIC タイマへ移る。関連型にすると
 /// 呼び出し側が実装ごとに総称化され、実行時の切り替えを跨げない。
 /// trait object にしない理由は、値として返して保持したいためである。
@@ -1021,7 +1021,7 @@ enum TimerSourceSetup {
     },
     /// Local APIC タイマ（S2-d-2）。
     ///
-    /// **分周設定を初期カウントと一緒に持つ。** 初期カウントだけでは周期が
+    /// 分周設定を初期カウントと一緒に持つ。初期カウントだけでは周期が
     /// 決まらないので、片方だけを見て周波数を語れないようにしてある。
     LapicTimer {
         initial_count: u32,
@@ -1064,12 +1064,12 @@ impl TimerSetup {
         }
     }
 
-    /// 要求した周波数。**実装に依存しない問いである。**
+    /// 要求した周波数。実装に依存しない問いである。
     pub const fn requested_hz(&self) -> u32 {
         self.requested_hz
     }
 
-    /// 実際に設定された周波数（ミリヘルツ）。**実装に依存しない問いである。**
+    /// 実際に設定された周波数（ミリヘルツ）。実装に依存しない問いである。
     ///
     /// 整数の分周や初期カウントを使う以上、要求どおりぴったりにはならない。
     /// S2-d でマーカーを問いベースへ移すとき、一致ではなく許容幅で見るのは
@@ -1082,7 +1082,7 @@ impl TimerSetup {
 impl fmt::Display for TimerSetup {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.source {
-            // **この腕の文字列を変えない。** `interrupt-test no-eoi` が
+            // この腕の文字列を変えない。`interrupt-test no-eoi` が
             // `divisor=11932` に一致を取っている。
             TimerSourceSetup::Pit { divisor } => write!(
                 f,
@@ -1131,13 +1131,13 @@ pub struct MaskCheck {
     expected: MaskState,
 }
 
-/// コントローラごとのマスクの持ち方。**実装が増えたら列挙子を足す。**
+/// コントローラごとのマスクの持ち方。実装が増えたら列挙子を足す。
 ///
 /// # なぜ列挙子で持つのか（S2-b）
 ///
 /// IMR の 2 バイトという形は PIC 固有で、IO-APIC の redirection table では
 /// 成り立たない（実測で 24 本ある）。[`TimerSourceSetup`] と同じ理由で、
-/// **2 つ目の実装が来ても列挙子を 1 つ足すだけで済む形**にしてある。
+/// 2 つ目の実装が来ても列挙子を 1 つ足すだけで済む形にしてある。
 /// 既存の腕を触らないので、PIC の出力する文字列は変わらない。
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum MaskState {
@@ -1147,11 +1147,11 @@ enum MaskState {
     },
     /// I/O APIC の redirection entry のマスクビット（S2-d-1b で足した）。
     ///
-    /// **ビットマップで持つ。** `bool` の配列にすると本数ぶんの領域が要り、
+    /// ビットマップで持つ。`bool` の配列にすると本数ぶんの領域が要り、
     /// この型は値として返す。添字は entry 番号 = GSI（この系では I/O APIC が
     /// 1 台で GSI base が 0）である。
     ///
-    /// 幅は 256 ビット固定で、**取りこぼしが起こらない**。Max Redirection
+    /// 幅は 256 ビット固定で、取りこぼしが起こらない。Max Redirection
     /// Entry は Version レジスタの 8 ビット欄なので、entry は最大 256 本である。
     IoApic {
         entries: usize,
