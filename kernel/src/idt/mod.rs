@@ -1203,23 +1203,23 @@ pub const PIC_TIMER_VECTOR: usize = match crate::irq::vector_for(0) {
     None => panic!("the timer IRQ has no vector"),
 };
 
-/// タイマ割り込みが**現在**届くベクタ。
+/// タイマ割り込みが現在届くベクタ。
 ///
 /// Local APIC タイマへ移った後は [`LAPIC_TIMER_VECTOR`]、それ以前は
 /// [`PIC_TIMER_VECTOR`] である。
 ///
 /// # なぜ今から関数にするのか
 ///
-/// **改名だけでは、値を使う側が `const` を直接読む形のままになる。**
+/// 改名だけでは、値を使う側が `const` を直接読む形のままになる。
 /// 「現在の配送先」を問う箇所と「8259 の採番」を問う箇所が同じ式で書かれて
 /// いると、移行のときにどちらの意味で書かれたのかを 1 箇所ずつ読み直す
-/// ことになる。**意味の違う 2 つを、今のうちに別の呼び出しに分けておく。**
+/// ことになる。意味の違う 2 つを、今のうちに別の呼び出しに分けておく。
 ///
 /// # タイマは IRQ 単位の移行状態に乗らない
 ///
-/// Local APIC タイマは I/O APIC ではなく **LVT 経由**で、**IRQ 番号を
-/// 持たない。** したがって `irq` の `ROUTED_TO_APIC`（I/O APIC 経由へ移した
-/// IRQ のビットマップ）では表せない。**IRQ0 のビットを立てて表現しないこと。**
+/// Local APIC タイマは I/O APIC ではなく LVT 経由で、IRQ 番号を
+/// 持たない。したがって `irq` の `ROUTED_TO_APIC`（I/O APIC 経由へ移した
+/// IRQ のビットマップ）では表せない。IRQ0 のビットを立てて表現しないこと。
 /// 立てるとビットマップの意味が「I/O APIC 経由である」から「PIC でなくなった」
 /// へ静かにずれる。S2-d-2 では別の器で持つ。
 pub fn timer_delivery_vector() -> usize {
@@ -1244,9 +1244,9 @@ pub fn spurious_count() -> u64 {
 
 /// Local APIC のスプリアス割り込みを受けた回数（S2-d-1）。
 ///
-/// **[`SPURIOUS_COUNT`] とは別に数える。** あちらは 8259A が IRQ7 / IRQ15 として
+/// [`SPURIOUS_COUNT`] とは別に数える。あちらは 8259A が IRQ7 / IRQ15 として
 /// 上げる偽の割り込みで、こちらは Local APIC が SVR のベクタで上げるものである。
-/// **機序が違うので合流させない。** 合流させると、ハートビートを見たときに
+/// 機序が違うので合流させない。合流させると、ハートビートを見たときに
 /// どちらが起きたのか分からなくなる。
 static LAPIC_SPURIOUS_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -1257,7 +1257,7 @@ pub fn lapic_spurious_count() -> u64 {
 
 /// ベクタ番号から IRQ 番号を求める。どのコントローラにも属さなければ `None`。
 ///
-/// **`pic_irq_for` から改名した**（S2-d-1c）。I/O APIC 経由へ移した IRQ も
+/// `pic_irq_for` から改名した（S2-d-1c）。I/O APIC 経由へ移した IRQ も
 /// 引くようになり、「PIC 由来か」という名前が事実と合わなくなったためである。
 ///
 /// テスト専用ベクタ（[`TEST_VECTOR`]）はどちらの表にも無いので `None` になり、
@@ -1271,7 +1271,7 @@ fn irq_for_vector(vector: usize) -> Option<u8> {
 
 /// IRQ スタブ表の配置検証。
 ///
-/// 例外用（[`check_stub_table`]）と**別系統**である。表が別の領域にある
+/// 例外用（[`check_stub_table`]）と別系統である。表が別の領域にある
 /// ため、片方の検証がもう片方を保証しない。
 pub fn check_irq_stub_table() -> StubTableCheck {
     let base = addr_of!(zaytos_irq_stubs) as u64;
@@ -1318,17 +1318,17 @@ pub fn check_irq_stub_table() -> StubTableCheck {
 
 /// ずらす対象の索引（`idt-irq-stub-offset-test`）。ベクタ `0x3F` にあたる。
 ///
-/// **既定ビルドでこのベクタへ割り込みが届くことは無い。** PIC は `0x20` から
+/// 既定ビルドでこのベクタへ割り込みが届くことは無い。PIC は `0x20` から
 /// 16 本を使い、`0x30`-`0x3F` を使うのは `alt-offset-test` のときだけである。
-/// **振る舞いを変えずに検査だけを落とすために、届かない位置を選んである。**
+/// 振る舞いを変えずに検査だけを落とすために、届かない位置を選んである。
 #[cfg(feature = "idt-irq-stub-offset-test")]
 const SABOTAGED_STUB_INDEX: usize = PIC_VECTOR_SPAN - 1;
 
 /// `n` 番目の IRQ スタブのアドレス。
 ///
 /// 破壊（S6-a、`idt-irq-stub-offset-test`）: [`SABOTAGED_STUB_INDEX`] のときだけ
-/// 1 本先を指す。**[`check_irq_stub_table`] の `entries_ok` を落とすためのもので
-/// ある。** この検査は「落ちるところを一度も見ていない」側だったので、
+/// 1 本先を指す。[`check_irq_stub_table`] の `entries_ok` を落とすためのもので
+/// ある。この検査は「落ちるところを一度も見ていない」側だったので、
 /// 見るための破壊を置いた（`verification-coverage.md`）。
 fn irq_stub_address(index: usize) -> u64 {
     #[cfg(feature = "idt-irq-stub-offset-test")]
@@ -1365,10 +1365,10 @@ pub const DEDICATED_STUB_COUNT: usize = 6;
 
 /// 例外スタブ表の外に置いた専用スタブと、それを指すべきゲートの対応。
 ///
-/// **この一覧が唯一の出所である。** [`check_stub_table`] は表の中に無い
+/// この一覧が唯一の出所である。[`check_stub_table`] は表の中に無い
 /// ベクタとしてここに載っているものを飛ばし、[`check_dedicated_stubs`] は
-/// 同じ一覧について「専用スタブを指していること」を確かめる。**飛ばす側と
-/// 確かめる側が同じ配列を読むので、片方だけを更新して食い違わせられない。**
+/// 同じ一覧について「専用スタブを指していること」を確かめる。飛ばす側と
+/// 確かめる側が同じ配列を読むので、片方だけを更新して食い違わせられない。
 ///
 /// 分けて持つと、飛ばす側にだけ足したときに「何も見ないベクタ」が生まれる。
 /// 実際に S2-d-1a でスプリアスベクタを飛ばす側にだけ足しており、その時点では
@@ -1410,14 +1410,14 @@ impl DedicatedStubCheck {
 
 /// 例外スタブ表の外のベクタが、それぞれの専用スタブを指していることを検証する。
 ///
-/// **[`check_stub_table`] の除外リストが空けた穴を塞ぐための検査である。**
+/// [`check_stub_table`] の除外リストが空けた穴を塞ぐための検査である。
 /// あちらは「全ベクタが例外スタブ表の対応する位置を指す」を見て、そこから
-/// 外れるベクタを飛ばす。飛ばされたベクタについては**何も見ない**ので、
+/// 外れるベクタを飛ばす。飛ばされたベクタについては何も見ないので、
 /// ゲートの代入を落としても、既定の例外スタイルのスタブを指したまま静かに
 /// 通る。yield と syscall は「戻らない」経路へ落ち、スプリアスは S2-b 以前の
 /// 「起きたら止まる」状態へ戻る。いずれも起動時には現れない。
 ///
-/// **見るのはハンドラのアドレスだけである。** present / ゲート種別 / DPL は
+/// 見るのはハンドラのアドレスだけである。present / ゲート種別 / DPL は
 /// 全 256 ベクタを対象にした別の検査が既に見ており、syscall の DPL は
 /// [`SYSCALL_GATE_DPL`] という本ごとの期待値を持っている。ここで属性を
 /// 一律に見ると、DPL 3 が正しい syscall で落ちる。
@@ -1432,7 +1432,7 @@ pub fn check_dedicated_stubs() -> [DedicatedStubCheck; DEDICATED_STUB_COUNT] {
 /// スタブ表の刻み幅と、IDT エントリがそれを正しく指していることを検証する。
 ///
 /// IDT は `base + n * STUB_SIZE` という式でエントリを作っているため、この
-/// 前提が崩れると**全エントリが誤ったアドレスを指す**。しかも、その前提を
+/// 前提が崩れると全エントリが誤ったアドレスを指す。しかも、その前提を
 /// 使って作ったエントリを同じ式で検算しても意味がない（循環する）。
 /// そこでアセンブラが算出した独立のラベル（終端と抜き取り 3 点）と
 /// 突き合わせる。
@@ -1450,13 +1450,13 @@ pub fn check_stub_table() -> StubTableCheck {
 
     // 全エントリのハンドラが表の範囲内で、ベクタ番号と位置が対応すること。
     //
-    // **この検査は実際に働いた。** S2-d-1a でスプリアスベクタを専用スタブへ
+    // この検査は実際に働いた。S2-d-1a でスプリアスベクタを専用スタブへ
     // 差し替えたとき、下の除外へ追加するのを忘れたまま起動したところ、
-    // `entries=NG` で停止した。**列挙で守る検査は列挙に無い形を静かに通す**のが
-    // 常だが、ここは逆に「表の中にあるはず」を検査しているので、**列挙から
-    // 漏れると落ちる側**である。
+    // `entries=NG` で停止した。列挙で守る検査は列挙に無い形を静かに通すのが
+    // 常だが、ここは逆に「表の中にあるはず」を検査しているので、列挙から
+    // 漏れると落ちる側である。
     //
-    // **ただし除外リストのほうは、静かに通す向きである。** 除外したベクタに
+    // ただし除外リストのほうは、静かに通す向きである。除外したベクタに
     // ついてここは何も見ない。その穴は check_dedicated_stubs が塞ぐ。
     let dedicated = dedicated_stubs();
     let mut entries_ok = true;
@@ -1467,8 +1467,8 @@ pub fn check_stub_table() -> StubTableCheck {
             continue;
         }
         // yield（M5-c）・syscall（M5-f-1）・スプリアス（S2-d-1a）は例外表の外の
-        // 専用スタブを指す。**飛ばす根拠と、その先を確かめる検査が同じ配列を
-        // 読む**ので、片方だけ更新して食い違わせられない。
+        // 専用スタブを指す。飛ばす根拠と、その先を確かめる検査が同じ配列を
+        // 読むので、片方だけ更新して食い違わせられない。
         if dedicated
             .iter()
             .any(|(dedicated_vector, _)| *dedicated_vector == vector)
@@ -1554,8 +1554,8 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
             );
         }
 
-        // 0x20-0x30 を IRQ スタイルのスタブへ上書きする。**例外を IRQ 化
-        // してはならない。** 例外ハンドラは戻ってはいけない（たとえば #DE
+        // 0x20-0x30 を IRQ スタイルのスタブへ上書きする。例外を IRQ 化
+        // してはならない。例外ハンドラは戻ってはいけない（たとえば #DE
         // からそのまま戻れば、同じ除算命令を再実行して無限ループになる）。
         // 戻れるのは、原因が外部にあり再実行の必要がないものだけである。
         for index in 0..IRQ_STYLE_STUB_COUNT {
@@ -1580,8 +1580,8 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
             None,
         );
 
-        // Local APIC のスプリアス割り込み用ゲート（S2-d-1）。**IRQ スタイルの
-        // スタブへ載せる。** 既定では例外スタイルのスタブが入っており、
+        // Local APIC のスプリアス割り込み用ゲート（S2-d-1）。IRQ スタイルの
+        // スタブへ載せる。既定では例外スタイルのスタブが入っており、
         // 起きるとダンプして停止する。Local APIC が配送を担い始めるとスプリアスは
         // 実際に起こりうるので、戻れる経路へ移す（EOI は送らない。判定は
         // `irq_entry` にある）。
@@ -1594,7 +1594,7 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
         );
 
         // I/O APIC 経由のキーボード用ゲート（S2-d-1c）。専用スタブへ載せる。
-        // **配送を切り替える前に置く。** ゲートが無い状態で redirection entry の
+        // 配送を切り替える前に置く。ゲートが無い状態で redirection entry の
         // マスクを外すと、最初のキー入力で例外スタイルのスタブへ落ちて停止する。
         (*idt)[IOAPIC_KEYBOARD_VECTOR] = IdtEntry::new(
             addr_of!(zaytos_ioapic_keyboard_stub) as u64,
@@ -1605,7 +1605,7 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
         );
 
         // Local APIC タイマ用ゲート（S2-d-2）。専用スタブへ載せる。
-        // **LVT のマスクを外す前に置く。** ゲートが無い状態で解禁すると、
+        // LVT のマスクを外す前に置く。ゲートが無い状態で解禁すると、
         // 最初のティックで例外スタイルのスタブへ落ちて停止する。
         (*idt)[LAPIC_TIMER_VECTOR] = IdtEntry::new(
             addr_of!(zaytos_lapic_timer_stub) as u64,
@@ -1616,9 +1616,9 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
         );
 
         // 測定用 IPI 用ゲート（S5-a）。専用スタブへ載せる。
-        // **`IRQ_STYLE_STUB_COUNT` の範囲外なので、`IdtEntry` を個別に置く**
+        // `IRQ_STYLE_STUB_COUNT` の範囲外なので、`IdtEntry` を個別に置く
         // （yield・スプリアス・キーボード・LAPIC タイマと同じ扱い）。
-        // **載せずに IPI を送ると、例外スタイルのスタブへ落ちて停止する。**
+        // 載せずに IPI を送ると、例外スタイルのスタブへ落ちて停止する。
         // 実際に踏んだ——載せる前に送ったところ、AP が 1 ティックで死んだ。
         (*idt)[IPI_PROBE_VECTOR] = IdtEntry::new(
             addr_of!(zaytos_ipi_probe_stub) as u64,
@@ -1629,7 +1629,7 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
         );
 
         // システムコール用ゲート（M5-f-1、ADR-0020）。ベクタ 0x80。DPL は
-        // SYSCALL_GATE_DPL（通常 3）。**DPL=3** で Ring 3 から int 0x80 を呼べる
+        // SYSCALL_GATE_DPL（通常 3）。DPL=3 で Ring 3 から int 0x80 を呼べる
         // ようにする（他のゲートは DPL=0）。割り込みゲート（IF を落とす）で ADR-0018
         // の「入場時 IF=0」を保つ。IST は使わず、特権変化のたびに CPU が TSS.RSP0 の
         // スタックへ切り替える。
@@ -1660,11 +1660,11 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
 
 /// 既に構築済みの IDT を、このコアの IDTR へ載せる（S3-b-2b-2）。
 ///
-/// # **IDT は 1 本を共有する。GDT / TSS と違って per-CPU ではない**
+/// # IDT は 1 本を共有する。GDT / TSS と違って per-CPU ではない
 ///
-/// ゲートの中身はコアに依存しない（ハンドラも、IST の**番号**も同じ）。
-/// **コアごとに違うのは IST が指す先で、それは TSS が持つ。**
-/// したがって IDT の実体は共有し、**各コアが `lidt` でそれを指すだけでよい。**
+/// ゲートの中身はコアに依存しない（ハンドラも、IST の番号も同じ）。
+/// コアごとに違うのは IST が指す先で、それは TSS が持つ。
+/// したがって IDT の実体は共有し、各コアが `lidt` でそれを指すだけでよい。
 ///
 /// # Safety
 ///
@@ -1747,7 +1747,7 @@ pub unsafe fn clear_present(vector: usize) {
 /// 安定していないため、アセンブリから呼ぶ関数には使えない（M2-0c の
 /// カーネルエントリと同じ理由）。
 ///
-/// **確保もロックもコンソールも使わない。** シリアルへ直接書く。例外
+/// 確保もロックもコンソールも使わない。シリアルへ直接書く。例外
 /// ハンドラ自身がフォルトするとダブルフォルトになるため、依存を最小に
 /// する（ADR-0018）。エラーコードの解釈も `&'static str` を返すだけの
 /// 純粋関数で行い、文字列を組み立てない。
@@ -1765,8 +1765,8 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
     // 読み取りのみで、この関数は戻らない。
     let context = unsafe { &*context };
 
-    // M5-e-3: Ring 3 遠征の予期した #GP だけを畳む。**二重判別（+RIP 照合）を
-    // 全て満たすときのみ**畳んでカーネルへ戻る。1 つでも欠ける全ての例外は、
+    // M5-e-3: Ring 3 遠征の予期した #GP だけを畳む。二重判別（+RIP 照合）を
+    // 全て満たすときのみ畳んでカーネルへ戻る。1 つでも欠ける全ての例外は、
     // この分岐を素通りして下の dump+halt へ落ちる（従来と 1 ビットも変わらない）。
     //   (1) ベクタ==13（#GP）
     //   (2) 例外フレームの CS の RPL==3（Ring 3 由来。カーネル由来は CS.RPL=0 で
