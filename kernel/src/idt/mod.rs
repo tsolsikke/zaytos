@@ -1741,6 +1741,36 @@ pub unsafe fn clear_present(vector: usize) {
     }
 }
 
+/// Ring 3 由来なら畳むベクタ（S8-d）。#DE・#UD・#GP・#PF の 4 つ。
+///
+/// **Ring 3 の通常の違反はこの 4 つに現れる。** 選んだ理由はベクタごとに違う。
+///
+/// - 0 #DE  0 除算と商のオーバーフロー。計算の誤りがそのまま出る
+/// - 6 #UD  未定義命令。壊れたコードへ飛んだときに出る
+/// - 13 #GP 特権命令、非正準アドレス、セグメントの誤り。最も広い受け皿である
+/// - 14 #PF 未マップ・権限違反。**メモリ保護の本体がここに出る**
+///
+/// **#DF（8）は入れない。** 例外処理そのものが失敗した状態で、Ring 3 の違反では
+/// なくカーネルの前提が崩れている。ADR-0004 の fail-fast のままにする。
+///
+/// # 反証をベクタごとに置かない理由
+///
+/// **畳みの条件はベクタごとに分岐しない。** 1 つのフラグ（[`crate::ring3`] の
+/// `IN_RING3`）と 1 つの分岐を 4 ベクタが共有している。したがって畳みを落とす破壊は
+/// **共有機構について 1 本**置く。**壊れ方がベクタで分岐しないものを、ベクタごとに
+/// 反証しても新しい情報が出ない。**
+///
+/// **採らなかった案**——ベクタを選べる破壊を 4 本置く。費用は `--full` が 3 項目と
+/// QEMU の実行 3 回ぶん増える。得られるのは既に共有機構で示したことの繰り返しで、
+/// 割に合わない。**「4 ベクタとも畳まれないことを確かめた」とは書かない。**
+/// 確かめたのは共有機構が生きていることで、4 ベクタ個別の肯定的な観測は
+/// 4 本の判定行が持つ。
+///
+/// **失効条件——畳みの条件がベクタごとに分岐するようになったら、4 本置く案を
+/// 再検討すること。** S9 でシグナルやプロセス終了が入ると、ベクタごとに処理が
+/// 分かれる可能性がある。分かれた時点で「共有機構だから 1 本でよい」が崩れる。
+const FOLDABLE_VECTORS: [u8; 4] = [0, 6, 13, 14];
+
 /// 畳むと決めたフレームが信用できるかを見る（S8-c）。
 ///
 /// 畳みは例外ハンドラの外へ制御を戻す唯一の経路なので、**戻る先を決めるのに使う値が
@@ -1812,13 +1842,12 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
     // 読み取りのみで、この関数は戻らない。
     let context = unsafe { &*context };
 
-    // M5-e-3: Ring 3 遠征の #GP だけを畳む。3 条件を全て満たすときのみ畳んで
-    // カーネルへ戻る。1 つでも欠ける全ての例外は、この分岐を素通りして下の
-    // dump+halt へ落ちる。
-    //   (1) ベクタ==13（#GP）
+    // Ring 3 由来の例外を畳む。3 条件を全て満たすときのみ畳んでカーネルへ戻る。
+    // 1 つでも欠ける全ての例外は、この分岐を素通りして下の dump+halt へ落ちる。
+    //   (1) ベクタが FOLDABLE_VECTORS のいずれか
     //   (2) 例外フレームの CS の RPL==3（Ring 3 由来。カーネル由来は CS.RPL=0 で
     //       ここで弾かれる）
-    //   (3) 遠征フラグが立っている（遠征外の Ring 3 #GP は畳まない）
+    //   (3) 今 Ring 3 にいる（カーネルの中で起きたものは畳まない）
     // (3) は crate::ring3::should_fold が見る。
     //
     // S8-a: フォルト RIP の厳密一致を条件から外した。畳んだ位置は記録して、
@@ -1835,7 +1864,10 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
     #[cfg(feature = "ring3-test-corrupt-frame-cs")]
     let frame_cs = 0x33u64;
 
-    if context.vector as u8 == 13 && (frame_cs & 0b11) == 3 && crate::ring3::should_fold() {
+    if FOLDABLE_VECTORS.contains(&(context.vector as u8))
+        && (frame_cs & 0b11) == 3
+        && crate::ring3::should_fold()
+    {
         if exception_frame_is_trustworthy(context.vector as u8, frame_cs, rsp_at_call) {
             // SAFETY: 上の 3 条件が全て真で、フレームも信用できる。遠征中で RECOVERY は
             // 保存済み。longjmp で遠征の呼び出し元へ戻る（戻らない）。dump は行わない。
@@ -1845,6 +1877,7 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
                     frame_cs,
                     context.rip,
                     context.rsp,
+                    context.cr2,
                     rsp_at_call,
                 );
             }

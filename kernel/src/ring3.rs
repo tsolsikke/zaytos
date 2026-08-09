@@ -139,6 +139,11 @@ static FAULT_RSP: AtomicU64 = AtomicU64::new(0);
 static HANDLER_RSP: AtomicU64 = AtomicU64::new(0);
 /// フォルト時の CS（Ring 3 由来なら RPL=3）。Ring 3 到達の実証に使う。
 static FAULT_CS: AtomicU64 = AtomicU64::new(0);
+/// フォルト時の CR2（S8-d）。**#PF のときだけ意味を持つ。**
+///
+/// 他のベクタでは直前の #PF の残骸か未定義の値なので、呼び出し側は
+/// ベクタが 14 のときだけ読むこと。**記録するだけで、ここでは出力しない。**
+static FAULT_CR2: AtomicU64 = AtomicU64::new(0);
 
 extern "C" {
     /// 偽フレームを積んで Ring 3 へ iretq する（setjmp 相当を内包）。畳みで
@@ -244,6 +249,7 @@ pub unsafe fn enter(main_rsp0_top: u64) {
     HANDLER_RSP.store(0, Ordering::SeqCst);
     FAULT_VECTOR.store(0, Ordering::SeqCst);
     FAULT_RIP.store(0, Ordering::SeqCst);
+    FAULT_CR2.store(0, Ordering::SeqCst);
 
     // RSP0 を遠征専用スタックへ据える。#GP はここへ切り替わる。
     // 破壊 (M5-e-4, drop-rsp0): 据えない。#GP がメインのスタックへ切り替わり、
@@ -331,11 +337,13 @@ pub unsafe fn record_and_fold(
     fault_cs: u64,
     fault_rip: u64,
     fault_rsp: u64,
+    fault_cr2: u64,
     handler_rsp: u64,
 ) -> ! {
     FAULT_VECTOR.store(fault_vector, Ordering::SeqCst);
     FAULT_RIP.store(fault_rip, Ordering::SeqCst);
     FAULT_CS.store(fault_cs, Ordering::SeqCst);
+    FAULT_CR2.store(fault_cr2, Ordering::SeqCst);
     FAULT_RSP.store(fault_rsp, Ordering::SeqCst);
     HANDLER_RSP.store(handler_rsp, Ordering::SeqCst);
     IN_RING3.store(false, Ordering::SeqCst);
@@ -373,4 +381,9 @@ pub fn fault_vector() -> u64 {
 /// 畳んだ例外のフォルト RIP。呼び出し側が予期と突き合わせる。
 pub fn fault_rip() -> u64 {
     FAULT_RIP.load(Ordering::SeqCst)
+}
+
+/// 畳んだ例外のフォルト CR2（[`FAULT_CR2`]）。**ベクタが 14 のときだけ読むこと。**
+pub fn fault_cr2() -> u64 {
+    FAULT_CR2.load(Ordering::SeqCst)
 }
