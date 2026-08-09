@@ -625,7 +625,7 @@ const TIMER_TOLERANCE_DENOMINATOR: u64 = 1000;
 /// # `hlt` を無条件に使う理由
 ///
 /// ADR-0018 のチェックリスト 10 は「`cli` → 条件確認 → `sti; hlt`」の並びを
-/// 求めている。あれが必要なのは**「仕事が無ければ眠る」形のループ**である。
+/// 求めている。あれが必要なのは「仕事が無ければ眠る」形のループである。
 /// 仕事の有無を確認してから眠るまでの隙間に仕事が発生すると、次の割り込みまで
 /// 眠り続けてしまう。
 ///
@@ -634,9 +634,9 @@ const TIMER_TOLERANCE_DENOMINATOR: u64 = 1000;
 /// 最悪でも 10ms 後には起きるため、取りこぼしという概念が成立しない。
 /// 条件つきの形が要るのは M5 の実行キュー（仕事の有無で眠りを決める）である。
 ///
-/// **限界**: この形は、起こしてくれるものが止まった瞬間に永久ハングになる。
+/// 限界: この形は、起こしてくれるものが止まった瞬間に永久ハングになる。
 /// `hlt` で眠っている以上、カーネル自身はそれを検出できない（検出のための
-/// コードが動かない）。**外側からは検出できる**ので、xtask がシリアルログの
+/// コードが動かない）。外側からは検出できるので、xtask がシリアルログの
 /// ハートビート回数で判定する。カーネル内部では検出できないが、テスト基盤
 /// では検出できる、という切り分けである。
 ///
@@ -663,8 +663,8 @@ pub unsafe fn run_timer_loop(
 
     // SAFETY: 呼び出し側の契約により、7 項目の検証とタイマ設定が済んでいる。
     //
-    // **`sti` を実行するのはここと [`spin_with_interrupts_enabled`] の 2 箇所
-    // だけである**（数と経緯は spin 側のコメントと ADR-0018 Addendum 5 を参照）。
+    // `sti` を実行するのはここと [`spin_with_interrupts_enabled`] の 2 箇所
+    // だけである（数と経緯は spin 側のコメントと ADR-0018 Addendum 5 を参照）。
     // こちらが「`hlt` で待つ本来の形」で、起こしてくれるタイマが実在する
     // M4-d-2 で初めて成立した（ADR-0018 Addendum 2 §3）。
     unsafe {
@@ -673,11 +673,11 @@ pub unsafe fn run_timer_loop(
 
     // === S2-c: Local APIC タイマの較正 ===
     //
-    // **この位置でなければならない。** 基準に使う `TIMER_TICKS` は IRQ0 が
+    // この位置でなければならない。基準に使う `TIMER_TICKS` は IRQ0 が
     // 増やすので、`sti` より前では進まない。`start_timer` は `-> !` で戻らず、
     // 通常起動では `run_timer_loop` も戻らないので、「割り込みが有効で、かつ
-    // 定常ループへ入る前」という区間はここにしか存在しない。**APIC 関連の他の
-    // 処理（`kmain` の前半）から離れているのはこのためである。まとめないこと。**
+    // 定常ループへ入る前」という区間はここにしか存在しない。APIC 関連の他の
+    // 処理（`kmain` の前半）から離れているのはこのためである。まとめないこと。
     //
     // 較正は測るだけで、LAPIC タイマをタイマとして使わない。LVT Timer は
     // マスクされたままで、LINT0 と SVR にも触らない。
@@ -686,18 +686,18 @@ pub unsafe fn run_timer_loop(
 
         // === S2-d-1b: 2 つ目のコントローラ実装を 1 回だけ読ませる ===
         //
-        // **切り替えない。読むだけである。** 配送は PIC / PIT のままで、
+        // 切り替えない。読むだけである。配送は PIC / PIT のままで、
         // 書き込みは一切しない。
         //
-        // 呼ぶ理由は、2 つ目の実装が**実ハードウェアを正しく読めることを、
-        // 振る舞いが変わらないうちに確かめておく**ためである。どこからも
+        // 呼ぶ理由は、2 つ目の実装が実ハードウェアを正しく読めることを、
+        // 振る舞いが変わらないうちに確かめておくためである。どこからも
         // 呼ばずに S2-d-1c（配送が変わる段）へ入ると、そこで落ちたときに
         // 「切り替えが悪いのか、実装が悪いのか」を切り分けられない。
         //
         // 期待は「I/O APIC 経由へ移した IRQ だけが開いている」である。
-        // **PIC のマスク状態をここへ持ち込まないこと。** 別のコントローラの
+        // PIC のマスク状態をここへ持ち込まないこと。別のコントローラの
         // 状態である。S2-d-1c で IRQ1 を移したので、開いているのはそれだけに
-        // なる。**期待は呼び出し側が持つ**（境界が独自に期待を持たない）。
+        // なる。期待は呼び出し側が持つ（境界が独自に期待を持たない）。
         let routed: &[u8] = if crate::irq::routed_to_apic(crate::keyboard::KEYBOARD_IRQ) {
             &[crate::keyboard::KEYBOARD_IRQ]
         } else {
@@ -717,9 +717,9 @@ pub unsafe fn run_timer_loop(
 
         // === S2-d-2: タイマを Local APIC タイマへ移す ===
         //
-        // **較正より後でなければならない。** 初期カウントを較正の戻り値から
-        // 求めるためである。**そして切り替えの区間ではティックが 1 本も
-        // 来ない**ので、`TIMER_TICKS` を待つ処理（較正のエッジ待ち）は
+        // 較正より後でなければならない。初期カウントを較正の戻り値から
+        // 求めるためである。そして切り替えの区間ではティックが 1 本も
+        // 来ないので、`TIMER_TICKS` を待つ処理（較正のエッジ待ち）は
         // ここより前に済んでいる必要がある。
         if let Some(calibration) = calibration {
             switch_timer_to_lapic(logger, calibration);
@@ -742,12 +742,12 @@ pub unsafe fn run_timer_loop(
 
         // === S3-b-2b-1: AP を起こす ===
         //
-        // **位置は 2 つの制約で決まっている。** `sti` より後でなければならない
-        // （10ms の待ちをタイマのティックで作る）。そして**プリエンプティブ
-        // デモの後**でなければならない（デモの最中に AP が起きると、周回数や
+        // 位置は 2 つの制約で決まっている。`sti` より後でなければならない
+        // （10ms の待ちをタイマのティックで作る）。そしてプリエンプティブ
+        // デモの後でなければならない（デモの最中に AP が起きると、周回数や
         // 窓カウントの観測に混ざる）。
         //
-        // **ここに `cli` / `sti` は追加していない。** 許可リストの数は変わらない。
+        // ここに `cli` / `sti` は追加していない。許可リストの数は変わらない。
         if let Some(apic) = apic {
             let mmio = apic.mmio();
             // SAFETY: `apic` は写像済み、タイマは動いている（直前まで
@@ -770,26 +770,26 @@ pub unsafe fn run_timer_loop(
             }
         }
 
-        // 増幅器 (S4-c-4-3, sched-keep-workers-runnable): **AP が起きた後で**
-        // デモのワーカーを走行可能へ戻す。**単独では何も主張しない**——
+        // 増幅器 (S4-c-4-3, sched-keep-workers-runnable): AP が起きた後で
+        // デモのワーカーを走行可能へ戻す。単独では何も主張しない——
         // bootstrap processor が巡回を続けるだけで、第 1 層が AP を弾く。
         //
-        // **位置はここでなければならない。** デモより前だとデモの観測に混ざり、
-        // 締切分岐を止める形にすると `run_preemptive_demo` が戻らず**AP 起こしへ
-        // 到達しない**（`task::rearm_workers_for_smp_stimulus` の doc）。
+        // 位置はここでなければならない。デモより前だとデモの観測に混ざり、
+        // 締切分岐を止める形にすると `run_preemptive_demo` が戻らずAP 起こしへ
+        // 到達しない（`task::rearm_workers_for_smp_stimulus` の doc）。
         #[cfg(feature = "sched-keep-workers-runnable")]
         crate::task::rearm_workers_for_smp_stimulus();
 
         // === S5-c: TLB シュートダウンの実証（4 段の手順）===
         //
-        // **手順の理由は `smp::shootdown_probe` の doc にある。**
-        // **「AP が触って #PF」だけでは差が出ない**——TLB に翻訳が載っていなければ、
+        // 手順の理由は `smp::shootdown_probe` の doc にある。
+        // 「AP が触って #PF」だけでは差が出ない——TLB に翻訳が載っていなければ、
         // 世代を上げない構成でもページテーブルを歩いて #PF になる。
         #[cfg(feature = "smp-tlb-shootdown-probe")]
         {
             use crate::smp::shootdown_probe;
 
-            // (1)(2) AP に触らせ、**触れたことを確かめる。**
+            // (1)(2) AP に触らせ、触れたことを確かめる。
             shootdown_probe::command(shootdown_probe::TOUCH_FIRST);
             let mut spun = 0u32;
             while shootdown_probe::touches() == 0 && spun < SHOOTDOWN_PROBE_WAIT_SPINS {
@@ -807,7 +807,7 @@ pub unsafe fn run_timer_loop(
                     "smp: the ap never touched the probe page; the shootdown comparison is void"
                 ));
             } else {
-                // (3) **BKL を保持したまま**写像を外し、世代を上げる。
+                // (3) BKL を保持したまま写像を外し、世代を上げる。
                 let flushes_before = crate::bkl::generation_flushes_for(1);
                 {
                     let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
@@ -819,13 +819,13 @@ pub unsafe fn run_timer_loop(
                         // SAFETY: 探り用に張ったページで、他の誰も使っていない。
                         let _ = unsafe { table.unmap_4kib(virt) };
                     }
-                    // 破壊 (S5-c, smp-tlb-no-generation-bump): **世代を上げない。**
-                    // **AP はフラッシュしないので、古い翻訳で成功する。**
+                    // 破壊 (S5-c, smp-tlb-no-generation-bump): 世代を上げない。
+                    // AP はフラッシュしないので、古い翻訳で成功する。
                     #[cfg(not(feature = "smp-tlb-no-generation-bump"))]
                     crate::bkl::note_mapping_changed();
                 }
-                // **世代方式が土台である。** 上げた場合、AP は次の取得でフラッシュする。
-                // **その完了を待ってから触らせる**ので、勝負が時間に依らない。
+                // 世代方式が土台である。上げた場合、AP は次の取得でフラッシュする。
+                // その完了を待ってから触らせるので、勝負が時間に依らない。
                 let mut spun = 0u32;
                 while crate::bkl::generation_flushes_for(1) == flushes_before
                     && spun < SHOOTDOWN_PROBE_WAIT_SPINS
@@ -839,7 +839,7 @@ pub unsafe fn run_timer_loop(
                     crate::bkl::generation_flushes_for(1)
                 ));
 
-                // (4) もう一度触らせる。**世代を上げていれば #PF、上げていなければ成功。**
+                // (4) もう一度触らせる。世代を上げていれば #PF、上げていなければ成功。
                 shootdown_probe::command(shootdown_probe::TOUCH_AGAIN);
                 let mut spun = 0u32;
                 let attempts_before = shootdown_probe::attempts();
@@ -862,25 +862,25 @@ pub unsafe fn run_timer_loop(
 
         // === S5-b: 世代を 1 つ上げて、AP が次の取得でフラッシュすることを見る ===
         //
-        // **本番には写像を変える経路が無いので、そのままでは一度も発火しない。**
-        // **発火させて機序を見るためだけの feature である。**
+        // 本番には写像を変える経路が無いので、そのままでは一度も発火しない。
+        // 発火させて機序を見るためだけの feature である。
         //
-        // **BKL を保持したまま上げる**——それが `note_mapping_changed` の契約で、
+        // BKL を保持したまま上げる——それが `note_mapping_changed` の契約で、
         // 順序（Acquire/Release の対）が成り立つ前提でもある。
         #[cfg(feature = "smp-tlb-generation-probe")]
         {
-            // **上げる前の AP のフラッシュ回数を控える（S7-d で足した）。**
-            // **控えないと、後から「この bump のせいで増えた」が言えない。**
-            // ハートビートは bump より後にしか出ないので、**前の値はここでしか取れない。**
-            // シュートダウンの探り（S5-c）は最初から同じ形で出している。**対称にした。**
+            // 上げる前の AP のフラッシュ回数を控える（S7-d で足した）。
+            // 控えないと、後から「この bump のせいで増えた」が言えない。
+            // ハートビートは bump より後にしか出ないので、前の値はここでしか取れない。
+            // シュートダウンの探り（S5-c）は最初から同じ形で出している。対称にした。
             let flushes_before = crate::bkl::generation_flushes_for(1);
             {
                 let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
                 crate::bkl::note_mapping_changed();
             }
-            // **AP が実際にフラッシュするまで待つ。** 上限つきである。
-            // **待ちの上限。** シュートダウンの探りの定数はその feature の下にしか
-            // 無いので、ここに持つ（同じ桁）。**上限の無い待ちを書かない。**
+            // AP が実際にフラッシュするまで待つ。上限つきである。
+            // 待ちの上限。シュートダウンの探りの定数はその feature の下にしか
+            // 無いので、ここに持つ（同じ桁）。上限の無い待ちを書かない。
             const GENERATION_PROBE_WAIT_SPINS: u32 = 3_000_000;
             let mut spun = 0u32;
             while crate::bkl::generation_flushes_for(1) == flushes_before
@@ -901,35 +901,35 @@ pub unsafe fn run_timer_loop(
 
         // === S5-a: 測定用 IPI を送る（feature `smp-ipi-probe` のときだけ）===
         //
-        // **既定ビルドでは送らない。** 送る側は上限つきとはいえスピンで待つので、
-        // **他の検査の時間の形を変える。** 実際に踏んだ——既定ビルドへ入れたところ、
+        // 既定ビルドでは送らない。送る側は上限つきとはいえスピンで待つので、
+        // 他の検査の時間の形を変える。実際に踏んだ——既定ビルドへ入れたところ、
         // S4-c-4-3 の梯子（第 2 層の実証）が 5 回中 4 回しか通らなくなった。
-        // **位置を刺激の後ろへ動かしても揺れは残った。** 測るためのものが別の検査の
-        // 前提を壊すので、**測るときだけ入れる形にする。**
+        // 位置を刺激の後ろへ動かしても揺れは残った。測るためのものが別の検査の
+        // 前提を壊すので、測るときだけ入れる形にする。
         //
-        // **位置も刺激より後ろにしてある**（前に置くと AP 起こしから刺激までが延びる）。
+        // 位置も刺激より後ろにしてある（前に置くと AP 起こしから刺激までが延びる）。
         #[cfg(feature = "smp-ipi-probe")]
         {
             // === S5-a: 測定用 IPI を 1 本送る ===
             //
-            // **目的は「TCG で IPI が届くか」を測ることだけである。**
+            // 目的は「TCG で IPI が届くか」を測ることだけである。
             // 宛先は起こした AP で、ハンドラは per-CPU カウンタと EOI だけを行う
-            // （`idt::IPI_PROBE_VECTOR`）。**BKL は要求しない。**
+            // （`idt::IPI_PROBE_VECTOR`）。BKL は要求しない。
             //
-            // **送信完了（ICR の delivery status）と、相手が受け取ったこと（受信
-            // カウンタ）は別の量である。** 前者は既存の AP 起こしが見ているものと
-            // 同じで、**後者が測りたいものである。**
+            // 送信完了（ICR の delivery status）と、相手が受け取ったこと（受信
+            // カウンタ）は別の量である。前者は既存の AP 起こしが見ているものと
+            // 同じで、後者が測りたいものである。
             if let Some(apic) = apic {
                 for slot in 1..common::percpu::MAX_CPUS {
                     let Some(apic_id) = crate::smp::started_ap_apic_id(slot) else {
                         continue;
                     };
-                    // **1 本ずつ、受け取りを確かめてから次を送る。**
+                    // 1 本ずつ、受け取りを確かめてから次を送る。
                     //
-                    // **まとめて送ると数が合わない。** 同じベクタの IPI は Local APIC の
-                    // IRR の 1 ビットなので、**処理より速く送ると畳まれる。**
+                    // まとめて送ると数が合わない。同じベクタの IPI は Local APIC の
+                    // IRR の 1 ビットなので、処理より速く送ると畳まれる。
                     // 「送った数と受け取った数が一致する」を主張したいなら、
-                    // **畳まれない送り方にする必要がある。**
+                    // 畳まれない送り方にする必要がある。
                     for _ in 0..IPI_PROBE_ROUNDS {
                         let before = idt::ipi_probe_received_for(slot);
                         // SAFETY: `apic` は写像済みで、宛先は起動を確認した AP である。
@@ -947,7 +947,7 @@ pub unsafe fn run_timer_loop(
                             break;
                         }
                         idt::record_ipi_probe_sent();
-                        // **上限つきで待つ**（上限の無い待ちを書かない）。
+                        // 上限つきで待つ（上限の無い待ちを書かない）。
                         let mut spun = 0u32;
                         while idt::ipi_probe_received_for(slot) == before
                             && spun < IPI_PROBE_WAIT_SPINS
@@ -1004,18 +1004,18 @@ pub unsafe fn run_timer_loop(
 
         if !announced_first {
             announced_first = true;
-            // **ICW2 の事後証明。** 実際に届いたベクタ番号を実値で確認する。
+            // ICW2 の事後証明。実際に届いたベクタ番号を実値で確認する。
             match idt::first_pic_vector() {
-                // **8259 の採番と突き合わせる。現在の配送先ではない。**
+                // 8259 の採番と突き合わせる。現在の配送先ではない。
                 //
                 // `first_pic_vector` が記録するのは「PIC の採番範囲で最初に
                 // 届いたベクタ」で、定義からして 8259 由来の観測である。
-                // S2-d-2 でタイマが Local APIC へ移った後も、**移行より前に
-                // PIT が動いていた**（較正が PIT のティックを使う）ので値は
+                // S2-d-2 でタイマが Local APIC へ移った後も、移行より前に
+                // PIT が動いていた（較正が PIT のティックを使う）ので値は
                 // 残っており、ICW2 の事後証明としては依然として有効である。
                 //
-                // **ここを `timer_delivery_vector()` にすると、移行後に
-                // `0x20` と `0xfe` を突き合わせて誤って落ちる。** 実際に落ちた。
+                // ここを `timer_delivery_vector()` にすると、移行後に
+                // `0x20` と `0xfe` を突き合わせて誤って落ちる。実際に落ちた。
                 Some(vector) if vector as usize == idt::PIC_TIMER_VECTOR => {
                     log_both(
                         logger,
@@ -1045,12 +1045,12 @@ pub unsafe fn run_timer_loop(
 
         // === S4-b-2: 共有物を触る区間だけ BKL を保持する ===
         //
-        // **この 1 周は入口ではない。定常ループはタスクである**（ADR-0023
+        // この 1 周は入口ではない。定常ループはタスクである（ADR-0023
         // Addendum §2）。触る共有物は `SCANCODES`・コンソール・i8042 と PIC の
-        // ポート・シリアルの 4 種類で、**`hlt` はそのどれにも触らない。**
+        // ポート・シリアルの 4 種類で、`hlt` はそのどれにも触らない。
         //
-        // **ガードのスコープに `hlt` を含めない。** 含めると、保持したまま眠って
-        // もう一方のコアが IF=0 で永久に待つ。**構造で起きないようにしてある。**
+        // ガードのスコープに `hlt` を含めない。含めると、保持したまま眠って
+        // もう一方のコアが IF=0 で永久に待つ。構造で起きないようにしてある。
         {
             let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
 
@@ -1062,7 +1062,7 @@ pub unsafe fn run_timer_loop(
                 crate::bkl::sabotage_enable_interrupts_while_held()
             };
 
-            // キーボードのリングバッファを吸い出す。**メインループが行う。**
+            // キーボードのリングバッファを吸い出す。メインループが行う。
             // ハンドラは積むだけで表示しない（ADR-0018 §5）。
             drain_keyboard(
                 logger,
@@ -1074,7 +1074,7 @@ pub unsafe fn run_timer_loop(
 
             if ticks >= next_heartbeat {
                 next_heartbeat = ticks + HEARTBEAT_TICKS;
-                // **入力中は画面へ出さない。** ハートビートとエコーが同じ
+                // 入力中は画面へ出さない。ハートビートとエコーが同じ
                 // コンソールに出るため、打っている途中に割り込むと入力行が
                 // ぶつ切りになって読めなくなる。行が空のときだけ画面にも出す。
                 // シリアルへは常に出るので、観測手段は失われない。
@@ -1086,10 +1086,10 @@ pub unsafe fn run_timer_loop(
                 log_both(
                     logger,
                     console_for_heartbeat,
-                    // **`heartbeat: ticks=` を行頭に保つ。** この部分文字列は xtask の
+                    // `heartbeat: ticks=` を行頭に保つ。この部分文字列は xtask の
                     // 期待・禁止マーカーとして 30 箇所近くで使われており、`last_heartbeat_seconds`
                     // が `heartbeat: ticks=256 (2 s), ...` の形を解析している。
-                    // **S4-a で足す `cpu=` は、その後ろに置く。**
+                    // S4-a で足す `cpu=` は、その後ろに置く。
                     // AP 側は別の行（`smp: ap heartbeat: cpu=`）なので、この数え上げに混ざらない。
                     format_args!(
                         "heartbeat: ticks={ticks} ({} s), cpu={}, ap_ticks={}, ticks_total={}, \
@@ -1104,37 +1104,37 @@ pub unsafe fn run_timer_loop(
                         common::percpu::cpu_id(),
                         ap_tick_summary(),
                         idt::timer_ticks_total(),
-                        // **合計で閉じる相手である。** 1 本のティックはどこか 1 コアの
+                        // 合計で閉じる相手である。1 本のティックはどこか 1 コアの
                         // スロットと、このベクタ別カウンタの両方を増やす。
                         idt::timer_delivery_count(),
                         idt::timer_accounting_balances(),
                         idt::max_kernel_entry_depth(),
-                        // **「割り当てられた」と「参加した」は別である（S4-c-2、
-                        // 観測量は S4-c-3-2a で置き換えた）。** 占有は `CURRENT` が
+                        // 「割り当てられた」と「参加した」は別である（S4-c-2、
+                        // 観測量は S4-c-3-2a で置き換えた）。占有は `CURRENT` が
                         // 示し、参加は `schedule_switch` を通った回数が示す。
-                        // **片方では足りない**——占有だけなら「割り当てたが一度も
+                        // 片方では足りない——占有だけなら「割り当てたが一度も
                         // 通っていない」を通し、参加だけなら「誰の担当か分からない
                         // まま数字が増えている」を通す。
                         //
-                        // **前の観測量（アイドルループの反復回数）は捨てた。**
+                        // 前の観測量（アイドルループの反復回数）は捨てた。
                         // 早期リターンを残した構成でも同じように増えるので、
-                        // **「参加した」と「従来どおりループしている」を区別
-                        // できなかった。**
+                        // 「参加した」と「従来どおりループしている」を区別
+                        // できなかった。
                         crate::task::ap_current_display(),
                         crate::task::ap_schedule_passes(),
                         idt::ipi_probe_sent(),
                         idt::ipi_probe_received_for(1),
                         crate::bkl::tlb_generation(),
                         crate::bkl::generation_flushes_for(1),
-                        // **漂流の観測量（S6-c）。** 定常状態では動かないはずの量で、
-                        // **動いたら「解放されない確保がある」ことになる。**
+                        // 漂流の観測量（S6-c）。定常状態では動かないはずの量で、
+                        // 動いたら「解放されない確保がある」ことになる。
                         //
-                        // **専用の出力経路を作らない。** 既にBKLの内側で出ている
+                        // 専用の出力経路を作らない。既にBKLの内側で出ている
                         // この行へ相乗りする。行を増やすと混線の機会が増える。
                         //
-                        // **判定は「全標本が同一であること」である**（`docs/verification-coverage.md`）。
-                        // 整数なので傾きの推定は要らない。**多点の価値は「いつ動いたか」
-                        // が特定できることにある。**
+                        // 判定は「全標本が同一であること」である（`docs/verification-coverage.md`）。
+                        // 整数なので傾きの推定は要らない。多点の価値は「いつ動いたか」
+                        // が特定できることにある。
                         crate::heap::ALLOCATOR.free_bytes(),
                         crate::heap::ALLOCATOR.free_block_count(),
                         crate::keyboard::buffer::received_count(),
@@ -1142,12 +1142,12 @@ pub unsafe fn run_timer_loop(
                         crate::keyboard::stray_irq_count(),
                         idt::spurious_count(),
                         idt::lapic_spurious_count(),
-                        // **会計。** irq1 は IDT 側のベクタ別カウンタ。
+                        // 会計。irq1 は IDT 側のベクタ別カウンタ。
                         // keys + stray がこれと一致しなければ経路の取り違えがある。
                         idt::interrupt_count(crate::keyboard::delivery_vector()),
                         crate::keyboard::accounting_balances(),
                         max_tick_jump(),
-                        // **止まった理由の切り分け材料。** キーが来なくなったとき、
+                        // 止まった理由の切り分け材料。キーが来なくなったとき、
                         // OBF が 1 なら「データポートを読んでいない」、
                         // PIC ISR にビットが残っていれば「EOI を送っていない」。
                         // どちらも「1 回動いて止まる」症状になるので、この 2 つが
@@ -1163,7 +1163,7 @@ pub unsafe fn run_timer_loop(
                 );
             }
         }
-        // ← ここで BKL を離す。**`hlt` はこの外にある。**
+        // ← ここで BKL を離す。`hlt` はこの外にある。
 
         if stop_after_ticks != 0 && ticks >= stop_after_ticks {
             logger.info(format_args!(
@@ -1177,7 +1177,7 @@ pub unsafe fn run_timer_loop(
         }
 
         // 破壊 (S4-b-2, bkl-hold-across-hlt): 離さずに `hlt` する。
-        // **もう一方のコアが IF=0 で待ち続け、タイムアウトして原因を出す。**
+        // もう一方のコアが IF=0 で待ち続け、タイムアウトして原因を出す。
         // 「静かに止まる」を「うるさく止まる」へ変えた形の実証である。
         #[cfg(feature = "bkl-hold-across-hlt-test")]
         let _bkl_held_across_hlt = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
