@@ -645,28 +645,28 @@ pub struct WakeReport {
     pub attempted: usize,
     /// 起動署名を出した AP の本数。
     pub started: usize,
-    /// **`MAX_CPUS` を超えるので起こさなかった AP の本数。**
+    /// `MAX_CPUS` を超えるので起こさなかった AP の本数。
     pub skipped_no_slot: usize,
 }
 
-/// AP を起こす（S3-b-2b-1）。**1 本ずつ起こし、次へ進む前に完了を待つ。**
+/// AP を起こす（S3-b-2b-1）。1 本ずつ起こし、次へ進む前に完了を待つ。
 ///
 /// # なぜ 1 本ずつなのか
 ///
-/// `Logger` と `SerialPort` にロックが無いので、**2 つ以上の AP が同時に書くと
-/// バイトが混ざる。** そして**どの AP が失敗したかを切り分けられなくなる。**
+/// `Logger` と `SerialPort` にロックが無いので、2 つ以上の AP が同時に書くと
+/// バイトが混ざる。そしてどの AP が失敗したかを切り分けられなくなる。
 /// 直列にする費用はコア数 × 10ms 程度で、実害が無い。
 ///
 /// # 起こす本数は `MAX_CPUS` で制限する
 ///
-/// **`MAX_CPUS` を超えるコアは起こさない**（`roadmap.md` の S3-b-2b-1）。
+/// `MAX_CPUS` を超えるコアは起こさない（`roadmap.md` の S3-b-2b-1）。
 /// 超えた分を起こすと、per-CPU スロットを持てない AP が生まれる。
-/// **起こさなかった本数を返して、検査がそれを主張できるようにする。**
+/// 起こさなかった本数を返して、検査がそれを主張できるようにする。
 ///
 /// # 待ち時間
 ///
-/// INIT の後に 10ms、SIPI の後に 10ms 待つ。**規格は SIPI の後 200µs だが、
-/// タイマのティックが 10ms 粒度なのでそれで代用する**（下限より長いだけなので
+/// INIT の後に 10ms、SIPI の後に 10ms 待つ。規格は SIPI の後 200µs だが、
+/// タイマのティックが 10ms 粒度なのでそれで代用する（下限より長いだけなので
 /// 安全側である。TSC は較正していないので新しい時間源を導入しない）。
 ///
 /// # Safety
@@ -690,24 +690,24 @@ pub unsafe fn wake_application_processors(
         cpu::halt_forever();
     };
 
-    // **トランポリンを予約フレームへコピーし、絶対値を書き込む。**
+    // トランポリンを予約フレームへコピーし、絶対値を書き込む。
     // SAFETY: frame は S1 が予約した 4KiB 境界の物理フレームで、他の誰も使わない。
     // BSP は本番 CR3 で走るので direct map 越しに触る（AP は恒等で触る）。
     let installed = unsafe { install_trampoline(logger, frame) };
 
-    // **この値は BSP の ID とは限らない。** MADT の最初の使用可能な Local APIC
+    // この値は BSP の ID とは限らない。MADT の最初の使用可能な Local APIC
     // エントリであって、エントリ順が BSP を先頭にする保証は仕様に無い
-    // （[`crate::acpi::ApicMmio::bsp_candidate_apic_id`] の doc）。**BSP が先頭で
+    // （[`crate::acpi::ApicMmio::bsp_candidate_apic_id`] の doc）。BSP が先頭で
     // ない実装では、下の `continue` が BSP を素通りさせ、BSP 自身へ INIT-SIPI を
-    // 送ることになる。**
+    // 送ることになる。
     //
-    // **権威のある出所は 2 つあり、どちらも既に読んでいる**——`IA32_APIC_BASE` の
+    // 権威のある出所は 2 つあり、どちらも既に読んでいる——`IA32_APIC_BASE` の
     // bit 8（`common::cpu::ApicBase::bootstrap_processor`）と、自コアの Local APIC
-    // ID レジスタ（[`crate::apic`] が読んでいる）である。**どちらも今はログへ出す
-    // だけで、判定には使っていない。**
+    // ID レジスタ（[`crate::apic`] が読んでいる）である。どちらも今はログへ出す
+    // だけで、判定には使っていない。
     //
-    // **直さない判断と解禁条件は `docs/deferred-decisions.md` にある。** 要点は、
-    // QEMU で MADT の並びを変える手段が無く、**破壊確認を構成できない**ことである。
+    // 直さない判断と解禁条件は `docs/deferred-decisions.md` にある。要点は、
+    // QEMU で MADT の並びを変える手段が無く、破壊確認を構成できないことである。
     let bsp = mmio.bsp_candidate_apic_id();
     let mut report = WakeReport {
         usable,
@@ -740,7 +740,7 @@ pub unsafe fn wake_application_processors(
             cpu::halt_forever();
         };
 
-        // **スタック頂点は恒等 VA である。** 静的初期テーブルに direct map が
+        // スタック頂点は恒等 VA である。静的初期テーブルに direct map が
         // 無いので、direct map の VA を渡すと最初の push で落ちる。
         let stack_top_identity = stack.as_u64() + FRAME_SIZE;
         // SAFETY: installed はコピー済みのトランポリンで、data ブロックの位置は
@@ -760,12 +760,12 @@ pub unsafe fn wake_application_processors(
             installed.cr3
         ));
 
-        // INIT → 待つ → SIPI → 待つ → **まだ起きていなければ**もう 1 回 SIPI。
+        // INIT → 待つ → SIPI → 待つ → まだ起きていなければもう 1 回 SIPI。
         //
-        // **2 回目を無条件に送ってはならない。** 既に走り出した AP へ SIPI を
-        // 送ると、**long mode で走っている最中に開始ベクタから再実行させる**
+        // 2 回目を無条件に送ってはならない。既に走り出した AP へ SIPI を
+        // 送ると、long mode で走っている最中に開始ベクタから再実行させる
         // ことになり、16 ビットのバイト列を 64 ビットとして解釈して #GP →
-        // トリプルフォルトする。**実際に踏んだ**（CPU 1 が CS64・GDTR=0 で
+        // トリプルフォルトする。実際に踏んだ（CPU 1 が CS64・GDTR=0 で
         // オフセット 0x15 に落ちた）。規格が 2 回目を許すのは「1 回目が
         // 届かなかった場合」であって、常に 2 回送れという意味ではない。
         // SAFETY: 写像済みの Local APIC。起動時の 1 回だけ。
@@ -778,7 +778,7 @@ pub unsafe fn wake_application_processors(
         wait_ticks(AP_WAKE_WAIT_TICKS);
         let ok = ok
             && (started_ap_count() > before || {
-                // SAFETY: 同上。**まだ起きていないときだけ**送る。
+                // SAFETY: 同上。まだ起きていないときだけ送る。
                 unsafe { crate::apic::send_startup_ipi(lapic_virt, apic_id, installed.sipi_vector) }
             });
         if !ok {
@@ -789,7 +789,7 @@ pub unsafe fn wake_application_processors(
             cpu::halt_forever();
         }
 
-        // 起動署名を待つ。**上限つきで待つ**（CLAUDE.md §14）。
+        // 起動署名を待つ。上限つきで待つ（CLAUDE.md §14）。
         let mut started = false;
         for _ in 0..AP_START_WAIT_TICKS {
             wait_ticks(1);
@@ -819,7 +819,7 @@ const AP_START_WAIT_TICKS: u64 = 50;
 
 /// タイマのティックが `count` 回進むまで待つ。
 ///
-/// **上限のない待ちにならない。** ティックが止まっていれば進まないが、
+/// 上限のない待ちにならない。ティックが止まっていれば進まないが、
 /// 呼び出し側が回数で上限を持つ。
 fn wait_ticks(count: u64) {
     let start = crate::idt::timer_ticks();
@@ -841,12 +841,12 @@ pub struct InstalledTrampoline {
 impl InstalledTrampoline {
     /// この AP に渡すスタック頂点と索引を書き込む。
     ///
-    /// **スタック頂点は恒等 VA で渡すこと**（AP の CR3 に direct map が無い）。
+    /// スタック頂点は恒等 VA で渡すこと（AP の CR3 に direct map が無い）。
     ///
     /// # Safety
     ///
-    /// 対象の AP がまだ走っていないこと。**走っている AP のデータブロックを
-    /// 書き換えてはならない。**
+    /// 対象の AP がまだ走っていないこと。走っている AP のデータブロックを
+    /// 書き換えてはならない。
     pub unsafe fn set_ap_parameters(&self, stack_top_identity: u64, index: u64) {
         // SAFETY: direct_map_base は写像済みの予約フレームの先頭で、
         // オフセットはレイアウト定数の範囲内である。
@@ -868,9 +868,9 @@ impl InstalledTrampoline {
 
     /// 整列を仮定せずに `u32` を書く。
     ///
-    /// **書き込み先は 4 バイト境界に載らない**（GDTR のベースも far jump の
+    /// 書き込み先は 4 バイト境界に載らない（GDTR のベースも far jump の
     /// 飛び先も、オペコードや `u16` の直後に来る）。`write_volatile` は整列を
-    /// 要求するので使えない。**バイトごとに書く。**
+    /// 要求するので使えない。バイトごとに書く。
     ///
     /// # Safety
     ///
@@ -890,18 +890,18 @@ impl InstalledTrampoline {
 ///
 /// # なぜコピーするのか
 ///
-/// 雛形はカーネルイメージ内の高位 VA にリンクされている。**AP は物理
-/// `vector << 12` から実行を始めるので、そのままでは走らせられない。**
+/// 雛形はカーネルイメージ内の高位 VA にリンクされている。AP は物理
+/// `vector << 12` から実行を始めるので、そのままでは走らせられない。
 ///
-/// # 何を書き込むのか。**自己再配置はしない**
+/// # 何を書き込むのか。自己再配置はしない
 ///
 /// 16 ビット部は `DS = CS` でフレーム内オフセットだけを使うので位置独立だが、
-/// **線形アドレスが要る 2 箇所だけは実行時の値でなければ成立しない。**
+/// 線形アドレスが要る 2 箇所だけは実行時の値でなければ成立しない。
 ///
 /// - `lgdt` が読む擬似記述子のベース（一時 GDT の線形アドレス）
 /// - long mode へ入った直後の far jump の飛び先
 ///
-/// **BSP がフレームの物理アドレスを知っているので、コピー後に書き込む。**
+/// BSP がフレームの物理アドレスを知っているので、コピー後に書き込む。
 /// 恒等写像の下では物理 == 線形なので、そのまま使える。
 ///
 /// # Safety
@@ -919,13 +919,13 @@ unsafe fn install_trampoline(
 
     let src = core::ptr::addr_of!(zaytos_ap_tramp_start) as u64;
     // far jump の位置は、`mov cr0` の直後に置く制約からコード長で決まる。
-    // **定数で持たず、シンボルからの相対で求める。**
+    // 定数で持たず、シンボルからの相対で求める。
     let farjmp_offset = core::ptr::addr_of!(zaytos_ap_tramp_farjmp) as u64 - src;
     let end = core::ptr::addr_of!(zaytos_ap_tramp_end) as u64;
     let len = end - src;
 
-    // **1 ページに収まることを確かめる。** 収まらない場合の隣接ページの確保は
-    // S1 から送った申し送りで、**この段で致命として扱う。**
+    // 1 ページに収まることを確かめる。収まらない場合の隣接ページの確保は
+    // S1 から送った申し送りで、この段で致命として扱う。
     if len > FRAME_SIZE {
         logger.error(format_args!(
             "smp: the AP trampoline is {len} bytes, which does not fit in the reserved {FRAME_SIZE} \
@@ -942,7 +942,7 @@ unsafe fn install_trampoline(
         core::ptr::copy_nonoverlapping(src as *const u8, direct_map_base as *mut u8, len as usize);
     }
 
-    // AP が使う CR3。**静的初期テーブルの物理**である。
+    // AP が使う CR3。静的初期テーブルの物理である。
     extern "C" {
         static zaytos_boot_pml4: u8;
     }
@@ -959,7 +959,7 @@ unsafe fn install_trampoline(
         sipi_vector: (frame.as_u64() >> 12) as u8,
     };
 
-    // **恒等の下では物理がそのまま線形アドレスである。** AP はその世界で走る。
+    // 恒等の下では物理がそのまま線形アドレスである。AP はその世界で走る。
     let identity_base = frame.as_u64();
     // SAFETY: 直上でコピーしたフレームで、オフセットはレイアウト定数である。
     unsafe {
@@ -979,7 +979,7 @@ unsafe fn install_trampoline(
     }
 
     // 破壊 (S3-b-2b-1, smp-tramp-corrupt-copy): 設置済みのコピーを 1 バイト壊す。
-    // **パッチされる 3 領域の外**を狙うので、雛形との比較が捕まえるはずである。
+    // パッチされる 3 領域の外を狙うので、雛形との比較が捕まえるはずである。
     #[cfg(feature = "smp-tramp-corrupt-copy-test")]
     // SAFETY: コピー済みのフレーム内。オフセット 0 は `cli` のバイトである。
     unsafe {
@@ -1008,20 +1008,20 @@ unsafe fn install_trampoline(
 ///
 /// # なぜ要るのか
 ///
-/// この段の実装では、**16 ビット / 64 ビットの符号化の取り違えを 4 件踏んだ**
+/// この段の実装では、16 ビット / 64 ビットの符号化の取り違えを 4 件踏んだ
 /// （`.org` の詰め物が `mov cr0` の直後に入る、`lgdtw` になる、整列を仮定した
-/// 書き込み、64 ビットの `[disp32]` が RIP 相対になる）。**いずれも AP 側でしか
-/// 落ちず、BSP 側は正常に見える。** コードを触ったときに静かに戻るのを、
-/// **設置後のバイト比較で捕まえる。**
+/// 書き込み、64 ビットの `[disp32]` が RIP 相対になる）。いずれも AP 側でしか
+/// 落ちず、BSP 側は正常に見える。コードを触ったときに静かに戻るのを、
+/// 設置後のバイト比較で捕まえる。
 ///
-/// # 比較の形。**パッチされる箇所は除外し、位置はシンボルから導く**
+/// # 比較の形。パッチされる箇所は除外し、位置はシンボルから導く
 ///
 /// 比較するのは「設置済みのコピー」と「`.rodata.aptramp` の雛形」である。
 /// BSP が書き込む 3 領域だけを除外する。
 ///
-/// **除外位置を定数で持たない。** far jump の位置は `mov cr0` の直後という制約
-/// から決まり、**コードを 1 バイト変えるたびに動く。** 実際に `0x40` と置いた
-/// 定数が実は `0x42` だった。**シンボルから導けば、動いても追随する。**
+/// 除外位置を定数で持たない。far jump の位置は `mov cr0` の直後という制約
+/// から決まり、コードを 1 バイト変えるたびに動く。実際に `0x40` と置いた
+/// 定数が実は `0x42` だった。シンボルから導けば、動いても追随する。
 fn verify_installed_trampoline(
     logger: &mut Logger<SerialPort>,
     installed: &InstalledTrampoline,
@@ -1038,7 +1038,7 @@ fn verify_installed_trampoline(
     let data_off = core::ptr::addr_of!(zaytos_ap_tramp_data_cr3) as u64 - src;
     let data_end = core::ptr::addr_of!(zaytos_ap_tramp_data_started) as u64 - src + 8;
 
-    // BSP が書き込む領域。**ここだけを除外する。**
+    // BSP が書き込む領域。ここだけを除外する。
     let patched: [(u64, u64); 3] = [
         (gdtr_off + 2, gdtr_off + 6),
         (
