@@ -1164,8 +1164,8 @@ enum MaskState {
 const MASK_BITMAP_WORDS: usize = 4;
 
 impl MaskCheck {
-    /// 実測が期待と一致しているか。**判定はこの値の比較で行い、`Display` の
-    /// 文字列を突き合わせる形にはしない。** 書式を判定に載せると、書式を
+    /// 実測が期待と一致しているか。判定はこの値の比較で行い、`Display` の
+    /// 文字列を突き合わせる形にはしない。書式を判定に載せると、書式を
     /// 変えた瞬間に静かに壊れる。
     pub fn matches(&self) -> bool {
         self.observed == self.expected
@@ -1173,7 +1173,7 @@ impl MaskCheck {
 
     /// 実測部分だけの表示。期待値の書き方が呼び出し側ごとに違う場合に使う
     /// （「must still be …」のように前置きではなく後置きで書く行がある）。
-    /// **同じ [`MaskCheck`] から導くので、判定と別の読み出しにはならない。**
+    /// 同じ [`MaskCheck`] から導くので、判定と別の読み出しにはならない。
     pub fn observed(&self) -> ObservedMasks {
         ObservedMasks {
             state: self.observed,
@@ -1197,7 +1197,7 @@ impl MaskCheck {
 ///
 /// この表示を使う 2 行（`pic: IMR before remap …` と
 /// `pit: IMR after configuring the PIT …`）に一致を取っているテストは
-/// **現時点で無い**（xtask の期待マーカーを実測で確認した）。依存があるのは
+/// 現時点で無い（xtask の期待マーカーを実測で確認した）。依存があるのは
 /// [`MaskCheck`] の全体表示（`interrupt-test timer` / `no-eoi`）の方である。
 pub struct ObservedMasks {
     state: MaskState,
@@ -1207,7 +1207,7 @@ pub struct ObservedMasks {
 impl fmt::Display for ObservedMasks {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.state {
-            // **この腕の文字列を変えない。**
+            // この腕の文字列を変えない。
             MaskState::Pic { master, slave } => {
                 if self.with_bits {
                     write!(
@@ -1226,7 +1226,7 @@ impl fmt::Display for ObservedMasks {
     }
 }
 
-/// マスクのビットマップを 16 進で書く。**必要な語だけ出す。**
+/// マスクのビットマップを 16 進で書く。必要な語だけ出す。
 ///
 /// 本数に関係なく 4 語すべてを出すと、24 本の系で意味の無い 0 が 3 語並ぶ。
 /// 上位の語から書くので、左端が最も大きい entry 番号側になる。
@@ -1247,13 +1247,13 @@ fn write_mask_bitmap(
 
 /// このコントローラが担当するベクタ番号の範囲。
 ///
-/// **ベクタ番号は境界の共通語彙である。** `idt` 側も
+/// ベクタ番号は境界の共通語彙である。`idt` 側も
 /// [`crate::idt::PIC_TIMER_VECTOR`] のようにベクタ番号で話すので、これを出すのは
 /// 「生の値を出さない」方針に反しない。反するのは IMR のビットや ISR のような
-/// **コントローラ内部の状態**であって、ベクタ番号ではない。
+/// コントローラ内部の状態であって、ベクタ番号ではない。
 ///
-/// 返すのは連続範囲の下端と**上端（この値を含む）**であって、**IRQ の本数では
-/// ない**。上端が包含であることを明記するのは、`0x2F`（含む）と `0x30`（含まない）
+/// 返すのは連続範囲の下端と上端（この値を含む）であって、IRQ の本数では
+/// ない。上端が包含であることを明記するのは、`0x2F`（含む）と `0x30`（含まない）
 /// の取り違えが呼び出し側の比較を 1 つずらすためである。S2 で IO-APIC へ移す
 /// ときに最も踏みやすい off-by-one になる。
 ///
@@ -1275,7 +1275,7 @@ pub const fn managed_vectors() -> (u8, u8) {
 
 impl fmt::Display for MaskCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // **この腕の文字列を変えない。** `interrupt-test timer` と
+        // この腕の文字列を変えない。`interrupt-test timer` と
         // `interrupt-test alt-offset` が `master=0xfe slave=0xff` に一致を取っている。
         match (self.observed, self.expected) {
             (
@@ -1302,7 +1302,7 @@ impl fmt::Display for MaskCheck {
                 write_mask_bitmap(f, entries, &expected_masked)?;
                 write!(f, ") [read back from hardware]")
             }
-            // **実装をまたいだ比較は行わない。** 観測と期待は同じ
+            // 実装をまたいだ比較は行わない。観測と期待は同じ
             // `check_masks` の呼び出しから作るので、腕が食い違うことはない。
             // 食い違ったら実装の誤りなので、黙って一致扱いにせず明示する。
             _ => write!(f, "observed and expected come from different controllers"),
@@ -1312,13 +1312,13 @@ impl fmt::Display for MaskCheck {
 
 /// 配送中の割り込みの観測値（ハートビートの診断用）。
 ///
-/// **この出力に自動検査が依存していないこと**を条件に、コントローラ固有の
+/// この出力に自動検査が依存していないことを条件に、コントローラ固有の
 /// 診断を境界から出してよいことにしている。現状ハートビートの
 /// `PIC ISR=` はどのテストのマーカーにも入っていない（実測で確認済み）。
 ///
 /// # 見ていない範囲（隠さずに書く）
 ///
-/// **マスタの ISR しか持っていない。** 現在のハートビートがマスタ側だけを
+/// マスタの ISR しか持っていない。現在のハートビートがマスタ側だけを
 /// 出しているので、それに合わせてある（振る舞い不変のため、ここでスレーブを
 /// 足して出力を増やさない）。スレーブ側で配送中の割り込みは観測できない。
 ///
@@ -1347,7 +1347,7 @@ pub unsafe fn service_snapshot() -> ServiceSnapshot {
 mod tests {
     use super::*;
 
-    /// `vector_for` と `irq_for` は互いの逆である。**往復で固定する。**
+    /// `vector_for` と `irq_for` は互いの逆である。往復で固定する。
     ///
     /// 片方だけを見るテストだと、両方を同じ向きに間違えたときに通ってしまう。
     #[test]
@@ -1376,11 +1376,11 @@ mod tests {
         }
     }
 
-    /// **スレーブのベクタはマスタのベクタと連続している必要がない。**
+    /// スレーブのベクタはマスタのベクタと連続している必要がない。
     ///
     /// S2-b でこの依存を閉じた。以前は `MASTER_VECTOR_OFFSET .. +16` という 1 つの
     /// 連続範囲で見ており、スレーブ = マスタ + 8 を仮定していた。ここでは
-    /// **その仮定が成り立つことを実際に確かめる**（現行の 2 構成ではどちらも
+    /// その仮定が成り立つことを実際に確かめる（現行の 2 構成ではどちらも
     /// 成り立つので、この確認は今は自明に通る）。仮定が崩れた構成が入ったとき、
     /// 上の 2 つのテストが連続範囲の実装を落とす。
     #[test]
@@ -1410,7 +1410,7 @@ mod tests {
 
     /// `TimerSetup` の問いは、実装固有の値と別に取り出せる。
     ///
-    /// **S2-d でマーカーを問いベースへ移す先がここである。**
+    /// S2-d でマーカーを問いベースへ移す先がここである。
     #[test]
     fn the_timer_setup_exposes_implementation_independent_questions() {
         let setup = TimerSetup {
