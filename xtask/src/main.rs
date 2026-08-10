@@ -1993,15 +1993,17 @@ fn run_keyboard_test(features: &[&str]) -> Result<KeyboardAssertions> {
 
     // 6. 意図しない例外が起きていないこと。
     //
-    // S8-d の遠征が Ring 3 の #PF を 1 本、意図して起こす。CR2 はユーザー
-    // サブツリー内の既知の未マップ VA（main.rs の UNMAPPED_USER_VIRT =
-    // USER_CODE_VIRT + 0x2000）なので、その 1 本だけを除外する。#DF（v=08）は
-    // 従来どおり無条件に NG である。
+    // S8-d/e の遠征が Ring 3 の #PF を意図して起こす（未マップ VA とカーネル VA の
+    // 2 本）。除外は CR2 の列挙ではなく **cpl=3 で行う**——S8 以降、Ring 3 由来の
+    // #PF は畳まれて処理される事象であり、この検査が守るべき不変条件は
+    // 「意図しない**カーネルの** #PF が無いこと」だからである。CR2 を並べる形だと
+    // 遠征を足すたびに除外が増え、増えた分だけ検査が守る範囲が黙って狭くなる。
+    // cpl=0 の #PF は従来どおり NG、#DF（v=08）も無条件に NG である。
     let unintended_pf = qemu
         .lines()
-        .any(|l| l.contains("v=0e") && !l.contains("CR2=0000008000002000"));
+        .any(|l| l.contains("v=0e") && !l.contains("cpl=3"));
     println!(
-        "{context}: qemu log free of unintended \"v=0e\" = {}",
+        "{context}: qemu log free of ring-0 \"v=0e\" = {}",
         if unintended_pf { "NG" } else { "OK" }
     );
     ok &= !unintended_pf;

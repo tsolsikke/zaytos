@@ -1890,6 +1890,7 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
                     context.rip,
                     context.rsp,
                     context.cr2,
+                    context.error_code,
                     rsp_at_call,
                 );
             }

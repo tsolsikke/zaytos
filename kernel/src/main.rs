@@ -4454,28 +4454,47 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
     // その間のこの位置は空いている。
     const UNMAPPED_USER_VIRT: u64 = ring3::USER_CODE_VIRT + 0x2000;
 
+    // カーネル像の先頭。張られていて（present）、U=0 である。Ring 3 から読むと
+    // 権限違反の #PF になる（S8-e。S7 の到達条件 3 の観測対象）。
+    const KERNEL_TARGET_VIRT: u64 = 0xffff_ffff_8010_0000;
+
     // 各遠征の命令列と、**フォルトする命令の位置**（ページ先頭からのオフセット）。
     //
     // **フォルトするのは必ずしも先頭の命令ではない。** #DE は被除数と除数を 0 に
     // 置いてから割るので、落ちるのは 3 命令目である。#PF はアドレスを積んでから
     // 読むので 2 命令目になる。**このオフセットは実測で合わせた**（最初 #DE を 0 と
     // 書いて主張が落ち、4 が正しいと分かった）。
-    let cases: [(&str, u8, &[u8], u64); 4] = [
+    // 5 本目（S8-e）は S7 の到達条件 3（ユーザーからカーネル領域へアクセス
+    // できない）の観測である。S7 は Ring 3 へ一度も行かず、構造の監査（U=1 が
+    // ユーザーサブツリーの外に無い）までで閉じた。**「Ring 3 から触って #PF に
+    // なる」はここが初めての直接の観測である。** 対象はカーネル像の先頭
+    // （張られていて U=0）。エラーコードの期待が 4 本目と違う——未マップは
+    // 0x4（不在・ユーザー・読み）、こちらは **0x5（存在・ユーザー・読み）**で、
+    // **「穴に落ちた」ではなく「権限で拒まれた」ことをエラーコードが区別する。**
+    /// 1 本の遠征の記述。名前 / 期待ベクタ / 命令列（#PF は空でロード列を生成） /
+    /// フォルトする命令のオフセット / #PF の読み先（0 = #PF でない） /
+    /// 期待するエラーコード（#PF のみ意味を持つ）。
+    type FaultCase = (&'static str, u8, &'static [u8], u64, u64, u64);
+    let cases: [FaultCase; 5] = [
         // #DE: xor edx,edx / xor ecx,ecx / div ecx。0 除算。落ちるのは div（+4）。
-        ("#DE", 0, &[0x31, 0xD2, 0x31, 0xC9, 0xF7, 0xF1], 4),
+        ("#DE", 0, &[0x31, 0xD2, 0x31, 0xC9, 0xF7, 0xF1], 4, 0, 0),
         // #UD: ud2。落ちるのは先頭。
-        ("#UD", 6, &[0x0F, 0x0B], 0),
+        ("#UD", 6, &[0x0F, 0x0B], 0, 0, 0),
         // #GP: cli。Ring 3 では特権命令。落ちるのは先頭。
-        ("#GP", 13, &[0xFA], 0),
-        // #PF: movabs rax, UNMAPPED_USER_VIRT（10 バイト）/ mov al,[rax]。
-        // 落ちるのは読み（+10）。
-        ("#PF", 14, &[], 10),
+        ("#GP", 13, &[0xFA], 0, 0, 0),
+        // #PF: movabs rax, <読み先>（10 バイト）/ mov al,[rax]。落ちるのは
+        // 読み（+10）。読み先は未マップのユーザー VA。エラーコード 0x4 =
+        // 不在・ユーザー・読み。
+        ("#PF", 14, &[], 10, UNMAPPED_USER_VIRT, 0x4),
+        // #PF-kernel: 同じ命令列で、読み先だけカーネル VA。エラーコード 0x5 =
+        // 存在・ユーザー・読み（権限違反）。
+        ("#PF-kernel", 14, &[], 10, KERNEL_TARGET_VIRT, 0x5),
     ];
 
     let main_rsp0_top = gdt::privilege_stack_top();
     let code_ptr = ring3::USER_CODE_VIRT as *mut u8;
 
-    for (name, expected_vector, bytes, fault_offset) in cases {
+    for (name, expected_vector, bytes, fault_offset, load_target, expected_error) in cases {
         // ユーザーコードページの先頭を、この遠征の命令列で埋める。
         // SAFETY: verify_ring3_excursion が張った U=1 / W=1 のユーザーページ。
         // 書くのは先頭の数バイトだけで、4KiB に収まる。SMAP は未有効。
@@ -4485,7 +4504,7 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
                 core::ptr::write_volatile(code_ptr, 0x48);
                 core::ptr::write_volatile(code_ptr.add(1), 0xB8);
                 for i in 0..8 {
-                    let byte = ((UNMAPPED_USER_VIRT >> (i * 8)) & 0xFF) as u8;
+                    let byte = ((load_target >> (i * 8)) & 0xFF) as u8;
                     core::ptr::write_volatile(code_ptr.add(2 + i as usize), byte);
                 }
                 // mov al, [rax]
@@ -4518,8 +4537,9 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
         if expected_vector == 14 {
             logger.info(format_args!(
                 "ring3-vectors: {name} interrupted the Ring 3 run and the kernel continued \
-                 (vector={vector} rip={rip:#018x} cs={cs:#x} cr2={:#018x})",
-                ring3::fault_cr2()
+                 (vector={vector} rip={rip:#018x} cs={cs:#x} cr2={:#018x} err={:#x})",
+                ring3::fault_cr2(),
+                ring3::fault_error_code()
             ));
         } else {
             logger.info(format_args!(
@@ -4548,20 +4568,40 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
             ));
             cpu::halt_forever();
         }
-        // #PF だけ CR2 を主張する。他のベクタでは意味を持たない値である。
-        if expected_vector == 14 && ring3::fault_cr2() != UNMAPPED_USER_VIRT {
-            logger.error(format_args!(
-                "ring3-vectors: {name} faulted on {:#018x}, expected \
-                 {UNMAPPED_USER_VIRT:#018x}; halting",
-                ring3::fault_cr2()
-            ));
-            cpu::halt_forever();
+        // #PF だけ CR2 とエラーコードを主張する。他のベクタでは意味を持たない値で
+        // ある。エラーコードは「穴（不在）」と「権限違反（存在するが U=0）」を
+        // 区別する——後者が S7 の到達条件 3 の中身である。
+        if expected_vector == 14 {
+            if ring3::fault_cr2() != load_target {
+                logger.error(format_args!(
+                    "ring3-vectors: {name} faulted on {:#018x}, expected \
+                     {load_target:#018x}; halting",
+                    ring3::fault_cr2()
+                ));
+                cpu::halt_forever();
+            }
+            if ring3::fault_error_code() != expected_error {
+                logger.error(format_args!(
+                    "ring3-vectors: {name} faulted with error code {:#x}, expected \
+                     {expected_error:#x}; halting",
+                    ring3::fault_error_code()
+                ));
+                cpu::halt_forever();
+            }
         }
     }
 
+    // S7 から預かった 1 件目の決着。ここまで来たなら 5 本目が通っている。
     logger.info(format_args!(
-        "ring3-vectors: all four Ring 3 faults (#DE, #UD, #GP, #PF) interrupted only the Ring 3 \
-         run; the kernel ran on after each one"
+        "ring3-vectors: S7 condition 3 observed: a Ring 3 read of the kernel address \
+         {KERNEL_TARGET_VIRT:#x} faulted as a protection violation (CR2 matched, error \
+         code 0x5 = present+user+read), not as a hole; the kernel region is mapped but \
+         unreachable from Ring 3"
+    ));
+
+    logger.info(format_args!(
+        "ring3-vectors: all five Ring 3 faults (#DE, #UD, #GP, #PF unmapped, #PF kernel) \
+         interrupted only the Ring 3 run; the kernel ran on after each one"
     ));
 }
 
