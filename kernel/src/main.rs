@@ -1537,6 +1537,12 @@ extern "sysv64" fn kernel_main() -> ! {
     // 間にユーザー空間へ触ると #PF になる。触らない。
     demo_address_space_switch(&mut logger, &mut allocator);
 
+    // === S9-b-1: 埋め込んだユーザープログラムの ELF を読む ===
+    //
+    // まだ写像もしないし走らせもしない。**像が在って、読めて、中身が期待どおり
+    // であること**までを見る。ロードは S9-b-1 の次の刻みである。
+    verify_embedded_user_elf(&mut logger);
+
     // === M4-d-2: タイマを動かす ===
     //
     // ここから先は戻らない。ZaytOS で初めて「時間が流れる」状態に入り、
@@ -3539,6 +3545,97 @@ fn switch_keyboard_to_io_apic(
         "ioapic: IRQ1 now goes through the I/O APIC as vector {:#04x}; the 8259 line is \
          masked (the first key must arrive as that vector, which the 8259 cannot produce)",
         keyboard::delivery_vector()
+    ));
+}
+
+/// 埋め込んだユーザープログラム `hello` の ELF（S9-b-1）。
+///
+/// `kernel/build.rs` が `kernel/userland/hello.rs` を `rustc` で単独にリンクし、
+/// `OUT_DIR` へ置いたものを抱える。**ファイルシステムを経由しない**
+/// （`docs/roadmap.md` の S9 が「ファイルシステムに依存せず」を範囲としている）。
+static HELLO_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello.elf"));
+
+/// 埋め込んだユーザープログラムの ELF を読み、会計を出す（S9-b-1）。
+///
+/// **写像もしないし走らせもしない。** 像が在って、`common::elf` が受理し、
+/// 中身が期待どおりであることまでを見る。
+///
+/// # entry がセグメントの先頭と一致しないことを主張する
+///
+/// `hello` は `.text.prepad` を entry の手前へ置いてある。**リンカスクリプトの
+/// `KEEP` を外すと、詰め物は到達不能なのでセクション回収に落ち、entry が
+/// セグメントの先頭に戻る。実際に一度落ちた。** そうなると「entry ではなく
+/// セグメントの先頭へ飛ぶ」破壊が破壊にならなくなるので、ここで主張しておく。
+fn verify_embedded_user_elf(logger: &mut Logger<SerialPort>) {
+    use common::elf::Elf;
+
+    let elf = match Elf::parse(HELLO_ELF) {
+        Ok(elf) => elf,
+        Err(e) => {
+            logger.error(format_args!(
+                "user-elf: the embedded hello image did not parse: {e:?}; halting"
+            ));
+            cpu::halt_forever();
+        }
+    };
+
+    logger.info(format_args!(
+        "user-elf: embedded hello is {} byte(s), entry {:#x}, {} program header(s)",
+        HELLO_ELF.len(),
+        elf.entry_point,
+        elf.program_headers().count()
+    ));
+
+    let mut load_count = 0usize;
+    let mut entry_segment: Option<common::elf::ProgramHeader> = None;
+    for ph in elf.load_segments() {
+        logger.info(format_args!(
+            "user-elf: PT_LOAD vaddr={:#x} filesz={:#x} memsz={:#x} flags={:#x} (r={} w={} x={})",
+            ph.p_vaddr,
+            ph.p_filesz,
+            ph.p_memsz,
+            ph.p_flags,
+            ph.p_flags & 0x4 != 0,
+            ph.p_flags & 0x2 != 0,
+            ph.p_flags & 0x1 != 0
+        ));
+        load_count += 1;
+        if elf.entry_point >= ph.p_vaddr && elf.entry_point < ph.p_vaddr + ph.p_memsz {
+            entry_segment = Some(ph);
+        }
+    }
+
+    if load_count == 0 {
+        logger.error(format_args!(
+            "user-elf: the embedded hello image has no PT_LOAD segment; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    let Some(entry_segment) = entry_segment else {
+        logger.error(format_args!(
+            "user-elf: the entry point {:#x} is not inside any PT_LOAD segment; halting",
+            elf.entry_point
+        ));
+        cpu::halt_forever();
+    };
+
+    // 詰め物が生きていること。**破壊のためだけではない**——`.text` の前に別の節が
+    // 来るほうが普通で、entry とセグメントの先頭が一致するのは極小の像だけである。
+    if elf.entry_point == entry_segment.p_vaddr {
+        logger.error(format_args!(
+            "user-elf: the entry point {:#x} equals the start of its PT_LOAD; the .text.prepad \
+             padding was dropped (check KEEP in userland/user.ld); halting",
+            elf.entry_point
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "user-elf: embedded hello verified ({load_count} PT_LOAD segment(s), entry sits {:#x} \
+         byte(s) into its segment, every segment is read-only={})",
+        elf.entry_point - entry_segment.p_vaddr,
+        elf.load_segments().all(|ph| ph.p_flags & 0x2 == 0)
     ));
 }
 
