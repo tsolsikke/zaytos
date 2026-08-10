@@ -833,27 +833,58 @@ pub unsafe fn run_timer_loop(
                     core::hint::spin_loop();
                     spun += 1;
                 }
+                // 主張を数字ではなく文で出す（S8-d で作り直した）。判定側は
+                // 「the ap flushed」/「the ap did not flush」を見る。数字は観測用。
+                let flushes_after = crate::bkl::generation_flushes_for(1);
                 logger.info(format_args!(
-                    "smp: shootdown probe step 3: unmapped the probe page; ap flushes {} -> {}",
+                    "smp: shootdown probe step 3: unmapped the probe page; {} (flushes {} -> {})",
+                    if flushes_after > flushes_before {
+                        "the ap flushed"
+                    } else {
+                        "the ap did not flush"
+                    },
                     flushes_before,
-                    crate::bkl::generation_flushes_for(1)
+                    flushes_after
                 ));
 
-                // (4) もう一度触らせる。世代を上げていれば #PF、上げていなければ成功。
+                // (4) もう一度触らせる。
+                //
+                // **主張が非対称である（S8-d で作り直した）。** フラッシュした側は
+                // 2 回目の触りが必ず #PF になる——翻訳が無いので歩き、写像が無いので
+                // 落ちる。**これはフラッシュの帰結として保証される。** 一方
+                // **フラッシュしなかった側の結果は主張しない**——古い翻訳が TLB に
+                // 残り続けることは、アーキテクチャが**許しているだけで約束していない**
+                // （実 CPU でも QEMU でも、容量の都合でいつでも捨てられてよい）。
+                // かつては「古い翻訳で成功する」を期待に置いていて、TCG の TLB の
+                // 追い出しがレイアウト依存で発火し、決定的に落ちた（S8-d）。
                 shootdown_probe::command(shootdown_probe::TOUCH_AGAIN);
                 let mut spun = 0u32;
                 let attempts_before = shootdown_probe::attempts();
+                let touches_before = shootdown_probe::touches();
                 while shootdown_probe::attempts() == attempts_before
                     && spun < SHOOTDOWN_PROBE_WAIT_SPINS
                 {
                     core::hint::spin_loop();
                     spun += 1;
                 }
+                // 触りが #PF になる側では、AP がダンプをシリアルへ書いている最中で
+                // ある。シリアルにはロックが無いので、ここですぐ書くと AP のダンプと
+                // バイト単位で混ざり、判定行が両方壊れる。**触れたか、予算を使い切る
+                // まで待ってから書く**——成功する側は touches の増分で早く抜け、
+                // 落ちる側は予算ぶんの時間が AP のダンプの完了に充てられる。
+                let mut spun = 0u32;
+                while shootdown_probe::touches() == touches_before
+                    && spun < SHOOTDOWN_PROBE_WAIT_SPINS
+                {
+                    core::hint::spin_loop();
+                    spun += 1;
+                }
                 logger.info(format_args!(
-                    "smp: shootdown probe step 4: attempts={} touches {first} -> {} (a stale \
-                     translation lets the second touch succeed; a flushed one faults. The \
-                     attempt count is the evidence that the ap tried: touches staying put is \
-                     also what a dead ap looks like)",
+                    "smp: shootdown probe step 4: attempts={} touches {first} -> {} (the \
+                     flushed side must fault on the second touch: no translation, no mapping. \
+                     The unflushed side's outcome is not asserted: keeping a stale translation \
+                     is permitted to a TLB, never promised. The attempt count is the evidence \
+                     that the ap tried)",
                     shootdown_probe::attempts(),
                     shootdown_probe::touches()
                 ));

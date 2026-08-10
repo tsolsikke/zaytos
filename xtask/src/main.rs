@@ -1991,15 +1991,26 @@ fn run_keyboard_test(features: &[&str]) -> Result<KeyboardAssertions> {
     println!("{context}: heartbeat lines = {heartbeats} (expected at least 2)");
     ok &= heartbeats >= 2;
 
-    // 6. 例外が起きていないこと。
-    for marker in ["v=0e", "v=08"] {
-        let present = qemu.contains(marker);
-        println!(
-            "{context}: qemu log free of {marker:?} = {}",
-            if present { "NG" } else { "OK" }
-        );
-        ok &= !present;
-    }
+    // 6. 意図しない例外が起きていないこと。
+    //
+    // S8-d の遠征が Ring 3 の #PF を 1 本、意図して起こす。CR2 はユーザー
+    // サブツリー内の既知の未マップ VA（main.rs の UNMAPPED_USER_VIRT =
+    // USER_CODE_VIRT + 0x2000）なので、その 1 本だけを除外する。#DF（v=08）は
+    // 従来どおり無条件に NG である。
+    let unintended_pf = qemu
+        .lines()
+        .any(|l| l.contains("v=0e") && !l.contains("CR2=0000008000002000"));
+    println!(
+        "{context}: qemu log free of unintended \"v=0e\" = {}",
+        if unintended_pf { "NG" } else { "OK" }
+    );
+    ok &= !unintended_pf;
+    let df_present = qemu.contains("v=08");
+    println!(
+        "{context}: qemu log free of \"v=08\" = {}",
+        if df_present { "NG" } else { "OK" }
+    );
+    ok &= !df_present;
 
     // ready / no_drop / heartbeats / 例外の 4 つは、どの構成でも成り立つべき
     // 前提として `line` へ畳んでいる。破壊確認が見分けたいのは、
@@ -5222,22 +5233,41 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
-    // **TLB シュートダウンの実証（S5-c）。** 世代を上げた側は、AP が
-    // フラッシュ済みなので **2 回目の触りで #PF になる。**
+    // **TLB シュートダウンの実証（S5-c。S8-d で主張を作り直した）。** 世代を
+    // 上げた側は AP がフラッシュし（the ap flushed）、**2 回目の触りは必ず #PF に
+    // なる**——翻訳が無いので歩き、写像が無いので落ちる。フラッシュの帰結として
+    // 保証される側なので、#PF のダンプ（vector=14、CR2=探りのページ）まで期待する。
     CriticalTest {
         name: "tlb-shootdown",
         feature: "smp-tlb-shootdown-probe",
-        expected_markers: &["the ap touched the probe page 1 time(s)", "touches 1 -> 1"],
-        forbidden_markers: &["touches 1 -> 2"],
+        expected_markers: &[
+            "the ap touched the probe page 1 time(s)",
+            "the ap flushed",
+            "touches 1 -> 1",
+            "exception: vector=14",
+            "cr2=0xffff818000000000",
+        ],
+        forbidden_markers: &["touches 1 -> 2", "the ap did not flush"],
         wait_for_full_timeout: true,
         min_heartbeats: None,
     },
-    // **破壊: 世代を上げない。** AP はフラッシュしないので、**古い翻訳で成功する。**
+    // **破壊: 世代を上げない。** AP はフラッシュしない（the ap did not flush）。
+    //
+    // **2 回目の触りの結果は主張しない（S8-d で作り直した）。** かつては
+    // 「古い翻訳で成功する（touches 1 -> 2）」を期待に置いていたが、**TLB が翻訳を
+    // 保持し続けることはアーキテクチャが許しているだけで約束していない。**
+    // TCG のソフトウェア TLB は無効化事象なしにエントリを捨て、どれを捨てるかは
+    // バイナリのレイアウトで決まるため、無関係な変更で決定的に落ちた（S8-d）。
+    // この破壊の本来の主張は「世代を上げなければ AP は世代フラッシュをしない」で
+    // あり、それは flushes の不動が観測している。
     CriticalTest {
         name: "tlb-no-shootdown",
         feature: "smp-tlb-shootdown-probe,smp-tlb-no-generation-bump",
-        expected_markers: &["the ap touched the probe page 1 time(s)", "touches 1 -> 2"],
-        forbidden_markers: &[],
+        expected_markers: &[
+            "the ap touched the probe page 1 time(s)",
+            "the ap did not flush",
+        ],
+        forbidden_markers: &["the ap flushed ("],
         wait_for_full_timeout: true,
         min_heartbeats: None,
     },
