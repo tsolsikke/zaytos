@@ -161,6 +161,18 @@ ring3-test-corrupt-frame-cs = []
 # paging-test の傘には入れない。傘に入れると Ring 3 の検証自体が載らなくなり、
 # 破壊を観測する側が消える。`--paging-test map-force-writable`。
 map-force-writable = []
+# S9-b-1: 埋め込んだユーザープログラムの破壊確認。いずれも既定ビルドには入らない。
+# PT_LOAD のコピーを落とす。ページはゼロのままで、Ring 3 が entry からゼロを実行し、
+# ud2 へ届かない。user-run の判定行がベクタの食い違いで止める。
+# `--ring3-test user-skip-load`。
+user-run-skip-load = []
+# PT_LOAD を writable: true で張る。読み取り専用のはずの葉が W=1 になり、
+# user-load の読み戻しが捕まえる。**この破壊だけが読み戻しまで到達する**
+# （map-force-writable は先に ring3-vectors が落ちる）。`--ring3-test user-writable-text`。
+user-run-writable-text = []
+# entry ではなく最初の PT_LOAD の先頭へ飛ぶ。詰め物の ud2 で即座に #UD になり、
+# フォルト RIP が期待と食い違う。`--ring3-test user-wrong-entry`。
+user-run-wrong-entry = []
 # M5-f-1-2: int 0x80 システムコールの破壊確認。いずれも既定ビルドには入らない。
 # 第 4 引数を context.r10 でなく context.rcx から読む。probe が記録した第 4 引数が
 # 期待値と食い違い、R10 規約であることが実証される。`--syscall-test arg4-rcx`。

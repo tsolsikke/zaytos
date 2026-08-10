@@ -34,7 +34,7 @@
 //! - `syscall-test-gate-dpl0`: ゲートを DPL=0 にする（[`crate::idt`] 側）。Ring 3 から
 //!   の `int 0x80` がゲート DPL<CPL で #GP になり、`syscall_entry` に到達しない。
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use common::addr::{DirectMap, PhysAddr};
 
@@ -101,6 +101,42 @@ pub const CHECKSUM_BUF_LEN: usize = 64;
 pub const USER_VIRT_MIN: u64 = 1 << 39;
 pub const USER_VIRT_MAX: u64 = 2 << 39;
 
+/// ユーザープログラムを走らせる空間の仮想範囲（S9-b-1）。`PML4[0]` の全体である。
+///
+/// **窓が 2 つになった。** 起動時の検証は本番の空間の `PML4[1]` を使い、
+/// ユーザープログラムは自分の空間の `PML4[0]` を使う（`0x400000` へリンクして
+/// いる）。**どちらか一方に収まっていれば受理する。**
+///
+/// **窓を「下位半分すべて」へ広げなかったのは、長さの上限が消えるためである。**
+/// 広げると、`over-long`（`8 GiB` 超の長さ）が範囲では弾かれず、ページ走査が
+/// 200 万回まわる。**窓が有限であることが、走査の停止性を与えている。**
+///
+/// # 下限が 0 ではないのは、低位にカーネルが居る時期があるからである
+///
+/// **一度 0 にして壊した。** `syscall-test validate-skip-us`（U=1 の判定を外す
+/// 破壊）が落ちて分かった。ポインタ検証の battery は恒等除去より前に走るので、
+/// **その時点の低位 VA にはカーネルの恒等写像が居る。** 下限を 0 にすると
+/// `0x100000`（カーネル像）が範囲の検査を通り、**U=1 の判定だけが拒否の根拠に
+/// なる。** 破壊でその 1 枚を外すと受理されてしまう。
+///
+/// **下限を `hello` のリンク先（4 MiB）に置く。** Linux の非 PIE の既定と同じ値で、
+/// `mmap_min_addr` が低位を空けておくのと同じ向きである。**カーネルポインタを
+/// 範囲の側でも拒む層が戻る。**
+pub const USER_PROGRAM_VIRT_MIN: u64 = 0x40_0000;
+pub const USER_PROGRAM_VIRT_MAX: u64 = 1 << 39;
+
+/// `write(fd, buf, len)`（S9-b-1）。**Linux の番号 1 をそのまま使う**
+/// （ADR-0020 の Addendum。対応するものがある呼び出しは Linux の番号を採る）。
+///
+/// 現在の実装は `fd` を見ず、**バイト列を静的領域へ記録して長さを返すだけである。**
+/// シリアルへは出さない。`syscall_entry` は出力しないという既存の方針
+/// （例外・IRQ ハンドラと同じ）に従い、**観測は畳んで戻った後に呼び出し側が
+/// 記録越しに行う。**
+pub const SYS_WRITE: u64 = 1;
+
+/// [`SYS_WRITE`] が記録するバイト数の上限。
+pub const WRITE_BUF_LEN: usize = 64;
+
 /// 検証用 probe システムコールの番号（ZaytOS 独自。[`ZAYTOS_PRIVATE_BASE`]）。
 pub const PROBE_NUMBER: u64 = ZAYTOS_PRIVATE_BASE;
 
@@ -125,6 +161,13 @@ pub const PROBE_ARGS: [u64; 6] = [
 /// `syscall-test-arg4-rcx` が第 4 引数を RCX から読むと、この値が第 4 引数として
 /// 記録され、`PROBE_ARGS[3]` と決定的に食い違う。
 pub const SENTINEL_RCX: u64 = 0xCCCC_CCCC;
+
+/// [`SYS_WRITE`] が最後に受け取った fd。
+static WRITE_FD: AtomicU64 = AtomicU64::new(0);
+/// [`SYS_WRITE`] が最後に記録したバイト数。
+static WRITE_LEN: AtomicU64 = AtomicU64::new(0);
+/// [`SYS_WRITE`] が最後に記録したバイト列。
+static WRITE_BUF: [AtomicU8; WRITE_BUF_LEN] = [const { AtomicU8::new(0) }; WRITE_BUF_LEN];
 
 /// `syscall_entry` が呼ばれた回数（会計用）。
 static INVOCATION_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -194,7 +237,8 @@ impl UserSlice {
 /// 契約はこの検証器を共有する全 syscall が継承する（呼び出し側で短絡しない）。
 /// それ以外は次を満たすとき `Some`:
 ///   (a) 長さの加算にオーバーフローが無い（`checked_add`）。
-///   (b) buf と末尾(buf+len-1) が [USER_VIRT_MIN, USER_VIRT_MAX)。
+///   (b) 範囲が [USER_VIRT_MIN, USER_VIRT_MAX) と
+///       [USER_PROGRAM_VIRT_MIN, USER_PROGRAM_VIRT_MAX) のどちらか一方に収まる。
 ///   (c) 範囲を跨ぐ全 4KiB ページが present && 全階層 U=1
 ///       （[`crate::paging::verify::walk_user_accessible`]）。
 ///
@@ -226,8 +270,12 @@ pub unsafe fn validate_user_range(
         }
         // (a) 加算オーバーフロー無し。end は排他的上端（buf+len）。
         let end = buf.checked_add(len)?;
-        // (b) buf と末尾（end-1）がユーザー範囲内。end <= USER_VIRT_MAX で末尾も範囲内。
-        if buf < USER_VIRT_MIN || end > USER_VIRT_MAX {
+        // (b) 範囲が 2 つの窓のどちらか一方に収まっていること（S9-b-1 で 2 つになった）。
+        // **またいだものは受理しない。** 窓は別のアドレス空間のもので、
+        // またぐ範囲はどちらの空間でも連続していない。
+        let in_boot_window = buf >= USER_VIRT_MIN && end <= USER_VIRT_MAX;
+        let in_program_window = buf >= USER_PROGRAM_VIRT_MIN && end <= USER_PROGRAM_VIRT_MAX;
+        if !in_boot_window && !in_program_window {
             return None;
         }
         // (c) 範囲を跨ぐ全 4KiB ページを walk。境界非整列でも先頭・末尾を覆う。
@@ -334,6 +382,28 @@ unsafe fn dispatch(
             } else {
                 (-EFAULT) as u64
             }
+        }
+        SYS_WRITE => {
+            let buf = args[1];
+            let len = args[2];
+            if len as usize > WRITE_BUF_LEN {
+                return (-EINVAL) as u64;
+            }
+            // **踏み込む前に検証する。** 検証済みトークンを得てから読む。
+            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+            let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, buf, len) })
+            else {
+                return (-EFAULT) as u64;
+            };
+            let mut kbuf = [0u8; WRITE_BUF_LEN];
+            // SAFETY: slice は検証済み。dst は len を収める。
+            let read = unsafe { copy_from_user(&mut kbuf, &slice) };
+            WRITE_FD.store(args[0], Ordering::SeqCst);
+            for (slot, value) in WRITE_BUF.iter().zip(kbuf.iter()) {
+                slot.store(*value, Ordering::SeqCst);
+            }
+            WRITE_LEN.store(read as u64, Ordering::SeqCst);
+            read as u64
         }
         SYS_CHECKSUM => {
             let buf = args[0];
@@ -449,6 +519,25 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
 
     // M5-f-1 は切り替えない。入場時の IrqContext 先頭を返す。
     context as u64
+}
+
+/// [`SYS_WRITE`] が最後に記録した fd。
+pub fn last_write_fd() -> u64 {
+    WRITE_FD.load(Ordering::SeqCst)
+}
+
+/// [`SYS_WRITE`] が最後に記録したバイト数。
+pub fn last_write_len() -> usize {
+    WRITE_LEN.load(Ordering::SeqCst) as usize
+}
+
+/// [`SYS_WRITE`] が最後に記録したバイト列を `dst` へ写す。写した長さを返す。
+pub fn last_write_bytes(dst: &mut [u8]) -> usize {
+    let len = last_write_len().min(dst.len()).min(WRITE_BUF_LEN);
+    for (slot, value) in dst.iter_mut().zip(WRITE_BUF.iter()).take(len) {
+        *slot = value.load(Ordering::SeqCst);
+    }
+    len
 }
 
 /// 会計カウンタを 0 に戻す（往復検証の直前に呼ぶ）。

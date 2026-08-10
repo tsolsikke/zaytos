@@ -3666,6 +3666,15 @@ const USER_PROGRAM_PML4_INDEX: usize = 0;
 /// `hello` の像は `0x400000` から 2 ページなので、十分離れた位置に置く。
 const USER_PROGRAM_STACK_TOP: u64 = 0x0080_0000;
 
+/// `hello` の `ud2` が entry から何バイト目にあるか（S9-b-1）。
+///
+/// **`kernel/userland/hello.rs` の `.org 0x20` と対になっている。** 値を 2 か所で
+/// 持つが、**食い違えば下の判定行が落ちる**ので静かには残らない。
+const HELLO_UD2_OFFSET: u64 = 0x20;
+
+/// `hello` が `write` で送るはずのバイト列（S9-b-1）。
+const HELLO_MESSAGE: &str = "hello from ring 3\n";
+
 /// 埋め込んだユーザープログラムを新しいアドレス空間へ写像する（S9-b-1）。
 ///
 /// **まだ走らせない。** Ring 3 への遷移は次の刻みである。
@@ -3765,7 +3774,9 @@ fn load_embedded_user_program(
             // このページが覆うファイル内の範囲を切り出して書く。
             let page_start_in_segment = page.saturating_sub(ph.p_vaddr);
             let offset_in_page = ph.p_vaddr.saturating_sub(page);
-            if page_start_in_segment < ph.p_filesz {
+            // 破壊 (S9-b-1, user-run-skip-load): ファイルの中身を写さない。ページは
+            // ゼロのままになり、Ring 3 が entry からゼロを実行して ud2 へ届かない。
+            if page_start_in_segment < ph.p_filesz && !cfg!(feature = "user-run-skip-load") {
                 let remaining = ph.p_filesz - page_start_in_segment;
                 let room = PAGE_SIZE - offset_in_page;
                 let count = core::cmp::min(remaining, room) as usize;
@@ -3787,9 +3798,11 @@ fn load_embedded_user_program(
                 ));
                 cpu::halt_forever();
             };
+            // 破壊 (S9-b-1, user-run-writable-text): 区画の権限を無視して書けるように
+            // 張る。**読み取り専用のはずの葉が W=1 になり、下の読み戻しが捕まえる。**
             let attributes = PageAttributes {
                 user: true,
-                writable,
+                writable: writable || cfg!(feature = "user-run-writable-text"),
                 cacheable: true,
             };
             // SAFETY: この空間はまだ稼働していない。direct map は覆っている。
@@ -3894,7 +3907,84 @@ fn load_embedded_user_program(
         cpu::halt_forever();
     }
 
-    // **この刻みでは走らせないので、空間はここで畳む。** 破棄は S7-d の経路
+    // === Ring 3 で走らせる（S9-b-1 の 4 つ目） ===
+    //
+    // **CR3 を差し替えてから iretq で落ちる。** 上位は共有なのでカーネルは動き
+    // 続ける（S7-c の到達条件 4 が、実プログラムで初めて使われる）。
+    // 戻りは `ud2` の #UD を S8 の畳みが受ける。
+    kernel::syscall::reset_counters();
+    let main_rsp0_top = gdt::privilege_stack_top();
+    // 破壊 (S9-b-1, user-run-wrong-entry): entry ではなく最初の PT_LOAD の先頭へ
+    // 飛ぶ。**詰め物の ud2 で即座に #UD になり、フォルト RIP が期待と食い違う。**
+    // 詰め物が生きていることは verify_embedded_user_elf が主張している。
+    #[cfg(not(feature = "user-run-wrong-entry"))]
+    let entry = elf.entry_point;
+    #[cfg(feature = "user-run-wrong-entry")]
+    let entry = elf
+        .load_segments()
+        .next()
+        .map(|ph| ph.p_vaddr)
+        .unwrap_or(elf.entry_point);
+
+    // SAFETY: この空間はカーネルの上位を共有しており、切り替えても実行中の
+    // コードとスタックは見え続ける。
+    unsafe { kernel::paging::switch::switch_to(space.pml4()) };
+    // SAFETY: entry と stack は今張ったユーザーページで、`ud2` が必ずフォルト
+    // する。main_rsp0_top はメインのカーネルスタック上端。単一実行文脈である。
+    unsafe { kernel::ring3::enter(main_rsp0_top, entry, USER_PROGRAM_STACK_TOP) };
+    // SAFETY: 本番のテーブルへ戻す。上位は同じなので連続して実行できる。
+    unsafe { kernel::paging::switch::switch_to(production) };
+
+    if !kernel::ring3::folded() {
+        logger.error(format_args!(
+            "user-run: hello returned without folding; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    let vector = kernel::ring3::fault_vector();
+    let rip = kernel::ring3::fault_rip();
+    let cs = kernel::ring3::fault_cs();
+    let expected_rip = entry + HELLO_UD2_OFFSET;
+    let mut bytes = [0u8; kernel::syscall::WRITE_BUF_LEN];
+    let written = kernel::syscall::last_write_bytes(&mut bytes);
+    let message = core::str::from_utf8(&bytes[..written]).unwrap_or("<not utf-8>");
+
+    logger.info(format_args!(
+        "user-run: hello ran in Ring 3 and folded (vector={vector} rip={rip:#x} cs={cs:#x}), \
+         write(fd={}, {written} byte(s)) said {:?}",
+        kernel::syscall::last_write_fd(),
+        message.trim_end()
+    ));
+
+    if vector != 6 {
+        logger.error(format_args!(
+            "user-run: expected #UD (6) from the trailing ud2, got vector={vector}; halting"
+        ));
+        cpu::halt_forever();
+    }
+    if rip != expected_rip {
+        logger.error(format_args!(
+            "user-run: folded at {rip:#x}, expected {expected_rip:#x} (entry + {HELLO_UD2_OFFSET:#x}); halting"
+        ));
+        cpu::halt_forever();
+    }
+    if (cs & 0b11) != 3 {
+        logger.error(format_args!(
+            "user-run: the fault did not come from Ring 3 (cs={cs:#x}); halting"
+        ));
+        cpu::halt_forever();
+    }
+    if kernel::syscall::last_write_fd() != 1 || message != HELLO_MESSAGE {
+        logger.error(format_args!(
+            "user-run: write did not deliver the expected bytes (fd={}, got {message:?}, \
+             expected {HELLO_MESSAGE:?}); halting",
+            kernel::syscall::last_write_fd()
+        ));
+        cpu::halt_forever();
+    }
+
+    // **走り終わったので空間を畳む。** 破棄は S7-d の経路
     // （下位のフレームを隔離へ入れ、世代が退くまで返さない）をそのまま通る。
     let mut quarantine = kernel::quarantine::Quarantine::new();
     let (held, leaked) = {
@@ -3904,10 +3994,10 @@ fn load_embedded_user_program(
     };
 
     logger.info(format_args!(
-        "user-load: hello mapped into its own address space and the leaves read back with the \
-         permissions the PT_LOAD flags asked for ({mapped_count} page(s): the read-only \
-         segments carry W=0 and the stack carries W=1). The space was destroyed again because \
-         nothing runs it yet (quarantined={held} leaked={leaked})"
+        "user-load: hello ran from its own address space ({mapped_count} page(s): the read-only \
+         segments carry W=0 and the stack carries W=1), wrote {written} byte(s) through \
+         int 0x80, and the kernel continued after the fold; the space was destroyed \
+         (quarantined={held} leaked={leaked})"
     ));
 }
 
@@ -5449,6 +5539,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "map-force-writable",
         cfg!(feature = "map-force-writable"),
         "map_4kib の書き込み可否の引数を無視して葉を常に W=1 にする",
+    ),
+    (
+        "user-run-skip-load",
+        cfg!(feature = "user-run-skip-load"),
+        "PT_LOAD のコピーを落とす",
+    ),
+    (
+        "user-run-writable-text",
+        cfg!(feature = "user-run-writable-text"),
+        "PT_LOAD を writable: true で張る",
+    ),
+    (
+        "user-run-wrong-entry",
+        cfg!(feature = "user-run-wrong-entry"),
+        "entry ではなく PT_LOAD の先頭へ飛ぶ",
     ),
     (
         "syscall-test-einval-as-efault",

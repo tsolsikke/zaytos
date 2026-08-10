@@ -645,6 +645,33 @@ const RING3_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // S9-b-1: 埋め込んだユーザープログラムの破壊確認。
+    CriticalTest {
+        name: "user-skip-load",
+        feature: "user-run-skip-load",
+        expected_markers: &["user-run: expected #UD (6)", "halting"],
+        forbidden_markers: &["user-load: hello ran from its own address space"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // **この破壊だけが user-load の読み戻しまで到達する。** map-force-writable は
+    // 先に ring3-vectors の 6 本目が落ちるので、後ろの読み戻しへ届かない。
+    CriticalTest {
+        name: "user-writable-text",
+        feature: "user-run-writable-text",
+        expected_markers: &["has w=true (expected false)", "halting"],
+        forbidden_markers: &["user-load: hello ran from its own address space"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    CriticalTest {
+        name: "user-wrong-entry",
+        feature: "user-run-wrong-entry",
+        expected_markers: &["user-run: folded at 0x400000", "halting"],
+        forbidden_markers: &["user-load: hello ran from its own address space"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
 ];
 
 /// int 0x80 システムコールの破壊確認（M5-f-1-2）。いずれも probe の往復が verified に
@@ -6575,7 +6602,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 20,
-    full: 117,
+    full: 120,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
