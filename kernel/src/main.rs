@@ -4455,9 +4455,11 @@ fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
 /// # 4 本とも同じユーザーコードページを使い回す
 ///
 /// [`ring3::enter`] は常に [`ring3::USER_CODE_VIRT`] へ `iretq` するので、
-/// 遠征のたびにそのページの先頭へ別の命令列を書く。**ページが書き込み可能なのは
-/// `map_4kib` が葉を常に W=1 で作るからである**（そのこと自体の記録は
-/// `deferred-decisions.md` の W^X の項目にある）。
+/// 遠征のたびにそのページの先頭へ別の命令列を書く。**ページが書き込み可能なのは、
+/// `verify_ring3_excursion` がコードページを `writable: true` で張っているから
+/// である。** S9-a より前は `map_4kib` が葉を常に W=1 で作っており、選ぶ余地が
+/// 無かった。**6 本目（`#PF-write-ro`）だけは `writable: false` で張った別の
+/// ページを的にする。**
 ///
 /// # カーネルが継続したことの観測
 ///
