@@ -730,6 +730,20 @@ const SYSCALL_TESTS: &[CriticalTest] = &[
     // copy_from_user が検証を経ずに読む（M5-f-2-2）。カーネルポインタで -EFAULT のはずが総和が
     // 返り、内容往復の検証が「-EFAULT のはずが値」を検出して halt する。
     CriticalTest {
+        name: "einval-as-efault",
+        feature: "syscall-test-einval-as-efault",
+        expected_markers: &[
+            "syscall: checksum case 'over-long' expected -EINVAL",
+            "halting",
+        ],
+        forbidden_markers: &["syscall: checksum round-trip verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // S9-a: 容量超過の errno を分ける前へ戻す。**この分岐は S9-a で初めて通るように
+    // なった経路である。** 通り始めたばかりの経路を手で1度確かめただけにしないため、
+    // 永続の破壊として置く。次に dispatch を触ったときに落ちる。
+    CriticalTest {
         name: "copy-skip-validate",
         feature: "syscall-test-copy-skip-validate",
         expected_markers: &[
@@ -6561,7 +6575,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 20,
-    full: 116,
+    full: 117,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

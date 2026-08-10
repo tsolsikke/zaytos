@@ -46,22 +46,50 @@ pub const ENOSYS: i64 = 38;
 /// `-EFAULT`（不正なアドレス）の errno。ユーザーポインタ検証に落ちたとき返す。
 pub const EFAULT: i64 = 14;
 
-/// ユーザーポインタを取る検証用システムコールの番号（M5-f-2-1、暫定割り当て）。
+/// `-EINVAL`（引数が不正）の errno（S9-a）。**アドレスは正しいが、値が受け付け
+/// られない**ときに返す。現在の用途は [`CHECKSUM_BUF_LEN`] の超過だけである。
+///
+/// 値は Linux と同じ 22 である（ADR-0020 の Addendum で「errno の値を Linux に
+/// 合わせる」と決めてある）。
+pub const EINVAL: i64 = 22;
+
+/// ZaytOS 独自のシステムコール番号の基点（S9-a）。
+///
+/// # なぜ Linux の番号表から離すのか
+///
+/// ADR-0020 の Addendum で「番号の割り当ては Linux x86-64 から採る」と決めた。
+/// **`read`=0 や `write`=1 のように Linux に対応するものがある呼び出しは、その
+/// 番号を使う。** 問題は、対応するものが無い呼び出しである。下記の検証用
+/// システムコールは ZaytOS 固有で、Linux に相当するものが未来にも現れない。
+///
+/// **かつては 0x2A・0x2B・0x2C に置いており、Linux の 42（`connect`）・
+/// 43（`accept`）・44（`sendto`）と衝突していた。** 番号表の中の空きに置くと、
+/// Linux がそこを埋めた時点で衝突する（歴史的に未実装のまま空いている番号も、
+/// 将来 Linux が再利用しうる）。**表の中に安全な空きは無い。**
+///
+/// そこで表の外へまとめる。Linux x86-64 の番号は現在 500 未満で、増え方は年に
+/// 数本である。**0x1000（4096）なら当面ぶつからない。** x32 ABI が使う
+/// `0x4000_0000` のビットとも重ならない。
+///
+/// **独自の呼び出しを足すときは、必ずこの基点より上に置くこと。**
+pub const ZAYTOS_PRIVATE_BASE: u64 = 0x1000;
+
+/// ユーザーポインタを取る検証用システムコールの番号（M5-f-2-1）。
 /// 第 1 引数(RDI)=buf、第 2 引数(RSI)=len。範囲が Ring 3 からアクセス可能なら 0、
 /// 不可なら -EFAULT を返す（**この段はバイトを読まない**。copy は M5-f-2-2）。
-pub const SYS_CHECK_PTR: u64 = 0x2B;
+pub const SYS_CHECK_PTR: u64 = ZAYTOS_PRIVATE_BASE + 1;
 
 /// ユーザーバッファのバイト総和（チェックサム）を返すシステムコールの番号
-/// （M5-f-2-2、暫定割り当て）。第 1 引数(RDI)=buf、第 2 引数(RSI)=len。範囲を検証してから
-/// 範囲内バイトを読み総和を返す。不正な範囲なら -EFAULT。バッファ容量超過も -EFAULT で
-/// 代用する（下記 [`CHECKSUM_BUF_LEN`] のコメント参照）。
-pub const SYS_CHECKSUM: u64 = 0x2C;
+/// （M5-f-2-2）。第 1 引数(RDI)=buf、第 2 引数(RSI)=len。範囲を検証してから
+/// 範囲内バイトを読み総和を返す。不正な範囲なら -EFAULT、長さが
+/// [`CHECKSUM_BUF_LEN`] を超えるなら -EINVAL。
+pub const SYS_CHECKSUM: u64 = ZAYTOS_PRIVATE_BASE + 2;
 
 /// SYS_CHECKSUM がユーザーバイトを読み込む固定カーネルバッファの大きさ。
 ///
-/// これを超える len は現状 -EFAULT で弾く。**意味的には「バッファ容量超過」であり、
-/// ポインタ不正（EFAULT = Bad address）とは異なる。** errno 体系がまだ最小なので -EFAULT で
-/// 代用しているが、errno を増やす段（POSIX 互換の構想）で見直す。
+/// これを超える len は -EINVAL で弾く。**意味的には「引数の値が受け付けられない」
+/// のであって、ポインタ不正（EFAULT = Bad address）ではない。** S9-a より前は
+/// errno が 2 つしか無く -EFAULT で代用していた。
 pub const CHECKSUM_BUF_LEN: usize = 64;
 
 /// ユーザーサブツリー（PML4[[`crate::USER_PML4_INDEX`]]）の仮想範囲
@@ -73,8 +101,8 @@ pub const CHECKSUM_BUF_LEN: usize = 64;
 pub const USER_VIRT_MIN: u64 = 1 << 39;
 pub const USER_VIRT_MAX: u64 = 2 << 39;
 
-/// 検証用 probe システムコールの番号（ZaytOS 独自の暫定割り当て）。
-pub const PROBE_NUMBER: u64 = 0x2A;
+/// 検証用 probe システムコールの番号（ZaytOS 独自。[`ZAYTOS_PRIVATE_BASE`]）。
+pub const PROBE_NUMBER: u64 = ZAYTOS_PRIVATE_BASE;
 
 /// probe が返す既知の戻り値。ユーザーはこれを RAX で受け取り、ユーザースタックへ
 /// store する。カーネルが畳み後に読み戻して一致を確かめることで、戻り値が RAX 経由で
@@ -310,9 +338,17 @@ unsafe fn dispatch(
         SYS_CHECKSUM => {
             let buf = args[0];
             let len = args[1];
-            // バッファ容量超過は -EFAULT で代用（上記 CHECKSUM_BUF_LEN のコメント）。
+            // 長さがカーネルバッファを超える。**アドレスの問題ではないので
+            // -EINVAL であって -EFAULT ではない**（S9-a で分けた）。
+            //
+            // 破壊 (S9-a, einval-as-efault): 分ける前の -EFAULT へ戻す。長さの誤りと
+            // アドレスの誤りが同じ errno へ潰れ、over-long の判定行が捕まえる。
             if len as usize > CHECKSUM_BUF_LEN {
-                return (-EFAULT) as u64;
+                #[cfg(not(feature = "syscall-test-einval-as-efault"))]
+                let errno = EINVAL;
+                #[cfg(feature = "syscall-test-einval-as-efault")]
+                let errno = EFAULT;
+                return (-errno) as u64;
             }
             // **踏み込む前に検証する。** 検証済みトークン UserSlice を得てから読む。
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。

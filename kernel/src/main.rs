@@ -4439,10 +4439,32 @@ fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
         cpu::halt_forever();
     }
 
+    // 異常系: 長さがカーネルバッファを超える。**アドレスは正しいので -EINVAL であって
+    // -EFAULT ではない**（S9-a で分けた）。
+    //
+    // **S9-a より前、この経路は一度も通っていなかった。** 検証はどちらの場合も
+    // len=8 しか渡しておらず、容量超過の分岐は書かれているだけだった。errno を
+    // 分けるなら、分けた側が実際に返ることを見る必要がある。
+    let einval = (-syscall::EINVAL) as u64;
+    let too_long = (syscall::CHECKSUM_BUF_LEN + 1) as u64;
+    let over = issue_ptr_len_syscall(logger, syscall::SYS_CHECKSUM, buf_va, too_long);
+    logger.info(format_args!(
+        "syscall: checksum case 'over-long' buf={buf_va:#x} len={too_long} -> stored={over:#x} \
+         (expect -EINVAL {einval:#x}, not -EFAULT {efault:#x}; the address is fine, the length \
+         is not)"
+    ));
+    if over != einval {
+        logger.error(format_args!(
+            "syscall: checksum case 'over-long' expected -EINVAL {einval:#x} but got {over:#x}; \
+             halting"
+        ));
+        cpu::halt_forever();
+    }
+
     logger.info(format_args!(
         "syscall: checksum round-trip verified (the kernel read the user buffer through a \
          validated UserSlice and returned the correct byte sum; a kernel pointer was rejected \
-         before reading)"
+         before reading; an over-long length was rejected as -EINVAL, distinct from -EFAULT)"
     ));
 }
 
@@ -5045,6 +5067,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "map-force-writable",
         cfg!(feature = "map-force-writable"),
         "map_4kib の書き込み可否の引数を無視して葉を常に W=1 にする",
+    ),
+    (
+        "syscall-test-einval-as-efault",
+        cfg!(feature = "syscall-test-einval-as-efault"),
+        "SYS_CHECKSUM の容量超過を -EINVAL でなく -EFAULT で返す",
     ),
     (
         "exception-test",
