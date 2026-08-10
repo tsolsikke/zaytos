@@ -46,6 +46,11 @@ pub struct Resolved {
     pub phys: PhysAddr,
     /// 2MiB ページで解決されたか。
     pub huge: bool,
+    /// 解決に使った葉のエントリの生の値（S9-b-1）。
+    ///
+    /// **フラグを読み戻すために持つ。** 張った側とは独立にここまで降りてきた
+    /// 値なので、`W` や `U` が実際に立っているかをこの値で照合できる。
+    pub entry: u64,
 }
 
 /// 辿れなかった理由。
@@ -102,6 +107,7 @@ pub unsafe fn walk(
         return Ok(Resolved {
             phys: PhysAddr::new_const(base + offset),
             huge: true,
+            entry: pde,
         });
     }
 
@@ -115,6 +121,7 @@ pub unsafe fn walk(
     Ok(Resolved {
         phys: PhysAddr::new_const(base + offset),
         huge: false,
+        entry: pte,
     })
 }
 

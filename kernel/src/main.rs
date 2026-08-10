@@ -1537,11 +1537,13 @@ extern "sysv64" fn kernel_main() -> ! {
     // 間にユーザー空間へ触ると #PF になる。触らない。
     demo_address_space_switch(&mut logger, &mut allocator);
 
-    // === S9-b-1: 埋め込んだユーザープログラムの ELF を読む ===
+    // === S9-b-1: 埋め込んだユーザープログラムの ELF を読み、写像する ===
     //
-    // まだ写像もしないし走らせもしない。**像が在って、読めて、中身が期待どおり
-    // であること**までを見る。ロードは S9-b-1 の次の刻みである。
+    // **まだ走らせない**（Ring 3 への遷移は次の刻み）。ここまでで、像が読めること、
+    // 新しいアドレス空間へ区画が張れること、**張った葉の W が区画の権限どおりで
+    // あること**を見る。
     verify_embedded_user_elf(&mut logger);
+    load_embedded_user_program(&mut logger, &mut allocator);
 
     // === M4-d-2: タイマを動かす ===
     //
@@ -3645,6 +3647,267 @@ fn verify_embedded_user_elf(logger: &mut Logger<SerialPort>) {
          byte(s) into its segment, every segment is read-only={})",
         elf.entry_point - entry_segment.p_vaddr,
         elf.load_segments().all(|ph| ph.p_flags & 0x2 == 0)
+    ));
+}
+
+/// ユーザープログラムを走らせる空間のユーザーサブツリーの添字（S9-b-1）。
+///
+/// **[`USER_PML4_INDEX`]（= 1）とは別である。** あちらは本番の空間の値で、
+/// 起動時の検証 3 本が使っている。**プログラムは自分の空間を持つので、添字も
+/// 自分で決められる**（`AddressSpace` が添字を持つ。S7-e）。
+///
+/// 0 を採るのは、`hello` を `0x400000` へリンクしているからである（Linux の
+/// 非 PIE の既定と同じ）。**本番の空間の `PML4[0]` には恒等除去まで恒等が居るが、
+/// 新しい空間の下位は空なので関係が無い。**
+const USER_PROGRAM_PML4_INDEX: usize = 0;
+
+/// ユーザープログラムのスタックの上端（S9-b-1）。1 ページだけ張る。
+///
+/// `hello` の像は `0x400000` から 2 ページなので、十分離れた位置に置く。
+const USER_PROGRAM_STACK_TOP: u64 = 0x0080_0000;
+
+/// 埋め込んだユーザープログラムを新しいアドレス空間へ写像する（S9-b-1）。
+///
+/// **まだ走らせない。** Ring 3 への遷移は次の刻みである。
+///
+/// # 区画の権限をそのまま葉へ落とす
+///
+/// `PT_LOAD` の `p_flags` の W を [`PageAttributes::writable`] へ渡す。`hello` の
+/// 2 区画はどちらも書き込み不可なので、**ここが `writable: false` の最初の実利用に
+/// なる**（S9-a で足した引数が、S9-b の本命の経路で使われる）。
+/// スタックだけは `writable: true` で張る。
+///
+/// # 失敗したら止まる。**これは信頼済みの入力だからである**
+///
+/// 相手は自分のビルドが作った像で、壊れていればカーネルの不具合である。
+/// **`docs/roadmap.md` の S9 が「いかなる入力に対しても fail-fast させない」と
+/// 言っているのは、信頼できない ELF についてである。** その経路（壊した像を
+/// 読んでプロセスだけを失敗させる）は S9-b-2 で作る。
+///
+/// # 区画が同じページを共有していると張れない
+///
+/// 1 枚のページに 2 つの権限は載らないので、後から来た区画が
+/// [`AddressSpaceError::…`] ではなく `AlreadyMapped` 相当で弾かれる。
+/// **`userland/user.ld` が区画をページ境界へ揃えているのはこのためである**
+/// （揃えないと実際に重なった。実測で `.text` が `0x400000..0x400030`、
+/// `.rodata` が `0x400030` からになった）。**実際のツールチェインも同じ理由で
+/// 揃える。**
+fn load_embedded_user_program(
+    logger: &mut Logger<SerialPort>,
+    allocator: &mut kernel::frame_allocator::FrameAllocator,
+) {
+    use common::elf::Elf;
+    use kernel::address_space::AddressSpace;
+    use kernel::paging::active::PageAttributes;
+    use kernel::paging::verify;
+
+    const PAGE_SIZE: u64 = 4096;
+
+    let direct_map = common::addr::direct_map();
+    let production = kernel::paging::switch::read_cr3();
+
+    let elf = match Elf::parse(HELLO_ELF) {
+        Ok(elf) => elf,
+        Err(e) => {
+            logger.error(format_args!(
+                "user-load: hello did not parse: {e:?}; halting"
+            ));
+            cpu::halt_forever();
+        }
+    };
+
+    // SAFETY: production は稼働中の PML4、direct_map は登録済みの窓。
+    let mut space = match unsafe {
+        AddressSpace::new(allocator, direct_map, production, USER_PROGRAM_PML4_INDEX)
+    } {
+        Ok(space) => space,
+        Err(e) => {
+            logger.error(format_args!(
+                "user-load: could not create the address space: {e:?}; halting"
+            ));
+            cpu::halt_forever();
+        }
+    };
+
+    // 張った VA と、期待する W を覚えておく（後で読み戻して照合する）。
+    let mut mapped: [(u64, bool); 8] = [(0, false); 8];
+    let mut mapped_count = 0usize;
+
+    for ph in elf.load_segments() {
+        let writable = ph.p_flags & 0x2 != 0;
+        let first_page = ph.p_vaddr & !(PAGE_SIZE - 1);
+        let last_page = (ph.p_vaddr + ph.p_memsz - 1) & !(PAGE_SIZE - 1);
+
+        let file = match elf.segment_data(&ph) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                logger.error(format_args!(
+                    "user-load: segment at {:#x} is out of file range: {e:?}; halting",
+                    ph.p_vaddr
+                ));
+                cpu::halt_forever();
+            }
+        };
+
+        let mut page = first_page;
+        while page <= last_page {
+            let Some(frame) = allocator.allocate_frame() else {
+                logger.error(format_args!("user-load: out of frames; halting"));
+                cpu::halt_forever();
+            };
+
+            // **ゼロ埋めしてからファイルの中身を重ねる。** `p_memsz` が `p_filesz` より
+            // 大きい分（.bss）はゼロのまま残る。
+            let dst = direct_map.phys_to_virt(frame).as_u64() as *mut u8;
+            // SAFETY: いま取ったフレームで、direct map が覆っている。誰も使っていない。
+            unsafe { core::ptr::write_bytes(dst, 0, PAGE_SIZE as usize) };
+
+            // このページが覆うファイル内の範囲を切り出して書く。
+            let page_start_in_segment = page.saturating_sub(ph.p_vaddr);
+            let offset_in_page = ph.p_vaddr.saturating_sub(page);
+            if page_start_in_segment < ph.p_filesz {
+                let remaining = ph.p_filesz - page_start_in_segment;
+                let room = PAGE_SIZE - offset_in_page;
+                let count = core::cmp::min(remaining, room) as usize;
+                let from = page_start_in_segment as usize;
+                // SAFETY: from + count <= p_filesz = file.len()、
+                // offset_in_page + count <= PAGE_SIZE。どちらも上で押さえてある。
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        file.as_ptr().add(from),
+                        dst.add(offset_in_page as usize),
+                        count,
+                    )
+                };
+            }
+
+            let Some(virt) = common::addr::VirtAddr::new(page) else {
+                logger.error(format_args!(
+                    "user-load: the page VA {page:#x} is not canonical; halting"
+                ));
+                cpu::halt_forever();
+            };
+            let attributes = PageAttributes {
+                user: true,
+                writable,
+                cacheable: true,
+            };
+            // SAFETY: この空間はまだ稼働していない。direct map は覆っている。
+            if let Err(e) =
+                unsafe { space.map_user_4kib(allocator, direct_map, virt, frame, attributes) }
+            {
+                logger.error(format_args!(
+                    "user-load: mapping {page:#x} failed: {e:?}; halting"
+                ));
+                cpu::halt_forever();
+            }
+
+            if mapped_count < mapped.len() {
+                mapped[mapped_count] = (page, writable);
+                mapped_count += 1;
+            }
+            page += PAGE_SIZE;
+        }
+
+        logger.info(format_args!(
+            "user-load: mapped PT_LOAD {:#x}..{:#x} (filesz={:#x} memsz={:#x} w={writable})",
+            ph.p_vaddr,
+            ph.p_vaddr + ph.p_memsz,
+            ph.p_filesz,
+            ph.p_memsz
+        ));
+    }
+
+    // ユーザースタックを 1 枚。**こちらは書ける。**
+    let stack_page = USER_PROGRAM_STACK_TOP - PAGE_SIZE;
+    let Some(frame) = allocator.allocate_frame() else {
+        logger.error(format_args!(
+            "user-load: out of frames for the stack; halting"
+        ));
+        cpu::halt_forever();
+    };
+    let dst = direct_map.phys_to_virt(frame).as_u64() as *mut u8;
+    // SAFETY: いま取ったフレーム。direct map が覆っている。
+    unsafe { core::ptr::write_bytes(dst, 0, PAGE_SIZE as usize) };
+    let Some(stack_virt) = common::addr::VirtAddr::new(stack_page) else {
+        logger.error(format_args!(
+            "user-load: the stack VA is not canonical; halting"
+        ));
+        cpu::halt_forever();
+    };
+    let stack_attributes = PageAttributes {
+        user: true,
+        writable: true,
+        cacheable: true,
+    };
+    // SAFETY: この空間はまだ稼働していない。direct map は覆っている。
+    if let Err(e) =
+        unsafe { space.map_user_4kib(allocator, direct_map, stack_virt, frame, stack_attributes) }
+    {
+        logger.error(format_args!(
+            "user-load: mapping the stack at {stack_page:#x} failed: {e:?}; halting"
+        ));
+        cpu::halt_forever();
+    }
+    if mapped_count < mapped.len() {
+        mapped[mapped_count] = (stack_page, true);
+        mapped_count += 1;
+    }
+    logger.info(format_args!(
+        "user-load: mapped the user stack {stack_page:#x}..{USER_PROGRAM_STACK_TOP:#x} (w=true)"
+    ));
+
+    // **張った側とは独立に降りて、葉のフラグを読み戻す。**
+    // これが S9-a で足した `writable` が実際に W を落としていることの、
+    // この経路での観測である（`ring3-vectors` の 6 本目はもう一方の経路を見ている）。
+    let mut mismatches = 0usize;
+    for &(virt_value, expected_writable) in mapped.iter().take(mapped_count) {
+        let Some(virt) = common::addr::VirtAddr::new(virt_value) else {
+            continue;
+        };
+        // SAFETY: この空間の PML4 は有効で、direct map が配下を覆っている。読み取りのみ。
+        match unsafe { verify::walk(space.pml4(), direct_map, virt) } {
+            Ok(resolved) => {
+                let writable = resolved.entry & kernel::paging::entry::PTE_WRITABLE != 0;
+                let user = resolved.entry & kernel::paging::entry::PTE_USER != 0;
+                if writable != expected_writable || !user {
+                    mismatches += 1;
+                    logger.error(format_args!(
+                        "user-load: {virt_value:#x} has w={writable} (expected \
+                         {expected_writable}) u={user} (expected true)"
+                    ));
+                }
+            }
+            Err(e) => {
+                mismatches += 1;
+                logger.error(format_args!(
+                    "user-load: {virt_value:#x} did not walk: {e:?}"
+                ));
+            }
+        }
+    }
+
+    if mismatches != 0 {
+        logger.error(format_args!(
+            "user-load: {mismatches} leaf/leaves did not carry the expected flags; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    // **この刻みでは走らせないので、空間はここで畳む。** 破棄は S7-d の経路
+    // （下位のフレームを隔離へ入れ、世代が退くまで返さない）をそのまま通る。
+    let mut quarantine = kernel::quarantine::Quarantine::new();
+    let (held, leaked) = {
+        let guard = kernel::bkl::acquire(kernel::bkl::KernelEntry::SteadyLoop);
+        // SAFETY: この空間はどのコアでも稼働していない。direct map は覆っている。
+        unsafe { space.destroy(direct_map, &mut quarantine, &guard) }
+    };
+
+    logger.info(format_args!(
+        "user-load: hello mapped into its own address space and the leaves read back with the \
+         permissions the PT_LOAD flags asked for ({mapped_count} page(s): the read-only \
+         segments carry W=0 and the stack carries W=1). The space was destroyed again because \
+         nothing runs it yet (quarantined={held} leaked={leaked})"
     ));
 }
 
