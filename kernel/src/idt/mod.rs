@@ -1791,12 +1791,22 @@ const FOLDABLE_VECTORS: [u8; 4] = [0, 6, 13, 14];
 /// - 従: ハンドラ自身が、そのベクタで CPU が切り替えるはずのスタックにいること。
 ///   これはカーネル側の状態で、Ring 3 からは作れない。
 ///
-/// # ベクタごとに行き先が違う
+/// # 期待するスタックは IDT のゲートから引く
 ///
-/// #DF は IST1、#PF は IST2、それ以外は TSS.RSP0 である（`idt::init`）。
-/// 畳む区間の RSP0 は遠征専用スタックなので、そこを期待する。
-/// **S8-c で実際に通るのは #GP の腕だけである**（畳む対象がまだ #GP しかない）。
-/// 他の腕は S8-d でベクタを広げたときに通る。
+/// 行き先を決めるのは **そのベクタのゲートの IST 番号**である。IST を持つなら
+/// その IST スタック、持たないなら TSS.RSP0 で、畳む区間の RSP0 は遠征専用
+/// スタックである。
+///
+/// **ベクタから直に決め打たない。** 最初はそう書いて落ちた——`stack-overflow-df-test`
+/// は **#PF に IST を与えない**構成で、その build では Ring 3 の #PF が RSP0 へ
+/// 切り替わる。IST2 を決め打つと正当なフレームを破損と判定し、畳めるはずの #PF が
+/// 畳まれなくなる。**期待は、実際に構成した側と同じ出所から引く。**
+///
+/// **枝は 3 つある。** IST1 / IST2 / IST 無しの 3 つに加えて、
+/// **「IST 番号を持つが、その番号のスタックを据えていない」場合は偽を返す。**
+/// 据えているのは IST1（#DF）と IST2（#PF）の 2 本だけなので、それ以外の番号を
+/// 指すゲートがあれば**期待するスタックが決められない。** 決められないまま
+/// 畳むより、畳まずに dump+halt へ落とすほうが安全側である。
 fn exception_frame_is_trustworthy(vector: u8, cs: u64, handler_rsp: u64) -> bool {
     let cs_is_known = cs == crate::gdt::USER_CODE_SELECTOR.bits() as u64
         || cs == crate::gdt::USER_CODE32_SELECTOR.bits() as u64;
@@ -1804,16 +1814,18 @@ fn exception_frame_is_trustworthy(vector: u8, cs: u64, handler_rsp: u64) -> bool
         return false;
     }
 
-    let (bottom, top) = match vector {
-        8 => {
+    let (bottom, top) = match entry(vector as usize).and_then(|gate| gate.ist_index()) {
+        Some(index) if index as usize == crate::gdt::DOUBLE_FAULT_IST_INDEX => {
             let ist = crate::stack::double_fault_stack_range();
             (ist.bottom.as_u64(), ist.top.as_u64())
         }
-        14 => {
+        Some(index) if index as usize == crate::gdt::PAGE_FAULT_IST_INDEX => {
             let ist = crate::stack::page_fault_stack_range();
             (ist.bottom.as_u64(), ist.top.as_u64())
         }
-        _ => crate::ring3::excursion_stack_range(),
+        // 据えていない IST 番号を指すゲートは、こちらの想定が崩れている。
+        Some(_) => return false,
+        None => crate::ring3::excursion_stack_range(),
     };
     handler_rsp >= bottom && handler_rsp < top
 }

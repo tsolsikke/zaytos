@@ -1203,6 +1203,12 @@ extern "sysv64" fn kernel_main() -> ! {
     #[cfg(not(feature = "paging-test"))]
     verify_syscall_checksum(&mut logger);
 
+    // Ring 3 の4ベクタが中断され、カーネルが継続することの検証（S8-d-2）。
+    // verify_ring3_excursion が残したユーザーページを使い回す。アロケータも恒等窓も
+    // 要らない（既にあるページへ命令列を書くだけで、#PF の対象は未マップのまま使う）。
+    #[cfg(not(feature = "paging-test"))]
+    verify_ring3_fault_vectors(&mut logger);
+
     // === S1-b-1: ACPI テーブルの検証つき走査 ===
     //
     // 置ける区間が上下から挟まれている。
@@ -4415,6 +4421,147 @@ fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
         "syscall: checksum round-trip verified (the kernel read the user buffer through a \
          validated UserSlice and returned the correct byte sum; a kernel pointer was rejected \
          before reading)"
+    ));
+}
+
+/// Ring 3 の 4 ベクタが中断され、カーネルが続くことを確かめる（S8-d-2）。
+///
+/// #DE・#UD・#GP・#PF を 1 つずつ Ring 3 で起こし、それぞれ畳んでここへ戻る。
+/// **4 本を 4 つの判定行に分ける。** 1 つにまとめると、どのベクタで落ちたかが
+/// 判定行から読めない。
+///
+/// # 4 本とも同じユーザーコードページを使い回す
+///
+/// [`ring3::enter`] は常に [`ring3::USER_CODE_VIRT`] へ `iretq` するので、
+/// 遠征のたびにそのページの先頭へ別の命令列を書く。**ページが書き込み可能なのは
+/// `map_4kib` が葉を常に W=1 で作るからである**（そのこと自体の記録は
+/// `deferred-decisions.md` の W^X の項目にある）。
+///
+/// # カーネルが継続したことの観測
+///
+/// **判定行が 4 本出ること自体がそれである。** 2 本目が出た時点で、1 本目の中断から
+/// カーネルが戻って次の仕事へ進んだことが確定する。4 本目の後は起動シーケンスが
+/// そのまま続く。
+///
+/// `paging-test` ビルドでは載せない（[`verify_ring3_excursion`] と同じ理由で、
+/// ユーザーページがそちらで張られるため）。
+#[cfg(not(feature = "paging-test"))]
+fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
+    use kernel::ring3;
+
+    // ユーザーサブツリー内の未マップ VA。#PF の対象にする。
+    // verify_ring3_excursion が張ったのはコード（+0）とスタック（+1 MiB）だけなので、
+    // その間のこの位置は空いている。
+    const UNMAPPED_USER_VIRT: u64 = ring3::USER_CODE_VIRT + 0x2000;
+
+    // 各遠征の命令列と、**フォルトする命令の位置**（ページ先頭からのオフセット）。
+    //
+    // **フォルトするのは必ずしも先頭の命令ではない。** #DE は被除数と除数を 0 に
+    // 置いてから割るので、落ちるのは 3 命令目である。#PF はアドレスを積んでから
+    // 読むので 2 命令目になる。**このオフセットは実測で合わせた**（最初 #DE を 0 と
+    // 書いて主張が落ち、4 が正しいと分かった）。
+    let cases: [(&str, u8, &[u8], u64); 4] = [
+        // #DE: xor edx,edx / xor ecx,ecx / div ecx。0 除算。落ちるのは div（+4）。
+        ("#DE", 0, &[0x31, 0xD2, 0x31, 0xC9, 0xF7, 0xF1], 4),
+        // #UD: ud2。落ちるのは先頭。
+        ("#UD", 6, &[0x0F, 0x0B], 0),
+        // #GP: cli。Ring 3 では特権命令。落ちるのは先頭。
+        ("#GP", 13, &[0xFA], 0),
+        // #PF: movabs rax, UNMAPPED_USER_VIRT（10 バイト）/ mov al,[rax]。
+        // 落ちるのは読み（+10）。
+        ("#PF", 14, &[], 10),
+    ];
+
+    let main_rsp0_top = gdt::privilege_stack_top();
+    let code_ptr = ring3::USER_CODE_VIRT as *mut u8;
+
+    for (name, expected_vector, bytes, fault_offset) in cases {
+        // ユーザーコードページの先頭を、この遠征の命令列で埋める。
+        // SAFETY: verify_ring3_excursion が張った U=1 / W=1 のユーザーページ。
+        // 書くのは先頭の数バイトだけで、4KiB に収まる。SMAP は未有効。
+        unsafe {
+            if expected_vector == 14 {
+                // movabs rax, imm64
+                core::ptr::write_volatile(code_ptr, 0x48);
+                core::ptr::write_volatile(code_ptr.add(1), 0xB8);
+                for i in 0..8 {
+                    let byte = ((UNMAPPED_USER_VIRT >> (i * 8)) & 0xFF) as u8;
+                    core::ptr::write_volatile(code_ptr.add(2 + i as usize), byte);
+                }
+                // mov al, [rax]
+                core::ptr::write_volatile(code_ptr.add(10), 0x8A);
+                core::ptr::write_volatile(code_ptr.add(11), 0x00);
+            } else {
+                for (i, byte) in bytes.iter().enumerate() {
+                    core::ptr::write_volatile(code_ptr.add(i), *byte);
+                }
+            }
+        }
+
+        // SAFETY: ユーザーページは張り済みで、今書いた命令列が必ずフォルトする。
+        // main_rsp0_top はメインの上端。起動時の単一実行文脈から呼ぶ。
+        unsafe {
+            ring3::enter(main_rsp0_top);
+        }
+
+        if !ring3::folded() {
+            logger.error(format_args!("ring3-vectors: {name} did not fold; halting"));
+            cpu::halt_forever();
+        }
+
+        let vector = ring3::fault_vector();
+        let rip = ring3::fault_rip();
+        let cs = ring3::fault_cs();
+        let expected_rip = ring3::USER_CODE_VIRT + fault_offset;
+
+        // 判定行。**ベクタごとに 1 行**にする。
+        if expected_vector == 14 {
+            logger.info(format_args!(
+                "ring3-vectors: {name} interrupted the Ring 3 run and the kernel continued \
+                 (vector={vector} rip={rip:#018x} cs={cs:#x} cr2={:#018x})",
+                ring3::fault_cr2()
+            ));
+        } else {
+            logger.info(format_args!(
+                "ring3-vectors: {name} interrupted the Ring 3 run and the kernel continued \
+                 (vector={vector} rip={rip:#018x} cs={cs:#x})"
+            ));
+        }
+
+        if vector != expected_vector as u64 {
+            logger.error(format_args!(
+                "ring3-vectors: {name} folded with vector={vector}, expected \
+                 {expected_vector}; halting"
+            ));
+            cpu::halt_forever();
+        }
+        if rip != expected_rip {
+            logger.error(format_args!(
+                "ring3-vectors: {name} folded at rip={rip:#018x}, expected \
+                 {expected_rip:#018x}; halting"
+            ));
+            cpu::halt_forever();
+        }
+        if (cs & 0b11) != 3 {
+            logger.error(format_args!(
+                "ring3-vectors: {name} did not come from Ring 3 (cs={cs:#x}); halting"
+            ));
+            cpu::halt_forever();
+        }
+        // #PF だけ CR2 を主張する。他のベクタでは意味を持たない値である。
+        if expected_vector == 14 && ring3::fault_cr2() != UNMAPPED_USER_VIRT {
+            logger.error(format_args!(
+                "ring3-vectors: {name} faulted on {:#018x}, expected \
+                 {UNMAPPED_USER_VIRT:#018x}; halting",
+                ring3::fault_cr2()
+            ));
+            cpu::halt_forever();
+        }
+    }
+
+    logger.info(format_args!(
+        "ring3-vectors: all four Ring 3 faults (#DE, #UD, #GP, #PF) interrupted only the Ring 3 \
+         run; the kernel ran on after each one"
     ));
 }
 
