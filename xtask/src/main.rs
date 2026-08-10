@@ -1082,7 +1082,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
+    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
@@ -1293,6 +1293,9 @@ fn main() -> Result<()> {
             cmd_run(panic_test, gui, gfx_test, kvm, no_limit)
         }
         Some("check") => cmd_check(args[1..].iter().any(|a| a == "--full")),
+        // `--full` から外した確率的な項目を手で回す。外した項目を回す手段が
+        // なければ、外すことは「守らないと決める」ことになる。
+        Some("flaky") => cmd_flaky(),
         Some("screenshot") => cmd_screenshot(&args[1..]),
         Some("gen-font") => font::generate(&workspace_root()?),
         Some(other) => bail!("unknown xtask subcommand: {other}\n\n{USAGE}"),
@@ -6102,6 +6105,9 @@ fn check_one_manifest_default_features(
 /// **1 つ落ちてもそこで止めない。** 止めると「直しては再実行」を
 /// 繰り返すことになり、全体像が分からない。最後にまとめて報告する。
 fn cmd_check(full: bool) -> Result<()> {
+    // 外した確率的な項目の一覧が実態を指しているかを先に見る（列挙の腐りを防ぐ）。
+    check_flaky_list_matches_tables()?;
+
     let workspace_root = workspace_root()?;
     let mut failed: Vec<String> = Vec::new();
     let mut total = 0usize;
@@ -6437,19 +6443,32 @@ fn cmd_check(full: bool) -> Result<()> {
             });
         }
         for test in INTERRUPT_TESTS {
+            if is_excluded_flaky("interrupt-test", test.name) {
+                println!(
+                    "=== xtask check: interrupt-test {} は確率的なので --full から外してある（cargo xtask flaky）",
+                    test.name
+                );
+                continue;
+            }
             total += 1;
             let name = format!("interrupt-test {}", test.name);
             run_regression(&name, &mut failed, &mut retries, || {
                 cmd_marker_test(INTERRUPT_TESTS, "interrupt-test", test.name, None)
             });
         }
-        total += 1;
-        run_regression(
-            "interrupt-test keyboard",
-            &mut failed,
-            &mut retries,
-            cmd_keyboard_test,
-        );
+        if is_excluded_flaky("interrupt-test", "keyboard") {
+            println!(
+                "=== xtask check: interrupt-test keyboard は確率的なので --full から外してある（cargo xtask flaky）"
+            );
+        } else {
+            total += 1;
+            run_regression(
+                "interrupt-test keyboard",
+                &mut failed,
+                &mut retries,
+                cmd_keyboard_test,
+            );
+        }
         // S2-d-2 の検査と破壊確認。**健全な `rate` を先頭に置いてある**ので、
         // 破壊が意図した経路だけを壊していることまで確かめられる。
         for test in LAPIC_TIMER_TESTS {
@@ -6461,6 +6480,13 @@ fn cmd_check(full: bool) -> Result<()> {
         }
         // S3-b-2b-2 の sentinel の破壊確認。
         for test in SMP_AP_TESTS {
+            if is_excluded_flaky("smp-ap-test", test.name) {
+                println!(
+                    "=== xtask check: smp-ap-test {} は確率的なので --full から外してある（cargo xtask flaky）",
+                    test.name
+                );
+                continue;
+            }
             total += 1;
             let name = format!("smp-ap-test {}", test.name);
             run_regression(&name, &mut failed, &mut retries, || {
@@ -6602,7 +6628,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 20,
-    full: 120,
+    full: 116,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
@@ -6799,6 +6825,124 @@ const DID_NOT_START_MARKER: &str = "kernel did not start (environment, not the c
 ///
 /// テストの失敗（実装の問題）では再試行しない。落ちるものは落ちたまま
 /// 報告する。
+/// `--full` から外した確率的な項目（S9-b の途中で、独立した作業として外した）。
+///
+/// # なぜ外すか
+///
+/// **確率的なものを `--full` へ入れると、落ちたときに退行か揺らぎかが区別できない。**
+/// 方針は `coding-standards.md` にあり、`kernel-entry-concurrency` を外した前例も
+/// ある。**同じ性質の 4 項目が入ったままだった**（`deferred-decisions.md` の
+/// 持ち越し 12「決めた方針が、後から該当した項目へ適用されていない」）。
+///
+/// **実測**——T2-c で `--full` 15 回中 4 回（約 27%）、S9-b-2 で 2 回中 2 回。
+/// **毎回、落ちたのが退行か揺らぎかを手で切り分けることになる。**
+///
+/// # 外して何が失われるか
+///
+/// **前例とは事情が違う。** `kernel-entry-concurrency` は**補助実証**で、
+/// `verification-coverage.md` が「何かの主張を担っていない」と書いている。
+/// **こちらの 4 つは主張を担っている**（TLB シュートダウン、キーボードの配送、
+/// 二層の守り）。**外すと、`cargo xtask flaky` を回さない限り誰も見ない。**
+///
+/// **そして前例が実際に手で回された記録は無い。** 外したのは S4-a で、
+/// それ以降 `kernel-entry-concurrency` を回した記録が docs に見当たらない。
+/// **したがって「手で回す」は、手順を置いても回される保証が無い。**
+/// **失われるものを正確に書いたうえで外している。**
+const FLAKY_EXCLUDED: &[(&str, &str)] = &[
+    ("interrupt-test", "keyboard"),
+    ("smp-ap-test", "tlb-shootdown"),
+    ("smp-ap-test", "smp-stimulus-layer1-off"),
+    ("smp-ap-test", "smp-stimulus-both-layers-off"),
+];
+
+/// その項目が [`FLAKY_EXCLUDED`] に載っているか。
+fn is_excluded_flaky(group: &str, name: &str) -> bool {
+    FLAKY_EXCLUDED
+        .iter()
+        .any(|(g, n)| *g == group && *n == name)
+}
+
+/// [`FLAKY_EXCLUDED`] の各行が実在の項目を指しているかを確かめる。
+///
+/// **列挙で守るものは、列挙が実態からずれると静かに効かなくなる。**
+/// 名前を打ち間違えると「外したつもりで外れていない」か「存在しない項目を
+/// 外している」になる。どちらも出力からは分からないので、ここで落とす。
+fn check_flaky_list_matches_tables() -> Result<()> {
+    for (group, name) in FLAKY_EXCLUDED {
+        let found = match (*group, *name) {
+            // `keyboard` は表の項目ではなく単独の関数である（`cmd_keyboard_test`）。
+            // **表だけを見ていると「無い」と判定するので、ここで明示的に扱う。**
+            // 実際、最初に表だけを見る形で書いて、この検査に落とされた。
+            ("interrupt-test", "keyboard") => true,
+            ("interrupt-test", n) => INTERRUPT_TESTS.iter().any(|t| t.name == n),
+            ("smp-ap-test", n) => SMP_AP_TESTS.iter().any(|t| t.name == n),
+            (other, _) => anyhow::bail!("FLAKY_EXCLUDED names an unknown group {other:?}"),
+        };
+        if !found {
+            anyhow::bail!("FLAKY_EXCLUDED names {group} {name:?}, which no table has");
+        }
+    }
+    Ok(())
+}
+
+/// `--full` から外した確率的な項目を手で回す（`cargo xtask flaky`）。
+///
+/// **外した項目を回す手段がなければ、外すことは「守らないと決める」ことになる。**
+/// 1 項目につき最大 [`FLAKY_ATTEMPTS`] 回まで試し、**何回目で通ったかを出す。**
+///
+/// **回数そのものが情報である。** 1 回目で通り続けているうちは揺らぎが小さく、
+/// 3 回目まで要るようになったなら確率が上がっている。**通らなければ退行である。**
+fn cmd_flaky() -> Result<()> {
+    let mut never_passed: Vec<String> = Vec::new();
+
+    for (group, name) in FLAKY_EXCLUDED {
+        let label = format!("{group} {name}");
+        let mut passed_on = None;
+        for attempt in 1..=FLAKY_ATTEMPTS {
+            let result = match (*group, *name) {
+                ("interrupt-test", "keyboard") => cmd_keyboard_test(),
+                ("interrupt-test", n) => cmd_marker_test(INTERRUPT_TESTS, group, n, None),
+                ("smp-ap-test", n) => cmd_marker_test(SMP_AP_TESTS, group, n, Some(2)),
+                (other, _) => anyhow::bail!("FLAKY_EXCLUDED names an unknown group {other:?}"),
+            };
+            if result.is_ok() {
+                passed_on = Some(attempt);
+                break;
+            }
+            println!("--- flaky: {label} did not pass on attempt {attempt}");
+        }
+        match passed_on {
+            Some(attempt) => println!("--- flaky: {label}: OK (passed on attempt {attempt})"),
+            None => {
+                println!("--- flaky: {label}: FAILED ({FLAKY_ATTEMPTS} attempt(s), none passed)");
+                never_passed.push(label);
+            }
+        }
+    }
+
+    if never_passed.is_empty() {
+        println!(
+            "flaky: all {} excluded item(s) passed within {FLAKY_ATTEMPTS} attempt(s)",
+            FLAKY_EXCLUDED.len()
+        );
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "flaky: {} item(s) never passed: {}",
+            never_passed.len(),
+            never_passed.join(", ")
+        )
+    }
+}
+
+/// [`cmd_flaky`] が 1 項目に許す試行回数。
+///
+/// **27% の揺らぎなら 3 回で約 2%、5 回で約 0.14% まで落ちる。**
+/// 5 回とも落ちたなら揺らぎでは説明しにくく、退行を疑う根拠になる。
+/// **ただし「5 回の緑では足りない」は逆向きにも効く**——通ったことは
+/// 「揺らぎが消えた」の証拠にはならない（`coding-standards.md`）。
+const FLAKY_ATTEMPTS: usize = 5;
+
 fn run_regression(
     name: &str,
     failed: &mut Vec<String>,
