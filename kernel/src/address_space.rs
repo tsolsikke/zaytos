@@ -24,6 +24,7 @@
 //! は上位を写さない。**切り替えた瞬間に命令フェッチが翻訳できなくなる。**
 
 use crate::frame_allocator::FrameAllocator;
+use crate::paging::active::PageAttributes;
 use common::addr::{DirectMap, PhysAddr};
 
 /// PML4 のエントリ数。
@@ -205,6 +206,28 @@ impl AddressSpace {
     /// **下位にしか張れない。** 上位は共有なので、ここから触ると全アドレス空間へ
     /// 波及する。**添字で弾く**（[`is_shared_kernel_index`]）。
     ///
+    /// # 属性（S9-b-1）
+    ///
+    /// `user` は常に真なので取らない。**この関数はユーザーページを張るためだけに
+    /// ある。** 取るのは [`PageAttributes::writable`] と
+    /// [`PageAttributes::cacheable`] である。
+    ///
+    /// **W は葉だけに効く。中間へは伝播しない**（[`crate::paging::active::ActivePageTable::map_4kib`] と
+    /// 同じ理由。中間を W=0 にすると配下の葉が 1 枚残らず読み取り専用になる）。
+    ///
+    /// **NX は無い。** `EFER.NXE` が未有効である（別項の解禁条件に従う）。
+    ///
+    /// # 写像の経路が 2 つあることについて
+    ///
+    /// **同じ「4KiB を 1 枚張る」を、この関数と [`crate::paging::active::ActivePageTable::map_4kib`] の
+    /// 2 か所が別々に実装している。** 前者は稼働していない空間のテーブルを
+    /// direct map 越しに書き、後者は稼働中のテーブルを書いて `invlpg` する。
+    /// **S9-b では統合せず、両方に同じ属性を通す。**
+    ///
+    /// **統合の合図は「どちらかの経路に 3 つ目の属性を足す必要が生じたとき」で
+    /// ある。** 同じ変更を 2 度加えることになった時点が、2 つ持っている費用が
+    /// 表に出た時点である。**今回（W を足す）が 1 度目である。**
+    ///
     /// # Safety
     ///
     /// - `direct_map` が、これから取る中間テーブルと `frame` を覆っていること。
@@ -217,6 +240,7 @@ impl AddressSpace {
         direct_map: DirectMap,
         virt: common::addr::VirtAddr,
         frame: PhysAddr,
+        attributes: PageAttributes,
     ) -> Result<(), AddressSpaceError> {
         use crate::paging::entry;
 
@@ -270,15 +294,18 @@ impl AddressSpace {
             table = child;
         }
 
-        // SAFETY: 葉。ユーザーから読み書きできる 4KiB ページ。
-        unsafe {
-            write_entry(
-                direct_map,
-                table,
-                entry::pt_index(virt),
-                frame.as_u64() | entry::PTE_PRESENT | entry::PTE_WRITABLE | entry::PTE_USER,
-            )
-        };
+        let mut leaf = frame.as_u64() | entry::PTE_PRESENT | entry::PTE_USER;
+        // 破壊 (S9-a, map-force-writable): 書き込み可否の引数を無視して常に W=1 に
+        // する。**もう一方の経路（`ActivePageTable::map_4kib`）と同じ破壊で両方が
+        // 落ちる。** 経路が 2 つあることを、破壊の側でも 1 本にまとめてある。
+        if attributes.writable || cfg!(feature = "map-force-writable") {
+            leaf |= entry::PTE_WRITABLE;
+        }
+        if !attributes.cacheable {
+            leaf |= entry::PTE_PCD;
+        }
+        // SAFETY: 葉。ユーザーから到達できる 4KiB ページ。
+        unsafe { write_entry(direct_map, table, entry::pt_index(virt), leaf) };
         Ok(())
     }
 

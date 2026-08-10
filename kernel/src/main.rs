@@ -3067,6 +3067,7 @@ fn demo_two_address_spaces(
     mut space_a: kernel::address_space::AddressSpace,
 ) {
     use kernel::address_space::{is_shared_kernel_index, AddressSpace, PML4_ENTRY_COUNT};
+    use kernel::paging::active::PageAttributes;
 
     // 下位の、どのデモとも重ならない VA。
     //
@@ -3114,8 +3115,16 @@ fn demo_two_address_spaces(
     }
 
     for (space, frame) in [(&mut space_a, frame_a), (&mut space_b, frame_b)] {
+        // S9-b-1: 渡す値は従来と同じ writable=true なので振る舞いは変わらない。
+        let attributes = PageAttributes {
+            user: true,
+            writable: true,
+            cacheable: true,
+        };
         // SAFETY: どちらもまだ稼働していない。direct map は覆っている。
-        if let Err(error) = unsafe { space.map_user_4kib(allocator, direct_map, virt, frame) } {
+        if let Err(error) =
+            unsafe { space.map_user_4kib(allocator, direct_map, virt, frame, attributes) }
+        {
             logger.error(format_args!(
                 "address-space: mapping failed ({error:?}); halting"
             ));
