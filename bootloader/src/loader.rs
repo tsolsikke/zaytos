@@ -121,12 +121,16 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
         }
 
         for seg in elf.load_segments() {
-            let file_data = elf.segment_data(&seg);
+            let file_data = elf
+                .segment_data(&seg)
+                .expect("kernel.elf segment lies outside the file");
             let dst = seg.p_paddr as *mut u8;
             // SAFETY: `dst..dst + p_memsz` lies within `region_start..region_end`,
             // which we just exclusively allocated above via AllocatePages(Address).
-            // `file_data.len() == p_filesz <= p_memsz` is guaranteed by the ELF
-            // program header contract that `common::elf::Elf` parses.
+            // `file_data.len() == p_filesz <= p_memsz` is guaranteed by
+            // `common::elf::Elf::parse`, which rejects `p_memsz < p_filesz` for every
+            // program header (S9-a; before that this comment claimed an invariant the
+            // parser did not actually check).
             unsafe {
                 core::ptr::copy_nonoverlapping(file_data.as_ptr(), dst, file_data.len());
                 let zero_start = dst.add(file_data.len());

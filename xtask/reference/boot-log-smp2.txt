@@ -11,7 +11,7 @@ Hello, ZaytOS!
 [INFO] jumping to kernel entry point 0x100000
 [INFO] ZaytOS kernel: entered _start
 [INFO] boot stack: 632 of 16384 bytes used (high-water; 15752 bytes poison intact)
-[INFO] higher-half: arrived at high VA. RIP=0xffffffff80179d98 in [0xffffffff80100000, 0xffffffff801d4348)=true, RSP=0xffffffff801b2de0 high=true, CR3=0x19f000 == bootstrap PML4 0x19f000 = true, identity alive (phys 0x100000 read via low==high) = true
+[INFO] higher-half: arrived at high VA. RIP=0xffffffff80179e28 in [0xffffffff80100000, 0xffffffff801d4348)=true, RSP=0xffffffff801b2de0 high=true, CR3=0x19f000 == bootstrap PML4 0x19f000 = true, identity alive (phys 0x100000 read via low==high) = true
 [INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff801c5060 first slot=0xffffffff801c5060 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
 [INFO] interrupts: RFLAGS.IF before cli = false (raw RFLAGS=0x96)
 [INFO] interrupts: RFLAGS.IF after cli = false (raw RFLAGS=0x96)
@@ -73,7 +73,7 @@ Hello, ZaytOS!
 [INFO] paging: required range [framebuffer] 0x80000000..0x803e8000: OK
 [INFO] paging: required range [new page tables (PML4)] 0x3000..0x4000: OK
 [INFO] paging: required range [current RSP] 0x1b3040..0x1b3041: OK
-[INFO] paging: required range [current RIP] 0x179d98..0x179d99: OK
+[INFO] paging: required range [current RIP] 0x179e28..0x179e29: OK
 [INFO] paging: all required ranges mapped. proceeding to CR3 switch (d-2).
 [INFO] paging: current CR3 = 0x19f000
 [INFO] paging: CR3 switch instruction executed
@@ -107,7 +107,7 @@ Hello, ZaytOS!
 [INFO] console: 102 log line(s) were emitted before the console existed (serial only)
 [INFO] heap: arena 0x5bd000..0x6bd000 (256 frames, 1 MiB), mapped=true
 [INFO] heap: initialized (1048576 bytes free, 1 block(s))
-[INFO] granularity: executing code (RIP) 0xffffffff80179d98 -> phys 0x179d98, mapped by a 4KiB page at 0xffffffff80179000 (entry=0x179023)
+[INFO] granularity: executing code (RIP) 0xffffffff80179e28 -> phys 0x179e28, mapped by a 4KiB page at 0xffffffff80179000 (entry=0x179023)
 [INFO] granularity: kernel stack (RSP) 0xffffffff801b2ac0 -> phys 0x1b2ac0, mapped by a 4KiB page at 0xffffffff801b2000 (entry=0x1b2063)
 [INFO] granularity: heap arena 0x5bd000 -> phys 0x5bd000, mapped by a 2MiB page at 0x400000 (entry=0x400083)
 [INFO] granularity: framebuffer 0x80000000 -> phys 0x80000000, mapped by a 2MiB page at 0x80000000 (entry=0x800000b3)
@@ -233,7 +233,7 @@ Hello, ZaytOS!
 [INFO] percpu: 2 usable CPU(s) enumerated, 2 per-CPU slot(s) available, every CPU has a slot=true (cpu_id() is the constant 0 and only the bootstrap processor runs, so no slot is indexed out of range yet)
 [INFO] identity-removal: begin. live PML4=0xe000, saved PML4[0]=0xf023
 [INFO] identity-removal: PML4[0] subtree table frames = 7 (28 KiB) become unreachable; intentional leak. subtree frames [256]=10 [511]=3. disjoint(0,256)=true disjoint(0,511)=true disjoint(256,511)=true
-[INFO] identity-removal: required [RIP] 0xffffffff80179d98 -> phys 0x179d98 (huge=false): OK
+[INFO] identity-removal: required [RIP] 0xffffffff80179e28 -> phys 0x179e28 (huge=false): OK
 [INFO] identity-removal: required [RSP] 0xffffffff801b2930 -> phys 0x1b2930 (huge=false): OK
 [INFO] identity-removal: required [direct map window] 0xffff80000000e000 -> phys 0xe000 (huge=false): OK
 [INFO] identity-removal: required [kernel image] 0xffffffff80100000 -> phys 0x100000 (huge=false): OK
@@ -305,7 +305,7 @@ task: cooperative switch verified
 [INFO] lapic-timer: the timer now arrives as vector 0xfe, which the 8259 cannot produce
 task: starting preemptive demo with 2 busy-loop workers for 200 ticks
 [INFO] smp: the installed AP trampoline matches the template outside the patched fields: 4048 byte(s) compared, 48 excluded (gdtr base at 0xf22, far jump target at 0x3b, data block 0xf40..0xf68), mismatches=0
-[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x19f000, rust entry 0xffffffff80158950
+[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x19f000, rust entry 0xffffffff801588c0
 [INFO] smp: starting application processor apic id 1 as slot 1 (trampoline at 0x1000, vector 0x01, stack top 0x3000 identity-mapped, cr3 0x19f000 = the static boot page table)
 [INFO] smp: application processor 1 started (long mode reached, running on the static boot page table; no per-CPU GDT/TSS/IDT yet, so cpu_id() is not used here)
 [INFO] smp: ap 1 loaded its own GDT/TSS/IDT; cpu_id() now reads 1 from GDTR (the index handed over in the trampoline data block was 1, match=true)

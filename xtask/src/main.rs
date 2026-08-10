@@ -856,7 +856,9 @@ fn trampoline_bytes(kernel_elf: &Path) -> Result<[u8; 24]> {
         .load_segments()
         .find(|s| entry >= s.p_vaddr && entry < s.p_vaddr + s.p_memsz)
         .context("no PT_LOAD segment contains the entry point")?;
-    let data = elf.segment_data(&seg);
+    let data = elf
+        .segment_data(&seg)
+        .map_err(|e| anyhow::anyhow!("the entry segment lies outside the file: {e:?}"))?;
     let offset = (entry - seg.p_vaddr) as usize;
     let slice = data
         .get(offset..offset + 24)
