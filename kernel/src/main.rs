@@ -3566,7 +3566,7 @@ fn verify_user_page_mapping<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
     allocator: &mut frame_allocator::FrameAllocator<CAP>,
 ) {
-    use kernel::paging::active::ActivePageTable;
+    use kernel::paging::active::{ActivePageTable, PageAttributes};
     use kernel::paging::verify;
 
     /// テストページの仮想アドレス（PML4[USER_PML4_INDEX] の先頭 = 512 GiB）。
@@ -3595,9 +3595,14 @@ fn verify_user_page_mapping<const CAP: usize>(
     let pml4_phys = table.pml4_phys();
 
     // --- 張る（専用サブツリー、user=true で全階層 U=1） ---
+    let attributes = PageAttributes {
+        user: true,
+        writable: true,
+        cacheable: true,
+    };
     // SAFETY: virt はまだマップされていない空き PML4 スロット配下。leaf_phys は
     // 今確保した未使用フレーム。allocator は中間テーブルの確保に使う。
-    if let Err(e) = unsafe { table.map_4kib(virt, leaf_phys, true, true, allocator) } {
+    if let Err(e) = unsafe { table.map_4kib(virt, leaf_phys, attributes, allocator) } {
         logger.error(format_args!(
             "user-map: map_4kib({USER_TEST_VIRT:#x}) failed: {e:?}; halting"
         ));
@@ -3741,19 +3746,21 @@ fn verify_ring3_excursion<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
     allocator: &mut frame_allocator::FrameAllocator<CAP>,
 ) {
-    use kernel::paging::active::ActivePageTable;
+    use kernel::paging::active::{ActivePageTable, PageAttributes};
     use kernel::paging::verify;
     use kernel::ring3;
 
     let identity = common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
         .expect("the identity window is canonical");
 
-    // ユーザーコードとユーザースタックの葉フレームを確保する。
-    let (Some(code_phys), Some(stack_phys)) =
-        (allocator.allocate_frame(), allocator.allocate_frame())
-    else {
+    // ユーザーコード・ユーザースタック・読み取り専用ページの葉フレームを確保する。
+    let (Some(code_phys), Some(stack_phys), Some(readonly_phys)) = (
+        allocator.allocate_frame(),
+        allocator.allocate_frame(),
+        allocator.allocate_frame(),
+    ) else {
         logger.error(format_args!(
-            "ring3: could not reserve frames for the user code/stack pages; halting"
+            "ring3: could not reserve frames for the user code/stack/read-only pages; halting"
         ));
         cpu::halt_forever();
     };
@@ -3762,6 +3769,8 @@ fn verify_ring3_excursion<const CAP: usize>(
         .expect("the user code virtual address is canonical");
     let stack_virt = common::addr::VirtAddr::new(ring3::USER_STACK_VIRT)
         .expect("the user stack virtual address is canonical");
+    let readonly_virt = common::addr::VirtAddr::new(ring3::USER_READONLY_VIRT)
+        .expect("the read-only user virtual address is canonical");
 
     // SAFETY: CR3 は自前テーブル。配下は恒等窓で読み書きできる。
     let mut table = unsafe { ActivePageTable::current(identity) };
@@ -3774,12 +3783,20 @@ fn verify_ring3_excursion<const CAP: usize>(
     let user_flag = true;
     #[cfg(feature = "ring3-test-user-page-supervisor")]
     let user_flag = false;
-    for (virt, phys, what) in [
-        (code_virt, code_phys, "code"),
-        (stack_virt, stack_phys, "stack"),
+    // 3 枚目は writable=false で張る（S9-a）。**Ring 3 からの書き込みが #PF に
+    // なることを ring3-vectors の 6 本目が確かめる的である。**
+    for (virt, phys, writable, what) in [
+        (code_virt, code_phys, true, "code"),
+        (stack_virt, stack_phys, true, "stack"),
+        (readonly_virt, readonly_phys, false, "read-only"),
     ] {
-        // SAFETY: どちらも未マップのユーザーサブツリー内アドレス。frame は未使用。
-        if let Err(e) = unsafe { table.map_4kib(virt, phys, user_flag, true, allocator) } {
+        let attributes = PageAttributes {
+            user: user_flag,
+            writable,
+            cacheable: true,
+        };
+        // SAFETY: いずれも未マップのユーザーサブツリー内アドレス。frame は未使用。
+        if let Err(e) = unsafe { table.map_4kib(virt, phys, attributes, allocator) } {
             logger.error(format_args!(
                 "ring3: map_4kib for the user {what} page failed: {e:?}; halting"
             ));
@@ -4248,7 +4265,7 @@ fn verify_syscall_pointer<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
     allocator: &mut frame_allocator::FrameAllocator<CAP>,
 ) {
-    use kernel::paging::active::{ActivePageTable, PageSize};
+    use kernel::paging::active::{ActivePageTable, PageAttributes, PageSize};
     use kernel::ring3;
     use kernel::syscall;
 
@@ -4281,9 +4298,14 @@ fn verify_syscall_pointer<const CAP: usize>(
         ));
         cpu::halt_forever();
     };
+    let sup_attributes = PageAttributes {
+        user: false,
+        writable: true,
+        cacheable: true,
+    };
     // SAFETY: sup はユーザーサブツリー内の未マップ VA。user=false で張るので Ring 3 から
     // 到達不可（walk_user_accessible が SupervisorOnly で弾く）。frame は未使用。
-    if let Err(e) = unsafe { table.map_4kib(sup, sup_phys, false, true, allocator) } {
+    if let Err(e) = unsafe { table.map_4kib(sup, sup_phys, sup_attributes, allocator) } {
         logger.error(format_args!(
             "syscall: map_4kib for the supervisor test page failed: {e:?}; halting"
         ));
@@ -4471,30 +4493,55 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
     // （張られていて U=0）。エラーコードの期待が 4 本目と違う——未マップは
     // 0x4（不在・ユーザー・読み）、こちらは **0x5（存在・ユーザー・読み）**で、
     // **「穴に落ちた」ではなく「権限で拒まれた」ことをエラーコードが区別する。**
-    /// 1 本の遠征の記述。名前 / 期待ベクタ / 命令列（#PF は空でロード列を生成） /
-    /// フォルトする命令のオフセット / #PF の読み先（0 = #PF でない） /
-    /// 期待するエラーコード（#PF のみ意味を持つ）。
-    type FaultCase = (&'static str, u8, &'static [u8], u64, u64, u64);
-    let cases: [FaultCase; 5] = [
+    // 読み取り専用で張ったユーザーページ（S9-a）。Ring 3 が書くと #PF になる。
+    // エラーコードは 0x7（存在・ユーザー・**書き**）で、4 本目（0x4）とも
+    // 5 本目（0x5）とも違う。**3 本の #PF が、不在・権限（読み）・権限（書き）を
+    // エラーコードで撃ち分けている。**
+    const READONLY_USER_VIRT: u64 = ring3::USER_READONLY_VIRT;
+
+    /// 1 本の遠征の記述。名前 / 期待ベクタ / 命令列（#PF は空でアクセス列を生成） /
+    /// フォルトする命令のオフセット / #PF のアクセス先（0 = #PF でない） /
+    /// 期待するエラーコード（#PF のみ意味を持つ） / 読みでなく書きか。
+    type FaultCase = (&'static str, u8, &'static [u8], u64, u64, u64, bool);
+    let cases: [FaultCase; 6] = [
         // #DE: xor edx,edx / xor ecx,ecx / div ecx。0 除算。落ちるのは div（+4）。
-        ("#DE", 0, &[0x31, 0xD2, 0x31, 0xC9, 0xF7, 0xF1], 4, 0, 0),
+        (
+            "#DE",
+            0,
+            &[0x31, 0xD2, 0x31, 0xC9, 0xF7, 0xF1],
+            4,
+            0,
+            0,
+            false,
+        ),
         // #UD: ud2。落ちるのは先頭。
-        ("#UD", 6, &[0x0F, 0x0B], 0, 0, 0),
+        ("#UD", 6, &[0x0F, 0x0B], 0, 0, 0, false),
         // #GP: cli。Ring 3 では特権命令。落ちるのは先頭。
-        ("#GP", 13, &[0xFA], 0, 0, 0),
+        ("#GP", 13, &[0xFA], 0, 0, 0, false),
         // #PF: movabs rax, <読み先>（10 バイト）/ mov al,[rax]。落ちるのは
         // 読み（+10）。読み先は未マップのユーザー VA。エラーコード 0x4 =
         // 不在・ユーザー・読み。
-        ("#PF", 14, &[], 10, UNMAPPED_USER_VIRT, 0x4),
+        ("#PF", 14, &[], 10, UNMAPPED_USER_VIRT, 0x4, false),
         // #PF-kernel: 同じ命令列で、読み先だけカーネル VA。エラーコード 0x5 =
         // 存在・ユーザー・読み（権限違反）。
-        ("#PF-kernel", 14, &[], 10, KERNEL_TARGET_VIRT, 0x5),
+        ("#PF-kernel", 14, &[], 10, KERNEL_TARGET_VIRT, 0x5, false),
+        // #PF-write-ro: movabs rax, <書き先>/ mov [rax],al / ud2。書き先は
+        // writable=false で張ったユーザーページ。エラーコード 0x7 =
+        // 存在・ユーザー・書き。
+        //
+        // **末尾の ud2 が破壊の受け皿である。** W=0 が効いていれば書きが落ちる
+        // （+10、ベクタ 14）。効いていなければ書きが通り、+12 の ud2 で
+        // ベクタ 6 が畳まれる。**どちらでも遠征は戻るので、判定行が
+        // 「ベクタが違う」と言える。** 受け皿を置かないと、書きが通った後に
+        // ページ上のゼロを命令として実行し始め、落ち方が決まらない。
+        ("#PF-write-ro", 14, &[], 10, READONLY_USER_VIRT, 0x7, true),
     ];
 
     let main_rsp0_top = gdt::privilege_stack_top();
     let code_ptr = ring3::USER_CODE_VIRT as *mut u8;
 
-    for (name, expected_vector, bytes, fault_offset, load_target, expected_error) in cases {
+    for (name, expected_vector, bytes, fault_offset, load_target, expected_error, is_store) in cases
+    {
         // ユーザーコードページの先頭を、この遠征の命令列で埋める。
         // SAFETY: verify_ring3_excursion が張った U=1 / W=1 のユーザーページ。
         // 書くのは先頭の数バイトだけで、4KiB に収まる。SMAP は未有効。
@@ -4507,9 +4554,14 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
                     let byte = ((load_target >> (i * 8)) & 0xFF) as u8;
                     core::ptr::write_volatile(code_ptr.add(2 + i as usize), byte);
                 }
-                // mov al, [rax]
-                core::ptr::write_volatile(code_ptr.add(10), 0x8A);
+                // mov al,[rax]（読み）か mov [rax],al（書き）。1 バイトしか違わない。
+                core::ptr::write_volatile(code_ptr.add(10), if is_store { 0x88 } else { 0x8A });
                 core::ptr::write_volatile(code_ptr.add(11), 0x00);
+                if is_store {
+                    // 書きが通ってしまった場合の受け皿（ud2）。
+                    core::ptr::write_volatile(code_ptr.add(12), 0x0F);
+                    core::ptr::write_volatile(code_ptr.add(13), 0x0B);
+                }
             } else {
                 for (i, byte) in bytes.iter().enumerate() {
                     core::ptr::write_volatile(code_ptr.add(i), *byte);
@@ -4599,9 +4651,18 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
          unreachable from Ring 3"
     ));
 
+    // S9-a。ここまで来たなら 6 本目が通っている。
     logger.info(format_args!(
-        "ring3-vectors: all five Ring 3 faults (#DE, #UD, #GP, #PF unmapped, #PF kernel) \
-         interrupted only the Ring 3 run; the kernel ran on after each one"
+        "ring3-vectors: map_4kib(writable=false) observed: a Ring 3 store to \
+         {READONLY_USER_VIRT:#x} faulted with error code 0x7 (present+user+write), so the \
+         leaf really carries W=0 (this says nothing about a Ring 0 store, which would need \
+         CR0.WP on every core)"
+    ));
+
+    logger.info(format_args!(
+        "ring3-vectors: all six Ring 3 faults (#DE, #UD, #GP, #PF unmapped, #PF kernel, \
+         #PF write to a read-only page) interrupted only the Ring 3 run; the kernel ran on \
+         after each one"
     ));
 }
 
@@ -4977,6 +5038,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "ring3-test-corrupt-frame-cs",
         cfg!(feature = "ring3-test-corrupt-frame-cs"),
         "例外フレームの CS を既知でない値へ差し替える",
+    ),
+    (
+        "map-force-writable",
+        cfg!(feature = "map-force-writable"),
+        "map_4kib の書き込み可否の引数を無視して葉を常に W=1 にする",
     ),
     (
         "exception-test",

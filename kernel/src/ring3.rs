@@ -46,6 +46,13 @@ use crate::gdt;
 pub const USER_CODE_VIRT: u64 = 0x0000_0080_0000_0000;
 /// ユーザースタックの仮想アドレス（同サブツリー内、コードの 1 MiB 上）。
 pub const USER_STACK_VIRT: u64 = 0x0000_0080_0010_0000;
+/// 読み取り専用で張るユーザーページの仮想アドレス（S9-a）。
+///
+/// `map_4kib` の `writable: false` が実際に W=0 の葉を作ることを、**Ring 3 からの
+/// 書き込みが #PF になる**ことで確かめるための的である。**カーネルからは書かない**
+/// （BSP は `CR0.WP` が立っているので Ring 0 の書きも落ちる。それを主張しないのは
+/// AP で WP が立っていないためで、`ActivePageTable::map_4kib` の doc に書いてある）。
+pub const USER_READONLY_VIRT: u64 = 0x0000_0080_0000_3000;
 /// ユーザースタックの上端（1 ページ）。iretq 偽フレームの RSP に使う。
 pub const USER_STACK_TOP: u64 = USER_STACK_VIRT + 4096;
 

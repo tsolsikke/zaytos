@@ -213,6 +213,31 @@ pub enum MapUpdateError {
     AlreadyMapped,
 }
 
+/// [`ActivePageTable::map_4kib`] が張る 1 枚に与える属性（S9-a）。
+///
+/// # なぜ bool を並べずに構造体にするか
+///
+/// 引数が 3 つとも `bool` になる。位置引数で並べると、取り違えても型が通り、
+/// **静かに違う属性のページが張られる。** フィールド名を書かせる形なら、
+/// 取り違えはコンパイルエラーになるか、読めば分かる。
+/// **写像の属性は「ガードを写像の不在で作る」と同じで、間違えたことが後から
+/// 症状としてしか出ない種類の値である。**
+///
+/// # 足りない属性
+///
+/// **実行可否（NX）は無い。** `EFER.NXE` が未有効で、立てると予約ビット違反の
+/// #PF になる。有効化は別項の解禁条件に従う（`docs/deferred-decisions.md`）。
+/// G と PWT と PAT も無い。前者は立てない方針、後の 2 つは要求が出ていない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageAttributes {
+    /// Ring 3 から到達できるか（U/S）。**中間エントリへも伝播する。**
+    pub user: bool,
+    /// 書き込めるか（W）。**葉だけに効く。中間へは伝播しない。**
+    pub writable: bool,
+    /// キャッシュしてよいか。偽なら PCD を立てる（MMIO 用）。
+    pub cacheable: bool,
+}
+
 /// 分割の結果。呼び出し側が照合に使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SplitOutcome {
@@ -493,10 +518,11 @@ impl ActivePageTable {
 
     /// 稼働中テーブルへ 4KiB ページを 1 枚張る（M5-e-2）。
     ///
-    /// 途中の中間テーブル（PDPT/PD/PT）が不在なら確保して作る。`user` が真なら、
-    /// **作る中間エントリと葉 PTE の両方**で U/S ビット（[`entry::PTE_USER`]）を
-    /// 立て、Ring 3 から到達可能にする。CPU は各階層の U/S を AND で合成する
-    /// ため、ユーザーページは PML4 から PT まで全階層で U=1 が要る。
+    /// 途中の中間テーブル（PDPT/PD/PT）が不在なら確保して作る。
+    /// [`PageAttributes::user`] が真なら、**作る中間エントリと葉 PTE の両方**で
+    /// U/S ビット（[`entry::PTE_USER`]）を立て、Ring 3 から到達可能にする。
+    /// CPU は各階層の U/S を AND で合成するため、ユーザーページは PML4 から PT まで
+    /// 全階層で U=1 が要る。
     ///
     /// # 既存の中間テーブルの U ビットは触らない
     ///
@@ -512,20 +538,31 @@ impl ActivePageTable {
     ///
     /// G は立てない（TLB を CR3 リロード / `invlpg` で管理する前提。
     /// `tlb_flush_precondition` の G=0 前提）。NX も立てない（EFER.NXE 未有効。
-    /// 予約ビット違反の #PF を避ける）。キャッシュは `cacheable` で制御する。
+    /// 予約ビット違反の #PF を避ける）。書き込み可否は
+    /// [`PageAttributes::writable`]、キャッシュは [`PageAttributes::cacheable`] で
+    /// 制御する。
     ///
-    /// # W は常に立つ。選べない
+    /// # 書き込み可否は葉だけで表す。中間へは伝播しない
     ///
-    /// **葉は必ず `PTE_WRITABLE` を含む。書き込み可否の引数は無い。**
-    /// **そうなっている理由はどこにも記録されておらず、履歴にも `writable` 引数は
-    /// 一度も存在しない**（NX の側は上記のとおり理由がある。W だけ理由が無い）。
+    /// U/S と違い、W は中間へ伝播させない。**書き込みの可否も各階層の W の AND で
+    /// 決まるので、中間を W=0 にすると、その配下の葉が 1 枚残らず読み取り専用に
+    /// なる。** 中間は常に許す側（W=1）に置き、可否は葉で表す。
     ///
-    /// **帰結——読み取り専用のページを張る手段が無い。** ユーザーコードページは
-    /// U=1・W=1・NX なしになるので、**Ring 3 は自分のコードページを書き換えられる。**
-    /// ELF の `PT_LOAD` は区画ごとに R/W/X を持つため、**この API のままでは
-    /// `.text` を読み取り専用にできない。**
-    /// 解禁条件と経緯は `docs/deferred-decisions.md` の「ページの書き込み可否と
-    /// 実行可否を選べるようにする（W^X）」にある。
+    /// # この段で入れたのは W だけである。`W^X` ではない
+    ///
+    /// **X の側（NX ビット）は入っていない。** 立てるには `EFER.NXE` の有効化が
+    /// 要り、それは別項の解禁条件に従う（`docs/deferred-decisions.md` の
+    /// 「`EFER.NXE` の有効化と NX」）。**したがってこの API はまだ
+    /// 「書き込めるが実行もできる」ページしか作れず、`W^X` は成立していない。**
+    /// 名前だけ先に使うと、到達していないものを到達したように書くことになる。
+    ///
+    /// # `writable: false` で張ったページについて、何を主張してよいか
+    ///
+    /// **主張してよいのは「Ring 3 から書くと #PF になる」までである。**
+    /// 「カーネル（Ring 0）から書いても落ちる」は主張しない。それには `CR0.WP` が
+    /// 要り、**AP では WP が立っていない**（BSP は立っている。実測値と経緯は
+    /// `docs/deferred-decisions.md` の「AP の制御レジスタが BSP と違う」）。
+    /// 揃えるかどうかはその項目の解禁条件に従う。
     ///
     /// # Safety
     ///
@@ -536,15 +573,15 @@ impl ActivePageTable {
         &mut self,
         virt: VirtAddr,
         phys: PhysAddr,
-        user: bool,
-        cacheable: bool,
+        attributes: PageAttributes,
         frames: &mut FrameAllocator<CAP>,
     ) -> Result<(), MapUpdateError> {
         let _guard = InterruptGuard::enter();
 
-        // 中間エントリのフラグ。U を伝播する（AND 合成のため全階層に要る）。
+        // 中間エントリのフラグ。U だけを伝播する（AND 合成のため全階層に要る）。
+        // W は伝播しない（上の doc）。
         let mut table_flags = entry::PTE_PRESENT | entry::PTE_WRITABLE;
-        if user {
+        if attributes.user {
             table_flags |= entry::PTE_USER;
         }
 
@@ -566,11 +603,17 @@ impl ActivePageTable {
             return Err(MapUpdateError::AlreadyMapped);
         }
 
-        let mut leaf_flags = entry::PTE_PRESENT | entry::PTE_WRITABLE;
-        if user {
+        let mut leaf_flags = entry::PTE_PRESENT;
+        // 破壊 (S9-a, map-force-writable): 書き込み可否の引数を無視して常に W=1 に
+        // する。読み取り専用で張ったユーザーページへ Ring 3 が書けてしまい、
+        // ring3-vectors の #PF-write-ro が #PF ではなく後続の ud2 で畳まれる。
+        if attributes.writable || cfg!(feature = "map-force-writable") {
+            leaf_flags |= entry::PTE_WRITABLE;
+        }
+        if attributes.user {
             leaf_flags |= entry::PTE_USER;
         }
-        if !cacheable {
+        if !attributes.cacheable {
             leaf_flags |= entry::PTE_PCD;
         }
         // SAFETY: pt/添字は上記の契約。書く値は 4KiB ページを指す正しい PTE。

@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use core::fmt::Write as _;
 
-use crate::paging::active::ActivePageTable;
+use crate::paging::active::{ActivePageTable, PageAttributes};
 #[allow(unused_imports)]
 use crate::paging::verify;
 use common::addr::{PhysAddr, VirtAddr};
@@ -516,8 +516,13 @@ pub unsafe fn prepare_shootdown_probe<const CAP: usize>(
         logger.error(format_args!("smp: the shootdown probe VA is not canonical"));
         return;
     };
+    let attributes = PageAttributes {
+        user: false,
+        writable: true,
+        cacheable: true,
+    };
     // SAFETY: 稼働中のテーブルへ、まだ誰も使っていない VA を張る。
-    if let Err(error) = unsafe { table.map_4kib(virt, frame, false, true, allocator) } {
+    if let Err(error) = unsafe { table.map_4kib(virt, frame, attributes, allocator) } {
         logger.error(format_args!(
             "smp: could not map the shootdown probe page: {error:?}"
         ));
@@ -1184,9 +1189,14 @@ pub unsafe fn map_ap_stacks<const CAP: usize>(
                 return None;
             };
             let virt = VirtAddr::new(bottom + offset)?;
+            // user=false, writable=true, cacheable=true（通常のカーネルメモリ）。
+            let attributes = PageAttributes {
+                user: false,
+                writable: true,
+                cacheable: true,
+            };
             // SAFETY: 稼働中のテーブルへ、まだ誰も使っていない VA を張る。
-            // user=false, cacheable=true（通常のカーネルメモリ）。
-            if let Err(error) = unsafe { table.map_4kib(virt, frame, false, true, allocator) } {
+            if let Err(error) = unsafe { table.map_4kib(virt, frame, attributes, allocator) } {
                 logger.error(format_args!(
                     "smp: could not map the per-CPU stack page at {:#x} for slot {slot}: \
                      {error:?}",

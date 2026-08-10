@@ -365,6 +365,23 @@ const PAGING_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: true,
         min_heartbeats: None,
     },
+    // S9-a: map_4kib の書き込み可否の引数を無視し、葉を常に W=1 で作る。
+    //
+    // **既定ビルドの主張は「writable=false で張った葉に Ring 3 が書くと #PF になる」**
+    // で、ring3-vectors の 6 本目（#PF-write-ro）がそれを見ている。この破壊は
+    // W=0 を作らせないので、Ring 3 の書きが通り、命令列の末尾に置いた ud2 が
+    // ベクタ 6 で畳まれる。判定行が「ベクタが違う」と言って止まる。
+    //
+    // **feature 名は paging-test の傘に入れていない。** 傘に入れると Ring 3 の
+    // 検証自体が載らず、破壊を観測する側が消える。
+    CriticalTest {
+        name: "map-force-writable",
+        feature: "map-force-writable",
+        expected_markers: &["#PF-write-ro folded with vector=6", "halting"],
+        forbidden_markers: &["ring3-vectors: all six Ring 3 faults"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // 正しい実装で、PCD 付きの 2MiB ページを分割しても属性が残ること。
     // わざと壊す側（drop-pcd）と対にして初めて意味を持つ。
     CriticalTest {
@@ -6544,7 +6561,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 20,
-    full: 115,
+    full: 116,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
