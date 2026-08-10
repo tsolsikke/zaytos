@@ -1543,6 +1543,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // 新しいアドレス空間へ区画が張れること、**張った葉の W が区画の権限どおりで
     // あること**を見る。
     verify_embedded_user_elf(&mut logger);
+    verify_corrupt_user_elf_is_rejected(&mut logger);
     if let Err(error) = load_embedded_user_program(&mut logger, &mut allocator) {
         // **この段ではまだ止める。** 既定の `hello` は成功するので、ここへは来ない。
         // 壊した像を渡してプロセスだけを失敗させるのは S9-b-2 の 2 つ目である。
@@ -3715,6 +3716,208 @@ enum UserLoadError {
     UnexpectedFold,
     /// `write` が届けたバイト列が予期と違った。
     WriteMismatch,
+}
+
+/// 壊した像を組み立てる作業領域（S9-b-2）。
+///
+/// **スタックへ置かない。** 8 KiB を超える単一のローカル配列は
+/// `docs/deferred-decisions.md` の「大きなスタック配列とガード幅」の解禁条件に
+/// 当たる。**静的領域なら当たらない。**
+static mut CORRUPT_IMAGE: [u8; HELLO_ELF.len()] = [0; HELLO_ELF.len()];
+
+/// 壊し方 1 つ分の記述（S9-b-2）。
+///
+/// **1 か所だけを壊す。** 2 か所壊すと、どちらで拒まれたのかが分からない。
+struct CorruptCase {
+    /// 判定行に出す壊し方の説明。**「何をしたか」を書く。**
+    what: &'static str,
+    /// 書き換える位置（0 なら [`CorruptCase::truncate_to`] を使う）。
+    offset: usize,
+    /// 書き込む値（リトルエンディアン）。
+    value: u64,
+    /// 書き込む幅（バイト）。0 なら書き換えない。
+    width: usize,
+    /// 像をこの長さへ切り詰める（0 なら切り詰めない）。
+    truncate_to: usize,
+    /// 期待する拒否理由。
+    expected: common::elf::ElfError,
+}
+
+/// 壊した像がパーサに拒まれることを確かめる（S9-b-2）。
+///
+/// # 既定ビルドで常に走らせる
+///
+/// **破壊 feature の中だけで壊すと、「壊す処理そのものが壊れている」ことに
+/// 気づけない。** 既定で毎回壊し、毎回拒まれることを主張すれば、
+/// **壊す側と拒む側の両方が守られる。**
+///
+/// # 像は 1 つ。壊すのは実行時である
+///
+/// 壊した像を埋め込みで増やす案は採らなかった。**`ElfError` は 11 種あり、
+/// 種類ごとに像を持つと本数がそのまま費用になる**（`rustc` の呼び出しも
+/// イメージの大きさも）。実行時に 1 バイトから 8 バイト書き換えれば全種を作れる。
+///
+/// **「壊した像がどこから来たか読めない」という欠点は、判定行に壊し方を
+/// 書いて消してある**（`what` の欄）。
+fn verify_corrupt_user_elf_is_rejected(logger: &mut Logger<SerialPort>) {
+    use common::elf::{Elf, ElfError};
+
+    const EI_CLASS: usize = 4;
+    const EI_DATA: usize = 5;
+    const E_TYPE: usize = 16;
+    const E_MACHINE: usize = 18;
+    const E_PHOFF: usize = 32;
+    const E_PHENTSIZE: usize = 54;
+    /// 先頭のプログラムヘッダの位置。`hello` の `e_phoff` は 64 である。
+    const PHDR0: usize = 64;
+    const P_OFFSET: usize = 8;
+    const P_VADDR: usize = 16;
+    const P_MEMSZ: usize = 40;
+
+    let len = HELLO_ELF.len();
+    let cases: [CorruptCase; 11] = [
+        CorruptCase {
+            what: "truncated to 32 bytes",
+            offset: 0,
+            value: 0,
+            width: 0,
+            truncate_to: 32,
+            expected: ElfError::TooShort,
+        },
+        CorruptCase {
+            what: "magic byte 0 set to 0",
+            offset: 0,
+            value: 0,
+            width: 1,
+            truncate_to: 0,
+            expected: ElfError::BadMagic,
+        },
+        CorruptCase {
+            what: "EI_CLASS set to ELFCLASS32",
+            offset: EI_CLASS,
+            value: 1,
+            width: 1,
+            truncate_to: 0,
+            expected: ElfError::NotElf64,
+        },
+        CorruptCase {
+            what: "EI_DATA set to big endian",
+            offset: EI_DATA,
+            value: 2,
+            width: 1,
+            truncate_to: 0,
+            expected: ElfError::NotLittleEndian,
+        },
+        CorruptCase {
+            what: "e_type set to ET_REL",
+            offset: E_TYPE,
+            value: 1,
+            width: 2,
+            truncate_to: 0,
+            expected: ElfError::NotExecutable,
+        },
+        CorruptCase {
+            what: "e_machine set to EM_386",
+            offset: E_MACHINE,
+            value: 3,
+            width: 2,
+            truncate_to: 0,
+            expected: ElfError::NotX86_64,
+        },
+        CorruptCase {
+            what: "e_phoff pushed past the end",
+            offset: E_PHOFF,
+            value: len as u64 + 0x1000,
+            width: 8,
+            truncate_to: 0,
+            expected: ElfError::ProgramHeaderOutOfBounds,
+        },
+        CorruptCase {
+            what: "e_phentsize set to 8",
+            offset: E_PHENTSIZE,
+            value: 8,
+            width: 2,
+            truncate_to: 0,
+            expected: ElfError::BadProgramHeaderEntrySize,
+        },
+        CorruptCase {
+            what: "p_offset of the first segment pushed past the end",
+            offset: PHDR0 + P_OFFSET,
+            value: len as u64 + 1,
+            width: 8,
+            truncate_to: 0,
+            expected: ElfError::SegmentFileRangeOutOfBounds,
+        },
+        CorruptCase {
+            what: "p_memsz of the first segment made smaller than p_filesz",
+            offset: PHDR0 + P_MEMSZ,
+            value: 1,
+            width: 8,
+            truncate_to: 0,
+            expected: ElfError::SegmentMemorySmallerThanFile,
+        },
+        CorruptCase {
+            what: "p_vaddr of the first segment set to u64::MAX",
+            offset: PHDR0 + P_VADDR,
+            value: u64::MAX,
+            width: 8,
+            truncate_to: 0,
+            expected: ElfError::SegmentAddressOverflow,
+        },
+    ];
+
+    let mut rejected = 0usize;
+    for case in cases {
+        // 毎回、健全な像から作り直す。**前の壊し方が残らないようにする。**
+        // SAFETY: 起動時の単一実行文脈で、この静的領域を触るのはここだけである。
+        let image = unsafe {
+            let buf = &mut *core::ptr::addr_of_mut!(CORRUPT_IMAGE);
+            buf.copy_from_slice(HELLO_ELF);
+            for i in 0..case.width {
+                buf[case.offset + i] = ((case.value >> (i * 8)) & 0xFF) as u8;
+            }
+            if case.truncate_to != 0 {
+                &buf[..case.truncate_to]
+            } else {
+                &buf[..]
+            }
+        };
+
+        match Elf::parse(image) {
+            Ok(_) => {
+                logger.error(format_args!(
+                    "user-elf-corrupt: {} was accepted; expected {:?}; halting",
+                    case.what, case.expected
+                ));
+                cpu::halt_forever();
+            }
+            Err(e) if e != case.expected => {
+                logger.error(format_args!(
+                    "user-elf-corrupt: {} was rejected as {e:?}, expected {:?}; halting",
+                    case.what, case.expected
+                ));
+                cpu::halt_forever();
+            }
+            Err(e) => {
+                logger.info(format_args!("user-elf-corrupt: {} -> {e:?}", case.what));
+                rejected += 1;
+            }
+        }
+    }
+
+    logger.info(format_args!(
+        "user-elf-corrupt: all {rejected} corrupted image(s) were rejected with the expected \
+         reason, and the kernel continued (the good image is untouched; each case patches a \
+         fresh copy)"
+    ));
+
+    // 壊した後も健全な像が読めること。**壊す処理が元を汚していないことの主張である。**
+    if Elf::parse(HELLO_ELF).is_err() {
+        logger.error(format_args!(
+            "user-elf-corrupt: the good image no longer parses after the corruption pass; halting"
+        ));
+        cpu::halt_forever();
+    }
 }
 
 /// ユーザープログラムを走らせる空間のユーザーサブツリーの添字（S9-b-1）。
