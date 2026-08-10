@@ -1830,7 +1830,8 @@ fn exception_frame_is_trustworthy(vector: u8, cs: u64, handler_rsp: u64) -> bool
     handler_rsp >= bottom && handler_rsp < top
 }
 
-/// 例外の共通処理。レジスタ一式をシリアルへ出して停止する。
+/// 例外の共通処理。Ring 3 由来の 4 ベクタは畳んで遠征の呼び出し元へ戻し（S8）、
+/// それ以外はレジスタ一式をシリアルへ出して停止する。
 ///
 /// スタブから `extern "sysv64"` で呼ばれる。Rust の既定 ABI はレイアウトが
 /// 安定していないため、アセンブリから呼ぶ関数には使えない（M2-0c の
