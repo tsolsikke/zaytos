@@ -159,7 +159,10 @@ static FAULT_ERROR_CODE: AtomicU64 = AtomicU64::new(0);
 extern "C" {
     /// 偽フレームを積んで Ring 3 へ iretq する（setjmp 相当を内包）。畳みで
     /// 戻ってくると、あたかも通常に return したように呼び出し元へ戻る。
-    fn zaytos_enter_ring3();
+    ///
+    /// **飛び先と Ring 3 のスタック上端は引数で受け取る**（S9-a）。RDI が
+    /// `user_rip`、RSI が `user_stack_top` である（System V の第 1・第 2 引数）。
+    fn zaytos_enter_ring3(user_rip: u64, user_stack_top: u64);
     /// [`RECOVERY`] から RSP と callee-saved を復元し、復帰 RIP へ飛ぶ
     /// （longjmp 相当）。戻らない。
     fn zaytos_resume_from_ring3() -> !;
@@ -187,18 +190,17 @@ core::arch::global_asm!(
     "  lea rcx, [rip + 3f]",
     "  mov [rax + 56], rcx",
     // iretq 偽フレームを積む。pop 順は RIP,CS,RFLAGS,RSP,SS なので、push は
-    // 逆順（SS を先＝高位、RIP を最後＝低位）。RSP/RIP は 512 GiB 付近で
-    // imm32 に収まらないため mov 経由で積む。
+    // 逆順（SS を先＝高位、RIP を最後＝低位）。セレクタと RFLAGS は定数なので
+    // mov 経由で積む。**飛び先とユーザー RSP は引数で受け取る**（RDI/RSI）。
+    // 上の setjmp 相当が使うのは rax と rcx だけなので、RDI/RSI はここまで生きている。
     "  mov rax, {ss}",
     "  push rax",
-    "  mov rax, {user_rsp}",
-    "  push rax",
+    "  push rsi",
     "  mov rax, {rflags}",
     "  push rax",
     "  mov rax, {cs}",
     "  push rax",
-    "  mov rax, {user_rip}",
-    "  push rax",
+    "  push rdi",
     "  iretq",
     // 復帰点（畳みだけがここへ来る。RSP と callee-saved は longjmp が復元済み）。
     "3:",
@@ -207,8 +209,6 @@ core::arch::global_asm!(
     ss = const gdt::USER_DATA_SELECTOR.bits() as u64,
     cs = const gdt::USER_CODE_SELECTOR.bits() as u64,
     rflags = const 0x202u64,
-    user_rsp = const USER_STACK_TOP,
-    user_rip = const USER_CODE_VIRT,
 );
 
 // 畳み（longjmp）。RECOVERY から RSP と callee-saved を復元し、復帰 RIP へ飛ぶ。
@@ -239,8 +239,19 @@ pub fn excursion_stack_range() -> (u64, u64) {
 /// Ring 3 へ 1 回遠征する。戻ってきたら（畳みで）会計を返す。
 ///
 /// RSP0 を遠征専用スタックへ据え、遠征フラグを立て、iretq で Ring 3 へ落ちる。
-/// Ring 3 が起こした #GP を `exception_entry` が畳み、ここへ戻る。戻ったら RSP0 を
+/// Ring 3 が起こした例外を `exception_entry` が畳み、ここへ戻る。戻ったら RSP0 を
 /// メインの上端へ戻す。
+///
+/// # 飛び先は呼び出し側が渡す（S9-a）
+///
+/// **`user_rip` と `user_stack_top` は引数である。** かつては `global_asm!` が
+/// [`USER_CODE_VIRT`] と [`USER_STACK_TOP`] を `const` で埋めており、遠征は 1 か所へ
+/// しか落ちられなかった。**ELF から読み込んだプログラムの入口へ落ちるには、
+/// 飛び先を実行時に決められる必要がある。**
+///
+/// **この段では振る舞いを変えていない。** 呼び出し側は 4 か所とも従来と同じ
+/// [`USER_CODE_VIRT`] と [`USER_STACK_TOP`] を渡す。変えたのは、値が固定である
+/// ことをやめた点だけである。
 ///
 /// **どこで畳まれたかは呼び出し側が主張する。** [`folded`]・[`fault_vector`]・
 /// [`fault_rip`] を読み、自分が置いた命令の位置と突き合わせること。この関数は
@@ -248,11 +259,12 @@ pub fn excursion_stack_range() -> (u64, u64) {
 ///
 /// # Safety
 ///
-/// 呼び出し前に、ユーザーコードとユーザースタックが `PML4` のユーザーサブツリーに
-/// U=1 で張られており、Ring 3 が #GP を起こすこと。`main_rsp0_top` が呼び出し元
-/// （メイン）のカーネルスタック上端で、遠征後に RSP0 をそこへ戻せること。
-/// 起動時の単一実行文脈から呼ぶこと。
-pub unsafe fn enter(main_rsp0_top: u64) {
+/// 呼び出し前に、`user_rip` と `user_stack_top` が `PML4` のユーザーサブツリーに
+/// U=1 で張られており、`user_rip` に置いた命令列が必ずフォルトすること。
+/// `user_stack_top` は 1 ページ内の上端で、Ring 3 が push できること。
+/// `main_rsp0_top` が呼び出し元（メイン）のカーネルスタック上端で、遠征後に
+/// RSP0 をそこへ戻せること。起動時の単一実行文脈から呼ぶこと。
+pub unsafe fn enter(main_rsp0_top: u64, user_rip: u64, user_stack_top: u64) {
     let (_, excursion_top) = excursion_stack_range();
 
     FOLDED.store(false, Ordering::SeqCst);
@@ -283,7 +295,7 @@ pub unsafe fn enter(main_rsp0_top: u64) {
     // SAFETY: 偽フレームを積んで Ring 3 へ落ちる。ユーザーページは呼び出し側が
     // 張り済み。畳みで戻ってくる（callee-saved と RSP は longjmp が復元する）。
     unsafe {
-        zaytos_enter_ring3();
+        zaytos_enter_ring3(user_rip, user_stack_top);
     }
 
     // データセグメントを復元する。**iretq で Ring 3（低特権）へ落ちるとき、CPU は

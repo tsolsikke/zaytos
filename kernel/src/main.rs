@@ -3542,12 +3542,25 @@ fn switch_keyboard_to_io_apic(
     ));
 }
 
-/// M5-e で使うユーザー空間の PML4 インデックス。空きの下位半分の先頭。
+/// 本番のアドレス空間で使うユーザー空間の PML4 インデックス。空きの下位半分の先頭。
 ///
-/// higher-half B までの暫定である。現在カーネルは PML4[0]（下位半分）に恒等で居るので、
-/// Linux 型の「下位=ユーザー / 上位=カーネル」はまだ成立していない。B でカーネルを
-/// 上位へ移し恒等を外せば、ユーザー空間を通常の低位へ広げられる
-/// （deferred-decisions.md）。
+/// # 値は暫定のままである。理由は S7-e で変わった
+///
+/// **かつての理由は「カーネルが PML4[0] に恒等で居るので PML4[0] を空けられない」
+/// だった。これは B-2b で成立しなくなっている**（カーネルは上位半分へ移り、恒等は
+/// 落ちている。[`kernel::address_space`] のモジュール doc）。**PML4[0] は空いており、
+/// ユーザー空間を通常の低位へ広げること自体は今できる。**
+///
+/// **それでも動かしていないのは、動かした先が正しいかを確かめる相手がいないため
+/// である**（S7-e で見送った理由）。値を変えても、その値でプログラムが走るところを
+/// 誰も見ていなければ、検査の無い変更になる。**解禁条件は
+/// 「ユーザープログラムを実際に置き、そのアドレスが正しいかを確かめる相手が
+/// できたとき」である**（`docs/deferred-decisions.md`）。
+///
+/// # これは「本番の空間の」添字であって、「すべての空間の」ではない
+///
+/// S7-e 以降、[`kernel::address_space::AddressSpace`] は自分のユーザーサブツリーの
+/// 添字を持つ。**プロセスごとに違ってよい。** ここにあるのは本番の空間の値である。
 pub const USER_PML4_INDEX: usize = 1;
 
 /// ユーザーページのマッピング能力を検証する（M5-e-2）。
@@ -3839,7 +3852,7 @@ fn verify_ring3_excursion<const CAP: usize>(
     // SAFETY: ユーザーページは張り済み。main_rsp0_top はメインの上端なので、遠征後に
     // RSP0 をそこへ戻せる。起動時の単一実行文脈から 1 回だけ呼ぶ。
     unsafe {
-        ring3::enter(main_rsp0_top);
+        ring3::enter(main_rsp0_top, ring3::USER_CODE_VIRT, ring3::USER_STACK_TOP);
     }
 
     // --- 会計と検証 ---
@@ -4056,7 +4069,7 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     // SAFETY: ユーザーページは張り済み。Ring 3 は cli_rip で cli を実行して #GP を起こす。
     // main_rsp0_top はメインの上端。起動時の単一実行文脈から 1 回だけ呼ぶ。
     unsafe {
-        ring3::enter(main_rsp0_top);
+        ring3::enter(main_rsp0_top, ring3::USER_CODE_VIRT, ring3::USER_STACK_TOP);
     }
 
     // --- 会計と検証 ---
@@ -4229,7 +4242,7 @@ fn issue_ptr_len_syscall(logger: &mut Logger<SerialPort>, number: u64, buf: u64,
     // SAFETY: ユーザーページは張り済み。Ring 3 は cli_rip で cli を実行して #GP を起こす。
     // main_rsp0_top はメインの上端。起動時の単一実行文脈から呼ぶ。
     unsafe {
-        ring3::enter(main_rsp0_top);
+        ring3::enter(main_rsp0_top, ring3::USER_CODE_VIRT, ring3::USER_STACK_TOP);
     }
 
     if !ring3::folded() {
@@ -4476,8 +4489,8 @@ fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
 ///
 /// # 4 本とも同じユーザーコードページを使い回す
 ///
-/// [`ring3::enter`] は常に [`ring3::USER_CODE_VIRT`] へ `iretq` するので、
-/// 遠征のたびにそのページの先頭へ別の命令列を書く。**ページが書き込み可能なのは、
+/// この 6 本はいずれも [`ring3::USER_CODE_VIRT`] を飛び先として [`ring3::enter`] へ
+/// 渡すので、遠征のたびにそのページの先頭へ別の命令列を書く。**ページが書き込み可能なのは、
 /// `verify_ring3_excursion` がコードページを `writable: true` で張っているから
 /// である。** S9-a より前は `map_4kib` が葉を常に W=1 で作っており、選ぶ余地が
 /// 無かった。**6 本目（`#PF-write-ro`）だけは `writable: false` で張った別の
@@ -4596,7 +4609,7 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
         // SAFETY: ユーザーページは張り済みで、今書いた命令列が必ずフォルトする。
         // main_rsp0_top はメインの上端。起動時の単一実行文脈から呼ぶ。
         unsafe {
-            ring3::enter(main_rsp0_top);
+            ring3::enter(main_rsp0_top, ring3::USER_CODE_VIRT, ring3::USER_STACK_TOP);
         }
 
         if !ring3::folded() {
