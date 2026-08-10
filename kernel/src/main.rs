@@ -1543,7 +1543,14 @@ extern "sysv64" fn kernel_main() -> ! {
     // 新しいアドレス空間へ区画が張れること、**張った葉の W が区画の権限どおりで
     // あること**を見る。
     verify_embedded_user_elf(&mut logger);
-    load_embedded_user_program(&mut logger, &mut allocator);
+    if let Err(error) = load_embedded_user_program(&mut logger, &mut allocator) {
+        // **この段ではまだ止める。** 既定の `hello` は成功するので、ここへは来ない。
+        // 壊した像を渡してプロセスだけを失敗させるのは S9-b-2 の 2 つ目である。
+        logger.error(format_args!(
+            "user-load: loading the embedded hello failed: {error:?}; halting"
+        ));
+        cpu::halt_forever();
+    }
 
     // === M4-d-2: タイマを動かす ===
     //
@@ -3650,6 +3657,66 @@ fn verify_embedded_user_elf(logger: &mut Logger<SerialPort>) {
     ));
 }
 
+/// 埋め込んだユーザープログラムのロードと実行が失敗する形（S9-b-2）。
+///
+/// # なぜ `Result` にしたか
+///
+/// **S9-b-1 では失敗のたびに `halt_forever` していた。** 相手が自分のビルドの
+/// 作った像だったので、壊れていればカーネルの不具合であり、止まるのが正しかった。
+/// **S9-b-2 は壊した像を意図的に渡すので、止まってはいけない。**
+///
+/// **この段では呼び出し側がまだ止める。** 既定の `hello` は成功するので、
+/// 振る舞いは変わらない。壊した像を渡すのは S9-b-2 の 2 つ目である。
+///
+/// # `ElfError` の 11 種をどう扱うか
+///
+/// [`common::elf::ElfError`] が返るのは [`Self::Parse`]（`Elf::parse`）と
+/// [`Self::SegmentData`]（`Elf::segment_data`）で、**どちらもそのまま持ち上げる。**
+/// **ローダーは種類で分岐しない。** 内訳は次のとおりで、**すべて「像が壊れている」
+/// に落ちる。**
+///
+/// - `TooShort` / `BadMagic` / `NotElf64` / `NotLittleEndian` / `NotExecutable` /
+///   `NotX86_64`: ヘッダの形。**`parse` の最初の 6 つで、いずれも 1 バイトの
+///   書き換えで作れる**
+/// - `ProgramHeaderOutOfBounds` / `BadProgramHeaderEntrySize`: 表の位置と 1 エントリの
+///   大きさ。**`e_phoff` と `e_phentsize` の書き換えで作れる**
+/// - `SegmentFileRangeOutOfBounds` / `SegmentMemorySmallerThanFile` /
+///   `SegmentAddressOverflow`: 区画の数値。**`p_offset` / `p_filesz` / `p_memsz` /
+///   `p_vaddr` の書き換えで作れる**
+///
+/// **11 種とも、既定の像の 1 バイトから 8 バイトを書き換えれば作れる。**
+/// S9-b-2 の 2 つ目で壊し方を選ぶときの材料である。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UserLoadError {
+    /// `Elf::parse` が拒んだ。**像がバイト列として壊れている。**
+    Parse(common::elf::ElfError),
+    /// `Elf::segment_data` が拒んだ。**区画のファイル内範囲が像の外にある。**
+    ///
+    /// **`parse` も同じことを見ているので、通常はここへ来ない。** 来るとしたら
+    /// 呼び出し側が `parse` を通さないヘッダを渡したときで、**多層防御の 2 枚目が
+    /// 効いた形である。**
+    SegmentData(common::elf::ElfError),
+    /// 新しいアドレス空間を作れなかった。**像ではなくカーネル側の事情である。**
+    AddressSpace(kernel::address_space::AddressSpaceError),
+    /// フレームが尽きた。**像ではなくカーネル側の事情である。**
+    OutOfFrames,
+    /// 張ろうとした仮想アドレスが正準形でない。
+    NotCanonical(u64),
+    /// 写像に失敗した。**区画が同じページを共有していると、後から来たほうがここへ来る。**
+    Mapping {
+        virt: u64,
+        error: kernel::address_space::AddressSpaceError,
+    },
+    /// 張った葉のフラグが、区画の権限と食い違った。**カーネル側の不具合である。**
+    LeafFlags { count: usize },
+    /// Ring 3 から畳まずに戻ってきた。**カーネル側の不具合である。**
+    DidNotFold,
+    /// 畳んだが、ベクタ・RIP・CS のどれかが予期と違った。
+    UnexpectedFold,
+    /// `write` が届けたバイト列が予期と違った。
+    WriteMismatch,
+}
+
 /// ユーザープログラムを走らせる空間のユーザーサブツリーの添字（S9-b-1）。
 ///
 /// **[`USER_PML4_INDEX`]（= 1）とは別である。** あちらは本番の空間の値で、
@@ -3704,7 +3771,7 @@ const HELLO_MESSAGE: &str = "hello from ring 3\n";
 fn load_embedded_user_program(
     logger: &mut Logger<SerialPort>,
     allocator: &mut kernel::frame_allocator::FrameAllocator,
-) {
+) -> Result<(), UserLoadError> {
     use common::elf::Elf;
     use kernel::address_space::AddressSpace;
     use kernel::paging::active::PageAttributes;
@@ -3717,12 +3784,7 @@ fn load_embedded_user_program(
 
     let elf = match Elf::parse(HELLO_ELF) {
         Ok(elf) => elf,
-        Err(e) => {
-            logger.error(format_args!(
-                "user-load: hello did not parse: {e:?}; halting"
-            ));
-            cpu::halt_forever();
-        }
+        Err(e) => return Err(UserLoadError::Parse(e)),
     };
 
     // SAFETY: production は稼働中の PML4、direct_map は登録済みの窓。
@@ -3730,12 +3792,7 @@ fn load_embedded_user_program(
         AddressSpace::new(allocator, direct_map, production, USER_PROGRAM_PML4_INDEX)
     } {
         Ok(space) => space,
-        Err(e) => {
-            logger.error(format_args!(
-                "user-load: could not create the address space: {e:?}; halting"
-            ));
-            cpu::halt_forever();
-        }
+        Err(e) => return Err(UserLoadError::AddressSpace(e)),
     };
 
     // 張った VA と、期待する W を覚えておく（後で読み戻して照合する）。
@@ -3749,20 +3806,13 @@ fn load_embedded_user_program(
 
         let file = match elf.segment_data(&ph) {
             Ok(bytes) => bytes,
-            Err(e) => {
-                logger.error(format_args!(
-                    "user-load: segment at {:#x} is out of file range: {e:?}; halting",
-                    ph.p_vaddr
-                ));
-                cpu::halt_forever();
-            }
+            Err(e) => return Err(UserLoadError::SegmentData(e)),
         };
 
         let mut page = first_page;
         while page <= last_page {
             let Some(frame) = allocator.allocate_frame() else {
-                logger.error(format_args!("user-load: out of frames; halting"));
-                cpu::halt_forever();
+                return Err(UserLoadError::OutOfFrames);
             };
 
             // **ゼロ埋めしてからファイルの中身を重ねる。** `p_memsz` が `p_filesz` より
@@ -3793,10 +3843,7 @@ fn load_embedded_user_program(
             }
 
             let Some(virt) = common::addr::VirtAddr::new(page) else {
-                logger.error(format_args!(
-                    "user-load: the page VA {page:#x} is not canonical; halting"
-                ));
-                cpu::halt_forever();
+                return Err(UserLoadError::NotCanonical(page));
             };
             // 破壊 (S9-b-1, user-run-writable-text): 区画の権限を無視して書けるように
             // 張る。**読み取り専用のはずの葉が W=1 になり、下の読み戻しが捕まえる。**
@@ -3809,10 +3856,10 @@ fn load_embedded_user_program(
             if let Err(e) =
                 unsafe { space.map_user_4kib(allocator, direct_map, virt, frame, attributes) }
             {
-                logger.error(format_args!(
-                    "user-load: mapping {page:#x} failed: {e:?}; halting"
-                ));
-                cpu::halt_forever();
+                return Err(UserLoadError::Mapping {
+                    virt: page,
+                    error: e,
+                });
             }
 
             if mapped_count < mapped.len() {
@@ -3834,19 +3881,13 @@ fn load_embedded_user_program(
     // ユーザースタックを 1 枚。**こちらは書ける。**
     let stack_page = USER_PROGRAM_STACK_TOP - PAGE_SIZE;
     let Some(frame) = allocator.allocate_frame() else {
-        logger.error(format_args!(
-            "user-load: out of frames for the stack; halting"
-        ));
-        cpu::halt_forever();
+        return Err(UserLoadError::OutOfFrames);
     };
     let dst = direct_map.phys_to_virt(frame).as_u64() as *mut u8;
     // SAFETY: いま取ったフレーム。direct map が覆っている。
     unsafe { core::ptr::write_bytes(dst, 0, PAGE_SIZE as usize) };
     let Some(stack_virt) = common::addr::VirtAddr::new(stack_page) else {
-        logger.error(format_args!(
-            "user-load: the stack VA is not canonical; halting"
-        ));
-        cpu::halt_forever();
+        return Err(UserLoadError::NotCanonical(stack_page));
     };
     let stack_attributes = PageAttributes {
         user: true,
@@ -3857,10 +3898,10 @@ fn load_embedded_user_program(
     if let Err(e) =
         unsafe { space.map_user_4kib(allocator, direct_map, stack_virt, frame, stack_attributes) }
     {
-        logger.error(format_args!(
-            "user-load: mapping the stack at {stack_page:#x} failed: {e:?}; halting"
-        ));
-        cpu::halt_forever();
+        return Err(UserLoadError::Mapping {
+            virt: stack_page,
+            error: e,
+        });
     }
     if mapped_count < mapped.len() {
         mapped[mapped_count] = (stack_page, true);
@@ -3901,10 +3942,7 @@ fn load_embedded_user_program(
     }
 
     if mismatches != 0 {
-        logger.error(format_args!(
-            "user-load: {mismatches} leaf/leaves did not carry the expected flags; halting"
-        ));
-        cpu::halt_forever();
+        return Err(UserLoadError::LeafFlags { count: mismatches });
     }
 
     // === Ring 3 で走らせる（S9-b-1 の 4 つ目） ===
@@ -3936,10 +3974,7 @@ fn load_embedded_user_program(
     unsafe { kernel::paging::switch::switch_to(production) };
 
     if !kernel::ring3::folded() {
-        logger.error(format_args!(
-            "user-run: hello returned without folding; halting"
-        ));
-        cpu::halt_forever();
+        return Err(UserLoadError::DidNotFold);
     }
 
     let vector = kernel::ring3::fault_vector();
@@ -3959,29 +3994,29 @@ fn load_embedded_user_program(
 
     if vector != 6 {
         logger.error(format_args!(
-            "user-run: expected #UD (6) from the trailing ud2, got vector={vector}; halting"
+            "user-run: expected #UD (6) from the trailing ud2, got vector={vector}"
         ));
-        cpu::halt_forever();
+        return Err(UserLoadError::UnexpectedFold);
     }
     if rip != expected_rip {
         logger.error(format_args!(
-            "user-run: folded at {rip:#x}, expected {expected_rip:#x} (entry + {HELLO_UD2_OFFSET:#x}); halting"
+            "user-run: folded at {rip:#x}, expected {expected_rip:#x} (entry + {HELLO_UD2_OFFSET:#x})"
         ));
-        cpu::halt_forever();
+        return Err(UserLoadError::UnexpectedFold);
     }
     if (cs & 0b11) != 3 {
         logger.error(format_args!(
-            "user-run: the fault did not come from Ring 3 (cs={cs:#x}); halting"
+            "user-run: the fault did not come from Ring 3 (cs={cs:#x})"
         ));
-        cpu::halt_forever();
+        return Err(UserLoadError::UnexpectedFold);
     }
     if kernel::syscall::last_write_fd() != 1 || message != HELLO_MESSAGE {
         logger.error(format_args!(
             "user-run: write did not deliver the expected bytes (fd={}, got {message:?}, \
-             expected {HELLO_MESSAGE:?}); halting",
+             expected {HELLO_MESSAGE:?})",
             kernel::syscall::last_write_fd()
         ));
-        cpu::halt_forever();
+        return Err(UserLoadError::WriteMismatch);
     }
 
     // **走り終わったので空間を畳む。** 破棄は S7-d の経路
@@ -3999,6 +4034,7 @@ fn load_embedded_user_program(
          int 0x80, and the kernel continued after the fold; the space was destroyed \
          (quarantined={held} leaked={leaked})"
     ));
+    Ok(())
 }
 
 /// 本番のアドレス空間で使うユーザー空間の PML4 インデックス。空きの下位半分の先頭。
