@@ -3711,10 +3711,25 @@ enum UserLoadError {
     },
     /// 張った葉のフラグが、区画の権限と食い違った。**カーネル側の不具合である。**
     LeafFlags { count: usize },
-    /// Ring 3 から畳まずに戻ってきた。**カーネル側の不具合である。**
-    DidNotFold,
-    /// 畳んだが、ベクタ・RIP・CS のどれかが予期と違った。
-    UnexpectedFold,
+    /// 終了せずに畳まれた（S9-b-3-1）。**`exit` が効かなかったということである。**
+    ///
+    /// `hello` は `exit` の直後に `ud2` を置いてあるので、**効かなければ確定的に
+    /// ここへ来る**（`HELLO_UD2_OFFSET` の doc）。
+    DidNotExit,
+    /// 終了でも畳みでもなく Ring 3 から戻ってきた。**カーネル側の不具合である。**
+    ///
+    /// `ring3::enter` はこの 2 つの longjmp でしか戻らないので、**通常は構成でき
+    /// ない。** 記録の側が壊れたときの受け皿である。
+    NoExitNoFold,
+    /// 終了状態が予期と違った。`hello` は 0 で終わる。
+    ExitStatus(u64),
+    /// 畳んだ会計が合わなかった（S9-b-3-1）。**空間を畳んでも、消えたフレームが
+    /// 隔離へ届いていない。**
+    DestroyAccounting {
+        consumed: usize,
+        quarantined: usize,
+        leaked: usize,
+    },
     /// `write` が届けたバイト列が予期と違った。
     WriteMismatch,
 }
@@ -3937,11 +3952,15 @@ const USER_PROGRAM_PML4_INDEX: usize = 0;
 /// `hello` の像は `0x400000` から 2 ページなので、十分離れた位置に置く。
 const USER_PROGRAM_STACK_TOP: u64 = 0x0080_0000;
 
-/// `hello` の `ud2` が entry から何バイト目にあるか（S9-b-1）。
+/// `hello` の `ud2` が entry から何バイト目にあるか（S9-b-1、S9-b-3-1 で移った）。
 ///
-/// **`kernel/userland/hello.rs` の `.org 0x20` と対になっている。** 値を 2 か所で
+/// **`kernel/userland/hello.rs` の `.org 0x30` と対になっている。** 値を 2 か所で
 /// 持つが、**食い違えば下の判定行が落ちる**ので静かには残らない。
-const HELLO_UD2_OFFSET: u64 = 0x20;
+///
+/// **役割が変わった。** S9-b-1 では `hello` の出口そのもの（畳んで戻る）だったが、
+/// S9-b-3-1 で出口は `exit` になった。**いまは `exit` が効かなかったときの受け皿で
+/// ある。** 既定ビルドでここへは来ない。来たら `user-run` の判定行が止める。
+const HELLO_UD2_OFFSET: u64 = 0x30;
 
 /// `hello` が `write` で送るはずのバイト列（S9-b-1）。
 const HELLO_MESSAGE: &str = "hello from ring 3\n";
@@ -4048,9 +4067,21 @@ fn load_user_program(
     let outcome = load_user_program_into(logger, allocator, image, &mut process, run);
 
     // **成否によらず畳む。** 破棄は S7-d の経路（下位を隔離へ入れ、世代が
-    // 退くまで返さない）をそのまま通る。
-    let mut quarantine = kernel::quarantine::Quarantine::new();
-    let (held, leaked) = {
+    // 退くまで返さない）をそのまま通る。**プロセスが終了したなら、畳むのはここ
+    // である**（S9-b-3-1。終了の記録は `syscall` 側、空間の始末はこちら）。
+    //
+    // 破壊 (S9-b-3-1, user-exit-keep-space): 畳まない。**消えたフレーム数と隔離へ
+    // 入れた数の会計が合わなくなり、呼び出し側が捕まえる**（`AddressSpace` は
+    // `Drop` を持たないので、落とすだけではフレームは戻らない）。
+    //
+    // **走らせたときだけ飛ばす。** 壊した像の後始末（S9-b-2）はこの破壊の対象では
+    // なく、そちらまで飛ばすと**あちらの会計が先に落ちて、終了の側を観測できない。**
+    // **実測で踏んだ**——先に落ちるほうだけを見ていた。
+    let keep_space = cfg!(feature = "user-exit-keep-space") && run;
+    let (held, leaked) = if keep_space {
+        (0, 0)
+    } else {
+        let mut quarantine = kernel::quarantine::Quarantine::new();
         let guard = kernel::bkl::acquire(kernel::bkl::KernelEntry::SteadyLoop);
         // SAFETY: この空間はどのコアでも稼働していない。direct map は覆っている。
         unsafe { process.space.destroy(direct_map, &mut quarantine, &guard) }
@@ -4065,15 +4096,51 @@ fn load_embedded_user_program(
     allocator: &mut kernel::frame_allocator::FrameAllocator,
 ) -> Result<(), UserLoadError> {
     // **一覧を順に走らせる。** 現在は 1 本だが、S9-b-3-2 で 3 本になる。
-    // **1 本が失敗しても残りを走らせる形は、`exit` を足す後半で入れる**
-    // （今は失敗をそのまま返す。既定の `hello` は成功する）。
+    // **1 本が失敗しても残りを走らせる形は、失敗が到達条件の一部になる段
+    // （S9-b-3-2 の `fault-test`）で入れる**（今は失敗をそのまま返す。既定の
+    // `hello` は成功する）。
     for (name, image) in USER_PROGRAMS {
+        let free_before = allocator.free_frame_count();
         let (outcome, held, leaked) = load_user_program(logger, allocator, image, true, name);
         outcome?;
+
+        // **畳んだ会計。** 消えた枚数と隔離へ入れた枚数が一致すること。
+        // **空きフレームの絶対値は出さない**（コア数で変わる。
+        // `verify_corrupt_user_program_is_not_loaded` が同じ理由で差だけを出している）。
+        // **主張の前に確かめる。** 先に「畳んだ」と書くと、会計が合わない場合に
+        // **その行が偽のまま残る。**
+        let consumed = (free_before - allocator.free_frame_count()) as usize;
+        if consumed != held || leaked != 0 {
+            logger.error(format_args!(
+                "user-load: {name} left the allocator short: {consumed} frame(s) consumed but \
+                 {held} quarantined ({leaked} leaked)"
+            ));
+            return Err(UserLoadError::DestroyAccounting {
+                consumed,
+                quarantined: held,
+                leaked,
+            });
+        }
         logger.info(format_args!(
-            "user-load: {name} ran from its own address space, wrote through int 0x80, and the \
-             kernel continued after the fold; the space was destroyed (quarantined={held} \
-             leaked={leaked})"
+            "user-load: {name} ran as a process in its own address space, wrote through \
+             int 0x80, exited, and the kernel continued after the process was gone; the space \
+             was destroyed ({consumed} frame(s) left the allocator and {held} reached \
+             quarantine, match={} leaked={leaked})",
+            consumed == held
+        ));
+
+        // **空き範囲の数を別の行で出す。** フレームアロケータの容量（256）の
+        // 見直しは「プロセスが任意の順で終了する形になるとき」が条件で、
+        // **この段ではまだ足りている**（順に 1 本ずつなので同時生存は 1）。
+        // **増え方が見えていなければ、足りなくなる時期も見えない。**
+        //
+        // **行を分けてあるのは、この値が起動ごとに揺れるからである**（UEFI の
+        // メモリマップ由来。実測で 10 と 11 の両方が出た）。**上の会計と同じ行に
+        // すると、起動ログの参照からその会計ごと落ちる。**
+        logger.info(format_args!(
+            "user-load: the allocator holds {} free range(s) of {} after {name}",
+            allocator.free_range_count(),
+            kernel::frame_allocator::DEFAULT_CAPACITY
         ));
     }
     Ok(())
@@ -4402,42 +4469,56 @@ fn load_user_program_into(
     // SAFETY: 本番のテーブルへ戻す。上位は同じなので連続して実行できる。
     unsafe { kernel::paging::switch::switch_to(production) };
 
-    if !kernel::ring3::folded() {
-        return Err(UserLoadError::DidNotFold);
-    }
-
+    // === 戻ってきた。理由は 2 つに 1 つである（S9-b-3-1） ===
+    //
+    // **終了**（`exit` が `leave_ring3` を呼んだ）か、**畳み**（Ring 3 由来の例外を
+    // S8 の機構が受けた）である。`ring3::enter` はこの 2 つの longjmp でしか戻らない。
+    let exited = kernel::syscall::process_exited();
+    let status = kernel::syscall::process_exit_status();
+    let folded = kernel::ring3::folded();
     let vector = kernel::ring3::fault_vector();
     let rip = kernel::ring3::fault_rip();
     let cs = kernel::ring3::fault_cs();
-    let expected_rip = entry + HELLO_UD2_OFFSET;
+    let ud2_rip = entry + HELLO_UD2_OFFSET;
     let mut bytes = [0u8; kernel::syscall::WRITE_BUF_LEN];
     let written = kernel::syscall::last_write_bytes(&mut bytes);
     let message = core::str::from_utf8(&bytes[..written]).unwrap_or("<not utf-8>");
 
     logger.info(format_args!(
-        "user-run: hello ran in Ring 3 and folded (vector={vector} rip={rip:#x} cs={cs:#x}), \
-         write(fd={}, {written} byte(s)) said {:?}",
+        "user-run: {} left Ring 3 (exited={exited} status={status} folded={folded} \
+         vector={vector} rip={rip:#x} cs={cs:#x}), it made {} syscall(s) and the kernel was \
+         entered from Ring 3 ({}), write(fd={}, {written} byte(s)) said {:?}",
+        process.name,
+        kernel::syscall::invocation_count(),
+        kernel::syscall::in_ring3_at_entry(),
         kernel::syscall::last_write_fd(),
         message.trim_end()
     ));
 
-    if vector != 6 {
+    // **畳んで戻ったなら、`exit` が効かなかったということである。** 受け皿の `ud2` は
+    // entry + [`HELLO_UD2_OFFSET`] にあり、そこで畳まれたことまで出して原因を絞る。
+    if folded {
         logger.error(format_args!(
-            "user-run: expected #UD (6) from the trailing ud2, got vector={vector}"
+            "user-run: {} folded instead of exiting (vector={vector} rip={rip:#x} cs={cs:#x}); \
+             the trailing ud2 sits at {ud2_rip:#x} (entry + {HELLO_UD2_OFFSET:#x}), so exit did \
+             not take effect",
+            process.name
         ));
-        return Err(UserLoadError::UnexpectedFold);
+        return Err(UserLoadError::DidNotExit);
     }
-    if rip != expected_rip {
+    if !exited {
         logger.error(format_args!(
-            "user-run: folded at {rip:#x}, expected {expected_rip:#x} (entry + {HELLO_UD2_OFFSET:#x})"
+            "user-run: {} came back from Ring 3 without exiting and without folding",
+            process.name
         ));
-        return Err(UserLoadError::UnexpectedFold);
+        return Err(UserLoadError::NoExitNoFold);
     }
-    if (cs & 0b11) != 3 {
+    if status != 0 {
         logger.error(format_args!(
-            "user-run: the fault did not come from Ring 3 (cs={cs:#x})"
+            "user-run: {} exited with status {status}, expected 0",
+            process.name
         ));
-        return Err(UserLoadError::UnexpectedFold);
+        return Err(UserLoadError::ExitStatus(status));
     }
     if kernel::syscall::last_write_fd() != 1 || message != HELLO_MESSAGE {
         logger.error(format_args!(
@@ -6004,6 +6085,26 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "user-run-wrong-entry",
         cfg!(feature = "user-run-wrong-entry"),
         "entry ではなく PT_LOAD の先頭へ飛ぶ",
+    ),
+    (
+        "user-exit-ignored",
+        cfg!(feature = "user-exit-ignored"),
+        "exit を受けても終了させず Ring 3 へ返す",
+    ),
+    (
+        "user-exit-keep-bkl",
+        cfg!(feature = "user-exit-keep-bkl"),
+        "exit の分岐で BKL を解かずに longjmp する",
+    ),
+    (
+        "user-exit-keep-space",
+        cfg!(feature = "user-exit-keep-space"),
+        "終了しても空間を畳まない",
+    ),
+    (
+        "user-exit-wrong-status",
+        cfg!(feature = "user-exit-wrong-status"),
+        "終了状態を RDI でなく RSI から読む",
     ),
     (
         "syscall-test-einval-as-efault",

@@ -649,8 +649,10 @@ const RING3_TESTS: &[CriticalTest] = &[
     CriticalTest {
         name: "user-skip-load",
         feature: "user-run-skip-load",
-        expected_markers: &["user-run: expected #UD (6)", "halting"],
-        forbidden_markers: &["user-load: hello ran from its own address space"],
+        // ゼロを実行して落ちる。**畳んだ位置とベクタは主張しない**——ゼロは
+        // `add [rax], al` なので、どこで落ちるかは入場時の RAX に依る。
+        expected_markers: &["user-run: hello folded instead of exiting", "halting"],
+        forbidden_markers: &["user-load: hello ran as a process"],
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
@@ -660,15 +662,73 @@ const RING3_TESTS: &[CriticalTest] = &[
         name: "user-writable-text",
         feature: "user-run-writable-text",
         expected_markers: &["has w=true (expected false)", "halting"],
-        forbidden_markers: &["user-load: hello ran from its own address space"],
+        forbidden_markers: &["user-load: hello ran as a process"],
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
     CriticalTest {
         name: "user-wrong-entry",
         feature: "user-run-wrong-entry",
-        expected_markers: &["user-run: folded at 0x400000", "halting"],
-        forbidden_markers: &["user-load: hello ran from its own address space"],
+        expected_markers: &[
+            "user-run: hello folded instead of exiting",
+            "rip=0x400000",
+            "halting",
+        ],
+        forbidden_markers: &["user-load: hello ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // S9-b-3-1: プロセスの終了の破壊確認。
+    //
+    // exit を受けても終了させない。**Ring 3 へ返り、直後の ud2 で畳まれる。**
+    // 受け皿を破壊と一緒に用意してあるので、行き先は確定している（entry + 0x30）。
+    CriticalTest {
+        name: "user-exit-ignored",
+        feature: "user-exit-ignored",
+        expected_markers: &[
+            "user-run: hello folded instead of exiting (vector=6",
+            "rip=0x400040",
+            "halting",
+        ],
+        forbidden_markers: &["user-load: hello ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // BKL を保持したまま longjmp する。**次に取る者が同じコアの再取得として捕まえる。**
+    // 取る入口に「出口を通らない経路」ができたことそのものの反証である。
+    CriticalTest {
+        name: "user-exit-keep-bkl",
+        feature: "user-exit-keep-bkl",
+        expected_markers: &[
+            "bkl: recursive acquisition",
+            "at entry SteadyLoop",
+            "halting",
+        ],
+        forbidden_markers: &["user-load: hello ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // 終了しても空間を畳まない。**会計が合わなくなる。**
+    CriticalTest {
+        name: "user-exit-keep-space",
+        feature: "user-exit-keep-space",
+        expected_markers: &["left the allocator short", "halting"],
+        forbidden_markers: &["user-load: hello ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // 終了状態を RDI でなく RSI から読む。**終了状態の一致も、判定行が主張して
+    // いる道の 1 つである。** 記録された値は主張しない（`hello` の `.rodata` の
+    // 番地に依る）。**主張するのは「0 でない値が入り、判定が落ちること」までである。**
+    CriticalTest {
+        name: "user-exit-wrong-status",
+        feature: "user-exit-wrong-status",
+        expected_markers: &[
+            "user-run: hello exited with status",
+            "expected 0",
+            "halting",
+        ],
+        forbidden_markers: &["user-load: hello ran as a process"],
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
@@ -3119,6 +3179,9 @@ const BOOT_LOG_VOLATILE_MARKERS: &[&str] = &[
     // S7-d のアドレス空間のデモが出す、フレームの本数とアドレス。
     // **`frame allocator:` と同じ理由である**——OVMF が返すメモリマップで動く。
     "allocator free",
+    // プロセスを畳んだ後の空き範囲の数（S9-b-3-1）。**同じ理由で揺れる**
+    // （実測で 10 と 11）。**畳んだ会計そのものは別の行にあり、そちらは残る。**
+    "the allocator holds",
     "address-space: the same VA",
     // TSC の較正。実行ごとに揺れる。
     "apic: LAPIC timer calibration",
@@ -6628,7 +6691,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 20,
-    full: 116,
+    full: 120,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

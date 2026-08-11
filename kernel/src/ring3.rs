@@ -273,6 +273,10 @@ pub unsafe fn enter(main_rsp0_top: u64, user_rip: u64, user_stack_top: u64) {
     HANDLER_RSP.store(0, Ordering::SeqCst);
     FAULT_VECTOR.store(0, Ordering::SeqCst);
     FAULT_RIP.store(0, Ordering::SeqCst);
+    // **CS も戻す（S9-b-3-1）。** 戻していなかったので、畳まずに戻った遠征の
+    // 判定行に**前の遠征の CS が出た。** 畳みで戻る遠征しか無かった間は誰も
+    // 読まなかったが、`exit` で戻る経路ができて読まれるようになった。
+    FAULT_CS.store(0, Ordering::SeqCst);
     FAULT_CR2.store(0, Ordering::SeqCst);
     FAULT_ERROR_CODE.store(0, Ordering::SeqCst);
 

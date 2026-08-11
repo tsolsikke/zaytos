@@ -137,6 +137,22 @@ pub const SYS_WRITE: u64 = 1;
 /// [`SYS_WRITE`] が記録するバイト数の上限。
 pub const WRITE_BUF_LEN: usize = 64;
 
+/// `exit(status)`（S9-b-3-1）。**Linux の番号 60 をそのまま使う。**
+///
+/// # `exit_group`（231）は採らない
+///
+/// あちらは「呼んだスレッドが属するスレッドグループ全体を終わらせる」呼び出しで、
+/// **ZaytOS にはスレッドの概念が無い。** 番号を用意しても、`exit` と区別できる
+/// 振る舞いが書けない。**同じ振る舞いの入口を 2 つ置くと、どちらが正なのかが
+/// 呼び出し側にも実装側にも決まらない。** スレッドを作る段で足す。
+///
+/// # 戻らない
+///
+/// **[`dispatch`] の戻り値では「戻らない」を表せない**ので、記録だけをあちらで
+/// 行い、**Ring 3 へ返らない分岐は [`syscall_entry`] が持つ**（あちらの
+/// 「exit は出口を通らない」の節）。
+pub const SYS_EXIT: u64 = 60;
+
 /// 検証用 probe システムコールの番号（ZaytOS 独自。[`ZAYTOS_PRIVATE_BASE`]）。
 pub const PROBE_NUMBER: u64 = ZAYTOS_PRIVATE_BASE;
 
@@ -168,6 +184,12 @@ static WRITE_FD: AtomicU64 = AtomicU64::new(0);
 static WRITE_LEN: AtomicU64 = AtomicU64::new(0);
 /// [`SYS_WRITE`] が最後に記録したバイト列。
 static WRITE_BUF: [AtomicU8; WRITE_BUF_LEN] = [const { AtomicU8::new(0) }; WRITE_BUF_LEN];
+
+/// [`SYS_EXIT`] を受け取ったか（S9-b-3-1）。**呼び出し側は、遠征から戻った理由が
+/// 終了なのか畳みなのかをこれで区別する。**
+static PROCESS_EXITED: AtomicBool = AtomicBool::new(false);
+/// [`SYS_EXIT`] が受け取った終了状態（RDI）。[`PROCESS_EXITED`] が真のときだけ意味を持つ。
+static PROCESS_EXIT_STATUS: AtomicU64 = AtomicU64::new(0);
 
 /// `syscall_entry` が呼ばれた回数（会計用）。
 static INVOCATION_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -357,7 +379,11 @@ pub unsafe fn copy_from_user(dst: &mut [u8], slice: &UserSlice) -> usize {
 ///
 /// probe は既知の戻り値 [`PROBE_RETURN`] を返す。SYS_CHECK_PTR はユーザーポインタの
 /// 範囲を検証し、可なら 0、不可なら -EFAULT を返す（**バイトは読まない**）。それ以外は
-/// 未実装で `-ENOSYS`。`pml4_phys` / `direct_map` は稼働中テーブルのもの（syscall_entry
+/// 未実装で `-ENOSYS`。
+///
+/// **[`SYS_EXIT`] だけは記録して終わる**（S9-b-3-1）。**戻り値では「戻らない」を
+/// 表せない**ので、Ring 3 へ返さない分岐は [`syscall_entry`] が持つ。
+///`pml4_phys` / `direct_map` は稼働中テーブルのもの（syscall_entry
 /// が用意する）で、ポインタ検証にのみ使う。
 ///
 /// # Safety
@@ -437,12 +463,39 @@ unsafe fn dispatch(
             let read = unsafe { copy_from_user(&mut kbuf, &slice) };
             kbuf[..read].iter().map(|b| *b as u64).sum()
         }
+        SYS_EXIT => {
+            // **記録するだけである。** Ring 3 へ返らない分岐は `syscall_entry` が
+            // 持つ（[`SYS_EXIT`] の doc）。**戻り値は読まれない。**
+            //
+            // 破壊 (S9-b-3-1, user-exit-wrong-status): 終了状態を第 1 引数（RDI）
+            // ではなく第 2 引数（RSI）から読む。**`arg4-rcx` と同じ、引数レジスタを
+            // 1 本取り違える形である。** `hello` は `exit` の直前に RSI を
+            // 触らない（`write` へ渡したバイト列の番地が残っている）ので、
+            // **0 でない既知の値が終了状態として記録される。**
+            #[cfg(not(feature = "user-exit-wrong-status"))]
+            let status = args[0];
+            #[cfg(feature = "user-exit-wrong-status")]
+            let status = args[1];
+            PROCESS_EXIT_STATUS.store(status, Ordering::SeqCst);
+            PROCESS_EXITED.store(true, Ordering::SeqCst);
+            0
+        }
         // 失敗は -errno（-1..-4095）。
         _ => (-ENOSYS) as u64,
     }
 }
 
-/// `zaytos_syscall_common` から `extern "sysv64"` で呼ばれる。**戻る。**
+/// `zaytos_syscall_common` から `extern "sysv64"` で呼ばれる。**[`SYS_EXIT`] 以外は戻る。**
+///
+/// # exit は出口を通らない（S9-b-3-1）
+///
+/// [`SYS_EXIT`] を受けたときだけ、`ring3::leave_ring3`（longjmp）で
+/// `ring3::enter` の呼び出し元へ帰る。**この関数の末尾を通らない。**
+///
+/// **したがって BKL の解放を `Drop` に任せられない。** longjmp は `Drop` を
+/// 走らせないので、**取ったまま出て二度と解かれない。** 分岐の中で明示的に
+/// `drop` する。**BKL を取る入口に、出口を通らない経路ができたのはここが初めて
+/// である**（`bkl.rs` の [`crate::bkl::NON_ACQUIRING_ENTRIES`] の隣の注記）。
 ///
 /// 番号（RAX）と 6 引数（RDI/RSI/RDX/R10/R8/R9）を読み、記録し、ディスパッチして、
 /// 戻り値を `context.rax` へ書き戻し、復元経路が使う RSP を返す。M5-f-1 は切り替え
@@ -502,6 +555,24 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     // SAFETY: pml4_phys / direct_map は稼働中テーブルのもので、walk の契約を満たす。
     let ret = unsafe { dispatch(number, &args, pml4_phys, direct_map) };
 
+    // **exit だけは Ring 3 へ返らない。**
+    //
+    // 破壊 (S9-b-3-1, user-exit-ignored): 終了させずに Ring 3 へ返す。プロセスは
+    // `exit` の直後に置いた `ud2` へ落ち、ベクタ 6 の畳みとして現れる。
+    #[cfg(not(feature = "user-exit-ignored"))]
+    if number == SYS_EXIT {
+        // **BKL は自分で解く。** 下の `leave_ring3` は longjmp で、`Drop` を
+        // 走らせない。**取ったまま戻ると、二度と解かれない。**
+        //
+        // 破壊 (S9-b-3-1, user-exit-keep-bkl): 解かずに戻る。次に BKL を取る者
+        // （空間を畳む側）が、同じコアの再取得として捕まえる。
+        #[cfg(not(feature = "user-exit-keep-bkl"))]
+        drop(_bkl);
+        // SAFETY: Ring 3 から `int 0x80` で入った文脈で、RECOVERY は
+        // `ring3::enter` が保存済みである。BKL は上で解いてある。
+        unsafe { crate::ring3::leave_ring3() }
+    }
+
     // 戻り値を RAX へ書き戻す。復元経路の pop rax がこれをユーザー RAX へ載せる。
     // 破壊 (M5-f-1-2, drop-retval): 書き戻しを落とす。ctx.rax は番号のままで、
     // ユーザーは期待した戻り値を受け取れない。
@@ -541,6 +612,9 @@ pub fn last_write_bytes(dst: &mut [u8]) -> usize {
 }
 
 /// 会計カウンタを 0 に戻す（往復検証の直前に呼ぶ）。
+///
+/// **終了の記録も戻す（S9-b-3-1）。** プロセスは順に 1 本ずつ走るので、
+/// **前のプロセスの終了が次のプロセスのものとして読まれない**ようにする。
 pub fn reset_counters() {
     INVOCATION_COUNT.store(0, Ordering::SeqCst);
     LAST_NUMBER.store(0, Ordering::SeqCst);
@@ -549,6 +623,18 @@ pub fn reset_counters() {
     }
     HANDLER_RSP.store(0, Ordering::SeqCst);
     IN_RING3_AT_ENTRY.store(false, Ordering::SeqCst);
+    PROCESS_EXITED.store(false, Ordering::SeqCst);
+    PROCESS_EXIT_STATUS.store(0, Ordering::SeqCst);
+}
+
+/// [`SYS_EXIT`] を受け取ったか（S9-b-3-1）。
+pub fn process_exited() -> bool {
+    PROCESS_EXITED.load(Ordering::SeqCst)
+}
+
+/// [`SYS_EXIT`] が受け取った終了状態。[`process_exited`] が真のときだけ意味を持つ。
+pub fn process_exit_status() -> u64 {
+    PROCESS_EXIT_STATUS.load(Ordering::SeqCst)
 }
 
 /// `syscall_entry` が呼ばれた回数。
