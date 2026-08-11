@@ -615,6 +615,12 @@ pub fn last_write_bytes(dst: &mut [u8]) -> usize {
 ///
 /// **終了の記録も戻す（S9-b-3-1）。** プロセスは順に 1 本ずつ走るので、
 /// **前のプロセスの終了が次のプロセスのものとして読まれない**ようにする。
+///
+/// **`write` の記録も戻す（S9-b-3-2a）。** 戻していなかったので、
+/// **`write` を発行しないプロセスについて「送っていない」を主張できなかった**
+/// ——前のプロセスが送ったバイト列がそのまま残る。**1 本しか走らない間は
+/// 差が出ないので、複数になって初めて要る**（`FAULT_CS` の戻し忘れと同じ形で、
+/// `verification-coverage.md` に記録がある）。
 pub fn reset_counters() {
     INVOCATION_COUNT.store(0, Ordering::SeqCst);
     LAST_NUMBER.store(0, Ordering::SeqCst);
@@ -625,6 +631,11 @@ pub fn reset_counters() {
     IN_RING3_AT_ENTRY.store(false, Ordering::SeqCst);
     PROCESS_EXITED.store(false, Ordering::SeqCst);
     PROCESS_EXIT_STATUS.store(0, Ordering::SeqCst);
+    WRITE_FD.store(0, Ordering::SeqCst);
+    WRITE_LEN.store(0, Ordering::SeqCst);
+    for slot in WRITE_BUF.iter() {
+        slot.store(0, Ordering::SeqCst);
+    }
 }
 
 /// [`SYS_EXIT`] を受け取ったか（S9-b-3-1）。

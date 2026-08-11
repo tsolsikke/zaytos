@@ -3575,6 +3575,11 @@ fn switch_keyboard_to_io_apic(
 /// （`docs/roadmap.md` の S9 が「ファイルシステムに依存せず」を範囲としている）。
 static HELLO_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello.elf"));
 
+/// 埋め込んだユーザープログラム `fault-test` の ELF（S9-b-3-2a）。
+///
+/// 出所は [`HELLO_ELF`] と同じで、`kernel/userland/fault-test.rs` を建てたものである。
+static FAULT_TEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fault-test.elf"));
+
 /// 埋め込んだユーザープログラムの ELF を読み、会計を出す（S9-b-1）。
 ///
 /// **写像もしないし走らせもしない。** 像が在って、`common::elf` が受理し、
@@ -3723,6 +3728,13 @@ enum UserLoadError {
     NoExitNoFold,
     /// 終了状態が予期と違った。`hello` は 0 で終わる。
     ExitStatus(u64),
+    /// 畳まれて終わるはずのプロセスが、終了して戻った（S9-b-3-2a）。
+    ///
+    /// **起こすはずの違反が起きなかったということである。**
+    DidNotFold,
+    /// 畳まれたが、ベクタ・RIP・CS・CR2・エラーコードのどれかが予期と違った
+    /// （S9-b-3-2a）。**どれが違うかは直前の ERROR 行に出ている。**
+    FoldMismatch,
     /// 畳んだ会計が合わなかった（S9-b-3-1）。**空間を畳んでも、消えたフレームが
     /// 隔離へ届いていない。**
     DestroyAccounting {
@@ -3965,6 +3977,31 @@ const HELLO_UD2_OFFSET: u64 = 0x30;
 /// `hello` が `write` で送るはずのバイト列（S9-b-1）。
 const HELLO_MESSAGE: &str = "hello from ring 3\n";
 
+/// `fault-test` が書きに行く番地（S9-b-3-2a）。**自分の `.text` の先頭である。**
+///
+/// **`kernel/userland/user.ld` のリンク先と、`fault-test.rs` の即値と対になって
+/// いる。** 3 か所で同じ値を持つが、**食い違えば CR2 の突き合わせが落ちる。**
+const FAULT_TEST_TARGET: u64 = 0x0040_0000;
+
+/// `fault-test` の書き込み命令が entry から何バイト目にあるか（S9-b-3-2a）。
+///
+/// **`kernel/userland/fault-test.rs` の `.org 0x20` と対になっている。**
+const FAULT_TEST_STORE_OFFSET: u64 = 0x20;
+
+/// `fault-test` の受け皿の `ud2` が entry から何バイト目にあるか（S9-b-3-2a）。
+///
+/// **書けてしまったときの行き先である。** 既定ビルドでここへは来ない。
+/// 来たらベクタが 6 になり、判定行が食い違いとして止める。
+const FAULT_TEST_UD2_OFFSET: u64 = 0x30;
+
+/// `fault-test` が起こす #PF のエラーコード（S9-b-3-2a）。
+///
+/// `P`（bit 0）| `W`（bit 1）| `U`（bit 2）= 7。**「不在」ではなく「権限違反」で
+/// あることを、この値で言っている**——ページは在る（`P=1`）が、書けない
+/// （`W=1` は書きでの違反を指す）。**S7 の到達条件 3 の観測が使っているのと
+/// 同じ区別である。**
+const FAULT_TEST_ERROR_CODE: u64 = 0b111;
+
 /// 走らせるプロセス 1 つ分（S9-b-3-1）。
 ///
 /// # 表を持たない
@@ -3990,14 +4027,88 @@ struct UserProcess {
     name: &'static str,
 }
 
-/// 走らせるプログラムの一覧（S9-b-3-1）。**静的な記述であって、管理構造では
-/// ない**（[`UserProcess`] の doc）。
+/// プロセスの終わり方（S9-b-3-2a）。**期待する側の記述である。**
 ///
-/// **順に走らせる。** 1 本が失敗しても残りは走る——それが S9 の到達条件
-/// 「壊した ELF でプロセスだけが失敗する」の観測になる。
+/// # なぜ表に持たせるか
 ///
-/// 現在は 1 本。`syscall-test` と `fault-test` は S9-b-3-2 で足す。
-const USER_PROGRAMS: &[(&str, &[u8])] = &[("hello", HELLO_ELF)];
+/// **プログラムごとに正しい終わり方が違う。** `hello` は `exit(0)` で終わるのが
+/// 正しく、`fault-test` は畳まれて終わるのが正しい。**「畳んで戻った」を一律に
+/// 失敗として扱うと、後者を正しく終わらせられない。**
+///
+/// **終わり方は観測される量であって、判定はここが持つ。** 観測は
+/// [`kernel::ring3`] と [`kernel::syscall`] の記録から読む。
+enum UserProgramOutcome {
+    /// `exit(status)` で終わる。
+    Exit {
+        /// 期待する終了状態。
+        status: u64,
+    },
+    /// Ring 3 の違反が畳まれて終わる。
+    Fold {
+        /// 期待するベクタ。
+        vector: u64,
+        /// フォルトした命令の位置（entry からの相対）。
+        rip_offset: u64,
+        /// 期待する CR2。**ベクタが 14 のときだけ突き合わせる。**
+        cr2: u64,
+        /// 期待するエラーコード。
+        error_code: u64,
+    },
+}
+
+/// 走らせるプログラム 1 本分の記述（S9-b-3-2a）。
+///
+/// **静的な記述であって、管理構造ではない**（[`UserProcess`] の doc）。
+struct UserProgram {
+    /// 判定行に出す名前。
+    name: &'static str,
+    /// 埋め込んだ像。
+    image: &'static [u8],
+    /// 期待する終わり方。
+    outcome: UserProgramOutcome,
+    /// 期待した終わり方が起きなかったときに実行が落ちる先（entry からの相対）。
+    ///
+    /// **破壊が成功した後の行き先を、破壊と一緒に用意する**（`coding-standards.md`）。
+    /// どのプログラムも、そこに `ud2` を置いてある。**判定行はこの位置を出す**
+    /// ので、「期待した終わり方が起きず、受け皿へ落ちた」が RIP で分かる。
+    receiver_offset: u64,
+    /// `write` で届くはずのバイト列。**発行しないなら `None`。**
+    expected_write: Option<&'static str>,
+}
+
+/// 走らせるプログラムの一覧（S9-b-3-1、S9-b-3-2a で期待を持たせた）。
+///
+/// **順に走らせる。1 本が終わってから次の 1 本が始まる。**
+///
+/// # 順序に意味がある
+///
+/// **畳まれて終わるプログラムの後ろに、正常に終わるプログラムを置く。**
+/// そうすると「1 本が畳まれて終わり、**次の 1 本が始まって**正常に終わる」が
+/// 1 回の起動で観測できる。**逆順では、畳んだ後に何かが始まるところを見せられない。**
+/// これは S8 が言い換えた到達条件（中断ではなく終了であること）の観測にあたる。
+///
+/// `syscall-test` は S9-b-3-2a の 2 本目で足し、`fault-test` の後ろに置く。
+const USER_PROGRAMS: &[UserProgram] = &[
+    UserProgram {
+        name: "hello",
+        image: HELLO_ELF,
+        outcome: UserProgramOutcome::Exit { status: 0 },
+        receiver_offset: HELLO_UD2_OFFSET,
+        expected_write: Some(HELLO_MESSAGE),
+    },
+    UserProgram {
+        name: "fault-test",
+        image: FAULT_TEST_ELF,
+        outcome: UserProgramOutcome::Fold {
+            vector: 14,
+            rip_offset: FAULT_TEST_STORE_OFFSET,
+            cr2: FAULT_TEST_TARGET,
+            error_code: FAULT_TEST_ERROR_CODE,
+        },
+        receiver_offset: FAULT_TEST_UD2_OFFSET,
+        expected_write: None,
+    },
+];
 
 /// 埋め込んだユーザープログラムを新しいアドレス空間へ写像する（S9-b-1）。
 ///
@@ -4035,13 +4146,20 @@ const USER_PROGRAMS: &[(&str, &[u8])] = &[("hello", HELLO_ELF)];
 ///
 /// 畳んだ結果（隔離へ入れた本数と、隔離が溢れて漏らした本数）を返す。
 /// **後始末が正しいことは、この会計で主張する。**
+///
+/// # 終わり方は判定しない（S9-b-3-2a）
+///
+/// 走らせた場合、返すのは像の entry である。**どう終わったかの判定は
+/// [`check_user_program_outcome`] が行う**——プログラムごとに正しい終わり方が
+/// 違い、それは呼び出し側の知識だからである（`ring3::enter` が畳んだ位置を
+/// 主張しないのと同じ形）。`run` が偽なら 0 を返す。
 fn load_user_program(
     logger: &mut Logger<SerialPort>,
     allocator: &mut kernel::frame_allocator::FrameAllocator,
     image: &[u8],
     run: bool,
     name: &'static str,
-) -> (Result<(), UserLoadError>, usize, usize) {
+) -> (Result<u64, UserLoadError>, usize, usize) {
     use kernel::address_space::AddressSpace;
 
     let direct_map = common::addr::direct_map();
@@ -4064,7 +4182,8 @@ fn load_user_program(
         name,
     };
 
-    let outcome = load_user_program_into(logger, allocator, image, &mut process, run);
+    let outcome =
+        load_user_program_into(logger, allocator, image, &mut process, run).map(|()| process.entry);
 
     // **成否によらず畳む。** 破棄は S7-d の経路（下位を隔離へ入れ、世代が
     // 退くまで返さない）をそのまま通る。**プロセスが終了したなら、畳むのはここ
@@ -4090,19 +4209,25 @@ fn load_user_program(
     (outcome, held, leaked)
 }
 
-/// 埋め込んだ `hello` を載せて走らせる（S9-b-1）。
+/// 埋め込んだユーザープログラムを順に走らせる（S9-b-1、S9-b-3-2a で複数になった）。
+///
+/// **1 本ずつ、生成から破棄まで閉じてから次へ行く。** 期待どおりに終わった
+/// プログラムは失敗ではない——`fault-test` は畳まれて終わるのが正しい
+/// （[`USER_PROGRAMS`]）。**期待と違う終わり方をしたときだけ止まる。**
 fn load_embedded_user_program(
     logger: &mut Logger<SerialPort>,
     allocator: &mut kernel::frame_allocator::FrameAllocator,
 ) -> Result<(), UserLoadError> {
-    // **一覧を順に走らせる。** 現在は 1 本だが、S9-b-3-2 で 3 本になる。
-    // **1 本が失敗しても残りを走らせる形は、失敗が到達条件の一部になる段
-    // （S9-b-3-2 の `fault-test`）で入れる**（今は失敗をそのまま返す。既定の
-    // `hello` は成功する）。
-    for (name, image) in USER_PROGRAMS {
+    for program in USER_PROGRAMS {
+        let name = program.name;
         let free_before = allocator.free_frame_count();
-        let (outcome, held, leaked) = load_user_program(logger, allocator, image, true, name);
-        outcome?;
+        let (outcome, held, leaked) =
+            load_user_program(logger, allocator, program.image, true, name);
+        let entry = outcome?;
+
+        // **終わり方を判定する。** ここで止まっても空間は既に畳まれている
+        // （`load_user_program` が成否によらず畳む）ので、会計はこの後で見られる。
+        check_user_program_outcome(logger, program, entry)?;
 
         // **畳んだ会計。** 消えた枚数と隔離へ入れた枚数が一致すること。
         // **空きフレームの絶対値は出さない**（コア数で変わる。
@@ -4122,10 +4247,10 @@ fn load_embedded_user_program(
             });
         }
         logger.info(format_args!(
-            "user-load: {name} ran as a process in its own address space, wrote through \
-             int 0x80, exited, and the kernel continued after the process was gone; the space \
-             was destroyed ({consumed} frame(s) left the allocator and {held} reached \
-             quarantine, match={} leaked={leaked})",
+            "user-load: {name} ran as a process in its own address space, ended as expected, \
+             and the kernel continued after the process was gone; the space was destroyed \
+             ({consumed} frame(s) left the allocator and {held} reached quarantine, match={} \
+             leaked={leaked})",
             consumed == held
         ));
 
@@ -4469,64 +4594,142 @@ fn load_user_program_into(
     // SAFETY: 本番のテーブルへ戻す。上位は同じなので連続して実行できる。
     unsafe { kernel::paging::switch::switch_to(production) };
 
-    // === 戻ってきた。理由は 2 つに 1 つである（S9-b-3-1） ===
-    //
-    // **終了**（`exit` が `leave_ring3` を呼んだ）か、**畳み**（Ring 3 由来の例外を
-    // S8 の機構が受けた）である。`ring3::enter` はこの 2 つの longjmp でしか戻らない。
+    Ok(())
+}
+
+/// 走り終えたプロセスが、期待どおりに終わったかを判定する（S9-b-3-2a）。
+///
+/// # 戻ってきた理由は 2 つに 1 つである
+///
+/// **終了**（`exit` が `ring3::leave_ring3` を呼んだ）か、**畳み**（Ring 3 由来の
+/// 違反を S8 の機構が受けた）である。`ring3::enter` はこの 2 つの longjmp でしか
+/// 戻らない。どちらであるべきかは [`UserProgram::outcome`] が持つ。
+///
+/// # 観測と判定を分けてある
+///
+/// 観測は [`kernel::ring3`] と [`kernel::syscall`] の記録から読む。**走らせる側
+/// （`load_user_program_into`）は判定しない**——プログラムごとに正しい終わり方が
+/// 違い、それは一覧を持つ側の知識である。`ring3::enter` が畳んだ位置を主張せず
+/// 呼び出し側に委ねているのと同じ形である。
+fn check_user_program_outcome(
+    logger: &mut Logger<SerialPort>,
+    program: &UserProgram,
+    entry: u64,
+) -> Result<(), UserLoadError> {
+    let name = program.name;
     let exited = kernel::syscall::process_exited();
     let status = kernel::syscall::process_exit_status();
     let folded = kernel::ring3::folded();
     let vector = kernel::ring3::fault_vector();
     let rip = kernel::ring3::fault_rip();
     let cs = kernel::ring3::fault_cs();
-    let ud2_rip = entry + HELLO_UD2_OFFSET;
+    let cr2 = kernel::ring3::fault_cr2();
+    let error_code = kernel::ring3::fault_error_code();
     let mut bytes = [0u8; kernel::syscall::WRITE_BUF_LEN];
     let written = kernel::syscall::last_write_bytes(&mut bytes);
     let message = core::str::from_utf8(&bytes[..written]).unwrap_or("<not utf-8>");
 
     logger.info(format_args!(
-        "user-run: {} left Ring 3 (exited={exited} status={status} folded={folded} \
-         vector={vector} rip={rip:#x} cs={cs:#x}), it made {} syscall(s) and the kernel was \
-         entered from Ring 3 ({}), write(fd={}, {written} byte(s)) said {:?}",
-        process.name,
+        "user-run: {name} left Ring 3 (exited={exited} status={status} folded={folded} \
+         vector={vector} rip={rip:#x} cs={cs:#x} cr2={cr2:#x} err={error_code:#x}), it made {} \
+         syscall(s) and the kernel was entered from Ring 3 ({}), write(fd={}, {written} byte(s)) \
+         said {:?}",
         kernel::syscall::invocation_count(),
         kernel::syscall::in_ring3_at_entry(),
         kernel::syscall::last_write_fd(),
         message.trim_end()
     ));
 
-    // **畳んで戻ったなら、`exit` が効かなかったということである。** 受け皿の `ud2` は
-    // entry + [`HELLO_UD2_OFFSET`] にあり、そこで畳まれたことまで出して原因を絞る。
-    if folded {
+    if !exited && !folded {
         logger.error(format_args!(
-            "user-run: {} folded instead of exiting (vector={vector} rip={rip:#x} cs={cs:#x}); \
-             the trailing ud2 sits at {ud2_rip:#x} (entry + {HELLO_UD2_OFFSET:#x}), so exit did \
-             not take effect",
-            process.name
-        ));
-        return Err(UserLoadError::DidNotExit);
-    }
-    if !exited {
-        logger.error(format_args!(
-            "user-run: {} came back from Ring 3 without exiting and without folding",
-            process.name
+            "user-run: {name} came back from Ring 3 without exiting and without folding"
         ));
         return Err(UserLoadError::NoExitNoFold);
     }
-    if status != 0 {
-        logger.error(format_args!(
-            "user-run: {} exited with status {status}, expected 0",
-            process.name
-        ));
-        return Err(UserLoadError::ExitStatus(status));
+
+    match program.outcome {
+        UserProgramOutcome::Exit {
+            status: expected_status,
+        } => {
+            // **畳んで戻ったなら、`exit` が効かなかったということである。** 受け皿の
+            // `ud2` は entry + [`HELLO_UD2_OFFSET`] にあり、そこまで出して原因を絞る。
+            if folded {
+                let receiver_rip = entry + program.receiver_offset;
+                logger.error(format_args!(
+                    "user-run: {name} folded instead of exiting (vector={vector} rip={rip:#x} \
+                     cs={cs:#x}); the trailing ud2 sits at {receiver_rip:#x} (entry + {:#x}), so \
+                     exit did not take effect",
+                    program.receiver_offset
+                ));
+                return Err(UserLoadError::DidNotExit);
+            }
+            if status != expected_status {
+                logger.error(format_args!(
+                    "user-run: {name} exited with status {status}, expected {expected_status}"
+                ));
+                return Err(UserLoadError::ExitStatus(status));
+            }
+        }
+        UserProgramOutcome::Fold {
+            vector: expected_vector,
+            rip_offset,
+            cr2: expected_cr2,
+            error_code: expected_error_code,
+        } => {
+            // **終了して戻ったなら、起こすはずの違反が起きなかったということである。**
+            if !folded {
+                logger.error(format_args!(
+                    "user-run: {name} exited with status {status} instead of faulting; the \
+                     violation it is supposed to raise did not happen"
+                ));
+                return Err(UserLoadError::DidNotFold);
+            }
+            let expected_rip = entry + rip_offset;
+            // **CR2 とエラーコードは #PF のときだけ意味を持つ**（`ring3.rs` の
+            // `FAULT_CR2` の doc）。ベクタが食い違っている時点で、残りの
+            // 突き合わせは意味を失うので、まとめて 1 つの食い違いとして出す。
+            let matched = vector == expected_vector
+                && rip == expected_rip
+                && (cs & 0b11) == 3
+                && (vector != 14 || (cr2 == expected_cr2 && error_code == expected_error_code));
+            if !matched {
+                logger.error(format_args!(
+                    "user-run: {name} folded somewhere else (vector={vector} rip={rip:#x} \
+                     cs={cs:#x} cr2={cr2:#x} err={error_code:#x}), expected vector \
+                     {expected_vector} at {expected_rip:#x} (entry + {rip_offset:#x}) from Ring 3 \
+                     with cr2={expected_cr2:#x} err={expected_error_code:#x}; the receiver ud2 \
+                     sits at {receiver_rip:#x}, so landing there means the violation never \
+                     happened",
+                    receiver_rip = entry + program.receiver_offset
+                ));
+                return Err(UserLoadError::FoldMismatch);
+            }
+        }
     }
-    if kernel::syscall::last_write_fd() != 1 || message != HELLO_MESSAGE {
-        logger.error(format_args!(
-            "user-run: write did not deliver the expected bytes (fd={}, got {message:?}, \
-             expected {HELLO_MESSAGE:?})",
-            kernel::syscall::last_write_fd()
-        ));
-        return Err(UserLoadError::WriteMismatch);
+
+    // **`write` の中身は、送るはずのプログラムについてだけ見る。**
+    // 送らないプログラムには「送っていないこと」を要求する（会計は
+    // `syscall::reset_counters` が走るたびに戻るので、前のプロセスの記録は残らない）。
+    match program.expected_write {
+        Some(expected) => {
+            if kernel::syscall::last_write_fd() != 1 || message != expected {
+                logger.error(format_args!(
+                    "user-run: {name} write did not deliver the expected bytes (fd={}, got \
+                     {message:?}, expected {expected:?})",
+                    kernel::syscall::last_write_fd()
+                ));
+                return Err(UserLoadError::WriteMismatch);
+            }
+        }
+        None => {
+            if written != 0 {
+                logger.error(format_args!(
+                    "user-run: {name} is not supposed to write, but {written} byte(s) arrived \
+                     ({message:?})"
+                ));
+                return Err(UserLoadError::WriteMismatch);
+            }
+        }
     }
 
     Ok(())
