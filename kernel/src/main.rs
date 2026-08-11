@@ -3946,6 +3946,40 @@ const HELLO_UD2_OFFSET: u64 = 0x20;
 /// `hello` が `write` で送るはずのバイト列（S9-b-1）。
 const HELLO_MESSAGE: &str = "hello from ring 3\n";
 
+/// 走らせるプロセス 1 つ分（S9-b-3-1）。
+///
+/// # 表を持たない
+///
+/// **同時に生きているプロセスは 1 つである。** 3 本を順に走らせ、1 本ずつ
+/// 終わらせる。**表を先に作るのは先回りの抽象化になる**（`vision.md` の規定）。
+/// 同時生存が複数になる段（S11 のシェル）で表にすればよく、**そのときこの型は
+/// そのまま使える。**
+///
+/// # 「走らせるプログラムの一覧」とは別物である
+///
+/// あちらは [`USER_PROGRAMS`] で、**静的な記述**である（`TASK_COUNT` や
+/// `build.rs` の `PROGRAMS` と同じ性質）。**混ぜると、一覧の長さが管理構造の
+/// 容量に見える。** こちらは管理構造で、長さは常に 1 である。
+struct UserProcess {
+    /// このプロセスのアドレス空間。**終了で畳む。**
+    space: kernel::address_space::AddressSpace,
+    /// 最初に飛ぶ先（ELF の entry）。
+    entry: u64,
+    /// ユーザースタックの上端。
+    stack_top: u64,
+    /// 判定行に出す名前。
+    name: &'static str,
+}
+
+/// 走らせるプログラムの一覧（S9-b-3-1）。**静的な記述であって、管理構造では
+/// ない**（[`UserProcess`] の doc）。
+///
+/// **順に走らせる。** 1 本が失敗しても残りは走る——それが S9 の到達条件
+/// 「壊した ELF でプロセスだけが失敗する」の観測になる。
+///
+/// 現在は 1 本。`syscall-test` と `fault-test` は S9-b-3-2 で足す。
+const USER_PROGRAMS: &[(&str, &[u8])] = &[("hello", HELLO_ELF)];
+
 /// 埋め込んだユーザープログラムを新しいアドレス空間へ写像する（S9-b-1）。
 ///
 /// **まだ走らせない。** Ring 3 への遷移は次の刻みである。
@@ -3972,6 +4006,7 @@ const HELLO_MESSAGE: &str = "hello from ring 3\n";
 /// （揃えないと実際に重なった。実測で `.text` が `0x400000..0x400030`、
 /// `.rodata` が `0x400030` からになった）。**実際のツールチェインも同じ理由で
 /// 揃える。**
+///
 /// 像を 1 つ、専用のアドレス空間へ載せて（`run` なら走らせて）畳む（S9-b-2）。
 ///
 /// **失敗しても空間を畳む。** 途中で落ちた場合、**そこまでに張った写像と
@@ -3986,6 +4021,7 @@ fn load_user_program(
     allocator: &mut kernel::frame_allocator::FrameAllocator,
     image: &[u8],
     run: bool,
+    name: &'static str,
 ) -> (Result<(), UserLoadError>, usize, usize) {
     use kernel::address_space::AddressSpace;
 
@@ -3993,14 +4029,23 @@ fn load_user_program(
     let production = kernel::paging::switch::read_cr3();
 
     // SAFETY: production は稼働中の PML4、direct_map は登録済みの窓。
-    let mut space = match unsafe {
+    let space = match unsafe {
         AddressSpace::new(allocator, direct_map, production, USER_PROGRAM_PML4_INDEX)
     } {
         Ok(space) => space,
         Err(e) => return (Err(UserLoadError::AddressSpace(e)), 0, 0),
     };
 
-    let outcome = load_user_program_into(logger, allocator, image, &mut space, run);
+    // **ここからプロセスである。** stack_top は張る前から決まっているが、entry は
+    // 像を読むまで分からないので、0 で作り load_user_program_into が埋める。
+    let mut process = UserProcess {
+        space,
+        entry: 0,
+        stack_top: USER_PROGRAM_STACK_TOP,
+        name,
+    };
+
+    let outcome = load_user_program_into(logger, allocator, image, &mut process, run);
 
     // **成否によらず畳む。** 破棄は S7-d の経路（下位を隔離へ入れ、世代が
     // 退くまで返さない）をそのまま通る。
@@ -4008,7 +4053,7 @@ fn load_user_program(
     let (held, leaked) = {
         let guard = kernel::bkl::acquire(kernel::bkl::KernelEntry::SteadyLoop);
         // SAFETY: この空間はどのコアでも稼働していない。direct map は覆っている。
-        unsafe { space.destroy(direct_map, &mut quarantine, &guard) }
+        unsafe { process.space.destroy(direct_map, &mut quarantine, &guard) }
     };
 
     (outcome, held, leaked)
@@ -4019,13 +4064,18 @@ fn load_embedded_user_program(
     logger: &mut Logger<SerialPort>,
     allocator: &mut kernel::frame_allocator::FrameAllocator,
 ) -> Result<(), UserLoadError> {
-    let (outcome, held, leaked) = load_user_program(logger, allocator, HELLO_ELF, true);
-    outcome?;
-    logger.info(format_args!(
-        "user-load: hello ran from its own address space, wrote through int 0x80, and the \
-         kernel continued after the fold; the space was destroyed (quarantined={held} \
-         leaked={leaked})"
-    ));
+    // **一覧を順に走らせる。** 現在は 1 本だが、S9-b-3-2 で 3 本になる。
+    // **1 本が失敗しても残りを走らせる形は、`exit` を足す後半で入れる**
+    // （今は失敗をそのまま返す。既定の `hello` は成功する）。
+    for (name, image) in USER_PROGRAMS {
+        let (outcome, held, leaked) = load_user_program(logger, allocator, image, true, name);
+        outcome?;
+        logger.info(format_args!(
+            "user-load: {name} ran from its own address space, wrote through int 0x80, and the \
+             kernel continued after the fold; the space was destroyed (quarantined={held} \
+             leaked={leaked})"
+        ));
+    }
     Ok(())
 }
 
@@ -4081,7 +4131,7 @@ fn verify_corrupt_user_program_is_not_loaded(
             &buf[..]
         };
 
-        let (outcome, held, leaked) = load_user_program(logger, allocator, image, false);
+        let (outcome, held, leaked) = load_user_program(logger, allocator, image, false, "corrupt");
 
         let Err(error) = outcome else {
             logger.error(format_args!(
@@ -4140,7 +4190,7 @@ fn load_user_program_into(
     logger: &mut Logger<SerialPort>,
     allocator: &mut kernel::frame_allocator::FrameAllocator,
     image: &[u8],
-    space: &mut kernel::address_space::AddressSpace,
+    process: &mut UserProcess,
     run: bool,
 ) -> Result<(), UserLoadError> {
     use common::elf::Elf;
@@ -4215,9 +4265,11 @@ fn load_user_program_into(
                 cacheable: true,
             };
             // SAFETY: この空間はまだ稼働していない。direct map は覆っている。
-            if let Err(e) =
-                unsafe { space.map_user_4kib(allocator, direct_map, virt, frame, attributes) }
-            {
+            if let Err(e) = unsafe {
+                process
+                    .space
+                    .map_user_4kib(allocator, direct_map, virt, frame, attributes)
+            } {
                 // **張れなかったフレームは、ここで返す。** 空間へ繋がっていないので
                 // `AddressSpace::destroy` からは見えず、返さないと誰にも戻らない。
                 // **実測で気づいた**——失敗の経路で空きフレームが 7 枚減るのに、
@@ -4237,7 +4289,8 @@ fn load_user_program_into(
         }
 
         logger.info(format_args!(
-            "user-load: mapped PT_LOAD {:#x}..{:#x} (filesz={:#x} memsz={:#x} w={writable})",
+            "user-load: {} mapped PT_LOAD {:#x}..{:#x} (filesz={:#x} memsz={:#x} w={writable})",
+            process.name,
             ph.p_vaddr,
             ph.p_vaddr + ph.p_memsz,
             ph.p_filesz,
@@ -4262,9 +4315,11 @@ fn load_user_program_into(
         cacheable: true,
     };
     // SAFETY: この空間はまだ稼働していない。direct map は覆っている。
-    if let Err(e) =
-        unsafe { space.map_user_4kib(allocator, direct_map, stack_virt, frame, stack_attributes) }
-    {
+    if let Err(e) = unsafe {
+        process
+            .space
+            .map_user_4kib(allocator, direct_map, stack_virt, frame, stack_attributes)
+    } {
         return Err(UserLoadError::Mapping {
             virt: stack_page,
             error: e,
@@ -4287,7 +4342,7 @@ fn load_user_program_into(
             continue;
         };
         // SAFETY: この空間の PML4 は有効で、direct map が配下を覆っている。読み取りのみ。
-        match unsafe { verify::walk(space.pml4(), direct_map, virt) } {
+        match unsafe { verify::walk(process.space.pml4(), direct_map, virt) } {
             Ok(resolved) => {
                 let writable = resolved.entry & kernel::paging::entry::PTE_WRITABLE != 0;
                 let user = resolved.entry & kernel::paging::entry::PTE_USER != 0;
@@ -4335,12 +4390,15 @@ fn load_user_program_into(
         .map(|ph| ph.p_vaddr)
         .unwrap_or(elf.entry_point);
 
+    // **ここで entry が確定する。** 呼び出し側は `UserProcess` から読む。
+    process.entry = entry;
+
     // SAFETY: この空間はカーネルの上位を共有しており、切り替えても実行中の
     // コードとスタックは見え続ける。
-    unsafe { kernel::paging::switch::switch_to(space.pml4()) };
+    unsafe { kernel::paging::switch::switch_to(process.space.pml4()) };
     // SAFETY: entry と stack は今張ったユーザーページで、`ud2` が必ずフォルト
     // する。main_rsp0_top はメインのカーネルスタック上端。単一実行文脈である。
-    unsafe { kernel::ring3::enter(main_rsp0_top, entry, USER_PROGRAM_STACK_TOP) };
+    unsafe { kernel::ring3::enter(main_rsp0_top, process.entry, process.stack_top) };
     // SAFETY: 本番のテーブルへ戻す。上位は同じなので連続して実行できる。
     unsafe { kernel::paging::switch::switch_to(production) };
 
