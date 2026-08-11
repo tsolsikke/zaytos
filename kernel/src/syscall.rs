@@ -92,38 +92,55 @@ pub const SYS_CHECKSUM: u64 = ZAYTOS_PRIVATE_BASE + 2;
 /// errno が 2 つしか無く -EFAULT で代用していた。
 pub const CHECKSUM_BUF_LEN: usize = 64;
 
-/// ユーザーサブツリー（PML4[[`crate::USER_PML4_INDEX`]]）の仮想範囲
-/// [USER_VIRT_MIN, USER_VIRT_MAX)。現在 PML4[1] = [512 GiB, 1 TiB)。
+/// ユーザーポインタとして受理する下限（S9-b-3-2b）。**方針である。**
 ///
-/// **この範囲は現在のアドレス空間レイアウト（カーネル=下位半分に恒等、ユーザー=
-/// PML4[1]）に依存する。** higher-half B でカーネルを上位半分へ移しユーザーを低位へ
-/// 広げると、この範囲は変わる（verification-coverage に再評価の申し送り）。
-pub const USER_VIRT_MIN: u64 = 1 << 39;
-pub const USER_VIRT_MAX: u64 = 2 << 39;
+/// # 理由が変わった。値は変わっていない
+///
+/// **S9-b-1 でこの値を置いた理由は、起動順の偶然だった。** ポインタ検証の battery は
+/// 恒等除去より前に走るので、その時点の低位 VA にはカーネルの恒等写像が居る。
+/// 下限を 0 にすると `0x100000`（カーネル像）が範囲の検査を通ってしまい、
+/// **U=1 の判定だけが拒否の根拠になる**（`validate-skip-us` の破壊で受理された）。
+///
+/// **S9-b-3-2b で窓を 1 つに畳んだので、その理由は当たらなくなった。** 起動時の
+/// battery が使う窓は本番の空間のユーザーサブツリー（`PML4[1]` = 512 GiB 以上）で、
+/// カーネル像はそもそも窓の外である。
+///
+/// **それでも 0 にしない。** null 近傍を**範囲の側でも**拒む層を残す。Linux の
+/// `mmap_min_addr` が低位を空けておくのと同じ向きで、**層を 1 枚減らすには
+/// 減らす理由が要る。** 減らす理由が無い。
+///
+/// **同じ値を、違う根拠で持っている。**
+pub const USER_MIN_ADDR: u64 = 0x40_0000;
 
-/// ユーザープログラムを走らせる空間の仮想範囲（S9-b-1）。`PML4[0]` の全体である。
+/// PML4 の添字 1 つ分が覆う仮想範囲の大きさ（512 GiB）。
+const PML4_ENTRY_SPAN: u64 = 1 << 39;
+
+/// ユーザーサブツリーの添字から、ポインタ検証の窓を導く（S9-b-3-2b）。
 ///
-/// **窓が 2 つになった。** 起動時の検証は本番の空間の `PML4[1]` を使い、
-/// ユーザープログラムは自分の空間の `PML4[0]` を使う（`0x400000` へリンクして
-/// いる）。**どちらか一方に収まっていれば受理する。**
+/// 返すのは `[start, end)` で、`start` は [`USER_MIN_ADDR`] で床を打ってある。
 ///
-/// **窓を「下位半分すべて」へ広げなかったのは、長さの上限が消えるためである。**
-/// 広げると、`over-long`（`8 GiB` 超の長さ）が範囲では弾かれず、ページ走査が
-/// 200 万回まわる。**窓が有限であることが、走査の停止性を与えている。**
+/// # 窓は 1 つである
 ///
-/// # 下限が 0 ではないのは、低位にカーネルが居る時期があるからである
+/// **S9-b-1 から S9-b-3-2a までは 2 つあった**（起動時の検証用と、ユーザー
+/// プログラム用）。どちらか一方に収まっていれば受理する形で、**またぐ範囲を
+/// 受理しない条件を明示的に書く必要があった。**
 ///
-/// **一度 0 にして壊した。** `syscall-test validate-skip-us`（U=1 の判定を外す
-/// 破壊）が落ちて分かった。ポインタ検証の battery は恒等除去より前に走るので、
-/// **その時点の低位 VA にはカーネルの恒等写像が居る。** 下限を 0 にすると
-/// `0x100000`（カーネル像）が範囲の検査を通り、**U=1 の判定だけが拒否の根拠に
-/// なる。** 破壊でその 1 枚を外すと受理されてしまう。
+/// **1 つに畳むと、その条件は消える。** またぐ範囲が受理されないのは、
+/// **窓が 1 つしかないからである**（書かれた条件ではなく、構造の帰結になった）。
 ///
-/// **下限を `hello` のリンク先（4 MiB）に置く。** Linux の非 PIE の既定と同じ値で、
-/// `mmap_min_addr` が低位を空けておくのと同じ向きである。**カーネルポインタを
-/// 範囲の側でも拒む層が戻る。**
-pub const USER_PROGRAM_VIRT_MIN: u64 = 0x40_0000;
-pub const USER_PROGRAM_VIRT_MAX: u64 = 1 << 39;
+/// # 窓が有限であることが、走査の停止性を与えている
+///
+/// 「下位半分すべて」へ広げてはならない。広げると長さの上限が消え、
+/// `over-long` のような呼び出しでページ走査が何百万回もまわる。
+pub const fn window_for_subtree(index: usize) -> (u64, u64) {
+    let start = (index as u64) * PML4_ENTRY_SPAN;
+    let end = start + PML4_ENTRY_SPAN;
+    if start < USER_MIN_ADDR {
+        (USER_MIN_ADDR, end)
+    } else {
+        (start, end)
+    }
+}
 
 /// `write(fd, buf, len)`（S9-b-1）。**Linux の番号 1 をそのまま使う**
 /// （ADR-0020 の Addendum。対応するものがある呼び出しは Linux の番号を採る）。
@@ -196,6 +213,21 @@ static WRITE_FD: AtomicU64 = AtomicU64::new(0);
 static WRITE_LEN: AtomicU64 = AtomicU64::new(0);
 /// [`SYS_WRITE`] が最後に記録したバイト列。
 static WRITE_BUF: [AtomicU8; WRITE_BUF_LEN] = [const { AtomicU8::new(0) }; WRITE_BUF_LEN];
+
+/// 今 Ring 3 が使っている窓の下端と上端（S9-b-3-2b）。
+///
+/// # 据えるのは Ring 3 へ落ちる側である
+///
+/// [`crate::ring3::enter`] が遠征の間だけ据え、戻るときに元へ戻す。**据えないまま
+/// ここへ来ることはない**——[`validate_user_range`] を呼ぶのは [`dispatch`] だけで、
+/// あちらは `syscall_entry` からしか来ず、`syscall_entry` は Ring 3 からしか来ない。
+///
+/// # 既定値は空の窓である
+///
+/// `(0, 0)` は**どんな長さ 1 以上の範囲も受理しない。** 据え忘れたときに黙って
+/// 通る形にしない。**安全側は「窓が無ければ何も通さない」である。**
+static USER_WINDOW_START: AtomicU64 = AtomicU64::new(0);
+static USER_WINDOW_END: AtomicU64 = AtomicU64::new(0);
 
 /// [`PROBE_NUMBER`] を受け取ったか（S9-b-3-2a）。
 static PROBE_INVOKED: AtomicBool = AtomicBool::new(false);
@@ -293,8 +325,7 @@ impl UserSlice {
 /// 契約はこの検証器を共有する全 syscall が継承する（呼び出し側で短絡しない）。
 /// それ以外は次を満たすとき `Some`:
 ///   (a) 長さの加算にオーバーフローが無い（`checked_add`）。
-///   (b) 範囲が [USER_VIRT_MIN, USER_VIRT_MAX) と
-///       [USER_PROGRAM_VIRT_MIN, USER_PROGRAM_VIRT_MAX) のどちらか一方に収まる。
+///   (b) 範囲が**今 Ring 3 が使っている窓**に収まる（[`user_window`]）。
 ///   (c) 範囲を跨ぐ全 4KiB ページが present && 全階層 U=1
 ///       （[`crate::paging::verify::walk_user_accessible`]）。
 ///
@@ -326,12 +357,12 @@ pub unsafe fn validate_user_range(
         }
         // (a) 加算オーバーフロー無し。end は排他的上端（buf+len）。
         let end = buf.checked_add(len)?;
-        // (b) 範囲が 2 つの窓のどちらか一方に収まっていること（S9-b-1 で 2 つになった）。
-        // **またいだものは受理しない。** 窓は別のアドレス空間のもので、
-        // またぐ範囲はどちらの空間でも連続していない。
-        let in_boot_window = buf >= USER_VIRT_MIN && end <= USER_VIRT_MAX;
-        let in_program_window = buf >= USER_PROGRAM_VIRT_MIN && end <= USER_PROGRAM_VIRT_MAX;
-        if !in_boot_window && !in_program_window {
+        // (b) 範囲が**今の窓**に収まっていること（S9-b-3-2b で 1 つに畳んだ）。
+        // **またぐ範囲が受理されないのは、窓が 1 つしかないからである**（S9-b-1 から
+        // S9-b-3-2a までは窓が 2 つあり、「またいだものは受理しない」と書いて
+        // いた。いまは書く条件ではなく構造の帰結である）。
+        let (window_start, window_end) = user_window();
+        if buf < window_start || end > window_end {
             return None;
         }
         // (c) 範囲を跨ぐ全 4KiB ページを walk。境界非整列でも先頭・末尾を覆う。
@@ -685,6 +716,26 @@ pub fn reset_counters() {
     for slot in PROBE_SEEN_ARGS.iter() {
         slot.store(0, Ordering::SeqCst);
     }
+}
+
+/// 今 Ring 3 が使っている窓を返す（S9-b-3-2b）。
+pub fn user_window() -> (u64, u64) {
+    (
+        USER_WINDOW_START.load(Ordering::SeqCst),
+        USER_WINDOW_END.load(Ordering::SeqCst),
+    )
+}
+
+/// 窓を据え、**据える前の値を返す**（S9-b-3-2b）。
+///
+/// **戻すのは呼び出し側の責任である。** 現在の呼び出し元は
+/// [`crate::ring3::enter`] だけで、あちらが遠征の前後で対にしている。
+/// **入れ子にはならない**（Ring 3 の遠征は入れ子にならない）が、
+/// **前の値を返す形にしてあるので、入れ子になっても壊れない。**
+pub fn set_user_window(start: u64, end: u64) -> (u64, u64) {
+    let previous_start = USER_WINDOW_START.swap(start, Ordering::SeqCst);
+    let previous_end = USER_WINDOW_END.swap(end, Ordering::SeqCst);
+    (previous_start, previous_end)
 }
 
 /// [`PROBE_NUMBER`] が呼ばれたか（S9-b-3-2a）。

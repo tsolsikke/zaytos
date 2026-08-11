@@ -4641,7 +4641,14 @@ fn load_user_program_into(
     unsafe { kernel::paging::switch::switch_to(process.space.pml4()) };
     // SAFETY: entry と stack は今張ったユーザーページで、`ud2` が必ずフォルト
     // する。main_rsp0_top はメインのカーネルスタック上端。単一実行文脈である。
-    unsafe { kernel::ring3::enter(main_rsp0_top, process.entry, process.stack_top) };
+    unsafe {
+        kernel::ring3::enter(
+            main_rsp0_top,
+            process.entry,
+            process.stack_top,
+            kernel::syscall::window_for_subtree(USER_PROGRAM_PML4_INDEX),
+        )
+    };
     // SAFETY: 本番のテーブルへ戻す。上位は同じなので連続して実行できる。
     unsafe { kernel::paging::switch::switch_to(production) };
 
@@ -5136,7 +5143,12 @@ fn verify_ring3_excursion<const CAP: usize>(
     // SAFETY: ユーザーページは張り済み。main_rsp0_top はメインの上端なので、遠征後に
     // RSP0 をそこへ戻せる。起動時の単一実行文脈から 1 回だけ呼ぶ。
     unsafe {
-        ring3::enter(main_rsp0_top, ring3::USER_CODE_VIRT, ring3::USER_STACK_TOP);
+        ring3::enter(
+            main_rsp0_top,
+            ring3::USER_CODE_VIRT,
+            ring3::USER_STACK_TOP,
+            kernel::syscall::window_for_subtree(USER_PML4_INDEX),
+        );
     }
 
     // --- 会計と検証 ---
@@ -5353,7 +5365,12 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     // SAFETY: ユーザーページは張り済み。Ring 3 は cli_rip で cli を実行して #GP を起こす。
     // main_rsp0_top はメインの上端。起動時の単一実行文脈から 1 回だけ呼ぶ。
     unsafe {
-        ring3::enter(main_rsp0_top, ring3::USER_CODE_VIRT, ring3::USER_STACK_TOP);
+        ring3::enter(
+            main_rsp0_top,
+            ring3::USER_CODE_VIRT,
+            ring3::USER_STACK_TOP,
+            kernel::syscall::window_for_subtree(USER_PML4_INDEX),
+        );
     }
 
     // --- 会計と検証 ---
@@ -5526,7 +5543,12 @@ fn issue_ptr_len_syscall(logger: &mut Logger<SerialPort>, number: u64, buf: u64,
     // SAFETY: ユーザーページは張り済み。Ring 3 は cli_rip で cli を実行して #GP を起こす。
     // main_rsp0_top はメインの上端。起動時の単一実行文脈から呼ぶ。
     unsafe {
-        ring3::enter(main_rsp0_top, ring3::USER_CODE_VIRT, ring3::USER_STACK_TOP);
+        ring3::enter(
+            main_rsp0_top,
+            ring3::USER_CODE_VIRT,
+            ring3::USER_STACK_TOP,
+            kernel::syscall::window_for_subtree(USER_PML4_INDEX),
+        );
     }
 
     if !ring3::folded() {
@@ -5612,7 +5634,10 @@ fn verify_syscall_pointer<const CAP: usize>(
     let efault = (-syscall::EFAULT) as u64;
     let kernel_ptr: u64 = 0x10_0000; // カーネルイメージ領域（PML4[0]、U=0、範囲下限外）
     let unmapped: u64 = 0x8000400000; // PML4[1]、PD[2]、未マップ
-    let over_long_len: u64 = syscall::USER_VIRT_MAX - ring3::USER_CODE_VIRT + 0x1000;
+                                      // **窓の上端を超える長さ。** 窓は 1 つになったので、上端は今の遠征の窓から
+                                      // 導く（S9-b-3-2b）。
+    let (_, window_end) = kernel::syscall::window_for_subtree(USER_PML4_INDEX);
+    let over_long_len: u64 = window_end - ring3::USER_CODE_VIRT + 0x1000;
 
     // (buf, len, 受理を期待するか, 名前)
     let cases: [(u64, u64, bool, &str); 8] = [
@@ -5893,7 +5918,12 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
         // SAFETY: ユーザーページは張り済みで、今書いた命令列が必ずフォルトする。
         // main_rsp0_top はメインの上端。起動時の単一実行文脈から呼ぶ。
         unsafe {
-            ring3::enter(main_rsp0_top, ring3::USER_CODE_VIRT, ring3::USER_STACK_TOP);
+            ring3::enter(
+                main_rsp0_top,
+                ring3::USER_CODE_VIRT,
+                ring3::USER_STACK_TOP,
+                kernel::syscall::window_for_subtree(USER_PML4_INDEX),
+            );
         }
 
         if !ring3::folded() {

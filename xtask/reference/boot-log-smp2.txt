@@ -11,11 +11,11 @@ Hello, ZaytOS!
 [INFO] jumping to kernel entry point 0x100000
 [INFO] ZaytOS kernel: entered _start
 [INFO] boot stack: 632 of 16384 bytes used (high-water; 15752 bytes poison intact)
-[INFO] higher-half: arrived at high VA. RIP=0xffffffff80184d08 in [0xffffffff80100000, 0xffffffff801ea348)=true, RSP=0xffffffff801c8d70 high=true, CR3=0x1b3000 == bootstrap PML4 0x1b3000 = true, identity alive (phys 0x100000 read via low==high) = true
-[INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff801db0f0 first slot=0xffffffff801db0f0 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
+[INFO] higher-half: arrived at high VA. RIP=0xffffffff80185028 in [0xffffffff80100000, 0xffffffff801ea348)=true, RSP=0xffffffff801c8d70 high=true, CR3=0x1b3000 == bootstrap PML4 0x1b3000 = true, identity alive (phys 0x100000 read via low==high) = true
+[INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff801db100 first slot=0xffffffff801db100 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
 [INFO] interrupts: RFLAGS.IF before cli = false (raw RFLAGS=0x96)
 [INFO] interrupts: RFLAGS.IF after cli = false (raw RFLAGS=0x96)
-[INFO] gdt: base=0xffffffff801db0f0 limit=63 (expected base=0xffffffff801db0f0)
+[INFO] gdt: base=0xffffffff801db100 limit=63 (expected base=0xffffffff801db100)
 [INFO] gdt: CS=0x8 (expected 0x8), TR=0x30 (expected 0x30)
 [INFO] gdt: limit=63 (expected 63)
 [INFO] gdt[1] kcode: 0x00af9a000000ffff DPL=0 present=1 kind=code accessed=0 (expected 0x00af9a000000ffff, accessed bit is CPU-managed)
@@ -40,7 +40,7 @@ Hello, ZaytOS!
 [INFO] idt: base=0xffffffff801bea99 limit=4095 (expected base=0xffffffff801bea99 limit=4095)
 [INFO] idt: 256 entries, all present=true, all interrupt gates=true, DPL layout ok=true (syscall vector 0x80 DPL=Some(3), others DPL 0)
 [INFO] idt: #DF (vector 8) IST index=Some(1), #DE (vector 0) IST index=None
-[INFO] idt: stub table 0xffffffff8013c740..0xffffffff8013d740 size=4096 (expected 4096), stride=OK, entries=OK
+[INFO] idt: stub table 0xffffffff8013c850..0xffffffff8013d850 size=4096 (expected 4096), stride=OK, entries=OK
 [INFO] idt: dedicated stubs outside the exception table: 6 checked, every gate points at its own stub=true
 [INFO] idt: loaded (exceptions now reach our handlers; interrupts stay disabled until M4-d)
 [INFO] critical: IF before any guard = false
@@ -73,7 +73,7 @@ Hello, ZaytOS!
 [INFO] paging: required range [framebuffer] 0x80000000..0x803e8000: OK
 [INFO] paging: required range [new page tables (PML4)] 0x3000..0x4000: OK
 [INFO] paging: required range [current RSP] 0x1c8fd0..0x1c8fd1: OK
-[INFO] paging: required range [current RIP] 0x184d08..0x184d09: OK
+[INFO] paging: required range [current RIP] 0x185028..0x185029: OK
 [INFO] paging: all required ranges mapped. proceeding to CR3 switch (d-2).
 [INFO] paging: current CR3 = 0x1b3000
 [INFO] paging: CR3 switch instruction executed
@@ -107,7 +107,7 @@ Hello, ZaytOS!
 [INFO] console: 102 log line(s) were emitted before the console existed (serial only)
 [INFO] heap: arena 0x5d3000..0x6d3000 (256 frames, 1 MiB), mapped=true
 [INFO] heap: initialized (1048576 bytes free, 1 block(s))
-[INFO] granularity: executing code (RIP) 0xffffffff80184d08 -> phys 0x184d08, mapped by a 4KiB page at 0xffffffff80184000 (entry=0x184023)
+[INFO] granularity: executing code (RIP) 0xffffffff80185028 -> phys 0x185028, mapped by a 4KiB page at 0xffffffff80185000 (entry=0x185023)
 [INFO] granularity: kernel stack (RSP) 0xffffffff801c8a50 -> phys 0x1c8a50, mapped by a 4KiB page at 0xffffffff801c8000 (entry=0x1c8063)
 [INFO] granularity: heap arena 0x5d3000 -> phys 0x5d3000, mapped by a 2MiB page at 0x400000 (entry=0x400083)
 [INFO] granularity: framebuffer 0x80000000 -> phys 0x80000000, mapped by a 2MiB page at 0x80000000 (entry=0x800000b3)
@@ -236,7 +236,7 @@ Hello, ZaytOS!
 [INFO] percpu: 2 usable CPU(s) enumerated, 2 per-CPU slot(s) available, every CPU has a slot=true (cpu_id() is the constant 0 and only the bootstrap processor runs, so no slot is indexed out of range yet)
 [INFO] identity-removal: begin. live PML4=0xe000, saved PML4[0]=0xf023
 [INFO] identity-removal: PML4[0] subtree table frames = 7 (28 KiB) become unreachable; intentional leak. subtree frames [256]=10 [511]=3. disjoint(0,256)=true disjoint(0,511)=true disjoint(256,511)=true
-[INFO] identity-removal: required [RIP] 0xffffffff80184d08 -> phys 0x184d08 (huge=false): OK
+[INFO] identity-removal: required [RIP] 0xffffffff80185028 -> phys 0x185028 (huge=false): OK
 [INFO] identity-removal: required [RSP] 0xffffffff801c88a0 -> phys 0x1c88a0 (huge=false): OK
 [INFO] identity-removal: required [direct map window] 0xffff80000000e000 -> phys 0xe000 (huge=false): OK
 [INFO] identity-removal: required [kernel image] 0xffffffff80100000 -> phys 0x100000 (huge=false): OK
@@ -319,9 +319,9 @@ task: cooperative switch verified
 [INFO] keyboard: IRQ1 is unmasked on the 8259; the delivery vector is 0x21 for now (S2-d-1c re-routes it through the I/O APIC before sti, which changes the vector)
 [INFO] ioapic: IRQ1 redirection entry read back: vector=0x42 masked=false level_triggered=false active_low=false destination_mode=physical destination=0x00, vector matches what we wrote (0x42) = true, destination is physical mode and equals the bootstrap processor (0x00) = true
 [INFO] ioapic: IRQ1 now goes through the I/O APIC as vector 0x42; the 8259 line is masked (the first key must arrive as that vector, which the 8259 cannot produce)
-[INFO] sti-check 1: GDT base=0xffffffff801db0f0 (expected 0xffffffff801db0f0), CS=0x0008 (expected 0x0008), DS=0x0010 SS=0x0010 (expected 0x0010)
+[INFO] sti-check 1: GDT base=0xffffffff801db100 (expected 0xffffffff801db100), CS=0x0008 (expected 0x0008), DS=0x0010 SS=0x0010 (expected 0x0010)
 [INFO] sti-check 2: TR=0x0030 (expected 0x0030), IST1 top=0xffffffff801d6000, #DF gate IST index=Some(1)
-[INFO] sti-check 3: IDT base=0xffffffff801bea99 limit=4095, first 32 gates ok=true, exception stub table ok=true, irq stub table ok=true (0xffffffff8013d770..0xffffffff8013d980, size=528 expected=528)
+[INFO] sti-check 3: IDT base=0xffffffff801bea99 limit=4095, first 32 gates ok=true, exception stub table ok=true, irq stub table ok=true (0xffffffff8013d880..0xffffffff8013da90, size=528 expected=528)
 [INFO] sti-check 5: PIC IMR master=0xfe slave=0xff (expected 0xfe/0xff) [read back from hardware]
 [INFO] sti-check 4: cannot be verified at this point; the timer still goes through the 8259 here (calibration needs PIT ticks, so the move to the local APIC timer happens after sti), and the 8259 ICW2 is write-only. Proceeding is safe only because check 5 holds: with every IRQ masked, a wrong offset delivers nothing. Proof arrives when the first timer IRQ shows up as vector 0x20. The other two paths are read back where they are set up: the I/O APIC redirection entry (IRQ1) and the LVT timer
 [INFO] sti-check 6: IF before=false while holding the lock=false after=false (must be false while held, and back to the entry value afterwards)
@@ -343,7 +343,7 @@ task: cooperative switch verified
 [INFO] lapic-timer: the timer now arrives as vector 0xfe, which the 8259 cannot produce
 task: starting preemptive demo with 2 busy-loop workers for 200 ticks
 [INFO] smp: the installed AP trampoline matches the template outside the patched fields: 4048 byte(s) compared, 48 excluded (gdtr base at 0xf22, far jump target at 0x3b, data block 0xf40..0xf68), mismatches=0
-[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x1b3000, rust entry 0xffffffff801630e0
+[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x1b3000, rust entry 0xffffffff80163400
 [INFO] smp: starting application processor apic id 1 as slot 1 (trampoline at 0x1000, vector 0x01, stack top 0x3000 identity-mapped, cr3 0x1b3000 = the static boot page table)
 [INFO] smp: application processor 1 started (long mode reached, running on the static boot page table; no per-CPU GDT/TSS/IDT yet, so cpu_id() is not used here)
 [INFO] smp: ap 1 loaded its own GDT/TSS/IDT; cpu_id() now reads 1 from GDTR (the index handed over in the trampoline data block was 1, match=true)

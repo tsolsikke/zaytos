@@ -258,6 +258,15 @@ pub fn excursion_stack_range() -> (u64, u64) {
 /// [`fault_rip`] を読み、自分が置いた命令の位置と突き合わせること。この関数は
 /// 突き合わせない（遠征ごとに予期する位置が違い、それは呼び出し側の知識である）。
 ///
+/// # ユーザーポインタの窓は引数である（S9-b-3-2b）
+///
+/// **遠征ごとに、その間だけ有効なユーザー VA の範囲が違う。** 起動時の検証は
+/// 本番の空間のユーザーサブツリーを使い、ユーザープログラムは自分の空間の
+/// サブツリーを使う。**遠征に入らないと Ring 3 は動かないので、ここで据えれば
+/// 「窓を据えずにシステムコールが来る」形は作れない。**
+///
+/// 戻すのはこの関数である。**畳みで戻っても `exit` で戻っても同じ位置を通る。**
+///
 /// # Safety
 ///
 /// 呼び出し前に、`user_rip` と `user_stack_top` が `PML4` のユーザーサブツリーに
@@ -265,8 +274,17 @@ pub fn excursion_stack_range() -> (u64, u64) {
 /// `user_stack_top` は 1 ページ内の上端で、Ring 3 が push できること。
 /// `main_rsp0_top` が呼び出し元（メイン）のカーネルスタック上端で、遠征後に
 /// RSP0 をそこへ戻せること。起動時の単一実行文脈から呼ぶこと。
-pub unsafe fn enter(main_rsp0_top: u64, user_rip: u64, user_stack_top: u64) {
+pub unsafe fn enter(
+    main_rsp0_top: u64,
+    user_rip: u64,
+    user_stack_top: u64,
+    user_window: (u64, u64),
+) {
     let (_, excursion_top) = excursion_stack_range();
+
+    // **この遠征の間、ユーザーポインタとして受理する範囲を据える（S9-b-3-2b）。**
+    // 戻すのは畳みでも `exit` でも同じ位置（下の longjmp から戻った先）である。
+    let previous_window = crate::syscall::set_user_window(user_window.0, user_window.1);
 
     FOLDED.store(false, Ordering::SeqCst);
     FAULT_RSP.store(0, Ordering::SeqCst);
@@ -328,6 +346,10 @@ pub unsafe fn enter(main_rsp0_top: u64, user_rip: u64, user_stack_top: u64) {
     unsafe {
         gdt::set_rsp0(main_rsp0_top);
     }
+
+    // **窓を戻す（S9-b-3-2b）。** ここは畳みで戻った場合も `exit` で戻った場合も
+    // 通る（どちらの longjmp も `zaytos_enter_ring3` の復帰点へ帰る）。
+    crate::syscall::set_user_window(previous_window.0, previous_window.1);
 }
 
 /// `exception_entry` が呼ぶ。今この例外を畳んでよいかを判定する。
