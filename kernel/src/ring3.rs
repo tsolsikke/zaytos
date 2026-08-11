@@ -106,7 +106,8 @@ static mut RECOVERY: Recovery = Recovery {
 /// 上げ下げする点は3つある。
 ///
 /// - [`enter`] が iretq の直前で立てる
-/// - `exception_entry` が畳むと決めた時点で降ろす（[`record_and_fold`]）
+/// - `exception_entry` が畳むと決めた時点で降ろす（[`record_and_fold`] が
+///   [`leave_ring3`] を呼び、降ろすのはそちらである）
 /// - `syscall_entry` が入口で降ろし、Ring 3 へ返る直前で立て直す
 ///
 /// # 今のところ振る舞いは変わらない
@@ -350,7 +351,10 @@ pub fn note_return_to_ring3() {
 }
 
 /// Ring 3 由来の例外を畳む。ベクタ・フォルト RIP・CS・RSP とハンドラ RSP を記録し、
-/// [`IN_RING3`] を降ろして longjmp で遠征の呼び出し元へ戻る。**戻らない。**
+/// **[`leave_ring3`] で遠征の呼び出し元へ戻る。戻らない。**
+///
+/// **[`IN_RING3`] を降ろすのは [`leave_ring3`] の側である**（S9-b-3-1 で切り出した）。
+/// ここが持つのは「畳みに固有の記録」だけである。
 ///
 /// # Safety
 ///
@@ -372,10 +376,39 @@ pub unsafe fn record_and_fold(
     FAULT_ERROR_CODE.store(fault_error_code, Ordering::SeqCst);
     FAULT_RSP.store(fault_rsp, Ordering::SeqCst);
     HANDLER_RSP.store(handler_rsp, Ordering::SeqCst);
-    IN_RING3.store(false, Ordering::SeqCst);
     FOLDED.store(true, Ordering::SeqCst);
-    // SAFETY: 呼び出し側契約により遠征中で、RECOVERY は保存済み。longjmp は
-    // RSP と callee-saved を復元して復帰 RIP へ飛ぶ。戻らない。
+    // SAFETY: 呼び出し側契約により遠征中で、RECOVERY は保存済み。
+    unsafe { leave_ring3() }
+}
+
+/// Ring 3 を出てカーネルへ戻る（S9-b-3-1）。**戻らない。**
+///
+/// [`IN_RING3`] を降ろし、longjmp で [`enter`] の呼び出し元へ帰る。
+///
+/// # 理由を問わない
+///
+/// **この関数は「なぜ Ring 3 を出るのか」を知らない。** 記録は呼び出し側が
+/// 済ませてから来る。**畳み**（[`record_and_fold`]。ベクタ・RIP・CS・CR2 を
+/// 記録する）と、**プロセスの終了**（S9-b-3-1 で足す。戻り値を記録する）が
+/// 利用者である。
+///
+/// # なぜ切り出したか
+///
+/// **切り出した時点で利用者が 2 つある。** 1 つのときに切り出せば先回りだが、
+/// 2 つ目が来た時点で切るのは「同じ変更を 2 度加えることになった」側である
+/// （`map_4kib` と `map_user_4kib` の統合の合図に書いた形）。
+///
+/// **切らずに `record_and_fold` を使い回すと、名前と doc が意味の外へ伸びる。**
+/// あれは「例外を畳む」関数で、**プロセスの終了は例外ではない。**
+///
+/// # Safety
+///
+/// [`RECOVERY`] が [`enter`] で保存済みであること（遠征中なら必ずそう）。
+/// Ring 3 から入ったカーネル文脈から呼ぶこと。
+pub unsafe fn leave_ring3() -> ! {
+    IN_RING3.store(false, Ordering::SeqCst);
+    // SAFETY: 呼び出し側契約により RECOVERY は保存済み。longjmp は RSP と
+    // callee-saved を復元して復帰 RIP へ飛ぶ。戻らない。
     unsafe { zaytos_resume_from_ring3() }
 }
 
