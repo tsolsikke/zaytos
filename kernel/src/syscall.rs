@@ -156,6 +156,18 @@ pub const SYS_EXIT: u64 = 60;
 /// 検証用 probe システムコールの番号（ZaytOS 独自。[`ZAYTOS_PRIVATE_BASE`]）。
 pub const PROBE_NUMBER: u64 = ZAYTOS_PRIVATE_BASE;
 
+/// **永久に実装しない番号**（S9-b-3-2a）。`-ENOSYS` の的である。
+///
+/// # なぜ「空いている番号」で済ませないか
+///
+/// **未実装の番号は、いつか実装される。** そのとき、`-ENOSYS` が返ることを
+/// 確かめていた検査は静かに別のものを見はじめる（戻り値が変わるので落ちはするが、
+/// **落ちた理由が「実装したから」だと分かる材料がどこにも無い**）。
+///
+/// **予約しておけば、実装しようとした人がこの doc を読む。** [`ZAYTOS_PRIVATE_BASE`]
+/// の上に置くので、Linux の番号表とも衝突しない。
+pub const SYS_NEVER_IMPLEMENTED: u64 = ZAYTOS_PRIVATE_BASE + 0xFF;
+
 /// probe が返す既知の戻り値。ユーザーはこれを RAX で受け取り、ユーザースタックへ
 /// store する。カーネルが畳み後に読み戻して一致を確かめることで、戻り値が RAX 経由で
 /// Ring 3 へ渡ったことを実証する。`-errno` の範囲（`-1..-4095`）と紛れない値にする。
@@ -184,6 +196,28 @@ static WRITE_FD: AtomicU64 = AtomicU64::new(0);
 static WRITE_LEN: AtomicU64 = AtomicU64::new(0);
 /// [`SYS_WRITE`] が最後に記録したバイト列。
 static WRITE_BUF: [AtomicU8; WRITE_BUF_LEN] = [const { AtomicU8::new(0) }; WRITE_BUF_LEN];
+
+/// [`PROBE_NUMBER`] を受け取ったか（S9-b-3-2a）。
+static PROBE_INVOKED: AtomicBool = AtomicBool::new(false);
+/// [`PROBE_NUMBER`] の呼び出しで届いた 6 引数（S9-b-3-2a）。
+///
+/// # なぜ [`LAST_ARGS`] で足りないか
+///
+/// あちらは**直近の呼び出し**を持つ。**起動時の battery は 1 回しか発行しないので
+/// 足りていた**が、ユーザープログラムは 4 回発行する（probe・`write`・未実装の
+/// 番号・`exit`）。**最後の `exit` で上書きされ、probe の引数は残らない。**
+///
+/// **番号ごとに要るのではなく、「主張したい 1 回」が要る。** 主張は
+/// 「6 引数が `ADR-0020` の規約どおりに届くこと」で、それを言えるのは probe の
+/// 回だけである。
+static PROBE_SEEN_ARGS: [AtomicU64; 6] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
 
 /// [`SYS_EXIT`] を受け取ったか（S9-b-3-1）。**呼び出し側は、遠征から戻った理由が
 /// 終了なのか畳みなのかをこれで区別する。**
@@ -396,7 +430,15 @@ unsafe fn dispatch(
     direct_map: DirectMap,
 ) -> u64 {
     match number {
-        PROBE_NUMBER => PROBE_RETURN,
+        PROBE_NUMBER => {
+            // **この回の引数を残す（S9-b-3-2a）。** [`LAST_ARGS`] は後続の呼び出しで
+            // 上書きされるので、**主張したい 1 回**をここで押さえる。
+            for (slot, value) in PROBE_SEEN_ARGS.iter().zip(args.iter()) {
+                slot.store(*value, Ordering::SeqCst);
+            }
+            PROBE_INVOKED.store(true, Ordering::SeqCst);
+            PROBE_RETURN
+        }
         SYS_CHECK_PTR => {
             let buf = args[0];
             let len = args[1];
@@ -636,6 +678,23 @@ pub fn reset_counters() {
     for slot in WRITE_BUF.iter() {
         slot.store(0, Ordering::SeqCst);
     }
+    // **probe の記録も戻す（S9-b-3-2a）。** 起動時の battery が発行した probe の
+    // 引数が、ユーザープログラムのものとして読まれないようにする
+    // （`verification-coverage.md` の「1 つしかない間は、リセット漏れが観測できない」）。
+    PROBE_INVOKED.store(false, Ordering::SeqCst);
+    for slot in PROBE_SEEN_ARGS.iter() {
+        slot.store(0, Ordering::SeqCst);
+    }
+}
+
+/// [`PROBE_NUMBER`] が呼ばれたか（S9-b-3-2a）。
+pub fn probe_invoked() -> bool {
+    PROBE_INVOKED.load(Ordering::SeqCst)
+}
+
+/// [`PROBE_NUMBER`] の呼び出しで届いた 6 引数（S9-b-3-2a）。
+pub fn probe_seen_args() -> [u64; 6] {
+    core::array::from_fn(|i| PROBE_SEEN_ARGS[i].load(Ordering::SeqCst))
 }
 
 /// [`SYS_EXIT`] を受け取ったか（S9-b-3-1）。

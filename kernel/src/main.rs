@@ -3580,6 +3580,9 @@ static HELLO_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello.elf"))
 /// 出所は [`HELLO_ELF`] と同じで、`kernel/userland/fault-test.rs` を建てたものである。
 static FAULT_TEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fault-test.elf"));
 
+/// 埋め込んだユーザープログラム `syscall-test` の ELF（S9-b-3-2a）。
+static SYSCALL_TEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/syscall-test.elf"));
+
 /// 埋め込んだユーザープログラムの ELF を読み、会計を出す（S9-b-1）。
 ///
 /// **写像もしないし走らせもしない。** 像が在って、`common::elf` が受理し、
@@ -3735,6 +3738,9 @@ enum UserLoadError {
     /// 畳まれたが、ベクタ・RIP・CS・CR2・エラーコードのどれかが予期と違った
     /// （S9-b-3-2a）。**どれが違うかは直前の ERROR 行に出ている。**
     FoldMismatch,
+    /// ユーザーが組み立てた引数が、`ADR-0020` の規約どおりに届かなかった
+    /// （S9-b-3-2a）。**probe が呼ばれなかった場合も含む。**
+    AbiMismatch,
     /// 畳んだ会計が合わなかった（S9-b-3-1）。**空間を畳んでも、消えたフレームが
     /// 隔離へ届いていない。**
     DestroyAccounting {
@@ -3994,6 +4000,30 @@ const FAULT_TEST_STORE_OFFSET: u64 = 0x20;
 /// 来たらベクタが 6 になり、判定行が食い違いとして止める。
 const FAULT_TEST_UD2_OFFSET: u64 = 0x30;
 
+/// `syscall-test` が `write` で送るはずのバイト列（S9-b-3-2a）。
+const SYSCALL_TEST_MESSAGE: &str = "syscall-test wrote this\n";
+
+/// `syscall-test` の受け皿の `ud2` が entry から何バイト目にあるか（S9-b-3-2a）。
+///
+/// **`kernel/userland/syscall-test.rs` の `.org 0x100` と対になっている。**
+/// `hello` より遠いのは、検算の分だけ命令が長いためである。
+const SYSCALL_TEST_UD2_OFFSET: u64 = 0x100;
+
+/// `syscall-test` の終了状態の意味（S9-b-3-2a）。
+///
+/// # 値に意味がある
+///
+/// **どの検算が落ちたかは、この値でしか分からない。** `user-exit-wrong-status` の
+/// 期待マーカーに値を入れなかったのとは逆で、**こちらは値そのものが情報である。**
+/// 判定行が 0 以外の終了状態を出すときは、この対応を引いて意味も出す。
+///
+/// **`kernel/userland/syscall-test.rs` の doc と対になっている。**
+const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
+    (1, "the probe return value was not PROBE_RETURN"),
+    (2, "write did not return the number of bytes it was given"),
+    (3, "the unimplemented number did not return -ENOSYS"),
+];
+
 /// `fault-test` が起こす #PF のエラーコード（S9-b-3-2a）。
 ///
 /// `P`（bit 0）| `W`（bit 1）| `U`（bit 2）= 7。**「不在」ではなく「権限違反」で
@@ -4074,6 +4104,14 @@ struct UserProgram {
     receiver_offset: u64,
     /// `write` で届くはずのバイト列。**発行しないなら `None`。**
     expected_write: Option<&'static str>,
+    /// **`ADR-0020` の ABI の契約を probe で確かめるプログラムか**（S9-b-3-2a）。
+    ///
+    /// 真なら、カーネル側が受け取った 6 引数を [`kernel::syscall::PROBE_ARGS`] と
+    /// 突き合わせる。**確かめているのは `dispatch` ではなく、ユーザーが asm で
+    /// 組み立てた引数が規約どおりのレジスタで届くことである。**
+    probes_abi: bool,
+    /// 0 以外の終了状態の意味（S9-b-3-2a）。**空なら値に意味を持たせていない。**
+    status_meanings: &'static [(u64, &'static str)],
 }
 
 /// 走らせるプログラムの一覧（S9-b-3-1、S9-b-3-2a で期待を持たせた）。
@@ -4095,6 +4133,8 @@ const USER_PROGRAMS: &[UserProgram] = &[
         outcome: UserProgramOutcome::Exit { status: 0 },
         receiver_offset: HELLO_UD2_OFFSET,
         expected_write: Some(HELLO_MESSAGE),
+        probes_abi: false,
+        status_meanings: &[],
     },
     UserProgram {
         name: "fault-test",
@@ -4107,6 +4147,17 @@ const USER_PROGRAMS: &[UserProgram] = &[
         },
         receiver_offset: FAULT_TEST_UD2_OFFSET,
         expected_write: None,
+        probes_abi: false,
+        status_meanings: &[],
+    },
+    UserProgram {
+        name: "syscall-test",
+        image: SYSCALL_TEST_ELF,
+        outcome: UserProgramOutcome::Exit { status: 0 },
+        receiver_offset: SYSCALL_TEST_UD2_OFFSET,
+        expected_write: Some(SYSCALL_TEST_MESSAGE),
+        probes_abi: true,
+        status_meanings: SYSCALL_TEST_STATUS,
     },
 ];
 
@@ -4664,8 +4715,16 @@ fn check_user_program_outcome(
                 return Err(UserLoadError::DidNotExit);
             }
             if status != expected_status {
+                // **意味を持たせてある終了状態なら、意味も出す。** 値だけでは
+                // どの検算が落ちたか分からない（[`SYSCALL_TEST_STATUS`]）。
+                let meaning = program
+                    .status_meanings
+                    .iter()
+                    .find(|(value, _)| *value == status)
+                    .map_or("no meaning is recorded for this value", |(_, text)| *text);
                 logger.error(format_args!(
-                    "user-run: {name} exited with status {status}, expected {expected_status}"
+                    "user-run: {name} exited with status {status}, expected \
+                     {expected_status} ({meaning})"
                 ));
                 return Err(UserLoadError::ExitStatus(status));
             }
@@ -4705,6 +4764,38 @@ fn check_user_program_outcome(
                 return Err(UserLoadError::FoldMismatch);
             }
         }
+    }
+
+    // **ABI の契約を確かめるプログラムなら、届いた引数を突き合わせる。**
+    if program.probes_abi {
+        let seen = kernel::syscall::probe_seen_args();
+        if !kernel::syscall::probe_invoked() {
+            logger.error(format_args!(
+                "user-run: {name} was supposed to issue the probe, but the kernel never saw it"
+            ));
+            return Err(UserLoadError::AbiMismatch);
+        }
+        for (index, (&got, &expected)) in seen
+            .iter()
+            .zip(kernel::syscall::PROBE_ARGS.iter())
+            .enumerate()
+        {
+            if got != expected {
+                logger.error(format_args!(
+                    "user-run: {name} argument register mismatch (arg{index} seen {got:#x}, \
+                     expected {expected:#x}); the ABI contract of ADR-0020 does not hold for \
+                     arguments assembled in user code"
+                ));
+                return Err(UserLoadError::AbiMismatch);
+            }
+        }
+        logger.info(format_args!(
+            "user-abi: {name} issued the probe from user assembly and all 6 arguments arrived \
+             per ADR-0020 (arg4 came from R10, not RCX, which carried a sentinel); this checks \
+             the ABI contract itself, not the dispatcher — the boot-time probe assembles its \
+             arguments in Rust inside the kernel, this one assembles them in assembly, links, \
+             loads and enters Ring 3 like any program"
+        ));
     }
 
     // **`write` の中身は、送るはずのプログラムについてだけ見る。**

@@ -72,7 +72,7 @@ fn main() {
 /// 非 PIE の ET_EXEC（`userland/user.ld` が `0x400000` へリンクする）。
 /// `common::elf` が受理する形であることは S9-b-1 の着手前に実測して確かめた。
 fn build_user_programs(manifest_dir: &str, out_dir: &str) {
-    const PROGRAMS: &[&str] = &["hello", "fault-test"];
+    const PROGRAMS: &[&str] = &["hello", "fault-test", "syscall-test"];
 
     let script = format!("{manifest_dir}/userland/user.ld");
     println!("cargo:rerun-if-changed={script}");
