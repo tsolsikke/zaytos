@@ -60,6 +60,12 @@ pub enum AddressSpaceError {
     NotPrivate,
     /// 下位に巨大ページがあった。**張る経路が無いので、前提が崩れている。**
     UnexpectedHugePage,
+    /// その仮想アドレスには既に葉が張られている（S9-b-3-2b）。
+    ///
+    /// **上書きしない。** 上書きすると前のフレームが写像から外れ、破棄から
+    /// 見えなくなって漏れる。**区画が同じ 4KiB ページを共有する ELF がここへ
+    /// 来る。**
+    AlreadyMapped,
 }
 
 /// プロセス 1 つ分のアドレス空間。
@@ -228,6 +234,12 @@ impl AddressSpace {
     /// ある。** 同じ変更を 2 度加えることになった時点が、2 つ持っている費用が
     /// 表に出た時点である。**今回（W を足す）が 1 度目である。**
     ///
+    /// **「同じ変更を 2 度」の 1 件目が出た（S9-b-3-2b）。** 葉が既に張られて
+    /// いるかの判定である。**`map_4kib` は最初から持っていて、こちらは持って
+    /// いなかった**——2 つの経路が同じ性質を持つべきなのに、片方だけが持って
+    /// いた。**合図には当たらない**（足したのは属性ではなく検査である）。
+    /// **カウントの 1 件目として数える。**
+    ///
     /// # Safety
     ///
     /// - `direct_map` が、これから取る中間テーブルと `frame` を覆っていること。
@@ -294,6 +306,24 @@ impl AddressSpace {
             table = child;
         }
 
+        // **既に張られている葉は上書きしない（S9-b-3-2b）。**
+        //
+        // **重なる区画を持つ像がここへ来る。** 上書きすると、前の葉が指していた
+        // フレームが写像から外れ、`destroy` から見えなくなって 1 枚漏れる
+        // （実測で 14 枚消えて隔離へ 13 枚）。**漏れは会計に出てカーネルが
+        // 止まるので、S9 の「いかなる入力でもカーネルを fail-fast させない」に
+        // 反していた。**
+        //
+        // `ActivePageTable::map_4kib` は最初からこの判定を持っている。
+        // **2 つの経路が同じ性質を持つべきなのに、片方だけが持っていた**
+        // （この関数の doc の「写像の経路が 2 つあることについて」）。
+        let leaf_index = entry::pt_index(virt);
+        // SAFETY: table は上の走査で得た present な中間テーブルの物理。読み取りのみ。
+        let existing_leaf = unsafe { read_entry(direct_map, table, leaf_index) };
+        if entry::is_present(existing_leaf) {
+            return Err(AddressSpaceError::AlreadyMapped);
+        }
+
         let mut leaf = frame.as_u64() | entry::PTE_PRESENT | entry::PTE_USER;
         // 破壊 (S9-a, map-force-writable): 書き込み可否の引数を無視して常に W=1 に
         // する。**もう一方の経路（`ActivePageTable::map_4kib`）と同じ破壊で両方が
@@ -305,7 +335,7 @@ impl AddressSpace {
             leaf |= entry::PTE_PCD;
         }
         // SAFETY: 葉。ユーザーから到達できる 4KiB ページ。
-        unsafe { write_entry(direct_map, table, entry::pt_index(virt), leaf) };
+        unsafe { write_entry(direct_map, table, leaf_index, leaf) };
         Ok(())
     }
 

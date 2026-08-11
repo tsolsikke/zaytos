@@ -4181,10 +4181,20 @@ const USER_PROGRAMS: &[UserProgram] = &[
 ///
 /// # 区画が同じページを共有していると張れない
 ///
-/// 1 枚のページに 2 つの権限は載らないので、後から来た区画が
-/// [`AddressSpaceError::…`] ではなく `AlreadyMapped` 相当で弾かれる。
-/// **`userland/user.ld` が区画をページ境界へ揃えているのはこのためである**
-/// （揃えないと実際に重なった。実測で `.text` が `0x400000..0x400030`、
+/// **後から来た区画が `Mapping { AlreadyMapped }` で拒まれる**（S9-b-3-2b）。
+///
+/// **一度は誤っていた。** ここには以前も「`AlreadyMapped` 相当で弾かれる」と
+/// 書いてあったが、**それを持っていたのは
+/// [`kernel::paging::active::ActivePageTable::map_4kib`] の側だけで、ローダーが
+/// 使う [`kernel::address_space::AddressSpace::map_user_4kib`] は葉の present を
+/// 見ずに書いていた。** 契約を片側だけ見て、もう片側のものとして書いていた形で
+/// ある（S9-b-3-2b の数え直しで実測した）。**実測では両方「張れた」ことになり、
+/// 1 つ目のフレームが写像から外れて 1 枚漏れた**（14 枚消えて隔離へ 13 枚）。
+/// **漏れは会計に出てカーネルを止めるので、S9 の「いかなる入力でもカーネルを
+/// fail-fast させない」に反していた。** 判定を足して直してある。
+///
+/// **`userland/user.ld` が区画をページ境界へ揃えているのは、この形を避けるため
+/// である**（揃えないと実際に重なった。実測で `.text` が `0x400000..0x400030`、
 /// `.rodata` が `0x400030` からになった）。**実際のツールチェインも同じ理由で
 /// 揃える。**
 ///
@@ -4330,16 +4340,20 @@ fn load_embedded_user_program(
 /// **あれらはローダーへ入らないので、`UserLoadError` の経路を 1 度も通らない。**
 /// **`Result` にした意味はここで初めて出る。**
 ///
-/// 2 つ置く。**落ちる場所が違う。**
+/// 3 つ置く。**落ちる場所が違う。**
 ///
 /// - 入口で落ちる（`Parse`）。写像は 1 枚も張られていない
-/// - **途中で落ちる（`Mapping`）。** 1 本目の区画は張り終わっており、
-///   **2 本目で拒まれる。そこまでに張ったものの後始末が要る**
+/// - **途中で落ちる（`Mapping { NotPrivate }`）。** 1 本目の区画は張り終わって
+///   おり、**2 本目で拒まれる。そこまでに張ったものの後始末が要る**
+/// - **途中で落ちる（`Mapping { AlreadyMapped }`、S9-b-3-2b）。** 区画が同じ
+///   4KiB ページを共有する像である。**以前はこれが拒まれず、上書きして
+///   1 枚漏らしていた**（`docs/verification-coverage.md` の「ELF の検査を
+///   3 つに分ける」）
 ///
-/// 途中で落ちる像は、**2 本目の `p_vaddr` をこの空間のユーザーサブツリーの
-/// 外（`PML4[1]`）へ動かして作る。** パーサは `p_vaddr` の範囲を見ない
-/// （配置の方針を知らないため。`common::elf` のモジュール doc）ので、
-/// **パースは通り、写像で `NotPrivate` になる。**
+/// 途中で落ちる像は、**2 本目の `p_vaddr` を動かして作る。** パーサは `p_vaddr`
+/// の範囲も区画の重なりも見ない（配置の方針を知らないため。`common::elf` の
+/// モジュール doc）ので、**パースは通り、写像で拒まれる。** 行き先は
+/// ユーザーサブツリーの外（`PML4[1]`）と、1 本目の区画のページの中である。
 fn verify_corrupt_user_program_is_not_loaded(
     logger: &mut Logger<SerialPort>,
     allocator: &mut kernel::frame_allocator::FrameAllocator,
@@ -4360,6 +4374,12 @@ fn verify_corrupt_user_program_is_not_loaded(
             "p_vaddr of the second segment moved out of the user subtree",
             PHDR0 + PHDR_SIZE + P_VADDR,
             1u64 << 39,
+            true,
+        ),
+        (
+            "p_vaddr of the second segment moved into the first segment's page",
+            PHDR0 + PHDR_SIZE + P_VADDR,
+            0x0040_0030u64,
             true,
         ),
     ] {
@@ -4414,10 +4434,10 @@ fn verify_corrupt_user_program_is_not_loaded(
     // **実測で踏んだ。差だけならコア数に依らない。**
     let consumed = (free_before - allocator.free_frame_count()) as usize;
     logger.info(format_args!(
-        "user-load-corrupt: both corrupted images were refused by the loader (one at the \
-         entrance, one after the first segment was already mapped) and the kernel continued; \
-         {consumed} frame(s) left the allocator and {quarantined_total} reached quarantine \
-         (match={})",
+        "user-load-corrupt: all 3 corrupted images were refused by the loader (one at the \
+         entrance, one after the first segment was already mapped, one whose segments share a \
+         page) and the kernel continued; {consumed} frame(s) left the allocator and \
+         {quarantined_total} reached quarantine (match={})",
         consumed == quarantined_total
     ));
     if consumed != quarantined_total {
