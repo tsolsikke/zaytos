@@ -1544,6 +1544,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // あること**を見る。
     verify_embedded_user_elf(&mut logger);
     verify_corrupt_user_elf_is_rejected(&mut logger);
+    verify_corrupt_user_program_is_not_loaded(&mut logger, &mut allocator);
     if let Err(error) = load_embedded_user_program(&mut logger, &mut allocator) {
         // **この段ではまだ止める。** 既定の `hello` は成功するので、ここへは来ない。
         // 壊した像を渡してプロセスだけを失敗させるのは S9-b-2 の 2 つ目である。
@@ -3971,12 +3972,178 @@ const HELLO_MESSAGE: &str = "hello from ring 3\n";
 /// （揃えないと実際に重なった。実測で `.text` が `0x400000..0x400030`、
 /// `.rodata` が `0x400030` からになった）。**実際のツールチェインも同じ理由で
 /// 揃える。**
+/// 像を 1 つ、専用のアドレス空間へ載せて（`run` なら走らせて）畳む（S9-b-2）。
+///
+/// **失敗しても空間を畳む。** 途中で落ちた場合、**そこまでに張った写像と
+/// 中間テーブルが残っている。** 畳まずに戻ると、そのフレームは誰にも
+/// 返らない。**「壊した像でカーネルが止まらない」は、後始末まで含めて
+/// 初めて言える。**
+///
+/// 畳んだ結果（隔離へ入れた本数と、隔離が溢れて漏らした本数）を返す。
+/// **後始末が正しいことは、この会計で主張する。**
+fn load_user_program(
+    logger: &mut Logger<SerialPort>,
+    allocator: &mut kernel::frame_allocator::FrameAllocator,
+    image: &[u8],
+    run: bool,
+) -> (Result<(), UserLoadError>, usize, usize) {
+    use kernel::address_space::AddressSpace;
+
+    let direct_map = common::addr::direct_map();
+    let production = kernel::paging::switch::read_cr3();
+
+    // SAFETY: production は稼働中の PML4、direct_map は登録済みの窓。
+    let mut space = match unsafe {
+        AddressSpace::new(allocator, direct_map, production, USER_PROGRAM_PML4_INDEX)
+    } {
+        Ok(space) => space,
+        Err(e) => return (Err(UserLoadError::AddressSpace(e)), 0, 0),
+    };
+
+    let outcome = load_user_program_into(logger, allocator, image, &mut space, run);
+
+    // **成否によらず畳む。** 破棄は S7-d の経路（下位を隔離へ入れ、世代が
+    // 退くまで返さない）をそのまま通る。
+    let mut quarantine = kernel::quarantine::Quarantine::new();
+    let (held, leaked) = {
+        let guard = kernel::bkl::acquire(kernel::bkl::KernelEntry::SteadyLoop);
+        // SAFETY: この空間はどのコアでも稼働していない。direct map は覆っている。
+        unsafe { space.destroy(direct_map, &mut quarantine, &guard) }
+    };
+
+    (outcome, held, leaked)
+}
+
+/// 埋め込んだ `hello` を載せて走らせる（S9-b-1）。
 fn load_embedded_user_program(
     logger: &mut Logger<SerialPort>,
     allocator: &mut kernel::frame_allocator::FrameAllocator,
 ) -> Result<(), UserLoadError> {
+    let (outcome, held, leaked) = load_user_program(logger, allocator, HELLO_ELF, true);
+    outcome?;
+    logger.info(format_args!(
+        "user-load: hello ran from its own address space, wrote through int 0x80, and the \
+         kernel continued after the fold; the space was destroyed (quarantined={held} \
+         leaked={leaked})"
+    ));
+    Ok(())
+}
+
+/// **壊した像がローダーの中で拒まれ、後始末まで済むことを確かめる（S9-b-2）。**
+///
+/// # パーサで止まる種類とは別の経路である
+///
+/// `verify_corrupt_user_elf_is_rejected` の 11 種はすべて `Elf::parse` が拒む。
+/// **あれらはローダーへ入らないので、`UserLoadError` の経路を 1 度も通らない。**
+/// **`Result` にした意味はここで初めて出る。**
+///
+/// 2 つ置く。**落ちる場所が違う。**
+///
+/// - 入口で落ちる（`Parse`）。写像は 1 枚も張られていない
+/// - **途中で落ちる（`Mapping`）。** 1 本目の区画は張り終わっており、
+///   **2 本目で拒まれる。そこまでに張ったものの後始末が要る**
+///
+/// 途中で落ちる像は、**2 本目の `p_vaddr` をこの空間のユーザーサブツリーの
+/// 外（`PML4[1]`）へ動かして作る。** パーサは `p_vaddr` の範囲を見ない
+/// （配置の方針を知らないため。`common::elf` のモジュール doc）ので、
+/// **パースは通り、写像で `NotPrivate` になる。**
+fn verify_corrupt_user_program_is_not_loaded(
+    logger: &mut Logger<SerialPort>,
+    allocator: &mut kernel::frame_allocator::FrameAllocator,
+) {
+    /// 先頭のプログラムヘッダの位置（`hello` の `e_phoff` は 64）。
+    const PHDR0: usize = 64;
+    /// `Elf64_Phdr` の大きさ。
+    const PHDR_SIZE: usize = 56;
+    /// `p_vaddr` のオフセット。
+    const P_VADDR: usize = 16;
+
+    let free_before = allocator.free_frame_count();
+    let mut quarantined_total = 0usize;
+
+    for (what, offset, value, expect_mapping) in [
+        ("magic byte 0 set to 0", 0usize, 0u64, false),
+        (
+            "p_vaddr of the second segment moved out of the user subtree",
+            PHDR0 + PHDR_SIZE + P_VADDR,
+            1u64 << 39,
+            true,
+        ),
+    ] {
+        // SAFETY: 起動時の単一実行文脈で、この静的領域を触るのはここだけである。
+        let image = unsafe {
+            let buf = &mut *core::ptr::addr_of_mut!(CORRUPT_IMAGE);
+            buf.copy_from_slice(HELLO_ELF);
+            let width = if offset == 0 { 1 } else { 8 };
+            for i in 0..width {
+                buf[offset + i] = ((value >> (i * 8)) & 0xFF) as u8;
+            }
+            &buf[..]
+        };
+
+        let (outcome, held, leaked) = load_user_program(logger, allocator, image, false);
+
+        let Err(error) = outcome else {
+            logger.error(format_args!(
+                "user-load-corrupt: {what} was loaded; expected a failure; halting"
+            ));
+            cpu::halt_forever();
+        };
+
+        let matches = match error {
+            UserLoadError::Parse(_) => !expect_mapping,
+            UserLoadError::Mapping { .. } => expect_mapping,
+            _ => false,
+        };
+        logger.info(format_args!(
+            "user-load-corrupt: {what} -> {error:?} (the space was destroyed: quarantined={held} \
+             leaked={leaked})"
+        ));
+        if !matches {
+            logger.error(format_args!(
+                "user-load-corrupt: {what} failed in the wrong place; halting"
+            ));
+            cpu::halt_forever();
+        }
+        quarantined_total += held;
+        if leaked != 0 {
+            logger.error(format_args!(
+                "user-load-corrupt: {what} leaked {leaked} frame(s) on the failure path; halting"
+            ));
+            cpu::halt_forever();
+        }
+    }
+
+    // **消えた枚数と隔離へ入れた枚数が一致すること。**
+    //
+    // 絶対値は出さない。**空きフレーム数はコア数で変わる**（AP ごとに per-CPU
+    // スタックを取る）ので、出すと `-smp 1/2/4` で起動ログが一致しなくなる。
+    // **実測で踏んだ。差だけならコア数に依らない。**
+    let consumed = (free_before - allocator.free_frame_count()) as usize;
+    logger.info(format_args!(
+        "user-load-corrupt: both corrupted images were refused by the loader (one at the \
+         entrance, one after the first segment was already mapped) and the kernel continued; \
+         {consumed} frame(s) left the allocator and {quarantined_total} reached quarantine \
+         (match={})",
+        consumed == quarantined_total
+    ));
+    if consumed != quarantined_total {
+        logger.error(format_args!(
+            "user-load-corrupt: {consumed} frame(s) left the allocator but only \
+             {quarantined_total} reached quarantine; the failure path lost the rest; halting"
+        ));
+        cpu::halt_forever();
+    }
+}
+
+fn load_user_program_into(
+    logger: &mut Logger<SerialPort>,
+    allocator: &mut kernel::frame_allocator::FrameAllocator,
+    image: &[u8],
+    space: &mut kernel::address_space::AddressSpace,
+    run: bool,
+) -> Result<(), UserLoadError> {
     use common::elf::Elf;
-    use kernel::address_space::AddressSpace;
     use kernel::paging::active::PageAttributes;
     use kernel::paging::verify;
 
@@ -3985,17 +4152,9 @@ fn load_embedded_user_program(
     let direct_map = common::addr::direct_map();
     let production = kernel::paging::switch::read_cr3();
 
-    let elf = match Elf::parse(HELLO_ELF) {
+    let elf = match Elf::parse(image) {
         Ok(elf) => elf,
         Err(e) => return Err(UserLoadError::Parse(e)),
-    };
-
-    // SAFETY: production は稼働中の PML4、direct_map は登録済みの窓。
-    let mut space = match unsafe {
-        AddressSpace::new(allocator, direct_map, production, USER_PROGRAM_PML4_INDEX)
-    } {
-        Ok(space) => space,
-        Err(e) => return Err(UserLoadError::AddressSpace(e)),
     };
 
     // 張った VA と、期待する W を覚えておく（後で読み戻して照合する）。
@@ -4059,6 +4218,11 @@ fn load_embedded_user_program(
             if let Err(e) =
                 unsafe { space.map_user_4kib(allocator, direct_map, virt, frame, attributes) }
             {
+                // **張れなかったフレームは、ここで返す。** 空間へ繋がっていないので
+                // `AddressSpace::destroy` からは見えず、返さないと誰にも戻らない。
+                // **実測で気づいた**——失敗の経路で空きフレームが 7 枚減るのに、
+                // 隔離へ入ったのは 6 枚だった。差の 1 枚がこれである。
+                let _ = allocator.deallocate_frame(frame);
                 return Err(UserLoadError::Mapping {
                     virt: page,
                     error: e,
@@ -4153,6 +4317,10 @@ fn load_embedded_user_program(
     // **CR3 を差し替えてから iretq で落ちる。** 上位は共有なのでカーネルは動き
     // 続ける（S7-c の到達条件 4 が、実プログラムで初めて使われる）。
     // 戻りは `ud2` の #UD を S8 の畳みが受ける。
+    if !run {
+        return Ok(());
+    }
+
     kernel::syscall::reset_counters();
     let main_rsp0_top = gdt::privilege_stack_top();
     // 破壊 (S9-b-1, user-run-wrong-entry): entry ではなく最初の PT_LOAD の先頭へ
@@ -4222,21 +4390,6 @@ fn load_embedded_user_program(
         return Err(UserLoadError::WriteMismatch);
     }
 
-    // **走り終わったので空間を畳む。** 破棄は S7-d の経路
-    // （下位のフレームを隔離へ入れ、世代が退くまで返さない）をそのまま通る。
-    let mut quarantine = kernel::quarantine::Quarantine::new();
-    let (held, leaked) = {
-        let guard = kernel::bkl::acquire(kernel::bkl::KernelEntry::SteadyLoop);
-        // SAFETY: この空間はどのコアでも稼働していない。direct map は覆っている。
-        unsafe { space.destroy(direct_map, &mut quarantine, &guard) }
-    };
-
-    logger.info(format_args!(
-        "user-load: hello ran from its own address space ({mapped_count} page(s): the read-only \
-         segments carry W=0 and the stack carries W=1), wrote {written} byte(s) through \
-         int 0x80, and the kernel continued after the fold; the space was destroyed \
-         (quarantined={held} leaked={leaked})"
-    ));
     Ok(())
 }
 
