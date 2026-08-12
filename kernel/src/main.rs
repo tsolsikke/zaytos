@@ -3845,7 +3845,87 @@ fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
     }
 
     verify_root_inode(logger, &fs);
+    verify_path_lookup(logger, &fs);
     verify_single_indirect_boundary(logger, &fs);
+}
+
+/// 種のファイルと同じ木にある `/etc/motd` の中身（S10-a）。
+///
+/// **像の中の `/etc/motd` は、このファイルを `mke2fs -d` が写したものである。**
+/// **写しを 2 つ持たない**——期待値をカーネルへ書き写すと、種を変えたときに
+/// 片方だけが古くなる（**単一間接の期待値を `build.rs` から出したのと同じ理由**）。
+/// `kernel/build.rs` が種の木に `rerun-if-changed` を張っているので、
+/// **この定数と像は同じ 1 本のファイルから来る。**
+static MOTD_SEED: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fsimage/seed/etc/motd"
+));
+
+/// 名前でファイルへ届き、中身が種と一致することを主張する（S10-a）。
+///
+/// # `hello` の `write` と同じ形の主張である
+///
+/// **既知のバイト列と一致することを言う。** ここまでの判定行は「読めた」「形が
+/// 合っている」を言ってきたが、**中身そのものを突き合わせるのはこれが最初である。**
+///
+/// # 毎回ルートから辿る
+///
+/// **`dentry` を置かない**（`docs/roadmap.md` の S10）。引く回数が問題になって
+/// いない段では、**キャッシュを持つ理由が無い。**
+fn verify_path_lookup(logger: &mut Logger<SerialPort>, fs: &common::ext2::Ext2<'_>) {
+    const MOTD_PATH: &str = "/etc/motd";
+
+    let motd = match fs.lookup(MOTD_PATH.as_bytes()) {
+        Ok(inode) => inode,
+        Err(e) => {
+            logger.error(format_args!(
+                "ext2: {MOTD_PATH} does not resolve: {e:?}; halting"
+            ));
+            cpu::halt_forever();
+        }
+    };
+
+    // **1 ブロックに収まる大きさである。** 収まらなくなったら、ここが最初に気づく。
+    if motd.size != MOTD_SEED.len() as u64 || fs.block_span(&motd) != 1 {
+        logger.error(format_args!(
+            "ext2: {MOTD_PATH} is {} byte(s) in {} block(s) but the seed file is {} byte(s); \
+             halting",
+            motd.size,
+            fs.block_span(&motd),
+            MOTD_SEED.len()
+        ));
+        cpu::halt_forever();
+    }
+
+    let contents = match fs.file_block(&motd, 0) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            logger.error(format_args!(
+                "ext2: {MOTD_PATH} is not readable: {e:?}; halting"
+            ));
+            cpu::halt_forever();
+        }
+    };
+
+    // **改行を判定行に出さない。** 1 行の判定行が 2 行に割れると、
+    // 起動ログの参照との突き合わせが読みにくくなる。
+    let shown = contents.strip_suffix(b"\n").unwrap_or(contents);
+    logger.info(format_args!(
+        "ext2: resolved {MOTD_PATH} to inode {}: {} byte(s) = {:?} (trailing newline trimmed \
+         for this line only); matches the seed file byte for byte: {}",
+        motd.number,
+        contents.len(),
+        core::str::from_utf8(shown).unwrap_or("<not valid UTF-8>"),
+        contents == MOTD_SEED
+    ));
+
+    if contents != MOTD_SEED {
+        logger.error(format_args!(
+            "ext2: {MOTD_PATH} does not match the seed file that mke2fs copied into the image; \
+             halting"
+        ));
+        cpu::halt_forever();
+    }
 }
 
 /// ルート inode を読み、直接ブロックで中身へ届くことを主張する（S10-a）。
@@ -4022,52 +4102,44 @@ fn verify_root_directory_walk(
 /// `kernel/build.rs` が模様を決めている側から出している。**カーネルへ書き写すと、
 /// 模様を変えたときに片方だけが古くなる。**
 ///
-/// # inode 番号を直に書いている
+/// # 名前で引く
 ///
-/// **名前で引けるのはパス解決を書いた後である**（S10-a の 6 本目）。それまでは
-/// `mke2fs -d` が割り当てた番号を直に使うほかない。**番号が動いたことは大きさの
-/// 食い違いで分かる**ので、期待した大きさと突き合わせてから中身を読む。
+/// **`mke2fs -d` が割り当てた inode 番号を直に書いていたが、パス解決を書いたので
+/// 外した**（S10-a の 6 本目）。**大きさの突き合わせは残してある**——番号ではなく
+/// 名前で届くようになっても、**届いた先が期待どおりのものかは別の主張である。**
 fn verify_single_indirect_boundary(logger: &mut Logger<SerialPort>, fs: &common::ext2::Ext2<'_>) {
     use common::ext2::SINGLE_INDIRECT_SLOT;
-
-    /// `/data/direct-max` の inode 番号（`mke2fs -d` の割り当て。`debugfs` で実測）。
-    const DIRECT_MAX_INODE: u32 = 15;
-    /// `/data/indirect-first` の inode 番号（同上）。
-    const INDIRECT_FIRST_INODE: u32 = 16;
 
     let cases = [
         (
             "/data/direct-max",
-            DIRECT_MAX_INODE,
             fsimage_info::DIRECT_MAX_BYTES,
             fsimage_info::DIRECT_MAX_LAST_BYTE,
             false,
         ),
         (
             "/data/indirect-first",
-            INDIRECT_FIRST_INODE,
             fsimage_info::INDIRECT_FIRST_BYTES,
             fsimage_info::INDIRECT_FIRST_LAST_BYTE,
             true,
         ),
     ];
 
-    for (path, ino, expected_size, expected_last, expects_indirect) in cases {
-        let inode = match fs.inode(ino) {
+    for (path, expected_size, expected_last, expects_indirect) in cases {
+        let inode = match fs.lookup(path.as_bytes()) {
             Ok(inode) => inode,
             Err(e) => {
                 logger.error(format_args!(
-                    "ext2: inode {ino} ({path}) is not readable: {e:?}; halting"
+                    "ext2: {path} does not resolve: {e:?}; halting"
                 ));
                 cpu::halt_forever();
             }
         };
-        // **番号が動いていないことを、大きさで確かめてから中身を読む。**
+        let ino = inode.number;
         if inode.size != expected_size || !inode.is_regular_file() {
             logger.error(format_args!(
-                "ext2: inode {ino} should be {path} ({expected_size} byte(s), regular) but is \
-                 {} byte(s) mode={:06o}; mke2fs may have allocated inode numbers differently. \
-                 halting",
+                "ext2: {path} should be {expected_size} byte(s) and regular but is \
+                 {} byte(s) mode={:06o}; halting",
                 inode.size, inode.mode
             ));
             cpu::halt_forever();

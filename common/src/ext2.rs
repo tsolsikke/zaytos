@@ -114,6 +114,42 @@ pub const DIRENT_TYPE_DIRECTORY: u8 = 2;
 /// ルートディレクトリの inode 番号。**ext2 では 2 で固定である。**
 pub const ROOT_INODE: u32 = 2;
 
+/// パスの区切り。
+const PATH_SEPARATOR: u8 = b'/';
+
+/// パス 1 本に許す要素の数（S10-a）。
+///
+/// # これは停止性のための上限ではない
+///
+/// **パス解決は、要素の有限な並びを畳む形なので、上限が無くても止まる。**
+/// `..` を辿っても循環しない——**`..` は特別扱いされず、ディレクトリの中の
+/// ただのエントリとして引かれる**ので、辿る回数はパスの中の区切りの数で
+/// 決まり切っている。**symlink を実装しないので、要素が増える経路も無い**
+/// （`docs/roadmap.md` の S10 が実装しないと宣言している）。
+///
+/// # 何のための上限か。**仕事の量である**
+///
+/// **要素 1 つにつきディレクトリを 1 回走査する。** パスは S10-b で
+/// ユーザー空間から来るので、**区切りだけを並べた長いパスは、走査を要素の数だけ
+/// 走らせる。** 上限を置くと、**そこで確実にエラーが返る**（黙って長く働かない）。
+///
+/// **上限が要る理由と、止まる理由を分けて書いておく。** 混ぜると、
+/// 「上限があるから止まる」という誤った根拠が残る。
+///
+/// # Linux は要素数の上限を持たない
+///
+/// **持たなくて済むのは `PATH_MAX`（4096 バイト）が実質的な上限になるからである。**
+/// パスの長さを縛れば、要素の数もそこから決まる（要素 1 つに最低 2 バイト要る）。
+///
+/// **したがって S10-b でパスの長さの上限を入れるなら、この上限は要らなくなりうる。**
+/// **どちらか一方でよい**ので、そのとき見直すこと。
+///
+/// # 外す条件
+///
+/// **「ユーザー空間から来るパスで 64 では足りないと分かったとき」。**
+/// 今の木は `/data/indirect-first` が最も深くて 2 段しかない。
+pub const MAX_PATH_COMPONENTS: usize = 64;
+
 /// `i_mode` のうちファイル種別を表すビット。
 const MODE_FORMAT_MASK: u16 = 0xF000;
 
@@ -183,6 +219,14 @@ pub enum Ext2Error {
     DirEntryRecordTooSmall { rec_len: u16, name_len: u8 },
     /// `rec_len` がブロックの残りを越えている（線3）。
     DirEntryRecordPastBlock { rec_len: u16, remaining: u32 },
+    /// パスが `/` で始まっていない。**現在位置を持たないので相対パスは引けない。**
+    PathNotAbsolute,
+    /// パスの要素が [`MAX_PATH_COMPONENTS`] を越えた。
+    ///
+    /// **停止性のための上限ではない**（あちらの doc に理由がある）。
+    PathTooManyComponents(usize),
+    /// その名前のエントリが無い。
+    NotFound,
 }
 
 /// 受理した ext2 の像。**元のバイトスライスを借用するのみで、コピーしない。**
@@ -787,6 +831,76 @@ impl<'a> Ext2<'a> {
         })
     }
 
+    /// 絶対パスを inode へ解決する（S10-a）。
+    ///
+    /// # 毎回ルートから辿る
+    ///
+    /// **`dentry` を置かない**（`docs/roadmap.md` の S10 で決めた）。
+    /// キャッシュと参照カウントが目的の構造なので、**引く回数が問題になって
+    /// いない段では、毎回ルートから辿れば足りる。**
+    ///
+    /// # 区切りの扱いは Linux に合わせる
+    ///
+    /// - **空の要素は飛ばす。** `//` も、先頭の `/` も、末尾の `/` も同じ扱いになる
+    /// - **`.` と `..` を特別扱いしない。** ext2 のディレクトリは両方を実体の
+    ///   エントリとして持っているので、**ただの名前として引けば正しく動く**
+    /// - **末尾が `/` なら、行き着いた先はディレクトリでなければならない。**
+    ///   `/etc/motd/` は拒む
+    ///
+    /// # 線がどう当たるか
+    ///
+    /// - **線1: 分割。** どんなバイト列でも切り出しが範囲内に収まる
+    ///   （`split` は空の要素を返すだけで、範囲外を作らない）
+    /// - **線3: 要素の inode 番号。** 走査が既に `s_inodes_count` と
+    ///   突き合わせている
+    /// - **線4: 止まること。** **要素の数はパスの長さで決まり切っている。**
+    ///   [`MAX_PATH_COMPONENTS`] は仕事の量の上限であって、止まる根拠ではない
+    pub fn lookup(&self, path: &[u8]) -> Result<Inode, Ext2Error> {
+        if path.first() != Some(&PATH_SEPARATOR) {
+            return Err(Ext2Error::PathNotAbsolute);
+        }
+
+        let mut current = self.inode(ROOT_INODE)?;
+        let mut components = 0usize;
+        for component in path.split(|&byte| byte == PATH_SEPARATOR) {
+            // 空の要素は飛ばす。**先頭・末尾・連続する区切りが、ここで同じ形になる。**
+            if component.is_empty() {
+                continue;
+            }
+            components += 1;
+            if components > MAX_PATH_COMPONENTS {
+                return Err(Ext2Error::PathTooManyComponents(MAX_PATH_COMPONENTS));
+            }
+            // **途中の要素がディレクトリでなければ、走査が `NotADirectory` を返す。**
+            // 「辿った先がディレクトリでないのに続きがある」形はここで止まる。
+            current = self.lookup_in(&current, component)?;
+        }
+
+        // 末尾が区切りなら、行き着いた先はディレクトリでなければならない。
+        if path.last() == Some(&PATH_SEPARATOR) && !current.is_directory() {
+            return Err(Ext2Error::NotADirectory(current.number));
+        }
+        Ok(current)
+    }
+
+    /// ディレクトリの中を名前で 1 段だけ引く（S10-a）。
+    ///
+    /// **`dir` がディレクトリでなければ [`Ext2Error::NotADirectory`] で返る**
+    /// （[`Self::directory_entries`] が見ている）。
+    ///
+    /// **名前の突き合わせはバイト単位の完全一致である。** ext2 の名前は
+    /// 255 バイトまでなので、**それより長い要素はどのエントリとも一致せず
+    /// [`Ext2Error::NotFound`] になる。**
+    pub fn lookup_in(&self, dir: &Inode, name: &[u8]) -> Result<Inode, Ext2Error> {
+        for entry in self.directory_entries(dir)? {
+            let entry = entry?;
+            if entry.name == name {
+                return self.inode(entry.inode);
+            }
+        }
+        Err(Ext2Error::NotFound)
+    }
+
     /// `i_size` を覆うのに要るブロックの数。
     ///
     /// **`i_size` が 0 なら 0 である。** 頭打ちにしない——**辿れるかどうかは
@@ -865,12 +979,12 @@ mod tests {
             &mut image,
             SHORT_FILE_INODE,
             0o100_644,
-            18,
+            SHORT_FILE_CONTENT.len() as u32,
             1,
             &[SHORT_FILE_BLOCK],
         );
         let at = SHORT_FILE_BLOCK as usize * 4096;
-        image[at..at + 18].copy_from_slice(b"ZaytOS ext2 short.");
+        image[at..at + SHORT_FILE_CONTENT.len()].copy_from_slice(SHORT_FILE_CONTENT);
 
         // 直接を 1 バイト超える通常ファイル。**単一間接を実際に踏む側である**
         // （実測した像の `/data/indirect-first` と同じ形。直接 43-54、`(IND)` 55、
@@ -897,7 +1011,47 @@ mod tests {
         image[table..table + 4].copy_from_slice(&INDIRECT_FILE_DATA_BLOCK.to_le_bytes());
         // 13 ブロック目の先頭 1 バイトが、ファイルの最後の 1 バイトである。
         image[INDIRECT_FILE_DATA_BLOCK as usize * 4096] = INDIRECT_FILE_LAST_BYTE;
+
+        // **中間のディレクトリ**（パス解決が辿る側）。**実測した像と同じ木にする**
+        // ——`/bin/hello`・`/data/direct-max`・`/data/indirect-first`・`/etc/motd`。
+        write_subdirectory(&mut image, LOST_FOUND_INODE, 21, &[]);
+        write_subdirectory(
+            &mut image,
+            BIN_INODE,
+            22,
+            &[(HELLO_INODE, DIRENT_TYPE_REGULAR, b"hello")],
+        );
+        write_subdirectory(
+            &mut image,
+            DATA_INODE,
+            23,
+            &[
+                (DIRECT_FILE_INODE, DIRENT_TYPE_REGULAR, b"direct-max"),
+                (INDIRECT_FILE_INODE, DIRENT_TYPE_REGULAR, b"indirect-first"),
+            ],
+        );
+        write_subdirectory(
+            &mut image,
+            ETC_INODE,
+            24,
+            &[(SHORT_FILE_INODE, DIRENT_TYPE_REGULAR, b"motd")],
+        );
+        // `/bin/hello` の実体（中身は問わない。**名前で届くことだけを見る**）。
+        write_inode(&mut image, HELLO_INODE, 0o100_755, 4096, 1, &[25]);
         image
+    }
+
+    /// ルート直下のディレクトリを 1 つ作る。**`.` と `..` を先頭に置く**
+    /// （ext2 のディレクトリは両方を実体のエントリとして持つ。**パス解決が
+    /// それを特別扱いしないので、実際に置かないと `..` が引けない**）。
+    fn write_subdirectory(image: &mut [u8], ino: u32, block: u32, children: &[(u32, u8, &[u8])]) {
+        let mut entries: std::vec::Vec<(u32, u8, &[u8])> = std::vec![
+            (ino, DIRENT_TYPE_DIRECTORY, &b"."[..]),
+            (ROOT_INODE, DIRENT_TYPE_DIRECTORY, &b".."[..]),
+        ];
+        entries.extend_from_slice(children);
+        write_inode(image, ino, 0o040_755, 4096, 2, &[block]);
+        write_dir_block(image, block, &entries);
     }
 
     /// ルートディレクトリの中身が在るブロック（実測した像と同じ番号）。
@@ -905,9 +1059,17 @@ mod tests {
     /// 直接ブロックを使い切る通常ファイルの inode 番号と先頭ブロック。
     const DIRECT_FILE_INODE: u32 = 15;
     const DIRECT_FILE_FIRST_BLOCK: u32 = 31;
-    /// 1 ブロックに満たない通常ファイルの inode 番号とブロック。
+    /// 1 ブロックに満たない通常ファイル（`/etc/motd`）の inode 番号とブロック。
     const SHORT_FILE_INODE: u32 = 18;
     const SHORT_FILE_BLOCK: u32 = 58;
+    /// その中身。**長さは実測した像の `motd` と同じ 18 バイトである。**
+    const SHORT_FILE_CONTENT: &[u8] = b"welcome to ZaytOS\n";
+    /// ルート直下のディレクトリと `/bin/hello`（実測した像と同じ番号）。
+    const LOST_FOUND_INODE: u32 = 11;
+    const BIN_INODE: u32 = 12;
+    const HELLO_INODE: u32 = 13;
+    const DATA_INODE: u32 = 14;
+    const ETC_INODE: u32 = 17;
     /// 単一間接を踏む通常ファイル（実測した像と同じ配置）。
     const INDIRECT_FILE_INODE: u32 = 16;
     const INDIRECT_FILE_FIRST_BLOCK: u32 = 43;
@@ -1228,7 +1390,7 @@ mod tests {
         assert_eq!(fs.block_span(&short), 1);
         assert_eq!(
             fs.file_block(&short, 0).unwrap(),
-            b"ZaytOS ext2 short.",
+            SHORT_FILE_CONTENT,
             "the last block is cut at i_size, not at the block size"
         );
         assert_eq!(
@@ -1660,6 +1822,177 @@ mod tests {
             ],
             "the unused slot is skipped and the entries after it still come back"
         );
+    }
+
+    /// 名前でファイルへ届き、中身が読めること。
+    #[test]
+    fn resolves_a_path_to_the_file_it_names() {
+        let image = build_test_image();
+        let fs = Ext2::parse(&image).unwrap();
+
+        let motd = fs.lookup(b"/etc/motd").expect("/etc/motd resolves");
+        assert_eq!(motd.number, SHORT_FILE_INODE);
+        assert!(motd.is_regular_file());
+        assert_eq!(fs.file_block(&motd, 0).unwrap(), SHORT_FILE_CONTENT);
+
+        assert_eq!(
+            fs.lookup(b"/data/direct-max").unwrap().number,
+            DIRECT_FILE_INODE
+        );
+        assert_eq!(
+            fs.lookup(b"/data/indirect-first").unwrap().number,
+            INDIRECT_FILE_INODE
+        );
+        assert_eq!(fs.lookup(b"/bin/hello").unwrap().number, HELLO_INODE);
+    }
+
+    /// 線1: **区切りの並びが、どう来ても同じ形に畳まれる。**
+    ///
+    /// 空の要素は飛ばすので、**連続する区切りも、末尾の区切りも、
+    /// 1 つの `/` と同じ扱いになる**（Linux と同じ）。
+    #[test]
+    fn separators_collapse_the_way_linux_collapses_them() {
+        let image = build_test_image();
+        let fs = Ext2::parse(&image).unwrap();
+
+        for path in [
+            &b"/"[..],
+            &b"//"[..],
+            &b"///"[..],
+            &b"/."[..],
+            &b"/./"[..],
+            &b"/etc/.."[..],
+            &b"/etc/../"[..],
+            &b"/../.."[..],
+        ] {
+            assert_eq!(
+                fs.lookup(path).unwrap().number,
+                ROOT_INODE,
+                "{:?} must land on the root",
+                core::str::from_utf8(path).unwrap()
+            );
+        }
+
+        for path in [
+            &b"/etc//motd"[..],
+            &b"//etc///motd"[..],
+            &b"/./etc/./motd"[..],
+        ] {
+            assert_eq!(
+                fs.lookup(path).unwrap().number,
+                SHORT_FILE_INODE,
+                "{:?} must land on /etc/motd",
+                core::str::from_utf8(path).unwrap()
+            );
+        }
+    }
+
+    /// `..` は特別扱いしない。**ディレクトリの中の実体のエントリとして引く。**
+    #[test]
+    fn dot_dot_is_an_ordinary_entry_not_a_special_case() {
+        let image = build_test_image();
+        let fs = Ext2::parse(&image).unwrap();
+        assert_eq!(
+            fs.lookup(b"/etc/../etc/motd").unwrap().number,
+            SHORT_FILE_INODE
+        );
+        // **ルートの `..` はルート自身である**（実測した像もそうなっている）。
+        assert_eq!(fs.lookup(b"/../etc/motd").unwrap().number, SHORT_FILE_INODE);
+    }
+
+    /// 末尾が区切りなら、行き着いた先はディレクトリでなければならない。
+    #[test]
+    fn a_trailing_separator_demands_a_directory() {
+        let image = build_test_image();
+        let fs = Ext2::parse(&image).unwrap();
+        assert_eq!(fs.lookup(b"/etc/").unwrap().number, ETC_INODE);
+        assert_eq!(
+            fs.lookup(b"/etc/motd/"),
+            Err(Ext2Error::NotADirectory(SHORT_FILE_INODE))
+        );
+    }
+
+    /// 途中の要素がディレクトリでないのに、パスに続きがある。
+    #[test]
+    fn a_path_cannot_continue_through_a_regular_file() {
+        let image = build_test_image();
+        let fs = Ext2::parse(&image).unwrap();
+        assert_eq!(
+            fs.lookup(b"/etc/motd/anything"),
+            Err(Ext2Error::NotADirectory(SHORT_FILE_INODE))
+        );
+    }
+
+    /// 相対パスは引けない。**現在位置を持たないからである。**
+    #[test]
+    fn relative_paths_are_refused() {
+        let image = build_test_image();
+        let fs = Ext2::parse(&image).unwrap();
+        for path in [&b""[..], &b"etc/motd"[..], &b"."[..], &b".."[..]] {
+            assert_eq!(fs.lookup(path), Err(Ext2Error::PathNotAbsolute));
+        }
+    }
+
+    /// 無い名前は [`Ext2Error::NotFound`] である。
+    ///
+    /// **255 バイトを越える要素も同じ**——ext2 の名前はそれより長くなれないので、
+    /// どのエントリとも一致しない。
+    #[test]
+    fn a_missing_name_is_not_found() {
+        let image = build_test_image();
+        let fs = Ext2::parse(&image).unwrap();
+        assert_eq!(fs.lookup(b"/nope"), Err(Ext2Error::NotFound));
+        assert_eq!(fs.lookup(b"/etc/nope"), Err(Ext2Error::NotFound));
+
+        let mut long = std::vec![b'/'];
+        long.extend(std::iter::repeat_n(b'a', 300));
+        assert_eq!(fs.lookup(&long), Err(Ext2Error::NotFound));
+    }
+
+    /// 要素の数の上限。**止まるための上限ではなく、仕事の量の上限である。**
+    ///
+    /// **上限までは通り、越えると落ちる**（拒みすぎていないことまで見る）。
+    #[test]
+    fn the_component_limit_bounds_the_work_not_the_termination() {
+        let image = build_test_image();
+        let fs = Ext2::parse(&image).unwrap();
+
+        // `/.` を並べる。**どれだけ並べてもルートに留まる**ので、上限だけが効く。
+        let at_limit: std::vec::Vec<u8> = b"/."
+            .iter()
+            .copied()
+            .cycle()
+            .take(MAX_PATH_COMPONENTS * 2)
+            .collect();
+        assert_eq!(fs.lookup(&at_limit).unwrap().number, ROOT_INODE);
+
+        let past_limit: std::vec::Vec<u8> = b"/."
+            .iter()
+            .copied()
+            .cycle()
+            .take((MAX_PATH_COMPONENTS + 1) * 2)
+            .collect();
+        assert_eq!(
+            fs.lookup(&past_limit),
+            Err(Ext2Error::PathTooManyComponents(MAX_PATH_COMPONENTS))
+        );
+    }
+
+    /// 線1: **どんなバイト列をパスとして渡してもパニックしない。**
+    #[test]
+    fn no_path_bytes_make_the_lookup_panic() {
+        let image = build_test_image();
+        let fs = Ext2::parse(&image).unwrap();
+        for seed in 0u32..256 {
+            let path: std::vec::Vec<u8> = (0..seed as usize % 40)
+                .map(|i| (i as u32).wrapping_mul(seed | 1).wrapping_add(seed) as u8)
+                .collect();
+            let _ = fs.lookup(&path);
+            // 先頭を区切りにした形も見る（**分割の経路へ実際に入る**）。
+            let mut absolute = std::vec![PATH_SEPARATOR];
+            absolute.extend_from_slice(&path);
+            let _ = fs.lookup(&absolute);
+        }
     }
 
     /// 通常ファイルはディレクトリとして走査しない。
