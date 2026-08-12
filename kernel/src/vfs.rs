@@ -29,7 +29,74 @@
 //! **[`Inode`] が [`common::ext2::Inode`] を直に持つ。**
 //! **2 つ目のファイルシステムを足すときに、そこが分かれる場所である。**
 
+use common::critical::Locked;
 use common::ext2;
+
+/// 埋め込んだ ext2 の像（S10-a で置き、S10-b で `main.rs` からここへ移した）。
+///
+/// # なぜ lib 側へ移したか
+///
+/// **`open` を処理するのは `syscall::dispatch` で、あちらは lib にある。**
+/// bin 側に置いたままだと像を渡す道が要る。**ファイルシステムは
+/// カーネルに 1 つしかない**（Linux の root filesystem と同じ）ので、
+/// **持ち主は lib が正しい。**
+///
+/// **写しは 1 つである。** bin 側は [`FS_IMAGE`] を参照するだけで、
+/// `include_bytes!` を二重に置かない（2 MiB が 2 つになる）。
+///
+/// # ホストのテストビルドには像が無い
+///
+/// **`kernel/build.rs` は `x86_64-unknown-none` のときだけ像を建てる**
+/// （ホストのテストで `mke2fs` を毎回走らせない）。**そのため `cargo test` の
+/// 構成では `include_bytes!` の相手が存在しない。**
+///
+/// **既定側（カーネル）が本物で、ホスト側は空の像である。**
+/// 空なら [`root_filesystem`] が `TooShort` で返るので、
+/// **黙って別のものを読むことにはならない。**
+#[cfg(target_os = "none")]
+pub static FS_IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fs.img"));
+
+/// ホストのテストビルドの [`FS_IMAGE`]。**像は建てられていないので空である。**
+#[cfg(not(target_os = "none"))]
+pub static FS_IMAGE: &[u8] = &[];
+
+/// 根のファイルシステムを組み立てる。
+///
+/// # 毎回組み立て直す
+///
+/// **`Ext2` は状態を持たない**——像を借り、superblock から読んだ値を写しているだけ
+/// である。**組み立ては superblock を 1 回読むだけなので、静的に持ち回るより安い。**
+/// **借用を `static` へ置かずに済む**ぶん、形も単純になる。
+pub fn root_filesystem() -> Result<ext2::Ext2<'static>, ext2::Ext2Error> {
+    ext2::Ext2::parse(FS_IMAGE)
+}
+
+/// 今 Ring 3 が使っている表（Linux の `current->files`）。
+///
+/// # 据えるのは遠征の前後である
+///
+/// **`syscall::set_user_window` と同じ形である**（S9-b-3-2b）。表はプロセスの
+/// 持ち物だが、**`dispatch` はプロセスを知らない。** そこで遠征の間だけここへ
+/// 据え、戻るときに引き取る。**入れ子にはならない**（Ring 3 の遠征は入れ子に
+/// ならない）が、**前の値を返す形にしてあるので、入れ子になっても壊れない。**
+///
+/// # 既定値は空の表である
+///
+/// **据え忘れたときに、前のプロセスの fd が見える形にしない。**
+/// 空の表なら、どの番号を引いても `BadDescriptor` である。
+static CURRENT_FILES: Locked<FileTable> = Locked::new(FileTable::new());
+
+/// 表を据え、**据える前の表を返す**。
+///
+/// **戻すのは呼び出し側の責任である**（[`CURRENT_FILES`] の doc）。
+pub fn swap_current_files(table: FileTable) -> FileTable {
+    core::mem::replace(&mut *CURRENT_FILES.lock(), table)
+}
+
+/// 今の表へ触る。**`dispatch` が `open` と `close` で使う。**
+pub fn with_current_files<R>(body: impl FnOnce(&mut FileTable) -> R) -> R {
+    body(&mut CURRENT_FILES.lock())
+}
 
 /// 1 つのプロセスが同時に開けるファイルの数（S10-b）。
 ///
@@ -188,6 +255,14 @@ pub enum FileTableError {
 #[derive(Debug)]
 pub struct FileTable {
     slots: [Option<File>; MAX_OPEN_FILES],
+    /// これまでに開いた本数（累計。閉じても減らない）。
+    ///
+    /// # なぜ「今開いている本数」だけでは足りないか
+    ///
+    /// **最後に全部閉じたプロセスと、一度も開かなかったプロセスは、
+    /// 今開いている本数では区別が付かない**（どちらも 0 である）。
+    /// **判定行が「表が動いた」を主張するには、累計が要る。**
+    opened: usize,
 }
 
 impl Default for FileTable {
@@ -201,6 +276,7 @@ impl FileTable {
     pub const fn new() -> Self {
         Self {
             slots: [None; MAX_OPEN_FILES],
+            opened: 0,
         }
     }
 
@@ -209,6 +285,7 @@ impl FileTable {
         for (fd, slot) in self.slots.iter_mut().enumerate() {
             if slot.is_none() {
                 *slot = Some(file);
+                self.opened = self.opened.saturating_add(1);
                 return Ok(fd);
             }
         }
@@ -243,6 +320,13 @@ impl FileTable {
     pub fn open_count(&self) -> usize {
         self.slots.iter().filter(|slot| slot.is_some()).count()
     }
+
+    /// これまでに開いた本数（累計）。**判定行に出す。**
+    ///
+    /// **0 なら、このプロセスは 1 度も開いていない。**
+    pub fn opened_total(&self) -> usize {
+        self.opened
+    }
 }
 
 #[cfg(test)]
@@ -276,16 +360,34 @@ mod tests {
         // **`Option` が 8 バイト増やす**（`File` に空き表現が無いため、
         // 判別子が別に要る）。**枠 1 つは 96 バイトである。**
         assert_eq!(core::mem::size_of::<Option<File>>(), 96);
-        assert_eq!(core::mem::size_of::<FileTable>(), 96 * MAX_OPEN_FILES);
+        // 表は枠 16 個 + 累計のカウンタ 8 バイトである。
+        assert_eq!(
+            core::mem::size_of::<FileTable>(),
+            96 * MAX_OPEN_FILES + core::mem::size_of::<usize>()
+        );
         // **4 KiB を超えない。** 超えると `deferred-decisions.md` の
         // 「大きなスタック配列とガード幅」の解禁条件に当たる。
         assert!(core::mem::size_of::<FileTable>() < 4096);
+    }
+
+    /// **一度も開いていないことと、開いて全部閉じたことは区別が付く。**
+    #[test]
+    fn the_running_total_separates_never_opened_from_all_closed() {
+        let mut untouched = FileTable::new();
+        assert_eq!(untouched.open_count(), 0);
+        assert_eq!(untouched.opened_total(), 0);
+
+        let fd = untouched.insert(File::new(inode(18, 18, REGULAR))).unwrap();
+        untouched.remove(fd).unwrap();
+        assert_eq!(untouched.open_count(), 0, "nothing is open any more");
+        assert_eq!(untouched.opened_total(), 1, "but the table did move");
     }
 
     #[test]
     fn a_new_table_is_empty() {
         let table = FileTable::new();
         assert_eq!(table.open_count(), 0);
+        assert_eq!(table.opened_total(), 0);
         assert_eq!(table.get(0), Err(FileTableError::BadDescriptor(0)));
     }
 

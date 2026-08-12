@@ -35,6 +35,19 @@
 //! - `1` probe の戻り値が `PROBE_RETURN` でなかった
 //! - `2` `write` が渡したバイト数を返さなかった
 //! - `3` 実装していない番号が `-ENOSYS` を返さなかった
+//! - `4` `open("/etc/motd", O_RDONLY)` が 0 番を返さなかった
+//! - `5` `close(0)` が 0 を返さなかった
+//! - `6` 閉じた直後の `open` が 0 番を返さなかった（枠が空いていない）
+//! - `7` `open("/nope")` が `-ENOENT` を返さなかった
+//! - `8` `open("/etc/motd", O_WRONLY)` が `-EROFS` を返さなかった
+//! - `9` `close` の 2 度目が `-EBADF` を返さなかった
+//! - `10` `open(NULL)` が `-EFAULT` を返さなかった
+//!
+//! # `open` はこのプログラムの `.rodata` のパスを渡す
+//!
+//! **カーネルが受け取るのはユーザー空間のポインタである。** `UserSlice` と
+//! 窓（`S9-b-3-2b` で 1 つに畳んだもの）がそのまま効くことを、**この経路が
+//! 実際に通ることで確かめている。**
 //!
 //! # 定数はカーネルの写しである
 //!
@@ -68,6 +81,22 @@ const NEVER_IMPLEMENTED: u32 = 0x10FF;
 const MINUS_ENOSYS: i32 = -38;
 /// 送るバイト列の長さ。
 const MESSAGE_LEN: u32 = 24;
+/// `open` の番号（Linux と同じ 2）。
+const SYS_OPEN: u32 = 2;
+/// `close` の番号（Linux と同じ 3）。
+const SYS_CLOSE: u32 = 3;
+/// 読み取りで開く（`O_RDONLY`）。
+const O_RDONLY: u32 = 0;
+/// 書き込みで開く（`O_WRONLY`）。**読み取り専用なので拒まれるはずである。**
+const O_WRONLY: u32 = 1;
+/// `-ENOENT`（そのパスは無い）。
+const MINUS_ENOENT: i32 = -2;
+/// `-EBADF`（そのファイルディスクリプタは開いていない）。
+const MINUS_EBADF: i32 = -9;
+/// `-EROFS`（読み取り専用のファイルシステム）。
+const MINUS_EROFS: i32 = -30;
+/// `-EFAULT`（不正なアドレス）。
+const MINUS_EFAULT: i32 = -14;
 
 core::arch::global_asm!(
     // **entry の手前に詰め物を置く**（`hello.rs` と同じ理由）。
@@ -112,6 +141,76 @@ core::arch::global_asm!(
     "  mov edi, 3",
     "  jne 9f",
 
+    // --- 4. open("/etc/motd", O_RDONLY)。最初の fd は 0 のはず ---
+    "  mov eax, {sys_open}",
+    "  lea rdi, [rip + MOTD_PATH]",
+    "  mov esi, {o_rdonly}",
+    "  xor edx, edx",
+    "  int 0x80",
+    "  test rax, rax",
+    "  mov edi, 4",
+    "  jne 9f",
+
+    // --- 5. close(0)。0 が返るはず ---
+    "  mov eax, {sys_close}",
+    "  xor edi, edi",
+    "  int 0x80",
+    "  test rax, rax",
+    "  mov edi, 5",
+    "  jne 9f",
+
+    // --- 6. もう一度 open。**閉じた枠が空いているので、また 0 のはず** ---
+    "  mov eax, {sys_open}",
+    "  lea rdi, [rip + MOTD_PATH]",
+    "  mov esi, {o_rdonly}",
+    "  xor edx, edx",
+    "  int 0x80",
+    "  test rax, rax",
+    "  mov edi, 6",
+    "  jne 9f",
+
+    // --- 7. 無いパス。-ENOENT が返るはず ---
+    "  mov eax, {sys_open}",
+    "  lea rdi, [rip + MISSING_PATH]",
+    "  mov esi, {o_rdonly}",
+    "  xor edx, edx",
+    "  int 0x80",
+    "  cmp rax, {minus_enoent}",
+    "  mov edi, 7",
+    "  jne 9f",
+
+    // --- 8. 書き込みで開く。**読み取り専用なので -EROFS のはず** ---
+    "  mov eax, {sys_open}",
+    "  lea rdi, [rip + MOTD_PATH]",
+    "  mov esi, {o_wronly}",
+    "  xor edx, edx",
+    "  int 0x80",
+    "  cmp rax, {minus_erofs}",
+    "  mov edi, 8",
+    "  jne 9f",
+
+    // --- 9. 同じ fd を 2 度閉じる。**2 度目は -EBADF のはず** ---
+    "  mov eax, {sys_close}",
+    "  xor edi, edi",
+    "  int 0x80",
+    "  mov eax, {sys_close}",
+    "  xor edi, edi",
+    "  int 0x80",
+    "  cmp rax, {minus_ebadf}",
+    "  mov edi, 9",
+    "  jne 9f",
+
+    // --- 10. パスに NULL を渡す。**窓の下端より下なので -EFAULT のはず** ---
+    // **`open` がユーザーポインタを検証していることの、否定側の観測である。**
+    "  mov eax, {sys_open}",
+    "  xor edi, edi",
+    "  mov esi, {o_rdonly}",
+    "  xor edx, edx",
+    "  int 0x80",
+    "  cmp rax, {minus_efault}",
+    "  mov edi, 10",
+    "  jne 9f",
+
     // すべて通った。
     "  xor edi, edi",
 
@@ -121,12 +220,16 @@ core::arch::global_asm!(
     "  int 0x80",
     // **`exit` が戻ってきたときの受け皿**（`hello.rs` と同じ規律）。位置を
     // `.org` で固定してあるので、ここへ落ちたことが RIP で分かる。
-    ".org 0x100, 0x90",
+    ".org 0x200, 0x90",
     "  ud2",
 
     ".section .rodata",
     "MESSAGE:",
     "  .ascii \"syscall-test wrote this\\n\"",
+    "MOTD_PATH:",
+    "  .asciz \"/etc/motd\"",
+    "MISSING_PATH:",
+    "  .asciz \"/nope\"",
 
     arg0 = const PROBE_ARG0,
     arg1 = const PROBE_ARG1,
@@ -142,6 +245,14 @@ core::arch::global_asm!(
     never = const NEVER_IMPLEMENTED,
     minus_enosys = const MINUS_ENOSYS,
     sys_exit = const SYS_EXIT,
+    sys_open = const SYS_OPEN,
+    sys_close = const SYS_CLOSE,
+    o_rdonly = const O_RDONLY,
+    o_wronly = const O_WRONLY,
+    minus_enoent = const MINUS_ENOENT,
+    minus_ebadf = const MINUS_EBADF,
+    minus_erofs = const MINUS_EROFS,
+    minus_efault = const MINUS_EFAULT,
 );
 
 #[panic_handler]

@@ -3591,7 +3591,7 @@ static SYSCALL_TEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sysca
 /// **`hello` の ELF と同じく `include_bytes!` で抱える**（`docs/roadmap.md` の
 /// S10。移す条件は「像を書き換える必要が生じたとき」または「像の大きさが
 /// 起動時のコピーで測れるほど効いたとき」）。
-static FS_IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fs.img"));
+use kernel::vfs::FS_IMAGE;
 
 /// `build.rs` が生成した、像を建てた道具の版と大きさ（S10-a）。
 mod fsimage_info {
@@ -5047,9 +5047,12 @@ const SYSCALL_TEST_MESSAGE: &str = "syscall-test wrote this\n";
 
 /// `syscall-test` の受け皿の `ud2` が entry から何バイト目にあるか（S9-b-3-2a）。
 ///
-/// **`kernel/userland/syscall-test.rs` の `.org 0x100` と対になっている。**
+/// **`kernel/userland/syscall-test.rs` の `.org 0x200` と対になっている。**
 /// `hello` より遠いのは、検算の分だけ命令が長いためである。
-const SYSCALL_TEST_UD2_OFFSET: u64 = 0x100;
+/// **S10-b で `open`/`close` の 6 つの検算を足したとき 0x100 に収まらなくなった**
+/// （実測で 310 バイト）ので 0x200 へ広げた。**アセンブラが `.org` で落ちる**ので、
+/// 収まらなくなったことは静かには通らない。
+const SYSCALL_TEST_UD2_OFFSET: u64 = 0x200;
 
 /// `syscall-test` の終了状態の意味（S9-b-3-2a）。
 ///
@@ -5064,6 +5067,19 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
     (1, "the probe return value was not PROBE_RETURN"),
     (2, "write did not return the number of bytes it was given"),
     (3, "the unimplemented number did not return -ENOSYS"),
+    (
+        4,
+        "open(\"/etc/motd\", O_RDONLY) did not return descriptor 0",
+    ),
+    (5, "close(0) did not return 0"),
+    (6, "the open right after close did not reuse descriptor 0"),
+    (7, "open(\"/nope\") did not return -ENOENT"),
+    (8, "open(\"/etc/motd\", O_WRONLY) did not return -EROFS"),
+    (
+        9,
+        "the second close of the same descriptor did not return -EBADF",
+    ),
+    (10, "open(NULL) did not return -EFAULT"),
 ];
 
 /// `fault-test` が起こす #PF のエラーコード（S9-b-3-2a）。
@@ -5105,14 +5121,17 @@ struct UserProcess {
     /// **ここが未使用なのはそのためである。** `#[allow(dead_code)]` を付けている
     /// のは、**「要らないものを置いた」のではなく「使い方をまだ実装していない」**
     /// 側だからである（S9-b-3-1 で立てた判定。未使用の警告はそのどちらかを指す）。
-    /// **次の刻みで `open` が触れるので、そのとき `allow` を外すこと。**
-    ///
     /// # プロセスの持ち物である
     ///
     /// 同時に生きているプロセスは今 1 つなので、グローバルに 1 つ置いても動く。
     /// **それでもここへ置く**——固定配列なので費用が変わらず、
     /// **グローバルに置くと S11 で作り直しになる。**
-    #[allow(dead_code)]
+    ///
+    /// # 遠征の間だけ `kernel::vfs` へ据える
+    ///
+    /// **`syscall::dispatch` はプロセスを知らない**ので、Ring 3 へ落ちる直前に
+    /// [`kernel::vfs::swap_current_files`] で据え、戻ったら引き取る
+    /// （`syscall::set_user_window` と同じ形である）。
     files: kernel::vfs::FileTable,
 }
 
@@ -5724,6 +5743,10 @@ fn load_user_program_into(
     // SAFETY: この空間はカーネルの上位を共有しており、切り替えても実行中の
     // コードとスタックは見え続ける。
     unsafe { kernel::paging::switch::switch_to(process.space.pml4()) };
+    // **このプロセスの fd の表を据える（S10-b）。** `dispatch` はプロセスを
+    // 知らないので、遠征の間だけ `kernel::vfs` が持つ
+    // （`syscall::set_user_window` と同じ形。据えるのは Ring 3 へ落ちる側である）。
+    let previous_files = kernel::vfs::swap_current_files(core::mem::take(&mut process.files));
     // SAFETY: entry と stack は今張ったユーザーページで、`ud2` が必ずフォルト
     // する。main_rsp0_top はメインのカーネルスタック上端。単一実行文脈である。
     unsafe {
@@ -5734,6 +5757,20 @@ fn load_user_program_into(
             kernel::syscall::window_for_subtree(USER_PROGRAM_PML4_INDEX),
         )
     };
+    // **引き取る。** 遠征が畳みで戻っても `exit` で戻ってもここを通る
+    // （`ring3::enter` はこの 2 つの longjmp でしか戻らない）。
+    process.files = kernel::vfs::swap_current_files(previous_files);
+    // **表が動いたことの観測（S10-b）。** 開いたまま戻ったものが何本あるかを出す。
+    // **`syscall-test` は最後に閉じるので 0 で戻る**——ここが 0 でなければ、
+    // 開いた fd が漏れている。
+    logger.info(format_args!(
+        "vfs: {} opened {} file(s) in total and left Ring 3 with {} still open \
+         (MAX_OPEN_FILES={})",
+        process.name,
+        process.files.opened_total(),
+        process.files.open_count(),
+        kernel::vfs::MAX_OPEN_FILES
+    ));
     // SAFETY: 本番のテーブルへ戻す。上位は同じなので連続して実行できる。
     unsafe { kernel::paging::switch::switch_to(production) };
 

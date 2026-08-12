@@ -53,6 +53,39 @@ pub const EFAULT: i64 = 14;
 /// 合わせる」と決めてある）。
 pub const EINVAL: i64 = 22;
 
+/// `-ENOENT`（そのパスは無い）の errno（S10-b）。値は Linux と同じ 2 である。
+pub const ENOENT: i64 = 2;
+
+/// `-EBADF`（そのファイルディスクリプタは開いていない）の errno（S10-b）。
+pub const EBADF: i64 = 9;
+
+/// `-ENOTDIR`（ディレクトリでないものをディレクトリとして辿った）の errno（S10-b）。
+pub const ENOTDIR: i64 = 20;
+
+/// `-EISDIR`（ディレクトリに対して許されない操作）の errno（S10-b）。
+///
+/// **この段では返さない。** `read` がディレクトリを拒む段（4 本目）で使う。
+/// **先に置いてあるのは、`Ext2Error` の対応表を 1 度で書き切るためである。**
+pub const EISDIR: i64 = 21;
+
+/// `-EMFILE`（そのプロセスの fd の表が満杯）の errno（S10-b）。
+pub const EMFILE: i64 = 24;
+
+/// `-EROFS`（読み取り専用のファイルシステム）の errno（S10-b）。
+///
+/// **書き込みで開かれたら、これを返す。** S10 は読み取りだけである
+/// （`docs/roadmap.md` の S10 の「実装しない」）。書き込みは S12 である。
+pub const EROFS: i64 = 30;
+
+/// `-ENAMETOOLONG`（パスが長すぎる）の errno（S10-b）。
+pub const ENAMETOOLONG: i64 = 36;
+
+/// `-EIO`（入出力エラー）の errno（S10-b）。
+///
+/// **像そのものが読めない形をここへ落とす。** 呼び出し側の引数の問題ではないので、
+/// **`EINVAL` でも `ENOENT` でもない。**
+pub const EIO: i64 = 5;
+
 /// ZaytOS 独自のシステムコール番号の基点（S9-a）。
 ///
 /// # なぜ Linux の番号表から離すのか
@@ -169,6 +202,50 @@ pub const WRITE_BUF_LEN: usize = 64;
 /// 行い、**Ring 3 へ返らない分岐は [`syscall_entry`] が持つ**（あちらの
 /// 「exit は出口を通らない」の節）。
 pub const SYS_EXIT: u64 = 60;
+
+/// `open(path, flags, mode)`（S10-b）。**Linux の番号 2 をそのまま使う。**
+///
+/// # `openat`（257）は採らない
+///
+/// **ZaytOS には作業ディレクトリが無い**ので、`dirfd` に渡すものが無い。
+/// **`AT_FDCWD` を受けるだけの引数を置いても、区別できる振る舞いが書けない**
+/// （[`SYS_EXIT`] が `exit_group` を採らない理由と同じ形である）。
+/// **作業ディレクトリを持つ段で足す。**
+pub const SYS_OPEN: u64 = 2;
+
+/// `close(fd)`（S10-b）。**Linux の番号 3 をそのまま使う。**
+pub const SYS_CLOSE: u64 = 3;
+
+/// `open` の第 2 引数のうち、アクセスモードを表すビット（Linux の `O_ACCMODE`）。
+pub const O_ACCMODE: u64 = 0o3;
+
+/// 読み取りで開く（Linux の `O_RDONLY`）。**受理するのはこれだけである。**
+pub const O_RDONLY: u64 = 0o0;
+
+/// 書き込みを伴う `open` のフラグ（`O_CREAT` / `O_TRUNC` / `O_APPEND`）。
+///
+/// **アクセスモードが読み取りでも、これらは書き込みを要求する。**
+/// **どれかが立っていたら `-EROFS` である。**
+pub const O_WRITE_INTENT: u64 = 0o100 | 0o1000 | 0o2000;
+
+/// カーネルが受け取るパスの最大長（NUL を含まない。S10-b）。
+///
+/// # Linux の `PATH_MAX`（4096）より小さい
+///
+/// **像の中で最も長いパスは `/data/indirect-first` の 20 バイトである。**
+/// 256 はその 10 倍を超える。**4096 にしない理由は置き場所である**——
+/// パスは `dispatch` の中でカーネルスタックへ写すので、
+/// **4096 バイトの単一のローカル配列は `deferred-decisions.md` の
+/// 「大きなスタック配列とガード幅」の解禁条件に当たる。**
+///
+/// # `MAX_PATH_COMPONENTS` はまだ要る
+///
+/// 256 バイトあれば `/a` の形で 128 要素まで書けるので、
+/// **`common::ext2::MAX_PATH_COMPONENTS`（64）のほうが先に効く。**
+/// **両方が意味を持っている**ので、どちらも残す
+/// （あちらの doc に「どちらか一方でよい」と書いたが、**この値では一方に
+/// ならなかった**）。
+pub const PATH_MAX: usize = 256;
 
 /// 検証用 probe システムコールの番号（ZaytOS 独自。[`ZAYTOS_PRIVATE_BASE`]）。
 pub const PROBE_NUMBER: u64 = ZAYTOS_PRIVATE_BASE;
@@ -536,6 +613,14 @@ unsafe fn dispatch(
             let read = unsafe { copy_from_user(&mut kbuf, &slice) };
             kbuf[..read].iter().map(|b| *b as u64).sum()
         }
+        SYS_OPEN => {
+            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+            unsafe { sys_open(args[0], args[1], pml4_phys, direct_map) }
+        }
+        SYS_CLOSE => crate::vfs::with_current_files(|files| match files.remove(args[0] as usize) {
+            Ok(_) => 0,
+            Err(e) => (-errno_for_file_table(e)) as u64,
+        }),
         SYS_EXIT => {
             // **記録するだけである。** Ring 3 へ返らない分岐は `syscall_entry` が
             // 持つ（[`SYS_EXIT`] の doc）。**戻り値は読まれない。**
@@ -663,6 +748,154 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
 
     // M5-f-1 は切り替えない。入場時の IrqContext 先頭を返す。
     context as u64
+}
+
+/// `open(path, flags, mode)` の本体（S10-b）。
+///
+/// # 順序に意味がある
+///
+/// **フラグを先に見る。** 書き込みで開かれたなら、**パスを読む前に `-EROFS` である**
+/// ——読み取り専用のファイルシステムに対して、そのパスが在るかどうかは答えるべき
+/// ことではない。
+///
+/// # パスはユーザー空間から来る
+///
+/// **`UserSlice` と窓がそのまま効く**（S9-b-3-2b で 1 つに畳んだ窓）。
+/// NUL 終端なので長さが先に分からないが、**ページ単位で検証しながら進む**ので、
+/// **踏み込む前に検証するという契約は崩れない。**
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn sys_open(path: u64, flags: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -> u64 {
+    // 読み取り以外は拒む。**S10 は読み取りだけである。**
+    if flags & O_ACCMODE != O_RDONLY || flags & O_WRITE_INTENT != 0 {
+        return (-EROFS) as u64;
+    }
+
+    let mut buf = [0u8; PATH_MAX];
+    // SAFETY: 呼び出し元契約をそのまま渡す。
+    let len = match unsafe { copy_user_path(&mut buf, path, pml4_phys, direct_map) } {
+        Ok(len) => len,
+        Err(errno) => return (-errno) as u64,
+    };
+
+    let fs = match crate::vfs::root_filesystem() {
+        Ok(fs) => fs,
+        Err(e) => return (-errno_for_ext2(e)) as u64,
+    };
+    let inode = match fs.lookup(&buf[..len]) {
+        Ok(inode) => inode,
+        Err(e) => return (-errno_for_ext2(e)) as u64,
+    };
+
+    let file = crate::vfs::File::new(crate::vfs::Inode::from_ext2(inode));
+    crate::vfs::with_current_files(|files| match files.insert(file) {
+        Ok(fd) => fd as u64,
+        Err(e) => (-errno_for_file_table(e)) as u64,
+    })
+}
+
+/// ユーザー空間の NUL 終端のパスを、カーネルのバッファへ写す（S10-b）。
+///
+/// 返るのは NUL を含まない長さである。
+///
+/// # ページごとに検証してから読む
+///
+/// **長さが先に分からないので、一度に検証できない。** そこで
+/// **「今いるページの残り」を単位に検証しては読む**。**踏み込む前に検証するという
+/// 契約は 1 バイトごとに保たれる。**
+///
+/// **上限は [`PATH_MAX`] である。** 越えたら `-ENAMETOOLONG` で、
+/// **NUL が無い入力でも必ず止まる**（`common::ext2` の走査と同じ形で、
+/// 進む量が正で上限が有限である）。
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn copy_user_path(
+    dst: &mut [u8; PATH_MAX],
+    path: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+) -> Result<usize, i64> {
+    /// ページの大きさ。**検証の単位である。**
+    const PAGE: u64 = 0x1000;
+
+    let mut copied = 0usize;
+    while copied < PATH_MAX {
+        let addr = path.checked_add(copied as u64).ok_or(EFAULT)?;
+        // 今いるページの残り。**ページ境界を越えない単位で検証する。**
+        let to_page_end = PAGE - (addr & (PAGE - 1));
+        let chunk = to_page_end.min((PATH_MAX - copied) as u64);
+        // SAFETY: 呼び出し元契約をそのまま渡す。
+        let slice =
+            unsafe { validate_user_range(pml4_phys, direct_map, addr, chunk) }.ok_or(EFAULT)?;
+        // SAFETY: slice は検証済み。dst の残りは chunk を収める。
+        let read = unsafe { copy_from_user(&mut dst[copied..copied + chunk as usize], &slice) };
+        if read == 0 {
+            return Err(EFAULT);
+        }
+        for i in 0..read {
+            if dst[copied + i] == 0 {
+                return Ok(copied + i);
+            }
+        }
+        copied += read;
+    }
+    Err(ENAMETOOLONG)
+}
+
+/// [`common::ext2::Ext2Error`] を errno へ写す（S10-b）。
+///
+/// # 対応表はここに置く
+///
+/// **`common` は errno を知らない。** あちらは `no_std` の純粋ロジックで、
+/// Linux の番号体系に依存しない（`common::elf` と同じ線である）。
+/// **写すのは、Linux の形で答える責任を持つ側である。**
+///
+/// # 全 20 種を明示する
+///
+/// **`_ =>` で捨てない。** 捨てると、新しい種類を足したときに黙って
+/// `-EIO` のようなものへ落ちる。**列挙が増えたらここが落ちる**ようにしておく。
+fn errno_for_ext2(error: common::ext2::Ext2Error) -> i64 {
+    use common::ext2::Ext2Error as E;
+    match error {
+        // 像そのものが読めない。**呼び出し側の引数の問題ではない。**
+        E::TooShort
+        | E::BadMagic
+        | E::UnsupportedRevision(_)
+        | E::BadBlockSizeShift(_)
+        | E::BadInodeSize(_)
+        | E::ZeroPerGroup
+        | E::UnsupportedIncompatFeatures(_)
+        | E::ImageTooSmall { .. }
+        | E::BlockOutOfRange(_)
+        | E::GroupDescriptorsOutOfRange
+        | E::InodeOutOfRange(_)
+        | E::InodeTableOutOfRange { .. }
+        | E::FileBlockOutOfRange(_)
+        | E::SparseBlock(_)
+        | E::DirEntryTruncated { .. }
+        | E::DirEntryMisaligned(_)
+        | E::DirEntryRecordTooSmall { .. }
+        | E::DirEntryRecordPastBlock { .. } => EIO,
+        // 実装していない形。
+        E::IndirectBlockUnsupported(_) => EIO,
+        // ここから下は、呼び出し側の引数に対する答えである。
+        E::NotADirectory(_) => ENOTDIR,
+        E::NotFound => ENOENT,
+        E::PathNotAbsolute => EINVAL,
+        E::PathTooManyComponents(_) => ENAMETOOLONG,
+    }
+}
+
+/// [`crate::vfs::FileTableError`] を errno へ写す（S10-b）。
+fn errno_for_file_table(error: crate::vfs::FileTableError) -> i64 {
+    match error {
+        crate::vfs::FileTableError::NoFreeDescriptor => EMFILE,
+        crate::vfs::FileTableError::BadDescriptor(_) => EBADF,
+    }
 }
 
 /// [`SYS_WRITE`] が最後に記録した fd。
