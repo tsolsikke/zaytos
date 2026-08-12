@@ -48,6 +48,7 @@ fn main() {
     }
 
     build_user_programs(&manifest_dir, &out_dir);
+    build_fs_image(&manifest_dir, &out_dir);
 
     println!("cargo:rustc-link-arg=-T{manifest_dir}/link.ld");
 }
@@ -130,4 +131,215 @@ fn parse_symbol(script: &str, name: &str) -> Option<u64> {
         return u64::from_str_radix(value, 16).ok();
     }
     None
+}
+
+/// ext2 の像を `mke2fs` で建て、決定的にしてから `OUT_DIR` へ置く（S10-a）。
+///
+/// # なぜ `mke2fs` を呼ぶか
+///
+/// **`roadmap.md` の S10 の到達条件が「`mke2fs` で作ったイメージを読めること」で
+/// ある。** 自作の書き手が作った像を読めても、それは自分の理解どうしの一致しか
+/// 言わない。**外の道具が作った像を読むことが主張の中身である。**
+///
+/// # 出力は決定的にする
+///
+/// **`mke2fs` の出力はそのままでは再現しない。** 3 通り測った（S10-a の着手前）。
+///
+/// - 既定: 2 回作ると md5 が違う（UUID と時刻）
+/// - `-U` と `-E hash_seed=` を固定: **同じ秒なら一致し、秒をまたぐと不一致**
+/// - `SOURCE_DATE_EPOCH`: **この版（1.47.0）では効かなかった。**
+///   `Filesystem created` は現在時刻のままだった。**版によっては対応が入って
+///   いるので、「効かない」と一般化しないこと**
+///
+/// **残る差は時刻だけなので、建てた後に 0 で上書きする。** 上書きするのは
+/// superblock の 3 つと、全 inode の 4 つである。**ext2 にはチェックサムが
+/// 無い**ので、バイトを書き換えても整合は崩れない（`e2fsck -fn` で確かめる）。
+///
+/// # ビルド環境への要求
+///
+/// **`mke2fs`（e2fsprogs）が要る。** `rust-toolchain.toml` では固定できない
+/// 種類の要求である。**S12 の独立検証で `e2fsck` が必須になるので、どのみち
+/// e2fsprogs は要る**（`ADR-0025`）。不在のときは、何が要るかと何のために
+/// 要るかを出して止まる。
+fn build_fs_image(manifest_dir: &str, out_dir: &str) {
+    /// 像の大きさ。**4 MiB の埋め込みが起動することは S10 の棚卸しで実測した**
+    /// （`PML4[511]` の PT 枚数が 3 から 4 になる以外に変化は無かった）。
+    const IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+    /// 直接ブロックだけで収まる最大の大きさ（12 ブロック × 4096）。
+    const DIRECT_MAX_BYTES: usize = 12 * 4096;
+
+    let seed = format!("{manifest_dir}/fsimage/seed");
+    println!("cargo:rerun-if-changed={seed}");
+
+    // 種を OUT_DIR へ写し、生成するファイルを足す。**リポジトリへバイナリを
+    // 置かない**（種はテキストだけで、大きいものはここで作る）。
+    let staging = format!("{out_dir}/fsimage-root");
+    let _ = std::fs::remove_dir_all(&staging);
+    copy_tree(std::path::Path::new(&seed), std::path::Path::new(&staging));
+
+    std::fs::create_dir_all(format!("{staging}/bin"))
+        .expect("failed to create /bin in the staging");
+    std::fs::copy(
+        format!("{out_dir}/hello.elf"),
+        format!("{staging}/bin/hello"),
+    )
+    .expect("failed to place hello into the staging");
+
+    // **単一間接ブロックの境界を挟む 2 本。** 直接ブロックは 12 個なので、
+    // 12 ブロックちょうどは間接を使わず、1 バイト超えると使う。
+    std::fs::create_dir_all(format!("{staging}/data"))
+        .expect("failed to create /data in the staging");
+    let pattern: Vec<u8> = (0..DIRECT_MAX_BYTES + 1).map(|i| (i % 251) as u8).collect();
+    std::fs::write(
+        format!("{staging}/data/direct-max"),
+        &pattern[..DIRECT_MAX_BYTES],
+    )
+    .expect("failed to write direct-max");
+    std::fs::write(format!("{staging}/data/indirect-first"), &pattern[..])
+        .expect("failed to write indirect-first");
+
+    // 像の器を作る（ゼロ埋め）。
+    let image = format!("{out_dir}/fs.img");
+    let file = std::fs::File::create(&image).expect("failed to create the image file");
+    file.set_len(IMAGE_BYTES)
+        .expect("failed to size the image file");
+    drop(file);
+
+    let version = mke2fs_version();
+
+    // UUID とハッシュシードを固定する。**残る差（時刻）は下で潰す。**
+    let status = std::process::Command::new("mke2fs")
+        .args([
+            "-q",
+            "-t",
+            "ext2",
+            "-U",
+            "11111111-2222-3333-4444-555555555555",
+            "-E",
+            "hash_seed=66666666-7777-8888-9999-000000000000",
+            "-d",
+            &staging,
+            &image,
+        ])
+        .status()
+        .unwrap_or_else(|e| {
+            panic!(
+                "failed to run mke2fs: {e}. ZaytOS builds the ext2 test image with mke2fs \
+                 (e2fsprogs); install it (for example `apt install e2fsprogs`). It is needed \
+                 because roadmap S10 requires reading an image made by an outside tool, and \
+                 S12 will verify ZaytOS's writes with e2fsck from the same package."
+            )
+        });
+    assert!(status.success(), "mke2fs failed for the ext2 test image");
+
+    zero_image_timestamps(&image);
+
+    // **版を判定行へ載せる**（S10-a）。**別の版で既定値が変われば、決めた
+    // パラメータ（block 4096・inode size 256・rev 1）が動く。**
+    std::fs::write(
+        format!("{out_dir}/fsimage_info.rs"),
+        format!(
+            "// build.rs が生成した。手で編集しないこと。\n\
+             pub const MKE2FS_VERSION: &str = {version:?};\n\
+             pub const IMAGE_BYTES: u64 = {IMAGE_BYTES};\n"
+        ),
+    )
+    .expect("failed to write fsimage_info.rs");
+}
+
+/// `mke2fs -V` の 1 行目。**版を記録に残すためだけに読む。**
+fn mke2fs_version() -> String {
+    // `mke2fs -V` は版をコード 1 で標準エラーへ出す。**成否は見ない**——
+    // 実際に建てるときの失敗が、不在の診断を出す側である。
+    let output = std::process::Command::new("mke2fs").arg("-V").output();
+    match output {
+        Ok(o) => {
+            let text = String::from_utf8_lossy(&o.stderr);
+            text.lines().next().unwrap_or("unknown").trim().to_string()
+        }
+        Err(_) => "unknown".to_string(),
+    }
+}
+
+/// 種のディレクトリを丸ごと写す。**シンボリックリンクは扱わない**
+/// （`roadmap.md` の S10 が symlink を範囲外と書いている）。
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("failed to create a staging directory");
+    let entries = std::fs::read_dir(from).expect("failed to read the seed directory");
+    for entry in entries {
+        let entry = entry.expect("failed to read a seed entry");
+        let kind = entry.file_type().expect("failed to stat a seed entry");
+        let target = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), &target).expect("failed to copy a seed file");
+        } else {
+            panic!(
+                "the seed tree has an entry that is neither a file nor a directory: {:?}",
+                entry.path()
+            );
+        }
+    }
+}
+
+/// 像の時刻フィールドを 0 にして、出力を決定的にする（S10-a）。
+///
+/// **触るのは superblock の 4 つと、全 inode の 4 つだけである。**
+/// superblock: `s_mtime`(44) / `s_wtime`(48) / `s_lastcheck`(64) / `s_mkfs_time`(264)。
+/// inode: `i_atime`(8) / `i_ctime`(12) / `i_mtime`(16) / `i_dtime`(20)。
+///
+/// **inode の位置は group descriptor から引く。** ここが ext2 の読み取りと
+/// 重なるが、**読むのは 1 フィールド（`bg_inode_table`）だけで、カーネル側の
+/// パーサとは別物である。** 正しさは「2 回建てて md5 が一致すること」と
+/// 「`e2fsck -fn` が clean と言うこと」で確かめる。
+fn zero_image_timestamps(image: &str) {
+    let mut bytes = std::fs::read(image).expect("failed to read the image back");
+
+    let u16_at = |b: &[u8], o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
+    let u32_at = |b: &[u8], o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
+
+    const SUPERBLOCK_OFFSET: usize = 1024;
+    let sb = SUPERBLOCK_OFFSET;
+    let block_size = 1024usize << u32_at(&bytes, sb + 24);
+    let inodes_count = u32_at(&bytes, sb) as usize;
+    let inodes_per_group = u32_at(&bytes, sb + 40) as usize;
+    let inode_size = u16_at(&bytes, sb + 88) as usize;
+    let first_data_block = u32_at(&bytes, sb + 20) as usize;
+    let group_count = inodes_count.div_ceil(inodes_per_group);
+
+    // `s_mtime`(44) / `s_wtime`(48) / `s_lastcheck`(64) / `s_mkfs_time`(264)。
+    // **`s_mkfs_time` は実測で見つけた**——最初は 3 つだけ潰し、2 回建てて
+    // md5 が食い違ったので `cmp` で位置を出した（バイト 1288 = superblock+264）。
+    for offset in [44usize, 48, 64, 264] {
+        bytes[sb + offset..sb + offset + 4].copy_from_slice(&0u32.to_le_bytes());
+    }
+
+    // group descriptor テーブルは superblock の次のブロックから始まる。
+    let gd_table = (first_data_block + 1) * block_size;
+    for group in 0..group_count {
+        let gd = gd_table + group * 32;
+        let inode_table = u32_at(&bytes, gd + 8) as usize * block_size;
+        for index in 0..inodes_per_group {
+            let inode = inode_table + index * inode_size;
+            if inode + inode_size > bytes.len() {
+                break;
+            }
+            for offset in [8usize, 12, 16, 20] {
+                bytes[inode + offset..inode + offset + 4].copy_from_slice(&0u32.to_le_bytes());
+            }
+            // **256 バイトの inode は、128 バイトの外に時刻をもう 5 つ持つ。**
+            // `i_ctime_extra`(132) / `i_mtime_extra`(136) / `i_atime_extra`(140) /
+            // **`i_crtime`(144)** / `i_crtime_extra`(148)。
+            // **`i_crtime` も実測で見つけた**——2 回建てて 10 バイトだけ食い違い、
+            // `cmp -l` の位置が inode の 144 に揃っていた。
+            if inode_size >= 152 {
+                for offset in [132usize, 136, 140, 144, 148] {
+                    bytes[inode + offset..inode + offset + 4].copy_from_slice(&0u32.to_le_bytes());
+                }
+            }
+        }
+    }
+
+    std::fs::write(image, &bytes).expect("failed to write the image back");
 }
