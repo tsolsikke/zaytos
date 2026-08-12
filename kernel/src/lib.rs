@@ -39,6 +39,7 @@ pub mod smp;
 pub mod stack;
 pub mod syscall;
 pub mod task;
+pub mod vfs;
 
 /// kernel イメージ内の仮想アドレスを物理アドレスへ写す。
 ///
