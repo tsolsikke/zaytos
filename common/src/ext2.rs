@@ -343,6 +343,27 @@ pub struct DirEntry<'a> {
     pub file_type: u8,
     /// 名前。**`/` も NUL も含まない生のバイト列で、UTF-8 とは限らない。**
     pub name: &'a [u8],
+    /// このエントリの**直後**を指す、ディレクトリ内のバイト位置。
+    ///
+    /// **走査を再開できる位置である。** [`Ext2::directory_entries_from`] へ渡すと、
+    /// このエントリの次から続けられる。
+    ///
+    /// **`getdents64` の `d_off` がこれである。** Linux では `d_off` は
+    /// 「`lseek` で戻れる不透明な値」で、**索引付きのディレクトリではハッシュが入る**
+    /// （実測した。`tmpfs` も実ディスクの ext4 も、バイト位置ではない値を返した）。
+    /// **線形のディレクトリではバイト位置であり、ここもそれに倣う。**
+    ///
+    /// # 「ext2 だからバイト位置」であって「`d_off` がバイト位置だから」ではない
+    ///
+    /// **理由を取り違えると、次の判断が変わる。** ここが線形の走査でよいのは
+    /// **`dir_index`（COMPAT の機能ビット。像には立っているが実装していない）を
+    /// 辿っていないからである。**
+    ///
+    /// **`dir_index` を実装したら、バイト位置では足りなくなる。** 索引付きの
+    /// ディレクトリはハッシュ順に返すので、**「次のバイト位置」が「次のエントリ」を
+    /// 指さない。** そのときは Linux と同じくハッシュを入れることになる。
+    /// **不透明な値という契約は、そこまで含めて決めてある。**
+    pub next_offset: u64,
 }
 
 impl DirEntry<'_> {
@@ -408,7 +429,8 @@ impl<'a> Iterator for DirEntries<'_, 'a> {
                     }
                     match self.fs.file_block(&self.inode, self.block_index) {
                         Ok(bytes) => {
-                            self.offset = 0;
+                            // **最初のブロックだけは `from` の位置から始める。**
+                            // 2 つ目からは先頭に戻す（`block` を `None` にする側が 0 を置く）。
                             self.block = Some(bytes);
                             bytes
                         }
@@ -423,6 +445,7 @@ impl<'a> Iterator for DirEntries<'_, 'a> {
             // このブロックを読み切ったら次のブロックへ。
             if self.offset >= bytes.len() {
                 self.block = None;
+                self.offset = 0;
                 self.block_index += 1;
                 continue;
             }
@@ -477,6 +500,8 @@ impl<'a> Iterator for DirEntries<'_, 'a> {
                 inode,
                 file_type,
                 name,
+                next_offset: u64::from(self.block_index) * u64::from(self.fs.block_size)
+                    + self.offset as u64,
             }));
         }
     }
@@ -826,16 +851,37 @@ impl<'a> Ext2<'a> {
     /// **未使用の枠（`inode` が 0）は飛ばす**ので、返るエントリはすべて
     /// 実在の inode を指している。
     pub fn directory_entries(&self, inode: &Inode) -> Result<DirEntries<'_, 'a>, Ext2Error> {
+        self.directory_entries_from(inode, 0)
+    }
+
+    /// ディレクトリの `from` バイト目から走査する（S10-b）。
+    ///
+    /// # `from` はエントリの境界であること
+    ///
+    /// **[`DirEntry::next_offset`] が返した値を渡すこと。** 途中の位置を渡すと、
+    /// **そこにあるバイト列をエントリとして読む**——`rec_len` の 3 条件が
+    /// 通らなければエラーで返り、通ってしまえば別の並びとして読める。
+    /// **どちらにしてもパニックはしないが、意味のある結果にもならない。**
+    ///
+    /// **範囲外の `from` は、エントリが 1 つも返らない形になる**
+    /// （ブロックの数で頭打ちになる）。
+    pub fn directory_entries_from(
+        &self,
+        inode: &Inode,
+        from: u64,
+    ) -> Result<DirEntries<'_, 'a>, Ext2Error> {
         if !inode.is_directory() {
             return Err(Ext2Error::NotADirectory(inode.number));
         }
+        let block_size = u64::from(self.block_size);
+        let block_index = u32::try_from(from / block_size).unwrap_or(u32::MAX);
         Ok(DirEntries {
             fs: self,
             inode: *inode,
             block_count: self.block_span(inode),
-            block_index: 0,
+            block_index,
             block: None,
-            offset: 0,
+            offset: (from % block_size) as usize,
             finished: false,
         })
     }
@@ -1667,6 +1713,51 @@ mod tests {
                  {DIRENT_HEADER_LEN} bytes, which is what the DirEntryRecordTooSmall check \
                  guarantees."
             ),
+        }
+    }
+
+    /// **`next_offset` から走査を再開できる。**
+    ///
+    /// **`getdents64` が続きを読むときに使う値である。**
+    #[test]
+    fn the_walk_can_resume_from_the_offset_it_reported() {
+        let image = build_test_image();
+        let fs = Ext2::parse(&image).unwrap();
+        let root = fs.inode(ROOT_INODE).unwrap();
+
+        // 3 つ目まで読み、そこで止めて位置を覚える。
+        let mut walker = fs.directory_entries(&root).unwrap();
+        let mut resume = 0u64;
+        for _ in 0..3 {
+            resume = walker.next().unwrap().unwrap().next_offset;
+        }
+
+        // 覚えた位置から続ける。**残りだけが返る。**
+        let rest: std::vec::Vec<&[u8]> = fs
+            .directory_entries_from(&root, resume)
+            .unwrap()
+            .map(|e| e.unwrap().name)
+            .collect();
+        assert_eq!(rest, std::vec![&b"bin"[..], &b"data"[..], &b"etc"[..]]);
+
+        // 0 から始めれば全部返る（**再開の位置が効いていることの対照**）。
+        let all = fs.directory_entries_from(&root, 0).unwrap().count();
+        assert_eq!(all, ROOT_ENTRIES.len());
+    }
+
+    /// 範囲外から再開しても、エントリは 1 つも返らない。**パニックしない。**
+    #[test]
+    fn resuming_past_the_end_yields_nothing() {
+        let image = build_test_image();
+        let fs = Ext2::parse(&image).unwrap();
+        let root = fs.inode(ROOT_INODE).unwrap();
+        for from in [4096u64, 4097, 1 << 40, u64::MAX] {
+            let count = fs
+                .directory_entries_from(&root, from)
+                .unwrap()
+                .filter(|e| e.is_ok())
+                .count();
+            assert_eq!(count, 0, "resuming from {from} must yield nothing");
         }
     }
 

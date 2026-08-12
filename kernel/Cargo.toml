@@ -235,6 +235,10 @@ syscall-test-read-no-advance = []
 # 取り違えは値がもっともらしいままなので、突き合わせる相手が無いと気づけない。
 # `--syscall-test stat-blocks-in-bytes`。
 syscall-test-stat-blocks-in-bytes = []
+# S10-b: getdents64 の d_reclen を 8 バイト境界へ切り上げない。こちらの走査は
+# d_reclen を頼りに歩くので外しても自分では気づけない。整列は呼び出し側との
+# 約束なので、約束を見ている検算だけが捕まえる。`--syscall-test dirent-no-align`。
+syscall-test-dirent-no-align = []
 # S1-b-2: ACPI の検証経路の破壊確認。いずれも既定ビルドには入らない。
 # `cargo xtask run --acpi-test <kind>` が有効化する。観測は panic ではなく、
 # 「検出のログが出て、MADT の列挙が完了しないこと」である。

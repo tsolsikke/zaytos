@@ -5047,13 +5047,16 @@ const SYSCALL_TEST_MESSAGE: &str = "syscall-test wrote this\n";
 
 /// `syscall-test` の受け皿の `ud2` が entry から何バイト目にあるか（S9-b-3-2a）。
 ///
-/// **`kernel/userland/syscall-test.rs` の `.org 0x400` と対になっている。**
+/// **`kernel/userland/syscall-test.rs` の `.org 0x800` と対になっている。**
 /// `hello` より遠いのは、検算の分だけ命令が長いためである。
 /// **S10-b で `open`/`close` の検算を足したとき 0x100 に収まらなくなり**（実測 310
 /// バイト）、**`read` の検算を足したとき 0x200 にも収まらなくなった**（実測 743
-/// バイト）。**アセンブラが `.org` で落ちる**ので、収まらなくなったことは静かには
-/// 通らない。
-const SYSCALL_TEST_UD2_OFFSET: u64 = 0x400;
+/// バイト）、**`getdents64` の検算で 0x400 にも収まらなくなった**（実測 1198 バイト）。
+/// **アセンブラが `.org` で落ちる**ので、収まらなくなったことは静かには通らない。
+/// **3 度広がった。** `docs/deferred-decisions.md` の
+/// 「`syscall-test` の受け皿の位置を `.org` で固定する形」が、
+/// **3 度目で見直すという条件で開いている。**
+const SYSCALL_TEST_UD2_OFFSET: u64 = 0x800;
 
 /// `syscall-test` の終了状態の意味（S9-b-3-2a）。
 ///
@@ -5097,6 +5100,18 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
     (21, "st_blocks was not 8 (512-byte units)"),
     (22, "st_mode for /etc did not say directory"),
     (23, "stat(\"/nope\") did not return -ENOENT"),
+    (24, "getdents64 on / did not fill the buffer"),
+    (25, "the root listing did not have 6 entries"),
+    (26, "a d_reclen was not a multiple of 8"),
+    (
+        27,
+        "d_type did not separate the regular file from the directories",
+    ),
+    (28, "getdents64 at the end did not return 0"),
+    (
+        29,
+        "getdents64 with a buffer too small for one record did not return -EINVAL",
+    ),
 ];
 
 /// `fault-test` が起こす #PF のエラーコード（S9-b-3-2a）。
@@ -7588,6 +7603,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "syscall-test-stat-blocks-in-bytes",
         cfg!(feature = "syscall-test-stat-blocks-in-bytes"),
         "stat の st_blocks を 512 バイト単位でなくバイト数で書く",
+    ),
+    (
+        "syscall-test-dirent-no-align",
+        cfg!(feature = "syscall-test-dirent-no-align"),
+        "getdents64 の d_reclen を 8 バイト境界へ切り上げない",
     ),
     (
         "exception-test",

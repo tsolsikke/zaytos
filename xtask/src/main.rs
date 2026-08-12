@@ -869,6 +869,20 @@ const SYSCALL_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // S10-b: getdents64 の d_reclen を 8 バイト境界へ切り上げない。**こちらの走査は
+    // d_reclen を頼りに歩くので、外しても自分では気づけない。** 整列は呼び出し側との
+    // 約束なので、約束を見ている検算だけが捕まえる。
+    CriticalTest {
+        name: "dirent-no-align",
+        feature: "syscall-test-dirent-no-align",
+        expected_markers: &[
+            "user-run: syscall-test exited with status 26",
+            "a d_reclen was not a multiple of 8",
+        ],
+        forbidden_markers: &["user-load: syscall-test ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // S9-a: 容量超過の errno を分ける前へ戻す。**この分岐は S9-a で初めて通るように
     // なった経路である。** 通り始めたばかりの経路を手で1度確かめただけにしないため、
     // 永続の破壊として置く。次に dispatch を触ったときに落ちる。
@@ -6885,7 +6899,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 21,
-    full: 124,
+    full: 125,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

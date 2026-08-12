@@ -206,6 +206,30 @@ pub const SYS_EXIT: u64 = 60;
 /// `read(fd, buf, count)`（S10-b）。**Linux の番号 0 をそのまま使う。**
 pub const SYS_READ: u64 = 0;
 
+/// `getdents64(fd, dirp, count)`（S10-b）。**Linux の番号 217 をそのまま使う。**
+pub const SYS_GETDENTS64: u64 = 217;
+
+/// `linux_dirent64` の固定部のバイト数。**実測で確かめた**（`d_name` の `offsetof`）。
+///
+/// `d_ino`(8) + `d_off`(8) + `d_reclen`(2) + `d_type`(1) = 19 である。
+///
+/// # `sizeof(struct dirent)` は 280 だが、それは別物である
+///
+/// **あれは受け皿の型の大きさ**（`d_name[256]` を含む）で、
+/// **`getdents64` が書くレコードの大きさではない。** レコードは可変長で、
+/// 長さは `d_reclen` が持つ。**280 を定数として持ち込まない。**
+pub const DIRENT64_HEADER_LEN: usize = 19;
+
+/// `linux_dirent64` のレコードの整列。**8 バイト境界へ切り上げる**（実測で確かめた）。
+const DIRENT64_ALIGN: usize = 8;
+
+/// `d_type`: 不明。**対応表に無い値はこれにする。**
+pub const DT_UNKNOWN: u8 = 0;
+/// `d_type`: ディレクトリ（実測）。
+pub const DT_DIR: u8 = 4;
+/// `d_type`: 通常ファイル（実測）。
+pub const DT_REG: u8 = 8;
+
 /// `stat(path, statbuf)`（S10-b）。**Linux の番号 4 をそのまま使う。**
 ///
 /// # `fstat`（5）は置かない
@@ -698,6 +722,10 @@ unsafe fn dispatch(
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
             unsafe { sys_read(args[0], args[1], args[2], pml4_phys, direct_map) }
         }
+        SYS_GETDENTS64 => {
+            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+            unsafe { sys_getdents64(args[0], args[1], args[2], pml4_phys, direct_map) }
+        }
         SYS_STAT => {
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
             unsafe { sys_stat(args[0], args[1], pml4_phys, direct_map) }
@@ -1002,6 +1030,165 @@ unsafe fn sys_open(path: u64, flags: u64, pml4_phys: PhysAddr, direct_map: Direc
         Err(e) => (-errno_for_file_table(e)) as u64,
     })
 }
+
+/// ext2 の `file_type` を `getdents64` の `d_type` へ写す（S10-b）。
+///
+/// # 値が違う
+///
+/// **ext2 は 1=REG・2=DIR、`d_type` は 8=REG・4=DIR である。**
+/// **番号が別の体系なので、写すのではなく引き当てる。** Linux も同じことを
+/// している（`fs_ftype_to_dtype`）。
+///
+/// # 表に無い値は [`DT_UNKNOWN`] である
+///
+/// **`d_type` は「分からない」を表せる**ので、知らない種別は 0 で返す。
+/// **symlink（ext2 の 7）は載せていない**——**この値を実測で確かめていない**
+/// （像に symlink が無く、`ext2fs` のヘッダもこの環境に無い）。
+/// **確かめていないものを表に書かない。** symlink は実装しないと宣言してある
+/// （`docs/roadmap.md` の S10）ので、載せなくても `DT_UNKNOWN` で正しく答える。
+fn dirent_type_for(file_type: u8) -> u8 {
+    match file_type {
+        common::ext2::DIRENT_TYPE_REGULAR => DT_REG,
+        common::ext2::DIRENT_TYPE_DIRECTORY => DT_DIR,
+        _ => DT_UNKNOWN,
+    }
+}
+
+/// `getdents64(fd, dirp, count)` の本体（S10-b）。
+///
+/// # 収まらないレコードは書かない
+///
+/// **Linux の振る舞いを実測で確かめた。**
+///
+/// - **最初の 1 つも収まらない**なら `-EINVAL`（バッファが 0・8・16 バイトのとき）
+/// - **収まるぶんだけ書く**（32 バイト渡しても、24 バイトのレコード 1 つで返る）
+/// - **終端では 0 を返す**
+///
+/// **途中で切ったレコードは書かない。** 呼び出し側は `d_reclen` を頼りに歩くので、
+/// 半端なレコードがあると歩けなくなる。
+///
+/// # 線4 がここで再来する
+///
+/// **`d_reclen` を積み上げる側にも上限が要る。** 上限は
+/// **ユーザーバッファの残り**で、**1 レコードは必ず [`DIRENT64_HEADER_LEN`] より
+/// 大きい**ので、書くたびに残りは必ず減る。**走査そのものの停止性は
+/// `common::ext2` の側が持っている**（`rec_len` の 3 条件）。
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn sys_getdents64(
+    fd: u64,
+    dirp: u64,
+    count: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+) -> u64 {
+    let opened = crate::vfs::with_current_files(|files| {
+        files
+            .get(fd as usize)
+            .map(|file| (*file.inode(), file.offset()))
+    });
+    let (inode, from) = match opened {
+        Ok(pair) => pair,
+        Err(e) => return (-errno_for_file_table(e)) as u64,
+    };
+    if !inode.is_directory() {
+        return (-ENOTDIR) as u64;
+    }
+
+    // **踏み込む前に検証する。** 書く量は `count` を越えない。
+    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, dirp, count) }) else {
+        return (-EFAULT) as u64;
+    };
+
+    let fs = match crate::vfs::root_filesystem() {
+        Ok(fs) => fs,
+        Err(e) => return (-errno_for_ext2(e)) as u64,
+    };
+    let entries = match fs.directory_entries_from(inode.ext2(), from) {
+        Ok(entries) => entries,
+        Err(e) => return (-errno_for_ext2(e)) as u64,
+    };
+
+    let mut written = 0u64;
+    let mut next_from = from;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => return (-errno_for_ext2(e)) as u64,
+        };
+
+        // レコードの長さ。**名前の NUL 終端を数え、8 バイト境界へ切り上げる。**
+        //
+        // 破壊 (S10-b, dirent-no-align): 切り上げをやめる。**こちらの走査は
+        // `d_reclen` を頼りに歩くので、外しても自分では気づけない。** 整列は
+        // 呼び出し側との約束なので、**約束を見ている検算だけが捕まえる。**
+        //
+        // **S10-b の他の 3 つとは種類が違う。** `eisdir-as-enotdir`・
+        // `read-no-advance`・`stat-blocks-in-bytes` は**値が間違っている**形で、
+        // 正しい値を知っていれば突き合わせられる。**こちらは値ではなく、
+        // 呼び出し側との約束の違反である**——どの値が返るかは変わらず、
+        // **返り方の規則だけが崩れる。** 突き合わせる相手は「正しい値」ではなく
+        // 「約束」なので、**約束を明文で検査していなければ、何も落ちない。**
+        let needed = DIRENT64_HEADER_LEN + entry.name.len() + 1;
+        #[cfg(not(feature = "syscall-test-dirent-no-align"))]
+        let reclen = needed.next_multiple_of(DIRENT64_ALIGN);
+        #[cfg(feature = "syscall-test-dirent-no-align")]
+        let reclen = needed;
+
+        if written + reclen as u64 > count {
+            // 収まらない。**書けたぶんで止める**（Linux と同じ）。
+            break;
+        }
+
+        let mut record = [0u8; DIRENT64_MAX_RECORD];
+        record[0..8].copy_from_slice(&u64::from(entry.inode).to_le_bytes());
+        record[8..16].copy_from_slice(&entry.next_offset.to_le_bytes());
+        record[16..18].copy_from_slice(&(reclen as u16).to_le_bytes());
+        record[18] = dirent_type_for(entry.file_type);
+        // 名前と NUL。**`reclen` に収まる長さしか書かない。**
+        let name_end = DIRENT64_HEADER_LEN + entry.name.len();
+        if name_end + 1 > record.len() {
+            // 名前が長すぎてレコードに収まらない。**像が壊れている。**
+            return (-EIO) as u64;
+        }
+        record[DIRENT64_HEADER_LEN..name_end].copy_from_slice(entry.name);
+
+        // SAFETY: slice は検証済み。`written + reclen` は `count` を越えない。
+        let put = unsafe { copy_to_user(&slice, written, &record[..reclen]) };
+        if put != reclen {
+            return (-EFAULT) as u64;
+        }
+        written += reclen as u64;
+        next_from = entry.next_offset;
+    }
+
+    if written == 0 && next_from == from {
+        // 1 つも書いていない。**終端なのか、バッファが狭すぎたのかを分ける。**
+        // **狭すぎた側は `-EINVAL` である**（Linux の実測）。
+        if fs
+            .directory_entries_from(inode.ext2(), from)
+            .map(|mut walk| walk.next().is_some())
+            .unwrap_or(false)
+        {
+            return (-EINVAL) as u64;
+        }
+        return 0;
+    }
+
+    // 次の呼び出しが続きから読めるように、位置を進める。
+    crate::vfs::with_current_files(|files| {
+        if let Ok(file) = files.get_mut(fd as usize) {
+            file.seek_to(next_from);
+        }
+    });
+    written
+}
+
+/// 1 レコードの作業領域。**名前は ext2 の上限（255）まで。**
+const DIRENT64_MAX_RECORD: usize = (DIRENT64_HEADER_LEN + 255 + 1).next_multiple_of(DIRENT64_ALIGN);
 
 /// `stat(path, statbuf)` の本体（S10-b）。
 ///

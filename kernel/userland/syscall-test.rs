@@ -55,6 +55,12 @@
 //! - `21` `st_blocks` が 8 でなかった（**512 バイト単位**）
 //! - `22` `/etc` の `st_mode` がディレクトリを表していなかった
 //! - `23` `stat("/nope")` が `-ENOENT` を返さなかった
+//! - `24` `getdents64` がバッファを埋めなかった
+//! - `25` ルートの一覧が 6 エントリでなかった
+//! - `26` `d_reclen` が 8 の倍数でなかった
+//! - `27` `d_type` が通常ファイルとディレクトリを分けなかった
+//! - `28` 末尾での `getdents64` が 0 を返さなかった
+//! - `29` 1 レコードも収まらないバッファで `-EINVAL` を返さなかった
 //!
 //! # 中身の突き合わせは `hello` の `write` と同じ形である
 //!
@@ -144,6 +150,22 @@ const MODE_REGULAR: u32 = 0x8000;
 const MODE_DIRECTORY: u32 = 0x4000;
 /// `/etc/motd` が占める 512 バイト単位のブロック数。**4096 の 1 ブロック分である。**
 const MOTD_BLOCKS: u32 = 8;
+/// `getdents64` の番号（Linux と同じ 217）。
+const SYS_GETDENTS64: u32 = 217;
+/// ルートディレクトリのエントリ数（`. .. lost+found bin data etc`）。
+const ROOT_ENTRIES: u32 = 6;
+/// `linux_dirent64` の `d_reclen` の位置。
+const DIRENT_RECLEN_OFFSET: u32 = 16;
+/// `linux_dirent64` の `d_type` の位置。
+const DIRENT_TYPE_OFFSET: u32 = 18;
+/// `d_type`: ディレクトリ。
+const DT_DIR: u32 = 4;
+/// `d_type`: 通常ファイル。
+const DT_REG: u32 = 8;
+/// **1 レコードも収まらない大きさ。** 固定部だけで 19 バイト要る。
+const TINY_BUFFER: u32 = 16;
+/// `-EINVAL`。
+const MINUS_EINVAL: i32 = -22;
 
 core::arch::global_asm!(
     // **entry の手前に詰め物を置く**（`hello.rs` と同じ理由）。
@@ -413,6 +435,124 @@ core::arch::global_asm!(
     "  jne 9f",
     "  add rsp, 192",
 
+    // --- 24..27. ルートを getdents64 で読み、レコードを歩く ---
+    // r12=fd、r13=バッファ先頭、r14=書かれたバイト数、r15=歩いた位置。
+    "  sub rsp, 1024",
+    "  mov eax, {sys_open}",
+    "  lea rdi, [rip + ROOT_PATH]",
+    "  mov esi, {o_rdonly}",
+    "  xor edx, edx",
+    "  int 0x80",
+    "  mov r12, rax",
+    "  mov eax, {sys_getdents}",
+    "  mov rdi, r12",
+    "  mov rsi, rsp",
+    "  mov edx, 1024",
+    "  int 0x80",
+    "  test rax, rax",
+    "  mov edi, 24",
+    "  jle 9f",
+    "  mov r14, rax",
+    "  mov r13, rsp",
+    "  xor r15, r15",          // 歩いた位置
+    "  xor ebx, ebx",          // 数えたエントリ
+    "  xor ebp, ebp",          // 見た d_type の論理和
+    "20:",
+    "  cmp r15, r14",
+    "  jae 21f",
+    // d_reclen が 8 の倍数か。
+    "  movzx eax, word ptr [r13 + r15 + {reclen_off}]",
+    "  test eax, 7",
+    "  mov edi, 26",
+    "  jne 9f",
+    // 進まないレコードは無いはず（**歩きが止まる**）。
+    "  test eax, eax",
+    "  mov edi, 26",
+    "  je 9f",
+    // d_type を集める。
+    "  movzx ecx, byte ptr [r13 + r15 + {type_off}]",
+    "  or ebp, ecx",
+    "  inc ebx",
+    "  add r15, rax",
+    "  jmp 20b",
+    "21:",
+    "  cmp ebx, {root_entries}",
+    "  mov edi, 25",
+    "  jne 9f",
+    // **ルートは全部ディレクトリである**（`. .. lost+found bin data etc`）。
+    "  cmp ebp, {dt_dir}",
+    "  mov edi, 27",
+    "  jne 9f",
+
+    // --- 27 の本命。**/data は `. ..` と通常ファイル 2 本なので、
+    // `d_type` が DT_DIR と DT_REG の両方になる。** ルートだけでは分かれない。
+    "  mov eax, {sys_close}",
+    "  mov rdi, r12",
+    "  int 0x80",
+    "  mov eax, {sys_open}",
+    "  lea rdi, [rip + DATA_PATH]",
+    "  mov esi, {o_rdonly}",
+    "  xor edx, edx",
+    "  int 0x80",
+    "  mov r12, rax",
+    "  mov eax, {sys_getdents}",
+    "  mov rdi, r12",
+    "  mov rsi, rsp",
+    "  mov edx, 1024",
+    "  int 0x80",
+    "  mov r14, rax",
+    "  mov r13, rsp",
+    "  xor r15, r15",
+    "  xor ebp, ebp",
+    "22:",
+    "  cmp r15, r14",
+    "  jae 23f",
+    "  movzx eax, word ptr [r13 + r15 + {reclen_off}]",
+    "  test eax, eax",
+    "  mov edi, 26",
+    "  je 9f",
+    "  movzx ecx, byte ptr [r13 + r15 + {type_off}]",
+    "  or ebp, ecx",
+    "  add r15, rax",
+    "  jmp 22b",
+    "23:",
+    "  cmp ebp, {dt_both}",
+    "  mov edi, 27",
+    "  jne 9f",
+
+    // --- 28. 末尾での getdents64。**0 が返るはず** ---
+    "  mov eax, {sys_getdents}",
+    "  mov rdi, r12",
+    "  mov rsi, rsp",
+    "  mov edx, 1024",
+    "  int 0x80",
+    "  test rax, rax",
+    "  mov edi, 28",
+    "  jne 9f",
+    "  mov eax, {sys_close}",
+    "  mov rdi, r12",
+    "  int 0x80",
+
+    // --- 29. 1 レコードも収まらないバッファ。**-EINVAL が返るはず** ---
+    "  mov eax, {sys_open}",
+    "  lea rdi, [rip + ROOT_PATH]",
+    "  mov esi, {o_rdonly}",
+    "  xor edx, edx",
+    "  int 0x80",
+    "  mov r12, rax",
+    "  mov eax, {sys_getdents}",
+    "  mov rdi, r12",
+    "  mov rsi, rsp",
+    "  mov edx, {tiny}",
+    "  int 0x80",
+    "  cmp rax, {minus_einval}",
+    "  mov edi, 29",
+    "  jne 9f",
+    "  mov eax, {sys_close}",
+    "  mov rdi, r12",
+    "  int 0x80",
+    "  add rsp, 1024",
+
     // すべて通った。
     "  xor edi, edi",
 
@@ -422,7 +562,7 @@ core::arch::global_asm!(
     "  int 0x80",
     // **`exit` が戻ってきたときの受け皿**（`hello.rs` と同じ規律）。位置を
     // `.org` で固定してあるので、ここへ落ちたことが RIP で分かる。
-    ".org 0x400, 0x90",
+    ".org 0x800, 0x90",
     "  ud2",
 
     ".section .rodata",
@@ -434,6 +574,10 @@ core::arch::global_asm!(
     "  .asciz \"/nope\"",
     "ETC_PATH:",
     "  .asciz \"/etc\"",
+    "ROOT_PATH:",
+    "  .asciz \"/\"",
+    "DATA_PATH:",
+    "  .asciz \"/data\"",
     // **`/etc/motd` の中身の写し。** 種のファイルと食い違えば 12 番が落ちる。
     "MOTD_BYTES:",
     "  .ascii \"welco\"",
@@ -476,6 +620,14 @@ core::arch::global_asm!(
     mode_regular = const MODE_REGULAR,
     mode_directory = const MODE_DIRECTORY,
     motd_blocks = const MOTD_BLOCKS,
+    sys_getdents = const SYS_GETDENTS64,
+    root_entries = const ROOT_ENTRIES,
+    reclen_off = const DIRENT_RECLEN_OFFSET,
+    type_off = const DIRENT_TYPE_OFFSET,
+    dt_dir = const DT_DIR,
+    dt_both = const DT_DIR | DT_REG,
+    tiny = const TINY_BUFFER,
+    minus_einval = const MINUS_EINVAL,
 );
 
 #[panic_handler]
