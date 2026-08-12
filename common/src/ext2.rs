@@ -34,6 +34,17 @@
 //! （`e2fsck` の仕事である）、チェックサム（ext2 に無い。ext4 の機能）、
 //! バックアップ superblock との突き合わせ、`s_state` が clean でないこと
 //! （**読み取りは拒まない。Linux も読み取り専用マウントは許す**）。
+//!
+//! **穴（sparse file）も扱わない。** ここは「読み取りに要らない」からではなく、
+//! **借りて返す形の帰結である**（[`Ext2::block_bytes`]）。穴に対して返すべき
+//! ゼロのバイト列が像の中に無いので、借りようがない。[`Ext2Error::SparseBlock`]
+//! で拒む。`mke2fs -d` は穴を作らないので、この段の像には現れない。
+//!
+//! **扱う条件は「穴を持つ像を読む必要が生じたとき」である。** 書き込みを実装すると
+//! **自分で穴を作れるようになる**ので、そこで発火しうる。**両立させる案は 2 つあり、
+//! どちらも今は要らない**——`common` に 1 ブロックぶんのゼロを静的に置いて借りる形と、
+//! 戻り値を「借りたバイト列」か「長さだけの穴」かの列挙にする形である。
+//! **要らないものを先回りで置かない**（`docs/vision.md`）。
 
 /// ext2 の magic（`s_magic`）。
 const EXT2_MAGIC: u16 = 0xEF53;
@@ -63,6 +74,28 @@ pub const INCOMPAT_FILETYPE: u32 = 0x0002;
 /// 理解している INCOMPAT ビットの全体。**ここに無いビットが立っていたら拒む。**
 const INCOMPAT_SUPPORTED: u32 = INCOMPAT_FILETYPE;
 
+/// inode の標準部のバイト数。**`s_inode_size` が 256 でも、こちらが読むのは
+/// 先頭の 128 バイトだけである**（追加領域は `i_crtime` などで、読み取りに要らない）。
+const INODE_CORE_LEN: usize = 128;
+
+/// `i_block` の要素数（直接 12 + 単一間接 + 二重間接 + 三重間接）。
+pub const INODE_BLOCK_COUNT: usize = 15;
+
+/// `i_block` のうち直接ブロックの数。
+pub const DIRECT_BLOCK_COUNT: usize = 12;
+
+/// ルートディレクトリの inode 番号。**ext2 では 2 で固定である。**
+pub const ROOT_INODE: u32 = 2;
+
+/// `i_mode` のうちファイル種別を表すビット。
+const MODE_FORMAT_MASK: u16 = 0xF000;
+
+/// `i_mode` のファイル種別: 通常ファイル。
+const MODE_REGULAR: u16 = 0x8000;
+
+/// `i_mode` のファイル種別: ディレクトリ。
+const MODE_DIRECTORY: u16 = 0x4000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ext2Error {
     /// superblock を読むにはデータが短すぎる（線1）。
@@ -89,6 +122,24 @@ pub enum Ext2Error {
     BlockOutOfRange(u32),
     /// group descriptor テーブルが像の外へ出る（線3）。
     GroupDescriptorsOutOfRange,
+    /// inode 番号が 0、または `s_inodes_count` を超えている（線3）。
+    ///
+    /// **ext2 の inode 番号は 1 始まりである。** 0 は「無い」を意味する値で、
+    /// **`(ino - 1)` を先に計算すると桁借りする**（線2）。
+    InodeOutOfRange(u32),
+    /// inode の在るはずのバイト位置が像の外へ出る（線2・線3）。
+    ///
+    /// **group descriptor の `inode_table` が像の中を指していても、そこから
+    /// `index * s_inode_size` だけ進んだ先が中とは限らない。**
+    InodeTableOutOfRange { inode: u32, needed: u64 },
+    /// ファイル内のブロック番号が `i_size` の外を指している。
+    FileBlockOutOfRange(u32),
+    /// 単一間接より先が要る（この段では直接ブロックだけを読む）。
+    IndirectBlockUnsupported(u32),
+    /// `i_block` の項が 0 なのに `i_size` の内側である（穴）。
+    ///
+    /// **借りて返す形なので、穴に対して返すゼロのバイト列が像の中に無い。**
+    SparseBlock(u32),
 }
 
 /// 受理した ext2 の像。**元のバイトスライスを借用するのみで、コピーしない。**
@@ -137,6 +188,41 @@ pub struct BlockGroupDescriptor {
     pub block_bitmap: u32,
     pub inode_bitmap: u32,
     pub inode_table: u32,
+}
+
+/// inode 1 つ分（読み取りに要る欄だけ）。
+///
+/// # 構築後に成り立っている不変条件
+///
+/// **`blocks` の 0 でない項は、すべて `s_blocks_count` の内側を指している**
+/// （線3。[`Ext2::inode`] が全項を見てから返す）。**ここを構築時に確かめて
+/// おくと、`i_block` を辿る側が番号の妥当性を持ち回らずに済む。**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Inode {
+    /// 番号（1 始まり）。**診断で「どの inode か」が要るので持つ。**
+    pub number: u32,
+    /// `i_mode`。上位 4 ビットが種別、下位 12 ビットが許可である。
+    pub mode: u16,
+    /// バイト長。**通常ファイルでは `i_size_high` を上位 32 ビットとして足す**
+    /// （RO_COMPAT の `large_file`）。**ディレクトリでは足さない**——あの欄は
+    /// `i_dir_acl` で、意味が違う。**この分岐は Linux と同じである。**
+    pub size: u64,
+    /// `i_links_count`。
+    pub links_count: u16,
+    /// `i_block`。0..12 が直接、12 が単一間接、13 が二重、14 が三重である。
+    pub blocks: [u32; INODE_BLOCK_COUNT],
+}
+
+impl Inode {
+    /// ディレクトリか。
+    pub fn is_directory(&self) -> bool {
+        self.mode & MODE_FORMAT_MASK == MODE_DIRECTORY
+    }
+
+    /// 通常ファイルか。
+    pub fn is_regular_file(&self) -> bool {
+        self.mode & MODE_FORMAT_MASK == MODE_REGULAR
+    }
 }
 
 impl<'a> Ext2<'a> {
@@ -328,6 +414,108 @@ impl<'a> Ext2<'a> {
         }
         Ok(descriptor)
     }
+
+    /// inode を 1 つ読む（S10-a）。
+    ///
+    /// # 線がどう当たるか
+    ///
+    /// - **線3: 番号の範囲。** `ino` は 1 始まりで、`s_inodes_count` 以下でなければ
+    ///   ならない。**0 を弾くのは範囲の話だけではない**——`ino - 1` が桁借りする
+    /// - **線2: テーブル内の位置の算術。** `inode_table * block_size` も
+    ///   `index * inode_size` も u32 では溢れうるので、**u64 で組み立てる**
+    /// - **線3: `i_block` の 15 項。** 0 でない項が像の外を指していないことを、
+    ///   **返す前に全部見る**。**辿る側に番号の妥当性を持ち回らせない**
+    pub fn inode(&self, ino: u32) -> Result<Inode, Ext2Error> {
+        if ino == 0 || ino > self.inodes_count {
+            return Err(Ext2Error::InodeOutOfRange(ino));
+        }
+        // **ここから下は `ino >= 1` が保証されている。**
+        let zero_based = ino - 1;
+        let group = zero_based / self.inodes_per_group;
+        let index = zero_based % self.inodes_per_group;
+        let table = self.group_descriptor(group)?.inode_table;
+
+        // 線2: u64 で組み立てる。**3 つとも u32 では溢れうる。**
+        let start = u64::from(table) * u64::from(self.block_size)
+            + u64::from(index) * u64::from(self.inode_size);
+        // **飽和させる。** 桁あふれは u32 由来の項の積では起きないが、起きた場合も
+        // 「像より大きい」へ倒れるので、静かに巻き戻らない。
+        let end = start.saturating_add(INODE_CORE_LEN as u64);
+        if end > self.image.len() as u64 {
+            return Err(Ext2Error::InodeTableOutOfRange {
+                inode: ino,
+                needed: end,
+            });
+        }
+        let raw = &self.image[start as usize..end as usize];
+
+        let mode = read_u16(raw, 0);
+        let mut blocks = [0u32; INODE_BLOCK_COUNT];
+        for (slot, block) in blocks.iter_mut().enumerate() {
+            *block = read_u32(raw, 40 + slot * 4);
+            // 線3: 0 は「無い」を表す値なので範囲の外にあってよい。
+            if *block != 0 && *block >= self.blocks_count {
+                return Err(Ext2Error::BlockOutOfRange(*block));
+            }
+        }
+
+        // `i_size_high` は通常ファイルでのみ上位 32 ビットである。ディレクトリでは
+        // 同じ位置が `i_dir_acl` なので足さない（**Linux と同じ分岐**）。
+        let size_low = u64::from(read_u32(raw, 4));
+        let size = if mode & MODE_FORMAT_MASK == MODE_REGULAR {
+            size_low | (u64::from(read_u32(raw, 108)) << 32)
+        } else {
+            size_low
+        };
+
+        Ok(Inode {
+            number: ino,
+            mode,
+            size,
+            links_count: read_u16(raw, 26),
+            blocks,
+        })
+    }
+
+    /// ファイル内の `index` 番目のブロックを**借りて返す**（S10-a）。
+    ///
+    /// **返るのは有効なバイトだけである。** 最後のブロックは `i_size` で切る
+    /// ので、呼び出し側が長さを計算し直さなくてよい（**線2 の「呼び出し側に
+    /// 強いる算術」を、こちら側で閉じている**）。
+    ///
+    /// **この段では直接ブロックだけを読む。** 12 番目から先は
+    /// [`Ext2Error::IndirectBlockUnsupported`] で返る（単一間接は次の刻み）。
+    pub fn file_block(&self, inode: &Inode, index: u32) -> Result<&'a [u8], Ext2Error> {
+        // 線2: `index * block_size` は u32 では溢れる。**u64 で出す。**
+        let offset = u64::from(index) * u64::from(self.block_size);
+        if offset >= inode.size {
+            return Err(Ext2Error::FileBlockOutOfRange(index));
+        }
+        if index as usize >= DIRECT_BLOCK_COUNT {
+            return Err(Ext2Error::IndirectBlockUnsupported(index));
+        }
+
+        let block = inode.blocks[index as usize];
+        if block == 0 {
+            return Err(Ext2Error::SparseBlock(index));
+        }
+        let bytes = self.block_bytes(block)?;
+
+        // 最後のブロックは `i_size` で切る。**残りはブロックサイズ以下なので
+        // `usize` へ落として安全である。**
+        let remaining = inode.size - offset;
+        let len = remaining.min(u64::from(self.block_size)) as usize;
+        Ok(&bytes[..len])
+    }
+
+    /// `i_size` を覆うのに要る直接ブロックの数。
+    ///
+    /// **`i_size` が 0 なら 0 である。** 間接が要る大きさでも、ここは 12 で頭打ち
+    /// になる（**足りているかは呼び出し側が [`Self::file_block`] の結果で知る**）。
+    pub fn direct_block_span(&self, inode: &Inode) -> u32 {
+        let blocks = inode.size.div_ceil(u64::from(self.block_size));
+        blocks.min(DIRECT_BLOCK_COUNT as u64) as u32
+    }
 }
 
 // 添字で切り出して `unwrap` する。範囲内であることは呼び出し側が保証している
@@ -360,7 +548,74 @@ mod tests {
         image[table..table + 4].copy_from_slice(&2u32.to_le_bytes());
         image[table + 4..table + 8].copy_from_slice(&3u32.to_le_bytes());
         image[table + 8..table + 12].copy_from_slice(&4u32.to_le_bytes());
+
+        // ルート inode（2 番）。**実測した像と同じ形にする**（`debugfs -R "stat <2>"`。
+        // mode 040755・size 4096・`i_block[0]` = 20）。
+        write_inode(
+            &mut image,
+            ROOT_INODE,
+            0o040_755,
+            4096,
+            6,
+            &[ROOT_DATA_BLOCK],
+        );
+        // ルートディレクトリの中身。**先頭 4 バイトは `.` の inode 番号である。**
+        let data = ROOT_DATA_BLOCK as usize * 4096;
+        image[data..data + 4].copy_from_slice(&ROOT_INODE.to_le_bytes());
+
+        // 直接ブロックをちょうど使い切る通常ファイル（12 ブロック）。**最後の
+        // ブロックが `i_size` で切られないことを見る側である。**
+        let direct: std::vec::Vec<u32> = (0..DIRECT_BLOCK_COUNT as u32)
+            .map(|i| DIRECT_FILE_FIRST_BLOCK + i)
+            .collect();
+        write_inode(
+            &mut image,
+            DIRECT_FILE_INODE,
+            0o100_644,
+            (DIRECT_BLOCK_COUNT * 4096) as u32,
+            1,
+            &direct,
+        );
+        for (index, block) in direct.iter().enumerate() {
+            let at = *block as usize * 4096;
+            image[at] = index as u8;
+        }
+
+        // 1 ブロックに満たない通常ファイル。**最後のブロックが切られる側である。**
+        write_inode(
+            &mut image,
+            SHORT_FILE_INODE,
+            0o100_644,
+            18,
+            1,
+            &[SHORT_FILE_BLOCK],
+        );
+        let at = SHORT_FILE_BLOCK as usize * 4096;
+        image[at..at + 18].copy_from_slice(b"ZaytOS ext2 short.");
         image
+    }
+
+    /// ルートディレクトリの中身が在るブロック（実測した像と同じ番号）。
+    const ROOT_DATA_BLOCK: u32 = 20;
+    /// 直接ブロックを使い切る通常ファイルの inode 番号と先頭ブロック。
+    const DIRECT_FILE_INODE: u32 = 15;
+    const DIRECT_FILE_FIRST_BLOCK: u32 = 31;
+    /// 1 ブロックに満たない通常ファイルの inode 番号とブロック。
+    const SHORT_FILE_INODE: u32 = 18;
+    const SHORT_FILE_BLOCK: u32 = 58;
+
+    /// inode テーブルへ 1 つ書く。**テストの像は group 0 だけである。**
+    fn write_inode(image: &mut [u8], ino: u32, mode: u16, size: u32, links: u16, blocks: &[u32]) {
+        const INODE_TABLE_BLOCK: usize = 4;
+        const INODE_SIZE: usize = 256;
+        let at = INODE_TABLE_BLOCK * 4096 + (ino as usize - 1) * INODE_SIZE;
+        image[at..at + 2].copy_from_slice(&mode.to_le_bytes());
+        image[at + 4..at + 8].copy_from_slice(&size.to_le_bytes());
+        image[at + 26..at + 28].copy_from_slice(&links.to_le_bytes());
+        for (slot, block) in blocks.iter().enumerate() {
+            let field = at + 40 + slot * 4;
+            image[field..field + 4].copy_from_slice(&block.to_le_bytes());
+        }
     }
 
     fn write_superblock(image: &mut [u8]) {
@@ -513,6 +768,208 @@ mod tests {
             fs.group_descriptor(0),
             Err(Ext2Error::BlockOutOfRange(9999))
         );
+    }
+
+    /// ルート inode が、実測した像と同じ値で読めること。
+    #[test]
+    fn reads_the_root_inode() {
+        let image = build_test_image();
+        let fs = Ext2::parse(&image).unwrap();
+        let root = fs.inode(ROOT_INODE).expect("the root inode is readable");
+        assert_eq!(root.number, ROOT_INODE);
+        assert_eq!(root.mode, 0o040_755);
+        assert_eq!(root.size, 4096);
+        assert_eq!(root.links_count, 6);
+        assert_eq!(root.blocks[0], ROOT_DATA_BLOCK);
+        assert!(root.is_directory());
+        assert!(!root.is_regular_file());
+    }
+
+    /// 線3: inode 番号の範囲。**0 と `s_inodes_count` 超えの両方を弾く。**
+    ///
+    /// **0 は範囲の話だけではない。** `ino - 1` を先に計算する形だと桁借りする。
+    #[test]
+    fn rejects_inode_numbers_outside_the_table() {
+        let image = build_test_image();
+        let fs = Ext2::parse(&image).unwrap();
+        assert_eq!(fs.inode(0), Err(Ext2Error::InodeOutOfRange(0)));
+        assert_eq!(fs.inode(257), Err(Ext2Error::InodeOutOfRange(257)));
+        assert_eq!(
+            fs.inode(u32::MAX),
+            Err(Ext2Error::InodeOutOfRange(u32::MAX))
+        );
+        // **境界の内側は通る。**弾きすぎていないことまで見る。
+        assert!(fs.inode(256).is_ok());
+    }
+
+    /// 線2: inode テーブルの位置の算術が像の外へ出る。
+    ///
+    /// `s_inodes_count` を上げると、末尾の inode が像の外に落ちる。**番号の検査
+    /// （線3）を通ってから位置の検査（線2）で止まることを見る。**
+    #[test]
+    fn rejects_an_inode_whose_position_falls_outside_the_image() {
+        let mut image = build_test_image();
+        // inode を 1 グループぶん増やし、テーブルが像に収まらない状態にする。
+        image[SUPERBLOCK_OFFSET..SUPERBLOCK_OFFSET + 4].copy_from_slice(&600_000u32.to_le_bytes());
+        image[SUPERBLOCK_OFFSET + 40..SUPERBLOCK_OFFSET + 44]
+            .copy_from_slice(&600_000u32.to_le_bytes());
+        let fs = Ext2::parse(&image).unwrap();
+        assert!(matches!(
+            fs.inode(600_000).unwrap_err(),
+            Ext2Error::InodeTableOutOfRange { inode: 600_000, .. }
+        ));
+    }
+
+    /// 線3: `i_block` のブロック番号が `s_blocks_count` の外を指している。
+    ///
+    /// **返す前に 15 項すべてを見る。** 直接ブロックだけでなく、この段では
+    /// まだ辿らない間接の 3 項も見る。**辿る側に妥当性を持ち回らせないためである。**
+    #[test]
+    fn rejects_an_inode_whose_block_pointer_leaves_the_filesystem() {
+        for slot in 0..INODE_BLOCK_COUNT {
+            let mut image = build_test_image();
+            let at = 4 * 4096 + (ROOT_INODE as usize - 1) * 256 + 40 + slot * 4;
+            image[at..at + 4].copy_from_slice(&512u32.to_le_bytes());
+            let fs = Ext2::parse(&image).unwrap();
+            assert_eq!(
+                fs.inode(ROOT_INODE),
+                Err(Ext2Error::BlockOutOfRange(512)),
+                "i_block[{slot}] pointing at block 512 must be refused"
+            );
+        }
+    }
+
+    /// **0 は「無い」を表す値なので、範囲の外にあってよい。**
+    #[test]
+    fn accepts_zero_block_pointers_in_the_unused_slots() {
+        let image = build_test_image();
+        let fs = Ext2::parse(&image).unwrap();
+        let root = fs.inode(ROOT_INODE).unwrap();
+        assert_eq!(root.blocks[1..], [0u32; INODE_BLOCK_COUNT - 1]);
+    }
+
+    /// 直接ブロックを辿り、最後のブロックが `i_size` で切られること。
+    #[test]
+    fn reads_a_file_through_its_direct_blocks() {
+        let image = build_test_image();
+        let fs = Ext2::parse(&image).unwrap();
+
+        let full = fs.inode(DIRECT_FILE_INODE).unwrap();
+        assert!(full.is_regular_file());
+        assert_eq!(fs.direct_block_span(&full), DIRECT_BLOCK_COUNT as u32);
+        for index in 0..DIRECT_BLOCK_COUNT as u32 {
+            let bytes = fs.file_block(&full, index).unwrap();
+            assert_eq!(bytes.len(), 4096, "block {index} is whole");
+            assert_eq!(bytes[0], index as u8);
+        }
+
+        // 端: `i_size` を覆い切ったので、次の番号は範囲外である。
+        assert_eq!(
+            fs.file_block(&full, DIRECT_BLOCK_COUNT as u32),
+            Err(Ext2Error::FileBlockOutOfRange(DIRECT_BLOCK_COUNT as u32))
+        );
+
+        let short = fs.inode(SHORT_FILE_INODE).unwrap();
+        assert_eq!(fs.direct_block_span(&short), 1);
+        assert_eq!(
+            fs.file_block(&short, 0).unwrap(),
+            b"ZaytOS ext2 short.",
+            "the last block is cut at i_size, not at the block size"
+        );
+        assert_eq!(
+            fs.file_block(&short, 1),
+            Err(Ext2Error::FileBlockOutOfRange(1))
+        );
+    }
+
+    /// 線2: ファイル内のブロック番号の算術が u32 で溢れる値。
+    ///
+    /// `index * block_size` を u32 で計算すると `0x40_0000` で 0 に巻き戻り、
+    /// **「`i_size` の内側」と誤って判定する。** u64 で出していれば範囲外になる。
+    #[test]
+    fn a_file_block_index_that_would_overflow_in_u32_is_out_of_range() {
+        let image = build_test_image();
+        let fs = Ext2::parse(&image).unwrap();
+        let short = fs.inode(SHORT_FILE_INODE).unwrap();
+        assert_eq!(
+            fs.file_block(&short, 0x40_0000),
+            Err(Ext2Error::FileBlockOutOfRange(0x40_0000))
+        );
+        assert_eq!(
+            fs.file_block(&short, u32::MAX),
+            Err(Ext2Error::FileBlockOutOfRange(u32::MAX))
+        );
+    }
+
+    /// この段では単一間接より先を読まない。**`i_size` の内側でも拒む。**
+    #[test]
+    fn refuses_to_follow_the_indirect_blocks_in_this_step() {
+        let mut image = build_test_image();
+        // 直接 12 ブロックぶんより 1 バイト大きくする（単一間接が要る形）。
+        let size_at = 4 * 4096 + (DIRECT_FILE_INODE as usize - 1) * 256 + 4;
+        image[size_at..size_at + 4]
+            .copy_from_slice(&((DIRECT_BLOCK_COUNT * 4096) as u32 + 1).to_le_bytes());
+        let fs = Ext2::parse(&image).unwrap();
+        let inode = fs.inode(DIRECT_FILE_INODE).unwrap();
+        assert_eq!(
+            fs.file_block(&inode, DIRECT_BLOCK_COUNT as u32),
+            Err(Ext2Error::IndirectBlockUnsupported(
+                DIRECT_BLOCK_COUNT as u32
+            ))
+        );
+    }
+
+    /// 穴は拒む。**借りて返す形なので、返すゼロのバイト列が像の中に無い。**
+    #[test]
+    fn refuses_a_hole_because_there_is_nothing_to_borrow() {
+        let mut image = build_test_image();
+        let at = 4 * 4096 + (DIRECT_FILE_INODE as usize - 1) * 256 + 40 + 4 * 4;
+        image[at..at + 4].copy_from_slice(&0u32.to_le_bytes());
+        let fs = Ext2::parse(&image).unwrap();
+        let inode = fs.inode(DIRECT_FILE_INODE).unwrap();
+        assert_eq!(fs.file_block(&inode, 4), Err(Ext2Error::SparseBlock(4)));
+    }
+
+    /// `i_size_high` は通常ファイルでだけ上位 32 ビットである。
+    ///
+    /// **ディレクトリでは同じ位置が `i_dir_acl` なので足さない。**
+    #[test]
+    fn the_high_size_field_counts_only_for_regular_files() {
+        let mut image = build_test_image();
+        let put_high = |image: &mut [u8], ino: u32| {
+            let at = 4 * 4096 + (ino as usize - 1) * 256 + 108;
+            image[at..at + 4].copy_from_slice(&1u32.to_le_bytes());
+        };
+        put_high(&mut image, ROOT_INODE);
+        put_high(&mut image, SHORT_FILE_INODE);
+        let fs = Ext2::parse(&image).unwrap();
+        assert_eq!(fs.inode(ROOT_INODE).unwrap().size, 4096);
+        assert_eq!(
+            fs.inode(SHORT_FILE_INODE).unwrap().size,
+            (1u64 << 32) | 18,
+            "a regular file takes i_size_high as the upper 32 bits"
+        );
+    }
+
+    /// 線1: どんな短さでも `inode` がパニックしない。
+    ///
+    /// **`parse` を通った像だけが `inode` に届く**ので、切り詰めた像は
+    /// `parse` で落ちる。**そこを抜けた形でも落ちないことを見るため、
+    /// `s_blocks_count` を下げて像だけを短くする。**
+    #[test]
+    fn reading_an_inode_from_a_truncated_image_does_not_panic() {
+        for blocks in 1u32..64 {
+            let mut image = build_test_image();
+            image[SUPERBLOCK_OFFSET + 4..SUPERBLOCK_OFFSET + 8]
+                .copy_from_slice(&blocks.to_le_bytes());
+            let truncated = &image[..blocks as usize * 4096];
+            let Ok(fs) = Ext2::parse(truncated) else {
+                continue;
+            };
+            for ino in [1u32, ROOT_INODE, DIRECT_FILE_INODE, SHORT_FILE_INODE, 256] {
+                let _ = fs.inode(ino);
+            }
+        }
     }
 
     #[test]

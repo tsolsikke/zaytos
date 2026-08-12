@@ -3843,6 +3843,87 @@ fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
             }
         }
     }
+
+    verify_root_inode(logger, &fs);
+}
+
+/// ルート inode を読み、直接ブロックで中身へ届くことを主張する（S10-a）。
+///
+/// # なぜルートだけか
+///
+/// **番号で辿れるのがルートだけだからである。** ext2 のルートは 2 番で固定
+/// （`common::ext2::ROOT_INODE`）で、**それ以外の inode へは名前からしか届かない。**
+/// ディレクトリの走査とパス解決は次の 2 刻みなので、ここではまだ名前を引けない。
+///
+/// # `.` の inode 番号まで見る理由
+///
+/// **「4096 バイト読めた」だけでは、読めたブロックがルートの中身だとは言えない。**
+/// ディレクトリの先頭のエントリは必ず `.` で、その inode 番号は自分自身である。
+/// **ここが 2 なら、`i_block[0]` が指していたのは確かにルートの中身である。**
+/// エントリの走査そのものは次の刻みで、ここでは先頭の 4 バイトしか見ない。
+fn verify_root_inode(logger: &mut Logger<SerialPort>, fs: &common::ext2::Ext2<'_>) {
+    use common::ext2::ROOT_INODE;
+
+    let root = match fs.inode(ROOT_INODE) {
+        Ok(inode) => inode,
+        Err(e) => {
+            logger.error(format_args!(
+                "ext2: the root inode ({ROOT_INODE}) is not readable: {e:?}; halting"
+            ));
+            cpu::halt_forever();
+        }
+    };
+    logger.info(format_args!(
+        "ext2: root inode {}: mode={:06o} size={} links={} i_block[0]={} directory={}",
+        root.number,
+        root.mode,
+        root.size,
+        root.links_count,
+        root.blocks[0],
+        root.is_directory()
+    ));
+
+    if !root.is_directory() {
+        logger.error(format_args!(
+            "ext2: the root inode is not a directory (mode={:06o}); halting",
+            root.mode
+        ));
+        cpu::halt_forever();
+    }
+
+    let first = match fs.file_block(&root, 0) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            logger.error(format_args!(
+                "ext2: the root directory's first block is not readable: {e:?}; halting"
+            ));
+            cpu::halt_forever();
+        }
+    };
+    // 先頭のエントリは `.` である。**その inode 番号は自分自身でなければならない。**
+    let dot_inode = match first.get(..4) {
+        Some(bytes) => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        None => {
+            logger.error(format_args!(
+                "ext2: the root directory's first block is only {} byte(s); halting",
+                first.len()
+            ));
+            cpu::halt_forever();
+        }
+    };
+    logger.info(format_args!(
+        "ext2: root directory block 0 of {}: {} byte(s) via the direct blocks, \
+         first entry inode={dot_inode} (the \".\" entry; walking the entries comes next)",
+        fs.direct_block_span(&root),
+        first.len()
+    ));
+    if dot_inode != ROOT_INODE {
+        logger.error(format_args!(
+            "ext2: the root directory's first entry points at inode {dot_inode}, not \
+             {ROOT_INODE}; i_block[0] does not hold the root directory. halting"
+        ));
+        cpu::halt_forever();
+    }
 }
 
 /// 壊した像を組み立てる作業領域（S9-b-2）。
