@@ -38,6 +38,16 @@ WSL2（Ubuntu系）+ WSLgで開発している。
 
 - Rust（rustup経由。ツールチェインの版と`x86_64-unknown-uefi` / `x86_64-unknown-none`ターゲットは`rust-toolchain.toml`により初回ビルド時に自動導入される）
 - QEMUとOVMF: `sudo apt install qemu-system-x86 ovmf`
+- e2fsprogs: `sudo apt install e2fsprogs`（`mke2fs`と`e2fsck`）
+
+`mke2fs`はビルド時に使う。カーネルが読むext2の像を`build.rs`が建てるためで、
+外の道具が作った像を読めることが目的である（自作の書き手が作った像を読めても、
+自分の理解どうしの一致しか言えない）。書き込みを実装する段では、書いた像を
+`e2fsck`で独立に検証する。どちらも同じパッケージに入っている。
+
+`rustup`と違い、この要求は`rust-toolchain.toml`では固定できない。版が変わると
+`mke2fs`の既定値（ブロックサイズ、inodeサイズ）が動きうるので、実際に使った版は
+起動ログの判定行に出る。
 
 ## ビルド・実行
 
