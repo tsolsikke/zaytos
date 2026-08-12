@@ -254,12 +254,23 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
 
     // **版を判定行へ載せる**（S10-a）。**別の版で既定値が変われば、決めた
     // パラメータ（block 4096・inode size 256・rev 1）が動く。**
+    //
+    // **2 本の大きさと最後の 1 バイトも一緒に出す**（S10-a の単一間接の刻み）。
+    // **模様を決めているのはここなので、期待値をここから出す。** カーネル側へ
+    // 書き写すと、模様を変えたときに片方だけが古くなる。
+    let direct_max_last = pattern[DIRECT_MAX_BYTES - 1];
+    let indirect_first_last = pattern[DIRECT_MAX_BYTES];
     std::fs::write(
         format!("{out_dir}/fsimage_info.rs"),
         format!(
             "// build.rs が生成した。手で編集しないこと。\n\
              pub const MKE2FS_VERSION: &str = {version:?};\n\
-             pub const IMAGE_BYTES: u64 = {IMAGE_BYTES};\n"
+             pub const IMAGE_BYTES: u64 = {IMAGE_BYTES};\n\
+             pub const DIRECT_MAX_BYTES: u64 = {DIRECT_MAX_BYTES};\n\
+             pub const DIRECT_MAX_LAST_BYTE: u8 = {direct_max_last};\n\
+             pub const INDIRECT_FIRST_BYTES: u64 = {};\n\
+             pub const INDIRECT_FIRST_LAST_BYTE: u8 = {indirect_first_last};\n",
+            DIRECT_MAX_BYTES + 1
         ),
     )
     .expect("failed to write fsimage_info.rs");

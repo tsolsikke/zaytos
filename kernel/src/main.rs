@@ -3845,6 +3845,7 @@ fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
     }
 
     verify_root_inode(logger, &fs);
+    verify_single_indirect_boundary(logger, &fs);
 }
 
 /// ルート inode を読み、直接ブロックで中身へ届くことを主張する（S10-a）。
@@ -3914,7 +3915,7 @@ fn verify_root_inode(logger: &mut Logger<SerialPort>, fs: &common::ext2::Ext2<'_
     logger.info(format_args!(
         "ext2: root directory block 0 of {}: {} byte(s) via the direct blocks, \
          first entry inode={dot_inode} (the \".\" entry; walking the entries comes next)",
-        fs.direct_block_span(&root),
+        fs.block_span(&root),
         first.len()
     ));
     if dot_inode != ROOT_INODE {
@@ -3923,6 +3924,120 @@ fn verify_root_inode(logger: &mut Logger<SerialPort>, fs: &common::ext2::Ext2<'_
              {ROOT_INODE}; i_block[0] does not hold the root directory. halting"
         ));
         cpu::halt_forever();
+    }
+}
+
+/// 単一間接の境界を挟む 2 本を読み、**両側**を主張する（S10-a）。
+///
+/// # なぜ対で見るのか
+///
+/// `/data/direct-max` は 12 ブロックちょうど（49152 バイト）で、**単一間接を
+/// 使わない。** `/data/indirect-first` はそれより 1 バイト大きく、**13 ブロック目が
+/// 単一間接の先にある。** 片側だけでは「間接を踏んだ」ことも「踏まずに済んだ」ことも
+/// 言えない。**境界の両側を並べて初めて、越えたことが主張になる。**
+///
+/// # 最後の 1 バイトを見る理由
+///
+/// **「読めた」と「正しいものが読めた」は違う**（ルート inode の `.` と同じ形）。
+/// 最後の 1 バイトは**間接の表を経由しないと届かない位置**にあり、期待値は
+/// `kernel/build.rs` が模様を決めている側から出している。**カーネルへ書き写すと、
+/// 模様を変えたときに片方だけが古くなる。**
+///
+/// # inode 番号を直に書いている
+///
+/// **名前で引けるのはパス解決を書いた後である**（S10-a の 6 本目）。それまでは
+/// `mke2fs -d` が割り当てた番号を直に使うほかない。**番号が動いたことは大きさの
+/// 食い違いで分かる**ので、期待した大きさと突き合わせてから中身を読む。
+fn verify_single_indirect_boundary(logger: &mut Logger<SerialPort>, fs: &common::ext2::Ext2<'_>) {
+    use common::ext2::SINGLE_INDIRECT_SLOT;
+
+    /// `/data/direct-max` の inode 番号（`mke2fs -d` の割り当て。`debugfs` で実測）。
+    const DIRECT_MAX_INODE: u32 = 15;
+    /// `/data/indirect-first` の inode 番号（同上）。
+    const INDIRECT_FIRST_INODE: u32 = 16;
+
+    let cases = [
+        (
+            "/data/direct-max",
+            DIRECT_MAX_INODE,
+            fsimage_info::DIRECT_MAX_BYTES,
+            fsimage_info::DIRECT_MAX_LAST_BYTE,
+            false,
+        ),
+        (
+            "/data/indirect-first",
+            INDIRECT_FIRST_INODE,
+            fsimage_info::INDIRECT_FIRST_BYTES,
+            fsimage_info::INDIRECT_FIRST_LAST_BYTE,
+            true,
+        ),
+    ];
+
+    for (path, ino, expected_size, expected_last, expects_indirect) in cases {
+        let inode = match fs.inode(ino) {
+            Ok(inode) => inode,
+            Err(e) => {
+                logger.error(format_args!(
+                    "ext2: inode {ino} ({path}) is not readable: {e:?}; halting"
+                ));
+                cpu::halt_forever();
+            }
+        };
+        // **番号が動いていないことを、大きさで確かめてから中身を読む。**
+        if inode.size != expected_size || !inode.is_regular_file() {
+            logger.error(format_args!(
+                "ext2: inode {ino} should be {path} ({expected_size} byte(s), regular) but is \
+                 {} byte(s) mode={:06o}; mke2fs may have allocated inode numbers differently. \
+                 halting",
+                inode.size, inode.mode
+            ));
+            cpu::halt_forever();
+        }
+
+        let uses_indirect = inode.blocks[SINGLE_INDIRECT_SLOT] != 0;
+        if uses_indirect != expects_indirect {
+            logger.error(format_args!(
+                "ext2: {path} has i_block[12]={} but the single indirect block is expected to be \
+                 {}; halting",
+                inode.blocks[SINGLE_INDIRECT_SLOT],
+                if expects_indirect { "in use" } else { "unused" }
+            ));
+            cpu::halt_forever();
+        }
+
+        // 最後の 1 バイトは最後のブロックの末尾にある。**返るのは `i_size` で
+        // 切られたバイト列なので、末尾がそのまま最後の 1 バイトである。**
+        let last_index = (fs.block_span(&inode) - 1) as u32;
+        let last_block = match fs.file_block(&inode, last_index) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                logger.error(format_args!(
+                    "ext2: {path} block {last_index} is not readable: {e:?}; halting"
+                ));
+                cpu::halt_forever();
+            }
+        };
+        let Some(&last_byte) = last_block.last() else {
+            logger.error(format_args!(
+                "ext2: {path} block {last_index} came back empty; halting"
+            ));
+            cpu::halt_forever();
+        };
+
+        logger.info(format_args!(
+            "ext2: {path} inode={ino} size={} blocks={} single indirect={} last byte={last_byte:#04x} \
+             (expected {expected_last:#04x})",
+            inode.size,
+            fs.block_span(&inode),
+            inode.blocks[SINGLE_INDIRECT_SLOT]
+        ));
+        if last_byte != expected_last {
+            logger.error(format_args!(
+                "ext2: {path} last byte is {last_byte:#04x}, expected {expected_last:#04x}; \
+                 halting"
+            ));
+            cpu::halt_forever();
+        }
     }
 }
 
