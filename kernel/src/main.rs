@@ -1538,6 +1538,14 @@ extern "sysv64" fn kernel_main() -> ! {
     // 間にユーザー空間へ触ると #PF になる。触らない。
     demo_address_space_switch(&mut logger, &mut allocator);
 
+    // **ここでフレームアロケータを預ける（S11-3。`ADR-0030`）。**
+    // 起動の組み立てはここまでで終わり、**以降はユーザープログラムの
+    // 写像だけがフレームを要る。** あちらは借りて、**Ring 3 へ落ちる前に返す。**
+    //
+    // **`deposit` は「返却」ではない**——ここは借りずに預ける唯一の場所である。
+    // SAFETY: 起動シーケンスの単一実行文脈で一度だけ。まだ誰も借りていない。
+    unsafe { kernel::frame_allocator::deposit(allocator) };
+
     // === S9-b-1: 埋め込んだユーザープログラムの ELF を読み、写像する ===
     //
     // **まだ走らせない**（Ring 3 への遷移は次の刻み）。ここまでで、像が読めること、
@@ -1547,8 +1555,17 @@ extern "sysv64" fn kernel_main() -> ! {
     verify_corrupt_fs_image_is_rejected(&mut logger);
     verify_embedded_user_elf(&mut logger);
     verify_corrupt_user_elf_is_rejected(&mut logger);
-    verify_corrupt_user_program_is_not_loaded(&mut logger, &mut allocator);
-    if let Err(error) = load_embedded_user_program(&mut logger, &mut allocator) {
+    verify_corrupt_user_program_is_not_loaded(&mut logger);
+    // **貸し借りの回数を出す（S11-3。`ADR-0030`）。** 取り出した回数と返した
+    // 回数が一致し、いまこの場に在れば、**その時点で返し忘れは無い。**
+    let (taken, returned, present) = kernel::frame_allocator::lending_counts();
+    logger.info(format_args!(
+        "frame-allocator: lent out {taken} time(s), given back {returned} time(s), \
+         balanced={}, present={present}",
+        taken == returned
+    ));
+
+    if let Err(error) = load_embedded_user_program(&mut logger) {
         // **この段ではまだ止める。** 既定の `hello` は成功するので、ここへは来ない。
         // 壊した像を渡してプロセスだけを失敗させるのは S9-b-2 の 2 つ目である。
         logger.error(format_args!(
@@ -3708,6 +3725,11 @@ fn verify_embedded_user_elf(logger: &mut Logger<SerialPort>) {
 /// S9-b-2 の 2 つ目で壊し方を選ぶときの材料である。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UserLoadError {
+    /// フレームアロケータを借りられなかった（S11-3。`ADR-0030`）。
+    ///
+    /// **起動シーケンスは単一コアの直線なので、ここへ来ること自体が異常である**
+    /// ——誰かが借りたまま返していない。
+    AllocatorUnavailable,
     /// `argv` と表と文字列が、スタックの 1 ページに収まらない（S11-1）。
     ArgumentsTooLong,
     /// `Elf::parse` が拒んだ。**像がバイト列として壊れている。**
@@ -5419,7 +5441,6 @@ const USER_PROGRAMS: &[UserProgram] = &[
 /// 主張しないのと同じ形）。`run` が偽なら 0 を返す。
 fn load_user_program(
     logger: &mut Logger<SerialPort>,
-    allocator: &mut kernel::frame_allocator::FrameAllocator,
     image: &[u8],
     run: bool,
     name: &'static str,
@@ -5430,12 +5451,25 @@ fn load_user_program(
     let direct_map = common::addr::direct_map();
     let production = kernel::paging::switch::read_cr3();
 
+    // **アロケータを借りる（S11-3。`ADR-0030`）。** 写像の間だけ持ち、
+    // **Ring 3 へ落ちる前に返す。**
+    let Some(allocator) = kernel::frame_allocator::take() else {
+        return (Err(UserLoadError::AllocatorUnavailable), 0, 0);
+    };
+
     // SAFETY: production は稼働中の PML4、direct_map は登録済みの窓。
     let space = match unsafe {
         AddressSpace::new(allocator, direct_map, production, USER_PROGRAM_PML4_INDEX)
     } {
         Ok(space) => space,
-        Err(e) => return (Err(UserLoadError::AddressSpace(e)), 0, 0),
+        Err(e) => {
+            // **失敗の経路でも返す（S11-3）。** ここで持ったまま抜けると、
+            // 以後の確保がすべて `None` になる。**S9-b-2 で「失敗の途中で取った
+            // フレームは呼び出し側が返す」と決めた場所と同じ関数で、
+            // 今度はアロケータ自体を返す。**
+            kernel::frame_allocator::give_back(allocator);
+            return (Err(UserLoadError::AddressSpace(e)), 0, 0);
+        }
     };
 
     // **ここからプロセスである。** stack_top は張る前から決まっているが、entry は
@@ -5448,7 +5482,23 @@ fn load_user_program(
         files: kernel::vfs::FileTable::new(),
     };
 
-    let outcome = load_user_program_into(logger, allocator, image, &mut process, run, argv)
+    // **写像まではアロケータが要る。遠征では要らない。**
+    let mapped = load_user_program_into(logger, allocator, image, &mut process, argv);
+    // **ここで返す。** 以降は Ring 3 の遠征があり、**その間はアロケータが
+    // `static` に在るので、システムコールから取り出せる**（`ADR-0030` の要）。
+    //
+    // **失敗の経路でも必ず通る**——`mapped` はまだ判定していない。
+    kernel::frame_allocator::give_back(allocator);
+
+    let outcome = mapped
+        .and_then(|()| {
+            if run {
+                // SAFETY: 写像は済んでおり、entry と stack は張ったユーザーページ。
+                unsafe { run_loaded_program(logger, &mut process) }
+            } else {
+                Ok(())
+            }
+        })
         .map(|()| process.entry);
 
     // **成否によらず畳む。** 破棄は S7-d の経路（下位を隔離へ入れ、世代が
@@ -5475,20 +5525,49 @@ fn load_user_program(
     (outcome, held, leaked)
 }
 
+/// 今の空きフレーム数（S11-3）。**会計のために短く借りて、すぐ返す。**
+///
+/// **借りられないのは異常である**（`ADR-0030`）。起動シーケンスは単一コアの
+/// 直線なので、**ここで `None` が返るなら誰かが返し忘れている。**
+fn frame_count_now(logger: &mut Logger<SerialPort>) -> u64 {
+    let Some(allocator) = kernel::frame_allocator::take() else {
+        logger.error(format_args!(
+            "frame-allocator: the allocator is on loan while the boot sequence needs it; \
+             someone did not give it back. halting"
+        ));
+        cpu::halt_forever();
+    };
+    let count = allocator.free_frame_count();
+    kernel::frame_allocator::give_back(allocator);
+    count
+}
+
+/// 今の空き範囲の数（S11-3）。**同じく短く借りて返す。**
+fn free_range_count_now(logger: &mut Logger<SerialPort>) -> usize {
+    let Some(allocator) = kernel::frame_allocator::take() else {
+        logger.error(format_args!(
+            "frame-allocator: the allocator is on loan while the boot sequence needs it; \
+             someone did not give it back. halting"
+        ));
+        cpu::halt_forever();
+    };
+    let count = allocator.free_range_count();
+    kernel::frame_allocator::give_back(allocator);
+    count
+}
+
 /// 埋め込んだユーザープログラムを順に走らせる（S9-b-1、S9-b-3-2a で複数になった）。
 ///
 /// **1 本ずつ、生成から破棄まで閉じてから次へ行く。** 期待どおりに終わった
 /// プログラムは失敗ではない——`fault-test` は畳まれて終わるのが正しい
 /// （[`USER_PROGRAMS`]）。**期待と違う終わり方をしたときだけ止まる。**
-fn load_embedded_user_program(
-    logger: &mut Logger<SerialPort>,
-    allocator: &mut kernel::frame_allocator::FrameAllocator,
-) -> Result<(), UserLoadError> {
+fn load_embedded_user_program(logger: &mut Logger<SerialPort>) -> Result<(), UserLoadError> {
     for program in USER_PROGRAMS {
         let name = program.name;
-        let free_before = allocator.free_frame_count();
+        // **会計のために短く借りる（S11-3）。** 読むだけなので、すぐ返す。
+        let free_before = frame_count_now(logger);
         let (outcome, held, leaked) =
-            load_user_program(logger, allocator, program.image, true, name, program.argv);
+            load_user_program(logger, program.image, true, name, program.argv);
         let entry = outcome?;
 
         // **終わり方を判定する。** ここで止まっても空間は既に畳まれている
@@ -5500,7 +5579,7 @@ fn load_embedded_user_program(
         // `verify_corrupt_user_program_is_not_loaded` が同じ理由で差だけを出している）。
         // **主張の前に確かめる。** 先に「畳んだ」と書くと、会計が合わない場合に
         // **その行が偽のまま残る。**
-        let consumed = (free_before - allocator.free_frame_count()) as usize;
+        let consumed = (free_before - frame_count_now(logger)) as usize;
         if consumed != held || leaked != 0 {
             logger.error(format_args!(
                 "user-load: {name} left the allocator short: {consumed} frame(s) consumed but \
@@ -5528,9 +5607,9 @@ fn load_embedded_user_program(
         // **行を分けてあるのは、この値が起動ごとに揺れるからである**（UEFI の
         // メモリマップ由来。実測で 10 と 11 の両方が出た）。**上の会計と同じ行に
         // すると、起動ログの参照からその会計ごと落ちる。**
+        let ranges = free_range_count_now(logger);
         logger.info(format_args!(
-            "user-load: the allocator holds {} free range(s) of {} after {name}",
-            allocator.free_range_count(),
+            "user-load: the allocator holds {ranges} free range(s) of {} after {name}",
             kernel::frame_allocator::DEFAULT_CAPACITY
         ));
     }
@@ -5559,10 +5638,7 @@ fn load_embedded_user_program(
 /// の範囲も区画の重なりも見ない（配置の方針を知らないため。`common::elf` の
 /// モジュール doc）ので、**パースは通り、写像で拒まれる。** 行き先は
 /// ユーザーサブツリーの外（`PML4[1]`）と、1 本目の区画のページの中である。
-fn verify_corrupt_user_program_is_not_loaded(
-    logger: &mut Logger<SerialPort>,
-    allocator: &mut kernel::frame_allocator::FrameAllocator,
-) {
+fn verify_corrupt_user_program_is_not_loaded(logger: &mut Logger<SerialPort>) {
     /// 先頭のプログラムヘッダの位置（`hello` の `e_phoff` は 64）。
     const PHDR0: usize = 64;
     /// `Elf64_Phdr` の大きさ。
@@ -5570,7 +5646,7 @@ fn verify_corrupt_user_program_is_not_loaded(
     /// `p_vaddr` のオフセット。
     const P_VADDR: usize = 16;
 
-    let free_before = allocator.free_frame_count();
+    let free_before = frame_count_now(logger);
     let mut quarantined_total = 0usize;
 
     for (what, offset, value, expect_mapping) in [
@@ -5600,7 +5676,7 @@ fn verify_corrupt_user_program_is_not_loaded(
         };
 
         let (outcome, held, leaked) =
-            load_user_program(logger, allocator, image, false, "corrupt", &["corrupt"]);
+            load_user_program(logger, image, false, "corrupt", &["corrupt"]);
 
         let Err(error) = outcome else {
             logger.error(format_args!(
@@ -5638,7 +5714,7 @@ fn verify_corrupt_user_program_is_not_loaded(
     // 絶対値は出さない。**空きフレーム数はコア数で変わる**（AP ごとに per-CPU
     // スタックを取る）ので、出すと `-smp 1/2/4` で起動ログが一致しなくなる。
     // **実測で踏んだ。差だけならコア数に依らない。**
-    let consumed = (free_before - allocator.free_frame_count()) as usize;
+    let consumed = (free_before - frame_count_now(logger)) as usize;
     logger.info(format_args!(
         "user-load-corrupt: all 3 corrupted images were refused by the loader (one at the \
          entrance, one after the first segment was already mapped, one whose segments share a \
@@ -5702,7 +5778,6 @@ fn load_user_program_into(
     allocator: &mut kernel::frame_allocator::FrameAllocator,
     image: &[u8],
     process: &mut UserProcess,
-    run: bool,
     argv: &[&str],
 ) -> Result<(), UserLoadError> {
     use common::elf::Elf;
@@ -5712,7 +5787,6 @@ fn load_user_program_into(
     const PAGE_SIZE: u64 = 4096;
 
     let direct_map = common::addr::direct_map();
-    let production = kernel::paging::switch::read_cr3();
 
     let elf = match Elf::parse(image) {
         Ok(elf) => elf,
@@ -5898,12 +5972,6 @@ fn load_user_program_into(
     // **CR3 を差し替えてから iretq で落ちる。** 上位は共有なのでカーネルは動き
     // 続ける（S7-c の到達条件 4 が、実プログラムで初めて使われる）。
     // 戻りは `ud2` の #UD を S8 の畳みが受ける。
-    if !run {
-        return Ok(());
-    }
-
-    kernel::syscall::reset_counters();
-    let main_rsp0_top = gdt::privilege_stack_top();
     // 破壊 (S9-b-1, user-run-wrong-entry): entry ではなく最初の PT_LOAD の先頭へ
     // 飛ぶ。**詰め物の ud2 で即座に #UD になり、フォルト RIP が期待と食い違う。**
     // 詰め物が生きていることは verify_embedded_user_elf が主張している。
@@ -5918,6 +5986,33 @@ fn load_user_program_into(
 
     // **ここで entry が確定する。** 呼び出し側は `UserProcess` から読む。
     process.entry = entry;
+
+    Ok(())
+}
+
+/// 写像済みのプロセスを Ring 3 で走らせる（S11-3 で切り出した）。
+///
+/// # なぜ切り出したか
+///
+/// **アロケータを遠征の前に返すためである**（`ADR-0030`）。写像には要るが、
+/// 遠征には要らない。**切り口は元からあった `if !run` の位置である。**
+///
+/// **あの分岐は S9-b-2 で「壊した像を写像だけして走らせない」ために作った。**
+/// **「写像と実行を分ける」という同じ軸なので、所有の境界とも一致した**
+/// ——別々の目的で引いた線が、同じ場所を通っている。
+///
+/// # Safety
+///
+/// `process` の写像が済んでおり、entry と stack が張ったユーザーページであること。
+/// 起動時の単一実行文脈から呼ぶこと。
+unsafe fn run_loaded_program(
+    logger: &mut Logger<SerialPort>,
+    process: &mut UserProcess,
+) -> Result<(), UserLoadError> {
+    let production = kernel::paging::switch::read_cr3();
+
+    kernel::syscall::reset_counters();
+    let main_rsp0_top = gdt::privilege_stack_top();
 
     // SAFETY: この空間はカーネルの上位を共有しており、切り替えても実行中の
     // コードとスタックは見え続ける。

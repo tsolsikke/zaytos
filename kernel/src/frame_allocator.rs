@@ -19,6 +19,8 @@
 //!
 //! ADR 化するかどうかは、この説明を見た人間の判断に委ねる。
 
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
 use common::addr::PhysAddr;
 
 use crate::memory_map::memory_type;
@@ -410,6 +412,96 @@ impl<const CAP: usize> Default for FrameAllocator<CAP> {
 /// `EfiLoaderData` として確保されている（`bootloader/src/loader.rs` で
 /// 確認済み）ため、型ベースのこの判定だけで自動的に除外される。
 /// 個別のアドレス範囲を特別扱いする必要はない。
+/// カーネル全体で 1 つのフレームアロケータの実体（S11-3。`ADR-0030`）。
+///
+/// # 値で渡さない。**動かすと 4104 バイトがスタックへ乗る**
+///
+/// **`FrameRange` が 16 バイト、`CAP` が 256 なので、この型は 4104 バイトである。**
+/// **借り手へ値で返す形にしたら、カーネルスタックがガードページへ落ちた**（実測）——
+/// `deferred-decisions.md` の「大きなスタック配列とガード幅」が言うとおり、
+/// **ガード幅 1 ページの前提は「スタック上の単一の物が 4096 バイト以下」である。**
+///
+/// **そこで実体はここに置いたまま、借り手には `&'static mut` を渡す。**
+/// **コピーが起きない。**
+static mut STORAGE: FrameAllocator = FrameAllocator::new();
+
+/// 実体が預けられているか（S11-3）。**起動の最初は空である。**
+static PRESENT: AtomicBool = AtomicBool::new(false);
+
+/// 貸し出し中か（S11-3）。**排他はこの旗が持つ。**
+static ON_LOAN: AtomicBool = AtomicBool::new(false);
+
+/// [`take`] が成功した回数（S11-3）。
+static TAKEN: AtomicU64 = AtomicU64::new(0);
+/// [`give_back`] が呼ばれた回数（S11-3）。
+static RETURNED: AtomicU64 = AtomicU64::new(0);
+
+/// 起動時に一度だけ預ける（S11-3）。
+///
+/// # なぜ [`give_back`] と分けるのか
+///
+/// **最初の 1 回は「返却」ではない。** アロケータは `kernel_main` のローカルとして
+/// 生まれ、**借りずに預けられる。** [`give_back`] で数えると、
+/// **貸し借りの釣り合いが最初から 1 ずれる**（実測で `lent out 5, given back 6` が出た）。
+///
+/// # Safety
+///
+/// **起動シーケンスから一度だけ呼ぶこと。** まだ誰も借りていない時点で呼ぶこと。
+pub unsafe fn deposit(allocator: FrameAllocator) {
+    // SAFETY: 呼び出し元契約により、まだ誰も借りていない単一実行文脈である。
+    unsafe {
+        *core::ptr::addr_of_mut!(STORAGE) = allocator;
+    }
+    PRESENT.store(true, Ordering::SeqCst);
+}
+
+/// アロケータを借りる（S11-3）。**返すのは呼び出し側の責任である。**
+///
+/// # 排他は `compare_exchange` が持つ
+///
+/// **`load` してから `store` する形にしない。** それだと**2 つの実行文脈が同時に
+/// 通り抜けられる。** いまは単一コアの直線なので実害は出ないが、
+/// **S13 で I/O 待ちが入り、割り込みハンドラから取る経路ができた時点で壊れる。**
+/// **`compare_exchange` なら、その時点でも契約が壊れない。**
+///
+/// **`None` は「今は借りられない」である。** 起動シーケンスは単一コアの直線なので、
+/// **そこで `None` が返るのは返し忘れを意味する。**
+pub fn take() -> Option<&'static mut FrameAllocator> {
+    if !PRESENT.load(Ordering::SeqCst) {
+        return None;
+    }
+    if ON_LOAN
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return None;
+    }
+    TAKEN.fetch_add(1, Ordering::SeqCst);
+    // SAFETY: **`compare_exchange` が成功した者だけがここへ来る。**
+    // 旗は [`give_back`] が戻すまで立ったままなので、**この `&mut` は唯一である。**
+    Some(unsafe { &mut *core::ptr::addr_of_mut!(STORAGE) })
+}
+
+/// アロケータを返す（S11-3）。
+///
+/// **借りた `&'static mut` を渡す。** 渡した側はそれ以降使えない
+/// （**返した後に使う形が型で作れない**）。
+pub fn give_back(_allocator: &'static mut FrameAllocator) {
+    RETURNED.fetch_add(1, Ordering::SeqCst);
+    ON_LOAN.store(false, Ordering::SeqCst);
+}
+
+/// 貸し借りの回数と、今この場に在るか（S11-3）。**判定行に出す。**
+///
+/// **取り出した回数と返した回数が一致していれば、その時点で返し忘れは無い。**
+pub fn lending_counts() -> (u64, u64, bool) {
+    (
+        TAKEN.load(Ordering::SeqCst),
+        RETURNED.load(Ordering::SeqCst),
+        !ON_LOAN.load(Ordering::SeqCst),
+    )
+}
+
 pub fn build(
     raw: &[u8],
     descriptor_size: u64,
