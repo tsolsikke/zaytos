@@ -3585,12 +3585,6 @@ static FAULT_TEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fault-t
 /// 埋め込んだユーザープログラム `syscall-test` の ELF（S9-b-3-2a）。
 static SYSCALL_TEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/syscall-test.elf"));
 
-/// 埋め込んだ ext2 の像（S10-a）。
-///
-/// `kernel/build.rs` が `mke2fs` で建て、時刻を 0 にして決定的にしたものである。
-/// **`hello` の ELF と同じく `include_bytes!` で抱える**（`docs/roadmap.md` の
-/// S10。移す条件は「像を書き換える必要が生じたとき」または「像の大きさが
-/// 起動時のコピーで測れるほど効いたとき」）。
 use kernel::vfs::FS_IMAGE;
 
 /// `build.rs` が生成した、像を建てた道具の版と大きさ（S10-a）。
