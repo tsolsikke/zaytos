@@ -339,7 +339,7 @@ task: cooperative switch verified
 [INFO] vfs: fault-test opened 0 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16)
 [INFO] user-run: fault-test left Ring 3 (exited=false status=0 folded=true vector=14 rip=0x400030 cs=0x2b cr2=0x400000 err=0x7), it made 0 syscall(s) and the kernel was entered from Ring 3 (false), write(fd=0, 0 byte(s)) said ""
 [INFO] user-load: fault-test ran as a process in its own address space, ended as expected, and the kernel continued after the process was gone; the space was destroyed (7 frame(s) left the allocator and 7 reached quarantine, match=true leaked=0)
-[INFO] user-load: syscall-test mapped PT_LOAD 0x400000..0x400812 (filesz=0x812 memsz=0x812 w=false)
+[INFO] user-load: syscall-test mapped PT_LOAD 0x400000..0x400802 (filesz=0x802 memsz=0x802 w=false)
 [INFO] user-load: syscall-test mapped PT_LOAD 0x401000..0x401047 (filesz=0x47 memsz=0x47 w=false)
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
 [INFO] vfs: syscall-test opened 8 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16)

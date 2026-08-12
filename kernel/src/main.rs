@@ -5047,16 +5047,23 @@ const SYSCALL_TEST_MESSAGE: &str = "syscall-test wrote this\n";
 
 /// `syscall-test` の受け皿の `ud2` が entry から何バイト目にあるか（S9-b-3-2a）。
 ///
-/// **`kernel/userland/syscall-test.rs` の `.org 0x800` と対になっている。**
-/// `hello` より遠いのは、検算の分だけ命令が長いためである。
-/// **S10-b で `open`/`close` の検算を足したとき 0x100 に収まらなくなり**（実測 310
-/// バイト）、**`read` の検算を足したとき 0x200 にも収まらなくなった**（実測 743
-/// バイト）、**`getdents64` の検算で 0x400 にも収まらなくなった**（実測 1198 バイト）。
-/// **アセンブラが `.org` で落ちる**ので、収まらなくなったことは静かには通らない。
-/// **3 度広がった。** `docs/deferred-decisions.md` の
-/// 「`syscall-test` の受け皿の位置を `.org` で固定する形」が、
-/// **3 度目で見直すという条件で開いている。**
-const SYSCALL_TEST_UD2_OFFSET: u64 = 0x800;
+/// # 出所は `user.ld` 1 つである（S10-b の締めで直した）
+///
+/// **以前は `.org` の即値と、この定数の 2 か所に同じ値があった。**
+/// 検算を足してコードが伸びるたびに両方を直すことになり、**S10-b で 3 度起きた**
+/// （0x100 → 0x200 → 0x400 → 0x800。実測で 310 / 743 / 1198 バイト）。
+///
+/// **いまはリンカが `.userland.receiver` を置き、`build.rs` が `user.ld` から
+/// 読んだ値をここへ生成する。** 直す場所は `user.ld` の 1 行だけである。
+///
+/// **収まらなくなったときに静かには通らない性質は残る**——`.text` が受け皿の
+/// 位置を越えると、**リンカが「位置カウンタを戻せない」で落ちる。**
+const SYSCALL_TEST_UD2_OFFSET: u64 = userland_layout::USER_RECEIVER_OFFSET;
+
+/// `build.rs` が `userland/user.ld` から生成した配置の定数（S10-b）。
+mod userland_layout {
+    include!(concat!(env!("OUT_DIR"), "/userland_layout.rs"));
+}
 
 /// `syscall-test` の終了状態の意味（S9-b-3-2a）。
 ///

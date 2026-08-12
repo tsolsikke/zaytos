@@ -78,6 +78,22 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
     let script = format!("{manifest_dir}/userland/user.ld");
     println!("cargo:rerun-if-changed={script}");
 
+    // **受け皿の位置は `user.ld` が唯一の出所である**（S10-b の締め）。
+    // 以前はアセンブリの `.org` と Rust の定数の 2 か所にあり、**検算を足して
+    // コードが伸びるたびに両方を直していた**（3 度起きた）。ここで読んで
+    // 生成すれば、**直す場所は `user.ld` の 1 行だけになる。**
+    let userland = std::fs::read_to_string(&script).expect("failed to read user.ld");
+    let receiver_offset = parse_symbol(&userland, "USER_RECEIVER_OFFSET")
+        .expect("user.ld does not define USER_RECEIVER_OFFSET");
+    std::fs::write(
+        format!("{out_dir}/userland_layout.rs"),
+        format!(
+            "// build.rs が user.ld から生成した。手で編集しないこと。\n\
+             pub const USER_RECEIVER_OFFSET: u64 = {receiver_offset};\n"
+        ),
+    )
+    .expect("failed to write userland_layout.rs");
+
     for name in PROGRAMS {
         let source = format!("{manifest_dir}/userland/{name}.rs");
         let output = format!("{out_dir}/{name}.elf");

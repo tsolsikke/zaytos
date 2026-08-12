@@ -560,9 +560,10 @@ core::arch::global_asm!(
     "9:",
     "  mov eax, {sys_exit}",
     "  int 0x80",
-    // **`exit` が戻ってきたときの受け皿**（`hello.rs` と同じ規律）。位置を
-    // `.org` で固定してあるので、ここへ落ちたことが RIP で分かる。
-    ".org 0x800, 0x90",
+    // **`exit` が戻ってきたときの受け皿**（`hello.rs` と同じ規律）。
+    // **位置はリンカが決める**（`user.ld` の `USER_RECEIVER_OFFSET`）ので、
+    // ここに `.org` は要らない。**検算を足しても、この行は動かない。**
+    ".section .userland.receiver,\"ax\"",
     "  ud2",
 
     ".section .rodata",
