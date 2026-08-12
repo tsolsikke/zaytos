@@ -5837,6 +5837,146 @@ fn check_structural_guard_symbols_present(workspace_root: &Path) -> Result<Strin
     Ok(found.join(", "))
 }
 
+/// 埋め込む ext2 の像が `e2fsck -fn` を通ること（S10-a）。
+///
+/// # 何を捕まえる検査か
+///
+/// **落ちるのは「像の作り手が変わった」ときである。** `kernel/build.rs` は
+/// `mke2fs` で像を建て、**そのあと時刻の 7 箇所をゼロで上書きしている。**
+/// 上書きは像のバイトを直接書き換える操作なので、**別の版の `mke2fs` が
+/// 別の場所に別の大きさで時刻を置けば、無関係なバイトを潰しうる。**
+/// そのとき像は壊れるが、**こちらのパーサは壊れた側を読んでも気づかない**
+/// ——superblock と inode は形として妥当なままだからである。
+///
+/// **判定行に載せた `mke2fs` の版と対になる検査である。** あちらは
+/// 「作り手が変わったこと」を人が読んで気づくための記録で、こちらは
+/// 「作り手が変わって像が壊れたこと」を機械で止める側である。
+///
+/// # 依存はもう及んでいる
+///
+/// **e2fsprogs はビルドの要求に既に入っている**（`mke2fs` が無ければ
+/// `kernel/build.rs` が止まる。`ADR-0025`）。`e2fsck` は同じパッケージなので、
+/// **この検査は新しい要求を足していない。** S12（書き込みの独立検証）で
+/// どのみち必須になる。
+///
+/// # `OUT_DIR` を `find` で拾わない
+///
+/// **`OUT_DIR` は feature 構成ごとに別である。** `target/` を探して 1 つ拾うと、
+/// 破壊ビルドの残骸を掴みうる（`--full` の直後がその状態になる）。**cargo に
+/// 訊く**——`--message-format=json` の `build-script-executed` が、
+/// **いま建てた構成の `out_dir` をパッケージごとに 1 行で返す。**
+fn check_fs_image_passes_e2fsck(workspace_root: &Path) -> Result<String> {
+    let image = kernel_build_out_dir(workspace_root)?.join(FS_IMAGE_NAME);
+    // **この分岐は今日の構成では届かない**（実測）。像が無ければ `include_bytes!` が
+    // 先に落ち、カーネルのビルドが失敗する。**`build.rs` が置き場所を変えたときの
+    // ためだけに残してある**——そのとき e2fsck の「そんなファイルは無い」より、
+    // どこを探したかが出るほうが早い。**届かないことを承知で置いていると書く。**
+    if !image.exists() {
+        bail!(
+            "the kernel build script reported an OUT_DIR without {}: {}",
+            FS_IMAGE_NAME,
+            image.display()
+        );
+    }
+
+    // `-f` は clean でも全パスを走らせる（`s_state` を信用しない）。`-n` は
+    // 何も直さず、直す必要があれば失敗で返す。**像を書き換えさせない。**
+    // `LC_ALL=C` は要約行を言語設定に依らせないため（**この行を報告に載せる**）。
+    let output = Command::new("e2fsck")
+        .env("LC_ALL", "C")
+        .arg("-fn")
+        .arg(&image)
+        .output()
+        .context(
+            "failed to invoke e2fsck (it ships with e2fsprogs, the same package as mke2fs, \
+             which the kernel build script already requires)",
+        )?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() {
+        bail!(
+            "e2fsck rejected the embedded ext2 image ({}). The image is built by mke2fs and then \
+             has its timestamps zeroed in place by kernel/build.rs; a different e2fsprogs version \
+             can put those timestamps elsewhere, in which case the overwrite corrupts unrelated \
+             bytes. Compare the mke2fs version on the boot log's ext2 line.\n{}{}",
+            output.status,
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // 要約行（`<像>: N/M files (...), N/M blocks`）から、像のパスを落として返す。
+    // **使用量が判定行に残り、パスに依らない**（`OUT_DIR` はハッシュを含む）。
+    let summary = stdout
+        .lines()
+        .find(|line| line.contains(" files (") && line.contains(" blocks"))
+        .and_then(|line| line.rsplit_once(": "))
+        .map(|(_, counts)| counts.trim().to_string())
+        .unwrap_or_else(|| "e2fsck printed no usage summary".to_string());
+    Ok(summary)
+}
+
+/// `kernel/build.rs` が生成物を置いた `OUT_DIR`（既定の feature 構成）。
+///
+/// **cargo の JSON 出力から引く。** `serde` は入れない——見るのは
+/// `build-script-executed` の行 1 種類で、必要な欄は 2 つだけである。
+fn kernel_build_out_dir(workspace_root: &Path) -> Result<PathBuf> {
+    let output = Command::new("cargo")
+        .current_dir(workspace_root)
+        .args([
+            "build",
+            "--target",
+            KERNEL_TARGET,
+            "-p",
+            KERNEL_PACKAGE,
+            "--bin",
+            KERNEL_PACKAGE,
+            "--message-format=json-render-diagnostics",
+        ])
+        .output()
+        .context("failed to invoke cargo to locate the kernel build script's OUT_DIR")?;
+    if !output.status.success() {
+        bail!(
+            "kernel build failed while locating OUT_DIR ({})\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if !line.contains("\"reason\":\"build-script-executed\"") {
+            continue;
+        }
+        // **kernel 以外のパッケージのビルドスクリプトも同じ形で出る。**
+        if !line.contains(&format!("/{KERNEL_PACKAGE}#")) {
+            continue;
+        }
+        if let Some(dir) = json_string_field(line, "out_dir") {
+            return Ok(PathBuf::from(dir));
+        }
+    }
+    bail!(
+        "cargo did not report a build-script-executed message for {KERNEL_PACKAGE}; \
+         cannot locate OUT_DIR"
+    )
+}
+
+/// JSON の 1 行から `"name":"値"` の値を取り出す。
+///
+/// **エスケープを解かない。** cargo が返すのはパスであり、**この検査が扱う範囲では
+/// `\` も `"` も現れない。** 現れたら開いたまま返るので、呼び出し側の
+/// `exists()` が落ちる（**静かに別の場所を指すことはない**）。
+fn json_string_field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    let key = format!("\"{name}\":\"");
+    let start = line.find(&key)? + key.len();
+    let rest = &line[start..];
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
+/// `kernel/build.rs` が `OUT_DIR` へ置く ext2 の像の名前。
+const FS_IMAGE_NAME: &str = "fs.img";
+
 /// **構造的なガード**のシンボル名に必ず現れる断片（S4-c-3-2b、S5-bで拡張）。
 ///
 /// Rust のシンボルはマングルされるので、**関数名の断片で照合する。**
@@ -6380,6 +6520,18 @@ fn cmd_check(full: bool) -> Result<()> {
         }
     }
 
+    // 埋め込む ext2 の像が `e2fsck` を通ること（S10-a、静的）。
+    total += 1;
+    println!("=== xtask check: the embedded ext2 image passes e2fsck");
+    match check_fs_image_passes_e2fsck(&workspace_root) {
+        Ok(summary) => println!("--- fs image e2fsck: OK ({summary})"),
+        Err(e) => {
+            println!("    {e}");
+            println!("--- fs image e2fsck: FAILED");
+            failed.push("fs image e2fsck".to_string());
+        }
+    }
+
     let mut retries: Vec<String> = Vec::new();
     if full {
         // QEMU を起動する回帰チェック。1 種類ごとにカーネルをビルドし直して
@@ -6690,8 +6842,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 20,
-    full: 120,
+    base: 21,
+    full: 121,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
