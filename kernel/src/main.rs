@@ -1543,6 +1543,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // 新しいアドレス空間へ区画が張れること、**張った葉の W が区画の権限どおりで
     // あること**を見る。
     verify_embedded_fs_image(&mut logger);
+    verify_corrupt_fs_image_is_rejected(&mut logger);
     verify_embedded_user_elf(&mut logger);
     verify_corrupt_user_elf_is_rejected(&mut logger);
     verify_corrupt_user_program_is_not_loaded(&mut logger, &mut allocator);
@@ -3849,6 +3850,67 @@ fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
     verify_single_indirect_boundary(logger, &fs);
 }
 
+/// 壊した ext2 の像を組み立てる作業領域（S10-a）。
+///
+/// # 像全体（2 MiB）を抱えない
+///
+/// **`.bss` が 2 MiB 増えると、bootloader が `0x100000` へ確保する量がそのぶん
+/// 増える。** 起動する上限は 6 MiB と 7 MiB のあいだにあると実測してあり
+/// （`kernel/build.rs` の `IMAGE_BYTES`）、**像を 2 MiB に決めたときの余裕を
+/// ここで食い潰しては、決めた意味が無くなる。**
+///
+/// # 先頭 64 ブロックだけで、読み切れる像になる
+///
+/// **`s_blocks_count` を 64 に直せば、切り出した先頭がそれ自体で完結する。**
+/// 実際に参照されている最大のブロックは 58 だからである（実測。`/etc/motd` の
+/// データブロック）。**64 に余裕を取ってあるので、種が少し増えても収まる。**
+/// **収まらなくなったら健全な対照（下）が最初に落ちる。**
+static mut CORRUPT_FS_IMAGE: [u8; CORRUPT_FS_LEN] = [0; CORRUPT_FS_LEN];
+
+/// 切り出すブロック数。**参照されている最大のブロック（58）より大きいこと。**
+const CORRUPT_FS_BLOCKS: usize = 64;
+
+/// 切り出した像のバイト数。
+const CORRUPT_FS_LEN: usize = CORRUPT_FS_BLOCKS * FS_BLOCK_SIZE;
+
+/// 像のブロックサイズ（`mke2fs` の既定。判定行で毎起動確かめている）。
+const FS_BLOCK_SIZE: usize = 4096;
+
+/// superblock の像内オフセット。**ブロックサイズに依らず固定である。**
+const FS_SUPERBLOCK: usize = 1024;
+
+/// group descriptor テーブルの先頭（`s_first_data_block` が 0 なのでブロック 1）。
+const FS_GROUP_DESCRIPTORS: usize = FS_BLOCK_SIZE;
+
+/// inode テーブルの先頭（group 0 の `bg_inode_table` は 4。判定行に出ている）。
+const FS_INODE_TABLE: usize = 4 * FS_BLOCK_SIZE;
+
+/// inode 1 つのバイト数（`s_inode_size`。判定行に出ている）。
+const FS_INODE_SIZE: usize = 256;
+
+/// inode `ino` の像内オフセット。
+const fn fs_inode_at(ino: usize) -> usize {
+    FS_INODE_TABLE + (ino - 1) * FS_INODE_SIZE
+}
+
+/// ルート inode の像内オフセット。
+const FS_ROOT_INODE_AT: usize = fs_inode_at(2);
+
+/// `/etc/motd` の inode（18 番。判定行に出ている）の像内オフセット。
+const FS_MOTD_INODE_AT: usize = fs_inode_at(18);
+
+/// ルートディレクトリのデータブロック（実測。判定行の `i_block[0]` に出ている）。
+const FS_ROOT_DIR_BLOCK: usize = 20 * FS_BLOCK_SIZE;
+
+/// ルートディレクトリの `etc` エントリの位置（実測。`. .. lost+found bin data` の後）。
+const FS_ROOT_ETC_ENTRY: usize = FS_ROOT_DIR_BLOCK + 68;
+
+/// `/data/indirect-first` の単一間接ブロック（実測。判定行の `single indirect` に出ている）。
+const FS_INDIRECT_TABLE_BLOCK: usize = 55 * FS_BLOCK_SIZE;
+
+/// `/etc/motd` のデータブロック（実測）。
+const FS_MOTD_DATA_BLOCK: usize = 58 * FS_BLOCK_SIZE;
+
 /// 種のファイルと同じ木にある `/etc/motd` の中身（S10-a）。
 ///
 /// **像の中の `/etc/motd` は、このファイルを `mke2fs -d` が写したものである。**
@@ -4190,6 +4252,546 @@ fn verify_single_indirect_boundary(logger: &mut Logger<SerialPort>, fs: &common:
             cpu::halt_forever();
         }
     }
+}
+
+/// 壊した像に対して走らせる観測（S10-a）。
+///
+/// **すべて `Result<(), Ext2Error>` へ畳む。** 成功したら反証が失敗である。
+type FsProbe = fn(&common::ext2::Ext2<'_>) -> Result<(), common::ext2::Ext2Error>;
+
+/// 書き換え 1 か所。
+struct FsPatch {
+    offset: usize,
+    value: u64,
+    width: usize,
+}
+
+/// 壊し方 1 つ分の記述（S10-a）。
+///
+/// **原則として 1 か所だけを壊す**（S9-b-2 と同じ。2 か所壊すと、どちらで拒まれた
+/// のかが分からない）。**例外は「1 つの論理的な変更が 2 つの欄にまたがる」場合だけ**
+/// で、inode テーブルを像の外へ伸ばす case がそれに当たる（`s_inodes_count` と
+/// `s_inodes_per_group` を揃えて動かさないと、別の検査に先に当たる）。
+struct CorruptFsCase {
+    /// 判定行に出す壊し方の説明。**「何をしたか」を書く。**
+    what: &'static str,
+    /// 書き換え（空なら [`CorruptFsCase::truncate_to`] だけを使う）。
+    patches: &'static [FsPatch],
+    /// 像をこの長さへ切り詰める（0 なら切り詰めない）。
+    truncate_to: usize,
+    /// `parse` が通った後に走らせる観測。
+    probe: FsProbe,
+    /// 期待する拒否理由。
+    expected: common::ext2::Ext2Error,
+}
+
+/// `parse` で拒まれるはずの case に付ける観測。**通ってしまったことが分かればよい。**
+fn fs_probe_nothing(_: &common::ext2::Ext2<'_>) -> Result<(), common::ext2::Ext2Error> {
+    Ok(())
+}
+
+/// ルート inode を読む。
+fn fs_probe_root_inode(fs: &common::ext2::Ext2<'_>) -> Result<(), common::ext2::Ext2Error> {
+    fs.inode(common::ext2::ROOT_INODE).map(|_| ())
+}
+
+/// 名乗った最大の inode を読む。**inode テーブルの端の算術に当たる。**
+fn fs_probe_highest_inode(fs: &common::ext2::Ext2<'_>) -> Result<(), common::ext2::Ext2Error> {
+    fs.inode(fs.inodes_count()).map(|_| ())
+}
+
+/// ルートディレクトリを最後まで走査する。
+fn fs_probe_root_walk(fs: &common::ext2::Ext2<'_>) -> Result<(), common::ext2::Ext2Error> {
+    let root = fs.inode(common::ext2::ROOT_INODE)?;
+    for entry in fs.directory_entries(&root)? {
+        entry?;
+    }
+    Ok(())
+}
+
+/// `/etc/motd` を名前で引く。
+fn fs_probe_lookup_motd(fs: &common::ext2::Ext2<'_>) -> Result<(), common::ext2::Ext2Error> {
+    fs.lookup(b"/etc/motd").map(|_| ())
+}
+
+/// `/etc/motd` を最後のブロックまで読む。
+fn fs_probe_read_motd(fs: &common::ext2::Ext2<'_>) -> Result<(), common::ext2::Ext2Error> {
+    fs_read_whole_file(fs, b"/etc/motd")
+}
+
+/// `/data/indirect-first` を最後のブロックまで読む。**単一間接の先まで届く。**
+fn fs_probe_read_indirect_first(
+    fs: &common::ext2::Ext2<'_>,
+) -> Result<(), common::ext2::Ext2Error> {
+    fs_read_whole_file(fs, b"/data/indirect-first")
+}
+
+/// パスで引いたファイルを、最初のブロックから最後まで読む。
+fn fs_read_whole_file(
+    fs: &common::ext2::Ext2<'_>,
+    path: &[u8],
+) -> Result<(), common::ext2::Ext2Error> {
+    let inode = fs.lookup(path)?;
+    for index in 0..fs.block_span(&inode) {
+        fs.file_block(&inode, index as u32)?;
+    }
+    Ok(())
+}
+
+/// 壊した ext2 の像が拒まれ、**カーネルが止まらない**ことを確かめる（S10-a）。
+///
+/// # 既定ビルドで毎起動走らせる
+///
+/// **壊す対象がデータなので、破壊 feature ではなく像を壊す**（S9-b-2 と同じ形。
+/// `docs/roadmap.md` の S10）。**破壊 feature の中だけで壊すと、「壊す処理そのものが
+/// 壊れている」ことに気づけない。**
+///
+/// # 4 つの線に対する反証である
+///
+/// - **線1**: 切り詰めた像。**切り出しが範囲外へ出ない**
+/// - **線2**: ブロックサイズの桁あふれ、inode テーブルの位置の算術
+/// - **線3**: group descriptor・`i_block`・dirent・間接ブロックの、4 種類の参照
+/// - **線4**: `rec_len` が 0。**「止まらないこと」は「エラーが返ること」で観測する**
+///   ——この case が返ってきた時点で、走査が止まったことが示されている
+///
+/// # 置いていない壊し方と、その理由
+///
+/// - **ビットマップと使用状況の矛盾**: `e2fsck` の仕事である（`common::ext2` の
+///   「扱わないもの」）。**読み取りには要らない**
+/// - **チェックサム**: ext2 に無い（ext4 の機能）
+/// - **バックアップ superblock との食い違い**: 突き合わせていないので、壊しても
+///   何も起きない。**検査していないものを壊しても反証にならない**
+/// - **`s_state` が clean でない**: **読み取りは拒まない**（Linux も読み取り専用
+///   マウントは許す）。**拒まないと決めたものを、拒むことの反証にはできない**
+/// - **二重・三重間接と穴**: **この像には作れない。** 二重間接が要るのは 4 MiB 超の
+///   ファイルからで 2 MiB の像に入らず、`mke2fs -d` は穴を作らない。
+///   **ホストテストが見ている**（`common::ext2` の
+///   `refuses_a_file_that_uses_the_double_or_triple_indirect_slots` ほか）
+fn verify_corrupt_fs_image_is_rejected(logger: &mut Logger<SerialPort>) {
+    use common::ext2::{Ext2, Ext2Error};
+
+    /// `s_inodes_count` と `s_inodes_per_group` を揃えて動かす値。
+    const HUGE_INODE_COUNT: u64 = 600_000;
+    /// `etc` を `xtc` にする 1 バイト。**名前が変われば、パスは解決しない。**
+    const MOTD_PATH_BREAKING_BYTE: u64 = b'x' as u64;
+    /// そのときに inode テーブルの端が要求するバイト位置。
+    const HUGE_INODE_END: u64 =
+        FS_INODE_TABLE as u64 + (HUGE_INODE_COUNT - 1) * FS_INODE_SIZE as u64 + 128;
+
+    let cases: &[CorruptFsCase] = &[
+        CorruptFsCase {
+            what: "truncated to 512 bytes (the superblock does not fit)",
+            patches: &[],
+            truncate_to: 512,
+            probe: fs_probe_nothing,
+            expected: Ext2Error::TooShort,
+        },
+        CorruptFsCase {
+            what: "s_magic zeroed",
+            patches: &[FsPatch {
+                offset: FS_SUPERBLOCK + 56,
+                value: 0,
+                width: 2,
+            }],
+            truncate_to: 0,
+            probe: fs_probe_nothing,
+            expected: Ext2Error::BadMagic,
+        },
+        CorruptFsCase {
+            what: "s_rev_level set to 0 (no s_inode_size, no s_first_ino)",
+            patches: &[FsPatch {
+                offset: FS_SUPERBLOCK + 76,
+                value: 0,
+                width: 4,
+            }],
+            truncate_to: 0,
+            probe: fs_probe_nothing,
+            expected: Ext2Error::UnsupportedRevision(0),
+        },
+        CorruptFsCase {
+            what: "an unknown INCOMPAT bit set alongside FILETYPE",
+            patches: &[FsPatch {
+                offset: FS_SUPERBLOCK + 96,
+                value: 0x42,
+                width: 4,
+            }],
+            truncate_to: 0,
+            probe: fs_probe_nothing,
+            expected: Ext2Error::UnsupportedIncompatFeatures(0x40),
+        },
+        CorruptFsCase {
+            what: "s_log_block_size set to 31 (1024 << 31 overflows)",
+            patches: &[FsPatch {
+                offset: FS_SUPERBLOCK + 24,
+                value: 31,
+                width: 4,
+            }],
+            truncate_to: 0,
+            probe: fs_probe_nothing,
+            expected: Ext2Error::BadBlockSizeShift(31),
+        },
+        CorruptFsCase {
+            what: "s_blocks_count claiming 65536 blocks (256 MiB)",
+            patches: &[FsPatch {
+                offset: FS_SUPERBLOCK + 4,
+                value: 65_536,
+                width: 4,
+            }],
+            truncate_to: 0,
+            probe: fs_probe_nothing,
+            expected: Ext2Error::ImageTooSmall {
+                needed: 65_536 * FS_BLOCK_SIZE as u64,
+                actual: CORRUPT_FS_LEN as u64,
+            },
+        },
+        CorruptFsCase {
+            what: "s_inodes_per_group zeroed (a divisor of zero)",
+            patches: &[FsPatch {
+                offset: FS_SUPERBLOCK + 40,
+                value: 0,
+                width: 4,
+            }],
+            truncate_to: 0,
+            probe: fs_probe_nothing,
+            expected: Ext2Error::ZeroPerGroup,
+        },
+        CorruptFsCase {
+            what: "group 0's bg_inode_table pointing past the filesystem",
+            patches: &[FsPatch {
+                offset: FS_GROUP_DESCRIPTORS + 8,
+                value: 65_535,
+                width: 4,
+            }],
+            truncate_to: 0,
+            probe: fs_probe_root_inode,
+            expected: Ext2Error::BlockOutOfRange(65_535),
+        },
+        CorruptFsCase {
+            what: "the inode table stretched past the end of the image",
+            patches: &[
+                FsPatch {
+                    offset: FS_SUPERBLOCK,
+                    value: HUGE_INODE_COUNT,
+                    width: 4,
+                },
+                FsPatch {
+                    offset: FS_SUPERBLOCK + 40,
+                    value: HUGE_INODE_COUNT,
+                    width: 4,
+                },
+            ],
+            truncate_to: 0,
+            probe: fs_probe_highest_inode,
+            expected: Ext2Error::InodeTableOutOfRange {
+                inode: HUGE_INODE_COUNT as u32,
+                needed: HUGE_INODE_END,
+            },
+        },
+        CorruptFsCase {
+            what: "the root inode's i_block[0] pointing past the filesystem",
+            patches: &[FsPatch {
+                offset: FS_ROOT_INODE_AT + 40,
+                value: 65_535,
+                width: 4,
+            }],
+            truncate_to: 0,
+            probe: fs_probe_root_inode,
+            expected: Ext2Error::BlockOutOfRange(65_535),
+        },
+        CorruptFsCase {
+            what: "the root inode's i_mode changed to a regular file",
+            patches: &[FsPatch {
+                offset: FS_ROOT_INODE_AT,
+                value: 0o100_644,
+                width: 2,
+            }],
+            truncate_to: 0,
+            probe: fs_probe_root_walk,
+            expected: Ext2Error::NotADirectory(2),
+        },
+        CorruptFsCase {
+            what: "the root inode's i_size grown past its blocks",
+            patches: &[FsPatch {
+                offset: FS_ROOT_INODE_AT + 4,
+                value: 100_000,
+                width: 4,
+            }],
+            truncate_to: 0,
+            probe: fs_probe_root_walk,
+            expected: Ext2Error::SparseBlock(1),
+        },
+        CorruptFsCase {
+            what: "the \"etc\" entry's rec_len zeroed (the walk would not advance)",
+            patches: &[FsPatch {
+                offset: FS_ROOT_ETC_ENTRY + 4,
+                value: 0,
+                width: 2,
+            }],
+            truncate_to: 0,
+            probe: fs_probe_root_walk,
+            expected: Ext2Error::DirEntryRecordTooSmall {
+                rec_len: 0,
+                name_len: 3,
+            },
+        },
+        CorruptFsCase {
+            what: "the \"etc\" entry's rec_len made odd",
+            patches: &[FsPatch {
+                offset: FS_ROOT_ETC_ENTRY + 4,
+                value: 13,
+                width: 2,
+            }],
+            truncate_to: 0,
+            probe: fs_probe_root_walk,
+            expected: Ext2Error::DirEntryMisaligned(13),
+        },
+        CorruptFsCase {
+            what: "the \"etc\" entry's rec_len reaching past the block",
+            patches: &[FsPatch {
+                offset: FS_ROOT_ETC_ENTRY + 4,
+                value: 5_000,
+                width: 2,
+            }],
+            truncate_to: 0,
+            probe: fs_probe_root_walk,
+            expected: Ext2Error::DirEntryRecordPastBlock {
+                rec_len: 5_000,
+                remaining: 4_028,
+            },
+        },
+        CorruptFsCase {
+            what: "the \"etc\" entry pointing at an inode outside the table",
+            patches: &[FsPatch {
+                offset: FS_ROOT_ETC_ENTRY,
+                value: 9_999,
+                width: 4,
+            }],
+            truncate_to: 0,
+            probe: fs_probe_root_walk,
+            expected: Ext2Error::InodeOutOfRange(9_999),
+        },
+        CorruptFsCase {
+            what: "the \"etc\" entry renamed to \"xtc\" (the path stops resolving)",
+            patches: &[FsPatch {
+                offset: FS_ROOT_ETC_ENTRY + 8,
+                value: MOTD_PATH_BREAKING_BYTE,
+                width: 1,
+            }],
+            truncate_to: 0,
+            probe: fs_probe_lookup_motd,
+            expected: Ext2Error::NotFound,
+        },
+        CorruptFsCase {
+            what: "the single indirect table's first entry pointing past the filesystem",
+            patches: &[FsPatch {
+                offset: FS_INDIRECT_TABLE_BLOCK,
+                value: 65_535,
+                width: 4,
+            }],
+            truncate_to: 0,
+            probe: fs_probe_read_indirect_first,
+            expected: Ext2Error::BlockOutOfRange(65_535),
+        },
+        CorruptFsCase {
+            what: "/etc/motd's i_size grown past its blocks",
+            patches: &[FsPatch {
+                offset: FS_MOTD_INODE_AT + 4,
+                value: 100_000,
+                width: 4,
+            }],
+            truncate_to: 0,
+            probe: fs_probe_read_motd,
+            expected: Ext2Error::SparseBlock(1),
+        },
+    ];
+
+    // **健全な対照を先に走らせる。** 切り出した先頭が、それ自体で読み切れる像で
+    // あることを確かめる。**ここが落ちたら、壊す側ではなく切り出す長さが足りない。**
+    // SAFETY: 起動時の単一実行文脈で、この静的領域を触るのはこの関数だけである。
+    let control = unsafe {
+        let buf = &mut *core::ptr::addr_of_mut!(CORRUPT_FS_IMAGE);
+        build_truncated_fs_image(buf);
+        &buf[..]
+    };
+    match Ext2::parse(control) {
+        Ok(fs) => {
+            let probes: [(&str, FsProbe); 5] = [
+                ("root inode", fs_probe_root_inode),
+                ("root walk", fs_probe_root_walk),
+                ("lookup /etc/motd", fs_probe_lookup_motd),
+                ("read /etc/motd", fs_probe_read_motd),
+                ("read /data/indirect-first", fs_probe_read_indirect_first),
+            ];
+            for (name, probe) in probes {
+                if let Err(e) = probe(&fs) {
+                    logger.error(format_args!(
+                        "ext2-corrupt: the untouched {CORRUPT_FS_BLOCKS}-block prefix failed \
+                         the \"{name}\" probe with {e:?}. The prefix is too short to hold \
+                         everything the image references; raise CORRUPT_FS_BLOCKS. halting"
+                    ));
+                    cpu::halt_forever();
+                }
+            }
+        }
+        Err(e) => {
+            logger.error(format_args!(
+                "ext2-corrupt: the untouched {CORRUPT_FS_BLOCKS}-block prefix did not parse \
+                 ({e:?}); halting"
+            ));
+            cpu::halt_forever();
+        }
+    }
+
+    let mut rejected = 0usize;
+    for case in cases {
+        // 毎回、健全な像から作り直す。**前の壊し方が残らないようにする。**
+        // SAFETY: 起動時の単一実行文脈で、この静的領域を触るのはこの関数だけである。
+        let image = unsafe {
+            let buf = &mut *core::ptr::addr_of_mut!(CORRUPT_FS_IMAGE);
+            build_truncated_fs_image(buf);
+            for patch in case.patches {
+                for i in 0..patch.width {
+                    buf[patch.offset + i] = ((patch.value >> (i * 8)) & 0xFF) as u8;
+                }
+            }
+            if case.truncate_to != 0 {
+                &buf[..case.truncate_to]
+            } else {
+                &buf[..]
+            }
+        };
+
+        let outcome = match Ext2::parse(image) {
+            Ok(fs) => (case.probe)(&fs),
+            Err(e) => Err(e),
+        };
+        match outcome {
+            Ok(()) => {
+                logger.error(format_args!(
+                    "ext2-corrupt: {} was accepted; expected {:?}; halting",
+                    case.what, case.expected
+                ));
+                cpu::halt_forever();
+            }
+            Err(e) if e != case.expected => {
+                logger.error(format_args!(
+                    "ext2-corrupt: {} was rejected as {e:?}, expected {:?}; halting",
+                    case.what, case.expected
+                ));
+                cpu::halt_forever();
+            }
+            Err(e) => {
+                logger.info(format_args!("ext2-corrupt: {} -> {e:?}", case.what));
+                rejected += 1;
+            }
+        }
+    }
+
+    verify_fs_content_mismatch_is_noticed(logger, &mut rejected);
+
+    logger.info(format_args!(
+        "ext2-corrupt: all {rejected} corrupted image(s) were refused with the expected reason, \
+         and the kernel continued (the embedded image is untouched; each case patches a fresh \
+         copy of its first {CORRUPT_FS_BLOCKS} blocks)"
+    ));
+
+    // 壊した後も、抱えている像が読めること。**壊す処理が元を汚していないことの主張。**
+    if Ext2::parse(FS_IMAGE).is_err() {
+        logger.error(format_args!(
+            "ext2-corrupt: the embedded image no longer parses after the corruption pass; halting"
+        ));
+        cpu::halt_forever();
+    }
+}
+
+/// **パーサは通るが、カーネル自身の突き合わせが食い違いに気づく**壊し方（S10-a）。
+///
+/// # 上の表とは観測が違う
+///
+/// あちらは**パーサがエラーを返す**ことを見る。**こちらは読めてしまう**——
+/// 形はすべて妥当なままで、**違うのは中身だけである。** 気づくのはパーサではなく
+/// **既知のバイト列と突き合わせている側**である（`verify_path_lookup`）。
+///
+/// **この 2 つを表に混ぜない。** 混ぜると「エラーが返る」と「値が違う」が
+/// 同じ主張に見える。
+fn verify_fs_content_mismatch_is_noticed(logger: &mut Logger<SerialPort>, rejected: &mut usize) {
+    use common::ext2::Ext2;
+
+    let cases: [(&str, FsPatch); 2] = [
+        (
+            "/etc/motd's i_size shrunk to 4 bytes",
+            FsPatch {
+                offset: FS_MOTD_INODE_AT + 4,
+                value: 4,
+                width: 4,
+            },
+        ),
+        (
+            "the first byte of /etc/motd's contents zeroed",
+            FsPatch {
+                offset: FS_MOTD_DATA_BLOCK,
+                value: 0,
+                width: 1,
+            },
+        ),
+    ];
+
+    for (what, patch) in cases {
+        // SAFETY: 起動時の単一実行文脈で、この静的領域を触るのはこの pass だけである。
+        let image = unsafe {
+            let buf = &mut *core::ptr::addr_of_mut!(CORRUPT_FS_IMAGE);
+            build_truncated_fs_image(buf);
+            for i in 0..patch.width {
+                buf[patch.offset + i] = ((patch.value >> (i * 8)) & 0xFF) as u8;
+            }
+            &buf[..]
+        };
+
+        let Ok(fs) = Ext2::parse(image) else {
+            logger.error(format_args!(
+                "ext2-corrupt: {what} made the image unparseable, but this case is about a \
+                 mismatch that the parser cannot see; halting"
+            ));
+            cpu::halt_forever();
+        };
+        let contents = match fs
+            .lookup(b"/etc/motd")
+            .and_then(|inode| fs.file_block(&inode, 0))
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                logger.error(format_args!(
+                    "ext2-corrupt: {what} made /etc/motd unreadable ({e:?}), but this case is \
+                     about a mismatch in what is read; halting"
+                ));
+                cpu::halt_forever();
+            }
+        };
+        if contents == MOTD_SEED {
+            logger.error(format_args!(
+                "ext2-corrupt: {what} still read back as the seed file; the comparison in \
+                 verify_path_lookup would not have noticed; halting"
+            ));
+            cpu::halt_forever();
+        }
+        logger.info(format_args!(
+            "ext2-corrupt: {what} -> read {} byte(s) that differ from the seed",
+            contents.len()
+        ));
+        *rejected += 1;
+    }
+}
+
+/// 抱えている像の先頭 [`CORRUPT_FS_BLOCKS`] ブロックを写し、それ自体で読み切れる
+/// 像に直す（S10-a）。
+///
+/// **`s_blocks_count` を切り出した長さへ合わせる。** 直さないと `parse` が
+/// [`common::ext2::Ext2Error::ImageTooSmall`] で拒み、**壊し方に関係なく
+/// すべての case が同じ理由で落ちる。**
+fn build_truncated_fs_image(buf: &mut [u8; CORRUPT_FS_LEN]) {
+    buf.copy_from_slice(&FS_IMAGE[..CORRUPT_FS_LEN]);
+    buf[FS_SUPERBLOCK + 4..FS_SUPERBLOCK + 8]
+        .copy_from_slice(&(CORRUPT_FS_BLOCKS as u32).to_le_bytes());
 }
 
 /// 壊した像を組み立てる作業領域（S9-b-2）。
