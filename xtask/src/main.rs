@@ -841,6 +841,34 @@ const SYSCALL_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // S10-b: read が位置を進めない。**1 回だけ読むぶんには正しく見える**ので、
+    // 最初に落ちるのは「末尾での read が 0 を返す」の検算である（位置が 0 のままなので
+    // 2 回目も 18 を返す）。**短く読んでから続きを読む検算より先に、ここが捕まえる。**
+    CriticalTest {
+        name: "read-no-advance",
+        feature: "syscall-test-read-no-advance",
+        expected_markers: &[
+            "user-run: syscall-test exited with status 13",
+            "reading at the end of the file did not return 0",
+        ],
+        forbidden_markers: &["user-load: syscall-test ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // S10-b: stat の st_blocks を 512 バイト単位でなくバイト数で書く。**単位の
+    // 取り違えは値がもっともらしいままである**（4096 は 8 と同じくらい「ありそう」に
+    // 見える）ので、突き合わせる相手が無いと気づけない。
+    CriticalTest {
+        name: "stat-blocks-in-bytes",
+        feature: "syscall-test-stat-blocks-in-bytes",
+        expected_markers: &[
+            "user-run: syscall-test exited with status 21",
+            "st_blocks was not 8 (512-byte units)",
+        ],
+        forbidden_markers: &["user-load: syscall-test ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // S9-a: 容量超過の errno を分ける前へ戻す。**この分岐は S9-a で初めて通るように
     // なった経路である。** 通り始めたばかりの経路を手で1度確かめただけにしないため、
     // 永続の破壊として置く。次に dispatch を触ったときに落ちる。
@@ -6857,7 +6885,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 21,
-    full: 122,
+    full: 124,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

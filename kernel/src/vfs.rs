@@ -161,6 +161,11 @@ impl Inode {
         self.ext2.links_count
     }
 
+    /// 占めている 512 バイト単位のブロック数（Linux の `st_blocks` と同じ単位）。
+    pub fn blocks_512(&self) -> u32 {
+        self.ext2.blocks_512
+    }
+
     /// ディレクトリか。
     pub fn is_directory(&self) -> bool {
         self.ext2.is_directory()
@@ -340,6 +345,7 @@ mod tests {
             mode,
             size,
             links_count: 1,
+            blocks_512: size.div_ceil(512) as u32,
             blocks: [0; ext2::INODE_BLOCK_COUNT],
         })
     }

@@ -49,6 +49,12 @@
 //! - `15` 続きの `read` が残りの 13 を返さなかった、または中身が食い違った
 //! - `16` ディレクトリの `read` が `-EISDIR` を返さなかった
 //! - `17` 閉じた fd の `read` が `-EBADF` を返さなかった
+//! - `18` `stat("/etc/motd")` が 0 を返さなかった
+//! - `19` `st_size` が 18 でなかった
+//! - `20` `st_mode` が通常ファイルを表していなかった
+//! - `21` `st_blocks` が 8 でなかった（**512 バイト単位**）
+//! - `22` `/etc` の `st_mode` がディレクトリを表していなかった
+//! - `23` `stat("/nope")` が `-ENOENT` を返さなかった
 //!
 //! # 中身の突き合わせは `hello` の `write` と同じ形である
 //!
@@ -122,6 +128,22 @@ const MOTD_HEAD: u32 = 5;
 const MOTD_TAIL: u32 = 13;
 /// 末尾を越えて要求する長さ。**`i_size` で切られるはずである。**
 const OVER_READ: u32 = 100;
+/// `stat` の番号（Linux と同じ 4）。
+const SYS_STAT: u32 = 4;
+/// `struct stat` の `st_mode` の位置（実測）。
+const STAT_MODE_OFFSET: u32 = 24;
+/// `struct stat` の `st_size` の位置（実測）。
+const STAT_SIZE_OFFSET: u32 = 48;
+/// `struct stat` の `st_blocks` の位置（実測）。
+const STAT_BLOCKS_OFFSET: u32 = 64;
+/// `st_mode` のうちファイル種別を表すビット。
+const MODE_FORMAT_MASK: u32 = 0xF000;
+/// 種別: 通常ファイル。
+const MODE_REGULAR: u32 = 0x8000;
+/// 種別: ディレクトリ。
+const MODE_DIRECTORY: u32 = 0x4000;
+/// `/etc/motd` が占める 512 バイト単位のブロック数。**4096 の 1 ブロック分である。**
+const MOTD_BLOCKS: u32 = 8;
 
 core::arch::global_asm!(
     // **entry の手前に詰め物を置く**（`hello.rs` と同じ理由）。
@@ -346,6 +368,51 @@ core::arch::global_asm!(
     "  jne 9f",
     "  add rsp, 64",
 
+    // --- 18..21. stat("/etc/motd")。**埋まる欄を突き合わせる** ---
+    // `struct stat` は 144 バイトなので、スタックへ余裕を取る。
+    "  sub rsp, 192",
+    "  mov eax, {sys_stat}",
+    "  lea rdi, [rip + MOTD_PATH]",
+    "  mov rsi, rsp",
+    "  int 0x80",
+    "  test rax, rax",
+    "  mov edi, 18",
+    "  jne 9f",
+    "  mov rax, [rsp + {stat_size_off}]",
+    "  cmp rax, {motd_len}",
+    "  mov edi, 19",
+    "  jne 9f",
+    "  mov eax, [rsp + {stat_mode_off}]",
+    "  and eax, {mode_mask}",
+    "  cmp eax, {mode_regular}",
+    "  mov edi, 20",
+    "  jne 9f",
+    "  mov rax, [rsp + {stat_blocks_off}]",
+    "  cmp rax, {motd_blocks}",
+    "  mov edi, 21",
+    "  jne 9f",
+
+    // --- 22. /etc は ディレクトリ ---
+    "  mov eax, {sys_stat}",
+    "  lea rdi, [rip + ETC_PATH]",
+    "  mov rsi, rsp",
+    "  int 0x80",
+    "  mov eax, [rsp + {stat_mode_off}]",
+    "  and eax, {mode_mask}",
+    "  cmp eax, {mode_directory}",
+    "  mov edi, 22",
+    "  jne 9f",
+
+    // --- 23. 無いパス。-ENOENT が返るはず ---
+    "  mov eax, {sys_stat}",
+    "  lea rdi, [rip + MISSING_PATH]",
+    "  mov rsi, rsp",
+    "  int 0x80",
+    "  cmp rax, {minus_enoent}",
+    "  mov edi, 23",
+    "  jne 9f",
+    "  add rsp, 192",
+
     // すべて通った。
     "  xor edi, edi",
 
@@ -401,6 +468,14 @@ core::arch::global_asm!(
     motd_head = const MOTD_HEAD,
     motd_tail = const MOTD_TAIL,
     over_read = const OVER_READ,
+    sys_stat = const SYS_STAT,
+    stat_mode_off = const STAT_MODE_OFFSET,
+    stat_size_off = const STAT_SIZE_OFFSET,
+    stat_blocks_off = const STAT_BLOCKS_OFFSET,
+    mode_mask = const MODE_FORMAT_MASK,
+    mode_regular = const MODE_REGULAR,
+    mode_directory = const MODE_DIRECTORY,
+    motd_blocks = const MOTD_BLOCKS,
 );
 
 #[panic_handler]

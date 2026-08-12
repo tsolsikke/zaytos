@@ -206,6 +206,48 @@ pub const SYS_EXIT: u64 = 60;
 /// `read(fd, buf, count)`（S10-b）。**Linux の番号 0 をそのまま使う。**
 pub const SYS_READ: u64 = 0;
 
+/// `stat(path, statbuf)`（S10-b）。**Linux の番号 4 をそのまま使う。**
+///
+/// # `fstat`（5）は置かない
+///
+/// あちらは fd を取る。**表の中の inode を返すだけなので実装は短いが、
+/// 要ると分かってから足す**（S10-b の棚卸しの判断）。
+pub const SYS_STAT: u64 = 4;
+
+/// `struct stat` のバイト数（x86-64 の Linux）。**実測で確かめた。**
+///
+/// # 欄の位置
+///
+/// `gcc` の `offsetof` で測った値である（`sys/stat.h`）。
+/// **記憶から書かない**（`docs/coding-standards.md` の「実測値は、測った条件が
+/// 変わると古くなる」）。
+///
+/// | 欄 | 位置 | 幅 |
+/// |---|---|---|
+/// | `st_dev` | 0 | 8 |
+/// | `st_ino` | 8 | 8 |
+/// | `st_nlink` | 16 | 8 |
+/// | `st_mode` | 24 | 4 |
+/// | `st_uid` | 28 | 4 |
+/// | `st_gid` | 32 | 4 |
+/// | `st_rdev` | 40 | 8 |
+/// | `st_size` | 48 | 8 |
+/// | `st_blksize` | 56 | 8 |
+/// | `st_blocks` | 64 | 8 |
+/// | `st_atim` | 72 | 16 |
+/// | `st_mtim` | 88 | 16 |
+/// | `st_ctim` | 104 | 16 |
+///
+/// 36..40 と 120..144 は詰め物である（`__pad0` と `__unused[3]`）。
+pub const STAT_LEN: usize = 144;
+
+/// `struct stat` の欄の位置。**上の表と対になっている。**
+const STAT_INO: usize = 8;
+const STAT_NLINK: usize = 16;
+const STAT_MODE: usize = 24;
+const STAT_SIZE: usize = 48;
+const STAT_BLOCKS: usize = 64;
+
 /// `open(path, flags, mode)`（S10-b）。**Linux の番号 2 をそのまま使う。**
 ///
 /// # `openat`（257）は採らない
@@ -656,6 +698,10 @@ unsafe fn dispatch(
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
             unsafe { sys_read(args[0], args[1], args[2], pml4_phys, direct_map) }
         }
+        SYS_STAT => {
+            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+            unsafe { sys_stat(args[0], args[1], pml4_phys, direct_map) }
+        }
         SYS_OPEN => {
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
             unsafe { sys_open(args[0], args[1], pml4_phys, direct_map) }
@@ -899,6 +945,10 @@ unsafe fn sys_read(
 
     // **位置を進めるのは、写し終えた後である。** 途中で失敗したら進めない
     // （呼び出し側から見て「読めなかったぶんは読めていない」）。
+    //
+    // 破壊 (S10-b, read-no-advance): 位置を進めない。**1 回だけ読むぶんには
+    // 正しく見える**——短く読んでから続きを読む検算だけが食い違う。
+    #[cfg(not(feature = "syscall-test-read-no-advance"))]
     crate::vfs::with_current_files(|files| {
         if let Ok(file) = files.get_mut(fd as usize) {
             file.advance(done);
@@ -951,6 +1001,85 @@ unsafe fn sys_open(path: u64, flags: u64, pml4_phys: PhysAddr, direct_map: Direc
         Ok(fd) => fd as u64,
         Err(e) => (-errno_for_file_table(e)) as u64,
     })
+}
+
+/// `stat(path, statbuf)` の本体（S10-b）。
+///
+/// # 埋まる欄は 5 つで、残りは 0 である
+///
+/// ext2 の inode から埋まるのは `st_ino`・`st_nlink`・`st_mode`・`st_size`・
+/// `st_blocks` である。**残りは 0 にする。**
+///
+/// **0 は未実装であって値ではない。** 内訳は次のとおりで、
+/// **どれも「0 という値を持っている」のではない。**
+///
+/// - `st_dev` / `st_rdev`——**デバイス番号の体系が無い。** 像は 1 つで、
+///   `BlockDevice` の trait も引いていない（`docs/roadmap.md` の S10）
+/// - `st_blksize`——**入出力の推奨単位という概念が無い。** ブロックサイズなら
+///   `Ext2::block_size` で分かるが、**`st_blksize` はそれとは別の意味である**
+///   ので、分かる値で埋めない
+/// - `st_atim` / `st_mtim` / `st_ctim`——**像の時刻を 0 に潰してある。**
+///   `kernel/build.rs` の `zero_image_timestamps` が superblock の 3 つと全 inode の
+///   4 つを 0 で上書きしており、**`mke2fs` の出力を決定的にするための帰結である。**
+///   **なぜ 0 なのかは、そこに 1 箇所ある**
+/// - `st_uid` / `st_gid`——**利用者の概念が無い。** ext2 の inode は値を持っているが、
+///   **その値を照合する相手がカーネルの側に無い**ので、持っていることにしない
+///
+/// # `st_blocks` の単位
+///
+/// **512 バイト単位である**（ブロックサイズ単位ではない）。**ext2 の `i_blocks` も
+/// 同じ単位なので、そのまま写す**（実測で確かめた。`common::ext2::Inode` の
+/// `blocks_512` の doc）。
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn sys_stat(path: u64, statbuf: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -> u64 {
+    let mut name = [0u8; PATH_MAX];
+    // SAFETY: 呼び出し元契約をそのまま渡す。
+    let len = match unsafe { copy_user_path(&mut name, path, pml4_phys, direct_map) } {
+        Ok(len) => len,
+        Err(errno) => return (-errno) as u64,
+    };
+
+    let fs = match crate::vfs::root_filesystem() {
+        Ok(fs) => fs,
+        Err(e) => return (-errno_for_ext2(e)) as u64,
+    };
+    let inode = match fs.lookup(&name[..len]) {
+        Ok(inode) => inode,
+        Err(e) => return (-errno_for_ext2(e)) as u64,
+    };
+
+    // **0 で埋めてから、分かる欄だけを書く。** 「書かなかった欄は 0」が
+    // 構造で決まるので、埋め忘れが未定義の値として出ない。
+    let mut out = [0u8; STAT_LEN];
+    out[STAT_INO..STAT_INO + 8].copy_from_slice(&u64::from(inode.number).to_le_bytes());
+    out[STAT_NLINK..STAT_NLINK + 8].copy_from_slice(&u64::from(inode.links_count).to_le_bytes());
+    out[STAT_MODE..STAT_MODE + 4].copy_from_slice(&u32::from(inode.mode).to_le_bytes());
+    out[STAT_SIZE..STAT_SIZE + 8].copy_from_slice(&inode.size.to_le_bytes());
+    // 破壊 (S10-b, stat-blocks-in-bytes): `st_blocks` を 512 バイト単位ではなく
+    // バイト数で書く。**単位の取り違えは値が「もっともらしい」ままなので、
+    // 突き合わせる相手が無いと気づけない。** syscall-test の検算が捕まえる。
+    #[cfg(not(feature = "syscall-test-stat-blocks-in-bytes"))]
+    let blocks = u64::from(inode.blocks_512);
+    #[cfg(feature = "syscall-test-stat-blocks-in-bytes")]
+    let blocks = u64::from(inode.blocks_512) * 512;
+    out[STAT_BLOCKS..STAT_BLOCKS + 8].copy_from_slice(&blocks.to_le_bytes());
+
+    // **踏み込む前に検証する。**
+    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    let Some(slice) =
+        (unsafe { validate_user_range(pml4_phys, direct_map, statbuf, STAT_LEN as u64) })
+    else {
+        return (-EFAULT) as u64;
+    };
+    // SAFETY: slice は検証済みで、長さは STAT_LEN ちょうどである。
+    let written = unsafe { copy_to_user(&slice, 0, &out) };
+    if written != STAT_LEN {
+        return (-EFAULT) as u64;
+    }
+    0
 }
 
 /// ユーザー空間の NUL 終端のパスを、カーネルのバッファへ写す（S10-b）。

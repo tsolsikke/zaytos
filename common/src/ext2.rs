@@ -298,6 +298,12 @@ pub struct Inode {
     pub size: u64,
     /// `i_links_count`。
     pub links_count: u16,
+    /// `i_blocks`。**512 バイト単位である**（ブロックサイズ単位ではない）。
+    ///
+    /// **間接ブロックも数に入る。** 実測で `/data/indirect-first` は 112 で、
+    /// 14 ブロック分（データ 13 + 単一間接 1）× 4096 / 512 である。
+    /// **Linux の `st_blocks` がそのまま同じ意味なので、写すだけで足りる。**
+    pub blocks_512: u32,
     /// `i_block`。0..12 が直接、12 が単一間接、13 が二重、14 が三重である。
     pub blocks: [u32; INODE_BLOCK_COUNT],
 }
@@ -724,6 +730,7 @@ impl<'a> Ext2<'a> {
             mode,
             size,
             links_count: read_u16(raw, 26),
+            blocks_512: read_u32(raw, 28),
             blocks,
         })
     }
@@ -1131,6 +1138,9 @@ mod tests {
         image[at..at + 2].copy_from_slice(&mode.to_le_bytes());
         image[at + 4..at + 8].copy_from_slice(&size.to_le_bytes());
         image[at + 26..at + 28].copy_from_slice(&links.to_le_bytes());
+        // `i_blocks` は 512 バイト単位である。**ブロックサイズ単位ではない。**
+        let sectors = (blocks.len() as u32) * (4096 / 512);
+        image[at + 28..at + 32].copy_from_slice(&sectors.to_le_bytes());
         for (slot, block) in blocks.iter().enumerate() {
             let field = at + 40 + slot * 4;
             image[field..field + 4].copy_from_slice(&block.to_le_bytes());
@@ -1299,6 +1309,7 @@ mod tests {
         assert_eq!(root.mode, 0o040_755);
         assert_eq!(root.size, 4096);
         assert_eq!(root.links_count, 6);
+        assert_eq!(root.blocks_512, 8, "one 4096-byte block is 8 sectors");
         assert_eq!(root.blocks[0], ROOT_DATA_BLOCK);
         assert!(root.is_directory());
         assert!(!root.is_regular_file());

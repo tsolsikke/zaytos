@@ -5091,6 +5091,12 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
     ),
     (16, "reading a directory did not return -EISDIR"),
     (17, "reading a closed descriptor did not return -EBADF"),
+    (18, "stat(\"/etc/motd\") did not return 0"),
+    (19, "st_size was not 18"),
+    (20, "st_mode did not say regular file"),
+    (21, "st_blocks was not 8 (512-byte units)"),
+    (22, "st_mode for /etc did not say directory"),
+    (23, "stat(\"/nope\") did not return -ENOENT"),
 ];
 
 /// `fault-test` が起こす #PF のエラーコード（S9-b-3-2a）。
@@ -7572,6 +7578,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "syscall-test-eisdir-as-enotdir",
         cfg!(feature = "syscall-test-eisdir-as-enotdir"),
         "ディレクトリの read を -EISDIR でなく -ENOTDIR で返す",
+    ),
+    (
+        "syscall-test-read-no-advance",
+        cfg!(feature = "syscall-test-read-no-advance"),
+        "read がファイルの位置を進めない",
+    ),
+    (
+        "syscall-test-stat-blocks-in-bytes",
+        cfg!(feature = "syscall-test-stat-blocks-in-bytes"),
+        "stat の st_blocks を 512 バイト単位でなくバイト数で書く",
     ),
     (
         "exception-test",
