@@ -61,6 +61,17 @@
 //! - `27` `d_type` が通常ファイルとディレクトリを分けなかった
 //! - `28` 末尾での `getdents64` が 0 を返さなかった
 //! - `29` 1 レコードも収まらないバッファで `-EINVAL` を返さなかった
+//! - `30` `argc` が 2 でなかった
+//! - `31` `argv[0]` が "syscall-test" でなかった
+//! - `32` `argv[1]` が "alpha" でなかった
+//! - `33` `argv[2]`（終端）が NULL でなかった
+//! - `34` `envp` の終端が NULL でなかった
+//! - `35` `auxv` の終端（`AT_NULL`）が無かった
+//!
+//! # `argv` は `_start` の時点の `rsp` から読む
+//!
+//! **カーネルが Linux と同じ形で積む**（`argc` / `argv[]` / NULL / `envp[]` /
+//! NULL / `auxv`）。**入口で `rsp` を控えておかないと、後から辿れない。**
 //!
 //! # 中身の突き合わせは `hello` の `write` と同じ形である
 //!
@@ -166,6 +177,12 @@ const DT_REG: u32 = 8;
 const TINY_BUFFER: u32 = 16;
 /// `-EINVAL`。
 const MINUS_EINVAL: i32 = -22;
+/// 期待する `argc`。**カーネルの `USER_PROGRAMS` の `argv` と対になっている。**
+const EXPECTED_ARGC: u32 = 2;
+/// `argv[0]` の長さ（NUL を含む）。
+const ARGV0_LEN: u32 = 13;
+/// `argv[1]` の長さ（NUL を含む）。
+const ARGV1_LEN: u32 = 6;
 
 core::arch::global_asm!(
     // **entry の手前に詰め物を置く**（`hello.rs` と同じ理由）。
@@ -177,6 +194,43 @@ core::arch::global_asm!(
     ".section .text._start,\"ax\"",
     ".globl _start",
     "_start:",
+    // --- 30..35. 初期スタックが Linux の形で積まれていること ---
+    // **入口の rsp をそのまま使う。** ここより前で何も push していない。
+    // **後の検算は rbx を数えに使うので、控えても壊れる**——実測で踏んだ。
+    // argc / argv[0] / argv[1] / NULL / envp NULL / AT_NULL。
+    "  cmp qword ptr [rsp], {argc}",
+    "  mov edi, 30",
+    "  jne 9f",
+    // argv[0] は \"syscall-test\"。
+    "  cld",
+    "  mov rsi, [rsp + 8]",
+    "  lea rdi, [rip + ARGV0_TEXT]",
+    "  mov ecx, {argv0_len}",
+    "  repe cmpsb",
+    "  mov edi, 31",
+    "  jne 9f",
+    // argv[1] は \"alpha\"。
+    "  cld",
+    "  mov rsi, [rsp + 16]",
+    "  lea rdi, [rip + ARGV1_TEXT]",
+    "  mov ecx, {argv1_len}",
+    "  repe cmpsb",
+    "  mov edi, 32",
+    "  jne 9f",
+    // argv の終端。
+    "  cmp qword ptr [rsp + 24], 0",
+    "  mov edi, 33",
+    "  jne 9f",
+    // envp の終端（空なので、argv の終端の次）。
+    "  cmp qword ptr [rsp + 32], 0",
+    "  mov edi, 34",
+    "  jne 9f",
+    // auxv の終端（AT_NULL = 0）。
+    "  cmp qword ptr [rsp + 40], 0",
+    "  mov edi, 35",
+    "  jne 9f",
+
+
     // --- 1. probe。6 引数を規約どおりのレジスタへ置く ---
     "  mov edi, {arg0}",
     "  mov esi, {arg1}",
@@ -579,6 +633,11 @@ core::arch::global_asm!(
     "  .asciz \"/\"",
     "DATA_PATH:",
     "  .asciz \"/data\"",
+    // **カーネルが積む `argv` の写し。** 食い違えば 31 番か 32 番が落ちる。
+    "ARGV0_TEXT:",
+    "  .asciz \"syscall-test\"",
+    "ARGV1_TEXT:",
+    "  .asciz \"alpha\"",
     // **`/etc/motd` の中身の写し。** 種のファイルと食い違えば 12 番が落ちる。
     "MOTD_BYTES:",
     "  .ascii \"welco\"",
@@ -629,6 +688,9 @@ core::arch::global_asm!(
     dt_both = const DT_DIR | DT_REG,
     tiny = const TINY_BUFFER,
     minus_einval = const MINUS_EINVAL,
+    argc = const EXPECTED_ARGC,
+    argv0_len = const ARGV0_LEN,
+    argv1_len = const ARGV1_LEN,
 );
 
 #[panic_handler]

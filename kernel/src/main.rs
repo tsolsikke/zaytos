@@ -3707,6 +3707,8 @@ fn verify_embedded_user_elf(logger: &mut Logger<SerialPort>) {
 /// S9-b-2 の 2 つ目で壊し方を選ぶときの材料である。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UserLoadError {
+    /// `argv` と表と文字列が、スタックの 1 ページに収まらない（S11-1）。
+    ArgumentsTooLong,
     /// `Elf::parse` が拒んだ。**像がバイト列として壊れている。**
     Parse(common::elf::ElfError),
     /// `Elf::segment_data` が拒んだ。**区画のファイル内範囲が像の外にある。**
@@ -3843,6 +3845,116 @@ fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
     verify_path_lookup(logger, &fs);
     verify_single_indirect_boundary(logger, &fs);
 }
+
+/// ユーザープログラムの初期スタックを **Linux と同じ形で**積む（S11-1）。
+///
+/// 返すのは entry へ入るときの `rsp`（`argc` を指す）。
+///
+/// # 形は実測で確かめた
+///
+/// **ホストで、`_start` から `rsp` をたどる自作の静的バイナリを走らせて観測した。**
+/// `rsp` の指す先から順に——`argc`、`argv` のポインタ、NULL、`envp` のポインタ、
+/// NULL、そして `auxv` の `(type, value)` の対が続き、`type == 0`（`AT_NULL`）で
+/// 終わる。**文字列そのものはこの表より上（高位）に置かれる。**
+///
+/// **記憶で書かない**（`docs/coding-standards.md` の「実測値は、測った条件が
+/// 変わると古くなる」）。`docs/vision.md` の表は**Linux バイナリを動かすための
+/// 記述**で、そこには `AT_PHDR` などが要るとある。**こちらが積むのは自作の
+/// プログラム向けなので、要るものが違う。**
+///
+/// # 何を積み、何を積まないか
+///
+/// **`argc` と `argv` は積む。** `envp` は**空**（終端だけ）、`auxv` は
+/// **`AT_NULL` だけ**である。
+///
+/// **`auxv` の中身は Linux バイナリを動かす段で要るものである。**
+/// **自作のプログラムは読まないので、終端だけ置く。**
+/// **形を合わせておくのは、後から中身を足すときに入口が変わらないからである**
+/// ——そして **C の `crt0` がそのまま書ける**（`docs/vision.md` の C の構想）。
+///
+/// # 16 バイト整列
+///
+/// **`rsp` は entry の時点で 16 の倍数である**（SysV の規約。Linux もそう積む）。
+/// **詰め物は表と文字列の間に入る。**
+///
+/// # Safety
+///
+/// `page` がスタックページの先頭を direct map 越しに指しており、
+/// 4096 バイト書けること。単一実行文脈から呼ぶこと。
+unsafe fn build_initial_stack(page: *mut u8, page_base: u64, argv: &[&str]) -> Option<u64> {
+    /// 表の項の大きさ。
+    const WORD: usize = 8;
+    /// 表の固定部——`argc`・`argv` の終端・`envp` の終端・`AT_NULL` の対。
+    const FIXED_WORDS: usize = 1 + 1 + 1 + 2;
+    /// `auxv` の終端。
+    const AT_NULL: u64 = 0;
+    /// スタックページの大きさ。**1 枚だけ張ってある**（呼び出し側）。
+    const PAGE_SIZE: usize = 4096;
+
+    if argv.len() > MAX_ARGV {
+        return None;
+    }
+
+    let mut cursor = PAGE_SIZE;
+
+    // **文字列を上から詰める。** 置いたユーザー VA を控える。
+    let mut argv_addrs = [0u64; MAX_ARGV];
+    for (index, arg) in argv.iter().enumerate() {
+        let bytes = arg.as_bytes();
+        // NUL 終端のぶんを含めて下げる。
+        cursor = cursor.checked_sub(bytes.len() + 1)?;
+        // SAFETY: cursor はページ内で、`bytes.len() + 1` バイト書ける。
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), page.add(cursor), bytes.len());
+            page.add(cursor + bytes.len()).write(0);
+        }
+        argv_addrs[index] = page_base + cursor as u64;
+    }
+
+    // 表を置く位置。**表の先頭が 16 の倍数になるように下げる。**
+    cursor &= !0xF;
+    cursor = cursor.checked_sub((FIXED_WORDS + argv.len()) * WORD)?;
+    cursor &= !0xF;
+
+    let mut at = cursor;
+    let put = |value: u64, at: &mut usize| {
+        // SAFETY: `at` は上で確保した範囲の中で、8 バイト書ける。
+        unsafe { page.add(*at).cast::<u64>().write_unaligned(value) };
+        *at += WORD;
+    };
+    put(argv.len() as u64, &mut at);
+    for address in argv_addrs.iter().take(argv.len()) {
+        put(*address, &mut at);
+    }
+    put(0, &mut at); // argv の終端
+    put(0, &mut at); // envp は空。終端だけ
+
+    // 破壊 (S11-1, no-auxv-terminator): `auxv` に項目を 1 つ足して、
+    // **終端を書かない。** `AT_PHDR` は Linux バイナリが読む型で、
+    // **自作のプログラムは `auxv` を読まないので、足しても誰も困らないように見える。**
+    // **終端が無いことは、終端まで歩いた者にしか分からない。**
+    #[cfg(feature = "syscall-test-no-auxv-terminator")]
+    {
+        /// `AT_PHDR`。**値そのものに意味は要らない**——終端の有無が主張である。
+        const AT_PHDR: u64 = 3;
+        put(AT_PHDR, &mut at);
+        put(0, &mut at);
+    }
+    #[cfg(not(feature = "syscall-test-no-auxv-terminator"))]
+    {
+        put(AT_NULL, &mut at); // auxv の終端（type）
+        put(0, &mut at); //                 （value）
+    }
+
+    Some(page_base + cursor as u64)
+}
+
+/// 1 プロセスに渡せる `argv` の要素数の上限（S11-1）。
+///
+/// **見込みの最大は 2 である**（プログラム名 + 引数 1 つ）。**8 はその 4 倍で、
+/// 表と文字列がスタックの 1 ページに収まる範囲である。** 越えたら
+/// [`UserLoadError::ArgumentsTooLong`] で拒む。
+const MAX_ARGV: usize = 8;
 
 /// 壊した ext2 の像を組み立てる作業領域（S10-a）。
 ///
@@ -5113,6 +5225,12 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
         29,
         "getdents64 with a buffer too small for one record did not return -EINVAL",
     ),
+    (30, "argc was not 2"),
+    (31, "argv[0] was not \"syscall-test\""),
+    (32, "argv[1] was not \"alpha\""),
+    (33, "the argv terminator was not NULL"),
+    (34, "the envp terminator was not NULL"),
+    (35, "the auxv terminator (AT_NULL) was missing"),
 ];
 
 /// `fault-test` が起こす #PF のエラーコード（S9-b-3-2a）。
@@ -5223,6 +5341,11 @@ struct UserProgram {
     probes_abi: bool,
     /// 0 以外の終了状態の意味（S9-b-3-2a）。**空なら値に意味を持たせていない。**
     status_meanings: &'static [(u64, &'static str)],
+    /// 初期スタックへ積む `argv`（S11-1）。
+    ///
+    /// **`argv[0]` はプログラム名である**——Unix の慣行であって、
+    /// **カーネルが強制するものではない**（`execve` は呼び出し側に決めさせる）。
+    argv: &'static [&'static str],
 }
 
 /// 走らせるプログラムの一覧（S9-b-3-1、S9-b-3-2a で期待を持たせた）。
@@ -5246,6 +5369,7 @@ const USER_PROGRAMS: &[UserProgram] = &[
         expected_write: Some(HELLO_MESSAGE),
         probes_abi: false,
         status_meanings: &[],
+        argv: &["hello"],
     },
     UserProgram {
         name: "fault-test",
@@ -5260,6 +5384,7 @@ const USER_PROGRAMS: &[UserProgram] = &[
         expected_write: None,
         probes_abi: false,
         status_meanings: &[],
+        argv: &["fault-test"],
     },
     UserProgram {
         name: "syscall-test",
@@ -5269,6 +5394,9 @@ const USER_PROGRAMS: &[UserProgram] = &[
         expected_write: Some(SYSCALL_TEST_MESSAGE),
         probes_abi: true,
         status_meanings: SYSCALL_TEST_STATUS,
+        // **2 要素にしてある。** `argc` が 1 のままだと、
+        // **「積んでいない」と「1 つ積んだ」が区別できない。**
+        argv: &["syscall-test", "alpha"],
     },
 ];
 
@@ -5294,6 +5422,7 @@ fn load_user_program(
     image: &[u8],
     run: bool,
     name: &'static str,
+    argv: &[&str],
 ) -> (Result<u64, UserLoadError>, usize, usize) {
     use kernel::address_space::AddressSpace;
 
@@ -5318,8 +5447,8 @@ fn load_user_program(
         files: kernel::vfs::FileTable::new(),
     };
 
-    let outcome =
-        load_user_program_into(logger, allocator, image, &mut process, run).map(|()| process.entry);
+    let outcome = load_user_program_into(logger, allocator, image, &mut process, run, argv)
+        .map(|()| process.entry);
 
     // **成否によらず畳む。** 破棄は S7-d の経路（下位を隔離へ入れ、世代が
     // 退くまで返さない）をそのまま通る。**プロセスが終了したなら、畳むのはここ
@@ -5358,7 +5487,7 @@ fn load_embedded_user_program(
         let name = program.name;
         let free_before = allocator.free_frame_count();
         let (outcome, held, leaked) =
-            load_user_program(logger, allocator, program.image, true, name);
+            load_user_program(logger, allocator, program.image, true, name, program.argv);
         let entry = outcome?;
 
         // **終わり方を判定する。** ここで止まっても空間は既に畳まれている
@@ -5469,7 +5598,8 @@ fn verify_corrupt_user_program_is_not_loaded(
             &buf[..]
         };
 
-        let (outcome, held, leaked) = load_user_program(logger, allocator, image, false, "corrupt");
+        let (outcome, held, leaked) =
+            load_user_program(logger, allocator, image, false, "corrupt", &["corrupt"]);
 
         let Err(error) = outcome else {
             logger.error(format_args!(
@@ -5572,6 +5702,7 @@ fn load_user_program_into(
     image: &[u8],
     process: &mut UserProcess,
     run: bool,
+    argv: &[&str],
 ) -> Result<(), UserLoadError> {
     use common::elf::Elf;
     use kernel::paging::active::PageAttributes;
@@ -5711,6 +5842,20 @@ fn load_user_program_into(
     }
     logger.info(format_args!(
         "user-load: mapped the user stack {stack_page:#x}..{USER_PROGRAM_STACK_TOP:#x} (w=true)"
+    ));
+
+    // **初期スタックを Linux の形で積む（S11-1）。**
+    // SAFETY: `dst` はいま張ったスタックページの direct map 越しの先頭で、
+    // 1 ページぶん書ける。単一実行文脈である。
+    let Some(initial_rsp) = (unsafe { build_initial_stack(dst, stack_page, argv) }) else {
+        return Err(UserLoadError::ArgumentsTooLong);
+    };
+    process.stack_top = initial_rsp;
+    logger.info(format_args!(
+        "user-load: {} initial stack at {initial_rsp:#x} (argc={}, 16-byte aligned={})",
+        process.name,
+        argv.len(),
+        initial_rsp % 16 == 0
     ));
 
     // **張った側とは独立に降りて、葉のフラグを読み戻す。**
@@ -7609,6 +7754,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "syscall-test-dirent-no-align",
         cfg!(feature = "syscall-test-dirent-no-align"),
         "getdents64 の d_reclen を 8 バイト境界へ切り上げない",
+    ),
+    (
+        "syscall-test-no-auxv-terminator",
+        cfg!(feature = "syscall-test-no-auxv-terminator"),
+        "初期スタックの auxv に項目を足し、終端を書かない",
     ),
     (
         "exception-test",

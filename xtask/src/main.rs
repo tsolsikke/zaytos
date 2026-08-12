@@ -883,6 +883,19 @@ const SYSCALL_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // S11-1: 初期スタックの auxv の終端を書かない。**自作のプログラムは auxv を
+    // 読まない**ので、足した項目も終端の欠落も、歩かなければ分からない。
+    CriticalTest {
+        name: "no-auxv-terminator",
+        feature: "syscall-test-no-auxv-terminator",
+        expected_markers: &[
+            "user-run: syscall-test exited with status 35",
+            "the auxv terminator (AT_NULL) was missing",
+        ],
+        forbidden_markers: &["user-load: syscall-test ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // S9-a: 容量超過の errno を分ける前へ戻す。**この分岐は S9-a で初めて通るように
     // なった経路である。** 通り始めたばかりの経路を手で1度確かめただけにしないため、
     // 永続の破壊として置く。次に dispatch を触ったときに落ちる。
@@ -6899,7 +6912,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 21,
-    full: 125,
+    full: 126,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

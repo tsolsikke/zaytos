@@ -239,6 +239,10 @@ syscall-test-stat-blocks-in-bytes = []
 # d_reclen を頼りに歩くので外しても自分では気づけない。整列は呼び出し側との
 # 約束なので、約束を見ている検算だけが捕まえる。`--syscall-test dirent-no-align`。
 syscall-test-dirent-no-align = []
+# S11-1: 初期スタックの auxv へ項目を1つ足し、終端(AT_NULL)を書かない。自作の
+# プログラムは auxv を読まないので、足しても誰も困らないように見える。終端が
+# 無いことは終端まで歩いた者にしか分からない。`--syscall-test no-auxv-terminator`。
+syscall-test-no-auxv-terminator = []
 # S1-b-2: ACPI の検証経路の破壊確認。いずれも既定ビルドには入らない。
 # `cargo xtask run --acpi-test <kind>` が有効化する。観測は panic ではなく、
 # 「検出のログが出て、MADT の列挙が完了しないこと」である。
