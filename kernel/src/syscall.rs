@@ -86,6 +86,11 @@ pub const ENAMETOOLONG: i64 = 36;
 /// **`EINVAL` でも `ENOENT` でもない。**
 pub const EIO: i64 = 5;
 
+/// `-EAGAIN`（今は受け付けられない）の errno（S11-2）。
+///
+/// **遠征の深さが上限に達しているときに返す。**
+pub const EAGAIN: i64 = 11;
+
 /// ZaytOS 独自のシステムコール番号の基点（S9-a）。
 ///
 /// # なぜ Linux の番号表から離すのか
@@ -315,6 +320,47 @@ pub const O_WRITE_INTENT: u64 = 0o100 | 0o1000 | 0o2000;
 /// （あちらの doc に「どちらか一方でよい」と書いたが、**この値では一方に
 /// ならなかった**）。
 pub const PATH_MAX: usize = 256;
+
+/// 遠征を 1 段深く入れ子にする検証用の番号（S11-2。ZaytOS 独自）。
+///
+/// # なぜ syscall として置くのか
+///
+/// **入れ子は「Ring 3 から入った処理の中で、もう一度 Ring 3 へ落ちる」形である。**
+/// カーネルの直線上からは作れない——**外側の遠征に入っていなければ、入れ子に
+/// ならない。** システムコールはその状態にいる唯一の場所である。
+///
+/// **`spawn` が来たら、この番号は要らなくなる**（あちらが本物の入れ子を作る）。
+/// **そのとき外すこと。**
+pub const SYS_NEST_PROBE: u64 = ZAYTOS_PRIVATE_BASE + 3;
+
+/// [`SYS_NEST_PROBE`] が返す既知の値。
+pub const NEST_PROBE_RETURN: u64 = 0x00DE_5738;
+
+/// 入れ子の遠征の飛び先（S11-2）。**呼び出し側が据える。**
+static NEST_TARGET: AtomicU64 = AtomicU64::new(0);
+/// 入れ子の遠征のユーザースタック上端（S11-2）。
+static NEST_STACK_TOP: AtomicU64 = AtomicU64::new(0);
+/// [`SYS_NEST_PROBE`] が呼ばれたか（S11-2）。
+static NEST_INVOKED: AtomicBool = AtomicBool::new(false);
+/// 入れ子の遠征に入っている間に観測した深さ（S11-2）。
+static NEST_DEPTH_INSIDE: AtomicU64 = AtomicU64::new(0);
+/// 入れ子の遠征が畳んで戻ったか（S11-2）。
+static NEST_FOLDED: AtomicBool = AtomicBool::new(false);
+
+/// 入れ子の遠征の飛び先とスタック上端を据える（S11-2）。
+pub fn set_nest_target(rip: u64, stack_top: u64) {
+    NEST_TARGET.store(rip, Ordering::SeqCst);
+    NEST_STACK_TOP.store(stack_top, Ordering::SeqCst);
+}
+
+/// [`SYS_NEST_PROBE`] の観測（呼ばれたか、中で見た深さ、畳んで戻ったか）。
+pub fn nest_observation() -> (bool, u64, bool) {
+    (
+        NEST_INVOKED.load(Ordering::SeqCst),
+        NEST_DEPTH_INSIDE.load(Ordering::SeqCst),
+        NEST_FOLDED.load(Ordering::SeqCst),
+    )
+}
 
 /// 検証用 probe システムコールの番号（ZaytOS 独自。[`ZAYTOS_PRIVATE_BASE`]）。
 pub const PROBE_NUMBER: u64 = ZAYTOS_PRIVATE_BASE;
@@ -717,6 +763,34 @@ unsafe fn dispatch(
             // SAFETY: slice は検証済み（copy-skip-validate を除く）。dst は len+破壊1 を収める。
             let read = unsafe { copy_from_user(&mut kbuf, &slice) };
             kbuf[..read].iter().map(|b| *b as u64).sum()
+        }
+        SYS_NEST_PROBE => {
+            // **外側の遠征の中から、もう 1 段深く入る（S11-2）。**
+            //
+            // **戻す RSP0 は「今の遠征スタックの上端」である**——親（外側）は
+            // そのスタックの上でこの処理をしている。**メインの上端へ戻すと、
+            // 親のカーネルスタックが変わってしまう。**
+            if crate::ring3::depth() >= crate::ring3::MAX_EXCURSION_DEPTH {
+                return (-EAGAIN) as u64;
+            }
+            let (_, restore_rsp0) = crate::ring3::excursion_stack_range();
+            let window = user_window();
+            NEST_INVOKED.store(true, Ordering::SeqCst);
+            // SAFETY: 飛び先とスタックは呼び出し側が据えた、張り済みのユーザー
+            // ページである（`set_nest_target`）。飛び先の命令は必ずフォルトする。
+            // 深さは上限未満（すぐ上で確かめた）。BKL 保持下の単一実行文脈である。
+            unsafe {
+                crate::ring3::enter(
+                    restore_rsp0,
+                    NEST_TARGET.load(Ordering::SeqCst),
+                    NEST_STACK_TOP.load(Ordering::SeqCst),
+                    window,
+                );
+            }
+            // **戻った直後に観測する。** 外側が畳むと記録が上書きされる。
+            NEST_DEPTH_INSIDE.store(crate::ring3::depth() as u64 + 1, Ordering::SeqCst);
+            NEST_FOLDED.store(crate::ring3::folded(), Ordering::SeqCst);
+            NEST_PROBE_RETURN
         }
         SYS_READ => {
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。

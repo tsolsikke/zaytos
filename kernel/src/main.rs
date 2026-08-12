@@ -1190,6 +1190,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // #GP を予期の畳みでカーネルへ戻すまでを確かめる。
     #[cfg(not(feature = "paging-test"))]
     verify_syscall_roundtrip(&mut logger);
+    verify_nested_excursion(&mut logger);
 
     // ユーザーポインタ検証の検証（M5-f-2-1）。Ring 3 が (buf, len) を渡す syscall で、
     // カーネルが読み書きに踏み込む前に範囲を実 PTE で検証する。正常系と異常系5ケースを
@@ -6528,6 +6529,142 @@ fn verify_ring3_excursion<const CAP: usize>(
          the excursion stack, folded back to the kernel, permission split intact)"
     ));
 }
+
+/// 遠征が 1 段入れ子になって戻ることを確かめる（S11-2）。
+///
+/// # なぜ syscall 越しなのか
+///
+/// **入れ子は「Ring 3 から入った処理の中で、もう一度 Ring 3 へ落ちる」形である。**
+/// カーネルの直線上からは作れない——**外側の遠征に入っていなければ入れ子にならない。**
+///
+/// # 飛び先は同じページの `cli` である
+///
+/// **新しいユーザーページを張らない。** 外側のルーチンの末尾に置いた `cli` は
+/// **それ自体が必ず #GP を起こす**ので、内側の飛び先としてそのまま使える。
+/// **内側は入った瞬間に畳んで戻る。**
+///
+/// # 何を主張しているか
+///
+/// - **内側で深さが 2 になっていること**（外側が 1、内側が 2）
+/// - **内側が畳んで戻り、外側が続きを実行できること**——戻り値が
+///   [`kernel::syscall::NEST_PROBE_RETURN`] としてユーザースタックへ store される
+/// - **外側がそのあと自分の `cli` で畳んで戻ること**
+///
+/// **3 つ目が要である。** 内側の畳みが外側の回復点を壊していれば、
+/// **外側はここへ戻ってこられない。**
+fn verify_nested_excursion(logger: &mut Logger<SerialPort>) {
+    use kernel::paging::active::{ActivePageTable, PageSize};
+    use kernel::ring3;
+    use kernel::syscall;
+
+    let identity = common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
+        .expect("the identity window is canonical");
+    let code_virt = common::addr::VirtAddr::new(ring3::USER_CODE_VIRT)
+        .expect("the user code virtual address is canonical");
+
+    // 前段が張ったユーザーコードページを再利用する。**実状態を読んで確かめてから
+    // 書き換える**（`verify_syscall_roundtrip` と同じ規律）。
+    // SAFETY: CR3 は自前テーブル。配下は恒等窓で読める。
+    let table = unsafe { ActivePageTable::current(identity) };
+    match table.translate(code_virt) {
+        Ok(Some(t)) if t.page_size == PageSize::Size4KiB => {}
+        other => {
+            logger.error(format_args!(
+                "nest: user code page {:#x} is not a 4KiB mapping ({other:?}); halting",
+                code_virt.as_u64()
+            ));
+            cpu::halt_forever();
+        }
+    }
+
+    // 外側のルーチン。
+    //   mov eax, SYS_NEST_PROBE   B8 id
+    //   int 0x80                  CD 80
+    //   mov [rsp-8], rax          48 89 44 24 F8   戻り値をユーザースタックへ
+    //   cli                       FA               外側の畳み出口。**内側の飛び先でもある**
+    let mut code = [0u8; 32];
+    let mut n = 0usize;
+    let emit = |bytes: &[u8], code: &mut [u8; 32], n: &mut usize| {
+        code[*n..*n + bytes.len()].copy_from_slice(bytes);
+        *n += bytes.len();
+    };
+    emit(&[0xB8], &mut code, &mut n);
+    emit(
+        &(syscall::SYS_NEST_PROBE as u32).to_le_bytes(),
+        &mut code,
+        &mut n,
+    );
+    emit(&[0xCD, 0x80], &mut code, &mut n);
+    emit(&[0x48, 0x89, 0x44, 0x24, 0xF8], &mut code, &mut n);
+    let cli_offset = n as u64;
+    emit(&[0xFA], &mut code, &mut n);
+
+    // SAFETY: 恒等窓越しに、張り済みの 4KiB ユーザーページへ書く。単一実行文脈。
+    unsafe {
+        core::ptr::copy_nonoverlapping(code.as_ptr(), ring3::USER_CODE_VIRT as *mut u8, n);
+    }
+
+    // **内側の飛び先は、いま置いた `cli` である。** スタックは外側と重ならない
+    // ように少し下げる（内側は書かないが、重ねない形にしておく）。
+    syscall::set_nest_target(
+        ring3::USER_CODE_VIRT + cli_offset,
+        ring3::USER_STACK_TOP - NEST_STACK_GAP,
+    );
+
+    let main_rsp0_top = gdt::privilege_stack_top();
+    logger.info(format_args!(
+        "nest: entering the outer excursion (depth before = {})",
+        ring3::depth()
+    ));
+
+    // SAFETY: 飛び先は今書いたユーザーページで、末尾の `cli` が必ずフォルトする。
+    // スタックは前段が張った上端。単一実行文脈である。
+    unsafe {
+        ring3::enter(
+            main_rsp0_top,
+            ring3::USER_CODE_VIRT,
+            ring3::USER_STACK_TOP,
+            syscall::window_for_subtree(USER_PML4_INDEX),
+        );
+    }
+
+    let (invoked, depth_inside, inner_folded) = syscall::nest_observation();
+    // 外側の戻り値は、外側のルーチンが `[rsp-8]` へ store している。
+    // SAFETY: 恒等窓越しに、張り済みのユーザースタックページを読む。
+    let returned = unsafe { ((ring3::USER_STACK_TOP - 8) as *const u64).read_volatile() };
+
+    logger.info(format_args!(
+        "nest: outer excursion returned. nested probe invoked={invoked}, depth seen inside={depth_inside},          inner folded={inner_folded}, outer folded={} (depth after = {}), the outer routine          resumed after the nested excursion and stored {returned:#x} (expected {:#x})",
+        ring3::folded(),
+        ring3::depth(),
+        syscall::NEST_PROBE_RETURN
+    ));
+
+    if !invoked || depth_inside != 2 || !inner_folded {
+        logger.error(format_args!(
+            "nest: the nested excursion did not run as expected (invoked={invoked},              depth inside={depth_inside}, inner folded={inner_folded}); halting"
+        ));
+        cpu::halt_forever();
+    }
+    if returned != syscall::NEST_PROBE_RETURN {
+        logger.error(format_args!(
+            "nest: the outer routine did not resume after the nested excursion \
+             (stored {returned:#x}, expected {:#x}); halting",
+            syscall::NEST_PROBE_RETURN
+        ));
+        cpu::halt_forever();
+    }
+    if ring3::depth() != 0 {
+        logger.error(format_args!(
+            "nest: the depth did not come back to 0 (it is {}); halting",
+            ring3::depth()
+        ));
+        cpu::halt_forever();
+    }
+}
+
+/// 入れ子の遠征のユーザースタックを、外側からどれだけ下げるか（S11-2）。
+const NEST_STACK_GAP: u64 = 256;
 
 /// int 0x80 システムコールの往復を検証する（M5-f-1-2）。
 ///

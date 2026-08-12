@@ -36,8 +36,8 @@
 //! ハンドラが踏み潰すのを避けるため（メインの Ring 0 連鎖が RSP0 スタック上に
 //! 残るのは、実ユーザータスクと違ってこの遠征に固有の事情）。
 
-use core::ptr::addr_of;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::ptr::{addr_of, addr_of_mut};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::gdt;
 
@@ -65,8 +65,37 @@ const EXCURSION_STACK_SIZE: usize = 16 * 1024;
 #[allow(dead_code)]
 struct ExcursionStack([u8; EXCURSION_STACK_SIZE]);
 
+/// 遠征の入れ子の深さの上限（S11-2）。
+///
+/// # なぜ深さが要るのか
+///
+/// **「呼んだ側が待つ」形の `spawn` は、遠征の入れ子そのものである。**
+/// 親の `int 0x80` の処理の中で子を Ring 3 で走らせ、子が終わったら親の続きへ戻る。
+///
+/// # なぜ 2 か
+///
+/// **見込みの最大は 2 である**——`init` が子を 1 つ起こし、その子が終わるまで待つ。
+/// **孫は今のところ要らない**（シェルが子を起こすときは `init` が待っている親では
+/// なくなる形も考えられるが、S11 の到達条件はそこまで要求しない）。
+///
+/// **固定配列の様式に合わせる**（`MAX_CPUS`・`WORKER_COUNT`・`MAX_OPEN_FILES`）。
+/// **深さ 1 つにつき遠征スタック 16 KiB を静的に持つ**ので、
+/// **増やすと `.bss` がそのぶん増える**（S10-a でガードページの位置が動いた件と同じ面）。
+///
+/// # 越えたらどうするか
+///
+/// **[`enter`] の契約である。** 呼び出し側が [`depth`] で確かめてから呼ぶ。
+/// **越えて呼ぶと、上限を越えた添字で静的配列に触ることになるので、
+/// 呼び出し側が防ぐ**（`spawn` は `-EAGAIN` を返す形になる）。
+pub const MAX_EXCURSION_DEPTH: usize = 2;
+
 /// 遠征専用のカーネルスタック（`.bss`）。IST スタックと同じ静的確保。
-static mut EXCURSION_STACK: ExcursionStack = ExcursionStack([0; EXCURSION_STACK_SIZE]);
+///
+/// **深さごとに 1 本持つ（S11-2）。** 入れ子のとき、**子がカーネルへ入るときに
+/// 親のスタックへ切り替わってはならない**——親はそのスタックの上で
+/// `spawn` の処理をしている最中である。
+static mut EXCURSION_STACKS: [ExcursionStack; MAX_EXCURSION_DEPTH] =
+    [const { ExcursionStack([0; EXCURSION_STACK_SIZE]) }; MAX_EXCURSION_DEPTH];
 
 /// setjmp/longjmp 相当の回復点。**フィールドのオフセットは `global_asm!` の
 /// `[rax + N]` と一対一で対応している。** 並べ替えると asm が別の場所を読む。
@@ -82,16 +111,38 @@ struct Recovery {
     resume_rip: u64, // +56
 }
 
-static mut RECOVERY: Recovery = Recovery {
-    rsp: 0,
-    rbx: 0,
-    rbp: 0,
-    r12: 0,
-    r13: 0,
-    r14: 0,
-    r15: 0,
-    resume_rip: 0,
-};
+/// 回復点。**深さごとに 1 つ持つ（S11-2）。**
+///
+/// **1 つしか無いと、子の遠征に入った時点で親の回復点が上書きされ、
+/// 親が戻れなくなる。**
+static mut RECOVERIES: [Recovery; MAX_EXCURSION_DEPTH] = [const {
+    Recovery {
+        rsp: 0,
+        rbx: 0,
+        rbp: 0,
+        r12: 0,
+        r13: 0,
+        r14: 0,
+        r15: 0,
+        resume_rip: 0,
+    }
+}; MAX_EXCURSION_DEPTH];
+
+/// 今使っている回復点の**アドレス**（S11-2）。
+///
+/// # なぜアドレスを持つのか。**asm に深さを渡さないため**
+///
+/// `zaytos_enter_ring3` と `zaytos_resume_from_ring3` は、かつて
+/// `lea rax, [rip + RECOVERY]` で回復点を直に指していた。**深さで添字を引く形に
+/// すると、asm が深さを読んで掛け算をすることになる。**
+///
+/// **代わりに、どの回復点を使うかを Rust が決めてここへ置く。**
+/// asm は `mov rax, [rip + CURRENT_RECOVERY]` で読むだけになる。
+/// **畳み（longjmp）が使うのも同じ値なので、入れ子でも取り違えない。**
+static CURRENT_RECOVERY: AtomicU64 = AtomicU64::new(0);
+
+/// 今の遠征の深さ（S11-2）。**0 なら Ring 3 の遠征に入っていない。**
+static EXCURSION_DEPTH: AtomicUsize = AtomicUsize::new(0);
 
 /// 今 Ring 3 にいるか（S8-b）。これが false のときの Ring 3 由来の例外は
 /// 「想定外」として畳まず halt する。
@@ -180,7 +231,8 @@ core::arch::global_asm!(
     ".globl zaytos_enter_ring3",
     "zaytos_enter_ring3:",
     // setjmp 相当: callee-saved と RSP、復帰 RIP を保存する。
-    "  lea rax, [rip + {recovery}]",
+    // **回復点は深さごとに違う**ので、アドレスを Rust が置いた場所から読む（S11-2）。
+    "  mov rax, [rip + {recovery_ptr}]",
     "  mov [rax + 0], rsp",
     "  mov [rax + 8], rbx",
     "  mov [rax + 16], rbp",
@@ -206,7 +258,7 @@ core::arch::global_asm!(
     // 復帰点（畳みだけがここへ来る。RSP と callee-saved は longjmp が復元済み）。
     "3:",
     "  ret",
-    recovery = sym RECOVERY,
+    recovery_ptr = sym CURRENT_RECOVERY,
     ss = const gdt::USER_DATA_SELECTOR.bits() as u64,
     cs = const gdt::USER_CODE_SELECTOR.bits() as u64,
     rflags = const 0x202u64,
@@ -218,7 +270,8 @@ core::arch::global_asm!(
     ".p2align 4",
     ".globl zaytos_resume_from_ring3",
     "zaytos_resume_from_ring3:",
-    "  lea rax, [rip + {recovery}]",
+    // **入った遠征と同じ回復点へ戻る**（S11-2）。
+    "  mov rax, [rip + {recovery_ptr}]",
     "  mov rsp, [rax + 0]",
     "  mov rbx, [rax + 8]",
     "  mov rbp, [rax + 16]",
@@ -228,13 +281,35 @@ core::arch::global_asm!(
     "  mov r15, [rax + 48]",
     "  mov rcx, [rax + 56]",
     "  jmp rcx",
-    recovery = sym RECOVERY,
+    recovery_ptr = sym CURRENT_RECOVERY,
 );
 
 /// 遠征専用カーネルスタックの (下端, 上端)。RSP0 とハンドラ RSP の照合に使う。
 pub fn excursion_stack_range() -> (u64, u64) {
-    let bottom = addr_of!(EXCURSION_STACK) as u64;
+    // **今いちばん内側の遠征のスタック。** 遠征に入っていなければ深さ 0 のもの
+    // （かつての唯一のスタックと同じ）である。
+    excursion_stack_range_at(EXCURSION_DEPTH.load(Ordering::SeqCst).saturating_sub(1))
+}
+
+/// 深さ `depth` の遠征スタックの (下端, 上端)（S11-2）。
+///
+/// 範囲外の `depth` は深さ 0 のものを返す。**呼び出し側が上限を知らなくてよい。**
+pub fn excursion_stack_range_at(depth: usize) -> (u64, u64) {
+    let index = if depth < MAX_EXCURSION_DEPTH {
+        depth
+    } else {
+        0
+    };
+    // SAFETY: 静的配列の要素のアドレスを取るだけで、中身は読まない。
+    let bottom = unsafe { addr_of!(EXCURSION_STACKS[index]) } as u64;
     (bottom, bottom + EXCURSION_STACK_SIZE as u64)
+}
+
+/// 今の遠征の深さ（S11-2）。**0 なら遠征に入っていない。**
+///
+/// **入れ子で呼ぶ側は、これで上限を確かめてから [`enter`] を呼ぶ。**
+pub fn depth() -> usize {
+    EXCURSION_DEPTH.load(Ordering::SeqCst)
 }
 
 /// Ring 3 へ 1 回遠征する。戻ってきたら（畳みで）会計を返す。
@@ -280,7 +355,15 @@ pub unsafe fn enter(
     user_stack_top: u64,
     user_window: (u64, u64),
 ) {
-    let (_, excursion_top) = excursion_stack_range();
+    // **この遠征の深さ（S11-2）。** 呼び出し側が [`depth`] で上限を確かめている。
+    let depth = EXCURSION_DEPTH.load(Ordering::SeqCst);
+    let (_, excursion_top) = excursion_stack_range_at(depth);
+
+    // **この深さの回復点を据える。** 戻すのはこの関数の末尾である。
+    // SAFETY: 静的配列の要素のアドレスを取るだけである。深さは上限未満（契約）。
+    let slot = unsafe { addr_of_mut!(RECOVERIES[depth.min(MAX_EXCURSION_DEPTH - 1)]) } as u64;
+    let previous_recovery = CURRENT_RECOVERY.swap(slot, Ordering::SeqCst);
+    EXCURSION_DEPTH.store(depth + 1, Ordering::SeqCst);
 
     // **この遠征の間、ユーザーポインタとして受理する範囲を据える（S9-b-3-2b）。**
     // 戻すのは畳みでも `exit` でも同じ位置（下の longjmp から戻った先）である。
@@ -341,8 +424,15 @@ pub unsafe fn enter(
         );
     }
 
-    // 畳みで戻った。RSP0 をメインの上端へ戻す（スケジューラの読み戻し前提を保つ）。
-    // SAFETY: main_rsp0_top は呼び出し元のカーネルスタック上端。
+    // **深さと回復点を戻す（S11-2）。** 畳みで戻っても `exit` で戻ってもここを通る。
+    EXCURSION_DEPTH.store(depth, Ordering::SeqCst);
+    CURRENT_RECOVERY.store(previous_recovery, Ordering::SeqCst);
+
+    // 畳みで戻った。RSP0 を呼び出し側が指定した上端へ戻す。
+    // **入れ子のときは、親の遠征スタックの上端がそれである**（S11-2）——
+    // 親はそのスタックの上で子を起こす処理をしている最中なので、
+    // **メインの上端へ戻すと親のカーネルスタックが変わってしまう。**
+    // SAFETY: main_rsp0_top は呼び出し元が使っているカーネルスタックの上端。
     unsafe {
         gdt::set_rsp0(main_rsp0_top);
     }
