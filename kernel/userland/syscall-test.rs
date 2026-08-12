@@ -42,6 +42,19 @@
 //! - `8` `open("/etc/motd", O_WRONLY)` が `-EROFS` を返さなかった
 //! - `9` `close` の 2 度目が `-EBADF` を返さなかった
 //! - `10` `open(NULL)` が `-EFAULT` を返さなかった
+//! - `11` `/etc/motd` の全長 `read` が 18 を返さなかった
+//! - `12` 読めたバイト列が既知の中身と食い違った
+//! - `13` 末尾での `read` が 0 を返さなかった
+//! - `14` 5 バイトの短い `read` が 5 を返さなかった、または中身が食い違った
+//! - `15` 続きの `read` が残りの 13 を返さなかった、または中身が食い違った
+//! - `16` ディレクトリの `read` が `-EISDIR` を返さなかった
+//! - `17` 閉じた fd の `read` が `-EBADF` を返さなかった
+//!
+//! # 中身の突き合わせは `hello` の `write` と同じ形である
+//!
+//! **既知のバイト列と一致することを言う。** カーネル側は種のファイルを
+//! `include_bytes!` で持っており、**こちらはその写しを持つ。**
+//! **食い違えば 12 番か 15 番の検算が落ちる**ので、静かには残らない。
 //!
 //! # `open` はこのプログラムの `.rodata` のパスを渡す
 //!
@@ -97,6 +110,18 @@ const MINUS_EBADF: i32 = -9;
 const MINUS_EROFS: i32 = -30;
 /// `-EFAULT`（不正なアドレス）。
 const MINUS_EFAULT: i32 = -14;
+/// `read` の番号（Linux と同じ 0）。
+const SYS_READ: u32 = 0;
+/// `-EISDIR`（ディレクトリに対して許されない操作）。
+const MINUS_EISDIR: i32 = -21;
+/// `/etc/motd` の長さ。**種のファイルと同じでなければ検算が落ちる。**
+const MOTD_LEN: u32 = 18;
+/// 短い `read` で読む長さ。
+const MOTD_HEAD: u32 = 5;
+/// その続きに残る長さ。
+const MOTD_TAIL: u32 = 13;
+/// 末尾を越えて要求する長さ。**`i_size` で切られるはずである。**
+const OVER_READ: u32 = 100;
 
 core::arch::global_asm!(
     // **entry の手前に詰め物を置く**（`hello.rs` と同じ理由）。
@@ -211,6 +236,116 @@ core::arch::global_asm!(
     "  mov edi, 10",
     "  jne 9f",
 
+    // --- 11/12. /etc/motd を全部読み、既知のバイト列と突き合わせる ---
+    // **読み込み先はユーザースタックである**（このプログラムに書ける区画は無い）。
+    "  sub rsp, 64",
+    "  mov eax, {sys_open}",
+    "  lea rdi, [rip + MOTD_PATH]",
+    "  mov esi, {o_rdonly}",
+    "  xor edx, edx",
+    "  int 0x80",
+    "  mov r12, rax",
+    "  mov eax, {sys_read}",
+    "  mov rdi, r12",
+    "  mov rsi, rsp",
+    "  mov edx, {motd_len}",
+    "  int 0x80",
+    "  cmp rax, {motd_len}",
+    "  mov edi, 11",
+    "  jne 9f",
+    "  cld",
+    "  mov rsi, rsp",
+    "  lea rdi, [rip + MOTD_BYTES]",
+    "  mov ecx, {motd_len}",
+    "  repe cmpsb",
+    "  mov edi, 12",
+    "  jne 9f",
+
+    // --- 13. 末尾での read。**0 が返るはず（EOF）** ---
+    "  mov eax, {sys_read}",
+    "  mov rdi, r12",
+    "  mov rsi, rsp",
+    "  mov edx, {motd_len}",
+    "  int 0x80",
+    "  test rax, rax",
+    "  mov edi, 13",
+    "  jne 9f",
+    "  mov eax, {sys_close}",
+    "  mov rdi, r12",
+    "  int 0x80",
+
+    // --- 14/15. 短く読んでから続きを読む。**位置が進んでいること** ---
+    "  mov eax, {sys_open}",
+    "  lea rdi, [rip + MOTD_PATH]",
+    "  mov esi, {o_rdonly}",
+    "  xor edx, edx",
+    "  int 0x80",
+    "  mov r12, rax",
+    "  mov eax, {sys_read}",
+    "  mov rdi, r12",
+    "  mov rsi, rsp",
+    "  mov edx, {motd_head}",
+    "  int 0x80",
+    "  cmp rax, {motd_head}",
+    "  mov edi, 14",
+    "  jne 9f",
+    "  cld",
+    "  mov rsi, rsp",
+    "  lea rdi, [rip + MOTD_BYTES]",
+    "  mov ecx, {motd_head}",
+    "  repe cmpsb",
+    "  mov edi, 14",
+    "  jne 9f",
+    // **末尾を越えて要求する。** 残りの 13 だけが返るはず。
+    "  mov eax, {sys_read}",
+    "  mov rdi, r12",
+    "  mov rsi, rsp",
+    "  mov edx, {over_read}",
+    "  int 0x80",
+    "  cmp rax, {motd_tail}",
+    "  mov edi, 15",
+    "  jne 9f",
+    "  cld",
+    "  mov rsi, rsp",
+    "  lea rdi, [rip + MOTD_REST]",
+    "  mov ecx, {motd_tail}",
+    "  repe cmpsb",
+    "  mov edi, 15",
+    "  jne 9f",
+    "  mov eax, {sys_close}",
+    "  mov rdi, r12",
+    "  int 0x80",
+
+    // --- 16. ディレクトリを read。**-EISDIR が返るはず** ---
+    "  mov eax, {sys_open}",
+    "  lea rdi, [rip + ETC_PATH]",
+    "  mov esi, {o_rdonly}",
+    "  xor edx, edx",
+    "  int 0x80",
+    "  mov r12, rax",
+    "  mov eax, {sys_read}",
+    "  mov rdi, r12",
+    "  mov rsi, rsp",
+    "  mov edx, {motd_head}",
+    "  int 0x80",
+    "  cmp rax, {minus_eisdir}",
+    "  mov edi, 16",
+    "  jne 9f",
+    "  mov eax, {sys_close}",
+    "  mov rdi, r12",
+    "  int 0x80",
+
+    // --- 17. 閉じた fd を read。**-EBADF が返るはず** ---
+    "  mov eax, {sys_read}",
+    "  mov rdi, r12",
+    "  mov rsi, rsp",
+    "  mov edx, {motd_head}",
+    "  int 0x80",
+    "  cmp rax, {minus_ebadf}",
+    "  mov edi, 17",
+    "  jne 9f",
+    "  add rsp, 64",
+
     // すべて通った。
     "  xor edi, edi",
 
@@ -220,7 +355,7 @@ core::arch::global_asm!(
     "  int 0x80",
     // **`exit` が戻ってきたときの受け皿**（`hello.rs` と同じ規律）。位置を
     // `.org` で固定してあるので、ここへ落ちたことが RIP で分かる。
-    ".org 0x200, 0x90",
+    ".org 0x400, 0x90",
     "  ud2",
 
     ".section .rodata",
@@ -230,6 +365,13 @@ core::arch::global_asm!(
     "  .asciz \"/etc/motd\"",
     "MISSING_PATH:",
     "  .asciz \"/nope\"",
+    "ETC_PATH:",
+    "  .asciz \"/etc\"",
+    // **`/etc/motd` の中身の写し。** 種のファイルと食い違えば 12 番が落ちる。
+    "MOTD_BYTES:",
+    "  .ascii \"welco\"",
+    "MOTD_REST:",
+    "  .ascii \"me to ZaytOS\\n\"",
 
     arg0 = const PROBE_ARG0,
     arg1 = const PROBE_ARG1,
@@ -253,6 +395,12 @@ core::arch::global_asm!(
     minus_ebadf = const MINUS_EBADF,
     minus_erofs = const MINUS_EROFS,
     minus_efault = const MINUS_EFAULT,
+    sys_read = const SYS_READ,
+    minus_eisdir = const MINUS_EISDIR,
+    motd_len = const MOTD_LEN,
+    motd_head = const MOTD_HEAD,
+    motd_tail = const MOTD_TAIL,
+    over_read = const OVER_READ,
 );
 
 #[panic_handler]

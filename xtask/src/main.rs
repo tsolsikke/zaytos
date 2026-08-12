@@ -827,6 +827,20 @@ const SYSCALL_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // S10-b: ディレクトリを read したときの errno を取り違える。EISDIR と ENOTDIR は
+    // どちらも「種別が違う」を意味するので雑に見ると同じに見えるが、Linux は分けている。
+    // syscall-test の 16 番目の検算が食い違いを捕まえ、終了状態 16 で止まる。
+    CriticalTest {
+        name: "eisdir-as-enotdir",
+        feature: "syscall-test-eisdir-as-enotdir",
+        expected_markers: &[
+            "user-run: syscall-test exited with status 16",
+            "reading a directory did not return -EISDIR",
+        ],
+        forbidden_markers: &["user-load: syscall-test ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // S9-a: 容量超過の errno を分ける前へ戻す。**この分岐は S9-a で初めて通るように
     // なった経路である。** 通り始めたばかりの経路を手で1度確かめただけにしないため、
     // 永続の破壊として置く。次に dispatch を触ったときに落ちる。
@@ -6843,7 +6857,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 21,
-    full: 121,
+    full: 122,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

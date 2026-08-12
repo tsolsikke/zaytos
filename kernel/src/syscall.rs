@@ -203,6 +203,9 @@ pub const WRITE_BUF_LEN: usize = 64;
 /// 「exit は出口を通らない」の節）。
 pub const SYS_EXIT: u64 = 60;
 
+/// `read(fd, buf, count)`（S10-b）。**Linux の番号 0 をそのまま使う。**
+pub const SYS_READ: u64 = 0;
+
 /// `open(path, flags, mode)`（S10-b）。**Linux の番号 2 をそのまま使う。**
 ///
 /// # `openat`（257）は採らない
@@ -517,6 +520,42 @@ pub unsafe fn copy_from_user(dst: &mut [u8], slice: &UserSlice) -> usize {
     count
 }
 
+/// 検証済みの範囲の `at` バイト目から、カーネルのバイト列を書く（S10-b）。
+///
+/// 書いた長さを返す。**トークンの長さを越えて書かない**ので、
+/// `at + src.len()` が [`UserSlice::len`] を越える場合は、越えない分だけ書く。
+///
+/// # なぜ `at` を取るか
+///
+/// **`read` は 1 回の呼び出しで複数のブロックから写す。** ブロックごとに
+/// トークンを作り直すと、**作り直すたびに検証を通さなければ意味が無い**
+/// （通さずに作れば `UserSlice` の保証が崩れる）。**1 つのトークンの中を
+/// 進む形にすれば、検証は 1 回で足りる。**
+///
+/// # Safety
+///
+/// `slice` が [`validate_user_range`] を通った検証済みトークンであること。
+/// **その範囲は present かつ U=1 で、書き込み可能であること**——`read` が
+/// 書く先はユーザーのバッファで、[`crate::paging`] が `writable: true` で
+/// 張ったページである。
+pub unsafe fn copy_to_user(slice: &UserSlice, at: u64, src: &[u8]) -> usize {
+    let Some(room) = slice.len().checked_sub(at) else {
+        return 0;
+    };
+    let count = src.len().min(room as usize);
+    for (i, byte) in src.iter().enumerate().take(count) {
+        // SAFETY: slice は検証済みで、buf+at+i は present・U=1 のユーザーページ。
+        // count が room を越えないので、トークンの範囲を出ない。SMAP 未有効。
+        unsafe {
+            core::ptr::write_volatile(
+                (slice.buf() as *mut u8).add((at + i as u64) as usize),
+                *byte,
+            )
+        };
+    }
+    count
+}
+
 /// 番号を実装へ振り分ける（M5-f-1-2 / M5-f-2-1）。
 ///
 /// probe は既知の戻り値 [`PROBE_RETURN`] を返す。SYS_CHECK_PTR はユーザーポインタの
@@ -612,6 +651,10 @@ unsafe fn dispatch(
             // SAFETY: slice は検証済み（copy-skip-validate を除く）。dst は len+破壊1 を収める。
             let read = unsafe { copy_from_user(&mut kbuf, &slice) };
             kbuf[..read].iter().map(|b| *b as u64).sum()
+        }
+        SYS_READ => {
+            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+            unsafe { sys_read(args[0], args[1], args[2], pml4_phys, direct_map) }
         }
         SYS_OPEN => {
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
@@ -748,6 +791,120 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
 
     // M5-f-1 は切り替えない。入場時の IrqContext 先頭を返す。
     context as u64
+}
+
+/// `read(fd, buf, count)` の本体（S10-b）。
+///
+/// # `i_size` の手前で止まる
+///
+/// **返すのは要求された長さではなく、実際に写した長さである。**
+/// 残り（`i_size` - 位置）より多くは写さず、**末尾に達していれば 0 を返す**
+/// （Linux と同じ EOF の表し方）。
+///
+/// # 線2 がここでも当たる
+///
+/// - **位置 + 長さ**——`count` は Ring 3 から来るので `u64::MAX` でもよい。
+///   **残りとの `min` を先に取る**ので、加算そのものが起きない
+/// - **`i_size` - 位置**——[`crate::vfs::File`] が位置を `i_size` で飽和させて
+///   いるので桁借りしない。**あちらの不変条件をここが使っている**
+/// - **ブロック内のオフセット**——`pos % block_size` はブロック長未満で、
+///   `block.len()` との差は飽和引き算で出す
+///
+/// # 借りたバイト列から写す
+///
+/// `common::ext2::Ext2::file_block` が返すのは**像を借りたバイト列**である。
+/// **位置から必要な範囲を切り出して写す**ので、カーネル側に中継のバッファは要らない。
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn sys_read(
+    fd: u64,
+    buf: u64,
+    count: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+) -> u64 {
+    // **表を握る区間を短くする。** ここでは inode と位置の写しだけを取り、
+    // 検証とブロックの読み出しは外で行う（`Locked` は割り込みを禁止する）。
+    let opened = crate::vfs::with_current_files(|files| {
+        files
+            .get(fd as usize)
+            .map(|file| (*file.inode(), file.offset()))
+    });
+    let (inode, offset) = match opened {
+        Ok(pair) => pair,
+        Err(e) => return (-errno_for_file_table(e)) as u64,
+    };
+    // **ディレクトリは `read` で読めない。** 中身は `getdents64` で返す形である
+    // （Linux も同じで、`read(2)` は `EISDIR` を返す）。
+    //
+    // 破壊 (S10-b, eisdir-as-enotdir): 対応表を 1 つ取り違え、`-ENOTDIR` を返す。
+    // **どちらも「種別が違う」を意味するので、雑に見ると同じに見える。**
+    // Linux は分けている——`read` がディレクトリに当たったら `EISDIR`、
+    // パスの途中がディレクトリでなければ `ENOTDIR` である。
+    // **syscall-test の検算が食い違いを捕まえる。**
+    if inode.is_directory() {
+        #[cfg(not(feature = "syscall-test-eisdir-as-enotdir"))]
+        let errno = EISDIR;
+        #[cfg(feature = "syscall-test-eisdir-as-enotdir")]
+        let errno = ENOTDIR;
+        return (-errno) as u64;
+    }
+
+    // 線2: 位置は `i_size` を越えない（[`crate::vfs::File`] の不変条件）。
+    let want = count.min(inode.size() - offset);
+    if want == 0 {
+        // 末尾に達しているか、0 バイト要求された。**どちらも 0 である。**
+        return 0;
+    }
+    // **踏み込む前に検証する。** 写す長さは `want` で確定している。
+    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, buf, want) }) else {
+        return (-EFAULT) as u64;
+    };
+
+    let fs = match crate::vfs::root_filesystem() {
+        Ok(fs) => fs,
+        Err(e) => return (-errno_for_ext2(e)) as u64,
+    };
+    let block_size = u64::from(fs.block_size());
+
+    let mut done = 0u64;
+    while done < want {
+        let pos = offset + done;
+        let Ok(index) = u32::try_from(pos / block_size) else {
+            return (-EIO) as u64;
+        };
+        let within = (pos % block_size) as usize;
+        let block = match fs.file_block(inode.ext2(), index) {
+            Ok(bytes) => bytes,
+            Err(e) => return (-errno_for_ext2(e)) as u64,
+        };
+        // 線2: 最後のブロックは `i_size` で切られているので、`within` が
+        // その長さを越えることがある。**飽和で引く。**
+        let available = block.len().saturating_sub(within);
+        if available == 0 {
+            // 進めない。**`i_size` と実際のブロックが食い違っている像である。**
+            return (-EIO) as u64;
+        }
+        let chunk = (want - done).min(available as u64) as usize;
+        // SAFETY: slice は検証済み。`done + chunk` は `want` を越えない。
+        let written = unsafe { copy_to_user(&slice, done, &block[within..within + chunk]) };
+        if written == 0 {
+            return (-EFAULT) as u64;
+        }
+        done += written as u64;
+    }
+
+    // **位置を進めるのは、写し終えた後である。** 途中で失敗したら進めない
+    // （呼び出し側から見て「読めなかったぶんは読めていない」）。
+    crate::vfs::with_current_files(|files| {
+        if let Ok(file) = files.get_mut(fd as usize) {
+            file.advance(done);
+        }
+    });
+    done
 }
 
 /// `open(path, flags, mode)` の本体（S10-b）。

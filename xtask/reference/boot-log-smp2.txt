@@ -2,7 +2,7 @@
 Hello, ZaytOS!
 [INFO] printed "Hello, ZaytOS!" to UEFI console
 [INFO] ELF parsed: entry point = 0xffffffff80100000
-[INFO] kernel segments placed and .bss zeroed (0x100000..0x43d000)
+[INFO] kernel segments placed and .bss zeroed (0x100000..0x43e000)
 [INFO] kernel entry: VMA 0xffffffff80100000 -> load address 0x100000 (delta 0xffffffff80000000)
 [INFO] GOP framebuffer acquired: 1280x800 stride=1280 format=Bgr phys=0x80000000 size=4096000
 [INFO] acpi: RSDP found at 0xf77e014 via the ACPI 2.0 configuration table entry
@@ -11,11 +11,11 @@ Hello, ZaytOS!
 [INFO] jumping to kernel entry point 0x100000
 [INFO] ZaytOS kernel: entered _start
 [INFO] boot stack: 632 of 16384 bytes used (high-water; 15752 bytes poison intact)
-[INFO] higher-half: arrived at high VA. RIP=0xffffffff8018f8c8 in [0xffffffff80100000, 0xffffffff8043c348)=true, RSP=0xffffffff8041ad70 high=true, CR3=0x3c5000 == bootstrap PML4 0x3c5000 = true, identity alive (phys 0x100000 read via low==high) = true
-[INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff8042d100 first slot=0xffffffff8042d100 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
+[INFO] higher-half: arrived at high VA. RIP=0xffffffff80190bc8 in [0xffffffff80100000, 0xffffffff8043d348)=true, RSP=0xffffffff8041bd70 high=true, CR3=0x3c6000 == bootstrap PML4 0x3c6000 = true, identity alive (phys 0x100000 read via low==high) = true
+[INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff8042e100 first slot=0xffffffff8042e100 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
 [INFO] interrupts: RFLAGS.IF before cli = false (raw RFLAGS=0x96)
 [INFO] interrupts: RFLAGS.IF after cli = false (raw RFLAGS=0x96)
-[INFO] gdt: base=0xffffffff8042d100 limit=63 (expected base=0xffffffff8042d100)
+[INFO] gdt: base=0xffffffff8042e100 limit=63 (expected base=0xffffffff8042e100)
 [INFO] gdt: CS=0x8 (expected 0x8), TR=0x30 (expected 0x30)
 [INFO] gdt: limit=63 (expected 63)
 [INFO] gdt[1] kcode: 0x00af9a000000ffff DPL=0 present=1 kind=code accessed=0 (expected 0x00af9a000000ffff, accessed bit is CPU-managed)
@@ -24,23 +24,23 @@ Hello, ZaytOS!
 [INFO] gdt[4] udata: 0x00cff2000000ffff DPL=3 present=1 kind=data accessed=0 (expected 0x00cff2000000ffff, accessed bit is CPU-managed)
 [INFO] gdt[5] ucode64: 0x00affa000000ffff DPL=3 present=1 kind=code accessed=0 (expected 0x00affa000000ffff, accessed bit is CPU-managed)
 [INFO] gdt: kdata D/B=1, udata D/B=1 (must match; udata follows kdata)
-[INFO] gdt[6] tss: base=0xffffffff803cd028 (expected 0xffffffff803cd028) present=1 S=0 type=0xb (0xb = busy, set by ltr)
+[INFO] gdt[6] tss: base=0xffffffff803ce028 (expected 0xffffffff803ce028) present=1 S=0 type=0xb (0xb = busy, set by ltr)
 [INFO] gdt: all descriptors match (kernel + user DPL=3 in STAR-compatible order, TSS at new index)
-[INFO] tss: base=0xffffffff803cd028 IST1=0xffffffff80428000 RSP0=0xffffffff80423000
+[INFO] tss: base=0xffffffff803ce028 IST1=0xffffffff80429000 RSP0=0xffffffff80424000
 [INFO] tss: RSP0 は特権レベル遷移（ユーザー -> カーネル）用で、M5 まで実際には使われない
-[INFO] stack: old RSP=0xffffffff803ccf78 (UEFI-derived), new RSP=0xffffffff8041aa40
-[INFO] stack: kernel stack 0xffffffff80413000..0xffffffff80423000 (64 KiB)
-[INFO] stack: double fault (IST1) stack 0xffffffff80424000..0xffffffff80428000 (16 KiB)
+[INFO] stack: old RSP=0xffffffff803cdf78 (UEFI-derived), new RSP=0xffffffff8041ba40
+[INFO] stack: kernel stack 0xffffffff80414000..0xffffffff80424000 (64 KiB)
+[INFO] stack: double fault (IST1) stack 0xffffffff80425000..0xffffffff80429000 (16 KiB)
 [INFO] stack: RSP is inside the kernel stack: true
-[INFO] stack: locals live at 0xffffffff8041ae4c, inside the kernel stack: true
+[INFO] stack: locals live at 0xffffffff8041be4c, inside the kernel stack: true
 [INFO] stack: no longer using the UEFI-derived stack: true
-[INFO] stack: write/read-back at 0xffffffff8041a940: OK
+[INFO] stack: write/read-back at 0xffffffff8041b940: OK
 [INFO] stack: IST guards intact (double-fault=true, page-fault=true)
 [INFO] stack: switched to the kernel's own stack (GDT/TSS loaded)
-[INFO] idt: base=0xffffffff80410a99 limit=4095 (expected base=0xffffffff80410a99 limit=4095)
+[INFO] idt: base=0xffffffff80411a99 limit=4095 (expected base=0xffffffff80411a99 limit=4095)
 [INFO] idt: 256 entries, all present=true, all interrupt gates=true, DPL layout ok=true (syscall vector 0x80 DPL=Some(3), others DPL 0)
 [INFO] idt: #DF (vector 8) IST index=Some(1), #DE (vector 0) IST index=None
-[INFO] idt: stub table 0xffffffff801441c0..0xffffffff801451c0 size=4096 (expected 4096), stride=OK, entries=OK
+[INFO] idt: stub table 0xffffffff801443d0..0xffffffff801453d0 size=4096 (expected 4096), stride=OK, entries=OK
 [INFO] idt: dedicated stubs outside the exception table: 6 checked, every gate points at its own stub=true
 [INFO] idt: loaded (exceptions now reach our handlers; interrupts stay disabled until M4-d)
 [INFO] critical: IF before any guard = false
@@ -67,15 +67,15 @@ Hello, ZaytOS!
 [INFO] paging:   0xf76d000..0x10000000 cacheable=true
 [INFO] paging:   0x80000000..0x803e8000 cacheable=false
 [INFO] paging:   0xffc00000..0x100000000 cacheable=false
-[INFO] higher-half: kernel image 0x100000..0x43c348 mapped at 0xffffffff80100000 (len 0x33d000), 4 new page-table frame(s)
+[INFO] higher-half: kernel image 0x100000..0x43d348 mapped at 0xffffffff80100000 (len 0x33e000), 4 new page-table frame(s)
 [INFO] paging: 129 huge (2MiB) page(s), 1287 small (4KiB) page(s), 12 frame(s) consumed for page tables
-[INFO] paging: required range [kernel image] 0x100000..0x43c348: OK
+[INFO] paging: required range [kernel image] 0x100000..0x43d348: OK
 [INFO] paging: required range [framebuffer] 0x80000000..0x803e8000: OK
 [INFO] paging: required range [new page tables (PML4)] 0x3000..0x4000: OK
-[INFO] paging: required range [current RSP] 0x41afd0..0x41afd1: OK
-[INFO] paging: required range [current RIP] 0x18f8c8..0x18f8c9: OK
+[INFO] paging: required range [current RSP] 0x41bfd0..0x41bfd1: OK
+[INFO] paging: required range [current RIP] 0x190bc8..0x190bc9: OK
 [INFO] paging: all required ranges mapped. proceeding to CR3 switch (d-2).
-[INFO] paging: current CR3 = 0x3c5000
+[INFO] paging: current CR3 = 0x3c6000
 [INFO] paging: CR3 switch instruction executed
 [INFO] paging: CR3 readback 0x3000 (expected 0x3000): OK
 [INFO] paging: walking the live tables from PML4 0x3000
@@ -92,7 +92,7 @@ Hello, ZaytOS!
 [INFO] paging: BootInfo read: OK
 [INFO] framebuffer: validated 1280x800 stride=1280 format=Bgr 0x80000000..0x803e8000
 [INFO] paging: CR3 switch verified. now running under self-built page tables.
-[INFO] higher-half: kernel image 0x100000..0x43c348 mapped at 0xffffffff80100000 (len 0x33d000), 4 new page-table frame(s)
+[INFO] higher-half: kernel image 0x100000..0x43d348 mapped at 0xffffffff80100000 (len 0x33e000), 4 new page-table frame(s)
 [INFO] direct-map: built a new table at PML4 0xf000 using 19 frame(s) (76 KiB), window base 0xffff800000000000
 [INFO] direct-map: pre-switch check: identity 14 probe(s) mismatches=0, window 14 probe(s) mismatches=0, saw a 2MiB window page=true
 [INFO] direct-map: CR3 switch instruction executed
@@ -105,16 +105,16 @@ Hello, ZaytOS!
 [INFO] direct-map A-2: framebuffer rehomed to 0xffff800080000000; wrote a proof pixel, read 0xc04080/0xc04080 via high/identity = true
 [INFO] console: ready (160x50 cells), back buffer 0x1780000..0x1b68000 (1000 frames)
 [INFO] console: 102 log line(s) were emitted before the console existed (serial only)
-[INFO] heap: arena 0x43d000..0x53d000 (256 frames, 1 MiB), mapped=true
+[INFO] heap: arena 0x43e000..0x53e000 (256 frames, 1 MiB), mapped=true
 [INFO] heap: initialized (1048576 bytes free, 1 block(s))
-[INFO] granularity: executing code (RIP) 0xffffffff8018f8c8 -> phys 0x18f8c8, mapped by a 4KiB page at 0xffffffff8018f000 (entry=0x18f023)
-[INFO] granularity: kernel stack (RSP) 0xffffffff8041aa50 -> phys 0x41aa50, mapped by a 4KiB page at 0xffffffff8041a000 (entry=0x41a063)
-[INFO] granularity: heap arena 0x43d000 -> phys 0x43d000, mapped by a 2MiB page at 0x400000 (entry=0x400083)
+[INFO] granularity: executing code (RIP) 0xffffffff80190bc8 -> phys 0x190bc8, mapped by a 4KiB page at 0xffffffff80190000 (entry=0x190023)
+[INFO] granularity: kernel stack (RSP) 0xffffffff8041ba50 -> phys 0x41ba50, mapped by a 4KiB page at 0xffffffff8041b000 (entry=0x41b063)
+[INFO] granularity: heap arena 0x43e000 -> phys 0x43e000, mapped by a 2MiB page at 0x400000 (entry=0x400083)
 [INFO] granularity: framebuffer 0x80000000 -> phys 0x80000000, mapped by a 2MiB page at 0x80000000 (entry=0x800000b3)
 [INFO] test hooks: none enabled (this is a normal build)
 [INFO] cpu: MAXPHYADDR = 40 bits (observed only; PhysAddr rejects anything above 52)
 [INFO] high-half: built a new table at PML4 0x22000 using 12 frame(s) (48 KiB)
-[INFO] high-half: kernel image 0x100000..0x43d000 is also mapped at 0xffffffff80100000 (kernel high mapping, NOT the direct map window)
+[INFO] high-half: kernel image 0x100000..0x43e000 is also mapped at 0xffffffff80100000 (kernel high mapping, NOT the direct map window)
 [INFO] high-half: walked 8 probe(s) through the kernel high mapping with an independent walker, mismatches=0
 [INFO] high-half: the identity part of the new table matches the plan, mismatches=0
 [INFO] high-half: the live table's PML4 is untouched by the build = true
@@ -125,16 +125,16 @@ Hello, ZaytOS!
 [INFO] split-test: unmapped 0xffff800000601000 (old pte=0x601003); translate returns none=true, both neighbours still mapped=true
 [INFO] split-test: splitting an already-split page is rejected = true
 [INFO] split-test: split and unmap behave as planned (verified through translate())
-[INFO] stack-guard: unmapped the kernel stack guard page 0xffffffff80412000 (old pte=0x412003); translate returns none=true. #PF now uses IST2.
-[INFO] user-map: U/S audit: user subtree PML4[1] entries=4 violations(U=0)=0, kernel entries=3678 violations(U=1)=0
+[INFO] stack-guard: unmapped the kernel stack guard page 0xffffffff80413000 (old pte=0x413003); translate returns none=true. #PF now uses IST2.
+[INFO] user-map: U/S audit: user subtree PML4[1] entries=4 violations(U=0)=0, kernel entries=3679 violations(U=1)=0
 [INFO] user-map: after unmap: user subtree residue entries=3 (intermediates kept for M5-e-3), kernel violations(U=1)=0
 [INFO] user-map: user-page mapping verified (all levels U=1 for the user page, all kernel entries U=0, Ring 0 read-back held; leaf unmapped, subtree kept for M5-e-3)
-[INFO] ring3: entering Ring 3 (user code 0x8000000000 with cli, user stack top 0x8000101000, RSP0 -> excursion stack [0xffffffff804380b0, 0xffffffff8043c0b0))
-[INFO] ring3: folded expected #GP. fault CS=0x2b (RPL=3), fault RSP=0x8000101000 (in user stack=true), handler RSP=0xffffffff8043bff0 (in excursion stack=true), RSP0 restored=true
-[INFO] ring3: U/S audit after the excursion: user subtree entries=6 violations=0, kernel entries=3678 violations=0
+[INFO] ring3: entering Ring 3 (user code 0x8000000000 with cli, user stack top 0x8000101000, RSP0 -> excursion stack [0xffffffff804390b0, 0xffffffff8043d0b0))
+[INFO] ring3: folded expected #GP. fault CS=0x2b (RPL=3), fault RSP=0x8000101000 (in user stack=true), handler RSP=0xffffffff8043cff0 (in excursion stack=true), RSP0 restored=true
+[INFO] ring3: U/S audit after the excursion: user subtree entries=6 violations=0, kernel entries=3679 violations=0
 [INFO] ring3: Ring 3 excursion verified (fell to Ring 3, cli faulted as #GP, RSP0 switched to the excursion stack, folded back to the kernel, permission split intact)
-[INFO] syscall: entering Ring 3 to issue probe int 0x80 (number=0x1000, int at 0x800000002b, cli fold at 0x8000000032, RSP0 -> excursion stack [0xffffffff804380b0, 0xffffffff8043c0b0))
-[INFO] syscall: probe int 0x80 returned. invocations=1 (issued exactly 1), number seen=0x1000 (expected 0x1000), handler RSP=0xffffffff8043c000 (on RSP0 excursion stack=true), in-Ring-3 flag at entry=true, RSP0 restored=true
+[INFO] syscall: entering Ring 3 to issue probe int 0x80 (number=0x1000, int at 0x800000002b, cli fold at 0x8000000032, RSP0 -> excursion stack [0xffffffff804390b0, 0xffffffff8043d0b0))
+[INFO] syscall: probe int 0x80 returned. invocations=1 (issued exactly 1), number seen=0x1000 (expected 0x1000), handler RSP=0xffffffff8043d000 (on RSP0 excursion stack=true), in-Ring-3 flag at entry=true, RSP0 restored=true
 [INFO] syscall: args seen=[0x11111111, 0x22222222, 0x33333333, 0x44444444, 0x55555555, 0x66666666], user stored=0xc0ffee (expected return 0xc0ffee)
 [INFO] syscall: probe int 0x80 round-trip verified (6 args reached syscall_entry per the R10 convention, the return value came back through RAX to Ring 3 and was stored, syscall_entry ran on the RSP0 stack, and the cli #GP folded back to the kernel)
 [INFO] syscall: ptr case 'valid page' buf=0x8000000000 len=0x1 -> stored=0x0 (expect accept(0), ok=true)
@@ -236,11 +236,11 @@ Hello, ZaytOS!
 [INFO] percpu: 2 usable CPU(s) enumerated, 2 per-CPU slot(s) available, every CPU has a slot=true (cpu_id() is the constant 0 and only the bootstrap processor runs, so no slot is indexed out of range yet)
 [INFO] identity-removal: begin. live PML4=0xf000, saved PML4[0]=0x10023
 [INFO] identity-removal: PML4[0] subtree table frames = 7 (28 KiB) become unreachable; intentional leak. subtree frames [256]=10 [511]=4. disjoint(0,256)=true disjoint(0,511)=true disjoint(256,511)=true
-[INFO] identity-removal: required [RIP] 0xffffffff8018f8c8 -> phys 0x18f8c8 (huge=false): OK
-[INFO] identity-removal: required [RSP] 0xffffffff8041a8a0 -> phys 0x41a8a0 (huge=false): OK
+[INFO] identity-removal: required [RIP] 0xffffffff80190bc8 -> phys 0x190bc8 (huge=false): OK
+[INFO] identity-removal: required [RSP] 0xffffffff8041b8a0 -> phys 0x41b8a0 (huge=false): OK
 [INFO] identity-removal: required [direct map window] 0xffff80000000f000 -> phys 0xf000 (huge=false): OK
 [INFO] identity-removal: required [kernel image] 0xffffffff80100000 -> phys 0x100000 (huge=false): OK
-[INFO] identity-removal: required [heap high VA] 0xffff80000043d000 -> phys 0x43d000 (huge=true): OK
+[INFO] identity-removal: required [heap high VA] 0xffff80000043e000 -> phys 0x43e000 (huge=true): OK
 [INFO] identity-removal: required [framebuffer high VA] 0xffff800080000000 -> phys 0x80000000 (huge=true): OK
 [INFO] identity-removal: PML4[0] after clear = 0x0 (empty=true)
 [INFO] identity-removal: post-flush required regions re-resolved OK: 6/6
@@ -248,9 +248,9 @@ Hello, ZaytOS!
 [INFO] identity-removal: done. identity (PML4[0]) removed; IDENTITY_REMOVED gate armed
 [INFO] lock: IF before=false while held=false after=false (value read back = 0xabcd)
 [INFO] lock: interrupts are disabled while the guard is held and restored afterwards
-[INFO] heap smoke test: Vec<u32> len=10 ptr=0xffff80000043d090 mapped=true
-[INFO] heap smoke test: Box<u32> value=0x12345678 ptr=0xffff80000043d020 mapped=true
-[INFO] heap smoke test: String="ZaytOS heap is alive" ptr=0xffff80000043d050 mapped=true
+[INFO] heap smoke test: Vec<u32> len=10 ptr=0xffff80000043e090 mapped=true
+[INFO] heap smoke test: Box<u32> value=0x12345678 ptr=0xffff80000043e020 mapped=true
+[INFO] heap smoke test: String="ZaytOS heap is alive" ptr=0xffff80000043e050 mapped=true
 [INFO] heap: after smoke test, 1048576 bytes free, 1 block(s)
 [INFO] console: 11 flush(es), 4418560 bytes transferred
 [INFO] console: full-screen equivalent would be 45056000 bytes (9% actually sent)
@@ -265,15 +265,15 @@ task: A finished all rounds; yielding for good
 task: B round 3/3: all 15 GPRs survived the switch (base=0xb2b20000)
 task: B finished all rounds; yielding for good
 task: demo finished. switches=9, sum(resumes)=9, A done=true, B done=true, accounting balanced=true
-task: TSS.RSP0 tracked every switch; now 0xffffffff80423000 (main stack top 0xffffffff80423000, match=true)
+task: TSS.RSP0 tracked every switch; now 0xffffffff80424000 (main stack top 0xffffffff80424000, match=true)
 task: cooperative switch verified
 [INFO] address-space: built a second address space (pml4=0x54000); the production one is 0xf000; about to switch
 [INFO] address-space: still running after the switch (cr3 read back = 0x54000, expected 0x54000, matches=true)
 [INFO] address-space: switched back to the production table (cr3 read back = 0xf000, matches=true)
 [INFO] address-space: read 0xaaaaaaaaaaaaaaaa in A and 0xbbbbbbbbbbbbbbbb in B (A sees only its own=true, B sees only its own=true)
 [INFO] address-space: shared kernel PML4 entries compared across 3 tables: mismatches=0 (expected 0)
-[INFO] address-space: U/S audit of A (user subtree PML4[0]): user entries=4 violations(U=0)=0, kernel entries=2284 violations(U=1)=0
-[INFO] address-space: U/S audit of B (user subtree PML4[0]): user entries=4 violations(U=0)=0, kernel entries=2284 violations(U=1)=0
+[INFO] address-space: U/S audit of A (user subtree PML4[0]): user entries=4 violations(U=0)=0, kernel entries=2285 violations(U=1)=0
+[INFO] address-space: U/S audit of B (user subtree PML4[0]): user entries=4 violations(U=0)=0, kernel entries=2285 violations(U=1)=0
 [INFO] ext2: image 2097152 byte(s) built by "mke2fs 1.47.0 (5-Feb-2023)"
 [INFO] ext2: superblock rev=1 block_size=4096 inode_size=256 inodes=256 blocks=512 blocks_per_group=32768 inodes_per_group=256 first_ino=11 groups=1
 [INFO] ext2: features compat=0x38 incompat=0x2 ro_compat=0x3 (only unknown incompat bits are refused; unknown ro_compat and compat are accepted for reading, as Linux does)
@@ -339,11 +339,11 @@ task: cooperative switch verified
 [INFO] vfs: fault-test opened 0 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16)
 [INFO] user-run: fault-test left Ring 3 (exited=false status=0 folded=true vector=14 rip=0x400030 cs=0x2b cr2=0x400000 err=0x7), it made 0 syscall(s) and the kernel was entered from Ring 3 (false), write(fd=0, 0 byte(s)) said ""
 [INFO] user-load: fault-test ran as a process in its own address space, ended as expected, and the kernel continued after the process was gone; the space was destroyed (7 frame(s) left the allocator and 7 reached quarantine, match=true leaked=0)
-[INFO] user-load: syscall-test mapped PT_LOAD 0x400000..0x400212 (filesz=0x212 memsz=0x212 w=false)
-[INFO] user-load: syscall-test mapped PT_LOAD 0x401000..0x401028 (filesz=0x28 memsz=0x28 w=false)
+[INFO] user-load: syscall-test mapped PT_LOAD 0x400000..0x400412 (filesz=0x412 memsz=0x412 w=false)
+[INFO] user-load: syscall-test mapped PT_LOAD 0x401000..0x40103f (filesz=0x3f memsz=0x3f w=false)
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
-[INFO] vfs: syscall-test opened 2 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16)
-[INFO] user-run: syscall-test left Ring 3 (exited=true status=0 folded=false vector=0 rip=0x0 cs=0x0 cr2=0x0 err=0x0), it made 12 syscall(s) and the kernel was entered from Ring 3 (true), write(fd=1, 24 byte(s)) said "syscall-test wrote this"
+[INFO] vfs: syscall-test opened 5 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16)
+[INFO] user-run: syscall-test left Ring 3 (exited=true status=0 folded=false vector=0 rip=0x0 cs=0x0 cr2=0x0 err=0x0), it made 24 syscall(s) and the kernel was entered from Ring 3 (true), write(fd=1, 24 byte(s)) said "syscall-test wrote this"
 [INFO] user-abi: syscall-test issued the probe from user assembly and all 6 arguments arrived per ADR-0020 (arg4 came from R10, not RCX, which carried a sentinel); this checks the ABI contract itself, not the dispatcher — the boot-time probe assembles its arguments in Rust inside the kernel, this one assembles them in assembly, links, loads and enters Ring 3 like any program
 [INFO] user-load: syscall-test ran as a process in its own address space, ended as expected, and the kernel continued after the process was gone; the space was destroyed (8 frame(s) left the allocator and 8 reached quarantine, match=true leaked=0)
 [INFO] pit: channel 0 set to divisor=11932 for a requested 100 Hz; actual is 99.998 Hz (the divisor is an integer, so the period never matches exactly)
@@ -356,9 +356,9 @@ task: cooperative switch verified
 [INFO] keyboard: IRQ1 is unmasked on the 8259; the delivery vector is 0x21 for now (S2-d-1c re-routes it through the I/O APIC before sti, which changes the vector)
 [INFO] ioapic: IRQ1 redirection entry read back: vector=0x42 masked=false level_triggered=false active_low=false destination_mode=physical destination=0x00, vector matches what we wrote (0x42) = true, destination is physical mode and equals the bootstrap processor (0x00) = true
 [INFO] ioapic: IRQ1 now goes through the I/O APIC as vector 0x42; the 8259 line is masked (the first key must arrive as that vector, which the 8259 cannot produce)
-[INFO] sti-check 1: GDT base=0xffffffff8042d100 (expected 0xffffffff8042d100), CS=0x0008 (expected 0x0008), DS=0x0010 SS=0x0010 (expected 0x0010)
-[INFO] sti-check 2: TR=0x0030 (expected 0x0030), IST1 top=0xffffffff80428000, #DF gate IST index=Some(1)
-[INFO] sti-check 3: IDT base=0xffffffff80410a99 limit=4095, first 32 gates ok=true, exception stub table ok=true, irq stub table ok=true (0xffffffff801451f0..0xffffffff80145400, size=528 expected=528)
+[INFO] sti-check 1: GDT base=0xffffffff8042e100 (expected 0xffffffff8042e100), CS=0x0008 (expected 0x0008), DS=0x0010 SS=0x0010 (expected 0x0010)
+[INFO] sti-check 2: TR=0x0030 (expected 0x0030), IST1 top=0xffffffff80429000, #DF gate IST index=Some(1)
+[INFO] sti-check 3: IDT base=0xffffffff80411a99 limit=4095, first 32 gates ok=true, exception stub table ok=true, irq stub table ok=true (0xffffffff80145400..0xffffffff80145610, size=528 expected=528)
 [INFO] sti-check 5: PIC IMR master=0xfe slave=0xff (expected 0xfe/0xff) [read back from hardware]
 [INFO] sti-check 4: cannot be verified at this point; the timer still goes through the 8259 here (calibration needs PIT ticks, so the move to the local APIC timer happens after sti), and the 8259 ICW2 is write-only. Proceeding is safe only because check 5 holds: with every IRQ masked, a wrong offset delivers nothing. Proof arrives when the first timer IRQ shows up as vector 0x20. The other two paths are read back where they are set up: the I/O APIC redirection entry (IRQ1) and the LVT timer
 [INFO] sti-check 6: IF before=false while holding the lock=false after=false (must be false while held, and back to the entry value afterwards)
@@ -380,8 +380,8 @@ task: cooperative switch verified
 [INFO] lapic-timer: the timer now arrives as vector 0xfe, which the 8259 cannot produce
 task: starting preemptive demo with 2 busy-loop workers for 200 ticks
 [INFO] smp: the installed AP trampoline matches the template outside the patched fields: 4048 byte(s) compared, 48 excluded (gdtr base at 0xf22, far jump target at 0x3b, data block 0xf40..0xf68), mismatches=0
-[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x3c5000, rust entry 0xffffffff8016bef0
-[INFO] smp: starting application processor apic id 1 as slot 1 (trampoline at 0x1000, vector 0x01, stack top 0x3000 identity-mapped, cr3 0x3c5000 = the static boot page table)
+[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x3c6000, rust entry 0xffffffff8016ce00
+[INFO] smp: starting application processor apic id 1 as slot 1 (trampoline at 0x1000, vector 0x01, stack top 0x3000 identity-mapped, cr3 0x3c6000 = the static boot page table)
 [INFO] smp: application processor 1 started (long mode reached, running on the static boot page table; no per-CPU GDT/TSS/IDT yet, so cpu_id() is not used here)
 [INFO] smp: ap 1 loaded its own GDT/TSS/IDT; cpu_id() now reads 1 from GDTR (the index handed over in the trampoline data block was 1, match=true)
 [INFO] smp: ap 1 switched to the production page table (cr3=0xf000) and its own per-CPU stack; PML4[0] read back from this core = empty:true (the identity mapping is gone here too, so the trampoline's identity VA stack is no longer usable)

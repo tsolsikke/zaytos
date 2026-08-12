@@ -5047,12 +5047,13 @@ const SYSCALL_TEST_MESSAGE: &str = "syscall-test wrote this\n";
 
 /// `syscall-test` の受け皿の `ud2` が entry から何バイト目にあるか（S9-b-3-2a）。
 ///
-/// **`kernel/userland/syscall-test.rs` の `.org 0x200` と対になっている。**
+/// **`kernel/userland/syscall-test.rs` の `.org 0x400` と対になっている。**
 /// `hello` より遠いのは、検算の分だけ命令が長いためである。
-/// **S10-b で `open`/`close` の 6 つの検算を足したとき 0x100 に収まらなくなった**
-/// （実測で 310 バイト）ので 0x200 へ広げた。**アセンブラが `.org` で落ちる**ので、
-/// 収まらなくなったことは静かには通らない。
-const SYSCALL_TEST_UD2_OFFSET: u64 = 0x200;
+/// **S10-b で `open`/`close` の検算を足したとき 0x100 に収まらなくなり**（実測 310
+/// バイト）、**`read` の検算を足したとき 0x200 にも収まらなくなった**（実測 743
+/// バイト）。**アセンブラが `.org` で落ちる**ので、収まらなくなったことは静かには
+/// 通らない。
+const SYSCALL_TEST_UD2_OFFSET: u64 = 0x400;
 
 /// `syscall-test` の終了状態の意味（S9-b-3-2a）。
 ///
@@ -5080,6 +5081,16 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
         "the second close of the same descriptor did not return -EBADF",
     ),
     (10, "open(NULL) did not return -EFAULT"),
+    (11, "reading all of /etc/motd did not return 18 bytes"),
+    (12, "the bytes read back did not match the known contents"),
+    (13, "reading at the end of the file did not return 0"),
+    (14, "the short read did not return 5 matching bytes"),
+    (
+        15,
+        "the follow-up read did not return the remaining 13 matching bytes",
+    ),
+    (16, "reading a directory did not return -EISDIR"),
+    (17, "reading a closed descriptor did not return -EBADF"),
 ];
 
 /// `fault-test` が起こす #PF のエラーコード（S9-b-3-2a）。
@@ -7556,6 +7567,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "syscall-test-einval-as-efault",
         cfg!(feature = "syscall-test-einval-as-efault"),
         "SYS_CHECKSUM の容量超過を -EINVAL でなく -EFAULT で返す",
+    ),
+    (
+        "syscall-test-eisdir-as-enotdir",
+        cfg!(feature = "syscall-test-eisdir-as-enotdir"),
+        "ディレクトリの read を -EISDIR でなく -ENOTDIR で返す",
     ),
     (
         "exception-test",

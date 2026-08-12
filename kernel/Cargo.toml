@@ -222,6 +222,12 @@ syscall-test-copy-overrun = []
 # アドレスの誤りが同じ errno に潰れ、over-long の判定行が食い違いを検出して halt する。
 # `--syscall-test einval-as-efault`。
 syscall-test-einval-as-efault = []
+# S10-b: ディレクトリを read したときの -EISDIR を -ENOTDIR で返す。errno の
+# 対応表の取り違えを狙う破壊で、どちらも「種別が違う」を意味するが、Linux が
+# 分けている 2 つである（read はディレクトリに対して EISDIR、パスの途中が
+# ディレクトリでなければ ENOTDIR）。syscall-test の検算が食い違いを検出して
+# halt する。`--syscall-test eisdir-as-enotdir`。
+syscall-test-eisdir-as-enotdir = []
 # S1-b-2: ACPI の検証経路の破壊確認。いずれも既定ビルドには入らない。
 # `cargo xtask run --acpi-test <kind>` が有効化する。観測は panic ではなく、
 # 「検出のログが出て、MADT の列挙が完了しないこと」である。
