@@ -1542,6 +1542,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // **まだ走らせない**（Ring 3 への遷移は次の刻み）。ここまでで、像が読めること、
     // 新しいアドレス空間へ区画が張れること、**張った葉の W が区画の権限どおりで
     // あること**を見る。
+    verify_embedded_fs_image(&mut logger);
     verify_embedded_user_elf(&mut logger);
     verify_corrupt_user_elf_is_rejected(&mut logger);
     verify_corrupt_user_program_is_not_loaded(&mut logger, &mut allocator);
@@ -3583,6 +3584,19 @@ static FAULT_TEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fault-t
 /// 埋め込んだユーザープログラム `syscall-test` の ELF（S9-b-3-2a）。
 static SYSCALL_TEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/syscall-test.elf"));
 
+/// 埋め込んだ ext2 の像（S10-a）。
+///
+/// `kernel/build.rs` が `mke2fs` で建て、時刻を 0 にして決定的にしたものである。
+/// **`hello` の ELF と同じく `include_bytes!` で抱える**（`docs/roadmap.md` の
+/// S10。移す条件は「像を書き換える必要が生じたとき」または「像の大きさが
+/// 起動時のコピーで測れるほど効いたとき」）。
+static FS_IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fs.img"));
+
+/// `build.rs` が生成した、像を建てた道具の版と大きさ（S10-a）。
+mod fsimage_info {
+    include!(concat!(env!("OUT_DIR"), "/fsimage_info.rs"));
+}
+
 /// 埋め込んだユーザープログラムの ELF を読み、会計を出す（S9-b-1）。
 ///
 /// **写像もしないし走らせもしない。** 像が在って、`common::elf` が受理し、
@@ -3750,6 +3764,85 @@ enum UserLoadError {
     },
     /// `write` が届けたバイト列が予期と違った。
     WriteMismatch,
+}
+
+/// 埋め込んだ ext2 の像を読み、superblock と group descriptor を主張する（S10-a）。
+///
+/// # 何を主張しているか
+///
+/// **外の道具（`mke2fs`）が作った像を、こちらのパーサが同じに読めることである。**
+/// 自作の書き手が作った像を読めても、**自分の理解どうしの一致しか言わない。**
+///
+/// # 版を出す
+///
+/// **`mke2fs` の版が変わると既定値が動きうる**（ブロックサイズ、inode サイズ）。
+/// 判定行に載せておくと、**将来ここが落ちたときに「像の作り手が変わった」を
+/// 最初に疑える。**
+fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
+    use common::ext2::Ext2;
+
+    let fs = match Ext2::parse(FS_IMAGE) {
+        Ok(fs) => fs,
+        Err(e) => {
+            logger.error(format_args!(
+                "ext2: the embedded image did not parse: {e:?}; halting"
+            ));
+            cpu::halt_forever();
+        }
+    };
+
+    logger.info(format_args!(
+        "ext2: image {} byte(s) built by {:?}",
+        FS_IMAGE.len(),
+        fsimage_info::MKE2FS_VERSION
+    ));
+    logger.info(format_args!(
+        "ext2: superblock rev=1 block_size={} inode_size={} inodes={} blocks={} \
+         blocks_per_group={} inodes_per_group={} first_ino={} groups={}",
+        fs.block_size(),
+        fs.inode_size(),
+        fs.inodes_count(),
+        fs.blocks_count(),
+        fs.blocks_per_group(),
+        fs.inodes_per_group(),
+        fs.first_inode(),
+        fs.group_count()
+    ));
+    logger.info(format_args!(
+        "ext2: features compat={:#x} incompat={:#x} ro_compat={:#x} (only unknown incompat \
+         bits are refused; unknown ro_compat and compat are accepted for reading, as Linux does)",
+        fs.feature_compat(),
+        fs.feature_incompat(),
+        fs.feature_ro_compat()
+    ));
+
+    // **像の大きさは build.rs が知っている値と一致するはず。** 食い違えば、
+    // 抱えた像と建てた像が別物である。
+    if FS_IMAGE.len() as u64 != fsimage_info::IMAGE_BYTES {
+        logger.error(format_args!(
+            "ext2: the embedded image is {} byte(s) but build.rs made {}; halting",
+            FS_IMAGE.len(),
+            fsimage_info::IMAGE_BYTES
+        ));
+        cpu::halt_forever();
+    }
+
+    // group descriptor を全部読む。**3 つのブロック番号が像の外を指していない
+    // ことは `group_descriptor` が見ている**（線3）。
+    for group in 0..fs.group_count() {
+        match fs.group_descriptor(group) {
+            Ok(descriptor) => logger.info(format_args!(
+                "ext2: group {group}: block bitmap at {} inode bitmap at {} inode table at {}",
+                descriptor.block_bitmap, descriptor.inode_bitmap, descriptor.inode_table
+            )),
+            Err(e) => {
+                logger.error(format_args!(
+                    "ext2: group {group} descriptor is not usable: {e:?}; halting"
+                ));
+                cpu::halt_forever();
+            }
+        }
+    }
 }
 
 /// 壊した像を組み立てる作業領域（S9-b-2）。

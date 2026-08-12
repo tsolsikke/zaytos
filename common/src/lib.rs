@@ -14,6 +14,7 @@ pub mod boot_info;
 pub mod cpu;
 pub mod critical;
 pub mod elf;
+pub mod ext2;
 pub mod log;
 pub mod percpu;
 pub mod port;
