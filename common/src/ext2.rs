@@ -96,6 +96,21 @@ const TRIPLE_INDIRECT_SLOT: usize = 14;
 /// 間接ブロックの項 1 つのバイト数（ブロック番号は `u32`）。
 const INDIRECT_ENTRY_SIZE: u32 = 4;
 
+/// ディレクトリエントリの固定部のバイト数（`inode`・`rec_len`・`name_len`・
+/// `file_type`）。**名前はこの直後に `name_len` バイト続く。**
+const DIRENT_HEADER_LEN: usize = 8;
+
+/// `rec_len` の整列。**ext2 はエントリを 4 バイト境界へ揃える**（Linux も
+/// `ext2_check_page` でここを見ている）。
+const DIRENT_ALIGNMENT: u16 = 4;
+
+/// `file_type`: 通常ファイル。**この欄が在るのは INCOMPAT の `FILETYPE` に
+/// よる**（[`INCOMPAT_FILETYPE`]。`mke2fs` の既定に入っている）。
+pub const DIRENT_TYPE_REGULAR: u8 = 1;
+
+/// `file_type`: ディレクトリ。
+pub const DIRENT_TYPE_DIRECTORY: u8 = 2;
+
 /// ルートディレクトリの inode 番号。**ext2 では 2 で固定である。**
 pub const ROOT_INODE: u32 = 2;
 
@@ -152,6 +167,22 @@ pub enum Ext2Error {
     ///
     /// **借りて返す形なので、穴に対して返すゼロのバイト列が像の中に無い。**
     SparseBlock(u32),
+    /// ディレクトリとして走査しようとした inode が、ディレクトリでない。
+    NotADirectory(u32),
+    /// ブロックの残りが、エントリの固定部（8 バイト）に足りない（線1）。
+    ///
+    /// **健全なディレクトリでは起きない。** 最後のエントリの `rec_len` が
+    /// ブロックの終わりまで伸びるので、残りはちょうど 0 になる。
+    DirEntryTruncated { block: u32, remaining: u32 },
+    /// `rec_len` が 4 の倍数でない。**Linux も `ext2_check_page` で見ている。**
+    DirEntryMisaligned(u16),
+    /// `rec_len` が `8 + name_len` に足りない（**線4。`rec_len = 0` はここで止まる**）。
+    ///
+    /// **走査が進むことを保証しているのはこの検査である。** `rec_len` が 0 だと
+    /// 位置が動かず、**上限が無ければ QEMU のタイムアウトでしか落ちない。**
+    DirEntryRecordTooSmall { rec_len: u16, name_len: u8 },
+    /// `rec_len` がブロックの残りを越えている（線3）。
+    DirEntryRecordPastBlock { rec_len: u16, remaining: u32 },
 }
 
 /// 受理した ext2 の像。**元のバイトスライスを借用するのみで、コピーしない。**
@@ -247,6 +278,155 @@ impl Inode {
     /// （4 MiB 超）からで、2 MiB の像には収まらない。**壊した像に対する備えである。**
     pub fn uses_unsupported_indirection(&self) -> bool {
         self.blocks[DOUBLE_INDIRECT_SLOT] != 0 || self.blocks[TRIPLE_INDIRECT_SLOT] != 0
+    }
+}
+
+/// ディレクトリエントリ 1 つ分。**名前は像から借りて返す。**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirEntry<'a> {
+    /// 指している inode 番号。**0 のエントリ（未使用の枠）は走査が飛ばすので、
+    /// ここへは現れない。**
+    pub inode: u32,
+    /// [`DIRENT_TYPE_REGULAR`] などの種別。
+    pub file_type: u8,
+    /// 名前。**`/` も NUL も含まない生のバイト列で、UTF-8 とは限らない。**
+    pub name: &'a [u8],
+}
+
+impl DirEntry<'_> {
+    /// ディレクトリか。
+    pub fn is_directory(&self) -> bool {
+        self.file_type == DIRENT_TYPE_DIRECTORY
+    }
+
+    /// 通常ファイルか。
+    pub fn is_regular_file(&self) -> bool {
+        self.file_type == DIRENT_TYPE_REGULAR
+    }
+}
+
+/// ディレクトリのエントリを 1 つずつ返す（S10-a）。
+///
+/// # 止まること（線4）
+///
+/// **`rec_len` が 0 だと位置が動かず、走査が無限に回る。** ACPI の MADT で
+/// 同じ形を踏んでいる（エントリ長 0。`acpi-test-zero-entry-length`）。
+/// **「止まらないこと」は「エラーが返ること」で観測する。**
+///
+/// 止まる根拠は 3 つの検査が組み合わさった形である。
+///
+/// - `rec_len >= 8 + name_len` なので、**`rec_len` は必ず 8 以上である。**
+///   したがって**ブロック内の位置は 1 回につき 8 バイト以上進む**
+/// - `rec_len <= 残りバイト数` なので、**位置はブロックの終わりを越えない**
+/// - ブロックの数は `i_size` から決まる有限の値である
+///
+/// **したがって、どんなバイト列に対しても有限回で終わる。** 上限を別に
+/// 数えるのではなく、**進むことそのものを検査している。**
+///
+/// # エラーの後は続けない
+///
+/// **1 つでも壊れたエントリを見たら、そこで終わる。** 壊れた `rec_len` の
+/// 先に何があるかは分からないので、**飛ばして続けると「どこを読んでいるのか」
+/// が言えなくなる。**
+pub struct DirEntries<'i, 'a> {
+    fs: &'i Ext2<'a>,
+    inode: Inode,
+    block_count: u64,
+    block_index: u32,
+    block: Option<&'a [u8]>,
+    offset: usize,
+    finished: bool,
+}
+
+impl<'a> Iterator for DirEntries<'_, 'a> {
+    type Item = Result<DirEntry<'a>, Ext2Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.finished {
+                return None;
+            }
+
+            let bytes = match self.block {
+                Some(bytes) => bytes,
+                None => {
+                    if u64::from(self.block_index) >= self.block_count {
+                        self.finished = true;
+                        return None;
+                    }
+                    match self.fs.file_block(&self.inode, self.block_index) {
+                        Ok(bytes) => {
+                            self.offset = 0;
+                            self.block = Some(bytes);
+                            bytes
+                        }
+                        Err(e) => {
+                            self.finished = true;
+                            return Some(Err(e));
+                        }
+                    }
+                }
+            };
+
+            // このブロックを読み切ったら次のブロックへ。
+            if self.offset >= bytes.len() {
+                self.block = None;
+                self.block_index += 1;
+                continue;
+            }
+
+            let remaining = bytes.len() - self.offset;
+            if remaining < DIRENT_HEADER_LEN {
+                self.finished = true;
+                return Some(Err(Ext2Error::DirEntryTruncated {
+                    block: self.block_index,
+                    remaining: remaining as u32,
+                }));
+            }
+            let header = &bytes[self.offset..self.offset + DIRENT_HEADER_LEN];
+            let inode = read_u32(header, 0);
+            let rec_len = read_u16(header, 4);
+            let name_len = header[6];
+            let file_type = header[7];
+
+            if !rec_len.is_multiple_of(DIRENT_ALIGNMENT) {
+                self.finished = true;
+                return Some(Err(Ext2Error::DirEntryMisaligned(rec_len)));
+            }
+            // **線4 の要。** `rec_len = 0` はここで止まる。
+            if usize::from(rec_len) < DIRENT_HEADER_LEN + usize::from(name_len) {
+                self.finished = true;
+                return Some(Err(Ext2Error::DirEntryRecordTooSmall { rec_len, name_len }));
+            }
+            if usize::from(rec_len) > remaining {
+                self.finished = true;
+                return Some(Err(Ext2Error::DirEntryRecordPastBlock {
+                    rec_len,
+                    remaining: remaining as u32,
+                }));
+            }
+            // 線3: 指している inode 番号が表の外を指していないこと。
+            if inode != 0 && inode > self.fs.inodes_count {
+                self.finished = true;
+                return Some(Err(Ext2Error::InodeOutOfRange(inode)));
+            }
+
+            let name_start = self.offset + DIRENT_HEADER_LEN;
+            let name = &bytes[name_start..name_start + usize::from(name_len)];
+            // **ここで初めて位置を進める。** 上の 3 つを通っているので、
+            // 進む量は 8 以上、かつブロックの内側である。
+            self.offset += usize::from(rec_len);
+
+            // inode 0 は未使用の枠である。**位置は進めた上で飛ばす。**
+            if inode == 0 {
+                continue;
+            }
+            return Some(Ok(DirEntry {
+                inode,
+                file_type,
+                name,
+            }));
+        }
     }
 }
 
@@ -587,6 +767,26 @@ impl<'a> Ext2<'a> {
         Ok(block)
     }
 
+    /// ディレクトリのエントリを走査する（S10-a）。
+    ///
+    /// **返るのは有限回で終わる走査である**（[`DirEntries`] に根拠がある）。
+    /// **未使用の枠（`inode` が 0）は飛ばす**ので、返るエントリはすべて
+    /// 実在の inode を指している。
+    pub fn directory_entries(&self, inode: &Inode) -> Result<DirEntries<'_, 'a>, Ext2Error> {
+        if !inode.is_directory() {
+            return Err(Ext2Error::NotADirectory(inode.number));
+        }
+        Ok(DirEntries {
+            fs: self,
+            inode: *inode,
+            block_count: self.block_span(inode),
+            block_index: 0,
+            block: None,
+            offset: 0,
+            finished: false,
+        })
+    }
+
     /// `i_size` を覆うのに要るブロックの数。
     ///
     /// **`i_size` が 0 なら 0 である。** 頭打ちにしない——**辿れるかどうかは
@@ -637,9 +837,10 @@ mod tests {
             6,
             &[ROOT_DATA_BLOCK],
         );
-        // ルートディレクトリの中身。**先頭 4 バイトは `.` の inode 番号である。**
-        let data = ROOT_DATA_BLOCK as usize * 4096;
-        image[data..data + 4].copy_from_slice(&ROOT_INODE.to_le_bytes());
+        // ルートディレクトリの中身。**実測した像と同じエントリを同じ `rec_len` で
+        // 並べる**（`. .. lost+found bin data etc`。最後の 1 つがブロックの
+        // 終わりまで伸びる）。
+        write_dir_block(&mut image, ROOT_DATA_BLOCK, ROOT_ENTRIES);
 
         // 直接ブロックをちょうど使い切る通常ファイル（12 ブロック）。**最後の
         // ブロックが `i_size` で切られないことを見る側である。**
@@ -713,6 +914,50 @@ mod tests {
     const INDIRECT_FILE_TABLE_BLOCK: u32 = 55;
     const INDIRECT_FILE_DATA_BLOCK: u32 = 56;
     const INDIRECT_FILE_LAST_BYTE: u8 = 0xA7;
+
+    /// ルートディレクトリのエントリ（実測した像と同じ並び。inode 番号も同じ）。
+    const ROOT_ENTRIES: &[(u32, u8, &[u8])] = &[
+        (ROOT_INODE, DIRENT_TYPE_DIRECTORY, b"."),
+        (ROOT_INODE, DIRENT_TYPE_DIRECTORY, b".."),
+        (11, DIRENT_TYPE_DIRECTORY, b"lost+found"),
+        (12, DIRENT_TYPE_DIRECTORY, b"bin"),
+        (14, DIRENT_TYPE_DIRECTORY, b"data"),
+        (17, DIRENT_TYPE_DIRECTORY, b"etc"),
+    ];
+
+    /// ディレクトリの 1 ブロックを組み立てる。
+    ///
+    /// **`rec_len` は 4 バイト境界へ切り上げ、最後の 1 つはブロックの終わりまで
+    /// 伸ばす**（ext2 の作り方であり、実測した像もそうなっている）。
+    fn write_dir_block(image: &mut [u8], block: u32, entries: &[(u32, u8, &[u8])]) {
+        let base = block as usize * 4096;
+        let mut offset = 0usize;
+        for (index, (ino, file_type, name)) in entries.iter().enumerate() {
+            let needed = (DIRENT_HEADER_LEN + name.len()).next_multiple_of(4);
+            let rec_len = if index + 1 == entries.len() {
+                4096 - offset
+            } else {
+                needed
+            };
+            let at = base + offset;
+            image[at..at + 4].copy_from_slice(&ino.to_le_bytes());
+            image[at + 4..at + 6].copy_from_slice(&(rec_len as u16).to_le_bytes());
+            image[at + 6] = name.len() as u8;
+            image[at + 7] = *file_type;
+            image[at + DIRENT_HEADER_LEN..at + DIRENT_HEADER_LEN + name.len()]
+                .copy_from_slice(name);
+            offset += rec_len;
+        }
+    }
+
+    /// エントリの固定部の在るバイト位置（テストが `rec_len` などを壊すため）。
+    fn dirent_offset(block: u32, index: usize, entries: &[(u32, u8, &[u8])]) -> usize {
+        let mut offset = block as usize * 4096;
+        for (_, _, name) in entries.iter().take(index) {
+            offset += (DIRENT_HEADER_LEN + name.len()).next_multiple_of(4);
+        }
+        offset
+    }
 
     /// inode テーブルへ 1 つ書く。**テストの像は group 0 だけである。**
     fn write_inode(image: &mut [u8], ino: u32, mode: u16, size: u32, links: u16, blocks: &[u32]) {
@@ -1175,6 +1420,258 @@ mod tests {
             (1u64 << 32) | 18,
             "a regular file takes i_size_high as the upper 32 bits"
         );
+    }
+
+    /// ルートディレクトリを走査し、実測した像と同じ並びが返ること。
+    #[test]
+    fn walks_the_root_directory() {
+        let image = build_test_image();
+        let fs = Ext2::parse(&image).unwrap();
+        let root = fs.inode(ROOT_INODE).unwrap();
+        let entries: std::vec::Vec<DirEntry<'_>> = fs
+            .directory_entries(&root)
+            .unwrap()
+            .map(|e| e.expect("every entry of a sound directory parses"))
+            .collect();
+
+        let names: std::vec::Vec<&[u8]> = entries.iter().map(|e| e.name).collect();
+        assert_eq!(
+            names,
+            std::vec![
+                &b"."[..],
+                &b".."[..],
+                &b"lost+found"[..],
+                &b"bin"[..],
+                &b"data"[..],
+                &b"etc"[..]
+            ]
+        );
+        assert_eq!(entries[0].inode, ROOT_INODE, "\".\" points at itself");
+        assert_eq!(entries[1].inode, ROOT_INODE, "root's parent is root");
+        assert!(entries.iter().all(|e| e.is_directory()));
+    }
+
+    /// 停止性の試験を、時間で区切って回す。
+    ///
+    /// # なぜ要るのか。**停止性の試験は信号の形が他と違う**
+    ///
+    /// 他の試験は主張が偽なら「落ちる」が、**停止性の試験は「返ってこない」。**
+    /// そして**上限を数える形では falsify できない**——止まらない実装では、
+    /// 数える処理そのものが動かないからである（**実測した**。模様で埋めた
+    /// ブロックを流して返る数の上限を見る形は、進むことの検査を外しても通った）。
+    ///
+    /// # 返らないままにできない
+    ///
+    /// **`cargo test` には項目ごとの時間上限が無く、`cargo xtask check` も
+    /// `cargo test` に上限を付けていない**（`CHECKS` を `Command::status()` で
+    /// 待つだけである。実測で確かめた）。**そのままだと `check` と `--full` が
+    /// 返らなくなり、`§14` の「ハングと待ちが区別できない」に落ちる。**
+    ///
+    /// **別スレッドで回して時間で区切り、「返ってこない」を「落ちる」へ変換する。**
+    /// 空転したスレッドは止められないので**残る**が、**試験の処理が終われば
+    /// プロセスごと消える**（他の試験を妨げない）。
+    fn assert_returns_promptly(what: &str, body: impl FnOnce() + Send + 'static) {
+        /// 停止性の試験に与える時間。**健全な実装では 1 ミリ秒もかからない。**
+        /// 遅い機械でも余裕があるように大きく取ってある。
+        const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+        let (done, wait) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            body();
+            // 受け手が既に諦めていることはある。**失敗しても構わない。**
+            let _ = done.send(());
+        });
+        match wait.recv_timeout(DEADLINE) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("{what} panicked; the assertion above says why")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
+                "{what} did not return within {DEADLINE:?}. The directory walk is not making \
+                 progress: every entry must advance the position by at least \
+                 {DIRENT_HEADER_LEN} bytes, which is what the DirEntryRecordTooSmall check \
+                 guarantees."
+            ),
+        }
+    }
+
+    /// 線4: **`rec_len` が 0 でも走査が止まる。**
+    #[test]
+    fn a_zero_record_length_ends_the_walk_instead_of_spinning() {
+        assert_returns_promptly("the walk over a directory with rec_len = 0", || {
+            let mut image = build_test_image();
+            let at = dirent_offset(ROOT_DATA_BLOCK, 2, ROOT_ENTRIES);
+            image[at + 4..at + 6].copy_from_slice(&0u16.to_le_bytes());
+            let fs = Ext2::parse(&image).unwrap();
+            let root = fs.inode(ROOT_INODE).unwrap();
+
+            let mut walker = fs.directory_entries(&root).unwrap();
+            assert!(walker.next().unwrap().is_ok(), "\".\" still parses");
+            assert!(walker.next().unwrap().is_ok(), "\"..\" still parses");
+            assert_eq!(
+                walker.next().unwrap(),
+                Err(Ext2Error::DirEntryRecordTooSmall {
+                    rec_len: 0,
+                    name_len: 10
+                })
+            );
+            // **エラーの後は続けない。**
+            assert!(walker.next().is_none());
+        });
+    }
+
+    /// 線4: **ゼロで埋まったブロックでも走査が止まる。**
+    ///
+    /// **`rec_len = 0` かつ `inode = 0` は、無限ループの正準の入力である。**
+    /// 未使用の枠は飛ばす形なので、**進むことの検査が無ければ 1 つも返さずに
+    /// 空転する**（上の試験は 2 つ返してから止まるので、空転の入り口が違う）。
+    #[test]
+    fn an_all_zero_directory_block_ends_the_walk() {
+        assert_returns_promptly("the walk over an all-zero directory block", || {
+            let mut image = build_test_image();
+            let base = ROOT_DATA_BLOCK as usize * 4096;
+            image[base..base + 4096].fill(0);
+            let fs = Ext2::parse(&image).unwrap();
+            let root = fs.inode(ROOT_INODE).unwrap();
+            let mut walker = fs.directory_entries(&root).unwrap();
+            assert_eq!(
+                walker.next().unwrap(),
+                Err(Ext2Error::DirEntryRecordTooSmall {
+                    rec_len: 0,
+                    name_len: 0
+                })
+            );
+            assert!(walker.next().is_none());
+        });
+    }
+
+    /// **どんなバイト列でもパニックせず、返る数がブロックの容量を越えない。**
+    ///
+    /// **停止性そのものはここでは示せない。** 空転する実装はこの `for` が
+    /// 返らないだけで、`steps` の上限には到達しないからである（**実測した**——
+    /// 進むことの検査を外してもこの試験は通った）。**止まることを falsify する
+    /// のは上の 2 つ**で、こちらが見ているのは
+    /// **「壊れた中身でも切り出しが範囲内に収まる」**（線1）である。
+    #[test]
+    fn no_block_contents_make_the_walk_panic() {
+        assert_returns_promptly("the walk over 64 arbitrary directory blocks", || {
+            const MAX_STEPS: usize = 4096 / DIRENT_HEADER_LEN;
+            for seed in 0u32..64 {
+                let mut image = build_test_image();
+                let base = ROOT_DATA_BLOCK as usize * 4096;
+                for (index, byte) in image[base..base + 4096].iter_mut().enumerate() {
+                    // 種ごとに違う模様で埋める。**健全さは狙わない。**
+                    *byte = (index as u32).wrapping_mul(seed | 1).wrapping_add(seed) as u8;
+                }
+                let fs = Ext2::parse(&image).unwrap();
+                let root = fs.inode(ROOT_INODE).unwrap();
+                let mut steps = 0usize;
+                for _ in fs.directory_entries(&root).unwrap() {
+                    steps += 1;
+                    assert!(steps <= MAX_STEPS, "seed {seed} did not terminate");
+                }
+            }
+        });
+    }
+
+    /// `rec_len` が 4 の倍数でない。**Linux も同じところを見ている。**
+    #[test]
+    fn rejects_a_misaligned_record_length() {
+        let mut image = build_test_image();
+        let at = dirent_offset(ROOT_DATA_BLOCK, 0, ROOT_ENTRIES);
+        image[at + 4..at + 6].copy_from_slice(&13u16.to_le_bytes());
+        let fs = Ext2::parse(&image).unwrap();
+        let root = fs.inode(ROOT_INODE).unwrap();
+        assert_eq!(
+            fs.directory_entries(&root).unwrap().next().unwrap(),
+            Err(Ext2Error::DirEntryMisaligned(13))
+        );
+    }
+
+    /// 線3: `rec_len` がブロックの残りを越えている。
+    #[test]
+    fn rejects_a_record_length_past_the_end_of_the_block() {
+        let mut image = build_test_image();
+        let at = dirent_offset(ROOT_DATA_BLOCK, 0, ROOT_ENTRIES);
+        image[at + 4..at + 6].copy_from_slice(&5000u16.to_le_bytes());
+        let fs = Ext2::parse(&image).unwrap();
+        let root = fs.inode(ROOT_INODE).unwrap();
+        assert_eq!(
+            fs.directory_entries(&root).unwrap().next().unwrap(),
+            Err(Ext2Error::DirEntryRecordPastBlock {
+                rec_len: 5000,
+                remaining: 4096
+            })
+        );
+    }
+
+    /// `rec_len` が `8 + name_len` に足りない（0 以外の形）。
+    #[test]
+    fn rejects_a_record_that_cannot_hold_its_own_name() {
+        let mut image = build_test_image();
+        let at = dirent_offset(ROOT_DATA_BLOCK, 2, ROOT_ENTRIES);
+        // `lost+found` は 10 文字なので 18 バイト要る。**16 では足りない。**
+        image[at + 4..at + 6].copy_from_slice(&16u16.to_le_bytes());
+        let fs = Ext2::parse(&image).unwrap();
+        let root = fs.inode(ROOT_INODE).unwrap();
+        let last = fs.directory_entries(&root).unwrap().last().unwrap();
+        assert_eq!(
+            last,
+            Err(Ext2Error::DirEntryRecordTooSmall {
+                rec_len: 16,
+                name_len: 10
+            })
+        );
+    }
+
+    /// 線3: エントリが指す inode 番号が表の外である。
+    #[test]
+    fn rejects_an_entry_pointing_outside_the_inode_table() {
+        let mut image = build_test_image();
+        let at = dirent_offset(ROOT_DATA_BLOCK, 3, ROOT_ENTRIES);
+        image[at..at + 4].copy_from_slice(&999u32.to_le_bytes());
+        let fs = Ext2::parse(&image).unwrap();
+        let root = fs.inode(ROOT_INODE).unwrap();
+        let last = fs.directory_entries(&root).unwrap().last().unwrap();
+        assert_eq!(last, Err(Ext2Error::InodeOutOfRange(999)));
+    }
+
+    /// `inode` が 0 の枠は未使用である。**飛ばすが、位置は進める。**
+    #[test]
+    fn skips_unused_entries_without_losing_the_rest() {
+        let mut image = build_test_image();
+        let at = dirent_offset(ROOT_DATA_BLOCK, 2, ROOT_ENTRIES);
+        image[at..at + 4].copy_from_slice(&0u32.to_le_bytes());
+        let fs = Ext2::parse(&image).unwrap();
+        let root = fs.inode(ROOT_INODE).unwrap();
+        let names: std::vec::Vec<&[u8]> = fs
+            .directory_entries(&root)
+            .unwrap()
+            .map(|e| e.unwrap().name)
+            .collect();
+        assert_eq!(
+            names,
+            std::vec![
+                &b"."[..],
+                &b".."[..],
+                &b"bin"[..],
+                &b"data"[..],
+                &b"etc"[..]
+            ],
+            "the unused slot is skipped and the entries after it still come back"
+        );
+    }
+
+    /// 通常ファイルはディレクトリとして走査しない。
+    #[test]
+    fn refuses_to_walk_a_regular_file() {
+        let image = build_test_image();
+        let fs = Ext2::parse(&image).unwrap();
+        let file = fs.inode(SHORT_FILE_INODE).unwrap();
+        assert!(matches!(
+            fs.directory_entries(&file),
+            Err(Ext2Error::NotADirectory(n)) if n == SHORT_FILE_INODE
+        ));
     }
 
     /// 線1: どんな短さでも `inode` がパニックしない。

@@ -3856,12 +3856,13 @@ fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
 /// （`common::ext2::ROOT_INODE`）で、**それ以外の inode へは名前からしか届かない。**
 /// ディレクトリの走査とパス解決は次の 2 刻みなので、ここではまだ名前を引けない。
 ///
-/// # `.` の inode 番号まで見る理由
+/// # ここが主張するのは「届いた」ところまでである
 ///
 /// **「4096 バイト読めた」だけでは、読めたブロックがルートの中身だとは言えない。**
-/// ディレクトリの先頭のエントリは必ず `.` で、その inode 番号は自分自身である。
-/// **ここが 2 なら、`i_block[0]` が指していたのは確かにルートの中身である。**
-/// エントリの走査そのものは次の刻みで、ここでは先頭の 4 バイトしか見ない。
+/// **正しいものが読めたことは [`verify_root_directory_walk`] が言う**——先頭の
+/// エントリが `.` で、その inode 番号が自分自身であることを、走査の結果として
+/// 見る。**以前はここで先頭 4 バイトだけを覗いていたが、走査を書いたので
+/// そちらへ寄せた。**
 fn verify_root_inode(logger: &mut Logger<SerialPort>, fs: &common::ext2::Ext2<'_>) {
     use common::ext2::ROOT_INODE;
 
@@ -3901,27 +3902,105 @@ fn verify_root_inode(logger: &mut Logger<SerialPort>, fs: &common::ext2::Ext2<'_
             cpu::halt_forever();
         }
     };
-    // 先頭のエントリは `.` である。**その inode 番号は自分自身でなければならない。**
-    let dot_inode = match first.get(..4) {
-        Some(bytes) => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-        None => {
+    logger.info(format_args!(
+        "ext2: root directory block 0 of {}: {} byte(s) via the direct blocks",
+        fs.block_span(&root),
+        first.len()
+    ));
+
+    verify_root_directory_walk(logger, fs, &root);
+}
+
+/// ルートディレクトリを走査し、名前を判定行に出す（S10-a）。
+///
+/// # 何を主張しているか
+///
+/// **`mke2fs` が並べたエントリを、こちらの走査が同じ順で同じ名前として読めること。**
+/// **先頭 2 つは形が決まっている**——`.` は自分自身を指し、`..` はルートでは
+/// 自分自身を指す。**ここだけをカーネルで確かめる。**
+///
+/// # 残りの名前をここで固定しない
+///
+/// **`lost+found` は `mke2fs` が作り、`bin`・`data`・`etc` は種の木が決めている。**
+/// カーネルへ書き写すと、種を変えたときに片方だけが古くなる（**単一間接の
+/// 期待値を `build.rs` から出したのと同じ理由**）。**一覧を固定しているのは
+/// 起動ログの参照である**——`xtask/reference/boot-log-smp2.txt` が行単位で
+/// 突き合わせるので、並びが変われば `--boot-log-diff` が落ちる。
+///
+/// # 走査が止まることは、ここでは主張しない
+///
+/// **停止性はホストテストが見ている**（`common::ext2` の
+/// `an_all_zero_directory_block_ends_the_walk`）。**QEMU では「返ってこない」が
+/// タイムアウトとしてしか観測できないので、falsify できる場所へ寄せてある。**
+fn verify_root_directory_walk(
+    logger: &mut Logger<SerialPort>,
+    fs: &common::ext2::Ext2<'_>,
+    root: &common::ext2::Inode,
+) {
+    use common::ext2::ROOT_INODE;
+
+    /// 名前を並べる作業領域。**足りなければ切り詰めたことを判定行に出す。**
+    const NAME_BUFFER_LEN: usize = 192;
+
+    let entries = match fs.directory_entries(root) {
+        Ok(entries) => entries,
+        Err(e) => {
             logger.error(format_args!(
-                "ext2: the root directory's first block is only {} byte(s); halting",
-                first.len()
+                "ext2: the root inode cannot be walked as a directory: {e:?}; halting"
             ));
             cpu::halt_forever();
         }
     };
+
+    let mut names = [0u8; NAME_BUFFER_LEN];
+    let mut used = 0usize;
+    let mut truncated = false;
+    let mut count = 0usize;
+    let mut first_two = [0u32; 2];
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                logger.error(format_args!(
+                    "ext2: root directory entry {count} is not usable: {e:?}; halting"
+                ));
+                cpu::halt_forever();
+            }
+        };
+        if count < first_two.len() {
+            first_two[count] = entry.inode;
+        }
+        count += 1;
+
+        // 区切りの空白と名前を詰める。**入らなければ詰めるのをやめる。**
+        let separator = usize::from(used != 0);
+        if used + separator + entry.name.len() <= NAME_BUFFER_LEN {
+            if separator != 0 {
+                names[used] = b' ';
+                used += 1;
+            }
+            names[used..used + entry.name.len()].copy_from_slice(entry.name);
+            used += entry.name.len();
+        } else {
+            truncated = true;
+        }
+    }
+
+    // **名前は生のバイト列で、UTF-8 とは限らない。** 読めない並びが来たら、
+    // 判定行にそう出す（**黙って落とさない**）。
+    let listing = core::str::from_utf8(&names[..used]).unwrap_or("<not valid UTF-8>");
     logger.info(format_args!(
-        "ext2: root directory block 0 of {}: {} byte(s) via the direct blocks, \
-         first entry inode={dot_inode} (the \".\" entry; walking the entries comes next)",
-        fs.block_span(&root),
-        first.len()
+        "ext2: root directory: {count} entr(y/ies): {listing}{}",
+        if truncated { " ..." } else { "" }
     ));
-    if dot_inode != ROOT_INODE {
+
+    // **先頭 2 つだけを固定する。** `.` と `..` はどちらもルート自身を指す。
+    if count < 2 || first_two != [ROOT_INODE, ROOT_INODE] {
         logger.error(format_args!(
-            "ext2: the root directory's first entry points at inode {dot_inode}, not \
-             {ROOT_INODE}; i_block[0] does not hold the root directory. halting"
+            "ext2: the root directory should start with \".\" and \"..\" both pointing at \
+             inode {ROOT_INODE}, but the first entries point at {first_two:?} ({count} entries \
+             in total); halting"
         ));
         cpu::halt_forever();
     }
