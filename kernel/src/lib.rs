@@ -28,6 +28,7 @@ pub mod gdt;
 pub mod graphics;
 pub mod heap;
 pub mod idt;
+pub mod input;
 pub mod interrupts;
 pub mod irq;
 pub mod keyboard;

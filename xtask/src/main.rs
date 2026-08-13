@@ -930,8 +930,8 @@ const SYSCALL_TESTS: &[CriticalTest] = &[
         name: "write-ignores-fd",
         feature: "write-ignores-fd",
         expected_markers: &[
-            "user-run: syscall-test exited with status 44",
-            "write(0, ...) did not return -EBADF",
+            "user-run: syscall-test exited with status 45",
+            "write(3, ...) did not return -EBADF",
         ],
         forbidden_markers: &["user-load: syscall-test ran as a process"],
         wait_for_full_timeout: false,

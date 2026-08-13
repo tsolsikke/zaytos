@@ -1104,10 +1104,39 @@ unsafe fn sys_read(
     let opened = crate::vfs::with_current_files(|files| {
         files
             .get(fd as usize)
-            .map(|file| (*file.inode(), file.offset()))
+            .map(|file| file.inode().map(|inode| (*inode, file.offset())))
     });
     let (inode, offset) = match opened {
-        Ok(pair) => pair,
+        // **端末である（S11-10）。** リングから取れるだけ取る。
+        Ok(None) => {
+            // **前景を持っていなければ読めない。** 持ち主は 1 人である
+            // （`crate::input` の不変条件）。**遠征の前に取ってある**ので、
+            // ここへ来る時点では持っている。
+            if !crate::input::foreground_is_claimed() {
+                return (-EBADF) as u64;
+            }
+            if count == 0 {
+                return 0;
+            }
+            // **踏み込む前に検証する。**
+            let want = count.min(TERMINAL_READ_MAX as u64);
+            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+            let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, buf, want) })
+            else {
+                return (-EFAULT) as u64;
+            };
+            let mut kbuf = [0u8; TERMINAL_READ_MAX];
+            let got = crate::input::read_bytes(&mut kbuf[..want as usize]);
+            if got == 0 {
+                // **待たない。** 待つにはユーザープロセスのスケジューラが要る。
+                // **`0` を返さない**——Linux では末尾（EOF）の意味になる。
+                return (-EAGAIN) as u64;
+            }
+            // SAFETY: slice は検証済みで、`got` は `want` を越えない。
+            let written = unsafe { copy_to_user(&slice, 0, &kbuf[..got]) };
+            return written as u64;
+        }
+        Ok(Some(pair)) => pair,
         Err(e) => return (-errno_for_file_table(e)) as u64,
     };
     // **ディレクトリは `read` で読めない。** 中身は `getdents64` で返す形である
@@ -1287,10 +1316,12 @@ unsafe fn sys_getdents64(
     let opened = crate::vfs::with_current_files(|files| {
         files
             .get(fd as usize)
-            .map(|file| (*file.inode(), file.offset()))
+            .map(|file| file.inode().map(|inode| (*inode, file.offset())))
     });
     let (inode, from) = match opened {
-        Ok(pair) => pair,
+        Ok(Some(pair)) => pair,
+        // **端末はディレクトリではない（S11-10）。** `getdents64` は拒む。
+        Ok(None) => return (-ENOTDIR) as u64,
         Err(e) => return (-errno_for_file_table(e)) as u64,
     };
     if !inode.is_directory() {
@@ -1519,6 +1550,14 @@ unsafe fn copy_user_path(
     Err(ENAMETOOLONG)
 }
 
+/// 端末からの `read` で 1 回に写す最大バイト数（S11-10）。
+///
+/// **カーネルスタックへ置く緩衝の大きさである。** 端末は溜まっている分しか
+/// 返さないので、**大きくしても意味が無い**——**1 回の `read` で取り切れなければ、
+/// 次の `read` が続きを取る。** 64 は `WRITE_BUF_LEN` と同じで、
+/// **4096 バイトを越えないローカル配列の範囲である。**
+pub const TERMINAL_READ_MAX: usize = 64;
+
 /// 標準出力の fd（Linux と同じ 1）。
 pub const STDOUT_FD: u64 = 1;
 /// 標準エラー出力の fd（Linux と同じ 2）。
@@ -1576,13 +1615,29 @@ unsafe fn sys_write(
     /// ページの大きさ。**検証の単位である。**
     const PAGE: u64 = 0x1000;
 
-    // 破壊 (S11-8, write-ignores-fd): fd を見ずに、何番でも出す。
+    // **番号ではなく、表の中身で分岐する（S11-10）。**
+    //
+    // **S11-8 では番号（1 と 2）を直に見ていた。** `crate::vfs::FileTable` が
+    // 0 / 1 / 2 を端末として持つようになったので、**表を引いて端末かどうかを
+    // 見る形にした。** **`open` が返した番号と衝突しない**——
+    // あちらは 3 から返る。
+    //
+    // **ファイルへの書き込みはまだ無い**ので、端末でなければ `-EROFS` である
+    // （読み取り専用のファイルシステム。`open` が書き込みを拒むのと同じ理由）。
+    //
+    // 破壊 (S11-8, write-ignores-fd): 表を引かず、何番でも出す。
     // **出力はそのまま現れるので、雑に見ると正しく動いているように見える。**
     // **見えないのは「開いていない番号が拒まれること」のほうである。**
-    // `syscall-test` の検算が食い違いを捕まえる。
     #[cfg(not(feature = "write-ignores-fd"))]
-    if fd != STDOUT_FD && fd != STDERR_FD {
-        return (-EBADF) as u64;
+    {
+        let kind = crate::vfs::with_current_files(|files| {
+            files.get(fd as usize).map(|file| file.is_terminal())
+        });
+        match kind {
+            Ok(true) => {}
+            Ok(false) => return (-EROFS) as u64,
+            Err(e) => return (-errno_for_file_table(e)) as u64,
+        }
     }
 
     // 破壊 (S11-9, write-half-only): 要求された長さの半分だけ書いて返す。

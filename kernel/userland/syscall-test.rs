@@ -35,9 +35,9 @@
 //! - `1` probe の戻り値が `PROBE_RETURN` でなかった
 //! - `2` `write` が渡したバイト数を返さなかった
 //! - `3` 実装していない番号が `-ENOSYS` を返さなかった
-//! - `4` `open("/etc/motd", O_RDONLY)` が 0 番を返さなかった
-//! - `5` `close(0)` が 0 を返さなかった
-//! - `6` 閉じた直後の `open` が 0 番を返さなかった（枠が空いていない）
+//! - `4` `open("/etc/motd", O_RDONLY)` が 3 番を返さなかった
+//! - `5` `close(3)` が 0 を返さなかった
+//! - `6` 閉じた直後の `open` が 3 番を返さなかった（枠が空いていない）
 //! - `7` `open("/nope")` が `-ENOENT` を返さなかった
 //! - `8` `open("/etc/motd", O_WRONLY)` が `-EROFS` を返さなかった
 //! - `9` `close` の 2 度目が `-EBADF` を返さなかった
@@ -75,10 +75,13 @@
 //! - `41` `spawn(path, NULL)` が `-EFAULT` を返さなかった
 //! - `42` 要素数が上限を越える `argv` が `-E2BIG` を返さなかった
 //! - `43` 全体が長すぎる `argv` が `-E2BIG` を返さなかった
-//! - `44` `write(0, ...)` が `-EBADF` を返さなかった
+//! - `44` `write(0, ...)` が渡したバイト数を返さなかった（0 も同じ端末である）
 //! - `45` `write(3, ...)` が `-EBADF` を返さなかった
 //! - `46` `write(2, ...)` が渡したバイト数を返さなかった
 //! - `47` 64 バイトを越える `write` が渡したバイト数を返さなかった
+//! - `51` `read(0)` が `-EAGAIN` を返さなかった（打鍵が無い）
+//! - `52` `read(1)` が `-EAGAIN` を返さなかった（1 も同じ端末である）
+//! - `53` `read(3)` が `-EBADF` を返さなかった（開いていない）
 //! - `48` `spawn("/bin/ls", ["ls"])` が 0 を返さなかった
 //! - `49` `spawn("/bin/cat", ["cat", "/etc/motd"])` が 0 を返さなかった
 //! - `50` `spawn("/bin/cat", ["cat"])` が 2 を返さなかった（引数が無い）
@@ -202,6 +205,8 @@ const ARGV1_LEN: u32 = 6;
 const SYS_SPAWN: u32 = 0x1004;
 /// `-E2BIG`（引数が多すぎる、または長すぎる）。
 const MINUS_E2BIG: i32 = -7;
+/// `-EAGAIN`（今は無い）。**端末に打鍵が溜まっていないときの答えである。**
+const MINUS_EAGAIN: i32 = -11;
 /// 64 バイトを越える 1 本の長さ。**記録用の緩衝より長いことが主張である。**
 const LONG_MESSAGE_LEN: u32 = 68;
 
@@ -285,31 +290,32 @@ core::arch::global_asm!(
     "  mov edi, 3",
     "  jne 9f",
 
-    // --- 4. open("/etc/motd", O_RDONLY)。最初の fd は 0 のはず ---
+    // --- 4. open("/etc/motd", O_RDONLY)。最初の fd は 3 のはず ---
+    // **0/1/2 は端末である**（S11-10。`kernel/src/vfs.rs` の `FileTable::new`）。
     "  mov eax, {sys_open}",
     "  lea rdi, [rip + MOTD_PATH]",
     "  mov esi, {o_rdonly}",
     "  xor edx, edx",
     "  int 0x80",
-    "  test rax, rax",
+    "  cmp rax, 3",
     "  mov edi, 4",
     "  jne 9f",
 
-    // --- 5. close(0)。0 が返るはず ---
+    // --- 5. close(3)。0 が返るはず ---
     "  mov eax, {sys_close}",
-    "  xor edi, edi",
+    "  mov edi, 3",
     "  int 0x80",
     "  test rax, rax",
     "  mov edi, 5",
     "  jne 9f",
 
-    // --- 6. もう一度 open。**閉じた枠が空いているので、また 0 のはず** ---
+    // --- 6. もう一度 open。**閉じた枠が空いているので、また 3 のはず** ---
     "  mov eax, {sys_open}",
     "  lea rdi, [rip + MOTD_PATH]",
     "  mov esi, {o_rdonly}",
     "  xor edx, edx",
     "  int 0x80",
-    "  test rax, rax",
+    "  cmp rax, 3",
     "  mov edi, 6",
     "  jne 9f",
 
@@ -335,10 +341,10 @@ core::arch::global_asm!(
 
     // --- 9. 同じ fd を 2 度閉じる。**2 度目は -EBADF のはず** ---
     "  mov eax, {sys_close}",
-    "  xor edi, edi",
+    "  mov edi, 3",
     "  int 0x80",
     "  mov eax, {sys_close}",
-    "  xor edi, edi",
+    "  mov edi, 3",
     "  int 0x80",
     "  cmp rax, {minus_ebadf}",
     "  mov edi, 9",
@@ -737,14 +743,51 @@ core::arch::global_asm!(
     "  mov edi, 50",
     "  jne 9f",
 
-    // --- 44. write(0)。**-EBADF が返るはず** ---
-    // **0 は標準入力である。** 出力先ではないので拒まれる。
+    // --- 51. read(0)。**打鍵が無いので -EAGAIN が返るはず** ---
+    // **0 は端末である**（S11-10）。**待たない**——待つにはユーザープロセスの
+    // スケジューラが要る。**`0` を返さない**のは、Linux では末尾の意味だからである。
+    "  sub rsp, 64",
+    "  mov eax, {sys_read}",
+    "  xor edi, edi",
+    "  mov rsi, rsp",
+    "  mov edx, 16",
+    "  int 0x80",
+    "  cmp rax, {minus_eagain}",
+    "  mov edi, 51",
+    "  jne 9f",
+
+    // --- 52. read(1)。**書く側なので -EAGAIN ではなく、端末として読める** ---
+    // **1 も端末である。** Linux でも同じ端末を指すので、読めるほうが正しい。
+    "  mov eax, {sys_read}",
+    "  mov edi, 1",
+    "  mov rsi, rsp",
+    "  mov edx, 16",
+    "  int 0x80",
+    "  cmp rax, {minus_eagain}",
+    "  mov edi, 52",
+    "  jne 9f",
+
+    // --- 53. read(3)。**開いていないので -EBADF のはず** ---
+    "  mov eax, {sys_read}",
+    "  mov edi, 3",
+    "  mov rsi, rsp",
+    "  mov edx, 16",
+    "  int 0x80",
+    "  cmp rax, {minus_ebadf}",
+    "  mov edi, 53",
+    "  jne 9f",
+    "  add rsp, 64",
+
+    // --- 44. write(0)。**書けるはず** ---
+    // **0 も 1 も 2 も同じ端末である**（S11-10。`FileTable::new`）。
+    // **番号ではなく中身で決まる**ので、どれへ書いても同じ先へ届く。
+    // **Linux でも同じである**——`init` が端末を読み書き両方で開き、複製する。
     "  mov eax, {sys_write}",
     "  xor edi, edi",
     "  lea rsi, [rip + MESSAGE]",
     "  mov edx, {msg_len}",
     "  int 0x80",
-    "  cmp rax, {minus_ebadf}",
+    "  cmp rax, {msg_len}",
     "  mov edi, 44",
     "  jne 9f",
 
@@ -935,6 +978,7 @@ core::arch::global_asm!(
     argv1_len = const ARGV1_LEN,
     sys_spawn = const SYS_SPAWN,
     minus_e2big = const MINUS_E2BIG,
+    minus_eagain = const MINUS_EAGAIN,
     long_len = const LONG_MESSAGE_LEN,
 );
 

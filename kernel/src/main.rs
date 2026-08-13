@@ -3807,7 +3807,7 @@ fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
 /// # 先頭 80 ブロックだけで、読み切れる像になる
 ///
 /// **`s_blocks_count` を 80 に直せば、切り出した先頭がそれ自体で完結する。**
-/// 実際に参照されている最大のブロックは 69 だからである（実測。`/etc/motd` の
+/// 実際に参照されている最大のブロックは 70 だからである（実測。`/etc/motd` の
 /// データブロック）。**80 に余裕を取ってあるので、種が少し増えても収まる。**
 /// **収まらなくなったら健全な対照（下）が最初に落ちる。**
 ///
@@ -3816,7 +3816,7 @@ fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
 /// 落ちる」が実際に働く前に、測って直した。**
 static mut CORRUPT_FS_IMAGE: [u8; CORRUPT_FS_LEN] = [0; CORRUPT_FS_LEN];
 
-/// 切り出すブロック数。**参照されている最大のブロック（69）より大きいこと。**
+/// 切り出すブロック数。**参照されている最大のブロック（70）より大きいこと。**
 const CORRUPT_FS_BLOCKS: usize = 80;
 
 /// 切り出した像のバイト数。
@@ -3861,15 +3861,16 @@ const FS_ROOT_ETC_ENTRY: usize = FS_ROOT_DIR_BLOCK + 68;
 
 /// `/data/indirect-first` の単一間接ブロック（実測。判定行の `single indirect` に出ている）。
 ///
-/// **S11-5 で 55 から 58 へ、S11-9 で 58 から 66 へ動いた**（像へプログラムを
-/// 足した。[`FS_MOTD_INODE_AT`] と同じ理由である）。
-const FS_INDIRECT_TABLE_BLOCK: usize = 66 * FS_BLOCK_SIZE;
+/// **S11-5 で 55 から 58 へ、S11-9 で 58 から 66 へ、S11-10 で 66 から 67 へ動いた**
+/// （像へプログラムを足し、受け皿の位置を上げて像が育った。
+/// [`FS_MOTD_INODE_AT`] と同じ理由である）。
+const FS_INDIRECT_TABLE_BLOCK: usize = 67 * FS_BLOCK_SIZE;
 
 /// `/etc/motd` のデータブロック（実測）。
 ///
-/// **S11-5 で 58 から 61 へ、S11-9 で 61 から 69 へ動いた**
+/// **S11-5 で 58 から 61 へ、S11-9 で 61 から 69 へ、S11-10 で 69 から 70 へ動いた**
 /// （[`FS_MOTD_INODE_AT`] と同じ理由）。
-const FS_MOTD_DATA_BLOCK: usize = 69 * FS_BLOCK_SIZE;
+const FS_MOTD_DATA_BLOCK: usize = 70 * FS_BLOCK_SIZE;
 
 /// 種のファイルと同じ木にある `/etc/motd` の中身（S10-a）。
 ///
@@ -5024,10 +5025,10 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
     (3, "the unimplemented number did not return -ENOSYS"),
     (
         4,
-        "open(\"/etc/motd\", O_RDONLY) did not return descriptor 0",
+        "open(\"/etc/motd\", O_RDONLY) did not return descriptor 3",
     ),
-    (5, "close(0) did not return 0"),
-    (6, "the open right after close did not reuse descriptor 0"),
+    (5, "close(3) did not return 0"),
+    (6, "the open right after close did not reuse descriptor 3"),
     (7, "open(\"/nope\") did not return -ENOENT"),
     (8, "open(\"/etc/motd\", O_WRONLY) did not return -EROFS"),
     (
@@ -5086,7 +5087,10 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
         43,
         "an argv whose total length is too big did not return -E2BIG",
     ),
-    (44, "write(0, ...) did not return -EBADF"),
+    (
+        44,
+        "write(0, ...) did not return the number of bytes it was given; 0 is the same terminal",
+    ),
     (45, "write(3, ...) did not return -EBADF"),
     (
         46,
@@ -5096,6 +5100,9 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
         47,
         "a write longer than the 64-byte record did not return the number of bytes it was given",
     ),
+    (51, "read(0) did not return -EAGAIN with no keys pending"),
+    (52, "read(1) did not return -EAGAIN; 1 is the same terminal"),
+    (53, "read(3) did not return -EBADF; nothing is open there"),
     (48, "spawn(\"/bin/ls\", [\"ls\"]) did not return 0"),
     (
         49,

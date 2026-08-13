@@ -831,6 +831,15 @@ unsafe fn run_loaded_program(
     // 知らないので、遠征の間だけ `crate::vfs` が持つ
     // （`syscall::set_user_window` と同じ形。据えるのは Ring 3 へ落ちる側である）。
     let previous_files = crate::vfs::swap_current_files(core::mem::take(&mut process.files));
+    // **前景を取る（S11-10）。** 取っているあいだ、カーネル側の消費者
+    // （`interrupts::drain_keyboard`）はスキャンコードを取り出さない。
+    // **入力の消費者は同時に 1 つである**（`crate::input` の不変条件）。
+    //
+    // **入れ子でも取れる。** 親は遠征の中で `spawn` を呼んでおり、
+    // **その間ずっと前景を持っている。** 子が取ろうとすると偽が返るので、
+    // **親が持ったままにして、子はその前景を通して読む**——
+    // **持ち主は 1 人という不変条件は保たれる。**
+    let claimed_foreground = crate::input::claim_foreground();
     // **どの深さの遠征スタックを使うかを控える（S11-5）。** 戻った後は深さが
     // 元へ戻っているので、そのときには引けない。
     let entered_at_depth = crate::ring3::depth();
@@ -846,6 +855,10 @@ unsafe fn run_loaded_program(
     };
     // **引き取る。** 遠征が畳みで戻っても `exit` で戻ってもここを通る
     // （`ring3::enter` はこの 2 つの longjmp でしか戻らない）。
+    // **前景を返す。** 取った者だけが返す（入れ子の子は取れていない）。
+    if claimed_foreground {
+        crate::input::release_foreground();
+    }
     process.files = crate::vfs::swap_current_files(previous_files);
     // **この遠征で遠征スタックをどれだけ使ったかを出す（S11-5）。**
     //
@@ -895,11 +908,12 @@ unsafe fn run_loaded_program(
     // 開いた fd が漏れている。
     logger.info(format_args!(
         "vfs: {} opened {} file(s) in total and left Ring 3 with {} still open \
-         (MAX_OPEN_FILES={})",
+         (MAX_OPEN_FILES={}); it was handed {} byte(s) of input",
         process.name,
         process.files.opened_total(),
         process.files.open_count(),
-        crate::vfs::MAX_OPEN_FILES
+        crate::vfs::MAX_OPEN_FILES,
+        crate::input::delivered_count()
     ));
     // SAFETY: 本番のテーブルへ戻す。上位は同じなので連続して実行できる。
     unsafe { crate::paging::switch::switch_to(production) };

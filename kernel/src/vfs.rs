@@ -133,6 +133,13 @@ pub fn with_current_files<R>(body: impl FnOnce(&mut FileTable) -> R) -> R {
 /// 別に確保する形である**——「まず固定配列」は Linux の形でもある。
 pub const MAX_OPEN_FILES: usize = 16;
 
+/// 標準入力の fd（Linux と同じ 0）。
+pub const STDIN_FD: usize = 0;
+/// 標準出力の fd（Linux と同じ 1）。
+pub const STDOUT_FD: usize = 1;
+/// 標準エラー出力の fd（Linux と同じ 2）。
+pub const STDERR_FD: usize = 2;
+
 /// 開いている実体（ファイルまたはディレクトリ）。
 ///
 /// **中身は [`common::ext2::Inode`] を直に持つ。** Linux が `ext2_inode_info` で
@@ -197,25 +204,53 @@ impl Inode {
 /// **同じ実体を 2 回開けば、位置は 2 つある。** Linux が位置を `struct file` に
 /// 置いているのと同じ理由で、**[`Inode`] は位置を持たない。**
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct File {
-    inode: Inode,
-    offset: u64,
+pub enum File {
+    /// ファイルシステムの実体を開いたもの。
+    Regular { inode: Inode, offset: u64 },
+    /// 端末（S11-10）。**0 / 1 / 2 に据えてある。**
+    ///
+    /// # なぜ表の中に置くのか
+    ///
+    /// **番号で特別扱いすると、`open` が返した番号と衝突する。**
+    /// 表に置けば、**`read` と `write` は番号ではなく中身で分岐する。**
+    /// **ファイルへ書けるようになった段（S12）でも、同じ形のまま通る。**
+    ///
+    /// # 位置を持たない
+    ///
+    /// **端末は端まで戻れない。** 読んだバイトは消える。
+    Terminal,
 }
 
 impl File {
     /// 先頭から読む状態で開く。
     pub fn new(inode: Inode) -> Self {
-        Self { inode, offset: 0 }
+        Self::Regular { inode, offset: 0 }
     }
 
-    /// 実体。
-    pub fn inode(&self) -> &Inode {
-        &self.inode
+    /// 端末。
+    pub fn terminal() -> Self {
+        Self::Terminal
     }
 
-    /// 次に読む位置（バイト）。
+    /// 端末か。
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Terminal)
+    }
+
+    /// 実体。**端末には無い。**
+    pub fn inode(&self) -> Option<&Inode> {
+        match self {
+            Self::Regular { inode, .. } => Some(inode),
+            Self::Terminal => None,
+        }
+    }
+
+    /// 次に読む位置（バイト）。**端末は 0 である。**
     pub fn offset(&self) -> u64 {
-        self.offset
+        match self {
+            Self::Regular { offset, .. } => *offset,
+            Self::Terminal => 0,
+        }
     }
 
     /// 位置を進める。**`i_size` を越えない**ように飽和させる。
@@ -224,12 +259,16 @@ impl File {
     /// 「残り = `i_size` - 位置」が桁借りする。**`common::ext2` が線2 として
     /// 守っているのと同じ形を、こちら側でも閉じておく。**
     pub fn advance(&mut self, bytes: u64) {
-        self.offset = self.offset.saturating_add(bytes).min(self.inode.size());
+        if let Self::Regular { inode, offset } = self {
+            *offset = offset.saturating_add(bytes).min(inode.size());
+        }
     }
 
     /// 位置を直に置く（`lseek` 相当。**この段では呼ばない**）。
-    pub fn seek_to(&mut self, offset: u64) {
-        self.offset = offset.min(self.inode.size());
+    pub fn seek_to(&mut self, to: u64) {
+        if let Self::Regular { inode, offset } = self {
+            *offset = to.min(inode.size());
+        }
     }
 }
 
@@ -284,15 +323,31 @@ impl Default for FileTable {
 }
 
 impl FileTable {
-    /// 空の表。
+    /// 0 / 1 / 2 が端末で、それ以外は空の表（S11-10）。
+    ///
+    /// # 予約する形へ変えた
+    ///
+    /// **S10-b では予約しないと決めていた**——「予約すると『開いていない番号が
+    /// 使える』形になり、表の不変条件（`Some` の番号だけが有効）が緩む」。
+    /// **その懸念は、端末を表の中身として置くことで消える**——
+    /// **0 / 1 / 2 は `Some` であり、開いている。**
+    ///
+    /// **`init` が開く形（Linux）は採らない。** **開く相手が無い**——
+    /// デバイスノードを置く仕組みが無く、`/dev/console` は像に存在しない。
+    /// **存在しないパスを特別扱いするほうが、番号を据えるより見えにくい。**
+    ///
+    /// **`docs/roadmap.md` が「予約するか、シェルが自分で開くか」と書いた判断は、
+    /// ここで前者に決まった。**
     pub const fn new() -> Self {
-        Self {
-            slots: [None; MAX_OPEN_FILES],
-            opened: 0,
-        }
+        let mut slots = [None; MAX_OPEN_FILES];
+        slots[STDIN_FD] = Some(File::Terminal);
+        slots[STDOUT_FD] = Some(File::Terminal);
+        slots[STDERR_FD] = Some(File::Terminal);
+        Self { slots, opened: 0 }
     }
 
-    /// 最小の空き番号へ置き、その番号を返す。
+    /// 最小の空き番号へ置き、その番号を返す。**端末の 3 つは埋まっているので、
+    /// 最初の `open` は 3 を返す**（Linux と同じ）。
     pub fn insert(&mut self, file: File) -> Result<usize, FileTableError> {
         for (fd, slot) in self.slots.iter_mut().enumerate() {
             if slot.is_none() {
@@ -329,8 +384,18 @@ impl FileTable {
     }
 
     /// 開いている本数。**判定行に出す。**
+    ///
+    /// # 端末は数えない（S11-10）
+    ///
+    /// **0 / 1 / 2 は最初から在り、閉じられることを想定していない。**
+    /// **数えると、判定行の「開いたまま戻ったものが何本あるか」が
+    /// 常に 3 から始まる**——**主張したいのは「このプロセスが開いて閉じ忘れた本数」
+    /// である。**
     pub fn open_count(&self) -> usize {
-        self.slots.iter().filter(|slot| slot.is_some()).count()
+        self.slots
+            .iter()
+            .filter(|slot| matches!(slot, Some(file) if !file.is_terminal()))
+            .count()
     }
 
     /// これまでに開いた本数（累計）。**判定行に出す。**
@@ -368,10 +433,15 @@ mod tests {
     /// **ここが落ちたら、`File` の中身が増えたということである。**
     #[test]
     fn the_table_is_small_enough_to_live_inside_a_process() {
-        // `File` = ext2 の inode（`i_block` の 60 バイトを含む）+ 位置。
-        assert_eq!(core::mem::size_of::<File>(), 88);
-        // **`Option` が 8 バイト増やす**（`File` に空き表現が無いため、
-        // 判別子が別に要る）。**枠 1 つは 96 バイトである。**
+        // `File` = ext2 の inode（`i_block` の 60 バイトを含む）+ 位置 + 判別子。
+        //
+        // **S11-10 で 88 から 96 へ増えた。** `File` が列挙になり、
+        // **端末と実体を区別する判別子が入った**（`Terminal` は中身を持たないので、
+        // 大きさを決めているのは `Regular` のほうである）。
+        assert_eq!(core::mem::size_of::<File>(), 96);
+        // **`Option` は増やさない。** 列挙になったことで**空き表現ができた**
+        // ——判別子の使っていない値を `None` に使える。**枠 1 つは 96 バイトのまま
+        // である**（S11-10 の前は 88 + 8 = 96 だった）。
         assert_eq!(core::mem::size_of::<Option<File>>(), 96);
         // 表は枠 16 個 + 累計のカウンタ 8 バイトである。
         assert_eq!(
@@ -396,47 +466,52 @@ mod tests {
         assert_eq!(untouched.opened_total(), 1, "but the table did move");
     }
 
+    /// **新しい表には端末が 3 つ在り、ファイルは 1 つも無い（S11-10）。**
     #[test]
-    fn a_new_table_is_empty() {
+    fn a_new_table_holds_the_three_terminals_and_no_files() {
         let table = FileTable::new();
-        assert_eq!(table.open_count(), 0);
+        assert_eq!(table.open_count(), 0, "terminals are not counted");
         assert_eq!(table.opened_total(), 0);
-        assert_eq!(table.get(0), Err(FileTableError::BadDescriptor(0)));
+        assert!(table.get(STDIN_FD).unwrap().is_terminal());
+        assert!(table.get(STDOUT_FD).unwrap().is_terminal());
+        assert!(table.get(STDERR_FD).unwrap().is_terminal());
+        assert_eq!(table.get(3), Err(FileTableError::BadDescriptor(3)));
     }
 
-    /// **最小の空き番号を返す**（POSIX と同じ）。
+    /// **最小の空き番号を返す**（POSIX と同じ）。**端末の 3 つは埋まっている。**
     #[test]
     fn descriptors_are_handed_out_lowest_first() {
         let mut table = FileTable::new();
-        for expected in 0..4 {
+        for expected in 3..7 {
             let fd = table
                 .insert(File::new(inode(10 + expected, 1, REGULAR)))
                 .unwrap();
             assert_eq!(fd as u32, expected);
         }
         // 途中を閉じると、次はそこが返る。**「最後の次」ではない。**
-        table.remove(1).unwrap();
-        assert_eq!(table.insert(File::new(inode(99, 1, REGULAR))).unwrap(), 1);
+        table.remove(4).unwrap();
+        assert_eq!(table.insert(File::new(inode(99, 1, REGULAR))).unwrap(), 4);
         assert_eq!(table.open_count(), 4);
     }
 
-    /// **0・1・2 を予約していない。** 最初に開いたものが 0 を取る。
+    /// **0・1・2 は端末である（S11-10）。** 最初に開いたものは 3 を取る。
     #[test]
-    fn the_first_open_takes_descriptor_zero() {
+    fn the_first_open_takes_descriptor_three() {
         let mut table = FileTable::new();
         assert_eq!(
             table.insert(File::new(inode(2, 4096, DIRECTORY))).unwrap(),
-            0
+            3
         );
     }
 
     #[test]
     fn the_table_fills_up_and_says_so() {
         let mut table = FileTable::new();
-        for _ in 0..MAX_OPEN_FILES {
+        // **端末の 3 つを引いた本数しか入らない（S11-10）。**
+        for _ in 0..MAX_OPEN_FILES - 3 {
             table.insert(File::new(inode(1, 1, REGULAR))).unwrap();
         }
-        assert_eq!(table.open_count(), MAX_OPEN_FILES);
+        assert_eq!(table.open_count(), MAX_OPEN_FILES - 3);
         assert_eq!(
             table.insert(File::new(inode(1, 1, REGULAR))),
             Err(FileTableError::NoFreeDescriptor)
@@ -475,8 +550,8 @@ mod tests {
         assert_eq!(table.get(first).unwrap().offset(), 8);
         assert_eq!(table.get(second).unwrap().offset(), 0);
         assert_eq!(
-            table.get(first).unwrap().inode().number(),
-            table.get(second).unwrap().inode().number()
+            table.get(first).unwrap().inode().unwrap().number(),
+            table.get(second).unwrap().inode().unwrap().number()
         );
     }
 
