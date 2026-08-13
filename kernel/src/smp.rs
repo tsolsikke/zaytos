@@ -795,7 +795,7 @@ pub unsafe fn wake_application_processors(
             cpu::halt_forever();
         }
 
-        // 起動署名を待つ。上限つきで待つ（CLAUDE.md §14）。
+        // 起動署名を待つ。上限つきで待つ（CLAUDE.md の「シェルコマンドの制約」）。
         let mut started = false;
         for _ in 0..AP_START_WAIT_TICKS {
             wait_ticks(1);

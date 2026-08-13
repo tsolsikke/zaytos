@@ -1056,7 +1056,7 @@ unsafe fn send_ipi(lapic_virt: u64, apic_id: u8, command: u32) -> bool {
         );
         write_lapic(lapic_virt, LAPIC_REGISTER_ICR_LOW, command);
     }
-    // 送信完了を上限つきで待つ。上限のない待ちを書かない（CLAUDE.md §14）。
+    // 送信完了を上限つきで待つ。上限のない待ちを書かない（CLAUDE.md の「シェルコマンドの制約」）。
     for _ in 0..IPI_DELIVERY_POLL_LIMIT {
         // SAFETY: 同じページの読み取りのみ。
         let icr = unsafe { read_lapic(lapic_virt, LAPIC_REGISTER_ICR_LOW) };

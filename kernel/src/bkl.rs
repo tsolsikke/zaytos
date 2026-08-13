@@ -180,7 +180,7 @@ static BKL: BigKernelLock = BigKernelLock {
 /// **ティックは BKL の中で数えるので、待っている側は使えない。**
 /// 前例は `interrupts::FIRST_TICK_TIMEOUT_CYCLES` で、同じ桁にしてある。
 ///
-/// **上限のない待機ループを書かない**（`CLAUDE.md` §14 と同じ規律が、
+/// **上限のない待機ループを書かない**（`CLAUDE.md` の「シェルコマンドの制約」と同じ規律が、
 /// カーネルの中でも同じ理由で要る）。デッドロックしたときに静かに止まらないよう、
 /// 上限に達したら原因を出して停止する。
 const WAIT_TIMEOUT_CYCLES: u64 = 20_000_000_000;

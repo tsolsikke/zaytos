@@ -6106,7 +6106,7 @@ fn capture_serial_for_calibration(run: usize) -> Result<String> {
         .spawn()
         .context("failed to launch qemu-system-x86_64 for the calibration run")?;
 
-    // 較正が出るまで待つ。**上限を必ず付ける**（CLAUDE.md §14）。
+    // 較正が出るまで待つ。**上限を必ず付ける**（CLAUDE.md の「シェルコマンドの制約」）。
     let deadline = Instant::now() + CALIBRATION_RUN_TIMEOUT;
     loop {
         if fs::read_to_string(&serial_log)
