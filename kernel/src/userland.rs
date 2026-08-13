@@ -850,7 +850,29 @@ unsafe fn run_loaded_program(
     ));
     if !intact {
         logger.error(format_args!(
-            "ring3: the depth-{entered_at_depth} excursion stack ran into its bottom canary;              it has no guard page, so anything below it may already be overwritten. halting"
+            "ring3: the depth-{entered_at_depth} excursion stack ran into its bottom canary; \
+             it has no guard page, so anything below it may already be overwritten. halting"
+        ));
+        common::cpu::halt_forever();
+    }
+    // **解禁条件を機械にする（S11-6）。**
+    //
+    // `deferred-decisions.md` の「遠征スタックにガードページが無い」は、解禁条件を
+    // **「使用量が容量の半分を超えたとき、または見張り区間が一度でも壊れたとき」**と
+    // 書いている。**後者は上で止まるが、前者は書いてあるだけだった。**
+    //
+    // **書いただけの条件は発火しない。** `install_kernel_stack_guard_page` が
+    // 2MiB ページを見つけたら止める形と同じにする——**あちらは M5-b で条件を書き、
+    // S11-5 で実際に発火して、そこで判断させた。**
+    //
+    // **見張り区間で止まるのでは遅い。** あれが偽になるのは残り 256 バイトまで
+    // 使い切ったときで、**そこまで来たら判断する余地が無い。**
+    if !crate::ring3::excursion_stack_within_budget(entered_at_depth) {
+        logger.error(format_args!(
+            "ring3: the depth-{entered_at_depth} excursion stack is more than half used \
+             ({used} of {capacity}); the deferred decision about these stacks having no guard \
+             page says to decide here - either map them the way StackBlock is mapped (page \
+             aligned, one page below unmapped) or raise the capacity with a measurement. halting"
         ));
         common::cpu::halt_forever();
     }
