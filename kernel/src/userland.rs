@@ -28,7 +28,7 @@ use common::log::{LogLevel, Logger};
 use common::serial::SerialPort;
 
 use crate::ring3::MAX_EXCURSION_DEPTH;
-use crate::syscall::{MAX_EXECUTABLE_SIZE, PATH_MAX};
+use crate::syscall::{MAX_ARGV_BYTES, MAX_EXECUTABLE_SIZE, PATH_MAX};
 
 /// ユーザープログラムを走らせる空間のユーザーサブツリーの添字（S9-b-1）。
 ///
@@ -51,7 +51,7 @@ const USER_PROGRAM_STACK_TOP: u64 = 0x0080_0000;
 /// **見込みの最大は 2 である**（プログラム名 + 引数 1 つ）。**8 はその 4 倍で、
 /// 表と文字列がスタックの 1 ページに収まる範囲である。** 越えたら
 /// [`UserLoadError::ArgumentsTooLong`] で拒む。
-const MAX_ARGV: usize = 8;
+pub const MAX_ARGV: usize = 8;
 
 /// 埋め込んだユーザープログラムのロードと実行が失敗する形（S9-b-2）。
 ///
@@ -180,7 +180,7 @@ pub enum UserLoadError {
 ///
 /// `page` がスタックページの先頭を direct map 越しに指しており、
 /// 4096 バイト書けること。単一実行文脈から呼ぶこと。
-unsafe fn build_initial_stack(page: *mut u8, page_base: u64, argv: &[&str]) -> Option<u64> {
+unsafe fn build_initial_stack(page: *mut u8, page_base: u64, argv: &[&[u8]]) -> Option<u64> {
     /// 表の項の大きさ。
     const WORD: usize = 8;
     /// 表の固定部——`argc`・`argv` の終端・`envp` の終端・`AT_NULL` の対。
@@ -199,7 +199,7 @@ unsafe fn build_initial_stack(page: *mut u8, page_base: u64, argv: &[&str]) -> O
     // **文字列を上から詰める。** 置いたユーザー VA を控える。
     let mut argv_addrs = [0u64; MAX_ARGV];
     for (index, arg) in argv.iter().enumerate() {
-        let bytes = arg.as_bytes();
+        let bytes = *arg;
         // NUL 終端のぶんを含めて下げる。
         cursor = cursor.checked_sub(bytes.len() + 1)?;
         // SAFETY: cursor はページ内で、`bytes.len() + 1` バイト書ける。
@@ -321,6 +321,14 @@ pub fn spawn_accounting() -> (usize, usize) {
     )
 }
 
+/// `spawn` が受け取った `argv` を置く場所（S11-7）。
+///
+/// **NUL 区切りで並べたバイト列である。** [`load_user_program`] が要求するのは
+/// `&[&[u8]]` で、**要素は `'static` でなければならない**（[`SPAWN_PATHS`] と
+/// 同じ理由）。**深さごとに 1 本ずつ持つ**（[`MAX_SPAWN_IN_FLIGHT`]）。
+static mut SPAWN_ARGVS: [[u8; MAX_ARGV_BYTES]; MAX_SPAWN_IN_FLIGHT] =
+    [[0; MAX_ARGV_BYTES]; MAX_SPAWN_IN_FLIGHT];
+
 /// [`spawn`] が拒む形（S11-5）。
 ///
 /// **`errno` を知らない。** 写すのは `crate::syscall` の側である
@@ -338,6 +346,11 @@ pub enum SpawnError {
     IsDirectory,
     /// 引けたが通常ファイルではなかった（デバイスファイル等）。
     NotRegularFile,
+    /// 写した `argv` のバイト列が、要素数と食い違った（S11-7）。
+    ///
+    /// **カーネル側の不具合である**——`copy_user_argv` は要素ごとに NUL を付けて
+    /// 並べるので、**要素数だけ NUL があるはずである。**
+    ArgvMalformed,
     /// 像が [`MAX_EXECUTABLE_SIZE`] に収まらない。
     TooLarge(u64),
     /// 像を読んでいる途中でブロックが引けなかった。
@@ -427,7 +440,7 @@ pub fn load_user_program(
     image: &[u8],
     run: bool,
     name: &'static str,
-    argv: &[&str],
+    argv: &[&[u8]],
 ) -> (Result<u64, UserLoadError>, usize, usize) {
     use crate::address_space::AddressSpace;
 
@@ -555,7 +568,7 @@ fn load_user_program_into(
     allocator: &mut crate::frame_allocator::FrameAllocator,
     image: &[u8],
     process: &mut UserProcess,
-    argv: &[&str],
+    argv: &[&[u8]],
 ) -> Result<(), UserLoadError> {
     use crate::paging::active::PageAttributes;
     use crate::paging::verify;
@@ -920,7 +933,11 @@ unsafe fn run_loaded_program(
 /// 子は [`crate::syscall::reset_counters`] を通り、自分の `write` と `exit` を
 /// 記録する。**親の記録はここで控えて戻す**（`crate::syscall::Records` と
 /// [`crate::ring3::FoldRecord`]）。
-pub fn spawn(path: &[u8]) -> Result<SpawnOutcome, SpawnError> {
+pub fn spawn(
+    path: &[u8],
+    argv_bytes: &[u8],
+    argv_count: usize,
+) -> Result<SpawnOutcome, SpawnError> {
     // **深さの上限。入る前に断る。**
     let depth = crate::ring3::depth();
     if depth >= MAX_EXCURSION_DEPTH {
@@ -1039,7 +1056,47 @@ pub fn spawn(path: &[u8]) -> Result<SpawnOutcome, SpawnError> {
         }
     };
 
-    let (outcome, held, leaked) = load_user_program(&mut logger, image, true, name, &[name]);
+    // **`argv` を控えて、`&'static [u8]` の並びへ切り分ける（S11-7）。**
+    //
+    // **切り分けは NUL で行う。** `copy_user_argv` が要素ごとに NUL を付けて
+    // 並べているので、**要素数だけ NUL があるはずである。** 無ければこちらの
+    // 不具合なので、[`SpawnError::ArgvMalformed`] で止める。
+    // SAFETY: `slot` は [`MAX_SPAWN_IN_FLIGHT`] の範囲内で、その深さで走っている
+    // のはこの 1 本だけである（深さの判定が入れ子の重なりを禁じている）。
+    // 単一コアの実行文脈で、割り込みハンドラはここへ来ない。
+    let argv_slot: &'static mut [u8; MAX_ARGV_BYTES] =
+        unsafe { &mut (*core::ptr::addr_of_mut!(SPAWN_ARGVS))[slot] };
+    argv_slot[..argv_bytes.len()].copy_from_slice(argv_bytes);
+    let stored: &'static [u8] = &argv_slot[..argv_bytes.len()];
+
+    // 破壊 (S11-7, spawn-argv-drop-last): 最後の 1 本を落とす。
+    // **終端の扱いを 1 つずらす形で、雑に見ると「ちゃんと切り分けている」ように
+    // 見える。** 子が受け取る `argc` が 1 つ少なくなり、`spawn-test` の検算が
+    // 食い違いを捕まえる。
+    let argv_count = if cfg!(feature = "spawn-argv-drop-last") {
+        argv_count.saturating_sub(1)
+    } else {
+        argv_count
+    };
+
+    let mut argv_slices: [&'static [u8]; MAX_ARGV] = [b""; MAX_ARGV];
+    let mut at = 0usize;
+    for slice in argv_slices.iter_mut().take(argv_count) {
+        let Some(end) = stored[at..]
+            .iter()
+            .position(|byte| *byte == 0)
+            .map(|i| at + i)
+        else {
+            crate::syscall::restore_records(saved_records);
+            crate::ring3::restore_fold_record(saved_fold);
+            return Err(SpawnError::ArgvMalformed);
+        };
+        *slice = &stored[at..end];
+        at = end + 1;
+    }
+    let argv: &[&[u8]] = &argv_slices[..argv_count];
+
+    let (outcome, held, leaked) = load_user_program(&mut logger, image, true, name, argv);
 
     // **子の終わり方をここで読む。** 戻す前に読まなければ、親のもので上書きされる。
     let child = if crate::syscall::process_exited() {

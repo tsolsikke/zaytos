@@ -22,12 +22,29 @@
 //! 受け付けられない」である。** 上限が効いていることを主張しているのは後者だけで、
 //! **破壊 `spawn-eagain-as-enosys` がその差を突く。**
 //!
+//! # 引数も検算する（S11-7）
+//!
+//! **親が `spawn` へ渡した `argv` が、そのまま届いていることを見る。**
+//! **入口の `rsp` から `argc` と `argv[]` を読む**（`syscall-test` と同じ形。
+//! カーネルが Linux と同じ形で積んでいる）。
+//!
+//! **`spawn` で起こされたプロセスとして見るのはここが初めてである**——
+//! `syscall-test` は起動シーケンスの直線から起こされており、`argv` はカーネルの
+//! 表（`USER_PROGRAMS`）が渡している。**こちらは Ring 3 から来た `argv` である。**
+//!
 //! # 終了状態の意味
 //!
-//! **カーネル側の `SPAWN_TEST_STATUS` と対になっている。**
+//! **意味の表はここにしか無い。** このプログラムは `USER_PROGRAMS` に載っていない
+//! ので、カーネル側に対になる表が無い。**終了状態は `spawn` の判定行に
+//! `Exited(N)` として出る**ので、値からここを引く。
+//! **0 以外で終われば、親（`syscall-test`）の検算 40 番が落ちる。**
 //!
 //! - `0` 孫の `spawn` が `-EAGAIN` で断られた
 //! - `1` 断られなかった、または別の値で断られた
+//! - `2` `argc` が 2 でなかった
+//! - `3` `argv[0]` が "spawn-test" でなかった
+//! - `4` `argv[1]` が "beta" でなかった
+//! - `5` `argv[2]`（終端）が NULL でなかった
 //!
 //! # 定数はカーネルの写しである
 //!
@@ -43,6 +60,12 @@ const SYS_SPAWN: u32 = 0x1004;
 const SYS_EXIT: u32 = 60;
 /// `-EAGAIN`（今は受け付けられない）。**上限に達したときの答えである。**
 const MINUS_EAGAIN: i32 = -11;
+/// 期待する `argc`。**親（`syscall-test`）が渡す `argv` と対になっている。**
+const EXPECTED_ARGC: u32 = 2;
+/// `argv[0]` の長さ（NUL を含む）。
+const ARGV0_LEN: u32 = 11;
+/// `argv[1]` の長さ（NUL を含む）。
+const ARGV1_LEN: u32 = 5;
 
 core::arch::global_asm!(
     // **entry の手前に詰め物を置く**（`hello.rs` と同じ理由）。
@@ -54,9 +77,36 @@ core::arch::global_asm!(
     ".section .text._start,\"ax\"",
     ".globl _start",
     "_start:",
+    // --- 2..5. 親が渡した argv が届いていること ---
+    // **入口の rsp をそのまま使う。** ここより前で何も push していない。
+    "  mov rax, [rsp]",
+    "  cmp rax, {argc}",
+    "  mov edi, 2",
+    "  jne 9f",
+    // argv[0] を突き合わせる。
+    "  mov rsi, [rsp + 8]",
+    "  lea rdi, [rip + ARGV0_TEXT]",
+    "  mov ecx, {argv0_len}",
+    "  repe cmpsb",
+    "  mov edi, 3",
+    "  jne 9f",
+    // argv[1] を突き合わせる。
+    "  mov rsi, [rsp + 16]",
+    "  lea rdi, [rip + ARGV1_TEXT]",
+    "  mov ecx, {argv1_len}",
+    "  repe cmpsb",
+    "  mov edi, 4",
+    "  jne 9f",
+    // argv の終端。
+    "  mov rax, [rsp + 24]",
+    "  test rax, rax",
+    "  mov edi, 5",
+    "  jne 9f",
+
     // 孫を起こそうとする。**深さの上限に達しているので断られるはず。**
     "  mov eax, {sys_spawn}",
     "  lea rdi, [rip + HELLO_PATH]",
+    "  lea rsi, [rip + ARGV_HELLO]",
     "  int 0x80",
     "  cmp rax, {minus_eagain}",
     "  mov edi, 1",
@@ -75,10 +125,25 @@ core::arch::global_asm!(
     ".section .rodata",
     "HELLO_PATH:",
     "  .asciz \"/bin/hello\"",
+    // **孫へ渡す `argv`。** 断られるので届かないが、**入口の形は同じにする。**
+    ".balign 8",
+    "ARGV_HELLO:",
+    "  .quad HELLO_ARG0",
+    "  .quad 0",
+    "HELLO_ARG0:",
+    "  .asciz \"hello\"",
+    // **親が渡した `argv` の写し。** 食い違えば 3 番か 4 番が落ちる。
+    "ARGV0_TEXT:",
+    "  .asciz \"spawn-test\"",
+    "ARGV1_TEXT:",
+    "  .asciz \"beta\"",
 
     sys_spawn = const SYS_SPAWN,
     sys_exit = const SYS_EXIT,
     minus_eagain = const MINUS_EAGAIN,
+    argc = const EXPECTED_ARGC,
+    argv0_len = const ARGV0_LEN,
+    argv1_len = const ARGV1_LEN,
 );
 
 #[panic_handler]

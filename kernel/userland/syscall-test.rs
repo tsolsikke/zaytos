@@ -72,6 +72,9 @@
 //! - `38` `spawn("/etc")` が `-EISDIR` を返さなかった
 //! - `39` `spawn(NULL)` が `-EFAULT` を返さなかった
 //! - `40` `spawn("/bin/spawn-test")` が 0 を返さなかった（孫が断られなかった）
+//! - `41` `spawn(path, NULL)` が `-EFAULT` を返さなかった
+//! - `42` 要素数が上限を越える `argv` が `-E2BIG` を返さなかった
+//! - `43` 全体が長すぎる `argv` が `-E2BIG` を返さなかった
 //!
 //! # `argv` は `_start` の時点の `rsp` から読む
 //!
@@ -190,6 +193,8 @@ const ARGV0_LEN: u32 = 13;
 const ARGV1_LEN: u32 = 6;
 /// `spawn` の番号（`ZAYTOS_PRIVATE_BASE + 4`）。
 const SYS_SPAWN: u32 = 0x1004;
+/// `-E2BIG`（引数が多すぎる、または長すぎる）。
+const MINUS_E2BIG: i32 = -7;
 
 core::arch::global_asm!(
     // **entry の手前に詰め物を置く**（`hello.rs` と同じ理由）。
@@ -620,6 +625,7 @@ core::arch::global_asm!(
     // 子の最初の `write` で再帰取得として止まる。
     "  mov eax, {sys_spawn}",
     "  lea rdi, [rip + HELLO_PATH]",
+    "  lea rsi, [rip + ARGV_HELLO]",
     "  int 0x80",
     "  test rax, rax",
     "  mov edi, 36",
@@ -628,6 +634,7 @@ core::arch::global_asm!(
     // --- 37. spawn("/nope")。**-ENOENT が返るはず** ---
     "  mov eax, {sys_spawn}",
     "  lea rdi, [rip + MISSING_PATH]",
+    "  lea rsi, [rip + ARGV_HELLO]",
     "  int 0x80",
     "  cmp rax, {minus_enoent}",
     "  mov edi, 37",
@@ -636,6 +643,7 @@ core::arch::global_asm!(
     // --- 38. spawn("/etc")。**-EISDIR が返るはず** ---
     "  mov eax, {sys_spawn}",
     "  lea rdi, [rip + ETC_PATH]",
+    "  lea rsi, [rip + ARGV_HELLO]",
     "  int 0x80",
     "  cmp rax, {minus_eisdir}",
     "  mov edi, 38",
@@ -645,6 +653,7 @@ core::arch::global_asm!(
     // **パスを写す経路は `open` と同じ**（`copy_user_path`）。**同じ窓が効く。**
     "  mov eax, {sys_spawn}",
     "  xor edi, edi",
+    "  lea rsi, [rip + ARGV_HELLO]",
     "  int 0x80",
     "  cmp rax, {minus_efault}",
     "  mov edi, 39",
@@ -655,9 +664,39 @@ core::arch::global_asm!(
     // `spawn-test` は自分の `spawn` が `-EAGAIN` で断られたときだけ 0 で終わる。
     "  mov eax, {sys_spawn}",
     "  lea rdi, [rip + SPAWN_TEST_PATH]",
+    "  lea rsi, [rip + ARGV_SPAWN_TEST]",
     "  int 0x80",
     "  test rax, rax",
     "  mov edi, 40",
+    "  jne 9f",
+
+    // --- 41. argv が NULL。**-EFAULT が返るはず** ---
+    // **配列を要求している。** 「引数が無い」は空の配列（先頭が NULL）で表す。
+    "  mov eax, {sys_spawn}",
+    "  lea rdi, [rip + HELLO_PATH]",
+    "  xor esi, esi",
+    "  int 0x80",
+    "  cmp rax, {minus_efault}",
+    "  mov edi, 41",
+    "  jne 9f",
+
+    // --- 42. 要素数が上限を越える argv。**-E2BIG が返るはず** ---
+    "  mov eax, {sys_spawn}",
+    "  lea rdi, [rip + HELLO_PATH]",
+    "  lea rsi, [rip + ARGV_TOO_MANY]",
+    "  int 0x80",
+    "  cmp rax, {minus_e2big}",
+    "  mov edi, 42",
+    "  jne 9f",
+
+    // --- 43. 全体が長すぎる argv。**-E2BIG が返るはず** ---
+    // **要素数は上限内である**（8 本）。**落ちるのは総バイト数のほうである。**
+    "  mov eax, {sys_spawn}",
+    "  lea rdi, [rip + HELLO_PATH]",
+    "  lea rsi, [rip + ARGV_TOO_BIG]",
+    "  int 0x80",
+    "  cmp rax, {minus_e2big}",
+    "  mov edi, 43",
     "  jne 9f",
 
     // すべて通った。
@@ -691,6 +730,39 @@ core::arch::global_asm!(
     "  .asciz \"/bin/hello\"",
     "SPAWN_TEST_PATH:",
     "  .asciz \"/bin/spawn-test\"",
+    // **`spawn` へ渡す `argv`。** 配列は 8 バイト境界へ揃える。
+    ".balign 8",
+    "ARGV_HELLO:",
+    "  .quad SPAWN_ARG_HELLO",
+    "  .quad 0",
+    // **`spawn-test` が受け取って検算する 2 本。** あちらの写しと対になっている。
+    "ARGV_SPAWN_TEST:",
+    "  .quad SPAWN_ARG_NAME",
+    "  .quad SPAWN_ARG_BETA",
+    "  .quad 0",
+    // **上限（8 本）を 1 本越える。** 中身は同じで構わない——落ちるのは数である。
+    "ARGV_TOO_MANY:",
+    "  .rept 9",
+    "  .quad SPAWN_ARG_HELLO",
+    "  .endr",
+    "  .quad 0",
+    // **8 本で上限内だが、総バイト数が越える。** 1 本 200 バイトの 8 本である。
+    "ARGV_TOO_BIG:",
+    "  .rept 8",
+    "  .quad SPAWN_ARG_LONG",
+    "  .endr",
+    "  .quad 0",
+    "SPAWN_ARG_HELLO:",
+    "  .asciz \"hello\"",
+    "SPAWN_ARG_NAME:",
+    "  .asciz \"spawn-test\"",
+    "SPAWN_ARG_BETA:",
+    "  .asciz \"beta\"",
+    "SPAWN_ARG_LONG:",
+    "  .rept 199",
+    "  .byte 0x41",
+    "  .endr",
+    "  .byte 0",
     // **カーネルが積む `argv` の写し。** 食い違えば 31 番か 32 番が落ちる。
     "ARGV0_TEXT:",
     "  .asciz \"syscall-test\"",
@@ -750,6 +822,7 @@ core::arch::global_asm!(
     argv0_len = const ARGV0_LEN,
     argv1_len = const ARGV1_LEN,
     sys_spawn = const SYS_SPAWN,
+    minus_e2big = const MINUS_E2BIG,
 );
 
 #[panic_handler]

@@ -923,6 +923,35 @@ const SYSCALL_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // S11-7: argv の量の問題を -E2BIG でなく -EINVAL で返す。**どちらも「引数が
+    // 受け付けられない」を意味するので、雑に見ると同じに見える**（S10-b の 4 つと
+    // 同じ族）。**Linux は分けている**——`execve` は長すぎる引数に `E2BIG` を返す。
+    // **「値が変」と「量が多い」は、呼び出し側の直し方が違う。**
+    CriticalTest {
+        name: "spawn-e2big-as-einval",
+        feature: "spawn-e2big-as-einval",
+        expected_markers: &[
+            "user-run: syscall-test exited with status 42",
+            "an argv with more entries than the limit did not return -E2BIG",
+        ],
+        forbidden_markers: &["user-load: syscall-test ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // S11-7: 写した argv の最後の 1 本を落とす。**終端の扱いを 1 つずらす形で、
+    // 雑に見ると「ちゃんと切り分けている」ように見える。** 子が受け取る `argc` が
+    // 1 つ少なくなり、`spawn-test` の検算が捕まえる。
+    CriticalTest {
+        name: "spawn-argv-drop-last",
+        feature: "spawn-argv-drop-last",
+        expected_markers: &[
+            "user-run: syscall-test exited with status 40",
+            "the grandchild was not refused",
+        ],
+        forbidden_markers: &["user-load: syscall-test ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // S11-5: 入れ子の遠征から戻す RSP0 を、親ではなく子自身の遠征スタックの上端に
     // する。**入れ子でないうちはこの経路を通らないので、入れ子になった瞬間だけ
     // 壊れる。** すぐには壊れず、次に子を起こしたときに親のフレームを踏む——
@@ -6960,7 +6989,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 21,
-    full: 129,
+    full: 131,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

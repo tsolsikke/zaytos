@@ -97,6 +97,15 @@ pub const EAGAIN: i64 = 11;
 /// **Linux の `execve` も、実行できない相手に `EACCES` を返す。**
 pub const EACCES: i64 = 13;
 
+/// `-E2BIG`（引数が多すぎる、または長すぎる）の errno（S11-7）。
+///
+/// # `EINVAL` と分ける
+///
+/// **どちらも「引数が受け付けられない」だが、Linux は分けている**——
+/// `execve` は引数と環境が長すぎるときに `E2BIG` を返す。
+/// **「値が変」と「量が多い」は、呼び出し側の直し方が違う。**
+pub const E2BIG: i64 = 7;
+
 /// `-ENOMEM`（入れる場所が無い）の errno（S11-5）。
 ///
 /// **像が [`MAX_EXECUTABLE_SIZE`] に収まらないとき、およびフレームが尽きたときに
@@ -392,6 +401,26 @@ pub const SPAWN_FOLDED_FLAG: u64 = 0x100;
 /// **置き場所は `crate::userland` の `static` である**
 /// （`ADR-0030` で採った「スタックへ載せない」と同じ解き方である）。
 pub const MAX_EXECUTABLE_SIZE: usize = 32 * 1024;
+
+/// [`SYS_SPAWN`] が受け取る `argv` の総バイト数の上限（NUL を含む。S11-7）。
+///
+/// # 本当の上限はページである
+///
+/// **初期スタックは 1 ページしか張っていない**（`crate::userland` の
+/// `build_initial_stack`）。表と文字列はその中に収める。**その判定は既にあり、
+/// 入らなければ `checked_sub` が `None` を返して `ArgumentsTooLong` になる。**
+///
+/// **ここはカーネル側の緩衝の大きさである。** ページより先に効くので、
+/// **実際に返るのは `-E2BIG` のほうである。** 1024 を採るのは、
+/// **いま渡している `argv` が 19 バイト**（`syscall-test` の `"syscall-test"` と
+/// `"alpha"`、NUL 込み）で、**その 50 倍を超える余裕**だからである。
+///
+/// # スタックへ置く
+///
+/// **`spawn_from_ring3` のローカルである。** 1024 バイトは
+/// `deferred-decisions.md` の「大きなスタック配列とガード幅」が言う 4096 バイトを
+/// 越えない。**越えるなら `static` へ移す**（`MAX_EXECUTABLE_SIZE` と同じ形）。
+pub const MAX_ARGV_BYTES: usize = 1024;
 
 /// 検証用 probe システムコールの番号（ZaytOS 独自。[`ZAYTOS_PRIVATE_BASE`]）。
 pub const PROBE_NUMBER: u64 = ZAYTOS_PRIVATE_BASE;
@@ -891,21 +920,31 @@ unsafe fn dispatch(
 /// `bkl` が、いま保持している BKL のガードであること。
 unsafe fn spawn_from_ring3(
     path: u64,
+    argv: u64,
     pml4_phys: PhysAddr,
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
-    // **パスを写す。BKL を保持したままである。**
+    // **パスと `argv` を写す。BKL を保持したままである。**
+    // **ユーザーメモリへ触るのはここだけで、区間ごと BKL の内側に残す**
+    // （`copy_from_user` の TOCTOU の注記）。
     let mut buf = [0u8; PATH_MAX];
     // SAFETY: 呼び出し元契約をそのまま渡す。
     let len = match unsafe { copy_user_path(&mut buf, path, pml4_phys, direct_map) } {
         Ok(len) => len,
         Err(errno) => return (-errno) as u64,
     };
+    let mut argv_bytes = [0u8; MAX_ARGV_BYTES];
+    // SAFETY: 呼び出し元契約をそのまま渡す。
+    let (argv_count, argv_used) =
+        match unsafe { copy_user_argv(&mut argv_bytes, argv, pml4_phys, direct_map) } {
+            Ok(pair) => pair,
+            Err(errno) => return (-errno) as u64,
+        };
 
     // **ここで解く。** 取り直すのは子が終わってからである。
     drop(bkl.take());
-    let result = crate::userland::spawn(&buf[..len]);
+    let result = crate::userland::spawn(&buf[..len], &argv_bytes[..argv_used], argv_count);
     *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
 
     match result {
@@ -1003,7 +1042,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     // SAFETY: pml4_phys / direct_map は稼働中テーブルのもので、walk の契約を満たす。
     let ret = if number == SYS_SPAWN {
         // SAFETY: 同上。`bkl` はいま保持しているガードである。
-        unsafe { spawn_from_ring3(args[0], pml4_phys, direct_map, &mut bkl) }
+        unsafe { spawn_from_ring3(args[0], args[1], pml4_phys, direct_map, &mut bkl) }
     } else {
         // SAFETY: pml4_phys / direct_map は稼働中テーブルのもので、walk の契約を満たす。
         unsafe { dispatch(number, &args, pml4_phys, direct_map) }
@@ -1498,6 +1537,133 @@ unsafe fn copy_user_path(
     Err(ENAMETOOLONG)
 }
 
+/// NUL 終端のユーザー文字列を 1 本写す（S11-7）。
+///
+/// 写したバイト数（**NUL を含む**）を返す。**`dst` に収まらなければ `-E2BIG` である**
+/// ——アドレスの誤りではなく量の問題なので、`-EFAULT` でも `-EINVAL` でもない。
+///
+/// # [`copy_user_path`] と同じ形である
+///
+/// **ページごとに検証してから読む。** 長さが先に分からないので、
+/// **「今いるページの残り」を単位に検証しては読む。** 上限は `dst` の長さで、
+/// **NUL が無い入力でも必ず止まる。**
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn copy_user_string(
+    dst: &mut [u8],
+    ptr: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+) -> Result<usize, i64> {
+    /// ページの大きさ。**検証の単位である。**
+    const PAGE: u64 = 0x1000;
+
+    let mut copied = 0usize;
+    while copied < dst.len() {
+        let addr = ptr.checked_add(copied as u64).ok_or(EFAULT)?;
+        let to_page_end = PAGE - (addr & (PAGE - 1));
+        let chunk = to_page_end.min((dst.len() - copied) as u64);
+        // SAFETY: 呼び出し元契約をそのまま渡す。
+        let slice =
+            unsafe { validate_user_range(pml4_phys, direct_map, addr, chunk) }.ok_or(EFAULT)?;
+        // SAFETY: slice は検証済み。dst の残りは chunk を収める。
+        let read = unsafe { copy_from_user(&mut dst[copied..copied + chunk as usize], &slice) };
+        if read == 0 {
+            return Err(EFAULT);
+        }
+        for i in 0..read {
+            if dst[copied + i] == 0 {
+                return Ok(copied + i + 1);
+            }
+        }
+        copied += read;
+    }
+    Err(E2BIG)
+}
+
+/// ユーザーの `argv`（NULL 終端のポインタ配列）を写す（S11-7）。
+///
+/// 写したバイト列を `dst` へ NUL 区切りで並べ、`(要素数, 使ったバイト数)` を返す。
+///
+/// # 線が当たる場所は 4 つある
+///
+/// **配列の終端が無い形**——NULL に当たるまで歩くので、**上限が要る。**
+/// [`crate::userland::MAX_ARGV`] を越えたら `-E2BIG` で止める。
+/// **`common::ext2` の走査と同じ形で、進む量が正（8 バイト）で上限が有限である。**
+///
+/// **要素数の上限**——同上。**表と文字列が 1 ページに収まる根拠でもある。**
+///
+/// **1 本あたりの長さの上限**——[`copy_user_string`] が `dst` の残りで切る。
+///
+/// **全体の長さの上限**——[`MAX_ARGV_BYTES`]。**そして最後にページの判定がある**
+/// （`build_initial_stack`）。**2 枚あるのは、緩衝の大きさとページの大きさが
+/// 別の理由で決まっているからである。**
+///
+/// # `argv` そのものが NULL なら `-EFAULT`
+///
+/// **配列を要求している。** 「引数が無い」は**空の配列**（先頭が NULL）で表す。
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn copy_user_argv(
+    dst: &mut [u8; MAX_ARGV_BYTES],
+    argv: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+) -> Result<(usize, usize), i64> {
+    /// 1 要素の大きさ（ポインタ）。
+    const WORD: u64 = 8;
+
+    if argv == 0 {
+        return Err(EFAULT);
+    }
+
+    let mut count = 0usize;
+    let mut used = 0usize;
+    loop {
+        let slot = argv.checked_add(count as u64 * WORD).ok_or(EFAULT)?;
+        // SAFETY: 呼び出し元契約をそのまま渡す。
+        let slice =
+            unsafe { validate_user_range(pml4_phys, direct_map, slot, WORD) }.ok_or(EFAULT)?;
+        let mut word = [0u8; WORD as usize];
+        // SAFETY: slice は検証済みで、word は 8 バイトを収める。
+        let read = unsafe { copy_from_user(&mut word, &slice) };
+        if read != WORD as usize {
+            return Err(EFAULT);
+        }
+        let pointer = u64::from_le_bytes(word);
+        if pointer == 0 {
+            return Ok((count, used));
+        }
+        if count == crate::userland::MAX_ARGV {
+            // 破壊 (S11-7, spawn-e2big-as-einval): 量の問題を `-EINVAL` で返す。
+            // **どちらも「引数が受け付けられない」なので、雑に見ると同じに見える。**
+            // **Linux は分けている**——`execve` は長すぎる引数に `E2BIG` を返す。
+            // **`syscall-test` の検算が食い違いを捕まえる。**
+            #[cfg(not(feature = "spawn-e2big-as-einval"))]
+            let errno = E2BIG;
+            #[cfg(feature = "spawn-e2big-as-einval")]
+            let errno = EINVAL;
+            return Err(errno);
+        }
+        // SAFETY: 呼び出し元契約をそのまま渡す。
+        let written =
+            match unsafe { copy_user_string(&mut dst[used..], pointer, pml4_phys, direct_map) } {
+                Ok(written) => written,
+                // 破壊 (S11-7, spawn-e2big-as-einval): こちらの経路も同じく潰す。
+                // **要素数と長さは別の場所で落ちるので、両方を同じ形にする。**
+                #[cfg(feature = "spawn-e2big-as-einval")]
+                Err(E2BIG) => return Err(EINVAL),
+                Err(errno) => return Err(errno),
+            };
+        used += written;
+        count += 1;
+    }
+}
+
 /// [`common::ext2::Ext2Error`] を errno へ写す（S10-b）。
 ///
 /// # 対応表はここに置く
@@ -1589,6 +1755,7 @@ fn errno_for_spawn(error: crate::userland::SpawnError) -> i64 {
         E::IsDirectory => EISDIR,
         E::NotRegularFile => EACCES,
         E::TooLarge(_) => ENOMEM,
+        E::ArgvMalformed => EINVAL,
         E::Load(e) => errno_for_user_load(e),
         E::DestroyAccounting { .. } => EIO,
     }

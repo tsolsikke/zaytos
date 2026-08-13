@@ -258,6 +258,15 @@ spawn-keep-child-records = []
 # カーネルへ入るときのRSP0が子のスタックを指し、spawnの突き合わせが捕まえる。
 # `--syscall-test spawn-child-rsp0`。
 spawn-child-rsp0 = []
+# S11-7: argv の量の問題(要素数・長さ)を -E2BIG でなく -EINVAL で返す。どちらも
+# 「引数が受け付けられない」を意味するので雑に見ると同じに見えるが、Linux は分けて
+# いる(execve は長すぎる引数に E2BIG を返す)。「値が変」と「量が多い」は呼び出し側の
+# 直し方が違う。syscall-test の検算が捕まえる。`--syscall-test spawn-e2big-as-einval`。
+spawn-e2big-as-einval = []
+# S11-7: 写した argv の最後の1本を落とす。終端の扱いを1つずらす形で、雑に見ると
+# ちゃんと切り分けているように見える。子が受け取る argc が1つ少なくなり、spawn-test の
+# 検算が捕まえる。`--syscall-test spawn-argv-drop-last`。
+spawn-argv-drop-last = []
 # S1-b-2: ACPI の検証経路の破壊確認。いずれも既定ビルドには入らない。
 # `cargo xtask run --acpi-test <kind>` が有効化する。観測は panic ではなく、
 # 「検出のログが出て、MADT の列挙が完了しないこと」である。

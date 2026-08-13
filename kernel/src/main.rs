@@ -5071,6 +5071,15 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
         40,
         "spawn(\"/bin/spawn-test\") did not return 0; the grandchild was not refused",
     ),
+    (41, "spawn(path, NULL) did not return -EFAULT"),
+    (
+        42,
+        "an argv with more entries than the limit did not return -E2BIG",
+    ),
+    (
+        43,
+        "an argv whose total length is too big did not return -E2BIG",
+    ),
 ];
 
 /// `fault-test` が起こす #PF のエラーコード（S9-b-3-2a）。
@@ -5140,7 +5149,7 @@ struct UserProgram {
     ///
     /// **`argv[0]` はプログラム名である**——Unix の慣行であって、
     /// **カーネルが強制するものではない**（`execve` は呼び出し側に決めさせる）。
-    argv: &'static [&'static str],
+    argv: &'static [&'static [u8]],
 }
 
 /// 走らせるプログラムの一覧（S9-b-3-1、S9-b-3-2a で期待を持たせた）。
@@ -5164,7 +5173,7 @@ const USER_PROGRAMS: &[UserProgram] = &[
         expected_write: Some(HELLO_MESSAGE),
         probes_abi: false,
         status_meanings: &[],
-        argv: &["hello"],
+        argv: &[b"hello"],
     },
     UserProgram {
         name: "fault-test",
@@ -5179,7 +5188,7 @@ const USER_PROGRAMS: &[UserProgram] = &[
         expected_write: None,
         probes_abi: false,
         status_meanings: &[],
-        argv: &["fault-test"],
+        argv: &[b"fault-test"],
     },
     UserProgram {
         name: "syscall-test",
@@ -5191,7 +5200,7 @@ const USER_PROGRAMS: &[UserProgram] = &[
         status_meanings: SYSCALL_TEST_STATUS,
         // **2 要素にしてある。** `argc` が 1 のままだと、
         // **「積んでいない」と「1 つ積んだ」が区別できない。**
-        argv: &["syscall-test", "alpha"],
+        argv: &[b"syscall-test", b"alpha"],
     },
 ];
 
@@ -5357,7 +5366,7 @@ fn verify_corrupt_user_program_is_not_loaded(logger: &mut Logger<SerialPort>) {
         };
 
         let (outcome, held, leaked) =
-            load_user_program(logger, image, false, "corrupt", &["corrupt"]);
+            load_user_program(logger, image, false, "corrupt", &[b"corrupt"]);
 
         let Err(error) = outcome else {
             logger.error(format_args!(
@@ -7231,6 +7240,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "spawn-child-rsp0",
         cfg!(feature = "spawn-child-rsp0"),
         "入れ子の遠征から戻す RSP0 を、親ではなく子自身の上端にする",
+    ),
+    (
+        "spawn-e2big-as-einval",
+        cfg!(feature = "spawn-e2big-as-einval"),
+        "argv の量の問題を -E2BIG でなく -EINVAL で返す",
+    ),
+    (
+        "spawn-argv-drop-last",
+        cfg!(feature = "spawn-argv-drop-last"),
+        "写した argv の最後の 1 本を落とす",
     ),
     (
         "exception-test",
