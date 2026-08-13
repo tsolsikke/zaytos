@@ -362,7 +362,9 @@ fn current_index() -> usize {
         // 実行しないので、ここへ来るのは AP がスケジューラへ入ったことを意味する。
         // 丸めず、落とす。
         serial_line(format_args!(
-            "[ERROR] task: current_index() was read on a CPU with no current task              (CURRENT is still the sentinel); this stage does not run tasks on application              processors; halting"
+            "[ERROR] task: current_index() was read on a CPU with no current task \
+             (CURRENT is still the sentinel); this stage does not run tasks on application \
+             processors; halting"
         ));
         common::cpu::halt_forever();
     }

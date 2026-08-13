@@ -471,7 +471,8 @@ pub extern "C" fn zaytos_ap_entry(index: u64) -> ! {
 
     let _ = writeln!(
         serial,
-        "[WARN] smp: ap {index} has no bring-up information, so it stays on the static boot          page table and halts here"
+        "[WARN] smp: ap {index} has no bring-up information, so it stays on the static boot \
+         page table and halts here"
     );
     // 割り込みは有効化しない。IDT を持たないので、来ても行き先が無い。
     cpu::halt_forever()
