@@ -5080,6 +5080,16 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
         43,
         "an argv whose total length is too big did not return -E2BIG",
     ),
+    (44, "write(0, ...) did not return -EBADF"),
+    (45, "write(3, ...) did not return -EBADF"),
+    (
+        46,
+        "write(2, ...) did not return the number of bytes it was given",
+    ),
+    (
+        47,
+        "a write longer than the 64-byte record did not return the number of bytes it was given",
+    ),
 ];
 
 /// `fault-test` が起こす #PF のエラーコード（S9-b-3-2a）。
@@ -7250,6 +7260,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "spawn-argv-drop-last",
         cfg!(feature = "spawn-argv-drop-last"),
         "写した argv の最後の 1 本を落とす",
+    ),
+    (
+        "write-ignores-fd",
+        cfg!(feature = "write-ignores-fd"),
+        "write が fd を見ずに、何番でも出力する",
     ),
     (
         "exception-test",

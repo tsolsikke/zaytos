@@ -771,26 +771,8 @@ unsafe fn dispatch(
             }
         }
         SYS_WRITE => {
-            let buf = args[1];
-            let len = args[2];
-            if len as usize > WRITE_BUF_LEN {
-                return (-EINVAL) as u64;
-            }
-            // **踏み込む前に検証する。** 検証済みトークンを得てから読む。
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-            let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, buf, len) })
-            else {
-                return (-EFAULT) as u64;
-            };
-            let mut kbuf = [0u8; WRITE_BUF_LEN];
-            // SAFETY: slice は検証済み。dst は len を収める。
-            let read = unsafe { copy_from_user(&mut kbuf, &slice) };
-            WRITE_FD.store(args[0], Ordering::SeqCst);
-            for (slot, value) in WRITE_BUF.iter().zip(kbuf.iter()) {
-                slot.store(*value, Ordering::SeqCst);
-            }
-            WRITE_LEN.store(read as u64, Ordering::SeqCst);
-            read as u64
+            unsafe { sys_write(args[0], args[1], args[2], pml4_phys, direct_map) }
         }
         SYS_CHECKSUM => {
             let buf = args[0];
@@ -1535,6 +1517,119 @@ unsafe fn copy_user_path(
         copied += read;
     }
     Err(ENAMETOOLONG)
+}
+
+/// 標準出力の fd（Linux と同じ 1）。
+pub const STDOUT_FD: u64 = 1;
+/// 標準エラー出力の fd（Linux と同じ 2）。
+pub const STDERR_FD: u64 = 2;
+
+/// `write(fd, buf, count)` の本体（S11-8）。
+///
+/// # 出力先を持たせた
+///
+/// **S11-7 まで、`write` は受け取ったバイト列を静的領域へ記録するだけだった。**
+/// カーネル側の判定行がそれを読んで突き合わせる形で、**Ring 3 の出力はどこへも
+/// 届いていなかった。** `hello` の "hello from ring 3" も、シリアルには出ていない。
+///
+/// **`ls` と `cat` を書くには、出力が届く先が要る。** 「印字するプログラム」は、
+/// **印字が観測できて初めて意味を持つ。**
+///
+/// # シリアルへ出す。コンソールへは出さない
+///
+/// **シリアルは最優先の観測手段である**（`docs/architecture.md`）。
+/// **コンソール（画面）へは出さない**——`deferred-decisions.md` の
+/// 「コンソール / シリアルへの出力の多重化」が
+/// **「出力するのはメインループだけ」という制約で運用する**と決めており、
+/// **`dispatch` はメインループではない。** `Console` は `kernel_main` のローカルで、
+/// lib からは届かない。**あの行の条件（前景プロセスの概念を設計する時点）を
+/// 先取りしない。**
+///
+/// # fd を見る
+///
+/// **1 と 2 だけを受ける。** それ以外は `-EBADF` である。
+///
+/// **0/1/2 を予約する話とは別である。** `crate::vfs::FileTable` は
+/// **0/1/2 を予約していない**ので、`open` は 0 番から返す。**衝突しないのは、
+/// ファイルへ書く道がまだ無いからである**——`write` が表を引くことは一度も無い。
+/// **`docs/roadmap.md` の「予約するか、シェルが自分で開くか」は、
+/// ファイルへ書けるようになった時点（S12）で決める。**
+///
+/// # 長さの上限を外した
+///
+/// **[`WRITE_BUF_LEN`] を越えると `-EINVAL` を返していた。** あれは
+/// **記録用の緩衝の大きさ**であって、`write` そのものの上限ではない。
+/// **ページ単位に検証しては出す**ので、**カーネル側に長さぶんの緩衝は要らない。**
+/// **記録は先頭 [`WRITE_BUF_LEN`] バイトだけ残す**——判定行が突き合わせるのは
+/// そこまでである。
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn sys_write(
+    fd: u64,
+    buf: u64,
+    count: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+) -> u64 {
+    /// ページの大きさ。**検証の単位である。**
+    const PAGE: u64 = 0x1000;
+
+    // 破壊 (S11-8, write-ignores-fd): fd を見ずに、何番でも出す。
+    // **出力はそのまま現れるので、雑に見ると正しく動いているように見える。**
+    // **見えないのは「開いていない番号が拒まれること」のほうである。**
+    // `syscall-test` の検算が食い違いを捕まえる。
+    #[cfg(not(feature = "write-ignores-fd"))]
+    if fd != STDOUT_FD && fd != STDERR_FD {
+        return (-EBADF) as u64;
+    }
+
+    let mut port = common::serial::SerialPort::new(common::serial::SerialPort::COM1_BASE);
+    port.init();
+
+    let mut recorded = [0u8; WRITE_BUF_LEN];
+    let mut done = 0u64;
+    while done < count {
+        let addr = match buf.checked_add(done) {
+            Some(addr) => addr,
+            None => return (-EFAULT) as u64,
+        };
+        // **一度に扱う量は 3 つの min である。** ページの残り（検証の単位）、
+        // 要求の残り、そして [`WRITE_BUF_LEN`]（スタックへ置ける緩衝の大きさ）。
+        let to_page_end = PAGE - (addr & (PAGE - 1));
+        let chunk = to_page_end.min(count - done).min(WRITE_BUF_LEN as u64);
+        // **踏み込む前に検証する。** 検証済みトークンを得てから読む。
+        // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+        let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, addr, chunk) })
+        else {
+            // **届いた分だけを返す。** 届いていないものを届いたことにしない。
+            return if done == 0 { (-EFAULT) as u64 } else { done };
+        };
+        let mut kbuf = [0u8; WRITE_BUF_LEN];
+        // SAFETY: slice は検証済み。dst は chunk を収める。
+        let read = unsafe { copy_from_user(&mut kbuf[..chunk as usize], &slice) };
+        if read == 0 {
+            return if done == 0 { (-EFAULT) as u64 } else { done };
+        }
+        for byte in &kbuf[..read] {
+            port.write_byte(*byte);
+        }
+        // **先頭 [`WRITE_BUF_LEN`] バイトだけ控える。**
+        let already = done as usize;
+        if already < WRITE_BUF_LEN {
+            let take = (WRITE_BUF_LEN - already).min(read);
+            recorded[already..already + take].copy_from_slice(&kbuf[..take]);
+        }
+        done += read as u64;
+    }
+
+    WRITE_FD.store(fd, Ordering::SeqCst);
+    for (slot, value) in WRITE_BUF.iter().zip(recorded.iter()) {
+        slot.store(*value, Ordering::SeqCst);
+    }
+    WRITE_LEN.store(done.min(WRITE_BUF_LEN as u64), Ordering::SeqCst);
+    done
 }
 
 /// NUL 終端のユーザー文字列を 1 本写す（S11-7）。

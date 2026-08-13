@@ -923,6 +923,20 @@ const SYSCALL_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // S11-8: `write` が fd を見ずに、何番でも出力する。**出力はそのまま現れるので、
+    // 雑に見ると正しく動いているように見える。** **見えないのは「開いていない番号が
+    // 拒まれること」のほうである。**
+    CriticalTest {
+        name: "write-ignores-fd",
+        feature: "write-ignores-fd",
+        expected_markers: &[
+            "user-run: syscall-test exited with status 44",
+            "write(0, ...) did not return -EBADF",
+        ],
+        forbidden_markers: &["user-load: syscall-test ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // S11-7: argv の量の問題を -E2BIG でなく -EINVAL で返す。**どちらも「引数が
     // 受け付けられない」を意味するので、雑に見ると同じに見える**（S10-b の 4 つと
     // 同じ族）。**Linux は分けている**——`execve` は長すぎる引数に `E2BIG` を返す。
@@ -4309,6 +4323,12 @@ const DIRECT_SERIAL_PORT_ALLOWLIST: &[DirectSerialPortSite] = &[
     // **許可リストの粒度がこの出口までしか届かないことが、この検査の限界である**
     // （型の doc の「粒度の限界」）。
     DirectSerialPortSite {
+        file: "kernel/src/syscall.rs",
+        item: "sys_write",
+        reason:
+            "Ring 3 の write を届ける先。BKL の内側だが、ロガーもコンソールも lib からは届かない",
+    },
+    DirectSerialPortSite {
         file: "kernel/src/userland.rs",
         item: "spawn",
         reason: "spawn の判定行。BKL を解いた区間で走る（ADR-0023 §1）ので、ロガーを渡す道が無い",
@@ -6989,7 +7009,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 21,
-    full: 131,
+    full: 132,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

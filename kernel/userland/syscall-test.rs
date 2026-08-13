@@ -75,6 +75,10 @@
 //! - `41` `spawn(path, NULL)` が `-EFAULT` を返さなかった
 //! - `42` 要素数が上限を越える `argv` が `-E2BIG` を返さなかった
 //! - `43` 全体が長すぎる `argv` が `-E2BIG` を返さなかった
+//! - `44` `write(0, ...)` が `-EBADF` を返さなかった
+//! - `45` `write(3, ...)` が `-EBADF` を返さなかった
+//! - `46` `write(2, ...)` が渡したバイト数を返さなかった
+//! - `47` 64 バイトを越える `write` が渡したバイト数を返さなかった
 //!
 //! # `argv` は `_start` の時点の `rsp` から読む
 //!
@@ -195,6 +199,8 @@ const ARGV1_LEN: u32 = 6;
 const SYS_SPAWN: u32 = 0x1004;
 /// `-E2BIG`（引数が多すぎる、または長すぎる）。
 const MINUS_E2BIG: i32 = -7;
+/// 64 バイトを越える 1 本の長さ。**記録用の緩衝より長いことが主張である。**
+const LONG_MESSAGE_LEN: u32 = 68;
 
 core::arch::global_asm!(
     // **entry の手前に詰め物を置く**（`hello.rs` と同じ理由）。
@@ -699,6 +705,58 @@ core::arch::global_asm!(
     "  mov edi, 43",
     "  jne 9f",
 
+    // --- 44. write(0)。**-EBADF が返るはず** ---
+    // **0 は標準入力である。** 出力先ではないので拒まれる。
+    "  mov eax, {sys_write}",
+    "  xor edi, edi",
+    "  lea rsi, [rip + MESSAGE]",
+    "  mov edx, {msg_len}",
+    "  int 0x80",
+    "  cmp rax, {minus_ebadf}",
+    "  mov edi, 44",
+    "  jne 9f",
+
+    // --- 45. write(3)。**-EBADF が返るはず** ---
+    // **開いていない番号である。** `open` が 0 番から返すのとは別の話で、
+    // **`write` は表を引かない**（ファイルへ書く道がまだ無い）。
+    "  mov eax, {sys_write}",
+    "  mov edi, 3",
+    "  lea rsi, [rip + MESSAGE]",
+    "  mov edx, {msg_len}",
+    "  int 0x80",
+    "  cmp rax, {minus_ebadf}",
+    "  mov edi, 45",
+    "  jne 9f",
+
+    // --- 46. write(2)。**標準エラー出力も受ける** ---
+    "  mov eax, {sys_write}",
+    "  mov edi, 2",
+    "  lea rsi, [rip + MESSAGE]",
+    "  mov edx, {msg_len}",
+    "  int 0x80",
+    "  cmp rax, {msg_len}",
+    "  mov edi, 46",
+    "  jne 9f",
+
+    // --- 47. 64 バイトを越える write ---
+    // **記録用の緩衝は 64 バイトだが、それは `write` の上限ではない。**
+    // **ページ単位に検証しては出す**ので、長さぶんの緩衝はカーネル側に要らない。
+    "  mov eax, {sys_write}",
+    "  mov edi, 1",
+    "  lea rsi, [rip + LONG_MESSAGE]",
+    "  mov edx, {long_len}",
+    "  int 0x80",
+    "  cmp rax, {long_len}",
+    "  mov edi, 47",
+    "  jne 9f",
+    // **最後にもう一度 MESSAGE を送る。** カーネル側の判定行が突き合わせるのは
+    // **最後の `write`** なので、**長い行で上書きしたままにしない。**
+    "  mov eax, {sys_write}",
+    "  mov edi, 1",
+    "  lea rsi, [rip + MESSAGE]",
+    "  mov edx, {msg_len}",
+    "  int 0x80",
+
     // すべて通った。
     "  xor edi, edi",
 
@@ -773,6 +831,9 @@ core::arch::global_asm!(
     "  .ascii \"welco\"",
     "MOTD_REST:",
     "  .ascii \"me to ZaytOS\\n\"",
+    // **64 バイトを越える 1 本。** 記録用の緩衝より長いことが主張である。
+    "LONG_MESSAGE:",
+    "  .ascii \"syscall-test is writing a line that does not fit the 64-byte record\\n\"",
 
     arg0 = const PROBE_ARG0,
     arg1 = const PROBE_ARG1,
@@ -823,6 +884,7 @@ core::arch::global_asm!(
     argv1_len = const ARGV1_LEN,
     sys_spawn = const SYS_SPAWN,
     minus_e2big = const MINUS_E2BIG,
+    long_len = const LONG_MESSAGE_LEN,
 );
 
 #[panic_handler]

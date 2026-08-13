@@ -11,7 +11,7 @@ Hello, ZaytOS!
 [INFO] jumping to kernel entry point 0x100000
 [INFO] ZaytOS kernel: entered _start
 [INFO] boot stack: 632 of 16384 bytes used (high-water; 15752 bytes poison intact)
-[INFO] higher-half: arrived at high VA. RIP=0xffffffff8019a038 in [0xffffffff80100000, 0xffffffff8046e8c8)=true, RSP=0xffffffff80426bc0 high=true, CR3=0x3d2000 == bootstrap PML4 0x3d2000 = true, identity alive (phys 0x100000 read via low==high) = true
+[INFO] higher-half: arrived at high VA. RIP=0xffffffff8019a4a8 in [0xffffffff80100000, 0xffffffff8046e8c8)=true, RSP=0xffffffff80426bc0 high=true, CR3=0x3d2000 == bootstrap PML4 0x3d2000 = true, identity alive (phys 0x100000 read via low==high) = true
 [INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff8043a100 first slot=0xffffffff8043a100 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
 [INFO] interrupts: RFLAGS.IF before cli = false (raw RFLAGS=0x96)
 [INFO] interrupts: RFLAGS.IF after cli = false (raw RFLAGS=0x96)
@@ -73,7 +73,7 @@ Hello, ZaytOS!
 [INFO] paging: required range [framebuffer] 0x80000000..0x803e8000: OK
 [INFO] paging: required range [new page tables (PML4)] 0x3000..0x4000: OK
 [INFO] paging: required range [current RSP] 0x426e20..0x426e21: OK
-[INFO] paging: required range [current RIP] 0x19a038..0x19a039: OK
+[INFO] paging: required range [current RIP] 0x19a4a8..0x19a4a9: OK
 [INFO] paging: all required ranges mapped. proceeding to CR3 switch (d-2).
 [INFO] paging: current CR3 = 0x3d2000
 [INFO] paging: CR3 switch instruction executed
@@ -107,7 +107,7 @@ Hello, ZaytOS!
 [INFO] console: 102 log line(s) were emitted before the console existed (serial only)
 [INFO] heap: arena 0x46f000..0x56f000 (256 frames, 1 MiB), mapped=true
 [INFO] heap: initialized (1048576 bytes free, 1 block(s))
-[INFO] granularity: executing code (RIP) 0xffffffff8019a038 -> phys 0x19a038, mapped by a 4KiB page at 0xffffffff8019a000 (entry=0x19a023)
+[INFO] granularity: executing code (RIP) 0xffffffff8019a4a8 -> phys 0x19a4a8, mapped by a 4KiB page at 0xffffffff8019a000 (entry=0x19a023)
 [INFO] granularity: kernel stack (RSP) 0xffffffff804268a0 -> phys 0x4268a0, mapped by a 4KiB page at 0xffffffff80426000 (entry=0x426063)
 [INFO] granularity: heap arena 0x46f000 -> phys 0x46f000, mapped by a 2MiB page at 0x400000 (entry=0x400083)
 [INFO] granularity: framebuffer 0x80000000 -> phys 0x80000000, mapped by a 2MiB page at 0x80000000 (entry=0x800000b3)
@@ -236,7 +236,7 @@ Hello, ZaytOS!
 [INFO] percpu: 2 usable CPU(s) enumerated, 2 per-CPU slot(s) available, every CPU has a slot=true (cpu_id() is the constant 0 and only the bootstrap processor runs, so no slot is indexed out of range yet)
 [INFO] identity-removal: begin. live PML4=0xf000, saved PML4[0]=0x10023
 [INFO] identity-removal: PML4[0] subtree table frames = 7 (28 KiB) become unreachable; intentional leak. subtree frames [256]=10 [511]=4. disjoint(0,256)=true disjoint(0,511)=true disjoint(256,511)=true
-[INFO] identity-removal: required [RIP] 0xffffffff8019a038 -> phys 0x19a038 (huge=false): OK
+[INFO] identity-removal: required [RIP] 0xffffffff8019a4a8 -> phys 0x19a4a8 (huge=false): OK
 [INFO] identity-removal: required [RSP] 0xffffffff804266f0 -> phys 0x4266f0 (huge=false): OK
 [INFO] identity-removal: required [direct map window] 0xffff80000000f000 -> phys 0xf000 (huge=false): OK
 [INFO] identity-removal: required [kernel image] 0xffffffff80100000 -> phys 0x100000 (huge=false): OK
@@ -333,7 +333,8 @@ task: cooperative switch verified
 [INFO] user-load: hello mapped PT_LOAD 0x401000..0x401012 (filesz=0x12 memsz=0x12 w=false)
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
 [INFO] user-load: hello initial stack at 0x7fffc0 (argc=1, 16-byte aligned=true)
-[INFO] ring3: hello used 2096 of 65536 byte(s) of the depth-0 excursion stack (3%), the canary at its bottom is intact=true
+hello from ring 3
+[INFO] ring3: hello used 2432 of 65536 byte(s) of the depth-0 excursion stack (3%), the canary at its bottom is intact=true
 [INFO] vfs: hello opened 0 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16)
 [INFO] user-run: hello left Ring 3 (exited=true status=0 folded=false vector=0 rip=0x0 cs=0x0 cr2=0x0 err=0x0), it made 2 syscall(s) and the kernel was entered from Ring 3 (true), write(fd=1, 18 byte(s)) said "hello from ring 3"
 [INFO] user-load: hello ran as a process in its own address space, ended as expected, and the kernel continued after the process was gone; the space was destroyed (8 frame(s) left the allocator and 8 reached quarantine (8 its own + 0 spawned), match=true leaked=0)
@@ -345,15 +346,17 @@ task: cooperative switch verified
 [INFO] user-run: fault-test left Ring 3 (exited=false status=0 folded=true vector=14 rip=0x400030 cs=0x2b cr2=0x400000 err=0x7), it made 0 syscall(s) and the kernel was entered from Ring 3 (false), write(fd=0, 0 byte(s)) said ""
 [INFO] user-load: fault-test ran as a process in its own address space, ended as expected, and the kernel continued after the process was gone; the space was destroyed (7 frame(s) left the allocator and 7 reached quarantine (7 its own + 0 spawned), match=true leaked=0)
 [INFO] user-load: syscall-test mapped PT_LOAD 0x400000..0x400802 (filesz=0x802 memsz=0x802 w=false)
-[INFO] user-load: syscall-test mapped PT_LOAD 0x401000..0x401213 (filesz=0x213 memsz=0x213 w=false)
+[INFO] user-load: syscall-test mapped PT_LOAD 0x401000..0x401257 (filesz=0x257 memsz=0x257 w=false)
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
 [INFO] user-load: syscall-test initial stack at 0x7fffa0 (argc=2, 16-byte aligned=true)
+syscall-test wrote this
 [INFO] spawn: /bin/hello is 8496 byte(s) at inode 13; entering at depth 2 (the parent's excursion stack 0xffffffff80445140..0xffffffff80455140 has 5969 byte(s) used and 59567 left)
 [INFO] user-load: /bin/hello mapped PT_LOAD 0x400000..0x400042 (filesz=0x42 memsz=0x42 w=false)
 [INFO] user-load: /bin/hello mapped PT_LOAD 0x401000..0x401012 (filesz=0x12 memsz=0x12 w=false)
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
 [INFO] user-load: /bin/hello initial stack at 0x7fffc0 (argc=1, 16-byte aligned=true)
-[INFO] ring3: /bin/hello used 2096 of 65536 byte(s) of the depth-1 excursion stack (3%), the canary at its bottom is intact=true
+hello from ring 3
+[INFO] ring3: /bin/hello used 2432 of 65536 byte(s) of the depth-1 excursion stack (3%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/hello opened 0 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16)
 [INFO] spawn: /bin/hello ended (Exited(0)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff80465090 (inside its own excursion stack 0xffffffff80455140..0xffffffff80465140 = true); the space was destroyed (8 frame(s) left the allocator and 8 reached quarantine, match=true leaked=0)
 [INFO] spawn: /bin/spawn-test is 8616 byte(s) at inode 14; entering at depth 2 (the parent's excursion stack 0xffffffff80445140..0xffffffff80455140 has 5969 byte(s) used and 59567 left)
@@ -364,9 +367,12 @@ task: cooperative switch verified
 [INFO] ring3: /bin/spawn-test used 7744 of 65536 byte(s) of the depth-1 excursion stack (11%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/spawn-test opened 0 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16)
 [INFO] spawn: /bin/spawn-test ended (Exited(0)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff80465090 (inside its own excursion stack 0xffffffff80455140..0xffffffff80465140 = true); the space was destroyed (8 frame(s) left the allocator and 8 reached quarantine, match=true leaked=0)
+syscall-test wrote this
+syscall-test is writing a line that does not fit the 64-byte record
+syscall-test wrote this
 [INFO] ring3: syscall-test used 23320 of 65536 byte(s) of the depth-0 excursion stack (35%), the canary at its bottom is intact=true
 [INFO] vfs: syscall-test opened 8 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16)
-[INFO] user-run: syscall-test left Ring 3 (exited=true status=0 folded=false vector=0 rip=0x0 cs=0x0 cr2=0x0 err=0x0), it made 45 syscall(s) and the kernel was entered from Ring 3 (true), write(fd=1, 24 byte(s)) said "syscall-test wrote this"
+[INFO] user-run: syscall-test left Ring 3 (exited=true status=0 folded=false vector=0 rip=0x0 cs=0x0 cr2=0x0 err=0x0), it made 50 syscall(s) and the kernel was entered from Ring 3 (true), write(fd=1, 24 byte(s)) said "syscall-test wrote this"
 [INFO] user-abi: syscall-test issued the probe from user assembly and all 6 arguments arrived per ADR-0020 (arg4 came from R10, not RCX, which carried a sentinel); this checks the ABI contract itself, not the dispatcher — the boot-time probe assembles its arguments in Rust inside the kernel, this one assembles them in assembly, links, loads and enters Ring 3 like any program
 [INFO] user-load: syscall-test ran as a process in its own address space, ended as expected, and the kernel continued after the process was gone; the space was destroyed (24 frame(s) left the allocator and 24 reached quarantine (8 its own + 16 spawned), match=true leaked=0)
 [INFO] frame-allocator: after the user programs, lent out 23 time(s), given back 23 time(s), balanced=true, present=true
@@ -404,7 +410,7 @@ task: cooperative switch verified
 [INFO] lapic-timer: the timer now arrives as vector 0xfe, which the 8259 cannot produce
 task: starting preemptive demo with 2 busy-loop workers for 200 ticks
 [INFO] smp: the installed AP trampoline matches the template outside the patched fields: 4048 byte(s) compared, 48 excluded (gdtr base at 0xf22, far jump target at 0x3b, data block 0xf40..0xf68), mismatches=0
-[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x3d2000, rust entry 0xffffffff8016fdf0
+[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x3d2000, rust entry 0xffffffff80170260
 [INFO] smp: starting application processor apic id 1 as slot 1 (trampoline at 0x1000, vector 0x01, stack top 0x3000 identity-mapped, cr3 0x3d2000 = the static boot page table)
 [INFO] smp: application processor 1 started (long mode reached, running on the static boot page table; no per-CPU GDT/TSS/IDT yet, so cpu_id() is not used here)
 [INFO] smp: ap 1 loaded its own GDT/TSS/IDT; cpu_id() now reads 1 from GDTR (the index handed over in the trampoline data block was 1, match=true)

@@ -267,6 +267,10 @@ spawn-e2big-as-einval = []
 # ちゃんと切り分けているように見える。子が受け取る argc が1つ少なくなり、spawn-test の
 # 検算が捕まえる。`--syscall-test spawn-argv-drop-last`。
 spawn-argv-drop-last = []
+# S11-8: write が fd を見ずに、何番でも出力する。出力はそのまま現れるので雑に見ると
+# 正しく動いているように見える。見えないのは「開いていない番号が拒まれること」の
+# ほうである。syscall-test の検算が捕まえる。`--syscall-test write-ignores-fd`。
+write-ignores-fd = []
 # S1-b-2: ACPI の検証経路の破壊確認。いずれも既定ビルドには入らない。
 # `cargo xtask run --acpi-test <kind>` が有効化する。観測は panic ではなく、
 # 「検出のログが出て、MADT の列挙が完了しないこと」である。
