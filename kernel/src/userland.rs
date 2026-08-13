@@ -1060,6 +1060,15 @@ pub fn spawn(
         ));
     }
 
+    // **子が起こした孫の隔離を控える（S11-11）。**
+    //
+    // **S11-5 で起動時の会計に同じ穴があり、そこは直した**——隔離のフレームは
+    // 世代が退くまでアロケータへ戻らないので、**親から見ると消えたままである。**
+    // **`spawn` 自身の会計にも同じ穴が残っていた。**
+    // **シェルが `ls` と `cat` と `hello` を起こしたところで出た**——
+    // 実測で 35 枚消えて、シェル自身の隔離は 9 枚だった（9 + 9 + 9 + 8）。
+    let (children_before, leaked_before) = spawn_accounting();
+
     // **戻ってくるべき RSP0 を控える（S11-11 で直した）。**
     //
     // **S11-5 では「親の遠征スタックの上端」と突き合わせていた。** あのときは
@@ -1186,6 +1195,10 @@ pub fn spawn(
     }
 
     let consumed = free_before.saturating_sub(free_after) as usize;
+    // **孫のぶんを足す。** 子が更に起こしていれば、そのぶんも消えている。
+    let (children_after, leaked_after) = spawn_accounting();
+    let quarantined = held + children_after.saturating_sub(children_before);
+    let all_leaked = leaked + leaked_after.saturating_sub(leaked_before);
     // **親の会計へ回す（S11-5）。** 隔離へ入ったフレームは世代が退くまで
     // アロケータへ戻らないので、**親から見ると消えたままである。**
     SPAWN_QUARANTINED.fetch_add(held, core::sync::atomic::Ordering::SeqCst);
@@ -1194,23 +1207,24 @@ pub fn spawn(
         "spawn: {name} ended ({child:?}) after {syscalls} syscall(s); its kernel entries ran on \
          RSP {child_handler_rsp:#x} (inside its own excursion stack \
          {child_bottom:#x}..{child_top:#x} = {handler_on_child_stack}); the space was destroyed \
-         ({consumed} frame(s) left the allocator and {held} reached quarantine, match={} \
-         leaked={leaked})",
-        consumed == held
+         ({consumed} frame(s) left the allocator and {quarantined} reached quarantine \
+         ({held} its own + {} from what it spawned), match={} leaked={all_leaked})",
+        children_after.saturating_sub(children_before),
+        consumed == quarantined
     ));
 
     let entry = outcome.map_err(SpawnError::Load)?;
     let _ = entry;
 
-    if consumed != held || leaked != 0 {
+    if consumed != quarantined || all_leaked != 0 {
         logger.error(format_args!(
             "spawn: {name} left the allocator short: {consumed} frame(s) consumed but \
-             {held} quarantined ({leaked} leaked)"
+             {quarantined} quarantined ({all_leaked} leaked)"
         ));
         return Err(SpawnError::DestroyAccounting {
             consumed,
-            quarantined: held,
-            leaked,
+            quarantined,
+            leaked: all_leaked,
         });
     }
 

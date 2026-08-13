@@ -150,6 +150,23 @@ pub fn getdents64(fd: u64, buf: &mut [u8]) -> i64 {
     }
 }
 
+/// `spawn` の番号（`ZAYTOS_PRIVATE_BASE + 4`。ZaytOS 独自）。
+pub const SYS_SPAWN: u64 = 0x1004;
+
+/// `spawn(path, argv)`。**子が終わるまで戻らない。**
+///
+/// 戻り値は子の終了状態（`0..=255`）か `-errno` である
+/// （`kernel/src/syscall.rs` の `SYS_SPAWN`）。
+///
+/// # Safety
+///
+/// `path` が NUL 終端であること。`argv` が NULL 終端のポインタ配列で、
+/// **各要素が NUL 終端の文字列を指していること。**
+pub unsafe fn spawn(path: &[u8], argv: &[*const u8]) -> i64 {
+    // SAFETY: 呼び出し元契約による。
+    unsafe { syscall3(SYS_SPAWN, path.as_ptr() as u64, argv.as_ptr() as u64, 0) }
+}
+
 /// `argc` と `argv` を、`_start` の時点の `rsp` から読む。
 ///
 /// # 形は Linux と同じである

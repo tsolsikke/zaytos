@@ -2146,17 +2146,26 @@ fn cmd_shell_test() -> Result<()> {
     if ready {
         match connect_monitor_with_retry(&monitor_socket) {
             Ok(mut stream) => {
-                for key in ["e", "x", "i", "t", "ret"] {
-                    if writeln!(stream, "sendkey {key}").is_err() {
-                        break;
+                // **到達条件の 3 つを順に打つ。** そのあと `exit` で締める。
+                // **`slash` と `spc` と `minus` は monitor のキー名である。**
+                for line in SHELL_TEST_LINES {
+                    for key in *line {
+                        if writeln!(stream, "sendkey {key}").is_err() {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(120));
                     }
-                    thread::sleep(Duration::from_millis(200));
+                    // **子が走り終えるのを待つ。** `ls` と `cat` は
+                    // `spawn` で起こされ、終わるまでシェルは戻らない。
+                    thread::sleep(Duration::from_millis(800));
                 }
             }
             Err(e) => println!("shell-test: could not reach the QEMU monitor: {e}"),
         }
         // **起こし直しが判定行に出るまで待つ。**
-        thread::sleep(Duration::from_secs(3));
+        // **3 つのコマンドを走らせた後なので、締めの `exit` が効いてから
+        // `init` が像を読み直すまでに時間がかかる。**
+        thread::sleep(Duration::from_secs(8));
     }
 
     let qemu_exit = child
@@ -2195,19 +2204,46 @@ fn cmd_shell_test() -> Result<()> {
     let restarted = serial.contains("init: starting /bin/sh (restart 1 of 3)");
     // **打った文字が反響していること。** シェルが反響を出しているので、
     // **Ring 3 まで届いた証拠が出力そのものにある。**
-    let echoed = serial.contains("zaytos$ exit");
+    let echoed = serial.contains("zaytos$ /bin/ls");
+    // **到達条件の 3 つ。** 出力そのものがシリアルに現れる。
+    let ran_ls = serial.contains("lost+found");
+    let ran_cat = serial.contains("welcome to ZaytOS");
+    let ran_hello = serial.contains("hello from ring 3");
 
     println!("{context}: the shell exited with 0 = {ended}");
     println!("{context}: init started it again = {restarted}");
     println!("{context}: the typed line was echoed = {echoed}");
+    println!("{context}: ls listed the root = {ran_ls}");
+    println!("{context}: cat printed /etc/motd = {ran_cat}");
+    println!("{context}: hello ran = {ran_hello}");
 
-    if ready && ended && restarted && echoed {
+    if ready && ended && restarted && echoed && ran_ls && ran_cat && ran_hello {
         println!("{context}: PASS");
         Ok(())
     } else {
         bail!("{context}: FAILED")
     }
 }
+
+/// `--shell-test` が打つ行（S11-11）。**到達条件の 3 つと、締めの `exit`。**
+///
+/// **キー名は QEMU monitor のものである。** `/` は `slash`、空白は `spc`、
+/// `-` は `minus`、改行は `ret` である。
+const SHELL_TEST_LINES: &[&[&str]] = &[
+    // /bin/ls
+    &["slash", "b", "i", "n", "slash", "l", "s", "ret"],
+    // /bin/cat /etc/motd
+    &[
+        "slash", "b", "i", "n", "slash", "c", "a", "t", "spc", "slash", "e", "t", "c", "slash",
+        "m", "o", "t", "d", "ret",
+    ],
+    // /bin/hello
+    &[
+        "slash", "b", "i", "n", "slash", "h", "e", "l", "l", "o", "ret",
+    ],
+    // exit
+    &["e", "x", "i", "t", "ret"],
+];
 
 fn cmd_keyboard_test() -> Result<()> {
     let assertions = run_keyboard_test(&[])?;
@@ -3022,10 +3058,16 @@ fn cmd_bkl_exclusion_proof() -> Result<()> {
     }
 
     let cases = [
-        ("widen only", "bkl-widen-entry-window-test", 1u64),
+        // **シェルへ渡さない構成で測る（S11-11）。** この証明は 2 コアが
+        // カーネルの中で重なることを見るので、**定常ループが回っている必要がある。**
+        (
+            "widen only",
+            "bkl-widen-entry-window-test,keep-steady-loop",
+            1u64,
+        ),
         (
             "widen + skip",
-            "bkl-widen-entry-window-test,bkl-skip-timer-entry-test",
+            "bkl-widen-entry-window-test,bkl-skip-timer-entry-test,keep-steady-loop",
             2,
         ),
     ];

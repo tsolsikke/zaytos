@@ -11,7 +11,7 @@ Hello, ZaytOS!
 [INFO] jumping to kernel entry point 0x100000
 [INFO] ZaytOS kernel: entered _start
 [INFO] boot stack: 632 of 16384 bytes used (high-water; 15752 bytes poison intact)
-[INFO] higher-half: arrived at high VA. RIP=0xffffffff8019bf88 in [0xffffffff80100000, 0xffffffff8048add0)=true, RSP=0xffffffff8043abc0 high=true, CR3=0x3d6000 == bootstrap PML4 0x3d6000 = true, identity alive (phys 0x100000 read via low==high) = true
+[INFO] higher-half: arrived at high VA. RIP=0xffffffff8019c188 in [0xffffffff80100000, 0xffffffff8048add0)=true, RSP=0xffffffff8043abc0 high=true, CR3=0x3d6000 == bootstrap PML4 0x3d6000 = true, identity alive (phys 0x100000 read via low==high) = true
 [INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff8044e100 first slot=0xffffffff8044e100 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
 [INFO] interrupts: RFLAGS.IF before cli = false (raw RFLAGS=0x96)
 [INFO] interrupts: RFLAGS.IF after cli = false (raw RFLAGS=0x96)
@@ -73,7 +73,7 @@ Hello, ZaytOS!
 [INFO] paging: required range [framebuffer] 0x80000000..0x803e8000: OK
 [INFO] paging: required range [new page tables (PML4)] 0x3000..0x4000: OK
 [INFO] paging: required range [current RSP] 0x43ae20..0x43ae21: OK
-[INFO] paging: required range [current RIP] 0x19bf88..0x19bf89: OK
+[INFO] paging: required range [current RIP] 0x19c188..0x19c189: OK
 [INFO] paging: all required ranges mapped. proceeding to CR3 switch (d-2).
 [INFO] paging: current CR3 = 0x3d6000
 [INFO] paging: CR3 switch instruction executed
@@ -107,7 +107,7 @@ Hello, ZaytOS!
 [INFO] console: 102 log line(s) were emitted before the console existed (serial only)
 [INFO] heap: arena 0x48b000..0x58b000 (256 frames, 1 MiB), mapped=true
 [INFO] heap: initialized (1048576 bytes free, 1 block(s))
-[INFO] granularity: executing code (RIP) 0xffffffff8019bf88 -> phys 0x19bf88, mapped by a 4KiB page at 0xffffffff8019b000 (entry=0x19b023)
+[INFO] granularity: executing code (RIP) 0xffffffff8019c188 -> phys 0x19c188, mapped by a 4KiB page at 0xffffffff8019c000 (entry=0x19c023)
 [INFO] granularity: kernel stack (RSP) 0xffffffff8043a8a0 -> phys 0x43a8a0, mapped by a 4KiB page at 0xffffffff8043a000 (entry=0x43a063)
 [INFO] granularity: heap arena 0x48b000 -> phys 0x48b000, mapped by a 2MiB page at 0x400000 (entry=0x400083)
 [INFO] granularity: framebuffer 0x80000000 -> phys 0x80000000, mapped by a 2MiB page at 0x80000000 (entry=0x800000b3)
@@ -236,7 +236,7 @@ Hello, ZaytOS!
 [INFO] percpu: 2 usable CPU(s) enumerated, 2 per-CPU slot(s) available, every CPU has a slot=true (cpu_id() is the constant 0 and only the bootstrap processor runs, so no slot is indexed out of range yet)
 [INFO] identity-removal: begin. live PML4=0xf000, saved PML4[0]=0x10023
 [INFO] identity-removal: PML4[0] subtree table frames = 7 (28 KiB) become unreachable; intentional leak. subtree frames [256]=10 [511]=4. disjoint(0,256)=true disjoint(0,511)=true disjoint(256,511)=true
-[INFO] identity-removal: required [RIP] 0xffffffff8019bf88 -> phys 0x19bf88 (huge=false): OK
+[INFO] identity-removal: required [RIP] 0xffffffff8019c188 -> phys 0x19c188 (huge=false): OK
 [INFO] identity-removal: required [RSP] 0xffffffff8043a6f0 -> phys 0x43a6f0 (huge=false): OK
 [INFO] identity-removal: required [direct map window] 0xffff80000000f000 -> phys 0xf000 (huge=false): OK
 [INFO] identity-removal: required [kernel image] 0xffffffff80100000 -> phys 0x100000 (huge=false): OK
@@ -350,7 +350,7 @@ hello from ring 3
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
 [INFO] user-load: syscall-test initial stack at 0x7fffa0 (argc=2, 16-byte aligned=true)
 syscall-test wrote this
-[INFO] spawn: /bin/hello is 8496 byte(s) at inode 14; entering at depth 2 (the parent's excursion stack 0xffffffff80459140..0xffffffff80469140 has 6129 byte(s) used and 59407 left)
+[INFO] spawn: /bin/hello is 8496 byte(s) at inode 14; entering at depth 2 (the parent's excursion stack 0xffffffff80459140..0xffffffff80469140 has 6337 byte(s) used and 59199 left)
 [INFO] user-load: /bin/hello mapped PT_LOAD 0x400000..0x400042 (filesz=0x42 memsz=0x42 w=false)
 [INFO] user-load: /bin/hello mapped PT_LOAD 0x401000..0x401012 (filesz=0x12 memsz=0x12 w=false)
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
@@ -358,16 +358,16 @@ syscall-test wrote this
 hello from ring 3
 [INFO] ring3: /bin/hello used 2464 of 65536 byte(s) of the depth-1 excursion stack (3%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/hello opened 0 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
-[INFO] spawn: /bin/hello ended (Exited(0)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff80479090 (inside its own excursion stack 0xffffffff80469140..0xffffffff80479140 = true); the space was destroyed (8 frame(s) left the allocator and 8 reached quarantine, match=true leaked=0)
-[INFO] spawn: /bin/spawn-test is 12712 byte(s) at inode 17; entering at depth 2 (the parent's excursion stack 0xffffffff80459140..0xffffffff80469140 has 6129 byte(s) used and 59407 left)
+[INFO] spawn: /bin/hello ended (Exited(0)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff80479090 (inside its own excursion stack 0xffffffff80469140..0xffffffff80479140 = true); the space was destroyed (8 frame(s) left the allocator and 8 reached quarantine (8 its own + 0 from what it spawned), match=true leaked=0)
+[INFO] spawn: /bin/spawn-test is 12712 byte(s) at inode 17; entering at depth 2 (the parent's excursion stack 0xffffffff80459140..0xffffffff80469140 has 6337 byte(s) used and 59199 left)
 [INFO] user-load: /bin/spawn-test mapped PT_LOAD 0x400000..0x401002 (filesz=0x1002 memsz=0x1002 w=false)
 [INFO] user-load: /bin/spawn-test mapped PT_LOAD 0x402000..0x402036 (filesz=0x36 memsz=0x36 w=false)
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
 [INFO] user-load: /bin/spawn-test initial stack at 0x7fffb0 (argc=2, 16-byte aligned=true)
-[INFO] ring3: /bin/spawn-test used 7872 of 65536 byte(s) of the depth-1 excursion stack (12%), the canary at its bottom is intact=true
+[INFO] ring3: /bin/spawn-test used 8144 of 65536 byte(s) of the depth-1 excursion stack (12%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/spawn-test opened 0 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
-[INFO] spawn: /bin/spawn-test ended (Exited(0)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff80479090 (inside its own excursion stack 0xffffffff80469140..0xffffffff80479140 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine, match=true leaked=0)
-[INFO] spawn: /bin/ls is 12696 byte(s) at inode 15; entering at depth 2 (the parent's excursion stack 0xffffffff80459140..0xffffffff80469140 has 6129 byte(s) used and 59407 left)
+[INFO] spawn: /bin/spawn-test ended (Exited(0)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff80479090 (inside its own excursion stack 0xffffffff80469140..0xffffffff80479140 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0)
+[INFO] spawn: /bin/ls is 12696 byte(s) at inode 15; entering at depth 2 (the parent's excursion stack 0xffffffff80459140..0xffffffff80469140 has 6337 byte(s) used and 59199 left)
 [INFO] user-load: /bin/ls mapped PT_LOAD 0x400000..0x400eaf (filesz=0xeaf memsz=0xeaf w=false)
 [INFO] user-load: /bin/ls mapped PT_LOAD 0x401000..0x401330 (filesz=0x330 memsz=0x330 w=false)
 [INFO] user-load: /bin/ls mapped PT_LOAD 0x402000..0x402038 (filesz=0x38 memsz=0x38 w=true)
@@ -381,8 +381,8 @@ data
 etc
 [INFO] ring3: /bin/ls used 5348 of 65536 byte(s) of the depth-1 excursion stack (8%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/ls opened 1 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
-[INFO] spawn: /bin/ls ended (Exited(0)) after 6 syscall(s); its kernel entries ran on RSP 0xffffffff80479090 (inside its own excursion stack 0xffffffff80469140..0xffffffff80479140 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine, match=true leaked=0)
-[INFO] spawn: /bin/cat is 12688 byte(s) at inode 13; entering at depth 2 (the parent's excursion stack 0xffffffff80459140..0xffffffff80469140 has 6129 byte(s) used and 59407 left)
+[INFO] spawn: /bin/ls ended (Exited(0)) after 6 syscall(s); its kernel entries ran on RSP 0xffffffff80479090 (inside its own excursion stack 0xffffffff80469140..0xffffffff80479140 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0)
+[INFO] spawn: /bin/cat is 12688 byte(s) at inode 13; entering at depth 2 (the parent's excursion stack 0xffffffff80459140..0xffffffff80469140 has 6337 byte(s) used and 59199 left)
 [INFO] user-load: /bin/cat mapped PT_LOAD 0x400000..0x400c15 (filesz=0xc15 memsz=0xc15 w=false)
 [INFO] user-load: /bin/cat mapped PT_LOAD 0x401000..0x401250 (filesz=0x250 memsz=0x250 w=false)
 [INFO] user-load: /bin/cat mapped PT_LOAD 0x402000..0x402030 (filesz=0x30 memsz=0x30 w=true)
@@ -391,8 +391,8 @@ etc
 welcome to ZaytOS
 [INFO] ring3: /bin/cat used 6500 of 65536 byte(s) of the depth-1 excursion stack (9%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/cat opened 1 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
-[INFO] spawn: /bin/cat ended (Exited(0)) after 6 syscall(s); its kernel entries ran on RSP 0xffffffff80479090 (inside its own excursion stack 0xffffffff80469140..0xffffffff80479140 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine, match=true leaked=0)
-[INFO] spawn: /bin/cat is 12688 byte(s) at inode 13; entering at depth 2 (the parent's excursion stack 0xffffffff80459140..0xffffffff80469140 has 6129 byte(s) used and 59407 left)
+[INFO] spawn: /bin/cat ended (Exited(0)) after 6 syscall(s); its kernel entries ran on RSP 0xffffffff80479090 (inside its own excursion stack 0xffffffff80469140..0xffffffff80479140 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0)
+[INFO] spawn: /bin/cat is 12688 byte(s) at inode 13; entering at depth 2 (the parent's excursion stack 0xffffffff80459140..0xffffffff80469140 has 6337 byte(s) used and 59199 left)
 [INFO] user-load: /bin/cat mapped PT_LOAD 0x400000..0x400c15 (filesz=0xc15 memsz=0xc15 w=false)
 [INFO] user-load: /bin/cat mapped PT_LOAD 0x401000..0x401250 (filesz=0x250 memsz=0x250 w=false)
 [INFO] user-load: /bin/cat mapped PT_LOAD 0x402000..0x402030 (filesz=0x30 memsz=0x30 w=true)
@@ -401,12 +401,12 @@ welcome to ZaytOS
 cat: usage: cat PATH
 [INFO] ring3: /bin/cat used 2464 of 65536 byte(s) of the depth-1 excursion stack (3%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/cat opened 0 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
-[INFO] spawn: /bin/cat ended (Exited(2)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff80479090 (inside its own excursion stack 0xffffffff80469140..0xffffffff80479140 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine, match=true leaked=0)
+[INFO] spawn: /bin/cat ended (Exited(2)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff80479090 (inside its own excursion stack 0xffffffff80469140..0xffffffff80479140 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0)
 syscall-test wrote this
 syscall-test wrote this
 syscall-test is writing a line that does not fit the 64-byte record
 syscall-test wrote this
-[INFO] ring3: syscall-test used 25624 of 65536 byte(s) of the depth-0 excursion stack (39%), the canary at its bottom is intact=true
+[INFO] ring3: syscall-test used 25896 of 65536 byte(s) of the depth-0 excursion stack (39%), the canary at its bottom is intact=true
 [INFO] vfs: syscall-test opened 8 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
 [INFO] user-run: syscall-test left Ring 3 (exited=true status=0 folded=false vector=0 rip=0x0 cs=0x0 cr2=0x0 err=0x0), it made 56 syscall(s) and the kernel was entered from Ring 3 (true), write(fd=1, 24 byte(s)) said "syscall-test wrote this"
 [INFO] user-abi: syscall-test issued the probe from user assembly and all 6 arguments arrived per ADR-0020 (arg4 came from R10, not RCX, which carried a sentinel); this checks the ABI contract itself, not the dispatcher — the boot-time probe assembles its arguments in Rust inside the kernel, this one assembles them in assembly, links, loads and enters Ring 3 like any program
@@ -458,8 +458,8 @@ task: starting preemptive demo with 2 busy-loop workers for 200 ticks
 [INFO] timer: this is the end of the steady-loop observation, timer_accounting_balanced=true; the shell takes the foreground from here
 [INFO] init: starting /bin/sh (restart 0 of 3)
 [INFO] spawn: /bin/sh is 12688 byte(s) at inode 16; entering at depth 1 (the parent runs on the main kernel stack, which has a guard page)
-[INFO] user-load: /bin/sh mapped PT_LOAD 0x400000..0x400cc5 (filesz=0xcc5 memsz=0xcc5 w=false)
-[INFO] user-load: /bin/sh mapped PT_LOAD 0x401000..0x401220 (filesz=0x220 memsz=0x220 w=false)
+[INFO] user-load: /bin/sh mapped PT_LOAD 0x400000..0x400f05 (filesz=0xf05 memsz=0xf05 w=false)
+[INFO] user-load: /bin/sh mapped PT_LOAD 0x401000..0x401298 (filesz=0x298 memsz=0x298 w=false)
 [INFO] user-load: /bin/sh mapped PT_LOAD 0x402000..0x402030 (filesz=0x30 memsz=0x30 w=true)
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
 [INFO] user-load: /bin/sh initial stack at 0x7fffc0 (argc=1, 16-byte aligned=true)
