@@ -1607,7 +1607,10 @@ extern "sysv64" fn kernel_main() -> ! {
     // === S11-11: init がシェルを起こす ===
     //
     // **ここから戻らない。**
-    run_init(&mut logger);
+    //
+    // **`console` を渡す（S12 前の手当て）。** メインループが抜けて画面の書き手が
+    // 居なくなったので、**`init` が引き取る**（`run_init` の doc）。
+    run_init(&mut logger, console.as_mut());
 }
 
 /// ハートビートを何本出してからシェルへ渡すか（S11-11）。
@@ -1669,15 +1672,69 @@ const SHELL_AFTER_HEARTBEATS: u64 = if cfg!(feature = "keep-steady-loop") {
 /// **起こし直す。** `docs/vision.md` は「再起動・rescue・停止のいずれか」と
 /// 書いている。**起こし直しを選ぶのは、シェルが落ちても触り続けられるからである。**
 /// **起こせなくなったら止まる**——**同じ失敗を無限に繰り返さない。**
-fn run_init(logger: &mut Logger<SerialPort>) -> ! {
+///
+/// # 画面への書き手は、ここから `init` 1 つである（S12 前の手当て）
+///
+/// **`Console` を受け取り、判定行を [`log_both`] で画面にも出す。**
+///
+/// **それまでの書き手はメインループだった**（`interrupts::run_timer_loop`）。
+/// **S11-11 でそのループがシェルへ渡すために抜け、書き手が居なくなった**——
+/// `Console` は `kernel_main` の局所として生きていたが、**参照を持つ者が
+/// 誰も居なくなり、画面は起動ログで止まった。**
+///
+/// **`deferred-decisions.md` の「コンソール / シリアルへの出力の多重化」は、
+/// 「出力するのはメインループだけ」という制約で運用すると決めていた。**
+/// **その制約は一度も破られていない。前提のほうが消えた**
+/// （`verification-coverage.md` の「条件が前提にしている状態が消えると、
+/// 条件は破られないまま意味を失う」）。**書き手を `init` へ付け替えて、
+/// 「書き手は 1 つ」という形のほうを保つ。**
+///
+/// **多重化はここでも要らない。** **Ring 3 の `write` は画面へ出さない**
+/// （`crate::syscall` の `sys_write`。シリアルへ出す）。**したがって
+/// この関数が画面へ書いている間、他に書く者は居ない。**
+///
+/// **この「1 つであること」は判定行にしない。理由は 2 つある。**
+///
+/// **1 つ目——偽になりうる道が今は無い。** 2 人目の書き手が現れるときは、
+/// その時点でコードが変わっている。**主張が偽になる道の無いものを判定行にすると、
+/// 落ちない検査になる**（`verification-coverage.md` の
+/// 「検査があるように見えて何も検査していない」）。
+///
+/// **2 つ目——`&mut` で渡している以上、「同時に 2 人が書けない」は
+/// 借用検査が既に保証している。** [`Console`] は静的ではなく `kernel_main` の
+/// 局所で、ここへは `Option<&mut Console>` として渡る。
+/// **判定行を置いても、型が保証しているものを実行時に測り直すだけになる。**
+///
+/// **2 つの理由は、次に触る人にとって別のことを言っている。**
+/// **1 つ目だけを読むと「実行時に測れないから諦めた」に見えるが、
+/// 実際は「型が既に保証しているから要らない」である。**
+/// **したがって [`Console`] を静的へ移すなら、そのとき型の保証が消える**
+/// ——静的にした瞬間、書き手が 1 つであることを言うものが何も無くなる。
+/// **そこが、この判断をやり直す場所である。**
+///
+/// **`deferred-decisions.md` の行が、条件としてこの doc を指している。**
+///
+/// # 画面に出すのは `init` の行だけである
+///
+/// **子（シェル）の出力は画面へ出ない。** シェルは `write` でシリアルへ書く。
+/// **画面に出るのは「起こした / 終わった / 起こし直す」の 3 種類で、
+/// 動いていること自体が画面で分かる**——**`exit` と打つと画面が動く。**
+fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> ! {
     /// 起こし直す上限。**同じ失敗を無限に繰り返さない。**
     const MAX_RESTARTS: usize = 3;
 
+    // **借り直しながら回す。** `Option<&mut _>` は `Copy` ではないので、
+    // 各周で `as_deref_mut` を取る（`interrupts::drain_keyboard` と同じ形）。
+    let mut console = console;
+
     let mut restarts = 0usize;
     loop {
-        logger.info(format_args!(
-            "init: starting {SHELL_PATH_TEXT} (restart {restarts} of {MAX_RESTARTS})"
-        ));
+        log_both(
+            logger,
+            console.as_deref_mut(),
+            LogLevel::Info,
+            format_args!("init: starting {SHELL_PATH_TEXT} (restart {restarts} of {MAX_RESTARTS})"),
+        );
         match kernel::userland::spawn(SHELL_PATH, SHELL_ARGV, 1) {
             Ok(outcome) => {
                 // **止まった場所が分かる形で出す（S11-11）。** 打鍵が届かない
@@ -1687,25 +1744,36 @@ fn run_init(logger: &mut Logger<SerialPort>) -> ! {
                 //   （IRQ1 の配送か i8042 の側）
                 // - 0 でなく届けたバイトが 0 なら、**前景か `read(0)` の側**
                 // - 届けたバイトが 0 でなければ、**Ring 3 まで来ている**
-                logger.info(format_args!(
-                    "init: the shell ended ({outcome:?}); the keyboard ring received {} \
-                     scancode(s) and the foreground handed {} byte(s) to Ring 3",
-                    kernel::keyboard::buffer::received_count(),
-                    kernel::input::delivered_count()
-                ));
+                log_both(
+                    logger,
+                    console.as_deref_mut(),
+                    LogLevel::Info,
+                    format_args!(
+                        "init: the shell ended ({outcome:?}); the keyboard ring received {} \
+                         scancode(s) and the foreground handed {} byte(s) to Ring 3",
+                        kernel::keyboard::buffer::received_count(),
+                        kernel::input::delivered_count()
+                    ),
+                );
             }
             Err(error) => {
-                logger.error(format_args!(
-                    "init: could not start {SHELL_PATH_TEXT}: {error:?}"
-                ));
+                log_both(
+                    logger,
+                    console.as_deref_mut(),
+                    LogLevel::Error,
+                    format_args!("init: could not start {SHELL_PATH_TEXT}: {error:?}"),
+                );
                 cpu::halt_forever();
             }
         }
         restarts += 1;
         if restarts > MAX_RESTARTS {
-            logger.error(format_args!(
-                "init: the shell ended {MAX_RESTARTS} time(s); not starting it again"
-            ));
+            log_both(
+                logger,
+                console.as_deref_mut(),
+                LogLevel::Error,
+                format_args!("init: the shell ended {MAX_RESTARTS} time(s); not starting it again"),
+            );
             cpu::halt_forever();
         }
     }
