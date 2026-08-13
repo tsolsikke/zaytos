@@ -61,7 +61,7 @@ full flush ram->fb          = 766 cyc/px
 
 - xtaskの既定はTCGのままにする。全マイルストーンをTCGで検証してきており、既定を変えると挙動差の切り分け軸が増える。`cargo xtask run --kvm`のようなopt-inにして、計測時だけ使う。
 - WSL2自体がHyper-V上のVMであるため、その上のKVMは入れ子の仮想化になる。TCGよりは遥かに実機へ近いが、実機そのものではない。特にTSCはハイパーバイザによる補正・オフセットの影響を受けうるため、絶対値ではなく「キャッシュ有効な書き込みとキャッシュ無効な書き込みの比」を見て判断すること。比が1倍前後のままなら、その計測もまだ信用できない。
-- 計測用のプローブは`.local-probes/m3c-flush-cost-probe.patch`（追跡対象外）に置いてある。`git apply`で復元できる。
+- 計測用のプローブは`.local-probes/m3c-flush-cost-probe.patch`に置いてある。**M3完了時点の`main.rs`を前提にしており、いまのツリーには当たらない**（`git apply --check`が`patch does not apply`を返す。実測）。残してあるのは測り方であって、当てる先ではない。
 
 ## Addendum 2（2026-07-20、KVM上で測り直した結果と判断）
 
