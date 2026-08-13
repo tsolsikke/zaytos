@@ -73,7 +73,19 @@ fn main() {
 /// 非 PIE の ET_EXEC（`userland/user.ld` が `0x400000` へリンクする）。
 /// `common::elf` が受理する形であることは S9-b-1 の着手前に実測して確かめた。
 fn build_user_programs(manifest_dir: &str, out_dir: &str) {
-    const PROGRAMS: &[&str] = &["hello", "fault-test", "syscall-test", "spawn-test"];
+    const PROGRAMS: &[&str] = &[
+        "hello",
+        "fault-test",
+        "syscall-test",
+        "spawn-test",
+        "ls",
+        "cat",
+    ];
+
+    // **共有する包み（S11-9）。** `ls` と `cat` が `mod userlib;` で取り込む。
+    // **`PROGRAMS` には入れない**——単独では建たない（`_start` はあるが
+    // `zaytos_main` が無い）。**変わったら建て直す必要はあるので、ここで見る。**
+    println!("cargo:rerun-if-changed={manifest_dir}/userland/userlib.rs");
 
     let script = format!("{manifest_dir}/userland/user.ld");
     println!("cargo:rerun-if-changed={script}");
@@ -218,7 +230,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     // **`spawn-test` は `USER_PROGRAMS` に載っていない。** 上から走らせると
     // 深さ 1 になり、孫の `spawn` が成功してしまう。**`syscall-test` が
     // 深さ 2 で起こすためだけに、像の中に居る。**
-    for name in ["hello", "spawn-test"] {
+    for name in ["hello", "spawn-test", "ls", "cat"] {
         std::fs::copy(
             format!("{out_dir}/{name}.elf"),
             format!("{staging}/bin/{name}"),

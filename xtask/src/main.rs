@@ -937,6 +937,23 @@ const SYSCALL_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // S11-9: `write` が要求された長さの半分だけ書いて返す。**主張は「`write` は
+    // 要求した長さを全部書く。書けなければ呼び出し側が繰り返す」である。**
+    // **24 バイト以下は半分にしない**——asm で直に `write` を呼ぶ既存の 4 本は
+    // 繰り返しを持たず、そこを半分にすると `ls` と `cat` が起こされる前に止まる。
+    // **繰り返しの経路が実際に通ることも、この構成で確かめている**
+    // （`ls` の 30 バイトの一覧が 2 周で出て、出力は欠けない）。
+    CriticalTest {
+        name: "write-half-only",
+        feature: "write-half-only",
+        expected_markers: &[
+            "user-run: syscall-test exited with status 47",
+            "did not return the number of bytes it was given",
+        ],
+        forbidden_markers: &["user-load: syscall-test ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // S11-7: argv の量の問題を -E2BIG でなく -EINVAL で返す。**どちらも「引数が
     // 受け付けられない」を意味するので、雑に見ると同じに見える**（S10-b の 4 つと
     // 同じ族）。**Linux は分けている**——`execve` は長すぎる引数に `E2BIG` を返す。
@@ -7009,7 +7026,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 21,
-    full: 132,
+    full: 133,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

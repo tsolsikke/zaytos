@@ -271,6 +271,12 @@ spawn-argv-drop-last = []
 # 正しく動いているように見える。見えないのは「開いていない番号が拒まれること」の
 # ほうである。syscall-test の検算が捕まえる。`--syscall-test write-ignores-fd`。
 write-ignores-fd = []
+# S11-9: write が要求された長さの半分だけ書いて返す(24バイト以下はそのまま)。主張は
+# 「write は要求した長さを全部書く。書けなければ呼び出し側が繰り返す」である。24以下を
+# 除くのは、asm で直に write を呼ぶ既存の4本が繰り返しを持たないためで、そこを半分に
+# すると ls と cat が起こされる前に止まって繰り返しの経路が通らない。
+# `--syscall-test write-half-only`。
+write-half-only = []
 # S1-b-2: ACPI の検証経路の破壊確認。いずれも既定ビルドには入らない。
 # `cargo xtask run --acpi-test <kind>` が有効化する。観測は panic ではなく、
 # 「検出のログが出て、MADT の列挙が完了しないこと」である。

@@ -1585,6 +1585,24 @@ unsafe fn sys_write(
         return (-EBADF) as u64;
     }
 
+    // 破壊 (S11-9, write-half-only): 要求された長さの半分だけ書いて返す。
+    //
+    // **主張は「`write` は要求した長さを全部書く。書けなければ呼び出し側が
+    // 繰り返す」である。** 短い書き込みが返るのは Linux でも起きるので、
+    // **呼び出し側は戻り値を見て繰り返さなければならない**——
+    // `kernel/userland/userlib.rs` の `write_all` がそうしている。
+    //
+    // **24 バイト以下は半分にしない。** 既存の 4 本（`hello` と `syscall-test` と
+    // `fault-test` と `spawn-test`）は asm で直に `write` を呼んでおり、
+    // **繰り返しを持たない。** あれらが使う最大の長さが 24 である。
+    // **そこを半分にすると、`ls` と `cat` が起こされる前に止まってしまい、
+    // 繰り返しの経路が一度も通らない。**
+    // **破壊の目的は 2 つある**——**短い書き込みが検出されること**（`syscall-test` の
+    // 47 番、68 バイトの行）と、**繰り返しの経路が実際に通ること**（`ls` の
+    // 30 バイトの一覧が 2 周で出る）。
+    #[cfg(feature = "write-half-only")]
+    let count = if count > 24 { count.div_ceil(2) } else { count };
+
     let mut port = common::serial::SerialPort::new(common::serial::SerialPort::COM1_BASE);
     port.init();
 

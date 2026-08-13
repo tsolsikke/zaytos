@@ -79,6 +79,9 @@
 //! - `45` `write(3, ...)` が `-EBADF` を返さなかった
 //! - `46` `write(2, ...)` が渡したバイト数を返さなかった
 //! - `47` 64 バイトを越える `write` が渡したバイト数を返さなかった
+//! - `48` `spawn("/bin/ls", ["ls"])` が 0 を返さなかった
+//! - `49` `spawn("/bin/cat", ["cat", "/etc/motd"])` が 0 を返さなかった
+//! - `50` `spawn("/bin/cat", ["cat"])` が 2 を返さなかった（引数が無い）
 //!
 //! # `argv` は `_start` の時点の `rsp` から読む
 //!
@@ -705,6 +708,35 @@ core::arch::global_asm!(
     "  mov edi, 43",
     "  jne 9f",
 
+    // --- 48. spawn("/bin/ls")。**ルートを並べて 0 で終わるはず** ---
+    // **出力はシリアルへ出る。** 中身の突き合わせは起動ログの参照が行う。
+    "  mov eax, {sys_spawn}",
+    "  lea rdi, [rip + LS_PATH]",
+    "  lea rsi, [rip + ARGV_LS]",
+    "  int 0x80",
+    "  test rax, rax",
+    "  mov edi, 48",
+    "  jne 9f",
+
+    // --- 49. spawn("/bin/cat", ["cat", "/etc/motd"]) ---
+    "  mov eax, {sys_spawn}",
+    "  lea rdi, [rip + CAT_PATH]",
+    "  lea rsi, [rip + ARGV_CAT]",
+    "  int 0x80",
+    "  test rax, rax",
+    "  mov edi, 49",
+    "  jne 9f",
+
+    // --- 50. spawn("/bin/cat", ["cat"])。**引数が無いので 2 で終わるはず** ---
+    // **標準入力がまだ無いので、黙って何もしない形にはしていない。**
+    "  mov eax, {sys_spawn}",
+    "  lea rdi, [rip + CAT_PATH]",
+    "  lea rsi, [rip + ARGV_CAT_ALONE]",
+    "  int 0x80",
+    "  cmp rax, 2",
+    "  mov edi, 50",
+    "  jne 9f",
+
     // --- 44. write(0)。**-EBADF が返るはず** ---
     // **0 は標準入力である。** 出力先ではないので拒まれる。
     "  mov eax, {sys_write}",
@@ -810,6 +842,25 @@ core::arch::global_asm!(
     "  .quad SPAWN_ARG_LONG",
     "  .endr",
     "  .quad 0",
+    "LS_PATH:",
+    "  .asciz \"/bin/ls\"",
+    "CAT_PATH:",
+    "  .asciz \"/bin/cat\"",
+    ".balign 8",
+    "ARGV_LS:",
+    "  .quad SPAWN_ARG_LS",
+    "  .quad 0",
+    "ARGV_CAT:",
+    "  .quad SPAWN_ARG_CAT",
+    "  .quad MOTD_PATH",
+    "  .quad 0",
+    "ARGV_CAT_ALONE:",
+    "  .quad SPAWN_ARG_CAT",
+    "  .quad 0",
+    "SPAWN_ARG_LS:",
+    "  .asciz \"ls\"",
+    "SPAWN_ARG_CAT:",
+    "  .asciz \"cat\"",
     "SPAWN_ARG_HELLO:",
     "  .asciz \"hello\"",
     "SPAWN_ARG_NAME:",

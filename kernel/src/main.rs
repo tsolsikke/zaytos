@@ -3804,16 +3804,20 @@ fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
 /// （`kernel/build.rs` の `IMAGE_BYTES`）、**像を 2 MiB に決めたときの余裕を
 /// ここで食い潰しては、決めた意味が無くなる。**
 ///
-/// # 先頭 64 ブロックだけで、読み切れる像になる
+/// # 先頭 80 ブロックだけで、読み切れる像になる
 ///
-/// **`s_blocks_count` を 64 に直せば、切り出した先頭がそれ自体で完結する。**
-/// 実際に参照されている最大のブロックは 58 だからである（実測。`/etc/motd` の
-/// データブロック）。**64 に余裕を取ってあるので、種が少し増えても収まる。**
+/// **`s_blocks_count` を 80 に直せば、切り出した先頭がそれ自体で完結する。**
+/// 実際に参照されている最大のブロックは 69 だからである（実測。`/etc/motd` の
+/// データブロック）。**80 に余裕を取ってあるので、種が少し増えても収まる。**
 /// **収まらなくなったら健全な対照（下）が最初に落ちる。**
+///
+/// **S11-9 で 64 から 80 へ上げた。** 像へ `/bin/ls` と `/bin/cat` を足したので、
+/// **後ろのブロック番号がすべてずれた**（58 → 69）。**「収まらなくなったら対照が
+/// 落ちる」が実際に働く前に、測って直した。**
 static mut CORRUPT_FS_IMAGE: [u8; CORRUPT_FS_LEN] = [0; CORRUPT_FS_LEN];
 
-/// 切り出すブロック数。**参照されている最大のブロック（58）より大きいこと。**
-const CORRUPT_FS_BLOCKS: usize = 64;
+/// 切り出すブロック数。**参照されている最大のブロック（69）より大きいこと。**
+const CORRUPT_FS_BLOCKS: usize = 80;
 
 /// 切り出した像のバイト数。
 const CORRUPT_FS_LEN: usize = CORRUPT_FS_BLOCKS * FS_BLOCK_SIZE;
@@ -3841,12 +3845,13 @@ const fn fs_inode_at(ino: usize) -> usize {
 /// ルート inode の像内オフセット。
 const FS_ROOT_INODE_AT: usize = fs_inode_at(2);
 
-/// `/etc/motd` の inode（19 番。判定行に出ている）の像内オフセット。
+/// `/etc/motd` の inode（21 番。判定行に出ている）の像内オフセット。
 ///
-/// **S11-5 で 18 から 19 へ動いた。** 像へ `/bin/spawn-test` を 1 本足したので、
-/// **後ろの inode 番号がすべて 1 つずれた**（`docs/coding-standards.md` の
-/// 「実測値は、測った条件が変わると古くなる」）。**測り直した値である。**
-const FS_MOTD_INODE_AT: usize = fs_inode_at(19);
+/// **S11-5 で 18 から 19 へ、S11-9 で 19 から 21 へ動いた。** 像へ
+/// `/bin/spawn-test`、続いて `/bin/ls` と `/bin/cat` を足したので、**後ろの
+/// inode 番号がそのぶんずれた**（`docs/coding-standards.md` の
+/// 「実測値は、測った条件が変わると古くなる」）。**そのつど測り直している。**
+const FS_MOTD_INODE_AT: usize = fs_inode_at(21);
 
 /// ルートディレクトリのデータブロック（実測。判定行の `i_block[0]` に出ている）。
 const FS_ROOT_DIR_BLOCK: usize = 20 * FS_BLOCK_SIZE;
@@ -3856,14 +3861,15 @@ const FS_ROOT_ETC_ENTRY: usize = FS_ROOT_DIR_BLOCK + 68;
 
 /// `/data/indirect-first` の単一間接ブロック（実測。判定行の `single indirect` に出ている）。
 ///
-/// **S11-5 で 55 から 58 へ動いた**（像へ `/bin/spawn-test` を足した。
-/// [`FS_MOTD_INODE_AT`] と同じ理由である）。
-const FS_INDIRECT_TABLE_BLOCK: usize = 58 * FS_BLOCK_SIZE;
+/// **S11-5 で 55 から 58 へ、S11-9 で 58 から 66 へ動いた**（像へプログラムを
+/// 足した。[`FS_MOTD_INODE_AT`] と同じ理由である）。
+const FS_INDIRECT_TABLE_BLOCK: usize = 66 * FS_BLOCK_SIZE;
 
 /// `/etc/motd` のデータブロック（実測）。
 ///
-/// **S11-5 で 58 から 61 へ動いた**（[`FS_MOTD_INODE_AT`] と同じ理由）。
-const FS_MOTD_DATA_BLOCK: usize = 61 * FS_BLOCK_SIZE;
+/// **S11-5 で 58 から 61 へ、S11-9 で 61 から 69 へ動いた**
+/// （[`FS_MOTD_INODE_AT`] と同じ理由）。
+const FS_MOTD_DATA_BLOCK: usize = 69 * FS_BLOCK_SIZE;
 
 /// 種のファイルと同じ木にある `/etc/motd` の中身（S10-a）。
 ///
@@ -5089,6 +5095,15 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
     (
         47,
         "a write longer than the 64-byte record did not return the number of bytes it was given",
+    ),
+    (48, "spawn(\"/bin/ls\", [\"ls\"]) did not return 0"),
+    (
+        49,
+        "spawn(\"/bin/cat\", [\"cat\", \"/etc/motd\"]) did not return 0",
+    ),
+    (
+        50,
+        "spawn(\"/bin/cat\", [\"cat\"]) did not return 2; cat did not refuse the missing argument",
     ),
 ];
 
@@ -7265,6 +7280,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "write-ignores-fd",
         cfg!(feature = "write-ignores-fd"),
         "write が fd を見ずに、何番でも出力する",
+    ),
+    (
+        "write-half-only",
+        cfg!(feature = "write-half-only"),
+        "write が要求された長さの半分だけ書いて返す",
     ),
     (
         "exception-test",
