@@ -2198,17 +2198,36 @@ fn cmd_shell_test() -> Result<()> {
 
     println!("{context}: the shell printed its prompt = {ready}");
 
+    // **シェルが出た後だけを見る（S12 前の手当ての 1 本目）。**
+    //
+    // **`ls`・`cat`・`hello` は起動シーケンスでも走っている**——`syscall-test` が
+    // `spawn` で起こす。**シリアル全体を `contains` で見ると、シェルが 1 つも
+    // 起こさなくても真になる。** 実際そうなっていた（下の 3 つ）。
+    //
+    // **到達条件はシェルについての主張なので、シェルが出た後の範囲で見る。**
+    //
+    // **`ready` が偽なら範囲が取れない。** そのときは空にして下の判定をすべて
+    // 偽にする——**プロンプトが出ていないなら、シェルは何も起こしていない。**
+    let after_shell = serial
+        .find(ready_marker)
+        .map(|at| &serial[at..])
+        .unwrap_or("");
+
     // **打鍵が Ring 3 まで届き、組み込みの `exit` が効いたこと。**
+    //
+    // **この 2 つは範囲を絞らない。** `init` の行はシェルが出た後にしか現れず、
+    // **`restart 1 of 3` は起こし直した回数を含んでいる**ので、
+    // **起動シーケンスでは真にならない。**
     let ended = serial.contains("init: the shell ended (Exited(0))");
     // **`init` が起こし直したこと。**
     let restarted = serial.contains("init: starting /bin/sh (restart 1 of 3)");
     // **打った文字が反響していること。** シェルが反響を出しているので、
     // **Ring 3 まで届いた証拠が出力そのものにある。**
-    let echoed = serial.contains("zaytos$ /bin/ls");
+    let echoed = after_shell.contains("zaytos$ /bin/ls");
     // **到達条件の 3 つ。** 出力そのものがシリアルに現れる。
-    let ran_ls = serial.contains("lost+found");
-    let ran_cat = serial.contains("welcome to ZaytOS");
-    let ran_hello = serial.contains("hello from ring 3");
+    let ran_ls = after_shell.contains("lost+found");
+    let ran_cat = after_shell.contains("welcome to ZaytOS");
+    let ran_hello = after_shell.contains("hello from ring 3");
 
     println!("{context}: the shell exited with 0 = {ended}");
     println!("{context}: init started it again = {restarted}");
