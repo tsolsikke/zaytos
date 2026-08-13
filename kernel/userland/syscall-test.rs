@@ -67,6 +67,11 @@
 //! - `33` `argv[2]`（終端）が NULL でなかった
 //! - `34` `envp` の終端が NULL でなかった
 //! - `35` `auxv` の終端（`AT_NULL`）が無かった
+//! - `36` `spawn("/bin/hello")` が 0 を返さなかった
+//! - `37` `spawn("/nope")` が `-ENOENT` を返さなかった
+//! - `38` `spawn("/etc")` が `-EISDIR` を返さなかった
+//! - `39` `spawn(NULL)` が `-EFAULT` を返さなかった
+//! - `40` `spawn("/bin/spawn-test")` が 0 を返さなかった（孫が断られなかった）
 //!
 //! # `argv` は `_start` の時点の `rsp` から読む
 //!
@@ -183,6 +188,8 @@ const EXPECTED_ARGC: u32 = 2;
 const ARGV0_LEN: u32 = 13;
 /// `argv[1]` の長さ（NUL を含む）。
 const ARGV1_LEN: u32 = 6;
+/// `spawn` の番号（`ZAYTOS_PRIVATE_BASE + 4`）。
+const SYS_SPAWN: u32 = 0x1004;
 
 core::arch::global_asm!(
     // **entry の手前に詰め物を置く**（`hello.rs` と同じ理由）。
@@ -607,6 +614,52 @@ core::arch::global_asm!(
     "  int 0x80",
     "  add rsp, 1024",
 
+    // --- 36. spawn("/bin/hello")。**像をファイルシステムから読んで走り、0 で終わるはず** ---
+    // **入れ子の遠征が本物になる場所である**（S11-2 の検証用 syscall はこれで外した）。
+    // **子はシステムコールを発行する**ので、BKL を保持したまま降りていれば
+    // 子の最初の `write` で再帰取得として止まる。
+    "  mov eax, {sys_spawn}",
+    "  lea rdi, [rip + HELLO_PATH]",
+    "  int 0x80",
+    "  test rax, rax",
+    "  mov edi, 36",
+    "  jne 9f",
+
+    // --- 37. spawn("/nope")。**-ENOENT が返るはず** ---
+    "  mov eax, {sys_spawn}",
+    "  lea rdi, [rip + MISSING_PATH]",
+    "  int 0x80",
+    "  cmp rax, {minus_enoent}",
+    "  mov edi, 37",
+    "  jne 9f",
+
+    // --- 38. spawn("/etc")。**-EISDIR が返るはず** ---
+    "  mov eax, {sys_spawn}",
+    "  lea rdi, [rip + ETC_PATH]",
+    "  int 0x80",
+    "  cmp rax, {minus_eisdir}",
+    "  mov edi, 38",
+    "  jne 9f",
+
+    // --- 39. spawn(NULL)。**-EFAULT が返るはず** ---
+    // **パスを写す経路は `open` と同じ**（`copy_user_path`）。**同じ窓が効く。**
+    "  mov eax, {sys_spawn}",
+    "  xor edi, edi",
+    "  int 0x80",
+    "  cmp rax, {minus_efault}",
+    "  mov edi, 39",
+    "  jne 9f",
+
+    // --- 40. spawn("/bin/spawn-test")。**孫が断られて 0 で終わるはず** ---
+    // **深さの上限が効いていることを、子の側から見ている。**
+    // `spawn-test` は自分の `spawn` が `-EAGAIN` で断られたときだけ 0 で終わる。
+    "  mov eax, {sys_spawn}",
+    "  lea rdi, [rip + SPAWN_TEST_PATH]",
+    "  int 0x80",
+    "  test rax, rax",
+    "  mov edi, 40",
+    "  jne 9f",
+
     // すべて通った。
     "  xor edi, edi",
 
@@ -633,6 +686,11 @@ core::arch::global_asm!(
     "  .asciz \"/\"",
     "DATA_PATH:",
     "  .asciz \"/data\"",
+    // **`spawn` が読む像のパス。** どちらも `kernel/build.rs` が像へ置いている。
+    "HELLO_PATH:",
+    "  .asciz \"/bin/hello\"",
+    "SPAWN_TEST_PATH:",
+    "  .asciz \"/bin/spawn-test\"",
     // **カーネルが積む `argv` の写し。** 食い違えば 31 番か 32 番が落ちる。
     "ARGV0_TEXT:",
     "  .asciz \"syscall-test\"",
@@ -691,6 +749,7 @@ core::arch::global_asm!(
     argc = const EXPECTED_ARGC,
     argv0_len = const ARGV0_LEN,
     argv1_len = const ARGV1_LEN,
+    sys_spawn = const SYS_SPAWN,
 );
 
 #[panic_handler]

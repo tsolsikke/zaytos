@@ -73,7 +73,7 @@ fn main() {
 /// 非 PIE の ET_EXEC（`userland/user.ld` が `0x400000` へリンクする）。
 /// `common::elf` が受理する形であることは S9-b-1 の着手前に実測して確かめた。
 fn build_user_programs(manifest_dir: &str, out_dir: &str) {
-    const PROGRAMS: &[&str] = &["hello", "fault-test", "syscall-test"];
+    const PROGRAMS: &[&str] = &["hello", "fault-test", "syscall-test", "spawn-test"];
 
     let script = format!("{manifest_dir}/userland/user.ld");
     println!("cargo:rerun-if-changed={script}");
@@ -213,11 +213,18 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
 
     std::fs::create_dir_all(format!("{staging}/bin"))
         .expect("failed to create /bin in the staging");
-    std::fs::copy(
-        format!("{out_dir}/hello.elf"),
-        format!("{staging}/bin/hello"),
-    )
-    .expect("failed to place hello into the staging");
+    // **`/bin` へ置く 2 本**（S11-5 で `spawn-test` が加わった）。
+    //
+    // **`spawn-test` は `USER_PROGRAMS` に載っていない。** 上から走らせると
+    // 深さ 1 になり、孫の `spawn` が成功してしまう。**`syscall-test` が
+    // 深さ 2 で起こすためだけに、像の中に居る。**
+    for name in ["hello", "spawn-test"] {
+        std::fs::copy(
+            format!("{out_dir}/{name}.elf"),
+            format!("{staging}/bin/{name}"),
+        )
+        .unwrap_or_else(|e| panic!("failed to place {name} into the staging: {e}"));
+    }
 
     // **単一間接ブロックの境界を挟む 2 本。** 直接ブロックは 12 個なので、
     // 12 ブロックちょうどは間接を使わず、1 バイト超えると使う。

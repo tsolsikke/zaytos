@@ -24,9 +24,11 @@
 //! [`UserLoadError`] は `errno` を持たない。**写すのは `syscall` の側である**
 //! （`common::ext2::Ext2Error` と `vfs::FileTableError` に続く 3 つ目）。
 
+use common::log::{LogLevel, Logger};
 use common::serial::SerialPort;
 
-use common::log::Logger;
+use crate::ring3::MAX_EXCURSION_DEPTH;
+use crate::syscall::{MAX_EXECUTABLE_SIZE, PATH_MAX};
 
 /// ユーザープログラムを走らせる空間のユーザーサブツリーの添字（S9-b-1）。
 ///
@@ -244,6 +246,119 @@ unsafe fn build_initial_stack(page: *mut u8, page_base: u64, argv: &[&str]) -> O
     }
 
     Some(page_base + cursor as u64)
+}
+
+/// 同時に飛べる `spawn` の本数（S11-5）。
+///
+/// # 引き算に理由がある
+///
+/// **`spawn` は遠征の中からしか呼べない**（`dispatch` へ来るのは Ring 3 からだけで、
+/// Ring 3 は遠征の中にしかない）。**したがって呼ばれた時点の深さは 1 以上である。**
+/// そして [`spawn`] は深さが [`MAX_EXCURSION_DEPTH`] 以上なら断るので、
+/// **実際に子を起こせるのは深さ 1 から `MAX_EXCURSION_DEPTH - 1` までである。**
+///
+/// **その本数だけ緩衝を持てば、入れ子で上書きされない。**
+/// **`MAX_EXCURSION_DEPTH` を上げれば、ここも自動で増える。**
+const MAX_SPAWN_IN_FLIGHT: usize = MAX_EXCURSION_DEPTH - 1;
+
+/// `spawn` が読んだ像を置く場所（S11-5）。
+///
+/// # なぜ像を写すのか。ブロックは借りられるのに
+///
+/// **`common::ext2::Ext2::file_block` が返すのは像を借りたバイト列である**
+/// （[`crate::vfs::FS_IMAGE`] は `&'static [u8]`）。**1 ブロックで足りるなら
+/// 写さずに済む**——しかし **ELF は 4096 バイトを超え、ブロックが像の中で
+/// 連続している保証は無い。** `hello` は 8496 バイトで 3 ブロックである。
+/// **繋がっていないものを 1 本のバイト列として渡すには、写すしかない。**
+///
+/// # スタックへ置かない
+///
+/// [`MAX_EXECUTABLE_SIZE`] の doc（`deferred-decisions.md` の解禁条件の 2 度目）。
+static mut SPAWN_IMAGES: [[u8; MAX_EXECUTABLE_SIZE]; MAX_SPAWN_IN_FLIGHT] =
+    [[0; MAX_EXECUTABLE_SIZE]; MAX_SPAWN_IN_FLIGHT];
+
+/// `spawn` が受け取ったパスを置く場所（S11-5）。
+///
+/// # `&'static str` が要る
+///
+/// [`load_user_program`] の `name` と `argv` は `&'static str` である
+/// （判定行に出す名前と、初期スタックへ積む `argv[0]`）。**ユーザーから来た
+/// パスはカーネルスタックのローカルなので、そのままでは渡せない。**
+///
+/// **像と同じく、深さごとに 1 本ずつ持つ**（[`MAX_SPAWN_IN_FLIGHT`]）。
+static mut SPAWN_PATHS: [[u8; PATH_MAX]; MAX_SPAWN_IN_FLIGHT] =
+    [[0; PATH_MAX]; MAX_SPAWN_IN_FLIGHT];
+
+/// [`spawn`] が起こした子が隔離へ入れたフレームの累計（S11-5）。
+///
+/// # なぜ要るのか。**親の会計が閉じなくなる**
+///
+/// 起動時の会計は「このプログラムを走らせる前後で空きフレームがいくつ減ったか」と
+/// 「そのプログラムの空間を畳んで隔離へ何枚入れたか」を突き合わせる。
+/// **子を起こすと、子のぶんも前者に乗る**——隔離へ入ったフレームは世代が退くまで
+/// アロケータへ戻らないので、**親から見ると「消えたまま」である。**
+///
+/// **実測で踏んだ**（S11-5）。`syscall-test` が 2 本の子を起こしたところ、
+/// **24 枚消えて自分の隔離は 8 枚**になった。差の 16 枚が子 2 本のぶんである。
+///
+/// **子の側で数えて、親が足す。** 親が子の内訳を知る必要はない。
+static SPAWN_QUARANTINED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// [`spawn`] が起こした子が漏らしたフレームの累計（S11-5）。
+static SPAWN_LEAKED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// 子の会計を 0 に戻す（S11-5）。**プログラムを 1 本走らせる直前に呼ぶ。**
+pub fn reset_spawn_accounting() {
+    SPAWN_QUARANTINED.store(0, core::sync::atomic::Ordering::SeqCst);
+    SPAWN_LEAKED.store(0, core::sync::atomic::Ordering::SeqCst);
+}
+
+/// 子が隔離へ入れた枚数と漏らした枚数（S11-5）。
+pub fn spawn_accounting() -> (usize, usize) {
+    (
+        SPAWN_QUARANTINED.load(core::sync::atomic::Ordering::SeqCst),
+        SPAWN_LEAKED.load(core::sync::atomic::Ordering::SeqCst),
+    )
+}
+
+/// [`spawn`] が拒む形（S11-5）。
+///
+/// **`errno` を知らない。** 写すのは `crate::syscall` の側である
+/// （[`UserLoadError`] と同じ線。module の doc）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnError {
+    /// 遠征の深さが上限に達している。**これ以上は入れ子にできない。**
+    TooDeep,
+    /// 遠征の外から呼ばれた。**カーネル側の不具合である**——`spawn` は Ring 3 から
+    /// しか来ないので、通常は構成できない。
+    NotInExcursion,
+    /// パスを引けなかった（無い、途中がディレクトリでない、像が壊れている）。
+    Lookup(common::ext2::Ext2Error),
+    /// 引けたがディレクトリだった。
+    IsDirectory,
+    /// 引けたが通常ファイルではなかった（デバイスファイル等）。
+    NotRegularFile,
+    /// 像が [`MAX_EXECUTABLE_SIZE`] に収まらない。
+    TooLarge(u64),
+    /// 像を読んでいる途中でブロックが引けなかった。
+    Read(common::ext2::Ext2Error),
+    /// 載せられなかった、または期待どおりに終わらなかった。
+    Load(UserLoadError),
+    /// 子を畳んだ会計が合わなかった。**カーネル側の不具合である。**
+    DestroyAccounting {
+        consumed: usize,
+        quarantined: usize,
+        leaked: usize,
+    },
+}
+
+/// 子プロセスの終わり方（S11-5）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnOutcome {
+    /// `exit(status)` で終わった。
+    Exited(u64),
+    /// Ring 3 の違反が畳まれて終わった。**ベクタを持つ。**
+    Folded(u64),
 }
 
 /// 走らせるプロセス 1 つ分（S9-b-3-1）。
@@ -674,7 +789,27 @@ unsafe fn run_loaded_program(
     let production = crate::paging::switch::read_cr3();
 
     crate::syscall::reset_counters();
-    let main_rsp0_top = crate::gdt::privilege_stack_top();
+    // **戻す RSP0 は「今この処理が乗っているカーネルスタックの上端」である。**
+    //
+    // 深さ 0 なら、ここはカーネルの直線上なのでメインのスタックである。
+    // **深さが 1 以上なら、`spawn` が親の遠征の中から呼んでいる**——親は
+    // その深さの遠征スタックの上でこの処理をしているので、**そこへ戻さないと
+    // 親のカーネルスタックが変わってしまう**（S11-2 の入れ子の検証で同じ判断をした）。
+    //
+    // **深さから引ける値なので、引数で受け取らない。**
+    //
+    // 破壊 (S11-5, spawn-child-rsp0): 親の遠征スタックではなく、**子自身の**
+    // 遠征スタックの上端へ戻す。**入れ子でないうちはこの行を通らないので、
+    // 入れ子になった瞬間だけ壊れる。** 親が次にカーネルへ入るときの RSP0 が
+    // 子のスタックを指し、**次に子を起こしたときに親のフレームを踏む。**
+    // **`spawn` が戻り先の RSP0 を突き合わせて捕まえる。**
+    let main_rsp0_top = if crate::ring3::depth() == 0 {
+        crate::gdt::privilege_stack_top()
+    } else if cfg!(feature = "spawn-child-rsp0") {
+        crate::ring3::excursion_stack_range_at(crate::ring3::depth()).1
+    } else {
+        crate::ring3::excursion_stack_range().1
+    };
 
     // SAFETY: この空間はカーネルの上位を共有しており、切り替えても実行中の
     // コードとスタックは見え続ける。
@@ -683,6 +818,9 @@ unsafe fn run_loaded_program(
     // 知らないので、遠征の間だけ `crate::vfs` が持つ
     // （`syscall::set_user_window` と同じ形。据えるのは Ring 3 へ落ちる側である）。
     let previous_files = crate::vfs::swap_current_files(core::mem::take(&mut process.files));
+    // **どの深さの遠征スタックを使うかを控える（S11-5）。** 戻った後は深さが
+    // 元へ戻っているので、そのときには引けない。
+    let entered_at_depth = crate::ring3::depth();
     // SAFETY: entry と stack は今張ったユーザーページで、`ud2` が必ずフォルト
     // する。main_rsp0_top はメインのカーネルスタック上端。単一実行文脈である。
     unsafe {
@@ -696,6 +834,27 @@ unsafe fn run_loaded_program(
     // **引き取る。** 遠征が畳みで戻っても `exit` で戻ってもここを通る
     // （`ring3::enter` はこの 2 つの longjmp でしか戻らない）。
     process.files = crate::vfs::swap_current_files(previous_files);
+    // **この遠征で遠征スタックをどれだけ使ったかを出す（S11-5）。**
+    //
+    // **このスタックにはガードページが無い**（`.bss` の配列である）ので、
+    // **溢れは静かに起きて、下の静的領域を書く。** 実測で `EXCURSION_DEPTH` を
+    // 壊した（`docs/troubleshooting.md`）。**推測せずに毎起動測る。**
+    let used = crate::ring3::excursion_stack_high_water(entered_at_depth);
+    let capacity = crate::ring3::excursion_stack_capacity();
+    let intact = crate::ring3::excursion_stack_canary_intact(entered_at_depth);
+    logger.info(format_args!(
+        "ring3: {} used {used} of {capacity} byte(s) of the depth-{entered_at_depth} \
+         excursion stack ({}%), the canary at its bottom is intact={intact}",
+        process.name,
+        used * 100 / capacity
+    ));
+    if !intact {
+        logger.error(format_args!(
+            "ring3: the depth-{entered_at_depth} excursion stack ran into its bottom canary;              it has no guard page, so anything below it may already be overwritten. halting"
+        ));
+        common::cpu::halt_forever();
+    }
+
     // **表が動いたことの観測（S10-b）。** 開いたまま戻ったものが何本あるかを出す。
     // **`syscall-test` は最後に閉じるので 0 で戻る**——ここが 0 でなければ、
     // 開いた fd が漏れている。
@@ -711,4 +870,238 @@ unsafe fn run_loaded_program(
     unsafe { crate::paging::switch::switch_to(production) };
 
     Ok(())
+}
+
+/// ファイルシステムから像を読み、子プロセスとして走らせ、**終わるまで待つ**（S11-5）。
+///
+/// # 同期である
+///
+/// **戻るのは子が終わった後である。** 親（呼び出し元の Ring 3）は、その間
+/// 入れ子の遠征の下で止まっている。**非同期にするにはユーザープロセスの
+/// スケジューラが要り、それはまだ無い**（`docs/roadmap.md` の S11）。
+///
+/// # 深さで断る
+///
+/// [`MAX_EXCURSION_DEPTH`] に達していたら [`SpawnError::TooDeep`] を返す。
+/// **入る前に断る**——[`crate::ring3::enter`] は上限を越えた深さで呼ばれると
+/// 遠征スタックと回復点を index 0 へ丸めるので、**親のものを踏む。**
+/// **その状態には判定行が無い**ので、**踏ませずに断る側で閉じる。**
+///
+/// # BKL は保持していない
+///
+/// **呼ぶ前に解いてある**（`crate::syscall::syscall_entry`。`ADR-0023` §1）。
+/// **子は Ring 3 で走り、システムコールごとに自分で BKL を取る。**
+/// 保持したまま入ると、子の最初のシステムコールが同じコアの再取得になる。
+///
+/// # 親の観測を壊さない
+///
+/// 子は [`crate::syscall::reset_counters`] を通り、自分の `write` と `exit` を
+/// 記録する。**親の記録はここで控えて戻す**（`crate::syscall::Records` と
+/// [`crate::ring3::FoldRecord`]）。
+pub fn spawn(path: &[u8]) -> Result<SpawnOutcome, SpawnError> {
+    // **深さの上限。入る前に断る。**
+    let depth = crate::ring3::depth();
+    if depth >= MAX_EXCURSION_DEPTH {
+        return Err(SpawnError::TooDeep);
+    }
+    // **深さは 1 以上のはずである**——`dispatch` へ来るのは Ring 3 からだけで、
+    // Ring 3 は遠征の中にしかない。**0 ならカーネル側の不具合である。**
+    // **[`SpawnError::TooDeep`] と混ぜない**——あちらは正しい断り方で、
+    // こちらは起きてはいけない状態である。
+    if depth == 0 {
+        return Err(SpawnError::NotInExcursion);
+    }
+    // **緩衝の番号は深さから決まる**（[`MAX_SPAWN_IN_FLIGHT`] の doc）。
+    // 深さ 1 が 0 番である。**上の 2 つの判定が
+    // `1 <= depth < MAX_EXCURSION_DEPTH` を保証しているので、範囲内である。**
+    let slot = depth - 1;
+
+    let mut port = SerialPort::new(SerialPort::COM1_BASE);
+    port.init();
+    let mut logger = Logger::new(port, LogLevel::Trace);
+
+    let fs = crate::vfs::root_filesystem().map_err(SpawnError::Lookup)?;
+    let inode = fs.lookup(path).map_err(SpawnError::Lookup)?;
+    if inode.is_directory() {
+        return Err(SpawnError::IsDirectory);
+    }
+    if !inode.is_regular_file() {
+        return Err(SpawnError::NotRegularFile);
+    }
+    if inode.size > MAX_EXECUTABLE_SIZE as u64 {
+        return Err(SpawnError::TooLarge(inode.size));
+    }
+    let size = inode.size as usize;
+
+    // **パスを控える。** `name` と `argv[0]` に `&'static str` が要る
+    // （[`SPAWN_PATHS`]）。**入らない分は切る**——`copy_user_path` が
+    // [`PATH_MAX`] で切っているので、ここへ来る時点で収まっている。
+    let name_len = path.len().min(PATH_MAX);
+    // SAFETY: `slot` は [`MAX_SPAWN_IN_FLIGHT`] の範囲内で、その深さで走っている
+    // のはこの 1 本だけである（深さの判定が入れ子の重なりを禁じている）。
+    // 単一コアの実行文脈で、割り込みハンドラはここへ来ない。
+    let path_slot: &'static mut [u8; PATH_MAX] =
+        unsafe { &mut (*core::ptr::addr_of_mut!(SPAWN_PATHS))[slot] };
+    path_slot[..name_len].copy_from_slice(&path[..name_len]);
+    let name_bytes: &'static [u8] = &path_slot[..name_len];
+    // **UTF-8 でなければ名前を伏せる。** パスは Ring 3 から来るバイト列で、
+    // **ext2 も UTF-8 を要求しない。** 判定行に出すためだけの値なので、
+    // **読めないことを理由に起動を拒まない。**
+    let name = core::str::from_utf8(name_bytes).unwrap_or("<not utf-8>");
+
+    // **像をブロックごとに写す。** 借りたままにできない理由は [`SPAWN_IMAGES`]。
+    // SAFETY: `slot` は範囲内で、その深さで使うのはこの 1 本だけである（上と同じ）。
+    let image_slot: &'static mut [u8; MAX_EXECUTABLE_SIZE] =
+        unsafe { &mut (*core::ptr::addr_of_mut!(SPAWN_IMAGES))[slot] };
+    {
+        let block_size = fs.block_size() as usize;
+        let mut done = 0usize;
+        let mut index = 0u32;
+        while done < size {
+            let block = fs.file_block(&inode, index).map_err(SpawnError::Read)?;
+            // **進む量が必ず正である**（線4）。`block_size` は 1024 以上、
+            // `size - done` は正、`block.len()` はブロック長である。
+            let take = block_size.min(size - done).min(block.len());
+            if take == 0 {
+                return Err(SpawnError::Read(common::ext2::Ext2Error::SparseBlock(
+                    index,
+                )));
+            }
+            image_slot[done..done + take].copy_from_slice(&block[..take]);
+            done += take;
+            index += 1;
+        }
+    }
+    // **`size` で切る。** 32 KiB 全体を渡すと、**前回の `spawn` が残した
+    // バイト列が像の続きとして読める**——`common::elf` の範囲検査は
+    // 渡されたバイト列の長さに対して行うので、**長さを偽ると検査も緩む**
+    // （線3。参照が像の外を指さないことは、像の端がどこかに依る）。
+    let image: &'static [u8] = &image_slot[..size];
+
+    // **親の遠征スタックの残りを測る（S11-5）。**
+    //
+    // **起動時の `load_user_program` はメインのカーネルスタック（ガードページ付き）の
+    // 上で走るが、`spawn` からのそれは親の遠征スタックの上で走る。**
+    // **遠征スタックは `.bss` の配列で、ガードページが無い**——溢れても止まらず、
+    // 隣を静かに書く。**推測せずに測って出す。**
+    let stack_probe = 0u8;
+    let rsp_now = &stack_probe as *const u8 as u64;
+    let (excursion_bottom, excursion_top) = crate::ring3::excursion_stack_range();
+    let stack_used = excursion_top.saturating_sub(rsp_now);
+    let stack_left = rsp_now.saturating_sub(excursion_bottom);
+
+    logger.info(format_args!(
+        "spawn: {name} is {size} byte(s) at inode {}; entering at depth {} (the parent's \
+         excursion stack {excursion_bottom:#x}..{excursion_top:#x} has {stack_used} byte(s) \
+         used and {stack_left} left)",
+        inode.number,
+        depth + 1
+    ));
+
+    // **親の記録を控える。** 子は `reset_counters` を通る。
+    let saved_records = crate::syscall::save_records();
+    let saved_fold = crate::ring3::save_fold_record();
+
+    // **会計のために借りて、すぐ返す**（`ADR-0030`）。**借りられなければ
+    // 子も起こせない**ので、そのまま [`UserLoadError::AllocatorUnavailable`] へ落とす。
+    let free_before = match crate::frame_allocator::take() {
+        Some(allocator) => {
+            let count = allocator.free_frame_count();
+            crate::frame_allocator::give_back(allocator);
+            count
+        }
+        None => {
+            crate::syscall::restore_records(saved_records);
+            crate::ring3::restore_fold_record(saved_fold);
+            return Err(SpawnError::Load(UserLoadError::AllocatorUnavailable));
+        }
+    };
+
+    let (outcome, held, leaked) = load_user_program(&mut logger, image, true, name, &[name]);
+
+    // **子の終わり方をここで読む。** 戻す前に読まなければ、親のもので上書きされる。
+    let child = if crate::syscall::process_exited() {
+        SpawnOutcome::Exited(crate::syscall::process_exit_status())
+    } else {
+        SpawnOutcome::Folded(crate::ring3::fault_vector())
+    };
+    let syscalls = crate::syscall::invocation_count();
+
+    // **子のカーネル入場が、子の遠征スタックの上で起きたことを見る（S11-5）。**
+    //
+    // **入れ子で最も静かに壊れる形がこれである**——RSP0 が親のスタックを指したまま
+    // だと、子のシステムコールが**親のカーネルフレームを上書きする。**
+    // **子は正しく走り終え、親が戻った先で壊れる**ので、原因から離れた場所で落ちる。
+    // **実測で踏んだ**（S11-5。`docs/troubleshooting.md`）。
+    // **戻ってきた RSP0 が、親の遠征スタックの上端であることを確かめる（S11-5）。**
+    //
+    // **ここが違うと、親が次にカーネルへ入るときのスタックが変わる。**
+    // **すぐには壊れない**——親はそのまま Ring 3 へ返り、次のシステムコールで
+    // 別のスタックに乗る。**壊れるのは、次に子を起こして親のフレームを踏んだ
+    // ときである。** 原因から遠いので、ここで突き合わせる。
+    let rsp0_after = crate::gdt::privilege_stack_top();
+    let (_, parent_top) = crate::ring3::excursion_stack_range();
+    if rsp0_after != parent_top {
+        logger.error(format_args!(
+            "spawn: RSP0 came back as {rsp0_after:#x} but the parent runs on the excursion \
+             stack that ends at {parent_top:#x}; the parent's next kernel entry would land on \
+             the wrong stack. halting"
+        ));
+        common::cpu::halt_forever();
+    }
+
+    let child_handler_rsp = crate::syscall::handler_rsp();
+    let (child_bottom, child_top) = crate::ring3::excursion_stack_range_at(depth);
+    let handler_on_child_stack = child_handler_rsp >= child_bottom && child_handler_rsp < child_top;
+
+    let free_after = match crate::frame_allocator::take() {
+        Some(allocator) => {
+            let count = allocator.free_frame_count();
+            crate::frame_allocator::give_back(allocator);
+            count
+        }
+        None => free_before,
+    };
+
+    // **親の記録を戻す。**
+    //
+    // 破壊 (S11-5, spawn-keep-child-records): 戻さない。**子が送ったバイト列と
+    // 終了状態が、親のものとして判定行に出る。** 親（`syscall-test`）の
+    // `write` の突き合わせが食い違って捕まえる。
+    #[cfg(not(feature = "spawn-keep-child-records"))]
+    {
+        crate::syscall::restore_records(saved_records);
+        crate::ring3::restore_fold_record(saved_fold);
+    }
+
+    let consumed = free_before.saturating_sub(free_after) as usize;
+    // **親の会計へ回す（S11-5）。** 隔離へ入ったフレームは世代が退くまで
+    // アロケータへ戻らないので、**親から見ると消えたままである。**
+    SPAWN_QUARANTINED.fetch_add(held, core::sync::atomic::Ordering::SeqCst);
+    SPAWN_LEAKED.fetch_add(leaked, core::sync::atomic::Ordering::SeqCst);
+    logger.info(format_args!(
+        "spawn: {name} ended ({child:?}) after {syscalls} syscall(s); its kernel entries ran on \
+         RSP {child_handler_rsp:#x} (inside its own excursion stack \
+         {child_bottom:#x}..{child_top:#x} = {handler_on_child_stack}); the space was destroyed \
+         ({consumed} frame(s) left the allocator and {held} reached quarantine, match={} \
+         leaked={leaked})",
+        consumed == held
+    ));
+
+    let entry = outcome.map_err(SpawnError::Load)?;
+    let _ = entry;
+
+    if consumed != held || leaked != 0 {
+        logger.error(format_args!(
+            "spawn: {name} left the allocator short: {consumed} frame(s) consumed but \
+             {held} quarantined ({leaked} leaked)"
+        ));
+        return Err(SpawnError::DestroyAccounting {
+            consumed,
+            quarantined: held,
+            leaked,
+        });
+    }
+
+    Ok(child)
 }

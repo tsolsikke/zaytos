@@ -243,6 +243,21 @@ syscall-test-dirent-no-align = []
 # プログラムは auxv を読まないので、足しても誰も困らないように見える。終端が
 # 無いことは終端まで歩いた者にしか分からない。`--syscall-test no-auxv-terminator`。
 syscall-test-no-auxv-terminator = []
+# S11-5: 深さの上限で断ったことを -EAGAIN でなく -ENOSYS で返す。どちらも
+# 「できない」を意味するので雑に見ると同じに見えるが、-ENOSYS は「その番号は無い」、
+# -EAGAIN は「その番号は在るが今は受け付けられない」である。上限が効いていることを
+# 主張しているのは後者だけで、spawn-test の検算がその差を突く。
+# `--syscall-test spawn-eagain-as-enosys`。
+spawn-eagain-as-enosys = []
+# S11-5: 入れ子の遠征から戻ったとき、親の記録(write・exit・probe・畳み)を戻さない。
+# 子が送ったバイト列と終了状態が親のものとして判定行に出る。syscall-test の write の
+# 突き合わせが食い違って捕まえる。`--syscall-test spawn-keep-child-records`。
+spawn-keep-child-records = []
+# S11-5: 入れ子の遠征から戻すRSP0を、親ではなく子自身の遠征スタックの上端にする。
+# 入れ子でないうちはこの経路を通らないので、入れ子になった瞬間だけ壊れる。親が次に
+# カーネルへ入るときのRSP0が子のスタックを指し、spawnの突き合わせが捕まえる。
+# `--syscall-test spawn-child-rsp0`。
+spawn-child-rsp0 = []
 # S1-b-2: ACPI の検証経路の破壊確認。いずれも既定ビルドには入らない。
 # `cargo xtask run --acpi-test <kind>` が有効化する。観測は panic ではなく、
 # 「検出のログが出て、MADT の列挙が完了しないこと」である。

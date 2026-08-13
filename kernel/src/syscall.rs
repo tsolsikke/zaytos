@@ -91,6 +91,18 @@ pub const EIO: i64 = 5;
 /// **遠征の深さが上限に達しているときに返す。**
 pub const EAGAIN: i64 = 11;
 
+/// `-EACCES`（許されない）の errno（S11-5）。
+///
+/// **[`SYS_SPAWN`] が通常ファイルでないものを渡されたときに返す。**
+/// **Linux の `execve` も、実行できない相手に `EACCES` を返す。**
+pub const EACCES: i64 = 13;
+
+/// `-ENOMEM`（入れる場所が無い）の errno（S11-5）。
+///
+/// **像が [`MAX_EXECUTABLE_SIZE`] に収まらないとき、およびフレームが尽きたときに
+/// 返す。** **`EINVAL` ではない**——像は正しく、こちらの器が足りていない。
+pub const ENOMEM: i64 = 12;
+
 /// ZaytOS 独自のシステムコール番号の基点（S9-a）。
 ///
 /// # なぜ Linux の番号表から離すのか
@@ -321,46 +333,65 @@ pub const O_WRITE_INTENT: u64 = 0o100 | 0o1000 | 0o2000;
 /// ならなかった**）。
 pub const PATH_MAX: usize = 256;
 
-/// 遠征を 1 段深く入れ子にする検証用の番号（S11-2。ZaytOS 独自）。
+/// `spawn(path)`——像を読み、子プロセスを起こし、**終わるまで待つ**（S11-5。ZaytOS 独自）。
 ///
-/// # なぜ syscall として置くのか
+/// # なぜ `fork`（57）と `execve`（59）の番号を採らないか
 ///
-/// **入れ子は「Ring 3 から入った処理の中で、もう一度 Ring 3 へ落ちる」形である。**
-/// カーネルの直線上からは作れない——**外側の遠征に入っていなければ、入れ子に
-/// ならない。** システムコールはその状態にいる唯一の場所である。
+/// **これは `fork` でも `execve` でもない。** 番号だけ借りると、
+/// **Linux の意味を持たない振る舞いに Linux の名前が付く。**
 ///
-/// **`spawn` が来たら、この番号は要らなくなる**（あちらが本物の入れ子を作る）。
-/// **そのとき外すこと。**
-pub const SYS_NEST_PROBE: u64 = ZAYTOS_PRIVATE_BASE + 3;
+/// - **`fork` は呼び出し側を複製する。** ここが作るのは複製ではなく、
+///   **別の像から起こした別のプロセスである。** 写像も `argv` も引き継がない
+/// - **`execve` は呼び出し側を置き換える。** ここは置き換えない——
+///   **親はそのまま在り、子が終わるのを待って続きを実行する**
+/// - **どちらも「戻る」の意味が違う。** `fork` は 2 回戻り、`execve` は成功したら
+///   戻らない。**`spawn` は 1 回戻り、戻り値は子の終わり方である**
+///
+/// **`SYS_OPEN`（2）が `openat`（257）を採らなかったのと同じ判断である**
+/// ——「振る舞いが違うなら、番号も分ける」。**あちらは作業ディレクトリが無いから
+/// `openat` を採らず、こちらは意味が違うから 57 と 59 を採らない。**
+///
+/// **予約もしない。** [`SYS_NEVER_IMPLEMENTED`] のような「永久に実装しない」宣言では
+/// なく、**`fork` と `execve` は将来ふつうに実装しうる**（`docs/vision.md` の
+/// Linux バイナリを動かす構想）。**空けておけば、そのとき Linux の意味で使える。**
+///
+/// # 戻り値
+///
+/// 子が `exit(status)` で終わったなら `status & 0xFF`。
+/// 畳まれて終わったなら [`SPAWN_FOLDED_FLAG`] とベクタ。
+/// 起こせなかったなら `-errno`。**`docs/coding-standards.md` の「`-errno` の範囲と
+/// 紛れない値にする」に従い、正の側は 0x1FFF を越えない。**
+pub const SYS_SPAWN: u64 = ZAYTOS_PRIVATE_BASE + 4;
 
-/// [`SYS_NEST_PROBE`] が返す既知の値。
-pub const NEST_PROBE_RETURN: u64 = 0x00DE_5738;
+/// [`SYS_SPAWN`] の戻り値のうち「子は終了ではなく畳まれて終わった」を表すビット。
+///
+/// **下位 8 ビットは終了状態なので、その上に置く。** 畳まれた場合は
+/// `SPAWN_FOLDED_FLAG | (vector << 9)` を返す。
+///
+/// # Linux の `wait` の符号化には合わせない
+///
+/// **`spawn` は Linux に対応するものが無い**ので、`W*` マクロの形を真似ても
+/// 互換にはならない。**外から見える形を Linux に合わせるのは、Linux に同じものが
+/// あるときの規則である。**
+pub const SPAWN_FOLDED_FLAG: u64 = 0x100;
 
-/// 入れ子の遠征の飛び先（S11-2）。**呼び出し側が据える。**
-static NEST_TARGET: AtomicU64 = AtomicU64::new(0);
-/// 入れ子の遠征のユーザースタック上端（S11-2）。
-static NEST_STACK_TOP: AtomicU64 = AtomicU64::new(0);
-/// [`SYS_NEST_PROBE`] が呼ばれたか（S11-2）。
-static NEST_INVOKED: AtomicBool = AtomicBool::new(false);
-/// 入れ子の遠征に入っている間に観測した深さ（S11-2）。
-static NEST_DEPTH_INSIDE: AtomicU64 = AtomicU64::new(0);
-/// 入れ子の遠征が畳んで戻ったか（S11-2）。
-static NEST_FOLDED: AtomicBool = AtomicBool::new(false);
-
-/// 入れ子の遠征の飛び先とスタック上端を据える（S11-2）。
-pub fn set_nest_target(rip: u64, stack_top: u64) {
-    NEST_TARGET.store(rip, Ordering::SeqCst);
-    NEST_STACK_TOP.store(stack_top, Ordering::SeqCst);
-}
-
-/// [`SYS_NEST_PROBE`] の観測（呼ばれたか、中で見た深さ、畳んで戻ったか）。
-pub fn nest_observation() -> (bool, u64, bool) {
-    (
-        NEST_INVOKED.load(Ordering::SeqCst),
-        NEST_DEPTH_INSIDE.load(Ordering::SeqCst),
-        NEST_FOLDED.load(Ordering::SeqCst),
-    )
-}
+/// [`SYS_SPAWN`] が受け入れる像の最大の大きさ（S11-5）。
+///
+/// # 32 KiB の根拠は実測である
+///
+/// **いま像として置いてあるのは `hello` が 8496 バイト、`syscall-test` が
+/// 8648 バイトである**（`kernel/build.rs` が `rustc` で建てたもの）。
+/// **32 KiB はその 3.7 倍で、ユーザープログラムが 3 倍を超えて育つまで届かない。**
+///
+/// # スタックへ置かない
+///
+/// **`deferred-decisions.md` の「大きなスタック配列とガード幅」の解禁条件に
+/// 当たる**——4 KiB を超える単一のローカル配列である。**S11-3 で 1 度目が発火し、
+/// 実測でガードページを踏んだ。** ここが 2 度目で、**踏む前に避ける。**
+///
+/// **置き場所は `crate::userland` の `static` である**
+/// （`ADR-0030` で採った「スタックへ載せない」と同じ解き方である）。
+pub const MAX_EXECUTABLE_SIZE: usize = 32 * 1024;
 
 /// 検証用 probe システムコールの番号（ZaytOS 独自。[`ZAYTOS_PRIVATE_BASE`]）。
 pub const PROBE_NUMBER: u64 = ZAYTOS_PRIVATE_BASE;
@@ -764,33 +795,14 @@ unsafe fn dispatch(
             let read = unsafe { copy_from_user(&mut kbuf, &slice) };
             kbuf[..read].iter().map(|b| *b as u64).sum()
         }
-        SYS_NEST_PROBE => {
-            // **外側の遠征の中から、もう 1 段深く入る（S11-2）。**
+        SYS_SPAWN => {
+            // **ここへは来ない。** [`SYS_SPAWN`] は [`syscall_entry`] が持つ——
+            // **BKL を解いてから入る必要があり、ガードはあちらのローカルである**
+            // （[`SYS_EXIT`] が「戻らない」を表せないのであちらに在るのと同じ形）。
             //
-            // **戻す RSP0 は「今の遠征スタックの上端」である**——親（外側）は
-            // そのスタックの上でこの処理をしている。**メインの上端へ戻すと、
-            // 親のカーネルスタックが変わってしまう。**
-            if crate::ring3::depth() >= crate::ring3::MAX_EXCURSION_DEPTH {
-                return (-EAGAIN) as u64;
-            }
-            let (_, restore_rsp0) = crate::ring3::excursion_stack_range();
-            let window = user_window();
-            NEST_INVOKED.store(true, Ordering::SeqCst);
-            // SAFETY: 飛び先とスタックは呼び出し側が据えた、張り済みのユーザー
-            // ページである（`set_nest_target`）。飛び先の命令は必ずフォルトする。
-            // 深さは上限未満（すぐ上で確かめた）。BKL 保持下の単一実行文脈である。
-            unsafe {
-                crate::ring3::enter(
-                    restore_rsp0,
-                    NEST_TARGET.load(Ordering::SeqCst),
-                    NEST_STACK_TOP.load(Ordering::SeqCst),
-                    window,
-                );
-            }
-            // **戻った直後に観測する。** 外側が畳むと記録が上書きされる。
-            NEST_DEPTH_INSIDE.store(crate::ring3::depth() as u64 + 1, Ordering::SeqCst);
-            NEST_FOLDED.store(crate::ring3::folded(), Ordering::SeqCst);
-            NEST_PROBE_RETURN
+            // **受け皿として置く。** 落とすと `-ENOSYS` へ落ち、
+            // **「実装していない」と「入口を間違えた」が同じ返り値になる。**
+            (-EAGAIN) as u64
         }
         SYS_READ => {
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
@@ -834,6 +846,86 @@ unsafe fn dispatch(
     }
 }
 
+/// [`SYS_SPAWN`] の本体（S11-5）。**BKL を解いてから子を走らせる。**
+///
+/// # なぜ [`dispatch`] ではなくここに在るのか
+///
+/// **BKL を解く必要があり、ガードは [`syscall_entry`] のローカルだからである。**
+/// [`SYS_EXIT`] が「戻らない」を戻り値で表せずにあちらへ在るのと、置き場所の
+/// 理由は同じである（**あちらは制御が戻らないから、こちらはロックを手放すから**）。
+///
+/// # BKL を解く理由（`ADR-0023` §1）
+///
+/// **`ADR-0023` §1 の定義は「カーネル入口で取り、ユーザー空間（Ring 3）へ戻るときに
+/// 離す」である。** 現在の実装は S4 の Addendum が置いた等価物——
+/// 「入口で取り、**その入口から戻るとき**に離す」——で、**Ring 3 が定常的に無い間は
+/// 2 つが一致していた。**
+///
+/// **`spawn` は初めて 2 つが食い違う場所である。** 入口からはまだ戻らないが、
+/// Ring 3 へは降りる。**Addendum 自身が「Ring 3 が定常状態になった段（S9 以降）で
+/// §1 の字面が改めて成立する」と書いており、ここがその場所である。**
+///
+/// **保持したまま降りると 2 つの形で壊れる。実測ではなく構造で言える。**
+///
+/// - **子のシステムコール**が [`syscall_entry`] へ入り、**同じコアが BKL を
+///   取り直す。** `bkl::acquire` は再帰取得を検出して停止する
+/// - **Ring 3 は `RFLAGS = 0x202`（IF=1）で走る**ので、タイマが動いている段では
+///   `irq_entry` が同じことをする。**`ADR-0023` の Addendum §4 の不変条件
+///   「BKL を保持する区間 = IF=0 の区間」に、保持したままの降下は直接反する**
+///
+/// # 解く区間はどこか
+///
+/// **パスを写し終えてから解く。** ユーザーメモリへ触るのは [`copy_user_path`] だけで、
+/// **あれは「検証と読みが実質アトミック」であることに依っている**（[`copy_from_user`] の
+/// TOCTOU の注記）。**その区間は BKL の内側に残す。**
+///
+/// **写像も畳みも BKL の外で走る。** これは新しい形ではない——**起動時の
+/// `load_user_program` は最初から BKL を保持せずに写像している**（`kernel_main` は
+/// ガードを持たない）。**`crate::userland::load_user_program` はそのまま呼べる**
+/// ——中で畳みのために自分で BKL を取るので、**保持したまま入ると、そこで
+/// 再帰取得になる。**
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+/// `bkl` が、いま保持している BKL のガードであること。
+unsafe fn spawn_from_ring3(
+    path: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    bkl: &mut Option<crate::bkl::BklGuard>,
+) -> u64 {
+    // **パスを写す。BKL を保持したままである。**
+    let mut buf = [0u8; PATH_MAX];
+    // SAFETY: 呼び出し元契約をそのまま渡す。
+    let len = match unsafe { copy_user_path(&mut buf, path, pml4_phys, direct_map) } {
+        Ok(len) => len,
+        Err(errno) => return (-errno) as u64,
+    };
+
+    // **ここで解く。** 取り直すのは子が終わってからである。
+    drop(bkl.take());
+    let result = crate::userland::spawn(&buf[..len]);
+    *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
+
+    match result {
+        Ok(crate::userland::SpawnOutcome::Exited(status)) => status & 0xFF,
+        Ok(crate::userland::SpawnOutcome::Folded(vector)) => SPAWN_FOLDED_FLAG | (vector << 9),
+        Err(error) => {
+            // 破壊 (S11-5, spawn-eagain-as-enosys): 深さで断ったことを
+            // `-ENOSYS` として返す。**どちらも「できない」を意味するので、
+            // 雑に見ると同じに見える。** `-ENOSYS` は「その番号は無い」で、
+            // `-EAGAIN` は「その番号は在るが、今は受け付けられない」である。
+            // **上限が効いていることを主張しているのは後者だけである。**
+            #[cfg(feature = "spawn-eagain-as-enosys")]
+            if matches!(error, crate::userland::SpawnError::TooDeep) {
+                return (-ENOSYS) as u64;
+            }
+            (-errno_for_spawn(error)) as u64
+        }
+    }
+}
+
 /// `zaytos_syscall_common` から `extern "sysv64"` で呼ばれる。**[`SYS_EXIT`] 以外は戻る。**
 ///
 /// # exit は出口を通らない（S9-b-3-1）
@@ -862,7 +954,11 @@ unsafe fn dispatch(
 pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     // **BKL を取る（S4-b-2）。** 割り込みゲート経由なので入場時点で IF=0 だが、
     // BKL の保持区間であることを型で表すためにガードを取る。
-    let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::Syscall);
+    //
+    // **`Option` にしてあるのは、出口以外で手放す経路が 2 つあるからである**
+    // ——[`SYS_EXIT`]（longjmp で出ていくので `Drop` が走らない）と
+    // [`SYS_SPAWN`]（Ring 3 へ降りている間は保持しない。`ADR-0023` §1）。
+    let mut bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
 
     // カーネルへ入ったので「今 Ring 3 にいる」を降ろす（S8-b）。Ring 3 へ返る直前で
     // 立て直す。降ろす前の値を記録しておき、往復の検証で突き合わせる（Ring 3 から
@@ -901,8 +997,17 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     let pml4_phys =
         unsafe { crate::paging::active::ActivePageTable::current(direct_map) }.pml4_phys();
 
+    // **[`SYS_SPAWN`] だけは、この関数が持つ。** BKL を解いてから入る必要があり、
+    // ガードはここのローカルである（[`spawn_from_ring3`]）。
+    //
     // SAFETY: pml4_phys / direct_map は稼働中テーブルのもので、walk の契約を満たす。
-    let ret = unsafe { dispatch(number, &args, pml4_phys, direct_map) };
+    let ret = if number == SYS_SPAWN {
+        // SAFETY: 同上。`bkl` はいま保持しているガードである。
+        unsafe { spawn_from_ring3(args[0], pml4_phys, direct_map, &mut bkl) }
+    } else {
+        // SAFETY: pml4_phys / direct_map は稼働中テーブルのもので、walk の契約を満たす。
+        unsafe { dispatch(number, &args, pml4_phys, direct_map) }
+    };
 
     // **exit だけは Ring 3 へ返らない。**
     //
@@ -916,7 +1021,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
         // 破壊 (S9-b-3-1, user-exit-keep-bkl): 解かずに戻る。次に BKL を取る者
         // （空間を畳む側）が、同じコアの再取得として捕まえる。
         #[cfg(not(feature = "user-exit-keep-bkl"))]
-        drop(_bkl);
+        drop(bkl.take());
         // SAFETY: Ring 3 から `int 0x80` で入った文脈で、RECOVERY は
         // `ring3::enter` が保存済みである。BKL は上で解いてある。
         unsafe { crate::ring3::leave_ring3() }
@@ -1437,6 +1542,58 @@ fn errno_for_ext2(error: common::ext2::Ext2Error) -> i64 {
     }
 }
 
+/// [`crate::userland::UserLoadError`] を errno へ写す（S11-5）。
+///
+/// # 全 16 種を明示する
+///
+/// **`_ =>` で捨てない**（[`errno_for_ext2`] と同じ理由）。
+///
+/// # 大半は「カーネル側の不具合」である
+///
+/// **`Parse` と `SegmentData` だけが、渡された像に対する答えである**——
+/// 像が壊れているので `-ENOEXEC`……**ではなく `-EINVAL` を返す。**
+/// `ENOEXEC`（8）をまだ持っておらず、**1 つの用途のために errno を増やすより、
+/// 「引数が受け付けられない」に落とすほうが小さい。** 分ける必要が出たら足す。
+fn errno_for_user_load(error: crate::userland::UserLoadError) -> i64 {
+    use crate::userland::UserLoadError as E;
+    match error {
+        // 借りられない・入れる場所が無い。**時間を置けば変わりうる。**
+        E::AllocatorUnavailable => EAGAIN,
+        E::OutOfFrames => ENOMEM,
+        // 渡されたものに対する答え。
+        E::Parse(_) | E::SegmentData(_) => EINVAL,
+        E::ArgumentsTooLong => ENAMETOOLONG,
+        // ここから下はカーネル側の事情である。
+        E::AddressSpace(_)
+        | E::NotCanonical(_)
+        | E::Mapping { .. }
+        | E::LeafFlags { .. }
+        | E::DidNotExit
+        | E::NoExitNoFold
+        | E::ExitStatus(_)
+        | E::DidNotFold
+        | E::FoldMismatch
+        | E::AbiMismatch
+        | E::DestroyAccounting { .. }
+        | E::WriteMismatch => EIO,
+    }
+}
+
+/// [`crate::userland::SpawnError`] を errno へ写す（S11-5）。
+fn errno_for_spawn(error: crate::userland::SpawnError) -> i64 {
+    use crate::userland::SpawnError as E;
+    match error {
+        E::TooDeep => EAGAIN,
+        E::NotInExcursion => EIO,
+        E::Lookup(e) | E::Read(e) => errno_for_ext2(e),
+        E::IsDirectory => EISDIR,
+        E::NotRegularFile => EACCES,
+        E::TooLarge(_) => ENOMEM,
+        E::Load(e) => errno_for_user_load(e),
+        E::DestroyAccounting { .. } => EIO,
+    }
+}
+
 /// [`crate::vfs::FileTableError`] を errno へ写す（S10-b）。
 fn errno_for_file_table(error: crate::vfs::FileTableError) -> i64 {
     match error {
@@ -1495,6 +1652,94 @@ pub fn reset_counters() {
     PROBE_INVOKED.store(false, Ordering::SeqCst);
     for slot in PROBE_SEEN_ARGS.iter() {
         slot.store(0, Ordering::SeqCst);
+    }
+}
+
+/// [`reset_counters`] が戻すもの、ひとそろい（S11-5）。
+///
+/// # なぜ「戻す」だけでなく「控える」が要るのか
+///
+/// **記録は 1 組しかない。** プロセスが順に 1 本ずつ走る間はそれで足りた——
+/// **次の 1 本が始まる前に、前の 1 本の判定が済んでいる。**
+///
+/// **`spawn` が入れ子を作ると、そうではなくなる。** 子は親の途中で走り、
+/// **[`reset_counters`] で親の記録を 0 にし、自分の `write` と `exit` を上書きする。**
+/// **親の判定行は、子が送ったバイト列を親のものとして読む。**
+///
+/// **控えて戻す**（`crate::ring3::FoldRecord` と同じ形。あちらは畳みの記録である）。
+///
+/// # 大きさは 256 バイトに満たない
+///
+/// **スタックへ置く**（[`MAX_EXECUTABLE_SIZE`] とは扱いが違う）。
+/// 内訳は `u64` が 10 個、`[u64; 6]` が 2 つ、`[u8; 64]` が 1 つ、`bool` が 3 つで、
+/// **詰め物を含めても 232 バイトである。**
+/// **`deferred-decisions.md` の「大きなスタック配列とガード幅」が言う 4096 バイトの
+/// 前提を破らない。**
+#[derive(Debug, Clone, Copy)]
+pub struct Records {
+    invocation_count: u64,
+    last_number: u64,
+    last_args: [u64; 6],
+    handler_rsp: u64,
+    in_ring3_at_entry: bool,
+    process_exited: bool,
+    process_exit_status: u64,
+    write_fd: u64,
+    write_len: u64,
+    write_buf: [u8; WRITE_BUF_LEN],
+    probe_invoked: bool,
+    probe_seen_args: [u64; 6],
+}
+
+/// 今の記録を控える（S11-5）。**[`reset_counters`] が戻す欄と 1 対 1 である。**
+pub fn save_records() -> Records {
+    let mut last_args = [0u64; 6];
+    for (slot, value) in last_args.iter_mut().zip(LAST_ARGS.iter()) {
+        *slot = value.load(Ordering::SeqCst);
+    }
+    let mut write_buf = [0u8; WRITE_BUF_LEN];
+    for (slot, value) in write_buf.iter_mut().zip(WRITE_BUF.iter()) {
+        *slot = value.load(Ordering::SeqCst);
+    }
+    let mut probe_seen_args = [0u64; 6];
+    for (slot, value) in probe_seen_args.iter_mut().zip(PROBE_SEEN_ARGS.iter()) {
+        *slot = value.load(Ordering::SeqCst);
+    }
+    Records {
+        invocation_count: INVOCATION_COUNT.load(Ordering::SeqCst),
+        last_number: LAST_NUMBER.load(Ordering::SeqCst),
+        last_args,
+        handler_rsp: HANDLER_RSP.load(Ordering::SeqCst),
+        in_ring3_at_entry: IN_RING3_AT_ENTRY.load(Ordering::SeqCst),
+        process_exited: PROCESS_EXITED.load(Ordering::SeqCst),
+        process_exit_status: PROCESS_EXIT_STATUS.load(Ordering::SeqCst),
+        write_fd: WRITE_FD.load(Ordering::SeqCst),
+        write_len: WRITE_LEN.load(Ordering::SeqCst),
+        write_buf,
+        probe_invoked: PROBE_INVOKED.load(Ordering::SeqCst),
+        probe_seen_args,
+    }
+}
+
+/// 控えた記録を戻す（S11-5）。
+pub fn restore_records(records: Records) {
+    INVOCATION_COUNT.store(records.invocation_count, Ordering::SeqCst);
+    LAST_NUMBER.store(records.last_number, Ordering::SeqCst);
+    for (slot, value) in LAST_ARGS.iter().zip(records.last_args.iter()) {
+        slot.store(*value, Ordering::SeqCst);
+    }
+    HANDLER_RSP.store(records.handler_rsp, Ordering::SeqCst);
+    IN_RING3_AT_ENTRY.store(records.in_ring3_at_entry, Ordering::SeqCst);
+    PROCESS_EXITED.store(records.process_exited, Ordering::SeqCst);
+    PROCESS_EXIT_STATUS.store(records.process_exit_status, Ordering::SeqCst);
+    WRITE_FD.store(records.write_fd, Ordering::SeqCst);
+    WRITE_LEN.store(records.write_len, Ordering::SeqCst);
+    for (slot, value) in WRITE_BUF.iter().zip(records.write_buf.iter()) {
+        slot.store(*value, Ordering::SeqCst);
+    }
+    PROBE_INVOKED.store(records.probe_invoked, Ordering::SeqCst);
+    for (slot, value) in PROBE_SEEN_ARGS.iter().zip(records.probe_seen_args.iter()) {
+        slot.store(*value, Ordering::SeqCst);
     }
 }
 

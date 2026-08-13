@@ -56,8 +56,40 @@ pub const USER_READONLY_VIRT: u64 = 0x0000_0080_0000_3000;
 /// ユーザースタックの上端（1 ページ）。iretq 偽フレームの RSP に使う。
 pub const USER_STACK_TOP: u64 = USER_STACK_VIRT + 4096;
 
-/// 遠征専用カーネルスタックの大きさ。#GP が RSP0 経由でここへ切り替わる。
-const EXCURSION_STACK_SIZE: usize = 16 * 1024;
+/// 遠征専用カーネルスタック 1 本の大きさ。#GP が RSP0 経由でここへ切り替わる。
+///
+/// # 64 KiB は実測で決めた（S11-5）
+///
+/// **16 KiB では足りず、静かに溢れた。** `spawn` が来るまで、このスタックに
+/// 乗るのは `syscall_entry` と `dispatch`、あるいは畳みのハンドラだけだった。
+/// **`spawn` は同じスタックの上でローダー一式を走らせる**——`load_user_program`・
+/// `load_user_program_into`・`run_loaded_program`、そして
+/// `UserProcess`（`FileTable` を含む）と `Quarantine` を抱える。
+///
+/// **溢れた先は静的領域で、[`EXCURSION_DEPTH`] が壊れた**（実測。
+/// `docs/troubleshooting.md`）。**メインのカーネルスタックと同じ 64 KiB にする**
+/// ——起動時の `load_user_program` はあちらの上で問題なく走っており、
+/// **同じ処理が乗るなら同じ大きさが要る**（`kernel/src/stack.rs`）。
+///
+/// **実際に使う量は毎起動測って判定行に出す**（[`fill_excursion_stack`] と
+/// [`excursion_stack_high_water`]）。**推測ではなく観測で持つ。**
+const EXCURSION_STACK_SIZE: usize = 64 * 1024;
+
+/// 遠征スタックを埋める既知のバイト（S11-5）。
+///
+/// # なぜ 0 でも 0xFF でもないか
+///
+/// **どちらも普通に書かれる値である。** ゼロ埋めされた領域と区別できず、
+/// **「使われた」と「元からそうだった」が混ざる。** ヒープの毒値（`0xDE`）と
+/// 同じ考え方で、**偶然そうなる確率が低い値を選ぶ。**
+const EXCURSION_STACK_FILL: u8 = 0xE5;
+
+/// 溢れの検出に使う、スタック最下部の見張り区間のバイト数（S11-5）。
+///
+/// **ここが 1 バイトでも変われば、残りを使い切ったということである。**
+/// **ガードページを張れないので**（`.bss` の配列であって、ページ境界に
+/// 揃っていない）、**埋めた値で代替する。**
+const EXCURSION_STACK_CANARY: usize = 256;
 
 // フィールドは値としては読まず、静的領域のアドレスだけを取る（RSP0 用の
 // スタック領域）。dead_code はそのための許容。
@@ -79,7 +111,7 @@ struct ExcursionStack([u8; EXCURSION_STACK_SIZE]);
 /// なくなる形も考えられるが、S11 の到達条件はそこまで要求しない）。
 ///
 /// **固定配列の様式に合わせる**（`MAX_CPUS`・`WORKER_COUNT`・`MAX_OPEN_FILES`）。
-/// **深さ 1 つにつき遠征スタック 16 KiB を静的に持つ**ので、
+/// **深さ 1 つにつき遠征スタックを [`EXCURSION_STACK_SIZE`] だけ静的に持つ**ので、
 /// **増やすと `.bss` がそのぶん増える**（S10-a でガードページの位置が動いた件と同じ面）。
 ///
 /// # 越えたらどうするか
@@ -305,6 +337,62 @@ pub fn excursion_stack_range_at(depth: usize) -> (u64, u64) {
     (bottom, bottom + EXCURSION_STACK_SIZE as u64)
 }
 
+/// 深さ `depth` の遠征スタックを既知のバイトで埋める（S11-5）。
+///
+/// **これから使うスタックを埋めるのであって、今乗っているスタックではない。**
+/// 深さ `d` の [`enter`] は深さ `d-1` のスタック（または メインのカーネルスタック）の
+/// 上で走るので、**自分の足元を消すことにはならない。**
+///
+/// # Safety
+///
+/// `depth` が [`MAX_EXCURSION_DEPTH`] 未満で、そのスタックが今使われていないこと。
+unsafe fn fill_excursion_stack(depth: usize) {
+    if depth >= MAX_EXCURSION_DEPTH {
+        return;
+    }
+    // SAFETY: 呼び出し元契約により、この配列要素は今誰も使っていない。
+    unsafe {
+        let stack = addr_of_mut!(EXCURSION_STACKS[depth]) as *mut u8;
+        core::ptr::write_bytes(stack, EXCURSION_STACK_FILL, EXCURSION_STACK_SIZE);
+    }
+}
+
+/// 深さ `depth` の遠征スタックで、実際に触られた最大バイト数（S11-5）。
+///
+/// **下から走査して、埋めた値でなくなる最初の位置を探す。**
+/// そこから上端までが使われた量である。
+///
+/// **[`fill_excursion_stack`] を通っていないスタックについては意味を持たない**
+/// （埋めていないので、走査は 0 バイト目で止まる）。
+pub fn excursion_stack_high_water(depth: usize) -> usize {
+    if depth >= MAX_EXCURSION_DEPTH {
+        return 0;
+    }
+    // SAFETY: 読み取りのみ。添字は上で範囲内にしてある。
+    let stack = unsafe { addr_of!(EXCURSION_STACKS[depth]) } as *const u8;
+    for offset in 0..EXCURSION_STACK_SIZE {
+        // SAFETY: offset は配列の中である。
+        if unsafe { stack.add(offset).read_volatile() } != EXCURSION_STACK_FILL {
+            return EXCURSION_STACK_SIZE - offset;
+        }
+    }
+    0
+}
+
+/// 深さ `depth` の遠征スタックの見張り区間が無傷か（S11-5）。
+///
+/// **偽なら、そのスタックを使い切って下の静的領域まで書いた疑いがある。**
+/// **溢れは静かに起きる**——このスタックにはガードページが無い
+/// （[`EXCURSION_STACK_CANARY`]）。
+pub fn excursion_stack_canary_intact(depth: usize) -> bool {
+    excursion_stack_high_water(depth) <= EXCURSION_STACK_SIZE - EXCURSION_STACK_CANARY
+}
+
+/// 遠征スタック 1 本の容量（判定行に出す。S11-5）。
+pub fn excursion_stack_capacity() -> usize {
+    EXCURSION_STACK_SIZE
+}
+
 /// 今の遠征の深さ（S11-2）。**0 なら遠征に入っていない。**
 ///
 /// **入れ子で呼ぶ側は、これで上限を確かめてから [`enter`] を呼ぶ。**
@@ -380,6 +468,13 @@ pub unsafe fn enter(
     FAULT_CS.store(0, Ordering::SeqCst);
     FAULT_CR2.store(0, Ordering::SeqCst);
     FAULT_ERROR_CODE.store(0, Ordering::SeqCst);
+
+    // **使う前に既知のバイトで埋める（S11-5）。** 戻ってから走査して、
+    // **実際に使った量と、見張り区間が無傷かを測る。**
+    // **ガードページが無いスタックなので、溢れは静かに起きる**——
+    // 実測で `EXCURSION_DEPTH` を壊した（`docs/troubleshooting.md`）。
+    // SAFETY: このスタックはこれから使うもので、今は誰も乗っていない。
+    unsafe { fill_excursion_stack(depth) };
 
     // RSP0 を遠征専用スタックへ据える。#GP はここへ切り替わる。
     // 破壊 (M5-e-4, drop-rsp0): 据えない。#GP がメインのスタックへ切り替わり、
@@ -531,6 +626,57 @@ pub unsafe fn leave_ring3() -> ! {
 /// 畳みが起きたか（遠征後の会計）。
 pub fn folded() -> bool {
     FOLDED.load(Ordering::SeqCst)
+}
+
+/// 畳みの記録ひとそろい（S11-5）。**入れ子の遠征をまたいで持ち出すためだけの型である。**
+///
+/// # なぜ要るのか
+///
+/// [`enter`] は入場時にこの一式を 0 へ戻し、**戻るときには復元しない。**
+/// 遠征が 1 段だけの間はそれで正しかった——**次の遠征が始まるまで、
+/// 誰も前の遠征の記録を必要としない。**
+///
+/// **`spawn` が入れ子を作ると、そうではなくなる。** 子の遠征が親の記録を
+/// 0 で潰し、**親が畳んで終わったのか終了したのかを、親の判定行が言えなくなる。**
+///
+/// **`crate::vfs::swap_current_files` と `crate::syscall::set_user_window` と
+/// 同じ形である**——遠征の前に控え、戻ったら戻す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FoldRecord {
+    folded: bool,
+    vector: u64,
+    rip: u64,
+    rsp: u64,
+    handler_rsp: u64,
+    cs: u64,
+    cr2: u64,
+    error_code: u64,
+}
+
+/// 今の畳みの記録を控える（S11-5）。
+pub fn save_fold_record() -> FoldRecord {
+    FoldRecord {
+        folded: FOLDED.load(Ordering::SeqCst),
+        vector: FAULT_VECTOR.load(Ordering::SeqCst),
+        rip: FAULT_RIP.load(Ordering::SeqCst),
+        rsp: FAULT_RSP.load(Ordering::SeqCst),
+        handler_rsp: HANDLER_RSP.load(Ordering::SeqCst),
+        cs: FAULT_CS.load(Ordering::SeqCst),
+        cr2: FAULT_CR2.load(Ordering::SeqCst),
+        error_code: FAULT_ERROR_CODE.load(Ordering::SeqCst),
+    }
+}
+
+/// 控えた畳みの記録を戻す（S11-5）。
+pub fn restore_fold_record(record: FoldRecord) {
+    FOLDED.store(record.folded, Ordering::SeqCst);
+    FAULT_VECTOR.store(record.vector, Ordering::SeqCst);
+    FAULT_RIP.store(record.rip, Ordering::SeqCst);
+    FAULT_RSP.store(record.rsp, Ordering::SeqCst);
+    HANDLER_RSP.store(record.handler_rsp, Ordering::SeqCst);
+    FAULT_CS.store(record.cs, Ordering::SeqCst);
+    FAULT_CR2.store(record.cr2, Ordering::SeqCst);
+    FAULT_ERROR_CODE.store(record.error_code, Ordering::SeqCst);
 }
 
 /// 記録したフォルト時 RSP（Ring 3 のユーザースタックのはず）。

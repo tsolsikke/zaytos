@@ -1169,7 +1169,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // `unmap_4kib` を使う。先に置くと壊れた unmap でガードが作れず fail-fast し、
     // 回帰チェックの判定行より前に止まる。通常運転（タイマループ以降）はこの後に
     // 始まるので、steady state は保護される。
-    install_kernel_stack_guard_page(&mut logger);
+    install_kernel_stack_guard_page(&mut logger, &mut allocator);
 
     // ユーザーページのマッピング能力の検証（M5-e-2）。専用サブツリー
     // PML4[USER_PML4_INDEX] へ U=1 ページを張り、両側 U/S 監査で権限分離を実状態で
@@ -1190,7 +1190,6 @@ extern "sysv64" fn kernel_main() -> ! {
     // #GP を予期の畳みでカーネルへ戻すまでを確かめる。
     #[cfg(not(feature = "paging-test"))]
     verify_syscall_roundtrip(&mut logger);
-    verify_nested_excursion(&mut logger);
 
     // ユーザーポインタ検証の検証（M5-f-2-1）。Ring 3 が (buf, len) を渡す syscall で、
     // カーネルが読み書きに踏み込む前に範囲を実 PTE で検証する。正常系と異常系5ケースを
@@ -1570,6 +1569,24 @@ extern "sysv64" fn kernel_main() -> ! {
         // 壊した像を渡してプロセスだけを失敗させるのは S9-b-2 の 2 つ目である。
         logger.error(format_args!(
             "user-load: loading the embedded hello failed: {error:?}; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    // **ユーザープログラムを走らせた後にも、貸し借りを突き合わせる（S11-5）。**
+    //
+    // **上の行はプログラムを走らせる前の状態しか主張していない。**
+    // `spawn` はシステムコールの中で借りて返す経路で、**そこが 1 度でも
+    // 返し忘れれば、以後の確保がすべて `None` になる。**
+    let (taken_after, returned_after, present_after) = kernel::frame_allocator::lending_counts();
+    logger.info(format_args!(
+        "frame-allocator: after the user programs, lent out {taken_after} time(s), given back \
+         {returned_after} time(s), balanced={}, present={present_after}",
+        taken_after == returned_after
+    ));
+    if taken_after != returned_after || !present_after {
+        logger.error(format_args!(
+            "frame-allocator: the lending is not balanced after the user programs; halting"
         ));
         cpu::halt_forever();
     }
@@ -3824,8 +3841,12 @@ const fn fs_inode_at(ino: usize) -> usize {
 /// ルート inode の像内オフセット。
 const FS_ROOT_INODE_AT: usize = fs_inode_at(2);
 
-/// `/etc/motd` の inode（18 番。判定行に出ている）の像内オフセット。
-const FS_MOTD_INODE_AT: usize = fs_inode_at(18);
+/// `/etc/motd` の inode（19 番。判定行に出ている）の像内オフセット。
+///
+/// **S11-5 で 18 から 19 へ動いた。** 像へ `/bin/spawn-test` を 1 本足したので、
+/// **後ろの inode 番号がすべて 1 つずれた**（`docs/coding-standards.md` の
+/// 「実測値は、測った条件が変わると古くなる」）。**測り直した値である。**
+const FS_MOTD_INODE_AT: usize = fs_inode_at(19);
 
 /// ルートディレクトリのデータブロック（実測。判定行の `i_block[0]` に出ている）。
 const FS_ROOT_DIR_BLOCK: usize = 20 * FS_BLOCK_SIZE;
@@ -3834,10 +3855,15 @@ const FS_ROOT_DIR_BLOCK: usize = 20 * FS_BLOCK_SIZE;
 const FS_ROOT_ETC_ENTRY: usize = FS_ROOT_DIR_BLOCK + 68;
 
 /// `/data/indirect-first` の単一間接ブロック（実測。判定行の `single indirect` に出ている）。
-const FS_INDIRECT_TABLE_BLOCK: usize = 55 * FS_BLOCK_SIZE;
+///
+/// **S11-5 で 55 から 58 へ動いた**（像へ `/bin/spawn-test` を足した。
+/// [`FS_MOTD_INODE_AT`] と同じ理由である）。
+const FS_INDIRECT_TABLE_BLOCK: usize = 58 * FS_BLOCK_SIZE;
 
 /// `/etc/motd` のデータブロック（実測）。
-const FS_MOTD_DATA_BLOCK: usize = 58 * FS_BLOCK_SIZE;
+///
+/// **S11-5 で 58 から 61 へ動いた**（[`FS_MOTD_INODE_AT`] と同じ理由）。
+const FS_MOTD_DATA_BLOCK: usize = 61 * FS_BLOCK_SIZE;
 
 /// 種のファイルと同じ木にある `/etc/motd` の中身（S10-a）。
 ///
@@ -5037,6 +5063,14 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
     (33, "the argv terminator was not NULL"),
     (34, "the envp terminator was not NULL"),
     (35, "the auxv terminator (AT_NULL) was missing"),
+    (36, "spawn(\"/bin/hello\") did not return 0"),
+    (37, "spawn(\"/nope\") did not return -ENOENT"),
+    (38, "spawn(\"/etc\") did not return -EISDIR"),
+    (39, "spawn(NULL) did not return -EFAULT"),
+    (
+        40,
+        "spawn(\"/bin/spawn-test\") did not return 0; the grandchild was not refused",
+    ),
 ];
 
 /// `fault-test` が起こす #PF のエラーコード（S9-b-3-2a）。
@@ -5202,8 +5236,12 @@ fn load_embedded_user_program(logger: &mut Logger<SerialPort>) -> Result<(), Use
         let name = program.name;
         // **会計のために短く借りる（S11-3）。** 読むだけなので、すぐ返す。
         let free_before = frame_count_now(logger);
+        // **子の会計を 0 に戻す（S11-5）。** このプログラムが `spawn` で起こした
+        // 子の隔離は、下の突き合わせで足す。
+        kernel::userland::reset_spawn_accounting();
         let (outcome, held, leaked) =
             load_user_program(logger, program.image, true, name, program.argv);
+        let (child_held, child_leaked) = kernel::userland::spawn_accounting();
         let entry = outcome?;
 
         // **終わり方を判定する。** ここで止まっても空間は既に畳まれている
@@ -5215,24 +5253,31 @@ fn load_embedded_user_program(logger: &mut Logger<SerialPort>) -> Result<(), Use
         // `verify_corrupt_user_program_is_not_loaded` が同じ理由で差だけを出している）。
         // **主張の前に確かめる。** 先に「畳んだ」と書くと、会計が合わない場合に
         // **その行が偽のまま残る。**
+        // **子が隔離へ入れたぶんを足す（S11-5）。** 隔離のフレームは世代が退くまで
+        // アロケータへ戻らないので、**親から見ると消えたままである。**
+        // **実測で踏んだ**——`syscall-test` が子を 2 本起こしたところ、24 枚消えて
+        // 自分の隔離は 8 枚だった。差の 16 枚が子 2 本のぶんである。
         let consumed = (free_before - frame_count_now(logger)) as usize;
-        if consumed != held || leaked != 0 {
+        let quarantined = held + child_held;
+        let all_leaked = leaked + child_leaked;
+        if consumed != quarantined || all_leaked != 0 {
             logger.error(format_args!(
                 "user-load: {name} left the allocator short: {consumed} frame(s) consumed but \
-                 {held} quarantined ({leaked} leaked)"
+                 {quarantined} quarantined ({held} its own + {child_held} from the process(es) \
+                 it spawned, {all_leaked} leaked)"
             ));
             return Err(UserLoadError::DestroyAccounting {
                 consumed,
-                quarantined: held,
-                leaked,
+                quarantined,
+                leaked: all_leaked,
             });
         }
         logger.info(format_args!(
             "user-load: {name} ran as a process in its own address space, ended as expected, \
              and the kernel continued after the process was gone; the space was destroyed \
-             ({consumed} frame(s) left the allocator and {held} reached quarantine, match={} \
-             leaked={leaked})",
-            consumed == held
+             ({consumed} frame(s) left the allocator and {quarantined} reached quarantine \
+             ({held} its own + {child_held} spawned), match={} leaked={all_leaked})",
+            consumed == quarantined
         ));
 
         // **空き範囲の数を別の行で出す。** フレームアロケータの容量（256）の
@@ -5940,142 +5985,6 @@ fn verify_ring3_excursion<const CAP: usize>(
          the excursion stack, folded back to the kernel, permission split intact)"
     ));
 }
-
-/// 遠征が 1 段入れ子になって戻ることを確かめる（S11-2）。
-///
-/// # なぜ syscall 越しなのか
-///
-/// **入れ子は「Ring 3 から入った処理の中で、もう一度 Ring 3 へ落ちる」形である。**
-/// カーネルの直線上からは作れない——**外側の遠征に入っていなければ入れ子にならない。**
-///
-/// # 飛び先は同じページの `cli` である
-///
-/// **新しいユーザーページを張らない。** 外側のルーチンの末尾に置いた `cli` は
-/// **それ自体が必ず #GP を起こす**ので、内側の飛び先としてそのまま使える。
-/// **内側は入った瞬間に畳んで戻る。**
-///
-/// # 何を主張しているか
-///
-/// - **内側で深さが 2 になっていること**（外側が 1、内側が 2）
-/// - **内側が畳んで戻り、外側が続きを実行できること**——戻り値が
-///   [`kernel::syscall::NEST_PROBE_RETURN`] としてユーザースタックへ store される
-/// - **外側がそのあと自分の `cli` で畳んで戻ること**
-///
-/// **3 つ目が要である。** 内側の畳みが外側の回復点を壊していれば、
-/// **外側はここへ戻ってこられない。**
-fn verify_nested_excursion(logger: &mut Logger<SerialPort>) {
-    use kernel::paging::active::{ActivePageTable, PageSize};
-    use kernel::ring3;
-    use kernel::syscall;
-
-    let identity = common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
-        .expect("the identity window is canonical");
-    let code_virt = common::addr::VirtAddr::new(ring3::USER_CODE_VIRT)
-        .expect("the user code virtual address is canonical");
-
-    // 前段が張ったユーザーコードページを再利用する。**実状態を読んで確かめてから
-    // 書き換える**（`verify_syscall_roundtrip` と同じ規律）。
-    // SAFETY: CR3 は自前テーブル。配下は恒等窓で読める。
-    let table = unsafe { ActivePageTable::current(identity) };
-    match table.translate(code_virt) {
-        Ok(Some(t)) if t.page_size == PageSize::Size4KiB => {}
-        other => {
-            logger.error(format_args!(
-                "nest: user code page {:#x} is not a 4KiB mapping ({other:?}); halting",
-                code_virt.as_u64()
-            ));
-            cpu::halt_forever();
-        }
-    }
-
-    // 外側のルーチン。
-    //   mov eax, SYS_NEST_PROBE   B8 id
-    //   int 0x80                  CD 80
-    //   mov [rsp-8], rax          48 89 44 24 F8   戻り値をユーザースタックへ
-    //   cli                       FA               外側の畳み出口。**内側の飛び先でもある**
-    let mut code = [0u8; 32];
-    let mut n = 0usize;
-    let emit = |bytes: &[u8], code: &mut [u8; 32], n: &mut usize| {
-        code[*n..*n + bytes.len()].copy_from_slice(bytes);
-        *n += bytes.len();
-    };
-    emit(&[0xB8], &mut code, &mut n);
-    emit(
-        &(syscall::SYS_NEST_PROBE as u32).to_le_bytes(),
-        &mut code,
-        &mut n,
-    );
-    emit(&[0xCD, 0x80], &mut code, &mut n);
-    emit(&[0x48, 0x89, 0x44, 0x24, 0xF8], &mut code, &mut n);
-    let cli_offset = n as u64;
-    emit(&[0xFA], &mut code, &mut n);
-
-    // SAFETY: 恒等窓越しに、張り済みの 4KiB ユーザーページへ書く。単一実行文脈。
-    unsafe {
-        core::ptr::copy_nonoverlapping(code.as_ptr(), ring3::USER_CODE_VIRT as *mut u8, n);
-    }
-
-    // **内側の飛び先は、いま置いた `cli` である。** スタックは外側と重ならない
-    // ように少し下げる（内側は書かないが、重ねない形にしておく）。
-    syscall::set_nest_target(
-        ring3::USER_CODE_VIRT + cli_offset,
-        ring3::USER_STACK_TOP - NEST_STACK_GAP,
-    );
-
-    let main_rsp0_top = gdt::privilege_stack_top();
-    logger.info(format_args!(
-        "nest: entering the outer excursion (depth before = {})",
-        ring3::depth()
-    ));
-
-    // SAFETY: 飛び先は今書いたユーザーページで、末尾の `cli` が必ずフォルトする。
-    // スタックは前段が張った上端。単一実行文脈である。
-    unsafe {
-        ring3::enter(
-            main_rsp0_top,
-            ring3::USER_CODE_VIRT,
-            ring3::USER_STACK_TOP,
-            syscall::window_for_subtree(USER_PML4_INDEX),
-        );
-    }
-
-    let (invoked, depth_inside, inner_folded) = syscall::nest_observation();
-    // 外側の戻り値は、外側のルーチンが `[rsp-8]` へ store している。
-    // SAFETY: 恒等窓越しに、張り済みのユーザースタックページを読む。
-    let returned = unsafe { ((ring3::USER_STACK_TOP - 8) as *const u64).read_volatile() };
-
-    logger.info(format_args!(
-        "nest: outer excursion returned. nested probe invoked={invoked}, depth seen inside={depth_inside},          inner folded={inner_folded}, outer folded={} (depth after = {}), the outer routine          resumed after the nested excursion and stored {returned:#x} (expected {:#x})",
-        ring3::folded(),
-        ring3::depth(),
-        syscall::NEST_PROBE_RETURN
-    ));
-
-    if !invoked || depth_inside != 2 || !inner_folded {
-        logger.error(format_args!(
-            "nest: the nested excursion did not run as expected (invoked={invoked},              depth inside={depth_inside}, inner folded={inner_folded}); halting"
-        ));
-        cpu::halt_forever();
-    }
-    if returned != syscall::NEST_PROBE_RETURN {
-        logger.error(format_args!(
-            "nest: the outer routine did not resume after the nested excursion \
-             (stored {returned:#x}, expected {:#x}); halting",
-            syscall::NEST_PROBE_RETURN
-        ));
-        cpu::halt_forever();
-    }
-    if ring3::depth() != 0 {
-        logger.error(format_args!(
-            "nest: the depth did not come back to 0 (it is {}); halting",
-            ring3::depth()
-        ));
-        cpu::halt_forever();
-    }
-}
-
-/// 入れ子の遠征のユーザースタックを、外側からどれだけ下げるか（S11-2）。
-const NEST_STACK_GAP: u64 = 256;
 
 /// int 0x80 システムコールの往復を検証する（M5-f-1-2）。
 ///
@@ -7309,6 +7218,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "初期スタックの auxv に項目を足し、終端を書かない",
     ),
     (
+        "spawn-eagain-as-enosys",
+        cfg!(feature = "spawn-eagain-as-enosys"),
+        "深さの上限で断ったことを -EAGAIN でなく -ENOSYS で返す",
+    ),
+    (
+        "spawn-keep-child-records",
+        cfg!(feature = "spawn-keep-child-records"),
+        "入れ子の遠征から戻ったとき、親の記録を戻さない",
+    ),
+    (
+        "spawn-child-rsp0",
+        cfg!(feature = "spawn-child-rsp0"),
+        "入れ子の遠征から戻す RSP0 を、親ではなく子自身の上端にする",
+    ),
+    (
         "exception-test",
         cfg!(feature = "exception-test"),
         "起動完了後に意図的な例外を起こす",
@@ -8441,13 +8365,25 @@ fn rehome_framebuffer_to_window(
 /// ページへ 1 段ずつ踏み込んで #PF になる。4KiB を超えるローカル配列を導入するなら、
 /// ガード幅を再検討すること（`deferred-decisions.md` の「大きなスタック配列とガード幅」）。
 ///
-/// # 現在は 4KiB ページであることを前提にする
+/// # 2MiB ページに載っていたら、先に split する（S11-5 で配線した）
 ///
-/// `StackBlock` は現在 `0x100000`〜`0x200000` の 4KiB フリンジにあり、`kernel_guard` は
-/// 4KiB ページで張られている。だから split せずに `unmap_4kib` だけで落とせる。2MiB ページに
-/// 載る構成になったら、その場で fail-fast する（split 分岐はそのとき足す。
-/// `deferred-decisions.md` の「ガードページの split 化」）。
-fn install_kernel_stack_guard_page(logger: &mut Logger<SerialPort>) {
+/// `StackBlock` は長らく `0x100000`〜`0x200000` の 4KiB フリンジにあり、`kernel_guard` は
+/// 4KiB ページで張られていた。だから split せずに `unmap_4kib` だけで落とせた。
+/// **M5-b では「使わない分岐を今書かない」ためにここで fail-fast させ、
+/// `deferred-decisions.md` の「ガードページの split 化」へ条件を登録してあった。**
+///
+/// **S11-5 でその条件が発火した。** `spawn` のために遠征スタックを 16KiB から 64KiB へ
+/// 広げ、像の緩衝（32KiB）を足したところ、**`interrupt-test` の構成で像が `0x400000` を
+/// 越え、`0x200000..0x400000` が丸ごと 2MiB ページで張られるようになった**——
+/// `StackBlock` はその中に居る。**登録しておいた条件が、まったく別の変更で現実になった**
+/// （M5-d の NOP そりで同じことが起きている。`docs/troubleshooting.md`）。
+///
+/// **分岐は登録のとおりに書いた**——2MiB なら `split_huge_page` を通してから `unmap_4kib`
+/// する。**機構は M5-a から在ったので、配線するだけである。**
+fn install_kernel_stack_guard_page(
+    logger: &mut Logger<SerialPort>,
+    allocator: &mut kernel::frame_allocator::FrameAllocator,
+) {
     use kernel::paging::active::{ActivePageTable, PageSize};
 
     let guard = stack::kernel_guard_page();
@@ -8463,18 +8399,44 @@ fn install_kernel_stack_guard_page(logger: &mut Logger<SerialPort>) {
     // 対処を名指しして止める。
     match table.translate(guard_virt) {
         Ok(Some(t)) if t.page_size == PageSize::Size4KiB => {}
-        Ok(Some(t)) => {
-            logger.error(format_args!(
-                "stack-guard: the guard page {:#x} is mapped by a {} page, not 4KiB. \
-                 StackBlock landed on a 2MiB page; the split branch is needed \
-                 (deferred-decisions: ガードページの split 化). halting",
-                guard_virt.as_u64(),
-                match t.page_size {
-                    PageSize::Size2MiB => "2MiB",
-                    PageSize::Size4KiB => "4KiB",
+        Ok(Some(_)) => {
+            // **2MiB ページに載っている。** unmap の前に split する（S11-5）。
+            // SAFETY: 稼働中のテーブルで、対象はカーネルの高位写像の中である。
+            // split は写像内容を変えず、粒度だけを 4KiB へ落とす。
+            match unsafe { table.split_huge_page(guard_virt, allocator) } {
+                Ok(outcome) => {
+                    logger.info(format_args!(
+                        "stack-guard: the guard page {:#x} was on a 2MiB page; split \
+                         {:#x}..+2MiB into 4KiB via a new page table at {:#x} (old pde={:#x})",
+                        guard_virt.as_u64(),
+                        outcome.base_virt.as_u64(),
+                        outcome.table_phys.as_u64(),
+                        outcome.huge_entry
+                    ));
                 }
-            ));
-            cpu::halt_forever();
+                Err(e) => {
+                    logger.error(format_args!(
+                        "stack-guard: the guard page {:#x} is on a 2MiB page and the split \
+                         failed ({e:?}); halting",
+                        guard_virt.as_u64()
+                    ));
+                    cpu::halt_forever();
+                }
+            }
+            // **split の後に、粒度をもう一度読み直す。**
+            // **split したことを主張の根拠にしない**——実状態で 4KiB になっている
+            // ことを、張った側とは独立に確かめる。
+            match table.translate(guard_virt) {
+                Ok(Some(t)) if t.page_size == PageSize::Size4KiB => {}
+                other => {
+                    logger.error(format_args!(
+                        "stack-guard: the guard page {:#x} is still not a 4KiB mapping after \
+                         the split ({other:?}); halting",
+                        guard_virt.as_u64()
+                    ));
+                    cpu::halt_forever();
+                }
+            }
         }
         other => {
             logger.error(format_args!(

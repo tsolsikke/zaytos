@@ -896,6 +896,49 @@ const SYSCALL_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // S11-5: 深さの上限で断ったことを -EAGAIN でなく -ENOSYS で返す。**どちらも
+    // 「できない」を意味するので、雑に見ると同じに見える**（S10-b の 4 つと同じ族）。
+    // **-ENOSYS は「その番号は無い」、-EAGAIN は「その番号は在るが今は受け付け
+    // られない」である。** 上限が効いていることを主張しているのは後者だけで、
+    // `spawn-test` が孫の側からその差を突く。
+    CriticalTest {
+        name: "spawn-eagain-as-enosys",
+        feature: "spawn-eagain-as-enosys",
+        expected_markers: &[
+            "user-run: syscall-test exited with status 40",
+            "the grandchild was not refused",
+        ],
+        forbidden_markers: &["user-load: syscall-test ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // S11-5: 入れ子の遠征から戻ったとき、親の記録を戻さない。**子の write と
+    // 終了状態が、親のものとして判定行に出る。** `hello` は "hello from ring 3" を
+    // 送るので、`syscall-test` が送ったはずのバイト列と食い違う。
+    CriticalTest {
+        name: "spawn-keep-child-records",
+        feature: "spawn-keep-child-records",
+        expected_markers: &["user-run: syscall-test", "halting"],
+        forbidden_markers: &["user-load: syscall-test ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // S11-5: 入れ子の遠征から戻す RSP0 を、親ではなく子自身の遠征スタックの上端に
+    // する。**入れ子でないうちはこの経路を通らないので、入れ子になった瞬間だけ
+    // 壊れる。** すぐには壊れず、次に子を起こしたときに親のフレームを踏む——
+    // **原因から遠いので、`spawn` が戻り先の RSP0 を突き合わせて捕まえる。**
+    CriticalTest {
+        name: "spawn-child-rsp0",
+        feature: "spawn-child-rsp0",
+        expected_markers: &[
+            "spawn: RSP0 came back as",
+            "the parent's next kernel entry would land on the wrong stack",
+            "halting",
+        ],
+        forbidden_markers: &["user-load: syscall-test ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // S9-a: 容量超過の errno を分ける前へ戻す。**この分岐は S9-a で初めて通るように
     // なった経路である。** 通り始めたばかりの経路を手で1度確かめただけにしないため、
     // 永続の破壊として置く。次に dispatch を触ったときに落ちる。
@@ -4237,6 +4280,11 @@ const DIRECT_SERIAL_PORT_ALLOWLIST: &[DirectSerialPortSite] = &[
     // **許可リストの粒度がこの出口までしか届かないことが、この検査の限界である**
     // （型の doc の「粒度の限界」）。
     DirectSerialPortSite {
+        file: "kernel/src/userland.rs",
+        item: "spawn",
+        reason: "spawn の判定行。BKL を解いた区間で走る（ADR-0023 §1）ので、ロガーを渡す道が無い",
+    },
+    DirectSerialPortSite {
         file: "kernel/src/task.rs",
         item: "serial_line",
         reason: "スケジューラの観測行の唯一の出口（31 箇所の呼び出しを覆う。粒度の限界）",
@@ -6912,7 +6960,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 21,
-    full: 126,
+    full: 129,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
