@@ -1638,7 +1638,9 @@ fn ap_heartbeat_loop(serial: &mut SerialPort, slot: usize) -> ! {
     let mut next_heartbeat = crate::interrupts::HEARTBEAT_TICKS;
     loop {
         let ticks = crate::idt::timer_ticks_for(slot);
-        if ticks >= next_heartbeat {
+        // **観測が締まっていれば出さない（S11-11）。** BSP がシェルへ渡した後も
+        // 出し続けると、**起動ログの長さが実時間に依存する。**
+        if ticks >= next_heartbeat && !crate::interrupts::steady_observation_is_closed() {
             next_heartbeat = ticks + crate::interrupts::HEARTBEAT_TICKS;
             let _ = writeln!(
                 serial,

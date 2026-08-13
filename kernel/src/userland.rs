@@ -259,7 +259,11 @@ unsafe fn build_initial_stack(page: *mut u8, page_base: u64, argv: &[&[u8]]) -> 
 ///
 /// **その本数だけ緩衝を持てば、入れ子で上書きされない。**
 /// **`MAX_EXCURSION_DEPTH` を上げれば、ここも自動で増える。**
-const MAX_SPAWN_IN_FLIGHT: usize = MAX_EXCURSION_DEPTH - 1;
+///
+/// **S11-11 で 1 本増えた。** `init` がカーネルの直線上（深さ 0）から
+/// シェルを起こすようになったので、**深さ 0 から `MAX_EXCURSION_DEPTH - 1` まで
+/// が起こす側になる。**
+const MAX_SPAWN_IN_FLIGHT: usize = MAX_EXCURSION_DEPTH;
 
 /// `spawn` が読んだ像を置く場所（S11-5）。
 ///
@@ -337,9 +341,6 @@ static mut SPAWN_ARGVS: [[u8; MAX_ARGV_BYTES]; MAX_SPAWN_IN_FLIGHT] =
 pub enum SpawnError {
     /// 遠征の深さが上限に達している。**これ以上は入れ子にできない。**
     TooDeep,
-    /// 遠征の外から呼ばれた。**カーネル側の不具合である**——`spawn` は Ring 3 から
-    /// しか来ないので、通常は構成できない。
-    NotInExcursion,
     /// パスを引けなかった（無い、途中がディレクトリでない、像が壊れている）。
     Lookup(common::ext2::Ext2Error),
     /// 引けたがディレクトリだった。
@@ -957,17 +958,13 @@ pub fn spawn(
     if depth >= MAX_EXCURSION_DEPTH {
         return Err(SpawnError::TooDeep);
     }
-    // **深さは 1 以上のはずである**——`dispatch` へ来るのは Ring 3 からだけで、
-    // Ring 3 は遠征の中にしかない。**0 ならカーネル側の不具合である。**
-    // **[`SpawnError::TooDeep`] と混ぜない**——あちらは正しい断り方で、
-    // こちらは起きてはいけない状態である。
-    if depth == 0 {
-        return Err(SpawnError::NotInExcursion);
-    }
-    // **緩衝の番号は深さから決まる**（[`MAX_SPAWN_IN_FLIGHT`] の doc）。
-    // 深さ 1 が 0 番である。**上の 2 つの判定が
-    // `1 <= depth < MAX_EXCURSION_DEPTH` を保証しているので、範囲内である。**
-    let slot = depth - 1;
+    // **緩衝の番号は深さそのものである**（[`MAX_SPAWN_IN_FLIGHT`] の doc）。
+    // **上の判定が `depth < MAX_EXCURSION_DEPTH` を保証しているので、範囲内である。**
+    //
+    // **深さ 0 からも呼べる（S11-11）。** `init` がカーネルの直線上から
+    // シェルを起こす。**S11-5 の時点では `dispatch` からしか来なかったので、
+    // 深さ 0 を不具合として拒んでいた。** 呼び出し側が増えたので、その判定を外した。
+    let slot = depth;
 
     let mut port = SerialPort::new(SerialPort::COM1_BASE);
     port.init();

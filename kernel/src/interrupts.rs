@@ -477,6 +477,30 @@ pub unsafe fn spin_with_interrupts_enabled(
 /// 長いと「動いているのか止まっているのか」の判断が遅れる。
 pub const HEARTBEAT_TICKS: u64 = 100;
 
+/// 定常ループの観測を締めたか（S11-11）。**両方のコアが見る。**
+///
+/// # なぜ AP も見るのか
+///
+/// **BSP がシェルへ渡しても、AP は自分のループを回し続ける。**
+/// **AP のハートビートが出続けると、起動ログの長さが実時間に依存する**
+/// ——**捕捉を打ち切った時点で何本出ているかが決まらない。**
+/// **`-smp 1` と `-smp 2` の突き合わせが、その差で落ちた**（実測）。
+///
+/// **観測の終わりは系全体の性質である。** 片方のコアだけ締めても、
+/// **ログとしては締まっていない。**
+static STEADY_OBSERVATION_CLOSED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// 定常ループの観測を締める（S11-11）。**BSP がシェルへ渡す直前に呼ぶ。**
+pub fn close_steady_observation() {
+    STEADY_OBSERVATION_CLOSED.store(true, core::sync::atomic::Ordering::SeqCst);
+}
+
+/// 定常ループの観測が締まっているか。**AP のハートビートが見る。**
+pub fn steady_observation_is_closed() -> bool {
+    STEADY_OBSERVATION_CLOSED.load(core::sync::atomic::Ordering::SeqCst)
+}
+
 /// 最初のティックを待つ上限（TSC サイクル）。
 ///
 /// これを過ぎても 1 件も来ないなら、タイマが設定できていないか、IMR が
@@ -648,6 +672,7 @@ pub unsafe fn run_timer_loop(
     logger: &mut Logger<SerialPort>,
     console: Option<&mut crate::console::Console>,
     stop_after_ticks: u64,
+    shell_after_heartbeats: u64,
     apic: Option<&crate::apic::MappedApic>,
 ) {
     // 最初のティックが来るまで何も出ないとハングと区別できないので、
@@ -1009,6 +1034,8 @@ pub unsafe fn run_timer_loop(
 
     let mut last_ticks = 0u64;
     let mut next_heartbeat = HEARTBEAT_TICKS;
+    // 出したハートビートの本数（S11-11）。**シェルへ渡す時機を決める。**
+    let mut heartbeats = 0u64;
     let mut announced_first = false;
     let mut announced_first_key = false;
     let mut decoder = crate::keyboard::decode::Decoder::new();
@@ -1105,6 +1132,7 @@ pub unsafe fn run_timer_loop(
 
             if ticks >= next_heartbeat {
                 next_heartbeat = ticks + HEARTBEAT_TICKS;
+                heartbeats += 1;
                 // 入力中は画面へ出さない。ハートビートとエコーが同じ
                 // コンソールに出るため、打っている途中に割り込むと入力行が
                 // ぶつ切りになって読めなくなる。行が空のときだけ画面にも出す。
@@ -1195,6 +1223,39 @@ pub unsafe fn run_timer_loop(
             }
         }
         // ← ここで BKL を離す。`hlt` はこの外にある。
+
+        // **シェルへ渡す（S11-11）。** 定常ループの観測はここで締める。
+        //
+        // **ティック数ではなくハートビートの本数で決める。** ティックの閾値だと
+        // **越えた時点で何本出ているかが揺れる**——`hlt` から起きた時点で数えるので、
+        // **`-smp 1` と `-smp 2` で行数が 1 本ずれた**（実測）。
+        // **本数で決めれば、どの構成でも同じ本数だけ出る。**
+        //
+        // **割り込みは止めない。** シェルはキーボードの割り込みで動く。
+        // **戻らない**——`kernel_main` が `init` を走らせ、そちらが `-> !` である。
+        //
+        // **なぜここで締めるのか。** ハートビートは**タイマ経路の健全性**を見る
+        // もので、**シェルとは別の主張である。** シェルが定期的に出す形にすると
+        // **シェルの都合で観測の頻度が変わる。** ここまでで十分な回数のティックを
+        // 観測してあるので、**最後の 1 本を出して締める。**
+        if stop_after_ticks == 0
+            && shell_after_heartbeats != 0
+            && heartbeats >= shell_after_heartbeats
+        {
+            // **揺れる値をこの行へ載せない**（S9-b-3-1 で決めた形）。
+            // **観測したティック数は起動ごとに違う**——`hlt` から起きた時点で
+            // 数えるので、**どこで閾値を越えるかが揺れる**（実測で 256 と 259）。
+            // **数はハートビートの行が出している。** ここが主張するのは
+            // **「会計が合ったまま定常ループを抜ける」**ことだけである。
+            // **両方のコアの観測を締める。** AP のハートビートも止まる。
+            close_steady_observation();
+            logger.info(format_args!(
+                "timer: this is the end of the steady-loop observation, \
+                 timer_accounting_balanced={}; the shell takes the foreground from here",
+                idt::timer_accounting_balances()
+            ));
+            return;
+        }
 
         if stop_after_ticks != 0 && ticks >= stop_after_ticks {
             logger.info(format_args!(

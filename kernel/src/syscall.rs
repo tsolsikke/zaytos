@@ -1918,7 +1918,6 @@ fn errno_for_spawn(error: crate::userland::SpawnError) -> i64 {
     use crate::userland::SpawnError as E;
     match error {
         E::TooDeep => EAGAIN,
-        E::NotInExcursion => EIO,
         E::Lookup(e) | E::Read(e) => errno_for_ext2(e),
         E::IsDirectory => EISDIR,
         E::NotRegularFile => EACCES,

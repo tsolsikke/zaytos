@@ -2360,7 +2360,8 @@ struct LapicTimerTest {
 const LAPIC_TIMER_TESTS: &[LapicTimerTest] = &[
     LapicTimerTest {
         name: "rate",
-        features: &[],
+        // **シェルへ渡さない構成で測る（S11-11）。** 20 秒ぶんのティックが要る。
+        features: &["keep-steady-loop"],
         expect_within_tolerance: true,
         sabotage_marker: "",
         expect_halt_marker: "",
@@ -2616,7 +2617,7 @@ fn cmd_ap_timer_rate() -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
-    let kernel_elf = build_kernel_with_features(&workspace_root, &[])?;
+    let kernel_elf = build_kernel_with_features(&workspace_root, &["keep-steady-loop"])?;
     let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
 
     let serial_log = workspace_root.join("target").join("smp-ap-rate-serial.log");

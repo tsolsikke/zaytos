@@ -1596,8 +1596,115 @@ extern "sysv64" fn kernel_main() -> ! {
     // ここから先は戻らない。ZaytOS で初めて「時間が流れる」状態に入り、
     // メインループがハートビートを出し続ける。`stop_after_ticks` に 0 を
     // 渡すと止まらない（回帰チェックのときだけ有限で打ち切る）。
-    start_timer(&mut logger, console.as_mut(), 0, mapped_apic.as_ref());
+    start_timer(
+        &mut logger,
+        console.as_mut(),
+        0,
+        SHELL_AFTER_HEARTBEATS,
+        mapped_apic.as_ref(),
+    );
+
+    // === S11-11: init がシェルを起こす ===
+    //
+    // **ここから戻らない。**
+    run_init(&mut logger);
 }
+
+/// ハートビートを何本出してからシェルへ渡すか（S11-11）。
+///
+/// # なぜ本数で決めるのか
+///
+/// **ティック数の閾値だと、越えた時点で何本出ているかが揺れる**——
+/// `hlt` から起きた時点で数えるので、**`-smp 1` と `-smp 2` で起動ログの行数が
+/// 1 本ずれた**（実測）。**本数で決めれば、どの構成でも同じ本数だけ出る。**
+///
+/// # なぜ 0 ではないのか
+///
+/// **定常ループの観測を先に済ませる。** **2 本出ていれば「ループが起き続けている」
+/// を示すには足りる**（`--full` の `interrupt-test` が 4 本以上を要求しているのは、
+/// **500 ティックで止める構成でループが最後まで起きていること**を見るためで、
+/// あちらはシェルを走らせない）。
+///
+/// # なぜ長くしないのか
+///
+/// **待っているあいだ、シェルは何もできない。** 手で触る人にとっては
+/// ただの待ち時間である。**観測に足りる最短にする。**
+///
+/// # 測定の構成では渡さない
+///
+/// **タイマの速さを実時間と比べる項目**（`lapic-timer-test rate` と
+/// `smp-ap-test ap-timer-rate`）は**20 秒ぶんのティックを要求する。**
+/// **2 本目のハートビートで渡すと、カーネル側の時間が 2 秒で止まって測れない。**
+/// **`keep-steady-loop` を立てた構成では渡さない**——**シェルはタイマ経路に
+/// 触らないので、この差は測定の対象に影響しない。**
+const SHELL_AFTER_HEARTBEATS: u64 = if cfg!(feature = "keep-steady-loop") {
+    0
+} else {
+    2
+};
+
+/// `init`（S11-11）。**シェルを起こし、終わったら起こし直す。**
+///
+/// # なぜカーネル側に置くのか
+///
+/// **`init` がやることは「シェルを起こし直す」だけで、それはカーネルの直線上でも
+/// 書ける。** **Ring 3 に置く値打ちは、いまのところ「Linux と同じ形」だけである。**
+///
+/// **そして遠征の深さが 1 つ浮く。** `init` を Ring 3 に置くと、
+/// `init`（深さ 1）→ シェル（深さ 2）→ `ls`（深さ 3）となり、
+/// **`MAX_EXCURSION_DEPTH` を 3 へ上げることになる**——**遠征スタックが
+/// 64 KiB 増える。** **得るものが「形が同じ」だけなら、`docs/vision.md` の
+/// 「先回りの抽象化を入れない」に当たる。**
+///
+/// **`docs/roadmap.md` の到達条件は「init と簡易シェル」である。**
+/// **`init` の役目（子の始末）は果たしており、置き場所がカーネル側である。**
+///
+/// # 移す条件
+///
+/// **`init` が子の始末以外の仕事を持つようになったとき。**
+/// そのとき `MAX_EXCURSION_DEPTH` を上げることになる。
+///
+/// # PID 1 が死んだら
+///
+/// **起こし直す。** `docs/vision.md` は「再起動・rescue・停止のいずれか」と
+/// 書いている。**起こし直しを選ぶのは、シェルが落ちても触り続けられるからである。**
+/// **起こせなくなったら止まる**——**同じ失敗を無限に繰り返さない。**
+fn run_init(logger: &mut Logger<SerialPort>) -> ! {
+    /// 起こし直す上限。**同じ失敗を無限に繰り返さない。**
+    const MAX_RESTARTS: usize = 3;
+
+    let mut restarts = 0usize;
+    loop {
+        logger.info(format_args!(
+            "init: starting {SHELL_PATH_TEXT} (restart {restarts} of {MAX_RESTARTS})"
+        ));
+        match kernel::userland::spawn(SHELL_PATH, SHELL_ARGV, 1) {
+            Ok(outcome) => {
+                logger.info(format_args!("init: the shell ended ({outcome:?})"));
+            }
+            Err(error) => {
+                logger.error(format_args!(
+                    "init: could not start {SHELL_PATH_TEXT}: {error:?}"
+                ));
+                cpu::halt_forever();
+            }
+        }
+        restarts += 1;
+        if restarts > MAX_RESTARTS {
+            logger.error(format_args!(
+                "init: the shell ended {MAX_RESTARTS} time(s); not starting it again"
+            ));
+            cpu::halt_forever();
+        }
+    }
+}
+
+/// シェルの像のパス。**NUL は付けない**（`spawn` はスライスを取る）。
+const SHELL_PATH: &[u8] = b"/bin/sh";
+/// 判定行に出すためのパス。
+const SHELL_PATH_TEXT: &str = "/bin/sh";
+/// シェルへ渡す `argv`。**NUL 区切りで並べる**（`spawn` の受け取る形）。
+const SHELL_ARGV: &[u8] = b"sh\0";
 
 /// フレームバッファを検証し、描画ハンドルを作る（M3-a）。
 ///
@@ -2854,7 +2961,7 @@ fn trigger_interrupt_test(
         /// 500 ティックで約 1 万行・800KB 程度に収まる（M4-b-1 のログが 14,400 行
         /// だったので同程度）。通常起動では止めずに回し続ける。
         const STOP_AFTER_TICKS: u64 = 500;
-        start_timer(logger, console, STOP_AFTER_TICKS, None);
+        start_timer(logger, console, STOP_AFTER_TICKS, 0, None);
     }
 
     logger.info(format_args!(
@@ -3324,8 +3431,9 @@ fn start_timer(
     logger: &mut Logger<SerialPort>,
     console: Option<&mut Console>,
     stop_after_ticks: u64,
+    shell_after_heartbeats: u64,
     apic: Option<&kernel::apic::MappedApic>,
-) -> ! {
+) {
     // --- 1. PIT を設定する ---
     // SAFETY: 起動時に 1 回だけ。この時点で IRQ0 はマスクされている
     // （M4-c-3 の remap が全マスクで終わり、以降解除していない）。
@@ -3393,7 +3501,18 @@ fn start_timer(
     // SAFETY: 7 項目を検証し、PIT を設定し、IRQ0 のマスクを外した。
     // ベクタ 0x20 のハンドラはティックを数えて EOI を送る。
     unsafe {
-        interrupts::run_timer_loop(logger, console, stop_after_ticks, apic);
+        interrupts::run_timer_loop(
+            logger,
+            console,
+            stop_after_ticks,
+            shell_after_heartbeats,
+            apic,
+        );
+    }
+
+    // **シェルへ渡すために戻ってきた（S11-11）。** 割り込みは動いたままである。
+    if stop_after_ticks == 0 && shell_after_heartbeats != 0 {
+        return;
     }
 
     // stop_after_ticks == 0 なら run_timer_loop は戻らないので、ここから先は
@@ -3807,7 +3926,7 @@ fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
 /// # 先頭 80 ブロックだけで、読み切れる像になる
 ///
 /// **`s_blocks_count` を 80 に直せば、切り出した先頭がそれ自体で完結する。**
-/// 実際に参照されている最大のブロックは 70 だからである（実測。`/etc/motd` の
+/// 実際に参照されている最大のブロックは 74 だからである（実測。`/etc/motd` の
 /// データブロック）。**80 に余裕を取ってあるので、種が少し増えても収まる。**
 /// **収まらなくなったら健全な対照（下）が最初に落ちる。**
 ///
@@ -3816,7 +3935,7 @@ fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
 /// 落ちる」が実際に働く前に、測って直した。**
 static mut CORRUPT_FS_IMAGE: [u8; CORRUPT_FS_LEN] = [0; CORRUPT_FS_LEN];
 
-/// 切り出すブロック数。**参照されている最大のブロック（70）より大きいこと。**
+/// 切り出すブロック数。**参照されている最大のブロック（74）より大きいこと。**
 const CORRUPT_FS_BLOCKS: usize = 80;
 
 /// 切り出した像のバイト数。
@@ -3847,11 +3966,11 @@ const FS_ROOT_INODE_AT: usize = fs_inode_at(2);
 
 /// `/etc/motd` の inode（21 番。判定行に出ている）の像内オフセット。
 ///
-/// **S11-5 で 18 から 19 へ、S11-9 で 19 から 21 へ動いた。** 像へ
+/// **S11-5 で 18 から 19 へ、S11-9 で 19 から 21 へ、S11-11 で 21 から 22 へ動いた。** 像へ
 /// `/bin/spawn-test`、続いて `/bin/ls` と `/bin/cat` を足したので、**後ろの
 /// inode 番号がそのぶんずれた**（`docs/coding-standards.md` の
 /// 「実測値は、測った条件が変わると古くなる」）。**そのつど測り直している。**
-const FS_MOTD_INODE_AT: usize = fs_inode_at(21);
+const FS_MOTD_INODE_AT: usize = fs_inode_at(22);
 
 /// ルートディレクトリのデータブロック（実測。判定行の `i_block[0]` に出ている）。
 const FS_ROOT_DIR_BLOCK: usize = 20 * FS_BLOCK_SIZE;
@@ -3861,16 +3980,16 @@ const FS_ROOT_ETC_ENTRY: usize = FS_ROOT_DIR_BLOCK + 68;
 
 /// `/data/indirect-first` の単一間接ブロック（実測。判定行の `single indirect` に出ている）。
 ///
-/// **S11-5 で 55 から 58 へ、S11-9 で 58 から 66 へ、S11-10 で 66 から 67 へ動いた**
+/// **S11-5 で 55 から 58 へ、S11-9 で 58 から 66 へ、S11-10 で 67 へ、S11-11 で 71 へ動いた**
 /// （像へプログラムを足し、受け皿の位置を上げて像が育った。
 /// [`FS_MOTD_INODE_AT`] と同じ理由である）。
-const FS_INDIRECT_TABLE_BLOCK: usize = 67 * FS_BLOCK_SIZE;
+const FS_INDIRECT_TABLE_BLOCK: usize = 71 * FS_BLOCK_SIZE;
 
 /// `/etc/motd` のデータブロック（実測）。
 ///
-/// **S11-5 で 58 から 61 へ、S11-9 で 61 から 69 へ、S11-10 で 69 から 70 へ動いた**
+/// **S11-5 で 58 から 61 へ、S11-9 で 61 から 69 へ、S11-10 で 70 へ、S11-11 で 74 へ動いた**
 /// （[`FS_MOTD_INODE_AT`] と同じ理由）。
-const FS_MOTD_DATA_BLOCK: usize = 70 * FS_BLOCK_SIZE;
+const FS_MOTD_DATA_BLOCK: usize = 74 * FS_BLOCK_SIZE;
 
 /// 種のファイルと同じ木にある `/etc/motd` の中身（S10-a）。
 ///
@@ -7287,6 +7406,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "write-ignores-fd",
         cfg!(feature = "write-ignores-fd"),
         "write が fd を見ずに、何番でも出力する",
+    ),
+    (
+        "keep-steady-loop",
+        cfg!(feature = "keep-steady-loop"),
+        "シェルへ渡さず、定常ループを回し続ける（測定のための構成）",
     ),
     (
         "write-half-only",

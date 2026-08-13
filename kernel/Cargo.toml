@@ -277,6 +277,11 @@ write-ignores-fd = []
 # すると ls と cat が起こされる前に止まって繰り返しの経路が通らない。
 # `--syscall-test write-half-only`。
 write-half-only = []
+# S11-11: シェルへ渡さず、定常ループを回し続ける。破壊ではなく、測定のための構成で
+# ある。タイマの速さを実時間と比べる項目(lapic-timer-test rate と smp-ap-test
+# ap-timer-rate)は20秒ぶんのティックを要求するので、2本目のハートビートでシェルへ
+# 渡すと測れない。シェルはタイマ経路に触らないので、この差は測定の対象に影響しない。
+keep-steady-loop = []
 # S1-b-2: ACPI の検証経路の破壊確認。いずれも既定ビルドには入らない。
 # `cargo xtask run --acpi-test <kind>` が有効化する。観測は panic ではなく、
 # 「検出のログが出て、MADT の列挙が完了しないこと」である。
