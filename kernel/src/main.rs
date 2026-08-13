@@ -4060,16 +4060,21 @@ const FS_ROOT_ETC_ENTRY: usize = FS_ROOT_DIR_BLOCK + 68;
 
 /// `/data/indirect-first` の単一間接ブロック（実測。判定行の `single indirect` に出ている）。
 ///
-/// **S11-5 で 55 から 58 へ、S11-9 で 58 から 66 へ、S11-10 で 67 へ、S11-11 で 71 へ動いた**
-/// （像へプログラムを足し、受け皿の位置を上げて像が育った。
-/// [`FS_MOTD_INODE_AT`] と同じ理由である）。
-const FS_INDIRECT_TABLE_BLOCK: usize = 71 * FS_BLOCK_SIZE;
+/// **S11-5 で 55 から 58 へ、S11-9 で 58 から 66 へ、S11-10 で 67 へ、S11-11 で 71 へ、
+/// S12 前の手当ての 3 本目で 72 へ動いた**（像へプログラムを足し、受け皿の位置を
+/// 上げて像が育った。[`FS_MOTD_INODE_AT`] と同じ理由である）。
+///
+/// **5 度目はプログラムを足していない。`sh` が太っただけである**——
+/// 固定の既定（`/` を含まない語を `/bin/` の下で探す）で `.text` が伸び、
+/// **`/bin/sh` が 1 ブロック増えて、後ろのブロックがそのぶんずれた。**
+/// **像に載るのは本数だけでなく、1 本あたりの大きさでもある。**
+const FS_INDIRECT_TABLE_BLOCK: usize = 72 * FS_BLOCK_SIZE;
 
 /// `/etc/motd` のデータブロック（実測）。
 ///
-/// **S11-5 で 58 から 61 へ、S11-9 で 61 から 69 へ、S11-10 で 70 へ、S11-11 で 74 へ動いた**
-/// （[`FS_MOTD_INODE_AT`] と同じ理由）。
-const FS_MOTD_DATA_BLOCK: usize = 74 * FS_BLOCK_SIZE;
+/// **S11-5 で 58 から 61 へ、S11-9 で 61 から 69 へ、S11-10 で 70 へ、S11-11 で 74 へ、
+/// S12 前の手当ての 3 本目で 75 へ動いた**（[`FS_MOTD_INODE_AT`] と同じ理由）。
+const FS_MOTD_DATA_BLOCK: usize = 75 * FS_BLOCK_SIZE;
 
 /// 種のファイルと同じ木にある `/etc/motd` の中身（S10-a）。
 ///

@@ -2229,14 +2229,50 @@ fn cmd_shell_test() -> Result<()> {
     let ran_cat = after_shell.contains("welcome to ZaytOS");
     let ran_hello = after_shell.contains("hello from ring 3");
 
+    // **`/` を含まない語が `/bin/` の下で見つかること（S12 前の手当ての 3 本目）。**
+    //
+    // **`ls` と `cat /etc/motd` を `/bin/` を付けずに送っている。**
+    // **反響でその行が打たれたことを見て、`cannot run` が出ていないことで
+    // 起こせたことを見る。**
+    //
+    // **出力そのもの（`lost+found` など）では区別できない**——
+    // **`/bin/` を付けた側が同じものを出す。** 上の 3 判定と同じ理由である。
+    let typed_bare_ls = after_shell.contains("zaytos$ ls\n");
+    let typed_bare_cat = after_shell.contains("zaytos$ cat /etc/motd\n");
+    let no_cannot_run = !after_shell.contains(": cannot run");
+    let bare_names_resolved = typed_bare_ls && typed_bare_cat && no_cannot_run;
+
+    // **`argv[0]` が打った語のままであること（3 本目）。**
+    //
+    // **`spawn-test beta` を `/bin/` を付けずに送っている。**
+    // **`spawn-test` は `argv[0]` が "spawn-test" でなければ 3 で終わる**
+    // （あちらの doc の終了状態の表）。**前置した `/bin/spawn-test` を
+    // `argv[0]` にしていたら、長さの突き合わせで落ちて 3 になる。**
+    //
+    // **`Exited(0)` は 2 つを同時に主張する**——**解決したパスが
+    // `/bin/spawn-test` であることと、渡した `argv[0]` が `spawn-test` である
+    // ことである。**
+    let argv0_is_as_typed = after_shell.contains("spawn: /bin/spawn-test ended (Exited(0))");
+
     println!("{context}: the shell exited with 0 = {ended}");
     println!("{context}: init started it again = {restarted}");
     println!("{context}: the typed line was echoed = {echoed}");
     println!("{context}: ls listed the root = {ran_ls}");
     println!("{context}: cat printed /etc/motd = {ran_cat}");
     println!("{context}: hello ran = {ran_hello}");
+    println!("{context}: bare names resolved under /bin = {bare_names_resolved}");
+    println!("{context}: argv[0] stayed as typed = {argv0_is_as_typed}");
 
-    if ready && ended && restarted && echoed && ran_ls && ran_cat && ran_hello {
+    if ready
+        && ended
+        && restarted
+        && echoed
+        && ran_ls
+        && ran_cat
+        && ran_hello
+        && bare_names_resolved
+        && argv0_is_as_typed
+    {
         println!("{context}: PASS");
         Ok(())
     } else {
@@ -2244,10 +2280,16 @@ fn cmd_shell_test() -> Result<()> {
     }
 }
 
-/// `--shell-test` が打つ行（S11-11）。**到達条件の 3 つと、締めの `exit`。**
+/// `--shell-test` が打つ行（S11-11。S12 前の手当ての 3 本目で伸ばした）。
 ///
 /// **キー名は QEMU monitor のものである。** `/` は `slash`、空白は `spc`、
 /// `-` は `minus`、改行は `ret` である。
+///
+/// # 順序に意味がある
+///
+/// **`/` を含む側を先に打つ。** あちらは 3 本目より前から通っていた道なので、
+/// **固定の既定を入れて壊れていないことを先に見る。**
+/// **そのあと `/` を含まない側を打つ。**
 const SHELL_TEST_LINES: &[&[&str]] = &[
     // /bin/ls
     &["slash", "b", "i", "n", "slash", "l", "s", "ret"],
@@ -2259,6 +2301,16 @@ const SHELL_TEST_LINES: &[&[&str]] = &[
     // /bin/hello
     &[
         "slash", "b", "i", "n", "slash", "h", "e", "l", "l", "o", "ret",
+    ],
+    // ls（`/` を含まない。`/bin/` の下で見つかること）
+    &["l", "s", "ret"],
+    // cat /etc/motd（`/` を含まない語 + `/` を含む引数）
+    &[
+        "c", "a", "t", "spc", "slash", "e", "t", "c", "slash", "m", "o", "t", "d", "ret",
+    ],
+    // spawn-test beta（`argv[0]` が打った語のままであること）
+    &[
+        "s", "p", "a", "w", "n", "minus", "t", "e", "s", "t", "spc", "b", "e", "t", "a", "ret",
     ],
     // exit
     &["e", "x", "i", "t", "ret"],

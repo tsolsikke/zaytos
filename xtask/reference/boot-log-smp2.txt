@@ -283,7 +283,7 @@ task: cooperative switch verified
 [INFO] ext2: root directory: 6 entr(y/ies): . .. lost+found bin data etc
 [INFO] ext2: resolved /etc/motd to inode 22: 18 byte(s) = "welcome to ZaytOS" (trailing newline trimmed for this line only); matches the seed file byte for byte: true
 [INFO] ext2: /data/direct-max inode=19 size=49152 blocks=12 single indirect=0 last byte=0xce (expected 0xce)
-[INFO] ext2: /data/indirect-first inode=20 size=49153 blocks=13 single indirect=71 last byte=0xcf (expected 0xcf)
+[INFO] ext2: /data/indirect-first inode=20 size=49153 blocks=13 single indirect=72 last byte=0xcf (expected 0xcf)
 [INFO] ext2-corrupt: truncated to 512 bytes (the superblock does not fit) -> TooShort
 [INFO] ext2-corrupt: s_magic zeroed -> BadMagic
 [INFO] ext2-corrupt: s_rev_level set to 0 (no s_inode_size, no s_first_ino) -> UnsupportedRevision(0)
@@ -457,10 +457,10 @@ task: starting preemptive demo with 2 busy-loop workers for 200 ticks
 [INFO] timer: first tick arrived as vector 0x20 - this is the proof that ICW2 was written correctly (it cannot be read back)
 [INFO] timer: this is the end of the steady-loop observation, timer_accounting_balanced=true; the shell takes the foreground from here
 [INFO] init: starting /bin/sh (restart 0 of 3)
-[INFO] spawn: /bin/sh is 12776 byte(s) at inode 16; entering at depth 1 (the parent runs on the main kernel stack, which has a guard page)
-[INFO] user-load: /bin/sh mapped PT_LOAD 0x400000..0x400f05 (filesz=0xf05 memsz=0xf05 w=false)
-[INFO] user-load: /bin/sh mapped PT_LOAD 0x401000..0x401298 (filesz=0x298 memsz=0x298 w=false)
-[INFO] user-load: /bin/sh mapped PT_LOAD 0x402000..0x402030 (filesz=0x30 memsz=0x30 w=true)
+[INFO] spawn: /bin/sh is 16912 byte(s) at inode 16; entering at depth 1 (the parent runs on the main kernel stack, which has a guard page)
+[INFO] user-load: /bin/sh mapped PT_LOAD 0x400000..0x40108f (filesz=0x108f memsz=0x108f w=false)
+[INFO] user-load: /bin/sh mapped PT_LOAD 0x402000..0x402298 (filesz=0x298 memsz=0x298 w=false)
+[INFO] user-load: /bin/sh mapped PT_LOAD 0x403000..0x40305e (filesz=0x5e memsz=0x5e w=true)
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
 [INFO] user-load: /bin/sh initial stack at 0x7fffc0 (argc=1, 16-byte aligned=true)
 sh: ready
