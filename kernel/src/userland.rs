@@ -1034,19 +1034,42 @@ pub fn spawn(
     // 上で走るが、`spawn` からのそれは親の遠征スタックの上で走る。**
     // **遠征スタックは `.bss` の配列で、ガードページが無い**——溢れても止まらず、
     // 隣を静かに書く。**推測せずに測って出す。**
+    // **深さ 0 の親は遠征スタックの上に居ない（S11-11 で直した）。**
+    // `init` はカーネルの直線上から呼ぶので、**メインのカーネルスタック**
+    // （ガードページ付き）の上に居る。**そちらは測らない**——
+    // **測る値打ちがあるのは、ガードの無い遠征スタックのほうである。**
     let stack_probe = 0u8;
     let rsp_now = &stack_probe as *const u8 as u64;
-    let (excursion_bottom, excursion_top) = crate::ring3::excursion_stack_range();
-    let stack_used = excursion_top.saturating_sub(rsp_now);
-    let stack_left = rsp_now.saturating_sub(excursion_bottom);
+    if depth == 0 {
+        logger.info(format_args!(
+            "spawn: {name} is {size} byte(s) at inode {}; entering at depth {} (the parent \
+             runs on the main kernel stack, which has a guard page)",
+            inode.number,
+            depth + 1
+        ));
+    } else {
+        let (excursion_bottom, excursion_top) = crate::ring3::excursion_stack_range();
+        let stack_used = excursion_top.saturating_sub(rsp_now);
+        let stack_left = rsp_now.saturating_sub(excursion_bottom);
+        logger.info(format_args!(
+            "spawn: {name} is {size} byte(s) at inode {}; entering at depth {} (the parent's \
+             excursion stack {excursion_bottom:#x}..{excursion_top:#x} has {stack_used} byte(s) \
+             used and {stack_left} left)",
+            inode.number,
+            depth + 1
+        ));
+    }
 
-    logger.info(format_args!(
-        "spawn: {name} is {size} byte(s) at inode {}; entering at depth {} (the parent's \
-         excursion stack {excursion_bottom:#x}..{excursion_top:#x} has {stack_used} byte(s) \
-         used and {stack_left} left)",
-        inode.number,
-        depth + 1
-    ));
+    // **戻ってくるべき RSP0 を控える（S11-11 で直した）。**
+    //
+    // **S11-5 では「親の遠征スタックの上端」と突き合わせていた。** あのときは
+    // `spawn` が `dispatch` からしか来ず、**親が必ず遠征の中にいた。**
+    // **`init` が深さ 0 から呼ぶようになって、その前提が消えた**——
+    // 深さ 0 の親はメインのカーネルスタックの上に居る。
+    //
+    // **控えて突き合わせる形なら、どちらの深さでも同じ 1 行で言える**
+    // ——**「子が走る前と後で RSP0 が変わっていない」。**
+    let rsp0_before = crate::gdt::privilege_stack_top();
 
     // **親の記録を控える。** 子は `reset_counters` を通る。
     let saved_records = crate::syscall::save_records();
@@ -1130,12 +1153,10 @@ pub fn spawn(
     // 別のスタックに乗る。**壊れるのは、次に子を起こして親のフレームを踏んだ
     // ときである。** 原因から遠いので、ここで突き合わせる。
     let rsp0_after = crate::gdt::privilege_stack_top();
-    let (_, parent_top) = crate::ring3::excursion_stack_range();
-    if rsp0_after != parent_top {
+    if rsp0_after != rsp0_before {
         logger.error(format_args!(
-            "spawn: RSP0 came back as {rsp0_after:#x} but the parent runs on the excursion \
-             stack that ends at {parent_top:#x}; the parent's next kernel entry would land on \
-             the wrong stack. halting"
+            "spawn: RSP0 came back as {rsp0_after:#x} but it was {rsp0_before:#x} before the \
+             child ran; the parent's next kernel entry would land on the wrong stack. halting"
         ));
         common::cpu::halt_forever();
     }

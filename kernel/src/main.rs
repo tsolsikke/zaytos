@@ -1680,7 +1680,19 @@ fn run_init(logger: &mut Logger<SerialPort>) -> ! {
         ));
         match kernel::userland::spawn(SHELL_PATH, SHELL_ARGV, 1) {
             Ok(outcome) => {
-                logger.info(format_args!("init: the shell ended ({outcome:?})"));
+                // **止まった場所が分かる形で出す（S11-11）。** 打鍵が届かない
+                // ときに、**どこまで来ていたかを 1 行で切り分ける。**
+                //
+                // - スキャンコードが 0 なら、**リングまで来ていない**
+                //   （IRQ1 の配送か i8042 の側）
+                // - 0 でなく届けたバイトが 0 なら、**前景か `read(0)` の側**
+                // - 届けたバイトが 0 でなければ、**Ring 3 まで来ている**
+                logger.info(format_args!(
+                    "init: the shell ended ({outcome:?}); the keyboard ring received {} \
+                     scancode(s) and the foreground handed {} byte(s) to Ring 3",
+                    kernel::keyboard::buffer::received_count(),
+                    kernel::input::delivered_count()
+                ));
             }
             Err(error) => {
                 logger.error(format_args!(

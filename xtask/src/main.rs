@@ -1315,6 +1315,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
     const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
+       cargo xtask run --shell-test
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
@@ -1418,6 +1419,9 @@ fn main() -> Result<()> {
                     ACPI_SMP_TESTS[0].name,
                     Some(2),
                 );
+            }
+            if rest.iter().any(|a| a == "--shell-test") {
+                return cmd_shell_test();
             }
             if rest.iter().any(|a| a == "--boot-log-diff") {
                 let update = rest.iter().any(|a| a == "--update-reference");
@@ -2066,6 +2070,142 @@ impl KeyboardAssertions {
             && self.count
             && self.balanced
             && !self.refused_sti
+    }
+}
+
+/// シェルへ打鍵を送り、組み込みの `exit` が効くことを見る（S11-11）。
+///
+/// # 既定の起動ログには入れない
+///
+/// **`sendkey` はタイミングに依存する。** `cmd_keyboard_test` は同じ性質で
+/// **既に `flaky` へ移してある**（確率的な 4 項目の 1 つ）。
+/// **同じものを既定の起動ログへ入れると、参照が揺れる。**
+///
+/// # 何を見るか
+///
+/// **この刻みのシェルは組み込みの `exit` しか持たない。** したがって
+/// **「`exit` と改行を送ったらシェルが終わり、`init` が起こし直す」**が
+/// **唯一の観測である。** **`init` の役目も同時に確かめられる。**
+///
+/// # 止まった場所が分かる形で送る
+///
+/// **送る前に、シェルがプロンプトを出すまで待つ。** 出ていなければ
+/// **打鍵の前で止まっている。**
+/// **送った後は `init: the shell ended` の行を見る**——あの行が
+/// **リングが受けたスキャンコード数と、前景が Ring 3 へ渡したバイト数**を
+/// 出しているので、**どこで止まったかが 1 行で分かる。**
+fn cmd_shell_test() -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let kernel_elf = build_kernel_with_features(&workspace_root, &[])?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let serial_log = workspace_root.join("target").join("shell-test-serial.log");
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+    let monitor_socket = PathBuf::from(format!(
+        "/tmp/zaytos-xtask-shell-{}.sock",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&monitor_socket);
+    ensure_socket_path_fits(&monitor_socket)?;
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: Some(&monitor_socket),
+        accelerator: Accelerator::Tcg,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the shell test")?;
+
+    // **プロンプトが出るまで待つ。上限つき。**
+    let ready_marker = "sh: ready";
+    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    let mut ready = false;
+    while Instant::now() < deadline {
+        if fs::read_to_string(&serial_log)
+            .map(|c| c.contains(ready_marker))
+            .unwrap_or(false)
+        {
+            ready = true;
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    if ready {
+        match connect_monitor_with_retry(&monitor_socket) {
+            Ok(mut stream) => {
+                for key in ["e", "x", "i", "t", "ret"] {
+                    if writeln!(stream, "sendkey {key}").is_err() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(200));
+                }
+            }
+            Err(e) => println!("shell-test: could not reach the QEMU monitor: {e}"),
+        }
+        // **起こし直しが判定行に出るまで待つ。**
+        thread::sleep(Duration::from_secs(3));
+    }
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = fs::remove_file(&monitor_socket);
+
+    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+
+    let context = "shell-test";
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    println!("--- {context}: relevant output ---");
+    for line in serial.lines().filter(|l| {
+        l.contains("init:") || l.contains("sh:") || l.contains("zaytos$") || l.contains("spawn:")
+    }) {
+        println!("{line}");
+    }
+    println!("--- end ---");
+
+    println!("{context}: the shell printed its prompt = {ready}");
+
+    // **打鍵が Ring 3 まで届き、組み込みの `exit` が効いたこと。**
+    let ended = serial.contains("init: the shell ended (Exited(0))");
+    // **`init` が起こし直したこと。**
+    let restarted = serial.contains("init: starting /bin/sh (restart 1 of 3)");
+    // **打った文字が反響していること。** シェルが反響を出しているので、
+    // **Ring 3 まで届いた証拠が出力そのものにある。**
+    let echoed = serial.contains("zaytos$ exit");
+
+    println!("{context}: the shell exited with 0 = {ended}");
+    println!("{context}: init started it again = {restarted}");
+    println!("{context}: the typed line was echoed = {echoed}");
+
+    if ready && ended && restarted && echoed {
+        println!("{context}: PASS");
+        Ok(())
+    } else {
+        bail!("{context}: FAILED")
     }
 }
 
@@ -6565,6 +6705,21 @@ fn cmd_check(full: bool) -> Result<()> {
                 failed.push("boot log diff".to_string());
             }
         }
+
+        // **シェルへ打鍵を送る（S11-11）。** **破壊ではない**——
+        // **打鍵が Ring 3 まで届き、組み込みの `exit` が効き、`init` が
+        // 起こし直すところまでを見る。**
+        // **既定の起動ログには入れていない**（`sendkey` はタイミングに依存する）。
+        // **3 回連続で通ることを確かめてから入れた。落ちる回が出たら `flaky` へ移す。**
+        total += 1;
+        println!("=== xtask check: the shell takes keystrokes and init restarts it");
+        match cmd_shell_test() {
+            Ok(()) => println!("--- shell test: OK"),
+            Err(error) => {
+                println!("--- shell test: FAILED ({error})");
+                failed.push("shell test".to_string());
+            }
+        }
     }
 
     total += 1;
@@ -7027,7 +7182,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 21,
-    full: 133,
+    full: 134,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
