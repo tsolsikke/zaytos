@@ -18,6 +18,22 @@ pub mod link_symbols {
     include!(concat!(env!("OUT_DIR"), "/link_symbols.rs"));
 }
 
+/// この成果物に立っている feature の一覧（`build.rs` が生成する）。
+///
+/// # なぜ持つのか
+///
+/// **どの像が走ったかを、起動ログだけで見分けるためである。**
+/// 破壊 feature の項目が落ちたとき、「破壊が効かなかった」のか
+/// **「破壊の無い像が走った」**のかが、判定行からは分からない
+/// （`docs/verification-coverage.md` の「破壊feature が効いていない形で
+/// 2 項目が落ち、単独では再現しなかった」）。
+///
+/// **出すのは実際にコンパイルされた構成である。** `build.rs` が `CARGO_FEATURE_*`
+/// から導くので、**渡したつもりの構成ではない。**
+pub mod enabled_features {
+    include!(concat!(env!("OUT_DIR"), "/enabled_features.rs"));
+}
+
 pub mod acpi;
 pub mod address_space;
 pub mod apic;

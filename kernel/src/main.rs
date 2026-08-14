@@ -400,6 +400,24 @@ extern "sysv64" fn kernel_main() -> ! {
 
     logger.info(format_args!("ZaytOS kernel: entered _start"));
 
+    // **どの像が走ったかを、起動ログの先頭で言う（S12 前の手当て）。**
+    //
+    // **破壊 feature の項目が落ちたとき、判定行だけでは 2 つを分けられない**
+    // ——「破壊が効かなかった」のか「破壊の無い像が走った」のか
+    // （`docs/verification-coverage.md` の該当節）。この行があれば分かれる。
+    //
+    // **一覧は `build.rs` が `CARGO_FEATURE_*` から生成する。**
+    // **手で並べないので、feature を足したときの書き足し忘れが起きない。**
+    if kernel::enabled_features::ENABLED_FEATURES.is_empty() {
+        logger.info(format_args!("build: no cargo feature is enabled"));
+    } else {
+        logger.info(format_args!(
+            "build: {} cargo feature(s) enabled: {}",
+            kernel::enabled_features::ENABLED_FEATURES.len(),
+            FeatureList(kernel::enabled_features::ENABLED_FEATURES)
+        ));
+    }
+
     // ブートスタックの深さ会計（B-2a）。B-2a-3 で実際の深さが出る。
     report_boot_stack_usage(&mut logger);
 
@@ -9197,4 +9215,22 @@ fn verify_page_tables(
     logger.info(format_args!(
         "paging: the live tables match the plan (read back from the tables themselves)"
     ));
+}
+
+/// 立っている feature を 1 行へ並べる（S12 前の手当て）。
+///
+/// **区切りはカンマである。** `xtask` が渡す形（`--features a,b`）と同じにしておくと、
+/// ログから構成をそのまま貼り直せる。
+struct FeatureList(&'static [&'static str]);
+
+impl core::fmt::Display for FeatureList {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for (index, name) in self.0.iter().enumerate() {
+            if index > 0 {
+                write!(f, ",")?;
+            }
+            write!(f, "{name}")?;
+        }
+        Ok(())
+    }
 }

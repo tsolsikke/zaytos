@@ -42,6 +42,34 @@ fn main() {
     )
     .expect("failed to write link_symbols.rs");
 
+    // **立っている feature の一覧を生成する（S12 前の手当て）。**
+    //
+    // **出すのは「実際にコンパイルされたもの」である。** `cargo` が渡した
+    // `CARGO_FEATURE_*` をそのまま読むので、**xtask が渡したつもりの構成ではなく、
+    // この成果物に効いている構成**が出る。意図と真実が食い違う場合を見分けたいので、
+    // 意図の側を出しては意味が無い。
+    //
+    // **手で並べた一覧を持たない。** 環境変数から導くので、feature を足したときに
+    // 書き足しを忘れる余地が無い（`TEST_HOOKS` の網羅検査が守っているのと同じ穴が、
+    // ここでは構造的に開かない）。
+    let mut features: Vec<String> = std::env::vars()
+        .filter_map(|(key, _)| key.strip_prefix("CARGO_FEATURE_").map(str::to_string))
+        .map(|name| name.to_ascii_lowercase().replace('_', "-"))
+        .collect();
+    features.sort();
+    let listed = features
+        .iter()
+        .map(|name| format!("    {name:?},\n"))
+        .collect::<String>();
+    std::fs::write(
+        format!("{out_dir}/enabled_features.rs"),
+        format!(
+            "// build.rs が CARGO_FEATURE_* から生成した。手で編集しないこと。\n\
+             pub const ENABLED_FEATURES: &[&str] = &[\n{listed}];\n"
+        ),
+    )
+    .expect("failed to write enabled_features.rs");
+
     let target = std::env::var("TARGET").expect("TARGET is not set");
     if target != "x86_64-unknown-none" {
         return;
