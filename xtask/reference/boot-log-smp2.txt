@@ -11,7 +11,7 @@ Hello, ZaytOS!
 [INFO] jumping to kernel entry point 0x100000
 [INFO] ZaytOS kernel: entered _start
 [INFO] boot stack: 632 of 16384 bytes used (high-water; 15752 bytes poison intact)
-[INFO] higher-half: arrived at high VA. RIP=0xffffffff8019c228 in [0xffffffff80100000, 0xffffffff8048add0)=true, RSP=0xffffffff8043abc0 high=true, CR3=0x3d6000 == bootstrap PML4 0x3d6000 = true, identity alive (phys 0x100000 read via low==high) = true
+[INFO] higher-half: arrived at high VA. RIP=0xffffffff8019c198 in [0xffffffff80100000, 0xffffffff8048add0)=true, RSP=0xffffffff8043abc0 high=true, CR3=0x3d6000 == bootstrap PML4 0x3d6000 = true, identity alive (phys 0x100000 read via low==high) = true
 [INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff8044e100 first slot=0xffffffff8044e100 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
 [INFO] interrupts: RFLAGS.IF before cli = false (raw RFLAGS=0x96)
 [INFO] interrupts: RFLAGS.IF after cli = false (raw RFLAGS=0x96)
@@ -73,7 +73,7 @@ Hello, ZaytOS!
 [INFO] paging: required range [framebuffer] 0x80000000..0x803e8000: OK
 [INFO] paging: required range [new page tables (PML4)] 0x3000..0x4000: OK
 [INFO] paging: required range [current RSP] 0x43ae20..0x43ae21: OK
-[INFO] paging: required range [current RIP] 0x19c228..0x19c229: OK
+[INFO] paging: required range [current RIP] 0x19c198..0x19c199: OK
 [INFO] paging: all required ranges mapped. proceeding to CR3 switch (d-2).
 [INFO] paging: current CR3 = 0x3d6000
 [INFO] paging: CR3 switch instruction executed
@@ -107,7 +107,7 @@ Hello, ZaytOS!
 [INFO] console: 102 log line(s) were emitted before the console existed (serial only)
 [INFO] heap: arena 0x48b000..0x58b000 (256 frames, 1 MiB), mapped=true
 [INFO] heap: initialized (1048576 bytes free, 1 block(s))
-[INFO] granularity: executing code (RIP) 0xffffffff8019c228 -> phys 0x19c228, mapped by a 4KiB page at 0xffffffff8019c000 (entry=0x19c023)
+[INFO] granularity: executing code (RIP) 0xffffffff8019c198 -> phys 0x19c198, mapped by a 4KiB page at 0xffffffff8019c000 (entry=0x19c023)
 [INFO] granularity: kernel stack (RSP) 0xffffffff8043a8a0 -> phys 0x43a8a0, mapped by a 4KiB page at 0xffffffff8043a000 (entry=0x43a063)
 [INFO] granularity: heap arena 0x48b000 -> phys 0x48b000, mapped by a 2MiB page at 0x400000 (entry=0x400083)
 [INFO] granularity: framebuffer 0x80000000 -> phys 0x80000000, mapped by a 2MiB page at 0x80000000 (entry=0x800000b3)
@@ -236,7 +236,7 @@ Hello, ZaytOS!
 [INFO] percpu: 2 usable CPU(s) enumerated, 2 per-CPU slot(s) available, every CPU has a slot=true (cpu_id() is the constant 0 and only the bootstrap processor runs, so no slot is indexed out of range yet)
 [INFO] identity-removal: begin. live PML4=0xf000, saved PML4[0]=0x10023
 [INFO] identity-removal: PML4[0] subtree table frames = 7 (28 KiB) become unreachable; intentional leak. subtree frames [256]=10 [511]=4. disjoint(0,256)=true disjoint(0,511)=true disjoint(256,511)=true
-[INFO] identity-removal: required [RIP] 0xffffffff8019c228 -> phys 0x19c228 (huge=false): OK
+[INFO] identity-removal: required [RIP] 0xffffffff8019c198 -> phys 0x19c198 (huge=false): OK
 [INFO] identity-removal: required [RSP] 0xffffffff8043a6f0 -> phys 0x43a6f0 (huge=false): OK
 [INFO] identity-removal: required [direct map window] 0xffff80000000f000 -> phys 0xf000 (huge=false): OK
 [INFO] identity-removal: required [kernel image] 0xffffffff80100000 -> phys 0x100000 (huge=false): OK

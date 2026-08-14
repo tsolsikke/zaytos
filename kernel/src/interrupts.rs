@@ -1133,18 +1133,24 @@ pub unsafe fn run_timer_loop(
             if ticks >= next_heartbeat {
                 next_heartbeat = ticks + HEARTBEAT_TICKS;
                 heartbeats += 1;
-                // 入力中は画面へ出さない。ハートビートとエコーが同じ
-                // コンソールに出るため、打っている途中に割り込むと入力行が
-                // ぶつ切りになって読めなくなる。行が空のときだけ画面にも出す。
-                // シリアルへは常に出るので、観測手段は失われない。
-                let console_for_heartbeat = if line.is_empty() {
-                    console.as_deref_mut()
-                } else {
-                    None
-                };
+                // **画面へは出さない。シリアルへだけ出す。**
+                //
+                // **同じ行に読み手が 2 つある**——**検査（`xtask`）はシリアルを読み、
+                // 人は画面を見る。** ハートビートが主張するのはタイマ経路の健全性で、
+                // **それを確かめるのは検査のほうである。** 画面の側にとっては、
+                // **打鍵とシェルの応答の合間に割り込んでくる行でしかない。**
+                //
+                // **以前は「行が空のときだけ画面にも出す」形だった**——入力中に
+                // 割り込むと入力行がぶつ切りになるためで、**その手当ては
+                // 「画面へ出さない」に含まれる。**
+                //
+                // **検査の主張は 1 つも変わらない。** `xtask` が見ているのは
+                // シリアルのログで、`heartbeat: ticks=` を期待マーカー（9 項目）・
+                // 禁止マーカー（4 項目）・本数（`min_heartbeats` と `--shell-test`）
+                // として使っているが、いずれもシリアル側である。
                 log_both(
                     logger,
-                    console_for_heartbeat,
+                    None,
                     // `heartbeat: ticks=` を行頭に保つ。この部分文字列は xtask の
                     // 期待・禁止マーカーとして 30 箇所近くで使われており、`last_heartbeat_seconds`
                     // が `heartbeat: ticks=256 (2 s), ...` の形を解析している。
@@ -1474,10 +1480,6 @@ impl TypedLine {
             buffer: [0; Self::CAPACITY],
             len: 0,
         }
-    }
-
-    const fn is_empty(&self) -> bool {
-        self.len == 0
     }
 
     fn push(&mut self, character: char) {

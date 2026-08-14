@@ -513,6 +513,18 @@ fn report_recursive_acquire_and_halt(entry: KernelEntry) -> ! {
         "[ERROR]   the BKL is held with IF=0, so no interrupt can re-enter on the same core; \
          reaching here means that invariant is broken"
     );
+    // **破壊が待った長さを出す（S12 前の手当て）。**
+    // **上限よりはるかに短いことが、発火が時間に依存していないことの観測である。**
+    #[cfg(feature = "bkl-hold-with-if-set-test")]
+    {
+        let waited = common::cpu::read_timestamp_counter()
+            .wrapping_sub(SABOTAGE_WAIT_START.load(Ordering::Relaxed));
+        let _ = writeln!(
+            serial,
+            "[ERROR]   the sabotage waited {waited} cycle(s) of the {SABOTAGE_TICK_WAIT_CYCLES} \
+             bound before this tick arrived"
+        );
+    }
     let _ = writeln!(serial, "[ERROR] halting (cli + hlt loop)");
     common::cpu::halt_forever();
 }
@@ -624,4 +636,61 @@ pub unsafe fn sabotage_enable_interrupts_while_held() {
     );
     // SAFETY: 破壊 feature 専用。呼び出し側が BKL を保持している。
     unsafe { common::cpu::enable_interrupts() }
+
+    // **ここで待つ。戻らない。**
+    //
+    // **発火には、ティックが BKL を保持している区間の中で届く必要がある。**
+    // 定常ループは保持区間の外で `hlt` するので、**戻ってしまうと、区間の長さは
+    // 「その周回でたまたま何をしたか」で決まる。** 実際そうなっていた——
+    // ハートビートの回のコンソールへの転送が窓を作っており、**画面へ出すのを
+    // やめた瞬間に発火しなくなった**（`docs/verification-coverage.md` の
+    // 「破壊が、偶然の所要時間に乗って発火していた」）。
+    //
+    // **待てば、区間の長さは破壊の側が決める。**
+    SABOTAGE_WAIT_START.store(common::cpu::read_timestamp_counter(), Ordering::Relaxed);
+    loop {
+        // **上限を必ず付ける**（[`WAIT_TIMEOUT_CYCLES`] と同じ規律）。
+        // **上限に達したら、発火しなかったこと自体を出して止める。**
+        // 破壊が効かなかったことを静かに通さない。
+        let waited = common::cpu::read_timestamp_counter()
+            .wrapping_sub(SABOTAGE_WAIT_START.load(Ordering::Relaxed));
+        if waited > SABOTAGE_TICK_WAIT_CYCLES {
+            report_sabotage_did_not_fire_and_halt(waited);
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// 破壊 `bkl-hold-with-if-set` が待ち始めた TSC（S12 前の手当て）。
+///
+/// **発火したときに「どれだけ待ったか」を出すために持つ。**
+/// 待ちが上限よりはるかに短いことが、**時間に依存しなくなったことの観測である。**
+#[cfg(feature = "bkl-hold-with-if-set-test")]
+static SABOTAGE_WAIT_START: AtomicU64 = AtomicU64::new(0);
+
+/// 破壊 `bkl-hold-with-if-set` の待ちの上限（TSC サイクル）。
+///
+/// **待つのはティック 1 本ぶんである**（100Hz なので 10ms 相当）。
+/// **上限はその桁を大きく超える量にしてある**——上限に達したことが
+/// 「遅かった」ではなく**「来なかった」**を意味するようにする。
+///
+/// **TSC は時刻源として使わない**（`common::cpu::read_timestamp_counter` の doc）。
+/// ここでも絶対時間ではなく**回る量の目安**として使っており、
+/// [`WAIT_TIMEOUT_CYCLES`] と同じ扱いである。
+/// 実測は 29,102,067 サイクル（TCG、`-smp 2`、1 回）で、上限の約 3 パーセントだった。
+#[cfg(feature = "bkl-hold-with-if-set-test")]
+const SABOTAGE_TICK_WAIT_CYCLES: u64 = 1_000_000_000;
+
+/// 破壊が発火しなかったことを報告して停止する（S12 前の手当て）。
+#[cfg(feature = "bkl-hold-with-if-set-test")]
+fn report_sabotage_did_not_fire_and_halt(waited: u64) -> ! {
+    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    serial.init();
+    let _ = writeln!(
+        serial,
+        "[ERROR] bkl: the sabotage did not fire; waited {waited} cycle(s) with IF=1 while \
+         holding the lock and no tick arrived (bound {SABOTAGE_TICK_WAIT_CYCLES})"
+    );
+    let _ = writeln!(serial, "[ERROR] halting (cli + hlt loop)");
+    common::cpu::halt_forever();
 }

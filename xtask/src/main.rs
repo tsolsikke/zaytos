@@ -4512,6 +4512,11 @@ const DIRECT_SERIAL_PORT_ALLOWLIST: &[DirectSerialPortSite] = &[
         item: "sabotage_enable_interrupts_while_held",
         reason: "破壊 bkl-hold-with-if-set-test の実装。保持したまま報せる",
     },
+    DirectSerialPortSite {
+        file: "kernel/src/bkl.rs",
+        item: "report_sabotage_did_not_fire_and_halt",
+        reason: "破壊が発火しなかったことの報告。保持したまま停止する経路である",
+    },
     // (b) 戻らない経路。**ADR-0023 で BKL を取らないと決めてある。**
     // 取らないと決めた以上、その経路の行も BKL の外にしかなりえない。
     DirectSerialPortSite {
