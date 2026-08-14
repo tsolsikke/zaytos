@@ -1,0 +1,194 @@
+diff --git a/kernel/src/main.rs b/kernel/src/main.rs
+index 907c2a2..4b9362b 100644
+--- a/kernel/src/main.rs
++++ b/kernel/src/main.rs
+@@ -637,6 +637,12 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
+         );
+     }
+ 
++    // === 一時的な計測プローブ（ADR-0015 の判断用。計測後に削除する） ===
++    if let Some(console) = console.as_ref() {
++        let layout = *console.framebuffer_layout();
++        measure_transfer_cost(&mut logger, &layout, &mut allocator, &mapped_ranges);
++    }
++
+     log_both(
+         &mut logger,
+         console.as_mut(),
+@@ -943,3 +949,176 @@ fn announce_console_start(logger: &mut Logger<SerialPort>, console: &mut Console
+          (serial only)"
+     ));
+ }
++
++/// 一時的な計測プローブ（ADR-0015 の判断用。計測後に削除する）。
++///
++/// タイマがまだ無いため rdtsc でサイクル数を数える。`rdtsc` は直列化命令
++/// ではないが、ここで測るのは数十万〜数千万サイクルの塊であり、その程度の
++/// 誤差は判断に影響しない。
++fn measure_transfer_cost(
++    logger: &mut Logger<SerialPort>,
++    layout: &FramebufferLayout,
++    allocator: &mut frame_allocator::FrameAllocator,
++    mapped_ranges: &MappedRanges,
++) {
++    let pixel_count = (layout.width() as u64) * (layout.height() as u64);
++    let byte_count = pixel_count * 4;
++
++    // 計測用のバッファを別途確保する（コンソールのバックバッファとは別）。
++    let frames_needed = byte_count.div_ceil(frame_allocator::FRAME_SIZE);
++    let Some(start_frame) = allocator.allocate_contiguous(frames_needed) else {
++        logger.error(format_args!(
++            "probe: allocate_contiguous({frames_needed}) failed; free={} largest={}",
++            allocator.free_frame_count(),
++            allocator.largest_contiguous_free_frames()
++        ));
++        return;
++    };
++    let scratch = start_frame * frame_allocator::FRAME_SIZE;
++    let scratch_end = scratch + frames_needed * frame_allocator::FRAME_SIZE;
++    if !mapped_ranges.contains_range(scratch, scratch_end) {
++        logger.error(format_args!("probe: scratch buffer not mapped; aborting"));
++        return;
++    }
++    logger.info(format_args!(
++        "probe: scratch {scratch:#x}..{scratch_end:#x}, framebuffer {:#x}..{:#x}",
++        layout.base(),
++        layout.end()
++    ));
++
++    // (1) フレームバッファへの全面書き込み（PCD、キャッシュ無効）。
++    let start = cpu::read_timestamp_counter();
++    for index in 0..pixel_count {
++        // SAFETY: index < pixel_count であり、形状の検証により
++        // pixel_count * 4 <= size_bytes。
++        unsafe {
++            core::ptr::write_volatile((layout.base() + index * 4) as *mut u32, 0x0011_2233);
++        }
++    }
++    let fb_fill = cpu::read_timestamp_counter() - start;
++
++    // (2) 通常 RAM（キャッシュ有効）への全面書き込み。
++    let start = cpu::read_timestamp_counter();
++    for index in 0..pixel_count {
++        // SAFETY: scratch は今確保したばかりのマップ済み領域で、
++        // pixel_count * 4 バイトに収まる。
++        unsafe {
++            core::ptr::write_volatile((scratch + index * 4) as *mut u32, 0x0044_5566);
++        }
++    }
++    let ram_fill = cpu::read_timestamp_counter() - start;
++
++    // (3) 全面フラッシュ（実装と同じ copy_nonoverlapping）。
++    let start = cpu::read_timestamp_counter();
++    // SAFETY: 両範囲ともマップ済み・重複なしで、pixel_count 個の u32 に収まる。
++    unsafe {
++        core::ptr::copy_nonoverlapping(
++            scratch as *const u32,
++            layout.base() as *mut u32,
++            pixel_count as usize,
++        );
++    }
++    let flush_all = cpu::read_timestamp_counter() - start;
++
++    // (1b)(2b) 2 周目。1 周目との差でキャッシュが効いているかを見る。
++    // PCD が実際に効いているなら、フレームバッファは 2 周目も 1 周目と同程度に
++    // 遅いはず。2 周目が大幅に速ければ、その領域はキャッシュされている
++    // （= PCD が honored されていない）と判断できる。
++    let start = cpu::read_timestamp_counter();
++    for index in 0..pixel_count {
++        // SAFETY: (1) と同じ範囲。
++        unsafe {
++            core::ptr::write_volatile((layout.base() + index * 4) as *mut u32, 0x0077_8899);
++        }
++    }
++    let fb_fill_second = cpu::read_timestamp_counter() - start;
++
++    let start = cpu::read_timestamp_counter();
++    for index in 0..pixel_count {
++        // SAFETY: (2) と同じ範囲。
++        unsafe {
++            core::ptr::write_volatile((scratch + index * 4) as *mut u32, 0x00AA_BBCC);
++        }
++    }
++    let ram_fill_second = cpu::read_timestamp_counter() - start;
++
++    // (4) 1 セル分（8x16）の転送を 1000 回。
++    const CELL_WIDTH: u64 = 8;
++    const CELL_HEIGHT: u64 = 16;
++    const CELL_REPEATS: u64 = 1000;
++    let stride_bytes = (layout.stride() as u64) * 4;
++    let start = cpu::read_timestamp_counter();
++    for _ in 0..CELL_REPEATS {
++        for row in 0..CELL_HEIGHT {
++            let offset = row * stride_bytes;
++            // SAFETY: セルは画面左上に収まっており範囲内。
++            unsafe {
++                core::ptr::copy_nonoverlapping(
++                    (scratch + offset) as *const u32,
++                    (layout.base() + offset) as *mut u32,
++                    CELL_WIDTH as usize,
++                );
++            }
++        }
++    }
++    let cell_total = cpu::read_timestamp_counter() - start;
++
++    // (5) 1 行分（幅 640px x 16 行）の転送を 100 回。
++    const LINE_WIDTH: u64 = 640;
++    const LINE_REPEATS: u64 = 100;
++    let start = cpu::read_timestamp_counter();
++    for _ in 0..LINE_REPEATS {
++        for row in 0..CELL_HEIGHT {
++            let offset = row * stride_bytes;
++            // SAFETY: 範囲内。
++            unsafe {
++                core::ptr::copy_nonoverlapping(
++                    (scratch + offset) as *const u32,
++                    (layout.base() + offset) as *mut u32,
++                    LINE_WIDTH as usize,
++                );
++            }
++        }
++    }
++    let line_total = cpu::read_timestamp_counter() - start;
++
++    logger.info(format_args!(
++        "probe: pixels={pixel_count} bytes={byte_count}"
++    ));
++    logger.info(format_args!(
++        "probe: (1) framebuffer fill (PCD)      = {fb_fill} cycles ({} cyc/px)",
++        fb_fill / pixel_count
++    ));
++    logger.info(format_args!(
++        "probe: (2) ram buffer fill (cacheable) = {ram_fill} cycles ({} cyc/px)",
++        ram_fill / pixel_count
++    ));
++    logger.info(format_args!(
++        "probe: (1b) framebuffer fill 2nd pass  = {fb_fill_second} cycles ({} cyc/px)",
++        fb_fill_second / pixel_count
++    ));
++    logger.info(format_args!(
++        "probe: (2b) ram buffer fill 2nd pass   = {ram_fill_second} cycles ({} cyc/px)",
++        ram_fill_second / pixel_count
++    ));
++    logger.info(format_args!(
++        "probe: (3) full flush ram->fb          = {flush_all} cycles ({} cyc/px)",
++        flush_all / pixel_count
++    ));
++    logger.info(format_args!(
++        "probe: (4) one 8x16 cell flush         = {} cycles (avg of {CELL_REPEATS})",
++        cell_total / CELL_REPEATS
++    ));
++    logger.info(format_args!(
++        "probe: (5) one 640x16 line flush       = {} cycles (avg of {LINE_REPEATS})",
++        line_total / LINE_REPEATS
++    ));
++    // 判定の中心。キャッシュ有効と無効で差が出ていなければ、測れているのは
++    // メモリ階層ではない（ADR-0015 Addendum）。
++    logger.info(format_args!(
++        "probe: ratio fb_fill/ram_fill = {}/100 (x100)",
++        fb_fill * 100 / ram_fill.max(1)
++    ));
++
++    // プローブの直後に halt するため、確保したフレームは解放せず放置する。
++}
