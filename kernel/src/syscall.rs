@@ -1432,7 +1432,7 @@ const DIRENT64_MAX_RECORD: usize = (DIRENT64_HEADER_LEN + 255 + 1).next_multiple
 /// **どれも「0 という値を持っている」のではない。**
 ///
 /// - `st_dev` / `st_rdev`——**デバイス番号の体系が無い。** 像は 1 つで、
-///   `BlockDevice` の trait も引いていない（`docs/roadmap.md` の S10）
+///   `BlockDevice` の trait も引いていない（`docs/roadmap.md` の S10 の締め）
 /// - `st_blksize`——**入出力の推奨単位という概念が無い。** ブロックサイズなら
 ///   `Ext2::block_size` で分かるが、**`st_blksize` はそれとは別の意味である**
 ///   ので、分かる値で埋めない
