@@ -1489,6 +1489,24 @@ extern "sysv64" fn kernel_main() -> ! {
                 stats.transferred_percent()
             ),
         );
+        // 転送の所要（S12 前の手当て）。**画面へ書く経路を BKL の内側へ入れてよいかの
+        // 判断材料である。** サイクルは時刻ではなく回る量の目安として読む。
+        log_both(
+            &mut logger,
+            console.as_mut(),
+            LogLevel::Info,
+            format_args!(
+                "console: flush cycles total={} max={}, full-screen flush(es)={} max={}, \
+                 write path (draw + flush) count={} total={} max={}",
+                stats.flush_cycles_total,
+                stats.flush_cycles_max,
+                stats.full_screen_flush_count,
+                stats.full_screen_cycles_max,
+                stats.write_count,
+                stats.write_cycles_total,
+                stats.write_cycles_max
+            ),
+        );
     }
 
     // === S4-c-2: AP 用アイドルタスクを登録する ===

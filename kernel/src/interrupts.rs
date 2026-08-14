@@ -1034,6 +1034,23 @@ pub unsafe fn run_timer_loop(
 
     let mut last_ticks = 0u64;
     let mut next_heartbeat = HEARTBEAT_TICKS;
+    // **1 ティックあたりの TSC サイクル。** 前のハートビートからの差で出す。
+    //
+    // **判定行に出すのは、揺れる値だからである**（TCG と KVM で桁が違う）。
+    // **docs へ書くと測った条件が変わったときに古くなる。**
+    // **対比の相手は `console:` の行の所要である**——あちらは BKL を保持している
+    // 区間へ入る量で、**「1 行を書くあいだにティックが何本入りうるか」がここで出る。**
+    // **`console:` の行には出せない。** あれは `sti` より前に出るので、
+    // その時点ではティックが進んでいない。
+    // **両方を同じ時点で読む。** 片方を `0` で始めると、ループへ入る前に
+    // 進んでいたぶん（較正が回した PIT のティック）が分母に入り、
+    // 1 本目の値だけが桁で外れる（実測で 154,813 と 37,563,944）。
+    //
+    // **1 本目は `0` が出る。** ループへ入る時点で既に閾値を越えているので、
+    // 最初のハートビートは基準と同じティックで出る（差が 0 なので
+    // `checked_div` が `None` を返す）。**値が乗るのは 2 本目からである。**
+    let mut last_heartbeat_tsc = cpu::read_timestamp_counter();
+    let mut last_heartbeat_ticks = idt::timer_ticks();
     // 出したハートビートの本数（S11-11）。**シェルへ渡す時機を決める。**
     let mut heartbeats = 0u64;
     let mut announced_first = false;
@@ -1133,6 +1150,14 @@ pub unsafe fn run_timer_loop(
             if ticks >= next_heartbeat {
                 next_heartbeat = ticks + HEARTBEAT_TICKS;
                 heartbeats += 1;
+                let now_tsc = cpu::read_timestamp_counter();
+                let elapsed_ticks = ticks.wrapping_sub(last_heartbeat_ticks);
+                let tsc_per_tick = now_tsc
+                    .wrapping_sub(last_heartbeat_tsc)
+                    .checked_div(elapsed_ticks)
+                    .unwrap_or(0);
+                last_heartbeat_tsc = now_tsc;
+                last_heartbeat_ticks = ticks;
                 // **画面へは出さない。シリアルへだけ出す。**
                 //
                 // **同じ行に読み手が 2 つある**——**検査（`xtask`）はシリアルを読み、
@@ -1157,7 +1182,7 @@ pub unsafe fn run_timer_loop(
                     // S4-a で足す `cpu=` は、その後ろに置く。
                     // AP 側は別の行（`smp: ap heartbeat: cpu=`）なので、この数え上げに混ざらない。
                     format_args!(
-                        "heartbeat: ticks={ticks} ({} s), cpu={}, ap_ticks={}, ticks_total={}, \
+                        "heartbeat: ticks={ticks} ({} s), tsc_per_tick={tsc_per_tick}, cpu={}, ap_ticks={}, ticks_total={}, \
                      lapic_timer_deliveries={}, timer_accounting_balanced={}, \
                      max kernel entry depth={}, ap_current={} ap_sched_passes={}, \
                      ipi_sent={} ipi_recv_cpu1={}, tlb_gen={} flush_cpu1={}, \

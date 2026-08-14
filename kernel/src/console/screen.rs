@@ -43,6 +43,28 @@ pub struct FlushStats {
     pub transferred_bytes: u64,
     /// 全面転送 1 回分のバイト数。
     pub full_screen_bytes: u64,
+    /// 転送に費やした TSC サイクルの合計（S12 前の手当て）。
+    ///
+    /// **時刻ではなく、回る量の目安である**（`common::cpu::read_timestamp_counter`）。
+    /// **測る理由は、転送が BKL を保持している区間へ入るかを判断するためである**
+    /// ——`sys_write` は BKL の内側で走る（`kernel/src/syscall.rs`）。
+    pub flush_cycles_total: u64,
+    /// 1 回の転送に費やした TSC サイクルの最大。
+    pub flush_cycles_max: u64,
+    /// そのうち全面転送だった回数。**スクロールで `mark_all` が呼ばれた回である。**
+    pub full_screen_flush_count: u64,
+    /// 全面転送 1 回の TSC サイクルの最大。**部分転送と桁が違うはずなので分けて持つ。**
+    pub full_screen_cycles_max: u64,
+    /// 1 行を書く経路（描画 + 転送）の TSC サイクルの合計。
+    ///
+    /// **転送だけでは足りない。** `write!` 1 回は、字を描いてから転送する
+    /// （[`Console::put_char`] がバックバッファへ書き、[`Console::flush`] が送る）。
+    /// **BKL の内側へ入るのはこの経路の全体である。**
+    pub write_cycles_total: u64,
+    /// 1 行を書く経路の TSC サイクルの最大。
+    pub write_cycles_max: u64,
+    /// その経路を通った回数（`write!` / `writeln!` の回数）。
+    pub write_count: u64,
 }
 
 impl FlushStats {
@@ -183,10 +205,20 @@ impl Console {
         let Some(rect) = self.dirty.take() else {
             return;
         };
+        let started = common::cpu::read_timestamp_counter();
         match self.back.flush_rect(&mut self.front, rect) {
             Ok(transferred) => {
+                let elapsed = common::cpu::read_timestamp_counter().wrapping_sub(started);
                 self.stats.flush_count += 1;
                 self.stats.transferred_bytes += transferred;
+                self.stats.flush_cycles_total += elapsed;
+                self.stats.flush_cycles_max = self.stats.flush_cycles_max.max(elapsed);
+                // **全面かどうかは転送量で分かる。** `mark_all` が呼ばれた回である。
+                if transferred == self.stats.full_screen_bytes {
+                    self.stats.full_screen_flush_count += 1;
+                    self.stats.full_screen_cycles_max =
+                        self.stats.full_screen_cycles_max.max(elapsed);
+                }
             }
             Err(error) => report_flush_failure_and_halt(&error),
         }
@@ -244,8 +276,13 @@ impl fmt::Write for Console {
     /// はログ 1 行を `writeln!` 1 回で書くので、この形でログ 1 行 =
     /// 転送 1 回になる（ADR-0017）。
     fn write_fmt(&mut self, args: fmt::Arguments<'_>) -> fmt::Result {
+        let started = common::cpu::read_timestamp_counter();
         let result = fmt::write(self, args);
         self.flush();
+        let elapsed = common::cpu::read_timestamp_counter().wrapping_sub(started);
+        self.stats.write_cycles_total += elapsed;
+        self.stats.write_cycles_max = self.stats.write_cycles_max.max(elapsed);
+        self.stats.write_count += 1;
         result
     }
 }
@@ -305,6 +342,7 @@ mod tests {
             flush_count: 10,
             transferred_bytes: 4_096_000,
             full_screen_bytes: 4_096_000,
+            ..FlushStats::default()
         };
         // 10 回全面転送していれば 40,960,000 バイト。実際は 1 回分だけ。
         assert_eq!(stats.full_screen_equivalent_bytes(), 40_960_000);
@@ -317,6 +355,7 @@ mod tests {
             flush_count: 5,
             transferred_bytes: 5 * 4_096_000,
             full_screen_bytes: 4_096_000,
+            ..FlushStats::default()
         };
         assert_eq!(stats.transferred_percent(), 100);
     }
