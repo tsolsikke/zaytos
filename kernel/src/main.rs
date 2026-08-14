@@ -8495,7 +8495,9 @@ fn activate_direct_map_window(logger: &mut Logger<SerialPort>) {
 
     // SAFETY: A-1 が高位窓を張り CR3 を新テーブルへ切り替え済みで、恒等も残っている。
     // replace_direct_map の # Safety（新窓のテーブルへ切り替えた後で呼ぶこと）を満たす。
-    // シングルコアで、この区間に他の実行文脈は無い。
+    // この区間に他の実行文脈は無い。AP を起こすのは `run_timer_loop` の中
+    // （`interrupts.rs`）で、ここより後である。**この根拠は起動順に依っている。
+    // AP を起こす位置がこの区間より前へ動くなら、書き直すこと。**
     if let Err(e) = unsafe { common::addr::replace_direct_map(high) } {
         logger.error(format_args!(
             "direct-map A-2: replace_direct_map failed: {e:?}; halting"

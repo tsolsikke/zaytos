@@ -472,10 +472,10 @@ pub fn init_direct_map(map: DirectMap) -> Result<(), DirectMapInitError> {
     // 値を先に書き、最後に READY を立てる（公開パターン）。
     direct_map_slot::BASE.store(map.base().as_u64(), Ordering::Relaxed);
     direct_map_slot::LENGTH.store(map.length(), Ordering::Relaxed);
-    // **Release はコンパイラの並べ替えを防ぐために今必要である。**
-    // シングルコアであっても、上の 2 つのストアをこの store より後ろへ
-    // 動かされると、READY が立った後に古い値を読む経路ができる。
-    // SMP を見越した先回りではない（`docs/vision.md` の規律による）。
+    // **Release はコンパイラの並べ替えを防ぐために要る。** 上の 2 つのストアを
+    // この store より後ろへ動かされると、READY が立った後に古い値を読む経路が
+    // できる。**この理由はコア数に依らない**（書いた時点ではシングルコアで、
+    // 「SMP を見越した先回りではない」と断っていた。その SMP はもう来ている）。
     direct_map_slot::READY
         .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed)
         .map(|_| ())
@@ -492,8 +492,13 @@ pub fn init_direct_map(map: DirectMap) -> Result<(), DirectMapInitError> {
 /// 2 つのストアの間に割り込みが入れば、「新しい base と古い length」という
 /// 裂けた値を観測する。
 ///
-/// シングルコアなので、区間全体で割り込みを禁止すれば、読み手は差し替えの
-/// 前か後のどちらかしか観測しない。M4-c-2 の `Locked<T>` と同じ構造である。
+/// 区間全体で割り込みを禁止すれば、**このコアの**読み手は差し替えの前か後の
+/// どちらかしか観測しない。M4-c-2 の `Locked<T>` と同じ構造である。
+///
+/// **別コアはこの禁止では止まらない。** 成り立っているのは、唯一の呼び出し側
+/// （higher-half 移行の A-2。`kernel/src/main.rs`）が **AP を起こすより前に走る**
+/// からである。**失効条件は「AP を起こす位置がこの呼び出しより前へ動くとき」**で、
+/// そのときはこの論法を作り直すこと。
 ///
 /// # Safety
 ///
