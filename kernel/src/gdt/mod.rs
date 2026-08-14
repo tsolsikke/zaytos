@@ -90,8 +90,9 @@ pub const PAGE_FAULT_IST_INDEX: usize = 2;
 /// に比例して STAR 互換順（ADR-0020）と絡むため。per-CPU なら各コアの GDT
 /// レイアウトが従来のまま保たれる。1 コアあたり 64 バイトで増分は無視できる。
 ///
-/// シングルコア（`MAX_CPUS = 1`）では [`PerCpu::this_cpu_ptr`] が常に唯一の
-/// スロットを指すので、構築・ロードされるテーブルは従来と同一である。
+/// `MAX_CPUS` が `1` だった間は [`PerCpu::this_cpu_ptr`] が常に唯一のスロットを
+/// 指し、構築・ロードされるテーブルは従来と同一だった。
+/// **いまは各コアが自分のスロットを構築して `lgdt` / `ltr` する。**
 static mut GDT: PerCpu<[u64; GDT_ENTRY_COUNT]> = PerCpu::new([[0; GDT_ENTRY_COUNT]; MAX_CPUS]);
 static mut TSS: PerCpu<TaskStateSegment> =
     PerCpu::new([const { TaskStateSegment::new() }; MAX_CPUS]);

@@ -143,9 +143,11 @@ fn log_directly_to_serial(args: core::fmt::Arguments<'_>) {
 
 // SAFETY: `alloc`/`dealloc` はヒープアリーナ（`init` で登録した、呼び出し
 // 元が有効性を保証した領域）の中だけを読み書きする。排他は
-// `common::critical::Locked` が保証する。ガードを保持している間は割り込みが
-// 禁止されるため（M4-c-2）、シングルコアでは保持区間に割り込みハンドラが
-// 割って入って同じ状態へ触ることがない。
+// `common::critical::Locked` が保証する。同一コアの再入は保持中の割り込み禁止が
+// （M4-c-2）、別コアは `acquired` の `swap` が止める（`critical.rs` のモジュール
+// doc の「排他の論法」）。**BKL は根拠に入れない。** `GlobalAlloc` は呼ばれる
+// 場所を選べないので、`Locked<T>` 自身で閉じている必要がある（実際、現在の
+// 確保はすべて起動シーケンス上にあり、BKL の内側から来る経路はまだ無い）。
 unsafe impl GlobalAlloc for LockedHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if layout.size() == 0 {
