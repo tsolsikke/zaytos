@@ -1213,10 +1213,12 @@ pub unsafe fn run_timer_loop(
                         // 無いと区別できない。
                         crate::keyboard::controller::output_buffer_full() as u8,
                         // SAFETY: メインループは通常文脈で、ここは割り込み禁止中
-                        // ではないが、シングルコアなので i8042/PIC を同時に触る
-                        // 別の実行文脈は割り込みハンドラだけである。ハンドラは
+                        // ではない。i8042/PIC を同時に触りうる別の実行文脈は、この
+                        // コアの割り込みハンドラだけである（この関数を走らせるのは
+                        // BSP だけで、AP は `smp::ap_heartbeat_loop` へ入る）。ハンドラは
                         // ISR を読んでも元に戻す必要がない読み出し専用の操作しか
                         // しないため、競合しても値がずれるだけで壊れない。
+                        // **失効条件は「AP がこの経路へ入るようになるとき」である。**
                         unsafe { crate::irq::service_snapshot() }
                     ),
                 );
