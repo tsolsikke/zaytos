@@ -748,6 +748,7 @@ unsafe fn dispatch(
     args: &[u64; 6],
     pml4_phys: PhysAddr,
     direct_map: DirectMap,
+    bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
     match number {
         PROBE_NUMBER => {
@@ -773,7 +774,7 @@ unsafe fn dispatch(
         }
         SYS_WRITE => {
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-            unsafe { sys_write(args[0], args[1], args[2], pml4_phys, direct_map) }
+            unsafe { sys_write(args[0], args[1], args[2], pml4_phys, direct_map, bkl) }
         }
         SYS_CHECKSUM => {
             let buf = args[0];
@@ -1028,7 +1029,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
         unsafe { spawn_from_ring3(args[0], args[1], pml4_phys, direct_map, &mut bkl) }
     } else {
         // SAFETY: pml4_phys / direct_map は稼働中テーブルのもので、walk の契約を満たす。
-        unsafe { dispatch(number, &args, pml4_phys, direct_map) }
+        unsafe { dispatch(number, &args, pml4_phys, direct_map, &mut bkl) }
     };
 
     // **exit だけは Ring 3 へ返らない。**
@@ -1612,6 +1613,7 @@ unsafe fn sys_write(
     count: u64,
     pml4_phys: PhysAddr,
     direct_map: DirectMap,
+    bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
     /// ページの大きさ。**検証の単位である。**
     const PAGE: u64 = 0x1000;
@@ -1688,6 +1690,29 @@ unsafe fn sys_write(
         }
         for byte in &kbuf[..read] {
             port.write_byte(*byte);
+        }
+
+        // **画面へは BKL を解いてから書く（S12 前の手当て）。**
+        //
+        // **1 行の描画と転送は 1 ティックの半分ほど掛かる**（実測は `console:` の
+        // 判定行にある。TCG で 0.67 ティック）。**保持したまま書くと、その間
+        // もう一方のコアがカーネルへ入れない。**
+        //
+        // **解く区間は最小である。** シリアルへの書き込みは保持したままでよい
+        // （速く、既にそうなっている）ので、**画面へ書く呼び出しだけを外へ出す。**
+        // **解いた区間で触るのは `Console` だけである**（`ADR-0023` の Addendum の
+        // 数え上げに 6 つ目として足してある）。
+        //
+        // **`SYS_SPAWN` とは形が違う。** あちらは**解いたまま Ring 3 へ降り、
+        // 戻ってから取り直す**。こちらは**解いて、書いて、その場で取り直す**。
+        // 次に解く経路を作る人は、どちらの形かを先に決めること。
+        //
+        // **据えられていないときは解かない。** 画面へ書くものが無いので、
+        // 解いて取り直す理由も無い（起動時の検算はこちらを通る）。
+        if crate::console::foreground_installed() {
+            drop(bkl.take());
+            crate::console::write_foreground_bytes(&kbuf[..read]);
+            *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
         }
         // **先頭 [`WRITE_BUF_LEN`] バイトだけ控える。**
         let already = done as usize;

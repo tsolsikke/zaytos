@@ -1753,7 +1753,19 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
             LogLevel::Info,
             format_args!("init: starting {SHELL_PATH_TEXT} (restart {restarts} of {MAX_RESTARTS})"),
         );
-        match kernel::userland::spawn(SHELL_PATH, SHELL_ARGV, 1) {
+        // **シェルが走っている間だけ、画面をシェルへ渡す（S12 前の手当て）。**
+        //
+        // **据えている間、この関数は画面へ書けない**——`&mut Console` をガードへ
+        // 預けるので、借用検査がそれを見る。**「書き手は 1 つ」はそこが保証する。**
+        // **外す時機は `spawn` が戻った直後である**（この束の終わり）。
+        // その後の `init` の行は、また `init` が書く。
+        let outcome = {
+            let _foreground = console
+                .as_deref_mut()
+                .map(kernel::console::install_foreground);
+            kernel::userland::spawn(SHELL_PATH, SHELL_ARGV, 1)
+        };
+        match outcome {
             Ok(outcome) => {
                 // **止まった場所が分かる形で出す（S11-11）。** 打鍵が届かない
                 // ときに、**どこまで来ていたかを 1 行で切り分ける。**
