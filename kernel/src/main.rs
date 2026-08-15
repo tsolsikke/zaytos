@@ -7341,6 +7341,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "PIC を 0x30-0x3F へ再マップする",
     ),
     (
+        "keyboard-drop-arrows-test",
+        cfg!(feature = "keyboard-drop-arrows-test"),
+        "左右の矢印を未対応へ戻し、シェルの挿入点が動かないようにする",
+    ),
+    (
         "tiny-key-buffer",
         cfg!(feature = "tiny-key-buffer"),
         "キーバッファを極小にする",

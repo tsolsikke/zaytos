@@ -45,6 +45,19 @@ pub enum KeyEvent {
     /// 占有種別（全角の先頭 / 後続）を管理する必要があり、割り込みとは別の
     /// 仕事になる（`docs/deferred-decisions.md`）。キーとしては認識する。
     Backspace,
+    /// カーソル左（S12 前の手当て）。
+    ///
+    /// # なぜ `Unsupported` から出すのか
+    ///
+    /// **`Unsupported` は「スキャンコードは分かるが扱わない」の集合である。**
+    /// 扱うようになったものを残すと、**呼び出し側が数えている「扱えなかった数」に
+    /// 扱えたものが混ざる。** 種を分ける。
+    ///
+    /// **上下は分けない。** いま使う道が無く、**使う者がいない機構は検算が置けない**
+    /// （S9-b-3-1 の診断）。`Unsupported` のままにしておく。
+    ArrowLeft,
+    /// カーソル右（S12 前の手当て）。
+    ArrowRight,
     /// 対応していないスキャンコード。**無言で捨てず、呼び出し側が数える。**
     ///
     /// 押下（make）のときだけ報告する。離した（break）ときは報告しない。
@@ -80,6 +93,11 @@ const SCANCODE_CAPS_LOCK: u8 = 0x3A;
 
 // 文字ではないが意味を持つキー。
 const SCANCODE_BACKSPACE: u8 = 0x0E;
+
+/// 拡張コードのカーソル左（`0xE0 0x4B`）。
+const SCANCODE_ARROW_LEFT: u8 = 0x4B;
+/// 拡張コードのカーソル右（`0xE0 0x4D`）。
+const SCANCODE_ARROW_RIGHT: u8 = 0x4D;
 const SCANCODE_TAB: u8 = 0x0F;
 const SCANCODE_ENTER: u8 = 0x1C;
 
@@ -180,8 +198,21 @@ impl Decoder {
             }
             Sequence::Extended => {
                 self.sequence = Sequence::Idle;
-                // 拡張キー（カーソル、右 Ctrl/Alt など）は未対応。押下のときだけ
-                // 報告し、離したときは黙る。押下と離しで 2 回数えると、
+                // 拡張キーのうち**左右の矢印だけを扱う**（S12 前の手当て）。
+                // 残り（上下・Home・End・右 Ctrl/Alt など）は未対応のままである。
+                //
+                // 破壊 (S12 前の手当て, keyboard-drop-arrows): 矢印を未対応へ戻す。
+                // **シェルの挿入点が動かなくなる**ので、`--shell-test` の
+                // 「左へ動かしてから入れた」判定が落ちる。
+                #[cfg(not(feature = "keyboard-drop-arrows-test"))]
+                if code == SCANCODE_ARROW_LEFT {
+                    return Some(KeyEvent::ArrowLeft);
+                }
+                #[cfg(not(feature = "keyboard-drop-arrows-test"))]
+                if code == SCANCODE_ARROW_RIGHT {
+                    return Some(KeyEvent::ArrowRight);
+                }
+                // 押下のときだけ報告し、離したときは黙る。押下と離しで 2 回数えると、
                 // 「押した回数」として見たときに倍になる。
                 if code & BREAK_BIT == 0 {
                     Some(KeyEvent::Unsupported(code))

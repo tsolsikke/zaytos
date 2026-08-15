@@ -2257,6 +2257,14 @@ fn cmd_shell_test() -> Result<()> {
     let unedited_line_absent = !after_shell.contains("zash: abcx: cannot run");
     let backspace_edited_the_line = edited_line_ran && unedited_line_absent;
 
+    // **左矢印が挿入点を動かしたこと（S12 前の手当て）。**
+    //
+    // **打ったのは `pq` → 左 → `y` で、走るのは `pyq` である。**
+    // **動いていなければ `pqy` になる。** Backspace と同じ形で、出る側と
+    // 出ない側の両方を見る。
+    let arrow_moved_the_cursor = after_shell.contains("zash: pyq: cannot run")
+        && !after_shell.contains("zash: pqy: cannot run");
+
     // **`argv[0]` が打った語のままであること（3 本目）。**
     //
     // **`spawn-test beta` を `/bin/` を付けずに送っている。**
@@ -2278,6 +2286,7 @@ fn cmd_shell_test() -> Result<()> {
     println!("{context}: bare names resolved under /bin = {bare_names_resolved}");
     println!("{context}: argv[0] stayed as typed = {argv0_is_as_typed}");
     println!("{context}: backspace edited the line = {backspace_edited_the_line}");
+    println!("{context}: the left arrow moved the insertion point = {arrow_moved_the_cursor}");
 
     if ready
         && ended
@@ -2289,6 +2298,7 @@ fn cmd_shell_test() -> Result<()> {
         && bare_names_resolved
         && argv0_is_as_typed
         && backspace_edited_the_line
+        && arrow_moved_the_cursor
     {
         println!("{context}: PASS");
         Ok(())
@@ -2336,6 +2346,11 @@ const SHELL_TEST_LINES: &[&[&str]] = &[
     // **出る側（`abx`）と出ない側（`abcx`）の両方を見る。**
     // どちらも実在しない語なので、シェルは `cannot run` を返す。
     &["a", "b", "c", "backspace", "x", "ret"],
+    // pq → 左 → y（S12 前の手当て）。**挿入点が動いたことを見る。**
+    //
+    // **左へ 1 つ動いてから `y` を入れるので、走るのは `pyq` である。**
+    // **動いていなければ `pqy` になる。** ここも 2 本で見る。
+    &["p", "q", "left", "y", "ret"],
     // exit
     &["e", "x", "i", "t", "ret"],
 ];

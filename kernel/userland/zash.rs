@@ -125,6 +125,12 @@ pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
     // 「動かす手段」だけになり、Backspace と挿入の側を書き直さずに済む。
     let mut cursor = 0usize;
     let mut overflowed = false;
+    // **エスケープの受け（S12 前の手当て）。** 矢印は 3 バイトで届く
+    // （`\x1b` `[` `D` または `C`。`kernel/src/input.rs` が落とす形）。
+    //
+    // **解釈はここで行う。画面（`Grid`）には届かない。**
+    // `ADR-0029` が決めたのは出力側の解釈で、こちらは入力側である。
+    let mut escape = Escape::Idle;
 
     loop {
         let mut byte = [0u8; 1];
@@ -136,6 +142,50 @@ pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
         if got <= 0 {
             // **端末が読めない。** 失敗として終わる。
             exit(1);
+        }
+
+        // **3 バイトの状態機械を先に通す（S12 前の手当て）。**
+        //
+        // **未完のまま別の字が来たら、そこで捨てて普通の字として扱う。**
+        // 溜めた `\x1b` や `[` は**行へ入れない**——打っていない字を
+        // 行へ混ぜると、走る語が変わる。
+        match (escape, byte[0]) {
+            (Escape::Idle, 0x1b) => {
+                escape = Escape::Esc;
+                continue;
+            }
+            (Escape::Esc, b'[') => {
+                escape = Escape::Bracket;
+                continue;
+            }
+            (Escape::Bracket, b'D') => {
+                escape = Escape::Idle;
+                // **左へ 1 つ。行頭より左へは動かない。**
+                if cursor > 0 {
+                    cursor -= 1;
+                    write_all(STDOUT, b"\x08");
+                }
+                continue;
+            }
+            (Escape::Bracket, b'C') => {
+                escape = Escape::Idle;
+                // **右へ 1 つ。行末より右へは動かない。**
+                //
+                // **カーソルを右へ動かすのに、その位置の字をもう一度書く。**
+                // `\x1b[C` を出す形もあるが、**画面（`Grid`）はエスケープを
+                // 解釈しない**ので届かない。字なら両方で動く。
+                if cursor < length {
+                    write_all(STDOUT, &line[cursor..cursor + 1]);
+                    cursor += 1;
+                }
+                continue;
+            }
+            (Escape::Esc, _) | (Escape::Bracket, _) => {
+                // **知らない並びだった。** 溜めた分は捨て、いま来た字は
+                // 下の分岐で普通に扱う。
+                escape = Escape::Idle;
+            }
+            (Escape::Idle, _) => {}
         }
 
         match byte[0] {
@@ -155,6 +205,9 @@ pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
                 length = 0;
                 cursor = 0;
                 overflowed = false;
+                // **未完のエスケープは行をまたがない。** 溜めた状態を捨てる
+                // （ここへ来る時点で `Idle` のはずだが、状態を持ち越さない）。
+                escape = Escape::Idle;
                 write_all(STDOUT, PROMPT);
             }
             BACKSPACE => {
@@ -434,4 +487,19 @@ fn redraw_tail_without_gap(tail: &[u8]) {
     for _ in 0..tail.len() {
         write_all(STDOUT, b"\x08");
     }
+}
+
+/// エスケープの受けの状態（S12 前の手当て）。
+///
+/// **3 バイトしか見ない。** 矢印は `\x1b` `[` `D` / `C` で届く。
+/// **数を伴う形（`\x1b[3~` など）は来ない**——落としているのは
+/// `kernel/src/input.rs` で、そこが出すのはこの 2 つだけである。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Escape {
+    /// 何も溜めていない。
+    Idle,
+    /// `\x1b` を受けた。
+    Esc,
+    /// `\x1b[` を受けた。
+    Bracket,
 }

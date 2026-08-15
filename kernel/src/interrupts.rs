@@ -1442,6 +1442,12 @@ fn drain_keyboard(
                 logger.info(format_args!("keyboard: line = \"{}\"", line.as_str()));
                 line.clear();
             }
+            // **カーソルの左右は、この行では何もしない（S12 前の手当て）。**
+            //
+            // **ここの行（`TypedLine`）は挿入点を持たない。** 前景が取られる前の
+            // 診断用で、**編集を持つのはシェルの側である**（`kernel/userland/zash.rs`）。
+            // **前景が取られている間、この経路は動かない。**
+            KeyEvent::ArrowLeft | KeyEvent::ArrowRight => {}
             KeyEvent::Backspace => {
                 // 画面上の消去は行わない。コンソール側でセルごとの
                 // 占有種別（全角の先頭 / 後続）を管理する必要があり、

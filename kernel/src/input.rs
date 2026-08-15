@@ -162,6 +162,42 @@ pub fn read_bytes(dst: &mut [u8]) -> usize {
         let Some(event) = event else {
             continue;
         };
+        // **矢印は 3 バイトへ落とす（S12 前の手当て）。**
+        //
+        // **形は CSI である**（`\x1b[D` と `\x1b[C`）。`ADR-0029` が画面制御に
+        // ANSI を選んでいるので、**入力の側も同じ表現にしておくと後で噛み合う。**
+        // **解釈するのはシェルであって、コンソールではない**——このバイト列が
+        // `Grid` へ届くことはない。
+        //
+        // **`dst` に 3 バイト入らないことがある。** 溜め場（[`PENDING`]）が
+        // 既にその形を持っているので、入る分だけ置いて残りを預ける。
+        if let crate::keyboard::decode::KeyEvent::ArrowLeft
+        | crate::keyboard::decode::KeyEvent::ArrowRight = event
+        {
+            let sequence: &[u8] = match event {
+                crate::keyboard::decode::KeyEvent::ArrowLeft => b"\x1b[D",
+                _ => b"\x1b[C",
+            };
+            for (index, byte) in sequence.iter().enumerate() {
+                if written < dst.len() {
+                    dst[written] = *byte;
+                    written += 1;
+                } else {
+                    let mut pending = PENDING.lock();
+                    let at = pending.length;
+                    // **溜め場は 8 バイトで、ここへ来るのは多くて 2 バイトである。**
+                    // 溢れるなら落とす——**落としたことが分かる形は無いが、
+                    // 入らないものを入ったことにはしない。**
+                    if at < pending.bytes.len() {
+                        pending.bytes[at] = *byte;
+                        pending.length = at + 1;
+                    }
+                    let _ = index;
+                }
+            }
+            continue;
+        }
+
         // **バイトへ落とす。** 行の区切りも編集もここでは持たない。
         let byte = match event {
             crate::keyboard::decode::KeyEvent::Char(character) => {
@@ -174,10 +210,13 @@ pub fn read_bytes(dst: &mut [u8]) -> usize {
             }
             crate::keyboard::decode::KeyEvent::Enter => b'\n',
             crate::keyboard::decode::KeyEvent::Backspace => 0x08,
-            // **バイトへ落とせないものは落とす。** 矢印などは、行の編集を
-            // 持つ層が要る形である（`docs/vision.md` の `zi`）。
-            // **S11 では切り替えも編集も入れない**（棚卸しの決定）。
+            // **バイトへ落とせないものは落とす。** 上下や Home などで、
+            // **行の編集を持つ層が要る形である**（`docs/vision.md` の `zi`）。
+            // **左右の矢印は上で 3 バイトへ落としてある。**
             crate::keyboard::decode::KeyEvent::Unsupported(_) => continue,
+            // 上の分岐で返しているので、ここへは来ない。
+            crate::keyboard::decode::KeyEvent::ArrowLeft
+            | crate::keyboard::decode::KeyEvent::ArrowRight => continue,
         };
         dst[written] = byte;
         written += 1;
