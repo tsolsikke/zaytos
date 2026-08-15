@@ -1315,7 +1315,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
     const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
-       cargo xtask run --shell-test
+       cargo xtask run --shell-test [--drop-arrows]
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
@@ -1421,7 +1421,12 @@ fn main() -> Result<()> {
                 );
             }
             if rest.iter().any(|a| a == "--shell-test") {
-                return cmd_shell_test();
+                let mode = if rest.iter().any(|a| a == "--drop-arrows") {
+                    ShellTestMode::ArrowsDropped
+                } else {
+                    ShellTestMode::Normal
+                };
+                return cmd_shell_test(mode);
             }
             if rest.iter().any(|a| a == "--boot-log-diff") {
                 let update = rest.iter().any(|a| a == "--update-reference");
@@ -2073,6 +2078,66 @@ impl KeyboardAssertions {
     }
 }
 
+/// `--shell-test` を、既定ビルドで走らせるか破壊ビルドで走らせるか。
+///
+/// # 破壊の側は「落ちること」を期待するのではなく、裏返した主張を立てる
+///
+/// **他の破壊項目は `expected_markers` / `forbidden_markers` の対で書いてある**
+/// （`CriticalTest`）。**あちらは「出る側」と「出ない側」を並べる形である。**
+/// **`--shell-test` は判定がすべて真なら PASS という形なので、
+/// そのままでは「落ちることを期待する項目」が書けない。**
+///
+/// **書けないのは判定の形ではなく、期待を固定していたことのほうだった。**
+/// **期待を引数にすれば、破壊の側も「すべて真なら PASS」のままでよい。**
+/// 矢印の判定だけが裏返り、残りは既定ビルドと同じく真であることを求める——
+/// **これは「壊れるのは 1 つだけである」という主張になる。**
+/// `no-eoi-test` が `forbidden_markers` で行っているのと同じ向きである。
+///
+/// **シリアルに出る目印がそのまま反転する。** 既定は `zash: pyq: cannot run`、
+/// 破壊は `zash: pqy: cannot run` である。**他の破壊項目とまったく同じ
+/// 「シリアルに含まれる / 含まれない」の形なので、判定の作り替えは要らない。**
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShellTestMode {
+    /// 既定ビルド。左矢印が挿入点を動かす。
+    Normal,
+    /// 破壊（`keyboard-drop-arrows-test`）。矢印がデコーダで未対応へ戻るので、
+    /// 前景へ 3 バイトが届かず、挿入点が動かない。
+    ArrowsDropped,
+}
+
+impl ShellTestMode {
+    /// この形で立てる feature。
+    fn features(self) -> &'static [&'static str] {
+        match self {
+            ShellTestMode::Normal => &[],
+            ShellTestMode::ArrowsDropped => &["keyboard-drop-arrows-test"],
+        }
+    }
+
+    /// 判定行の頭。**破壊の側を別の名前にする**——`--full` の出力で
+    /// どちらの実行かが読めないと、落ちた行の出所が分からない。
+    fn context(self) -> &'static str {
+        match self {
+            ShellTestMode::Normal => "shell-test",
+            ShellTestMode::ArrowsDropped => "shell-test keyboard-drop-arrows",
+        }
+    }
+
+    /// シリアルの記録先。**互いに上書きしない**——落ちたときに
+    /// 両方のログが残っていないと、どちらが壊れたのかを後から見られない。
+    fn serial_log_name(self) -> &'static str {
+        match self {
+            ShellTestMode::Normal => "shell-test-serial.log",
+            ShellTestMode::ArrowsDropped => "shell-test-drop-arrows-serial.log",
+        }
+    }
+
+    /// 矢印について期待すること。**`true` は「挿入点が動く」である。**
+    fn expects_the_cursor_to_move(self) -> bool {
+        self == ShellTestMode::Normal
+    }
+}
+
 /// シェルへ打鍵を送り、組み込みの `exit` が効くことを見る（S11-11）。
 ///
 /// # 既定の起動ログには入れない
@@ -2094,14 +2159,18 @@ impl KeyboardAssertions {
 /// **送った後は `init: the shell ended` の行を見る**——あの行が
 /// **リングが受けたスキャンコード数と、前景が Ring 3 へ渡したバイト数**を
 /// 出しているので、**どこで止まったかが 1 行で分かる。**
-fn cmd_shell_test() -> Result<()> {
+///
+/// # 破壊も同じ関数で走らせる
+///
+/// **[`ShellTestMode`] を見ること。** 打鍵を流す仕組みは 1 つで足りる。
+fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
-    let kernel_elf = build_kernel_with_features(&workspace_root, &[])?;
+    let kernel_elf = build_kernel_with_features(&workspace_root, mode.features())?;
     let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
 
-    let serial_log = workspace_root.join("target").join("shell-test-serial.log");
+    let serial_log = workspace_root.join("target").join(mode.serial_log_name());
     let _ = fs::remove_file(&serial_log);
     let debug_log = workspace_root.join("target").join("qemu-debug.log");
     let _ = fs::remove_file(&debug_log);
@@ -2180,7 +2249,7 @@ fn cmd_shell_test() -> Result<()> {
     let serial = fs::read_to_string(&serial_log).unwrap_or_default();
     let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
 
-    let context = "shell-test";
+    let context = mode.context();
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
     {
@@ -2262,8 +2331,17 @@ fn cmd_shell_test() -> Result<()> {
     // **打ったのは `pq` → 左 → `y` で、走るのは `pyq` である。**
     // **動いていなければ `pqy` になる。** Backspace と同じ形で、出る側と
     // 出ない側の両方を見る。
-    let arrow_moved_the_cursor = after_shell.contains("zash: pyq: cannot run")
-        && !after_shell.contains("zash: pqy: cannot run");
+    //
+    // **破壊ビルドでは期待が裏返る**（[`ShellTestMode`]）。
+    // **どちらの向きでも 2 本で見る**——片方だけだと、シェルが行を
+    // 空にしてしまった場合に通ってしまう。
+    let moved = after_shell.contains("zash: pyq: cannot run");
+    let did_not_move = after_shell.contains("zash: pqy: cannot run");
+    let arrow_behaved_as_expected = if mode.expects_the_cursor_to_move() {
+        moved && !did_not_move
+    } else {
+        did_not_move && !moved
+    };
 
     // **`argv[0]` が打った語のままであること（3 本目）。**
     //
@@ -2286,7 +2364,10 @@ fn cmd_shell_test() -> Result<()> {
     println!("{context}: bare names resolved under /bin = {bare_names_resolved}");
     println!("{context}: argv[0] stayed as typed = {argv0_is_as_typed}");
     println!("{context}: backspace edited the line = {backspace_edited_the_line}");
-    println!("{context}: the left arrow moved the insertion point = {arrow_moved_the_cursor}");
+    println!(
+        "{context}: the left arrow moved the insertion point = {moved} (wanted {})",
+        mode.expects_the_cursor_to_move()
+    );
 
     if ready
         && ended
@@ -2298,7 +2379,7 @@ fn cmd_shell_test() -> Result<()> {
         && bare_names_resolved
         && argv0_is_as_typed
         && backspace_edited_the_line
-        && arrow_moved_the_cursor
+        && arrow_behaved_as_expected
     {
         println!("{context}: PASS");
         Ok(())
@@ -6875,11 +6956,26 @@ fn cmd_check(full: bool) -> Result<()> {
         // **3 回連続で通ることを確かめてから入れた。落ちる回が出たら `flaky` へ移す。**
         total += 1;
         println!("=== xtask check: the shell takes keystrokes and init restarts it");
-        match cmd_shell_test() {
+        match cmd_shell_test(ShellTestMode::Normal) {
             Ok(()) => println!("--- shell test: OK"),
             Err(error) => {
                 println!("--- shell test: FAILED ({error})");
                 failed.push("shell test".to_string());
+            }
+        }
+
+        // **矢印を落とすと挿入点が動かなくなること（S12 前の手当て）。**
+        // **上の項目が主張していることの反証である**——**上は「動いた」を
+        // 見ているが、動いていない像でも同じ判定が真になる形だと意味が無い。**
+        // **打鍵を流す仕組みは上と同じもので、期待だけが裏返る**
+        // （`ShellTestMode`）。
+        total += 1;
+        println!("=== xtask check: dropping the arrows stops the insertion point from moving");
+        match cmd_shell_test(ShellTestMode::ArrowsDropped) {
+            Ok(()) => println!("--- shell test (arrows dropped): OK"),
+            Err(error) => {
+                println!("--- shell test (arrows dropped): FAILED ({error})");
+                failed.push("shell test (arrows dropped)".to_string());
             }
         }
     }
@@ -7344,7 +7440,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 21,
-    full: 134,
+    full: 135,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
