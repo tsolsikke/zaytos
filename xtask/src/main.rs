@@ -7213,6 +7213,23 @@ fn cmd_check(full: bool) -> Result<()> {
     }
 
     total += 1;
+    println!("=== xtask check: every deferred decision carries a state marker");
+    match check_deferred_state_markers(&workspace_root) {
+        Ok((open, done)) => println!(
+            "--- deferred markers: OK ({open} open, {done} settled, {} row(s) total; the count is \
+             reported, not enforced)",
+            open + done
+        ),
+        Err(findings) => {
+            for finding in &findings {
+                println!("    {finding}");
+            }
+            println!("--- deferred markers: FAILED");
+            failed.push("deferred markers".to_string());
+        }
+    }
+
+    total += 1;
     println!("=== xtask check: markdown prose style (tracked .md)");
     let prose = check_markdown_prose_style(&workspace_root)?;
     if prose.is_empty() {
@@ -7585,8 +7602,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 21,
-    full: 140,
+    base: 22,
+    full: 141,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
@@ -7719,6 +7736,87 @@ const TEST_HOOKS_TABLE_MARKER: &str = "const TEST_HOOKS: &[(&str, bool, &str)] =
 
 /// 会計行がある文書。
 const ACCOUNTING_DOC_PATH: &str = "docs/verification-coverage.md";
+
+/// 持ち越しの一覧が状態の印を持っているかを見る（S12 前の手当ての締め）。
+///
+/// **数は返すが、検査しない。** 持ち越しは増減するのが正常なので、
+/// **数そのものを固定すると、行を 1 つ足すたびに定数を直す作業が生まれる。**
+/// `EXPECTED_CHECK_COUNT` と同じ族にしないのはそのためである。
+///
+/// **見るのは 2 つだけである。**
+///
+/// - 状態の列を持つ表の行が、すべて印を持っていること
+/// - その印が語彙（`未` / `済`）の中にあること
+///
+/// **「印が無い」を静かに通すと、数える側が黙って狭くなる**——
+/// `TEST_HOOKS` の doc が「一覧が足したときに更新されず静かに狭くなる」を
+/// 3 件目として記録しているのと同じ形である。
+///
+/// 返すのは `(未の数, 済の数)`。**規則の本体は
+/// `docs/deferred-decisions.md` の「持ち越しの数え方」にある。**
+fn check_deferred_state_markers(workspace_root: &Path) -> Result<(usize, usize), Vec<String>> {
+    /// 状態の語彙。**増やすときは doc の「持ち越しの数え方」も直すこと。**
+    const VOCABULARY: [&str; 2] = ["未", "済"];
+
+    let path = workspace_root.join("docs/deferred-decisions.md");
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) => return Err(vec![format!("could not read {}: {e}", path.display())]),
+    };
+
+    let mut findings = Vec::new();
+    let (mut open, mut done) = (0usize, 0usize);
+    // 状態の列を持つ表の中にいるか。見出しで入り、表が切れたら出る。
+    let mut in_marked_table = false;
+
+    for (number, line) in text.lines().enumerate() {
+        let line_number = number + 1;
+        if !line.starts_with('|') {
+            in_marked_table = false;
+            continue;
+        }
+        let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+        // 見出し行。**項目の表だけを対象にする。**
+        //
+        // **列の数も見る。** 「持ち越しの数え方」の語彙の表も見出しが `状態` で
+        // 始まるが、2 列しかない。**列を見ないと、語彙の説明そのものが
+        // 項目として数えられる**（実測でそうなった。51 と出て、実数より 2 多かった）。
+        if cells.first() == Some(&"状態") {
+            in_marked_table = cells.len() >= 4;
+            continue;
+        }
+        // 区切り行。
+        if line.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ')) {
+            continue;
+        }
+        if !in_marked_table {
+            continue;
+        }
+        match cells.first() {
+            Some(marker) if VOCABULARY.contains(marker) => {
+                if *marker == "未" {
+                    open += 1;
+                } else {
+                    done += 1;
+                }
+            }
+            Some(other) => findings.push(format!(
+                "docs/deferred-decisions.md:{line_number}: the state cell is {other:?}, which is \
+                 not one of {VOCABULARY:?}. The vocabulary is deliberately two words; see \
+                 the section 持ち越しの数え方"
+            )),
+            None => findings.push(format!(
+                "docs/deferred-decisions.md:{line_number}: this row has no state cell"
+            )),
+        }
+    }
+
+    if findings.is_empty() {
+        Ok((open, done))
+    } else {
+        Err(findings)
+    }
+}
 
 /// 会計行の目印。**この行の書式に結合しているのはここだけである。**
 const ACCOUNTING_LINE_PREFIX: &str = "推移: ";
