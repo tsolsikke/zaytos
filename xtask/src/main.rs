@@ -1316,6 +1316,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 fn main() -> Result<()> {
     const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
        cargo xtask run --shell-test [--drop-arrows]
+       cargo xtask run --fs-extract [--sabotage FEATURE]
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
@@ -1419,6 +1420,14 @@ fn main() -> Result<()> {
                     ACPI_SMP_TESTS[0].name,
                     Some(2),
                 );
+            }
+            if rest.iter().any(|a| a == "--fs-extract") {
+                let feature = rest
+                    .iter()
+                    .position(|a| a == "--sabotage")
+                    .and_then(|i| rest.get(i + 1))
+                    .map(|s| s.as_str());
+                return cmd_fs_image_extract(feature);
             }
             if rest.iter().any(|a| a == "--shell-test") {
                 let mode = if rest.iter().any(|a| a == "--drop-arrows") {
@@ -2076,6 +2085,204 @@ impl KeyboardAssertions {
             && self.balanced
             && !self.refused_sti
     }
+}
+
+/// 複製した ext2 の像をホストへ取り出し、元の像と突き合わせる（S12-a）。
+///
+/// # 何を主張するか。**経路であって、書き込みではない**
+///
+/// **S12-a は像を書き換えない。** したがって取り出した像は、
+/// `build.rs` が建てた像と**バイト単位で一致するはずである。**
+/// **主張は「複製と取り出しが 1 バイトも落とさないこと」である。**
+///
+/// # 判定は 3 本ある
+///
+/// - **複製先がカーネル像の外にあること。** これが無いと「複製した」が
+///   反証できない——**複製せずに `.rodata` の番地を出す形が通ってしまう**
+/// - **取り出した像が、建てた像とバイト単位で一致すること。** これが要である
+/// - **`e2fsck` が無傷と判定すること**
+///
+/// # 3 本目は、いまは何も新しく検査していない
+///
+/// **バイト一致が真である限り、`e2fsck` は絶対に落ちない**——
+/// S10-a が既に建てた像へ `e2fsck` を当てており（`--full` の `fs image e2fsck`）、
+/// **同じバイト列に同じ道具を当てているからである。含意される。**
+///
+/// **それでも置く。S12-b 以降で使う経路の予行だからである。**
+/// **書き換えが入った瞬間に、こちらが主たる判定になる**——
+/// そのとき「バイト一致」は偽になるのが正常で、**含意が成り立たなくなる。**
+/// **落ちないと分かっていて置いていると、ここに書いておく。**
+///
+/// # `pmemsave` である（`memsave` ではない）
+///
+/// **実測で確かめた。** monitor の `help` はこう答える。
+///
+///     memsave  addr size file -- save to disk virtual memory dump ...
+///     pmemsave addr size file -- save to disk physical memory dump ...
+///
+/// **カーネルが出すのは物理アドレスなので `pmemsave` である。**
+fn cmd_fs_image_extract(feature: Option<&str>) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let features: Vec<&str> = feature.into_iter().collect();
+    let kernel_elf = build_kernel_with_features(&workspace_root, &features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let serial_log = workspace_root.join("target").join("fs-extract-serial.log");
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+    let dump = workspace_root.join("target").join("fs-extract.img");
+    let _ = fs::remove_file(&dump);
+    let monitor_socket = PathBuf::from(format!(
+        "/tmp/zaytos-xtask-fsextract-{}.sock",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&monitor_socket);
+    ensure_socket_path_fits(&monitor_socket)?;
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: Some(&monitor_socket),
+        accelerator: Accelerator::Tcg,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the fs image extraction")?;
+
+    // **複製の行が出るまで待つ。上限つき。**
+    let marker = "fs-image-copy: copied ";
+    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    let mut copied_line = None;
+    while Instant::now() < deadline {
+        if let Ok(text) = fs::read_to_string(&serial_log) {
+            if let Some(line) = text.lines().find(|l| l.contains(marker)) {
+                copied_line = Some(line.to_string());
+                break;
+            }
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let context = match feature {
+        Some(name) => format!("fs-extract {name}"),
+        None => "fs-extract".to_string(),
+    };
+    let context = context.as_str();
+
+    let mut extracted = false;
+    if let Some(line) = &copied_line {
+        if let Some((base, end)) = parse_copy_range(line) {
+            match connect_monitor_with_retry(&monitor_socket) {
+                Ok(mut stream) => {
+                    // **物理メモリを取り出す。** 範囲はカーネルが出した値そのままで、
+                    // xtask は長さの定数を持たない（**像の大きさは変わりうる**）。
+                    let size = end - base;
+                    // **ファイル名を引用符で囲む。** 囲まないと、**サイズの式が
+                    // パスの `/` を除算として飲み込む**——実測で
+                    // `invalid char 't' in expression` になった（`/tmp/...` の `t`）。
+                    let command = format!("pmemsave {base:#x} {size:#x} \"{}\"\n", dump.display());
+                    if stream.write_all(command.as_bytes()).is_ok() {
+                        // 書き終わるのを待つ。上限つき。
+                        let deadline = Instant::now() + Duration::from_secs(30);
+                        while Instant::now() < deadline {
+                            if fs::metadata(&dump).map(|m| m.len()).unwrap_or(0) == size {
+                                extracted = true;
+                                break;
+                            }
+                            thread::sleep(PANIC_TEST_POLL_INTERVAL);
+                        }
+                    }
+                }
+                Err(e) => println!("{context}: could not reach the QEMU monitor: {e}"),
+            }
+        }
+    }
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = fs::remove_file(&monitor_socket);
+
+    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    let Some(line) = copied_line else {
+        bail!("{context}: the kernel never reported {marker:?}");
+    };
+    println!("{context}: {}", line.trim());
+
+    // **1 本目——複製先がカーネル像の外にあること。**
+    let outside_kernel_image = match (parse_copy_range(&line), parse_kernel_image_range(&line)) {
+        (Some((base, end)), Some((image_start, image_end))) => {
+            end <= image_start || base >= image_end
+        }
+        _ => false,
+    };
+    println!("{context}: the copy lies outside the kernel image = {outside_kernel_image}");
+
+    // **2 本目——取り出した像が、建てた像とバイト単位で一致すること。**
+    let built = kernel_build_out_dir(&workspace_root)?.join(FS_IMAGE_NAME);
+    let identical = match (fs::read(&dump), fs::read(&built)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    println!("{context}: the extracted image matches the built image byte for byte = {identical}");
+
+    // **3 本目——`e2fsck` が無傷と判定すること。**
+    // **バイト一致が真なら、これは必ず通る**（この関数の doc）。
+    let summary = if extracted {
+        run_e2fsck(&dump)?
+    } else {
+        "the image was not extracted".to_string()
+    };
+    let fsck_ok = extracted && !summary.starts_with("the image was not extracted");
+    println!("{context}: e2fsck accepted the extracted image = {fsck_ok} ({summary})");
+
+    if outside_kernel_image && identical && fsck_ok {
+        println!("{context}: PASS");
+        Ok(())
+    } else {
+        bail!("{context}: FAILED")
+    }
+}
+
+/// `fs-image-copy` の行から複製先の物理範囲を読む。
+fn parse_copy_range(line: &str) -> Option<(u64, u64)> {
+    let rest = line.split("to phys ").nth(1)?;
+    let range = rest.split_whitespace().next()?;
+    let (start, end) = range.split_once("..")?;
+    Some((parse_hex(start)?, parse_hex(end)?))
+}
+
+/// 同じ行からカーネル像の物理範囲を読む。
+fn parse_kernel_image_range(line: &str) -> Option<(u64, u64)> {
+    let rest = line.split("the kernel image is ").nth(1)?;
+    let range = rest.split_whitespace().next()?;
+    let (start, end) = range.split_once("..")?;
+    Some((parse_hex(start)?, parse_hex(end)?))
+}
+
+fn parse_hex(text: &str) -> Option<u64> {
+    u64::from_str_radix(text.trim().trim_start_matches("0x"), 16).ok()
 }
 
 /// `--shell-test` を、既定ビルドで走らせるか破壊ビルドで走らせるか。
@@ -6575,13 +6782,25 @@ fn check_fs_image_passes_e2fsck(workspace_root: &Path) -> Result<String> {
         );
     }
 
+    run_e2fsck(&image)
+}
+
+/// ある像へ `e2fsck -fn` を当て、要約行を返す（S10-a。S12-a で寄せた）。
+///
+/// # 見る相手が 2 つある
+///
+/// **`build.rs` が建てた像**（S10-a）と、**ZaytOS が RAM に持っている像を
+/// 取り出したもの**（S12-a）である。**同じ道具で、見る相手が違う。**
+/// **寄せたのは、ガードページを 2 か所で張っていたのと同じ形を作らないためである**
+/// （`kernel::stack::install_guard_page` の doc）。
+fn run_e2fsck(image: &Path) -> Result<String> {
     // `-f` は clean でも全パスを走らせる（`s_state` を信用しない）。`-n` は
     // 何も直さず、直す必要があれば失敗で返す。**像を書き換えさせない。**
     // `LC_ALL=C` は要約行を言語設定に依らせないため（**この行を報告に載せる**）。
     let output = Command::new("e2fsck")
         .env("LC_ALL", "C")
         .arg("-fn")
-        .arg(&image)
+        .arg(image)
         .output()
         .context(
             "failed to invoke e2fsck (it ships with e2fsprogs, the same package as mke2fs, \
@@ -6590,10 +6809,11 @@ fn check_fs_image_passes_e2fsck(workspace_root: &Path) -> Result<String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() {
         bail!(
-            "e2fsck rejected the embedded ext2 image ({}). The image is built by mke2fs and then \
-             has its timestamps zeroed in place by kernel/build.rs; a different e2fsprogs version \
-             can put those timestamps elsewhere, in which case the overwrite corrupts unrelated \
-             bytes. Compare the mke2fs version on the boot log's ext2 line.\n{}{}",
+            "e2fsck rejected {} ({}). If this is the embedded image, it is built by mke2fs and \
+             then has its timestamps zeroed in place by kernel/build.rs; a different e2fsprogs \
+             version can put those timestamps elsewhere, in which case the overwrite corrupts \
+             unrelated bytes. Compare the mke2fs version on the boot log's ext2 line.\n{}{}",
+            image.display(),
             output.status,
             stdout,
             String::from_utf8_lossy(&output.stderr)
@@ -7113,6 +7333,31 @@ fn cmd_check(full: bool) -> Result<()> {
         // **5 つとも「通らないこと」を期待する**（`ShellTestMode::MustFail`）。
         // **落ちる判定は 1 つずつ違う**ので、まとめて 1 項目にはしない——
         // **どれが捕まらなくなったのかが、項目の名前で分かる形にする。**
+        // **像を複製して取り出し、建てた像と突き合わせる（S12-a）。**
+        // **判定 3 本を 1 項目にまとめてある**（複製先の位置・バイト一致・`e2fsck`）。
+        total += 1;
+        println!("=== xtask check: the copied ext2 image comes back byte for byte");
+        match cmd_fs_image_extract(None) {
+            Ok(()) => println!("--- fs extract: OK"),
+            Err(error) => {
+                println!("--- fs extract: FAILED ({error})");
+                failed.push("fs extract".to_string());
+            }
+        }
+
+        // **破壊の側（S12-a）。** **`e2fsck` では捕まらない**——潰した 1 バイトは
+        // 使われていない末尾にあり、あちらは無傷と判定する（実測）。
+        // **捕まえるのはバイト一致である。**
+        total += 1;
+        println!("=== xtask check: the fs extract catches a corrupted copy");
+        match cmd_fs_image_extract(Some("fs-copy-corrupt-tail-test")) {
+            Ok(()) => {
+                println!("--- fs extract (corrupt tail): FAILED (the sabotage was NOT caught)");
+                failed.push("fs extract (corrupt tail)".to_string());
+            }
+            Err(_) => println!("--- fs extract (corrupt tail): OK (the sabotage was caught)"),
+        }
+
         for feature in KILL_SABOTAGES {
             total += 1;
             println!("=== xtask check: the shell test catches the sabotage {feature}");
@@ -7603,7 +7848,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 141,
+    full: 143,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

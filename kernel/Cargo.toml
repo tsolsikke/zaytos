@@ -94,6 +94,10 @@ kill-keep-stale-interrupt-test = []
 # 破壊（S12 前の手当て、C）: BKL を解かずに畳む。次に BKL を取る者が、
 # 同じコアの再取得として捕まえる（`user-exit-keep-bkl` と同じ機序）。
 kill-fold-keep-bkl-test = []
+# 破壊（S12-a）: 像の複製の末尾 1 バイトを 0xFF で潰す。読み戻しが落ちる。
+# 落とさなければ、取り出した像とのバイト一致がホスト側で落ちる。
+# **0 で潰す形は破壊にならない**——像の末尾は既に 0 である（実測）。
+fs-copy-corrupt-tail-test = []
 # 破壊（S12 前の手当て、C）: 止めた後に溜まっている入力を捨てない。
 # 止めた打鍵そのものが残り、次のプロンプトに `^C` が余分に出る。
 kill-keep-typed-input-test = []

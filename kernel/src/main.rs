@@ -1590,6 +1590,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // 新しいアドレス空間へ区画が張れること、**張った葉の W が区画の権限どおりで
     // あること**を見る。
     verify_embedded_fs_image(&mut logger);
+    copy_fs_image_to_frames(&mut logger);
     verify_corrupt_fs_image_is_rejected(&mut logger);
     verify_embedded_user_elf(&mut logger);
     verify_corrupt_user_elf_is_rejected(&mut logger);
@@ -3989,6 +3990,129 @@ fn verify_embedded_user_elf(logger: &mut Logger<SerialPort>) {
 /// **`mke2fs` の版が変わると既定値が動きうる**（ブロックサイズ、inode サイズ）。
 /// 判定行に載せておくと、**将来ここが落ちたときに「像の作り手が変わった」を
 /// 最初に疑える。**
+/// 埋め込んだ ext2 の像を、書ける場所（フレーム）へ複製する（S12-a）。
+///
+/// # なぜ複製するのか。**`.rodata` だからではない**
+///
+/// **保護の話ではない。** 像を含むカーネル像の写像は読み書き可で、`W^X` は
+/// 未実装である（棚卸しで実測した）。**書けないのは [`FS_IMAGE`] が
+/// `&'static [u8]` だからで、型の話である。**
+///
+/// **それでも複製する。** `static mut` にしてその場で書く案は
+/// **「不可能」ではなく「採らない」である**——**埋め込んだ像は
+/// `build.rs` が建てたものと同一であることが検査の前提**で
+/// （`--full` の `fs image e2fsck`）、**その前提を実行時に壊すと、
+/// 「建てた像」と「動かした像」が同じものを指さなくなる。**
+///
+/// # S12-a では書き換えない
+///
+/// **作るのは経路だけである。** 複製して、物理の位置を判定行に出し、
+/// **ホスト側が取り出して元の像と突き合わせる**ところまでを見る。
+///
+/// **書き換えを入れると、経路の誤りと書き込みの誤りが混ざる。**
+/// **S12-a が主張するのは「複製と取り出しが 1 バイトも落とさないこと」だけである。**
+///
+/// # 返さないフレームである
+///
+/// **取ったきり返さない。** 像は起動中ずっと生きる。
+/// **`spawn` の会計（`leaked`）には出ない**——あちらはプロセスの
+/// アドレス空間の畳みを、`spawn` の前後で測っている。**ここは spawn より前で、
+/// 窓の外である**（実測で確かめた）。
+fn copy_fs_image_to_frames(logger: &mut Logger<SerialPort>) {
+    use kernel::frame_allocator::FRAME_SIZE;
+
+    // **預けた後なので借りる**（`ADR-0030`）。**取ったフレームは返さないが、
+    // アロケータ自身は返す**——貸し借りの回数は判定行で突き合わされている。
+    let Some(allocator) = kernel::frame_allocator::take() else {
+        logger.error(format_args!(
+            "fs-image-copy: the frame allocator is not available (someone did not give it back); \
+             halting"
+        ));
+        cpu::halt_forever();
+    };
+
+    let bytes = FS_IMAGE.len() as u64;
+    let frames = bytes.div_ceil(FRAME_SIZE);
+    // **2 MiB 境界へ揃える。** いま要るのは取り出しだけで、揃える必要は無い。
+    // **引数 1 つで済むので揃えておく**——後で 2MiB ページ 1 枚で張り直す道が残る。
+    const HUGE_PAGE_FRAMES: u64 = (2 * 1024 * 1024) / FRAME_SIZE;
+
+    let Some(base) = allocator.allocate_contiguous_aligned(frames, HUGE_PAGE_FRAMES) else {
+        logger.error(format_args!(
+            "fs-image-copy: could not allocate {frames} contiguous frame(s) for the {bytes}-byte              image; halting"
+        ));
+        cpu::halt_forever();
+    };
+
+    let direct_map = common::addr::direct_map();
+    // **覆いを先に見る。** `phys_to_virt` は覆いを検査せずに加算するだけなので、
+    // **覆いの外を渡すと黙って別のアドレスを返す**（`address_space` と同じ作法）。
+    let Some(last) = common::addr::PhysAddr::new(base.as_u64() + frames * FRAME_SIZE - 1) else {
+        logger.error(format_args!(
+            "fs-image-copy: the end of the copy is not a valid physical address; halting"
+        ));
+        cpu::halt_forever();
+    };
+    if !direct_map.covers(base) || !direct_map.covers(last) {
+        logger.error(format_args!(
+            "fs-image-copy: the direct map does not cover {:#x}..{:#x}; halting",
+            base.as_u64(),
+            last.as_u64()
+        ));
+        cpu::halt_forever();
+    }
+
+    let destination = direct_map.phys_to_virt(base).as_u64() as *mut u8;
+    // SAFETY: いま確保した連続フレームで、direct map が覆っていることを上で確かめた。
+    // 誰も使っていない。`bytes` は像の長さで、確保した範囲に収まる。
+    unsafe {
+        core::ptr::copy_nonoverlapping(FS_IMAGE.as_ptr(), destination, bytes as usize);
+    }
+
+    // **書いたものを読み戻して突き合わせる。** 複製したことを主張の根拠にしない
+    // （`install_guard_page` が split の後に粒度を読み直すのと同じ形）。
+    //
+    // 破壊 (S12-a, fs-copy-corrupt-tail): 末尾の 1 バイトを 0xFF で潰す。
+    // **読み戻しがここで落ちる。** 落とさなければホスト側の突き合わせが落ちる。
+    //
+    // **0 で潰す形は破壊にならない。** 像の末尾は既に 0 なので、書いても何も
+    // 変わらない（**実測でそうなった**——破壊を立てたのに項目が通った）。
+    // **「壊したつもりで壊れていない」を、破壊を走らせて捕まえた例である。**
+    #[cfg(feature = "fs-copy-corrupt-tail-test")]
+    // SAFETY: 上と同じ範囲。破壊のために末尾を 1 バイトだけ変える。
+    unsafe {
+        destination.add(bytes as usize - 1).write(0xFF);
+    }
+
+    // SAFETY: いま書いた範囲を読むだけである。
+    let copied = unsafe { core::slice::from_raw_parts(destination as *const u8, bytes as usize) };
+    let identical = copied == FS_IMAGE;
+
+    // **アロケータを返す。** 取ったフレームは返さないが、**借りたものは返す。**
+    kernel::frame_allocator::give_back(allocator);
+
+    // **カーネル像の物理範囲も一緒に出す。** ホスト側が「複製先がカーネル像の
+    // 外にあること」を見る——**出さないと「複製した」が反証できない**
+    // （複製せずに `.rodata` の番地を出す形が通ってしまう）。
+    let (image_start, image_end) = kernel_image_phys_range();
+    logger.info(format_args!(
+        "fs-image-copy: copied {bytes} byte(s) to phys {:#x}..{:#x} ({frames} frame(s), \
+         2MiB-aligned={}), read-back identical={identical}; the kernel image is {:#x}..{:#x}",
+        base.as_u64(),
+        base.as_u64() + bytes,
+        base.as_u64() % (2 * 1024 * 1024) == 0,
+        image_start.as_u64(),
+        image_end.as_u64()
+    ));
+
+    if !identical {
+        logger.error(format_args!(
+            "fs-image-copy: the copy does not match the embedded image; halting"
+        ));
+        cpu::halt_forever();
+    }
+}
+
 fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
     use common::ext2::Ext2;
 
@@ -7377,6 +7501,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "kill-fold-keep-bkl-test",
         cfg!(feature = "kill-fold-keep-bkl-test"),
         "BKL を解かずに畳み、次に取る者が再取得として捕まえるようにする",
+    ),
+    (
+        "fs-copy-corrupt-tail-test",
+        cfg!(feature = "fs-copy-corrupt-tail-test"),
+        "像の複製の末尾 1 バイトを 0xFF で潰す",
     ),
     (
         "kill-keep-typed-input-test",
