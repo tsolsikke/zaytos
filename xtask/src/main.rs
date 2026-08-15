@@ -2239,8 +2239,23 @@ fn cmd_shell_test() -> Result<()> {
     // **`/bin/` を付けた側が同じものを出す。** 上の 3 判定と同じ理由である。
     let typed_bare_ls = after_shell.contains("zaytos$ ls\n");
     let typed_bare_cat = after_shell.contains("zaytos$ cat /etc/motd\n");
-    let no_cannot_run = !after_shell.contains(": cannot run");
+    // **「1 つも `cannot run` が出ていない」では見られなくなった（S12 前の手当て）。**
+    // **行編集の判定が、わざと走らない語（`abx`）を打つためである。**
+    // **名前を挙げて見る形へ狭めた**——ここが主張したいのは
+    // 「`/bin/` を付けずに打った 3 つが起こせたこと」だけである。
+    let no_cannot_run = !after_shell.contains("sh: ls: cannot run")
+        && !after_shell.contains("sh: cat: cannot run")
+        && !after_shell.contains("sh: spawn-test: cannot run");
     let bare_names_resolved = typed_bare_ls && typed_bare_cat && no_cannot_run;
+
+    // **Backspace が行を編集したこと（S12 前の手当て）。**
+    //
+    // **打ったのは `abc` → Backspace → `x` で、走るのは `abx` である。**
+    // **消えていなければ `abcx` になる。** 出る側と出ない側の両方を見る——
+    // **片方だけだと、シェルが行を空にしてしまっても通る。**
+    let edited_line_ran = after_shell.contains("sh: abx: cannot run");
+    let unedited_line_absent = !after_shell.contains("sh: abcx: cannot run");
+    let backspace_edited_the_line = edited_line_ran && unedited_line_absent;
 
     // **`argv[0]` が打った語のままであること（3 本目）。**
     //
@@ -2262,6 +2277,7 @@ fn cmd_shell_test() -> Result<()> {
     println!("{context}: hello ran = {ran_hello}");
     println!("{context}: bare names resolved under /bin = {bare_names_resolved}");
     println!("{context}: argv[0] stayed as typed = {argv0_is_as_typed}");
+    println!("{context}: backspace edited the line = {backspace_edited_the_line}");
 
     if ready
         && ended
@@ -2272,6 +2288,7 @@ fn cmd_shell_test() -> Result<()> {
         && ran_hello
         && bare_names_resolved
         && argv0_is_as_typed
+        && backspace_edited_the_line
     {
         println!("{context}: PASS");
         Ok(())
@@ -2312,6 +2329,13 @@ const SHELL_TEST_LINES: &[&[&str]] = &[
     &[
         "s", "p", "a", "w", "n", "minus", "t", "e", "s", "t", "spc", "b", "e", "t", "a", "ret",
     ],
+    // abc → Backspace → x（S12 前の手当て）。**行編集が効いていることを見る。**
+    //
+    // **打つのは `abc`、消してから `x` なので、走るのは `abx` である。**
+    // **消えていなければ `abcx` になる**——判定は 2 本で、
+    // **出る側（`abx`）と出ない側（`abcx`）の両方を見る。**
+    // どちらも実在しない語なので、シェルは `cannot run` を返す。
+    &["a", "b", "c", "backspace", "x", "ret"],
     // exit
     &["e", "x", "i", "t", "ret"],
 ];

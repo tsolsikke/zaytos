@@ -112,6 +112,12 @@ pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
 
     let mut line = [0u8; LINE_MAX];
     let mut length = 0usize;
+    // **挿入点（S12 前の手当て）。** 次に字を入れる位置で、**常に `length` 以下**である。
+    //
+    // **いまは常に行末（`length` と等しい）である**——動かす手段がまだ無い。
+    // **それでも概念として先に置く。** 矢印を足す段で増えるのは
+    // 「動かす手段」だけになり、Backspace と挿入の側を書き直さずに済む。
+    let mut cursor = 0usize;
     let mut overflowed = false;
 
     loop {
@@ -141,22 +147,37 @@ pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
                     run_line(&mut line[..length]);
                 }
                 length = 0;
+                cursor = 0;
                 overflowed = false;
                 write_all(STDOUT, PROMPT);
             }
             BACKSPACE => {
-                if length > 0 {
+                // **挿入点の直前を消して、後ろを詰める（S12 前の手当て）。**
+                // **行頭では何もしない。**
+                if cursor > 0 {
+                    line.copy_within(cursor..length, cursor - 1);
+                    cursor -= 1;
                     length -= 1;
-                    // **画面の消去はしない**（`ADR-0017` の保留項目）。
-                    // **シリアルには後退・空白・後退を送る**——端末側が消す。
+                    // **後退・空白・後退で 1 つ消す。** 画面もこれで消える
+                    // （`Grid` が `\x08` でカーソルを戻すようにした）。
                     write_all(STDOUT, b"\x08 \x08");
+                    // **挿入点より後ろがあるなら、書き直して詰める。**
+                    // **末尾に空白を 1 つ置いて、消えた 1 セルを潰す。**
+                    // そのぶんカーソルが右へ動くので、同じ数だけ戻す。
+                    redraw_tail(&line[cursor..length]);
                 }
             }
             other => {
                 if length < line.len() {
-                    line[length] = other;
+                    // **挿入点へ入れて、後ろをずらす。**
+                    line.copy_within(cursor..length, cursor + 1);
+                    line[cursor] = other;
+                    cursor += 1;
                     length += 1;
                     write_all(STDOUT, &byte);
+                    // **挿入点より後ろは書き直す。** 末尾の空白は要らない
+                    // （消えた分が無いため）。
+                    redraw_tail_without_gap(&line[cursor..length]);
                 } else {
                     // **越えたぶんは捨てる。** 反響もしない——
                     // **入っていないものを入ったように見せない。**
@@ -368,4 +389,43 @@ fn write_decimal(value: u64) {
         }
     }
     write_all(STDOUT, &digits[3 - length..]);
+}
+
+/// 挿入点より後ろを書き直し、**消えた 1 セルを空白で潰してから**カーソルを戻す。
+///
+/// # なぜ書き直すのか
+///
+/// **端末も画面も「消した」ことを知らない。** 後ろを詰めたのはこちらの配列の中
+/// だけなので、**同じ並びを書き直さないと画面が古いままになる。**
+///
+/// **末尾の空白は、詰めたぶんの 1 セルを潰すためである。** 詰めると行は 1 つ短く
+/// なるが、画面には前の最後の字が残っている。
+///
+/// **戻す数は「書いた数」である。** 書いた後のカーソルは行の末尾にあり、
+/// 挿入点はそこから `tail.len() + 1` だけ左である（空白のぶんを含む）。
+fn redraw_tail(tail: &[u8]) {
+    // **行末で消したなら、書き直すものが無い。** 直前の後退・空白・後退が
+    // 最後のセルを潰しているので、**ここで空白をもう 1 つ置くと 1 セル余計に
+    // 塗ることになる**（実測で `\x08 \x08 \x08` と 5 バイト出ていた）。
+    if tail.is_empty() {
+        return;
+    }
+    write_all(STDOUT, tail);
+    write_all(STDOUT, b" ");
+    for _ in 0..tail.len() + 1 {
+        write_all(STDOUT, b"\x08");
+    }
+}
+
+/// 挿入点より後ろを書き直し、カーソルを戻す。**空白は置かない。**
+///
+/// 字を入れた側から呼ぶ。**行は 1 つ伸びているので、潰すセルが無い。**
+fn redraw_tail_without_gap(tail: &[u8]) {
+    if tail.is_empty() {
+        return;
+    }
+    write_all(STDOUT, tail);
+    for _ in 0..tail.len() {
+        write_all(STDOUT, b"\x08");
+    }
 }
