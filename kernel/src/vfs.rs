@@ -75,7 +75,54 @@ pub static FS_IMAGE: &[u8] = &[];
 /// である。**組み立ては superblock を 1 回読むだけなので、静的に持ち回るより安い。**
 /// **借用を `static` へ置かずに済む**ぶん、形も単純になる。
 pub fn root_filesystem() -> Result<ext2::Ext2<'static>, ext2::Ext2Error> {
-    ext2::Ext2::parse(FS_IMAGE)
+    ext2::Ext2::parse(root_image())
+}
+
+/// 根の像の在り処（S12-b の 1 段目）。**0 なら、まだ複製へ向いていない。**
+///
+/// # なぜ差し替えるのか
+///
+/// **書く先と読む先を同じにするためである。** S12-a は像をフレームへ複製したが、
+/// **読む側は `.rodata` の [`FS_IMAGE`] を見たままだった。**
+/// **そのまま書き始めると、書いた先と読む先が別物になる。**
+///
+/// # 向ける前も動く
+///
+/// **複製は起動の途中で作られる。** それより前に像を読む経路がある
+/// （`verify_embedded_fs_image`）ので、**向くまでは埋め込みの側を返す。**
+static ROOT_IMAGE_PTR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+/// [`ROOT_IMAGE_PTR`] が指す長さ。
+static ROOT_IMAGE_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// 根の像を複製へ向ける（S12-b の 1 段目）。**複製した側が 1 度だけ呼ぶ。**
+pub fn set_root_image(image: &'static [u8]) {
+    ROOT_IMAGE_LEN.store(image.len(), core::sync::atomic::Ordering::SeqCst);
+    ROOT_IMAGE_PTR.store(
+        image.as_ptr() as usize,
+        core::sync::atomic::Ordering::SeqCst,
+    );
+}
+
+/// いま読んでいる像。
+///
+/// 破壊 (S12-b, fs-read-from-rodata): 常に埋め込みの側を返す。
+/// **向け直したことが観測できなくなる**——判定行に出る番地がカーネル像の中になり、
+/// 複製の番地と食い違う。
+pub fn root_image() -> &'static [u8] {
+    #[cfg(feature = "fs-read-from-rodata-test")]
+    return FS_IMAGE;
+
+    #[cfg(not(feature = "fs-read-from-rodata-test"))]
+    {
+        let ptr = ROOT_IMAGE_PTR.load(core::sync::atomic::Ordering::SeqCst);
+        let len = ROOT_IMAGE_LEN.load(core::sync::atomic::Ordering::SeqCst);
+        if ptr == 0 {
+            return FS_IMAGE;
+        }
+        // SAFETY: [`set_root_image`] が渡した `&'static [u8]` の中身をそのまま
+        // 組み直している。**複製先のフレームは起動中ずっと生きており、返さない。**
+        unsafe { core::slice::from_raw_parts(ptr as *const u8, len) }
+    }
 }
 
 /// 今 Ring 3 が使っている表（Linux の `current->files`）。

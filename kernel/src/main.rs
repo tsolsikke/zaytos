@@ -4091,6 +4091,27 @@ fn copy_fs_image_to_frames(logger: &mut Logger<SerialPort>) {
     // **アロケータを返す。** 取ったフレームは返さないが、**借りたものは返す。**
     kernel::frame_allocator::give_back(allocator);
 
+    // **読む側をここへ向ける（S12-b の 1 段目）。**
+    // **書く先と読む先を同じにする**——向けないまま書き始めると、
+    // 書いた先と読む先が別物になる。
+    //
+    // SAFETY: このフレームは起動中ずっと生き、返さない。中身はいま書いた像である。
+    let copied_static: &'static [u8] =
+        unsafe { core::slice::from_raw_parts(destination as *const u8, bytes as usize) };
+    kernel::vfs::set_root_image(copied_static);
+
+    // **どこを読んでいるかを出す。** **向けたことを主張できるようにする**——
+    // **複製は元の像とバイト単位で一致しているので、向けても向けなくても
+    // 読めるものが変わらない。** 番地だけが違う。
+    //
+    // **番地は、実際に返ってくるスライスから取る。** 控えた値を出し直すと、
+    // **比べ方を間違えても必ず一致してしまう。**
+    let reading = kernel::vfs::root_image().as_ptr() as u64;
+    let reading_phys = reading.wrapping_sub(direct_map.base().as_u64());
+    logger.info(format_args!(
+        "fs-image-source: root_filesystem reads from virt {reading:#x} (phys {reading_phys:#x})"
+    ));
+
     // **カーネル像の物理範囲も一緒に出す。** ホスト側が「複製先がカーネル像の
     // 外にあること」を見る——**出さないと「複製した」が反証できない**
     // （複製せずに `.rodata` の番地を出す形が通ってしまう）。
@@ -7506,6 +7527,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "fs-copy-corrupt-tail-test",
         cfg!(feature = "fs-copy-corrupt-tail-test"),
         "像の複製の末尾 1 バイトを 0xFF で潰す",
+    ),
+    (
+        "fs-read-from-rodata-test",
+        cfg!(feature = "fs-read-from-rodata-test"),
+        "読む側を複製へ向けず、埋め込みの側を返す",
     ),
     (
         "kill-keep-typed-input-test",

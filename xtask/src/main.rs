@@ -2160,6 +2160,7 @@ fn cmd_fs_image_extract(feature: Option<&str>) -> Result<()> {
 
     // **複製の行が出るまで待つ。上限つき。**
     let marker = "fs-image-copy: copied ";
+    let source_marker = "fs-image-source: root_filesystem reads from ";
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     let mut copied_line = None;
     while Instant::now() < deadline {
@@ -2239,6 +2240,21 @@ fn cmd_fs_image_extract(feature: Option<&str>) -> Result<()> {
     };
     println!("{context}: the copy lies outside the kernel image = {outside_kernel_image}");
 
+    // **読む側が複製を見ていること（S12-b の 1 段目）。**
+    //
+    // **複製は元の像とバイト単位で一致しているので、向けても向けなくても
+    // 読めるものは変わらない。番地だけが違う。** したがって
+    // **番地を突き合わせないと「向けた」ことを主張できない。**
+    let reader_phys = serial
+        .lines()
+        .find(|l| l.contains(source_marker))
+        .and_then(parse_reader_phys);
+    let reads_the_copy = match (reader_phys, parse_copy_range(&line)) {
+        (Some(reader), Some((base, _))) => reader == base,
+        _ => false,
+    };
+    println!("{context}: root_filesystem reads from the copy = {reads_the_copy}");
+
     // **2 本目——取り出した像が、建てた像とバイト単位で一致すること。**
     let built = kernel_build_out_dir(&workspace_root)?.join(FS_IMAGE_NAME);
     let identical = match (fs::read(&dump), fs::read(&built)) {
@@ -2257,7 +2273,7 @@ fn cmd_fs_image_extract(feature: Option<&str>) -> Result<()> {
     let fsck_ok = extracted && !summary.starts_with("the image was not extracted");
     println!("{context}: e2fsck accepted the extracted image = {fsck_ok} ({summary})");
 
-    if outside_kernel_image && identical && fsck_ok {
+    if outside_kernel_image && reads_the_copy && identical && fsck_ok {
         println!("{context}: PASS");
         Ok(())
     } else {
@@ -2271,6 +2287,12 @@ fn parse_copy_range(line: &str) -> Option<(u64, u64)> {
     let range = rest.split_whitespace().next()?;
     let (start, end) = range.split_once("..")?;
     Some((parse_hex(start)?, parse_hex(end)?))
+}
+
+/// `fs-image-source` の行から、読んでいる先の物理アドレスを読む。
+fn parse_reader_phys(line: &str) -> Option<u64> {
+    let rest = line.split("(phys ").nth(1)?;
+    parse_hex(rest.split(')').next()?)
 }
 
 /// 同じ行からカーネル像の物理範囲を読む。
@@ -7358,6 +7380,19 @@ fn cmd_check(full: bool) -> Result<()> {
             Err(_) => println!("--- fs extract (corrupt tail): OK (the sabotage was caught)"),
         }
 
+        // **読む側を複製へ向けたことの反証（S12-b の 1 段目）。**
+        // **判定を足しただけでは足りない**——番地を 2 つ出して比べる形は、
+        // **比べ方を間違えても通りうる**（同じ値を 2 回出せば必ず一致する）。
+        total += 1;
+        println!("=== xtask check: the fs extract catches reading from the embedded image");
+        match cmd_fs_image_extract(Some("fs-read-from-rodata-test")) {
+            Ok(()) => {
+                println!("--- fs extract (read from rodata): FAILED (the sabotage was NOT caught)");
+                failed.push("fs extract (read from rodata)".to_string());
+            }
+            Err(_) => println!("--- fs extract (read from rodata): OK (the sabotage was caught)"),
+        }
+
         for feature in KILL_SABOTAGES {
             total += 1;
             println!("=== xtask check: the shell test catches the sabotage {feature}");
@@ -7848,7 +7883,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 143,
+    full: 144,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
