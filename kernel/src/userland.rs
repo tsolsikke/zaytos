@@ -373,6 +373,15 @@ pub enum SpawnOutcome {
     Exited(u64),
     /// Ring 3 の違反が畳まれて終わった。**ベクタを持つ。**
     Folded(u64),
+    /// 外から止められた（Ctrl+C。S12 前の手当て、C）。
+    ///
+    /// **`Folded` と分けてある。** あちらは**子が違反した**で、
+    /// **こちらは子に落ち度が無い。** 混ぜると、判定行から
+    /// 「落ちた」と「止めた」の区別が付かなくなる。
+    ///
+    /// **ベクタを持たない。** 止めた地点はタイマ割り込みで、
+    /// **どのベクタで止めたかは子について何も語らない。**
+    Interrupted,
 }
 
 /// 走らせるプロセス 1 つ分（S9-b-3-1）。
@@ -841,6 +850,17 @@ unsafe fn run_loaded_program(
     // **親が持ったままにして、子はその前景を通して読む**——
     // **持ち主は 1 人という不変条件は保たれる。**
     let claimed_foreground = crate::input::claim_foreground();
+    // **前の中断要求を持ち越さない（S12 前の手当て、C）。**
+    //
+    // **深さ 1 で Ctrl+C を押すと、旗は立つが誰も消費しない**——
+    // **畳む地点は深さ 2 以上でしか発火しない**（`crate::idt` の
+    // `fold_if_interrupted`）。**降ろさずに子を起こすと、その子が
+    // 起きた瞬間に止まる。**
+    //
+    // 破壊 (S12 前の手当て C, kill-keep-stale-interrupt): 降ろさない。
+    // **シェルで Ctrl+C を押した後、次に起こした子が即座に止まる。**
+    #[cfg(not(feature = "kill-keep-stale-interrupt-test"))]
+    crate::input::clear_interrupt_request();
     // **どの深さの遠征スタックを使うかを控える（S11-5）。** 戻った後は深さが
     // 元へ戻っているので、そのときには引けない。
     let entered_at_depth = crate::ring3::depth();
@@ -861,6 +881,28 @@ unsafe fn run_loaded_program(
         crate::input::release_foreground();
     }
     process.files = crate::vfs::swap_current_files(previous_files);
+    // **止めたときは、前景の持ち主と止めた相手を両方出す（S12 前の手当て、C）。**
+    //
+    // **この 2 つは同じではない。** 前景を取るのは遠征の最も外側
+    // （シェル）で、**止めるのは最も内側（子）である。**
+    // `claim_foreground` は入れ子では偽を返し、**親が持ったまま子はその前景を
+    // 通して読む。** **どこにも書かれていなかったので、判定行に出す。**
+    if crate::ring3::interrupted() {
+        // **止めた打鍵そのものを捨てる。** 残すと、次にシェルが読んだときに
+        // `^C` がもう 1 つ出る（実測。[`crate::input::discard_typed_input`]）。
+        //
+        // 破壊 (S12 前の手当て C, kill-keep-typed-input): 捨てない。
+        // **止めた直後のプロンプトに `^C` が余分に出る。**
+        #[cfg(not(feature = "kill-keep-typed-input-test"))]
+        crate::input::discard_typed_input();
+        logger.info(format_args!(
+            "interrupt: stopped {} at excursion depth {entered_at_depth}; the foreground is held \
+             at depth {} (the holder is the outermost excursion, the target is the innermost), \
+             claimed here={claimed_foreground}",
+            process.name,
+            crate::input::foreground_depth()
+        ));
+    }
     // **この遠征で遠征スタックをどれだけ使ったかを出す（S11-5）。**
     //
     // **このスタックにはガードページが無い**（`.bss` の配列である）ので、
@@ -1142,7 +1184,11 @@ pub fn spawn(
     let (outcome, held, leaked) = load_user_program(&mut logger, image, true, name, argv);
 
     // **子の終わり方をここで読む。** 戻す前に読まなければ、親のもので上書きされる。
-    let child = if crate::syscall::process_exited() {
+    // **中断を先に見る（S12 前の手当て、C）。** **`exit` も畳みも通っていない**
+    // ので、先に見なければ `Folded(0)` に化ける。
+    let child = if crate::ring3::interrupted() {
+        SpawnOutcome::Interrupted
+    } else if crate::syscall::process_exited() {
         SpawnOutcome::Exited(crate::syscall::process_exit_status())
     } else {
         SpawnOutcome::Folded(crate::ring3::fault_vector())

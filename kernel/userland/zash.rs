@@ -73,6 +73,19 @@ const BUILTIN_EXIT: &[u8] = b"exit";
 const NOT_FOUND_HEAD: &[u8] = b"zash: ";
 /// 起こせなかったときの返事（後半）。
 const NOT_FOUND_TAIL: &[u8] = b": cannot run\n";
+
+/// 中断（Ctrl+C）で子が止まったときに `spawn` が返す値（S12 前の手当て、C）。
+///
+/// **カーネル側の `SPAWN_INTERRUPTED_FLAG` と同じ値である。**
+/// **ユーザープログラムはカーネルの定数を参照できない**ので、ここに写す
+/// （`SYS_*` の番号を写しているのと同じ形）。
+const SPAWN_INTERRUPTED: u64 = 0x200;
+
+/// 止められたときに出す 1 行。
+const INTERRUPTED_LINE: &[u8] = b"interrupted\n";
+
+/// Ctrl+C が届くバイト（ASCII の ETX）。
+const CTRL_C: u8 = 0x03;
 /// 0 以外で終わったときの返事（前半）。
 const STATUS_HEAD: &[u8] = b"zash: exit status ";
 /// `argv` の要素数の上限。**カーネルの `MAX_ARGV` と同じ。**
@@ -207,6 +220,23 @@ pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
                 overflowed = false;
                 // **未完のエスケープは行をまたがない。** 溜めた状態を捨てる
                 // （ここへ来る時点で `Idle` のはずだが、状態を持ち越さない）。
+                escape = Escape::Idle;
+                write_all(STDOUT, PROMPT);
+            }
+            CTRL_C => {
+                // **打ちかけの行を捨てる（S12 前の手当て、C）。**
+                //
+                // **子が走っていないときの Ctrl+C はここへ来る。**
+                // **走っているときはこのバイトが届かない**——カーネルが
+                // 子の遠征を畳んでおり、シェルは `spawn` の中で待っている。
+                //
+                // **`^C` を出してから改行する。** 出さないと、捨てられた行が
+                // 画面に残ったまま次のプロンプトが出て、**何が起きたのか
+                // 打った人に見えない。**
+                write_all(STDOUT, b"^C\n");
+                length = 0;
+                cursor = 0;
+                overflowed = false;
                 escape = Escape::Idle;
                 write_all(STDOUT, PROMPT);
             }
@@ -412,6 +442,14 @@ fn run_with_terminator(line: &[u8], starts: &[usize]) {
         write_all(STDERR, NOT_FOUND_HEAD);
         write_all(STDERR, command);
         write_all(STDERR, NOT_FOUND_TAIL);
+        return;
+    }
+    // **止められた子は、状態ではなく 1 行で報せる（S12 前の手当て、C）。**
+    //
+    // **子に落ち度が無いので、終了状態として数字を出さない。**
+    // **打った人は自分で止めたことを知っている**ので、短くてよい。
+    if status as u64 == SPAWN_INTERRUPTED {
+        write_all(STDOUT, INTERRUPTED_LINE);
         return;
     }
     if status != 0 {

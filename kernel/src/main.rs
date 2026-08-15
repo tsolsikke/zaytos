@@ -4110,13 +4110,18 @@ const fn fs_inode_at(ino: usize) -> usize {
 /// ルート inode の像内オフセット。
 const FS_ROOT_INODE_AT: usize = fs_inode_at(2);
 
-/// `/etc/motd` の inode（21 番。判定行に出ている）の像内オフセット。
+/// `/etc/motd` の inode（判定行に出ている）の像内オフセット。
 ///
-/// **S11-5 で 18 から 19 へ、S11-9 で 19 から 21 へ、S11-11 で 21 から 22 へ動いた。** 像へ
-/// `/bin/spawn-test`、続いて `/bin/ls` と `/bin/cat` を足したので、**後ろの
+/// **S11-5 で 18 から 19 へ、S11-9 で 19 から 21 へ、S11-11 で 21 から 22 へ、
+/// S12 前の手当ての C で 22 から 23 へ動いた。** 像へ `/bin/spawn-test`、
+/// 続いて `/bin/ls` と `/bin/cat`、そして `/bin/spin` を足したので、**後ろの
 /// inode 番号がそのぶんずれた**（`docs/coding-standards.md` の
 /// 「実測値は、測った条件が変わると古くなる」）。**そのつど測り直している。**
-const FS_MOTD_INODE_AT: usize = fs_inode_at(22);
+///
+/// **doc の見出しから番号を落とした。** かつて「21 番」と書いてあったが、
+/// **本体が 22 になっても直されていなかった**——**同じ数を 2 か所に書くと、
+/// 片方だけが古くなる。** 番号は下の式が持つ。
+const FS_MOTD_INODE_AT: usize = fs_inode_at(23);
 
 /// ルートディレクトリのデータブロック（実測。判定行の `i_block[0]` に出ている）。
 const FS_ROOT_DIR_BLOCK: usize = 20 * FS_BLOCK_SIZE;
@@ -4134,13 +4139,18 @@ const FS_ROOT_ETC_ENTRY: usize = FS_ROOT_DIR_BLOCK + 68;
 /// 固定の既定（`/` を含まない語を `/bin/` の下で探す）で `.text` が伸び、
 /// **`/bin/zash`（当時の名前は `/bin/sh`）が 1 ブロック増えて、後ろのブロックがそのぶんずれた。**
 /// **像に載るのは本数だけでなく、1 本あたりの大きさでもある。**
-const FS_INDIRECT_TABLE_BLOCK: usize = 72 * FS_BLOCK_SIZE;
+///
+/// **6 度目は S12 前の手当ての C で、72 から 75 へ動いた**（`/bin/spin` を足した）。
+/// **今回は `debugfs` で測った**——判定行にも出ているが、
+/// **像を読む側と壊す側が同じ数を別々に持つので、外の道具で突き合わせた。**
+const FS_INDIRECT_TABLE_BLOCK: usize = 75 * FS_BLOCK_SIZE;
 
 /// `/etc/motd` のデータブロック（実測）。
 ///
 /// **S11-5 で 58 から 61 へ、S11-9 で 61 から 69 へ、S11-10 で 70 へ、S11-11 で 74 へ、
-/// S12 前の手当ての 3 本目で 75 へ動いた**（[`FS_MOTD_INODE_AT`] と同じ理由）。
-const FS_MOTD_DATA_BLOCK: usize = 75 * FS_BLOCK_SIZE;
+/// S12 前の手当ての 3 本目で 75 へ、同じ手当ての C で 78 へ動いた**
+/// （[`FS_MOTD_INODE_AT`] と同じ理由）。
+const FS_MOTD_DATA_BLOCK: usize = 78 * FS_BLOCK_SIZE;
 
 /// 種のファイルと同じ木にある `/etc/motd` の中身（S10-a）。
 ///
@@ -7347,6 +7357,31 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "keyboard-drop-arrows-test",
         cfg!(feature = "keyboard-drop-arrows-test"),
         "左右の矢印を未対応へ戻し、シェルの挿入点が動かないようにする",
+    ),
+    (
+        "kill-ignore-interrupt-test",
+        cfg!(feature = "kill-ignore-interrupt-test"),
+        "中断の旗を立てず、Ctrl+C で子が止まらないようにする",
+    ),
+    (
+        "kill-fold-at-depth-one-test",
+        cfg!(feature = "kill-fold-at-depth-one-test"),
+        "深さ 1 でも畳み、シェル自身が Ctrl+C で死ぬようにする",
+    ),
+    (
+        "kill-keep-stale-interrupt-test",
+        cfg!(feature = "kill-keep-stale-interrupt-test"),
+        "子を起こす前に中断の旗を降ろさず、次の子へ持ち越す",
+    ),
+    (
+        "kill-fold-keep-bkl-test",
+        cfg!(feature = "kill-fold-keep-bkl-test"),
+        "BKL を解かずに畳み、次に取る者が再取得として捕まえるようにする",
+    ),
+    (
+        "kill-keep-typed-input-test",
+        cfg!(feature = "kill-keep-typed-input-test"),
+        "止めた後の入力を捨てず、次のプロンプトに ^C を余分に出す",
     ),
     (
         "tiny-key-buffer",

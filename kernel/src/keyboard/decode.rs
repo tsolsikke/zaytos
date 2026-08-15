@@ -70,7 +70,7 @@ pub enum KeyEvent {
 const BREAK_BIT: u8 = 0x80;
 
 /// 拡張スキャンコードのプレフィックス。次の 1 バイトと組で 1 つのキーを表す。
-const EXTENDED_PREFIX: u8 = 0xE0;
+pub(crate) const EXTENDED_PREFIX: u8 = 0xE0;
 
 /// Pause / Break のプレフィックス。
 ///
@@ -79,17 +79,29 @@ const EXTENDED_PREFIX: u8 = 0xE0;
 /// 「次の 1 バイトを飛ばす」実装だと内側の `E1` で状態機械が入れ子になり、
 /// 以降のバイト境界がずれて**キー入力全体が壊れる**。しかも Pause を
 /// 押さなければ再現しないため、気づくのが遅れる。
-const PAUSE_PREFIX: u8 = 0xE1;
+pub(crate) const PAUSE_PREFIX: u8 = 0xE1;
 
 /// `PAUSE_PREFIX` の後に続き、無条件に読み捨てるバイト数。
 ///
 /// 内側の `E1` も「数のうち」として飲み込むので、入れ子にならない。
-const PAUSE_TRAILING_BYTES: u8 = 5;
+pub(crate) const PAUSE_TRAILING_BYTES: u8 = 5;
 
 // 修飾キーのスキャンコード（押下側）。
 const SCANCODE_LEFT_SHIFT: u8 = 0x2A;
 const SCANCODE_RIGHT_SHIFT: u8 = 0x36;
 const SCANCODE_CAPS_LOCK: u8 = 0x3A;
+
+/// Ctrl のスキャンコード（S12 前の手当て、C）。
+///
+/// **左右で同じ値である。** 右 Ctrl は `0xE0 0x1D` で、接頭辞が付くだけである。
+/// **接頭辞の有無を区別しない**ので、左右どちらでも Ctrl として効く。
+pub(crate) const SCANCODE_CTRL: u8 = 0x1D;
+
+/// `C` のスキャンコード（S12 前の手当て、C）。
+pub(crate) const SCANCODE_C: u8 = 0x2E;
+
+/// Ctrl+C が作る制御文字。**ASCII の ETX（`0x03`）である。**
+pub(crate) const CTRL_C_BYTE: u8 = 0x03;
 
 // 文字ではないが意味を持つキー。
 const SCANCODE_BACKSPACE: u8 = 0x0E;
@@ -149,6 +161,14 @@ pub struct Decoder {
     shift_left: bool,
     shift_right: bool,
     caps_lock: bool,
+    /// Ctrl が押されているか（S12 前の手当て、C）。
+    ///
+    /// **左右を分けない。** Shift は左右を分けているが、あちらは
+    /// **どちらが押されたかを数えるため**ではなく、**片方を離しても
+    /// もう片方が押されていれば Shift のまま**にするためである。
+    /// **Ctrl は右が `0xE0 0x1D` で来るので、接頭辞を落とすと左と区別が付かない。**
+    /// **区別しないと決めたので、1 つで持つ**（[`SCANCODE_CTRL`]）。
+    ctrl: bool,
     sequence: Sequence,
 }
 
@@ -164,8 +184,14 @@ impl Decoder {
             shift_left: false,
             shift_right: false,
             caps_lock: false,
+            ctrl: false,
             sequence: Sequence::Idle,
         }
+    }
+
+    /// Ctrl が押されているか（左右どちらでも）。
+    pub const fn ctrl(&self) -> bool {
+        self.ctrl
     }
 
     /// Shift が押されているか（左右どちらでも）。
@@ -212,6 +238,18 @@ impl Decoder {
                 if code == SCANCODE_ARROW_RIGHT {
                     return Some(KeyEvent::ArrowRight);
                 }
+                // **右 Ctrl（`0xE0 0x1D`）も Ctrl として扱う（S12 前の手当て、C）。**
+                //
+                // **接頭辞の有無で左右を区別しない。** 区別すると、
+                // **右 Ctrl で Ctrl+C が効かない**という、押した人にしか
+                // 分からない差が出る。**左右どちらでも効くほうを採る。**
+                //
+                // **修飾なので押下と離脱の両方で更新し、報告はしない**
+                // （Shift と同じ形。`Unsupported` にも出さない）。
+                if code & !BREAK_BIT == SCANCODE_CTRL {
+                    self.ctrl = code & BREAK_BIT == 0;
+                    return None;
+                }
                 // 押下のときだけ報告し、離したときは黙る。押下と離しで 2 回数えると、
                 // 「押した回数」として見たときに倍になる。
                 if code & BREAK_BIT == 0 {
@@ -249,6 +287,11 @@ impl Decoder {
                 self.shift_right = !released;
                 return None;
             }
+            SCANCODE_CTRL => {
+                // 左 Ctrl。右は `Sequence::Extended` の側で拾う。
+                self.ctrl = !released;
+                return None;
+            }
             SCANCODE_CAPS_LOCK => {
                 // **押下でのみトグルする。** 離脱でもトグルすると 1 回押した
                 // だけで 2 回反転し、元に戻ってしまう。押しっぱなしのときに
@@ -265,6 +308,20 @@ impl Decoder {
         // 離したことは報告しない。文字が出るのは押下のときだけ。
         if released {
             return None;
+        }
+
+        // **Ctrl+C だけを制御文字へ落とす（S12 前の手当て、C）。**
+        //
+        // **他の Ctrl の組み合わせは従来どおりである**——Ctrl+A は `a` を出す。
+        // **一般化して Ctrl+英字を 1..26 へ落とす形も採れるが、採らない。**
+        // **使う者がいない機構は検算が置けない**（S9-b-3-1 の診断）。
+        // 使う道ができた時点で広げること。
+        //
+        // **種を足さず `Char` で出す。** Ctrl は修飾であって、キーではない——
+        // **矢印（B）で種を足したのは、あれがキーそのものだったからである。**
+        // 修飾の族は Shift と Caps Lock で、どちらも種を持たない。
+        if self.ctrl && key == SCANCODE_C {
+            return Some(KeyEvent::Char(CTRL_C_BYTE as char));
         }
 
         match key {

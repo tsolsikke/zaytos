@@ -109,6 +109,16 @@ pub(crate) fn handle_irq(vector: u64) {
     let code = unsafe { controller::read_data() };
 
     if has_data {
+        // **中断（Ctrl+C）を、積むより先に見る（S12 前の手当て、C）。**
+        //
+        // **リングは前景が取られている間ずっと溜まる一方である**——
+        // **デコードするのは `input::read_bytes` だけで、あれは Ring 3 が
+        // `read` を出したときにしか動かない。** **止めたい相手は `read` を
+        // 出さずに回っている子なので、リング越しには永久に見えない。**
+        //
+        // **したがってここで見る。** 積むかどうかとは独立なので、
+        // **溢れて捨てられるバイトでも中断は拾える。**
+        crate::input::note_scancode_for_interrupt(code);
         // 積めなければ捨てて数える。読み出しは既に済んでいるので、
         // 捨てても IRQ1 は止まらない。
         buffer::record(code);

@@ -82,6 +82,21 @@ keyboard-raw-log = []
 # `KeyEvent::Unsupported` を返すので前景へバイトが届かず、シェルの挿入点が
 # 動かない。`--shell-test` の「左へ動かしてから入れた」判定が落ちる。
 keyboard-drop-arrows-test = []
+# 破壊（S12 前の手当て、C）: 中断（Ctrl+C）の旗を立てない。走っている子が
+# 止まらなくなる。
+kill-ignore-interrupt-test = []
+# 破壊（S12 前の手当て、C）: 深さ 1 でも畳む。シェル自身が Ctrl+C で死に、
+# `init` が起こし直す。
+kill-fold-at-depth-one-test = []
+# 破壊（S12 前の手当て、C）: 子を起こす前に中断の旗を降ろさない。
+# 直前の Ctrl+C が次の子へ持ち越され、起きた瞬間に止まる。
+kill-keep-stale-interrupt-test = []
+# 破壊（S12 前の手当て、C）: BKL を解かずに畳む。次に BKL を取る者が、
+# 同じコアの再取得として捕まえる（`user-exit-keep-bkl` と同じ機序）。
+kill-fold-keep-bkl-test = []
+# 破壊（S12 前の手当て、C）: 止めた後に溜まっている入力を捨てない。
+# 止めた打鍵そのものが残り、次のプロンプトに `^C` が余分に出る。
+kill-keep-typed-input-test = []
 # ページテーブルの分割・アンマップの回帰チェック（M5-a-2-2）。
 # `cargo xtask run --paging-test <kind>` が有効化する。通常ビルドには
 # 含まれない。いずれも「検査が実際に働くこと」を確かめるためのもので、

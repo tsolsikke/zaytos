@@ -109,6 +109,7 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
         "ls",
         "cat",
         "zash",
+        "spin",
     ];
 
     // **共有する包み（S11-9）。** `ls` と `cat` が `mod userlib;` で取り込む。
@@ -254,12 +255,15 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
 
     std::fs::create_dir_all(format!("{staging}/bin"))
         .expect("failed to create /bin in the staging");
-    // **`/bin` へ置く 2 本**（S11-5 で `spawn-test` が加わった）。
+    // **`/bin` へ置くもの**（S11-5 で `spawn-test`、S12 前の手当てで `spin` が加わった）。
+    //
+    // **本数を書かない。** かつて「2 本」と書いてあったが、**列が 5 本に
+    // なっても直されなかった。** 数は列そのものが持っている。
     //
     // **`spawn-test` は `USER_PROGRAMS` に載っていない。** 上から走らせると
     // 深さ 1 になり、孫の `spawn` が成功してしまう。**`syscall-test` が
     // 深さ 2 で起こすためだけに、像の中に居る。**
-    for name in ["hello", "spawn-test", "ls", "cat", "zash"] {
+    for name in ["hello", "spawn-test", "ls", "cat", "zash", "spin"] {
         std::fs::copy(
             format!("{out_dir}/{name}.elf"),
             format!("{staging}/bin/{name}"),

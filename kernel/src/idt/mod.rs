@@ -1028,10 +1028,17 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     // 定義が 2 つになる。
     // 破壊 (S4-b-4, bkl-skip-timer-entry): ロックを取らず計数だけ行う。
     // 数えているものが本番と違う（`acquire_counting_only` の doc）。
+    //
+    // **`Option` にしてあるのは、出口を通らない経路が 1 つあるからである**
+    // （S12 前の手当て、C）——**中断による畳み**は longjmp で出ていくので
+    // `Drop` が走らない。**`syscall_entry` が [`SYS_EXIT`] と `SYS_SPAWN` の
+    // ために同じ形にしているのに倣う。**
     #[cfg(feature = "bkl-skip-timer-entry-test")]
-    let _bkl = crate::bkl::acquire_counting_only(crate::bkl::KernelEntry::Irq);
+    let mut bkl = Some(crate::bkl::acquire_counting_only(
+        crate::bkl::KernelEntry::Irq,
+    ));
     #[cfg(not(feature = "bkl-skip-timer-entry-test"))]
-    let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::Irq);
+    let mut bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Irq));
 
     // 破壊 (S4-b-4, bkl-widen-entry-window): 入口の保持区間を広げる。
     // 重なりの増幅器であって、素の重なりの頻度とは別である（feature の doc）。
@@ -1104,6 +1111,16 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         unsafe {
             crate::irq::end_of_interrupt_for_lapic_timer();
         }
+        // **中断（Ctrl+C）で遠征を畳む地点はここである（S12 前の手当て、C）。**
+        //
+        // **EOI を送った後でなければならない。** 下は longjmp で出ていくので、
+        // **EOI より前に置くと、割り込みを終えないまま抜ける。**
+        // **IRQ1 の側に置けないのはこれが理由である**——あちらの EOI は
+        // ハンドラより後ろにあり、そこから抜けるとキーボードが二度と来ない。
+        //
+        // SAFETY: `context` はスタブが積んだ有効なフレームで、読み取りのみ。
+        // 畳む条件が揃ったときだけ longjmp する（戻らない）。
+        unsafe { fold_if_interrupted(context, &mut bkl) };
         // AP もスケジューラへ入る（S4-c-3-2b）。
         //
         // S4-a から S4-c-3-2a までは、ここで AP を手前へ返していた。当時の AP は
@@ -1772,6 +1789,72 @@ pub unsafe fn clear_present(vector: usize) {
 /// 再検討すること。** S9 でシグナルやプロセス終了が入ると、ベクタごとに処理が
 /// 分かれる可能性がある。分かれた時点で「共有機構だから 1 本でよい」が崩れる。
 const FOLDABLE_VECTORS: [u8; 4] = [0, 6, 13, 14];
+
+/// 中断（Ctrl+C）が要求されていれば、走っている子の遠征を畳む（S12 前の手当て、C）。
+///
+/// **条件が揃わなければ何もせずに戻る。揃えば戻らない。**
+///
+/// # ここが「深さで分ける」唯一の場所である
+///
+/// **旗を立てる側は深さを見ない**（`crate::input::note_scancode_for_interrupt`）。
+/// **消費する側もここだけである。** 深さ 1 では消費されず、旗は立ったまま残るが、
+/// **子を起こす直前に降りる**（`crate::userland` が呼ぶ
+/// `crate::input::clear_interrupt_request`）ので持ち越さない。
+///
+/// **深さ 1 の 0x03 は、この経路をまったく通らない。** `Decoder` が
+/// 制御文字として出し、前景を通してシェルへ届く。**行を捨てるのはシェルの仕事である。**
+///
+/// # 条件の順序に意味がある
+///
+/// **旗を消費するのは最後である。** 先に消費すると、深さ 1 や
+/// カーネル由来の割り込みで**旗だけが消えて畳まれない。**
+///
+/// # 3 つの条件
+///
+/// - **深さが 2 以上**（子が走っている）。深さ 1 はシェル自身なので畳まない
+/// - **その割り込みが Ring 3 から来た**（`CS` の RPL が 3）。例外側の条件 (2) と
+///   同じ形で、**CPU が積んだ事実だけを見る**
+/// - **旗が立っている**（そして降ろす）
+///
+/// # Safety
+///
+/// `context` が有効な [`IrqContext`] を指すこと。遠征中（深さ 2 以上）なら
+/// `RECOVERY` は `ring3::enter` が保存済みである。EOI を送った後に呼ぶこと。
+unsafe fn fold_if_interrupted(context: &IrqContext, bkl: &mut Option<crate::bkl::BklGuard>) {
+    // 破壊 (S12 前の手当て C, kill-fold-at-depth-one): 深さ 1 でも畳む。
+    // **シェル自身が Ctrl+C で死ぬ**ので、`init` が起こし直す回数が増える。
+    #[cfg(feature = "kill-fold-at-depth-one-test")]
+    const MINIMUM_DEPTH: usize = 1;
+    #[cfg(not(feature = "kill-fold-at-depth-one-test"))]
+    const MINIMUM_DEPTH: usize = 2;
+
+    if crate::ring3::depth() < MINIMUM_DEPTH {
+        return;
+    }
+    if (context.cs & 0b11) != 3 {
+        return;
+    }
+    if !crate::input::take_interrupt_request() {
+        return;
+    }
+
+    crate::ring3::note_interrupted();
+
+    // **BKL は自分で解く。** 下は longjmp で `Drop` を走らせない。
+    // **取ったまま出ると二度と解かれない**（`syscall_entry` の [`SYS_EXIT`] と
+    // まったく同じ形である）。
+    //
+    // 破壊 (S12 前の手当て C, kill-fold-keep-bkl): 解かずに畳む。次に BKL を
+    // 取る者が、同じコアの再取得として捕まえる。**`user-exit-keep-bkl` と
+    // 同じ機序で、入口が `Syscall` ではなく `Irq` である点だけが違う。**
+    #[cfg(not(feature = "kill-fold-keep-bkl-test"))]
+    drop(bkl.take());
+    #[cfg(feature = "kill-fold-keep-bkl-test")]
+    let _ = bkl;
+
+    // SAFETY: 深さ 2 以上なので遠征中で、RECOVERY は保存済み。BKL は上で解いた。
+    unsafe { crate::ring3::leave_ring3() }
+}
 
 /// 畳むと決めたフレームが信用できるかを見る（S8-c）。
 ///

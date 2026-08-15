@@ -2103,7 +2103,37 @@ enum ShellTestMode {
     /// 破壊（`keyboard-drop-arrows-test`）。矢印がデコーダで未対応へ戻るので、
     /// 前景へ 3 バイトが届かず、挿入点が動かない。
     ArrowsDropped,
+    /// 破壊。**通らないことを期待する**（S12 前の手当て、C）。
+    ///
+    /// # なぜこちらは裏返さないのか
+    ///
+    /// **[`ShellTestMode::ArrowsDropped`] は判定を 1 本裏返せば済んだ。**
+    /// **壊れるのが 1 本だと分かっていたからである。**
+    ///
+    /// **中断の破壊は 5 つあり、落ちる判定が 1 本ずつ違う**
+    /// （子が止まらない / シェルが余分に起こし直される / `^C` が 2 つ出る）。
+    /// **5 通りの裏返しを書くと、破壊ごとに期待を書き写すことになり、
+    /// 「どれか 1 本が落ちる」を 5 回別々に述べる形になる。**
+    ///
+    /// **主張しているのは「この破壊は `--shell-test` が捕まえる」である。**
+    /// **それは「通らないこと」そのものなので、そう書く。**
+    /// **どの判定が落ちたかは出力に並ぶ**ので、読めば分かる。
+    ///
+    /// **起動しなかった場合は Ok にしない。** あちらは環境の失敗で、
+    /// **捕まえたことにはならない**（`classify_boot` が先に切り分ける）。
+    MustFail(&'static str),
 }
+
+/// 中断（Ctrl+C）の破壊のうち、`--shell-test` が捕まえるもの（S12 前の手当て、C）。
+///
+/// **5 つとも実測で落ちることを確かめてある。** 落ちる判定はそれぞれ違う。
+const KILL_SABOTAGES: &[&str] = &[
+    "kill-ignore-interrupt-test",
+    "kill-fold-at-depth-one-test",
+    "kill-keep-stale-interrupt-test",
+    "kill-fold-keep-bkl-test",
+    "kill-keep-typed-input-test",
+];
 
 impl ShellTestMode {
     /// この形で立てる feature。
@@ -2111,30 +2141,48 @@ impl ShellTestMode {
         match self {
             ShellTestMode::Normal => &[],
             ShellTestMode::ArrowsDropped => &["keyboard-drop-arrows-test"],
+            // **1 要素の配列を作れないので、一覧から借りる。**
+            // `KILL_SABOTAGES` に在る名前だけを受け取る契約である。
+            ShellTestMode::MustFail(feature) => {
+                let index = KILL_SABOTAGES
+                    .iter()
+                    .position(|name| *name == feature)
+                    .expect("MustFail takes a feature listed in KILL_SABOTAGES");
+                &KILL_SABOTAGES[index..index + 1]
+            }
         }
     }
 
     /// 判定行の頭。**破壊の側を別の名前にする**——`--full` の出力で
     /// どちらの実行かが読めないと、落ちた行の出所が分からない。
-    fn context(self) -> &'static str {
+    fn context(self) -> String {
         match self {
-            ShellTestMode::Normal => "shell-test",
-            ShellTestMode::ArrowsDropped => "shell-test keyboard-drop-arrows",
+            ShellTestMode::Normal => "shell-test".to_string(),
+            ShellTestMode::ArrowsDropped => "shell-test keyboard-drop-arrows".to_string(),
+            ShellTestMode::MustFail(feature) => format!("shell-test {feature}"),
         }
     }
 
     /// シリアルの記録先。**互いに上書きしない**——落ちたときに
     /// 両方のログが残っていないと、どちらが壊れたのかを後から見られない。
-    fn serial_log_name(self) -> &'static str {
+    fn serial_log_name(self) -> String {
         match self {
-            ShellTestMode::Normal => "shell-test-serial.log",
-            ShellTestMode::ArrowsDropped => "shell-test-drop-arrows-serial.log",
+            ShellTestMode::Normal => "shell-test-serial.log".to_string(),
+            ShellTestMode::ArrowsDropped => "shell-test-drop-arrows-serial.log".to_string(),
+            ShellTestMode::MustFail(feature) => format!("shell-test-{feature}-serial.log"),
         }
     }
 
     /// 矢印について期待すること。**`true` は「挿入点が動く」である。**
+    ///
+    /// **破壊の側も真である。** 中断の破壊はどれも矢印に触らない。
     fn expects_the_cursor_to_move(self) -> bool {
-        self == ShellTestMode::Normal
+        self != ShellTestMode::ArrowsDropped
+    }
+
+    /// この形が通ることを期待するか。**破壊は通らないことを期待する。**
+    fn expects_to_pass(self) -> bool {
+        !matches!(self, ShellTestMode::MustFail(_))
     }
 }
 
@@ -2170,7 +2218,9 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     let kernel_elf = build_kernel_with_features(&workspace_root, mode.features())?;
     let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
 
-    let serial_log = workspace_root.join("target").join(mode.serial_log_name());
+    let serial_log = workspace_root
+        .join("target")
+        .join(mode.serial_log_name().as_str());
     let _ = fs::remove_file(&serial_log);
     let debug_log = workspace_root.join("target").join("qemu-debug.log");
     let _ = fs::remove_file(&debug_log);
@@ -2250,6 +2300,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
 
     let context = mode.context();
+    let context = context.as_str();
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
     {
@@ -2290,6 +2341,12 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     let ended = serial.contains("init: the shell ended (Exited(0))");
     // **`init` が起こし直したこと。**
     let restarted = serial.contains("init: starting /bin/zash (restart 1 of 3)");
+    // **起こし直したのはちょうど 1 回であること（S12 前の手当て、C）。**
+    //
+    // **シェル自身が死ぬと、ここが 2 回になる。** 締めの `exit` でどのみち
+    // 1 回起きるので、**「起こし直した」だけでは足りない**——
+    // **深さ 1 でも畳む破壊は、1 回目の判定を通ってしまう**（実測でそうなった）。
+    let restarted_only_once = !serial.contains("init: starting /bin/zash (restart 2 of 3)");
     // **打った文字が反響していること。** シェルが反響を出しているので、
     // **Ring 3 まで届いた証拠が出力そのものにある。**
     let echoed = after_shell.contains("zaytos$ /bin/ls");
@@ -2343,6 +2400,36 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         did_not_move && !moved
     };
 
+    // **Ctrl+C が打ちかけの行を捨てたこと（S12 前の手当て、C。深さ 1）。**
+    //
+    // **`zz` と打ってから Ctrl+C を送り、`ret` を打っている。**
+    // **捨てられていれば `zz` は走らない。** 反響の `^C` が出ることも見る——
+    // **片方だけだと、シェルが打鍵を受け取っていなくても通る。**
+    let ctrl_c_echoed = after_shell.contains("^C");
+    let discarded_line_did_not_run = !after_shell.contains("zash: zz: cannot run");
+    let ctrl_c_discarded_the_line = ctrl_c_echoed && discarded_line_did_not_run;
+
+    // **Ctrl+C が回り続ける子を止めたこと（S12 前の手当て、C。深さ 2）。**
+    //
+    // **`spin` はシステムコールを出さずに回る。** **走り始めたこと**（あちらが
+    // 出す 1 行）と、**止まったこと**（シェルの `interrupted` と、カーネルの
+    // 判定行）の両方を見る。
+    //
+    // **走り始めたことを見なければ、「起きなかった」を「止めた」と誤読する。**
+    let spin_started = after_shell.contains("spin: running");
+    let shell_saw_the_interruption = after_shell.contains("interrupted");
+    let kernel_reported_the_interruption = after_shell.contains("interrupt: stopped /bin/spin");
+    // **止めた打鍵そのものが残っていないこと。**
+    //
+    // **`^C` はちょうど 1 つである**——深さ 1 で捨てた行の分だけである。
+    // **子を止めた側の Ctrl+C はスキャンコードのリングにも積まれている**ので、
+    // **捨てないと、止めた直後のプロンプトへ 2 つ目が出る**（実測でそうなった）。
+    let echoed_ctrl_c_count = after_shell.matches("^C").count();
+    let ctrl_c_stopped_the_child = spin_started
+        && shell_saw_the_interruption
+        && kernel_reported_the_interruption
+        && echoed_ctrl_c_count == 1;
+
     // **`argv[0]` が打った語のままであること（3 本目）。**
     //
     // **`spawn-test beta` を `/bin/` を付けずに送っている。**
@@ -2357,6 +2444,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
 
     println!("{context}: the shell exited with 0 = {ended}");
     println!("{context}: init started it again = {restarted}");
+    println!("{context}: the shell was restarted exactly once = {restarted_only_once}");
     println!("{context}: the typed line was echoed = {echoed}");
     println!("{context}: ls listed the root = {ran_ls}");
     println!("{context}: cat printed /etc/motd = {ran_cat}");
@@ -2367,6 +2455,12 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     println!(
         "{context}: the left arrow moved the insertion point = {moved} (wanted {})",
         mode.expects_the_cursor_to_move()
+    );
+
+    println!("{context}: ctrl-c discarded the half-typed line = {ctrl_c_discarded_the_line}");
+    println!(
+        "{context}: ctrl-c stopped the spinning child = {ctrl_c_stopped_the_child} (echoed ^C \
+         count = {echoed_ctrl_c_count}, wanted 1)"
     );
 
     if ready
@@ -2380,11 +2474,26 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && argv0_is_as_typed
         && backspace_edited_the_line
         && arrow_behaved_as_expected
+        && ctrl_c_discarded_the_line
+        && ctrl_c_stopped_the_child
+        && restarted_only_once
     {
         println!("{context}: PASS");
-        Ok(())
+        if mode.expects_to_pass() {
+            Ok(())
+        } else {
+            // **破壊が捕まらなかった。** 通ってしまったこと自体が失敗である。
+            bail!("{context}: the sabotage was NOT caught; every judgement still held")
+        }
     } else {
-        bail!("{context}: FAILED")
+        println!("{context}: FAILED");
+        if mode.expects_to_pass() {
+            bail!("{context}: FAILED")
+        } else {
+            // **期待どおり落ちた。** どの判定が落ちたかは上に並んでいる。
+            println!("{context}: the sabotage was caught (this run is expected to fail)");
+            Ok(())
+        }
     }
 }
 
@@ -2432,6 +2541,26 @@ const SHELL_TEST_LINES: &[&[&str]] = &[
     // **左へ 1 つ動いてから `y` を入れるので、走るのは `pyq` である。**
     // **動いていなければ `pqy` になる。** ここも 2 本で見る。
     &["p", "q", "left", "y", "ret"],
+    // 打ちかけの行を Ctrl+C で捨てる（S12 前の手当て、C）。**深さ 1 の側である。**
+    //
+    // **`zz` と打ってから Ctrl+C を送り、そのまま `ret` を打つ。**
+    // **捨てられていれば空行なので何も走らない。**
+    // **捨てられていなければ `zz` が走り、`cannot run` が出る。**
+    //
+    // **ここだけ右 Ctrl を使う**（`ctrl_r`。深さ 2 の側は左 Ctrl のままである）。
+    // **左右で同じに扱うと決めた**——右は `0xE0 0x1D` で来るので、接頭辞を
+    // 読み捨てないと左と区別が付く。**決めたことを回帰で守る。**
+    // **項目は増えない**——同じ 1 本の中で、左右の両方が通る形にしてある。
+    &["z", "z", "ctrl_r-c", "ret"],
+    // 回り続ける子を Ctrl+C で止める（S12 前の手当て、C）。**深さ 2 の側である。**
+    //
+    // **`spin` はシステムコールを出さずに回る**ので、**止められなければ
+    // ここで永久に止まる**（`--shell-test` は待ち時間の上限で落ちる）。
+    //
+    // **`ret` の後に間が要る。** 子が起きて 1 行出すまで待ってから Ctrl+C を送る
+    // ——**起きる前に送ると、旗が子より先に立って `spawn` が降ろしてしまう。**
+    &["s", "p", "i", "n", "ret"],
+    &["ctrl-c"],
     // exit
     &["e", "x", "i", "t", "ret"],
 ];
@@ -6978,6 +7107,23 @@ fn cmd_check(full: bool) -> Result<()> {
                 failed.push("shell test (arrows dropped)".to_string());
             }
         }
+
+        // **中断（Ctrl+C）の破壊（S12 前の手当て、C）。**
+        //
+        // **5 つとも「通らないこと」を期待する**（`ShellTestMode::MustFail`）。
+        // **落ちる判定は 1 つずつ違う**ので、まとめて 1 項目にはしない——
+        // **どれが捕まらなくなったのかが、項目の名前で分かる形にする。**
+        for feature in KILL_SABOTAGES {
+            total += 1;
+            println!("=== xtask check: the shell test catches the sabotage {feature}");
+            match cmd_shell_test(ShellTestMode::MustFail(feature)) {
+                Ok(()) => println!("--- shell test ({feature}): OK"),
+                Err(error) => {
+                    println!("--- shell test ({feature}): FAILED ({error})");
+                    failed.push(format!("shell test ({feature})"));
+                }
+            }
+        }
     }
 
     total += 1;
@@ -7440,7 +7586,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 21,
-    full: 135,
+    full: 140,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

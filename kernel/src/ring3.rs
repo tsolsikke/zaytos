@@ -521,6 +521,10 @@ pub unsafe fn enter(
     let previous_window = crate::syscall::set_user_window(user_window.0, user_window.1);
 
     FOLDED.store(false, Ordering::SeqCst);
+    // **中断の記録も戻す（S12 前の手当て、C）。** 戻さないと、前の遠征を
+    // 止めたことが次の遠征の判定行に出る（`FAULT_CS` を戻していなかった
+    // S9-b-3-1 とまったく同じ形である）。
+    INTERRUPTED.store(false, Ordering::SeqCst);
     FAULT_RSP.store(0, Ordering::SeqCst);
     HANDLER_RSP.store(0, Ordering::SeqCst);
     FAULT_VECTOR.store(0, Ordering::SeqCst);
@@ -691,6 +695,23 @@ pub fn folded() -> bool {
     FOLDED.load(Ordering::SeqCst)
 }
 
+/// 中断（Ctrl+C）で遠征を出たか（S12 前の手当て、C）。
+///
+/// **`FOLDED` と分けてある。** あちらは「Ring 3 が例外を起こした」で、
+/// **こちらは「外から止めた」である。** 混ぜると、遠征から戻った側が
+/// **「子が落ちた」と「子を止めた」を区別できない。**
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// 中断で出ることを記す（S12 前の手当て、C）。**`leave_ring3` の直前に呼ぶ。**
+pub fn note_interrupted() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+/// 中断で出たか（遠征後の会計）。
+pub fn interrupted() -> bool {
+    INTERRUPTED.load(Ordering::SeqCst)
+}
+
 /// 畳みの記録ひとそろい（S11-5）。**入れ子の遠征をまたいで持ち出すためだけの型である。**
 ///
 /// # なぜ要るのか
@@ -707,6 +728,9 @@ pub fn folded() -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FoldRecord {
     folded: bool,
+    /// 中断で出たか（S12 前の手当て、C）。**入れ子で持ち出すものに含める**——
+    /// 含めないと、子を止めたことが親の判定行に出る。
+    interrupted: bool,
     vector: u64,
     rip: u64,
     rsp: u64,
@@ -720,6 +744,7 @@ pub struct FoldRecord {
 pub fn save_fold_record() -> FoldRecord {
     FoldRecord {
         folded: FOLDED.load(Ordering::SeqCst),
+        interrupted: INTERRUPTED.load(Ordering::SeqCst),
         vector: FAULT_VECTOR.load(Ordering::SeqCst),
         rip: FAULT_RIP.load(Ordering::SeqCst),
         rsp: FAULT_RSP.load(Ordering::SeqCst),
@@ -733,6 +758,7 @@ pub fn save_fold_record() -> FoldRecord {
 /// 控えた畳みの記録を戻す（S11-5）。
 pub fn restore_fold_record(record: FoldRecord) {
     FOLDED.store(record.folded, Ordering::SeqCst);
+    INTERRUPTED.store(record.interrupted, Ordering::SeqCst);
     FAULT_VECTOR.store(record.vector, Ordering::SeqCst);
     FAULT_RIP.store(record.rip, Ordering::SeqCst);
     FAULT_RSP.store(record.rsp, Ordering::SeqCst);

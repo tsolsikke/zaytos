@@ -384,6 +384,21 @@ pub const SYS_SPAWN: u64 = ZAYTOS_PRIVATE_BASE + 4;
 /// あるときの規則である。**
 pub const SPAWN_FOLDED_FLAG: u64 = 0x100;
 
+/// [`SYS_SPAWN`] の戻り値のうち「子は外から止められた」を表すビット
+/// （Ctrl+C。S12 前の手当て、C）。
+///
+/// **[`SPAWN_FOLDED_FLAG`] の隣に置く。** 下位 8 ビットは終了状態なので、
+/// **その上のビットで「終了以外の終わり方」を並べる形である。**
+/// **`0x1FFF` を越えないので `-errno` と紛れない**（`SYS_SPAWN` の doc）。
+///
+/// # Linux の `128 + signo` を採らない
+///
+/// **`spawn` は Linux に対応するものが無い**（[`SPAWN_FOLDED_FLAG`] の doc）。
+/// **加えて、まだシグナルが無い**——番号を持たないものに `128 + signo` の形を
+/// 与えると、**「`SIGINT` が配送された」と読める値を、配送していないのに返す。**
+/// **シグナルを実装する段（(4)）で、そのとき改めて決めること。**
+pub const SPAWN_INTERRUPTED_FLAG: u64 = 0x200;
+
 /// [`SYS_SPAWN`] が受け入れる像の最大の大きさ（S11-5）。
 ///
 /// # 32 KiB の根拠は実測である
@@ -934,6 +949,7 @@ unsafe fn spawn_from_ring3(
     match result {
         Ok(crate::userland::SpawnOutcome::Exited(status)) => status & 0xFF,
         Ok(crate::userland::SpawnOutcome::Folded(vector)) => SPAWN_FOLDED_FLAG | (vector << 9),
+        Ok(crate::userland::SpawnOutcome::Interrupted) => SPAWN_INTERRUPTED_FLAG,
         Err(error) => {
             // 破壊 (S11-5, spawn-eagain-as-enosys): 深さで断ったことを
             // `-ENOSYS` として返す。**どちらも「できない」を意味するので、
