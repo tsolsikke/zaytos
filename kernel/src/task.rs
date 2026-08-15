@@ -29,7 +29,6 @@ use common::serial::SerialPort;
 
 use crate::gdt;
 use crate::idt::YIELD_VECTOR;
-use crate::paging::active::{ActivePageTable, PageSize};
 
 /// ワーカータスクの本数（M5-c は 2 本）。
 pub const WORKER_COUNT: usize = 2;
@@ -702,32 +701,27 @@ fn require_bootstrap_processor(what: &str) {
 
 /// あるワーカーのスタックのガードページを unmap する（M5-b と同じ機構）。
 ///
+/// **本体は [`crate::stack::install_guard_page`] にある**（S12 前の手当ての C で寄せた）。
+/// **カーネルスタック側と同じ 1 本を通る**——**分けていたときに、分割の対処が
+/// あちらにしか入らず、像が育ったときにこちらが止めた。**
+///
 /// # Safety
 ///
-/// 自前のページテーブルへ切り替え済みで、`guard_virt` が 4KiB でマップされた
-/// ワーカースタックの直下のページであること。
-unsafe fn install_worker_guard_page(guard_virt: VirtAddr) {
-    // SAFETY: CR3 は自前のテーブルを指し、その配下は登録窓で読み書きできる。
-    let mut table = unsafe { ActivePageTable::current(common::addr::direct_map()) };
-    match table.translate(guard_virt) {
-        Ok(Some(t)) if t.page_size == PageSize::Size4KiB => {}
-        other => {
-            serial_line(format_args!(
-                "[ERROR] task: worker guard page {:#x} is not a 4KiB mapping ({other:?}); halting \
-                 (deferred-decisions: ガードページの split 化)",
-                guard_virt.as_u64()
-            ));
-            common::cpu::halt_forever();
-        }
-    }
-    // SAFETY: guard_virt はワーカースタックの直下のガードページ。今後この
-    // ページへ正規のアクセスは無く、溢れたら #PF（IST2）で捕まえる。
-    if let Err(e) = unsafe { table.unmap_4kib(guard_virt) } {
-        serial_line(format_args!(
-            "[ERROR] task: failed to unmap worker guard page {:#x}: {e:?}; halting",
-            guard_virt.as_u64()
-        ));
-        common::cpu::halt_forever();
+/// 自前のページテーブルへ切り替え済みで、`guard_virt` がワーカースタックの
+/// 直下のページであること。
+unsafe fn install_worker_guard_page(
+    guard_virt: VirtAddr,
+    allocator: &mut crate::frame_allocator::FrameAllocator,
+) {
+    // SAFETY: 呼び出し元の契約をそのまま渡す。
+    unsafe {
+        crate::stack::install_guard_page(
+            guard_virt,
+            allocator,
+            "task",
+            "the worker guard page",
+            &mut serial_line,
+        );
     }
 }
 
@@ -783,11 +777,11 @@ unsafe fn build_initial_context(top: VirtAddr, entry: u64) -> u64 {
 // yield-in-critical のビルドでは fail-fast で halt するため、その先の会計が
 // 到達不能になる。回帰チェック専用のビルドなので許容する。
 #[cfg_attr(feature = "task-switch-yield-in-critical", allow(unreachable_code))]
-pub fn run_cooperative_demo() {
+pub fn run_cooperative_demo(allocator: &mut crate::frame_allocator::FrameAllocator) {
     require_bootstrap_processor("the cooperative demo");
     // SAFETY: 起動時の単一実行文脈。まだ誰もスケジューラを触っていない。
     unsafe {
-        setup_tasks();
+        setup_tasks(allocator);
     }
 
     serial_line(format_args!(
@@ -858,7 +852,7 @@ pub fn run_cooperative_demo() {
 ///
 /// 起動時の単一実行文脈から 1 回だけ呼ぶこと。自前のページテーブルへ切り替え
 /// 済みであること（ガードページの unmap に使う）。
-unsafe fn setup_tasks() {
+unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
     let entry = addr_of!(zaytos_worker_body) as u64;
 
     // タスク 0 = メイン。走行中なので saved_rsp は初回 yield で埋まる。
@@ -883,7 +877,7 @@ unsafe fn setup_tasks() {
         // SAFETY: 起動時、自前のページテーブル上。ワーカースタックの直下 1
         // ページをガードページにする。
         unsafe {
-            install_worker_guard_page(guard);
+            install_worker_guard_page(guard, allocator);
         }
         // SAFETY: top は今ガードページを張ったワーカースタックの頂点で、
         // まだ誰も使っていない。16 バイト境界（4KiB 境界）に載っている。

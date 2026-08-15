@@ -1542,7 +1542,10 @@ extern "sysv64" fn kernel_main() -> ! {
     // 協調的マルチタスクのデモと検証（M5-c）。2 本のワーカーが決定的に往復し、
     // 各タスクの全 GPR が切り替えを跨いで保たれることを確認する。戻ってくると
     // 起動シーケンスは続行する。
-    kernel::task::run_cooperative_demo();
+    // **アロケータを渡す（S12 前の手当ての C の途中）。** ワーカーのガードページが
+    // 2MiB ページに載っていたら、張る前に分割するために要る
+    // （`kernel::stack::install_guard_page`）。
+    kernel::task::run_cooperative_demo(&mut allocator);
 
     // 例外ハンドラの回帰チェック。起動シーケンスを最後まで通してから発火させる。
     // mapped_ranges でプローブアドレスの妥当性を見るので、ページング構築後に置く。
@@ -8724,99 +8727,21 @@ fn install_kernel_stack_guard_page(
     logger: &mut Logger<SerialPort>,
     allocator: &mut kernel::frame_allocator::FrameAllocator,
 ) {
-    use kernel::paging::active::{ActivePageTable, PageSize};
-
-    let guard = stack::kernel_guard_page();
-    let guard_virt = guard.bottom;
-
-    // テーブルフレームへのアクセスは登録窓（A-2 後は高位）で足りる。unmap の対象は
-    // ガードページの（低位・恒等の）仮想アドレスそのものである。
-    // SAFETY: CR3 は自前のテーブルを指し、その配下は登録窓で読み書きできる。
-    let mut table = unsafe { ActivePageTable::current(common::addr::direct_map()) };
-
-    // 事前アサート: ガードページが 4KiB で張られていること。想定外（2MiB /
-    // 解決不能）なら、bare な unmap_4kib の AlreadySmall に頼らず、原因と
-    // 対処を名指しして止める。
-    match table.translate(guard_virt) {
-        Ok(Some(t)) if t.page_size == PageSize::Size4KiB => {}
-        Ok(Some(_)) => {
-            // **2MiB ページに載っている。** unmap の前に split する（S11-5）。
-            // SAFETY: 稼働中のテーブルで、対象はカーネルの高位写像の中である。
-            // split は写像内容を変えず、粒度だけを 4KiB へ落とす。
-            match unsafe { table.split_huge_page(guard_virt, allocator) } {
-                Ok(outcome) => {
-                    logger.info(format_args!(
-                        "stack-guard: the guard page {:#x} was on a 2MiB page; split \
-                         {:#x}..+2MiB into 4KiB via a new page table at {:#x} (old pde={:#x})",
-                        guard_virt.as_u64(),
-                        outcome.base_virt.as_u64(),
-                        outcome.table_phys.as_u64(),
-                        outcome.huge_entry
-                    ));
-                }
-                Err(e) => {
-                    logger.error(format_args!(
-                        "stack-guard: the guard page {:#x} is on a 2MiB page and the split \
-                         failed ({e:?}); halting",
-                        guard_virt.as_u64()
-                    ));
-                    cpu::halt_forever();
-                }
-            }
-            // **split の後に、粒度をもう一度読み直す。**
-            // **split したことを主張の根拠にしない**——実状態で 4KiB になっている
-            // ことを、張った側とは独立に確かめる。
-            match table.translate(guard_virt) {
-                Ok(Some(t)) if t.page_size == PageSize::Size4KiB => {}
-                other => {
-                    logger.error(format_args!(
-                        "stack-guard: the guard page {:#x} is still not a 4KiB mapping after \
-                         the split ({other:?}); halting",
-                        guard_virt.as_u64()
-                    ));
-                    cpu::halt_forever();
-                }
-            }
-        }
-        other => {
-            logger.error(format_args!(
-                "stack-guard: the guard page {:#x} does not resolve ({other:?}); halting",
-                guard_virt.as_u64()
-            ));
-            cpu::halt_forever();
-        }
-    }
-
-    // ガードページを 1 枚 unmap する。unmap_4kib は内部で invlpg も行うので、以後この
-    // ページへのアクセスは即座に #PF になる。フレームは解放しない（.bss の一部で
-    // アロケータの管理外。M5-a-2 の仕様どおり unmap はフレームを返さない）。
-    // SAFETY: guard_virt はカーネルスタックの直下のガードページで、スタック本体
-    // （block_base + GUARD_SIZE 以上）とは別の 1 ページ。今後このページへ正規のアクセスは
-    // 無く、触れたら溢れとして #PF で捕まえるのが目的である。
-    match unsafe { table.unmap_4kib(guard_virt) } {
-        Ok(old_pte) => {
-            // 会計: unmap 後にこのページが解決不能になっていること（ガードが効いて
-            // いること）を、構築とは別に translate で確かめる。
-            let unmapped = matches!(table.translate(guard_virt), Ok(None));
-            logger.info(format_args!(
-                "stack-guard: unmapped the kernel stack guard page {:#x} (old pte={old_pte:#x}); \
-                 translate returns none={unmapped}. #PF now uses IST2.",
-                guard_virt.as_u64()
-            ));
-            if !unmapped {
-                logger.error(format_args!(
-                    "stack-guard: the guard page is still resolvable after unmap; halting"
-                ));
-                cpu::halt_forever();
-            }
-        }
-        Err(e) => {
-            logger.error(format_args!(
-                "stack-guard: failed to unmap the guard page {:#x}: {e:?}; halting",
-                guard_virt.as_u64()
-            ));
-            cpu::halt_forever();
-        }
+    let guard_virt = stack::kernel_guard_page().bottom;
+    // **張る手順は `kernel::stack::install_guard_page` が持つ**（S12 前の手当ての C で
+    // 寄せた）。**ワーカースタック側と同じ 1 本を通る**——あちらの doc に、
+    // 2 つに分かれていたときに対処が片側にしか入らなかった経緯がある。
+    //
+    // SAFETY: 自前のページテーブルへ切り替え済みで、guard_virt はカーネルスタックの
+    // 直下の 1 ページ。今後このページへ正規のアクセスは無い。
+    unsafe {
+        kernel::stack::install_guard_page(
+            guard_virt,
+            allocator,
+            "stack-guard",
+            "the kernel stack guard page",
+            &mut |args| logger.info(args),
+        );
     }
 }
 

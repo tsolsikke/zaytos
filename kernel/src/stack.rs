@@ -313,6 +313,131 @@ unsafe extern "sysv64" fn switch_stack_and_call(
     );
 }
 
+/// ガードページを 1 枚張る（S12 前の手当て、C の途中で寄せた）。
+///
+/// **粒度を確かめ、2MiB なら分割し、分割後にもう一度読み直してから unmap する。**
+///
+/// # なぜ 1 つに寄せたのか。**同じことをする関数が 2 つあり、対処が片方にしか入らなかった**
+///
+/// **かつてガードページを張る場所は 2 つあった**——カーネルスタック
+/// （`kernel/src/main.rs` の `install_kernel_stack_guard_page`）と、
+/// ワーカースタック（`kernel/src/task.rs` の `install_worker_guard_page`）である。
+///
+/// **`docs/deferred-decisions.md` の「ガードページの split 化」は S11-5 で発火し、
+/// そのとき分割の分岐が配線された。ところが入ったのはカーネルスタックの側だけだった。**
+/// **ワーカーの側は「4KiB でなければ止める」のまま残り、S12 前の手当ての C で
+/// 像が育ったときに、そちらが止めた。**
+///
+/// **根は「分割が無かったこと」ではない。「同じ不変を守る場所が 2 つあり、
+/// 対処が片側にだけ入ったこと」である。** 配線して終わりにすると、
+/// **3 つ目の場所が生まれた日に同じことが起きる。**
+///
+/// **したがって寄せた。関数が 1 つなら、直し忘れようがない。**
+/// **呼び分けはログの文言だけで、ページテーブルの扱いは 1 本である。**
+///
+/// # 振る舞いは、寄せる前のカーネルスタック側に揃えた
+///
+/// **2 つは分割の有無だけでなく、unmap の後の確かめ方も違っていた**——
+/// **カーネルスタック側は unmap 後に `translate` で解決不能になったことを見ており、
+/// ワーカー側は見ていなかった。** **強い側に揃えてある。**
+///
+/// # Safety
+///
+/// 自前のページテーブルへ切り替え済みで、`guard_virt` がスタックの直下の
+/// 1 ページであること。以後このページへ正規のアクセスが無いこと。
+pub unsafe fn install_guard_page(
+    guard_virt: VirtAddr,
+    allocator: &mut crate::frame_allocator::FrameAllocator,
+    tag: &str,
+    what: &str,
+    log: &mut dyn FnMut(core::fmt::Arguments),
+) {
+    use crate::paging::active::{ActivePageTable, PageSize};
+
+    // SAFETY: CR3 は自前のテーブルを指し、その配下は登録窓で読み書きできる。
+    let mut table = unsafe { ActivePageTable::current(common::addr::direct_map()) };
+
+    match table.translate(guard_virt) {
+        Ok(Some(t)) if t.page_size == PageSize::Size4KiB => {}
+        Ok(Some(_)) => {
+            // **2MiB ページに載っている。** unmap の前に split する（S11-5）。
+            // SAFETY: 稼働中のテーブルで、対象はカーネルの高位写像の中である。
+            // split は写像内容を変えず、粒度だけを 4KiB へ落とす。
+            match unsafe { table.split_huge_page(guard_virt, allocator) } {
+                Ok(outcome) => log(format_args!(
+                    "{tag}: {what} {:#x} was on a 2MiB page; split {:#x}..+2MiB into 4KiB via a \
+                     new page table at {:#x} (old pde={:#x})",
+                    guard_virt.as_u64(),
+                    outcome.base_virt.as_u64(),
+                    outcome.table_phys.as_u64(),
+                    outcome.huge_entry
+                )),
+                Err(e) => {
+                    log(format_args!(
+                        "{tag}: {what} {:#x} is on a 2MiB page and the split failed ({e:?}); \
+                         halting",
+                        guard_virt.as_u64()
+                    ));
+                    common::cpu::halt_forever();
+                }
+            }
+            // **split の後に、粒度をもう一度読み直す。**
+            // **split したことを主張の根拠にしない**——実状態で 4KiB になっている
+            // ことを、張った側とは独立に確かめる。
+            match table.translate(guard_virt) {
+                Ok(Some(t)) if t.page_size == PageSize::Size4KiB => {}
+                other => {
+                    log(format_args!(
+                        "{tag}: {what} {:#x} is still not a 4KiB mapping after the split \
+                         ({other:?}); halting",
+                        guard_virt.as_u64()
+                    ));
+                    common::cpu::halt_forever();
+                }
+            }
+        }
+        other => {
+            log(format_args!(
+                "{tag}: {what} {:#x} does not resolve ({other:?}); halting",
+                guard_virt.as_u64()
+            ));
+            common::cpu::halt_forever();
+        }
+    }
+
+    // ガードページを 1 枚 unmap する。unmap_4kib は内部で invlpg も行うので、以後この
+    // ページへのアクセスは即座に #PF になる。フレームは解放しない（.bss の一部で
+    // アロケータの管理外。M5-a-2 の仕様どおり unmap はフレームを返さない）。
+    // SAFETY: guard_virt はスタックの直下のガードページで、スタック本体とは別の
+    // 1 ページ。今後このページへ正規のアクセスは無く、触れたら溢れとして #PF で
+    // 捕まえるのが目的である。
+    match unsafe { table.unmap_4kib(guard_virt) } {
+        Ok(old_pte) => {
+            // 会計: unmap 後にこのページが解決不能になっていること（ガードが効いて
+            // いること）を、構築とは別に translate で確かめる。
+            let unmapped = matches!(table.translate(guard_virt), Ok(None));
+            log(format_args!(
+                "{tag}: unmapped {what} {:#x} (old pte={old_pte:#x}); translate returns \
+                 none={unmapped}. #PF now uses IST2.",
+                guard_virt.as_u64()
+            ));
+            if !unmapped {
+                log(format_args!(
+                    "{tag}: {what} is still resolvable after unmap; halting"
+                ));
+                common::cpu::halt_forever();
+            }
+        }
+        Err(e) => {
+            log(format_args!(
+                "{tag}: failed to unmap {what} {:#x}: {e:?}; halting",
+                guard_virt.as_u64()
+            ));
+            common::cpu::halt_forever();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
