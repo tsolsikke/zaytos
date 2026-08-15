@@ -360,7 +360,7 @@ hello from ring 3
 [INFO] ring3: /bin/hello used 2528 of 65536 byte(s) of the depth-1 excursion stack (3%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/hello opened 0 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
 [INFO] spawn: /bin/hello ended (Exited(0)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff8047a090 (inside its own excursion stack 0xffffffff8046a140..0xffffffff8047a140 = true); the space was destroyed (8 frame(s) left the allocator and 8 reached quarantine (8 its own + 0 from what it spawned), match=true leaked=0)
-[INFO] spawn: /bin/spawn-test is 12712 byte(s) at inode 17; entering at depth 2 (the parent's excursion stack 0xffffffff8045a140..0xffffffff8046a140 has 6337 byte(s) used and 59199 left)
+[INFO] spawn: /bin/spawn-test is 12712 byte(s) at inode 16; entering at depth 2 (the parent's excursion stack 0xffffffff8045a140..0xffffffff8046a140 has 6337 byte(s) used and 59199 left)
 [INFO] user-load: /bin/spawn-test mapped PT_LOAD 0x400000..0x401002 (filesz=0x1002 memsz=0x1002 w=false)
 [INFO] user-load: /bin/spawn-test mapped PT_LOAD 0x402000..0x402036 (filesz=0x36 memsz=0x36 w=false)
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
@@ -457,12 +457,12 @@ task: starting preemptive demo with 2 busy-loop workers for 200 ticks
 [INFO] smp: application processors: 2 usable CPU(s) reported, 1 AP(s) attempted, 1 started, 0 skipped for lack of a per-CPU slot (MAX_CPUS=2)
 [INFO] timer: first tick arrived as vector 0x20 - this is the proof that ICW2 was written correctly (it cannot be read back)
 [INFO] timer: this is the end of the steady-loop observation, timer_accounting_balanced=true; the shell takes the foreground from here
-[INFO] init: starting /bin/sh (restart 0 of 3)
-[INFO] spawn: /bin/sh is 16920 byte(s) at inode 16; entering at depth 1 (the parent runs on the main kernel stack, which has a guard page)
-[INFO] user-load: /bin/sh mapped PT_LOAD 0x400000..0x4012f4 (filesz=0x12f4 memsz=0x12f4 w=false)
-[INFO] user-load: /bin/sh mapped PT_LOAD 0x402000..0x4023b0 (filesz=0x3b0 memsz=0x3b0 w=false)
-[INFO] user-load: /bin/sh mapped PT_LOAD 0x403000..0x403066 (filesz=0x66 memsz=0x66 w=true)
+[INFO] init: starting /bin/zash (restart 0 of 3)
+[INFO] spawn: /bin/zash is 16920 byte(s) at inode 17; entering at depth 1 (the parent runs on the main kernel stack, which has a guard page)
+[INFO] user-load: /bin/zash mapped PT_LOAD 0x400000..0x4012f4 (filesz=0x12f4 memsz=0x12f4 w=false)
+[INFO] user-load: /bin/zash mapped PT_LOAD 0x402000..0x4023b8 (filesz=0x3b8 memsz=0x3b8 w=false)
+[INFO] user-load: /bin/zash mapped PT_LOAD 0x403000..0x403066 (filesz=0x66 memsz=0x66 w=true)
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
-[INFO] user-load: /bin/sh initial stack at 0x7fffc0 (argc=1, 16-byte aligned=true)
-sh: ready
+[INFO] user-load: /bin/zash initial stack at 0x7fffc0 (argc=1, 16-byte aligned=true)
+zash: ready
 zaytos$ 

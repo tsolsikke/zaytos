@@ -1843,11 +1843,11 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
 }
 
 /// シェルの像のパス。**NUL は付けない**（`spawn` はスライスを取る）。
-const SHELL_PATH: &[u8] = b"/bin/sh";
+const SHELL_PATH: &[u8] = b"/bin/zash";
 /// 判定行に出すためのパス。
-const SHELL_PATH_TEXT: &str = "/bin/sh";
+const SHELL_PATH_TEXT: &str = "/bin/zash";
 /// シェルへ渡す `argv`。**NUL 区切りで並べる**（`spawn` の受け取る形）。
-const SHELL_ARGV: &[u8] = b"sh\0";
+const SHELL_ARGV: &[u8] = b"zash\0";
 
 /// フレームバッファを検証し、描画ハンドルを作る（M3-a）。
 ///
@@ -4129,7 +4129,7 @@ const FS_ROOT_ETC_ENTRY: usize = FS_ROOT_DIR_BLOCK + 68;
 ///
 /// **5 度目はプログラムを足していない。`sh` が太っただけである**——
 /// 固定の既定（`/` を含まない語を `/bin/` の下で探す）で `.text` が伸び、
-/// **`/bin/sh` が 1 ブロック増えて、後ろのブロックがそのぶんずれた。**
+/// **`/bin/zash`（当時の名前は `/bin/sh`）が 1 ブロック増えて、後ろのブロックがそのぶんずれた。**
 /// **像に載るのは本数だけでなく、1 本あたりの大きさでもある。**
 const FS_INDIRECT_TABLE_BLOCK: usize = 72 * FS_BLOCK_SIZE;
 

@@ -36,7 +36,7 @@
 //! - `0` 組み込みの `exit` で終わった
 //! - `1` 端末を読めなくなった
 //!
-//! **子の終了状態はここには出ない。** 0 以外なら `sh: exit status N` として
+//! **子の終了状態はここには出ない。** 0 以外なら `zash: exit status N` として
 //! 表示し、**シェル自身は続ける。**
 
 #![no_std]
@@ -60,15 +60,21 @@ const LINE_MAX: usize = 128;
 const PROMPT: &[u8] = b"zaytos$ ";
 /// 起動したことを告げる 1 行。**プロンプトは改行で終わらないので、
 /// 「シェルが動いた」を行として残すものが別に要る。**
-const BANNER: &[u8] = b"sh: ready\n";
+// **接頭辞は固定文字列である。`argv[0]` から作らない。**
+//
+// **`zash` と打つか `/bin/zash` と打つかで、`argv[0]` は変わる**
+// （ZaytOS は打った語をそのまま渡す。`spawn-test` がそれを検算している）。
+// **接頭辞を `argv[0]` 由来にすると、同じ診断が2つの形で出る。**
+// **判定行はその文字列を見ているので、打ち方で壊れる。**
+const BANNER: &[u8] = b"zash: ready\n";
 /// 組み込みの `exit`。
 const BUILTIN_EXIT: &[u8] = b"exit";
 /// 起こせなかったときの返事（前半）。
-const NOT_FOUND_HEAD: &[u8] = b"sh: ";
+const NOT_FOUND_HEAD: &[u8] = b"zash: ";
 /// 起こせなかったときの返事（後半）。
 const NOT_FOUND_TAIL: &[u8] = b": cannot run\n";
 /// 0 以外で終わったときの返事（前半）。
-const STATUS_HEAD: &[u8] = b"sh: exit status ";
+const STATUS_HEAD: &[u8] = b"zash: exit status ";
 /// `argv` の要素数の上限。**カーネルの `MAX_ARGV` と同じ。**
 const MAX_ARGS: usize = 8;
 /// [`RESOLVED`] の前置きの長さ（`/bin/`）。
@@ -93,7 +99,7 @@ static mut RESOLVED: [u8; DEFAULT_DIR_LEN + NAME_MAX + 1] = {
     buffer
 };
 /// 行が長すぎたときの断り書き。
-const TOO_LONG: &[u8] = b"sh: line too long\n";
+const TOO_LONG: &[u8] = b"zash: line too long\n";
 
 /// `-EAGAIN`。**溜まっていないという意味で、失敗ではない。**
 const MINUS_EAGAIN: i64 = -11;

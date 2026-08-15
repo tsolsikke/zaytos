@@ -2129,7 +2129,7 @@ fn cmd_shell_test() -> Result<()> {
         .context("failed to launch qemu-system-x86_64 for the shell test")?;
 
     // **プロンプトが出るまで待つ。上限つき。**
-    let ready_marker = "sh: ready";
+    let ready_marker = "zash: ready";
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     let mut ready = false;
     while Instant::now() < deadline {
@@ -2220,7 +2220,7 @@ fn cmd_shell_test() -> Result<()> {
     // **起動シーケンスでは真にならない。**
     let ended = serial.contains("init: the shell ended (Exited(0))");
     // **`init` が起こし直したこと。**
-    let restarted = serial.contains("init: starting /bin/sh (restart 1 of 3)");
+    let restarted = serial.contains("init: starting /bin/zash (restart 1 of 3)");
     // **打った文字が反響していること。** シェルが反響を出しているので、
     // **Ring 3 まで届いた証拠が出力そのものにある。**
     let echoed = after_shell.contains("zaytos$ /bin/ls");
@@ -2243,9 +2243,9 @@ fn cmd_shell_test() -> Result<()> {
     // **行編集の判定が、わざと走らない語（`abx`）を打つためである。**
     // **名前を挙げて見る形へ狭めた**——ここが主張したいのは
     // 「`/bin/` を付けずに打った 3 つが起こせたこと」だけである。
-    let no_cannot_run = !after_shell.contains("sh: ls: cannot run")
-        && !after_shell.contains("sh: cat: cannot run")
-        && !after_shell.contains("sh: spawn-test: cannot run");
+    let no_cannot_run = !after_shell.contains("zash: ls: cannot run")
+        && !after_shell.contains("zash: cat: cannot run")
+        && !after_shell.contains("zash: spawn-test: cannot run");
     let bare_names_resolved = typed_bare_ls && typed_bare_cat && no_cannot_run;
 
     // **Backspace が行を編集したこと（S12 前の手当て）。**
@@ -2253,8 +2253,8 @@ fn cmd_shell_test() -> Result<()> {
     // **打ったのは `abc` → Backspace → `x` で、走るのは `abx` である。**
     // **消えていなければ `abcx` になる。** 出る側と出ない側の両方を見る——
     // **片方だけだと、シェルが行を空にしてしまっても通る。**
-    let edited_line_ran = after_shell.contains("sh: abx: cannot run");
-    let unedited_line_absent = !after_shell.contains("sh: abcx: cannot run");
+    let edited_line_ran = after_shell.contains("zash: abx: cannot run");
+    let unedited_line_absent = !after_shell.contains("zash: abcx: cannot run");
     let backspace_edited_the_line = edited_line_ran && unedited_line_absent;
 
     // **`argv[0]` が打った語のままであること（3 本目）。**
