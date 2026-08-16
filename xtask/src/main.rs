@@ -2310,6 +2310,8 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
 
     // **0 まで縮めたままの像か（S12-d）。**
     let keep_truncated = features.contains(&TRUNCATE_KEEP_FEATURE);
+    // **作ったままの像か（S12-e）。**
+    let keep_created = features.contains(&CREATE_KEEP_FEATURE);
 
     let (identical, fsck_ok) = if keep_truncated {
         // **空のファイルは ext2 として正しい。** **`e2fsck` は無傷と判定する。**
@@ -2320,9 +2322,9 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
         );
 
         // **長さが 0 であること。** **外の道具に読ませる**（自分で言わない）。
-        // **「引けなかった」を「空」と混ぜない**——**混ぜると、ファイルが
-        // 消えていてもこの判定が満たされる**（`debugfs_read_writable` の doc）。
-        let actual = debugfs_read_writable(&dump)?;
+        // **「引けなかった」を「空」と混ぜない**（S12-e で締めた。
+        // `debugfs_read` の doc に理由がある）。
+        let actual = debugfs_read(&dump, "/data/writable")?;
         let emptied = actual.as_ref().is_some_and(|bytes| bytes.is_empty());
         println!(
             "{context}: the file reads back empty = {emptied} ({:?} byte(s))",
@@ -2339,6 +2341,44 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
         );
 
         (emptied && returned, clean)
+    } else if keep_created {
+        // **作ったままの像（S12-e）。** **判定 A・B・D はこの構成でしか言えない。**
+        //
+        // **判定A——`e2fsck` の不満が 0 本。**
+        let clean = extracted && complaints.is_empty();
+        println!(
+            "{context}: e2fsck found nothing to complain about = {clean} (complaints: \
+             {complaints:?})"
+        );
+
+        // **判定B——作ったファイルが引けて、中身も長さも一致すること。**
+        let expected = expected_created_content();
+        let actual = debugfs_read(&dump, CREATED_PATH)?;
+        let content_ok = actual.as_deref() == Some(expected.as_slice());
+        println!(
+            "{context}: {CREATED_PATH} reads back exactly = {content_ok} (expected {} byte(s), \
+             got {:?} byte(s))",
+            expected.len(),
+            actual.as_ref().map(|bytes| bytes.len())
+        );
+
+        // **判定D——空きブロックと空き inode が 1 つずつ減っていること。**
+        // **inode の空き数を判定に使うのは、ここが初めてである。**
+        //
+        // **`bg_used_dirs_count` も一緒に見る。** **ファイルの作成では動かない**
+        // （実測。`debugfs` でファイルを作ると変わらず、ディレクトリを作ると 1 増えた）。
+        let after = dumpe2fs_free_counts(&dump)?;
+        let moved_by_one = after.superblock_blocks + 1 == expected_counts.superblock_blocks
+            && after.superblock_inodes + 1 == expected_counts.superblock_inodes
+            && after.group_inodes + 1 == expected_counts.group_inodes
+            && after.group_dirs == expected_counts.group_dirs;
+        println!(
+            "{context}: one block and one inode went away, the directory count did not = \
+             {moved_by_one} (built {:?}, extracted {after:?})",
+            expected_counts
+        );
+
+        (content_ok && moved_by_one, clean)
     } else if keep_written {
         // **追記したままの像（S12-c）。** **中身が inode から参照され、会計が
         // 締まっているので、`e2fsck` は不満を 1 本も言わないはずである**（実測）。
@@ -2351,7 +2391,7 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
         // **判定B——中身と長さの両方が一致すること。**
         // **「含む」で見ない**——前後に余分が無いことを言う。
         let expected = expected_writable_content();
-        let actual = debugfs_read_writable(&dump)?;
+        let actual = debugfs_read(&dump, "/data/writable")?;
         let content_ok = actual.as_deref() == Some(expected.as_slice());
         println!(
             "{context}: the appended bytes read back exactly = {content_ok} (expected {} byte(s), \
@@ -2411,11 +2451,20 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
             "{context}: the extracted image matches the built image byte for byte = {identical}"
         );
 
+        // **判定C——作って消したファイルが、もう引けないこと（S12-e）。**
+        //
+        // **バイト一致が真なら含意される。** S12-a の 3 本目と同じ位置づけで、
+        // **落ちないと分かっていて置いている**——**バイト一致のほうが強いので、
+        // これが単独で落ちることは無い。** それでも置くのは、
+        // **「消えたこと」が判定行として読めるようにするためである。**
+        let gone = extracted && debugfs_read(&dump, CREATED_PATH)?.is_none();
+        println!("{context}: {CREATED_PATH} is no longer there = {gone}");
+
         // **不満が 1 本も無いこと。** **バイト一致が真ならこれは含意される**が、
         // **S12-c で書き換えたまま残す段になると、こちらが主たる判定になる。**
         let clean = extracted && complaints.is_empty();
         println!("{context}: e2fsck found nothing to complain about = {clean} (complaints: {complaints:?})");
-        (identical, clean)
+        (identical && gone, clean)
     };
 
     if outside_kernel_image && reads_the_copy && free_counts_agree && identical && fsck_ok {
@@ -2540,7 +2589,59 @@ fn expected_writable_content() -> Vec<u8> {
     expected
 }
 
-/// 取り出した像から `/data/writable` の中身を読む（S12-c）。
+/// カーネルが作るファイルの名前と中身の長さ（S12-e）。
+///
+/// **`WRITABLE_*` と同じ作法である**——**同じ規則で組み立てるだけで、
+/// 値を書き写さない。**
+const CREATED_PATH: &str = "/data/created";
+const CREATED_BYTES: usize = 300;
+
+/// 作った後の `/data/created` の中身。
+fn expected_created_content() -> Vec<u8> {
+    (0..CREATED_BYTES).map(|i| (i % 251) as u8).collect()
+}
+
+/// 作ったままにする構成の feature 名（S12-e）。**破壊ではなく変種である。**
+const CREATE_KEEP_FEATURE: &str = "fs-create-keep-test";
+
+/// 作成と削除の破壊（S12-e）。
+///
+/// **5 つは作ったままの像で見る**ので `fs-create-keep-test` と組む。
+/// **`unlink-mark-unused` だけは往復で見る**ので既定の構成である
+/// （**あれは削除の側を壊すので、消さない構成では現れない**——
+/// S12-b の `free-skip-bit` と同じ形）。
+///
+/// **`unlink-mark-unused` は `e2fsck` を通り抜ける。**
+/// `inode = 0` の枠を残す形は **ext2 として不整合ではない**ので、
+/// **往復のバイト一致だけが捕まえる**（S12-d の 4 つと同じ機序である）。
+const FS_CREATE_SABOTAGES: &[(&str, &[&str])] = &[
+    (
+        "an inode handed out without marking the bitmap",
+        &[CREATE_KEEP_FEATURE, "ext2-create-skip-inode-bit-test"],
+    ),
+    (
+        "a link count left at zero",
+        &[CREATE_KEEP_FEATURE, "ext2-create-skip-links-test"],
+    ),
+    (
+        "a previous entry whose record length is not shrunk",
+        &[CREATE_KEEP_FEATURE, "ext2-create-keep-prev-rec-len-test"],
+    ),
+    (
+        "free inode counts left stale",
+        &[CREATE_KEEP_FEATURE, "ext2-create-skip-inode-count-test"],
+    ),
+    (
+        "a directory count moved for a plain file",
+        &[CREATE_KEEP_FEATURE, "ext2-create-move-dirs-count-test"],
+    ),
+    (
+        "unlinking that leaves the slot behind instead of merging it",
+        &["ext2-unlink-mark-unused-test"],
+    ),
+];
+
+/// 取り出した像からファイルの中身を読む（S12-c。S12-e で名前を引数にした）。
 ///
 /// **`debugfs` に読ませる**——**自分で書いて自分で読むと、同じ設計の取り違えが
 /// 両側で相殺する。** **`i_size` までを出す**ので、**長さの一致がそのまま
@@ -2558,11 +2659,14 @@ fn expected_writable_content() -> Vec<u8> {
 ///
 /// **判定の前に濾す仕組みは、それ自体が判定の一部である**（S12-c で
 /// `Fix? no` を `contains` で落として不満ごと消していたのと同じ形である）。
-fn debugfs_read_writable(image: &Path) -> Result<Option<Vec<u8>>> {
+///
+/// **S12-e の判定 C は、この区別の上に載っている**——
+/// **消えたことを主張するので、「無い」が返ることそのものが判定である。**
+fn debugfs_read(image: &Path, path: &str) -> Result<Option<Vec<u8>>> {
     let output = Command::new("debugfs")
         .env("LC_ALL", "C")
         .arg("-R")
-        .arg("cat /data/writable")
+        .arg(format!("cat {path}"))
         .arg(image)
         .output()
         .context(
@@ -7938,6 +8042,29 @@ fn cmd_check(full: bool) -> Result<()> {
             }
         }
 
+        // **作成と削除（S12-e）。** **作ったままの像でしか判定 A・B・D は言えない。**
+        total += 1;
+        println!("=== xtask check: a created file survives a round trip through the image");
+        match cmd_fs_image_extract(&[CREATE_KEEP_FEATURE]) {
+            Ok(()) => println!("--- fs create (kept): OK"),
+            Err(error) => {
+                println!("--- fs create (kept): FAILED ({error})");
+                failed.push("fs create (kept)".to_string());
+            }
+        }
+
+        for (label, features) in FS_CREATE_SABOTAGES {
+            total += 1;
+            println!("=== xtask check: the fs create check catches {label}");
+            match cmd_fs_image_extract(features) {
+                Ok(()) => {
+                    println!("--- fs create ({label}): FAILED (the sabotage was NOT caught)");
+                    failed.push(format!("fs create ({label})"));
+                }
+                Err(_) => println!("--- fs create ({label}): OK (the sabotage was caught)"),
+            }
+        }
+
         for (label, features) in FS_TRUNCATE_SABOTAGES {
             total += 1;
             println!("=== xtask check: the fs truncate check catches {label}");
@@ -8464,7 +8591,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 164,
+    full: 171,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

@@ -110,6 +110,16 @@ fs-alloc-keep-test = []
 fs-write-keep-test = []
 # 変種（S12-d）: 縮めた後に元へ戻さない。**壊さない**——0 のままの像を作る。
 fs-truncate-keep-test = []
+# 変種（S12-e）: 作ったファイルを消さない。**壊さない**——作ったままの像を作る。
+# 1 回の起動だと最終状態が「消した後」になり、作成の誤りが削除で消える。
+fs-create-keep-test = []
+# 破壊（S12-e）: 作成と削除の6種。いずれも common へ転送する。
+ext2-create-skip-inode-bit-test = ["common/ext2-create-skip-inode-bit"]
+ext2-create-skip-links-test = ["common/ext2-create-skip-links"]
+ext2-create-keep-prev-rec-len-test = ["common/ext2-create-keep-prev-rec-len"]
+ext2-create-skip-inode-count-test = ["common/ext2-create-skip-inode-count"]
+ext2-create-move-dirs-count-test = ["common/ext2-create-move-dirs-count"]
+ext2-unlink-mark-unused-test = ["common/ext2-unlink-mark-unused"]
 # 破壊（S12-d）: truncate の6種。いずれも common へ転送する。
 ext2-truncate-off-by-one-test = ["common/ext2-truncate-off-by-one"]
 ext2-truncate-always-free-test = ["common/ext2-truncate-always-free"]

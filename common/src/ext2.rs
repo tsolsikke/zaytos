@@ -662,6 +662,7 @@ impl<'a> Ext2<'a> {
             inodes_per_group: self.inodes_per_group,
             inode_size: self.inode_size,
             inodes_count: self.inodes_count,
+            first_inode: self.first_inode,
         }
     }
 
@@ -1034,6 +1035,12 @@ pub struct Layout {
     inodes_per_group: u32,
     inode_size: u16,
     inodes_count: u32,
+    /// 配ってよい最も小さい inode 番号（`s_first_ino`。S12-e）。
+    ///
+    /// **これより小さい番号は ext2 が用途を決めている**（ルートは 2 など）。
+    /// **ビットマップにも印が立っているはずだが、そこに頼らない**——
+    /// **印が落ちた像を渡されたときに、予約された番号を配ってしまう。**
+    first_inode: u32,
 }
 
 /// ビットマップの操作で起きうる誤り（S12-b）。
@@ -1051,6 +1058,39 @@ pub enum AllocError {
     ///
     /// **飽和させずに断る**——0 のまま進むと、**解放で 1 増えて往復が戻らない。**
     FreeCountInconsistent,
+    /// inode 番号が 0、または `s_inodes_count` を超えている（S12-e）。
+    ///
+    /// **[`AllocError::BlockOutOfRange`] を流用しない。** 追記と縮めは
+    /// inode 番号をあちらで返しているが（S12-c）、**番号の族が違うものを
+    /// 同じ変種で返すと、診断で取り違える。**
+    InodeOutOfRange(u32),
+    /// 名前が空、255 バイトを超える、`/` を含む、または `.` か `..`（S12-e）。
+    BadName,
+    /// その名前が既にディレクトリに在る（S12-e）。
+    NameTaken,
+    /// ディレクトリのどのブロックにも、この名前を入れる隙間が無い（S12-e）。
+    ///
+    /// **ディレクトリは伸ばさない**（[`create_file`] の doc に理由がある）。
+    NoRoomInDirectory,
+    /// ディレクトリとして辿ろうとした inode が、ディレクトリでない（S12-e）。
+    NotADirectory(u32),
+    /// 消そうとした inode が通常ファイルでない（S12-e）。
+    ///
+    /// **ディレクトリは消さない**（[`unlink_file`] の doc に理由がある）。
+    NotARegularFile(u32),
+    /// その名前のエントリがディレクトリに無い（S12-e）。
+    NoSuchEntry,
+    /// 消そうとしたエントリがブロックの先頭に在る（S12-e）。
+    ///
+    /// **前のエントリへ隙間を吸わせる形なので、前が要る。**
+    /// **健全なディレクトリでは起きない**——先頭は必ず `.` である。
+    NoPreviousEntry,
+    /// ディレクトリのバイト列が、エントリの並びとして読めない（S12-e）。
+    ///
+    /// **書く側は読む側より厳しくてよい。** [`DirEntries`] は壊れた並びを
+    /// 種類ごとに区別して返すが、**書く前に見つけたらそこで止める**——
+    /// **並びが読めない場所へ書き足すと、壊し方が増えるだけである。**
+    DirectoryCorrupt,
 }
 
 impl Layout {
@@ -1413,6 +1453,390 @@ pub fn truncate_to(
     Ok(())
 }
 
+/// 名前に許す最大の長さ。**`name_len` が `u8` なので 255 で頭打ちである。**
+pub const MAX_NAME_LEN: usize = 255;
+
+/// この名前を持つエントリが占める `rec_len`（S12-e）。
+///
+/// **固定部 8 バイト + 名前を、4 バイト境界へ切り上げる。**
+/// **`rec_len` はこれ以上でなければならない**（[`DirEntries`] が線4 で見ている）。
+fn dirent_span(name_len: usize) -> usize {
+    (DIRENT_HEADER_LEN + name_len).next_multiple_of(DIRENT_ALIGNMENT as usize)
+}
+
+/// 空き inode を 1 つ取り、会計も直す（S12-e）。**取れた番号を返す。**
+///
+/// # ブロックの側とちょうど同じ形である
+///
+/// [`allocate_block`] と直すものが対応している——ビットマップのビット、
+/// `bg_free_inodes_count`、`s_free_inodes_count`。**違うのは 2 点だけである。**
+///
+/// - **欄の位置**（群は +14、superblock は +16）
+/// - **予約された番号を飛ばす**（`s_first_ino` より小さい番号）
+///
+/// # `bg_used_dirs_count` は動かさない
+///
+/// **ディレクトリを作るときだけ動く欄である。** **実測で確かめた**——
+/// `debugfs` でファイルを 1 つ作ると `5 directories` のまま、
+/// ディレクトリを 1 つ作ると `6 directories` になった。
+/// **動かすと `e2fsck` が `Directories count wrong for group #0` と言う**（実測）。
+pub fn allocate_inode(image: &mut [u8], layout: &Layout) -> Result<u32, AllocError> {
+    for group in 0..layout.group_count {
+        let descriptor = layout
+            .descriptor_at(group)
+            .ok_or(AllocError::ImageTooSmall)?;
+        if descriptor + GROUP_DESCRIPTOR_SIZE > image.len() {
+            return Err(AllocError::ImageTooSmall);
+        }
+        let bitmap_block = read_u32(image, descriptor + 4);
+        let bitmap = usize::try_from(u64::from(bitmap_block) * u64::from(layout.block_size))
+            .map_err(|_| AllocError::ImageTooSmall)?;
+
+        // この群が受け持つ inode 番号（最後の群は端数になりうる）。
+        let first = group * layout.inodes_per_group + 1;
+        let span = layout
+            .inodes_per_group
+            .min((layout.inodes_count + 1).saturating_sub(first));
+        for index in 0..span {
+            let ino = first + index;
+            if ino < layout.first_inode {
+                continue;
+            }
+            let byte = bitmap + (index / 8) as usize;
+            if byte >= image.len() {
+                return Err(AllocError::ImageTooSmall);
+            }
+            let mask = 1u8 << (index % 8);
+            if image[byte] & mask != 0 {
+                continue;
+            }
+            // 破壊 (S12-e, ext2-create-skip-inode-bit): 使用中の印を立てない。
+            // **inode を配ったのにビットマップが空きのままなので、
+            // `e2fsck` が `Inode bitmap differences` を出す。**
+            #[cfg(not(feature = "ext2-create-skip-inode-bit"))]
+            {
+                image[byte] |= mask;
+            }
+            // 破壊 (S12-e, ext2-create-skip-inode-count): 空き数を直さない。
+            // **[`allocate_block`] と違って群と superblock を分けない**——
+            // **分けても捕まえ方が同じで、破壊が 1 つ増えるだけだからである**
+            // （あちらは文言が違うことを見せるために分けてある）。
+            #[cfg(not(feature = "ext2-create-skip-inode-count"))]
+            {
+                // **飽和させない**（[`allocate_block`] と同じ理由）。
+                let group_free = read_u16(image, descriptor + 14)
+                    .checked_sub(1)
+                    .ok_or(AllocError::FreeCountInconsistent)?;
+                let total_free = read_u32(image, SUPERBLOCK_OFFSET + 16)
+                    .checked_sub(1)
+                    .ok_or(AllocError::FreeCountInconsistent)?;
+                image[descriptor + 14..descriptor + 16].copy_from_slice(&group_free.to_le_bytes());
+                image[SUPERBLOCK_OFFSET + 16..SUPERBLOCK_OFFSET + 20]
+                    .copy_from_slice(&total_free.to_le_bytes());
+            }
+            return Ok(ino);
+        }
+    }
+    Err(AllocError::Full)
+}
+
+/// inode を 1 つ返し、会計も直す（S12-e）。
+///
+/// **[`allocate_inode`] とちょうど逆である。**
+/// **戻し方が 1 つでも違えば、往復して像が元へ戻らない。**
+pub fn free_inode(image: &mut [u8], layout: &Layout, ino: u32) -> Result<(), AllocError> {
+    if ino == 0 || ino > layout.inodes_count {
+        return Err(AllocError::InodeOutOfRange(ino));
+    }
+    let group = (ino - 1) / layout.inodes_per_group;
+    let index = (ino - 1) % layout.inodes_per_group;
+    let descriptor = layout
+        .descriptor_at(group)
+        .ok_or(AllocError::InodeOutOfRange(ino))?;
+    if descriptor + GROUP_DESCRIPTOR_SIZE > image.len() {
+        return Err(AllocError::ImageTooSmall);
+    }
+    let bitmap_block = read_u32(image, descriptor + 4);
+    let bitmap = usize::try_from(u64::from(bitmap_block) * u64::from(layout.block_size))
+        .map_err(|_| AllocError::ImageTooSmall)?;
+    let byte = bitmap + (index / 8) as usize;
+    if byte >= image.len() {
+        return Err(AllocError::ImageTooSmall);
+    }
+    let mask = 1u8 << (index % 8);
+    if image[byte] & mask == 0 {
+        return Err(AllocError::NotAllocated(ino));
+    }
+    let group_free = read_u16(image, descriptor + 14)
+        .checked_add(1)
+        .ok_or(AllocError::FreeCountInconsistent)?;
+    let total_free = read_u32(image, SUPERBLOCK_OFFSET + 16)
+        .checked_add(1)
+        .ok_or(AllocError::FreeCountInconsistent)?;
+    image[byte] &= !mask;
+    image[descriptor + 14..descriptor + 16].copy_from_slice(&group_free.to_le_bytes());
+    image[SUPERBLOCK_OFFSET + 16..SUPERBLOCK_OFFSET + 20]
+        .copy_from_slice(&total_free.to_le_bytes());
+    Ok(())
+}
+
+/// ディレクトリの中の 1 か所（S12-e）。
+///
+/// **`(そのエントリの像内オフセット, 直前のエントリの像内オフセット)`。**
+/// **直前が `None` なのは、ブロックの先頭に在るときである。**
+type DirectorySlot = (usize, Option<usize>);
+
+/// ディレクトリの中で名前を探し、入れられる隙間も一緒に見つける（S12-e）。
+///
+/// 返すのは `(名前の在るエントリ, 隙間を持つエントリ)` である。
+///
+/// # 1 度で両方を見る
+///
+/// **[`create_file`] は「名前が既に在るか」を全体について言う必要があり、
+/// [`unlink_file`] は「名前の在る位置と、その直前」が要る。**
+/// **走査を 2 度書くと、片方だけが壊れた並びの扱いを変える余地が生まれる。**
+///
+/// # 直接ブロックだけを見る
+///
+/// **単一間接を辿るディレクトリは扱わない。** 4096 バイトのブロックが 12 個
+/// あれば、この像のディレクトリはすべて 1 ブロックで収まっている（実測）。
+fn scan_directory(
+    image: &[u8],
+    layout: &Layout,
+    dir: u32,
+    name: &[u8],
+    want: usize,
+) -> Result<(Option<DirectorySlot>, Option<DirectorySlot>), AllocError> {
+    let dir_at = layout
+        .inode_at(image, dir)
+        .ok_or(AllocError::InodeOutOfRange(dir))?;
+    if read_u16(image, dir_at) & MODE_FORMAT_MASK != MODE_DIRECTORY {
+        return Err(AllocError::NotADirectory(dir));
+    }
+    let block_size = layout.block_size as usize;
+    let size = read_u32(image, dir_at + 4) as usize;
+    let blocks = (size / block_size).min(DIRECT_BLOCK_COUNT);
+
+    let mut found = None;
+    let mut room = None;
+    for index in 0..blocks {
+        let block = read_u32(image, dir_at + 40 + index * 4);
+        if block == 0 {
+            continue;
+        }
+        let base = usize::try_from(u64::from(block) * u64::from(layout.block_size))
+            .map_err(|_| AllocError::ImageTooSmall)?;
+        if base + block_size > image.len() {
+            return Err(AllocError::ImageTooSmall);
+        }
+        let end = base + block_size;
+        let mut at = base;
+        let mut previous = None;
+        while at + DIRENT_HEADER_LEN <= end {
+            let entry = read_u32(image, at);
+            let rec_len = usize::from(read_u16(image, at + 4));
+            let name_len = usize::from(image[at + 6]);
+            // **読む側と同じ 3 つを見る**（線4 の要である `rec_len` の下限を含む）。
+            // **書く前に壊れた並びを見つけたら、そこで止める。**
+            if !rec_len.is_multiple_of(usize::from(DIRENT_ALIGNMENT))
+                || rec_len < DIRENT_HEADER_LEN + name_len
+                || at + rec_len > end
+            {
+                return Err(AllocError::DirectoryCorrupt);
+            }
+            if entry != 0
+                && &image[at + DIRENT_HEADER_LEN..at + DIRENT_HEADER_LEN + name_len] == name
+            {
+                found = Some((at, previous));
+            }
+            // **使われているエントリの後ろの余りだけを見る。**
+            // **`inode == 0` の枠は、この設計では現れない**——
+            // [`unlink_file`] は隙間を前のエントリへ吸わせるので、枠が残らない。
+            //
+            // **この引き算が桁借りしないことは、上の 3 つの検査に依存している。**
+            // `rec_len` は 4 の倍数で、かつ `8 + name_len` 以上である。
+            // **`dirent_span(name_len)` は `8 + name_len` を 4 の倍数へ切り上げた値**
+            // なので、**その 2 つが成り立てば `rec_len >= dirent_span(name_len)` になる。**
+            // **上の検査を 1 つでも外すなら、ここを `checked_sub` にすること**——
+            // **外した人が、引き算の破れに気づける場所がここしか無い。**
+            if room.is_none() && entry != 0 && rec_len - dirent_span(name_len) >= want {
+                room = Some((at, previous));
+            }
+            previous = Some(at);
+            at += rec_len;
+        }
+    }
+    Ok((found, room))
+}
+
+/// ディレクトリへ通常ファイルを 1 つ作る（S12-e）。**取れた inode 番号を返す。**
+///
+/// # 中身は空である
+///
+/// **inode を取って、初期化して、ディレクトリへ繋ぐところまでである。**
+/// **中身は [`append_to_file`] が書く**——**割り当てと追記を混ぜると、
+/// 会計がどちらの誤りで狂ったのかが切り分けられない。**
+///
+/// # 直すのは 4 つである
+///
+/// inode ビットマップと 2 つの空き数（[`allocate_inode`] が見る）、
+/// inode の中身、ディレクトリのエントリ、そして前のエントリの `rec_len`。
+///
+/// # ディレクトリは伸ばさない
+///
+/// **隙間が無ければ [`AllocError::NoRoomInDirectory`] を返す。**
+/// **伸ばす形はブロックの割り当てと `i_size` の更新が入り、
+/// [`append_to_file`] と同じ算術をディレクトリでもう一度書くことになる。**
+/// **要るようになったら足す**（この像のディレクトリは 1 ブロックに収まっている）。
+///
+/// # `rec_len` が 0 になる道を作らない
+///
+/// **割る前の `rec_len` から、前のエントリが実際に使う分を引いた残りを渡す。**
+/// **残りが新しいエントリの分に足りないなら、そもそも隙間として選ばれない。**
+/// **したがって両方とも 8 以上である**（[`DirEntries`] の線4 が要求する下限）。
+pub fn create_file(
+    image: &mut [u8],
+    layout: &Layout,
+    dir: u32,
+    name: &[u8],
+) -> Result<u32, AllocError> {
+    if name.is_empty()
+        || name.len() > MAX_NAME_LEN
+        || name.contains(&PATH_SEPARATOR)
+        || name == b"."
+        || name == b".."
+    {
+        return Err(AllocError::BadName);
+    }
+    let want = dirent_span(name.len());
+    let (found, room) = scan_directory(image, layout, dir, name, want)?;
+    if found.is_some() {
+        return Err(AllocError::NameTaken);
+    }
+    let (previous, _) = room.ok_or(AllocError::NoRoomInDirectory)?;
+
+    // **割った後の 2 つの `rec_len` を先に出す。** どちらも 0 にならないことは、
+    // 隙間の選び方（`rec_len - dirent_span(name_len) >= want`）から出ている。
+    let previous_len = dirent_span(usize::from(image[previous + 6]));
+    let entry_len = usize::from(read_u16(image, previous + 4)) - previous_len;
+
+    let ino = allocate_inode(image, layout)?;
+
+    // **枠ごと 0 にしてから書く。** **空いている inode の枠の中身は決まっていない**
+    // ——取った枠に前の住人が残っていると、直さない欄がそのまま生き返る。
+    let at = layout
+        .inode_at(image, ino)
+        .ok_or(AllocError::InodeOutOfRange(ino))?;
+    image[at..at + usize::from(layout.inode_size)].fill(0);
+    image[at..at + 2].copy_from_slice(&(MODE_REGULAR | 0o644).to_le_bytes());
+    // 破壊 (S12-e, ext2-create-skip-links): `i_links_count` を 0 のままにする。
+    // **ディレクトリから指されているのに参照が 0 なので、
+    // `e2fsck` が `Inode … ref count is 0, should be 1` と言う。**
+    #[cfg(not(feature = "ext2-create-skip-links"))]
+    image[at + 26..at + 28].copy_from_slice(&1u16.to_le_bytes());
+
+    // 破壊 (S12-e, ext2-create-keep-prev-rec-len): 前のエントリを縮めない。
+    // **新しいエントリが前の `rec_len` の内側に入るので、走査が素通りする。**
+    // **ext2 として不整合ではない**（隙間の中身は自由である）——
+    // **`e2fsck` は「どこからも指されていない inode」として捕まえ、
+    // `debugfs` は名前を引けない。**
+    #[cfg(not(feature = "ext2-create-keep-prev-rec-len"))]
+    image[previous + 4..previous + 6].copy_from_slice(&(previous_len as u16).to_le_bytes());
+
+    let entry = previous + previous_len;
+    image[entry..entry + 4].copy_from_slice(&ino.to_le_bytes());
+    image[entry + 4..entry + 6].copy_from_slice(&(entry_len as u16).to_le_bytes());
+    image[entry + 6] = name.len() as u8;
+    image[entry + 7] = DIRENT_TYPE_REGULAR;
+    image[entry + DIRENT_HEADER_LEN..entry + DIRENT_HEADER_LEN + name.len()].copy_from_slice(name);
+
+    // 破壊 (S12-e, ext2-create-move-dirs-count): ファイルでも `bg_used_dirs_count`
+    // を動かす。**動くのはディレクトリのときだけである**（実測）。
+    #[cfg(feature = "ext2-create-move-dirs-count")]
+    {
+        let group = (ino - 1) / layout.inodes_per_group;
+        if let Some(descriptor) = layout.descriptor_at(group) {
+            let dirs = read_u16(image, descriptor + 16).wrapping_add(1);
+            image[descriptor + 16..descriptor + 18].copy_from_slice(&dirs.to_le_bytes());
+        }
+    }
+
+    Ok(ino)
+}
+
+/// ディレクトリから通常ファイルを 1 つ消す（S12-e）。**[`create_file`] の逆である。**
+///
+/// # 逆であることが主張の中身である
+///
+/// **作って消せば、像はバイト単位で元へ戻るはずである。**
+/// **`e2fsck` は使われていない場所の中身を見ない**ので、
+/// **返し過ぎ・消し残しは往復でしか捕まらない**（S12-d で実測した）。
+///
+/// # 戻すのは 4 つである
+///
+/// 中身のブロック（[`truncate_to`] が返す）、inode の枠、inode ビットマップと
+/// 空き数（[`free_inode`] が戻す）、ディレクトリの隙間。
+///
+/// # 隙間は前のエントリへ吸わせる
+///
+/// **`inode = 0` の枠として残す形も ext2 として正しい**（Linux もそう書く場面がある）。
+/// **採らないのは、それでは像が元へ戻らないからである**——
+/// 割った跡が `rec_len` の並びに残る。**破壊としてその形を立ててある。**
+///
+/// # ディレクトリは消さない
+///
+/// **`.` と `..` の始末と、親の `i_links_count` を戻す処理が要る。**
+/// **作る側がディレクトリを作らないので、消す側にも要らない**（対を保つ）。
+pub fn unlink_file(
+    image: &mut [u8],
+    layout: &Layout,
+    dir: u32,
+    name: &[u8],
+) -> Result<(), AllocError> {
+    if name.is_empty() || name.len() > MAX_NAME_LEN {
+        return Err(AllocError::BadName);
+    }
+    let (found, _) = scan_directory(image, layout, dir, name, usize::MAX)?;
+    let (entry, previous) = found.ok_or(AllocError::NoSuchEntry)?;
+    let previous = previous.ok_or(AllocError::NoPreviousEntry)?;
+    let ino = read_u32(image, entry);
+
+    let at = layout
+        .inode_at(image, ino)
+        .ok_or(AllocError::InodeOutOfRange(ino))?;
+    if read_u16(image, at) & MODE_FORMAT_MASK != MODE_REGULAR {
+        return Err(AllocError::NotARegularFile(ino));
+    }
+
+    // **中身を返してから枠を消す。** 逆にすると `i_block` が読めなくなり、
+    // **持っていたブロックが誰からも参照されないまま使用中に残る。**
+    truncate_to(image, layout, ino, 0)?;
+    image[at..at + usize::from(layout.inode_size)].fill(0);
+    free_inode(image, layout, ino)?;
+
+    let entry_len = usize::from(read_u16(image, entry + 4));
+    // 破壊 (S12-e, ext2-unlink-mark-unused): 前のエントリへ吸わせず、
+    // **`inode = 0` の枠として残す。** **`e2fsck` は無傷と判定する**——
+    // **ext2 として不整合ではないからである。往復のバイト一致だけが捕まえる。**
+    #[cfg(feature = "ext2-unlink-mark-unused")]
+    {
+        // **前を探す検査そのものは残す**——**破壊で通る道が増えると、
+        // 何を壊したのかが 1 つに絞れなくなる。**
+        let _ = (previous, entry_len);
+        image[entry..entry + 4].copy_from_slice(&0u32.to_le_bytes());
+    }
+    #[cfg(not(feature = "ext2-unlink-mark-unused"))]
+    {
+        let merged = u16::try_from(usize::from(read_u16(image, previous + 4)) + entry_len)
+            .map_err(|_| AllocError::DirectoryCorrupt)?;
+        image[previous + 4..previous + 6].copy_from_slice(&merged.to_le_bytes());
+        // **書いたバイトを消す。** **隙間の中身は ext2 として自由なので、
+        // 残しても `e2fsck` は何も言わない**——**往復のバイト一致のためである。**
+        image[entry..entry + entry_len].fill(0);
+    }
+    Ok(())
+}
+
 fn read_u16(data: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap())
 }
@@ -1452,6 +1876,16 @@ mod tests {
         let bitmap = 2 * 4096;
         for block in 0..=60u32 {
             image[bitmap + (block / 8) as usize] |= 1 << (block % 8);
+        }
+
+        // **使っている inode にビットを立てる（S12-e）。**
+        //
+        // **ブロックの側と同じ理由である**——立てないと [`allocate_inode`] が
+        // **既に住人の居る枠を返し、作成がテスト像そのものを壊す。**
+        // **この像が使うのは 18 番までである**（ルート・各ディレクトリ・各ファイル）。
+        let inode_bitmap = 3 * 4096;
+        for ino in 1..=18u32 {
+            image[inode_bitmap + ((ino - 1) / 8) as usize] |= 1 << ((ino - 1) % 8);
         }
 
         // 空き数の3欄（S12-b）。**別々の値を書く**——同じ値だと、
@@ -1575,6 +2009,8 @@ mod tests {
 
     /// ルートディレクトリの中身が在るブロック（実測した像と同じ番号）。
     const ROOT_DATA_BLOCK: u32 = 20;
+    /// `/data` の中身が在るブロック（S12-e。`write_subdirectory` へ渡す番号と同じ）。
+    const DATA_DATA_BLOCK: u32 = 23;
     /// 直接ブロックを使い切る通常ファイルの inode 番号と先頭ブロック。
     const DIRECT_FILE_INODE: u32 = 15;
     const DIRECT_FILE_FIRST_BLOCK: u32 = 31;
@@ -1669,6 +2105,7 @@ mod tests {
         put32(image, 0, 256); // s_inodes_count
         put32(image, 4, 512); // s_blocks_count
         put32(image, 12, 9); // s_free_blocks_count（S12-b。群の欄 7 とは別の値にする）
+        put32(image, 16, 6); // s_free_inodes_count（S12-e。群の欄 5 とは別の値にする）
         put32(image, 20, 0); // s_first_data_block
         put32(image, 24, 2); // s_log_block_size -> 4096
         put32(image, 32, 32768); // s_blocks_per_group
@@ -1823,6 +2260,271 @@ mod tests {
             free_block(&mut image, &layout, block),
             Err(AllocError::NotAllocated(block))
         );
+    }
+
+    /// 作る先のディレクトリ（テスト像の `/data`）。
+    /// **最後のエントリがブロックの終わりまで伸びているので、隙間がある側である。**
+    const TEST_DIRECTORY_INO: u32 = DATA_INODE;
+
+    #[test]
+    fn creating_then_unlinking_restores_the_image_byte_for_byte() {
+        let mut image = build_test_image();
+        let original = image.clone();
+        let layout = Ext2::parse(&image).unwrap().layout();
+
+        let ino = create_file(&mut image, &layout, TEST_DIRECTORY_INO, b"created").unwrap();
+        assert_ne!(image, original, "作成で像が変わること");
+        // **中身も書く。** **空のまま消すと、ブロックを返す道を通らない。**
+        append_to_file(&mut image, &layout, ino, &[0x5A; 300]).unwrap();
+
+        unlink_file(&mut image, &layout, TEST_DIRECTORY_INO, b"created").unwrap();
+        assert_eq!(image, original, "往復で像が元へ戻ること");
+    }
+
+    #[test]
+    fn creating_moves_both_free_inode_counts_by_one() {
+        let mut image = build_test_image();
+        let before = Ext2::parse(&image).unwrap();
+        let layout = before.layout();
+        let (sb_before, bg_before) = (
+            before.free_inodes_count(),
+            before.group_descriptor(0).unwrap().free_inodes_count,
+        );
+
+        create_file(&mut image, &layout, TEST_DIRECTORY_INO, b"created").unwrap();
+
+        let after = Ext2::parse(&image).unwrap();
+        assert_eq!(after.free_inodes_count(), sb_before - 1, "superblock 側");
+        assert_eq!(
+            after.group_descriptor(0).unwrap().free_inodes_count,
+            bg_before - 1,
+            "group 側"
+        );
+    }
+
+    #[test]
+    fn creating_a_file_leaves_the_directory_count_alone() {
+        let mut image = build_test_image();
+        let layout = Ext2::parse(&image).unwrap().layout();
+        let before = Ext2::parse(&image)
+            .unwrap()
+            .group_descriptor(0)
+            .unwrap()
+            .used_dirs_count;
+
+        create_file(&mut image, &layout, TEST_DIRECTORY_INO, b"created").unwrap();
+
+        // **ディレクトリを作ったときだけ動く欄である**（実測で確かめた。
+        // `debugfs` でファイルを作ると動かず、ディレクトリを作ると 1 増えた）。
+        assert_eq!(
+            Ext2::parse(&image)
+                .unwrap()
+                .group_descriptor(0)
+                .unwrap()
+                .used_dirs_count,
+            before
+        );
+    }
+
+    #[test]
+    fn the_new_entry_is_walkable_and_no_record_length_is_zero() {
+        let mut image = build_test_image();
+        let layout = Ext2::parse(&image).unwrap().layout();
+        create_file(&mut image, &layout, TEST_DIRECTORY_INO, b"created").unwrap();
+
+        // **走査そのものに読ませる。** **`rec_len` が 0 なら線4 の検査が
+        // `DirEntryRecordTooSmall` を返すので、名前が出る前に落ちる。**
+        let fs = Ext2::parse(&image).unwrap();
+        let inode = fs.inode(TEST_DIRECTORY_INO).unwrap();
+        let names: std::vec::Vec<std::vec::Vec<u8>> = fs
+            .directory_entries(&inode)
+            .unwrap()
+            .map(|entry| entry.expect("エントリの並びが読めること").name.to_vec())
+            .collect();
+        assert!(names.iter().any(|name| name == b"created"), "{names:?}");
+        // **元から在ったものが消えていないこと。** 前のエントリを縮めるので、
+        // **縮め過ぎれば直前の名前が読めなくなる。**
+        assert!(names.iter().any(|name| name == b"indirect-first"));
+        assert!(names.iter().any(|name| name == b"."));
+
+        // 引ける形になっていること。
+        let found = fs.lookup(b"/data/created").unwrap();
+        assert!(found.is_regular_file());
+        assert_eq!(found.size, 0);
+    }
+
+    #[test]
+    fn a_name_that_is_already_there_is_refused() {
+        let mut image = build_test_image();
+        let layout = Ext2::parse(&image).unwrap().layout();
+        let original = image.clone();
+        assert_eq!(
+            create_file(&mut image, &layout, TEST_DIRECTORY_INO, b"direct-max"),
+            Err(AllocError::NameTaken)
+        );
+        // **断るときは何も書かない。** inode を取ってから断ると、取った分が漏れる。
+        assert_eq!(image, original);
+    }
+
+    #[test]
+    fn names_that_cannot_be_written_are_refused() {
+        let mut image = build_test_image();
+        let layout = Ext2::parse(&image).unwrap().layout();
+        for name in [&b""[..], b".", b"..", b"a/b", &[b'x'; MAX_NAME_LEN + 1]] {
+            assert_eq!(
+                create_file(&mut image, &layout, TEST_DIRECTORY_INO, name),
+                Err(AllocError::BadName),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn creating_in_something_that_is_not_a_directory_is_refused() {
+        let mut image = build_test_image();
+        let layout = Ext2::parse(&image).unwrap().layout();
+        assert_eq!(
+            create_file(&mut image, &layout, SHORT_FILE_INODE, b"created"),
+            Err(AllocError::NotADirectory(SHORT_FILE_INODE))
+        );
+    }
+
+    #[test]
+    fn unlinking_a_name_that_is_not_there_is_refused() {
+        let mut image = build_test_image();
+        let layout = Ext2::parse(&image).unwrap().layout();
+        assert_eq!(
+            unlink_file(&mut image, &layout, TEST_DIRECTORY_INO, b"missing"),
+            Err(AllocError::NoSuchEntry)
+        );
+    }
+
+    #[test]
+    fn unlinking_a_directory_is_refused() {
+        let mut image = build_test_image();
+        let layout = Ext2::parse(&image).unwrap().layout();
+        // **`..` は前が在るので `NoPreviousEntry` では止まらない。**
+        // **止めているのは種別の検査である。**
+        assert_eq!(
+            unlink_file(&mut image, &layout, TEST_DIRECTORY_INO, b".."),
+            Err(AllocError::NotARegularFile(ROOT_INODE))
+        );
+        // **`.` はブロックの先頭に在るので、前が無い側で止まる。**
+        assert_eq!(
+            unlink_file(&mut image, &layout, TEST_DIRECTORY_INO, b"."),
+            Err(AllocError::NoPreviousEntry)
+        );
+    }
+
+    #[test]
+    fn reserved_inode_numbers_are_never_handed_out() {
+        let mut image = build_test_image();
+        let layout = Ext2::parse(&image).unwrap().layout();
+        // **予約された番号のビットを落としても、配らないこと。**
+        // **ビットマップの印に頼っていたら、ここで 3 番が返る。**
+        let inode_bitmap = 3 * 4096;
+        image[inode_bitmap] = 0;
+        image[inode_bitmap + 1] = 0;
+        let ino = allocate_inode(&mut image, &layout).unwrap();
+        assert!(ino >= layout.first_inode, "{ino}");
+    }
+
+    #[test]
+    fn freeing_an_inode_that_is_not_allocated_is_refused() {
+        let mut image = build_test_image();
+        let layout = Ext2::parse(&image).unwrap().layout();
+        let ino = allocate_inode(&mut image, &layout).unwrap();
+        free_inode(&mut image, &layout, ino).unwrap();
+        assert_eq!(
+            free_inode(&mut image, &layout, ino),
+            Err(AllocError::NotAllocated(ino))
+        );
+    }
+
+    #[test]
+    fn allocating_then_freeing_an_inode_restores_the_image_byte_for_byte() {
+        let mut image = build_test_image();
+        let original = image.clone();
+        let layout = Ext2::parse(&image).unwrap().layout();
+
+        let ino = allocate_inode(&mut image, &layout).unwrap();
+        assert_ne!(image, original, "割り当てで像が変わること");
+        free_inode(&mut image, &layout, ino).unwrap();
+        assert_eq!(image, original, "往復で像が元へ戻ること");
+    }
+
+    #[test]
+    fn a_directory_that_has_no_room_is_refused() {
+        let mut image = build_test_image();
+        let layout = Ext2::parse(&image).unwrap().layout();
+        // **ブロックを隙間なく埋める。** **最後の `rec_len` を詰めるだけでは
+        // 後ろがゼロで残り、「隙間が無い」ではなく「並びが読めない」になる**
+        // （実測で踏んだ。`DirectoryCorrupt` が返った）。
+        //
+        // `.` と `..` に 16 バイトずつ持たせ、残りの 4064 を 32 バイトずつ配る。
+        // **どのエントリも余りが `created` の 16 バイトに足りない。**
+        let base = DATA_DATA_BLOCK as usize * 4096;
+        image[base..base + 4096].fill(0);
+        let mut at = base;
+        let put = |image: &mut [u8], at: usize, ino: u32, rec_len: u16, ty: u8, name: &[u8]| {
+            image[at..at + 4].copy_from_slice(&ino.to_le_bytes());
+            image[at + 4..at + 6].copy_from_slice(&rec_len.to_le_bytes());
+            image[at + 6] = name.len() as u8;
+            image[at + 7] = ty;
+            image[at + DIRENT_HEADER_LEN..at + DIRENT_HEADER_LEN + name.len()]
+                .copy_from_slice(name);
+        };
+        put(
+            &mut image,
+            at,
+            TEST_DIRECTORY_INO,
+            16,
+            DIRENT_TYPE_DIRECTORY,
+            b".",
+        );
+        at += 16;
+        put(&mut image, at, ROOT_INODE, 16, DIRENT_TYPE_DIRECTORY, b"..");
+        at += 16;
+        // 名前は 24 バイトで、固定部と合わせて 32 バイトちょうどになる。
+        for index in 0..(4096 - 32) / 32 {
+            let mut name = [b'f'; 24];
+            name[0] = b'0' + (index % 10) as u8;
+            put(
+                &mut image,
+                at,
+                DIRECT_FILE_INODE,
+                32,
+                DIRENT_TYPE_REGULAR,
+                &name,
+            );
+            at += 32;
+        }
+        assert_eq!(at, base + 4096, "ブロックを使い切っていること");
+        assert_eq!(
+            create_file(&mut image, &layout, TEST_DIRECTORY_INO, b"created"),
+            Err(AllocError::NoRoomInDirectory)
+        );
+    }
+
+    #[test]
+    fn a_directory_whose_entries_do_not_parse_is_refused_before_anything_is_written() {
+        let mut image = build_test_image();
+        let original = image.clone();
+        let layout = Ext2::parse(&image).unwrap().layout();
+        // **`rec_len` を 4 の倍数でない値にする。**
+        let entries: &[(u32, u8, &[u8])] = &[
+            (TEST_DIRECTORY_INO, DIRENT_TYPE_DIRECTORY, b"."),
+            (ROOT_INODE, DIRENT_TYPE_DIRECTORY, b".."),
+        ];
+        let at = dirent_offset(DATA_DATA_BLOCK, 1, entries);
+        image[at + 4..at + 6].copy_from_slice(&13u16.to_le_bytes());
+        let poisoned = image.clone();
+        assert_eq!(
+            create_file(&mut image, &layout, TEST_DIRECTORY_INO, b"created"),
+            Err(AllocError::DirectoryCorrupt)
+        );
+        assert_eq!(image, poisoned, "断るときは何も書かないこと");
+        assert_ne!(image, original, "壊した像であること");
     }
 
     #[test]

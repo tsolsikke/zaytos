@@ -4450,6 +4450,115 @@ fn exercise_truncate(
         logger.info(format_args!(
             "fs-truncate: restored inode {ino} to {original_size} byte(s)"
         ));
+
+        exercise_create_and_unlink(logger, image, layout);
+    }
+}
+
+/// `/data` にファイルを 1 つ作り、既定では消す（S12-e）。
+///
+/// # 作ると消すを同じ段に置く
+///
+/// **削除は作成の逆で、往復が両方を同時に見る。** 分けると、
+/// **作った状態を戻す手段が無いまま段が終わる。**
+///
+/// # 中身も書く
+///
+/// **空のファイルを作って消すだけでは、ブロックを取って返す道を通らない。**
+/// **1 ブロックに収まる量を書く**——**そうすると、空きブロックと空き inode が
+/// ちょうど 1 つずつ減る。** 2 つ以上減っていれば、どこかが余分に取っている。
+///
+/// # 既定では戻す
+///
+/// **作って、書いて、消す。** 戻すので、**取り出した像は建てた像と
+/// バイト単位で一致するはずである。**
+/// **`fs-create-keep-test` は消さない**（変種。壊さない）——
+/// **1 回の起動だと最終状態が「消した後」になり、作成の誤りが削除で消える。**
+/// **作ったままの像でしか、中身も会計も見られない**（S12-d で踏んだ形である）。
+fn exercise_create_and_unlink(
+    logger: &mut Logger<SerialPort>,
+    image: &mut [u8],
+    layout: &common::ext2::Layout,
+) {
+    use common::ext2::Ext2;
+
+    const DIRECTORY: &[u8] = b"/data";
+    const NAME: &[u8] = b"created";
+    /// 書く量。**1 ブロックに収まる**ので、割り当ては 1 回だけ起きる。
+    const CONTENT_BYTES: usize = 300;
+
+    let dir_ino = match Ext2::parse(image).and_then(|fs| fs.lookup(DIRECTORY)) {
+        Ok(inode) => inode.number,
+        Err(e) => {
+            logger.error(format_args!(
+                "fs-create: could not find {}: {e:?}; halting",
+                core::str::from_utf8(DIRECTORY).unwrap_or("?")
+            ));
+            cpu::halt_forever();
+        }
+    };
+
+    let ino = match common::ext2::create_file(image, layout, dir_ino, NAME) {
+        Ok(ino) => ino,
+        Err(e) => {
+            logger.error(format_args!("fs-create: could not create: {e:?}; halting"));
+            cpu::halt_forever();
+        }
+    };
+
+    // **書く中身は位置から決まる形にする**（追記と同じ理由。定数の並びだと、
+    // 書けていない箇所と元から同じ箇所が見分けにくい）。
+    let mut content = [0u8; CONTENT_BYTES];
+    for (index, slot) in content.iter_mut().enumerate() {
+        *slot = (index % 251) as u8;
+    }
+    if let Err(e) = common::ext2::append_to_file(image, layout, ino, &content) {
+        logger.error(format_args!(
+            "fs-create: could not write the contents: {e:?}; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    let (blocks, inodes) = match Ext2::parse(image) {
+        Ok(fs) => (fs.free_blocks_count(), fs.free_inodes_count()),
+        Err(e) => {
+            logger.error(format_args!(
+                "fs-create: the copy did not parse after creating: {e:?}; halting"
+            ));
+            cpu::halt_forever();
+        }
+    };
+    logger.info(format_args!(
+        "fs-create: created inode {ino} under inode {dir_ino} and wrote {CONTENT_BYTES} byte(s); \
+         free blocks={blocks} inodes={inodes}"
+    ));
+
+    // 変種 (S12-e, fs-create-keep): 消さない。**作ったままの像を取り出す。**
+    #[cfg(feature = "fs-create-keep-test")]
+    {
+        logger.info(format_args!(
+            "fs-create: keeping the new file (fs-create-keep-test)"
+        ));
+    }
+
+    #[cfg(not(feature = "fs-create-keep-test"))]
+    {
+        if let Err(e) = common::ext2::unlink_file(image, layout, dir_ino, NAME) {
+            logger.error(format_args!("fs-create: could not unlink: {e:?}; halting"));
+            cpu::halt_forever();
+        }
+        let (blocks, inodes) = match Ext2::parse(image) {
+            Ok(fs) => (fs.free_blocks_count(), fs.free_inodes_count()),
+            Err(e) => {
+                logger.error(format_args!(
+                    "fs-create: the copy did not parse after unlinking: {e:?}; halting"
+                ));
+                cpu::halt_forever();
+            }
+        };
+        logger.info(format_args!(
+            "fs-create: unlinked inode {ino}; free blocks={blocks} inodes={inodes}"
+        ));
     }
 }
 
@@ -7883,6 +7992,41 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "fs-truncate-keep-test",
         cfg!(feature = "fs-truncate-keep-test"),
         "壊さない。0 まで縮めてそのままにする",
+    ),
+    (
+        "fs-create-keep-test",
+        cfg!(feature = "fs-create-keep-test"),
+        "壊さない。作ったファイルを消さずに残す",
+    ),
+    (
+        "ext2-create-skip-inode-bit-test",
+        cfg!(feature = "ext2-create-skip-inode-bit-test"),
+        "inode を配ってもビットマップの印を立てない",
+    ),
+    (
+        "ext2-create-skip-links-test",
+        cfg!(feature = "ext2-create-skip-links-test"),
+        "作った inode の i_links_count を 0 のままにする",
+    ),
+    (
+        "ext2-create-keep-prev-rec-len-test",
+        cfg!(feature = "ext2-create-keep-prev-rec-len-test"),
+        "前のエントリの rec_len を縮めず、隙間を重ねる",
+    ),
+    (
+        "ext2-create-skip-inode-count-test",
+        cfg!(feature = "ext2-create-skip-inode-count-test"),
+        "inode を配っても空き数を直さない",
+    ),
+    (
+        "ext2-create-move-dirs-count-test",
+        cfg!(feature = "ext2-create-move-dirs-count-test"),
+        "ファイルを作っても bg_used_dirs_count を動かす",
+    ),
+    (
+        "ext2-unlink-mark-unused-test",
+        cfg!(feature = "ext2-unlink-mark-unused-test"),
+        "消した枠を前のエントリへ吸わせず、inode = 0 で残す",
     ),
     (
         "ext2-truncate-off-by-one-test",
