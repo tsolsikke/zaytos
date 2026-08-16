@@ -714,7 +714,7 @@ M5-fの子番号を持つが、ADR-0022でM5本体から切り出した独立マ
 
   1. **ext2の起動時検証を`Result`へ切り出す**（`halt_forever`が**12の関数に49箇所**。内訳は`copy_fs_image_to_frames` 5／`exercise_block_bitmap` 4／`exercise_file_append` 3／`exercise_truncate` 4／`exercise_create_and_unlink` 6／`verify_embedded_fs_image` 3／`verify_path_lookup` 4／`verify_root_inode` 3／`verify_root_directory_walk` 3／`verify_single_indirect_boundary` 6／`verify_corrupt_fs_image_is_rejected` 5／`verify_fs_content_mismatch_is_noticed` 3。**一度25と書いたのは誤りである**——**関数の一覧を手で並べて数えたので、この行が名指ししている`verify_root_inode`など3つを取りこぼしていた。****手で並べた一覧を数の出所にしないこと**）
   2. **ext2の書く側の、同じ算術を切り出す**（バイト位置8箇所・ビットマップ4箇所ずつ・`i_block`のスロット5箇所）
-  3. **欄の位置に名前を付ける**（群descriptor 10箇所・superblock 8箇所）
+  3. **欄の位置に名前を付ける**（**群descriptor 14箇所**——内訳は`+12`が4・`+14`が6・`+16`が4、**superblock 10箇所**——`+12`が4・`+16`が6）。**着手時に10と8と書いたのは行数だった**——**1行に2つ出るものがある**（`image[descriptor + 12..descriptor + 14]`）。**数えるのは出現数である。****2通りの方法で数えて一致を見た**
 
   **(2)を先にやる理由**——**算術を切り出すと、`+12`のような欄の位置がその中へ吸われる。****先に(3)をやると、(2)で消える箇所にも名前を付けることになる。**
   **したがって(3)の件数は(2)の後に測り直す。** **上の数は着手時に測ったもので、一覧は着手時に閉じるものだから書き換えない**——**(3)に着手するときに残っている箇所を実測し直し、着手時の数との差を報告する。差が出るのが正常である。**
