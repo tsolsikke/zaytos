@@ -6377,38 +6377,149 @@ fn mask_code_spans(line: &str) -> Vec<char> {
     out
 }
 
-/// コミットメッセージに和文と英数字の間の半角空白が無いことを見る。
+/// 本文の行数の規則を書いたコミット（`CLAUDE.md` 13.4）。
 ///
-/// 検出するのは「かな・カタカナ・漢字」と「英数字・括弧」が半角空白 1 個を
-/// 挟んで隣り合う形だけである。英単語どうしの空白や、コード片の内部は
-/// 対象にしない。
-fn check_commit_message_style(workspace_root: &Path) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .current_dir(workspace_root)
-        .args([
-            "log",
-            "--format=%h%x1f%s%x1e",
-            &format!("--since={COMMIT_STYLE_SINCE}"),
-            "HEAD",
-        ])
-        .output()
-        .context("failed to read commit subjects")?;
-    if !output.status.success() {
-        bail!("git log failed while reading commit subjects");
-    }
-    let text = String::from_utf8(output.stdout).context("git log produced non-UTF-8")?;
+/// # なぜハッシュで書くのか
+///
+/// **規則ごとに当てる範囲が違うからである。** **接頭辞と 2 行目の空行は
+/// 履歴全体が既に満たしているが**（実測）、**本文の行数（2 行から 5 行）は
+/// 遡って当てると落ちる**——**運用を変える前は 20 行を超える本文が普通だった**
+/// （実測で最長 77 行）。**したがって、この地点より後にだけ当てる。**
+///
+/// # この値は動かない
+///
+/// **`CLAUDE.md` 13.5 が過去のコミットの書き換えを禁じている**ので、
+/// **ハッシュは後から変わらない。** 日付で書く手もあるが、
+/// **「規則を書いたのはどれか」を指すほうが、なぜその地点なのかが読める。**
+const COMMIT_BODY_RULE_COMMIT: &str = "69d2a9e";
 
+/// 件名の接頭辞として許すもの（`CLAUDE.md` 13.4）。
+///
+/// **履歴の 576 件すべてがこの 7 つのいずれかである**（実測）。
+/// **したがって履歴全体へ当てられる。**
+const COMMIT_SUBJECT_PREFIXES: &[&str] =
+    &["feat", "fix", "docs", "refactor", "test", "style", "chore"];
+
+/// 1 つのコミットメッセージを見る。**純粋関数である。**
+///
+/// # なぜ切り出すのか
+///
+/// **`git` を動かさずに試験できるようにするためである。** **実際のコミットを
+/// 作って確かめる形は後始末に `git reset --hard` が要り、未コミットの変更を
+/// 巻き込む**——**この段で実際に踏んで、書きかけの実装を消した。**
+///
+/// # 範囲の判定は呼び出し側が持つ
+///
+/// **規則ごとに当てる範囲が違う**ので、**ここへは「当てるかどうか」だけを渡す。**
+fn commit_message_findings(
+    short: &str,
+    message: &str,
+    body_rule: bool,
+    gap_rule: bool,
+) -> Vec<String> {
+    let lines: Vec<&str> = message.trim_end_matches('\n').split('\n').collect();
+    let subject = lines.first().copied().unwrap_or("");
     let mut findings = Vec::new();
-    for record in text.split('\u{1e}') {
-        let record = record.trim_start_matches('\n');
-        let Some((hash, subject)) = record.split_once('\u{1f}') else {
-            continue;
-        };
-        if japanese_ascii_gap(subject) {
-            findings.push(format!("{hash}: {subject}"));
+
+    let prefix = subject.split_once(':').map(|(p, _)| p);
+    if !prefix.is_some_and(|p| COMMIT_SUBJECT_PREFIXES.contains(&p)) {
+        findings.push(format!(
+            "{short}: the subject prefix is not one of {COMMIT_SUBJECT_PREFIXES:?} \
+             (CLAUDE.md 13.4): {subject}"
+        ));
+    }
+
+    if lines.len() > 1 && !lines[1].trim().is_empty() {
+        findings.push(format!(
+            "{short}: the second line must be blank when there is a body \
+             (CLAUDE.md 13.4): {subject}"
+        ));
+    }
+
+    if body_rule {
+        let body = lines
+            .iter()
+            .skip(2)
+            .filter(|line| !line.trim().is_empty())
+            .count();
+        if body != 0 && !COMMIT_BODY_LINES.contains(&body) {
+            findings.push(format!(
+                "{short}: the body is {body} line(s); it must be {} to {} \
+                 (CLAUDE.md 13.4): {subject}",
+                COMMIT_BODY_LINES.start(),
+                COMMIT_BODY_LINES.end()
+            ));
         }
     }
+
+    if gap_rule && japanese_ascii_gap(subject) {
+        findings.push(format!(
+            "{short}: the subject has a space between Japanese and ASCII \
+             (docs/coding-standards.md): {subject}"
+        ));
+    }
+
+    findings
+}
+
+/// コミットメッセージの、機械で判定できる規則を見る（`CLAUDE.md` 13.4）。
+///
+/// # 規則ごとに当てる範囲が違う
+///
+/// **履歴全体**——接頭辞と、本文があるときの 2 行目の空行。**どちらも履歴が
+/// 既に満たしている**（実測）。
+/// **[`COMMIT_BODY_RULE_COMMIT`] より後**——本文の行数。
+/// **[`COMMIT_STYLE_SINCE`] より後**——和文と英数字の間の空白（元からある規則）。
+///
+/// # 判定できないもの
+///
+/// **「件名だけで足りるなら 1 行で終える」は機械では見られない。**
+/// **「足りる」かどうかは中身の判断だからである。**
+/// **1 行のコミットも本文つきのコミットも、どちらも通す。**
+fn check_commit_message_style(workspace_root: &Path) -> Result<Vec<String>> {
+    let all = read_commit_messages(workspace_root, &["HEAD"])?;
+    let hashes = |range: &[&str]| -> Result<std::collections::BTreeSet<String>> {
+        Ok(read_commit_messages(workspace_root, range)?
+            .into_iter()
+            .map(|(hash, _)| hash)
+            .collect())
+    };
+    let after_rule = hashes(&[&format!("{COMMIT_BODY_RULE_COMMIT}..HEAD")])?;
+    let after_cutoff = hashes(&[&format!("--since={COMMIT_STYLE_SINCE}"), "HEAD"])?;
+
+    let mut findings = Vec::new();
+    for (hash, message) in &all {
+        findings.extend(commit_message_findings(
+            &hash[..7.min(hash.len())],
+            message,
+            after_rule.contains(hash),
+            after_cutoff.contains(hash),
+        ));
+    }
     Ok(findings)
+}
+
+/// `git log` からハッシュと本文の対を読む。
+fn read_commit_messages(workspace_root: &Path, range: &[&str]) -> Result<Vec<(String, String)>> {
+    let mut args: Vec<&str> = std::vec!["log", "--format=%H%x1f%B%x1e"];
+    args.extend_from_slice(range);
+    let output = Command::new("git")
+        .current_dir(workspace_root)
+        .args(&args)
+        .output()
+        .context("failed to read commit messages")?;
+    if !output.status.success() {
+        bail!("git log failed while reading commit messages");
+    }
+    let text = String::from_utf8(output.stdout).context("git log produced non-UTF-8")?;
+    let mut out = Vec::new();
+    for record in text.split('\u{1e}') {
+        let record = record.trim_start_matches('\n');
+        if let Some((hash, message)) = record.split_once('\u{1f}') {
+            out.push((hash.to_string(), message.to_string()));
+        }
+    }
+    Ok(out)
 }
 
 fn japanese_ascii_gap(text: &str) -> bool {
@@ -6526,6 +6637,9 @@ const ACPI_TESTS: &[CriticalTest] = &[
         min_heartbeats: None,
     },
 ];
+
+/// 本文の行数の下限と上限（`CLAUDE.md` 13.4）。**空行は数えない。**
+const COMMIT_BODY_LINES: core::ops::RangeInclusive<usize> = 2..=5;
 
 /// `-smp 2` での ACPI 列挙の確認（S1-b-2）。
 ///
@@ -8300,7 +8414,10 @@ fn cmd_check(full: bool) -> Result<()> {
     }
 
     total += 1;
-    println!("=== xtask check: commit message style (since {COMMIT_STYLE_SINCE})");
+    println!(
+        "=== xtask check: commit message style (prefixes and blank line over all history; \
+         body length after {COMMIT_BODY_RULE_COMMIT}; Japanese/ASCII gap since {COMMIT_STYLE_SINCE})"
+    );
     let offenders = check_commit_message_style(&workspace_root)?;
     if offenders.is_empty() {
         println!("--- commit style: OK");
@@ -9357,6 +9474,64 @@ mod tests {
             .position(|a| a == "-d")
             .expect("-d flag missing");
         assert_eq!(joined[d_pos + 1], "int,cpu_reset");
+    }
+
+    /// 規則ごとに、違反する形が捕まることを見る（`CLAUDE.md` 13.4）。
+    ///
+    /// **`git` を動かさない。** 実際のコミットで確かめる形は後始末に
+    /// `git reset --hard` が要り、**未コミットの変更を巻き込む**
+    /// （この検査を書いている最中に実際に踏んだ）。
+    #[test]
+    fn the_commit_message_rules_catch_each_shape() {
+        let both = |m: &str| commit_message_findings("0000000", m, true, true);
+
+        // 接頭辞が集合の外。
+        assert_eq!(both("wip: 集合の外").len(), 1);
+        assert!(both("wip: 集合の外")[0].contains("prefix"));
+        // 接頭辞そのものが無い。
+        assert_eq!(both("接頭辞が無い").len(), 1);
+
+        // 本文があるのに 2 行目が空でない。
+        let joined = both("docs: 件名\n本文をすぐ書く");
+        assert_eq!(joined.len(), 1, "{joined:?}");
+        assert!(joined[0].contains("second line"));
+
+        // 本文が 1 行、および 6 行。
+        assert!(both("docs: 件名\n\n一行だけ。")[0].contains("1 line(s)"));
+        let six = "docs: 件名\n\n1。\n2。\n3。\n4。\n5。\n6。";
+        assert!(both(six)[0].contains("6 line(s)"));
+
+        // 和文と英数字の間の空白。
+        let gap = both("docs: halt_forever の数");
+        assert_eq!(gap.len(), 1, "{gap:?}");
+        assert!(gap[0].contains("Japanese and ASCII"));
+    }
+
+    /// **落ちてはならない側も見る。** 通るべき形で findings が出ないこと。
+    #[test]
+    fn the_commit_message_rules_pass_the_shapes_that_are_allowed() {
+        let both = |m: &str| commit_message_findings("0000000", m, true, true);
+
+        // 件名だけ。**「1 行で足りるなら 1 行」は機械では見ないので、通す。**
+        assert!(both("docs: 件名だけのコミット").is_empty());
+        // 本文が 2 行から 5 行。
+        assert!(both("docs: 件名\n\n1。\n2。").is_empty());
+        assert!(both("feat: 件名\n\n1。\n2。\n3。\n4。\n5。").is_empty());
+        // 末尾の改行が余分にあっても数に入らない。
+        assert!(both("fix: 件名\n\n1。\n2。\n\n").is_empty());
+        // 7 つの接頭辞すべて。
+        for prefix in COMMIT_SUBJECT_PREFIXES {
+            assert!(both(&format!("{prefix}: 件名")).is_empty(), "{prefix}");
+        }
+    }
+
+    /// **範囲の旗が効くこと。** 当てない規則は、違反していても出ない。
+    #[test]
+    fn the_range_flags_turn_the_rules_off() {
+        let long = "docs: 件名\n\n1。\n2。\n3。\n4。\n5。\n6。";
+        assert!(commit_message_findings("0000000", long, false, true).is_empty());
+        let gap = "docs: halt_forever の数";
+        assert!(commit_message_findings("0000000", gap, true, false).is_empty());
     }
 
     #[test]
