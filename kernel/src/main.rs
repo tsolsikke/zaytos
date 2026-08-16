@@ -4210,6 +4210,9 @@ fn exercise_block_bitmap(logger: &mut Logger<SerialPort>, image: &'static mut [u
         return;
     }
 
+    #[cfg(not(feature = "fs-alloc-keep-test"))]
+    exercise_file_append(logger, image, &layout);
+
     // **解放する。** 破壊は `common::ext2::free_block` の中に置いてある——
     // **動作のある場所に置かないと、破壊にならない**（実測で踏んだ。
     // ここで正しく呼んでいたので、feature を立てても何も変わらなかった）。
@@ -4221,6 +4224,106 @@ fn exercise_block_bitmap(logger: &mut Logger<SerialPort>, image: &'static mut [u
         }
         logger.info(format_args!(
             "fs-bitmap: freed block {block}; the image should be back to what was built"
+        ));
+    }
+}
+
+/// `/data/writable` へ 2 回追記し、既定では元へ戻す（S12-c）。
+///
+/// # 2 回に分ける理由
+///
+/// **1 回目は末尾のブロックの空きを埋めるだけで、割り当てが起きない。**
+/// **2 回目で境界を越えて割り当てが起きる。**
+/// **`/data/writable` の初期の大きさ（100 バイト）は、その 2 つの道を
+/// 1 本のファイルで通すために選んである**（`kernel/build.rs`）。
+///
+/// **1 回目の道に観測する者を置いてある**——**全体で空き数が 1 つだけ減ること**を
+/// ホスト側が外の道具から見る。**2 つ減っていれば、1 回目でも割り当てている。**
+///
+/// # 既定では戻す
+///
+/// **書いて、消して、元へ戻す。** 戻すので、**取り出した像は建てた像と
+/// バイト単位で一致するはずである。**
+/// **`fs-write-keep-test` は戻さない**（変種。壊さない）——
+/// **書いたままの像で `e2fsck` と中身を見るために要る。**
+fn exercise_file_append(
+    logger: &mut Logger<SerialPort>,
+    image: &mut [u8],
+    layout: &common::ext2::Layout,
+) {
+    use common::ext2::Ext2;
+
+    const TARGET: &[u8] = b"/data/writable";
+    // **1 回目は末尾の空きに収まる量、2 回目は境界を越える量。**
+    const FIRST: usize = 200;
+    const SECOND: usize = 4000;
+
+    let (ino, original_size) = match Ext2::parse(image).and_then(|fs| {
+        fs.lookup(TARGET)
+            .map(|inode| (inode.number, inode.size as u32))
+    }) {
+        Ok(pair) => pair,
+        Err(e) => {
+            logger.error(format_args!(
+                "fs-write: could not find {}: {e:?}; halting",
+                core::str::from_utf8(TARGET).unwrap_or("?")
+            ));
+            cpu::halt_forever();
+        }
+    };
+
+    // **初めの大きさが build.rs の置いたものと一致すること。**
+    // **食い違えば、抱えた像と建てた像が別物である**（`IMAGE_BYTES` と同じ作法）。
+    if u64::from(original_size) != fsimage_info::WRITABLE_SEED_BYTES {
+        logger.error(format_args!(
+            "fs-write: {} is {original_size} byte(s) but build.rs seeded {}; halting",
+            core::str::from_utf8(TARGET).unwrap_or("?"),
+            fsimage_info::WRITABLE_SEED_BYTES
+        ));
+        cpu::halt_forever();
+    }
+
+    // **書く中身は位置から決まる形にする。** 定数の並びだと、
+    // **書けていない箇所と元から同じ箇所が見分けにくい。**
+    let mut buffer = [0u8; FIRST + SECOND];
+    for (index, slot) in buffer.iter_mut().enumerate() {
+        *slot = (index % 251) as u8;
+    }
+
+    for (round, len) in [(1usize, FIRST), (2usize, SECOND)] {
+        let at = if round == 1 { 0 } else { FIRST };
+        if let Err(e) = common::ext2::append_to_file(image, layout, ino, &buffer[at..at + len]) {
+            logger.error(format_args!(
+                "fs-write: append {round} failed: {e:?}; halting"
+            ));
+            cpu::halt_forever();
+        }
+        let free = Ext2::parse(image)
+            .map(|fs| fs.free_blocks_count())
+            .unwrap_or(0);
+        logger.info(format_args!(
+            "fs-write: append {round} wrote {len} byte(s) to inode {ino}; free blocks are now \
+             {free}"
+        ));
+    }
+
+    // 変種 (S12-c, fs-write-keep): 戻さない。**書いたままの像を取り出す。**
+    #[cfg(feature = "fs-write-keep-test")]
+    {
+        let _ = original_size;
+        logger.info(format_args!(
+            "fs-write: keeping the appended bytes (fs-write-keep-test)"
+        ));
+    }
+
+    #[cfg(not(feature = "fs-write-keep-test"))]
+    {
+        if let Err(e) = common::ext2::truncate_to(image, layout, ino, original_size) {
+            logger.error(format_args!("fs-write: truncate failed: {e:?}; halting"));
+            cpu::halt_forever();
+        }
+        logger.info(format_args!(
+            "fs-write: truncated inode {ino} back to {original_size} byte(s)"
         ));
     }
 }
@@ -4368,7 +4471,7 @@ const FS_ROOT_INODE_AT: usize = fs_inode_at(2);
 /// `/etc/motd` の inode（判定行に出ている）の像内オフセット。
 ///
 /// **S11-5 で 18 から 19 へ、S11-9 で 19 から 21 へ、S11-11 で 21 から 22 へ、
-/// S12 前の手当ての C で 22 から 23 へ動いた。** 像へ `/bin/spawn-test`、
+/// S12 前の手当ての C で 22 から 23 へ、S12-c で 23 から 24 へ動いた。** 像へ `/bin/spawn-test`、
 /// 続いて `/bin/ls` と `/bin/cat`、そして `/bin/spin` を足したので、**後ろの
 /// inode 番号がそのぶんずれた**（`docs/coding-standards.md` の
 /// 「実測値は、測った条件が変わると古くなる」）。**そのつど測り直している。**
@@ -4376,7 +4479,7 @@ const FS_ROOT_INODE_AT: usize = fs_inode_at(2);
 /// **doc の見出しから番号を落とした。** かつて「21 番」と書いてあったが、
 /// **本体が 22 になっても直されていなかった**——**同じ数を 2 か所に書くと、
 /// 片方だけが古くなる。** 番号は下の式が持つ。
-const FS_MOTD_INODE_AT: usize = fs_inode_at(23);
+const FS_MOTD_INODE_AT: usize = fs_inode_at(24);
 
 /// ルートディレクトリのデータブロック（実測。判定行の `i_block[0]` に出ている）。
 const FS_ROOT_DIR_BLOCK: usize = 20 * FS_BLOCK_SIZE;
@@ -4396,6 +4499,9 @@ const FS_ROOT_ETC_ENTRY: usize = FS_ROOT_DIR_BLOCK + 68;
 /// **像に載るのは本数だけでなく、1 本あたりの大きさでもある。**
 ///
 /// **6 度目は S12 前の手当ての C で、72 から 75 へ動いた**（`/bin/spin` を足した）。
+/// **S12-c で `/data/writable` を足したが、ここは動かなかった**——
+/// **足したファイルが `/data` の中で名前順に後ろへ来たためである。**
+/// **動かないこともあると分かったので、そのつど測ること**（推測しない）。
 /// **今回は `debugfs` で測った**——判定行にも出ているが、
 /// **像を読む側と壊す側が同じ数を別々に持つので、外の道具で突き合わせた。**
 const FS_INDIRECT_TABLE_BLOCK: usize = 75 * FS_BLOCK_SIZE;
@@ -4403,9 +4509,9 @@ const FS_INDIRECT_TABLE_BLOCK: usize = 75 * FS_BLOCK_SIZE;
 /// `/etc/motd` のデータブロック（実測）。
 ///
 /// **S11-5 で 58 から 61 へ、S11-9 で 61 から 69 へ、S11-10 で 70 へ、S11-11 で 74 へ、
-/// S12 前の手当ての 3 本目で 75 へ、同じ手当ての C で 78 へ動いた**
+/// S12 前の手当ての 3 本目で 75 へ、同じ手当ての C で 78 へ、S12-c で 79 へ動いた**
 /// （[`FS_MOTD_INODE_AT`] と同じ理由）。
-const FS_MOTD_DATA_BLOCK: usize = 78 * FS_BLOCK_SIZE;
+const FS_MOTD_DATA_BLOCK: usize = 79 * FS_BLOCK_SIZE;
 
 /// 種のファイルと同じ木にある `/etc/motd` の中身（S10-a）。
 ///
@@ -7647,6 +7753,41 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "ext2-group-count-offset-test",
         cfg!(feature = "ext2-group-count-offset-test"),
         "空きブロック数の欄を 2 バイトずらして読む",
+    ),
+    (
+        "fs-write-keep-test",
+        cfg!(feature = "fs-write-keep-test"),
+        "壊さない。追記した中身を戻さずに残す",
+    ),
+    (
+        "ext2-append-skip-size-test",
+        cfg!(feature = "ext2-append-skip-size-test"),
+        "追記で i_size を直さない",
+    ),
+    (
+        "ext2-append-round-size-test",
+        cfg!(feature = "ext2-append-round-size-test"),
+        "追記で i_size をブロック境界へ丸める",
+    ),
+    (
+        "ext2-append-skip-blocks-test",
+        cfg!(feature = "ext2-append-skip-blocks-test"),
+        "追記で i_blocks を直さない",
+    ),
+    (
+        "ext2-append-blocks-in-bytes-test",
+        cfg!(feature = "ext2-append-blocks-in-bytes-test"),
+        "追記で i_blocks をバイト単位で書く",
+    ),
+    (
+        "ext2-append-skip-link-test",
+        cfg!(feature = "ext2-append-skip-link-test"),
+        "追記で取ったブロックを inode へ繋がない",
+    ),
+    (
+        "ext2-append-always-allocate-test",
+        cfg!(feature = "ext2-append-always-allocate-test"),
+        "追記で末尾の空きを見ずに常に割り当てる",
     ),
     (
         "fs-alloc-keep-test",

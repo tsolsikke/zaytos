@@ -241,6 +241,8 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     /// **中身は 59 ブロックしか使っていない**（`e2fsck` の実測。512 ブロック中）。
     /// **像を大きくしても中身は増えない。**
     const IMAGE_BYTES: u64 = 2 * 1024 * 1024;
+    /// `/data/writable` の初期の大きさ（S12-c）。**ブロック境界にしない。**
+    const WRITABLE_SEED_BYTES: usize = 100;
     /// 直接ブロックだけで収まる最大の大きさ（12 ブロック × 4096）。
     const DIRECT_MAX_BYTES: usize = 12 * 4096;
 
@@ -283,6 +285,20 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     .expect("failed to write direct-max");
     std::fs::write(format!("{staging}/data/indirect-first"), &pattern[..])
         .expect("failed to write indirect-first");
+
+    // **書き込みの的（S12-c）。** カーネルが追記する唯一のファイルである。
+    //
+    // **大きさをブロック境界にしない。** 100 バイトなら末尾のブロックに
+    // 3996 バイト空いているので、**1 回目の追記は割り当てを起こさない**
+    // （末尾の空きを埋めるだけ）。**2 回目で境界を越えて割り当てが起きる。**
+    // **その 2 つの道を 1 本のファイルで通せる大きさを選んだ。**
+    //
+    // **既存の的へ書かない理由は 2 つ。** `/etc/motd` は `cat` の判定が
+    // 中身を見ており、書くと落ちる。そして**短くて 1 ブロックの端にあるので、
+    // 境界の場合分けが作りにくい。**
+    let writable: Vec<u8> = (0..WRITABLE_SEED_BYTES).map(|i| (i % 251) as u8).collect();
+    std::fs::write(format!("{staging}/data/writable"), &writable[..])
+        .expect("failed to write the writable target");
 
     // 像の器を作る（ゼロ埋め）。
     let image = format!("{out_dir}/fs.img");
@@ -337,7 +353,8 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
              pub const DIRECT_MAX_BYTES: u64 = {DIRECT_MAX_BYTES};\n\
              pub const DIRECT_MAX_LAST_BYTE: u8 = {direct_max_last};\n\
              pub const INDIRECT_FIRST_BYTES: u64 = {};\n\
-             pub const INDIRECT_FIRST_LAST_BYTE: u8 = {indirect_first_last};\n",
+             pub const INDIRECT_FIRST_LAST_BYTE: u8 = {indirect_first_last};\n\
+             pub const WRITABLE_SEED_BYTES: u64 = {WRITABLE_SEED_BYTES};\n",
             DIRECT_MAX_BYTES + 1
         ),
     )

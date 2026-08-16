@@ -659,6 +659,9 @@ impl<'a> Ext2<'a> {
             first_data_block: self.first_data_block,
             blocks_per_group: self.blocks_per_group,
             group_count: self.group_count,
+            inodes_per_group: self.inodes_per_group,
+            inode_size: self.inode_size,
+            inodes_count: self.inodes_count,
         }
     }
 
@@ -1027,6 +1030,10 @@ pub struct Layout {
     first_data_block: u32,
     blocks_per_group: u32,
     group_count: u32,
+    /// inode テーブルの位置を引くのに要る（S12-c）。
+    inodes_per_group: u32,
+    inode_size: u16,
+    inodes_count: u32,
 }
 
 /// ビットマップの操作で起きうる誤り（S12-b）。
@@ -1054,6 +1061,37 @@ impl Layout {
         }
         let index = block.checked_sub(self.first_data_block)?;
         Some((index / self.blocks_per_group, index % self.blocks_per_group))
+    }
+
+    /// inode の像内オフセット（S12-c）。**`Ext2::inode` と同じ算術である。**
+    ///
+    /// **テーブルの位置は群の descriptor にあるので、像を読む。**
+    fn inode_at(&self, image: &[u8], ino: u32) -> Option<usize> {
+        if ino == 0 || ino > self.inodes_count {
+            return None;
+        }
+        let group = (ino - 1) / self.inodes_per_group;
+        let index = (ino - 1) % self.inodes_per_group;
+        let descriptor = self.descriptor_at(group)?;
+        if descriptor + GROUP_DESCRIPTOR_SIZE > image.len() {
+            return None;
+        }
+        let table = read_u32(image, descriptor + 8);
+        let offset = u64::from(table) * u64::from(self.block_size)
+            + u64::from(index) * u64::from(self.inode_size);
+        let offset = usize::try_from(offset).ok()?;
+        if offset + usize::from(self.inode_size) > image.len() {
+            return None;
+        }
+        Some(offset)
+    }
+
+    /// 1 ブロックあたりの 512 バイト単位の数（`i_blocks` の単位。S12-c）。
+    ///
+    /// **`i_blocks` はバイトでもブロックでもなく、512 バイト単位である。**
+    /// **既存の族に単位の取り違えがある**（`stat-blocks-in-bytes`）。
+    fn sectors_per_block(&self) -> u32 {
+        self.block_size / 512
     }
 
     /// 群の descriptor の像内オフセット。
@@ -1174,6 +1212,172 @@ pub fn free_block(image: &mut [u8], layout: &Layout, block: u32) -> Result<(), A
     Ok(())
 }
 
+/// ファイルの末尾へ書き足す（S12-c）。**追記だけである。**
+///
+/// # 上書きは扱わない
+///
+/// **既にある位置への上書きは会計を動かさない**（ブロックも `i_size` も変わらない）。
+/// **S12-c が主張したいのは「割り当てたブロックが inode から参照され、会計が
+/// 締まっていること」**なので、**上書きはその主張に何も足さない。**
+///
+/// # 末尾のブロックの空きを先に使う
+///
+/// **`i_size` がブロック境界にないなら、末尾のブロックに空きがある。**
+/// **そこを埋めてから次を割り当てる。** **見ずに割り当てると、
+/// 使わないブロックを取ることになる**（`e2fsck` は文句を言わないが、
+/// 空き数が余計に減る）。
+///
+/// # 直すのは 3 つである
+///
+/// 中身、`i_size`、`i_blocks`。**`i_blocks` は 512 バイト単位である。**
+/// **`i_size` を直さないと `e2fsck` が `i_size is …` と言い、
+/// `i_blocks` を直さないと `i_blocks is …` と言う**（実測。文言が違う）。
+///
+/// # 直接ブロックだけを使う
+///
+/// **12 個を超えたら断る。** 単一間接は「ブロックを 1 つ余分に取って表を書く」形で、
+/// **割り当ての回数と会計の締め方が変わる。** 混ぜると切り分けが利かない。
+pub fn append_to_file(
+    image: &mut [u8],
+    layout: &Layout,
+    ino: u32,
+    data: &[u8],
+) -> Result<(), AllocError> {
+    let inode = layout
+        .inode_at(image, ino)
+        .ok_or(AllocError::BlockOutOfRange(ino))?;
+    let size = read_u32(image, inode + 4);
+    let block_size = layout.block_size;
+
+    let mut written = 0usize;
+    let mut size = size;
+    while written < data.len() {
+        let offset_in_block = size % block_size;
+        let index = size / block_size;
+        if index >= DIRECT_BLOCK_COUNT as u32 {
+            return Err(AllocError::Full);
+        }
+
+        // 破壊 (S12-c, ext2-append-always-allocate): 末尾の空きを見ずに、
+        // **毎回割り当てる。** **空き数が余計に減る**ので、外の道具が捕まえる。
+        #[cfg(not(feature = "ext2-append-always-allocate-break"))]
+        let needs_block = offset_in_block == 0;
+        #[cfg(feature = "ext2-append-always-allocate-break")]
+        let needs_block = true;
+
+        let block = if needs_block {
+            let block = allocate_block(image, layout)?;
+            // 破壊 (S12-c, ext2-append-skip-link): 取ったブロックを inode へ繋がない。
+            // **割り当てたのに誰も参照しないので、`Block bitmap differences` が出る。**
+            #[cfg(not(feature = "ext2-append-skip-link"))]
+            image[inode + 40 + index as usize * 4..inode + 44 + index as usize * 4]
+                .copy_from_slice(&block.to_le_bytes());
+            block
+        } else {
+            read_u32(image, inode + 40 + index as usize * 4)
+        };
+
+        let room = (block_size - offset_in_block) as usize;
+        let take = room.min(data.len() - written);
+        let at = usize::try_from(u64::from(block) * u64::from(block_size))
+            .map_err(|_| AllocError::ImageTooSmall)?
+            + offset_in_block as usize;
+        if at + take > image.len() {
+            return Err(AllocError::ImageTooSmall);
+        }
+        image[at..at + take].copy_from_slice(&data[written..written + take]);
+        written += take;
+        size += take as u32;
+    }
+
+    // 破壊 (S12-c, ext2-append-skip-size): `i_size` を直さない。
+    // **`e2fsck` が `i_size is …` と言い、取り出した中身も短くなる。**
+    #[cfg(not(feature = "ext2-append-skip-size"))]
+    // 破壊 (S12-c, ext2-append-round-size): ブロック境界へ丸めた値を書く。
+    // **`e2fsck` が期待する値そのものなので通り抜ける。** 中身の長さだけが違う。
+    {
+        #[cfg(not(feature = "ext2-append-round-size"))]
+        let stored = size;
+        #[cfg(feature = "ext2-append-round-size")]
+        let stored = size.div_ceil(block_size) * block_size;
+        image[inode + 4..inode + 8].copy_from_slice(&stored.to_le_bytes());
+    }
+
+    // `i_blocks` は 512 バイト単位で、使っているブロック数から導く。
+    let used = size.div_ceil(block_size);
+    // 破壊 (S12-c, ext2-append-blocks-in-bytes): バイト単位で書く。
+    // **単位の取り違えで、既存の族と同じ機序である**（`stat-blocks-in-bytes`）。
+    #[cfg(not(feature = "ext2-append-blocks-in-bytes"))]
+    let sectors = used * layout.sectors_per_block();
+    #[cfg(feature = "ext2-append-blocks-in-bytes")]
+    let sectors = used * block_size;
+    // 破壊 (S12-c, ext2-append-skip-blocks): `i_blocks` を直さない。
+    #[cfg(not(feature = "ext2-append-skip-blocks"))]
+    image[inode + 28..inode + 32].copy_from_slice(&sectors.to_le_bytes());
+
+    Ok(())
+}
+
+/// 追記を巻き戻して、元の大きさへ戻す（S12-c）。
+///
+/// **truncate の一般形ではない。** **戻す先が「書く前の値」という既知の 1 点だけ**で、
+/// **任意の長さへ縮める形は後段である。**
+///
+/// **書いた中身も 0 で埋め直す**——**ブロックを返すだけでは、
+/// 次に同じブロックを取った者が前の中身を見る。**
+pub fn truncate_to(
+    image: &mut [u8],
+    layout: &Layout,
+    ino: u32,
+    target: u32,
+) -> Result<(), AllocError> {
+    let inode = layout
+        .inode_at(image, ino)
+        .ok_or(AllocError::BlockOutOfRange(ino))?;
+    let size = read_u32(image, inode + 4);
+    let block_size = layout.block_size;
+    if target > size {
+        return Err(AllocError::NotAllocated(ino));
+    }
+
+    let keep = target.div_ceil(block_size);
+    let have = size.div_ceil(block_size);
+    for index in (keep..have).rev() {
+        let slot = inode + 40 + index as usize * 4;
+        let block = read_u32(image, slot);
+        if block == 0 {
+            continue;
+        }
+        let at = usize::try_from(u64::from(block) * u64::from(block_size))
+            .map_err(|_| AllocError::ImageTooSmall)?;
+        if at + block_size as usize <= image.len() {
+            image[at..at + block_size as usize].fill(0);
+        }
+        image[slot..slot + 4].copy_from_slice(&0u32.to_le_bytes());
+        free_block(image, layout, block)?;
+    }
+
+    // **末尾のブロックの、残す長さより後ろも 0 へ戻す。**
+    if keep > 0 {
+        let last = read_u32(image, inode + 40 + (keep - 1) as usize * 4);
+        let tail = target % block_size;
+        if last != 0 && tail != 0 {
+            let at = usize::try_from(u64::from(last) * u64::from(block_size))
+                .map_err(|_| AllocError::ImageTooSmall)?
+                + tail as usize;
+            let end = at + (block_size - tail) as usize;
+            if end <= image.len() {
+                image[at..end].fill(0);
+            }
+        }
+    }
+
+    image[inode + 4..inode + 8].copy_from_slice(&target.to_le_bytes());
+    let sectors = keep * layout.sectors_per_block();
+    image[inode + 28..inode + 32].copy_from_slice(&sectors.to_le_bytes());
+    Ok(())
+}
+
 fn read_u16(data: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap())
 }
@@ -1201,6 +1405,20 @@ mod tests {
         image[table..table + 4].copy_from_slice(&2u32.to_le_bytes());
         image[table + 4..table + 8].copy_from_slice(&3u32.to_le_bytes());
         image[table + 8..table + 12].copy_from_slice(&4u32.to_le_bytes());
+        // **使っているブロックにビットを立てる（S12-c）。**
+        //
+        // **立てていなかった。** そのため [`allocate_block`] がブロック 0
+        // （superblock）を返し、**追記がテスト像そのものを壊していた**
+        // （実測。往復のバイト一致が落ちて気づいた）。
+        //
+        // **この像が使うのは 60 番までである**（メタデータ・ルート・
+        // 各ファイルのブロック）。**まとめて立てる**——1 つずつ数えると、
+        // ファイルを足したときに合わなくなる。
+        let bitmap = 2 * 4096;
+        for block in 0..=60u32 {
+            image[bitmap + (block / 8) as usize] |= 1 << (block % 8);
+        }
+
         // 空き数の3欄（S12-b）。**別々の値を書く**——同じ値だと、
         // **欄を取り違えても気づけない。**
         image[table + 12..table + 14].copy_from_slice(&7u16.to_le_bytes());
@@ -1439,6 +1657,87 @@ mod tests {
         assert_eq!(fs.blocks_count(), 512);
         assert_eq!(fs.group_count(), 1);
         assert_eq!(fs.feature_incompat(), INCOMPAT_FILETYPE);
+    }
+
+    /// テスト像の中の、追記できる通常ファイル。
+    /// **1 ブロックに満たないので、末尾に空きがある側である。**
+    const TEST_WRITABLE_INO: u32 = SHORT_FILE_INODE;
+
+    #[test]
+    fn appending_within_the_last_block_does_not_allocate() {
+        let mut image = build_test_image();
+        let layout = Ext2::parse(&image).unwrap().layout();
+        let free_before = Ext2::parse(&image).unwrap().free_blocks_count();
+
+        // **末尾のブロックに空きがあるので、割り当ては起きないはず。**
+        append_to_file(&mut image, &layout, TEST_WRITABLE_INO, &[0xAB; 8]).unwrap();
+
+        assert_eq!(
+            Ext2::parse(&image).unwrap().free_blocks_count(),
+            free_before,
+            "末尾の空きを使うので空き数が動かないこと"
+        );
+    }
+
+    #[test]
+    fn appending_past_the_block_boundary_allocates_a_block_per_boundary() {
+        let mut image = build_test_image();
+        let layout = Ext2::parse(&image).unwrap().layout();
+        let free_before = Ext2::parse(&image).unwrap().free_blocks_count();
+
+        // **末尾のブロックの残りを越える量を足す。**
+        // 元が 1 ブロックに満たないので、足した後は 2 ブロックになる。
+        // **したがって新しく取るのは 1 つである**（末尾の空きを先に使う）。
+        let big = std::vec![0xCDu8; 5000];
+        append_to_file(&mut image, &layout, TEST_WRITABLE_INO, &big).unwrap();
+
+        let after = Ext2::parse(&image).unwrap().free_blocks_count();
+        assert_eq!(after + 1, free_before, "境界を越えた分だけ取ること");
+
+        // **書いた中身が読み戻せること。**
+        //
+        // **空き数の差だけでは足りない。** あれは会計の主張で、
+        // **`allocating_moves_both_free_counts_by_one` が既に言っている。**
+        // **ここが言うべきなのは「取ったブロックが inode から参照され、
+        // 書いた中身がそこに在る」ことである。**
+        //
+        // **実測でこの穴を踏んだ**——テスト像がビットマップを立てておらず、
+        // **割り当てがブロック 0（superblock）を返して像を潰していたのに、
+        // このテストは通っていた**（空き数は 1 つ減るので）。
+        let fs = Ext2::parse(&image).unwrap();
+        let inode = fs.inode(TEST_WRITABLE_INO).unwrap();
+        let mut read_back = std::vec::Vec::new();
+        let mut left = inode.size as usize;
+        let mut index = 0u32;
+        while left > 0 {
+            let block = fs.file_block(&inode, index).unwrap();
+            let take = left.min(block.len());
+            read_back.extend_from_slice(&block[..take]);
+            left -= take;
+            index += 1;
+        }
+        assert_eq!(
+            &read_back[read_back.len() - big.len()..],
+            &big[..],
+            "追記した中身が、inode の指すブロックから読み戻せること"
+        );
+    }
+
+    #[test]
+    fn appending_then_truncating_restores_the_image_byte_for_byte() {
+        let mut image = build_test_image();
+        let original = image.clone();
+        let layout = Ext2::parse(&image).unwrap().layout();
+        let size_before = {
+            let fs = Ext2::parse(&image).unwrap();
+            fs.inode(TEST_WRITABLE_INO).unwrap().size as u32
+        };
+
+        append_to_file(&mut image, &layout, TEST_WRITABLE_INO, &[0xEF; 5000]).unwrap();
+        assert_ne!(image, original, "追記で像が変わること");
+
+        truncate_to(&mut image, &layout, TEST_WRITABLE_INO, size_before).unwrap();
+        assert_eq!(image, original, "戻したら1バイトも違わないこと");
     }
 
     #[test]

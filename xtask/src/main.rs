@@ -2187,6 +2187,8 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
     // **判定 1（往復のバイト一致）と判定 2（`e2fsck` の不満が 1 本）は、
     // 像の状態が違うので同じ起動では両方言えない。** 構成で分ける。
     let keep_allocated = features.contains(&KEEP_ALLOCATED_FEATURE);
+    // **追記したままの像か（S12-c）。** 判定 A・B・D はこの構成でしか言えない。
+    let keep_written = features.contains(&WRITE_KEEP_FEATURE);
 
     let context = if features.is_empty() {
         "fs-extract".to_string()
@@ -2299,7 +2301,41 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
         std::vec!["the image was not extracted".to_string()]
     };
 
-    let (identical, fsck_ok) = if keep_allocated {
+    let (identical, fsck_ok) = if keep_written {
+        // **追記したままの像（S12-c）。** **中身が inode から参照され、会計が
+        // 締まっているので、`e2fsck` は不満を 1 本も言わないはずである**（実測）。
+        let clean = extracted && complaints.is_empty();
+        println!(
+            "{context}: e2fsck found nothing to complain about = {clean} (complaints: \
+             {complaints:?})"
+        );
+
+        // **判定B——中身と長さの両方が一致すること。**
+        // **「含む」で見ない**——前後に余分が無いことを言う。
+        let expected = expected_writable_content();
+        let actual = debugfs_read_writable(&dump)?;
+        let content_ok = actual == expected;
+        println!(
+            "{context}: the appended bytes read back exactly = {content_ok} (expected {} byte(s), \
+             got {} byte(s))",
+            expected.len(),
+            actual.len()
+        );
+
+        // **判定D——空き数の減りがちょうど 1 つ。**
+        // **追記 1 は末尾の空きを埋めるだけで割り当てを起こさない**ので、
+        // **2 回の追記で減るのは 1 つだけである。** 2 つ減っていれば、
+        // **1 回目でも割り当てている。**
+        let after = dumpe2fs_free_counts(&dump)?;
+        let moved_by_one = after.superblock_blocks + 1 == expected_counts.superblock_blocks;
+        println!(
+            "{context}: the free blocks dropped by exactly one across both appends = \
+             {moved_by_one} (built {}, extracted {})",
+            expected_counts.superblock_blocks, after.superblock_blocks
+        );
+
+        (content_ok && moved_by_one, clean)
+    } else if keep_allocated {
         // **割り当てたままの像。** **`e2fsck` は必ず 1 本だけ不満を言う**——
         // **どの inode も参照していないブロックに使用中の印が立っている**からで、
         // **会計が正しければそれ以外は出ない**（実測）。
@@ -2382,6 +2418,76 @@ const FS_BITMAP_SABOTAGES: &[(&str, &[&str])] = &[
         &["ext2-free-skip-bit-test"],
     ),
 ];
+
+/// 追記の破壊と、それぞれが要る構成（S12-c）。**6 つとも書いたままの像で見る。**
+///
+/// **`round-size` だけは判定 A を通り抜ける**——`e2fsck` が期待する値そのものを
+/// 書くので不満が出ない。**判定 B（中身と長さ）だけが落ちる。**
+/// **判定 B が独立に効いていることの反証である。**
+const FS_WRITE_SABOTAGES: &[(&str, &[&str])] = &[
+    (
+        "a stale i_size",
+        &[WRITE_KEEP_FEATURE, "ext2-append-skip-size-test"],
+    ),
+    (
+        "an i_size rounded up to the block boundary",
+        &[WRITE_KEEP_FEATURE, "ext2-append-round-size-test"],
+    ),
+    (
+        "a stale i_blocks",
+        &[WRITE_KEEP_FEATURE, "ext2-append-skip-blocks-test"],
+    ),
+    (
+        "i_blocks written in bytes",
+        &[WRITE_KEEP_FEATURE, "ext2-append-blocks-in-bytes-test"],
+    ),
+    (
+        "a block that is never linked into the inode",
+        &[WRITE_KEEP_FEATURE, "ext2-append-skip-link-test"],
+    ),
+    (
+        "allocating without using the space in the last block",
+        &[WRITE_KEEP_FEATURE, "ext2-append-always-allocate-test"],
+    ),
+];
+
+/// 追記したままにする構成の feature 名（S12-c）。**破壊ではなく変種である。**
+const WRITE_KEEP_FEATURE: &str = "fs-write-keep-test";
+
+/// `/data/writable` の初期の中身と、カーネルが足す量（S12-c）。
+///
+/// **`build.rs` とカーネルが同じ規則で埋めている**——位置から決まる形にしてある
+/// （定数の並びだと、書けていない箇所と元から同じ箇所が見分けにくい）。
+/// **ここは同じ規則で期待値を組み立てるだけで、値を書き写さない。**
+const WRITABLE_SEED_BYTES: usize = 100;
+const WRITABLE_APPENDED_BYTES: usize = 200 + 4000;
+
+/// 追記した後の `/data/writable` の中身。
+fn expected_writable_content() -> Vec<u8> {
+    let pattern = |len: usize| -> Vec<u8> { (0..len).map(|i| (i % 251) as u8).collect() };
+    let mut expected = pattern(WRITABLE_SEED_BYTES);
+    expected.extend(pattern(WRITABLE_APPENDED_BYTES));
+    expected
+}
+
+/// 取り出した像から `/data/writable` の中身を読む（S12-c）。
+///
+/// **`debugfs` に読ませる**——**自分で書いて自分で読むと、同じ設計の取り違えが
+/// 両側で相殺する。** **`i_size` までを出す**ので、**長さの一致がそのまま
+/// `i_size` の正しさを主張する**（実測で確かめた）。
+fn debugfs_read_writable(image: &Path) -> Result<Vec<u8>> {
+    let output = Command::new("debugfs")
+        .env("LC_ALL", "C")
+        .arg("-R")
+        .arg("cat /data/writable")
+        .arg(image)
+        .output()
+        .context(
+            "failed to invoke debugfs (it ships with e2fsprogs, the same package as e2fsck and \
+             mke2fs, which the kernel build script already requires)",
+        )?;
+    Ok(output.stdout)
+}
 
 /// 割り当てたままにする構成の feature 名（S12-b）。
 ///
@@ -7038,9 +7144,24 @@ const E2FSCK_NOISE: &[&str] = &[
     "Pass 3:",
     "Pass 4:",
     "Pass 5:",
-    "Fix? no",
     "WARNING: Filesystem still has errors",
 ];
+
+/// 不満の行の末尾に付く問い（S12-c）。
+///
+/// # `E2FSCK_NOISE` に入れてはならない
+///
+/// **`Fix? no` は単独の行にも、不満と同じ行の末尾にも出る。**
+/// **`contains` で雑音として落とすと、同じ行に載った不満ごと消える。**
+///
+/// **実測で踏んだ**——`Inode 22, i_size is 100, should be 8192.  Fix? no` が
+/// **まるごと落ち、判定が「不満 0 本」になっていた。** 破壊を有効にしたのに
+/// 判定 A が通り、**判定 B だけが落ちた。**
+/// **落ちる判定が 1 つ減っていたことに、破壊を走らせて初めて気づいた。**
+///
+/// **したがって、落とすのではなく末尾から剥がす。** 剥がした残りが空なら、
+/// その行は問いだけだったということである。
+const E2FSCK_FIX_PROMPT: &str = "Fix? no";
 
 /// `e2fsck` の出力から、不満の行だけを取り出す（S12-b）。
 ///
@@ -7052,7 +7173,12 @@ fn e2fsck_complaints(stdout: &str) -> Vec<String> {
         .filter(|line| !line.is_empty())
         .filter(|line| !E2FSCK_NOISE.iter().any(|noise| line.contains(noise)))
         .filter(|line| !(line.contains(" files (") && line.contains(" blocks")))
-        .map(|line| line.to_string())
+        // **問いを末尾から剥がす。** 落とすと、同じ行に載った不満ごと消える。
+        .map(|line| match line.split_once(E2FSCK_FIX_PROMPT) {
+            Some((before, _)) => before.trim().to_string(),
+            None => line.to_string(),
+        })
+        .filter(|line| !line.is_empty())
         .collect()
 }
 
@@ -7703,6 +7829,29 @@ fn cmd_check(full: bool) -> Result<()> {
             }
         }
 
+        // **追記（S12-c）。** **書いたままの像でしか判定 A・B・D は言えない。**
+        total += 1;
+        println!("=== xtask check: the appended bytes survive a round trip through the image");
+        match cmd_fs_image_extract(&[WRITE_KEEP_FEATURE]) {
+            Ok(()) => println!("--- fs write (kept): OK"),
+            Err(error) => {
+                println!("--- fs write (kept): FAILED ({error})");
+                failed.push("fs write (kept)".to_string());
+            }
+        }
+
+        for (label, features) in FS_WRITE_SABOTAGES {
+            total += 1;
+            println!("=== xtask check: the fs write check catches {label}");
+            match cmd_fs_image_extract(features) {
+                Ok(()) => {
+                    println!("--- fs write ({label}): FAILED (the sabotage was NOT caught)");
+                    failed.push(format!("fs write ({label})"));
+                }
+                Err(_) => println!("--- fs write ({label}): OK (the sabotage was caught)"),
+            }
+        }
+
         for (label, features) in FS_BITMAP_SABOTAGES {
             total += 1;
             println!("=== xtask check: the fs bitmap check catches {label}");
@@ -8205,7 +8354,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 150,
+    full: 157,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

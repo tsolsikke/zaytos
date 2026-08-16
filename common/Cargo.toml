@@ -23,3 +23,10 @@ ext2-alloc-skip-bg-count-break = []
 ext2-alloc-ignore-bitmap-break = []
 # 破壊（S12-b）: 解放でビットを落とさず、会計だけ戻す。
 ext2-free-skip-bit-break = []
+# 破壊（S12-c）: 追記の6種。
+ext2-append-skip-size = []
+ext2-append-round-size = []
+ext2-append-skip-blocks = []
+ext2-append-blocks-in-bytes = []
+ext2-append-skip-link = []
+ext2-append-always-allocate-break = []
