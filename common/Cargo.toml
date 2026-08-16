@@ -44,3 +44,6 @@ ext2-create-keep-prev-rec-len = []
 ext2-create-skip-inode-count = []
 ext2-create-move-dirs-count = []
 ext2-unlink-mark-unused = []
+# 破壊（S12-f-3）: 作った inode が i_extra_isize を名乗らない。e2fsck は 0 を
+# 受理するので通り抜ける（実測）。判定だけが落ちる。
+ext2-create-skip-extra-isize = []

@@ -4528,9 +4528,15 @@ fn exercise_create_and_unlink(
             cpu::halt_forever();
         }
     };
+    // **名乗った `i_extra_isize` も出す（S12-f-3）。**
+    // **0 は「像がその欄を持たない」に倒れたことを意味する**——
+    // **黙って倒れると、書いているつもりで書いていない状態になる。**
+    let extra = Ext2::parse(image)
+        .map(|fs| fs.want_extra_isize())
+        .unwrap_or(0);
     logger.info(format_args!(
         "fs-create: created inode {ino} under inode {dir_ino} and wrote {CONTENT_BYTES} byte(s); \
-         free blocks={blocks} inodes={inodes}"
+         free blocks={blocks} inodes={inodes}, i_extra_isize={extra}"
     ));
 
     // 変種 (S12-e, fs-create-keep): 消さない。**作ったままの像を取り出す。**
@@ -8027,6 +8033,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "ext2-unlink-mark-unused-test",
         cfg!(feature = "ext2-unlink-mark-unused-test"),
         "消した枠を前のエントリへ吸わせず、inode = 0 で残す",
+    ),
+    (
+        "ext2-create-skip-extra-isize-test",
+        cfg!(feature = "ext2-create-skip-extra-isize-test"),
+        "作った inode が i_extra_isize を名乗らない",
     ),
     (
         "ext2-truncate-off-by-one-test",

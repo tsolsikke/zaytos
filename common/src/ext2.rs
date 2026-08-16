@@ -55,6 +55,18 @@ const SUPERBLOCK_OFFSET: usize = 1024;
 /// superblock のうち、この module が読む範囲。
 const SUPERBLOCK_MIN_LEN: usize = 104;
 
+/// `s_want_extra_isize` の superblock 内オフセット（S12-f-3）。
+///
+/// # [`SUPERBLOCK_MIN_LEN`] を伸ばさない
+///
+/// **伸ばすと、受理する像が狭まる**——**いま通っている短い像を拒む方向に働く。**
+/// **f-3 が変えたいのは書く側であって、受理する範囲ではない。**
+/// **そこで、届かなければ 0 として扱う**（[`Ext2::want_extra_isize`]）。
+const SUPERBLOCK_WANT_EXTRA_ISIZE: usize = 350;
+
+/// `i_extra_isize` の inode 内オフセット。**標準部の直後である。**
+const INODE_EXTRA_ISIZE: usize = INODE_CORE_LEN;
+
 /// group descriptor 1 つのバイト数（ext2。ext4 の 64 バイトではない）。
 pub const GROUP_DESCRIPTOR_SIZE: usize = 32;
 
@@ -258,6 +270,8 @@ pub struct Ext2<'a> {
     free_blocks_count: u32,
     /// `s_free_inodes_count`（S12-b）。
     free_inodes_count: u32,
+    /// 新しい inode へ書く `i_extra_isize`（S12-f-3）。**0 は「書かない」である。**
+    want_extra_isize: u16,
 }
 
 /// **`Debug` は手で書く。** `derive` すると像そのもの（2 MiB）が
@@ -568,6 +582,26 @@ impl<'a> Ext2<'a> {
             return Err(Ext2Error::ZeroPerGroup);
         }
 
+        // **新しい inode へ書く `i_extra_isize`（S12-f-3）。**
+        //
+        // **`SUPERBLOCK_MIN_LEN` の外にあるので、届くかを見てから読む。**
+        // **届かない像、値が 0 の像、追加領域が inode に収まらない像では 0 にする**
+        // ——**0 は「追加領域を持たない」という妥当な ext2 である。**
+        // **倒れたことは呼び出し側から見える**（[`Ext2::want_extra_isize`] が 0 を返す）。
+        let want_extra_isize = {
+            let at = SUPERBLOCK_OFFSET + SUPERBLOCK_WANT_EXTRA_ISIZE;
+            let declared = if at + 2 <= image.len() {
+                read_u16(image, at)
+            } else {
+                0
+            };
+            if declared != 0 && INODE_CORE_LEN + usize::from(declared) <= usize::from(inode_size) {
+                declared
+            } else {
+                0
+            }
+        };
+
         // 線3: 名乗った大きさが像に収まるか。**u64 で掛ける**（u32 では溢れる）。
         let needed = u64::from(blocks_count) * u64::from(block_size);
         if needed > image.len() as u64 {
@@ -602,6 +636,7 @@ impl<'a> Ext2<'a> {
             group_count,
             free_blocks_count,
             free_inodes_count,
+            want_extra_isize,
         };
 
         // 線3: group descriptor テーブル全体が像の中にあるか。
@@ -663,6 +698,7 @@ impl<'a> Ext2<'a> {
             inode_size: self.inode_size,
             inodes_count: self.inodes_count,
             first_inode: self.first_inode,
+            want_extra_isize: self.want_extra_isize,
         }
     }
 
@@ -673,6 +709,22 @@ impl<'a> Ext2<'a> {
     /// `s_free_inodes_count`（S12-b）。
     pub fn free_inodes_count(&self) -> u32 {
         self.free_inodes_count
+    }
+
+    /// 新しい inode へ書く `i_extra_isize`（S12-f-3）。
+    ///
+    /// **`s_want_extra_isize` をそのまま返すのではない。**
+    /// **届かない・0・inode に収まらない、のいずれかなら 0 である。**
+    /// **0 は「追加領域を持たない」を意味する妥当な ext2 で、
+    /// この実装が S12-f-3 より前に書いていた値でもある。**
+    ///
+    /// # 0 へ倒れたことが見えるようにしてある
+    ///
+    /// **黙って倒れると、書いているつもりで書いていない状態になる。**
+    /// **カーネルは起動ログへこの値を出す**ので、
+    /// **像を替えて 0 になったときに、判定行の側から気づける。**
+    pub fn want_extra_isize(&self) -> u16 {
+        self.want_extra_isize
     }
     pub fn group_count(&self) -> u32 {
         self.group_count
@@ -1035,6 +1087,8 @@ pub struct Layout {
     inodes_per_group: u32,
     inode_size: u16,
     inodes_count: u32,
+    /// 新しい inode へ書く `i_extra_isize`（S12-f-3）。**0 は「書かない」である。**
+    want_extra_isize: u16,
     /// 配ってよい最も小さい inode 番号（`s_first_ino`。S12-e）。
     ///
     /// **これより小さい番号は ext2 が用途を決めている**（ルートは 2 など）。
@@ -1729,6 +1783,29 @@ pub fn create_file(
         .ok_or(AllocError::InodeOutOfRange(ino))?;
     image[at..at + usize::from(layout.inode_size)].fill(0);
     image[at..at + 2].copy_from_slice(&(MODE_REGULAR | 0o644).to_le_bytes());
+
+    // **追加領域の大きさを名乗る（S12-f-3）。**
+    //
+    // **像そのものが `s_min_extra_isize` を宣言している**ので、
+    // **0 のままだと、像が自分で宣言した約束を、こちらが作った inode だけが破る。**
+    // **`e2fsck` は 0 を受理する**（実測。範囲外は拒むので、欄は見ている）が、
+    // **それは道具の寛容さに乗っているだけである。**
+    //
+    // **中身は書かない。** **追加領域に在るのは時刻まわりの欄で、
+    // S12-f-2 で「時刻は書かない」と決めた。** **枠は 0 で埋めてあるので、
+    // `mke2fs` が建てて `build.rs` が潰した inode と同じ形になる。**
+    //
+    // **32 を直に書かない**——`s_want_extra_isize` から来る値である
+    // （像の中の数を実装にも判定にも埋めない）。
+    //
+    // 破壊 (S12-f-3, ext2-create-skip-extra-isize): 名乗らない。
+    // **`e2fsck` は通り抜ける**（0 を受理する）。**判定だけが落ちる。**
+    #[cfg(not(feature = "ext2-create-skip-extra-isize"))]
+    if layout.want_extra_isize != 0 {
+        image[at + INODE_EXTRA_ISIZE..at + INODE_EXTRA_ISIZE + 2]
+            .copy_from_slice(&layout.want_extra_isize.to_le_bytes());
+    }
+
     // 破壊 (S12-e, ext2-create-skip-links): `i_links_count` を 0 のままにする。
     // **ディレクトリから指されているのに参照が 0 なので、
     // `e2fsck` が `Inode … ref count is 0, should be 1` と言う。**
@@ -2087,6 +2164,12 @@ mod tests {
         // `i_blocks` は 512 バイト単位である。**ブロックサイズ単位ではない。**
         let sectors = (blocks.len() as u32) * (4096 / 512);
         image[at + 28..at + 32].copy_from_slice(&sectors.to_le_bytes());
+        // `i_extra_isize`（S12-f-3）。**実測した像では全 inode が 32 である**
+        // （`debugfs`の`Size of extra inode fields`）。**置かないと、
+        // 「こちらの inode が像の他と揃っている」を見る検査が、
+        // 両方 0 で通ってしまう**（実測で踏んだ——族の1つ目である）。
+        image[at + INODE_EXTRA_ISIZE..at + INODE_EXTRA_ISIZE + 2]
+            .copy_from_slice(&32u16.to_le_bytes());
         for (slot, block) in blocks.iter().enumerate() {
             let field = at + 40 + slot * 4;
             image[field..field + 4].copy_from_slice(&block.to_le_bytes());
@@ -2117,6 +2200,10 @@ mod tests {
         put32(image, 92, 0x38); // COMPAT: dir_index | resize_inode | ext_attr
         put32(image, 96, INCOMPAT_FILETYPE);
         put32(image, 100, 0x03); // RO_COMPAT: sparse_super | large_file
+                                 // `s_want_extra_isize`（S12-f-3）。**実測した像と同じ 32 である**
+                                 // （`dumpe2fs`の`Desired extra isize`）。**`s_min_extra_isize`(348)も同じ値だが、
+                                 // 書く側が見るのは`want`のほうなので、そちらだけを置く。**
+        put16(image, 350, 32);
     }
 
     #[test]
@@ -2279,6 +2366,54 @@ mod tests {
 
         unlink_file(&mut image, &layout, TEST_DIRECTORY_INO, b"created").unwrap();
         assert_eq!(image, original, "往復で像が元へ戻ること");
+    }
+
+    #[test]
+    fn a_created_inode_names_the_extra_area_the_way_the_image_asks() {
+        let mut image = build_test_image();
+        let layout = Ext2::parse(&image).unwrap().layout();
+        let want = Ext2::parse(&image).unwrap().want_extra_isize();
+        // **テスト像は `mke2fs` と同じ 32 を宣言している。**
+        // **0 だと、この検査は何も主張しなくなる**（族の1つ目）。
+        assert_ne!(want, 0, "像が s_want_extra_isize を宣言していること");
+
+        let ino = create_file(&mut image, &layout, TEST_DIRECTORY_INO, b"created").unwrap();
+        let at = layout.inode_at(&image, ino).unwrap();
+        assert_eq!(read_u16(&image, at + INODE_EXTRA_ISIZE), want);
+        // **像の他の inode と同じ値であること。**
+        let other = layout.inode_at(&image, DIRECT_FILE_INODE).unwrap();
+        assert_eq!(
+            read_u16(&image, at + INODE_EXTRA_ISIZE),
+            read_u16(&image, other + INODE_EXTRA_ISIZE)
+        );
+    }
+
+    #[test]
+    fn an_extra_size_that_does_not_fit_the_inode_falls_back_to_zero() {
+        let mut image = build_test_image();
+        // **inode に収まらない値を宣言させる**（128 + 200 > 256）。
+        image[SUPERBLOCK_OFFSET + SUPERBLOCK_WANT_EXTRA_ISIZE
+            ..SUPERBLOCK_OFFSET + SUPERBLOCK_WANT_EXTRA_ISIZE + 2]
+            .copy_from_slice(&200u16.to_le_bytes());
+        // **拒まない。0 へ倒れる**——0 は「追加領域を持たない」という妥当な ext2 である。
+        let fs = Ext2::parse(&image).unwrap();
+        assert_eq!(fs.want_extra_isize(), 0);
+
+        let layout = fs.layout();
+        let ino = create_file(&mut image, &layout, TEST_DIRECTORY_INO, b"created").unwrap();
+        let at = layout.inode_at(&image, ino).unwrap();
+        assert_eq!(read_u16(&image, at + INODE_EXTRA_ISIZE), 0);
+    }
+
+    #[test]
+    fn an_image_too_short_to_reach_the_field_is_still_accepted() {
+        // **`SUPERBLOCK_MIN_LEN` を伸ばしていないので、受理する範囲は変わらない。**
+        // **欄へ届かない像では 0 になるだけである。**
+        let image = build_test_image();
+        let short = &image[..SUPERBLOCK_OFFSET + SUPERBLOCK_MIN_LEN + 8];
+        // 像そのものは短すぎて別の理由で拒まれるので、欄の位置だけを確かめる。
+        assert!(short.len() < SUPERBLOCK_OFFSET + SUPERBLOCK_WANT_EXTRA_ISIZE + 2);
+        assert!(Ext2::parse(short).is_err());
     }
 
     #[test]

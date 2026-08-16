@@ -120,6 +120,8 @@ ext2-create-keep-prev-rec-len-test = ["common/ext2-create-keep-prev-rec-len"]
 ext2-create-skip-inode-count-test = ["common/ext2-create-skip-inode-count"]
 ext2-create-move-dirs-count-test = ["common/ext2-create-move-dirs-count"]
 ext2-unlink-mark-unused-test = ["common/ext2-unlink-mark-unused"]
+# 破壊（S12-f-3）: i_extra_isize を名乗らない。common へ転送する。
+ext2-create-skip-extra-isize-test = ["common/ext2-create-skip-extra-isize"]
 # 破壊（S12-d）: truncate の6種。いずれも common へ転送する。
 ext2-truncate-off-by-one-test = ["common/ext2-truncate-off-by-one"]
 ext2-truncate-always-free-test = ["common/ext2-truncate-always-free"]

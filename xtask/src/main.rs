@@ -2378,7 +2378,34 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
             expected_counts
         );
 
-        (content_ok && moved_by_one, clean)
+        // **判定E——作った inode が、像が望むとおりに追加領域を名乗ること（S12-f-3）。**
+        //
+        // **参照は 2 つ要る。**
+        //
+        // - **`mke2fs` が作った inode と一致すること**（同じ像の中で揃っていること）
+        // - **`dumpe2fs` の `Desired extra isize` と一致すること**
+        //
+        // **後者が無いと、参照側が 0 の像で判定が空振りする**——
+        // **128 バイト inode の像になれば両方 0 で通り、破壊（名乗らない）も通る。**
+        // **族の1つ目そのものである**（実際、ホストの単体テストで踏んだ。
+        // テスト像の inode が欄を持っておらず、両方 0 で通っていた）。
+        //
+        // **望む値が 0 か読めない像では、黙って通さずに落とす**——
+        // **「適用外」を緑にすると、適用外になったことに誰も気づかない。**
+        let desired = dumpe2fs_desired_extra_isize(&built)?;
+        let ours = debugfs_extra_isize(&dump, CREATED_PATH)?;
+        let theirs = debugfs_extra_isize(&dump, "/data/writable")?;
+        let extra_ok = match desired {
+            Some(want) if want != 0 => ours == Some(want) && theirs == Some(want),
+            _ => false,
+        };
+        println!(
+            "{context}: the new inode names the extra area the way the image asks = {extra_ok} \
+             (desired {desired:?}, ours {ours:?}, mke2fs's {theirs:?}; a desired of 0 or None \
+             makes this check inapplicable, and inapplicable is not a pass)"
+        );
+
+        (content_ok && moved_by_one && extra_ok, clean)
     } else if keep_written {
         // **追記したままの像（S12-c）。** **中身が inode から参照され、会計が
         // 締まっているので、`e2fsck` は不満を 1 本も言わないはずである**（実測）。
@@ -2639,7 +2666,49 @@ const FS_CREATE_SABOTAGES: &[(&str, &[&str])] = &[
         "unlinking that leaves the slot behind instead of merging it",
         &["ext2-unlink-mark-unused-test"],
     ),
+    (
+        "a new inode that does not name its extra area",
+        &[CREATE_KEEP_FEATURE, "ext2-create-skip-extra-isize-test"],
+    ),
 ];
+
+/// ある像のあるパスの `i_extra_isize` を、`debugfs` に読ませる（S12-f-3）。
+///
+/// **`debugfs` は `stat` の末尾に `Size of extra inode fields: N` を出す**（実測）。
+/// **自分で inode の位置を算術して読まない**——**書く側と同じ算術を判定でも書くと、
+/// 取り違えが両側で相殺する。**
+fn debugfs_extra_isize(image: &Path, path: &str) -> Result<Option<u64>> {
+    let output = Command::new("debugfs")
+        .env("LC_ALL", "C")
+        .arg("-R")
+        .arg(format!("stat {path}"))
+        .arg(image)
+        .output()
+        .context("failed to invoke debugfs (it ships with e2fsprogs)")?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Size of extra inode fields:"))
+        .and_then(|value| value.trim().parse().ok()))
+}
+
+/// 像が新しい inode に望む `i_extra_isize`（S12-f-3）。
+///
+/// **`dumpe2fs` の `Desired extra isize` である**（`s_want_extra_isize`。実測で確かめた）。
+/// **32 という数を判定に書かないためにここから取る**——**像が変われば動く値である。**
+fn dumpe2fs_desired_extra_isize(image: &Path) -> Result<Option<u64>> {
+    let output = Command::new("dumpe2fs")
+        .env("LC_ALL", "C")
+        .arg("-h")
+        .arg(image)
+        .output()
+        .context("failed to invoke dumpe2fs (it ships with e2fsprogs)")?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(text
+        .lines()
+        .find_map(|line| line.strip_prefix("Desired extra isize:"))
+        .and_then(|value| value.trim().parse().ok()))
+}
 
 /// 取り出した像からファイルの中身を読む（S12-c。S12-e で名前を引数にした）。
 ///
@@ -8591,7 +8660,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 171,
+    full: 172,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
