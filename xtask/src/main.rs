@@ -1422,12 +1422,13 @@ fn main() -> Result<()> {
                 );
             }
             if rest.iter().any(|a| a == "--fs-extract") {
-                let feature = rest
+                let features: Vec<&str> = rest
                     .iter()
-                    .position(|a| a == "--sabotage")
-                    .and_then(|i| rest.get(i + 1))
-                    .map(|s| s.as_str());
-                return cmd_fs_image_extract(feature);
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                return cmd_fs_image_extract(&features);
             }
             if rest.iter().any(|a| a == "--shell-test") {
                 let mode = if rest.iter().any(|a| a == "--drop-arrows") {
@@ -2121,19 +2122,28 @@ impl KeyboardAssertions {
 ///     pmemsave addr size file -- save to disk physical memory dump ...
 ///
 /// **カーネルが出すのは物理アドレスなので `pmemsave` である。**
-fn cmd_fs_image_extract(feature: Option<&str>) -> Result<()> {
+fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
-    let features: Vec<&str> = feature.into_iter().collect();
-    let kernel_elf = build_kernel_with_features(&workspace_root, &features)?;
+    let kernel_elf = build_kernel_with_features(&workspace_root, features)?;
     let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
 
-    let serial_log = workspace_root.join("target").join("fs-extract-serial.log");
+    // **構成ごとに別のログへ書く。** 落ちたときに、どの構成のものかが残る。
+    let tag = if features.is_empty() {
+        "default".to_string()
+    } else {
+        features.join("-")
+    };
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("fs-extract-{tag}-serial.log"));
     let _ = fs::remove_file(&serial_log);
     let debug_log = workspace_root.join("target").join("qemu-debug.log");
     let _ = fs::remove_file(&debug_log);
-    let dump = workspace_root.join("target").join("fs-extract.img");
+    let dump = workspace_root
+        .join("target")
+        .join(format!("fs-extract-{tag}.img"));
     let _ = fs::remove_file(&dump);
     let monitor_socket = PathBuf::from(format!(
         "/tmp/zaytos-xtask-fsextract-{}.sock",
@@ -2173,9 +2183,15 @@ fn cmd_fs_image_extract(feature: Option<&str>) -> Result<()> {
         thread::sleep(PANIC_TEST_POLL_INTERVAL);
     }
 
-    let context = match feature {
-        Some(name) => format!("fs-extract {name}"),
-        None => "fs-extract".to_string(),
+    // **割り当てたままの像を取り出す構成か。**
+    // **判定 1（往復のバイト一致）と判定 2（`e2fsck` の不満が 1 本）は、
+    // 像の状態が違うので同じ起動では両方言えない。** 構成で分ける。
+    let keep_allocated = features.contains(&KEEP_ALLOCATED_FEATURE);
+
+    let context = if features.is_empty() {
+        "fs-extract".to_string()
+    } else {
+        format!("fs-extract {}", features.join("+"))
     };
     let context = context.as_str();
 
@@ -2275,30 +2291,102 @@ fn cmd_fs_image_extract(feature: Option<&str>) -> Result<()> {
         kernel_counts
     );
 
-    // **2 本目——取り出した像が、建てた像とバイト単位で一致すること。**
-    let identical = match (fs::read(&dump), fs::read(&built)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    };
-    println!("{context}: the extracted image matches the built image byte for byte = {identical}");
-
-    // **3 本目——`e2fsck` が無傷と判定すること。**
-    // **バイト一致が真なら、これは必ず通る**（この関数の doc）。
-    let summary = if extracted {
-        run_e2fsck(&dump)?
+    // **像の状態で判定が分かれる。**
+    println!("{context}: e2fsck version = {}", e2fsck_version());
+    let complaints = if extracted {
+        e2fsck_complaint_lines(&dump)?
     } else {
-        "the image was not extracted".to_string()
+        std::vec!["the image was not extracted".to_string()]
     };
-    let fsck_ok = extracted && !summary.starts_with("the image was not extracted");
-    println!("{context}: e2fsck accepted the extracted image = {fsck_ok} ({summary})");
+
+    let (identical, fsck_ok) = if keep_allocated {
+        // **割り当てたままの像。** **`e2fsck` は必ず 1 本だけ不満を言う**——
+        // **どの inode も参照していないブロックに使用中の印が立っている**からで、
+        // **会計が正しければそれ以外は出ない**（実測）。
+        //
+        // **強い形で見る**——**`Block bitmap differences` の 1 本だけで、
+        // それ以外の不満が無いこと。** 想定外の行が出たら落とす。
+        let only_bitmap =
+            complaints.len() == 1 && complaints[0].starts_with("Block bitmap differences:");
+        println!(
+            "{context}: e2fsck complains exactly once, about the bitmap = {only_bitmap} \
+             (complaints: {complaints:?})"
+        );
+
+        // **空き数が 1 つ減っていること。外の道具から読む**——
+        // **自分で「減らした」と言わない**（段(2) で `dumpe2fs` へ寄せたのと同じ理由）。
+        let after = dumpe2fs_free_counts(&dump)?;
+        let moved_by_one = after.superblock_blocks + 1 == expected_counts.superblock_blocks
+            && after.group_blocks + 1 == expected_counts.group_blocks;
+        println!(
+            "{context}: the free counts dropped by exactly one = {moved_by_one} (built \
+             {}/{}, extracted {}/{})",
+            expected_counts.superblock_blocks,
+            expected_counts.group_blocks,
+            after.superblock_blocks,
+            after.group_blocks
+        );
+        (moved_by_one, only_bitmap)
+    } else {
+        // **往復した後の像。** **1 バイトも違わないはずである。**
+        let identical = match (fs::read(&dump), fs::read(&built)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        };
+        println!(
+            "{context}: the extracted image matches the built image byte for byte = {identical}"
+        );
+
+        // **不満が 1 本も無いこと。** **バイト一致が真ならこれは含意される**が、
+        // **S12-c で書き換えたまま残す段になると、こちらが主たる判定になる。**
+        let clean = extracted && complaints.is_empty();
+        println!("{context}: e2fsck found nothing to complain about = {clean} (complaints: {complaints:?})");
+        (identical, clean)
+    };
 
     if outside_kernel_image && reads_the_copy && free_counts_agree && identical && fsck_ok {
         println!("{context}: PASS");
         Ok(())
     } else {
+        // **文言に結合しているので、落ちた理由の切り分けを 1 行出す。**
+        // **「実装が壊れた」と「文言が変わった」を、読む人が最初に分けられるように。**
+        println!(
+            "{context}: note - the judgements above read e2fsck's wording. If the complaints look \
+             unfamiliar, check whether e2fsck changed version (see the version line above); the \
+             known-quiet lines are listed in E2FSCK_NOISE in xtask"
+        );
         bail!("{context}: FAILED")
     }
 }
+
+/// ビットマップの破壊と、それぞれが要る構成（S12-b）。
+///
+/// **3 つは割り当て中の像で見る**ので `fs-alloc-keep-test` と組む。
+/// **`free-skip-bit` だけは往復で見る**ので既定の構成である
+/// （**あれは解放の側を壊すので、解放を飛ばす構成では現れない**）。
+const FS_BITMAP_SABOTAGES: &[(&str, &[&str])] = &[
+    (
+        "a superblock count left stale",
+        &[KEEP_ALLOCATED_FEATURE, "ext2-alloc-skip-sb-count-test"],
+    ),
+    (
+        "a group count left stale",
+        &[KEEP_ALLOCATED_FEATURE, "ext2-alloc-skip-bg-count-test"],
+    ),
+    (
+        "allocating a block that is already in use",
+        &[KEEP_ALLOCATED_FEATURE, "ext2-alloc-ignore-bitmap-test"],
+    ),
+    (
+        "freeing without clearing the bit",
+        &["ext2-free-skip-bit-test"],
+    ),
+];
+
+/// 割り当てたままにする構成の feature 名（S12-b）。
+///
+/// **破壊ではなく変種である**（`paging-test` と同じ形。壊さず、別の状態を作る）。
+const KEEP_ALLOCATED_FEATURE: &str = "fs-alloc-keep-test";
 
 /// `fs-image-copy` の行から複製先の物理範囲を読む。
 fn parse_copy_range(line: &str) -> Option<(u64, u64)> {
@@ -6922,6 +7010,87 @@ fn check_fs_image_passes_e2fsck(workspace_root: &Path) -> Result<String> {
     run_e2fsck(&image)
 }
 
+/// `e2fsck` の出力のうち、**不満ではない行**（S12-b）。
+///
+/// # なぜ「不満の一覧」ではなく「不満でない一覧」なのか
+///
+/// **想定外の不満を黙って通さないためである。** 不満の側を列挙すると、
+/// **一覧に無い種類の不満が出たときに、それが不満だと分からない。**
+/// **こちらを列挙して、残りをすべて不満として数える。**
+///
+/// # 「1 本」の数え方
+///
+/// **行数では数えない。** `e2fsck` は 1 つの不満に `Fix? no` を続けるので、
+/// **1 つの不満が複数行になる。** **この一覧に当たらない行を 1 本と数える。**
+///
+/// # 文言に結合していることを承知で置く
+///
+/// **S12 の要は、外部の実装が判定することである**（`docs/roadmap.md` の S12）。
+/// 自前で会計の欄を読めば版に依らなくなるが、**それは同じ設計で書いたものを
+/// 同じ設計で読むことになり、外部性を失う。** **結合は払う費用である。**
+///
+/// **したがって 1 箇所に集める。** S12-c 以降も同じ出力を読むので、
+/// **判定ごとに文字列を書き散らすと、版が変わったときに直す場所が段の数だけ増える。**
+const E2FSCK_NOISE: &[&str] = &[
+    "e2fsck ",
+    "Pass 1:",
+    "Pass 2:",
+    "Pass 3:",
+    "Pass 4:",
+    "Pass 5:",
+    "Fix? no",
+    "WARNING: Filesystem still has errors",
+];
+
+/// `e2fsck` の出力から、不満の行だけを取り出す（S12-b）。
+///
+/// **要約行（`… files (…), … blocks`）も落とす**——あれは結果であって不満ではない。
+fn e2fsck_complaints(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| !E2FSCK_NOISE.iter().any(|noise| line.contains(noise)))
+        .filter(|line| !(line.contains(" files (") && line.contains(" blocks")))
+        .map(|line| line.to_string())
+        .collect()
+}
+
+/// `e2fsck` の版（判定行に出す。S12-b）。
+///
+/// **`mke2fs` の版は像の行に出ているが、こちらは別に出す**——
+/// **同じパッケージでも、ホストによっては違いうる。**
+fn e2fsck_version() -> String {
+    Command::new("e2fsck")
+        .env("LC_ALL", "C")
+        .arg("-V")
+        .output()
+        .ok()
+        .map(|out| {
+            let text = String::from_utf8_lossy(&out.stderr).to_string()
+                + &String::from_utf8_lossy(&out.stdout);
+            text.lines().next().unwrap_or("unknown").trim().to_string()
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// ある像へ `e2fsck -fn` を当て、不満の行を返す（S12-b）。
+///
+/// **落ちない。** 不満が在ることそのものが判定の材料なので、
+/// **呼び出し側が数える**（[`e2fsck_complaints`]）。
+fn e2fsck_complaint_lines(image: &Path) -> Result<Vec<String>> {
+    let output = Command::new("e2fsck")
+        .env("LC_ALL", "C")
+        .arg("-fn")
+        .arg(image)
+        .output()
+        .context(
+            "failed to invoke e2fsck (it ships with e2fsprogs, the same package as mke2fs, \
+             which the kernel build script already requires)",
+        )?;
+    Ok(e2fsck_complaints(&String::from_utf8_lossy(&output.stdout)))
+}
+
 /// ある像へ `e2fsck -fn` を当て、要約行を返す（S10-a。S12-a で寄せた）。
 ///
 /// # 見る相手が 2 つある
@@ -7474,7 +7643,7 @@ fn cmd_check(full: bool) -> Result<()> {
         // **判定 3 本を 1 項目にまとめてある**（複製先の位置・バイト一致・`e2fsck`）。
         total += 1;
         println!("=== xtask check: the copied ext2 image comes back byte for byte");
-        match cmd_fs_image_extract(None) {
+        match cmd_fs_image_extract(&[]) {
             Ok(()) => println!("--- fs extract: OK"),
             Err(error) => {
                 println!("--- fs extract: FAILED ({error})");
@@ -7487,7 +7656,7 @@ fn cmd_check(full: bool) -> Result<()> {
         // **捕まえるのはバイト一致である。**
         total += 1;
         println!("=== xtask check: the fs extract catches a corrupted copy");
-        match cmd_fs_image_extract(Some("fs-copy-corrupt-tail-test")) {
+        match cmd_fs_image_extract(&["fs-copy-corrupt-tail-test"]) {
             Ok(()) => {
                 println!("--- fs extract (corrupt tail): FAILED (the sabotage was NOT caught)");
                 failed.push("fs extract (corrupt tail)".to_string());
@@ -7500,7 +7669,7 @@ fn cmd_check(full: bool) -> Result<()> {
         // **比べ方を間違えても通りうる**（同じ値を 2 回出せば必ず一致する）。
         total += 1;
         println!("=== xtask check: the fs extract catches reading from the embedded image");
-        match cmd_fs_image_extract(Some("fs-read-from-rodata-test")) {
+        match cmd_fs_image_extract(&["fs-read-from-rodata-test"]) {
             Ok(()) => {
                 println!("--- fs extract (read from rodata): FAILED (the sabotage was NOT caught)");
                 failed.push("fs extract (read from rodata)".to_string());
@@ -7512,12 +7681,38 @@ fn cmd_check(full: bool) -> Result<()> {
         // **自分の解析を自分で確かめても、欄を取り違えていれば気づけない。**
         total += 1;
         println!("=== xtask check: the fs extract catches a shifted group-descriptor field");
-        match cmd_fs_image_extract(Some("ext2-group-count-offset-test")) {
+        match cmd_fs_image_extract(&["ext2-group-count-offset-test"]) {
             Ok(()) => {
                 println!("--- fs extract (shifted field): FAILED (the sabotage was NOT caught)");
                 failed.push("fs extract (shifted field)".to_string());
             }
             Err(_) => println!("--- fs extract (shifted field): OK (the sabotage was caught)"),
+        }
+
+        // **割り当てと解放（S12-b の 3 段目）。**
+        // **判定 1 と判定 2 は像の状態が違うので、同じ起動では両方言えない。**
+        // 既定の構成が往復（バイト一致）、`fs-alloc-keep-test` が割り当て中
+        // （`e2fsck` の不満が 1 本）である。
+        total += 1;
+        println!("=== xtask check: the block bitmap round trip restores the image");
+        match cmd_fs_image_extract(&[KEEP_ALLOCATED_FEATURE]) {
+            Ok(()) => println!("--- fs bitmap (allocated): OK"),
+            Err(error) => {
+                println!("--- fs bitmap (allocated): FAILED ({error})");
+                failed.push("fs bitmap (allocated)".to_string());
+            }
+        }
+
+        for (label, features) in FS_BITMAP_SABOTAGES {
+            total += 1;
+            println!("=== xtask check: the fs bitmap check catches {label}");
+            match cmd_fs_image_extract(features) {
+                Ok(()) => {
+                    println!("--- fs bitmap ({label}): FAILED (the sabotage was NOT caught)");
+                    failed.push(format!("fs bitmap ({label})"));
+                }
+                Err(_) => println!("--- fs bitmap ({label}): OK (the sabotage was caught)"),
+            }
         }
 
         for feature in KILL_SABOTAGES {
@@ -8010,7 +8205,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 145,
+    full: 150,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

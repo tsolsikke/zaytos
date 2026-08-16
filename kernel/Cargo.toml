@@ -103,6 +103,14 @@ fs-copy-corrupt-tail-test = []
 fs-read-from-rodata-test = []
 # 破壊（S12-b）: 空きブロック数の欄を 2 バイトずらして読む。common へ転送する。
 ext2-group-count-offset-test = ["common/ext2-group-count-offset-break"]
+# 変種（S12-b）: 割り当てたブロックを解放しない。**壊さない**——別の状態を作る
+# （`paging-test` と同じ形）。割り当て中の像を取り出して e2fsck の不満を見るために要る。
+fs-alloc-keep-test = []
+# 破壊（S12-b）: 割り当てと解放の4種。いずれも common へ転送する。
+ext2-alloc-skip-sb-count-test = ["common/ext2-alloc-skip-sb-count-break"]
+ext2-alloc-skip-bg-count-test = ["common/ext2-alloc-skip-bg-count-break"]
+ext2-alloc-ignore-bitmap-test = ["common/ext2-alloc-ignore-bitmap-break"]
+ext2-free-skip-bit-test = ["common/ext2-free-skip-bit-break"]
 # 破壊（S12 前の手当て、C）: 止めた後に溜まっている入力を捨てない。
 # 止めた打鍵そのものが残り、次のプロンプトに `^C` が余分に出る。
 kill-keep-typed-input-test = []

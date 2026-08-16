@@ -4132,6 +4132,97 @@ fn copy_fs_image_to_frames(logger: &mut Logger<SerialPort>) {
         ));
         cpu::halt_forever();
     }
+
+    // SAFETY: 複製先のフレームは起動中ずっと生き、いま誰も読んでいない。
+    // 中身は像そのものである。**書けるのはここが初めてである。**
+    let writable: &'static mut [u8] =
+        unsafe { core::slice::from_raw_parts_mut(destination, bytes as usize) };
+    exercise_block_bitmap(logger, writable);
+}
+
+/// ブロックビットマップの割り当てと解放を 1 往復させる（S12-b の 3 段目）。
+///
+/// # 何を主張するか
+///
+/// **割り当てが 3 つとも直し、解放がちょうど逆へ戻すこと**である。
+/// **像の中の番号には依存しない**——取れた番号は出すだけで、
+/// **どれが取れるべきかは主張しない**（`docs/verification-coverage.md`）。
+///
+/// # 既定では像を元へ戻す
+///
+/// **既定ビルドは割り当てて解放する。** 戻すので、
+/// **取り出した像は建てた像とバイト単位で一致するはずである。**
+///
+/// **`fs-alloc-keep-test` は解放を飛ばす**（壊す feature ではなく変種である。
+/// `paging-test` と同じ形）。**割り当てたままの像を取り出して、
+/// `e2fsck` の不満がちょうど 1 本であることを見るために要る。**
+/// **2 つの状態は同じ起動では取れない**ので、**構成で分ける。**
+fn exercise_block_bitmap(logger: &mut Logger<SerialPort>, image: &'static mut [u8]) {
+    use common::ext2::Ext2;
+
+    let layout = match Ext2::parse(image) {
+        Ok(fs) => fs.layout(),
+        Err(e) => {
+            logger.error(format_args!(
+                "fs-bitmap: the copy did not parse: {e:?}; halting"
+            ));
+            cpu::halt_forever();
+        }
+    };
+
+    let block = match common::ext2::allocate_block(image, &layout) {
+        Ok(block) => block,
+        Err(e) => {
+            logger.error(format_args!(
+                "fs-bitmap: could not allocate: {e:?}; halting"
+            ));
+            cpu::halt_forever();
+        }
+    };
+
+    // **取れた後の空き数を出す。** ホスト側は外の道具（`dumpe2fs`）から
+    // 同じ値を読んで突き合わせる——**自分で「減らした」と言うだけにしない。**
+    let (after_sb, after_bg) = match Ext2::parse(image) {
+        Ok(fs) => (
+            fs.free_blocks_count(),
+            fs.group_descriptor(0)
+                .map(|d| d.free_blocks_count)
+                .unwrap_or(0),
+        ),
+        Err(e) => {
+            logger.error(format_args!(
+                "fs-bitmap: the copy did not parse after allocating: {e:?}; halting"
+            ));
+            cpu::halt_forever();
+        }
+    };
+    logger.info(format_args!(
+        "fs-bitmap: allocated one block (number {block}); free counts are now blocks={after_sb} \
+         group0={after_bg}"
+    ));
+
+    // 変種 (S12-b, fs-alloc-keep): 解放しない。**像は割り当てたまま取り出される。**
+    #[cfg(feature = "fs-alloc-keep-test")]
+    {
+        logger.info(format_args!(
+            "fs-bitmap: keeping the block allocated (fs-alloc-keep-test)"
+        ));
+        return;
+    }
+
+    // **解放する。** 破壊は `common::ext2::free_block` の中に置いてある——
+    // **動作のある場所に置かないと、破壊にならない**（実測で踏んだ。
+    // ここで正しく呼んでいたので、feature を立てても何も変わらなかった）。
+    #[cfg(not(feature = "fs-alloc-keep-test"))]
+    {
+        if let Err(e) = common::ext2::free_block(image, &layout, block) {
+            logger.error(format_args!("fs-bitmap: could not free: {e:?}; halting"));
+            cpu::halt_forever();
+        }
+        logger.info(format_args!(
+            "fs-bitmap: freed block {block}; the image should be back to what was built"
+        ));
+    }
 }
 
 fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
@@ -7556,6 +7647,31 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "ext2-group-count-offset-test",
         cfg!(feature = "ext2-group-count-offset-test"),
         "空きブロック数の欄を 2 バイトずらして読む",
+    ),
+    (
+        "fs-alloc-keep-test",
+        cfg!(feature = "fs-alloc-keep-test"),
+        "壊さない。割り当てたブロックを解放せずに残す",
+    ),
+    (
+        "ext2-alloc-skip-sb-count-test",
+        cfg!(feature = "ext2-alloc-skip-sb-count-test"),
+        "割り当てで superblock の空き数を直さない",
+    ),
+    (
+        "ext2-alloc-skip-bg-count-test",
+        cfg!(feature = "ext2-alloc-skip-bg-count-test"),
+        "割り当てで群の空き数を直さない",
+    ),
+    (
+        "ext2-alloc-ignore-bitmap-test",
+        cfg!(feature = "ext2-alloc-ignore-bitmap-test"),
+        "ビットを見ずに、使用中のブロックでも割り当てる",
+    ),
+    (
+        "ext2-free-skip-bit-test",
+        cfg!(feature = "ext2-free-skip-bit-test"),
+        "解放でビットを落とさず、会計だけ戻す",
     ),
     (
         "kill-keep-typed-input-test",

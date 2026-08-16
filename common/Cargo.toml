@@ -15,3 +15,11 @@ preempt-in-critical-break = []
 # 欄）から読む。**外の道具（dumpe2fs）の値と食い違う。** ホストの単体テストも
 # 落ちる（あちらは 3 つの欄へ別々の値を書いて offset を見ている）。
 ext2-group-count-offset-break = []
+# 破壊（S12-b）: 割り当てで superblock の空き数を直さない。
+ext2-alloc-skip-sb-count-break = []
+# 破壊（S12-b）: 割り当てで群の空き数を直さない。
+ext2-alloc-skip-bg-count-break = []
+# 破壊（S12-b）: ビットを見ずに、使用中のブロックでも割り当てる。
+ext2-alloc-ignore-bitmap-break = []
+# 破壊（S12-b）: 解放でビットを落とさず、会計だけ戻す。
+ext2-free-skip-bit-break = []

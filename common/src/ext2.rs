@@ -651,6 +651,17 @@ impl<'a> Ext2<'a> {
     pub fn feature_ro_compat(&self) -> u32 {
         self.feature_ro_compat
     }
+    /// 書き換えに要る配置を写して返す（S12-b）。**`Copy` なので像を借りない。**
+    pub fn layout(&self) -> Layout {
+        Layout {
+            block_size: self.block_size,
+            blocks_count: self.blocks_count,
+            first_data_block: self.first_data_block,
+            blocks_per_group: self.blocks_per_group,
+            group_count: self.group_count,
+        }
+    }
+
     /// `s_free_blocks_count`（S12-b）。
     pub fn free_blocks_count(&self) -> u32 {
         self.free_blocks_count
@@ -998,6 +1009,171 @@ impl<'a> Ext2<'a> {
 // 添字で切り出して `unwrap` する。範囲内であることは呼び出し側が保証している
 // （`parse` 冒頭の長さ検査と、`group_descriptor` が渡す 32 バイトちょうどの
 // スライスが根拠で、どちらもオフセットは固定である）。
+/// 像を書き換えるのに要る配置（S12-b）。
+///
+/// # なぜ `Ext2` を可変にしないのか
+///
+/// **`Ext2` は像を借りている。** 全体を可変にすると、**読み取りの経路すべてが
+/// 可変借用に巻き込まれる**——`lookup` も `file_block` も、返した参照が
+/// 生きている間は書けなくなる。
+///
+/// **代わりに、配置だけを写して持ち出す。** これは `Copy` なので、
+/// **`Ext2` を落としてから像を可変で借り直せる。**
+/// **読む型と書く関数が、同じ像を同時に借りない形である。**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Layout {
+    block_size: u32,
+    blocks_count: u32,
+    first_data_block: u32,
+    blocks_per_group: u32,
+    group_count: u32,
+}
+
+/// ビットマップの操作で起きうる誤り（S12-b）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllocError {
+    /// 空きが無い。
+    Full,
+    /// 番号が像の外である。
+    BlockOutOfRange(u32),
+    /// 解放しようとしたブロックが、そもそも使われていない。
+    NotAllocated(u32),
+    /// 像が短く、触ろうとした場所が入っていない。
+    ImageTooSmall,
+    /// 空き数の欄が、ビットマップと食い違っている。
+    ///
+    /// **飽和させずに断る**——0 のまま進むと、**解放で 1 増えて往復が戻らない。**
+    FreeCountInconsistent,
+}
+
+impl Layout {
+    /// このブロックが属する群と、群の中での添字。
+    fn locate(&self, block: u32) -> Option<(u32, u32)> {
+        if block >= self.blocks_count {
+            return None;
+        }
+        let index = block.checked_sub(self.first_data_block)?;
+        Some((index / self.blocks_per_group, index % self.blocks_per_group))
+    }
+
+    /// 群の descriptor の像内オフセット。
+    fn descriptor_at(&self, group: u32) -> Option<usize> {
+        if group >= self.group_count {
+            return None;
+        }
+        let table = u64::from(self.first_data_block + 1) * u64::from(self.block_size);
+        let offset = table + u64::from(group) * GROUP_DESCRIPTOR_SIZE as u64;
+        usize::try_from(offset).ok()
+    }
+}
+
+/// 空きブロックを 1 つ取り、会計も直す（S12-b）。**取れた番号を返す。**
+///
+/// # 直すのは 3 つである
+///
+/// ビットマップのビット、`bg_free_blocks_count`、`s_free_blocks_count`。
+/// **1 つでも落とすと `e2fsck` が食い違いを報告する**（実測。
+/// 落とし方によって文言が違う）。
+///
+/// # 番号を選ぶ規則を主張しない
+///
+/// **「空いているものを 1 つ」だけである。** どれを選ぶかは判定に書かない
+/// （`docs/verification-coverage.md` の「像の中の番号に依存しない」）。
+pub fn allocate_block(image: &mut [u8], layout: &Layout) -> Result<u32, AllocError> {
+    for group in 0..layout.group_count {
+        let descriptor = layout
+            .descriptor_at(group)
+            .ok_or(AllocError::ImageTooSmall)?;
+        if descriptor + GROUP_DESCRIPTOR_SIZE > image.len() {
+            return Err(AllocError::ImageTooSmall);
+        }
+        let bitmap_block = read_u32(image, descriptor);
+        let bitmap = usize::try_from(u64::from(bitmap_block) * u64::from(layout.block_size))
+            .map_err(|_| AllocError::ImageTooSmall)?;
+
+        // この群が受け持つブロック数（最後の群は端数になりうる）。
+        let first = layout.first_data_block + group * layout.blocks_per_group;
+        let span = layout.blocks_per_group.min(layout.blocks_count - first);
+        for index in 0..span {
+            let byte = bitmap + (index / 8) as usize;
+            if byte >= image.len() {
+                return Err(AllocError::ImageTooSmall);
+            }
+            let mask = 1u8 << (index % 8);
+            // 破壊 (S12-b, ext2-alloc-ignore-bitmap): 使用中でも取る。
+            // **ビットマップは既に 1 なので変わらず、会計だけが減る。**
+            // **e2fsck は会計とビットマップの食い違いとして捕まえる**（実測）。
+            #[cfg(not(feature = "ext2-alloc-ignore-bitmap-break"))]
+            if image[byte] & mask != 0 {
+                continue;
+            }
+            // **飽和させない。** ビットマップに空きがあるのに会計が 0 なら、
+            // **像がそもそも食い違っている。** 黙って 0 のままにすると、
+            // **解放で 1 増えて往復が戻らない**（実測で踏んだ）。
+            let free = read_u16(image, descriptor + 12)
+                .checked_sub(1)
+                .ok_or(AllocError::FreeCountInconsistent)?;
+            let total = read_u32(image, SUPERBLOCK_OFFSET + 12)
+                .checked_sub(1)
+                .ok_or(AllocError::FreeCountInconsistent)?;
+            image[byte] |= mask;
+            // 破壊 (S12-b, ext2-alloc-skip-bg-count): 群の欄を直さない。
+            // **e2fsck が `for group #0` 付きで報告する**（実測）。
+            #[cfg(not(feature = "ext2-alloc-skip-bg-count-break"))]
+            image[descriptor + 12..descriptor + 14].copy_from_slice(&free.to_le_bytes());
+            // 破壊 (S12-b, ext2-alloc-skip-sb-count): superblock の欄を直さない。
+            // **e2fsck が群の番号なしで報告する**（実測。文言で区別できる）。
+            #[cfg(not(feature = "ext2-alloc-skip-sb-count-break"))]
+            image[SUPERBLOCK_OFFSET + 12..SUPERBLOCK_OFFSET + 16]
+                .copy_from_slice(&total.to_le_bytes());
+            return Ok(first + index);
+        }
+    }
+    Err(AllocError::Full)
+}
+
+/// ブロックを 1 つ返し、会計も直す（S12-b）。
+///
+/// **[`allocate_block`] とちょうど逆である**——3 つとも戻す。
+/// **戻し方が 1 つでも違えば、往復して像が元へ戻らない。**
+pub fn free_block(image: &mut [u8], layout: &Layout, block: u32) -> Result<(), AllocError> {
+    let (group, index) = layout
+        .locate(block)
+        .ok_or(AllocError::BlockOutOfRange(block))?;
+    let descriptor = layout
+        .descriptor_at(group)
+        .ok_or(AllocError::BlockOutOfRange(block))?;
+    if descriptor + GROUP_DESCRIPTOR_SIZE > image.len() {
+        return Err(AllocError::ImageTooSmall);
+    }
+    let bitmap_block = read_u32(image, descriptor);
+    let bitmap = usize::try_from(u64::from(bitmap_block) * u64::from(layout.block_size))
+        .map_err(|_| AllocError::ImageTooSmall)?;
+    let byte = bitmap + (index / 8) as usize;
+    if byte >= image.len() {
+        return Err(AllocError::ImageTooSmall);
+    }
+    let mask = 1u8 << (index % 8);
+    if image[byte] & mask == 0 {
+        return Err(AllocError::NotAllocated(block));
+    }
+    let free = read_u16(image, descriptor + 12)
+        .checked_add(1)
+        .ok_or(AllocError::FreeCountInconsistent)?;
+    let total = read_u32(image, SUPERBLOCK_OFFSET + 12)
+        .checked_add(1)
+        .ok_or(AllocError::FreeCountInconsistent)?;
+    // 破壊 (S12-b, ext2-free-skip-bit): ビットを落とさず、会計だけ戻す。
+    // **往復しても像が元へ戻らない**——バイト一致が捕まえる。
+    #[cfg(not(feature = "ext2-free-skip-bit-break"))]
+    {
+        image[byte] &= !mask;
+    }
+    image[descriptor + 12..descriptor + 14].copy_from_slice(&free.to_le_bytes());
+    image[SUPERBLOCK_OFFSET + 12..SUPERBLOCK_OFFSET + 16].copy_from_slice(&total.to_le_bytes());
+    Ok(())
+}
+
 fn read_u16(data: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap())
 }
@@ -1239,6 +1415,7 @@ mod tests {
         };
         put32(image, 0, 256); // s_inodes_count
         put32(image, 4, 512); // s_blocks_count
+        put32(image, 12, 9); // s_free_blocks_count（S12-b。群の欄 7 とは別の値にする）
         put32(image, 20, 0); // s_first_data_block
         put32(image, 24, 2); // s_log_block_size -> 4096
         put32(image, 32, 32768); // s_blocks_per_group
@@ -1262,6 +1439,56 @@ mod tests {
         assert_eq!(fs.blocks_count(), 512);
         assert_eq!(fs.group_count(), 1);
         assert_eq!(fs.feature_incompat(), INCOMPAT_FILETYPE);
+    }
+
+    #[test]
+    fn allocating_then_freeing_restores_the_image_byte_for_byte() {
+        let mut image = build_test_image();
+        let original = image.clone();
+        let layout = Ext2::parse(&image).unwrap().layout();
+
+        let block = allocate_block(&mut image, &layout).unwrap();
+        // **割り当てた時点では像が違う。** 違わなければ、割り当てが効いていない。
+        assert_ne!(image, original, "割り当てで像が変わること");
+
+        free_block(&mut image, &layout, block).unwrap();
+        // **戻したら 1 バイトも違わない。** ビットも 2 つの会計も、
+        // ちょうど逆へ戻っている。
+        assert_eq!(image, original, "往復で像が元へ戻ること");
+    }
+
+    #[test]
+    fn allocating_moves_both_free_counts_by_one() {
+        let mut image = build_test_image();
+        let before = Ext2::parse(&image).unwrap();
+        let layout = before.layout();
+        let (sb_before, bg_before) = (
+            before.free_blocks_count(),
+            before.group_descriptor(0).unwrap().free_blocks_count,
+        );
+
+        allocate_block(&mut image, &layout).unwrap();
+
+        let after = Ext2::parse(&image).unwrap();
+        assert_eq!(after.free_blocks_count(), sb_before - 1, "superblock 側");
+        assert_eq!(
+            after.group_descriptor(0).unwrap().free_blocks_count,
+            bg_before - 1,
+            "group 側"
+        );
+    }
+
+    #[test]
+    fn freeing_a_block_that_is_not_allocated_is_refused() {
+        let mut image = build_test_image();
+        let layout = Ext2::parse(&image).unwrap().layout();
+        let block = allocate_block(&mut image, &layout).unwrap();
+        free_block(&mut image, &layout, block).unwrap();
+        // **2 回目は断る。** 断らないと会計だけが増え、像が壊れる。
+        assert_eq!(
+            free_block(&mut image, &layout, block),
+            Err(AllocError::NotAllocated(block))
+        );
     }
 
     #[test]
