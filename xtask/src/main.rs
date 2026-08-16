@@ -2320,11 +2320,13 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
         );
 
         // **長さが 0 であること。** **外の道具に読ませる**（自分で言わない）。
+        // **「引けなかった」を「空」と混ぜない**——**混ぜると、ファイルが
+        // 消えていてもこの判定が満たされる**（`debugfs_read_writable` の doc）。
         let actual = debugfs_read_writable(&dump)?;
-        let emptied = actual.is_empty();
+        let emptied = actual.as_ref().is_some_and(|bytes| bytes.is_empty());
         println!(
-            "{context}: the file reads back empty = {emptied} ({} byte(s))",
-            actual.len()
+            "{context}: the file reads back empty = {emptied} ({:?} byte(s))",
+            actual.as_ref().map(|bytes| bytes.len())
         );
 
         // **持っていたブロックが返っていること。**
@@ -2350,12 +2352,12 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
         // **「含む」で見ない**——前後に余分が無いことを言う。
         let expected = expected_writable_content();
         let actual = debugfs_read_writable(&dump)?;
-        let content_ok = actual == expected;
+        let content_ok = actual.as_deref() == Some(expected.as_slice());
         println!(
             "{context}: the appended bytes read back exactly = {content_ok} (expected {} byte(s), \
-             got {} byte(s))",
+             got {:?} byte(s))",
             expected.len(),
-            actual.len()
+            actual.as_ref().map(|bytes| bytes.len())
         );
 
         // **判定D——空き数の減りがちょうど 1 つ。**
@@ -2543,7 +2545,20 @@ fn expected_writable_content() -> Vec<u8> {
 /// **`debugfs` に読ませる**——**自分で書いて自分で読むと、同じ設計の取り違えが
 /// 両側で相殺する。** **`i_size` までを出す**ので、**長さの一致がそのまま
 /// `i_size` の正しさを主張する**（実測で確かめた）。
-fn debugfs_read_writable(image: &Path) -> Result<Vec<u8>> {
+///
+/// # 引けなかったことを、空と区別する
+///
+/// **`debugfs` は引けなくても終了コード 0 を返す**（実測）。**標準出力は空で、
+/// 標準エラーへ `File not found by ext2_lookup` と出る。**
+///
+/// **区別していなかった。** そのため **S12-d の「空になったこと」は、
+/// ファイルが消えていても満たされていた**——**あの判定は
+/// 「0 バイトに縮んだ」を主張しているつもりで、
+/// 「0 バイトに縮んだか、または存在しない」しか主張していなかった。**
+///
+/// **判定の前に濾す仕組みは、それ自体が判定の一部である**（S12-c で
+/// `Fix? no` を `contains` で落として不満ごと消していたのと同じ形である）。
+fn debugfs_read_writable(image: &Path) -> Result<Option<Vec<u8>>> {
     let output = Command::new("debugfs")
         .env("LC_ALL", "C")
         .arg("-R")
@@ -2554,7 +2569,11 @@ fn debugfs_read_writable(image: &Path) -> Result<Vec<u8>> {
             "failed to invoke debugfs (it ships with e2fsprogs, the same package as e2fsck and \
              mke2fs, which the kernel build script already requires)",
         )?;
-    Ok(output.stdout)
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("File not found by ext2_lookup") {
+        return Ok(None);
+    }
+    Ok(Some(output.stdout))
 }
 
 /// 割り当てたままにする構成の feature 名（S12-b）。
