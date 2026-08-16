@@ -3400,31 +3400,50 @@ TCGで守れないもの
 **独立な読み手はLinuxカーネルの`fs/ext2`（または`ext4`）ドライバだけで、
 これは`mount`が要り、`mount`は`root`が要る。**
 
+#### どの像を回すか（3つ。S12-f-4で1つから3つへ増やした）
+
+**偵察（S12-f-1.5）は`fs-create-keep`だけだった。**
+**そのときドライバが読んだのは300バイトと100バイトの、
+どちらも1ブロックに収まるものだけである。**
+**S12-cとS12-dが作った状態は、外の道具では`e2fsck`と`debugfs`までしか通っていない。**
+
+| 構成 | 何が入っているか | この像でしか見られないこと |
+|---|---|---|
+| `fs-create-keep` | ZaytOSが作った`/data/created`（300バイト）と、追記して縮めて戻した`/data/writable`（100バイト） | **作ったinodeそのもの。** `i_extra_isize`と`i_uid`/`i_gid`が見えるのもここである |
+| `fs-write-keep` | 追記したままの`/data/writable`（**4300バイト。2ブロック目に跨る**） | **多ブロックの読み。** **ドライバでは一度も通していない**——`i_block[1]`を辿る経路である |
+| `fs-truncate-keep` | 0まで縮めたままの`/data/writable`（**0バイト**） | **ブロックを全部返した後の像を、独立な読み手が受け取れること** |
+
+**`fs-truncate-keep`で見られないことも書いておく。**
+**「切った先が0で埋まっていること」は、どのマウントでも観測できない**——
+**返したブロックはどのinodeからも参照されていないので、
+ファイルシステムの読み手からは到達できない。**
+**あれを捕まえるのは往復のバイト一致だけである**（S12-dで実測した）。
+**この像で言えるのは「0バイトのファイルとして提示され、木の残りも読める」までである。**
+
 #### 手順
 
 **像は`xtask`が取り出す。** 運用者はその像に対して回す。
+**3つとも同じ形で回す。** 下では`<CONFIG>`を構成の名前に置き換えること
+（`fs-create-keep-test` / `fs-write-keep-test` / `fs-truncate-keep-test`）。
 
 1. 像を取り出す（`root`は要らない。ここまでは機械である）
 
-        cargo xtask run --fs-extract --sabotage fs-create-keep-test
+        cargo xtask run --fs-extract --sabotage <CONFIG>
 
-   **`fs-create-keep-test`の構成を使うのは、この構成だけが
-   「ZaytOSが作ったファイルが残っている像」だからである**——
-   既定の構成は作って消すので、見るべきinodeが残らない。
-   像は`target/fs-extract-fs-create-keep-test.img`に出る。
+   像は`target/fs-extract-<CONFIG>.img`に出る。
 
 2. **マウントする前に、像の`md5`と`dmesg`の末尾を控える。**
    **`md5`は、読み取り専用で開いたことが像を変えていないことを後で言うためである。**
    **`dmesg`は、後から`tail`だけを見るとどの行が今回のものか分からないためである**
 
-        md5sum target/fs-extract-fs-create-keep-test.img
+        md5sum target/fs-extract-<CONFIG>.img
         sudo dmesg | wc -l > /tmp/zaytos-dmesg-before.txt
         sudo dmesg | tail -3
 
 3. マウントする。**`-t ext2`を明示する**（理由は下記）
 
         mkdir -p /tmp/zaytos-mnt
-        sudo mount -t ext2 -o loop,ro target/fs-extract-fs-create-keep-test.img /tmp/zaytos-mnt
+        sudo mount -t ext2 -o loop,ro target/fs-extract-<CONFIG>.img /tmp/zaytos-mnt
         mount | grep zaytos-mnt
 
 4. **木を丸ごと見る。** **ZaytOSが触っていないものが壊れていないことは、
@@ -3432,20 +3451,31 @@ TCGで守れないもの
 
         ls -lnR /tmp/zaytos-mnt
 
-5. **2本のファイルを、中身と長さでドライバ越しに突き合わせる。**
-   **`created`はZaytOSが作ったもの、`writable`はZaytOSが追記して縮めて戻したものである**
+5. **中身と長さをドライバ越しに突き合わせる。**
+   **読むファイルと期待値は構成ごとに違う**（下記「構成ごとの期待値」）。
+   **下の1本で3つとも扱える**——**在るファイルだけを見る。**
 
         python3 -c "
-        for path, want in (('created', 300), ('writable', 100)):
-            d = open('/tmp/zaytos-mnt/data/' + path, 'rb').read()
-            ok = d == bytes((i % 251) for i in range(len(d)))
-            print(f'{path}: len={len(d)} (expected {want})  pattern_ok={ok}')"
+        import os
+        base = '/tmp/zaytos-mnt/data/'
+        for name in ('created', 'writable'):
+            path = base + name
+            if not os.path.exists(path):
+                print(f'{name}: not present')
+                continue
+            d = open(path, 'rb').read()
+            p = lambda n: bytes((i % 251) for i in range(n))
+            # 種100バイトの後ろに追記が続く形なので、模様は2本の連結である
+            expect = p(100) + p(len(d) - 100) if len(d) > 100 else p(len(d))
+            if name == 'created':
+                expect = p(len(d))
+            print(f'{name}: len={len(d)}  pattern_ok={d == expect}')"
 
 6. 今回出た`dmesg`だけを見て、外し、**`md5`が変わっていないことを見る**
 
         sudo dmesg | tail -n +$(( $(cat /tmp/zaytos-dmesg-before.txt) + 1 ))
         sudo umount /tmp/zaytos-mnt
-        md5sum target/fs-extract-fs-create-keep-test.img
+        md5sum target/fs-extract-<CONFIG>.img
 
 **`-t ext2`を明示する理由。** **この環境のカーネルは`ext2`・`ext3`・`ext4`の3つを
 名乗っている**（`/proc/filesystems`で実測）。**明示しないと`ext4`ドライバが受けうる**
@@ -3454,10 +3484,26 @@ TCGで守れないもの
 **`ext2`で拒まれて`ext4`なら通る（あるいはその逆）なら、それ自体が観測である**——
 **そのときは両方を試し、結果を書き分けること。**
 
-#### 見るもの（5つ）
+#### 構成ごとの期待値（実測で確かめた）
 
-**独立な読み手を呼ぶ機会は1度である。** **新しいinodeだけを見るのはもったいない**ので、
-**ZaytOSが触った2本と、触っていない木の全体まで見る。**
+| 構成 | `/data/created` | `/data/writable` |
+|---|---|---|
+| `fs-create-keep` | **300バイト。** 模様は`i % 251`（`i`は0から） | **100バイト。** 模様は`i % 251` |
+| `fs-write-keep` | **無い**（作って消す道を通らない構成である） | **4300バイト** |
+| `fs-truncate-keep` | **無い** | **0バイト** |
+
+**4300バイトの模様は、1本の連続した`i % 251`ではない**（実測で確かめた）。
+**種の100バイトと、追記した4200バイトの連結である**——
+**`build.rs`が100バイトを`i % 251`で置き、カーネルがその後ろへ
+もう一度0から数え直した4200バイトを足すからである。**
+**1本の模様だと思って突き合わせると、100バイト目から食い違う。**
+**上の手順の`python3`はその形で書いてある。**
+
+
+#### 見るもの（5つ。3つの像それぞれについて）
+
+**独立な読み手を呼ぶ機会は少ない。** **新しいinodeだけを見るのはもったいない**ので、
+**ZaytOSが触ったファイルと、触っていない木の全体まで見る。**
 
 - **マウントできるか。** できなければ`dmesg`に理由が出る
 - **`/data/created`（**ZaytOSが作ったinode**）が読めるか。長さは300バイトで、
@@ -3505,7 +3551,8 @@ TCGで守れないもの
 
 #### 回す時機
 
-**S12-f-1.5（偵察）で1度、S12-f-4（締め）で1度である。**
+**S12-f-1.5（偵察）で1度、S12-f-4（締め）で3度である**
+（**締めでは像を3つ回す。理由は上の「どの像を回すか」にある**）。
 
 **偵察を先に回すのは、`f-2`（時刻を書くか）と`f-3`（`i_extra_isize`と`i_uid`/`i_gid`）の
 判断が、ドライバが何を拒むかに依存しているからである。**
@@ -3563,6 +3610,27 @@ TCGで守れないもの
 **「見た上で何も無い」と「そもそも見ていない」が、出力からは区別できない。**
 **S12を通して繰り返し当たっている形である**（上の「破壊を立てたら、状態が変わったことを
 確かめる」と同じ根である）。
+
+#### 結果（S12-f-4。締め）
+
+**まだ回していない。** **回す像は3つで、`0798725`（`docs: 利用者の概念が無いので
+i_uid/i_gidは書かないと決める`）の作業ツリーから取り出した。**
+
+| 構成 | 取り出した像の`md5` |
+|---|---|
+| `fs-create-keep` | `ec15d5048a1c15c5229c2b4b069b02a9` |
+| `fs-write-keep` | `28ed305dde7256e4a4084aebe6f70b8d` |
+| `fs-truncate-keep` | `e54b4d9b922b318d92b592ce160423c9` |
+
+**偵察のときの像（`8beebbaf78b6d9213a7714b0fdda2e67`）とは別である**——
+**あちらはS12-eの実装から、こちらはS12-f-3を入れた後から取り出した。**
+**`fs-create-keep`の`/data/created`は、偵察のときは`i_extra_isize`が0で、
+今回は32である**（S12-f-3で書くようにした）。
+
+**`dmesg`が偵察のときと変わるかを見ること。**
+**変わらなければ、「ドライバがあの欄を見ているかは分からない」のままである。**
+**そう書くこと**——**変わらなかったことを「見ていない証拠」とも
+「正しい証拠」とも読まない。**
 
 上記以外の純粋ロジック・ドキュメント・テスト・ビルドスクリプトの変更は、この扱いの対象外である。
 
