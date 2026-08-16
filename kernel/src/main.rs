@@ -4019,16 +4019,70 @@ fn verify_embedded_user_elf(logger: &mut Logger<SerialPort>) {
 /// アドレス空間の畳みを、`spawn` の前後で測っている。**ここは spawn より前で、
 /// 窓の外である**（実測で確かめた）。
 fn copy_fs_image_to_frames(logger: &mut Logger<SerialPort>) {
+    let Err(reason) = try_copy_fs_image_to_frames(logger) else {
+        return;
+    };
+    // **文言はここで組み立てる。** **`format_args!` は返せない**——
+    // **一時値を借りるので、関数の外へ出せない**（実測。`E0515`）。
+    // **したがって「どこで、なぜ」を列挙で運び、文言はここで作る。**
+    match reason {
+        FsImageCopyError::AllocatorMissing => logger.error(format_args!(
+            "fs-image-copy: the frame allocator is not available (someone did not give it back); \
+             halting"
+        )),
+        FsImageCopyError::AllocationFailed { frames, bytes } => logger.error(format_args!(
+            "fs-image-copy: could not allocate {frames} contiguous frame(s) for the {bytes}-byte              image; halting"
+        )),
+        FsImageCopyError::EndNotPhysical => logger.error(format_args!(
+            "fs-image-copy: the end of the copy is not a valid physical address; halting"
+        )),
+        FsImageCopyError::NotCovered { base, last } => logger.error(format_args!(
+            "fs-image-copy: the direct map does not cover {:#x}..{:#x}; halting",
+            base, last
+        )),
+        FsImageCopyError::ReadBackMismatch => logger.error(format_args!(
+            "fs-image-copy: the copy does not match the embedded image; halting"
+        )),
+    }
+    cpu::halt_forever();
+}
+
+/// [`copy_fs_image_to_frames`] が止まる理由（T3-1）。
+///
+/// # なぜ列挙にするのか
+///
+/// **文言を1文字も変えないためである。** 止める文言は場所ごとに違い、
+/// **書式に値が入る**（フレーム数、番地）。**`&'static str` 1 本では持てないので、
+/// 場所ごとの変種に値を持たせる。**
+///
+/// # 止めるのは呼び出し側である
+///
+/// **この型は「どこで、なぜ止まるか」だけを運ぶ。**
+/// **`halt_forever` を呼ぶのは [`copy_fs_image_to_frames`] の 1 箇所だけである。**
+enum FsImageCopyError {
+    /// フレームアロケータが預けられていない。
+    AllocatorMissing,
+    /// 連続フレームが取れない。
+    AllocationFailed { frames: u64, bytes: u64 },
+    /// 複製の終端が物理アドレスとして妥当でない。
+    EndNotPhysical,
+    /// direct map が複製先を覆っていない。
+    NotCovered { base: u64, last: u64 },
+    /// 読み戻した中身が元の像と一致しない。
+    ReadBackMismatch,
+}
+
+/// 像をフレームへ複製する検査部（T3-1）。**止めない。`Err` を返す。**
+///
+/// **判定行（`logger.info`）はここに残る。** **検査と検査の間に、検査した値を
+/// 使って出ているからである**——外へ出すと順序か文言が変わる。
+fn try_copy_fs_image_to_frames(logger: &mut Logger<SerialPort>) -> Result<(), FsImageCopyError> {
     use kernel::frame_allocator::FRAME_SIZE;
 
     // **預けた後なので借りる**（`ADR-0030`）。**取ったフレームは返さないが、
     // アロケータ自身は返す**——貸し借りの回数は判定行で突き合わされている。
     let Some(allocator) = kernel::frame_allocator::take() else {
-        logger.error(format_args!(
-            "fs-image-copy: the frame allocator is not available (someone did not give it back); \
-             halting"
-        ));
-        cpu::halt_forever();
+        return Err(FsImageCopyError::AllocatorMissing);
     };
 
     let bytes = FS_IMAGE.len() as u64;
@@ -4038,28 +4092,20 @@ fn copy_fs_image_to_frames(logger: &mut Logger<SerialPort>) {
     const HUGE_PAGE_FRAMES: u64 = (2 * 1024 * 1024) / FRAME_SIZE;
 
     let Some(base) = allocator.allocate_contiguous_aligned(frames, HUGE_PAGE_FRAMES) else {
-        logger.error(format_args!(
-            "fs-image-copy: could not allocate {frames} contiguous frame(s) for the {bytes}-byte              image; halting"
-        ));
-        cpu::halt_forever();
+        return Err(FsImageCopyError::AllocationFailed { frames, bytes });
     };
 
     let direct_map = common::addr::direct_map();
     // **覆いを先に見る。** `phys_to_virt` は覆いを検査せずに加算するだけなので、
     // **覆いの外を渡すと黙って別のアドレスを返す**（`address_space` と同じ作法）。
     let Some(last) = common::addr::PhysAddr::new(base.as_u64() + frames * FRAME_SIZE - 1) else {
-        logger.error(format_args!(
-            "fs-image-copy: the end of the copy is not a valid physical address; halting"
-        ));
-        cpu::halt_forever();
+        return Err(FsImageCopyError::EndNotPhysical);
     };
     if !direct_map.covers(base) || !direct_map.covers(last) {
-        logger.error(format_args!(
-            "fs-image-copy: the direct map does not cover {:#x}..{:#x}; halting",
-            base.as_u64(),
-            last.as_u64()
-        ));
-        cpu::halt_forever();
+        return Err(FsImageCopyError::NotCovered {
+            base: base.as_u64(),
+            last: last.as_u64(),
+        });
     }
 
     let destination = direct_map.phys_to_virt(base).as_u64() as *mut u8;
@@ -4127,10 +4173,7 @@ fn copy_fs_image_to_frames(logger: &mut Logger<SerialPort>) {
     ));
 
     if !identical {
-        logger.error(format_args!(
-            "fs-image-copy: the copy does not match the embedded image; halting"
-        ));
-        cpu::halt_forever();
+        return Err(FsImageCopyError::ReadBackMismatch);
     }
 
     // SAFETY: 複製先のフレームは起動中ずっと生き、いま誰も読んでいない。
@@ -4151,6 +4194,7 @@ fn copy_fs_image_to_frames(logger: &mut Logger<SerialPort>) {
     logger.info(format_args!(
         "fs-image-ready: the image is in its final state for this run"
     ));
+    Ok(())
 }
 
 /// ブロックビットマップの割り当てと解放を 1 往復させる（S12-b の 3 段目）。
