@@ -3346,23 +3346,35 @@ TCGで守れないもの
    既定の構成は作って消すので、見るべきinodeが残らない。
    像は`target/fs-extract-fs-create-keep-test.img`に出る。
 
-2. マウントして読む。**`-t ext2`を明示する**（理由は下記）
+2. **マウントする前に`dmesg`の末尾を控える。**
+   **後から`tail`だけを見ると、どの行が今回のものか分からない**
+
+        sudo dmesg | wc -l > /tmp/zaytos-dmesg-before.txt
+        sudo dmesg | tail -3
+
+3. マウントする。**`-t ext2`を明示する**（理由は下記）
 
         mkdir -p /tmp/zaytos-mnt
         sudo mount -t ext2 -o loop,ro target/fs-extract-fs-create-keep-test.img /tmp/zaytos-mnt
         mount | grep zaytos-mnt
-        ls -ln /tmp/zaytos-mnt/data
 
-3. 中身と長さを、ドライバ越しに突き合わせる
+4. **木を丸ごと見る。** **ZaytOSが触っていないものが壊れていないことは、
+   まだ誰も言っていない**
+
+        ls -lnR /tmp/zaytos-mnt
+
+5. **2本のファイルを、中身と長さでドライバ越しに突き合わせる。**
+   **`created`はZaytOSが作ったもの、`writable`はZaytOSが追記して縮めて戻したものである**
 
         python3 -c "
-        d = open('/tmp/zaytos-mnt/data/created','rb').read()
-        print('len =', len(d), '(expected 300)')
-        print('pattern ok =', d == bytes((i % 251) for i in range(len(d))))"
+        for path, want in (('created', 300), ('writable', 100)):
+            d = open('/tmp/zaytos-mnt/data/' + path, 'rb').read()
+            ok = d == bytes((i % 251) for i in range(len(d)))
+            print(f'{path}: len={len(d)} (expected {want})  pattern_ok={ok}')"
 
-4. カーネルの苦情を見て、外す
+6. 今回出た`dmesg`だけを見て、外す
 
-        sudo dmesg | tail -40
+        sudo dmesg | tail -n +$(( $(cat /tmp/zaytos-dmesg-before.txt) + 1 ))
         sudo umount /tmp/zaytos-mnt
 
 **`-t ext2`を明示する理由。** **この環境のカーネルは`ext2`・`ext3`・`ext4`の3つを
@@ -3372,15 +3384,54 @@ TCGで守れないもの
 **`ext2`で拒まれて`ext4`なら通る（あるいはその逆）なら、それ自体が観測である**——
 **そのときは両方を試し、結果を書き分けること。**
 
-#### 見るもの（3つ）
+#### 見るもの（5つ）
+
+**独立な読み手を呼ぶ機会は1度である。** **新しいinodeだけを見るのはもったいない**ので、
+**ZaytOSが触った2本と、触っていない木の全体まで見る。**
 
 - **マウントできるか。** できなければ`dmesg`に理由が出る
-- **`/data/created`（**ZaytOSが作ったinode**）が読めるか。長さは300バイトか。
+- **`/data/created`（**ZaytOSが作ったinode**）が読めるか。長さは300バイトで、
   中身は`i % 251`の並びか**——`i_size`と`i_block`と中身が揃っていることを、
   `debugfs`とは別の実装が言う
+- **`/data/writable`（**ZaytOSが追記して縮めて戻したファイル**）が壊れていないか。
+  長さは100バイトで、中身は`i % 251`の並びか。**
+  **この構成では、あの往復を見ている判定が1つも無い**——
+  **`e2fsck`は中身を見ず、S12-cとS12-dの中身の判定は別の構成（`fs-write-keep`・
+  `fs-truncate-keep`）に載っている。** 往復そのものは既定の構成の
+  バイト一致が見ているが、**それは同じコードを別の起動で見たものである。**
+  **この像のこの1本を読んだ者は、まだ誰もいない**
+  （`debugfs`では確かめた——100バイト・模様一致。**ドライバでは確かめていない**）
+- **木の全体が、建てた像と同じか**（下記「木の突き合わせ方」）
 - **`dmesg`に苦情が出るか。** **とくに`i_extra_isize`が0のinodeについて何か言うか**
   （上の「ext2へ書く側が、一度も書いていない欄」の1行目。
   **`e2fsck 1.47.0`は何も言わないが、ドライバが同じとは限らない**）
+
+#### 木の突き合わせ方
+
+**正は`kernel/fsimage/seed`と`kernel/build.rs`である。**
+**`ZaytOS`が足すのは`/data/created`の1本だけで、ほかは`mke2fs -d`が置いたものである。**
+
+**下は`debugfs`で読んだこの像の木である**（比べる相手として置く。目で見てよい）。
+
+    /            lost+found  bin  data  etc
+    /bin         cat  hello  ls  spawn-test  spin  zash
+    /data        direct-max  indirect-first  writable  created
+    /etc         motd
+    /lost+found  （空。予約された枠だけ）
+
+**大きさは2種類に分かれる。固定してよいものと、してはならないものがある。**
+
+- **固定してよい**——`build.rs`が決めている値である。
+  `direct-max`が49152（12 × 4096）、`indirect-first`が49153、`writable`が100、
+  `motd`が18、`created`が300（最後の1つだけはカーネルが書く量である）
+- **固定してはならない**——**`/bin`の6本はビルドで動く。**
+  ユーザープログラムが1行伸びれば変わる。**判定に書かないこと**
+  （上の「像の中の番号は、名前順と量で決まる」と同じ規律である）
+
+**持ち主も見ること。** **`/data/created`だけが`0 0`（root）で、
+`mke2fs -d`が置いたものは`1000 1000`である**（`lost+found`と`/`自身を除く）。
+**これは誤りではなく、選んでいないことの現れである**
+（上の表の`i_uid` / `i_gid`の行）。**ドライバ越しにもそう見えるはずである。**
 
 #### 回す時機
 
