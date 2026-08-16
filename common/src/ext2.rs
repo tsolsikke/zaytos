@@ -254,6 +254,10 @@ pub struct Ext2<'a> {
     feature_incompat: u32,
     feature_ro_compat: u32,
     group_count: u32,
+    /// `s_free_blocks_count`（S12-b）。**群ごとの欄と対で直す。**
+    free_blocks_count: u32,
+    /// `s_free_inodes_count`（S12-b）。
+    free_inodes_count: u32,
 }
 
 /// **`Debug` は手で書く。** `derive` すると像そのもの（2 MiB）が
@@ -277,6 +281,12 @@ pub struct BlockGroupDescriptor {
     pub block_bitmap: u32,
     pub inode_bitmap: u32,
     pub inode_table: u32,
+    /// `bg_free_blocks_count`（S12-b）。**割り当てで直す欄である。**
+    pub free_blocks_count: u16,
+    /// `bg_free_inodes_count`（S12-b）。
+    pub free_inodes_count: u16,
+    /// `bg_used_dirs_count`（S12-b）。**ディレクトリを作るときだけ動く。**
+    pub used_dirs_count: u16,
 }
 
 /// inode 1 つ分（読み取りに要る欄だけ）。
@@ -550,6 +560,8 @@ impl<'a> Ext2<'a> {
 
         let blocks_count = read_u32(sb, 4);
         let inodes_count = read_u32(sb, 0);
+        let free_blocks_count = read_u32(sb, 12);
+        let free_inodes_count = read_u32(sb, 16);
         let blocks_per_group = read_u32(sb, 32);
         let inodes_per_group = read_u32(sb, 40);
         if blocks_per_group == 0 || inodes_per_group == 0 {
@@ -588,6 +600,8 @@ impl<'a> Ext2<'a> {
             feature_incompat,
             feature_ro_compat: read_u32(sb, 100),
             group_count,
+            free_blocks_count,
+            free_inodes_count,
         };
 
         // 線3: group descriptor テーブル全体が像の中にあるか。
@@ -637,6 +651,14 @@ impl<'a> Ext2<'a> {
     pub fn feature_ro_compat(&self) -> u32 {
         self.feature_ro_compat
     }
+    /// `s_free_blocks_count`（S12-b）。
+    pub fn free_blocks_count(&self) -> u32 {
+        self.free_blocks_count
+    }
+    /// `s_free_inodes_count`（S12-b）。
+    pub fn free_inodes_count(&self) -> u32 {
+        self.free_inodes_count
+    }
     pub fn group_count(&self) -> u32 {
         self.group_count
     }
@@ -684,6 +706,14 @@ impl<'a> Ext2<'a> {
             block_bitmap: read_u32(raw, 0),
             inode_bitmap: read_u32(raw, 4),
             inode_table: read_u32(raw, 8),
+            // 破壊 (S12-b, ext2-group-count-offset): 空きブロック数を 2 バイト
+            // 先（空き inode 数の欄）から読む。**外の道具の値と食い違う。**
+            #[cfg(not(feature = "ext2-group-count-offset-break"))]
+            free_blocks_count: read_u16(raw, 12),
+            #[cfg(feature = "ext2-group-count-offset-break")]
+            free_blocks_count: read_u16(raw, 14),
+            free_inodes_count: read_u16(raw, 14),
+            used_dirs_count: read_u16(raw, 16),
         };
         for block in [
             descriptor.block_bitmap,
@@ -995,6 +1025,11 @@ mod tests {
         image[table..table + 4].copy_from_slice(&2u32.to_le_bytes());
         image[table + 4..table + 8].copy_from_slice(&3u32.to_le_bytes());
         image[table + 8..table + 12].copy_from_slice(&4u32.to_le_bytes());
+        // 空き数の3欄（S12-b）。**別々の値を書く**——同じ値だと、
+        // **欄を取り違えても気づけない。**
+        image[table + 12..table + 14].copy_from_slice(&7u16.to_le_bytes());
+        image[table + 14..table + 16].copy_from_slice(&5u16.to_le_bytes());
+        image[table + 16..table + 18].copy_from_slice(&3u16.to_le_bytes());
 
         // ルート inode（2 番）。**実測した像と同じ形にする**（`debugfs -R "stat <2>"`。
         // mode 040755・size 4096・`i_block[0]` = 20）。
@@ -1239,6 +1274,9 @@ mod tests {
                 block_bitmap: 2,
                 inode_bitmap: 3,
                 inode_table: 4,
+                free_blocks_count: 7,
+                free_inodes_count: 5,
+                used_dirs_count: 3,
             }
         );
         assert_eq!(

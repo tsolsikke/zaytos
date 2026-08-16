@@ -101,6 +101,8 @@ fs-copy-corrupt-tail-test = []
 # 破壊（S12-b）: 読む側を複製へ向けず、常に埋め込みの側を返す。
 # 判定行に出る番地がカーネル像の中になり、複製の番地と食い違う。
 fs-read-from-rodata-test = []
+# 破壊（S12-b）: 空きブロック数の欄を 2 バイトずらして読む。common へ転送する。
+ext2-group-count-offset-test = ["common/ext2-group-count-offset-break"]
 # 破壊（S12 前の手当て、C）: 止めた後に溜まっている入力を捨てない。
 # 止めた打鍵そのものが残り、次のプロンプトに `^C` が余分に出る。
 kill-keep-typed-input-test = []

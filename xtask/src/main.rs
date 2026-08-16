@@ -2255,8 +2255,27 @@ fn cmd_fs_image_extract(feature: Option<&str>) -> Result<()> {
     };
     println!("{context}: root_filesystem reads from the copy = {reads_the_copy}");
 
-    // **2 本目——取り出した像が、建てた像とバイト単位で一致すること。**
+    // **カーネルが読んだ空き数が、外の道具の値と一致すること（S12-b の 2 段目）。**
+    //
+    // **自分の解析を自分で確かめても、欄の位置を取り違えていれば気づけない。**
+    // **`dumpe2fs` は同じ像について独立した答えを持っている**ので、
+    // **突き合わせる相手にする**（`e2fsck` と同じ `e2fsprogs` にあり、道具は増えない）。
+    //
+    // **期待値を定数で持たない。** 像が変われば空き数も変わるので、
+    // **そのつど外の道具から取る。**
     let built = kernel_build_out_dir(&workspace_root)?.join(FS_IMAGE_NAME);
+    let expected_counts = dumpe2fs_free_counts(&built)?;
+    let kernel_counts = parse_kernel_free_counts(&serial);
+    let free_counts_agree = kernel_counts
+        .as_ref()
+        .is_some_and(|counts| *counts == expected_counts);
+    println!(
+        "{context}: the free counts match dumpe2fs = {free_counts_agree} (kernel {:?}, dumpe2fs \
+         {expected_counts:?})",
+        kernel_counts
+    );
+
+    // **2 本目——取り出した像が、建てた像とバイト単位で一致すること。**
     let identical = match (fs::read(&dump), fs::read(&built)) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
@@ -2273,7 +2292,7 @@ fn cmd_fs_image_extract(feature: Option<&str>) -> Result<()> {
     let fsck_ok = extracted && !summary.starts_with("the image was not extracted");
     println!("{context}: e2fsck accepted the extracted image = {fsck_ok} ({summary})");
 
-    if outside_kernel_image && reads_the_copy && identical && fsck_ok {
+    if outside_kernel_image && reads_the_copy && free_counts_agree && identical && fsck_ok {
         println!("{context}: PASS");
         Ok(())
     } else {
@@ -2287,6 +2306,102 @@ fn parse_copy_range(line: &str) -> Option<(u64, u64)> {
     let range = rest.split_whitespace().next()?;
     let (start, end) = range.split_once("..")?;
     Some((parse_hex(start)?, parse_hex(end)?))
+}
+
+/// 空き数のひとそろい（S12-b）。**superblock と群 0 の分である。**
+#[derive(Debug, PartialEq, Eq)]
+struct FreeCounts {
+    superblock_blocks: u64,
+    superblock_inodes: u64,
+    group_blocks: u64,
+    group_inodes: u64,
+    group_dirs: u64,
+}
+
+/// `dumpe2fs` に像の空き数を訊く（S12-b）。
+///
+/// **`e2fsck` と同じ `e2fsprogs` にある**ので、要る道具は増えない（実測で確かめた）。
+/// `LC_ALL=C` は出力を言語設定に依らせないため（`run_e2fsck` と同じ理由）。
+fn dumpe2fs_free_counts(image: &Path) -> Result<FreeCounts> {
+    let output = Command::new("dumpe2fs")
+        .env("LC_ALL", "C")
+        .arg(image)
+        .output()
+        .context(
+            "failed to invoke dumpe2fs (it ships with e2fsprogs, the same package as e2fsck and \
+             mke2fs, which the kernel build script already requires)",
+        )?;
+    if !output.status.success() {
+        bail!("dumpe2fs failed on {}: {}", image.display(), output.status);
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    // superblock 側は `Free blocks:` / `Free inodes:` の見出し行にある。
+    // **群の一覧にも同じ語が出る**（`  Free blocks: 79-511` は範囲であって数ではない）
+    // ので、**行頭で始まるものだけを取る。**
+    let header = |key: &str| -> Option<u64> {
+        text.lines()
+            .find(|line| line.starts_with(key))
+            .and_then(|line| line.split_once(':'))
+            .and_then(|(_, value)| value.trim().parse().ok())
+    };
+    // 群の側は `  433 free blocks, 233 free inodes, 5 directories` の 1 行にある。
+    let group = text
+        .lines()
+        .find(|line| line.contains(" free blocks, ") && line.contains(" free inodes, "))
+        .map(|line| {
+            let numbers: Vec<u64> = line
+                .split_whitespace()
+                .filter_map(|word| word.parse().ok())
+                .collect();
+            numbers
+        })
+        .unwrap_or_default();
+
+    match (
+        header("Free blocks:"),
+        header("Free inodes:"),
+        group.first(),
+        group.get(1),
+        group.get(2),
+    ) {
+        (Some(sb), Some(si), Some(gb), Some(gi), Some(gd)) => Ok(FreeCounts {
+            superblock_blocks: sb,
+            superblock_inodes: si,
+            group_blocks: *gb,
+            group_inodes: *gi,
+            group_dirs: *gd,
+        }),
+        _ => bail!(
+            "could not parse the free counts out of dumpe2fs for {}",
+            image.display()
+        ),
+    }
+}
+
+/// 起動ログから、カーネルが読んだ空き数を取る。
+fn parse_kernel_free_counts(serial: &str) -> Option<FreeCounts> {
+    let sb = serial
+        .lines()
+        .find(|l| l.contains("ext2: superblock free counts: "))?;
+    let group = serial
+        .lines()
+        .find(|l| l.contains("ext2: group 0 free counts: "))?;
+    let field = |line: &str, key: &str| -> Option<u64> {
+        line.split(key)
+            .nth(1)?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    };
+    Some(FreeCounts {
+        superblock_blocks: field(sb, "blocks=")?,
+        superblock_inodes: field(sb, "inodes=")?,
+        group_blocks: field(group, "blocks=")?,
+        group_inodes: field(group, "inodes=")?,
+        group_dirs: field(group, "dirs=")?,
+    })
 }
 
 /// `fs-image-source` の行から、読んでいる先の物理アドレスを読む。
@@ -7393,6 +7508,18 @@ fn cmd_check(full: bool) -> Result<()> {
             Err(_) => println!("--- fs extract (read from rodata): OK (the sabotage was caught)"),
         }
 
+        // **空き数の欄を正しい位置から読んでいることの反証（S12-b の 2 段目）。**
+        // **自分の解析を自分で確かめても、欄を取り違えていれば気づけない。**
+        total += 1;
+        println!("=== xtask check: the fs extract catches a shifted group-descriptor field");
+        match cmd_fs_image_extract(Some("ext2-group-count-offset-test")) {
+            Ok(()) => {
+                println!("--- fs extract (shifted field): FAILED (the sabotage was NOT caught)");
+                failed.push("fs extract (shifted field)".to_string());
+            }
+            Err(_) => println!("--- fs extract (shifted field): OK (the sabotage was caught)"),
+        }
+
         for feature in KILL_SABOTAGES {
             total += 1;
             println!("=== xtask check: the shell test catches the sabotage {feature}");
@@ -7883,7 +8010,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 144,
+    full: 145,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

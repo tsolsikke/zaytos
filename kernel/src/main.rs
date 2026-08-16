@@ -4172,6 +4172,13 @@ fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
         fs.feature_ro_compat()
     ));
 
+    // **superblock 側の空き数（S12-b）。** 群ごとの欄と対で直すことになる。
+    logger.info(format_args!(
+        "ext2: superblock free counts: blocks={} inodes={}",
+        fs.free_blocks_count(),
+        fs.free_inodes_count()
+    ));
+
     // **像の大きさは build.rs が知っている値と一致するはず。** 食い違えば、
     // 抱えた像と建てた像が別物である。
     if FS_IMAGE.len() as u64 != fsimage_info::IMAGE_BYTES {
@@ -4187,10 +4194,22 @@ fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
     // ことは `group_descriptor` が見ている**（線3）。
     for group in 0..fs.group_count() {
         match fs.group_descriptor(group) {
-            Ok(descriptor) => logger.info(format_args!(
-                "ext2: group {group}: block bitmap at {} inode bitmap at {} inode table at {}",
-                descriptor.block_bitmap, descriptor.inode_bitmap, descriptor.inode_table
-            )),
+            Ok(descriptor) => {
+                logger.info(format_args!(
+                    "ext2: group {group}: block bitmap at {} inode bitmap at {} inode table at {}",
+                    descriptor.block_bitmap, descriptor.inode_bitmap, descriptor.inode_table
+                ));
+                // **空き数を出す（S12-b）。** **これを解析しただけでは、
+                // 正しく読めているかを自分では言えない**——**外の道具
+                // （`dumpe2fs`）が同じ像について答えを持っているので、
+                // xtask がそれと突き合わせる。**
+                logger.info(format_args!(
+                    "ext2: group {group} free counts: blocks={} inodes={} dirs={}",
+                    descriptor.free_blocks_count,
+                    descriptor.free_inodes_count,
+                    descriptor.used_dirs_count
+                ));
+            }
             Err(e) => {
                 logger.error(format_args!(
                     "ext2: group {group} descriptor is not usable: {e:?}; halting"
@@ -7532,6 +7551,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "fs-read-from-rodata-test",
         cfg!(feature = "fs-read-from-rodata-test"),
         "読む側を複製へ向けず、埋め込みの側を返す",
+    ),
+    (
+        "ext2-group-count-offset-test",
+        cfg!(feature = "ext2-group-count-offset-test"),
+        "空きブロック数の欄を 2 バイトずらして読む",
     ),
     (
         "kill-keep-typed-input-test",

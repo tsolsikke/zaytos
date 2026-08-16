@@ -11,3 +11,7 @@ publish = false
 # ないので、この feature が届いても bootloader の挙動には影響しない**（gate する
 # コードが bootloader からは到達不能。kernel ビルドでのみ effective）。
 preempt-in-critical-break = []
+# 破壊（S12-b）: group descriptor の空きブロック数を、2 バイト先（空き inode 数の
+# 欄）から読む。**外の道具（dumpe2fs）の値と食い違う。** ホストの単体テストも
+# 落ちる（あちらは 3 つの欄へ別々の値を書いて offset を見ている）。
+ext2-group-count-offset-break = []
