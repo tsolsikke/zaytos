@@ -1340,8 +1340,28 @@ pub fn truncate_to(
         return Err(AllocError::NotAllocated(ino));
     }
 
+    // 破壊 (S12-d, ext2-truncate-off-by-one): 1 ブロック余分に返す。
+    // **`e2fsck` が参照されているブロックの不足を言う。**
+    #[cfg(not(feature = "ext2-truncate-off-by-one"))]
     let keep = target.div_ceil(block_size);
+    #[cfg(feature = "ext2-truncate-off-by-one")]
+    let keep = target.div_ceil(block_size).saturating_sub(1);
+
     let have = size.div_ceil(block_size);
+
+    // 破壊 (S12-d, ext2-truncate-always-free): 返す必要が無くても 1 つ返す。
+    // **同じブロックの中で縮める道**（会計が動かない道）**を壊す。**
+    //
+    // **`have` を 1 つ増やす形では破壊にならなかった**（実測）——
+    // **file の外のスロットは 0 なので、ループが素通りする。**
+    // **実際に参照されているブロックを返さないと、状態が変わらない**（族の 1 つ目）。
+    #[cfg(feature = "ext2-truncate-always-free")]
+    let keep = if keep == have {
+        keep.saturating_sub(1)
+    } else {
+        keep
+    };
+
     for index in (keep..have).rev() {
         let slot = inode + 40 + index as usize * 4;
         let block = read_u32(image, slot);
@@ -1353,7 +1373,14 @@ pub fn truncate_to(
         if at + block_size as usize <= image.len() {
             image[at..at + block_size as usize].fill(0);
         }
+        // 破壊 (S12-d, ext2-truncate-keep-slot): `i_block` の欄を 0 にしない。
+        // **返したブロックを inode がまだ指しているので、
+        // `e2fsck` が多重請求として捕まえる。**
+        #[cfg(not(feature = "ext2-truncate-keep-slot"))]
         image[slot..slot + 4].copy_from_slice(&0u32.to_le_bytes());
+        // 破壊 (S12-d, ext2-truncate-skip-free): ブロックを返さない。
+        // **`i_size` だけが縮み、空き数が増えない。**
+        #[cfg(not(feature = "ext2-truncate-skip-free"))]
         free_block(image, layout, block)?;
     }
 
@@ -1361,6 +1388,12 @@ pub fn truncate_to(
     if keep > 0 {
         let last = read_u32(image, inode + 40 + (keep - 1) as usize * 4);
         let tail = target % block_size;
+        // 破壊 (S12-d, ext2-truncate-keep-tail): 切った先を 0 で埋めない。
+        // **前の中身が残るので、読み戻すと出る。**
+        // **埋める前の中身が既に 0 なら効かない**（族の 1 つ目）ので、
+        // **追記で書く中身は位置から決まる形にしてある。**
+        #[cfg(feature = "ext2-truncate-keep-tail")]
+        let tail = 0u32;
         if last != 0 && tail != 0 {
             let at = usize::try_from(u64::from(last) * u64::from(block_size))
                 .map_err(|_| AllocError::ImageTooSmall)?
@@ -1374,6 +1407,8 @@ pub fn truncate_to(
 
     image[inode + 4..inode + 8].copy_from_slice(&target.to_le_bytes());
     let sectors = keep * layout.sectors_per_block();
+    // 破壊 (S12-d, ext2-truncate-skip-blocks): `i_blocks` を直さない。
+    #[cfg(not(feature = "ext2-truncate-skip-blocks"))]
     image[inode + 28..inode + 32].copy_from_slice(&sectors.to_le_bytes());
     Ok(())
 }

@@ -108,6 +108,15 @@ ext2-group-count-offset-test = ["common/ext2-group-count-offset-break"]
 fs-alloc-keep-test = []
 # 変種（S12-c）: 追記した中身を戻さない。**壊さない**——書いたままの像を作る。
 fs-write-keep-test = []
+# 変種（S12-d）: 縮めた後に元へ戻さない。**壊さない**——0 のままの像を作る。
+fs-truncate-keep-test = []
+# 破壊（S12-d）: truncate の6種。いずれも common へ転送する。
+ext2-truncate-off-by-one-test = ["common/ext2-truncate-off-by-one"]
+ext2-truncate-always-free-test = ["common/ext2-truncate-always-free"]
+ext2-truncate-keep-slot-test = ["common/ext2-truncate-keep-slot"]
+ext2-truncate-skip-free-test = ["common/ext2-truncate-skip-free"]
+ext2-truncate-keep-tail-test = ["common/ext2-truncate-keep-tail"]
+ext2-truncate-skip-blocks-test = ["common/ext2-truncate-skip-blocks"]
 # 破壊（S12-c）: 追記の6種。いずれも common へ転送する。
 ext2-append-skip-size-test = ["common/ext2-append-skip-size"]
 ext2-append-round-size-test = ["common/ext2-append-round-size"]

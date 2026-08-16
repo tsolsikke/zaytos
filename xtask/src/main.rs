@@ -2169,15 +2169,22 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
         .context("failed to launch qemu-system-x86_64 for the fs image extraction")?;
 
     // **複製の行が出るまで待つ。上限つき。**
+    // **取り出す合図。** **複製した直後ではなく、像の作業が終わった時点である。**
+    // **`fs-image-copy` を合図にすると、割り当て・追記・縮めの途中で取り出しうる**
+    // （実測で踏んだ）。
+    let ready_marker = "fs-image-ready:";
     let marker = "fs-image-copy: copied ";
     let source_marker = "fs-image-source: root_filesystem reads from ";
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     let mut copied_line = None;
     while Instant::now() < deadline {
         if let Ok(text) = fs::read_to_string(&serial_log) {
-            if let Some(line) = text.lines().find(|l| l.contains(marker)) {
-                copied_line = Some(line.to_string());
-                break;
+            // **完了の行を待ってから、複製の行を拾う。**
+            if text.contains(ready_marker) {
+                if let Some(line) = text.lines().find(|l| l.contains(marker)) {
+                    copied_line = Some(line.to_string());
+                    break;
+                }
             }
         }
         thread::sleep(PANIC_TEST_POLL_INTERVAL);
@@ -2301,7 +2308,36 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
         std::vec!["the image was not extracted".to_string()]
     };
 
-    let (identical, fsck_ok) = if keep_written {
+    // **0 まで縮めたままの像か（S12-d）。**
+    let keep_truncated = features.contains(&TRUNCATE_KEEP_FEATURE);
+
+    let (identical, fsck_ok) = if keep_truncated {
+        // **空のファイルは ext2 として正しい。** **`e2fsck` は無傷と判定する。**
+        let clean = extracted && complaints.is_empty();
+        println!(
+            "{context}: e2fsck found nothing to complain about = {clean} (complaints: \
+             {complaints:?})"
+        );
+
+        // **長さが 0 であること。** **外の道具に読ませる**（自分で言わない）。
+        let actual = debugfs_read_writable(&dump)?;
+        let emptied = actual.is_empty();
+        println!(
+            "{context}: the file reads back empty = {emptied} ({} byte(s))",
+            actual.len()
+        );
+
+        // **持っていたブロックが返っていること。**
+        // **1 ブロックのファイルを空にしたので、空き数は 1 つ増える。**
+        let after = dumpe2fs_free_counts(&dump)?;
+        let returned = after.superblock_blocks == expected_counts.superblock_blocks + 1;
+        println!(
+            "{context}: the block it held came back = {returned} (built {}, extracted {})",
+            expected_counts.superblock_blocks, after.superblock_blocks
+        );
+
+        (emptied && returned, clean)
+    } else if keep_written {
         // **追記したままの像（S12-c）。** **中身が inode から参照され、会計が
         // 締まっているので、`e2fsck` は不満を 1 本も言わないはずである**（実測）。
         let clean = extracted && complaints.is_empty();
@@ -2417,6 +2453,38 @@ const FS_BITMAP_SABOTAGES: &[(&str, &[&str])] = &[
         "freeing without clearing the bit",
         &["ext2-free-skip-bit-test"],
     ),
+];
+
+/// 0 まで縮めてそのままにする構成の feature 名（S12-d）。**変種であって破壊ではない。**
+const TRUNCATE_KEEP_FEATURE: &str = "fs-truncate-keep-test";
+
+/// 縮める破壊（S12-d）。**6 つとも既定の構成（往復）で見る。**
+///
+/// **往復のバイト一致が要である**——**`e2fsck` は 4 つを無傷と判定する。**
+/// 返し過ぎ・返さなさ過ぎ・切った先の埋め損ねは、**像には残るが
+/// ext2 として不整合ではない**（使われていないブロックの中身は自由である）。
+const FS_TRUNCATE_SABOTAGES: &[(&str, &[&str])] = &[
+    (
+        "freeing one block too many",
+        &["ext2-truncate-off-by-one-test"],
+    ),
+    (
+        "freeing a block when none should be returned",
+        &["ext2-truncate-always-free-test"],
+    ),
+    (
+        "leaving the freed block in the inode",
+        &["ext2-truncate-keep-slot-test"],
+    ),
+    (
+        "shrinking without freeing",
+        &["ext2-truncate-skip-free-test"],
+    ),
+    (
+        "leaving the bytes past the new end",
+        &["ext2-truncate-keep-tail-test"],
+    ),
+    ("a stale i_blocks", &["ext2-truncate-skip-blocks-test"]),
 ];
 
 /// 追記の破壊と、それぞれが要る構成（S12-c）。**6 つとも書いたままの像で見る。**
@@ -7840,6 +7908,29 @@ fn cmd_check(full: bool) -> Result<()> {
             }
         }
 
+        // **縮める道（S12-d）。** **0 まで縮める道は戻さない変種で通る。**
+        total += 1;
+        println!("=== xtask check: shrinking a file returns exactly the blocks it should");
+        match cmd_fs_image_extract(&[TRUNCATE_KEEP_FEATURE]) {
+            Ok(()) => println!("--- fs truncate (emptied): OK"),
+            Err(error) => {
+                println!("--- fs truncate (emptied): FAILED ({error})");
+                failed.push("fs truncate (emptied)".to_string());
+            }
+        }
+
+        for (label, features) in FS_TRUNCATE_SABOTAGES {
+            total += 1;
+            println!("=== xtask check: the fs truncate check catches {label}");
+            match cmd_fs_image_extract(features) {
+                Ok(()) => {
+                    println!("--- fs truncate ({label}): FAILED (the sabotage was NOT caught)");
+                    failed.push(format!("fs truncate ({label})"));
+                }
+                Err(_) => println!("--- fs truncate ({label}): OK (the sabotage was caught)"),
+            }
+        }
+
         for (label, features) in FS_WRITE_SABOTAGES {
             total += 1;
             println!("=== xtask check: the fs write check catches {label}");
@@ -8354,7 +8445,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 157,
+    full: 164,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

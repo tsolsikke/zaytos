@@ -4138,6 +4138,19 @@ fn copy_fs_image_to_frames(logger: &mut Logger<SerialPort>) {
     let writable: &'static mut [u8] =
         unsafe { core::slice::from_raw_parts_mut(destination, bytes as usize) };
     exercise_block_bitmap(logger, writable);
+
+    // **像がこの起動での最終形になったことを告げる（S12-d）。**
+    //
+    // **ホスト側はこの行を待ってから取り出す。**
+    // **`fs-image-copy` の行を合図にしてはならない**——**あれは複製した直後に出る**
+    // ので、**その後の割り当て・追記・縮めが終わる前に取り出しうる。**
+    //
+    // **実測で踏んだ**——S12-d で作業が伸びたとき、
+    // **追記 1 の直後（300 バイト）の像を取り出していた。**
+    // **それまでの段で表に出なかったのは、作業が短くて間に合っていただけである。**
+    logger.info(format_args!(
+        "fs-image-ready: the image is in its final state for this run"
+    ));
 }
 
 /// ブロックビットマップの割り当てと解放を 1 往復させる（S12-b の 3 段目）。
@@ -4318,12 +4331,124 @@ fn exercise_file_append(
 
     #[cfg(not(feature = "fs-write-keep-test"))]
     {
+        exercise_truncate(logger, image, layout, ino, original_size);
+    }
+}
+
+/// 縮める道を境界ごとに通す（S12-d）。
+///
+/// # どの長さを通すか
+///
+/// **`ceil(size / block_size)` の取り違えは境界に住む。**
+/// **ちょうど `N*4096` ならブロックは N 個、`N*4096 + 1` なら N+1 個である。**
+/// **1 つずれる誤りは、境界を通さない限り出ない。**
+///
+/// **通すのは 5 つ。**
+///
+/// - **ちょうど境界**（`8192`、`4096`）
+/// - **境界の 1 つ先**（`4097`）
+/// - **同じブロックの中**（`4096` から `4000`）——**返すブロックが 0 の道である。**
+///   **S12-c の追記 1 と対になる**（会計が動かない道）
+/// - **0**——ブロックを全部返し、`i_block` を全部 0 にする
+///
+/// # 最後に元へ戻す
+///
+/// **0 まで縮めてから、初めの中身を書き直す。**
+/// **戻すので、取り出した像は建てた像とバイト単位で一致するはずである。**
+fn exercise_truncate(
+    logger: &mut Logger<SerialPort>,
+    image: &mut [u8],
+    layout: &common::ext2::Layout,
+    ino: u32,
+    original_size: u32,
+) {
+    use common::ext2::Ext2;
+
+    /// 縮める先。**境界・境界の 1 つ先・同じブロックの中を通す。**
+    ///
+    /// **0 はここに入れない。** **0 まで縮めるとブロック全体が 0 で埋まり、
+    /// 「切った先を埋めなかった」痕跡が消える**（実測で踏んだ——
+    /// `keep-tail` と `off-by-one` が捕まらなかった）。
+    /// **0 は戻さない変種の側で通す。**
+    const TARGETS: &[u32] = &[8192, 4097, 4096, 4000];
+
+    // **まず 4 ブロックまで伸ばす。** 上の 5 つを順に通せる高さが要る。
+    let grown = 12289u32;
+    let current = Ext2::parse(image)
+        .and_then(|fs| fs.inode(ino))
+        .map(|inode| inode.size as u32)
+        .unwrap_or(0);
+    let mut filler = [0u8; 8192];
+    for (index, slot) in filler.iter_mut().enumerate() {
+        *slot = (index % 251) as u8;
+    }
+    let need = (grown - current) as usize;
+    if let Err(e) = common::ext2::append_to_file(image, layout, ino, &filler[..need]) {
+        logger.error(format_args!("fs-truncate: could not grow: {e:?}; halting"));
+        cpu::halt_forever();
+    }
+
+    for target in TARGETS {
+        let before = Ext2::parse(image)
+            .map(|fs| fs.free_blocks_count())
+            .unwrap_or(0);
+        if let Err(e) = common::ext2::truncate_to(image, layout, ino, *target) {
+            logger.error(format_args!(
+                "fs-truncate: truncate to {target} failed: {e:?}; halting"
+            ));
+            cpu::halt_forever();
+        }
+        let after = Ext2::parse(image)
+            .map(|fs| fs.free_blocks_count())
+            .unwrap_or(0);
+        logger.info(format_args!(
+            "fs-truncate: shrank inode {ino} to {target} byte(s); free blocks {before} -> {after} \
+             (returned {})",
+            after.saturating_sub(before)
+        ));
+    }
+
+    // 変種 (S12-d, fs-truncate-keep): 0 まで縮めてそのままにする。
+    // **ブロックを全部返し、`i_block` を全部 0 にする道はここで通る。**
+    #[cfg(feature = "fs-truncate-keep-test")]
+    {
+        let _ = original_size;
+        let before = Ext2::parse(image)
+            .map(|fs| fs.free_blocks_count())
+            .unwrap_or(0);
+        if let Err(e) = common::ext2::truncate_to(image, layout, ino, 0) {
+            logger.error(format_args!(
+                "fs-truncate: truncate to 0 failed: {e:?}; halting"
+            ));
+            cpu::halt_forever();
+        }
+        let after = Ext2::parse(image)
+            .map(|fs| fs.free_blocks_count())
+            .unwrap_or(0);
+        logger.info(format_args!(
+            "fs-truncate: shrank inode {ino} to 0 byte(s); free blocks {before} -> {after} \
+             (returned {})",
+            after.saturating_sub(before)
+        ));
+    }
+
+    #[cfg(not(feature = "fs-truncate-keep-test"))]
+    {
+        // **初めの大きさまで縮めて戻す。**
+        //
+        // **0 を経由しない。** 経由すると**ブロック全体が 0 で埋まり、
+        // 「切った先を埋めなかった」痕跡が消える**（実測で踏んだ）。
+        // **ここを通ると埋め損ねが像に残る**ので、往復のバイト一致が見る。
+        //
+        // **中身を書き直す必要も無い**——初めの 100 バイトは一度も上書きしていない。
         if let Err(e) = common::ext2::truncate_to(image, layout, ino, original_size) {
-            logger.error(format_args!("fs-write: truncate failed: {e:?}; halting"));
+            logger.error(format_args!(
+                "fs-truncate: could not restore: {e:?}; halting"
+            ));
             cpu::halt_forever();
         }
         logger.info(format_args!(
-            "fs-write: truncated inode {ino} back to {original_size} byte(s)"
+            "fs-truncate: restored inode {ino} to {original_size} byte(s)"
         ));
     }
 }
@@ -7753,6 +7878,41 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "ext2-group-count-offset-test",
         cfg!(feature = "ext2-group-count-offset-test"),
         "空きブロック数の欄を 2 バイトずらして読む",
+    ),
+    (
+        "fs-truncate-keep-test",
+        cfg!(feature = "fs-truncate-keep-test"),
+        "壊さない。0 まで縮めてそのままにする",
+    ),
+    (
+        "ext2-truncate-off-by-one-test",
+        cfg!(feature = "ext2-truncate-off-by-one-test"),
+        "縮めるときに 1 ブロック余分に返す",
+    ),
+    (
+        "ext2-truncate-always-free-test",
+        cfg!(feature = "ext2-truncate-always-free-test"),
+        "返す必要が無くても 1 つ返す",
+    ),
+    (
+        "ext2-truncate-keep-slot-test",
+        cfg!(feature = "ext2-truncate-keep-slot-test"),
+        "返したブロックを i_block へ残す",
+    ),
+    (
+        "ext2-truncate-skip-free-test",
+        cfg!(feature = "ext2-truncate-skip-free-test"),
+        "縮めてもブロックを返さない",
+    ),
+    (
+        "ext2-truncate-keep-tail-test",
+        cfg!(feature = "ext2-truncate-keep-tail-test"),
+        "切った先を 0 で埋めない",
+    ),
+    (
+        "ext2-truncate-skip-blocks-test",
+        cfg!(feature = "ext2-truncate-skip-blocks-test"),
+        "縮めるときに i_blocks を直さない",
     ),
     (
         "fs-write-keep-test",
