@@ -2,7 +2,7 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::Write,
+    io::{Read, Write},
     os::unix::{ffi::OsStrExt, net::UnixStream},
     path::{Path, PathBuf},
     process::Command,
@@ -1316,7 +1316,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 fn main() -> Result<()> {
     const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
        cargo xtask run --shell-test [--drop-arrows]
-       cargo xtask run --fs-extract [--sabotage FEATURE]
+       cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
@@ -1429,6 +1429,15 @@ fn main() -> Result<()> {
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
                 return cmd_fs_image_extract(&features);
+            }
+            if rest.iter().any(|a| a == "--pci-test") {
+                let features: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                return cmd_pci_test(&features);
             }
             if rest.iter().any(|a| a == "--shell-test") {
                 let mode = if rest.iter().any(|a| a == "--drop-arrows") {
@@ -3009,6 +3018,270 @@ impl ShellTestMode {
 /// # 破壊も同じ関数で走らせる
 ///
 /// **[`ShellTestMode`] を見ること。** 打鍵を流す仕組みは 1 つで足りる。
+/// PCI 列挙の破壊の一覧（S13-a）。
+const PCI_SABOTAGES: &[(&str, &str)] = &[
+    ("a shifted ID register", "pci-config-offset-test"),
+    (
+        "an ignored multifunction bit",
+        "pci-ignore-multifunction-test",
+    ),
+    (
+        "a scan that stops at the first device",
+        "pci-stop-at-first-test",
+    ),
+];
+
+/// カーネルの PCI 列挙を、QEMU 自身の帳簿（`info pci`）と突き合わせる（S13-a）。
+///
+/// **期待値を定数で持たない。** bus / device の並びは QEMU の側の事情なので、
+/// 同じ起動の QEMU から `info pci` で取り、カーネルの判定行と両側から比べる
+/// （S12 の `dumpe2fs` と同じ形——外の道具が独立した答えを持っている）。
+fn cmd_pci_test(features: &[&str]) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let kernel_elf = build_kernel_with_features(&workspace_root, features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    // **構成ごとに別のログへ書く**（`cmd_fs_image_extract` と同じ理由）。
+    let tag = if features.is_empty() {
+        "default".to_string()
+    } else {
+        features.join("-")
+    };
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("pci-test-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+    let monitor_socket =
+        PathBuf::from(format!("/tmp/zaytos-xtask-pci-{}.sock", std::process::id()));
+    let _ = fs::remove_file(&monitor_socket);
+    ensure_socket_path_fits(&monitor_socket)?;
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: Some(&monitor_socket),
+        accelerator: Accelerator::Tcg,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the pci test")?;
+
+    // 列挙の完了を待つ。上限つき。
+    let complete_marker = "pci: enumeration complete:";
+    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    while Instant::now() < deadline {
+        let text = fs::read_to_string(&serial_log).unwrap_or_default();
+        if text.contains(complete_marker) {
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let context = if features.is_empty() {
+        "pci-test".to_string()
+    } else {
+        format!("pci-test {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    // **同じ起動の QEMU から装置の帳簿を取る。** ここが外の道具である。
+    let info_pci = match connect_monitor_with_retry(&monitor_socket) {
+        Ok(mut stream) => query_monitor(&mut stream, "info pci").unwrap_or_default(),
+        Err(e) => {
+            println!("{context}: could not reach the QEMU monitor: {e}");
+            String::new()
+        }
+    };
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = fs::remove_file(&monitor_socket);
+
+    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let qemu_debug = fs::read_to_string(&debug_log).unwrap_or_default();
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+    if !serial.contains(complete_marker) {
+        bail!("{context}: the kernel never reported {complete_marker:?}");
+    }
+
+    let mut kernel_functions = parse_kernel_pci_lines(&serial);
+    kernel_functions.sort();
+    let mut qemu_functions = parse_info_pci(&info_pci);
+    qemu_functions.sort();
+
+    // **空の帳簿を一致にしない。** モニタが読めなかったときは両方空でも落とす
+    // ——「適用外」を緑にしない。
+    let sets_match = kernel_functions == qemu_functions && !qemu_functions.is_empty();
+    println!(
+        "{context}: kernel enumerated {} function(s), qemu reports {}; the sets match = \
+         {sets_match} (bus/device/function and vendor:device, both sides read independently)",
+        kernel_functions.len(),
+        qemu_functions.len()
+    );
+
+    let kernel_virtio = count_virtio_blk(&kernel_functions);
+    let qemu_virtio = count_virtio_blk(&qemu_functions);
+    println!(
+        "{context}: virtio-blk (1af4:1001 or 1af4:1041) in the kernel's list = {kernel_virtio}, \
+         in qemu's list = {qemu_virtio} (wanted exactly 1 in both)"
+    );
+
+    // **ポートで読むという前提の観測。** 0 でなくなったら設計の見直しである。
+    let mcfg_zero = serial.contains("acpi: MCFG tables: 0 ");
+    println!(
+        "{context}: the kernel observed 0 MCFG tables = {mcfg_zero} (the premise of the \
+         port 0xCF8/0xCFC access)"
+    );
+
+    if !sets_match || kernel_virtio != 1 || qemu_virtio != 1 || !mcfg_zero {
+        bail!("{context}: the pci enumeration does not agree with qemu's own device list");
+    }
+    Ok(())
+}
+
+/// カーネルの列挙の判定行から `(bus, device, function, "vvvv:dddd")` を拾う。
+///
+/// **形の合わない行は黙って読み飛ばさず、そもそも拾えない**——各段の
+/// 突き合わせ（`device` / `function` / コロン）に外れた時点で次の行へ進む。
+/// `pci: enumeration complete:` のような同じ接頭辞の行はここで弾かれる。
+fn parse_kernel_pci_lines(serial: &str) -> Vec<(u8, u8, u8, String)> {
+    let mut out = Vec::new();
+    for line in serial.lines() {
+        let Some((_, rest)) = line.split_once("pci: bus ") else {
+            continue;
+        };
+        let mut tokens = rest.split_whitespace();
+        let Some(bus) = tokens.next().and_then(|t| t.parse::<u8>().ok()) else {
+            continue;
+        };
+        if tokens.next() != Some("device") {
+            continue;
+        }
+        let Some(device) = tokens.next().and_then(|t| t.parse::<u8>().ok()) else {
+            continue;
+        };
+        if tokens.next() != Some("function") {
+            continue;
+        }
+        let Some(function) = tokens
+            .next()
+            .and_then(|t| t.strip_suffix(':'))
+            .and_then(|t| t.parse::<u8>().ok())
+        else {
+            continue;
+        };
+        let Some(id) = tokens.next() else {
+            continue;
+        };
+        out.push((bus, device, function, id.to_string()));
+    }
+    out
+}
+
+/// `info pci` の出力から `(bus, device, function, "vvvv:dddd")` を拾う。
+///
+/// **`PCI subsystem` の行は拾わない**——装置の ID の行は `: PCI device ` を
+/// 含み、subsystem の行は含まない。
+fn parse_info_pci(text: &str) -> Vec<(u8, u8, u8, String)> {
+    let mut out = Vec::new();
+    let mut current: Option<(u8, u8, u8)> = None;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.starts_with("Bus") {
+            // 「Bus  0, device   4, function 0:」——数字だけを順に拾う。
+            let mut numbers = line
+                .split(|c: char| !c.is_ascii_digit())
+                .filter(|s| !s.is_empty())
+                .filter_map(|s| s.parse::<u8>().ok());
+            current = match (numbers.next(), numbers.next(), numbers.next()) {
+                (Some(bus), Some(device), Some(function)) => Some((bus, device, function)),
+                _ => None,
+            };
+        } else if let Some((_, id_part)) = line.split_once(": PCI device ") {
+            if let (Some((bus, device, function)), Some(id)) =
+                (current, id_part.split_whitespace().next())
+            {
+                out.push((bus, device, function, id.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// virtio-blk の数を数える。transitional（`1001`）と modern（`1041`）の両方。
+fn count_virtio_blk(functions: &[(u8, u8, u8, String)]) -> usize {
+    functions
+        .iter()
+        .filter(|(_, _, _, id)| id == "1af4:1001" || id == "1af4:1041")
+        .count()
+}
+
+/// モニタへ 1 コマンドを送り、次のプロンプトまでの応答を返す。
+///
+/// **どちらの待ちも上限つきである**（`CLAUDE.md` のシェルコマンドの制約と
+/// 同じ理由。パイプの相手が死んでいる状況は普通に起きる）。
+fn query_monitor(stream: &mut UnixStream, command: &str) -> Result<String> {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .context("failed to set the monitor read timeout")?;
+    let mut scratch = [0u8; 4096];
+    // 接続直後のバナーと最初のプロンプトを読み捨てる。
+    let mut banner = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !banner.contains("(qemu)") {
+        if Instant::now() >= deadline {
+            bail!("timed out waiting for the monitor banner");
+        }
+        match stream.read(&mut scratch) {
+            Ok(0) => bail!("the monitor closed the connection"),
+            Ok(n) => banner.push_str(&String::from_utf8_lossy(&scratch[..n])),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(e).context("failed to read the monitor banner"),
+        }
+    }
+    stream
+        .write_all(format!("{command}\n").as_bytes())
+        .context("failed to send the monitor command")?;
+    let mut response = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !response.contains("(qemu)") {
+        if Instant::now() >= deadline {
+            bail!("timed out waiting for the monitor response");
+        }
+        match stream.read(&mut scratch) {
+            Ok(0) => break,
+            Ok(n) => response.push_str(&String::from_utf8_lossy(&scratch[..n])),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(e).context("failed to read the monitor response"),
+        }
+    }
+    Ok(response)
+}
+
 fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
@@ -8284,6 +8557,30 @@ fn cmd_check(full: bool) -> Result<()> {
             }
         }
 
+        // **PCI の列挙（S13-a）。** 判定は QEMU 自身の帳簿（`info pci`）との
+        // 突き合わせで、期待値の定数を持たない。
+        total += 1;
+        println!("=== xtask check: the pci enumeration matches qemu's own device list");
+        match cmd_pci_test(&[]) {
+            Ok(()) => println!("--- pci enumeration: OK"),
+            Err(error) => {
+                println!("--- pci enumeration: FAILED ({error})");
+                failed.push("pci enumeration".to_string());
+            }
+        }
+
+        for (label, feature) in PCI_SABOTAGES {
+            total += 1;
+            println!("=== xtask check: the pci enumeration catches {label}");
+            match cmd_pci_test(&[feature]) {
+                Ok(()) => {
+                    println!("--- pci enumeration ({label}): FAILED (the sabotage was NOT caught)");
+                    failed.push(format!("pci enumeration ({label})"));
+                }
+                Err(_) => println!("--- pci enumeration ({label}): OK (the sabotage was caught)"),
+            }
+        }
+
         for feature in KILL_SABOTAGES {
             total += 1;
             println!("=== xtask check: the shell test catches the sabotage {feature}");
@@ -8777,7 +9074,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 172,
+    full: 176,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
@@ -9290,6 +9587,21 @@ const STARTUP_NSH: &str = "FS0:\\EFI\\BOOT\\BOOTX64.EFI\r\n";
 /// した ESP (EFI System Partition) 相当のディレクトリを用意する。QEMU の
 /// `fat:` ドライバでこのディレクトリをそのまま仮想 FAT ドライブとして渡せる
 /// ため、ディスクイメージファイルを別途作成する必要はない。
+/// virtio ディスクの像の置き場所（S13-a）。
+///
+/// **`esp_dir` から導く**——起動に使う成果物を 1 つの根（`target/`）に集め、
+/// [`stage_esp`]（作る側）と [`qemu_launch_args`]（渡す側）が同じ導出を使う。
+fn disk_image_path(esp_dir: &Path) -> PathBuf {
+    esp_dir
+        .parent()
+        .expect("the esp dir always lives under target/")
+        .join("disk0.img")
+}
+
+/// virtio ディスクの像の大きさ。**中身はまだ使わないので、量に根拠は無い**
+/// （S13-c で ext2 の像を置くときに決め直す）。
+const DISK_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
+
 fn stage_esp(workspace_root: &Path, bootloader_efi: &Path, kernel_elf: &Path) -> Result<PathBuf> {
     let esp_dir = workspace_root.join("target").join("esp");
     let boot_dir = esp_dir.join("EFI").join("BOOT");
@@ -9322,6 +9634,17 @@ fn stage_esp(workspace_root: &Path, bootloader_efi: &Path, kernel_elf: &Path) ->
             staged_kernel_elf.display()
         )
     })?;
+
+    // virtio ディスクの像を作り直す（S13-a）。**起こすたびに、である**——
+    // ゲストが書く可変の共有状態なので、残すと「前の項目が書いた中身を
+    // 次の項目が見る」形になる（`troubleshooting.md` 2026-08-17 の族。
+    // 書き込みが入る S13-e の手当ては `deferred-decisions.md` の行にある）。
+    // `create` が切り詰め、`set_len` が 0 で伸ばすので、中身は決定的である。
+    let disk_image = disk_image_path(&esp_dir);
+    let file = fs::File::create(&disk_image)
+        .with_context(|| format!("failed to create {}", disk_image.display()))?;
+    file.set_len(DISK_IMAGE_BYTES)
+        .with_context(|| format!("failed to size {}", disk_image.display()))?;
 
     Ok(esp_dir)
 }
@@ -9391,6 +9714,18 @@ fn qemu_launch_args(opts: &QemuLaunchOptions) -> Vec<OsString> {
         // 起動パス `\EFI\BOOT\BOOTX64.EFI` を自動的に見つけて起動する。
         "-drive".into(),
         format!("format=raw,file=fat:rw:{}", opts.esp_dir.display()).into(),
+        // virtio-blk ディスク（S13-a で常設にした）。起動可能な中身を持たない
+        // ので、OVMF の起動順は乱れない（実測）。**像は `stage_esp` が QEMU を
+        // 起こすたびに作り直す**——ゲストが書く可変の共有状態で、`target/esp`
+        // と同じ族である（`deferred-decisions.md` のディスク像の行）。
+        "-drive".into(),
+        format!(
+            "if=none,id=disk0,format=raw,file={}",
+            disk_image_path(opts.esp_dir).display()
+        )
+        .into(),
+        "-device".into(),
+        "virtio-blk-pci,drive=disk0".into(),
         "-serial".into(),
         match opts.serial {
             SerialSink::Stdio => "stdio".into(),
@@ -9474,6 +9809,67 @@ mod tests {
             .position(|a| a == "-d")
             .expect("-d flag missing");
         assert_eq!(joined[d_pos + 1], "int,cpu_reset");
+    }
+
+    /// カーネルの列挙の行が拾え、同じ接頭辞の別の行が混ざらないこと（S13-a）。
+    #[test]
+    fn kernel_pci_lines_are_parsed_and_other_pci_lines_are_ignored() {
+        let serial = "\
+[INFO] pci: bus 0 device 0 function 0: 8086:1237 class=0x06 subclass=0x00 header=0x00 irq line=0 pin=0 bars=[0x0 0x0 0x0 0x0 0x0 0x0]\n\
+[INFO] pci: bus 0 device 4 function 0: 1af4:1001 class=0x01 subclass=0x00 header=0x00 irq line=11 pin=1 bars=[0xc001 0x810a0000 0x0 0x0 0xc000000c 0x0]\n\
+[INFO] pci: enumeration complete: 2 function(s) on bus 0, virtio-blk (vendor 0x1af4 device 0x1001 or 0x1041) found 1 time(s)\n";
+        let parsed = parse_kernel_pci_lines(serial);
+        assert_eq!(
+            parsed,
+            vec![
+                (0, 0, 0, "8086:1237".to_string()),
+                (0, 4, 0, "1af4:1001".to_string()),
+            ]
+        );
+    }
+
+    /// `info pci` の出力が拾え、subsystem の行が混ざらないこと（S13-a）。
+    /// **標本は実測の出力そのものである**（QEMU 8 系、i440FX）。
+    #[test]
+    fn info_pci_output_is_parsed_and_subsystem_lines_are_ignored() {
+        let text = "\
+  Bus  0, device   0, function 0:\r\n\
+    Host bridge: PCI device 8086:1237\r\n\
+      PCI subsystem 1af4:1100\r\n\
+      id \"\"\r\n\
+  Bus  0, device   4, function 0:\r\n\
+    SCSI controller: PCI device 1af4:1001\r\n\
+      PCI subsystem 1af4:0002\r\n\
+      IRQ 11, pin A\r\n\
+      BAR0: I/O at 0xc000 [0xc07f].\r\n\
+      id \"\"\r\n";
+        let parsed = parse_info_pci(text);
+        assert_eq!(
+            parsed,
+            vec![
+                (0, 0, 0, "8086:1237".to_string()),
+                (0, 4, 0, "1af4:1001".to_string()),
+            ]
+        );
+        assert_eq!(count_virtio_blk(&parsed), 1);
+    }
+
+    /// virtio ディスクが常設であること（S13-a）。**像の経路は `stage_esp` の
+    /// 作る側と同じ導出**（[`disk_image_path`]）であることも、ここで固定する。
+    #[test]
+    fn qemu_args_always_include_the_virtio_disk() {
+        let debug_log = PathBuf::from("/dummy/qemu-debug.log");
+        let opts = base_options(&SerialSink::Stdio, &debug_log);
+        let joined = joined_args(&qemu_launch_args(&opts));
+
+        assert!(joined
+            .iter()
+            .any(|a| a == "if=none,id=disk0,format=raw,file=/z/disk0.img"));
+        let device_pos = joined
+            .iter()
+            .position(|a| a == "virtio-blk-pci,drive=disk0")
+            .expect("virtio-blk-pci device missing");
+        assert_eq!(joined[device_pos - 1], "-device");
     }
 
     /// 規則ごとに、違反する形が捕まることを見る（`CLAUDE.md` 13.4）。

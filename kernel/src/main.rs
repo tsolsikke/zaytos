@@ -1257,6 +1257,21 @@ extern "sysv64" fn kernel_main() -> ! {
     // 写像と、Local APIC を読めることの確認だけで、レジスタへは書き込まない。
     let mapped_apic = kernel::apic::map_and_probe(&mut logger, &mut allocator, &apic_mmio);
 
+    // === S13-a: PCI bus 0 の列挙と virtio-blk の発見 ===
+    //
+    // **位置が契約である。** `scan_bus0` は `0xCF8`/`0xCFC` の対を使い、
+    // 対の間に別の書き込みが挟まらないことを要求する。ここは
+    //   - BSP だけが走っている（AP の起床はこの後の S3-b-2b-2 以降）
+    //   - 割り込みは無効のまま（`sti` は割り込みの検査の段まで先である）
+    // なので、同一コアの再入も他コアの並行も無い。
+    //
+    // ACPI の走査の後に置くのは、直前の判定行（MCFG の数）が
+    // 「ポートで読む」という前提の観測だからである。産地と利用点を離さない。
+    //
+    // SAFETY: 上記のとおり、BSP のみ・IF=0 の位置である。このポート対を
+    // 触るのは `kernel::pci` だけである（grep で確認済み）。
+    unsafe { kernel::pci::scan_bus0(&mut logger) };
+
     // === S3-b-2b-2: AP の per-CPU 資産を用意する ===
     //
     // 位置が正しさの条件である。要るのは2つ。
@@ -9057,6 +9072,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "syscall-test-copy-overrun",
         cfg!(feature = "syscall-test-copy-overrun"),
         "copy_from_user が len を 1 バイト超えて読む",
+    ),
+    (
+        "pci-config-offset-test",
+        cfg!(feature = "pci-config-offset-test"),
+        "PCI の ID の読みを 1 レジスタずらす",
+    ),
+    (
+        "pci-ignore-multifunction-test",
+        cfg!(feature = "pci-ignore-multifunction-test"),
+        "PCI の multifunction ビットを見ない",
+    ),
+    (
+        "pci-stop-at-first-test",
+        cfg!(feature = "pci-stop-at-first-test"),
+        "PCI の列挙を最初の device でやめる",
     ),
 ];
 

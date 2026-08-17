@@ -75,3 +75,43 @@ pub unsafe fn inb(port: u16) -> u8 {
     }
     value
 }
+
+/// 4 バイトをポート `port` へ書き込む（S13-a。PCI の `CONFIG_ADDRESS` 用）。
+///
+/// # Safety
+///
+/// [`outb`] と同じ。`port` の妥当性と排他性は呼び出し側の責任である。
+#[inline]
+pub unsafe fn outl(port: u16, value: u32) {
+    // SAFETY: `out dx, eax` は指定ポートへ4バイト出力するだけで、メモリには
+    // 触れない。ポート番号の妥当性と排他性は呼び出し元の契約である。
+    unsafe {
+        core::arch::asm!(
+            "out dx, eax",
+            in("dx") port,
+            in("eax") value,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
+/// ポート `port` から4バイト読み込む（S13-a。PCI の `CONFIG_DATA` 用）。
+///
+/// # Safety
+///
+/// [`outb`] と同じ。`port` の妥当性と排他性は呼び出し側の責任である。
+#[inline]
+pub unsafe fn inl(port: u16) -> u32 {
+    let value: u32;
+    // SAFETY: `in eax, dx` は指定ポートから4バイト読み込むだけで、メモリには
+    // 触れない。ポート番号の妥当性と排他性は呼び出し元の契約である。
+    unsafe {
+        core::arch::asm!(
+            "in eax, dx",
+            out("eax") value,
+            in("dx") port,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    value
+}

@@ -777,6 +777,10 @@ fn walk_root_table(
 
     let mut madt_phys: Option<PhysAddr> = None;
     let mut madt_count = 0usize;
+    // MCFG（PCIe の ECAM）の数（S13-a）。**読むのは数だけで、中身は解釈しない。**
+    // PCI の走査（`kernel::pci`）はポート（`0xCF8`/`0xCFC`）を使っており、
+    // **その前提「i440FX に ECAM は無い」が崩れたらこの判定行で見える。**
+    let mut mcfg_count = 0usize;
     let mut header_buffer = [0u8; sdt::HEADER_LENGTH];
     for (index, raw) in entries.enumerate() {
         let Some(phys) = checked_phys(logger, "a root table entry", raw) else {
@@ -805,6 +809,9 @@ fn walk_root_table(
                         madt_phys = Some(phys);
                     }
                 }
+                if header.has_signature(b"MCFG") {
+                    mcfg_count += 1;
+                }
             }
             Err(e) => logger.error(format_args!(
                 "acpi:   [{index}] {:#x}: the header is not usable: {e:?}",
@@ -812,6 +819,12 @@ fn walk_root_table(
             )),
         }
     }
+
+    // **PCI の走査が置いた前提の判定行である（S13-a）。** 0 でなくなったら、
+    // ポート経由の構成空間アクセスという選択に判断が生まれる（設計を見直す）。
+    logger.info(format_args!(
+        "acpi: MCFG tables: {mcfg_count} (0 = no ECAM; the PCI scan uses ports 0xCF8/0xCFC)"
+    ));
 
     // **黙って 1 つ目を使わない。** 同じ署名の表が複数あるのは想定外であり、
     // どちらを読むかで結論が変わりうる。

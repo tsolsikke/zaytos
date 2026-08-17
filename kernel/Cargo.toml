@@ -144,6 +144,14 @@ ext2-free-skip-bit-test = ["common/ext2-free-skip-bit-break"]
 # 破壊（S12 前の手当て、C）: 止めた後に溜まっている入力を捨てない。
 # 止めた打鍵そのものが残り、次のプロンプトに `^C` が余分に出る。
 kill-keep-typed-input-test = []
+# 破壊（S13-a）: PCI の ID の読みを 1 レジスタ（4 バイト）ずらす。
+# 全装置の ID が壊れ、`info pci` との突き合わせが落ちる。
+pci-config-offset-test = []
+# 破壊（S13-a）: multifunction ビットを見ない。i440FX では device 1 の
+# function 1（IDE）と 3（bridge）が列挙から消える。
+pci-ignore-multifunction-test = []
+# 破壊（S13-a）: 最初に見つけた device で列挙をやめる。集合が痩せる。
+pci-stop-at-first-test = []
 # ページテーブルの分割・アンマップの回帰チェック（M5-a-2-2）。
 # `cargo xtask run --paging-test <kind>` が有効化する。通常ビルドには
 # 含まれない。いずれも「検査が実際に働くこと」を確かめるためのもので、
