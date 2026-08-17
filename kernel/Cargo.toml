@@ -152,6 +152,16 @@ pci-config-offset-test = []
 pci-ignore-multifunction-test = []
 # 破壊（S13-a）: 最初に見つけた device で列挙をやめる。集合が痩せる。
 pci-stop-at-first-test = []
+# 破壊（S13-b）: QueueNotify を書かない。要求は公開されたままで装置は読まず、
+# ポーリングが上限に達して止まる。上限のある待機だけがこの形を観測へ変える。
+virtio-skip-notify-test = []
+# 破壊（S13-b）: sector 1 を要求する。像の模様は絶対オフセットから決まるので、
+# ホスト側の中身の突き合わせが落ちる。
+virtio-wrong-sector-test = []
+# 破壊（S13-b）: データ記述子の長さを 511 にする。実測では QEMU が要求ごと
+# 拒み（status=1）、status の検査が捕まえる。見込み（黙って 511 バイト書く）は
+# 外れたが、捕まる。
+virtio-short-desc-test = []
 # ページテーブルの分割・アンマップの回帰チェック（M5-a-2-2）。
 # `cargo xtask run --paging-test <kind>` が有効化する。通常ビルドには
 # 含まれない。いずれも「検査が実際に働くこと」を確かめるためのもので、

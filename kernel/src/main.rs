@@ -1270,7 +1270,62 @@ extern "sysv64" fn kernel_main() -> ! {
     //
     // SAFETY: 上記のとおり、BSP のみ・IF=0 の位置である。このポート対を
     // 触るのは `kernel::pci` だけである（grep で確認済み）。
-    unsafe { kernel::pci::scan_bus0(&mut logger) };
+    let virtio_blk = unsafe { kernel::pci::scan_bus0(&mut logger) };
+
+    // === S13-b: virtqueue を 1 本立て、ポーリングで sector 0 を読む ===
+    //
+    // 位置の契約は S13-a と同じ（BSP のみ・IF=0・AP 起床前）。ADR-0033 の
+    // legacy interface で話す。**判定はホスト側にある**——像は `stage_esp` が
+    // 模様を置いて建てており、xtask が同じ 512 バイトから同じ計算をして
+    // 突き合わせる。ここで出すのは観測（checksum と先頭バイト）である。
+    match virtio_blk {
+        Some(virtio) => {
+            // SAFETY: 上の pci scan と同じ位置（BSP のみ・IF=0）。`virtio` は
+            // `scan_bus0` が返した BAR0 の I/O 窓そのものである。
+            if let Err(reason) =
+                unsafe { kernel::virtio::read_first_sector(&mut logger, &virtio, &mut allocator) }
+            {
+                match reason {
+                    kernel::virtio::VirtioBlkError::QueueSizeZero => logger.error(format_args!(
+                        "virtio-blk: queue 0 reports size 0; the device offers no queue; halting"
+                    )),
+                    kernel::virtio::VirtioBlkError::RingAllocationFailed { pages } => {
+                        logger.error(format_args!(
+                            "virtio-blk: could not allocate {pages} contiguous page(s) for the \
+                             ring; halting"
+                        ))
+                    }
+                    kernel::virtio::VirtioBlkError::RequestTimedOut { spins } => {
+                        logger.error(format_args!(
+                            "virtio-blk: the request was not completed after {spins} spin(s); \
+                             halting"
+                        ))
+                    }
+                    kernel::virtio::VirtioBlkError::BadRequestStatus { status } => {
+                        logger.error(format_args!(
+                            "virtio-blk: the device reported status {status} (expected 0 = OK); \
+                             halting"
+                        ))
+                    }
+                    kernel::virtio::VirtioBlkError::WrongUsedId { id } => {
+                        logger.error(format_args!(
+                            "virtio-blk: the used entry names descriptor {id} (expected 0); \
+                             halting"
+                        ))
+                    }
+                }
+                cpu::halt_forever();
+            }
+        }
+        None => {
+            // **黙って進まない。** 装置は xtask が常設しているので、無いのは
+            // 構成が壊れた形である（S13-a の突き合わせも先に落ちるはずである）。
+            logger.error(format_args!(
+                "virtio-blk: no device with an I/O BAR0 was found on bus 0; halting"
+            ));
+            cpu::halt_forever();
+        }
+    }
 
     // === S3-b-2b-2: AP の per-CPU 資産を用意する ===
     //
@@ -9087,6 +9142,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "pci-stop-at-first-test",
         cfg!(feature = "pci-stop-at-first-test"),
         "PCI の列挙を最初の device でやめる",
+    ),
+    (
+        "virtio-skip-notify-test",
+        cfg!(feature = "virtio-skip-notify-test"),
+        "virtio の QueueNotify を書かない",
+    ),
+    (
+        "virtio-wrong-sector-test",
+        cfg!(feature = "virtio-wrong-sector-test"),
+        "virtio-blk へ sector 1 を要求する",
+    ),
+    (
+        "virtio-short-desc-test",
+        cfg!(feature = "virtio-short-desc-test"),
+        "virtio のデータ記述子を 511 バイトに縮める",
     ),
 ];
 

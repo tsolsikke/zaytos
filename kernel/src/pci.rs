@@ -3,8 +3,9 @@
 //! # 何をする module か
 //!
 //! **bus 0 を列挙し、見つけた装置を判定行に出し、virtio-blk を数える。**
-//! それだけである。BAR の写像・virtqueue・割り込みの設定・装置の利用は
-//! すべて後段（S13-b 以降）で、**ここでは構成空間を読む以外のことをしない。**
+//! それだけである。BAR の写像・割り込みの設定・装置の利用はすべて後段で、
+//! **ここでは構成空間を読む以外のことをしない**（virtio-blk の BAR0 だけは
+//! S13-b が使うので、[`VirtioBlkLocation`] として返す）。
 //!
 //! # アクセスはポート（`0xCF8` / `0xCFC`）である
 //!
@@ -52,6 +53,16 @@ const FUNCTIONS_PER_DEVICE: u8 = 8;
 /// 「不在」を表すベンダ ID。**構成空間が無い場所を読むと全ビット 1 が返る。**
 const VENDOR_ABSENT: u16 = 0xFFFF;
 
+/// 見つけた virtio-blk の所在（S13-b で返す形にした）。
+///
+/// **S13-a では返さなかった**——利用者が居ない機構には検算が置けないためである。
+/// **S13-b（virtqueue）が最初の利用者になったので、要る 1 つだけを返す**
+/// （IRQ の line / pin は S13-d の話で、要るときに足す）。
+pub struct VirtioBlkLocation {
+    /// BAR0 の I/O 窓の先頭（下位 2 ビットの種別フラグは落としてある）。
+    pub io_base: u16,
+}
+
 /// 構成空間の 1 dword を読む。
 ///
 /// # Safety
@@ -92,13 +103,15 @@ unsafe fn config_read(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
 /// `info pci` は別の bus として列挙し、**こちらの集合が欠けて突き合わせが
 /// 落ちる。** ブリッジ用の注記の枝は置かない——**今の構成では一度も走らず、
 /// 走らない枝を持つのは「利用者の居ない機構を持たない」に反する**
-/// （見つけた装置を保持しないのと同じ判断である）。
+/// （S13-a で装置を保持しなかったのと同じ判断である。**保持のほうは S13-b で
+/// 利用者が来たので、返す形になった**——[`VirtioBlkLocation`]）。
 /// **停止性はループの形そのものにある**（最大 32 device
 /// かける 8 function の読みで、外部の値に依存しない。S10 の線 4 の族だが、
 /// 上限が構造で決まるので打ち切りの機構は要らない）。
-pub unsafe fn scan_bus0(logger: &mut Logger<SerialPort>) {
+pub unsafe fn scan_bus0(logger: &mut Logger<SerialPort>) -> Option<VirtioBlkLocation> {
     let mut functions = 0u32;
     let mut virtio_blk = 0u32;
+    let mut found: Option<VirtioBlkLocation> = None;
 
     for device in 0..DEVICES_PER_BUS {
         // SAFETY: この関数の契約をそのまま引き継ぐ。
@@ -159,6 +172,14 @@ pub unsafe fn scan_bus0(logger: &mut Logger<SerialPort>) {
                 && (device_id == VIRTIO_BLK_TRANSITIONAL || device_id == VIRTIO_BLK_MODERN)
             {
                 virtio_blk += 1;
+                // **BAR0 が I/O 窓（ビット 0 = 1）のときだけ返す**——legacy で
+                // 話す（ADR-0033）ための唯一の入口である。最初の 1 つを採る
+                // （2 つ以上は下の判定行の数で見える）。
+                if found.is_none() && bars[0] & 0x1 == 1 {
+                    found = Some(VirtioBlkLocation {
+                        io_base: (bars[0] & !0x3) as u16,
+                    });
+                }
             }
         }
 
@@ -175,6 +196,7 @@ pub unsafe fn scan_bus0(logger: &mut Logger<SerialPort>) {
          (vendor {VIRTIO_VENDOR:#06x} device {VIRTIO_BLK_TRANSITIONAL:#06x} or \
          {VIRTIO_BLK_MODERN:#06x}) found {virtio_blk} time(s)"
     ));
+    found
 }
 
 /// ベンダとデバイス ID の dword を読む。

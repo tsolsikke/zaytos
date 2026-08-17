@@ -1316,7 +1316,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 fn main() -> Result<()> {
     const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
        cargo xtask run --shell-test [--drop-arrows]
-       cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]
+       cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
@@ -1438,6 +1438,15 @@ fn main() -> Result<()> {
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
                 return cmd_pci_test(&features);
+            }
+            if rest.iter().any(|a| a == "--virtio-test") {
+                let features: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                return cmd_virtio_test(&features);
             }
             if rest.iter().any(|a| a == "--shell-test") {
                 let mode = if rest.iter().any(|a| a == "--drop-arrows") {
@@ -3282,6 +3291,156 @@ fn query_monitor(stream: &mut UnixStream, command: &str) -> Result<String> {
     Ok(response)
 }
 
+/// virtio-blk の読みの破壊の一覧（S13-b）。
+const VIRTIO_SABOTAGES: &[(&str, &str)] = &[
+    ("a dropped queue notify", "virtio-skip-notify-test"),
+    ("a request for the wrong sector", "virtio-wrong-sector-test"),
+    ("a data descriptor one byte short", "virtio-short-desc-test"),
+];
+
+/// カーネルが読んだ sector 0 を、ホスト側の像のファイルと突き合わせる（S13-b）。
+///
+/// **判定の出所は `target/disk0.img` そのものである。** `stage_esp` が模様を
+/// 置いて建て、カーネルは装置越しに読んで checksum を出し、こちらは同じ
+/// ファイルの同じ 512 バイトから同じ計算をする。**両側が独立である。**
+fn cmd_virtio_test(features: &[&str]) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let kernel_elf = build_kernel_with_features(&workspace_root, features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let tag = if features.is_empty() {
+        "default".to_string()
+    } else {
+        features.join("-")
+    };
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("virtio-test-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the virtio test")?;
+
+    // 読みの判定行か、停止の行が出るまで待つ。上限つき。
+    let read_marker = "virtio-blk: read sector ";
+    let error_marker = "virtio-blk: ";
+    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    while Instant::now() < deadline {
+        let text = fs::read_to_string(&serial_log).unwrap_or_default();
+        if text.contains(read_marker)
+            || text
+                .lines()
+                .any(|l| l.contains("[ERROR]") && l.contains(error_marker))
+        {
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let context = if features.is_empty() {
+        "virtio-test".to_string()
+    } else {
+        format!("virtio-test {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let qemu_debug = fs::read_to_string(&debug_log).unwrap_or_default();
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    let Some(read_line) = serial.lines().find(|l| l.contains(read_marker)) else {
+        // 停止していれば、その行を見せて落とす（skip-notify はここへ来る）。
+        if let Some(line) = serial
+            .lines()
+            .find(|l| l.contains("[ERROR]") && l.contains(error_marker))
+        {
+            bail!("{context}: the read did not complete: {}", line.trim());
+        }
+        bail!("{context}: the kernel reported neither the read line nor an error");
+    };
+    println!("{context}: {}", read_line.trim());
+
+    // **ホスト側で同じ計算をする。** 出所は像のファイルそのものである。
+    let image = fs::read(disk_image_path(&esp_dir))
+        .with_context(|| "failed to read the disk image back".to_string())?;
+    let mut expected_checksum = 0u32;
+    for (index, byte) in image.iter().take(512).enumerate() {
+        expected_checksum =
+            expected_checksum.wrapping_add(u32::from(*byte).wrapping_mul(index as u32 + 1));
+    }
+    let kernel_checksum = parse_marked_hex(read_line, "checksum=");
+    let checksum_matches = kernel_checksum == Some(expected_checksum);
+    // **`{:#x?}` を `Option` に使わない**——複数行に割れる（S13-a の BAR で
+    // 踏んだのと同じ癖）。
+    let kernel_checksum_shown = match kernel_checksum {
+        Some(value) => format!("{value:#010x}"),
+        None => "none".to_string(),
+    };
+    println!(
+        "{context}: checksum from the device = {kernel_checksum_shown}, from the image file = \
+         {expected_checksum:#010x}; match = {checksum_matches}"
+    );
+
+    // capacity（512 バイト単位の数）も独立に突き合わせる。出所はファイルの長さ。
+    let capacity_line = serial.lines().find(|l| l.contains("capacity="));
+    let kernel_capacity = capacity_line.and_then(|l| parse_marked_u64(l, "capacity="));
+    let expected_capacity = image.len() as u64 / 512;
+    let capacity_matches = kernel_capacity == Some(expected_capacity);
+    println!(
+        "{context}: capacity from the device = {kernel_capacity:?}, file length / 512 = \
+         {expected_capacity}; match = {capacity_matches}"
+    );
+
+    if !checksum_matches || !capacity_matches {
+        bail!("{context}: the sector the kernel read does not agree with the image file");
+    }
+    Ok(())
+}
+
+/// `marker` の直後の `0x` 付き 16 進を拾う。
+fn parse_marked_hex(line: &str, marker: &str) -> Option<u32> {
+    let rest = line.split(marker).nth(1)?;
+    let token = rest.split_whitespace().next()?;
+    u32::from_str_radix(token.trim_start_matches("0x"), 16).ok()
+}
+
+/// `marker` の直後の 10 進を拾う。
+fn parse_marked_u64(line: &str, marker: &str) -> Option<u64> {
+    let rest = line.split(marker).nth(1)?;
+    let token = rest.split_whitespace().next()?;
+    token.parse().ok()
+}
+
 fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
@@ -4928,6 +5087,11 @@ const BOOT_LOG_VOLATILE_MARKERS: &[&str] = &[
     // プロセスを畳んだ後の空き範囲の数（S9-b-3-1）。**同じ理由で揺れる**
     // （実測で 10 と 11）。**畳んだ会計そのものは別の行にあり、そちらは残る。**
     "the allocator holds",
+    // virtio のポーリングの回数（S13-b）。装置の処理との競争なので実行ごとに
+    // 揺れる（実測で 0 / 2 / 146 / 165）。**checksum などの判定は別の行にあり、
+    // そちらは残る**——揺れる値を判定行から分けたので、この標識は 1 行の
+    // 主題そのものに当たる（語の広い標識ではない）。
+    "virtio-blk: polling took",
     "address-space: the same VA",
     // TSC の較正。実行ごとに揺れる。
     "apic: LAPIC timer calibration",
@@ -4971,6 +5135,10 @@ const BOOT_LOG_CORE_COUNT_MARKERS: &[&str] = &[
     "entry type=0 (Processor Local APIC)",
     "signature=\"APIC\" length=",
     "acpi: MADT enumeration complete",
+    // virtio-blk の feature bits（S13-b）。**実測でコア数に依る**——QEMU は
+    // キューの数を vCPU 数に合わせるので、`-smp 1` と `-smp 2` で 0x1000 違う。
+    // capacity などの判定は別の行にあり、そちらは残る。
+    "virtio-blk: host features=",
 ];
 
 /// 起動ログを正規化する（S6-d）。
@@ -8581,6 +8749,30 @@ fn cmd_check(full: bool) -> Result<()> {
             }
         }
 
+        // **virtio-blk の読み（S13-b）。** 判定はホスト側の像のファイルとの
+        // 突き合わせで、期待値の定数を持たない。
+        total += 1;
+        println!("=== xtask check: the virtio-blk read agrees with the image file");
+        match cmd_virtio_test(&[]) {
+            Ok(()) => println!("--- virtio blk read: OK"),
+            Err(error) => {
+                println!("--- virtio blk read: FAILED ({error})");
+                failed.push("virtio blk read".to_string());
+            }
+        }
+
+        for (label, feature) in VIRTIO_SABOTAGES {
+            total += 1;
+            println!("=== xtask check: the virtio-blk read catches {label}");
+            match cmd_virtio_test(&[feature]) {
+                Ok(()) => {
+                    println!("--- virtio blk read ({label}): FAILED (the sabotage was NOT caught)");
+                    failed.push(format!("virtio blk read ({label})"));
+                }
+                Err(_) => println!("--- virtio blk read ({label}): OK (the sabotage was caught)"),
+            }
+        }
+
         for feature in KILL_SABOTAGES {
             total += 1;
             println!("=== xtask check: the shell test catches the sabotage {feature}");
@@ -9074,7 +9266,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 176,
+    full: 180,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
@@ -9640,13 +9832,32 @@ fn stage_esp(workspace_root: &Path, bootloader_efi: &Path, kernel_elf: &Path) ->
     // 次の項目が見る」形になる（`troubleshooting.md` 2026-08-17 の族。
     // 書き込みが入る S13-e の手当ては `deferred-decisions.md` の行にある）。
     // `create` が切り詰め、`set_len` が 0 で伸ばすので、中身は決定的である。
+    //
+    // **先頭の 1 ページには模様を置く（S13-b）。** 決定的な 0 のままでは
+    // 「読めていなくても 0」で一致が言えない（破壊が緑を出す族の 1 つ目）。
+    // **バイトは絶対オフセットから決まる**（ext2 の検査の「書く中身は位置から
+    // 決まる形にする」と同じ判断）ので、違う sector を読む形が中身で捕まる。
     let disk_image = disk_image_path(&esp_dir);
-    let file = fs::File::create(&disk_image)
+    let mut file = fs::File::create(&disk_image)
         .with_context(|| format!("failed to create {}", disk_image.display()))?;
+    file.write_all(&disk_pattern_page())
+        .with_context(|| format!("failed to write the pattern to {}", disk_image.display()))?;
     file.set_len(DISK_IMAGE_BYTES)
         .with_context(|| format!("failed to size {}", disk_image.display()))?;
 
     Ok(esp_dir)
+}
+
+/// ディスク像の先頭 1 ページの模様（S13-b）。
+///
+/// カーネル側は独立に読んで観測を出し、[`cmd_virtio_test`] が同じバイト列から
+/// 同じ計算をして突き合わせる。**この関数が両方の出所である。**
+fn disk_pattern_page() -> [u8; 4096] {
+    let mut page = [0u8; 4096];
+    for (offset, slot) in page.iter_mut().enumerate() {
+        *slot = (offset % 251) as u8;
+    }
+    page
 }
 
 fn workspace_root() -> Result<PathBuf> {

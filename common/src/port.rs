@@ -76,6 +76,46 @@ pub unsafe fn inb(port: u16) -> u8 {
     value
 }
 
+/// 2 バイトをポート `port` へ書き込む（S13-b。virtio の legacy レジスタ用）。
+///
+/// # Safety
+///
+/// [`outb`] と同じ。`port` の妥当性と排他性は呼び出し側の責任である。
+#[inline]
+pub unsafe fn outw(port: u16, value: u16) {
+    // SAFETY: `out dx, ax` は指定ポートへ2バイト出力するだけで、メモリには
+    // 触れない。ポート番号の妥当性と排他性は呼び出し元の契約である。
+    unsafe {
+        core::arch::asm!(
+            "out dx, ax",
+            in("dx") port,
+            in("ax") value,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
+/// ポート `port` から2バイト読み込む（S13-b。virtio の legacy レジスタ用）。
+///
+/// # Safety
+///
+/// [`outb`] と同じ。`port` の妥当性と排他性は呼び出し側の責任である。
+#[inline]
+pub unsafe fn inw(port: u16) -> u16 {
+    let value: u16;
+    // SAFETY: `in ax, dx` は指定ポートから2バイト読み込むだけで、メモリには
+    // 触れない。ポート番号の妥当性と排他性は呼び出し元の契約である。
+    unsafe {
+        core::arch::asm!(
+            "in ax, dx",
+            out("ax") value,
+            in("dx") port,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    value
+}
+
 /// 4 バイトをポート `port` へ書き込む（S13-a。PCI の `CONFIG_ADDRESS` 用）。
 ///
 /// # Safety

@@ -59,6 +59,7 @@ pub mod syscall;
 pub mod task;
 pub mod userland;
 pub mod vfs;
+pub mod virtio;
 
 /// kernel イメージ内の仮想アドレスを物理アドレスへ写す。
 ///
