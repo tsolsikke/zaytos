@@ -1197,6 +1197,46 @@ impl Layout {
         let offset = table + u64::from(group) * GROUP_DESCRIPTOR_SIZE as u64;
         usize::try_from(offset).ok()
     }
+
+    /// ブロックの像内オフセット（T3-2）。
+    ///
+    /// **`block * block_size` を 1 箇所へ集めた。** 書く側の 8 箇所が
+    /// 同じ算術を同じ `map_err` ごと書いていた。
+    ///
+    /// **読む側はまだ差し替えていない**——同じ算術が [`Ext2`] の側に残っている
+    /// （`block_bytes` など）。**T3 の一覧は着手時に閉じるので、読む側は
+    /// 行を立てて次の整理の段で拾う**（`docs/deferred-decisions.md`）。
+    ///
+    /// **[`Layout::descriptor_at`] と違って `Option` でなく `Err` を返す**——
+    /// あちらは呼ぶ側ごとに誤りの種類が違うが、**こちらは 8 箇所すべてが
+    /// [`AllocError::ImageTooSmall`] へ写していた。** 呼ぶ側に選ばせる理由が無い。
+    fn block_at(&self, block: u32) -> Result<usize, AllocError> {
+        usize::try_from(u64::from(block) * u64::from(self.block_size))
+            .map_err(|_| AllocError::ImageTooSmall)
+    }
+}
+
+/// ビットマップの中でこの添字が住む場所（T3-2）。**`(バイト位置, マスク)` を返す。**
+///
+/// **`index / 8` と `index % 8` の対を 1 箇所へ集めた。** 取得と解放の 4 関数が
+/// 同じ対を書いていた。**対で使う算術を別々に持つと、片方だけ直る余地が生まれる。**
+///
+/// **読む側は対象外である**——ビットマップを読むのは書く側だけなので、
+/// こちらには残りが無い（ブロック位置の算術とは違う）。
+fn bitmap_slot(bitmap: usize, index: u32) -> (usize, u8) {
+    (bitmap + (index / 8) as usize, 1u8 << (index % 8))
+}
+
+/// `i_block[index]` の像内オフセット（T3-2）。
+///
+/// **`+ 40 + index * 4` を 1 箇所へ集めた。** 40 は inode の中の `i_block` の
+/// 位置、4 はスロットの幅である。**欄の位置に名前を付けるのは T3-3 の仕事なので、
+/// ここでは算術を集めるところまでにする。**
+///
+/// **読む側はまだ差し替えていない**——[`Ext2::inode`] が同じ位置を自分で
+/// 読んでいる。**行を立てて次の整理の段で拾う**（`docs/deferred-decisions.md`）。
+fn i_block_slot(inode_at: usize, index: usize) -> usize {
+    inode_at + 40 + index * 4
 }
 
 /// 空きブロックを 1 つ取り、会計も直す（S12-b）。**取れた番号を返す。**
@@ -1220,18 +1260,16 @@ pub fn allocate_block(image: &mut [u8], layout: &Layout) -> Result<u32, AllocErr
             return Err(AllocError::ImageTooSmall);
         }
         let bitmap_block = read_u32(image, descriptor);
-        let bitmap = usize::try_from(u64::from(bitmap_block) * u64::from(layout.block_size))
-            .map_err(|_| AllocError::ImageTooSmall)?;
+        let bitmap = layout.block_at(bitmap_block)?;
 
         // この群が受け持つブロック数（最後の群は端数になりうる）。
         let first = layout.first_data_block + group * layout.blocks_per_group;
         let span = layout.blocks_per_group.min(layout.blocks_count - first);
         for index in 0..span {
-            let byte = bitmap + (index / 8) as usize;
+            let (byte, mask) = bitmap_slot(bitmap, index);
             if byte >= image.len() {
                 return Err(AllocError::ImageTooSmall);
             }
-            let mask = 1u8 << (index % 8);
             // 破壊 (S12-b, ext2-alloc-ignore-bitmap): 使用中でも取る。
             // **ビットマップは既に 1 なので変わらず、会計だけが減る。**
             // **e2fsck は会計とビットマップの食い違いとして捕まえる**（実測）。
@@ -1279,13 +1317,11 @@ pub fn free_block(image: &mut [u8], layout: &Layout, block: u32) -> Result<(), A
         return Err(AllocError::ImageTooSmall);
     }
     let bitmap_block = read_u32(image, descriptor);
-    let bitmap = usize::try_from(u64::from(bitmap_block) * u64::from(layout.block_size))
-        .map_err(|_| AllocError::ImageTooSmall)?;
-    let byte = bitmap + (index / 8) as usize;
+    let bitmap = layout.block_at(bitmap_block)?;
+    let (byte, mask) = bitmap_slot(bitmap, index);
     if byte >= image.len() {
         return Err(AllocError::ImageTooSmall);
     }
-    let mask = 1u8 << (index % 8);
     if image[byte] & mask == 0 {
         return Err(AllocError::NotAllocated(block));
     }
@@ -1359,23 +1395,22 @@ pub fn append_to_file(
         #[cfg(feature = "ext2-append-always-allocate-break")]
         let needs_block = true;
 
+        // **書く枝も読む枝も、同じスロットへ触る。**
+        let slot = i_block_slot(inode, index as usize);
         let block = if needs_block {
             let block = allocate_block(image, layout)?;
             // 破壊 (S12-c, ext2-append-skip-link): 取ったブロックを inode へ繋がない。
             // **割り当てたのに誰も参照しないので、`Block bitmap differences` が出る。**
             #[cfg(not(feature = "ext2-append-skip-link"))]
-            image[inode + 40 + index as usize * 4..inode + 44 + index as usize * 4]
-                .copy_from_slice(&block.to_le_bytes());
+            image[slot..slot + 4].copy_from_slice(&block.to_le_bytes());
             block
         } else {
-            read_u32(image, inode + 40 + index as usize * 4)
+            read_u32(image, slot)
         };
 
         let room = (block_size - offset_in_block) as usize;
         let take = room.min(data.len() - written);
-        let at = usize::try_from(u64::from(block) * u64::from(block_size))
-            .map_err(|_| AllocError::ImageTooSmall)?
-            + offset_in_block as usize;
+        let at = layout.block_at(block)? + offset_in_block as usize;
         if at + take > image.len() {
             return Err(AllocError::ImageTooSmall);
         }
@@ -1457,13 +1492,12 @@ pub fn truncate_to(
     };
 
     for index in (keep..have).rev() {
-        let slot = inode + 40 + index as usize * 4;
+        let slot = i_block_slot(inode, index as usize);
         let block = read_u32(image, slot);
         if block == 0 {
             continue;
         }
-        let at = usize::try_from(u64::from(block) * u64::from(block_size))
-            .map_err(|_| AllocError::ImageTooSmall)?;
+        let at = layout.block_at(block)?;
         if at + block_size as usize <= image.len() {
             image[at..at + block_size as usize].fill(0);
         }
@@ -1480,7 +1514,7 @@ pub fn truncate_to(
 
     // **末尾のブロックの、残す長さより後ろも 0 へ戻す。**
     if keep > 0 {
-        let last = read_u32(image, inode + 40 + (keep - 1) as usize * 4);
+        let last = read_u32(image, i_block_slot(inode, (keep - 1) as usize));
         let tail = target % block_size;
         // 破壊 (S12-d, ext2-truncate-keep-tail): 切った先を 0 で埋めない。
         // **前の中身が残るので、読み戻すと出る。**
@@ -1489,9 +1523,7 @@ pub fn truncate_to(
         #[cfg(feature = "ext2-truncate-keep-tail")]
         let tail = 0u32;
         if last != 0 && tail != 0 {
-            let at = usize::try_from(u64::from(last) * u64::from(block_size))
-                .map_err(|_| AllocError::ImageTooSmall)?
-                + tail as usize;
+            let at = layout.block_at(last)? + tail as usize;
             let end = at + (block_size - tail) as usize;
             if end <= image.len() {
                 image[at..end].fill(0);
@@ -1543,8 +1575,7 @@ pub fn allocate_inode(image: &mut [u8], layout: &Layout) -> Result<u32, AllocErr
             return Err(AllocError::ImageTooSmall);
         }
         let bitmap_block = read_u32(image, descriptor + 4);
-        let bitmap = usize::try_from(u64::from(bitmap_block) * u64::from(layout.block_size))
-            .map_err(|_| AllocError::ImageTooSmall)?;
+        let bitmap = layout.block_at(bitmap_block)?;
 
         // この群が受け持つ inode 番号（最後の群は端数になりうる）。
         let first = group * layout.inodes_per_group + 1;
@@ -1556,11 +1587,10 @@ pub fn allocate_inode(image: &mut [u8], layout: &Layout) -> Result<u32, AllocErr
             if ino < layout.first_inode {
                 continue;
             }
-            let byte = bitmap + (index / 8) as usize;
+            let (byte, mask) = bitmap_slot(bitmap, index);
             if byte >= image.len() {
                 return Err(AllocError::ImageTooSmall);
             }
-            let mask = 1u8 << (index % 8);
             if image[byte] & mask != 0 {
                 continue;
             }
@@ -1611,13 +1641,11 @@ pub fn free_inode(image: &mut [u8], layout: &Layout, ino: u32) -> Result<(), All
         return Err(AllocError::ImageTooSmall);
     }
     let bitmap_block = read_u32(image, descriptor + 4);
-    let bitmap = usize::try_from(u64::from(bitmap_block) * u64::from(layout.block_size))
-        .map_err(|_| AllocError::ImageTooSmall)?;
-    let byte = bitmap + (index / 8) as usize;
+    let bitmap = layout.block_at(bitmap_block)?;
+    let (byte, mask) = bitmap_slot(bitmap, index);
     if byte >= image.len() {
         return Err(AllocError::ImageTooSmall);
     }
-    let mask = 1u8 << (index % 8);
     if image[byte] & mask == 0 {
         return Err(AllocError::NotAllocated(ino));
     }
@@ -1674,12 +1702,11 @@ fn scan_directory(
     let mut found = None;
     let mut room = None;
     for index in 0..blocks {
-        let block = read_u32(image, dir_at + 40 + index * 4);
+        let block = read_u32(image, i_block_slot(dir_at, index));
         if block == 0 {
             continue;
         }
-        let base = usize::try_from(u64::from(block) * u64::from(layout.block_size))
-            .map_err(|_| AllocError::ImageTooSmall)?;
+        let base = layout.block_at(block)?;
         if base + block_size > image.len() {
             return Err(AllocError::ImageTooSmall);
         }
