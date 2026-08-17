@@ -67,6 +67,35 @@ const SUPERBLOCK_WANT_EXTRA_ISIZE: usize = 350;
 /// `i_extra_isize` の inode 内オフセット。**標準部の直後である。**
 const INODE_EXTRA_ISIZE: usize = INODE_CORE_LEN;
 
+// 欄の位置の名前（T3-3）。**規則は 1 つである**——
+// **「構造体の接頭辞（`SUPERBLOCK` / `GROUP_DESCRIPTOR` / `INODE`）+
+// ext2 の欄名から構造体の接頭辞（`s_` / `bg_` / `i_`）を落として大文字化」。
+// 値は構造体の先頭からのオフセットである。**
+// [`SUPERBLOCK_WANT_EXTRA_ISIZE`]（`s_want_extra_isize`）と
+// [`INODE_EXTRA_ISIZE`]（`i_extra_isize`）が先に在り、それに揃えた。
+// **次に欄を足す人も同じ形で書くこと。**
+
+/// `s_free_blocks_count` の superblock 内オフセット。
+const SUPERBLOCK_FREE_BLOCKS_COUNT: usize = 12;
+
+/// `s_free_inodes_count` の superblock 内オフセット。
+const SUPERBLOCK_FREE_INODES_COUNT: usize = 16;
+
+/// `bg_free_blocks_count` の group descriptor 内オフセット。
+const GROUP_DESCRIPTOR_FREE_BLOCKS_COUNT: usize = 12;
+
+/// `bg_free_inodes_count` の group descriptor 内オフセット。
+const GROUP_DESCRIPTOR_FREE_INODES_COUNT: usize = 14;
+
+/// `bg_used_dirs_count` の group descriptor 内オフセット。
+///
+/// **既定の経路はこの欄を動かさない**（ファイルしか作らないため。
+/// [`create_file`] の doc）。**触るのは破壊だけなので、同じ `cfg` で囲む**
+/// ——囲まないと既定のビルドで一度も使われず、`dead_code` が出る
+/// （T3-1 の `TruncateToZeroFailed` と同じ手当てである）。
+#[cfg(feature = "ext2-create-move-dirs-count")]
+const GROUP_DESCRIPTOR_USED_DIRS_COUNT: usize = 16;
+
 /// group descriptor 1 つのバイト数（ext2。ext4 の 64 バイトではない）。
 pub const GROUP_DESCRIPTOR_SIZE: usize = 32;
 
@@ -1230,8 +1259,12 @@ fn bitmap_slot(bitmap: usize, index: u32) -> (usize, u8) {
 /// `i_block[index]` の像内オフセット（T3-2）。
 ///
 /// **`+ 40 + index * 4` を 1 箇所へ集めた。** 40 は inode の中の `i_block` の
-/// 位置、4 はスロットの幅である。**欄の位置に名前を付けるのは T3-3 の仕事なので、
-/// ここでは算術を集めるところまでにする。**
+/// 位置、4 はスロットの幅である。
+///
+/// **40 に名前は付けていない。** T3-2 の doc は T3-3 へ委ねると書いていたが、
+/// **T3-3 の一覧（群 descriptor と superblock の欄）に inode のこの欄は
+/// 入っていなかった**——約束より、着手時に閉じた一覧のほうが強い。
+/// **ここに集めた時点で散らばりは消えている**ので、名前は要る場面が出たら付ける。
 ///
 /// **読む側はまだ差し替えていない**——[`Ext2::inode`] が同じ位置を自分で
 /// 読んでいる。**行を立てて次の整理の段で拾う**（`docs/deferred-decisions.md`）。
@@ -1280,21 +1313,24 @@ pub fn allocate_block(image: &mut [u8], layout: &Layout) -> Result<u32, AllocErr
             // **飽和させない。** ビットマップに空きがあるのに会計が 0 なら、
             // **像がそもそも食い違っている。** 黙って 0 のままにすると、
             // **解放で 1 増えて往復が戻らない**（実測で踏んだ）。
-            let free = read_u16(image, descriptor + 12)
+            let free = read_u16(image, descriptor + GROUP_DESCRIPTOR_FREE_BLOCKS_COUNT)
                 .checked_sub(1)
                 .ok_or(AllocError::FreeCountInconsistent)?;
-            let total = read_u32(image, SUPERBLOCK_OFFSET + 12)
+            let total = read_u32(image, SUPERBLOCK_OFFSET + SUPERBLOCK_FREE_BLOCKS_COUNT)
                 .checked_sub(1)
                 .ok_or(AllocError::FreeCountInconsistent)?;
             image[byte] |= mask;
             // 破壊 (S12-b, ext2-alloc-skip-bg-count): 群の欄を直さない。
             // **e2fsck が `for group #0` 付きで報告する**（実測）。
             #[cfg(not(feature = "ext2-alloc-skip-bg-count-break"))]
-            image[descriptor + 12..descriptor + 14].copy_from_slice(&free.to_le_bytes());
+            image[descriptor + GROUP_DESCRIPTOR_FREE_BLOCKS_COUNT
+                ..descriptor + GROUP_DESCRIPTOR_FREE_BLOCKS_COUNT + 2]
+                .copy_from_slice(&free.to_le_bytes());
             // 破壊 (S12-b, ext2-alloc-skip-sb-count): superblock の欄を直さない。
             // **e2fsck が群の番号なしで報告する**（実測。文言で区別できる）。
             #[cfg(not(feature = "ext2-alloc-skip-sb-count-break"))]
-            image[SUPERBLOCK_OFFSET + 12..SUPERBLOCK_OFFSET + 16]
+            image[SUPERBLOCK_OFFSET + SUPERBLOCK_FREE_BLOCKS_COUNT
+                ..SUPERBLOCK_OFFSET + SUPERBLOCK_FREE_BLOCKS_COUNT + 4]
                 .copy_from_slice(&total.to_le_bytes());
             return Ok(first + index);
         }
@@ -1325,10 +1361,10 @@ pub fn free_block(image: &mut [u8], layout: &Layout, block: u32) -> Result<(), A
     if image[byte] & mask == 0 {
         return Err(AllocError::NotAllocated(block));
     }
-    let free = read_u16(image, descriptor + 12)
+    let free = read_u16(image, descriptor + GROUP_DESCRIPTOR_FREE_BLOCKS_COUNT)
         .checked_add(1)
         .ok_or(AllocError::FreeCountInconsistent)?;
-    let total = read_u32(image, SUPERBLOCK_OFFSET + 12)
+    let total = read_u32(image, SUPERBLOCK_OFFSET + SUPERBLOCK_FREE_BLOCKS_COUNT)
         .checked_add(1)
         .ok_or(AllocError::FreeCountInconsistent)?;
     // 破壊 (S12-b, ext2-free-skip-bit): ビットを落とさず、会計だけ戻す。
@@ -1337,8 +1373,12 @@ pub fn free_block(image: &mut [u8], layout: &Layout, block: u32) -> Result<(), A
     {
         image[byte] &= !mask;
     }
-    image[descriptor + 12..descriptor + 14].copy_from_slice(&free.to_le_bytes());
-    image[SUPERBLOCK_OFFSET + 12..SUPERBLOCK_OFFSET + 16].copy_from_slice(&total.to_le_bytes());
+    image[descriptor + GROUP_DESCRIPTOR_FREE_BLOCKS_COUNT
+        ..descriptor + GROUP_DESCRIPTOR_FREE_BLOCKS_COUNT + 2]
+        .copy_from_slice(&free.to_le_bytes());
+    image[SUPERBLOCK_OFFSET + SUPERBLOCK_FREE_BLOCKS_COUNT
+        ..SUPERBLOCK_OFFSET + SUPERBLOCK_FREE_BLOCKS_COUNT + 4]
+        .copy_from_slice(&total.to_le_bytes());
     Ok(())
 }
 
@@ -1608,14 +1648,17 @@ pub fn allocate_inode(image: &mut [u8], layout: &Layout) -> Result<u32, AllocErr
             #[cfg(not(feature = "ext2-create-skip-inode-count"))]
             {
                 // **飽和させない**（[`allocate_block`] と同じ理由）。
-                let group_free = read_u16(image, descriptor + 14)
+                let group_free = read_u16(image, descriptor + GROUP_DESCRIPTOR_FREE_INODES_COUNT)
                     .checked_sub(1)
                     .ok_or(AllocError::FreeCountInconsistent)?;
-                let total_free = read_u32(image, SUPERBLOCK_OFFSET + 16)
+                let total_free = read_u32(image, SUPERBLOCK_OFFSET + SUPERBLOCK_FREE_INODES_COUNT)
                     .checked_sub(1)
                     .ok_or(AllocError::FreeCountInconsistent)?;
-                image[descriptor + 14..descriptor + 16].copy_from_slice(&group_free.to_le_bytes());
-                image[SUPERBLOCK_OFFSET + 16..SUPERBLOCK_OFFSET + 20]
+                image[descriptor + GROUP_DESCRIPTOR_FREE_INODES_COUNT
+                    ..descriptor + GROUP_DESCRIPTOR_FREE_INODES_COUNT + 2]
+                    .copy_from_slice(&group_free.to_le_bytes());
+                image[SUPERBLOCK_OFFSET + SUPERBLOCK_FREE_INODES_COUNT
+                    ..SUPERBLOCK_OFFSET + SUPERBLOCK_FREE_INODES_COUNT + 4]
                     .copy_from_slice(&total_free.to_le_bytes());
             }
             return Ok(ino);
@@ -1649,15 +1692,18 @@ pub fn free_inode(image: &mut [u8], layout: &Layout, ino: u32) -> Result<(), All
     if image[byte] & mask == 0 {
         return Err(AllocError::NotAllocated(ino));
     }
-    let group_free = read_u16(image, descriptor + 14)
+    let group_free = read_u16(image, descriptor + GROUP_DESCRIPTOR_FREE_INODES_COUNT)
         .checked_add(1)
         .ok_or(AllocError::FreeCountInconsistent)?;
-    let total_free = read_u32(image, SUPERBLOCK_OFFSET + 16)
+    let total_free = read_u32(image, SUPERBLOCK_OFFSET + SUPERBLOCK_FREE_INODES_COUNT)
         .checked_add(1)
         .ok_or(AllocError::FreeCountInconsistent)?;
     image[byte] &= !mask;
-    image[descriptor + 14..descriptor + 16].copy_from_slice(&group_free.to_le_bytes());
-    image[SUPERBLOCK_OFFSET + 16..SUPERBLOCK_OFFSET + 20]
+    image[descriptor + GROUP_DESCRIPTOR_FREE_INODES_COUNT
+        ..descriptor + GROUP_DESCRIPTOR_FREE_INODES_COUNT + 2]
+        .copy_from_slice(&group_free.to_le_bytes());
+    image[SUPERBLOCK_OFFSET + SUPERBLOCK_FREE_INODES_COUNT
+        ..SUPERBLOCK_OFFSET + SUPERBLOCK_FREE_INODES_COUNT + 4]
         .copy_from_slice(&total_free.to_le_bytes());
     Ok(())
 }
@@ -1860,8 +1906,11 @@ pub fn create_file(
     {
         let group = (ino - 1) / layout.inodes_per_group;
         if let Some(descriptor) = layout.descriptor_at(group) {
-            let dirs = read_u16(image, descriptor + 16).wrapping_add(1);
-            image[descriptor + 16..descriptor + 18].copy_from_slice(&dirs.to_le_bytes());
+            let dirs =
+                read_u16(image, descriptor + GROUP_DESCRIPTOR_USED_DIRS_COUNT).wrapping_add(1);
+            image[descriptor + GROUP_DESCRIPTOR_USED_DIRS_COUNT
+                ..descriptor + GROUP_DESCRIPTOR_USED_DIRS_COUNT + 2]
+                .copy_from_slice(&dirs.to_le_bytes());
         }
     }
 
