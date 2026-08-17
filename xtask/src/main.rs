@@ -5091,6 +5091,11 @@ const BOOT_LOG_VOLATILE_MARKERS: &[&str] = &[
     // 揺れる（実測で 0 / 2 / 146 / 165）。**checksum などの判定は別の行にあり、
     // そちらは残る**——揺れる値を判定行から分けたので、この標識は 1 行の
     // 主題そのものに当たる（語の広い標識ではない）。
+    //
+    // **隠したものを見る者**: 完了しないことは上限の fail-fast が、違うものを
+    // 読んだことは `--virtio-test` の checksum が覆う。**遅くなる退行（常に
+    // 上限近くまで回る）は誰も見ていない**——この体制は性能を扱っていない
+    // （`perf` 接頭辞を外した判断と同じ）。
     "virtio-blk: polling took",
     "address-space: the same VA",
     // TSC の較正。実行ごとに揺れる。
@@ -5138,6 +5143,11 @@ const BOOT_LOG_CORE_COUNT_MARKERS: &[&str] = &[
     // virtio-blk の feature bits（S13-b）。**実測でコア数に依る**——QEMU は
     // キューの数を vCPU 数に合わせるので、`-smp 1` と `-smp 2` で 0x1000 違う。
     // capacity などの判定は別の行にあり、そちらは残る。
+    //
+    // **隠したものを見る者**: 無い。**観測の行であって、値に依存する者が
+    // まだ居ない**（feature は何も受けていない。ADR-0033）。受け始めたら、
+    // そのとき受けた bit の判定を持つこと。なおこの標識が落とすのは
+    // smp 比較だけで、参照との比較（`-smp 2` 固定）には残る。
     "virtio-blk: host features=",
 ];
 
@@ -10020,6 +10030,32 @@ mod tests {
             .position(|a| a == "-d")
             .expect("-d flag missing");
         assert_eq!(joined[d_pos + 1], "int,cpu_reset");
+    }
+
+    /// S13-b で足した 2 つの標識が、その行だけを落とすこと。
+    ///
+    /// **「消してはならない差が残ること」の検査である**——正規化の持ち越しの
+    /// 行（`deferred-decisions.md`）が「規則を足すとき」に発火し、今回足した
+    /// 2 つについて取り上げた。**checksum と capacity の行は、どちらの比較
+    /// でも落ちてはならない**——落ちたら、S13-b の判定が参照から消える。
+    #[test]
+    fn the_two_s13b_markers_drop_their_lines_and_nothing_else() {
+        let serial = "\
+[INFO] virtio-blk: polling took 165 spin(s) (limit 20000000)\n\
+[INFO] virtio-blk: host features=0x79007e54 (accepted 0)\n\
+[INFO] virtio-blk: handshake: ACKNOWLEDGE -> DRIVER; capacity=32768 sector(s)\n\
+[INFO] virtio-blk: read sector 0: 512 byte(s) requested, used.len=513, status=0 (OK); checksum=0x01195f6d first bytes=[00, 01, 02, 03, 04, 05, 06, 07]\n";
+        // 参照との比較（コア数の行は残す側）。
+        let kept = normalize_boot_log(serial, false);
+        assert!(kept.iter().all(|l| !l.contains("polling took")));
+        assert!(kept.iter().any(|l| l.contains("host features")));
+        assert!(kept.iter().any(|l| l.contains("checksum=")));
+        assert!(kept.iter().any(|l| l.contains("capacity=")));
+        // smp 比較（コア数の行も落とす側）では features も落ちる。
+        let cross = normalize_boot_log(serial, true);
+        assert!(cross.iter().all(|l| !l.contains("host features")));
+        assert!(cross.iter().any(|l| l.contains("checksum=")));
+        assert!(cross.iter().any(|l| l.contains("capacity=")));
     }
 
     /// カーネルの列挙の行が拾え、同じ接頭辞の別の行が混ざらないこと（S13-a）。
