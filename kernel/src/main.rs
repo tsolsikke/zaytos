@@ -4728,16 +4728,202 @@ fn exercise_create_and_unlink(
 }
 
 fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
+    use common::ext2::ROOT_INODE;
+
+    let Err(reason) = try_verify_embedded_fs_image(logger) else {
+        return;
+    };
+    match reason {
+        FsReadCheckError::EmbeddedImageDidNotParse { error: e } => logger.error(format_args!(
+            "ext2: the embedded image did not parse: {e:?}; halting"
+        )),
+        FsReadCheckError::ImageSizeMismatch => logger.error(format_args!(
+            "ext2: the embedded image is {} byte(s) but build.rs made {}; halting",
+            FS_IMAGE.len(),
+            fsimage_info::IMAGE_BYTES
+        )),
+        FsReadCheckError::GroupDescriptorNotUsable { group, error: e } => logger.error(
+            format_args!("ext2: group {group} descriptor is not usable: {e:?}; halting"),
+        ),
+        FsReadCheckError::MotdDoesNotResolve { error: e } => logger.error(format_args!(
+            "ext2: {MOTD_PATH} does not resolve: {e:?}; halting"
+        )),
+        FsReadCheckError::MotdShapeMismatch { size, span } => logger.error(format_args!(
+            "ext2: {MOTD_PATH} is {} byte(s) in {} block(s) but the seed file is {} byte(s); \
+             halting",
+            size,
+            span,
+            MOTD_SEED.len()
+        )),
+        FsReadCheckError::MotdNotReadable { error: e } => logger.error(format_args!(
+            "ext2: {MOTD_PATH} is not readable: {e:?}; halting"
+        )),
+        FsReadCheckError::MotdDoesNotMatchSeed => logger.error(format_args!(
+            "ext2: {MOTD_PATH} does not match the seed file that mke2fs copied into the image; \
+             halting"
+        )),
+        FsReadCheckError::RootInodeNotReadable { error: e } => logger.error(format_args!(
+            "ext2: the root inode ({ROOT_INODE}) is not readable: {e:?}; halting"
+        )),
+        FsReadCheckError::RootInodeNotDirectory { mode } => logger.error(format_args!(
+            "ext2: the root inode is not a directory (mode={:06o}); halting",
+            mode
+        )),
+        FsReadCheckError::RootFirstBlockNotReadable { error: e } => logger.error(format_args!(
+            "ext2: the root directory's first block is not readable: {e:?}; halting"
+        )),
+        FsReadCheckError::RootNotWalkable { error: e } => logger.error(format_args!(
+            "ext2: the root inode cannot be walked as a directory: {e:?}; halting"
+        )),
+        FsReadCheckError::RootEntryNotUsable { count, error: e } => logger.error(format_args!(
+            "ext2: root directory entry {count} is not usable: {e:?}; halting"
+        )),
+        FsReadCheckError::RootDirectoryPrefixWrong { first_two, count } => {
+            logger.error(format_args!(
+                "ext2: the root directory should start with \".\" and \"..\" both pointing at \
+                 inode {ROOT_INODE}, but the first entries point at {first_two:?} ({count} entries \
+                 in total); halting"
+            ))
+        }
+        FsReadCheckError::IndirectPathDoesNotResolve { path, error: e } => logger.error(
+            format_args!("ext2: {path} does not resolve: {e:?}; halting"),
+        ),
+        FsReadCheckError::IndirectShapeMismatch {
+            path,
+            expected_size,
+            size,
+            mode,
+        } => logger.error(format_args!(
+            "ext2: {path} should be {expected_size} byte(s) and regular but is \
+             {} byte(s) mode={:06o}; halting",
+            size, mode
+        )),
+        FsReadCheckError::IndirectSlotMismatch {
+            path,
+            slot,
+            expects_indirect,
+        } => logger.error(format_args!(
+            "ext2: {path} has i_block[12]={} but the single indirect block is expected to be \
+             {}; halting",
+            slot,
+            if expects_indirect { "in use" } else { "unused" }
+        )),
+        FsReadCheckError::IndirectBlockNotReadable {
+            path,
+            last_index,
+            error: e,
+        } => logger.error(format_args!(
+            "ext2: {path} block {last_index} is not readable: {e:?}; halting"
+        )),
+        FsReadCheckError::IndirectBlockEmpty { path, last_index } => logger.error(format_args!(
+            "ext2: {path} block {last_index} came back empty; halting"
+        )),
+        FsReadCheckError::IndirectLastByteMismatch {
+            path,
+            last_byte,
+            expected_last,
+        } => logger.error(format_args!(
+            "ext2: {path} last byte is {last_byte:#04x}, expected {expected_last:#04x}; \
+             halting"
+        )),
+    }
+    cpu::halt_forever();
+}
+
+/// [`verify_embedded_fs_image`] を根とする 5 段が止まる理由（T3-1）。
+///
+/// **(a)(b)(c) と同じ形である**——**「どこで、なぜ」だけを運び、文言は包み側で作る。**
+/// **`format_args!` は一時値を借りるので関数の外へ返せない**（実測）。
+///
+/// # 5 つの関数で 1 つにした理由
+///
+/// **(c) と同じ基準を、群の中で当てた。** [`verify_path_lookup`] /
+/// [`verify_root_inode`] / [`verify_root_directory_walk`] /
+/// [`verify_single_indirect_boundary`] は、**どれも呼ばれる先が 1 つで、
+/// その 1 つがこの群の中にある。** **止まる先を分ける理由が無い。**
+///
+/// **(c) と違うのは、数珠つなぎではなく木であることだけである**——
+/// [`verify_embedded_fs_image`] が 3 つを呼び、[`verify_root_inode`] が
+/// [`verify_root_directory_walk`] を呼ぶ。**枝分かれしても基準は変わらない。**
+///
+/// # 誤りの族は 1 つである
+///
+/// **すべて [`common::ext2::Ext2Error`] である**——**この群は読むだけで、書かない。**
+/// **(c) は読んで書くので 2 族を運んでいた。** **その違いがそのまま出ている。**
+enum FsReadCheckError {
+    /// 抱えている像が解析できない。
+    EmbeddedImageDidNotParse { error: common::ext2::Ext2Error },
+    /// 抱えている像の大きさが `build.rs` の作ったものと食い違う。
+    ImageSizeMismatch,
+    /// 群 descriptor が読めない。
+    GroupDescriptorNotUsable {
+        group: u32,
+        error: common::ext2::Ext2Error,
+    },
+    /// `/etc/motd` が名前で引けない。
+    MotdDoesNotResolve { error: common::ext2::Ext2Error },
+    /// `/etc/motd` の大きさかブロック数が種と食い違う。
+    MotdShapeMismatch { size: u64, span: u64 },
+    /// `/etc/motd` の中身が読めない。
+    MotdNotReadable { error: common::ext2::Ext2Error },
+    /// `/etc/motd` の中身が種と一致しない。
+    MotdDoesNotMatchSeed,
+    /// ルート inode が読めない。
+    RootInodeNotReadable { error: common::ext2::Ext2Error },
+    /// ルート inode がディレクトリでない。
+    RootInodeNotDirectory { mode: u16 },
+    /// ルートディレクトリの最初のブロックが読めない。
+    RootFirstBlockNotReadable { error: common::ext2::Ext2Error },
+    /// ルート inode をディレクトリとして走査できない。
+    RootNotWalkable { error: common::ext2::Ext2Error },
+    /// 走査の途中のエントリが読めない。
+    RootEntryNotUsable {
+        count: usize,
+        error: common::ext2::Ext2Error,
+    },
+    /// 先頭 2 つが `.` と `..` になっていない。
+    RootDirectoryPrefixWrong { first_two: [u32; 2], count: usize },
+    /// 境界を挟む 2 本のどちらかが名前で引けない。
+    IndirectPathDoesNotResolve {
+        path: &'static str,
+        error: common::ext2::Ext2Error,
+    },
+    /// 大きさか種別が期待と食い違う。
+    IndirectShapeMismatch {
+        path: &'static str,
+        expected_size: u64,
+        size: u64,
+        mode: u16,
+    },
+    /// 単一間接のスロットの使用が期待と食い違う。
+    IndirectSlotMismatch {
+        path: &'static str,
+        slot: u32,
+        expects_indirect: bool,
+    },
+    /// 最後のブロックが読めない。
+    IndirectBlockNotReadable {
+        path: &'static str,
+        last_index: u32,
+        error: common::ext2::Ext2Error,
+    },
+    /// 最後のブロックが空で返った。
+    IndirectBlockEmpty { path: &'static str, last_index: u32 },
+    /// 最後の 1 バイトが期待と食い違う。
+    IndirectLastByteMismatch {
+        path: &'static str,
+        last_byte: u8,
+        expected_last: u8,
+    },
+}
+
+/// 抱えている像を読み切れることを見る検査部（T3-1）。**止めない。`Err` を返す。**
+fn try_verify_embedded_fs_image(logger: &mut Logger<SerialPort>) -> Result<(), FsReadCheckError> {
     use common::ext2::Ext2;
 
     let fs = match Ext2::parse(FS_IMAGE) {
         Ok(fs) => fs,
-        Err(e) => {
-            logger.error(format_args!(
-                "ext2: the embedded image did not parse: {e:?}; halting"
-            ));
-            cpu::halt_forever();
-        }
+        Err(error) => return Err(FsReadCheckError::EmbeddedImageDidNotParse { error }),
     };
 
     logger.info(format_args!(
@@ -4775,12 +4961,7 @@ fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
     // **像の大きさは build.rs が知っている値と一致するはず。** 食い違えば、
     // 抱えた像と建てた像が別物である。
     if FS_IMAGE.len() as u64 != fsimage_info::IMAGE_BYTES {
-        logger.error(format_args!(
-            "ext2: the embedded image is {} byte(s) but build.rs made {}; halting",
-            FS_IMAGE.len(),
-            fsimage_info::IMAGE_BYTES
-        ));
-        cpu::halt_forever();
+        return Err(FsReadCheckError::ImageSizeMismatch);
     }
 
     // group descriptor を全部読む。**3 つのブロック番号が像の外を指していない
@@ -4803,18 +4984,16 @@ fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
                     descriptor.used_dirs_count
                 ));
             }
-            Err(e) => {
-                logger.error(format_args!(
-                    "ext2: group {group} descriptor is not usable: {e:?}; halting"
-                ));
-                cpu::halt_forever();
+            Err(error) => {
+                return Err(FsReadCheckError::GroupDescriptorNotUsable { group, error });
             }
         }
     }
 
-    verify_root_inode(logger, &fs);
-    verify_path_lookup(logger, &fs);
-    verify_single_indirect_boundary(logger, &fs);
+    verify_root_inode(logger, &fs)?;
+    verify_path_lookup(logger, &fs)?;
+    verify_single_indirect_boundary(logger, &fs)?;
+    Ok(())
 }
 
 /// 壊した ext2 の像を組み立てる作業領域（S10-a）。
@@ -4924,6 +5103,14 @@ static MOTD_SEED: &[u8] = include_bytes!(concat!(
     "/fsimage/seed/etc/motd"
 ));
 
+/// [`MOTD_SEED`] が像の中で置かれている場所（S10-a）。
+///
+/// **[`verify_path_lookup`] の中の定数だったが、T3-1 で外へ出した。**
+/// **止まる文言が `{MOTD_PATH}` という行内の捕捉で書かれているため、
+/// 文言を作る側（[`verify_embedded_fs_image`]）から見えている必要がある。**
+/// **写しを 2 つ持たないためであって、意味は変わっていない。**
+const MOTD_PATH: &str = "/etc/motd";
+
 /// 名前でファイルへ届き、中身が種と一致することを主張する（S10-a）。
 ///
 /// # `hello` の `write` と同じ形の主張である
@@ -4935,39 +5122,26 @@ static MOTD_SEED: &[u8] = include_bytes!(concat!(
 ///
 /// **`dentry` を置かない**（`docs/roadmap.md` の S10）。引く回数が問題になって
 /// いない段では、**キャッシュを持つ理由が無い。**
-fn verify_path_lookup(logger: &mut Logger<SerialPort>, fs: &common::ext2::Ext2<'_>) {
-    const MOTD_PATH: &str = "/etc/motd";
-
+fn verify_path_lookup(
+    logger: &mut Logger<SerialPort>,
+    fs: &common::ext2::Ext2<'_>,
+) -> Result<(), FsReadCheckError> {
     let motd = match fs.lookup(MOTD_PATH.as_bytes()) {
         Ok(inode) => inode,
-        Err(e) => {
-            logger.error(format_args!(
-                "ext2: {MOTD_PATH} does not resolve: {e:?}; halting"
-            ));
-            cpu::halt_forever();
-        }
+        Err(error) => return Err(FsReadCheckError::MotdDoesNotResolve { error }),
     };
 
     // **1 ブロックに収まる大きさである。** 収まらなくなったら、ここが最初に気づく。
     if motd.size != MOTD_SEED.len() as u64 || fs.block_span(&motd) != 1 {
-        logger.error(format_args!(
-            "ext2: {MOTD_PATH} is {} byte(s) in {} block(s) but the seed file is {} byte(s); \
-             halting",
-            motd.size,
-            fs.block_span(&motd),
-            MOTD_SEED.len()
-        ));
-        cpu::halt_forever();
+        return Err(FsReadCheckError::MotdShapeMismatch {
+            size: motd.size,
+            span: fs.block_span(&motd),
+        });
     }
 
     let contents = match fs.file_block(&motd, 0) {
         Ok(bytes) => bytes,
-        Err(e) => {
-            logger.error(format_args!(
-                "ext2: {MOTD_PATH} is not readable: {e:?}; halting"
-            ));
-            cpu::halt_forever();
-        }
+        Err(error) => return Err(FsReadCheckError::MotdNotReadable { error }),
     };
 
     // **改行を判定行に出さない。** 1 行の判定行が 2 行に割れると、
@@ -4983,12 +5157,9 @@ fn verify_path_lookup(logger: &mut Logger<SerialPort>, fs: &common::ext2::Ext2<'
     ));
 
     if contents != MOTD_SEED {
-        logger.error(format_args!(
-            "ext2: {MOTD_PATH} does not match the seed file that mke2fs copied into the image; \
-             halting"
-        ));
-        cpu::halt_forever();
+        return Err(FsReadCheckError::MotdDoesNotMatchSeed);
     }
+    Ok(())
 }
 
 /// ルート inode を読み、直接ブロックで中身へ届くことを主張する（S10-a）。
@@ -5006,17 +5177,15 @@ fn verify_path_lookup(logger: &mut Logger<SerialPort>, fs: &common::ext2::Ext2<'
 /// エントリが `.` で、その inode 番号が自分自身であることを、走査の結果として
 /// 見る。**以前はここで先頭 4 バイトだけを覗いていたが、走査を書いたので
 /// そちらへ寄せた。**
-fn verify_root_inode(logger: &mut Logger<SerialPort>, fs: &common::ext2::Ext2<'_>) {
+fn verify_root_inode(
+    logger: &mut Logger<SerialPort>,
+    fs: &common::ext2::Ext2<'_>,
+) -> Result<(), FsReadCheckError> {
     use common::ext2::ROOT_INODE;
 
     let root = match fs.inode(ROOT_INODE) {
         Ok(inode) => inode,
-        Err(e) => {
-            logger.error(format_args!(
-                "ext2: the root inode ({ROOT_INODE}) is not readable: {e:?}; halting"
-            ));
-            cpu::halt_forever();
-        }
+        Err(error) => return Err(FsReadCheckError::RootInodeNotReadable { error }),
     };
     logger.info(format_args!(
         "ext2: root inode {}: mode={:06o} size={} links={} i_block[0]={} directory={}",
@@ -5029,21 +5198,12 @@ fn verify_root_inode(logger: &mut Logger<SerialPort>, fs: &common::ext2::Ext2<'_
     ));
 
     if !root.is_directory() {
-        logger.error(format_args!(
-            "ext2: the root inode is not a directory (mode={:06o}); halting",
-            root.mode
-        ));
-        cpu::halt_forever();
+        return Err(FsReadCheckError::RootInodeNotDirectory { mode: root.mode });
     }
 
     let first = match fs.file_block(&root, 0) {
         Ok(bytes) => bytes,
-        Err(e) => {
-            logger.error(format_args!(
-                "ext2: the root directory's first block is not readable: {e:?}; halting"
-            ));
-            cpu::halt_forever();
-        }
+        Err(error) => return Err(FsReadCheckError::RootFirstBlockNotReadable { error }),
     };
     logger.info(format_args!(
         "ext2: root directory block 0 of {}: {} byte(s) via the direct blocks",
@@ -5051,7 +5211,7 @@ fn verify_root_inode(logger: &mut Logger<SerialPort>, fs: &common::ext2::Ext2<'_
         first.len()
     ));
 
-    verify_root_directory_walk(logger, fs, &root);
+    verify_root_directory_walk(logger, fs, &root)
 }
 
 /// ルートディレクトリを走査し、名前を判定行に出す（S10-a）。
@@ -5079,7 +5239,7 @@ fn verify_root_directory_walk(
     logger: &mut Logger<SerialPort>,
     fs: &common::ext2::Ext2<'_>,
     root: &common::ext2::Inode,
-) {
+) -> Result<(), FsReadCheckError> {
     use common::ext2::ROOT_INODE;
 
     /// 名前を並べる作業領域。**足りなければ切り詰めたことを判定行に出す。**
@@ -5087,12 +5247,7 @@ fn verify_root_directory_walk(
 
     let entries = match fs.directory_entries(root) {
         Ok(entries) => entries,
-        Err(e) => {
-            logger.error(format_args!(
-                "ext2: the root inode cannot be walked as a directory: {e:?}; halting"
-            ));
-            cpu::halt_forever();
-        }
+        Err(error) => return Err(FsReadCheckError::RootNotWalkable { error }),
     };
 
     let mut names = [0u8; NAME_BUFFER_LEN];
@@ -5104,12 +5259,7 @@ fn verify_root_directory_walk(
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
-            Err(e) => {
-                logger.error(format_args!(
-                    "ext2: root directory entry {count} is not usable: {e:?}; halting"
-                ));
-                cpu::halt_forever();
-            }
+            Err(error) => return Err(FsReadCheckError::RootEntryNotUsable { count, error }),
         };
         if count < first_two.len() {
             first_two[count] = entry.inode;
@@ -5140,13 +5290,9 @@ fn verify_root_directory_walk(
 
     // **先頭 2 つだけを固定する。** `.` と `..` はどちらもルート自身を指す。
     if count < 2 || first_two != [ROOT_INODE, ROOT_INODE] {
-        logger.error(format_args!(
-            "ext2: the root directory should start with \".\" and \"..\" both pointing at \
-             inode {ROOT_INODE}, but the first entries point at {first_two:?} ({count} entries \
-             in total); halting"
-        ));
-        cpu::halt_forever();
+        return Err(FsReadCheckError::RootDirectoryPrefixWrong { first_two, count });
     }
+    Ok(())
 }
 
 /// 単一間接の境界を挟む 2 本を読み、**両側**を主張する（S10-a）。
@@ -5170,7 +5316,10 @@ fn verify_root_directory_walk(
 /// **`mke2fs -d` が割り当てた inode 番号を直に書いていたが、パス解決を書いたので
 /// 外した**（S10-a の 6 本目）。**大きさの突き合わせは残してある**——番号ではなく
 /// 名前で届くようになっても、**届いた先が期待どおりのものかは別の主張である。**
-fn verify_single_indirect_boundary(logger: &mut Logger<SerialPort>, fs: &common::ext2::Ext2<'_>) {
+fn verify_single_indirect_boundary(
+    logger: &mut Logger<SerialPort>,
+    fs: &common::ext2::Ext2<'_>,
+) -> Result<(), FsReadCheckError> {
     use common::ext2::SINGLE_INDIRECT_SLOT;
 
     let cases = [
@@ -5191,32 +5340,27 @@ fn verify_single_indirect_boundary(logger: &mut Logger<SerialPort>, fs: &common:
     for (path, expected_size, expected_last, expects_indirect) in cases {
         let inode = match fs.lookup(path.as_bytes()) {
             Ok(inode) => inode,
-            Err(e) => {
-                logger.error(format_args!(
-                    "ext2: {path} does not resolve: {e:?}; halting"
-                ));
-                cpu::halt_forever();
+            Err(error) => {
+                return Err(FsReadCheckError::IndirectPathDoesNotResolve { path, error });
             }
         };
         let ino = inode.number;
         if inode.size != expected_size || !inode.is_regular_file() {
-            logger.error(format_args!(
-                "ext2: {path} should be {expected_size} byte(s) and regular but is \
-                 {} byte(s) mode={:06o}; halting",
-                inode.size, inode.mode
-            ));
-            cpu::halt_forever();
+            return Err(FsReadCheckError::IndirectShapeMismatch {
+                path,
+                expected_size,
+                size: inode.size,
+                mode: inode.mode,
+            });
         }
 
         let uses_indirect = inode.blocks[SINGLE_INDIRECT_SLOT] != 0;
         if uses_indirect != expects_indirect {
-            logger.error(format_args!(
-                "ext2: {path} has i_block[12]={} but the single indirect block is expected to be \
-                 {}; halting",
-                inode.blocks[SINGLE_INDIRECT_SLOT],
-                if expects_indirect { "in use" } else { "unused" }
-            ));
-            cpu::halt_forever();
+            return Err(FsReadCheckError::IndirectSlotMismatch {
+                path,
+                slot: inode.blocks[SINGLE_INDIRECT_SLOT],
+                expects_indirect,
+            });
         }
 
         // 最後の 1 バイトは最後のブロックの末尾にある。**返るのは `i_size` で
@@ -5224,18 +5368,16 @@ fn verify_single_indirect_boundary(logger: &mut Logger<SerialPort>, fs: &common:
         let last_index = (fs.block_span(&inode) - 1) as u32;
         let last_block = match fs.file_block(&inode, last_index) {
             Ok(bytes) => bytes,
-            Err(e) => {
-                logger.error(format_args!(
-                    "ext2: {path} block {last_index} is not readable: {e:?}; halting"
-                ));
-                cpu::halt_forever();
+            Err(error) => {
+                return Err(FsReadCheckError::IndirectBlockNotReadable {
+                    path,
+                    last_index,
+                    error,
+                });
             }
         };
         let Some(&last_byte) = last_block.last() else {
-            logger.error(format_args!(
-                "ext2: {path} block {last_index} came back empty; halting"
-            ));
-            cpu::halt_forever();
+            return Err(FsReadCheckError::IndirectBlockEmpty { path, last_index });
         };
 
         logger.info(format_args!(
@@ -5246,13 +5388,14 @@ fn verify_single_indirect_boundary(logger: &mut Logger<SerialPort>, fs: &common:
             inode.blocks[SINGLE_INDIRECT_SLOT]
         ));
         if last_byte != expected_last {
-            logger.error(format_args!(
-                "ext2: {path} last byte is {last_byte:#04x}, expected {expected_last:#04x}; \
-                 halting"
-            ));
-            cpu::halt_forever();
+            return Err(FsReadCheckError::IndirectLastByteMismatch {
+                path,
+                last_byte,
+                expected_last,
+            });
         }
     }
+    Ok(())
 }
 
 /// 壊した像に対して走らせる観測（S10-a）。
