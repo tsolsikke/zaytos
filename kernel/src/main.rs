@@ -5254,6 +5254,93 @@ fn fs_read_whole_file(
 ///   **ホストテストが見ている**（`common::ext2` の
 ///   `refuses_a_file_that_uses_the_double_or_triple_indirect_slots` ほか）
 fn verify_corrupt_fs_image_is_rejected(logger: &mut Logger<SerialPort>) {
+    let Err(reason) = try_verify_corrupt_fs_image_is_rejected(logger) else {
+        return;
+    };
+    match reason {
+        CorruptFsCheckError::PrefixProbeFailed { name, error: e } => logger.error(format_args!(
+            "ext2-corrupt: the untouched {CORRUPT_FS_BLOCKS}-block prefix failed \
+             the \"{name}\" probe with {e:?}. The prefix is too short to hold \
+             everything the image references; raise CORRUPT_FS_BLOCKS. halting"
+        )),
+        CorruptFsCheckError::PrefixDidNotParse { error: e } => logger.error(format_args!(
+            "ext2-corrupt: the untouched {CORRUPT_FS_BLOCKS}-block prefix did not parse \
+             ({e:?}); halting"
+        )),
+        CorruptFsCheckError::CaseAccepted { what, expected } => logger.error(format_args!(
+            "ext2-corrupt: {} was accepted; expected {:?}; halting",
+            what, expected
+        )),
+        CorruptFsCheckError::CaseWrongReason {
+            what,
+            error: e,
+            expected,
+        } => logger.error(format_args!(
+            "ext2-corrupt: {} was rejected as {e:?}, expected {:?}; halting",
+            what, expected
+        )),
+        CorruptFsCheckError::EmbeddedImageBroken => logger.error(format_args!(
+            "ext2-corrupt: the embedded image no longer parses after the corruption pass; halting"
+        )),
+        CorruptFsCheckError::MismatchUnparseable { what } => logger.error(format_args!(
+            "ext2-corrupt: {what} made the image unparseable, but this case is about a \
+             mismatch that the parser cannot see; halting"
+        )),
+        CorruptFsCheckError::MismatchUnreadable { what, error: e } => logger.error(format_args!(
+            "ext2-corrupt: {what} made /etc/motd unreadable ({e:?}), but this case is \
+             about a mismatch in what is read; halting"
+        )),
+        CorruptFsCheckError::MismatchStillSeed { what } => logger.error(format_args!(
+            "ext2-corrupt: {what} still read back as the seed file; the comparison in \
+             verify_path_lookup would not have noticed; halting"
+        )),
+    }
+    cpu::halt_forever();
+}
+
+/// [`verify_corrupt_fs_image_is_rejected`] が止まる理由（T3-1）。
+///
+/// **(a) と同じ形である**——**「どこで、なぜ」だけを運び、文言は包み側で作る。**
+/// **`format_args!` は関数の外へ返せない**ため（`E0515`）。
+///
+/// **助けの [`verify_fs_content_mismatch_is_noticed`] の分も、この 1 つに入れてある。**
+/// **あれは本体から呼ばれる助けで、止まる先を分ける理由が無い。**
+enum CorruptFsCheckError {
+    /// 短くした前置きが、健全なはずなのに probe を通らない。
+    PrefixProbeFailed {
+        name: &'static str,
+        error: common::ext2::Ext2Error,
+    },
+    /// 短くした前置きが、そもそも解析できない。
+    PrefixDidNotParse { error: common::ext2::Ext2Error },
+    /// 壊した像が受理された。
+    CaseAccepted {
+        what: &'static str,
+        expected: common::ext2::Ext2Error,
+    },
+    /// 壊した像は拒まれたが、理由が違う。
+    CaseWrongReason {
+        what: &'static str,
+        error: common::ext2::Ext2Error,
+        expected: common::ext2::Ext2Error,
+    },
+    /// 壊す処理の後で、抱えている像が読めなくなった。
+    EmbeddedImageBroken,
+    /// 中身の食い違いを見る例なのに、解析そのものが通らない。
+    MismatchUnparseable { what: &'static str },
+    /// 中身の食い違いを見る例なのに、読み出しが通らない。
+    MismatchUnreadable {
+        what: &'static str,
+        error: common::ext2::Ext2Error,
+    },
+    /// 壊したのに、種のファイルと同じものが読めた。
+    MismatchStillSeed { what: &'static str },
+}
+
+/// 壊した像が拒まれることを見る検査部（T3-1）。**止めない。`Err` を返す。**
+fn try_verify_corrupt_fs_image_is_rejected(
+    logger: &mut Logger<SerialPort>,
+) -> Result<(), CorruptFsCheckError> {
     use common::ext2::{Ext2, Ext2Error};
 
     /// `s_inodes_count` と `s_inodes_per_group` を揃えて動かす値。
@@ -5509,22 +5596,13 @@ fn verify_corrupt_fs_image_is_rejected(logger: &mut Logger<SerialPort>) {
                 ("read /data/indirect-first", fs_probe_read_indirect_first),
             ];
             for (name, probe) in probes {
-                if let Err(e) = probe(&fs) {
-                    logger.error(format_args!(
-                        "ext2-corrupt: the untouched {CORRUPT_FS_BLOCKS}-block prefix failed \
-                         the \"{name}\" probe with {e:?}. The prefix is too short to hold \
-                         everything the image references; raise CORRUPT_FS_BLOCKS. halting"
-                    ));
-                    cpu::halt_forever();
+                if let Err(error) = probe(&fs) {
+                    return Err(CorruptFsCheckError::PrefixProbeFailed { name, error });
                 }
             }
         }
-        Err(e) => {
-            logger.error(format_args!(
-                "ext2-corrupt: the untouched {CORRUPT_FS_BLOCKS}-block prefix did not parse \
-                 ({e:?}); halting"
-            ));
-            cpu::halt_forever();
+        Err(error) => {
+            return Err(CorruptFsCheckError::PrefixDidNotParse { error });
         }
     }
 
@@ -5553,18 +5631,17 @@ fn verify_corrupt_fs_image_is_rejected(logger: &mut Logger<SerialPort>) {
         };
         match outcome {
             Ok(()) => {
-                logger.error(format_args!(
-                    "ext2-corrupt: {} was accepted; expected {:?}; halting",
-                    case.what, case.expected
-                ));
-                cpu::halt_forever();
+                return Err(CorruptFsCheckError::CaseAccepted {
+                    what: case.what,
+                    expected: case.expected,
+                });
             }
-            Err(e) if e != case.expected => {
-                logger.error(format_args!(
-                    "ext2-corrupt: {} was rejected as {e:?}, expected {:?}; halting",
-                    case.what, case.expected
-                ));
-                cpu::halt_forever();
+            Err(error) if error != case.expected => {
+                return Err(CorruptFsCheckError::CaseWrongReason {
+                    what: case.what,
+                    error,
+                    expected: case.expected,
+                });
             }
             Err(e) => {
                 logger.info(format_args!("ext2-corrupt: {} -> {e:?}", case.what));
@@ -5573,7 +5650,7 @@ fn verify_corrupt_fs_image_is_rejected(logger: &mut Logger<SerialPort>) {
         }
     }
 
-    verify_fs_content_mismatch_is_noticed(logger, &mut rejected);
+    verify_fs_content_mismatch_is_noticed(logger, &mut rejected)?;
 
     logger.info(format_args!(
         "ext2-corrupt: all {rejected} corrupted image(s) were refused with the expected reason, \
@@ -5583,11 +5660,9 @@ fn verify_corrupt_fs_image_is_rejected(logger: &mut Logger<SerialPort>) {
 
     // 壊した後も、抱えている像が読めること。**壊す処理が元を汚していないことの主張。**
     if Ext2::parse(FS_IMAGE).is_err() {
-        logger.error(format_args!(
-            "ext2-corrupt: the embedded image no longer parses after the corruption pass; halting"
-        ));
-        cpu::halt_forever();
+        return Err(CorruptFsCheckError::EmbeddedImageBroken);
     }
+    Ok(())
 }
 
 /// **パーサは通るが、カーネル自身の突き合わせが食い違いに気づく**壊し方（S10-a）。
@@ -5600,7 +5675,10 @@ fn verify_corrupt_fs_image_is_rejected(logger: &mut Logger<SerialPort>) {
 ///
 /// **この 2 つを表に混ぜない。** 混ぜると「エラーが返る」と「値が違う」が
 /// 同じ主張に見える。
-fn verify_fs_content_mismatch_is_noticed(logger: &mut Logger<SerialPort>, rejected: &mut usize) {
+fn verify_fs_content_mismatch_is_noticed(
+    logger: &mut Logger<SerialPort>,
+    rejected: &mut usize,
+) -> Result<(), CorruptFsCheckError> {
     use common::ext2::Ext2;
 
     let cases: [(&str, FsPatch); 2] = [
@@ -5634,31 +5712,19 @@ fn verify_fs_content_mismatch_is_noticed(logger: &mut Logger<SerialPort>, reject
         };
 
         let Ok(fs) = Ext2::parse(image) else {
-            logger.error(format_args!(
-                "ext2-corrupt: {what} made the image unparseable, but this case is about a \
-                 mismatch that the parser cannot see; halting"
-            ));
-            cpu::halt_forever();
+            return Err(CorruptFsCheckError::MismatchUnparseable { what });
         };
         let contents = match fs
             .lookup(b"/etc/motd")
             .and_then(|inode| fs.file_block(&inode, 0))
         {
             Ok(bytes) => bytes,
-            Err(e) => {
-                logger.error(format_args!(
-                    "ext2-corrupt: {what} made /etc/motd unreadable ({e:?}), but this case is \
-                     about a mismatch in what is read; halting"
-                ));
-                cpu::halt_forever();
+            Err(error) => {
+                return Err(CorruptFsCheckError::MismatchUnreadable { what, error });
             }
         };
         if contents == MOTD_SEED {
-            logger.error(format_args!(
-                "ext2-corrupt: {what} still read back as the seed file; the comparison in \
-                 verify_path_lookup would not have noticed; halting"
-            ));
-            cpu::halt_forever();
+            return Err(CorruptFsCheckError::MismatchStillSeed { what });
         }
         logger.info(format_args!(
             "ext2-corrupt: {what} -> read {} byte(s) that differ from the seed",
@@ -5666,6 +5732,7 @@ fn verify_fs_content_mismatch_is_noticed(logger: &mut Logger<SerialPort>, reject
         ));
         *rejected += 1;
     }
+    Ok(())
 }
 
 /// 抱えている像の先頭 [`CORRUPT_FS_BLOCKS`] ブロックを写し、それ自体で読み切れる
