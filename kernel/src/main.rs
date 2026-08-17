@@ -4215,26 +4215,166 @@ fn try_copy_fs_image_to_frames(logger: &mut Logger<SerialPort>) -> Result<(), Fs
 /// `e2fsck` の不満がちょうど 1 本であることを見るために要る。**
 /// **2 つの状態は同じ起動では取れない**ので、**構成で分ける。**
 fn exercise_block_bitmap(logger: &mut Logger<SerialPort>, image: &'static mut [u8]) {
+    let Err(reason) = try_exercise_block_bitmap(logger, image) else {
+        return;
+    };
+    match reason {
+        WriteExerciseError::BitmapCopyDidNotParse { error: e } => logger.error(format_args!(
+            "fs-bitmap: the copy did not parse: {e:?}; halting"
+        )),
+        WriteExerciseError::BitmapCouldNotAllocate { error: e } => logger.error(format_args!(
+            "fs-bitmap: could not allocate: {e:?}; halting"
+        )),
+        WriteExerciseError::BitmapCopyDidNotParseAfterAllocating { error: e } => logger.error(
+            format_args!("fs-bitmap: the copy did not parse after allocating: {e:?}; halting"),
+        ),
+        WriteExerciseError::BitmapCouldNotFree { error: e } => {
+            logger.error(format_args!("fs-bitmap: could not free: {e:?}; halting"))
+        }
+        WriteExerciseError::AppendTargetNotFound { name, error: e } => logger.error(format_args!(
+            "fs-write: could not find {}: {e:?}; halting",
+            core::str::from_utf8(name).unwrap_or("?")
+        )),
+        WriteExerciseError::AppendSeedSizeMismatch {
+            name,
+            original_size,
+        } => logger.error(format_args!(
+            "fs-write: {} is {original_size} byte(s) but build.rs seeded {}; halting",
+            core::str::from_utf8(name).unwrap_or("?"),
+            fsimage_info::WRITABLE_SEED_BYTES
+        )),
+        WriteExerciseError::AppendFailed { round, error: e } => logger.error(format_args!(
+            "fs-write: append {round} failed: {e:?}; halting"
+        )),
+        WriteExerciseError::TruncateCouldNotGrow { error: e } => {
+            logger.error(format_args!("fs-truncate: could not grow: {e:?}; halting"))
+        }
+        WriteExerciseError::TruncateFailed { target, error: e } => logger.error(format_args!(
+            "fs-truncate: truncate to {target} failed: {e:?}; halting"
+        )),
+        #[cfg(feature = "fs-truncate-keep-test")]
+        WriteExerciseError::TruncateToZeroFailed { error: e } => logger.error(format_args!(
+            "fs-truncate: truncate to 0 failed: {e:?}; halting"
+        )),
+        WriteExerciseError::TruncateCouldNotRestore { error: e } => logger.error(format_args!(
+            "fs-truncate: could not restore: {e:?}; halting"
+        )),
+        WriteExerciseError::CreateDirectoryNotFound { name, error: e } => {
+            logger.error(format_args!(
+                "fs-create: could not find {}: {e:?}; halting",
+                core::str::from_utf8(name).unwrap_or("?")
+            ))
+        }
+        WriteExerciseError::CreateFailed { error: e } => {
+            logger.error(format_args!("fs-create: could not create: {e:?}; halting"))
+        }
+        WriteExerciseError::CreateCouldNotWriteContents { error: e } => logger.error(format_args!(
+            "fs-create: could not write the contents: {e:?}; halting"
+        )),
+        WriteExerciseError::CreateCopyDidNotParseAfterCreating { error: e } => logger.error(
+            format_args!("fs-create: the copy did not parse after creating: {e:?}; halting"),
+        ),
+        WriteExerciseError::CreateCouldNotUnlink { error: e } => {
+            logger.error(format_args!("fs-create: could not unlink: {e:?}; halting"))
+        }
+        WriteExerciseError::CreateCopyDidNotParseAfterUnlinking { error: e } => logger.error(
+            format_args!("fs-create: the copy did not parse after unlinking: {e:?}; halting"),
+        ),
+    }
+    cpu::halt_forever();
+}
+
+/// [`exercise_block_bitmap`] から始まる 4 段が止まる理由（T3-1）。
+///
+/// **(a)(b) と同じ形である**——**「どこで、なぜ」だけを運び、文言は包み側で作る。**
+/// **`format_args!` は一時値を借りるので関数の外へ返せない**（実測）。
+///
+/// # 4 つの関数で 1 つにした理由
+///
+/// **[`exercise_file_append`] / [`exercise_truncate`] /
+/// [`exercise_create_and_unlink`] は、どれも呼ばれる先が 1 つしかない。**
+/// **数珠つなぎの途中であって、止まる先を分ける理由が無い**
+/// （(b) の [`verify_fs_content_mismatch_is_noticed`] と同じ判断である）。
+///
+/// # (a) へは畳まない
+///
+/// **[`exercise_block_bitmap`] 自身も呼ばれる先は 1 つだが、そこは
+/// [`try_copy_fs_image_to_frames`]、つまり (a) の中である。**
+/// **由来の違う群なので畳まない**——**(a) は像の複製、こちらは書き込みの実演である。**
+/// **畳むと、閉じた群の列挙を後から太らせることになる。**
+/// **誤りの族が 2 つ混じる。** **読む側は [`common::ext2::Ext2Error`]、
+/// 書く側は [`common::ext2::AllocError`] を返す**——**この群は読んで書くので、
+/// 1 つの列挙が両方を運ぶ。** **(a)(b) は読む側だけだったので 1 族で足りていた。**
+/// **揃えるために片方を包み直すことはしない**——**包むと `{e:?}` の出す文言が変わる。**
+enum WriteExerciseError {
+    /// 複製が解析できない。
+    BitmapCopyDidNotParse { error: common::ext2::Ext2Error },
+    /// 空きブロックが取れない。
+    BitmapCouldNotAllocate { error: common::ext2::AllocError },
+    /// 取った後で複製が解析できない。
+    BitmapCopyDidNotParseAfterAllocating { error: common::ext2::Ext2Error },
+    /// 取ったブロックが返せない。
+    BitmapCouldNotFree { error: common::ext2::AllocError },
+    /// 追記する先が見つからない。
+    AppendTargetNotFound {
+        name: &'static [u8],
+        error: common::ext2::Ext2Error,
+    },
+    /// 初めの大きさが `build.rs` の蒔いたものと食い違う。
+    AppendSeedSizeMismatch {
+        name: &'static [u8],
+        original_size: u32,
+    },
+    /// 追記そのものが通らない。
+    AppendFailed {
+        round: usize,
+        error: common::ext2::AllocError,
+    },
+    /// 縮める前に伸ばせない。
+    TruncateCouldNotGrow { error: common::ext2::AllocError },
+    /// 目標の大きさへ縮められない。
+    TruncateFailed {
+        target: u32,
+        error: common::ext2::AllocError,
+    },
+    /// 0 へ縮められない。**変種でしか通らない道なので、同じ `cfg` で囲む**
+    /// ——囲まないと既定のビルドで一度も作られず、`dead_code` が出る。
+    #[cfg(feature = "fs-truncate-keep-test")]
+    TruncateToZeroFailed { error: common::ext2::AllocError },
+    /// 初めの大きさへ戻せない。
+    TruncateCouldNotRestore { error: common::ext2::AllocError },
+    /// 作る先のディレクトリが見つからない。
+    CreateDirectoryNotFound {
+        name: &'static [u8],
+        error: common::ext2::Ext2Error,
+    },
+    /// ファイルが作れない。
+    CreateFailed { error: common::ext2::AllocError },
+    /// 作ったファイルへ中身が書けない。
+    CreateCouldNotWriteContents { error: common::ext2::AllocError },
+    /// 作った後で複製が解析できない。
+    CreateCopyDidNotParseAfterCreating { error: common::ext2::Ext2Error },
+    /// 作ったファイルが消せない。
+    CreateCouldNotUnlink { error: common::ext2::AllocError },
+    /// 消した後で複製が解析できない。
+    CreateCopyDidNotParseAfterUnlinking { error: common::ext2::Ext2Error },
+}
+
+/// ブロックビットマップの往復を見る検査部（T3-1）。**止めない。`Err` を返す。**
+fn try_exercise_block_bitmap(
+    logger: &mut Logger<SerialPort>,
+    image: &'static mut [u8],
+) -> Result<(), WriteExerciseError> {
     use common::ext2::Ext2;
 
     let layout = match Ext2::parse(image) {
         Ok(fs) => fs.layout(),
-        Err(e) => {
-            logger.error(format_args!(
-                "fs-bitmap: the copy did not parse: {e:?}; halting"
-            ));
-            cpu::halt_forever();
-        }
+        Err(error) => return Err(WriteExerciseError::BitmapCopyDidNotParse { error }),
     };
 
     let block = match common::ext2::allocate_block(image, &layout) {
         Ok(block) => block,
-        Err(e) => {
-            logger.error(format_args!(
-                "fs-bitmap: could not allocate: {e:?}; halting"
-            ));
-            cpu::halt_forever();
-        }
+        Err(error) => return Err(WriteExerciseError::BitmapCouldNotAllocate { error }),
     };
 
     // **取れた後の空き数を出す。** ホスト側は外の道具（`dumpe2fs`）から
@@ -4246,11 +4386,8 @@ fn exercise_block_bitmap(logger: &mut Logger<SerialPort>, image: &'static mut [u
                 .map(|d| d.free_blocks_count)
                 .unwrap_or(0),
         ),
-        Err(e) => {
-            logger.error(format_args!(
-                "fs-bitmap: the copy did not parse after allocating: {e:?}; halting"
-            ));
-            cpu::halt_forever();
+        Err(error) => {
+            return Err(WriteExerciseError::BitmapCopyDidNotParseAfterAllocating { error });
         }
     };
     logger.info(format_args!(
@@ -4264,25 +4401,26 @@ fn exercise_block_bitmap(logger: &mut Logger<SerialPort>, image: &'static mut [u
         logger.info(format_args!(
             "fs-bitmap: keeping the block allocated (fs-alloc-keep-test)"
         ));
-        return;
     }
-
-    #[cfg(not(feature = "fs-alloc-keep-test"))]
-    exercise_file_append(logger, image, &layout);
 
     // **解放する。** 破壊は `common::ext2::free_block` の中に置いてある——
     // **動作のある場所に置かないと、破壊にならない**（実測で踏んだ。
     // ここで正しく呼んでいたので、feature を立てても何も変わらなかった）。
+    //
+    // **`return` を使わずに `cfg(not(...))` の 1 つの塊へまとめてある**
+    // ——**戻り値が `Result` になったので、`return` を残すと変種のビルドで
+    // 末尾の `Ok(())` が到達不能になる。** 順序は元のままである。
     #[cfg(not(feature = "fs-alloc-keep-test"))]
     {
-        if let Err(e) = common::ext2::free_block(image, &layout, block) {
-            logger.error(format_args!("fs-bitmap: could not free: {e:?}; halting"));
-            cpu::halt_forever();
+        exercise_file_append(logger, image, &layout)?;
+        if let Err(error) = common::ext2::free_block(image, &layout, block) {
+            return Err(WriteExerciseError::BitmapCouldNotFree { error });
         }
         logger.info(format_args!(
             "fs-bitmap: freed block {block}; the image should be back to what was built"
         ));
     }
+    Ok(())
 }
 
 /// `/data/writable` へ 2 回追記し、既定では元へ戻す（S12-c）。
@@ -4307,7 +4445,7 @@ fn exercise_file_append(
     logger: &mut Logger<SerialPort>,
     image: &mut [u8],
     layout: &common::ext2::Layout,
-) {
+) -> Result<(), WriteExerciseError> {
     use common::ext2::Ext2;
 
     const TARGET: &[u8] = b"/data/writable";
@@ -4320,24 +4458,21 @@ fn exercise_file_append(
             .map(|inode| (inode.number, inode.size as u32))
     }) {
         Ok(pair) => pair,
-        Err(e) => {
-            logger.error(format_args!(
-                "fs-write: could not find {}: {e:?}; halting",
-                core::str::from_utf8(TARGET).unwrap_or("?")
-            ));
-            cpu::halt_forever();
+        Err(error) => {
+            return Err(WriteExerciseError::AppendTargetNotFound {
+                name: TARGET,
+                error,
+            });
         }
     };
 
     // **初めの大きさが build.rs の置いたものと一致すること。**
     // **食い違えば、抱えた像と建てた像が別物である**（`IMAGE_BYTES` と同じ作法）。
     if u64::from(original_size) != fsimage_info::WRITABLE_SEED_BYTES {
-        logger.error(format_args!(
-            "fs-write: {} is {original_size} byte(s) but build.rs seeded {}; halting",
-            core::str::from_utf8(TARGET).unwrap_or("?"),
-            fsimage_info::WRITABLE_SEED_BYTES
-        ));
-        cpu::halt_forever();
+        return Err(WriteExerciseError::AppendSeedSizeMismatch {
+            name: TARGET,
+            original_size,
+        });
     }
 
     // **書く中身は位置から決まる形にする。** 定数の並びだと、
@@ -4349,11 +4484,9 @@ fn exercise_file_append(
 
     for (round, len) in [(1usize, FIRST), (2usize, SECOND)] {
         let at = if round == 1 { 0 } else { FIRST };
-        if let Err(e) = common::ext2::append_to_file(image, layout, ino, &buffer[at..at + len]) {
-            logger.error(format_args!(
-                "fs-write: append {round} failed: {e:?}; halting"
-            ));
-            cpu::halt_forever();
+        if let Err(error) = common::ext2::append_to_file(image, layout, ino, &buffer[at..at + len])
+        {
+            return Err(WriteExerciseError::AppendFailed { round, error });
         }
         let free = Ext2::parse(image)
             .map(|fs| fs.free_blocks_count())
@@ -4375,8 +4508,9 @@ fn exercise_file_append(
 
     #[cfg(not(feature = "fs-write-keep-test"))]
     {
-        exercise_truncate(logger, image, layout, ino, original_size);
+        exercise_truncate(logger, image, layout, ino, original_size)?;
     }
+    Ok(())
 }
 
 /// 縮める道を境界ごとに通す（S12-d）。
@@ -4405,7 +4539,7 @@ fn exercise_truncate(
     layout: &common::ext2::Layout,
     ino: u32,
     original_size: u32,
-) {
+) -> Result<(), WriteExerciseError> {
     use common::ext2::Ext2;
 
     /// 縮める先。**境界・境界の 1 つ先・同じブロックの中を通す。**
@@ -4427,20 +4561,19 @@ fn exercise_truncate(
         *slot = (index % 251) as u8;
     }
     let need = (grown - current) as usize;
-    if let Err(e) = common::ext2::append_to_file(image, layout, ino, &filler[..need]) {
-        logger.error(format_args!("fs-truncate: could not grow: {e:?}; halting"));
-        cpu::halt_forever();
+    if let Err(error) = common::ext2::append_to_file(image, layout, ino, &filler[..need]) {
+        return Err(WriteExerciseError::TruncateCouldNotGrow { error });
     }
 
     for target in TARGETS {
         let before = Ext2::parse(image)
             .map(|fs| fs.free_blocks_count())
             .unwrap_or(0);
-        if let Err(e) = common::ext2::truncate_to(image, layout, ino, *target) {
-            logger.error(format_args!(
-                "fs-truncate: truncate to {target} failed: {e:?}; halting"
-            ));
-            cpu::halt_forever();
+        if let Err(error) = common::ext2::truncate_to(image, layout, ino, *target) {
+            return Err(WriteExerciseError::TruncateFailed {
+                target: *target,
+                error,
+            });
         }
         let after = Ext2::parse(image)
             .map(|fs| fs.free_blocks_count())
@@ -4460,11 +4593,8 @@ fn exercise_truncate(
         let before = Ext2::parse(image)
             .map(|fs| fs.free_blocks_count())
             .unwrap_or(0);
-        if let Err(e) = common::ext2::truncate_to(image, layout, ino, 0) {
-            logger.error(format_args!(
-                "fs-truncate: truncate to 0 failed: {e:?}; halting"
-            ));
-            cpu::halt_forever();
+        if let Err(error) = common::ext2::truncate_to(image, layout, ino, 0) {
+            return Err(WriteExerciseError::TruncateToZeroFailed { error });
         }
         let after = Ext2::parse(image)
             .map(|fs| fs.free_blocks_count())
@@ -4485,18 +4615,16 @@ fn exercise_truncate(
         // **ここを通ると埋め損ねが像に残る**ので、往復のバイト一致が見る。
         //
         // **中身を書き直す必要も無い**——初めの 100 バイトは一度も上書きしていない。
-        if let Err(e) = common::ext2::truncate_to(image, layout, ino, original_size) {
-            logger.error(format_args!(
-                "fs-truncate: could not restore: {e:?}; halting"
-            ));
-            cpu::halt_forever();
+        if let Err(error) = common::ext2::truncate_to(image, layout, ino, original_size) {
+            return Err(WriteExerciseError::TruncateCouldNotRestore { error });
         }
         logger.info(format_args!(
             "fs-truncate: restored inode {ino} to {original_size} byte(s)"
         ));
 
-        exercise_create_and_unlink(logger, image, layout);
+        exercise_create_and_unlink(logger, image, layout)?;
     }
+    Ok(())
 }
 
 /// `/data` にファイルを 1 つ作り、既定では消す（S12-e）。
@@ -4523,7 +4651,7 @@ fn exercise_create_and_unlink(
     logger: &mut Logger<SerialPort>,
     image: &mut [u8],
     layout: &common::ext2::Layout,
-) {
+) -> Result<(), WriteExerciseError> {
     use common::ext2::Ext2;
 
     const DIRECTORY: &[u8] = b"/data";
@@ -4533,21 +4661,17 @@ fn exercise_create_and_unlink(
 
     let dir_ino = match Ext2::parse(image).and_then(|fs| fs.lookup(DIRECTORY)) {
         Ok(inode) => inode.number,
-        Err(e) => {
-            logger.error(format_args!(
-                "fs-create: could not find {}: {e:?}; halting",
-                core::str::from_utf8(DIRECTORY).unwrap_or("?")
-            ));
-            cpu::halt_forever();
+        Err(error) => {
+            return Err(WriteExerciseError::CreateDirectoryNotFound {
+                name: DIRECTORY,
+                error,
+            });
         }
     };
 
     let ino = match common::ext2::create_file(image, layout, dir_ino, NAME) {
         Ok(ino) => ino,
-        Err(e) => {
-            logger.error(format_args!("fs-create: could not create: {e:?}; halting"));
-            cpu::halt_forever();
-        }
+        Err(error) => return Err(WriteExerciseError::CreateFailed { error }),
     };
 
     // **書く中身は位置から決まる形にする**（追記と同じ理由。定数の並びだと、
@@ -4556,20 +4680,14 @@ fn exercise_create_and_unlink(
     for (index, slot) in content.iter_mut().enumerate() {
         *slot = (index % 251) as u8;
     }
-    if let Err(e) = common::ext2::append_to_file(image, layout, ino, &content) {
-        logger.error(format_args!(
-            "fs-create: could not write the contents: {e:?}; halting"
-        ));
-        cpu::halt_forever();
+    if let Err(error) = common::ext2::append_to_file(image, layout, ino, &content) {
+        return Err(WriteExerciseError::CreateCouldNotWriteContents { error });
     }
 
     let (blocks, inodes) = match Ext2::parse(image) {
         Ok(fs) => (fs.free_blocks_count(), fs.free_inodes_count()),
-        Err(e) => {
-            logger.error(format_args!(
-                "fs-create: the copy did not parse after creating: {e:?}; halting"
-            ));
-            cpu::halt_forever();
+        Err(error) => {
+            return Err(WriteExerciseError::CreateCopyDidNotParseAfterCreating { error });
         }
     };
     // **名乗った `i_extra_isize` も出す（S12-f-3）。**
@@ -4593,23 +4711,20 @@ fn exercise_create_and_unlink(
 
     #[cfg(not(feature = "fs-create-keep-test"))]
     {
-        if let Err(e) = common::ext2::unlink_file(image, layout, dir_ino, NAME) {
-            logger.error(format_args!("fs-create: could not unlink: {e:?}; halting"));
-            cpu::halt_forever();
+        if let Err(error) = common::ext2::unlink_file(image, layout, dir_ino, NAME) {
+            return Err(WriteExerciseError::CreateCouldNotUnlink { error });
         }
         let (blocks, inodes) = match Ext2::parse(image) {
             Ok(fs) => (fs.free_blocks_count(), fs.free_inodes_count()),
-            Err(e) => {
-                logger.error(format_args!(
-                    "fs-create: the copy did not parse after unlinking: {e:?}; halting"
-                ));
-                cpu::halt_forever();
+            Err(error) => {
+                return Err(WriteExerciseError::CreateCopyDidNotParseAfterUnlinking { error });
             }
         };
         logger.info(format_args!(
             "fs-create: unlinked inode {ino}; free blocks={blocks} inodes={inodes}"
         ));
     }
+    Ok(())
 }
 
 fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
