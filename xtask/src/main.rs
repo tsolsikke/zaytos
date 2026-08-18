@@ -2264,11 +2264,13 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
     // **下限で見る**——OVMF の起動時の探りが混ざる（実測 8,704 バイト。像の
     // 0.4%）ので差分は取らず、「像 1 枚ぶん以上」を要求する。基線を 2 回聞く
     // 形は採らない——カーネルは xtask を待たないので、時機の競争になる。
-    let disk_rd_bytes = match connect_monitor_with_retry(&monitor_socket) {
-        Ok(mut stream) => query_monitor(&mut stream, "info blockstats")
-            .ok()
-            .and_then(|text| parse_disk0_rd_bytes(&text)),
-        Err(_) => None,
+    // 読んだ量と**書いた量**（S13-c / S13-e）を、1 回の帳簿から取る。
+    let (disk_rd_bytes, disk_wr_bytes) = match connect_monitor_with_retry(&monitor_socket) {
+        Ok(mut stream) => match query_monitor(&mut stream, "info blockstats").ok() {
+            Some(text) => (parse_disk0_rd_bytes(&text), parse_disk0_wr_bytes(&text)),
+            None => (None, None),
+        },
+        Err(_) => (None, None),
     };
 
     let qemu_exit = child
@@ -2546,12 +2548,43 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
          {device_read_whole_image}"
     );
 
+    // === S13-e: 書き戻し（flush）の判定 ===
+    //
+    // **2 系統である**（読み側と対称）。**(1) 帳簿の下限**——装置が像 1 枚ぶん
+    // 以上を書いたこと。既定でも「書いた」を言える（内容が変わらなくても）。
+    // **(2) 装置の中身**——`disk0.img`（装置が書いた結果）と `dump`（RAM 複製を
+    // pmemsave したもの）がバイト一致すること。**pmemsave 系統は RAM 複製の
+    // 正しさを、この系統は「装置に届いた結果」を見る。** keep 変種では両者が
+    // 「書いたまま」の像で一致し、`fs-flush-skip` は装置が古いままなので
+    // 食い違う（S13-c の取り違えと対の形）。
+    let device_wrote_whole_image =
+        disk_wr_bytes.is_some_and(|wrote| image_bytes > 0 && wrote >= image_bytes);
+    println!(
+        "{context}: the virtio disk received {disk_wr_bytes:?} byte(s); at least the whole \
+         image went to the device = {device_wrote_whole_image}"
+    );
+
+    let disk_matches_dump = if extracted {
+        match (fs::read(&dump), fs::read(disk_image_path(&esp_dir))) {
+            (Ok(ram), Ok(disk)) => ram == disk,
+            _ => false,
+        }
+    } else {
+        false
+    };
+    println!(
+        "{context}: the disk image the device wrote matches the RAM copy byte for byte = \
+         {disk_matches_dump} (independent of pmemsave; e2fsck on disk0.img would agree)"
+    );
+
     if outside_kernel_image
         && reads_the_copy
         && free_counts_agree
         && identical
         && fsck_ok
         && device_read_whole_image
+        && device_wrote_whole_image
+        && disk_matches_dump
     {
         println!("{context}: PASS");
         Ok(())
@@ -3333,12 +3366,22 @@ fn query_monitor(stream: &mut UnixStream, command: &str) -> Result<String> {
 
 /// `info blockstats` の出力から `disk0` の `rd_bytes` を拾う（S13-c）。
 fn parse_disk0_rd_bytes(text: &str) -> Option<u64> {
+    parse_disk0_stat(text, "rd_bytes=")
+}
+
+/// `info blockstats` の出力から `disk0` の `wr_bytes` を拾う（S13-e。rd の対称）。
+fn parse_disk0_wr_bytes(text: &str) -> Option<u64> {
+    parse_disk0_stat(text, "wr_bytes=")
+}
+
+/// `disk0:` の行から `marker` 直後の数を拾う。
+fn parse_disk0_stat(text: &str, marker: &str) -> Option<u64> {
     for raw in text.lines() {
         let line = raw.trim();
         let Some(rest) = line.strip_prefix("disk0:") else {
             continue;
         };
-        let Some((_, after)) = rest.split_once("rd_bytes=") else {
+        let Some((_, after)) = rest.split_once(marker) else {
             continue;
         };
         return after.split_whitespace().next()?.parse().ok();
@@ -9036,6 +9079,21 @@ fn cmd_check(full: bool) -> Result<()> {
             }
         }
 
+        // **書き戻し（flush）の破壊（S13-e）。** keep 変種と組む——最終形が
+        // 「割り当てたまま」の像で、flush を飛ばすと disk0.img が建てた像の
+        // ままになる。**帳簿の下限（wr_bytes）とバイト一致の両方が落ちる。**
+        total += 1;
+        println!("=== xtask check: the fs image flush catches a skipped write-back");
+        match cmd_fs_image_extract(&["fs-flush-skip-test", KEEP_ALLOCATED_FEATURE]) {
+            Ok(()) => {
+                println!("--- fs image flush (a skipped write-back): FAILED (the sabotage was NOT caught)");
+                failed.push("fs image flush (a skipped write-back)".to_string());
+            }
+            Err(_) => {
+                println!("--- fs image flush (a skipped write-back): OK (the sabotage was caught)")
+            }
+        }
+
         for feature in KILL_SABOTAGES {
             total += 1;
             println!("=== xtask check: the shell test catches the sabotage {feature}");
@@ -9529,7 +9587,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 187,
+    full: 188,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
@@ -10284,6 +10342,22 @@ ide1-cd0: rd_bytes=0 wr_bytes=0 rd_operations=0
         assert_eq!(
             parse_disk0_rd_bytes(
                 "floppy0: rd_bytes=1
+"
+            ),
+            None
+        );
+    }
+
+    /// `wr_bytes` も `disk0` の行だけから拾えること（S13-e。rd の対称）。
+    #[test]
+    fn disk0_wr_bytes_is_parsed_and_other_drives_are_ignored() {
+        let text = "ide0-hd0: rd_bytes=7781888 wr_bytes=12345 rd_operations=88
+disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
+";
+        assert_eq!(parse_disk0_wr_bytes(text), Some(2097152));
+        assert_eq!(
+            parse_disk0_wr_bytes(
+                "floppy0: wr_bytes=1
 "
             ),
             None
