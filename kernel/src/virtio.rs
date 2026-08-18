@@ -424,15 +424,24 @@ pub fn handle_irq() {
     if isr_port == 0 {
         return;
     }
-    // SAFETY: `arm_interrupt` が武装した ISR ポートで、読みは deassert の
-    // 副作用を意図している。割り込みゲート経由（IF=0）なので再入しない。
-    let isr = unsafe { port::inb(isr_port) };
-    if isr & 0x1 != 0 {
+    // 破壊 (S13-d, virtio-skip-isr-read-test): ISR を読まない。レベルの線が
+    // deassert されず、EOI の後に同じ割り込みが再送され続ける形を狙う。
+    #[cfg(feature = "virtio-skip-isr-read-test")]
+    {
         IRQ_DELIVERED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    } else {
-        // **自分宛でなかったことを黙って捨てない**（ADR-0035。共有線の
-        // 仮定が破れた最初の兆候である）。数は実演の判定行に出る。
-        IRQ_NOT_MINE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    #[cfg(not(feature = "virtio-skip-isr-read-test"))]
+    {
+        // SAFETY: `arm_interrupt` が武装した ISR ポートで、読みは deassert の
+        // 副作用を意図している。割り込みゲート経由（IF=0）なので再入しない。
+        let isr = unsafe { port::inb(isr_port) };
+        if isr & 0x1 != 0 {
+            IRQ_DELIVERED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        } else {
+            // **自分宛でなかったことを黙って捨てない**（ADR-0035。共有線の
+            // 仮定が破れた最初の兆候である）。数は実演の判定行に出る。
+            IRQ_NOT_MINE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
 
@@ -451,30 +460,36 @@ pub unsafe fn exercise_interrupt_read(
     logger: &mut Logger<SerialPort>,
     blk: &mut VirtioBlk,
 ) -> Result<(), VirtioBlkError> {
-    let before = IRQ_DELIVERED.load(core::sync::atomic::Ordering::Relaxed);
+    // **読みは 2 回である。** 1 回では EOI を落とす破壊が見えない——実測で、
+    // 1 発目は届いて数えられ、timer（優先度クラス 15）は生きたままなので
+    // 起動も続いてしまう。**2 発目が LAPIC の ISR ビットに塞がれて届かない**
+    // ことが、EOI の欠落を観測へ変える（下の待ちが上限で落とす）。
     let data_phys = blk.spare_phys + 512;
-    // SAFETY: この関数の契約そのまま。読み先は器の中で、装置だけが書く。
-    unsafe { blk.read_at(2, 512, data_phys)? };
+    for _round in 0..2u32 {
+        let before = IRQ_DELIVERED.load(core::sync::atomic::Ordering::Relaxed);
+        // SAFETY: この関数の契約そのまま。読み先は器の中で、装置だけが書く。
+        unsafe { blk.read_at(2, 512, data_phys)? };
 
-    // 完了は見えた。**割り込みも届くまで待つ。上限つき**——ポーリングが
-    // 先に完了を見る形は正常で、配送はその直後に来る。
-    let mut spins = 0u64;
-    loop {
-        if IRQ_DELIVERED.load(core::sync::atomic::Ordering::Relaxed) > before {
-            break;
+        // 完了は見えた。**割り込みも届くまで待つ。上限つき**——ポーリングが
+        // 先に完了を見る形は正常で、配送はその直後に来る。
+        let mut spins = 0u64;
+        loop {
+            if IRQ_DELIVERED.load(core::sync::atomic::Ordering::Relaxed) > before {
+                break;
+            }
+            spins += 1;
+            if spins >= POLL_SPIN_LIMIT {
+                return Err(VirtioBlkError::RequestTimedOut { spins });
+            }
+            core::hint::spin_loop();
         }
-        spins += 1;
-        if spins >= POLL_SPIN_LIMIT {
-            return Err(VirtioBlkError::RequestTimedOut { spins });
-        }
-        core::hint::spin_loop();
     }
 
     let delivered = IRQ_DELIVERED.load(core::sync::atomic::Ordering::Relaxed);
     let not_mine = IRQ_NOT_MINE.load(core::sync::atomic::Ordering::Relaxed);
     logger.info(format_args!(
-        "virtio-blk: interrupt exercise: 1 read completed with interrupts enabled; \
-         delivered={delivered} not-mine={not_mine} (wanted 1 and 0)"
+        "virtio-blk: interrupt exercise: 2 read(s) completed with interrupts enabled; \
+         delivered={delivered} not-mine={not_mine} (wanted 2 and 0)"
     ));
     Ok(())
 }

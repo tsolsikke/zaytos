@@ -3610,9 +3610,9 @@ fn cmd_virtio_irq_test(features: &[&str]) -> Result<()> {
     println!("{context}: {}", line.trim());
     let delivered = parse_marked_u64(line, "delivered=");
     let not_mine = parse_marked_u64(line, "not-mine=");
-    let counts_ok = delivered == Some(1) && not_mine == Some(0);
+    let counts_ok = delivered == Some(2) && not_mine == Some(0);
     println!(
-        "{context}: delivered = {delivered:?} (wanted 1), not mine = {not_mine:?} (wanted 0), \
+        "{context}: delivered = {delivered:?} (wanted 2), not mine = {not_mine:?} (wanted 0), \
          route read back matching the platform's declaration = {route_ok}"
     );
     if !counts_ok || !route_ok {
@@ -8985,6 +8985,23 @@ fn cmd_check(full: bool) -> Result<()> {
             Err(_) => println!("--- virtio irq (edge route): OK (the sabotage was caught)"),
         }
 
+        // **落ち方が 3 形で全部違う**——edge は読み戻し、EOI 落としは 2 回目の
+        // 上限つき待ち、ISR 読み落としは数の爆発である。
+        for (label, feature) in [
+            ("a dropped EOI", "virtio-skip-eoi-test"),
+            ("an unread ISR", "virtio-skip-isr-read-test"),
+        ] {
+            total += 1;
+            println!("=== xtask check: the virtio interrupt catches {label}");
+            match cmd_virtio_irq_test(&[feature]) {
+                Ok(()) => {
+                    println!("--- virtio irq ({label}): FAILED (the sabotage was NOT caught)");
+                    failed.push(format!("virtio irq ({label})"));
+                }
+                Err(_) => println!("--- virtio irq ({label}): OK (the sabotage was caught)"),
+            }
+        }
+
         // **像のロードの破壊（S13-c）。** どちらも fs extract の判定が捕まえる
         // ——取り違えは blockstats の下限、先頭の欠けはバイト一致である。
         for (label, feature) in FS_LOAD_SABOTAGES {
@@ -9492,7 +9509,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 184,
+    full: 186,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

@@ -1198,11 +1198,21 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         // 割り込みを上げられるようになる。宛先は純粋ロジックが決める
         // （スプリアスの扱いはマスタ側とスレーブ側で非対称）。
         //
-        // SAFETY: 実際に発生した割り込みに対してのみ呼んでいる。宛先の決定は
-        // 境界の内側の純粋ロジックが行う。
+        // 破壊 (S13-d, virtio-skip-eoi-test): virtio の IRQ にだけ EOI を
+        // 送らない。LAPIC の ISR ビットが立ったままになり、同じ優先度
+        // クラス以下の割り込みが以後届かなくなる形を狙う。
+        #[cfg(feature = "virtio-skip-eoi-test")]
+        let skip_eoi = crate::virtio::armed_irq() == Some(irq);
+        #[cfg(not(feature = "virtio-skip-eoi-test"))]
+        let skip_eoi = false;
+
         #[cfg(not(feature = "no-eoi-test"))]
-        unsafe {
-            crate::irq::end_of_interrupt(irq, spurious);
+        if !skip_eoi {
+            // SAFETY: 実際に発生した割り込みに対してのみ呼んでいる。宛先の決定は
+            // 境界の内側の純粋ロジックが行う。
+            unsafe {
+                crate::irq::end_of_interrupt(irq, spurious);
+            }
         }
     }
 

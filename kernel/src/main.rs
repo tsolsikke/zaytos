@@ -9336,6 +9336,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         cfg!(feature = "virtio-intx-edge-test"),
         "virtio の redirection entry を生のエッジで書く",
     ),
+    (
+        "virtio-skip-eoi-test",
+        cfg!(feature = "virtio-skip-eoi-test"),
+        "virtio の IRQ に EOI を送らない",
+    ),
+    (
+        "virtio-skip-isr-read-test",
+        cfg!(feature = "virtio-skip-isr-read-test"),
+        "virtio のハンドラが ISR を読まない",
+    ),
 ];
 
 /// 有効な仕込み feature を起動時に報告する。
