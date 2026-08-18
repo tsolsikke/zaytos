@@ -67,6 +67,8 @@ const DESC_F_WRITE: u16 = 2;
 
 /// virtio-blk の要求種別: 読み取り。
 const BLK_T_IN: u32 = 0;
+/// virtio-blk の要求種別: 書き込み（S13-e）。
+const BLK_T_OUT: u32 = 1;
 
 /// リングの整列（legacy の vring_align）。
 const RING_ALIGN: u64 = 4096;
@@ -277,20 +279,68 @@ impl VirtioBlk {
         bytes: u32,
         data_phys: u64,
     ) -> Result<(), VirtioBlkError> {
+        // SAFETY: 呼び出し元の契約をそのまま `request_at` へ渡す。
+        unsafe { self.request_at(first_sector, bytes, data_phys, false) }
+    }
+
+    /// `first_sector` から `bytes` バイトを物理 `data_phys` **へ書き戻す**
+    /// （S13-e。ADR-0034 の Addendum の全像フラッシュが使う）。
+    ///
+    /// **[`read_at`](Self::read_at) と対称である**——向きだけが逆で、装置が
+    /// `data_phys` から読み、ディスクへ書く。`bytes` は 512 の倍数であること。
+    ///
+    /// # Safety
+    ///
+    /// [`read_at`](Self::read_at) と同じ位置の契約に加えて、
+    /// `data_phys..data_phys+bytes` が direct map の覆う RAM で、いま他の誰も
+    /// 書き換えていない（装置が一貫した内容を読む）こと。
+    pub unsafe fn write_at(
+        &mut self,
+        first_sector: u64,
+        bytes: u32,
+        data_phys: u64,
+    ) -> Result<(), VirtioBlkError> {
+        // SAFETY: 呼び出し元の契約をそのまま `request_at` へ渡す。
+        unsafe { self.request_at(first_sector, bytes, data_phys, true) }
+    }
+
+    /// 読み書き 1 要求を出して完了までポーリングする（S13-b、S13-e）。
+    ///
+    /// **`to_device` が向きを決める**——`false` は読み（装置が `data_phys` へ
+    /// 書く）、`true` は書き（装置が `data_phys` から読む）。記述子の鎖の形は
+    /// 同じで、ヘッダの type とデータ記述子の `DESC_F_WRITE` だけが違う。
+    ///
+    /// # Safety
+    ///
+    /// [`read_at`](Self::read_at) / [`write_at`](Self::write_at) の契約。
+    unsafe fn request_at(
+        &mut self,
+        first_sector: u64,
+        bytes: u32,
+        data_phys: u64,
+        to_device: bool,
+    ) -> Result<(), VirtioBlkError> {
         let base = self.ring_virt;
         let spare = self.spare_virt();
+        let (blk_type, data_flags) = if to_device {
+            // 書き: 装置がデータを読む（`DESC_F_WRITE` を立てない）。
+            (BLK_T_OUT, DESC_F_NEXT)
+        } else {
+            // 読み: 装置がデータを書く。
+            (BLK_T_IN, DESC_F_NEXT | DESC_F_WRITE)
+        };
 
         // SAFETY: リングと器は [`setup`] が 0 埋めした自前の領域である。
         // **装置が読者なので `write_volatile` で書く**（module doc の契約。
         // 以降のリングへの書き込みすべて同じ）。
         unsafe {
             // 要求ヘッダ（type / reserved / sector）。
-            core::ptr::write_volatile(spare as *mut u32, BLK_T_IN);
+            core::ptr::write_volatile(spare as *mut u32, blk_type);
             core::ptr::write_volatile((spare + 8) as *mut u64, first_sector);
             // desc[0]: ヘッダ（装置が読む）。
             self.write_desc(0, self.spare_phys, 16, DESC_F_NEXT, 1);
-            // desc[1]: データ（装置が書く）。
-            self.write_desc(1, data_phys, bytes, DESC_F_NEXT | DESC_F_WRITE, 2);
+            // desc[1]: データ（向きは `data_flags` が決める）。
+            self.write_desc(1, data_phys, bytes, data_flags, 2);
             // desc[2]: status（装置が書く）。器の +1024 に置く。
             core::ptr::write_volatile((spare + 1024) as *mut u8, 0xFF);
             self.write_desc(2, self.spare_phys + 1024, 1, DESC_F_WRITE, 0);

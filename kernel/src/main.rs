@@ -4224,6 +4224,9 @@ fn copy_fs_image_to_frames(logger: &mut Logger<SerialPort>, blk: &mut kernel::vi
         FsImageCopyError::DeviceReadFailed { error } => logger.error(format_args!(
             "fs-image-load: reading the image from the virtio disk failed: {error:?}; halting"
         )),
+        FsImageCopyError::DeviceWriteFailed { error } => logger.error(format_args!(
+            "fs-image-flush: writing the image back to the virtio disk failed: {error:?}; halting"
+        )),
     }
     cpu::halt_forever();
 }
@@ -4255,12 +4258,51 @@ enum FsImageCopyError {
     DeviceReadFailed {
         error: kernel::virtio::VirtioBlkError,
     },
+    /// 装置への書き戻しが失敗した（S13-e。全像フラッシュ。ADR-0034 の Addendum）。
+    DeviceWriteFailed {
+        error: kernel::virtio::VirtioBlkError,
+    },
 }
 
 /// 像をフレームへ複製する検査部（T3-1）。**止めない。`Err` を返す。**
 ///
 /// **判定行（`logger.info`）はここに残る。** **検査と検査の間に、検査した値を
 /// 使って出ているからである**——外へ出すと順序か文言が変わる。
+/// 最終形の像を装置へ 4KiB ずつ書き戻す（S13-e。ADR-0034 の Addendum）。
+///
+/// **[`try_copy_fs_image_to_frames`] のロードの対称である**——あちらが装置から
+/// フレームへ読み、こちらがフレームから装置へ書く。`base` は複製先の物理先頭。
+fn flush_fs_image_to_device(
+    logger: &mut Logger<SerialPort>,
+    blk: &mut kernel::virtio::VirtioBlk,
+    base: common::addr::PhysAddr,
+    bytes: u64,
+) -> Result<(), kernel::virtio::VirtioBlkError> {
+    let mut offset = 0u64;
+    while offset < bytes {
+        let chunk = 4096u32.min((bytes - offset) as u32);
+        // 破壊 (S13-e, fs-flush-skip-test): 装置へ書かない。**RAM の複製は
+        // 正しいが `disk0.img` は古いまま**——ホストの `e2fsck` が keep 変種で
+        // 差を見る（S13-c の取り違えと対の形）。
+        #[cfg(not(feature = "fs-flush-skip-test"))]
+        // SAFETY: 複製先の連続フレームで、direct map が覆うことは呼び出し元が
+        // 確かめている。いま誰も書き換えていない。位置の契約（BSP のみ・IF=0）
+        // は呼び出し位置が満たす。
+        unsafe {
+            blk.write_at(
+                offset / kernel::virtio::SECTOR_BYTES,
+                chunk,
+                base.as_u64() + offset,
+            )?;
+        }
+        offset += u64::from(chunk);
+    }
+    logger.info(format_args!(
+        "fs-image-flush: wrote {bytes} byte(s) back to the virtio disk"
+    ));
+    Ok(())
+}
+
 fn try_copy_fs_image_to_frames(
     logger: &mut Logger<SerialPort>,
     blk: &mut kernel::virtio::VirtioBlk,
@@ -4414,6 +4456,17 @@ fn try_copy_fs_image_to_frames(
     let writable: &'static mut [u8] =
         unsafe { core::slice::from_raw_parts_mut(destination, bytes as usize) };
     exercise_block_bitmap(logger, writable);
+
+    // === S13-e: 最終形の像を装置へ書き戻す（ADR-0034 の Addendum。全像フラッシュ）===
+    //
+    // **exercise の後・`fs-image-ready` の前である。** keep 系変種では最終形が
+    // 「書いたまま」の像で、`disk0.img` へ書き戻すとホストが QEMU の外で
+    // `e2fsck` を当てられる。既定ビルドでは最終形が建てた像と同じなので、
+    // 書き戻しても `disk0.img` は変わらない——**flush は既定でも走る。閉じては
+    // いない**（破壊は `fs-flush-skip`。keep 変種のとき `disk0.img` の差で捕まる）。
+    if let Err(error) = flush_fs_image_to_device(logger, blk, base, bytes) {
+        return Err(FsImageCopyError::DeviceWriteFailed { error });
+    }
 
     // **像がこの起動での最終形になったことを告げる（S12-d）。**
     //
@@ -9330,6 +9383,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "virtio-load-skip-first-test",
         cfg!(feature = "virtio-load-skip-first-test"),
         "像の先頭 4KiB を装置から読まない",
+    ),
+    (
+        "fs-flush-skip-test",
+        cfg!(feature = "fs-flush-skip-test"),
+        "最終形の像を装置へ書き戻さない",
     ),
     (
         "virtio-intx-edge-test",

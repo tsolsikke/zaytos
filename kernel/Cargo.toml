@@ -168,6 +168,9 @@ fs-load-from-embedded-test = []
 # 破壊（S13-c）: 像の先頭 4KiB を装置から読まない。superblock が 0 のままになり
 # バイト一致が落ちる。末尾を欠く形は像の末尾が 0 なので破壊にならない（実測）。
 virtio-load-skip-first-test = []
+# 破壊（S13-e）: 最終形の像を装置へ書き戻さない。RAM の複製は正しいが
+# disk0.img は古いまま——ホストの e2fsck が keep 変種で差を見る。
+fs-flush-skip-test = []
 # 破壊（S13-d）: 宣言も申告も無視して、redirection entry を生のエッジ・
 # ハイで書く。実測では QEMU は極性とトリガを厳密に模っておらず、届いて
 # しまう——捕まえるのは読み戻し（宣言との一致の判定）である。
