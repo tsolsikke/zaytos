@@ -1,15 +1,16 @@
-//! virtio-blk と legacy interface で話し、sector 0 を 1 回読む（S13-b）。
+//! virtio-blk と legacy interface で話す（S13-b、S13-c）。
 //!
 //! # 話し方は legacy である（ADR-0033）
 //!
 //! BAR0 の I/O ポート越しにレジスタを読み書きする。MMIO の写像は使わない。
 //! feature は何も受けずに交渉する（装置側の bit は読んで判定行に出す）。
 //!
-//! # 範囲（S13-b）
+//! # 範囲（S13-c まで）
 //!
-//! **queue を 1 本立て、ポーリングで sector 0 の 512 バイトを読む。それだけである。**
-//! 割り込み（ISR も読まない）・MSI-X・書き込み・複数リクエスト・複数キュー・
-//! ext2 への接続は後段で、ここには入れない。
+//! **queue を 1 本立て、ポーリングで読む。それだけである。**
+//! 要求は逐次 1 つずつ（同時に複数を出さない）。割り込み（ISR も読まない）・
+//! MSI-X・書き込み・ext2 のキャッシュ化は後段で、ここには入れない。
+//! S13-c は像の全ロード（ADR-0034）のためにこの読みを 4KiB ずつ繰り返す。
 //!
 //! # 装置はこちらのメモリを読む側の観測者である
 //!
@@ -49,7 +50,7 @@ const REG_QUEUE_NOTIFY: u16 = 0x10;
 const REG_DEVICE_STATUS: u16 = 0x12;
 /// legacy レジスタ: 装置固有領域の先頭。virtio-blk では capacity（512 バイト
 /// 単位の数、u64）がここにある。**MSI-X を有効にすると +4 ずれるが、
-/// S13-b は MSI-X に触れないのでずれない。**
+/// この module は MSI-X に触れないのでずれない。**
 const REG_DEVICE_CONFIG: u16 = 0x14;
 
 /// 状態ビット: 装置に気づいた。
@@ -70,15 +71,18 @@ const BLK_T_IN: u32 = 0;
 /// リングの整列（legacy の vring_align）。
 const RING_ALIGN: u64 = 4096;
 
+/// sector の大きさ（virtio-blk の単位）。
+pub const SECTOR_BYTES: u64 = 512;
+
 /// ポーリングの上限（スピン回数）。
 ///
 /// **上限のない待機ループを書かない**（`CLAUDE.md` のシェルの規則と同じ理由が
 /// カーネル内にも当たる——notify を落とす破壊はここで止まる）。時計は
-/// まだ無いので、回数で切る。既定の QEMU では数千回で完了する（実測は
-/// 判定行の `spins` に出る）。
+/// まだ無いので、回数で切る。既定の QEMU では数百スピンまでに完了する（実測は
+/// 判定行の `spins` に出る）。**TCG で数秒に収まる大きさにしてある。**
 const POLL_SPIN_LIMIT: u64 = 20_000_000;
 
-/// sector 0 の読みが止まる理由（S13-b）。文言は呼び出し側（`main.rs`）が作る。
+/// 読みが止まる理由（S13-b）。文言は呼び出し側（`main.rs`）が作る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VirtioBlkError {
     /// queue 0 の大きさが 0（装置が queue を提供していない）。
@@ -93,7 +97,31 @@ pub enum VirtioBlkError {
     WrongUsedId { id: u32 },
 }
 
-/// sector 0 を 1 回読み、観測を判定行に出す（S13-b）。
+/// 設定の済んだ virtio-blk（S13-c で保持する形にした）。
+///
+/// **S13-b では設定と読みが 1 つの関数で、リングは使い捨てだった。**
+/// **像の全ロード（ADR-0034）が 2 人目の利用者になったので、設定を分けて
+/// 保持する**——`VirtioBlkLocation` を返す形にしたときと同じ進み方である。
+pub struct VirtioBlk {
+    io_base: u16,
+    queue_size: u64,
+    /// リングの物理先頭（4096 整列）。
+    ring_phys: u64,
+    /// リングの仮想先頭（direct map 越し）。
+    ring_virt: u64,
+    /// desc 表のバイト数（avail はこの直後）。
+    desc_bytes: u64,
+    /// used リングのリング内オフセット。
+    used_offset: u64,
+    /// 要求の器（ヘッダ・予備データ・status）を置くページの物理先頭。
+    spare_phys: u64,
+    /// 完了済みの要求数。**used.idx の期待値である**（u16 で自然に巻く）。
+    completed: u16,
+    /// これまでの要求で最も長かったポーリング（実測の観測用）。
+    max_spins: u64,
+}
+
+/// 握手から queue の設定までを行い、設定の済んだ装置を返す（S13-b）。
 ///
 /// # Safety
 ///
@@ -102,18 +130,18 @@ pub enum VirtioBlkError {
 ///
 /// - `virtio.io_base` が virtio-blk の BAR0 の I/O 窓であること
 ///   （呼び出し側は `scan_bus0` の返り値をそのまま渡す）
-/// - このポート窓とリングの物理領域を触るのはこの関数だけであること
-///   （確保した領域は返さないので、以後も誰も触らない）
-pub unsafe fn read_first_sector(
+/// - このポート窓とリングの物理領域を触るのは、返した [`VirtioBlk`] だけで
+///   あること（複製を作らない）
+pub unsafe fn setup(
     logger: &mut Logger<SerialPort>,
     virtio: &VirtioBlkLocation,
     allocator: &mut FrameAllocator,
-) -> Result<(), VirtioBlkError> {
+) -> Result<VirtioBlk, VirtioBlkError> {
     let io = virtio.io_base;
 
-    // === 握手（legacy）。reset -> ACKNOWLEDGE -> DRIVER -> queue -> DRIVER_OK ===
+    // === 握手（legacy）。reset -> ACKNOWLEDGE -> DRIVER ===
     // SAFETY: この関数の契約（doc）どおり、ポート窓は virtio-blk の BAR0 で、
-    // 触るのはこの関数だけである（以下のポート I/O すべて同じ）。
+    // 触るのはこの module だけである（以下のポート I/O すべて同じ）。
     unsafe {
         port::outb(io + REG_DEVICE_STATUS, 0);
         port::outb(io + REG_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
@@ -158,7 +186,7 @@ pub unsafe fn read_first_sector(
     let avail_bytes = 6 + 2 * queue_size;
     let used_offset = (desc_bytes + avail_bytes).next_multiple_of(RING_ALIGN);
     let used_bytes = 6 + 8 * queue_size;
-    // 末尾の 1 ページを要求の器（ヘッダ 16B・データ 512B・status 1B）に使う。
+    // 末尾の 1 ページを要求の器（ヘッダ 16B・予備データ 512B・status 1B）に使う。
     let ring_bytes = used_offset + used_bytes;
     let pages = ring_bytes.div_ceil(4096) + 1;
 
@@ -168,7 +196,7 @@ pub unsafe fn read_first_sector(
     let ring_virt = direct_map().phys_to_virt(ring_phys);
 
     // SAFETY: いま確保した `pages` ページは direct map が覆う RAM で、
-    // この関数のほかに参照する者は居ない（確保したまま返さない）。
+    // 返す [`VirtioBlk`] のほかに参照する者は居ない。
     let ring: &mut [u8] = unsafe {
         core::slice::from_raw_parts_mut(ring_virt.as_u64() as *mut u8, (pages * 4096) as usize)
     };
@@ -206,103 +234,180 @@ pub unsafe fn read_first_sector(
         );
     }
 
-    // === 記述子 3 本の鎖と要求の器を書く ===
-    //
-    // 器の配置（リングの末尾のページ）:
-    //   +0    要求ヘッダ 16B（type / reserved / sector）
-    //   +512  データ 512B（装置が書く）
-    //   +1024 status 1B（装置が書く）
-    let buffer_phys = ring_phys.as_u64() + (pages - 1) * 4096;
-    let header_phys = buffer_phys;
-    let data_phys = buffer_phys + 512;
-    let status_phys = buffer_phys + 1024;
+    Ok(VirtioBlk {
+        io_base: io,
+        queue_size,
+        ring_phys: ring_phys.as_u64(),
+        ring_virt: ring_virt.as_u64(),
+        desc_bytes,
+        used_offset,
+        spare_phys: ring_phys.as_u64() + (pages - 1) * 4096,
+        completed: 0,
+        max_spins: 0,
+    })
+}
 
-    // 破壊 (S13-b, virtio-wrong-sector-test): sector 1 を要求する。
-    // **像の模様は絶対オフセットから決まる**ので、中身の突き合わせが落ちる。
+impl VirtioBlk {
+    /// 要求の器（末尾ページ）の仮想アドレス。
+    fn spare_virt(&self) -> u64 {
+        self.ring_virt + (self.spare_phys - self.ring_phys)
+    }
+
+    /// `first_sector` から `bytes` バイトを物理 `data_phys` へ読む。
+    ///
+    /// **要求は 1 つずつで、返ってから次を出す**（同時に複数を出さない。
+    /// S13-c の範囲）。`bytes` は 512 の倍数であること。
+    ///
+    /// # Safety
+    ///
+    /// [`setup`] と同じ位置の契約に加えて、`data_phys..data_phys+bytes` が
+    /// direct map の覆う RAM で、装置が書いてよい（他の誰も同時に読み書き
+    /// しない）領域であること。
+    pub unsafe fn read_at(
+        &mut self,
+        first_sector: u64,
+        bytes: u32,
+        data_phys: u64,
+    ) -> Result<(), VirtioBlkError> {
+        let base = self.ring_virt;
+        let spare = self.spare_virt();
+
+        // SAFETY: リングと器は [`setup`] が 0 埋めした自前の領域である。
+        // **装置が読者なので `write_volatile` で書く**（module doc の契約。
+        // 以降のリングへの書き込みすべて同じ）。
+        unsafe {
+            // 要求ヘッダ（type / reserved / sector）。
+            core::ptr::write_volatile(spare as *mut u32, BLK_T_IN);
+            core::ptr::write_volatile((spare + 8) as *mut u64, first_sector);
+            // desc[0]: ヘッダ（装置が読む）。
+            self.write_desc(0, self.spare_phys, 16, DESC_F_NEXT, 1);
+            // desc[1]: データ（装置が書く）。
+            self.write_desc(1, data_phys, bytes, DESC_F_NEXT | DESC_F_WRITE, 2);
+            // desc[2]: status（装置が書く）。器の +1024 に置く。
+            core::ptr::write_volatile((spare + 1024) as *mut u8, 0xFF);
+            self.write_desc(2, self.spare_phys + 1024, 1, DESC_F_WRITE, 0);
+            // avail.ring[idx % N] = 先頭の記述子、avail.idx += 1（公開）。
+            let slot = u64::from(self.completed) % self.queue_size;
+            core::ptr::write_volatile((base + self.desc_bytes + 4 + 2 * slot) as *mut u16, 0);
+            core::ptr::write_volatile(
+                (base + self.desc_bytes + 2) as *mut u16,
+                self.completed.wrapping_add(1),
+            );
+        }
+
+        // **公開が notify より先に装置から見えること**（module doc の契約）。
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+        // 破壊 (S13-b, virtio-skip-notify-test): notify を書かない。
+        // **要求は公開されたままで、装置は読まない。** ポーリングが上限に
+        // 達して止まる——**上限のある待機だけが、この形を観測へ変える。**
+        //
+        // SAFETY: ポート I/O は [`setup`] と同じ契約。
+        #[cfg(not(feature = "virtio-skip-notify-test"))]
+        unsafe {
+            port::outw(self.io_base + REG_QUEUE_NOTIFY, 0);
+        }
+
+        // === used.idx が進むまでポーリングする。上限つき ===
+        let expected = self.completed.wrapping_add(1);
+        let used_idx_at = base + self.used_offset + 2;
+        let mut spins = 0u64;
+        loop {
+            // SAFETY: used は装置が書く領域で、こちらは読むだけである。
+            // **装置が書き手なので `read_volatile` で読む。**
+            let used_idx = unsafe { core::ptr::read_volatile(used_idx_at as *const u16) };
+            if used_idx == expected {
+                break;
+            }
+            spins += 1;
+            if spins >= POLL_SPIN_LIMIT {
+                return Err(VirtioBlkError::RequestTimedOut { spins });
+            }
+            core::hint::spin_loop();
+        }
+        self.max_spins = self.max_spins.max(spins);
+
+        // used エントリの中身（id）。
+        let slot = u64::from(self.completed) % self.queue_size;
+        // SAFETY: 同上（装置が書いた領域の volatile 読み）。
+        let used_id = unsafe {
+            core::ptr::read_volatile((base + self.used_offset + 4 + 8 * slot) as *const u32)
+        };
+        if used_id != 0 {
+            return Err(VirtioBlkError::WrongUsedId { id: used_id });
+        }
+        // SAFETY: 同上。
+        let status = unsafe { core::ptr::read_volatile((spare + 1024) as *const u8) };
+        if status != 0 {
+            return Err(VirtioBlkError::BadRequestStatus { status });
+        }
+        self.completed = expected;
+        Ok(())
+    }
+
+    /// 記述子 1 本を書く。
+    ///
+    /// # Safety
+    ///
+    /// リングは [`setup`] が建てた自前の領域で、`index * 16 + 16` がその中に
+    /// 収まること。
+    unsafe fn write_desc(&self, index: u64, addr: u64, len: u32, flags: u16, next: u16) {
+        let at = self.ring_virt + index * 16;
+        // SAFETY: 呼び出し元の契約のとおり自前の領域で、装置が読者なので
+        // `write_volatile` で書く。
+        unsafe {
+            core::ptr::write_volatile(at as *mut u64, addr);
+            core::ptr::write_volatile((at + 8) as *mut u32, len);
+            core::ptr::write_volatile((at + 12) as *mut u16, flags);
+            core::ptr::write_volatile((at + 14) as *mut u16, next);
+        }
+    }
+}
+
+/// superblock の sector を 1 つ読み、観測を判定行に出す（S13-b）。
+///
+/// **sector 2 を読む**（オフセット 1024。ext2 の superblock で、`s_magic` を
+/// 含むので必ず非 0 である）。**S13-b では sector 0 を読んでいたが、S13-c で
+/// ディスクの中身が ext2 の像になり、sector 0 は boot 領域の全 0 になった**
+/// ——「0 を読んでも、読めていなくても 0」（破壊が緑を出す族の 1 つ目）を
+/// 避けるため、必ず非 0 の場所へ移した。判定はホスト側（xtask）が像の
+/// ファイルの同じ 512 バイトから同じ計算をする。
+///
+/// # Safety
+///
+/// [`setup`] と同じ位置の契約。
+pub unsafe fn exercise_read(
+    logger: &mut Logger<SerialPort>,
+    blk: &mut VirtioBlk,
+) -> Result<(), VirtioBlkError> {
+    // 破壊 (S13-b, virtio-wrong-sector-test): 隣の sector を要求する。
+    // **superblock の前半（非 0）と後半（ほぼ 0）で中身が違う**ので、
+    // ホスト側の突き合わせが落ちる。
     #[cfg(not(feature = "virtio-wrong-sector-test"))]
-    let sector = 0u64;
+    let sector = 2u64;
     #[cfg(feature = "virtio-wrong-sector-test")]
-    let sector = 1u64;
+    let sector = 3u64;
 
     // 破壊 (S13-b, virtio-short-desc-test): データ記述子の長さを 511 にする。
     // **見込みは「装置は黙って 511 バイトだけ書く」だったが、実測では QEMU が
     // 要求ごと拒む**——status に 1（IOERR）が書かれ、status の検査が捕まえる。
     // 中身の突き合わせまで届かない。**捕まえ方の見込みは外れたが、捕まる。**
     #[cfg(not(feature = "virtio-short-desc-test"))]
-    let data_len = 512u32;
+    let bytes = 512u32;
     #[cfg(feature = "virtio-short-desc-test")]
-    let data_len = 511u32;
+    let bytes = 511u32;
 
-    let base = ring_virt.as_u64();
-    // SAFETY: `base` から `used_offset + used_bytes` までは上で 0 埋めした
-    // 自前の領域である。**装置が読者なので `write_volatile` で書く**（module
-    // doc の契約。以降のリングへの書き込みすべて同じ）。
-    unsafe {
-        // 要求ヘッダ。
-        core::ptr::write_volatile((base + (pages - 1) * 4096) as *mut u32, BLK_T_IN);
-        core::ptr::write_volatile((base + (pages - 1) * 4096 + 8) as *mut u64, sector);
-        // desc[0]: ヘッダ（装置が読む）。
-        write_desc(base, 0, header_phys, 16, DESC_F_NEXT, 1);
-        // desc[1]: データ（装置が書く）。
-        write_desc(base, 1, data_phys, data_len, DESC_F_NEXT | DESC_F_WRITE, 2);
-        // desc[2]: status（装置が書く）。
-        write_desc(base, 2, status_phys, 1, DESC_F_WRITE, 0);
-        // avail.ring[0] = 先頭の記述子、avail.idx = 1（公開）。
-        core::ptr::write_volatile((base + desc_bytes + 4) as *mut u16, 0);
-        core::ptr::write_volatile((base + desc_bytes + 2) as *mut u16, 1);
-    }
+    // 器の +512 を読み先に使う（S13-b の使い捨てと同じ場所）。
+    let data_phys = blk.spare_phys + 512;
+    let before = blk.max_spins;
+    // SAFETY: この関数の契約そのまま。読み先は器の中で、装置だけが書く。
+    unsafe { blk.read_at(sector, bytes, data_phys)? };
 
-    // **公開が notify より先に装置から見えること**（module doc の契約）。
-    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-    // 破壊 (S13-b, virtio-skip-notify-test): notify を書かない。
-    // **要求は公開されたままで、装置は読まない。** ポーリングが上限に
-    // 達して止まる——**上限のある待機だけが、この形を観測へ変える。**
-    //
-    // SAFETY: ポート I/O は冒頭と同じ契約。
-    #[cfg(not(feature = "virtio-skip-notify-test"))]
-    unsafe {
-        port::outw(io + REG_QUEUE_NOTIFY, 0);
-    }
-
-    // === used.idx が進むまでポーリングする。上限つき ===
-    let used_idx_at = base + used_offset + 2;
-    let mut spins = 0u64;
-    loop {
-        // SAFETY: used は装置が書く領域で、こちらは読むだけである。
-        // **装置が書き手なので `read_volatile` で読む。**
-        let used_idx = unsafe { core::ptr::read_volatile(used_idx_at as *const u16) };
-        if used_idx != 0 {
-            break;
-        }
-        spins += 1;
-        if spins >= POLL_SPIN_LIMIT {
-            return Err(VirtioBlkError::RequestTimedOut { spins });
-        }
-        core::hint::spin_loop();
-    }
-
-    // used エントリの中身（id と装置が書いた長さ）。
-    // SAFETY: 同上（装置が書いた領域の volatile 読み）。
-    let used_id = unsafe { core::ptr::read_volatile((base + used_offset + 4) as *const u32) };
-    // SAFETY: 同上。
-    let used_len = unsafe { core::ptr::read_volatile((base + used_offset + 8) as *const u32) };
-    if used_id != 0 {
-        return Err(VirtioBlkError::WrongUsedId { id: used_id });
-    }
-    // SAFETY: 同上。
-    let status =
-        unsafe { core::ptr::read_volatile((base + (pages - 1) * 4096 + 1024) as *const u8) };
-    if status != 0 {
-        return Err(VirtioBlkError::BadRequestStatus { status });
-    }
-
-    // === 中身の観測。判定はホスト側（xtask）が像のファイルから同じ計算をする ===
-    let data_at = (base + (pages - 1) * 4096 + 512) as *const u8;
+    let data_at = (blk.spare_virt() + 512) as *const u8;
     let mut checksum = 0u32;
     let mut first = [0u8; 8];
     for index in 0..512usize {
-        // SAFETY: データも装置が書いた領域である。volatile で読む。
+        // SAFETY: データは装置が書いた領域である。volatile で読む。
         let byte = unsafe { core::ptr::read_volatile(data_at.add(index)) };
         // **位置で重み付けする。** 単純な和だと並べ替えに気づけない。
         checksum = checksum.wrapping_add(u32::from(byte).wrapping_mul(index as u32 + 1));
@@ -314,29 +419,12 @@ pub unsafe fn read_first_sector(
     // 突き合わせるので、起動ごとに動く値を載せると参照が壊れる。この行は
     // xtask の正規化の標識に入っている（揺れることが正常な観測である）。
     logger.info(format_args!(
-        "virtio-blk: polling took {spins} spin(s) (limit {POLL_SPIN_LIMIT})"
+        "virtio-blk: polling took {} spin(s) (limit {POLL_SPIN_LIMIT})",
+        blk.max_spins - before
     ));
     logger.info(format_args!(
-        "virtio-blk: read sector {sector}: 512 byte(s) requested, used.len={used_len}, \
-         status=0 (OK); checksum={checksum:#010x} first bytes={first:02x?}"
+        "virtio-blk: read sector {sector}: 512 byte(s) requested, status=0 (OK); \
+         checksum={checksum:#010x} first bytes={first:02x?}"
     ));
     Ok(())
-}
-
-/// 記述子 1 本を書く。
-///
-/// # Safety
-///
-/// `base` が 0 埋め済みの自前のリングを指し、`index * 16 + 16` がその中に
-/// 収まること。呼び出し側（[`read_first_sector`]）だけが使う。
-unsafe fn write_desc(base: u64, index: u64, addr: u64, len: u32, flags: u16, next: u16) {
-    let at = base + index * 16;
-    // SAFETY: 呼び出し元の契約のとおり自前の領域で、装置が読者なので
-    // `write_volatile` で書く。
-    unsafe {
-        core::ptr::write_volatile(at as *mut u64, addr);
-        core::ptr::write_volatile((at + 8) as *mut u32, len);
-        core::ptr::write_volatile((at + 12) as *mut u16, flags);
-        core::ptr::write_volatile((at + 14) as *mut u16, next);
-    }
 }

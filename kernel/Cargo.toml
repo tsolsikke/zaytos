@@ -162,6 +162,12 @@ virtio-wrong-sector-test = []
 # 拒み（status=1）、status の検査が捕まえる。見込み（黙って 511 バイト書く）は
 # 外れたが、捕まる。
 virtio-short-desc-test = []
+# 破壊（S13-c）: 像を装置から読まず、埋め込みから複製する。中身が同一なので
+# バイト一致では捕まらず、ホスト側の info blockstats（読んだ量）が捕まえる。
+fs-load-from-embedded-test = []
+# 破壊（S13-c）: 像の先頭 4KiB を装置から読まない。superblock が 0 のままになり
+# バイト一致が落ちる。末尾を欠く形は像の末尾が 0 なので破壊にならない（実測）。
+virtio-load-skip-first-test = []
 # ページテーブルの分割・アンマップの回帰チェック（M5-a-2-2）。
 # `cargo xtask run --paging-test <kind>` が有効化する。通常ビルドには
 # 含まれない。いずれも「検査が実際に働くこと」を確かめるためのもので、

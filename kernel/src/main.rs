@@ -1272,49 +1272,60 @@ extern "sysv64" fn kernel_main() -> ! {
     // 触るのは `kernel::pci` だけである（grep で確認済み）。
     let virtio_blk = unsafe { kernel::pci::scan_bus0(&mut logger) };
 
-    // === S13-b: virtqueue を 1 本立て、ポーリングで sector 0 を読む ===
+    // === S13-b: virtqueue を 1 本立て、ポーリングで superblock の sector を読む ===
     //
     // 位置の契約は S13-a と同じ（BSP のみ・IF=0・AP 起床前）。ADR-0033 の
     // legacy interface で話す。**判定はホスト側にある**——像は `stage_esp` が
-    // 模様を置いて建てており、xtask が同じ 512 バイトから同じ計算をして
+    // ディスクへ置いており、xtask が同じ 512 バイトから同じ計算をして
     // 突き合わせる。ここで出すのは観測（checksum と先頭バイト）である。
-    match virtio_blk {
+    //
+    // **設定した装置は保持し、後段（S13-c の像の全ロード。ADR-0034）へ渡す。**
+    // ロードの位置（`copy_fs_image_to_frames`）も AP 起床と `sti` より前なので、
+    // 契約（BSP のみ・IF=0）はそこまで崩れない。
+    let mut virtio_disk = match virtio_blk {
         Some(virtio) => {
             // SAFETY: 上の pci scan と同じ位置（BSP のみ・IF=0）。`virtio` は
             // `scan_bus0` が返した BAR0 の I/O 窓そのものである。
-            if let Err(reason) =
-                unsafe { kernel::virtio::read_first_sector(&mut logger, &virtio, &mut allocator) }
-            {
-                match reason {
-                    kernel::virtio::VirtioBlkError::QueueSizeZero => logger.error(format_args!(
+            let outcome = unsafe { kernel::virtio::setup(&mut logger, &virtio, &mut allocator) }
+                .and_then(|mut blk| {
+                    // SAFETY: 同じ位置。読み先は器（リングの末尾ページ）の中である。
+                    unsafe { kernel::virtio::exercise_read(&mut logger, &mut blk) }?;
+                    Ok(blk)
+                });
+            match outcome {
+                Ok(blk) => blk,
+                Err(reason) => {
+                    match reason {
+                        kernel::virtio::VirtioBlkError::QueueSizeZero => {
+                            logger.error(format_args!(
                         "virtio-blk: queue 0 reports size 0; the device offers no queue; halting"
-                    )),
-                    kernel::virtio::VirtioBlkError::RingAllocationFailed { pages } => {
-                        logger.error(format_args!(
+                    ))
+                        }
+                        kernel::virtio::VirtioBlkError::RingAllocationFailed { pages } => logger
+                            .error(format_args!(
                             "virtio-blk: could not allocate {pages} contiguous page(s) for the \
                              ring; halting"
-                        ))
-                    }
-                    kernel::virtio::VirtioBlkError::RequestTimedOut { spins } => {
-                        logger.error(format_args!(
-                            "virtio-blk: the request was not completed after {spins} spin(s); \
+                        )),
+                        kernel::virtio::VirtioBlkError::RequestTimedOut { spins } => {
+                            logger.error(format_args!(
+                                "virtio-blk: the request was not completed after {spins} spin(s); \
                              halting"
-                        ))
-                    }
-                    kernel::virtio::VirtioBlkError::BadRequestStatus { status } => {
-                        logger.error(format_args!(
+                            ))
+                        }
+                        kernel::virtio::VirtioBlkError::BadRequestStatus { status } => logger
+                            .error(format_args!(
                             "virtio-blk: the device reported status {status} (expected 0 = OK); \
                              halting"
-                        ))
-                    }
-                    kernel::virtio::VirtioBlkError::WrongUsedId { id } => {
-                        logger.error(format_args!(
-                            "virtio-blk: the used entry names descriptor {id} (expected 0); \
+                        )),
+                        kernel::virtio::VirtioBlkError::WrongUsedId { id } => {
+                            logger.error(format_args!(
+                                "virtio-blk: the used entry names descriptor {id} (expected 0); \
                              halting"
-                        ))
+                            ))
+                        }
                     }
+                    cpu::halt_forever()
                 }
-                cpu::halt_forever();
             }
         }
         None => {
@@ -1323,9 +1334,9 @@ extern "sysv64" fn kernel_main() -> ! {
             logger.error(format_args!(
                 "virtio-blk: no device with an I/O BAR0 was found on bus 0; halting"
             ));
-            cpu::halt_forever();
+            cpu::halt_forever()
         }
-    }
+    };
 
     // === S3-b-2b-2: AP の per-CPU 資産を用意する ===
     //
@@ -1660,7 +1671,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // 新しいアドレス空間へ区画が張れること、**張った葉の W が区画の権限どおりで
     // あること**を見る。
     verify_embedded_fs_image(&mut logger);
-    copy_fs_image_to_frames(&mut logger);
+    copy_fs_image_to_frames(&mut logger, &mut virtio_disk);
     verify_corrupt_fs_image_is_rejected(&mut logger);
     verify_embedded_user_elf(&mut logger);
     verify_corrupt_user_elf_is_rejected(&mut logger);
@@ -4088,8 +4099,8 @@ fn verify_embedded_user_elf(logger: &mut Logger<SerialPort>) {
 /// **`spawn` の会計（`leaked`）には出ない**——あちらはプロセスの
 /// アドレス空間の畳みを、`spawn` の前後で測っている。**ここは spawn より前で、
 /// 窓の外である**（実測で確かめた）。
-fn copy_fs_image_to_frames(logger: &mut Logger<SerialPort>) {
-    let Err(reason) = try_copy_fs_image_to_frames(logger) else {
+fn copy_fs_image_to_frames(logger: &mut Logger<SerialPort>, blk: &mut kernel::virtio::VirtioBlk) {
+    let Err(reason) = try_copy_fs_image_to_frames(logger, blk) else {
         return;
     };
     // **文言はここで組み立てる。** **`format_args!` は返せない**——
@@ -4112,6 +4123,9 @@ fn copy_fs_image_to_frames(logger: &mut Logger<SerialPort>) {
         )),
         FsImageCopyError::ReadBackMismatch => logger.error(format_args!(
             "fs-image-copy: the copy does not match the embedded image; halting"
+        )),
+        FsImageCopyError::DeviceReadFailed { error } => logger.error(format_args!(
+            "fs-image-load: reading the image from the virtio disk failed: {error:?}; halting"
         )),
     }
     cpu::halt_forever();
@@ -4140,13 +4154,20 @@ enum FsImageCopyError {
     NotCovered { base: u64, last: u64 },
     /// 読み戻した中身が元の像と一致しない。
     ReadBackMismatch,
+    /// 装置からの読みが失敗した（S13-c。複製元は装置である。ADR-0034）。
+    DeviceReadFailed {
+        error: kernel::virtio::VirtioBlkError,
+    },
 }
 
 /// 像をフレームへ複製する検査部（T3-1）。**止めない。`Err` を返す。**
 ///
 /// **判定行（`logger.info`）はここに残る。** **検査と検査の間に、検査した値を
 /// 使って出ているからである**——外へ出すと順序か文言が変わる。
-fn try_copy_fs_image_to_frames(logger: &mut Logger<SerialPort>) -> Result<(), FsImageCopyError> {
+fn try_copy_fs_image_to_frames(
+    logger: &mut Logger<SerialPort>,
+    blk: &mut kernel::virtio::VirtioBlk,
+) -> Result<(), FsImageCopyError> {
     use kernel::frame_allocator::FRAME_SIZE;
 
     // **預けた後なので借りる**（`ADR-0030`）。**取ったフレームは返さないが、
@@ -4179,10 +4200,55 @@ fn try_copy_fs_image_to_frames(logger: &mut Logger<SerialPort>) -> Result<(), Fs
     }
 
     let destination = direct_map.phys_to_virt(base).as_u64() as *mut u8;
+
+    // === S13-c: 複製元は装置である（ADR-0034） ===
+    //
+    // 4KiB ずつ逐次読む。**読み先は複製先そのもの**（装置が DMA で直接書く）ので、
+    // 読み終えた時点で複製が済んでいる。
+    //
+    // 破壊 (S13-c, fs-load-from-embedded-test): 装置を読まず、埋め込みの像から
+    // 複製する。**中身が同一なのでバイト一致では捕まらない**（S12-b の
+    // `fs-read-from-rodata` と同じ罠）——**捕まえるのはホスト側の
+    // `info blockstats` である**（装置から読んだ量が像 1 枚ぶん欠ける）。
+    #[cfg(feature = "fs-load-from-embedded-test")]
     // SAFETY: いま確保した連続フレームで、direct map が覆っていることを上で確かめた。
     // 誰も使っていない。`bytes` は像の長さで、確保した範囲に収まる。
     unsafe {
         core::ptr::copy_nonoverlapping(FS_IMAGE.as_ptr(), destination, bytes as usize);
+    }
+    #[cfg(not(feature = "fs-load-from-embedded-test"))]
+    {
+        // 破壊 (S13-c, virtio-load-skip-first-test): 先頭の 4KiB を読まない。
+        // **superblock（オフセット 1024）が 0 のままになり、バイト一致が落ちる。**
+        // **末尾を欠く形にしない**——像の末尾は 0 なので（S12-a の実測）、
+        // 欠けても変わらず、破壊にならない（族の 1 つ目）。
+        #[cfg(not(feature = "virtio-load-skip-first-test"))]
+        let start_chunk = 0u64;
+        #[cfg(feature = "virtio-load-skip-first-test")]
+        let start_chunk = 1u64;
+
+        let mut offset = start_chunk * 4096;
+        while offset < bytes {
+            let chunk = 4096u32.min((bytes - offset) as u32);
+            // SAFETY: 読み先はいま確保した連続フレームの中で、direct map が
+            // 覆っていることを上で確かめた。装置のほかに書く者は居ない。
+            // 位置の契約（BSP のみ・IF=0）は呼び出し位置が満たす（AP 起床と
+            // `sti` はどちらもこの後である）。
+            if let Err(error) = unsafe {
+                blk.read_at(
+                    offset / kernel::virtio::SECTOR_BYTES,
+                    chunk,
+                    base.as_u64() + offset,
+                )
+            } {
+                return Err(FsImageCopyError::DeviceReadFailed { error });
+            }
+            offset += u64::from(chunk);
+        }
+        logger.info(format_args!(
+            "fs-image-load: read {} byte(s) from the virtio disk into the copy destination",
+            bytes - start_chunk * 4096
+        ));
     }
 
     // **書いたものを読み戻して突き合わせる。** 複製したことを主張の根拠にしない
@@ -9157,6 +9223,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "virtio-short-desc-test",
         cfg!(feature = "virtio-short-desc-test"),
         "virtio のデータ記述子を 511 バイトに縮める",
+    ),
+    (
+        "fs-load-from-embedded-test",
+        cfg!(feature = "fs-load-from-embedded-test"),
+        "像を装置から読まず、埋め込みから複製する",
+    ),
+    (
+        "virtio-load-skip-first-test",
+        cfg!(feature = "virtio-load-skip-first-test"),
+        "像の先頭 4KiB を装置から読まない",
     ),
 ];
 

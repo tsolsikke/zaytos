@@ -2251,6 +2251,17 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
         }
     }
 
+    // **装置が実際に読まれた量（S13-c）。** QEMU の帳簿を、殺す前に聞く。
+    // **下限で見る**——OVMF の起動時の探りが混ざる（実測 8,704 バイト。像の
+    // 0.4%）ので差分は取らず、「像 1 枚ぶん以上」を要求する。基線を 2 回聞く
+    // 形は採らない——カーネルは xtask を待たないので、時機の競争になる。
+    let disk_rd_bytes = match connect_monitor_with_retry(&monitor_socket) {
+        Ok(mut stream) => query_monitor(&mut stream, "info blockstats")
+            .ok()
+            .and_then(|text| parse_disk0_rd_bytes(&text)),
+        Err(_) => None,
+    };
+
     let qemu_exit = child
         .try_wait()
         .ok()
@@ -2512,7 +2523,27 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
         (identical && gone, clean)
     };
 
-    if outside_kernel_image && reads_the_copy && free_counts_agree && identical && fsck_ok {
+    // **装置が像 1 枚ぶん以上を配ったこと（S13-c）。** バイト一致は
+    // 「複製の中身が正しい」ことしか言えない——**複製元が装置だったことは、
+    // QEMU の帳簿だけが独立に言える**（`fs-load-from-embedded` の破壊は
+    // 中身が同一なので、ここでしか捕まらない）。期待値はホスト側の像の
+    // ファイルの長さからそのつど導く。
+    let image_bytes = fs::metadata(&built).map(|m| m.len()).unwrap_or(0);
+    let device_read_whole_image =
+        disk_rd_bytes.is_some_and(|read| image_bytes > 0 && read >= image_bytes);
+    println!(
+        "{context}: the virtio disk delivered {disk_rd_bytes:?} byte(s); the image is \
+         {image_bytes} byte(s); at least the whole image came from the device = \
+         {device_read_whole_image}"
+    );
+
+    if outside_kernel_image
+        && reads_the_copy
+        && free_counts_agree
+        && identical
+        && fsck_ok
+        && device_read_whole_image
+    {
         println!("{context}: PASS");
         Ok(())
     } else {
@@ -3291,6 +3322,30 @@ fn query_monitor(stream: &mut UnixStream, command: &str) -> Result<String> {
     Ok(response)
 }
 
+/// `info blockstats` の出力から `disk0` の `rd_bytes` を拾う（S13-c）。
+fn parse_disk0_rd_bytes(text: &str) -> Option<u64> {
+    for raw in text.lines() {
+        let line = raw.trim();
+        let Some(rest) = line.strip_prefix("disk0:") else {
+            continue;
+        };
+        let Some((_, after)) = rest.split_once("rd_bytes=") else {
+            continue;
+        };
+        return after.split_whitespace().next()?.parse().ok();
+    }
+    None
+}
+
+/// 像のロードの破壊の一覧（S13-c）。
+const FS_LOAD_SABOTAGES: &[(&str, &str)] = &[
+    (
+        "loading from the embedded image",
+        "fs-load-from-embedded-test",
+    ),
+    ("a skipped first chunk", "virtio-load-skip-first-test"),
+];
+
 /// virtio-blk の読みの破壊の一覧（S13-b）。
 const VIRTIO_SABOTAGES: &[(&str, &str)] = &[
     ("a dropped queue notify", "virtio-skip-notify-test"),
@@ -3391,10 +3446,13 @@ fn cmd_virtio_test(features: &[&str]) -> Result<()> {
     println!("{context}: {}", read_line.trim());
 
     // **ホスト側で同じ計算をする。** 出所は像のファイルそのものである。
+    // **読むのは sector 2（オフセット 1024。superblock）である**——S13-c で
+    // ディスクの中身が ext2 の像になり、sector 0 は boot 領域の全 0 になった。
+    // 0 のままでは「読めていなくても 0」で一致が言えない（族の 1 つ目）。
     let image = fs::read(disk_image_path(&esp_dir))
         .with_context(|| "failed to read the disk image back".to_string())?;
     let mut expected_checksum = 0u32;
-    for (index, byte) in image.iter().take(512).enumerate() {
+    for (index, byte) in image.iter().skip(1024).take(512).enumerate() {
         expected_checksum =
             expected_checksum.wrapping_add(u32::from(*byte).wrapping_mul(index as u32 + 1));
     }
@@ -8783,6 +8841,20 @@ fn cmd_check(full: bool) -> Result<()> {
             }
         }
 
+        // **像のロードの破壊（S13-c）。** どちらも fs extract の判定が捕まえる
+        // ——取り違えは blockstats の下限、先頭の欠けはバイト一致である。
+        for (label, feature) in FS_LOAD_SABOTAGES {
+            total += 1;
+            println!("=== xtask check: the fs image load catches {label}");
+            match cmd_fs_image_extract(&[feature]) {
+                Ok(()) => {
+                    println!("--- fs image load ({label}): FAILED (the sabotage was NOT caught)");
+                    failed.push(format!("fs image load ({label})"));
+                }
+                Err(_) => println!("--- fs image load ({label}): OK (the sabotage was caught)"),
+            }
+        }
+
         for feature in KILL_SABOTAGES {
             total += 1;
             println!("=== xtask check: the shell test catches the sabotage {feature}");
@@ -9276,7 +9348,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 180,
+    full: 182,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
@@ -9800,10 +9872,6 @@ fn disk_image_path(esp_dir: &Path) -> PathBuf {
         .join("disk0.img")
 }
 
-/// virtio ディスクの像の大きさ。**中身はまだ使わないので、量に根拠は無い**
-/// （S13-c で ext2 の像を置くときに決め直す）。
-const DISK_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
-
 fn stage_esp(workspace_root: &Path, bootloader_efi: &Path, kernel_elf: &Path) -> Result<PathBuf> {
     let esp_dir = workspace_root.join("target").join("esp");
     let boot_dir = esp_dir.join("EFI").join("BOOT");
@@ -9841,33 +9909,23 @@ fn stage_esp(workspace_root: &Path, bootloader_efi: &Path, kernel_elf: &Path) ->
     // ゲストが書く可変の共有状態なので、残すと「前の項目が書いた中身を
     // 次の項目が見る」形になる（`troubleshooting.md` 2026-08-17 の族。
     // 書き込みが入る S13-e の手当ては `deferred-decisions.md` の行にある）。
-    // `create` が切り詰め、`set_len` が 0 で伸ばすので、中身は決定的である。
     //
-    // **先頭の 1 ページには模様を置く（S13-b）。** 決定的な 0 のままでは
-    // 「読めていなくても 0」で一致が言えない（破壊が緑を出す族の 1 つ目）。
-    // **バイトは絶対オフセットから決まる**（ext2 の検査の「書く中身は位置から
-    // 決まる形にする」と同じ判断）ので、違う sector を読む形が中身で捕まる。
+    // **中身は建てた ext2 の像そのものである（S13-c。ADR-0034）。**
+    // S13-b では模様を置いていたが、S13-c でカーネルが像をこのディスクから
+    // ロードするようになった。像は決定的（`build.rs` が時刻を潰す）なので、
+    // どの feature 構成でも同じバイト列になる。大きさも像と同じにする
+    // （16MiB に伸ばす根拠が無くなった）。
     let disk_image = disk_image_path(&esp_dir);
-    let mut file = fs::File::create(&disk_image)
-        .with_context(|| format!("failed to create {}", disk_image.display()))?;
-    file.write_all(&disk_pattern_page())
-        .with_context(|| format!("failed to write the pattern to {}", disk_image.display()))?;
-    file.set_len(DISK_IMAGE_BYTES)
-        .with_context(|| format!("failed to size {}", disk_image.display()))?;
+    let built = kernel_build_out_dir(workspace_root)?.join(FS_IMAGE_NAME);
+    fs::copy(&built, &disk_image).with_context(|| {
+        format!(
+            "failed to copy {} to {}",
+            built.display(),
+            disk_image.display()
+        )
+    })?;
 
     Ok(esp_dir)
-}
-
-/// ディスク像の先頭 1 ページの模様（S13-b）。
-///
-/// カーネル側は独立に読んで観測を出し、[`cmd_virtio_test`] が同じバイト列から
-/// 同じ計算をして突き合わせる。**この関数が両方の出所である。**
-fn disk_pattern_page() -> [u8; 4096] {
-    let mut page = [0u8; 4096];
-    for (offset, slot) in page.iter_mut().enumerate() {
-        *slot = (offset % 251) as u8;
-    }
-    page
 }
 
 fn workspace_root() -> Result<PathBuf> {
@@ -10030,6 +10088,25 @@ mod tests {
             .position(|a| a == "-d")
             .expect("-d flag missing");
         assert_eq!(joined[d_pos + 1], "int,cpu_reset");
+    }
+
+    /// `info blockstats` の出力から `disk0` の行だけが拾えること（S13-c）。
+    /// **標本は実測の出力そのものである**（`ide0-hd0` は ESP の FAT で、
+    /// 拾ってはならない側）。
+    #[test]
+    fn disk0_rd_bytes_is_parsed_and_other_drives_are_ignored() {
+        let text = "ide0-hd0: rd_bytes=7781888 wr_bytes=0 rd_operations=88
+disk0: rd_bytes=8704 wr_bytes=0 rd_operations=11
+ide1-cd0: rd_bytes=0 wr_bytes=0 rd_operations=0
+";
+        assert_eq!(parse_disk0_rd_bytes(text), Some(8704));
+        assert_eq!(
+            parse_disk0_rd_bytes(
+                "floppy0: rd_bytes=1
+"
+            ),
+            None
+        );
     }
 
     /// S13-b で足した 2 つの標識が、その行だけを落とすこと。
