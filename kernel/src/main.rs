@@ -9346,6 +9346,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         cfg!(feature = "virtio-skip-isr-read-test"),
         "virtio のハンドラが ISR を読まない",
     ),
+    (
+        "virtio-wait-holding-bkl-test",
+        cfg!(feature = "virtio-wait-holding-bkl-test"),
+        "BKL を解かずに I/O 待ちへ入る",
+    ),
+    (
+        "virtio-open-wakeup-window-test",
+        cfg!(feature = "virtio-open-wakeup-window-test"),
+        "完了の検査と hlt の間で IF を開ける",
+    ),
 ];
 
 /// 有効な仕込み feature を起動時に報告する。

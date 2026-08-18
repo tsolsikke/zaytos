@@ -3615,7 +3615,13 @@ fn cmd_virtio_irq_test(features: &[&str]) -> Result<()> {
         "{context}: delivered = {delivered:?} (wanted 2), not mine = {not_mine:?} (wanted 0), \
          route read back matching the platform's declaration = {route_ok}"
     );
-    if !counts_ok || !route_ok {
+    // d-2: BKL を解いてから待ったこと（§6。ADR-0036）。
+    let released = serial
+        .lines()
+        .any(|l| l.contains("blocking read: released the BKL before waiting"));
+    println!("{context}: the blocking read released the BKL before waiting = {released}");
+
+    if !counts_ok || !route_ok || !released {
         bail!("{context}: the interrupt did not arrive the way the route claims");
     }
     Ok(())
@@ -5267,6 +5273,11 @@ const BOOT_LOG_VOLATILE_MARKERS: &[&str] = &[
     // プロセスを畳んだ後の空き範囲の数（S9-b-3-1）。**同じ理由で揺れる**
     // （実測で 10 と 11）。**畳んだ会計そのものは別の行にあり、そちらは残る。**
     "the allocator holds",
+    // virtio の眠りの halt 数（S13-d-2）。装置の速さと負荷で揺れる（既定は
+    // 0——QEMU の TCG は完了 IRQ を眠る前に配送する）。**隠したものを見る者**:
+    // 「BKL を解いて待った」ことは別の行が主張する。遅くなる退行だけは誰も
+    // 見ていない（性能を扱わない。スピン数と同じ）。
+    "virtio-blk: blocking wait:",
     // virtio のポーリングの回数（S13-b）。装置の処理との競争なので実行ごとに
     // 揺れる（実測で 0 / 2 / 146 / 165）。**checksum などの判定は別の行にあり、
     // そちらは残る**——揺れる値を判定行から分けたので、この標識は 1 行の
@@ -6328,6 +6339,11 @@ const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
         file: "kernel/src/interrupts.rs",
         item: "run_timer_loop",
         reason: "sti する箇所の 1 つ（M4-d-2 のタイマループ）と sti;hlt 隣接・上限到達時の cli",
+    },
+    DirectInterruptControlSite {
+        file: "kernel/src/virtio.rs",
+        item: "exercise_blocking_read",
+        reason: "I/O 待ちの sti;hlt 隣接（S13-d-2。ADR-0036）。cli 下で完了を検査し、                 未完了なら enable_interrupts_and_halt で眠る",
     },
     DirectInterruptControlSite {
         file: "kernel/src/smp.rs",
@@ -8985,11 +9001,15 @@ fn cmd_check(full: bool) -> Result<()> {
             Err(_) => println!("--- virtio irq (edge route): OK (the sabotage was caught)"),
         }
 
-        // **落ち方が 3 形で全部違う**——edge は読み戻し、EOI 落としは 2 回目の
-        // 上限つき待ち、ISR 読み落としは数の爆発である。
+        // **落ち方が 4 形で全部違う**——edge は読み戻し、EOI 落としは 2 回目の
+        // 上限つき待ち、ISR 読み落としは数の爆発、BKL 保持待ちは次に BKL を
+        // 取る者の再取得検出である（d-2。§6 違反）。**open-wakeup-window は
+        // ここに無い**——QEMU の TCG では眠りが起きず、決定的に踏めない
+        // （`deferred-decisions.md`）。
         for (label, feature) in [
             ("a dropped EOI", "virtio-skip-eoi-test"),
             ("an unread ISR", "virtio-skip-isr-read-test"),
+            ("a wait that holds the BKL", "virtio-wait-holding-bkl-test"),
         ] {
             total += 1;
             println!("=== xtask check: the virtio interrupt catches {label}");
@@ -9509,7 +9529,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 186,
+    full: 187,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

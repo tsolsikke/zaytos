@@ -494,6 +494,108 @@ pub unsafe fn exercise_interrupt_read(
     Ok(())
 }
 
+/// 眠って待つ実演が待ちを打ち切るティック数（S13-d-2）。
+///
+/// **時計が無いのでティックで数える。** 100Hz なので 200 は 2 秒である。
+/// `hlt` はタイマ割り込みでも起きるので、完了 IRQ が来なくてもここへ戻って
+/// 上限を見られる（起こし忘れの破壊はこの上限で捕まる）。
+const BLOCKING_WAIT_TICKS: u64 = 200;
+
+/// **BKL を解いて眠り、割り込みで起きる**ことを実演する（S13-d-2。ADR-0036）。
+///
+/// d-1 の [`exercise_interrupt_read`] はポーリングで「届いて数えられる」ことを
+/// 見た。**こちらは「BKL を保持したまま待たない」を実際に守る最初の利用者**
+/// である（`CLAUDE.md` §6）。post-boot の読み 1 回に限る（S13-e の flush へ
+/// 広げない）。
+///
+/// # 取り逃しの窓の閉じ（ADR-0036 の IF の規律）
+///
+/// 完了フラグの検査を `cli` 下（[`EntryInterruptGuard`]）で行い、未完了なら
+/// **`sti; hlt` を隣接させて眠る**（[`common::cpu::enable_interrupts_and_halt`]）。
+/// 検査から `hlt` まで IF=0 なので、「検査したら未完了と見てから眠るまでの間に
+/// 完了 IRQ が来て取り逃す」窓が開かない。
+///
+/// # Safety
+///
+/// [`exercise_interrupt_read`] と同じ位置の契約（配線・武装済み、IF=1、
+/// この struct だけがリングとポート窓を触る）。
+pub unsafe fn exercise_blocking_read(
+    logger: &mut Logger<SerialPort>,
+    blk: &mut VirtioBlk,
+) -> Result<(), VirtioBlkError> {
+    let before = IRQ_DELIVERED.load(core::sync::atomic::Ordering::Acquire);
+
+    // === 要求を発行する。**BKL を保持したまま待たない**（§6。ADR-0036）===
+    //
+    // read_at は notify まで行う。**発行だけを BKL 下で行い、完了待ちは
+    // BKL を解いた後にする。**
+    {
+        let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
+        // 破壊 (S13-d, virtio-wait-holding-bkl-test): BKL を解かずに待ちへ入る。
+        // **§6 違反そのものである。** 保持したまま下の hlt へ進むと、BKL 下は
+        // IF=0 なので完了 IRQ が来ず、他コアも永久に待つ。**次に BKL を取る者が
+        // 同じコアの再取得として捕まえる**見込み（`kill-fold-keep-bkl` の族）。
+        #[cfg(feature = "virtio-wait-holding-bkl-test")]
+        {
+            // SAFETY: read_at の契約は exercise 側の doc が満たす。
+            unsafe { blk.read_at(2, 512, blk.spare_phys + 512)? };
+            core::mem::forget(_bkl);
+        }
+        #[cfg(not(feature = "virtio-wait-holding-bkl-test"))]
+        {
+            let data_phys = blk.spare_phys + 512;
+            // SAFETY: 同上。
+            unsafe { blk.read_at(2, 512, data_phys)? };
+        }
+    } // ここで BKL が解け、IF が発行前の値（=1）へ戻る。
+
+    // === 完了を眠って待つ。上限つき（ティック）===
+    let deadline = crate::idt::timer_ticks() + BLOCKING_WAIT_TICKS;
+    let mut halts = 0u64;
+    loop {
+        // cli 下で完了を検査する（取り逃しの窓を閉じる。ADR-0036）。
+        let guard = common::critical::EntryInterruptGuard::enter();
+        if IRQ_DELIVERED.load(core::sync::atomic::Ordering::Acquire) > before {
+            drop(guard);
+            break;
+        }
+        if crate::idt::timer_ticks() >= deadline {
+            drop(guard);
+            return Err(VirtioBlkError::RequestTimedOut { spins: halts });
+        }
+        // 破壊 (S13-d, virtio-open-wakeup-window-test): 検査の後・hlt の前で
+        // IF を開ける（窓を開く）。**cli 下の検査で見た「未完了」と hlt の間に
+        // 完了 IRQ が入ると、その IRQ を処理してから眠り、次の IRQ まで起きない**
+        // ——lost wakeup。ただし QEMU で決定的に踏めるかは実測（下の報告）。
+        #[cfg(feature = "virtio-open-wakeup-window-test")]
+        drop(guard);
+        #[cfg(not(feature = "virtio-open-wakeup-window-test"))]
+        core::mem::forget(guard);
+        // **`sti; hlt` を隣接させる。** guard の cli を sti が上書きし、hlt が
+        // 眠る。タイマでも起きるので、完了 IRQ が来なくても上限を見られる。
+        //
+        // SAFETY: 配線済みで、IF=1 で受けてよいベクタにハンドラが揃っている
+        // （sti 前 7 項目は `start_timer` が検証済み）。
+        unsafe { common::cpu::enable_interrupts_and_halt() };
+        halts += 1;
+    }
+
+    // **主張は「BKL を解いてから待った」ことである**（§6。ADR-0036）。
+    // **「眠った（hlt）」とは言い切らない**——実測で QEMU の TCG は完了 IRQ を
+    // 眠る前に配送し、既定では halt を 1 度も踏まない（d-1 のポーリングが数
+    // spin で返るのと同じ速さの限界）。取り逃しの窓を閉じる cli 下の検査は
+    // 毎回通る。
+    logger.info(format_args!(
+        "virtio-blk: blocking read: released the BKL before waiting; the completion was seen"
+    ));
+    // **halt 数は揺れる観測なので行を分ける**（装置の速さと負荷で変わる。
+    // スピン数と同じ扱い）。xtask の正規化の標識に入っている。
+    logger.info(format_args!(
+        "virtio-blk: blocking wait: {halts} halt(s) before the completion woke it"
+    ));
+    Ok(())
+}
+
 /// superblock の sector を 1 つ読み、観測を判定行に出す（S13-b）。
 ///
 /// **sector 2 を読む**（オフセット 1024。ext2 の superblock で、`s_magic` を

@@ -179,6 +179,12 @@ virtio-skip-eoi-test = []
 # 破壊（S13-d）: ハンドラが ISR を読まない。レベルの線が deassert されず
 # 再送が続き、届いた数が爆発する（実測で 20000）——数の判定が捕まえる。
 virtio-skip-isr-read-test = []
+# 破壊（S13-d-2）: BKL を解かずに待ちへ入る。§6 違反。次に BKL を取る者が
+# 同じコアの再取得として捕まえる見込み（実測で形を確かめる）。
+virtio-wait-holding-bkl-test = []
+# 破壊（S13-d-2）: 完了の検査の後・hlt の前で IF を開ける。lost wakeup を
+# 狙う。QEMU で決定的に踏めるかは実測。
+virtio-open-wakeup-window-test = []
 # ページテーブルの分割・アンマップの回帰チェック（M5-a-2-2）。
 # `cargo xtask run --paging-test <kind>` が有効化する。通常ビルドには
 # 含まれない。いずれも「検査が実際に働くこと」を確かめるためのもので、

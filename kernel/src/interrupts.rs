@@ -820,6 +820,16 @@ pub unsafe fn run_timer_loop(
                     ));
                     common::cpu::halt_forever();
                 }
+                // d-2: BKL を解いて眠り、割り込みで起きる（ADR-0036）。
+                // SAFETY: 上と同じ位置（配線・武装済み、IF=1）。
+                if let Err(reason) =
+                    unsafe { crate::virtio::exercise_blocking_read(logger, virtio) }
+                {
+                    logger.error(format_args!(
+                        "virtio-blk: the blocking read failed ({reason:?}); halting"
+                    ));
+                    common::cpu::halt_forever();
+                }
             }
         }
 
