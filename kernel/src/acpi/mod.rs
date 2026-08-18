@@ -202,6 +202,16 @@ impl ApicMmio {
         u32::from(irq)
     }
 
+    /// この IRQ に Interrupt Source Override が在るか（S13-d）。
+    ///
+    /// **flags が 0 の override と「override が無い」を分けるために要る**——
+    /// [`Self::redirection_flags_for_irq`] はどちらも 0 を返す。firmware が
+    /// 宣言しているなら、その値（エッジ・ハイでも）が platform の答えである。
+    pub fn has_override_for_irq(&self, irq: u8) -> bool {
+        self.interrupt_source_overrides()
+            .any(|iso| iso.source == irq)
+    }
+
     /// この IRQ を I/O APIC の redirection entry へ書くときの、極性とトリガの
     /// ビット（S2-d-1c）。
     ///

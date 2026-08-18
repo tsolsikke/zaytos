@@ -283,7 +283,22 @@ trait Controller {
     ///
     /// - 配送先のベクタに、戻れるハンドラが IDT に入っていること。
     /// - この IRQ がマスクされていること（設定の途中で届かせない）。
-    unsafe fn route(&self, irq: u8, vector: u8);
+    unsafe fn route(&self, irq: u8, vector: u8, signaling: RouteSignaling);
+}
+
+/// 線の鳴り方（S13-d）。
+///
+/// **ISA のバス既定はエッジ・アクティブハイ、PCI の INTx はレベル・
+/// アクティブローである。** MADT の Interrupt Source Override は ISA の
+/// 例外（IRQ0 の付け替えなど）しか載せず、**PCI 由来の線の鳴り方は
+/// バスの規定そのものなので、呼び出し側が申告する**——読める側
+/// （`redirection_flags_for_irq`）が返すのは override の分だけである。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RouteSignaling {
+    /// ISA の既定（override があれば `redirection_flags_for_irq` が足す）。
+    EdgeHigh,
+    /// PCI の INTx。redirection entry へ level と active-low を立てる。
+    LevelLow,
 }
 
 /// 周期タイマ源。
@@ -324,7 +339,7 @@ impl Controller for Legacy {
         pic::is_spurious(irq, isr)
     }
 
-    unsafe fn route(&self, _irq: u8, _vector: u8) {
+    unsafe fn route(&self, _irq: u8, _vector: u8, _signaling: RouteSignaling) {
         // 何もしない。8259 は IRQ 単位で行き先を選べない。
         //
         // 経路はベクタオフセット（ICW2）で決まり、IRQ 番号を足したものが
@@ -681,6 +696,7 @@ pub unsafe fn route_to_apic(
     mapped: &crate::apic::MappedApic,
     irq: u8,
     vector: u8,
+    signaling: RouteSignaling,
 ) -> Result<(), RouteError> {
     if irq as usize >= MAX_LEGACY_IRQS {
         return Err(RouteError::IrqOutOfRange);
@@ -693,7 +709,7 @@ pub unsafe fn route_to_apic(
     // 1. 経路を設定する。マスクは立てたままなので、まだ届かない。
     // SAFETY: ゲートの用意は呼び出し側の契約。この IRQ は I/O APIC 側で
     // マスクされたままである（起動時の redirection entry は全本マスク）。
-    unsafe { controller.route(irq, vector) };
+    unsafe { controller.route(irq, vector, signaling) };
 
     // 2 から 4 をひとまとめにする。区間内でログも確保も行わない。
     {
@@ -736,6 +752,22 @@ pub unsafe fn route_to_apic(
 /// 保持されているかを見ていない形を、それぞれ通す。
 ///
 /// 移していない IRQ や、I/O APIC が無い場合は `None`。
+/// firmware（MADT の override）が宣言する鳴り方（S13-d）。
+///
+/// `Some((level, active_low))` を返す。override が無ければ `None`——
+/// そのとき何を既定とするかは呼び出し側の判断である（PCI なら level・low）。
+/// **ビット定数は `crate::apic` の内側に留める**（あの到達範囲を広げない）。
+pub fn declared_signaling(mmio: &crate::acpi::ApicMmio, irq: u8) -> Option<(bool, bool)> {
+    if !mmio.has_override_for_irq(irq) {
+        return None;
+    }
+    let flags = mmio.redirection_flags_for_irq(irq);
+    Some((
+        flags & crate::apic::ENTRY_LEVEL_TRIGGERED_BIT != 0,
+        flags & crate::apic::ENTRY_ACTIVE_LOW_BIT != 0,
+    ))
+}
+
 pub fn routed_entry_readback(
     mapped: &crate::apic::MappedApic,
     irq: u8,
@@ -769,6 +801,16 @@ impl RedirectionEntryView {
     /// この entry はマスクされているか。
     pub fn masked(&self) -> bool {
         self.low & crate::apic::ENTRY_MASKED_BIT != 0
+    }
+
+    /// レベルトリガか（S13-d。PCI の INTx の読み戻しに使う）。
+    pub fn level_triggered(&self) -> bool {
+        self.low & crate::apic::ENTRY_LEVEL_TRIGGERED_BIT != 0
+    }
+
+    /// アクティブローか（S13-d）。
+    pub fn active_low(&self) -> bool {
+        self.low & crate::apic::ENTRY_ACTIVE_LOW_BIT != 0
     }
 
     /// 宛先が physical モードか（S4-a）。

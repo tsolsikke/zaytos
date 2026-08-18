@@ -240,7 +240,7 @@ impl Controller for Apic {
         false
     }
 
-    unsafe fn route(&self, irq: u8, vector: u8) {
+    unsafe fn route(&self, irq: u8, vector: u8, signaling: super::RouteSignaling) {
         let Some(entry) = self.entry_for_irq(irq) else {
             return;
         };
@@ -254,9 +254,33 @@ impl Controller for Apic {
         // **実測の記憶であって主張ではなかった。** AP が割り込みを受けられるように
         // なると、「この IRQ は AP へ届かない」が S4-a の安全の根拠になるので、
         // physical モードと宛先を読み戻して主張する（`main.rs` の読み戻し）。
-        let low = u32::from(vector)
-            | self.mmio.redirection_flags_for_irq(irq)
-            | crate::apic::ENTRY_MASKED_BIT;
+        // 鳴り方の決め方（S13-d。ADR-0035 の Addendum）: **firmware の宣言が
+        // 最優先である。** 実測で QEMU の MADT は PCI リンクの GSI（5/9/10/11）
+        // に override を持ち、IRQ 11 を level・active-high と宣言している——
+        // **PCI の規定（level・low）を機械的に書くと、platform の宣言と
+        // 食い違う。** 申告（`RouteSignaling`）は override が無いときの
+        // 既定としてだけ使う。
+        let override_flags = self.mmio.redirection_flags_for_irq(irq);
+        let signaling_flags = if self.mmio.has_override_for_irq(irq) {
+            override_flags
+        } else {
+            match signaling {
+                super::RouteSignaling::EdgeHigh => 0,
+                super::RouteSignaling::LevelLow => {
+                    crate::apic::ENTRY_LEVEL_TRIGGERED_BIT | crate::apic::ENTRY_ACTIVE_LOW_BIT
+                }
+            }
+        };
+        // 破壊 (S13-d, virtio-intx-edge-test): 宣言も申告も無視して、生の
+        // エッジ・ハイで書く。**実測で、QEMU では届いてしまう**（極性と
+        // トリガを厳密に模っていない）——**捕まえるのは読み戻しである**
+        // （entry の level が宣言と食い違う）。
+        #[cfg(feature = "virtio-intx-edge-test")]
+        let signaling_flags = {
+            let _ = signaling_flags;
+            0
+        };
+        let low = u32::from(vector) | signaling_flags | crate::apic::ENTRY_MASKED_BIT;
 
         // 破壊 (S4-a, ioapic-keyboard-broadcast): 宛先を logical の broadcast に
         // する。**確実に落ちるのは読み戻しの主張のほうである。** 配送が実際に

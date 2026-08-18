@@ -1316,7 +1316,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 fn main() -> Result<()> {
     const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
        cargo xtask run --shell-test [--drop-arrows]
-       cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]
+       cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
@@ -1438,6 +1438,15 @@ fn main() -> Result<()> {
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
                 return cmd_pci_test(&features);
+            }
+            if rest.iter().any(|a| a == "--virtio-irq-test") {
+                let features: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                return cmd_virtio_irq_test(&features);
             }
             if rest.iter().any(|a| a == "--virtio-test") {
                 let features: Vec<&str> = rest
@@ -3497,6 +3506,119 @@ fn parse_marked_u64(line: &str, marker: &str) -> Option<u64> {
     let rest = line.split(marker).nth(1)?;
     let token = rest.split_whitespace().next()?;
     token.parse().ok()
+}
+
+/// 割り込みの実演の判定行を待ち、届いた数を確かめる（S13-d）。
+///
+/// **主張は「届いて数えられる」ことである。** 数はカーネルのカウンタだが、
+/// 破壊（エッジのまま配線する）が届かなくなることは、判定行が出ずに
+/// 上限つき待ちの停止で観測される——**「レジスタは書けてしまい何も落ちない」
+/// 形を、届いた数の判定だけが観測へ変える。**
+fn cmd_virtio_irq_test(features: &[&str]) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let kernel_elf = build_kernel_with_features(&workspace_root, features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let tag = if features.is_empty() {
+        "default".to_string()
+    } else {
+        features.join("-")
+    };
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("virtio-irq-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+    });
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the virtio irq test")?;
+
+    let exercise_marker = "virtio-blk: interrupt exercise:";
+    let error_marker = "virtio-blk: the interrupt exercise failed";
+    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    while Instant::now() < deadline {
+        let text = fs::read_to_string(&serial_log).unwrap_or_default();
+        if text.contains(exercise_marker) || text.contains(error_marker) {
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let context = if features.is_empty() {
+        "virtio-irq".to_string()
+    } else {
+        format!("virtio-irq {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let qemu_debug = fs::read_to_string(&debug_log).unwrap_or_default();
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    // 配線の読み戻し（level / active-low がハードウェアに載っていること）。
+    let routed = serial
+        .lines()
+        .find(|l| l.contains("ioapic: virtio IRQ"))
+        .map(|l| l.trim().to_string());
+    if let Some(line) = &routed {
+        println!("{context}: {line}");
+    }
+    // **一致の判定はカーネルが宣言と突き合わせた結果を読む。** 期待値
+    // （level / active-low の組）は platform の宣言（MADT の override）から
+    // カーネル側が導いており、こちらは値を定数で持たない。
+    let route_ok = routed
+        .as_deref()
+        .is_some_and(|l| l.contains("matches the platform's declaration = true"));
+
+    let Some(line) = serial.lines().find(|l| l.contains(exercise_marker)) else {
+        if let Some(error_line) = serial.lines().find(|l| l.contains(error_marker)) {
+            bail!(
+                "{context}: the exercise did not complete: {}",
+                error_line.trim()
+            );
+        }
+        bail!("{context}: the kernel reported neither the exercise line nor an error");
+    };
+    println!("{context}: {}", line.trim());
+    let delivered = parse_marked_u64(line, "delivered=");
+    let not_mine = parse_marked_u64(line, "not-mine=");
+    let counts_ok = delivered == Some(1) && not_mine == Some(0);
+    println!(
+        "{context}: delivered = {delivered:?} (wanted 1), not mine = {not_mine:?} (wanted 0), \
+         route read back matching the platform's declaration = {route_ok}"
+    );
+    if !counts_ok || !route_ok {
+        bail!("{context}: the interrupt did not arrive the way the route claims");
+    }
+    Ok(())
 }
 
 fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
@@ -8841,6 +8963,28 @@ fn cmd_check(full: bool) -> Result<()> {
             }
         }
 
+        // **割り込みの配送（S13-d）。** 判定は配線の読み戻し（level と
+        // active-low がハードウェアに載っている）と、届いた数である。
+        total += 1;
+        println!("=== xtask check: the virtio interrupt arrives as routed");
+        match cmd_virtio_irq_test(&[]) {
+            Ok(()) => println!("--- virtio irq: OK"),
+            Err(error) => {
+                println!("--- virtio irq: FAILED ({error})");
+                failed.push("virtio irq".to_string());
+            }
+        }
+
+        total += 1;
+        println!("=== xtask check: the virtio interrupt catches an edge-signaled route");
+        match cmd_virtio_irq_test(&["virtio-intx-edge-test"]) {
+            Ok(()) => {
+                println!("--- virtio irq (edge route): FAILED (the sabotage was NOT caught)");
+                failed.push("virtio irq (edge route)".to_string());
+            }
+            Err(_) => println!("--- virtio irq (edge route): OK (the sabotage was caught)"),
+        }
+
         // **像のロードの破壊（S13-c）。** どちらも fs extract の判定が捕まえる
         // ——取り違えは blockstats の下限、先頭の欠けはバイト一致である。
         for (label, feature) in FS_LOAD_SABOTAGES {
@@ -9348,7 +9492,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 182,
+    full: 184,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

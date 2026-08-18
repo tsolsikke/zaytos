@@ -674,6 +674,7 @@ pub unsafe fn run_timer_loop(
     stop_after_ticks: u64,
     shell_after_heartbeats: u64,
     apic: Option<&crate::apic::MappedApic>,
+    virtio: Option<&mut crate::virtio::VirtioBlk>,
 ) {
     // 最初のティックが来るまで何も出ないとハングと区別できないので、
     // 待ちに入ることを先に宣言する。
@@ -792,6 +793,33 @@ pub unsafe fn run_timer_loop(
                     "smp: only {} of {} application processor(s) reported their start signature",
                     report.started, report.attempted
                 ));
+            }
+        }
+
+        // === S13-d: 割り込みが実際に届くことの実演 ===
+        //
+        // **`sti` の後・AP 起床の後である。** 主張は「届いて数えられる」だけで、
+        // 完了の待ちはポーリングのまま（眠りは d-2。ADR-0036）。届かなければ
+        // 上限で止まる。**エッジのまま書く破壊はここでは落ちない**——実測で
+        // QEMU は極性とトリガを厳密に模らず、届いてしまう。あちらを捕まえる
+        // のは配線の読み戻し（宣言との一致）である。
+        // **武装済みのときだけ実演する。** I/O APIC が無い構成（ACPI の破壊の
+        // 一群）では配線されておらず、待っても届かない——あの構成の主張は
+        // 「ACPI が読めなくても起動は続く」なので、ここで止めてはならない。
+        // 閉じたままであることは `start_timer` が判定行に出している。
+        if crate::virtio::armed_irq().is_some() {
+            if let Some(virtio) = virtio {
+                // SAFETY: 配線と武装は `start_timer` が `sti` より前に済ませ、
+                // いま IF=1 である。リングとポート窓はこの struct だけが触り、
+                // ISR ポートだけはハンドラと共有する（意図した相互作用）。
+                if let Err(reason) =
+                    unsafe { crate::virtio::exercise_interrupt_read(logger, virtio) }
+                {
+                    logger.error(format_args!(
+                        "virtio-blk: the interrupt exercise failed ({reason:?}); halting"
+                    ));
+                    common::cpu::halt_forever();
+                }
             }
         }
 

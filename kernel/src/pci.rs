@@ -56,11 +56,13 @@ const VENDOR_ABSENT: u16 = 0xFFFF;
 /// 見つけた virtio-blk の所在（S13-b で返す形にした）。
 ///
 /// **S13-a では返さなかった**——利用者が居ない機構には検算が置けないためである。
-/// **S13-b（virtqueue）が最初の利用者になったので、要る 1 つだけを返す**
-/// （IRQ の line / pin は S13-d の話で、要るときに足す）。
+/// **S13-b（virtqueue）が最初の利用者になったので、要るものだけを返す。**
+/// S13-d で割り込みの配線に `irq_line` が要るようになり、2 つになった。
 pub struct VirtioBlkLocation {
     /// BAR0 の I/O 窓の先頭（下位 2 ビットの種別フラグは落としてある）。
     pub io_base: u16,
+    /// 構成空間の Interrupt Line（S13-d で割り込みの配線に使う。実測で 11）。
+    pub irq_line: u8,
 }
 
 /// 構成空間の 1 dword を読む。
@@ -178,6 +180,7 @@ pub unsafe fn scan_bus0(logger: &mut Logger<SerialPort>) -> Option<VirtioBlkLoca
                 if found.is_none() && bars[0] & 0x1 == 1 {
                     found = Some(VirtioBlkLocation {
                         io_base: (bars[0] & !0x3) as u16,
+                        irq_line: (irq & 0xFF) as u8,
                     });
                 }
             }

@@ -1723,6 +1723,7 @@ extern "sysv64" fn kernel_main() -> ! {
         0,
         SHELL_AFTER_HEARTBEATS,
         mapped_apic.as_ref(),
+        Some(&mut virtio_disk),
     );
 
     // === S11-11: init がシェルを起こす ===
@@ -3189,7 +3190,7 @@ fn trigger_interrupt_test(
         /// 500 ティックで約 1 万行・800KB 程度に収まる（M4-b-1 のログが 14,400 行
         /// だったので同程度）。通常起動では止めずに回し続ける。
         const STOP_AFTER_TICKS: u64 = 500;
-        start_timer(logger, console, STOP_AFTER_TICKS, 0, None);
+        start_timer(logger, console, STOP_AFTER_TICKS, 0, None, None);
     }
 
     logger.info(format_args!(
@@ -3661,6 +3662,7 @@ fn start_timer(
     stop_after_ticks: u64,
     shell_after_heartbeats: u64,
     apic: Option<&kernel::apic::MappedApic>,
+    mut virtio: Option<&mut kernel::virtio::VirtioBlk>,
 ) {
     // --- 1. PIT を設定する ---
     // SAFETY: 起動時に 1 回だけ。この時点で IRQ0 はマスクされている
@@ -3716,6 +3718,14 @@ fn start_timer(
     // IRQ1 が届く形になりうる。
     switch_keyboard_to_io_apic(logger, apic);
 
+    // --- 4.7 virtio-blk の割り込みを配線する（S13-d。ADR-0035）---
+    //
+    // キーボードと同じく `sti` より前に終える。PCI の INTx なので
+    // レベル・アクティブローを申告して書く。
+    if let Some(virtio) = virtio.as_deref_mut() {
+        switch_virtio_to_io_apic(logger, apic, virtio);
+    }
+
     // --- 5. sti 前 7 項目を再検証する ---
     let report = interrupts::verify_ready_for_sti_with_timer(logger);
     if !report.may_enable_interrupts() {
@@ -3735,6 +3745,7 @@ fn start_timer(
             stop_after_ticks,
             shell_after_heartbeats,
             apic,
+            virtio,
         );
     }
 
@@ -3871,6 +3882,85 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>) {
 ///
 /// 実際の 4 手（経路の設定 → PIC でマスク → 状態 → I/O APIC で解禁）は
 /// [`irq::route_to_apic`] が持つ。ここはその前後の観測に徹する。
+/// virtio-blk の割り込みを I/O APIC 経由で開く（S13-d。ADR-0035）。
+///
+/// キーボード（[`switch_keyboard_to_io_apic`]）と同じ形で、違いは 2 つ。
+/// **レベル・アクティブローを申告すること**（PCI の INTx。バスの規定であって
+/// MADT の override ではない）と、**配線の前に ISR を読み捨てて武装すること**
+/// （S13-b/c の完了が ISR に溜まっており、読まずに開くと過去のぶんが
+/// 実演の数に混ざる）である。
+fn switch_virtio_to_io_apic(
+    logger: &mut Logger<SerialPort>,
+    apic: Option<&kernel::apic::MappedApic>,
+    virtio: &mut kernel::virtio::VirtioBlk,
+) {
+    let Some(mapped) = apic else {
+        // I/O APIC が無い構成では開かない。実演は行われず、判定行も出ない
+        // （xtask の項目は判定行を待つので、この形は上限で落ちる——黙らない）。
+        logger.info(format_args!(
+            "ioapic: no mapped I/O APIC; the virtio interrupt stays closed"
+        ));
+        return;
+    };
+
+    let irq = virtio.irq_line();
+    // SAFETY: BSP のみ・IF=0 の位置（`sti` はこの後段）。ISR の読み捨ては
+    // 武装の契約どおり。
+    unsafe { kernel::virtio::arm_interrupt(virtio, irq) };
+
+    // 申告は PCI の規定（レベル・アクティブロー）。**ただし firmware の宣言が
+    // 勝つ**——実測で QEMU の MADT は IRQ 11 に override を持ち、level・
+    // active-high と宣言している。申告が効くのは override が無い platform
+    // だけである（`irq/apic.rs` の route。ADR-0035 の Addendum）。
+    // 破壊 virtio-intx-edge-test は route の側に居る——宣言も申告も無視して
+    // 生のエッジ・ハイで書く。
+    let signaling = irq::RouteSignaling::LevelLow;
+
+    // SAFETY: ベクタ IOAPIC_VIRTIO_VECTOR には専用スタブのゲートが入っており
+    // （`idt::init`）、ハンドラは ISR を読んで deassert してから EOI へ進む。
+    // 割り込みはまだ禁止されている。
+    if let Err(error) =
+        unsafe { irq::route_to_apic(mapped, irq, idt::IOAPIC_VIRTIO_VECTOR as u8, signaling) }
+    {
+        logger.error(format_args!(
+            "ioapic: could not route the virtio IRQ {irq} to the I/O APIC ({error:?}); halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    // 設定の読み戻し。**level と active-low が entry に載っていることを、
+    // 書いた側の申告とは独立に確かめる**——ここが持ち越しの「読める側と
+    // 設定する側の非対称」を閉じる判定行である。
+    // **期待値は platform の宣言から導く**（定数で書かない）。override が
+    // あればその値、無ければ PCI の規定（level・low）である。
+    let (expect_level, expect_low) =
+        irq::declared_signaling(&mapped.mmio(), irq).unwrap_or((true, true));
+    let readback = irq::routed_entry_readback(mapped, irq);
+    match readback {
+        Some(entry) => {
+            let agrees = entry.level_triggered() == expect_level
+                && entry.active_low() == expect_low
+                && entry.vector() == idt::IOAPIC_VIRTIO_VECTOR as u8;
+            logger.info(format_args!(
+                "ioapic: virtio IRQ {irq} routed: vector={:#04x} (expected {:#04x}), level={} \
+                 active-low={} masked={}; matches the platform's declaration = {agrees} \
+                 [read back from hardware]",
+                entry.vector(),
+                idt::IOAPIC_VIRTIO_VECTOR,
+                entry.level_triggered(),
+                entry.active_low(),
+                entry.masked(),
+            ))
+        }
+        None => {
+            logger.error(format_args!(
+                "ioapic: the virtio IRQ {irq} readback is unavailable; halting"
+            ));
+            cpu::halt_forever();
+        }
+    }
+}
+
 fn switch_keyboard_to_io_apic(
     logger: &mut Logger<SerialPort>,
     mapped: Option<&kernel::apic::MappedApic>,
@@ -3892,7 +3982,14 @@ fn switch_keyboard_to_io_apic(
     // SAFETY: ベクタ IOAPIC_KEYBOARD_VECTOR には専用スタブのゲートが入っており
     // （`idt::init`）、ハンドラはデータポートを読み切ってから EOI を送る。
     // 割り込みはまだ禁止されている。
-    if let Err(error) = unsafe { irq::route_to_apic(mapped, keyboard::KEYBOARD_IRQ, vector) } {
+    if let Err(error) = unsafe {
+        irq::route_to_apic(
+            mapped,
+            keyboard::KEYBOARD_IRQ,
+            vector,
+            irq::RouteSignaling::EdgeHigh,
+        )
+    } {
         logger.error(format_args!(
             "ioapic: could not route IRQ1 to the I/O APIC ({error:?}); halting"
         ));
@@ -9233,6 +9330,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "virtio-load-skip-first-test",
         cfg!(feature = "virtio-load-skip-first-test"),
         "像の先頭 4KiB を装置から読まない",
+    ),
+    (
+        "virtio-intx-edge-test",
+        cfg!(feature = "virtio-intx-edge-test"),
+        "virtio の redirection entry を生のエッジで書く",
     ),
 ];
 

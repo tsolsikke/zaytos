@@ -311,6 +311,12 @@ core::arch::global_asm!(
     "  .byte 0x68, 0x43, 0x00, 0x00, 0x00",
     "  jmp zaytos_irq_common",
     ".p2align 4",
+    // virtio-blk 用スタブ（S13-d）。既存の専用スタブと同じ形である。
+    ".globl zaytos_virtio_blk_stub",
+    "zaytos_virtio_blk_stub:",
+    "  .byte 0x68, 0x44, 0x00, 0x00, 0x00",
+    "  jmp zaytos_irq_common",
+    ".p2align 4",
     "zaytos_irq_common:",
     // 入場時のスタック: [rsp]=ベクタ, +8=RIP, +16=CS, +24=RFLAGS, +32=RSP, +40=SS
     //
@@ -478,6 +484,7 @@ extern "C" {
     static zaytos_irq_stubs_end: u8;
     static zaytos_spurious_stub: u8;
     static zaytos_ioapic_keyboard_stub: u8;
+    static zaytos_virtio_blk_stub: u8;
     static zaytos_lapic_timer_stub: u8;
     static zaytos_ipi_probe_stub: u8;
     static zaytos_irq_stub_0: u8;
@@ -589,6 +596,12 @@ pub const YIELD_VECTOR: usize = 0x41;
 ///
 /// スタブ表（`0x20`-`0x40`）の外なので専用スタブが要る。
 pub const IOAPIC_KEYBOARD_VECTOR: usize = 0x42;
+
+/// I/O APIC 経由の virtio-blk 用ベクタ（S13-d）。
+///
+/// キーボード（`0x42`）・IPI 測定（`0x43`）と同じ「表の外の専用スタブ」の族で、
+/// 次の空きが `0x44` である。優先度クラスはキーボードと同じ 4。
+pub const IOAPIC_VIRTIO_VECTOR: usize = 0x44;
 
 /// Local APIC タイマ用ベクタ（S2-d-2）。
 ///
@@ -1163,6 +1176,14 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
             crate::keyboard::handle_irq(context.vector);
         }
 
+        // virtio-blk（S13-d）。**ISR を読んで deassert する**（レベルトリガの
+        // 要件。読まないと EOI の後に同じ割り込みが再送され続ける）。
+        // IRQ 番号は固定しない——`scan_bus0` が構成空間から読んだ値を
+        // `virtio::arm_interrupt` が控えており、それと突き合わせる。
+        if crate::virtio::armed_irq() == Some(irq) {
+            crate::virtio::handle_irq();
+        }
+
         // スプリアス（偽）割り込みの判定。IRQ7 / IRQ15 でしか起きない。
         // 本物なら ISR の該当ビットが立っている。
         //
@@ -1380,7 +1401,7 @@ impl StubTableCheck {
 }
 
 /// 例外スタブ表の外に置いた専用スタブの本数。
-pub const DEDICATED_STUB_COUNT: usize = 6;
+pub const DEDICATED_STUB_COUNT: usize = 7;
 
 /// 例外スタブ表の外に置いた専用スタブと、それを指すべきゲートの対応。
 ///
@@ -1405,6 +1426,10 @@ fn dedicated_stubs() -> [(usize, u64); DEDICATED_STUB_COUNT] {
         (
             IOAPIC_KEYBOARD_VECTOR,
             addr_of!(zaytos_ioapic_keyboard_stub) as u64,
+        ),
+        (
+            IOAPIC_VIRTIO_VECTOR,
+            addr_of!(zaytos_virtio_blk_stub) as u64,
         ),
         (LAPIC_TIMER_VECTOR, addr_of!(zaytos_lapic_timer_stub) as u64),
         (IPI_PROBE_VECTOR, addr_of!(zaytos_ipi_probe_stub) as u64),
@@ -1617,6 +1642,15 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
         // マスクを外すと、最初のキー入力で例外スタイルのスタブへ落ちて停止する。
         (*idt)[IOAPIC_KEYBOARD_VECTOR] = IdtEntry::new(
             addr_of!(zaytos_ioapic_keyboard_stub) as u64,
+            KERNEL_CODE_SELECTOR,
+            GateType::Interrupt,
+            0,
+            None,
+        );
+        // I/O APIC 経由の virtio-blk 用ゲート（S13-d）。キーボードと同じ形で、
+        // 配送を開く前に置く。
+        (*idt)[IOAPIC_VIRTIO_VECTOR] = IdtEntry::new(
+            addr_of!(zaytos_virtio_blk_stub) as u64,
             KERNEL_CODE_SELECTOR,
             GateType::Interrupt,
             0,

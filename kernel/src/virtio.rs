@@ -119,6 +119,8 @@ pub struct VirtioBlk {
     completed: u16,
     /// これまでの要求で最も長かったポーリング（実測の観測用）。
     max_spins: u64,
+    /// 構成空間の Interrupt Line（S13-d。配線と武装が使う）。
+    irq_line: u8,
 }
 
 /// 握手から queue の設定までを行い、設定の済んだ装置を返す（S13-b）。
@@ -244,10 +246,16 @@ pub unsafe fn setup(
         spare_phys: ring_phys.as_u64() + (pages - 1) * 4096,
         completed: 0,
         max_spins: 0,
+        irq_line: virtio.irq_line,
     })
 }
 
 impl VirtioBlk {
+    /// 構成空間の Interrupt Line（S13-d）。
+    pub fn irq_line(&self) -> u8 {
+        self.irq_line
+    }
+
     /// 要求の器（末尾ページ）の仮想アドレス。
     fn spare_virt(&self) -> u64 {
         self.ring_virt + (self.spare_phys - self.ring_phys)
@@ -362,6 +370,113 @@ impl VirtioBlk {
             core::ptr::write_volatile((at + 14) as *mut u16, next);
         }
     }
+}
+
+/// 割り込みで観測する準備が済んだ virtio の所在（S13-d）。
+///
+/// **IRQ ハンドラ（`idt::irq_entry`）から届く必要があるので static である。**
+/// 0 は「まだ武装していない」を表す（I/O ポート 0 は PCI の BAR に現れない）。
+static ARMED_ISR_PORT: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
+/// 武装した IRQ 番号（+1 で保持。0 = 未武装）。
+static ARMED_IRQ_PLUS_ONE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+/// 自分宛（ISR の bit0 が立っていた）の届いた数。
+static IRQ_DELIVERED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// 自分宛でなかった数。**共有線の仮定（他に鳴る者が居ない）が破れたときに
+/// 最初に動く値である**——黙って捨てると、deassert されない線の嵐が
+/// 原因の見えない形で出る（ADR-0035 の共有線の代償）。
+static IRQ_NOT_MINE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// legacy レジスタ: ISR（読み）。**読むと割り込みが deassert される。**
+const REG_ISR: u16 = 0x13;
+
+/// IRQ ハンドラが ISR を読めるように武装する（S13-d）。
+///
+/// **配線（route）の前に呼ぶこと。** 逆だと、武装前に届いた割り込みを
+/// ハンドラが読めず、レベルの線が上がったまま残る。
+///
+/// # Safety
+///
+/// [`setup`] と同じ位置の契約（BSP のみ・IF=0）。**ここで ISR を 1 度読んで
+/// 捨てる**——S13-b/c の要求は完了のたびに ISR を立てており、読まれずに
+/// 溜まっている。読まずに線を開くと、開いた瞬間に過去のぶんが 1 回届き、
+/// 「届いた数」の判定が実演と混ざる。
+pub unsafe fn arm_interrupt(blk: &VirtioBlk, irq_line: u8) {
+    // SAFETY: この関数の契約。ISR の読みは deassert の副作用を意図している。
+    let _stale = unsafe { port::inb(blk.io_base + REG_ISR) };
+    ARMED_ISR_PORT.store(blk.io_base + REG_ISR, core::sync::atomic::Ordering::Relaxed);
+    ARMED_IRQ_PLUS_ONE.store(irq_line + 1, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// 武装済みの IRQ 番号（未武装なら `None`）。`idt::irq_entry` の分岐が使う。
+pub fn armed_irq() -> Option<u8> {
+    match ARMED_IRQ_PLUS_ONE.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        plus_one => Some(plus_one - 1),
+    }
+}
+
+/// IRQ ハンドラ本体（S13-d）。**ISR を読んで deassert し、数える。**
+///
+/// ログは出さない（ADR-0018 §5。ハンドラ内の出力はティックを取りこぼす）。
+/// 観測はメインループ側が [`exercise_interrupt_read`] でカウンタ越しに行う。
+pub fn handle_irq() {
+    let isr_port = ARMED_ISR_PORT.load(core::sync::atomic::Ordering::Relaxed);
+    if isr_port == 0 {
+        return;
+    }
+    // SAFETY: `arm_interrupt` が武装した ISR ポートで、読みは deassert の
+    // 副作用を意図している。割り込みゲート経由（IF=0）なので再入しない。
+    let isr = unsafe { port::inb(isr_port) };
+    if isr & 0x1 != 0 {
+        IRQ_DELIVERED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    } else {
+        // **自分宛でなかったことを黙って捨てない**（ADR-0035。共有線の
+        // 仮定が破れた最初の兆候である）。数は実演の判定行に出る。
+        IRQ_NOT_MINE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// 割り込みが実際に届くことを、読み 1 回で実証する（S13-d）。
+///
+/// **主張は「届いて数えられる」ことだけである。** 完了の待ちはポーリングの
+/// まま（眠りは S13-e の利用者と一緒に d-2 で設計する。ADR-0036）。
+///
+/// # Safety
+///
+/// - 配線（`route_to_apic`）と武装（[`arm_interrupt`]）が済み、IF=1 であること
+/// - [`read_at`](VirtioBlk::read_at) と同じ排他（この struct だけが
+///   リングとポート窓を触る。**ISR ポートだけはハンドラと共有し、
+///   それは意図した相互作用である**——装置が上げ、ハンドラが読んで下ろす）
+pub unsafe fn exercise_interrupt_read(
+    logger: &mut Logger<SerialPort>,
+    blk: &mut VirtioBlk,
+) -> Result<(), VirtioBlkError> {
+    let before = IRQ_DELIVERED.load(core::sync::atomic::Ordering::Relaxed);
+    let data_phys = blk.spare_phys + 512;
+    // SAFETY: この関数の契約そのまま。読み先は器の中で、装置だけが書く。
+    unsafe { blk.read_at(2, 512, data_phys)? };
+
+    // 完了は見えた。**割り込みも届くまで待つ。上限つき**——ポーリングが
+    // 先に完了を見る形は正常で、配送はその直後に来る。
+    let mut spins = 0u64;
+    loop {
+        if IRQ_DELIVERED.load(core::sync::atomic::Ordering::Relaxed) > before {
+            break;
+        }
+        spins += 1;
+        if spins >= POLL_SPIN_LIMIT {
+            return Err(VirtioBlkError::RequestTimedOut { spins });
+        }
+        core::hint::spin_loop();
+    }
+
+    let delivered = IRQ_DELIVERED.load(core::sync::atomic::Ordering::Relaxed);
+    let not_mine = IRQ_NOT_MINE.load(core::sync::atomic::Ordering::Relaxed);
+    logger.info(format_args!(
+        "virtio-blk: interrupt exercise: 1 read completed with interrupts enabled; \
+         delivered={delivered} not-mine={not_mine} (wanted 1 and 0)"
+    ));
+    Ok(())
 }
 
 /// superblock の sector を 1 つ読み、観測を判定行に出す（S13-b）。
