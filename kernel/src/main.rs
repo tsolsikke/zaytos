@@ -8961,6 +8961,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "zi が上下の矢印を捨て、カーソルが行を移らない",
     ),
     (
+        "zi-write-skip-body-test",
+        cfg!(feature = "zi-write-skip-body-test"),
+        "zi の :w が中身を書かずに閉じ、ファイルが空になる",
+    ),
+    (
+        "zi-insert-drop-first-test",
+        cfg!(feature = "zi-insert-drop-first-test"),
+        "zi の挿入が最初の 1 字を落とす",
+    ),
+    (
         "ext2-sparse-as-error-test",
         cfg!(feature = "ext2-sparse-as-error-test"),
         "穴を全 0 として読まず SparseBlock で拒む",

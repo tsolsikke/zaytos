@@ -144,10 +144,20 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
     // **kernel の feature 環境変数から引く**（`CARGO_FEATURE_*`）。ここに
     // 載せた分だけがユーザー側へ届く形で、**列挙が全部である**——足すときは
     // この表へ 1 行足すこと。
-    const USER_PROGRAM_CFGS: &[(&str, &str)] = &[(
-        "CARGO_FEATURE_ZI_CURSOR_IGNORE_UPDOWN_TEST",
-        "zi_cursor_ignore_updown",
-    )];
+    const USER_PROGRAM_CFGS: &[(&str, &str)] = &[
+        (
+            "CARGO_FEATURE_ZI_CURSOR_IGNORE_UPDOWN_TEST",
+            "zi_cursor_ignore_updown",
+        ),
+        (
+            "CARGO_FEATURE_ZI_WRITE_SKIP_BODY_TEST",
+            "zi_write_skip_body",
+        ),
+        (
+            "CARGO_FEATURE_ZI_INSERT_DROP_FIRST_TEST",
+            "zi_insert_drop_first",
+        ),
+    ];
     let mut extra_cfgs: Vec<String> = Vec::new();
     for (env, cfg) in USER_PROGRAM_CFGS {
         if std::env::var(env).is_ok() {

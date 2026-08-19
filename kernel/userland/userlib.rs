@@ -41,6 +41,12 @@ pub const SYS_GETDENTS64: u64 = 217;
 /// 読み取りで開く（`O_RDONLY`）。
 pub const O_RDONLY: u64 = 0;
 
+/// 書き込みで開く（`O_WRONLY`。ADR-0037）。
+pub const O_WRONLY: u64 = 1;
+
+/// 開くと同時に長さ 0 へ切る（`O_TRUNC`。ADR-0037）。
+pub const O_TRUNC: u64 = 0o1000;
+
 /// 標準出力の fd。
 pub const STDOUT: u64 = 1;
 /// 標準エラー出力の fd。
@@ -123,6 +129,16 @@ pub fn write_all(fd: u64, bytes: &[u8]) -> i64 {
 pub fn open_read_only(path: &[u8]) -> i64 {
     // SAFETY: `path` は NUL 終端のバイト列を指す。
     unsafe { syscall3(SYS_OPEN, path.as_ptr() as u64, O_RDONLY, 0) }
+}
+
+/// 書き込みで開き、同時に長さ 0 へ切る（`O_WRONLY|O_TRUNC`。zi-d-2）。
+///
+/// **カーネルが受理する 2 形のうちの一方である**（ADR-0037）。
+/// **読みながら書き先を開いておくことはできない**——open の時点で切るので、
+/// **読み切って閉じてから開き直す。**
+pub fn open_write_truncate(path: &[u8]) -> i64 {
+    // SAFETY: `path` は NUL 終端のバイト列を指す。
+    unsafe { syscall3(SYS_OPEN, path.as_ptr() as u64, O_WRONLY | O_TRUNC, 0) }
 }
 
 /// `close(fd)`。

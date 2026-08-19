@@ -19,7 +19,7 @@
 //! **`zi` が意図した列を出しているかは目視の補助に委ねてある**
 //! （`cargo xtask run --gui`）。
 //!
-//! # zi-c の契約から来る順序（`:w` は zi-d-2）
+//! # zi-c の契約から来る順序
 //!
 //! **`O_WRONLY|O_TRUNC` は open の時点で長さ 0 へ切る**（ADR-0037）ので、
 //! **読みながら書き先を開いておくことはできない。** 起動時に
@@ -33,6 +33,7 @@
 //! - `3` 読めなかった
 //! - `4` ファイルが上限を越えている（**切り詰めない**——切り詰めて保存すると
 //!   開いた時点で中身が消える）
+//! - `5` `:w` が失敗した（開けない、または書いた量が要求と食い違う）
 
 #![no_std]
 #![no_main]
@@ -40,7 +41,9 @@
 #[path = "userlib.rs"]
 mod userlib;
 
-use userlib::{close, exit, length_of, open_read_only, read, write_all, STDERR, STDOUT};
+use userlib::{
+    close, exit, length_of, open_read_only, open_write_truncate, read, write_all, STDERR, STDOUT,
+};
 
 /// パスの最大長（NUL を含む）。**カーネルの `PATH_MAX` と同じ。**
 const PATH_MAX: usize = 256;
@@ -66,11 +69,20 @@ const MINUS_EAGAIN: i64 = -11;
 /// Esc のバイト。
 const ESC: u8 = 0x1b;
 
+/// コマンド行の最大長（`:wq` で足りるが、余裕を取る）。
+const COMMAND_MAX: usize = 16;
+
+/// `:w` が書き出す先の受け皿。**`.bss` に置く**（スタックは 1 ページである）。
+static mut FLUSH_BUFFER: [u8; MAX_LINES * (MAX_LINE_LEN + 1)] =
+    [0; MAX_LINES * (MAX_LINE_LEN + 1)];
+
 /// 編集中のモード。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Normal,
     Insert,
+    /// `:` を打った後。**改行までを溜めて解釈する。**
+    Command,
 }
 
 /// エスケープ列の受け（`zash` と同じ形。`kernel/src/input.rs` が落とす形）。
@@ -347,6 +359,10 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     let mut row = 0usize;
     let mut col = 0usize;
     let mut escape = Escape::Idle;
+    // **`:` の後に溜める語と、変更があったか（zi-d-2）。**
+    let mut command = [0u8; COMMAND_MAX];
+    let mut command_len = 0usize;
+    let mut dirty = false;
     redraw(buffer, row, col);
     report_cursor(buffer, row, col, b"start");
 
@@ -417,13 +433,183 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             (Escape::Idle, _) => {}
         }
 
-        handle_byte(byte, buffer, &mut row, &mut col, &mut mode);
+        // **コマンド行は改行まで溜める（zi-d-2）。**
+        if mode == Mode::Command {
+            match byte {
+                b'\n' => {
+                    let outcome = run_command(&command[..command_len], &path[..length + 1], buffer, dirty);
+                    command_len = 0;
+                    mode = Mode::Normal;
+                    match outcome {
+                        Command::Quit => exit(0),
+                        Command::Failed => exit(5),
+                        // **保存したら変更は無い。**
+                        Command::Saved => dirty = false,
+                        Command::Refused => {}
+                    }
+                    redraw(buffer, row, col);
+                    report_cursor(buffer, row, col, b"command");
+                }
+                ESC => {
+                    // **打ちかけを捨てる。** ノーマルへ戻る。
+                    command_len = 0;
+                    mode = Mode::Normal;
+                }
+                other => {
+                    if command_len < command.len() {
+                        command[command_len] = other;
+                        command_len += 1;
+                    }
+                }
+            }
+            continue;
+        }
+
+        // **`:` でコマンド行へ入る（ノーマルのときだけ）。**
+        if mode == Mode::Normal && byte == b':' {
+            mode = Mode::Command;
+            command_len = 0;
+            continue;
+        }
+
+        let changed = handle_byte(byte, buffer, &mut row, &mut col, &mut mode);
+        dirty |= changed;
     }
 
     exit(0);
 }
 
-/// ノーマル / インサートの 1 バイトを処理する。戻り値は使わない側もある。
+/// バッファをファイルへ書き出す（`:w`。zi-d-2）。
+///
+/// **順序は zi-c の契約から決まる**（モジュール doc）——
+/// `open(O_WRONLY|O_TRUNC)` で長さ 0 へ切ってから、全量を 1 回で書く。
+///
+/// **戻り値が要求と一致することを見る。** 一致しなければ、
+/// **切った後に書けていない**ので内容が失われている。**黙らない。**
+fn save(path: &[u8], buffer: &Buffer) -> bool {
+    // SAFETY: このプロセスは単一の実行文脈で、`FLUSH_BUFFER` を触るのはここだけ。
+    let out = unsafe { &mut *core::ptr::addr_of_mut!(FLUSH_BUFFER) };
+    let mut at = 0usize;
+    for row in 0..buffer.count {
+        let line = buffer.line(row);
+        out[at..at + line.len()].copy_from_slice(line);
+        at += line.len();
+        // **各行の後ろに改行を置く。** 読み込みの `split_into_lines` と対である。
+        out[at] = b'\n';
+        at += 1;
+    }
+
+    let fd = open_write_truncate(path);
+    if fd < 0 {
+        write_all(STDERR, b"zi: cannot open for writing\n");
+        return false;
+    }
+    let fd = fd as u64;
+    // 破壊 (zi-d-2, zi-write-skip-body): 中身を書かずに閉じる。
+    // **open が長さ 0 へ切った後なので、ファイルが空のまま残る**——
+    // `cat` の読み戻しが空になり、往復の判定が落ちる。
+    // **`:w` の戻り値は「要求 0 に対して 0」になるので、量の判定は通る**
+    // ——**捕まえるのは往復のほうである。**
+    #[cfg(zi_write_skip_body)]
+    let at = 0usize;
+    let written = write_all(STDOUT_UNUSED_MARKER.min(fd), &out[..at]);
+    close(fd);
+
+    // **要求した長さと一致すること。** `write_all` は繰り返して全量を書くので、
+    // 足りないのは誤りである。
+    let ok = written == at as i64;
+    report_save(at, written, ok);
+    ok
+}
+
+/// `save` が `write_all` へ渡す fd の目印。**`fd` をそのまま使うための飾りである**
+/// ——`min` は常に `fd` を返す（`fd` は 3 以上、この値は大きい）。
+///
+/// **なぜこう書くか**——`write_all` の引数を `fd` と読み違えないように、
+/// 「端末ではない」ことを名前で示している。
+const STDOUT_UNUSED_MARKER: u64 = u64::MAX;
+
+/// 保存の判定行。**書いた量と要求した量を並べる。**
+fn report_save(requested: usize, written: i64, ok: bool) {
+    let mut out = [0u8; 96];
+    let mut at = 0usize;
+    let head = b"zi: saved bytes requested=";
+    out[at..at + head.len()].copy_from_slice(head);
+    at += head.len();
+    let mut digits = [0u8; 12];
+    let count = write_number(&mut digits, requested);
+    out[at..at + count].copy_from_slice(&digits[..count]);
+    at += count;
+    out[at..at + 9].copy_from_slice(b" written=");
+    at += 9;
+    // **負の値は errno である。** 桁で書けないので、目印だけ置く。
+    let count = if written < 0 {
+        out[at] = b'-';
+        at += 1;
+        write_number(&mut digits, (-written) as usize)
+    } else {
+        write_number(&mut digits, written as usize)
+    };
+    out[at..at + count].copy_from_slice(&digits[..count]);
+    at += count;
+    let tail: &[u8] = if ok { b" match=true\n" } else { b" match=false\n" };
+    out[at..at + tail.len()].copy_from_slice(tail);
+    at += tail.len();
+    write_all(STDERR, &out[..at]);
+}
+
+/// コマンド行を解釈する（zi-d-2）。**戻り値は「終わってよいか」である。**
+///
+/// **`:q` は変更があれば拒む。** `:q!` は入れない——**「変更を捨てる」の
+/// 意思表示が要るが、最小には無くてよい**（拒まれたら `:wq` を使う）。
+fn run_command(command: &[u8], path: &[u8], buffer: &Buffer, dirty: bool) -> Command {
+    match command {
+        b"w" => {
+            if save(path, buffer) {
+                Command::Saved
+            } else {
+                Command::Failed
+            }
+        }
+        b"q" => {
+            if dirty {
+                write_all(STDERR, b"zi: unsaved changes; use :wq\n");
+                Command::Refused
+            } else {
+                Command::Quit
+            }
+        }
+        b"wq" => {
+            if save(path, buffer) {
+                Command::Quit
+            } else {
+                Command::Failed
+            }
+        }
+        _ => {
+            write_all(STDERR, b"zi: unknown command\n");
+            Command::Refused
+        }
+    }
+}
+
+/// [`run_command`] の結果。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Command {
+    /// 保存した。編集を続ける。
+    Saved,
+    /// 終わってよい。
+    Quit,
+    /// 断った（変更があるのに `:q`、または知らないコマンド）。
+    Refused,
+    /// 保存に失敗した。**終了状態 5 で終わる。**
+    Failed,
+}
+
+/// ノーマル / インサートの 1 バイトを処理する。
+///
+/// **戻り値は「バッファを変えたか」である**（zi-d-2 で意味を変えた。
+/// `:q` が変更の有無で拒むために要る）。
 fn handle_byte(
     byte: u8,
     buffer: &mut Buffer,
@@ -432,6 +618,8 @@ fn handle_byte(
     mode: &mut Mode,
 ) -> bool {
     match *mode {
+        // **コマンド行は呼び出し側で処理する**（主ループが `continue` する）。
+        Mode::Command => false,
         Mode::Normal => {
             let moved = match byte {
                 b'h' => move_left(col),
@@ -442,10 +630,12 @@ fn handle_byte(
                     *mode = Mode::Insert;
                     move_cursor(*row, *col);
                     report_cursor(buffer, *row, *col, b"insert");
-                    return true;
+                    // **モードを変えただけで、バッファは変わっていない。**
+                    return false;
                 }
                 b'x' => {
-                    if buffer.remove(*row, *col) {
+                    let removed = buffer.remove(*row, *col);
+                    if removed {
                         // **行末を越えたら 1 つ左へ寄る**（vi の形）。
                         let length = buffer.lengths[*row];
                         if *col >= length {
@@ -454,7 +644,7 @@ fn handle_byte(
                         redraw(buffer, *row, *col);
                         report_cursor(buffer, *row, *col, b"delete");
                     }
-                    return true;
+                    return removed;
                 }
                 // 知らないキーは黙って捨てる。**`:` は zi-d-2 で受ける。**
                 _ => false,
@@ -463,19 +653,35 @@ fn handle_byte(
                 move_cursor(*row, *col);
                 report_cursor(buffer, *row, *col, b"move");
             }
-            true
+            // **移動はバッファを変えない。**
+            false
         }
         Mode::Insert => {
             // **改行は入れない**（行の追加は zi-d-1 の範囲外。`o` も同じ）。
             if byte == b'\n' || byte == 0x08 {
-                return true;
+                return false;
             }
-            if buffer.insert(*row, *col, byte) {
+            // 破壊 (zi-d-2, zi-insert-drop-first): 挿入の最初の 1 字を落とす。
+            // **`cat` の読み戻しが 1 字短くなる**ので、往復の判定が捕まえる。
+            // **画面の再描画も 1 字少ないが、それは観測できない**（モジュール doc）。
+            #[cfg(zi_insert_drop_first)]
+            let inserted = {
+                use core::sync::atomic::{AtomicBool, Ordering};
+                static DROPPED: AtomicBool = AtomicBool::new(false);
+                if DROPPED.swap(true, Ordering::SeqCst) {
+                    buffer.insert(*row, *col, byte)
+                } else {
+                    false
+                }
+            };
+            #[cfg(not(zi_insert_drop_first))]
+            let inserted = buffer.insert(*row, *col, byte);
+            if inserted {
                 *col += 1;
                 redraw(buffer, *row, *col);
                 report_cursor(buffer, *row, *col, b"typed");
             }
-            true
+            inserted
         }
     }
 }
@@ -496,7 +702,9 @@ fn move_left(col: &mut usize) -> bool {
 fn move_right(buffer: &Buffer, row: usize, col: &mut usize, mode: Mode) -> bool {
     let length = buffer.lengths[row];
     let limit = match mode {
-        Mode::Normal => length.saturating_sub(1),
+        // **コマンド行では矢印が来ない**（主ループが先に処理する）。
+        // ノーマルと同じ扱いにしておく。
+        Mode::Normal | Mode::Command => length.saturating_sub(1),
         Mode::Insert => length,
     };
     if *col >= limit {

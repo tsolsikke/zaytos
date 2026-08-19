@@ -528,15 +528,20 @@ pub(crate) mod script {
     ///
     /// 順に——`zi /data/writable` を起こし、**上下でカーソルを動かし**
     /// （zi-a で `zi-d` へ委ねた分担の条件。名指しで含めてある）、
-    /// **`hjkl` でも動かし**、`i` で挿入して `Esc` で戻り、`x` で 1 字消す。
-    /// **`:w` はまだ無い**（zi-d-2）ので、読み手が尽きたところで終わる。
+    /// **`hjkl` でも動かし**、`i` で挿入して `Esc` で戻り、`x` で 2 字消し、
+    /// **`:wq` で保存して抜け、`cat` で読み戻す**（zi-d-2）。
+    ///
+    /// **読み戻しはシェルの文脈で行う**——`zi` が書いた内容と `cat` の出力の
+    /// 一致を、ホスト側が突き合わせる。**期待値をホストが持たない形である。**
     const SCRIPT: &[u8] = b"/bin/zi /data/lines\n\
         \x1b[B\x1b[B\x1b[A\
         jjkk\
         \x1b[C\x1b[D\
         lh\
         iZY\x1b\
-        xx";
+        xx\
+        :wq\n\
+        /bin/cat /data/lines\n";
 
     /// 台本の残りを `dst` へ写す。**返した数が 0 なら台本は尽きている。**
     pub(crate) fn next_bytes(dst: &mut [u8]) -> usize {

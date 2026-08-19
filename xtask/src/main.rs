@@ -3432,13 +3432,15 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         .spawn()
         .context("failed to launch qemu-system-x86_64 for the zi test")?;
 
-    // **台本の最後の動作が出るまで待つ。** 上限つき。
+    // **台本の最後の出力が出るまで待つ。** 上限つき。
     //
     // **本数で待たない。** 判定行の本数で切ると、**台本を出し切る前に
     // QEMU を止めてしまう**（実測でそうなった——`x` の削除が届く前に
     // 落として、`x deleted a byte = false` になった）。
-    // **台本の最後は `x`（削除）なので、その札を待つ。**
-    let done_marker = "lines=4 delete";
+    // **台本の最後は `cat` の読み戻し**（zi-d-2）だが、`cat` は起動シーケンス
+    // でも走るので、**その行では早く切れる**（実測）。**シェルが `cat` を
+    // 終えたことを、プロンプトの反響で見る。**
+    let done_marker = "zaytos$ /bin/cat /data/lines";
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     while Instant::now() < deadline {
         let text = fs::read_to_string(&serial_log).unwrap_or_default();
@@ -3495,6 +3497,30 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     let deleted = serial.contains("delete");
     let back_to_normal = serial.contains("normal");
 
+    // **保存が要求した量を書いたこと（zi-d-2）。**
+    //
+    // **`:w` は open の時点で長さ 0 へ切る**ので、**書けなければ内容が
+    // 失われている。** `zi` が判定行に量を並べるので、一致を見る。
+    //
+    // **この判定は、下の往復の判定が在って初めて意味を持つ。**
+    // **単独では「書いたつもり」を通す**——実測で、`zi-write-skip-body`
+    // （中身を書かずに閉じる破壊）は**要求 0 に対して 0 を書くので
+    // `match=true` になる。** 量だけを見ていたら捕まらなかった。
+    // **往復（`cat` の読み戻し）を削るなら、この判定も守っていない。**
+    // **削る者がその関係に気づけるよう、ここに書いておく。**
+    let saved = serial
+        .lines()
+        .any(|line| line.contains("zi: saved bytes") && line.contains("match=true"));
+
+    // **`cat` の読み戻しが、`zi` が編集した内容と一致すること（zi-d-2）。**
+    //
+    // **期待値をこちらが持たない。** `zi` の最後の再描画に編集後の行が
+    // 並んでいるので、**そこから読み取って `cat` の出力と突き合わせる**
+    // （「期待値は定数で持たず外の道具から導く」）。
+    let edited_lines = parse_zi_last_redraw(&serial);
+    let readback = parse_cat_readback(&serial, edited_lines.len());
+    let roundtrip = !edited_lines.is_empty() && edited_lines == readback;
+
     println!("{context}: zi started = {started}");
     println!(
         "{context}: the up/down arrows moved the cursor between lines = {arrows_moved} \
@@ -3504,17 +3530,82 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     println!("{context}: insert mode typed into the buffer = {typed}");
     println!("{context}: Esc returned to normal mode = {back_to_normal}");
     println!("{context}: x deleted a byte = {deleted}");
+    println!("{context}: :w wrote every byte it asked for = {saved}");
+    println!(
+        "{context}: cat read back exactly what zi edited = {roundtrip} \
+         (zi's last redraw {edited_lines:?}, cat printed {readback:?})"
+    );
     println!(
         "{context}: note - these judgements read zi's internal state, NOT the screen; \
          a redraw that puts the right bytes at the wrong place is not observable here"
     );
 
-    if started && arrows_moved && hjkl_moved && typed && back_to_normal && deleted {
+    if started
+        && arrows_moved
+        && hjkl_moved
+        && typed
+        && back_to_normal
+        && deleted
+        && saved
+        && roundtrip
+    {
         println!("{context}: PASS");
         Ok(())
     } else {
         bail!("{context}: FAILED")
     }
+}
+
+/// `zi` の最後の再描画から、編集後の行を取り出す（zi-d-2）。
+///
+/// **再描画は `ED(2)` の後に `CUP` と `EL(2)` を挟んで各行を出す**
+/// （`kernel/userland/zi.rs` の `redraw`）。**その列から字だけを拾う。**
+///
+/// **期待値をホストが持たないための道具である**——`zi` が画面へ出した行と、
+/// `cat` がファイルから読んだ行を突き合わせる。
+fn parse_zi_last_redraw(serial: &str) -> Vec<String> {
+    // 最後の全画面消去から始まる断片を取る。
+    let Some(at) = serial.rfind("\u{1b}[2J") else {
+        return Vec::new();
+    };
+    let tail = &serial[at..];
+    // **判定行が続く前まで**——再描画の直後に `zi: cursor` が来る。
+    let tail = tail.split("zi: cursor").next().unwrap_or(tail);
+    tail.split("\u{1b}[2K")
+        .skip(1)
+        .map(|piece| {
+            // 次の CSI までが行の中身である。
+            piece
+                .split('\u{1b}')
+                .next()
+                .unwrap_or("")
+                .trim_end_matches('\r')
+                .to_string()
+        })
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+/// `cat` が読み戻した行を拾う（zi-d-2）。
+///
+/// **`cat` はファイルの中身をそのまま出す**ので、シェルが反響した
+/// コマンド行の後ろに、行がそのまま並ぶ。**求める本数だけ取る。**
+fn parse_cat_readback(serial: &str, want: usize) -> Vec<String> {
+    let marker = "zaytos$ /bin/cat /data/lines";
+    let Some(at) = serial.rfind(marker) else {
+        return Vec::new();
+    };
+    // **カーネルのログ行を除く。** `cat` を起こす際の `spawn` と `user-load`
+    // の行が同じシリアルへ混ざるので、**`[INFO]` などで始まる行は飛ばす**
+    // （`cat` が出すのはファイルの中身だけで、目印を持たない）。
+    serial[at + marker.len()..]
+        .lines()
+        .skip(1)
+        .map(|line| line.trim_end_matches('\r'))
+        .filter(|line| !line.starts_with('[') && !line.is_empty())
+        .take(want)
+        .map(str::to_string)
+        .collect()
 }
 
 /// `zi` の判定行から `row=` の値を順に拾う（zi-d）。
@@ -9367,6 +9458,38 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             Err(_) => println!("--- bss mapping (filesz only): OK (the sabotage was caught)"),
         }
 
+        // **`zi` の実演（zi-d）。** 決定的な台本入力で、開いて動いて編集し、
+        // `:wq` で保存し、`cat` で読み戻すところまでを見る。
+        total += 1;
+        println!("=== xtask check: zi moves, edits, saves, and the file reads back");
+        match cmd_zi_test(&[]) {
+            Ok(()) => println!("--- zi test: OK"),
+            Err(error) => {
+                println!("--- zi test: FAILED ({error})");
+                failed.push("zi test".to_string());
+            }
+        }
+
+        // **`zi` の破壊 3 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
+        // 書かない、挿入が 1 字落とす（どちらも zi-d-2）。
+        // **後の 2 つは往復の判定が捕まえる**——`:w` の量の判定は通ってしまう
+        // （要求 0 に対して 0 なので）。
+        for feature in [
+            "zi-cursor-ignore-updown-test",
+            "zi-write-skip-body-test",
+            "zi-insert-drop-first-test",
+        ] {
+            total += 1;
+            println!("=== xtask check: the zi test catches {feature}");
+            match cmd_zi_test(&[feature]) {
+                Ok(()) => {
+                    println!("--- zi test ({feature}): FAILED (the sabotage was NOT caught)");
+                    failed.push(format!("zi test ({feature})"));
+                }
+                Err(_) => println!("--- zi test ({feature}): OK (the sabotage was caught)"),
+            }
+        }
+
         // **中断（Ctrl+C）の破壊（S12 前の手当て、C）。**
         //
         // **5 つとも「通らないこと」を期待する**（`ShellTestMode::MustFail`）。
@@ -10142,7 +10265,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 197,
+    full: 201,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
