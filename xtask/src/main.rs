@@ -9082,15 +9082,27 @@ fn cmd_check(full: bool) -> Result<()> {
         // **書き戻し（flush）の破壊（S13-e）。** keep 変種と組む——最終形が
         // 「割り当てたまま」の像で、flush を飛ばすと disk0.img が建てた像の
         // ままになる。**帳簿の下限（wr_bytes）とバイト一致の両方が落ちる。**
-        total += 1;
-        println!("=== xtask check: the fs image flush catches a skipped write-back");
-        match cmd_fs_image_extract(&["fs-flush-skip-test", KEEP_ALLOCATED_FEATURE]) {
-            Ok(()) => {
-                println!("--- fs image flush (a skipped write-back): FAILED (the sabotage was NOT caught)");
-                failed.push("fs image flush (a skipped write-back)".to_string());
-            }
-            Err(_) => {
-                println!("--- fs image flush (a skipped write-back): OK (the sabotage was caught)")
+        // **落ち方が違う2形**——skip は全部書かず wr_bytes=0、short は先頭
+        // 4KiB を欠いて wr_bytes が 4KiB 少なく superblock が食い違う。
+        // どちらも keep 変種と組む（最終形が「割り当てたまま」）。
+        for (label, features) in [
+            (
+                "a skipped write-back",
+                &["fs-flush-skip-test", KEEP_ALLOCATED_FEATURE][..],
+            ),
+            (
+                "a short write-back",
+                &["virtio-flush-short-test", KEEP_ALLOCATED_FEATURE][..],
+            ),
+        ] {
+            total += 1;
+            println!("=== xtask check: the fs image flush catches {label}");
+            match cmd_fs_image_extract(features) {
+                Ok(()) => {
+                    println!("--- fs image flush ({label}): FAILED (the sabotage was NOT caught)");
+                    failed.push(format!("fs image flush ({label})"));
+                }
+                Err(_) => println!("--- fs image flush ({label}): OK (the sabotage was caught)"),
             }
         }
 
@@ -9587,7 +9599,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 188,
+    full: 189,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

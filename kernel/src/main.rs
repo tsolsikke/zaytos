@@ -4281,6 +4281,21 @@ fn flush_fs_image_to_device(
     let mut offset = 0u64;
     while offset < bytes {
         let chunk = 4096u32.min((bytes - offset) as u32);
+
+        // 破壊 (S13-e, virtio-flush-short-test): 先頭の 4KiB を書き戻さない。
+        // **末尾を欠く形は罠である**——像 2MiB の 512 チャンクのうち中身が
+        // あるのは先頭 80 だけで、末尾は全 0（S12-a の罠。実測。中身の最後は
+        // チャンク 79）。末尾を欠いても `disk0.img` は変わらず、「状態が
+        // 変わらない」で立たない。**先頭チャンクは superblock（オフセット
+        // 1024）を含む**ので、keep 変種では空き数が変わり、欠くと `disk0.img`
+        // の superblock が古いまま——バイト一致と wr_bytes の両方が落ちる
+        // （wr は 4KiB 少ない）。
+        #[cfg(feature = "virtio-flush-short-test")]
+        if offset == 0 {
+            offset += u64::from(chunk);
+            continue;
+        }
+
         // 破壊 (S13-e, fs-flush-skip-test): 装置へ書かない。**RAM の複製は
         // 正しいが `disk0.img` は古いまま**——ホストの `e2fsck` が keep 変種で
         // 差を見る（S13-c の取り違えと対の形）。
@@ -9388,6 +9403,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "fs-flush-skip-test",
         cfg!(feature = "fs-flush-skip-test"),
         "最終形の像を装置へ書き戻さない",
+    ),
+    (
+        "virtio-flush-short-test",
+        cfg!(feature = "virtio-flush-short-test"),
+        "像の先頭 4KiB を書き戻さない",
     ),
     (
         "virtio-intx-edge-test",

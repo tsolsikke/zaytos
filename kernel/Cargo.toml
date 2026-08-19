@@ -171,6 +171,9 @@ virtio-load-skip-first-test = []
 # 破壊（S13-e）: 最終形の像を装置へ書き戻さない。RAM の複製は正しいが
 # disk0.img は古いまま——ホストの e2fsck が keep 変種で差を見る。
 fs-flush-skip-test = []
+# 破壊（S13-e）: 先頭の 4KiB を書き戻さない。superblock が古いまま残り、keep
+# 変種で disk0.img が食い違う。末尾を欠く形は像の末尾が 0 なので罠（実測）。
+virtio-flush-short-test = []
 # 破壊（S13-d）: 宣言も申告も無視して、redirection entry を生のエッジ・
 # ハイで書く。実測では QEMU は極性とトリガを厳密に模っておらず、届いて
 # しまう——捕まえるのは読み戻し（宣言との一致の判定）である。
