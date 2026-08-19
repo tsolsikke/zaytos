@@ -1314,7 +1314,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
+    const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
        cargo xtask run --shell-test [--drop-arrows]
        cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
        cargo xtask run --boot-log-diff [--update-reference]
@@ -1570,7 +1570,14 @@ fn main() -> Result<()> {
             }
             cmd_run(panic_test, gui, gfx_test, kvm, no_limit)
         }
-        Some("check") => cmd_check(args[1..].iter().any(|a| a == "--full")),
+        Some("check") => {
+            let full = args[1..].iter().any(|a| a == "--full");
+            let commit = args[1..].iter().any(|a| a == "--commit");
+            if full && commit {
+                bail!("--full already includes everything --commit runs; pass one of them");
+            }
+            cmd_check(full, commit)
+        }
         // `--full` から外した確率的な項目を手で回す。外した項目を回す手段が
         // なければ、外すことは「守らないと決める」ことになる。
         Some("flaky") => cmd_flaky(),
@@ -8719,7 +8726,7 @@ fn check_one_manifest_default_features(
 ///
 /// **1 つ落ちてもそこで止めない。** 止めると「直しては再実行」を
 /// 繰り返すことになり、全体像が分からない。最後にまとめて報告する。
-fn cmd_check(full: bool) -> Result<()> {
+fn cmd_check(full: bool, commit: bool) -> Result<()> {
     // 外した確率的な項目の一覧が実態を指しているかを先に見る（列挙の腐りを防ぐ）。
     check_flaky_list_matches_tables()?;
 
@@ -8783,7 +8790,11 @@ fn cmd_check(full: bool) -> Result<()> {
         failed.push("direct cli/sti".to_string());
     }
 
-    if full {
+    // **`--commit` はここで終わる**——基底 + boot log diff の 1 項目。
+    // カーネルのコードに触れたコミットの前に回す（`docs/coding-standards.md` の
+    // 「回帰チェックの必須条件」）。起動ログの参照が古いままコミットされる形
+    // （S13-e-1 で実際に起きた）を、コミットの時点で止めるための段である。
+    if full || commit {
         total += 1;
         println!("=== xtask check: the boot log matches the reference and does not depend on the core count");
         match cmd_boot_log_diff(false) {
@@ -8793,7 +8804,9 @@ fn cmd_check(full: bool) -> Result<()> {
                 failed.push("boot log diff".to_string());
             }
         }
+    }
 
+    if full {
         // **シェルへ打鍵を送る（S11-11）。** **破壊ではない**——
         // **打鍵が Ring 3 まで届き、組み込みの `exit` が効き、`init` が
         // 起こし直すところまでを見る。**
@@ -9529,7 +9542,7 @@ fn cmd_check(full: bool) -> Result<()> {
     // **項目数が会計行と一致すること。** 検査を足して会計行を更新し忘れる形を
     // 構造で止める（`EXPECTED_CHECK_COUNT` の doc）。**`total` はここで確定して
     // いるので、`cmd_check` の組み替えは要らない。**
-    check_count_matches_accounting(&workspace_root, total, full)?;
+    check_count_matches_accounting(&workspace_root, total, full, commit)?;
 
     if failed.is_empty() {
         println!("xtask check: all {total} check(s) passed");
@@ -9606,14 +9619,30 @@ const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
 ///
 /// 一致しないときは**検査の失敗として扱う。** 項目を足したのに会計行を更新して
 /// いない状態でコミットへ進めないようにするためである。
-fn check_count_matches_accounting(workspace_root: &Path, total: usize, full: bool) -> Result<()> {
+fn check_count_matches_accounting(
+    workspace_root: &Path,
+    total: usize,
+    full: bool,
+    commit: bool,
+) -> Result<()> {
+    // `--commit` の期待値は base + 1（boot log diff の 1 項目）で導出する。
+    // 定数を持たない——持つと base の検査を足すたびに 2 箇所を直す作業が
+    // 生まれ、片方だけが更新される形で腐る。
     let expected = if full {
         EXPECTED_CHECK_COUNT.full
+    } else if commit {
+        EXPECTED_CHECK_COUNT.base + 1
     } else {
         EXPECTED_CHECK_COUNT.base
     };
     if total != expected {
-        let field = if full { "full" } else { "base" };
+        let field = if full {
+            "full"
+        } else if commit {
+            "base + 1 (--commit)"
+        } else {
+            "base"
+        };
         bail!(
             "xtask check: ran {total} check(s) but EXPECTED_CHECK_COUNT.{field} is {expected}. \
              If you added or removed a check, update that constant in xtask AND the \
