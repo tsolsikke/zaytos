@@ -92,6 +92,15 @@ ansi-test = []
 # 破壊（zi-b）: 前景経路がパーサを通さず素のまま描く。zi-b 前の接続そのもの
 # ——CSI がグリフとして画面へ化けて出るので、ansi-test の判定が落ちる。
 ansi-console-skip-parse-test = []
+# 破壊（zi-c）: 書きで開いた fd への write が複製へ足さない。検証も戻り値も
+# 正しく、書いたつもりが複製に届いていない——読み戻しの検算（58 番）が捕まえる。
+write-file-skip-append-test = []
+# 破壊（zi-c）: 別の inode へ足す。的のファイルが空のまま残り、読み戻しの
+# 検算（58 番）が捕まえる。
+write-file-wrong-inode-test = []
+# 破壊（zi-c）: O_TRUNC の切り詰めを落とす。古い中身の後ろへ追記され、
+# 読み戻しが「古い+新しい」の連結になる——読み戻しの検算（58 番）が捕まえる。
+open-skip-truncate-test = []
 # 破壊（S12 前の手当て、C）: 中断（Ctrl+C）の旗を立てない。走っている子が
 # 止まらなくなる。
 kill-ignore-interrupt-test = []

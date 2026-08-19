@@ -125,6 +125,49 @@ pub fn root_image() -> &'static [u8] {
     }
 }
 
+/// RAM 複製を可変で貸す（zi-c。ADR-0037 の「書き手の口」）。
+///
+/// **複製前（[`ROOT_IMAGE_PTR`] が 0）は `None` である。** そのとき読める側は
+/// `.rodata` の埋め込み（[`FS_IMAGE`]）で、**あれは共有の `&'static` である——
+/// 絶対に可変で貸してはならない。**
+///
+/// # Safety（&mut と & の重なりが無いことの、参照生成箇所の全数列挙）
+///
+/// この像への参照が生成される場所は、次で全部である（zi-c で数えた。
+/// **像への参照を作る経路を足すときは、この列挙へ足すこと**）。
+///
+/// 1. [`root_filesystem`]（唯一の共有借用の構成点。`Ext2::parse(root_image())`）。
+///    呼び出し元は 5 つで、**いずれも自分の呼び出しの中で借りて落とす**——
+///    `sys_open` / `sys_read` / `sys_getdents64` / `sys_stat`
+///    （`kernel/src/syscall.rs`）、`load_user_program`
+///    （`kernel/src/userland.rs`。ELF を `SPAWN_IMAGES` へ写してから落とす——
+///    **借りたまま Ring 3 へ入らないことは、あちらの「像をブロックごとに写す。
+///    借りたままにできない」の doc が根拠である**）
+/// 2. [`root_image`] の直接の呼び出し元は `kernel/src/main.rs` の判定行 1 箇所で、
+///    **番地の値だけを読む**（参照を保持しない）
+/// 3. 起動シーケンス（`copy_fs_image_to_frames` と exercise 群）。**スケジューラ
+///    より前・Ring 3 より前の単一文脈**で、syscall はまだ来ない
+///
+/// そのうえで、重ならない根拠は 2 つである。
+///
+/// - **BKL が syscall どうしを直列化する**（§6）。上の 1 の借用は各 syscall の
+///   呼び出し区間で閉じており、この関数が `&mut` を貸すのは別の syscall
+///   （`sys_open` の truncate と `sys_write` の append）の区間である
+/// - **貸す区間は closure の間だけである。** closure の中から
+///   [`root_filesystem`] / [`root_image`] を呼び戻さないこと（いまの利用者は
+///   `common::ext2` の純関数へ渡すだけである）
+pub fn with_root_image_mut<R>(f: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
+    let ptr = ROOT_IMAGE_PTR.load(core::sync::atomic::Ordering::SeqCst);
+    let len = ROOT_IMAGE_LEN.load(core::sync::atomic::Ordering::SeqCst);
+    if ptr == 0 {
+        return None;
+    }
+    // SAFETY: `set_root_image` が渡した複製のフレームで、起動中ずっと生きている。
+    // 生きた共有借用と重ならないことは、上の doc の全数列挙が示す。
+    let image = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len) };
+    Some(f(image))
+}
+
 /// 今 Ring 3 が使っている表（Linux の `current->files`）。
 ///
 /// # 据えるのは遠征の前後である
@@ -253,7 +296,15 @@ impl Inode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum File {
     /// ファイルシステムの実体を開いたもの。
-    Regular { inode: Inode, offset: u64 },
+    ///
+    /// `writable` は開いた向き（zi-c。ADR-0037）。**読みで開いたら偽、
+    /// `O_WRONLY|O_TRUNC` で開いたら真である。** 向きの取り違えは
+    /// 両方向とも `-EBADF`（syscall の側が写す）。
+    Regular {
+        inode: Inode,
+        offset: u64,
+        writable: bool,
+    },
     /// 端末（S11-10）。**0 / 1 / 2 に据えてある。**
     ///
     /// # なぜ表の中に置くのか
@@ -271,7 +322,29 @@ pub enum File {
 impl File {
     /// 先頭から読む状態で開く。
     pub fn new(inode: Inode) -> Self {
-        Self::Regular { inode, offset: 0 }
+        Self::Regular {
+            inode,
+            offset: 0,
+            writable: false,
+        }
+    }
+
+    /// 書き込みで開く（zi-c。`O_WRONLY|O_TRUNC` の形だけがここへ来る）。
+    ///
+    /// **`inode` は open 時点の写しである。** 切った後の大きさ（0）とは
+    /// 食い違うが、**書きで開いた fd は読まない**（read は `-EBADF`）ので、
+    /// 位置の飽和（`advance` が `i_size` で切る形）に使われることは無い。
+    pub fn writable(inode: Inode) -> Self {
+        Self::Regular {
+            inode,
+            offset: 0,
+            writable: true,
+        }
+    }
+
+    /// 書き込みで開いたか。**端末は偽である**（あちらは常に書ける）。
+    pub fn is_writable_file(&self) -> bool {
+        matches!(self, Self::Regular { writable: true, .. })
     }
 
     /// 端末。
@@ -306,14 +379,14 @@ impl File {
     /// 「残り = `i_size` - 位置」が桁借りする。**`common::ext2` が線2 として
     /// 守っているのと同じ形を、こちら側でも閉じておく。**
     pub fn advance(&mut self, bytes: u64) {
-        if let Self::Regular { inode, offset } = self {
+        if let Self::Regular { inode, offset, .. } = self {
             *offset = offset.saturating_add(bytes).min(inode.size());
         }
     }
 
     /// 位置を直に置く（`lseek` 相当。**この段では呼ばない**）。
     pub fn seek_to(&mut self, to: u64) {
-        if let Self::Regular { inode, offset } = self {
+        if let Self::Regular { inode, offset, .. } = self {
             *offset = to.min(inode.size());
         }
     }
@@ -478,6 +551,16 @@ mod tests {
     ///
     /// **判断の材料として測っておく**（`MAX_OPEN_FILES` の doc）。
     /// **ここが落ちたら、`File` の中身が増えたということである。**
+    /// **開いた向きの印（zi-c）。** 読みで開けば偽、書きで開けば真。
+    /// 端末は偽である（あちらは常に書ける——向きの概念が無い）。
+    #[test]
+    fn the_writable_mark_follows_how_the_file_was_opened() {
+        let target = inode(12, 18, REGULAR);
+        assert!(!File::new(target).is_writable_file());
+        assert!(File::writable(target).is_writable_file());
+        assert!(!File::terminal().is_writable_file());
+    }
+
     #[test]
     fn the_table_is_small_enough_to_live_inside_a_process() {
         // `File` = ext2 の inode（`i_block` の 60 バイトを含む）+ 位置 + 判別子。

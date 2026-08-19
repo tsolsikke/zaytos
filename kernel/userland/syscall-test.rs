@@ -85,6 +85,13 @@
 //! - `48` `spawn("/bin/ls", ["ls"])` が 0 を返さなかった
 //! - `49` `spawn("/bin/cat", ["cat", "/etc/motd"])` が 0 を返さなかった
 //! - `50` `spawn("/bin/cat", ["cat"])` が 2 を返さなかった（引数が無い）
+//! - `54` `open("/data/writable", O_WRONLY|O_TRUNC)` が fd 3 を返さなかった
+//! - `55` 書きで開いた fd への `read` が `-EBADF` を返さなかった
+//! - `56` ファイルへの `write` が渡したバイト数を返さなかった
+//! - `57` 書いた後の `close` が 0 を返さなかった
+//! - `58` 読み戻しが書いた中身と一致しなかった（長さ・バイト列・EOF）
+//! - `59` 読みで開いた fd への `write` が `-EBADF` を返さなかった
+//! - `60` カナリア（/etc/motd）が変わっていた（別のファイルへ書いた）
 //!
 //! # `argv` は `_start` の時点の `rsp` から読む
 //!
@@ -143,6 +150,14 @@ const SYS_CLOSE: u32 = 3;
 const O_RDONLY: u32 = 0;
 /// 書き込みで開く（`O_WRONLY`）。**読み取り専用なので拒まれるはずである。**
 const O_WRONLY: u32 = 1;
+
+/// 書き込みで開き、同時に長さ 0 へ切る（zi-c。ADR-0037 の受理形）。
+const O_WRONLY_TRUNC: u32 = 0o1001;
+
+/// 54 番からの書き込みの検算が書く中身。**建てた像の `/data/writable` の
+/// 中身と違う列であること**——同じ中身を書くと「状態が変わらない」の族で、
+/// 破壊を立てても検算が通ってしまう。
+const NEW_BODY_LEN: u32 = 23;
 /// `-ENOENT`（そのパスは無い）。
 const MINUS_ENOENT: i32 = -2;
 /// `-EBADF`（そのファイルディスクリプタは開いていない）。
@@ -832,6 +847,112 @@ core::arch::global_asm!(
     "  mov edx, {msg_len}",
     "  int 0x80",
 
+    // --- 54-60. ファイルへ書く（zi-c。ADR-0037） ---
+    // 54: /data/writable を O_WRONLY|O_TRUNC で開く。fd は最小の空き（3）。
+    "  mov eax, {sys_open}",
+    "  lea rdi, [rip + WRITABLE_PATH]",
+    "  mov esi, {o_wronly_trunc}",
+    "  xor edx, edx",
+    "  int 0x80",
+    "  cmp rax, 3",
+    "  mov edi, 54",
+    "  jne 9f",
+    // 55: 書きで開いた fd への read は -EBADF（向きの取り違えの片側）。
+    "  mov eax, {sys_read}",
+    "  mov edi, 3",
+    "  mov rsi, rsp",
+    "  mov edx, 8",
+    "  int 0x80",
+    "  cmp rax, {minus_ebadf}",
+    "  mov edi, 55",
+    "  jne 9f",
+    // 56: 書く。返るのは渡した長さである。
+    "  mov eax, {sys_write}",
+    "  mov edi, 3",
+    "  lea rsi, [rip + NEW_BODY]",
+    "  mov edx, {new_body_len}",
+    "  int 0x80",
+    "  cmp rax, {new_body_len}",
+    "  mov edi, 56",
+    "  jne 9f",
+    // 57: 閉じる。
+    "  mov eax, {sys_close}",
+    "  mov edi, 3",
+    "  int 0x80",
+    "  test rax, rax",
+    "  mov edi, 57",
+    "  jne 9f",
+    // 58: 開き直して読み戻す。**長さ・中身・EOF の 3 つで見る。**
+    // 長さの一致だけだと「後ろに古い中身が残る」形（切り詰めの欠け）を
+    // 素通しする——直後の read が 0（EOF）であることまでが 58 の主張である。
+    "  mov eax, {sys_open}",
+    "  lea rdi, [rip + WRITABLE_PATH]",
+    "  mov esi, {o_rdonly}",
+    "  xor edx, edx",
+    "  int 0x80",
+    "  mov r12, rax",
+    "  mov eax, {sys_read}",
+    "  mov rdi, r12",
+    "  mov rsi, rsp",
+    "  mov edx, {new_body_len}",
+    "  int 0x80",
+    "  cmp rax, {new_body_len}",
+    "  mov edi, 58",
+    "  jne 9f",
+    "  cld",
+    "  mov rsi, rsp",
+    "  lea rdi, [rip + NEW_BODY]",
+    "  mov ecx, {new_body_len}",
+    "  repe cmpsb",
+    "  mov edi, 58",
+    "  jne 9f",
+    "  mov eax, {sys_read}",
+    "  mov rdi, r12",
+    "  mov rsi, rsp",
+    "  mov edx, {new_body_len}",
+    "  int 0x80",
+    "  test rax, rax",
+    "  mov edi, 58",
+    "  jne 9f",
+    // 59: 読みで開いた fd への write は -EBADF（対称のもう片側）。
+    "  mov eax, {sys_write}",
+    "  mov rdi, r12",
+    "  lea rsi, [rip + NEW_BODY]",
+    "  mov edx, {new_body_len}",
+    "  int 0x80",
+    "  cmp rax, {minus_ebadf}",
+    "  mov edi, 59",
+    "  jne 9f",
+    "  mov eax, {sys_close}",
+    "  mov rdi, r12",
+    "  int 0x80",
+    // 60: カナリア。**他のファイルへ書いていない**——/etc/motd の先頭 5 バイトが
+    // 変わっていないこと（wrong-inode の族の否定側）。
+    "  mov eax, {sys_open}",
+    "  lea rdi, [rip + MOTD_PATH]",
+    "  mov esi, {o_rdonly}",
+    "  xor edx, edx",
+    "  int 0x80",
+    "  mov r12, rax",
+    "  mov eax, {sys_read}",
+    "  mov rdi, r12",
+    "  mov rsi, rsp",
+    "  mov edx, 5",
+    "  int 0x80",
+    "  cmp rax, 5",
+    "  mov edi, 60",
+    "  jne 9f",
+    "  cld",
+    "  mov rsi, rsp",
+    "  lea rdi, [rip + MOTD_BYTES]",
+    "  mov ecx, 5",
+    "  repe cmpsb",
+    "  mov edi, 60",
+    "  jne 9f",
+    "  mov eax, {sys_close}",
+    "  mov rdi, r12",
+    "  int 0x80",
+
     // すべて通った。
     "  xor edi, edi",
 
@@ -852,6 +973,11 @@ core::arch::global_asm!(
     "  .asciz \"/etc/motd\"",
     "MISSING_PATH:",
     "  .asciz \"/nope\"",
+    "WRITABLE_PATH:",
+    "  .asciz \"/data/writable\"",
+    // **23 バイト**（NEW_BODY_LEN と対）。像の初期の中身と違う列である。
+    "NEW_BODY:",
+    "  .ascii \"zi-c rewrote this file\\n\"",
     "ETC_PATH:",
     "  .asciz \"/etc\"",
     "ROOT_PATH:",
@@ -947,6 +1073,8 @@ core::arch::global_asm!(
     sys_close = const SYS_CLOSE,
     o_rdonly = const O_RDONLY,
     o_wronly = const O_WRONLY,
+    o_wronly_trunc = const O_WRONLY_TRUNC,
+    new_body_len = const NEW_BODY_LEN,
     minus_enoent = const MINUS_ENOENT,
     minus_ebadf = const MINUS_EBADF,
     minus_erofs = const MINUS_EROFS,

@@ -6812,6 +6812,25 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
         50,
         "spawn(\"/bin/cat\", [\"cat\"]) did not return 2; cat did not refuse the missing argument",
     ),
+    (
+        54,
+        "open(\"/data/writable\", O_WRONLY|O_TRUNC) did not return fd 3",
+    ),
+    (55, "read on a write-only fd did not return -EBADF"),
+    (
+        56,
+        "write(3, ...) to the file did not return the byte count",
+    ),
+    (57, "close(3) after writing did not return 0"),
+    (
+        58,
+        "the readback did not match what was written (length, bytes, or EOF)",
+    ),
+    (59, "write on a read-only fd did not return -EBADF"),
+    (
+        60,
+        "the canary /etc/motd changed; the write reached another file",
+    ),
 ];
 
 /// `fault-test` が起こす #PF のエラーコード（S9-b-3-2a）。
@@ -8792,6 +8811,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "ansi-console-skip-parse-test",
         cfg!(feature = "ansi-console-skip-parse-test"),
         "前景経路が ANSI パーサを通さず素のまま描く",
+    ),
+    (
+        "write-file-skip-append-test",
+        cfg!(feature = "write-file-skip-append-test"),
+        "書きで開いた fd への write が複製へ足さない",
+    ),
+    (
+        "write-file-wrong-inode-test",
+        cfg!(feature = "write-file-wrong-inode-test"),
+        "書きで開いた fd への write が別の inode へ足す",
+    ),
+    (
+        "open-skip-truncate-test",
+        cfg!(feature = "open-skip-truncate-test"),
+        "O_TRUNC の切り詰めを落とし、古い中身の後ろへ追記する",
     ),
     (
         "kill-ignore-interrupt-test",

@@ -317,6 +317,12 @@ pub const O_ACCMODE: u64 = 0o3;
 /// 読み取りで開く（Linux の `O_RDONLY`）。**受理するのはこれだけである。**
 pub const O_RDONLY: u64 = 0o0;
 
+/// 書き込みで開く（Linux の `O_WRONLY`）。zi-c で受理に加わった。
+pub const O_WRONLY: u64 = 0o1;
+
+/// 開くと同時に長さ 0 へ切る（Linux の `O_TRUNC`）。zi-c で受理に加わった。
+pub const O_TRUNC: u64 = 0o1000;
+
 /// 書き込みを伴う `open` のフラグ（`O_CREAT` / `O_TRUNC` / `O_APPEND`）。
 ///
 /// **アクセスモードが読み取りでも、これらは書き込みを要求する。**
@@ -1120,11 +1126,12 @@ unsafe fn sys_read(
     // **表を握る区間を短くする。** ここでは inode と位置の写しだけを取り、
     // 検証とブロックの読み出しは外で行う（`Locked` は割り込みを禁止する）。
     let opened = crate::vfs::with_current_files(|files| {
-        files
-            .get(fd as usize)
-            .map(|file| file.inode().map(|inode| (*inode, file.offset())))
+        files.get(fd as usize).map(|file| {
+            file.inode()
+                .map(|inode| (*inode, file.offset(), file.is_writable_file()))
+        })
     });
-    let (inode, offset) = match opened {
+    let (inode, offset, writable) = match opened {
         // **端末である（S11-10）。** リングから取れるだけ取る。
         Ok(None) => {
             // **前景を持っていなければ読めない。** 持ち主は 1 人である
@@ -1157,6 +1164,14 @@ unsafe fn sys_read(
         Ok(Some(pair)) => pair,
         Err(e) => return (-errno_for_file_table(e)) as u64,
     };
+    // **書きで開いた fd への read は -EBADF である**（zi-c。ADR-0037。
+    // 読みで開いた fd への write と対称——fd の向きの取り違えは両方向とも
+    // -EBADF）。inode の写しは open 時点の大きさのままで、切った後の実寸とも
+    // 食い違う——**読ませない理由は形（Linux の向きの規約）と実装（古い
+    // i_size で読むと切る前の長さを信じる）の両方にある。**
+    if writable {
+        return (-EBADF) as u64;
+    }
     // **ディレクトリは `read` で読めない。** 中身は `getdents64` で返す形である
     // （Linux も同じで、`read(2)` は `EISDIR` を返す）。
     //
@@ -1250,8 +1265,12 @@ unsafe fn sys_read(
 ///
 /// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 unsafe fn sys_open(path: u64, flags: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -> u64 {
-    // 読み取り以外は拒む。**S10 は読み取りだけである。**
-    if flags & O_ACCMODE != O_RDONLY || flags & O_WRITE_INTENT != 0 {
+    // **受理は 2 形だけである（zi-c。ADR-0037）**——O_RDONLY と
+    // O_WRONLY|O_TRUNC。**それ以外は従来どおり -EROFS**（bare O_WRONLY も
+    // 拒む——位置書きの部品が無く、:w の全置換には O_TRUNC の形が対応する。
+    // O_CREAT / O_APPEND は「決めないこと」である）。
+    let write_form = flags & O_ACCMODE == O_WRONLY && flags & O_WRITE_INTENT == O_TRUNC;
+    if !write_form && (flags & O_ACCMODE != O_RDONLY || flags & O_WRITE_INTENT != 0) {
         return (-EROFS) as u64;
     }
 
@@ -1271,7 +1290,40 @@ unsafe fn sys_open(path: u64, flags: u64, pml4_phys: PhysAddr, direct_map: Direc
         Err(e) => return (-errno_for_ext2(e)) as u64,
     };
 
-    let file = crate::vfs::File::new(crate::vfs::Inode::from_ext2(inode));
+    let file = if write_form {
+        // **既存の通常ファイルだけを書きで開ける。** ディレクトリ等は拒む
+        // （Linux の EISDIR に相当する形は要る者が出たら分ける。いまは
+        // 「書けない」で足りるので -EROFS に寄せる）。
+        if !inode.is_regular_file() {
+            return (-EROFS) as u64;
+        }
+        // **open の時点で長さ 0 へ切る（O_TRUNC の意味）。**
+        //
+        // 破壊 (zi-c, open-skip-truncate-test): 切らない。**古い中身の後ろへ
+        // 追記され、読み戻しが「古い+新しい」の連結になる**——syscall-test の
+        // 読み戻しの検算（58 番）が捕まえる。
+        #[cfg(not(feature = "open-skip-truncate-test"))]
+        {
+            let layout = match crate::vfs::root_filesystem() {
+                Ok(fs) => fs.layout(),
+                Err(e) => return (-errno_for_ext2(e)) as u64,
+            };
+            // **共有借用はもう生きていない。** `layout` は `Copy` の写しで、
+            // `fs` は上の束で落ちている（`common::ext2::Layout` の doc の形）。
+            let truncated = crate::vfs::with_root_image_mut(|image| {
+                common::ext2::truncate_to(image, &layout, inode.number, 0)
+            });
+            match truncated {
+                Some(Ok(())) => {}
+                Some(Err(_)) => return (-EIO) as u64,
+                // 複製前は書けない（埋め込みを可変にしない）。
+                None => return (-EROFS) as u64,
+            }
+        }
+        crate::vfs::File::writable(crate::vfs::Inode::from_ext2(inode))
+    } else {
+        crate::vfs::File::new(crate::vfs::Inode::from_ext2(inode))
+    };
     crate::vfs::with_current_files(|files| match files.insert(file) {
         Ok(fd) => fd as u64,
         Err(e) => (-errno_for_file_table(e)) as u64,
@@ -1650,11 +1702,25 @@ unsafe fn sys_write(
     #[cfg(not(feature = "write-ignores-fd"))]
     {
         let kind = crate::vfs::with_current_files(|files| {
-            files.get(fd as usize).map(|file| file.is_terminal())
+            files.get(fd as usize).map(|file| {
+                (
+                    file.is_terminal(),
+                    file.is_writable_file(),
+                    file.inode().map(|inode| inode.number()),
+                )
+            })
         });
         match kind {
-            Ok(true) => {}
-            Ok(false) => return (-EROFS) as u64,
+            // 端末。下のシリアル+画面の経路へ。
+            Ok((true, _, _)) => {}
+            // **書きで開いたファイル（zi-c。ADR-0037）。** 複製へ足して返る。
+            Ok((false, true, Some(ino))) => {
+                // SAFETY: 呼び出し元契約をそのまま渡す。
+                return unsafe { sys_write_to_file(fd, buf, count, ino, pml4_phys, direct_map) };
+            }
+            // **読みで開いた fd への write は -EBADF である**（Linux の形。
+            // ADR-0037。以前の -EROFS はファイルへ書く道が無い時代の値だった）。
+            Ok((false, _, _)) => return (-EBADF) as u64,
             Err(e) => return (-errno_for_file_table(e)) as u64,
         }
     }
@@ -1744,6 +1810,100 @@ unsafe fn sys_write(
         slot.store(*value, Ordering::SeqCst);
     }
     WRITE_LEN.store(done.min(WRITE_BUF_LEN as u64), Ordering::SeqCst);
+    done
+}
+
+/// `write(fd, buf, count)` のファイルの側（zi-c。ADR-0037）。
+///
+/// # RAM 複製への追記である
+///
+/// **fd は `O_WRONLY|O_TRUNC` で開かれており、open の時点で長さ 0 に切って
+/// ある。** したがって**追記（`append_to_file`）が全置換の後半である。**
+/// 位置（offset）は使わない——追記は像の中の `i_size` から続き、
+/// **読みは `-EBADF` なので位置を読む者も居ない。**
+///
+/// # 検証の形はシリアルの側と同じである
+///
+/// **ページごとに検証し、検証済みトークン（`UserSlice`）から一時緩衝へ写し、
+/// そこから複製へ足す。** 踏み込む前に検証する契約は崩れない。
+///
+/// # シリアルへも画面へも出さない
+///
+/// ファイルへの write は端末への write ではない。**出力の多重化の判断
+/// （`deferred-decisions.md`）にも触れない。**
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn sys_write_to_file(
+    _fd: u64,
+    buf: u64,
+    count: u64,
+    ino: u32,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+) -> u64 {
+    /// ページの大きさ。**検証の単位である。**
+    const PAGE: u64 = 0x1000;
+
+    // **配置の写しを先に取る。** `Layout` は `Copy` で、`fs`（共有借用）は
+    // この束で落ちる——`with_root_image_mut` の可変借用と重ならない
+    // （`crate::vfs::with_root_image_mut` の doc の列挙）。
+    let layout = match crate::vfs::root_filesystem() {
+        Ok(fs) => fs.layout(),
+        Err(e) => return (-errno_for_ext2(e)) as u64,
+    };
+
+    // 破壊 (zi-c, write-file-wrong-inode-test): 別の inode へ足す。
+    // **戻り値もシリアルも正しく見える**——的のファイルだけが空のままになり、
+    // syscall-test の読み戻し（58 番）が捕まえる。
+    #[cfg(feature = "write-file-wrong-inode-test")]
+    let ino = ino + 1;
+
+    let mut done = 0u64;
+    while done < count {
+        let addr = match buf.checked_add(done) {
+            Some(addr) => addr,
+            None => return (-EFAULT) as u64,
+        };
+        // **一度に扱う量は 3 つの min である**（シリアルの側と同じ）。
+        let to_page_end = PAGE - (addr & (PAGE - 1));
+        let chunk = to_page_end.min(count - done).min(WRITE_BUF_LEN as u64);
+        // **踏み込む前に検証する。**
+        // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+        let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, addr, chunk) })
+        else {
+            // **届いた分だけを返す。** 届いていないものを届いたことにしない。
+            return if done == 0 { (-EFAULT) as u64 } else { done };
+        };
+        let mut kbuf = [0u8; WRITE_BUF_LEN];
+        // SAFETY: slice は検証済み。dst は chunk を収める。
+        let read = unsafe { copy_from_user(&mut kbuf[..chunk as usize], &slice) };
+        if read == 0 {
+            return if done == 0 { (-EFAULT) as u64 } else { done };
+        }
+
+        // 破壊 (zi-c, write-file-skip-append-test): 複製へ足さない。
+        // **検証も戻り値も正しい**——書いたつもりが複製に届いていない形で、
+        // 戻り値では捕まらない。syscall-test の読み戻し（58 番）が捕まえる。
+        #[cfg(not(feature = "write-file-skip-append-test"))]
+        {
+            let appended = crate::vfs::with_root_image_mut(|image| {
+                common::ext2::append_to_file(image, &layout, ino, &kbuf[..read])
+            });
+            match appended {
+                Some(Ok(())) => {}
+                // 空きが尽きた等。**届いた分だけを返す**（短い write）。
+                Some(Err(_)) => {
+                    return if done == 0 { (-EIO) as u64 } else { done };
+                }
+                // 複製前は書けない（open が拒んでいるので、来ない見込み）。
+                None => return (-EROFS) as u64,
+            }
+        }
+
+        done += read as u64;
+    }
     done
 }
 

@@ -912,6 +912,36 @@ const SYSCALL_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // zi-c: 書きで開いた fd への write が複製へ足さない。**検証も戻り値も
+    // 正しい**——読み戻し（58 番。長さ・バイト列・EOF）だけが捕まえる。
+    CriticalTest {
+        name: "write-file-skip-append",
+        feature: "write-file-skip-append-test",
+        expected_markers: &["user-run: syscall-test exited with status 58"],
+        forbidden_markers: &["user-load: syscall-test ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // zi-c: 別の inode へ足す。的が空のまま残り、読み戻し（58 番）が捕まえる。
+    // カナリア（60 番）まで届かない——58 番が先に落ちる。
+    CriticalTest {
+        name: "write-file-wrong-inode",
+        feature: "write-file-wrong-inode-test",
+        expected_markers: &["user-run: syscall-test exited with status 58"],
+        forbidden_markers: &["user-load: syscall-test ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // zi-c: O_TRUNC の切り詰めを落とす。古い中身が先頭に残り、読み戻しの
+    // バイト列の突き合わせ（58 番）が捕まえる。
+    CriticalTest {
+        name: "open-skip-truncate",
+        feature: "open-skip-truncate-test",
+        expected_markers: &["user-run: syscall-test exited with status 58"],
+        forbidden_markers: &["user-load: syscall-test ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // S11-5: 入れ子の遠征から戻ったとき、親の記録を戻さない。**子の write と
     // 終了状態が、親のものとして判定行に出る。** `hello` は "hello from ring 3" を
     // 送るので、`syscall-test` が送ったはずのバイト列と食い違う。
@@ -9877,7 +9907,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 192,
+    full: 195,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
