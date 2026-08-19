@@ -110,6 +110,7 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
         "cat",
         "zash",
         "spin",
+        "zi",
         "bss-test",
     ];
 
@@ -137,12 +138,34 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
     )
     .expect("failed to write userland_layout.rs");
 
+    // **ユーザープログラムは `rustc` を直に呼んで建てる**ので、cargo の
+    // feature は届かない。**破壊 feature を渡すには `--cfg` を明示する。**
+    //
+    // **kernel の feature 環境変数から引く**（`CARGO_FEATURE_*`）。ここに
+    // 載せた分だけがユーザー側へ届く形で、**列挙が全部である**——足すときは
+    // この表へ 1 行足すこと。
+    const USER_PROGRAM_CFGS: &[(&str, &str)] = &[(
+        "CARGO_FEATURE_ZI_CURSOR_IGNORE_UPDOWN_TEST",
+        "zi_cursor_ignore_updown",
+    )];
+    let mut extra_cfgs: Vec<String> = Vec::new();
+    for (env, cfg) in USER_PROGRAM_CFGS {
+        if std::env::var(env).is_ok() {
+            extra_cfgs.push((*cfg).to_string());
+        }
+    }
+
     for name in PROGRAMS {
         let source = format!("{manifest_dir}/userland/{name}.rs");
         let output = format!("{out_dir}/{name}.elf");
         println!("cargo:rerun-if-changed={source}");
 
-        let status = std::process::Command::new(std::env::var("RUSTC").unwrap_or("rustc".into()))
+        let mut command =
+            std::process::Command::new(std::env::var("RUSTC").unwrap_or("rustc".into()));
+        for cfg in &extra_cfgs {
+            command.args(["--cfg", cfg]);
+        }
+        let status = command
             .args([
                 "--edition",
                 "2021",
@@ -273,6 +296,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         "cat",
         "zash",
         "spin",
+        "zi",
         "bss-test",
     ] {
         std::fs::copy(
@@ -286,6 +310,17 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     // 12 ブロックちょうどは間接を使わず、1 バイト超えると使う。
     std::fs::create_dir_all(format!("{staging}/data"))
         .expect("failed to create /data in the staging");
+    // **`zi` が開く複数行のファイル（zi-d-1）。**
+    //
+    // **`/data/writable` を使わない**——あちらは S12-c の検算が中身を
+    // 固定しており、**1 行（改行を含まないバイト列）なので、上下の移動が
+    // 起きない。** `zi` の台本は行を移るので、**移る先が要る。**
+    std::fs::write(
+        format!("{staging}/data/lines"),
+        b"alpha\nbravo\ncharlie\ndelta\n" as &[u8],
+    )
+    .expect("failed to write /data/lines into the staging");
+
     // **穴を持つファイルを常設する（ADR-0038 の到達条件 2）。**
     //
     // **中身のあるブロック・全 0 のブロック・中身のあるブロック**の 3 つで、

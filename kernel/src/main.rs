@@ -1888,6 +1888,9 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
         // 預けるので、借用検査がそれを見る。**「書き手は 1 つ」はそこが保証する。**
         // **外す時機は `spawn` が戻った直後である**（この束の終わり）。
         // その後の `init` の行は、また `init` が書く。
+        // **台本を作動させる（zi-d。`zi-test` のときだけ効く）。**
+        // **起動シーケンスの検算より後である**（`kernel::input::arm_input_script`）。
+        kernel::input::arm_input_script();
         let outcome = {
             let _foreground = console
                 .as_deref_mut()
@@ -5561,7 +5564,7 @@ static mut CORRUPT_FS_IMAGE: [u8; CORRUPT_FS_LEN] = [0; CORRUPT_FS_LEN];
 /// 切り出すブロック数。**参照されている最大のブロックより大きいこと。**
 ///
 /// **実測で決める。** `dumpe2fs` の `Free blocks:` の先頭が使用の上端 + 1 で、
-/// ADR-0039 の時点では 86（使用は 0..85）である。**96 は余裕**——像へ 1 本
+/// zi-d-1 の時点では 93（使用は 0..92）である。**96 は余裕**——像へ 1 本
 /// 足すたびに直さずに済む幅を取ってある。
 const CORRUPT_FS_BLOCKS: usize = 96;
 
@@ -5603,10 +5606,10 @@ const FS_ROOT_INODE_AT: usize = fs_inode_at(2);
 /// **本体が 22 になっても直されていなかった**——**同じ数を 2 か所に書くと、
 /// 片方だけが古くなる。** 番号は下の式が持つ。
 ///
-/// **ADR-0038 で 24 から 25 へ、ADR-0039 で 25 から 26 へ動いた**
-/// （`/data/sparse-hole` と `/bin/bss-test` を足した。
+/// **ADR-0038 で 24 から 25 へ、ADR-0039 で 26 へ、zi-d-1 で 28 へ動いた**
+/// （`/data/sparse-hole`、`/bin/bss-test`、`/bin/zi` と `/data/lines` を足した。
 /// **いずれも `debugfs` で実測している**——推測で足さない）。
-const FS_MOTD_INODE_AT: usize = fs_inode_at(26);
+const FS_MOTD_INODE_AT: usize = fs_inode_at(28);
 
 /// ルートディレクトリのデータブロック（実測。判定行の `i_block[0]` に出ている）。
 const FS_ROOT_DIR_BLOCK: usize = 20 * FS_BLOCK_SIZE;
@@ -5630,7 +5633,7 @@ const FS_ROOT_ETC_ENTRY: usize = FS_ROOT_DIR_BLOCK + 68;
 /// **`sparse-hole` は `/data` の中で `indirect-first` より後ろに来るためである**
 /// （S12-c の `writable` と同じ形。**動かないこともあると分かっているので、
 /// そのつど測っている**）。
-/// **7 度目は ADR-0039 で、75 から 79 へ動いた**——**`/bin/zi` は `/bin` の中で
+/// **7 度目は ADR-0039 で 75 から 79 へ、zi-d-1 で 85 へ動いた**——**`/bin/zi` は `/bin` の中で
 /// 名前順の最後だが、`/bin` そのものが `/data` より前にあるので、
 /// 後ろのブロックがまとめてずれる。**
 /// **S12-c で `/data/writable` を足したが、ここは動かなかった**——
@@ -5638,14 +5641,14 @@ const FS_ROOT_ETC_ENTRY: usize = FS_ROOT_DIR_BLOCK + 68;
 /// **動かないこともあると分かったので、そのつど測ること**（推測しない）。
 /// **今回は `debugfs` で測った**——判定行にも出ているが、
 /// **像を読む側と壊す側が同じ数を別々に持つので、外の道具で突き合わせた。**
-const FS_INDIRECT_TABLE_BLOCK: usize = 79 * FS_BLOCK_SIZE;
+const FS_INDIRECT_TABLE_BLOCK: usize = 85 * FS_BLOCK_SIZE;
 
 /// `/etc/motd` のデータブロック（実測）。
 ///
 /// **S11-5 で 58 から 61 へ、S11-9 で 61 から 69 へ、S11-10 で 70 へ、S11-11 で 74 へ、
 /// S12 前の手当ての 3 本目で 75 へ、同じ手当ての C で 78 へ、S12-c で 79 へ動いた**
 /// （[`FS_MOTD_INODE_AT`] と同じ理由）。
-const FS_MOTD_DATA_BLOCK: usize = 85 * FS_BLOCK_SIZE;
+const FS_MOTD_DATA_BLOCK: usize = 92 * FS_BLOCK_SIZE;
 
 /// 種のファイルと同じ木にある `/etc/motd` の中身（S10-a）。
 ///
@@ -8946,6 +8949,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "open-skip-truncate-test",
         cfg!(feature = "open-skip-truncate-test"),
         "O_TRUNC の切り詰めを落とし、古い中身の後ろへ追記する",
+    ),
+    (
+        "zi-test",
+        cfg!(feature = "zi-test"),
+        "打鍵の代わりに決定的な台本を read_bytes から返す",
+    ),
+    (
+        "zi-cursor-ignore-updown-test",
+        cfg!(feature = "zi-cursor-ignore-updown-test"),
+        "zi が上下の矢印を捨て、カーソルが行を移らない",
     ),
     (
         "ext2-sparse-as-error-test",

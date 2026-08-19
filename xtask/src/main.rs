@@ -1345,7 +1345,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
     const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
-       cargo xtask run --shell-test [--drop-arrows | --drop-esc]\n       cargo xtask run --ansi-test [--sabotage FEATURE]
+       cargo xtask run --shell-test [--drop-arrows | --drop-esc]\n       cargo xtask run --ansi-test [--sabotage FEATURE]\n       cargo xtask run --zi-test [--sabotage FEATURE]
        cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
@@ -1459,6 +1459,15 @@ fn main() -> Result<()> {
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
                 return cmd_fs_image_extract(&features);
+            }
+            if rest.iter().any(|a| a == "--zi-test") {
+                let features: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                return cmd_zi_test(&features);
             }
             if rest.iter().any(|a| a == "--ansi-test") {
                 let features: Vec<&str> = rest
@@ -3379,6 +3388,145 @@ fn cmd_boot_with_features(features: &[&str], marker: &str, wanted: &str) -> Resu
     } else {
         bail!("{context}: {marker} did not say {wanted}")
     }
+}
+
+/// `zi` の実演（zi-d）。**決定的な台本入力で駆動する。**
+///
+/// **`sendkey` を使わない。** 台本は `read_bytes` が返すので、打鍵の間隔にも
+/// 行の処理の速さにも依らない（`kernel/src/input.rs` の `script`）。
+/// **`--shell-test` は実打鍵の側を主張しており、層が違う**——あちらが
+/// 42.58 秒（実測）掛かるのは待ちのためである。
+///
+/// **判定は `zi` の内部状態である**（`kernel/userland/zi.rs` のモジュール doc）。
+/// 画面に正しく描けたことは、この項目では観測できない。
+fn cmd_zi_test(features: &[&str]) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let mut all_features: Vec<&str> = vec!["zi-test"];
+    all_features.extend_from_slice(features);
+    let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let tag = all_features.join("-");
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("zi-test-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the zi test")?;
+
+    // **台本の最後の動作が出るまで待つ。** 上限つき。
+    //
+    // **本数で待たない。** 判定行の本数で切ると、**台本を出し切る前に
+    // QEMU を止めてしまう**（実測でそうなった——`x` の削除が届く前に
+    // 落として、`x deleted a byte = false` になった）。
+    // **台本の最後は `x`（削除）なので、その札を待つ。**
+    let done_marker = "lines=4 delete";
+    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    while Instant::now() < deadline {
+        let text = fs::read_to_string(&serial_log).unwrap_or_default();
+        if text.contains(done_marker) {
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let context = if features.is_empty() {
+        "zi-test".to_string()
+    } else {
+        format!("zi-test {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    let qemu_debug = fs::read_to_string(&debug_log).unwrap_or_default();
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    // **カーソルの推移を判定行から拾う。** `row` の列がそのまま台本の答えである。
+    let rows = parse_zi_cursor_rows(&serial);
+
+    let started = serial.contains("zi: ready");
+    // **上下でカーソルが動いた（zi-a で zi-d へ委ねた分担の条件）。**
+    // 台本は下・下・上を送るので、`row` は 0 -> 1 -> 2 -> 1 と動く。
+    let arrows_moved = rows.windows(2).any(|pair| pair[1] > pair[0])
+        && rows.windows(2).any(|pair| pair[1] < pair[0]);
+    // **hjkl でも動いた。** 台本は j j k k を送るので、上下の後にもう一度
+    // 増えて減る推移が出る。**両方の経路が同じ動きを作ることの主張である。**
+    let distinct_rows = {
+        let mut seen: Vec<u32> = rows.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        seen.len()
+    };
+    let hjkl_moved = distinct_rows >= 3;
+    // **挿入と削除がバッファへ効いた。** 台本は `i Z Y Esc x` なので、
+    // 桁が 2 つ進んでから戻り、削除で 1 つ減る。
+    let typed = serial.contains("typed");
+    let deleted = serial.contains("delete");
+    let back_to_normal = serial.contains("normal");
+
+    println!("{context}: zi started = {started}");
+    println!(
+        "{context}: the up/down arrows moved the cursor between lines = {arrows_moved} \
+         (rows seen: {rows:?})"
+    );
+    println!("{context}: hjkl reached at least three distinct rows = {hjkl_moved}");
+    println!("{context}: insert mode typed into the buffer = {typed}");
+    println!("{context}: Esc returned to normal mode = {back_to_normal}");
+    println!("{context}: x deleted a byte = {deleted}");
+    println!(
+        "{context}: note - these judgements read zi's internal state, NOT the screen; \
+         a redraw that puts the right bytes at the wrong place is not observable here"
+    );
+
+    if started && arrows_moved && hjkl_moved && typed && back_to_normal && deleted {
+        println!("{context}: PASS");
+        Ok(())
+    } else {
+        bail!("{context}: FAILED")
+    }
+}
+
+/// `zi` の判定行から `row=` の値を順に拾う（zi-d）。
+fn parse_zi_cursor_rows(serial: &str) -> Vec<u32> {
+    serial
+        .lines()
+        .filter_map(|line| {
+            let rest = line.split("row=").nth(1)?;
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            digits.parse().ok()
+        })
+        .collect()
 }
 
 fn cmd_pci_test(features: &[&str]) -> Result<()> {

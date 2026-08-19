@@ -282,6 +282,22 @@ pub fn read_bytes(dst: &mut [u8]) -> usize {
     static DECODER: Locked<crate::keyboard::decode::Decoder> =
         Locked::new(crate::keyboard::decode::Decoder::new());
 
+    // 検証（zi-d, zi-test）: 打鍵の代わりに台本を返す。**時間に依存しない**
+    // ——`sendkey` は打鍵の間隔と待ちに依るが、これは読み手が要求したぶんだけ
+    // 進む。**測っているものが違う**——実打鍵が届くことは `--shell-test` が
+    // 主張しており（zi-a で Esc と矢印を足した判定）、ここが主張するのは
+    // エディタの論理である。**層が違うものを同じ項目で測らない。**
+    #[cfg(feature = "zi-test")]
+    {
+        let taken = script::next_bytes(dst);
+        if taken > 0 {
+            DELIVERED.fetch_add(taken as u64, Ordering::SeqCst);
+            return taken;
+        }
+        // 台本を出し切った。**以後は本物の打鍵の経路へ落ちる**（`-EAGAIN` で
+        // 回り続ける形になる）。
+    }
+
     let mut written = 0usize;
 
     // **まず溜まっている分を出す。**
@@ -452,5 +468,88 @@ mod tests {
             bytes_for_event(KeyEvent::Unsupported(0x47)),
             DeliveredBytes::None
         ));
+    }
+}
+
+/// 台本を作動させる（zi-d。`zi-test` feature のときだけ効く）。
+///
+/// **`init` がシェルを起こす直前に呼ぶ。** それより前に流すと、起動シーケンスの
+/// 検算（`syscall-test` の 51 番）が台本を食べてしまう（[`script`] の doc）。
+pub fn arm_input_script() {
+    #[cfg(feature = "zi-test")]
+    script::arm();
+}
+
+/// 決定的な台本入力（zi-d。`zi-test` feature）。
+///
+/// # なぜ打鍵の注入ではないのか
+///
+/// **`sendkey` は時間に依存する。** 打鍵の間隔と、行が処理されるまでの待ちを
+/// ホスト側が見積もる形になり、**遅い機械では落ちる。** `--shell-test` が
+/// その形で、**1 本 42.58 秒掛かる**（実測）。
+///
+/// **ここは読み手が要求したぶんだけ進む。** `zash` も `zi` も `-EAGAIN` で
+/// 回る形のままで、**待ちが要らない。** `ansi-test` を決定的に作ったのと
+/// 同じ判断である。
+///
+/// # スキャンコードのリングへ流し込まない
+///
+/// **前景が取られるまで、カーネル側の消費者（`drain_keyboard`）が食べてしまう。**
+/// リングは 128 バイトでもあり、台本を先に置く形は取れない。
+/// **デコード後のバイトを返す層（[`read_bytes`]）へ差し込む。**
+#[cfg(feature = "zi-test")]
+pub(crate) mod script {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 台本の現在位置。
+    static AT: AtomicUsize = AtomicUsize::new(0);
+
+    /// 台本が作動しているか。**`init` がシェルを起こす直前に立てる。**
+    ///
+    /// # なぜ最初から流さないのか
+    ///
+    /// **起動シーケンスの検算が先に `read(0)` を出す**——`syscall-test` の
+    /// 51 番が「打鍵が無ければ `-EAGAIN`」を主張しており、**台本を最初から
+    /// 流すとあれが台本を 食べてしまい、51 番が落ちる**（実測でそうなった）。
+    ///
+    /// **作動前は 0 を返す**ので、本物の打鍵の経路（空なので `-EAGAIN`）へ
+    /// そのまま落ちる。**検算の主張は変わらない。**
+    static ARMED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+    /// 台本を作動させる（`init` がシェルを起こす直前に呼ぶ）。
+    pub(crate) fn arm() {
+        ARMED.store(true, Ordering::SeqCst);
+    }
+
+    /// 台本（zi-d-1）。**`zash` への行と、`zi` への打鍵が 1 本に並ぶ。**
+    ///
+    /// **矢印は CSI の 3 バイトで書く**（`kernel/src/input.rs` の
+    /// `bytes_for_event` が実打鍵から作る形と同じ）。
+    ///
+    /// 順に——`zi /data/writable` を起こし、**上下でカーソルを動かし**
+    /// （zi-a で `zi-d` へ委ねた分担の条件。名指しで含めてある）、
+    /// **`hjkl` でも動かし**、`i` で挿入して `Esc` で戻り、`x` で 1 字消す。
+    /// **`:w` はまだ無い**（zi-d-2）ので、読み手が尽きたところで終わる。
+    const SCRIPT: &[u8] = b"/bin/zi /data/lines\n\
+        \x1b[B\x1b[B\x1b[A\
+        jjkk\
+        \x1b[C\x1b[D\
+        lh\
+        iZY\x1b\
+        xx";
+
+    /// 台本の残りを `dst` へ写す。**返した数が 0 なら台本は尽きている。**
+    pub(crate) fn next_bytes(dst: &mut [u8]) -> usize {
+        if !ARMED.load(Ordering::SeqCst) {
+            return 0;
+        }
+        let at = AT.load(Ordering::SeqCst);
+        if at >= SCRIPT.len() {
+            return 0;
+        }
+        let take = dst.len().min(SCRIPT.len() - at);
+        dst[..take].copy_from_slice(&SCRIPT[at..at + take]);
+        AT.store(at + take, Ordering::SeqCst);
+        take
     }
 }

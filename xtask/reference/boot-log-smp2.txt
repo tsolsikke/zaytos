@@ -12,7 +12,7 @@ Hello, ZaytOS!
 [INFO] ZaytOS kernel: entered _start
 [INFO] build: 2 cargo feature(s) enabled: default,heap-poison
 [INFO] boot stack: 648 of 16384 bytes used (high-water; 15736 bytes poison intact)
-[INFO] higher-half: arrived at high VA. RIP=0xffffffff801aebe8 in [0xffffffff80100000, 0xffffffff804c9e08)=true, RSP=0xffffffff80479780 high=true, CR3=0x405000 == bootstrap PML4 0x405000 = true, identity alive (phys 0x100000 read via low==high) = true
+[INFO] higher-half: arrived at high VA. RIP=0xffffffff801aebf8 in [0xffffffff80100000, 0xffffffff804c9e08)=true, RSP=0xffffffff80479780 high=true, CR3=0x405000 == bootstrap PML4 0x405000 = true, identity alive (phys 0x100000 read via low==high) = true
 [INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff8048d100 first slot=0xffffffff8048d100 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
 [INFO] interrupts: RFLAGS.IF before cli = false (raw RFLAGS=0x96)
 [INFO] interrupts: RFLAGS.IF after cli = false (raw RFLAGS=0x96)
@@ -74,7 +74,7 @@ Hello, ZaytOS!
 [INFO] paging: required range [framebuffer] 0x80000000..0x803e8000: OK
 [INFO] paging: required range [new page tables (PML4)] 0x3000..0x4000: OK
 [INFO] paging: required range [current RSP] 0x4799e0..0x4799e1: OK
-[INFO] paging: required range [current RIP] 0x1aebe8..0x1aebe9: OK
+[INFO] paging: required range [current RIP] 0x1aebf8..0x1aebf9: OK
 [INFO] paging: all required ranges mapped. proceeding to CR3 switch (d-2).
 [INFO] paging: current CR3 = 0x405000
 [INFO] paging: CR3 switch instruction executed
@@ -108,7 +108,7 @@ Hello, ZaytOS!
 [INFO] console: 103 log line(s) were emitted before the console existed (serial only)
 [INFO] heap: arena 0x4ca000..0x5ca000 (256 frames, 1 MiB), mapped=true
 [INFO] heap: initialized (1048576 bytes free, 1 block(s))
-[INFO] granularity: executing code (RIP) 0xffffffff801aebe8 -> phys 0x1aebe8, mapped by a 4KiB page at 0xffffffff801ae000 (entry=0x1ae023)
+[INFO] granularity: executing code (RIP) 0xffffffff801aebf8 -> phys 0x1aebf8, mapped by a 4KiB page at 0xffffffff801ae000 (entry=0x1ae023)
 [INFO] granularity: kernel stack (RSP) 0xffffffff80479460 -> phys 0x479460, mapped by a 4KiB page at 0xffffffff80479000 (entry=0x479063)
 [INFO] granularity: heap arena 0x4ca000 -> phys 0x4ca000, mapped by a 2MiB page at 0x400000 (entry=0x400083)
 [INFO] granularity: framebuffer 0x80000000 -> phys 0x80000000, mapped by a 2MiB page at 0x80000000 (entry=0x800000b3)
@@ -206,7 +206,7 @@ Hello, ZaytOS!
 [INFO] virtio-blk: host features=0x79007e54 (accepted 0)
 [INFO] virtio-blk: handshake: ACKNOWLEDGE -> DRIVER; capacity=4096 sector(s)
 [INFO] virtio-blk: queue 0: size 256; ring at phys 0x39000..0x3d000 (4 page(s), 4096-aligned=true); zeroed 16384 byte(s) (0 were nonzero before)
-[INFO] virtio-blk: read sector 2: 512 byte(s) requested, status=0 (OK); checksum=0x000786a0 first bytes=[00, 01, 00, 00, 00, 02, 00, 00]
+[INFO] virtio-blk: read sector 2: 512 byte(s) requested, status=0 (OK); checksum=0x00078623 first bytes=[00, 01, 00, 00, 00, 02, 00, 00]
 [INFO] smp: mapped per-CPU stacks for slot 1 at 0xffff81000001b000 (PML4[258], not [257] which a sabotage VA depends on): kernel top 0xffff81000002c000, IST1 top 0xffff810000031000, IST2 top 0xffff810000036000; 27 frame(s) consumed (pages plus page tables), guards left unmapped
 [INFO] apic: LAPIC SVR=0x0000010f software_enabled=true spurious_vector=0x0f TPR=0x00000000
 [INFO] apic: LAPIC has 6 LVT entr(y/ies) (Max LVT Entry = 5); reading only those
@@ -250,7 +250,7 @@ Hello, ZaytOS!
 [INFO] percpu: 2 usable CPU(s) enumerated, 2 per-CPU slot(s) available, every CPU has a slot=true (cpu_id() is the constant 0 and only the bootstrap processor runs, so no slot is indexed out of range yet)
 [INFO] identity-removal: begin. live PML4=0xf000, saved PML4[0]=0x10023
 [INFO] identity-removal: PML4[0] subtree table frames = 7 (28 KiB) become unreachable; intentional leak. subtree frames [256]=10 [511]=4. disjoint(0,256)=true disjoint(0,511)=true disjoint(256,511)=true
-[INFO] identity-removal: required [RIP] 0xffffffff801aebe8 -> phys 0x1aebe8 (huge=false): OK
+[INFO] identity-removal: required [RIP] 0xffffffff801aebf8 -> phys 0x1aebf8 (huge=false): OK
 [INFO] identity-removal: required [RSP] 0xffffffff804792b0 -> phys 0x4792b0 (huge=false): OK
 [INFO] identity-removal: required [direct map window] 0xffff80000000f000 -> phys 0xf000 (huge=false): OK
 [INFO] identity-removal: required [kernel image] 0xffffffff80100000 -> phys 0x100000 (huge=false): OK
@@ -293,30 +293,30 @@ task: cooperative switch verified
 [INFO] ext2: image 2097152 byte(s) built by "mke2fs 1.47.0 (5-Feb-2023)"
 [INFO] ext2: superblock rev=1 block_size=4096 inode_size=256 inodes=256 blocks=512 blocks_per_group=32768 inodes_per_group=256 first_ino=11 groups=1
 [INFO] ext2: features compat=0x38 incompat=0x2 ro_compat=0x3 (only unknown incompat bits are refused; unknown ro_compat and compat are accepted for reading, as Linux does)
-[INFO] ext2: superblock free counts: blocks=426 inodes=230
+[INFO] ext2: superblock free counts: blocks=419 inodes=228
 [INFO] ext2: group 0: block bitmap at 2 inode bitmap at 3 inode table at 4
-[INFO] ext2: group 0 free counts: blocks=426 inodes=230 dirs=5
+[INFO] ext2: group 0 free counts: blocks=419 inodes=228 dirs=5
 [INFO] ext2: root inode 2: mode=040755 size=4096 links=6 i_block[0]=20 directory=true
 [INFO] ext2: root directory block 0 of 1: 4096 byte(s) via the direct blocks
 [INFO] ext2: root directory: 6 entr(y/ies): . .. lost+found bin data etc
-[INFO] ext2: resolved /etc/motd to inode 26: 18 byte(s) = "welcome to ZaytOS" (trailing newline trimmed for this line only); matches the seed file byte for byte: true
-[INFO] ext2: /data/direct-max inode=21 size=49152 blocks=12 single indirect=0 last byte=0xce (expected 0xce)
-[INFO] ext2: /data/indirect-first inode=22 size=49153 blocks=13 single indirect=79 last byte=0xcf (expected 0xcf)
+[INFO] ext2: resolved /etc/motd to inode 28: 18 byte(s) = "welcome to ZaytOS" (trailing newline trimmed for this line only); matches the seed file byte for byte: true
+[INFO] ext2: /data/direct-max inode=22 size=49152 blocks=12 single indirect=0 last byte=0xce (expected 0xce)
+[INFO] ext2: /data/indirect-first inode=23 size=49153 blocks=13 single indirect=85 last byte=0xcf (expected 0xcf)
 [INFO] fs-image-load: read 2097152 byte(s) from the virtio disk into the copy destination
 [INFO] fs-image-source: root_filesystem reads from virt 0xffff800001c00000 (phys 0x1c00000)
 [INFO] fs-image-copy: copied 2097152 byte(s) to phys 0x1c00000..0x1e00000 (512 frame(s), 2MiB-aligned=true), read-back identical=true; the kernel image is 0x100000..0x4c9e08
 [INFO] fs-sparse: /data/sparse-hole reads block 1 as a full block of zeros = true (the blocks around it have content: head=true tail=true); i_size=12288 i_blocks_512=16
-[INFO] fs-bitmap: allocated one block (number 86); free counts are now blocks=425 group0=425
-[INFO] fs-write: append 1 wrote 200 byte(s) to inode 24; free blocks are now 425
-[INFO] fs-write: append 2 wrote 4000 byte(s) to inode 24; free blocks are now 424
-[INFO] fs-truncate: shrank inode 24 to 8192 byte(s); free blocks 422 -> 424 (returned 2)
-[INFO] fs-truncate: shrank inode 24 to 4097 byte(s); free blocks 424 -> 424 (returned 0)
-[INFO] fs-truncate: shrank inode 24 to 4096 byte(s); free blocks 424 -> 425 (returned 1)
-[INFO] fs-truncate: shrank inode 24 to 4000 byte(s); free blocks 425 -> 425 (returned 0)
-[INFO] fs-truncate: restored inode 24 to 100 byte(s)
-[INFO] fs-create: created inode 27 under inode 20 and wrote 300 byte(s); free blocks=424 inodes=229, i_extra_isize=32
-[INFO] fs-create: unlinked inode 27; free blocks=425 inodes=230
-[INFO] fs-bitmap: freed block 86; the image should be back to what was built
+[INFO] fs-bitmap: allocated one block (number 93); free counts are now blocks=418 group0=418
+[INFO] fs-write: append 1 wrote 200 byte(s) to inode 26; free blocks are now 418
+[INFO] fs-write: append 2 wrote 4000 byte(s) to inode 26; free blocks are now 417
+[INFO] fs-truncate: shrank inode 26 to 8192 byte(s); free blocks 415 -> 417 (returned 2)
+[INFO] fs-truncate: shrank inode 26 to 4097 byte(s); free blocks 417 -> 417 (returned 0)
+[INFO] fs-truncate: shrank inode 26 to 4096 byte(s); free blocks 417 -> 418 (returned 1)
+[INFO] fs-truncate: shrank inode 26 to 4000 byte(s); free blocks 418 -> 418 (returned 0)
+[INFO] fs-truncate: restored inode 26 to 100 byte(s)
+[INFO] fs-create: created inode 29 under inode 21 and wrote 300 byte(s); free blocks=417 inodes=227, i_extra_isize=32
+[INFO] fs-create: unlinked inode 29; free blocks=418 inodes=228
+[INFO] fs-bitmap: freed block 93; the image should be back to what was built
 [INFO] fs-image-flush: wrote 2097152 byte(s) back to the virtio disk
 [INFO] fs-image-ready: the image is in its final state for this run
 [INFO] ext2-corrupt: truncated to 512 bytes (the superblock does not fit) -> TooShort
@@ -489,7 +489,7 @@ syscall-test wrote this
 [INFO] lapic-timer: the timer now arrives as vector 0xfe, which the 8259 cannot produce
 task: starting preemptive demo with 2 busy-loop workers for 200 ticks
 [INFO] smp: the installed AP trampoline matches the template outside the patched fields: 4048 byte(s) compared, 48 excluded (gdtr base at 0xf22, far jump target at 0x3b, data block 0xf40..0xf68), mismatches=0
-[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x405000, rust entry 0xffffffff8017cb10
+[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x405000, rust entry 0xffffffff8017cb20
 [INFO] smp: starting application processor apic id 1 as slot 1 (trampoline at 0x1000, vector 0x01, stack top 0x3000 identity-mapped, cr3 0x405000 = the static boot page table)
 [INFO] smp: application processor 1 started (long mode reached, running on the static boot page table; no per-CPU GDT/TSS/IDT yet, so cpu_id() is not used here)
 [INFO] smp: ap 1 loaded its own GDT/TSS/IDT; cpu_id() now reads 1 from GDTR (the index handed over in the trampoline data block was 1, match=true)
