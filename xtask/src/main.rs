@@ -3322,6 +3322,65 @@ fn cmd_ansi_test(features: &[&str]) -> Result<()> {
     }
 }
 
+/// 指定の feature で起動し、シリアルに目印が出ることを見る（ADR-0038）。
+///
+/// **判定行そのものを見る形である。** 破壊の側では目印が出ないので `Err` になる。
+/// **起動しなかった場合も `Err` だが、`classify_boot` が先に切り分ける。**
+fn cmd_boot_with_features(features: &[&str], marker: &str, wanted: &str) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let kernel_elf = build_kernel_with_features(&workspace_root, features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let tag = features.join("-");
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("boot-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64")?;
+
+    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    while Instant::now() < deadline {
+        let text = fs::read_to_string(&serial_log).unwrap_or_default();
+        if text.lines().any(|line| line.contains(marker)) {
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let context = format!("boot {}", features.join("+"));
+    let held = serial
+        .lines()
+        .any(|line| line.contains(marker) && line.contains(wanted));
+    println!("{context}: {marker} says {wanted} = {held}");
+    if held {
+        Ok(())
+    } else {
+        bail!("{context}: {marker} did not say {wanted}")
+    }
+}
+
 fn cmd_pci_test(features: &[&str]) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
@@ -9132,6 +9191,21 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             Err(_) => println!("--- ansi test (skip parse): OK (the sabotage was caught)"),
         }
 
+        // **穴を 0 として読まない破壊（ADR-0038）。** 既定の起動ログが
+        // `fs-sparse` の判定行を固定しているので、**破壊は起動ログの差として
+        // 出る**——ここでは「その構成で起動が通らないこと」を見る。
+        // **`/data/sparse-hole` の読みが落ち、corrupt-fs の期待も食い違う**
+        // （実測。2 つの経路で捕まる）。
+        total += 1;
+        println!("=== xtask check: refusing holes breaks the sparse read and the corrupt-fs probe");
+        match cmd_boot_with_features(&["ext2-sparse-as-error-test"], "fs-sparse", "= true") {
+            Ok(()) => {
+                println!("--- sparse read (refused): FAILED (the sabotage was NOT caught)");
+                failed.push("sparse read (refused)".to_string());
+            }
+            Err(_) => println!("--- sparse read (refused): OK (the sabotage was caught)"),
+        }
+
         // **中断（Ctrl+C）の破壊（S12 前の手当て、C）。**
         //
         // **5 つとも「通らないこと」を期待する**（`ShellTestMode::MustFail`）。
@@ -9907,7 +9981,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 195,
+    full: 196,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

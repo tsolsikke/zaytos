@@ -35,16 +35,37 @@
 //! バックアップ superblock との突き合わせ、`s_state` が clean でないこと
 //! （**読み取りは拒まない。Linux も読み取り専用マウントは許す**）。
 //!
-//! **穴（sparse file）も扱わない。** ここは「読み取りに要らない」からではなく、
-//! **借りて返す形の帰結である**（[`Ext2::block_bytes`]）。穴に対して返すべき
-//! ゼロのバイト列が像の中に無いので、借りようがない。[`Ext2Error::SparseBlock`]
-//! で拒む。`mke2fs -d` は穴を作らないので、この段の像には現れない。
+//! **穴（sparse file）は読める。ADR-0038 で入れた。** 読み出しは全 0 を返す
+//! （ext2 の仕様どおり）。**書き側は扱わない**——穴を作る道も、穴へ書いて
+//! 埋める道も無い（ADR-0038 の「決めないこと」）。
 //!
-//! **扱う条件は「穴を持つ像を読む必要が生じたとき」である。** 書き込みを実装すると
-//! **自分で穴を作れるようになる**ので、そこで発火しうる。**両立させる案は 2 つあり、
-//! どちらも今は要らない**——`common` に 1 ブロックぶんのゼロを静的に置いて借りる形と、
-//! 戻り値を「借りたバイト列」か「長さだけの穴」かの列挙にする形である。
-//! **要らないものを先回りで置かない**（`docs/vision.md`）。
+//! **この節はかつて「穴も扱わない」と書いていた。** 理由として
+//! 「借りて返す形の帰結で、返すべきゼロが像の中に無い」を挙げ、
+//! **「`mke2fs -d` は穴を作らないので、この段の像には現れない」と書いていた。**
+//! **その前提は誤りだった**——zi-d-1 で `/bin/zi` を像へ足したとき、
+//! **ELF の中の全 0 の 1 ブロックが穴になった**（`debugfs` で実測）。
+//! **既存の 6 本がそれまで踏まなかったのは運である。**
+//!
+//! **挙げてあった 2 案のうち 1 つ目を採った**——[`ZERO_BLOCK`] を静的に置いて
+//! 借りる形である。**戻り値の型が変わらないので、呼び出し側に手が入らない。**
+
+/// 穴（sparse）に対して貸すゼロのバイト列（ADR-0038）。
+///
+/// # なぜ静的に置くのか
+///
+/// **[`Ext2::file_block`] は像の中のバイト列を借りて返す**（`&'a [u8]`）。
+/// **穴には対応するバイト列が像の中に無い**ので、借りる先をどこかに持つ
+/// 必要がある。**戻り値を「借りた列」か「長さだけの穴」かの列挙へ変える案も
+/// あったが、呼び出し側すべてに分岐が増える**ので採らなかった（ADR-0038）。
+///
+/// # 大きさ
+///
+/// **ブロックサイズの上限は 65536 である**——`s_log_block_size` のシフト量を
+/// 6 で頭打ちにしてあり（`1024 << 6`）、それを越える像は
+/// [`Ext2Error::BadBlockSizeShift`] で拒む。**したがってこの配列で必ず足りる。**
+///
+/// **`'static` なので、`&'a` としてそのまま貸せる**（`'static: 'a`）。
+static ZERO_BLOCK: [u8; 65536] = [0; 65536];
 
 /// ext2 の magic（`s_magic`）。
 const EXT2_MAGIC: u16 = 0xEF53;
@@ -244,7 +265,13 @@ pub enum Ext2Error {
     IndirectBlockUnsupported(u32),
     /// `i_block` の項が 0 なのに `i_size` の内側である（穴）。
     ///
-    /// **借りて返す形なので、穴に対して返すゼロのバイト列が像の中に無い。**
+    /// **ADR-0038 以降、`common::ext2` はこれを返さない。** 穴は全 0 として
+    /// 読めるようになった（[`ZERO_BLOCK`]）ので、**この経路は到達不能である。**
+    ///
+    /// **残す理由**: `kernel/src/userland.rs` の像の写しループが、進む量が 0 に
+    /// なった場合の防御としてこの値を構成する（そちらも実際には到達しないが、
+    /// **「進む量が必ず正である」という線 4 の主張を型で表している**）。
+    /// 消すと errno の対応表とあちらの防御に手が入り、**得るものが無い。**
     SparseBlock(u32),
     /// ディレクトリとして走査しようとした inode が、ディレクトリでない。
     NotADirectory(u32),
@@ -895,6 +922,10 @@ impl<'a> Ext2<'a> {
     /// **辿るのは直接 12 個と単一間接だけである。** 二重・三重間接は
     /// [`Ext2Error::IndirectBlockUnsupported`] で返る（`docs/roadmap.md` の S10 が
     /// 実装しないと宣言している）。
+    ///
+    /// **穴（ブロック番号 0）は全 0 が返る**（ADR-0038）。像の中に対応する
+    /// バイト列が無いので、[`ZERO_BLOCK`] を貸す。**最後のブロックの切り詰めは
+    /// 穴でも同じに効く。**
     pub fn file_block(&self, inode: &Inode, index: u32) -> Result<&'a [u8], Ext2Error> {
         // 線2: `index * block_size` は u32 では溢れる。**u64 で出す。**
         let offset = u64::from(index) * u64::from(self.block_size);
@@ -908,7 +939,19 @@ impl<'a> Ext2<'a> {
         }
 
         let block = self.block_number_of(inode, index)?;
-        let bytes = self.block_bytes(block)?;
+        // **穴は全 0 として読む（ADR-0038）。**
+        //
+        // 破壊 (ADR-0038, ext2-sparse-as-error): 穴を拒む形へ戻す。
+        // **`/data/sparse-hole` の読み出しが落ち**、`/bin/zi` も起こせなくなる
+        // （この変更が入る前の挙動そのものである）。
+        let bytes = if block == 0 {
+            #[cfg(feature = "ext2-sparse-as-error")]
+            return Err(Ext2Error::SparseBlock(index));
+            #[cfg(not(feature = "ext2-sparse-as-error"))]
+            &ZERO_BLOCK[..self.block_size as usize]
+        } else {
+            self.block_bytes(block)?
+        };
 
         // 最後のブロックは `i_size` で切る。**残りはブロックサイズ以下なので
         // `usize` へ落として安全である。**
@@ -937,11 +980,10 @@ impl<'a> Ext2<'a> {
     ///   [`Self::inode`] では見られない**——表は inode の外にあるからである
     fn block_number_of(&self, inode: &Inode, index: u32) -> Result<u32, Ext2Error> {
         if (index as usize) < DIRECT_BLOCK_COUNT {
-            let block = inode.blocks[index as usize];
-            if block == 0 {
-                return Err(Ext2Error::SparseBlock(index));
-            }
-            return Ok(block);
+            // **0 は穴である（ADR-0038）。** そのまま返し、[`Ext2::file_block`]
+            // が [`ZERO_BLOCK`] を貸す。**エラーにしない**——ext2 の仕様では
+            // 穴は全 0 として読めるので、拒むのは読み手の欠落である。
+            return Ok(inode.blocks[index as usize]);
         }
 
         // **ここから下は `index >= 12` が保証されている。**
@@ -954,7 +996,8 @@ impl<'a> Ext2<'a> {
 
         let table_block = inode.blocks[SINGLE_INDIRECT_SLOT];
         if table_block == 0 {
-            return Err(Ext2Error::SparseBlock(index));
+            // **表そのものが穴である。** 表が無いなら、その先はすべて穴である。
+            return Ok(0);
         }
         let table = self.block_bytes(table_block)?;
 
@@ -964,11 +1007,8 @@ impl<'a> Ext2<'a> {
         let entry = table
             .get(at..at + INDIRECT_ENTRY_SIZE as usize)
             .ok_or(Ext2Error::FileBlockOutOfRange(index))?;
-        let block = u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]);
-        if block == 0 {
-            return Err(Ext2Error::SparseBlock(index));
-        }
-        Ok(block)
+        // **0 は穴である**（直接ブロックと同じ扱い）。
+        Ok(u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]))
     }
 
     /// ディレクトリのエントリを走査する（S10-a）。
@@ -3053,31 +3093,33 @@ mod tests {
 
     /// 間接ブロックの項が 0 なのに `i_size` の内側である（穴）。
     #[test]
-    fn rejects_a_hole_reached_through_the_indirect_table() {
+    fn a_hole_reached_through_the_indirect_table_reads_as_zeros() {
         let mut image = build_test_image();
         let table = INDIRECT_FILE_TABLE_BLOCK as usize * 4096;
         image[table..table + 4].copy_from_slice(&0u32.to_le_bytes());
         let fs = Ext2::parse(&image).unwrap();
         let inode = fs.inode(INDIRECT_FILE_INODE).unwrap();
-        assert_eq!(
-            fs.file_block(&inode, DIRECT_BLOCK_COUNT as u32),
-            Err(Ext2Error::SparseBlock(DIRECT_BLOCK_COUNT as u32))
-        );
+        let block = fs
+            .file_block(&inode, DIRECT_BLOCK_COUNT as u32)
+            .expect("a hole is readable (ADR-0038)");
+        // **最後のブロックは `i_size` で切られる**ので、長さは 1 である。
+        assert!(block.iter().all(|byte| *byte == 0), "a hole reads as zeros");
     }
 
     /// 単一間接そのものが 0 なのに `i_size` の内側である。
     #[test]
-    fn rejects_a_missing_indirect_table() {
+    fn a_missing_indirect_table_reads_as_zeros() {
         let mut image = build_test_image();
         let slot =
             4 * 4096 + (INDIRECT_FILE_INODE as usize - 1) * 256 + 40 + SINGLE_INDIRECT_SLOT * 4;
         image[slot..slot + 4].copy_from_slice(&0u32.to_le_bytes());
         let fs = Ext2::parse(&image).unwrap();
         let inode = fs.inode(INDIRECT_FILE_INODE).unwrap();
-        assert_eq!(
-            fs.file_block(&inode, DIRECT_BLOCK_COUNT as u32),
-            Err(Ext2Error::SparseBlock(DIRECT_BLOCK_COUNT as u32))
-        );
+        // **表が無いなら、その先はすべて穴である**（ADR-0038）。
+        let block = fs
+            .file_block(&inode, DIRECT_BLOCK_COUNT as u32)
+            .expect("a missing table reads as a hole");
+        assert!(block.iter().all(|byte| *byte == 0));
     }
 
     /// 二重・三重間接は実装しない。**使うファイルは 1 ブロックも読まない。**
@@ -3116,22 +3158,28 @@ mod tests {
             Err(Ext2Error::IndirectBlockUnsupported(reach as u32))
         );
         // **直前の添字は単一間接の範囲である**（拒みすぎていないこと）。
-        // 表の項は 0 なので穴として返る——**越えたのではなく、空だからである。**
-        assert_eq!(
-            fs.file_block(&inode, reach as u32 - 1),
-            Err(Ext2Error::SparseBlock(reach as u32 - 1))
-        );
+        // 表の項は 0 なので穴として全 0 が返る——**越えたのではなく、
+        // 空だからである。** 区別が付くのは、越えた側だけがエラーになるからである。
+        let block = fs
+            .file_block(&inode, reach as u32 - 1)
+            .expect("still within the single indirect reach; an empty entry is a hole");
+        assert!(block.iter().all(|byte| *byte == 0));
     }
 
-    /// 穴は拒む。**借りて返す形なので、返すゼロのバイト列が像の中に無い。**
+    /// 穴は全 0 として読める（ADR-0038）。
+    ///
+    /// **かつては拒んでいた**——「借りて返す形なので、返すゼロのバイト列が
+    /// 像の中に無い」という理由だった。[`ZERO_BLOCK`] を置いて解いた。
     #[test]
-    fn refuses_a_hole_because_there_is_nothing_to_borrow() {
+    fn a_hole_in_the_direct_blocks_reads_as_zeros() {
         let mut image = build_test_image();
         let at = 4 * 4096 + (DIRECT_FILE_INODE as usize - 1) * 256 + 40 + 4 * 4;
         image[at..at + 4].copy_from_slice(&0u32.to_le_bytes());
         let fs = Ext2::parse(&image).unwrap();
         let inode = fs.inode(DIRECT_FILE_INODE).unwrap();
-        assert_eq!(fs.file_block(&inode, 4), Err(Ext2Error::SparseBlock(4)));
+        let block = fs.file_block(&inode, 4).expect("a hole is readable");
+        assert_eq!(block.len(), 4096, "a full block of zeros");
+        assert!(block.iter().all(|byte| *byte == 0));
     }
 
     /// `i_size_high` は通常ファイルでだけ上位 32 ビットである。

@@ -5,6 +5,9 @@ edition = "2021"
 publish = false
 
 [features]
+# 破壊（ADR-0038）: 穴を全 0 として読まず、SparseBlock で拒む形へ戻す。
+# `/data/sparse-hole` の読み出しが落ちる（kernel 側は ext2-sparse-as-error-test）。
+ext2-sparse-as-error = []
 # InterruptGuard::enter が cli しなくなる（M5-d の task-preempt-in-critical から
 # 有効化される）。Locked 保持中も IF=1 のままになり、timer プリエンプトが
 # クリティカル区間へ食い込む経路を作れる。**bootloader は critical を一切使わ

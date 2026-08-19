@@ -101,6 +101,8 @@ write-file-wrong-inode-test = []
 # 破壊（zi-c）: O_TRUNC の切り詰めを落とす。古い中身の後ろへ追記され、
 # 読み戻しが「古い+新しい」の連結になる——読み戻しの検算（58 番）が捕まえる。
 open-skip-truncate-test = []
+# 破壊（ADR-0038）: 穴を全 0 として読まず拒む。common へ転送する。
+ext2-sparse-as-error-test = ["common/ext2-sparse-as-error"]
 # 破壊（S12 前の手当て、C）: 中断（Ctrl+C）の旗を立てない。走っている子が
 # 止まらなくなる。
 kill-ignore-interrupt-test = []

@@ -277,6 +277,29 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     // 12 ブロックちょうどは間接を使わず、1 バイト超えると使う。
     std::fs::create_dir_all(format!("{staging}/data"))
         .expect("failed to create /data in the staging");
+    // **穴を持つファイルを常設する（ADR-0038 の到達条件 2）。**
+    //
+    // **中身のあるブロック・全 0 のブロック・中身のあるブロック**の 3 つで、
+    // **`mke2fs -d` は真ん中を穴にする**（zi.elf で実測した挙動と同じである）。
+    //
+    // **常設する理由は「無検査へ戻さない」ことである。** 穴を読む能力は
+    // `/bin/zi` がたまたま穴を持ったことで発覚したが、**zi が伸びて穴が
+    // 消えれば、その能力は誰も検査しない機構に戻る。** ここに 1 本置けば、
+    // 像の作り方が変わらない限り穴は在り続ける。
+    {
+        const SPARSE_BLOCK: usize = 4096;
+        let mut sparse = vec![0u8; SPARSE_BLOCK * 3];
+        // **先頭と末尾だけを埋める。** 真ん中は 0 のままで、穴になる。
+        for (index, byte) in sparse[..SPARSE_BLOCK].iter_mut().enumerate() {
+            *byte = (index % 251) as u8 | 1;
+        }
+        for (index, byte) in sparse[SPARSE_BLOCK * 2..].iter_mut().enumerate() {
+            *byte = (index % 241) as u8 | 1;
+        }
+        std::fs::write(format!("{staging}/data/sparse-hole"), &sparse)
+            .expect("failed to write /data/sparse-hole into the staging");
+    }
+
     let pattern: Vec<u8> = (0..DIRECT_MAX_BYTES + 1).map(|i| (i % 251) as u8).collect();
     std::fs::write(
         format!("{staging}/data/direct-max"),

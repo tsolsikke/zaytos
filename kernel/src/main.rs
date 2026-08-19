@@ -4619,6 +4619,10 @@ fn try_copy_fs_image_to_frames(
     // 中身は像そのものである。**書けるのはここが初めてである。**
     let writable: &'static mut [u8] =
         unsafe { core::slice::from_raw_parts_mut(destination, bytes as usize) };
+    // **穴を全 0 として読めることを毎起動で見る（ADR-0038 の到達条件 2）。**
+    // **`exercise_*` より前である**——あちらは像を書き換えるので、
+    // **建てたままの状態で見る。**
+    verify_sparse_hole_reads_as_zeros(logger);
     exercise_block_bitmap(logger, writable);
 
     // === S13-e: 最終形の像を装置へ書き戻す（ADR-0034 の Addendum。全像フラッシュ）===
@@ -4664,6 +4668,61 @@ fn try_copy_fs_image_to_frames(
 /// `paging-test` と同じ形）。**割り当てたままの像を取り出して、
 /// `e2fsck` の不満がちょうど 1 本であることを見るために要る。**
 /// **2 つの状態は同じ起動では取れない**ので、**構成で分ける。**
+/// 穴のあるファイルが全 0 として読めることを見る（ADR-0038 の到達条件 2）。
+///
+/// # なぜ常設するのか
+///
+/// **穴を読む能力は、たまたま `/bin/zi` が穴を持ったことで発覚した。**
+/// **zi が伸びて穴が消えれば、その能力は誰も検査しない機構に戻る。**
+/// `build.rs` が `/data/sparse-hole`（中身・穴・中身の 3 ブロック）を常設し、
+/// ここが毎起動で読む。
+///
+/// **止めない。`Err` を返さず判定行を出す**——読めなければ判定が偽になり、
+/// ホスト側（`--full` の項目）が落とす。
+fn verify_sparse_hole_reads_as_zeros(logger: &mut Logger<SerialPort>) {
+    /// 穴のあるファイル。**`build.rs` が置く。**
+    const SPARSE_PATH: &[u8] = b"/data/sparse-hole";
+    /// 穴のブロックの添字（先頭・穴・末尾の 3 つのうち真ん中）。
+    const HOLE_INDEX: u32 = 1;
+
+    let fs = match kernel::vfs::root_filesystem() {
+        Ok(fs) => fs,
+        Err(error) => {
+            logger.error(format_args!(
+                "fs-sparse: the image did not parse: {error:?}"
+            ));
+            return;
+        }
+    };
+    let inode = match fs.lookup(SPARSE_PATH) {
+        Ok(inode) => inode,
+        Err(error) => {
+            logger.error(format_args!("fs-sparse: lookup failed: {error:?}"));
+            return;
+        }
+    };
+    // **前後のブロックに中身が在ることも見る。** 「全部 0 の像を読んで
+    // 全部 0 が返った」では、穴を読めたことにならない。
+    let head_has_content = fs
+        .file_block(&inode, 0)
+        .map(|block| block.iter().any(|byte| *byte != 0))
+        .unwrap_or(false);
+    let tail_has_content = fs
+        .file_block(&inode, 2)
+        .map(|block| block.iter().any(|byte| *byte != 0))
+        .unwrap_or(false);
+    let hole = fs.file_block(&inode, HOLE_INDEX);
+    let hole_is_zeros = hole
+        .map(|block| block.len() == fs.block_size() as usize && block.iter().all(|b| *b == 0))
+        .unwrap_or(false);
+    logger.info(format_args!(
+        "fs-sparse: {} reads block {HOLE_INDEX} as a full block of zeros = {hole_is_zeros} \
+         (the blocks around it have content: head={head_has_content} tail={tail_has_content}); \
+         i_size={} i_blocks_512={}",
+        "/data/sparse-hole", inode.size, inode.blocks_512
+    ));
+}
+
 fn exercise_block_bitmap(logger: &mut Logger<SerialPort>, image: &'static mut [u8]) {
     let Err(reason) = try_exercise_block_bitmap(logger, image) else {
         return;
@@ -5465,10 +5524,17 @@ fn try_verify_embedded_fs_image(logger: &mut Logger<SerialPort>) -> Result<(), F
 /// **S11-9 で 64 から 80 へ上げた。** 像へ `/bin/ls` と `/bin/cat` を足したので、
 /// **後ろのブロック番号がすべてずれた**（58 → 69）。**「収まらなくなったら対照が
 /// 落ちる」が実際に働く前に、測って直した。**
+///
+/// **ADR-0038 で 80 から 96 へ上げた。** 像へ `/data/sparse-hole` を足したので
+/// 使用ブロックが 80 から 82 へ増えた。**96 は余裕**——像へ 1 本足すたびに
+/// 直さずに済む幅である。
 static mut CORRUPT_FS_IMAGE: [u8; CORRUPT_FS_LEN] = [0; CORRUPT_FS_LEN];
 
-/// 切り出すブロック数。**参照されている最大のブロック（74）より大きいこと。**
-const CORRUPT_FS_BLOCKS: usize = 80;
+/// 切り出すブロック数。**参照されている最大のブロックより大きいこと。**
+///
+/// **実測で決める。** `dumpe2fs` の `Free blocks:` の先頭が使用の上端 + 1 で、
+/// ADR-0038 の時点では 82（使用は 0..81）である。
+const CORRUPT_FS_BLOCKS: usize = 96;
 
 /// 切り出した像のバイト数。
 const CORRUPT_FS_LEN: usize = CORRUPT_FS_BLOCKS * FS_BLOCK_SIZE;
@@ -5507,7 +5573,10 @@ const FS_ROOT_INODE_AT: usize = fs_inode_at(2);
 /// **doc の見出しから番号を落とした。** かつて「21 番」と書いてあったが、
 /// **本体が 22 になっても直されていなかった**——**同じ数を 2 か所に書くと、
 /// 片方だけが古くなる。** 番号は下の式が持つ。
-const FS_MOTD_INODE_AT: usize = fs_inode_at(24);
+///
+/// **ADR-0038 で 24 から 25 へ動いた**（`/data/sparse-hole` を足した。
+/// `debugfs` で実測）。
+const FS_MOTD_INODE_AT: usize = fs_inode_at(25);
 
 /// ルートディレクトリのデータブロック（実測。判定行の `i_block[0]` に出ている）。
 const FS_ROOT_DIR_BLOCK: usize = 20 * FS_BLOCK_SIZE;
@@ -5527,6 +5596,10 @@ const FS_ROOT_ETC_ENTRY: usize = FS_ROOT_DIR_BLOCK + 68;
 /// **像に載るのは本数だけでなく、1 本あたりの大きさでもある。**
 ///
 /// **6 度目は S12 前の手当ての C で、72 から 75 へ動いた**（`/bin/spin` を足した）。
+/// **ADR-0038 で `/data/sparse-hole` を足したが、ここは動かなかった**——
+/// **`sparse-hole` は `/data` の中で `indirect-first` より後ろに来るためである**
+/// （S12-c の `writable` と同じ形。**動かないこともあると分かっているので、
+/// そのつど測っている**）。
 /// **S12-c で `/data/writable` を足したが、ここは動かなかった**——
 /// **足したファイルが `/data` の中で名前順に後ろへ来たためである。**
 /// **動かないこともあると分かったので、そのつど測ること**（推測しない）。
@@ -5539,7 +5612,7 @@ const FS_INDIRECT_TABLE_BLOCK: usize = 75 * FS_BLOCK_SIZE;
 /// **S11-5 で 58 から 61 へ、S11-9 で 61 から 69 へ、S11-10 で 70 へ、S11-11 で 74 へ、
 /// S12 前の手当ての 3 本目で 75 へ、同じ手当ての C で 78 へ、S12-c で 79 へ動いた**
 /// （[`FS_MOTD_INODE_AT`] と同じ理由）。
-const FS_MOTD_DATA_BLOCK: usize = 79 * FS_BLOCK_SIZE;
+const FS_MOTD_DATA_BLOCK: usize = 81 * FS_BLOCK_SIZE;
 
 /// 種のファイルと同じ木にある `/etc/motd` の中身（S10-a）。
 ///
@@ -6190,6 +6263,14 @@ fn try_verify_corrupt_fs_image_is_rejected(
             probe: fs_probe_root_walk,
             expected: Ext2Error::NotADirectory(2),
         },
+        // **捕まえ方が ADR-0038 で変わった。** かつては穴が `SparseBlock` で
+        // 拒まれたが、**穴は全 0 として読めるようになった。**
+        // **それでも捕まる**——`i_size` を信じて 2 ブロック目を歩くと、
+        // **全 0 のブロックをディレクトリとして読むことになり**、
+        // `rec_len` が 0 で「進まないエントリ」として拒まれる（実測）。
+        // **主張は変わっていない**（`i_size` の水増しは通らない）。
+        // **捕まえ方の見込みが外れても内容で捕まる形は、`virtio-short-desc` と
+        // `virtio-intx-edge` に続いて 3 度目である。**
         CorruptFsCase {
             what: "the root inode's i_size grown past its blocks",
             patches: &[FsPatch {
@@ -6199,7 +6280,10 @@ fn try_verify_corrupt_fs_image_is_rejected(
             }],
             truncate_to: 0,
             probe: fs_probe_root_walk,
-            expected: Ext2Error::SparseBlock(1),
+            expected: Ext2Error::DirEntryRecordTooSmall {
+                rec_len: 0,
+                name_len: 0,
+            },
         },
         CorruptFsCase {
             what: "the \"etc\" entry's rec_len zeroed (the walk would not advance)",
@@ -6273,17 +6357,20 @@ fn try_verify_corrupt_fs_image_is_rejected(
             probe: fs_probe_read_indirect_first,
             expected: Ext2Error::BlockOutOfRange(65_535),
         },
-        CorruptFsCase {
-            what: "/etc/motd's i_size grown past its blocks",
-            patches: &[FsPatch {
-                offset: FS_MOTD_INODE_AT + 4,
-                value: 100_000,
-                width: 4,
-            }],
-            truncate_to: 0,
-            probe: fs_probe_read_motd,
-            expected: Ext2Error::SparseBlock(1),
-        },
+        // **`/etc/motd` の `i_size` を伸ばす形は、ADR-0038 で成立しなくなった。**
+        // **黙って消さずに理由を残す**（`docs/coding-standards.md` の
+        // 「行は消さず状態を書き換える」と同じ趣旨である）。
+        //
+        // **穴が全 0 として読めるようになると、この破壊は正当な疎ファイルと
+        // 同じ状態になる**——ext2 において「`i_size` が割り当て済みブロックより
+        // 大きい通常ファイル」は、まさに疎ファイルの定義そのものである。
+        // **ext2 の側にも区別が付かない。** 壊れた像を作れていないので、
+        // 拒まれないのが正しい。
+        //
+        // **ディレクトリの側（上の「the root inode's i_size grown past its
+        // blocks」）は残る**——あちらは全 0 のブロックを**ディレクトリとして**
+        // 歩くことになり、`rec_len` が 0 で拒まれる（実測）。
+        // **構造を持つ側だけが、水増しを検出できる。**
     ];
 
     // **健全な対照を先に走らせる。** 切り出した先頭が、それ自体で読み切れる像で
@@ -8826,6 +8913,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "open-skip-truncate-test",
         cfg!(feature = "open-skip-truncate-test"),
         "O_TRUNC の切り詰めを落とし、古い中身の後ろへ追記する",
+    ),
+    (
+        "ext2-sparse-as-error-test",
+        cfg!(feature = "ext2-sparse-as-error-test"),
+        "穴を全 0 として読まず SparseBlock で拒む",
     ),
     (
         "kill-ignore-interrupt-test",
