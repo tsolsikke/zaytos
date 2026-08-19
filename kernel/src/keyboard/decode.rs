@@ -52,12 +52,22 @@ pub enum KeyEvent {
     /// **`Unsupported` は「スキャンコードは分かるが扱わない」の集合である。**
     /// 扱うようになったものを残すと、**呼び出し側が数えている「扱えなかった数」に
     /// 扱えたものが混ざる。** 種を分ける。
-    ///
-    /// **上下は分けない。** いま使う道が無く、**使う者がいない機構は検算が置けない**
-    /// （S9-b-3-1 の診断）。`Unsupported` のままにしておく。
     ArrowLeft,
     /// カーソル右（S12 前の手当て）。
     ArrowRight,
+    /// カーソル上（zi-a）。
+    ///
+    /// **左右を入れたとき「上下は分けない。使う者がいない機構は検算が置けない」と
+    /// 書いた。** 使う者（`zi`。vision から段になった）が決まったので分けた。
+    ArrowUp,
+    /// カーソル下（zi-a）。
+    ArrowDown,
+    /// Esc（zi-a）。**`zi` のノーマルモードへ戻るキーである。**
+    ///
+    /// **`Char('\x1b')` にはしない。** 表示すべき文字ではない——
+    /// `Char` の集合は「画面へ出るもの」で、Esc はキーそのものである
+    /// （矢印と同じ判断）。バイトへの落とし方は `input.rs` が持つ。
+    Escape,
     /// 対応していないスキャンコード。**無言で捨てず、呼び出し側が数える。**
     ///
     /// 押下（make）のときだけ報告する。離した（break）ときは報告しない。
@@ -110,6 +120,15 @@ const SCANCODE_BACKSPACE: u8 = 0x0E;
 const SCANCODE_ARROW_LEFT: u8 = 0x4B;
 /// 拡張コードのカーソル右（`0xE0 0x4D`）。
 const SCANCODE_ARROW_RIGHT: u8 = 0x4D;
+/// 拡張コードのカーソル上（`0xE0 0x48`。zi-a）。
+///
+/// **素の `0x48` はキーパッドの 8 である**（表で `'\0'`、`Unsupported` に落ちる）。
+/// 矢印は必ず `0xE0` 付きで届くので、取り違えは起きない。下も同じ。
+const SCANCODE_ARROW_UP: u8 = 0x48;
+/// 拡張コードのカーソル下（`0xE0 0x50`。zi-a）。
+const SCANCODE_ARROW_DOWN: u8 = 0x50;
+/// Esc（`0x01`。zi-a）。
+const SCANCODE_ESC: u8 = 0x01;
 const SCANCODE_TAB: u8 = 0x0F;
 const SCANCODE_ENTER: u8 = 0x1C;
 
@@ -238,6 +257,17 @@ impl Decoder {
                 if code == SCANCODE_ARROW_RIGHT {
                     return Some(KeyEvent::ArrowRight);
                 }
+                // **上下も同じ feature の下に置く（zi-a）。** 破壊の意味を
+                // 「矢印を未対応へ戻す」の 1 つに保つ——鍵ごとに feature を
+                // 分けると、名前が主張する範囲と実際の範囲がずれていく。
+                #[cfg(not(feature = "keyboard-drop-arrows-test"))]
+                if code == SCANCODE_ARROW_UP {
+                    return Some(KeyEvent::ArrowUp);
+                }
+                #[cfg(not(feature = "keyboard-drop-arrows-test"))]
+                if code == SCANCODE_ARROW_DOWN {
+                    return Some(KeyEvent::ArrowDown);
+                }
                 // **右 Ctrl（`0xE0 0x1D`）も Ctrl として扱う（S12 前の手当て、C）。**
                 //
                 // **接頭辞の有無で左右を区別しない。** 区別すると、
@@ -328,6 +358,11 @@ impl Decoder {
             SCANCODE_ENTER => Some(KeyEvent::Enter),
             SCANCODE_BACKSPACE => Some(KeyEvent::Backspace),
             SCANCODE_TAB => Some(KeyEvent::Char('\t')),
+            // 破壊 (zi-a, keyboard-drop-esc-test): Esc を未対応へ戻す。
+            // **Ring 3 へ `\x1b` が届かなくなる**ので、`--shell-test` の
+            // 「Esc `[` `D` の実打鍵が挿入点を動かした」判定が落ちる。
+            #[cfg(not(feature = "keyboard-drop-esc-test"))]
+            SCANCODE_ESC => Some(KeyEvent::Escape),
             _ => match self.character_for(key) {
                 Some(character) => Some(KeyEvent::Char(character)),
                 None => Some(KeyEvent::Unsupported(key)),
@@ -480,14 +515,41 @@ mod tests {
     }
 
     /// 拡張キー（0xE0 プレフィックス）は押下のときだけ 1 回報告する。
+    ///
+    /// **上矢印は zi-a で種を得た**ので、未対応の代表は Home（`0xE0 0x47`）へ
+    /// 差し替えた。
     #[test]
     fn extended_keys_are_reported_once_on_press() {
         let mut decoder = Decoder::new();
-        // 0xE0 0x48 = カーソル上（押下）、0xE0 0xC8 = 同（離脱）。
+        // 0xE0 0x47 = Home（押下）、0xE0 0xC7 = 同（離脱）。
         assert_eq!(decoder.feed(0xE0), None, "プレフィックス単独では何も出ない");
-        assert_eq!(decoder.feed(0x48), Some(KeyEvent::Unsupported(0x48)));
+        assert_eq!(decoder.feed(0x47), Some(KeyEvent::Unsupported(0x47)));
         assert_eq!(decoder.feed(0xE0), None);
-        assert_eq!(decoder.feed(0xC8), None, "離脱では報告しない");
+        assert_eq!(decoder.feed(0xC7), None, "離脱では報告しない");
+    }
+
+    /// **4 方向の矢印がそれぞれの種で届く（zi-a で上下を足した）。**
+    #[test]
+    fn all_four_arrows_decode_to_their_own_kinds() {
+        let mut decoder = Decoder::new();
+        assert_eq!(decoder.feed(0xE0), None);
+        assert_eq!(decoder.feed(0x4B), Some(KeyEvent::ArrowLeft));
+        assert_eq!(decoder.feed(0xE0), None);
+        assert_eq!(decoder.feed(0x4D), Some(KeyEvent::ArrowRight));
+        assert_eq!(decoder.feed(0xE0), None);
+        assert_eq!(decoder.feed(0x48), Some(KeyEvent::ArrowUp));
+        assert_eq!(decoder.feed(0xE0), None);
+        assert_eq!(decoder.feed(0x50), Some(KeyEvent::ArrowDown));
+    }
+
+    /// **Esc は押下で 1 回だけ `Escape` を出す（zi-a）。**
+    ///
+    /// 離脱（`0x81`）では出さない。文字キーと同じ形である。
+    #[test]
+    fn esc_is_reported_as_escape_on_press_only() {
+        let mut decoder = Decoder::new();
+        assert_eq!(decoder.feed(0x01), Some(KeyEvent::Escape));
+        assert_eq!(decoder.feed(0x81), None, "離脱では報告しない");
     }
 
     /// **拡張キーの後で通常のキーが壊れない。**

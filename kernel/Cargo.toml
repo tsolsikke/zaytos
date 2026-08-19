@@ -78,10 +78,14 @@ tiny-key-buffer = []
 # 生のスキャンコードをシリアルへ出す。エコーと二重になって読みにくいので
 # 既定では無効。キーボード周りの切り分けが要るときだけ有効にする。
 keyboard-raw-log = []
-# 破壊（S12 前の手当て）: 左右の矢印を未対応へ戻す。デコーダが
-# `KeyEvent::Unsupported` を返すので前景へバイトが届かず、シェルの挿入点が
-# 動かない。`--shell-test` の「左へ動かしてから入れた」判定が落ちる。
+# 破壊（S12 前の手当て。zi-a で上下も同じ feature の下に入った）: 矢印を
+# 未対応へ戻す。デコーダが `KeyEvent::Unsupported` を返すので前景へバイトが
+# 届かず、シェルの挿入点が動かない。`--shell-test` の「左へ動かしてから
+# 入れた」判定が落ちる。
 keyboard-drop-arrows-test = []
+# 破壊（zi-a）: Esc を未対応へ戻す。Ring 3 へ `\x1b` が届かなくなるので、
+# `--shell-test` の「Esc `[` `D` の実打鍵が挿入点を動かした」判定が落ちる。
+keyboard-drop-esc-test = []
 # 破壊（S12 前の手当て、C）: 中断（Ctrl+C）の旗を立てない。走っている子が
 # 止まらなくなる。
 kill-ignore-interrupt-test = []

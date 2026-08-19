@@ -139,7 +139,8 @@ pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
     let mut cursor = 0usize;
     let mut overflowed = false;
     // **エスケープの受け（S12 前の手当て）。** 矢印は 3 バイトで届く
-    // （`\x1b` `[` `D` または `C`。`kernel/src/input.rs` が落とす形）。
+    // （`\x1b` `[` に `D`/`C`/`A`/`B`。`kernel/src/input.rs` が落とす形。
+    // 上下は zi-a で増えた——このシェルでは読んで捨てる）。
     //
     // **解釈はここで行う。画面（`Grid`）には届かない。**
     // `ADR-0029` が決めたのは出力側の解釈で、こちらは入力側である。
@@ -191,6 +192,14 @@ pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
                     write_all(STDOUT, &line[cursor..cursor + 1]);
                     cursor += 1;
                 }
+                continue;
+            }
+            (Escape::Bracket, b'A') | (Escape::Bracket, b'B') => {
+                escape = Escape::Idle;
+                // **上下は何もしない（zi-a）。** 履歴が無いので動かす先が無い。
+                // **知らない並びの分岐へ落とさない**——あちらは最後のバイトを
+                // 普通の字として行へ入れるので、**上矢印を押すたびに `A` が
+                // 挿入されてしまう。** 読んで捨てるのが正しい形である。
                 continue;
             }
             (Escape::Esc, _) | (Escape::Bracket, _) => {

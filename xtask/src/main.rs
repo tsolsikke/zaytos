@@ -1315,7 +1315,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
     const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
-       cargo xtask run --shell-test [--drop-arrows]
+       cargo xtask run --shell-test [--drop-arrows | --drop-esc]
        cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
@@ -1460,6 +1460,8 @@ fn main() -> Result<()> {
             if rest.iter().any(|a| a == "--shell-test") {
                 let mode = if rest.iter().any(|a| a == "--drop-arrows") {
                     ShellTestMode::ArrowsDropped
+                } else if rest.iter().any(|a| a == "--drop-esc") {
+                    ShellTestMode::EscDropped
                 } else {
                     ShellTestMode::Normal
                 };
@@ -2999,6 +3001,11 @@ enum ShellTestMode {
     /// 破壊（`keyboard-drop-arrows-test`）。矢印がデコーダで未対応へ戻るので、
     /// 前景へ 3 バイトが届かず、挿入点が動かない。
     ArrowsDropped,
+    /// 破壊（`keyboard-drop-esc-test`。zi-a）。Esc がデコーダで未対応へ戻るので、
+    /// 前景へ `\x1b` が届かず、**実打鍵の Esc `[` `D` が CSI にならない**——
+    /// 3 打が字のまま行へ入る。[`ShellTestMode::ArrowsDropped`] と同じく
+    /// 判定を 1 本裏返す形である。
+    EscDropped,
     /// 破壊。**通らないことを期待する**（S12 前の手当て、C）。
     ///
     /// # なぜこちらは裏返さないのか
@@ -3037,6 +3044,7 @@ impl ShellTestMode {
         match self {
             ShellTestMode::Normal => &[],
             ShellTestMode::ArrowsDropped => &["keyboard-drop-arrows-test"],
+            ShellTestMode::EscDropped => &["keyboard-drop-esc-test"],
             // **1 要素の配列を作れないので、一覧から借りる。**
             // `KILL_SABOTAGES` に在る名前だけを受け取る契約である。
             ShellTestMode::MustFail(feature) => {
@@ -3055,6 +3063,7 @@ impl ShellTestMode {
         match self {
             ShellTestMode::Normal => "shell-test".to_string(),
             ShellTestMode::ArrowsDropped => "shell-test keyboard-drop-arrows".to_string(),
+            ShellTestMode::EscDropped => "shell-test keyboard-drop-esc".to_string(),
             ShellTestMode::MustFail(feature) => format!("shell-test {feature}"),
         }
     }
@@ -3065,6 +3074,7 @@ impl ShellTestMode {
         match self {
             ShellTestMode::Normal => "shell-test-serial.log".to_string(),
             ShellTestMode::ArrowsDropped => "shell-test-drop-arrows-serial.log".to_string(),
+            ShellTestMode::EscDropped => "shell-test-drop-esc-serial.log".to_string(),
             ShellTestMode::MustFail(feature) => format!("shell-test-{feature}-serial.log"),
         }
     }
@@ -3074,6 +3084,12 @@ impl ShellTestMode {
     /// **破壊の側も真である。** 中断の破壊はどれも矢印に触らない。
     fn expects_the_cursor_to_move(self) -> bool {
         self != ShellTestMode::ArrowsDropped
+    }
+
+    /// Esc の実打鍵について期待すること（zi-a）。**`true` は「Esc `[` `D` の
+    /// 3 打が CSI として解釈され、挿入点が動く」である。**
+    fn expects_esc_to_reach_ring3(self) -> bool {
+        self != ShellTestMode::EscDropped
     }
 
     /// この形が通ることを期待するか。**破壊は通らないことを期待する。**
@@ -3866,6 +3882,38 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         did_not_move && !moved
     };
 
+    // **Esc が Ring 3 へ届いたこと（zi-a）。**
+    //
+    // **打ったのは `m` → Esc → `[` → `D` → `n` である。** `\x1b` が届いて
+    // いれば zash が 3 打を CSI（左）として解釈し、走るのは `nm` である。
+    // **届いていなければ `[` と `D` が字のまま入り、`m[Dn` になる。**
+    // 左矢印の判定と同じ形で、出る側と出ない側の両方を見る。
+    //
+    // **破壊ビルド（`keyboard-drop-esc-test`）では期待が裏返る。**
+    let esc_moved = after_shell.contains("zash: nm: cannot run");
+    let esc_did_not_move = after_shell.contains("zash: m[Dn: cannot run");
+    let esc_behaved_as_expected = if mode.expects_esc_to_reach_ring3() {
+        esc_moved && !esc_did_not_move
+    } else {
+        esc_did_not_move && !esc_moved
+    };
+
+    // **上下の矢印が行を壊さないこと（zi-a）。**
+    //
+    // **打ったのは `u` → 上 → `v` → 下 → `w` で、走るのは `uvw` である。**
+    // zash が `\x1b[A` / `\x1b[B` を読んで捨てる分岐を持たないと、最後の
+    // バイトが字として入り `uAvBw` になる。両方を見る。
+    //
+    // **これは「届いたこと」の証明ではない。** デコーダが落とす形
+    // （`keyboard-drop-arrows-test`）でも `uvw` になり、届いて捨てた形と
+    // 区別できない——**上下を消費して観測できる者がまだ居ない**ためである。
+    // **届く側の固定はホストテストにある**（decode の 4 方向と input の
+    // 出し分け）。**実機での届きの観測は zi-d の自動判定が持つ**（あちらは
+    // 上下で実際にカーソルが動く）。観測していないことは観測していないと書く。
+    let updown_kept_the_line = after_shell.contains("zash: uvw: cannot run");
+    let updown_did_not_corrupt = !after_shell.contains("zash: uAvBw: cannot run");
+    let updown_left_the_line_intact = updown_kept_the_line && updown_did_not_corrupt;
+
     // **Ctrl+C が打ちかけの行を捨てたこと（S12 前の手当て、C。深さ 1）。**
     //
     // **`zz` と打ってから Ctrl+C を送り、`ret` を打っている。**
@@ -3922,6 +3970,12 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         "{context}: the left arrow moved the insertion point = {moved} (wanted {})",
         mode.expects_the_cursor_to_move()
     );
+    println!(
+        "{context}: the literal Esc [ D keystrokes moved the insertion point = {esc_moved} \
+         (wanted {})",
+        mode.expects_esc_to_reach_ring3()
+    );
+    println!("{context}: the up/down arrows left the line intact = {updown_left_the_line_intact}");
 
     println!("{context}: ctrl-c discarded the half-typed line = {ctrl_c_discarded_the_line}");
     println!(
@@ -3940,6 +3994,8 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && argv0_is_as_typed
         && backspace_edited_the_line
         && arrow_behaved_as_expected
+        && esc_behaved_as_expected
+        && updown_left_the_line_intact
         && ctrl_c_discarded_the_line
         && ctrl_c_stopped_the_child
         && restarted_only_once
@@ -4007,6 +4063,22 @@ const SHELL_TEST_LINES: &[&[&str]] = &[
     // **左へ 1 つ動いてから `y` を入れるので、走るのは `pyq` である。**
     // **動いていなければ `pqy` になる。** ここも 2 本で見る。
     &["p", "q", "left", "y", "ret"],
+    // m → Esc → [ → D → n（zi-a）。**Esc が Ring 3 へ届いたことを見る。**
+    //
+    // **Esc キーそのものを打ち、`[` と `D` を続ける。** 届いていれば zash の
+    // 状態機械が 3 打を `\x1b[D`（左）として解釈し、挿入点が 1 つ戻って
+    // `n` が頭へ入る——**走るのは `nm` である。**
+    // **届いていなければ Esc は捨てられ、`[` と `D` が字のまま入る**——
+    // `m[Dn` になる。ここも 2 本で見る。
+    // **`shift-d` は monitor のキー名である**（大文字 D。zash は `D` だけを
+    // 左と解釈する）。
+    &["m", "esc", "bracket_left", "shift-d", "n", "ret"],
+    // u → 上 → v → 下 → w（zi-a）。**上下の CSI が行を壊さないことを見る。**
+    //
+    // **zash は `\x1b[A` / `\x1b[B` を読んで捨てる**（履歴が無い）ので、
+    // **走るのは `uvw` である。** 捨てる分岐が無いと最後のバイトが字として
+    // 入り、`uAvBw` になる。
+    &["u", "up", "v", "down", "w", "ret"],
     // 打ちかけの行を Ctrl+C で捨てる（S12 前の手当て、C）。**深さ 1 の側である。**
     //
     // **`zz` と打ってから Ctrl+C を送り、そのまま `ret` を打つ。**
@@ -8837,6 +8909,20 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             }
         }
 
+        // **Esc を落とすと実打鍵の Esc `[` `D` が CSI にならないこと（zi-a）。**
+        // 上の矢印の破壊と同じ形——**通常の側の「Esc が届いた」判定の反証である。**
+        total += 1;
+        println!(
+            "=== xtask check: dropping Esc keeps the literal Esc [ D keystrokes as characters"
+        );
+        match cmd_shell_test(ShellTestMode::EscDropped) {
+            Ok(()) => println!("--- shell test (esc dropped): OK"),
+            Err(error) => {
+                println!("--- shell test (esc dropped): FAILED ({error})");
+                failed.push("shell test (esc dropped)".to_string());
+            }
+        }
+
         // **中断（Ctrl+C）の破壊（S12 前の手当て、C）。**
         //
         // **5 つとも「通らないこと」を期待する**（`ShellTestMode::MustFail`）。
@@ -9612,7 +9698,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 189,
+    full: 190,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

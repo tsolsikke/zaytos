@@ -8627,7 +8627,12 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
     (
         "keyboard-drop-arrows-test",
         cfg!(feature = "keyboard-drop-arrows-test"),
-        "左右の矢印を未対応へ戻し、シェルの挿入点が動かないようにする",
+        "矢印 4 方向を未対応へ戻し、シェルの挿入点が動かないようにする",
+    ),
+    (
+        "keyboard-drop-esc-test",
+        cfg!(feature = "keyboard-drop-esc-test"),
+        "Esc を未対応へ戻し、Ring 3 へ 0x1b が届かないようにする",
     ),
     (
         "kill-ignore-interrupt-test",

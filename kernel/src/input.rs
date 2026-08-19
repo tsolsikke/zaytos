@@ -308,66 +308,149 @@ pub fn read_bytes(dst: &mut [u8]) -> usize {
         let Some(event) = event else {
             continue;
         };
-        // **矢印は 3 バイトへ落とす（S12 前の手当て）。**
-        //
-        // **形は CSI である**（`\x1b[D` と `\x1b[C`）。`ADR-0029` が画面制御に
-        // ANSI を選んでいるので、**入力の側も同じ表現にしておくと後で噛み合う。**
-        // **解釈するのはシェルであって、コンソールではない**——このバイト列が
-        // `Grid` へ届くことはない。
-        //
-        // **`dst` に 3 バイト入らないことがある。** 溜め場（[`PENDING`]）が
-        // 既にその形を持っているので、入る分だけ置いて残りを預ける。
-        if let crate::keyboard::decode::KeyEvent::ArrowLeft
-        | crate::keyboard::decode::KeyEvent::ArrowRight = event
-        {
-            let sequence: &[u8] = match event {
-                crate::keyboard::decode::KeyEvent::ArrowLeft => b"\x1b[D",
-                _ => b"\x1b[C",
-            };
-            for (index, byte) in sequence.iter().enumerate() {
-                if written < dst.len() {
-                    dst[written] = *byte;
-                    written += 1;
-                } else {
-                    let mut pending = PENDING.lock();
-                    let at = pending.length;
-                    // **溜め場は 8 バイトで、ここへ来るのは多くて 2 バイトである。**
-                    // 溢れるなら落とす——**落としたことが分かる形は無いが、
-                    // 入らないものを入ったことにはしない。**
-                    if at < pending.bytes.len() {
-                        pending.bytes[at] = *byte;
-                        pending.length = at + 1;
+        // **バイト列への写像は純粋関数が持つ**（[`bytes_for_event`]。zi-a で
+        // 切り出した）。**Esc 単体と CSI の出し分けの規約もそちらの doc にある。**
+        match bytes_for_event(event) {
+            DeliveredBytes::None => continue,
+            DeliveredBytes::Single(byte) => {
+                dst[written] = byte;
+                written += 1;
+            }
+            // **`dst` に 3 バイト入らないことがある。** 溜め場（[`PENDING`]）が
+            // 既にその形を持っているので、入る分だけ置いて残りを預ける。
+            DeliveredBytes::Csi(sequence) => {
+                for byte in sequence {
+                    if written < dst.len() {
+                        dst[written] = *byte;
+                        written += 1;
+                    } else {
+                        let mut pending = PENDING.lock();
+                        let at = pending.length;
+                        // **溜め場は 8 バイトで、ここへ来るのは多くて 2 バイトである。**
+                        // 溢れるなら落とす——**落としたことが分かる形は無いが、
+                        // 入らないものを入ったことにはしない。**
+                        if at < pending.bytes.len() {
+                            pending.bytes[at] = *byte;
+                            pending.length = at + 1;
+                        }
                     }
-                    let _ = index;
                 }
             }
-            continue;
         }
-
-        // **バイトへ落とす。** 行の区切りも編集もここでは持たない。
-        let byte = match event {
-            crate::keyboard::decode::KeyEvent::Char(character) => {
-                // **ASCII だけを通す。** デコーダは US 配列で、非 ASCII を出さない。
-                if character.is_ascii() {
-                    character as u8
-                } else {
-                    continue;
-                }
-            }
-            crate::keyboard::decode::KeyEvent::Enter => b'\n',
-            crate::keyboard::decode::KeyEvent::Backspace => 0x08,
-            // **バイトへ落とせないものは落とす。** 上下や Home などで、
-            // **行の編集を持つ層が要る形である**（`docs/vision.md` の `zi`）。
-            // **左右の矢印は上で 3 バイトへ落としてある。**
-            crate::keyboard::decode::KeyEvent::Unsupported(_) => continue,
-            // 上の分岐で返しているので、ここへは来ない。
-            crate::keyboard::decode::KeyEvent::ArrowLeft
-            | crate::keyboard::decode::KeyEvent::ArrowRight => continue,
-        };
-        dst[written] = byte;
-        written += 1;
     }
 
     DELIVERED.fetch_add(written as u64, Ordering::SeqCst);
     written
+}
+
+/// [`bytes_for_event`] が返す、Ring 3 へ届けるバイトの形。
+pub(crate) enum DeliveredBytes {
+    /// 届けない（バイトへ落とせないキー）。
+    None,
+    /// 1 バイト。
+    Single(u8),
+    /// CSI の 3 バイト列。**不可分に届ける**（下の doc）。
+    Csi(&'static [u8; 3]),
+}
+
+/// キーイベントからバイト列への写像（zi-a で純粋関数へ切り出した）。
+///
+/// # Esc 単体と CSI の出し分け
+///
+/// **Esc キーは素の 1 バイト（`\x1b`）、矢印は CSI の 3 バイト列である**
+/// （`\x1b[D` / `\x1b[C` / `\x1b[A` / `\x1b[B`。S12 前の手当てで左右、zi-a で
+/// 上下）。**形は ANSI の CSI である**——`ADR-0029` が画面制御に ANSI を
+/// 選んでいるので、入力の側も同じ表現にしておくと後で噛み合う。
+/// **解釈するのはシェルや `zi` であって、コンソールではない**——この列が
+/// `Grid` へ届くことはない。
+///
+/// **受け手は「`\x1b` の直後に `[` が続くか」で区別する。** カーネル側の
+/// 保証は 1 つ——**CSI の 3 バイトはここで不可分に組み立てられ、間に他の
+/// キーのバイトが挟まらない**（`read_bytes` はイベント 1 つを写してから次を
+/// 取り出す。`dst` に入り切らない残りも [`PENDING`] が順序を保って預かる）。
+/// したがって受け手が `\x1b` を読んで**次のバイトがすぐ取れないなら、それは
+/// Esc 単体である**——人間が Esc と `[` を同じ read に収まる速さで打つことは
+/// なく、`zi` はこの規約で足りる（vi と同じ割り切りである）。
+/// **不可分の保証があるので、この判別は確定である**——`\x1b` の直後の `read` が
+/// `-EAGAIN` を返したら、それは CSI の途中ではありえない。**本物の端末と違い
+/// ESC タイムアウトの曖昧さが生じず、`zi` はタイムアウト機構を作らずに済む。**
+///
+/// # `Char` は ASCII だけを通す
+///
+/// デコーダは US 配列で、非 ASCII を出さない。ここで落とすのは二重の守りである。
+pub(crate) fn bytes_for_event(event: crate::keyboard::decode::KeyEvent) -> DeliveredBytes {
+    use crate::keyboard::decode::KeyEvent;
+    match event {
+        KeyEvent::Char(character) => {
+            if character.is_ascii() {
+                DeliveredBytes::Single(character as u8)
+            } else {
+                DeliveredBytes::None
+            }
+        }
+        KeyEvent::Enter => DeliveredBytes::Single(b'\n'),
+        KeyEvent::Backspace => DeliveredBytes::Single(0x08),
+        // **Esc は素の 1 バイトである（zi-a）。** CSI に包むと「Esc を押した」が
+        // 表せなくなる——`zi` のノーマルモード入りは Esc 単体で起きる。
+        KeyEvent::Escape => DeliveredBytes::Single(0x1b),
+        KeyEvent::ArrowLeft => DeliveredBytes::Csi(b"\x1b[D"),
+        KeyEvent::ArrowRight => DeliveredBytes::Csi(b"\x1b[C"),
+        KeyEvent::ArrowUp => DeliveredBytes::Csi(b"\x1b[A"),
+        KeyEvent::ArrowDown => DeliveredBytes::Csi(b"\x1b[B"),
+        // **バイトへ落とせないものは落とす。** Home / End などで、
+        // 扱う層がまだ無い（扱うと決めたら decode 側で種を得る。zi-a の形）。
+        KeyEvent::Unsupported(_) => DeliveredBytes::None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bytes_for_event, DeliveredBytes};
+    use crate::keyboard::decode::KeyEvent;
+
+    /// **Esc は素の 1 バイト、矢印は CSI**——出し分けの規約を固定する（zi-a）。
+    #[test]
+    fn esc_is_a_bare_byte_and_arrows_are_csi_sequences() {
+        assert!(matches!(
+            bytes_for_event(KeyEvent::Escape),
+            DeliveredBytes::Single(0x1b)
+        ));
+        assert!(matches!(
+            bytes_for_event(KeyEvent::ArrowUp),
+            DeliveredBytes::Csi(b"\x1b[A")
+        ));
+        assert!(matches!(
+            bytes_for_event(KeyEvent::ArrowDown),
+            DeliveredBytes::Csi(b"\x1b[B")
+        ));
+        assert!(matches!(
+            bytes_for_event(KeyEvent::ArrowLeft),
+            DeliveredBytes::Csi(b"\x1b[D")
+        ));
+        assert!(matches!(
+            bytes_for_event(KeyEvent::ArrowRight),
+            DeliveredBytes::Csi(b"\x1b[C")
+        ));
+    }
+
+    /// 既存の 1 バイト系と「落とすもの」が変わっていないこと。
+    #[test]
+    fn plain_bytes_and_dropped_events_are_unchanged() {
+        assert!(matches!(
+            bytes_for_event(KeyEvent::Char('a')),
+            DeliveredBytes::Single(b'a')
+        ));
+        assert!(matches!(
+            bytes_for_event(KeyEvent::Enter),
+            DeliveredBytes::Single(b'\n')
+        ));
+        assert!(matches!(
+            bytes_for_event(KeyEvent::Backspace),
+            DeliveredBytes::Single(0x08)
+        ));
+        assert!(matches!(
+            bytes_for_event(KeyEvent::Unsupported(0x47)),
+            DeliveredBytes::None
+        ));
+    }
 }
