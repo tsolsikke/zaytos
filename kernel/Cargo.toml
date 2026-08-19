@@ -86,6 +86,12 @@ keyboard-drop-arrows-test = []
 # 破壊（zi-a）: Esc を未対応へ戻す。Ring 3 へ `\x1b` が届かなくなるので、
 # `--shell-test` の「Esc `[` `D` の実打鍵が挿入点を動かした」判定が落ちる。
 keyboard-drop-esc-test = []
+# 検証（zi-b）: 起動シーケンスで ANSI の解釈を前景経路ごと実演し、判定行を
+# 出す。壊す経路ではない（exception-test 等と同じ検証用フック）。
+ansi-test = []
+# 破壊（zi-b）: 前景経路がパーサを通さず素のまま描く。zi-b 前の接続そのもの
+# ——CSI がグリフとして画面へ化けて出るので、ansi-test の判定が落ちる。
+ansi-console-skip-parse-test = []
 # 破壊（S12 前の手当て、C）: 中断（Ctrl+C）の旗を立てない。走っている子が
 # 止まらなくなる。
 kill-ignore-interrupt-test = []

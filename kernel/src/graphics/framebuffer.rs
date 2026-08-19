@@ -66,6 +66,27 @@ impl Framebuffer {
         }
     }
 
+    /// 1 ピクセルを生の値で読む。画面外は `None`（zi-b の判定用）。
+    ///
+    /// **判定のために置いた**——ANSI の消去がセルを背景へ戻したことを、
+    /// バックバッファを読んで確かめる（`ansi-test`）。描画経路は使わない。
+    pub fn read_pixel_raw(&self, x: u32, y: u32) -> Option<u32> {
+        let offset = self.layout.pixel_offset_bytes(x, y)?;
+        // SAFETY: offset は pixel_offset_bytes が返した検証済みの値であり、
+        // 構築時検証により offset + BYTES_PER_PIXEL <= size_bytes が成り立つ。
+        // base..end は new の安全性要件によりマップ済み・排他所有で、読みは
+        // 書きと同じ範囲・同じ整列（4 バイト境界）である。volatile なのは
+        // write_pixel と同じ理由（読み返しの最適化を許さない）。
+        Some(unsafe {
+            core::ptr::read_volatile(
+                self.layout
+                    .base()
+                    .as_mut_ptr::<u32>()
+                    .byte_add(offset as usize),
+            )
+        })
+    }
+
     /// 矩形を塗る。画面外へはみ出す分は切り詰める。
     pub fn fill_rect(&mut self, x: u32, y: u32, width: u32, height: u32, color: Color) {
         let Some(rect) = self.layout.clip_rect(x, y, width, height) else {

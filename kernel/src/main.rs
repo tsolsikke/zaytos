@@ -1073,6 +1073,12 @@ extern "sysv64" fn kernel_main() -> ! {
         announce_console_start(&mut logger, console);
     }
 
+    // **ANSI の解釈の実演（zi-b）。** 起動シーケンスで走り、判定は決定的である。
+    #[cfg(feature = "ansi-test")]
+    if let Some(console) = console.as_mut() {
+        exercise_ansi_console(&mut logger, console);
+    }
+
     // === M2-e: カーネルヒープ ===
 
     let heap_frame_count = heap::DEFAULT_HEAP_FRAME_COUNT;
@@ -2167,6 +2173,149 @@ fn init_console(
             None
         }
     }
+}
+
+/// ANSI の解釈を前景経路で実演し、判定行を出す（zi-b。ADR-0029）。
+///
+/// # 前景経路を通す
+///
+/// **`write_foreground_bytes` へ渡す**——`sys_write` が使うのと同じ入口である。
+/// `Console` のメソッドを直に呼ぶと、**「パーサが居ても前景経路が呼ばない」
+/// 破壊（`ansi-console-skip-parse-test`。接続の取り違え）がすり抜ける。**
+///
+/// # 判定はバックバッファとカーソルで行う
+///
+/// 画面（フレームバッファ）そのものはシリアルから観測できないが、
+/// **カーソル位置（`cursor_cell`）とセルの中身（`cell_has_ink`。バック
+/// バッファの読み出し）は判定行に出せる。** 転送の正しさはここでは
+/// 主張しない——それは既存の flush の検証（M3）が持つ。
+///
+/// # 起動シーケンスで走る
+///
+/// タイミングに依存しない（`sendkey` を使わない）ので、判定は決定的である。
+#[cfg(feature = "ansi-test")]
+fn exercise_ansi_console(logger: &mut Logger<SerialPort>, console: &mut Console) {
+    // まっさらから始める。判定を既知の状態に固定する。
+    console.clear();
+    let foreground = kernel::console::install_foreground(console);
+
+    // (1) CUP。1 起点の (3;7) はセル (col 6, row 2) である。
+    kernel::console::write_foreground_bytes(b"\x1b[3;7H");
+    drop(foreground);
+    let after_cup = console.cursor_cell();
+    logger.info(format_args!(
+        "ansi-test: cursor after CUP(3;7) = {after_cup:?} (expected (6, 2)), matches = {}",
+        after_cup == (6, 2)
+    ));
+
+    // (2) その位置へ印字。セルにインクが載り、カーソルが 1 つ進む。
+    let foreground = kernel::console::install_foreground(console);
+    kernel::console::write_foreground_bytes(b"Z");
+    drop(foreground);
+    let inked = console.cell_has_ink(6, 2);
+    let after_print = console.cursor_cell();
+    logger.info(format_args!(
+        "ansi-test: the cell under CUP got ink = {inked}, cursor advanced = {}",
+        after_print == (7, 2)
+    ));
+
+    // (3) 列が 2 回の write に割れても解釈される（状態の持ち越し）。
+    //
+    // **`install_foreground` はパーサを reset する**ので、据えたまま
+    // 2 回に分けて送る（実際の `sys_write` の刻みと同じ形である）。
+    let foreground = kernel::console::install_foreground(console);
+    kernel::console::write_foreground_bytes(b"\x1b[");
+    kernel::console::write_foreground_bytes(b"5;1H");
+    drop(foreground);
+    let after_split = console.cursor_cell();
+    logger.info(format_args!(
+        "ansi-test: a sequence split across two writes still moved the cursor = {}",
+        after_split == (0, 4)
+    ));
+
+    // (4) EL(2)。行に書いた 4 文字が消え、カーソルは動かない。
+    let foreground = kernel::console::install_foreground(console);
+    kernel::console::write_foreground_bytes(b"zzzz\x1b[2K");
+    drop(foreground);
+    let line_erased = !console.cell_has_ink(0, 4)
+        && !console.cell_has_ink(3, 4)
+        && console.cursor_cell() == (4, 4);
+    logger.info(format_args!(
+        "ansi-test: EL(2) erased the line and left the cursor = {line_erased}"
+    ));
+
+    // (5) ED(2)。(2) で置いた Z が消え、カーソルは動かない。
+    let foreground = kernel::console::install_foreground(console);
+    kernel::console::write_foreground_bytes(b"\x1b[2J");
+    drop(foreground);
+    let display_erased = !console.cell_has_ink(6, 2) && console.cursor_cell() == (4, 4);
+    logger.info(format_args!(
+        "ansi-test: ED(2) erased the display and left the cursor = {display_erased}"
+    ));
+
+    // (5b) EL(0) と EL(1)。**0・1 の変種の検証はここが持つ**——消去の真実は
+    // バックバッファ（描画層）にあり、ホストで固定できるのはスコープの解釈
+    // （パーサ側の 12 本）だけである。
+    //
+    // 行 6 に `abcd` を置き、カーソルをセル 2（`c` の上）へ戻して EL(0)。
+    // **右（c・d）が消え、左（a・b）が残る。** カーソルは動かない。
+    let foreground = kernel::console::install_foreground(console);
+    kernel::console::write_foreground_bytes(b"\x1b[6;1Habcd\x1b[6;3H\x1b[0K");
+    drop(foreground);
+    let el0 = console.cell_has_ink(0, 5)
+        && console.cell_has_ink(1, 5)
+        && !console.cell_has_ink(2, 5)
+        && !console.cell_has_ink(3, 5)
+        && console.cursor_cell() == (2, 5);
+    logger.info(format_args!(
+        "ansi-test: EL(0) erased right of the cursor and kept the left = {el0}"
+    ));
+
+    // EL(1)。**左（a・b。カーソルのセルを含む）が消える。**
+    let foreground = kernel::console::install_foreground(console);
+    kernel::console::write_foreground_bytes(b"\x1b[1K");
+    drop(foreground);
+    let el1 = !console.cell_has_ink(0, 5) && !console.cell_has_ink(1, 5);
+    logger.info(format_args!(
+        "ansi-test: EL(1) erased left of the cursor = {el1}"
+    ));
+
+    // (5c) ED(0) と ED(1)。行 7・8・9 の頭に印を置き、カーソルを行 8 の
+    // セル 1 へ。ED(0) は**下（行 9）と行 8 のカーソル以後**を消し、
+    // **上（行 7）と行 8 のカーソルより左（セル 0 の印）を残す。**
+    let foreground = kernel::console::install_foreground(console);
+    kernel::console::write_foreground_bytes(b"\x1b[7;1Hp\x1b[8;1Hq\x1b[9;1Hr\x1b[8;2H\x1b[0J");
+    drop(foreground);
+    let ed0 = console.cell_has_ink(0, 6)
+        && console.cell_has_ink(0, 7)
+        && !console.cell_has_ink(0, 8)
+        && console.cursor_cell() == (1, 7);
+    logger.info(format_args!(
+        "ansi-test: ED(0) erased below and kept above = {ed0}"
+    ));
+
+    // ED(1)。**上（行 7）と行 8 のカーソルまでが消える。**
+    let foreground = kernel::console::install_foreground(console);
+    kernel::console::write_foreground_bytes(b"\x1b[1J");
+    drop(foreground);
+    let ed1 = !console.cell_has_ink(0, 6) && !console.cell_has_ink(0, 7);
+    logger.info(format_args!(
+        "ansi-test: ED(1) erased above and up to the cursor = {ed1}"
+    ));
+
+    // (6) 知らない終端（SGR）は列ごと読み捨てられ、画面に化けて出ない。
+    let foreground = kernel::console::install_foreground(console);
+    kernel::console::write_foreground_bytes(b"\x1b[31m");
+    drop(foreground);
+    // (5c) の後、カーソルはセル (1, 7) にある。SGR で動かず、化けて出ない。
+    let sgr_ignored = !console.cell_has_ink(1, 7) && console.cursor_cell() == (1, 7);
+    logger.info(format_args!(
+        "ansi-test: an SGR sequence was consumed without printing = {sgr_ignored}"
+    ));
+
+    // 締めてから通常の起動へ戻る。画面に実演の残骸を残さない。
+    console.clear();
+    logger.info(format_args!("ansi-test: done"));
 }
 
 /// シリアルへ書き、コンソールがあれば画面にも同じ内容を書く（M3-c-3）。
@@ -8633,6 +8782,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "keyboard-drop-esc-test",
         cfg!(feature = "keyboard-drop-esc-test"),
         "Esc を未対応へ戻し、Ring 3 へ 0x1b が届かないようにする",
+    ),
+    (
+        "ansi-test",
+        cfg!(feature = "ansi-test"),
+        "起動シーケンスで ANSI の解釈を前景経路ごと実演する",
+    ),
+    (
+        "ansi-console-skip-parse-test",
+        cfg!(feature = "ansi-console-skip-parse-test"),
+        "前景経路が ANSI パーサを通さず素のまま描く",
     ),
     (
         "kill-ignore-interrupt-test",

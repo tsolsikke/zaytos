@@ -131,6 +131,16 @@ impl Grid {
         (self.cursor_column, self.cursor_row)
     }
 
+    /// カーソルを指定のセルへ動かす（zi-b。ANSIのCUPが使う）。
+    ///
+    /// **端で切り詰める。** 画面より大きい値は右端・下端に丸まる——
+    /// カーソルが画面外を指さないことの保証は`break_line`と同じで、
+    /// この型が持つ。**0起点である**（1起点からの変換は呼び出し側）。
+    pub fn set_cursor(&mut self, column: u32, row: u32) {
+        self.cursor_column = column.min(self.columns - 1);
+        self.cursor_row = row.min(self.rows - 1);
+    }
+
     /// 1 文字を処理し、描画側がやるべきことを返す。
     ///
     /// `width_cells` はそのグリフが占めるセル数（半角なら 1、全角なら 2）。
@@ -253,6 +263,18 @@ impl Grid {
 
 #[cfg(test)]
 mod tests {
+    /// **CUPの切り詰め（zi-b）。** 画面内はそのまま、画面外は端に丸まる。
+    #[test]
+    fn set_cursor_clamps_to_the_grid() {
+        let mut grid = super::Grid::new(10, 5).unwrap();
+        grid.set_cursor(3, 2);
+        assert_eq!(grid.cursor(), (3, 2));
+        grid.set_cursor(99, 99);
+        assert_eq!(grid.cursor(), (9, 4), "右端・下端に丸まる");
+        grid.set_cursor(0, 0);
+        assert_eq!(grid.cursor(), (0, 0));
+    }
+
     use super::*;
 
     const HALF: u32 = 1;

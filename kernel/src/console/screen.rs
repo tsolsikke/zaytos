@@ -178,6 +178,94 @@ impl Console {
         self.foreground = color;
     }
 
+    /// カーソルのセル位置 `(column, row)`（zi-b の判定行が読む）。
+    pub fn cursor_cell(&self) -> (u32, u32) {
+        self.grid.cursor()
+    }
+
+    /// カーソルをセルへ動かす（zi-b。ANSI の CUP が使う）。
+    ///
+    /// **0 起点である。** 1 起点からの変換は呼び出し側（`console::mod` の
+    /// 前景経路）が行う。端の切り詰めは [`Grid::set_cursor`] が持つ。
+    pub fn cursor_to_cell(&mut self, column: u32, row: u32) {
+        self.grid.set_cursor(column, row);
+    }
+
+    /// 行のセル範囲 `[from, to)` を背景で塗る（zi-b の消去の部品）。
+    fn erase_cells(&mut self, row: u32, from: u32, to: u32) {
+        if from >= to {
+            return;
+        }
+        let x = from * font::CELL_WIDTH;
+        let y = row * font::GLYPH_HEIGHT;
+        let width = (to - from) * font::CELL_WIDTH;
+        self.back
+            .surface_mut()
+            .fill_rect(x, y, width, font::GLYPH_HEIGHT, self.background);
+        self.dirty.mark(x, y, width, font::GLYPH_HEIGHT);
+    }
+
+    /// 行消去（EL。zi-b）。**カーソルは動かさない。**
+    ///
+    /// 範囲は ANSI の規約どおり——`After` と `Before` はどちらもカーソルの
+    /// セルを含む。
+    pub fn erase_in_line(&mut self, scope: common::ansi::EraseScope) {
+        use common::ansi::EraseScope;
+        let (column, row) = self.grid.cursor();
+        let columns = self.grid.columns();
+        match scope {
+            EraseScope::After => self.erase_cells(row, column, columns),
+            EraseScope::Before => self.erase_cells(row, 0, column + 1),
+            EraseScope::All => self.erase_cells(row, 0, columns),
+        }
+    }
+
+    /// 画面消去（ED。zi-b）。**カーソルは動かさない**——ここが [`Self::clear`]
+    /// との違いである（ANSI の ED はカーソルを移さない。`zi` は ED の後に
+    /// CUP を送る）。
+    pub fn erase_in_display(&mut self, scope: common::ansi::EraseScope) {
+        use common::ansi::EraseScope;
+        let (column, row) = self.grid.cursor();
+        let (columns, rows) = (self.grid.columns(), self.grid.rows());
+        match scope {
+            EraseScope::After => {
+                self.erase_cells(row, column, columns);
+                for below in row + 1..rows {
+                    self.erase_cells(below, 0, columns);
+                }
+            }
+            EraseScope::Before => {
+                for above in 0..row {
+                    self.erase_cells(above, 0, columns);
+                }
+                self.erase_cells(row, 0, column + 1);
+            }
+            EraseScope::All => {
+                self.back.clear_all(self.background);
+                self.dirty.mark_all();
+            }
+        }
+    }
+
+    /// セルの中に背景色でないピクセルが在るか（zi-b の判定用）。
+    ///
+    /// **バックバッファを読む**ので、転送（flush）前でも判定できる。
+    /// 画面外のセルは「無い」。
+    pub fn cell_has_ink(&mut self, column: u32, row: u32) -> bool {
+        let expected = self.background.to_pixel(self.back.layout().format());
+        let x = column * font::CELL_WIDTH;
+        let y = row * font::GLYPH_HEIGHT;
+        for dy in 0..font::GLYPH_HEIGHT {
+            for dx in 0..font::CELL_WIDTH {
+                let pixel = self.back.surface_mut().read_pixel_raw(x + dx, y + dy);
+                if pixel.is_some_and(|raw| raw != expected) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// 画面全体を背景色に戻し、カーソルを左上へ移す。
     pub fn clear(&mut self) {
         self.back.clear_all(self.background);

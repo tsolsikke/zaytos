@@ -1315,7 +1315,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
     const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
-       cargo xtask run --shell-test [--drop-arrows | --drop-esc]
+       cargo xtask run --shell-test [--drop-arrows | --drop-esc]\n       cargo xtask run --ansi-test [--sabotage FEATURE]
        cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
@@ -1429,6 +1429,15 @@ fn main() -> Result<()> {
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
                 return cmd_fs_image_extract(&features);
+            }
+            if rest.iter().any(|a| a == "--ansi-test") {
+                let features: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                return cmd_ansi_test(&features);
             }
             if rest.iter().any(|a| a == "--pci-test") {
                 let features: Vec<&str> = rest
@@ -3141,6 +3150,148 @@ const PCI_SABOTAGES: &[(&str, &str)] = &[
 /// **期待値を定数で持たない。** bus / device の並びは QEMU の側の事情なので、
 /// 同じ起動の QEMU から `info pci` で取り、カーネルの判定行と両側から比べる
 /// （S12 の `dumpe2fs` と同じ形——外の道具が独立した答えを持っている）。
+/// ANSI の解釈の実演（zi-b）。起動シーケンスの判定行を読む。
+///
+/// **`sendkey` を使わないので決定的である**——`ansi-test` feature の
+/// exercise が起動中に CSI を前景経路へ流し、カーソル位置とセルの中身を
+/// 判定行に出す。ここはそれを読むだけである。
+///
+/// `--sabotage` に破壊 feature（`ansi-console-skip-parse-test`）を与えると
+/// 一緒に立てる。**その場合の期待（落ちること）は呼び出し側が見る**
+/// （`cmd_fs_image_extract` と同じ形）。
+fn cmd_ansi_test(features: &[&str]) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let mut all_features: Vec<&str> = vec!["ansi-test"];
+    all_features.extend_from_slice(features);
+    let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    // **構成ごとに別のログへ書く**（`cmd_fs_image_extract` と同じ理由）。
+    let tag = all_features.join("-");
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("ansi-test-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the ansi test")?;
+
+    // 実演の終端行を待つ。上限つき。
+    let done_marker = "ansi-test: done";
+    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    while Instant::now() < deadline {
+        let text = fs::read_to_string(&serial_log).unwrap_or_default();
+        if text.contains(done_marker) {
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let context = if features.is_empty() {
+        "ansi-test".to_string()
+    } else {
+        format!("ansi-test {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    // **落ちる前に、起動の失敗と切り分ける**（他の QEMU 項目と同じ作法）。
+    let qemu_debug = fs::read_to_string(&debug_log).unwrap_or_default();
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    // **判定は exercise が出した 6 行である。** それぞれ「出たか」を見る——
+    // 破壊ビルドでは値が false になるか、カーソルがずれて期待の行が出ない。
+    let judgements: &[(&str, &str)] = &[
+        (
+            "CUP moved the cursor",
+            "cursor after CUP(3;7) = (6, 2) (expected (6, 2)), matches = true",
+        ),
+        (
+            "printing at the cursor left ink",
+            "the cell under CUP got ink = true, cursor advanced = true",
+        ),
+        (
+            "a split sequence still parsed",
+            "a sequence split across two writes still moved the cursor = true",
+        ),
+        (
+            "EL(2) erased the line",
+            "EL(2) erased the line and left the cursor = true",
+        ),
+        (
+            "EL(0) erased right and kept left",
+            "EL(0) erased right of the cursor and kept the left = true",
+        ),
+        (
+            "EL(1) erased left",
+            "EL(1) erased left of the cursor = true",
+        ),
+        (
+            "ED(0) erased below and kept above",
+            "ED(0) erased below and kept above = true",
+        ),
+        (
+            "ED(1) erased above",
+            "ED(1) erased above and up to the cursor = true",
+        ),
+        (
+            "ED(2) erased the display",
+            "ED(2) erased the display and left the cursor = true",
+        ),
+        (
+            "SGR was consumed silently",
+            "an SGR sequence was consumed without printing = true",
+        ),
+    ];
+    let mut all_ok = true;
+    for (name, needle) in judgements {
+        let ok = serial.contains(needle);
+        println!("{context}: {name} = {ok}");
+        all_ok &= ok;
+    }
+    if !serial.contains(done_marker) {
+        println!("{context}: the exercise did not reach its end marker");
+        all_ok = false;
+    }
+
+    if all_ok {
+        println!("{context}: PASS");
+        Ok(())
+    } else {
+        bail!("{context}: FAILED")
+    }
+}
+
 fn cmd_pci_test(features: &[&str]) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
@@ -8923,6 +9074,34 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             }
         }
 
+        // **ANSI の解釈の実演（zi-b。ADR-0029）。** 起動シーケンスで CSI を
+        // 前景経路へ流し、カーソル位置とセルの中身を判定行で見る。
+        // sendkey を使わないので決定的である。
+        total += 1;
+        println!(
+            "=== xtask check: the console interprets CUP / ED / EL through the foreground path"
+        );
+        match cmd_ansi_test(&[]) {
+            Ok(()) => println!("--- ansi test: OK"),
+            Err(error) => {
+                println!("--- ansi test: FAILED ({error})");
+                failed.push("ansi test".to_string());
+            }
+        }
+
+        // **破壊の側（zi-b）。** パーサは在るのに前景経路が呼ばない——
+        // 接続の取り違えである。CSI がグリフとして化けて出るので、
+        // カーソル位置とセルの判定が落ちる。
+        total += 1;
+        println!("=== xtask check: the ansi test catches a foreground path that skips the parser");
+        match cmd_ansi_test(&["ansi-console-skip-parse-test"]) {
+            Ok(()) => {
+                println!("--- ansi test (skip parse): FAILED (the sabotage was NOT caught)");
+                failed.push("ansi test (skip parse)".to_string());
+            }
+            Err(_) => println!("--- ansi test (skip parse): OK (the sabotage was caught)"),
+        }
+
         // **中断（Ctrl+C）の破壊（S12 前の手当て、C）。**
         //
         // **5 つとも「通らないこと」を期待する**（`ShellTestMode::MustFail`）。
@@ -9698,7 +9877,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 190,
+    full: 192,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

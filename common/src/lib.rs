@@ -10,6 +10,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod addr;
+pub mod ansi;
 pub mod boot_info;
 pub mod cpu;
 pub mod critical;

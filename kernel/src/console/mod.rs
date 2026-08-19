@@ -68,8 +68,30 @@ impl Drop for ForegroundConsole<'_> {
     }
 }
 
+/// 前景経路の ANSI の状態機械（zi-b。ADR-0029）。
+///
+/// # なぜ静的が要るのか
+///
+/// **1 つの CSI 列が 2 回の `write` に割れて届くことがある**（システムコールは
+/// ページ単位で刻む）。状態は `write` をまたいで保つ必要があり、
+/// [`FOREGROUND`] と同じ理由で静的に置く。
+///
+/// # 取り方——写して返す
+///
+/// **[`write_foreground_bytes`] はロックを保持したまま描かない。**
+/// `Locked` は保持中の割り込みを禁じるが、1 行の描画と転送は 1 ティックの
+/// 半分ほど掛かる（この関数の doc）。**入るときに写しを取り、描き終えてから
+/// 書き戻す。** 写しで済むのは書き手が 1 つだからである（[`FOREGROUND`] の
+/// doc の保証と同じ根拠。同時に 2 つの `write` は走らない）。
+static FOREGROUND_ANSI: common::critical::Locked<common::ansi::AnsiParser> =
+    common::critical::Locked::new(common::ansi::AnsiParser::new());
+
 /// 前景の [`Console`] を据える。**ガードが落ちるまで有効である。**
 pub fn install_foreground(console: &mut Console) -> ForegroundConsole<'_> {
+    // **ANSI の状態を最初へ戻す（zi-b）。** 前のプログラムが CSI 列の途中で
+    // 死んでいても、次のプログラムの 1 字目が列の続きに化けない
+    // （`release_foreground` が溜まった入力を捨てるのと同じ向きの手当て）。
+    FOREGROUND_ANSI.lock().reset();
     FOREGROUND.store(console as *mut Console, Ordering::Release);
     ForegroundConsole { _console: console }
 }
@@ -90,6 +112,8 @@ pub fn foreground_installed() -> bool {
 /// **1 行の描画と転送は 1 ティックの半分ほど掛かる**ので、保持したまま呼ぶと
 /// その間もう一方のコアがカーネルへ入れない（実測は `console:` の判定行にある）。
 pub fn write_foreground_bytes(bytes: &[u8]) {
+    // **破壊ビルドだけが `write_str` を使う**（既定はパーサ経由で `put_char`）。
+    #[cfg(feature = "ansi-console-skip-parse-test")]
     use core::fmt::Write as _;
 
     let console = FOREGROUND.load(Ordering::Acquire);
@@ -103,8 +127,43 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
     // **UTF-8 でないバイトは落とす。** Ring 3 から来る列に UTF-8 を要求しない
     // （`load_user_program` の `argv` と同じ立場）。画面へ出せるのは字だけである。
     if let Ok(text) = core::str::from_utf8(bytes) {
-        let _ = console.write_str(text);
-        console.flush();
+        // 破壊 (zi-b, ansi-console-skip-parse-test): パーサを通さず素のまま描く。
+        // **zi-b 前の接続そのものである**——パーサは在るのに前景経路が呼ばない。
+        // CSI がグリフとして画面に出る（`[2;5H` が化けて見える）ので、
+        // `ansi-test` のカーソル位置とセルの判定が落ちる。
+        #[cfg(feature = "ansi-console-skip-parse-test")]
+        {
+            let _ = console.write_str(text);
+            console.flush();
+            return;
+        }
+        // **前景経路が ANSI を解釈する（zi-b。ADR-0029）。** 出す側
+        // （`sys_write` の fd 1/2）の経路は不変で、解釈はここに集まる。
+        // カーネルのログの経路（`Console::write_str` を直に呼ぶ側）は
+        // 通らない——ログの行に CSI は無く、通す理由が無い。
+        #[cfg(not(feature = "ansi-console-skip-parse-test"))]
+        {
+            // **写しを取り、描き終えてから書き戻す**（[`FOREGROUND_ANSI`] の doc）。
+            let mut parser = *FOREGROUND_ANSI.lock();
+            for c in text.chars() {
+                match parser.feed(c) {
+                    None => {}
+                    Some(common::ansi::AnsiAction::Print(c)) => console.put_char(c),
+                    Some(common::ansi::AnsiAction::CursorTo { row, col }) => {
+                        // **1 起点から 0 起点へ。** 端の切り詰めは Grid が持つ。
+                        console.cursor_to_cell(col - 1, row - 1);
+                    }
+                    Some(common::ansi::AnsiAction::EraseDisplay(scope)) => {
+                        console.erase_in_display(scope)
+                    }
+                    Some(common::ansi::AnsiAction::EraseLine(scope)) => {
+                        console.erase_in_line(scope)
+                    }
+                }
+            }
+            console.flush();
+            *FOREGROUND_ANSI.lock() = parser;
+        }
     }
 }
 
