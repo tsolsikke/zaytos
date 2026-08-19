@@ -110,6 +110,7 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
         "cat",
         "zash",
         "spin",
+        "bss-test",
     ];
 
     // **共有する包み（S11-9）。** `ls` と `cat` が `mod userlib;` で取り込む。
@@ -265,7 +266,15 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     // **`spawn-test` は `USER_PROGRAMS` に載っていない。** 上から走らせると
     // 深さ 1 になり、孫の `spawn` が成功してしまう。**`syscall-test` が
     // 深さ 2 で起こすためだけに、像の中に居る。**
-    for name in ["hello", "spawn-test", "ls", "cat", "zash", "spin"] {
+    for name in [
+        "hello",
+        "spawn-test",
+        "ls",
+        "cat",
+        "zash",
+        "spin",
+        "bss-test",
+    ] {
         std::fs::copy(
             format!("{out_dir}/{name}.elf"),
             format!("{staging}/bin/{name}"),

@@ -596,10 +596,32 @@ fn load_user_program_into(
     // 張った VA と、期待する W を覚えておく（後で読み戻して照合する）。
     let mut mapped: [(u64, bool); 8] = [(0, false); 8];
     let mut mapped_count = 0usize;
+    // 実際に写像し終えた区画の本数（ADR-0039 の判定行）。
+    let mut loaded_segments = 0usize;
+    // 共有として飛ばしたページの数（ADR-0039 の判定行）。
+    let mut shared_pages = 0usize;
+    // **直前の区画の最終ページと終端アドレス。** 共有を許す条件に両方が要る
+    // （ADR-0039）。**最初の区画には直前が無いので、共有は起こりえない。**
+    let mut previous_last_page: Option<u64> = None;
+    let mut previous_end: u64 = 0;
+
+    // **ELF が持つ区画の本数を先に数える（ADR-0039 の切り分け）。**
+    //
+    // **「張った本数」だけでは足りない。** 3 行出たとき、**それが正しい 3 本
+    // なのか、4 本のうち 1 本を落とした 3 本なのかが行から読めない**
+    // ——実際にその区別が付かず、切り分けが遠回りになった。
+    // **本数の対（持っている / 張った）を同じ行に出す。**
+    let declared_segments = elf.load_segments().count();
 
     for ph in elf.load_segments() {
         let writable = ph.p_flags & 0x2 != 0;
         let first_page = ph.p_vaddr & !(PAGE_SIZE - 1);
+        // 破壊 (ADR-0039, user-load-filesz-only): `memsz` ではなく `filesz` で
+        // 最終ページを出す。**`.bss` が張られない**——`/bin/bss-test` が
+        // ゼロを読もうとして落ちる（この変更が入る前の欠落そのものである）。
+        #[cfg(feature = "user-load-filesz-only")]
+        let last_page = (ph.p_vaddr + ph.p_filesz.max(1) - 1) & !(PAGE_SIZE - 1);
+        #[cfg(not(feature = "user-load-filesz-only"))]
         let last_page = (ph.p_vaddr + ph.p_memsz - 1) & !(PAGE_SIZE - 1);
 
         let file = match elf.segment_data(&ph) {
@@ -609,6 +631,35 @@ fn load_user_program_into(
 
         let mut page = first_page;
         while page <= last_page {
+            // **正当な共有ページは飛ばす（ADR-0039）。**
+            //
+            // **条件は 2 つで、どちらも ELF の仕様から導ける。**
+            //
+            // 1. **そのページが直前の区画の最終ページと一致すること**
+            // 2. **この区画の先頭が、直前の区画の終端以降であること**
+            //    （`p_vaddr >= previous_end`）——**区画どうしがアドレスの上で
+            //    重ならないこと**である。`lld` は `.bss` を `.data` の直後
+            //    （同じページの途中）から始めるので、**境界のページだけを
+            //    共有する形は正当である。**
+            //
+            // **2 つ目が要る。** 1 つ目だけだと、`user-load-corrupt` の
+            // 「前の区画のページへ `p_vaddr` を動かす」破壊が通ってしまう
+            // （**実測でそうなった**）——`hello` の 1 本目は 0x42 バイトしか
+            // 無いので**最終ページが先頭ページと同じ**で、破壊が狙う
+            // `0x400030` も同じページに落ちる。**違うのは、あちらが直前の
+            // 区画の中身の内側（終端 0x400042 より前）を指すことである。**
+            //
+            // **確保もゼロ埋めもやり直さない。** そのページは直前の区画が
+            // 既にゼロ埋めしてファイルの中身を重ねてあり、**新しい区画は
+            // その中身の直後から始まる**ので、**残りは既にゼロである。**
+            // **やり直すと直前の区画の中身を消す。**
+            if previous_last_page == Some(page) && page == first_page && ph.p_vaddr >= previous_end
+            {
+                shared_pages += 1;
+                page += PAGE_SIZE;
+                continue;
+            }
+
             let Some(frame) = allocator.allocate_frame() else {
                 return Err(UserLoadError::OutOfFrames);
             };
@@ -674,15 +725,31 @@ fn load_user_program_into(
             page += PAGE_SIZE;
         }
 
+        // **ページ範囲も出す（ADR-0039）。** 区画どうしがページを共有する形は
+        // ELF では正当なので、**重なりが行から読める**ようにしておく。
         logger.info(format_args!(
-            "user-load: {} mapped PT_LOAD {:#x}..{:#x} (filesz={:#x} memsz={:#x} w={writable})",
+            "user-load: {} mapped PT_LOAD {:#x}..{:#x} (filesz={:#x} memsz={:#x} w={writable}) \
+             pages {:#x}..{:#x}",
             process.name,
             ph.p_vaddr,
             ph.p_vaddr + ph.p_memsz,
             ph.p_filesz,
-            ph.p_memsz
+            ph.p_memsz,
+            first_page,
+            last_page
         ));
+        loaded_segments += 1;
+        previous_last_page = Some(last_page);
+        previous_end = ph.p_vaddr + ph.p_memsz;
     }
+
+    // **本数の対。** 落ちた区画があれば、この 1 行で分かる。
+    logger.info(format_args!(
+        "user-load: {} PT_LOAD segments: declared={declared_segments} mapped={loaded_segments} \
+         (they must match; a gap means a segment was skipped), pages shared with the previous \
+         segment={shared_pages}",
+        process.name
+    ));
 
     // ユーザースタックを 1 枚。**こちらは書ける。**
     let stack_page = USER_PROGRAM_STACK_TOP - PAGE_SIZE;
@@ -1259,7 +1326,18 @@ pub fn spawn(
         consumed == quarantined
     ));
 
-    let entry = outcome.map_err(SpawnError::Load)?;
+    // **ロードの失敗を 1 行で出す（ADR-0039）。**
+    //
+    // **以前は 1 行も出なかった。** 上の `ended ({child:?})` の行は
+    // **ロードに失敗しても印字される**ので、走ったように読める——
+    // **`/bin/zi` の切り分けが遠回りになった直接の原因である。**
+    let entry = match outcome {
+        Ok(entry) => entry,
+        Err(error) => {
+            logger.error(format_args!("spawn: {name} could not be loaded: {error:?}"));
+            return Err(SpawnError::Load(error));
+        }
+    };
     let _ = entry;
 
     if consumed != quarantined || all_leaked != 0 {

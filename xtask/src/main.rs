@@ -9206,6 +9206,19 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             Err(_) => println!("--- sparse read (refused): OK (the sabotage was caught)"),
         }
 
+        // **`.bss` を張らない破壊（ADR-0039）。** 既定の起動ログが
+        // `bss-check` の判定行を固定しているので、**破壊はその行が
+        // `Exited(0)` でなくなる形で出る**（実測では `Folded(14)`＝#PF）。
+        total += 1;
+        println!("=== xtask check: mapping segments by filesz drops the .bss");
+        match cmd_boot_with_features(&["user-load-filesz-only"], "bss-check", "Exited(0)") {
+            Ok(()) => {
+                println!("--- bss mapping (filesz only): FAILED (the sabotage was NOT caught)");
+                failed.push("bss mapping (filesz only)".to_string());
+            }
+            Err(_) => println!("--- bss mapping (filesz only): OK (the sabotage was caught)"),
+        }
+
         // **中断（Ctrl+C）の破壊（S12 前の手当て、C）。**
         //
         // **5 つとも「通らないこと」を期待する**（`ShellTestMode::MustFail`）。
@@ -9981,7 +9994,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 196,
+    full: 197,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

@@ -1738,6 +1738,10 @@ extern "sysv64" fn kernel_main() -> ! {
     //
     // **`console` を渡す（S12 前の手当て）。** メインループが抜けて画面の書き手が
     // 居なくなったので、**`init` が引き取る**（`run_init` の doc）。
+    // **`.bss` が張られていることを見る（ADR-0039 の到達条件 2）。**
+    // **`init` へ入る前である**——あちらは戻らない。
+    verify_bss_is_mapped(&mut logger);
+
     run_init(&mut logger, console.as_mut());
 }
 
@@ -4679,6 +4683,30 @@ fn try_copy_fs_image_to_frames(
 ///
 /// **止めない。`Err` を返さず判定行を出す**——読めなければ判定が偽になり、
 /// ホスト側（`--full` の項目）が落とす。
+/// `.bss` が張られていることを見る（ADR-0039 の到達条件 2）。
+///
+/// **`/bin/bss-test` を起こし、その終了状態を判定行に出す。**
+/// あちらは 3 つを主張する——`.bss` がゼロで読めること、書けること、
+/// **`.data` とページを共有していること**（共有していなければ、
+/// この判定は「`.bss` は読める」しか言えず、ADR-0039 が入れた経路を
+/// 通っていない）。
+///
+/// **止めない。判定行を出すだけである**——ホスト側（`--full` の項目と
+/// 起動ログの参照）が落とす。
+fn verify_bss_is_mapped(logger: &mut Logger<SerialPort>) {
+    /// 検査用プログラム。**`build.rs` が像へ置く。**
+    const BSS_TEST_PATH: &[u8] = b"/bin/bss-test";
+
+    /// `argv`。**NUL 終端の 1 本である**（`SHELL_ARGV` と同じ形）。
+    const BSS_TEST_ARGV: &[u8] = b"bss-test\0";
+
+    let outcome = kernel::userland::spawn(BSS_TEST_PATH, BSS_TEST_ARGV, 1);
+    logger.info(format_args!(
+        "bss-check: /bin/bss-test ended {outcome:?} (0 means the .bss reads as zero, keeps \
+         writes, and shares a page with .data)"
+    ));
+}
+
 fn verify_sparse_hole_reads_as_zeros(logger: &mut Logger<SerialPort>) {
     /// 穴のあるファイル。**`build.rs` が置く。**
     const SPARSE_PATH: &[u8] = b"/data/sparse-hole";
@@ -5533,7 +5561,8 @@ static mut CORRUPT_FS_IMAGE: [u8; CORRUPT_FS_LEN] = [0; CORRUPT_FS_LEN];
 /// 切り出すブロック数。**参照されている最大のブロックより大きいこと。**
 ///
 /// **実測で決める。** `dumpe2fs` の `Free blocks:` の先頭が使用の上端 + 1 で、
-/// ADR-0038 の時点では 82（使用は 0..81）である。
+/// ADR-0039 の時点では 86（使用は 0..85）である。**96 は余裕**——像へ 1 本
+/// 足すたびに直さずに済む幅を取ってある。
 const CORRUPT_FS_BLOCKS: usize = 96;
 
 /// 切り出した像のバイト数。
@@ -5574,9 +5603,10 @@ const FS_ROOT_INODE_AT: usize = fs_inode_at(2);
 /// **本体が 22 になっても直されていなかった**——**同じ数を 2 か所に書くと、
 /// 片方だけが古くなる。** 番号は下の式が持つ。
 ///
-/// **ADR-0038 で 24 から 25 へ動いた**（`/data/sparse-hole` を足した。
-/// `debugfs` で実測）。
-const FS_MOTD_INODE_AT: usize = fs_inode_at(25);
+/// **ADR-0038 で 24 から 25 へ、ADR-0039 で 25 から 26 へ動いた**
+/// （`/data/sparse-hole` と `/bin/bss-test` を足した。
+/// **いずれも `debugfs` で実測している**——推測で足さない）。
+const FS_MOTD_INODE_AT: usize = fs_inode_at(26);
 
 /// ルートディレクトリのデータブロック（実測。判定行の `i_block[0]` に出ている）。
 const FS_ROOT_DIR_BLOCK: usize = 20 * FS_BLOCK_SIZE;
@@ -5600,19 +5630,22 @@ const FS_ROOT_ETC_ENTRY: usize = FS_ROOT_DIR_BLOCK + 68;
 /// **`sparse-hole` は `/data` の中で `indirect-first` より後ろに来るためである**
 /// （S12-c の `writable` と同じ形。**動かないこともあると分かっているので、
 /// そのつど測っている**）。
+/// **7 度目は ADR-0039 で、75 から 79 へ動いた**——**`/bin/zi` は `/bin` の中で
+/// 名前順の最後だが、`/bin` そのものが `/data` より前にあるので、
+/// 後ろのブロックがまとめてずれる。**
 /// **S12-c で `/data/writable` を足したが、ここは動かなかった**——
 /// **足したファイルが `/data` の中で名前順に後ろへ来たためである。**
 /// **動かないこともあると分かったので、そのつど測ること**（推測しない）。
 /// **今回は `debugfs` で測った**——判定行にも出ているが、
 /// **像を読む側と壊す側が同じ数を別々に持つので、外の道具で突き合わせた。**
-const FS_INDIRECT_TABLE_BLOCK: usize = 75 * FS_BLOCK_SIZE;
+const FS_INDIRECT_TABLE_BLOCK: usize = 79 * FS_BLOCK_SIZE;
 
 /// `/etc/motd` のデータブロック（実測）。
 ///
 /// **S11-5 で 58 から 61 へ、S11-9 で 61 から 69 へ、S11-10 で 70 へ、S11-11 で 74 へ、
 /// S12 前の手当ての 3 本目で 75 へ、同じ手当ての C で 78 へ、S12-c で 79 へ動いた**
 /// （[`FS_MOTD_INODE_AT`] と同じ理由）。
-const FS_MOTD_DATA_BLOCK: usize = 81 * FS_BLOCK_SIZE;
+const FS_MOTD_DATA_BLOCK: usize = 85 * FS_BLOCK_SIZE;
 
 /// 種のファイルと同じ木にある `/etc/motd` の中身（S10-a）。
 ///
@@ -8918,6 +8951,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "ext2-sparse-as-error-test",
         cfg!(feature = "ext2-sparse-as-error-test"),
         "穴を全 0 として読まず SparseBlock で拒む",
+    ),
+    (
+        "user-load-filesz-only",
+        cfg!(feature = "user-load-filesz-only"),
+        "区画を memsz ではなく filesz で張り、.bss を落とす",
     ),
     (
         "kill-ignore-interrupt-test",
