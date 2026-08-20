@@ -100,6 +100,17 @@ pub struct Console {
     /// **一度色を変えたら既定へ戻れない。**
     default_foreground: Color,
     default_background: Color,
+    /// カーソルを描くか（ES-c。DECTCEM が切り替える）。
+    ///
+    /// **既定は「出す」である**——端末の慣行どおりで、`zi` は隠したいときに
+    /// 明示的に `\x1b[?25l` を送る。
+    cursor_visible: bool,
+    /// いまカーソルを描いてあるセル（ES-c）。**消すために覚えておく。**
+    ///
+    /// **「描いた場所」であって「カーソルの位置」ではない。** カーソルは
+    /// `Screen` が持つが、**描いた跡はピクセルなので、動かす前に元へ戻す
+    /// 必要がある**——そのための記録である。
+    cursor_drawn_at: Option<(u32, u32)>,
     stats: FlushStats,
 }
 
@@ -167,6 +178,8 @@ impl Console {
             background,
             default_foreground: foreground,
             default_background: background,
+            cursor_visible: true,
+            cursor_drawn_at: None,
             stats,
         };
         // 画面に残っている前の内容（ファームウェアの表示など）を消しておく。
@@ -211,6 +224,110 @@ impl Console {
     /// 前景経路）が行う。端の切り詰めは [`Grid::set_cursor`] が持つ。
     pub fn cursor_to_cell(&mut self, column: u32, row: u32) {
         self.grid.set_cursor(column, row);
+    }
+
+    /// カーソルの描画（ES-c）。
+    ///
+    /// # 形と色を判定から選んだ
+    ///
+    /// **形は「セルの下 2 ピクセルを塗る下線」である。** 塗りつぶしの矩形に
+    /// しない——**字の上に重ねると、字が読めているかを目で確かめられなく
+    /// なる**（`cargo xtask run --gui` の補助が効かなくなる）。
+    ///
+    /// **色は truecolor の `(0, 255, 255)`（シアン）である。**
+    /// **`read_pixel_raw` で読む以上、背景と紛れない色でなければ判定が
+    /// 主張を持てない**（ADR-0040 の到達条件5）。**背景
+    /// （`0x10,0x10,0x18`）とも既定前景（`0xD0,0xD8,0xE0`）とも、
+    /// ES-b の判定色（緑 `(0,200,0)` と赤 `(200,0,0)`）とも、
+    /// RGB のどれかの軸で 150 以上離れている。**
+    /// **見た目の好みで変えないこと**——近い色にすると判定は緑のまま鈍る。
+    const CURSOR_COLOR: Color = Color::rgb(0, 255, 255);
+    /// カーソルの下線の厚み（ピクセル）。
+    const CURSOR_THICKNESS: u32 = 2;
+
+    /// カーソルを描く / 消す（ES-c）。**描画の直前と直後に呼ぶ。**
+    ///
+    /// **点滅は作らない。** **時間で変わる状態は判定を揺らす**（揺れる値を
+    /// 判定行に載せない）し、**そもそも時計が無い。**
+    /// **いまは「在る / 無い」だけである。**
+    fn paint_cursor(&mut self, show: bool) {
+        let (column, row) = self.grid.cursor();
+        let x = column * font::CELL_WIDTH;
+        let y = row * font::GLYPH_HEIGHT + font::GLYPH_HEIGHT - Self::CURSOR_THICKNESS;
+        let color = if show {
+            Self::CURSOR_COLOR
+        } else {
+            // **消すときは、そのセルの背景色へ戻す。** 既定ではなく
+            // **セルが持つ色である**——色付きの行の上でも跡が残らない。
+            self.grid
+                .cell(column, row)
+                .map(|cell| Color::rgb(cell.bg.red, cell.bg.green, cell.bg.blue))
+                .unwrap_or(self.background)
+        };
+        self.back
+            .surface_mut()
+            .fill_rect(x, y, font::CELL_WIDTH, Self::CURSOR_THICKNESS, color);
+        self.dirty
+            .mark(x, y, font::CELL_WIDTH, Self::CURSOR_THICKNESS);
+    }
+
+    /// 描いてあるカーソルを消す（ES-c）。**描いた場所へ戻る。**
+    fn erase_drawn_cursor(&mut self) {
+        let Some((column, row)) = self.cursor_drawn_at.take() else {
+            return;
+        };
+        let (current_column, current_row) = self.grid.cursor();
+        // **カーソルを一時的に描いた場所へ移して消す**——`paint_cursor` は
+        // 現在位置を見るためである。**移してすぐ戻す。**
+        self.grid.set_cursor(column, row);
+        self.paint_cursor(false);
+        self.grid.set_cursor(current_column, current_row);
+    }
+
+    /// カーソルを描き直す（ES-c）。**`flush` の直前に呼ぶ。**
+    ///
+    /// **前に描いた跡を消してから、いまの位置へ描く。**
+    fn refresh_cursor(&mut self) {
+        self.erase_drawn_cursor();
+        // 破壊 (ES-c, ansi-cursor-ignore-hide): 隠す指示を無視して常に描く。
+        // **DECTCEM が届いていても画面から消えない**ので、ansi-test の
+        // 「隠した後にカーソルが無い」判定が落ちる。
+        //
+        // **逆の形（出す指示を受けたが描かない）は立てていない。**
+        // **既にある 3 つの判定がそれを覆うためである**——「CUP が置いた
+        // ところに描かれる」「出し直すと戻る」「動いたら跡が消えて新しい
+        // 場所に在る」の 3 つは、**どれも「描かれている」ことを画面の実物で
+        // 見ている。** 描かない形を作れば**その 3 つが同時に落ちる**ので、
+        // **feature を足しても捕まえる先が増えない。**
+        // **破壊は「その形でしか落ちない判定がある」ときに足す。**
+        #[cfg(feature = "ansi-cursor-ignore-hide-test")]
+        let visible = true;
+        #[cfg(not(feature = "ansi-cursor-ignore-hide-test"))]
+        let visible = self.cursor_visible;
+        if visible {
+            self.paint_cursor(true);
+            self.cursor_drawn_at = Some(self.grid.cursor());
+        }
+    }
+
+    /// カーソルを出す / 隠す（DECTCEM。ES-c）。
+    pub fn show_cursor(&mut self, show: bool) {
+        self.cursor_visible = show;
+    }
+
+    /// カーソルの下線が在るはずのピクセルを読む（ES-c の判定用）。
+    ///
+    /// **セルの下端の 1 点を返す。** **`pixel_at` を呼ぶ側が座標を組み立てる
+    /// と、判定と実装で計算がずれる**ので、ここで組み立てる。
+    pub fn cursor_pixel(&mut self, column: u32, row: u32) -> Option<u32> {
+        let x = column * font::CELL_WIDTH;
+        let y = row * font::GLYPH_HEIGHT + font::GLYPH_HEIGHT - 1;
+        self.back.surface_mut().read_pixel_raw(x, y)
+    }
+
+    /// カーソルの色（ES-c の判定用）。**判定が値を写さずに済ませる。**
+    pub fn cursor_color(&self) -> Color {
+        Self::CURSOR_COLOR
     }
 
     /// SGR を適用する（ES-b。ADR-0040）。
@@ -374,6 +491,11 @@ impl Console {
     /// （ADR-0004）。フラッシュはパニック経路から呼ばれないので、ここで
     /// 停止しても再帰の懸念はない。
     pub fn flush(&mut self) {
+        // **カーソルを描き直してから送る（ES-c）。**
+        //
+        // **`take` より前である**——描き直すと未転送範囲が増えるので、
+        // **先に描かないとカーソルだけが送られない。**
+        self.refresh_cursor();
         let Some(rect) = self.dirty.take() else {
             return;
         };
@@ -398,6 +520,9 @@ impl Console {
 
     /// 1 文字書く。転送はしない。
     pub fn put_char(&mut self, c: char) {
+        // **描いてあるカーソルを先に消す（ES-c）。** **消さずに字を置くと、
+        // カーソルの跡が字の下に残る**——下線とグリフが重なる位置にあるため。
+        self.erase_drawn_cursor();
         let glyph = font::glyph(c);
         let step = self.grid.advance(c, glyph.width_cells());
 

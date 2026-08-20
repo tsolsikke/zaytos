@@ -66,6 +66,10 @@ pub enum AnsiAction {
     EraseDisplay(EraseScope),
     /// 行消去（EL）。
     EraseLine(EraseScope),
+    /// カーソルを出す / 隠す（DECTCEM。ES-c）。
+    ///
+    /// **`true` が「出す」（`\x1b[?25h`）である。**
+    ShowCursor(bool),
     /// 文字の見た目を変える（SGR。ES-b。ADR-0040）。
     ///
     /// **色は受理時にRGBへ展開してある**（`Rgb`）——16色・256色・truecolorの
@@ -126,6 +130,12 @@ pub struct AnsiParser {
     param_index: usize,
     /// 上限を越えるパラメータが来た。終端まで飲み込んでから列ごと捨てる。
     too_many_params: bool,
+    /// `?` で始まる私用の列か（ES-c。DECTCEM が使う）。
+    ///
+    /// **`\x1b[?25h` の `?` である。** DEC の私用パラメータで、
+    /// **同じ終端でも公用と意味が違う**——`h` は公用なら SM
+    /// （モード設定）で、私用なら DECSET である。**混ぜて解釈しない。**
+    private: bool,
 }
 
 impl AnsiParser {
@@ -135,6 +145,7 @@ impl AnsiParser {
             params: [0; MAX_PARAMS],
             param_index: 0,
             too_many_params: false,
+            private: false,
         }
     }
 
@@ -177,6 +188,7 @@ impl AnsiParser {
         self.params = [0; MAX_PARAMS];
         self.param_index = 0;
         self.too_many_params = false;
+        self.private = false;
     }
 
     fn feed_csi(&mut self, c: char) -> Option<AnsiAction> {
@@ -188,6 +200,13 @@ impl AnsiParser {
                 if let Some(slot) = self.params.get_mut(self.param_index) {
                     *slot = slot.saturating_mul(10).saturating_add(digit);
                 }
+                None
+            }
+            // **私用の印（ES-c）。** `\x1b[?25h` の `?` である。
+            // **列の先頭にしか来ない**——パラメータを積み始めた後の `?` は
+            // 構成要素ではないので、下の分岐が列ごと捨てる。
+            '?' if self.param_index == 0 && self.params[0] == 0 && !self.private => {
+                self.private = true;
                 None
             }
             ';' => {
@@ -216,6 +235,29 @@ impl AnsiParser {
                 self.state = State::Ground;
                 self.feed(c)
             }
+        }
+    }
+
+    /// 私用の列（`?` で始まるもの）を組み立てる（ES-c）。
+    ///
+    /// **解釈するのは DECTCEM だけである**——`?25h`（カーソルを出す）と
+    /// `?25l`（隠す）。**利用者は `zi` の再描画である。**
+    ///
+    /// # 知らない私用パラメータは列ごと捨てる
+    ///
+    /// **SGR とは扱いを変えた。** SGR は**複数の指示を並べられる**ので、
+    /// 知らないものを飛ばして知っているものを効かせるのが正しい
+    /// （`1;31` の太字を知らないからといって赤まで捨てない）。
+    /// **私用の列はそうではない**——`?1049h`（代替画面バッファ）のように
+    /// **1 つの列が 1 つのモードを指す**ので、**知らなければ何もしないのが
+    /// 正しい。** **基準は「解釈できるものが混じっているか」である。**
+    fn dispatch_private(&self, final_byte: char) -> Option<AnsiAction> {
+        // **パラメータは 1 つだけ見る。** 解釈する列が 1 つしかないので、
+        // 複数指定（`?25;1049h`）は扱わない——**来たら最初のものだけ効く。**
+        match (self.params[0], final_byte) {
+            (25, 'h') => Some(AnsiAction::ShowCursor(true)),
+            (25, 'l') => Some(AnsiAction::ShowCursor(false)),
+            _ => None,
         }
     }
 
@@ -307,6 +349,10 @@ impl AnsiParser {
 
     /// 終端バイトから動作を組み立てる。知らない終端は `None`（読み捨て）。
     fn dispatch_final(&self, final_byte: char) -> Option<AnsiAction> {
+        // **私用の列は別の表で引く（ES-c）。** 同じ終端でも意味が違う。
+        if self.private {
+            return self.dispatch_private(final_byte);
+        }
         match final_byte {
             'H' => {
                 // **省略と0は1である**（ANSIの規約。`\x1b[H` は左上）。
@@ -686,6 +732,69 @@ mod tests {
         assert_eq!(feed_all(&mut parser, "\x1b[38;2;255;0m"), []);
         // 次の字は普通に通る（状態が残らない）。
         assert_eq!(feed_all(&mut parser, "x"), [AnsiAction::Print('x')]);
+    }
+
+    /// **DECTCEM が出す / 隠すを返す（ES-c）。**
+    #[test]
+    fn dectcem_shows_and_hides_the_cursor() {
+        let mut parser = AnsiParser::new();
+        assert_eq!(
+            feed_all(&mut parser, "\x1b[?25l"),
+            [AnsiAction::ShowCursor(false)]
+        );
+        assert_eq!(
+            feed_all(&mut parser, "\x1b[?25h"),
+            [AnsiAction::ShowCursor(true)]
+        );
+    }
+
+    /// **私用と公用は同じ終端でも別である（ES-c）。**
+    ///
+    /// `h` は公用なら SM（モード設定）で、いまは解釈しない。
+    /// **`?` の有無だけが違う 2 つの列が、別の結果になることを固定する。**
+    #[test]
+    fn the_private_marker_changes_what_a_final_byte_means() {
+        let mut parser = AnsiParser::new();
+        // 私用: DECTCEM として効く。
+        assert_eq!(
+            feed_all(&mut parser, "\x1b[?25h"),
+            [AnsiAction::ShowCursor(true)]
+        );
+        // 公用: 知らない終端なので読み捨てる。
+        assert_eq!(feed_all(&mut parser, "\x1b[25h"), []);
+        assert_eq!(feed_all(&mut parser, "x"), [AnsiAction::Print('x')]);
+    }
+
+    /// **知らない私用パラメータは列ごと捨てる（ES-c）。**
+    ///
+    /// **SGR と扱いが違う**——あちらは複数の指示を並べられるので知らない
+    /// ものだけ飛ばすが、**私用の列は 1 つが 1 つのモードを指す。**
+    #[test]
+    fn an_unknown_private_parameter_drops_the_sequence() {
+        let mut parser = AnsiParser::new();
+        // 代替画面バッファ。**まだ扱わない**（ADR-0040 の「決めないこと」）。
+        assert_eq!(feed_all(&mut parser, "\x1b[?1049h"), []);
+        assert_eq!(feed_all(&mut parser, "x"), [AnsiAction::Print('x')]);
+    }
+
+    /// **`?` は列の先頭にしか来ない（ES-c）。**
+    ///
+    /// 数字を積み始めた後の `?` は構成要素ではないので、**列を捨てて
+    /// いま来た字からやり直す**（既存の規則がそのまま効く）。
+    ///
+    /// **実測で確かめた**——`\x1b[25?h` は `?` と `h` を**字として**出す。
+    /// **「何も出ない」ではない。** 崩れた列の規則は「溜めた分を捨て、
+    /// いま来た字を扱い直す」なので、**`?` 自身も扱い直されて `Print` に
+    /// なる**（`\x1bz` が `z` を出すのと同じ形である）。
+    /// **私用として解釈されないことがここでの主張である。**
+    #[test]
+    fn a_late_private_marker_is_not_a_private_sequence() {
+        let mut parser = AnsiParser::new();
+        assert_eq!(
+            feed_all(&mut parser, "\x1b[25?h"),
+            [AnsiAction::Print('?'), AnsiAction::Print('h')],
+            "私用としては解釈されず、崩れた列として扱い直される"
+        );
     }
 
     /// 大きすぎる値は飽和する（呼び出し側の切り詰めに任せる）。

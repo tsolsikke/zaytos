@@ -2232,6 +2232,18 @@ fn init_console(
 fn exercise_ansi_console(logger: &mut Logger<SerialPort>, console: &mut Console) {
     // まっさらから始める。判定を既知の状態に固定する。
     console.clear();
+    // **カーソルを隠してから始める（ES-c で足した手当て）。**
+    //
+    // **`cell_has_ink` はセルの全ピクセルを見る**ので、**カーソルの下線を
+    // インクとして拾う**（実測で EL(0) と SGR の判定が落ちた）。
+    // **消去や印字の判定が主張しているのは「字が在る / 無い」**であって
+    // カーソルの有無ではない。**実演の間は隠しておき、ES-c の判定の
+    // ところだけ出す。**
+    {
+        let hide = kernel::console::install_foreground(console);
+        kernel::console::write_foreground_bytes(b"\x1b[?25l");
+        drop(hide);
+    }
     let foreground = kernel::console::install_foreground(console);
 
     // (1) CUP。1 起点の (3;7) はセル (col 6, row 2) である。
@@ -2395,6 +2407,58 @@ fn exercise_ansi_console(logger: &mut Logger<SerialPort>, console: &mut Console)
     logger.info(format_args!(
         "ansi-test: SGR 0 restored the default colors = {sgr_reset_restored_defaults} \
          ({reset_colors:?})"
+    ));
+
+    // (9) カーソルの描画と DECTCEM（ES-c）。**画面の実物で在る / 無いを見る。**
+    //
+    // **色は判定から選んだ**——シアン `(0,255,255)` で、背景・既定前景・
+    // ES-b の判定色（緑と赤）のどれとも RGB のどれかの軸で 150 以上離れて
+    // いる（`Console::CURSOR_COLOR` の doc）。**判定は色を写さず訊く。**
+    console.clear();
+    // **ここからはカーソルを見る**ので、出し直す（上の手当ての対）。
+    let foreground = kernel::console::install_foreground(console);
+    kernel::console::write_foreground_bytes(b"\x1b[?25h\x1b[3;5H");
+    drop(foreground);
+    let cursor_color = console
+        .cursor_color()
+        .to_pixel(console.framebuffer_layout().format());
+    let drawn = console.cursor_pixel(4, 2);
+    let cursor_is_drawn = drawn == Some(cursor_color);
+    logger.info(format_args!(
+        "ansi-test: the cursor is drawn where CUP put it = {cursor_is_drawn} \
+         (pixel {drawn:?} expected {cursor_color:?})"
+    ));
+
+    // 隠す。**跡が残らないこと**を同じ点で見る。
+    let foreground = kernel::console::install_foreground(console);
+    kernel::console::write_foreground_bytes(b"\x1b[?25l");
+    drop(foreground);
+    let after_hide = console.cursor_pixel(4, 2);
+    let cursor_is_hidden = after_hide != Some(cursor_color);
+    logger.info(format_args!(
+        "ansi-test: DECTCEM hid the cursor = {cursor_is_hidden} (pixel {after_hide:?})"
+    ));
+
+    // 出し直す。**同じ点へ戻ること。**
+    let foreground = kernel::console::install_foreground(console);
+    kernel::console::write_foreground_bytes(b"\x1b[?25h");
+    drop(foreground);
+    let after_show = console.cursor_pixel(4, 2);
+    let cursor_is_back = after_show == Some(cursor_color);
+    logger.info(format_args!(
+        "ansi-test: DECTCEM brought the cursor back = {cursor_is_back} (pixel {after_show:?})"
+    ));
+
+    // **動いたら前の跡が消えること。** 隣のセルへ動かし、元の点を見る。
+    let foreground = kernel::console::install_foreground(console);
+    kernel::console::write_foreground_bytes(b"\x1b[3;6H");
+    drop(foreground);
+    let old_spot = console.cursor_pixel(4, 2);
+    let new_spot = console.cursor_pixel(5, 2);
+    let cursor_left_no_trail = old_spot != Some(cursor_color) && new_spot == Some(cursor_color);
+    logger.info(format_args!(
+        "ansi-test: moving the cursor left no trail = {cursor_left_no_trail} \
+         (old {old_spot:?}, new {new_spot:?})"
     ));
 
     // 締めてから通常の起動へ戻る。画面に実演の残骸を残さない。
@@ -9016,6 +9080,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "ansi-sgr-ignore-color-test",
         cfg!(feature = "ansi-sgr-ignore-color-test"),
         "SGR を受けても色を変えない",
+    ),
+    (
+        "ansi-cursor-ignore-hide-test",
+        cfg!(feature = "ansi-cursor-ignore-hide-test"),
+        "DECTCEM の隠す指示を無視して常にカーソルを描く",
     ),
     (
         "write-file-skip-append-test",

@@ -3319,6 +3319,19 @@ fn cmd_ansi_test(features: &[&str]) -> Result<()> {
             "SGR 0 restored the defaults",
             "SGR 0 restored the default colors = true",
         ),
+        (
+            "the cursor is drawn where CUP put it",
+            "the cursor is drawn where CUP put it = true",
+        ),
+        ("DECTCEM hid the cursor", "DECTCEM hid the cursor = true"),
+        (
+            "DECTCEM brought the cursor back",
+            "DECTCEM brought the cursor back = true",
+        ),
+        (
+            "moving the cursor left no trail",
+            "moving the cursor left no trail = true",
+        ),
     ];
     let mut all_ok = true;
     for (name, needle) in judgements {
@@ -9451,6 +9464,20 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             Err(_) => println!("--- ansi test (sgr ignored): OK (the sabotage was caught)"),
         }
 
+        // **DECTCEM の隠す指示を無視する破壊（ES-c）。** 指示は届いて
+        // いるが、**描く側が見ない**——「隠した後に無い」判定が落ちる。
+        total += 1;
+        println!("=== xtask check: the ansi test catches a cursor that ignores DECTCEM");
+        match cmd_ansi_test(&["ansi-cursor-ignore-hide-test"]) {
+            Ok(()) => {
+                println!(
+                    "--- ansi test (cursor ignores hide): FAILED (the sabotage was NOT caught)"
+                );
+                failed.push("ansi test (cursor ignores hide)".to_string());
+            }
+            Err(_) => println!("--- ansi test (cursor ignores hide): OK (the sabotage was caught)"),
+        }
+
         // **穴を 0 として読まない破壊（ADR-0038）。** 既定の起動ログが
         // `fs-sparse` の判定行を固定しているので、**破壊は起動ログの差として
         // 出る**——ここでは「その構成で起動が通らないこと」を見る。
@@ -10286,7 +10313,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 202,
+    full: 203,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

@@ -168,6 +168,9 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
                     Some(common::ansi::AnsiAction::SetGraphics(graphics)) => {
                         console.set_graphics(graphics)
                     }
+                    // **DECTCEM（ES-c）。** 出す / 隠すを切り替えるだけで、
+                    // **描き直すのは下の `flush` の直前である。**
+                    Some(common::ansi::AnsiAction::ShowCursor(show)) => console.show_cursor(show),
                 }
             }
             console.flush();
