@@ -2383,16 +2383,15 @@ fn exercise_ansi_console(logger: &mut Logger<SerialPort>, console: &mut Console)
     kernel::console::write_foreground_bytes(b"\x1b[2;1H\x1b[0mD");
     drop(foreground);
     let reset_colors = console.cell_colors(0, 1);
-    // **既定の色は `init_console` の局所定数である**ので、値をここへ写す。
-    // **同じ数を 2 か所に持つ形だが、食い違えばこの判定が落ちる。**
+    // **既定の色は写さない。コンソールに訊く。**
     //
-    // **写し間違えた**——`FOREGROUND` という名の定数が 2 つあり
-    // （`0xE0,0xE0,0xE0` と `0xD0,0xD8,0xE0`）、**使われているのは後者である。**
-    // **判定行が値を出していたので、実測で気づけた。**
-    const DEFAULT_FOREGROUND: Color = Color::rgb(0xD0, 0xD8, 0xE0);
-    const DEFAULT_BACKGROUND: Color = Color::rgb(0x10, 0x10, 0x18);
-    let sgr_reset_restored_defaults =
-        reset_colors == Some((DEFAULT_FOREGROUND, DEFAULT_BACKGROUND));
+    // **一度は写して間違えた**——`FOREGROUND` という名の局所定数が
+    // 3 つの関数にあり（`draw_startup_test_pattern` /
+    // `draw_startup_text` / `init_console`）、**コンソールが使うのは
+    // `init_console` のものである。** 別のものを写して判定が落ちた。
+    // **判定行が値を出していたので実測で気づけたが、写しそのものを
+    // 無くすほうが確かである**（「期待値は定数で持たず外の道具から導く」）。
+    let sgr_reset_restored_defaults = reset_colors == Some(console.default_colors());
     logger.info(format_args!(
         "ansi-test: SGR 0 restored the default colors = {sgr_reset_restored_defaults} \
          ({reset_colors:?})"

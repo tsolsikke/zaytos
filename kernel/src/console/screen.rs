@@ -246,6 +246,16 @@ impl Console {
         }
     }
 
+    /// 起動時に決めた既定の前景・背景（ES-b）。
+    ///
+    /// **判定が値を写さずに済ませるために出す。** **写すと、片方だけが
+    /// 古くなる**——実際にES-bで写し間違えた（`FOREGROUND` という名の
+    /// 局所定数が3つの関数にあり、コンソールが使うのはそのうち1つである）。
+    /// **「期待値は定数で持たず外の道具から導く」の形をここでも採る。**
+    pub fn default_colors(&self) -> (Color, Color) {
+        (self.default_foreground, self.default_background)
+    }
+
     /// セルの色を読む（ES-b の判定用）。**範囲外は `None`。**
     pub fn cell_colors(&self, column: u32, row: u32) -> Option<(Color, Color)> {
         let cell = self.grid.cell(column, row)?;
