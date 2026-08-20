@@ -157,6 +157,14 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
             "CARGO_FEATURE_ZI_INSERT_DROP_FIRST_TEST",
             "zi_insert_drop_first",
         ),
+        (
+            "CARGO_FEATURE_ZASH_PROMPT_DROP_COLOR_TEST",
+            "zash_prompt_drop_color",
+        ),
+        (
+            "CARGO_FEATURE_ZI_STATUS_FREEZE_MODE_TEST",
+            "zi_status_freeze_mode",
+        ),
     ];
     let mut extra_cfgs: Vec<String> = Vec::new();
     for (env, cfg) in USER_PROGRAM_CFGS {

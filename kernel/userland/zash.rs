@@ -56,8 +56,23 @@ use userlib::{exit, read, write_all, STDERR, STDOUT};
 /// スタックを踏むことのほうが害である。**
 const LINE_MAX: usize = 128;
 
-/// プロンプト。
+/// プロンプト。**色は [`write_prompt`] が付ける**（ES-d）。
 const PROMPT: &[u8] = b"zaytos$ ";
+/// プロンプトの色（ES-d）。**SGR の truecolor で前景を指定する。**
+///
+/// # 色は判定から選んだ
+///
+/// **マゼンタ `(200, 0, 200)` である。** 画面の実物を `read_pixel_raw` で
+/// 読む判定が付くので、**既に画面に居る色と紛れてはならない**
+/// （`kernel/src/console/screen.rs` の `CURSOR_COLOR` の doc と同じ規律）。
+/// **背景 `(0x10, 0x10, 0x18)`・既定前景 `(0xD0, 0xD8, 0xE0)`・ES-b の
+/// 判定色（緑 `(0, 200, 0)` と赤 `(200, 0, 0)`）・カーソルのシアン
+/// `(0, 255, 255)`・`zi` の状態行の黄 `(200, 200, 0)` のいずれとも、
+/// RGB のどれかの軸で 150 以上離れている。**
+/// **見た目の好みで変えないこと。**
+const PROMPT_COLOR: &[u8] = b"\x1b[38;2;200;0;200m";
+/// 色を既定へ戻す（SGR 0）。**打った字はプロンプトの色にしない。**
+const SGR_RESET: &[u8] = b"\x1b[0m";
 /// 起動したことを告げる 1 行。**プロンプトは改行で終わらないので、
 /// 「シェルが動いた」を行として残すものが別に要る。**
 // **接頭辞は固定文字列である。`argv[0]` から作らない。**
@@ -119,6 +134,30 @@ const MINUS_EAGAIN: i64 = -11;
 /// Backspace のバイト。
 const BACKSPACE: u8 = 0x08;
 
+/// プロンプトを出す（ES-d）。**色を付けてから戻す。**
+///
+/// **3 回書くのではなく 1 回で書く。** `write` は 1 回ごとに画面へ届いて
+/// フラッシュされるので、**分けて書くと色の無いプロンプトが一瞬出る。**
+/// **判定は入力待ちの時点で見るので、そこでは差が出ない**——それでも、
+/// **人が見る側で点滅させる理由が無い。**
+fn write_prompt() {
+    // 破壊 (ES-d, zash-prompt-drop-color): 色を送らずにプロンプトを出す。
+    // **プロンプトの字も位置も変わらない**ので、既存の判定はどれも動かない。
+    // **画面のセルが既定前景のままになる**ので、zi-test の
+    // 「プロンプトが自分の色で描かれている」判定だけが落ちる。
+    #[cfg(zash_prompt_drop_color)]
+    let parts: [&[u8]; 1] = [PROMPT];
+    #[cfg(not(zash_prompt_drop_color))]
+    let parts: [&[u8]; 3] = [PROMPT_COLOR, PROMPT, SGR_RESET];
+    let mut out = [0u8; PROMPT_COLOR.len() + PROMPT.len() + SGR_RESET.len()];
+    let mut at = 0usize;
+    for part in parts {
+        out[at..at + part.len()].copy_from_slice(part);
+        at += part.len();
+    }
+    write_all(STDOUT, &out[..at]);
+}
+
 /// `_start` から呼ばれる（`userlib.rs` の `global_asm!`）。
 ///
 /// # Safety
@@ -127,7 +166,7 @@ const BACKSPACE: u8 = 0x08;
 #[no_mangle]
 pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
     write_all(STDOUT, BANNER);
-    write_all(STDOUT, PROMPT);
+    write_prompt();
 
     let mut line = [0u8; LINE_MAX];
     let mut length = 0usize;
@@ -230,7 +269,7 @@ pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
                 // **未完のエスケープは行をまたがない。** 溜めた状態を捨てる
                 // （ここへ来る時点で `Idle` のはずだが、状態を持ち越さない）。
                 escape = Escape::Idle;
-                write_all(STDOUT, PROMPT);
+                write_prompt();
             }
             CTRL_C => {
                 // **打ちかけの行を捨てる（S12 前の手当て、C）。**
@@ -247,7 +286,7 @@ pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
                 cursor = 0;
                 overflowed = false;
                 escape = Escape::Idle;
-                write_all(STDOUT, PROMPT);
+                write_prompt();
             }
             BACKSPACE => {
                 // **挿入点の直前を消して、後ろを詰める（S12 前の手当て）。**

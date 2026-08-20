@@ -98,6 +98,12 @@ ansi-sgr-ignore-color-test = []
 # 破壊（ES-c）: DECTCEM の隠す指示を無視して常にカーソルを描く。指示は届いて
 # いるが画面から消えない——ansi-test の「隠した後に無い」判定が落ちる。
 ansi-cursor-ignore-hide-test = []
+# 破壊（ES-d）: zash が色を送らずにプロンプトを出す。字も位置も変わらないので
+# 既存の判定は動かない——zi-test の「プロンプトが自分の色で描かれている」だけが落ちる。
+zash-prompt-drop-color-test = []
+# 破壊（ES-d）: zi の状態行がモードに関わらず NORMAL のまま描く。色も長さも
+# 変わらないので、落ちるのは「状態行がモードに従って変わる」判定だけである。
+zi-status-freeze-mode-test = []
 # 破壊（zi-c）: 書きで開いた fd への write が複製へ足さない。検証も戻り値も
 # 正しく、書いたつもりが複製に届いていない——読み戻しの検算（58 番）が捕まえる。
 write-file-skip-append-test = []

@@ -516,11 +516,11 @@ bss-test: the .bss reads as zero, keeps writes, and shares a page with .data
 [INFO] bss-check: /bin/bss-test ended Ok(Exited(0)) (0 means the .bss reads as zero, keeps writes, and shares a page with .data)
 [INFO] init: starting /bin/zash (restart 0 of 3)
 [INFO] spawn: /bin/zash is 16920 byte(s) at inode 19; entering at depth 1 (the parent runs on the main kernel stack, which has a guard page)
-[INFO] user-load: /bin/zash mapped PT_LOAD 0x400000..0x401474 (filesz=0x1474 memsz=0x1474 w=false) pages 0x400000..0x401000
-[INFO] user-load: /bin/zash mapped PT_LOAD 0x402000..0x4023d8 (filesz=0x3d8 memsz=0x3d8 w=false) pages 0x402000..0x402000
+[INFO] user-load: /bin/zash mapped PT_LOAD 0x400000..0x4014b4 (filesz=0x14b4 memsz=0x14b4 w=false) pages 0x400000..0x401000
+[INFO] user-load: /bin/zash mapped PT_LOAD 0x402000..0x402410 (filesz=0x410 memsz=0x410 w=false) pages 0x402000..0x402000
 [INFO] user-load: /bin/zash mapped PT_LOAD 0x403000..0x403066 (filesz=0x66 memsz=0x66 w=true) pages 0x403000..0x403000
 [INFO] user-load: /bin/zash PT_LOAD segments: declared=3 mapped=3 (they must match; a gap means a segment was skipped), pages shared with the previous segment=0
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
 [INFO] user-load: /bin/zash initial stack at 0x7fffc0 (argc=1, 16-byte aligned=true)
 zash: ready
-zaytos$ 
+[38;2;200;0;200mzaytos$ [0m

@@ -3471,7 +3471,8 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     while Instant::now() < deadline {
         let text = fs::read_to_string(&serial_log).unwrap_or_default();
-        if text.contains(done_marker) {
+        // **色の列を落としてから探す（ES-d）。** [`strip_ansi`] の doc。
+        if strip_ansi(&text).contains(done_marker) {
             break;
         }
         thread::sleep(PANIC_TEST_POLL_INTERVAL);
@@ -3564,6 +3565,23 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     let readback = parse_cat_readback(&serial, edited_lines.len());
     let roundtrip = !edited_lines.is_empty() && edited_lines == readback;
 
+    // **画面の実物で色が出ていること（ES-d）。**
+    //
+    // **判定を出すのはカーネルである**（`kernel/src/console/probe.rs`）——
+    // **色を出す利用者は Ring 3 に居て、画面を読み戻せない。**
+    // **台本の中の観測点で、そのつど画面を見ている。**
+    //
+    // **上の判定群とは層が違う。** あちらは `zi` の内部状態で、
+    // **こちらはバックバッファのピクセルである。**
+    let judged = |marker: &str| {
+        serial
+            .lines()
+            .any(|line| line.contains(marker) && line.contains("= true"))
+    };
+    let prompt_colored = judged("the zash prompt is drawn in its own color");
+    let status_colored = judged("the zi status line is drawn in its own color");
+    let status_followed_mode = judged("the zi status line followed the mode");
+
     println!("{context}: zi started = {started}");
     println!(
         "{context}: the up/down arrows moved the cursor between lines = {arrows_moved} \
@@ -3584,9 +3602,17 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         "{context}: cat read back exactly what zi edited = {roundtrip} \
          (zi's last redraw {edited_lines:?}, cat printed {readback:?})"
     );
+    println!("{context}: the zash prompt is drawn in its own color = {prompt_colored}");
+    println!("{context}: the zi status line is drawn in its own color = {status_colored}");
+    println!("{context}: the zi status line followed the mode = {status_followed_mode}");
+    for line in serial.lines().filter(|line| line.contains("screen-color:")) {
+        println!("  {}", line.trim());
+    }
     println!(
-        "{context}: note - these judgements read zi's internal state, NOT the screen; \
-         a redraw that puts the right bytes at the wrong place is not observable here"
+        "{context}: note - the judgements above the screen-color ones read zi's internal state, \
+         NOT the screen; a redraw that puts the right bytes at the wrong place is still not \
+         observable here. the screen-color judgements (ES-d) read the back buffer, but only \
+         at the colored cells - they say nothing about where the text landed"
     );
 
     if started
@@ -3597,12 +3623,57 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && deleted
         && saved
         && roundtrip
+        && prompt_colored
+        && status_colored
+        && status_followed_mode
     {
         println!("{context}: PASS");
         Ok(())
     } else {
         bail!("{context}: FAILED")
     }
+}
+
+/// シリアルのログから ANSI のエスケープ列を落とす（ES-d）。
+///
+/// # なぜ要るのか
+///
+/// **ES-d でプロンプトに色が付いた**ので、`write` が出すバイト列は
+/// `\x1b[38;2;200;0;200mzaytos$ \x1b[0m` である。**シリアルはそれをそのまま
+/// 記録する**（`sys_write` はバイトを写すだけである）ので、
+/// **`"zaytos$ /bin/ls"` のような「プロンプトの直後に打った語が続く」
+/// 目印が、色の列に割られて当たらなくなる。**
+///
+/// # 隠したものを誰が見ているか
+///
+/// **この関数は色の列を判定から隠す**（揺れる値ではないが、標識で消す点は
+/// 同じ形である）。**隠したものを見ているのは 2 つある**——
+/// **起動ログの参照**（`xtask/reference/boot-log-smp2.txt` は素のバイトを
+/// 持っており、色が消えれば差分が出る）と、**画面の観測**
+/// （`screen-color:` の判定行が、色が実際にセルとピクセルへ届いたことを見る）。
+///
+/// **落とすのは CSI（`ESC [` … 終端）と単独の `ESC` だけである。**
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        // **`[` が続けば CSI である。** 終端バイト（0x40..=0x7E）まで捨てる。
+        let mut lookahead = chars.clone();
+        if lookahead.next() == Some('[') {
+            chars = lookahead;
+            for c in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&c) {
+                    break;
+                }
+            }
+        }
+        // **`[` が続かなければ、落とすのは `ESC` 1 バイトだけである。**
+    }
+    out
 }
 
 /// `zi` の最後の再描画から、編集後の行を取り出す（zi-d-2）。
@@ -3640,6 +3711,10 @@ fn parse_zi_last_redraw(serial: &str) -> Vec<String> {
 /// **`cat` はファイルの中身をそのまま出す**ので、シェルが反響した
 /// コマンド行の後ろに、行がそのまま並ぶ。**求める本数だけ取る。**
 fn parse_cat_readback(serial: &str, want: usize) -> Vec<String> {
+    // **色の列を落としてから探す（ES-d）。** プロンプトに色が付いたので、
+    // **素のログでは目印がエスケープに割られる**（[`strip_ansi`] の doc）。
+    let serial = strip_ansi(serial);
+    let serial = serial.as_str();
     let marker = "zaytos$ /bin/cat /data/lines";
     let Some(at) = serial.rfind(marker) else {
         return Vec::new();
@@ -4366,7 +4441,12 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     let restarted_only_once = !serial.contains("init: starting /bin/zash (restart 2 of 3)");
     // **打った文字が反響していること。** シェルが反響を出しているので、
     // **Ring 3 まで届いた証拠が出力そのものにある。**
-    let echoed = after_shell.contains("zaytos$ /bin/ls");
+    // **色の列を落とした写しで見る（ES-d）。** プロンプトの直後に打った語が
+    // 続くことを見る 3 つは、**色が付いた時点で素のログには当たらない**
+    // （[`strip_ansi`] の doc に、隠したものを誰が見ているかを書いてある）。
+    let after_shell_plain = strip_ansi(after_shell);
+    let after_shell_plain = after_shell_plain.as_str();
+    let echoed = after_shell_plain.contains("zaytos$ /bin/ls");
     // **到達条件の 3 つ。** 出力そのものがシリアルに現れる。
     let ran_ls = after_shell.contains("lost+found");
     let ran_cat = after_shell.contains("welcome to ZaytOS");
@@ -4380,8 +4460,8 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     //
     // **出力そのもの（`lost+found` など）では区別できない**——
     // **`/bin/` を付けた側が同じものを出す。** 上の 3 判定と同じ理由である。
-    let typed_bare_ls = after_shell.contains("zaytos$ ls\n");
-    let typed_bare_cat = after_shell.contains("zaytos$ cat /etc/motd\n");
+    let typed_bare_ls = after_shell_plain.contains("zaytos$ ls\n");
+    let typed_bare_cat = after_shell_plain.contains("zaytos$ cat /etc/motd\n");
     // **「1 つも `cannot run` が出ていない」では見られなくなった（S12 前の手当て）。**
     // **行編集の判定が、わざと走らない語（`abx`）を打つためである。**
     // **名前を挙げて見る形へ狭めた**——ここが主張したいのは
@@ -6954,6 +7034,11 @@ const DIRECT_SERIAL_PORT_ALLOWLIST: &[DirectSerialPortSite] = &[
         item: "sys_write",
         reason:
             "Ring 3 の write を届ける先。BKL の内側だが、ロガーもコンソールも lib からは届かない",
+    },
+    DirectSerialPortSite {
+        file: "kernel/src/console/probe.rs",
+        item: "observe",
+        reason: "画面の観測の判定行（ES-d）。sys_write と同じで、lib からロガーへ届かない",
     },
     DirectSerialPortSite {
         file: "kernel/src/userland.rs",
@@ -9562,20 +9647,23 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             }
         }
 
-        // **`zi` の破壊 3 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
-        // 書かない、挿入が 1 字落とす（どちらも zi-d-2）。
+        // **`zi` の破壊 5 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
+        // 書かない、挿入が 1 字落とす（どちらも zi-d-2）、プロンプトの色を
+        // 送らない、状態行がモードに追随しない（どちらも ES-d）。
         //
         // **落とす判定はそれぞれ違う**——順に、矢印の札の推移 / 往復 /
-        // 挿入の本数である。**`:w` の量の判定はどれでも通る**
-        // （要求 0 に対して 0 なので）。
+        // 挿入の本数 / プロンプトの色 / 状態行の札の変化である。
+        // **`:w` の量の判定はどれでも通る**（要求 0 に対して 0 なので）。
         //
         // **3 つは長い間「別の理由で」落ちていた**——破壊ビルドの像が
         // ディスクへ載らず、シェルが起きる前に停止していた
-        // （`docs/troubleshooting.md`）。**直したら、2 つは捕まっていなかった。**
+        // （`docs/troubleshooting.md`。ES-d で直した）。
         for feature in [
             "zi-cursor-ignore-updown-test",
             "zi-write-skip-body-test",
             "zi-insert-drop-first-test",
+            "zash-prompt-drop-color-test",
+            "zi-status-freeze-mode-test",
         ] {
             total += 1;
             println!("=== xtask check: the zi test catches {feature}");
@@ -10363,7 +10451,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 203,
+    full: 205,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

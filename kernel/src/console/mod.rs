@@ -24,6 +24,10 @@
 
 pub mod backbuffer;
 pub mod dirty;
+// **画面の実物を見る観測（ES-d）。** **判定のためだけに在る**ので、
+// 台本が在る構成（`zi-test`）にしか置かない。
+#[cfg(feature = "zi-test")]
+pub(crate) mod probe;
 pub mod screen;
 
 pub use backbuffer::{BackBuffer, BackBufferError};

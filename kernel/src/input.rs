@@ -533,26 +533,59 @@ pub(crate) mod script {
     ///
     /// **読み戻しはシェルの文脈で行う**——`zi` が書いた内容と `cat` の出力の
     /// 一致を、ホスト側が突き合わせる。**期待値をホストが持たない形である。**
-    const SCRIPT: &[u8] = b"/bin/zi /data/lines\n\
+    const SCRIPT: &[u8] = b"\x01/bin/zi /data/lines\n\
         \x1b[B\x1b[B\x1b[A\
         jjkk\
         \x1b[C\x1b[D\
-        lh\
-        iZY\x1b\
+        lh\x02\
+        iZY\x02\x1b\
         xx\
         :wq\n\
         /bin/cat /data/lines\n";
 
+    /// 観測点（ES-d）。**プロンプトの色を見る。**
+    const OBSERVE_PROMPT: u8 = 0x01;
+    /// 観測点（ES-d）。**`zi` の状態行を見る。**
+    const OBSERVE_STATUS: u8 = 0x02;
+
+    /// 台本の中の観測点か（ES-d）。
+    ///
+    /// **観測点は入力ではない。** [`next_bytes`] が食べて、Ring 3 へは
+    /// 届けない。**打鍵として届くバイトと衝突しない値を選んである**——
+    /// `0x01` と `0x02` は `bytes_for_event` がどのキーからも作らない。
+    fn observation_at(byte: u8) -> Option<crate::console::probe::Observation> {
+        match byte {
+            OBSERVE_PROMPT => Some(crate::console::probe::Observation::Prompt),
+            OBSERVE_STATUS => Some(crate::console::probe::Observation::Status),
+            _ => None,
+        }
+    }
+
     /// 台本の残りを `dst` へ写す。**返した数が 0 なら台本は尽きている。**
+    ///
+    /// **観測点は先に食べる（ES-d）。** **ここへ来たということは、読み手が
+    /// それまでの入力を処理し終えて次を要求したということ**なので、
+    /// **画面はその時点で最新である**（`crate::console::probe` の doc）。
     pub(crate) fn next_bytes(dst: &mut [u8]) -> usize {
         if !ARMED.load(Ordering::SeqCst) {
             return 0;
         }
-        let at = AT.load(Ordering::SeqCst);
+        let mut at = AT.load(Ordering::SeqCst);
+        while let Some(kind) = SCRIPT.get(at).copied().and_then(observation_at) {
+            crate::console::probe::observe(kind);
+            at += 1;
+        }
         if at >= SCRIPT.len() {
+            AT.store(at, Ordering::SeqCst);
             return 0;
         }
-        let take = dst.len().min(SCRIPT.len() - at);
+        // **次の観測点の手前までしか渡さない。** 1 度に多くを求められても、
+        // **観測点を跨いで渡すと、見るはずだった時点を通り過ぎる。**
+        let until = SCRIPT[at..]
+            .iter()
+            .position(|byte| observation_at(*byte).is_some())
+            .map_or(SCRIPT.len(), |offset| at + offset);
+        let take = dst.len().min(until - at);
         dst[..take].copy_from_slice(&SCRIPT[at..at + take]);
         AT.store(at + take, Ordering::SeqCst);
         take

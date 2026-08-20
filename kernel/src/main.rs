@@ -9087,6 +9087,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "DECTCEM の隠す指示を無視して常にカーソルを描く",
     ),
     (
+        "zash-prompt-drop-color-test",
+        cfg!(feature = "zash-prompt-drop-color-test"),
+        "zash が色を送らずにプロンプトを出す",
+    ),
+    (
+        "zi-status-freeze-mode-test",
+        cfg!(feature = "zi-status-freeze-mode-test"),
+        "zi の状態行がモードに関わらず NORMAL のまま描く",
+    ),
+    (
         "write-file-skip-append-test",
         cfg!(feature = "write-file-skip-append-test"),
         "書きで開いた fd への write が複製へ足さない",

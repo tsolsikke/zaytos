@@ -72,6 +72,31 @@ const ESC: u8 = 0x1b;
 /// コマンド行の最大長（`:wq` で足りるが、余裕を取る）。
 const COMMAND_MAX: usize = 16;
 
+/// 状態行の色（ES-d）。**SGR の truecolor で前景を指定する。**
+///
+/// # 色は判定から選んだ
+///
+/// **黄 `(200, 200, 0)` である。** 画面の実物を `read_pixel_raw` で読む判定が
+/// 付くので、**既に画面に居る色と紛れてはならない**（`zash` の `PROMPT_COLOR`
+/// と同じ規律）。**背景 `(0x10, 0x10, 0x18)`・既定前景 `(0xD0, 0xD8, 0xE0)`・
+/// ES-b の判定色（緑と赤）・カーソルのシアン・`zash` のプロンプトのマゼンタの
+/// いずれとも、RGB のどれかの軸で 150 以上離れている。**
+const STATUS_COLOR: &[u8] = b"\x1b[38;2;200;200;0m";
+/// 色を既定へ戻す（SGR 0）。
+const SGR_RESET: &[u8] = b"\x1b[0m";
+
+/// 状態行の札（ES-d）。**3 つとも同じ長さである。**
+///
+/// # 長さを揃えると消去が要らない
+///
+/// **札を上書きするだけで前の札が残らない。** 揃えないと `EL(2)` が要り、
+/// **`EL(2)` を足すと `parse_zi_last_redraw`（xtask）が状態行を本文の行として
+/// 拾う**——あちらは再描画の列を `\x1b[2K` で切って行を取り出している。
+/// **揃えるほうが、判定の側に例外を作らずに済む。**
+const STATUS_NORMAL: &[u8] = b"-- NORMAL  --";
+const STATUS_INSERT: &[u8] = b"-- INSERT  --";
+const STATUS_COMMAND: &[u8] = b"-- COMMAND --";
+
 /// `:w` が書き出す先の受け皿。**`.bss` に置く**（スタックは 1 ページである）。
 static mut FLUSH_BUFFER: [u8; MAX_LINES * (MAX_LINE_LEN + 1)] =
     [0; MAX_LINES * (MAX_LINE_LEN + 1)];
@@ -238,11 +263,55 @@ fn move_cursor(row: usize, col: usize) {
     write_all(STDOUT, &sequence[..at]);
 }
 
+/// 状態行を描く（ES-d）。**本文の 1 行下に、色を付けて置く。**
+///
+/// # 画面の下端ではなく本文の下である
+///
+/// **画面の大きさを訊く手段が無い**——`ioctl` も `TIOCGWINSZ` も無く、
+/// **端末の行数を知る道が 1 つも無い**（`docs/deferred-decisions.md` の
+/// 環境変数の行と同じ立場である）。**下端に置くには行数が要るので、
+/// 本文の下に置く。** 端末が本物の vi のように見えないのはこのためである。
+///
+/// # カーソルを戻して終わる
+///
+/// **描いた後、編集位置へカーソルを戻す。** 戻さないと、次に打った字が
+/// 状態行の隣へ出る——**カーソルは画面に見えている**（ES-c）ので、
+/// **戻し忘れは目でも判定でも分かる。**
+fn draw_status(buffer: &Buffer, mode: Mode, cursor_row: usize, cursor_col: usize) {
+    // 破壊 (ES-d, zi-status-freeze-mode): モードが変わっても NORMAL のまま描く。
+    // **色も位置も長さも変わらない**ので、「状態行が自分の色で描かれている」
+    // 判定は緑のままである。**落ちるのは「モードに従って変わる」判定だけ**で、
+    // **その形でしか落ちない**（`docs/verification-coverage.md` の破壊を足す基準）。
+    #[cfg(zi_status_freeze_mode)]
+    let mode = {
+        let _ = mode;
+        Mode::Normal
+    };
+    let label = match mode {
+        Mode::Normal => STATUS_NORMAL,
+        Mode::Insert => STATUS_INSERT,
+        Mode::Command => STATUS_COMMAND,
+    };
+    move_cursor(buffer.count + 1, 0);
+    // **1 回で書く**（`zash` の `write_prompt` と同じ理由。色の無い札を
+    // 一瞬でも出さない）。
+    let mut out = [0u8; STATUS_COLOR.len() + STATUS_NORMAL.len() + SGR_RESET.len()];
+    let mut at = 0usize;
+    for part in [STATUS_COLOR, label, SGR_RESET] {
+        out[at..at + part.len()].copy_from_slice(part);
+        at += part.len();
+    }
+    write_all(STDOUT, &out[..at]);
+    move_cursor(cursor_row, cursor_col);
+}
+
 /// 画面を描き直す。**全面を消してから行ごとに置く。**
 ///
 /// **消してから描くので、前の内容が残らない。** 1 行ずつ CUP で置くのは、
 /// 行の折り返しに依らず「バッファの行 = 画面の行」を保つためである。
-fn redraw(buffer: &Buffer, cursor_row: usize, cursor_col: usize) {
+///
+/// **状態行もここで描き直す（ES-d）**——`ED(2)` が消してしまうためである。
+fn redraw(buffer: &Buffer, mode: Mode, cursor_row: usize, cursor_col: usize) {
     // ED(2): 画面全体を消す。**カーソルは動かない**ので、この後に CUP を出す。
     write_all(STDOUT, b"\x1b[2J");
     for row in 0..buffer.count {
@@ -254,7 +323,7 @@ fn redraw(buffer: &Buffer, cursor_row: usize, cursor_col: usize) {
             write_all(STDOUT, line);
         }
     }
-    move_cursor(cursor_row, cursor_col);
+    draw_status(buffer, mode, cursor_row, cursor_col);
 }
 
 /// 判定行を出す。**内部状態であって画面ではない**（モジュール doc の限界）。
@@ -363,10 +432,22 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     let mut command = [0u8; COMMAND_MAX];
     let mut command_len = 0usize;
     let mut dirty = false;
-    redraw(buffer, row, col);
+    redraw(buffer, mode, row, col);
     report_cursor(buffer, row, col, b"start");
+    // **いま状態行に出ている札のモード（ES-d）。**
+    let mut shown_mode = mode;
 
     loop {
+        // **モードが変わっていたら状態行を描き直す（ES-d）。**
+        //
+        // **読む直前に見る。** モードを変える場所は 4 つある（`i`・Esc・`:`・
+        // コマンドの実行）が、**そのどれもが最後にここへ戻る**ので、
+        // **`continue` が何本あっても漏れない。**
+        // **`-EAGAIN` で回っている間は変わらない**ので、何度も描かない。
+        if mode != shown_mode {
+            draw_status(buffer, mode, row, col);
+            shown_mode = mode;
+        }
         let mut byte = [0u8; 1];
         let got = read(0, &mut byte);
         if got == MINUS_EAGAIN {
@@ -447,7 +528,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                         Command::Saved => dirty = false,
                         Command::Refused => {}
                     }
-                    redraw(buffer, row, col);
+                    redraw(buffer, mode, row, col);
                     report_cursor(buffer, row, col, b"command");
                 }
                 ESC => {
@@ -641,7 +722,7 @@ fn handle_byte(
                         if *col >= length {
                             *col = length.saturating_sub(1);
                         }
-                        redraw(buffer, *row, *col);
+                        redraw(buffer, *mode, *row, *col);
                         report_cursor(buffer, *row, *col, b"delete");
                     }
                     return removed;
@@ -678,7 +759,7 @@ fn handle_byte(
             let inserted = buffer.insert(*row, *col, byte);
             if inserted {
                 *col += 1;
-                redraw(buffer, *row, *col);
+                redraw(buffer, *mode, *row, *col);
                 report_cursor(buffer, *row, *col, b"typed");
             }
             inserted

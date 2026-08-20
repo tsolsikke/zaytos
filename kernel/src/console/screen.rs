@@ -382,6 +382,43 @@ impl Console {
         ))
     }
 
+    /// セルの字を読む（ES-d の判定用）。**範囲外は `None`。**
+    ///
+    /// **色とは別に要る**——状態行が「モードに従って変わったか」は、
+    /// **色ではなく字が変わったこと**でしか見られない。
+    pub fn cell_char(&self, column: u32, row: u32) -> Option<char> {
+        self.grid.cell(column, row).map(|cell| cell.ch)
+    }
+
+    /// セルの中で最初に見つかる「そのセルの背景でない」ピクセル（ES-d の判定用）。
+    ///
+    /// **[`Self::cell_has_ink`] は在る / 無いしか返さない。** 色を主張するには
+    /// **実際に塗られた値**が要る。**セル自身の背景と比べる**ので、
+    /// **色付きの行の上でも字のピクセルだけが返る。**
+    ///
+    /// **カーソルの下線は含まれる**（同じセルに在れば拾う）。
+    /// **呼ぶ側がカーソルの居るセルを避けること。**
+    pub fn cell_ink_pixel(&mut self, column: u32, row: u32) -> Option<u32> {
+        let format = self.back.layout().format();
+        let background = self
+            .grid
+            .cell(column, row)
+            .map(|cell| Color::rgb(cell.bg.red, cell.bg.green, cell.bg.blue))
+            .unwrap_or(self.background)
+            .to_pixel(format);
+        let x = column * font::CELL_WIDTH;
+        let y = row * font::GLYPH_HEIGHT;
+        for dy in 0..font::GLYPH_HEIGHT {
+            for dx in 0..font::CELL_WIDTH {
+                let pixel = self.back.surface_mut().read_pixel_raw(x + dx, y + dy)?;
+                if pixel != background {
+                    return Some(pixel);
+                }
+            }
+        }
+        None
+    }
+
     /// 画面の実物のピクセルを読む（ES-b の判定用。ADR-0040 の到達条件3）。
     ///
     /// **セルの中身ではなく、バックバッファに実際に書かれた値である。**
