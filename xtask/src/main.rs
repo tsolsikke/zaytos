@@ -5,7 +5,7 @@ use std::{
     io::{Read, Write},
     os::unix::{ffi::OsStrExt, net::UnixStream},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -2385,7 +2385,13 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
     //
     // **期待値を定数で持たない。** 像が変われば空き数も変わるので、
     // **そのつど外の道具から取る。**
-    let built = kernel_build_out_dir(&workspace_root)?.join(FS_IMAGE_NAME);
+    // **像は、いま建てた構成のものを見る（ES-d の同族の洗い出し）。**
+    // **`kernel_build_out_dir` は `--features` を付けずに建て直す**ので、
+    // **構成を変えても既定の像が返る。** ここは破壊 feature つきで呼ばれるので、
+    // **像を変える feature が来たら期待値が別の像から来ることになる**
+    // （`stage_esp` で実際に起きた形である。`docs/troubleshooting.md`）。
+    // **いまその形の feature はここへ来ないが、来たときに静かに壊れる。**
+    let built = kernel_elf.out_dir.join(FS_IMAGE_NAME);
     let expected_counts = dumpe2fs_free_counts(&built)?;
     let kernel_counts = parse_kernel_free_counts(&serial);
     let free_counts_agree = kernel_counts
@@ -3496,17 +3502,20 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     }
 
     // **カーソルの推移を判定行から拾う。** `row` の列がそのまま台本の答えである。
-    let rows = parse_zi_cursor_rows(&serial);
+    //
+    // **矢印と `hjkl` を札で分ける（ES-d の手当て）**——[`parse_zi_cursor_rows`]。
+    let arrow_rows = parse_zi_cursor_rows(&serial, "arrow");
+    let move_rows = parse_zi_cursor_rows(&serial, "move");
 
     let started = serial.contains("zi: ready");
     // **上下でカーソルが動いた（zi-a で zi-d へ委ねた分担の条件）。**
     // 台本は下・下・上を送るので、`row` は 0 -> 1 -> 2 -> 1 と動く。
-    let arrows_moved = rows.windows(2).any(|pair| pair[1] > pair[0])
-        && rows.windows(2).any(|pair| pair[1] < pair[0]);
+    let arrows_moved = arrow_rows.windows(2).any(|pair| pair[1] > pair[0])
+        && arrow_rows.windows(2).any(|pair| pair[1] < pair[0]);
     // **hjkl でも動いた。** 台本は j j k k を送るので、上下の後にもう一度
     // 増えて減る推移が出る。**両方の経路が同じ動きを作ることの主張である。**
     let distinct_rows = {
-        let mut seen: Vec<u32> = rows.clone();
+        let mut seen: Vec<u32> = move_rows.clone();
         seen.sort_unstable();
         seen.dedup();
         seen.len()
@@ -3514,7 +3523,20 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     let hjkl_moved = distinct_rows >= 3;
     // **挿入と削除がバッファへ効いた。** 台本は `i Z Y Esc x` なので、
     // 桁が 2 つ進んでから戻り、削除で 1 つ減る。
-    let typed = serial.contains("typed");
+    //
+    // **本数で見る（ES-d の手当て）。** **在るかどうかで見ていたので、
+    // 1 字目を落とす破壊（`zi-insert-drop-first`）が通っていた**——
+    // **残る 1 字が `typed` を出すので、`contains` は真のままである。**
+    // **往復の判定も捕まえない**——`zi` の再描画と `cat` の読み戻しは
+    // どちらも落とした後の内容なので、一致してしまう
+    // （`docs/verification-coverage.md`）。
+    // **台本が送る挿入は 2 字である**（`kernel/src/input.rs` の `SCRIPT` の
+    // `iZY`）。**この数は台本の写しで、台本を変えたらここも変わる。**
+    let typed_events = serial
+        .lines()
+        .filter(|line| line.contains("zi: cursor") && line.trim_end().ends_with("typed"))
+        .count();
+    let typed = typed_events >= 2;
     let deleted = serial.contains("delete");
     let back_to_normal = serial.contains("normal");
 
@@ -3545,10 +3567,16 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     println!("{context}: zi started = {started}");
     println!(
         "{context}: the up/down arrows moved the cursor between lines = {arrows_moved} \
-         (rows seen: {rows:?})"
+         (rows seen with the arrow tag: {arrow_rows:?})"
     );
-    println!("{context}: hjkl reached at least three distinct rows = {hjkl_moved}");
-    println!("{context}: insert mode typed into the buffer = {typed}");
+    println!(
+        "{context}: hjkl reached at least three distinct rows = {hjkl_moved} \
+         (rows seen with the move tag: {move_rows:?})"
+    );
+    println!(
+        "{context}: insert mode typed into the buffer = {typed} \
+         ({typed_events} typed event(s); the script sends 2)"
+    );
     println!("{context}: Esc returned to normal mode = {back_to_normal}");
     println!("{context}: x deleted a byte = {deleted}");
     println!("{context}: :w wrote every byte it asked for = {saved}");
@@ -3630,9 +3658,16 @@ fn parse_cat_readback(serial: &str, want: usize) -> Vec<String> {
 }
 
 /// `zi` の判定行から `row=` の値を順に拾う（zi-d）。
-fn parse_zi_cursor_rows(serial: &str) -> Vec<u32> {
+///
+/// **札で絞る（ES-d の手当て）。** `zi` は動かした理由を行末の札で分けており
+/// （`arrow` / `move` / `typed` / `delete` / `normal` / `start` / `command`）、
+/// **絞らずに全部拾うと、矢印の主張を `hjkl` が満たしてしまう。**
+/// **実測でそうなっていた**——`zi-cursor-ignore-updown` を有効にしても
+/// `arrows_moved` が真のままだった（`docs/verification-coverage.md`）。
+fn parse_zi_cursor_rows(serial: &str, tag: &str) -> Vec<u32> {
     serial
         .lines()
+        .filter(|line| line.contains("zi: cursor") && line.trim_end().ends_with(tag))
         .filter_map(|line| {
             let rest = line.split("row=").nth(1)?;
             let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
@@ -5804,7 +5839,7 @@ fn cmd_highhalf_trampoline_check(
     expect_match: bool,
 ) -> Result<()> {
     let kernel_elf = build_kernel_with_features(workspace_root, features)?;
-    let bytes = trampoline_bytes(&kernel_elf)?;
+    let bytes = trampoline_bytes(&kernel_elf.elf)?;
     let matches = bytes == EXPECTED_TRAMPOLINE_BYTES;
     let label = if features.is_empty() {
         "default build".to_string()
@@ -8691,11 +8726,11 @@ const APIC_TESTS: &[CriticalTest] = &[
 fn check_structural_guard_symbols_present(workspace_root: &Path) -> Result<String> {
     let kernel_elf = build_kernel(workspace_root, false)?;
     let output = Command::new("nm")
-        .arg(&kernel_elf)
+        .arg(&kernel_elf.elf)
         .output()
         .context("failed to invoke nm (is binutils installed?)")?;
     if !output.status.success() {
-        bail!("nm failed on {}", kernel_elf.display());
+        bail!("nm failed on {}", kernel_elf.elf.display());
     }
     let listing = String::from_utf8_lossy(&output.stdout);
     let mut found = Vec::new();
@@ -8742,6 +8777,15 @@ fn check_structural_guard_symbols_present(workspace_root: &Path) -> Result<Strin
 /// 破壊ビルドの残骸を掴みうる（`--full` の直後がその状態になる）。**cargo に
 /// 訊く**——`--message-format=json` の `build-script-executed` が、
 /// **いま建てた構成の `out_dir` をパッケージごとに 1 行で返す。**
+///
+/// # ここが見るのは既定構成の像である
+///
+/// **[`kernel_build_out_dir`] は `--features` を付けずに建て直す**ので、
+/// **返るのは常に既定構成の `OUT_DIR` である。** **この検査の対象は既定構成の
+/// 像なので、それでよい**——**意図して既定を見ている、と書いておく。**
+/// **同じ形が別の場所では誤りだった**（`stage_esp` が破壊ビルドへ既定の像を
+/// 載せていた。`docs/troubleshooting.md`）。**構成を渡す側と訊く側が分かれて
+/// いる形は、意図か誤りかを毎回書き分けること。**
 fn check_fs_image_passes_e2fsck(workspace_root: &Path) -> Result<String> {
     let image = kernel_build_out_dir(workspace_root)?.join(FS_IMAGE_NAME);
     // **この分岐は今日の構成では届かない**（実測）。像が無ければ `include_bytes!` が
@@ -9520,8 +9564,14 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
 
         // **`zi` の破壊 3 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
         // 書かない、挿入が 1 字落とす（どちらも zi-d-2）。
-        // **後の 2 つは往復の判定が捕まえる**——`:w` の量の判定は通ってしまう
+        //
+        // **落とす判定はそれぞれ違う**——順に、矢印の札の推移 / 往復 /
+        // 挿入の本数である。**`:w` の量の判定はどれでも通る**
         // （要求 0 に対して 0 なので）。
+        //
+        // **3 つは長い間「別の理由で」落ちていた**——破壊ビルドの像が
+        // ディスクへ載らず、シェルが起きる前に停止していた
+        // （`docs/troubleshooting.md`）。**直したら、2 つは捕まっていなかった。**
         for feature in [
             "zi-cursor-ignore-updown-test",
             "zi-write-skip-body-test",
@@ -10759,7 +10809,31 @@ fn run_regression(
     }
 }
 
-fn build_kernel_with_features(workspace_root: &Path, features: &[&str]) -> Result<PathBuf> {
+/// 建てたカーネルと、その構成の `OUT_DIR`（ES-d の手当て）。
+///
+/// # なぜ対で持つのか
+///
+/// **`OUT_DIR` は feature 構成ごとに別で、その下に `fs.img` が建つ。**
+/// **ユーザープログラムを変える feature（`USER_PROGRAM_CFGS`）があるので、
+/// 像は構成ごとに違うバイト列になる。**
+///
+/// **以前は `stage_esp` が「既定構成でもう一度 `cargo build` を走らせて
+/// `OUT_DIR` を訊く」形だった**ので、**破壊ビルドを起こすときに、
+/// 既定構成の像がディスクへ載っていた。** カーネルは自分が埋め込んだ像と
+/// 突き合わせるので一致せず、**シェルが起きる前に停止していた**
+/// （`docs/troubleshooting.md`）。
+///
+/// **建てた側と載せる側を対にして持てば、取り違えようが無い。**
+struct KernelBuild {
+    elf: PathBuf,
+    out_dir: PathBuf,
+}
+
+/// カーネルを建て、ELF と `OUT_DIR` を返す。
+///
+/// **`OUT_DIR` は同じ `cargo` の出力から取る**——**別の呼び出しで訊くと、
+/// 訊いた構成が違いうる**（それが上記の取り違えの原因だった）。
+fn run_kernel_build(workspace_root: &Path, features: &[&str]) -> Result<KernelBuild> {
     let mut command = Command::new("cargo");
     command.current_dir(workspace_root).args([
         "build",
@@ -10769,65 +10843,66 @@ fn build_kernel_with_features(workspace_root: &Path, features: &[&str]) -> Resul
         KERNEL_PACKAGE,
         "--bin",
         KERNEL_PACKAGE,
+        "--message-format=json-render-diagnostics",
     ]);
     if !features.is_empty() {
         command.args(["--features", &features.join(",")]);
     }
-    let status = command
-        .status()
+    // **診断はそのまま流す。** `--message-format=json-render-diagnostics` は
+    // 人が読む形の診断を stderr へ出すので、握らずに見せる。
+    let output = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .output()
         .context("failed to invoke cargo to build the kernel")?;
-    if !status.success() {
-        bail!("kernel build failed ({status})");
+    if !output.status.success() {
+        bail!("kernel build failed ({})", output.status);
     }
 
-    let elf_path = workspace_root
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut out_dir = None;
+    for line in stdout.lines() {
+        if !line.contains("\"reason\":\"build-script-executed\"") {
+            continue;
+        }
+        // **kernel 以外のパッケージのビルドスクリプトも同じ形で出る。**
+        if !line.contains(&format!("/{KERNEL_PACKAGE}#")) {
+            continue;
+        }
+        if let Some(dir) = json_string_field(line, "out_dir") {
+            out_dir = Some(PathBuf::from(dir));
+        }
+    }
+    let out_dir = out_dir.context(
+        "cargo did not report a build-script-executed message for the kernel; \
+         cannot locate OUT_DIR",
+    )?;
+
+    let elf = workspace_root
         .join("target")
         .join(KERNEL_TARGET)
         .join("debug")
         .join(KERNEL_PACKAGE);
-    if !elf_path.exists() {
+    if !elf.exists() {
         bail!(
             "kernel build reported success but {} is missing",
-            elf_path.display()
+            elf.display()
         );
     }
-    Ok(elf_path)
+    Ok(KernelBuild { elf, out_dir })
 }
 
-fn build_kernel(workspace_root: &Path, gfx_test: bool) -> Result<PathBuf> {
-    let mut command = Command::new("cargo");
-    command.current_dir(workspace_root).args([
-        "build",
-        "--target",
-        KERNEL_TARGET,
-        "-p",
-        KERNEL_PACKAGE,
-        "--bin",
-        KERNEL_PACKAGE,
-    ]);
-    if gfx_test {
-        command.args(["--features", GFX_TEST_PATTERN_FEATURE]);
-    }
-    let status = command
-        .status()
-        .context("failed to invoke cargo to build the kernel")?;
+fn build_kernel_with_features(workspace_root: &Path, features: &[&str]) -> Result<KernelBuild> {
+    run_kernel_build(workspace_root, features)
+}
 
-    if !status.success() {
-        bail!("kernel build failed ({status})");
-    }
-
-    let elf_path = workspace_root
-        .join("target")
-        .join(KERNEL_TARGET)
-        .join("debug")
-        .join(KERNEL_PACKAGE);
-    if !elf_path.exists() {
-        bail!(
-            "kernel build reported success but {} is missing",
-            elf_path.display()
-        );
-    }
-    Ok(elf_path)
+fn build_kernel(workspace_root: &Path, gfx_test: bool) -> Result<KernelBuild> {
+    let features: &[&str] = if gfx_test {
+        &[GFX_TEST_PATTERN_FEATURE]
+    } else {
+        &[]
+    };
+    run_kernel_build(workspace_root, features)
 }
 
 /// このプロジェクトで使う OVMF ビルド（Ubuntu の `ovmf` パッケージ）は、
@@ -10853,7 +10928,12 @@ fn disk_image_path(esp_dir: &Path) -> PathBuf {
         .join("disk0.img")
 }
 
-fn stage_esp(workspace_root: &Path, bootloader_efi: &Path, kernel_elf: &Path) -> Result<PathBuf> {
+fn stage_esp(
+    workspace_root: &Path,
+    bootloader_efi: &Path,
+    kernel: &KernelBuild,
+) -> Result<PathBuf> {
+    let kernel_elf = kernel.elf.as_path();
     let esp_dir = workspace_root.join("target").join("esp");
     let boot_dir = esp_dir.join("EFI").join("BOOT");
     fs::create_dir_all(&boot_dir)
@@ -10897,7 +10977,10 @@ fn stage_esp(workspace_root: &Path, bootloader_efi: &Path, kernel_elf: &Path) ->
     // どの feature 構成でも同じバイト列になる。大きさも像と同じにする
     // （16MiB に伸ばす根拠が無くなった）。
     let disk_image = disk_image_path(&esp_dir);
-    let built = kernel_build_out_dir(workspace_root)?.join(FS_IMAGE_NAME);
+    // **載せる像は、いま積んだカーネルが埋め込んでいるものと同じである**
+    // （[`KernelBuild`] の doc）。**別の構成の像を載せると、カーネルの
+    // 突き合わせが落ちて、シェルが起きる前に停止する。**
+    let built = kernel.out_dir.join(FS_IMAGE_NAME);
     fs::copy(&built, &disk_image).with_context(|| {
         format!(
             "failed to copy {} to {}",
