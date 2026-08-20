@@ -2159,11 +2159,39 @@ fn init_console(
     // バックバッファは物理フレームから切り出したもので、変換は direct map を通す
     // （T-2c で frame_allocator が PhysAddr を返すようになれば、この分岐は消える）。
     let base_virt = common::addr::direct_map().phys_to_virt(start_frame);
+    // **端末のセルの置き場（ES-a。ADR-0040）。**
+    //
+    // # なぜ静的で、なぜこの大きさか
+    //
+    // **`Screen` は大きさを持たない**——フレームバッファの実寸から桁行を
+    // 導くので、**ここは「仮定する最大」だけを決める。**
+    // **FHD（1920x1080）で 240x67 = 16080 セルである**（実測から計算。
+    // 現在の 1280x800 は 160x50 = 8000 セル）。**GUI で FHD へ移ることが
+    // 決まっている**ので、そこまで足りる形にしてある。
+    //
+    // **越えたら `Console::new` が拒む**（`ScreenError::CellsTooSmall`）。
+    // **切り詰めない**——足りないまま使うと、書いたはずのセルが黙って消える。
+    // **拒まれるとコンソールが起動しないが、シリアルは影響を受けない**
+    // （`init_console` の失敗の経路がそう書いてある）。
+    //
+    // **ヒープを使わない。** ヒープは 1MiB 固定で（実測）、**代替画面
+    // バッファを足すと 2 面で倍になる**——そのときヒープの拡張の行が
+    // 発火する。**いまは `.bss` に置いて、その判断を先送りしない形にする。**
+    const MAX_TERMINAL_CELLS: usize = 240 * 67;
+    static mut TERMINAL_CELLS: [common::screen::Cell; MAX_TERMINAL_CELLS] =
+        [common::screen::Cell::blank(); MAX_TERMINAL_CELLS];
+    // SAFETY: 起動時の単一実行文脈で、ここが唯一の借り手である。
+    // **`Console` は 1 つしか作らない**（`init_console` の呼び出しは 1 箇所）。
+    let cells: &'static mut [common::screen::Cell] =
+        unsafe { &mut *core::ptr::addr_of_mut!(TERMINAL_CELLS) };
+
     // SAFETY: base..end は今確保したばかりで他の誰も使っておらず、直前に
     // contains_range でマップ済みを確認した。framebuffer は init_framebuffer が検証済み
     // の形状で作ったもので、所有権をここへ移している（同じ領域に対する Framebuffer は
     // 他に存在しない）。
-    match unsafe { Console::new(framebuffer, base_virt, FOREGROUND, BACKGROUND) } {
+    // **セルの置き場も同じ契約に載る**——上の `TERMINAL_CELLS` は
+    // 起動時の単一実行文脈で 1 度だけ借りる。
+    match unsafe { Console::new(framebuffer, base_virt, FOREGROUND, BACKGROUND, cells) } {
         Ok(console) => {
             let (columns, rows) = console.size();
             logger.info(format_args!(

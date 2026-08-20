@@ -19,4 +19,5 @@ pub mod ext2;
 pub mod log;
 pub mod percpu;
 pub mod port;
+pub mod screen;
 pub mod serial;

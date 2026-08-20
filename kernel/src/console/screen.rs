@@ -25,13 +25,13 @@ use crate::graphics::{Color, Framebuffer};
 
 use super::backbuffer::{BackBuffer, BackBufferError, FlushRangeError};
 use super::dirty::DirtyRegion;
-use super::grid::{Grid, GridError};
+use common::screen::{Cell, Rgb, Screen, ScreenError};
 
 /// [`Console::new`] が拒否した理由。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ConsoleError {
     BackBuffer(BackBufferError),
-    Grid(GridError),
+    Screen(ScreenError),
 }
 
 /// 転送量の記録。ダーティ矩形が実際に効いているかを数字で確かめるためのもの。
@@ -89,7 +89,7 @@ impl FlushStats {
 pub struct Console {
     front: Framebuffer,
     back: BackBuffer,
-    grid: Grid,
+    grid: Screen<'static>,
     dirty: DirtyRegion,
     foreground: Color,
     background: Color,
@@ -118,6 +118,7 @@ impl Console {
         back_buffer_base: VirtAddr,
         foreground: Color,
         background: Color,
+        cells: &'static mut [Cell],
     ) -> Result<Self, ConsoleError> {
         let layout = *framebuffer.layout();
 
@@ -125,13 +126,17 @@ impl Console {
         let mut back = unsafe { BackBuffer::new(back_buffer_base, &layout) }
             .map_err(ConsoleError::BackBuffer)?;
 
-        let grid = Grid::from_screen(
+        // **端末の状態は `Screen` が持つ（ES-a。ADR-0040）。**
+        // **置き場は呼び出し側が渡す**——大きさをフレームバッファの実寸から
+        // 導くためで、**`Screen` 自身は画面の大きさを知らない。**
+        let grid = Screen::from_screen(
             layout.width(),
             layout.height(),
             font::CELL_WIDTH,
             font::GLYPH_HEIGHT,
+            cells,
         )
-        .map_err(ConsoleError::Grid)?;
+        .map_err(ConsoleError::Screen)?;
 
         // 最初の転送より前に、確保したばかりの領域を必ず塗り潰す。
         back.clear_all(background);
@@ -158,6 +163,14 @@ impl Console {
         // 画面に残っている前の内容（ファームウェアの表示など）を消しておく。
         console.flush();
         Ok(console)
+    }
+
+    /// 描画側の [`Color`] を端末の状態の [`Rgb`] へ写す（ES-a）。
+    ///
+    /// **型を分けてあるのは、片方が描画側でもう片方が状態だからである**
+    /// （`common::screen::Rgb` の doc）。
+    const fn rgb(color: Color) -> Rgb {
+        Rgb::new(color.red, color.green, color.blue)
     }
 
     /// フレームバッファの形状。計測や診断で参照する。
@@ -203,6 +216,11 @@ impl Console {
             .surface_mut()
             .fill_rect(x, y, width, font::GLYPH_HEIGHT, self.background);
         self.dirty.mark(x, y, width, font::GLYPH_HEIGHT);
+        // **セルも消す（ES-a）。**
+        let background = Self::rgb(self.background);
+        for column in from..to {
+            self.grid.put(column, row, ' ', background, background, 1);
+        }
     }
 
     /// 行消去（EL。zi-b）。**カーソルは動かさない。**
@@ -270,13 +288,9 @@ impl Console {
     pub fn clear(&mut self) {
         self.back.clear_all(self.background);
         self.dirty.mark_all();
-        self.grid = Grid::from_screen(
-            self.front.layout().width(),
-            self.front.layout().height(),
-            font::CELL_WIDTH,
-            font::GLYPH_HEIGHT,
-        )
-        .unwrap_or(self.grid);
+        // **セルも空へ戻す（ES-a）。** 画面を塗り直したので、
+        // **状態とピクセルを食い違わせない。**
+        self.grid.reset(Self::rgb(self.background));
     }
 
     /// 未転送の範囲をフレームバッファへ送る。
@@ -321,6 +335,9 @@ impl Console {
         if step.scrolled {
             self.back.scroll_up(font::GLYPH_HEIGHT, self.background);
             self.dirty.mark_all();
+            // **セルも同じ規則で動かす（ES-a）。** 片方だけを動かすと、
+            // **状態と画面が食い違う。**
+            self.grid.scroll_up(Self::rgb(self.background));
         }
 
         if let Some(row) = step.clear_row {
@@ -329,12 +346,24 @@ impl Console {
                 .clear_rows(top, font::GLYPH_HEIGHT, self.background);
             self.dirty
                 .mark(0, top, self.back.layout().width(), font::GLYPH_HEIGHT);
+            self.grid.clear_row(row, Self::rgb(self.background));
         }
 
         if let Some(placement) = step.draw_at {
+            // **セルへ記録してから描く（ES-a。ADR-0040）。**
+            // **状態が先で、描画はその写しである**——ES-b 以降で
+            // 「`Screen` を矩形へ写す」形へ寄せるための順序である。
+            let (foreground, background) = (self.foreground, self.background);
+            self.grid.put(
+                placement.column,
+                placement.row,
+                c,
+                Self::rgb(foreground),
+                Self::rgb(background),
+                placement.width_cells,
+            );
             let x = placement.column * font::CELL_WIDTH;
             let y = placement.row * font::GLYPH_HEIGHT;
-            let (foreground, background) = (self.foreground, self.background);
             self.back
                 .surface_mut()
                 .draw_glyph(x, y, glyph, foreground, Some(background));

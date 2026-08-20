@@ -1,7 +1,8 @@
 //! 画面コンソール（M3）。
 //!
-//! - [`grid`][mod@grid]: カーソルと桁送りの管理（純粋ロジック、ホスト
-//!   `cargo test` で検証）。
+//! - 桁送りとセルの状態は `common::screen` にある（ES-a。ADR-0040 が
+//!   **端末の状態を画面から切り離した**）。純粋ロジックで、ホストの
+//!   `cargo test` で検証する。
 //! - [`dirty`][mod@dirty]: 未転送範囲の追跡（純粋ロジック、ホスト
 //!   `cargo test` で検証）。
 //! - [`backbuffer`][mod@backbuffer]: バックバッファとフレームバッファへの
@@ -23,12 +24,15 @@
 
 pub mod backbuffer;
 pub mod dirty;
-pub mod grid;
 pub mod screen;
 
 pub use backbuffer::{BackBuffer, BackBufferError};
 pub use dirty::{DirtyRegion, Rect};
-pub use grid::{Grid, GridError, Placement, Step, MAX_GLYPH_WIDTH_CELLS, TAB_WIDTH};
+// **桁送りとセルの論理は `common::screen` へ移した（ES-a。ADR-0040）。**
+// **端末の状態を画面から切り離すためで、ホストテストもあちらへ移っている。**
+pub use common::screen::{
+    Cell, Placement, Rgb, Screen, ScreenError, Step, MAX_GLYPH_WIDTH_CELLS, TAB_WIDTH,
+};
 pub use screen::{Console, ConsoleError, FlushStats};
 
 use core::sync::atomic::{AtomicPtr, Ordering};
@@ -169,8 +173,8 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::grid::MAX_GLYPH_WIDTH_CELLS;
     use crate::graphics::font;
+    use common::screen::MAX_GLYPH_WIDTH_CELLS;
 
     /// 格子が想定するグリフ幅の上限が、実際にフォントへ収録されている最大幅を
     /// 下回っていないことを確かめる。
@@ -183,7 +187,7 @@ mod tests {
         assert!(
             font::max_width_cells() <= MAX_GLYPH_WIDTH_CELLS,
             "フォントに {} セル幅のグリフがあるが、格子の想定上限は {} セル。\
-             console::grid::MAX_GLYPH_WIDTH_CELLS を引き上げること",
+             common::screen::MAX_GLYPH_WIDTH_CELLS を引き上げること",
             font::max_width_cells(),
             MAX_GLYPH_WIDTH_CELLS
         );
