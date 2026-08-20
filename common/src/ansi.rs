@@ -28,6 +28,8 @@
 //! **溜めた分は捨てて、いま来た字を最初から扱い直す**（`zash` の入力側の
 //! 状態機械と同じ判断——溜めた字を画面へ混ぜない）。
 
+use crate::screen::Rgb;
+
 /// 消去の範囲（EDとELで共通。ANSIのパラメータ 0 / 1 / 2）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EraseScope {
@@ -64,13 +66,38 @@ pub enum AnsiAction {
     EraseDisplay(EraseScope),
     /// 行消去（EL）。
     EraseLine(EraseScope),
+    /// 文字の見た目を変える（SGR。ES-b。ADR-0040）。
+    ///
+    /// **色は受理時にRGBへ展開してある**（`Rgb`）——16色・256色・truecolorの
+    /// どれで来ても、ここから先は同じ形である。**量子化しない。**
+    SetGraphics(Graphics),
 }
 
-/// パラメータの上限。CUPの `row;col` の2つで足りる。
+/// SGRが指示した見た目の変化（ES-b）。
 ///
-/// **3つ目の`;`が来たら列ごと捨てる**——解釈する3列に3パラメータのものは
-/// 無いので、それは知らない列である。
-const MAX_PARAMS: usize = 2;
+/// **`None`は「触らない」である。** SGRは複数の指示を1つの列に並べられるので、
+/// **指定されなかったものを既定へ戻してはならない。**
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Graphics {
+    /// すべて既定へ戻す（`0`）。**これが真なら下の2つより先に効く。**
+    pub reset: bool,
+    /// 前景。
+    pub foreground: Option<Rgb>,
+    /// 背景。
+    pub background: Option<Rgb>,
+}
+
+/// パラメータの上限（ES-bで2から16へ上げた）。
+///
+/// **SGRは可変長である。** 前景と背景をどちらもtruecolorで指定すると
+/// `38;2;r;g;b;48;2;r;g;b`で**10個**になり、属性を足せばもう少し伸びる。
+/// **16はその実用上の上限に余裕を取った値である**（一般の端末は16から32を
+/// 受ける）。
+///
+/// **越えたら列ごと捨てる。** **途中まで適用しない**——`38;2;255;0`のような
+/// 半端な指定を部分適用すると、**色が中途半端に変わって「効いたのか」が
+/// 読めなくなる。** 捨てれば「効かなかった」だけである。
+const MAX_PARAMS: usize = 16;
 
 /// 状態機械の状態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,7 +124,7 @@ pub struct AnsiParser {
     params: [u32; MAX_PARAMS],
     /// いま何番目のパラメータへ数字を積んでいるか。
     param_index: usize,
-    /// 3つ目以降のパラメータが来た。終端まで飲み込んでから列ごと捨てる。
+    /// 上限を越えるパラメータが来た。終端まで飲み込んでから列ごと捨てる。
     too_many_params: bool,
 }
 
@@ -192,6 +219,92 @@ impl AnsiParser {
         }
     }
 
+    /// SGRを組み立てる（ES-b。ADR-0040）。
+    ///
+    /// # 受ける形
+    ///
+    /// | パラメータ | 意味 |
+    /// |---|---|
+    /// | `0`（省略も同じ） | すべて既定へ戻す |
+    /// | `30`..`37` / `90`..`97` | 前景（標準8色 / 明るい8色） |
+    /// | `40`..`47` / `100`..`107` | 背景（同上） |
+    /// | `38;5;n` / `48;5;n` | 256色（受理時にRGBへ展開する） |
+    /// | `38;2;r;g;b` / `48;2;r;g;b` | truecolor |
+    /// | `39` / `49` | 前景 / 背景を既定へ |
+    ///
+    /// **量子化しない**（ADR-0040 の Decision 2）。**どの形で来ても RGB へ
+    /// 展開して同じ形にする。**
+    ///
+    /// # 知らないパラメータは飛ばす
+    ///
+    /// **列ごと捨てない。** SGRは複数の指示を並べられるので、
+    /// **`1;31`（太字 + 赤）の太字を知らないからといって赤まで捨てるのは
+    /// 行き過ぎである。** **知っているものだけを効かせる。**
+    ///
+    /// **太字・下線・反転（`1` / `4` / `7`）は受けるが、いまは効かない**
+    /// ——**描く側に太字の字形が無い。** **`Cell::attrs` へ溜めない**
+    /// （溜めても誰も見ないので、**観測されない状態を増やすことになる**）。
+    /// **要る利用者が来たら足す。**
+    fn dispatch_sgr(&self) -> Option<AnsiAction> {
+        let mut graphics = Graphics::default();
+        // **パラメータが1つも無い `\x1b[m` は `0` である**（配列は0で埋めて
+        // あるので、そのまま `0` として読める）。
+        let count = self.param_index + 1;
+        let mut at = 0usize;
+        while at < count {
+            let param = self.params[at];
+            match param {
+                0 => graphics.reset = true,
+                30..=37 => graphics.foreground = Some(base_color(param - 30, false)),
+                90..=97 => graphics.foreground = Some(base_color(param - 90, true)),
+                40..=47 => graphics.background = Some(base_color(param - 40, false)),
+                100..=107 => graphics.background = Some(base_color(param - 100, true)),
+                39 => graphics.foreground = None,
+                49 => graphics.background = None,
+                38 | 48 => {
+                    // **`5;n`（256色）か `2;r;g;b`（truecolor）が続く。**
+                    // **足りなければ列ごと捨てる**——半端な指定を部分適用しない
+                    // （[`MAX_PARAMS`] の doc と同じ判断）。
+                    let kind = self.params.get(at + 1)?;
+                    let color = match kind {
+                        5 => {
+                            let index = self.params.get(at + 2)?;
+                            if at + 2 >= count {
+                                return None;
+                            }
+                            at += 2;
+                            palette_256(*index)
+                        }
+                        2 => {
+                            if at + 4 >= count {
+                                return None;
+                            }
+                            let (r, g, b) = (
+                                self.params[at + 2],
+                                self.params[at + 3],
+                                self.params[at + 4],
+                            );
+                            at += 4;
+                            Rgb::new(clamp_u8(r), clamp_u8(g), clamp_u8(b))
+                        }
+                        // 知らない指定方式。**列ごと捨てる**——続く値の個数が
+                        // 分からないので、飛ばす先を決められない。
+                        _ => return None,
+                    };
+                    if param == 38 {
+                        graphics.foreground = Some(color);
+                    } else {
+                        graphics.background = Some(color);
+                    }
+                }
+                // 知らないパラメータは飛ばす（上の doc）。
+                _ => {}
+            }
+            at += 1;
+        }
+        Some(AnsiAction::SetGraphics(graphics))
+    }
+
     /// 終端バイトから動作を組み立てる。知らない終端は `None`（読み捨て）。
     fn dispatch_final(&self, final_byte: char) -> Option<AnsiAction> {
         match final_byte {
@@ -203,8 +316,85 @@ impl AnsiParser {
             }
             'J' => EraseScope::from_param(self.params[0]).map(AnsiAction::EraseDisplay),
             'K' => EraseScope::from_param(self.params[0]).map(AnsiAction::EraseLine),
+            // SGR（ES-b）。**パラメータが無い `\x1b[m` は `0`（全部戻す）である**
+            // ——ANSI の規約どおり。
+            'm' => self.dispatch_sgr(),
             _ => None,
         }
+    }
+}
+
+/// 標準8色と明るい8色（ES-b）。
+///
+/// **xtermの慣行の値を使う。** **ZaytOSはコンソールもウィンドウも同じ
+/// フレームバッファへ描くので、量子化も別プロファイルも持たない**
+/// （ADR-0040）。
+const fn base_color(index: u32, bright: bool) -> Rgb {
+    let table = if bright {
+        [
+            (0x7f, 0x7f, 0x7f),
+            (0xff, 0x00, 0x00),
+            (0x00, 0xff, 0x00),
+            (0xff, 0xff, 0x00),
+            (0x5c, 0x5c, 0xff),
+            (0xff, 0x00, 0xff),
+            (0x00, 0xff, 0xff),
+            (0xff, 0xff, 0xff),
+        ]
+    } else {
+        [
+            (0x00, 0x00, 0x00),
+            (0xcd, 0x00, 0x00),
+            (0x00, 0xcd, 0x00),
+            (0xcd, 0xcd, 0x00),
+            (0x00, 0x00, 0xee),
+            (0xcd, 0x00, 0xcd),
+            (0x00, 0xcd, 0xcd),
+            (0xe5, 0xe5, 0xe5),
+        ]
+    };
+    // **範囲外は来ない**（呼び出し側が 0..=7 に絞っている）が、
+    // **添字で落とさない**——`get` が無い const 文脈なので剰余で閉じる。
+    let (red, green, blue) = table[(index % 8) as usize];
+    Rgb::new(red, green, blue)
+}
+
+/// 256色をRGBへ展開する（ES-b）。**表ではなく式で出す。**
+///
+/// - `0`..`15`: 標準8色と明るい8色
+/// - `16`..`231`: 6×6×6の立方体
+/// - `232`..`255`: 24段の灰
+const fn palette_256(index: u32) -> Rgb {
+    if index < 8 {
+        return base_color(index, false);
+    }
+    if index < 16 {
+        return base_color(index - 8, true);
+    }
+    if index < 232 {
+        let value = index - 16;
+        // **各軸は6段で、xtermの刻みは 0, 95, 135, 175, 215, 255 である。**
+        let steps = [0u8, 95, 135, 175, 215, 255];
+        let red = steps[((value / 36) % 6) as usize];
+        let green = steps[((value / 6) % 6) as usize];
+        let blue = steps[(value % 6) as usize];
+        return Rgb::new(red, green, blue);
+    }
+    if index < 256 {
+        // **灰は 8 から 10 刻みである**（xtermの慣行）。
+        let level = (8 + (index - 232) * 10) as u8;
+        return Rgb::new(level, level, level);
+    }
+    // 範囲外。**黒にしない**——白のほうが「知らない値が来た」と気づきやすい。
+    Rgb::new(0xff, 0xff, 0xff)
+}
+
+/// SGRのパラメータをバイトへ落とす。**255で飽和する。**
+const fn clamp_u8(value: u32) -> u8 {
+    if value > 255 {
+        255
+    } else {
+        value as u8
     }
 }
 
@@ -291,12 +481,16 @@ mod tests {
         );
     }
 
-    /// **知らない終端は列ごと読み捨てる。** SGR（`m`）を送っても
-    /// `[31m` が画面へ出ない——無視は「化けない」を含む。
+    /// **知らない終端は列ごと読み捨てる。** 無視は「化けない」を含む。
+    ///
+    /// **例をSGRから変えた（ES-b）。** かつては `\x1b[31m` を「知らない終端」の
+    /// 例に使っていたが、**ES-bでSGRを解釈するようになったので例として
+    /// 成り立たない。** DSR（`\x1b[6n`。カーソル位置の問い合わせ）へ移した
+    /// ——**あれは応答を返す列で、入力の経路を持たないいまは扱えない。**
     #[test]
     fn an_unknown_final_byte_consumes_the_whole_sequence() {
         let mut parser = AnsiParser::new();
-        assert_eq!(feed_all(&mut parser, "\x1b[31mx"), [AnsiAction::Print('x')]);
+        assert_eq!(feed_all(&mut parser, "\x1b[6nx"), [AnsiAction::Print('x')]);
     }
 
     /// 知らない消去パラメータは捨てる（間違って全消去しない）。
@@ -307,13 +501,30 @@ mod tests {
         assert_eq!(feed_all(&mut parser, "x"), [AnsiAction::Print('x')]);
     }
 
-    /// 3つ目のパラメータが来たら、その列は知らない列である。
+    /// **上限を越えるパラメータが来たら、その列ごと捨てる。**
+    ///
+    /// **例を変えた（ES-b）。** かつては3つで越えたが、**SGRのために上限を
+    /// 16へ上げた**ので、越えるには17個要る。**CUPは余分なパラメータを
+    /// 無視する形になった**（3つ目以降を読まない）——**それは端末の慣行
+    /// どおりで、`\x1b[1;2;3H` は (1,2) へ動く。**
     #[test]
     fn too_many_params_drop_the_sequence() {
         let mut parser = AnsiParser::new();
+        // 17 個並べる。**上限（16）を 1 つ越える。**
+        let over = "\x1b[1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1Hx";
+        assert_eq!(feed_all(&mut parser, over), [AnsiAction::Print('x')]);
+    }
+
+    /// **CUPは余分なパラメータを無視する（ES-bで上限を上げた帰結）。**
+    ///
+    /// **端末の慣行どおりである**——`\x1b[1;2;3H` は 3 つ目を見ずに (1,2) へ
+    /// 動く。**上限が 2 だった頃は列ごと捨てていた**ので、挙動が変わった。
+    #[test]
+    fn cup_ignores_extra_parameters() {
+        let mut parser = AnsiParser::new();
         assert_eq!(
-            feed_all(&mut parser, "\x1b[1;2;3Hx"),
-            [AnsiAction::Print('x')]
+            feed_all(&mut parser, "\x1b[1;2;3H"),
+            [AnsiAction::CursorTo { row: 1, col: 2 }]
         );
     }
 
@@ -347,6 +558,133 @@ mod tests {
         let mut parser = AnsiParser::new();
         assert_eq!(feed_all(&mut parser, "\x1b[3"), []);
         parser.reset();
+        assert_eq!(feed_all(&mut parser, "x"), [AnsiAction::Print('x')]);
+    }
+
+    /// **標準8色と明るい8色が前景・背景の両方で効く（ES-b）。**
+    #[test]
+    fn the_base_colors_land_on_foreground_and_background() {
+        let mut parser = AnsiParser::new();
+        let red = feed_all(&mut parser, "\x1b[31m");
+        assert_eq!(
+            red,
+            [AnsiAction::SetGraphics(Graphics {
+                reset: false,
+                foreground: Some(Rgb::new(0xcd, 0x00, 0x00)),
+                background: None,
+            })]
+        );
+        let bright_bg = feed_all(&mut parser, "\x1b[102m");
+        assert_eq!(
+            bright_bg,
+            [AnsiAction::SetGraphics(Graphics {
+                reset: false,
+                foreground: None,
+                background: Some(Rgb::new(0x00, 0xff, 0x00)),
+            })]
+        );
+    }
+
+    /// **truecolorはそのまま通る。量子化しない**（ADR-0040）。
+    #[test]
+    fn truecolor_passes_through_unquantised() {
+        let mut parser = AnsiParser::new();
+        let actions = feed_all(&mut parser, "\x1b[38;2;12;34;56m");
+        assert_eq!(
+            actions,
+            [AnsiAction::SetGraphics(Graphics {
+                reset: false,
+                foreground: Some(Rgb::new(12, 34, 56)),
+                background: None,
+            })]
+        );
+    }
+
+    /// **256色は式で展開する**（立方体と灰）。
+    #[test]
+    fn the_256_palette_expands_to_rgb() {
+        let mut parser = AnsiParser::new();
+        // 16 は立方体の原点で、xterm では黒である。
+        assert_eq!(
+            feed_all(&mut parser, "\x1b[38;5;16m"),
+            [AnsiAction::SetGraphics(Graphics {
+                reset: false,
+                foreground: Some(Rgb::new(0, 0, 0)),
+                background: None,
+            })]
+        );
+        // 231 は立方体の反対の端で白。
+        assert_eq!(
+            feed_all(&mut parser, "\x1b[48;5;231m"),
+            [AnsiAction::SetGraphics(Graphics {
+                reset: false,
+                foreground: None,
+                background: Some(Rgb::new(255, 255, 255)),
+            })]
+        );
+        // 232 は灰の最初（8, 8, 8）。
+        assert_eq!(
+            feed_all(&mut parser, "\x1b[38;5;232m"),
+            [AnsiAction::SetGraphics(Graphics {
+                reset: false,
+                foreground: Some(Rgb::new(8, 8, 8)),
+                background: None,
+            })]
+        );
+    }
+
+    /// **1つの列に前景と背景を並べられる。**
+    #[test]
+    fn one_sequence_can_set_both_colors() {
+        let mut parser = AnsiParser::new();
+        let actions = feed_all(&mut parser, "\x1b[38;2;1;2;3;48;2;4;5;6m");
+        assert_eq!(
+            actions,
+            [AnsiAction::SetGraphics(Graphics {
+                reset: false,
+                foreground: Some(Rgb::new(1, 2, 3)),
+                background: Some(Rgb::new(4, 5, 6)),
+            })]
+        );
+    }
+
+    /// **`0` と省略はどちらも「全部戻す」である。**
+    #[test]
+    fn zero_and_omission_both_reset() {
+        let mut parser = AnsiParser::new();
+        let expected = [AnsiAction::SetGraphics(Graphics {
+            reset: true,
+            foreground: None,
+            background: None,
+        })];
+        assert_eq!(feed_all(&mut parser, "\x1b[0m"), expected);
+        assert_eq!(feed_all(&mut parser, "\x1b[m"), expected);
+    }
+
+    /// **知らないパラメータは飛ばし、知っているものは効く。**
+    ///
+    /// **列ごと捨てない**——太字（`1`）を知らないからといって赤まで
+    /// 捨てるのは行き過ぎである。
+    #[test]
+    fn unknown_parameters_are_skipped_not_fatal() {
+        let mut parser = AnsiParser::new();
+        let actions = feed_all(&mut parser, "\x1b[1;31m");
+        assert_eq!(
+            actions,
+            [AnsiAction::SetGraphics(Graphics {
+                reset: false,
+                foreground: Some(Rgb::new(0xcd, 0x00, 0x00)),
+                background: None,
+            })]
+        );
+    }
+
+    /// **半端な指定は列ごと捨てる**（部分適用しない）。
+    #[test]
+    fn a_truncated_color_spec_drops_the_sequence() {
+        let mut parser = AnsiParser::new();
+        assert_eq!(feed_all(&mut parser, "\x1b[38;2;255;0m"), []);
+        // 次の字は普通に通る（状態が残らない）。
         assert_eq!(feed_all(&mut parser, "x"), [AnsiAction::Print('x')]);
     }
 

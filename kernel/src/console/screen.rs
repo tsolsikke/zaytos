@@ -93,6 +93,13 @@ pub struct Console {
     dirty: DirtyRegion,
     foreground: Color,
     background: Color,
+    /// 既定の前景・背景（ES-b）。**SGR の `0` がここへ戻す。**
+    ///
+    /// **`foreground` / `background` は「いま使っている色」で、
+    /// こちらは「起動時に決めた色」である。** 分けないと、
+    /// **一度色を変えたら既定へ戻れない。**
+    default_foreground: Color,
+    default_background: Color,
     stats: FlushStats,
 }
 
@@ -158,6 +165,8 @@ impl Console {
             dirty,
             foreground,
             background,
+            default_foreground: foreground,
+            default_background: background,
             stats,
         };
         // 画面に残っている前の内容（ファームウェアの表示など）を消しておく。
@@ -202,6 +211,57 @@ impl Console {
     /// 前景経路）が行う。端の切り詰めは [`Grid::set_cursor`] が持つ。
     pub fn cursor_to_cell(&mut self, column: u32, row: u32) {
         self.grid.set_cursor(column, row);
+    }
+
+    /// SGR を適用する（ES-b。ADR-0040）。
+    ///
+    /// **`reset` が先に効く**——`\x1b[0;31m` は「全部戻してから赤」である。
+    /// **`None` は「触らない」**（`common::ansi::Graphics` の doc）。
+    ///
+    /// **ここで変わるのは「これから描く色」だけである。** 既に描いたセルは
+    /// 変わらない——**端末の規約どおりで、SGR は遡らない。**
+    pub fn set_graphics(&mut self, graphics: common::ansi::Graphics) {
+        // 破壊 (ES-b, ansi-sgr-ignore-color): 受けても色を変えない。
+        // **パーサは正しく展開しており、状態も届いている**——**渡す先だけが
+        // 欠けている形である**（zi-b の「接続の取り違え」と同じ族）。
+        // **セルの色も画面の色も既定のままになる**ので、ansi-test の
+        // 2 判定が落ちる。
+        #[cfg(feature = "ansi-sgr-ignore-color-test")]
+        {
+            let _ = graphics;
+            return;
+        }
+        #[cfg(not(feature = "ansi-sgr-ignore-color-test"))]
+        {
+            if graphics.reset {
+                self.foreground = self.default_foreground;
+                self.background = self.default_background;
+            }
+            if let Some(fg) = graphics.foreground {
+                self.foreground = Color::rgb(fg.red, fg.green, fg.blue);
+            }
+            if let Some(bg) = graphics.background {
+                self.background = Color::rgb(bg.red, bg.green, bg.blue);
+            }
+        }
+    }
+
+    /// セルの色を読む（ES-b の判定用）。**範囲外は `None`。**
+    pub fn cell_colors(&self, column: u32, row: u32) -> Option<(Color, Color)> {
+        let cell = self.grid.cell(column, row)?;
+        Some((
+            Color::rgb(cell.fg.red, cell.fg.green, cell.fg.blue),
+            Color::rgb(cell.bg.red, cell.bg.green, cell.bg.blue),
+        ))
+    }
+
+    /// 画面の実物のピクセルを読む（ES-b の判定用。ADR-0040 の到達条件3）。
+    ///
+    /// **セルの中身ではなく、バックバッファに実際に書かれた値である。**
+    /// **`cell_colors` と対で使う**——状態と画面が一致することを見るために、
+    /// 両方が要る。
+    pub fn pixel_at(&mut self, x: u32, y: u32) -> Option<u32> {
+        self.back.surface_mut().read_pixel_raw(x, y)
     }
 
     /// 行のセル範囲 `[from, to)` を背景で塗る（zi-b の消去の部品）。

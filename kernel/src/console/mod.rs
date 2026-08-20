@@ -163,6 +163,11 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
                     Some(common::ansi::AnsiAction::EraseLine(scope)) => {
                         console.erase_in_line(scope)
                     }
+                    // **SGR（ES-b。ADR-0040）。** 色は受理時に RGB へ
+                    // 展開されている——**ここから先は形が 1 つである。**
+                    Some(common::ansi::AnsiAction::SetGraphics(graphics)) => {
+                        console.set_graphics(graphics)
+                    }
                 }
             }
             console.flush();

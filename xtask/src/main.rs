@@ -3311,6 +3311,14 @@ fn cmd_ansi_test(features: &[&str]) -> Result<()> {
             "SGR was consumed silently",
             "an SGR sequence was consumed without printing = true",
         ),
+        (
+            "SGR colored the cell and the screen",
+            "SGR reached the cell = true, and the screen really shows that background = true",
+        ),
+        (
+            "SGR 0 restored the defaults",
+            "SGR 0 restored the default colors = true",
+        ),
     ];
     let mut all_ok = true;
     for (name, needle) in judgements {
@@ -9430,6 +9438,19 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             Err(_) => println!("--- ansi test (skip parse): OK (the sabotage was caught)"),
         }
 
+        // **SGR の色を渡さない破壊（ES-b。ADR-0040）。** パーサは正しく
+        // 展開しており状態も届いているが、**渡す先だけが欠ける**——
+        // zi-b の「接続の取り違え」と同じ族である。
+        total += 1;
+        println!("=== xtask check: the ansi test catches an SGR that never reaches the color");
+        match cmd_ansi_test(&["ansi-sgr-ignore-color-test"]) {
+            Ok(()) => {
+                println!("--- ansi test (sgr ignored): FAILED (the sabotage was NOT caught)");
+                failed.push("ansi test (sgr ignored)".to_string());
+            }
+            Err(_) => println!("--- ansi test (sgr ignored): OK (the sabotage was caught)"),
+        }
+
         // **穴を 0 として読まない破壊（ADR-0038）。** 既定の起動ログが
         // `fs-sparse` の判定行を固定しているので、**破壊は起動ログの差として
         // 出る**——ここでは「その構成で起動が通らないこと」を見る。
@@ -10265,7 +10286,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 201,
+    full: 202,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

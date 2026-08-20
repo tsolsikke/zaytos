@@ -2348,6 +2348,56 @@ fn exercise_ansi_console(logger: &mut Logger<SerialPort>, console: &mut Console)
         "ansi-test: an SGR sequence was consumed without printing = {sgr_ignored}"
     ));
 
+    // (7) SGR（ES-b。ADR-0040）。**画面の実物の色を見る。**
+    //
+    // # 色は判定から選んだ
+    //
+    // **`read_pixel_raw` で実物を読む以上、背景と紛れない色・互いに
+    // 紛れない色でなければ判定が主張を持てない**（ADR-0040 の到達条件5）。
+    // **既定の背景は `0x10,0x10,0x18`（ほぼ黒）、既定の前景は
+    // `0xE0,0xE0,0xE0`（ほぼ白）である**（実測。`kernel_main` の定数）。
+    // **選んだのは truecolor の `(0, 200, 0)`（緑）と `(200, 0, 0)`（赤）で、
+    // どちらも背景・既定前景・互いに、RGB のどの軸でも 150 以上離れている。**
+    // **見た目の好みで変えないこと**——近い色にすると判定は緑のまま鈍る。
+    console.clear();
+    let foreground = kernel::console::install_foreground(console);
+    // 前景を緑、背景を赤にして 1 字置く。
+    kernel::console::write_foreground_bytes(b"\x1b[1;1H\x1b[38;2;0;200;0m\x1b[48;2;200;0;0mG");
+    drop(foreground);
+    let cell_colors = console.cell_colors(0, 0);
+    let sgr_reached_the_cell = cell_colors == Some((Color::rgb(0, 200, 0), Color::rgb(200, 0, 0)));
+    // **画面の実物を読む。** セル (0,0) は 8x16 ピクセルで、
+    // **左上の 1 点は字の外側（背景）である**——`G` のグリフは
+    // 上端の行を使わない。**そこが赤なら、背景が実際に塗られている。**
+    let background_pixel = console.pixel_at(0, 0);
+    let expected_background = Color::rgb(200, 0, 0).to_pixel(console.framebuffer_layout().format());
+    let screen_shows_the_background = background_pixel == Some(expected_background);
+    logger.info(format_args!(
+        "ansi-test: SGR reached the cell = {sgr_reached_the_cell}, and the screen really shows \
+         that background = {screen_shows_the_background} (cell {cell_colors:?}, pixel \
+         {background_pixel:?} expected {expected_background:?})"
+    ));
+
+    // (8) SGR の `0` が既定へ戻すこと。**戻した後のセルは既定の色である。**
+    let foreground = kernel::console::install_foreground(console);
+    kernel::console::write_foreground_bytes(b"\x1b[2;1H\x1b[0mD");
+    drop(foreground);
+    let reset_colors = console.cell_colors(0, 1);
+    // **既定の色は `init_console` の局所定数である**ので、値をここへ写す。
+    // **同じ数を 2 か所に持つ形だが、食い違えばこの判定が落ちる。**
+    //
+    // **写し間違えた**——`FOREGROUND` という名の定数が 2 つあり
+    // （`0xE0,0xE0,0xE0` と `0xD0,0xD8,0xE0`）、**使われているのは後者である。**
+    // **判定行が値を出していたので、実測で気づけた。**
+    const DEFAULT_FOREGROUND: Color = Color::rgb(0xD0, 0xD8, 0xE0);
+    const DEFAULT_BACKGROUND: Color = Color::rgb(0x10, 0x10, 0x18);
+    let sgr_reset_restored_defaults =
+        reset_colors == Some((DEFAULT_FOREGROUND, DEFAULT_BACKGROUND));
+    logger.info(format_args!(
+        "ansi-test: SGR 0 restored the default colors = {sgr_reset_restored_defaults} \
+         ({reset_colors:?})"
+    ));
+
     // 締めてから通常の起動へ戻る。画面に実演の残骸を残さない。
     console.clear();
     logger.info(format_args!("ansi-test: done"));
@@ -8962,6 +9012,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "ansi-console-skip-parse-test",
         cfg!(feature = "ansi-console-skip-parse-test"),
         "前景経路が ANSI パーサを通さず素のまま描く",
+    ),
+    (
+        "ansi-sgr-ignore-color-test",
+        cfg!(feature = "ansi-sgr-ignore-color-test"),
+        "SGR を受けても色を変えない",
     ),
     (
         "write-file-skip-append-test",

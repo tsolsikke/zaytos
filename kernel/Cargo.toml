@@ -92,6 +92,9 @@ ansi-test = []
 # 破壊（zi-b）: 前景経路がパーサを通さず素のまま描く。zi-b 前の接続そのもの
 # ——CSI がグリフとして画面へ化けて出るので、ansi-test の判定が落ちる。
 ansi-console-skip-parse-test = []
+# 破壊（ES-b）: SGR を受けても色を変えない。パーサは正しく展開しており状態も
+# 届いているが、渡す先だけが欠ける——ansi-test の色の 2 判定が落ちる。
+ansi-sgr-ignore-color-test = []
 # 破壊（zi-c）: 書きで開いた fd への write が複製へ足さない。検証も戻り値も
 # 正しく、書いたつもりが複製に届いていない——読み戻しの検算（58 番）が捕まえる。
 write-file-skip-append-test = []
