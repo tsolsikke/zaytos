@@ -2180,10 +2180,20 @@ fn init_console(
     const MAX_TERMINAL_CELLS: usize = 240 * 67;
     static mut TERMINAL_CELLS: [common::screen::Cell; MAX_TERMINAL_CELLS] =
         [common::screen::Cell::blank(); MAX_TERMINAL_CELLS];
+    // **代替画面バッファの面（e-3。ADR-0040 の Addendum）。**
+    // **上と同じ大きさで、2 面目である**——**「代替画面バッファを足すと
+    // 2 面で倍になる」と上に書いてあった当のものが、ここで発火した。**
+    // **ヒープではなく `.bss` に置く**——ヒープは 1MiB 固定で、
+    // **1 面 188.4KiB を 2 つ置くと残りが心細い**（拡張の行を発火させない）。
+    static mut ALTERNATE_TERMINAL_CELLS: [common::screen::Cell; MAX_TERMINAL_CELLS] =
+        [common::screen::Cell::blank(); MAX_TERMINAL_CELLS];
     // SAFETY: 起動時の単一実行文脈で、ここが唯一の借り手である。
     // **`Console` は 1 つしか作らない**（`init_console` の呼び出しは 1 箇所）。
     let cells: &'static mut [common::screen::Cell] =
         unsafe { &mut *core::ptr::addr_of_mut!(TERMINAL_CELLS) };
+    // SAFETY: 上と同じ契約。**別の静的で、借り手はここだけである。**
+    let alternate_cells: &'static mut [common::screen::Cell] =
+        unsafe { &mut *core::ptr::addr_of_mut!(ALTERNATE_TERMINAL_CELLS) };
 
     // SAFETY: base..end は今確保したばかりで他の誰も使っておらず、直前に
     // contains_range でマップ済みを確認した。framebuffer は init_framebuffer が検証済み
@@ -2191,7 +2201,16 @@ fn init_console(
     // 他に存在しない）。
     // **セルの置き場も同じ契約に載る**——上の `TERMINAL_CELLS` は
     // 起動時の単一実行文脈で 1 度だけ借りる。
-    match unsafe { Console::new(framebuffer, base_virt, FOREGROUND, BACKGROUND, cells) } {
+    match unsafe {
+        Console::new(
+            framebuffer,
+            base_virt,
+            FOREGROUND,
+            BACKGROUND,
+            cells,
+            alternate_cells,
+        )
+    } {
         Ok(console) => {
             let (columns, rows) = console.size();
             logger.info(format_args!(
@@ -9105,6 +9124,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "zi-esc-needs-second-key-test",
         cfg!(feature = "zi-esc-needs-second-key-test"),
         "zi が -EAGAIN で Esc を確定しない",
+    ),
+    (
+        "alt-screen-skip-repaint-test",
+        cfg!(feature = "alt-screen-skip-repaint-test"),
+        "代替画面から戻るときに画面を描き直さない",
     ),
     (
         "write-file-skip-append-test",

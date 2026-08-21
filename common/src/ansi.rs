@@ -70,6 +70,12 @@ pub enum AnsiAction {
     ///
     /// **`true` が「出す」（`\x1b[?25h`）である。**
     ShowCursor(bool),
+    /// 代替画面バッファへ切り替える / 戻る（`?1049`。e-3）。
+    ///
+    /// **`true` が「切り替える」（`\x1b[?1049h`）である。**
+    /// **戻るときは、元の画面をセルから描き直す**（ADR-0040 の Addendum。
+    /// 責務はカーネル側にある）。
+    AlternateScreen(bool),
     /// 文字の見た目を変える（SGR。ES-b。ADR-0040）。
     ///
     /// **色は受理時にRGBへ展開してある**（`Rgb`）——16色・256色・truecolorの
@@ -240,15 +246,16 @@ impl AnsiParser {
 
     /// 私用の列（`?` で始まるもの）を組み立てる（ES-c）。
     ///
-    /// **解釈するのは DECTCEM だけである**——`?25h`（カーソルを出す）と
-    /// `?25l`（隠す）。**利用者は `zi` の再描画である。**
+    /// **解釈するのは 2 つである**——DECTCEM（`?25h` / `?25l`。カーソルの
+    /// 出し隠し）と、代替画面バッファ（`?1049h` / `?1049l`。e-3）。
+    /// **どちらも利用者は `zi` である。**
     ///
     /// # 知らない私用パラメータは列ごと捨てる
     ///
     /// **SGR とは扱いを変えた。** SGR は**複数の指示を並べられる**ので、
     /// 知らないものを飛ばして知っているものを効かせるのが正しい
     /// （`1;31` の太字を知らないからといって赤まで捨てない）。
-    /// **私用の列はそうではない**——`?1049h`（代替画面バッファ）のように
+    /// **私用の列はそうではない**——`?2004h`（bracketed paste）のように
     /// **1 つの列が 1 つのモードを指す**ので、**知らなければ何もしないのが
     /// 正しい。** **基準は「解釈できるものが混じっているか」である。**
     fn dispatch_private(&self, final_byte: char) -> Option<AnsiAction> {
@@ -257,6 +264,8 @@ impl AnsiParser {
         match (self.params[0], final_byte) {
             (25, 'h') => Some(AnsiAction::ShowCursor(true)),
             (25, 'l') => Some(AnsiAction::ShowCursor(false)),
+            (1049, 'h') => Some(AnsiAction::AlternateScreen(true)),
+            (1049, 'l') => Some(AnsiAction::AlternateScreen(false)),
             _ => None,
         }
     }
@@ -772,9 +781,26 @@ mod tests {
     #[test]
     fn an_unknown_private_parameter_drops_the_sequence() {
         let mut parser = AnsiParser::new();
-        // 代替画面バッファ。**まだ扱わない**（ADR-0040 の「決めないこと」）。
-        assert_eq!(feed_all(&mut parser, "\x1b[?1049h"), []);
+        // bracketed paste。**まだ扱わない**（ADR-0040 の「決めないこと」。
+        // **利用者が来るまで作らない**）。
+        assert_eq!(feed_all(&mut parser, "\x1b[?2004h"), []);
         assert_eq!(feed_all(&mut parser, "x"), [AnsiAction::Print('x')]);
+    }
+
+    /// **代替画面バッファの切り替えを返す（e-3）。**
+    #[test]
+    fn the_alternate_screen_sequence_switches_both_ways() {
+        let mut parser = AnsiParser::new();
+        assert_eq!(
+            feed_all(&mut parser, "\x1b[?1049h"),
+            [AnsiAction::AlternateScreen(true)]
+        );
+        assert_eq!(
+            feed_all(&mut parser, "\x1b[?1049l"),
+            [AnsiAction::AlternateScreen(false)]
+        );
+        // **公用の `1049h` は知らない終端として読み捨てる**（`?` の有無が効く）。
+        assert_eq!(feed_all(&mut parser, "\x1b[1049h"), []);
     }
 
     /// **`?` は列の先頭にしか来ない（ES-c）。**

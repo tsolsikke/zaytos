@@ -3587,7 +3587,13 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     // **台本の最後は `cat` の読み戻し**（zi-d-2）だが、`cat` は起動シーケンス
     // でも走るので、**その行では早く切れる**（実測）。**シェルが `cat` を
     // 終えたことを、プロンプトの反響で見る。**
-    let done_marker = "zaytos$ /bin/cat /data/lines";
+    // **台本の最後の判定行が出るまで待つ（e-3）。**
+    //
+    // **以前はプロンプトの反響（`zaytos$ /bin/cat /data/lines`）を待っていた**が、
+    // **あれは `cat` が走る前に出る**ので、**その後に置いた観測点が間に合う保証が
+    // 無い**（`kernel/src/input.rs` の `OBSERVE_AFTER_ALT`）。
+    // **台本の最後に置いた観測の、最後の1行を待つ。**
+    let done_marker = "the screen before zi came back";
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     while Instant::now() < deadline {
         let text = fs::read_to_string(&serial_log).unwrap_or_default();
@@ -3755,6 +3761,11 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && status_labels[2] == status_labels[0]
         && status_labels[2] != status_labels[1];
 
+    // **代替画面バッファ（e-3）。** **抜けた後に元の画面が戻っていることを、
+    // 画面の実物で見る。** カーネルが入る前のピクセルを控え、戻った後に
+    // 同じ点を読み直して突き合わせている（`kernel/src/console/probe.rs`）。
+    let screen_came_back = judged("the screen before zi came back");
+
     println!("{context}: zi started = {started}");
     println!(
         "{context}: the up/down arrows moved the cursor between lines = {arrows_moved} \
@@ -3787,6 +3798,18 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         "{context}: a lone Esc settled without another key = {esc_settled_at_once} \
          (status labels in order: {status_labels:?})"
     );
+    println!("{context}: the screen before zi came back = {screen_came_back}");
+    println!(
+        "{context}: note - the continuation-cell flag (Cell::CONTINUATION) has no screen-side \
+         judgement here; the font has no two-cell glyph, so a continuation cell never appears \
+         on the real screen. the claim lives in the host test a_wide_glyph_marks_its_right_half"
+    );
+    for line in serial
+        .lines()
+        .filter(|line| line.contains("screen-restore:"))
+    {
+        println!("  {}", line.trim());
+    }
     for line in serial.lines().filter(|line| line.contains("screen-color:")) {
         println!("  {}", line.trim());
     }
@@ -3811,6 +3834,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && status_colored
         && status_followed_mode
         && esc_settled_at_once
+        && screen_came_back
     {
         println!("{context}: PASS");
         Ok(())
@@ -9847,15 +9871,16 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             }
         }
 
-        // **`zi` の破壊 7 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
+        // **`zi` の破壊 8 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
         // 書かない、挿入が 1 字落とす（どちらも zi-d-2）、プロンプトの色を
         // 送らない、状態行がモードに追随しない（どちらも ES-d）、
         // `ioctl(TIOCGWINSZ)` が行と桁を入れ替える（e-1）、
-        // `-EAGAIN` で Esc を確定しない（e-2）。
+        // `-EAGAIN` で Esc を確定しない（e-2）、代替画面から戻るときに
+        // 描き直さない（e-3）。
         //
         // **落とす判定はそれぞれ違う**——順に、矢印の札の推移 / 往復 /
         // 挿入の本数 / プロンプトの色 / 状態行の札の変化 / 大きさの突き合わせ /
-        // 札の並び（ノーマル・インサート・ノーマル）である。
+        // 札の並び（ノーマル・インサート・ノーマル）/ 戻った画面の実物である。
         // **`:w` の量の判定はどれでも通る**（要求 0 に対して 0 なので）。
         //
         // **3 つは長い間「別の理由で」落ちていた**——破壊ビルドの像が
@@ -9869,6 +9894,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "zi-status-freeze-mode-test",
             "ioctl-winsize-swap-test",
             "zi-esc-needs-second-key-test",
+            "alt-screen-skip-repaint-test",
         ] {
             total += 1;
             println!("=== xtask check: the zi test catches {feature}");
@@ -10656,7 +10682,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 207,
+    full: 208,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

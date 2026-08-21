@@ -30,7 +30,44 @@ pub(crate) enum Observation {
     Prompt,
     /// `zi` の状態行。
     Status,
+    /// 代替画面へ入る前の画面（e-3）。**控えるだけで、判定は出さない。**
+    BeforeAlternate,
+    /// 代替画面から戻った画面（e-3）。**控えたものと突き合わせる。**
+    AfterAlternate,
 }
+
+/// 代替画面へ入る前に控えた画面の目印（e-3）。
+///
+/// # 何を控えるか
+///
+/// **プロンプトの緑の連なりが在った行と、その行のインクのピクセルである。**
+///
+/// **ピクセルまで控える**——**戻ったときにセルだけが戻って画面が代替の
+/// ままなら、セルは一致してピクセルが違う。** **その形が破壊そのもので
+/// ある**（`alt-screen-skip-repaint`）。
+///
+/// # 全角の右半分は、ここでは観測できない
+///
+/// **描き直しは継続セルの印（`common::screen::Cell::CONTINUATION`）を見て
+/// 右半分を飛ばす**が、**いまのフォントに 2 桁のグリフが 1 つも無い**
+/// （`third_party/unifont/unifont-subset.hex` は 96 字すべてが 8x16。実測）。
+/// **したがって継続セルは実機の画面に一度も現れず、画面側の判定が置けない。**
+/// **主張はホストの単体テストが持つ**（`common::screen` の
+/// `a_wide_glyph_marks_its_right_half`）。**フォントに全角が入ったら、
+/// ここへ画面側の判定を足すこと**（`docs/deferred-decisions.md` に行がある）。
+#[derive(Clone, Copy)]
+struct BeforeAlternateMarks {
+    seen: bool,
+    /// プロンプトの緑が在った行と、その行のインクのピクセル。
+    prompt: Option<(u32, u32)>,
+}
+
+/// 控えた目印。**`Locked` で守る**（[`LAST_STATUS`] と同じ理由）。
+static BEFORE_ALTERNATE: common::critical::Locked<BeforeAlternateMarks> =
+    common::critical::Locked::new(BeforeAlternateMarks {
+        seen: false,
+        prompt: None,
+    });
 
 /// `zash` のプロンプトの名前の部分の色（緑）。
 ///
@@ -112,6 +149,8 @@ pub(crate) fn observe(kind: Observation) {
     match kind {
         Observation::Prompt => observe_prompt(&mut serial, console),
         Observation::Status => observe_status(&mut serial, console),
+        Observation::BeforeAlternate => observe_before_alternate(&mut serial, console),
+        Observation::AfterAlternate => observe_after_alternate(&mut serial, console),
     }
 }
 
@@ -297,5 +336,52 @@ fn observe_status(serial: &mut SerialPort, console: &mut crate::console::Console
         "screen-color: the zi status line followed the mode = {changed} (was {:?}, now {:?})",
         core::str::from_utf8(&previous.label[..previous.length]).unwrap_or("?"),
         core::str::from_utf8(&label[..length]).unwrap_or("?")
+    );
+}
+
+/// 代替画面へ入る前の画面を控える（e-3）。**判定は出さない。**
+fn observe_before_alternate(serial: &mut SerialPort, console: &mut crate::console::Console) {
+    let (_, cursor_row) = console.cursor_cell();
+    let prompt = find_colored_run_in_row(console, cursor_row, PROMPT_COLOR)
+        .and_then(|(row, from, to)| ink_of_run(console, row, from, to).map(|(_, ink)| (row, ink)));
+    *BEFORE_ALTERNATE.lock() = BeforeAlternateMarks { seen: true, prompt };
+    let _ = writeln!(
+        serial,
+        "screen-restore: before the alternate screen, the prompt was at row {:?}",
+        prompt.map(|(row, _)| row)
+    );
+}
+
+/// 代替画面から戻った画面を、控えたものと突き合わせる（e-3）。
+///
+/// # 主張は1つである
+///
+/// **元の画面が戻っていること**——プロンプトの緑が同じ行に、同じピクセルで
+/// 在ることである。
+///
+/// **ピクセルを見る。** **セルだけを見ると、面を入れ替えただけで描き直して
+/// いない形が通ってしまう。**
+fn observe_after_alternate(serial: &mut SerialPort, console: &mut crate::console::Console) {
+    let before = *BEFORE_ALTERNATE.lock();
+    if !before.seen {
+        let _ = writeln!(
+            serial,
+            "screen-restore: nothing was recorded before the alternate screen"
+        );
+        return;
+    }
+
+    let prompt_now = before.prompt.and_then(|(row, _)| {
+        find_colored_run_in_row(console, row, PROMPT_COLOR).and_then(|(row, from, to)| {
+            ink_of_run(console, row, from, to).map(|(_, ink)| (row, ink))
+        })
+    });
+    let screen_came_back = before.prompt.is_some() && prompt_now == before.prompt;
+    let _ = writeln!(
+        serial,
+        "screen-restore: the screen before zi came back = {screen_came_back} \
+         (was {:?}, now {:?})",
+        before.prompt.map(|(row, ink)| (row, PixelHex(ink))),
+        prompt_now.map(|(row, ink)| (row, PixelHex(ink)))
     );
 }

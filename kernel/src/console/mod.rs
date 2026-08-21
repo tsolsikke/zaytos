@@ -210,6 +210,12 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
                     // **DECTCEM（ES-c）。** 出す / 隠すを切り替えるだけで、
                     // **描き直すのは下の `flush` の直前である。**
                     Some(common::ansi::AnsiAction::ShowCursor(show)) => console.show_cursor(show),
+                    // **代替画面バッファ（e-3。ADR-0040 の Addendum）。**
+                    // **戻すときに描き直すのはコンソールの側である**——
+                    // Ring 3 には画面を読み戻す手段が無い。
+                    Some(common::ansi::AnsiAction::AlternateScreen(alternate)) => {
+                        console.set_alternate_screen(alternate)
+                    }
                 }
             }
             console.flush();

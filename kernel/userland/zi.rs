@@ -276,12 +276,12 @@ fn move_cursor(row: usize, col: usize) {
 /// 環境変数の行と同じ立場である）。**下端に置くには行数が要るので、
 /// 本文の下に置く。** 端末が本物の vi のように見えないのはこのためである。
 ///
-/// # カーソルを戻して終わる
+/// # カーソルは戻さない（e-3）
 ///
-/// **描いた後、編集位置へカーソルを戻す。** 戻さないと、次に打った字が
-/// 状態行の隣へ出る——**カーソルは画面に見えている**（ES-c）ので、
-/// **戻し忘れは目でも判定でも分かる。**
-fn draw_status(buffer: &Buffer, mode: Mode, cursor_row: usize, cursor_col: usize) {
+/// **戻すのは [`restore_cursor`] だけである。** **描く関数が各自で戻す形は、
+/// 描く場所が増えるたびに書き忘れが画面の誤りになる**（e-2 で順序依存が出た）。
+/// **この関数を呼ぶ側は [`refresh_status`] を通すこと。**
+fn draw_status(buffer: &Buffer, mode: Mode) {
     // 破壊 (ES-d, zi-status-freeze-mode): モードが変わっても NORMAL のまま描く。
     // **色も位置も長さも変わらない**ので、「状態行が自分の色で描かれている」
     // 判定は緑のままである。**落ちるのは「モードに従って変わる」判定だけ**で、
@@ -306,7 +306,51 @@ fn draw_status(buffer: &Buffer, mode: Mode, cursor_row: usize, cursor_col: usize
         at += part.len();
     }
     write_all(STDOUT, &out[..at]);
+}
+
+/// 代替画面バッファへ入る（e-3。`?1049h`）。
+///
+/// # なぜ要るのか
+///
+/// **全画面のアプリは、抜けた後に元の画面を返すべきである。**
+/// **`zi` が終わった後、編集していた本文が残り、シェルが `zi` のカーソル位置
+/// から続いていた**（運用者の目視。ES 段の締めの限界の節）。
+///
+/// **戻す仕事はカーネル側にある**（ADR-0040 の Addendum）——
+/// **Ring 3 には画面を読み戻す手段が無い。** `zi` は入る / 出るを告げるだけである。
+fn enter_screen() {
+    write_all(STDOUT, b"\x1b[?1049h");
+}
+
+/// 代替画面バッファから出る（e-3。`?1049l`）。**終わるすべての道で呼ぶ。**
+///
+/// **入った後に終わる道は 3 つある**——`:q` / `:wq` の `exit(0)`、
+/// `:w` の失敗の `exit(5)`、端末が読めなくなったときの `break` である。
+/// **入る前に終わる道（引数が無い・開けない・読めない・大きすぎる）では
+/// 呼ばない**——**まだ入っていないので、戻す面が無い。**
+fn leave_screen() {
+    write_all(STDOUT, b"\x1b[?1049l");
+}
+
+/// 描き終わりにカーソルを編集位置へ戻す（e-3）。
+///
+/// # 責務を1つにした
+///
+/// **描く場所が増えるたびに「最後にカーソルを戻す」を書き足す形は、
+/// 書き忘れがそのまま画面の誤りになる。** **実際に e-2 で順序依存が出た**
+/// ——状態行を後から描くと、カーソルが状態行の隣に残る。
+///
+/// **描く関数はカーソルを戻さない。** **戻すのはここだけである。**
+/// **e-4 で下から2行目と最下行の2本になっても、増えるのはこの関数の
+/// 中身だけで済む。**
+fn restore_cursor(cursor_row: usize, cursor_col: usize) {
     move_cursor(cursor_row, cursor_col);
+}
+
+/// 本文と札を描き、最後にカーソルを戻す（e-3）。**画面を更新する入口である。**
+fn refresh_status(buffer: &Buffer, mode: Mode, cursor_row: usize, cursor_col: usize) {
+    draw_status(buffer, mode);
+    restore_cursor(cursor_row, cursor_col);
 }
 
 /// 画面を描き直す。**全面を消してから行ごとに置く。**
@@ -327,7 +371,7 @@ fn redraw(buffer: &Buffer, mode: Mode, cursor_row: usize, cursor_col: usize) {
             write_all(STDOUT, line);
         }
     }
-    draw_status(buffer, mode, cursor_row, cursor_col);
+    refresh_status(buffer, mode, cursor_row, cursor_col);
 }
 
 /// 判定行を出す。**内部状態であって画面ではない**（モジュール doc の限界）。
@@ -456,6 +500,11 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     // **訊く経路が本物の利用者を持たないと、検算が置けない。**
     report_window_size(userlib::window_size(0));
 
+    // **代替画面バッファへ入る（e-3）。** **ここから先の描画は代替の面に載り、
+    // 出るときに元の画面が戻る。** **読み込みが済んで、確実に編集へ入る時点で
+    // 入る**——**入る前に終わる道では、戻す面が無い。**
+    enter_screen();
+
     let mut mode = Mode::Normal;
     let mut row = 0usize;
     let mut col = 0usize;
@@ -477,7 +526,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
         // **`continue` が何本あっても漏れない。**
         // **`-EAGAIN` で回っている間は変わらない**ので、何度も描かない。
         if mode != shown_mode {
-            draw_status(buffer, mode, row, col);
+            refresh_status(buffer, mode, row, col);
             shown_mode = mode;
         }
         let mut byte = [0u8; 1];
@@ -531,7 +580,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                     _ => false,
                 };
                 if moved {
-                    move_cursor(row, col);
+                    restore_cursor(row, col);
                     report_cursor(buffer, row, col, b"arrow");
                 }
                 continue;
@@ -562,8 +611,14 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                     command_len = 0;
                     mode = Mode::Normal;
                     match outcome {
-                        Command::Quit => exit(0),
-                        Command::Failed => exit(5),
+                        Command::Quit => {
+                            leave_screen();
+                            exit(0)
+                        }
+                        Command::Failed => {
+                            leave_screen();
+                            exit(5)
+                        }
                         // **保存したら変更は無い。**
                         Command::Saved => dirty = false,
                         Command::Refused => {}
@@ -597,6 +652,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
         dirty |= changed;
     }
 
+    leave_screen();
     exit(0);
 }
 
@@ -752,11 +808,10 @@ fn finish_pending_escape(
     *mode = Mode::Normal;
     // **ノーマルへ戻ると、カーソルは 1 つ左へ寄る**（vi の形）。
     *col = col.saturating_sub(1);
-    // **状態行を先に描き直す**——**あちらはカーソルを編集位置へ戻して終える**
-    // ので、**後から描くとカーソルの位置が状態行の後になる。**
-    draw_status(buffer, *mode, row, *col);
+    // **札を描いてからカーソルを戻す**（[`refresh_status`]）。
+    // **順序はあちらが持つ**ので、ここでは考えない。
+    refresh_status(buffer, *mode, row, *col);
     *shown_mode = *mode;
-    move_cursor(row, *col);
     report_cursor(buffer, row, *col, b"normal");
 }
 
@@ -830,7 +885,7 @@ fn handle_byte(
                 b'l' => move_right(buffer, *row, col, *mode),
                 b'i' => {
                     *mode = Mode::Insert;
-                    move_cursor(*row, *col);
+                    restore_cursor(*row, *col);
                     report_cursor(buffer, *row, *col, b"insert");
                     // **モードを変えただけで、バッファは変わっていない。**
                     return false;
@@ -852,7 +907,7 @@ fn handle_byte(
                 _ => false,
             };
             if moved {
-                move_cursor(*row, *col);
+                restore_cursor(*row, *col);
                 report_cursor(buffer, *row, *col, b"move");
             }
             // **移動はバッファを変えない。**

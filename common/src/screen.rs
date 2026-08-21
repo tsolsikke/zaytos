@@ -50,9 +50,9 @@ impl Rgb {
 
 /// 1 つのセル。
 ///
-/// **属性は ES-b で使う**（太字・下線など）。**いまは 0 のままである**——
-/// **持たせておくのは、ES-b で `Cell` の形を変えずに済ませるためではなく、
-/// 「端末の状態とは何か」を ADR-0040 が定めたからである。**
+/// **属性は e-3 で使い始めた**（[`Cell::CONTINUATION`]）。太字・下線などは
+/// まだ持たない。**持たせてあったのは「端末の状態とは何か」を ADR-0040 が
+/// 定めたからである。**
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Cell {
     pub ch: char,
@@ -62,6 +62,25 @@ pub struct Cell {
 }
 
 impl Cell {
+    /// このセルは全角の右半分である（`attrs` のビット 0。e-3）。
+    ///
+    /// # なぜ印が要るのか
+    ///
+    /// **全角の右半分は `' '` として記録される**（[`Screen::put`]）。
+    /// **字だけを見ると、空白と区別が付かない。**
+    ///
+    /// **セルから画面を描き直す経路（代替画面バッファの復帰。ADR-0040 の
+    /// Addendum）が、区別を要求する**——**印が無いと、右半分に空白を描いて
+    /// 全角の右半分を消してしまう。**
+    ///
+    /// **描き直す側は、印の在るセルを飛ばす**（左のセルが 2 桁ぶん描く）。
+    pub const CONTINUATION: u8 = 0b0000_0001;
+
+    /// 全角の右半分か（e-3）。
+    pub const fn is_continuation(&self) -> bool {
+        self.attrs & Self::CONTINUATION != 0
+    }
+
     /// 空のセル。**色は呼び出し側の既定で塗り直される**ので、黒で作る。
     pub const fn blank() -> Self {
         Self {
@@ -297,6 +316,21 @@ impl<'a> Screen<'a> {
     /// **全角は 2 セルを占める。** 後続のセルには同じ色で空白を置く——
     /// **`Grid` が「カーソルが全角の途中を指さない」を構造で保っている**ので、
     /// **後続のセルを別の字が上書きすることはない。**
+    /// 描き直す側が、このセルを描くべきか（e-3）。
+    ///
+    /// # 純粋な述語として切り出してある
+    ///
+    /// **判断は「継続セル（全角の右半分）でないこと」だけである。**
+    /// **描き直す側（`kernel/src/console/screen.rs` の `repaint_from_cells`）は
+    /// これを呼ぶだけにしてある**——**実機では 2 桁のグリフが在るフォントが
+    /// 入るまでこの分岐が通らない**ので、**判断の側だけでもホストで固定する。**
+    ///
+    /// **範囲外は「描かない」である。**
+    pub fn should_draw(&self, column: u32, row: u32) -> bool {
+        self.cell(column, row)
+            .is_some_and(|cell| !cell.is_continuation())
+    }
+
     pub fn put(&mut self, column: u32, row: u32, ch: char, fg: Rgb, bg: Rgb, width_cells: u32) {
         let Some(at) = self.index(column, row) else {
             return;
@@ -314,11 +348,14 @@ impl<'a> Screen<'a> {
                 break;
             };
             if let Some(cell) = self.cells.get_mut(at) {
+                // **右半分だと印を付ける（e-3）。** **字は `' '` のままである**
+                // ——**印が無いと、描き直す側が空白を描いて右半分を消す**
+                // （[`Cell::CONTINUATION`]）。
                 *cell = Cell {
                     ch: ' ',
                     fg,
                     bg,
-                    attrs: 0,
+                    attrs: Cell::CONTINUATION,
                 };
             }
         }
@@ -431,6 +468,49 @@ impl<'a> Screen<'a> {
 
 #[cfg(test)]
 mod tests {
+
+    /// **全角の右半分に印が付く（e-3）。**
+    ///
+    /// **左のセルには付かない。** 描き直す側は、印の在るセルを飛ばして
+    /// 左のセルに 2 桁ぶんを描く（`Cell::CONTINUATION` の doc）。
+    #[test]
+    fn a_wide_glyph_marks_its_right_half() {
+        let mut cells = [Cell::blank(); 8];
+        let mut screen = Screen::new(4, 2, &mut cells).expect("4x2 fits in 8 cells");
+        let fg = Rgb::new(1, 2, 3);
+        let bg = Rgb::new(4, 5, 6);
+        screen.put(0, 0, '日', fg, bg, 2);
+        let left = screen.cell(0, 0).expect("in range");
+        let right = screen.cell(1, 0).expect("in range");
+        assert_eq!(left.ch, '日');
+        assert!(!left.is_continuation(), "左のセルは右半分ではない");
+        assert_eq!(right.ch, ' ');
+        assert!(right.is_continuation(), "右半分には印が付く");
+        // **半角には付かない。**
+        screen.put(2, 0, 'a', fg, bg, 1);
+        assert!(!screen.cell(2, 0).expect("in range").is_continuation());
+        assert!(!screen.cell(3, 0).expect("in range").is_continuation());
+    }
+
+    /// **描き直す側が飛ばすセルを、述語で固定する（e-3）。**
+    ///
+    /// **実機ではこの分岐が通らない**（フォントに 2 桁のグリフが無い）ので、
+    /// **判断の側だけでもここで固定する。**
+    #[test]
+    fn the_repaint_predicate_skips_only_the_right_half() {
+        let mut cells = [Cell::blank(); 8];
+        let mut screen = Screen::new(4, 2, &mut cells).expect("4x2 fits in 8 cells");
+        let fg = Rgb::new(1, 2, 3);
+        let bg = Rgb::new(4, 5, 6);
+        screen.put(0, 0, '日', fg, bg, 2);
+        screen.put(2, 0, 'a', fg, bg, 1);
+        assert!(screen.should_draw(0, 0), "全角の左は描く");
+        assert!(!screen.should_draw(1, 0), "全角の右半分は飛ばす");
+        assert!(screen.should_draw(2, 0), "半角は描く");
+        assert!(screen.should_draw(3, 0), "空のセルも描く（背景で塗る）");
+        assert!(!screen.should_draw(4, 0), "範囲外は描かない");
+        assert!(!screen.should_draw(0, 9), "範囲外は描かない");
+    }
     /// 試験用のセルの置き場。**`Vec` を貸す**（モジュール doc の「置き場は
     /// 呼び出し側が渡す」）。**ホストのテストだけがこれを使う。**
     fn cells() -> std::vec::Vec<Cell> {

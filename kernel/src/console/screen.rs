@@ -111,6 +111,21 @@ pub struct Console {
     /// `Screen` が持つが、**描いた跡はピクセルなので、動かす前に元へ戻す
     /// 必要がある**——そのための記録である。
     cursor_drawn_at: Option<(u32, u32)>,
+    /// 表に出ていない側の面（e-3。代替画面バッファ）。
+    ///
+    /// # 2 面を入れ替えて持つ
+    ///
+    /// **`grid` が常に「いま表に出ている面」である。** 切り替えは 2 つを
+    /// 入れ替えるだけで、**既存の経路はどれも `grid` を見たままでよい。**
+    ///
+    /// **カーソルは面ごとに付いてくる**——`Screen` が自分で持っているので、
+    /// 戻ったときの位置は入れ替えで自然に戻る。
+    ///
+    /// **静的に持つ**（呼び出し側が 2 面ぶんを貸す）。**ヒープは 1MiB 固定で、
+    /// 1 面が 188.4KiB である**（240x67 = 16080 セル、1 セル 12 バイト）。
+    inactive: Screen<'static>,
+    /// いま代替画面に居るか（e-3）。
+    alternate_active: bool,
     stats: FlushStats,
 }
 
@@ -137,6 +152,7 @@ impl Console {
         foreground: Color,
         background: Color,
         cells: &'static mut [Cell],
+        alternate_cells: &'static mut [Cell],
     ) -> Result<Self, ConsoleError> {
         let layout = *framebuffer.layout();
 
@@ -156,8 +172,33 @@ impl Console {
         )
         .map_err(ConsoleError::Screen)?;
 
+        // **代替画面バッファの面（e-3）。** **同じ大きさで作る**——
+        // **入れ替えて使うので、形が違うと切り替えた瞬間に食い違う。**
+        let inactive = Screen::from_screen(
+            layout.width(),
+            layout.height(),
+            font::CELL_WIDTH,
+            font::GLYPH_HEIGHT,
+            alternate_cells,
+        )
+        .map_err(ConsoleError::Screen)?;
+
         // 最初の転送より前に、確保したばかりの領域を必ず塗り潰す。
         back.clear_all(background);
+
+        // **セルも既定の背景で始める（e-3）。**
+        //
+        // **`Cell::blank()` の背景は黒である**（「色は呼び出し側の既定で
+        // 塗り直される」と doc に書いてある側の話で、**塗り直すのはここである**）。
+        // **触られていないセルが黒のままだと、セルから描き直したときに
+        // 画面の下半分が黒くなる**——**実測で見つけた**（代替画面から戻ると、
+        // 一度も字を置いていない領域だけ背景が変わって見えた）。
+        //
+        // **2 面とも初期化する。** 代替の面も、切り替えた瞬間に同じ形で使われる。
+        let mut grid = grid;
+        let mut inactive = inactive;
+        grid.reset(Rgb::new(background.red, background.green, background.blue));
+        inactive.reset(Rgb::new(background.red, background.green, background.blue));
 
         let mut dirty = DirtyRegion::new(layout.width(), layout.height());
         dirty.mark_all();
@@ -180,6 +221,8 @@ impl Console {
             default_background: background,
             cursor_visible: true,
             cursor_drawn_at: None,
+            inactive,
+            alternate_active: false,
             stats,
         };
         // 画面に残っている前の内容（ファームウェアの表示など）を消しておく。
@@ -328,6 +371,89 @@ impl Console {
     /// カーソルの色（ES-c の判定用）。**判定が値を写さずに済ませる。**
     pub fn cursor_color(&self) -> Color {
         Self::CURSOR_COLOR
+    }
+
+    /// 代替画面バッファへ切り替える / 元へ戻る（`?1049`。e-3。ADR-0040 の Addendum）。
+    ///
+    /// # 何をするか
+    ///
+    /// **切り替える**（`true`）——**面を入れ替え、新しい面を空にする。**
+    /// `xterm` の `?1049h` と同じで、**代替画面は毎回まっさらから始まる。**
+    ///
+    /// **戻る**（`false`）——**面を入れ替え、セルから画面を描き直す。**
+    /// **描き直す責務はここにある**（ADR-0040 の Addendum）——
+    /// **Ring 3 には画面を読み戻す手段が無いので、元の絵を持っている側が戻す。**
+    ///
+    /// # カーソルの跡は面をまたがない
+    ///
+    /// **[`Self::cursor_drawn_at`] は「いまの面のどこに下線を描いたか」である。**
+    /// **面が変われば、その跡はもう無い**ので忘れる。
+    ///
+    /// # 色（SGR の状態）は面をまたぐ
+    ///
+    /// **`foreground` / `background` は入れ替えない。** **`xterm` も同じで、
+    /// 代替画面へ入っても色は続く。** **戻したときに色が変わって見えないよう、
+    /// 触らない。**
+    pub fn set_alternate_screen(&mut self, alternate: bool) {
+        if alternate == self.alternate_active {
+            return;
+        }
+        core::mem::swap(&mut self.grid, &mut self.inactive);
+        self.alternate_active = alternate;
+        self.cursor_drawn_at = None;
+        if alternate {
+            // **代替画面はまっさらから始める。**
+            self.back.clear_all(self.background);
+            self.grid.reset(Self::rgb(self.background));
+            self.dirty.mark_all();
+        } else {
+            // 破壊 (e-3, alt-screen-skip-repaint): 面は戻すが描き直さない。
+            // **セルは元の画面のもの、ピクセルは代替画面のまま**になる——
+            // **状態と画面が食い違う形そのものである。**
+            // **判定は画面の実物を読むので落ちる**（セルだけを読む判定では
+            // 落ちない。だから ES-d の判定はピクセルまで見ている）。
+            #[cfg(not(feature = "alt-screen-skip-repaint-test"))]
+            self.repaint_from_cells();
+        }
+    }
+
+    /// いまの面のセルから、画面を丸ごと描き直す（e-3）。
+    ///
+    /// # 全角の右半分を飛ばす
+    ///
+    /// **右半分は `' '` として記録されている**ので、**素朴に描くと左の
+    /// セルが描いた全角の右半分を空白で潰す。** **印（[`Cell::CONTINUATION`]）
+    /// の在るセルは飛ばす**——**左のセルが 2 桁ぶんを描いている。**
+    //
+    // **破壊ビルドでは呼ばれない**（唯一の呼び出し側が消えるため）。
+    // **未使用の警告を止めるだけで、既定ビルドの形は変えない。**
+    #[cfg_attr(feature = "alt-screen-skip-repaint-test", allow(dead_code))]
+    fn repaint_from_cells(&mut self) {
+        let (columns, rows) = (self.grid.columns(), self.grid.rows());
+        self.back.clear_all(self.background);
+        for row in 0..rows {
+            for column in 0..columns {
+                // **飛ばすかどうかの判断は `Screen` が持つ（e-3）。**
+                // **ホストで固定してある**（`Screen::should_draw`）——
+                // **実機では 2 桁のグリフが在るフォントが入るまで、
+                // 飛ばす側が一度も通らない。**
+                if !self.grid.should_draw(column, row) {
+                    continue;
+                }
+                let Some(cell) = self.grid.cell(column, row) else {
+                    continue;
+                };
+                let foreground = Color::rgb(cell.fg.red, cell.fg.green, cell.fg.blue);
+                let background = Color::rgb(cell.bg.red, cell.bg.green, cell.bg.blue);
+                let glyph = font::glyph(cell.ch);
+                let x = column * font::CELL_WIDTH;
+                let y = row * font::GLYPH_HEIGHT;
+                self.back
+                    .surface_mut()
+                    .draw_glyph(x, y, glyph, foreground, Some(background));
+            }
+        }
+        self.dirty.mark_all();
     }
 
     /// SGR を適用する（ES-b。ADR-0040）。

@@ -533,7 +533,7 @@ pub(crate) mod script {
     ///
     /// **読み戻しはシェルの文脈で行う**——`zi` が書いた内容と `cat` の出力の
     /// 一致を、ホスト側が突き合わせる。**期待値をホストが持たない形である。**
-    const SCRIPT: &[u8] = b"\x01/bin/zi /data/lines\n\
+    const SCRIPT: &[u8] = b"\x01\x06/bin/zi /data/lines\n\
         \x1b[B\x1b[B\x1b[A\
         jjkk\
         \x1b[C\x1b[D\
@@ -541,12 +541,26 @@ pub(crate) mod script {
         iZY\x02\x1b\x04\x02\
         xx\
         :wq\n\
-        /bin/cat /data/lines\n";
+        /bin/cat /data/lines\n\x05";
 
     /// 観測点（ES-d）。**プロンプトの色を見る。**
     const OBSERVE_PROMPT: u8 = 0x01;
     /// 観測点（ES-d）。**`zi` の状態行を見る。**
     const OBSERVE_STATUS: u8 = 0x02;
+    /// 観測点（e-3）。**代替画面へ入る前の画面を控える。**
+    const OBSERVE_BEFORE_ALT: u8 = 0x06;
+    /// 観測点（e-3）。**代替画面から戻った画面を、控えたものと突き合わせる。**
+    ///
+    /// # 台本の最後に置く
+    ///
+    /// **`:wq` の直後には置けない。** **観測の出力はシリアルへ出るので、
+    /// プロンプトと、その後に反響されるコマンドの間へ割り込む**——
+    /// **`zaytos$ /bin/cat /data/lines` を目印にしている判定が、
+    /// 割られた瞬間に当たらなくなる**（実測でそうなった）。
+    ///
+    /// **最後に置いても主張は変わらない。** 戻った画面はそのまま残っており、
+    /// **控えた行と桁を読み直すだけである**（`cat` の出力は下の行へ足される）。
+    const OBSERVE_AFTER_ALT: u8 = 0x05;
     /// 休み（e-2）。**その `read` は何も返さない**（`-EAGAIN` になる）。
     ///
     /// # 何のために在るのか
@@ -576,6 +590,8 @@ pub(crate) mod script {
         match byte {
             OBSERVE_PROMPT => Some(crate::console::probe::Observation::Prompt),
             OBSERVE_STATUS => Some(crate::console::probe::Observation::Status),
+            OBSERVE_BEFORE_ALT => Some(crate::console::probe::Observation::BeforeAlternate),
+            OBSERVE_AFTER_ALT => Some(crate::console::probe::Observation::AfterAlternate),
             _ => None,
         }
     }

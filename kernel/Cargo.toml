@@ -110,6 +110,9 @@ ioctl-winsize-swap-test = []
 # 破壊（e-2）: zi が -EAGAIN で Esc を確定しない。使う人は Esc を2回押すことになる
 # ——「Esc 1回で戻る」判定だけが落ちる（台本の残りは次のバイトで確定する）。
 zi-esc-needs-second-key-test = []
+# 破壊（e-3）: 代替画面から戻るとき、面は戻すが画面を描き直さない。セルは元の画面で
+# ピクセルは代替画面のまま——状態と画面が食い違う。画面の実物を読む判定が捕まえる。
+alt-screen-skip-repaint-test = []
 # 破壊（zi-c）: 書きで開いた fd への write が複製へ足さない。検証も戻り値も
 # 正しく、書いたつもりが複製に届いていない——読み戻しの検算（58 番）が捕まえる。
 write-file-skip-append-test = []
