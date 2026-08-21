@@ -214,6 +214,19 @@ fn observe_prompt(serial: &mut SerialPort, console: &mut crate::console::Console
         ink.map(|(column, _)| column)
     );
 
+    // **画面の形を出す（e-1）。** **`ioctl(TIOCGWINSZ)` が答える値の出所と
+    // 同じもの**（`crate::console::foreground_geometry`）を、**カーネルの側から
+    // 1 行にする。** **`zi` が受け取った値と突き合わせる**ので、
+    // **どちらも期待値を写していない**——経路のどこかで入れ替われば食い違う。
+    let (columns, rows) = console.size();
+    let layout = console.framebuffer_layout();
+    let _ = writeln!(
+        serial,
+        "screen-size: the console is rows={rows} columns={columns} xpixel={} ypixel={}",
+        layout.width(),
+        layout.height()
+    );
+
     // **記号のセル**（連なりの直後）**は既定前景で、字が在る。**
     let default_foreground = console.default_colors().0;
     let symbol = found.map(|(row, _, to)| (to, row));

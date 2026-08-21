@@ -92,6 +92,10 @@
 //! - `58` 読み戻しが書いた中身と一致しなかった（長さ・バイト列・EOF）
 //! - `59` 読みで開いた fd への `write` が `-EBADF` を返さなかった
 //! - `60` カナリア（/etc/motd）が変わっていた（別のファイルへ書いた）
+//! - `61` ファイルの fd への `ioctl` が `-ENOTTY` を返さなかった（端末ではない）
+//! - `62` 端末への `ioctl(TIOCGWINSZ)` が 0 を返さなかった
+//! - `63` 画面の無い文脈なのに行が 0 でなかった（**起動シーケンスには前景が無い**）
+//! - `64` 知らない要求が `-ENOTTY` を返さなかった
 //!
 //! # `argv` は `_start` の時点の `rsp` から読む
 //!
@@ -162,6 +166,17 @@ const NEW_BODY_LEN: u32 = 23;
 const MINUS_ENOENT: i32 = -2;
 /// `-EBADF`（そのファイルディスクリプタは開いていない）。
 const MINUS_EBADF: i32 = -9;
+/// `-ENOTTY`（端末に対する要求ではない。e-1）。
+///
+/// **端末でない fd への `ioctl` と、知らない要求の両方で返る**
+/// （`kernel/src/syscall.rs` の `sys_ioctl`）。
+const MINUS_ENOTTY: i32 = -25;
+/// `ioctl` の番号（e-1）。**カーネルの `SYS_IOCTL` と同じ値である。**
+const SYS_IOCTL: u32 = 16;
+/// 端末の大きさを訊く要求（`TIOCGWINSZ`。e-1）。
+const TIOCGWINSZ: u32 = 0x5413;
+/// 知らない要求（e-1）。**`TIOCGWINSZ` でなければ何でもよい。**
+const UNKNOWN_IOCTL: u32 = 0x5555;
 /// `-EROFS`（読み取り専用のファイルシステム）。
 const MINUS_EROFS: i32 = -30;
 /// `-EFAULT`（不正なアドレス）。
@@ -923,6 +938,16 @@ core::arch::global_asm!(
     "  cmp rax, {minus_ebadf}",
     "  mov edi, 59",
     "  jne 9f",
+    // 61: ファイルの fd への ioctl は -ENOTTY（e-1）。**端末ではない。**
+    // **`sys_write` と同じく、番号ではなく表を引いて分けている。**
+    "  mov eax, {sys_ioctl}",
+    "  mov rdi, r12",
+    "  mov esi, {tiocgwinsz}",
+    "  mov rdx, rsp",
+    "  int 0x80",
+    "  cmp rax, {minus_enotty}",
+    "  mov edi, 61",
+    "  jne 9f",
     "  mov eax, {sys_close}",
     "  mov rdi, r12",
     "  int 0x80",
@@ -952,6 +977,30 @@ core::arch::global_asm!(
     "  mov eax, {sys_close}",
     "  mov rdi, r12",
     "  int 0x80",
+    // 62: 端末への ioctl(TIOCGWINSZ) は 0 を返す（e-1）。
+    "  mov eax, {sys_ioctl}",
+    "  xor edi, edi",
+    "  mov esi, {tiocgwinsz}",
+    "  mov rdx, rsp",
+    "  int 0x80",
+    "  test rax, rax",
+    "  mov edi, 62",
+    "  jne 9f",
+    // 63: **起動シーケンスには前景のコンソールが無い**ので、行は 0 である
+    //     （`sys_ioctl` の doc。「0 は分からない」であって「端末でない」ではない）。
+    "  movzx eax, word ptr [rsp]",
+    "  test eax, eax",
+    "  mov edi, 63",
+    "  jne 9f",
+    // 64: 知らない要求は -ENOTTY（e-1）。**入口はここで閉じている。**
+    "  mov eax, {sys_ioctl}",
+    "  xor edi, edi",
+    "  mov esi, {unknown_ioctl}",
+    "  mov rdx, rsp",
+    "  int 0x80",
+    "  cmp rax, {minus_enotty}",
+    "  mov edi, 64",
+    "  jne 9f",
 
     // すべて通った。
     "  xor edi, edi",
@@ -1077,6 +1126,10 @@ core::arch::global_asm!(
     new_body_len = const NEW_BODY_LEN,
     minus_enoent = const MINUS_ENOENT,
     minus_ebadf = const MINUS_EBADF,
+    minus_enotty = const MINUS_ENOTTY,
+    sys_ioctl = const SYS_IOCTL,
+    tiocgwinsz = const TIOCGWINSZ,
+    unknown_ioctl = const UNKNOWN_IOCTL,
     minus_erofs = const MINUS_EROFS,
     minus_efault = const MINUS_EFAULT,
     sys_read = const SYS_READ,

@@ -33,6 +33,15 @@ pub const SYS_WRITE: u64 = 1;
 pub const SYS_OPEN: u64 = 2;
 /// `close` の番号（Linux と同じ）。
 pub const SYS_CLOSE: u64 = 3;
+
+/// `ioctl(fd, request, arg)`（e-1）。**カーネルの `SYS_IOCTL` と同じ値である。**
+pub const SYS_IOCTL: u64 = 16;
+
+/// 端末の大きさを訊く要求（`TIOCGWINSZ`。e-1）。
+///
+/// **カーネルの `TIOCGWINSZ` と同じ値である**（`SYS_*` の番号を写しているのと
+/// 同じ形。ユーザープログラムはカーネルの定数を参照できない）。
+pub const TIOCGWINSZ: u64 = 0x5413;
 /// `exit` の番号（Linux と同じ）。
 pub const SYS_EXIT: u64 = 60;
 /// `getdents64` の番号（Linux と同じ）。
@@ -91,6 +100,92 @@ pub fn exit(status: u64) -> ! {
     // **戻ってきた場合の行き先。** 受け皿の `ud2` へ落ちる。
     // SAFETY: `exit` が効かなかったということなので、確定的に落とす。
     unsafe { core::arch::asm!("ud2", options(noreturn)) }
+}
+
+/// 端末の大きさ（e-1）。`ioctl(TIOCGWINSZ)` が返す `struct winsize` である。
+///
+/// **`0` は「分からない」である**（`kernel/src/syscall.rs` の `sys_ioctl`）。
+/// **画面を持たない文脈で走ると 0 が返る**ので、**使う側は 0 を確かめること。**
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct WindowSize {
+    pub rows: u16,
+    pub columns: u16,
+    pub width_pixels: u16,
+    pub height_pixels: u16,
+}
+
+/// 大きさが分からないときの既定の行数（e-1）。**端末の慣行である。**
+pub const DEFAULT_ROWS: u16 = 24;
+/// 大きさが分からないときの既定の桁数（e-1）。**端末の慣行である。**
+pub const DEFAULT_COLUMNS: u16 = 80;
+
+impl WindowSize {
+    /// 0 と失敗を既定へ落とす（e-1）。**使う側はこれを通すこと。**
+    ///
+    /// # なぜ 1 箇所で決めるのか
+    ///
+    /// **`0` は「分からない」で、返りうる**（画面を持たない文脈で走ったとき）。
+    /// **使う側が「行数 - 2」のような計算をすると、0 は負か 0 除算になる。**
+    /// **各所で場当たりに守る形にすると、守り忘れた場所だけが落ちる。**
+    ///
+    /// **落とす先は 24x80 である**——**端末の慣行で、`vi` も `less` もこれを
+    /// 既定にしている。** **ピクセルは 0 のままにする**——**使う者がまだ
+    /// 居らず、代わりに置ける慣行の値も無い**（画面が無いのだから、
+    /// 「たぶんこのくらい」を置く根拠が無い）。
+    ///
+    /// **判定は落とす前の値を見る**（`zi` の判定行）——**落とした後を見ると、
+    /// 「訊けた」と「訊けなかったが既定へ落ちた」が同じ値になる。**
+    pub fn or_default(self) -> Self {
+        Self {
+            rows: if self.rows == 0 {
+                DEFAULT_ROWS
+            } else {
+                self.rows
+            },
+            columns: if self.columns == 0 {
+                DEFAULT_COLUMNS
+            } else {
+                self.columns
+            },
+            width_pixels: self.width_pixels,
+            height_pixels: self.height_pixels,
+        }
+    }
+}
+
+/// 端末の大きさを訊き、分からなければ既定へ落とす（e-1）。
+///
+/// **使う側の入口はこちらである。** [`window_size`] は生の値を返すので、
+/// **判定と診断が使う**（落とす前と後を区別するため。[`WindowSize::or_default`]）。
+pub fn window_size_or_default(fd: u64) -> WindowSize {
+    window_size(fd).unwrap_or(WindowSize {
+        rows: 0,
+        columns: 0,
+        width_pixels: 0,
+        height_pixels: 0,
+    })
+    .or_default()
+}
+
+/// 端末の大きさを訊く（e-1）。**失敗したら `-errno` を返す。**
+///
+/// **`fd` は端末であること**——そうでなければカーネルが `-ENOTTY` を返す。
+///
+/// **返るのは生の値である**（`0` を含む）。**使う側は
+/// [`window_size_or_default`] を通すこと。**
+pub fn window_size(fd: u64) -> Result<WindowSize, i64> {
+    let mut raw = [0u8; 8];
+    // SAFETY: `raw` は自分のスタックの上にあり、カーネルが書く長さ（8）を収める。
+    let ret = unsafe { syscall3(SYS_IOCTL, fd, TIOCGWINSZ, raw.as_mut_ptr() as u64) };
+    if ret < 0 {
+        return Err(ret);
+    }
+    Ok(WindowSize {
+        rows: u16::from_le_bytes([raw[0], raw[1]]),
+        columns: u16::from_le_bytes([raw[2], raw[3]]),
+        width_pixels: u16::from_le_bytes([raw[4], raw[5]]),
+        height_pixels: u16::from_le_bytes([raw[6], raw[7]]),
+    })
 }
 
 /// バイト列を fd へ**すべて**書く。書けた総数、または最初の `-errno` を返す。

@@ -9097,6 +9097,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "zi の状態行がモードに関わらず NORMAL のまま描く",
     ),
     (
+        "ioctl-winsize-swap-test",
+        cfg!(feature = "ioctl-winsize-swap-test"),
+        "ioctl(TIOCGWINSZ) が行と桁を入れ替えて返す",
+    ),
+    (
         "write-file-skip-append-test",
         cfg!(feature = "write-file-skip-append-test"),
         "書きで開いた fd への write が複製へ足さない",

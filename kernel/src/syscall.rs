@@ -91,6 +91,13 @@ pub const EIO: i64 = 5;
 /// **遠征の深さが上限に達しているときに返す。**
 pub const EAGAIN: i64 = 11;
 
+/// **端末に対する要求ではない**（Linux の `ENOTTY` = 25。実測。
+/// `/usr/include/asm-generic/errno-base.h`）。
+///
+/// **2 つの場面で返す**（e-1）——**端末でない fd への `ioctl`** と、
+/// **知らない要求**。**Linux も同じ値を両方に使う。**
+pub const ENOTTY: i64 = 25;
+
 /// `-EACCES`（許されない）の errno（S11-5）。
 ///
 /// **[`SYS_SPAWN`] が通常ファイルでないものを渡されたときに返す。**
@@ -310,6 +317,28 @@ pub const SYS_OPEN: u64 = 2;
 
 /// `close(fd)`（S10-b）。**Linux の番号 3 をそのまま使う。**
 pub const SYS_CLOSE: u64 = 3;
+
+/// `ioctl(fd, request, arg)`（e-1）。**Linux の番号 16 をそのまま使う**
+/// （実測。`/usr/include/x86_64-linux-gnu/asm/unistd_64.h` の `__NR_ioctl`）。
+///
+/// # 入口の方針——端末の問い合わせに限る
+///
+/// **`ioctl` は「何でも入る雑多な入口」である。** 最初の1つを入れる時点で
+/// **何を入れ、何を入れないかを決めてある**——**受けるのは端末の問い合わせだけ**
+/// で、**設定の変更（`termios` 相当・`TIOCSWINSZ`）は別の判断とする。**
+/// **知らない要求は `-ENOTTY` で断る**ので、**入口が黙って広がることはない。**
+/// **決定の記録は `docs/deferred-decisions.md` にある**（解禁の契機は
+/// 「設定の変更を要求する利用者が来たとき」。**C の移植で必ず来る**）。
+pub const SYS_IOCTL: u64 = 16;
+
+/// `TIOCGWINSZ`——端末の大きさを訊く要求（e-1）。**Linux の値をそのまま使う**
+/// （実測。`/usr/include/asm-generic/ioctls.h` の `0x5413`）。
+pub const TIOCGWINSZ: u64 = 0x5413;
+
+/// `struct winsize` の大きさ（e-1）。**`u16` が 4 つである**
+/// （実測。`/usr/include/x86_64-linux-gnu/bits/ioctl-types.h`。
+/// 順に `ws_row` / `ws_col` / `ws_xpixel` / `ws_ypixel`）。
+pub const WINSIZE_LEN: usize = 8;
 
 /// `open` の第 2 引数のうち、アクセスモードを表すビット（Linux の `O_ACCMODE`）。
 pub const O_ACCMODE: u64 = 0o3;
@@ -853,6 +882,10 @@ unsafe fn dispatch(
         SYS_OPEN => {
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
             unsafe { sys_open(args[0], args[1], pml4_phys, direct_map) }
+        }
+        SYS_IOCTL => {
+            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+            unsafe { sys_ioctl(args[0], args[1], args[2], pml4_phys, direct_map) }
         }
         SYS_CLOSE => crate::vfs::with_current_files(|files| match files.remove(args[0] as usize) {
             Ok(_) => 0,
@@ -1565,6 +1598,87 @@ unsafe fn sys_stat(path: u64, statbuf: u64, pml4_phys: PhysAddr, direct_map: Dir
     // SAFETY: slice は検証済みで、長さは STAT_LEN ちょうどである。
     let written = unsafe { copy_to_user(&slice, 0, &out) };
     if written != STAT_LEN {
+        return (-EFAULT) as u64;
+    }
+    0
+}
+
+/// `ioctl(fd, request, arg)`（e-1）。**端末の問い合わせだけを受ける。**
+///
+/// # 受けるのは `TIOCGWINSZ` だけである
+///
+/// **入口の方針は [`SYS_IOCTL`] の doc にある**——端末の問い合わせに限り、
+/// 設定の変更は別の判断とする。**知らない要求は `-ENOTTY` で断る。**
+///
+/// # 断り方は 3 つある
+///
+/// - **無い fd** → `-EBADF`（表が答える）
+/// - **端末でない fd**（`open` で開いたファイル）→ `-ENOTTY`
+/// - **知らない要求** → `-ENOTTY`
+///
+/// **Linux も端末でない fd と知らない要求に同じ `ENOTTY` を返す。**
+///
+/// # 画面が無いときは 0 を返し、欄を 0 で埋める
+///
+/// **前景のコンソールが据えられていない文脈がある**（起動シーケンスの検算）。
+/// **そこは「端末だが大きさが無い」**——**シリアルだけの端末と同じ立場である。**
+/// **Linux も、大きさを知らない端末には 0 を返す**（`ws_row` が 0）。
+/// **呼ぶ側は 0 を確かめること。** **`-ENOTTY` にはしない**——
+/// **端末ではあるので、嘘になる。**
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn sys_ioctl(
+    fd: u64,
+    request: u64,
+    arg: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+) -> u64 {
+    // **表を引いて端末かどうかを見る**（`sys_write` と同じ形。番号では分けない）。
+    let is_terminal = match crate::vfs::with_current_files(|files| {
+        files.get(fd as usize).map(|file| file.is_terminal())
+    }) {
+        Ok(is_terminal) => is_terminal,
+        Err(e) => return (-errno_for_file_table(e)) as u64,
+    };
+    if !is_terminal {
+        return (-ENOTTY) as u64;
+    }
+    if request != TIOCGWINSZ {
+        return (-ENOTTY) as u64;
+    }
+
+    // **0 で埋めてから、分かる欄だけを書く**（`sys_stat` と同じ形）。
+    // **画面が無ければ 0 のままである。**
+    let mut out = [0u8; WINSIZE_LEN];
+    if let Some((columns, rows, width, height)) = crate::console::foreground_geometry() {
+        // 破壊 (e-1, ioctl-winsize-swap): 行と桁を入れ替えて返す。
+        // **どちらももっともらしい数のままなので、受けた側だけでは気づけない**
+        // （`stat` の `st_blocks` を単位違いで返す破壊と同じ族である）。
+        // **画面は正方形ではない**（160x50。実測）ので、入れ替えれば必ず違う値になる。
+        // **カーネルが自分の値を判定行に出しており、突き合わせが捕まえる。**
+        #[cfg(feature = "ioctl-winsize-swap-test")]
+        let (rows, columns) = (columns, rows);
+        // **`u16` へ収める。** **越えることは無い**——桁も行もセルの数で、
+        // 仮定する最大は 240x67 である（`kernel_main` の `MAX_TERMINAL_CELLS`）。
+        out[0..2].copy_from_slice(&(rows as u16).to_le_bytes());
+        out[2..4].copy_from_slice(&(columns as u16).to_le_bytes());
+        out[4..6].copy_from_slice(&(width as u16).to_le_bytes());
+        out[6..8].copy_from_slice(&(height as u16).to_le_bytes());
+    }
+
+    // **踏み込む前に検証する。**
+    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    let Some(slice) =
+        (unsafe { validate_user_range(pml4_phys, direct_map, arg, WINSIZE_LEN as u64) })
+    else {
+        return (-EFAULT) as u64;
+    };
+    // SAFETY: slice は検証済みで、長さは WINSIZE_LEN ちょうどである。
+    let written = unsafe { copy_to_user(&slice, 0, &out) };
+    if written != WINSIZE_LEN {
         return (-EFAULT) as u64;
     }
     0

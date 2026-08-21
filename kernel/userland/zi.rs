@@ -450,6 +450,12 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     #[cfg(zi_diagnostics)]
     write_all(STDERR, b"zi: ready\n");
 
+    // **端末の大きさを訊く（e-1）。** **使うのは e-4 の2本立てである**——
+    // **いまは受け取って判定行に出すだけで、置き場所には使っていない**
+    // （状態行は本文の1行下のままである）。
+    // **訊く経路が本物の利用者を持たないと、検算が置けない。**
+    report_window_size(userlib::window_size(0));
+
     let mut mode = Mode::Normal;
     let mut row = 0usize;
     let mut col = 0usize;
@@ -671,6 +677,42 @@ fn report_save(requested: usize, written: i64, ok: bool) {
 /// 判定行を出さない側（既定のビルド）。
 #[cfg(not(zi_diagnostics))]
 fn report_save(_requested: usize, _written: i64, _ok: bool) {}
+
+/// 端末の大きさの判定行（e-1）。**受け取った値をそのまま出す。**
+///
+/// **突き合わせる相手はカーネルが出す行である**——**期待値をこちらが持たない。**
+/// **カーネルは自分の `Console` から桁と行を読んで出しており、こちらは
+/// `ioctl` を通って受け取った値を出す。** **経路のどこかで入れ替われば食い違う。**
+#[cfg(zi_diagnostics)]
+fn report_window_size(size: Result<userlib::WindowSize, i64>) {
+    let mut out = [0u8; 96];
+    let mut at = 0usize;
+    let head = b"zi: winsize rows=";
+    out[at..at + head.len()].copy_from_slice(head);
+    at += head.len();
+    let mut digits = [0u8; 12];
+    let (rows, columns) = match size {
+        Ok(size) => (size.rows as usize, size.columns as usize),
+        // **失敗は 0 として出す。** **判定は「カーネルの値と一致すること」なので、
+        // 0 は一致しない**（画面が在る構成で走るためである）。
+        Err(_) => (0, 0),
+    };
+    let count = write_number(&mut digits, rows);
+    out[at..at + count].copy_from_slice(&digits[..count]);
+    at += count;
+    out[at..at + 9].copy_from_slice(b" columns=");
+    at += 9;
+    let count = write_number(&mut digits, columns);
+    out[at..at + count].copy_from_slice(&digits[..count]);
+    at += count;
+    out[at] = b'\n';
+    at += 1;
+    write_all(STDERR, &out[..at]);
+}
+
+/// 判定行を出さない側（既定のビルド）。
+#[cfg(not(zi_diagnostics))]
+fn report_window_size(_size: Result<userlib::WindowSize, i64>) {}
 
 /// コマンド行を解釈する（zi-d-2）。**戻り値は「終わってよいか」である。**
 ///

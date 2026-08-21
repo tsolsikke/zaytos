@@ -3702,6 +3702,39 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     // **色が記号へ漏れていないこと（zi-e 前の色替え）。** 連なりの直後の
     // セルが既定前景で、字が在ることを見る。
     let prompt_symbol_plain = judged("the prompt symbol kept the default color");
+
+    // **`ioctl(TIOCGWINSZ)` が答えた大きさが、カーネルの画面と一致すること（e-1）。**
+    //
+    // **期待値をホストが持たない。** カーネルは自分の `Console` から読んだ値を
+    // `screen-size:` の行に出し、`zi` は `ioctl` を通って受け取った値を
+    // `zi: winsize` の行に出す。**両側の数字を突き合わせる。**
+    //
+    // **源は独立している**——片方は画面を持っている側、もう片方は
+    // システムコールの戻り値である。**入れ替えれば食い違う**
+    // （画面は 160x50 で正方形ではない）。
+    let kernel_geometry = serial.lines().find_map(|line| {
+        let rest = line.split("screen-size: the console is ").nth(1)?;
+        let rows = rest.split("rows=").nth(1)?.split(' ').next()?.to_string();
+        let columns = rest
+            .split("columns=")
+            .nth(1)?
+            .split(' ')
+            .next()?
+            .to_string();
+        Some((rows, columns))
+    });
+    let zi_geometry = serial.lines().find_map(|line| {
+        let rest = line.split("zi: winsize ").nth(1)?;
+        let rows = rest.split("rows=").nth(1)?.split(' ').next()?.to_string();
+        let columns = rest
+            .split("columns=")
+            .nth(1)?
+            .trim_end_matches('\r')
+            .to_string();
+        Some((rows, columns))
+    });
+    let winsize_agrees =
+        kernel_geometry.is_some() && zi_geometry.is_some() && kernel_geometry == zi_geometry;
     let status_colored = judged("the zi status line is drawn in its own color");
     let status_followed_mode = judged("the zi status line followed the mode");
 
@@ -3727,6 +3760,10 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     );
     println!("{context}: the zash prompt name is drawn in its own color = {prompt_colored}");
     println!("{context}: the prompt symbol kept the default color = {prompt_symbol_plain}");
+    println!(
+        "{context}: ioctl(TIOCGWINSZ) agrees with the console = {winsize_agrees} \
+         (kernel {kernel_geometry:?}, zi {zi_geometry:?})"
+    );
     println!("{context}: the zi status line is drawn in its own color = {status_colored}");
     println!("{context}: the zi status line followed the mode = {status_followed_mode}");
     for line in serial.lines().filter(|line| line.contains("screen-color:")) {
@@ -3749,6 +3786,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && roundtrip
         && prompt_colored
         && prompt_symbol_plain
+        && winsize_agrees
         && status_colored
         && status_followed_mode
     {
@@ -9787,12 +9825,14 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             }
         }
 
-        // **`zi` の破壊 5 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
+        // **`zi` の破壊 6 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
         // 書かない、挿入が 1 字落とす（どちらも zi-d-2）、プロンプトの色を
-        // 送らない、状態行がモードに追随しない（どちらも ES-d）。
+        // 送らない、状態行がモードに追随しない（どちらも ES-d）、
+        // `ioctl(TIOCGWINSZ)` が行と桁を入れ替える（e-1）。
         //
         // **落とす判定はそれぞれ違う**——順に、矢印の札の推移 / 往復 /
-        // 挿入の本数 / プロンプトの色 / 状態行の札の変化である。
+        // 挿入の本数 / プロンプトの色 / 状態行の札の変化 / 大きさの突き合わせ
+        // である。
         // **`:w` の量の判定はどれでも通る**（要求 0 に対して 0 なので）。
         //
         // **3 つは長い間「別の理由で」落ちていた**——破壊ビルドの像が
@@ -9804,6 +9844,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "zi-insert-drop-first-test",
             "zash-prompt-drop-color-test",
             "zi-status-freeze-mode-test",
+            "ioctl-winsize-swap-test",
         ] {
             total += 1;
             println!("=== xtask check: the zi test catches {feature}");
@@ -10591,7 +10632,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 205,
+    full: 206,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

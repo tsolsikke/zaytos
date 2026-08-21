@@ -112,6 +112,41 @@ pub fn foreground_installed() -> bool {
     !FOREGROUND.load(Ordering::Acquire).is_null()
 }
 
+/// 前景の画面の形（e-1）。**据えられていなければ `None`。**
+///
+/// 返すのは `(桁, 行, 横のピクセル, 縦のピクセル)` である。
+///
+/// # 何のために在るのか
+///
+/// **`ioctl(TIOCGWINSZ)` が答える値の出所である**（`crate::syscall`）。
+/// **Ring 3 には画面の形を知る手段が1つも無い**ので、訊かれたら答える側が要る。
+///
+/// # `None` は「大きさが無い」であって「端末でない」ではない
+///
+/// **据えられていないのは、その fd が端末でないからではない**——
+/// **画面を持たない文脈（起動シーケンスの検算など）で走っているからである。**
+/// **シリアルだけの端末に大きさが無いのと同じ立場で、呼ぶ側は 0 を受け取る。**
+///
+/// # 書き込みと同じ根拠で読む
+///
+/// **速い。** 桁と行はセルの表の形で、フレームバッファの形状も値の写しである。
+/// **[`write_foreground_bytes`] と違って BKL を解く理由が無い**——
+/// あちらが解くのは描画と転送が 1 ティックの半分ほど掛かるためである。
+pub fn foreground_geometry() -> Option<(u32, u32, u32, u32)> {
+    let console = FOREGROUND.load(Ordering::Acquire);
+    if console.is_null() {
+        return None;
+    }
+    // SAFETY: 非 null なら [`install_foreground`] のガードが生きており、
+    // その間は据えた側が `&mut Console` を預けたままなので書けない
+    // （[`FOREGROUND`] の doc）。**読むだけで、他のコアと他の遠征が
+    // 書かないことも同じ doc に挙げてある。**
+    let console = unsafe { &*console };
+    let (columns, rows) = console.size();
+    let layout = console.framebuffer_layout();
+    Some((columns, rows, layout.width(), layout.height()))
+}
+
 /// 前景の [`Console`] へバイト列を書く。**据えられていなければ何もしない。**
 ///
 /// # 呼ぶ側の前提
