@@ -538,7 +538,7 @@ pub(crate) mod script {
         jjkk\
         \x1b[C\x1b[D\
         lh\x02\
-        iZY\x02\x1b\
+        iZY\x02\x1b\x04\x02\
         xx\
         :wq\n\
         /bin/cat /data/lines\n";
@@ -547,6 +547,25 @@ pub(crate) mod script {
     const OBSERVE_PROMPT: u8 = 0x01;
     /// 観測点（ES-d）。**`zi` の状態行を見る。**
     const OBSERVE_STATUS: u8 = 0x02;
+    /// 休み（e-2）。**その `read` は何も返さない**（`-EAGAIN` になる）。
+    ///
+    /// # 何のために在るのか
+    ///
+    /// **台本が作動している間、`read` は必ず 1 バイトを返す。** つまり
+    /// **読み手は「入力が途切れた」状態を一度も見ない。**
+    /// **`zi` の Esc の確定はまさにそこで起きる**（`-EAGAIN` を受けたら
+    /// Esc 単体と確定する。`kernel/userland/zi.rs`）ので、
+    /// **途切れを作らないと、その経路が一度も通らない。**
+    ///
+    /// **1 回の `read` だけを空にする。** 次の `read` は台本の続きを返す。
+    ///
+    /// # 値の選び方
+    ///
+    /// **`0x04` は打鍵から作られないバイトである**（`bytes_for_event` が
+    /// 返すのは字と `0x08` と `0x03` と CSI である）。**そもそも Ring 3 へは
+    /// 届けない**ので衝突しないが、**読む人が「これは入力ではない」と
+    /// 分かる値を選んである。**
+    const SCRIPT_PAUSE: u8 = 0x04;
 
     /// 台本の中の観測点か（ES-d）。
     ///
@@ -566,6 +585,9 @@ pub(crate) mod script {
     /// **観測点は先に食べる（ES-d）。** **ここへ来たということは、読み手が
     /// それまでの入力を処理し終えて次を要求したということ**なので、
     /// **画面はその時点で最新である**（`crate::console::probe` の doc）。
+    ///
+    /// **休み（e-2）は 0 を返して終わる。** **「台本が尽きた」と同じ返り値だが、
+    /// 位置は進めてある**ので、次の呼び出しは続きを返す。
     pub(crate) fn next_bytes(dst: &mut [u8]) -> usize {
         if !ARMED.load(Ordering::SeqCst) {
             return 0;
@@ -579,11 +601,17 @@ pub(crate) mod script {
             AT.store(at, Ordering::SeqCst);
             return 0;
         }
+        // **休み（e-2）。** **1 回だけ空を返す**——読み手に「入力が途切れた」を
+        // 見せるためである（[`SCRIPT_PAUSE`] の doc）。
+        if SCRIPT[at] == SCRIPT_PAUSE {
+            AT.store(at + 1, Ordering::SeqCst);
+            return 0;
+        }
         // **次の観測点の手前までしか渡さない。** 1 度に多くを求められても、
         // **観測点を跨いで渡すと、見るはずだった時点を通り過ぎる。**
         let until = SCRIPT[at..]
             .iter()
-            .position(|byte| observation_at(*byte).is_some())
+            .position(|byte| observation_at(*byte).is_some() || *byte == SCRIPT_PAUSE)
             .map_or(SCRIPT.len(), |offset| at + offset);
         let take = dst.len().min(until - at);
         dst[..take].copy_from_slice(&SCRIPT[at..at + take]);

@@ -9102,6 +9102,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "ioctl(TIOCGWINSZ) が行と桁を入れ替えて返す",
     ),
     (
+        "zi-esc-needs-second-key-test",
+        cfg!(feature = "zi-esc-needs-second-key-test"),
+        "zi が -EAGAIN で Esc を確定しない",
+    ),
+    (
         "write-file-skip-append-test",
         cfg!(feature = "write-file-skip-append-test"),
         "書きで開いた fd への write が複製へ足さない",

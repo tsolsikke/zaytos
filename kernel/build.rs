@@ -169,6 +169,10 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
             "CARGO_FEATURE_ZI_STATUS_FREEZE_MODE_TEST",
             "zi_status_freeze_mode",
         ),
+        (
+            "CARGO_FEATURE_ZI_ESC_NEEDS_SECOND_KEY_TEST",
+            "zi_esc_needs_second_key",
+        ),
     ];
     let mut extra_cfgs: Vec<String> = Vec::new();
     for (env, cfg) in USER_PROGRAM_CFGS {

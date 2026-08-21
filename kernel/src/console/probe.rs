@@ -268,6 +268,15 @@ fn observe_status(serial: &mut SerialPort, console: &mut crate::console::Console
             length += 1;
         }
     }
+    // **札をそのつど出す（e-2）。** **並びを見る判定が要る**——
+    // 「Esc 1 回で前のモードへ戻った」は、**3 つ目の札が 1 つ目と同じで
+    // 2 つ目と違うこと**で言える（**札の文字列を写さずに済む**）。
+    let _ = writeln!(
+        serial,
+        "screen-color: the zi status line says {:?}",
+        core::str::from_utf8(&label[..length]).unwrap_or("?")
+    );
+
     let previous = *LAST_STATUS.lock();
     *LAST_STATUS.lock() = StatusSnapshot {
         label,
@@ -278,8 +287,7 @@ fn observe_status(serial: &mut SerialPort, console: &mut crate::console::Console
         // **1 回目は比べる相手が無い。** 観測していないことは書いておく。
         let _ = writeln!(
             serial,
-            "screen-color: the zi status line said {:?} (first observation, nothing to compare yet)",
-            core::str::from_utf8(&label[..length]).unwrap_or("?")
+            "screen-color: the zi status line has no earlier observation to compare yet"
         );
         return;
     }

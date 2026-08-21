@@ -3738,6 +3738,23 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     let status_colored = judged("the zi status line is drawn in its own color");
     let status_followed_mode = judged("the zi status line followed the mode");
 
+    // **Esc 1 バイトで、次の入力を待たずに前のモードへ戻ること（e-2）。**
+    //
+    // **台本は `i Z Y` の後に Esc を 1 バイト送り、そこで「休み」を挟む**
+    // （`kernel/src/input.rs` の `SCRIPT_PAUSE`）。**休みは `read` を空に
+    // するので、`zi` は「入力が途切れた」を見る。** 直後の観測点で札を読む。
+    //
+    // **札の文字列を写さない。** **3 つ目が 1 つ目と同じで、2 つ目と違う**
+    // ことを見る——ノーマル、インサート、ノーマル、の並びである。
+    let status_labels: Vec<&str> = serial
+        .lines()
+        .filter_map(|line| line.split("the zi status line says ").nth(1))
+        .map(|rest| rest.trim().trim_end_matches('\r'))
+        .collect();
+    let esc_settled_at_once = status_labels.len() >= 3
+        && status_labels[2] == status_labels[0]
+        && status_labels[2] != status_labels[1];
+
     println!("{context}: zi started = {started}");
     println!(
         "{context}: the up/down arrows moved the cursor between lines = {arrows_moved} \
@@ -3766,6 +3783,10 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     );
     println!("{context}: the zi status line is drawn in its own color = {status_colored}");
     println!("{context}: the zi status line followed the mode = {status_followed_mode}");
+    println!(
+        "{context}: a lone Esc settled without another key = {esc_settled_at_once} \
+         (status labels in order: {status_labels:?})"
+    );
     for line in serial.lines().filter(|line| line.contains("screen-color:")) {
         println!("  {}", line.trim());
     }
@@ -3789,6 +3810,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && winsize_agrees
         && status_colored
         && status_followed_mode
+        && esc_settled_at_once
     {
         println!("{context}: PASS");
         Ok(())
@@ -9825,14 +9847,15 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             }
         }
 
-        // **`zi` の破壊 6 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
+        // **`zi` の破壊 7 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
         // 書かない、挿入が 1 字落とす（どちらも zi-d-2）、プロンプトの色を
         // 送らない、状態行がモードに追随しない（どちらも ES-d）、
-        // `ioctl(TIOCGWINSZ)` が行と桁を入れ替える（e-1）。
+        // `ioctl(TIOCGWINSZ)` が行と桁を入れ替える（e-1）、
+        // `-EAGAIN` で Esc を確定しない（e-2）。
         //
         // **落とす判定はそれぞれ違う**——順に、矢印の札の推移 / 往復 /
-        // 挿入の本数 / プロンプトの色 / 状態行の札の変化 / 大きさの突き合わせ
-        // である。
+        // 挿入の本数 / プロンプトの色 / 状態行の札の変化 / 大きさの突き合わせ /
+        // 札の並び（ノーマル・インサート・ノーマル）である。
         // **`:w` の量の判定はどれでも通る**（要求 0 に対して 0 なので）。
         //
         // **3 つは長い間「別の理由で」落ちていた**——破壊ビルドの像が
@@ -9845,6 +9868,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "zash-prompt-drop-color-test",
             "zi-status-freeze-mode-test",
             "ioctl-winsize-swap-test",
+            "zi-esc-needs-second-key-test",
         ] {
             total += 1;
             println!("=== xtask check: the zi test catches {feature}");
@@ -10632,7 +10656,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 206,
+    full: 207,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

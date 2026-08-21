@@ -483,6 +483,19 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
         let mut byte = [0u8; 1];
         let got = read(0, &mut byte);
         if got == MINUS_EAGAIN {
+            // **溜めた Esc をここで確定する（e-2）。** **入力が途切れたので、
+            // CSI の途中ではありえない**（[`finish_pending_escape`] の doc）。
+            //
+            // 破壊 (e-2, zi-esc-needs-second-key): ここで確定しない。
+            // **溜めた Esc は次の 1 バイトが来るまで残る**ので、
+            // **使う人は Esc を 2 回押すことになる**（e-2 で直した当の形である）。
+            // **落ちるのは「Esc 1 回で戻る」判定だけである**——台本の残りは
+            // 次のバイトで確定するので、往復も本数も変わらない。
+            #[cfg(not(zi_esc_needs_second_key))]
+            if escape == Escape::Esc {
+                escape = Escape::Idle;
+                finish_pending_escape(buffer, row, &mut col, &mut mode, &mut shown_mode);
+            }
             // **溜まっていない。** 回して待つ（`zash` と同じ形）。
             continue;
         }
@@ -525,14 +538,9 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             }
             (Escape::Esc, other) => {
                 // **`[` が続かなかった。Esc 単体である**（確定。上の doc）。
+                // **`-EAGAIN` の側と同じ確定を通る（e-2）。**
                 escape = Escape::Idle;
-                if mode == Mode::Insert {
-                    mode = Mode::Normal;
-                    // **ノーマルへ戻ると、カーソルは 1 つ左へ寄る**（vi の形）。
-                    col = col.saturating_sub(1);
-                    move_cursor(row, col);
-                    report_cursor(&buffer, row, col, b"normal");
-                }
+                finish_pending_escape(buffer, row, &mut col, &mut mode, &mut shown_mode);
                 // **溜めた Esc の次の字は、この周で扱い直す。**
                 if other == ESC {
                     escape = Escape::Esc;
@@ -713,6 +721,44 @@ fn report_window_size(size: Result<userlib::WindowSize, i64>) {
 /// 判定行を出さない側（既定のビルド）。
 #[cfg(not(zi_diagnostics))]
 fn report_window_size(_size: Result<userlib::WindowSize, i64>) {}
+
+/// Esc 単体を確定する（e-2）。**インサートならノーマルへ戻る。**
+///
+/// # 2 つの経路から呼ぶ
+///
+/// **次の字が来たとき**と、**`read` が `-EAGAIN` を返したとき**である。
+/// **後者が本命で、前者は「Esc の次にすぐ字が来た」場合の受けである。**
+///
+/// # なぜ `-EAGAIN` で確定してよいのか
+///
+/// **カーネルが CSI の 3 バイトを不可分に届けるからである**
+/// （`kernel/src/input.rs` の `bytes_for_event` の doc）。
+/// **`\x1b` の直後の `read` が `-EAGAIN` を返したら、それは CSI の途中では
+/// ありえない。** **本物の端末と違い、ESC タイムアウトの曖昧さが生じない。**
+///
+/// **e-2 まで、この規約は使われていなかった**——`zi` は次の 1 バイトが
+/// 来るまで待っており、**Esc を 2 回押さないとノーマルへ戻れなかった**
+/// （運用者の目視で出た）。
+fn finish_pending_escape(
+    buffer: &Buffer,
+    row: usize,
+    col: &mut usize,
+    mode: &mut Mode,
+    shown_mode: &mut Mode,
+) {
+    if *mode != Mode::Insert {
+        return;
+    }
+    *mode = Mode::Normal;
+    // **ノーマルへ戻ると、カーソルは 1 つ左へ寄る**（vi の形）。
+    *col = col.saturating_sub(1);
+    // **状態行を先に描き直す**——**あちらはカーソルを編集位置へ戻して終える**
+    // ので、**後から描くとカーソルの位置が状態行の後になる。**
+    draw_status(buffer, *mode, row, *col);
+    *shown_mode = *mode;
+    move_cursor(row, *col);
+    report_cursor(buffer, row, *col, b"normal");
+}
 
 /// コマンド行を解釈する（zi-d-2）。**戻り値は「終わってよいか」である。**
 ///
