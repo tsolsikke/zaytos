@@ -32,7 +32,14 @@ pub(crate) enum Observation {
     Status,
 }
 
-/// `zash` のプロンプトの色。
+/// `zash` のプロンプトの名前の部分の色（緑）。
+///
+/// # ES-b の判定色の緑と同じ値である
+///
+/// **共有している。** **150 以上離れた「別の緑」は作れない**——`(0, 200, 0)`
+/// から離すと黄かシアンに寄る（`kernel/userland/zash.rs` の `PROMPT_COLOR`）。
+/// **同じ画面に並ばない**ことを実測で確かめてあるが、**それに頼らず、
+/// プロンプトの判定はカーソルの居る行だけを見る**（[`observe_prompt`]）。
 ///
 /// # 写しである
 ///
@@ -45,7 +52,7 @@ pub(crate) enum Observation {
 /// **その色のセルが見つからず `= false` が出る**——**黙って緑にはならない。**
 /// **判定が実装の値を写さない規律（`docs/verification-coverage.md`）は
 /// 同じプログラムの中の話で、ここは越えられない境界である。**
-const PROMPT_COLOR: Color = Color::rgb(200, 0, 200);
+const PROMPT_COLOR: Color = Color::rgb(0, 200, 0);
 /// `zi` の状態行の色。**`kernel/userland/zi.rs` の `STATUS_COLOR` の写しである。**
 const STATUS_COLOR: Color = Color::rgb(200, 200, 0);
 
@@ -108,6 +115,31 @@ pub(crate) fn observe(kind: Observation) {
     }
 }
 
+/// 色の付いた連なりを、1 行の中で探す（ES-d）。
+///
+/// **行を呼ぶ側が決める形である。** プロンプトの判定はカーソルの居る行を渡す
+/// ——**色でだけ探すと、同じ色を使う別の判定のセルを拾いうる**（緑は ES-b と
+/// 共有している）。
+fn find_colored_run_in_row(
+    console: &mut crate::console::Console,
+    row: u32,
+    want: Color,
+) -> Option<(u32, u32, u32)> {
+    let (columns, _) = console.size();
+    let mut from = None;
+    for column in 0..columns {
+        let matches = console
+            .cell_colors(column, row)
+            .is_some_and(|(fg, _)| fg == want);
+        match (matches, from) {
+            (true, None) => from = Some(column),
+            (false, Some(start)) => return Some((row, start, column)),
+            _ => {}
+        }
+    }
+    from.map(|start| (row, start, columns))
+}
+
 /// 色の付いた連なりを、画面の下から探す（ES-d）。
 ///
 /// **下から探すのは、いちばん新しく描かれたものを見るためである**——
@@ -154,18 +186,46 @@ fn ink_of_run(
 }
 
 /// プロンプトの色を見る。
+///
+/// # 見るのはカーソルの居る行である
+///
+/// **プロンプトを出し終えて入力を待っている時点で観測する**ので、
+/// **カーソルはプロンプトの直後に居る**（実測。8 桁目）。
+/// **画面全体を色で探さない**——同じ緑を ES-b の判定が使うためである。
+///
+/// # 2 つを主張する
+///
+/// **色が名前に乗っていること**（連なりのインクが緑であること）と、
+/// **色が記号へ漏れていないこと**（連なりの直後のセルが既定前景で、
+/// かつ字が在ること）。**後者は ES-d の目視で「白のはず」と決めた側である。**
+/// **既定前景は写さない。コンソールに訊く。**
 fn observe_prompt(serial: &mut SerialPort, console: &mut crate::console::Console) {
     let format = console.framebuffer_layout().format();
     let want = PROMPT_COLOR.to_pixel(format);
-    let found = find_colored_run(console, PROMPT_COLOR);
+    let (_, cursor_row) = console.cursor_cell();
+    let found = find_colored_run_in_row(console, cursor_row, PROMPT_COLOR);
     let ink = found.and_then(|(row, from, to)| ink_of_run(console, row, from, to));
     let drawn = ink.is_some_and(|(_, pixel)| pixel == want);
     let _ = writeln!(
         serial,
-        "screen-color: the zash prompt is drawn in its own color = {drawn} \
-         (run {found:?}, ink {:?} at column {:?}, expected {want:#010x})",
+        "screen-color: the zash prompt name is drawn in its own color = {drawn} \
+         (row {cursor_row}, run {found:?}, ink {:?} at column {:?}, expected {want:#010x})",
         ink.map(|(_, pixel)| PixelHex(pixel)),
         ink.map(|(column, _)| column)
+    );
+
+    // **記号のセル**（連なりの直後）**は既定前景で、字が在る。**
+    let default_foreground = console.default_colors().0;
+    let symbol = found.map(|(row, _, to)| (to, row));
+    let symbol_colors = symbol.and_then(|(column, row)| console.cell_colors(column, row));
+    let symbol_char = symbol.and_then(|(column, row)| console.cell_char(column, row));
+    let symbol_is_plain = symbol_colors.is_some_and(|(fg, _)| fg == default_foreground)
+        && symbol_char.is_some_and(|c| c != ' ');
+    let _ = writeln!(
+        serial,
+        "screen-color: the prompt symbol kept the default color = {symbol_is_plain} \
+         (cell {symbol:?} char {symbol_char:?} fg {:?}, default {default_foreground:?})",
+        symbol_colors.map(|(fg, _)| fg)
     );
 }
 

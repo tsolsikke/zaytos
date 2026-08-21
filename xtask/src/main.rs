@@ -3698,7 +3698,10 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
             .lines()
             .any(|line| line.contains(marker) && line.contains("= true"))
     };
-    let prompt_colored = judged("the zash prompt is drawn in its own color");
+    let prompt_colored = judged("the zash prompt name is drawn in its own color");
+    // **色が記号へ漏れていないこと（zi-e 前の色替え）。** 連なりの直後の
+    // セルが既定前景で、字が在ることを見る。
+    let prompt_symbol_plain = judged("the prompt symbol kept the default color");
     let status_colored = judged("the zi status line is drawn in its own color");
     let status_followed_mode = judged("the zi status line followed the mode");
 
@@ -3722,7 +3725,8 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         "{context}: cat read back exactly what zi edited = {roundtrip} \
          (zi's last redraw {edited_lines:?}, cat printed {readback:?})"
     );
-    println!("{context}: the zash prompt is drawn in its own color = {prompt_colored}");
+    println!("{context}: the zash prompt name is drawn in its own color = {prompt_colored}");
+    println!("{context}: the prompt symbol kept the default color = {prompt_symbol_plain}");
     println!("{context}: the zi status line is drawn in its own color = {status_colored}");
     println!("{context}: the zi status line followed the mode = {status_followed_mode}");
     for line in serial.lines().filter(|line| line.contains("screen-color:")) {
@@ -3744,6 +3748,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && saved
         && roundtrip
         && prompt_colored
+        && prompt_symbol_plain
         && status_colored
         && status_followed_mode
     {
