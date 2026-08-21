@@ -327,6 +327,21 @@ fn redraw(buffer: &Buffer, mode: Mode, cursor_row: usize, cursor_col: usize) {
 }
 
 /// 判定行を出す。**内部状態であって画面ではない**（モジュール doc の限界）。
+///
+/// # 検査の構成でしか出さない（zi-e 前の手当て）
+///
+/// **`write` はシリアルと前景コンソールの両方へ届く**（`sys_write` は fd 1 と
+/// fd 2 を区別しない）。**したがって診断行は画面にも描かれ、カーソルの居る
+/// 行の本文を上書きする。** **実測で、本文の4行すべてが判定行に化けていた。**
+///
+/// **通常の起動では一切出さない。** 台本で駆動する構成（kernel の `zi-test`
+/// feature が `zi_diagnostics` として届く）でだけ出す。**判定はその構成で
+/// 走るので、主張は保たれる。**
+///
+/// **これは応急である。** **根の手当ては「診断の出口を画面と分ける」
+/// （たとえば fd 2 をシリアル専用にする）で、`deferred-decisions.md` に
+/// 行がある**——**Cの移植で `stderr` が来るので、どのみち決める必要がある。**
+#[cfg(zi_diagnostics)]
 fn report_cursor(buffer: &Buffer, row: usize, col: usize, tag: &[u8]) {
     let mut out = [0u8; 96];
     let mut at = 0usize;
@@ -356,6 +371,10 @@ fn report_cursor(buffer: &Buffer, row: usize, col: usize, tag: &[u8]) {
     at += 1;
     write_all(userlib::STDERR, &out[..at]);
 }
+
+/// 判定行を出さない側（既定のビルド。上の doc を参照）。
+#[cfg(not(zi_diagnostics))]
+fn report_cursor(_buffer: &Buffer, _row: usize, _col: usize, _tag: &[u8]) {}
 
 /// `_start` から呼ばれる（`userlib.rs` の `global_asm!`）。
 ///
@@ -422,6 +441,9 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
         exit(4);
     }
 
+    // **検査の構成でしか出さない**（[`report_cursor`] と同じ理由。
+    // **これも診断であって、使う人に要る行ではない**）。
+    #[cfg(zi_diagnostics)]
     write_all(STDERR, b"zi: ready\n");
 
     let mut mode = Mode::Normal;
@@ -611,6 +633,9 @@ fn save(path: &[u8], buffer: &Buffer) -> bool {
 const STDOUT_UNUSED_MARKER: u64 = u64::MAX;
 
 /// 保存の判定行。**書いた量と要求した量を並べる。**
+///
+/// **検査の構成でしか出さない**（[`report_cursor`] と同じ理由）。
+#[cfg(zi_diagnostics)]
 fn report_save(requested: usize, written: i64, ok: bool) {
     let mut out = [0u8; 96];
     let mut at = 0usize;
@@ -638,6 +663,10 @@ fn report_save(requested: usize, written: i64, ok: bool) {
     at += tail.len();
     write_all(STDERR, &out[..at]);
 }
+
+/// 判定行を出さない側（既定のビルド）。
+#[cfg(not(zi_diagnostics))]
+fn report_save(_requested: usize, _written: i64, _ok: bool) {}
 
 /// コマンド行を解釈する（zi-d-2）。**戻り値は「終わってよいか」である。**
 ///

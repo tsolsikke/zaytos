@@ -485,6 +485,20 @@ impl Console {
             EraseScope::All => {
                 self.back.clear_all(self.background);
                 self.dirty.mark_all();
+                // **セルも空へ戻す（zi-e 前の手当て）。** **ピクセルだけ消すと、
+                // 状態と画面が食い違う**——`erase_cells`（`After` / `Before` が
+                // 使う側）は最初から両方を消しており、**ここだけが片方だった。**
+                //
+                // **実測で見つかった。** 画面の字をセルから読み出したところ、
+                // **`ED(2)` の後の行に、消えたはずの起動ログが残っていた**
+                // （ピクセルは消えている）。**セルを読む判定を置くなら、
+                // ここが合っていなければ嘘を読む。**
+                //
+                // **カーソルは動かさない。** `Screen::reset` は左上へ戻すので、
+                // **前後で位置を控えて戻す**——**ANSI の `ED` はカーソルを
+                // 移さない**（この関数の doc。`clear()` との違いそのものである）。
+                self.grid.reset(Self::rgb(self.background));
+                self.grid.set_cursor(column, row);
             }
         }
     }

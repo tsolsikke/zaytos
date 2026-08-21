@@ -157,6 +157,10 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
             "CARGO_FEATURE_ZI_INSERT_DROP_FIRST_TEST",
             "zi_insert_drop_first",
         ),
+        // **破壊ではない（zi-e 前の手当て）。** **`zi` の診断行を出すのは検査の
+        // 構成だけである**——`write` は画面へも届くので、通常の起動で出すと
+        // 全画面のアプリの本文を上書きする（`kernel/userland/zi.rs`）。
+        ("CARGO_FEATURE_ZI_TEST", "zi_diagnostics"),
         (
             "CARGO_FEATURE_ZASH_PROMPT_DROP_COLOR_TEST",
             "zash_prompt_drop_color",
