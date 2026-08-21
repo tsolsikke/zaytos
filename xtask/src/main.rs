@@ -1344,7 +1344,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
+    const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit] [--manual]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
        cargo xtask run --shell-test [--drop-arrows | --drop-esc]\n       cargo xtask run --ansi-test [--sabotage FEATURE]\n       cargo xtask run --zi-test [--sabotage FEATURE]
        cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
        cargo xtask run --boot-log-diff [--update-reference]
@@ -1359,6 +1359,9 @@ fn main() -> Result<()> {
             let gfx_test = rest.iter().any(|a| a == "--gfx-test");
             let kvm = rest.iter().any(|a| a == "--kvm");
             let no_limit = rest.iter().any(|a| a == "--no-limit");
+            // **手で触るための起動（zi-e 前の手当て）。** 上限を外し、
+            // 記録を `cpu_reset` だけに絞る（[`cmd_run`] の doc）。
+            let manual = rest.iter().any(|a| a == "--manual");
             if let Some(index) = rest.iter().position(|a| a == "--lapic-timer-test") {
                 let kind = rest.get(index + 1).with_context(|| {
                     let names: Vec<&str> = LAPIC_TIMER_TESTS.iter().map(|t| t.name).collect();
@@ -1618,7 +1621,7 @@ fn main() -> Result<()> {
                 })?;
                 return cmd_exception_test(kind);
             }
-            cmd_run(panic_test, gui, gfx_test, kvm, no_limit)
+            cmd_run(panic_test, gui, gfx_test, kvm, no_limit || manual, manual)
         }
         Some("check") => {
             let full = args[1..].iter().any(|a| a == "--full");
@@ -1676,9 +1679,66 @@ struct QemuLaunchOptions<'a> {
     /// server モードで待ち受けさせる（screenshot サブコマンド用）。
     monitor_socket: Option<&'a Path>,
     accelerator: Accelerator,
+    /// `-d` に何を渡すか（zi-e 前の手当て）。**既定は `int,cpu_reset` である**
+    /// （`CLAUDE.md` の「QEMU の沈黙の失敗を必ず可視化する」）。
+    debug_events: DebugEvents,
 }
 
-fn cmd_run(panic_test: bool, gui: bool, gfx_test: bool, kvm: bool, no_limit: bool) -> Result<()> {
+/// QEMU の `-d` に渡す種類（zi-e 前の手当て）。
+///
+/// # なぜ選べるようにしたか
+///
+/// **`int` は割り込み1件ごとに CPU の全状態を出す**（実測で 1 件あたり
+/// 約 1.3KiB）。**シェルは `read(0)` を回して待つ**ので、**`int 0x80` が
+/// 毎秒約 39,000 件出る**——**実測で、120 秒の起動で 5.6GiB になった。**
+///
+/// **自動検査では外さない。** あれは落ちた原因を追う唯一の記録である。
+/// **手で触る経路（`--manual`）でだけ `cpu_reset` に絞る**——
+/// **トリプルフォルトの再起動要因は残り、割り込みの列だけが消える。**
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DebugEvents {
+    /// `int,cpu_reset`。自動検査の既定。
+    IntAndCpuReset,
+    /// `cpu_reset` だけ。手で触るときの選択。
+    CpuResetOnly,
+}
+
+impl DebugEvents {
+    fn as_qemu_value(self) -> &'static str {
+        match self {
+            DebugEvents::IntAndCpuReset => "int,cpu_reset",
+            DebugEvents::CpuResetOnly => "cpu_reset",
+        }
+    }
+}
+
+/// `cargo xtask run`。
+///
+/// # `--manual`——運用者が手で触るための起動（zi-e 前の手当て）
+///
+/// **`--gui --manual` が、手で触るときの道である。** 2 つのことをする。
+///
+/// - **時間の上限を外す**（`--no-limit` と同じ）。**120 秒では手で触れない。**
+/// - **`-d` を `cpu_reset` だけに絞る**（[`DebugEvents`]）。**`int` を付けた
+///   ままでは記録が毎秒 48MiB 増える**（実測。シェルが `read(0)` を回して
+///   待つので、`int 0x80` が毎秒約 39,000 件出る）。**上限を外したうえで
+///   `int` を残すと、1 分あたり約 2.9GiB でディスクが埋まる。**
+///
+/// **自動検査の側の時間制限と記録は変えていない。** あちらは fail-fast の
+/// 機構で、落ちた原因を追う唯一の記録である（`CLAUDE.md` の
+/// 「QEMU の沈黙の失敗を必ず可視化する」）。
+///
+/// **失うもの**——**手で触っている間に例外が起きても、割り込みの列は残らない。**
+/// **残るのは `cpu_reset`**（トリプルフォルトの再起動要因）**とシリアルである。**
+/// **原因を追う段になったら `--manual` を外して起こし直すこと。**
+fn cmd_run(
+    panic_test: bool,
+    gui: bool,
+    gfx_test: bool,
+    kvm: bool,
+    no_limit: bool,
+    manual: bool,
+) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
     let bootloader_efi = build_bootloader(&workspace_root, panic_test)?;
@@ -1688,7 +1748,15 @@ fn cmd_run(panic_test: bool, gui: bool, gfx_test: bool, kvm: bool, no_limit: boo
     if panic_test {
         run_panic_test(&workspace_root, &ovmf_vars, &esp_dir)
     } else {
-        run_interactive(&workspace_root, &ovmf_vars, &esp_dir, gui, kvm, no_limit)
+        run_interactive(
+            &workspace_root,
+            &ovmf_vars,
+            &esp_dir,
+            gui,
+            kvm,
+            no_limit,
+            manual,
+        )
     }
 }
 
@@ -1701,8 +1769,25 @@ fn cmd_run(panic_test: bool, gui: bool, gfx_test: bool, kvm: bool, no_limit: boo
 /// 打ち切る。`--no-limit` で解除できる。
 const RUN_TIME_LIMIT: Duration = Duration::from_secs(120);
 
-/// `-d int,cpu_reset` のログが増える概算速度（実測、TCG・100Hz）。
-const DEBUG_LOG_GROWTH_KB_PER_SEC: u64 = 137;
+/// `-d int,cpu_reset` のログが増える速度（実測。TCG。KiB/秒）。
+///
+/// # 測り直した（zi-e 前の手当て）
+///
+/// **以前は 137 だった。** あれは M4-d-2 の実測で、**まだシェルが居らず、
+/// 出ていたのはタイマ割り込みだけだった**（100Hz、1 ティックあたり 20 行強）。
+///
+/// **いまは約 49,000 である**（**370 倍**）。**駆動しているのはシェルである**
+/// ——`read(0)` を回して待つので、**`int 0x80` が毎秒約 39,000 件出て、
+/// 1 件ごとに CPU の全状態（約 1.3KiB）が記録される。**
+///
+/// **実測の内訳**（既定構成、120 秒、`-display none`）——
+/// 記録は 6,021,246,698 バイト（5.6GiB）、事象は 4,657,255 件で、
+/// **`v=80`（`int 0x80`）が 4,645,430 件（99.7%）**、`v=fe`（LAPIC タイマ）が
+/// 11,423 件、`v=20` が 369 件、例外（`v=0d` / `v=0e` / `v=06`）が 19 件である。
+///
+/// **この値は「待つ形」を入れたら変わる。** シェルが眠るようになれば
+/// `int 0x80` は消える。**測り直すこと。**
+const DEBUG_LOG_GROWTH_KB_PER_SEC: u64 = 49_000;
 
 fn run_interactive(
     workspace_root: &Path,
@@ -1711,6 +1796,7 @@ fn run_interactive(
     gui: bool,
     kvm: bool,
     no_limit: bool,
+    manual: bool,
 ) -> Result<()> {
     let debug_log = workspace_root.join("target").join("qemu-debug.log");
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
@@ -1730,14 +1816,35 @@ fn run_interactive(
         } else {
             Accelerator::Tcg
         },
+        debug_events: if manual {
+            DebugEvents::CpuResetOnly
+        } else {
+            DebugEvents::IntAndCpuReset
+        },
     });
-    println!("qemu debug log (-d int,cpu_reset): {}", debug_log.display());
+    let debug_events = if manual {
+        DebugEvents::CpuResetOnly
+    } else {
+        DebugEvents::IntAndCpuReset
+    };
+    println!(
+        "qemu debug log (-d {}): {}",
+        debug_events.as_qemu_value(),
+        debug_log.display()
+    );
     // M4-d-2 以降、カーネルは halt せずタイマで回り続ける。ログが増え続ける
     // ことを知らせておく。
-    println!(
-        "note: the kernel no longer halts (M4-d-2). It keeps ticking, so the debug log grows \
-         at roughly {DEBUG_LOG_GROWTH_KB_PER_SEC} KB/s."
-    );
+    match debug_events {
+        DebugEvents::IntAndCpuReset => println!(
+            "note: the shell polls read(0), so every int 0x80 is logged with a full CPU dump. \
+             The debug log grows at roughly {} MiB/s (measured). Pass --manual to drop `int`.",
+            DEBUG_LOG_GROWTH_KB_PER_SEC / 1024
+        ),
+        DebugEvents::CpuResetOnly => println!(
+            "note: --manual given; `-d` records cpu_reset only. A triple fault still leaves its \
+             reset reason, but the interrupt trace is gone. Drop --manual to get it back."
+        ),
+    }
     if no_limit {
         println!("note: --no-limit given; qemu will run until you stop it (Ctrl-C).");
     } else {
@@ -1785,10 +1892,17 @@ fn run_interactive(
             }
             None => {
                 if Instant::now() >= deadline {
+                    // **概算ではなく実測を出す（zi-e 前の手当て）。**
+                    // **以前は定数から掛け算していたので、実物と 370 倍
+                    // 食い違っていても気づけなかった**（実際そうなっていた。
+                    // 「16MB」と出しながら 5.6GiB 書いていた）。
+                    let grown = fs::metadata(&debug_log).map(|m| m.len()).unwrap_or(0);
                     println!(
-                        "\nreached the {} s limit; stopping qemu. The debug log is about {} MB.",
+                        "\nreached the {} s limit; stopping qemu. The debug log is {} byte(s) \
+                         ({} MiB).",
                         RUN_TIME_LIMIT.as_secs(),
-                        (RUN_TIME_LIMIT.as_secs() * DEBUG_LOG_GROWTH_KB_PER_SEC) / 1024
+                        grown,
+                        grown / (1024 * 1024)
                     );
                     let _ = child.kill();
                     let _ = child.wait();
@@ -1822,6 +1936,7 @@ fn run_panic_test(workspace_root: &Path, ovmf_vars: &Path, esp_dir: &Path) -> Re
         // パニック経路の回帰チェックは例外まわりの挙動を見るものなので、
         // 常に TCG で行う。
         accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
 
     let mut child = Command::new("qemu-system-x86_64")
@@ -1956,6 +2071,7 @@ fn take_screenshot(
         } else {
             Accelerator::Tcg
         },
+        debug_events: DebugEvents::IntAndCpuReset,
     });
 
     let mut child = Command::new("qemu-system-x86_64")
@@ -2245,6 +2361,7 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
         display: DisplayMode::None,
         monitor_socket: Some(&monitor_socket),
         accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
 
     let mut child = Command::new("qemu-system-x86_64")
@@ -3231,6 +3348,7 @@ fn cmd_ansi_test(features: &[&str]) -> Result<()> {
         display: DisplayMode::None,
         monitor_socket: None,
         accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
 
     let mut child = Command::new("qemu-system-x86_64")
@@ -3386,6 +3504,7 @@ fn cmd_boot_with_features(features: &[&str], marker: &str, wanted: &str) -> Resu
         display: DisplayMode::None,
         monitor_socket: None,
         accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
 
     let mut child = Command::new("qemu-system-x86_64")
@@ -3452,6 +3571,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         display: DisplayMode::None,
         monitor_socket: None,
         accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
 
     let mut child = Command::new("qemu-system-x86_64")
@@ -3784,6 +3904,7 @@ fn cmd_pci_test(features: &[&str]) -> Result<()> {
         display: DisplayMode::None,
         monitor_socket: Some(&monitor_socket),
         accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
 
     let mut child = Command::new("qemu-system-x86_64")
@@ -4071,6 +4192,7 @@ fn cmd_virtio_test(features: &[&str]) -> Result<()> {
         display: DisplayMode::None,
         monitor_socket: None,
         accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
 
     let mut child = Command::new("qemu-system-x86_64")
@@ -4218,6 +4340,7 @@ fn cmd_virtio_irq_test(features: &[&str]) -> Result<()> {
         display: DisplayMode::None,
         monitor_socket: None,
         accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
     let mut child = Command::new("qemu-system-x86_64")
         .args(&qemu_args)
@@ -4332,6 +4455,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         display: DisplayMode::None,
         monitor_socket: Some(&monitor_socket),
         accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
 
     let mut child = Command::new("qemu-system-x86_64")
@@ -4762,6 +4886,7 @@ fn run_keyboard_test(features: &[&str]) -> Result<KeyboardAssertions> {
         display: DisplayMode::None,
         monitor_socket: Some(&monitor_socket),
         accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
 
     let mut child = Command::new("qemu-system-x86_64")
@@ -5093,6 +5218,7 @@ fn cmd_lapic_timer_test(kind: &str) -> Result<()> {
         display: DisplayMode::None,
         monitor_socket: None,
         accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
 
     let mut child = Command::new("qemu-system-x86_64")
@@ -5283,6 +5409,7 @@ fn cmd_ap_timer_rate() -> Result<()> {
         display: DisplayMode::None,
         monitor_socket: None,
         accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
     qemu_args.push("-smp".into());
     qemu_args.push("2".into());
@@ -5432,6 +5559,7 @@ fn cmd_kernel_entry_concurrency() -> Result<()> {
         display: DisplayMode::None,
         monitor_socket: None,
         accelerator: Accelerator::Kvm,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
     qemu_args.push("-smp".into());
     qemu_args.push("2".into());
@@ -5580,6 +5708,7 @@ fn run_for_max_entry_depth(workspace_root: &Path, features: &str) -> Result<Opti
         display: DisplayMode::None,
         monitor_socket: None,
         accelerator: Accelerator::Kvm,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
     qemu_args.push("-smp".into());
     qemu_args.push("2".into());
@@ -5807,6 +5936,7 @@ fn cmd_highhalf_test(kind: &str) -> Result<()> {
         display: DisplayMode::None,
         monitor_socket: None,
         accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
 
     // **必ずタイムアウトまで待つ。** 破壊ビルドは「死んで止まる」ので、present
@@ -6118,6 +6248,7 @@ fn capture_boot_log(workspace_root: &Path, smp: Option<u32>, tag: &str) -> Resul
         display: DisplayMode::None,
         monitor_socket: None,
         accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
     if let Some(count) = smp {
         qemu_args.push("-smp".into());
@@ -6316,6 +6447,7 @@ fn cmd_drift_test(minutes: u64, smp: Option<u32>) -> Result<()> {
         display: DisplayMode::None,
         monitor_socket: None,
         accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
     if let Some(count) = smp {
         qemu_args.push("-smp".into());
@@ -6465,6 +6597,7 @@ fn cmd_marker_test(
         display: DisplayMode::None,
         monitor_socket: None,
         accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
     // コア数を指定する構成（現在は ACPI の列挙が `-smp` と一致することの確認だけ）。
     // **既定は指定しない。** `QemuLaunchOptions` へ足さずここで付けるのは、
@@ -6652,6 +6785,7 @@ fn cmd_exception_test(kind: &str) -> Result<()> {
         display: DisplayMode::None,
         monitor_socket: None,
         accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
 
     let expected_serial = format!("[ERROR] exception: vector={} ", test.vector);
@@ -8659,6 +8793,7 @@ fn capture_serial_for_calibration(run: usize) -> Result<String> {
         monitor_socket: None,
         // **既定は TCG である。** KVM での較正結果は測っていない。
         accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
     });
 
     let mut child = Command::new("qemu-system-x86_64")
@@ -10344,7 +10479,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         }
         total += 1;
         run_regression("panic-test", &mut failed, &mut retries, || {
-            cmd_run(true, false, false, false, false)
+            cmd_run(true, false, false, false, false, false)
         });
         // higher-half の破壊確認（B-2a-5）。(a)(b)(c) は QEMU で位置署名 + 定常未到達を
         // 判定、(d) はビルド + トランポリンのバイト不一致を静的に判定。
@@ -11175,7 +11310,7 @@ fn qemu_launch_args(opts: &QemuLaunchOptions) -> Vec<OsString> {
         // ため、`-d int` の記録はほとんど残らない。デバッグは TCG（既定）、
         // 計測は KVM、という使い分けをすること（troubleshooting.md 参照）。
         "-d".into(),
-        "int,cpu_reset".into(),
+        opts.debug_events.as_qemu_value().into(),
         // `-d` の出力先を明示的にファイルへ分離する。指定しない場合 QEMU 自身の
         // stderr に出て、`-serial stdio` のシリアル出力と混ざってしまい、
         // ターミナルでの可読性が大きく落ちる。
@@ -11217,6 +11352,7 @@ mod tests {
             display: DisplayMode::None,
             monitor_socket: None,
             accelerator: Accelerator::Tcg,
+            debug_events: DebugEvents::IntAndCpuReset,
         }
     }
 
@@ -11240,6 +11376,28 @@ mod tests {
             .position(|a| a == "-d")
             .expect("-d flag missing");
         assert_eq!(joined[d_pos + 1], "int,cpu_reset");
+    }
+
+    /// **手で触る経路だけが `int` を落とす（zi-e 前の手当て）。**
+    ///
+    /// **`-no-reboot` と `-no-shutdown` と `cpu_reset` は落ちない**——
+    /// **沈黙の失敗を可視化する部分は残る**（`CLAUDE.md`）。
+    /// **落ちるのは割り込みの列だけである。**
+    #[test]
+    fn manual_runs_record_cpu_reset_but_not_every_interrupt() {
+        let debug_log = PathBuf::from("/dummy/qemu-debug.log");
+        let mut opts = base_options(&SerialSink::Stdio, &debug_log);
+        opts.debug_events = DebugEvents::CpuResetOnly;
+        let joined = joined_args(&qemu_launch_args(&opts));
+
+        assert!(joined.iter().any(|a| a == "-no-reboot"));
+        assert!(joined.iter().any(|a| a == "-no-shutdown"));
+
+        let d_pos = joined
+            .iter()
+            .position(|a| a == "-d")
+            .expect("-d flag missing");
+        assert_eq!(joined[d_pos + 1], "cpu_reset");
     }
 
     /// `info blockstats` の出力から `disk0` の行だけが拾えること（S13-c）。
