@@ -2957,7 +2957,7 @@ const FS_CREATE_SABOTAGES: &[(&str, &[&str])] = &[
 /// **自分で inode の位置を算術して読まない**——**書く側と同じ算術を判定でも書くと、
 /// 取り違えが両側で相殺する。**
 fn debugfs_extra_isize(image: &Path, path: &str) -> Result<Option<u64>> {
-    let output = Command::new("debugfs")
+    let output = external_tool("debugfs")
         .env("LC_ALL", "C")
         .arg("-R")
         .arg(format!("stat {path}"))
@@ -2976,7 +2976,7 @@ fn debugfs_extra_isize(image: &Path, path: &str) -> Result<Option<u64>> {
 /// **`dumpe2fs` の `Desired extra isize` である**（`s_want_extra_isize`。実測で確かめた）。
 /// **32 という数を判定に書かないためにここから取る**——**像が変われば動く値である。**
 fn dumpe2fs_desired_extra_isize(image: &Path) -> Result<Option<u64>> {
-    let output = Command::new("dumpe2fs")
+    let output = external_tool("dumpe2fs")
         .env("LC_ALL", "C")
         .arg("-h")
         .arg(image)
@@ -3011,7 +3011,7 @@ fn dumpe2fs_desired_extra_isize(image: &Path) -> Result<Option<u64>> {
 /// **S12-e の判定 C は、この区別の上に載っている**——
 /// **消えたことを主張するので、「無い」が返ることそのものが判定である。**
 fn debugfs_read(image: &Path, path: &str) -> Result<Option<Vec<u8>>> {
-    let output = Command::new("debugfs")
+    let output = external_tool("debugfs")
         .env("LC_ALL", "C")
         .arg("-R")
         .arg(format!("cat {path}"))
@@ -3056,7 +3056,7 @@ struct FreeCounts {
 /// **`e2fsck` と同じ `e2fsprogs` にある**ので、要る道具は増えない（実測で確かめた）。
 /// `LC_ALL=C` は出力を言語設定に依らせないため（`run_e2fsck` と同じ理由）。
 fn dumpe2fs_free_counts(image: &Path) -> Result<FreeCounts> {
-    let output = Command::new("dumpe2fs")
+    let output = external_tool("dumpe2fs")
         .env("LC_ALL", "C")
         .arg(image)
         .output()
@@ -7601,6 +7601,44 @@ fn find_unapproved_interrupt_control(
 /// **`cli`/`sti` の走査と同じ形にしてある**（同じ `function_name_declared_on` で
 /// 所属名を追い、コメント行を飛ばし、追跡済みと未追跡の両方を見る）。
 /// **`asm!` の塊を追う必要はない**——シリアルは Rust の式でしか触らない。
+/// 出力を解析する外の道具を、直に `Command::new` している箇所を探す
+/// （e-4 の後の手当て）。
+///
+/// # 何を見ているか
+///
+/// **`Command::new("<道具>")` と書いた行である**（[`PARSED_EXTERNAL_TOOLS`]）。
+/// **`external_tool` を通せば言語が固定される**ので、**直に書いた箇所だけが
+/// 環境の言語で答えを受ける。**
+///
+/// # 何を見ていないか
+///
+/// **道具の一覧に無いものは見ない。** **新しく解析する道具を足したら、
+/// 一覧へも足すこと**——**この検査は「一覧に載っているものが寄せてあるか」
+/// しか言わない**（列挙で守る検査の限界。`verification-coverage.md`）。
+///
+/// **`external_tool` 自身は数えない**（あそこが唯一の `Command::new` である）。
+fn find_direct_external_tool_calls(workspace_root: &Path) -> Result<Vec<String>> {
+    let mut findings = Vec::new();
+    for relative in ["xtask/src/main.rs", "kernel/build.rs"] {
+        let path = workspace_root.join(relative);
+        let text = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        for (number, line) in text.lines().enumerate() {
+            for tool in PARSED_EXTERNAL_TOOLS {
+                let direct = format!("Command::new(\"{tool}\")");
+                if line.contains(&direct) {
+                    findings.push(format!(
+                        "{relative}:{}: {tool} is called directly; go through external_tool() so \
+                         LC_ALL=C is set",
+                        number + 1
+                    ));
+                }
+            }
+        }
+    }
+    Ok(findings)
+}
+
 fn find_unapproved_direct_serial_ports(
     workspace_root: &Path,
     approved_occurrences: &mut usize,
@@ -9128,7 +9166,7 @@ const APIC_TESTS: &[CriticalTest] = &[
 /// `smp-ap-test tlb-generation` と `tlb-shootdown` が示す。**
 fn check_structural_guard_symbols_present(workspace_root: &Path) -> Result<String> {
     let kernel_elf = build_kernel(workspace_root, false)?;
-    let output = Command::new("nm")
+    let output = external_tool("nm")
         .arg(&kernel_elf.elf)
         .output()
         .context("failed to invoke nm (is binutils installed?)")?;
@@ -9277,7 +9315,7 @@ fn e2fsck_complaints(stdout: &str) -> Vec<String> {
 /// **`mke2fs` の版は像の行に出ているが、こちらは別に出す**——
 /// **同じパッケージでも、ホストによっては違いうる。**
 fn e2fsck_version() -> String {
-    Command::new("e2fsck")
+    external_tool("e2fsck")
         .env("LC_ALL", "C")
         .arg("-V")
         .output()
@@ -9295,7 +9333,7 @@ fn e2fsck_version() -> String {
 /// **落ちない。** 不満が在ることそのものが判定の材料なので、
 /// **呼び出し側が数える**（[`e2fsck_complaints`]）。
 fn e2fsck_complaint_lines(image: &Path) -> Result<Vec<String>> {
-    let output = Command::new("e2fsck")
+    let output = external_tool("e2fsck")
         .env("LC_ALL", "C")
         .arg("-fn")
         .arg(image)
@@ -9319,7 +9357,7 @@ fn run_e2fsck(image: &Path) -> Result<String> {
     // `-f` は clean でも全パスを走らせる（`s_state` を信用しない）。`-n` は
     // 何も直さず、直す必要があれば失敗で返す。**像を書き換えさせない。**
     // `LC_ALL=C` は要約行を言語設定に依らせないため（**この行を報告に載せる**）。
-    let output = Command::new("e2fsck")
+    let output = external_tool("e2fsck")
         .env("LC_ALL", "C")
         .arg("-fn")
         .arg(image)
@@ -10332,6 +10370,27 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
     }
 
     total += 1;
+    println!("=== xtask check: parsed external tools are called with a fixed locale");
+    let direct_tool_calls = find_direct_external_tool_calls(&workspace_root)?;
+    if direct_tool_calls.is_empty() {
+        println!(
+            "--- external tool locale: OK ({} tool(s) go through external_tool(): {})",
+            PARSED_EXTERNAL_TOOLS.len(),
+            PARSED_EXTERNAL_TOOLS.join(", ")
+        );
+    } else {
+        for finding in &direct_tool_calls {
+            println!("    {finding}");
+        }
+        println!(
+            "--- external tool locale: FAILED ({} direct call(s); the output is translated by \
+             the environment, and a plausible number from the wrong section reads as success)",
+            direct_tool_calls.len()
+        );
+        failed.push("external tool locale".to_string());
+    }
+
+    total += 1;
     println!("=== xtask check: private-by-design modules keep their internals private");
     let leaks = find_boundary_visibility_leaks(&workspace_root)?;
     if leaks.is_empty() {
@@ -10780,8 +10839,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 22,
-    full: 211,
+    base: 23,
+    full: 212,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
@@ -11408,6 +11467,30 @@ fn stage_esp(
     })?;
 
     Ok(esp_dir)
+}
+
+/// 出力を解析する外の道具の一覧（e-4 の後の手当て）。
+///
+/// **ここに載っているものは [`external_tool`] を通して呼ぶこと。**
+/// **`cargo xtask check` の静的検査が、直に `Command::new` していないかを見る。**
+const PARSED_EXTERNAL_TOOLS: &[&str] = &["e2fsck", "dumpe2fs", "debugfs", "mke2fs", "nm"];
+
+/// 出力を解析する外の道具を呼ぶ（e-4 の後の手当て）。**言語を固定する。**
+///
+/// # なぜ 1 箇所へ寄せたのか
+///
+/// **外の道具の出力は環境の言語で訳される。** 実測で踏んだ——`dumpe2fs` の
+/// 群の見出しが `グループ 0:` で出て、**「群の節に入ってから読む」が成り立たず、
+/// superblock の「空きの数」419 を最初の空きブロック（正しくは 93）として
+/// 拾った**（`docs/troubleshooting.md`）。**どちらも「もっともらしい数」なので、
+/// 数だけを見ていると黙って通る。**
+///
+/// **付け忘れは静的検査が見る**（[`PARSED_EXTERNAL_TOOLS`]）。
+fn external_tool(name: &str) -> Command {
+    let mut command = Command::new(name);
+    // **英語で出させる。** **解析しているのは見出しの語と数の並びである。**
+    command.env("LC_ALL", "C");
+    command
 }
 
 fn workspace_root() -> Result<PathBuf> {

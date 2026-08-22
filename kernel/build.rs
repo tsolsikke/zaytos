@@ -415,7 +415,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     let version = mke2fs_version();
 
     // UUID とハッシュシードを固定する。**残る差（時刻）は下で潰す。**
-    let status = std::process::Command::new("mke2fs")
+    let status = external_tool("mke2fs")
         .args([
             "-q",
             "-t",
@@ -483,6 +483,17 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     .expect("failed to write fsimage_info.rs");
 }
 
+/// 出力を解析する外の道具を呼ぶ（e-4 の後の手当て）。**言語を固定する。**
+///
+/// **`xtask` の `external_tool` と同じ形である**（あちらの doc に理由がある）。
+/// **2 つの crate にまたがるので、入口は 2 つある**——**寄せられるのは
+/// crate の中までで、`cargo xtask check` の静的検査が両方を見る。**
+fn external_tool(name: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(name);
+    command.env("LC_ALL", "C");
+    command
+}
+
 /// `debugfs -R "stat <path>"` から拾う番号（e-4 の手当て）。
 struct ImageStat {
     inode: Option<usize>,
@@ -506,10 +517,7 @@ struct ImageStat {
 /// （直す場所を 1 つにする）。**道具は増えていない**——`debugfs` は
 /// `mke2fs` と同じ e2fsprogs にある。
 fn stat_of(image: &str, path: &str) -> ImageStat {
-    let output = std::process::Command::new("debugfs")
-        // **英語で出させる（e-4 の手当て）。** **道具は環境の言語で訳す**
-        // ——実測で、`dumpe2fs` の見出しが日本語で出て解析が外れた。
-        .env("LC_ALL", "C")
+    let output = external_tool("debugfs")
         .args(["-R", &format!("stat {path}"), image])
         .output()
         .unwrap_or_else(|e| {
@@ -548,9 +556,7 @@ fn stat_of(image: &str, path: &str) -> ImageStat {
 /// **使用しているブロックの上端 + 1 である。** 壊した像の検算は、
 /// **ここまでを写せば像が読み切れる。**
 fn first_free_block(image: &str) -> usize {
-    let output = std::process::Command::new("dumpe2fs")
-        // **英語で出させる**（[`stat_of`] と同じ理由）。
-        .env("LC_ALL", "C")
+    let output = external_tool("dumpe2fs")
         .arg(image)
         .output()
         .unwrap_or_else(|e| panic!("failed to run dumpe2fs: {e} (e2fsprogs)"));
@@ -582,7 +588,7 @@ fn first_free_block(image: &str) -> usize {
 fn mke2fs_version() -> String {
     // `mke2fs -V` は版をコード 1 で標準エラーへ出す。**成否は見ない**——
     // 実際に建てるときの失敗が、不在の診断を出す側である。
-    let output = std::process::Command::new("mke2fs").arg("-V").output();
+    let output = external_tool("mke2fs").arg("-V").output();
     match output {
         Ok(o) => {
             let text = String::from_utf8_lossy(&o.stderr);
