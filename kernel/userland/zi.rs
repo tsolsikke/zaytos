@@ -42,7 +42,7 @@
 mod userlib;
 
 use userlib::{
-    close, exit, length_of, open_read_only, open_write_truncate, read, write_all, STDERR, STDOUT,
+    close, exit, length_of, open_read_only, open_write_create, read, write_all, STDERR, STDOUT,
 };
 
 /// パスの最大長（NUL を含む）。**カーネルの `PATH_MAX` と同じ。**
@@ -322,6 +322,11 @@ struct Status<'a> {
     /// コマンド行に出す語（`:` を除く）。**コマンド中でなければ空である。**
     command: &'a [u8],
     in_command: bool,
+    /// コマンド行に出す報せ（e-5）。**コマンド中でないときに出る。**
+    ///
+    /// **使う人へのものである**——断った理由、知らないコマンド、
+    /// 行が一杯であること。**空なら何も出さない。**
+    message: &'a [u8],
 }
 
 /// 状態行を描く（ES-d。e-4 で下から 2 行目へ移し、中身を増やした）。
@@ -412,13 +417,21 @@ fn draw_status(view: &View, status: &Status) {
 ///
 /// # コマンド中でなければ空にする
 ///
-/// **消すだけである。** **メッセージやエラーを出す口はここだが、
-/// いまは出す者がいない**——`:q` を拒む断り書きは `STDERR` へ出しており、
-/// **その付け替えは利用者（読む人）が要ると言ってから行う。**
+/// # 報せの出し先である（e-5）
+///
+/// **`:q` を拒んだ理由、知らないコマンド、行が一杯であること**を、ここへ出す。
+/// **`STDERR` へ出していたものを移した**——**`zi` は代替画面に居るので、
+/// `STDERR` は「使う人が見る画面」ではない**（診断は検査の構成でしか出ない）。
+/// **e-4 で作った口に、利用者がここで来た。**
 fn draw_command_line(view: &View, status: &Status) {
     move_cursor(view.command_row(), 0);
     write_all(STDOUT, b"\x1b[2K");
     if !status.in_command {
+        // **報せを出す（e-5）。** **コマンド中はそちらが優先である**
+        // ——打っている途中を消さない。
+        if !status.message.is_empty() {
+            write_all(STDOUT, status.message);
+        }
         return;
     }
     let mut out = [0u8; COMMAND_MAX + 1];
@@ -574,12 +587,18 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     path[length] = 0;
 
     // === 読み込み。**読み切って閉じる**（zi-c の契約。モジュール doc） ===
+    //
+    // **無いパスは「新しいファイル」である（e-5）。** **空のバッファで始め、
+    // `:w` が `O_CREAT` で作る**（vi と同じ形）。**開けない理由が「無い」以外
+    // なら、従来どおり断って終わる**——**権限も何も無いこの体制では、
+    // ここへ来るのは像の側の失敗である。**
     let fd = open_read_only(&path[..length + 1]);
-    if fd < 0 {
+    let new_file = fd == userlib::MINUS_ENOENT;
+    if fd < 0 && !new_file {
         write_all(STDERR, OPEN_FAILED);
         exit(1);
     }
-    let fd = fd as u64;
+    let fd = if new_file { 0 } else { fd as u64 };
 
     // SAFETY: このプロセスは単一の実行文脈で、`CONTENTS` を触るのはここだけである。
     let contents: &mut [u8; MAX_LINES * MAX_LINE_LEN] =
@@ -587,7 +606,8 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     let mut total = 0usize;
     let mut chunk = [0u8; CHUNK];
     let mut overflowed = false;
-    loop {
+    // **新しいファイルは読まない（e-5）。** **fd を開いていない。**
+    while !new_file {
         let got = read(fd, &mut chunk);
         if got < 0 {
             close(fd);
@@ -605,7 +625,10 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
         contents[total..total + got].copy_from_slice(&chunk[..got]);
         total += got;
     }
-    close(fd);
+    // **新しいファイルでは開いていないので閉じない（e-5）。**
+    if !new_file {
+        close(fd);
+    }
 
     // SAFETY: 上と同じ。`EDITOR` を触るのはこの 1 本だけである。
     let buffer: &mut Buffer = unsafe { &mut *core::ptr::addr_of_mut!(EDITOR) };
@@ -643,6 +666,9 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     let mut command = [0u8; COMMAND_MAX];
     let mut command_len = 0usize;
     let mut dirty = false;
+    // **コマンド行に出す報せ（e-5）。** **次の打鍵まで残す**——vi と同じで、
+    // **出した瞬間に消えると読めない。**
+    let mut message: &[u8] = b"";
     // **画面の形を訊く（e-4）。** **0 なら既定へ落ちる**
     // （`userlib::window_size_or_default`。**その形がここで初めて本番で効く**）。
     let view = View {
@@ -660,6 +686,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             dirty,
             command: &command[..command_len],
             in_command: false,
+            message,
         },
     );
     report_cursor(buffer, row, col, b"start");
@@ -683,6 +710,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                     dirty,
                     command: &command[..command_len],
                     in_command: mode == Mode::Command,
+                    message,
                 },
             );
             shown_mode = mode;
@@ -781,7 +809,13 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
         if mode == Mode::Command {
             match byte {
                 b'\n' => {
-                    let outcome = run_command(&command[..command_len], &path[..length + 1], buffer, dirty);
+                    let (outcome, said) = run_command(
+                        &command[..command_len],
+                        &path[..length + 1],
+                        buffer,
+                        dirty,
+                    );
+                    message = said;
                     command_len = 0;
                     mode = Mode::Normal;
                     match outcome {
@@ -807,6 +841,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                             dirty,
                             command: &command[..command_len],
                             in_command: false,
+                            message,
                         },
                     );
                     report_cursor(buffer, row, col, b"command");
@@ -841,6 +876,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                                 dirty,
                                 command: &command[..command_len],
                                 in_command: true,
+                                message,
                             },
                         );
                     }
@@ -884,7 +920,9 @@ fn save(path: &[u8], buffer: &Buffer) -> bool {
         at += 1;
     }
 
-    let fd = open_write_truncate(path);
+    // **無ければ作る（e-5。`O_CREAT`）。** **在れば長さ 0 へ切る**——
+    // **`:w` は全置換なので、どちらの道でも同じ状態から書き始める。**
+    let fd = open_write_create(path);
     if fd < 0 {
         write_all(STDERR, b"zi: cannot open for writing\n");
         return false;
@@ -1029,6 +1067,8 @@ fn finish_pending_escape(
             dirty,
             command: &[],
             in_command: false,
+            // **モードを戻すだけなので、報せは持たない。**
+            message: &[],
         },
     );
     *shown_mode = *mode;
@@ -1039,34 +1079,32 @@ fn finish_pending_escape(
 ///
 /// **`:q` は変更があれば拒む。** `:q!` は入れない——**「変更を捨てる」の
 /// 意思表示が要るが、最小には無くてよい**（拒まれたら `:wq` を使う）。
-fn run_command(command: &[u8], path: &[u8], buffer: &Buffer, dirty: bool) -> Command {
+fn run_command(command: &[u8], path: &[u8], buffer: &Buffer, dirty: bool) -> (Command, &'static [u8]) {
     match command {
         b"w" => {
             if save(path, buffer) {
-                Command::Saved
+                (Command::Saved, b"written")
             } else {
-                Command::Failed
+                (Command::Failed, b"")
             }
         }
         b"q" => {
             if dirty {
-                write_all(STDERR, b"zi: unsaved changes; use :wq\n");
-                Command::Refused
+                // **報せはコマンド行へ出す（e-5）。** **`STDERR` は
+                // 「使う人が見る画面」ではない**——`zi` は代替画面に居る。
+                (Command::Refused, b"unsaved changes; use :wq")
             } else {
-                Command::Quit
+                (Command::Quit, b"")
             }
         }
         b"wq" => {
             if save(path, buffer) {
-                Command::Quit
+                (Command::Quit, b"")
             } else {
-                Command::Failed
+                (Command::Failed, b"")
             }
         }
-        _ => {
-            write_all(STDERR, b"zi: unknown command\n");
-            Command::Refused
-        }
+        _ => (Command::Refused, b"unknown command"),
     }
 }
 
@@ -1154,6 +1192,7 @@ fn handle_byte(
                                 dirty: true,
                                 command: &[],
                                 in_command: false,
+                                message: &[],
                             },
                         );
                         report_cursor(buffer, *row, *col, b"delete");
@@ -1203,6 +1242,7 @@ fn handle_byte(
                         dirty: true,
                         command: &[],
                         in_command: false,
+                        message: &[],
                     },
                 );
                 report_cursor(buffer, *row, *col, b"typed");

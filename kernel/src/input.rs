@@ -533,7 +533,14 @@ pub(crate) mod script {
     ///
     /// **読み戻しはシェルの文脈で行う**——`zi` が書いた内容と `cat` の出力の
     /// 一致を、ホスト側が突き合わせる。**期待値をホストが持たない形である。**
-    const SCRIPT: &[u8] = b"\x01\x06/bin/zi /data/lines\n\
+    const SCRIPT: &[u8] = b"\x01\x06/bin/ls /data\n\
+        /bin/zi /data/fresh\n\
+        iNEW\x1b\x04\
+        :q\n\x0b\
+        :wq\n\
+        /bin/ls /data\n\
+        /bin/cat /data/fresh\n\
+        /bin/zi /data/lines\n\
         \x1b[B\x1b[B\x1b[A\
         jjkk\
         \x1b[C\x1b[D\
@@ -565,6 +572,12 @@ pub(crate) mod script {
     const OBSERVE_AFTER_ALT: u8 = 0x05;
     /// 観測点（e-4）。**コマンド行（最下行）に打っている途中が出ているか。**
     const OBSERVE_COMMAND_LINE: u8 = 0x07;
+    /// 観測点（e-5）。**コマンド行に報せ（断った理由）が出ているか。**
+    ///
+    /// **`0x08` は使わない**——**Backspace がそのバイトで届く**
+    /// （`bytes_for_event`）。**台本の中でしか使わないので衝突はしないが、
+    /// 読む人が入力と取り違える。**
+    const OBSERVE_MESSAGE: u8 = 0x0b;
     /// 休み（e-2）。**その `read` は何も返さない**（`-EAGAIN` になる）。
     ///
     /// # 何のために在るのか
@@ -597,6 +610,7 @@ pub(crate) mod script {
             OBSERVE_BEFORE_ALT => Some(crate::console::probe::Observation::BeforeAlternate),
             OBSERVE_AFTER_ALT => Some(crate::console::probe::Observation::AfterAlternate),
             OBSERVE_COMMAND_LINE => Some(crate::console::probe::Observation::CommandLine),
+            OBSERVE_MESSAGE => Some(crate::console::probe::Observation::Message),
             _ => None,
         }
     }

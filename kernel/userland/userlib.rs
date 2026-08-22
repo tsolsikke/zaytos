@@ -56,6 +56,12 @@ pub const O_WRONLY: u64 = 1;
 /// 開くと同時に長さ 0 へ切る（`O_TRUNC`。ADR-0037）。
 pub const O_TRUNC: u64 = 0o1000;
 
+/// 無ければ作る（`O_CREAT`。e-5。ADR-0037 の Addendum）。
+pub const O_CREAT: u64 = 0o100;
+
+/// `-ENOENT`（そのパスは無い）。**新規作成の判別に使う。**
+pub const MINUS_ENOENT: i64 = -2;
+
 /// 標準出力の fd。
 pub const STDOUT: u64 = 1;
 /// 標準エラー出力の fd。
@@ -234,6 +240,23 @@ pub fn open_read_only(path: &[u8]) -> i64 {
 pub fn open_write_truncate(path: &[u8]) -> i64 {
     // SAFETY: `path` は NUL 終端のバイト列を指す。
     unsafe { syscall3(SYS_OPEN, path.as_ptr() as u64, O_WRONLY | O_TRUNC, 0) }
+}
+
+/// 無ければ作り、書き込みで開き、長さ 0 へ切る
+/// （`O_WRONLY|O_CREAT|O_TRUNC`。e-5。ADR-0037 の Addendum）。
+///
+/// **`O_CREAT` 単独は受理されない**——**位置書きの部品が無いので、
+/// 作った後にできるのは全置換だけである。**
+pub fn open_write_create(path: &[u8]) -> i64 {
+    // SAFETY: `path` は NUL 終端のバイト列を指す。
+    unsafe {
+        syscall3(
+            SYS_OPEN,
+            path.as_ptr() as u64,
+            O_WRONLY | O_CREAT | O_TRUNC,
+            0,
+        )
+    }
 }
 
 /// `close(fd)`。

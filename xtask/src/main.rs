@@ -3795,6 +3795,46 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         .as_deref()
         .is_some_and(|line| line.contains("\":w\""));
 
+    // **報せがコマンド行に出ていること（e-5）。**
+    //
+    // **台本は変更を持ったまま `:q` を打つ**ので、`zi` は断る。
+    // **断った理由が最下行に出ていることを、画面の実物で見る。**
+    // **`STDERR` へ出していたものを移した**——**`zi` は代替画面に居るので、
+    // あちらは「使う人が見る画面」ではない。**
+    let message_line = serial
+        .lines()
+        .find_map(|line| line.split("screen-message: ").nth(1))
+        .map(|rest| rest.trim().trim_end_matches('\r').to_string());
+    let message_shown = message_line
+        .as_deref()
+        .is_some_and(|line| line.contains("unsaved changes"));
+
+    // **新しいファイルを作れること（e-5。`O_CREAT`）。**
+    //
+    // **`ls` を前後で撮り、後にだけ在ることを見る**——**源は `zi` ではない**
+    // （`ls` はカーネルの `getdents64` を通って像を読む）。
+    // **`cat` の読み戻しは、`zi` が書いた中身が像に入ったことを見る。**
+    // **`ls /data` は 1 行に 1 つ出す**ので、**行がちょうど名前と等しいか**を見る
+    // （`zi` の状態行にも `/data/fresh` が出るが、あちらは 1 行の一部である）。
+    let plain = strip_ansi(&serial);
+    // **プロンプトを目印にしない**——**観測の出力がプロンプトと反響の間へ
+    // 割り込むことがある**（1 回目がそうなる。`kernel/src/console/probe.rs`）。
+    let mut listings = plain.split("/bin/ls /data");
+    let _boot = listings.next();
+    let after_first = listings.next().unwrap_or("");
+    let after_second = listings.next().unwrap_or("");
+    // **1 回目の一覧は、`zi` を起こす手前までである。**
+    let first_listing = after_first.split("/bin/zi").next().unwrap_or("");
+    let lists_fresh = |segment: &str| {
+        segment
+            .lines()
+            .any(|line| line.trim_end_matches('\r') == "fresh")
+    };
+    let created_file_appeared = !lists_fresh(first_listing) && lists_fresh(after_second);
+    let fresh_content = serial
+        .lines()
+        .any(|line| line.trim_end_matches('\r') == "NEW");
+
     // **`a` は `i` と違う桁から挿入する（e-4）。**
     //
     // **台本は `i`（そのまま）と `a`（1 つ右）を両方通す。** `zi` は
@@ -3867,6 +3907,14 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
          ({command_line:?})"
     );
     println!(
+        "{context}: the refusal is shown on the command line = {message_shown} ({message_line:?})"
+    );
+    println!(
+        "{context}: a new file was created and read back = {} \
+         (it appeared in ls = {created_file_appeared}, cat printed what zi wrote = {fresh_content})",
+        created_file_appeared && fresh_content
+    );
+    println!(
         "{context}: a starts one column right of i = {append_differs_from_insert} \
          (i kept the column = {insert_kept_the_column}, a moved right = {append_moved_right})"
     );
@@ -3908,6 +3956,9 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && screen_came_back
         && status_at_bottom
         && command_line_echoes
+        && message_shown
+        && created_file_appeared
+        && fresh_content
         && append_differs_from_insert
     {
         println!("{context}: PASS");
@@ -10003,18 +10054,18 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             }
         }
 
-        // **`zi` の破壊 11 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
+        // **`zi` の破壊 12 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
         // 書かない、挿入が 1 字落とす（どちらも zi-d-2）、プロンプトの色を
         // 送らない、状態行がモードに追随しない（どちらも ES-d）、
         // `ioctl(TIOCGWINSZ)` が行と桁を入れ替える（e-1）、
         // `-EAGAIN` で Esc を確定しない（e-2）、代替画面から戻るときに
         // 描き直さない（e-3）、状態行を本文の下へ置く / コマンド行を描き直さない /
-        // `a` を `i` と同じにする（どれも e-4）。
+        // `a` を `i` と同じにする（どれも e-4）、`O_CREAT` を受けても作らない（e-5）。
         //
         // **落とす判定はそれぞれ違う**——順に、矢印の札の推移 / 往復 /
         // 挿入の本数 / プロンプトの色 / 状態行の札の変化 / 大きさの突き合わせ /
         // 札の並び（ノーマル・インサート・ノーマル）/ 戻った画面の実物 /
-        // 状態行の行番号 / 最下行の字 / `a` の桁である。
+        // 状態行の行番号 / 最下行の字 / `a` の桁 / 新しいファイルの有無である。
         // **`:w` の量の判定はどれでも通る**（要求 0 に対して 0 なので）。
         //
         // **3 つは長い間「別の理由で」落ちていた**——破壊ビルドの像が
@@ -10032,6 +10083,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "zi-status-below-text-test",
             "zi-command-line-silent-test",
             "zi-append-like-insert-test",
+            "open-ignore-create-test",
         ] {
             total += 1;
             println!("=== xtask check: the zi test catches {feature}");
@@ -10840,7 +10892,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 23,
-    full: 212,
+    full: 213,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

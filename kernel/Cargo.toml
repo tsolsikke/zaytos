@@ -122,6 +122,9 @@ zi-command-line-silent-test = []
 # 破壊（e-4）: `a` を `i` と同じ桁から挿入させる。往復も本数も変わらず、
 # 「a は i より1つ右から始まる」判定だけが落ちる。
 zi-append-like-insert-test = []
+# 破壊（e-5）: O_CREAT を受けても作らず、-ENOENT を返す。開く側から見ると
+# 受理していないのと同じで、新しいファイルが作れることの判定だけが落ちる。
+open-ignore-create-test = []
 # 破壊（zi-c）: 書きで開いた fd への write が複製へ足さない。検証も戻り値も
 # 正しく、書いたつもりが複製に届いていない——読み戻しの検算（58 番）が捕まえる。
 write-file-skip-append-test = []

@@ -9159,6 +9159,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "zi の a が i と同じ桁から挿入する",
     ),
     (
+        "open-ignore-create-test",
+        cfg!(feature = "open-ignore-create-test"),
+        "O_CREAT を受けても作らない",
+    ),
+    (
         "write-file-skip-append-test",
         cfg!(feature = "write-file-skip-append-test"),
         "書きで開いた fd への write が複製へ足さない",

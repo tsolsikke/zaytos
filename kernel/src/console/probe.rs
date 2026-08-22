@@ -36,6 +36,12 @@ pub(crate) enum Observation {
     AfterAlternate,
     /// コマンド行（最下行。e-4）。**打っている途中が出ているか。**
     CommandLine,
+    /// コマンド行（最下行。e-5）。**報せ（断った理由）が出ているか。**
+    ///
+    /// **読むものは [`Observation::CommandLine`] と同じである**——
+    /// **分けてあるのは、判定行の名前を分けて、どちらの主張かを
+    /// ホスト側が見分けるためである。**
+    Message,
 }
 
 /// 代替画面へ入る前に控えた画面の目印（e-3）。
@@ -153,7 +159,8 @@ pub(crate) fn observe(kind: Observation) {
         Observation::Status => observe_status(&mut serial, console),
         Observation::BeforeAlternate => observe_before_alternate(&mut serial, console),
         Observation::AfterAlternate => observe_after_alternate(&mut serial, console),
-        Observation::CommandLine => observe_command_line(&mut serial, console),
+        Observation::CommandLine => observe_command_line(&mut serial, console, "screen-command"),
+        Observation::Message => observe_command_line(&mut serial, console, "screen-message"),
     }
 }
 
@@ -413,10 +420,14 @@ fn observe_after_alternate(serial: &mut SerialPort, console: &mut crate::console
 ///
 /// **判定するのはホスト側である**（`xtask`）。ここは画面から読んだ字を
 /// 出すだけで、**期待値を持たない。**
-fn observe_command_line(serial: &mut SerialPort, console: &mut crate::console::Console) {
+fn observe_command_line(
+    serial: &mut SerialPort,
+    console: &mut crate::console::Console,
+    marker: &str,
+) {
     let (columns, rows) = console.size();
     let row = rows - 1;
-    let mut line = [0u8; 24];
+    let mut line = [0u8; 48];
     let mut length = 0usize;
     for column in 0..columns.min(line.len() as u32) {
         let c = console.cell_char(column, row).unwrap_or(' ');
@@ -428,7 +439,7 @@ fn observe_command_line(serial: &mut SerialPort, console: &mut crate::console::C
     }
     let _ = writeln!(
         serial,
-        "screen-command: the last row (row {row}) says {:?}",
+        "{marker}: the last row (row {row}) says {:?}",
         core::str::from_utf8(&line[..length]).unwrap_or("?")
     );
 }

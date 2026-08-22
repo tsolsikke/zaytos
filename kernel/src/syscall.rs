@@ -98,6 +98,20 @@ pub const EAGAIN: i64 = 11;
 /// **知らない要求**。**Linux も同じ値を両方に使う。**
 pub const ENOTTY: i64 = 25;
 
+/// **場所が無い**（Linux の `ENOSPC` = 28。実測。
+/// `/usr/include/asm-generic/errno-base.h`）。
+///
+/// **e-5 で入った**——**`O_CREAT` は像の空きを使う。** 空き inode が尽きた、
+/// 空きブロックが尽きた、ディレクトリに隙間が無い、のどれでもこれである。
+pub const ENOSPC: i64 = 28;
+
+/// **その名前は既に在る**（Linux の `EEXIST` = 17。実測）。
+///
+/// **e-5 で入った。** **`O_CREAT` の経路は「無いとき」しか通らない**ので、
+/// **ここへ来るのは像の側が食い違っているときだけである**（引けなかったのに
+/// 作ろうとしたら在った）。
+pub const EEXIST: i64 = 17;
+
 /// `-EACCES`（許されない）の errno（S11-5）。
 ///
 /// **[`SYS_SPAWN`] が通常ファイルでないものを渡されたときに返す。**
@@ -351,6 +365,9 @@ pub const O_WRONLY: u64 = 0o1;
 
 /// 開くと同時に長さ 0 へ切る（Linux の `O_TRUNC`）。zi-c で受理に加わった。
 pub const O_TRUNC: u64 = 0o1000;
+
+/// 無ければ作る（Linux の `O_CREAT`）。e-5 で受理に加わった（ADR-0037 の Addendum）。
+pub const O_CREAT: u64 = 0o100;
 
 /// 書き込みを伴う `open` のフラグ（`O_CREAT` / `O_TRUNC` / `O_APPEND`）。
 ///
@@ -1297,12 +1314,92 @@ unsafe fn sys_read(
 /// # Safety
 ///
 /// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+/// `O_CREAT` の本体（e-5。ADR-0037 の Addendum）。
+///
+/// # 親と名前へ割る
+///
+/// **最後の `/` で割る。** `/data/fresh` なら親が `/data`、名前が `fresh` である。
+/// **`/` で終わる形と、名前が空の形は断る**（`-EINVAL`）。
+///
+/// # 既に在る名前はここへ来ない
+///
+/// **呼ぶ側が `lookup` の `NotFound` でだけ入る。** **`O_EXCL` は受けない**
+/// ——**「在ったら失敗する」を要求する利用者がいない**（ADR-0037 の Addendum）。
+///
+/// # 作った後にもう一度引く
+///
+/// **`create_file` は inode 番号を返すが、開く側が要るのは [`common::ext2::Inode`]
+/// である。** **像を書き換えた後に引き直す**ので、**作った結果そのものを見る**
+/// ——**書けたつもりで引けない形が、ここで落ちる。**
+fn create_and_lookup(path: &[u8]) -> Result<common::ext2::Inode, i64> {
+    let split = path.iter().rposition(|byte| *byte == b'/').ok_or(EINVAL)?;
+    let (parent, name) = path.split_at(split);
+    let name = &name[1..];
+    if name.is_empty() {
+        return Err(EINVAL);
+    }
+    // **親が `/` だけのときは、そのまま `/` を渡す。**
+    let parent: &[u8] = if parent.is_empty() { b"/" } else { parent };
+
+    let layout = crate::vfs::root_filesystem()
+        .map_err(errno_for_ext2)?
+        .layout();
+    let dir = crate::vfs::root_filesystem()
+        .map_err(errno_for_ext2)?
+        .lookup(parent)
+        .map_err(errno_for_ext2)?;
+    if !dir.is_directory() {
+        return Err(ENOTDIR);
+    }
+
+    // 破壊 (e-5, open-ignore-create-test): O_CREAT を受けても作らない。
+    // **戻り値は「無い」のままなので、開く側から見ると受理していないのと
+    // 同じである**——**新しいファイルが作れることの判定だけが落ちる。**
+    #[cfg(feature = "open-ignore-create-test")]
+    return Err(ENOENT);
+
+    #[cfg(not(feature = "open-ignore-create-test"))]
+    {
+        let created = crate::vfs::with_root_image_mut(|image| {
+            common::ext2::create_file(image, &layout, dir.number, name)
+        })
+        .ok_or(EIO)?;
+        created.map_err(errno_for_alloc)?;
+
+        crate::vfs::root_filesystem()
+            .map_err(errno_for_ext2)?
+            .lookup(path)
+            .map_err(errno_for_ext2)
+    }
+}
+
+/// [`common::ext2::AllocError`] を errno へ写す（e-5）。
+///
+/// **空きが尽きた形はすべて `-ENOSPC` である**——**inode でもブロックでも
+/// ディレクトリの隙間でも、使う側にできることは同じ（消して空ける）である。**
+fn errno_for_alloc(error: common::ext2::AllocError) -> i64 {
+    use common::ext2::AllocError;
+    match error {
+        AllocError::Full | AllocError::NoRoomInDirectory => ENOSPC,
+        AllocError::NameTaken => EEXIST,
+        AllocError::BadName => EINVAL,
+        // **像の側の食い違いは、使う側の入力では直らない。**
+        _ => EIO,
+    }
+}
+
 unsafe fn sys_open(path: u64, flags: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -> u64 {
     // **受理は 2 形だけである（zi-c。ADR-0037）**——O_RDONLY と
     // O_WRONLY|O_TRUNC。**それ以外は従来どおり -EROFS**（bare O_WRONLY も
     // 拒む——位置書きの部品が無く、:w の全置換には O_TRUNC の形が対応する。
     // O_CREAT / O_APPEND は「決めないこと」である）。
-    let write_form = flags & O_ACCMODE == O_WRONLY && flags & O_WRITE_INTENT == O_TRUNC;
+    // **e-5 で `O_CREAT` が加わった**（ADR-0037 の Addendum）。**受理するのは
+    // `O_WRONLY|O_TRUNC` と `O_WRONLY|O_CREAT|O_TRUNC` の 2 形である。**
+    // **`O_CREAT` 単独は受けない**——**位置書きの部品が無いので、
+    // 作った後にできるのは全置換だけである**（`O_TRUNC` と同じ形になる）。
+    let create = flags & O_CREAT != 0;
+    let write_intent = flags & O_WRITE_INTENT & !O_CREAT;
+    let write_form = flags & O_ACCMODE == O_WRONLY && write_intent == O_TRUNC;
     if !write_form && (flags & O_ACCMODE != O_RDONLY || flags & O_WRITE_INTENT != 0) {
         return (-EROFS) as u64;
     }
@@ -1320,6 +1417,14 @@ unsafe fn sys_open(path: u64, flags: u64, pml4_phys: PhysAddr, direct_map: Direc
     };
     let inode = match fs.lookup(&buf[..len]) {
         Ok(inode) => inode,
+        // **無ければ作る（e-5。`O_CREAT`）。** **作るのは書きの形のときだけである。**
+        Err(common::ext2::Ext2Error::NotFound) if write_form && create => {
+            // SAFETY: この関数は Ring 3 からの入口で、像は BKL の内側にある。
+            match create_and_lookup(&buf[..len]) {
+                Ok(inode) => inode,
+                Err(errno) => return (-errno) as u64,
+            }
+        }
         Err(e) => return (-errno_for_ext2(e)) as u64,
     };
 
