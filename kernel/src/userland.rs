@@ -70,16 +70,29 @@ pub const MAX_ENVP: usize = 8;
 /// `spawn` が受け取るのは今までどおり `path` と `argv` だけで、
 /// **環境は user から来ない。**
 ///
-/// # `TERM` だけである
+/// # `TERM` と `PATH` の 2 つである
 ///
 /// **読む者が居ないものを積まない。** `PS1` も `KEYMAP` も入れない
 /// （`docs/verification-coverage.md` の「使う者がいない機構は検算が置けない」）。
-/// **読む側は同じ段で作った**——`zash` がこの値で色を決める。
+/// **どちらも読む側を同じ段で作った**——`zash` が `TERM` で色を決め、
+/// `PATH` で語を探す。
+///
+/// **`PATH` は DIR-1 で入った**（ADR-0043）。**`DEFAULT_DIR` の固定の既定を
+/// 置き換えたものである**——あの doc が「置き換えの条件は `envp` を開けた
+/// とき」と書いており、EV で開いた。
+///
+/// **`PATH` はいま固定の既定と同じくらい固定である。承知のうえで採った**
+/// （ADR-0043 の決定 4。**見直しの行は `docs/deferred-decisions.md` にある**）。
 ///
 /// **配列の選択はこれでは解けない**——**配列を読むのはカーネルのデコーダで、
 /// Ring 3 の `envp` を見ない**（`docs/foundation-inventory.md` の訂正）。
 ///
-/// 破壊 (EV, env-drop-term-test): **空にする。** `zash` は `TERM` を見つけられず、
+/// # 並びに意味がある
+///
+/// **`TERM` を先に置く。** **`syscall-test` が `envp[0]` を突き合わせている**
+/// ので、入れ替えるとあちらが落ちる（**落ちてよい。契約だからである**）。
+///
+/// 破壊 (EV, env-drop-term-test): **`TERM` だけを落とす。** `zash` は `TERM` を見つけられず、
 /// **プロンプトの色を既定へ落とす。**
 ///
 /// **落ちるのは 3 本である**（実測。**「1 本だけ」ではない**）——色の判定・
@@ -91,10 +104,25 @@ pub const MAX_ENVP: usize = 8;
 /// 常に色を付ける形である**——**既定の構成ではどの判定も落ちないので、
 /// この破壊が無ければ「環境が色を決めている」ことを誰も主張していない。**
 /// **`zash-prompt-drop-color` は送る側を壊す**ので、こちらとは別の形である。
-#[cfg(not(feature = "env-drop-term-test"))]
+///
+/// 破壊 (DIR-1, env-drop-path-test): **`PATH` だけを落とす。** **名前だけで
+/// 打った語が起こせなくなる**——**`--shell-test` の
+/// 「bare names resolved under /bin」がそのまま受け止める。**
+/// **`/bin/ls` のようにパスを直に打つ形は動く**ので、**落ちるのは
+/// 探索の判定だけである。**
+#[cfg(all(
+    not(feature = "env-drop-term-test"),
+    not(feature = "env-drop-path-test")
+))]
+const ENVIRONMENT: &[&[u8]] = &[b"TERM=zaytos", b"PATH=/bin"];
+
+#[cfg(all(feature = "env-drop-term-test", not(feature = "env-drop-path-test")))]
+const ENVIRONMENT: &[&[u8]] = &[b"PATH=/bin"];
+
+#[cfg(all(not(feature = "env-drop-term-test"), feature = "env-drop-path-test"))]
 const ENVIRONMENT: &[&[u8]] = &[b"TERM=zaytos"];
 
-#[cfg(feature = "env-drop-term-test")]
+#[cfg(all(feature = "env-drop-term-test", feature = "env-drop-path-test"))]
 const ENVIRONMENT: &[&[u8]] = &[];
 
 /// ユーザースタックの未使用部分を埋める既知のバイト（EV。ADR-0041）。

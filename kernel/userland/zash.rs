@@ -129,8 +129,17 @@ const CTRL_C: u8 = 0x03;
 const STATUS_HEAD: &[u8] = b"zash: exit status ";
 /// `argv` の要素数の上限。**カーネルの `MAX_ARGV` と同じ。**
 const MAX_ARGS: usize = 8;
-/// [`RESOLVED`] の前置きの長さ（`/bin/`）。
-const DEFAULT_DIR_LEN: usize = 5;
+/// `PATH` の 1 要素の最大の長さ（DIR-1。ADR-0043）。
+///
+/// **越える要素は飛ばす。** **`/bin` を越える見込みが無い**ので、
+/// 緩衝を行の長さと同じにしない（[`NAME_MAX`] と同じ理由）。
+const DIR_MAX: usize = 32;
+
+/// `PATH` を引く名前。
+const PATH_NAME: &[u8] = b"PATH";
+
+/// `PATH` の区切り。
+const PATH_SEPARATOR: u8 = b':';
 /// 前置きの対象にする語の最大の長さ。
 ///
 /// **越えたらそのまま渡す**（`/bin/` の下でその名前は探さない）。
@@ -138,16 +147,11 @@ const DEFAULT_DIR_LEN: usize = 5;
 /// **緩衝を行の長さと同じにしない**——`.text` にも `.bss` にも効く。
 const NAME_MAX: usize = 32;
 
-/// `/` を含まない語を前置して組み立てる先。**`PATH` ではない**（`run_line` の doc）。
+/// `/` を含まない語を、`PATH` の要素の下へ組み立てる先（DIR-1。ADR-0043）。
 ///
-/// **前置きを埋めた状態で持つ。** 毎回 `/bin/` を書き直さずに済む。
-static mut RESOLVED: [u8; DEFAULT_DIR_LEN + NAME_MAX + 1] = {
-    let mut buffer = [0u8; DEFAULT_DIR_LEN + NAME_MAX + 1];
-    buffer[0] = b'/';
-    buffer[1] = b'b';
-    buffer[2] = b'i';
-    buffer[3] = b'n';
-    buffer[4] = b'/';
+/// **`要素` + `/` + `語` + NUL** が収まる大きさである。
+static mut RESOLVED: [u8; DIR_MAX + 1 + NAME_MAX + 1] = {
+    let mut buffer = [0u8; DIR_MAX + 1 + NAME_MAX + 1];
     buffer
 };
 /// 行が長すぎたときの断り書き。
@@ -181,6 +185,111 @@ const TERM_NAME: &[u8] = b"TERM";
 /// **端末の種類が分からないなら、装飾しないのが安全側でもある。**
 static COLOR_PROMPT: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+
+/// `PATH` の値（DIR-1。ADR-0043）。**`zaytos_main` が起動時に控える。**
+///
+/// # 無ければ名前だけの語は起こせない
+///
+/// **既定の探索先を持たない。** **持つと、`PATH` が届かなかったときに
+/// 届いたときと同じ振る舞いになり、機構が観測できなくなる**
+/// （`COLOR_PROMPT` と同じ形である）。
+///
+/// **POSIX は `PATH` が未設定のときの振る舞いを実装定義としている。**
+/// **こちらは「探せない」を選ぶ。**
+static mut PATH_VALUE: *const u8 = core::ptr::null();
+
+/// `PATH` を控える（DIR-1。ADR-0043）。
+///
+/// # Safety
+///
+/// `stack` が `_start` の時点の `rsp` であること。
+unsafe fn remember_path(stack: *const u64) {
+    // SAFETY: 呼び出し元契約をそのまま渡す。
+    if let Some(value) = unsafe { userlib::environment(stack, PATH_NAME) } {
+        // SAFETY: このプログラムは Ring 3 で 1 本だけ走る。**書くのはここだけである。**
+        unsafe { PATH_VALUE = value };
+    }
+}
+
+/// `PATH` の要素の下で語を起こす（DIR-1。ADR-0043）。
+///
+/// # 探索の規則は 2 つだけである
+///
+/// **左から順に試し、最初に起こせたものを採る。** **`-ENOENT` のときだけ
+/// 次の要素へ進む**——**それ以外の失敗は、その要素で決まったことである**
+/// （ディレクトリだった、許されなかった）。**探し続けると、最初の要素で
+/// 起きた本当の理由が、最後の要素の `-ENOENT` に置き換わる。**
+///
+/// # 長すぎる要素は飛ばす
+///
+/// **[`DIR_MAX`] を越える要素は組み立てられない。** **黙って飛ばす**
+/// ——**`PATH` はカーネルの定数なので、越える要素が来ることは今は無い**
+/// （ADR-0043 の決定 4）。
+///
+/// # 見つからなければ `-ENOENT` を返す
+///
+/// **`PATH` が無い場合も同じである。** 呼ぶ側は区別しない
+/// ——**どちらも「その名前では起こせない」である。**
+///
+/// # Safety
+///
+/// `argv` が NULL 終端のポインタ配列であること。
+unsafe fn spawn_via_path(command: &[u8], argv: &[*const u8]) -> i64 {
+    // SAFETY: 書き手はこのプログラムだけで、起動時に一度だけ書く。
+    let path = unsafe { PATH_VALUE };
+    if path.is_null() {
+        return userlib::MINUS_ENOENT;
+    }
+
+    let mut at = 0usize;
+    loop {
+        // **要素を 1 つ取る。** 終端か区切りまで進む。
+        let start = at;
+        let mut length = 0usize;
+        loop {
+            // SAFETY: `PATH` はカーネルが NUL 終端で積んだ文字列である。
+            let byte = unsafe { *path.add(start + length) };
+            if byte == 0 || byte == PATH_SEPARATOR {
+                break;
+            }
+            length += 1;
+        }
+        // SAFETY: 上で数えた位置である。
+        let ended = unsafe { *path.add(start + length) } == 0;
+
+        if length > 0 && length <= DIR_MAX && command.len() <= NAME_MAX {
+            // SAFETY: このプログラムは Ring 3 で 1 本だけ走る。
+            // **`RESOLVED` へ触るのはこの経路だけである。**
+            let resolved = unsafe { &mut *core::ptr::addr_of_mut!(RESOLVED) };
+            for index in 0..length {
+                // SAFETY: 要素の範囲である。
+                resolved[index] = unsafe { *path.add(start + index) };
+            }
+            let mut end = length;
+            // **要素が `/` で終わっていたら重ねない。**
+            if resolved[end - 1] != b'/' {
+                resolved[end] = b'/';
+                end += 1;
+            }
+            resolved[end..end + command.len()].copy_from_slice(command);
+            end += command.len();
+            // **終端を置く。** 前の候補のほうが長かった場合に、残りが続きとして
+            // 読まれない。
+            resolved[end] = 0;
+
+            // SAFETY: 組み立てた先は NUL 終端で、`argv` は呼び出し元の契約による。
+            let status = unsafe { userlib::spawn(&resolved[..end], argv) };
+            if status != userlib::MINUS_ENOENT {
+                return status;
+            }
+        }
+
+        if ended {
+            return userlib::MINUS_ENOENT;
+        }
+        at = start + length + 1;
+    }
+}
 
 /// `TERM` を読んで、色を付けるかを決める（EV。ADR-0041）。
 ///
@@ -253,6 +362,9 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     // **プロンプトを出す前に決める（EV。ADR-0041）。**
     // SAFETY: 呼び出し元契約により `stack` は初期スタックの先頭を指す。
     unsafe { decide_prompt_color(stack) };
+    // **`PATH` を控える（DIR-1。ADR-0043）。**
+    // SAFETY: 呼び出し元契約により `stack` は初期スタックの先頭を指す。
+    unsafe { remember_path(stack) };
     write_all(STDOUT, BANNER);
     write_prompt();
 
@@ -567,23 +679,19 @@ fn run_with_terminator(line: &[u8], starts: &[usize]) {
     // ぶんだけ**である（スタックに置いて毎回組み立てると、`.text` がそのぶん増える。
     // **この程度の差が効くほど余裕が無い**——`kernel/userland/user.ld` の
     // 受け皿の位置を見ること）。
-    let path: &[u8] = if command.contains(&b'/') || command.len() > NAME_MAX {
-        command
+    let status = if command.contains(&b'/') {
+        // **`/` を含む語は、そのまま渡す。** 探索はしない（Unix と同じ）。
+        //
+        // SAFETY: `command` は `line` の中の NUL 終端の語で、`argv` は NULL 終端の
+        // ポインタ配列である（各要素も `line` の中の NUL 終端の語を指す）。
+        unsafe { userlib::spawn(command, &argv[..starts.len() + 1]) }
     } else {
-        // SAFETY: このプログラムは Ring 3 で 1 本だけ走り、割り込みハンドラも
-        // シグナルも無い。**`RESOLVED` へ触るのはこの行だけである。**
-        let resolved = unsafe { &mut *core::ptr::addr_of_mut!(RESOLVED) };
-        resolved[DEFAULT_DIR_LEN..DEFAULT_DIR_LEN + command.len()].copy_from_slice(command);
-        // **終端を置く。** 前の語のほうが長かった場合に、その残りが続きとして
-        // 読まれない。
-        resolved[DEFAULT_DIR_LEN + command.len()] = 0;
-        &resolved[..DEFAULT_DIR_LEN + command.len()]
+        // **名前だけの語は `PATH` の下で探す（DIR-1。ADR-0043）。**
+        //
+        // SAFETY: `argv` は NULL 終端のポインタ配列で、各要素は `line` の中の
+        // NUL 終端の語を指す。
+        unsafe { spawn_via_path(command, &argv[..starts.len() + 1]) }
     };
-
-    // SAFETY: `path` は NUL 終端で、`argv` は NULL 終端のポインタ配列である。
-    // **各要素は `line` の中の NUL 終端の語を指す。**
-    // **前置した側の終端は、配列の残りが 0 であることによる。**
-    let status = unsafe { userlib::spawn(path, &argv[..starts.len() + 1]) };
     if status < 0 {
         write_all(STDERR, NOT_FOUND_HEAD);
         write_all(STDERR, command);

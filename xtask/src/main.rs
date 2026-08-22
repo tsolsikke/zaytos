@@ -3279,15 +3279,25 @@ enum ShellTestMode {
     MustFail(&'static str),
 }
 
-/// 中断（Ctrl+C）の破壊のうち、`--shell-test` が捕まえるもの（S12 前の手当て、C）。
+/// `--shell-test` が「通らないこと」で捕まえる破壊（S12 前の手当て、C）。
 ///
-/// **5 つとも実測で落ちることを確かめてある。** 落ちる判定はそれぞれ違う。
-const KILL_SABOTAGES: &[&str] = &[
+/// **実測で落ちることを確かめてある。** 落ちる判定はそれぞれ違う。
+///
+/// # 中断だけの一覧ではなくなった（DIR-1）
+///
+/// **`env-drop-path-test` が加わった。** **`PATH` が届かないと、名前だけで
+/// 打った語が起こせない**——**落ちるのは「bare names resolved under /bin」
+/// だけである**（`/bin/ls` のようにパスを直に打つ形は動く）。
+///
+/// **名前を `KILL_SABOTAGES` のままにしない。** **一覧の名前が中身と
+/// 食い違うと、次に足す者が「中断ではないから別の一覧が要る」と考える。**
+const SHELL_TEST_SABOTAGES: &[&str] = &[
     "kill-ignore-interrupt-test",
     "kill-fold-at-depth-one-test",
     "kill-keep-stale-interrupt-test",
     "kill-fold-keep-bkl-test",
     "kill-keep-typed-input-test",
+    "env-drop-path-test",
 ];
 
 impl ShellTestMode {
@@ -3298,13 +3308,13 @@ impl ShellTestMode {
             ShellTestMode::ArrowsDropped => &["keyboard-drop-arrows-test"],
             ShellTestMode::EscDropped => &["keyboard-drop-esc-test"],
             // **1 要素の配列を作れないので、一覧から借りる。**
-            // `KILL_SABOTAGES` に在る名前だけを受け取る契約である。
+            // `SHELL_TEST_SABOTAGES` に在る名前だけを受け取る契約である。
             ShellTestMode::MustFail(feature) => {
-                let index = KILL_SABOTAGES
+                let index = SHELL_TEST_SABOTAGES
                     .iter()
                     .position(|name| *name == feature)
-                    .expect("MustFail takes a feature listed in KILL_SABOTAGES");
-                &KILL_SABOTAGES[index..index + 1]
+                    .expect("MustFail takes a feature listed in SHELL_TEST_SABOTAGES");
+                &SHELL_TEST_SABOTAGES[index..index + 1]
             }
         }
     }
@@ -10296,7 +10306,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // `-EAGAIN` で Esc を確定しない（e-2）、代替画面から戻るときに
         // 描き直さない（e-3）、状態行を本文の下へ置く / コマンド行を描き直さない /
         // `a` を `i` と同じにする（どれも e-4）、`O_CREAT` を受けても作らない（e-5）、
-        // **`envp` を空にして `TERM` を積まない（EV）。**
+        // **`envp` から `TERM` を落とす（EV）。**
         //
         // **落とす判定はそれぞれ違う**——順に、矢印の札の推移 / 往復 /
         // 挿入の本数 / プロンプトの色 / 状態行の札の変化 / 大きさの突き合わせ /
@@ -10359,7 +10369,8 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
 
         // **中断（Ctrl+C）の破壊（S12 前の手当て、C）。**
         //
-        // **5 つとも「通らないこと」を期待する**（`ShellTestMode::MustFail`）。
+        // **6 つとも「通らないこと」を期待する**（`ShellTestMode::MustFail`）。
+        // **DIR-1 で `env-drop-path-test` が 1 つ加わった。**
         // **落ちる判定は 1 つずつ違う**ので、まとめて 1 項目にはしない——
         // **どれが捕まらなくなったのかが、項目の名前で分かる形にする。**
         // **像を複製して取り出し、建てた像と突き合わせる（S12-a）。**
@@ -10639,7 +10650,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             }
         }
 
-        for feature in KILL_SABOTAGES {
+        for feature in SHELL_TEST_SABOTAGES {
             total += 1;
             println!("=== xtask check: the shell test catches the sabotage {feature}");
             match cmd_shell_test(ShellTestMode::MustFail(feature)) {
@@ -11162,7 +11173,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 23,
-    full: 215,
+    full: 216,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

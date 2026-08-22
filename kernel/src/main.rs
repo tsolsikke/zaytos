@@ -9172,7 +9172,12 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
     (
         "env-drop-term-test",
         cfg!(feature = "env-drop-term-test"),
-        "envp を空にして TERM を積まない",
+        "envp から TERM を落とす",
+    ),
+    (
+        "env-drop-path-test",
+        cfg!(feature = "env-drop-path-test"),
+        "envp から PATH を落とす",
     ),
     (
         "write-file-skip-append-test",

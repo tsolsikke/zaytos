@@ -233,21 +233,20 @@ const ARGV0_LEN: u32 = 13;
 /// `argv[1]` の長さ（NUL を含む）。
 const ARGV1_LEN: u32 = 6;
 
-/// 期待する環境の要素数（EV。ADR-0041）。
+/// 期待する環境の要素数（EV。DIR-1 で 2 になった）。
 ///
-/// **`env_drop_term` の構成では 0 である**——**破壊が入った構成で、
+/// **既定は `TERM` と `PATH` の 2 つである**（ADR-0041・ADR-0043）。
+/// **落とす破壊の構成では、そのぶん減る**——**破壊が入った構成で、
 /// この検算が別の理由で落ちないようにする。**
 /// **`kernel/build.rs` の `USER_PROGRAM_CFGS` が feature から `--cfg` を導く。**
-#[cfg(not(env_drop_term))]
-const EXPECTED_ENVC: usize = 1;
-#[cfg(env_drop_term)]
-const EXPECTED_ENVC: usize = 0;
+const EXPECTED_ENVC: usize =
+    2 - (cfg!(env_drop_term) as usize) - (cfg!(env_drop_path) as usize);
 
 /// `envp[0]` として突き合わせる長さ（NUL を含む。`"TERM=zaytos"`）。
 ///
 /// **環境が空の構成では 0 にする。** **`repe cmpsb` は ecx が 0 なら
 /// 何もしない**ので、**同じ asm のまま検算だけが素通りする。**
-const TERM_LEN: u32 = if EXPECTED_ENVC == 0 { 0 } else { 12 };
+const TERM_LEN: u32 = if cfg!(env_drop_term) { 0 } else { 12 };
 
 /// `envp` の終端の位置（`rsp` からのバイト）。
 ///
