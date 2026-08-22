@@ -128,6 +128,9 @@ open-ignore-create-test = []
 # 破壊（zi-e）: キーボードの変換表を US のまま返す。JIS 固有の 2 キーも消える。
 # 差し替えた記号の十数個が同時に US へ戻るので、ホストの単体テストが落ちる。
 keyboard-us-layout-test = []
+# 破壊（EV）: envp を空にする。zash が TERM を見つけられず、プロンプトの色を
+# 既定へ落とす。ES-d の色の判定（画面の実物のピクセル）が落ちる。
+env-drop-term-test = []
 # 破壊（zi-c）: 書きで開いた fd への write が複製へ足さない。検証も戻り値も
 # 正しく、書いたつもりが複製に届いていない——読み戻しの検算（58 番）が捕まえる。
 write-file-skip-append-test = []

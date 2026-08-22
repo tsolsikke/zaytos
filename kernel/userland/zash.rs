@@ -164,24 +164,82 @@ const BACKSPACE: u8 = 0x08;
 /// フラッシュされるので、**分けて書くと色の無いプロンプトが一瞬出る。**
 /// **判定は入力待ちの時点で見るので、そこでは差が出ない**——それでも、
 /// **人が見る側で点滅させる理由が無い。**
+/// `TERM` がこの値なら色を付ける（EV。ADR-0041）。
+const TERM_WITH_COLOR: &[u8] = b"zaytos";
+
+/// `TERM` を引く名前。
+const TERM_NAME: &[u8] = b"TERM";
+
+/// プロンプトに色を付けるか（EV）。**`zaytos_main` が起動時に決める。**
+///
+/// # なぜ既定を「付けない」にするのか
+///
+/// **`TERM` が読めなかったときに、読めたときと同じ見た目になってはいけない。**
+/// **同じにすると、環境が届いたかどうかを画面から区別できない**
+/// ——**判定が何も主張していないのと同じである**（ADR-0041 の到達条件）。
+///
+/// **端末の種類が分からないなら、装飾しないのが安全側でもある。**
+static COLOR_PROMPT: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// `TERM` を読んで、色を付けるかを決める（EV。ADR-0041）。
+///
+/// # Safety
+///
+/// `stack` が `_start` の時点の `rsp` であること。
+unsafe fn decide_prompt_color(stack: *const u64) {
+    // SAFETY: 呼び出し元契約をそのまま渡す。
+    let Some(value) = (unsafe { userlib::environment(stack, TERM_NAME) }) else {
+        return;
+    };
+    // **突き合わせは NUL まで見る。** 前方一致で決めない——`zaytos2` を
+    // `zaytos` として扱わない。
+    let mut index = 0usize;
+    loop {
+        // SAFETY: 値はカーネルが NUL 終端で積んだ文字列である。
+        let byte = unsafe { *value.add(index) };
+        if index == TERM_WITH_COLOR.len() {
+            if byte == 0 {
+                COLOR_PROMPT.store(true, core::sync::atomic::Ordering::SeqCst);
+            }
+            return;
+        }
+        if byte != TERM_WITH_COLOR[index] {
+            return;
+        }
+        index += 1;
+    }
+}
+
 fn write_prompt() {
     // 破壊 (ES-d, zash-prompt-drop-color): 色を送らずにプロンプトを出す。
     // **プロンプトの字も位置も変わらない**ので、既存の判定はどれも動かない。
     // **画面のセルが既定前景のままになる**ので、zi-test の
     // 「プロンプトが自分の色で描かれている」判定だけが落ちる。
     #[cfg(zash_prompt_drop_color)]
-    let parts: [&[u8]; 2] = [PROMPT_NAME, PROMPT_SYMBOL];
+    let colored = false;
+    // **`TERM` が決める（EV。ADR-0041）。** **環境が届かなければ色を付けない**
+    // ——**届いたかどうかが画面から見える形にしてある**（[`COLOR_PROMPT`]）。
+    #[cfg(not(zash_prompt_drop_color))]
+    let colored = COLOR_PROMPT.load(core::sync::atomic::Ordering::SeqCst);
+
+    let mut out = [0u8; PROMPT_COLOR.len() + PROMPT.len() + SGR_RESET.len()];
+    let mut at = 0usize;
     // **記号には SGR を掛けない。** **戻してから出す**ので、記号のセルは
     // 既定前景そのものになる——**色が記号へ漏れていないことを、判定が
     // 「連なりの直後のセルが既定色であること」で見る。**
-    #[cfg(not(zash_prompt_drop_color))]
-    let parts: [&[u8]; 4] = [PROMPT_COLOR, PROMPT_NAME, SGR_RESET, PROMPT_SYMBOL];
-    let mut out = [0u8; PROMPT_COLOR.len() + PROMPT.len() + SGR_RESET.len()];
-    let mut at = 0usize;
-    for part in parts {
-        out[at..at + part.len()].copy_from_slice(part);
-        at += part.len();
+    let mut put = |part: &[u8], at: &mut usize| {
+        out[*at..*at + part.len()].copy_from_slice(part);
+        *at += part.len();
+    };
+    if colored {
+        put(PROMPT_COLOR, &mut at);
+        put(PROMPT_NAME, &mut at);
+        put(SGR_RESET, &mut at);
+    } else {
+        put(PROMPT_NAME, &mut at);
     }
+    put(PROMPT_SYMBOL, &mut at);
     write_all(STDOUT, &out[..at]);
 }
 
@@ -191,7 +249,10 @@ fn write_prompt() {
 ///
 /// `stack` が `_start` の時点の `rsp` であること。
 #[no_mangle]
-pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
+pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
+    // **プロンプトを出す前に決める（EV。ADR-0041）。**
+    // SAFETY: 呼び出し元契約により `stack` は初期スタックの先頭を指す。
+    unsafe { decide_prompt_color(stack) };
     write_all(STDOUT, BANNER);
     write_prompt();
 

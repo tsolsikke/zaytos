@@ -326,6 +326,64 @@ pub unsafe fn argument(stack: *const u64, index: usize) -> Option<*const u8> {
     }
 }
 
+/// 環境変数を引く（EV。ADR-0041）。**`getenv` の最小である。**
+///
+/// # 形は Linux と同じである
+///
+/// **`envp` は `argv` の終端の次から始まり、NULL で終わる**
+/// （`kernel/src/userland.rs` の `build_initial_stack`）。
+/// **要素は `NAME=VALUE` の NUL 終端バイト列である。**
+///
+/// # `name` に `=` を含めないこと
+///
+/// **突き合わせるのは `name` と、それに続く `=` である。** `TERM` を渡すと
+/// `TERM=` で始まる要素を探し、**返るのは `=` の次を指すポインタである。**
+///
+/// **前方一致では引かない**——`TERM` が `TERMINFO` に当たってしまう。
+///
+/// # 見つからなければ `None`
+///
+/// **既定値をここで決めない。** 決めるのは読む側である
+/// （`zash` は「無ければ色を付けない」を選んだ）。
+///
+/// # Safety
+///
+/// `stack` が `_start` の時点の `rsp` であること。
+pub unsafe fn environment(stack: *const u64, name: &[u8]) -> Option<*const u8> {
+    // SAFETY: 呼び出し元契約により `stack` は初期スタックの先頭を指す。
+    let argc = unsafe { *stack } as usize;
+    // `argc` の 1 語 + `argv` の `argc` 本 + `argv` の終端 1 語。
+    let mut at = 1 + argc + 1;
+
+    loop {
+        // SAFETY: `envp` は NULL で終わる。終端まで歩く。
+        let pointer = unsafe { *stack.add(at) };
+        if pointer == 0 {
+            return None;
+        }
+        let entry = pointer as *const u8;
+
+        // **`name` と、それに続く `=` を突き合わせる。**
+        let mut index = 0usize;
+        let matched = loop {
+            // SAFETY: 要素はカーネルが NUL 終端で積んだ文字列である。
+            let byte = unsafe { *entry.add(index) };
+            if index == name.len() {
+                break byte == b'=';
+            }
+            if byte == 0 || byte != name[index] {
+                break false;
+            }
+            index += 1;
+        };
+        if matched {
+            // SAFETY: 上で `=` を見た位置の次である。
+            return Some(unsafe { entry.add(name.len() + 1) });
+        }
+        at += 1;
+    }
+}
+
 /// NUL 終端のバイト列の長さ（NUL を含まない）を数える。**上限つきである。**
 ///
 /// # 上限が要る

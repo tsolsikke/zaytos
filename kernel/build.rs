@@ -185,6 +185,10 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
             "CARGO_FEATURE_ZI_APPEND_LIKE_INSERT_TEST",
             "zi_append_like_insert",
         ),
+        // **破壊そのものはカーネル側に在る（EV）。** **ここで渡すのは
+        // `syscall-test` の期待値を合わせるためである**——**環境が空の構成で
+        // ABI の検算が落ちると、破壊が別の理由で捕まったことになる。**
+        ("CARGO_FEATURE_ENV_DROP_TERM_TEST", "env_drop_term"),
     ];
     let mut extra_cfgs: Vec<String> = Vec::new();
     for (env, cfg) in USER_PROGRAM_CFGS {

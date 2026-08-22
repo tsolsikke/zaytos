@@ -53,6 +53,70 @@ const USER_PROGRAM_STACK_TOP: u64 = 0x0080_0000;
 /// [`UserLoadError::ArgumentsTooLong`] で拒む。
 pub const MAX_ARGV: usize = 8;
 
+/// 1 プロセスに渡せる環境の要素数の上限（EV。ADR-0041）。
+///
+/// **[`MAX_ARGV`] と同じ 8 にしてある。** **いま積むのは 1 つだけである**
+/// （`TERM`）。**8 はその 8 倍で、表と文字列がスタックの 1 ページに収まる
+/// 範囲である。** 越えたら [`UserLoadError::ArgumentsTooLong`] で拒む
+/// ——**黙って切り詰めない。**
+pub const MAX_ENVP: usize = 8;
+
+/// すべてのプロセスへ積む環境（EV。ADR-0041）。
+///
+/// # なぜカーネルが 1 つ持つのか
+///
+/// **プロセスごとに違う環境を持たない**（ADR-0041 の Decision 2）。
+/// **効果は費用よりも面にある**——**ユーザーポインタを 1 本も増やさない。**
+/// `spawn` が受け取るのは今までどおり `path` と `argv` だけで、
+/// **環境は user から来ない。**
+///
+/// # `TERM` だけである
+///
+/// **読む者が居ないものを積まない。** `PS1` も `KEYMAP` も入れない
+/// （`docs/verification-coverage.md` の「使う者がいない機構は検算が置けない」）。
+/// **読む側は同じ段で作った**——`zash` がこの値で色を決める。
+///
+/// **配列の選択はこれでは解けない**——**配列を読むのはカーネルのデコーダで、
+/// Ring 3 の `envp` を見ない**（`docs/foundation-inventory.md` の訂正）。
+///
+/// 破壊 (EV, env-drop-term-test): **空にする。** `zash` は `TERM` を見つけられず、
+/// **プロンプトの色を既定へ落とす。**
+///
+/// **落ちるのは 3 本である**（実測。**「1 本だけ」ではない**）——色の判定・
+/// 記号の判定・代替画面の復帰の判定。**根は 1 つで、どれも
+/// 「プロンプトの色付きの連なり」を目印にしている**（`crate::console::probe` の
+/// `find_colored_run_in_row`）。
+///
+/// **この破壊が固有に捕まえるものを書いておく。** **`TERM` を読まずに
+/// 常に色を付ける形である**——**既定の構成ではどの判定も落ちないので、
+/// この破壊が無ければ「環境が色を決めている」ことを誰も主張していない。**
+/// **`zash-prompt-drop-color` は送る側を壊す**ので、こちらとは別の形である。
+#[cfg(not(feature = "env-drop-term-test"))]
+const ENVIRONMENT: &[&[u8]] = &[b"TERM=zaytos"];
+
+#[cfg(feature = "env-drop-term-test")]
+const ENVIRONMENT: &[&[u8]] = &[];
+
+/// ユーザースタックの未使用部分を埋める既知のバイト（EV。ADR-0041）。
+///
+/// # なぜ測るのか
+///
+/// **ユーザースタックは 1 ページで、`argv` と `envp` の文字列も同じページに
+/// 載る。** **増やすかどうかを決めるには、プログラム自身がどれだけ使うかが
+/// 要る**——**それを誰も測っていなかった**（遠征スタックには高水位が在るのに、
+/// こちらには無かった。実測）。
+///
+/// # 遠征スタックと値を変えてある
+///
+/// あちらは `0xE5` である（`crate::ring3` の `EXCURSION_STACK_FILL`）。
+/// **迷子の模様を見たときに、どちらのスタックから来たかが分かるようにする。**
+///
+/// # 限界
+///
+/// **プログラムがこの値そのものを書いたら、使ったとは数えられない。**
+/// **遠征スタックの測りかたと同じ限界である**（あちらの doc に同じ注記がある）。
+const USER_STACK_FILL: u8 = 0xA5;
+
 /// 埋め込んだユーザープログラムのロードと実行が失敗する形（S9-b-2）。
 ///
 /// # なぜ `Result` にしたか
@@ -163,8 +227,10 @@ pub enum UserLoadError {
 ///
 /// # 何を積み、何を積まないか
 ///
-/// **`argc` と `argv` は積む。** `envp` は**空**（終端だけ）、`auxv` は
-/// **`AT_NULL` だけ**である。
+/// **`argc` と `argv` と `envp` を積む。** `auxv` は **`AT_NULL` だけ**である。
+///
+/// **`envp` は EV で中身が入った**（ADR-0041）。**並びは変えていない**
+/// ——S11-1 が終端だけ置いていた場所に、ポインタ列が入っただけである。
 ///
 /// **`auxv` の中身は Linux バイナリを動かす段で要るものである。**
 /// **自作のプログラムは読まないので、終端だけ置く。**
@@ -180,39 +246,57 @@ pub enum UserLoadError {
 ///
 /// `page` がスタックページの先頭を direct map 越しに指しており、
 /// 4096 バイト書けること。単一実行文脈から呼ぶこと。
-unsafe fn build_initial_stack(page: *mut u8, page_base: u64, argv: &[&[u8]]) -> Option<u64> {
+unsafe fn build_initial_stack(
+    page: *mut u8,
+    page_base: u64,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> Option<u64> {
     /// 表の項の大きさ。
     const WORD: usize = 8;
     /// 表の固定部——`argc`・`argv` の終端・`envp` の終端・`AT_NULL` の対。
+    ///
+    /// **`argv` と `envp` の本体はここに入らない。** 呼ぶ側が要素数を足す。
     const FIXED_WORDS: usize = 1 + 1 + 1 + 2;
     /// `auxv` の終端。
     const AT_NULL: u64 = 0;
     /// スタックページの大きさ。**1 枚だけ張ってある**（呼び出し側）。
     const PAGE_SIZE: usize = 4096;
 
-    if argv.len() > MAX_ARGV {
+    if argv.len() > MAX_ARGV || envp.len() > MAX_ENVP {
         return None;
     }
 
     let mut cursor = PAGE_SIZE;
 
     // **文字列を上から詰める。** 置いたユーザー VA を控える。
-    let mut argv_addrs = [0u64; MAX_ARGV];
-    for (index, arg) in argv.iter().enumerate() {
-        let bytes = *arg;
-        // NUL 終端のぶんを含めて下げる。
-        cursor = cursor.checked_sub(bytes.len() + 1)?;
-        // SAFETY: cursor はページ内で、`bytes.len() + 1` バイト書ける。
-        unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), page.add(cursor), bytes.len());
-            page.add(cursor + bytes.len()).write(0);
+    //
+    // **`argv` と `envp` を同じ手順で詰める（EV）。** **並びの上では
+    // `argv` の表が先に来るが、文字列の置き場に順序の要求は無い**
+    // ——ポインタで指すためである。
+    let put_strings = |items: &[&[u8]], addrs: &mut [u64], cursor: &mut usize| -> Option<()> {
+        for (index, item) in items.iter().enumerate() {
+            let bytes = *item;
+            // NUL 終端のぶんを含めて下げる。
+            *cursor = cursor.checked_sub(bytes.len() + 1)?;
+            // SAFETY: cursor はページ内で、`bytes.len() + 1` バイト書ける。
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), page.add(*cursor), bytes.len());
+                page.add(*cursor + bytes.len()).write(0);
+            }
+            addrs[index] = page_base + *cursor as u64;
         }
-        argv_addrs[index] = page_base + cursor as u64;
-    }
+        Some(())
+    };
+
+    let mut argv_addrs = [0u64; MAX_ARGV];
+    put_strings(argv, &mut argv_addrs, &mut cursor)?;
+    let mut envp_addrs = [0u64; MAX_ENVP];
+    put_strings(envp, &mut envp_addrs, &mut cursor)?;
 
     // 表を置く位置。**表の先頭が 16 の倍数になるように下げる。**
     cursor &= !0xF;
-    cursor = cursor.checked_sub((FIXED_WORDS + argv.len()) * WORD)?;
+    cursor = cursor.checked_sub((FIXED_WORDS + argv.len() + envp.len()) * WORD)?;
     cursor &= !0xF;
 
     let mut at = cursor;
@@ -226,7 +310,12 @@ unsafe fn build_initial_stack(page: *mut u8, page_base: u64, argv: &[&[u8]]) -> 
         put(*address, &mut at);
     }
     put(0, &mut at); // argv の終端
-    put(0, &mut at); // envp は空。終端だけ
+                     // **環境（EV。ADR-0041）。** **並びは変えていない**——ここに中身が入った
+                     // だけである。**空なら終端だけになり、S11-1 の形と同じである。**
+    for address in envp_addrs.iter().take(envp.len()) {
+        put(*address, &mut at);
+    }
+    put(0, &mut at); // envp の終端
 
     // 破壊 (S11-1, no-auxv-terminator): `auxv` に項目を 1 つ足して、
     // **終端を書かない。** `AT_PHDR` は Linux バイナリが読む型で、
@@ -405,6 +494,17 @@ pub struct UserProcess {
     entry: u64,
     /// ユーザースタックの上端。
     stack_top: u64,
+    /// ユーザースタックのページを、direct map 越しに指す番地（EV）。
+    ///
+    /// # なぜ持つのか
+    ///
+    /// **戻ってから高水位を読むためである**（[`USER_STACK_FILL`]）。
+    /// **プログラムが走っている間は CR3 が別なので、ユーザー VA では読めない。**
+    /// **direct map はどの空間からも同じ場所を指すので、こちらを控える。**
+    ///
+    /// **0 は「まだ張っていない」である**（[`load_user_program`] が 0 で作り、
+    /// 張った側が埋める）。
+    stack_scratch: u64,
     /// 判定行に出す名前。
     name: &'static str,
     /// このプロセスが開いているファイルの表（S10-b）。
@@ -484,6 +584,7 @@ pub fn load_user_program(
         space,
         entry: 0,
         stack_top: USER_PROGRAM_STACK_TOP,
+        stack_scratch: 0,
         name,
         files: crate::vfs::FileTable::new(),
     };
@@ -789,14 +890,29 @@ fn load_user_program_into(
     // **初期スタックを Linux の形で積む（S11-1）。**
     // SAFETY: `dst` はいま張ったスタックページの direct map 越しの先頭で、
     // 1 ページぶん書ける。単一実行文脈である。
-    let Some(initial_rsp) = (unsafe { build_initial_stack(dst, stack_page, argv) }) else {
+    let Some(initial_rsp) = (unsafe { build_initial_stack(dst, stack_page, argv, ENVIRONMENT) })
+    else {
         return Err(UserLoadError::ArgumentsTooLong);
     };
     process.stack_top = initial_rsp;
+
+    // **未使用部分を既知のバイトで埋める（EV）。** **初期データの下は、
+    // これからプログラムが使う領域である。** 遠征スタックと同じ形で、
+    // **戻ってから高水位を読む**（[`USER_STACK_FILL`]）。
+    //
+    // **順序に理由がある。** **積んだ後に埋める**——先に埋めると、
+    // 積んだ文字列と表を毒値が上書きする。
+    let initial_bytes = (USER_PROGRAM_STACK_TOP - initial_rsp) as usize;
+    // SAFETY: `dst` はスタックページの先頭で、`PAGE_SIZE` バイト書ける。
+    // 埋めるのは初期データより下だけである。
+    unsafe { core::ptr::write_bytes(dst, USER_STACK_FILL, PAGE_SIZE as usize - initial_bytes) };
+    process.stack_scratch = dst as u64;
+
     logger.info(format_args!(
-        "user-load: {} initial stack at {initial_rsp:#x} (argc={}, 16-byte aligned={})",
+        "user-load: {} initial stack at {initial_rsp:#x} (argc={}, envc={}, 16-byte aligned={},          initial data {initial_bytes} of {PAGE_SIZE} byte(s))",
         process.name,
         argv.len(),
+        ENVIRONMENT.len(),
         initial_rsp % 16 == 0
     ));
 
@@ -872,6 +988,46 @@ fn load_user_program_into(
 ///
 /// `process` の写像が済んでおり、entry と stack が張ったユーザーページであること。
 /// 起動時の単一実行文脈から呼ぶこと。
+/// ユーザースタックの高水位を判定行に出す（EV。ADR-0041）。
+///
+/// # 解禁条件を機械にする
+///
+/// **ADR-0041 は「半分を超えていたら、そのとき増やす判断をする」と書いた。**
+/// **書いただけの条件は発火しない**（`deferred-decisions.md` の遠征スタックの行が
+/// 同じ轍を踏んでいる）。**超えたことが判定行に出る形にしておく。**
+///
+/// **止めない。** **超えても壊れてはいない**——**判断が要るだけである。**
+/// **壊れる側（ガードページを踏む）は、そもそもこのページの下が
+/// 写像されていないので `#PF` になる。**
+fn report_user_stack_high_water(logger: &mut Logger<SerialPort>, process: &UserProcess) {
+    /// スタックページの大きさ。**1 枚だけ張ってある。**
+    const PAGE_SIZE: usize = 4096;
+
+    if process.stack_scratch == 0 {
+        // **張っていない。** 走らせずに戻る経路（`run` が偽）がここへ来る。
+        return;
+    }
+
+    let page = process.stack_scratch as *const u8;
+    let mut lowest = PAGE_SIZE;
+    for offset in 0..PAGE_SIZE {
+        // SAFETY: `stack_scratch` はスタックページを direct map 越しに指しており、
+        // `PAGE_SIZE` バイト読める。書き手はもう走っていない。
+        if unsafe { page.add(offset).read() } != USER_STACK_FILL {
+            lowest = offset;
+            break;
+        }
+    }
+    let used = PAGE_SIZE - lowest;
+    let over_half = used * 2 > PAGE_SIZE;
+
+    logger.info(format_args!(
+        "user-stack: {} used {used} of {PAGE_SIZE} byte(s) ({}%), over half={over_half}          (the initial argv/envp table is counted in; ADR-0041 says to decide about growing          the stack when this goes over half)",
+        process.name,
+        used * 100 / PAGE_SIZE
+    ));
+}
+
 unsafe fn run_loaded_program(
     logger: &mut Logger<SerialPort>,
     process: &mut UserProcess,
@@ -970,6 +1126,19 @@ unsafe fn run_loaded_program(
             crate::input::foreground_depth()
         ));
     }
+    // **ユーザースタックをどれだけ使ったかを出す（EV。ADR-0041）。**
+    //
+    // **1 ページしかないので、環境を積むと減る側である。** **増やすかどうかを
+    // 決める材料が、これまで 1 つも無かった**——**遠征スタックには高水位が
+    // 在るのに、こちらには無かった。**
+    //
+    // **測りかたは遠征スタックと同じである**——**張るときに既知のバイトで埋め、
+    // 戻ってから、毒値でない一番下のバイトを探す。** 使用量は上端からそこまでである。
+    //
+    // **限界も同じである**——**プログラムが毒値そのものを書いたら、使ったとは
+    // 数えられない。** **下側から数えるので、間に毒値が挟まっても影響しない。**
+    report_user_stack_high_water(logger, process);
+
     // **この遠征で遠征スタックをどれだけ使ったかを出す（S11-5）。**
     //
     // **このスタックにはガードページが無い**（`.bss` の配列である）ので、

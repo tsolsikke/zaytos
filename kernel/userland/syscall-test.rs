@@ -65,7 +65,8 @@
 //! - `31` `argv[0]` が "syscall-test" でなかった
 //! - `32` `argv[1]` が "alpha" でなかった
 //! - `33` `argv[2]`（終端）が NULL でなかった
-//! - `34` `envp` の終端が NULL でなかった
+//! - `34` `envp[0]` が `"TERM=zaytos"` でなかった（EV。**環境が空の構成では素通りする**）
+//! - `61` `envp` の終端が NULL でなかった
 //! - `35` `auxv` の終端（`AT_NULL`）が無かった
 //! - `36` `spawn("/bin/hello")` が 0 を返さなかった
 //! - `37` `spawn("/nope")` が `-ENOENT` を返さなかった
@@ -231,6 +232,31 @@ const EXPECTED_ARGC: u32 = 2;
 const ARGV0_LEN: u32 = 13;
 /// `argv[1]` の長さ（NUL を含む）。
 const ARGV1_LEN: u32 = 6;
+
+/// 期待する環境の要素数（EV。ADR-0041）。
+///
+/// **`env_drop_term` の構成では 0 である**——**破壊が入った構成で、
+/// この検算が別の理由で落ちないようにする。**
+/// **`kernel/build.rs` の `USER_PROGRAM_CFGS` が feature から `--cfg` を導く。**
+#[cfg(not(env_drop_term))]
+const EXPECTED_ENVC: usize = 1;
+#[cfg(env_drop_term)]
+const EXPECTED_ENVC: usize = 0;
+
+/// `envp[0]` として突き合わせる長さ（NUL を含む。`"TERM=zaytos"`）。
+///
+/// **環境が空の構成では 0 にする。** **`repe cmpsb` は ecx が 0 なら
+/// 何もしない**ので、**同じ asm のまま検算だけが素通りする。**
+const TERM_LEN: u32 = if EXPECTED_ENVC == 0 { 0 } else { 12 };
+
+/// `envp` の終端の位置（`rsp` からのバイト）。
+///
+/// **`argc` 1 語 + `argv` 2 本 + `argv` の終端 1 語 = 32 バイトの次から
+/// `envp` が始まる。** 要素数ぶん進んだ先が終端である。
+const ENVP_TERMINATOR_OFFSET: usize = 32 + EXPECTED_ENVC * 8;
+
+/// `auxv` の型欄の位置（`rsp` からのバイト）。**`envp` の終端の次である。**
+const AUXV_TYPE_OFFSET: usize = ENVP_TERMINATOR_OFFSET + 8;
 /// `spawn` の番号（`ZAYTOS_PRIVATE_BASE + 4`）。
 const SYS_SPAWN: u32 = 0x1004;
 /// `-E2BIG`（引数が多すぎる、または長すぎる）。
@@ -253,7 +279,7 @@ core::arch::global_asm!(
     // --- 30..35. 初期スタックが Linux の形で積まれていること ---
     // **入口の rsp をそのまま使う。** ここより前で何も push していない。
     // **後の検算は rbx を数えに使うので、控えても壊れる**——実測で踏んだ。
-    // argc / argv[0] / argv[1] / NULL / envp NULL / AT_NULL。
+    // argc / argv[0] / argv[1] / NULL / envp[] / NULL / AT_NULL。
     "  cmp qword ptr [rsp], {argc}",
     "  mov edi, 30",
     "  jne 9f",
@@ -277,12 +303,29 @@ core::arch::global_asm!(
     "  cmp qword ptr [rsp + 24], 0",
     "  mov edi, 33",
     "  jne 9f",
-    // envp の終端（空なので、argv の終端の次）。
-    "  cmp qword ptr [rsp + 32], 0",
+    // **envp[0] は \"TERM=zaytos\"（EV。ADR-0041）。**
+    //
+    // **`repe cmpsb` は ecx が 0 なら何もしない**ので、**破壊の構成
+    // （環境が空）では `{term_len}` が 0 になり、この検算は素通りする。**
+    // **`rsi` へ終端の 0 を読み込むだけで、参照はしない。**
+    //
+    // **`xor eax, eax` で ZF を立ててから入る。** **`mov` は flags を変えない**
+    // ので、**ecx が 0 のときは直前の flags がそのまま残る**——
+    // **それに頼ると、前の検算の結果でここの合否が決まる。**
+    "  cld",
+    "  mov rsi, [rsp + 32]",
+    "  lea rdi, [rip + TERM_TEXT]",
+    "  mov ecx, {term_len}",
+    "  xor eax, eax",
+    "  repe cmpsb",
     "  mov edi, 34",
     "  jne 9f",
+    // envp の終端。**位置は要素数で決まる（EV）。**
+    "  cmp qword ptr [rsp + {envp_terminator}], 0",
+    "  mov edi, 61",
+    "  jne 9f",
     // auxv の終端（AT_NULL = 0）。
-    "  cmp qword ptr [rsp + 40], 0",
+    "  cmp qword ptr [rsp + {auxv_type}], 0",
     "  mov edi, 35",
     "  jne 9f",
 
@@ -1095,6 +1138,9 @@ core::arch::global_asm!(
     "  .asciz \"syscall-test\"",
     "ARGV1_TEXT:",
     "  .asciz \"alpha\"",
+    // **カーネルが積む環境の写し（EV）。** 食い違えば 34 番が落ちる。
+    "TERM_TEXT:",
+    "  .asciz \"TERM=zaytos\"",
     // **`/etc/motd` の中身の写し。** 種のファイルと食い違えば 12 番が落ちる。
     "MOTD_BYTES:",
     "  .ascii \"welco\"",
@@ -1157,6 +1203,9 @@ core::arch::global_asm!(
     argc = const EXPECTED_ARGC,
     argv0_len = const ARGV0_LEN,
     argv1_len = const ARGV1_LEN,
+    term_len = const TERM_LEN,
+    envp_terminator = const ENVP_TERMINATOR_OFFSET,
+    auxv_type = const AUXV_TYPE_OFFSET,
     sys_spawn = const SYS_SPAWN,
     minus_e2big = const MINUS_E2BIG,
     minus_eagain = const MINUS_EAGAIN,

@@ -7064,7 +7064,7 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
     (31, "argv[0] was not \"syscall-test\""),
     (32, "argv[1] was not \"alpha\""),
     (33, "the argv terminator was not NULL"),
-    (34, "the envp terminator was not NULL"),
+    (34, "envp[0] was not \"TERM=zaytos\""),
     (35, "the auxv terminator (AT_NULL) was missing"),
     (36, "spawn(\"/bin/hello\") did not return 0"),
     (37, "spawn(\"/nope\") did not return -ENOENT"),
@@ -7127,6 +7127,7 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
         60,
         "the canary /etc/motd changed; the write reached another file",
     ),
+    (61, "the envp terminator was not NULL"),
 ];
 
 /// `fault-test` が起こす #PF のエラーコード（S9-b-3-2a）。
@@ -9167,6 +9168,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "keyboard-us-layout-test",
         cfg!(feature = "keyboard-us-layout-test"),
         "キーボードの変換表が JIS ではなく US のままになる",
+    ),
+    (
+        "env-drop-term-test",
+        cfg!(feature = "env-drop-term-test"),
+        "envp を空にして TERM を積まない",
     ),
     (
         "write-file-skip-append-test",
