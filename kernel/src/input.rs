@@ -393,7 +393,9 @@ pub(crate) enum DeliveredBytes {
 ///
 /// # `Char` は ASCII だけを通す
 ///
-/// デコーダは US 配列で、非 ASCII を出さない。ここで落とすのは二重の守りである。
+/// デコーダは JIS 配列で、非 ASCII を出さない。ここで落とすのは二重の守りである。
+/// **`¥` キーが `\` を出すのは、この関門があるためである**
+/// （`crate::keyboard::decode` のモジュール doc）。
 pub(crate) fn bytes_for_event(event: crate::keyboard::decode::KeyEvent) -> DeliveredBytes {
     use crate::keyboard::decode::KeyEvent;
     match event {

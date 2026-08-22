@@ -1352,7 +1352,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit] [--manual]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
+    const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit] [--manual] [--key-probe]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
        cargo xtask run --shell-test [--drop-arrows | --drop-esc]\n       cargo xtask run --ansi-test [--sabotage FEATURE]\n       cargo xtask run --zi-test [--sabotage FEATURE]
        cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
        cargo xtask run --boot-log-diff [--update-reference]
@@ -1370,6 +1370,10 @@ fn main() -> Result<()> {
             // **手で触るための起動（zi-e 前の手当て）。** 上限を外し、
             // 記録を `cpu_reset` だけに絞る（[`cmd_run`] の doc）。
             let manual = rest.iter().any(|a| a == "--manual");
+            // **打鍵の切り分け（zi-e の後の手当て）。** シェルを起こさず、
+            // 取り出したスキャンコードを生のままシリアルへ出す構成で建てる
+            // （[`build_kernel_for_key_probe`]）。
+            let key_probe = rest.iter().any(|a| a == "--key-probe");
             if let Some(index) = rest.iter().position(|a| a == "--lapic-timer-test") {
                 let kind = rest.get(index + 1).with_context(|| {
                     let names: Vec<&str> = LAPIC_TIMER_TESTS.iter().map(|t| t.name).collect();
@@ -1629,7 +1633,15 @@ fn main() -> Result<()> {
                 })?;
                 return cmd_exception_test(kind);
             }
-            cmd_run(panic_test, gui, gfx_test, kvm, no_limit || manual, manual)
+            cmd_run(
+                panic_test,
+                gui,
+                gfx_test,
+                kvm,
+                no_limit || manual,
+                manual,
+                key_probe,
+            )
         }
         Some("check") => {
             let full = args[1..].iter().any(|a| a == "--full");
@@ -1746,11 +1758,17 @@ fn cmd_run(
     kvm: bool,
     no_limit: bool,
     manual: bool,
+    key_probe: bool,
 ) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
     let bootloader_efi = build_bootloader(&workspace_root, panic_test)?;
-    let kernel_elf = build_kernel(&workspace_root, gfx_test)?;
+    // **打鍵の切り分けだけ、別の構成で建てる**（[`build_kernel_for_key_probe`]）。
+    let kernel_elf = if key_probe {
+        build_kernel_for_key_probe(&workspace_root, gfx_test)?
+    } else {
+        build_kernel(&workspace_root, gfx_test)?
+    };
     let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
 
     if panic_test {
@@ -2212,10 +2230,21 @@ struct KeyInjection {
     codes: u64,
 }
 
-/// 送るキー列。結果は `Hello!` になる。
+/// 送るキー列。結果は `Hello!\\` になる。
 ///
 /// **大文字と記号の両方を含める。** どちらも Shift を伴い、英字は
 /// Shift と Caps の XOR、記号は Shift のみという非対称な経路を通る。
+///
+/// # 末尾の 2 つは変換表の外に居る（zi-e）
+///
+/// **`ro`（`0x73`）と `yen`（`0x7D`）はどちらも `\` を出す**ので、行は
+/// `Hello!\\` で終わる。**表の外に居るものは、範囲の判定より先に引く経路が
+/// 要る**——**ホストの単体テストが固定するのは表までで、打鍵が実機の消費者
+/// まで届くことは言えない**（`kernel/src/keyboard/decode.rs` のモジュール doc）。
+///
+/// **ここが見るのはカーネル側の消費者である。** **Ring 3 の前景経路は
+/// `--shell-test` が見る**——**前景が取られている間、こちらの消費者は
+/// 1 バイトも取り出さない**ので、片方では両方を主張できない。
 const KEYBOARD_TEST_KEYS: &[KeyInjection] = &[
     KeyInjection {
         monitor: "shift-h",
@@ -2242,13 +2271,21 @@ const KEYBOARD_TEST_KEYS: &[KeyInjection] = &[
         codes: 4,
     },
     KeyInjection {
+        monitor: "ro",
+        codes: 2,
+    },
+    KeyInjection {
+        monitor: "yen",
+        codes: 2,
+    },
+    KeyInjection {
         monitor: "ret",
         codes: 2,
     },
 ];
 
 /// 期待する 1 行。
-const KEYBOARD_TEST_EXPECTED_LINE: &str = "keyboard: line = \"Hello!\"";
+const KEYBOARD_TEST_EXPECTED_LINE: &str = "keyboard: line = \"Hello!\\\\\"";
 
 /// キーボードの回帰チェック（`--interrupt-test keyboard`）。
 ///
@@ -4883,6 +4920,18 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     // **届く側の固定はホストテストにある**（decode の 4 方向と input の
     // 出し分け）。**実機での届きの観測は zi-d の自動判定が持つ**（あちらは
     // 上下で実際にカーソルが動く）。観測していないことは観測していないと書く。
+    // **変換表の外に居る 2 キーが Ring 3 まで届いたこと（zi-e）。**
+    //
+    // **`ろ`（`0x73`）と `¥`（`0x7D`）はどちらも `\` を出す**ので、走るのは
+    // `\\` である。**出る側と、片方だけになった側の両方を見る。**
+    //
+    // **なぜ実機の側にも置くのか。** **ホストの単体テストが固定したのは表であって、
+    // 打鍵が実機で届くことではない。** **表に在るが経路が繋がっていない形は、
+    // ホストからは見えない**（`character_for` は正しくても、`TABLE_LEN` の
+    // 外に居る 2 つは、範囲の判定より先に引く経路が要る）。
+    let jis_only_keys_reached_ring3 = after_shell.contains("zash: \\\\: cannot run");
+    let only_one_jis_key_arrived = after_shell.contains("zash: \\: cannot run");
+
     let updown_kept_the_line = after_shell.contains("zash: uvw: cannot run");
     let updown_did_not_corrupt = !after_shell.contains("zash: uAvBw: cannot run");
     let updown_left_the_line_intact = updown_kept_the_line && updown_did_not_corrupt;
@@ -4949,6 +4998,10 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         mode.expects_esc_to_reach_ring3()
     );
     println!("{context}: the up/down arrows left the line intact = {updown_left_the_line_intact}");
+    println!(
+        "{context}: the two keys outside the table (ro, yen) reached ring 3 = \
+         {jis_only_keys_reached_ring3} (only one of them arrived = {only_one_jis_key_arrived})"
+    );
 
     println!("{context}: ctrl-c discarded the half-typed line = {ctrl_c_discarded_the_line}");
     println!(
@@ -4969,6 +5022,8 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && arrow_behaved_as_expected
         && esc_behaved_as_expected
         && updown_left_the_line_intact
+        && jis_only_keys_reached_ring3
+        && !only_one_jis_key_arrived
         && ctrl_c_discarded_the_line
         && ctrl_c_stopped_the_child
         && restarted_only_once
@@ -5045,7 +5100,25 @@ const SHELL_TEST_LINES: &[&[&str]] = &[
     // `m[Dn` になる。ここも 2 本で見る。
     // **`shift-d` は monitor のキー名である**（大文字 D。zash は `D` だけを
     // 左と解釈する）。
-    &["m", "esc", "bracket_left", "shift-d", "n", "ret"],
+    //
+    // **`bracket_right` で `[` を打つ（zi-e）。** **monitor のキー名は物理の
+    // 位置を指しており、名前は US の刻印から付いている**——`bracket_left` は
+    // `0x1A` で、**JIS ではそこが `@` である。** **既定を JIS にした段で、
+    // 打つ位置を `0x1B`（JIS の `[`）へ移した。**
+    //
+    // **この 1 本が、実機で変換表を通る唯一の判定である**（台本の経路は
+    // `read_bytes` へ直に差し込むのでデコーダを通らない。`kernel/src/input.rs`）。
+    &["m", "esc", "bracket_right", "shift-d", "n", "ret"],
+    // ろ → ¥ → Enter（zi-e）。**変換表の外に居る 2 キーが Ring 3 へ届くこと。**
+    //
+    // **どちらも `\` を出すので、走るのは `\\` である**（実在しない語なので
+    // `cannot run` が返る）。**片方でも落ちれば語が `\` 1 文字になり、
+    // 両方落ちれば空行になって何も走らない。** 3 つの結果が区別できる。
+    //
+    // **ここが見るのは前景の経路である**——`--interrupt-test keyboard` が
+    // 見ているのはカーネル側の消費者（`drain_keyboard`）で、**消費者が違う。**
+    // **同じ表を引くが、通る層が違うので両方に置く。**
+    &["ro", "yen", "ret"],
     // u → 上 → v → 下 → w（zi-a）。**上下の CSI が行を壊さないことを見る。**
     //
     // **zash は `\x1b[A` / `\x1b[B` を読んで捨てる**（履歴が無い）ので、
@@ -9518,6 +9591,53 @@ fn run_e2fsck(image: &Path) -> Result<String> {
     Ok(summary)
 }
 
+/// 破壊 feature を入れてホストの単体テストを走らせ、**落ちること**を見る（zi-e）。
+///
+/// # QEMU を起こさない破壊が初めて出た
+///
+/// **既存の破壊はすべて QEMU の側で捕まえていた。** キーボードの変換表は
+/// **純粋な変換なのでホストで回る**（`docs/coding-standards.md` の
+/// 「ハードウェア依存部と純粋ロジックを分離する」）。**捕まえる先がホストに
+/// あるなら、QEMU を起こす理由が無い**——1 本あたり数十秒の差である。
+///
+/// # 落ちた本数を数える。**status だけを見ない**
+///
+/// **ビルドが失敗しても `status` は成功以外になる。** 見るだけだと、
+/// **破壊が捕まったのか、そもそもコンパイルが通らなかったのかが区別できない**
+/// ——**後者は「破壊が緑を出す道」の 1 つ（機会が無い）そのものである。**
+///
+/// **したがって、落ちたテストが 1 本以上あることまで見る。**
+fn check_host_tests_fail_with(workspace_root: &Path, feature: &str) -> Result<String> {
+    let output = Command::new("cargo")
+        .current_dir(workspace_root)
+        .args(["test", "-p", KERNEL_PACKAGE, "--features", feature])
+        .output()
+        .with_context(|| format!("failed to invoke cargo test with {feature} enabled"))?;
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let failed = text
+        .lines()
+        .filter(|line| line.starts_with("test ") && line.trim_end().ends_with("FAILED"))
+        .count();
+
+    if output.status.success() {
+        bail!(
+            "the host tests passed with {feature} enabled ({} test(s) reported as failed); \
+             the sabotage was NOT caught",
+            failed
+        );
+    }
+    if failed == 0 {
+        bail!(
+            "cargo test with {feature} enabled did not succeed, but no test reported FAILED; \
+             the run probably did not get as far as running tests\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(format!("{failed} host test(s) failed, as they should"))
+}
+
 /// `kernel/build.rs` が生成物を置いた `OUT_DIR`（既定の feature 構成）。
 ///
 /// **cargo の JSON 出力から引く。** `serde` は入れない——見るのは
@@ -10172,6 +10292,19 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
                     failed.push(format!("zi test ({feature})"));
                 }
                 Err(_) => println!("--- zi test ({feature}): OK (the sabotage was caught)"),
+            }
+        }
+
+        // **キーボードの変換表の破壊（zi-e）。** **ここだけ QEMU を起こさない。**
+        // **表は純粋な変換なので、捕まえる先がホストの単体テストにある。**
+        total += 1;
+        println!("=== xtask check: the host tests catch keyboard-us-layout-test");
+        match check_host_tests_fail_with(&workspace_root, "keyboard-us-layout-test") {
+            Ok(summary) => println!("--- host tests (keyboard-us-layout-test): OK ({summary})"),
+            Err(error) => {
+                println!("    {error}");
+                println!("--- host tests (keyboard-us-layout-test): FAILED");
+                failed.push("host tests (keyboard-us-layout-test)".to_string());
             }
         }
 
@@ -10864,7 +10997,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         }
         total += 1;
         run_regression("panic-test", &mut failed, &mut retries, || {
-            cmd_run(true, false, false, false, false, false)
+            cmd_run(true, false, false, false, false, false, false)
         });
         // higher-half の破壊確認（B-2a-5）。(a)(b)(c) は QEMU で位置署名 + 定常未到達を
         // 判定、(d) はビルド + トランポリンのバイト不一致を静的に判定。
@@ -10971,7 +11104,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 23,
-    full: 213,
+    full: 214,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
@@ -11511,6 +11644,37 @@ fn build_kernel(workspace_root: &Path, gfx_test: bool) -> Result<KernelBuild> {
         &[]
     };
     run_kernel_build(workspace_root, features)
+}
+
+/// 打鍵の切り分け用のビルド（zi-e の後の手当て）。
+///
+/// # 何のために在るのか
+///
+/// **前景を Ring 3 が持っている間、届いたスキャンコードを記録する経路が無い。**
+/// `drain_keyboard` は前景が取られていたら何も取り出さないので、
+/// **キーが届かなかったのか、届いたが文字にならなかったのかが区別できない**
+/// （`kernel/src/interrupts.rs`）。
+///
+/// **踏んだ**——JIS 配列を既定にした後、運用者の手元で `ろ` と `¥` が
+/// 出なかった。**こちらの `sendkey` では両方とも `\` が出た**ので、
+/// **物理キーから QEMU までの間で失われている見込みだが、それを運用者の
+/// 画面で確かめる手立てが無かった。**
+///
+/// # 2 つの feature を組み合わせるだけである
+///
+/// **カーネルは変えていない。どちらも既に在る。**
+/// `keep-steady-loop` はシェルを起こさないので、**カーネル自身の消費者が
+/// 回り続ける**（前景が取られない）。`keyboard-raw-log` は取り出した
+/// スキャンコードをそのままシリアルへ出す。
+///
+/// **したがって、押したキーが届いていれば `keyboard: scancode 0x..` が出る。
+/// 出なければ、届いていない。**
+fn build_kernel_for_key_probe(workspace_root: &Path, gfx_test: bool) -> Result<KernelBuild> {
+    let mut features = vec!["keep-steady-loop", "keyboard-raw-log"];
+    if gfx_test {
+        features.push(GFX_TEST_PATTERN_FEATURE);
+    }
+    run_kernel_build(workspace_root, &features)
 }
 
 /// このプロジェクトで使う OVMF ビルド（Ubuntu の `ovmf` パッケージ）は、

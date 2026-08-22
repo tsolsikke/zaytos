@@ -9164,6 +9164,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "O_CREAT を受けても作らない",
     ),
     (
+        "keyboard-us-layout-test",
+        cfg!(feature = "keyboard-us-layout-test"),
+        "キーボードの変換表が JIS ではなく US のままになる",
+    ),
+    (
         "write-file-skip-append-test",
         cfg!(feature = "write-file-skip-append-test"),
         "書きで開いた fd への write が複製へ足さない",

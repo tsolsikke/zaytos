@@ -6,15 +6,65 @@
 //!
 //! ## 対応範囲
 //!
-//! **US 配列の英数字と基本的な記号のみ。** 具体的には、数字段・英字 3 段・
-//! スペース・Enter・Tab・Backspace と、それらの Shift 記号である。
+//! **JIS 配列（106/109）の英数字と記号。** 具体的には、数字段・英字 3 段・
+//! スペース・Enter・Tab・Backspace・Esc・矢印と、それらの Shift 記号である。
+//!
+//! **既定を JIS にしたのは運用者の決定である**（zi-e）。**運用者は日本語
+//! キーボードを使っており、US の表では `:` が Shift 無しで打てなかった**
+//! ——`zi` のコマンド行は `:` から始まるので、毎回当たっていた。
+//!
+//! **配列は選べない。1 つに固定する。** **選ぶ手段そのものが無いためである**
+//! ——環境変数もカーネルコマンドラインも無い（`docs/deferred-decisions.md` に
+//! 行がある）。**2 人目の利用者が来たときに、そこから考え直すこと。**
 //!
 //! 対応しないもの（受けても状態機械は壊れず、[`KeyEvent::Unsupported`] として
 //! 報告する）:
 //!
-//! - ファンクションキー、テンキー、カーソルキー
-//! - Ctrl / Alt との組み合わせ（修飾としては解釈しない）
-//! - US 以外の配列
+//! - ファンクションキー、テンキー
+//! - Ctrl / Alt との組み合わせ（Ctrl+C だけは例外。下記）
+//! - JIS 以外の配列
+//!
+//! ## ASCII の記号は全部打てる
+//!
+//! **JIS でも、印字可能な ASCII の記号 32 個すべてに経路がある**（単体テストが
+//! 表から数えて主張する）。**そのために、US には無い 2 つのキーを扱う。**
+//! [`SCANCODE_JIS_RO`]（`\` と `_`）と [`SCANCODE_JIS_YEN`]（`\` と `|`）で、
+//! **どちらも `0x40` 以上に居るので変換表の外である。**
+//!
+//! **この 2 つを落とすと、`\` と `_` と `|` が打てなくなる。** US では
+//! `\`（`0x2B`）1 つで足りていたが、**JIS はそこが `]` になっている。**
+//!
+//! ### 表が正しいことと、打鍵が届くことは別である
+//!
+//! **単体テストが固定するのは表と [`Decoder::character_for`] の分岐までである。**
+//! **`0x40` の外に居る 2 つは、範囲の判定より先に引く経路が要る**ので、
+//! **その経路が繋がっているかは、実機の消費者まで通さないと言えない。**
+//!
+//! **消費者は 2 つあり、判定も 2 つ置いてある**（`xtask`）——
+//! `--interrupt-test keyboard` がカーネル側（`crate::interrupts` の
+//! `drain_keyboard`）を、`--shell-test` が Ring 3 の前景経路を見る。
+//! **前景が取られている間、前者は 1 バイトも取り出さない**ので、
+//! **片方が緑でも、もう片方は何も言っていない。**
+//!
+//! ## `¥` キーは `\` を出す
+//!
+//! **`¥`（U+00A5）そのものは出さない。** 理由は 2 つある。**前景へ渡すのは
+//! バイトで、いまの経路は ASCII しか通らない**（`crate::input` の
+//! `bytes_for_event`）。**そして、このキーの Shift 側の刻印は `|` で、すでに
+//! ASCII である**——素の側だけを非 ASCII にすると、1 つのキーの 2 つの刻印が
+//! 別の世界の字になる。
+//!
+//! **歴史的にも同じ位置である**（Shift-JIS は `0x5C` に `¥` を置いた）。
+//!
+//! ## JIS 固有キーは無視する。**黙って落とさない**
+//!
+//! **変換（`0x79`）・無変換（`0x7B`）・かな（`0x70`）・半角/全角（`0x29`）は
+//! 文字を持たない。** [`KeyEvent::Unsupported`] として報告する——
+//! **無視すると決めたのであって、取りこぼしているのではない。**
+//!
+//! **かな入力も IME も無い。** 日本語を打つ道が無いので、**この 4 つは
+//! その道ができるまで意味を持たない。** **半角/全角（`0x29`）は US では
+//! `` ` `` の位置だが、JIS の `` ` `` は Shift+`@` にある**ので、失う字は無い。
 //!
 //! ## セット 1 を前提にしてよい理由
 //!
@@ -133,9 +183,91 @@ const SCANCODE_TAB: u8 = 0x0F;
 const SCANCODE_ENTER: u8 = 0x1C;
 
 /// 変換表の大きさ。これ以上のコードは未対応として扱う。
+///
+/// # JIS 固有の 2 つはこの外に居る
+///
+/// **`0x73`（ろ）と `0x7D`（¥）は `0x40` を越えている。** 表を `0x80` まで
+/// 伸ばすと、**`0x40` から `0x72` までの 51 個が空欄で埋まる**——表の見た目が
+/// 「何も無い区間」に占められる。**2 つだけなので名前で持つ**
+/// （[`JIS_ONLY_KEYS`]）。
 const TABLE_LEN: usize = 0x40;
 
-/// Shift を押していないときの文字。`'\0'` は「文字ではない」。
+/// JIS 固有キー——`\` と `_` の刻印を持つ（**ろ**。右 Shift の左）。
+const SCANCODE_JIS_RO: u8 = 0x73;
+
+/// JIS 固有キー——`¥` と `|` の刻印を持つ（Backspace の左）。
+///
+/// **素の側は `\` を出す**（モジュール doc の「`¥` キーは `\` を出す」）。
+const SCANCODE_JIS_YEN: u8 = 0x7D;
+
+/// 変換表の外に居る JIS 固有キー。`(スキャンコード, 素, Shift)`。
+///
+/// **記号なので Shift だけが効く**（表の側と同じ規則。Caps Lock は関係しない）。
+///
+/// 破壊 (zi-e, keyboard-us-layout-test): **空にする。**
+/// **US の表には対応するキーが無いので、無いことが US の表そのものである。**
+#[cfg(not(feature = "keyboard-us-layout-test"))]
+const JIS_ONLY_KEYS: &[(u8, char, char)] =
+    &[(SCANCODE_JIS_RO, '\\', '_'), (SCANCODE_JIS_YEN, '\\', '|')];
+
+#[cfg(feature = "keyboard-us-layout-test")]
+const JIS_ONLY_KEYS: &[(u8, char, char)] = &[];
+
+/// Shift を押していないときの文字。JIS 配列。`'\0'` は「文字ではない」。
+///
+/// # `0x29` は半角/全角である
+///
+/// **US ではここが `` ` `` だが、JIS は変換の切り替えキーである。**
+/// 文字を持たないので `'\0'` を置く。**`` ` `` は Shift+`@`（`0x1A`）にある。**
+#[cfg(not(feature = "keyboard-us-layout-test"))]
+const UNSHIFTED: [char; TABLE_LEN] = [
+    '\0', '\0', '1', '2', '3', '4', '5', '6', // 0x00-0x07
+    '7', '8', '9', '0', '-', '^', '\0', '\0', // 0x08-0x0F (0x0E=BS, 0x0F=Tab)
+    'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', // 0x10-0x17
+    'o', 'p', '@', '[', '\0', '\0', 'a', 's', // 0x18-0x1F (0x1C=Enter, 0x1D=LCtrl)
+    'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', // 0x20-0x27
+    ':', '\0', '\0', ']', 'z', 'x', 'c', 'v', // 0x28-0x2F (0x29=半角/全角, 0x2A=LShift)
+    'b', 'n', 'm', ',', '.', '/', '\0', '\0', // 0x30-0x37 (0x36=RShift, 0x37=keypad *)
+    '\0', ' ', '\0', '\0', '\0', '\0', '\0', '\0', // 0x38-0x3F (0x39=Space, 0x3A=Caps)
+];
+
+/// Shift を押しているときの文字。JIS 配列。
+///
+/// # `0x0B`（`0`）だけ、Shift 側に字が無い
+///
+/// **JIS の `0` キーには Shift の刻印が無い**（刻印は `0` と かなの「わ」で、
+/// ASCII の記号を持たない）。**US はここが `)` だが、JIS の `)` は Shift+`9`
+/// にある**ので、失う字は無い。
+///
+/// **`'\0'` を置くので、Shift+`0` は [`KeyEvent::Unsupported`] になる。**
+/// **2 つの表が食い違う唯一の位置であり、単体テストがそう主張している。**
+#[cfg(not(feature = "keyboard-us-layout-test"))]
+const SHIFTED: [char; TABLE_LEN] = [
+    '\0', '\0', '!', '"', '#', '$', '%', '&', // 0x00-0x07
+    '\'', '(', ')', '\0', '=', '~', '\0', '\0', // 0x08-0x0F (0x0B=Shift+0 は無い)
+    'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', // 0x10-0x17
+    'O', 'P', '`', '{', '\0', '\0', 'A', 'S', // 0x18-0x1F
+    'D', 'F', 'G', 'H', 'J', 'K', 'L', '+', // 0x20-0x27
+    '*', '\0', '\0', '}', 'Z', 'X', 'C', 'V', // 0x28-0x2F
+    'B', 'N', 'M', '<', '>', '?', '\0', '\0', // 0x30-0x37
+    '\0', ' ', '\0', '\0', '\0', '\0', '\0', '\0', // 0x38-0x3F
+];
+
+// 破壊 (zi-e, keyboard-us-layout-test): **US の表のまま返す。**
+//
+// **既定を JIS にした段の判定が、実際に表を見ていることを確かめる。**
+// **記号の十数個と、JIS 固有の 2 キーが同時に US へ戻る**ので、
+// **ホストの単体テストが 6 本落ちる**（実測）——差の一覧・`:` の位置・
+// Shift+`0`・日本語入力キー・2 つの表の一致・JIS 固有キーである。
+//
+// **落ちない 1 本を書いておく。** 「ASCII の記号 32 個が全部打てる」は
+// **US でも成り立つので、配列を見分けない。** あれが守るのは
+// 「記号を打つ道を失わないこと」であって、**どちらの配列かではない。**
+//
+// **実機の側も落ちる**——`--shell-test` は `bracket_right`（`0x1B`）を打って
+// `[` を作っており、US ではあれが `]` になる。**ただし回帰としては置いていない**
+// （QEMU を 1 本余計に起こす費用に対して、捕まえる先がホストと同じである）。
+#[cfg(feature = "keyboard-us-layout-test")]
 const UNSHIFTED: [char; TABLE_LEN] = [
     '\0', '\0', '1', '2', '3', '4', '5', '6', // 0x00-0x07
     '7', '8', '9', '0', '-', '=', '\0', '\0', // 0x08-0x0F (0x0E=BS, 0x0F=Tab)
@@ -147,7 +279,7 @@ const UNSHIFTED: [char; TABLE_LEN] = [
     '\0', ' ', '\0', '\0', '\0', '\0', '\0', '\0', // 0x38-0x3F (0x39=Space, 0x3A=Caps)
 ];
 
-/// Shift を押しているときの文字。US 配列。
+#[cfg(feature = "keyboard-us-layout-test")]
 const SHIFTED: [char; TABLE_LEN] = [
     '\0', '\0', '!', '@', '#', '$', '%', '^', // 0x00-0x07
     '&', '*', '(', ')', '_', '+', '\0', '\0', // 0x08-0x0F
@@ -378,7 +510,17 @@ impl Decoder {
     /// ここを取り違えると、Caps Lock 中に数字段が記号になるという分かりやすい
     /// バグと、Caps Lock + Shift で大文字のままになるという分かりにくいバグの
     /// 両方が出る。
+    ///
+    /// # 表より先に JIS 固有キーを見る
+    ///
+    /// **`0x73` と `0x7D` は `TABLE_LEN` の外に居る**ので、範囲の判定に
+    /// 先んじて引く（[`JIS_ONLY_KEYS`]）。**順序を逆にすると `None` で
+    /// 打ち切られ、2 つのキーが黙って消える。**
     fn character_for(&self, key: u8) -> Option<char> {
+        if let Some((_, plain, shifted)) = JIS_ONLY_KEYS.iter().find(|(code, ..)| *code == key) {
+            return Some(if self.shift() { *shifted } else { *plain });
+        }
+
         let index = key as usize;
         if index >= TABLE_LEN {
             return None;
@@ -629,17 +771,179 @@ mod tests {
         assert_eq!(chars(&events), "hello!");
     }
 
-    /// 変換表の 2 つが同じ長さで、対応が食い違っていないこと。
+    /// 変換表の 2 つの対応が、**記録した 1 箇所を除いて**食い違っていないこと。
     ///
     /// 片方だけに文字があると、Shift の有無で「文字が消える」挙動になる。
+    /// **JIS ではそれが 1 箇所だけ正しい**——`0` キーには Shift の刻印が無い。
+    ///
+    /// **例外を数えて固定する。** 「食い違いがあってもよい」ではなく、
+    /// **「食い違うのはここだけ」**を主張する。
     #[test]
-    fn the_two_tables_agree_on_which_scancodes_produce_characters() {
+    fn the_two_tables_agree_except_at_the_one_key_that_has_no_shift_legend() {
+        /// Shift の刻印を持たない唯一のキー（`0`。JIS）。
+        const NO_SHIFT_LEGEND: usize = 0x0B;
+
         for index in 0..TABLE_LEN {
+            if index == NO_SHIFT_LEGEND {
+                assert_eq!(UNSHIFTED[index], '0', "素の側は 0 である");
+                assert_eq!(SHIFTED[index], '\0', "Shift 側には字が無い");
+                continue;
+            }
             assert_eq!(
                 UNSHIFTED[index] == '\0',
                 SHIFTED[index] == '\0',
                 "scancode {index:#04x} で 2 つの表が食い違っている"
             );
         }
+    }
+
+    /// **US と JIS で結果が変わる鍵を名指しで並べる。**
+    ///
+    /// # なぜ一覧で持つのか
+    ///
+    /// **表を差し替えた段の主張そのものだからである。** 「JIS になった」は
+    /// 表全体を見ても言えず、**US と違う位置を数え上げて初めて言える。**
+    /// **US では何だったかを同じ行に置く**——差し替えを戻したくなった人が、
+    /// **どこが動くのかをこの一覧だけで読める。**
+    ///
+    /// **末尾の 2 つは US に対応するキーが無い**（JIS 固有。変換表の外に居る）。
+    #[test]
+    fn the_keys_that_differ_between_us_and_jis_carry_the_jis_legends() {
+        // (スキャンコード, 素, Shift, US では何だったか)
+        const DIFFER: &[(u8, char, char, &str)] = &[
+            (0x03, '2', '"', "US: 2 / @"),
+            (0x07, '6', '&', "US: 6 / ^"),
+            (0x08, '7', '\'', "US: 7 / &"),
+            (0x09, '8', '(', "US: 8 / *"),
+            (0x0A, '9', ')', "US: 9 / ("),
+            (0x0C, '-', '=', "US: - / _"),
+            (0x0D, '^', '~', "US: = / +"),
+            (0x1A, '@', '`', "US: [ / {"),
+            (0x1B, '[', '{', "US: ] / }"),
+            (0x27, ';', '+', "US: ; / :"),
+            (0x28, ':', '*', "US: ' / \""),
+            (0x2B, ']', '}', "US: \\ / |"),
+            (SCANCODE_JIS_RO, '\\', '_', "US: このキーが無い"),
+            (SCANCODE_JIS_YEN, '\\', '|', "US: このキーが無い"),
+        ];
+
+        for (code, plain, shifted, was) in DIFFER {
+            let mut decoder = Decoder::new();
+            assert_eq!(
+                decoder.feed(*code),
+                Some(KeyEvent::Char(*plain)),
+                "{code:#04x} を素で打つ（{was}）"
+            );
+
+            let mut decoder = Decoder::new();
+            decoder.feed(0x2A); // LShift 押下
+            assert_eq!(
+                decoder.feed(*code),
+                Some(KeyEvent::Char(*shifted)),
+                "{code:#04x} を Shift で打つ（{was}）"
+            );
+        }
+    }
+
+    /// **`:` が Shift 無しで打てる。**
+    ///
+    /// **既定を JIS にした理由そのものである**（`zi` のコマンド行は `:` から
+    /// 始まる）。**一覧の中に埋もれさせず、単独で立てる。**
+    #[test]
+    fn a_colon_needs_no_shift_on_jis() {
+        let mut decoder = Decoder::new();
+        assert_eq!(decoder.feed(0x28), Some(KeyEvent::Char(':')));
+    }
+
+    /// **印字可能な ASCII の記号 32 個すべてに経路がある。**
+    ///
+    /// # 表を読まず、デコーダに打たせて数える
+    ///
+    /// **表を直接見ると、`character_for` の分岐（JIS 固有キー・範囲の判定・
+    /// Shift の規則）を通らない。** **打てるかどうかは、あの分岐まで含めて
+    /// 初めて言える**——実際、JIS 固有の 2 キーは表の外に居る。
+    #[test]
+    fn every_printable_ascii_symbol_can_be_typed() {
+        extern crate std;
+
+        /// ASCII の印字可能な記号（空白と英数字を除く 32 個）。
+        const SYMBOLS: &str = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+
+        let mut reachable = std::collections::BTreeSet::new();
+        for code in 0u8..0x80 {
+            for shift in [false, true] {
+                let mut decoder = Decoder::new();
+                if shift {
+                    decoder.feed(0x2A); // LShift 押下
+                }
+                if let Some(KeyEvent::Char(character)) = decoder.feed(code) {
+                    reachable.insert(character);
+                }
+            }
+        }
+
+        assert_eq!(SYMBOLS.chars().count(), 32, "数え間違いを固定する");
+        for symbol in SYMBOLS.chars() {
+            assert!(reachable.contains(&symbol), "{symbol:?} を打つ経路が無い");
+        }
+    }
+
+    /// **`0` に Shift を足しても何も出ない。**
+    ///
+    /// **JIS の `0` キーには Shift の刻印が無い。** 黙って消すのではなく
+    /// [`KeyEvent::Unsupported`] として報告する。
+    #[test]
+    fn shift_and_zero_report_unsupported_because_the_key_has_no_shift_legend() {
+        let mut decoder = Decoder::new();
+        decoder.feed(0x2A); // LShift 押下
+        assert_eq!(decoder.feed(0x0B), Some(KeyEvent::Unsupported(0x0B)));
+    }
+
+    /// **日本語入力のためのキーは、無視すると決めた上で報告する。**
+    ///
+    /// **半角/全角・かな・変換・無変換の 4 つである。** かな入力も IME も
+    /// 無いので文字を持たない。**黙って落とさない**ことをここで固定する。
+    #[test]
+    fn the_japanese_input_keys_are_reported_as_unsupported() {
+        // (スキャンコード, どのキーか)
+        const IGNORED: &[(u8, &str)] = &[
+            (0x29, "半角/全角"),
+            (0x70, "かな"),
+            (0x79, "変換"),
+            (0x7B, "無変換"),
+        ];
+
+        for (code, name) in IGNORED {
+            let mut decoder = Decoder::new();
+            assert_eq!(
+                decoder.feed(*code),
+                Some(KeyEvent::Unsupported(*code)),
+                "{name}（{code:#04x}）"
+            );
+        }
+    }
+
+    /// **JIS 固有の 2 キーは、変換表の外に居ても状態機械を壊さない。**
+    ///
+    /// **`TABLE_LEN` を越えたコードは従来 `None` で打ち切られていた。**
+    /// 先に引く経路を足したので、**その後で通常のキーが読めることまで見る。**
+    #[test]
+    fn the_jis_only_keys_live_outside_the_table_and_do_not_break_the_decoder() {
+        assert!(SCANCODE_JIS_RO as usize >= TABLE_LEN);
+        assert!(SCANCODE_JIS_YEN as usize >= TABLE_LEN);
+
+        let mut decoder = Decoder::new();
+        let events = feed_all(
+            &mut decoder,
+            &[
+                SCANCODE_JIS_RO,
+                SCANCODE_JIS_RO | BREAK_BIT,
+                SCANCODE_JIS_YEN,
+                SCANCODE_JIS_YEN | BREAK_BIT,
+                0x1E,
+                0x9E,
+            ],
+        );
+        assert_eq!(chars(&events), "\\\\a");
     }
 }
