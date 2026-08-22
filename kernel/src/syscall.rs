@@ -105,6 +105,11 @@ pub const ENOTTY: i64 = 25;
 /// 空きブロックが尽きた、ディレクトリに隙間が無い、のどれでもこれである。
 pub const ENOSPC: i64 = 28;
 
+/// **位置を持たないものに位置を与えようとした**（Linux の `ESPIPE` = 29。実測。
+/// `/usr/include/asm-generic/errno-base.h`）。**DIR-1b で入った**——
+/// 端末の fd に `lseek` を出したときである。
+pub const ESPIPE: i64 = 29;
+
 /// **その名前は既に在る**（Linux の `EEXIST` = 17。実測）。
 ///
 /// **e-5 で入った。** **`O_CREAT` の経路は「無いとき」しか通らない**ので、
@@ -368,6 +373,32 @@ pub const O_TRUNC: u64 = 0o1000;
 
 /// 無ければ作る（Linux の `O_CREAT`）。e-5 で受理に加わった（ADR-0037 の Addendum）。
 pub const O_CREAT: u64 = 0o100;
+
+/// `lseek` の番号（Linux と同じ。DIR-1b）。
+///
+/// # 部品は S10-b から在り、入口が無かっただけである
+///
+/// **`crate::vfs::File::seek_to` が最初から在る。** **使う者が居なかったので
+/// 入口を置いていなかった**（`docs/foundation-inventory.md` が
+/// 「部品は在るが入口が無い」として挙げていた 2 つのうちの 1 つ）。
+///
+/// **利用者は `/bin/tail` である**（DIR-1b で同じ段に作った）。
+pub const SYS_LSEEK: u64 = 8;
+
+/// `unlink` の番号（Linux と同じ。DIR-1b）。
+///
+/// **`common::ext2::unlink_file` が S12-e から在り、入口が無かっただけである。**
+/// **利用者は `/bin/rm` である。**
+pub const SYS_UNLINK: u64 = 87;
+
+/// `lseek` の `whence`——先頭からの絶対位置（`SEEK_SET`）。
+///
+/// # ここだけ受ける
+///
+/// **`SEEK_CUR` と `SEEK_END` は受けない**（`-EINVAL`）。
+/// **使う者が居ない**——`/bin/tail` は `stat` で大きさを取ってから
+/// `SEEK_SET` で跳ぶ。**要る者が来たら足す。**
+pub const SEEK_SET: u64 = 0;
 
 /// 書き込みを伴う `open` のフラグ（`O_CREAT` / `O_TRUNC` / `O_APPEND`）。
 ///
@@ -904,6 +935,11 @@ unsafe fn dispatch(
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
             unsafe { sys_ioctl(args[0], args[1], args[2], pml4_phys, direct_map) }
         }
+        SYS_LSEEK => sys_lseek(args[0], args[1], args[2]),
+        SYS_UNLINK => {
+            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+            unsafe { sys_unlink(args[0], pml4_phys, direct_map) }
+        }
         SYS_CLOSE => crate::vfs::with_current_files(|files| match files.remove(args[0] as usize) {
             Ok(_) => 0,
             Err(e) => (-errno_for_file_table(e)) as u64,
@@ -1332,14 +1368,7 @@ unsafe fn sys_read(
 /// である。** **像を書き換えた後に引き直す**ので、**作った結果そのものを見る**
 /// ——**書けたつもりで引けない形が、ここで落ちる。**
 fn create_and_lookup(path: &[u8]) -> Result<common::ext2::Inode, i64> {
-    let split = path.iter().rposition(|byte| *byte == b'/').ok_or(EINVAL)?;
-    let (parent, name) = path.split_at(split);
-    let name = &name[1..];
-    if name.is_empty() {
-        return Err(EINVAL);
-    }
-    // **親が `/` だけのときは、そのまま `/` を渡す。**
-    let parent: &[u8] = if parent.is_empty() { b"/" } else { parent };
+    let (parent, name) = split_parent_and_name(path)?;
 
     let layout = crate::vfs::root_filesystem()
         .map_err(errno_for_ext2)?
@@ -1373,6 +1402,31 @@ fn create_and_lookup(path: &[u8]) -> Result<common::ext2::Inode, i64> {
     }
 }
 
+/// パスを親と名前へ割る（e-5 で `create_and_lookup` に在ったものを DIR-1b で切り出した）。
+///
+/// # 最後の `/` で割る
+///
+/// `/data/fresh` なら親が `/data`、名前が `fresh` である。
+/// **`/` で終わる形と、名前が空の形は断る**（`-EINVAL`）。
+/// **`/` を含まない形も断る**——**カレントディレクトリが無いので、
+/// 親を決める手段が無い**（`docs/foundation-inventory.md`）。
+///
+/// # 3 つが同じ割りを使う
+///
+/// `O_CREAT` の `open`・`unlink`・`rmdir` である。**同じ規則で割らないと、
+/// 作れるが消せない名前が生じうる。**
+fn split_parent_and_name(path: &[u8]) -> Result<(&[u8], &[u8]), i64> {
+    let split = path.iter().rposition(|byte| *byte == b'/').ok_or(EINVAL)?;
+    let (parent, name) = path.split_at(split);
+    let name = &name[1..];
+    if name.is_empty() {
+        return Err(EINVAL);
+    }
+    // **親が `/` だけのときは、そのまま `/` を渡す。**
+    let parent: &[u8] = if parent.is_empty() { b"/" } else { parent };
+    Ok((parent, name))
+}
+
 /// [`common::ext2::AllocError`] を errno へ写す（e-5）。
 ///
 /// **空きが尽きた形はすべて `-ENOSPC` である**——**inode でもブロックでも
@@ -1383,8 +1437,109 @@ fn errno_for_alloc(error: common::ext2::AllocError) -> i64 {
         AllocError::Full | AllocError::NoRoomInDirectory => ENOSPC,
         AllocError::NameTaken => EEXIST,
         AllocError::BadName => EINVAL,
+        // **その名前は無い**（DIR-1b。`unlink` が使う）。
+        AllocError::NoSuchEntry => ENOENT,
+        // **ディレクトリだった**（DIR-1b）。**`rm` はこれで「ディレクトリだ」
+        // と分かり、`rmdir` を使えと言える。**
+        AllocError::NotARegularFile(_) => EISDIR,
         // **像の側の食い違いは、使う側の入力では直らない。**
         _ => EIO,
+    }
+}
+
+/// `lseek(fd, offset, whence)` の本体（DIR-1b）。
+///
+/// # 受けるのは `SEEK_SET` だけである
+///
+/// 理由は [`SEEK_SET`] の doc にある。**知らない `whence` は `-EINVAL`。**
+///
+/// # 末尾より先へ跳んでもよい
+///
+/// **`File::seek_to` が末尾で止める**（`crate::vfs` の
+/// 「オフセットはファイルの末尾を越えない」）。**したがって跳んだ先が
+/// 末尾より先なら、読み出しは 0 バイトになる。**
+/// **穴あきファイルを作る道にはならない**——**書く側は追記しかできない。**
+///
+/// # 端末には効かない
+///
+/// **`fd` が端末なら `-ESPIPE` である**（Linux も同じ）。
+/// **位置を持たないものに位置を与えない。**
+fn sys_lseek(fd: u64, offset: u64, whence: u64) -> u64 {
+    if whence != SEEK_SET {
+        return (-EINVAL) as u64;
+    }
+    crate::vfs::with_current_files(|files| match files.get_mut(fd as usize) {
+        Ok(file) => {
+            if file.is_terminal() {
+                return (-ESPIPE) as u64;
+            }
+            file.seek_to(offset);
+            file.offset()
+        }
+        Err(e) => (-errno_for_file_table(e)) as u64,
+    })
+}
+
+/// `unlink(path)` の本体（DIR-1b）。
+///
+/// # 消せるのは通常ファイルだけである
+///
+/// **`common::ext2::unlink_file` がディレクトリを断る**
+/// （`NotARegularFile`）。**`-EISDIR` へ写す**ので、`rm` は
+/// 「ディレクトリだった」と分かる。
+///
+/// # 開いている fd は気にしない
+///
+/// **Unix は「消しても、開いている者が閉じるまで中身が生きている」。**
+/// **こちらはそうならない**——**inode を即座に返すので、開いたままの fd は
+/// 消えた inode を指す。** **同時に走るプロセスが 1 つなので、いまは
+/// その形にならない**（`spawn` は同期である）。**`fork` が来たら判断が要る。**
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn sys_unlink(path: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -> u64 {
+    let mut buf = [0u8; PATH_MAX];
+    // SAFETY: 呼び出し元契約をそのまま渡す。
+    let len = match unsafe { copy_user_path(&mut buf, path, pml4_phys, direct_map) } {
+        Ok(len) => len,
+        Err(errno) => return (-errno) as u64,
+    };
+
+    let (parent, name) = match split_parent_and_name(&buf[..len]) {
+        Ok(split) => split,
+        Err(errno) => return (-errno) as u64,
+    };
+
+    let layout = match crate::vfs::root_filesystem() {
+        Ok(fs) => fs.layout(),
+        Err(e) => return (-errno_for_ext2(e)) as u64,
+    };
+    let dir = match crate::vfs::root_filesystem().and_then(|fs| fs.lookup(parent)) {
+        Ok(dir) => dir,
+        Err(e) => return (-errno_for_ext2(e)) as u64,
+    };
+    if !dir.is_directory() {
+        return (-ENOTDIR) as u64;
+    }
+
+    // 破壊 (DIR-1b, unlink-ignore-request-test): 消さずに 0 を返す。
+    // **戻り値は成功のままなので、`rm` は何も言わない**——**落ちるのは
+    // 「消した後の `ls` に名前が無い」判定だけである。**
+    #[cfg(feature = "unlink-ignore-request-test")]
+    return 0;
+
+    #[cfg(not(feature = "unlink-ignore-request-test"))]
+    {
+        let removed = crate::vfs::with_root_image_mut(|image| {
+            common::ext2::unlink_file(image, &layout, dir.number, name)
+        });
+        match removed {
+            Some(Ok(())) => 0,
+            Some(Err(error)) => (-errno_for_alloc(error)) as u64,
+            // 複製前は書けない（埋め込みを可変にしない）。
+            None => (-EROFS) as u64,
+        }
     }
 }
 

@@ -535,6 +535,27 @@ pub(crate) mod script {
     ///
     /// **読み戻しはシェルの文脈で行う**——`zi` が書いた内容と `cat` の出力の
     /// 一致を、ホスト側が突き合わせる。**期待値をホストが持たない形である。**
+    ///
+    /// # 末尾に DIR-1b の 3 行が付いている
+    ///
+    /// **`tail`（`lseek` の利用者）と `rm`（`unlink` の利用者）と、
+    /// 消した後の `ls` である。** **`/bin/ls /data` はこれで 3 回目になる**
+    /// ——**1 回目は `fresh` が無い、2 回目は在る、3 回目はまた無い。**
+    ///
+    /// **`tail` の出力は `cat` の出力の末尾と突き合わせる**ので、
+    /// **ホストは期待値を持たない。**
+    ///
+    /// # 代替画面の観測点を `zi` を抜けた直後へ移した
+    ///
+    /// **`\x05`（`OBSERVE_AFTER_ALT`）は台本の末尾に在った。** **DIR-1b で
+    /// 3 行足したところ、画面が流れてプロンプトの行が変わり、判定が落ちた**
+    /// （実測）。**あの判定は「控えた行に、同じ色のプロンプトが在ること」を
+    /// 見ている**（`crate::console::probe`）。
+    ///
+    /// **主張は変えていない。時点を厳密にしただけである**——**抜けた直後に
+    /// 見るほうが、間に何を挟んでも動かない。**
+    /// **台本を変えるときは、台本に寄りかかっている判定を数え直すこと**
+    /// （`docs/verification-coverage.md`）。
     const SCRIPT: &[u8] = b"\x01\x06/bin/ls /data\n\
         /bin/zi /data/fresh\n\
         iNEW\x1b\x04\
@@ -551,8 +572,11 @@ pub(crate) mod script {
         xx\
         j\
         aQ\x1b\x04\
-        :w\x07q\n\
-        /bin/cat /data/lines\n\x05";
+        :w\x07q\n\x05\
+        /bin/cat /data/lines\n\
+        /bin/tail /data/lines\n\
+        /bin/rm /data/fresh\n\
+        /bin/ls /data\n\x0c";
 
     /// 観測点（ES-d）。**プロンプトの色を見る。**
     const OBSERVE_PROMPT: u8 = 0x01;
@@ -580,6 +604,11 @@ pub(crate) mod script {
     /// （`bytes_for_event`）。**台本の中でしか使わないので衝突はしないが、
     /// 読む人が入力と取り違える。**
     const OBSERVE_MESSAGE: u8 = 0x0b;
+    /// 台本の終わり（DIR-1b）。**ホスト側の待ちの合図である。**
+    ///
+    /// **主張を持つ観測点を合図に使わない**（`crate::console::probe` の
+    /// `Observation::ScriptDone`）。
+    const OBSERVE_DONE: u8 = 0x0c;
     /// 休み（e-2）。**その `read` は何も返さない**（`-EAGAIN` になる）。
     ///
     /// # 何のために在るのか
@@ -613,6 +642,7 @@ pub(crate) mod script {
             OBSERVE_AFTER_ALT => Some(crate::console::probe::Observation::AfterAlternate),
             OBSERVE_COMMAND_LINE => Some(crate::console::probe::Observation::CommandLine),
             OBSERVE_MESSAGE => Some(crate::console::probe::Observation::Message),
+            OBSERVE_DONE => Some(crate::console::probe::Observation::ScriptDone),
             _ => None,
         }
     }

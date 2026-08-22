@@ -3683,8 +3683,14 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     // **以前はプロンプトの反響（`zaytos$ /bin/cat /data/lines`）を待っていた**が、
     // **あれは `cat` が走る前に出る**ので、**その後に置いた観測点が間に合う保証が
     // 無い**（`kernel/src/input.rs` の `OBSERVE_AFTER_ALT`）。
-    // **台本の最後に置いた観測の、最後の1行を待つ。**
-    let done_marker = "the screen before zi came back";
+    //
+    // **次に、代替画面の観測の行を合図にした。** **DIR-1b でその観測点を
+    // 台本の途中へ移したところ、待ちが途中で切れた**（実測。**`tail` と `rm` が
+    // 走る前に QEMU を止めていた**）。
+    //
+    // **合図と主張を分けた。** **`script-done:` は何も主張しない観測点で、
+    // 台本の末尾にだけ在る**（`crate::console::probe` の `ScriptDone`）。
+    let done_marker = "script-done:";
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     while Instant::now() < deadline {
         let text = fs::read_to_string(&serial_log).unwrap_or_default();
@@ -3906,14 +3912,69 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     let _boot = listings.next();
     let after_first = listings.next().unwrap_or("");
     let after_second = listings.next().unwrap_or("");
+    // **3 回目は `rm` の後である（DIR-1b）。**
+    let after_third = listings.next().unwrap_or("");
     // **1 回目の一覧は、`zi` を起こす手前までである。**
     let first_listing = after_first.split("/bin/zi").next().unwrap_or("");
+    // **2 回目の一覧は、`cat` を起こす手前までである。**
+    let second_listing = after_second.split("/bin/cat").next().unwrap_or("");
     let lists_fresh = |segment: &str| {
         segment
             .lines()
             .any(|line| line.trim_end_matches('\r') == "fresh")
     };
-    let created_file_appeared = !lists_fresh(first_listing) && lists_fresh(after_second);
+    let created_file_appeared = !lists_fresh(first_listing) && lists_fresh(second_listing);
+
+    // **`rm` が消したこと（DIR-1b）。**
+    //
+    // **同じ `ls` を 3 回撮っている**——**無い / 在る / また無い。**
+    // **「無い」を 1 回だけ見ると、そもそも作られなかった形と区別できない。**
+    // **`created_file_appeared` が「在る」を主張しているので、
+    // ここは「また無い」だけを見ればよい。**
+    let removed_file_disappeared = !lists_fresh(after_third);
+
+    // **`tail` が末尾を出したこと（DIR-1b。`lseek` の利用者）。**
+    //
+    // **期待値をホストが持たない**——**`cat` が出した本文の末尾と突き合わせる。**
+    // **`tail` は 12 バイトだけ出す**ので、**`cat` の出力と同じにはならない**
+    // ——**同じなら跳んでいない。**
+    //
+    // **`cat /data/lines` の出力は、`zi` が編集した後の 4 行である。**
+    // 直前の `cat` の出力を取り、その末尾 12 バイトを期待にする。
+    //
+    // **プログラムの出したものだけを取り出す。** **シリアルには判定行と
+    // ログが混ざる**ので、`[` で始まる行とプロンプトを落とす。
+    // **`/data/lines` に空行が無い**ので、空行も落として差し支えない。
+    let program_output = |segment: &str| -> String {
+        segment
+            .lines()
+            .map(|line| line.trim_end_matches('\r'))
+            .filter(|line| !line.starts_with('[') && !line.contains("zaytos$") && !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let tail_output = program_output(
+        plain
+            .split("/bin/tail /data/lines")
+            .nth(1)
+            .unwrap_or("")
+            .split("/bin/rm")
+            .next()
+            .unwrap_or(""),
+    );
+    let cat_output = program_output(
+        plain
+            .split("/bin/cat /data/lines")
+            .nth(1)
+            .unwrap_or("")
+            .split("/bin/tail")
+            .next()
+            .unwrap_or(""),
+    );
+    let tail_matches_the_end_of_cat = !cat_output.is_empty()
+        && !tail_output.is_empty()
+        && cat_output.ends_with(&tail_output)
+        && tail_output.len() < cat_output.len();
     let fresh_content = serial
         .lines()
         .any(|line| line.trim_end_matches('\r') == "NEW");
@@ -3997,6 +4058,11 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
          (it appeared in ls = {created_file_appeared}, cat printed what zi wrote = {fresh_content})",
         created_file_appeared && fresh_content
     );
+    println!("{context}: rm removed it again = {removed_file_disappeared}");
+    println!(
+        "{context}: tail printed the end of the file and nothing more = \
+         {tail_matches_the_end_of_cat} (tail {tail_output:?}, cat {cat_output:?})"
+    );
     println!(
         "{context}: a starts one column right of i = {append_differs_from_insert} \
          (i kept the column = {insert_kept_the_column}, a moved right = {append_moved_right})"
@@ -4042,6 +4108,8 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && message_shown
         && created_file_appeared
         && fresh_content
+        && removed_file_disappeared
+        && tail_matches_the_end_of_cat
         && append_differs_from_insert
     {
         println!("{context}: PASS");
@@ -4132,7 +4200,15 @@ fn parse_cat_readback(serial: &str, want: usize) -> Vec<String> {
     // **素のログでは目印がエスケープに割られる**（[`strip_ansi`] の doc）。
     let serial = strip_ansi(serial);
     let serial = serial.as_str();
-    let marker = "zaytos$ /bin/cat /data/lines";
+    // **プロンプトを目印にしない（DIR-1b で踏んだ）。**
+    //
+    // **観測の出力がプロンプトと反響の間へ割り込む**——`\x05` を `zi` を
+    // 抜けた直後へ移したところ、`screen-restore:` の行が `zaytos$ ` と
+    // `/bin/cat ...` の間に入り、**この目印が一致しなくなった**（実測）。
+    //
+    // **同じ罠は既に 1 つ先で書いてあった**（`cmd_zi_test` の `ls` の一覧の
+    // 取り出し）。**そちらは避けていて、こちらは踏んでいた。**
+    let marker = "/bin/cat /data/lines";
     let Some(at) = serial.rfind(marker) else {
         return Vec::new();
     };
@@ -10299,20 +10375,21 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             }
         }
 
-        // **`zi` の破壊 13 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
+        // **`zi` の破壊 14 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
         // 書かない、挿入が 1 字落とす（どちらも zi-d-2）、プロンプトの色を
         // 送らない、状態行がモードに追随しない（どちらも ES-d）、
         // `ioctl(TIOCGWINSZ)` が行と桁を入れ替える（e-1）、
         // `-EAGAIN` で Esc を確定しない（e-2）、代替画面から戻るときに
         // 描き直さない（e-3）、状態行を本文の下へ置く / コマンド行を描き直さない /
         // `a` を `i` と同じにする（どれも e-4）、`O_CREAT` を受けても作らない（e-5）、
-        // **`envp` から `TERM` を落とす（EV）。**
+        // **`envp` から `TERM` を落とす（EV）**、
+        // **`unlink` を受けても消さない（DIR-1b）。**
         //
         // **落とす判定はそれぞれ違う**——順に、矢印の札の推移 / 往復 /
         // 挿入の本数 / プロンプトの色 / 状態行の札の変化 / 大きさの突き合わせ /
         // 札の並び（ノーマル・インサート・ノーマル）/ 戻った画面の実物 /
         // 状態行の行番号 / 最下行の字 / `a` の桁 / 新しいファイルの有無 /
-        // **プロンプトの色**である。
+        // **プロンプトの色** / **消した後の一覧**である。
         //
         // **`env-drop-term` は ES-d の色の判定に乗る（EV）。** **新しい判定器を
         // 足していない**——**画面の実物（バックバッファのピクセル）を読む側が
@@ -10342,6 +10419,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "zi-append-like-insert-test",
             "open-ignore-create-test",
             "env-drop-term-test",
+            "unlink-ignore-request-test",
         ] {
             total += 1;
             println!("=== xtask check: the zi test catches {feature}");
@@ -11173,7 +11251,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 23,
-    full: 216,
+    full: 217,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

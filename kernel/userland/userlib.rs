@@ -259,6 +259,70 @@ pub fn open_write_create(path: &[u8]) -> i64 {
     }
 }
 
+/// `lseek` の番号（Linux と同じ。DIR-1b）。
+pub const SYS_LSEEK: u64 = 8;
+/// `unlink` の番号（Linux と同じ。DIR-1b）。
+pub const SYS_UNLINK: u64 = 87;
+/// `lseek` の `whence`——先頭からの絶対位置。**カーネルはこれだけ受ける。**
+pub const SEEK_SET: u64 = 0;
+
+/// `stat` の番号（Linux と同じ。DIR-1b）。
+pub const SYS_STAT: u64 = 4;
+
+/// `struct stat` のバイト数（x86-64 の Linux。カーネルの `STAT_SIZE` と同じ）。
+pub const STAT_BYTES: usize = 144;
+
+/// `struct stat` の `st_size` の位置（実測。`syscall-test` の `STAT_SIZE_OFFSET`）。
+pub const STAT_SIZE_OFFSET: usize = 48;
+
+/// ファイルの大きさを訊く（DIR-1b）。
+///
+/// **`stat` の欄をここで解かない。** **`st_size` の 8 バイトだけを取り出す**
+/// ——**他の欄を読む者がまだ居ない。**
+///
+/// # Safety
+///
+/// `path` が NUL 終端のバイト列を指すこと。
+pub unsafe fn size_of_file(path: &[u8]) -> Result<u64, i64> {
+    let mut buffer = [0u8; STAT_BYTES];
+    // SAFETY: `path` は NUL 終端で、`buffer` は `STAT_BYTES` を収める。
+    let status = unsafe {
+        syscall3(
+            SYS_STAT,
+            path.as_ptr() as u64,
+            buffer.as_mut_ptr() as u64,
+            0,
+        )
+    };
+    if status < 0 {
+        return Err(status);
+    }
+    let mut size = [0u8; 8];
+    size.copy_from_slice(&buffer[STAT_SIZE_OFFSET..STAT_SIZE_OFFSET + 8]);
+    Ok(u64::from_le_bytes(size))
+}
+
+/// `lseek(fd, offset, SEEK_SET)`（DIR-1b）。**戻るのは新しい位置である。**
+///
+/// **`whence` を引数に取らない。** **カーネルが `SEEK_SET` しか受けない**ので、
+/// **渡せない値を渡せる形にしない。**
+pub fn seek_to(fd: u64, offset: u64) -> i64 {
+    // SAFETY: 引数は fd と数だけである。
+    unsafe { syscall3(SYS_LSEEK, fd, offset, SEEK_SET) }
+}
+
+/// `unlink(path)`（DIR-1b）。**通常ファイルだけを消せる。**
+///
+/// **ディレクトリなら `-EISDIR` が返る**（`rmdir` を使うこと）。
+///
+/// # Safety
+///
+/// `path` が NUL 終端のバイト列を指すこと。
+pub unsafe fn unlink(path: &[u8]) -> i64 {
+    // SAFETY: 呼び出し元契約により `path` は NUL 終端である。
+    unsafe { syscall3(SYS_UNLINK, path.as_ptr() as u64, 0, 0) }
+}
+
 /// `close(fd)`。
 pub fn close(fd: u64) -> i64 {
     // SAFETY: 引数は fd だけである。

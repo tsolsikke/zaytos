@@ -36,6 +36,17 @@ pub(crate) enum Observation {
     AfterAlternate,
     /// コマンド行（最下行。e-4）。**打っている途中が出ているか。**
     CommandLine,
+    /// 台本が最後まで進んだ（DIR-1b）。**画面を読まない。**
+    ///
+    /// # 何も主張しない観測点である
+    ///
+    /// **ホスト側が「台本が終わった」を知るためだけに在る。**
+    /// **以前は代替画面の観測（`AfterAlternate`）の行を合図にしていた**が、
+    /// **あれを台本の途中へ移したところ、途中で待ちが切れた**（実測。DIR-1b）。
+    ///
+    /// **合図と主張を分ける。** **主張を持つ行を合図に使うと、
+    /// 主張の置き場所を動かしたときに待ちが壊れる。**
+    ScriptDone,
     /// コマンド行（最下行。e-5）。**報せ（断った理由）が出ているか。**
     ///
     /// **読むものは [`Observation::CommandLine`] と同じである**——
@@ -161,6 +172,9 @@ pub(crate) fn observe(kind: Observation) {
         Observation::AfterAlternate => observe_after_alternate(&mut serial, console),
         Observation::CommandLine => observe_command_line(&mut serial, console, "screen-command"),
         Observation::Message => observe_command_line(&mut serial, console, "screen-message"),
+        Observation::ScriptDone => {
+            let _ = writeln!(serial, "script-done: the script reached its end");
+        }
     }
 }
 

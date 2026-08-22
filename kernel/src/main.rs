@@ -9180,6 +9180,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "envp から PATH を落とす",
     ),
     (
+        "unlink-ignore-request-test",
+        cfg!(feature = "unlink-ignore-request-test"),
+        "unlink を受けても消さない",
+    ),
+    (
         "write-file-skip-append-test",
         cfg!(feature = "write-file-skip-append-test"),
         "書きで開いた fd への write が複製へ足さない",

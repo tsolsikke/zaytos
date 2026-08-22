@@ -112,6 +112,8 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
         "spin",
         "zi",
         "bss-test",
+        "rm",
+        "tail",
     ];
 
     // **共有する包み（S11-9）。** `ls` と `cat` が `mod userlib;` で取り込む。
@@ -341,6 +343,8 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         "spin",
         "zi",
         "bss-test",
+        "rm",
+        "tail",
     ] {
         std::fs::copy(
             format!("{out_dir}/{name}.elf"),
