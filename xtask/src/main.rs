@@ -129,6 +129,14 @@ const EXPECTED_CPU_RESET_COUNT: usize = 2;
 
 const EXCEPTION_TEST_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// 演習の行が出た後、判定が見る最後の行を待つ猶予（e-4 の手当て）。
+///
+/// **`cmd_virtio_irq_test` は 2 本の行を見ている**が、待っていたのは 1 本目
+/// だけだった。**2 本目が出ないまま切ると、出ていないのか間に合わなかったのかが
+/// 区別できない。** **破壊の構成では出ないことがある**ので、**待ち切りではなく
+/// 猶予にしてある。**
+const VIRTIO_IRQ_GRACE: Duration = Duration::from_secs(3);
+
 /// クリティカルセクションとロックの回帰チェック（`--critical-test <kind>`）。
 ///
 /// 検出の仕組みを入れても、それが機能しなければ意味がない。わざと異常経路を
@@ -3657,13 +3665,18 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     // **往復の判定も捕まえない**——`zi` の再描画と `cat` の読み戻しは
     // どちらも落とした後の内容なので、一致してしまう
     // （`docs/verification-coverage.md`）。
-    // **台本が送る挿入は 2 字である**（`kernel/src/input.rs` の `SCRIPT` の
-    // `iZY`）。**この数は台本の写しで、台本を変えたらここも変わる。**
+    // **台本が送る挿入は 3 字である**（`kernel/src/input.rs` の `SCRIPT` の
+    // `iZY` と `aQ`）。**この数は台本の写しで、台本を変えたらここも変わる。**
+    //
+    // **実際に変わった（e-4）。** **台本へ `a` の挿入を 1 字足したとき、
+    // ここが 2 のままだったので、1 字落とす破壊が捕まらなくなった**
+    // （落としても 2 字残るため）。**`--full` が「破壊が捕まらない」と
+    // 出して分かった**——**写しは、写した先が変わった瞬間に古くなる。**
     let typed_events = serial
         .lines()
         .filter(|line| line.contains("zi: cursor") && line.trim_end().ends_with("typed"))
         .count();
-    let typed = typed_events >= 2;
+    let typed = typed_events >= 3;
     let deleted = serial.contains("delete");
     let back_to_normal = serial.contains("normal");
 
@@ -3766,6 +3779,55 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     // 同じ点を読み直して突き合わせている（`kernel/src/console/probe.rs`）。
     let screen_came_back = judged("the screen before zi came back");
 
+    // **2 本立て（e-4）。** 状態行が下から 2 行目に在ること。
+    // **`ioctl(TIOCGWINSZ)` が答えた行数を `zi` が実際に使っていることの
+    // 主張である**（行番号はカーネルが画面から取る）。
+    let status_at_bottom = judged("the zi status line sits on the second-to-last row");
+    // **コマンド行に、打っている途中が出ていること。**
+    // **台本の `:w` の直後に観測している**ので、最下行は `:w` である。
+    // **`:` を含む形であることまで見る**——`w` だけでは、コマンド行ではなく
+    // 本文へ出ていても通る。
+    let command_line = serial
+        .lines()
+        .find_map(|line| line.split("screen-command: ").nth(1))
+        .map(|rest| rest.trim().trim_end_matches('\r').to_string());
+    let command_line_echoes = command_line
+        .as_deref()
+        .is_some_and(|line| line.contains("\":w\""));
+
+    // **`a` は `i` と違う桁から挿入する（e-4）。**
+    //
+    // **台本は `i`（そのまま）と `a`（1 つ右）を両方通す。** `zi` は
+    // 判定行の札を分けている（`insert` と `append`）ので、**直前の報告の桁と
+    // 比べる**——`i` は同じ桁、`a` は 1 つ右である。
+    // **期待値を写していない**（数はどちらも `zi` の報告から取る）。
+    let cursor_reports: Vec<(u32, &str)> = serial
+        .lines()
+        .filter(|line| line.contains("zi: cursor"))
+        .filter_map(|line| {
+            let col = line.split("col=").nth(1)?;
+            let digits: String = col.chars().take_while(char::is_ascii_digit).collect();
+            let tag = line.trim_end().rsplit(' ').next()?;
+            Some((digits.parse().ok()?, tag))
+        })
+        .collect();
+    let column_before = |index: usize| {
+        cursor_reports
+            .get(index.wrapping_sub(1))
+            .map(|(col, _)| *col)
+    };
+    let insert_kept_the_column = cursor_reports
+        .iter()
+        .position(|(_, tag)| *tag == "insert")
+        .is_some_and(|at| column_before(at) == Some(cursor_reports[at].0));
+    let append_moved_right = cursor_reports
+        .iter()
+        .position(|(_, tag)| *tag == "append")
+        .is_some_and(|at| {
+            column_before(at).is_some_and(|before| cursor_reports[at].0 == before + 1)
+        });
+    let append_differs_from_insert = insert_kept_the_column && append_moved_right;
+
     println!("{context}: zi started = {started}");
     println!(
         "{context}: the up/down arrows moved the cursor between lines = {arrows_moved} \
@@ -3777,7 +3839,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     );
     println!(
         "{context}: insert mode typed into the buffer = {typed} \
-         ({typed_events} typed event(s); the script sends 2)"
+         ({typed_events} typed event(s); the script sends 3)"
     );
     println!("{context}: Esc returned to normal mode = {back_to_normal}");
     println!("{context}: x deleted a byte = {deleted}");
@@ -3799,6 +3861,15 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
          (status labels in order: {status_labels:?})"
     );
     println!("{context}: the screen before zi came back = {screen_came_back}");
+    println!("{context}: the zi status line sits on the second-to-last row = {status_at_bottom}");
+    println!(
+        "{context}: the command line echoes what is being typed = {command_line_echoes} \
+         ({command_line:?})"
+    );
+    println!(
+        "{context}: a starts one column right of i = {append_differs_from_insert} \
+         (i kept the column = {insert_kept_the_column}, a moved right = {append_moved_right})"
+    );
     println!(
         "{context}: note - the continuation-cell flag (Cell::CONTINUATION) has no screen-side \
          judgement here; the font has no two-cell glyph, so a continuation cell never appears \
@@ -3835,6 +3906,9 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && status_followed_mode
         && esc_settled_at_once
         && screen_came_back
+        && status_at_bottom
+        && command_line_echoes
+        && append_differs_from_insert
     {
         println!("{context}: PASS");
         Ok(())
@@ -4438,11 +4512,31 @@ fn cmd_virtio_irq_test(features: &[&str]) -> Result<()> {
 
     let exercise_marker = "virtio-blk: interrupt exercise:";
     let error_marker = "virtio-blk: the interrupt exercise failed";
+    // **判定が見る最後の行はこれである**（d-2。BKL を解いてから待ったこと）。
+    let released_marker = "blocking read: released the BKL before waiting";
+    // **演習の行で切ると、その後に出る行を取り逃がす（e-4 で踏んだ）。**
+    //
+    // **判定は 2 本の行を見ているのに、待っていたのは 1 本目だけだった。**
+    // **カーネルが太って遅くなった日に、2 本目が間に合わなくなった**
+    // ——`--full` が「BKL を解いていない」と出したが、**実際にはログが
+    // そこで切れていた**（`docs/troubleshooting.md`）。
+    // **S12-d の `fs-image-ready` と同じ族である**——**判定が見る時点と、
+    // 判定したい対象が生まれる時点が違う。**
+    //
+    // **2 本目を待つ。** **破壊の構成では 2 本目が出ないことがある**ので、
+    // **演習の行を見たら猶予を置いて切る**（上限は全体の締切より短い）。
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    let mut grace: Option<Instant> = None;
     while Instant::now() < deadline {
         let text = fs::read_to_string(&serial_log).unwrap_or_default();
-        if text.contains(exercise_marker) || text.contains(error_marker) {
+        if text.contains(released_marker) || text.contains(error_marker) {
             break;
+        }
+        if text.contains(exercise_marker) {
+            let until = *grace.get_or_insert_with(|| Instant::now() + VIRTIO_IRQ_GRACE);
+            if Instant::now() >= until {
+                break;
+            }
         }
         thread::sleep(PANIC_TEST_POLL_INTERVAL);
     }
@@ -9871,16 +9965,18 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             }
         }
 
-        // **`zi` の破壊 8 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
+        // **`zi` の破壊 11 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
         // 書かない、挿入が 1 字落とす（どちらも zi-d-2）、プロンプトの色を
         // 送らない、状態行がモードに追随しない（どちらも ES-d）、
         // `ioctl(TIOCGWINSZ)` が行と桁を入れ替える（e-1）、
         // `-EAGAIN` で Esc を確定しない（e-2）、代替画面から戻るときに
-        // 描き直さない（e-3）。
+        // 描き直さない（e-3）、状態行を本文の下へ置く / コマンド行を描き直さない /
+        // `a` を `i` と同じにする（どれも e-4）。
         //
         // **落とす判定はそれぞれ違う**——順に、矢印の札の推移 / 往復 /
         // 挿入の本数 / プロンプトの色 / 状態行の札の変化 / 大きさの突き合わせ /
-        // 札の並び（ノーマル・インサート・ノーマル）/ 戻った画面の実物である。
+        // 札の並び（ノーマル・インサート・ノーマル）/ 戻った画面の実物 /
+        // 状態行の行番号 / 最下行の字 / `a` の桁である。
         // **`:w` の量の判定はどれでも通る**（要求 0 に対して 0 なので）。
         //
         // **3 つは長い間「別の理由で」落ちていた**——破壊ビルドの像が
@@ -9895,6 +9991,9 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "ioctl-winsize-swap-test",
             "zi-esc-needs-second-key-test",
             "alt-screen-skip-repaint-test",
+            "zi-status-below-text-test",
+            "zi-command-line-silent-test",
+            "zi-append-like-insert-test",
         ] {
             total += 1;
             println!("=== xtask check: the zi test catches {feature}");
@@ -10682,7 +10781,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 22,
-    full: 208,
+    full: 211,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

@@ -540,7 +540,9 @@ pub(crate) mod script {
         lh\x02\
         iZY\x02\x1b\x04\x02\
         xx\
-        :wq\n\
+        j\
+        aQ\x1b\x04\
+        :w\x07q\n\
         /bin/cat /data/lines\n\x05";
 
     /// 観測点（ES-d）。**プロンプトの色を見る。**
@@ -561,6 +563,8 @@ pub(crate) mod script {
     /// **最後に置いても主張は変わらない。** 戻った画面はそのまま残っており、
     /// **控えた行と桁を読み直すだけである**（`cat` の出力は下の行へ足される）。
     const OBSERVE_AFTER_ALT: u8 = 0x05;
+    /// 観測点（e-4）。**コマンド行（最下行）に打っている途中が出ているか。**
+    const OBSERVE_COMMAND_LINE: u8 = 0x07;
     /// 休み（e-2）。**その `read` は何も返さない**（`-EAGAIN` になる）。
     ///
     /// # 何のために在るのか
@@ -592,6 +596,7 @@ pub(crate) mod script {
             OBSERVE_STATUS => Some(crate::console::probe::Observation::Status),
             OBSERVE_BEFORE_ALT => Some(crate::console::probe::Observation::BeforeAlternate),
             OBSERVE_AFTER_ALT => Some(crate::console::probe::Observation::AfterAlternate),
+            OBSERVE_COMMAND_LINE => Some(crate::console::probe::Observation::CommandLine),
             _ => None,
         }
     }

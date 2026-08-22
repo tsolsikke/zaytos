@@ -267,21 +267,83 @@ fn move_cursor(row: usize, col: usize) {
     write_all(STDOUT, &sequence[..at]);
 }
 
-/// 状態行を描く（ES-d）。**本文の 1 行下に、色を付けて置く。**
+/// 画面の形と、開いているファイル（e-4）。**起動時に決まり、以後変わらない。**
+struct View<'a> {
+    /// 画面の行数。**`ioctl(TIOCGWINSZ)` が答えた値である**（0 なら既定へ落ちる。
+    /// `userlib::window_size_or_default`）。
+    rows: usize,
+    /// 本文の行数。**破壊（`zi-status-below-text`）だけが使う**——
+    /// **訊いた行数を使わない形が、どこへ置くかを決めるために要る。**
+    #[cfg_attr(not(zi_status_below_text), allow(dead_code))]
+    text_lines: usize,
+    /// 開いているファイルのパス。**状態行に出す。**
+    path: &'a [u8],
+}
+
+impl View<'_> {
+    /// 状態行の行（下から 2 行目。e-4）。
+    fn status_row(&self) -> usize {
+        // 破壊 (e-4, zi-status-below-text): 訊いた行数を使わず、本文の 1 行下へ置く
+        // （ES-d までの形）。**画面の下端に在ることの判定だけが落ちる**——
+        // **色も札も中身も変わらない。** **`ioctl` が答えた値を実際に使って
+        // いることの主張が、これで初めて偽になる。**
+        #[cfg(zi_status_below_text)]
+        {
+            return self.text_lines + 1;
+        }
+        #[cfg(not(zi_status_below_text))]
+        {
+            self.rows - 2
+        }
+    }
+
+    /// コマンド行の行（最下行。e-4）。
+    fn command_row(&self) -> usize {
+        self.rows - 1
+    }
+
+    /// 本文に使える行数（e-4）。
+    ///
+    /// **`rows - 2` である。** **0 や負にならない**——`rows` は
+    /// `window_size_or_default` を通っており、**0 なら既定の 24 へ落ちる**
+    /// （`userlib::WindowSize::or_default`）。**24 でも 22 行が残る。**
+    fn text_rows(&self) -> usize {
+        self.rows - 2
+    }
+}
+
+/// いま画面へ出す状態（e-4）。**移ろう側をまとめてある。**
+struct Status<'a> {
+    mode: Mode,
+    row: usize,
+    col: usize,
+    /// 保存していない変更があるか。
+    dirty: bool,
+    /// コマンド行に出す語（`:` を除く）。**コマンド中でなければ空である。**
+    command: &'a [u8],
+    in_command: bool,
+}
+
+/// 状態行を描く（ES-d。e-4 で下から 2 行目へ移し、中身を増やした）。
 ///
-/// # 画面の下端ではなく本文の下である
+/// # 画面の下端に置く
 ///
-/// **画面の大きさを訊く手段が無い**——`ioctl` も `TIOCGWINSZ` も無く、
-/// **端末の行数を知る道が 1 つも無い**（`docs/deferred-decisions.md` の
-/// 環境変数の行と同じ立場である）。**下端に置くには行数が要るので、
-/// 本文の下に置く。** 端末が本物の vi のように見えないのはこのためである。
+/// **e-1 で `ioctl(TIOCGWINSZ)` が入るまで、行数を知る道が無かった**ので、
+/// 本文の 1 行下に置いていた。**いまは訊ける**ので、vi と同じ下端へ置く。
+///
+/// # 色が付くのはモードの札だけである
+///
+/// **ファイル名・位置・変更の印は既定の色で出す。** **判定は色の付いた
+/// 連なりを読む**（`kernel/src/console/probe.rs`）ので、**位置のような
+/// 動く値を色の中へ入れると、札の並びを見る判定が揺れる。**
 ///
 /// # カーソルは戻さない（e-3）
 ///
 /// **戻すのは [`restore_cursor`] だけである。** **描く関数が各自で戻す形は、
 /// 描く場所が増えるたびに書き忘れが画面の誤りになる**（e-2 で順序依存が出た）。
-/// **この関数を呼ぶ側は [`refresh_status`] を通すこと。**
-fn draw_status(buffer: &Buffer, mode: Mode) {
+/// **この関数を呼ぶ側は [`refresh`] を通すこと。**
+fn draw_status(view: &View, status: &Status) {
+    let mode = status.mode;
     // 破壊 (ES-d, zi-status-freeze-mode): モードが変わっても NORMAL のまま描く。
     // **色も位置も長さも変わらない**ので、「状態行が自分の色で描かれている」
     // 判定は緑のままである。**落ちるのは「モードに従って変わる」判定だけ**で、
@@ -296,16 +358,74 @@ fn draw_status(buffer: &Buffer, mode: Mode) {
         Mode::Insert => STATUS_INSERT,
         Mode::Command => STATUS_COMMAND,
     };
-    move_cursor(buffer.count + 1, 0);
+    move_cursor(view.status_row(), 0);
+    // EL(2): 前の中身を消してから置く（位置の桁数が減ったときに残さない）。
+    write_all(STDOUT, b"\x1b[2K");
     // **1 回で書く**（`zash` の `write_prompt` と同じ理由。色の無い札を
     // 一瞬でも出さない）。
-    let mut out = [0u8; STATUS_COLOR.len() + STATUS_NORMAL.len() + SGR_RESET.len()];
+    let mut out = [0u8; 160];
     let mut at = 0usize;
-    for part in [STATUS_COLOR, label, SGR_RESET] {
+    for part in [STATUS_COLOR, label, SGR_RESET, b" "] {
         out[at..at + part.len()].copy_from_slice(part);
         at += part.len();
     }
+    // **ファイル名。** NUL 終端の手前まで。
+    let name = {
+        let end = view
+            .path
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(view.path.len());
+        &view.path[..end]
+    };
+    let take = name.len().min(out.len() - at - 32);
+    out[at..at + take].copy_from_slice(&name[..take]);
+    at += take;
+    // **位置は 1 起点で出す**（vi と同じ。使う人が見る数である）。
+    out[at] = b' ';
+    at += 1;
+    let mut digits = [0u8; 12];
+    let count = write_number(&mut digits, status.row + 1);
+    out[at..at + count].copy_from_slice(&digits[..count]);
+    at += count;
+    out[at] = b':';
+    at += 1;
+    let count = write_number(&mut digits, status.col + 1);
+    out[at..at + count].copy_from_slice(&digits[..count]);
+    at += count;
+    // **保存していない変更の印。** vi の `[+]` と同じ形である。
+    if status.dirty {
+        let mark = b" [+]";
+        out[at..at + mark.len()].copy_from_slice(mark);
+        at += mark.len();
+    }
     write_all(STDOUT, &out[..at]);
+}
+
+/// コマンド行（エコーエリア）を描く（e-4）。**最下行である。**
+///
+/// # 打っている途中が見える
+///
+/// **`:` を打った時点で `:` が出て、`w` を打てば `:w` になる。**
+/// **打ち終わるまで何も見えない形は、打ち間違いに気づけない**
+/// （運用者の指摘）。
+///
+/// # コマンド中でなければ空にする
+///
+/// **消すだけである。** **メッセージやエラーを出す口はここだが、
+/// いまは出す者がいない**——`:q` を拒む断り書きは `STDERR` へ出しており、
+/// **その付け替えは利用者（読む人）が要ると言ってから行う。**
+fn draw_command_line(view: &View, status: &Status) {
+    move_cursor(view.command_row(), 0);
+    write_all(STDOUT, b"\x1b[2K");
+    if !status.in_command {
+        return;
+    }
+    let mut out = [0u8; COMMAND_MAX + 1];
+    out[0] = b':';
+    let take = status.command.len().min(COMMAND_MAX);
+    out[1..1 + take].copy_from_slice(&status.command[..take]);
+    write_all(STDOUT, &out[..1 + take]);
 }
 
 /// 代替画面バッファへ入る（e-3。`?1049h`）。
@@ -347,10 +467,13 @@ fn restore_cursor(cursor_row: usize, cursor_col: usize) {
     move_cursor(cursor_row, cursor_col);
 }
 
-/// 本文と札を描き、最後にカーソルを戻す（e-3）。**画面を更新する入口である。**
-fn refresh_status(buffer: &Buffer, mode: Mode, cursor_row: usize, cursor_col: usize) {
-    draw_status(buffer, mode);
-    restore_cursor(cursor_row, cursor_col);
+/// 2 本（状態行とコマンド行）を描き、最後にカーソルを戻す（e-3。e-4 で 2 本になった）。
+///
+/// **画面を更新する入口である。** **順序はここが持つ**ので、呼ぶ側は考えない。
+fn refresh(view: &View, status: &Status) {
+    draw_status(view, status);
+    draw_command_line(view, status);
+    restore_cursor(status.row, status.col);
 }
 
 /// 画面を描き直す。**全面を消してから行ごとに置く。**
@@ -359,10 +482,14 @@ fn refresh_status(buffer: &Buffer, mode: Mode, cursor_row: usize, cursor_col: us
 /// 行の折り返しに依らず「バッファの行 = 画面の行」を保つためである。
 ///
 /// **状態行もここで描き直す（ES-d）**——`ED(2)` が消してしまうためである。
-fn redraw(buffer: &Buffer, mode: Mode, cursor_row: usize, cursor_col: usize) {
+fn redraw(view: &View, buffer: &Buffer, status: &Status) {
     // ED(2): 画面全体を消す。**カーソルは動かない**ので、この後に CUP を出す。
     write_all(STDOUT, b"\x1b[2J");
-    for row in 0..buffer.count {
+    // **本文に使える行までしか描かない（e-4）。**
+    // **スクロールは作らない**——**上限を越えるファイルは開かずに拒む**ので
+    // （`MAX_LINES` = 64）、**画面が 66 行以上あれば全部入る。** 足りない画面では
+    // 後ろが見えないままになる。**利用者が来たら作る。**
+    for row in 0..buffer.count.min(view.text_rows()) {
         move_cursor(row, 0);
         // EL(2): その行を消してから置く（消し残しを作らない）。
         write_all(STDOUT, b"\x1b[2K");
@@ -371,7 +498,7 @@ fn redraw(buffer: &Buffer, mode: Mode, cursor_row: usize, cursor_col: usize) {
             write_all(STDOUT, line);
         }
     }
-    refresh_status(buffer, mode, cursor_row, cursor_col);
+    refresh(view, status);
 }
 
 /// 判定行を出す。**内部状態であって画面ではない**（モジュール doc の限界）。
@@ -499,6 +626,9 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     // （状態行は本文の1行下のままである）。
     // **訊く経路が本物の利用者を持たないと、検算が置けない。**
     report_window_size(userlib::window_size(0));
+    // **使う値は既定へ落とした側である（e-4）。** **判定は落とす前を見る**
+    // （上の行）——落とした後を見ると、訊けた場合と落ちた場合が同じ値になる。
+    let window = userlib::window_size_or_default(0);
 
     // **代替画面バッファへ入る（e-3）。** **ここから先の描画は代替の面に載り、
     // 出るときに元の画面が戻る。** **読み込みが済んで、確実に編集へ入る時点で
@@ -513,7 +643,25 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     let mut command = [0u8; COMMAND_MAX];
     let mut command_len = 0usize;
     let mut dirty = false;
-    redraw(buffer, mode, row, col);
+    // **画面の形を訊く（e-4）。** **0 なら既定へ落ちる**
+    // （`userlib::window_size_or_default`。**その形がここで初めて本番で効く**）。
+    let view = View {
+        rows: window.rows as usize,
+        text_lines: buffer.count,
+        path: &path[..length + 1],
+    };
+    redraw(
+        &view,
+        buffer,
+        &Status {
+            mode,
+            row,
+            col,
+            dirty,
+            command: &command[..command_len],
+            in_command: false,
+        },
+    );
     report_cursor(buffer, row, col, b"start");
     // **いま状態行に出ている札のモード（ES-d）。**
     let mut shown_mode = mode;
@@ -526,7 +674,17 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
         // **`continue` が何本あっても漏れない。**
         // **`-EAGAIN` で回っている間は変わらない**ので、何度も描かない。
         if mode != shown_mode {
-            refresh_status(buffer, mode, row, col);
+            refresh(
+                &view,
+                &Status {
+                    mode,
+                    row,
+                    col,
+                    dirty,
+                    command: &command[..command_len],
+                    in_command: mode == Mode::Command,
+                },
+            );
             shown_mode = mode;
         }
         let mut byte = [0u8; 1];
@@ -543,7 +701,15 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             #[cfg(not(zi_esc_needs_second_key))]
             if escape == Escape::Esc {
                 escape = Escape::Idle;
-                finish_pending_escape(buffer, row, &mut col, &mut mode, &mut shown_mode);
+                finish_pending_escape(
+                    &view,
+                    buffer,
+                    row,
+                    &mut col,
+                    &mut mode,
+                    &mut shown_mode,
+                    dirty,
+                );
             }
             // **溜まっていない。** 回して待つ（`zash` と同じ形）。
             continue;
@@ -589,13 +755,21 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 // **`[` が続かなかった。Esc 単体である**（確定。上の doc）。
                 // **`-EAGAIN` の側と同じ確定を通る（e-2）。**
                 escape = Escape::Idle;
-                finish_pending_escape(buffer, row, &mut col, &mut mode, &mut shown_mode);
+                finish_pending_escape(
+                    &view,
+                    buffer,
+                    row,
+                    &mut col,
+                    &mut mode,
+                    &mut shown_mode,
+                    dirty,
+                );
                 // **溜めた Esc の次の字は、この周で扱い直す。**
                 if other == ESC {
                     escape = Escape::Esc;
                     continue;
                 }
-                if !handle_byte(other, buffer, &mut row, &mut col, &mut mode) {
+                if !handle_byte(&view, other, buffer, &mut row, &mut col, &mut mode) {
                     continue;
                 }
                 continue;
@@ -623,7 +797,18 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                         Command::Saved => dirty = false,
                         Command::Refused => {}
                     }
-                    redraw(buffer, mode, row, col);
+                    redraw(
+                        &view,
+                        buffer,
+                        &Status {
+                            mode,
+                            row,
+                            col,
+                            dirty,
+                            command: &command[..command_len],
+                            in_command: false,
+                        },
+                    );
                     report_cursor(buffer, row, col, b"command");
                 }
                 ESC => {
@@ -635,6 +820,29 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                     if command_len < command.len() {
                         command[command_len] = other;
                         command_len += 1;
+                    }
+                    // **打っている途中をそのまま出す（e-4）。**
+                    // **打ち終わるまで何も見えない形は、打ち間違いに
+                    // 気づけない**（運用者の指摘）。
+                    //
+                    // 破壊 (e-4, zi-command-line-silent): 打っている間は描き直さない。
+                    // **`:` を打った時点の空のコマンド行のままになる**ので、
+                    // **最下行に打鍵が出ていることの判定だけが落ちる。**
+                    // **コマンド自身は効く**（改行で解釈するため）ので、
+                    // 往復も保存も変わらない。
+                    #[cfg(not(zi_command_line_silent))]
+                    {
+                        refresh(
+                            &view,
+                            &Status {
+                                mode,
+                                row,
+                                col,
+                                dirty,
+                                command: &command[..command_len],
+                                in_command: true,
+                            },
+                        );
                     }
                 }
             }
@@ -648,7 +856,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             continue;
         }
 
-        let changed = handle_byte(byte, buffer, &mut row, &mut col, &mut mode);
+        let changed = handle_byte(&view, byte, buffer, &mut row, &mut col, &mut mode);
         dirty |= changed;
     }
 
@@ -796,11 +1004,13 @@ fn report_window_size(_size: Result<userlib::WindowSize, i64>) {}
 /// 来るまで待っており、**Esc を 2 回押さないとノーマルへ戻れなかった**
 /// （運用者の目視で出た）。
 fn finish_pending_escape(
+    view: &View,
     buffer: &Buffer,
     row: usize,
     col: &mut usize,
     mode: &mut Mode,
     shown_mode: &mut Mode,
+    dirty: bool,
 ) {
     if *mode != Mode::Insert {
         return;
@@ -808,9 +1018,19 @@ fn finish_pending_escape(
     *mode = Mode::Normal;
     // **ノーマルへ戻ると、カーソルは 1 つ左へ寄る**（vi の形）。
     *col = col.saturating_sub(1);
-    // **札を描いてからカーソルを戻す**（[`refresh_status`]）。
+    // **札を描いてからカーソルを戻す**（[`refresh`]）。
     // **順序はあちらが持つ**ので、ここでは考えない。
-    refresh_status(buffer, *mode, row, *col);
+    refresh(
+        view,
+        &Status {
+            mode: *mode,
+            row,
+            col: *col,
+            dirty,
+            command: &[],
+            in_command: false,
+        },
+    );
     *shown_mode = *mode;
     report_cursor(buffer, row, *col, b"normal");
 }
@@ -868,6 +1088,7 @@ enum Command {
 /// **戻り値は「バッファを変えたか」である**（zi-d-2 で意味を変えた。
 /// `:q` が変更の有無で拒むために要る）。
 fn handle_byte(
+    view: &View,
     byte: u8,
     buffer: &mut Buffer,
     row: &mut usize,
@@ -890,6 +1111,30 @@ fn handle_byte(
                     // **モードを変えただけで、バッファは変わっていない。**
                     return false;
                 }
+                // **カーソルの次から挿入する（e-4。vi の `a`）。**
+                //
+                // **`i` との違いは桁が 1 つ右になることだけである。**
+                // **行末では動かない**——インサートでは末尾の 1 つ先まで
+                // 許すので、`move_right` と同じ上限に合わせる。
+                // **`A` / `o` / `O` / `I` は作らない**（利用者が求めたのは
+                // `a` である。使う者がいない機構は検算が置けない）。
+                b'a' => {
+                    *mode = Mode::Insert;
+                    // 破壊 (e-4, zi-append-like-insert): `a` を `i` と同じにする。
+                    // **モードは変わり、字も入る**ので、往復も本数も変わらない。
+                    // **落ちるのは「`a` は `i` より 1 つ右から始まる」判定だけである。**
+                    #[cfg(not(zi_append_like_insert))]
+                    {
+                        if *col < buffer.lengths[*row] {
+                            *col += 1;
+                        }
+                    }
+                    restore_cursor(*row, *col);
+                    // **札は `insert` と分ける**——**判定が `i` と `a` を
+                    // 見分けるためである**（`a` は直前の位置より 1 つ右）。
+                    report_cursor(buffer, *row, *col, b"append");
+                    return false;
+                }
                 b'x' => {
                     let removed = buffer.remove(*row, *col);
                     if removed {
@@ -898,7 +1143,19 @@ fn handle_byte(
                         if *col >= length {
                             *col = length.saturating_sub(1);
                         }
-                        redraw(buffer, *mode, *row, *col);
+                        redraw(
+                            view,
+                            buffer,
+                            &Status {
+                                mode: *mode,
+                                row: *row,
+                                col: *col,
+                                // **消した直後なので、変更は確実にある。**
+                                dirty: true,
+                                command: &[],
+                                in_command: false,
+                            },
+                        );
                         report_cursor(buffer, *row, *col, b"delete");
                     }
                     return removed;
@@ -935,7 +1192,19 @@ fn handle_byte(
             let inserted = buffer.insert(*row, *col, byte);
             if inserted {
                 *col += 1;
-                redraw(buffer, *mode, *row, *col);
+                redraw(
+                    view,
+                    buffer,
+                    &Status {
+                        mode: *mode,
+                        row: *row,
+                        col: *col,
+                        // **入れた直後なので、変更は確実にある。**
+                        dirty: true,
+                        command: &[],
+                        in_command: false,
+                    },
+                );
                 report_cursor(buffer, *row, *col, b"typed");
             }
             inserted

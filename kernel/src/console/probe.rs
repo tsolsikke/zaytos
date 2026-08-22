@@ -34,6 +34,8 @@ pub(crate) enum Observation {
     BeforeAlternate,
     /// 代替画面から戻った画面（e-3）。**控えたものと突き合わせる。**
     AfterAlternate,
+    /// コマンド行（最下行。e-4）。**打っている途中が出ているか。**
+    CommandLine,
 }
 
 /// 代替画面へ入る前に控えた画面の目印（e-3）。
@@ -151,6 +153,7 @@ pub(crate) fn observe(kind: Observation) {
         Observation::Status => observe_status(&mut serial, console),
         Observation::BeforeAlternate => observe_before_alternate(&mut serial, console),
         Observation::AfterAlternate => observe_after_alternate(&mut serial, console),
+        Observation::CommandLine => observe_command_line(&mut serial, console),
     }
 }
 
@@ -296,6 +299,20 @@ fn observe_status(serial: &mut SerialPort, console: &mut crate::console::Console
         ink.map(|(column, _)| column)
     );
 
+    // **下から 2 行目に在ること（e-4）。**
+    //
+    // **`ioctl(TIOCGWINSZ)` が答えた行数を `zi` が実際に使っている**ことの
+    // 主張である。**行番号はこちらが画面から取る**（`console.size()`）ので、
+    // **期待値を写していない。**
+    let (_, rows) = console.size();
+    let at_bottom = found.is_some_and(|(row, _, _)| row + 2 == rows);
+    let _ = writeln!(
+        serial,
+        "screen-color: the zi status line sits on the second-to-last row = {at_bottom} \
+         (row {:?}, the screen has {rows} row(s))",
+        found.map(|(row, _, _)| row)
+    );
+
     // **札を控えて、前に見たものと比べる。**
     let mut label = [0u8; LABEL_MAX];
     let mut length = 0usize;
@@ -383,5 +400,35 @@ fn observe_after_alternate(serial: &mut SerialPort, console: &mut crate::console
          (was {:?}, now {:?})",
         before.prompt.map(|(row, ink)| (row, PixelHex(ink))),
         prompt_now.map(|(row, ink)| (row, PixelHex(ink)))
+    );
+}
+
+/// コマンド行（最下行）に、打っている途中が出ているか（e-4）。
+///
+/// # 最下行の字をそのまま出す
+///
+/// **`:` を打った時点で `:` が出て、`w` を打てば `:w` になる。**
+/// **観測点は台本の `:w` の直後に置いてある**ので、**この時点の最下行は
+/// `:w` であるはずである。**
+///
+/// **判定するのはホスト側である**（`xtask`）。ここは画面から読んだ字を
+/// 出すだけで、**期待値を持たない。**
+fn observe_command_line(serial: &mut SerialPort, console: &mut crate::console::Console) {
+    let (columns, rows) = console.size();
+    let row = rows - 1;
+    let mut line = [0u8; 24];
+    let mut length = 0usize;
+    for column in 0..columns.min(line.len() as u32) {
+        let c = console.cell_char(column, row).unwrap_or(' ');
+        line[length] = if c.is_ascii() { c as u8 } else { b'?' };
+        length += 1;
+    }
+    while length > 0 && line[length - 1] == b' ' {
+        length -= 1;
+    }
+    let _ = writeln!(
+        serial,
+        "screen-command: the last row (row {row}) says {:?}",
+        core::str::from_utf8(&line[..length]).unwrap_or("?")
     );
 }

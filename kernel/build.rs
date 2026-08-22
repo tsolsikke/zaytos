@@ -173,6 +173,18 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
             "CARGO_FEATURE_ZI_ESC_NEEDS_SECOND_KEY_TEST",
             "zi_esc_needs_second_key",
         ),
+        (
+            "CARGO_FEATURE_ZI_STATUS_BELOW_TEXT_TEST",
+            "zi_status_below_text",
+        ),
+        (
+            "CARGO_FEATURE_ZI_COMMAND_LINE_SILENT_TEST",
+            "zi_command_line_silent",
+        ),
+        (
+            "CARGO_FEATURE_ZI_APPEND_LIKE_INSERT_TEST",
+            "zi_append_like_insert",
+        ),
     ];
     let mut extra_cfgs: Vec<String> = Vec::new();
     for (env, cfg) in USER_PROGRAM_CFGS {
@@ -437,6 +449,19 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     // 書き写すと、模様を変えたときに片方だけが古くなる。
     let direct_max_last = pattern[DIRECT_MAX_BYTES - 1];
     let indirect_first_last = pattern[DIRECT_MAX_BYTES];
+    // **像の中の番号を、建てた直後に外の道具から測る（e-4 の手当て）。**
+    let motd = stat_of(&image, "/etc/motd");
+    let indirect = stat_of(&image, "/data/indirect-first");
+    let motd_inode = motd
+        .inode
+        .expect("debugfs did not report /etc/motd's inode");
+    let motd_block = motd
+        .first_block
+        .expect("debugfs did not report /etc/motd's first block");
+    let indirect_table = indirect
+        .indirect_block
+        .expect("debugfs did not report the single indirect block");
+    let first_free = first_free_block(&image);
     std::fs::write(
         format!("{out_dir}/fsimage_info.rs"),
         format!(
@@ -447,11 +472,110 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
              pub const DIRECT_MAX_LAST_BYTE: u8 = {direct_max_last};\n\
              pub const INDIRECT_FIRST_BYTES: u64 = {};\n\
              pub const INDIRECT_FIRST_LAST_BYTE: u8 = {indirect_first_last};\n\
-             pub const WRITABLE_SEED_BYTES: u64 = {WRITABLE_SEED_BYTES};\n",
+             pub const WRITABLE_SEED_BYTES: u64 = {WRITABLE_SEED_BYTES};\n\
+             pub const MOTD_INODE: usize = {motd_inode};\n\
+             pub const MOTD_DATA_BLOCK: usize = {motd_block};\n\
+             pub const INDIRECT_TABLE_BLOCK: usize = {indirect_table};\n\
+             pub const FIRST_FREE_BLOCK: usize = {first_free};\n",
             DIRECT_MAX_BYTES + 1
         ),
     )
     .expect("failed to write fsimage_info.rs");
+}
+
+/// `debugfs -R "stat <path>"` から拾う番号（e-4 の手当て）。
+struct ImageStat {
+    inode: Option<usize>,
+    first_block: Option<usize>,
+    indirect_block: Option<usize>,
+}
+
+/// 像の中の番号を `debugfs` に訊く（e-4 の手当て）。
+///
+/// # なぜ build.rs が測るのか
+///
+/// **像の中の inode 番号とブロック番号は、像の中身で決まる。**
+/// **ユーザープログラムを変える feature（`USER_PROGRAM_CFGS`）を立てると
+/// 像が変わる**ので、**構成ごとに番号が違う。**
+///
+/// **手で測って定数へ書く形は、その構成の分しか合わない。** 実際に踏んだ——
+/// **`zi` が e-4 で 1 ブロック太り、`zi-test` の構成でだけ番号がずれて、
+/// 壊した像の検算が「壊れていない」と言った**（`docs/troubleshooting.md`）。
+///
+/// **`user.ld` から受け皿の位置を読んで生成しているのと同じ形である**
+/// （直す場所を 1 つにする）。**道具は増えていない**——`debugfs` は
+/// `mke2fs` と同じ e2fsprogs にある。
+fn stat_of(image: &str, path: &str) -> ImageStat {
+    let output = std::process::Command::new("debugfs")
+        // **英語で出させる（e-4 の手当て）。** **道具は環境の言語で訳す**
+        // ——実測で、`dumpe2fs` の見出しが日本語で出て解析が外れた。
+        .env("LC_ALL", "C")
+        .args(["-R", &format!("stat {path}"), image])
+        .output()
+        .unwrap_or_else(|e| {
+            panic!("failed to run debugfs for {path}: {e}. ZaytOS measures the image numbers with debugfs (e2fsprogs)")
+        });
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut stat = ImageStat {
+        inode: None,
+        first_block: None,
+        indirect_block: None,
+    };
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("Inode: ") {
+            stat.inode = rest
+                .split_whitespace()
+                .next()
+                .and_then(|number| number.parse().ok());
+        }
+        // **`BLOCKS:` の次の行に `(0):B` と `(IND):B` が並ぶ。**
+        if line.starts_with('(') {
+            for piece in line.split(", ") {
+                if let Some(rest) = piece.strip_prefix("(0):") {
+                    stat.first_block = rest.trim().parse().ok();
+                }
+                if let Some(rest) = piece.strip_prefix("(IND):") {
+                    stat.indirect_block = rest.trim().parse().ok();
+                }
+            }
+        }
+    }
+    stat
+}
+
+/// 最初の空きブロック（`dumpe2fs` の `Free blocks:` の先頭。e-4 の手当て）。
+///
+/// **使用しているブロックの上端 + 1 である。** 壊した像の検算は、
+/// **ここまでを写せば像が読み切れる。**
+fn first_free_block(image: &str) -> usize {
+    let output = std::process::Command::new("dumpe2fs")
+        // **英語で出させる**（[`stat_of`] と同じ理由）。
+        .env("LC_ALL", "C")
+        .arg(image)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run dumpe2fs: {e} (e2fsprogs)"));
+    let text = String::from_utf8_lossy(&output.stdout);
+    // **群の節に入ってから読む。** **superblock の節にも `Free blocks:` が
+    // あるが、あちらは「空きの数」で、こちらは「空きの範囲」である**
+    // （実測。数のほうを読んで 419 を得た）。
+    let mut in_group = false;
+    for line in text.lines() {
+        if line.starts_with("Group ") {
+            in_group = true;
+            continue;
+        }
+        if !in_group {
+            continue;
+        }
+        if let Some(rest) = line.trim().strip_prefix("Free blocks: ") {
+            // **`93-511` の形と、`93` だけの形がある。**
+            let first = rest.split(&['-', ','][..]).next().unwrap_or("").trim();
+            if let Ok(block) = first.parse::<usize>() {
+                return block;
+            }
+        }
+    }
+    panic!("dumpe2fs did not report a free block range for the image")
 }
 
 /// `mke2fs -V` の 1 行目。**版を記録に残すためだけに読む。**

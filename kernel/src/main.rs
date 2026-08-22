@@ -5723,10 +5723,19 @@ static mut CORRUPT_FS_IMAGE: [u8; CORRUPT_FS_LEN] = [0; CORRUPT_FS_LEN];
 
 /// 切り出すブロック数。**参照されている最大のブロックより大きいこと。**
 ///
-/// **実測で決める。** `dumpe2fs` の `Free blocks:` の先頭が使用の上端 + 1 で、
-/// zi-d-1 の時点では 93（使用は 0..92）である。**96 は余裕**——像へ 1 本
-/// 足すたびに直さずに済む幅を取ってある。
-const CORRUPT_FS_BLOCKS: usize = 96;
+/// # 手で測らない（e-4 の手当て）
+///
+/// **`build.rs` が像を建てた直後に `dumpe2fs` へ訊いた値である**
+/// （`fsimage_info::FIRST_FREE_BLOCK`。使用の上端 + 1）。
+///
+/// **手で測って書く形は、構成ごとに像が違うと合わなくなる。**
+/// **実際に踏んだ**——`zi` が e-4 で 1 ブロック太り、**`zi-test` の構成でだけ
+/// 番号がずれて、壊した像の検算が「壊れていない」と言った**
+/// （`docs/troubleshooting.md`）。
+///
+/// **余裕は取らない。** **使用の上端までを写せば像は読み切れる**ので、
+/// **余裕は「合っているように見える幅」でしかない。**
+const CORRUPT_FS_BLOCKS: usize = fsimage_info::FIRST_FREE_BLOCK;
 
 /// 切り出した像のバイト数。
 const CORRUPT_FS_LEN: usize = CORRUPT_FS_BLOCKS * FS_BLOCK_SIZE;
@@ -5768,8 +5777,12 @@ const FS_ROOT_INODE_AT: usize = fs_inode_at(2);
 ///
 /// **ADR-0038 で 24 から 25 へ、ADR-0039 で 26 へ、zi-d-1 で 28 へ動いた**
 /// （`/data/sparse-hole`、`/bin/bss-test`、`/bin/zi` と `/data/lines` を足した。
-/// **いずれも `debugfs` で実測している**——推測で足さない）。
-const FS_MOTD_INODE_AT: usize = fs_inode_at(28);
+/// **いずれも `debugfs` で実測していた**——推測で足さない）。
+///
+/// **e-4 で、手で測るのをやめた。** **`build.rs` が像を建てた直後に
+/// `debugfs` へ訊く**（`fsimage_info::MOTD_INODE`）。**構成ごとに像が違う**ので、
+/// **1 つの数を手で持つ形では、どれか 1 つの構成にしか合わない。**
+const FS_MOTD_INODE_AT: usize = fs_inode_at(fsimage_info::MOTD_INODE);
 
 /// ルートディレクトリのデータブロック（実測。判定行の `i_block[0]` に出ている）。
 const FS_ROOT_DIR_BLOCK: usize = 20 * FS_BLOCK_SIZE;
@@ -5801,14 +5814,14 @@ const FS_ROOT_ETC_ENTRY: usize = FS_ROOT_DIR_BLOCK + 68;
 /// **動かないこともあると分かったので、そのつど測ること**（推測しない）。
 /// **今回は `debugfs` で測った**——判定行にも出ているが、
 /// **像を読む側と壊す側が同じ数を別々に持つので、外の道具で突き合わせた。**
-const FS_INDIRECT_TABLE_BLOCK: usize = 85 * FS_BLOCK_SIZE;
+const FS_INDIRECT_TABLE_BLOCK: usize = fsimage_info::INDIRECT_TABLE_BLOCK * FS_BLOCK_SIZE;
 
 /// `/etc/motd` のデータブロック（実測）。
 ///
 /// **S11-5 で 58 から 61 へ、S11-9 で 61 から 69 へ、S11-10 で 70 へ、S11-11 で 74 へ、
 /// S12 前の手当ての 3 本目で 75 へ、同じ手当ての C で 78 へ、S12-c で 79 へ動いた**
 /// （[`FS_MOTD_INODE_AT`] と同じ理由）。
-const FS_MOTD_DATA_BLOCK: usize = 92 * FS_BLOCK_SIZE;
+const FS_MOTD_DATA_BLOCK: usize = fsimage_info::MOTD_DATA_BLOCK * FS_BLOCK_SIZE;
 
 /// 種のファイルと同じ木にある `/etc/motd` の中身（S10-a）。
 ///
@@ -9129,6 +9142,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "alt-screen-skip-repaint-test",
         cfg!(feature = "alt-screen-skip-repaint-test"),
         "代替画面から戻るときに画面を描き直さない",
+    ),
+    (
+        "zi-status-below-text-test",
+        cfg!(feature = "zi-status-below-text-test"),
+        "zi が状態行を画面の下端ではなく本文の1行下へ置く",
+    ),
+    (
+        "zi-command-line-silent-test",
+        cfg!(feature = "zi-command-line-silent-test"),
+        "zi がコマンド行を打っている間に描き直さない",
+    ),
+    (
+        "zi-append-like-insert-test",
+        cfg!(feature = "zi-append-like-insert-test"),
+        "zi の a が i と同じ桁から挿入する",
     ),
     (
         "write-file-skip-append-test",
