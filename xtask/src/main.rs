@@ -1352,7 +1352,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gfx-test] [--kvm] [--no-limit] [--manual] [--key-probe]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
+    const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gtk] [--gfx-test] [--kvm] [--no-limit] [--manual] [--key-probe]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
        cargo xtask run --shell-test [--drop-arrows | --drop-esc]\n       cargo xtask run --ansi-test [--sabotage FEATURE]\n       cargo xtask run --zi-test [--sabotage FEATURE]
        cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
        cargo xtask run --boot-log-diff [--update-reference]
@@ -1374,6 +1374,10 @@ fn main() -> Result<()> {
             // 取り出したスキャンコードを生のままシリアルへ出す構成で建てる
             // （[`build_kernel_for_key_probe`]）。
             let key_probe = rest.iter().any(|a| a == "--key-probe");
+            // **窓を GTK で開く（zi-e）。** **窓の既定は SDL である**
+            // ——GTK は JIS 固有キーを落とす（実測。[`DisplayMode::Sdl`]）。
+            // **これは退路で、SDL で窓が開かない環境のために残してある。**
+            let gtk = rest.iter().any(|a| a == "--gtk");
             if let Some(index) = rest.iter().position(|a| a == "--lapic-timer-test") {
                 let kind = rest.get(index + 1).with_context(|| {
                     let names: Vec<&str> = LAPIC_TIMER_TESTS.iter().map(|t| t.name).collect();
@@ -1633,15 +1637,17 @@ fn main() -> Result<()> {
                 })?;
                 return cmd_exception_test(kind);
             }
-            cmd_run(
+            cmd_run(&RunOptions {
                 panic_test,
                 gui,
+                gtk,
                 gfx_test,
                 kvm,
-                no_limit || manual,
+                // **`--manual` は上限を外す**（`cmd_run` の doc）。
+                no_limit: no_limit || manual,
                 manual,
                 key_probe,
-            )
+            })
         }
         Some("check") => {
             let full = args[1..].iter().any(|a| a == "--full");
@@ -1673,7 +1679,24 @@ enum SerialSink {
 /// 唯一の観測手段とする）。`--gui` 指定時のみ実際のウィンドウを開く。
 enum DisplayMode {
     None,
-    Gui,
+    /// 窓を開ける。**窓を開けるときの既定である**（zi-e）。
+    ///
+    /// # なぜ GTK ではなく SDL が既定なのか
+    ///
+    /// **GTK は JIS 固有キーを落とす（実測）。** 運用者の JIS キーボードで、
+    /// **`ろ`（`0x73`）と `¥`（`0x7D`）だけが届かなかった**——他のキーは
+    /// 押下も離鍵も届く。**SDL では両方とも届く。**
+    ///
+    /// **打つ人が居るのは窓を開けるときだけである。** **打てないキーが
+    /// ある側を既定に残す理由が無い。**
+    ///
+    /// 経緯は `docs/troubleshooting.md` にある。
+    Sdl,
+    /// GTK で開く（`--gtk`）。**退路である。**
+    ///
+    /// **SDL で窓が開かない環境があり得る**（別の機械、別の版）。
+    /// **既定を替えるときは、替える前のものを選べる形で残す。**
+    Gtk,
 }
 
 /// QEMU のアクセラレータ。既定は TCG（純粋エミュレーション）。
@@ -1751,15 +1774,30 @@ impl DebugEvents {
 /// **失うもの**——**手で触っている間に例外が起きても、割り込みの列は残らない。**
 /// **残るのは `cpu_reset`**（トリプルフォルトの再起動要因）**とシリアルである。**
 /// **原因を追う段になったら `--manual` を外して起こし直すこと。**
-fn cmd_run(
+/// `cargo xtask run` の指定。
+///
+/// **1 つずつ渡す形だと引数が 8 本になり、clippy が落ちる**
+/// （`too_many_arguments`）。**旗を足すたびに呼び出し側 3 か所を直す形でも
+/// あったので、まとめてある。**
+struct RunOptions {
     panic_test: bool,
     gui: bool,
+    gtk: bool,
     gfx_test: bool,
     kvm: bool,
     no_limit: bool,
     manual: bool,
     key_probe: bool,
-) -> Result<()> {
+}
+
+fn cmd_run(opts: &RunOptions) -> Result<()> {
+    // **窓と上限の旗は [`run_interactive`] が読む。** ここが使うのは 3 つだけである。
+    let RunOptions {
+        panic_test,
+        gfx_test,
+        key_probe,
+        ..
+    } = *opts;
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
     let bootloader_efi = build_bootloader(&workspace_root, panic_test)?;
@@ -1774,15 +1812,7 @@ fn cmd_run(
     if panic_test {
         run_panic_test(&workspace_root, &ovmf_vars, &esp_dir)
     } else {
-        run_interactive(
-            &workspace_root,
-            &ovmf_vars,
-            &esp_dir,
-            gui,
-            kvm,
-            no_limit,
-            manual,
-        )
+        run_interactive(&workspace_root, &ovmf_vars, &esp_dir, opts)
     }
 }
 
@@ -1819,11 +1849,16 @@ fn run_interactive(
     workspace_root: &Path,
     ovmf_vars: &Path,
     esp_dir: &Path,
-    gui: bool,
-    kvm: bool,
-    no_limit: bool,
-    manual: bool,
+    opts: &RunOptions,
 ) -> Result<()> {
+    let RunOptions {
+        gui,
+        gtk,
+        kvm,
+        no_limit,
+        manual,
+        ..
+    } = *opts;
     let debug_log = workspace_root.join("target").join("qemu-debug.log");
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
@@ -1831,10 +1866,11 @@ fn run_interactive(
         esp_dir,
         serial: &SerialSink::Stdio,
         debug_log: &debug_log,
-        display: if gui {
-            DisplayMode::Gui
-        } else {
-            DisplayMode::None
+        // **`--gtk` も窓を開ける**（`--gui` と一緒に書かなくてよい）。
+        display: match (gui || gtk, gtk) {
+            (true, false) => DisplayMode::Sdl,
+            (true, true) => DisplayMode::Gtk,
+            (false, _) => DisplayMode::None,
         },
         monitor_socket: None,
         accelerator: if kvm {
@@ -10997,7 +11033,16 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         }
         total += 1;
         run_regression("panic-test", &mut failed, &mut retries, || {
-            cmd_run(true, false, false, false, false, false, false)
+            cmd_run(&RunOptions {
+                panic_test: true,
+                gui: false,
+                gtk: false,
+                gfx_test: false,
+                kvm: false,
+                no_limit: false,
+                manual: false,
+                key_probe: false,
+            })
         });
         // higher-half の破壊確認（B-2a-5）。(a)(b)(c) は QEMU で位置署名 + 定常未到達を
         // 判定、(d) はビルド + トランポリンのバイト不一致を静的に判定。
@@ -11872,10 +11917,12 @@ fn qemu_launch_args(opts: &QemuLaunchOptions) -> Vec<OsString> {
         },
         // 既定は none（ADR-0003: シリアルログを唯一の観測手段とする）。
         // `--gui` 指定時のみ実際のウィンドウ（WSLg 経由）を開く。
+        // **窓を開けるときの既定は SDL である**（[`DisplayMode::Sdl`] に理由がある）。
         "-display".into(),
         match opts.display {
             DisplayMode::None => "none".into(),
-            DisplayMode::Gui => "gtk".into(),
+            DisplayMode::Sdl => "sdl".into(),
+            DisplayMode::Gtk => "gtk".into(),
         },
         "-no-reboot".into(),
         "-no-shutdown".into(),
@@ -11907,6 +11954,22 @@ fn qemu_launch_args(opts: &QemuLaunchOptions) -> Vec<OsString> {
         args.push("-monitor".into());
         args.push(format!("unix:{},server,nowait", monitor_socket.display()).into());
     }
+
+    // **キーマップ（`-k`）は渡さない（zi-e）。**
+    //
+    // **一度渡してみて、外した。** JIS 固有キーが GTK で届かなかったので
+    // `-k ja` を試したが、**効かなかった（実測）。** QEMU の文書のとおりで、
+    // **`-k` が要るのは生のキーコードが取りにくい環境だけである**
+    // （VNC・curses・一部の X11 サーバ）。**GTK も SDL も生のキーコードを使う。**
+    //
+    // **受理は証拠にならない**——**存在しない `-k zz` も同じく受理された**
+    // （実測。起動時にキーマップを読まない）。**「渡しても落ちない」ことを
+    // 「効いている」と読み違えない。**
+    //
+    // **効かないものを残さない。** 残すと、**「渡してあるのだから配列の
+    // 問題ではない」という誤った証拠になる。**
+    //
+    // **届かない側は、窓の種類で解いた**（[`DisplayMode::Sdl`]）。
 
     args
 }
@@ -12200,18 +12263,60 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         assert_eq!(joined[pos + 1], "none");
     }
 
+    /// **窓を開けるときの既定は SDL である（zi-e）。**
+    ///
+    /// # なぜ既定を固定するのか
+    ///
+    /// **GTK は JIS 固有キー（`ろ` = `0x73` / `¥` = `0x7D`）を落とす**
+    /// （実測。`docs/troubleshooting.md`）。**打つ人が居るのは窓を開けるときだけ
+    /// なので、打てないキーがある側を既定に残さない。**
+    ///
+    /// **既定が戻ったことを、実際に打って気づく形にしない。**
     #[test]
-    fn qemu_args_gui_display_selects_gtk() {
+    fn opening_a_window_selects_sdl_and_gtk_stays_available() {
         let debug_log = PathBuf::from("/z/qemu-debug.log");
-        let mut opts = base_options(&SerialSink::Stdio, &debug_log);
-        opts.display = DisplayMode::Gui;
-        let joined = joined_args(&qemu_launch_args(&opts));
 
-        let pos = joined
-            .iter()
-            .position(|a| a == "-display")
-            .expect("-display flag missing");
-        assert_eq!(joined[pos + 1], "gtk");
+        for (display, wanted) in [
+            (DisplayMode::None, "none"),
+            (DisplayMode::Sdl, "sdl"),
+            (DisplayMode::Gtk, "gtk"),
+        ] {
+            let mut opts = base_options(&SerialSink::Stdio, &debug_log);
+            opts.display = display;
+            let joined = joined_args(&qemu_launch_args(&opts));
+
+            let pos = joined
+                .iter()
+                .position(|a| a == "-display")
+                .expect("-display flag missing");
+            assert_eq!(joined[pos + 1], wanted);
+        }
+    }
+
+    /// **キーマップ（`-k`）はどの構成でも渡さない（zi-e）。**
+    ///
+    /// # 外したものが黙って戻らないようにする
+    ///
+    /// **一度 `-k ja` を渡し、効かないので外した**（実測。GTK でも SDL でも
+    /// 生のキーコードを使うため）。**受理は証拠にならない**——`-k zz` も
+    /// 受理されるので、**「渡しても落ちない」を「効いている」と読み違えうる。**
+    ///
+    /// **効かないものが残っていると、「渡してあるのだから配列の問題ではない」
+    /// という誤った証拠になる。** 戻ったらここが落ちる。
+    #[test]
+    fn no_keyboard_layout_is_ever_passed() {
+        let debug_log = PathBuf::from("/z/qemu-debug.log");
+
+        for display in [DisplayMode::None, DisplayMode::Sdl, DisplayMode::Gtk] {
+            let mut opts = base_options(&SerialSink::Stdio, &debug_log);
+            opts.display = display;
+            let joined = joined_args(&qemu_launch_args(&opts));
+
+            assert!(
+                !joined.iter().any(|a| a == "-k"),
+                "-k が渡っている（効かないことを実測してある）"
+            );
+        }
     }
 
     #[test]
