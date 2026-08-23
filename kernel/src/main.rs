@@ -9349,6 +9349,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "zi が終わるときにヒープを返さない",
     ),
     (
+        "zi-skip-grow-test",
+        cfg!(feature = "zi-skip-grow-test"),
+        "zi が索引を伸ばさず、入る行までで切り詰める",
+    ),
+    (
+        "zi-join-does-nothing-test",
+        cfg!(feature = "zi-join-does-nothing-test"),
+        "zi が行頭の Backspace を捨てる",
+    ),
+    (
         "unlink-ignore-request-test",
         cfg!(feature = "unlink-ignore-request-test"),
         "unlink を受けても消さない",

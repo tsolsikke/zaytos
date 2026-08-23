@@ -59,47 +59,31 @@ use userlib::{
 /// パスの最大長（NUL を含む）。**カーネルの `PATH_MAX` と同じ。**
 const PATH_MAX: usize = 256;
 
-/// 収められる行数の初期容量（H-b-1）。**据え置きの上限ではない。**
+/// 開くときに本文へ足す余白（H-b-2）。**1 ページである。**
 ///
-/// **b-1 では上限でもある**——**取る量をこの値から決めており、伸ばす道を
-/// まだ作っていない。** **外すのは b-2 である。**
-const MAX_LINES: usize = 64;
-/// 1 行の最大バイト数の初期容量（H-b-1）。**同じく b-2 で外す。**
-const MAX_LINE_LEN: usize = 128;
+/// # 容量はファイルの大きさから決める
+///
+/// **`stat` で訊いた大きさ + 改行の補い 1 + 同じ大きさ + この余白**である。
+/// **「同じ大きさ」を足すのは、開いたファイルが倍に育つまで伸ばさずに済む
+/// ようにするためである。** **余白のほうは、空のファイルにも 1 ページ渡る。**
+///
+/// **b-1 の `MAX_LINES` と `MAX_LINE_LEN` はここで消えた。**
+/// **上限はヒープの上限（`0x7ff000`。ADR-0044 の決定 4）だけである。**
+const TEXT_SLACK: usize = 4096;
 
-/// 索引の枠の数（H-b-1）。**行数 + 1 である**——**末尾に番兵を 1 つ置く。**
+/// 本文を伸ばすときの最小の刻み（H-b-2）。**1 ページである。**
 ///
-/// # 番兵が在ると場合分けが消える
-///
-/// **`starts[row + 1]` が常に読める**ので、**行の長さも、最終行の終わりも、
-/// 同じ式で出る**（`starts[count]` は `used` に等しい）。
-/// **最終行だけを別扱いする枝が要らない。**
-const INDEX_SLOTS: usize = MAX_LINES + 1;
+/// **1 バイト足りないたびに `brk` を呼ぶ形にしない。**
+const TEXT_STEP: usize = 4096;
 
-/// 索引のバイト数（H-b-1）。
-const INDEX_BYTES: usize = INDEX_SLOTS * core::mem::size_of::<usize>();
-
-/// 本文の容量（H-b-1）。**改行を含む。**
+/// 索引の初期の枠（H-b-2）。**行数 + 番兵 1 である。**
 ///
-/// **`:w` が書く形そのものである**——**行の中身に改行を 1 つずつ足した長さで、
-/// 全行が上限まで埋まった場合がこれである。** **保存で並べ直さない**ので、
-/// **書き出しの受け皿を別に持たない。**
-const TEXT_CAPACITY: usize = MAX_LINES * (MAX_LINE_LEN + 1);
+/// **b-1 の初期容量（64 行）をそのまま持ってきた。** **開いた直後に
+/// 足りなければ [`Buffer::ensure_index`] が伸ばす**ので、**上限ではない。**
+const INDEX_INITIAL: usize = 64 + 1;
 
-/// 読み込みで受ける上限（H-b-1）。**改行を含まない。**
-///
-/// # 収める量と読む量が違う
-///
-/// **[`TEXT_CAPACITY`] より小さい。** **これは b-1 より前の受け皿の大きさを
-/// そのまま持ってきた値である**——**開けるファイルを変えないためである。**
-/// **同じにすると、いままで断っていた大きさのファイルが開くようになる**
-/// （実測で、64 行 x 128 字 + 改行 64 個 = 8256 バイトのファイルがそれに当たる。
-/// 以前は受け皿が 8192 バイトなので拒んでいた）。
-/// **b-1 は振る舞い不変の段なので、その差を作らない。** **外すのは b-2 である。**
-const READ_CAPACITY: usize = MAX_LINES * MAX_LINE_LEN;
-
-/// ヒープから取る量（H-b-1）。**索引と本文を 1 回で取る。**
-const RESERVE_BYTES: usize = INDEX_BYTES + TEXT_CAPACITY;
+/// 索引を伸ばすときの最小の刻み（H-b-2）。**行の単位である。**
+const INDEX_STEP: usize = 64;
 
 /// 1 回に読む大きさ。`cat` と同じ理由で、ブロックより小さくてよい。
 ///
@@ -108,11 +92,10 @@ const RESERVE_BYTES: usize = INDEX_BYTES + TEXT_CAPACITY;
 /// **これは容量ではなく、`read` に渡す長さである。** **ヒープが伸びても、
 /// 1 回のシステムコールで受ける量を変える理由が無い。**
 ///
-/// **本文へ直に読み込まないのも、ここに理由がある。** **入りきらないことを
-/// 見るには、入らないバイトを 1 度は受け取る必要がある**——**本文の残りへ
-/// 直に読むと、`read` の長さが残り容量で切られ、「ちょうど埋まった」と
-/// 「入りきらなかった」が同じ形になる。** **中継ぎを 1 つ挟むと、
-/// `read` の長さが常に [`CHUNK`] で揃い、超過はその場で分かる。**
+/// **本文へ直に読み込まないのも、ここに理由がある。** **`read` の長さを
+/// 残り容量で切ると、「ちょうど埋まった」と「入りきらなかった」が同じ形になる。**
+/// **中継ぎを 1 つ挟むと、`read` の長さが常に [`CHUNK`] で揃い、
+/// 受け取ってから容量を確かめられる**（H-b-2 では、そこで伸ばす）。
 const CHUNK: usize = 256;
 
 /// 引数が無いときの使い方。
@@ -126,15 +109,19 @@ const TOO_BIG: &[u8] = b"zi: the file does not fit the buffer\n";
 /// ヒープを取れなかったときの断り書き（H-b-1）。
 const NO_HEAP: &[u8] = b"zi: cannot reserve the edit buffer\n";
 
-/// 行数の上限に当たったときの報せ（zi-f）。**コマンド行へ出す。**
+/// 行を増やせなかったときの報せ（zi-f。H-b-2 で意味が変わった）。
 ///
 /// **黙って落とさない。** **`insert` が入らない字を落とすのと同じ判断だが、
 /// あちらは 1 字で、こちらは「行が作れない」である**——**使う人から見て
 /// 何も起きないので、言わないと分からない。**
+///
+/// # 64 行という値は消えた（H-b-2）
+///
+/// **b-1 まではこれが `MAX_LINES` に当たった報せだった。**
+/// **いま出るのは、ヒープを伸ばせなかったときだけである**
+/// （`brk` がヒープの上限で断ったか、フレームが尽きたか）。
+/// **文言の見直しは締めで行う**（`docs/deferred-decisions.md` に行がある）。
 const NO_ROOM_FOR_A_LINE: &[u8] = b"no room for another line";
-
-/// 1 行の上限に当たって連結できなかったときの報せ（zi-f）。
-const NO_ROOM_TO_JOIN: &[u8] = b"the joined line would be too long";
 
 /// `read(0)` が「まだ無い」を返す値（`-EAGAIN`）。
 const MINUS_EAGAIN: i64 = -11;
@@ -202,46 +189,77 @@ enum Escape {
     Tilde,
 }
 
-/// 行の集まり（H-b-1）。**1 本の連続バイト列と、行の索引で持つ。**
+/// 行の集まり（H-b-1。H-b-2 で容量が動くようになった）。
 ///
 /// # 形
 ///
+/// **ヒープから取った 1 本の領域を、前半の本文と後半の索引に割って使う。**
+///
+///     [ 本文 text_cap バイト ][ 索引 index_cap 枠 ]
+///
 /// **`text[..used]` が、そのまま `:w` の書き出す形である**——
 /// **各行の中身の後ろに改行が 1 つ在る。** **`starts[row]` はその行の
-/// 開始位置で、`starts[count]` は `used` に等しい**（番兵。[`INDEX_SLOTS`]）。
+/// 開始位置で、`starts[count]` は `used` に等しい**（番兵）。
 ///
 /// **したがって行 `row` の中身は `text[starts[row]..starts[row + 1] - 1]` で、
 /// 末尾の 1 バイトを落とした分が改行である。**
 ///
-/// # なぜこの形なのか
+/// # 索引を後ろに置いた（H-b-2）
 ///
-/// **3 つが同時に消えるからである。** **保存で並べ直さないので書き出しの
-/// 受け皿が要らず、読み込みの受け皿がそのまま本体になり、行ごとの固定長の
-/// 枠も要らない。**
+/// **`brk` は上端しか動かさない。** **索引を後ろに置くと、行が増えたときは
+/// 上端を伸ばすだけで済み、何も動かさなくてよい。**
+///
+/// **本文が伸びるときだけ、索引を後ろへずらす。** **索引は行あたり 8 バイト
+/// なので、動かす量は本文よりずっと小さい。** **前後を逆にすると、
+/// 本文が伸びるたびに本文の全体を動かすことになる。**
+///
+/// # 上限
+///
+/// **行数にも行の長さにも上限が無い**（b-1 の `MAX_LINES` と `MAX_LINE_LEN`
+/// は消えた）。**残るのはヒープの上限だけである**——`0x7ff000` まで、
+/// 実測で 1012 ページ（約 4MiB。ADR-0044 の決定 4）。
 ///
 /// # 代償——1 字入れるたびに後ろ全部が動く
 ///
 /// **`insert` も `remove` も、その位置から `used` までを 1 バイトずらす。**
-/// **この規模（数 KiB）では問題にならない**が、**大きなファイルでは遅い。**
+/// **数 KiB では問題にならないが、大きなファイルでは遅い。**
 /// **行ごとに確保する形なら動かさずに済むが、そちらは保存で並べ直しが
 /// 復活し、小さな確保が多数になって本物の割り当て器が要る**
-/// （引き継いだ設計の判断）。**限界として引き受ける。**
-///
-/// # スタックに置けるようになった
-///
-/// **b-1 より前は `.bss` の静的だった**——**約 16KiB の配列を局所に置くと、
-/// ユーザースタック（1 ページ）の入口で `#PF` になる**（実測。
-/// `Folded(14)` で 0 syscall のまま死んだ）。**いまは中身がヒープに在り、
-/// この構造体そのものは参照 2 本と数 2 つなので、局所で足りる。**
+/// （H 段 b の設計）。**限界として引き受ける。**
 struct Buffer {
-    /// 各行の開始位置。**`starts[count]` は番兵で、`used` に等しい。**
-    starts: &'static mut [usize],
-    /// 本文。**各行の後ろに改行が 1 つ在る。**
-    text: &'static mut [u8],
+    /// ヒープから取った領域の全体。
+    ///
+    /// **割らずに持つ（H-b-2）。** **[`userlib::heap::grow_to`] と
+    /// [`userlib::heap::release`] が一意の参照を値で受け取る**ので、
+    /// **渡せる形で持っておく必要がある。** **割った 2 本を持つと渡し直せない。**
+    region: &'static mut [u8],
+    /// 本文の容量（バイト）。**索引の開始位置でもある。**
+    ///
+    /// **`usize` の倍数に保つ**——**索引の整列がここで決まる。**
+    text_cap: usize,
+    /// 索引の枠の数（行数 + 番兵 1 まで入る）。
+    index_cap: usize,
     /// 行数。
     count: usize,
     /// 使っているバイト数（改行を含む）。
     used: usize,
+}
+
+/// `usize` の整列へ切り上げる（H-b-2）。
+///
+/// **索引が本文の後ろに在るので、本文の容量が `usize` の倍数でないと
+/// 索引の整列が崩れる。**
+fn round_up_word(bytes: usize) -> usize {
+    let word = userlib::heap::WORD;
+    (bytes + word - 1) & !(word - 1)
+}
+
+/// 開くときの本文の容量を決める（H-b-2）。
+///
+/// **ファイルの大きさ + 改行の補い 1 + 同じ大きさ + [`TEXT_SLACK`]。**
+/// 理由はあちらの doc にある。
+fn text_capacity_for(size: usize) -> usize {
+    round_up_word(size + 1 + size + TEXT_SLACK)
 }
 
 impl Buffer {
@@ -250,39 +268,138 @@ impl Buffer {
     /// **1 行（空行）で始まる。** **`text` は改行 1 つで、`used` は 1 である**
     /// ——**空のファイルを `:w` すると 1 バイトになるのは b-1 より前と同じで、
     /// この初期状態がその形である。**
-    fn new(starts: &'static mut [usize], text: &'static mut [u8]) -> Option<Self> {
-        if starts.len() < 2 || text.is_empty() {
+    fn new(region: &'static mut [u8], text_cap: usize, index_cap: usize) -> Option<Self> {
+        if index_cap < 2 || text_cap == 0 || region.len() < text_cap + index_cap * userlib::heap::WORD
+        {
             return None;
         }
-        starts[0] = 0;
-        starts[1] = 1;
-        text[0] = b'\n';
-        Some(Self {
-            starts,
-            text,
+        let mut buffer = Self {
+            region,
+            text_cap,
+            index_cap,
             count: 1,
             used: 1,
-        })
+        };
+        let (text, starts) = buffer.parts_mut();
+        text[0] = b'\n';
+        starts[0] = 0;
+        starts[1] = 1;
+        Some(buffer)
     }
 
-    /// 索引が持てる行数（H-b-1）。**番兵の分を引く。**
-    fn line_capacity(&self) -> usize {
-        self.starts.len() - 1
+    /// 領域を本文と索引へ割る（H-b-2）。
+    fn parts(&self) -> (&[u8], &[usize]) {
+        let (text, index) = self.region.split_at(self.text_cap);
+        // SAFETY: `text_cap` は `WORD` の倍数（[`round_up_word`]）で、領域の
+        // 下端はページ境界である（`Heap::from_image_end` が切り上げる）ので、
+        // `index` は `usize` の整列を満たす。長さは構築と [`Buffer::regrow`] が
+        // `index_cap * WORD` 以上を保っている。
+        let starts =
+            unsafe { core::slice::from_raw_parts(index.as_ptr().cast::<usize>(), self.index_cap) };
+        (text, starts)
+    }
+
+    /// 領域を本文と索引へ割る（可変。H-b-2）。**理由は [`Buffer::parts`]。**
+    fn parts_mut(&mut self) -> (&mut [u8], &mut [usize]) {
+        let index_cap = self.index_cap;
+        let (text, index) = self.region.split_at_mut(self.text_cap);
+        // SAFETY: [`Buffer::parts`] と同じ。**`split_at_mut` が本文との
+        // 重なりを断っている**ので、別名は作られない。
+        let starts =
+            unsafe { core::slice::from_raw_parts_mut(index.as_mut_ptr().cast::<usize>(), index_cap) };
+        (text, starts)
+    }
+
+    /// 本文（H-b-2）。
+    fn text(&self) -> &[u8] {
+        &self.region[..self.text_cap]
+    }
+
+    /// 本文（可変。H-b-2）。
+    fn text_mut(&mut self) -> &mut [u8] {
+        &mut self.region[..self.text_cap]
+    }
+
+    /// 行の開始位置。
+    fn start_of(&self, row: usize) -> usize {
+        self.parts().1[row]
     }
 
     /// 行の中身。**末尾の改行は含まない。**
     fn line(&self, row: usize) -> &[u8] {
-        &self.text[self.starts[row]..self.starts[row + 1] - 1]
+        let (text, starts) = self.parts();
+        &text[starts[row]..starts[row + 1] - 1]
     }
 
-    /// 行の長さ（H-b-1）。**改行を含まない。**
+    /// 行の長さ。**改行を含まない。**
     fn length(&self, row: usize) -> usize {
-        self.starts[row + 1] - self.starts[row] - 1
+        let starts = self.parts().1;
+        starts[row + 1] - starts[row] - 1
     }
 
     /// `:w` が書き出すバイト列（H-b-1）。**そのまま渡す。**
     fn as_bytes(&self) -> &[u8] {
-        &self.text[..self.used]
+        &self.region[..self.used]
+    }
+
+    /// 本文が `needed` バイト入るようにする（H-b-2）。
+    ///
+    /// **足りていれば何もしない。** **伸ばすときは [`TEXT_STEP`] を下回らない**
+    /// ——**1 バイト足りないたびに `brk` を呼ぶ形にしない。**
+    fn ensure_text(&mut self, needed: usize) -> bool {
+        if needed <= self.text_cap {
+            return true;
+        }
+        let want = round_up_word(if needed > self.text_cap + TEXT_STEP {
+            needed
+        } else {
+            self.text_cap + TEXT_STEP
+        });
+        self.regrow(want, self.index_cap)
+    }
+
+    /// 索引が `slots` 枠入るようにする（H-b-2）。**番兵の分は呼ぶ側が数える。**
+    fn ensure_index(&mut self, slots: usize) -> bool {
+        if slots <= self.index_cap {
+            return true;
+        }
+        let want = if slots > self.index_cap + INDEX_STEP {
+            slots
+        } else {
+            self.index_cap + INDEX_STEP
+        };
+        self.regrow(self.text_cap, want)
+    }
+
+    /// 領域を取り直して割り直す（H-b-2）。
+    ///
+    /// # 伸ばせなければ何も変えない
+    ///
+    /// **[`userlib::heap::grow_to`] は失敗すると受け取った領域をそのまま
+    /// 返す**ので、**元の状態へ戻せる。** **偽を返した後も、バッファは
+    /// そのまま使える。**
+    fn regrow(&mut self, text_cap: usize, index_cap: usize) -> bool {
+        let total = text_cap + index_cap * userlib::heap::WORD;
+        let region = core::mem::take(&mut self.region);
+        match userlib::heap::grow_to(region, total) {
+            Ok(bigger) => {
+                self.region = bigger;
+                // **本文が伸びたぶんだけ索引を後ろへずらす。**
+                // **索引だけを増やしたときは動かさない**（上端が伸びるだけ）。
+                if text_cap != self.text_cap {
+                    let moved = self.index_cap * userlib::heap::WORD;
+                    let from = self.text_cap;
+                    self.region.copy_within(from..from + moved, text_cap);
+                }
+                self.text_cap = text_cap;
+                self.index_cap = index_cap;
+                true
+            }
+            Err(same) => {
+                self.region = same;
+                false
+            }
+        }
     }
 
     /// 索引の `row` より後ろを `delta` だけずらす（H-b-1）。
@@ -290,59 +407,77 @@ impl Buffer {
     /// **番兵まで動かす**（`..=self.count`）——**動かし忘れると `used` と
     /// 食い違い、最終行の終わりがずれる。**
     fn shift_index(&mut self, row: usize, delta: isize) {
-        for index in row + 1..=self.count {
-            self.starts[index] = self.starts[index].wrapping_add_signed(delta);
+        let count = self.count;
+        let starts = self.parts_mut().1;
+        for index in row + 1..=count {
+            starts[index] = starts[index].wrapping_add_signed(delta);
         }
     }
 
     /// 1 バイトを挿入する。**入らなければ落とす**（入っていないものを
     /// 入ったように見せない。`zash` の行編集と同じ判断）。
+    ///
+    /// **H-b-2 で 1 行の上限が消えた。** **落ちるのはヒープを伸ばせなかった
+    /// ときだけである。**
     fn insert(&mut self, row: usize, at: usize, byte: u8) -> bool {
-        let length = self.length(row);
-        if length >= MAX_LINE_LEN || at > length || self.used >= self.text.len() {
+        if at > self.length(row) {
             return false;
         }
-        let position = self.starts[row] + at;
-        self.text.copy_within(position..self.used, position + 1);
-        self.text[position] = byte;
-        self.used += 1;
-        self.shift_index(row, 1);
+        if !self.ensure_text(self.used + 1) {
+            return false;
+        }
+        let (used, count) = (self.used, self.count);
+        let (text, starts) = self.parts_mut();
+        let position = starts[row] + at;
+        text.copy_within(position..used, position + 1);
+        text[position] = byte;
+        for index in row + 1..=count {
+            starts[index] += 1;
+        }
+        self.used = used + 1;
         true
     }
 
     /// 行を割る（zi-f。インサートモードの Enter）。
     ///
     /// **`at` 以降を次の行へ移す。** **入らなければ何もしない**
-    /// ——**行数の上限（[`MAX_LINES`]）に当たった形である。**
+    /// ——**H-b-2 では、ヒープを伸ばせなかった形である。**
     ///
     /// **`insert` と同じ判断である**——**入っていないものを入ったように
     /// 見せない。** **断ったことは呼ぶ側がコマンド行へ出す。**
     fn split_line(&mut self, row: usize, at: usize) -> bool {
-        if self.count >= self.line_capacity()
-            || row >= self.count
-            || at > self.length(row)
-            || self.used >= self.text.len()
-        {
+        if row >= self.count || at > self.length(row) {
             return false;
         }
-        // **改行を 1 つ挿し込むだけである（H-b-1）。** 後ろの中身は動かない
-        // ——**1 バイト分ずれるだけで、並びは変わらない。**
-        let position = self.starts[row] + at;
-        self.text.copy_within(position..self.used, position + 1);
-        self.text[position] = b'\n';
-        self.used += 1;
-        // **索引に境界を 1 つ足す。** 番兵から順に 1 つずつ後ろへ送る。
-        for index in (row + 1..=self.count).rev() {
-            self.starts[index + 1] = self.starts[index] + 1;
+        if !self.ensure_text(self.used + 1) {
+            return false;
         }
-        self.starts[row + 1] = position + 1;
-        self.count += 1;
+        // **行が 1 つ増えるので、番兵まで入れて `count + 2` 枠が要る。**
+        if !self.ensure_index(self.count + 2) {
+            return false;
+        }
+        let (used, count) = (self.used, self.count);
+        let (text, starts) = self.parts_mut();
+        // **改行を 1 つ挿し込むだけである。** 後ろの中身は動かない
+        // ——**1 バイト分ずれるだけで、並びは変わらない。**
+        let position = starts[row] + at;
+        text.copy_within(position..used, position + 1);
+        text[position] = b'\n';
+        // **索引に境界を 1 つ足す。** 番兵から順に 1 つずつ後ろへ送る。
+        for index in (row + 1..=count).rev() {
+            starts[index + 1] = starts[index] + 1;
+        }
+        starts[row + 1] = position + 1;
+        self.used = used + 1;
+        self.count = count + 1;
         true
     }
 
     /// 次の行を末尾へ繋げる（zi-f。行頭の Backspace）。
     ///
-    /// **入らなければ何もしない**（1 行の上限に当たった形である）。
+    /// **次の行が無ければ何もしない。** **H-b-2 で 1 行の上限が消えたので、
+    /// 長さで断ることは無くなった**——**繋げると本文は 1 バイト縮むので、
+    /// ヒープも伸ばさなくてよい。**
     ///
     /// # `zi` の締めは「行の連結」を実装しないと書いていた
     ///
@@ -353,19 +488,18 @@ impl Buffer {
         if row + 1 >= self.count {
             return false;
         }
-        if self.length(row) + self.length(row + 1) > MAX_LINE_LEN {
-            return false;
-        }
-        // **行 `row` を終えている改行を 1 つ抜くだけである（H-b-1）。**
-        let position = self.starts[row + 1] - 1;
-        self.text.copy_within(position + 1..self.used, position);
-        self.used -= 1;
+        let (used, count) = (self.used, self.count);
+        let (text, starts) = self.parts_mut();
+        // **行 `row` を終えている改行を 1 つ抜くだけである。**
+        let position = starts[row + 1] - 1;
+        text.copy_within(position + 1..used, position);
         // **索引から境界を 1 つ抜く。** 前から順に 1 つずつ前へ詰める
         // （読む側が先で書く側が後なので、元の値を読める）。
-        for index in row + 1..self.count {
-            self.starts[index] = self.starts[index + 1] - 1;
+        for index in row + 1..count {
+            starts[index] = starts[index + 1] - 1;
         }
-        self.count -= 1;
+        self.used = used - 1;
+        self.count = count - 1;
         true
     }
 
@@ -374,20 +508,21 @@ impl Buffer {
         if at >= self.length(row) {
             return false;
         }
-        let position = self.starts[row] + at;
-        self.text.copy_within(position + 1..self.used, position);
-        self.used -= 1;
+        let used = self.used;
+        let position = self.start_of(row) + at;
+        let text = self.text_mut();
+        text.copy_within(position + 1..used, position);
+        self.used = used - 1;
         self.shift_index(row, -1);
         true
     }
 }
 
-/// 読み込んだ本文へ索引を張る（H-b-1）。**上限を越えたら偽を返す**
-/// （切り詰めない）。
+/// 読み込んだ本文へ索引を張る（H-b-1。H-b-2 で上限が消えた）。
 ///
 /// # 中身は既に本体の中に在る
 ///
-/// **`total` は `buffer.text` の先頭から読み込んだバイト数である。**
+/// **`total` は本文の先頭から読み込んだバイト数である。**
 /// **どこへも写さない**——**受け皿がそのまま本体である**ので、
 /// **ここでやるのは改行を数えて索引を埋めることだけである。**
 ///
@@ -397,41 +532,67 @@ impl Buffer {
 /// **改行で終わっていないファイルは、最後に 1 つ足す。** **空のファイルは
 /// 改行 1 つ（＝空行が 1 行）になる。**
 ///
-/// **`:w` が書く量は b-1 より前と同じである**——**あちらも各行の後ろに
-/// 改行を置いていた**ので、**改行で終わらないファイルを開いて保存すると
-/// 1 バイト増える、という振る舞いまで同じである。**
+/// # 偽を返すのは、ヒープが伸びなかったときだけである（H-b-2）
+///
+/// **b-1 までは行数と行の長さの上限で断っていた。** **その上限は消えた。**
 fn index_lines(buffer: &mut Buffer, total: usize) -> bool {
     // **改行で終わる形へ揃える。**
     let used = if total == 0 {
-        buffer.text[0] = b'\n';
-        1
-    } else if buffer.text[total - 1] == b'\n' {
-        total
-    } else {
-        if total >= buffer.text.len() {
+        if !buffer.ensure_text(1) {
             return false;
         }
-        buffer.text[total] = b'\n';
+        buffer.text_mut()[0] = b'\n';
+        1
+    } else if buffer.text()[total - 1] == b'\n' {
+        total
+    } else {
+        if !buffer.ensure_text(total + 1) {
+            return false;
+        }
+        buffer.text_mut()[total] = b'\n';
         total + 1
     };
 
-    let mut count = 0usize;
-    let mut start = 0usize;
-    buffer.starts[0] = 0;
-    for position in 0..used {
-        if buffer.text[position] != b'\n' {
-            continue;
-        }
-        if position - start > MAX_LINE_LEN || count >= buffer.line_capacity() {
-            return false;
-        }
-        count += 1;
-        start = position + 1;
-        buffer.starts[count] = start;
+    // **行を数えてから索引の枠を確かめる**（H-b-2）。**数えるほうが先である**
+    // ——**読む前には行数が分からない**（`stat` が答えるのは大きさだけである）。
+    let lines = buffer.text()[..used]
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count();
+    // **番兵の分 + 続きを打つ余地。**
+    //
+    // 破壊 (H-b-2, zi-skip-grow): 索引を伸ばさない。**初期の枠に入る行までで
+    // 切り詰める**——**b-1 までの上限（64 行）へ戻った形である。**
+    // **`zi` は何も言わずに開き、保存すると入らなかった行が消える。**
+    // **落ちるのは「編集の前後で `cat` が同じ中身を出す」判定だけである**
+    // ——**開く前の `cat` は像を読むので、そちらは変わらない。**
+    #[cfg(not(zi_skip_grow))]
+    if !buffer.ensure_index(lines + 1 + INDEX_STEP) {
+        return false;
     }
-    // **`used` は改行で終わっている**ので、最後の改行が番兵を据えている。
+
+    let mut count = 0usize;
+    {
+        let (text, starts) = buffer.parts_mut();
+        starts[0] = 0;
+        for position in 0..used {
+            if text[position] != b'\n' {
+                continue;
+            }
+            // **枠に入らない行は捨てる。** **既定の構成では上の
+            // `ensure_index` が枠を確かめているので、ここは通らない。**
+            if count + 1 >= starts.len() {
+                break;
+            }
+            count += 1;
+            starts[count] = position + 1;
+        }
+    }
+    // **`used` は番兵から取る。** **既定の構成では読み込んだ量と等しい**
+    // （最後の改行が番兵を据えるため）。**枠が足りずに切り詰めたときだけ、
+    // 入った行の終わりまで縮む**——**索引と本文が食い違ったまま残らない。**
     buffer.count = count;
-    buffer.used = used;
+    buffer.used = buffer.parts().1[count];
     true
 }
 
@@ -731,9 +892,15 @@ fn redraw(view: &View, buffer: &Buffer, status: &Status) {
     // ED(2): 画面全体を消す。**カーソルは動かない**ので、この後に CUP を出す。
     write_all(STDOUT, b"\x1b[2J");
     // **本文に使える行までしか描かない（e-4）。**
-    // **スクロールは作らない**——**上限を越えるファイルは開かずに拒む**ので
-    // （`MAX_LINES` = 64）、**画面が 66 行以上あれば全部入る。** 足りない画面では
-    // 後ろが見えないままになる。**利用者が来たら作る。**
+    //
+    // **スクロールは作らない。** **b-1 まではそれで足りていた**——
+    // **64 行を越えるファイルは開かずに拒んでいたので、画面が 66 行以上
+    // あれば全部入った。**
+    //
+    // **H-b-2 で上限が消えたので、いまは入りきらないファイルが開く。**
+    // **画面に出るのは先頭の `text_rows()` 行だけで、それより下の行は
+    // 見えないまま編集される**（バッファは正しく、画面が足りない）。
+    // **限界として `docs/roadmap.md` に書いた。** **スクロールは別の段である。**
     for row in 0..buffer.count.min(view.text_rows()) {
         move_cursor(row, 0);
         // EL(2): その行を消してから置く（消し残しを作らない）。
@@ -824,30 +991,25 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     // `:w` が `O_CREAT` で作る**（vi と同じ形）。**開けない理由が「無い」以外
     // なら、従来どおり断って終わる**——**権限も何も無いこの体制では、
     // ここへ来るのは像の側の失敗である。**
-    // === 入れ物をヒープから取る（H-b-1。ADR-0044） ===
+    // === 入れ物をヒープから取る（H-b-1。容量は H-b-2 で動くようになった） ===
     //
-    // **開く前に取る。** **取れなければ、ファイルに触らずに終わる**
-    // ——**開いてから断ると、断り書きが 2 種類の失敗を跨ぐ。**
-    let Some(region) = userlib::heap::reserve(RESERVE_BYTES) else {
+    // **開く前に大きさを訊く。** **`stat` が答えるのはファイルの大きさだけで、
+    // 行数は答えない**ので、**行の数は読んでから数える**（[`index_lines`]）。
+    //
+    // **訊けなければ 0 として始める。** **足りなければ読みながら伸ばす**ので、
+    // **訊けたかどうかは速さの話であって、開けるかどうかの話ではない。**
+    //
+    // SAFETY: `path` は上で NUL 終端にした。
+    let size = unsafe { userlib::size_of_file(&path[..length + 1]) }.unwrap_or(0) as usize;
+    let text_cap = text_capacity_for(size);
+    let index_cap = INDEX_INITIAL;
+    let Some(region) = userlib::heap::reserve(text_cap + index_cap * userlib::heap::WORD) else {
         write_all(STDERR, NO_HEAP);
         exit(6);
     };
-    // **1 回の確保を索引と本文へ割る（H-b-1）。**
-    //
-    // **`split_at_mut` が重ならないことを保証する。** 残るのは
-    // 「前半を `usize` の列として読んでよいか」だけで、**それは整列の話である。**
-    let (index_bytes, text) = region.split_at_mut(INDEX_BYTES);
-    // SAFETY: ヒープの下端はページ境界である（`kernel/src/userland.rs` の
-    // `Heap::from_image_end` が切り上げる）ので、`usize` の整列を満たす。
-    // 長さは `INDEX_BYTES = INDEX_SLOTS * size_of::<usize>()` から取っており、
-    // `index_bytes` の外へ出ない。**`split_at_mut` が `text` との重なりを
-    // 断っている**ので、別名は作られない。
-    let starts: &'static mut [usize] = unsafe {
-        core::slice::from_raw_parts_mut(index_bytes.as_mut_ptr().cast::<usize>(), INDEX_SLOTS)
-    };
-    let Some(mut editor) = Buffer::new(starts, text) else {
+    let Some(mut editor) = Buffer::new(region, text_cap, index_cap) else {
         write_all(STDERR, NO_HEAP);
-        release_and_exit(6);
+        exit(6);
     };
     let buffer: &mut Buffer = &mut editor;
 
@@ -855,7 +1017,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     let new_file = fd == userlib::MINUS_ENOENT;
     if fd < 0 && !new_file {
         write_all(STDERR, OPEN_FAILED);
-        release_and_exit(1);
+        release_and_exit(buffer, 1);
     }
     let fd = if new_file { 0 } else { fd as u64 };
 
@@ -868,19 +1030,23 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
         if got < 0 {
             close(fd);
             write_all(STDERR, READ_FAILED);
-            release_and_exit(3);
+            release_and_exit(buffer, 3);
         }
         if got == 0 {
             break;
         }
         let got = got as usize;
-        // **受ける上限は [`READ_CAPACITY`] である**——**本文の容量ではない**
-        // （あちらの doc。開けるファイルを b-1 より前と同じにするため）。
-        if total + got > READ_CAPACITY {
+        // **足りなければ伸ばす（H-b-2）。** **`+ 1` は末尾の改行を補う分である**
+        // ——**改行で終わらないファイルでも、この後で 1 バイト足せる。**
+        //
+        // **ここが伸びる場面は実測では出ない**——**容量は `stat` の答えから
+        // 決めており、読む量はそれと同じである。** **`stat` が答えなかったとき
+        // （0 として始めたとき）の受けである。**
+        if !buffer.ensure_text(total + got + 1) {
             overflowed = true;
             break;
         }
-        buffer.text[total..total + got].copy_from_slice(&chunk[..got]);
+        buffer.text_mut()[total..total + got].copy_from_slice(&chunk[..got]);
         total += got;
     }
     // **新しいファイルでは開いていないので閉じない（e-5）。**
@@ -888,11 +1054,11 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
         close(fd);
     }
 
-    // **上限を越えたら開かずに拒む。** 切り詰めて保存すると、開いた時点で
-    // 中身が消える——**それは編集ではなく破壊である。**
+    // **入れ物を用意できなかったら開かずに拒む。** 切り詰めて保存すると、
+    // 開いた時点で中身が消える——**それは編集ではなく破壊である。**
     if overflowed || !index_lines(buffer, total) {
         write_all(STDERR, TOO_BIG);
-        release_and_exit(4);
+        release_and_exit(buffer, 4);
     }
 
     // **検査の構成でしか出さない**（[`report_cursor`] と同じ理由。
@@ -1113,11 +1279,11 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                     match outcome {
                         Command::Quit => {
                             leave_screen();
-                            release_and_exit(0)
+                            release_and_exit(buffer, 0)
                         }
                         Command::Failed => {
                             leave_screen();
-                            release_and_exit(5)
+                            release_and_exit(buffer, 5)
                         }
                         // **保存したら変更は無い。**
                         Command::Saved => dirty = false,
@@ -1197,36 +1363,32 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     }
 
     leave_screen();
-    release_and_exit(0);
+    release_and_exit(buffer, 0);
 }
 
 /// ヒープを返してから終わる（H-b-1）。**入れ物を取った後の終わる道はここを通る。**
 ///
 /// # `unsafe` が要らない
 ///
-/// **[`userlib::heap::release_and_exit`] は安全な関数である**——
-/// **戻らないことで「返した領域を後から触らない」を構造として与えている**
-/// （あちらの doc）。**`zi` の側に守るべき契約は無い。**
+/// **[`userlib::heap::release`] は領域を値で受け取る**（H-b-2）。
+/// **`core::mem::take` で `Buffer` から抜いて渡すので、この関数から先に
+/// 領域を指す参照が 1 つも残らない。** **契約ではなく所有で守られている。**
 ///
-/// **この包みが在るのは破壊の枝を置くためだけである。**
+/// **b-1 は「戻らない関数の中でしか返さない」で守っていた。**
+/// **b-2 で `grow_to` が所有の形を要求したので、こちらも同じ形になった。**
 ///
 /// # 返せたかどうかは、こちらでは主張しない
 ///
 /// **カーネルが `user-heap:` の行に、取った数と返した数を並べる**
 /// （`kernel/src/userland.rs`）。**自分で書いて自分で読む形にしない。**
-fn release_and_exit(status: u64) -> ! {
+fn release_and_exit(buffer: &mut Buffer, status: u64) -> ! {
     // 破壊 (H-b-1, zi-skip-release): 返さずに終わる。**振る舞いは 1 つも
     // 変わらない**——**編集も保存も読み戻しも、返す前に終わっている。**
     // **落ちるのは「`zi` が取った分を返した」判定だけである**
     // ——**カーネルの `user-heap:` の行が、取った数と返した数を並べる。**
-    #[cfg(zi_skip_release)]
-    {
-        exit(status)
-    }
     #[cfg(not(zi_skip_release))]
-    {
-        userlib::heap::release_and_exit(status)
-    }
+    userlib::heap::release(core::mem::take(&mut buffer.region));
+    exit(status)
 }
 
 /// バッファをファイルへ書き出す（`:w`。zi-d-2）。
@@ -1571,17 +1733,30 @@ fn handle_byte(
                     // **1 行目の行頭では何もしない**（繋げる先が無い）。
                     return false;
                 }
-                let landing = buffer.length(*row - 1);
-                if !buffer.join_with_next(*row - 1) {
-                    *message = NO_ROOM_TO_JOIN;
-                    redraw_here(view, buffer, *mode, *row, *col, message);
+                // 破壊 (zi-f, zi-join-does-nothing): 行頭の Backspace を捨てる。
+                // **行が繋がらないので、読み戻しが 2 行のまま残る**
+                // ——**「行頭の Backspace が前の行と繋げた」判定だけが落ちる。**
+                // **`zi-enter-does-nothing` と対である**（あちらは割る側）。
+                #[cfg(zi_join_does_nothing)]
+                {
                     return false;
                 }
-                *row -= 1;
-                *col = landing;
-                redraw_here(view, buffer, *mode, *row, *col, b"");
-                report_cursor(buffer, *row, *col, b"join");
-                return true;
+                #[cfg(not(zi_join_does_nothing))]
+                {
+                    let landing = buffer.length(*row - 1);
+                    // **H-b-2 で断る道が消えた。** **1 行の上限が無くなり、
+                    // 繋げると本文は 1 バイト縮む**ので、**ここは必ず通る**
+                    // （`*row` は行数未満なので、`*row - 1` の次の行は在る）。
+                    // **戻り値は捨てない**——**通らなかったことに気づけなくなる。**
+                    if !buffer.join_with_next(*row - 1) {
+                        return false;
+                    }
+                    *row -= 1;
+                    *col = landing;
+                    redraw_here(view, buffer, *mode, *row, *col, b"");
+                    report_cursor(buffer, *row, *col, b"join");
+                    return true;
+                }
             }
             // 破壊 (zi-d-2, zi-insert-drop-first): 挿入の最初の 1 字を落とす。
             // **`cat` の読み戻しが 1 字短くなる**ので、往復の判定が捕まえる。

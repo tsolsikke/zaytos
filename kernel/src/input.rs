@@ -628,7 +628,16 @@ pub(crate) mod script {
         /bin/zi /data/edited\n\
         iab\ncdX\x08\x1b[D\x1b[3~\x1b\x04\
         :wq\n\
-        /bin/cat /data/edited\n\x0c";
+        /bin/cat /data/edited\n\
+        /bin/zi /data/joined\n\
+        iab\ncd\x1b[D\x1b[D\x08\x1b\x04\
+        :wq\n\
+        /bin/cat /data/joined\n\
+        /bin/cat /data/big\n\
+        /bin/zi /data/big\n\
+        iZ\x1b\x04\
+        :wq\n\
+        /bin/cat /data/big\n\x0c";
 
     /// 観測点（ES-d）。**プロンプトの色を見る。**
     const OBSERVE_PROMPT: u8 = 0x01;

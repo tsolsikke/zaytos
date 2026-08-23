@@ -200,6 +200,11 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
             "zi_enter_does_nothing",
         ),
         ("CARGO_FEATURE_ZI_SKIP_RELEASE_TEST", "zi_skip_release"),
+        ("CARGO_FEATURE_ZI_SKIP_GROW_TEST", "zi_skip_grow"),
+        (
+            "CARGO_FEATURE_ZI_JOIN_DOES_NOTHING_TEST",
+            "zi_join_does_nothing",
+        ),
     ];
     let mut extra_cfgs: Vec<String> = Vec::new();
     for (env, cfg) in USER_PROGRAM_CFGS {
@@ -384,6 +389,34 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         b"alpha\nbravo\ncharlie\ndelta\n" as &[u8],
     )
     .expect("failed to write /data/lines into the staging");
+
+    // **`zi` の上限が外れたことを示すファイル（H-b-2）。**
+    //
+    // **2 つを 1 本に入れてある。** **100 行**（b-1 までの上限は 64 行で、
+    // 越えるファイルは開かずに拒んでいた）と、**200 バイトの行 1 本**
+    // （b-1 までの 1 行の上限は 128 バイトだった）。
+    //
+    // **大きさは約 1 ブロックである**（実測で 2181 バイト。ブロックは 4096）。
+    // **像を 1 ブロック太らせるだけで、上限の両方に触れる。**
+    //
+    // **中身は決定的である。** **判定は像の中身を定数として持たない**
+    // ——**`cat` を編集の前後で 2 回撮り、差が編集の分だけであることを見る。**
+    {
+        const BIG_LINES: usize = 100;
+        const LONG_LINE_BYTES: usize = 200;
+        let mut big = String::new();
+        // **先頭の 1 行だけを長くする。** 26 文字の巡回で、切れたら分かる。
+        for index in 0..LONG_LINE_BYTES {
+            big.push((b'a' + (index % 26) as u8) as char);
+        }
+        big.push('\n');
+        for line in 1..BIG_LINES {
+            // **19 文字 + 改行 = 20 バイト。**
+            big.push_str(&format!("big-line-{line:03}-xxxxxx\n"));
+        }
+        std::fs::write(format!("{staging}/data/big"), big.as_bytes())
+            .expect("failed to write /data/big into the staging");
+    }
 
     // **穴を持つファイルを常設する（ADR-0038 の到達条件 2）。**
     //

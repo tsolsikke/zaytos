@@ -129,6 +129,27 @@ const EXPECTED_CPU_RESET_COUNT: usize = 2;
 
 const EXCEPTION_TEST_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// `zi` の台本を待つ猶予（H-b-2）。
+///
+/// # 共通の 20 秒では足りなくなった
+///
+/// **H-b-2 で台本に 3 つの回が増えた**——`/data/joined` の行の連結と、
+/// **100 行のファイルを `cat` で 2 回撮る往復**である。
+/// **実測で足りず、`/data/joined` の回の入口で QEMU を止めていた**
+/// （**判定は 4 本とも「出力が無い」で落ちた**）。
+///
+/// **値は実測から決めた**（下の `(info)` の行が、毎回どれだけ掛かったかを出す）。
+/// **実測は 16.1 秒である**——**20 秒のすぐ下で、通る回と落ちる回があった。**
+/// **4 倍に近い余裕を取って 60 秒にする。** **台本を伸ばすときは、
+/// その `(info)` の行を見て決め直すこと。**
+///
+/// **共通の定数を上げない。** **他の検査は 20 秒で足りており、
+/// 上げるとハングの発見が全部遅くなる。**
+///
+/// **際限なく上げない。** **`--full` は `zi-test` を 19 回走らせる**ので、
+/// **本当にハングしたときの待ち時間がそのまま 19 倍になる。**
+const ZI_TEST_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// 演習の行が出た後、判定が見る最後の行を待つ猶予（e-4 の手当て）。
 ///
 /// **`cmd_virtio_irq_test` は 2 本の行を見ている**が、待っていたのは 1 本目
@@ -3763,11 +3784,14 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     // **合図と主張を分けた。** **`script-done:` は何も主張しない観測点で、
     // 台本の末尾にだけ在る**（`crate::console::probe` の `ScriptDone`）。
     let done_marker = "script-done:";
-    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    let started_waiting = Instant::now();
+    let deadline = started_waiting + ZI_TEST_TIMEOUT;
+    let mut finished_after = None;
     while Instant::now() < deadline {
         let text = fs::read_to_string(&serial_log).unwrap_or_default();
         // **色の列を落としてから探す（ES-d）。** [`strip_ansi`] の doc。
         if strip_ansi(&text).contains(done_marker) {
+            finished_after = Some(started_waiting.elapsed());
             break;
         }
         thread::sleep(PANIC_TEST_POLL_INTERVAL);
@@ -3833,6 +3857,17 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     // ここが 2 のままだったので、1 字落とす破壊が捕まらなくなった**
     // （落としても 2 字残るため）。**`--full` が「破壊が捕まらない」と
     // 出して分かった**——**写しは、写した先が変わった瞬間に古くなる。**
+    //
+    // **数え直した（H-b-2）。** **数えているのは台本ぜんたいの `typed` の本数で、
+    // `/data/lines` の回だけではない**——**実測で 16 本である**
+    // （`fresh` の `NEW` が 3、`lines` の `ZY` と `Q` が 3、`edited` の
+    // `ab` `cd` `X` が 5、`joined` の `ab` `cd` が 4、`big` の `Z` が 1）。
+    //
+    // **下限は 3 のままにしてある。** **この判定は「挿入がバッファへ届いた」
+    // までしか言わない**——**1 字落とす破壊を捕まえているのは往復のほうである**
+    // （`zi-insert-drop-first` の項。`docs/verification-coverage.md`）。
+    // **本数を実測値へ固定すると、台本を触るたびに直す作業が増えるだけで、
+    // 捕まえる力は増えない。**
     let typed_events = serial
         .lines()
         .filter(|line| line.contains("zi: cursor") && line.trim_end().ends_with("typed"))
@@ -4164,17 +4199,96 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
             .iter()
             .all(|(took, gave)| took == gave && *took > 0);
 
+    // **1 回の `brk` が 2 ページより大きく伸ばせること（H-b-2）。**
+    //
+    // **`syscall-test` は 2 ページちょうどしか伸ばさない**（あちらの asm）。
+    // **`zi` は開くファイルの大きさから容量を決める**ので、**大きいファイルの
+    // 回では 1 回の要求が 2 ページを越える。** **越えた回が 1 つも無ければ、
+    // 複数ページを写す道は 2 ページまでしか通っていないことになる。**
+    //
+    // **数を写さない**——**「2 より大きい」だけを見る。** 容量の決め方を
+    // 変えれば実際の値は動くが、**主張は「2 ページを越える要求が通る」である。**
+    let zi_largest_take = zi_heap_pairs
+        .iter()
+        .map(|(took, _)| *took)
+        .max()
+        .unwrap_or(0);
+    let brk_grew_past_two_pages = zi_largest_take > 2;
+
+    // **行頭の Backspace が前の行と繋げたこと（H-b-2。7-3 で塞いだ穴）。**
+    //
+    // **b-1 まで、この経路は台本が 1 度も通らなかった**
+    // （`docs/verification-coverage.md` の「検査なし」）。**運用者の目視では
+    // 通っていたが、判定が無かった。** **台本を触る b-2 で足した。**
+    //
+    // **台本は `ab` / `cd` の 2 行を作り、2 行目の行頭で Backspace を打つ。**
+    // **1 行の `abcd` になるはずである。**
+    let joined_output = program_output(
+        plain
+            .split("/bin/cat /data/joined")
+            .nth(1)
+            .unwrap_or("")
+            .split("/bin/cat /data/big")
+            .next()
+            .unwrap_or(""),
+    );
+    let joined_lines_seen: Vec<&str> = joined_output.lines().collect();
+    let backspace_joined_the_lines = joined_lines_seen == ["abcd"];
+
+    // **上限が外れたこと（H-b-2）。**
+    //
+    // **像に `/data/big` を置いた**——**100 行**（b-1 までの上限は 64 行）と、
+    // **200 バイトの行 1 本**（b-1 までの 1 行の上限は 128 バイト）。
+    //
+    // **期待値をホストが持たない。** **編集の前と後で `cat` を撮り、
+    // 差が編集の分だけであることを見る**——**像の中身を定数として持たない。**
+    // **`64` と `128` は像の写しではなく、b-1 まで在った上限そのものである**
+    // ——**「その上限を越えている」ことがこの判定の言いたいことである。**
+    let big_before = program_output(
+        plain
+            .split("/bin/cat /data/big")
+            .nth(1)
+            .unwrap_or("")
+            .split("/bin/zi /data/big")
+            .next()
+            .unwrap_or(""),
+    );
+    let big_after = program_output(
+        plain
+            .split("/bin/cat /data/big")
+            .nth(2)
+            .unwrap_or("")
+            .split("script-done")
+            .next()
+            .unwrap_or(""),
+    );
+    let big_lines_before: Vec<&str> = big_before.lines().collect();
+    let big_lines_after: Vec<&str> = big_after.lines().collect();
+    let big_passes_the_old_line_limit = big_lines_before.len() > 64;
+    let big_passes_the_old_length_limit = big_lines_before.iter().any(|line| line.len() > 128);
+    // **台本は先頭の行の行頭へ `Z` を 1 字入れる。** 他の行は変わらない。
+    let big_round_trip = big_lines_before.len() > 1
+        && big_lines_after.len() == big_lines_before.len()
+        && big_lines_after[0] == format!("Z{}", big_lines_before[0])
+        && big_lines_after[1..] == big_lines_before[1..];
+
     // **Enter と Backspace と Delete（zi-f）。**
     //
     // **台本が新しいファイルを開き、3 つを通してから保存している**
     // （`kernel/src/input.rs` の台本の doc に打鍵が並べてある）。
     // **読み戻しは `ab` と `c` の 2 行になるはずである。**
+    // **区切りは次の `zi` の回の手前である（H-b-2）。**
+    //
+    // **`script-done` で切っていた。** **台本の末尾に回が 3 つ増えた**ので、
+    // **そのままだと後ろの回の出力まで飲み込む**（`/data/lines` の回で
+    // 一度踏んだのと同じ形である。**台本を変えたら、台本に寄りかかっている
+    // 判定を数え直すこと**）。
     let edited_output = program_output(
         plain
             .split("/bin/cat /data/edited")
             .nth(1)
             .unwrap_or("")
-            .split("script-done")
+            .split("/bin/zi /data/joined")
             .next()
             .unwrap_or(""),
     );
@@ -4223,6 +4337,12 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         });
     let append_differs_from_insert = insert_kept_the_column && append_moved_right;
 
+    // **判定ではない。** **台本が伸びたときに [`ZI_TEST_TIMEOUT`] を決め直す
+    // ための実測値である。** **揺れる値なので、合否には載せない。**
+    println!(
+        "{context}: (info) the script finished {finished_after:?} into the wait \
+         (the wait allows {ZI_TEST_TIMEOUT:?}; None means it never finished)"
+    );
     println!("{context}: zi started = {started}");
     println!(
         "{context}: the up/down arrows moved the cursor between lines = {arrows_moved} \
@@ -4286,6 +4406,32 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     println!(
         "{context}: zi gave back every frame it took, on every run = \
          {zi_returned_what_it_took} (took/gave per run {zi_heap_pairs:?})"
+    );
+    println!(
+        "{context}: one brk grew past two pages = {brk_grew_past_two_pages} \
+         (largest take across zi runs: {zi_largest_take} page(s))"
+    );
+    println!(
+        "{context}: backspace at the start of a line joined it to the one above = \
+         {backspace_joined_the_lines} (cat printed {joined_lines_seen:?})"
+    );
+    println!(
+        "{context}: zi opened a file past both of the old limits = \
+         {} (lines {} > 64 = {big_passes_the_old_line_limit}, longest line {} > 128 = \
+         {big_passes_the_old_length_limit})",
+        big_passes_the_old_line_limit && big_passes_the_old_length_limit,
+        big_lines_before.len(),
+        big_lines_before
+            .iter()
+            .map(|line| line.len())
+            .max()
+            .unwrap_or(0)
+    );
+    println!(
+        "{context}: the big file read back with exactly the one edit = {big_round_trip} \
+         (before {} line(s), after {} line(s))",
+        big_lines_before.len(),
+        big_lines_after.len()
     );
     println!(
         "{context}: enter split the line = {enter_split_the_line}, backspace erased = \
@@ -4357,6 +4503,11 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && edited_round_trip
         && brk_returned_what_it_took
         && zi_returned_what_it_took
+        && brk_grew_past_two_pages
+        && backspace_joined_the_lines
+        && big_passes_the_old_line_limit
+        && big_passes_the_old_length_limit
+        && big_round_trip
         && append_differs_from_insert
     {
         println!("{context}: PASS");
@@ -10670,6 +10821,8 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "zi-enter-does-nothing-test",
             "brk-skip-shrink-test",
             "zi-skip-release-test",
+            "zi-skip-grow-test",
+            "zi-join-does-nothing-test",
         ] {
             total += 1;
             println!("=== xtask check: the zi test catches {feature}");
@@ -11524,7 +11677,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 23,
-    full: 225,
+    full: 227,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
