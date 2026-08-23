@@ -9344,6 +9344,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "zi のインサートモードで Enter を捨てる",
     ),
     (
+        "zi-skip-release-test",
+        cfg!(feature = "zi-skip-release-test"),
+        "zi が終わるときにヒープを返さない",
+    ),
+    (
         "unlink-ignore-request-test",
         cfg!(feature = "unlink-ignore-request-test"),
         "unlink を受けても消さない",

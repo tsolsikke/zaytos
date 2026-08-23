@@ -4127,6 +4127,43 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     let brk_returned_what_it_took =
         heap_numbers.len() >= 2 && heap_numbers[0] == heap_numbers[1] && heap_numbers[0] > 0;
 
+    // **`zi` が取った分を返したこと（H-b-1）。**
+    //
+    // **`zi` は入れ物をヒープから取るようになった**（`kernel/userland/zi.rs`）。
+    // **終わる道はどれも [`userlib::heap::release`] を通る**ので、
+    // **取った数と返した数は一致するはずである。**
+    //
+    // **上の `syscall-test` の判定とは別に置く。** あちらは `brk` そのものの
+    // 検算（asm で 2 ページ伸ばして縮める）で、**こちらは「本物の利用者が
+    // 返し忘れていないこと」である。** **`syscall-test` が緑でも、
+    // `zi` が返し忘れていれば、フレームは減り続ける。**
+    //
+    // **台本は `zi` を 3 回起こす**（`/data/lines`・`/data/fresh`・
+    // `/data/edited`）。**回数を写さない**——**1 回でも取り忘れ・返し忘れが
+    // あれば落ちる形にする。** **`> 0` も要る**——**取っていなければ
+    // 「0 と 0」で一致してしまい、ヒープを使わなくなった形が通る。**
+    let zi_heap_lines: Vec<&str> = plain
+        .lines()
+        .filter(|line| line.contains("user-heap: /bin/zi had brk take"))
+        .collect();
+    let zi_heap_pairs: Vec<(u32, u32)> = zi_heap_lines
+        .iter()
+        .map(|line| {
+            let numbers: Vec<u32> = line
+                .split_whitespace()
+                .filter_map(|word| word.parse::<u32>().ok())
+                .collect();
+            (
+                numbers.first().copied().unwrap_or(0),
+                numbers.get(1).copied().unwrap_or(0),
+            )
+        })
+        .collect();
+    let zi_returned_what_it_took = !zi_heap_pairs.is_empty()
+        && zi_heap_pairs
+            .iter()
+            .all(|(took, gave)| took == gave && *took > 0);
+
     // **Enter と Backspace と Delete（zi-f）。**
     //
     // **台本が新しいファイルを開き、3 つを通してから保存している**
@@ -4247,6 +4284,10 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
          (took/gave {heap_numbers:?}, from {heap_line:?})"
     );
     println!(
+        "{context}: zi gave back every frame it took, on every run = \
+         {zi_returned_what_it_took} (took/gave per run {zi_heap_pairs:?})"
+    );
+    println!(
         "{context}: enter split the line = {enter_split_the_line}, backspace erased = \
          {backspace_erased}, delete erased = {delete_erased}, the round trip reads back as \
          written = {edited_round_trip} (cat printed {edited_lines_seen:?})"
@@ -4315,6 +4356,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && delete_erased
         && edited_round_trip
         && brk_returned_what_it_took
+        && zi_returned_what_it_took
         && append_differs_from_insert
     {
         println!("{context}: PASS");
@@ -10627,6 +10669,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "unlink-ignore-request-test",
             "zi-enter-does-nothing-test",
             "brk-skip-shrink-test",
+            "zi-skip-release-test",
         ] {
             total += 1;
             println!("=== xtask check: the zi test catches {feature}");
@@ -11481,7 +11524,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 23,
-    full: 224,
+    full: 225,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

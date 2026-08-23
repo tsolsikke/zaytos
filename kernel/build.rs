@@ -199,6 +199,7 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
             "CARGO_FEATURE_ZI_ENTER_DOES_NOTHING_TEST",
             "zi_enter_does_nothing",
         ),
+        ("CARGO_FEATURE_ZI_SKIP_RELEASE_TEST", "zi_skip_release"),
     ];
     let mut extra_cfgs: Vec<String> = Vec::new();
     for (env, cfg) in USER_PROGRAM_CFGS {
