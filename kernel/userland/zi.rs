@@ -53,6 +53,19 @@
 #[path = "userlib.rs"]
 mod userlib;
 
+// **`common` の純粋な論理を取り込む（VIEW-a。ADR-0045）。**
+//
+// **`less` と `more` も同じものを使う。** **自己完結でなければならない**
+// （`crate::` を参照しない）。**ホストテストは `cargo test -p common` が持つ。**
+// **`dead_code` を許す。** **`zi` が使わない口が在る**——`height()` は
+// `less` が使う見込みで、`top()` は診断の構成でしか呼ばれない。
+// **`common` の側では使われているので、あちらでは黙らせていない。**
+#[path = "../../common/src/window.rs"]
+#[allow(dead_code)]
+mod window;
+
+use window::Window;
+
 use userlib::{
     close, exit, length_of, open_read_only, open_write_create, read, write_all, STDERR, STDOUT,
 };
@@ -887,17 +900,55 @@ fn leave_screen() {
 /// **描く関数はカーソルを戻さない。** **戻すのはここだけである。**
 /// **e-4 で下から2行目と最下行の2本になっても、増えるのはこの関数の
 /// 中身だけで済む。**
-fn restore_cursor(cursor_row: usize, cursor_col: usize) {
-    move_cursor(cursor_row, cursor_col);
+fn restore_cursor(window: &Window, cursor_row: usize, cursor_col: usize) {
+    // **窓の中の位置へ直す（VIEW-a）。** **窓の外なら動かさない**
+    // ——**呼ぶ前に [`follow_window`] を通していれば、その形にはならない。**
+    if let Some(screen) = window.screen_row(cursor_row) {
+        move_cursor(screen, cursor_col);
+    }
+}
+
+/// 窓を現在行へ追わせる（VIEW-a）。**動いたら真。**
+///
+/// **破壊の枝をここ 1 か所に置くために、包んである。**
+fn follow_window(window: &mut Window, row: usize) -> bool {
+    // 破壊 (VIEW-a, zi-window-frozen): 窓を動かさない。
+    // **b-2 までの振る舞いに戻る**——**窓は先頭に据え置かれ、カーソルが
+    // 下へ出ても画面は先頭の 48 行のままである。** **バッファは正しいので、
+    // 内部状態を見る判定は 1 つも落ちない**——**落ちるのは画面を読む
+    // 「窓が動いた」判定だけである。**
+    #[cfg(zi_window_frozen)]
+    {
+        let _ = row;
+        let _ = window;
+        false
+    }
+    #[cfg(not(zi_window_frozen))]
+    {
+        window.follow(row)
+    }
+}
+
+/// カーソルを動かした後の画面（VIEW-a）。
+///
+/// **窓が動いたら描き直し、動かなければカーソルだけ戻す。**
+/// **描き直しは全面である**——**差分で描く形は測ってから決める**
+/// （`docs/roadmap.md` の VIEW 段）。
+fn show_cursor(view: &View, buffer: &Buffer, window: &mut Window, status: &Status) {
+    if follow_window(window, status.row) {
+        redraw(view, buffer, window, status);
+    } else {
+        restore_cursor(window, status.row, status.col);
+    }
 }
 
 /// 2 本（状態行とコマンド行）を描き、最後にカーソルを戻す（e-3。e-4 で 2 本になった）。
 ///
 /// **画面を更新する入口である。** **順序はここが持つ**ので、呼ぶ側は考えない。
-fn refresh(view: &View, status: &Status) {
+fn refresh(view: &View, window: &Window, status: &Status) {
     draw_status(view, status);
     draw_command_line(view, status);
-    restore_cursor(status.row, status.col);
+    restore_cursor(window, status.row, status.col);
 }
 
 /// 画面を描き直す。**全面を消してから行ごとに置く。**
@@ -906,7 +957,9 @@ fn refresh(view: &View, status: &Status) {
 /// 行の折り返しに依らず「バッファの行 = 画面の行」を保つためである。
 ///
 /// **状態行もここで描き直す（ES-d）**——`ED(2)` が消してしまうためである。
-fn redraw(view: &View, buffer: &Buffer, status: &Status) {
+fn redraw(view: &View, buffer: &Buffer, window: &mut Window, status: &Status) {
+    // **描く前に窓を追わせる（VIEW-a）。** **描く範囲がここで決まる。**
+    follow_window(window, status.row);
     // ED(2): 画面全体を消す。**カーソルは動かない**ので、この後に CUP を出す。
     write_all(STDOUT, b"\x1b[2J");
     // **本文に使える行までしか描かない（e-4）。**
@@ -919,8 +972,9 @@ fn redraw(view: &View, buffer: &Buffer, status: &Status) {
     // **画面に出るのは先頭の `text_rows()` 行だけで、それより下の行は
     // 見えないまま編集される**（バッファは正しく、画面が足りない）。
     // **限界として `docs/roadmap.md` に書いた。** **スクロールは別の段である。**
-    for row in 0..buffer.count.min(view.text_rows()) {
-        move_cursor(row, 0);
+    let visible = window.visible(buffer.count);
+    for row in visible.clone() {
+        move_cursor(row - visible.start, 0);
         // EL(2): その行を消してから置く（消し残しを作らない）。
         write_all(STDOUT, b"\x1b[2K");
         let line = buffer.line(row);
@@ -928,7 +982,7 @@ fn redraw(view: &View, buffer: &Buffer, status: &Status) {
             write_all(STDOUT, line);
         }
     }
-    refresh(view, status);
+    refresh(view, window, status);
 }
 
 /// 判定行を出す。**内部状態であって画面ではない**（モジュール doc の限界）。
@@ -947,7 +1001,7 @@ fn redraw(view: &View, buffer: &Buffer, status: &Status) {
 /// （たとえば fd 2 をシリアル専用にする）で、`deferred-decisions.md` に
 /// 行がある**——**Cの移植で `stderr` が来るので、どのみち決める必要がある。**
 #[cfg(zi_diagnostics)]
-fn report_cursor(buffer: &Buffer, row: usize, col: usize, tag: &[u8]) {
+fn report_cursor(buffer: &Buffer, window: &Window, row: usize, col: usize, tag: &[u8]) {
     let mut out = [0u8; 96];
     let mut at = 0usize;
     let head = b"zi: cursor (buffer state, not the screen) row=";
@@ -967,6 +1021,13 @@ fn report_cursor(buffer: &Buffer, row: usize, col: usize, tag: &[u8]) {
     let count = write_number(&mut digits, buffer.count);
     out[at..at + count].copy_from_slice(&digits[..count]);
     at += count;
+    // **窓の位置（VIEW-a）。** **状態行へは出さない**（判定が状態行の並びを
+    // 読んでおり、増やすと揺れる。運用者の判断）。**診断側に出す。**
+    out[at..at + 5].copy_from_slice(b" top=");
+    at += 5;
+    let count = write_number(&mut digits, window.top());
+    out[at..at + count].copy_from_slice(&digits[..count]);
+    at += count;
     out[at] = b' ';
     at += 1;
     let take = tag.len().min(out.len() - at - 1);
@@ -979,7 +1040,7 @@ fn report_cursor(buffer: &Buffer, row: usize, col: usize, tag: &[u8]) {
 
 /// 判定行を出さない側（既定のビルド。上の doc を参照）。
 #[cfg(not(zi_diagnostics))]
-fn report_cursor(_buffer: &Buffer, _row: usize, _col: usize, _tag: &[u8]) {}
+fn report_cursor(_buffer: &Buffer, _window: &Window, _row: usize, _col: usize, _tag: &[u8]) {}
 
 /// `_start` から呼ばれる（`userlib.rs` の `global_asm!`）。
 ///
@@ -1091,7 +1152,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     report_window_size(userlib::window_size(0));
     // **使う値は既定へ落とした側である（e-4）。** **判定は落とす前を見る**
     // （上の行）——落とした後を見ると、訊けた場合と落ちた場合が同じ値になる。
-    let window = userlib::window_size_or_default(0);
+    let screen = userlib::window_size_or_default(0);
 
     // **代替画面バッファへ入る（e-3）。** **ここから先の描画は代替の面に載り、
     // 出るときに元の画面が戻る。** **読み込みが済んで、確実に編集へ入る時点で
@@ -1112,13 +1173,16 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     // **画面の形を訊く（e-4）。** **0 なら既定へ落ちる**
     // （`userlib::window_size_or_default`。**その形がここで初めて本番で効く**）。
     let view = View {
-        rows: window.rows as usize,
+        rows: screen.rows as usize,
         text_lines: buffer.count,
         path: &path[..length + 1],
     };
+    // **見えている窓（VIEW-a。ADR-0045）。** **高さは本文に使える行数である。**
+    let mut window = Window::new(view.text_rows());
     redraw(
         &view,
         buffer,
+        &mut window,
         &Status {
             mode,
             row,
@@ -1129,7 +1193,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             message,
         },
     );
-    report_cursor(buffer, row, col, b"start");
+    report_cursor(buffer, &window, row, col, b"start");
     // **いま状態行に出ている札のモード（ES-d）。**
     let mut shown_mode = mode;
 
@@ -1143,6 +1207,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
         if mode != shown_mode {
             refresh(
                 &view,
+                &window,
                 &Status {
                     mode,
                     row,
@@ -1172,6 +1237,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 finish_pending_escape(
                     &view,
                     buffer,
+                    &mut window,
                     row,
                     &mut col,
                     &mut mode,
@@ -1220,8 +1286,8 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                             col = length.saturating_sub(1);
                         }
                     }
-                    redraw_here(&view, buffer, mode, row, col, b"");
-                    report_cursor(buffer, row, col, b"delete");
+                    redraw_here(&view, buffer, &mut window, mode, row, col, b"");
+                    report_cursor(buffer, &window, row, col, b"delete");
                     dirty = true;
                 }
                 continue;
@@ -1242,8 +1308,23 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                     _ => false,
                 };
                 if moved {
-                    restore_cursor(row, col);
-                    report_cursor(buffer, row, col, b"arrow");
+                    // **上下の矢印は行を移る（VIEW-a）。** **窓の外へ出たら
+                    // 窓が動き、そのときは描き直しになる。**
+                    show_cursor(
+                        &view,
+                        buffer,
+                        &mut window,
+                        &Status {
+                            mode,
+                            row,
+                            col,
+                            dirty,
+                            command: &[],
+                            in_command: false,
+                            message,
+                        },
+                    );
+                    report_cursor(buffer, &window, row, col, b"arrow");
                 }
                 continue;
             }
@@ -1254,6 +1335,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 finish_pending_escape(
                     &view,
                     buffer,
+                    &mut window,
                     row,
                     &mut col,
                     &mut mode,
@@ -1269,9 +1351,11 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                     &view,
                     other,
                     buffer,
+                    &mut window,
                     &mut row,
                     &mut col,
                     &mut mode,
+                    dirty,
                     &mut message,
                 ) {
                     continue;
@@ -1310,6 +1394,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                     redraw(
                         &view,
                         buffer,
+                        &mut window,
                         &Status {
                             mode,
                             row,
@@ -1320,7 +1405,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                             message,
                         },
                     );
-                    report_cursor(buffer, row, col, b"command");
+                    report_cursor(buffer, &window, row, col, b"command");
                 }
                 ESC => {
                     // **打ちかけを捨てる。** ノーマルへ戻る。
@@ -1345,6 +1430,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                     {
                         refresh(
                             &view,
+                            &window,
                             &Status {
                                 mode,
                                 row,
@@ -1372,9 +1458,11 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             &view,
             byte,
             buffer,
+            &mut window,
             &mut row,
             &mut col,
             &mut mode,
+            dirty,
             &mut message,
         );
         dirty |= changed;
@@ -1547,6 +1635,7 @@ fn report_window_size(_size: Result<userlib::WindowSize, i64>) {}
 fn finish_pending_escape(
     view: &View,
     buffer: &Buffer,
+    window: &mut Window,
     row: usize,
     col: &mut usize,
     mode: &mut Mode,
@@ -1563,6 +1652,7 @@ fn finish_pending_escape(
     // **順序はあちらが持つ**ので、ここでは考えない。
     refresh(
         view,
+        window,
         &Status {
             mode: *mode,
             row,
@@ -1575,7 +1665,7 @@ fn finish_pending_escape(
         },
     );
     *shown_mode = *mode;
-    report_cursor(buffer, row, *col, b"normal");
+    report_cursor(buffer, window, row, *col, b"normal");
 }
 
 /// コマンド行を解釈する（zi-d-2）。**戻り値は「終わってよいか」である。**
@@ -1632,9 +1722,11 @@ fn handle_byte(
     view: &View,
     byte: u8,
     buffer: &mut Buffer,
+    window: &mut Window,
     row: &mut usize,
     col: &mut usize,
     mode: &mut Mode,
+    dirty: bool,
     message: &mut &'static [u8],
 ) -> bool {
     match *mode {
@@ -1648,8 +1740,9 @@ fn handle_byte(
                 b'l' => move_right(buffer, *row, col, *mode),
                 b'i' => {
                     *mode = Mode::Insert;
-                    restore_cursor(*row, *col);
-                    report_cursor(buffer, *row, *col, b"insert");
+                    // **行は変わらないので窓も動かない。** カーソルだけ戻す。
+                    restore_cursor(window, *row, *col);
+                    report_cursor(buffer, window, *row, *col, b"insert");
                     // **モードを変えただけで、バッファは変わっていない。**
                     return false;
                 }
@@ -1671,10 +1764,11 @@ fn handle_byte(
                             *col += 1;
                         }
                     }
-                    restore_cursor(*row, *col);
+                    // **行は変わらないので窓も動かない。** カーソルだけ戻す。
+                    restore_cursor(window, *row, *col);
                     // **札は `insert` と分ける**——**判定が `i` と `a` を
                     // 見分けるためである**（`a` は直前の位置より 1 つ右）。
-                    report_cursor(buffer, *row, *col, b"append");
+                    report_cursor(buffer, window, *row, *col, b"append");
                     return false;
                 }
                 b'x' => {
@@ -1688,6 +1782,7 @@ fn handle_byte(
                         redraw(
                             view,
                             buffer,
+                            window,
                             &Status {
                                 mode: *mode,
                                 row: *row,
@@ -1699,7 +1794,7 @@ fn handle_byte(
                                 message: &[],
                             },
                         );
-                        report_cursor(buffer, *row, *col, b"delete");
+                        report_cursor(buffer, window, *row, *col, b"delete");
                     }
                     return removed;
                 }
@@ -1707,8 +1802,23 @@ fn handle_byte(
                 _ => false,
             };
             if moved {
-                restore_cursor(*row, *col);
-                report_cursor(buffer, *row, *col, b"move");
+                // **`j` と `k` は行を移る（VIEW-a）。** **窓の外へ出たら
+                // 窓が動き、そのときは描き直しになる。**
+                show_cursor(
+                    view,
+                    buffer,
+                    window,
+                    &Status {
+                        mode: *mode,
+                        row: *row,
+                        col: *col,
+                        dirty,
+                        command: &[],
+                        in_command: false,
+                        message: &[],
+                    },
+                );
+                report_cursor(buffer, window, *row, *col, b"move");
             }
             // **移動はバッファを変えない。**
             false
@@ -1727,13 +1837,13 @@ fn handle_byte(
                 #[cfg(not(zi_enter_does_nothing))]
                 if !buffer.split_line(*row, *col) {
                     *message = OUT_OF_MEMORY_FOR_A_LINE;
-                    redraw_here(view, buffer, *mode, *row, *col, message);
+                    redraw_here(view, buffer, window, *mode, *row, *col, message);
                     return false;
                 }
                 *row += 1;
                 *col = 0;
-                redraw_here(view, buffer, *mode, *row, *col, b"");
-                report_cursor(buffer, *row, *col, b"split");
+                redraw_here(view, buffer, window, *mode, *row, *col, b"");
+                report_cursor(buffer, window, *row, *col, b"split");
                 return true;
             }
             // **Backspace（zi-f）。** 行頭なら前の行と繋げる。
@@ -1742,8 +1852,8 @@ fn handle_byte(
                     let removed = buffer.remove(*row, *col - 1);
                     if removed {
                         *col -= 1;
-                        redraw_here(view, buffer, *mode, *row, *col, b"");
-                        report_cursor(buffer, *row, *col, b"erase");
+                        redraw_here(view, buffer, window, *mode, *row, *col, b"");
+                        report_cursor(buffer, window, *row, *col, b"erase");
                     }
                     return removed;
                 }
@@ -1771,8 +1881,8 @@ fn handle_byte(
                     }
                     *row -= 1;
                     *col = landing;
-                    redraw_here(view, buffer, *mode, *row, *col, b"");
-                    report_cursor(buffer, *row, *col, b"join");
+                    redraw_here(view, buffer, window, *mode, *row, *col, b"");
+                    report_cursor(buffer, window, *row, *col, b"join");
                     return true;
                 }
             }
@@ -1796,6 +1906,7 @@ fn handle_byte(
                 redraw(
                     view,
                     buffer,
+                    window,
                     &Status {
                         mode: *mode,
                         row: *row,
@@ -1807,7 +1918,7 @@ fn handle_byte(
                         message: &[],
                     },
                 );
-                report_cursor(buffer, *row, *col, b"typed");
+                report_cursor(buffer, window, *row, *col, b"typed");
             }
             inserted
         }
@@ -1821,6 +1932,7 @@ fn handle_byte(
 fn redraw_here(
     view: &View,
     buffer: &Buffer,
+    window: &mut Window,
     mode: Mode,
     row: usize,
     col: usize,
@@ -1829,6 +1941,7 @@ fn redraw_here(
     redraw(
         view,
         buffer,
+        window,
         &Status {
             mode,
             row,

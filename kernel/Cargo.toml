@@ -152,6 +152,9 @@ zi-skip-grow-test = []
 # 破壊（zi-f）: zi が行頭の Backspace を捨てる。行が繋がらないので、
 # 読み戻しが 2 行のまま残る。zi-enter-does-nothing と対である。
 zi-join-does-nothing-test = []
+# 破壊（VIEW-a）: zi が窓を動かさない。b-2 までの振る舞いへ戻る。バッファは
+# 正しいので内部状態の判定は落ちず、画面を読む「窓が動いた」判定だけが落ちる。
+zi-window-frozen-test = []
 # 破壊（zi-c）: 書きで開いた fd への write が複製へ足さない。検証も戻り値も
 # 正しく、書いたつもりが複製に届いていない——読み戻しの検算（58 番）が捕まえる。
 write-file-skip-append-test = []

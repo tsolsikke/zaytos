@@ -596,6 +596,11 @@ pub(crate) mod script {
     /// 見るほうが、間に何を挟んでも動かない。**
     /// **台本を変えるときは、台本に寄りかかっている判定を数え直すこと**
     /// （`docs/verification-coverage.md`）。
+    // **VIEW-a で `/data/big` の回に窓の観測を 2 つ足した。**
+    // **`iZ` で先頭行を編集してから、`j` を 60 回送って窓を動かす**
+    // ——**本文に使える行数は実測で 48 なので、48 回目から窓が動く。**
+    // **観測は動かす前と後の 2 回で、ホストが「先頭行が変わったこと」と
+    // 「後のほうがファイルの後ろの行であること」を突き合わせる。**
     const SCRIPT: &[u8] = b"\x01\x06/bin/ls /data\n\
         /bin/zi /data/fresh\n\
         iNEW\x1b\x04\
@@ -635,7 +640,8 @@ pub(crate) mod script {
         /bin/cat /data/joined\n\
         /bin/cat /data/big\n\
         /bin/zi /data/big\n\
-        iZ\x1b\x04\
+        iZ\x1b\x04\x0e\
+        jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj\x0e\
         :wq\n\
         /bin/cat /data/big\n\x0c";
 
@@ -670,6 +676,11 @@ pub(crate) mod script {
     /// **主張を持つ観測点を合図に使わない**（`crate::console::probe` の
     /// `Observation::ScriptDone`）。
     const OBSERVE_DONE: u8 = 0x0c;
+    /// 観測点（VIEW-a）。**`zi` の本文の先頭行に何が出ているか。**
+    ///
+    /// **`0x0e` を使う。** **`0x09`（Tab）・`0x0a`（LF）・`0x0d`（CR）は
+    /// 打鍵として届きうるので避ける。** **`0x03` は Ctrl+C である。**
+    const OBSERVE_ZI_WINDOW: u8 = 0x0e;
     /// 休み（e-2）。**その `read` は何も返さない**（`-EAGAIN` になる）。
     ///
     /// # 何のために在るのか
@@ -697,6 +708,7 @@ pub(crate) mod script {
     /// `0x01` と `0x02` は `bytes_for_event` がどのキーからも作らない。
     fn observation_at(byte: u8) -> Option<crate::console::probe::Observation> {
         match byte {
+            OBSERVE_ZI_WINDOW => Some(crate::console::probe::Observation::ZiWindow),
             OBSERVE_PROMPT => Some(crate::console::probe::Observation::Prompt),
             OBSERVE_STATUS => Some(crate::console::probe::Observation::Status),
             OBSERVE_BEFORE_ALT => Some(crate::console::probe::Observation::BeforeAlternate),

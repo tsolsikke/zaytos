@@ -4272,6 +4272,41 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && big_lines_after[0] == format!("Z{}", big_lines_before[0])
         && big_lines_after[1..] == big_lines_before[1..];
 
+    // **窓が動いたこと（VIEW-a）。画面の実物で見る。**
+    //
+    // **バッファではない。** **`zi` は `top` を診断行に出しているが、
+    // それはバッファ側である**——**H-b-2 で捕まえられなかったのは、
+    // まさにバッファしか見ていなかったからである。**
+    //
+    // **台本は `/data/big` を開き、窓を動かす前と後で 2 回観測する**
+    // （`kernel/src/console/probe.rs` の `observe_zi_window`）。
+    //
+    // **期待値をホストが持たない。** **2 つが違うことと、後のほうが
+    // `cat` の出した並びの中で後ろに在ることを見る**——**像の中身も、
+    // 窓の高さも、動いた量も、写していない。**
+    let window_rows: Vec<&str> = serial
+        .lines()
+        .filter_map(|line| {
+            line.split("screen-window: the text row below the top of the window says ")
+                .nth(1)
+        })
+        .map(|rest| rest.trim().trim_end_matches('\r').trim_matches('"'))
+        .collect();
+    let position_in_the_file = |prefix: &str| {
+        big_lines_before
+            .iter()
+            .position(|line| line.starts_with(prefix))
+    };
+    let window_followed_the_cursor = window_rows.len() == 2
+        && window_rows[0] != window_rows[1]
+        && match (
+            position_in_the_file(window_rows[0]),
+            position_in_the_file(window_rows[1]),
+        ) {
+            (Some(before), Some(after)) => after > before,
+            _ => false,
+        };
+
     // **Enter と Backspace と Delete（zi-f）。**
     //
     // **台本が新しいファイルを開き、3 つを通してから保存している**
@@ -4434,6 +4469,15 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         big_lines_after.len()
     );
     println!(
+        "{context}: the window followed the cursor down the file = \
+         {window_followed_the_cursor} (the screen row below the top said {window_rows:?}, \
+         at lines {:?} of what cat printed)",
+        window_rows
+            .iter()
+            .map(|row| position_in_the_file(row))
+            .collect::<Vec<_>>()
+    );
+    println!(
         "{context}: enter split the line = {enter_split_the_line}, backspace erased = \
          {backspace_erased}, delete erased = {delete_erased}, the round trip reads back as \
          written = {edited_round_trip} (cat printed {edited_lines_seen:?})"
@@ -4508,6 +4552,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && big_passes_the_old_line_limit
         && big_passes_the_old_length_limit
         && big_round_trip
+        && window_followed_the_cursor
         && append_differs_from_insert
     {
         println!("{context}: PASS");
@@ -10823,6 +10868,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "zi-skip-release-test",
             "zi-skip-grow-test",
             "zi-join-does-nothing-test",
+            "zi-window-frozen-test",
         ] {
             total += 1;
             println!("=== xtask check: the zi test catches {feature}");
@@ -11677,7 +11723,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 23,
-    full: 227,
+    full: 228,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

@@ -124,6 +124,12 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
     // `zaytos_main` が無い）。**変わったら建て直す必要はあるので、ここで見る。**
     println!("cargo:rerun-if-changed={manifest_dir}/userland/userlib.rs");
 
+    // **`common` から取り込む純粋な論理（VIEW-a。ADR-0045 の決定 3）。**
+    //
+    // **載せないと、`common` 側を直してもユーザープログラムが建て直されない。**
+    // **`userlib.rs` を載せているのと同じ理由である。**
+    println!("cargo:rerun-if-changed={manifest_dir}/../common/src/window.rs");
+
     let script = format!("{manifest_dir}/userland/user.ld");
     println!("cargo:rerun-if-changed={script}");
 
@@ -205,6 +211,7 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
             "CARGO_FEATURE_ZI_JOIN_DOES_NOTHING_TEST",
             "zi_join_does_nothing",
         ),
+        ("CARGO_FEATURE_ZI_WINDOW_FROZEN_TEST", "zi_window_frozen"),
     ];
     let mut extra_cfgs: Vec<String> = Vec::new();
     for (env, cfg) in USER_PROGRAM_CFGS {

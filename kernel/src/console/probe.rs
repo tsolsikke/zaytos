@@ -36,6 +36,15 @@ pub(crate) enum Observation {
     AfterAlternate,
     /// コマンド行（最下行。e-4）。**打っている途中が出ているか。**
     CommandLine,
+    /// `zi` の窓（VIEW-a）。**本文の先頭行に何が出ているかを控えて出す。**
+    ///
+    /// # 画面を読む。バッファではない
+    ///
+    /// **窓が動いたことは、画面の先頭行が変わったことでしか言えない。**
+    /// **`zi` の内部状態（`top`）は診断行に出ているが、それはバッファ側で
+    /// ある**——**H-b-2 で捕まえられなかったのは、まさにバッファしか
+    /// 見ていなかったからである。**
+    ZiWindow,
     /// 台本が最後まで進んだ（DIR-1b）。**画面を読まない。**
     ///
     /// # 何も主張しない観測点である
@@ -172,6 +181,7 @@ pub(crate) fn observe(kind: Observation) {
         Observation::AfterAlternate => observe_after_alternate(&mut serial, console),
         Observation::CommandLine => observe_command_line(&mut serial, console, "screen-command"),
         Observation::Message => observe_command_line(&mut serial, console, "screen-message"),
+        Observation::ZiWindow => observe_zi_window(&mut serial, console),
         Observation::ScriptDone => {
             let _ = writeln!(serial, "script-done: the script reached its end");
         }
@@ -302,6 +312,52 @@ fn observe_prompt(serial: &mut SerialPort, console: &mut crate::console::Console
         "screen-color: the prompt symbol kept the default color = {symbol_is_plain} \
          (cell {symbol:?} char {symbol_char:?} fg {:?}, default {default_foreground:?})",
         symbol_colors.map(|(fg, _)| fg)
+    );
+}
+
+/// `zi` の本文の先頭行に出ている字を控えて出す（VIEW-a）。
+///
+/// # 何を主張するか
+///
+/// **この関数は主張しない。控えて出すだけである。**
+/// **突き合わせるのはホスト側である**——**台本は窓を動かす前と後で 2 回
+/// 観測し、ホストが「変わったこと」と「後のほうがファイルの後ろの行で
+/// あること」を見る。** **期待値をこちらが持たない。**
+///
+/// # 読むのは画面の行 1 である。行 0 ではない
+///
+/// **`zi` は本文を画面の先頭から並べる**（`redraw` が `move_cursor(0, 0)` から
+/// 置く）ので、**素直には行 0 が「窓の先頭に見えている行」である。**
+///
+/// **しかし行 0 は読めない。** **検査の構成では `zi` が診断行を `STDERR` へ
+/// 出し、それが画面にも描かれてカーソルの居る行を上書きする**
+/// （`kernel/userland/zi.rs` の `report_cursor` の doc。**zi-e 前の応急で、
+/// 根の手当ては「診断の出口を画面と分ける」である**）。**カーソルは開いた
+/// 直後に行 0 に居るので、そこを読むと診断行が出る**（実測。
+/// `"zi: cursor (buff"` が読めた）。
+///
+/// **したがって 1 つ下を読む。** **窓が `top` に居るとき、行 1 に出るのは
+/// バッファの `top + 1` である。** **窓が動いたかどうかを見るには、
+/// どの行を読んでも同じだけ言える**——**要るのは「変わったこと」である。**
+fn observe_zi_window(serial: &mut SerialPort, console: &mut crate::console::Console) {
+    /// 読む画面の行（VIEW-a）。**行 0 は診断行に上書きされる**（上の doc）。
+    const ROW: u32 = 1;
+    let (columns, _) = console.size();
+    let mut text = [0u8; LABEL_MAX];
+    let mut length = 0usize;
+    for column in 0..columns.min(LABEL_MAX as u32) {
+        let c = console.cell_char(column, ROW).unwrap_or(' ');
+        text[length] = if c.is_ascii() { c as u8 } else { b'?' };
+        length += 1;
+    }
+    // **右端の空白を落とす。** **行の長さは中身で決まり、画面の幅ではない。**
+    while length > 0 && text[length - 1] == b' ' {
+        length -= 1;
+    }
+    let _ = writeln!(
+        serial,
+        "screen-window: the text row below the top of the window says {:?}",
+        core::str::from_utf8(&text[..length]).unwrap_or("?")
     );
 }
 

@@ -9359,6 +9359,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "zi が行頭の Backspace を捨てる",
     ),
     (
+        "zi-window-frozen-test",
+        cfg!(feature = "zi-window-frozen-test"),
+        "zi が窓を動かさない",
+    ),
+    (
         "unlink-ignore-request-test",
         cfg!(feature = "unlink-ignore-request-test"),
         "unlink を受けても消さない",
