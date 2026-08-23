@@ -24,6 +24,7 @@
 //! [`UserLoadError`] は `errno` を持たない。**写すのは `syscall` の側である**
 //! （`common::ext2::Ext2Error` と `vfs::FileTableError` に続く 3 つ目）。
 
+use common::critical::Locked;
 use common::log::{LogLevel, Logger};
 use common::serial::SerialPort;
 
@@ -124,6 +125,122 @@ const ENVIRONMENT: &[&[u8]] = &[b"TERM=zaytos"];
 
 #[cfg(all(feature = "env-drop-term-test", feature = "env-drop-path-test"))]
 const ENVIRONMENT: &[&[u8]] = &[];
+
+/// ページの大きさ（H-a）。**関数の中に同じ定数が 3 つあるが、
+/// ヒープの上端は関数の外で要るので、モジュールの高さに 1 つ置く。**
+const HEAP_PAGE_SIZE: u64 = 4096;
+
+/// いま走っているプロセスのヒープ（H-a。ADR-0044）。
+///
+/// # 深さの配列にしない
+///
+/// **最初は `MAX_EXCURSION_DEPTH` の配列にした。** **書く側（像を読む時点）と
+/// 読む側（システムコールの中）で深さが違い、索引がずれた**（実測。
+/// `brk(0)` が答えられなかった）。
+///
+/// **据える側が戻す形にする**——`crate::vfs::swap_current_files` と
+/// `crate::syscall::set_user_window` と同じ形である（S9-b-3-2b から続く形）。
+/// **`run_loaded_program` が入る直前に据え、戻ったら引き取る。**
+/// **深さの算術が消えるので、ずれようが無い。**
+static CURRENT_HEAP: Locked<Heap> = Locked::new(Heap::EMPTY);
+
+/// ヒープの下端と上端（H-a）。
+#[derive(Clone, Copy)]
+pub struct Heap {
+    /// 像の末尾の次のページ。**`brk` はここより下げられない。**
+    start: u64,
+    /// いまの上端。
+    break_at: u64,
+    /// `brk` が取ったフレームの数（H-a）。
+    ///
+    /// # 空きフレームの全体を数えない
+    ///
+    /// **最初は遠征の前後で `free_frame_count()` を比べた。** **釣り合わなかった**
+    /// ——**`syscall-test` は子を起こすので、子の空間のフレームが隔離
+    /// （quarantine）へ入り、まだ空きへ戻っていない**（実測で 44 フレームの差）。
+    ///
+    /// **`brk` 自身が取った数と返した数を数える。** **他の活動に汚されない。**
+    /// **主張は同じである**——ADR-0044 の到達条件（伸ばして縮めたら戻る）を、
+    /// **測れる形にしたものである。**
+    taken: u32,
+    /// `brk` が返したフレームの数（H-a）。
+    given: u32,
+}
+
+impl Heap {
+    /// 張っていない状態。**`start` が 0 である。**
+    pub const EMPTY: Self = Self {
+        start: 0,
+        break_at: 0,
+        taken: 0,
+        given: 0,
+    };
+
+    /// 像の末尾から作る（H-a）。**次のページの先頭から始まる。**
+    ///
+    /// **固定の番地にしない**——**像の大きさはプログラムごとに違う**
+    /// （実測で `hello` が `0x401012`、`zi` が `0x40a289`。ADR-0044）。
+    pub fn from_image_end(image_end: u64) -> Self {
+        let start = (image_end + HEAP_PAGE_SIZE - 1) & !(HEAP_PAGE_SIZE - 1);
+        Self {
+            start,
+            break_at: start,
+            taken: 0,
+            given: 0,
+        }
+    }
+
+    /// 下端。
+    pub const fn start(&self) -> u64 {
+        self.start
+    }
+
+    /// いまの上端。
+    pub const fn break_at(&self) -> u64 {
+        self.break_at
+    }
+
+    /// 上端を置く。**写像を変えた後で呼ぶ。**
+    pub fn set_break(&mut self, value: u64) {
+        self.break_at = value;
+    }
+
+    /// 張っているか。
+    pub const fn is_mapped(&self) -> bool {
+        self.start != 0
+    }
+
+    /// 取ったフレームを 1 つ数える（H-a）。
+    pub fn note_taken(&mut self) {
+        self.taken += 1;
+    }
+
+    /// 返したフレームを 1 つ数える（H-a）。
+    pub fn note_given(&mut self) {
+        self.given += 1;
+    }
+
+    /// 取った数と返した数（H-a）。**判定行に出す。**
+    pub const fn frames(&self) -> (u32, u32) {
+        (self.taken, self.given)
+    }
+}
+
+/// 今のヒープを据え、前のものを返す（H-a）。**`swap_current_files` と同じ形。**
+pub fn swap_current_heap(heap: Heap) -> Heap {
+    core::mem::replace(&mut CURRENT_HEAP.lock(), heap)
+}
+
+/// 今のヒープへ触る（H-a）。**`sys_brk` が使う。**
+pub fn with_current_heap<R>(body: impl FnOnce(&mut Heap) -> R) -> R {
+    body(&mut CURRENT_HEAP.lock())
+}
+
+/// ヒープが越えられない上端（H-a。ADR-0044 の決定 4）。
+///
+/// **ユーザースタックの下端である。** **ガードページは置かず、ここで断る**
+/// ——**越えなければ衝突しない。**
+pub const HEAP_LIMIT: u64 = USER_PROGRAM_STACK_TOP - HEAP_PAGE_SIZE;
 
 /// ユーザースタックの未使用部分を埋める既知のバイト（EV。ADR-0041）。
 ///
@@ -522,6 +639,11 @@ pub struct UserProcess {
     entry: u64,
     /// ユーザースタックの上端。
     stack_top: u64,
+    /// このプロセスのヒープ（H-a。ADR-0044）。
+    ///
+    /// **`run_loaded_program` が [`swap_current_heap`] で据え、戻ったら
+    /// 引き取る**（`files` と同じ形）。
+    heap: Heap,
     /// ユーザースタックのページを、direct map 越しに指す番地（EV）。
     ///
     /// # なぜ持つのか
@@ -613,6 +735,7 @@ pub fn load_user_program(
         entry: 0,
         stack_top: USER_PROGRAM_STACK_TOP,
         stack_scratch: 0,
+        heap: Heap::EMPTY,
         name,
         files: crate::vfs::FileTable::new(),
     };
@@ -635,6 +758,26 @@ pub fn load_user_program(
             }
         })
         .map(|()| process.entry);
+
+    // **`brk` が取った数と返した数を出す（H-a。ADR-0044 の到達条件）。**
+    //
+    // **空きフレームの全体を数えない**——**子を起こすプログラムでは、
+    // 子の空間のフレームが隔離へ入り、まだ空きへ戻っていない**
+    // （実測で 44 フレームの差が出た）。**`brk` 自身を数えれば、他の活動に
+    // 汚されない。**
+    //
+    // **伸ばして縮めないプログラムでは、当然合わない**（取っただけで終わる）。
+    // **合わないことを主張しない——出すだけである。** **判定はホスト側が行う**
+    // （`syscall-test` は伸ばして縮めるので、そこだけが一致を主張する）。
+    if run {
+        let (taken, given) = process.heap.frames();
+        logger.info(format_args!(
+            "user-heap: {} had brk take {taken} frame(s) and give back {given} \
+             (equal means the shrink actually returned them; a program that only grows \
+             will not be equal, and that is not a failure)",
+            process.name
+        ));
+    }
 
     // **成否によらず畳む。** 破棄は S7-d の経路（下位を隔離へ入れ、世代が
     // 退くまで返さない）をそのまま通る。**プロセスが終了したなら、畳むのはここ
@@ -872,6 +1015,13 @@ fn load_user_program_into(
         previous_end = ph.p_vaddr + ph.p_memsz;
     }
 
+    // **ヒープの初期値を控える（H-a。ADR-0044）。** **像の末尾の次のページである。**
+    //
+    // **`previous_end` は最後の区画の末尾である**（上のループが毎回入れている）。
+    // **区画は番地の順に並んでいる**ので、これが像の末尾になる
+    // （並びは `Elf::load_segments` が保証する。ADR-0039）。
+    process.heap = Heap::from_image_end(previous_end);
+
     // **本数の対。** 落ちた区画があれば、この 1 行で分かる。
     logger.info(format_args!(
         "user-load: {} PT_LOAD segments: declared={declared_segments} mapped={loaded_segments} \
@@ -1092,6 +1242,8 @@ unsafe fn run_loaded_program(
     // 知らないので、遠征の間だけ `crate::vfs` が持つ
     // （`syscall::set_user_window` と同じ形。据えるのは Ring 3 へ落ちる側である）。
     let previous_files = crate::vfs::swap_current_files(core::mem::take(&mut process.files));
+    // **ヒープも据える（H-a）。** **据える側が戻す**（`files` と同じ形）。
+    let previous_heap = swap_current_heap(process.heap);
     // **前景を取る（S11-10）。** 取っているあいだ、カーネル側の消費者
     // （`interrupts::drain_keyboard`）はスキャンコードを取り出さない。
     // **入力の消費者は同時に 1 つである**（`crate::input` の不変条件）。
@@ -1132,6 +1284,7 @@ unsafe fn run_loaded_program(
         crate::input::release_foreground();
     }
     process.files = crate::vfs::swap_current_files(previous_files);
+    process.heap = swap_current_heap(previous_heap);
     // **止めたときは、前景の持ち主と止めた相手を両方出す（S12 前の手当て、C）。**
     //
     // **この 2 つは同じではない。** 前景を取るのは遠征の最も外側

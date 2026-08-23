@@ -7251,6 +7251,12 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
         "the canary /etc/motd changed; the write reached another file",
     ),
     (61, "the envp terminator was not NULL"),
+    (62, "brk(0) did not return a positive break"),
+    (63, "brk could not grow the heap by two pages"),
+    (64, "the end of the first new page was not writable"),
+    (65, "the end of the second new page was not writable"),
+    (66, "a request past the limit was not refused with -ENOMEM"),
+    (67, "brk could not shrink the heap back"),
 ];
 
 /// `fault-test` が起こす #PF のエラーコード（S9-b-3-2a）。
@@ -9326,6 +9332,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "ext2-rmdir-ignore-nonempty-test",
         cfg!(feature = "ext2-rmdir-ignore-nonempty-test"),
         "rmdir が空かどうかを見ない",
+    ),
+    (
+        "brk-skip-shrink-test",
+        cfg!(feature = "brk-skip-shrink-test"),
+        "brk が下げる要求で写像を外さない",
     ),
     (
         "zi-enter-does-nothing-test",

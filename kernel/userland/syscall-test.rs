@@ -67,6 +67,12 @@
 //! - `33` `argv[2]`（終端）が NULL でなかった
 //! - `34` `envp[0]` が `"TERM=zaytos"` でなかった（EV。**環境が空の構成では素通りする**）
 //! - `61` `envp` の終端が NULL でなかった
+//! - `62` `brk(0)` が正の上端を返さなかった
+//! - `63` `brk` で 2 ページ伸ばせなかった
+//! - `64` 伸ばした 1 ページ目の末尾が読み書きできなかった
+//! - `65` 伸ばした 2 ページ目の末尾が読み書きできなかった
+//! - `66` 上限を越える要求が `-ENOMEM` で断られなかった
+//! - `67` `brk` で元へ縮められなかった
 //! - `35` `auxv` の終端（`AT_NULL`）が無かった
 //! - `36` `spawn("/bin/hello")` が 0 を返さなかった
 //! - `37` `spawn("/nope")` が `-ENOENT` を返さなかった
@@ -264,6 +270,31 @@ const ENVP_TERMINATOR_OFFSET: usize = 32 + EXPECTED_ENVC * 8;
 const AUXV_TYPE_OFFSET: usize = ENVP_TERMINATOR_OFFSET + 8;
 /// `spawn` の番号（`ZAYTOS_PRIVATE_BASE + 4`）。
 const SYS_SPAWN: u32 = 0x1004;
+
+/// `brk` の番号（Linux と同じ。H-a。ADR-0044）。
+const SYS_BRK: u32 = 12;
+
+/// `brk` で伸ばす量（2 ページ）。
+///
+/// **1 ページでは足りない**——**2 ページ目の末尾まで書けることを見たい。**
+/// **「1 ページだけ写って 2 ページ目が無い」形が、1 ページでは捕まらない。**
+const BRK_GROWTH: u32 = 8192;
+
+/// 伸ばした領域の末尾から測ったオフセット（最後の 4 バイト）。
+const BRK_LAST_WORD: u32 = BRK_GROWTH - 4;
+
+/// 1 ページ目の末尾（最後の 4 バイト）。
+const BRK_FIRST_PAGE_LAST_WORD: u32 = 4092;
+
+/// 伸ばした領域へ書く模様。**他の検算の値と紛れない値にする。**
+const BRK_PATTERN: u32 = 0x5A5A_1234;
+
+/// **上限を必ず越える要求。** **上限そのものを写さない**
+/// ——**カーネルの定数を検算へ書き写すと、片方だけが古くなる。**
+const BRK_TOO_FAR: u32 = 0x7FFF_FFFF;
+
+/// `-ENOMEM`。
+const MINUS_ENOMEM: i32 = -12;
 /// `-E2BIG`（引数が多すぎる、または長すぎる）。
 const MINUS_E2BIG: i32 = -7;
 /// `-EAGAIN`（今は無い）。**端末に打鍵が溜まっていないときの答えである。**
@@ -332,6 +363,54 @@ core::arch::global_asm!(
     // auxv の終端（AT_NULL = 0）。
     "  cmp qword ptr [rsp + {auxv_type}], 0",
     "  mov edi, 35",
+    "  jne 9f",
+
+    // --- 62..67. ヒープ（`brk`。H-a。ADR-0044） ---
+    //
+    // **`r12` は callee-saved で、`int 0x80` を跨いで残る**
+    // （カーネルは GPR を復元する。`syscall-test` の他の検算が rbx で
+    // 同じことをしている）。
+    //
+    // **問い合わせ（`brk(0)`）が正の上端を返すこと。**
+    "  xor edi, edi",
+    "  mov eax, {brk}",
+    "  int 0x80",
+    "  cmp rax, 0",
+    "  mov edi, 62",
+    "  jle 9f",
+    "  mov r12, rax",
+    // **2 ページ伸ばすと、要求した値がそのまま返ること。**
+    "  lea rdi, [r12 + {brk_growth}]",
+    "  mov eax, {brk}",
+    "  int 0x80",
+    "  lea rdx, [r12 + {brk_growth}]",
+    "  cmp rax, rdx",
+    "  mov edi, 63",
+    "  jne 9f",
+    // **伸ばした領域が読み書きできること。** **1 ページ目の末尾と
+    // 2 ページ目の末尾の両方を見る**——**1 ページしか写っていない形を捕まえる。**
+    "  mov dword ptr [r12 + {brk_first_last}], {brk_pattern}",
+    "  mov dword ptr [r12 + {brk_last}], {brk_pattern}",
+    "  cmp dword ptr [r12 + {brk_first_last}], {brk_pattern}",
+    "  mov edi, 64",
+    "  jne 9f",
+    "  cmp dword ptr [r12 + {brk_last}], {brk_pattern}",
+    "  mov edi, 65",
+    "  jne 9f",
+    // **上限を越える要求が `-ENOMEM` で断られること。**
+    "  mov edi, {brk_too_far}",
+    "  mov eax, {brk}",
+    "  int 0x80",
+    "  cmp eax, {minus_enomem}",
+    "  mov edi, 66",
+    "  jne 9f",
+    // **元へ縮められること。** **返ったかどうかはカーネルが数える**
+    // （`user-heap:` の行。ホスト側が突き合わせる）。
+    "  mov rdi, r12",
+    "  mov eax, {brk}",
+    "  int 0x80",
+    "  cmp rax, r12",
+    "  mov edi, 67",
     "  jne 9f",
 
 
@@ -1211,6 +1290,13 @@ core::arch::global_asm!(
     term_len = const TERM_LEN,
     envp_terminator = const ENVP_TERMINATOR_OFFSET,
     auxv_type = const AUXV_TYPE_OFFSET,
+    brk = const SYS_BRK,
+    brk_growth = const BRK_GROWTH,
+    brk_last = const BRK_LAST_WORD,
+    brk_first_last = const BRK_FIRST_PAGE_LAST_WORD,
+    brk_pattern = const BRK_PATTERN,
+    brk_too_far = const BRK_TOO_FAR,
+    minus_enomem = const MINUS_ENOMEM,
     sys_spawn = const SYS_SPAWN,
     minus_e2big = const MINUS_E2BIG,
     minus_eagain = const MINUS_EAGAIN,

@@ -4106,6 +4106,27 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     let failures_in_the_round = after_mkdir.matches("zash: exit status ").count();
     let only_the_refused_rmdir_failed = failures_in_the_round == 1;
 
+    // **`brk` が取った分を返したこと（H-a。ADR-0044 の到達条件）。**
+    //
+    // **`syscall-test` は 2 ページ伸ばしてから元へ縮める**（あちらの asm の
+    // 62..67 番）。**取った数と返した数が一致していなければ、縮めたつもりで
+    // 返っていない。**
+    //
+    // **空きフレームの全体は見ない**——**子を起こすので、子の空間のフレームが
+    // 隔離へ入り、まだ空きへ戻っていない**（実測で 44 フレームの差。
+    // `kernel/src/userland.rs` の `Heap` の doc）。
+    let heap_line = plain
+        .lines()
+        .find(|line| line.contains("user-heap: syscall-test had brk take"))
+        .unwrap_or("");
+    let heap_numbers: Vec<u32> = heap_line
+        .split_whitespace()
+        .filter_map(|word| word.parse::<u32>().ok())
+        .collect();
+    // **拾うのは「取った数」と「返した数」の 2 つだけである。**
+    let brk_returned_what_it_took =
+        heap_numbers.len() >= 2 && heap_numbers[0] == heap_numbers[1] && heap_numbers[0] > 0;
+
     // **Enter と Backspace と Delete（zi-f）。**
     //
     // **台本が新しいファイルを開き、3 つを通してから保存している**
@@ -4222,6 +4243,10 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
          (ls /tmp printed {listing_of_tmp:?})"
     );
     println!(
+        "{context}: brk gave back every frame it took = {brk_returned_what_it_took} \
+         (took/gave {heap_numbers:?}, from {heap_line:?})"
+    );
+    println!(
         "{context}: enter split the line = {enter_split_the_line}, backspace erased = \
          {backspace_erased}, delete erased = {delete_erased}, the round trip reads back as \
          written = {edited_round_trip} (cat printed {edited_lines_seen:?})"
@@ -4289,6 +4314,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && backspace_erased
         && delete_erased
         && edited_round_trip
+        && brk_returned_what_it_took
         && append_differs_from_insert
     {
         println!("{context}: PASS");
@@ -10554,7 +10580,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             }
         }
 
-        // **`zi` の破壊 15 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
+        // **`zi` の破壊 16 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
         // 書かない、挿入が 1 字落とす（どちらも zi-d-2）、プロンプトの色を
         // 送らない、状態行がモードに追随しない（どちらも ES-d）、
         // `ioctl(TIOCGWINSZ)` が行と桁を入れ替える（e-1）、
@@ -10600,6 +10626,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "env-drop-term-test",
             "unlink-ignore-request-test",
             "zi-enter-does-nothing-test",
+            "brk-skip-shrink-test",
         ] {
             total += 1;
             println!("=== xtask check: the zi test catches {feature}");
@@ -11454,7 +11481,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 23,
-    full: 223,
+    full: 224,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

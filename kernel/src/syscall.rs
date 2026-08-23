@@ -396,6 +396,20 @@ pub const SYS_MKDIR: u64 = 83;
 /// `rmdir` の番号（Linux と同じ。DIR-1c）。**利用者は `/bin/rmdir` である。**
 pub const SYS_RMDIR: u64 = 84;
 
+/// `brk` の番号（Linux と同じ。H-a。ADR-0044）。
+///
+/// # `brk(0)` は問い合わせである
+///
+/// **Linux と同じ形にする**——**0 を渡すと、いまの上端が返る。**
+/// **別の番号を用意しない**（`sbrk` は libc の側の話である）。
+///
+/// # 返すのは新しい上端である
+///
+/// **失敗しても `-errno` を返す**（**Linux は失敗すると古い上端を返す**が、
+/// **こちらは `-errno` にする**——**「動かなかった」と「そこまでしか
+/// 伸びなかった」を、呼ぶ側が区別できる形にする**）。
+pub const SYS_BRK: u64 = 12;
+
 /// `unlink` の番号（Linux と同じ。DIR-1b）。
 ///
 /// **`common::ext2::unlink_file` が S12-e から在り、入口が無かっただけである。**
@@ -946,6 +960,11 @@ unsafe fn dispatch(
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
             unsafe { sys_ioctl(args[0], args[1], args[2], pml4_phys, direct_map) }
         }
+        SYS_BRK => {
+            // SAFETY: 呼び出し元契約により direct_map は有効で、
+            // 遠征の中なので CR3 はこのプロセスのものである。
+            unsafe { sys_brk(args[0], direct_map) }
+        }
         SYS_LSEEK => sys_lseek(args[0], args[1], args[2]),
         SYS_MKDIR => {
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
@@ -1468,6 +1487,142 @@ fn errno_for_alloc(error: common::ext2::AllocError) -> i64 {
         // **像の側の食い違いは、使う側の入力では直らない。**
         _ => EIO,
     }
+}
+
+/// `brk(addr)` の本体（H-a。ADR-0044）。
+///
+/// # 上げれば写す。下げれば外して返す
+///
+/// **ページ単位で動く。** **要求は 1 バイト単位で受けるが、
+/// 写すのはページである**（Linux も同じ）。
+///
+/// # 上限で断る
+///
+/// **[`crate::userland::HEAP_LIMIT`] を越えたら `-ENOMEM`。**
+/// **ガードページは置かない**——**スタックの下端そのものが境界なので、
+/// 越えなければ衝突しない**（ADR-0044 の決定 4）。
+///
+/// # 稼働中の表へ写す
+///
+/// **遠征の中では CR3 がこのプロセスのものである**
+/// （`crate::userland` の `run_loaded_program` が `switch_to` してから入る）。
+/// **したがって [`crate::paging::active::ActivePageTable::current`] が
+/// 指すのはユーザーの表である。** **新しい経路を作らない**（ADR-0044）。
+///
+/// # 途中で足りなくなったら、そこまでで止める
+///
+/// **写せた分は残す。** **`-ENOMEM` を返すが、上端はそこまで進んでいる**
+/// ——**巻き戻すと、巻き戻しの途中で失敗したときに何も言えなくなる。**
+/// **呼ぶ側は `brk(0)` で確かめられる。**
+///
+/// # Safety
+///
+/// `direct_map` が有効で、遠征の中（CR3 がユーザーの表）から呼ばれること。
+unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
+    use crate::paging::active::{ActivePageTable, PageAttributes};
+
+    let (mapped, current, start) = crate::userland::with_current_heap(|heap| {
+        (heap.is_mapped(), heap.break_at(), heap.start())
+    });
+    if !mapped {
+        // **像を読む前には答えられない。** ここへ来るのは異常である。
+        return (-ENOMEM) as u64;
+    }
+
+    // **0 は問い合わせである。**
+    if requested == 0 {
+        return current;
+    }
+    // **像の末尾より下げられない。** **下は像とスタックの外である。**
+    if requested < start || requested > crate::userland::HEAP_LIMIT {
+        return (-ENOMEM) as u64;
+    }
+
+    const PAGE_SIZE: u64 = 4096;
+    let want = (requested + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let have = current.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+    if want == have {
+        crate::userland::with_current_heap(|heap| heap.set_break(requested));
+        return requested;
+    }
+
+    let Some(allocator) = crate::frame_allocator::take() else {
+        return (-ENOMEM) as u64;
+    };
+    // SAFETY: 遠征の中なので CR3 はこのプロセスの表である。
+    let mut table = unsafe { ActivePageTable::current(direct_map) };
+    let attributes = PageAttributes {
+        user: true,
+        writable: true,
+        cacheable: true,
+    };
+
+    let mut outcome = requested;
+    if want > have {
+        // **伸ばす。** 1 ページずつ写す。
+        let mut page = have;
+        while page < want {
+            let Some(frame) = allocator.allocate_frame() else {
+                outcome = (-ENOMEM) as u64;
+                break;
+            };
+            let Some(virt) = common::addr::VirtAddr::new(page) else {
+                let _ = allocator.deallocate_frame(frame);
+                outcome = (-ENOMEM) as u64;
+                break;
+            };
+            // **中身を 0 にしてから写す。** **前の住人の中身をユーザーへ渡さない。**
+            // SAFETY: いま取ったフレームで、direct map が覆っている。
+            unsafe {
+                core::ptr::write_bytes(
+                    direct_map.phys_to_virt(frame).as_u64() as *mut u8,
+                    0,
+                    PAGE_SIZE as usize,
+                )
+            };
+            // SAFETY: 稼働中の表へ、ユーザーの範囲を写す。
+            if unsafe { table.map_4kib(virt, frame, attributes, allocator) }.is_err() {
+                let _ = allocator.deallocate_frame(frame);
+                outcome = (-ENOMEM) as u64;
+                break;
+            }
+            crate::userland::with_current_heap(|heap| heap.note_taken());
+            page += PAGE_SIZE;
+        }
+        // **写せた分までを上端にする**（doc の「そこまでで止める」）。
+        let reached = if outcome == requested {
+            requested
+        } else {
+            page
+        };
+        crate::userland::with_current_heap(|heap| heap.set_break(reached));
+    } else {
+        // 破壊 (H-a, brk-skip-shrink-test): 下げる要求で外さない。
+        // **上端だけ下がり、フレームは返らない。** **`brk(0)` は下がった値を
+        // 返すので、使う側からは成功に見える**——**落ちるのは
+        // 「伸ばして縮めたら空きフレームの数が元へ戻る」判定だけである。**
+        #[cfg(not(feature = "brk-skip-shrink-test"))]
+        {
+            let mut page = have;
+            while page > want {
+                page -= PAGE_SIZE;
+                if let Some(virt) = common::addr::VirtAddr::new(page) {
+                    // SAFETY: 稼働中の表から外し、フレームを返す。
+                    if let Ok(frame) = unsafe { table.unmap_4kib(virt) } {
+                        // **`unmap_4kib` は物理番地を `u64` で返す。**
+                        if let Some(frame) = PhysAddr::new(frame) {
+                            let _ = allocator.deallocate_frame(frame);
+                            crate::userland::with_current_heap(|heap| heap.note_given());
+                        }
+                    }
+                }
+            }
+        }
+        crate::userland::with_current_heap(|heap| heap.set_break(requested));
+    }
+
+    crate::frame_allocator::give_back(allocator);
+    outcome
 }
 
 /// `lseek(fd, offset, whence)` の本体（DIR-1b）。

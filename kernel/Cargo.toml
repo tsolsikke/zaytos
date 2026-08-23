@@ -140,6 +140,9 @@ unlink-ignore-request-test = []
 # 破壊（zi-f）: zi のインサートモードで Enter を捨てる。行が増えないので、
 # 読み戻しが 2 行にならず、「enter split the line」だけが落ちる。
 zi-enter-does-nothing-test = []
+# 破壊（H-a）: brk が下げる要求で写像を外さない。上端だけ下がりフレームが
+# 返らないので、「伸ばして縮めたら空きフレームの数が元へ戻る」判定が落ちる。
+brk-skip-shrink-test = []
 # 破壊（zi-c）: 書きで開いた fd への write が複製へ足さない。検証も戻り値も
 # 正しく、書いたつもりが複製に届いていない——読み戻しの検算（58 番）が捕まえる。
 write-file-skip-append-test = []
