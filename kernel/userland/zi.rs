@@ -31,10 +31,11 @@
 //! - `1` 開けなかった
 //! - `2` 引数が無かった
 //! - `3` 読めなかった
-//! - `4` ファイルが上限を越えている（**切り詰めない**——切り詰めて保存すると
-//!   開いた時点で中身が消える）
+//! - `4` 読んでいる途中でヒープを伸ばせなかった（**切り詰めない**——切り詰めて
+//!   保存すると開いた時点で中身が消える。**b-2 まではここが「上限を越えている」
+//!   だった。その上限は消えた**）
 //! - `5` `:w` が失敗した（開けない、または書いた量が要求と食い違う）
-//! - `6` ヒープを取れなかった（H-b-1。`brk` が断った）
+//! - `6` 最初の確保に失敗した（H-b-1。`brk` が断った）
 //!
 //! # 入れ物はヒープの上に在る（H-b-1）
 //!
@@ -104,12 +105,24 @@ const USAGE: &[u8] = b"zi: usage: zi PATH\n";
 const OPEN_FAILED: &[u8] = b"zi: cannot open\n";
 /// 読めなかったときの断り書き。
 const READ_FAILED: &[u8] = b"zi: cannot read\n";
-/// 上限を越えていたときの断り書き。**切り詰めない。**
-const TOO_BIG: &[u8] = b"zi: the file does not fit the buffer\n";
-/// ヒープを取れなかったときの断り書き（H-b-1）。
-const NO_HEAP: &[u8] = b"zi: cannot reserve the edit buffer\n";
+/// 読んでいる途中でヒープを伸ばせなかったときの断り書き（H-b-3 で文言を直した）。
+///
+/// **切り詰めない。** 切り詰めて保存すると、開いた時点で中身が消える。
+///
+/// # 文言を意味へ合わせた（H-b-3）
+///
+/// **b-2 まで `zi: the file does not fit the buffer` だった。**
+/// **あれは「64 行 x 128 バイトの固定配列に入らない」という意味だった**
+/// ——**その配列は b-2 で消えた。** **いま出るのは、ヒープを伸ばせなかった
+/// ときだけである。** **古い文言を残すと、次に読む者が 64 行の話だと思う。**
+const OUT_OF_MEMORY_READING: &[u8] = b"zi: ran out of memory while reading the file\n";
+/// 最初の確保に失敗したときの断り書き（H-b-1）。
+///
+/// **[`OUT_OF_MEMORY_READING`] と分けてある**——**開く前に断ったのか、
+/// 読んでいる途中で足りなくなったのかが、文言で分かるようにする。**
+const NO_HEAP: &[u8] = b"zi: cannot reserve memory for the edit buffer\n";
 
-/// 行を増やせなかったときの報せ（zi-f。H-b-2 で意味が変わった）。
+/// 行を増やせなかったときの報せ（zi-f。H-b-3 で文言を直した）。
 ///
 /// **黙って落とさない。** **`insert` が入らない字を落とすのと同じ判断だが、
 /// あちらは 1 字で、こちらは「行が作れない」である**——**使う人から見て
@@ -117,11 +130,16 @@ const NO_HEAP: &[u8] = b"zi: cannot reserve the edit buffer\n";
 ///
 /// # 64 行という値は消えた（H-b-2）
 ///
-/// **b-1 まではこれが `MAX_LINES` に当たった報せだった。**
-/// **いま出るのは、ヒープを伸ばせなかったときだけである**
-/// （`brk` がヒープの上限で断ったか、フレームが尽きたか）。
-/// **文言の見直しは締めで行う**（`docs/deferred-decisions.md` に行がある）。
-const NO_ROOM_FOR_A_LINE: &[u8] = b"no room for another line";
+/// **b-1 まではこれが `MAX_LINES` に当たった報せで、文言も
+/// `no room for another line` だった。** **いま出るのは、ヒープを
+/// 伸ばせなかったときだけである**（`brk` がヒープの上限で断ったか、
+/// フレームが尽きたか）。**古い文言を残すと、次に読む者が 64 行の話だと思う。**
+///
+/// # この報せが出る形は、まだ通っていない
+///
+/// **4MiB を使い切る利用者が居ない**（`docs/deferred-decisions.md` の
+/// 「ヒープを使い切る経路が4つとも未検査である」）。**通していないと書いておく。**
+const OUT_OF_MEMORY_FOR_A_LINE: &[u8] = b"out of memory: cannot add a line";
 
 /// `read(0)` が「まだ無い」を返す値（`-EAGAIN`）。
 const MINUS_EAGAIN: i64 = -11;
@@ -1057,7 +1075,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     // **入れ物を用意できなかったら開かずに拒む。** 切り詰めて保存すると、
     // 開いた時点で中身が消える——**それは編集ではなく破壊である。**
     if overflowed || !index_lines(buffer, total) {
-        write_all(STDERR, TOO_BIG);
+        write_all(STDERR, OUT_OF_MEMORY_READING);
         release_and_exit(buffer, 4);
     }
 
@@ -1708,7 +1726,7 @@ fn handle_byte(
 
                 #[cfg(not(zi_enter_does_nothing))]
                 if !buffer.split_line(*row, *col) {
-                    *message = NO_ROOM_FOR_A_LINE;
+                    *message = OUT_OF_MEMORY_FOR_A_LINE;
                     redraw_here(view, buffer, *mode, *row, *col, message);
                     return false;
                 }
