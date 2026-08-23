@@ -212,8 +212,14 @@ const MODE_DIRECTORY: u32 = 0x4000;
 const MOTD_BLOCKS: u32 = 8;
 /// `getdents64` の番号（Linux と同じ 217）。
 const SYS_GETDENTS64: u32 = 217;
-/// ルートディレクトリのエントリ数（`. .. lost+found bin data etc`）。
-const ROOT_ENTRIES: u32 = 6;
+/// ルートディレクトリのエントリ数（`. .. lost+found bin data etc tmp`）。
+///
+/// **DIR-1c で 6 から 7 になった**——**`/tmp` を像に足したためである**
+/// （ADR-0042 が「作る」と決めた唯一のもの）。
+///
+/// **この数は像の中身に寄りかかっている。** **置き場所を足したら、
+/// ここも数え直すこと**（実測。足した日にこの検算が起動を止めた）。
+const ROOT_ENTRIES: u32 = 7;
 /// `linux_dirent64` の `d_reclen` の位置。
 const DIRENT_RECLEN_OFFSET: u32 = 16;
 /// `linux_dirent64` の `d_type` の位置。

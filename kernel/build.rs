@@ -114,6 +114,9 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
         "bss-test",
         "rm",
         "tail",
+        "mkdir",
+        "rmdir",
+        "touch",
     ];
 
     // **共有する包み（S11-9）。** `ls` と `cat` が `mod userlib;` で取り込む。
@@ -345,6 +348,9 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         "bss-test",
         "rm",
         "tail",
+        "mkdir",
+        "rmdir",
+        "touch",
     ] {
         std::fs::copy(
             format!("{out_dir}/{name}.elf"),
@@ -355,6 +361,12 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
 
     // **単一間接ブロックの境界を挟む 2 本。** 直接ブロックは 12 個なので、
     // 12 ブロックちょうどは間接を使わず、1 バイト超えると使う。
+    // **`/tmp` を作る（DIR-1c。ADR-0042）。** **中身は置かない**——
+    // **一時ファイルの置き場であって、像に焼くものではない。**
+    // **ADR-0042 が「作る」と決めた唯一のものである。**
+    std::fs::create_dir_all(format!("{staging}/tmp"))
+        .expect("failed to create /tmp in the staging");
+
     std::fs::create_dir_all(format!("{staging}/data"))
         .expect("failed to create /data in the staging");
     // **`zi` が開く複数行のファイル（zi-d-1）。**

@@ -2613,6 +2613,7 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
     let keep_truncated = features.contains(&TRUNCATE_KEEP_FEATURE);
     // **作ったままの像か（S12-e）。**
     let keep_created = features.contains(&CREATE_KEEP_FEATURE);
+    let keep_made = features.contains(&MKDIR_KEEP_FEATURE);
 
     let (identical, fsck_ok) = if keep_truncated {
         // **空のファイルは ext2 として正しい。** **`e2fsck` は無傷と判定する。**
@@ -2707,6 +2708,42 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
         );
 
         (content_ok && moved_by_one && extra_ok, clean)
+    } else if keep_made {
+        // **作ったままのディレクトリ（DIR-1c）。**
+        //
+        // **判定A——`e2fsck` の不満が 0 本。**
+        //
+        // **3 つの破壊はここで捕まる**——`..` が無い / 親の参照数が上がって
+        // いない / 群のディレクトリ数が古い。**どれも「読めるか」では
+        // 分からず、外の道具に訊くしかない。**
+        //
+        // **`..` と親の参照数について、こちらは独立の判定を持っていない。**
+        // **`e2fsck` の文言に乗っている**（`E2FSCK_NOISE` に当たらない行を
+        // 不満として数える形）。**観測していないことは観測していないと書く。**
+        let clean = extracted && complaints.is_empty();
+        println!(
+            "{context}: e2fsck found nothing to complain about = {clean} (complaints: \
+             {complaints:?})"
+        );
+
+        // **判定B——空きブロックと空き inode が 1 つずつ減り、
+        // **群のディレクトリ数が 1 増えていること。**
+        //
+        // **ファイルを作ったときと違うのはここである**——**あちらは
+        // ディレクトリ数が動かないことを主張していた**（同じ欄を、
+        // 逆向きに使っている）。
+        let after = dumpe2fs_free_counts(&dump)?;
+        let counts_moved = after.superblock_blocks + 1 == expected_counts.superblock_blocks
+            && after.superblock_inodes + 1 == expected_counts.superblock_inodes
+            && after.group_inodes + 1 == expected_counts.group_inodes
+            && after.group_dirs == expected_counts.group_dirs + 1;
+        println!(
+            "{context}: one block and one inode went away and the directory count rose by one = \
+             {counts_moved} (built {:?}, extracted {after:?})",
+            expected_counts
+        );
+
+        (counts_moved, clean)
     } else if keep_written {
         // **追記したままの像（S12-c）。** **中身が inode から参照され、会計が
         // 締まっているので、`e2fsck` は不満を 1 本も言わないはずである**（実測）。
@@ -2993,6 +3030,41 @@ const CREATE_KEEP_FEATURE: &str = "fs-create-keep-test";
 /// **`unlink-mark-unused` は `e2fsck` を通り抜ける。**
 /// `inode = 0` の枠を残す形は **ext2 として不整合ではない**ので、
 /// **往復のバイト一致だけが捕まえる**（S12-d の 4 つと同じ機序である）。
+/// ディレクトリを作ったままにする構成の feature 名（DIR-1c）。**変種である。**
+const MKDIR_KEEP_FEATURE: &str = "fs-mkdir-keep-test";
+
+/// ディレクトリの作成と削除の破壊（DIR-1c）。
+///
+/// # 3 つは作ったままの像で見る
+///
+/// **`.` と `..`・親の `i_links_count`・群の `bg_used_dirs_count` は、
+/// 消してしまうと現れない**（`fs-create-keep-test` と同じ形）。
+///
+/// # `rmdir-ignore-nonempty` は既定の構成である
+///
+/// **あれは消す側を壊すので、消さない構成では通らない。**
+/// **捕まえるのはカーネル側の判定行である**——**空でない `rmdir` が
+/// 断られなければ、起動が止まる**（`kernel/src/main.rs` の
+/// `MkdirRemovedNonEmpty`）。
+const FS_MKDIR_SABOTAGES: &[(&str, &[&str])] = &[
+    (
+        "a new directory without its .. entry",
+        &[MKDIR_KEEP_FEATURE, "ext2-mkdir-skip-dot-dot-test"],
+    ),
+    (
+        "a parent whose link count was not raised",
+        &[MKDIR_KEEP_FEATURE, "ext2-mkdir-skip-parent-link-test"],
+    ),
+    (
+        "a group directory count left stale",
+        &[MKDIR_KEEP_FEATURE, "ext2-mkdir-skip-dirs-count-test"],
+    ),
+    (
+        "rmdir removing a directory that is not empty",
+        &["ext2-rmdir-ignore-nonempty-test"],
+    ),
+];
+
 const FS_CREATE_SABOTAGES: &[(&str, &[&str])] = &[
     (
         "an inode handed out without marking the bitmap",
@@ -3979,6 +4051,51 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         .lines()
         .any(|line| line.trim_end_matches('\r') == "NEW");
 
+    // **ディレクトリの一巡（DIR-1c）。**
+    //
+    // **`mkdir` → `touch` → `ls` → `cat` → 空でない `rmdir`（断られる）→
+    // `rm` → `rmdir` → `ls` を、台本が順に打っている。**
+    //
+    // **3 つを見る。**
+    let after_mkdir = plain.split("/bin/mkdir /tmp/box").nth(1).unwrap_or("");
+
+    // **(1) 作ったディレクトリに `touch` したファイルが `ls` で見えること。**
+    let listing_in_box = program_output(
+        after_mkdir
+            .split("/bin/ls /tmp/box")
+            .nth(1)
+            .unwrap_or("")
+            .split("/bin/cat")
+            .next()
+            .unwrap_or(""),
+    );
+    // **`.` と `..` も出る**（`ls` はそのまま出す。実測）。**3 つが揃うことを見る**
+    // ——**`note` を含むだけでは、`.` と `..` が書けていない形が通ってしまう。**
+    let made_directory_holds_the_file =
+        listing_in_box.lines().collect::<Vec<_>>() == [".", "..", "note"];
+
+    // **(2) 空でない `rmdir` が断られること。**
+    //
+    // **`rmdir` の断り書きを見る**（あれは `STDERR` へ出す）。
+    let rmdir_refused = after_mkdir.contains("rmdir: cannot remove /tmp/box");
+
+    // **(3) 一巡の後、`/tmp` に `box` が残っていないこと。**
+    let listing_of_tmp = program_output(
+        after_mkdir
+            .split("/bin/ls /tmp\n")
+            .nth(1)
+            .unwrap_or(after_mkdir.rsplit("/bin/ls /tmp").next().unwrap_or("")),
+    );
+    let directory_removed = !listing_of_tmp.lines().any(|line| line.trim() == "box");
+
+    // **(4) 失敗したのは、断られた `rmdir` の 1 回だけであること。**
+    //
+    // **`cat` は空のファイルを読むので何も出さない。** **単独の判定を
+    // 持たせる代わりに、一巡ぜんたいで数える**——**`mkdir`・`touch`・`cat`・
+    // `rm`・2 回目の `rmdir` がどれか 1 つでも失敗すれば、この数が増える。**
+    let failures_in_the_round = after_mkdir.matches("zash: exit status ").count();
+    let only_the_refused_rmdir_failed = failures_in_the_round == 1;
+
     // **`a` は `i` と違う桁から挿入する（e-4）。**
     //
     // **台本は `i`（そのまま）と `a`（1 つ右）を両方通す。** `zi` は
@@ -4060,6 +4177,19 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     );
     println!("{context}: rm removed it again = {removed_file_disappeared}");
     println!(
+        "{context}: mkdir made a directory and touch put a file in it = \
+         {made_directory_holds_the_file} (ls /tmp/box printed {listing_in_box:?})"
+    );
+    println!("{context}: rmdir refused a directory that was not empty = {rmdir_refused}");
+    println!(
+        "{context}: the directory was gone after the round trip = {directory_removed} \
+         (ls /tmp printed {listing_of_tmp:?})"
+    );
+    println!(
+        "{context}: the only failure in the round was the refused rmdir = \
+         {only_the_refused_rmdir_failed} ({failures_in_the_round} non-zero exit(s))"
+    );
+    println!(
         "{context}: tail printed the end of the file and nothing more = \
          {tail_matches_the_end_of_cat} (tail {tail_output:?}, cat {cat_output:?})"
     );
@@ -4110,6 +4240,10 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && fresh_content
         && removed_file_disappeared
         && tail_matches_the_end_of_cat
+        && made_directory_holds_the_file
+        && rmdir_refused
+        && directory_removed
+        && only_the_refused_rmdir_failed
         && append_differs_from_insert
     {
         println!("{context}: PASS");
@@ -10560,6 +10694,29 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             }
         }
 
+        // **ディレクトリの作成と削除（DIR-1c）。**
+        total += 1;
+        println!("=== xtask check: a created directory survives a round trip through the image");
+        match cmd_fs_image_extract(&[MKDIR_KEEP_FEATURE]) {
+            Ok(()) => println!("--- fs mkdir (kept): OK"),
+            Err(error) => {
+                println!("--- fs mkdir (kept): FAILED ({error})");
+                failed.push("fs mkdir (kept)".to_string());
+            }
+        }
+
+        for (label, features) in FS_MKDIR_SABOTAGES {
+            total += 1;
+            println!("=== xtask check: the fs mkdir check catches {label}");
+            match cmd_fs_image_extract(features) {
+                Ok(()) => {
+                    println!("--- fs mkdir ({label}): FAILED (the sabotage was NOT caught)");
+                    failed.push(format!("fs mkdir ({label})"));
+                }
+                Err(_) => println!("--- fs mkdir ({label}): OK (the sabotage was caught)"),
+            }
+        }
+
         for (label, features) in FS_TRUNCATE_SABOTAGES {
             total += 1;
             println!("=== xtask check: the fs truncate check catches {label}");
@@ -11251,7 +11408,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 23,
-    full: 217,
+    full: 222,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

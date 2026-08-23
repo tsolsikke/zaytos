@@ -47,6 +47,16 @@ ext2-create-keep-prev-rec-len = []
 ext2-create-skip-inode-count = []
 ext2-create-move-dirs-count = []
 ext2-unlink-mark-unused = []
+# 破壊（DIR-1c）: mkdir が `..` を書かない。e2fsck が「`..` が無い」と言う。
+ext2-mkdir-skip-dot-dot = []
+# 破壊（DIR-1c）: mkdir が親の i_links_count を増やさない。e2fsck が参照数の
+# 食い違いを言う。
+ext2-mkdir-skip-parent-link = []
+# 破壊（DIR-1c）: mkdir が bg_used_dirs_count を増やさない。e2fsck が
+# 「Directories count wrong for group #0」と言う。
+ext2-mkdir-skip-dirs-count = []
+# 破壊（DIR-1c）: rmdir が空かどうかを見ない。中身の在るディレクトリが消える。
+ext2-rmdir-ignore-nonempty = []
 # 破壊（S12-f-3）: 作った inode が i_extra_isize を名乗らない。e2fsck は 0 を
 # 受理するので通り抜ける（実測）。判定だけが落ちる。
 ext2-create-skip-extra-isize = []

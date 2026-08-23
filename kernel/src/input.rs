@@ -545,6 +545,17 @@ pub(crate) mod script {
     /// **`tail` の出力は `cat` の出力の末尾と突き合わせる**ので、
     /// **ホストは期待値を持たない。**
     ///
+    /// # 末尾に DIR-1c の 8 行が付いている
+    ///
+    /// **ディレクトリの一巡である**——`mkdir` → `touch` → `ls` → `cat` →
+    /// **空でない `rmdir`（断られる）** → `rm` → `rmdir` → `ls`。
+    ///
+    /// **`/tmp` は像に在る**（ADR-0042 で「作る」と決めた唯一のもの）。
+    ///
+    /// **`cat` は空のファイルを読む**ので何も出さない。**単独の判定は
+    /// 持たない**——**代わりに「この一巡で失敗したのは断られた `rmdir` の
+    /// 1 回だけ」を見る**（`zash` が 0 以外の終了状態を 1 行で報せる）。
+    ///
     /// # 代替画面の観測点を `zi` を抜けた直後へ移した
     ///
     /// **`\x05`（`OBSERVE_AFTER_ALT`）は台本の末尾に在った。** **DIR-1b で
@@ -576,7 +587,15 @@ pub(crate) mod script {
         /bin/cat /data/lines\n\
         /bin/tail /data/lines\n\
         /bin/rm /data/fresh\n\
-        /bin/ls /data\n\x0c";
+        /bin/ls /data\n\
+        /bin/mkdir /tmp/box\n\
+        /bin/touch /tmp/box/note\n\
+        /bin/ls /tmp/box\n\
+        /bin/cat /tmp/box/note\n\
+        /bin/rmdir /tmp/box\n\
+        /bin/rm /tmp/box/note\n\
+        /bin/rmdir /tmp/box\n\
+        /bin/ls /tmp\n\x0c";
 
     /// 観測点（ES-d）。**プロンプトの色を見る。**
     const OBSERVE_PROMPT: u8 = 0x01;

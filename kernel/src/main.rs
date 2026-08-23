@@ -4980,6 +4980,15 @@ fn exercise_block_bitmap(logger: &mut Logger<SerialPort>, image: &'static mut [u
         WriteExerciseError::CreateCopyDidNotParseAfterUnlinking { error: e } => logger.error(
             format_args!("fs-create: the copy did not parse after unlinking: {e:?}; halting"),
         ),
+        WriteExerciseError::MkdirFailed { error: e } => {
+            logger.error(format_args!("fs-mkdir: could not create: {e:?}; halting"))
+        }
+        WriteExerciseError::MkdirCouldNotRemove { error: e } => {
+            logger.error(format_args!("fs-mkdir: could not remove: {e:?}; halting"))
+        }
+        WriteExerciseError::MkdirRemovedNonEmpty => logger.error(format_args!(
+            "fs-mkdir: rmdir removed a directory that was not empty; halting"
+        )),
     }
     cpu::halt_forever();
 }
@@ -5056,6 +5065,15 @@ enum WriteExerciseError {
     CreateCopyDidNotParseAfterCreating { error: common::ext2::Ext2Error },
     /// 作ったファイルが消せない。
     CreateCouldNotUnlink { error: common::ext2::AllocError },
+    /// ディレクトリを作れなかった（DIR-1c）。
+    MkdirFailed { error: common::ext2::AllocError },
+    /// 作ったディレクトリを消せなかった（DIR-1c）。
+    MkdirCouldNotRemove { error: common::ext2::AllocError },
+    /// **空でないディレクトリが消せてしまった**（DIR-1c）。
+    ///
+    /// **`rmdir` が断るはずの形である。** 断らなければ、
+    /// **中の inode がどこからも指されなくなる。**
+    MkdirRemovedNonEmpty,
     /// 消した後で複製が解析できない。
     CreateCopyDidNotParseAfterUnlinking { error: common::ext2::Ext2Error },
 }
@@ -5323,6 +5341,7 @@ fn exercise_truncate(
         ));
 
         exercise_create_and_unlink(logger, image, layout)?;
+        exercise_mkdir_and_rmdir(logger, image, layout)?;
     }
     Ok(())
 }
@@ -5422,6 +5441,110 @@ fn exercise_create_and_unlink(
         };
         logger.info(format_args!(
             "fs-create: unlinked inode {ino}; free blocks={blocks} inodes={inodes}"
+        ));
+    }
+    Ok(())
+}
+
+/// ディレクトリを作って消す（DIR-1c）。**[`exercise_create_and_unlink`] の対である。**
+///
+/// # `e2fsck` にしか見えないものが 3 つある
+///
+/// **`.` と `..`、親の `i_links_count`、群の `bg_used_dirs_count` である。**
+/// **どれも「読めるか」では分からない**——**像として整合しているかを、
+/// 外の道具に訊くしかない。**
+///
+/// # 既定では戻す。**残す構成も要る**
+///
+/// **戻すので、取り出した像は建てた像とバイト単位で一致するはずである。**
+/// **`fs-mkdir-keep-test` は消さない**（変種。壊さない）——
+/// **生きたディレクトリを `e2fsck` に見せるのは、その構成だけである。**
+/// **`fs-create-keep-test` と同じ理由である**（S12-d で踏んだ形）。
+///
+/// # 空でない `rmdir` が断られることも、ここで見る
+///
+/// **中に 1 つファイルを作ってから `rmdir` を呼ぶ。** **通れば異常である。**
+/// **消してから、改めて `rmdir` する。**
+fn exercise_mkdir_and_rmdir(
+    logger: &mut Logger<SerialPort>,
+    image: &mut [u8],
+    layout: &common::ext2::Layout,
+) -> Result<(), WriteExerciseError> {
+    use common::ext2::Ext2;
+
+    const DIRECTORY: &[u8] = b"/data";
+    const NAME: &[u8] = b"made";
+    /// 空でないことを作るための名前。
+    const INSIDE: &[u8] = b"inside";
+
+    let dir_ino = match Ext2::parse(image).and_then(|fs| fs.lookup(DIRECTORY)) {
+        Ok(inode) => inode.number,
+        Err(error) => {
+            return Err(WriteExerciseError::CreateDirectoryNotFound {
+                name: DIRECTORY,
+                error,
+            });
+        }
+    };
+
+    let ino = match common::ext2::create_directory(image, layout, dir_ino, NAME) {
+        Ok(ino) => ino,
+        Err(error) => return Err(WriteExerciseError::MkdirFailed { error }),
+    };
+    let (blocks, inodes, dirs) = match Ext2::parse(image) {
+        Ok(fs) => (
+            fs.free_blocks_count(),
+            fs.free_inodes_count(),
+            fs.group_descriptor(0).map(|d| d.used_dirs_count),
+        ),
+        Err(error) => return Err(WriteExerciseError::CreateCopyDidNotParseAfterCreating { error }),
+    };
+    logger.info(format_args!(
+        "fs-mkdir: created directory inode {ino} under inode {dir_ino}; \
+         free blocks={blocks} inodes={inodes} dirs={dirs:?}"
+    ));
+
+    // **空でない `rmdir` が断られること。** 中に 1 つ作ってから呼ぶ。
+    if let Err(error) = common::ext2::create_file(image, layout, ino, INSIDE) {
+        return Err(WriteExerciseError::CreateFailed { error });
+    }
+    let refused = common::ext2::remove_directory(image, layout, dir_ino, NAME).is_err();
+    logger.info(format_args!(
+        "fs-mkdir: rmdir on a directory that is not empty was refused = {refused}"
+    ));
+    if !refused {
+        return Err(WriteExerciseError::MkdirRemovedNonEmpty);
+    }
+    if let Err(error) = common::ext2::unlink_file(image, layout, ino, INSIDE) {
+        return Err(WriteExerciseError::CreateCouldNotUnlink { error });
+    }
+
+    // 変種 (DIR-1c, fs-mkdir-keep): 消さない。**作ったままの像を取り出す。**
+    #[cfg(feature = "fs-mkdir-keep-test")]
+    {
+        logger.info(format_args!(
+            "fs-mkdir: keeping the new directory (fs-mkdir-keep-test)"
+        ));
+    }
+
+    #[cfg(not(feature = "fs-mkdir-keep-test"))]
+    {
+        if let Err(error) = common::ext2::remove_directory(image, layout, dir_ino, NAME) {
+            return Err(WriteExerciseError::MkdirCouldNotRemove { error });
+        }
+        let (blocks, inodes, dirs) = match Ext2::parse(image) {
+            Ok(fs) => (
+                fs.free_blocks_count(),
+                fs.free_inodes_count(),
+                fs.group_descriptor(0).map(|d| d.used_dirs_count),
+            ),
+            Err(error) => {
+                return Err(WriteExerciseError::CreateCopyDidNotParseAfterUnlinking { error });
+            }
+        };
+        logger.info(format_args!(
+            "fs-mkdir: removed directory inode {ino}; free blocks={blocks} inodes={inodes} \
+             dirs={dirs:?}"
         ));
     }
     Ok(())
@@ -7049,7 +7172,7 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
     (22, "st_mode for /etc did not say directory"),
     (23, "stat(\"/nope\") did not return -ENOENT"),
     (24, "getdents64 on / did not fill the buffer"),
-    (25, "the root listing did not have 6 entries"),
+    (25, "the root listing did not have 7 entries"),
     (26, "a d_reclen was not a multiple of 8"),
     (
         27,
@@ -9178,6 +9301,31 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "env-drop-path-test",
         cfg!(feature = "env-drop-path-test"),
         "envp から PATH を落とす",
+    ),
+    (
+        "fs-mkdir-keep-test",
+        cfg!(feature = "fs-mkdir-keep-test"),
+        "作ったディレクトリを消さずに残す（壊さない）",
+    ),
+    (
+        "ext2-mkdir-skip-dot-dot-test",
+        cfg!(feature = "ext2-mkdir-skip-dot-dot-test"),
+        "mkdir が `..` を書かない",
+    ),
+    (
+        "ext2-mkdir-skip-parent-link-test",
+        cfg!(feature = "ext2-mkdir-skip-parent-link-test"),
+        "mkdir が親の i_links_count を増やさない",
+    ),
+    (
+        "ext2-mkdir-skip-dirs-count-test",
+        cfg!(feature = "ext2-mkdir-skip-dirs-count-test"),
+        "mkdir が bg_used_dirs_count を増やさない",
+    ),
+    (
+        "ext2-rmdir-ignore-nonempty-test",
+        cfg!(feature = "ext2-rmdir-ignore-nonempty-test"),
+        "rmdir が空かどうかを見ない",
     ),
     (
         "unlink-ignore-request-test",

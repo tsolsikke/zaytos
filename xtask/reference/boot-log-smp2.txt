@@ -2,7 +2,7 @@
 Hello, ZaytOS!
 [INFO] printed "Hello, ZaytOS!" to UEFI console
 [INFO] ELF parsed: entry point = 0xffffffff80100000
-[INFO] kernel segments placed and .bss zeroed (0x100000..0x535000)
+[INFO] kernel segments placed and .bss zeroed (0x100000..0x548000)
 [INFO] kernel entry: VMA 0xffffffff80100000 -> load address 0x100000 (delta 0xffffffff80000000)
 [INFO] GOP framebuffer acquired: 1280x800 stride=1280 format=Bgr phys=0x80000000 size=4096000
 [INFO] acpi: RSDP found at 0xf77e014 via the ACPI 2.0 configuration table entry
@@ -12,11 +12,11 @@ Hello, ZaytOS!
 [INFO] ZaytOS kernel: entered _start
 [INFO] build: 2 cargo feature(s) enabled: default,heap-poison
 [INFO] boot stack: 648 of 16384 bytes used (high-water; 15736 bytes poison intact)
-[INFO] higher-half: arrived at high VA. RIP=0xffffffff801b55c8 in [0xffffffff80100000, 0xffffffff80534e08)=true, RSP=0xffffffff804e4740 high=true, CR3=0x40c000 == bootstrap PML4 0x40c000 = true, identity alive (phys 0x100000 read via low==high) = true
-[INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff804f8100 first slot=0xffffffff804f8100 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
+[INFO] higher-half: arrived at high VA. RIP=0xffffffff801b7548 in [0xffffffff80100000, 0xffffffff80547e08)=true, RSP=0xffffffff804f7740 high=true, CR3=0x412000 == bootstrap PML4 0x412000 = true, identity alive (phys 0x100000 read via low==high) = true
+[INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff8050b100 first slot=0xffffffff8050b100 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
 [INFO] interrupts: RFLAGS.IF before cli = false (raw RFLAGS=0x96)
 [INFO] interrupts: RFLAGS.IF after cli = false (raw RFLAGS=0x96)
-[INFO] gdt: base=0xffffffff804f8100 limit=63 (expected base=0xffffffff804f8100)
+[INFO] gdt: base=0xffffffff8050b100 limit=63 (expected base=0xffffffff8050b100)
 [INFO] gdt: CS=0x8 (expected 0x8), TR=0x30 (expected 0x30)
 [INFO] gdt: limit=63 (expected 63)
 [INFO] gdt[1] kcode: 0x00af9a000000ffff DPL=0 present=1 kind=code accessed=0 (expected 0x00af9a000000ffff, accessed bit is CPU-managed)
@@ -25,23 +25,23 @@ Hello, ZaytOS!
 [INFO] gdt[4] udata: 0x00cff2000000ffff DPL=3 present=1 kind=data accessed=0 (expected 0x00cff2000000ffff, accessed bit is CPU-managed)
 [INFO] gdt[5] ucode64: 0x00affa000000ffff DPL=3 present=1 kind=code accessed=0 (expected 0x00affa000000ffff, accessed bit is CPU-managed)
 [INFO] gdt: kdata D/B=1, udata D/B=1 (must match; udata follows kdata)
-[INFO] gdt[6] tss: base=0xffffffff804723a8 (expected 0xffffffff804723a8) present=1 S=0 type=0xb (0xb = busy, set by ltr)
+[INFO] gdt[6] tss: base=0xffffffff804783a8 (expected 0xffffffff804783a8) present=1 S=0 type=0xb (0xb = busy, set by ltr)
 [INFO] gdt: all descriptors match (kernel + user DPL=3 in STAR-compatible order, TSS at new index)
-[INFO] tss: base=0xffffffff804723a8 IST1=0xffffffff804f3000 RSP0=0xffffffff804ee000
+[INFO] tss: base=0xffffffff804783a8 IST1=0xffffffff80506000 RSP0=0xffffffff80501000
 [INFO] tss: RSP0 は特権レベル遷移（ユーザー -> カーネル）用で、M5 まで実際には使われない
-[INFO] stack: old RSP=0xffffffff80413f78 (UEFI-derived), new RSP=0xffffffff804e4410
-[INFO] stack: kernel stack 0xffffffff804de000..0xffffffff804ee000 (64 KiB)
-[INFO] stack: double fault (IST1) stack 0xffffffff804ef000..0xffffffff804f3000 (16 KiB)
+[INFO] stack: old RSP=0xffffffff80419f78 (UEFI-derived), new RSP=0xffffffff804f7410
+[INFO] stack: kernel stack 0xffffffff804f1000..0xffffffff80501000 (64 KiB)
+[INFO] stack: double fault (IST1) stack 0xffffffff80502000..0xffffffff80506000 (16 KiB)
 [INFO] stack: RSP is inside the kernel stack: true
-[INFO] stack: locals live at 0xffffffff804e481c, inside the kernel stack: true
+[INFO] stack: locals live at 0xffffffff804f781c, inside the kernel stack: true
 [INFO] stack: no longer using the UEFI-derived stack: true
-[INFO] stack: write/read-back at 0xffffffff804e4310: OK
+[INFO] stack: write/read-back at 0xffffffff804f7310: OK
 [INFO] stack: IST guards intact (double-fault=true, page-fault=true)
 [INFO] stack: switched to the kernel's own stack (GDT/TSS loaded)
-[INFO] idt: base=0xffffffff804dbae9 limit=4095 (expected base=0xffffffff804dbae9 limit=4095)
+[INFO] idt: base=0xffffffff804eeae9 limit=4095 (expected base=0xffffffff804eeae9 limit=4095)
 [INFO] idt: 256 entries, all present=true, all interrupt gates=true, DPL layout ok=true (syscall vector 0x80 DPL=Some(3), others DPL 0)
 [INFO] idt: #DF (vector 8) IST index=Some(1), #DE (vector 0) IST index=None
-[INFO] idt: stub table 0xffffffff8014bac0..0xffffffff8014cac0 size=4096 (expected 4096), stride=OK, entries=OK
+[INFO] idt: stub table 0xffffffff8014ce20..0xffffffff8014de20 size=4096 (expected 4096), stride=OK, entries=OK
 [INFO] idt: dedicated stubs outside the exception table: 7 checked, every gate points at its own stub=true
 [INFO] idt: loaded (exceptions now reach our handlers; interrupts stay disabled until M4-d)
 [INFO] critical: IF before any guard = false
@@ -68,15 +68,15 @@ Hello, ZaytOS!
 [INFO] paging:   0xf76d000..0x10000000 cacheable=true
 [INFO] paging:   0x80000000..0x803e8000 cacheable=false
 [INFO] paging:   0xffc00000..0x100000000 cacheable=false
-[INFO] higher-half: kernel image 0x100000..0x534e08 mapped at 0xffffffff80100000 (len 0x435000), 4 new page-table frame(s)
+[INFO] higher-half: kernel image 0x100000..0x547e08 mapped at 0xffffffff80100000 (len 0x448000), 4 new page-table frame(s)
 [INFO] paging: 129 huge (2MiB) page(s), 1287 small (4KiB) page(s), 12 frame(s) consumed for page tables
-[INFO] paging: required range [kernel image] 0x100000..0x534e08: OK
+[INFO] paging: required range [kernel image] 0x100000..0x547e08: OK
 [INFO] paging: required range [framebuffer] 0x80000000..0x803e8000: OK
 [INFO] paging: required range [new page tables (PML4)] 0x3000..0x4000: OK
-[INFO] paging: required range [current RSP] 0x4e49a0..0x4e49a1: OK
-[INFO] paging: required range [current RIP] 0x1b55c8..0x1b55c9: OK
+[INFO] paging: required range [current RSP] 0x4f79a0..0x4f79a1: OK
+[INFO] paging: required range [current RIP] 0x1b7548..0x1b7549: OK
 [INFO] paging: all required ranges mapped. proceeding to CR3 switch (d-2).
-[INFO] paging: current CR3 = 0x40c000
+[INFO] paging: current CR3 = 0x412000
 [INFO] paging: CR3 switch instruction executed
 [INFO] paging: CR3 readback 0x3000 (expected 0x3000): OK
 [INFO] paging: walking the live tables from PML4 0x3000
@@ -93,7 +93,7 @@ Hello, ZaytOS!
 [INFO] paging: BootInfo read: OK
 [INFO] framebuffer: validated 1280x800 stride=1280 format=Bgr 0x80000000..0x803e8000
 [INFO] paging: CR3 switch verified. now running under self-built page tables.
-[INFO] higher-half: kernel image 0x100000..0x534e08 mapped at 0xffffffff80100000 (len 0x435000), 4 new page-table frame(s)
+[INFO] higher-half: kernel image 0x100000..0x547e08 mapped at 0xffffffff80100000 (len 0x448000), 4 new page-table frame(s)
 [INFO] direct-map: built a new table at PML4 0xf000 using 19 frame(s) (76 KiB), window base 0xffff800000000000
 [INFO] direct-map: pre-switch check: identity 14 probe(s) mismatches=0, window 14 probe(s) mismatches=0, saw a 2MiB window page=true
 [INFO] direct-map: CR3 switch instruction executed
@@ -106,16 +106,16 @@ Hello, ZaytOS!
 [INFO] direct-map A-2: framebuffer rehomed to 0xffff800080000000; wrote a proof pixel, read 0xc04080/0xc04080 via high/identity = true
 [INFO] console: ready (160x50 cells), back buffer 0x1780000..0x1b68000 (1000 frames)
 [INFO] console: 103 log line(s) were emitted before the console existed (serial only)
-[INFO] heap: arena 0x535000..0x635000 (256 frames, 1 MiB), mapped=true
+[INFO] heap: arena 0x548000..0x648000 (256 frames, 1 MiB), mapped=true
 [INFO] heap: initialized (1048576 bytes free, 1 block(s))
-[INFO] granularity: executing code (RIP) 0xffffffff801b55c8 -> phys 0x1b55c8, mapped by a 4KiB page at 0xffffffff801b5000 (entry=0x1b5023)
-[INFO] granularity: kernel stack (RSP) 0xffffffff804e4420 -> phys 0x4e4420, mapped by a 4KiB page at 0xffffffff804e4000 (entry=0x4e4063)
-[INFO] granularity: heap arena 0x535000 -> phys 0x535000, mapped by a 2MiB page at 0x400000 (entry=0x400083)
+[INFO] granularity: executing code (RIP) 0xffffffff801b7548 -> phys 0x1b7548, mapped by a 4KiB page at 0xffffffff801b7000 (entry=0x1b7023)
+[INFO] granularity: kernel stack (RSP) 0xffffffff804f7420 -> phys 0x4f7420, mapped by a 4KiB page at 0xffffffff804f7000 (entry=0x4f7063)
+[INFO] granularity: heap arena 0x548000 -> phys 0x548000, mapped by a 2MiB page at 0x400000 (entry=0x400083)
 [INFO] granularity: framebuffer 0x80000000 -> phys 0x80000000, mapped by a 2MiB page at 0x80000000 (entry=0x800000b3)
 [INFO] test hooks: none enabled (this is a normal build)
 [INFO] cpu: MAXPHYADDR = 40 bits (observed only; PhysAddr rejects anything above 52)
 [INFO] high-half: built a new table at PML4 0x22000 using 12 frame(s) (48 KiB)
-[INFO] high-half: kernel image 0x100000..0x535000 is also mapped at 0xffffffff80100000 (kernel high mapping, NOT the direct map window)
+[INFO] high-half: kernel image 0x100000..0x548000 is also mapped at 0xffffffff80100000 (kernel high mapping, NOT the direct map window)
 [INFO] high-half: walked 8 probe(s) through the kernel high mapping with an independent walker, mismatches=0
 [INFO] high-half: the identity part of the new table matches the plan, mismatches=0
 [INFO] high-half: the live table's PML4 is untouched by the build = true
@@ -126,16 +126,16 @@ Hello, ZaytOS!
 [INFO] split-test: unmapped 0xffff800001c01000 (old pte=0x1c01003); translate returns none=true, both neighbours still mapped=true
 [INFO] split-test: splitting an already-split page is rejected = true
 [INFO] split-test: split and unmap behave as planned (verified through translate())
-[INFO] stack-guard: unmapped the kernel stack guard page 0xffffffff804dd000 (old pte=0x4dd003); translate returns none=true. #PF now uses IST2.
-[INFO] user-map: U/S audit: user subtree PML4[1] entries=4 violations(U=0)=0, kernel entries=3926 violations(U=1)=0
+[INFO] stack-guard: unmapped the kernel stack guard page 0xffffffff804f0000 (old pte=0x4f0003); translate returns none=true. #PF now uses IST2.
+[INFO] user-map: U/S audit: user subtree PML4[1] entries=4 violations(U=0)=0, kernel entries=3945 violations(U=1)=0
 [INFO] user-map: after unmap: user subtree residue entries=3 (intermediates kept for M5-e-3), kernel violations(U=1)=0
 [INFO] user-map: user-page mapping verified (all levels U=1 for the user page, all kernel entries U=0, Ring 0 read-back held; leaf unmapped, subtree kept for M5-e-3)
-[INFO] ring3: entering Ring 3 (user code 0x8000000000 with cli, user stack top 0x8000101000, RSP0 -> excursion stack [0xffffffff80503150, 0xffffffff80513150))
-[INFO] ring3: folded expected #GP. fault CS=0x2b (RPL=3), fault RSP=0x8000101000 (in user stack=true), handler RSP=0xffffffff80513090 (in excursion stack=true), RSP0 restored=true
-[INFO] ring3: U/S audit after the excursion: user subtree entries=6 violations=0, kernel entries=3926 violations=0
+[INFO] ring3: entering Ring 3 (user code 0x8000000000 with cli, user stack top 0x8000101000, RSP0 -> excursion stack [0xffffffff80516150, 0xffffffff80526150))
+[INFO] ring3: folded expected #GP. fault CS=0x2b (RPL=3), fault RSP=0x8000101000 (in user stack=true), handler RSP=0xffffffff80526090 (in excursion stack=true), RSP0 restored=true
+[INFO] ring3: U/S audit after the excursion: user subtree entries=6 violations=0, kernel entries=3945 violations=0
 [INFO] ring3: Ring 3 excursion verified (fell to Ring 3, cli faulted as #GP, RSP0 switched to the excursion stack, folded back to the kernel, permission split intact)
-[INFO] syscall: entering Ring 3 to issue probe int 0x80 (number=0x1000, int at 0x800000002b, cli fold at 0x8000000032, RSP0 -> excursion stack [0xffffffff80503150, 0xffffffff80513150))
-[INFO] syscall: probe int 0x80 returned. invocations=1 (issued exactly 1), number seen=0x1000 (expected 0x1000), handler RSP=0xffffffff805130a0 (on RSP0 excursion stack=true), in-Ring-3 flag at entry=true, RSP0 restored=true
+[INFO] syscall: entering Ring 3 to issue probe int 0x80 (number=0x1000, int at 0x800000002b, cli fold at 0x8000000032, RSP0 -> excursion stack [0xffffffff80516150, 0xffffffff80526150))
+[INFO] syscall: probe int 0x80 returned. invocations=1 (issued exactly 1), number seen=0x1000 (expected 0x1000), handler RSP=0xffffffff805260a0 (on RSP0 excursion stack=true), in-Ring-3 flag at entry=true, RSP0 restored=true
 [INFO] syscall: args seen=[0x11111111, 0x22222222, 0x33333333, 0x44444444, 0x55555555, 0x66666666], user stored=0xc0ffee (expected return 0xc0ffee)
 [INFO] syscall: probe int 0x80 round-trip verified (6 args reached syscall_entry per the R10 convention, the return value came back through RAX to Ring 3 and was stored, syscall_entry ran on the RSP0 stack, and the cli #GP folded back to the kernel)
 [INFO] syscall: ptr case 'valid page' buf=0x8000000000 len=0x1 -> stored=0x0 (expect accept(0), ok=true)
@@ -206,7 +206,7 @@ Hello, ZaytOS!
 [INFO] virtio-blk: host features=0x79007e54 (accepted 0)
 [INFO] virtio-blk: handshake: ACKNOWLEDGE -> DRIVER; capacity=4096 sector(s)
 [INFO] virtio-blk: queue 0: size 256; ring at phys 0x39000..0x3d000 (4 page(s), 4096-aligned=true); zeroed 16384 byte(s) (0 were nonzero before)
-[INFO] virtio-blk: read sector 2: 512 byte(s) requested, status=0 (OK); checksum=0x0007858c first bytes=[00, 01, 00, 00, 00, 02, 00, 00]
+[INFO] virtio-blk: read sector 2: 512 byte(s) requested, status=0 (OK); checksum=0x0007849f first bytes=[00, 01, 00, 00, 00, 02, 00, 00]
 [INFO] smp: mapped per-CPU stacks for slot 1 at 0xffff81000001b000 (PML4[258], not [257] which a sabotage VA depends on): kernel top 0xffff81000002c000, IST1 top 0xffff810000031000, IST2 top 0xffff810000036000; 27 frame(s) consumed (pages plus page tables), guards left unmapped
 [INFO] apic: LAPIC SVR=0x0000010f software_enabled=true spurious_vector=0x0f TPR=0x00000000
 [INFO] apic: LAPIC has 6 LVT entr(y/ies) (Max LVT Entry = 5); reading only those
@@ -250,11 +250,11 @@ Hello, ZaytOS!
 [INFO] percpu: 2 usable CPU(s) enumerated, 2 per-CPU slot(s) available, every CPU has a slot=true (cpu_id() is the constant 0 and only the bootstrap processor runs, so no slot is indexed out of range yet)
 [INFO] identity-removal: begin. live PML4=0xf000, saved PML4[0]=0x10023
 [INFO] identity-removal: PML4[0] subtree table frames = 7 (28 KiB) become unreachable; intentional leak. subtree frames [256]=10 [511]=4. disjoint(0,256)=true disjoint(0,511)=true disjoint(256,511)=true
-[INFO] identity-removal: required [RIP] 0xffffffff801b55c8 -> phys 0x1b55c8 (huge=false): OK
-[INFO] identity-removal: required [RSP] 0xffffffff804e4270 -> phys 0x4e4270 (huge=false): OK
+[INFO] identity-removal: required [RIP] 0xffffffff801b7548 -> phys 0x1b7548 (huge=false): OK
+[INFO] identity-removal: required [RSP] 0xffffffff804f7270 -> phys 0x4f7270 (huge=false): OK
 [INFO] identity-removal: required [direct map window] 0xffff80000000f000 -> phys 0xf000 (huge=false): OK
 [INFO] identity-removal: required [kernel image] 0xffffffff80100000 -> phys 0x100000 (huge=false): OK
-[INFO] identity-removal: required [heap high VA] 0xffff800000535000 -> phys 0x535000 (huge=true): OK
+[INFO] identity-removal: required [heap high VA] 0xffff800000548000 -> phys 0x548000 (huge=true): OK
 [INFO] identity-removal: required [framebuffer high VA] 0xffff800080000000 -> phys 0x80000000 (huge=true): OK
 [INFO] identity-removal: PML4[0] after clear = 0x0 (empty=true)
 [INFO] identity-removal: post-flush required regions re-resolved OK: 6/6
@@ -262,15 +262,15 @@ Hello, ZaytOS!
 [INFO] identity-removal: done. identity (PML4[0]) removed; IDENTITY_REMOVED gate armed
 [INFO] lock: IF before=false while held=false after=false (value read back = 0xabcd)
 [INFO] lock: interrupts are disabled while the guard is held and restored afterwards
-[INFO] heap smoke test: Vec<u32> len=10 ptr=0xffff800000535090 mapped=true
-[INFO] heap smoke test: Box<u32> value=0x12345678 ptr=0xffff800000535020 mapped=true
-[INFO] heap smoke test: String="ZaytOS heap is alive" ptr=0xffff800000535050 mapped=true
+[INFO] heap smoke test: Vec<u32> len=10 ptr=0xffff800000548090 mapped=true
+[INFO] heap smoke test: Box<u32> value=0x12345678 ptr=0xffff800000548020 mapped=true
+[INFO] heap smoke test: String="ZaytOS heap is alive" ptr=0xffff800000548050 mapped=true
 [INFO] heap: after smoke test, 1048576 bytes free, 1 block(s)
 [INFO] console: 12 flush(es), 4741696 bytes transferred
 [INFO] console: full-screen equivalent would be 49152000 bytes (9% actually sent)
 task: registered the AP idle task as index 3 owned by cpu 1 on its per-CPU stack [0xffff81000001c000, 0xffff81000002c000); the application processor adopts it at bring-up and schedules on it from then on
-task: unmapped the worker guard page 0xffffffff804f9000 (old pte=0x4f9003); translate returns none=true. #PF now uses IST2.
-task: unmapped the worker guard page 0xffffffff804fe000 (old pte=0x4fe003); translate returns none=true. #PF now uses IST2.
+task: unmapped the worker guard page 0xffffffff8050c000 (old pte=0x50c003); translate returns none=true. #PF now uses IST2.
+task: unmapped the worker guard page 0xffffffff80511000 (old pte=0x511003); translate returns none=true. #PF now uses IST2.
 task: starting cooperative demo with 2 workers, 3 rounds each
 task: A round 1/3: all 15 GPRs survived the switch (base=0xa1a10000)
 task: B round 1/3: all 15 GPRs survived the switch (base=0xb2b20000)
@@ -281,42 +281,45 @@ task: A finished all rounds; yielding for good
 task: B round 3/3: all 15 GPRs survived the switch (base=0xb2b20000)
 task: B finished all rounds; yielding for good
 task: demo finished. switches=9, sum(resumes)=9, A done=true, B done=true, accounting balanced=true
-task: TSS.RSP0 tracked every switch; now 0xffffffff804ee000 (main stack top 0xffffffff804ee000, match=true)
+task: TSS.RSP0 tracked every switch; now 0xffffffff80501000 (main stack top 0xffffffff80501000, match=true)
 task: cooperative switch verified
 [INFO] address-space: built a second address space (pml4=0x58000); the production one is 0xf000; about to switch
 [INFO] address-space: still running after the switch (cr3 read back = 0x58000, expected 0x58000, matches=true)
 [INFO] address-space: switched back to the production table (cr3 read back = 0xf000, matches=true)
 [INFO] address-space: read 0xaaaaaaaaaaaaaaaa in A and 0xbbbbbbbbbbbbbbbb in B (A sees only its own=true, B sees only its own=true)
 [INFO] address-space: shared kernel PML4 entries compared across 3 tables: mismatches=0 (expected 0)
-[INFO] address-space: U/S audit of A (user subtree PML4[0]): user entries=4 violations(U=0)=0, kernel entries=2532 violations(U=1)=0
-[INFO] address-space: U/S audit of B (user subtree PML4[0]): user entries=4 violations(U=0)=0, kernel entries=2532 violations(U=1)=0
+[INFO] address-space: U/S audit of A (user subtree PML4[0]): user entries=4 violations(U=0)=0, kernel entries=2551 violations(U=1)=0
+[INFO] address-space: U/S audit of B (user subtree PML4[0]): user entries=4 violations(U=0)=0, kernel entries=2551 violations(U=1)=0
 [INFO] ext2: image 2097152 byte(s) built by "mke2fs 1.47.0 (5-Feb-2023)"
 [INFO] ext2: superblock rev=1 block_size=4096 inode_size=256 inodes=256 blocks=512 blocks_per_group=32768 inodes_per_group=256 first_ino=11 groups=1
 [INFO] ext2: features compat=0x38 incompat=0x2 ro_compat=0x3 (only unknown incompat bits are refused; unknown ro_compat and compat are accepted for reading, as Linux does)
-[INFO] ext2: superblock free counts: blocks=410 inodes=226
+[INFO] ext2: superblock free counts: blocks=397 inodes=222
 [INFO] ext2: group 0: block bitmap at 2 inode bitmap at 3 inode table at 4
-[INFO] ext2: group 0 free counts: blocks=410 inodes=226 dirs=5
-[INFO] ext2: root inode 2: mode=040755 size=4096 links=6 i_block[0]=20 directory=true
+[INFO] ext2: group 0 free counts: blocks=397 inodes=222 dirs=6
+[INFO] ext2: root inode 2: mode=040755 size=4096 links=7 i_block[0]=20 directory=true
 [INFO] ext2: root directory block 0 of 1: 4096 byte(s) via the direct blocks
-[INFO] ext2: root directory: 6 entr(y/ies): . .. lost+found bin data etc
-[INFO] ext2: resolved /etc/motd to inode 30: 18 byte(s) = "welcome to ZaytOS" (trailing newline trimmed for this line only); matches the seed file byte for byte: true
-[INFO] ext2: /data/direct-max inode=24 size=49152 blocks=12 single indirect=0 last byte=0xce (expected 0xce)
-[INFO] ext2: /data/indirect-first inode=25 size=49153 blocks=13 single indirect=94 last byte=0xcf (expected 0xcf)
+[INFO] ext2: root directory: 7 entr(y/ies): . .. lost+found bin data etc tmp
+[INFO] ext2: resolved /etc/motd to inode 33: 18 byte(s) = "welcome to ZaytOS" (trailing newline trimmed for this line only); matches the seed file byte for byte: true
+[INFO] ext2: /data/direct-max inode=27 size=49152 blocks=12 single indirect=0 last byte=0xce (expected 0xce)
+[INFO] ext2: /data/indirect-first inode=28 size=49153 blocks=13 single indirect=106 last byte=0xcf (expected 0xcf)
 [INFO] fs-image-load: read 2097152 byte(s) from the virtio disk into the copy destination
 [INFO] fs-image-source: root_filesystem reads from virt 0xffff800001e00000 (phys 0x1e00000)
-[INFO] fs-image-copy: copied 2097152 byte(s) to phys 0x1e00000..0x2000000 (512 frame(s), 2MiB-aligned=true), read-back identical=true; the kernel image is 0x100000..0x534e08
+[INFO] fs-image-copy: copied 2097152 byte(s) to phys 0x1e00000..0x2000000 (512 frame(s), 2MiB-aligned=true), read-back identical=true; the kernel image is 0x100000..0x547e08
 [INFO] fs-sparse: /data/sparse-hole reads block 1 as a full block of zeros = true (the blocks around it have content: head=true tail=true); i_size=12288 i_blocks_512=16
-[INFO] fs-bitmap: allocated one block (number 102); free counts are now blocks=409 group0=409
-[INFO] fs-write: append 1 wrote 200 byte(s) to inode 28; free blocks are now 409
-[INFO] fs-write: append 2 wrote 4000 byte(s) to inode 28; free blocks are now 408
-[INFO] fs-truncate: shrank inode 28 to 8192 byte(s); free blocks 406 -> 408 (returned 2)
-[INFO] fs-truncate: shrank inode 28 to 4097 byte(s); free blocks 408 -> 408 (returned 0)
-[INFO] fs-truncate: shrank inode 28 to 4096 byte(s); free blocks 408 -> 409 (returned 1)
-[INFO] fs-truncate: shrank inode 28 to 4000 byte(s); free blocks 409 -> 409 (returned 0)
-[INFO] fs-truncate: restored inode 28 to 100 byte(s)
-[INFO] fs-create: created inode 31 under inode 23 and wrote 300 byte(s); free blocks=408 inodes=225, i_extra_isize=32
-[INFO] fs-create: unlinked inode 31; free blocks=409 inodes=226
-[INFO] fs-bitmap: freed block 102; the image should be back to what was built
+[INFO] fs-bitmap: allocated one block (number 115); free counts are now blocks=396 group0=396
+[INFO] fs-write: append 1 wrote 200 byte(s) to inode 31; free blocks are now 396
+[INFO] fs-write: append 2 wrote 4000 byte(s) to inode 31; free blocks are now 395
+[INFO] fs-truncate: shrank inode 31 to 8192 byte(s); free blocks 393 -> 395 (returned 2)
+[INFO] fs-truncate: shrank inode 31 to 4097 byte(s); free blocks 395 -> 395 (returned 0)
+[INFO] fs-truncate: shrank inode 31 to 4096 byte(s); free blocks 395 -> 396 (returned 1)
+[INFO] fs-truncate: shrank inode 31 to 4000 byte(s); free blocks 396 -> 396 (returned 0)
+[INFO] fs-truncate: restored inode 31 to 100 byte(s)
+[INFO] fs-create: created inode 35 under inode 26 and wrote 300 byte(s); free blocks=395 inodes=221, i_extra_isize=32
+[INFO] fs-create: unlinked inode 35; free blocks=396 inodes=222
+[INFO] fs-mkdir: created directory inode 35 under inode 26; free blocks=395 inodes=221 dirs=Ok(7)
+[INFO] fs-mkdir: rmdir on a directory that is not empty was refused = true
+[INFO] fs-mkdir: removed directory inode 35; free blocks=396 inodes=222 dirs=Ok(6)
+[INFO] fs-bitmap: freed block 115; the image should be back to what was built
 [INFO] fs-image-flush: wrote 2097152 byte(s) back to the virtio disk
 [INFO] fs-image-ready: the image is in its final state for this run
 [INFO] ext2-corrupt: truncated to 512 bytes (the superblock does not fit) -> TooShort
@@ -324,7 +327,7 @@ task: cooperative switch verified
 [INFO] ext2-corrupt: s_rev_level set to 0 (no s_inode_size, no s_first_ino) -> UnsupportedRevision(0)
 [INFO] ext2-corrupt: an unknown INCOMPAT bit set alongside FILETYPE -> UnsupportedIncompatFeatures(64)
 [INFO] ext2-corrupt: s_log_block_size set to 31 (1024 << 31 overflows) -> BadBlockSizeShift(31)
-[INFO] ext2-corrupt: s_blocks_count claiming 65536 blocks (256 MiB) -> ImageTooSmall { needed: 268435456, actual: 417792 }
+[INFO] ext2-corrupt: s_blocks_count claiming 65536 blocks (256 MiB) -> ImageTooSmall { needed: 268435456, actual: 471040 }
 [INFO] ext2-corrupt: s_inodes_per_group zeroed (a divisor of zero) -> ZeroPerGroup
 [INFO] ext2-corrupt: group 0's bg_inode_table pointing past the filesystem -> BlockOutOfRange(65535)
 [INFO] ext2-corrupt: the inode table stretched past the end of the image -> InodeTableOutOfRange { inode: 600000, needed: 153616256 }
@@ -339,7 +342,7 @@ task: cooperative switch verified
 [INFO] ext2-corrupt: the single indirect table's first entry pointing past the filesystem -> BlockOutOfRange(65535)
 [INFO] ext2-corrupt: /etc/motd's i_size shrunk to 4 bytes -> read 4 byte(s) that differ from the seed
 [INFO] ext2-corrupt: the first byte of /etc/motd's contents zeroed -> read 18 byte(s) that differ from the seed
-[INFO] ext2-corrupt: all 20 corrupted image(s) were refused with the expected reason, and the kernel continued (the embedded image is untouched; each case patches a fresh copy of its first 102 blocks)
+[INFO] ext2-corrupt: all 20 corrupted image(s) were refused with the expected reason, and the kernel continued (the embedded image is untouched; each case patches a fresh copy of its first 115 blocks)
 [INFO] user-elf: embedded hello is 8576 byte(s), entry 0x400010, 3 program header(s)
 [INFO] user-elf: PT_LOAD vaddr=0x400000 filesz=0x42 memsz=0x42 flags=0x5 (r=true w=false x=true)
 [INFO] user-elf: PT_LOAD vaddr=0x401000 filesz=0x12 memsz=0x12 flags=0x4 (r=true w=false x=false)
@@ -389,7 +392,7 @@ hello from ring 3
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
 [INFO] user-load: syscall-test initial stack at 0x7fff80 (argc=2, envc=2, 16-byte aligned=true,          initial data 128 of 4096 byte(s))
 syscall-test wrote this
-[INFO] spawn: /bin/hello is 8576 byte(s) at inode 15; entering at depth 2 (the parent's excursion stack 0xffffffff80503150..0xffffffff80513150 has 6337 byte(s) used and 59199 left)
+[INFO] spawn: /bin/hello is 8576 byte(s) at inode 15; entering at depth 2 (the parent's excursion stack 0xffffffff80516150..0xffffffff80526150 has 6337 byte(s) used and 59199 left)
 [INFO] user-load: /bin/hello mapped PT_LOAD 0x400000..0x400042 (filesz=0x42 memsz=0x42 w=false) pages 0x400000..0x400000
 [INFO] user-load: /bin/hello mapped PT_LOAD 0x401000..0x401012 (filesz=0x12 memsz=0x12 w=false) pages 0x401000..0x401000
 [INFO] user-load: /bin/hello PT_LOAD segments: declared=2 mapped=2 (they must match; a gap means a segment was skipped), pages shared with the previous segment=0
@@ -399,8 +402,8 @@ hello from ring 3
 [INFO] user-stack: /bin/hello used 96 of 4096 byte(s) (2%), over half=false          (the initial argv/envp table is counted in; ADR-0041 says to decide about growing          the stack when this goes over half)
 [INFO] ring3: /bin/hello used 2544 of 65536 byte(s) of the depth-1 excursion stack (3%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/hello opened 0 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
-[INFO] spawn: /bin/hello ended (Exited(0)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff805230a0 (inside its own excursion stack 0xffffffff80513150..0xffffffff80523150 = true); the space was destroyed (8 frame(s) left the allocator and 8 reached quarantine (8 its own + 0 from what it spawned), match=true leaked=0)
-[INFO] spawn: /bin/spawn-test is 12712 byte(s) at inode 18; entering at depth 2 (the parent's excursion stack 0xffffffff80503150..0xffffffff80513150 has 6337 byte(s) used and 59199 left)
+[INFO] spawn: /bin/hello ended (Exited(0)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff805360a0 (inside its own excursion stack 0xffffffff80526150..0xffffffff80536150 = true); the space was destroyed (8 frame(s) left the allocator and 8 reached quarantine (8 its own + 0 from what it spawned), match=true leaked=0)
+[INFO] spawn: /bin/spawn-test is 12712 byte(s) at inode 20; entering at depth 2 (the parent's excursion stack 0xffffffff80516150..0xffffffff80526150 has 6337 byte(s) used and 59199 left)
 [INFO] user-load: /bin/spawn-test mapped PT_LOAD 0x400000..0x401002 (filesz=0x1002 memsz=0x1002 w=false) pages 0x400000..0x401000
 [INFO] user-load: /bin/spawn-test mapped PT_LOAD 0x402000..0x402036 (filesz=0x36 memsz=0x36 w=false) pages 0x402000..0x402000
 [INFO] user-load: /bin/spawn-test PT_LOAD segments: declared=2 mapped=2 (they must match; a gap means a segment was skipped), pages shared with the previous segment=0
@@ -409,8 +412,8 @@ hello from ring 3
 [INFO] user-stack: /bin/spawn-test used 128 of 4096 byte(s) (3%), over half=false          (the initial argv/envp table is counted in; ADR-0041 says to decide about growing          the stack when this goes over half)
 [INFO] ring3: /bin/spawn-test used 8176 of 65536 byte(s) of the depth-1 excursion stack (12%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/spawn-test opened 0 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
-[INFO] spawn: /bin/spawn-test ended (Exited(0)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff805230a0 (inside its own excursion stack 0xffffffff80513150..0xffffffff80523150 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0)
-[INFO] spawn: /bin/ls is 12784 byte(s) at inode 16; entering at depth 2 (the parent's excursion stack 0xffffffff80503150..0xffffffff80513150 has 6337 byte(s) used and 59199 left)
+[INFO] spawn: /bin/spawn-test ended (Exited(0)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff805360a0 (inside its own excursion stack 0xffffffff80526150..0xffffffff80536150 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0)
+[INFO] spawn: /bin/ls is 12784 byte(s) at inode 16; entering at depth 2 (the parent's excursion stack 0xffffffff80516150..0xffffffff80526150 has 6337 byte(s) used and 59199 left)
 [INFO] user-load: /bin/ls mapped PT_LOAD 0x400000..0x400eaf (filesz=0xeaf memsz=0xeaf w=false) pages 0x400000..0x400000
 [INFO] user-load: /bin/ls mapped PT_LOAD 0x401000..0x401330 (filesz=0x330 memsz=0x330 w=false) pages 0x401000..0x401000
 [INFO] user-load: /bin/ls mapped PT_LOAD 0x402000..0x402038 (filesz=0x38 memsz=0x38 w=true) pages 0x402000..0x402000
@@ -423,11 +426,12 @@ lost+found
 bin
 data
 etc
+tmp
 [INFO] user-stack: /bin/ls used 1960 of 4096 byte(s) (47%), over half=false          (the initial argv/envp table is counted in; ADR-0041 says to decide about growing          the stack when this goes over half)
 [INFO] ring3: /bin/ls used 5872 of 65536 byte(s) of the depth-1 excursion stack (8%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/ls opened 1 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
-[INFO] spawn: /bin/ls ended (Exited(0)) after 6 syscall(s); its kernel entries ran on RSP 0xffffffff805230a0 (inside its own excursion stack 0xffffffff80513150..0xffffffff80523150 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0)
-[INFO] spawn: /bin/cat is 12776 byte(s) at inode 14; entering at depth 2 (the parent's excursion stack 0xffffffff80503150..0xffffffff80513150 has 6337 byte(s) used and 59199 left)
+[INFO] spawn: /bin/ls ended (Exited(0)) after 6 syscall(s); its kernel entries ran on RSP 0xffffffff805360a0 (inside its own excursion stack 0xffffffff80526150..0xffffffff80536150 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0)
+[INFO] spawn: /bin/cat is 12776 byte(s) at inode 14; entering at depth 2 (the parent's excursion stack 0xffffffff80516150..0xffffffff80526150 has 6337 byte(s) used and 59199 left)
 [INFO] user-load: /bin/cat mapped PT_LOAD 0x400000..0x400c15 (filesz=0xc15 memsz=0xc15 w=false) pages 0x400000..0x400000
 [INFO] user-load: /bin/cat mapped PT_LOAD 0x401000..0x401250 (filesz=0x250 memsz=0x250 w=false) pages 0x401000..0x401000
 [INFO] user-load: /bin/cat mapped PT_LOAD 0x402000..0x402030 (filesz=0x30 memsz=0x30 w=true) pages 0x402000..0x402000
@@ -438,8 +442,8 @@ welcome to ZaytOS
 [INFO] user-stack: /bin/cat used 680 of 4096 byte(s) (16%), over half=false          (the initial argv/envp table is counted in; ADR-0041 says to decide about growing          the stack when this goes over half)
 [INFO] ring3: /bin/cat used 7136 of 65536 byte(s) of the depth-1 excursion stack (10%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/cat opened 1 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
-[INFO] spawn: /bin/cat ended (Exited(0)) after 6 syscall(s); its kernel entries ran on RSP 0xffffffff805230a0 (inside its own excursion stack 0xffffffff80513150..0xffffffff80523150 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0)
-[INFO] spawn: /bin/cat is 12776 byte(s) at inode 14; entering at depth 2 (the parent's excursion stack 0xffffffff80503150..0xffffffff80513150 has 6337 byte(s) used and 59199 left)
+[INFO] spawn: /bin/cat ended (Exited(0)) after 6 syscall(s); its kernel entries ran on RSP 0xffffffff805360a0 (inside its own excursion stack 0xffffffff80526150..0xffffffff80536150 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0)
+[INFO] spawn: /bin/cat is 12776 byte(s) at inode 14; entering at depth 2 (the parent's excursion stack 0xffffffff80516150..0xffffffff80526150 has 6337 byte(s) used and 59199 left)
 [INFO] user-load: /bin/cat mapped PT_LOAD 0x400000..0x400c15 (filesz=0xc15 memsz=0xc15 w=false) pages 0x400000..0x400000
 [INFO] user-load: /bin/cat mapped PT_LOAD 0x401000..0x401250 (filesz=0x250 memsz=0x250 w=false) pages 0x401000..0x401000
 [INFO] user-load: /bin/cat mapped PT_LOAD 0x402000..0x402030 (filesz=0x30 memsz=0x30 w=true) pages 0x402000..0x402000
@@ -450,7 +454,7 @@ cat: usage: cat PATH
 [INFO] user-stack: /bin/cat used 656 of 4096 byte(s) (16%), over half=false          (the initial argv/envp table is counted in; ADR-0041 says to decide about growing          the stack when this goes over half)
 [INFO] ring3: /bin/cat used 2544 of 65536 byte(s) of the depth-1 excursion stack (3%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/cat opened 0 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
-[INFO] spawn: /bin/cat ended (Exited(2)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff805230a0 (inside its own excursion stack 0xffffffff80513150..0xffffffff80523150 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0)
+[INFO] spawn: /bin/cat ended (Exited(2)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff805360a0 (inside its own excursion stack 0xffffffff80526150..0xffffffff80536150 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0)
 syscall-test wrote this
 syscall-test wrote this
 syscall-test is writing a line that does not fit the 64-byte record
@@ -473,9 +477,9 @@ syscall-test wrote this
 [INFO] ioapic: IRQ1 redirection entry read back: vector=0x42 masked=false level_triggered=false active_low=false destination_mode=physical destination=0x00, vector matches what we wrote (0x42) = true, destination is physical mode and equals the bootstrap processor (0x00) = true
 [INFO] ioapic: IRQ1 now goes through the I/O APIC as vector 0x42; the 8259 line is masked (the first key must arrive as that vector, which the 8259 cannot produce)
 [INFO] ioapic: virtio IRQ 11 routed: vector=0x44 (expected 0x44), level=true active-low=false masked=false; matches the platform's declaration = true [read back from hardware]
-[INFO] sti-check 1: GDT base=0xffffffff804f8100 (expected 0xffffffff804f8100), CS=0x0008 (expected 0x0008), DS=0x0010 SS=0x0010 (expected 0x0010)
-[INFO] sti-check 2: TR=0x0030 (expected 0x0030), IST1 top=0xffffffff804f3000, #DF gate IST index=Some(1)
-[INFO] sti-check 3: IDT base=0xffffffff804dbae9 limit=4095, first 32 gates ok=true, exception stub table ok=true, irq stub table ok=true (0xffffffff8014caf0..0xffffffff8014cd00, size=528 expected=528)
+[INFO] sti-check 1: GDT base=0xffffffff8050b100 (expected 0xffffffff8050b100), CS=0x0008 (expected 0x0008), DS=0x0010 SS=0x0010 (expected 0x0010)
+[INFO] sti-check 2: TR=0x0030 (expected 0x0030), IST1 top=0xffffffff80506000, #DF gate IST index=Some(1)
+[INFO] sti-check 3: IDT base=0xffffffff804eeae9 limit=4095, first 32 gates ok=true, exception stub table ok=true, irq stub table ok=true (0xffffffff8014de50..0xffffffff8014e060, size=528 expected=528)
 [INFO] sti-check 5: PIC IMR master=0xfe slave=0xff (expected 0xfe/0xff) [read back from hardware]
 [INFO] sti-check 4: cannot be verified at this point; the timer still goes through the 8259 here (calibration needs PIT ticks, so the move to the local APIC timer happens after sti), and the 8259 ICW2 is write-only. Proceeding is safe only because check 5 holds: with every IRQ masked, a wrong offset delivers nothing. Proof arrives when the first timer IRQ shows up as vector 0x20. The other two paths are read back where they are set up: the I/O APIC redirection entry (IRQ1) and the LVT timer
 [INFO] sti-check 6: IF before=false while holding the lock=false after=false (must be false while held, and back to the entry value afterwards)
@@ -497,8 +501,8 @@ syscall-test wrote this
 [INFO] lapic-timer: the timer now arrives as vector 0xfe, which the 8259 cannot produce
 task: starting preemptive demo with 2 busy-loop workers for 200 ticks
 [INFO] smp: the installed AP trampoline matches the template outside the patched fields: 4048 byte(s) compared, 48 excluded (gdtr base at 0xf22, far jump target at 0x3b, data block 0xf40..0xf68), mismatches=0
-[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x40c000, rust entry 0xffffffff8017e6f0
-[INFO] smp: starting application processor apic id 1 as slot 1 (trampoline at 0x1000, vector 0x01, stack top 0x3000 identity-mapped, cr3 0x40c000 = the static boot page table)
+[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x412000, rust entry 0xffffffff80180140
+[INFO] smp: starting application processor apic id 1 as slot 1 (trampoline at 0x1000, vector 0x01, stack top 0x3000 identity-mapped, cr3 0x412000 = the static boot page table)
 [INFO] smp: application processor 1 started (long mode reached, running on the static boot page table; no per-CPU GDT/TSS/IDT yet, so cpu_id() is not used here)
 [INFO] smp: ap 1 loaded its own GDT/TSS/IDT; cpu_id() now reads 1 from GDTR (the index handed over in the trampoline data block was 1, match=true)
 [INFO] smp: ap 1 switched to the production page table (cr3=0xf000) and its own per-CPU stack; PML4[0] read back from this core = empty:true (the identity mapping is gone here too, so the trampoline's identity VA stack is no longer usable)
@@ -521,10 +525,10 @@ bss-test: the .bss reads as zero, keeps writes, and shares a page with .data
 [INFO] user-stack: /bin/bss-test used 128 of 4096 byte(s) (3%), over half=false          (the initial argv/envp table is counted in; ADR-0041 says to decide about growing          the stack when this goes over half)
 [INFO] ring3: /bin/bss-test used 2544 of 65536 byte(s) of the depth-0 excursion stack (3%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/bss-test opened 0 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
-[INFO] spawn: /bin/bss-test ended (Exited(0)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff805130a0 (inside its own excursion stack 0xffffffff80503150..0xffffffff80513150 = true); the space was destroyed (11 frame(s) left the allocator and 11 reached quarantine (11 its own + 0 from what it spawned), match=true leaked=0)
+[INFO] spawn: /bin/bss-test ended (Exited(0)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff805260a0 (inside its own excursion stack 0xffffffff80516150..0xffffffff80526150 = true); the space was destroyed (11 frame(s) left the allocator and 11 reached quarantine (11 its own + 0 from what it spawned), match=true leaked=0)
 [INFO] bss-check: /bin/bss-test ended Ok(Exited(0)) (0 means the .bss reads as zero, keeps writes, and shares a page with .data)
 [INFO] init: starting /bin/zash (restart 0 of 3)
-[INFO] spawn: /bin/zash is 16952 byte(s) at inode 21; entering at depth 1 (the parent runs on the main kernel stack, which has a guard page)
+[INFO] spawn: /bin/zash is 16952 byte(s) at inode 24; entering at depth 1 (the parent runs on the main kernel stack, which has a guard page)
 [INFO] user-load: /bin/zash mapped PT_LOAD 0x400000..0x401604 (filesz=0x1604 memsz=0x1604 w=false) pages 0x400000..0x401000
 [INFO] user-load: /bin/zash mapped PT_LOAD 0x402000..0x4023e0 (filesz=0x3e0 memsz=0x3e0 w=false) pages 0x402000..0x402000
 [INFO] user-load: /bin/zash mapped PT_LOAD 0x403000..0x403040 (filesz=0x40 memsz=0x40 w=true) pages 0x403000..0x403000

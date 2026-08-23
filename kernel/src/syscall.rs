@@ -110,6 +110,11 @@ pub const ENOSPC: i64 = 28;
 /// 端末の fd に `lseek` を出したときである。
 pub const ESPIPE: i64 = 29;
 
+/// **ディレクトリが空でない**（Linux の `ENOTEMPTY` = 39。実測。
+/// `/usr/include/asm-generic/errno.h`）。**DIR-1c で入った**——
+/// `rmdir` が中身の在るディレクトリを渡されたときである。
+pub const ENOTEMPTY: i64 = 39;
+
 /// **その名前は既に在る**（Linux の `EEXIST` = 17。実測）。
 ///
 /// **e-5 で入った。** **`O_CREAT` の経路は「無いとき」しか通らない**ので、
@@ -384,6 +389,12 @@ pub const O_CREAT: u64 = 0o100;
 ///
 /// **利用者は `/bin/tail` である**（DIR-1b で同じ段に作った）。
 pub const SYS_LSEEK: u64 = 8;
+
+/// `mkdir` の番号（Linux と同じ。DIR-1c）。**利用者は `/bin/mkdir` である。**
+pub const SYS_MKDIR: u64 = 83;
+
+/// `rmdir` の番号（Linux と同じ。DIR-1c）。**利用者は `/bin/rmdir` である。**
+pub const SYS_RMDIR: u64 = 84;
 
 /// `unlink` の番号（Linux と同じ。DIR-1b）。
 ///
@@ -936,6 +947,14 @@ unsafe fn dispatch(
             unsafe { sys_ioctl(args[0], args[1], args[2], pml4_phys, direct_map) }
         }
         SYS_LSEEK => sys_lseek(args[0], args[1], args[2]),
+        SYS_MKDIR => {
+            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+            unsafe { sys_directory(args[0], DirectoryOp::Create, pml4_phys, direct_map) }
+        }
+        SYS_RMDIR => {
+            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+            unsafe { sys_directory(args[0], DirectoryOp::Remove, pml4_phys, direct_map) }
+        }
         SYS_UNLINK => {
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
             unsafe { sys_unlink(args[0], pml4_phys, direct_map) }
@@ -1442,6 +1461,10 @@ fn errno_for_alloc(error: common::ext2::AllocError) -> i64 {
         // **ディレクトリだった**（DIR-1b）。**`rm` はこれで「ディレクトリだ」
         // と分かり、`rmdir` を使えと言える。**
         AllocError::NotARegularFile(_) => EISDIR,
+        // **ディレクトリでなかった**（DIR-1c。`rmdir` が通常ファイルを見た）。
+        AllocError::NotADirectory(_) => ENOTDIR,
+        // **空でなかった**（DIR-1c。Linux も `rmdir` にこれを返す）。
+        AllocError::DirectoryNotEmpty(_) => ENOTEMPTY,
         // **像の側の食い違いは、使う側の入力では直らない。**
         _ => EIO,
     }
@@ -1540,6 +1563,75 @@ unsafe fn sys_unlink(path: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -> u
             // 複製前は書けない（埋め込みを可変にしない）。
             None => (-EROFS) as u64,
         }
+    }
+}
+
+/// [`sys_directory`] がどちらを行うか（DIR-1c）。
+enum DirectoryOp {
+    /// `mkdir`。
+    Create,
+    /// `rmdir`。
+    Remove,
+}
+
+/// `mkdir(path)` と `rmdir(path)` の本体（DIR-1c）。
+///
+/// # 1 つにまとめてある
+///
+/// **違うのは `common::ext2` のどちらを呼ぶかだけである。**
+/// **パスの写し・親と名前への割り・親がディレクトリであることの確認は同じ**
+/// ——**分けると、同じ手順を 2 つ持つことになる。**
+///
+/// # `mkdir -p` は無い
+///
+/// **親が無ければ `-ENOENT` である。** **途中を作る形は、
+/// 「どこまで作ったか」を戻す判断が要る**（途中で失敗したとき）。
+/// **要る者が来てから作る。**
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn sys_directory(
+    path: u64,
+    op: DirectoryOp,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+) -> u64 {
+    let mut buf = [0u8; PATH_MAX];
+    // SAFETY: 呼び出し元契約をそのまま渡す。
+    let len = match unsafe { copy_user_path(&mut buf, path, pml4_phys, direct_map) } {
+        Ok(len) => len,
+        Err(errno) => return (-errno) as u64,
+    };
+
+    let (parent, name) = match split_parent_and_name(&buf[..len]) {
+        Ok(split) => split,
+        Err(errno) => return (-errno) as u64,
+    };
+
+    let layout = match crate::vfs::root_filesystem() {
+        Ok(fs) => fs.layout(),
+        Err(e) => return (-errno_for_ext2(e)) as u64,
+    };
+    let dir = match crate::vfs::root_filesystem().and_then(|fs| fs.lookup(parent)) {
+        Ok(dir) => dir,
+        Err(e) => return (-errno_for_ext2(e)) as u64,
+    };
+    if !dir.is_directory() {
+        return (-ENOTDIR) as u64;
+    }
+
+    let done = crate::vfs::with_root_image_mut(|image| match op {
+        DirectoryOp::Create => {
+            common::ext2::create_directory(image, &layout, dir.number, name).map(|_| ())
+        }
+        DirectoryOp::Remove => common::ext2::remove_directory(image, &layout, dir.number, name),
+    });
+    match done {
+        Some(Ok(())) => 0,
+        Some(Err(error)) => (-errno_for_alloc(error)) as u64,
+        // 複製前は書けない（埋め込みを可変にしない）。
+        None => (-EROFS) as u64,
     }
 }
 

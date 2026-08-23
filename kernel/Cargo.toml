@@ -193,6 +193,9 @@ fs-truncate-keep-test = []
 # 変種（S12-e）: 作ったファイルを消さない。**壊さない**——作ったままの像を作る。
 # 1 回の起動だと最終状態が「消した後」になり、作成の誤りが削除で消える。
 fs-create-keep-test = []
+# 変種（DIR-1c）: 壊さない。作ったディレクトリを消さずに残す。生きた
+# ディレクトリを e2fsck に見せる唯一の構成である。
+fs-mkdir-keep-test = []
 # 破壊（S12-e）: 作成と削除の6種。いずれも common へ転送する。
 ext2-create-skip-inode-bit-test = ["common/ext2-create-skip-inode-bit"]
 ext2-create-skip-links-test = ["common/ext2-create-skip-links"]
@@ -200,6 +203,10 @@ ext2-create-keep-prev-rec-len-test = ["common/ext2-create-keep-prev-rec-len"]
 ext2-create-skip-inode-count-test = ["common/ext2-create-skip-inode-count"]
 ext2-create-move-dirs-count-test = ["common/ext2-create-move-dirs-count"]
 ext2-unlink-mark-unused-test = ["common/ext2-unlink-mark-unused"]
+ext2-mkdir-skip-dot-dot-test = ["common/ext2-mkdir-skip-dot-dot"]
+ext2-mkdir-skip-parent-link-test = ["common/ext2-mkdir-skip-parent-link"]
+ext2-mkdir-skip-dirs-count-test = ["common/ext2-mkdir-skip-dirs-count"]
+ext2-rmdir-ignore-nonempty-test = ["common/ext2-rmdir-ignore-nonempty"]
 # 破壊（S12-f-3）: i_extra_isize を名乗らない。common へ転送する。
 ext2-create-skip-extra-isize-test = ["common/ext2-create-skip-extra-isize"]
 # 破壊（S12-d）: truncate の6種。いずれも common へ転送する。

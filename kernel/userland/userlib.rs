@@ -311,6 +311,31 @@ pub fn seek_to(fd: u64, offset: u64) -> i64 {
     unsafe { syscall3(SYS_LSEEK, fd, offset, SEEK_SET) }
 }
 
+/// `mkdir` の番号（Linux と同じ。DIR-1c）。
+pub const SYS_MKDIR: u64 = 83;
+/// `rmdir` の番号（Linux と同じ。DIR-1c）。
+pub const SYS_RMDIR: u64 = 84;
+
+/// `mkdir(path)`（DIR-1c）。**親が無ければ `-ENOENT`（`-p` は無い）。**
+///
+/// # Safety
+///
+/// `path` が NUL 終端のバイト列を指すこと。
+pub unsafe fn mkdir(path: &[u8]) -> i64 {
+    // SAFETY: 呼び出し元契約により `path` は NUL 終端である。
+    unsafe { syscall3(SYS_MKDIR, path.as_ptr() as u64, 0, 0) }
+}
+
+/// `rmdir(path)`（DIR-1c）。**空でなければ `-ENOTEMPTY`。**
+///
+/// # Safety
+///
+/// `path` が NUL 終端のバイト列を指すこと。
+pub unsafe fn rmdir(path: &[u8]) -> i64 {
+    // SAFETY: 呼び出し元契約により `path` は NUL 終端である。
+    unsafe { syscall3(SYS_RMDIR, path.as_ptr() as u64, 0, 0) }
+}
+
 /// `unlink(path)`（DIR-1b）。**通常ファイルだけを消せる。**
 ///
 /// **ディレクトリなら `-EISDIR` が返る**（`rmdir` を使うこと）。
