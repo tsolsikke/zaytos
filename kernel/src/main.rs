@@ -9328,6 +9328,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "rmdir が空かどうかを見ない",
     ),
     (
+        "zi-enter-does-nothing-test",
+        cfg!(feature = "zi-enter-does-nothing-test"),
+        "zi のインサートモードで Enter を捨てる",
+    ),
+    (
         "unlink-ignore-request-test",
         cfg!(feature = "unlink-ignore-request-test"),
         "unlink を受けても消さない",

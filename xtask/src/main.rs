@@ -3861,8 +3861,18 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     // **期待値をこちらが持たない。** `zi` の最後の再描画に編集後の行が
     // 並んでいるので、**そこから読み取って `cat` の出力と突き合わせる**
     // （「期待値は定数で持たず外の道具から導く」）。
-    let edited_lines = parse_zi_last_redraw(&serial);
-    let readback = parse_cat_readback(&serial, edited_lines.len());
+    // **`/data/lines` の回に区切る（zi-f）。**
+    //
+    // **台本の末尾に `zi` の回がもう 1 つ増えた**ので、**区切らないと
+    // 「最後の再描画」があちらを指し、`/data/lines` の読み戻しと
+    // 突き合わなくなる**（実測で踏んだ）。
+    // **台本を変えるときは、台本に寄りかかっている判定を数え直すこと。**
+    let lines_session = serial
+        .split("/bin/tail /data/lines")
+        .next()
+        .unwrap_or(&serial);
+    let edited_lines = parse_zi_last_redraw(lines_session);
+    let readback = parse_cat_readback(lines_session, edited_lines.len());
     let roundtrip = !edited_lines.is_empty() && edited_lines == readback;
 
     // **画面の実物で色が出ていること（ES-d）。**
@@ -4096,6 +4106,32 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     let failures_in_the_round = after_mkdir.matches("zash: exit status ").count();
     let only_the_refused_rmdir_failed = failures_in_the_round == 1;
 
+    // **Enter と Backspace と Delete（zi-f）。**
+    //
+    // **台本が新しいファイルを開き、3 つを通してから保存している**
+    // （`kernel/src/input.rs` の台本の doc に打鍵が並べてある）。
+    // **読み戻しは `ab` と `c` の 2 行になるはずである。**
+    let edited_output = program_output(
+        plain
+            .split("/bin/cat /data/edited")
+            .nth(1)
+            .unwrap_or("")
+            .split("script-done")
+            .next()
+            .unwrap_or(""),
+    );
+    let edited_lines_seen: Vec<&str> = edited_output.lines().collect();
+
+    // **(1) Enter が行を割った**——**新しいファイルは 1 行で始まる**ので、
+    // **2 行あることが Enter の効いた証拠である。**
+    let enter_split_the_line = edited_lines_seen.len() == 2;
+    // **(2) Backspace が `X` を消した。**
+    let backspace_erased = !edited_output.contains('X');
+    // **(3) Delete が `d` を消した。**
+    let delete_erased = !edited_output.contains('d');
+    // **(4) 3 つが揃った形になっていること。**
+    let edited_round_trip = edited_lines_seen == ["ab", "c"];
+
     // **`a` は `i` と違う桁から挿入する（e-4）。**
     //
     // **台本は `i`（そのまま）と `a`（1 つ右）を両方通す。** `zi` は
@@ -4186,6 +4222,11 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
          (ls /tmp printed {listing_of_tmp:?})"
     );
     println!(
+        "{context}: enter split the line = {enter_split_the_line}, backspace erased = \
+         {backspace_erased}, delete erased = {delete_erased}, the round trip reads back as \
+         written = {edited_round_trip} (cat printed {edited_lines_seen:?})"
+    );
+    println!(
         "{context}: the only failure in the round was the refused rmdir = \
          {only_the_refused_rmdir_failed} ({failures_in_the_round} non-zero exit(s))"
     );
@@ -4244,6 +4285,10 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && rmdir_refused
         && directory_removed
         && only_the_refused_rmdir_failed
+        && enter_split_the_line
+        && backspace_erased
+        && delete_erased
+        && edited_round_trip
         && append_differs_from_insert
     {
         println!("{context}: PASS");
@@ -10509,7 +10554,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             }
         }
 
-        // **`zi` の破壊 14 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
+        // **`zi` の破壊 15 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
         // 書かない、挿入が 1 字落とす（どちらも zi-d-2）、プロンプトの色を
         // 送らない、状態行がモードに追随しない（どちらも ES-d）、
         // `ioctl(TIOCGWINSZ)` が行と桁を入れ替える（e-1）、
@@ -10554,6 +10599,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "open-ignore-create-test",
             "env-drop-term-test",
             "unlink-ignore-request-test",
+            "zi-enter-does-nothing-test",
         ] {
             total += 1;
             println!("=== xtask check: the zi test catches {feature}");
@@ -11408,7 +11454,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 23,
-    full: 222,
+    full: 223,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

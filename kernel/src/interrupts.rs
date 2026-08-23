@@ -1490,7 +1490,10 @@ fn drain_keyboard(
             | KeyEvent::ArrowRight
             | KeyEvent::ArrowUp
             | KeyEvent::ArrowDown
-            | KeyEvent::Escape => {}
+            | KeyEvent::Escape
+            // **Delete も何もしない（zi-f）。** **この行は挿入点を持たない**
+            // ——`Backspace` と同じ理由で、編集は Ring 3 の側にある。
+            | KeyEvent::Delete => {}
             KeyEvent::Backspace => {
                 // 画面上の消去は行わない。コンソール側でセルごとの
                 // 占有種別（全角の先頭 / 後続）を管理する必要があり、

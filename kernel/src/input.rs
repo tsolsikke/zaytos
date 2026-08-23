@@ -365,8 +365,16 @@ pub(crate) enum DeliveredBytes {
     None,
     /// 1 バイト。
     Single(u8),
-    /// CSI の 3 バイト列。**不可分に届ける**（下の doc）。
-    Csi(&'static [u8; 3]),
+    /// CSI の列。**不可分に届ける**（下の doc）。
+    ///
+    /// # 長さを固定しない（zi-f）
+    ///
+    /// **以前は `[u8; 3]` だった**（矢印がすべて 3 バイトだったため）。
+    /// **Delete は `\x1b[3~` の 4 バイトである**——**本物の端末が送る形で、
+    /// 3 バイトの版は無い。** **器のほうを合わせる。**
+    ///
+    /// **[`PENDING`] は 8 バイト持つ**ので、溢れない。
+    Csi(&'static [u8]),
 }
 
 /// キーイベントからバイト列への写像（zi-a で純粋関数へ切り出した）。
@@ -411,6 +419,10 @@ pub(crate) fn bytes_for_event(event: crate::keyboard::decode::KeyEvent) -> Deliv
         // **Esc は素の 1 バイトである（zi-a）。** CSI に包むと「Esc を押した」が
         // 表せなくなる——`zi` のノーマルモード入りは Esc 単体で起きる。
         KeyEvent::Escape => DeliveredBytes::Single(0x1b),
+        // **Delete は `\x1b[3~` である（zi-f）。** **本物の端末と同じ形にする**
+        // ——**こちらの都合で 1 バイトを割り当てると、`terminfo` を書く日に
+        // 合わなくなる**（C の移植で来る）。
+        KeyEvent::Delete => DeliveredBytes::Csi(b"\x1b[3~"),
         KeyEvent::ArrowLeft => DeliveredBytes::Csi(b"\x1b[D"),
         KeyEvent::ArrowRight => DeliveredBytes::Csi(b"\x1b[C"),
         KeyEvent::ArrowUp => DeliveredBytes::Csi(b"\x1b[A"),
@@ -556,6 +568,23 @@ pub(crate) mod script {
     /// 持たない**——**代わりに「この一巡で失敗したのは断られた `rmdir` の
     /// 1 回だけ」を見る**（`zash` が 0 以外の終了状態を 1 行で報せる）。
     ///
+    /// # 末尾に zi-f の 4 行が付いている
+    ///
+    /// **Enter と Backspace と Delete である。** **新しいファイルを開き、
+    /// 3 つを通してから保存し、`cat` で読み戻す。**
+    ///
+    /// 打つのは `i` `a` `b` Enter `c` `d` `X` Backspace 左 Delete Esc である。
+    ///
+    /// - `ab` を入れる
+    /// - **Enter で行を割る**（`ab` / 空）
+    /// - `cdX` を入れる（`ab` / `cdX`）
+    /// - **Backspace で `X` を消す**（`ab` / `cd`）
+    /// - 左へ 1 つ動く
+    /// - **Delete で `d` を消す**（`ab` / `c`）
+    ///
+    /// **したがって読み戻しは `ab` と `c` の 2 行である。**
+    /// **3 つのどれが効かなくても、この 2 行にはならない。**
+    ///
     /// # 代替画面の観測点を `zi` を抜けた直後へ移した
     ///
     /// **`\x05`（`OBSERVE_AFTER_ALT`）は台本の末尾に在った。** **DIR-1b で
@@ -595,7 +624,11 @@ pub(crate) mod script {
         /bin/rmdir /tmp/box\n\
         /bin/rm /tmp/box/note\n\
         /bin/rmdir /tmp/box\n\
-        /bin/ls /tmp\n\x0c";
+        /bin/ls /tmp\n\
+        /bin/zi /data/edited\n\
+        iab\ncdX\x08\x1b[D\x1b[3~\x1b\x04\
+        :wq\n\
+        /bin/cat /data/edited\n\x0c";
 
     /// 観測点（ES-d）。**プロンプトの色を見る。**
     const OBSERVE_PROMPT: u8 = 0x01;

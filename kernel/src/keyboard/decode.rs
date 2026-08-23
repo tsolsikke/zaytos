@@ -110,6 +110,14 @@ pub enum KeyEvent {
     /// **左右を入れたとき「上下は分けない。使う者がいない機構は検算が置けない」と
     /// 書いた。** 使う者（`zi`。vision から段になった）が決まったので分けた。
     ArrowUp,
+    /// Delete（zi-f）。**カーソル位置の字を消す。**
+    ///
+    /// # なぜ種を足すのか
+    ///
+    /// **Backspace と別のキーである。** **Backspace は前を消し、
+    /// Delete はその場を消す。** **同じ種にすると、消す向きを
+    /// 受け手が決められない。**
+    Delete,
     /// カーソル下（zi-a）。
     ArrowDown,
     /// Esc（zi-a）。**`zi` のノーマルモードへ戻るキーである。**
@@ -177,6 +185,12 @@ const SCANCODE_ARROW_RIGHT: u8 = 0x4D;
 const SCANCODE_ARROW_UP: u8 = 0x48;
 /// 拡張コードのカーソル下（`0xE0 0x50`。zi-a）。
 const SCANCODE_ARROW_DOWN: u8 = 0x50;
+/// 拡張コードの Delete（`0xE0 0x53`。zi-f）。
+///
+/// **素の `0x53` はキーパッドの `.` である**（表で `'\0'`、`Unsupported` に
+/// 落ちる）。**Delete は必ず `0xE0` 付きで届くので、取り違えは起きない**
+/// （矢印と同じ形である）。
+const SCANCODE_DELETE: u8 = 0x53;
 /// Esc（`0x01`。zi-a）。
 const SCANCODE_ESC: u8 = 0x01;
 const SCANCODE_TAB: u8 = 0x0F;
@@ -399,6 +413,12 @@ impl Decoder {
                 #[cfg(not(feature = "keyboard-drop-arrows-test"))]
                 if code == SCANCODE_ARROW_DOWN {
                     return Some(KeyEvent::ArrowDown);
+                }
+                // **Delete（zi-f）。** **`keyboard-drop-arrows-test` の下に
+                // 置かない**——**あの破壊の意味は「矢印を未対応へ戻す」の
+                // 1 つである**（名前が主張する範囲と実際の範囲をずらさない）。
+                if code == SCANCODE_DELETE {
+                    return Some(KeyEvent::Delete);
                 }
                 // **右 Ctrl（`0xE0 0x1D`）も Ctrl として扱う（S12 前の手当て、C）。**
                 //
@@ -682,6 +702,23 @@ mod tests {
         assert_eq!(decoder.feed(0x48), Some(KeyEvent::ArrowUp));
         assert_eq!(decoder.feed(0xE0), None);
         assert_eq!(decoder.feed(0x50), Some(KeyEvent::ArrowDown));
+    }
+
+    /// **Delete は拡張キーで、押下のときだけ届く（zi-f）。**
+    ///
+    /// **素の `0x53` はキーパッドの `.` で、`Unsupported` になる**
+    /// ——**同じ番号が接頭辞の有無で別のキーになることを固定する。**
+    #[test]
+    fn delete_arrives_only_with_the_extended_prefix() {
+        let mut decoder = Decoder::new();
+        assert_eq!(decoder.feed(0xE0), None);
+        assert_eq!(decoder.feed(0x53), Some(KeyEvent::Delete));
+        assert_eq!(decoder.feed(0xE0), None);
+        assert_eq!(decoder.feed(0xD3), None, "離脱では報告しない");
+
+        // **接頭辞なしはキーパッドの `.` である。**
+        let mut decoder = Decoder::new();
+        assert_eq!(decoder.feed(0x53), Some(KeyEvent::Unsupported(0x53)));
     }
 
     /// **Esc は押下で 1 回だけ `Escape` を出す（zi-a）。**

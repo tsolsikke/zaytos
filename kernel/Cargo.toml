@@ -137,6 +137,9 @@ env-drop-path-test = []
 # 破壊（DIR-1b）: unlink を受けても消さず、成功を返す。rm は何も言わないので、
 # 落ちるのは「消した後の ls に名前が無い」判定だけである。
 unlink-ignore-request-test = []
+# 破壊（zi-f）: zi のインサートモードで Enter を捨てる。行が増えないので、
+# 読み戻しが 2 行にならず、「enter split the line」だけが落ちる。
+zi-enter-does-nothing-test = []
 # 破壊（zi-c）: 書きで開いた fd への write が複製へ足さない。検証も戻り値も
 # 正しく、書いたつもりが複製に届いていない——読み戻しの検算（58 番）が捕まえる。
 write-file-skip-append-test = []

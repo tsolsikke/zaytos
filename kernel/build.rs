@@ -195,6 +195,10 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
         // ABI の検算が落ちると、破壊が別の理由で捕まったことになる。**
         ("CARGO_FEATURE_ENV_DROP_TERM_TEST", "env_drop_term"),
         ("CARGO_FEATURE_ENV_DROP_PATH_TEST", "env_drop_path"),
+        (
+            "CARGO_FEATURE_ZI_ENTER_DOES_NOTHING_TEST",
+            "zi_enter_does_nothing",
+        ),
     ];
     let mut extra_cfgs: Vec<String> = Vec::new();
     for (env, cfg) in USER_PROGRAM_CFGS {

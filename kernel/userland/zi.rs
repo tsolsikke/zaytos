@@ -64,6 +64,16 @@ const READ_FAILED: &[u8] = b"zi: cannot read\n";
 /// 上限を越えていたときの断り書き。**切り詰めない。**
 const TOO_BIG: &[u8] = b"zi: the file does not fit the buffer\n";
 
+/// 行数の上限に当たったときの報せ（zi-f）。**コマンド行へ出す。**
+///
+/// **黙って落とさない。** **`insert` が入らない字を落とすのと同じ判断だが、
+/// あちらは 1 字で、こちらは「行が作れない」である**——**使う人から見て
+/// 何も起きないので、言わないと分からない。**
+const NO_ROOM_FOR_A_LINE: &[u8] = b"no room for another line";
+
+/// 1 行の上限に当たって連結できなかったときの報せ（zi-f）。
+const NO_ROOM_TO_JOIN: &[u8] = b"the joined line would be too long";
+
 /// `read(0)` が「まだ無い」を返す値（`-EAGAIN`）。
 const MINUS_EAGAIN: i64 = -11;
 /// Esc のバイト。
@@ -125,6 +135,13 @@ enum Escape {
     Idle,
     Esc,
     Bracket,
+    /// `\x1b[3` まで来た（zi-f）。**次が `~` なら Delete である。**
+    ///
+    /// **矢印は 3 バイトで終わるが、Delete は 4 バイトである**
+    /// （`\x1b[3~`。本物の端末と同じ形。`kernel/src/input.rs`）。
+    /// **数字を溜める形にはしない**——**受けるのは `3~` の 1 種類だけで、
+    /// 一般の CSI パラメータを解釈する利用者がまだ居ない。**
+    Tilde,
 }
 
 /// 行の集まりと読み込みの受け皿。**`.bss` の静的に置く。**
@@ -173,6 +190,67 @@ impl Buffer {
         line.copy_within(at..length, at + 1);
         line[at] = byte;
         self.lengths[row] = length + 1;
+        true
+    }
+
+    /// 行を割る（zi-f。インサートモードの Enter）。
+    ///
+    /// **`at` 以降を次の行へ移す。** **入らなければ何もしない**
+    /// ——**行数の上限（[`MAX_LINES`]）に当たった形である。**
+    ///
+    /// **`insert` と同じ判断である**——**入っていないものを入ったように
+    /// 見せない。** **断ったことは呼ぶ側がコマンド行へ出す。**
+    fn split_line(&mut self, row: usize, at: usize) -> bool {
+        if self.count >= MAX_LINES || row >= self.count || at > self.lengths[row] {
+            return false;
+        }
+        // **下の行を 1 つずつ下げる。** 上限に当たらないことは上で見た。
+        for index in (row + 1..self.count).rev() {
+            let (source, target) = (index, index + 1);
+            let line = self.lines[source];
+            self.lines[target] = line;
+            self.lengths[target] = self.lengths[source];
+        }
+        let length = self.lengths[row];
+        let tail = length - at;
+        let mut moved = [0u8; MAX_LINE_LEN];
+        moved[..tail].copy_from_slice(&self.lines[row][at..length]);
+        self.lines[row + 1] = moved;
+        self.lengths[row + 1] = tail;
+        self.lengths[row] = at;
+        self.count += 1;
+        true
+    }
+
+    /// 次の行を末尾へ繋げる（zi-f。行頭の Backspace）。
+    ///
+    /// **入らなければ何もしない**（1 行の上限に当たった形である）。
+    ///
+    /// # `zi` の締めは「行の連結」を実装しないと書いていた
+    ///
+    /// **書いたのは `zi-d` の範囲としてである。** **zi-f で作ることにした**
+    /// ——**行頭の Backspace が何もしないと、打ち間違いを直せない場面が
+    /// 残る**（1 行目まで戻って消すしかない）。**運用者の指摘が利用者である。**
+    fn join_with_next(&mut self, row: usize) -> bool {
+        if row + 1 >= self.count {
+            return false;
+        }
+        let length = self.lengths[row];
+        let next = self.lengths[row + 1];
+        if length + next > MAX_LINE_LEN {
+            return false;
+        }
+        let tail = self.lines[row + 1];
+        self.lines[row][length..length + next].copy_from_slice(&tail[..next]);
+        self.lengths[row] = length + next;
+        // **下の行を 1 つずつ上げる。**
+        for index in row + 1..self.count - 1 {
+            let line = self.lines[index + 1];
+            self.lines[index] = line;
+            self.lengths[index] = self.lengths[index + 1];
+        }
+        self.count -= 1;
+        self.lengths[self.count] = 0;
         true
     }
 
@@ -668,7 +746,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     let mut dirty = false;
     // **コマンド行に出す報せ（e-5）。** **次の打鍵まで残す**——vi と同じで、
     // **出した瞬間に消えると読めない。**
-    let mut message: &[u8] = b"";
+    let mut message: &'static [u8] = b"";
     // **画面の形を訊く（e-4）。** **0 なら既定へ落ちる**
     // （`userlib::window_size_or_default`。**その形がここで初めて本番で効く**）。
     let view = View {
@@ -758,6 +836,34 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 escape = Escape::Bracket;
                 continue;
             }
+            // **`\x1b[3` は Delete の途中である（zi-f）。**
+            (Escape::Bracket, b'3') => {
+                escape = Escape::Tilde;
+                continue;
+            }
+            (Escape::Tilde, terminator) => {
+                escape = Escape::Idle;
+                if terminator != b'~' {
+                    // **知らない終端は捨てる。** 字として入れない。
+                    continue;
+                }
+                // **Delete はカーソル位置の字を消す（zi-f）。**
+                // **ノーマルの `x` と同じ動きだが、インサートでも効く。**
+                let removed = buffer.remove(row, col);
+                if removed {
+                    // **行末を越えたら 1 つ左へ寄る**（ノーマルのみ。`x` と同じ）。
+                    if mode == Mode::Normal {
+                        let length = buffer.lengths[row];
+                        if col >= length {
+                            col = length.saturating_sub(1);
+                        }
+                    }
+                    redraw_here(&view, buffer, mode, row, col, b"");
+                    report_cursor(buffer, row, col, b"delete");
+                    dirty = true;
+                }
+                continue;
+            }
             (Escape::Bracket, direction) => {
                 escape = Escape::Idle;
                 let moved = match direction {
@@ -797,7 +903,15 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                     escape = Escape::Esc;
                     continue;
                 }
-                if !handle_byte(&view, other, buffer, &mut row, &mut col, &mut mode) {
+                if !handle_byte(
+                    &view,
+                    other,
+                    buffer,
+                    &mut row,
+                    &mut col,
+                    &mut mode,
+                    &mut message,
+                ) {
                     continue;
                 }
                 continue;
@@ -892,7 +1006,15 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             continue;
         }
 
-        let changed = handle_byte(&view, byte, buffer, &mut row, &mut col, &mut mode);
+        let changed = handle_byte(
+            &view,
+            byte,
+            buffer,
+            &mut row,
+            &mut col,
+            &mut mode,
+            &mut message,
+        );
         dirty |= changed;
     }
 
@@ -1132,6 +1254,7 @@ fn handle_byte(
     row: &mut usize,
     col: &mut usize,
     mode: &mut Mode,
+    message: &mut &'static [u8],
 ) -> bool {
     match *mode {
         // **コマンド行は呼び出し側で処理する**（主ループが `continue` する）。
@@ -1210,9 +1333,54 @@ fn handle_byte(
             false
         }
         Mode::Insert => {
-            // **改行は入れない**（行の追加は zi-d-1 の範囲外。`o` も同じ）。
-            if byte == b'\n' || byte == 0x08 {
+            // **Enter で行を割る（zi-f）。** vi と同じで、カーソル以降が
+            // 新しい行へ移り、カーソルは新しい行の先頭へ行く。
+            if byte == b'\n' {
+                // 破壊 (zi-f, zi-enter-does-nothing): Enter を捨てる。
+                // **zi-d-1 までの振る舞いに戻る**（あの頃は「行の追加は
+                // 範囲外」として捨てていた）。**行が増えないので、読み戻しが
+                // 2 行にならない**——**「enter split the line」だけが落ちる。**
+                #[cfg(zi_enter_does_nothing)]
                 return false;
+
+                #[cfg(not(zi_enter_does_nothing))]
+                if !buffer.split_line(*row, *col) {
+                    *message = NO_ROOM_FOR_A_LINE;
+                    redraw_here(view, buffer, *mode, *row, *col, message);
+                    return false;
+                }
+                *row += 1;
+                *col = 0;
+                redraw_here(view, buffer, *mode, *row, *col, b"");
+                report_cursor(buffer, *row, *col, b"split");
+                return true;
+            }
+            // **Backspace（zi-f）。** 行頭なら前の行と繋げる。
+            if byte == 0x08 {
+                if *col > 0 {
+                    let removed = buffer.remove(*row, *col - 1);
+                    if removed {
+                        *col -= 1;
+                        redraw_here(view, buffer, *mode, *row, *col, b"");
+                        report_cursor(buffer, *row, *col, b"erase");
+                    }
+                    return removed;
+                }
+                if *row == 0 {
+                    // **1 行目の行頭では何もしない**（繋げる先が無い）。
+                    return false;
+                }
+                let landing = buffer.lengths[*row - 1];
+                if !buffer.join_with_next(*row - 1) {
+                    *message = NO_ROOM_TO_JOIN;
+                    redraw_here(view, buffer, *mode, *row, *col, message);
+                    return false;
+                }
+                *row -= 1;
+                *col = landing;
+                redraw_here(view, buffer, *mode, *row, *col, b"");
+                report_cursor(buffer, *row, *col, b"join");
+                return true;
             }
             // 破壊 (zi-d-2, zi-insert-drop-first): 挿入の最初の 1 字を落とす。
             // **`cat` の読み戻しが 1 字短くなる**ので、往復の判定が捕まえる。
@@ -1250,6 +1418,33 @@ fn handle_byte(
             inserted
         }
     }
+}
+
+/// 編集の後の描き直し（zi-f で切り出した）。
+///
+/// **`Status` を組み立てる形が 4 か所へ増えたので、1 つにまとめる。**
+/// **変更があった直後にしか呼ばない**ので、`dirty` は常に真である。
+fn redraw_here(
+    view: &View,
+    buffer: &Buffer,
+    mode: Mode,
+    row: usize,
+    col: usize,
+    message: &[u8],
+) {
+    redraw(
+        view,
+        buffer,
+        &Status {
+            mode,
+            row,
+            col,
+            dirty: true,
+            command: &[],
+            in_command: false,
+            message,
+        },
+    );
 }
 
 /// 左へ 1 つ。**行頭では動かない**（前の行の末尾へは回らない）。
