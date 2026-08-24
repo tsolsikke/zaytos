@@ -61,6 +61,23 @@ pub(crate) enum Observation {
     /// （`PROMPT_COLOR` と同じ立場）。**写しが古くなれば、読む行が
     /// 状態行になって突き合わせが落ちる**——黙って緑にはならない。
     ViewWindow,
+    /// `more` の出力（VIEW-c）。**画面の下 3 行を控えて出す。**
+    ///
+    /// # `less` と逆の主張を受け止める
+    ///
+    /// **`less` は抜けたら元の画面が戻る**（`screen-restore`）。
+    /// **`more` は抜けても出したものが残る**——**代替画面へ入らないからである。**
+    /// **したがって、抜けた後の画面にファイルの中身が出ていることを見る。**
+    ///
+    /// **`screen-restore` を流用しない。** **あれは「元の画面が戻ったこと」を
+    /// 見ており、主張が逆である。**
+    ///
+    /// # 下から読むのは、出力が下に溜まるからである
+    ///
+    /// **`more` は書きながら画面を流す。** **最後に出した行は下端に在る。**
+    /// **3 行読むのは、下端がプロンプトや空行でも、その上に本文が在るから
+    /// である**——**ホスト側が「どれか 1 行がファイルの行と一致すること」を見る。**
+    MoreOutput,
     /// エコーエリア（最下行。ADR-0046）。**エラーがそこに出ているか。**
     ///
     /// # 「見えなくする」と区別が付く形にする
@@ -255,6 +272,7 @@ pub(crate) fn observe(kind: Observation) {
         Observation::Message => observe_command_line(&mut serial, console, "screen-message"),
         Observation::EchoArea => observe_command_line(&mut serial, console, "screen-echo"),
         Observation::ViewWindow => observe_view_window(&mut serial, console),
+        Observation::MoreOutput => observe_more_output(&mut serial, console),
         Observation::ZiWindow => observe_zi_window(&mut serial, console),
         Observation::ScriptDone => {
             let _ = writeln!(serial, "script-done: the script reached its end");
@@ -456,6 +474,29 @@ fn observe_view_window(serial: &mut SerialPort, console: &mut crate::console::Co
         core::str::from_utf8(&top_text[..top_length]).unwrap_or("?"),
         core::str::from_utf8(&bottom_text[..bottom_length]).unwrap_or("?")
     );
+}
+
+/// 画面の下 3 行を控えて出す（VIEW-c）。
+///
+/// # 何を主張するか
+///
+/// **この関数は主張しない。控えて出すだけである。**
+/// **突き合わせるのはホスト側である**——**`cat` が出した並びの中に、
+/// この 3 行のどれかが在ることを見る。** **期待値をこちらが持たない。**
+fn observe_more_output(serial: &mut SerialPort, console: &mut crate::console::Console) {
+    let (_, rows) = console.size();
+    let mut text = [0u8; LABEL_MAX];
+    for offset in 1..=3u32 {
+        let Some(row) = rows.checked_sub(offset) else {
+            continue;
+        };
+        let length = read_row_text(console, row, &mut text);
+        let _ = writeln!(
+            serial,
+            "screen-more: row {row} says {:?}",
+            core::str::from_utf8(&text[..length]).unwrap_or("?")
+        );
+    }
 }
 
 /// 画面の 1 行を字として読み、右端の空白を落とす（VIEW-b で切り出した）。

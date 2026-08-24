@@ -9407,6 +9407,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "打鍵の代わりに決定的な台本を read_bytes から返す",
     ),
     (
+        "more-uses-alternate-screen-test",
+        cfg!(feature = "more-uses-alternate-screen-test"),
+        "more が代替画面へ入り、抜けると出した行が消える",
+    ),
+    (
         "less-window-frozen-test",
         cfg!(feature = "less-window-frozen-test"),
         "less が窓を動かさず、最初の1枚のままになる",

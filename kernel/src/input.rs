@@ -684,6 +684,15 @@ pub(crate) mod script {
     ///    `b` が `Space` を打ち消す）
     /// 6. **`q` で抜け、戻った画面を控えたものと突き合わせる**（`\x05`）
     /// 7. **`cat` をもう一度撮る**——**`less` が像を変えていないこと**
+    /// 8. **`more /data/big` を 2 回起こす。** **1 回目は `Space` の後に `q` で
+    ///    抜け**（**打ち切る道**）、**2 回目は `Space` を 2 回送って読み切らせる**
+    ///    （**`more` が自分で終わる道**。`/data/big` は 100 行で、1 画面は 49 行
+    ///    なので 3 画面である）。**抜けた後の画面の下 3 行を観測する**（`\x11`）。
+    ///    **`less` と逆の主張である**——**出したものが残っている。**
+    ///
+    ///    **打鍵の空白は `\x20` と書く。** **行頭に空白を書くと、Rust の行継続が
+    ///    落とす**（実測。**`\` の次の行の先頭の空白は消える**）。
+    /// 9. **`cat` をもう一度撮る**——**`more` も像を変えていないこと**
     ///
     /// **観測点の値は `zi-test` の台本と同じものを使う**（同じ表を引く）。
     #[cfg(feature = "view-test")]
@@ -692,6 +701,9 @@ pub(crate) mod script {
         \x10 \x10\
         jjjkkkb\x10\
         q\x05\
+        /bin/cat /data/big\n\
+        /bin/more /data/big\n\x20q\
+        /bin/more /data/big\n\x20\x20\x11\
         /bin/cat /data/big\n\x0c";
 
     /// 観測点（ES-d）。**プロンプトの色を見る。**
@@ -725,6 +737,8 @@ pub(crate) mod script {
     /// **主張を持つ観測点を合図に使わない**（`crate::console::probe` の
     /// `Observation::ScriptDone`）。
     const OBSERVE_DONE: u8 = 0x0c;
+    /// 観測点（VIEW-c）。**`more` が抜けた後の画面の下 3 行。**
+    const OBSERVE_MORE_OUTPUT: u8 = 0x11;
     /// 観測点（VIEW-b）。**`less` の窓の上端と、いちばん下の本文行。**
     const OBSERVE_VIEW_WINDOW: u8 = 0x10;
     /// 観測点（ADR-0046）。**エコーエリア（最下行）にエラーが出ているか。**
@@ -768,6 +782,7 @@ pub(crate) mod script {
             OBSERVE_ZI_WINDOW => Some(crate::console::probe::Observation::ZiWindow),
             OBSERVE_ECHO => Some(crate::console::probe::Observation::EchoArea),
             OBSERVE_VIEW_WINDOW => Some(crate::console::probe::Observation::ViewWindow),
+            OBSERVE_MORE_OUTPUT => Some(crate::console::probe::Observation::MoreOutput),
             OBSERVE_PROMPT => Some(crate::console::probe::Observation::Prompt),
             OBSERVE_STATUS => Some(crate::console::probe::Observation::Status),
             OBSERVE_BEFORE_ALT => Some(crate::console::probe::Observation::BeforeAlternate),

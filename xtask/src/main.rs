@@ -4764,10 +4764,23 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
             .next()
             .unwrap_or(""),
     );
+    // **区切りは次の回の手前である（VIEW-c で台本が伸びた）。**
+    // **`script-done` で切っていたが、後ろに `more` の 2 回と `cat` が付いた**
+    // ——**台本を変えたら、台本に寄りかかっている判定を数え直すこと。**
     let cat_after = program_output(
         plain
             .split("/bin/cat /data/big")
             .nth(2)
+            .unwrap_or("")
+            .split("/bin/more /data/big")
+            .next()
+            .unwrap_or(""),
+    );
+    // **`more` の後にもう一度撮る**——**`more` も像を変えていないこと。**
+    let cat_final = program_output(
+        plain
+            .split("/bin/cat /data/big")
+            .nth(3)
             .unwrap_or("")
             .split("script-done")
             .next()
@@ -4775,6 +4788,7 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
     );
     let lines_before: Vec<&str> = cat_before.lines().collect();
     let lines_after: Vec<&str> = cat_after.lines().collect();
+    let lines_final: Vec<&str> = cat_final.lines().collect();
 
     // **窓の観測**（`kernel/src/console/probe.rs` の `observe_view_window`）。
     // **3 回ある**——入った直後、`Space` の後、戻した後である。
@@ -4826,7 +4840,33 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
         .unwrap_or_default();
     let screen_came_back = screen_restore_line.contains("came back = true");
     // **(5) `less` は像を変えていない。** **前後の `cat` が一致すること。**
-    let image_unchanged = !lines_before.is_empty() && lines_before == lines_after;
+    let image_unchanged =
+        !lines_before.is_empty() && lines_before == lines_after && lines_before == lines_final;
+
+    // **(6) `more` は抜けても出力が残る（VIEW-c）。`less` と逆の主張である。**
+    //
+    // **`less` の判定を流用しない**——**あちらは「元の画面が戻ったこと」で、
+    // 主張が逆である。** **こちらは「出したものが画面に在ること」を見る。**
+    //
+    // **期待値をホストが持たない**——**画面の下 3 行のどれかが、`cat` の出した
+    // 並びの中に在ることを見る。** **どの行かは書かない**（**画面の高さと
+    // ファイルの長さの関係を写すことになる**）。
+    let more_rows: Vec<String> = serial
+        .lines()
+        .filter_map(|line| line.split("screen-more: row ").nth(1))
+        .filter_map(|rest| rest.split_once("says ").map(|(_, value)| value))
+        .map(|value| {
+            value
+                .trim()
+                .trim_end_matches('\r')
+                .trim_matches('"')
+                .to_string()
+        })
+        .collect();
+    let more_output_stayed = !more_rows.is_empty()
+        && more_rows
+            .iter()
+            .any(|row| !row.is_empty() && position(row).is_some());
 
     println!(
         "{context}: script finished = {} ({:?})",
@@ -4861,10 +4901,19 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
          ({screen_restore_line:?})"
     );
     println!(
-        "{context}: less did not change the file = {image_unchanged} \
-         ({} line(s) before, {} line(s) after)",
+        "{context}: neither less nor more changed the file = {image_unchanged} \
+         ({} line(s) before, {} after less, {} after more)",
         lines_before.len(),
-        lines_after.len()
+        lines_after.len(),
+        lines_final.len()
+    );
+    println!(
+        "{context}: what more printed is still on the screen after it left = \
+         {more_output_stayed} (the last rows say {more_rows:?}, at lines {:?} of what cat printed)",
+        more_rows
+            .iter()
+            .map(|row| position(row))
+            .collect::<Vec<Option<usize>>>()
     );
 
     if finished_after.is_some()
@@ -4873,6 +4922,7 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
         && came_back_to_the_top
         && screen_came_back
         && image_unchanged
+        && more_output_stayed
     {
         println!("{context}: PASS");
         Ok(())
@@ -11144,7 +11194,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         //
         // **判定は画面の実物である。** **`less` は内部状態を1つも出さない。**
         total += 1;
-        begin_item("less shows a window, moves it, and gives the screen back");
+        begin_item("less shows a window and gives the screen back; more leaves its output");
         match cmd_view_test(&[]) {
             Ok(()) => println!("--- view test: OK"),
             Err(error) => {
@@ -11157,10 +11207,10 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // 状態行も描き直されるので、雑に見ると気づけない。**
         // **落ちるのは「窓の外に在った行が見えるようになった」判定だけである。**
         //
-        // **1 種なので `for` で回さない**（clippy が単一要素のループを断る）。
-        // **増えたら列にすること**——`zi` 側と同じ形になる。
-        {
-            let feature = "less-window-frozen-test";
+        // **`less` の窓を止める形と、`more` が代替画面へ入る形の 2 種である。**
+        // **後者は `less` の振る舞いそのもので、`more` との違いを消す**
+        // ——**「出したものが残る」判定だけが落ちる。**
+        for feature in ["less-window-frozen-test", "more-uses-alternate-screen-test"] {
             total += 1;
             begin_item(&format!("the view test catches {feature}"));
             match cmd_view_test(&[feature]) {
@@ -12085,7 +12135,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 23,
-    full: 232,
+    full: 233,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
