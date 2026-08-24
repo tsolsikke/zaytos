@@ -175,6 +175,14 @@ zi-cursor-ignore-updown-test = []
 zi-write-skip-body-test = []
 # 破壊（zi-d-2）: 挿入の最初の 1 字を落とす。読み戻しが 1 字短くなる。
 zi-insert-drop-first-test = []
+# 検証（VIEW-b）: less を駆動する台本を read_bytes から返す。zi-test と同じ
+# 仕組みで、台本だけが違う。zi-test は 21 秒で破壊19構成に掛かるので、
+# less の台本を混ぜずに別へ立てた。
+view-test = []
+# 破壊（VIEW-b）: less が窓を動かさない。打鍵は届いており状態行も描き直される
+# ので、雑に見ると気づけない。「窓の外に在った行が見えるようになった」判定が
+# 捕まえる。
+less-window-frozen-test = []
 # 破壊（ADR-0046 の Addendum）: kernel_main のローカルを 2048 バイト太らせ、
 # 起動時のカーネルスタックが張る前のガードページを踏む形にする。
 # 「張る前に手つかずだった」判定が捕まえる。

@@ -26,7 +26,7 @@ pub mod backbuffer;
 pub mod dirty;
 // **画面の実物を見る観測（ES-d）。** **判定のためだけに在る**ので、
 // 台本が在る構成（`zi-test`）にしか置かない。
-#[cfg(feature = "zi-test")]
+#[cfg(any(feature = "zi-test", feature = "view-test"))]
 pub(crate) mod probe;
 pub mod screen;
 // **全画面のアプリが動く間の`fd 2`の控え（ADR-0046）。**

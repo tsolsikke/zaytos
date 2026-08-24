@@ -1395,7 +1395,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
     const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gtk] [--gfx-test] [--kvm] [--no-limit] [--manual] [--key-probe]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
-       cargo xtask run --shell-test [--drop-arrows | --drop-esc]\n       cargo xtask run --ansi-test [--sabotage FEATURE]\n       cargo xtask run --zi-test [--sabotage FEATURE]
+       cargo xtask run --shell-test [--drop-arrows | --drop-esc]\n       cargo xtask run --ansi-test [--sabotage FEATURE]\n       cargo xtask run --zi-test [--sabotage FEATURE]\n       cargo xtask run --view-test [--sabotage FEATURE]
        cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
@@ -1520,6 +1520,15 @@ fn main() -> Result<()> {
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
                 return cmd_fs_image_extract(&features);
+            }
+            if rest.iter().any(|a| a == "--view-test") {
+                let features: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                return cmd_view_test(&features);
             }
             if rest.iter().any(|a| a == "--zi-test") {
                 let features: Vec<&str> = rest
@@ -4003,8 +4012,9 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
 
     // **代替画面バッファ（e-3）。** **抜けた後に元の画面が戻っていることを、
     // 画面の実物で見る。** カーネルが入る前のピクセルを控え、戻った後に
-    // 同じ点を読み直して突き合わせている（`kernel/src/console/probe.rs`）。
-    let screen_came_back = judged("the screen before zi came back");
+    // 画面じゅうから同じインクを探して突き合わせている
+    // （`kernel/src/console/probe.rs`。**VIEW-b で行番号を控える形をやめた**）。
+    let screen_came_back = judged("the screen before the alternate screen came back");
 
     // **2 本立て（e-4）。** 状態行が下から 2 行目に在ること。
     // **`ioctl(TIOCGWINSZ)` が答えた行数を `zi` が実際に使っていることの
@@ -4083,14 +4093,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     // **プログラムの出したものだけを取り出す。** **シリアルには判定行と
     // ログが混ざる**ので、`[` で始まる行とプロンプトを落とす。
     // **`/data/lines` に空行が無い**ので、空行も落として差し支えない。
-    let program_output = |segment: &str| -> String {
-        segment
-            .lines()
-            .map(|line| line.trim_end_matches('\r'))
-            .filter(|line| !line.starts_with('[') && !line.contains("zaytos$") && !line.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
+
     let tail_output = program_output(
         plain
             .split("/bin/tail /data/lines")
@@ -4482,7 +4485,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         "{context}: a lone Esc settled without another key = {esc_settled_at_once} \
          (status labels in order: {status_labels:?})"
     );
-    println!("{context}: the screen before zi came back = {screen_came_back}");
+    println!("{context}: the screen before the alternate screen came back = {screen_came_back}");
     println!("{context}: the zi status line sits on the second-to-last row = {status_at_bottom}");
     println!(
         "{context}: the command line echoes what is being typed = {command_line_echoes} \
@@ -4636,6 +4639,240 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && window_came_back_up
         && error_reached_the_echo_area
         && append_differs_from_insert
+    {
+        println!("{context}: PASS");
+        Ok(())
+    } else {
+        bail!("{context}: FAILED")
+    }
+}
+
+/// シリアルの一区間から、プログラムが出した行だけを取り出す（zi-d-2）。
+///
+/// **シリアルには判定行とログが混ざる**ので、`[` で始まる行とプロンプトを
+/// 落とす。**空行も落とす**——`/data` の検査用のファイルに空行は無い。
+///
+/// **`zi-test` と `view-test` が同じものを使う**（VIEW-b で閉包から切り出した。
+/// **同じ切り出し方を2つ書かない**）。
+fn program_output(segment: &str) -> String {
+    segment
+        .lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .filter(|line| !line.starts_with('[') && !line.contains("zaytos$") && !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `less` の実演（VIEW-b）。**決定的な台本入力で駆動する。**
+///
+/// # `zi-test` と分けてある
+///
+/// **`zi-test` は21秒掛かり、破壊19構成すべてに掛かる**（実測）。
+/// **`less` の打鍵をあちらへ足すと、19回ぶん伸びる**（運用者の承認。VIEW-b の 4-4）。
+///
+/// # 判定は画面の実物である
+///
+/// **`less` は内部状態を1つも出さない**（`zi` の判定行に当たるものが無い）。
+/// **主張は「窓の外に在った行が見えるようになったこと」と
+/// 「抜けたら元の画面へ戻ること」で、どちらも画面を読む。**
+///
+/// **期待値をホストが持たない**——**`cat` の出した並びの中で、画面に出た行が
+/// どこに在るかで見る。** **像の中身も、窓の高さも、動いた量も写していない。**
+fn cmd_view_test(features: &[&str]) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let mut all_features: Vec<&str> = vec!["view-test"];
+    all_features.extend_from_slice(features);
+    let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let tag = all_features.join("-");
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("view-test-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the view test")?;
+
+    // **合図は `script-done:` である**（`zi-test` と同じ。**主張を持つ行を
+    // 待ちの合図に使わない**）。
+    let done_marker = "script-done:";
+    let started_waiting = Instant::now();
+    let deadline = started_waiting + ZI_TEST_TIMEOUT;
+    let mut finished_after = None;
+    while Instant::now() < deadline {
+        let text = fs::read_to_string(&serial_log).unwrap_or_default();
+        if strip_ansi(&text).contains(done_marker) {
+            finished_after = Some(started_waiting.elapsed());
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let context = if features.is_empty() {
+        "view-test".to_string()
+    } else {
+        format!("view-test {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    let qemu_debug = fs::read_to_string(&debug_log).unwrap_or_default();
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    let plain = strip_ansi(&serial);
+
+    // **`cat` の出した並びを 2 回撮る。** **前は `less` の手前、後は末尾である。**
+    // **期待値をホストが持たない**——**画面に出た行がこの並びのどこに在るかで見る。**
+    let cat_before = program_output(
+        plain
+            .split("/bin/cat /data/big")
+            .nth(1)
+            .unwrap_or("")
+            .split("/bin/less /data/big")
+            .next()
+            .unwrap_or(""),
+    );
+    let cat_after = program_output(
+        plain
+            .split("/bin/cat /data/big")
+            .nth(2)
+            .unwrap_or("")
+            .split("script-done")
+            .next()
+            .unwrap_or(""),
+    );
+    let lines_before: Vec<&str> = cat_before.lines().collect();
+    let lines_after: Vec<&str> = cat_after.lines().collect();
+
+    // **窓の観測**（`kernel/src/console/probe.rs` の `observe_view_window`）。
+    // **3 回ある**——入った直後、`Space` の後、戻した後である。
+    let views: Vec<(String, String)> = serial
+        .lines()
+        .filter_map(|line| line.split("screen-view: the top row says ").nth(1))
+        .filter_map(|rest| {
+            let (top, tail) = rest.split_once(" and the last text row ")?;
+            let bottom = tail.split_once("says ").map(|(_, value)| value)?;
+            Some((
+                top.trim().trim_matches('"').to_string(),
+                bottom
+                    .trim()
+                    .trim_end_matches('\r')
+                    .trim_matches('"')
+                    .to_string(),
+            ))
+        })
+        .collect();
+    let position = |prefix: &str| -> Option<usize> {
+        if prefix.is_empty() {
+            return None;
+        }
+        lines_before
+            .iter()
+            .position(|line| line.starts_with(prefix))
+    };
+
+    // **(1) 開いた直後、ファイルの先頭が見えている。**
+    let opened_at_the_top = views.len() == 3 && position(&views[0].0) == Some(0);
+    // **(2) 窓の外に在った行が見えるようになった。**
+    //
+    // **`Space` の後の上端が、動かす前の下端より後ろに在ること。**
+    // **これが「窓の外」の意味である**——**動かす前の画面には出ていなかった。**
+    let saw_past_the_first_screen = views.len() == 3
+        && match (position(&views[0].1), position(&views[1].0)) {
+            (Some(was_bottom), Some(now_top)) => now_top > was_bottom,
+            _ => false,
+        };
+    // **(3) 戻したら同じところへ戻る。** **`j` と `k` が釣り合い、`b` が
+    // `Space` を打ち消す。**
+    let came_back_to_the_top =
+        views.len() == 3 && views[2].0 == views[0].0 && !views[0].0.is_empty();
+    // **(4) 抜けたら元の画面が戻った。** **カーネル側の判定行をそのまま読む。**
+    let screen_restore_line = serial
+        .lines()
+        .find_map(|line| line.split("screen-restore: the screen ").nth(1))
+        .map(|rest| rest.trim().trim_end_matches('\r').to_string())
+        .unwrap_or_default();
+    let screen_came_back = screen_restore_line.contains("came back = true");
+    // **(5) `less` は像を変えていない。** **前後の `cat` が一致すること。**
+    let image_unchanged = !lines_before.is_empty() && lines_before == lines_after;
+
+    println!(
+        "{context}: script finished = {} ({:?})",
+        finished_after.is_some(),
+        finished_after
+    );
+    println!(
+        "{context}: less opened at the top of the file = {opened_at_the_top} \
+         (the top row said {:?})",
+        views.first().map(|view| view.0.as_str())
+    );
+    println!(
+        "{context}: a line past the first screen became visible = {saw_past_the_first_screen} \
+         (before: top {:?} bottom {:?}; after Space: top {:?}; at lines {:?} and {:?} of what cat \
+         printed)",
+        views.first().map(|view| view.0.as_str()),
+        views.first().map(|view| view.1.as_str()),
+        views.get(1).map(|view| view.0.as_str()),
+        views.first().and_then(|view| position(&view.1)),
+        views.get(1).and_then(|view| position(&view.0)),
+    );
+    println!(
+        "{context}: moving back up returned to the same line = {came_back_to_the_top} \
+         (the three top rows are {:?})",
+        views
+            .iter()
+            .map(|view| view.0.as_str())
+            .collect::<Vec<&str>>()
+    );
+    println!(
+        "{context}: the screen came back after less left = {screen_came_back} \
+         ({screen_restore_line:?})"
+    );
+    println!(
+        "{context}: less did not change the file = {image_unchanged} \
+         ({} line(s) before, {} line(s) after)",
+        lines_before.len(),
+        lines_after.len()
+    );
+
+    if finished_after.is_some()
+        && opened_at_the_top
+        && saw_past_the_first_screen
+        && came_back_to_the_top
+        && screen_came_back
+        && image_unchanged
     {
         println!("{context}: PASS");
         Ok(())
@@ -10695,7 +10932,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
 
     for (name, args) in CHECKS {
         total += 1;
-        println!("=== xtask check: {name}");
+        begin_item(name);
         let status = Command::new("cargo")
             .current_dir(&workspace_root)
             .args(*args)
@@ -10710,7 +10947,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
     }
 
     total += 1;
-    println!("=== xtask check: unsafe blocks carry a SAFETY comment");
+    begin_item("unsafe blocks carry a SAFETY comment");
     let missing = find_unsafe_without_safety_comment(&workspace_root)?;
     if missing.is_empty() {
         println!("--- unsafe/SAFETY: OK");
@@ -10723,7 +10960,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
     }
 
     total += 1;
-    println!("=== xtask check: direct cli/sti stays on the approved list");
+    begin_item("direct cli/sti stays on the approved list");
     let mut approved_occurrences = 0usize;
     let unapproved = find_unapproved_interrupt_control(&workspace_root, &mut approved_occurrences)?;
     if unapproved.is_empty() {
@@ -10755,7 +10992,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
     // （S13-e-1 で実際に起きた）を、コミットの時点で止めるための段である。
     if full || commit {
         total += 1;
-        println!("=== xtask check: the boot log matches the reference and does not depend on the core count");
+        begin_item("the boot log matches the reference and does not depend on the core count");
         match cmd_boot_log_diff(false) {
             Ok(()) => println!("--- boot log diff: OK"),
             Err(error) => {
@@ -10772,7 +11009,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // **既定の起動ログには入れていない**（`sendkey` はタイミングに依存する）。
         // **3 回連続で通ることを確かめてから入れた。落ちる回が出たら `flaky` へ移す。**
         total += 1;
-        println!("=== xtask check: the shell takes keystrokes and init restarts it");
+        begin_item("the shell takes keystrokes and init restarts it");
         match cmd_shell_test(ShellTestMode::Normal) {
             Ok(()) => println!("--- shell test: OK"),
             Err(error) => {
@@ -10787,7 +11024,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // **打鍵を流す仕組みは上と同じもので、期待だけが裏返る**
         // （`ShellTestMode`）。
         total += 1;
-        println!("=== xtask check: dropping the arrows stops the insertion point from moving");
+        begin_item("dropping the arrows stops the insertion point from moving");
         match cmd_shell_test(ShellTestMode::ArrowsDropped) {
             Ok(()) => println!("--- shell test (arrows dropped): OK"),
             Err(error) => {
@@ -10799,9 +11036,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // **Esc を落とすと実打鍵の Esc `[` `D` が CSI にならないこと（zi-a）。**
         // 上の矢印の破壊と同じ形——**通常の側の「Esc が届いた」判定の反証である。**
         total += 1;
-        println!(
-            "=== xtask check: dropping Esc keeps the literal Esc [ D keystrokes as characters"
-        );
+        begin_item("dropping Esc keeps the literal Esc [ D keystrokes as characters");
         match cmd_shell_test(ShellTestMode::EscDropped) {
             Ok(()) => println!("--- shell test (esc dropped): OK"),
             Err(error) => {
@@ -10814,9 +11049,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // 前景経路へ流し、カーソル位置とセルの中身を判定行で見る。
         // sendkey を使わないので決定的である。
         total += 1;
-        println!(
-            "=== xtask check: the console interprets CUP / ED / EL through the foreground path"
-        );
+        begin_item("the console interprets CUP / ED / EL through the foreground path");
         match cmd_ansi_test(&[]) {
             Ok(()) => println!("--- ansi test: OK"),
             Err(error) => {
@@ -10829,7 +11062,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // 接続の取り違えである。CSI がグリフとして化けて出るので、
         // カーソル位置とセルの判定が落ちる。
         total += 1;
-        println!("=== xtask check: the ansi test catches a foreground path that skips the parser");
+        begin_item("the ansi test catches a foreground path that skips the parser");
         match cmd_ansi_test(&["ansi-console-skip-parse-test"]) {
             Ok(()) => {
                 println!("--- ansi test (skip parse): FAILED (the sabotage was NOT caught)");
@@ -10842,7 +11075,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // 展開しており状態も届いているが、**渡す先だけが欠ける**——
         // zi-b の「接続の取り違え」と同じ族である。
         total += 1;
-        println!("=== xtask check: the ansi test catches an SGR that never reaches the color");
+        begin_item("the ansi test catches an SGR that never reaches the color");
         match cmd_ansi_test(&["ansi-sgr-ignore-color-test"]) {
             Ok(()) => {
                 println!("--- ansi test (sgr ignored): FAILED (the sabotage was NOT caught)");
@@ -10854,7 +11087,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // **DECTCEM の隠す指示を無視する破壊（ES-c）。** 指示は届いて
         // いるが、**描く側が見ない**——「隠した後に無い」判定が落ちる。
         total += 1;
-        println!("=== xtask check: the ansi test catches a cursor that ignores DECTCEM");
+        begin_item("the ansi test catches a cursor that ignores DECTCEM");
         match cmd_ansi_test(&["ansi-cursor-ignore-hide-test"]) {
             Ok(()) => {
                 println!(
@@ -10871,7 +11104,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // **`/data/sparse-hole` の読みが落ち、corrupt-fs の期待も食い違う**
         // （実測。2 つの経路で捕まる）。
         total += 1;
-        println!("=== xtask check: refusing holes breaks the sparse read and the corrupt-fs probe");
+        begin_item("refusing holes breaks the sparse read and the corrupt-fs probe");
         match cmd_boot_with_features(&["ext2-sparse-as-error-test"], "fs-sparse", "= true") {
             Ok(()) => {
                 println!("--- sparse read (refused): FAILED (the sabotage was NOT caught)");
@@ -10884,7 +11117,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // `bss-check` の判定行を固定しているので、**破壊はその行が
         // `Exited(0)` でなくなる形で出る**（実測では `Folded(14)`＝#PF）。
         total += 1;
-        println!("=== xtask check: mapping segments by filesz drops the .bss");
+        begin_item("mapping segments by filesz drops the .bss");
         match cmd_boot_with_features(&["user-load-filesz-only"], "bss-check", "Exited(0)") {
             Ok(()) => {
                 println!("--- bss mapping (filesz only): FAILED (the sabotage was NOT caught)");
@@ -10896,12 +11129,46 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // **`zi` の実演（zi-d）。** 決定的な台本入力で、開いて動いて編集し、
         // `:wq` で保存し、`cat` で読み戻すところまでを見る。
         total += 1;
-        println!("=== xtask check: zi moves, edits, saves, and the file reads back");
+        begin_item("zi moves, edits, saves, and the file reads back");
         match cmd_zi_test(&[]) {
             Ok(()) => println!("--- zi test: OK"),
             Err(error) => {
                 println!("--- zi test: FAILED ({error})");
                 failed.push("zi test".to_string());
+            }
+        }
+
+        // **`less` の実演（VIEW-b）。** **`zi-test` とは別の台本である**
+        // ——**あちらは21秒掛かり、破壊19構成すべてに掛かる**ので、
+        // **`less` の打鍵を混ぜない**（運用者の承認）。
+        //
+        // **判定は画面の実物である。** **`less` は内部状態を1つも出さない。**
+        total += 1;
+        begin_item("less shows a window, moves it, and gives the screen back");
+        match cmd_view_test(&[]) {
+            Ok(()) => println!("--- view test: OK"),
+            Err(error) => {
+                println!("--- view test: FAILED ({error})");
+                failed.push("view test".to_string());
+            }
+        }
+
+        // **`less` の破壊 1 種。** **窓を動かさない**——**打鍵は届いており、
+        // 状態行も描き直されるので、雑に見ると気づけない。**
+        // **落ちるのは「窓の外に在った行が見えるようになった」判定だけである。**
+        //
+        // **1 種なので `for` で回さない**（clippy が単一要素のループを断る）。
+        // **増えたら列にすること**——`zi` 側と同じ形になる。
+        {
+            let feature = "less-window-frozen-test";
+            total += 1;
+            begin_item(&format!("the view test catches {feature}"));
+            match cmd_view_test(&[feature]) {
+                Ok(()) => {
+                    println!("--- view test ({feature}): FAILED (the sabotage was NOT caught)");
+                    failed.push(format!("view test ({feature})"));
+                }
+                Err(_) => println!("--- view test ({feature}): OK (the sabotage was caught)"),
             }
         }
 
@@ -10965,7 +11232,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "stderr-on-screen-test",
         ] {
             total += 1;
-            println!("=== xtask check: the zi test catches {feature}");
+            begin_item(&format!("the zi test catches {feature}"));
             match cmd_zi_test(&[feature]) {
                 Ok(()) => {
                     println!("--- zi test ({feature}): FAILED (the sabotage was NOT caught)");
@@ -10978,7 +11245,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // **キーボードの変換表の破壊（zi-e）。** **ここだけ QEMU を起こさない。**
         // **表は純粋な変換なので、捕まえる先がホストの単体テストにある。**
         total += 1;
-        println!("=== xtask check: the host tests catch keyboard-us-layout-test");
+        begin_item("the host tests catch keyboard-us-layout-test");
         match check_host_tests_fail_with(&workspace_root, "keyboard-us-layout-test") {
             Ok(summary) => println!("--- host tests (keyboard-us-layout-test): OK ({summary})"),
             Err(error) => {
@@ -10997,7 +11264,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // **像を複製して取り出し、建てた像と突き合わせる（S12-a）。**
         // **判定 3 本を 1 項目にまとめてある**（複製先の位置・バイト一致・`e2fsck`）。
         total += 1;
-        println!("=== xtask check: the copied ext2 image comes back byte for byte");
+        begin_item("the copied ext2 image comes back byte for byte");
         match cmd_fs_image_extract(&[]) {
             Ok(()) => println!("--- fs extract: OK"),
             Err(error) => {
@@ -11010,7 +11277,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // 使われていない末尾にあり、あちらは無傷と判定する（実測）。
         // **捕まえるのはバイト一致である。**
         total += 1;
-        println!("=== xtask check: the fs extract catches a corrupted copy");
+        begin_item("the fs extract catches a corrupted copy");
         match cmd_fs_image_extract(&["fs-copy-corrupt-tail-test"]) {
             Ok(()) => {
                 println!("--- fs extract (corrupt tail): FAILED (the sabotage was NOT caught)");
@@ -11023,7 +11290,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // **判定を足しただけでは足りない**——番地を 2 つ出して比べる形は、
         // **比べ方を間違えても通りうる**（同じ値を 2 回出せば必ず一致する）。
         total += 1;
-        println!("=== xtask check: the fs extract catches reading from the embedded image");
+        begin_item("the fs extract catches reading from the embedded image");
         match cmd_fs_image_extract(&["fs-read-from-rodata-test"]) {
             Ok(()) => {
                 println!("--- fs extract (read from rodata): FAILED (the sabotage was NOT caught)");
@@ -11035,7 +11302,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // **空き数の欄を正しい位置から読んでいることの反証（S12-b の 2 段目）。**
         // **自分の解析を自分で確かめても、欄を取り違えていれば気づけない。**
         total += 1;
-        println!("=== xtask check: the fs extract catches a shifted group-descriptor field");
+        begin_item("the fs extract catches a shifted group-descriptor field");
         match cmd_fs_image_extract(&["ext2-group-count-offset-test"]) {
             Ok(()) => {
                 println!("--- fs extract (shifted field): FAILED (the sabotage was NOT caught)");
@@ -11049,7 +11316,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // 既定の構成が往復（バイト一致）、`fs-alloc-keep-test` が割り当て中
         // （`e2fsck` の不満が 1 本）である。
         total += 1;
-        println!("=== xtask check: the block bitmap round trip restores the image");
+        begin_item("the block bitmap round trip restores the image");
         match cmd_fs_image_extract(&[KEEP_ALLOCATED_FEATURE]) {
             Ok(()) => println!("--- fs bitmap (allocated): OK"),
             Err(error) => {
@@ -11060,7 +11327,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
 
         // **追記（S12-c）。** **書いたままの像でしか判定 A・B・D は言えない。**
         total += 1;
-        println!("=== xtask check: the appended bytes survive a round trip through the image");
+        begin_item("the appended bytes survive a round trip through the image");
         match cmd_fs_image_extract(&[WRITE_KEEP_FEATURE]) {
             Ok(()) => println!("--- fs write (kept): OK"),
             Err(error) => {
@@ -11071,7 +11338,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
 
         // **縮める道（S12-d）。** **0 まで縮める道は戻さない変種で通る。**
         total += 1;
-        println!("=== xtask check: shrinking a file returns exactly the blocks it should");
+        begin_item("shrinking a file returns exactly the blocks it should");
         match cmd_fs_image_extract(&[TRUNCATE_KEEP_FEATURE]) {
             Ok(()) => println!("--- fs truncate (emptied): OK"),
             Err(error) => {
@@ -11082,7 +11349,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
 
         // **作成と削除（S12-e）。** **作ったままの像でしか判定 A・B・D は言えない。**
         total += 1;
-        println!("=== xtask check: a created file survives a round trip through the image");
+        begin_item("a created file survives a round trip through the image");
         match cmd_fs_image_extract(&[CREATE_KEEP_FEATURE]) {
             Ok(()) => println!("--- fs create (kept): OK"),
             Err(error) => {
@@ -11093,7 +11360,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
 
         for (label, features) in FS_CREATE_SABOTAGES {
             total += 1;
-            println!("=== xtask check: the fs create check catches {label}");
+            begin_item(&format!("the fs create check catches {label}"));
             match cmd_fs_image_extract(features) {
                 Ok(()) => {
                     println!("--- fs create ({label}): FAILED (the sabotage was NOT caught)");
@@ -11105,7 +11372,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
 
         // **ディレクトリの作成と削除（DIR-1c）。**
         total += 1;
-        println!("=== xtask check: a created directory survives a round trip through the image");
+        begin_item("a created directory survives a round trip through the image");
         match cmd_fs_image_extract(&[MKDIR_KEEP_FEATURE]) {
             Ok(()) => println!("--- fs mkdir (kept): OK"),
             Err(error) => {
@@ -11116,7 +11383,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
 
         for (label, features) in FS_MKDIR_SABOTAGES {
             total += 1;
-            println!("=== xtask check: the fs mkdir check catches {label}");
+            begin_item(&format!("the fs mkdir check catches {label}"));
             match cmd_fs_image_extract(features) {
                 Ok(()) => {
                     println!("--- fs mkdir ({label}): FAILED (the sabotage was NOT caught)");
@@ -11128,7 +11395,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
 
         for (label, features) in FS_TRUNCATE_SABOTAGES {
             total += 1;
-            println!("=== xtask check: the fs truncate check catches {label}");
+            begin_item(&format!("the fs truncate check catches {label}"));
             match cmd_fs_image_extract(features) {
                 Ok(()) => {
                     println!("--- fs truncate ({label}): FAILED (the sabotage was NOT caught)");
@@ -11140,7 +11407,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
 
         for (label, features) in FS_WRITE_SABOTAGES {
             total += 1;
-            println!("=== xtask check: the fs write check catches {label}");
+            begin_item(&format!("the fs write check catches {label}"));
             match cmd_fs_image_extract(features) {
                 Ok(()) => {
                     println!("--- fs write ({label}): FAILED (the sabotage was NOT caught)");
@@ -11152,7 +11419,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
 
         for (label, features) in FS_BITMAP_SABOTAGES {
             total += 1;
-            println!("=== xtask check: the fs bitmap check catches {label}");
+            begin_item(&format!("the fs bitmap check catches {label}"));
             match cmd_fs_image_extract(features) {
                 Ok(()) => {
                     println!("--- fs bitmap ({label}): FAILED (the sabotage was NOT caught)");
@@ -11165,7 +11432,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // **PCI の列挙（S13-a）。** 判定は QEMU 自身の帳簿（`info pci`）との
         // 突き合わせで、期待値の定数を持たない。
         total += 1;
-        println!("=== xtask check: the pci enumeration matches qemu's own device list");
+        begin_item("the pci enumeration matches qemu's own device list");
         match cmd_pci_test(&[]) {
             Ok(()) => println!("--- pci enumeration: OK"),
             Err(error) => {
@@ -11176,7 +11443,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
 
         for (label, feature) in PCI_SABOTAGES {
             total += 1;
-            println!("=== xtask check: the pci enumeration catches {label}");
+            begin_item(&format!("the pci enumeration catches {label}"));
             match cmd_pci_test(&[feature]) {
                 Ok(()) => {
                     println!("--- pci enumeration ({label}): FAILED (the sabotage was NOT caught)");
@@ -11189,7 +11456,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // **virtio-blk の読み（S13-b）。** 判定はホスト側の像のファイルとの
         // 突き合わせで、期待値の定数を持たない。
         total += 1;
-        println!("=== xtask check: the virtio-blk read agrees with the image file");
+        begin_item("the virtio-blk read agrees with the image file");
         match cmd_virtio_test(&[]) {
             Ok(()) => println!("--- virtio blk read: OK"),
             Err(error) => {
@@ -11200,7 +11467,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
 
         for (label, feature) in VIRTIO_SABOTAGES {
             total += 1;
-            println!("=== xtask check: the virtio-blk read catches {label}");
+            begin_item(&format!("the virtio-blk read catches {label}"));
             match cmd_virtio_test(&[feature]) {
                 Ok(()) => {
                     println!("--- virtio blk read ({label}): FAILED (the sabotage was NOT caught)");
@@ -11213,7 +11480,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // **割り込みの配送（S13-d）。** 判定は配線の読み戻し（level と
         // active-low がハードウェアに載っている）と、届いた数である。
         total += 1;
-        println!("=== xtask check: the virtio interrupt arrives as routed");
+        begin_item("the virtio interrupt arrives as routed");
         match cmd_virtio_irq_test(&[]) {
             Ok(()) => println!("--- virtio irq: OK"),
             Err(error) => {
@@ -11223,7 +11490,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         }
 
         total += 1;
-        println!("=== xtask check: the virtio interrupt catches an edge-signaled route");
+        begin_item("the virtio interrupt catches an edge-signaled route");
         match cmd_virtio_irq_test(&["virtio-intx-edge-test"]) {
             Ok(()) => {
                 println!("--- virtio irq (edge route): FAILED (the sabotage was NOT caught)");
@@ -11243,7 +11510,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             ("a wait that holds the BKL", "virtio-wait-holding-bkl-test"),
         ] {
             total += 1;
-            println!("=== xtask check: the virtio interrupt catches {label}");
+            begin_item(&format!("the virtio interrupt catches {label}"));
             match cmd_virtio_irq_test(&[feature]) {
                 Ok(()) => {
                     println!("--- virtio irq ({label}): FAILED (the sabotage was NOT caught)");
@@ -11257,7 +11524,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // ——取り違えは blockstats の下限、先頭の欠けはバイト一致である。
         for (label, feature) in FS_LOAD_SABOTAGES {
             total += 1;
-            println!("=== xtask check: the fs image load catches {label}");
+            begin_item(&format!("the fs image load catches {label}"));
             match cmd_fs_image_extract(&[feature]) {
                 Ok(()) => {
                     println!("--- fs image load ({label}): FAILED (the sabotage was NOT caught)");
@@ -11284,7 +11551,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             ),
         ] {
             total += 1;
-            println!("=== xtask check: the fs image flush catches {label}");
+            begin_item(&format!("the fs image flush catches {label}"));
             match cmd_fs_image_extract(features) {
                 Ok(()) => {
                     println!("--- fs image flush ({label}): FAILED (the sabotage was NOT caught)");
@@ -11296,7 +11563,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
 
         for feature in SHELL_TEST_SABOTAGES {
             total += 1;
-            println!("=== xtask check: the shell test catches the sabotage {feature}");
+            begin_item(&format!("the shell test catches the sabotage {feature}"));
             match cmd_shell_test(ShellTestMode::MustFail(feature)) {
                 Ok(()) => println!("--- shell test ({feature}): OK"),
                 Err(error) => {
@@ -11308,7 +11575,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
     }
 
     total += 1;
-    println!("=== xtask check: direct serial ports stay on the approved list");
+    begin_item("direct serial ports stay on the approved list");
     let mut approved_direct_serial_occurrences = 0usize;
     let unapproved_direct_serial = find_unapproved_direct_serial_ports(
         &workspace_root,
@@ -11338,7 +11605,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
     }
 
     total += 1;
-    println!("=== xtask check: parsed external tools are called with a fixed locale");
+    begin_item("parsed external tools are called with a fixed locale");
     let direct_tool_calls = find_direct_external_tool_calls(&workspace_root)?;
     if direct_tool_calls.is_empty() {
         println!(
@@ -11359,7 +11626,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
     }
 
     total += 1;
-    println!("=== xtask check: private-by-design modules keep their internals private");
+    begin_item("private-by-design modules keep their internals private");
     let leaks = find_boundary_visibility_leaks(&workspace_root)?;
     if leaks.is_empty() {
         println!(
@@ -11378,7 +11645,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
     }
 
     total += 1;
-    println!("=== xtask check: every kernel feature appears in the runtime TEST_HOOKS table");
+    begin_item("every kernel feature appears in the runtime TEST_HOOKS table");
     let uncovered = find_features_missing_from_test_hooks(&workspace_root)?;
     if uncovered.is_empty() {
         println!(
@@ -11402,7 +11669,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
     }
 
     total += 1;
-    println!("=== xtask check: the default kernel build has no sabotage features");
+    begin_item("the default kernel build has no sabotage features");
     let sabotage = check_default_features_are_clean(&workspace_root)?;
     if sabotage.is_empty() {
         println!("--- default features: OK");
@@ -11415,7 +11682,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
     }
 
     total += 1;
-    println!("=== xtask check: every deferred decision carries a state marker");
+    begin_item("every deferred decision carries a state marker");
     match check_deferred_state_markers(&workspace_root) {
         Ok((open, done)) => println!(
             "--- deferred markers: OK ({open} open, {done} settled, {} row(s) total; the count is \
@@ -11432,7 +11699,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
     }
 
     total += 1;
-    println!("=== xtask check: markdown prose style (tracked .md)");
+    begin_item("markdown prose style (tracked .md)");
     let prose = check_markdown_prose_style(&workspace_root)?;
     if prose.is_empty() {
         println!("--- markdown prose style: OK");
@@ -11445,10 +11712,8 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
     }
 
     total += 1;
-    println!(
-        "=== xtask check: commit message style (prefixes and blank line over all history; \
-         body length after {COMMIT_BODY_RULE_COMMIT}; Japanese/ASCII gap since {COMMIT_STYLE_SINCE})"
-    );
+    begin_item(&format!("commit message style (prefixes and blank line over all history; \
+         body length after {COMMIT_BODY_RULE_COMMIT}; Japanese/ASCII gap since {COMMIT_STYLE_SINCE})"));
     let offenders = check_commit_message_style(&workspace_root)?;
     if offenders.is_empty() {
         println!("--- commit style: OK");
@@ -11462,7 +11727,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
 
     // 二重選択の検出器が既定ビルドに在ること（S4-c-3-2b、静的）。
     total += 1;
-    println!("=== xtask check: the structural guards are present in the default build");
+    begin_item("the structural guards are present in the default build");
     match check_structural_guard_symbols_present(&workspace_root) {
         Ok(symbol) => println!("--- guard symbols: OK ({symbol})"),
         Err(e) => {
@@ -11475,7 +11740,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
     // トランポリンのバイト単位一致検査（B-2a-5、静的）。既定ビルドの入口 24 バイトが
     // 期待リテラルと一致すること。base 検査なので `--full` でなくても毎回走る。
     total += 1;
-    println!("=== xtask check: trampoline byte match (default build)");
+    begin_item("trampoline byte match (default build)");
     match cmd_highhalf_trampoline_check(&workspace_root, &[], true) {
         Ok(()) => println!("--- trampoline byte match: OK"),
         Err(e) => {
@@ -11487,7 +11752,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
 
     // 埋め込む ext2 の像が `e2fsck` を通ること（S10-a、静的）。
     total += 1;
-    println!("=== xtask check: the embedded ext2 image passes e2fsck");
+    begin_item("the embedded ext2 image passes e2fsck");
     match check_fs_image_passes_e2fsck(&workspace_root) {
         Ok(summary) => println!("--- fs image e2fsck: OK ({summary})"),
         Err(e) => {
@@ -11747,6 +12012,9 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
     // **項目数が会計行と一致すること。** 検査を足して会計行を更新し忘れる形を
     // 構造で止める（`EXPECTED_CHECK_COUNT` の doc）。**`total` はここで確定して
     // いるので、`cmd_check` の組み替えは要らない。**
+    // **最後の項目の所要を出す**（[`begin_item`] の doc。**次の見出しが
+    // 前の項目の終わりなので、最後だけはここで締める**）。
+    finish_item();
     check_count_matches_accounting(&workspace_root, total, full, commit)?;
 
     if failed.is_empty() {
@@ -11817,7 +12085,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 23,
-    full: 228,
+    full: 232,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
@@ -12229,13 +12497,54 @@ fn cmd_flaky() -> Result<()> {
 /// 「揺らぎが消えた」の証拠にはならない（`coding-standards.md`）。
 const FLAKY_ATTEMPTS: usize = 5;
 
+/// 項目の所要を測る時計（VIEW-b の後）。
+///
+/// # なぜ在るのか
+///
+/// **`--full` の所要が説明できなくなった**——**足した項目では説明の付かない
+/// 差が出た**（実測。**42分と、上限で切れた50分超**）。**内訳が出ないと、
+/// 次に伸びたときに「切れたのか壊れたのか」も、何を疑うかも決まらない。**
+///
+/// # 判定行には載せない
+///
+/// **時間は揺れる。** **同じ構成の同じ `--full` が42分と50分超になった**
+/// （実測）。**揺れる値を判定行に載せない**（`docs/verification-coverage.md`
+/// の規律）。**`(info)` の行に出すだけである。**
+///
+/// # 見出しを出すたびに、前の項目の所要を出す
+///
+/// **項目の終わりを呼ぶ側に書かせない。** **`--full` の項目は51箇所から
+/// 見出しを出しており、終わりを1つずつ書かせると、書き忘れた項目だけが
+/// 黙って消える。** **次の見出しが前の項目の終わりである。**
+static ITEM_CLOCK: std::sync::Mutex<Option<(Instant, String)>> = std::sync::Mutex::new(None);
+
+/// 項目の見出しを出し、時計を始める（VIEW-b の後）。
+fn begin_item(label: &str) {
+    finish_item();
+    println!("=== xtask check: {label}");
+    if let Ok(mut clock) = ITEM_CLOCK.lock() {
+        *clock = Some((Instant::now(), label.to_string()));
+    }
+}
+
+/// 走っている項目の所要を出す（VIEW-b の後）。**走っていなければ何もしない。**
+fn finish_item() {
+    let taken = ITEM_CLOCK.lock().ok().and_then(|mut clock| clock.take());
+    if let Some((started, label)) = taken {
+        println!(
+            "(info) item time: {:.1}s for {label}",
+            started.elapsed().as_secs_f64()
+        );
+    }
+}
+
 fn run_regression(
     name: &str,
     failed: &mut Vec<String>,
     retries: &mut Vec<String>,
     mut body: impl FnMut() -> Result<()>,
 ) {
-    println!("=== xtask check: {name}");
+    begin_item(name);
     let first = body();
     let error = match first {
         Ok(()) => {

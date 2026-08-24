@@ -287,7 +287,7 @@ pub fn read_bytes(dst: &mut [u8]) -> usize {
     // 進む。**測っているものが違う**——実打鍵が届くことは `--shell-test` が
     // 主張しており（zi-a で Esc と矢印を足した判定）、ここが主張するのは
     // エディタの論理である。**層が違うものを同じ項目で測らない。**
-    #[cfg(feature = "zi-test")]
+    #[cfg(any(feature = "zi-test", feature = "view-test"))]
     {
         let taken = script::next_bytes(dst);
         if taken > 0 {
@@ -485,12 +485,12 @@ mod tests {
     }
 }
 
-/// 台本を作動させる（zi-d。`zi-test` feature のときだけ効く）。
+/// 台本を作動させる（zi-d。`zi-test` / `view-test` feature のときだけ効く）。
 ///
 /// **`init` がシェルを起こす直前に呼ぶ。** それより前に流すと、起動シーケンスの
 /// 検算（`syscall-test` の 51 番）が台本を食べてしまう（[`script`] の doc）。
 pub fn arm_input_script() {
-    #[cfg(feature = "zi-test")]
+    #[cfg(any(feature = "zi-test", feature = "view-test"))]
     script::arm();
 }
 
@@ -511,7 +511,7 @@ pub fn arm_input_script() {
 /// **前景が取られるまで、カーネル側の消費者（`drain_keyboard`）が食べてしまう。**
 /// リングは 128 バイトでもあり、台本を先に置く形は取れない。
 /// **デコード後のバイトを返す層（[`read_bytes`]）へ差し込む。**
-#[cfg(feature = "zi-test")]
+#[cfg(any(feature = "zi-test", feature = "view-test"))]
 pub(crate) mod script {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -614,6 +614,7 @@ pub(crate) mod script {
     // ——**本文に使える行数は実測で 48 なので、48 回目から窓が動く。**
     // **観測は動かす前と後の 2 回で、ホストが「先頭行が変わったこと」と
     // 「後のほうがファイルの後ろの行であること」を突き合わせる。**
+    #[cfg(feature = "zi-test")]
     const SCRIPT: &[u8] = b"\x01\x06/bin/ls /data\n\
         /bin/zi /data/fresh\n\
         iNEW\x1b\x04\
@@ -662,6 +663,37 @@ pub(crate) mod script {
         :w\n\x0f\
         :q\n\x0c";
 
+    /// 台本（VIEW-b）。**`less` を駆動する。**
+    ///
+    /// # `zi-test` と分けてある
+    ///
+    /// **`zi-test` は21秒掛かり、破壊19構成すべてに掛かる**（実測）。
+    /// **`less` の打鍵をあちらへ足すと、19回ぶん伸びる。** **別に立てて、
+    /// `less` の破壊だけがこちらへ掛かる形にする**（運用者の承認。VIEW-b の 4-4）。
+    ///
+    /// # 何を見せるか
+    ///
+    /// 1. **`/data/big` を `cat` で撮る**——**期待値をホストが持たない**
+    ///    （画面に出た行が、`cat` の出した並びのどこに在るかで見る）
+    /// 2. **入る前の画面を控え**（`\x06`）、**`less /data/big` を起こす**
+    /// 3. **窓の上端と下端を観測する**（`\x10`）——**ファイルの先頭行が出ている**
+    /// 4. **`Space` で1画面ぶん下げ、また観測する**——**窓の外に在った行が
+    ///    見えるようになったこと**が主張である
+    /// 5. **`j` を3回、`k` を3回、`b` で1画面ぶん戻して観測する**
+    ///    ——**3 と同じ行に戻るはずである**（`j` と `k` が釣り合い、
+    ///    `b` が `Space` を打ち消す）
+    /// 6. **`q` で抜け、戻った画面を控えたものと突き合わせる**（`\x05`）
+    /// 7. **`cat` をもう一度撮る**——**`less` が像を変えていないこと**
+    ///
+    /// **観測点の値は `zi-test` の台本と同じものを使う**（同じ表を引く）。
+    #[cfg(feature = "view-test")]
+    const SCRIPT: &[u8] = b"\x01/bin/cat /data/big\n\
+        \x06/bin/less /data/big\n\
+        \x10 \x10\
+        jjjkkkb\x10\
+        q\x05\
+        /bin/cat /data/big\n\x0c";
+
     /// 観測点（ES-d）。**プロンプトの色を見る。**
     const OBSERVE_PROMPT: u8 = 0x01;
     /// 観測点（ES-d）。**`zi` の状態行を見る。**
@@ -693,6 +725,8 @@ pub(crate) mod script {
     /// **主張を持つ観測点を合図に使わない**（`crate::console::probe` の
     /// `Observation::ScriptDone`）。
     const OBSERVE_DONE: u8 = 0x0c;
+    /// 観測点（VIEW-b）。**`less` の窓の上端と、いちばん下の本文行。**
+    const OBSERVE_VIEW_WINDOW: u8 = 0x10;
     /// 観測点（ADR-0046）。**エコーエリア（最下行）にエラーが出ているか。**
     ///
     /// **`0x0b`（[`Self::OBSERVE_MESSAGE`]）と読むものは同じで、名前だけが
@@ -733,6 +767,7 @@ pub(crate) mod script {
         match byte {
             OBSERVE_ZI_WINDOW => Some(crate::console::probe::Observation::ZiWindow),
             OBSERVE_ECHO => Some(crate::console::probe::Observation::EchoArea),
+            OBSERVE_VIEW_WINDOW => Some(crate::console::probe::Observation::ViewWindow),
             OBSERVE_PROMPT => Some(crate::console::probe::Observation::Prompt),
             OBSERVE_STATUS => Some(crate::console::probe::Observation::Status),
             OBSERVE_BEFORE_ALT => Some(crate::console::probe::Observation::BeforeAlternate),

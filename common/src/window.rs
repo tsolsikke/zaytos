@@ -90,6 +90,42 @@ impl Window {
         false
     }
 
+    /// 窓そのものを下へ動かす（VIEW-b）。**動いたら真。**
+    ///
+    /// # 追うのではなく、動かす
+    ///
+    /// **[`Self::follow`] はカーソルを追う形で、`zi` が使う。**
+    /// **`less` と `more` はカーソルを持たない**——**窓そのものを動かす。**
+    /// **規則が違うので、別の口にしてある。**
+    ///
+    /// # 末尾より先へは行かない
+    ///
+    /// **最後の1画面ぶんで止まる**（`top` の上限は `total - height`）。
+    /// **全体が1画面に収まるなら動かない。** **`less` と同じ振る舞いである**
+    /// ——**末尾の先の空白へ落ちていく形にはしない。**
+    pub fn scroll_down(&mut self, lines: usize, total: usize) -> bool {
+        let max = total.saturating_sub(self.height);
+        let want = self.top.saturating_add(lines).min(max);
+        if want == self.top {
+            return false;
+        }
+        self.top = want;
+        true
+    }
+
+    /// 窓そのものを上へ動かす（VIEW-b）。**動いたら真。**
+    ///
+    /// **先頭で止まる。** **`total` を要らない**——**上端は 0 で、全体の
+    /// 行数に依らない。**
+    pub fn scroll_up(&mut self, lines: usize) -> bool {
+        let want = self.top.saturating_sub(lines);
+        if want == self.top {
+            return false;
+        }
+        self.top = want;
+        true
+    }
+
     /// `line` が画面の何行目に出るか。**窓の外なら `None`。**
     pub fn screen_row(&self, line: usize) -> Option<usize> {
         if line < self.top || line >= self.top + self.height {
@@ -102,6 +138,46 @@ impl Window {
 #[cfg(test)]
 mod tests {
     use super::Window;
+
+    #[test]
+    fn scrolling_down_stops_at_the_last_screenful() {
+        let mut window = Window::new(10);
+        assert!(window.scroll_down(5, 100));
+        assert_eq!(window.top(), 5);
+        // **上限は `total - height` である。** それより先へは行かない。
+        assert!(window.scroll_down(1000, 100));
+        assert_eq!(window.top(), 90);
+        assert!(!window.scroll_down(1, 100), "端に着いたら動かない");
+    }
+
+    #[test]
+    fn scrolling_does_not_move_when_everything_fits() {
+        let mut window = Window::new(10);
+        assert!(!window.scroll_down(1, 10), "全体が1画面に収まる");
+        assert!(!window.scroll_down(1, 3), "画面より短い");
+        assert_eq!(window.top(), 0);
+    }
+
+    #[test]
+    fn scrolling_up_stops_at_the_top() {
+        let mut window = Window::new(10);
+        window.scroll_down(20, 100);
+        assert_eq!(window.top(), 20);
+        assert!(window.scroll_up(5));
+        assert_eq!(window.top(), 15);
+        assert!(window.scroll_up(1000));
+        assert_eq!(window.top(), 0);
+        assert!(!window.scroll_up(1), "先頭では動かない");
+    }
+
+    #[test]
+    fn a_page_down_then_a_page_up_returns_to_where_it_started() {
+        let mut window = Window::new(48);
+        assert!(window.scroll_down(48, 100));
+        assert_eq!(window.top(), 48);
+        assert!(window.scroll_up(48));
+        assert_eq!(window.top(), 0, "同じ量で戻る");
+    }
 
     #[test]
     fn a_new_window_shows_the_top() {

@@ -45,6 +45,22 @@ pub(crate) enum Observation {
     /// ある**——**H-b-2 で捕まえられなかったのは、まさにバッファしか
     /// 見ていなかったからである。**
     ZiWindow,
+    /// `less` の窓（VIEW-b）。**上端と、いちばん下の本文行を控えて出す。**
+    ///
+    /// # 2 行を読むのは、窓の外が見えたことを言うためである
+    ///
+    /// **上端だけでは「窓が動いた」しか言えない。** **`less` の主張は
+    /// 「窓の外に在った行が見えるようになった」である**ので、
+    /// **動かす前の下端より後ろの行が、動かした後に上端へ来たこと**を
+    /// ホスト側が突き合わせる。**期待値をこちらが持たない。**
+    ///
+    /// # `less` の配置を写している
+    ///
+    /// **最下行は状態行で、本文はその 1 つ上までである**
+    /// （`kernel/userland/less.rs`）。**境界をまたぐ値は写すしかない**
+    /// （`PROMPT_COLOR` と同じ立場）。**写しが古くなれば、読む行が
+    /// 状態行になって突き合わせが落ちる**——黙って緑にはならない。
+    ViewWindow,
     /// エコーエリア（最下行。ADR-0046）。**エラーがそこに出ているか。**
     ///
     /// # 「見えなくする」と区別が付く形にする
@@ -98,18 +114,59 @@ pub(crate) enum Observation {
 /// **主張はホストの単体テストが持つ**（`common::screen` の
 /// `a_wide_glyph_marks_its_right_half`）。**フォントに全角が入ったら、
 /// ここへ画面側の判定を足すこと**（`docs/deferred-decisions.md` に行がある）。
+/// 控える行の字の最大長（セル数）。
+const MARK_TEXT_MAX: usize = 48;
+
+/// 代替画面へ入る前に控えた 1 行（e-3。VIEW-b で作り直した）。
+///
+/// # 控えるのは「戻るはずの行」である
+///
+/// **プロンプトの行ではない。** **その 1 つ上の、既に出ている出力の行である。**
+///
+/// **理由は 2 つある。**
+///
+/// **(1) プロンプトの行は、戻った後に描き直される**——**シェルが次の
+/// プロンプトを出す。** **新しく描いた絵は必ず正しい**ので、
+/// **そこを見ても「戻ったこと」は言えない**（実測。**破壊
+/// `alt-screen-skip-repaint` が通ってしまった**）。
+///
+/// **(2) プロンプトの行の字は変わる**——**打った語が後ろに反響される。**
+/// **字で探せない。**
+///
+/// # 行番号では突き合わせない
+///
+/// **控えた行を後からもう一度読む形だった。** **出力が増えて画面が流れると、
+/// 控えた行には別のものが載る**——**b-2 で一度踏み、`less` では必ず踏む**
+/// （抜けた後にシェルが次のプロンプトを出すと 1 行流れる）。
+///
+/// **したがって、字で探して、ピクセルで突き合わせる。**
+/// **字はセルから読む**（面を入れ替えれば戻る）。**ピクセルは画面の実物で、
+/// 描き直していなければ代替画面のままである**——**そこが主張の要である。**
 #[derive(Clone, Copy)]
 struct BeforeAlternateMarks {
     seen: bool,
-    /// プロンプトの緑が在った行と、その行のインクのピクセル。
-    prompt: Option<(u32, u32)>,
+    /// 控えた行の字。
+    text: [u8; MARK_TEXT_MAX],
+    length: usize,
+    /// インクを読んだ桁と、その値。
+    column: u32,
+    ink: u32,
+    /// そのとき在った行。**参考として出すだけで、突き合わせない。**
+    row: u32,
+    /// 控えられたか。**空の画面では控えるものが無い。**
+    found: bool,
 }
 
 /// 控えた目印。**`Locked` で守る**（[`LAST_STATUS`] と同じ理由）。
 static BEFORE_ALTERNATE: common::critical::Locked<BeforeAlternateMarks> =
     common::critical::Locked::new(BeforeAlternateMarks {
         seen: false,
-        prompt: None,
+        text: [0; MARK_TEXT_MAX],
+        length: 0,
+        column: 0,
+        ink: 0,
+        row: 0,
+        found: false,
     });
 
 /// `zash` のプロンプトの名前の部分の色（緑）。
@@ -197,6 +254,7 @@ pub(crate) fn observe(kind: Observation) {
         Observation::CommandLine => observe_command_line(&mut serial, console, "screen-command"),
         Observation::Message => observe_command_line(&mut serial, console, "screen-message"),
         Observation::EchoArea => observe_command_line(&mut serial, console, "screen-echo"),
+        Observation::ViewWindow => observe_view_window(&mut serial, console),
         Observation::ZiWindow => observe_zi_window(&mut serial, console),
         Observation::ScriptDone => {
             let _ = writeln!(serial, "script-done: the script reached its end");
@@ -375,6 +433,49 @@ fn observe_zi_window(serial: &mut SerialPort, console: &mut crate::console::Cons
     );
 }
 
+/// `less` の窓の上端と、いちばん下の本文行を控えて出す（VIEW-b）。
+///
+/// # 何を主張するか
+///
+/// **この関数は主張しない。控えて出すだけである。**
+/// **突き合わせるのはホスト側である**——**動かす前と後で 2 回観測し、
+/// 「後の上端が、前の下端より後ろの行であること」を見る。**
+fn observe_view_window(serial: &mut SerialPort, console: &mut crate::console::Console) {
+    /// 本文の上端（`less` は画面の先頭から並べる）。
+    const TOP: u32 = 0;
+    let (_, rows) = console.size();
+    // **最下行は状態行なので、その 1 つ上が本文の下端である**（型の doc）。
+    let bottom = rows.saturating_sub(2);
+    let mut top_text = [0u8; LABEL_MAX];
+    let top_length = read_row_text(console, TOP, &mut top_text);
+    let mut bottom_text = [0u8; LABEL_MAX];
+    let bottom_length = read_row_text(console, bottom, &mut bottom_text);
+    let _ = writeln!(
+        serial,
+        "screen-view: the top row says {:?} and the last text row (row {bottom}) says {:?}",
+        core::str::from_utf8(&top_text[..top_length]).unwrap_or("?"),
+        core::str::from_utf8(&bottom_text[..bottom_length]).unwrap_or("?")
+    );
+}
+
+/// 画面の 1 行を字として読み、右端の空白を落とす（VIEW-b で切り出した）。
+///
+/// **返るのは書いた長さである。** **ASCII でない字は `?` にする**——
+/// **判定行はホストが読むので、そこで壊れない形にする。**
+fn read_row_text(console: &mut crate::console::Console, row: u32, out: &mut [u8]) -> usize {
+    let (columns, _) = console.size();
+    let mut length = 0usize;
+    for column in 0..columns.min(out.len() as u32) {
+        let c = console.cell_char(column, row).unwrap_or(' ');
+        out[length] = if c.is_ascii() { c as u8 } else { b'?' };
+        length += 1;
+    }
+    while length > 0 && out[length - 1] == b' ' {
+        length -= 1;
+    }
+    length
+}
+
 /// 状態行の色と、モードに従って変わったことを見る。
 fn observe_status(serial: &mut SerialPort, console: &mut crate::console::Console) {
     let format = console.framebuffer_layout().format();
@@ -450,25 +551,71 @@ fn observe_status(serial: &mut SerialPort, console: &mut crate::console::Console
 /// 代替画面へ入る前の画面を控える（e-3）。**判定は出さない。**
 fn observe_before_alternate(serial: &mut SerialPort, console: &mut crate::console::Console) {
     let (_, cursor_row) = console.cursor_cell();
-    let prompt = find_colored_run_in_row(console, cursor_row, PROMPT_COLOR)
-        .and_then(|(row, from, to)| ink_of_run(console, row, from, to).map(|(_, ink)| (row, ink)));
-    *BEFORE_ALTERNATE.lock() = BeforeAlternateMarks { seen: true, prompt };
+    let mut marks = BeforeAlternateMarks {
+        seen: true,
+        text: [0; MARK_TEXT_MAX],
+        length: 0,
+        column: 0,
+        ink: 0,
+        row: 0,
+        found: false,
+    };
+    // **カーソルの行の 1 つ上から、上へ探す。** **字の在る行を1つ選ぶ**
+    // （[`BeforeAlternateMarks`] の doc。**プロンプトの行は選ばない**）。
+    let mut row = cursor_row;
+    while row > 0 {
+        row -= 1;
+        let length = read_row_text(console, row, &mut marks.text);
+        if length == 0 {
+            continue;
+        }
+        let Some((column, ink)) = first_ink_in_row(console, row) else {
+            continue;
+        };
+        marks.length = length;
+        marks.column = column;
+        marks.ink = ink;
+        marks.row = row;
+        marks.found = true;
+        break;
+    }
+    *BEFORE_ALTERNATE.lock() = marks;
     let _ = writeln!(
         serial,
-        "screen-restore: before the alternate screen, the prompt was at row {:?}",
-        prompt.map(|(row, _)| row)
+        "screen-restore: before the alternate screen, row {} said {:?} with ink {:?} at column {}",
+        marks.row,
+        core::str::from_utf8(&marks.text[..marks.length]).unwrap_or("?"),
+        PixelHex(marks.ink),
+        marks.column
     );
+}
+
+/// その行で最初に字が在るセルの、実物のピクセルを読む（VIEW-b）。
+fn first_ink_in_row(console: &mut crate::console::Console, row: u32) -> Option<(u32, u32)> {
+    let (columns, _) = console.size();
+    for column in 0..columns {
+        if console.cell_char(column, row) != Some(' ') {
+            return console.cell_ink_pixel(column, row).map(|ink| (column, ink));
+        }
+    }
+    None
 }
 
 /// 代替画面から戻った画面を、控えたものと突き合わせる（e-3）。
 ///
 /// # 主張は1つである
 ///
-/// **元の画面が戻っていること**——プロンプトの緑が同じ行に、同じピクセルで
-/// 在ることである。
+/// **控えた行が、同じ字と同じピクセルで戻っていること。**
 ///
-/// **ピクセルを見る。** **セルだけを見ると、面を入れ替えただけで描き直して
-/// いない形が通ってしまう。**
+/// **字で探し、ピクセルで突き合わせる**（[`BeforeAlternateMarks`] の doc）。
+/// **セルだけを見ると、面を入れ替えただけで描き直していない形が通る**
+/// （破壊 `alt-screen-skip-repaint` がその形である）。
+///
+/// # 探すのは字である。行番号ではない（VIEW-b で直した）
+///
+/// **控えた行をもう一度読む形だった。** **出力が増えて画面が流れると壊れる**
+/// ——**`less` を抜けた後にシェルが次のプロンプトを出すと 1 行流れる。**
+/// **VIEW-c の `more` は代替画面へ入らないので、なおさら流れる。**
 fn observe_after_alternate(serial: &mut SerialPort, console: &mut crate::console::Console) {
     let before = *BEFORE_ALTERNATE.lock();
     if !before.seen {
@@ -479,18 +626,30 @@ fn observe_after_alternate(serial: &mut SerialPort, console: &mut crate::console
         return;
     }
 
-    let prompt_now = before.prompt.and_then(|(row, _)| {
-        find_colored_run_in_row(console, row, PROMPT_COLOR).and_then(|(row, from, to)| {
-            ink_of_run(console, row, from, to).map(|(_, ink)| (row, ink))
-        })
-    });
-    let screen_came_back = before.prompt.is_some() && prompt_now == before.prompt;
+    // **控えた字の行を、下から探す。** **流れていても見つかる。**
+    let (_, rows) = console.size();
+    let mut now: Option<(u32, u32)> = None;
+    let mut text = [0u8; MARK_TEXT_MAX];
+    for row in (0..rows).rev() {
+        let length = read_row_text(console, row, &mut text);
+        if length != before.length || text[..length] != before.text[..before.length] {
+            continue;
+        }
+        now = console
+            .cell_ink_pixel(before.column, row)
+            .map(|ink| (row, ink));
+        break;
+    }
+    let screen_came_back = before.found && now.is_some_and(|(_, ink)| ink == before.ink);
     let _ = writeln!(
         serial,
-        "screen-restore: the screen before zi came back = {screen_came_back} \
-         (was {:?}, now {:?})",
-        before.prompt.map(|(row, ink)| (row, PixelHex(ink))),
-        prompt_now.map(|(row, ink)| (row, PixelHex(ink)))
+        "screen-restore: the screen before the alternate screen came back = {screen_came_back} \
+         (row {:?} said {:?} with ink {:?}; it is now at row {:?} with ink {:?})",
+        before.row,
+        core::str::from_utf8(&before.text[..before.length]).unwrap_or("?"),
+        PixelHex(before.ink),
+        now.map(|(row, _)| row),
+        now.map(|(_, ink)| PixelHex(ink))
     );
 }
 

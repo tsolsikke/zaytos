@@ -117,6 +117,7 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
         "mkdir",
         "rmdir",
         "touch",
+        "less",
     ];
 
     // **共有する包み（S11-9）。** `ls` と `cat` が `mod userlib;` で取り込む。
@@ -212,6 +213,10 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
             "zi_join_does_nothing",
         ),
         ("CARGO_FEATURE_ZI_WINDOW_FROZEN_TEST", "zi_window_frozen"),
+        (
+            "CARGO_FEATURE_LESS_WINDOW_FROZEN_TEST",
+            "less_window_frozen",
+        ),
     ];
     let mut extra_cfgs: Vec<String> = Vec::new();
     for (env, cfg) in USER_PROGRAM_CFGS {
@@ -368,6 +373,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         "mkdir",
         "rmdir",
         "touch",
+        "less",
     ] {
         std::fs::copy(
             format!("{out_dir}/{name}.elf"),

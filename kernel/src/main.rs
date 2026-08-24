@@ -9407,6 +9407,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "打鍵の代わりに決定的な台本を read_bytes から返す",
     ),
     (
+        "less-window-frozen-test",
+        cfg!(feature = "less-window-frozen-test"),
+        "less が窓を動かさず、最初の1枚のままになる",
+    ),
+    (
+        "view-test",
+        cfg!(feature = "view-test"),
+        "less を駆動する台本を read_bytes から返す（zi-test と別の台本）",
+    ),
+    (
         "stack-overflow-before-guard-test",
         cfg!(feature = "stack-overflow-before-guard-test"),
         "起動時のカーネルスタックをわざと深くし、張る前のガードページを踏む",
