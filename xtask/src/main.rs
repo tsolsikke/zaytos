@@ -10977,8 +10977,15 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
     check_flaky_list_matches_tables()?;
 
     let workspace_root = workspace_root()?;
-    let mut failed: Vec<String> = Vec::new();
+    let mut failed = Failures::default();
     let mut total = 0usize;
+    // **`--full` にだけ上限を置く**（[`FULL_TIME_LIMIT`] の doc）。
+    // **`base` と `--commit` は数分で終わるので、置く理由が無い。**
+    if full {
+        if let Ok(mut limit) = TIME_LIMIT.lock() {
+            *limit = Some((Instant::now(), FULL_TIME_LIMIT));
+        }
+    }
 
     for (name, args) in CHECKS {
         total += 1;
@@ -12547,6 +12554,63 @@ fn cmd_flaky() -> Result<()> {
 /// 「揺らぎが消えた」の証拠にはならない（`coding-standards.md`）。
 const FLAKY_ATTEMPTS: usize = 5;
 
+/// 落ちた項目の一覧（VIEW-c の後）。
+///
+/// # なぜ `Vec` を包むのか
+///
+/// **`--full` が上限で切れたとき、「切れた」と「落ちた」を分けて言うために、
+/// 走っている最中の失敗の数が要る**（[`begin_item`] が締めの行に出す）。
+/// **`push` を包めば、55 箇所の呼び出し側は 1 文字も変わらない。**
+#[derive(Default)]
+struct Failures {
+    list: Vec<String>,
+}
+
+impl Failures {
+    fn push(&mut self, name: String) {
+        FAILED_SO_FAR.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.list.push(name);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    fn join(&self, separator: &str) -> String {
+        self.list.join(separator)
+    }
+}
+
+/// ここまでに落ちた項目の数（VIEW-c の後）。
+static FAILED_SO_FAR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// ここまでに走った項目の数（VIEW-c の後）。
+static ITEMS_DONE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// `--full` の自前の上限（VIEW-c の後）。**過ぎたらそこで止める。**
+static TIME_LIMIT: std::sync::Mutex<Option<(Instant, std::time::Duration)>> =
+    std::sync::Mutex::new(None);
+
+/// `--full` の上限（VIEW-c の後）。
+///
+/// # なぜ自前で持つのか
+///
+/// **外側の `timeout` に切られると、締めの行が出ない**——**ログの末尾は
+/// QEMU の終了メッセージで終わり、次に見る者は「落ちた」と読む**
+/// （実測で 1 度そうなった）。**自分で止めれば「上限で切れた。ここまでは
+/// 緑」と書ける。**
+///
+/// # 値の根拠
+///
+/// **実測でいちばん遅い回が約52分である**（3 回走らせて、50分の上限で切れた回が
+/// 約97%まで進んでいた／42.4分／42.0分）。**項目の外にも0.9分掛かる。**
+/// **90分はその倍近くで、揺れても届かない。**
+const FULL_TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(90 * 60);
+
 /// 項目の所要を測る時計（VIEW-b の後）。
 ///
 /// # なぜ在るのか
@@ -12571,10 +12635,39 @@ static ITEM_CLOCK: std::sync::Mutex<Option<(Instant, String)>> = std::sync::Mute
 /// 項目の見出しを出し、時計を始める（VIEW-b の後）。
 fn begin_item(label: &str) {
     finish_item();
+    ITEMS_DONE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    stop_if_over_the_time_limit();
     println!("=== xtask check: {label}");
     if let Ok(mut clock) = ITEM_CLOCK.lock() {
         *clock = Some((Instant::now(), label.to_string()));
     }
+}
+
+/// 上限を過ぎていたら、そこで止める（VIEW-c の後）。
+///
+/// # 「切れた」と「落ちた」を分ける
+///
+/// **締めの行に、走った数と落ちた数を出す。** **落ちた数が 0 なら
+/// 「ここまでは緑」と言える。** **終了の値も分ける**——
+/// **検査の失敗は 1、上限で切れたのは 3 である。**
+fn stop_if_over_the_time_limit() {
+    let over = TIME_LIMIT
+        .lock()
+        .ok()
+        .and_then(|limit| *limit)
+        .is_some_and(|(started, limit)| started.elapsed() > limit);
+    if !over {
+        return;
+    }
+    let done = ITEMS_DONE.load(std::sync::atomic::Ordering::SeqCst) - 1;
+    let failed = FAILED_SO_FAR.load(std::sync::atomic::Ordering::SeqCst);
+    println!(
+        "xtask check: stopped at the time limit ({} minute(s)). {done} check(s) ran and {failed} \
+         failed - this is the limit, not a failing check. Raise FULL_TIME_LIMIT if the machine \
+         got slower.",
+        FULL_TIME_LIMIT.as_secs() / 60
+    );
+    std::process::exit(3);
 }
 
 /// 走っている項目の所要を出す（VIEW-b の後）。**走っていなければ何もしない。**
@@ -12590,7 +12683,7 @@ fn finish_item() {
 
 fn run_regression(
     name: &str,
-    failed: &mut Vec<String>,
+    failed: &mut Failures,
     retries: &mut Vec<String>,
     mut body: impl FnMut() -> Result<()>,
 ) {
