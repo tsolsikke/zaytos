@@ -405,6 +405,43 @@ pub unsafe fn install_guard_page(
         }
     }
 
+    // **張る前に、ガードページが手つかずかを見る（ADR-0046 の Addendum）。**
+    //
+    // # なぜ要るのか
+    //
+    // **ガードページは張った後しか効かない。** **張る前に溢れても黙って通る。**
+    // **実際に踏んだ**——ADR-0046 の実装で、起動時のカーネルスタックが 64KiB を
+    // 越えてここへ 15 バイト書き込んでいた（実測）。**壊れたものは無い**
+    // （踏んだ先はまさに犠牲領域である）が、**気づいたのは起動ログの `old pte` に
+    // A/D のビットが立っていたからで、あれは偶然映っていただけである。**
+    // **偶然に頼った捕捉は捕捉ではない。**
+    //
+    // # 見るのは「全部 0 か」である
+    //
+    // **`.bss` の一部なので、起動時に 0 で埋められている。** **非ゼロが 1 つでも
+    // あれば、誰かが書いたということである。** **0 を書いた場合は見えない**が、
+    // **スタックが積む値が全部 0 になる形は考えにくい**（戻り番地とフレーム
+    // ポインタが載る）。
+    //
+    // # 停止しない。報せる
+    //
+    // **踏んだ先は犠牲領域で、壊れたものは無い**（`StackBlock` の doc）。
+    // **IST のカナリアの判定と同じ立場である**——**報せて、起動ログの参照が
+    // 差として捕まえる。**
+    {
+        // SAFETY: guard_virt はまだ張られており、1 ページぶんを読むだけである。
+        let bytes =
+            unsafe { core::slice::from_raw_parts(guard_virt.as_u64() as *const u8, GUARD_SIZE) };
+        let nonzero = bytes.iter().filter(|byte| **byte != 0).count();
+        let first = bytes.iter().position(|byte| *byte != 0);
+        log(format_args!(
+            "{tag}: {what} was untouched before it was installed = {} (nonzero bytes={nonzero}, \
+             first at {first:?}, page {:#x})",
+            nonzero == 0,
+            guard_virt.as_u64()
+        ));
+    }
+
     // ガードページを 1 枚 unmap する。unmap_4kib は内部で invlpg も行うので、以後この
     // ページへのアクセスは即座に #PF になる。フレームは解放しない（.bss の一部で
     // アロケータの管理外。M5-a-2 の仕様どおり unmap はフレームを返さない）。

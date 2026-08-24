@@ -42,6 +42,25 @@ pub const SYS_IOCTL: u64 = 16;
 /// **カーネルの `TIOCGWINSZ` と同じ値である**（`SYS_*` の番号を写しているのと
 /// 同じ形。ユーザープログラムはカーネルの定数を参照できない）。
 pub const TIOCGWINSZ: u64 = 0x5413;
+
+/// 溜まっているエラーを取り出す要求（`TIOCZTAKE`。ADR-0046）。
+///
+/// **カーネルの `TIOCZTAKE` と同じ値である。**
+pub const TIOCZTAKE: u64 = 0x5A01;
+
+/// 1 行をログ（シリアル）へ出す要求（`TIOCZLOG`。ADR-0046）。
+///
+/// **カーネルの `TIOCZLOG` と同じ値である。**
+pub const TIOCZLOG: u64 = 0x5A02;
+
+/// `TIOCZTAKE` / `TIOCZLOG` の構造の大きさ（ADR-0046）。
+pub const ZDIAG_LEN: usize = 256;
+
+/// その構造の本文が始まる位置（ADR-0046）。
+pub const ZDIAG_TEXT_OFFSET: usize = 4;
+
+/// 本文に使える大きさ（ADR-0046）。
+pub const ZDIAG_TEXT: usize = ZDIAG_LEN - ZDIAG_TEXT_OFFSET;
 /// `exit` の番号（Linux と同じ）。
 pub const SYS_EXIT: u64 = 60;
 /// `getdents64` の番号（Linux と同じ）。
@@ -192,6 +211,112 @@ pub fn window_size(fd: u64) -> Result<WindowSize, i64> {
         width_pixels: u16::from_le_bytes([raw[4], raw[5]]),
         height_pixels: u16::from_le_bytes([raw[6], raw[7]]),
     })
+}
+
+/// カーネルが溜めたエラーの控え（ADR-0046）。
+///
+/// # 全画面のアプリのためのものである
+///
+/// **代替画面に居る間、`fd 2`へ書いたものはカーネルが溜める。**
+/// **画面へ勝手に描かれると絵が壊れる**ためで、**取り出して自分の
+/// エコーエリアへ描くのはアプリの仕事である**（ADR-0046）。
+///
+/// **`zi`と`less`が同じものを使う。** **描く場所だけがそれぞれ違う**
+/// （`zi`はコマンド行、`less`は状態行）。
+///
+/// # 次に取り出すまで残す
+///
+/// **[`Self::take`]は、溜まっていなければ前の中身を保つ。** **`vi`と同じで、
+/// 出した瞬間に消えると読めない。** **消すのは呼ぶ側である**（[`Self::clear`]）。
+pub struct Echo {
+    text: [u8; ZDIAG_TEXT],
+    len: usize,
+}
+
+/// 溢れたことを示す印（ADR-0046）。**捨てた数そのものは出さない。**
+///
+/// **1 行に収まる長さで、かつ「これで全部ではない」と分かる形にする。**
+/// **正確な数はシリアルにある**——**そちらが記録で、こちらは控えである。**
+const ECHO_TRUNCATED: &[u8] = b" ...";
+
+impl Echo {
+    pub const fn new() -> Self {
+        Self {
+            text: [0u8; ZDIAG_TEXT],
+            len: 0,
+        }
+    }
+
+    /// カーネルから取り出す。**新しく出てきたら真。**
+    ///
+    /// **偽のときは前の中身が残る**（この型の doc）。
+    pub fn take(&mut self, fd: u64) -> bool {
+        let mut raw = [0u8; ZDIAG_LEN];
+        // SAFETY: `raw` は自分のスタックの上にあり、カーネルが書く長さ
+        // （`ZDIAG_LEN`）をちょうど収める。
+        let ret = unsafe { syscall3(SYS_IOCTL, fd, TIOCZTAKE, raw.as_mut_ptr() as u64) };
+        if ret < 0 {
+            return false;
+        }
+        let length = u16::from_le_bytes([raw[0], raw[1]]) as usize;
+        if length == 0 || length > ZDIAG_TEXT {
+            return false;
+        }
+        let dropped = u16::from_le_bytes([raw[2], raw[3]]);
+        self.len = 0;
+        // **改行は落とす。** **エコーエリアは 1 行である**——
+        // **そのまま出すと、次の行へ送ってしまう。**
+        for byte in &raw[ZDIAG_TEXT_OFFSET..ZDIAG_TEXT_OFFSET + length] {
+            if *byte == b'\n' || *byte == b'\r' {
+                continue;
+            }
+            self.text[self.len] = *byte;
+            self.len += 1;
+        }
+        // **溢れたことを隠さない（ADR-0046）。** **入らなければ印も出さない**
+        // ——**その場合は本文のほうが情報である。**
+        if dropped > 0 && self.len + ECHO_TRUNCATED.len() <= ZDIAG_TEXT {
+            self.text[self.len..self.len + ECHO_TRUNCATED.len()].copy_from_slice(ECHO_TRUNCATED);
+            self.len += ECHO_TRUNCATED.len();
+        }
+        self.len > 0
+    }
+
+    /// 出す 1 行。**空なら空である。**
+    pub fn line(&self) -> &[u8] {
+        &self.text[..self.len]
+    }
+
+    /// 空にする。
+    pub fn clear(&mut self) {
+        self.len = 0;
+    }
+}
+
+impl Default for Echo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 1 行をログ（シリアル）へ出す（ADR-0046）。
+///
+/// # 画面へは出ない
+///
+/// **診断の出口である。** **読み手はホスト側の判定で、判定はシリアルを
+/// 読んでいる**（ADR-0046 の「線はどこに在るか」）。**全画面のアプリの
+/// 画面を、診断が壊してよい理由は無い。**
+///
+/// **使う人へのエラーはこちらへ出さない**——あちらは`STDERR`で、
+/// カーネルが溜め、アプリがエコーエリアへ描く。
+pub fn log_line(fd: u64, bytes: &[u8]) {
+    let mut raw = [0u8; ZDIAG_LEN];
+    let take = bytes.len().min(ZDIAG_TEXT);
+    raw[0..2].copy_from_slice(&(take as u16).to_le_bytes());
+    raw[ZDIAG_TEXT_OFFSET..ZDIAG_TEXT_OFFSET + take].copy_from_slice(&bytes[..take]);
+    // SAFETY: `raw` は自分のスタックの上にあり、カーネルが読む長さ
+    // （`ZDIAG_LEN`）をちょうど収める。
+    let _ = unsafe { syscall3(SYS_IOCTL, fd, TIOCZLOG, raw.as_ptr() as u64) };
 }
 
 /// バイト列を fd へ**すべて**書く。書けた総数、または最初の `-errno` を返す。

@@ -45,6 +45,21 @@ pub(crate) enum Observation {
     /// ある**——**H-b-2 で捕まえられなかったのは、まさにバッファしか
     /// 見ていなかったからである。**
     ZiWindow,
+    /// エコーエリア（最下行。ADR-0046）。**エラーがそこに出ているか。**
+    ///
+    /// # 「見えなくする」と区別が付く形にする
+    ///
+    /// **カーネルが溜めた `fd 2` を、アプリが取り出してここへ描く。**
+    /// **溜めるだけで描かなければ、画面は壊れないが人にも見えない**
+    /// ——**それは却下した案（(a) と (a')）と同じ振る舞いである。**
+    /// **したがって「出ていること」を画面の実物で見る。**
+    ///
+    /// # `CommandLine` と同じ行を読む。ラベルだけが違う
+    ///
+    /// **同じラベルにしない。** **`screen-message` を読む判定は最初の 1 件を
+    /// 取っており**（`xtask` の `find_map`）、**同じ名前で増やすとそちらが
+    /// 別の回を見てしまう。**
+    EchoArea,
     /// 台本が最後まで進んだ（DIR-1b）。**画面を読まない。**
     ///
     /// # 何も主張しない観測点である
@@ -181,6 +196,7 @@ pub(crate) fn observe(kind: Observation) {
         Observation::AfterAlternate => observe_after_alternate(&mut serial, console),
         Observation::CommandLine => observe_command_line(&mut serial, console, "screen-command"),
         Observation::Message => observe_command_line(&mut serial, console, "screen-message"),
+        Observation::EchoArea => observe_command_line(&mut serial, console, "screen-echo"),
         Observation::ZiWindow => observe_zi_window(&mut serial, console),
         Observation::ScriptDone => {
             let _ = writeln!(serial, "script-done: the script reached its end");
@@ -324,24 +340,22 @@ fn observe_prompt(serial: &mut SerialPort, console: &mut crate::console::Console
 /// 観測し、ホストが「変わったこと」と「後のほうがファイルの後ろの行で
 /// あること」を見る。** **期待値をこちらが持たない。**
 ///
-/// # 読むのは画面の行 1 である。行 0 ではない
+/// # 読むのは画面の行 0 である（ADR-0046 で戻した）
 ///
 /// **`zi` は本文を画面の先頭から並べる**（`redraw` が `move_cursor(0, 0)` から
-/// 置く）ので、**素直には行 0 が「窓の先頭に見えている行」である。**
+/// 置く）ので、**行 0 が「窓の先頭に見えている行」である。**
 ///
-/// **しかし行 0 は読めない。** **検査の構成では `zi` が診断行を `STDERR` へ
-/// 出し、それが画面にも描かれてカーソルの居る行を上書きする**
-/// （`kernel/userland/zi.rs` の `report_cursor` の doc。**zi-e 前の応急で、
-/// 根の手当ては「診断の出口を画面と分ける」である**）。**カーソルは開いた
-/// 直後に行 0 に居るので、そこを読むと診断行が出る**（実測。
-/// `"zi: cursor (buff"` が読めた）。
+/// **VIEW-a では行 1 を読んでいた。** **行 0 が診断行に上書きされていた
+/// ためである**（実測。`"zi: cursor (buff"` が読めた）。**迂回であって、
+/// 主張が薄かった。**
 ///
-/// **したがって 1 つ下を読む。** **窓が `top` に居るとき、行 1 に出るのは
-/// バッファの `top + 1` である。** **窓が動いたかどうかを見るには、
-/// どの行を読んでも同じだけ言える**——**要るのは「変わったこと」である。**
+/// **ADR-0046 で診断の出口を画面から外した**ので、**迂回は要らなくなった。**
+/// **行 0 を読むほうが主張が強い**——**窓の先頭そのものを見ている。**
+///
+/// **破壊 `stderr-on-screen-test` は、まさにこの行を診断行へ戻す。**
 fn observe_zi_window(serial: &mut SerialPort, console: &mut crate::console::Console) {
-    /// 読む画面の行（VIEW-a）。**行 0 は診断行に上書きされる**（上の doc）。
-    const ROW: u32 = 1;
+    /// 読む画面の行（VIEW-a。ADR-0046 で 1 から戻した）。**窓の先頭である。**
+    const ROW: u32 = 0;
     let (columns, _) = console.size();
     let mut text = [0u8; LABEL_MAX];
     let mut length = 0usize;
@@ -356,7 +370,7 @@ fn observe_zi_window(serial: &mut SerialPort, console: &mut crate::console::Cons
     }
     let _ = writeln!(
         serial,
-        "screen-window: the text row below the top of the window says {:?}",
+        "screen-window: the top row of the window says {:?}",
         core::str::from_utf8(&text[..length]).unwrap_or("?")
     );
 }

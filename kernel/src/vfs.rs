@@ -316,7 +316,16 @@ pub enum File {
     /// # 位置を持たない
     ///
     /// **端末は端まで戻れない。** 読んだバイトは消える。
-    Terminal,
+    ///
+    /// # エラーの出口かどうかを持つ（ADR-0046）
+    ///
+    /// **`errors`が真なのは`STDERR_FD`だけである。**
+    /// **全画面のアプリが動く間、この口へ来たものはカーネルが溜める**
+    /// （`crate::syscall`の`sys_write`）。
+    ///
+    /// **番号（2）で見ない。** **表の中身で分岐するのはS11-10からの形で、
+    /// `dup`が来ても性質が複製に付いて回る**（番号で見ると付いて回らない）。
+    Terminal { errors: bool },
 }
 
 impl File {
@@ -349,19 +358,24 @@ impl File {
 
     /// 端末。
     pub fn terminal() -> Self {
-        Self::Terminal
+        Self::Terminal { errors: false }
     }
 
     /// 端末か。
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Terminal)
+        matches!(self, Self::Terminal { .. })
+    }
+
+    /// エラーの出口か（ADR-0046）。**端末でなければ偽である。**
+    pub fn is_error_terminal(&self) -> bool {
+        matches!(self, Self::Terminal { errors: true })
     }
 
     /// 実体。**端末には無い。**
     pub fn inode(&self) -> Option<&Inode> {
         match self {
             Self::Regular { inode, .. } => Some(inode),
-            Self::Terminal => None,
+            Self::Terminal { .. } => None,
         }
     }
 
@@ -369,7 +383,7 @@ impl File {
     pub fn offset(&self) -> u64 {
         match self {
             Self::Regular { offset, .. } => *offset,
-            Self::Terminal => 0,
+            Self::Terminal { .. } => 0,
         }
     }
 
@@ -460,9 +474,10 @@ impl FileTable {
     /// ここで前者に決まった。**
     pub const fn new() -> Self {
         let mut slots = [None; MAX_OPEN_FILES];
-        slots[STDIN_FD] = Some(File::Terminal);
-        slots[STDOUT_FD] = Some(File::Terminal);
-        slots[STDERR_FD] = Some(File::Terminal);
+        slots[STDIN_FD] = Some(File::Terminal { errors: false });
+        slots[STDOUT_FD] = Some(File::Terminal { errors: false });
+        // **2 番だけがエラーの出口である（ADR-0046）。**
+        slots[STDERR_FD] = Some(File::Terminal { errors: true });
         Self { slots, opened: 0 }
     }
 
@@ -605,6 +620,10 @@ mod tests {
         assert!(table.get(STDIN_FD).unwrap().is_terminal());
         assert!(table.get(STDOUT_FD).unwrap().is_terminal());
         assert!(table.get(STDERR_FD).unwrap().is_terminal());
+        // **エラーの出口は 2 番だけである（ADR-0046）。**
+        assert!(!table.get(STDIN_FD).unwrap().is_error_terminal());
+        assert!(!table.get(STDOUT_FD).unwrap().is_error_terminal());
+        assert!(table.get(STDERR_FD).unwrap().is_error_terminal());
         assert_eq!(table.get(3), Err(FileTableError::BadDescriptor(3)));
     }
 

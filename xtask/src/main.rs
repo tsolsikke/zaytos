@@ -538,6 +538,27 @@ const STACK_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // **張る前のガードページを踏む（ADR-0046 の Addendum）。**
+    //
+    // **ガードページは張った後しか効かない。** **張る前に溢れても黙って通る**
+    // ——実際に踏んだ（ADR-0046 の実装。**気づいたのは `old pte` の A/D で、
+    // あれは偶然映っていただけである**）。**この破壊は、その形へわざと戻す。**
+    //
+    // **`stack-guard`（上）とは別の面である**——**あちらは張った後に触れた
+    // #PF を見る。こちらは張る前に触れていたことを見る。**
+    CriticalTest {
+        name: "untouched",
+        feature: "stack-overflow-before-guard-test",
+        expected_markers: &[
+            "stack-guard: the kernel stack guard page was untouched before it was installed = \
+             false",
+        ],
+        forbidden_markers: &[
+            "stack-guard: the kernel stack guard page was untouched before it was installed = true",
+        ],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // #PF に IST を与えず、溢れ → 壊れたスタック上の #PF → #DF の本来の連鎖で
     // ダブルフォルトが出ること。#PF が IST2 上で完結しないこと。
     CriticalTest {
@@ -4253,12 +4274,17 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
             .next()
             .unwrap_or(""),
     );
+    // **区切りは次の回の手前である（ADR-0046 で台本が伸びた）。**
+    // **`script-done` で切っていたが、後ろに `/nope/x` の回が付いた**ので、
+    // **そのままだとその回の出力まで飲み込む**（`/data/lines` と `edited` で
+    // 既に 2 度踏んでいる形である。**台本を変えたら、台本に寄りかかっている
+    // 判定を数え直すこと**）。
     let big_after = program_output(
         plain
             .split("/bin/cat /data/big")
             .nth(2)
             .unwrap_or("")
-            .split("script-done")
+            .split("/bin/zi /nope/x")
             .next()
             .unwrap_or(""),
     );
@@ -4284,20 +4310,37 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     // **期待値をホストが持たない。** **2 つが違うことと、後のほうが
     // `cat` の出した並びの中で後ろに在ることを見る**——**像の中身も、
     // 窓の高さも、動いた量も、写していない。**
+    //
+    // **読むのは画面の行 0 である（ADR-0046 で戻した）。** **VIEW-a では
+    // 行 1 を読んでいた**——**診断行が行 0 を上書きしていたための迂回で、
+    // 診断の出口を画面から外したので要らなくなった。**
+    //
+    // **観測は 3 つである（ADR-0046 で `k` を 60 足した）。**
+    // **下へ 60、上へ 60 で、3 つ目は 1 つ目へ戻る**——**上へ戻る形が
+    // QEMU で一度も通っていなかった。**
     let window_rows: Vec<&str> = serial
         .lines()
         .filter_map(|line| {
-            line.split("screen-window: the text row below the top of the window says ")
+            line.split("screen-window: the top row of the window says ")
                 .nth(1)
         })
         .map(|rest| rest.trim().trim_end_matches('\r').trim_matches('"'))
         .collect();
+    // **突き合わせる相手は編集の後の像である（ADR-0046）。**
+    //
+    // **VIEW-a では編集の前を見ていた。** **行 1 を読んでいたので、
+    // 編集した行（先頭）に当たらなかっただけである。** **行 0 を読むように
+    // なると、そこは `Z` を入れた当の行で、編集の前の並びには無い。**
+    //
+    // **後の像で見るのが正しい**——**窓を動かしたのは編集の後であり、
+    // 画面に出ていたのは保存された中身と同じものである。**
+    // **どちらも `cat` の出力で、こちらが定数を持っていないことは変わらない。**
     let position_in_the_file = |prefix: &str| {
-        big_lines_before
+        big_lines_after
             .iter()
             .position(|line| line.starts_with(prefix))
     };
-    let window_followed_the_cursor = window_rows.len() == 2
+    let window_followed_the_cursor = window_rows.len() == 3
         && window_rows[0] != window_rows[1]
         && match (
             position_in_the_file(window_rows[0]),
@@ -4306,6 +4349,35 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
             (Some(before), Some(after)) => after > before,
             _ => false,
         };
+    // **上へ戻ると、窓も戻る。** **同じ行が先頭に出ることが主張である**
+    // ——**戻り方（先頭にする枝）はホストテストが覆っているが、実機では
+    // ここが初めての通過である。**
+    let window_came_back_up =
+        window_rows.len() == 3 && window_rows[2] == window_rows[0] && !window_rows[0].is_empty();
+
+    // **エラーがエコーエリアに出ている（ADR-0046）。画面の実物で見る。**
+    //
+    // **台本は `/nope/x` を開いて `:w` を打つ。** **親のディレクトリが無いので
+    // 断られる**——**`zi` が代替画面に居る間にエラーを出す唯一の道である。**
+    //
+    // **主張は 2 つあり、どちらも要る。**
+    //
+    // **(1) エラーがエコーエリア（最下行）に出ていること。** **溜めるだけで
+    // 描かなければ、画面は壊れないが人にも見えない**——**それは却下した
+    // (a) と (a') と同じ振る舞いで、区別が付かなくなる。**
+    //
+    // **(2) 本文の行が壊れていないこと。** **`screen-window` が画面の行 0 を
+    // 読んでおり、そちらが持っている。**
+    //
+    // **期待値をホストが持たない**とは言えない——**文言は `zi` の側にある。**
+    // **`zi` の断り書きであることが分かる形で見る**（`zi:` で始まり、
+    // `writing` を含む）。**丸ごと写すと、文言を直すたびにここも直す。**
+    let echo_line = serial
+        .lines()
+        .find_map(|line| line.split("screen-echo: ").nth(1))
+        .map(|rest| rest.trim().trim_end_matches('\r'))
+        .unwrap_or("");
+    let error_reached_the_echo_area = echo_line.contains("zi:") && echo_line.contains("writing");
 
     // **Enter と Backspace と Delete（zi-f）。**
     //
@@ -4470,12 +4542,20 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     );
     println!(
         "{context}: the window followed the cursor down the file = \
-         {window_followed_the_cursor} (the screen row below the top said {window_rows:?}, \
+         {window_followed_the_cursor} (the top row of the window said {window_rows:?}, \
          at lines {:?} of what cat printed)",
         window_rows
             .iter()
             .map(|row| position_in_the_file(row))
             .collect::<Vec<_>>()
+    );
+    println!(
+        "{context}: the window went back up to where it started = {window_came_back_up} \
+         (the three window rows are {window_rows:?})"
+    );
+    println!(
+        "{context}: the error reached the echo area instead of the text = \
+         {error_reached_the_echo_area} (the last row said {echo_line:?})"
     );
     println!(
         "{context}: enter split the line = {enter_split_the_line}, backspace erased = \
@@ -4553,6 +4633,8 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && big_passes_the_old_length_limit
         && big_round_trip
         && window_followed_the_cursor
+        && window_came_back_up
+        && error_reached_the_echo_area
         && append_differs_from_insert
     {
         println!("{context}: PASS");
@@ -8042,6 +8124,11 @@ const DIRECT_SERIAL_PORT_ALLOWLIST: &[DirectSerialPortSite] = &[
             "Ring 3 の write を届ける先。BKL の内側だが、ロガーもコンソールも lib からは届かない",
     },
     DirectSerialPortSite {
+        file: "kernel/src/syscall.rs",
+        item: "ioctl_log_line",
+        reason: "診断の出口（ADR-0046）。画面へ出さずログへ出す当の経路である",
+    },
+    DirectSerialPortSite {
         file: "kernel/src/console/probe.rs",
         item: "observe",
         reason: "画面の観測の判定行（ES-d）。sys_write と同じで、lib からロガーへ届かない",
@@ -10845,6 +10932,12 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // 「環境が色を決めている」ことを誰も主張していない。**
         // **`:w` の量の判定はどれでも通る**（要求 0 に対して 0 なので）。
         //
+        // **`stderr-on-screen-test` は ADR-0046 の前の振る舞いへ戻す**——
+        // **全画面のアプリが動く間も `fd 2` と診断を画面へ書く。**
+        // **落ちるのは 2 本である**——**`screen-window`（画面の行 0 が診断行に
+        // 化ける）と `screen-echo`（エラーがカーソルの居る行へ出て、
+        // エコーエリアが空のままになる）。**
+        //
         // **3 つは長い間「別の理由で」落ちていた**——破壊ビルドの像が
         // ディスクへ載らず、シェルが起きる前に停止していた
         // （`docs/troubleshooting.md`。ES-d で直した）。
@@ -10869,6 +10962,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "zi-skip-grow-test",
             "zi-join-does-nothing-test",
             "zi-window-frozen-test",
+            "stderr-on-screen-test",
         ] {
             total += 1;
             println!("=== xtask check: the zi test catches {feature}");

@@ -596,6 +596,19 @@ pub(crate) mod script {
     /// 見るほうが、間に何を挟んでも動かない。**
     /// **台本を変えるときは、台本に寄りかかっている判定を数え直すこと**
     /// （`docs/verification-coverage.md`）。
+    // **ADR-0046 で `/nope/x` の回を足した。** **`zi` が代替画面に居る間に
+    // エラーを出す唯一の道である**——**親のディレクトリが無いので `:w` が
+    // 断られる**（`create_and_lookup` が `/nope` を引けない）。
+    // **何も打っていないので `dirty` は偽で、`:q` はそのまま抜ける。**
+    // **観測（`\x0f`）はエコーエリアを読む**——**エラーがそこに出ていること
+    // が主張である**（溜めるだけで描かなければ「見えなくする」と同じになる）。
+    //
+    // **VIEW-b の前に `k` を 60 足した。** **窓を上へ戻す形が QEMU で一度も
+    // 通っていなかった**（台本は下へ 60 行だけだった）。**`follow` の「上へ
+    // 出たら先頭にする」枝はホストテストが覆っているが、実機では未通過で
+    // あった。** **台本を触る回に一度に払う**（行頭 Backspace のときと同じ）。
+    // **観測は 3 つになり、3 つ目は 1 つ目と同じ行に戻るはずである。**
+    //
     // **VIEW-a で `/data/big` の回に窓の観測を 2 つ足した。**
     // **`iZ` で先頭行を編集してから、`j` を 60 回送って窓を動かす**
     // ——**本文に使える行数は実測で 48 なので、48 回目から窓が動く。**
@@ -642,8 +655,12 @@ pub(crate) mod script {
         /bin/zi /data/big\n\
         iZ\x1b\x04\x0e\
         jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj\x0e\
+        kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\x0e\
         :wq\n\
-        /bin/cat /data/big\n\x0c";
+        /bin/cat /data/big\n\
+        /bin/zi /nope/x\n\
+        :w\n\x0f\
+        :q\n\x0c";
 
     /// 観測点（ES-d）。**プロンプトの色を見る。**
     const OBSERVE_PROMPT: u8 = 0x01;
@@ -676,6 +693,12 @@ pub(crate) mod script {
     /// **主張を持つ観測点を合図に使わない**（`crate::console::probe` の
     /// `Observation::ScriptDone`）。
     const OBSERVE_DONE: u8 = 0x0c;
+    /// 観測点（ADR-0046）。**エコーエリア（最下行）にエラーが出ているか。**
+    ///
+    /// **`0x0b`（[`Self::OBSERVE_MESSAGE`]）と読むものは同じで、名前だけが
+    /// 違う**——**判定がどちらの主張かを見分けるためである**
+    /// （`crate::console::probe` の `Observation::EchoArea`）。
+    const OBSERVE_ECHO: u8 = 0x0f;
     /// 観測点（VIEW-a）。**`zi` の本文の先頭行に何が出ているか。**
     ///
     /// **`0x0e` を使う。** **`0x09`（Tab）・`0x0a`（LF）・`0x0d`（CR）は
@@ -709,6 +732,7 @@ pub(crate) mod script {
     fn observation_at(byte: u8) -> Option<crate::console::probe::Observation> {
         match byte {
             OBSERVE_ZI_WINDOW => Some(crate::console::probe::Observation::ZiWindow),
+            OBSERVE_ECHO => Some(crate::console::probe::Observation::EchoArea),
             OBSERVE_PROMPT => Some(crate::console::probe::Observation::Prompt),
             OBSERVE_STATUS => Some(crate::console::probe::Observation::Status),
             OBSERVE_BEFORE_ALT => Some(crate::console::probe::Observation::BeforeAlternate),

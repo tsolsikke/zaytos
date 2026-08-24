@@ -394,6 +394,24 @@ static mut BOOT_HANDOFF: BootHandoff = BootHandoff {
     allow(unreachable_code)
 )]
 extern "sysv64" fn kernel_main() -> ! {
+    // 破壊 (ADR-0046 の Addendum, stack-overflow-before-guard-test):
+    // **起動時のカーネルスタックをわざと深くする。**
+    //
+    // **`kernel_main` のローカルとして置く**——**この関数の枠は起動の間ずっと
+    // 生きているので、いちばん深いところがそのぶん深くなる。** **ADR-0046 で
+    // 踏んだ形そのものである**（256 バイトの構造体を `Console` へ足したら
+    // 64KiB を越えた）。
+    //
+    // **大きさは実測で決めた**——**余裕は 208 バイトほどで、ガードページは
+    // 4096 バイトである**（`kernel::stack::install_guard_page` の doc）。
+    // **2048 なら必ず踏み、かつガードページの外までは行かない。**
+    //
+    // **落ちるのは「張る前に手つかずだった」判定だけである。**
+    #[cfg(feature = "stack-overflow-before-guard-test")]
+    let mut deepen_the_boot_stack = [0xA5u8; 2048];
+    #[cfg(feature = "stack-overflow-before-guard-test")]
+    core::hint::black_box(&mut deepen_the_boot_stack);
+
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
     serial.init();
     let mut logger = Logger::new(serial, LogLevel::Trace);
@@ -9387,6 +9405,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "zi-test",
         cfg!(feature = "zi-test"),
         "打鍵の代わりに決定的な台本を read_bytes から返す",
+    ),
+    (
+        "stack-overflow-before-guard-test",
+        cfg!(feature = "stack-overflow-before-guard-test"),
+        "起動時のカーネルスタックをわざと深くし、張る前のガードページを踏む",
+    ),
+    (
+        "stderr-on-screen-test",
+        cfg!(feature = "stderr-on-screen-test"),
+        "全画面のアプリが動く間も fd 2 と診断を画面へ書き、本文を壊す",
     ),
     (
         "zi-cursor-ignore-updown-test",

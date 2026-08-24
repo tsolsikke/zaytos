@@ -359,6 +359,32 @@ pub const SYS_IOCTL: u64 = 16;
 /// （実測。`/usr/include/asm-generic/ioctls.h` の `0x5413`）。
 pub const TIOCGWINSZ: u64 = 0x5413;
 
+/// `TIOCZTAKE`——溜まっているエラーを取り出す要求（ADR-0046）。
+///
+/// # ZaytOS の値である。Linux の値ではない
+///
+/// **全画面のアプリが動く間、`fd 2`はカーネルが溜める。** **アプリが
+/// これで取り出し、自分のエコーエリアへ描く**（ADR-0046）。
+/// **Linux にこの操作は無い**ので、**`TIOC` の空間の外に置く**
+/// （`0x5A` は `Z`。`TIOCGWINSZ` の `0x5413` と衝突しない）。
+///
+/// **新しい syscall 番号は作らない**——**`ADR-0020`は番号を Linux から
+/// 採ると決めており、相当する番号が無い。** **`ioctl`は端末固有の操作の
+/// ための口である。**
+pub const TIOCZTAKE: u64 = 0x5A01;
+
+/// `TIOCZLOG`——1 行をログ（シリアル）へ出す要求（ADR-0046）。
+///
+/// **画面へは出さない。** **検査のための診断の出口であり、読み手は
+/// ホスト側の判定である**（ADR-0046 の「線はどこに在るか」）。
+pub const TIOCZLOG: u64 = 0x5A02;
+
+/// `TIOCZTAKE` / `TIOCZLOG` がやり取りする構造の大きさ（ADR-0046）。
+pub const ZDIAG_LEN: usize = crate::console::pending::ZDIAG_LEN;
+
+/// その構造の本文が始まる位置（ADR-0046）。**手前の 4 バイトは長さと捨てた数である。**
+pub const ZDIAG_TEXT_OFFSET: usize = 4;
+
 /// `struct winsize` の大きさ（e-1）。**`u16` が 4 つである**
 /// （実測。`/usr/include/x86_64-linux-gnu/bits/ioctl-types.h`。
 /// 順に `ws_row` / `ws_col` / `ws_xpixel` / `ws_ypixel`）。
@@ -2153,8 +2179,15 @@ unsafe fn sys_ioctl(
     if !is_terminal {
         return (-ENOTTY) as u64;
     }
-    if request != TIOCGWINSZ {
-        return (-ENOTTY) as u64;
+    match request {
+        TIOCGWINSZ => {}
+        // **溜まっているエラーを取り出す（ADR-0046）。**
+        // SAFETY: 呼び出し元契約をそのまま渡す。
+        TIOCZTAKE => return unsafe { ioctl_take_pending(arg, pml4_phys, direct_map) },
+        // **1 行をログへ出す（ADR-0046）。**
+        // SAFETY: 同上。
+        TIOCZLOG => return unsafe { ioctl_log_line(arg, pml4_phys, direct_map) },
+        _ => return (-ENOTTY) as u64,
     }
 
     // **0 で埋めてから、分かる欄だけを書く**（`sys_stat` と同じ形）。
@@ -2188,6 +2221,93 @@ unsafe fn sys_ioctl(
     if written != WINSIZE_LEN {
         return (-EFAULT) as u64;
     }
+    0
+}
+
+/// 溜まっているエラーを `ioctl` の形で返す（`TIOCZTAKE`。ADR-0046）。
+///
+/// # 何を返すか
+///
+/// **`[0..2]` が長さ、`[2..4]` が捨てた数、`[4..]` が本文である。**
+/// **取り出したら空になる**——**同じものを 2 度出さない。**
+///
+/// # 空で返るのが普通である
+///
+/// **アプリは毎周訊きに来る。** **溜まっていなければ長さ 0 で返る**ので、
+/// **呼ぶ側は「0 なら何もしない」と書けばよい。** **`-ENOENT` にはしない**
+/// ——**errno は異常のためのもので、これは異常ではない。**
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn ioctl_take_pending(arg: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -> u64 {
+    let mut out = [0u8; ZDIAG_LEN];
+    crate::console::take_pending(&mut out);
+
+    // **踏み込む前に検証する。**
+    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    let Some(slice) =
+        (unsafe { validate_user_range(pml4_phys, direct_map, arg, ZDIAG_LEN as u64) })
+    else {
+        return (-EFAULT) as u64;
+    };
+    // SAFETY: slice は検証済みで、長さは ZDIAG_LEN ちょうどである。
+    let written = unsafe { copy_to_user(&slice, 0, &out) };
+    if written != ZDIAG_LEN {
+        return (-EFAULT) as u64;
+    }
+    0
+}
+
+/// 1 行をログ（シリアル）へ出す（`TIOCZLOG`。ADR-0046）。
+///
+/// # 画面へは出さない
+///
+/// **これは診断の出口である。** **読み手はホスト側の判定で、その判定は
+/// シリアルを読んでいる**（ADR-0046 の「線はどこに在るか」）。
+/// **全画面のアプリの画面を、診断が壊してよい理由は無い。**
+///
+/// # 受ける形は `TIOCZTAKE` と同じ構造である
+///
+/// **`[0..2]` が長さ、`[4..]` が本文である。** **捨てた数の欄は読まない。**
+/// **形を 1 つにしておくと、包む側（`userlib`）が 1 つの構造で済む。**
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn ioctl_log_line(arg: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -> u64 {
+    // **踏み込む前に検証する。**
+    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    let Some(slice) =
+        (unsafe { validate_user_range(pml4_phys, direct_map, arg, ZDIAG_LEN as u64) })
+    else {
+        return (-EFAULT) as u64;
+    };
+    let mut buf = [0u8; ZDIAG_LEN];
+    // SAFETY: slice は検証済みで、長さは ZDIAG_LEN ちょうどである。
+    let read = unsafe { copy_from_user(&mut buf, &slice) };
+    if read != ZDIAG_LEN {
+        return (-EFAULT) as u64;
+    }
+    let length = u16::from_le_bytes([buf[0], buf[1]]) as usize;
+    if length > ZDIAG_LEN - ZDIAG_TEXT_OFFSET {
+        return (-EINVAL) as u64;
+    }
+
+    let mut port = common::serial::SerialPort::new(common::serial::SerialPort::COM1_BASE);
+    port.init();
+    for byte in &buf[ZDIAG_TEXT_OFFSET..ZDIAG_TEXT_OFFSET + length] {
+        port.write_byte(*byte);
+    }
+
+    // 破壊 (ADR-0046, stderr-on-screen-test): 診断を画面へも書く。
+    // **ADR-0046 の前の振る舞いそのものである**——**カーソルの居る行の本文が
+    // 診断行に化ける。** **`screen-window` が画面の行 0 を読んで捕まえる。**
+    #[cfg(feature = "stderr-on-screen-test")]
+    if crate::console::foreground_installed() {
+        crate::console::write_foreground_bytes(&buf[ZDIAG_TEXT_OFFSET..ZDIAG_TEXT_OFFSET + length]);
+    }
+
     0
 }
 
@@ -2320,31 +2440,38 @@ unsafe fn sys_write(
     // 破壊 (S11-8, write-ignores-fd): 表を引かず、何番でも出す。
     // **出力はそのまま現れるので、雑に見ると正しく動いているように見える。**
     // **見えないのは「開いていない番号が拒まれること」のほうである。**
+    //
+    // **エラーの出口かどうかも、ここで表から取る（ADR-0046）。**
+    // **番号（2）で見ない**——**表の中身で分ける形をS11-10から続けている。**
     #[cfg(not(feature = "write-ignores-fd"))]
-    {
+    let errors = {
         let kind = crate::vfs::with_current_files(|files| {
             files.get(fd as usize).map(|file| {
                 (
                     file.is_terminal(),
                     file.is_writable_file(),
                     file.inode().map(|inode| inode.number()),
+                    file.is_error_terminal(),
                 )
             })
         });
         match kind {
             // 端末。下のシリアル+画面の経路へ。
-            Ok((true, _, _)) => {}
+            Ok((true, _, _, errors)) => errors,
             // **書きで開いたファイル（zi-c。ADR-0037）。** 複製へ足して返る。
-            Ok((false, true, Some(ino))) => {
+            Ok((false, true, Some(ino), _)) => {
                 // SAFETY: 呼び出し元契約をそのまま渡す。
                 return unsafe { sys_write_to_file(fd, buf, count, ino, pml4_phys, direct_map) };
             }
             // **読みで開いた fd への write は -EBADF である**（Linux の形。
             // ADR-0037。以前の -EROFS はファイルへ書く道が無い時代の値だった）。
-            Ok((false, _, _)) => return (-EBADF) as u64,
+            Ok((false, _, _, _)) => return (-EBADF) as u64,
             Err(e) => return (-errno_for_file_table(e)) as u64,
         }
-    }
+    };
+    // **表を引かない構成では、溜める判断もできない**（fd が何かを知らない）。
+    #[cfg(feature = "write-ignores-fd")]
+    let errors = false;
 
     // 破壊 (S11-9, write-half-only): 要求された長さの半分だけ書いて返す。
     //
@@ -2412,7 +2539,23 @@ unsafe fn sys_write(
         //
         // **据えられていないときは解かない。** 画面へ書くものが無いので、
         // 解いて取り直す理由も無い（起動時の検算はこちらを通る）。
-        if crate::console::foreground_installed() {
+        //
+        // **全画面のアプリが動く間、エラーは画面へ書かずに溜める（ADR-0046）。**
+        // **描くのはアプリである**——取り出してエコーエリアへ出す
+        // （`ioctl(TIOCZTAKE)`）。**カーネルが割り込んで描くと絵が壊れる。**
+        //
+        // 破壊 (ADR-0046, stderr-on-screen-test): 溜めずに、いままでどおり画面へ書く。
+        // **`zi`の本文がカーソルの居る行ごと上書きされる形そのものである。**
+        // **`screen-echo`が最下行を読んで捕まえる**（エラーがエコーエリアに
+        // 出ていないことのほうが主張である）。
+        #[cfg(not(feature = "stderr-on-screen-test"))]
+        let deferred = errors && crate::console::push_pending_if_alternate(&kbuf[..read]);
+        #[cfg(feature = "stderr-on-screen-test")]
+        let deferred = {
+            let _ = errors;
+            false
+        };
+        if !deferred && crate::console::foreground_installed() {
             drop(bkl.take());
             crate::console::write_foreground_bytes(&kbuf[..read]);
             *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));

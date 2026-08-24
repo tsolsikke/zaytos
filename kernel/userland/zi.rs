@@ -987,19 +987,24 @@ fn redraw(view: &View, buffer: &Buffer, window: &mut Window, status: &Status) {
 
 /// 判定行を出す。**内部状態であって画面ではない**（モジュール doc の限界）。
 ///
-/// # 検査の構成でしか出さない（zi-e 前の手当て）
+/// # 出口はログである。画面ではない（ADR-0046）
 ///
-/// **`write` はシリアルと前景コンソールの両方へ届く**（`sys_write` は fd 1 と
-/// fd 2 を区別しない）。**したがって診断行は画面にも描かれ、カーソルの居る
-/// 行の本文を上書きする。** **実測で、本文の4行すべてが判定行に化けていた。**
+/// **[`userlib::log_line`] を通す。** **シリアルへ出て、画面へは出ない。**
 ///
-/// **通常の起動では一切出さない。** 台本で駆動する構成（kernel の `zi-test`
-/// feature が `zi_diagnostics` として届く）でだけ出す。**判定はその構成で
-/// 走るので、主張は保たれる。**
+/// **`STDERR` へ出していた。** **`write` はシリアルと前景コンソールの両方へ
+/// 届く**ので、**診断行が画面にも描かれ、カーソルの居る行の本文を上書き
+/// した**——**実測で、本文の4行すべてが判定行に化けていた。**
+/// **応急は「検査の構成でだけ出す」で、根は「出口が1つしかない」ことだった。**
 ///
-/// **これは応急である。** **根の手当ては「診断の出口を画面と分ける」
-/// （たとえば fd 2 をシリアル専用にする）で、`deferred-decisions.md` に
-/// 行がある**——**Cの移植で `stderr` が来るので、どのみち決める必要がある。**
+/// **ADR-0046 で出口を割った。** **使う人へのエラーは `STDERR` のままで、
+/// カーネルが溜め、アプリがエコーエリアへ描く。** **診断はこちらで、
+/// 読み手はホスト側の判定である。**
+///
+/// # それでも検査の構成でしか出さない
+///
+/// **画面は壊れなくなったが、通常の起動のシリアルに判定行を混ぜる理由は無い。**
+/// 台本で駆動する構成（kernel の `zi-test` feature が `zi_diagnostics` として
+/// 届く）でだけ出す。**判定はその構成で走るので、主張は保たれる。**
 #[cfg(zi_diagnostics)]
 fn report_cursor(buffer: &Buffer, window: &Window, row: usize, col: usize, tag: &[u8]) {
     let mut out = [0u8; 96];
@@ -1035,7 +1040,7 @@ fn report_cursor(buffer: &Buffer, window: &Window, row: usize, col: usize, tag: 
     at += take;
     out[at] = b'\n';
     at += 1;
-    write_all(userlib::STDERR, &out[..at]);
+    userlib::log_line(userlib::STDERR, &out[..at]);
 }
 
 /// 判定行を出さない側（既定のビルド。上の doc を参照）。
@@ -1143,7 +1148,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     // **検査の構成でしか出さない**（[`report_cursor`] と同じ理由。
     // **これも診断であって、使う人に要る行ではない**）。
     #[cfg(zi_diagnostics)]
-    write_all(STDERR, b"zi: ready\n");
+    userlib::log_line(STDERR, b"zi: ready\n");
 
     // **端末の大きさを訊く（e-1）。** **使うのは e-4 の2本立てである**——
     // **いまは受け取って判定行に出すだけで、置き場所には使っていない**
@@ -1196,6 +1201,11 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     report_cursor(buffer, &window, row, col, b"start");
     // **いま状態行に出ている札のモード（ES-d）。**
     let mut shown_mode = mode;
+    // **カーネルが溜めたエラーの控え（ADR-0046）。**
+    //
+    // **代替画面に居る間、`STDERR` へ出したものは画面へ描かれない。**
+    // **取り出して自分のエコーエリアへ描くのがアプリの仕事である。**
+    let mut echo = userlib::Echo::new();
 
     loop {
         // **モードが変わっていたら状態行を描き直す（ES-d）。**
@@ -1219,6 +1229,28 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 },
             );
             shown_mode = mode;
+        }
+        // **カーネルが溜めたエラーを取り出す（ADR-0046）。**
+        //
+        // **読む直前に見る。** モードの札と同じ理由で、**`continue` が
+        // 何本あってもここへ戻る。**
+        //
+        // **出たらその場で描く。** **次の打鍵まで残る**——`vi` と同じで、
+        // **出した瞬間に消えると読めない**（[`Status::message`] の doc）。
+        if echo.take(STDERR) {
+            refresh(
+                &view,
+                &window,
+                &Status {
+                    mode,
+                    row,
+                    col,
+                    dirty,
+                    command: &command[..command_len],
+                    in_command: mode == Mode::Command,
+                    message: echo.line(),
+                },
+            );
         }
         let mut byte = [0u8; 1];
         let got = read(0, &mut byte);
@@ -1253,6 +1285,9 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             break;
         }
         let byte = byte[0];
+        // **打鍵が来たら控えを空にする（ADR-0046）。** **次の描き直しで
+        // 消える**——`vi` と同じで、報せは次の打鍵まで残る。
+        echo.clear();
 
         // **3 バイトの状態機械を先に通す**（`zash` と同じ形）。
         match (escape, byte) {
@@ -1383,10 +1418,15 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                             leave_screen();
                             release_and_exit(buffer, 0)
                         }
-                        Command::Failed => {
-                            leave_screen();
-                            release_and_exit(buffer, 5)
-                        }
+                        // **保存に失敗しても抜けない（ADR-0046）。**
+                        //
+                        // **抜けると、編集した中身がそのまま失われる。**
+                        // **`vi` も留まる**——`:w` が失敗しても編集は続く。
+                        //
+                        // **理由は次の周でエコーエリアに出る**——`save` が
+                        // `STDERR` へ出したものをカーネルが溜め、
+                        // [`userlib::Echo`] が取り出して最下行へ描く。
+                        Command::Failed => {}
                         // **保存したら変更は無い。**
                         Command::Saved => dirty = false,
                         Command::Refused => {}
@@ -1515,6 +1555,9 @@ fn save(path: &[u8], buffer: &Buffer) -> bool {
     // **`:w` は全置換なので、どちらの道でも同じ状態から書き始める。**
     let fd = open_write_create(path);
     if fd < 0 {
+        // **使う人へのエラーである（ADR-0046）。** **`STDERR` へ出す**と、
+        // **代替画面に居る間はカーネルが溜め、次の周で [`userlib::Echo`] が
+        // 取り出してエコーエリアへ描く。** **画面は壊れない。**
         write_all(STDERR, b"zi: cannot open for writing\n");
         return false;
     }
@@ -1572,7 +1615,7 @@ fn report_save(requested: usize, written: i64, ok: bool) {
     let tail: &[u8] = if ok { b" match=true\n" } else { b" match=false\n" };
     out[at..at + tail.len()].copy_from_slice(tail);
     at += tail.len();
-    write_all(STDERR, &out[..at]);
+    userlib::log_line(STDERR, &out[..at]);
 }
 
 /// 判定行を出さない側（既定のビルド）。
@@ -1608,7 +1651,7 @@ fn report_window_size(size: Result<userlib::WindowSize, i64>) {
     at += count;
     out[at] = b'\n';
     at += 1;
-    write_all(STDERR, &out[..at]);
+    userlib::log_line(STDERR, &out[..at]);
 }
 
 /// 判定行を出さない側（既定のビルド）。

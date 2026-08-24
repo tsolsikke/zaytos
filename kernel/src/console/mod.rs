@@ -29,6 +29,8 @@ pub mod dirty;
 #[cfg(feature = "zi-test")]
 pub(crate) mod probe;
 pub mod screen;
+// **全画面のアプリが動く間の`fd 2`の控え（ADR-0046）。**
+pub(crate) mod pending;
 
 pub use backbuffer::{BackBuffer, BackBufferError};
 pub use dirty::{DirtyRegion, Rect};
@@ -94,12 +96,36 @@ impl Drop for ForegroundConsole<'_> {
 static FOREGROUND_ANSI: common::critical::Locked<common::ansi::AnsiParser> =
     common::critical::Locked::new(common::ansi::AnsiParser::new());
 
+/// 全画面のアプリが動く間に `fd 2` へ来たエラーの控え（ADR-0046）。
+///
+/// # なぜ静的なのか——実測で決めた
+///
+/// **最初は [`Console`] の中へ置いた。** **代替画面の状態と同じ場所だからである。**
+/// **`Console` は `kernel_main` のローカルなので、起動時のカーネルスタックが
+/// 272 バイト深くなった**（実測）。**そして 64KiB を越え、ガードページへ
+/// 15 バイト書き込んだ**（実測。ガードページの先頭から 4032 バイト目から。
+/// **`stack-guard` の判定行の PTE に A/D が立っていたのが最初の兆候である**）。
+///
+/// **したがって `.bss` の静的へ移した。** **[`FOREGROUND_ANSI`] と同じ形である。**
+///
+/// # 錠は [`FOREGROUND_ANSI`] と同じ根拠で足りる
+///
+/// **書き手は 1 つである**（[`FOREGROUND`] の doc の保証）。**同時に 2 つの
+/// `write` は走らない。** **`Locked` は保持中の割り込みを禁じる**ので、
+/// **保持したまま描かない**——写しを取ってから描く（[`flush_pending_to_screen`]）。
+static PENDING: common::critical::Locked<pending::Pending> =
+    common::critical::Locked::new(pending::Pending::new());
+
 /// 前景の [`Console`] を据える。**ガードが落ちるまで有効である。**
 pub fn install_foreground(console: &mut Console) -> ForegroundConsole<'_> {
     // **ANSI の状態を最初へ戻す（zi-b）。** 前のプログラムが CSI 列の途中で
     // 死んでいても、次のプログラムの 1 字目が列の続きに化けない
     // （`release_foreground` が溜まった入力を捨てるのと同じ向きの手当て）。
     FOREGROUND_ANSI.lock().reset();
+    // **前のプログラムが残した控えを捨てる（ADR-0046）。**
+    // **次のプログラムのエコーエリアへ、前のプログラムのエラーを出さない。**
+    // **記録は残る**——シリアルには既に出ている。
+    PENDING.lock().clear();
     FOREGROUND.store(console as *mut Console, Ordering::Release);
     ForegroundConsole { _console: console }
 }
@@ -145,6 +171,78 @@ pub fn foreground_geometry() -> Option<(u32, u32, u32, u32)> {
     let (columns, rows) = console.size();
     let layout = console.framebuffer_layout();
     Some((columns, rows, layout.width(), layout.height()))
+}
+
+/// 代替画面が有効なら、エラーを控えへ溜める（ADR-0046）。**溜めたら真。**
+///
+/// # 見るのと溜めるのを 1 回で済ませる
+///
+/// **「代替画面か」を訊いてから「溜める」を呼ぶ形にしない。**
+/// **2 回に割ると、その間に切り替わりうる形に見える**——
+/// **実際には書き手が 1 つなので起きないが、読む人にそれを保証させない。**
+///
+/// # 溜めるのは速い
+///
+/// **BKL を解かない。** 解くのは描画と転送が 1 ティックの半分ほど掛かる
+/// ためで（[`write_foreground_bytes`] の doc）、**こちらは写すだけである。**
+pub fn push_pending_if_alternate(bytes: &[u8]) -> bool {
+    let console = FOREGROUND.load(Ordering::Acquire);
+    if console.is_null() {
+        return false;
+    }
+    // SAFETY: 非 null なら [`install_foreground`] のガードが生きており、
+    // その間は据えた側が `&mut Console` を預けたままなので書けない
+    // （[`FOREGROUND`] の doc）。他のコアと他の遠征が書かないことも同じ doc に挙げてある。
+    let console = unsafe { &*console };
+    if !console.alternate_screen_active() {
+        return false;
+    }
+    PENDING.lock().push(bytes);
+    true
+}
+
+/// 溜まっているエラーを `ioctl` の形へ取り出す（ADR-0046）。
+///
+/// **前景が据えられていなければ、長さ 0 のまま返る**
+/// （[`foreground_geometry`] が 0 を返すのと同じ立場。**端末ではある**）。
+pub fn take_pending(out: &mut [u8; pending::ZDIAG_LEN]) {
+    PENDING.lock().take_into(out);
+}
+
+/// 控えに残っているエラーを、いまの画面へそのまま書く（ADR-0046）。
+///
+/// # 代替画面から戻るときに呼ぶ
+///
+/// **取り出されないまま終わったものを、黙って捨てない。**
+/// **戻った先は通常画面なので、ここへ書くのはいままでどおりの振る舞いである。**
+///
+/// # 解釈しない
+///
+/// **`put_char` へ直に置く。** **ANSI の状態機械を通さない**——
+/// **エラーの文言に CSI が混ざっていても、画面を動かす権利は無い。**
+///
+/// # 錠を保持したまま描かない
+///
+/// **写しを取ってから描く**（[`PENDING`] の doc）。
+fn flush_pending_to_screen(console: &mut Console) {
+    let mut text = [0u8; pending::ZDIAG_TEXT];
+    let length = {
+        let mut guard = PENDING.lock();
+        if guard.is_empty() {
+            return;
+        }
+        let length = guard.text().len();
+        text[..length].copy_from_slice(guard.text());
+        guard.clear();
+        length
+    };
+    for byte in &text[..length] {
+        console.put_char(*byte as char);
+    }
+    // **行を閉じる。** 続けて出るものと同じ行に並ばない。
+    if text[length - 1] != b'\n' {
+        console.put_char('\n');
+    }
 }
 
 /// 前景の [`Console`] へバイト列を書く。**据えられていなければ何もしない。**
@@ -214,7 +312,11 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
                     // **戻すときに描き直すのはコンソールの側である**——
                     // Ring 3 には画面を読み戻す手段が無い。
                     Some(common::ansi::AnsiAction::AlternateScreen(alternate)) => {
-                        console.set_alternate_screen(alternate)
+                        console.set_alternate_screen(alternate);
+                        // **戻ったら、取り出されずに残ったエラーを流す（ADR-0046）。**
+                        if !alternate {
+                            flush_pending_to_screen(console);
+                        }
                     }
                 }
             }

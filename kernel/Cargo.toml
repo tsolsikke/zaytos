@@ -175,6 +175,15 @@ zi-cursor-ignore-updown-test = []
 zi-write-skip-body-test = []
 # 破壊（zi-d-2）: 挿入の最初の 1 字を落とす。読み戻しが 1 字短くなる。
 zi-insert-drop-first-test = []
+# 破壊（ADR-0046 の Addendum）: kernel_main のローカルを 2048 バイト太らせ、
+# 起動時のカーネルスタックが張る前のガードページを踏む形にする。
+# 「張る前に手つかずだった」判定が捕まえる。
+stack-overflow-before-guard-test = []
+# 破壊（ADR-0046）: 全画面のアプリが動く間も fd 2 と診断を画面へ書く。
+# ADR-0046 の前の振る舞いそのもので、zi の本文がカーソルの居る行ごと
+# 診断行に化ける。screen-window（画面の行 0）と screen-echo（最下行）が
+# 捕まえる。
+stderr-on-screen-test = []
 # 破壊（ADR-0038）: 穴を全 0 として読まず拒む。common へ転送する。
 ext2-sparse-as-error-test = ["common/ext2-sparse-as-error"]
 # 破壊（ADR-0039）: 区画を memsz ではなく filesz で張る。.bss が張られず、
