@@ -265,6 +265,9 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
     // その間は据えた側が `&mut Console` を預けたままなので書けない（上の doc）。
     // 他のコアと他の遠征が書かないことも同じ doc に挙げてある。
     let console = unsafe { &mut *console };
+    // **数える（PERF）。** **落とすバイトも数える**——**Ring 3 から見れば
+    // 送った量である。**
+    console.note_foreground_write(bytes.len());
     // **UTF-8 でないバイトは落とす。** Ring 3 から来る列に UTF-8 を要求しない
     // （`load_user_program` の `argv` と同じ立場）。画面へ出せるのは字だけである。
     if let Ok(text) = core::str::from_utf8(bytes) {

@@ -61,6 +61,22 @@ pub(crate) enum Observation {
     /// （`PROMPT_COLOR` と同じ立場）。**写しが古くなれば、読む行が
     /// 状態行になって突き合わせが落ちる**——黙って緑にはならない。
     ViewWindow,
+    /// 描画の計器（PERF）。**層ごとの数をそのまま出す。**
+    ///
+    /// # 何を測るか
+    ///
+    /// **`write` の回数とバイト数**（Ring 3 から画面へ届いた量）、
+    /// **字を置いた回数**（`put_char`）、**転送の回数とバイト数**（`flush`）、
+    /// **転送に費やしたサイクル**（TSC）。
+    ///
+    /// **差分で読む。** **観測点を動きの前後に置き、ホスト側が引き算する**
+    /// ——**累計をそのまま読んでも、どの動きの分か分からない。**
+    ///
+    /// # 判定行ではない
+    ///
+    /// **数は揺れる**（TSC は特に）。**主張を持たせない**——**速さを直す前に、
+    /// どの層が重いかを知るための計器である。**
+    DrawStats,
     /// `more` の出力（VIEW-c）。**画面の下 3 行を控えて出す。**
     ///
     /// # `less` と逆の主張を受け止める
@@ -273,6 +289,7 @@ pub(crate) fn observe(kind: Observation) {
         Observation::EchoArea => observe_command_line(&mut serial, console, "screen-echo"),
         Observation::ViewWindow => observe_view_window(&mut serial, console),
         Observation::MoreOutput => observe_more_output(&mut serial, console),
+        Observation::DrawStats => observe_draw_stats(&mut serial, console),
         Observation::ZiWindow => observe_zi_window(&mut serial, console),
         Observation::ScriptDone => {
             let _ = writeln!(serial, "script-done: the script reached its end");
@@ -473,6 +490,25 @@ fn observe_view_window(serial: &mut SerialPort, console: &mut crate::console::Co
         "screen-view: the top row says {:?} and the last text row (row {bottom}) says {:?}",
         core::str::from_utf8(&top_text[..top_length]).unwrap_or("?"),
         core::str::from_utf8(&bottom_text[..bottom_length]).unwrap_or("?")
+    );
+}
+
+/// 描画の層ごとの数をそのまま出す（PERF）。
+///
+/// **主張しない。** **差分を取るのはホスト側である。**
+fn observe_draw_stats(serial: &mut SerialPort, console: &mut crate::console::Console) {
+    let stats = console.stats();
+    let _ = writeln!(
+        serial,
+        "screen-cost: writes={} write_bytes={} glyphs={} flushes={} flush_bytes={} \
+         flush_cycles={} full_screen_flushes={}",
+        stats.foreground_writes,
+        stats.foreground_bytes,
+        stats.glyphs_drawn,
+        stats.flush_count,
+        stats.transferred_bytes,
+        stats.flush_cycles_total,
+        stats.full_screen_flush_count
     );
 }
 

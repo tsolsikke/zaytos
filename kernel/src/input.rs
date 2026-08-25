@@ -678,7 +678,10 @@ pub(crate) mod script {
     /// 2. **入る前の画面を控え**（`\x06`）、**`less /data/big` を起こす**
     /// 3. **窓の上端と下端を観測する**（`\x10`）——**ファイルの先頭行が出ている**
     /// 4. **`Space` で1画面ぶん下げ、また観測する**——**窓の外に在った行が
-    ///    見えるようになったこと**が主張である
+    ///    見えるようになったこと**が主張である。
+    ///    **前後で描画の計器も撮る**（`\x12`。PERF）——**1画面の移動に
+    ///    `write` が何回、字が何回、転送が何回・何バイト掛かるか。**
+    ///    **続けて `j` の前後でも撮る**——**1行の移動と1画面の移動を比べる。**
     /// 5. **`j` を3回、`k` を3回、`b` で1画面ぶん戻して観測する**
     ///    ——**3 と同じ行に戻るはずである**（`j` と `k` が釣り合い、
     ///    `b` が `Space` を打ち消す）
@@ -698,12 +701,13 @@ pub(crate) mod script {
     #[cfg(feature = "view-test")]
     const SCRIPT: &[u8] = b"\x01/bin/cat /data/big\n\
         \x06/bin/less /data/big\n\
-        \x10 \x10\
-        jjjkkkb\x10\
+        \x10\x12 \x12\x10\
+        \x12j\x12\
+        jjkkkb\x10\
         q\x05\
         /bin/cat /data/big\n\
         /bin/more /data/big\n\x20q\
-        /bin/more /data/big\n\x20\x20\x11\
+        /bin/more /data/big\n\x12\x20\x12\x20\x11\
         /bin/cat /data/big\n\x0c";
 
     /// 観測点（ES-d）。**プロンプトの色を見る。**
@@ -737,6 +741,8 @@ pub(crate) mod script {
     /// **主張を持つ観測点を合図に使わない**（`crate::console::probe` の
     /// `Observation::ScriptDone`）。
     const OBSERVE_DONE: u8 = 0x0c;
+    /// 観測点（PERF）。**描画の層ごとの数。** **差分で読む。**
+    const OBSERVE_DRAW_STATS: u8 = 0x12;
     /// 観測点（VIEW-c）。**`more` が抜けた後の画面の下 3 行。**
     const OBSERVE_MORE_OUTPUT: u8 = 0x11;
     /// 観測点（VIEW-b）。**`less` の窓の上端と、いちばん下の本文行。**
@@ -783,6 +789,7 @@ pub(crate) mod script {
             OBSERVE_ECHO => Some(crate::console::probe::Observation::EchoArea),
             OBSERVE_VIEW_WINDOW => Some(crate::console::probe::Observation::ViewWindow),
             OBSERVE_MORE_OUTPUT => Some(crate::console::probe::Observation::MoreOutput),
+            OBSERVE_DRAW_STATS => Some(crate::console::probe::Observation::DrawStats),
             OBSERVE_PROMPT => Some(crate::console::probe::Observation::Prompt),
             OBSERVE_STATUS => Some(crate::console::probe::Observation::Status),
             OBSERVE_BEFORE_ALT => Some(crate::console::probe::Observation::BeforeAlternate),

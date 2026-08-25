@@ -4868,10 +4868,44 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
             .iter()
             .any(|row| !row.is_empty() && position(row).is_some());
 
+    // **描画の費用（PERF）。** **主張しない**——**層ごとの数を差で出すだけである。**
+    // **どの層が重いかを、推測ではなく実測で見るために在る。**
+    let costs: Vec<Vec<u64>> = serial
+        .lines()
+        .filter_map(|line| line.split("screen-cost: ").nth(1))
+        .map(|rest| {
+            rest.split_whitespace()
+                .filter_map(|field| field.split('=').nth(1))
+                .filter_map(|value| value.trim_end_matches('\r').parse::<u64>().ok())
+                .collect()
+        })
+        .collect();
+    let delta = |from: usize, to: usize| -> Option<Vec<u64>> {
+        let (a, b) = (costs.get(from)?, costs.get(to)?);
+        if a.len() != b.len() {
+            return None;
+        }
+        Some(a.iter().zip(b).map(|(x, y)| y.saturating_sub(*x)).collect())
+    };
+    let cost_fields = "writes write_bytes glyphs flushes flush_bytes flush_cycles full_flushes";
+
     println!(
         "{context}: script finished = {} ({:?})",
         finished_after.is_some(),
         finished_after
+    );
+    println!(
+        "{context}: (info) the cost of one Space (a whole page) = {:?} [{cost_fields}]",
+        delta(0, 1)
+    );
+    println!(
+        "{context}: (info) the cost of one j (a single line) = {:?} [{cost_fields}]",
+        delta(2, 3)
+    );
+    println!(
+        "{context}: (info) the cost of one Space in more (one page of plain output) = {:?} \
+         [{cost_fields}]",
+        delta(4, 5)
     );
     println!(
         "{context}: less opened at the top of the file = {opened_at_the_top} \

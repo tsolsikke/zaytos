@@ -65,6 +65,17 @@ pub struct FlushStats {
     pub write_cycles_max: u64,
     /// その経路を通った回数（`write!` / `writeln!` の回数）。
     pub write_count: u64,
+    /// Ring 3 の `write` が前景の画面へ届いた回数（PERF）。
+    ///
+    /// **`write` 1 回につき 1 回である**（`crate::console::write_foreground_bytes`）。
+    /// **速さを測るとき、いちばん外側の層がここである。**
+    pub foreground_writes: u64,
+    /// その `write` が運んだバイト数の合計（PERF）。
+    pub foreground_bytes: u64,
+    /// 画面へ字を置いた回数（PERF）。**[`Console::put_char`] を通った回数である。**
+    ///
+    /// **描いた字とは限らない**——**スクロールや行消去だけの回も数える。**
+    pub glyphs_drawn: u64,
 }
 
 impl FlushStats {
@@ -371,6 +382,12 @@ impl Console {
     /// カーソルの色（ES-c の判定用）。**判定が値を写さずに済ませる。**
     pub fn cursor_color(&self) -> Color {
         Self::CURSOR_COLOR
+    }
+
+    /// Ring 3 の `write` が届いたことを数える（PERF）。
+    pub fn note_foreground_write(&mut self, bytes: usize) {
+        self.stats.foreground_writes += 1;
+        self.stats.foreground_bytes += bytes as u64;
     }
 
     /// いま代替画面に居るか（ADR-0046）。
@@ -707,6 +724,9 @@ impl Console {
 
     /// 1 文字書く。転送はしない。
     pub fn put_char(&mut self, c: char) {
+        // **数える（PERF）。** **速さの層を分けるために要る**——
+        // **この数と、`write` の数と、転送の数が別の層である。**
+        self.stats.glyphs_drawn += 1;
         // **描いてあるカーソルを先に消す（ES-c）。** **消さずに字を置くと、
         // カーソルの跡が字の下に残る**——下線とグリフが重なる位置にあるため。
         self.erase_drawn_cursor();
