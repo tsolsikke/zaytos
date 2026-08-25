@@ -183,6 +183,12 @@ view-test = []
 # ので、雑に見ると気づけない。「窓の外に在った行が見えるようになった」判定が
 # 捕まえる。
 less-window-frozen-test = []
+# 破壊（PERF-a）: write のたびに転送する。ADR-0047 の前の形そのもので、
+# 転送の回数と量が桁で増える。計器の判定（1回の移動で転送が1回）が捕まえる。
+flush-every-write-test = []
+# 破壊（PERF-a）: read の時点で転送しない。溜めたまま入力を待つので、画面が
+# 古いまま止まる。画面を読む判定が軒並み落ちる。
+read-skip-flush-test = []
 # 破壊（VIEW-c）: more が代替画面へ入る。less の振る舞いそのもので、抜けると
 # 元の画面が戻り、more の出したものが消える。「出力が残る」判定が捕まえる。
 more-uses-alternate-screen-test = []

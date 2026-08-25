@@ -69,11 +69,19 @@ static FOREGROUND: AtomicPtr<Console> = AtomicPtr::new(core::ptr::null_mut());
 ///
 /// **`&mut Console` を預かる。** 落ちるときに静的を戻す。
 pub struct ForegroundConsole<'a> {
-    _console: &'a mut Console,
+    /// 据えている [`Console`]。**手放すときに溜まりを送るために持つ**
+    /// （`ADR-0047`。**それまでは名前を使っていなかった**）。
+    console: &'a mut Console,
 }
 
 impl Drop for ForegroundConsole<'_> {
     fn drop(&mut self) {
+        // **溜まっている描画を送ってから手放す（ADR-0047）。**
+        // **次のプログラムへ持ち越さない**——**手放した後は誰も送れない。**
+        //
+        // **この経路にも判定が置けない**（`crate::syscall` の `SYS_EXIT` と
+        // 同じ理由。**次に据える者が書いて読む**）。**受け皿として置く。**
+        self.console.flush();
         FOREGROUND.store(core::ptr::null_mut(), Ordering::Release);
     }
 }
@@ -127,7 +135,7 @@ pub fn install_foreground(console: &mut Console) -> ForegroundConsole<'_> {
     // **記録は残る**——シリアルには既に出ている。
     PENDING.lock().clear();
     FOREGROUND.store(console as *mut Console, Ordering::Release);
-    ForegroundConsole { _console: console }
+    ForegroundConsole { console }
 }
 
 /// 前景の [`Console`] が据えられているか。
@@ -245,6 +253,29 @@ fn flush_pending_to_screen(console: &mut Console) {
     }
 }
 
+/// 溜まっている描画を画面へ送る（ADR-0047）。**溜まっていなければ何もしない。**
+///
+/// # 呼ぶ側の前提
+///
+/// **BKL を解いてから呼ぶこと**（[`write_foreground_bytes`] と同じ理由。
+/// **全面転送は 5.05M サイクル掛かる**——実測）。
+///
+/// # いつ呼ぶか
+///
+/// **3 つである**（`ADR-0047` の決定 2）——**Ring 3 が端末から `read` したとき、
+/// プロセスが終わるとき、前景を手放すとき。**
+pub fn flush_foreground() {
+    let console = FOREGROUND.load(Ordering::Acquire);
+    if console.is_null() {
+        return;
+    }
+    // SAFETY: 非 null なら [`install_foreground`] のガードが生きており、
+    // その間は据えた側が `&mut Console` を預けたままなので書けない
+    // （[`FOREGROUND`] の doc）。他のコアと他の遠征が書かないことも同じ doc にある。
+    let console = unsafe { &mut *console };
+    console.flush();
+}
+
 /// 前景の [`Console`] へバイト列を書く。**据えられていなければ何もしない。**
 ///
 /// # 呼ぶ側の前提
@@ -323,6 +354,16 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
                     }
                 }
             }
+            // **ここでは転送しない（ADR-0047）。** **溜めておき、Ring 3 が
+            // 入力を待った時点でまとめて送る**（[`flush_foreground`]）。
+            //
+            // **実測が理由である**——**`write` ごとに送っていたので、
+            // Ring 3 の 1,529 バイトに対して 6MB を送っていた**（`less` の
+            // 1 回の移動。ADR-0047 の表）。
+            //
+            // 破壊 (PERF-a, flush-every-write-test): ここで送る。**ADR-0047 の
+            // 前の形そのものである**——**転送の回数と量が桁で増える。**
+            #[cfg(feature = "flush-every-write-test")]
             console.flush();
             *FOREGROUND_ANSI.lock() = parser;
         }

@@ -4889,6 +4889,21 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
     };
     let cost_fields = "writes write_bytes glyphs flushes flush_bytes flush_cycles full_flushes";
 
+    // **1 回の動きにつき、転送は 1 回である（ADR-0047）。**
+    //
+    // **回数を判定に載せ、サイクルと量は (info) に置く**——**回数は揺れないが、
+    // サイクルは揺れる**（実測。同じ構成で 4.5M と 4.7M）。
+    //
+    // **`ADR-0047` の前は 152 回だった**（実測）。**破壊 `flush-every-write` が
+    // その形へ戻す。**
+    let one_transfer_per_move = matches!(
+        (
+            delta(0, 1).and_then(|values| values.get(3).copied()),
+            delta(2, 3).and_then(|values| values.get(3).copied()),
+        ),
+        (Some(1), Some(1))
+    );
+
     println!(
         "{context}: script finished = {} ({:?})",
         finished_after.is_some(),
@@ -4906,6 +4921,12 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
         "{context}: (info) the cost of one Space in more (one page of plain output) = {:?} \
          [{cost_fields}]",
         delta(4, 5)
+    );
+    println!(
+        "{context}: one move costs one transfer = {one_transfer_per_move} \
+         (Space {:?} transfer(s), j {:?} transfer(s); ADR-0047 replaced one transfer per write)",
+        delta(0, 1).and_then(|values| values.get(3).copied()),
+        delta(2, 3).and_then(|values| values.get(3).copied())
     );
     println!(
         "{context}: less opened at the top of the file = {opened_at_the_top} \
@@ -4957,6 +4978,7 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
         && screen_came_back
         && image_unchanged
         && more_output_stayed
+        && one_transfer_per_move
     {
         println!("{context}: PASS");
         Ok(())
@@ -11251,7 +11273,12 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // **`less` の窓を止める形と、`more` が代替画面へ入る形の 2 種である。**
         // **後者は `less` の振る舞いそのもので、`more` との違いを消す**
         // ——**「出したものが残る」判定だけが落ちる。**
-        for feature in ["less-window-frozen-test", "more-uses-alternate-screen-test"] {
+        for feature in [
+            "less-window-frozen-test",
+            "more-uses-alternate-screen-test",
+            "flush-every-write-test",
+            "read-skip-flush-test",
+        ] {
             total += 1;
             begin_item(&format!("the view test catches {feature}"));
             match cmd_view_test(&[feature]) {
@@ -12176,7 +12203,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 23,
-    full: 233,
+    full: 235,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

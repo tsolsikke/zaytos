@@ -968,7 +968,7 @@ unsafe fn dispatch(
         }
         SYS_READ => {
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-            unsafe { sys_read(args[0], args[1], args[2], pml4_phys, direct_map) }
+            unsafe { sys_read(args[0], args[1], args[2], pml4_phys, direct_map, bkl) }
         }
         SYS_GETDENTS64 => {
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
@@ -1023,6 +1023,21 @@ unsafe fn dispatch(
             let status = args[1];
             PROCESS_EXIT_STATUS.store(status, Ordering::SeqCst);
             PROCESS_EXITED.store(true, Ordering::SeqCst);
+            // **溜まっている描画を送る（ADR-0047）。**
+            //
+            // **待たずに終わるプログラムを取りこぼさない**——`cat` と `ls` は
+            // 書いて、読まずに終わる。**入力を待つ時点が来ない。**
+            //
+            // **この経路には判定が置けない。** **次に読む者が必ず居るので、
+            // 掃かなくても1つ後の `read` で送られる**（`zash` が待つ）。
+            // **受け皿として置く**——**「誰も読まないまま終わる」形が来たら、
+            // ここだけが残る。** **観測できないので、破壊も立てない**
+            // （`docs/verification-coverage.md`）。
+            if crate::console::foreground_installed() {
+                drop(bkl.take());
+                crate::console::flush_foreground();
+                *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
+            }
             0
         }
         // 失敗は -errno（-1..-4095）。
@@ -1272,7 +1287,31 @@ unsafe fn sys_read(
     count: u64,
     pml4_phys: PhysAddr,
     direct_map: DirectMap,
+    bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
+    // **溜まっている描画を送る（ADR-0047）。**
+    //
+    // **ここが「Ring 3 が入力を待つ側へ回る直前」である。** **返す値が入力でも
+    // `-EAGAIN` でも掃く**——**溜まっていなければ `flush` は何もしない**ので、
+    // `-EAGAIN` で回り続ける形でも費用は増えない。
+    //
+    // **BKL を解いてから呼ぶ**（`crate::console::flush_foreground` の doc。
+    // **全面転送は 5.05M サイクル掛かる**——実測）。
+    //
+    // **端末でない fd でも掃く。** **判定に使うのは「読む側へ回った」ことだけで、
+    // どの fd から読むかではない**——**ファイルを読む前に画面が古いままである
+    // 理由も無い。**
+    //
+    // 破壊 (PERF-a, read-skip-flush-test): ここで送らない。**溜めたまま
+    // 入力を待つ**ので、**画面が古いまま止まる**——**次に誰かが送るまで
+    // 出ない。** **画面を読む判定が軒並み落ちる。**
+    #[cfg(not(feature = "read-skip-flush-test"))]
+    if crate::console::foreground_installed() {
+        drop(bkl.take());
+        crate::console::flush_foreground();
+        *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
+    }
+
     // **表を握る区間を短くする。** ここでは inode と位置の写しだけを取り、
     // 検証とブロックの読み出しは外で行う（`Locked` は割り込みを禁止する）。
     let opened = crate::vfs::with_current_files(|files| {

@@ -9407,6 +9407,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "打鍵の代わりに決定的な台本を read_bytes から返す",
     ),
     (
+        "flush-every-write-test",
+        cfg!(feature = "flush-every-write-test"),
+        "write のたびに画面へ転送する（ADR-0047 の前の形）",
+    ),
+    (
+        "read-skip-flush-test",
+        cfg!(feature = "read-skip-flush-test"),
+        "入力を待つ時点で転送せず、画面が古いまま止まる",
+    ),
+    (
         "more-uses-alternate-screen-test",
         cfg!(feature = "more-uses-alternate-screen-test"),
         "more が代替画面へ入り、抜けると出した行が消える",
