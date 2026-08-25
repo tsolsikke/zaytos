@@ -500,8 +500,9 @@ fn observe_draw_stats(serial: &mut SerialPort, console: &mut crate::console::Con
     let stats = console.stats();
     let _ = writeln!(
         serial,
-        "screen-cost: writes={} write_bytes={} glyphs={} flushes={} flush_bytes={} \
+        "screen-cost: syscalls={} writes={} write_bytes={} glyphs={} flushes={} flush_bytes={} \
          flush_cycles={} full_screen_flushes={}",
+        stats.terminal_writes,
         stats.foreground_writes,
         stats.foreground_bytes,
         stats.glyphs_drawn,

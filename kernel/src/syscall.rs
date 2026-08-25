@@ -2530,6 +2530,10 @@ unsafe fn sys_write(
     #[cfg(feature = "write-half-only")]
     let count = if count > 24 { count.div_ceil(2) } else { count };
 
+    // **システムコールの回数を数える（PERF-b）。** **刻む前に 1 回だけである**
+    // ——**刻んだ後の回数は `foreground_writes` が別に持つ。**
+    crate::console::note_terminal_write();
+
     let mut port = common::serial::SerialPort::new(common::serial::SerialPort::COM1_BASE);
     port.init();
 

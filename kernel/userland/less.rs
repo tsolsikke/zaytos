@@ -163,6 +163,8 @@ fn leave_screen() {
 }
 
 /// カーソルを動かす（CUP。0 起点で受け取り、1 起点で出す）。
+///
+/// **溜める（PERF-b）。** **送るのは [`userlib::Frame::flush`] である。**
 fn move_cursor(row: usize, col: usize) {
     let mut sequence = [0u8; 32];
     let mut at = 0usize;
@@ -181,7 +183,7 @@ fn move_cursor(row: usize, col: usize) {
     at += count;
     sequence[at] = b'H';
     at += 1;
-    write_all(STDOUT, &sequence[..at]);
+    userlib::frame_push(STDOUT, &sequence[..at]);
 }
 
 /// 10 進の数を書く。**返るのは書いた桁数である。**
@@ -234,13 +236,13 @@ fn draw_text(view: &View, doc: &Doc, window: &Window) {
     for row in 0..view.text_rows() {
         move_cursor(row, 0);
         // EL(2): その行を消してから置く（消し残しを作らない）。
-        write_all(STDOUT, b"\x1b[2K");
+        userlib::frame_push(STDOUT, b"\x1b[2K");
         let line = visible.start + row;
         if line < visible.end {
             let text = doc.line(line);
             let take = text.len().min(view.columns);
             if take > 0 {
-                write_all(STDOUT, &text[..take]);
+                userlib::frame_push(STDOUT, &text[..take]);
             }
         }
     }
@@ -253,11 +255,12 @@ fn draw_text(view: &View, doc: &Doc, window: &Window) {
 /// **エラーは、位置の表示より読まれるべきものである。**
 fn draw_status(view: &View, doc: &Doc, window: &Window, echo: &userlib::Echo) {
     move_cursor(view.status_row(), 0);
-    write_all(STDOUT, b"\x1b[2K");
+    userlib::frame_push(STDOUT, b"\x1b[2K");
 
     if !echo.line().is_empty() {
         let take = echo.line().len().min(view.columns);
-        write_all(STDOUT, &echo.line()[..take]);
+        userlib::frame_push(STDOUT, &echo.line()[..take]);
+        userlib::frame_flush(STDOUT);
         return;
     }
 
@@ -306,10 +309,13 @@ fn draw_status(view: &View, doc: &Doc, window: &Window, echo: &userlib::Echo) {
     }
     color[used] = b'm';
     used += 1;
-    write_all(STDOUT, &color[..used]);
-    write_all(STDOUT, &out[..at.min(view.columns)]);
+    userlib::frame_push(STDOUT, &color[..used]);
+    userlib::frame_push(STDOUT, &out[..at.min(view.columns)]);
     // **既定の色へ戻す。** **次に描くものへ色を引きずらない。**
-    write_all(STDOUT, b"\x1b[0m");
+    userlib::frame_push(STDOUT, b"\x1b[0m");
+    // **ここで送る（PERF-b）。** **状態行は毎回の描き直しの最後である**
+    // ——**本文と状態行がまとめて 1 回の `write` になる。**
+    userlib::frame_flush(STDOUT);
 }
 
 /// 画面を描き直す。

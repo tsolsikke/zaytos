@@ -65,10 +65,17 @@ pub struct FlushStats {
     pub write_cycles_max: u64,
     /// その経路を通った回数（`write!` / `writeln!` の回数）。
     pub write_count: u64,
-    /// Ring 3 の `write` が前景の画面へ届いた回数（PERF）。
+    /// Ring 3 の `write` が端末へ来た回数（PERF）。**システムコールの回数である。**
     ///
-    /// **`write` 1 回につき 1 回である**（`crate::console::write_foreground_bytes`）。
-    /// **速さを測るとき、いちばん外側の層がここである。**
+    /// # 下の [`Self::foreground_writes`] とは別である
+    ///
+    /// **`sys_write` は 64 バイト（`WRITE_BUF_LEN`）ずつに刻んでコンソールへ渡す**
+    /// ので、**1 回のシステムコールが複数回の `write_foreground_bytes` になる。**
+    /// **BKL の取り直しと `int 0x80` の回数はこちらである**（PERF-b が減らすのはここ）。
+    pub terminal_writes: u64,
+    /// 前景の画面へバイト列が届いた回数（PERF）。**刻んだ後の回数である。**
+    ///
+    /// **`sys_write` の刻み（64 バイト）ごとに 1 回である**（上の doc）。
     pub foreground_writes: u64,
     /// その `write` が運んだバイト数の合計（PERF）。
     pub foreground_bytes: u64,
@@ -384,7 +391,12 @@ impl Console {
         Self::CURSOR_COLOR
     }
 
-    /// Ring 3 の `write` が届いたことを数える（PERF）。
+    /// 端末への `write`（システムコール 1 回）を数える（PERF-b）。
+    pub fn note_terminal_write(&mut self) {
+        self.stats.terminal_writes += 1;
+    }
+
+    /// 前景の画面へバイト列が届いたことを数える（PERF）。
     pub fn note_foreground_write(&mut self, bytes: usize) {
         self.stats.foreground_writes += 1;
         self.stats.foreground_bytes += bytes as u64;

@@ -4887,7 +4887,8 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
         }
         Some(a.iter().zip(b).map(|(x, y)| y.saturating_sub(*x)).collect())
     };
-    let cost_fields = "writes write_bytes glyphs flushes flush_bytes flush_cycles full_flushes";
+    let cost_fields =
+        "syscalls writes write_bytes glyphs flushes flush_bytes flush_cycles full_flushes";
 
     // **1 回の動きにつき、転送は 1 回である（ADR-0047）。**
     //
@@ -4896,10 +4897,24 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
     //
     // **`ADR-0047` の前は 152 回だった**（実測）。**破壊 `flush-every-write` が
     // その形へ戻す。**
+    // **1 回の動きにつき、システムコールも 1 回である（PERF-b）。**
+    //
+    // **`ADR-0047` の前は 152 回だった**（実測。**1 行につき 3 回**）。
+    // **`write` のたびに BKL を解いて取り直しているので、回数がそのまま費用である。**
+    //
+    // **転送の判定とは別に持つ**——**片方だけが落ちる形が在る**
+    // （破壊 `frame-write-per-piece` は回数だけを戻し、転送は 1 回のままである）。
+    let one_syscall_per_move = matches!(
+        (
+            delta(0, 1).and_then(|values| values.first().copied()),
+            delta(2, 3).and_then(|values| values.first().copied()),
+        ),
+        (Some(1), Some(1))
+    );
     let one_transfer_per_move = matches!(
         (
-            delta(0, 1).and_then(|values| values.get(3).copied()),
-            delta(2, 3).and_then(|values| values.get(3).copied()),
+            delta(0, 1).and_then(|values| values.get(4).copied()),
+            delta(2, 3).and_then(|values| values.get(4).copied()),
         ),
         (Some(1), Some(1))
     );
@@ -4923,10 +4938,16 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
         delta(4, 5)
     );
     println!(
+        "{context}: one move costs one syscall = {one_syscall_per_move} \
+         (Space {:?} syscall(s), j {:?} syscall(s); PERF-b replaced one write per piece)",
+        delta(0, 1).and_then(|values| values.first().copied()),
+        delta(2, 3).and_then(|values| values.first().copied())
+    );
+    println!(
         "{context}: one move costs one transfer = {one_transfer_per_move} \
          (Space {:?} transfer(s), j {:?} transfer(s); ADR-0047 replaced one transfer per write)",
-        delta(0, 1).and_then(|values| values.get(3).copied()),
-        delta(2, 3).and_then(|values| values.get(3).copied())
+        delta(0, 1).and_then(|values| values.get(4).copied()),
+        delta(2, 3).and_then(|values| values.get(4).copied())
     );
     println!(
         "{context}: less opened at the top of the file = {opened_at_the_top} \
@@ -4979,6 +5000,7 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
         && image_unchanged
         && more_output_stayed
         && one_transfer_per_move
+        && one_syscall_per_move
     {
         println!("{context}: PASS");
         Ok(())
@@ -11278,6 +11300,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "more-uses-alternate-screen-test",
             "flush-every-write-test",
             "read-skip-flush-test",
+            "frame-write-per-piece-test",
         ] {
             total += 1;
             begin_item(&format!("the view test catches {feature}"));
@@ -12203,7 +12226,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 23,
-    full: 235,
+    full: 236,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

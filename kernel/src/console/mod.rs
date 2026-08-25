@@ -253,6 +253,19 @@ fn flush_pending_to_screen(console: &mut Console) {
     }
 }
 
+/// 端末への `write`（システムコール 1 回）を数える（PERF-b）。
+///
+/// **刻む前に 1 回だけ呼ぶこと**（`crate::syscall` の `sys_write`）。
+pub fn note_terminal_write() {
+    let console = FOREGROUND.load(Ordering::Acquire);
+    if console.is_null() {
+        return;
+    }
+    // SAFETY: [`push_pending_if_alternate`] と同じ根拠。
+    let console = unsafe { &mut *console };
+    console.note_terminal_write();
+}
+
 /// 溜まっている描画を画面へ送る（ADR-0047）。**溜まっていなければ何もしない。**
 ///
 /// # 呼ぶ側の前提

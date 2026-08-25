@@ -9407,6 +9407,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "打鍵の代わりに決定的な台本を read_bytes から返す",
     ),
     (
+        "frame-write-per-piece-test",
+        cfg!(feature = "frame-write-per-piece-test"),
+        "1画面を組み立てず、来たそのつど write する（PERF-b の前の形）",
+    ),
+    (
         "flush-every-write-test",
         cfg!(feature = "flush-every-write-test"),
         "write のたびに画面へ転送する（ADR-0047 の前の形）",

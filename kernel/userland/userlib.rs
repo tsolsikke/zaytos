@@ -319,6 +319,102 @@ pub fn log_line(fd: u64, bytes: &[u8]) {
     let _ = unsafe { syscall3(SYS_IOCTL, fd, TIOCZLOG, raw.as_ptr() as u64) };
 }
 
+/// 1 画面ぶんを組み立ててから 1 回で送る器（PERF-b）。
+///
+/// # なぜ在るのか
+///
+/// **`write` のたびにカーネルへ入り、BKL を取り直している**（`sys_write` は
+/// 画面へ書く前に解いて、書いてから取り直す）。**`less` の 1 回の移動で
+/// `write` が 152 回だった**（実測。`ADR-0047` の表）——**1 行につき 3 回
+/// （カーソル移動・行消去・本文）である。**
+///
+/// **運ぶ量は軽い**（1 回の移動で 1,529 バイト）。**重いのは回数のほうである。**
+///
+/// # 自由関数である。持ち回らない
+///
+/// **画面は 1 つで、プログラムも 1 本である。** **引数で持ち回る形にすると、
+/// 描く関数すべての署名が変わる**——`zi` は描く関数を 7 つ持っている。
+/// **`userlib::heap` が静的 1 本を貸すのと同じ立場である。**
+///
+/// # 置き場所は `.bss` の固定配列である
+///
+/// **ヒープは使わない。** **`userlib::heap` は 1 本しか貸さず、`zi` と `less` は
+/// それを本文に使っている。**
+///
+/// **大きさは FHD の上限から取る**（`240 * 67 = 16080` セル。カーネルの
+/// `MAX_TERMINAL_CELLS` と同じ根拠）。**行ごとの制御と色の列のぶんを足して
+/// 丸めた値である。**
+///
+/// # 溢れたら送る。捨てない
+///
+/// **入りきらなければ、そこまでを送ってから続きを溜める。**
+/// **`write` の回数が増えるだけで、出るものは変わらない。**
+pub const FRAME_MAX: usize = 20 * 1024;
+
+/// 器の実体。**`.bss` に置く。**
+///
+/// # なぜ `static mut` なのか
+///
+/// **単一の実行文脈である**（このモジュールの doc。`heap` の `BASE` と同じ立場）。
+static mut FRAME_BUFFER: [u8; FRAME_MAX] = [0u8; FRAME_MAX];
+
+/// 溜まっている量。
+static mut FRAME_USED: usize = 0;
+
+/// 溜める（PERF-b）。**入りきらなければ、そこまでを送ってから続ける。**
+pub fn frame_push(fd: u64, bytes: &[u8]) {
+    // 破壊 (PERF-b, frame-write-per-piece): 溜めずに、来たそのつど送る。
+    // **PERF-b の前の形そのものである**——**システムコールの回数が桁で増える。**
+    // **出るものは変わらない**ので、**画面を読む判定は1つも落ちない。**
+    #[cfg(frame_write_per_piece)]
+    {
+        write_all(fd, bytes);
+        return;
+    }
+    #[cfg(not(frame_write_per_piece))]
+    {
+    let mut at = 0usize;
+    while at < bytes.len() {
+        // SAFETY: 単一の実行文脈である（[`FRAME_MAX`] の doc）。値を読むだけ。
+        let used = unsafe { FRAME_USED };
+        if used == FRAME_MAX {
+            frame_flush(fd);
+            continue;
+        }
+        let take = (FRAME_MAX - used).min(bytes.len() - at);
+        // SAFETY: 単一の実行文脈であり、`used + take` は `FRAME_MAX` を越えない。
+        // **参照は作らず、ポインタで写す。**
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                bytes.as_ptr().add(at),
+                core::ptr::addr_of_mut!(FRAME_BUFFER).cast::<u8>().add(used),
+                take,
+            );
+            FRAME_USED = used + take;
+        }
+        at += take;
+    }
+    }
+}
+
+/// 溜めたものを 1 回で送る（PERF-b）。**空なら何もしない。**
+pub fn frame_flush(fd: u64) {
+    // SAFETY: 単一の実行文脈である。
+    let used = unsafe { FRAME_USED };
+    if used == 0 {
+        return;
+    }
+    // 破壊 (PERF-b, frame-write-per-piece-test): 溜めずに、来たそのつど送る。
+    // **PERF-b の前の形そのものである**——**システムコールの回数が桁で増える。**
+    // **出るものは変わらない**ので、画面を読む判定は 1 つも落ちない。
+    // SAFETY: 単一の実行文脈であり、`used` は `FRAME_MAX` を越えない。
+    let bytes =
+        unsafe { core::slice::from_raw_parts(core::ptr::addr_of!(FRAME_BUFFER).cast::<u8>(), used) };
+    write_all(fd, bytes);
+    // SAFETY: 単一の実行文脈である。
+    unsafe { FRAME_USED = 0 };
+}
+
 /// バイト列を fd へ**すべて**書く。書けた総数、または最初の `-errno` を返す。
 ///
 /// # 繰り返す形にした

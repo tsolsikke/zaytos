@@ -222,6 +222,10 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
             "CARGO_FEATURE_MORE_USES_ALTERNATE_SCREEN_TEST",
             "more_uses_alternate_screen",
         ),
+        (
+            "CARGO_FEATURE_FRAME_WRITE_PER_PIECE_TEST",
+            "frame_write_per_piece",
+        ),
     ];
     let mut extra_cfgs: Vec<String> = Vec::new();
     for (env, cfg) in USER_PROGRAM_CFGS {

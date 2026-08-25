@@ -666,7 +666,7 @@ fn move_cursor(row: usize, col: usize) {
     at += count;
     sequence[at] = b'H';
     at += 1;
-    write_all(STDOUT, &sequence[..at]);
+    userlib::frame_push(STDOUT, &sequence[..at]);
 }
 
 /// 画面の形と、開いているファイル（e-4）。**起動時に決まり、以後変わらない。**
@@ -784,7 +784,7 @@ fn draw_status(view: &View, status: &Status) {
     };
     move_cursor(view.status_row(), 0);
     // EL(2): 前の中身を消してから置く（位置の桁数が減ったときに残さない）。
-    write_all(STDOUT, b"\x1b[2K");
+    userlib::frame_push(STDOUT, b"\x1b[2K");
     // **1 回で書く**（`zash` の `write_prompt` と同じ理由。色の無い札を
     // 一瞬でも出さない）。
     let mut out = [0u8; 160];
@@ -823,7 +823,7 @@ fn draw_status(view: &View, status: &Status) {
         out[at..at + mark.len()].copy_from_slice(mark);
         at += mark.len();
     }
-    write_all(STDOUT, &out[..at]);
+    userlib::frame_push(STDOUT, &out[..at]);
 }
 
 /// コマンド行（エコーエリア）を描く（e-4）。**最下行である。**
@@ -849,12 +849,12 @@ fn draw_status(view: &View, status: &Status) {
 /// おり、編集する中身に依らない。**
 fn draw_command_line(view: &View, status: &Status) {
     move_cursor(view.command_row(), 0);
-    write_all(STDOUT, b"\x1b[2K");
+    userlib::frame_push(STDOUT, b"\x1b[2K");
     if !status.in_command {
         // **報せを出す（e-5）。** **コマンド中はそちらが優先である**
         // ——打っている途中を消さない。
         if !status.message.is_empty() {
-            write_all(STDOUT, status.message);
+            userlib::frame_push(STDOUT, status.message);
         }
         return;
     }
@@ -862,7 +862,7 @@ fn draw_command_line(view: &View, status: &Status) {
     out[0] = b':';
     let take = status.command.len().min(COMMAND_MAX);
     out[1..1 + take].copy_from_slice(&status.command[..take]);
-    write_all(STDOUT, &out[..1 + take]);
+    userlib::frame_push(STDOUT, &out[..1 + take]);
 }
 
 /// 代替画面バッファへ入る（e-3。`?1049h`）。
@@ -876,7 +876,7 @@ fn draw_command_line(view: &View, status: &Status) {
 /// **戻す仕事はカーネル側にある**（ADR-0040 の Addendum）——
 /// **Ring 3 には画面を読み戻す手段が無い。** `zi` は入る / 出るを告げるだけである。
 fn enter_screen() {
-    write_all(STDOUT, b"\x1b[?1049h");
+    userlib::frame_push(STDOUT, b"\x1b[?1049h");
 }
 
 /// 代替画面バッファから出る（e-3。`?1049l`）。**終わるすべての道で呼ぶ。**
@@ -886,7 +886,10 @@ fn enter_screen() {
 /// **入る前に終わる道（引数が無い・開けない・読めない・大きすぎる）では
 /// 呼ばない**——**まだ入っていないので、戻す面が無い。**
 fn leave_screen() {
-    write_all(STDOUT, b"\x1b[?1049l");
+    userlib::frame_push(STDOUT, b"\x1b[?1049l");
+    // **ここは描き終わりではない。** **この後は終わるだけで、送る機会が
+    // もう無い**——**溜めたままにすると、代替画面から戻らない。**
+    userlib::frame_flush(STDOUT);
 }
 
 /// 描き終わりにカーソルを編集位置へ戻す（e-3）。
@@ -949,6 +952,9 @@ fn refresh(view: &View, window: &Window, status: &Status) {
     draw_status(view, status);
     draw_command_line(view, status);
     restore_cursor(window, status.row, status.col);
+    // **ここで 1 回だけ送る（PERF-b）。** **描く関数は溜めるだけである**
+    // ——**`write` のたびにカーネルへ入り、BKL を取り直していた。**
+    userlib::frame_flush(STDOUT);
 }
 
 /// 画面を描き直す。**全面を消してから行ごとに置く。**
@@ -961,7 +967,7 @@ fn redraw(view: &View, buffer: &Buffer, window: &mut Window, status: &Status) {
     // **描く前に窓を追わせる（VIEW-a）。** **描く範囲がここで決まる。**
     follow_window(window, status.row);
     // ED(2): 画面全体を消す。**カーソルは動かない**ので、この後に CUP を出す。
-    write_all(STDOUT, b"\x1b[2J");
+    userlib::frame_push(STDOUT, b"\x1b[2J");
     // **本文に使える行までしか描かない（e-4）。**
     //
     // **スクロールは作らない。** **b-1 まではそれで足りていた**——
@@ -976,10 +982,10 @@ fn redraw(view: &View, buffer: &Buffer, window: &mut Window, status: &Status) {
     for row in visible.clone() {
         move_cursor(row - visible.start, 0);
         // EL(2): その行を消してから置く（消し残しを作らない）。
-        write_all(STDOUT, b"\x1b[2K");
+        userlib::frame_push(STDOUT, b"\x1b[2K");
         let line = buffer.line(row);
         if !line.is_empty() {
-            write_all(STDOUT, line);
+            userlib::frame_push(STDOUT, line);
         }
     }
     refresh(view, window, status);

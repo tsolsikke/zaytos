@@ -186,6 +186,11 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     let mut lines = Lines::new(fd);
     let mut line = [0u8; LINE_MAX];
     let mut quit = false;
+    // **組み立ててから 1 回で送る（PERF-b）。**
+    //
+    // **`more` は流しながら出すので、`less` とは意味が違う**——
+    // **あちらは「1 画面を描き直す」、こちらは「1 画面ぶんを出す」である。**
+    // **どちらも `write` の回数を 1 にする。**
     'pages: loop {
         let mut printed = 0usize;
         let mut done = false;
@@ -193,9 +198,9 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             match lines.next(&mut line) {
                 Some(taken) => {
                     if taken > 0 {
-                        write_all(STDOUT, &line[..taken]);
+                        userlib::frame_push(STDOUT, &line[..taken]);
                     }
-                    write_all(STDOUT, b"\n");
+                    userlib::frame_push(STDOUT, b"\n");
                     printed += 1;
                 }
                 None => {
@@ -209,7 +214,9 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
         }
 
         // **待つ。** **札を出してから読む。**
-        write_all(STDOUT, MORE_PROMPT);
+        // **ここで送る（PERF-b）**——**1 画面ぶんと札がまとめて 1 回になる。**
+        userlib::frame_push(STDOUT, MORE_PROMPT);
+        userlib::frame_flush(STDOUT);
         loop {
             let mut byte = [0u8; 1];
             let got = read(STDIN, &mut byte);
@@ -233,11 +240,16 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
         }
         // **札を消す。** **行頭へ戻して行を消す**——**残すと、次の画面の
         // 1 行目に札が混じる。**
-        write_all(STDOUT, b"\r\x1b[2K");
+        // **溜めるだけである**——**次の画面と一緒に送る。**
+        userlib::frame_push(STDOUT, b"\r\x1b[2K");
         if quit {
             break 'pages;
         }
     }
+
+    // **最後の画面を送る（PERF-b）。** **読み切って抜ける道には札が無いので、
+    // ここが唯一の送り先である。**
+    userlib::frame_flush(STDOUT);
 
     close(fd);
 
