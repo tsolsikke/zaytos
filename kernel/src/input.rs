@@ -603,6 +603,11 @@ pub(crate) mod script {
     // **観測（`\x0f`）はエコーエリアを読む**——**エラーがそこに出ていること
     // が主張である**（溜めるだけで描かなければ「見えなくする」と同じになる）。
     //
+    // **PERF-f で、空読み 1 回の前後にも計器の観測点を置いた**
+    // （`\x12\x04\x12`）。**`\x04` は 1 回だけ空を返す休みである**——
+    // **アプリは `-EAGAIN` を受けて回る。** **その 1 周で画面へ何が起きるかを
+    // 測る**（`ADR-0047` で、読むたびに掃く形にしたためである）。
+    //
     // **PERF-e で、60 回目の `j` の前後に計器の観測点を置いた**（`\x12`）。
     // **窓が動く 1 行の移動を測るためである**——**48 回目から窓が動くので、
     // 最初の `j` を測っても窓は動かない。** **`j` の数は 60 のままである。**
@@ -658,9 +663,9 @@ pub(crate) mod script {
         /bin/cat /data/joined\n\
         /bin/cat /data/big\n\
         /bin/zi /data/big\n\
-        iZ\x1b\x04\x0e\
+        iZ\x1b\x04\x0e\x12\
         jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj\
-        \x12j\x12\x0e\
+        \x12j\x12\x0e\x12\x04\x12\
         kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\x0e\
         :wq\n\
         /bin/cat /data/big\n\

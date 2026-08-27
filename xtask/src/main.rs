@@ -4067,7 +4067,19 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
                 .collect()
         })
         .collect();
-    let zi_move_cost: Option<Vec<u64>> = match (zi_costs.first(), zi_costs.get(1)) {
+    // **60 回の `j` の全体（PERF-f の測定）。** **1 打鍵あたりの実時間を出す。**
+    // **観測は 3 つある**——**走り始め、60 回目の直前、60 回目の直後である。**
+    let zi_run_cost: Option<Vec<u64>> = match (zi_costs.first(), zi_costs.get(2)) {
+        (Some(before), Some(after)) if before.len() == after.len() => Some(
+            before
+                .iter()
+                .zip(after)
+                .map(|(x, y)| y.saturating_sub(*x))
+                .collect(),
+        ),
+        _ => None,
+    };
+    let zi_move_cost: Option<Vec<u64>> = match (zi_costs.get(1), zi_costs.get(2)) {
         (Some(before), Some(after)) if before.len() == after.len() => Some(
             before
                 .iter()
@@ -4569,6 +4581,28 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         zi_move_cost
             .as_ref()
             .and_then(|values| values.get(3).copied())
+    );
+    // **空読み 1 回の費用（PERF-f）。** **何も描いていないのに転送が
+    // 走っていないかを見る**（`ADR-0047` で、読むたびに掃く形にした）。
+    let zi_idle_cost: Option<Vec<u64>> = match (zi_costs.get(3), zi_costs.get(4)) {
+        (Some(before), Some(after)) if before.len() == after.len() => Some(
+            before
+                .iter()
+                .zip(after)
+                .map(|(x, y)| y.saturating_sub(*x))
+                .collect(),
+        ),
+        _ => None,
+    };
+    println!(
+        "{context}: (info) one idle read (no output at all) costs {zi_idle_cost:?} \
+         [syscalls writes write_bytes glyphs draw_cycles erase_cycles glyph_cycles flushes \
+         flush_bytes flush_cycles full_flushes ticks]"
+    );
+    println!(
+        "{context}: (info) 60 j keystrokes cost {zi_run_cost:?} \
+         [syscalls writes write_bytes glyphs draw_cycles erase_cycles glyph_cycles flushes \
+         flush_bytes flush_cycles full_flushes ticks] - the last field is 10 ms per tick"
     );
     println!(
         "{context}: (info) the cost of one j that moves the window = {zi_move_cost:?} \
