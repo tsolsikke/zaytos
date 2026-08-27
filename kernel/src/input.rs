@@ -643,7 +643,7 @@ pub(crate) mod script {
         iZY\x02\x1b\x04\x02\
         xx\
         j\
-        aQ\x1b\x04\
+        aQ\x1b\x04\x14\
         :w\x07q\n\x05\
         /bin/cat /data/lines\n\
         /bin/tail /data/lines\n\
@@ -755,6 +755,8 @@ pub(crate) mod script {
     /// **主張を持つ観測点を合図に使わない**（`crate::console::probe` の
     /// `Observation::ScriptDone`）。
     const OBSERVE_DONE: u8 = 0x0c;
+    /// 観測点（PERF-g）。**本文の先頭 6 行を画面から読む。**
+    const OBSERVE_TEXT_ROWS: u8 = 0x14;
     /// 観測点（PERF-b の後）。**画面の側のカーソルの位置。**
     const OBSERVE_CURSOR: u8 = 0x13;
     /// 観測点（PERF）。**描画の層ごとの数。** **差分で読む。**
@@ -807,6 +809,7 @@ pub(crate) mod script {
             OBSERVE_MORE_OUTPUT => Some(crate::console::probe::Observation::MoreOutput),
             OBSERVE_DRAW_STATS => Some(crate::console::probe::Observation::DrawStats),
             OBSERVE_CURSOR => Some(crate::console::probe::Observation::CursorCell),
+            OBSERVE_TEXT_ROWS => Some(crate::console::probe::Observation::TextRows),
             OBSERVE_PROMPT => Some(crate::console::probe::Observation::Prompt),
             OBSERVE_STATUS => Some(crate::console::probe::Observation::Status),
             OBSERVE_BEFORE_ALT => Some(crate::console::probe::Observation::BeforeAlternate),

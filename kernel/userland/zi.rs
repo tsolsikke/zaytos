@@ -1417,7 +1417,8 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                             col = length.saturating_sub(1);
                         }
                     }
-                    redraw_here(&view, buffer, &mut window, mode, row, col, b"");
+                    // **行の中の削除は 1 行だけが変わる（PERF-g）。**
+                    redraw_line_here(&view, buffer, &window, mode, row, col, b"");
                     report_cursor(buffer, &window, row, col, b"delete");
                     dirty = true;
                 }
@@ -1991,7 +1992,8 @@ fn handle_byte(
                     let removed = buffer.remove(*row, *col - 1);
                     if removed {
                         *col -= 1;
-                        redraw_here(view, buffer, window, *mode, *row, *col, b"");
+                        // **行の中の削除は 1 行だけが変わる（PERF-g）。**
+                        redraw_line_here(view, buffer, window, *mode, *row, *col, b"");
                         report_cursor(buffer, window, *row, *col, b"erase");
                     }
                     return removed;
@@ -2042,25 +2044,82 @@ fn handle_byte(
             let inserted = buffer.insert(*row, *col, byte);
             if inserted {
                 *col += 1;
-                redraw(
-                    view,
-                    buffer,
-                    window,
-                    &Status {
-                        mode: *mode,
-                        row: *row,
-                        col: *col,
-                        // **入れた直後なので、変更は確実にある。**
-                        dirty: true,
-                        command: &[],
-                        in_command: false,
-                        message: &[],
-                    },
-                );
+                // **変わったのは 1 行だけである（PERF-g）。**
+                redraw_line_here(view, buffer, window, *mode, *row, *col, b"");
                 report_cursor(buffer, window, *row, *col, b"typed");
             }
             inserted
         }
+    }
+}
+
+/// 編集の後の描き直し——変わった 1 行だけを描く（PERF-g）。
+///
+/// # なぜ全面ではないのか
+///
+/// **素の挿入と削除で変わるのは 1 行だけである**（`Buffer` は行の中で
+/// バイトをずらす。**他の行は動かない**）。
+///
+/// **全面を描き直していた**——**実測で 1 字の挿入が 1,125 字・330.9M
+/// サイクル（約95ms）だった。** **自動繰り返しは毎秒 25〜30 回来るので、
+/// 生成が消費の 3 倍近くになり、押しっぱなしで溜まっていた。**
+///
+/// # 窓は動かさない
+///
+/// **行の中身が変わっただけなので、窓の位置は変わらない。**
+/// **窓が動く形（カーソルが窓の外へ出る）は [`show_cursor`] が持つ。**
+///
+/// # 行が増減する場合は使えない
+///
+/// **`Enter` と行頭の `Backspace` は、その行から下が全部ずれる。**
+/// **そちらは [`redraw_here`]（全面）のままである**——`IL` / `DL` で
+/// ずらす形は測ってから決める（`docs/roadmap.md` の PERF 段）。
+///
+/// # カーソルは最後に戻す
+///
+/// **[`refresh`] を通す**——**`restore_cursor` がすべての描き終わりの
+/// 最後に居る形を崩さない**（`PERF-b` の回帰がその順序で出た）。
+fn redraw_line_here(
+    view: &View,
+    buffer: &Buffer,
+    window: &Window,
+    mode: Mode,
+    row: usize,
+    col: usize,
+    message: &[u8],
+) {
+    // 破壊 (PERF-g, zi-edit-redraws-everything): 1 行ではなく全面を描き直す。
+    // **PERF-g の前の形そのものである**——**絵は同じで、描く字が桁で増える。**
+    #[cfg(zi_edit_redraws_everything)]
+    {
+        let mut window = *window;
+        redraw_here(view, buffer, &mut window, mode, row, col, message);
+        return;
+    }
+    #[cfg(not(zi_edit_redraws_everything))]
+    {
+        if let Some(screen_row) = window.screen_row(row) {
+            move_cursor(screen_row, 0);
+            // EL(2): その行を消してから置く（消し残しを作らない）。
+            userlib::frame_push(STDOUT, b"\x1b[2K");
+            let line = buffer.line(row);
+            if !line.is_empty() {
+                userlib::frame_push(STDOUT, line);
+            }
+        }
+        refresh(
+            view,
+            window,
+            &Status {
+                mode,
+                row,
+                col,
+                dirty: true,
+                command: &[],
+                in_command: false,
+                message,
+            },
+        );
     }
 }
 

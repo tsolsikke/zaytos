@@ -238,6 +238,10 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
             "CARGO_FEATURE_ZI_REDRAW_WHOLE_SCREEN_TEST",
             "zi_redraw_whole_screen",
         ),
+        (
+            "CARGO_FEATURE_ZI_EDIT_REDRAWS_EVERYTHING_TEST",
+            "zi_edit_redraws_everything",
+        ),
     ];
     let mut extra_cfgs: Vec<String> = Vec::new();
     for (env, cfg) in USER_PROGRAM_CFGS {

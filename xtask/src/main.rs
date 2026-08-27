@@ -3936,7 +3936,29 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         .split("/bin/tail /data/lines")
         .next()
         .unwrap_or(&serial);
-    let edited_lines = parse_zi_last_redraw(lines_session);
+    // **画面の実物から読む（PERF-g）。**
+    //
+    // **シリアルの列から組み立て直していた**（`parse_zi_last_redraw`）が、
+    // **`zi` が編集で全面を描き直さなくなったので成り立たなくなった**
+    // ——**部分の描き直しは、前の全面の出力と混ざる。**
+    // **`docs/verification-coverage.md` の一覧で「条件つきで危ない」と
+    // 印を付けてあった項目で、印のとおりに壊れた。**
+    //
+    // **画面を読む形にすれば、描き方に依らない。** **観測点は `:w` の直前に
+    // 置いてある**（`kernel/src/input.rs` の台本）。
+    let edited_lines: Vec<String> = serial
+        .lines()
+        .filter_map(|line| line.split("screen-text: row ").nth(1))
+        .filter_map(|rest| rest.split_once("says "))
+        .map(|(_, value)| {
+            value
+                .trim()
+                .trim_end_matches('\r')
+                .trim_matches('"')
+                .to_string()
+        })
+        .take_while(|row| !row.is_empty())
+        .collect();
     let readback = parse_cat_readback(lines_session, edited_lines.len());
     let roundtrip = !edited_lines.is_empty() && edited_lines == readback;
 
@@ -4561,7 +4583,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     println!("{context}: :w wrote every byte it asked for = {saved}");
     println!(
         "{context}: cat read back exactly what zi edited = {roundtrip} \
-         (zi's last redraw {edited_lines:?}, cat printed {readback:?})"
+         (the screen said {edited_lines:?}, cat printed {readback:?})"
     );
     println!("{context}: the zash prompt name is drawn in its own color = {prompt_colored}");
     println!("{context}: the prompt symbol kept the default color = {prompt_symbol_plain}");
@@ -4620,6 +4642,24 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         .and_then(|values| values.get(7).copied())
         .is_some_and(|flushes| flushes == 0);
 
+    // **1 字の挿入は 1 行ぶんしか描かないこと（PERF-g）。**
+    //
+    // **実測**——**1 行だけ描くと 232 字、全面だと 1,125 字である。**
+    // **上限を 500 字に置くと、両側に 2 倍以上の余裕がある。**
+    // **窓の移動の上限（200）を写していない**——**`zi` は状態行と
+    // コマンド行の 2 本を毎回描くので、下限がそのぶん高い。**
+    let insert_draws_one_line = zi_insert_cost
+        .as_ref()
+        .and_then(|values| values.get(3).copied())
+        .is_some_and(|glyphs| glyphs <= 500);
+
+    println!(
+        "{context}: inserting one character draws one line = {insert_draws_one_line} \
+         (it drew {:?} glyph(s); the whole-screen redraw measured 1125)",
+        zi_insert_cost
+            .as_ref()
+            .and_then(|values| values.get(3).copied())
+    );
     println!(
         "{context}: (info) inserting one character costs {zi_insert_cost:?} \
          [syscalls writes write_bytes glyphs draw_cycles erase_cycles glyph_cycles flushes \
@@ -4781,6 +4821,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && screen_came_back
         && cursor_followed
         && zi_moves_one_line
+        && insert_draws_one_line
         && idle_read_costs_nothing
         && status_at_bottom
         && command_line_echoes
@@ -5266,36 +5307,6 @@ fn strip_ansi(text: &str) -> String {
         // **`[` が続かなければ、落とすのは `ESC` 1 バイトだけである。**
     }
     out
-}
-
-/// `zi` の最後の再描画から、編集後の行を取り出す（zi-d-2）。
-///
-/// **再描画は `ED(2)` の後に `CUP` と `EL(2)` を挟んで各行を出す**
-/// （`kernel/userland/zi.rs` の `redraw`）。**その列から字だけを拾う。**
-///
-/// **期待値をホストが持たないための道具である**——`zi` が画面へ出した行と、
-/// `cat` がファイルから読んだ行を突き合わせる。
-fn parse_zi_last_redraw(serial: &str) -> Vec<String> {
-    // 最後の全画面消去から始まる断片を取る。
-    let Some(at) = serial.rfind("\u{1b}[2J") else {
-        return Vec::new();
-    };
-    let tail = &serial[at..];
-    // **判定行が続く前まで**——再描画の直後に `zi: cursor` が来る。
-    let tail = tail.split("zi: cursor").next().unwrap_or(tail);
-    tail.split("\u{1b}[2K")
-        .skip(1)
-        .map(|piece| {
-            // 次の CSI までが行の中身である。
-            piece
-                .split('\u{1b}')
-                .next()
-                .unwrap_or("")
-                .trim_end_matches('\r')
-                .to_string()
-        })
-        .filter(|line| !line.is_empty())
-        .collect()
 }
 
 /// `cat` が読み戻した行を拾う（zi-d-2）。
@@ -11593,6 +11604,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "zi-skip-cursor-flush-test",
             "zi-redraw-whole-screen-test",
             "cursor-repaint-always-test",
+            "zi-edit-redraws-everything-test",
         ] {
             total += 1;
             begin_item(&format!("the zi test catches {feature}"));
@@ -12448,7 +12460,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 23,
-    full: 241,
+    full: 242,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

@@ -82,6 +82,21 @@ pub(crate) enum Observation {
     /// 画面のカーソルが追従しない**）。**判定がカーソルを見ていなかったので、
     /// 自動判定は緑のまま通った**——**運用者の目視で出た。**
     CursorCell,
+    /// 本文の先頭 6 行（PERF-g）。**画面の実物を読む。**
+    ///
+    /// # なぜ要ったか
+    ///
+    /// **`zi` が編集で全面を描き直さなくなった**（PERF-g）ので、
+    /// **シリアルの列から画面を組み立て直す判定が成り立たなくなった**
+    /// （`xtask` の `parse_zi_last_redraw`。**部分の描き直しは、前の全面の
+    /// 出力と混ざる**）。
+    ///
+    /// **`docs/verification-coverage.md` の一覧で「条件つきで危ない」と
+    /// 印を付けてあった項目である**——**印のとおりに壊れた。**
+    ///
+    /// **画面を読む形にすれば、描き方に依らない**——**主張は
+    /// 「`cat` が読み戻した中身が画面に出ている」ことである。**
+    TextRows,
     /// 描画の計器（PERF）。**層ごとの数をそのまま出す。**
     ///
     /// # 何を測るか
@@ -311,6 +326,17 @@ pub(crate) fn observe(kind: Observation) {
         Observation::ViewWindow => observe_view_window(&mut serial, console),
         Observation::MoreOutput => observe_more_output(&mut serial, console),
         Observation::DrawStats => observe_draw_stats(&mut serial, console),
+        Observation::TextRows => {
+            let mut text = [0u8; LABEL_MAX];
+            for row in 0..6u32 {
+                let length = read_row_text(console, row, &mut text);
+                let _ = writeln!(
+                    serial,
+                    "screen-text: row {row} says {:?}",
+                    core::str::from_utf8(&text[..length]).unwrap_or("?")
+                );
+            }
+        }
         Observation::CursorCell => {
             let (column, row) = console.cursor_cell();
             let _ = writeln!(
