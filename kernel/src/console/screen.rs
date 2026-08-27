@@ -79,6 +79,11 @@ pub struct FlushStats {
     pub foreground_writes: u64,
     /// その `write` が運んだバイト数の合計（PERF）。
     pub foreground_bytes: u64,
+    /// グリフを描く呼び出しに費やした TSC サイクル（PERF-c の測定）。
+    ///
+    /// **`draw_cycles` の内訳である**——**消す経路とこれを引いた残りが、
+    /// パーサと格子とカーソルの費用である。**
+    pub glyph_cycles: u64,
     /// 消す経路（`EL` / `ED`）に費やした TSC サイクル（PERF-c の測定）。
     ///
     /// **`draw_cycles` の内訳である**——**引いた残りが字を置く費用である。**
@@ -797,9 +802,11 @@ impl Console {
             );
             let x = placement.column * font::CELL_WIDTH;
             let y = placement.row * font::GLYPH_HEIGHT;
+            let started = common::cpu::read_timestamp_counter();
             self.back
                 .surface_mut()
                 .draw_glyph(x, y, glyph, foreground, Some(background));
+            self.stats.glyph_cycles += common::cpu::read_timestamp_counter().wrapping_sub(started);
             self.dirty
                 .mark(x, y, glyph.width_pixels(), glyph.height_pixels());
         }

@@ -107,7 +107,9 @@ impl BackBuffer {
 
         // SAFETY: 呼び出し側の契約により base..end はマップ済みかつ排他所有。
         // layout は with_base で検証済み。
-        let surface = unsafe { Framebuffer::new(layout) };
+        // **普通の RAM の面である（PERF-c）**——**フレームアロケータが返した
+        // フレームで、MMIO ではない**（`graphics::framebuffer::SurfaceKind` の doc）。
+        let surface = unsafe { Framebuffer::new_ram(layout) };
 
         Ok(Self {
             surface,

@@ -15,7 +15,36 @@ use super::color::Color;
 use super::layout::{ClippedRect, FramebufferLayout, BYTES_PER_PIXEL};
 
 /// 検証済みのフレームバッファへの排他的な書き込みハンドル。
+/// 面の実体がどこに在るか（PERF-c）。
+///
+/// # ここが線である
+///
+/// **フレームバッファは MMIO である**——**PCD（キャッシュ無効）で張っており、
+/// 書き込みは `write_volatile` でなければならない**（通常の代入は最適化で
+/// 消えたり並べ替えられたりしうる。このモジュールの doc）。
+///
+/// **バックバッファは普通の RAM である**——**フレームアロケータが返した
+/// フレームで、WB（書き戻し）である。** **volatile で書く理由が1つも無い。**
+///
+/// # 実測（PERF-c）
+///
+/// **1 画素ずつ `write_volatile` で書いていたので、消す経路が支配していた**
+/// ——**`less` の1回の移動で、消すのに 438M サイクル（約124ms）、
+/// 転送は 4.7M サイクル（約1.3ms）だった。** **同じ画素数を一括で消す道
+/// （`BackBuffer::clear_rows` の `slice::fill`）は45倍速い**（実測）。
+///
+/// **次に触る者へ**——**RAM の面は一括で書くこと。** **MMIO の面だけが
+/// volatile である。**
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SurfaceKind {
+    /// フレームバッファ本体（MMIO。PCD）。
+    Mmio,
+    /// バックバッファ（普通の RAM）。
+    Ram,
+}
+
 pub struct Framebuffer {
+    kind: SurfaceKind,
     layout: FramebufferLayout,
 }
 
@@ -33,11 +62,58 @@ impl Framebuffer {
     ///   （型がそれを保証しているが、`base` が実在のフレームバッファを
     ///   指しているかどうかまでは型では保証できない）。
     pub const unsafe fn new(layout: FramebufferLayout) -> Self {
-        Self { layout }
+        Self {
+            kind: SurfaceKind::Mmio,
+            layout,
+        }
+    }
+
+    /// 普通の RAM の面として作る（PERF-c）。**バックバッファがこれである。**
+    ///
+    /// # Safety
+    ///
+    /// [`Self::new`] と同じ契約に加え、**その領域が普通の RAM であること**
+    /// （MMIO でないこと）。**volatile を外して書くので、MMIO へ向けると
+    /// 書き込みが消えうる。**
+    pub const unsafe fn new_ram(layout: FramebufferLayout) -> Self {
+        Self {
+            kind: SurfaceKind::Ram,
+            layout,
+        }
+    }
+
+    /// 面の種別（PERF-c）。
+    pub fn kind(&self) -> SurfaceKind {
+        self.kind
     }
 
     pub fn layout(&self) -> &FramebufferLayout {
         &self.layout
+    }
+
+    /// 連続した画素をまとめて書く（PERF-c）。**RAM の面だけが呼ぶこと。**
+    ///
+    /// **画面の外へはみ出す分は捨てる**（[`Self::write_pixel`] と同じ規則。
+    /// **描画経路から panic を起こさない**。ADR-0013）。
+    pub(crate) fn write_pixel_run(&mut self, x: u32, y: u32, pixels: &[u32]) {
+        let Some(rect) = self.layout.clip_rect(x, y, pixels.len() as u32, 1) else {
+            return;
+        };
+        let Some(offset) = self.layout.pixel_offset_bytes(rect.x, rect.y) else {
+            return;
+        };
+        let take = (rect.width as usize).min(pixels.len());
+        // SAFETY: `clip_rect` と `pixel_offset_bytes` が返した検証済みの位置で、
+        // `take` 画素は面の中に収まる。**RAM の面なので通常の書き込みでよい**
+        // （[`SurfaceKind`] の doc）。**MMIO の面はこの関数を呼ばない。**
+        unsafe {
+            let base = self
+                .layout
+                .base()
+                .as_mut_ptr::<u32>()
+                .byte_add(offset as usize);
+            core::slice::from_raw_parts_mut(base, take).copy_from_slice(&pixels[..take]);
+        }
     }
 
     /// 1 ピクセル書き込む。画面外の座標は無視する。
@@ -113,6 +189,27 @@ impl Framebuffer {
                 debug_assert!(false, "clip_rect returned a row outside the framebuffer");
                 return;
             };
+            // **RAM の面は一括で埋める（PERF-c）。** **1 画素ずつ volatile で
+            // 書く必要が無い**（[`SurfaceKind`] の doc）。**実測で、ここが
+            // 描画の費用の6割を占めていた。**
+            //
+            // 破壊 (PERF-c, draw-pixel-by-pixel-test): RAM でも 1 画素ずつ書く。
+            // **PERF-c の前の形そのものである**——**出る絵は同じで、費用だけが
+            // 桁で増える。** **描く費用の判定が捕まえる。**
+            #[cfg(not(feature = "draw-pixel-by-pixel-test"))]
+            if self.kind == SurfaceKind::Ram {
+                // SAFETY: row_offset は検証済みで、この行の rect.width 画素は
+                // 面の中に収まる（上の debug_assert と clip_rect の保証）。
+                // **RAM なので通常の書き込みでよい**（[`SurfaceKind`] の doc）。
+                let row_slice = unsafe {
+                    core::slice::from_raw_parts_mut(
+                        base.as_mut_ptr::<u32>().byte_add(row_offset as usize),
+                        rect.width as usize,
+                    )
+                };
+                row_slice.fill(pixel);
+                continue;
+            }
             debug_assert!(
                 row_offset + (rect.width as u64) * BYTES_PER_PIXEL <= self.layout.size_bytes(),
                 "clipped row would run past the end of the framebuffer"

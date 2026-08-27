@@ -9407,6 +9407,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "打鍵の代わりに決定的な台本を read_bytes から返す",
     ),
     (
+        "draw-pixel-by-pixel-test",
+        cfg!(feature = "draw-pixel-by-pixel-test"),
+        "RAM の面も 1 画素ずつ書き、描く費用が桁で増える",
+    ),
+    (
         "zi-skip-cursor-flush-test",
         cfg!(feature = "zi-skip-cursor-flush-test"),
         "zi がカーソルを戻した後に送らず、画面のカーソルが追従しない",

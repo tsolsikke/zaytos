@@ -38,6 +38,26 @@ impl Framebuffer {
         foreground: Color,
         background: Option<Color>,
     ) {
+        // **RAM の面は 1 行ぶんをまとめて書く（PERF-c）。**
+        //
+        // **1 画素ずつ `write_volatile` で書いていた**——**MMIO の規則を
+        // RAM の面へも当てていた**（`super::framebuffer::SurfaceKind` の doc）。
+        // **背景を塗る形（コンソールが使う側）では、1 行が連続した 8 画素に
+        // なるので、組み立てて 1 回で写せる。**
+        //
+        // **重ね描き（`background` が `None`）は 1 画素ずつのままである**
+        // ——**穴が開くので連続にならない。** **利用者はデモの経路だけで、
+        // コンソールは必ず背景を塗る。**
+        //
+        // 破壊 (PERF-c, draw-pixel-by-pixel-test): まとめずに 1 画素ずつ書く。
+        if let (Some(background), false) = (
+            background,
+            cfg!(feature = "draw-pixel-by-pixel-test")
+                || self.kind() != super::framebuffer::SurfaceKind::Ram,
+        ) {
+            self.draw_glyph_rows(x, y, glyph, foreground, background);
+            return;
+        }
         for row in 0..glyph.height_pixels() {
             for column in 0..glyph.width_pixels() {
                 let color = if glyph.is_set(column, row) {
@@ -51,6 +71,37 @@ impl Framebuffer {
                 // 画面外の座標は write_pixel 側で無視される。
                 self.write_pixel(x.saturating_add(column), y.saturating_add(row), color);
             }
+        }
+    }
+
+    /// グリフを 1 行ずつまとめて書く（PERF-c）。**RAM の面だけが通る。**
+    ///
+    /// **`MAX_GLYPH_WIDTH` 画素までを組み立てて、行ごとに 1 回で写す。**
+    fn draw_glyph_rows(
+        &mut self,
+        x: u32,
+        y: u32,
+        glyph: Glyph,
+        foreground: Color,
+        background: Color,
+    ) {
+        /// 組み立てる行の上限（画素）。**全角でも 16 である**
+        /// （`common::screen::MAX_GLYPH_WIDTH_CELLS` × セル幅）。
+        const MAX_GLYPH_WIDTH: usize = 32;
+        let width = (glyph.width_pixels() as usize).min(MAX_GLYPH_WIDTH);
+        let format = self.layout().format();
+        let front = foreground.to_pixel(format);
+        let back = background.to_pixel(format);
+        let mut line = [0u32; MAX_GLYPH_WIDTH];
+        for row in 0..glyph.height_pixels() {
+            for (column, slot) in line[..width].iter_mut().enumerate() {
+                *slot = if glyph.is_set(column as u32, row) {
+                    front
+                } else {
+                    back
+                };
+            }
+            self.write_pixel_run(x, y.saturating_add(row), &line[..width]);
         }
     }
 

@@ -4937,8 +4937,8 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
         }
         Some(a.iter().zip(b).map(|(x, y)| y.saturating_sub(*x)).collect())
     };
-    let cost_fields = "syscalls writes write_bytes glyphs draw_cycles erase_cycles flushes \
-         flush_bytes flush_cycles full_flushes ticks";
+    let cost_fields = "syscalls writes write_bytes glyphs draw_cycles erase_cycles glyph_cycles \
+         flushes flush_bytes flush_cycles full_flushes ticks";
 
     // **1 回の動きにつき、転送は 1 回である（ADR-0047）。**
     //
@@ -4947,6 +4947,27 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
     //
     // **`ADR-0047` の前は 152 回だった**（実測）。**破壊 `flush-every-write` が
     // その形へ戻す。**
+    // **消す費用が、同じ量を送る費用と同じ桁であること（PERF-c）。**
+    //
+    // # なぜ比で見るのか
+    //
+    // **サイクルは揺れ、機械の周波数にも依る**（TSC はホストのサイクルである）。
+    // **同じ回の転送と比べれば、その両方が消える**——**どちらも 1 画面ぶん
+    // （4MB 前後）を動かす仕事である。**
+    //
+    // **実測**——**一括で消すと転送の 9.8 倍、1 画素ずつ消すと 113 倍である。**
+    // **上限を 30 倍に置くと、両側に 3 倍ほどの余裕がある。**
+    //
+    // **`ADR-0047` と `PERF-b` の判定が回数で言えるのと違い、ここは量の話なので
+    // 回数では言えない**——**同じ画素数を、遅い道と速い道のどちらで書いたかである。**
+    let erase_is_bulk = match delta(0, 1) {
+        Some(values) => match (values.get(5), values.get(9)) {
+            (Some(&erase), Some(&flush)) if flush > 0 => erase <= flush.saturating_mul(30),
+            _ => false,
+        },
+        None => false,
+    };
+
     // **1 回の動きにつき、システムコールも 1 回である（PERF-b）。**
     //
     // **`ADR-0047` の前は 152 回だった**（実測。**1 行につき 3 回**）。
@@ -4963,8 +4984,8 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
     );
     let one_transfer_per_move = matches!(
         (
-            delta(0, 1).and_then(|values| values.get(6).copied()),
-            delta(2, 3).and_then(|values| values.get(6).copied()),
+            delta(0, 1).and_then(|values| values.get(7).copied()),
+            delta(2, 3).and_then(|values| values.get(7).copied()),
         ),
         (Some(1), Some(1))
     );
@@ -4988,6 +5009,13 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
         delta(4, 5)
     );
     println!(
+        "{context}: erasing a page stays in the same order as sending one = {erase_is_bulk} \
+         (erase {:?} cycles, transfer {:?} cycles for the same page; the bulk path measured 9.8x \
+         and the pixel-by-pixel path 113x)",
+        delta(0, 1).and_then(|values| values.get(5).copied()),
+        delta(0, 1).and_then(|values| values.get(9).copied())
+    );
+    println!(
         "{context}: one move costs one syscall = {one_syscall_per_move} \
          (Space {:?} syscall(s), j {:?} syscall(s); PERF-b replaced one write per piece)",
         delta(0, 1).and_then(|values| values.first().copied()),
@@ -4996,8 +5024,8 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
     println!(
         "{context}: one move costs one transfer = {one_transfer_per_move} \
          (Space {:?} transfer(s), j {:?} transfer(s); ADR-0047 replaced one transfer per write)",
-        delta(0, 1).and_then(|values| values.get(6).copied()),
-        delta(2, 3).and_then(|values| values.get(6).copied())
+        delta(0, 1).and_then(|values| values.get(7).copied()),
+        delta(2, 3).and_then(|values| values.get(7).copied())
     );
     println!(
         "{context}: less opened at the top of the file = {opened_at_the_top} \
@@ -5051,6 +5079,7 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
         && more_output_stayed
         && one_transfer_per_move
         && one_syscall_per_move
+        && erase_is_bulk
     {
         println!("{context}: PASS");
         Ok(())
@@ -11351,6 +11380,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "flush-every-write-test",
             "read-skip-flush-test",
             "frame-write-per-piece-test",
+            "draw-pixel-by-pixel-test",
         ] {
             total += 1;
             begin_item(&format!("the view test catches {feature}"));
@@ -12277,7 +12307,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 23,
-    full: 237,
+    full: 238,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
