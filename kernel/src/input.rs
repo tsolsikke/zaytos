@@ -603,6 +603,10 @@ pub(crate) mod script {
     // **観測（`\x0f`）はエコーエリアを読む**——**エラーがそこに出ていること
     // が主張である**（溜めるだけで描かなければ「見えなくする」と同じになる）。
     //
+    // **PERF-e で、60 回目の `j` の前後に計器の観測点を置いた**（`\x12`）。
+    // **窓が動く 1 行の移動を測るためである**——**48 回目から窓が動くので、
+    // 最初の `j` を測っても窓は動かない。** **`j` の数は 60 のままである。**
+    //
     // **VIEW-b の前に `k` を 60 足した。** **窓を上へ戻す形が QEMU で一度も
     // 通っていなかった**（台本は下へ 60 行だけだった）。**`follow` の「上へ
     // 出たら先頭にする」枝はホストテストが覆っているが、実機では未通過で
@@ -655,7 +659,8 @@ pub(crate) mod script {
         /bin/cat /data/big\n\
         /bin/zi /data/big\n\
         iZ\x1b\x04\x0e\
-        jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj\x0e\
+        jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj\
+        \x12j\x12\x0e\
         kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\x0e\
         :wq\n\
         /bin/cat /data/big\n\

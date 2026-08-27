@@ -230,6 +230,14 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
             "CARGO_FEATURE_ZI_SKIP_CURSOR_FLUSH_TEST",
             "zi_skip_cursor_flush",
         ),
+        (
+            "CARGO_FEATURE_LESS_REDRAW_WHOLE_SCREEN_TEST",
+            "less_redraw_whole_screen",
+        ),
+        (
+            "CARGO_FEATURE_ZI_REDRAW_WHOLE_SCREEN_TEST",
+            "zi_redraw_whole_screen",
+        ),
     ];
     let mut extra_cfgs: Vec<String> = Vec::new();
     for (env, cfg) in USER_PROGRAM_CFGS {

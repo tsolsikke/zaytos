@@ -349,6 +349,15 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
                     Some(common::ansi::AnsiAction::EraseLine(scope)) => {
                         console.erase_in_line(scope)
                     }
+                    // **行の挿入と削除（PERF-d）。** **全画面のアプリが
+                    // 1 行ぶんだけ画面をずらすために要る**——**ずらせないと、
+                    // 窓が 1 行動くたびに全画面を描き直すことになる。**
+                    Some(common::ansi::AnsiAction::InsertLines(count)) => {
+                        console.insert_lines(count)
+                    }
+                    Some(common::ansi::AnsiAction::DeleteLines(count)) => {
+                        console.delete_lines(count)
+                    }
                     // **SGR（ES-b。ADR-0040）。** 色は受理時に RGB へ
                     // 展開されている——**ここから先は形が 1 つである。**
                     Some(common::ansi::AnsiAction::SetGraphics(graphics)) => {

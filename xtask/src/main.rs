@@ -4055,6 +4055,29 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         });
     let cursor_followed = cursor_cell.is_some() && cursor_cell == buffer_cursor;
 
+    // **描画の費用（PERF-e）。** **窓が動く 1 行の移動の前後で撮ってある。**
+    // **主張しない**——**層ごとの数を差で出すだけである。**
+    let zi_costs: Vec<Vec<u64>> = serial
+        .lines()
+        .filter_map(|line| line.split("screen-cost: ").nth(1))
+        .map(|rest| {
+            rest.split_whitespace()
+                .filter_map(|field| field.split('=').nth(1))
+                .filter_map(|value| value.trim_end_matches('\r').parse::<u64>().ok())
+                .collect()
+        })
+        .collect();
+    let zi_move_cost: Option<Vec<u64>> = match (zi_costs.first(), zi_costs.get(1)) {
+        (Some(before), Some(after)) if before.len() == after.len() => Some(
+            before
+                .iter()
+                .zip(after)
+                .map(|(x, y)| y.saturating_sub(*x))
+                .collect(),
+        ),
+        _ => None,
+    };
+
     // **代替画面バッファ（e-3）。** **抜けた後に元の画面が戻っていることを、
     // 画面の実物で見る。** カーネルが入る前のピクセルを控え、戻った後に
     // 画面じゅうから同じインクを探して突き合わせている
@@ -4530,6 +4553,28 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         "{context}: a lone Esc settled without another key = {esc_settled_at_once} \
          (status labels in order: {status_labels:?})"
     );
+    // **窓が 1 行動く移動は、1 行ぶんしか描かないこと（PERF-e）。**
+    //
+    // **`less` と同じ形の判定である**（あちらは上限 200 字）。**`zi` の実測は
+    // 51 字で、全部描き直すと 944 字である**——**上限は `zi` の実測から
+    // 決めた**（`less` の値を写さない）。**字の数は揺れない。**
+    let zi_moves_one_line = zi_move_cost
+        .as_ref()
+        .and_then(|values| values.get(3).copied())
+        .is_some_and(|glyphs| glyphs <= 200);
+
+    println!(
+        "{context}: moving the window one line draws one line = {zi_moves_one_line} \
+         (it drew {:?} glyph(s); the whole-screen redraw measured 944)",
+        zi_move_cost
+            .as_ref()
+            .and_then(|values| values.get(3).copied())
+    );
+    println!(
+        "{context}: (info) the cost of one j that moves the window = {zi_move_cost:?} \
+         [syscalls writes write_bytes glyphs draw_cycles erase_cycles glyph_cycles flushes \
+         flush_bytes flush_cycles full_flushes ticks]"
+    );
     println!("{context}: the screen before the alternate screen came back = {screen_came_back}");
     println!(
         "{context}: the cursor on the screen followed the buffer = {cursor_followed} \
@@ -4663,6 +4708,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && esc_settled_at_once
         && screen_came_back
         && cursor_followed
+        && zi_moves_one_line
         && status_at_bottom
         && command_line_echoes
         && message_shown
@@ -4947,6 +4993,19 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
     //
     // **`ADR-0047` の前は 152 回だった**（実測）。**破壊 `flush-every-write` が
     // その形へ戻す。**
+    // **1 行の移動は 1 行ぶんしか描かないこと（PERF-d）。**
+    //
+    // **窓が 1 行動くと、本文の行はすべて別の行を映す**ので、
+    // **「変わった行だけ描く」では 1 字も減らない**——**画面をずらすことで
+    // 初めて減る**（`ADR-0040` の Addendum）。
+    //
+    // **実測**——**ずらすと 55 字、全部描き直すと 967 字である。**
+    // **上限を 200 字に置くと、両側に 3 倍以上の余裕がある。**
+    // **字の数は揺れない**（同じ台本なら同じである）。
+    let one_line_redraws_one_line = delta(2, 3)
+        .and_then(|values| values.get(3).copied())
+        .is_some_and(|glyphs| glyphs <= 200);
+
     // **消す費用が、同じ量を送る費用と同じ桁であること（PERF-c）。**
     //
     // # なぜ比で見るのか
@@ -5007,6 +5066,11 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
         "{context}: (info) the cost of one Space in more (one page of plain output) = {:?} \
          [{cost_fields}]",
         delta(4, 5)
+    );
+    println!(
+        "{context}: moving one line draws one line = {one_line_redraws_one_line} \
+         (j drew {:?} glyph(s); the whole-screen redraw measured 967)",
+        delta(2, 3).and_then(|values| values.get(3).copied())
     );
     println!(
         "{context}: erasing a page stays in the same order as sending one = {erase_is_bulk} \
@@ -5080,6 +5144,7 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
         && one_transfer_per_move
         && one_syscall_per_move
         && erase_is_bulk
+        && one_line_redraws_one_line
     {
         println!("{context}: PASS");
         Ok(())
@@ -11381,6 +11446,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "read-skip-flush-test",
             "frame-write-per-piece-test",
             "draw-pixel-by-pixel-test",
+            "less-redraw-whole-screen-test",
         ] {
             total += 1;
             begin_item(&format!("the view test catches {feature}"));
@@ -11452,6 +11518,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "zi-window-frozen-test",
             "stderr-on-screen-test",
             "zi-skip-cursor-flush-test",
+            "zi-redraw-whole-screen-test",
         ] {
             total += 1;
             begin_item(&format!("the zi test catches {feature}"));
@@ -12307,7 +12374,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 23,
-    full: 238,
+    full: 240,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

@@ -66,6 +66,14 @@ pub enum AnsiAction {
     EraseDisplay(EraseScope),
     /// 行消去（EL）。
     EraseLine(EraseScope),
+    /// 行を挿入する（`IL`。PERF-d）。**カーソルの行から下へずらす。**
+    ///
+    /// **全画面のアプリが1行ぶんだけ画面をずらすために要る**——
+    /// **ずらせないと、窓が1行動くたびに全画面を描き直すことになる**
+    /// （実測で967字。`ADR-0040`のAddendum）。
+    InsertLines(u32),
+    /// 行を削除する（`DL`。PERF-d）。**カーソルの行から下を上へ詰める。**
+    DeleteLines(u32),
     /// カーソルを出す / 隠す（DECTCEM。ES-c）。
     ///
     /// **`true` が「出す」（`\x1b[?25h`）である。**
@@ -371,6 +379,10 @@ impl AnsiParser {
             }
             'J' => EraseScope::from_param(self.params[0]).map(AnsiAction::EraseDisplay),
             'K' => EraseScope::from_param(self.params[0]).map(AnsiAction::EraseLine),
+            // **`IL` と `DL`（PERF-d）。** **パラメータが無い、または 0 のときは
+            // 1 行である**——ANSI の規約どおり。
+            'L' => Some(AnsiAction::InsertLines(self.params[0].max(1))),
+            'M' => Some(AnsiAction::DeleteLines(self.params[0].max(1))),
             // SGR（ES-b）。**パラメータが無い `\x1b[m` は `0`（全部戻す）である**
             // ——ANSI の規約どおり。
             'm' => self.dispatch_sgr(),
@@ -788,6 +800,27 @@ mod tests {
     }
 
     /// **代替画面バッファの切り替えを返す（e-3）。**
+    #[test]
+    fn insert_and_delete_lines_default_to_one() {
+        let mut parser = AnsiParser::new();
+        assert_eq!(
+            feed_all(&mut parser, "\x1b[L"),
+            [AnsiAction::InsertLines(1)]
+        );
+        assert_eq!(
+            feed_all(&mut parser, "\x1b[M"),
+            [AnsiAction::DeleteLines(1)]
+        );
+        assert_eq!(
+            feed_all(&mut parser, "\x1b[0M"),
+            [AnsiAction::DeleteLines(1)]
+        );
+        assert_eq!(
+            feed_all(&mut parser, "\x1b[3L"),
+            [AnsiAction::InsertLines(3)]
+        );
+    }
+
     #[test]
     fn the_alternate_screen_sequence_switches_both_ways() {
         let mut parser = AnsiParser::new();

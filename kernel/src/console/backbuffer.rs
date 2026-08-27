@@ -187,17 +187,52 @@ impl BackBuffer {
             return;
         }
 
-        let stride = self.stride as usize;
-        let moved_rows = (screen_height - lines) as usize;
-        let from = lines as usize * stride;
-        let to_len = moved_rows * stride;
+        // **`DL` の画素の側と同じ規則である（PERF-e）。** **道を 2 本持たない。**
+        self.delete_rows(0, lines, color);
+    }
 
-        let pixels = self.pixels_mut();
-        if from + to_len <= pixels.len() {
-            pixels.copy_within(from..from + to_len, 0);
+    /// `top` から下を `lines` ピクセルぶん上へ詰める（`DL`。PERF-d）。
+    ///
+    /// **空いた下端は `color` で埋める。** **[`Self::scroll_up`] は画面全体を
+    /// ずらすが、こちらは途中から下だけをずらす**——**`less` は最下行を
+    /// 状態行に使っているので、全体をずらせない。**
+    pub fn delete_rows(&mut self, top: u32, lines: u32, color: Color) {
+        let height = self.layout().height();
+        if lines == 0 || top >= height {
+            return;
         }
+        let lines = lines.min(height - top);
+        let stride = self.stride as usize;
+        let first = top as usize * stride;
+        let from = (top + lines) as usize * stride;
+        let end = height as usize * stride;
+        let pixels = self.pixels_mut();
+        if from < end && end <= pixels.len() {
+            pixels.copy_within(from..end, first);
+        }
+        self.clear_rows(height - lines, lines, color);
+    }
 
-        self.clear_rows(screen_height - lines, lines, color);
+    /// `top` から下を `lines` ピクセルぶん下へずらす（`IL`。PERF-d）。
+    ///
+    /// **空いた `top` から `lines` ピクセルを `color` で埋める。**
+    /// **押し出された下端は消える。**
+    pub fn insert_rows(&mut self, top: u32, lines: u32, color: Color) {
+        let height = self.layout().height();
+        if lines == 0 || top >= height {
+            return;
+        }
+        let lines = lines.min(height - top);
+        let stride = self.stride as usize;
+        let first = top as usize * stride;
+        let to = (top + lines) as usize * stride;
+        let end = height as usize * stride;
+        let pixels = self.pixels_mut();
+        if to < end && end <= pixels.len() {
+            let moved = end - to;
+            pixels.copy_within(first..first + moved, to);
+        }
+        self.clear_rows(top, lines, color);
     }
 
     /// 指定範囲をフレームバッファへ転送し、転送したバイト数を返す。

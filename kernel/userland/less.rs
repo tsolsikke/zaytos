@@ -324,6 +324,71 @@ fn redraw(view: &View, doc: &Doc, window: &Window, echo: &userlib::Echo) {
     draw_status(view, doc, window, echo);
 }
 
+/// 窓が 1 行動いたぶんだけ画面をずらす（PERF-d）。
+///
+/// # なぜ全部描き直さないのか
+///
+/// **窓が 1 行動くと、本文の行はすべて別の行を映す**ので、
+/// **「変わった行だけ描く」では 1 字も減らない**（実測。PERF-c）。
+/// **画面をずらせば、描き直すのは新しく現れた 1 行だけになる。**
+///
+/// **実測**——**全部描き直すと 967 字で約 52ms、ずらすと 20 字ほどになる。**
+///
+/// # 端末に任せる
+///
+/// **`DL`（`CSI M`）と `IL`（`CSI L`）を送る。** **セルと画素を同じ規則で
+/// 動かすのはコンソールの仕事である**（`kernel/src/console/screen.rs`）。
+///
+/// # 状態行は毎回描き直す
+///
+/// **`DL` は最下行（状態行）も 1 行ぶん引き上げる。** **そのままだと状態行が
+/// 本文の位置に残るが、この後で必ず描き直すので、最後の絵は正しい。**
+fn scroll_by_one(view: &View, doc: &Doc, window: &Window, down: bool) {
+    // 破壊 (PERF-d, less-redraw-whole-screen): ずらさずに全部描き直す。
+    // **PERF-d の前の形そのものである**——**出る絵は同じで、描く字が
+    // 55 から 967 へ増える。** **描く字の数の判定が捕まえる。**
+    #[cfg(less_redraw_whole_screen)]
+    {
+        let echo = userlib::Echo::new();
+        redraw(view, doc, window, &echo);
+        let _ = down;
+        return;
+    }
+    #[cfg(not(less_redraw_whole_screen))]
+    {
+    let visible = window.visible(doc.count);
+    if down {
+        // **先頭の行を捨てて、下から 1 行が現れる。**
+        move_cursor(0, 0);
+        userlib::frame_push(STDOUT, b"\x1b[M");
+        let last = view.text_rows().saturating_sub(1);
+        move_cursor(last, 0);
+        userlib::frame_push(STDOUT, b"\x1b[2K");
+        let line = visible.start + last;
+        if line < visible.end {
+            let text = doc.line(line);
+            let take = text.len().min(view.columns);
+            if take > 0 {
+                userlib::frame_push(STDOUT, &text[..take]);
+            }
+        }
+    } else {
+        // **上から 1 行が現れる。**
+        move_cursor(0, 0);
+        userlib::frame_push(STDOUT, b"\x1b[L");
+        move_cursor(0, 0);
+        userlib::frame_push(STDOUT, b"\x1b[2K");
+        if visible.start < visible.end {
+            let text = doc.line(visible.start);
+            let take = text.len().min(view.columns);
+            if take > 0 {
+                userlib::frame_push(STDOUT, &text[..take]);
+            }
+        }
+    }
+    }
+}
+
 /// `_start` から呼ばれる（`userlib.rs` の `global_asm!`）。
 ///
 /// # Safety
@@ -480,14 +545,17 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             }
             (Escape::Bracket, final_byte) => {
                 escape = Escape::Idle;
-                let moved = match final_byte {
-                    b'B' => scroll_down(&mut window, 1, doc.count),
-                    b'A' => scroll_up(&mut window, 1),
+                let (moved, down) = match final_byte {
+                    b'B' => (scroll_down(&mut window, 1, doc.count), true),
+                    b'A' => (scroll_up(&mut window, 1), false),
                     // **知らない終端は捨てる。**
-                    _ => false,
+                    _ => (false, false),
                 };
                 if moved {
-                    redraw(&view, &doc, &window, &echo);
+                    // **矢印も 1 行の移動である（PERF-d）。** **`j` / `k` と
+                    // 同じ道を通る**——**片方だけ速い形にしない。**
+                    scroll_by_one(&view, &doc, &window, down);
+                    draw_status(&view, &doc, &window, &echo);
                 }
                 continue;
             }
@@ -498,9 +566,21 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             (Escape::Idle, _) => {}
         }
 
+        // **1 行の移動は、ずらして 1 行だけ描く（PERF-d）。**
+        // **1 画面の移動は全部描き直す**——**ずらす量が画面と同じなので、
+        // ずらしても得るものが無い。**
+        let mut shifted = None;
         let moved = match byte {
-            b'j' => scroll_down(&mut window, 1, doc.count),
-            b'k' => scroll_up(&mut window, 1),
+            b'j' => {
+                let moved = scroll_down(&mut window, 1, doc.count);
+                shifted = moved.then_some(true);
+                moved
+            }
+            b'k' => {
+                let moved = scroll_up(&mut window, 1);
+                shifted = moved.then_some(false);
+                moved
+            }
             // **`Space` は1画面ぶん下へ、`b` は1画面ぶん上へ。**
             b' ' => scroll_down(&mut window, view.text_rows(), doc.count),
             b'b' => scroll_up(&mut window, view.text_rows()),
@@ -511,7 +591,13 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             _ => false,
         };
         if moved {
-            redraw(&view, &doc, &window, &echo);
+            match shifted {
+                Some(down) => {
+                    scroll_by_one(&view, &doc, &window, down);
+                    draw_status(&view, &doc, &window, &echo);
+                }
+                None => redraw(&view, &doc, &window, &echo),
+            }
         } else {
             // **動かなくても状態行は描き直す**——**端に着いたことが
             // 分かるように、いまの位置を出し続ける。**

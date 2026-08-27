@@ -9407,6 +9407,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "打鍵の代わりに決定的な台本を read_bytes から返す",
     ),
     (
+        "zi-redraw-whole-screen-test",
+        cfg!(feature = "zi-redraw-whole-screen-test"),
+        "zi が窓の1行の移動でも全画面を描き直す（PERF-e の前の形）",
+    ),
+    (
+        "less-redraw-whole-screen-test",
+        cfg!(feature = "less-redraw-whole-screen-test"),
+        "less が1行の移動でも全画面を描き直す（PERF-d の前の形）",
+    ),
+    (
         "draw-pixel-by-pixel-test",
         cfg!(feature = "draw-pixel-by-pixel-test"),
         "RAM の面も 1 画素ずつ書き、描く費用が桁で増える",

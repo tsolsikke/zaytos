@@ -632,6 +632,43 @@ impl Console {
         }
     }
 
+    /// 行を削除して下を詰める（`DL`。PERF-d）。
+    ///
+    /// # セルと画素を同じ規則で動かす
+    ///
+    /// **片方だけを動かすと、状態と画面が食い違う**（`set_alternate_screen`の
+    /// doc と同じ立場である）。**セルは`common::screen`が、画素は
+    /// [`crate::console::BackBuffer`]が持つ。**
+    ///
+    /// # 全面を未転送にする
+    ///
+    /// **ずらした範囲は画面のどこでも変わりうる。** **矩形1つで表せるので、
+    /// `mark_all`ではなく動かした範囲だけを印にする。**
+    pub fn delete_lines(&mut self, count: u32) {
+        let (_, row) = self.grid.cursor();
+        self.erase_drawn_cursor();
+        let top = row * font::GLYPH_HEIGHT;
+        let height = self.back.layout().height().saturating_sub(top);
+        self.back
+            .delete_rows(top, count * font::GLYPH_HEIGHT, self.background);
+        self.grid
+            .delete_lines(row, count, Self::rgb(self.background));
+        self.dirty.mark(0, top, self.back.layout().width(), height);
+    }
+
+    /// 行を挿入して下へずらす（`IL`。PERF-d）。
+    pub fn insert_lines(&mut self, count: u32) {
+        let (_, row) = self.grid.cursor();
+        self.erase_drawn_cursor();
+        let top = row * font::GLYPH_HEIGHT;
+        let height = self.back.layout().height().saturating_sub(top);
+        self.back
+            .insert_rows(top, count * font::GLYPH_HEIGHT, self.background);
+        self.grid
+            .insert_lines(row, count, Self::rgb(self.background));
+        self.dirty.mark(0, top, self.back.layout().width(), height);
+    }
+
     /// 行消去（EL。zi-b）。**カーソルは動かさない。**
     ///
     /// 範囲は ANSI の規約どおり——`After` と `Before` はどちらもカーソルの

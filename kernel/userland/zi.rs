@@ -954,10 +954,87 @@ fn follow_window(window: &mut Window, row: usize) -> bool {
 /// **描き直しは全面である**——**差分で描く形は測ってから決める**
 /// （`docs/roadmap.md` の VIEW 段）。
 fn show_cursor(view: &View, buffer: &Buffer, window: &mut Window, status: &Status) {
-    if follow_window(window, status.row) {
-        redraw(view, buffer, window, status);
-    } else {
+    let before = window.top();
+    if !follow_window(window, status.row) {
         restore_cursor(window, status.row, status.col);
+        return;
+    }
+    // **窓が 1 行だけ動いたなら、画面をずらす（PERF-e）。**
+    //
+    // **`less` と同じ機構である**（`common::ansi` の `IL` / `DL`）。
+    // **2 つ目の経路を作らない。**
+    //
+    // **1 行より大きく跳んだときは描き直す**——**ずらす量が画面に近づくと、
+    // ずらしても得るものが無い**（`less` の 1 画面の移動と同じ判断）。
+    let moved = window.top() as isize - before as isize;
+    if moved == 1 || moved == -1 {
+        scroll_by_one(view, buffer, window, moved == 1);
+        // **最後にカーソルを戻す**（[`refresh`] が持つ順序）。
+        // **PERF-b の回帰は、この順序を崩したときに出た。**
+        refresh(view, window, status);
+        return;
+    }
+    redraw(view, buffer, window, status);
+}
+
+/// 窓が 1 行動いたぶんだけ画面をずらす（PERF-e）。
+///
+/// # 本文だけをずらす
+///
+/// **`zi` は最下の 2 行を状態行とコマンド行に使っている**（`less` は 1 本）。
+/// **`DL` / `IL` は画面全体をずらすので、その 2 本も 1 行ぶん動く**——
+/// **この後の [`refresh`] が両方を描き直すので、最後の絵は正しい。**
+///
+/// # 新しく現れた 1 行だけを描く
+///
+/// **窓が 1 行動くと、本文の行はすべて別の行を映す**ので、
+/// **「変わった行だけ描く」では 1 字も減らない**（実測。PERF-c）。
+/// **画面をずらせば、描き直すのは 1 行だけになる。**
+fn scroll_by_one(view: &View, buffer: &Buffer, window: &Window, down: bool) {
+    // 破壊 (PERF-e, zi-redraw-whole-screen): ずらさずに全部描き直す。
+    // **PERF-e の前の形そのものである**——**出る絵は同じで、描く字が
+    // 桁で増える。** **描く字の数の判定が捕まえる。**
+    #[cfg(zi_redraw_whole_screen)]
+    {
+        let _ = down;
+        let mut copy = *window;
+        let top = copy.top();
+        redraw(
+            view,
+            buffer,
+            &mut copy,
+            &Status {
+                mode: Mode::Normal,
+                row: top,
+                col: 0,
+                dirty: true,
+                command: &[],
+                in_command: false,
+                message: b"",
+            },
+        );
+        return;
+    }
+    #[cfg(not(zi_redraw_whole_screen))]
+    {
+        let visible = window.visible(buffer.count);
+        let last = view.text_rows().saturating_sub(1);
+        let (sequence, screen_row, line) = if down {
+            (&b"\x1b[M"[..], last, visible.start + last)
+        } else {
+            (&b"\x1b[L"[..], 0, visible.start)
+        };
+        move_cursor(0, 0);
+        userlib::frame_push(STDOUT, sequence);
+        move_cursor(screen_row, 0);
+        // EL(2): 現れた行を消してから置く（ずらした先に前の字が残らない）。
+        userlib::frame_push(STDOUT, b"\x1b[2K");
+        if line < visible.end {
+            let text = buffer.line(line);
+            if !text.is_empty() {
+                userlib::frame_push(STDOUT, text);
+            }
+        }
     }
 }
 

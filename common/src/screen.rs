@@ -374,13 +374,56 @@ impl<'a> Screen<'a> {
     /// こちらはセルを動かす。**両方が同じ規則で動くことが振る舞い不変の
     /// 条件である。**
     pub fn scroll_up(&mut self, bg: Rgb) {
-        let width = self.columns as usize;
-        let used = width * self.rows as usize;
-        if used > width {
-            self.cells.copy_within(width..used, 0);
+        // **`DL` の 1 行と同じ規則である（PERF-e）。** **道を 2 本持たない**
+        // ——**片方だけが直る形を作らない**（この体制の規律）。
+        self.delete_lines(0, 1, bg);
+    }
+
+    /// `row` から下の行を `count` 行ぶん上へ詰める（`DL`。PERF-d）。
+    ///
+    /// # 何のために在るのか
+    ///
+    /// **`less`のような全画面のアプリが、1行ずらすためである。**
+    /// **いままでは全画面を描き直していた**——**窓が1行動くと49行すべての
+    /// 中身が変わるので、「変わった行だけ描く」では減らない**（実測。PERF-c）。
+    /// **画面をずらせば、描き直すのは新しく現れた1行だけになる。**
+    ///
+    /// **空いた下端は背景で埋める。** **`row` が画面の外なら何もしない。**
+    pub fn delete_lines(&mut self, row: u32, count: u32, bg: Rgb) {
+        if row >= self.rows || count == 0 {
+            return;
         }
-        if self.rows > 0 {
-            self.clear_row(self.rows - 1, bg);
+        let width = self.columns as usize;
+        let count = count.min(self.rows - row);
+        let first = (row as usize) * width;
+        let from = ((row + count) as usize) * width;
+        let end = (self.rows as usize) * width;
+        if from < end {
+            self.cells.copy_within(from..end, first);
+        }
+        for blank in (self.rows - count)..self.rows {
+            self.clear_row(blank, bg);
+        }
+    }
+
+    /// `row` から下の行を `count` 行ぶん下へずらす（`IL`。PERF-d）。
+    ///
+    /// **空いた `row` から `count` 行を背景で埋める。**
+    /// **押し出された下端は消える**（端末の慣行どおりである）。
+    pub fn insert_lines(&mut self, row: u32, count: u32, bg: Rgb) {
+        if row >= self.rows || count == 0 {
+            return;
+        }
+        let width = self.columns as usize;
+        let count = count.min(self.rows - row);
+        let first = (row as usize) * width;
+        let to = ((row + count) as usize) * width;
+        let end = (self.rows as usize) * width;
+        if to < end {
+            self.cells.copy_within(first..end - (to - first), to);
+        }
+        for blank in row..(row + count) {
+            self.clear_row(blank, bg);
         }
     }
 
@@ -463,6 +506,82 @@ impl<'a> Screen<'a> {
         });
         self.cursor_column += width_cells;
         step
+    }
+}
+
+#[cfg(test)]
+mod line_shift_tests {
+    use super::{Cell, Rgb, Screen};
+
+    fn screen(cells: &mut [Cell], columns: u32, rows: u32) -> Screen<'_> {
+        Screen::new(columns, rows, cells).expect("形が正しいこと")
+    }
+
+    fn put_marks(screen: &mut Screen<'_>, rows: u32) {
+        let ink = Rgb::new(200, 200, 200);
+        for row in 0..rows {
+            screen.put(0, row, (b'a' + row as u8) as char, ink, ink, 1);
+        }
+    }
+
+    fn row_char(screen: &Screen<'_>, row: u32) -> char {
+        screen.cell(0, row).map(|cell| cell.ch).unwrap_or('?')
+    }
+
+    #[test]
+    fn deleting_a_line_pulls_the_rest_up_and_blanks_the_bottom() {
+        let mut cells = [Cell::blank(); 4 * 4];
+        let mut screen = screen(&mut cells, 4, 4);
+        put_marks(&mut screen, 4);
+        screen.delete_lines(0, 1, Rgb::new(0, 0, 0));
+        assert_eq!(row_char(&screen, 0), 'b');
+        assert_eq!(row_char(&screen, 2), 'd');
+        assert_eq!(row_char(&screen, 3), ' ', "下端は空になる");
+    }
+
+    #[test]
+    fn inserting_a_line_pushes_the_rest_down_and_blanks_it() {
+        let mut cells = [Cell::blank(); 4 * 4];
+        let mut screen = screen(&mut cells, 4, 4);
+        put_marks(&mut screen, 4);
+        screen.insert_lines(0, 1, Rgb::new(0, 0, 0));
+        assert_eq!(row_char(&screen, 0), ' ', "空いた行は空になる");
+        assert_eq!(row_char(&screen, 1), 'a');
+        assert_eq!(row_char(&screen, 3), 'c', "下端は押し出されて消える");
+    }
+
+    #[test]
+    fn shifting_from_the_middle_leaves_the_rows_above_alone() {
+        let mut cells = [Cell::blank(); 4 * 4];
+        let mut screen = screen(&mut cells, 4, 4);
+        put_marks(&mut screen, 4);
+        screen.delete_lines(2, 1, Rgb::new(0, 0, 0));
+        assert_eq!(row_char(&screen, 0), 'a');
+        assert_eq!(row_char(&screen, 1), 'b');
+        assert_eq!(row_char(&screen, 2), 'd');
+        assert_eq!(row_char(&screen, 3), ' ');
+    }
+
+    #[test]
+    fn a_count_past_the_bottom_clears_the_rest() {
+        let mut cells = [Cell::blank(); 4 * 4];
+        let mut screen = screen(&mut cells, 4, 4);
+        put_marks(&mut screen, 4);
+        screen.delete_lines(1, 99, Rgb::new(0, 0, 0));
+        assert_eq!(row_char(&screen, 0), 'a');
+        for row in 1..4 {
+            assert_eq!(row_char(&screen, row), ' ');
+        }
+    }
+
+    #[test]
+    fn a_row_past_the_bottom_does_nothing() {
+        let mut cells = [Cell::blank(); 4 * 4];
+        let mut screen = screen(&mut cells, 4, 4);
+        put_marks(&mut screen, 4);
+        screen.delete_lines(9, 1, Rgb::new(0, 0, 0));
+        assert_eq!(row_char(&screen, 0), 'a');
+        assert_eq!(row_char(&screen, 3), 'd');
     }
 }
 
