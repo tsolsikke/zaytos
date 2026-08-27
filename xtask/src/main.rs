@@ -12074,6 +12074,38 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
     }
 
     total += 1;
+    begin_item("the Bash hook still decides the way it says it does");
+    // **hook が読み込まれているかは、ここでは分からない**——**ツールの
+    // 呼び出しを止めるのは harness の側で、`xtask` からは観測できない。**
+    // **守れるのは「判定そのものが壊れていないこと」だけである。**
+    //
+    // **実測で 2 回、素通りする形を踏んでいる**（§6-C）——**部分一致が
+    // 文書の言及まで拒む形と、内側の heredoc が stdin を奪う形である。**
+    // **どちらもエラーを出さずに素通りした。**
+    //
+    // **読み込まれていることは、実際に打って確かめるしかない**
+    // （`CLAUDE.md` の規律）。
+    {
+        let hook = workspace_root.join(".claude/hooks/deny_dangerous_bash.py");
+        let status = Command::new("python3")
+            .arg(&hook)
+            .arg("--self-test")
+            .current_dir(&workspace_root)
+            .status();
+        match status {
+            Ok(status) if status.success() => println!("--- bash hook self-test: OK"),
+            Ok(status) => {
+                println!("--- bash hook self-test: FAILED ({status})");
+                failed.push("bash hook self-test".to_string());
+            }
+            Err(error) => {
+                println!("--- bash hook self-test: FAILED (could not run {hook:?}: {error})");
+                failed.push("bash hook self-test".to_string());
+            }
+        }
+    }
+
+    total += 1;
     begin_item("markdown prose style (tracked .md)");
     let prose = check_markdown_prose_style(&workspace_root)?;
     if prose.is_empty() {
@@ -12459,8 +12491,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 23,
-    full: 242,
+    base: 24,
+    full: 243,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

@@ -37,5 +37,44 @@ def main() -> int:
         return 2
     return 0
 
+def self_test() -> int:
+    """判定表を回す（`cargo xtask check` から呼ぶ）。
+
+    **hook が読み込まれているかは、ここでは分からない**——**ツールの
+    呼び出しを止めるのは harness の側で、こちらからは観測できない。**
+    **ここで守れるのは「判定そのものが壊れていないこと」だけである。**
+
+    **読み込まれていることは、実際に打って確かめるしかない**
+    （`CLAUDE.md` の規律。**実測で2回、素通りする形を踏んでいる**）。
+    """
+    cases = [
+        ("sleep 1 &", "deny"),
+        ("ls && pwd", "allow"),
+        ("git " + "add -A", "deny"),
+        ("git " + "add --all .", "deny"),
+        ("echo '`git " + "add -A` は使わない'", "allow"),
+        ("git " + "commit -am x", "exit2"),
+        ("git " + "commit -m x", "allow"),
+        ("git status --short", "allow"),
+        ("cat a.txt | grep x", "allow"),
+    ]
+    failures = 0
+    for command, want in cases:
+        got = "allow"
+        for pattern, how, _ in RULES:
+            if pattern.search(command):
+                got = "deny" if how == "deny" else "exit2"
+                break
+        if got != want:
+            print(f"self-test: {command!r} wanted {want} but got {got}")
+            failures += 1
+    if failures:
+        return 1
+    print(f"self-test: {len(cases)} case(s) decided as expected")
+    return 0
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
+        raise SystemExit(self_test())
     raise SystemExit(main())
