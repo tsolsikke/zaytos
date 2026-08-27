@@ -331,6 +331,8 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
         // 通らない——ログの行に CSI は無く、通す理由が無い。
         #[cfg(not(feature = "ansi-console-skip-parse-test"))]
         {
+            // **描く費用を測る（PERF-c の測定）。** **転送とは別の層である。**
+            let started = common::cpu::read_timestamp_counter();
             // **写しを取り、描き終えてから書き戻す**（[`FOREGROUND_ANSI`] の doc）。
             let mut parser = *FOREGROUND_ANSI.lock();
             for c in text.chars() {
@@ -379,6 +381,8 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
             #[cfg(feature = "flush-every-write-test")]
             console.flush();
             *FOREGROUND_ANSI.lock() = parser;
+            let elapsed = common::cpu::read_timestamp_counter().wrapping_sub(started);
+            console.note_draw_cycles(elapsed);
         }
     }
 }

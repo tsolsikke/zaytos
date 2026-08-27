@@ -79,6 +79,16 @@ pub struct FlushStats {
     pub foreground_writes: u64,
     /// その `write` が運んだバイト数の合計（PERF）。
     pub foreground_bytes: u64,
+    /// 消す経路（`EL` / `ED`）に費やした TSC サイクル（PERF-c の測定）。
+    ///
+    /// **`draw_cycles` の内訳である**——**引いた残りが字を置く費用である。**
+    pub erase_cycles: u64,
+    /// 字を置く経路に費やした TSC サイクル（PERF-c の測定）。
+    ///
+    /// **転送とは別の層である**——**あちらは送る費用、こちらは描く費用である。**
+    /// **PERF-a と b は転送の回数しか減らしていない**ので、**描く側が
+    /// 支配していないかを別に測る。**
+    pub draw_cycles: u64,
     /// 画面へ字を置いた回数（PERF）。**[`Console::put_char`] を通った回数である。**
     ///
     /// **描いた字とは限らない**——**スクロールや行消去だけの回も数える。**
@@ -391,6 +401,11 @@ impl Console {
         Self::CURSOR_COLOR
     }
 
+    /// 字を置く経路に費やしたサイクルを足す（PERF-c の測定）。
+    pub fn note_draw_cycles(&mut self, cycles: u64) {
+        self.stats.draw_cycles += cycles;
+    }
+
     /// 端末への `write`（システムコール 1 回）を数える（PERF-b）。
     pub fn note_terminal_write(&mut self) {
         self.stats.terminal_writes += 1;
@@ -618,6 +633,7 @@ impl Console {
     /// セルを含む。
     pub fn erase_in_line(&mut self, scope: common::ansi::EraseScope) {
         use common::ansi::EraseScope;
+        let started = common::cpu::read_timestamp_counter();
         let (column, row) = self.grid.cursor();
         let columns = self.grid.columns();
         match scope {
@@ -625,6 +641,7 @@ impl Console {
             EraseScope::Before => self.erase_cells(row, 0, column + 1),
             EraseScope::All => self.erase_cells(row, 0, columns),
         }
+        self.stats.erase_cycles += common::cpu::read_timestamp_counter().wrapping_sub(started);
     }
 
     /// 画面消去（ED。zi-b）。**カーソルは動かさない**——ここが [`Self::clear`]
@@ -632,6 +649,7 @@ impl Console {
     /// CUP を送る）。
     pub fn erase_in_display(&mut self, scope: common::ansi::EraseScope) {
         use common::ansi::EraseScope;
+        let started = common::cpu::read_timestamp_counter();
         let (column, row) = self.grid.cursor();
         let (columns, rows) = (self.grid.columns(), self.grid.rows());
         match scope {
@@ -666,6 +684,7 @@ impl Console {
                 self.grid.set_cursor(column, row);
             }
         }
+        self.stats.erase_cycles += common::cpu::read_timestamp_counter().wrapping_sub(started);
     }
 
     /// セルの中に背景色でないピクセルが在るか（zi-b の判定用）。
