@@ -10,6 +10,7 @@
 use super::color::Color;
 use super::font::{self, Glyph};
 use super::framebuffer::Framebuffer;
+use super::layout::BYTES_PER_PIXEL;
 
 /// `text` を 1 行に描いたときの幅（ピクセル）。
 ///
@@ -93,6 +94,46 @@ impl Framebuffer {
         let front = foreground.to_pixel(format);
         let back = background.to_pixel(format);
         let mut line = [0u32; MAX_GLYPH_WIDTH];
+        // **切り詰めと位置の計算を、字ごとに 1 回だけにする（PERF-c-2）。**
+        //
+        // **行ごとに呼んでいた**——**16 行ぶんの `clip_rect` と
+        // `pixel_offset_bytes` である。** **debug ビルドでは、どちらも
+        // 検査つきの関数呼び出しになる**（実測で、グリフ 1 字が 161K サイクル
+        // だった。**うち書き込みは 8 画素 × 16 行 = 32 バイト × 16 しかない**）。
+        //
+        // **画面の外へ出る字は、これまでどおり `write_pixel_run` の側で捨てる**
+        // ——**まとめて書けるのは、字が丸ごと収まっているときだけである。**
+        let fits = self
+            .layout()
+            .clip_rect(x, y, width as u32, glyph.height_pixels())
+            .is_some_and(|rect| rect.width == width as u32 && rect.height == glyph.height_pixels());
+        if !fits {
+            for row in 0..glyph.height_pixels() {
+                for (column, slot) in line[..width].iter_mut().enumerate() {
+                    *slot = if glyph.is_set(column as u32, row) {
+                        front
+                    } else {
+                        back
+                    };
+                }
+                self.write_pixel_run(x, y.saturating_add(row), &line[..width]);
+            }
+            return;
+        }
+        let Some(offset) = self.layout().pixel_offset_bytes(x, y) else {
+            return;
+        };
+        let stride_bytes = (self.layout().stride() as u64) * BYTES_PER_PIXEL;
+        // SAFETY: 上で字が丸ごと画面の中に収まることを確かめてある。
+        // **各行の先頭は `offset + row * stride_bytes` で、最後の行の右端も
+        // 面の中である**（`clip_rect` が高さと幅の両方を認めた）。
+        // **RAM の面だけがここへ来る**（呼ぶ側が種別で分けている）。
+        let base = unsafe {
+            self.layout()
+                .base()
+                .as_mut_ptr::<u32>()
+                .byte_add(offset as usize)
+        };
         for row in 0..glyph.height_pixels() {
             for (column, slot) in line[..width].iter_mut().enumerate() {
                 *slot = if glyph.is_set(column as u32, row) {
@@ -101,7 +142,11 @@ impl Framebuffer {
                     back
                 };
             }
-            self.write_pixel_run(x, y.saturating_add(row), &line[..width]);
+            // SAFETY: 上の SAFETY と同じ。行の先頭から `width` 画素は面の中である。
+            unsafe {
+                let row_ptr = base.byte_add((row as u64 * stride_bytes) as usize);
+                core::slice::from_raw_parts_mut(row_ptr, width).copy_from_slice(&line[..width]);
+            }
         }
     }
 
