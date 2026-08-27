@@ -4069,7 +4069,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         .collect();
     // **60 回の `j` の全体（PERF-f の測定）。** **1 打鍵あたりの実時間を出す。**
     // **観測は 3 つある**——**走り始め、60 回目の直前、60 回目の直後である。**
-    let zi_run_cost: Option<Vec<u64>> = match (zi_costs.first(), zi_costs.get(2)) {
+    let zi_insert_cost: Option<Vec<u64>> = match (zi_costs.first(), zi_costs.get(1)) {
         (Some(before), Some(after)) if before.len() == after.len() => Some(
             before
                 .iter()
@@ -4079,7 +4079,17 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         ),
         _ => None,
     };
-    let zi_move_cost: Option<Vec<u64>> = match (zi_costs.get(1), zi_costs.get(2)) {
+    let zi_run_cost: Option<Vec<u64>> = match (zi_costs.get(2), zi_costs.get(4)) {
+        (Some(before), Some(after)) if before.len() == after.len() => Some(
+            before
+                .iter()
+                .zip(after)
+                .map(|(x, y)| y.saturating_sub(*x))
+                .collect(),
+        ),
+        _ => None,
+    };
+    let zi_move_cost: Option<Vec<u64>> = match (zi_costs.get(3), zi_costs.get(4)) {
         (Some(before), Some(after)) if before.len() == after.len() => Some(
             before
                 .iter()
@@ -4584,7 +4594,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     );
     // **空読み 1 回の費用（PERF-f）。** **何も描いていないのに転送が
     // 走っていないかを見る**（`ADR-0047` で、読むたびに掃く形にした）。
-    let zi_idle_cost: Option<Vec<u64>> = match (zi_costs.get(3), zi_costs.get(4)) {
+    let zi_idle_cost: Option<Vec<u64>> = match (zi_costs.get(5), zi_costs.get(6)) {
         (Some(before), Some(after)) if before.len() == after.len() => Some(
             before
                 .iter()
@@ -4594,6 +4604,34 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         ),
         _ => None,
     };
+    // **空読み 1 回で転送が走らないこと（PERF-f）。**
+    //
+    // **何も描いていないのだから、送るものも無い。** **`ADR-0047` で
+    // 「読むたびに掃く」形にしたとき、カーソルを必ず描き直す経路が
+    // そのまま転送になっていた**（実測。**転送 1 回・64 バイト・
+    // 49,968 サイクル**）。
+    //
+    // **アプリは `-EAGAIN` で毎秒 39,000 回ほど回る**ので、
+    // **1 回の費用がそのまま CPU の占有になる。**
+    //
+    // **回数で見る**——**揺れない。** **0 か 1 かである。**
+    let idle_read_costs_nothing = zi_idle_cost
+        .as_ref()
+        .and_then(|values| values.get(7).copied())
+        .is_some_and(|flushes| flushes == 0);
+
+    println!(
+        "{context}: (info) inserting one character costs {zi_insert_cost:?} \
+         [syscalls writes write_bytes glyphs draw_cycles erase_cycles glyph_cycles flushes \
+         flush_bytes flush_cycles full_flushes ticks]"
+    );
+    println!(
+        "{context}: an idle read sends nothing = {idle_read_costs_nothing} \
+         (it caused {:?} transfer(s); before PERF-f it was 1 transfer of 64 bytes)",
+        zi_idle_cost
+            .as_ref()
+            .and_then(|values| values.get(7).copied())
+    );
     println!(
         "{context}: (info) one idle read (no output at all) costs {zi_idle_cost:?} \
          [syscalls writes write_bytes glyphs draw_cycles erase_cycles glyph_cycles flushes \
@@ -4743,6 +4781,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && screen_came_back
         && cursor_followed
         && zi_moves_one_line
+        && idle_read_costs_nothing
         && status_at_bottom
         && command_line_echoes
         && message_shown
@@ -11553,6 +11592,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "stderr-on-screen-test",
             "zi-skip-cursor-flush-test",
             "zi-redraw-whole-screen-test",
+            "cursor-repaint-always-test",
         ] {
             total += 1;
             begin_item(&format!("the zi test catches {feature}"));
@@ -12408,7 +12448,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 23,
-    full: 240,
+    full: 241,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

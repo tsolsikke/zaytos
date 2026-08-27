@@ -603,6 +603,10 @@ pub(crate) mod script {
     // **観測（`\x0f`）はエコーエリアを読む**——**エラーがそこに出ていること
     // が主張である**（溜めるだけで描かなければ「見えなくする」と同じになる）。
     //
+    // **PERF-g で、インサートの 1 字の前後にも計器の観測点を置いた**
+    // （`i\x12Z\x12\x1b`）。**`/data/big` は画面を埋めるので、
+    // 編集の描き直しの費用がここで出る。**
+    //
     // **PERF-f で、空読み 1 回の前後にも計器の観測点を置いた**
     // （`\x12\x04\x12`）。**`\x04` は 1 回だけ空を返す休みである**——
     // **アプリは `-EAGAIN` を受けて回る。** **その 1 周で画面へ何が起きるかを
@@ -663,7 +667,7 @@ pub(crate) mod script {
         /bin/cat /data/joined\n\
         /bin/cat /data/big\n\
         /bin/zi /data/big\n\
-        iZ\x1b\x04\x0e\x12\
+        i\x12Z\x12\x1b\x04\x0e\x12\
         jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj\
         \x12j\x12\x0e\x12\x04\x12\
         kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\x0e\

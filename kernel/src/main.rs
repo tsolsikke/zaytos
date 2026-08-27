@@ -9407,6 +9407,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "打鍵の代わりに決定的な台本を read_bytes から返す",
     ),
     (
+        "cursor-repaint-always-test",
+        cfg!(feature = "cursor-repaint-always-test"),
+        "変わっていなくてもカーソルを描き直し、空読みのたびに転送する",
+    ),
+    (
         "zi-redraw-whole-screen-test",
         cfg!(feature = "zi-redraw-whole-screen-test"),
         "zi が窓の1行の移動でも全画面を描き直す（PERF-e の前の形）",

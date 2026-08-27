@@ -183,6 +183,9 @@ view-test = []
 # ので、雑に見ると気づけない。「窓の外に在った行が見えるようになった」判定が
 # 捕まえる。
 less-window-frozen-test = []
+# 破壊（PERF-f）: 変わっていなくてもカーソルを描き直す。PERF-f の前の形で、
+# 絵は同じだが空読みのたびに転送が走る。空読みの判定が捕まえる。
+cursor-repaint-always-test = []
 # 破壊（PERF-e）: zi が窓の1行の移動でも全画面を描き直す。PERF-e の前の形で、
 # 出る絵は同じで描く字が桁で増える。描く字の数の判定が捕まえる。
 zi-redraw-whole-screen-test = []
