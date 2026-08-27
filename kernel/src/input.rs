@@ -626,7 +626,7 @@ pub(crate) mod script {
         \x1b[B\x1b[B\x1b[A\
         jjkk\
         \x1b[C\x1b[D\
-        lh\x02\
+        lh\x02\x13\
         iZY\x02\x1b\x04\x02\
         xx\
         j\
@@ -741,6 +741,8 @@ pub(crate) mod script {
     /// **主張を持つ観測点を合図に使わない**（`crate::console::probe` の
     /// `Observation::ScriptDone`）。
     const OBSERVE_DONE: u8 = 0x0c;
+    /// 観測点（PERF-b の後）。**画面の側のカーソルの位置。**
+    const OBSERVE_CURSOR: u8 = 0x13;
     /// 観測点（PERF）。**描画の層ごとの数。** **差分で読む。**
     const OBSERVE_DRAW_STATS: u8 = 0x12;
     /// 観測点（VIEW-c）。**`more` が抜けた後の画面の下 3 行。**
@@ -790,6 +792,7 @@ pub(crate) mod script {
             OBSERVE_VIEW_WINDOW => Some(crate::console::probe::Observation::ViewWindow),
             OBSERVE_MORE_OUTPUT => Some(crate::console::probe::Observation::MoreOutput),
             OBSERVE_DRAW_STATS => Some(crate::console::probe::Observation::DrawStats),
+            OBSERVE_CURSOR => Some(crate::console::probe::Observation::CursorCell),
             OBSERVE_PROMPT => Some(crate::console::probe::Observation::Prompt),
             OBSERVE_STATUS => Some(crate::console::probe::Observation::Status),
             OBSERVE_BEFORE_ALT => Some(crate::console::probe::Observation::BeforeAlternate),

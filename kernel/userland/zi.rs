@@ -909,6 +909,22 @@ fn restore_cursor(window: &Window, cursor_row: usize, cursor_col: usize) {
     if let Some(screen) = window.screen_row(cursor_row) {
         move_cursor(screen, cursor_col);
     }
+    // **ここで 1 回だけ送る（PERF-b。回帰で位置を移した）。**
+    //
+    // **描き終わりは [`refresh`] だけではない。** **ノーマルモードの移動は
+    // [`show_cursor`] からここへ直に来る**（`refresh` を通らない）。
+    // **送る場所を `refresh` に置いていたので、その経路だけが送られず、
+    // 画面のカーソルが追従しなくなった**（実測。**運用者の目視で出た**）。
+    //
+    // **この関数はすべての描き終わりの最後に居る**——**`refresh` も
+    // `show_cursor` も、最後にカーソルを戻す。** **送る場所はここが正しい。**
+    //
+    // 破壊 (PERF-b の回帰, zi-skip-cursor-flush): ここで送らない。
+    // **回帰そのものへ戻す**——**ノーマルモードの移動が画面へ届かず、
+    // 画面のカーソルが古い位置に残る。** **バッファは正しいので、
+    // 内部状態を見る判定は1つも落ちない。**
+    #[cfg(not(zi_skip_cursor_flush))]
+    userlib::frame_flush(STDOUT);
 }
 
 /// 窓を現在行へ追わせる（VIEW-a）。**動いたら真。**
@@ -952,9 +968,6 @@ fn refresh(view: &View, window: &Window, status: &Status) {
     draw_status(view, status);
     draw_command_line(view, status);
     restore_cursor(window, status.row, status.col);
-    // **ここで 1 回だけ送る（PERF-b）。** **描く関数は溜めるだけである**
-    // ——**`write` のたびにカーネルへ入り、BKL を取り直していた。**
-    userlib::frame_flush(STDOUT);
 }
 
 /// 画面を描き直す。**全面を消してから行ごとに置く。**

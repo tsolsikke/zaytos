@@ -4010,6 +4010,51 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && status_labels[2] == status_labels[0]
         && status_labels[2] != status_labels[1];
 
+    // **画面のカーソルが、バッファのカーソルへ追従していること**
+    // （PERF-b の後。**回帰で気づいた**）。
+    //
+    // **突き合わせるのは `zi` の診断行である**——**あちらは `row` / `col` /
+    // `top` を出しており、窓の中の位置は `row - top`、桁は `col` である。**
+    // **期待値をホストが持たない**——**どちらも実測の値で、計算だけをここでする。**
+    //
+    // **観測点は台本の `lh`（ノーマルモードの移動）の直後に置いてある。**
+    let cursor_cell = serial
+        .lines()
+        .find_map(|line| line.split("screen-cursor: the cursor cell is ").nth(1))
+        .and_then(|rest| {
+            let mut row = None;
+            let mut column = None;
+            for field in rest.trim().trim_end_matches('\r').split_whitespace() {
+                match field.split_once('=') {
+                    Some(("row", value)) => row = value.parse::<usize>().ok(),
+                    Some(("column", value)) => column = value.parse::<usize>().ok(),
+                    _ => {}
+                }
+            }
+            Some((row?, column?))
+        });
+    // **観測点の手前で最後に出た診断行を取る。**
+    let buffer_cursor = serial
+        .lines()
+        .take_while(|line| !line.contains("screen-cursor:"))
+        .filter(|line| line.contains("zi: cursor (buffer state"))
+        .last()
+        .and_then(|line| {
+            let mut row = None;
+            let mut col = None;
+            let mut top = None;
+            for field in line.split_whitespace() {
+                match field.split_once('=') {
+                    Some(("row", value)) => row = value.parse::<usize>().ok(),
+                    Some(("col", value)) => col = value.parse::<usize>().ok(),
+                    Some(("top", value)) => top = value.parse::<usize>().ok(),
+                    _ => {}
+                }
+            }
+            Some((row?.checked_sub(top?)?, col?))
+        });
+    let cursor_followed = cursor_cell.is_some() && cursor_cell == buffer_cursor;
+
     // **代替画面バッファ（e-3）。** **抜けた後に元の画面が戻っていることを、
     // 画面の実物で見る。** カーネルが入る前のピクセルを控え、戻った後に
     // 画面じゅうから同じインクを探して突き合わせている
@@ -4486,6 +4531,10 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
          (status labels in order: {status_labels:?})"
     );
     println!("{context}: the screen before the alternate screen came back = {screen_came_back}");
+    println!(
+        "{context}: the cursor on the screen followed the buffer = {cursor_followed} \
+         (screen {cursor_cell:?}, buffer says {buffer_cursor:?} as (row - top, col))"
+    );
     println!("{context}: the zi status line sits on the second-to-last row = {status_at_bottom}");
     println!(
         "{context}: the command line echoes what is being typed = {command_line_echoes} \
@@ -4613,6 +4662,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && status_followed_mode
         && esc_settled_at_once
         && screen_came_back
+        && cursor_followed
         && status_at_bottom
         && command_line_echoes
         && message_shown
@@ -4887,8 +4937,8 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
         }
         Some(a.iter().zip(b).map(|(x, y)| y.saturating_sub(*x)).collect())
     };
-    let cost_fields =
-        "syscalls writes write_bytes glyphs flushes flush_bytes flush_cycles full_flushes";
+    let cost_fields = "syscalls writes write_bytes glyphs draw_cycles erase_cycles flushes \
+         flush_bytes flush_cycles full_flushes ticks";
 
     // **1 回の動きにつき、転送は 1 回である（ADR-0047）。**
     //
@@ -4913,8 +4963,8 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
     );
     let one_transfer_per_move = matches!(
         (
-            delta(0, 1).and_then(|values| values.get(4).copied()),
-            delta(2, 3).and_then(|values| values.get(4).copied()),
+            delta(0, 1).and_then(|values| values.get(6).copied()),
+            delta(2, 3).and_then(|values| values.get(6).copied()),
         ),
         (Some(1), Some(1))
     );
@@ -4946,8 +4996,8 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
     println!(
         "{context}: one move costs one transfer = {one_transfer_per_move} \
          (Space {:?} transfer(s), j {:?} transfer(s); ADR-0047 replaced one transfer per write)",
-        delta(0, 1).and_then(|values| values.get(4).copied()),
-        delta(2, 3).and_then(|values| values.get(4).copied())
+        delta(0, 1).and_then(|values| values.get(6).copied()),
+        delta(2, 3).and_then(|values| values.get(6).copied())
     );
     println!(
         "{context}: less opened at the top of the file = {opened_at_the_top} \
@@ -11371,6 +11421,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "zi-join-does-nothing-test",
             "zi-window-frozen-test",
             "stderr-on-screen-test",
+            "zi-skip-cursor-flush-test",
         ] {
             total += 1;
             begin_item(&format!("the zi test catches {feature}"));
@@ -12226,7 +12277,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 23,
-    full: 236,
+    full: 237,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

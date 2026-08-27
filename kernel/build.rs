@@ -226,6 +226,10 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
             "CARGO_FEATURE_FRAME_WRITE_PER_PIECE_TEST",
             "frame_write_per_piece",
         ),
+        (
+            "CARGO_FEATURE_ZI_SKIP_CURSOR_FLUSH_TEST",
+            "zi_skip_cursor_flush",
+        ),
     ];
     let mut extra_cfgs: Vec<String> = Vec::new();
     for (env, cfg) in USER_PROGRAM_CFGS {

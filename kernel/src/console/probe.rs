@@ -61,6 +61,27 @@ pub(crate) enum Observation {
     /// （`PROMPT_COLOR` と同じ立場）。**写しが古くなれば、読む行が
     /// 状態行になって突き合わせが落ちる**——黙って緑にはならない。
     ViewWindow,
+    /// カーソルの居るセル（PERF-b の後。**回帰で気づいた**）。
+    ///
+    /// # 画面の側のカーソルである
+    ///
+    /// **コンソールが持つカーソルの位置を出す。** **アプリが `CUP` を送った
+    /// ときにだけ動く**——**送らなければ、ここは古い位置のままである。**
+    ///
+    /// # 突き合わせる相手はアプリの判定行である
+    ///
+    /// **`zi` は自分の `row` / `col` / `top` を診断行に出している。**
+    /// **窓の中の位置は `row - top` で、桁は `col` である**——**ホストが
+    /// その計算をして、この行と突き合わせる。** **境界をまたぐ突き合わせで、
+    /// 期待値をどちらも持っていない**（`ioctl(TIOCGWINSZ)` の判定と同じ形）。
+    ///
+    /// # なぜ要ったか
+    ///
+    /// **PERF-b で「描き終わりに 1 回だけ送る」形にしたとき、カーソルを戻す
+    /// 経路だけが送られなくなった**（実測。**ノーマルモードで動かしても
+    /// 画面のカーソルが追従しない**）。**判定がカーソルを見ていなかったので、
+    /// 自動判定は緑のまま通った**——**運用者の目視で出た。**
+    CursorCell,
     /// 描画の計器（PERF）。**層ごとの数をそのまま出す。**
     ///
     /// # 何を測るか
@@ -290,6 +311,13 @@ pub(crate) fn observe(kind: Observation) {
         Observation::ViewWindow => observe_view_window(&mut serial, console),
         Observation::MoreOutput => observe_more_output(&mut serial, console),
         Observation::DrawStats => observe_draw_stats(&mut serial, console),
+        Observation::CursorCell => {
+            let (column, row) = console.cursor_cell();
+            let _ = writeln!(
+                serial,
+                "screen-cursor: the cursor cell is row={row} column={column}"
+            );
+        }
         Observation::ZiWindow => observe_zi_window(&mut serial, console),
         Observation::ScriptDone => {
             let _ = writeln!(serial, "script-done: the script reached its end");
@@ -500,16 +528,19 @@ fn observe_draw_stats(serial: &mut SerialPort, console: &mut crate::console::Con
     let stats = console.stats();
     let _ = writeln!(
         serial,
-        "screen-cost: syscalls={} writes={} write_bytes={} glyphs={} flushes={} flush_bytes={} \
-         flush_cycles={} full_screen_flushes={}",
+        "screen-cost: syscalls={} writes={} write_bytes={} glyphs={} draw_cycles={} erase_cycles={} flushes={} \
+         flush_bytes={} flush_cycles={} full_screen_flushes={} ticks={}",
         stats.terminal_writes,
         stats.foreground_writes,
         stats.foreground_bytes,
         stats.glyphs_drawn,
+        stats.draw_cycles,
+        stats.erase_cycles,
         stats.flush_count,
         stats.transferred_bytes,
         stats.flush_cycles_total,
-        stats.full_screen_flush_count
+        stats.full_screen_flush_count,
+        crate::idt::timer_ticks()
     );
 }
 
