@@ -9490,7 +9490,7 @@ fn mask_code_spans(line: &str) -> Vec<char> {
     out
 }
 
-/// 本文の行数の規則を書いたコミット（`CLAUDE.md` 13.4）。
+/// 本文の行数の規則を書いたコミット（`CLAUDE.md` の「コミットメッセージ」）。
 ///
 /// # なぜハッシュで書くのか
 ///
@@ -9501,12 +9501,13 @@ fn mask_code_spans(line: &str) -> Vec<char> {
 ///
 /// # この値は動かない
 ///
-/// **`CLAUDE.md` 13.5 が過去のコミットの書き換えを禁じている**ので、
+/// **`CLAUDE.md` の「コミットメッセージ」が、公開後は履歴を書き換えられないと
+/// 書いている**ので、
 /// **ハッシュは後から変わらない。** 日付で書く手もあるが、
 /// **「規則を書いたのはどれか」を指すほうが、なぜその地点なのかが読める。**
 const COMMIT_BODY_RULE_COMMIT: &str = "69d2a9e";
 
-/// 件名の接頭辞として許すもの（`CLAUDE.md` 13.4）。
+/// 件名の接頭辞として許すもの（`CLAUDE.md` の「コミットメッセージ」）。
 ///
 /// **履歴の 576 件すべてがこの 7 つのいずれかである**（実測）。
 /// **したがって履歴全体へ当てられる。**
@@ -9538,14 +9539,14 @@ fn commit_message_findings(
     if !prefix.is_some_and(|p| COMMIT_SUBJECT_PREFIXES.contains(&p)) {
         findings.push(format!(
             "{short}: the subject prefix is not one of {COMMIT_SUBJECT_PREFIXES:?} \
-             (CLAUDE.md 13.4): {subject}"
+             (CLAUDE.md の「コミットメッセージ」): {subject}"
         ));
     }
 
     if lines.len() > 1 && !lines[1].trim().is_empty() {
         findings.push(format!(
             "{short}: the second line must be blank when there is a body \
-             (CLAUDE.md 13.4): {subject}"
+             (CLAUDE.md の「コミットメッセージ」): {subject}"
         ));
     }
 
@@ -9558,7 +9559,7 @@ fn commit_message_findings(
         if body != 0 && !COMMIT_BODY_LINES.contains(&body) {
             findings.push(format!(
                 "{short}: the body is {body} line(s); it must be {} to {} \
-                 (CLAUDE.md 13.4): {subject}",
+                 (CLAUDE.md の「コミットメッセージ」): {subject}",
                 COMMIT_BODY_LINES.start(),
                 COMMIT_BODY_LINES.end()
             ));
@@ -9575,7 +9576,7 @@ fn commit_message_findings(
     findings
 }
 
-/// コミットメッセージの、機械で判定できる規則を見る（`CLAUDE.md` 13.4）。
+/// コミットメッセージの、機械で判定できる規則を見る（`CLAUDE.md` の「コミットメッセージ」）。
 ///
 /// # 規則ごとに当てる範囲が違う
 ///
@@ -9751,7 +9752,7 @@ const ACPI_TESTS: &[CriticalTest] = &[
     },
 ];
 
-/// 本文の行数の下限と上限（`CLAUDE.md` 13.4）。**空行は数えない。**
+/// 本文の行数の下限と上限（`CLAUDE.md` の「コミットメッセージ」）。**空行は数えない。**
 const COMMIT_BODY_LINES: core::ops::RangeInclusive<usize> = 2..=5;
 
 /// `-smp 2` での ACPI 列挙の確認（S1-b-2）。
@@ -12106,6 +12107,25 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
     }
 
     total += 1;
+    begin_item("the index and the tracked .claude/ files name each other");
+    match check_agent_index_links(&workspace_root) {
+        Ok(count) => println!(
+            "--- agent index links: OK (both directions; {count} tracked file(s) under .claude/, \
+             each named by CLAUDE.md, and every .claude/ path CLAUDE.md names is tracked)"
+        ),
+        Err(findings) => {
+            for finding in &findings {
+                println!("    {finding}");
+            }
+            println!(
+                "--- agent index links: FAILED ({} mismatch(es))",
+                findings.len()
+            );
+            failed.push("agent index links".to_string());
+        }
+    }
+
+    total += 1;
     begin_item("markdown prose style (tracked .md)");
     let prose = check_markdown_prose_style(&workspace_root)?;
     if prose.is_empty() {
@@ -12491,8 +12511,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 24,
-    full: 243,
+    base: 25,
+    full: 244,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
@@ -12659,6 +12679,109 @@ const ACCOUNTING_DOC_PATH: &str = "docs/verification-coverage.md";
 ///
 /// 返すのは `(未の数, 済の数)`。**規則の本体は
 /// `docs/deferred-decisions.md` の「持ち越しの数え方」にある。**
+/// 索引が指している `.claude/…` のパスを、重複を落として拾う。
+///
+/// **ディレクトリの言及（`/` で終わるもの）は拾わない。**
+/// 「`.claude/` の整備」のような書き方を、指し先として数えないためである。
+fn agent_paths_named_in(text: &str) -> Vec<String> {
+    const PREFIX: &str = ".claude/";
+    let mut found: Vec<String> = Vec::new();
+    for (start, _) in text.match_indices(PREFIX) {
+        let rest = &text[start..];
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/')))
+            .unwrap_or(rest.len());
+        let path = &rest[..end];
+        if path.ends_with('/') {
+            continue;
+        }
+        if !found.iter().any(|p| p == path) {
+            found.push(path.to_string());
+        }
+    }
+    found
+}
+
+/// 索引（`CLAUDE.md`）と、追跡下の `.claude/` のファイルの対応を**両向きに**見る。
+///
+/// # なぜ要るか
+///
+/// **`CLAUDE.md` は索引になった。** 節の見出しを残し、本体の在り処を 1 行で指す。
+/// **指す先は `.claude/` の中で、そこは今後も分割・改名される。**
+/// **切れても機械は止めない**——参照はリンクではないので、`tools/docstyle.py` の
+/// `S5`（リンクとアンカーの生存）は見ない。**誰も気づかないまま索引が嘘になる。**
+///
+/// # 見るのは両向きである
+///
+/// - **順**: 索引が名前を出した `.claude/…` が、すべて追跡下に在ること。
+///   **無いものを指した索引は、その場で嘘である**（公開文書は、リポジトリに
+///   無いファイルを指してはならない。`CLAUDE.md` の「エージェント向け設定
+///   ファイルの扱い」）。
+/// - **逆**: 追跡下の `.claude/…` が、すべて索引から指されていること。
+///   **足したのに索引へ載せなければ、次のセッションはその存在を知れない**
+///   （`ADR-0031` が追跡下へ入れた理由がこれである）。
+///
+/// **追跡下かどうかで入力を決めるので、追跡外のものは両向きとも対象にならない。**
+/// `.claude/settings.local.json` が逆向きで落ちないのはそのためである
+/// （公開しないと決めてある。`ADR-0031`）。
+fn find_agent_index_mismatches(index_text: &str, tracked: &[String]) -> Vec<String> {
+    let named = agent_paths_named_in(index_text);
+    let mut findings = Vec::new();
+    for path in &named {
+        if !tracked.iter().any(|t| t == path) {
+            findings.push(format!(
+                "CLAUDE.md names {path}, which is not tracked. The index must not point at a \
+                 file the repository does not have"
+            ));
+        }
+    }
+    for path in tracked {
+        if !named.iter().any(|n| n == path) {
+            findings.push(format!(
+                "{path} is tracked but CLAUDE.md never names it. Put the pointer in the index, \
+                 or the next session cannot find the file"
+            ));
+        }
+    }
+    findings
+}
+
+/// 上の判定へ入力を集める。**追跡下の一覧は `git ls-files` から取る。**
+fn check_agent_index_links(workspace_root: &Path) -> Result<usize, Vec<String>> {
+    let index = workspace_root.join("CLAUDE.md");
+    let text = match fs::read_to_string(&index) {
+        Ok(text) => text,
+        Err(e) => return Err(vec![format!("could not read {}: {e}", index.display())]),
+    };
+    let output = Command::new("git")
+        .current_dir(workspace_root)
+        .args(["ls-files", ".claude"])
+        .output();
+    let output = match output {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            return Err(vec![format!(
+                "git ls-files .claude failed ({})",
+                output.status
+            )]);
+        }
+        Err(e) => return Err(vec![format!("could not run git ls-files: {e}")]),
+    };
+    let tracked: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    let findings = find_agent_index_mismatches(&text, &tracked);
+    if findings.is_empty() {
+        Ok(tracked.len())
+    } else {
+        Err(findings)
+    }
+}
+
 fn check_deferred_state_markers(workspace_root: &Path) -> Result<(usize, usize), Vec<String>> {
     /// 状態の語彙。**増やすときは doc の「持ち越しの数え方」も直すこと。**
     const VOCABULARY: [&str; 2] = ["未", "済"];
@@ -13638,7 +13761,45 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         assert_eq!(joined[device_pos - 1], "-device");
     }
 
-    /// 規則ごとに、違反する形が捕まることを見る（`CLAUDE.md` 13.4）。
+    /// 索引と `.claude/` の対応を、**両向きとも**見ていることを確かめる。
+    ///
+    /// **`git` を動かさない。** 判定は純粋関数で、入力は索引の本文と追跡下の
+    /// 一覧の 2 つだけである（`.claude/rules/temporary-changes.md` の
+    /// 「検査そのものを試すときは、リポジトリを動かさない」）。
+    #[test]
+    fn the_agent_index_check_looks_both_ways() {
+        let tracked = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        // 揃っている。**ディレクトリの言及は指し先として数えない。**
+        let index = "本体は `.claude/rules/a.md` にある。`.claude/` の整備で移した。";
+        assert!(find_agent_index_mismatches(index, &tracked(&[".claude/rules/a.md"])).is_empty());
+
+        // 順向き: 索引が追跡下に無いものを指している（改名がこの形で出る）。
+        // **同時に逆向きも出る**——改名前の名前は索引から消えているためである。
+        let renamed = find_agent_index_mismatches(
+            "本体は `.claude/rules/b.md` にある。",
+            &tracked(&[".claude/rules/a.md"]),
+        );
+        assert_eq!(renamed.len(), 2, "{renamed:?}");
+        assert!(
+            renamed[0].contains("names .claude/rules/b.md"),
+            "{renamed:?}"
+        );
+        assert!(renamed[1].contains("never names it"), "{renamed:?}");
+
+        // 逆向きだけ: 追跡下に在るのに、索引が名前を出していない。
+        let unlisted = find_agent_index_mismatches(
+            "本体は `.claude/rules/a.md` にある。",
+            &tracked(&[".claude/rules/a.md", ".claude/settings.json"]),
+        );
+        assert_eq!(unlisted.len(), 1, "{unlisted:?}");
+        assert!(
+            unlisted[0].contains(".claude/settings.json"),
+            "{unlisted:?}"
+        );
+    }
+
+    /// 規則ごとに、違反する形が捕まることを見る（`CLAUDE.md` の「コミットメッセージ」）。
     ///
     /// **`git` を動かさない。** 実際のコミットで確かめる形は後始末に
     /// `git reset --hard` が要り、**未コミットの変更を巻き込む**
