@@ -9262,6 +9262,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "zash が知らない制御バイトを捨てず、行へ入れる",
     ),
     (
+        "shell-skip-expansion-test",
+        cfg!(feature = "shell-skip-expansion-test"),
+        "zash が `$NAME` を展開せず、打った字のまま語へ切る",
+    ),
+    (
         "ansi-test",
         cfg!(feature = "ansi-test"),
         "起動シーケンスで ANSI の解釈を前景経路ごと実演する",

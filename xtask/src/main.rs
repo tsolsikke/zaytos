@@ -3437,6 +3437,14 @@ const SHELL_TEST_SABOTAGES: &[&str] = &[
     "keyboard-drop-home-end-test",
     "keyboard-drop-ctrl-letters-test",
     "shell-keep-control-bytes-test",
+    // **SE-d で 2 つ増えた（`ADR-0049`）。**
+    // **`shell-skip-expansion-test` は 4 本とも落とす**（どの行も展開に寄りかかる）。
+    //
+    // **`shell-keep-empty-word-test` は置かなかった。** **書いて走らせたが
+    // 捕まらなかった**（実測。2026-08-28）——**空の語を落とさなくても、
+    // `zash` の語へ切る側が空白の連なりを読み飛ばすので `argv` が変わらない。**
+    // **「状態が変わらない」で緑になる形である**（`ADR-0049` の Addendum）。
+    "shell-skip-expansion-test",
 ];
 
 impl ShellTestMode {
@@ -6279,6 +6287,40 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     let ctrl_d_kept = after_shell.contains("zash: n\u{4}o: cannot run");
     let ctrl_d_stayed_out_of_the_line = ctrl_d_dropped && !ctrl_d_kept;
 
+    // **`$NAME` が展開されたこと（SE-d。`ADR-0049`）。**
+    //
+    // **打った行と出た行を「続けて」見ることはできない。** **実測で踏んだ**
+    // （2026-08-28）——**`spawn` と `user-load` の INFO が両者の間に何行も入る。**
+    // **反響と出力は別々に見る。**
+    //
+    // **語の数はカーネルが出している。** `/bin/echo` を起こすたびに
+    // `initial stack at ... (argc=N, ...)` が出るので、**渡った語の数がそのまま読める**
+    // ——**出力の空白を数えるより強い観測である**（`echo` の書き方に依らない）。
+    let echo_argcs: Vec<usize> = after_shell
+        .lines()
+        .filter(|line| line.contains("/bin/echo initial stack"))
+        .filter_map(|line| line.split("argc=").nth(1))
+        .filter_map(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .filter_map(|digits| digits.parse().ok())
+        .collect();
+    // **打った 4 行の順に並ぶ。** `echo $PATH` / `echo a $UNSET b` / `echo $UNSET` /
+    // `echo a$TERM b` で、**落とす形なら 2 / 3 / 1 / 3 である。**
+    let echo_word_counts = echo_argcs.as_slice() == [2usize, 3, 1, 3];
+
+    let typed_echo_path = after_shell_plain.contains("zaytos$ echo $PATH\n");
+    let expanded_a_value = typed_echo_path && after_shell.contains("\n/bin\n");
+    // **丸ごと空になった語が落ちたこと。** **空白の数を見る。**
+    // **`argc` の並びも同時に見る**——**空白は `echo` の書き方に依るが、
+    // `argc` は依らない。2 つは独立である。**
+    let dropped_the_empty_word = after_shell.contains("\na b\n");
+    let kept_the_empty_word = after_shell.contains("\na  b\n");
+    let empty_word_was_dropped = dropped_the_empty_word && !kept_the_empty_word && echo_word_counts;
+    // **語が 0 個になったこと。** **`argc` が 1（`echo` 自身だけ）である。**
+    let expanded_to_nothing = echo_argcs.get(2) == Some(&1);
+    // **`$` の直後以外の字が壊れないこと。**
+    let expanded_inside_a_word =
+        after_shell.contains("\nazaytos b\n") && echo_argcs.get(3) == Some(&3);
+
     // **`argv[0]` が打った語のままであること（3 本目）。**
     //
     // **`spawn-test beta` を `/bin/` を付けずに送っている。**
@@ -6331,6 +6373,10 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     );
     println!("{context}: tab stayed out of the line = {tab_stayed_out_of_the_line}");
     println!("{context}: ctrl-d stayed out of the line = {ctrl_d_stayed_out_of_the_line}");
+    println!("{context}: echo $PATH printed the value = {expanded_a_value}");
+    println!("{context}: the empty word was dropped = {empty_word_was_dropped}");
+    println!("{context}: an unset name expanded to nothing = {expanded_to_nothing}");
+    println!("{context}: the name expanded inside a word = {expanded_inside_a_word}");
     println!("{context}: ctrl-c discarded the half-typed line = {ctrl_c_discarded_the_line}");
     println!(
         "{context}: ctrl-c stopped the spinning child = {ctrl_c_stopped_the_child} (echoed ^C \
@@ -6357,6 +6403,10 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && delete_removed_the_character
         && tab_stayed_out_of_the_line
         && ctrl_d_stayed_out_of_the_line
+        && expanded_a_value
+        && empty_word_was_dropped
+        && expanded_to_nothing
+        && expanded_inside_a_word
         && ctrl_c_discarded_the_line
         && ctrl_c_stopped_the_child
         && restarted_only_once
@@ -6489,6 +6539,36 @@ const SHELL_TEST_LINES: &[&[&str]] = &[
     // `ndo` になり、この判定も落ちる——**Ctrl+英字そのものを外す破壊なので、
     // Ctrl+英字を使う判定は全部落ちる。**
     &["n", "ctrl-d", "o", "ret"],
+    // `echo $PATH`（SE-d と SE-e。ADR-0049 と ADR-0043）。**展開が起きたこと。**
+    //
+    // **`$` は Shift+4 である**（JIS の表。`kernel/src/keyboard/decode.rs`）。
+    // **出るのは `/bin` である。** **展開していなければ `$PATH` がそのまま出る。**
+    &[
+        "e", "c", "h", "o", "spc", "shift-4", "shift-p", "shift-a", "shift-t", "shift-h", "ret",
+    ],
+    // `echo a $UNSET b`（SE-d）。**丸ごと空になった語が落ちること。**
+    //
+    // **出るのは `a b` で、空白は 1 つである。** **落としていなければ
+    // 空の語が `argv` に残り、`a  b` になる**（空白 2 つ）。
+    // **この 1 本だけが `shell-keep-empty-word-test` を捕まえる。**
+    &[
+        "e", "c", "h", "o", "spc", "a", "spc", "shift-4", "shift-u", "shift-n", "shift-s",
+        "shift-e", "shift-t", "spc", "b", "ret",
+    ],
+    // `echo $UNSET`（SE-d）。**語が 0 個になること。**
+    //
+    // **出るのは空行である。** **`echo` は引数が無くても改行を出す。**
+    &[
+        "e", "c", "h", "o", "spc", "shift-4", "shift-u", "shift-n", "shift-s", "shift-e",
+        "shift-t", "ret",
+    ],
+    // `echo a$TERM b`（SE-d）。**`$` の直後以外の字が壊れないこと。**
+    //
+    // **出るのは `azaytos b` である**（`TERM` は `zaytos`。ADR-0041）。
+    &[
+        "e", "c", "h", "o", "spc", "a", "shift-4", "shift-t", "shift-e", "shift-r", "shift-m",
+        "spc", "b", "ret",
+    ],
     // 打ちかけの行を Ctrl+C で捨てる（S12 前の手当て、C）。**深さ 1 の側である。**
     //
     // **`zz` と打ってから Ctrl+C を送り、そのまま `ret` を打つ。**
@@ -12685,7 +12765,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 25,
-    full: 247,
+    full: 248,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

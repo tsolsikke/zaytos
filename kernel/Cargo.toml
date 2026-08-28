@@ -99,6 +99,9 @@ keyboard-drop-ctrl-letters-test = []
 # Tab の `0x09` と Ctrl+D の `0x04` が語に混ざるので、`--shell-test` の
 # 「知らない制御バイトが行へ入らない」判定が落ちる。
 shell-keep-control-bytes-test = []
+# 破壊（SE-d。ADR-0049）: zash が `$NAME` を展開しない。`echo $PATH` が
+# `$PATH` をそのまま出すので、`--shell-test` の「展開が起きた」判定が落ちる。
+shell-skip-expansion-test = []
 # 検証（zi-b）: 起動シーケンスで ANSI の解釈を前景経路ごと実演し、判定行を
 # 出す。壊す経路ではない（exception-test 等と同じ検証用フック）。
 ansi-test = []

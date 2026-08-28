@@ -174,6 +174,12 @@ const CTRL_E: u8 = 0x05;
 /// 制御バイトの上限。**これ未満は字ではない（SE-b。`ADR-0050`）。**
 const FIRST_PRINTABLE: u8 = 0x20;
 
+/// 環境の値として読む上限（SE-d）。**行より長い値は入りきらないので断る。**
+const VALUE_MAX: usize = 4096;
+
+/// 破壊 (SE-d, shell-skip-expansion-test): 展開を素通りさせる。
+const SKIP_EXPANSION: bool = cfg!(zash_skip_expansion);
+
 /// 破壊 (SE-b, shell-keep-control-bytes-test): 制御バイトを捨てない。
 ///
 /// **`cfg!` で持つ。** **`#[cfg]` を分岐へ付けると、破壊の側で
@@ -523,12 +529,36 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 write_all(STDOUT, b"\n");
                 if overflowed {
                     write_all(STDOUT, TOO_LONG);
-                } else if length > 0 {
+                } else if length > 0 && SKIP_EXPANSION {
+                    // 破壊 (SE-d, shell-skip-expansion-test): 展開を通さない。
+                    //
                     // **終端を置いてから渡す。** 語の末尾は `line` の中の NUL で
                     // 決まるので、**前の行の残りが続きとして読まれない**ように
                     // ここで 1 バイト置く（`LINE_MAX` は 1 行より大きいので在る）。
                     line[length] = 0;
                     run_line(&mut line[..length]);
+                } else if length > 0 {
+                    // **`$NAME` を展開してから語へ切る（SE-d。`ADR-0049`）。**
+                    //
+                    // **写しへ展開する。** **展開は長さを変えるので、その場で
+                    // 伸ばすと終端の置き場が壊れる。**
+                    // **終端の 1 バイトを別に持つ**（`line` と同じ形。上の SE-d の注記）。
+                    let mut expanded = [0u8; LINE_MAX + 1];
+                    // SAFETY: `stack` は `zaytos_main` が受けた初期スタックである。
+                    match unsafe { expand_line(stack, &line[..length], &mut expanded[..LINE_MAX]) }
+                    {
+                        // **語が 1 つも残らなかった。** 走らせるものが無い。
+                        Some(0) => {}
+                        Some(count) => {
+                            expanded[count] = 0;
+                            run_line(&mut expanded[..count]);
+                        }
+                        // **入りきらなかった。** **部分的に展開した行を走らせない**
+                        // （`ADR-0049` の 6）。文言は打ちすぎと同じものを使う。
+                        None => {
+                            write_all(STDOUT, TOO_LONG);
+                        }
+                    }
                 }
                 length = 0;
                 cursor = 0;
@@ -625,6 +655,126 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             }
         }
     }
+}
+
+/// 名前の先頭になれる字か（SE-d。`ADR-0049`）。
+fn is_name_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+/// 名前の続きになれる字か（SE-d）。
+fn is_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// 語を 1 つ展開する（SE-d。`ADR-0049`）。**書けた長さを返す。入らなければ `None`。**
+///
+/// # Safety
+///
+/// `stack` が `_start` の時点の `rsp` であること。
+unsafe fn expand_word(stack: *const u64, word: &[u8], out: &mut [u8]) -> Option<usize> {
+    let mut used = 0usize;
+    let mut at = 0usize;
+    // 溜める側の受け。
+    let mut put = |byte: u8, used: &mut usize| -> bool {
+        if *used >= out.len() {
+            return false;
+        }
+        out[*used] = byte;
+        *used += 1;
+        true
+    };
+    while at < word.len() {
+        let byte = word[at];
+        // **`$` の直後が名前の先頭でなければ、`$` は字である**（`ADR-0049` の 5）。
+        if byte != b'$' || at + 1 >= word.len() || !is_name_start(word[at + 1]) {
+            if !put(byte, &mut used) {
+                return None;
+            }
+            at += 1;
+            continue;
+        }
+        let start = at + 1;
+        let mut end = start;
+        while end < word.len() && is_name_byte(word[end]) {
+            end += 1;
+        }
+        at = end;
+        // **未定義の名前は空へ落とす**（`ADR-0049` の 2）。**何も足さない。**
+        // SAFETY: 呼び出し元契約をそのまま渡す。
+        let Some(value) = (unsafe { userlib::environment(stack, &word[start..end]) }) else {
+            continue;
+        };
+        // SAFETY: カーネルが NUL 終端で積んだ文字列である。
+        let length = unsafe { userlib::length_of(value, VALUE_MAX) };
+        for index in 0..length {
+            // SAFETY: 上で数えた長さの範囲である。
+            if !put(unsafe { *value.add(index) }, &mut used) {
+                return None;
+            }
+        }
+    }
+    Some(used)
+}
+
+/// 行を展開する（SE-d。`ADR-0049`）。**書けた長さを返す。入らなければ `None`。**
+///
+/// # 語ごとに展開する
+///
+/// **丸ごと空になった語を落とすためである**（`ADR-0049` の 3）。
+/// **`echo a $UNSET b` は `a b` になる**——空白は 1 つである。
+///
+/// **展開の結果で語を割らない**（`ADR-0049` の 4）。**値の中に空白が在っても、
+/// 語は増えない**——ここが `sh` と違うところである。
+///
+/// # Safety
+///
+/// `stack` が `_start` の時点の `rsp` であること。
+unsafe fn expand_line(stack: *const u64, line: &[u8], out: &mut [u8]) -> Option<usize> {
+    let mut used = 0usize;
+    let mut at = 0usize;
+    let mut word = [0u8; LINE_MAX];
+    while at < line.len() {
+        while at < line.len() && line[at] == b' ' {
+            at += 1;
+        }
+        if at >= line.len() {
+            break;
+        }
+        let start = at;
+        while at < line.len() && line[at] != b' ' {
+            at += 1;
+        }
+        // SAFETY: 呼び出し元契約をそのまま渡す。
+        let length = unsafe { expand_word(stack, &line[start..at], &mut word) }?;
+        // **丸ごと空になった語は落とす**（`ADR-0049` の 3）。
+        //
+        // **ここを外しても振る舞いは変わらない。** **落とす代わりに空白が
+        // 1 つ余分に出るだけで、`run_line` が空白の連なりを読み飛ばす**ので、
+        // **`argv` に空の語は現れない。** **実測で確かめた**（2026-08-28。
+        // 破壊 feature を書いて `--full` を通し、捕まらなかった）。
+        //
+        // **したがって、この規則は 2 重に守られている**——**ここと、語へ切る側である。**
+        // **その形でしか落ちない判定が作れないので、破壊は置かない**
+        // （`ADR-0049` の Addendum）。**明示は残す**——**語へ切る側の実装が
+        // 変わったとき、ここが最後の守りになる。**
+        if length == 0 {
+            continue;
+        }
+        if used > 0 {
+            if used >= out.len() {
+                return None;
+            }
+            out[used] = b' ';
+            used += 1;
+        }
+        if used + length > out.len() {
+            return None;
+        }
+        out[used..used + length].copy_from_slice(&word[..length]);
+        used += length;
+    }
+    Some(used)
 }
 
 /// 1 行を実行する。

@@ -119,6 +119,7 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
         "touch",
         "less",
         "more",
+        "echo",
     ];
 
     // **共有する包み（S11-9）。** `ls` と `cat` が `mod userlib;` で取り込む。
@@ -181,6 +182,10 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
         (
             "CARGO_FEATURE_SHELL_KEEP_CONTROL_BYTES_TEST",
             "zash_keep_control_bytes",
+        ),
+        (
+            "CARGO_FEATURE_SHELL_SKIP_EXPANSION_TEST",
+            "zash_skip_expansion",
         ),
         (
             "CARGO_FEATURE_ZI_STATUS_FREEZE_MODE_TEST",
@@ -404,6 +409,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         "touch",
         "less",
         "more",
+        "echo",
     ] {
         std::fs::copy(
             format!("{out_dir}/{name}.elf"),
