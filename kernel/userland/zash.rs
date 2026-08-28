@@ -597,7 +597,17 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 if other < FIRST_PRINTABLE && !KEEP_CONTROL_BYTES {
                     continue;
                 }
-                if length < line.len() {
+                // **終端の 1 バイトを残す（SE-d で直した）。**
+                //
+                // **以前は `length < line.len()` だった。** **`LINE_MAX` ちょうどまで
+                // 入るので、`length` が `LINE_MAX` になりうる**——**そのまま Enter を
+                // 打つと、下の `line[length] = 0` が配列の外を書いて畳まれる。**
+                // **`overflowed` は次の 1 打まで立たないので、間に合わない。**
+                //
+                // **すぐ上の doc が「`LINE_MAX` は 1 行より大きいので在る」と
+                // 書いており、その前提が守られていなかった。**
+                // **コードから読んで見つけた。打って確かめてはいない。**
+                if length + 1 < line.len() {
                     // **挿入点へ入れて、後ろをずらす。**
                     line.copy_within(cursor..length, cursor + 1);
                     line[cursor] = other;
