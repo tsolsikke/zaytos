@@ -3445,6 +3445,10 @@ const SHELL_TEST_SABOTAGES: &[&str] = &[
     // `zash` の語へ切る側が空白の連なりを読み飛ばすので `argv` が変わらない。**
     // **「状態が変わらない」で緑になる形である**（`ADR-0049` の Addendum）。
     "shell-skip-expansion-test",
+    // **SE-c で 1 つ増えた。** **履歴を積まない。**
+    // **「上で辿れた」の判定は、既定の構成ではこの破壊でしか落ちない**
+    // ——**矢印を落とす破壊は期待のほうを裏返すので、落ちない。**
+    "shell-drop-history-test",
 ];
 
 impl ShellTestMode {
@@ -6172,18 +6176,13 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         esc_did_not_move && !esc_moved
     };
 
-    // **上下の矢印が行を壊さないこと（zi-a）。**
+    // **上下の矢印の判定は SE-c で置き換えた。**
     //
-    // **打ったのは `u` → 上 → `v` → 下 → `w` で、走るのは `uvw` である。**
-    // zash が `\x1b[A` / `\x1b[B` を読んで捨てる分岐を持たないと、最後の
-    // バイトが字として入り `uAvBw` になる。両方を見る。
-    //
-    // **これは「届いたこと」の証明ではない。** デコーダが落とす形
-    // （`keyboard-drop-arrows-test`）でも `uvw` になり、届いて捨てた形と
-    // 区別できない——**上下を消費して観測できる者がまだ居ない**ためである。
-    // **届く側の固定はホストテストにある**（decode の 4 方向と input の
-    // 出し分け）。**実機での届きの観測は zi-d の自動判定が持つ**（あちらは
-    // 上下で実際にカーソルが動く）。観測していないことは観測していないと書く。
+    // **以前は「行が壊れないこと」を見ていた**（zi-a。`u` → 上 → `v` → 下 → `w` で
+    // `uvw` が走る）。**あれは「上下を消費して観測できる者が居ない」ために、
+    // 届いたことの証明にならない判定だった**——そう書いてあった。
+    // **SE-c で消費する者ができたので、履歴を辿れることを直接見る形へ移した**
+    // （下の `history_walked_with_arrows`）。**いまは届いたことの証明である。**
     // **変換表の外に居る 2 キーが Ring 3 まで届いたこと（zi-e）。**
     //
     // **`ろ`（`0x73`）と `¥`（`0x7D`）はどちらも `\` を出す**ので、走るのは
@@ -6195,10 +6194,6 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     // 外に居る 2 つは、範囲の判定より先に引く経路が要る）。
     let jis_only_keys_reached_ring3 = after_shell.contains("zash: \\\\: cannot run");
     let only_one_jis_key_arrived = after_shell.contains("zash: \\: cannot run");
-
-    let updown_kept_the_line = after_shell.contains("zash: uvw: cannot run");
-    let updown_did_not_corrupt = !after_shell.contains("zash: uAvBw: cannot run");
-    let updown_left_the_line_intact = updown_kept_the_line && updown_did_not_corrupt;
 
     // **Ctrl+C が打ちかけの行を捨てたこと（S12 前の手当て、C。深さ 1）。**
     //
@@ -6321,6 +6316,38 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     let expanded_inside_a_word =
         after_shell.contains("\nazaytos b\n") && echo_argcs.get(3) == Some(&3);
 
+    // **履歴を矢印で辿れること（SE-c）。**
+    //
+    // **`aa` を打ち、`bb` を打ち、上 上 で `aa` へ戻って Enter した。**
+    // **辿れていれば `aa` は 2 度走る。** **積んでいなければ 1 度きりである。**
+    //
+    // **矢印が落ちている構成では期待が変わる**——上が届かないので 1 度きりになる
+    // （Delete の判定と同じ形である）。
+    let ran_aa = after_shell.matches("zash: aa: cannot run").count();
+    let history_walked_with_arrows = if mode.expects_the_cursor_to_move() {
+        ran_aa == 2
+    } else {
+        ran_aa == 1
+    };
+    // **同じ履歴を `Ctrl+P` / `Ctrl+N` で辿れること（SE-c）。**
+    //
+    // **2 つ戻って 1 つ進むので `dd` が 2 度走る。**
+    // **上下と同じ関数を通しているが、それは判定になっていない**ので別に置く。
+    let history_walked_with_ctrl = after_shell.matches("zash: dd: cannot run").count() == 2;
+    // **`Ctrl+B` と `Ctrl+F` が左右へ動かすこと（SE-c）。**
+    let ctrl_bf_moved = after_shell.contains("zash: rtsu: cannot run");
+    let ctrl_bf_typed_letters = after_shell.contains("zash: rsbtfu: cannot run");
+    let ctrl_b_and_f_moved_the_insertion_point = ctrl_bf_moved && !ctrl_bf_typed_letters;
+
+    // **`LINE_MAX` ちょうどの行が畳まずに断られること（SE-c。`d7de0ce`）。**
+    //
+    // **`z` を 128 打った。** **入るのは 127 までで、128 打目は溢れる。**
+    // **直す前は配列の外を書いて畳まれ、シェルが止まっていた。**
+    //
+    // **「止まらなかったこと」は下の判定が全部見ている**（止まればすべて落ちる）。
+    // **ここが見るのは「断り書きが出たこと」である。**
+    let long_line_was_refused = after_shell.contains("zash: line too long");
+
     // **`argv[0]` が打った語のままであること（3 本目）。**
     //
     // **`spawn-test beta` を `/bin/` を付けずに送っている。**
@@ -6352,7 +6379,6 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
          (wanted {})",
         mode.expects_esc_to_reach_ring3()
     );
-    println!("{context}: the up/down arrows left the line intact = {updown_left_the_line_intact}");
     println!(
         "{context}: the two keys outside the table (ro, yen) reached ring 3 = \
          {jis_only_keys_reached_ring3} (only one of them arrived = {only_one_jis_key_arrived})"
@@ -6373,6 +6399,17 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     );
     println!("{context}: tab stayed out of the line = {tab_stayed_out_of_the_line}");
     println!("{context}: ctrl-d stayed out of the line = {ctrl_d_stayed_out_of_the_line}");
+    println!(
+        "{context}: the history was walked with the arrows = {history_walked_with_arrows} \
+         (ran aa {ran_aa} time(s); the cursor moves = {})",
+        mode.expects_the_cursor_to_move()
+    );
+    println!("{context}: the history was walked with ctrl-p/n = {history_walked_with_ctrl}");
+    println!("{context}: the full-length line was refused, not folded = {long_line_was_refused}");
+    println!(
+        "{context}: ctrl-b and ctrl-f moved the insertion point = \
+         {ctrl_b_and_f_moved_the_insertion_point}"
+    );
     println!("{context}: echo $PATH printed the value = {expanded_a_value}");
     println!("{context}: the empty word was dropped = {empty_word_was_dropped}");
     println!("{context}: an unset name expanded to nothing = {expanded_to_nothing}");
@@ -6395,7 +6432,6 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && backspace_edited_the_line
         && arrow_behaved_as_expected
         && esc_behaved_as_expected
-        && updown_left_the_line_intact
         && jis_only_keys_reached_ring3
         && !only_one_jis_key_arrived
         && home_and_end_moved_the_insertion_point
@@ -6403,6 +6439,10 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && delete_removed_the_character
         && tab_stayed_out_of_the_line
         && ctrl_d_stayed_out_of_the_line
+        && long_line_was_refused
+        && history_walked_with_arrows
+        && history_walked_with_ctrl
+        && ctrl_b_and_f_moved_the_insertion_point
         && expanded_a_value
         && empty_word_was_dropped
         && expanded_to_nothing
@@ -6429,6 +6469,20 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         }
     }
 }
+
+/// `LINE_MAX` ちょうどの打鍵（SE-c）。**`z` を 128 個と Enter。**
+///
+/// **`kernel/userland/zash.rs` の `LINE_MAX` と同じ数である。**
+/// **あちらを変えたらここも変えること**——**数が合わないと、溢れの境目を
+/// 打たなくなる**（判定は静かに緑になる）。
+const LONG_LINE_KEYS: usize = 128;
+
+/// 上の打鍵を並べたもの。
+static LONG_LINE_SCRIPT: [&str; LONG_LINE_KEYS + 1] = {
+    let mut keys = ["z"; LONG_LINE_KEYS + 1];
+    keys[LONG_LINE_KEYS] = "ret";
+    keys
+};
 
 /// `--shell-test` が打つ行（S11-11。S12 前の手当ての 3 本目で伸ばした）。
 ///
@@ -6502,12 +6556,11 @@ const SHELL_TEST_LINES: &[&[&str]] = &[
     // 見ているのはカーネル側の消費者（`drain_keyboard`）で、**消費者が違う。**
     // **同じ表を引くが、通る層が違うので両方に置く。**
     &["ro", "yen", "ret"],
-    // u → 上 → v → 下 → w（zi-a）。**上下の CSI が行を壊さないことを見る。**
+    // **上下で行が壊れないことを見る台本は、SE-c で外した。**
     //
-    // **zash は `\x1b[A` / `\x1b[B` を読んで捨てる**（履歴が無い）ので、
-    // **走るのは `uvw` である。** 捨てる分岐が無いと最後のバイトが字として
-    // 入り、`uAvBw` になる。
-    &["u", "up", "v", "down", "w", "ret"],
+    // **あれは「zash が上下を読んで捨てる」ことに寄りかかっていた**（zi-a。
+    // 履歴が無かった）。**SE-c で上下に意味ができたので、前提そのものが消えた。**
+    // **上下が届くことは、下の履歴の判定が主張している。**
     // a → b → Home → c → End → d（SE-b。ADR-0050）。**Home と End が端へ動かす。**
     //
     // **走るのは `cabd` である**（`ab` の頭へ `c` を入れ、末尾へ `d` を入れる）。
@@ -6569,6 +6622,39 @@ const SHELL_TEST_LINES: &[&[&str]] = &[
         "e", "c", "h", "o", "spc", "a", "shift-4", "shift-t", "shift-e", "shift-r", "shift-m",
         "spc", "b", "ret",
     ],
+    // aa / bb を打ってから 上 上（SE-c）。**履歴を矢印で辿る。**
+    //
+    // **辿れていれば `aa` が 2 度走る**（打ったときと、辿って Enter したとき）。
+    // **積んでいなければ上は何もせず、空行になって 1 度きりである。**
+    // **数で見る**——同じ語なので、出る側と出ない側では分けられない。
+    &["a", "a", "ret"],
+    &["b", "b", "ret"],
+    &["up", "up", "ret"],
+    // cc / dd を打ってから Ctrl+P Ctrl+P Ctrl+N（SE-c）。**同じ履歴を Ctrl で辿る。**
+    //
+    // **2 つ戻って 1 つ進むので、走るのは `dd` である**（2 度目）。
+    // **矢印と同じ関数を通しているが、それは判定になっていない**ので、
+    // **両方の経路に判定を置く。**
+    &["c", "c", "ret"],
+    &["d", "d", "ret"],
+    &["ctrl-p", "ctrl-p", "ctrl-n", "ret"],
+    // r s → Ctrl+B → t → Ctrl+F → u（SE-c）。**Ctrl+B と Ctrl+F が左右へ動かす。**
+    //
+    // **走るのは `rtsu` である。** **効いていなければ `b` と `f` が字として入り、
+    // `rsbtfu` になる**（`keyboard-drop-ctrl-letters-test` がその形である）。
+    &["r", "s", "ctrl-b", "t", "ctrl-f", "u", "ret"],
+    // `LINE_MAX` ちょうどの行（SE-c。`d7de0ce` の修正に判定を置く）。
+    //
+    // **`z` を 128 打ってから Enter する。** **入るのは 127 までで、128 打目は
+    // 溢れとして捨てられる**ので、**出るのは `zash: line too long` である。**
+    //
+    // **直す前はここで畳まれていた**——**`length` が `LINE_MAX` になり、
+    // `line[length] = 0` が配列の外を書いた。** **畳まれるとシェルが止まるので、
+    // この行より後ろの判定が全部落ちる。**
+    //
+    // **費用は打鍵の数である**（実測。この 1 行で `--shell-test` が 69.7 秒から
+    // 86.0 秒へ延びた。**`--full` は 14 回走らせるので約 3.8 分増える**）。
+    &LONG_LINE_SCRIPT,
     // 打ちかけの行を Ctrl+C で捨てる（S12 前の手当て、C）。**深さ 1 の側である。**
     //
     // **`zz` と打ってから Ctrl+C を送り、そのまま `ret` を打つ。**
@@ -12765,7 +12851,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 25,
-    full: 248,
+    full: 249,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

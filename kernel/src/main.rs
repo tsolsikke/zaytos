@@ -9267,6 +9267,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "zash が `$NAME` を展開せず、打った字のまま語へ切る",
     ),
     (
+        "shell-drop-history-test",
+        cfg!(feature = "shell-drop-history-test"),
+        "zash が打った行を履歴へ積まず、辿れないようにする",
+    ),
+    (
         "ansi-test",
         cfg!(feature = "ansi-test"),
         "起動シーケンスで ANSI の解釈を前景経路ごと実演する",

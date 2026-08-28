@@ -192,6 +192,58 @@ const CSI_HOME: u8 = b'1';
 const CSI_DELETE: u8 = b'3';
 const CSI_END: u8 = b'4';
 
+/// `Ctrl+B`（SE-c）。**左へ 1 つ。** `b` は `0x02` である。
+const CTRL_B: u8 = 0x02;
+
+/// `Ctrl+F`（SE-c）。**右へ 1 つ。** `f` は `0x06` である。
+const CTRL_F: u8 = 0x06;
+
+/// `Ctrl+P`（SE-c）。**1 つ前の行。** `p` は `0x10` である。
+const CTRL_P: u8 = 0x10;
+
+/// `Ctrl+N`（SE-c）。**1 つ後の行。** `n` は `0x0E` である。
+const CTRL_N: u8 = 0x0E;
+
+/// 履歴の本数（SE-c）。
+///
+/// # なぜ 16 本か
+///
+/// **`bash` の既定は 500 だが、あちらはファイルへ保存する。** **こちらは
+/// 再起動で消える**ので、**1 つのセッションで辿る範囲だけあればよい。**
+///
+/// **1 ページに収まる本数でもある**（下の [`HISTORY`] の doc）。
+const HISTORY_MAX: usize = 16;
+
+/// 履歴の輪（SE-c）。**古いものから捨てる。**
+///
+/// # なぜヒープを使わないのか
+///
+/// **上限はどちらにせよ要る。** ヒープにしても無制限には伸ばせない
+/// （`brk` が像を食う）。**上限があるなら、固定で足りる。**
+///
+/// **費用が静的に測れる。** **`16 * 128 + 16 * 8 = 2176` バイトが `.bss` に出る。**
+/// **`zash` の書き込み可の区画は `0x403040` から始まり、`.bss` は 81 バイトだった**
+/// （実測。2026-08-28）。**足しても `0x403911` で、ページの終わり `0x404000` を
+/// 越えない**——**写像は 1 ページも増えない。**
+///
+/// **`zash` はヒープを 1 度も使っていない**（実測。`brk` は 0 箇所）。
+/// **使い始めると `brk` の会計が 1 つ増える**（`zi` と `syscall-test` には
+/// その判定が在る）。**履歴の大きさは行の長さと本数で決まっており、
+/// 動的である必要が無い。** **会計を増やす値打ちが無い。**
+static mut HISTORY: [[u8; LINE_MAX]; HISTORY_MAX] = [[0; LINE_MAX]; HISTORY_MAX];
+
+/// 各行の長さ。
+static mut HISTORY_LEN: [usize; HISTORY_MAX] = [0; HISTORY_MAX];
+
+/// 積んだ本数。**増え続ける。輪の位置は剰余で出す。**
+static mut HISTORY_COUNT: usize = 0;
+
+/// 破壊 (SE-c, shell-drop-history-test): 行を履歴へ積まない。
+const DROP_HISTORY: bool = cfg!(zash_drop_history);
+
+/// 空白を並べた種。**消すときにまとめて 1 回で書くために持つ。**
+const SPACES: [u8; LINE_MAX] = [b' '; LINE_MAX];
+
 /// 後退を並べた種。**まとめて 1 回で書くために持つ。**
 ///
 /// **1 バイトずつ書くと、行頭へ戻るだけで最大 128 回の `write` になる**
@@ -420,6 +472,11 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     // **解釈はここで行う。画面（`Grid`）には届かない。**
     // `ADR-0029` が決めたのは出力側の解釈で、こちらは入力側である。
     let mut escape = Escape::Idle;
+    // **履歴を辿っている深さ（SE-c）。** `0` は「打ちかけの行」である。
+    let mut history_back = 0usize;
+    // **辿り始めたときの打ちかけの行。** `Ctrl+N` で `0` まで戻ると復す。
+    let mut saved = [0u8; LINE_MAX];
+    let mut saved_length = 0usize;
 
     loop {
         let mut byte = [0u8; 1];
@@ -449,24 +506,14 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             }
             (Escape::Bracket, b'D') => {
                 escape = Escape::Idle;
-                // **左へ 1 つ。行頭より左へは動かない。**
-                if cursor > 0 {
-                    cursor -= 1;
-                    write_all(STDOUT, b"\x08");
-                }
+                // **左へ 1 つ。** **`Ctrl+B` と同じ関数を通す（SE-c）。**
+                move_left(&mut cursor);
                 continue;
             }
             (Escape::Bracket, b'C') => {
                 escape = Escape::Idle;
-                // **右へ 1 つ。行末より右へは動かない。**
-                //
-                // **カーソルを右へ動かすのに、その位置の字をもう一度書く。**
-                // `\x1b[C` を出す形もあるが、**画面（`Grid`）はエスケープを
-                // 解釈しない**ので届かない。字なら両方で動く。
-                if cursor < length {
-                    write_all(STDOUT, &line[cursor..cursor + 1]);
-                    cursor += 1;
-                }
+                // **右へ 1 つ。** **`Ctrl+F` と同じ関数を通す（SE-c）。**
+                move_right(&line, &mut cursor, length);
                 continue;
             }
             (Escape::Bracket, digit) if digit.is_ascii_digit() => {
@@ -496,12 +543,38 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 }
                 continue;
             }
-            (Escape::Bracket, b'A') | (Escape::Bracket, b'B') => {
+            (Escape::Bracket, b'A') => {
                 escape = Escape::Idle;
-                // **上下は何もしない（zi-a）。** 履歴が無いので動かす先が無い。
-                // **知らない並びの分岐へ落とさない**——あちらは最後のバイトを
-                // 普通の字として行へ入れるので、**上矢印を押すたびに `A` が
-                // 挿入されてしまう。** 読んで捨てるのが正しい形である。
+                // **1 つ前の行（SE-c）。** **`Ctrl+P` と同じ関数を通す。**
+                //
+                // **以前は読んで捨てていた**（zi-a。履歴が無かった）。
+                // SAFETY: このプログラムは Ring 3 で 1 本だけ走る。
+                unsafe {
+                    history_previous(
+                        &mut line,
+                        &mut length,
+                        &mut cursor,
+                        &mut history_back,
+                        &mut saved,
+                        &mut saved_length,
+                    );
+                }
+                continue;
+            }
+            (Escape::Bracket, b'B') => {
+                escape = Escape::Idle;
+                // **1 つ後の行（SE-c）。** **`Ctrl+N` と同じ関数を通す。**
+                // SAFETY: 同上。
+                unsafe {
+                    history_next(
+                        &mut line,
+                        &mut length,
+                        &mut cursor,
+                        &mut history_back,
+                        &saved,
+                        saved_length,
+                    );
+                }
                 continue;
             }
             (Escape::Esc, _) | (Escape::Bracket, _) | (Escape::Number(_), _) => {
@@ -527,6 +600,12 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 // **打った改行を反響する。** 反響はシェルが行う——
                 // **カーネルは前景を渡しているだけで、何も表示しない。**
                 write_all(STDOUT, b"\n");
+                // **打った行を履歴へ積む（SE-c）。** **展開の前の、打った形で積む**
+                // ——**辿って出てくるのは打った行である**（`$PATH` は `$PATH` のまま）。
+                // SAFETY: このプログラムは Ring 3 で 1 本だけ走る。
+                unsafe { remember_line(&line[..length]) };
+                history_back = 0;
+                saved_length = 0;
                 if overflowed {
                     write_all(STDOUT, TOO_LONG);
                 } else if length > 0 && SKIP_EXPANSION {
@@ -581,9 +660,47 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 write_all(STDOUT, b"^C\n");
                 length = 0;
                 cursor = 0;
+                history_back = 0;
+                saved_length = 0;
                 overflowed = false;
                 escape = Escape::Idle;
                 write_prompt();
+            }
+            CTRL_B => {
+                // **左へ 1 つ（SE-c）。** **左矢印と同じ関数を通す。**
+                move_left(&mut cursor);
+            }
+            CTRL_F => {
+                // **右へ 1 つ（SE-c）。** **右矢印と同じ関数を通す。**
+                move_right(&line, &mut cursor, length);
+            }
+            CTRL_P => {
+                // **1 つ前の行（SE-c）。** **上矢印と同じ関数を通す。**
+                // SAFETY: このプログラムは Ring 3 で 1 本だけ走る。
+                unsafe {
+                    history_previous(
+                        &mut line,
+                        &mut length,
+                        &mut cursor,
+                        &mut history_back,
+                        &mut saved,
+                        &mut saved_length,
+                    );
+                }
+            }
+            CTRL_N => {
+                // **1 つ後の行（SE-c）。** **下矢印と同じ関数を通す。**
+                // SAFETY: 同上。
+                unsafe {
+                    history_next(
+                        &mut line,
+                        &mut length,
+                        &mut cursor,
+                        &mut history_back,
+                        &saved,
+                        saved_length,
+                    );
+                }
             }
             CTRL_A => {
                 // **行頭へ（SE-b。`ADR-0050`）。** Home と同じ動きである——
@@ -654,6 +771,138 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 }
             }
         }
+    }
+}
+
+/// 行を履歴へ積む（SE-c）。
+///
+/// **直前と同じ行は積まない。空行も積まない。**
+/// **辿るときに同じ行が並ぶと、辿る回数が増えるだけで情報が増えない。**
+///
+/// # Safety
+///
+/// **このプログラムは Ring 3 で 1 本だけ走る。** 履歴を書くのはここだけである。
+unsafe fn remember_line(line: &[u8]) {
+    if line.is_empty() || DROP_HISTORY {
+        return;
+    }
+    // SAFETY: 上記のとおり、単一の実行者である。
+    let count = unsafe { HISTORY_COUNT };
+    if count > 0 {
+        let last = (count - 1) % HISTORY_MAX;
+        // SAFETY: 同上。`last` は剰余なので範囲内である。
+        let length = unsafe { HISTORY_LEN[last] };
+        // SAFETY: 同上。**参照で取る**——値で取ると `[u8]` を動かすことになる。
+        let stored = unsafe { &*core::ptr::addr_of!(HISTORY[last]) };
+        if length == line.len() && &stored[..length] == line {
+            return;
+        }
+    }
+    let slot = count % HISTORY_MAX;
+    // SAFETY: 同上。`line` は `LINE_MAX` 未満である（呼び出し側が行から渡す）。
+    unsafe {
+        HISTORY[slot][..line.len()].copy_from_slice(line);
+        HISTORY_LEN[slot] = line.len();
+        HISTORY_COUNT = count + 1;
+    }
+}
+
+/// 履歴を辿る（SE-c）。`back` は「いくつ前か」で、`1` が直前である。
+///
+/// **持っている本数を越えたら `None`。**
+///
+/// # Safety
+///
+/// [`remember_line`] と同じ。
+unsafe fn history_at(back: usize) -> Option<(&'static [u8; LINE_MAX], usize)> {
+    // SAFETY: 単一の実行者である。
+    let count = unsafe { HISTORY_COUNT };
+    if back == 0 || back > count || back > HISTORY_MAX {
+        return None;
+    }
+    let slot = (count - back) % HISTORY_MAX;
+    // SAFETY: 同上。`slot` は剰余なので範囲内である。
+    unsafe { Some((&*core::ptr::addr_of!(HISTORY[slot]), HISTORY_LEN[slot])) }
+}
+
+/// 画面の行を差し替える（SE-c）。**挿入点は行末へ置く。**
+///
+/// **消してから書く。** 後退・空白・後退をそれぞれ 1 回で出す
+/// （1 バイトずつだと 1 行につき最大 384 回の `write` になる）。
+fn replace_line(
+    line: &mut [u8; LINE_MAX],
+    length: &mut usize,
+    cursor: &mut usize,
+    new: &[u8],
+) {
+    move_to_end(line, cursor, *length);
+    if *length > 0 {
+        write_all(STDOUT, &BACKSPACES[..*length]);
+        write_all(STDOUT, &SPACES[..*length]);
+        write_all(STDOUT, &BACKSPACES[..*length]);
+    }
+    line[..new.len()].copy_from_slice(new);
+    *length = new.len();
+    *cursor = new.len();
+    if *length > 0 {
+        write_all(STDOUT, &line[..*length]);
+    }
+}
+
+/// 1 つ前の行を出す（SE-c）。**上キーと `Ctrl+P` が同じここを通る。**
+///
+/// **辿り始めるときに、打ちかけの行を控える。** **`Ctrl+N` で戻ったときに
+/// 打ちかけの行が消えていると、辿ったことが編集の取り消しになる。**
+///
+/// # Safety
+///
+/// [`history_at`] と同じ。
+unsafe fn history_previous(
+    line: &mut [u8; LINE_MAX],
+    length: &mut usize,
+    cursor: &mut usize,
+    back: &mut usize,
+    saved: &mut [u8; LINE_MAX],
+    saved_length: &mut usize,
+) {
+    // SAFETY: 呼び出し元契約をそのまま渡す。
+    let Some((entry, entry_length)) = (unsafe { history_at(*back + 1) }) else {
+        return;
+    };
+    if *back == 0 {
+        saved[..*length].copy_from_slice(&line[..*length]);
+        *saved_length = *length;
+    }
+    *back += 1;
+    replace_line(line, length, cursor, &entry[..entry_length]);
+}
+
+/// 1 つ後の行を出す（SE-c）。**下キーと `Ctrl+N` が同じここを通る。**
+///
+/// **`0` まで戻ったら、控えてあった打ちかけの行へ戻す。**
+///
+/// # Safety
+///
+/// [`history_at`] と同じ。
+unsafe fn history_next(
+    line: &mut [u8; LINE_MAX],
+    length: &mut usize,
+    cursor: &mut usize,
+    back: &mut usize,
+    saved: &[u8; LINE_MAX],
+    saved_length: usize,
+) {
+    if *back == 0 {
+        return;
+    }
+    *back -= 1;
+    if *back == 0 {
+        replace_line(line, length, cursor, &saved[..saved_length]);
+        return;
+    }
+    // SAFETY: 呼び出し元契約をそのまま渡す。
+    if let Some((entry, entry_length)) = (unsafe { history_at(*back) }) {
+        replace_line(line, length, cursor, &entry[..entry_length]);
     }
 }
 
@@ -1012,6 +1261,28 @@ fn redraw_tail(tail: &[u8]) {
     write_all(STDOUT, b" ");
     for _ in 0..tail.len() + 1 {
         write_all(STDOUT, b"\x08");
+    }
+}
+
+/// 挿入点を左へ 1 つ動かす（SE-b で切り出した。SE-c で `Ctrl+B` も通す）。
+///
+/// **行頭より左へは動かない。**
+fn move_left(cursor: &mut usize) {
+    if *cursor > 0 {
+        *cursor -= 1;
+        write_all(STDOUT, b"\x08");
+    }
+}
+
+/// 挿入点を右へ 1 つ動かす（SE-c で `Ctrl+F` も通す）。
+///
+/// **カーソルを右へ動かすのに、その位置の字をもう一度書く。**
+/// `\x1b[C` を出す形もあるが、**画面（`Grid`）はエスケープを解釈しない**ので
+/// 届かない。字なら両方で動く。
+fn move_right(line: &[u8], cursor: &mut usize, length: usize) {
+    if *cursor < length {
+        write_all(STDOUT, &line[*cursor..*cursor + 1]);
+        *cursor += 1;
     }
 }
 

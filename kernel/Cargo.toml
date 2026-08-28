@@ -102,6 +102,9 @@ shell-keep-control-bytes-test = []
 # 破壊（SE-d。ADR-0049）: zash が `$NAME` を展開しない。`echo $PATH` が
 # `$PATH` をそのまま出すので、`--shell-test` の「展開が起きた」判定が落ちる。
 shell-skip-expansion-test = []
+# 破壊（SE-c）: zash が打った行を履歴へ積まない。上キーでも Ctrl+P でも
+# 前の行が戻らないので、`--shell-test` の履歴の判定2本が落ちる。
+shell-drop-history-test = []
 # 検証（zi-b）: 起動シーケンスで ANSI の解釈を前景経路ごと実演し、判定行を
 # 出す。壊す経路ではない（exception-test 等と同じ検証用フック）。
 ansi-test = []

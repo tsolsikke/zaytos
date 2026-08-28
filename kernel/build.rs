@@ -187,6 +187,7 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
             "CARGO_FEATURE_SHELL_SKIP_EXPANSION_TEST",
             "zash_skip_expansion",
         ),
+        ("CARGO_FEATURE_SHELL_DROP_HISTORY_TEST", "zash_drop_history"),
         (
             "CARGO_FEATURE_ZI_STATUS_FREEZE_MODE_TEST",
             "zi_status_freeze_mode",
