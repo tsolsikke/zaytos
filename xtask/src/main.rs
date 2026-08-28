@@ -12075,34 +12075,83 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item("the Bash hook still decides the way it says it does");
+    begin_item("every Bash hook still decides the way it says it does");
     // **hook が読み込まれているかは、ここでは分からない**——**ツールの
     // 呼び出しを止めるのは harness の側で、`xtask` からは観測できない。**
     // **守れるのは「判定そのものが壊れていないこと」だけである。**
     //
-    // **実測で 2 回、素通りする形を踏んでいる**（§6-C）——**部分一致が
-    // 文書の言及まで拒む形と、内側の heredoc が stdin を奪う形である。**
+    // **実測で 2 回、素通りする形を踏んでいる**（`docs/troubleshooting.md`）——
+    // **部分一致が文書の言及まで拒む形と、内側の heredoc が stdin を奪う形である。**
     // **どちらもエラーを出さずに素通りした。**
     //
     // **読み込まれていることは、実際に打って確かめるしかない**
     // （`CLAUDE.md` の規律）。
+    //
+    // **1 本を名指しせず、`.claude/hooks/` を走査する。** **名指しにすると、
+    // 次に足した hook が覆われないまま緑になる**——`--self-test` を持たない
+    // hook は、印の行を出さないので落ちる。
     {
-        let hook = workspace_root.join(".claude/hooks/deny_dangerous_bash.py");
-        let status = Command::new("python3")
-            .arg(&hook)
-            .arg("--self-test")
-            .current_dir(&workspace_root)
-            .status();
-        match status {
-            Ok(status) if status.success() => println!("--- bash hook self-test: OK"),
-            Ok(status) => {
-                println!("--- bash hook self-test: FAILED ({status})");
-                failed.push("bash hook self-test".to_string());
-            }
+        let dir = workspace_root.join(".claude/hooks");
+        let mut hooks: Vec<PathBuf> = match fs::read_dir(&dir) {
+            Ok(entries) => entries
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| path.extension().is_some_and(|ext| ext == "py"))
+                .collect(),
             Err(error) => {
-                println!("--- bash hook self-test: FAILED (could not run {hook:?}: {error})");
+                println!("--- bash hook self-test: FAILED (could not read {dir:?}: {error})");
                 failed.push("bash hook self-test".to_string());
+                Vec::new()
             }
+        };
+        hooks.sort();
+        let mut findings: Vec<String> = Vec::new();
+        if hooks.is_empty() && dir.is_dir() {
+            findings.push(format!("no *.py hook under {}", dir.display()));
+        }
+        for hook in &hooks {
+            // stdin を閉じて呼ぶ。**開けたままだと、`--self-test` を持たない
+            // hook が本体の側へ落ちて標準入力を待ち、検査ごと止まる。**
+            let output = Command::new("python3")
+                .arg(hook)
+                .arg("--self-test")
+                .current_dir(&workspace_root)
+                .stdin(Stdio::null())
+                .output();
+            match output {
+                Ok(output) if output.status.success() => {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    // **印の行を要求する。** 成功の終了値だけだと、
+                    // `--self-test` を無視した hook が黙って通る。
+                    if !text.contains("case(s) decided as expected") {
+                        findings.push(format!(
+                            "{}: --self-test printed no verdict line",
+                            hook.display()
+                        ));
+                    }
+                }
+                Ok(output) => findings.push(format!(
+                    "{}: --self-test failed ({})",
+                    hook.display(),
+                    output.status
+                )),
+                Err(error) => findings.push(format!("{}: could not run ({error})", hook.display())),
+            }
+        }
+        if findings.is_empty() && !hooks.is_empty() {
+            println!(
+                "--- bash hook self-test: OK ({} hook(s) under .claude/hooks/, each with a \
+                 self-test that decides as it says)",
+                hooks.len()
+            );
+        } else if !findings.is_empty() {
+            for finding in &findings {
+                println!("    {finding}");
+            }
+            println!(
+                "--- bash hook self-test: FAILED ({} hook(s))",
+                findings.len()
+            );
+            failed.push("bash hook self-test".to_string());
         }
     }
 

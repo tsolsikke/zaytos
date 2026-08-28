@@ -230,6 +230,14 @@ commit・次ステップへ進む。
   承認前にコミットしない
 - ドキュメントのみの変更、リファクタリングのみの変更は、機能変更と
   混ぜず別コミットにする
+- **コミットの直後に `cargo xtask check`（基底）を回す。文書だけの変更でも
+  省かない。** **忘れても気づけないので、機械で回している**——
+  `.claude/settings.json` が `PostToolUse` の `Bash` へ
+  `.claude/hooks/check_after_commit.py` を登録している。
+  **「後」であって「前」ではない。** 落ちたら `--amend` か次のコミットで直す。
+  **コミットの経路を hook から横取りしない**
+- **カーネルのコードに触れたコミットの前は `cargo xtask check --commit`。**
+  時機の本体は `docs/coding-standards.md` の「回帰チェックの必須条件」にある
 
 ### 13.2 コミットの粒度
 
