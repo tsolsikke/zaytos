@@ -1774,7 +1774,7 @@ struct QemuLaunchOptions<'a> {
     monitor_socket: Option<&'a Path>,
     accelerator: Accelerator,
     /// `-d` に何を渡すか（zi-e 前の手当て）。**既定は `int,cpu_reset` である**
-    /// （`CLAUDE.md` の「QEMU の沈黙の失敗を必ず可視化する」）。
+    /// （`docs/coding-standards.md` の「QEMU の沈黙の失敗を必ず可視化する」）。
     debug_events: DebugEvents,
 }
 
@@ -1819,7 +1819,7 @@ impl DebugEvents {
 ///   `int` を残すと、1 分あたり約 2.9GiB でディスクが埋まる。**
 ///
 /// **自動検査の側の時間制限と記録は変えていない。** あちらは fail-fast の
-/// 機構で、落ちた原因を追う唯一の記録である（`CLAUDE.md` の
+/// 機構で、落ちた原因を追う唯一の記録である（`docs/coding-standards.md` の
 /// 「QEMU の沈黙の失敗を必ず可視化する」）。
 ///
 /// **失うもの**——**手で触っている間に例外が起きても、割り込みの列は残らない。**
@@ -13669,7 +13669,7 @@ mod tests {
     /// **手で触る経路だけが `int` を落とす（zi-e 前の手当て）。**
     ///
     /// **`-no-reboot` と `-no-shutdown` と `cpu_reset` は落ちない**——
-    /// **沈黙の失敗を可視化する部分は残る**（`CLAUDE.md`）。
+    /// **沈黙の失敗を可視化する部分は残る**（`docs/coding-standards.md`）。
     /// **落ちるのは割り込みの列だけである。**
     #[test]
     fn manual_runs_record_cpu_reset_but_not_every_interrupt() {

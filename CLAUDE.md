@@ -88,7 +88,7 @@
 
 ### 3.3 QEMU の「沈黙の失敗」を必ず可視化する
 
-本体は `.claude/rules/qemu-and-build.md` にある。
+本体は `docs/coding-standards.md` にある。
 
 ## 4. 実装ループの標準手順
 
