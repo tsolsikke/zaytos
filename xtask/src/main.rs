@@ -3421,6 +3421,22 @@ const SHELL_TEST_SABOTAGES: &[&str] = &[
     "kill-fold-keep-bkl-test",
     "kill-keep-typed-input-test",
     "env-drop-path-test",
+    // **SE-a と SE-b で 3 つ増えた（`ADR-0050`）。** 落ちる判定はそれぞれ違う——
+    // **Home / End の 1 本、Ctrl+A / Ctrl+E の 1 本、制御バイトの 1 本である。**
+    //
+    // **実測で、落ちた判定はこうだった**（2026-08-28。`--full`）。
+    // **`keyboard-drop-home-end-test` は 1 本**（Home と End）。
+    // **`keyboard-drop-ctrl-letters-test` は 2 本**（Ctrl+A / Ctrl+E と Ctrl+D）
+    // ——**Ctrl+英字そのものを外すので、Ctrl+英字を使う判定は全部落ちる。**
+    // **`shell-keep-control-bytes-test` は 2 本**（Tab と Ctrl+D）。
+    //
+    // **`keyboard-drop-ctrl-letters-test` は、止めた子の判定を落とさない**
+    // （実測で緑のままだった）。**中断の旗は割り込み側の別経路だからである**
+    // （`ADR-0050` の条件 1）。
+    // **どの判定が落ちたかは出力に並ぶ**（[`ShellTestMode::MustFail`] の doc）。
+    "keyboard-drop-home-end-test",
+    "keyboard-drop-ctrl-letters-test",
+    "shell-keep-control-bytes-test",
 ];
 
 impl ShellTestMode {
@@ -6206,6 +6222,63 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && kernel_reported_the_interruption
         && echoed_ctrl_c_count == 1;
 
+    // **Home と End が挿入点を端へ動かしたこと（SE-b。`ADR-0050`）。**
+    //
+    // **打ったのは `ab` → Home → `c` → End → `d` で、走るのは `cabd` である。**
+    // **動いていなければ `abcd` になる。** 出る側と出ない側の両方を見る。
+    let home_end_moved = after_shell.contains("zash: cabd: cannot run");
+    let home_end_did_not_move = after_shell.contains("zash: abcd: cannot run");
+    let home_and_end_moved_the_insertion_point = home_end_moved && !home_end_did_not_move;
+
+    // **Ctrl+A と Ctrl+E が同じ動きをしたこと（SE-b。`ADR-0050`）。**
+    //
+    // **打ったのは `ef` → Ctrl+A → `g` → Ctrl+E → `h` で、走るのは `gefh` である。**
+    // **一般化が外れていれば `a` と `e` が字として入り、`efageh` になる。**
+    //
+    // **Home / End と別の 1 本にしてある。** **落ちる破壊が違う**——
+    // あちらは `keyboard-drop-home-end-test`、こちらは
+    // `keyboard-drop-ctrl-letters-test` である。
+    let ctrl_ae_moved = after_shell.contains("zash: gefh: cannot run");
+    let ctrl_ae_typed_letters = after_shell.contains("zash: efageh: cannot run");
+    let ctrl_a_and_e_moved_the_insertion_point = ctrl_ae_moved && !ctrl_ae_typed_letters;
+
+    // **Delete が挿入点の字を消したこと（SE-b）。**
+    //
+    // **打ったのは `ij` → 左 → Delete で、走るのは `i` である。**
+    // **扱っていなければ `i3~j` になる**——**実測でその形だった**（2026-08-28）。
+    //
+    // **矢印が落ちている構成では期待が変わる。** **左が届かないので挿入点は
+    // 行末のままで、Delete は消す字を持たない**——走るのは `ij` である。
+    // **実測でここを踏んだ**（2026-08-28。台本へ左を足した回で
+    // `keyboard-drop-arrows` の実行が落ちた）。**台本を変えるときは、
+    // 台本を写している判定を数え直すこと。**
+    let delete_removed = after_shell.contains("zash: i: cannot run");
+    let delete_left_the_csi = after_shell.contains("zash: i3~j: cannot run");
+    let delete_left_the_line_alone = after_shell.contains("zash: ij: cannot run");
+    let delete_removed_the_character = if mode.expects_the_cursor_to_move() {
+        delete_removed && !delete_left_the_csi
+    } else {
+        delete_left_the_line_alone && !delete_removed
+    };
+
+    // **Tab が行へ入らないこと（SE-b。`ADR-0050`）。**
+    //
+    // **打ったのは `k` → Tab → `l` で、走るのは `kl` である。**
+    // **捨てていなければ `0x09` が語に混ざる。**
+    let tab_dropped = after_shell.contains("zash: kl: cannot run");
+    let tab_kept = after_shell.contains("zash: k\tl: cannot run");
+    let tab_stayed_out_of_the_line = tab_dropped && !tab_kept;
+
+    // **一般化した Ctrl+英字が行へ入らないこと（SE-b。`ADR-0050`）。**
+    //
+    // **打ったのは `n` → Ctrl+D → `o` で、走るのは `no` である。**
+    // **捨てていなければ `0x04` が語に混ざる。**
+    //
+    // **Tab と別の 1 本にしてある**——**落ちる破壊が違う**（台本の doc）。
+    let ctrl_d_dropped = after_shell.contains("zash: no: cannot run");
+    let ctrl_d_kept = after_shell.contains("zash: n\u{4}o: cannot run");
+    let ctrl_d_stayed_out_of_the_line = ctrl_d_dropped && !ctrl_d_kept;
+
     // **`argv[0]` が打った語のままであること（3 本目）。**
     //
     // **`spawn-test beta` を `/bin/` を付けずに送っている。**
@@ -6243,6 +6316,21 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
          {jis_only_keys_reached_ring3} (only one of them arrived = {only_one_jis_key_arrived})"
     );
 
+    println!(
+        "{context}: home and end moved the insertion point = \
+         {home_and_end_moved_the_insertion_point}"
+    );
+    println!(
+        "{context}: ctrl-a and ctrl-e moved the insertion point = \
+         {ctrl_a_and_e_moved_the_insertion_point}"
+    );
+    println!(
+        "{context}: delete removed the character = {delete_removed_the_character} (the cursor \
+         moves = {})",
+        mode.expects_the_cursor_to_move()
+    );
+    println!("{context}: tab stayed out of the line = {tab_stayed_out_of_the_line}");
+    println!("{context}: ctrl-d stayed out of the line = {ctrl_d_stayed_out_of_the_line}");
     println!("{context}: ctrl-c discarded the half-typed line = {ctrl_c_discarded_the_line}");
     println!(
         "{context}: ctrl-c stopped the spinning child = {ctrl_c_stopped_the_child} (echoed ^C \
@@ -6264,6 +6352,11 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && updown_left_the_line_intact
         && jis_only_keys_reached_ring3
         && !only_one_jis_key_arrived
+        && home_and_end_moved_the_insertion_point
+        && ctrl_a_and_e_moved_the_insertion_point
+        && delete_removed_the_character
+        && tab_stayed_out_of_the_line
+        && ctrl_d_stayed_out_of_the_line
         && ctrl_c_discarded_the_line
         && ctrl_c_stopped_the_child
         && restarted_only_once
@@ -6365,6 +6458,37 @@ const SHELL_TEST_LINES: &[&[&str]] = &[
     // **走るのは `uvw` である。** 捨てる分岐が無いと最後のバイトが字として
     // 入り、`uAvBw` になる。
     &["u", "up", "v", "down", "w", "ret"],
+    // a → b → Home → c → End → d（SE-b。ADR-0050）。**Home と End が端へ動かす。**
+    //
+    // **走るのは `cabd` である**（`ab` の頭へ `c` を入れ、末尾へ `d` を入れる）。
+    // **届いていなければ挿入点が動かず、`abcd` になる。** ここも 2 本で見る。
+    &["a", "b", "home", "c", "end", "d", "ret"],
+    // e → f → Ctrl+A → g → Ctrl+E → h（SE-b。ADR-0050）。**Ctrl+A と Ctrl+E。**
+    //
+    // **走るのは `gefh` である。** **一般化が外れていれば Ctrl+A は `a` を、
+    // Ctrl+E は `e` を出す**ので、`efageh` になる。**その形も見る。**
+    &["e", "f", "ctrl-a", "g", "ctrl-e", "h", "ret"],
+    // i → j → 左 → Delete（SE-b）。**Delete が挿入点の字を消す。**
+    //
+    // **走るのは `i` である。** **扱っていなければ `3` と `~` が字として入り、
+    // `i3~j` になる**——**実測でその形だった**（2026-08-28）。
+    &["i", "j", "left", "delete", "ret"],
+    // k → Tab → l（SE-b。ADR-0050）。**Tab が行へ入らない。**
+    //
+    // **走るのは `kl` である。** **捨てていなければ `0x09` が語に混ざる**
+    // ——**実測でそうなっていた**（2026-08-28）。
+    //
+    // **Ctrl+D と別の行にしてある。** **落ちる破壊が違う**——
+    // **Tab は Ctrl+英字ではないので、`keyboard-drop-ctrl-letters-test` では
+    // 緑のままである。**
+    &["k", "tab", "l", "ret"],
+    // n → Ctrl+D → o（SE-b。ADR-0050）。**一般化した Ctrl+英字が行へ入らない。**
+    //
+    // **走るのは `no` である。** **捨てていなければ `0x04` が語に混ざる。**
+    // **`keyboard-drop-ctrl-letters-test` では Ctrl+D が `d` を出す**ので
+    // `ndo` になり、この判定も落ちる——**Ctrl+英字そのものを外す破壊なので、
+    // Ctrl+英字を使う判定は全部落ちる。**
+    &["n", "ctrl-d", "o", "ret"],
     // 打ちかけの行を Ctrl+C で捨てる（S12 前の手当て、C）。**深さ 1 の側である。**
     //
     // **`zz` と打ってから Ctrl+C を送り、そのまま `ret` を打つ。**
@@ -12561,7 +12685,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 25,
-    full: 244,
+    full: 247,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

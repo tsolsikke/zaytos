@@ -162,6 +162,36 @@ const MINUS_EAGAIN: i64 = -11;
 /// Backspace のバイト。
 const BACKSPACE: u8 = 0x08;
 
+/// `Ctrl+A`（SE-b。`ADR-0050`）。**行頭へ動かす。**
+///
+/// **デコーダが Ctrl+英字を `0x01` から `0x1A` へ落とすようになった**ので、
+/// `a` は `0x01` である。
+const CTRL_A: u8 = 0x01;
+
+/// `Ctrl+E`（SE-b。`ADR-0050`）。**行末へ動かす。** `e` は `0x05` である。
+const CTRL_E: u8 = 0x05;
+
+/// 制御バイトの上限。**これ未満は字ではない（SE-b。`ADR-0050`）。**
+const FIRST_PRINTABLE: u8 = 0x20;
+
+/// 破壊 (SE-b, shell-keep-control-bytes-test): 制御バイトを捨てない。
+///
+/// **`cfg!` で持つ。** **`#[cfg]` を分岐へ付けると、破壊の側で
+/// [`FIRST_PRINTABLE`] が使われなくなって警告が出る。**
+const KEEP_CONTROL_BYTES: bool = cfg!(zash_keep_control_bytes);
+
+/// `\x1b[` の後に来る数（SE-b）。**Home は 1、Delete は 3、End は 4 である**
+/// （`kernel/src/input.rs` の `bytes_for_event`）。
+const CSI_HOME: u8 = b'1';
+const CSI_DELETE: u8 = b'3';
+const CSI_END: u8 = b'4';
+
+/// 後退を並べた種。**まとめて 1 回で書くために持つ。**
+///
+/// **1 バイトずつ書くと、行頭へ戻るだけで最大 128 回の `write` になる**
+/// ——PERF 段が減らした側である。
+const BACKSPACES: [u8; LINE_MAX] = [BACKSPACE; LINE_MAX];
+
 /// プロンプトを出す（ES-d）。**色を付けてから戻す。**
 ///
 /// **3 回書くのではなく 1 回で書く。** `write` は 1 回ごとに画面へ届いて
@@ -433,6 +463,33 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 }
                 continue;
             }
+            (Escape::Bracket, digit) if digit.is_ascii_digit() => {
+                // **`\x1b[` に続く数（SE-b）。** 次の `~` で確定する。
+                escape = Escape::Number(digit);
+                continue;
+            }
+            (Escape::Number(digit), b'~') => {
+                escape = Escape::Idle;
+                match digit {
+                    // **Home は行頭へ（`ADR-0050`）。**
+                    CSI_HOME => move_to_start(&mut cursor),
+                    // **End は行末へ。**
+                    CSI_END => move_to_end(&line, &mut cursor, length),
+                    // **Delete は挿入点の字を消す。** 挿入点は動かない。
+                    // **行末では何もしない**——消す字が無い。
+                    CSI_DELETE => {
+                        if cursor < length {
+                            line.copy_within(cursor + 1..length, cursor);
+                            length -= 1;
+                            redraw_tail_after_delete(&line[cursor..length]);
+                        }
+                    }
+                    // **知らない数は捨てる。** **最後のバイトを字として
+                    // 行へ入れない**——上下矢印と同じ判断である。
+                    _ => {}
+                }
+                continue;
+            }
             (Escape::Bracket, b'A') | (Escape::Bracket, b'B') => {
                 escape = Escape::Idle;
                 // **上下は何もしない（zi-a）。** 履歴が無いので動かす先が無い。
@@ -441,7 +498,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 // 挿入されてしまう。** 読んで捨てるのが正しい形である。
                 continue;
             }
-            (Escape::Esc, _) | (Escape::Bracket, _) => {
+            (Escape::Esc, _) | (Escape::Bracket, _) | (Escape::Number(_), _) => {
                 // **知らない並びだった。** 溜めた分は捨て、いま来た字は
                 // 下の分岐で普通に扱う。
                 //
@@ -498,6 +555,15 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 escape = Escape::Idle;
                 write_prompt();
             }
+            CTRL_A => {
+                // **行頭へ（SE-b。`ADR-0050`）。** Home と同じ動きである——
+                // **同じ関数を通すので、2 つの経路で振る舞いがずれない。**
+                move_to_start(&mut cursor);
+            }
+            CTRL_E => {
+                // **行末へ（SE-b。`ADR-0050`）。** End と同じ動きである。
+                move_to_end(&line, &mut cursor, length);
+            }
             BACKSPACE => {
                 // **挿入点の直前を消して、後ろを詰める（S12 前の手当て）。**
                 // **行頭では何もしない。**
@@ -515,6 +581,22 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 }
             }
             other => {
+                // **知らない制御バイトは行へ入れない（SE-b。`ADR-0050`）。**
+                //
+                // **入れると、幅を持たない字が語に混ざる。** **実測で、Tab を
+                // 打つと `f` `0x09` `g` という語になり、`cannot run` が出ていた**
+                // ——**打った人には、なぜ動かないのかが読めない。**
+                //
+                // **扱うと決めたものは上の分岐で受けてある**（改行・Ctrl+C・
+                // Ctrl+A・Ctrl+E・Backspace）。**ここへ来る `0x20` 未満は、
+                // 受け手が決まっていないバイトである。**
+                //
+                // **捨てたことは画面に出ない。** **Tab を押しても何も起きない**
+                // ——**補完は作らないと決めてある**（`ADR-0050` の「決めないこと」。
+                // 持ち越しに行がある）。
+                if other < FIRST_PRINTABLE && !KEEP_CONTROL_BYTES {
+                    continue;
+                }
                 if length < line.len() {
                     // **挿入点へ入れて、後ろをずらす。**
                     line.copy_within(cursor..length, cursor + 1);
@@ -625,8 +707,13 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
 /// **写しを取らない**——`argv` の要素はカーネルが写すので、
 /// **この行が生きているあいだ有効であれば足りる。**
 fn run_line(line: &mut [u8]) {
-    // **語へ切る。** 空白は 1 種類だけ見る（`0x20`）。**タブはまだ来ない**
-    // ——`kernel/src/keyboard/decode.rs` が Tab を文字として出さない。
+    // **語へ切る。** 空白は 1 種類だけ見る（`0x20`）。
+    //
+    // **以前ここには「タブはまだ来ない——decode.rs が Tab を文字として
+    // 出さない」と書いてあった。誤りだった**——**`decode.rs` は Tab を
+    // `Char('\t')` として出しており、実測で `0x09` が行へ入っていた**
+    // （2026-08-28。`f` `0x09` `g` という語になった）。
+    // **いまは入力の輪が捨てるので、ここへは来ない**（`ADR-0050`）。
     let mut starts = [0usize; MAX_ARGS];
     let mut count = 0usize;
     let mut at = 0usize;
@@ -768,6 +855,38 @@ fn redraw_tail(tail: &[u8]) {
     }
 }
 
+/// 挿入点を行頭へ動かす（SE-b）。**後退をまとめて 1 回で書く。**
+fn move_to_start(cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+    write_all(STDOUT, &BACKSPACES[..*cursor]);
+    *cursor = 0;
+}
+
+/// 挿入点を行末へ動かす（SE-b）。
+///
+/// **右へ動かすのに、その位置の字をもう一度書く。** `\x1b[C` を出す形もあるが、
+/// **画面（`Grid`）はエスケープを解釈しない**ので届かない（矢印と同じ判断）。
+fn move_to_end(line: &[u8], cursor: &mut usize, length: usize) {
+    if *cursor >= length {
+        return;
+    }
+    write_all(STDOUT, &line[*cursor..length]);
+    *cursor = length;
+}
+
+/// 挿入点の字を消したあと、後ろを詰めて書き直す（SE-b）。
+///
+/// **[`redraw_tail`] と違い、後ろが空でも 1 セル潰す。**
+/// **Backspace は後退・空白・後退で既に潰しているが、Delete は潰していない**
+/// ——**同じ関数を使うと、行末の字を消したときに画面へ残る。**
+fn redraw_tail_after_delete(tail: &[u8]) {
+    write_all(STDOUT, tail);
+    write_all(STDOUT, b" ");
+    write_all(STDOUT, &BACKSPACES[..tail.len() + 1]);
+}
+
 /// 挿入点より後ろを書き直し、カーソルを戻す。**空白は置かない。**
 ///
 /// 字を入れた側から呼ぶ。**行は 1 つ伸びているので、潰すセルが無い。**
@@ -781,11 +900,11 @@ fn redraw_tail_without_gap(tail: &[u8]) {
     }
 }
 
-/// エスケープの受けの状態（S12 前の手当て）。
+/// エスケープの受けの状態（S12 前の手当て。SE-b で 4 バイトの形が増えた）。
 ///
-/// **3 バイトしか見ない。** 矢印は `\x1b` `[` `D` / `C` で届く。
-/// **数を伴う形（`\x1b[3~` など）は来ない**——落としているのは
-/// `kernel/src/input.rs` で、そこが出すのはこの 2 つだけである。
+/// **2 つの形を受ける。** 矢印は `\x1b` `[` `D` / `C` / `A` / `B` の 3 バイトで、
+/// **Home / Delete / End は `\x1b` `[` 数 `~` の 4 バイトである**
+/// （`kernel/src/input.rs` の `bytes_for_event`。`ADR-0050`）。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Escape {
     /// 何も溜めていない。
@@ -794,4 +913,6 @@ enum Escape {
     Esc,
     /// `\x1b[` を受けた。
     Bracket,
+    /// `\x1b[` に続けて数を受けた。**次が `~` なら確定する。**
+    Number(u8),
 }

@@ -86,6 +86,19 @@ keyboard-drop-arrows-test = []
 # 破壊（zi-a）: Esc を未対応へ戻す。Ring 3 へ `\x1b` が届かなくなるので、
 # `--shell-test` の「Esc `[` `D` の実打鍵が挿入点を動かした」判定が落ちる。
 keyboard-drop-esc-test = []
+# 破壊（SE-a。ADR-0050）: Home と End を未対応へ戻す。デコーダが
+# `KeyEvent::Unsupported` を返すので前景へバイトが届かず、シェルの挿入点が
+# 端へ動かない。`--shell-test` の「Home と End が挿入点を端へ動かした」判定が
+# 落ちる。
+keyboard-drop-home-end-test = []
+# 破壊（SE-a。ADR-0050）: Ctrl+英字の一般化を外し、Ctrl+C だけに戻す。
+# `--shell-test` の「Ctrl+A と Ctrl+E が挿入点を端へ動かした」判定が落ちる。
+# 止めた子の判定は緑のまま——中断の旗は割り込み側の別経路である。
+keyboard-drop-ctrl-letters-test = []
+# 破壊（SE-b。ADR-0050）: zash が知らない制御バイトを捨てず、行へ入れる。
+# Tab の `0x09` と Ctrl+D の `0x04` が語に混ざるので、`--shell-test` の
+# 「知らない制御バイトが行へ入らない」判定が落ちる。
+shell-keep-control-bytes-test = []
 # 検証（zi-b）: 起動シーケンスで ANSI の解釈を前景経路ごと実演し、判定行を
 # 出す。壊す経路ではない（exception-test 等と同じ検証用フック）。
 ansi-test = []

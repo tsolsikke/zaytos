@@ -427,7 +427,17 @@ pub(crate) fn bytes_for_event(event: crate::keyboard::decode::KeyEvent) -> Deliv
         KeyEvent::ArrowRight => DeliveredBytes::Csi(b"\x1b[C"),
         KeyEvent::ArrowUp => DeliveredBytes::Csi(b"\x1b[A"),
         KeyEvent::ArrowDown => DeliveredBytes::Csi(b"\x1b[B"),
-        // **バイトへ落とせないものは落とす。** Home / End などで、
+        // **Home と End は `\x1b[1~` と `\x1b[4~` である（SE-a。`ADR-0050`）。**
+        //
+        // **`\x1b[H` と `\x1b[F`（xterm の形）を採らない。** 理由は 3 つある。
+        // **(1) `\x1b[3~` と同じ「CSI 数字 ~」の族で揃い、入力を解釈する側の
+        // 形が 1 つで済む。** **(2) `\x1b[H` は出力側の CUP と終端が同じで、
+        // 次に読む者が入力と出力を取り違える**（`ADR-0029`）。
+        // **(3) 端末は ZaytOS 自身なので xterm 互換の利得が無い**——
+        // **Delete は全端末で `3~` だが、Home / End は端末によって割れている。**
+        KeyEvent::Home => DeliveredBytes::Csi(b"\x1b[1~"),
+        KeyEvent::End => DeliveredBytes::Csi(b"\x1b[4~"),
+        // **バイトへ落とせないものは落とす。** ファンクションキーやテンキーで、
         // 扱う層がまだ無い（扱うと決めたら decode 側で種を得る。zi-a の形）。
         KeyEvent::Unsupported(_) => DeliveredBytes::None,
     }
@@ -461,6 +471,29 @@ mod tests {
             bytes_for_event(KeyEvent::ArrowRight),
             DeliveredBytes::Csi(b"\x1b[C")
         ));
+    }
+
+    /// **Home と End は `\x1b[1~` と `\x1b[4~` である（SE-a。`ADR-0050`）。**
+    ///
+    /// **`\x1b[3~`（Delete）と同じ「CSI 数字 ~」の族に揃えた**——
+    /// **`\x1b[H` を採ると出力側の CUP と終端が同じになる。**
+    #[test]
+    fn home_and_end_are_csi_number_tilde() {
+        assert!(matches!(
+            bytes_for_event(KeyEvent::Home),
+            DeliveredBytes::Csi(b"\x1b[1~")
+        ));
+        assert!(matches!(
+            bytes_for_event(KeyEvent::End),
+            DeliveredBytes::Csi(b"\x1b[4~")
+        ));
+        // **族が揃っていること自体を主張する。** 3 つとも `~` で終わる。
+        for event in [KeyEvent::Delete, KeyEvent::Home, KeyEvent::End] {
+            let DeliveredBytes::Csi(bytes) = bytes_for_event(event) else {
+                panic!("{event:?} は CSI で届くはずである");
+            };
+            assert_eq!(bytes.last(), Some(&b'~'), "{event:?} の終端は ~ である");
+        }
     }
 
     /// 既存の 1 バイト系と「落とすもの」が変わっていないこと。

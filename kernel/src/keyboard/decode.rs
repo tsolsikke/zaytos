@@ -120,6 +120,16 @@ pub enum KeyEvent {
     Delete,
     /// カーソル下（zi-a）。
     ArrowDown,
+    /// Home（SE-a。`ADR-0050`）。**行頭へ動かすキーである。**
+    ///
+    /// # なぜ `Unsupported` から出すのか
+    ///
+    /// **矢印と Delete と同じ形である。** **扱うようになったものを
+    /// `Unsupported` に残すと、呼び出し側が数えている「扱えなかった数」に
+    /// 扱えたものが混ざる。**
+    Home,
+    /// End（SE-a。`ADR-0050`）。**行末へ動かすキーである。**
+    End,
     /// Esc（zi-a）。**`zi` のノーマルモードへ戻るキーである。**
     ///
     /// **`Char('\x1b')` にはしない。** 表示すべき文字ではない——
@@ -130,6 +140,26 @@ pub enum KeyEvent {
     ///
     /// 押下（make）のときだけ報告する。離した（break）ときは報告しない。
     Unsupported(u8),
+}
+
+/// Ctrl+英字が作る制御文字（`0x01` から `0x1A`）。英字でなければ `None`。
+///
+/// **Shift と Caps Lock を見ない。** **Ctrl+Shift+A も `0x01` である**
+/// ——**Ctrl は字の大小の外に居る修飾である。**
+///
+/// **素の表だけを引く。** 配列が変わっても、英字の位置は同じところに在る
+/// （JIS と US の表を突き合わせる単体テストが在る）。
+fn control_byte_for(key: u8) -> Option<u8> {
+    let index = key as usize;
+    if index >= TABLE_LEN {
+        return None;
+    }
+    let character = UNSHIFTED[index];
+    if character.is_ascii_lowercase() {
+        Some(character as u8 - b'a' + 1)
+    } else {
+        None
+    }
 }
 
 /// ブレークコード（キーを離した）を示すビット。
@@ -171,6 +201,13 @@ pub(crate) const SCANCODE_C: u8 = 0x2E;
 /// Ctrl+C が作る制御文字。**ASCII の ETX（`0x03`）である。**
 pub(crate) const CTRL_C_BYTE: u8 = 0x03;
 
+/// **一般化が、以前の例外と同じ値を出すことをコンパイル時に確かめる（SE-a）。**
+///
+/// **Ctrl+C は、いまや規則の 1 つの場合である**（`ADR-0050`）。
+/// **`c` は英字の 3 番目なので `0x03` になる。**
+/// **この行が落ちるなら、[`control_byte_for`] の落とし方が変わっている。**
+const _: () = assert!(CTRL_C_BYTE == b'c' - b'a' + 1);
+
 // 文字ではないが意味を持つキー。
 const SCANCODE_BACKSPACE: u8 = 0x0E;
 
@@ -191,6 +228,17 @@ const SCANCODE_ARROW_DOWN: u8 = 0x50;
 /// 落ちる）。**Delete は必ず `0xE0` 付きで届くので、取り違えは起きない**
 /// （矢印と同じ形である）。
 const SCANCODE_DELETE: u8 = 0x53;
+/// 拡張コードの Home（`0xE0 0x47`。SE-a）。
+///
+/// **素の `0x47` はキーパッドの 7 である**（表で `'\0'`、`Unsupported` に落ちる）。
+/// **Home は必ず `0xE0` 付きで届くので、取り違えは起きない**（矢印と同じ形である）。
+const SCANCODE_HOME: u8 = 0x47;
+
+/// 拡張コードの End（`0xE0 0x4F`。SE-a）。
+///
+/// **素の `0x4F` はキーパッドの 1 である**（Home と同じ形）。
+const SCANCODE_END: u8 = 0x4F;
+
 /// Esc（`0x01`。zi-a）。
 const SCANCODE_ESC: u8 = 0x01;
 const SCANCODE_TAB: u8 = 0x0F;
@@ -420,6 +468,21 @@ impl Decoder {
                 if code == SCANCODE_DELETE {
                     return Some(KeyEvent::Delete);
                 }
+                // **Home と End（SE-a。`ADR-0050`）。** **矢印の破壊の下に
+                // 置かない**——**あの破壊の意味は「矢印を未対応へ戻す」の
+                // 1 つである**（Delete と同じ判断）。
+                //
+                // 破壊 (SE-a, keyboard-drop-home-end-test): 種を返さず
+                // `Unsupported` へ落とす。**`--shell-test` の「Home と End が
+                // 挿入点を端へ動かした」判定が落ちる。**
+                #[cfg(not(feature = "keyboard-drop-home-end-test"))]
+                if code == SCANCODE_HOME {
+                    return Some(KeyEvent::Home);
+                }
+                #[cfg(not(feature = "keyboard-drop-home-end-test"))]
+                if code == SCANCODE_END {
+                    return Some(KeyEvent::End);
+                }
                 // **右 Ctrl（`0xE0 0x1D`）も Ctrl として扱う（S12 前の手当て、C）。**
                 //
                 // **接頭辞の有無で左右を区別しない。** 区別すると、
@@ -492,16 +555,31 @@ impl Decoder {
             return None;
         }
 
-        // **Ctrl+C だけを制御文字へ落とす（S12 前の手当て、C）。**
+        // **Ctrl+英字を制御文字へ落とす（SE-a。`ADR-0050`）。**
         //
-        // **他の Ctrl の組み合わせは従来どおりである**——Ctrl+A は `a` を出す。
-        // **一般化して Ctrl+英字を 1..26 へ落とす形も採れるが、採らない。**
-        // **使う者がいない機構は検算が置けない**（S9-b-3-1 の診断）。
-        // 使う道ができた時点で広げること。
+        // **以前は Ctrl+C だけを落としており、「使う道ができた時点で広げること」と
+        // 書いてあった。** **SE 段の `Ctrl+A` / `Ctrl+E` がその道である。**
+        //
+        // **一般化は機構を増やさない。** **既に在った例外（Ctrl+C だけ特別）を
+        // 規則へ畳む**——**2 文字だけ通す形にすると、例外の表が育つ。**
         //
         // **種を足さず `Char` で出す。** Ctrl は修飾であって、キーではない——
         // **矢印（B）で種を足したのは、あれがキーそのものだったからである。**
         // 修飾の族は Shift と Caps Lock で、どちらも種を持たない。
+        #[cfg(not(feature = "keyboard-drop-ctrl-letters-test"))]
+        if self.ctrl {
+            if let Some(byte) = control_byte_for(key) {
+                return Some(KeyEvent::Char(byte as char));
+            }
+        }
+        // 破壊 (SE-a, keyboard-drop-ctrl-letters-test): 一般化を外し、
+        // Ctrl+C だけに戻す。**`--shell-test` の「Ctrl+A と Ctrl+E が
+        // 挿入点を端へ動かした」判定が落ちる。**
+        //
+        // **止めた子の判定は緑のままである**——**中断の旗は
+        // `kernel/src/input.rs` の割り込み側が立てており、こちらとは
+        // 独立の経路である**（`ADR-0050` の条件 1）。
+        #[cfg(feature = "keyboard-drop-ctrl-letters-test")]
         if self.ctrl && key == SCANCODE_C {
             return Some(KeyEvent::Char(CTRL_C_BYTE as char));
         }
@@ -587,6 +665,77 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// **Ctrl+英字は `0x01` から `0x1A` へ落ちる（SE-a。`ADR-0050`）。**
+    ///
+    /// **Ctrl+C はその 1 つの場合である**——以前は例外として書いてあった。
+    #[test]
+    fn ctrl_turns_letters_into_control_bytes() {
+        let mut decoder = Decoder::new();
+        // LCtrl 押下 -> 'a'(0x1E) -> 'c'(0x2E) -> 'z'(0x2C) -> LCtrl 離脱
+        let events = feed_all(&mut decoder, &[0x1D, 0x1E, 0x2E, 0x2C, 0x9D]);
+        let bytes: std::vec::Vec<u8> = events
+            .iter()
+            .filter_map(|e| match e {
+                KeyEvent::Char(c) => Some(*c as u8),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bytes, [0x01, 0x03, 0x1A], "a/c/z が 1/3/26 になる");
+    }
+
+    /// **Shift と Caps Lock は Ctrl の落とし方に効かない。**
+    ///
+    /// **Ctrl は字の大小の外に居る修飾である。**
+    #[test]
+    fn ctrl_ignores_shift() {
+        let mut decoder = Decoder::new();
+        // LShift 押下 -> LCtrl 押下 -> 'a'
+        let events = feed_all(&mut decoder, &[0x2A, 0x1D, 0x1E]);
+        assert_eq!(events, [KeyEvent::Char('\u{1}')], "Ctrl+Shift+A も 0x01");
+    }
+
+    /// **英字でないキーは落とさない。** Ctrl+`1` は `1` のままである。
+    ///
+    /// **落とす範囲を英字に限ると決めてある**（`ADR-0050` の「決めないこと」）。
+    #[test]
+    fn ctrl_leaves_non_letters_alone() {
+        let mut decoder = Decoder::new();
+        // LCtrl 押下 -> '1'(0x02)
+        let events = feed_all(&mut decoder, &[0x1D, 0x02]);
+        assert_eq!(events, [KeyEvent::Char('1')]);
+    }
+
+    /// **Ctrl を離したら、英字は字へ戻る。**
+    #[test]
+    fn releasing_ctrl_restores_plain_letters() {
+        let mut decoder = Decoder::new();
+        let events = feed_all(&mut decoder, &[0x1D, 0x1E, 0x9D, 0x1E]);
+        assert_eq!(
+            events,
+            [KeyEvent::Char('\u{1}'), KeyEvent::Char('a')],
+            "離したら 'a' へ戻る"
+        );
+    }
+
+    /// **Home と End は拡張コードから種で出る（SE-a。`ADR-0050`）。**
+    ///
+    /// **素の `0x47` / `0x4F` はキーパッドで、`Unsupported` に落ちる**
+    /// ——`0xE0` が付いたときだけ Home / End である。
+    #[test]
+    fn home_and_end_come_from_the_extended_codes() {
+        let mut decoder = Decoder::new();
+        let events = feed_all(&mut decoder, &[0xE0, 0x47, 0xE0, 0x4F]);
+        assert_eq!(events, [KeyEvent::Home, KeyEvent::End]);
+
+        // 接頭辞が無ければキーパッドで、種は出ない。
+        let mut plain = Decoder::new();
+        let events = feed_all(&mut plain, &[0x47, 0x4F]);
+        assert_eq!(
+            events,
+            [KeyEvent::Unsupported(0x47), KeyEvent::Unsupported(0x4F)]
+        );
     }
 
     #[test]
@@ -678,16 +827,18 @@ mod tests {
 
     /// 拡張キー（0xE0 プレフィックス）は押下のときだけ 1 回報告する。
     ///
-    /// **上矢印は zi-a で種を得た**ので、未対応の代表は Home（`0xE0 0x47`）へ
-    /// 差し替えた。
+    /// **未対応の代表は 2 度差し替えている。** 上矢印は zi-a で種を得たので
+    /// Home へ移し、**Home も SE-a で種を得た**ので PageUp（`0xE0 0x49`）へ移した。
+    /// **この差し替えが要るのは、扱う鍵が増えるたびである**——
+    /// **代表が種を得ると、この判定は「未対応の代表」を主張しなくなる。**
     #[test]
     fn extended_keys_are_reported_once_on_press() {
         let mut decoder = Decoder::new();
-        // 0xE0 0x47 = Home（押下）、0xE0 0xC7 = 同（離脱）。
+        // 0xE0 0x49 = PageUp（押下）、0xE0 0xC9 = 同（離脱）。
         assert_eq!(decoder.feed(0xE0), None, "プレフィックス単独では何も出ない");
-        assert_eq!(decoder.feed(0x47), Some(KeyEvent::Unsupported(0x47)));
+        assert_eq!(decoder.feed(0x49), Some(KeyEvent::Unsupported(0x49)));
         assert_eq!(decoder.feed(0xE0), None);
-        assert_eq!(decoder.feed(0xC7), None, "離脱では報告しない");
+        assert_eq!(decoder.feed(0xC9), None, "離脱では報告しない");
     }
 
     /// **4 方向の矢印がそれぞれの種で届く（zi-a で上下を足した）。**

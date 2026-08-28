@@ -1493,7 +1493,10 @@ fn drain_keyboard(
             | KeyEvent::Escape
             // **Delete も何もしない（zi-f）。** **この行は挿入点を持たない**
             // ——`Backspace` と同じ理由で、編集は Ring 3 の側にある。
-            | KeyEvent::Delete => {}
+            | KeyEvent::Delete
+            // **Home と End も同じである（SE-a。`ADR-0050`）。**
+            | KeyEvent::Home
+            | KeyEvent::End => {}
             KeyEvent::Backspace => {
                 // 画面上の消去は行わない。コンソール側でセルごとの
                 // 占有種別（全角の先頭 / 後続）を管理する必要があり、

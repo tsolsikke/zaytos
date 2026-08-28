@@ -9247,6 +9247,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "Esc を未対応へ戻し、Ring 3 へ 0x1b が届かないようにする",
     ),
     (
+        "keyboard-drop-home-end-test",
+        cfg!(feature = "keyboard-drop-home-end-test"),
+        "Home と End を未対応へ戻し、シェルの挿入点が端へ動かないようにする",
+    ),
+    (
+        "keyboard-drop-ctrl-letters-test",
+        cfg!(feature = "keyboard-drop-ctrl-letters-test"),
+        "Ctrl+英字の一般化を外し、Ctrl+C だけを制御文字へ落とす形へ戻す",
+    ),
+    (
+        "shell-keep-control-bytes-test",
+        cfg!(feature = "shell-keep-control-bytes-test"),
+        "zash が知らない制御バイトを捨てず、行へ入れる",
+    ),
+    (
         "ansi-test",
         cfg!(feature = "ansi-test"),
         "起動シーケンスで ANSI の解釈を前景経路ごと実演する",

@@ -179,6 +179,10 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
             "zash_prompt_drop_color",
         ),
         (
+            "CARGO_FEATURE_SHELL_KEEP_CONTROL_BYTES_TEST",
+            "zash_keep_control_bytes",
+        ),
+        (
             "CARGO_FEATURE_ZI_STATUS_FREEZE_MODE_TEST",
             "zi_status_freeze_mode",
         ),
