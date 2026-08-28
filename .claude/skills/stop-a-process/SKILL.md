@@ -3,7 +3,7 @@ name: stop-a-process
 description: 走っている QEMU や xtask を止める手順（pkill を使わず PID で止める）。プロセスを止めるときに使う
 ---
 
-### 14.1 プロセスを止める手順
+## プロセスを止める手順
 
 `pkill -f` / `killall` は使わない。パターンが自分のシェルのコマンドラインに
 マッチして、自分自身を殺す。`pkill -f "qemu-system-x86_64"` と
