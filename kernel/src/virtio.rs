@@ -922,10 +922,15 @@ pub unsafe fn exercise_read(
     // **見込みは「装置は黙って 511 バイトだけ書く」だったが、実測では QEMU が
     // 要求ごと拒む**——status に 1（IOERR）が書かれ、status の検査が捕まえる。
     // 中身の突き合わせまで届かない。**捕まえ方の見込みは外れたが、捕まる。**
+    //
+    // **正しい長さから 1 を引く形で書く。** **以前は `512` と `511` を別々に
+    // 書いていた**——**正しい側を変えると、破壊が「1 バイト短い」でなくなる**
+    // （効き目が別の定数に依存する形。2026-08-28 の洗い出しで見つけた）。
+    const EXERCISE_READ_BYTES: u32 = 512;
     #[cfg(not(feature = "virtio-short-desc-test"))]
-    let bytes = 512u32;
+    let bytes = EXERCISE_READ_BYTES;
     #[cfg(feature = "virtio-short-desc-test")]
-    let bytes = 511u32;
+    let bytes = EXERCISE_READ_BYTES - 1;
 
     // 器の +512 を読み先に使う（S13-b の使い捨てと同じ場所）。
     let data_phys = blk.spare_phys + 512;

@@ -4723,6 +4723,13 @@ fn flush_fs_image_to_device(
     Ok(())
 }
 
+/// 像を装置から読むときの 1 回ぶんの大きさ（S13-c）。
+///
+/// **破壊 `virtio-load-skip-first-test` がこの値に依存している**——
+/// **「先頭の 1 かたまりを飛ばす」ので、飛ばす量と読む量が同じでなければ
+/// ならない。** **2 箇所に書かないこと。**
+const FS_LOAD_CHUNK: u32 = 4096;
+
 fn try_copy_fs_image_to_frames(
     logger: &mut Logger<SerialPort>,
     blk: &mut kernel::virtio::VirtioBlk,
@@ -4771,18 +4778,23 @@ fn try_copy_fs_image_to_frames(
     // **破壊 `fs-load-from-embedded-test` は消した（P-e）。** **装置以外の源が
     // 無いので、戻す先が無い**（`ADR-0034` の Addendum の引き継ぎの表）。
     {
-        // 破壊 (S13-c, virtio-load-skip-first-test): 先頭の 4KiB を読まない。
-        // **superblock（オフセット 1024）が 0 のままになり、バイト一致が落ちる。**
+        // 破壊 (S13-c, virtio-load-skip-first-test): 先頭の 1 かたまりを読まない。
+        // **superblock（オフセット 1024）が 0 のままになり、突き合わせが落ちる。**
         // **末尾を欠く形にしない**——像の末尾は 0 なので（S12-a の実測）、
         // 欠けても変わらず、破壊にならない（族の 1 つ目）。
+        //
+        // **かたまりの大きさは [`FS_LOAD_CHUNK`] から取る。**
+        // **以前は `4096` を 2 箇所に書いていた**——**片方だけを変えると、
+        // 破壊が「先頭のかたまり」を飛ばさなくなる**（効き目が別の定数に
+        // 依存する形。2026-08-28 の洗い出しで見つけた）。
         #[cfg(not(feature = "virtio-load-skip-first-test"))]
         let start_chunk = 0u64;
         #[cfg(feature = "virtio-load-skip-first-test")]
         let start_chunk = 1u64;
 
-        let mut offset = start_chunk * 4096;
+        let mut offset = start_chunk * u64::from(FS_LOAD_CHUNK);
         while offset < bytes {
-            let chunk = 4096u32.min((bytes - offset) as u32);
+            let chunk = FS_LOAD_CHUNK.min((bytes - offset) as u32);
             // SAFETY: 読み先はいま確保した連続フレームの中で、direct map が
             // 覆っていることを上で確かめた。装置のほかに書く者は居ない。
             // 位置の契約（BSP のみ・IF=0）は呼び出し位置が満たす（AP 起床と
