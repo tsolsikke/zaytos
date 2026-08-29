@@ -1752,6 +1752,22 @@ extern "sysv64" fn kernel_main() -> ! {
         Some(&mut virtio_disk),
     );
 
+    // **カーネルスタックの高水位を出す（P-c-1 の手当て）。**
+    //
+    // **ガードは真偽しか言わない**——**「踏んだか」は分かるが、「どれだけ
+    // 余っているか」は分からない。** **緑であることと、余裕があることは違う。**
+    //
+    // **遠征スタックには同じ形が既に在った**（`ring3:` の行）。
+    // **カーネルスタックにだけ無かった。** その非対称を埋める。
+    {
+        let used = stack::kernel_stack_high_water();
+        let capacity = stack::kernel_stack_capacity();
+        logger.info(format_args!(
+            "stack-water: the kernel stack used {used} of {capacity} byte(s); {} left",
+            capacity.saturating_sub(used)
+        ));
+    }
+
     // === S11-11: init がシェルを起こす ===
     //
     // **ここから戻らない。**
@@ -2743,6 +2759,14 @@ fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
     logger.info(format_args!(
         "stack: old RSP={old_rsp:#x} (UEFI-derived), new RSP={current_rsp:#x}"
     ));
+    // **使っていない側へ目印を敷く（P-c-1 の手当て）。**
+    //
+    // **ここが敷ける最初の場所である**——**切り替えた直後で、下は誰も
+    // 使っていない。** **高水位はこの後の全部を含む。**
+    //
+    // SAFETY: いまこのスタックの上に居り、`current_rsp` の下は誰も使っていない。
+    unsafe { stack::paint_unused_kernel_stack(current_rsp) };
+
     logger.info(format_args!(
         "stack: kernel stack {:#x}..{:#x} ({} KiB)",
         kernel_stack.bottom.as_u64(),

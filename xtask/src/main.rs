@@ -6475,6 +6475,25 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         ran_oo == 1
     };
 
+    // **カーネルスタックに余裕が残っていること（P-c-1 の手当て）。**
+    //
+    // **ガードは真偽しか言わない**——**「踏んだか」は分かるが「どれだけ
+    // 余っているか」は分からない。** **緑であることと、余裕があることは違う**
+    // （`ADR-0046` が「余裕が無い」と書いたのに、数を誰も見ていなかった）。
+    //
+    // **16KiB の根拠は実測である**——**関数 1 つの枠は最大 4KiB で
+    // （`kernel_main` を除く）、4 つ積んでも足りる幅である。**
+    //
+    // **高水位は揺れない**（起動シーケンスは決定的である。2 回続けて同じ値を
+    // 実測した）ので、判定に載せられる。
+    let stack_spare = serial
+        .lines()
+        .find(|line| line.contains("stack-water: the kernel stack used"))
+        .and_then(|line| line.split("byte(s); ").nth(1))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|token| token.parse::<usize>().ok());
+    let kernel_stack_has_room = stack_spare.is_some_and(|spare| spare >= KERNEL_STACK_MIN_SPARE);
+
     // **`argv[0]` が打った語のままであること（3 本目）。**
     //
     // **`spawn-test beta` を `/bin/` を付けずに送っている。**
@@ -6540,6 +6559,10 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         "{context}: ctrl-b and ctrl-f moved the insertion point = \
          {ctrl_b_and_f_moved_the_insertion_point}"
     );
+    println!(
+        "{context}: the kernel stack kept at least {KERNEL_STACK_MIN_SPARE} byte(s) spare = \
+         {kernel_stack_has_room} (spare {stack_spare:?})"
+    );
     println!("{context}: ctrl-k cut to the end = {ctrl_k_cut_to_the_end}");
     println!("{context}: ctrl-u cut to the start = {ctrl_u_cut_to_the_start}");
     println!("{context}: ctrl-w deleted the previous word = {ctrl_w_deleted_the_word}");
@@ -6590,6 +6613,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && history_walked_with_arrows
         && history_walked_with_ctrl
         && ctrl_b_and_f_moved_the_insertion_point
+        && kernel_stack_has_room
         && ctrl_k_cut_to_the_end
         && ctrl_u_cut_to_the_start
         && ctrl_w_deleted_the_word
@@ -6625,6 +6649,13 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         }
     }
 }
+
+/// カーネルスタックに残っていてほしい余裕（P-c-1 の手当て）。
+///
+/// **16KiB である。** **根拠は実測**——**`kernel_main` を除くと、関数 1 つの枠は
+/// 最大 4KiB である**（`objdump` でプロローグを走査した。2026-08-28）。
+/// **4 つ積んでも足りる幅を取ってある。**
+const KERNEL_STACK_MIN_SPARE: usize = 16 * 1024;
 
 /// `LINE_MAX` ちょうどの打鍵（SE-c）。**`z` を 128 個と Enter。**
 ///

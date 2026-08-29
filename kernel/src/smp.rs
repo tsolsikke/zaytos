@@ -171,8 +171,12 @@ mod tests {
 
         // 起動ログで実測した値に釘付けする（S4-c-3-2a、`-smp 2`、スロット 1）。
         // 算術が合っていても定数がずれれば動くので、実測値を 1 点持っておく。
-        assert_eq!(bottom, 0xffff_8100_0001_c000);
-        assert_eq!(recorded_top, 0xffff_8100_0002_c000);
+        //
+        // **P-c-1 でカーネルスタックを 64KiB から 128KiB へ広げたので、
+        // 測り直した**（2026-08-28。起動ログの `smp: mapped per-CPU stacks` の行）。
+        // **釘は測って打つものなので、算術で導かない。**
+        assert_eq!(bottom, 0xffff_8100_0002_c000);
+        assert_eq!(recorded_top, 0xffff_8100_0004_c000);
     }
 
     #[test]

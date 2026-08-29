@@ -75,7 +75,26 @@ use common::addr::VirtAddr;
 use core::ptr::addr_of;
 
 /// 通常実行用のカーネルスタックの大きさ。
-pub const KERNEL_STACK_SIZE: usize = 64 * 1024;
+///
+/// # なぜ 128KiB か（P-c-1 の手当て。2026-08-28）
+///
+/// **測って決めた。** **起動の経路が要るのは 65,744 バイトである**
+/// （128KiB へ広げて高水位を読んだ。2 回続けて同じ値だった）。
+/// **64KiB では 208 バイト足りない。**
+///
+/// **64KiB だった間、余裕はほぼ 0 だった。** **`ADR-0046` が既に
+/// 「起動時のカーネルスタックに余裕が無い」と書いており、256 バイトの
+/// 構造体 1 つで越えることを実測している。** **緑であることと、余裕が
+/// あることは違う**——**ガードは真偽しか言わず、数を誰も見ていなかった。**
+///
+/// **128KiB にすると余裕は 65,328 バイトになる**（必要量とほぼ同じだけ余る）。
+/// **96KiB も採れるが、余裕が 30KiB では次の 1 回の変更でまた縁へ来る。**
+///
+/// **内訳も測った。** **`kernel_main` の枠だけで 36,864 バイト（36KiB）で、
+/// 他の関数は 1 つも 4KiB を超えない。** **1 つの枠が 56% を占める形は
+/// それ自体が良くないが、減らすのは起動シーケンスの構造に触る作業なので
+/// 分けた**（`deferred-decisions.md` に行がある）。
+pub const KERNEL_STACK_SIZE: usize = 128 * 1024;
 
 /// IST 用スタックの大きさ。ダブルフォルトハンドラが動く分だけあればよい。
 pub const IST_STACK_SIZE: usize = 16 * 1024;
@@ -177,6 +196,61 @@ pub fn kernel_stack_range() -> StackRange {
         .checked_add(GUARD_SIZE as u64)
         .expect("the stack block stays within the canonical range");
     range_from(bottom, KERNEL_STACK_SIZE as u64)
+}
+
+/// カーネルスタックへ敷く目印（P-c-1 の手当て）。
+///
+/// **`.bss` は 0 で埋まっているが、0 では高水位が測れない**——**スタックが
+/// 書く値にも 0 が混ざるので、「どこまで使ったか」を 0 では区切れない。**
+///
+/// **遠征スタックが既に同じ形を採っている**（`ring3::EXCURSION_STACK_FILL`）。
+/// **2 つ作らず、同じ考え方を借りる。**
+pub const KERNEL_STACK_FILL: u8 = 0xA5;
+
+/// いま使っていない側へ目印を敷く（P-c-1 の手当て）。
+///
+/// # なぜ「いま使っていない側」だけなのか
+///
+/// **カーネルスタックは、敷く時点で既に使われている**——**呼んでいる自分が
+/// その上に居る。** **遠征スタックは使う前に丸ごと敷けるが、こちらはできない。**
+/// **底から `rsp` の少し下までを敷く。**
+///
+/// # Safety
+///
+/// `rsp` が、いまこのスタックの上に在ること。**敷く範囲に生きた値が無いこと。**
+pub unsafe fn paint_unused_kernel_stack(rsp: u64) {
+    let range = kernel_stack_range();
+    let bottom = range.bottom.as_u64();
+    // **`rsp` の下に余白を置く。** 呼び出しの途中で下へ伸びうるので、
+    // **いま生きている枠を塗り潰さない。**
+    let slack = 512u64;
+    if rsp <= bottom + slack {
+        return;
+    }
+    let length = (rsp - slack - bottom) as usize;
+    // SAFETY: 範囲は `STACKS` の中で、`rsp` より下（誰も使っていない）である。
+    unsafe { core::ptr::write_bytes(bottom as *mut u8, KERNEL_STACK_FILL, length) };
+}
+
+/// カーネルスタックの高水位（P-c-1 の手当て）。**底から目印でない最初の位置を探す。**
+///
+/// **返すのは「使ったバイト数」である。** **敷いていなければ容量が返る**
+/// （底が目印でないため）——**敷き忘れは、使い切ったように見える。**
+pub fn kernel_stack_high_water() -> usize {
+    let range = kernel_stack_range();
+    let bottom = range.bottom.as_u64() as *const u8;
+    for offset in 0..KERNEL_STACK_SIZE {
+        // SAFETY: `offset` は範囲の中である。
+        if unsafe { bottom.add(offset).read_volatile() } != KERNEL_STACK_FILL {
+            return KERNEL_STACK_SIZE - offset;
+        }
+    }
+    0
+}
+
+/// カーネルスタックの容量（判定行に出す）。
+pub fn kernel_stack_capacity() -> usize {
+    KERNEL_STACK_SIZE
 }
 
 /// カーネルスタックの直下に置くガードページ（M5-b で unmap する 1 ページ）。
