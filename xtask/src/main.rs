@@ -2931,9 +2931,38 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
          {disk_matches_dump} (independent of pmemsave; e2fsck on disk0.img would agree)"
     );
 
+    // **カーネルが出した像の検査値を、ホストが独立に計算した値と突き合わせる（P-e）。**
+    //
+    // **埋め込み像を外したので、カーネル側の「バイト一致」は無くなった**
+    // （`ADR-0034` の Addendum）。**代わりがこれである。**
+    // **源が独立である**——**ホストは建てた像のファイルを直に読み、
+    // カーネルは virtio を通って読んだ複製を見ている。**
+    //
+    // **突き合わせる相手は「起動の時点で装置に在ったもの」である。**
+    // **この経路では `stage_esp` が建てた像をそのまま置くので、建てた像が
+    // その中身である。** **持ち越す経路（P-a）では相手が変わる。**
+    let kernel_image_checksum = serial
+        .lines()
+        .find(|line| line.contains("fs-image-copy: copied"))
+        // **`parse_marked_hex` を使わない。** **あれは空白で区切るが、この行では
+        // 値の直後が `;` である**——**実測で `None` になった**（2026-08-28）。
+        .and_then(|line| {
+            let rest = line.split("checksum=").nth(1)?;
+            let token = rest.split(|c: char| c == ';' || c.is_whitespace()).next()?;
+            u32::from_str_radix(token.trim_start_matches("0x"), 16).ok()
+        });
+    let host_image_checksum = fs::read(&built).ok().map(|bytes| image_checksum(&bytes));
+    let image_checksum_matches =
+        kernel_image_checksum.is_some() && kernel_image_checksum == host_image_checksum;
+    println!(
+        "{context}: the kernel's image checksum matches the host's = {image_checksum_matches} \
+         (kernel {kernel_image_checksum:?}, host {host_image_checksum:?})"
+    );
+
     if outside_kernel_image
         && reads_the_copy
         && free_counts_agree
+        && image_checksum_matches
         && identical
         && fsck_ok
         && device_read_whole_image
@@ -5672,12 +5701,25 @@ fn parse_disk0_stat(text: &str, marker: &str) -> Option<u64> {
     None
 }
 
+/// 像の検査値（P-e。`ADR-0034` の Addendum）。
+///
+/// **カーネル側の `image_checksum` と同じ式である**——`byte * (index + 1)` の
+/// 総和をラップさせて足す。**式を 2 つに増やさない。**
+///
+/// **源は独立である**——**こちらはファイルを直に読み、あちらは virtio を通って
+/// 読んだ複製を見ている。**
+fn image_checksum(bytes: &[u8]) -> u32 {
+    let mut sum = 0u32;
+    for (index, byte) in bytes.iter().enumerate() {
+        sum = sum.wrapping_add(u32::from(*byte).wrapping_mul(index as u32 + 1));
+    }
+    sum
+}
+
 /// 像のロードの破壊の一覧（S13-c）。
 const FS_LOAD_SABOTAGES: &[(&str, &str)] = &[
-    (
-        "loading from the embedded image",
-        "fs-load-from-embedded-test",
-    ),
+    // **`fs-load-from-embedded-test` は P-e で消した。** **埋め込み像を外したので、
+    // 装置以外の源が無い**——**戻す先が無い**（`ADR-0034` の Addendum）。
     ("a skipped first chunk", "virtio-load-skip-first-test"),
 ];
 
@@ -12243,18 +12285,9 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             Err(_) => println!("--- fs extract (corrupt tail): OK (the sabotage was caught)"),
         }
 
-        // **読む側を複製へ向けたことの反証（S12-b の 1 段目）。**
-        // **判定を足しただけでは足りない**——番地を 2 つ出して比べる形は、
-        // **比べ方を間違えても通りうる**（同じ値を 2 回出せば必ず一致する）。
-        total += 1;
-        begin_item("the fs extract catches reading from the embedded image");
-        match cmd_fs_image_extract(&["fs-read-from-rodata-test"]) {
-            Ok(()) => {
-                println!("--- fs extract (read from rodata): FAILED (the sabotage was NOT caught)");
-                failed.push("fs extract (read from rodata)".to_string());
-            }
-            Err(_) => println!("--- fs extract (read from rodata): OK (the sabotage was caught)"),
-        }
+        // **「読む側を複製へ向けたことの反証」は P-e で落とした。**
+        // **埋め込み像を外したので、読む先が 1 つしかない**——**あの破壊が
+        // 守っていた性質は構造的に真である**（`ADR-0034` の Addendum の引き継ぎの表）。
 
         // **空き数の欄を正しい位置から読んでいることの反証（S12-b の 2 段目）。**
         // **自分の解析を自分で確かめても、欄を取り違えていれば気づけない。**
@@ -13142,7 +13175,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 25,
-    full: 250,
+    full: 248,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
