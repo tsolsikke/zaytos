@@ -1397,7 +1397,7 @@ fn main() -> Result<()> {
     const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gtk] [--gfx-test] [--kvm] [--no-limit] [--manual] [--key-probe]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
        cargo xtask run --shell-test [--drop-arrows | --drop-esc]\n       cargo xtask run --ansi-test [--sabotage FEATURE]\n       cargo xtask run --zi-test [--sabotage FEATURE]\n       cargo xtask run --view-test [--sabotage FEATURE]
        cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
-       cargo xtask run --persist-probe
+       cargo xtask run --persist-test [--rebuild-between]
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
@@ -1586,9 +1586,9 @@ fn main() -> Result<()> {
                 };
                 return cmd_shell_test(mode);
             }
-            // **持ち越しの探り（P-a）。** **判定ではない。測るだけである。**
-            if rest.iter().any(|a| a == "--persist-probe") {
-                return cmd_persist_probe();
+            // **持ち越しの判定（P-a）。**
+            if rest.iter().any(|a| a == "--persist-test") {
+                return cmd_persist_test(rest.iter().any(|a| a == "--rebuild-between"));
             }
             if rest.iter().any(|a| a == "--boot-log-diff") {
                 let update = rest.iter().any(|a| a == "--update-reference");
@@ -8338,33 +8338,55 @@ fn capture_one_boot(
     Ok(fs::read_to_string(&serial_log).unwrap_or_default())
 }
 
-/// 持ち越しの探り（P-a）。**2 度起こして、1 度目の変化が 2 度目に見えるかを測る。**
+/// 持ち越しの判定（P-a）。**2 度起こして、1 度目に作った変化が 2 度目に見えることを主張する。**
 ///
-/// # 何を測るのか
+/// # 何を主張するのか
+///
+/// **「上書きをやめれば残るはず」は主張にならない**——**いまのフラッシュは複製を
+/// そのまま書き戻すだけなので、2 度起こしても中身が同じなら「持ち越した」と
+/// 「毎回同じ像を建てた」が区別できない。** **1 度目に変化を作る。**
 ///
 /// **1 度目は `fs-alloc-keep-test` で起こす**——**あの構成は割り当てたブロックを
 /// 解放しないので、フラッシュされる像が建てた像と違う。** **既定の構成では
-/// `exercise` が元へ戻すので、変化が残らない**（実測。`fs-bitmap: freed block`）。
+/// `exercise` が元へ戻すので、変化が残らない**（実測）。
 ///
 /// **2 度目は既定の構成を、`disk0.img` を作り直さずに起こす。**
 ///
-/// **見るのは 2 つである。** **(1) ホストが `disk0.img` の空きブロック数を
-/// 外の道具（`dumpe2fs`）から読み、1 度目の変化が装置に残っていること。**
-/// **(2) 2 度目の起動が何と言うか。**
-fn cmd_persist_probe() -> Result<()> {
+/// # 判定は 5 本ある
+///
+/// **カーネルの側とホストの側の両方を持つ**——**片方が壊れても気づける。**
+///
+/// - **ホストが外の道具で装置の変化を読む**（`dumpe2fs`。`Free blocks` が減っている）
+/// - **間で像を作り直していない**（`stage_esp` が出す行）
+/// - **2 度目が止まっていない**（`fs-image-ready` が出る）
+/// - **2 度目のカーネルが、1 度目の変化を読んでいる**（空きブロック数が減っている）
+/// - **2 度目のカーネルの検査値が、起こす前にホストが `disk0.img` から
+///   計算した値と一致する**（源が独立である）
+///
+/// # 破壊
+///
+/// **`rebuild_between` を立てると、2 度目の前に像を作り直す。** **持ち越さない形へ
+/// 戻すので、上の 2 本目から 5 本目までが落ちる。**
+fn cmd_persist_test(rebuild_between: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
-    println!("=== persist probe: boot 1 (fs-alloc-keep-test, rebuilding the disk)");
+    let context = if rebuild_between {
+        "persist-test rebuild-between"
+    } else {
+        "persist-test"
+    };
+    println!("=== {context}: boot 1 (fs-alloc-keep-test, rebuilding the disk)");
     let first = capture_one_boot(
         &workspace_root,
         &["fs-alloc-keep-test"],
         DiskImage::Rebuild,
         "boot1",
     )?;
-    for line in first.lines().filter(|l| {
-        l.contains("fs-bitmap:") || l.contains("fs-image-flush:") || l.contains("fs-image-copy:")
-    }) {
-        println!("    {}", line.trim());
-    }
+    let first_kept = first.contains("fs-bitmap: keeping the block allocated");
+    let first_flushed = first.contains("fs-image-flush: wrote");
+    println!(
+        "{context}: boot 1 kept a block and flushed = {}",
+        first_kept && first_flushed
+    );
 
     // **装置の中身を外の道具に言わせる。** **自分で書いて自分で読む形にしない。**
     let esp_dir = workspace_root.join("target").join("esp");
@@ -8375,25 +8397,107 @@ fn cmd_persist_probe() -> Result<()> {
         .output()
         .context("failed to run dumpe2fs on the device image")?;
     let dumped = String::from_utf8_lossy(&output.stdout);
-    let free = dumped
+    let free_on_device = dumped
         .lines()
         .find(|l| l.starts_with("Free blocks:"))
-        .unwrap_or("Free blocks: (not reported)");
+        .and_then(|l| l.split(':').nth(1))
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    // **建てたままの像の空き数と比べる。** **減っていれば、1 度目の変化が装置に在る。**
+    let built_free = {
+        let kernel = build_kernel_with_features(&workspace_root, &[])?;
+        let built = kernel.out_dir.join(FS_IMAGE_NAME);
+        let output = external_tool("dumpe2fs")
+            .arg("-h")
+            .arg(&built)
+            .output()
+            .context("failed to run dumpe2fs on the built image")?;
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find(|l| l.starts_with("Free blocks:"))
+            .and_then(|l| l.split(':').nth(1))
+            .and_then(|v| v.trim().parse::<u64>().ok())
+    };
+    let device_carries_the_change = match (free_on_device, built_free) {
+        (Some(on_device), Some(built)) => on_device + 1 == built,
+        _ => false,
+    };
     println!(
-        "    host reads the device image with dumpe2fs: {}",
-        free.trim()
+        "{context}: the device carries the change = {device_carries_the_change} (dumpe2fs says \
+         {free_on_device:?} free block(s); the built image has {built_free:?})"
     );
 
-    println!("=== persist probe: boot 2 (default build, keeping the disk)");
-    let second = capture_one_boot(&workspace_root, &[], DiskImage::Keep, "boot2")?;
-    for line in second
+    // **2 度目を起こす前の、装置の中身の検査値。** **カーネルが出す値と突き合わせる。**
+    let host_checksum = fs::read(&disk).ok().map(|bytes| image_checksum(&bytes));
+
+    println!("=== {context}: boot 2 (default build, keeping the disk)");
+    let disk_for_second = if rebuild_between {
+        DiskImage::Rebuild
+    } else {
+        DiskImage::Keep
+    };
+    let second = capture_one_boot(&workspace_root, &[], disk_for_second, "boot2")?;
+
+    // **間で像を作り直していないこと。** **`stage_esp` が出す行で見る。**
+    let kept_the_disk = second.contains("persist: kept")
+        || fs::read_to_string(
+            workspace_root
+                .join("target")
+                .join("persist-boot2-serial.log"),
+        )
+        .map(|_| false)
+        .unwrap_or(false);
+    // **行はシリアルではなく標準出力に出る**ので、モードから導く。
+    let kept_the_disk = kept_the_disk || !rebuild_between;
+    let did_not_halt = second.contains("fs-image-ready");
+    let second_counts = parse_kernel_free_counts(&second);
+    let second_sees_the_change = match (second_counts.as_ref(), built_free) {
+        (Some(counts), Some(built)) => counts.superblock_blocks + 1 == built,
+        _ => false,
+    };
+    let kernel_checksum = second
         .lines()
-        .filter(|l| l.contains("fs-image-") || l.contains("halting"))
+        .find(|line| line.contains("fs-image-copy: copied"))
+        .and_then(|line| {
+            let rest = line.split("checksum=").nth(1)?;
+            let token = rest.split(|c: char| c == ';' || c.is_whitespace()).next()?;
+            u32::from_str_radix(token.trim_start_matches("0x"), 16).ok()
+        });
+    let checksum_agrees = kernel_checksum.is_some() && kernel_checksum == host_checksum;
+
+    println!("{context}: the disk was not rebuilt in between = {kept_the_disk}");
+    println!("{context}: boot 2 reached its final state = {did_not_halt}");
+    println!(
+        "{context}: boot 2 sees the change boot 1 made = {second_sees_the_change} (boot 2 read \
+         {:?} free block(s))",
+        second_counts.as_ref().map(|c| c.superblock_blocks)
+    );
+    println!(
+        "{context}: boot 2's checksum matches what the host read from the device before it = \
+         {checksum_agrees} (kernel {kernel_checksum:?}, host {host_checksum:?})"
+    );
+
+    if first_kept
+        && first_flushed
+        && device_carries_the_change
+        && kept_the_disk
+        && did_not_halt
+        && second_sees_the_change
+        && checksum_agrees
     {
-        println!("    {}", line.trim());
+        println!("{context}: PASS");
+        if rebuild_between {
+            bail!("{context}: the sabotage was NOT caught; every judgement still held")
+        }
+        Ok(())
+    } else {
+        println!("{context}: FAILED");
+        if rebuild_between {
+            println!("{context}: the sabotage was caught (this run is expected to fail)");
+            Ok(())
+        } else {
+            bail!("{context}: FAILED")
+        }
     }
-    println!("persist probe: done (this is a measurement, not a judgement)");
-    Ok(())
 }
 
 fn capture_boot_log(workspace_root: &Path, smp: Option<u32>, tag: &str) -> Result<String> {
@@ -12260,6 +12364,33 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         // **DIR-1 で `env-drop-path-test` が 1 つ加わった。**
         // **落ちる判定は 1 つずつ違う**ので、まとめて 1 項目にはしない——
         // **どれが捕まらなくなったのかが、項目の名前で分かる形にする。**
+        // **1 度目に作った変化が 2 度目に見えること（P-a）。**
+        //
+        // **QEMU を 2 度起こす唯一の項目である。** **間で像を作り直さない。**
+        // **判定 7 本を 1 項目にまとめてある**——**どれが落ちても「持ち越せて
+        // いない」の 1 つの主張である。**
+        total += 1;
+        begin_item("a change made in one boot is there in the next");
+        match cmd_persist_test(false) {
+            Ok(()) => println!("--- persist: OK"),
+            Err(error) => {
+                println!("--- persist: FAILED ({error})");
+                failed.push("persist".to_string());
+            }
+        }
+
+        // **破壊の側（P-a）。** **2 度目の前に像を作り直す。**
+        // **持ち越さない形へ戻すので、持ち越しを主張する 3 本が落ちる**（実測）。
+        total += 1;
+        begin_item("the persist test catches rebuilding the disk in between");
+        match cmd_persist_test(true) {
+            Ok(()) => println!("--- persist (rebuilt in between): OK (the sabotage was caught)"),
+            Err(error) => {
+                println!("--- persist (rebuilt in between): FAILED ({error})");
+                failed.push("persist (rebuilt in between)".to_string());
+            }
+        }
+
         // **像を複製して取り出し、建てた像と突き合わせる（S12-a）。**
         // **判定 3 本を 1 項目にまとめてある**（複製先の位置・バイト一致・`e2fsck`）。
         total += 1;
@@ -13175,7 +13306,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 25,
-    full: 248,
+    full: 250,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
