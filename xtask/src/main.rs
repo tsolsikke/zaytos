@@ -1397,6 +1397,7 @@ fn main() -> Result<()> {
     const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gtk] [--gfx-test] [--kvm] [--no-limit] [--manual] [--key-probe]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
        cargo xtask run --shell-test [--drop-arrows | --drop-esc]\n       cargo xtask run --ansi-test [--sabotage FEATURE]\n       cargo xtask run --zi-test [--sabotage FEATURE]\n       cargo xtask run --view-test [--sabotage FEATURE]
        cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
+       cargo xtask run --persist-probe
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
@@ -1584,6 +1585,10 @@ fn main() -> Result<()> {
                     ShellTestMode::Normal
                 };
                 return cmd_shell_test(mode);
+            }
+            // **持ち越しの探り（P-a）。** **判定ではない。測るだけである。**
+            if rest.iter().any(|a| a == "--persist-probe") {
+                return cmd_persist_probe();
             }
             if rest.iter().any(|a| a == "--boot-log-diff") {
                 let update = rest.iter().any(|a| a == "--update-reference");
@@ -8230,6 +8235,125 @@ fn normalize_boot_log(serial: &str, drop_core_count_lines: bool) -> Vec<String> 
 }
 
 /// 起動ログを 1 本取る（S6-d）。QEMU を起こし、`marker` が出るまで待って落とす。
+/// 起動を 1 回だけ行い、シリアルを返す（P-a の探り）。
+///
+/// **`capture_boot_log` と違い、`disk0.img` をどう扱うかを選べる。**
+/// **`fs-image-ready` か停止の文言が出るまで待つ**——**持ち越しの探りでは
+/// 「止まったこと」も観測の対象である。**
+fn capture_one_boot(
+    workspace_root: &Path,
+    features: &[&str],
+    disk: DiskImage,
+    tag: &str,
+) -> Result<String> {
+    let ovmf_vars = prepare_ovmf_vars(workspace_root)?;
+    let bootloader_efi = build_bootloader(workspace_root, false)?;
+    let kernel = build_kernel_with_features(workspace_root, features)?;
+    let esp_dir = match disk {
+        DiskImage::Rebuild => stage_esp(workspace_root, &bootloader_efi, &kernel)?,
+        DiskImage::Keep => stage_esp_keeping_the_disk(workspace_root, &bootloader_efi, &kernel)?,
+    };
+
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("persist-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
+    });
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the persist probe")?;
+
+    // **フラッシュが済むか、止まる文言が出るまで待つ。上限つき。**
+    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    loop {
+        let seen = fs::read_to_string(&serial_log).unwrap_or_default();
+        if seen.contains("fs-image-ready")
+            || seen.contains("; halting")
+            || Instant::now() >= deadline
+        {
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+    // **止まる形では文言の後も回り続ける**ので、少し待ってから落とす。
+    thread::sleep(Duration::from_millis(500));
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(fs::read_to_string(&serial_log).unwrap_or_default())
+}
+
+/// 持ち越しの探り（P-a）。**2 度起こして、1 度目の変化が 2 度目に見えるかを測る。**
+///
+/// # 何を測るのか
+///
+/// **1 度目は `fs-alloc-keep-test` で起こす**——**あの構成は割り当てたブロックを
+/// 解放しないので、フラッシュされる像が建てた像と違う。** **既定の構成では
+/// `exercise` が元へ戻すので、変化が残らない**（実測。`fs-bitmap: freed block`）。
+///
+/// **2 度目は既定の構成を、`disk0.img` を作り直さずに起こす。**
+///
+/// **見るのは 2 つである。** **(1) ホストが `disk0.img` の空きブロック数を
+/// 外の道具（`dumpe2fs`）から読み、1 度目の変化が装置に残っていること。**
+/// **(2) 2 度目の起動が何と言うか。**
+fn cmd_persist_probe() -> Result<()> {
+    let workspace_root = workspace_root()?;
+    println!("=== persist probe: boot 1 (fs-alloc-keep-test, rebuilding the disk)");
+    let first = capture_one_boot(
+        &workspace_root,
+        &["fs-alloc-keep-test"],
+        DiskImage::Rebuild,
+        "boot1",
+    )?;
+    for line in first.lines().filter(|l| {
+        l.contains("fs-bitmap:") || l.contains("fs-image-flush:") || l.contains("fs-image-copy:")
+    }) {
+        println!("    {}", line.trim());
+    }
+
+    // **装置の中身を外の道具に言わせる。** **自分で書いて自分で読む形にしない。**
+    let esp_dir = workspace_root.join("target").join("esp");
+    let disk = disk_image_path(&esp_dir);
+    let output = external_tool("dumpe2fs")
+        .arg("-h")
+        .arg(&disk)
+        .output()
+        .context("failed to run dumpe2fs on the device image")?;
+    let dumped = String::from_utf8_lossy(&output.stdout);
+    let free = dumped
+        .lines()
+        .find(|l| l.starts_with("Free blocks:"))
+        .unwrap_or("Free blocks: (not reported)");
+    println!(
+        "    host reads the device image with dumpe2fs: {}",
+        free.trim()
+    );
+
+    println!("=== persist probe: boot 2 (default build, keeping the disk)");
+    let second = capture_one_boot(&workspace_root, &[], DiskImage::Keep, "boot2")?;
+    for line in second
+        .lines()
+        .filter(|l| l.contains("fs-image-") || l.contains("halting"))
+    {
+        println!("    {}", line.trim());
+    }
+    println!("persist probe: done (this is a measurement, not a judgement)");
+    Ok(())
+}
+
 fn capture_boot_log(workspace_root: &Path, smp: Option<u32>, tag: &str) -> Result<String> {
     let ovmf_vars = prepare_ovmf_vars(workspace_root)?;
     let bootloader_efi = build_bootloader(workspace_root, false)?;
@@ -13857,10 +13981,45 @@ fn disk_image_path(esp_dir: &Path) -> PathBuf {
         .join("disk0.img")
 }
 
+/// `stage_esp` が `disk0.img` をどう扱うか（P-a）。
+///
+/// # なぜ入口を分けるのか
+///
+/// **`stage_esp` の呼び手は 12 箇所ある**（実測。2026-08-28）。**引数を足すと
+/// 全部が動く。** **持ち越す起動は新しい道なので、既存の 12 箇所の振る舞いを
+/// 1 つも変えずに足せる形にする。**
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DiskImage {
+    /// 建てた像で作り直す。**既存の 12 箇所はすべてこれである。**
+    Rebuild,
+    /// 在るものをそのまま使う（P-a）。**無ければ作り直す。**
+    Keep,
+}
+
+/// `disk0.img` を作り直さずに ESP だけを積む（P-a）。
+///
+/// **2 度目の起動で使う。** **1 度目が書いた装置の中身を、そのまま持ち越す。**
+fn stage_esp_keeping_the_disk(
+    workspace_root: &Path,
+    bootloader_efi: &Path,
+    kernel: &KernelBuild,
+) -> Result<PathBuf> {
+    stage_esp_with_disk(workspace_root, bootloader_efi, kernel, DiskImage::Keep)
+}
+
 fn stage_esp(
     workspace_root: &Path,
     bootloader_efi: &Path,
     kernel: &KernelBuild,
+) -> Result<PathBuf> {
+    stage_esp_with_disk(workspace_root, bootloader_efi, kernel, DiskImage::Rebuild)
+}
+
+fn stage_esp_with_disk(
+    workspace_root: &Path,
+    bootloader_efi: &Path,
+    kernel: &KernelBuild,
+    disk: DiskImage,
 ) -> Result<PathBuf> {
     let kernel_elf = kernel.elf.as_path();
     let esp_dir = workspace_root.join("target").join("esp");
@@ -13910,13 +14069,23 @@ fn stage_esp(
     // （[`KernelBuild`] の doc）。**別の構成の像を載せると、カーネルの
     // 突き合わせが落ちて、シェルが起きる前に停止する。**
     let built = kernel.out_dir.join(FS_IMAGE_NAME);
-    fs::copy(&built, &disk_image).with_context(|| {
-        format!(
-            "failed to copy {} to {}",
-            built.display(),
-            disk_image.display()
-        )
-    })?;
+    // **持ち越す起動では、在るものに触れない（P-a）。**
+    // **無ければ作り直す**——1 度目の起動はここを通る。
+    if disk == DiskImage::Rebuild || !disk_image.exists() {
+        fs::copy(&built, &disk_image).with_context(|| {
+            format!(
+                "failed to copy {} to {}",
+                built.display(),
+                disk_image.display()
+            )
+        })?;
+    } else {
+        println!(
+            "persist: kept {} as it is (not rebuilt from {})",
+            disk_image.display(),
+            built.display()
+        );
+    }
 
     Ok(esp_dir)
 }
