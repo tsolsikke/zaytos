@@ -402,13 +402,27 @@ extern "sysv64" fn kernel_main() -> ! {
     // 踏んだ形そのものである**（256 バイトの構造体を `Console` へ足したら
     // 64KiB を越えた）。
     //
-    // **大きさは実測で決めた**——**余裕は 208 バイトほどで、ガードページは
-    // 4096 バイトである**（`kernel::stack::install_guard_page` の doc）。
-    // **2048 なら必ず踏み、かつガードページの外までは行かない。**
+    // **大きさには両側に境界がある。**
+    //
+    // - **下**: **余裕より大きいこと。** 小さいとガードへ届かず、破壊が
+    //   捕まらない（**実測で踏んだ**。2026-08-28。スタックを 64KiB から
+    //   128KiB へ広げたら、2048 バイトでは届かなくなった）
+    // - **上**: **ガードページ（4096 バイト）の外へ出ないこと。** 越えると
+    //   `ALLOCATOR` や `TSS` を壊し、判定へ辿り着く前に起動が壊れる
+    //   （`kernel::stack` のモジュール doc）
+    //
+    // **スタックの大きさに結び付けてある。** **広げるたびに手で測り直さない**
+    // ——**余裕は「大きさ - 使用量」で、使用量は 65,744 バイトである**（実測。
+    // `stack-water:` の行）。**半分（65,536）は余裕（65,328）より 208 バイト
+    // 大きく、ガードページの中に収まる。**
+    //
+    // **使用量が大きく減ったら、この結び付けは成り立たなくなる**——
+    // **そのときは `stack-water:` の値を見て決め直すこと。**
     //
     // **落ちるのは「張る前に手つかずだった」判定だけである。**
     #[cfg(feature = "stack-overflow-before-guard-test")]
-    let mut deepen_the_boot_stack = [0xA5u8; 2048];
+    let mut deepen_the_boot_stack = [0xA5u8; kernel::stack::KERNEL_STACK_SIZE / 2];
+    #[cfg(feature = "stack-overflow-before-guard-test")]
     #[cfg(feature = "stack-overflow-before-guard-test")]
     core::hint::black_box(&mut deepen_the_boot_stack);
 
