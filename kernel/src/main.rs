@@ -423,7 +423,6 @@ extern "sysv64" fn kernel_main() -> ! {
     #[cfg(feature = "stack-overflow-before-guard-test")]
     let mut deepen_the_boot_stack = [0xA5u8; kernel::stack::KERNEL_STACK_SIZE / 2];
     #[cfg(feature = "stack-overflow-before-guard-test")]
-    #[cfg(feature = "stack-overflow-before-guard-test")]
     core::hint::black_box(&mut deepen_the_boot_stack);
 
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
@@ -1711,7 +1710,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // **像の検査は複製の中へ移した（P-e）。** **埋め込みを外したので、複製する前に
     // 読める像が無い**（`ADR-0034` の Addendum）。**置き場は複製の直後・`exercise` の
     // 前である**——[`try_copy_fs_image_to_frames`] にある。
-    copy_fs_image_to_frames(&mut logger, &mut virtio_disk);
+    let (image_phys, image_bytes) = copy_fs_image_to_frames(&mut logger, &mut virtio_disk);
     verify_corrupt_fs_image_is_rejected(&mut logger);
     verify_embedded_user_elf(&mut logger);
     verify_corrupt_user_elf_is_rejected(&mut logger);
@@ -1765,6 +1764,23 @@ extern "sysv64" fn kernel_main() -> ! {
         mapped_apic.as_ref(),
         Some(&mut virtio_disk),
     );
+
+    // === P-c-1: 装置をシェルの文脈から届く場所へ据える ===
+    //
+    // **ここまでは起動シーケンスが `&mut` を持っていた**（`start_timer` の
+    // 中の S13-d の演習が最後の利用者である）。**据えるのはその後である。**
+    //
+    // **ガードは `run_init` の間ずっと生きる**——**あちらは戻らないので、
+    // 実際に落ちることは無い。** **それでもガードにするのは、借用が静的に
+    // 効くからである**（据えている間、こちらは `&mut` を手放したままになる）。
+    // 破壊 (P-c-1, virtio-skip-install-test): 据えない。**シェルの文脈から装置へ
+    // 届かなくなる**——**書き戻しは黙って飛ばされる**（据えられていなければ
+    // 書き戻さない形にしてあるため）。**`--zi-test` の「保存が装置へ届いた」
+    // 判定が落ちる。** **据え忘れが黙る形を、これで塞ぐ。**
+    #[cfg(not(feature = "virtio-skip-install-test"))]
+    let _installed_disk = kernel::virtio::install(&mut virtio_disk, image_phys, image_bytes);
+    #[cfg(feature = "virtio-skip-install-test")]
+    let _ = (&mut virtio_disk, image_phys, image_bytes);
 
     // **カーネルスタックの高水位を出す（P-c-1 の手当て）。**
     //
@@ -4569,9 +4585,16 @@ fn verify_embedded_user_elf(logger: &mut Logger<SerialPort>) {
 /// **`spawn` の会計（`leaked`）には出ない**——あちらはプロセスの
 /// アドレス空間の畳みを、`spawn` の前後で測っている。**ここは spawn より前で、
 /// 窓の外である**（実測で確かめた）。
-fn copy_fs_image_to_frames(logger: &mut Logger<SerialPort>, blk: &mut kernel::virtio::VirtioBlk) {
-    let Err(reason) = try_copy_fs_image_to_frames(logger, blk) else {
-        return;
+/// 像を装置から複製する。**複製先の物理の置き場と長さを返す（P-c-1）。**
+///
+/// **返すのは、後で書き戻す者へ渡すためである**（`kernel::virtio::install`）。
+fn copy_fs_image_to_frames(
+    logger: &mut Logger<SerialPort>,
+    blk: &mut kernel::virtio::VirtioBlk,
+) -> (u64, u64) {
+    let reason = match try_copy_fs_image_to_frames(logger, blk) {
+        Ok(placed) => return placed,
+        Err(reason) => reason,
     };
     // **文言はここで組み立てる。** **`format_args!` は返せない**——
     // **一時値を借りるので、関数の外へ出せない**（実測。`E0515`）。
@@ -4703,7 +4726,7 @@ fn flush_fs_image_to_device(
 fn try_copy_fs_image_to_frames(
     logger: &mut Logger<SerialPort>,
     blk: &mut kernel::virtio::VirtioBlk,
-) -> Result<(), FsImageCopyError> {
+) -> Result<(u64, u64), FsImageCopyError> {
     use kernel::frame_allocator::FRAME_SIZE;
 
     // **預けた後なので借りる**（`ADR-0030`）。**取ったフレームは返さないが、
@@ -4890,7 +4913,7 @@ fn try_copy_fs_image_to_frames(
     logger.info(format_args!(
         "fs-image-ready: the image is in its final state for this run"
     ));
-    Ok(())
+    Ok((base.as_u64(), bytes))
 }
 
 /// ブロックビットマップの割り当てと解放を 1 往復させる（S12-b の 3 段目）。
@@ -9342,6 +9365,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "shell-shift-delete-range-test",
         cfg!(feature = "shell-shift-delete-range-test"),
         "zash が消す範囲の先頭を1つ後ろへずらし、消える字を1つ減らす",
+    ),
+    (
+        "virtio-skip-install-test",
+        cfg!(feature = "virtio-skip-install-test"),
+        "装置を据えず、シェルの文脈から書き戻せないようにする",
     ),
     (
         "ansi-test",

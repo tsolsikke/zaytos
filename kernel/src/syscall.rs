@@ -71,6 +71,12 @@ pub const EISDIR: i64 = 21;
 /// `-EMFILE`（そのプロセスの fd の表が満杯）の errno（S10-b）。
 pub const EMFILE: i64 = 24;
 
+/// `-EBUSY`（装置が使用中）の errno（P-c-1）。
+///
+/// **`close` が像を書き戻そうとして、装置の占有が取れなかったときに返す。**
+/// **止めるより断るほうが観測できる。**
+pub const EBUSY: i64 = 16;
+
 /// `-EROFS`（読み取り専用のファイルシステム）の errno（S10-b）。
 ///
 /// **書き込みで開かれたら、これを返す。** S10 は読み取りだけである
@@ -1004,10 +1010,29 @@ unsafe fn dispatch(
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
             unsafe { sys_unlink(args[0], pml4_phys, direct_map) }
         }
-        SYS_CLOSE => crate::vfs::with_current_files(|files| match files.remove(args[0] as usize) {
-            Ok(_) => 0,
-            Err(e) => (-errno_for_file_table(e)) as u64,
-        }),
+        SYS_CLOSE => {
+            // **書きで開いた口を閉じたら、像を装置へ書き戻す（P-c-1）。**
+            //
+            // **ここを選んだ理由は、`zi` の `:w` が「開く・書く・閉じる」で
+            // 1 回の保存になるからである**——**書きのたびに書き戻すと、
+            // 1 回の保存で何度も 2MiB を書くことになる。**
+            let closed = crate::vfs::with_current_files(|files| {
+                files
+                    .remove(args[0] as usize)
+                    .map(|file| file.is_writable_file())
+            });
+            match closed {
+                Ok(true) => {
+                    // SAFETY: BKL を保持して入っている（[`syscall_entry`] の契約）。
+                    match unsafe { flush_root_image(bkl) } {
+                        Ok(()) => 0,
+                        Err(errno) => (-errno) as u64,
+                    }
+                }
+                Ok(false) => 0,
+                Err(e) => (-errno_for_file_table(e)) as u64,
+            }
+        }
         SYS_EXIT => {
             // **記録するだけである。** Ring 3 へ返らない分岐は `syscall_entry` が
             // 持つ（[`SYS_EXIT`] の doc）。**戻り値は読まれない。**
@@ -1088,6 +1113,61 @@ unsafe fn dispatch(
 ///
 /// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 /// `bkl` が、いま保持している BKL のガードであること。
+/// 像を装置へ書き戻す（P-c-1）。**シェルの文脈から呼ぶ唯一の口である。**
+///
+/// # BKL の踊り
+///
+/// **`ADR-0036` が「BKL を保持したまま眠らない・待たない」と決めている。**
+/// **発行だけを BKL 下で行い、解いてから眠る。** **起きたら取り直す。**
+/// **形は `spawn_from_ring3` と同じである**（あちらは子が走る間、こちらは
+/// 装置が書く間）。
+///
+/// # 装置は占有で守る
+///
+/// **BKL を解いている間、他のコアが同じ装置へ入りうる。** **占有の旗が
+/// 止める**（`kernel::virtio::claim`）。**取れなければ `-EBUSY` を返す**
+/// ——**止めるより断るほうが観測できる。**
+///
+/// # 使う者がまだ 1 つである
+///
+/// **いま断られる形は起きない**——**Ring 3 を走らせているのは前景の 1 本だけで、
+/// AP は利用者を走らせていない**（実測。起動ログの `ap_sched_passes=0`）。
+/// **それでも旗を置くのは、解いている間の守りが BKL では作れないからである。**
+///
+/// # Safety
+///
+/// `bkl` が、いま保持している BKL のガードであること。
+unsafe fn flush_root_image(bkl: &mut Option<crate::bkl::BklGuard>) -> Result<(), i64> {
+    // **据えられていなければ書き戻さない（P-c-1）。**
+    //
+    // **起動シーケンスの中でもユーザープログラムが走り、書きで開いた口を閉じる。**
+    // **あれらは据える前に走る**——**断ると起動が止まる**（実測。2026-08-28）。
+    // **起動シーケンスが最後に自分で書き戻すので、失われるものが無い。**
+    if !crate::virtio::installed() {
+        return Ok(());
+    }
+    let Some(mut claim) = crate::virtio::claim() else {
+        return Err(EBUSY);
+    };
+    let started = common::cpu::read_timestamp_counter();
+    // **発行は BKL の下で行う。** リングを触るので、同じコアの再入も止める。
+    // SAFETY: 呼び出し元契約により BKL を保持している。
+    let Some((expected, before, bytes)) = (unsafe { claim.issue_image_write() }) else {
+        return Err(EIO);
+    };
+    // **ここで解く。** 取り直すのは待ち終えてからである。
+    drop(bkl.take());
+    // SAFETY: BKL は解いてある。`expected` は直前の発行が返した値である。
+    let outcome = unsafe { claim.wait_for_image_write(expected, before) };
+    *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
+    let cycles = common::cpu::read_timestamp_counter().wrapping_sub(started);
+    crate::virtio::note_flush(bytes, cycles);
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(_) => Err(EIO),
+    }
+}
+
 unsafe fn spawn_from_ring3(
     path: u64,
     argv: u64,

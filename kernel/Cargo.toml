@@ -105,6 +105,9 @@ shell-skip-expansion-test = []
 # 破壊（SE-c）: zash が打った行を履歴へ積まない。上キーでも Ctrl+P でも
 # 前の行が戻らないので、`--shell-test` の履歴の判定2本が落ちる。
 shell-drop-history-test = []
+# 破壊（P-c-1）: 装置を据えない。シェルの文脈から届かなくなり、書き戻しが
+# 黙って飛ばされる。`--zi-test` の「保存が装置へ届いた」判定が落ちる。
+virtio-skip-install-test = []
 # 破壊（SE-f）: zash が消す範囲の先頭を1つ後ろへずらす。消える字が1つ減るので、
 # 消す鍵の判定が同時に落ちる。届くことではなく、範囲の計算を守る破壊である。
 shell-shift-delete-range-test = []

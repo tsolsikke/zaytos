@@ -4029,6 +4029,16 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     let readback = parse_cat_readback(lines_session, edited_lines.len());
     let roundtrip = !edited_lines.is_empty() && edited_lines == readback;
 
+    // **保存が装置へ届いたこと（P-c-1）。**
+    //
+    // **`zi` の `:w` は開いて書いて閉じる。** **閉じたときに像が装置へ書き戻る。**
+    // **据えられていなければ黙って飛ばされる**（あの形は起動シーケンスの中で
+    // 走るプログラムのために要る）ので、**据え忘れは黙る。** **この判定が塞ぐ。**
+    //
+    // **破壊は `virtio-skip-install-test`**（据えない形）。**その形でしか
+    // 落ちない**——`zi` の他の破壊は開いて閉じる経路を通るので、書き戻しは起きる。
+    let save_reached_the_device = serial.contains("user-flush: /bin/zi wrote the image back");
+
     // **画面の実物で色が出ていること（ES-d）。**
     //
     // **判定を出すのはカーネルである**（`kernel/src/console/probe.rs`）——
@@ -4838,6 +4848,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
          {backspace_erased}, delete erased = {delete_erased}, the round trip reads back as \
          written = {edited_round_trip} (cat printed {edited_lines_seen:?})"
     );
+    println!("{context}: the save reached the device = {save_reached_the_device}");
     println!(
         "{context}: the only failure in the round was the refused rmdir = \
          {only_the_refused_rmdir_failed} ({failures_in_the_round} non-zero exit(s))"
@@ -4879,6 +4890,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && deleted
         && saved
         && roundtrip
+        && save_reached_the_device
         && prompt_colored
         && prompt_symbol_plain
         && winsize_agrees
@@ -9554,6 +9566,14 @@ const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
         reason: "I/O 待ちの sti;hlt 隣接（S13-d-2。ADR-0036）。cli 下で完了を検査し、                 未完了なら enable_interrupts_and_halt で眠る",
     },
     DirectInterruptControlSite {
+        file: "kernel/src/virtio.rs",
+        item: "wait_for_image_write",
+        reason: "I/O 待ちの sti;hlt 隣接（P-c-1。ADR-0036）。exercise_blocking_read と \
+                 同じ形で、こちらはシェルの文脈から呼ばれる本番の利用者である。cli 下で \
+                 完了を検査し、未完了なら enable_interrupts_and_halt で眠る。BKL は \
+                 呼び出し側が解いてある",
+    },
+    DirectInterruptControlSite {
         file: "kernel/src/smp.rs",
         item: "ap_heartbeat_loop",
         reason: "AP の定常ループ（S4-a）。sti;hlt 隣接で、BSP の run_timer_loop と同じ形で \
@@ -12386,6 +12406,8 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "zi-redraw-whole-screen-test",
             "cursor-repaint-always-test",
             "zi-edit-redraws-everything-test",
+            // **P-c-1 で 1 つ増えた。** **据え忘れが黙る形を塞ぐ。**
+            "virtio-skip-install-test",
         ] {
             total += 1;
             begin_item(&format!("the zi test catches {feature}"));
@@ -13359,7 +13381,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 25,
-    full: 250,
+    full: 251,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

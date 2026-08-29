@@ -777,6 +777,24 @@ pub fn load_user_program(
              will not be equal, and that is not a failure)",
             process.name
         ));
+        // **書き戻しの計器（P-c-1）。**
+        //
+        // **回数と量は揺れない**（書きで開いた口を閉じた数と、像の長さで決まる）。
+        // **サイクルと `hlt` の数は揺れる**ので `(info)` の側に置く
+        // ——**判定に載せない**（`docs/coding-standards.md` の「揺れる値と主張は、
+        // 同じ行に載せない」）。
+        let (flushes, flushed_bytes, cycles, halts) = crate::virtio::take_flush_stats();
+        if flushes > 0 {
+            logger.info(format_args!(
+                "user-flush: {} wrote the image back {flushes} time(s), {flushed_bytes} byte(s)",
+                process.name
+            ));
+            logger.info(format_args!(
+                "user-flush: {} spent {cycles} cycle(s) and {halts} halt(s) on those writes \
+                 (both vary with the host and the device; they are not judged)",
+                process.name
+            ));
+        }
     }
 
     // **成否によらず畳む。** 破棄は S7-d の経路（下位を隔離へ入れ、世代が

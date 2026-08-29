@@ -320,6 +320,36 @@ impl VirtioBlk {
         data_phys: u64,
         to_device: bool,
     ) -> Result<(), VirtioBlkError> {
+        // SAFETY: 呼び出し元契約をそのまま渡す。
+        let expected = unsafe { self.issue_at(first_sector, bytes, data_phys, to_device) };
+        // SAFETY: 直前に発行した要求である。
+        unsafe { self.wait_for_used(expected) }
+    }
+
+    /// 要求を発行し、notify まで行う（P-c）。**完了は待たない。**
+    ///
+    /// **返すのは、待つべき `used.idx` の値である。**
+    ///
+    /// # なぜ割るのか
+    ///
+    /// **シェルの文脈は BKL を保持して入る。** **`ADR-0036` が「BKL を保持した
+    /// まま待たない」と決めているので、発行だけを BKL 下で行い、待ちは解いた後に
+    /// 行う必要がある。** **割る前は [`request_at`] が中で完了まで回しており、
+    /// 発行だけを取り出す口が無かった。**
+    ///
+    /// **起動シーケンスは [`request_at`] のまま**（発行と待ちを続けて行う）
+    /// ——**あちらは BKL を持っていない。**
+    ///
+    /// # Safety
+    ///
+    /// [`request_at`] と同じ契約。
+    unsafe fn issue_at(
+        &mut self,
+        first_sector: u64,
+        bytes: u32,
+        data_phys: u64,
+        to_device: bool,
+    ) -> u16 {
         let base = self.ring_virt;
         let spare = self.spare_virt();
         let (blk_type, data_flags) = if to_device {
@@ -366,8 +396,21 @@ impl VirtioBlk {
             port::outw(self.io_base + REG_QUEUE_NOTIFY, 0);
         }
 
+        self.completed.wrapping_add(1)
+    }
+
+    /// 発行した要求の完了を待つ（P-c）。**上限つきのポーリングである。**
+    ///
+    /// **既に完了していれば、1 周目で返る。** **眠って待った後に呼ぶと、
+    /// たいていそうなる。**
+    ///
+    /// # Safety
+    ///
+    /// [`issue_at`] が返した `expected` であること。
+    unsafe fn wait_for_used(&mut self, expected: u16) -> Result<(), VirtioBlkError> {
+        let base = self.ring_virt;
+        let spare = self.spare_virt();
         // === used.idx が進むまでポーリングする。上限つき ===
-        let expected = self.completed.wrapping_add(1);
         let used_idx_at = base + self.used_offset + 2;
         let mut spins = 0u64;
         loop {
@@ -431,6 +474,211 @@ static ARMED_ISR_PORT: core::sync::atomic::AtomicU16 = core::sync::atomic::Atomi
 static ARMED_IRQ_PLUS_ONE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 /// 自分宛（ISR の bit0 が立っていた）の届いた数。
 static IRQ_DELIVERED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// 据えてある装置（P-c-1）。**シェルの文脈から届く唯一の口である。**
+///
+/// # なぜ静的な家が要るのか
+///
+/// **`VirtioBlk` は `kernel_main` のローカルだった**（実測。2026-08-28）。
+/// **シェルの文脈**（Ring 3 → `int 0x80` → BKL の下）**から届く経路が
+/// 1 つも無かった。**
+///
+/// **形は `console::FOREGROUND` と同じである**——**据えている間だけ生きる
+/// ガードが `&mut` を預かり、落ちるときに静的を戻す。** **借用が静的に効く。**
+static DEVICE: core::sync::atomic::AtomicPtr<VirtioBlk> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// 装置を占有しているか（P-c-1）。
+///
+/// # なぜ旗が要るのか。**BKL では足りない**
+///
+/// **`ADR-0036` は「BKL を解いてから眠る」と決めている。** **解いている間、
+/// 他のコアが同じ装置へ入りうる。** **BKL は解いた時点で守りにならない。**
+///
+/// **旗は待つ間も持ったままにする。** **`Locked<T>` の族と考え方は同じだが、
+/// あちらは競合したら待たずに停止する**（fail-fast。`ADR-0004`）。
+/// **こちらは断って返す**（`-EBUSY`）——**シェルの文脈なので、止めるより
+/// 断るほうが観測できる。**
+static DEVICE_IN_USE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// 像の物理の置き場（P-c-1）。**据えるときに控える。**
+static IMAGE_PHYS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// 像の長さ。
+static IMAGE_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// 書き戻した回数（P-c-1 の計器）。
+static FLUSHES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// 書き戻したバイト数。
+static FLUSHED_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// 書き戻しに使ったサイクル数。**揺れるので判定には載せない。**
+static FLUSH_CYCLES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// 眠った回数（`hlt` を踏んだ数）。
+static FLUSH_HALTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// [`DEVICE`] へ据えている間だけ生きるガード（P-c-1）。
+pub struct InstalledDevice<'a> {
+    /// 据えている装置。**手放すときに静的を戻すために持つ。**
+    device: &'a mut VirtioBlk,
+}
+
+impl Drop for InstalledDevice<'_> {
+    fn drop(&mut self) {
+        let _ = &self.device;
+        DEVICE.store(core::ptr::null_mut(), core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// 装置を据える（P-c-1）。**起動シーケンスが 1 度だけ呼ぶ。**
+///
+/// **像の置き場も一緒に控える**——**書き戻す者が、どこを書けばよいかを
+/// 知る必要がある。**
+pub fn install(device: &mut VirtioBlk, image_phys: u64, image_bytes: u64) -> InstalledDevice<'_> {
+    IMAGE_PHYS.store(image_phys, core::sync::atomic::Ordering::Release);
+    IMAGE_BYTES.store(image_bytes, core::sync::atomic::Ordering::Release);
+    DEVICE.store(
+        device as *mut VirtioBlk,
+        core::sync::atomic::Ordering::Release,
+    );
+    InstalledDevice { device }
+}
+
+/// 装置の占有（P-c-1）。**落ちるときに旗を降ろす。**
+pub struct DeviceClaim {
+    /// 待った回数（`hlt` を踏んだ数）。**計器へ足すために持つ。**
+    halts: u64,
+}
+
+impl Drop for DeviceClaim {
+    fn drop(&mut self) {
+        FLUSH_HALTS.fetch_add(self.halts, core::sync::atomic::Ordering::Relaxed);
+        DEVICE_IN_USE.store(false, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// 装置が据えられているか（P-c-1）。
+///
+/// # なぜ「占有が取れない」と分ける必要があるのか
+///
+/// **起動シーケンスの中でもユーザープログラムが走る**（`syscall-test` など）。
+/// **あれらは据える前に走り、書きで開いた口を閉じる。** **据えられていない時点で
+/// 断ると、起動が止まる**（実測。2026-08-28。`close(3) after writing did not
+/// return 0` で `syscall-test` が落ちた）。
+///
+/// **据えられていないときは書き戻さない。** **起動シーケンスが最後に自分で
+/// 書き戻すので、失われるものが無い。**
+pub fn installed() -> bool {
+    !DEVICE.load(core::sync::atomic::Ordering::Acquire).is_null()
+}
+
+/// 装置を占有する（P-c-1）。**取れなければ `None`。**
+///
+/// **据えられていなければ取れない**——**起動シーケンスが据える前に呼ぶ者は
+/// 居ないはずだが、居たら断る。**
+pub fn claim() -> Option<DeviceClaim> {
+    if DEVICE.load(core::sync::atomic::Ordering::Acquire).is_null() {
+        return None;
+    }
+    if DEVICE_IN_USE
+        .compare_exchange(
+            false,
+            true,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return None;
+    }
+    Some(DeviceClaim { halts: 0 })
+}
+
+impl DeviceClaim {
+    /// 像の全体を書き戻す要求を発行する（P-c-1）。**完了は待たない。**
+    ///
+    /// **1 回の要求で全部を書く。** **装置は 1 回の要求の上限を申告していない**
+    /// （`ADR-0033` の Addendum。`VIRTIO_BLK_F_SIZE_MAX` が提示されていない）。
+    ///
+    /// # Safety
+    ///
+    /// **BKL を保持して呼ぶこと。** 発行はリングを触るので、他の入口と重ならない
+    /// ことが要る（旗は他コアを止めるが、同じコアの再入は BKL が止める）。
+    pub unsafe fn issue_image_write(&mut self) -> Option<(u16, u64, u32)> {
+        let phys = IMAGE_PHYS.load(core::sync::atomic::Ordering::Acquire);
+        let bytes = IMAGE_BYTES.load(core::sync::atomic::Ordering::Acquire);
+        if phys == 0 || bytes == 0 || bytes > u64::from(u32::MAX) {
+            return None;
+        }
+        let device = DEVICE.load(core::sync::atomic::Ordering::Acquire);
+        if device.is_null() {
+            return None;
+        }
+        // SAFETY: 旗を持っているので、他のコアはここへ入れない。
+        // 据えたガードが生きているので、指す先も生きている（[`DEVICE`] の doc）。
+        let device = unsafe { &mut *device };
+        let before = IRQ_DELIVERED.load(core::sync::atomic::Ordering::Acquire);
+        // SAFETY: 像は連続する物理範囲で、装置が読む向きである。
+        let expected = unsafe { device.issue_at(0, bytes as u32, phys, true) };
+        Some((expected, u64::from(before), bytes as u32))
+    }
+
+    /// 完了を眠って待ち、確かめる（P-c-1）。**BKL を解いた後に呼ぶこと。**
+    ///
+    /// **形は [`exercise_blocking_read`] と同じである**——`cli` 下で検査し、
+    /// `sti; hlt` を隣接させて眠る（`ADR-0036` の IF の規律）。
+    /// **起きた理由がタイマかもしれないので、上限つきで回す。**
+    ///
+    /// # Safety
+    ///
+    /// [`issue_image_write`] が返した値であること。**BKL を保持していないこと。**
+    pub unsafe fn wait_for_image_write(
+        &mut self,
+        expected: u16,
+        before: u64,
+    ) -> Result<(), VirtioBlkError> {
+        let deadline = crate::idt::timer_ticks() + BLOCKING_WAIT_TICKS;
+        loop {
+            let guard = common::critical::EntryInterruptGuard::enter();
+            if u64::from(IRQ_DELIVERED.load(core::sync::atomic::Ordering::Acquire)) > before {
+                drop(guard);
+                break;
+            }
+            if crate::idt::timer_ticks() >= deadline {
+                drop(guard);
+                break;
+            }
+            core::mem::forget(guard);
+            // SAFETY: [`exercise_blocking_read`] と同じ位置の契約である。
+            unsafe { common::cpu::enable_interrupts_and_halt() };
+            self.halts += 1;
+        }
+        let device = DEVICE.load(core::sync::atomic::Ordering::Acquire);
+        if device.is_null() {
+            return Err(VirtioBlkError::QueueSizeZero);
+        }
+        // SAFETY: 旗を持っている間、指す先はこの占有だけのものである。
+        let device = unsafe { &mut *device };
+        // SAFETY: 直前に発行した要求である。**眠っている間に完了しているはずだが、
+        // 上限で起きた場合もあるので、ここで確かめる。**
+        unsafe { device.wait_for_used(expected) }
+    }
+}
+
+/// 計器を足す（P-c-1）。**書き戻しが 1 回済んだときに呼ぶ。**
+pub fn note_flush(bytes: u32, cycles: u64) {
+    FLUSHES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    FLUSHED_BYTES.fetch_add(u64::from(bytes), core::sync::atomic::Ordering::Relaxed);
+    FLUSH_CYCLES.fetch_add(cycles, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// 計器を読んで、0 へ戻す（P-c-1）。**プログラムが終わるたびに読む。**
+pub fn take_flush_stats() -> (u64, u64, u64, u64) {
+    (
+        FLUSHES.swap(0, core::sync::atomic::Ordering::Relaxed),
+        FLUSHED_BYTES.swap(0, core::sync::atomic::Ordering::Relaxed),
+        FLUSH_CYCLES.swap(0, core::sync::atomic::Ordering::Relaxed),
+        FLUSH_HALTS.swap(0, core::sync::atomic::Ordering::Relaxed),
+    )
+}
 /// 自分宛でなかった数。**共有線の仮定（他に鳴る者が居ない）が破れたときに
 /// 最初に動く値である**——黙って捨てると、deassert されない線の嵐が
 /// 原因の見えない形で出る（ADR-0035 の共有線の代償）。

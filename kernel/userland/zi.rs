@@ -1667,11 +1667,21 @@ fn save(path: &[u8], buffer: &Buffer) -> bool {
     #[cfg(zi_write_skip_body)]
     let at = 0usize;
     let written = write_all(STDOUT_UNUSED_MARKER.min(fd), &out[..at]);
-    close(fd);
+    // **閉じるときに装置へ書き戻る（P-c-1）。** **戻り値を見る**——
+    // **書き戻せなかったら、中身は RAM に在るが装置に無い。**
+    // **黙って成功にしない**（`ADR-0046`。エコーエリアへ出す）。
+    //
+    // **いま断られる形は起きない見込みである**——**装置の占有を争う者が
+    // 1 つしか居ない**（前景の 1 本だけ。AP は利用者を走らせていない）。
+    // **それでも見るのは、断られたことが観測できる形にしておくためである。**
+    let closed = close(fd);
+    if closed < 0 {
+        write_all(STDERR, b"zi: saved to memory but not to the disk\n");
+    }
 
     // **要求した長さと一致すること。** `write_all` は繰り返して全量を書くので、
     // 足りないのは誤りである。
-    let ok = written == at as i64;
+    let ok = written == at as i64 && closed >= 0;
     report_save(at, written, ok);
     ok
 }
