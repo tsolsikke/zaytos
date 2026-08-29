@@ -3449,6 +3449,11 @@ const SHELL_TEST_SABOTAGES: &[&str] = &[
     // **「上で辿れた」の判定は、既定の構成ではこの破壊でしか落ちない**
     // ——**矢印を落とす破壊は期待のほうを裏返すので、落ちない。**
     "shell-drop-history-test",
+    // **SE-f で 1 つ増えた。** **消す範囲の先頭を 1 つずらす。**
+    // **`keyboard-drop-ctrl-letters-test` が覆うのは「鍵が届くこと」であって、
+    // 「範囲の計算が正しいこと」ではない**——**`Ctrl+K` が行頭まで消す形は、
+    // 鍵が届いているのであちらでは捕まらない。**
+    "shell-shift-delete-range-test",
 ];
 
 impl ShellTestMode {
@@ -6272,15 +6277,18 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     let tab_kept = after_shell.contains("zash: k\tl: cannot run");
     let tab_stayed_out_of_the_line = tab_dropped && !tab_kept;
 
-    // **一般化した Ctrl+英字が行へ入らないこと（SE-b。`ADR-0050`）。**
+    // **受け手が決まっていない Ctrl+英字が行へ入らないこと（SE-b。`ADR-0050`）。**
     //
-    // **打ったのは `n` → Ctrl+D → `o` で、走るのは `no` である。**
-    // **捨てていなければ `0x04` が語に混ざる。**
+    // **打ったのは `n` → Ctrl+G → `o` で、走るのは `no` である。**
+    // **捨てていなければ `0x07` が語に混ざる。**
+    //
+    // **SE-f で Ctrl+D から Ctrl+G へ移した**——**あちらに意味ができたので、
+    // 「捨てる」を主張する鍵として使えなくなった。**
     //
     // **Tab と別の 1 本にしてある**——**落ちる破壊が違う**（台本の doc）。
-    let ctrl_d_dropped = after_shell.contains("zash: no: cannot run");
-    let ctrl_d_kept = after_shell.contains("zash: n\u{4}o: cannot run");
-    let ctrl_d_stayed_out_of_the_line = ctrl_d_dropped && !ctrl_d_kept;
+    let unknown_ctrl_dropped = after_shell.contains("zash: no: cannot run");
+    let unknown_ctrl_kept = after_shell.contains("zash: n\u{7}o: cannot run");
+    let unknown_ctrl_stayed_out_of_the_line = unknown_ctrl_dropped && !unknown_ctrl_kept;
 
     // **`$NAME` が展開されたこと（SE-d。`ADR-0049`）。**
     //
@@ -6298,9 +6306,13 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         .filter_map(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
         .filter_map(|digits| digits.parse().ok())
         .collect();
-    // **打った 4 行の順に並ぶ。** `echo $PATH` / `echo a $UNSET b` / `echo $UNSET` /
-    // `echo a$TERM b` で、**落とす形なら 2 / 3 / 1 / 3 である。**
-    let echo_word_counts = echo_argcs.as_slice() == [2usize, 3, 1, 3];
+    // **打った順に並ぶ。** 最初の 4 行は `echo $PATH` / `echo a $UNSET b` /
+    // `echo $UNSET` / `echo a$TERM b` で、**落とす形なら 2 / 3 / 1 / 3 である。**
+    //
+    // **SE-f で 2 行増えた**ので、**前の 4 つだけを見る**——**後ろの 2 行は
+    // 別の判定が見ている**（`Ctrl+W` と `$` の残り）。**全部を 1 本で見ると、
+    // 落ちたときにどれが壊れたか分からない。**
+    let echo_word_counts = echo_argcs.len() >= 6 && echo_argcs[..4] == [2usize, 3, 1, 3];
 
     let typed_echo_path = after_shell_plain.contains("zaytos$ echo $PATH\n");
     let expanded_a_value = typed_echo_path && after_shell.contains("\n/bin\n");
@@ -6347,6 +6359,74 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     // **「止まらなかったこと」は下の判定が全部見ている**（止まればすべて落ちる）。
     // **ここが見るのは「断り書きが出たこと」である。**
     let long_line_was_refused = after_shell.contains("zash: line too long");
+
+    // **`Ctrl+W` が直前の語を消したこと（SE-f）。**
+    //
+    // **`echo qq rr` の末尾で打った。** **切れ目は空白だけなので `qq ` が残り、
+    // 出るのは `qq` で `argc` は 2 である。** **効いていなければ `qq rrw` になる。**
+    let ctrl_w_output = after_shell.contains("\nqq\n");
+    let ctrl_w_left_the_word = after_shell.contains("\nqq rrw\n");
+    let ctrl_w_deleted_the_word =
+        ctrl_w_output && !ctrl_w_left_the_word && echo_argcs.get(4) == Some(&2);
+
+    // **`$` の直後が名前の先頭でなければ字として残ること（SE-f。`ADR-0049` の 5）。**
+    //
+    // **`echo $1` を打った。** **出るのは `$1` そのものである。**
+    let dollar_stayed_literal = after_shell.contains("\n$1\n") && echo_argcs.get(5) == Some(&2);
+
+    // **`Ctrl+K` が挿入点から行末まで消したこと（SE-f）。**
+    let ctrl_k_cut = after_shell.contains("zash: kk: cannot run");
+    let ctrl_k_left_the_line = after_shell.contains("zash: kkxx: cannot run");
+    let ctrl_k_cut_to_the_end = ctrl_k_cut && !ctrl_k_left_the_line;
+
+    // **`Ctrl+U` が行頭から挿入点まで消したこと（SE-f）。**
+    //
+    // **`Ctrl+K` と範囲の計算が逆なので、別の 1 本である。**
+    let ctrl_u_cut = after_shell.contains("zash: yy: cannot run");
+    let ctrl_u_left_the_line = after_shell.contains("zash: uuyy: cannot run");
+    let ctrl_u_cut_to_the_start = ctrl_u_cut && !ctrl_u_left_the_line;
+
+    // **`Ctrl+D` が挿入点の字を消したこと（SE-f）。**
+    let ctrl_d_cut = after_shell.contains("zash: mmy: cannot run");
+    let ctrl_d_left_the_line = after_shell.contains("zash: mxmy: cannot run");
+    let ctrl_d_deleted_the_character = ctrl_d_cut && !ctrl_d_left_the_line;
+
+    // **空行の `Ctrl+D` が何もしないこと（SE-f）。**
+    //
+    // **`bash` はここで EOF になりシェルが終わる。** **続けて打った `ee` が
+    // そのまま走ることで、終わっていないことを見る。**
+    // **終わっていれば「ちょうど 1 回」の判定も落ちる**ので、2 本で見ている。
+    let ctrl_d_on_an_empty_line_did_nothing = after_shell.contains("zash: ee: cannot run");
+
+    // **`Ctrl+L` が画面を消して描き直したこと（SE-f）。**
+    //
+    // **行が消えないことは `ll` が走ることで見る。**
+    // **消す並びを出したことは、シリアルに出た並びそのもので見る。**
+    //
+    // **画面が実際に消えたことは見ていない。** **`--shell-test` は実打鍵の経路で、
+    // 画面を観測する仕組み（`screen-text`）はカーネル側の台本にしか無い。**
+    // **ED(2) と CUP の解釈は `--ansi-test` が持っている**（`ADR-0029`）。
+    // **観測していないことは観測していないと書く。**
+    let ctrl_l_kept_the_line = after_shell.contains("zash: ll: cannot run");
+    let ctrl_l_cleared = serial.contains("\u{1b}[2J\u{1b}[H");
+    let ctrl_l_redrew_the_screen = ctrl_l_kept_the_line && ctrl_l_cleared;
+
+    // **辿ってから戻ると、打ちかけの行が復ること（SE-c の宿題）。**
+    //
+    // **`st` と打ってから 上 → `Ctrl+N` で戻した。** **復らなければ、
+    // 辿った先の行か空行になる。**
+    let the_pending_line_came_back = after_shell.contains("zash: st: cannot run");
+
+    // **同じ行が履歴に 2 つ並ばないこと（SE-c の宿題）。**
+    //
+    // **`oo` `pp` `pp` と打ってから 上 上 した。** **並んでいなければ `oo` へ届く。**
+    // **矢印が落ちている構成では辿らないので、`oo` は 1 度きりである。**
+    let ran_oo = after_shell.matches("zash: oo: cannot run").count();
+    let duplicates_were_not_stored = if mode.expects_the_cursor_to_move() {
+        ran_oo == 2
+    } else {
+        ran_oo == 1
+    };
 
     // **`argv[0]` が打った語のままであること（3 本目）。**
     //
@@ -6398,7 +6478,10 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         mode.expects_the_cursor_to_move()
     );
     println!("{context}: tab stayed out of the line = {tab_stayed_out_of_the_line}");
-    println!("{context}: ctrl-d stayed out of the line = {ctrl_d_stayed_out_of_the_line}");
+    println!(
+        "{context}: unknown control bytes stayed out of the line = \
+         {unknown_ctrl_stayed_out_of_the_line}"
+    );
     println!(
         "{context}: the history was walked with the arrows = {history_walked_with_arrows} \
          (ran aa {ran_aa} time(s); the cursor moves = {})",
@@ -6410,6 +6493,23 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         "{context}: ctrl-b and ctrl-f moved the insertion point = \
          {ctrl_b_and_f_moved_the_insertion_point}"
     );
+    println!("{context}: ctrl-k cut to the end = {ctrl_k_cut_to_the_end}");
+    println!("{context}: ctrl-u cut to the start = {ctrl_u_cut_to_the_start}");
+    println!("{context}: ctrl-w deleted the previous word = {ctrl_w_deleted_the_word}");
+    println!("{context}: ctrl-d deleted the character = {ctrl_d_deleted_the_character}");
+    println!(
+        "{context}: ctrl-d on an empty line did nothing = {ctrl_d_on_an_empty_line_did_nothing}"
+    );
+    println!(
+        "{context}: ctrl-l cleared and redrew (the screen itself is not observed here) = \
+         {ctrl_l_redrew_the_screen}"
+    );
+    println!("{context}: the pending line came back = {the_pending_line_came_back}");
+    println!(
+        "{context}: duplicates were not stored = {duplicates_were_not_stored} (ran oo \
+         {ran_oo} time(s))"
+    );
+    println!("{context}: the dollar stayed literal = {dollar_stayed_literal}");
     println!("{context}: echo $PATH printed the value = {expanded_a_value}");
     println!("{context}: the empty word was dropped = {empty_word_was_dropped}");
     println!("{context}: an unset name expanded to nothing = {expanded_to_nothing}");
@@ -6438,11 +6538,20 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && ctrl_a_and_e_moved_the_insertion_point
         && delete_removed_the_character
         && tab_stayed_out_of_the_line
-        && ctrl_d_stayed_out_of_the_line
+        && unknown_ctrl_stayed_out_of_the_line
         && long_line_was_refused
         && history_walked_with_arrows
         && history_walked_with_ctrl
         && ctrl_b_and_f_moved_the_insertion_point
+        && ctrl_k_cut_to_the_end
+        && ctrl_u_cut_to_the_start
+        && ctrl_w_deleted_the_word
+        && ctrl_d_deleted_the_character
+        && ctrl_d_on_an_empty_line_did_nothing
+        && ctrl_l_redrew_the_screen
+        && the_pending_line_came_back
+        && duplicates_were_not_stored
+        && dollar_stayed_literal
         && expanded_a_value
         && empty_word_was_dropped
         && expanded_to_nothing
@@ -6585,13 +6694,17 @@ const SHELL_TEST_LINES: &[&[&str]] = &[
     // **Tab は Ctrl+英字ではないので、`keyboard-drop-ctrl-letters-test` では
     // 緑のままである。**
     &["k", "tab", "l", "ret"],
-    // n → Ctrl+D → o（SE-b。ADR-0050）。**一般化した Ctrl+英字が行へ入らない。**
+    // n → Ctrl+G → o（SE-b。ADR-0050。**SE-f で Ctrl+D から移した**）。
+    // **一般化した Ctrl+英字のうち、受け手が決まっていないものが行へ入らない。**
     //
-    // **走るのは `no` である。** **捨てていなければ `0x04` が語に混ざる。**
-    // **`keyboard-drop-ctrl-letters-test` では Ctrl+D が `d` を出す**ので
-    // `ndo` になり、この判定も落ちる——**Ctrl+英字そのものを外す破壊なので、
-    // Ctrl+英字を使う判定は全部落ちる。**
-    &["n", "ctrl-d", "o", "ret"],
+    // **走るのは `no` である。** **捨てていなければ `0x07` が語に混ざる。**
+    // **以前は Ctrl+D を打っていたが、SE-f であれに意味ができた**
+    // ——**受け手が決まった鍵では「捨てる」を主張できない。**
+    // **`Ctrl+G` を選んだのは、受け手が無く、`0x0A`（Enter）や `0x09`（Tab）と
+    // 重ならないためである。**
+    // **`keyboard-drop-ctrl-letters-test` では Ctrl+G が `g` を出す**ので
+    // `ngo` になり、この判定も落ちる。
+    &["n", "ctrl-g", "o", "ret"],
     // `echo $PATH`（SE-d と SE-e。ADR-0049 と ADR-0043）。**展開が起きたこと。**
     //
     // **`$` は Shift+4 である**（JIS の表。`kernel/src/keyboard/decode.rs`）。
@@ -6655,6 +6768,60 @@ const SHELL_TEST_LINES: &[&[&str]] = &[
     // **費用は打鍵の数である**（実測。この 1 行で `--shell-test` が 69.7 秒から
     // 86.0 秒へ延びた。**`--full` は 14 回走らせるので約 3.8 分増える**）。
     &LONG_LINE_SCRIPT,
+    // echo qq rr → Ctrl+W（SE-f）。**直前の語を消す。**
+    //
+    // **切れ目は空白だけである**（`zash` の `word_start`）。**`qq rr` の末尾で
+    // 打つと `qq ` が残るので、出るのは `qq` で `argc` は 2 である。**
+    // **効いていなければ `w` が字として入り、`qq rrw` になる**（`argc` は 3）。
+    &[
+        "e", "c", "h", "o", "spc", "q", "q", "spc", "r", "r", "ctrl-w", "ret",
+    ],
+    // echo $1（SE-f。`ADR-0049` の 5）。**`$` の直後が名前の先頭でなければ字である。**
+    //
+    // **出るのは `$1` そのものである。** **展開していれば消えるか、別の値になる。**
+    &["e", "c", "h", "o", "spc", "shift-4", "1", "ret"],
+    // kkxx → Ctrl+A → Ctrl+F Ctrl+F → Ctrl+K（SE-f）。**挿入点から行末まで消す。**
+    //
+    // **走るのは `kk` である。** **効いていなければ `kkxx` のままである。**
+    &[
+        "k", "k", "x", "x", "ctrl-a", "ctrl-f", "ctrl-f", "ctrl-k", "ret",
+    ],
+    // uuyy → Ctrl+A → Ctrl+F Ctrl+F → Ctrl+U（SE-f）。**行頭から挿入点まで消す。**
+    //
+    // **走るのは `yy` である。** **効いていなければ `uuyy` のままである。**
+    // **`Ctrl+K` と範囲の計算が逆なので、別の 1 本にする。**
+    &[
+        "u", "u", "y", "y", "ctrl-a", "ctrl-f", "ctrl-f", "ctrl-u", "ret",
+    ],
+    // mxmy → Ctrl+A → Ctrl+F → Ctrl+D（SE-f）。**挿入点の字を消す。**
+    //
+    // **走るのは `mmy` である。** **効いていなければ `mxmy` のままである。**
+    &["m", "x", "m", "y", "ctrl-a", "ctrl-f", "ctrl-d", "ret"],
+    // 空行で Ctrl+D → ee（SE-f）。**空行では何もしない。**
+    //
+    // **`bash` はここで EOF になりシェルが終わる。** **ZaytOS は何もしない**ので、
+    // **続けて打った `ee` がそのまま走る。** **終わっていれば `init` が起こし直し、
+    // 「ちょうど 1 回」の判定が落ちる。**
+    &["ctrl-d", "e", "e", "ret"],
+    // ll → Ctrl+L（SE-f）。**画面を消して描き直す。行は消さない。**
+    //
+    // **走るのは `ll` である。** **消す並びが出ていることは別に見る。**
+    &["l", "l", "ctrl-l", "ret"],
+    // st → 上 → Ctrl+N（SE-c の宿題）。**打ちかけの行が戻ること。**
+    //
+    // **辿ってから戻ると、打ちかけだった `st` が復る。** **復らなければ、
+    // 辿った先の行か空行になる。**
+    // **矢印を落とす構成でも `st` のままである**（上が届かないので辿らない）
+    // ——**どちらの構成でも同じ主張になる。**
+    &["s", "t", "up", "ctrl-n", "ret"],
+    // oo / pp / pp → 上 上（SE-c の宿題）。**同じ行が 2 つ並ばないこと。**
+    //
+    // **積まなければ履歴は `oo` `pp` の 2 本で、上 上 は `oo` へ届く。**
+    // **並べば `pp` `pp` になり、上 上 は `pp` で止まる。**
+    &["o", "o", "ret"],
+    &["p", "p", "ret"],
+    &["p", "p", "ret"],
+    &["up", "up", "ret"],
     // 打ちかけの行を Ctrl+C で捨てる（S12 前の手当て、C）。**深さ 1 の側である。**
     //
     // **`zz` と打ってから Ctrl+C を送り、そのまま `ret` を打つ。**
@@ -12851,7 +13018,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 25,
-    full: 249,
+    full: 250,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

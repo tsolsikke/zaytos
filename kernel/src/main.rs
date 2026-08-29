@@ -9272,6 +9272,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "zash が打った行を履歴へ積まず、辿れないようにする",
     ),
     (
+        "shell-shift-delete-range-test",
+        cfg!(feature = "shell-shift-delete-range-test"),
+        "zash が消す範囲の先頭を1つ後ろへずらし、消える字を1つ減らす",
+    ),
+    (
         "ansi-test",
         cfg!(feature = "ansi-test"),
         "起動シーケンスで ANSI の解釈を前景経路ごと実演する",

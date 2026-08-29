@@ -198,6 +198,33 @@ const CTRL_B: u8 = 0x02;
 /// `Ctrl+F`（SE-c）。**右へ 1 つ。** `f` は `0x06` である。
 const CTRL_F: u8 = 0x06;
 
+/// `Ctrl+D`（SE-f）。**挿入点の字を消す。** `d` は `0x04` である。
+///
+/// # `bash` と違う——空行でも終わらない
+///
+/// **`bash` の `Ctrl+D` は、空行のときは EOF でシェルが終わる。**
+/// **ZaytOS に EOF の概念が無い**——`read(0)` は溜まっていなければ `-EAGAIN` を
+/// 返すだけで、「もう来ない」を表す値が無い（`ADR-0020` の面）。
+/// **したがって空行では何もしない。** **黙って違う形にしない**ために、ここに書く。
+///
+/// **終わる道は `exit` である**（組み込み。`ADR-0043`）。
+const CTRL_D: u8 = 0x04;
+
+/// `Ctrl+K`（SE-f）。**挿入点から行末まで消す。** `k` は `0x0B` である。
+const CTRL_K: u8 = 0x0B;
+
+/// `Ctrl+L`（SE-f）。**画面を消して描き直す。** `l` は `0x0C` である。
+const CTRL_L: u8 = 0x0C;
+
+/// `Ctrl+U`（SE-f）。**行頭から挿入点まで消す。** `u` は `0x15` である。
+const CTRL_U: u8 = 0x15;
+
+/// `Ctrl+W`（SE-f）。**直前の語を消す。** `w` は `0x17` である。
+const CTRL_W: u8 = 0x17;
+
+/// 画面を消して左上へ戻す並び（SE-f）。**ED(2) と CUP である**（`ADR-0029`）。
+const CLEAR_SCREEN: &[u8] = b"\x1b[2J\x1b[H";
+
 /// `Ctrl+P`（SE-c）。**1 つ前の行。** `p` は `0x10` である。
 const CTRL_P: u8 = 0x10;
 
@@ -237,6 +264,18 @@ static mut HISTORY_LEN: [usize; HISTORY_MAX] = [0; HISTORY_MAX];
 
 /// 積んだ本数。**増え続ける。輪の位置は剰余で出す。**
 static mut HISTORY_COUNT: usize = 0;
+
+/// 破壊 (SE-f, shell-shift-delete-range-test): 消す範囲を 1 つ狭める。
+///
+/// # なぜこの破壊が要るのか
+///
+/// **`keyboard-drop-ctrl-letters-test` が覆っているのは「鍵が届くこと」であって、
+/// 「範囲の計算が正しいこと」ではない。** **`Ctrl+K` が誤って行頭まで消す形は、
+/// 鍵が届いているので、あの破壊では捕まらない。**
+///
+/// **範囲を 1 つずらせば、消す鍵の判定が同時に落ちる**——**範囲の計算を
+/// 守っているのがそれらの判定であることを、この破壊が主張する。**
+const SHIFT_DELETE_RANGE: bool = cfg!(zash_shift_delete_range);
 
 /// 破壊 (SE-c, shell-drop-history-test): 行を履歴へ積まない。
 const DROP_HISTORY: bool = cfg!(zash_drop_history);
@@ -531,11 +570,8 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                     // **Delete は挿入点の字を消す。** 挿入点は動かない。
                     // **行末では何もしない**——消す字が無い。
                     CSI_DELETE => {
-                        if cursor < length {
-                            line.copy_within(cursor + 1..length, cursor);
-                            length -= 1;
-                            redraw_tail_after_delete(&line[cursor..length]);
-                        }
+                        let at = cursor;
+                        delete_range(&mut line, &mut length, &mut cursor, at, at + 1);
                     }
                     // **知らない数は捨てる。** **最後のバイトを字として
                     // 行へ入れない**——上下矢印と同じ判断である。
@@ -712,20 +748,39 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 move_to_end(&line, &mut cursor, length);
             }
             BACKSPACE => {
-                // **挿入点の直前を消して、後ろを詰める（S12 前の手当て）。**
-                // **行頭では何もしない。**
-                if cursor > 0 {
-                    line.copy_within(cursor..length, cursor - 1);
-                    cursor -= 1;
-                    length -= 1;
-                    // **後退・空白・後退で 1 つ消す。** 画面もこれで消える
-                    // （`Grid` が `\x08` でカーソルを戻すようにした）。
-                    write_all(STDOUT, b"\x08 \x08");
-                    // **挿入点より後ろがあるなら、書き直して詰める。**
-                    // **末尾に空白を 1 つ置いて、消えた 1 セルを潰す。**
-                    // そのぶんカーソルが右へ動くので、同じ数だけ戻す。
-                    redraw_tail(&line[cursor..length]);
-                }
+                // **挿入点の直前を消す（S12 前の手当て。SE-f で `delete_range` へ寄せた）。**
+                // **行頭では何もしない**——範囲が空になるので、あちらが返る。
+                let at = cursor;
+                delete_range(&mut line, &mut length, &mut cursor, at.saturating_sub(1), at);
+            }
+            CTRL_D => {
+                // **挿入点の字を消す（SE-f）。** **Delete と同じ範囲である。**
+                //
+                // **空行では何もしない**——`bash` はそこで EOF になるが、
+                // **ZaytOS に EOF の概念が無い**（[`CTRL_D`] の doc）。
+                let at = cursor;
+                delete_range(&mut line, &mut length, &mut cursor, at, at + 1);
+            }
+            CTRL_K => {
+                // **挿入点から行末まで消す（SE-f）。**
+                let (at, end) = (cursor, length);
+                delete_range(&mut line, &mut length, &mut cursor, at, end);
+            }
+            CTRL_U => {
+                // **行頭から挿入点まで消す（SE-f）。**
+                let at = cursor;
+                delete_range(&mut line, &mut length, &mut cursor, 0, at);
+            }
+            CTRL_W => {
+                // **直前の語を消す（SE-f）。** 切れ目は空白だけである
+                // （[`word_start`] の doc）。
+                let at = cursor;
+                let start = word_start(&line, at);
+                delete_range(&mut line, &mut length, &mut cursor, start, at);
+            }
+            CTRL_L => {
+                // **画面を消して描き直す（SE-f）。** 行は消さない。
+                redraw_screen(&line, length, cursor);
             }
             other => {
                 // **知らない制御バイトは行へ入れない（SE-b。`ADR-0050`）。**
@@ -901,7 +956,7 @@ unsafe fn history_next(
         return;
     }
     // SAFETY: 呼び出し元契約をそのまま渡す。
-    if let Some((entry, entry_length)) = (unsafe { history_at(*back) }) {
+    if let Some((entry, entry_length)) = unsafe { history_at(*back) } {
         replace_line(line, length, cursor, &entry[..entry_length]);
     }
 }
@@ -1250,20 +1305,6 @@ fn write_decimal(value: u64) {
 ///
 /// **戻す数は「書いた数」である。** 書いた後のカーソルは行の末尾にあり、
 /// 挿入点はそこから `tail.len() + 1` だけ左である（空白のぶんを含む）。
-fn redraw_tail(tail: &[u8]) {
-    // **行末で消したなら、書き直すものが無い。** 直前の後退・空白・後退が
-    // 最後のセルを潰しているので、**ここで空白をもう 1 つ置くと 1 セル余計に
-    // 塗ることになる**（実測で `\x08 \x08 \x08` と 5 バイト出ていた）。
-    if tail.is_empty() {
-        return;
-    }
-    write_all(STDOUT, tail);
-    write_all(STDOUT, b" ");
-    for _ in 0..tail.len() + 1 {
-        write_all(STDOUT, b"\x08");
-    }
-}
-
 /// 挿入点を左へ 1 つ動かす（SE-b で切り出した。SE-c で `Ctrl+B` も通す）。
 ///
 /// **行頭より左へは動かない。**
@@ -1307,15 +1348,84 @@ fn move_to_end(line: &[u8], cursor: &mut usize, length: usize) {
     *cursor = length;
 }
 
-/// 挿入点の字を消したあと、後ろを詰めて書き直す（SE-b）。
+/// 行の `start..end` を消し、後ろを詰める（SE-f）。**挿入点は `start` へ置く。**
 ///
-/// **[`redraw_tail`] と違い、後ろが空でも 1 セル潰す。**
-/// **Backspace は後退・空白・後退で既に潰しているが、Delete は潰していない**
-/// ——**同じ関数を使うと、行末の字を消したときに画面へ残る。**
-fn redraw_tail_after_delete(tail: &[u8]) {
-    write_all(STDOUT, tail);
-    write_all(STDOUT, b" ");
-    write_all(STDOUT, &BACKSPACES[..tail.len() + 1]);
+/// # なぜ 1 本にするのか
+///
+/// **消す鍵が 5 つある**（Backspace / Delete / `Ctrl+D` / `Ctrl+K` / `Ctrl+U` /
+/// `Ctrl+W`）。**違うのは範囲の計算だけで、消し方と描き直しは同じである。**
+/// **別々に書くと、6 つの経路で振る舞いがずれる**——`Ctrl+A` と Home を
+/// 同じ関数へ通したのと同じ判断である（SE-b）。
+///
+/// **以前は `redraw_tail` と `redraw_tail_after_delete` の 2 つが在った。**
+/// **前者は「後ろが空なら何もしない」形で、Backspace が先に 1 セル潰している
+/// ことに寄りかかっていた。** **ここでは消した数だけ潰すので、寄りかかりが消える。**
+///
+/// **`start <= *cursor` を前提にする。** 呼ぶ側はすべて挿入点を含むか、
+/// その手前までの範囲を渡す。
+fn delete_range(
+    line: &mut [u8; LINE_MAX],
+    length: &mut usize,
+    cursor: &mut usize,
+    start: usize,
+    end: usize,
+) {
+    // 破壊 (SE-f, shell-shift-delete-range-test): 先頭を 1 つ後ろへずらす。
+    // **消える字が 1 つ減る**ので、走る語が変わる。
+    let start = if SHIFT_DELETE_RANGE { start + 1 } else { start };
+    if start >= end || end > *length {
+        return;
+    }
+    let removed = end - start;
+    // **画面の挿入点を `start` へ戻す。**
+    if *cursor > start {
+        write_all(STDOUT, &BACKSPACES[..*cursor - start]);
+    }
+    line.copy_within(end..*length, start);
+    *length -= removed;
+    *cursor = start;
+    // **後ろを書き直し、消えたぶんのセルを空白で潰し、まとめて戻る。**
+    let tail = *length - start;
+    if tail > 0 {
+        write_all(STDOUT, &line[start..*length]);
+    }
+    write_all(STDOUT, &SPACES[..removed]);
+    write_all(STDOUT, &BACKSPACES[..tail + removed]);
+}
+
+/// `Ctrl+W` が消す範囲の先頭（SE-f）。
+///
+/// # 切れ目は空白だけである
+///
+/// **`bash` の `unix-word-rubout` と同じで、`run_line` が語へ切る規則とも同じ**
+/// である（`0x20` だけを見る）。**記号を切れ目にしない**——**この体制に「語」の
+/// 定義は 1 つしか無く、2 つ目を作ると、消える範囲と走る語がずれる。**
+///
+/// **挿入点の手前の空白を先に飛ばす。** `ab cd ` の末尾で打つと `ab ` が残る。
+fn word_start(line: &[u8], cursor: usize) -> usize {
+    let mut at = cursor;
+    while at > 0 && line[at - 1] == b' ' {
+        at -= 1;
+    }
+    while at > 0 && line[at - 1] != b' ' {
+        at -= 1;
+    }
+    at
+}
+
+/// 画面を消して、プロンプトと打ちかけの行を描き直す（SE-f。`Ctrl+L`）。
+///
+/// **消しただけだと、打ちかけが見えなくなる。**
+/// **挿入点の位置も戻す**——行末まで書いてから、そのぶん後退する。
+fn redraw_screen(line: &[u8], length: usize, cursor: usize) {
+    write_all(STDOUT, CLEAR_SCREEN);
+    write_prompt();
+    if length > 0 {
+        write_all(STDOUT, &line[..length]);
+    }
+    if cursor < length {
+        write_all(STDOUT, &BACKSPACES[..length - cursor]);
+    }
 }
 
 /// 挿入点より後ろを書き直し、カーソルを戻す。**空白は置かない。**

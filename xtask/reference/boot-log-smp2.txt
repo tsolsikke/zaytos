@@ -541,8 +541,8 @@ bss-test: the .bss reads as zero, keeps writes, and shares a page with .data
 [INFO] bss-check: /bin/bss-test ended Ok(Exited(0)) (0 means the .bss reads as zero, keeps writes, and shares a page with .data)
 [INFO] init: starting /bin/zash (restart 0 of 3)
 [INFO] spawn: /bin/zash is 21056 byte(s) at inode 27; entering at depth 1 (the parent runs on the main kernel stack, which has a guard page)
-[INFO] user-load: /bin/zash mapped PT_LOAD 0x400000..0x402354 (filesz=0x2354 memsz=0x2354 w=false) pages 0x400000..0x402000
-[INFO] user-load: /bin/zash mapped PT_LOAD 0x403000..0x4036e0 (filesz=0x6e0 memsz=0x6e0 w=false) pages 0x403000..0x403000
+[INFO] user-load: /bin/zash mapped PT_LOAD 0x400000..0x402454 (filesz=0x2454 memsz=0x2454 w=false) pages 0x400000..0x402000
+[INFO] user-load: /bin/zash mapped PT_LOAD 0x403000..0x403748 (filesz=0x748 memsz=0x748 w=false) pages 0x403000..0x403000
 [INFO] user-load: /bin/zash mapped PT_LOAD 0x404000..0x404048 (filesz=0x48 memsz=0x48 w=true) pages 0x404000..0x404000
 [INFO] user-load: /bin/zash mapped PT_LOAD 0x404048..0x404928 (filesz=0x0 memsz=0x8e0 w=true) pages 0x404000..0x404000
 [INFO] user-load: /bin/zash PT_LOAD segments: declared=4 mapped=4 (they must match; a gap means a segment was skipped), pages shared with the previous segment=1
