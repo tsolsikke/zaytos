@@ -32,41 +32,6 @@
 use common::critical::Locked;
 use common::ext2;
 
-/// 埋め込んだ ext2 の像（S10-a で置き、S10-b で `main.rs` からここへ移した）。
-///
-/// # なぜ lib 側へ移したか
-///
-/// **`open` を処理するのは `syscall::dispatch` で、あちらは lib にある。**
-/// bin 側に置いたままだと像を渡す道が要る。**ファイルシステムは
-/// カーネルに 1 つしかない**（Linux の root filesystem と同じ）ので、
-/// **持ち主は lib が正しい。**
-///
-/// **写しは 1 つである。** bin 側は [`FS_IMAGE`] を参照するだけで、
-/// `include_bytes!` を二重に置かない（2 MiB が 2 つになる）。
-///
-/// # 抱えるのをやめる条件
-///
-/// **「像を書き換える必要が生じたとき」または「像の大きさが起動時のコピーで
-/// 測れるほど効いたとき」**（`docs/roadmap.md` の S10）。
-/// **`.rodata` に置いた像は書けない**ので、S12（書き込み）ではフレームへの
-/// 複製が要る。**この記録は S10-a で `main.rs` に置き、S10-b でここへ移した。**
-///
-/// # ホストのテストビルドには像が無い
-///
-/// **`kernel/build.rs` は `x86_64-unknown-none` のときだけ像を建てる**
-/// （ホストのテストで `mke2fs` を毎回走らせない）。**そのため `cargo test` の
-/// 構成では `include_bytes!` の相手が存在しない。**
-///
-/// **既定側（カーネル）が本物で、ホスト側は空の像である。**
-/// 空なら [`root_filesystem`] が `TooShort` で返るので、
-/// **黙って別のものを読むことにはならない。**
-#[cfg(target_os = "none")]
-pub static FS_IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fs.img"));
-
-/// ホストのテストビルドの [`FS_IMAGE`]。**像は建てられていないので空である。**
-#[cfg(not(target_os = "none"))]
-pub static FS_IMAGE: &[u8] = &[];
-
 /// 根のファイルシステムを組み立てる。
 ///
 /// # 毎回組み立て直す
@@ -83,13 +48,13 @@ pub fn root_filesystem() -> Result<ext2::Ext2<'static>, ext2::Ext2Error> {
 /// # なぜ差し替えるのか
 ///
 /// **書く先と読む先を同じにするためである。** S12-a は像をフレームへ複製したが、
-/// **読む側は `.rodata` の [`FS_IMAGE`] を見たままだった。**
+/// **読む側は `.rodata` の埋め込みを見たままだった。**
 /// **そのまま書き始めると、書いた先と読む先が別物になる。**
 ///
-/// # 向ける前も動く
+/// # 向ける前は空である（P-e）
 ///
-/// **複製は起動の途中で作られる。** それより前に像を読む経路がある
-/// （`verify_embedded_fs_image`）ので、**向くまでは埋め込みの側を返す。**
+/// **複製は起動の途中で作られる。** **それより前は読む先が無い**——
+/// **埋め込みを外したので、返せるものが空しか無い**（`ADR-0034` の Addendum）。
 static ROOT_IMAGE_PTR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 /// [`ROOT_IMAGE_PTR`] が指す長さ。
 static ROOT_IMAGE_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
@@ -105,31 +70,32 @@ pub fn set_root_image(image: &'static [u8]) {
 
 /// いま読んでいる像。
 ///
-/// 破壊 (S12-b, fs-read-from-rodata): 常に埋め込みの側を返す。
-/// **向け直したことが観測できなくなる**——判定行に出る番地がカーネル像の中になり、
-/// 複製の番地と食い違う。
+/// # 埋め込み像は外した（P-e。`ADR-0034` の Addendum）
+///
+/// **像の源は装置だけである。** **複製へ向く前は空を返す**——
+/// **以前は埋め込みの側を返していたが、その埋め込みが無い。**
+/// **空なら [`root_filesystem`] が `TooShort` で返るので、黙って別のものを
+/// 読むことにはならない**（ホストのテストビルドと同じ形である）。
+///
+/// **破壊 `fs-read-from-rodata-test` は消した。** **戻す先が無い**——
+/// **読む先が 1 つしかないので、あの破壊が守っていた性質は構造的に真である**
+/// （`ADR-0034` の Addendum の引き継ぎの表）。
 pub fn root_image() -> &'static [u8] {
-    #[cfg(feature = "fs-read-from-rodata-test")]
-    return FS_IMAGE;
-
-    #[cfg(not(feature = "fs-read-from-rodata-test"))]
-    {
-        let ptr = ROOT_IMAGE_PTR.load(core::sync::atomic::Ordering::SeqCst);
-        let len = ROOT_IMAGE_LEN.load(core::sync::atomic::Ordering::SeqCst);
-        if ptr == 0 {
-            return FS_IMAGE;
-        }
-        // SAFETY: [`set_root_image`] が渡した `&'static [u8]` の中身をそのまま
-        // 組み直している。**複製先のフレームは起動中ずっと生きており、返さない。**
-        unsafe { core::slice::from_raw_parts(ptr as *const u8, len) }
+    let ptr = ROOT_IMAGE_PTR.load(core::sync::atomic::Ordering::SeqCst);
+    let len = ROOT_IMAGE_LEN.load(core::sync::atomic::Ordering::SeqCst);
+    if ptr == 0 {
+        return &[];
     }
+    // SAFETY: [`set_root_image`] が渡した `&'static [u8]` の中身をそのまま
+    // 組み直している。**複製先のフレームは起動中ずっと生きており、返さない。**
+    unsafe { core::slice::from_raw_parts(ptr as *const u8, len) }
 }
 
 /// RAM 複製を可変で貸す（zi-c。ADR-0037 の「書き手の口」）。
 ///
-/// **複製前（[`ROOT_IMAGE_PTR`] が 0）は `None` である。** そのとき読める側は
-/// `.rodata` の埋め込み（[`FS_IMAGE`]）で、**あれは共有の `&'static` である——
-/// 絶対に可変で貸してはならない。**
+/// **複製前（[`ROOT_IMAGE_PTR`] が 0）は `None` である。** **そのとき読める像は
+/// 無い**（P-e で埋め込みを外した。`ADR-0034` の Addendum）——
+/// **貸す対象そのものが存在しない。**
 ///
 /// # Safety（&mut と & の重なりが無いことの、参照生成箇所の全数列挙）
 ///

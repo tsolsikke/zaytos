@@ -1694,7 +1694,9 @@ extern "sysv64" fn kernel_main() -> ! {
     // **まだ走らせない**（Ring 3 への遷移は次の刻み）。ここまでで、像が読めること、
     // 新しいアドレス空間へ区画が張れること、**張った葉の W が区画の権限どおりで
     // あること**を見る。
-    verify_embedded_fs_image(&mut logger);
+    // **像の検査は複製の中へ移した（P-e）。** **埋め込みを外したので、複製する前に
+    // 読める像が無い**（`ADR-0034` の Addendum）。**置き場は複製の直後・`exercise` の
+    // 前である**——[`try_copy_fs_image_to_frames`] にある。
     copy_fs_image_to_frames(&mut logger, &mut virtio_disk);
     verify_corrupt_fs_image_is_rejected(&mut logger);
     verify_embedded_user_elf(&mut logger);
@@ -4399,7 +4401,6 @@ static FAULT_TEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fault-t
 static SYSCALL_TEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/syscall-test.elf"));
 
 use kernel::userland::{load_user_program, UserLoadError};
-use kernel::vfs::FS_IMAGE;
 
 /// `build.rs` が生成した、像を建てた道具の版と大きさ（S10-a）。
 mod fsimage_info {
@@ -4552,9 +4553,6 @@ fn copy_fs_image_to_frames(logger: &mut Logger<SerialPort>, blk: &mut kernel::vi
             "fs-image-copy: the direct map does not cover {:#x}..{:#x}; halting",
             base, last
         )),
-        FsImageCopyError::ReadBackMismatch => logger.error(format_args!(
-            "fs-image-copy: the copy does not match the embedded image; halting"
-        )),
         FsImageCopyError::DeviceReadFailed { error } => logger.error(format_args!(
             "fs-image-load: reading the image from the virtio disk failed: {error:?}; halting"
         )),
@@ -4563,6 +4561,20 @@ fn copy_fs_image_to_frames(logger: &mut Logger<SerialPort>, blk: &mut kernel::vi
         )),
     }
     cpu::halt_forever();
+}
+
+/// 像の検査値（P-e。`ADR-0034` の Addendum）。
+///
+/// **virtio の読みの検査値と同じ式である**——`byte * (index + 1)` の総和を
+/// ラップさせて足す。**位置を見るので、順序の入れ替えも捕まえる。**
+///
+/// **ホストが `disk0.img` から同じ計算を独立に行い、突き合わせる。**
+fn image_checksum(bytes: &[u8]) -> u32 {
+    let mut sum = 0u32;
+    for (index, byte) in bytes.iter().enumerate() {
+        sum = sum.wrapping_add(u32::from(*byte).wrapping_mul(index as u32 + 1));
+    }
+    sum
 }
 
 /// [`copy_fs_image_to_frames`] が止まる理由（T3-1）。
@@ -4586,8 +4598,6 @@ enum FsImageCopyError {
     EndNotPhysical,
     /// direct map が複製先を覆っていない。
     NotCovered { base: u64, last: u64 },
-    /// 読み戻した中身が元の像と一致しない。
-    ReadBackMismatch,
     /// 装置からの読みが失敗した（S13-c。複製元は装置である。ADR-0034）。
     DeviceReadFailed {
         error: kernel::virtio::VirtioBlkError,
@@ -4664,7 +4674,10 @@ fn try_copy_fs_image_to_frames(
         return Err(FsImageCopyError::AllocatorMissing);
     };
 
-    let bytes = FS_IMAGE.len() as u64;
+    // **大きさの出所は `build.rs` の定数である（P-e）。**
+    // **以前は埋め込み像の長さだった**——外したので、建てたときの数を直に使う
+    // （`ADR-0034` の Addendum）。
+    let bytes = fsimage_info::IMAGE_BYTES;
     let frames = bytes.div_ceil(FRAME_SIZE);
     // **2 MiB 境界へ揃える。** いま要るのは取り出しだけで、揃える必要は無い。
     // **引数 1 つで済むので揃えておく**——後で 2MiB ページ 1 枚で張り直す道が残る。
@@ -4694,17 +4707,8 @@ fn try_copy_fs_image_to_frames(
     // 4KiB ずつ逐次読む。**読み先は複製先そのもの**（装置が DMA で直接書く）ので、
     // 読み終えた時点で複製が済んでいる。
     //
-    // 破壊 (S13-c, fs-load-from-embedded-test): 装置を読まず、埋め込みの像から
-    // 複製する。**中身が同一なのでバイト一致では捕まらない**（S12-b の
-    // `fs-read-from-rodata` と同じ罠）——**捕まえるのはホスト側の
-    // `info blockstats` である**（装置から読んだ量が像 1 枚ぶん欠ける）。
-    #[cfg(feature = "fs-load-from-embedded-test")]
-    // SAFETY: いま確保した連続フレームで、direct map が覆っていることを上で確かめた。
-    // 誰も使っていない。`bytes` は像の長さで、確保した範囲に収まる。
-    unsafe {
-        core::ptr::copy_nonoverlapping(FS_IMAGE.as_ptr(), destination, bytes as usize);
-    }
-    #[cfg(not(feature = "fs-load-from-embedded-test"))]
+    // **破壊 `fs-load-from-embedded-test` は消した（P-e）。** **装置以外の源が
+    // 無いので、戻す先が無い**（`ADR-0034` の Addendum の引き継ぎの表）。
     {
         // 破壊 (S13-c, virtio-load-skip-first-test): 先頭の 4KiB を読まない。
         // **superblock（オフセット 1024）が 0 のままになり、バイト一致が落ちる。**
@@ -4756,7 +4760,18 @@ fn try_copy_fs_image_to_frames(
 
     // SAFETY: いま書いた範囲を読むだけである。
     let copied = unsafe { core::slice::from_raw_parts(destination as *const u8, bytes as usize) };
-    let identical = copied == FS_IMAGE;
+    // **検査値を出す（P-e。`ADR-0034` の Addendum）。**
+    //
+    // **以前は埋め込み像とのバイト一致を見ていた。** **その埋め込みを外したので、
+    // 突き合わせる相手をホストへ移した**——**ホストが `disk0.img` から同じ計算を
+    // 独立に行う。** **源が独立である**（ファイルを直に読む側と、virtio を通って
+    // 読む側）。**持ち越しでも成立する**（毎回中身が変わってよい）。
+    //
+    // **ハッシュではない。重み付き和である**（`byte * (index + 1)` の総和）。
+    // **virtio の読みの検査値と同じ式で、式を 2 つに増やさない。**
+    //
+    // **費用は前と同じ位である**——**前も 2MiB のスライス比較で 2MiB を歩いていた。**
+    let checksum = image_checksum(copied);
 
     // **アロケータを返す。** 取ったフレームは返さないが、**借りたものは返す。**
     kernel::frame_allocator::give_back(allocator);
@@ -4769,6 +4784,14 @@ fn try_copy_fs_image_to_frames(
     let copied_static: &'static [u8] =
         unsafe { core::slice::from_raw_parts(destination as *const u8, bytes as usize) };
     kernel::vfs::set_root_image(copied_static);
+
+    // **像の検査は、複製した直後・`exercise` より前である（P-e）。**
+    //
+    // **見るのは「装置から読んだ像がそのまま使えること」である。**
+    // **`exercise` の後に置くと、書き換えた後の像を見ることになり、
+    // 判定行の空き数が建てたときの数と食い違う**——**実測で踏んだ**
+    // （2026-08-28。`--full` で keep 系の 5 項目が落ちた）。
+    verify_root_fs_image(logger);
 
     // **どこを読んでいるかを出す。** **向けたことを主張できるようにする**——
     // **複製は元の像とバイト単位で一致しているので、向けても向けなくても
@@ -4788,17 +4811,13 @@ fn try_copy_fs_image_to_frames(
     let (image_start, image_end) = kernel_image_phys_range();
     logger.info(format_args!(
         "fs-image-copy: copied {bytes} byte(s) to phys {:#x}..{:#x} ({frames} frame(s), \
-         2MiB-aligned={}), read-back identical={identical}; the kernel image is {:#x}..{:#x}",
+         2MiB-aligned={}), checksum={checksum:#010x}; the kernel image is {:#x}..{:#x}",
         base.as_u64(),
         base.as_u64() + bytes,
         base.as_u64() % (2 * 1024 * 1024) == 0,
         image_start.as_u64(),
         image_end.as_u64()
     ));
-
-    if !identical {
-        return Err(FsImageCopyError::ReadBackMismatch);
-    }
 
     // SAFETY: 複製先のフレームは起動中ずっと生き、いま誰も読んでいない。
     // 中身は像そのものである。**書けるのはここが初めてである。**
@@ -5568,19 +5587,19 @@ fn exercise_mkdir_and_rmdir(
     Ok(())
 }
 
-fn verify_embedded_fs_image(logger: &mut Logger<SerialPort>) {
+fn verify_root_fs_image(logger: &mut Logger<SerialPort>) {
     use common::ext2::ROOT_INODE;
 
-    let Err(reason) = try_verify_embedded_fs_image(logger) else {
+    let Err(reason) = try_verify_root_fs_image(logger) else {
         return;
     };
     match reason {
         FsReadCheckError::EmbeddedImageDidNotParse { error: e } => logger.error(format_args!(
-            "ext2: the embedded image did not parse: {e:?}; halting"
+            "ext2: the image on the device did not parse: {e:?}; halting"
         )),
         FsReadCheckError::ImageSizeMismatch => logger.error(format_args!(
-            "ext2: the embedded image is {} byte(s) but build.rs made {}; halting",
-            FS_IMAGE.len(),
+            "ext2: the image on the device is {} byte(s) but build.rs made {}; halting",
+            fsimage_info::IMAGE_BYTES,
             fsimage_info::IMAGE_BYTES
         )),
         FsReadCheckError::GroupDescriptorNotUsable { group, error: e } => logger.error(
@@ -5759,17 +5778,20 @@ enum FsReadCheckError {
 }
 
 /// 抱えている像を読み切れることを見る検査部（T3-1）。**止めない。`Err` を返す。**
-fn try_verify_embedded_fs_image(logger: &mut Logger<SerialPort>) -> Result<(), FsReadCheckError> {
+fn try_verify_root_fs_image(logger: &mut Logger<SerialPort>) -> Result<(), FsReadCheckError> {
     use common::ext2::Ext2;
 
-    let fs = match Ext2::parse(FS_IMAGE) {
+    // **見るのは装置から読んだ複製である（P-e）。**
+    // **以前は埋め込み像だった**——外したので、実際に使う像を見る形になった。
+    let image = kernel::vfs::root_image();
+    let fs = match Ext2::parse(image) {
         Ok(fs) => fs,
         Err(error) => return Err(FsReadCheckError::EmbeddedImageDidNotParse { error }),
     };
 
     logger.info(format_args!(
         "ext2: image {} byte(s) built by {:?}",
-        FS_IMAGE.len(),
+        image.len(),
         fsimage_info::MKE2FS_VERSION
     ));
     logger.info(format_args!(
@@ -5801,7 +5823,7 @@ fn try_verify_embedded_fs_image(logger: &mut Logger<SerialPort>) -> Result<(), F
 
     // **像の大きさは build.rs が知っている値と一致するはず。** 食い違えば、
     // 抱えた像と建てた像が別物である。
-    if FS_IMAGE.len() as u64 != fsimage_info::IMAGE_BYTES {
+    if image.len() as u64 != fsimage_info::IMAGE_BYTES {
         return Err(FsReadCheckError::ImageSizeMismatch);
     }
 
@@ -6804,7 +6826,8 @@ fn try_verify_corrupt_fs_image_is_rejected(
     ));
 
     // 壊した後も、抱えている像が読めること。**壊す処理が元を汚していないことの主張。**
-    if Ext2::parse(FS_IMAGE).is_err() {
+    // **複製元は装置から読んだ複製である（P-e）。** **以前は埋め込み像だった。**
+    if Ext2::parse(kernel::vfs::root_image()).is_err() {
         return Err(CorruptFsCheckError::EmbeddedImageBroken);
     }
     Ok(())
@@ -6887,7 +6910,13 @@ fn verify_fs_content_mismatch_is_noticed(
 /// [`common::ext2::Ext2Error::ImageTooSmall`] で拒み、**壊し方に関係なく
 /// すべての case が同じ理由で落ちる。**
 fn build_truncated_fs_image(buf: &mut [u8; CORRUPT_FS_LEN]) {
-    buf.copy_from_slice(&FS_IMAGE[..CORRUPT_FS_LEN]);
+    // **複製元は装置から読んだ複製である（P-e。`ADR-0034` の Addendum）。**
+    //
+    // **前提を書く。** **この破壊の検査は、作り直した像でしか走らない。**
+    // **持ち越す構成では、装置の中身の使用上端が起動ごとに動きうるので、
+    // `CORRUPT_FS_LEN`（`build.rs` の定数）が実態と合わなくなる。**
+    // **以前は偶然そうなっているだけで、前提として書かれていなかった。**
+    buf.copy_from_slice(&kernel::vfs::root_image()[..CORRUPT_FS_LEN]);
     buf[FS_SUPERBLOCK + 4..FS_SUPERBLOCK + 8]
         .copy_from_slice(&(CORRUPT_FS_BLOCKS as u32).to_le_bytes());
 }
@@ -9557,11 +9586,6 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "像の複製の末尾 1 バイトを 0xFF で潰す",
     ),
     (
-        "fs-read-from-rodata-test",
-        cfg!(feature = "fs-read-from-rodata-test"),
-        "読む側を複製へ向けず、埋め込みの側を返す",
-    ),
-    (
         "ext2-group-count-offset-test",
         cfg!(feature = "ext2-group-count-offset-test"),
         "空きブロック数の欄を 2 バイトずらして読む",
@@ -10290,11 +10314,6 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "virtio-short-desc-test",
         cfg!(feature = "virtio-short-desc-test"),
         "virtio のデータ記述子を 511 バイトに縮める",
-    ),
-    (
-        "fs-load-from-embedded-test",
-        cfg!(feature = "fs-load-from-embedded-test"),
-        "像を装置から読まず、埋め込みから複製する",
     ),
     (
         "virtio-load-skip-first-test",
