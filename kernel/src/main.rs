@@ -5045,14 +5045,6 @@ fn exercise_block_bitmap(logger: &mut Logger<SerialPort>, image: &'static mut [u
             "fs-write: could not find {}: {e:?}; halting",
             core::str::from_utf8(name).unwrap_or("?")
         )),
-        WriteExerciseError::AppendSeedSizeMismatch {
-            name,
-            original_size,
-        } => logger.error(format_args!(
-            "fs-write: {} is {original_size} byte(s) but build.rs seeded {}; halting",
-            core::str::from_utf8(name).unwrap_or("?"),
-            fsimage_info::WRITABLE_SEED_BYTES
-        )),
         WriteExerciseError::AppendFailed { round, error: e } => logger.error(format_args!(
             "fs-write: append {round} failed: {e:?}; halting"
         )),
@@ -5138,11 +5130,6 @@ enum WriteExerciseError {
     AppendTargetNotFound {
         name: &'static [u8],
         error: common::ext2::Ext2Error,
-    },
-    /// 初めの大きさが `build.rs` の蒔いたものと食い違う。
-    AppendSeedSizeMismatch {
-        name: &'static [u8],
-        original_size: u32,
     },
     /// 追記そのものが通らない。
     AppendFailed {
@@ -5295,12 +5282,27 @@ fn exercise_file_append(
     };
 
     // **初めの大きさが build.rs の置いたものと一致すること。**
-    // **食い違えば、抱えた像と建てた像が別物である**（`IMAGE_BYTES` と同じ作法）。
+    //
+    // **一致しなければ、止めずに演習を飛ばす**（P-c-3）。
+    // **以前は止めていた**——**「抱えた像と建てた像が別物である」と読んで
+    // いた**が、**像が持ち越されるようになった今、Ring 3 の利用者が
+    // このファイルを編集して保存すれば、次の起動が普通に止まる。**
+    // **実際に踏んだ**——`zi-test` の台本が `/data/writable` を書き換え、
+    // それが装置へ残り、2 度目の起動が止まった（実測。2026-08-30）。
+    //
+    // **飛ばしても黙らない。** **既定の起動では `fs-write: append 1` から
+    // `fs-truncate: restored` までがシリアルに出ており、
+    // `xtask/reference/boot-log-smp2.txt` がその行を持っている**——
+    // **建てたままの像で飛べば、起動ログの突き合わせが落ちる。**
+    // **「前提が消えたときだけ静かに飛ぶ」形である。**
     if u64::from(original_size) != fsimage_info::WRITABLE_SEED_BYTES {
-        return Err(WriteExerciseError::AppendSeedSizeMismatch {
-            name: TARGET,
-            original_size,
-        });
+        logger.info(format_args!(
+            "fs-write: skipped the append exercise; {} is {original_size} byte(s), not the {} \
+             that build.rs seeded (the image was carried over and something rewrote this file)",
+            core::str::from_utf8(TARGET).unwrap_or("?"),
+            fsimage_info::WRITABLE_SEED_BYTES
+        ));
+        return Ok(());
     }
 
     // **書く中身は位置から決まる形にする。** 定数の並びだと、
@@ -9542,6 +9544,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "zi-test",
         cfg!(feature = "zi-test"),
         "打鍵の代わりに決定的な台本を read_bytes から返す",
+    ),
+    (
+        "persist-check-test",
+        cfg!(feature = "persist-check-test"),
+        "持ち越しの 2 度目で /data/lines を cat するだけの台本を返す",
     ),
     (
         "zi-edit-redraws-everything-test",

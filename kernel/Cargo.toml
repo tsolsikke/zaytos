@@ -192,6 +192,9 @@ open-skip-truncate-test = []
 # 検証（zi-d）: 打鍵の代わりに決定的な台本を read_bytes から返す。壊す経路では
 # ない（ansi-test と同じ検証用フック）。sendkey と違い時間に依存しない。
 zi-test = []
+# 検証（P-c-3）: 持ち越しの2度目で /data/lines を cat するだけの台本。
+# zi-test の台本はあの回で /data/lines を編集するので、2度目には使えない。
+persist-check-test = []
 # 破壊（zi-d-1）: zi が上下の矢印を捨てる。カーソルが行を移らないので、
 # 編集が別の行に入る——zi-test の判定行（row の推移）が捕まえる。
 zi-cursor-ignore-updown-test = []

@@ -287,7 +287,11 @@ pub fn read_bytes(dst: &mut [u8]) -> usize {
     // 進む。**測っているものが違う**——実打鍵が届くことは `--shell-test` が
     // 主張しており（zi-a で Esc と矢印を足した判定）、ここが主張するのは
     // エディタの論理である。**層が違うものを同じ項目で測らない。**
-    #[cfg(any(feature = "zi-test", feature = "view-test"))]
+    #[cfg(any(
+        feature = "zi-test",
+        feature = "view-test",
+        feature = "persist-check-test"
+    ))]
     {
         let taken = script::next_bytes(dst);
         if taken > 0 {
@@ -523,7 +527,11 @@ mod tests {
 /// **`init` がシェルを起こす直前に呼ぶ。** それより前に流すと、起動シーケンスの
 /// 検算（`syscall-test` の 51 番）が台本を食べてしまう（[`script`] の doc）。
 pub fn arm_input_script() {
-    #[cfg(any(feature = "zi-test", feature = "view-test"))]
+    #[cfg(any(
+        feature = "zi-test",
+        feature = "view-test",
+        feature = "persist-check-test"
+    ))]
     script::arm();
 }
 
@@ -544,7 +552,11 @@ pub fn arm_input_script() {
 /// **前景が取られるまで、カーネル側の消費者（`drain_keyboard`）が食べてしまう。**
 /// リングは 128 バイトでもあり、台本を先に置く形は取れない。
 /// **デコード後のバイトを返す層（[`read_bytes`]）へ差し込む。**
-#[cfg(any(feature = "zi-test", feature = "view-test"))]
+#[cfg(any(
+    feature = "zi-test",
+    feature = "view-test",
+    feature = "persist-check-test"
+))]
 pub(crate) mod script {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -709,6 +721,23 @@ pub(crate) mod script {
         /bin/zi /nope/x\n\
         :w\n\x0f\
         :q\n\x0c";
+
+    /// 台本（P-c-3）。**持ち越しの2度目で、Ring 3 に読み戻させる。**
+    ///
+    /// **1行しかない。** **`/data/lines` を `cat` するだけである。**
+    ///
+    /// # なぜ別に立てるのか
+    ///
+    /// **`zi-test` の台本は使えない**——**あちらは `/data/lines` を編集する。**
+    /// **2度目で編集してしまうと、「1度目の保存が見えた」と
+    /// 「2度目が自分で書いた」が区別できない**（**変わったことは分かるが、
+    /// 変えた者が分からない**形である）。
+    ///
+    /// **読むだけの台本にする。** **像を変えないので、この起動の後の
+    /// `disk0.img` は起こす前と同じである**——**ホストが前後で読んで
+    /// 突き合わせられる。**
+    #[cfg(feature = "persist-check-test")]
+    const SCRIPT: &[u8] = b"/bin/cat /data/lines\n\x0c";
 
     /// 台本（VIEW-b）。**`less` を駆動する。**
     ///

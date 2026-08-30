@@ -1394,10 +1394,11 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gtk] [--gfx-test] [--kvm] [--no-limit] [--manual] [--key-probe]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
+    const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gtk] [--gfx-test] [--kvm] [--no-limit] [--manual] [--key-probe] [--keep-disk]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
        cargo xtask run --shell-test [--drop-arrows | --drop-esc]\n       cargo xtask run --ansi-test [--sabotage FEATURE]\n       cargo xtask run --zi-test [--sabotage FEATURE]\n       cargo xtask run --view-test [--sabotage FEATURE]
        cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
        cargo xtask run --persist-test [--rebuild-between]
+       cargo xtask run --persist-zi-test [--rebuild-between]
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
@@ -1587,6 +1588,9 @@ fn main() -> Result<()> {
                 return cmd_shell_test(mode);
             }
             // **持ち越しの判定（P-a）。**
+            if rest.iter().any(|a| a == "--persist-zi-test") {
+                return cmd_persist_zi_test(rest.iter().any(|a| a == "--rebuild-between"));
+            }
             if rest.iter().any(|a| a == "--persist-test") {
                 return cmd_persist_test(rest.iter().any(|a| a == "--rebuild-between"));
             }
@@ -1695,6 +1699,7 @@ fn main() -> Result<()> {
             }
             cmd_run(&RunOptions {
                 panic_test,
+                keep_disk: rest.iter().any(|a| a == "--keep-disk"),
                 gui,
                 gtk,
                 gfx_test,
@@ -1837,6 +1842,12 @@ impl DebugEvents {
 /// あったので、まとめてある。**
 struct RunOptions {
     panic_test: bool,
+    /// `disk0.img` を作り直さずに起こす（P-c-3）。
+    ///
+    /// **既定では毎回作り直す。** **持ち越しを目で見るには、
+    /// 2 度目を作り直さずに起こす道が要る**——**`zi` で保存して抜け、
+    /// この旗を付けて起こし直すと、保存したものが在る。**
+    keep_disk: bool,
     gui: bool,
     gtk: bool,
     gfx_test: bool,
@@ -1863,7 +1874,11 @@ fn cmd_run(opts: &RunOptions) -> Result<()> {
     } else {
         build_kernel(&workspace_root, gfx_test)?
     };
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = if opts.keep_disk {
+        stage_esp_keeping_the_disk(&workspace_root, &bootloader_efi, &kernel_elf)?
+    } else {
+        stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?
+    };
 
     if panic_test {
         run_panic_test(&workspace_root, &ovmf_vars, &esp_dir)
@@ -8325,11 +8340,183 @@ fn normalize_boot_log(serial: &str, drop_core_count_lines: bool) -> Vec<String> 
 /// **`capture_boot_log` と違い、`disk0.img` をどう扱うかを選べる。**
 /// **`fs-image-ready` か停止の文言が出るまで待つ**——**持ち越しの探りでは
 /// 「止まったこと」も観測の対象である。**
+/// 持ち越しの判定、`zi` の側（P-c-3）。
+///
+/// # 主張は 1 つである
+///
+/// **「`zi` で保存したものが、2 度目の起動で見える」。**
+///
+/// **P-a とは変化の作り方が違う。** **あちらはカーネルの中の破壊
+/// （`fs-alloc-keep-test`）で像を変えており、「持ち越しの仕組みが動くこと」を
+/// 主張していた。** **こちらは Ring 3 の利用者が `zi` で編集して保存する**
+/// ——**運用者が実際にする操作そのものである。**
+///
+/// # 3 つの層で見る
+///
+/// **どれか 1 つが壊れても、残りで気づける形にする。**
+///
+/// 1. **カーネルが言う**——1 度目に `user-flush: /bin/zi wrote the image back`
+///    が出る（保存が装置まで届いた）
+/// 2. **外の道具が言う**——`debugfs` が `disk0.img` から `/data/lines` を読み、
+///    **建てた像の同じファイルと違う。** **さらに `e2fsck` が通る**
+///    （書き戻しが構造を壊していない）
+/// 3. **2 度目の Ring 3 が読み戻す**——`persist-check-test` の台本が
+///    `cat /data/lines` を打ち、**出た本文が、`debugfs` が装置から読んだものと
+///    一致する。** **源が独立である**（片方はホストの道具、片方は
+///    カーネルとファイルシステムとシリアル）
+///
+/// **加えて、2 度目のカーネルの検査値が、起こす前にホストが `disk0.img` から
+/// 計算した値と一致する**（P-a と同じ本。**間で像を作り直していないこと**）。
+///
+/// # 破壊
+///
+/// **`rebuild_between` を立てると、2 度目の前に像を作り直す。** **2 度目は
+/// 建てたままの `/data/lines` を読むので、3 番目の層が落ちる**——
+/// **Ring 3 が出す本文が、装置に在ったものと違う。**
+///
+/// # 「フラッシュを落とす」破壊を足さない
+///
+/// **既に在る `virtio-skip-install-test` が覆っている**（実測で確かめた）。
+/// **あの構成では装置が据わらないので `zi` の保存が届かず、
+/// `--zi-test` の判定行（`save reached the device`）が落ちる。**
+/// **同じことを主張する破壊を 2 つ持たない**（SE-d の教訓。
+/// **覆われている破壊を足すと、切り分けないものが緑を増やす**）。
+fn cmd_persist_zi_test(rebuild_between: bool) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let context = if rebuild_between {
+        "persist-zi-test rebuild-between"
+    } else {
+        "persist-zi-test"
+    };
+
+    // **建てたままの像の `/data/lines` を先に取る。** **比べる元である。**
+    let built_lines = {
+        let kernel = build_kernel_with_features(&workspace_root, &[])?;
+        debugfs_read(&kernel.out_dir.join(FS_IMAGE_NAME), "/data/lines")?
+    };
+
+    println!("=== {context}: boot 1 (zi-test, rebuilding the disk)");
+    let first = capture_one_boot(
+        &workspace_root,
+        &["zi-test"],
+        DiskImage::Rebuild,
+        "zi-boot1",
+        "script-done:",
+    )?;
+    let saved = first.contains("user-flush: /bin/zi wrote the image back");
+    println!("{context}: boot 1's save reached the device = {saved}");
+
+    // **装置の中身を外の道具に言わせる。**
+    let esp_dir = workspace_root.join("target").join("esp");
+    let disk = disk_image_path(&esp_dir);
+    let on_device = debugfs_read(&disk, "/data/lines")?;
+    let device_carries_the_edit = match (on_device.as_ref(), built_lines.as_ref()) {
+        (Some(now), Some(built)) => !now.is_empty() && now != built,
+        _ => false,
+    };
+    println!(
+        "{context}: the device carries what zi saved = {device_carries_the_edit} (debugfs read \
+         {:?} byte(s); the built image has {:?})",
+        on_device.as_ref().map(|b| b.len()),
+        built_lines.as_ref().map(|b| b.len())
+    );
+
+    // **書き戻しが構造を壊していないこと。** **中身が違うだけでは足りない**
+    // ——**壊れた像でも「違う」は成り立つ。**
+    let fsck = external_tool("e2fsck")
+        .arg("-fn")
+        .arg(&disk)
+        .output()
+        .context("failed to run e2fsck on the device image")?;
+    let structure_is_sound = fsck.status.success();
+    println!("{context}: e2fsck says the device image is sound = {structure_is_sound}");
+
+    let host_checksum = fs::read(&disk).ok().map(|bytes| image_checksum(&bytes));
+
+    println!("=== {context}: boot 2 (persist-check-test, keeping the disk)");
+    let second = capture_one_boot(
+        &workspace_root,
+        &["persist-check-test"],
+        if rebuild_between {
+            DiskImage::Rebuild
+        } else {
+            DiskImage::Keep
+        },
+        "zi-boot2",
+        "script-done:",
+    )?;
+    let did_not_halt = second.contains("fs-image-ready");
+    let kernel_checksum = second
+        .lines()
+        .find(|line| line.contains("fs-image-copy: copied"))
+        .and_then(|line| {
+            let rest = line.split("checksum=").nth(1)?;
+            let token = rest.split(|c: char| c == ';' || c.is_whitespace()).next()?;
+            u32::from_str_radix(token.trim_start_matches("0x"), 16).ok()
+        });
+    let checksum_agrees = kernel_checksum.is_some() && kernel_checksum == host_checksum;
+
+    // **Ring 3 が出した本文と、装置から読んだ本文を突き合わせる。**
+    let plain = strip_ansi(&second);
+    let printed = program_output(
+        plain
+            .split("/bin/cat /data/lines")
+            .nth(1)
+            .unwrap_or("")
+            .split("script-done:")
+            .next()
+            .unwrap_or(""),
+    );
+    let expected = on_device
+        .as_ref()
+        .map(|bytes| {
+            String::from_utf8_lossy(bytes)
+                .replace('\r', "")
+                .trim_end_matches('\n')
+                .to_string()
+        })
+        .unwrap_or_default();
+    let ring3_sees_it = !expected.is_empty() && printed == expected;
+    println!(
+        "{context}: boot 2's Ring 3 printed what the device carries = {ring3_sees_it} \
+         ({} byte(s) printed, {} expected)",
+        printed.len(),
+        expected.len()
+    );
+    println!("{context}: boot 2 reached its final state = {did_not_halt}");
+    println!(
+        "{context}: boot 2's checksum matches what the host read before it = {checksum_agrees} \
+         (kernel {kernel_checksum:?}, host {host_checksum:?})"
+    );
+
+    if saved
+        && device_carries_the_edit
+        && structure_is_sound
+        && did_not_halt
+        && checksum_agrees
+        && ring3_sees_it
+    {
+        println!("{context}: PASS");
+        if rebuild_between {
+            bail!("{context}: the sabotage was NOT caught; every judgement still held")
+        }
+        Ok(())
+    } else {
+        println!("{context}: FAILED");
+        if rebuild_between {
+            println!("{context}: the sabotage was caught (this run is expected to fail)");
+            return Ok(());
+        }
+        bail!("{context}: at least one judgement did not hold")
+    }
+}
+
 fn capture_one_boot(
     workspace_root: &Path,
     features: &[&str],
     disk: DiskImage,
     tag: &str,
+    until: &str,
 ) -> Result<String> {
     let ovmf_vars = prepare_ovmf_vars(workspace_root)?;
     let bootloader_efi = build_bootloader(workspace_root, false)?;
@@ -8366,10 +8553,7 @@ fn capture_one_boot(
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     loop {
         let seen = fs::read_to_string(&serial_log).unwrap_or_default();
-        if seen.contains("fs-image-ready")
-            || seen.contains("; halting")
-            || Instant::now() >= deadline
-        {
+        if seen.contains(until) || seen.contains("; halting") || Instant::now() >= deadline {
             break;
         }
         thread::sleep(PANIC_TEST_POLL_INTERVAL);
@@ -8413,12 +8597,15 @@ fn capture_one_boot(
 ///
 /// # 後始末をしない。**要らないからである**
 ///
-/// **この項目は `--full` の中で唯一、`disk0.img` を作り直さない。**
+/// **`disk0.img` を作り直さない項目は、`--full` の中でこれと `persist (zi)` の
+/// 2 つである**（P-c-3 で 1 つ増えた）。
 /// **既定の側は、終わった時点で汚れた像を残す**（ブロックを 1 つ割り当てたまま）。
 ///
-/// **それでも次の項目へ漏れない。** **`DiskImage::Keep` を渡す経路はここ 1 本だけで、
-/// 他のすべての経路は `stage_esp`（`Rebuild`）を呼んでから QEMU を起こす**
-/// （実測。`stage_esp` の呼び手は 12 箇所、`Keep` の呼び手はこの関数だけである）。
+/// **それでも次の項目へ漏れない。** **`DiskImage::Keep` を渡す経路は 2 本**
+/// （この関数と [`cmd_persist_zi_test`]）**で、他のすべての経路は
+/// `stage_esp`（`Rebuild`）を呼んでから QEMU を起こす**
+/// （実測。`stage_esp` の呼び手は 12 箇所である）。
+/// **2 本になっても議論は変わらない**——**どちらも汚した像を次へ渡さない。**
 /// **したがって、汚れた像が別の項目の起動へ届くことはない。**
 /// **偶然ではなく構造である**——**入口が 2 つに分かれており、片方しか汚さない。**
 ///
@@ -8445,6 +8632,7 @@ fn cmd_persist_test(rebuild_between: bool) -> Result<()> {
         &["fs-alloc-keep-test"],
         DiskImage::Rebuild,
         "boot1",
+        "fs-image-ready",
     )?;
     let first_kept = first.contains("fs-bitmap: keeping the block allocated");
     let first_flushed = first.contains("fs-image-flush: wrote");
@@ -8500,7 +8688,13 @@ fn cmd_persist_test(rebuild_between: bool) -> Result<()> {
     } else {
         DiskImage::Keep
     };
-    let second = capture_one_boot(&workspace_root, &[], disk_for_second, "boot2")?;
+    let second = capture_one_boot(
+        &workspace_root,
+        &[],
+        disk_for_second,
+        "boot2",
+        "fs-image-ready",
+    )?;
 
     // **間で像を作り直していないこと。** **`stage_esp` が出す行で見る。**
     let kept_the_disk = second.contains("persist: kept")
@@ -12466,6 +12660,36 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             }
         }
 
+        // **`zi` で保存したものが 2 度目に見えること（P-c-3）。**
+        //
+        // **P-a と変化の作り方が違う**——**あちらはカーネルの中の破壊、
+        // こちらは Ring 3 の利用者の操作である。** **判定 6 本を 1 項目に
+        // まとめてある**——**どれが落ちても「保存が持ち越せていない」の
+        // 1 つの主張である。**
+        total += 1;
+        begin_item("what zi saved is there in the next boot");
+        match cmd_persist_zi_test(false) {
+            Ok(()) => println!("--- persist (zi): OK"),
+            Err(error) => {
+                println!("--- persist (zi): FAILED ({error})");
+                failed.push("persist (zi)".to_string());
+            }
+        }
+
+        // **破壊の側（P-c-3）。** **2 度目の前に像を作り直す。**
+        // **2 度目の Ring 3 は建てたままの本文を出すので、突き合わせが落ちる。**
+        total += 1;
+        begin_item("the zi persist test catches rebuilding the disk in between");
+        match cmd_persist_zi_test(true) {
+            Ok(()) => {
+                println!("--- persist (zi, rebuilt in between): OK (the sabotage was caught)")
+            }
+            Err(error) => {
+                println!("--- persist (zi, rebuilt in between): FAILED ({error})");
+                failed.push("persist (zi, rebuilt in between)".to_string());
+            }
+        }
+
         // **像を複製して取り出し、建てた像と突き合わせる（S12-a）。**
         // **判定 3 本を 1 項目にまとめてある**（複製先の位置・バイト一致・`e2fsck`）。
         total += 1;
@@ -13264,6 +13488,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         run_regression("panic-test", &mut failed, &mut retries, || {
             cmd_run(&RunOptions {
                 panic_test: true,
+                keep_disk: false,
                 gui: false,
                 gtk: false,
                 gfx_test: false,
@@ -13381,7 +13606,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 25,
-    full: 251,
+    full: 253,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
