@@ -58,7 +58,7 @@ cargo xtask run
 QEMUを`-display none`で起動し、シリアル出力を端末へ流す。
 カーネルは停止せず動き続けるため、`run`は既定で120秒後にQEMUを自動停止する（`--no-limit`で解除）。
 
-- `cargo xtask run --gui` : QEMUのウィンドウを表示する。ウィンドウにフォーカスを当ててキーを打つと、文字が画面にエコーされる
+- `cargo xtask run --gui --manual` : QEMUのウィンドウを表示する。**手で触るときは`--manual`を付ける。****上限が外れ、`disk0.img`が起動間で持ち越される**（`zi`で保存したものが次の起動に在る）。**毎回作り直すなら`--rebuild-disk`を付ける。**ウィンドウにフォーカスを当ててキーを打つと、文字が画面にエコーされる
 - `cargo xtask screenshot [out.png]` : 起動後の画面をキャプチャする
 - `cargo test` : ホスト上で純粋ロジックの単体テストを実行する
 

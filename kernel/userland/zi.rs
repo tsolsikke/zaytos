@@ -17,7 +17,7 @@
 //! ANSI の解釈そのもの（CUP・ED・EL がセルへどう効くか）は
 //! `ansi-test` が別に固定しており（ADR-0029 の Addendum）、
 //! **`zi` が意図した列を出しているかは目視の補助に委ねてある**
-//! （`cargo xtask run --gui`）。
+//! （`cargo xtask run --gui --manual`）。
 //!
 //! # zi-c の契約から来る順序
 //!

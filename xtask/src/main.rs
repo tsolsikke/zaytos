@@ -1394,7 +1394,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gtk] [--gfx-test] [--kvm] [--no-limit] [--manual] [--key-probe] [--keep-disk]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
+    const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gtk] [--gfx-test] [--kvm] [--no-limit] [--manual] [--key-probe] [--keep-disk | --rebuild-disk]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
        cargo xtask run --shell-test [--drop-arrows | --drop-esc]\n       cargo xtask run --ansi-test [--sabotage FEATURE]\n       cargo xtask run --zi-test [--sabotage FEATURE]\n       cargo xtask run --view-test [--sabotage FEATURE]
        cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
        cargo xtask run --persist-test [--rebuild-between]
@@ -1700,6 +1700,7 @@ fn main() -> Result<()> {
             cmd_run(&RunOptions {
                 panic_test,
                 keep_disk: rest.iter().any(|a| a == "--keep-disk"),
+                rebuild_disk: rest.iter().any(|a| a == "--rebuild-disk"),
                 gui,
                 gtk,
                 gfx_test,
@@ -1844,10 +1845,10 @@ struct RunOptions {
     panic_test: bool,
     /// `disk0.img` を作り直さずに起こす（P-c-3）。
     ///
-    /// **既定では毎回作り直す。** **持ち越しを目で見るには、
-    /// 2 度目を作り直さずに起こす道が要る**——**`zi` で保存して抜け、
-    /// この旗を付けて起こし直すと、保存したものが在る。**
+    /// **`--manual` のときは既定でこちらである**（[`disk_for_run`]）。
     keep_disk: bool,
+    /// `disk0.img` を作り直して起こす（P-c-3）。**`--manual` の既定を覆す。**
+    rebuild_disk: bool,
     gui: bool,
     gtk: bool,
     gfx_test: bool,
@@ -1855,6 +1856,42 @@ struct RunOptions {
     no_limit: bool,
     manual: bool,
     key_probe: bool,
+}
+
+/// 手で起こすときに `disk0.img` を作り直すか（P-c-3。運用者の指示）。
+///
+/// # 境界は「打つ人が居るか」で引く
+///
+/// **`--manual` のときは持ち越しを既定にする。** **人が触るときは、
+/// さっき保存したものが次の起動に在るのが自然である**——**いちいち旗を
+/// 付けるほうが不自然である。**
+///
+/// **検査は毎回同じ像から始めたい**ので、**作り直しが既定であるべきである。**
+/// **持ち越しの経路は `--full` の中で 2 項目しか通らない**
+/// （[`cmd_persist_test`] と [`cmd_persist_zi_test`]）。
+///
+/// **この引き方には前例が 2 つある。** **窓を開けるときは SDL を使う**
+/// （打つ人が居るのはそのときだけ）。**`--manual` のときだけ `-d int` を
+/// 落とす。** **どれも「打つ人が居るか」で分けている。**
+///
+/// # 明示の旗は両方残す
+///
+/// **`--keep-disk` は `--manual` でないときに持ち越したい場合に要る。**
+/// **`--rebuild-disk` は `--manual` の既定を覆す**——**「付けなければ消える」
+/// を目で見る道がここに残る。**
+///
+/// **両方付いたら作り直しが勝つ。** **消えるほうが安全側だからである**
+/// ——**作り直しは前の起動の中身を捨てるだけだが、持ち越しは
+/// 「作り直したつもりの検査」を汚れた像の上で走らせる。**
+fn disk_for_run(manual: bool, keep_disk: bool, rebuild_disk: bool) -> DiskImage {
+    if rebuild_disk {
+        return DiskImage::Rebuild;
+    }
+    if keep_disk || manual {
+        DiskImage::Keep
+    } else {
+        DiskImage::Rebuild
+    }
 }
 
 fn cmd_run(opts: &RunOptions) -> Result<()> {
@@ -1874,10 +1911,11 @@ fn cmd_run(opts: &RunOptions) -> Result<()> {
     } else {
         build_kernel(&workspace_root, gfx_test)?
     };
-    let esp_dir = if opts.keep_disk {
-        stage_esp_keeping_the_disk(&workspace_root, &bootloader_efi, &kernel_elf)?
-    } else {
-        stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?
+    let esp_dir = match disk_for_run(opts.manual, opts.keep_disk, opts.rebuild_disk) {
+        DiskImage::Keep => {
+            stage_esp_keeping_the_disk(&workspace_root, &bootloader_efi, &kernel_elf)?
+        }
+        DiskImage::Rebuild => stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?,
     };
 
     if panic_test {
@@ -7211,7 +7249,7 @@ fn run_keyboard_test(features: &[&str]) -> Result<KeyboardAssertions> {
     );
     println!(
         "{context}: note - key repeat (typematic) is NOT covered here; QEMU's sendkey does \
-         not emulate it. Check it by hand with `cargo xtask run --gui`."
+         not emulate it. Check it by hand with `cargo xtask run --gui --manual`."
     );
     Ok(assertions)
 }
@@ -8601,11 +8639,15 @@ fn capture_one_boot(
 /// 2 つである**（P-c-3 で 1 つ増えた）。
 /// **既定の側は、終わった時点で汚れた像を残す**（ブロックを 1 つ割り当てたまま）。
 ///
-/// **それでも次の項目へ漏れない。** **`DiskImage::Keep` を渡す経路は 2 本**
-/// （この関数と [`cmd_persist_zi_test`]）**で、他のすべての経路は
+/// **それでも次の項目へ漏れない。** **`DiskImage::Keep` を渡す経路は 3 本**
+/// （この関数、[`cmd_persist_zi_test`]、[`cmd_run`]）**で、他のすべての経路は
 /// `stage_esp`（`Rebuild`）を呼んでから QEMU を起こす**
 /// （実測。`stage_esp` の呼び手は 12 箇所である）。
-/// **2 本になっても議論は変わらない**——**どちらも汚した像を次へ渡さない。**
+///
+/// **3 本目の [`cmd_run`] は `--full` の中では持ち越さない。**
+/// **持ち越すのは `--manual` か `--keep-disk` のときだけで**
+/// （[`disk_for_run`]。ホストテストが渡らない側を主張している）、
+/// **`--full` が呼ぶ `cmd_run` はどちらも立てていない**（`panic-test` の 1 箇所。実測）。
 /// **したがって、汚れた像が別の項目の起動へ届くことはない。**
 /// **偶然ではなく構造である**——**入口が 2 つに分かれており、片方しか汚さない。**
 ///
@@ -13489,6 +13531,7 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             cmd_run(&RunOptions {
                 panic_test: true,
                 keep_disk: false,
+                rebuild_disk: false,
                 gui: false,
                 gtk: false,
                 gfx_test: false,
@@ -14452,7 +14495,7 @@ fn disk_image_path(esp_dir: &Path) -> PathBuf {
 /// **`stage_esp` の呼び手は 12 箇所ある**（実測。2026-08-28）。**引数を足すと
 /// 全部が動く。** **持ち越す起動は新しい道なので、既存の 12 箇所の振る舞いを
 /// 1 つも変えずに足せる形にする。**
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DiskImage {
     /// 建てた像で作り直す。**既存の 12 箇所はすべてこれである。**
     Rebuild,
@@ -14919,6 +14962,53 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
     /// 一覧の 2 つだけである（`.claude/rules/temporary-changes.md` の
     /// 「検査そのものを試すときは、リポジトリを動かさない」）。
     #[test]
+    /// 手で起こすときの像の扱い（P-c-3）。
+    ///
+    /// **主張は 2 つあり、渡らない側が主である。**
+    ///
+    /// - **`--manual` のときは持ち越す**（人が触るときの既定）
+    /// - **`--manual` でないときは持ち越さない**——**明示で頼まない限り。**
+    ///   **こちらが要る**——**検査は毎回同じ像から始まる必要があり、
+    ///   「うっかり持ち越す」が起きると、汚れた像の上で走った検査が
+    ///   緑になる。** **落ちるのではなく緑になるので、気づけない。**
+    #[test]
+    fn only_the_manual_run_keeps_the_disk_by_default() {
+        // manual, keep, rebuild -> 期待
+        let cases: &[(bool, bool, bool, DiskImage)] = &[
+            (false, false, false, DiskImage::Rebuild),
+            (true, false, false, DiskImage::Keep),
+            (false, true, false, DiskImage::Keep),
+            (true, false, true, DiskImage::Rebuild),
+            (false, true, true, DiskImage::Rebuild),
+            (true, true, false, DiskImage::Keep),
+            (true, true, true, DiskImage::Rebuild),
+        ];
+        for &(manual, keep, rebuild, expected) in cases {
+            assert_eq!(
+                disk_for_run(manual, keep, rebuild),
+                expected,
+                "manual={manual} keep={keep} rebuild={rebuild}"
+            );
+        }
+
+        // **渡らない側を、旗の組み合わせを尽くして主張する。**
+        // **`--manual` でも `--keep-disk` でもない組み合わせは 2 つで、
+        // どちらも作り直しである。**
+        let kept: Vec<(bool, bool, bool)> = [false, true]
+            .into_iter()
+            .flat_map(|m| {
+                [false, true]
+                    .into_iter()
+                    .flat_map(move |k| [false, true].into_iter().map(move |r| (m, k, r)))
+            })
+            .filter(|&(m, k, r)| disk_for_run(m, k, r) == DiskImage::Keep)
+            .collect();
+        assert!(
+            kept.iter().all(|&(m, k, _)| m || k),
+            "the disk was kept without --manual and without --keep-disk: {kept:?}"
+        );
+    }
+
     fn the_agent_index_check_looks_both_ways() {
         let tracked = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
