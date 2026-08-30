@@ -9615,13 +9615,39 @@ const CHECKS: &[(&str, &[&str])] = &[
             "warnings",
         ],
     ),
+    // **ホストの 2 つは `--all-targets` を付ける。** **付けないと
+    // `#[cfg(test)]` の中を一度も見ない**——**実測で、テストの中の
+    // `duplicated attribute` を素通りさせていた**（2026-08-30。
+    // **既定の形では警告 0、`--all-targets` では error 2 である**）。
+    //
+    // **`kernel` と `bootloader` には付けられない。** **`kernel` を
+    // 素の標的で `--all-targets` すると 2,896 件出る**（テストの標的が
+    // `x86_64-unknown-none` で建たない。実測）。**ホストの標的で見る道は
+    // `build.rs` の生成物の在り処で落ちる**（実測）。**`deferred-decisions`
+    // に行を立てた。**
     (
         "clippy common (host)",
-        &["clippy", "-p", "common", "--", "-D", "warnings"],
+        &[
+            "clippy",
+            "-p",
+            "common",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ],
     ),
     (
         "clippy xtask (host)",
-        &["clippy", "-p", "xtask", "--", "-D", "warnings"],
+        &[
+            "clippy",
+            "-p",
+            "xtask",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ],
     ),
     ("fmt --check", &["fmt", "--all", "--", "--check"]),
 ];
@@ -12394,6 +12420,42 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
     for (name, args) in CHECKS {
         total += 1;
         begin_item(name);
+        // **ホストテストの本数を記録へ残す（2026-08-30）。**
+        //
+        // **固定はしない。** **実測で決めた**——**`#[test]` を足すか消した
+        // コミットは 87 本、`EXPECTED_CHECK_COUNT` を触ったコミットは 13 本
+        // である**（全 750 本のうち）。**固定すると 6.7 倍の手間が掛かる。**
+        //
+        // **それに、固定しても今回の欠陥は捕まらない**——**走らなくなった
+        // 1 本と、同じコミットで足した 1 本で、合計が動かなかった**（実測）。
+        // **捕まえたのは `--all-targets` を付けた clippy のほうである。**
+        //
+        // **数は主張しない。出すだけである**——**報告に残るので、
+        // 減ったときに人が気づける。**
+        if *name == "test (host)" {
+            let output = Command::new("cargo")
+                .current_dir(&workspace_root)
+                .args(*args)
+                .output()
+                .with_context(|| format!("failed to invoke cargo for the {name} check"))?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            print!("{stdout}");
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+            let ran: u64 = stdout
+                .lines()
+                .filter_map(|line| line.strip_prefix("test result: ok. "))
+                .filter_map(|rest| rest.split(' ').next()?.parse::<u64>().ok())
+                .sum();
+            if output.status.success() {
+                println!(
+                    "--- {name}: OK ({ran} host test(s) ran; the count is reported, not enforced)"
+                );
+            } else {
+                println!("--- {name}: FAILED ({})", output.status);
+                failed.push((*name).to_string());
+            }
+            continue;
+        }
         let status = Command::new("cargo")
             .current_dir(&workspace_root)
             .args(*args)
