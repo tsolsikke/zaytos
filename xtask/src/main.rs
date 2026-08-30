@@ -14956,12 +14956,6 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         assert_eq!(joined[device_pos - 1], "-device");
     }
 
-    /// 索引と `.claude/` の対応を、**両向きとも**見ていることを確かめる。
-    ///
-    /// **`git` を動かさない。** 判定は純粋関数で、入力は索引の本文と追跡下の
-    /// 一覧の 2 つだけである（`.claude/rules/temporary-changes.md` の
-    /// 「検査そのものを試すときは、リポジトリを動かさない」）。
-    #[test]
     /// 手で起こすときの像の扱い（P-c-3）。
     ///
     /// **主張は 2 つあり、渡らない側が主である。**
@@ -15009,6 +15003,12 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         );
     }
 
+    /// 索引と `.claude/` の対応を、**両向きとも**見ていることを確かめる。
+    ///
+    /// **`git` を動かさない。** 判定は純粋関数で、入力は索引の本文と追跡下の
+    /// 一覧の 2 つだけである（`.claude/rules/temporary-changes.md` の
+    /// 「検査そのものを試すときは、リポジトリを動かさない」）。
+    #[test]
     fn the_agent_index_check_looks_both_ways() {
         let tracked = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
