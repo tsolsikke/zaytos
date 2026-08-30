@@ -115,16 +115,305 @@ pub const MAX_ENVP: usize = 8;
     not(feature = "env-drop-term-test"),
     not(feature = "env-drop-path-test")
 ))]
-const ENVIRONMENT: &[&[u8]] = &[b"TERM=zaytos", b"PATH=/bin"];
+const DEFAULT_ENVIRONMENT: &[&[u8]] = &[b"TERM=zaytos", b"PATH=/bin", b"HOME=/root"];
 
 #[cfg(all(feature = "env-drop-term-test", not(feature = "env-drop-path-test")))]
-const ENVIRONMENT: &[&[u8]] = &[b"PATH=/bin"];
+const DEFAULT_ENVIRONMENT: &[&[u8]] = &[b"PATH=/bin", b"HOME=/root"];
 
 #[cfg(all(not(feature = "env-drop-term-test"), feature = "env-drop-path-test"))]
-const ENVIRONMENT: &[&[u8]] = &[b"TERM=zaytos"];
+const DEFAULT_ENVIRONMENT: &[&[u8]] = &[b"TERM=zaytos", b"HOME=/root"];
 
 #[cfg(all(feature = "env-drop-term-test", feature = "env-drop-path-test"))]
-const ENVIRONMENT: &[&[u8]] = &[];
+const DEFAULT_ENVIRONMENT: &[&[u8]] = &[b"HOME=/root"];
+
+/// 1 行の上限（f-1。`ADR-0052`）。
+///
+/// **`PATH` が伸びても収まる大きさである。** **越えた行は落とす**
+/// （`ADR-0052` の Decision 3）。
+pub const ENV_LINE_MAX: usize = 128;
+
+/// 環境の源のパス（f-1。`ADR-0052` の Decision 1）。
+const ENV_SOURCE: &[u8] = b"/etc/environment";
+
+/// 1 行を読んだ結果（f-1）。**純粋な判定なので、ホストで固定できる。**
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum EnvLine {
+    /// 空行と `#` で始まる行。**壊れではない。** 黙って飛ばす。
+    Ignore,
+    /// 採る。
+    Take,
+    /// 壊れている。**その行だけ落とし、理由を出す**（`ADR-0052`）。
+    Reject(EnvReject),
+}
+
+/// 落とす理由（f-1）。**出す文言のためだけに分けてある**
+/// ——**黙って落とさないのが `ADR-0052` の Decision 3 である。**
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum EnvReject {
+    /// `=` が無い。
+    NoEquals,
+    /// `=` の左が空。
+    EmptyName,
+    /// 名前に使えない字が在る。
+    BadName,
+    /// 行が [`ENV_LINE_MAX`] を超える。
+    TooLong,
+}
+
+/// 1 行を判定する（f-1）。
+///
+/// # 名前の規則は `ADR-0049` と同じものを使う
+///
+/// **`[A-Za-z_][A-Za-z0-9_]*` である。** **シェルが `$NAME` で引ける名前と、
+/// ここで受ける名前を別にしない**——**別にすると、置けるのに引けない名前が
+/// できる。**
+///
+/// **値は何でもよい。** **空でもよい**（`NAME=` は「空の値」である）。
+pub(crate) fn classify_env_line(line: &[u8]) -> EnvLine {
+    if line.is_empty() || line[0] == b'#' {
+        return EnvLine::Ignore;
+    }
+    if line.len() > ENV_LINE_MAX {
+        return EnvLine::Reject(EnvReject::TooLong);
+    }
+    let Some(equals) = line.iter().position(|byte| *byte == b'=') else {
+        return EnvLine::Reject(EnvReject::NoEquals);
+    };
+    let name = &line[..equals];
+    if name.is_empty() {
+        return EnvLine::Reject(EnvReject::EmptyName);
+    }
+    if !(name[0].is_ascii_alphabetic() || name[0] == b'_') {
+        return EnvLine::Reject(EnvReject::BadName);
+    }
+    if !name[1..]
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    {
+        return EnvLine::Reject(EnvReject::BadName);
+    }
+    EnvLine::Take
+}
+
+/// 積む環境の実体（f-1。`ADR-0052`）。
+///
+/// # なぜ `static mut` にしないのか
+///
+/// **`Locked<T>` の裏に閉じる**（`ADR-0023` の seam 整備の決まり）。
+/// **新しい `unsafe` を作らない。**
+struct Environment {
+    lines: [[u8; ENV_LINE_MAX]; MAX_ENVP],
+    lens: [usize; MAX_ENVP],
+    count: usize,
+    /// **ファイルから読めたか。** **判定はこちらを見る**
+    /// （`ADR-0052` の Decision 4。落とす前を見る）。
+    from_file: bool,
+}
+
+impl Environment {
+    const fn new() -> Self {
+        Self {
+            lines: [[0; ENV_LINE_MAX]; MAX_ENVP],
+            lens: [0; MAX_ENVP],
+            count: 0,
+            from_file: false,
+        }
+    }
+
+    /// 1 行を足す。**入らなければ偽を返す。**
+    fn push(&mut self, line: &[u8]) -> bool {
+        if self.count >= MAX_ENVP || line.len() > ENV_LINE_MAX {
+            return false;
+        }
+        self.lines[self.count][..line.len()].copy_from_slice(line);
+        self.lens[self.count] = line.len();
+        self.count += 1;
+        true
+    }
+}
+
+static ENVIRONMENT: Locked<Environment> = Locked::new(Environment::new());
+
+/// 環境の源を読む（f-1。`ADR-0052`）。
+///
+/// # 呼ぶ位置
+///
+/// **像の複製の直後・最初の Ring 3 の前である**（`ADR-0052` の Decision 2）。
+/// **窓は実測で挟まっている**——`kernel/src/main.rs` で、像の複製が
+/// `copy_fs_image_to_frames`、最初の Ring 3 が `verify_bss_is_mapped` である。
+///
+/// **置き場が主張を決める。** **P-e で像の検査を 1 つ後ろに置いていたために
+/// `exercise` が書き換えた後を見ていた、という族と同じである**
+/// （`docs/troubleshooting.md`）。**動かすときは何が変わるかを見ること。**
+///
+/// # 落ちる道は 1 つに閉じる
+///
+/// **開けない・読めない・1 行も採れない、のどれでも既定へ落ちる。**
+/// **止めない**——**利用者が `rm /etc/environment` を打てる**
+/// （`ADR-0052` の Decision 3）。
+pub fn load_environment(logger: &mut Logger<SerialPort>) {
+    let mut taken = 0usize;
+    let mut dropped = 0usize;
+    let mut from_file = false;
+
+    // 破壊 (f-1, env-ignore-file-test): 源を読まず、既定へ落ちる。
+    // **`ADR-0052` の Decision 1 が主張しているのは「源はファイルである」で、
+    // それを直接否定する形である。** **出る環境は種と同じなので、
+    // 値を見る判定は 1 つも落ちない**——**`from_file` を見る判定と、
+    // 書き換えが 2 度目に効く判定でしか捕まらない。**
+    #[cfg(feature = "env-ignore-file-test")]
+    let source: Option<&'static [u8]> = None;
+    #[cfg(not(feature = "env-ignore-file-test"))]
+    let source = read_env_source(logger);
+
+    if let Some(contents) = source {
+        from_file = true;
+        let mut environment = ENVIRONMENT.lock();
+        for line in contents.split(|byte| *byte == b'\n') {
+            let line = trim_env_line(line);
+            match classify_env_line(line) {
+                EnvLine::Ignore => {}
+                EnvLine::Take => {
+                    // 破壊 (EV, env-drop-term-test / env-drop-path-test):
+                    // **その名前の行を落とす。**
+                    //
+                    // **f-1 で場所を移した。** **以前は既定の表の側だけを
+                    // 削っていたが、源がファイルになって効かなくなった**
+                    // ——**ファイルが在れば既定は使われない**（実測。
+                    // 2026-08-31。**破壊を入れても `envc=3` のままだった**）。
+                    // **SE-d の族である**——**性質が構造的に真になった破壊は、
+                    // 残すと嘘の安心になる。** **ここは源を問わず必ず通る。**
+                    if drop_by_sabotage(line) {
+                        dropped += 1;
+                        continue;
+                    }
+                    if environment.push(line) {
+                        taken += 1;
+                    } else {
+                        dropped += 1;
+                        logger.info(format_args!(
+                            "env-source: dropped a line; the table already holds {MAX_ENVP}"
+                        ));
+                    }
+                }
+                EnvLine::Reject(reason) => {
+                    dropped += 1;
+                    logger.info(format_args!("env-source: dropped a line; {reason:?}"));
+                }
+            }
+        }
+    }
+
+    // **1 行も採れなければ既定へ落ちる。** **「読めたが空だった」も同じ扱い
+    // である**——**環境が空のまま Ring 3 を起こすと、`PATH` が無くなって
+    // 名前でコマンドを引けなくなる。**
+    if taken == 0 {
+        let mut environment = ENVIRONMENT.lock();
+        environment.count = 0;
+        for line in DEFAULT_ENVIRONMENT {
+            let _ = environment.push(line);
+        }
+        environment.from_file = false;
+    } else {
+        ENVIRONMENT.lock().from_file = from_file;
+    }
+
+    let environment = ENVIRONMENT.lock();
+    logger.info(format_args!(
+        "env-source: {} took {taken} line(s) and dropped {dropped}; the table holds {} (from_file={})",
+        core::str::from_utf8(ENV_SOURCE).unwrap_or("?"),
+        environment.count,
+        environment.from_file
+    ));
+}
+
+/// 破壊が落とす名前か（EV。f-1 で場所を移した）。
+///
+/// **既定の構成では常に偽である。**
+fn drop_by_sabotage(line: &[u8]) -> bool {
+    #[cfg(feature = "env-drop-term-test")]
+    if line.starts_with(b"TERM=") {
+        return true;
+    }
+    #[cfg(feature = "env-drop-path-test")]
+    if line.starts_with(b"PATH=") {
+        return true;
+    }
+    let _ = line;
+    false
+}
+
+/// 行の末尾の `\r` と、前後の空白を落とす（f-1）。
+///
+/// **`\r` を落とすのは、運用者が別の機械で編集する道が在るためである**
+/// （`disk0.img` は持ち越すので、外の道具で触れる）。
+fn trim_env_line(line: &[u8]) -> &[u8] {
+    let mut start = 0;
+    let mut end = line.len();
+    while start < end && (line[start] == b' ' || line[start] == b'\t') {
+        start += 1;
+    }
+    while end > start && (line[end - 1] == b' ' || line[end - 1] == b'\t' || line[end - 1] == b'\r')
+    {
+        end -= 1;
+    }
+    &line[start..end]
+}
+
+/// 源を読む（f-1）。**開けなければ `None` で、そのことを出す。**
+///
+/// # 器を作らない
+///
+/// **像はカーネルが抱えている複製で、寿命は `'static` である**
+/// （`crate::vfs::root_image`）。**ブロックをそのまま借りればよい。**
+/// **カーネルにヒープが無いので、写す先を固定で取る形も考えたが、要らない。**
+///
+/// # 先頭の 1 ブロックだけを読む
+///
+/// **`/etc/environment` が 4096 バイトを超える形は読まない。**
+/// **`MAX_ENVP` が 8 で 1 行が [`ENV_LINE_MAX`] なので、採れるのは
+/// 高々 1KiB ぶんである**——**4096 バイトの中に、採れる行はすべて入る。**
+/// **越えたぶんは黙って読まれない**ので、**そのことを出す。**
+fn read_env_source(logger: &mut Logger<SerialPort>) -> Option<&'static [u8]> {
+    let filesystem = match crate::vfs::root_filesystem() {
+        Ok(filesystem) => filesystem,
+        Err(error) => {
+            logger.info(format_args!(
+                "env-source: the root filesystem did not parse ({error:?}); falling back"
+            ));
+            return None;
+        }
+    };
+    let inode = match filesystem.lookup(ENV_SOURCE) {
+        Ok(inode) => inode,
+        Err(error) => {
+            logger.info(format_args!(
+                "env-source: {} is not there ({error:?}); falling back",
+                core::str::from_utf8(ENV_SOURCE).unwrap_or("?")
+            ));
+            return None;
+        }
+    };
+    let block = match filesystem.file_block(&inode, 0) {
+        Ok(block) => block,
+        Err(error) => {
+            logger.info(format_args!(
+                "env-source: could not read {} ({error:?}); falling back",
+                core::str::from_utf8(ENV_SOURCE).unwrap_or("?")
+            ));
+            return None;
+        }
+    };
+    let size = inode.size as usize;
+    if size > block.len() {
+        logger.info(format_args!(
+            "env-source: {} is {size} byte(s); only the first {} are read",
+            core::str::from_utf8(ENV_SOURCE).unwrap_or("?"),
+            block.len()
+        ));
+    }
+    Some(&block[..size.min(block.len())])
+}
 
 /// ページの大きさ（H-a）。**関数の中に同じ定数が 3 つあるが、
 /// ヒープの上端は関数の外で要るので、モジュールの高さに 1 つ置く。**
@@ -1083,11 +1372,33 @@ fn load_user_program_into(
         "user-load: mapped the user stack {stack_page:#x}..{USER_PROGRAM_STACK_TOP:#x} (w=true)"
     ));
 
+    // **環境を積む前に、錠の外へ写す（f-1）。**
+    //
+    // **`build_initial_stack` を錠の下で呼ばない**——**`Locked` は持っている
+    // 間ずっと割り込みを止める**ので、1 ページを書く間ずっと止めることになる。
+    // **写しは 1KiB で、カーネルスタックの余裕（実測で 65,328 バイト）の
+    // 中に収まる。**
+    let mut env_store = [[0u8; ENV_LINE_MAX]; MAX_ENVP];
+    let mut env_lens = [0usize; MAX_ENVP];
+    let env_count = {
+        let environment = ENVIRONMENT.lock();
+        for index in 0..environment.count {
+            let length = environment.lens[index];
+            env_store[index][..length].copy_from_slice(&environment.lines[index][..length]);
+            env_lens[index] = length;
+        }
+        environment.count
+    };
+    let mut envp: [&[u8]; MAX_ENVP] = [b""; MAX_ENVP];
+    for index in 0..env_count {
+        envp[index] = &env_store[index][..env_lens[index]];
+    }
+    let envp = &envp[..env_count];
+
     // **初期スタックを Linux の形で積む（S11-1）。**
     // SAFETY: `dst` はいま張ったスタックページの direct map 越しの先頭で、
     // 1 ページぶん書ける。単一実行文脈である。
-    let Some(initial_rsp) = (unsafe { build_initial_stack(dst, stack_page, argv, ENVIRONMENT) })
-    else {
+    let Some(initial_rsp) = (unsafe { build_initial_stack(dst, stack_page, argv, envp) }) else {
         return Err(UserLoadError::ArgumentsTooLong);
     };
     process.stack_top = initial_rsp;
@@ -1108,7 +1419,7 @@ fn load_user_program_into(
         "user-load: {} initial stack at {initial_rsp:#x} (argc={}, envc={}, 16-byte aligned={},          initial data {initial_bytes} of {PAGE_SIZE} byte(s))",
         process.name,
         argv.len(),
-        ENVIRONMENT.len(),
+        env_count,
         initial_rsp % 16 == 0
     ));
 
@@ -1721,4 +2032,79 @@ pub fn spawn(
     }
 
     Ok(child)
+}
+
+#[cfg(test)]
+mod tests {
+    /// 環境の 1 行の判定（f-1。`ADR-0052` の Decision 3）。
+    ///
+    /// **主張は「落とす側」が主である。** **採る側だけを見ると、
+    /// 何でも採る形が通る。**
+    #[test]
+    fn an_environment_line_is_taken_ignored_or_rejected() {
+        use super::{classify_env_line, EnvLine, EnvReject, ENV_LINE_MAX};
+
+        assert_eq!(classify_env_line(b"TERM=zaytos"), EnvLine::Take);
+        assert_eq!(classify_env_line(b"_X=1"), EnvLine::Take);
+        // **値は空でもよい。** `NAME=` は「空の値」である。
+        assert_eq!(classify_env_line(b"EMPTY="), EnvLine::Take);
+        // **値に `=` が在ってもよい**（最初の `=` で割る）。
+        assert_eq!(classify_env_line(b"A=b=c"), EnvLine::Take);
+
+        // 飛ばす。**壊れではない。**
+        assert_eq!(classify_env_line(b""), EnvLine::Ignore);
+        assert_eq!(classify_env_line(b"# comment"), EnvLine::Ignore);
+
+        // 落とす。
+        assert_eq!(
+            classify_env_line(b"NOEQUALS"),
+            EnvLine::Reject(EnvReject::NoEquals)
+        );
+        assert_eq!(
+            classify_env_line(b"=value"),
+            EnvLine::Reject(EnvReject::EmptyName)
+        );
+        assert_eq!(
+            classify_env_line(b"1BAD=x"),
+            EnvLine::Reject(EnvReject::BadName)
+        );
+        assert_eq!(
+            classify_env_line(b"A-B=x"),
+            EnvLine::Reject(EnvReject::BadName)
+        );
+        let mut long = [b'A'; ENV_LINE_MAX + 1];
+        long[1] = b'=';
+        assert_eq!(
+            classify_env_line(&long),
+            EnvLine::Reject(EnvReject::TooLong)
+        );
+        // **上限ちょうどは採る。** **境界の両側を見る。**
+        assert_eq!(classify_env_line(&long[..ENV_LINE_MAX]), EnvLine::Take);
+    }
+
+    /// 行の前後を落とす（f-1）。
+    ///
+    /// **`\r` を落とすのは、像を外の道具で編集する道が在るためである。**
+    #[test]
+    fn an_environment_line_is_trimmed_on_both_sides() {
+        use super::trim_env_line;
+
+        assert_eq!(trim_env_line(b"  TERM=zaytos  "), b"TERM=zaytos");
+        assert_eq!(trim_env_line(b"TERM=zaytos\r"), b"TERM=zaytos");
+        assert_eq!(trim_env_line(b"\tA=1 \r"), b"A=1");
+        // **値の中の空白は落とさない。** 端だけである。
+        assert_eq!(trim_env_line(b"A=b c"), b"A=b c");
+        assert_eq!(trim_env_line(b"   "), b"");
+    }
+
+    /// 既定に `HOME` が入っていること（f-1。`ADR-0052` の Decision 5）。
+    ///
+    /// **`~` の展開が `HOME` を引くので、既定に無いと、設定ファイルが
+    /// 無いときだけ `~` が展開されなくなる。**
+    #[test]
+    fn the_default_environment_carries_home() {
+        assert!(super::DEFAULT_ENVIRONMENT
+            .iter()
+            .any(|line| line.starts_with(b"HOME=")));
+    }
 }

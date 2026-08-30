@@ -1,0 +1,5 @@
+# ZaytOS の環境（ADR-0052）。1 行 1 つの NAME=VALUE。
+# 空行と # で始まる行は無視する。壊れた行はその行だけ落ちる。
+TERM=zaytos
+PATH=/bin
+HOME=/root

@@ -1711,6 +1711,14 @@ extern "sysv64" fn kernel_main() -> ! {
     // 読める像が無い**（`ADR-0034` の Addendum）。**置き場は複製の直後・`exercise` の
     // 前である**——[`try_copy_fs_image_to_frames`] にある。
     let (image_phys, image_bytes) = copy_fs_image_to_frames(&mut logger, &mut virtio_disk);
+
+    // **環境の源を読む（f-1。`ADR-0052` の Decision 2）。**
+    //
+    // **位置がこの 2 行の間である理由**——**上でファイルシステムが使える
+    // ようになり、下の `verify_bss_is_mapped` が最初の Ring 3 である。**
+    // **環境はプロセスを起こすときに積むので、それより前に決まっていれば
+    // 足りる。**
+    kernel::userland::load_environment(&mut logger);
     verify_corrupt_fs_image_is_rejected(&mut logger);
     verify_embedded_user_elf(&mut logger);
     verify_corrupt_user_elf_is_rejected(&mut logger);
@@ -7294,7 +7302,7 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
     (22, "st_mode for /etc did not say directory"),
     (23, "stat(\"/nope\") did not return -ENOENT"),
     (24, "getdents64 on / did not fill the buffer"),
-    (25, "the root listing did not have 7 entries"),
+    (25, "the root listing did not have 8 entries"),
     (26, "a d_reclen was not a multiple of 8"),
     (
         27,
@@ -9549,6 +9557,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "zi-test",
         cfg!(feature = "zi-test"),
         "打鍵の代わりに決定的な台本を read_bytes から返す",
+    ),
+    (
+        "env-ignore-file-test",
+        cfg!(feature = "env-ignore-file-test"),
+        "環境の源を読まず、常に既定へ落ちる",
+    ),
+    (
+        "env-rewrite-test",
+        cfg!(feature = "env-rewrite-test"),
+        "持ち越しの 1 度目で /etc/environment の TERM を書き換える台本を返す",
     ),
     (
         "persist-check-test",

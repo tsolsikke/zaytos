@@ -431,6 +431,13 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     std::fs::create_dir_all(format!("{staging}/tmp"))
         .expect("failed to create /tmp in the staging");
 
+    // **`/root` を作る（f-1。`ADR-0042` と `ADR-0052`）。** **中身は置かない**
+    // ——**`root` のホームであって、像に焼くものではない。**
+    // **`git` は空のディレクトリを追跡しないので、種ではなくここで作る**
+    // （`/tmp` と同じ理由）。
+    std::fs::create_dir_all(format!("{staging}/root"))
+        .expect("failed to create /root in the staging");
+
     std::fs::create_dir_all(format!("{staging}/data"))
         .expect("failed to create /data in the staging");
     // **`zi` が開く複数行のファイル（zi-d-1）。**

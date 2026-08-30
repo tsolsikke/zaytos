@@ -65,7 +65,7 @@
 //! - `31` `argv[0]` が "syscall-test" でなかった
 //! - `32` `argv[1]` が "alpha" でなかった
 //! - `33` `argv[2]`（終端）が NULL でなかった
-//! - `34` `envp[0]` が `"TERM=zaytos"` でなかった（EV。**環境が空の構成では素通りする**）
+//! - `34` `envp[0]` が NULL だった（f-1。**以前は `"TERM=zaytos"` と突き合わせていたが、源がファイルになって前提が消えたりする**）
 //! - `61` `envp` の終端が NULL でなかった
 //! - `62` `brk(0)` が正の上端を返さなかった
 //! - `63` `brk` で 2 ページ伸ばせなかった
@@ -220,12 +220,16 @@ const MOTD_BLOCKS: u32 = 8;
 const SYS_GETDENTS64: u32 = 217;
 /// ルートディレクトリのエントリ数（`. .. lost+found bin data etc tmp`）。
 ///
-/// **DIR-1c で 6 から 7 になった**——**`/tmp` を像に足したためである**
-/// （ADR-0042 が「作る」と決めた唯一のもの）。
+/// **DIR-1c で 6 から 7 になった**——**`/tmp` を像に足したためである。**
+/// **f-1 で 8 になった**——**`/root` を足したためである**（`ADR-0052`）。
 ///
 /// **この数は像の中身に寄りかかっている。** **置き場所を足したら、
-/// ここも数え直すこと**（実測。足した日にこの検算が起動を止めた）。
-const ROOT_ENTRIES: u32 = 7;
+/// ここも数え直すこと**（実測。**2 度とも、足した日にこの検算が起動を
+/// 止めた**——**止まるので気づける。**）。
+///
+/// **数え方**——**ルート直下の項を数えた。** **`.` と `..` を含む**
+/// （いまは `. .. lost+found bin data etc tmp root` の 8 つである）。
+const ROOT_ENTRIES: u32 = 8;
 /// `linux_dirent64` の `d_reclen` の位置。
 const DIRENT_RECLEN_OFFSET: u32 = 16;
 /// `linux_dirent64` の `d_type` の位置。
@@ -245,20 +249,23 @@ const ARGV0_LEN: u32 = 13;
 /// `argv[1]` の長さ（NUL を含む）。
 const ARGV1_LEN: u32 = 6;
 
-/// 期待する環境の要素数（EV。DIR-1 で 2 になった）。
+/// 期待する環境の要素数（EV。DIR-1 で 2、f-1 で 3 になった）。
 ///
-/// **既定は `TERM` と `PATH` の 2 つである**（ADR-0041・ADR-0043）。
+/// **既定は `TERM` と `PATH` と `HOME` の 3 つである**
+/// （`ADR-0041`・`ADR-0043`・`ADR-0052`）。
 /// **落とす破壊の構成では、そのぶん減る**——**破壊が入った構成で、
 /// この検算が別の理由で落ちないようにする。**
 /// **`kernel/build.rs` の `USER_PROGRAM_CFGS` が feature から `--cfg` を導く。**
-const EXPECTED_ENVC: usize =
-    2 - (cfg!(env_drop_term) as usize) - (cfg!(env_drop_path) as usize);
-
-/// `envp[0]` として突き合わせる長さ（NUL を含む。`"TERM=zaytos"`）。
 ///
-/// **環境が空の構成では 0 にする。** **`repe cmpsb` は ecx が 0 なら
-/// 何もしない**ので、**同じ asm のまま検算だけが素通りする。**
-const TERM_LEN: u32 = if cfg!(env_drop_term) { 0 } else { 12 };
+/// # ここは源がファイルであることに寄りかかっている
+///
+/// **f-1 で環境の源は `/etc/environment` になった**（`ADR-0052`）。
+/// **この数は「種が置いた行が 3 本ある」ことを前提にしている**
+/// ——**`kernel/fsimage/seed/etc/environment` を編集すると、ここが落ちる。**
+/// **落ちるのは正しい**——**種を変えたなら、期待も変えるべきである。**
+const EXPECTED_ENVC: usize =
+    3 - (cfg!(env_drop_term) as usize) - (cfg!(env_drop_path) as usize);
+
 
 /// `envp` の終端の位置（`rsp` からのバイト）。
 ///
@@ -339,23 +346,24 @@ core::arch::global_asm!(
     "  cmp qword ptr [rsp + 24], 0",
     "  mov edi, 33",
     "  jne 9f",
-    // **envp[0] は \"TERM=zaytos\"（EV。ADR-0041）。**
+    // **envp[0] は NULL でない（f-1）。**
     //
-    // **`repe cmpsb` は ecx が 0 なら何もしない**ので、**破壊の構成
-    // （環境が空）では `{term_len}` が 0 になり、この検算は素通りする。**
-    // **`rsi` へ終端の 0 を読み込むだけで、参照はしない。**
+    // **以前は \"TERM=zaytos\" と突き合わせていた**（EV。ADR-0041）。
+    // **f-1 で環境の源がファイルになり、その前提が消えた**——
+    // **利用者が `/etc/environment` の `TERM` を書き換えると、
+    // ここが落ちて起動が止まる。** **実際に踏んだ**（実測。2026-08-31。
+    // `--persist-env-test` の 2 度目が止まった）。
     //
-    // **`xor eax, eax` で ZF を立ててから入る。** **`mov` は flags を変えない**
-    // ので、**ecx が 0 のときは直前の flags がそのまま残る**——
-    // **それに頼ると、前の検算の結果でここの合否が決まる。**
-    "  cld",
-    "  mov rsi, [rsp + 32]",
-    "  lea rdi, [rip + TERM_TEXT]",
-    "  mov ecx, {term_len}",
-    "  xor eax, eax",
-    "  repe cmpsb",
+    // **`/data/writable` の演習と同じ族である**——**能力を足すと、
+    // 既存の判定の前提が消える**（`docs/troubleshooting.md`）。
+    //
+    // **したがって、ここはカーネルが保証するものだけを見る**——
+    // **`envp[0]` が在ること。** **値の突き合わせはホスト側へ移した**
+    // （`--shell-test` の `echo a$TERM b` が `azaytos b` を出すこと。
+    // **あちらは源がファイルでも定数でも、値そのものを見る**）。
+    "  cmp qword ptr [rsp + 32], 0",
     "  mov edi, 34",
-    "  jne 9f",
+    "  je 9f",
     // envp の終端。**位置は要素数で決まる（EV）。**
     "  cmp qword ptr [rsp + {envp_terminator}], 0",
     "  mov edi, 61",
@@ -1222,9 +1230,6 @@ core::arch::global_asm!(
     "  .asciz \"syscall-test\"",
     "ARGV1_TEXT:",
     "  .asciz \"alpha\"",
-    // **カーネルが積む環境の写し（EV）。** 食い違えば 34 番が落ちる。
-    "TERM_TEXT:",
-    "  .asciz \"TERM=zaytos\"",
     // **`/etc/motd` の中身の写し。** 種のファイルと食い違えば 12 番が落ちる。
     "MOTD_BYTES:",
     "  .ascii \"welco\"",
@@ -1287,7 +1292,6 @@ core::arch::global_asm!(
     argc = const EXPECTED_ARGC,
     argv0_len = const ARGV0_LEN,
     argv1_len = const ARGV1_LEN,
-    term_len = const TERM_LEN,
     envp_terminator = const ENVP_TERMINATOR_OFFSET,
     auxv_type = const AUXV_TYPE_OFFSET,
     brk = const SYS_BRK,

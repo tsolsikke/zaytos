@@ -199,6 +199,11 @@ zi-test = []
 # 検証（P-c-3）: 持ち越しの2度目で /data/lines を cat するだけの台本。
 # zi-test の台本はあの回で /data/lines を編集するので、2度目には使えない。
 persist-check-test = []
+# 検証（f-1）: 持ち越しの1度目で zi が /etc/environment の TERM を書き換える台本。
+env-rewrite-test = []
+# 破壊（f-1）: 環境の源を読まず、常に既定へ落ちる。ADR-0052 の Decision 1 を
+# 直接否定する形で、出る環境は種と同じなので値を見る判定は落ちない。
+env-ignore-file-test = []
 # 破壊（zi-d-1）: zi が上下の矢印を捨てる。カーソルが行を移らないので、
 # 編集が別の行に入る——zi-test の判定行（row の推移）が捕まえる。
 zi-cursor-ignore-updown-test = []

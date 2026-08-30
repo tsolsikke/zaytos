@@ -290,7 +290,8 @@ pub fn read_bytes(dst: &mut [u8]) -> usize {
     #[cfg(any(
         feature = "zi-test",
         feature = "view-test",
-        feature = "persist-check-test"
+        feature = "persist-check-test",
+        feature = "env-rewrite-test"
     ))]
     {
         let taken = script::next_bytes(dst);
@@ -530,7 +531,8 @@ pub fn arm_input_script() {
     #[cfg(any(
         feature = "zi-test",
         feature = "view-test",
-        feature = "persist-check-test"
+        feature = "persist-check-test",
+        feature = "env-rewrite-test"
     ))]
     script::arm();
 }
@@ -555,7 +557,8 @@ pub fn arm_input_script() {
 #[cfg(any(
     feature = "zi-test",
     feature = "view-test",
-    feature = "persist-check-test"
+    feature = "persist-check-test",
+    feature = "env-rewrite-test"
 ))]
 pub(crate) mod script {
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -737,7 +740,27 @@ pub(crate) mod script {
     /// `disk0.img` は起こす前と同じである**——**ホストが前後で読んで
     /// 突き合わせられる。**
     #[cfg(feature = "persist-check-test")]
-    const SCRIPT: &[u8] = b"/bin/cat /data/lines\n\x0c";
+    const SCRIPT: &[u8] = b"/bin/cat /data/lines\n\
+        /bin/echo $TERM\n\x0c";
+
+    /// 台本（f-1）。**持ち越しの1度目で `/etc/environment` を書き換える。**
+    ///
+    /// **`zi` で `TERM` の行の末尾へ 1 字足す。** **行は上から
+    /// 注釈 2 本・`TERM` ・`PATH` ・`HOME` なので、`jj` で 3 行目へ降りる。**
+    /// **`l` を 11 回打つと `TERM=zaytos` の最後の字に居る**（それ以上は
+    /// 右端で止まる）。**`a` で後ろへ挿し、`X` を打つ。**
+    ///
+    /// # なぜ `TERM` なのか
+    ///
+    /// **`PATH` を書き換えると、2 度目のシェルが名前でコマンドを引けなく
+    /// なり、台本ごと動かない**（運用者の指示）。**`HOME` は `~` の展開が
+    /// 使っており、そちらの判定と混ざる。**
+    #[cfg(feature = "env-rewrite-test")]
+    const SCRIPT: &[u8] = b"/bin/zi /etc/environment\n\
+        jj\
+        lllllllllll\
+        aX\x1b\x04\
+        :wq\n\x0c";
 
     /// 台本（VIEW-b）。**`less` を駆動する。**
     ///

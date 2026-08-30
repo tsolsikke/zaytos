@@ -988,6 +988,30 @@ unsafe fn expand_word(stack: *const u64, word: &[u8], out: &mut [u8]) -> Option<
         *used += 1;
         true
     };
+    // **`~` を先に展開する（f-1。`ADR-0049` の Addendum の 4）。**
+    //
+    // **語の先頭に在るときだけである**（規則 1）。**`~` 単独と `~/` だけ**
+    // （規則 2。`~user` は作らない）。**`HOME` が未定義なら展開しない**
+    // （規則 3。**空へ落とすと `~/foo` が `/foo` になり、意味の違うパスになる**）。
+    //
+    // **`$NAME` より先に置くのは、`HOME` の値へ直接展開するためである**
+    // （規則 4）。**`$HOME` を経由すると 2 度展開になり、値に `$` が
+    // 含まれるときに差が出る。**
+    if word.first() == Some(&b'~') && (word.len() == 1 || word[1] == b'/') {
+        // SAFETY: 呼び出し元契約をそのまま渡す。
+        if let Some(home) = (unsafe { userlib::environment(stack, b"HOME") }) {
+            // SAFETY: カーネルが NUL 終端で積んだ文字列である。
+            let length = unsafe { userlib::length_of(home, VALUE_MAX) };
+            for index in 0..length {
+                // SAFETY: 上で数えた長さの範囲である。
+                if !put(unsafe { *home.add(index) }, &mut used) {
+                    return None;
+                }
+            }
+            at = 1;
+        }
+    }
+
     while at < word.len() {
         let byte = word[at];
         // **`$` の直後が名前の先頭でなければ、`$` は字である**（`ADR-0049` の 5）。

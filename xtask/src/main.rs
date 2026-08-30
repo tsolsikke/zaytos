@@ -1399,6 +1399,7 @@ fn main() -> Result<()> {
        cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
        cargo xtask run --persist-test [--rebuild-between]
        cargo xtask run --persist-zi-test [--rebuild-between]
+       cargo xtask run --persist-env-test [--rebuild-between]
        cargo xtask check [--update-reference]   (ホストテストの名前の集合を取り直す)
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
@@ -1589,6 +1590,12 @@ fn main() -> Result<()> {
                 return cmd_shell_test(mode);
             }
             // **持ち越しの判定（P-a）。**
+            if rest.iter().any(|a| a == "--persist-env-test") {
+                return cmd_persist_env_test(
+                    rest.iter().any(|a| a == "--rebuild-between"),
+                    rest.iter().any(|a| a == "--ignore-file"),
+                );
+            }
             if rest.iter().any(|a| a == "--persist-zi-test") {
                 return cmd_persist_zi_test(rest.iter().any(|a| a == "--rebuild-between"));
             }
@@ -6552,6 +6559,20 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     // **`echo $1` を打った。** **出るのは `$1` そのものである。**
     let dollar_stayed_literal = after_shell.contains("\n$1\n") && echo_argcs.get(5) == Some(&2);
 
+    // **`~` が `HOME` へ展開されること（f-1。`ADR-0049` の Addendum）。**
+    //
+    // **3 本を 1 つにまとめる。** **どれが落ちても「`~` の展開が壊れた」の
+    // 1 つの主張である。**
+    //
+    // **期待値を定数で持たない。** **`HOME` の値はカーネルが積んだもので、
+    // シリアルの `env-source:` の側からは読めない**ので、
+    // **`echo $HOME` と `echo ~` が同じ物を出すことを見る**——
+    // **源が独立である**（片方は `$NAME` の展開、片方は `~` の展開）。
+    let tilde_alone = after_shell.contains("\n/root\n");
+    let tilde_with_path = after_shell.contains("\n/root/x\n");
+    let tilde_inside_a_word = after_shell.contains("\na~b\n");
+    let tilde_expanded = tilde_alone && tilde_with_path && tilde_inside_a_word;
+
     // **`Ctrl+K` が挿入点から行末まで消したこと（SE-f）。**
     let ctrl_k_cut = after_shell.contains("zash: kk: cannot run");
     let ctrl_k_left_the_line = after_shell.contains("zash: kkxx: cannot run");
@@ -6711,6 +6732,10 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
          {ran_oo} time(s))"
     );
     println!("{context}: the dollar stayed literal = {dollar_stayed_literal}");
+    println!(
+        "{context}: ~ expands to HOME at the start of a word only = {tilde_expanded} \
+         (~ = {tilde_alone}, ~/x = {tilde_with_path}, a~b left alone = {tilde_inside_a_word})"
+    );
     println!("{context}: echo $PATH printed the value = {expanded_a_value}");
     println!("{context}: the empty word was dropped = {empty_word_was_dropped}");
     println!("{context}: an unset name expanded to nothing = {expanded_to_nothing}");
@@ -6754,6 +6779,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && the_pending_line_came_back
         && duplicates_were_not_stored
         && dollar_stayed_literal
+        && tilde_expanded
         && expanded_a_value
         && empty_word_was_dropped
         && expanded_to_nothing
@@ -6944,6 +6970,35 @@ const SHELL_TEST_LINES: &[&[&str]] = &[
         "e", "c", "h", "o", "spc", "a", "shift-4", "shift-t", "shift-e", "shift-r", "shift-m",
         "spc", "b", "ret",
     ],
+    // `echo ~`（f-1。`ADR-0049` の Addendum）。**`~` が `HOME` へ展開されること。**
+    //
+    // **`~` は Shift+`^` である**（JIS の表。`0x0D`）。**monitor のキー名は
+    // 物理の位置を指しており、名前は US の刻印から付いている**ので
+    // `shift-equal` である（`bracket_right` と同じ事情）。
+    //
+    // **出るのは `/root` である**（`ADR-0052` の Decision 5）。
+    // **展開していなければ `~` がそのまま出る。**
+    &["e", "c", "h", "o", "spc", "shift-equal", "ret"],
+    // `echo ~/x`（f-1）。**`~/` の形も展開されること。**
+    //
+    // **出るのは `/root/x` である。** **`~` 単独だけを見ると、
+    // 「`~` で始まる語をすべて `HOME` に置き換える」形が通ってしまう。**
+    &[
+        "e",
+        "c",
+        "h",
+        "o",
+        "spc",
+        "shift-equal",
+        "slash",
+        "x",
+        "ret",
+    ],
+    // `echo a~b`（f-1。Addendum の規則 1）。**語の先頭でなければ字である。**
+    //
+    // **出るのは `a~b` そのものである。** **こちらが主張の主である**
+    // ——**展開する側だけを見ると、どこでも展開する形が通る。**
+    &["e", "c", "h", "o", "spc", "a", "shift-equal", "b", "ret"],
     // aa / bb を打ってから 上 上（SE-c）。**履歴を矢印で辿る。**
     //
     // **辿れていれば `aa` が 2 度走る**（打ったときと、辿って Enter したとき）。
@@ -8608,6 +8663,135 @@ fn cmd_persist_zi_test(rebuild_between: bool) -> Result<()> {
     } else {
         println!("{context}: FAILED");
         if rebuild_between {
+            println!("{context}: the sabotage was caught (this run is expected to fail)");
+            return Ok(());
+        }
+        bail!("{context}: at least one judgement did not hold")
+    }
+}
+
+/// 環境の持ち越しの判定（f-1。`ADR-0052`）。
+///
+/// # 主張は 1 つである
+///
+/// **「1 度目に `/etc/environment` を書き換えると、2 度目の環境が変わる」。**
+///
+/// **これが「源がファイルである」ことの最も強い主張である**——
+/// **カーネルの定数のままなら、ファイルを書き換えても何も変わらない。**
+///
+/// # 3 つの層で見る
+///
+/// 1. **カーネルが言う**——1 度目に `zi` の保存が装置へ届く
+/// 2. **外の道具が言う**——`debugfs` が `disk0.img` から `/etc/environment`
+///    を読み、`TERM` の行が書き換わっている
+/// 3. **2 度目の Ring 3 が読み戻す**——`echo $TERM` が新しい値を出す。
+///    **加えて、2 度目のカーネルの `env-source:` の行が
+///    `from_file=true` で 3 行採っている**
+///
+/// # 書き換えるのは `TERM` である
+///
+/// **`PATH` を書き換えると、2 度目のシェルが名前でコマンドを引けなくなり、
+/// 台本ごと動かない**（運用者の指示）。**`HOME` は `~` の展開が使っており、
+/// そちらの判定と混ざる。**
+///
+/// # 破壊
+///
+/// **`rebuild_between` を立てると、2 度目の前に像を作り直す。**
+/// **2 度目は種のままの `TERM=zaytos` を読むので、3 層目が落ちる。**
+fn cmd_persist_env_test(rebuild_between: bool, ignore_file: bool) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let context = if rebuild_between {
+        "persist-env-test rebuild-between"
+    } else if ignore_file {
+        "persist-env-test env-ignore-file-test"
+    } else {
+        "persist-env-test"
+    };
+    let sabotage: &[&str] = if ignore_file {
+        &["env-ignore-file-test"]
+    } else {
+        &[]
+    };
+
+    println!("=== {context}: boot 1 (env-rewrite-test, rebuilding the disk)");
+    let first = capture_one_boot(
+        &workspace_root,
+        &[&["env-rewrite-test"], sabotage].concat(),
+        DiskImage::Rebuild,
+        "env-boot1",
+        "script-done:",
+    )?;
+    let saved = first.contains("user-flush: /bin/zi wrote the image back");
+    println!("{context}: boot 1's save reached the device = {saved}");
+
+    // **装置の中身を外の道具に言わせる。**
+    let esp_dir = workspace_root.join("target").join("esp");
+    let disk = disk_image_path(&esp_dir);
+    let on_device = debugfs_read(&disk, "/etc/environment")?;
+    let device_carries_the_edit = on_device
+        .as_ref()
+        .map(|bytes| {
+            let text = String::from_utf8_lossy(bytes);
+            text.lines().any(|line| line.trim_end() == "TERM=zaytosX")
+        })
+        .unwrap_or(false);
+    println!(
+        "{context}: the device carries the rewritten TERM = {device_carries_the_edit} \
+         (debugfs read {:?} byte(s))",
+        on_device.as_ref().map(|bytes| bytes.len())
+    );
+
+    println!("=== {context}: boot 2 (persist-check-test, keeping the disk)");
+    let second = capture_one_boot(
+        &workspace_root,
+        &[&["persist-check-test"], sabotage].concat(),
+        if rebuild_between {
+            DiskImage::Rebuild
+        } else {
+            DiskImage::Keep
+        },
+        "env-boot2",
+        "script-done:",
+    )?;
+    let read_from_the_file = second
+        .lines()
+        .any(|line| line.contains("env-source:") && line.contains("from_file=true"));
+    let plain = strip_ansi(&second);
+    let printed = program_output(
+        plain
+            .split("/bin/echo $TERM")
+            .nth(1)
+            .unwrap_or("")
+            .split("script-done:")
+            .next()
+            .unwrap_or(""),
+    );
+    // **期待値は 1 度目が書いたものである。** **ホストが定数で持たない
+    // ——**装置から読んだ行の値を切り出して使う。**
+    let expected = on_device
+        .as_ref()
+        .and_then(|bytes| {
+            String::from_utf8_lossy(bytes)
+                .lines()
+                .find_map(|line| line.trim_end().strip_prefix("TERM=").map(str::to_string))
+        })
+        .unwrap_or_default();
+    let ring3_sees_the_new_value = !expected.is_empty() && printed == expected;
+    println!("{context}: boot 2 read the environment from the file = {read_from_the_file}");
+    println!(
+        "{context}: boot 2's Ring 3 printed the rewritten TERM = {ring3_sees_the_new_value} \
+         (printed {printed:?}, the device says {expected:?})"
+    );
+
+    if saved && device_carries_the_edit && read_from_the_file && ring3_sees_the_new_value {
+        println!("{context}: PASS");
+        if rebuild_between || ignore_file {
+            bail!("{context}: the sabotage was NOT caught; every judgement still held")
+        }
+        Ok(())
+    } else {
+        println!("{context}: FAILED");
+        if rebuild_between || ignore_file {
             println!("{context}: the sabotage was caught (this run is expected to fail)");
             return Ok(());
         }
@@ -13885,7 +14069,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 26,
-    full: 255,
+    full: 258,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
