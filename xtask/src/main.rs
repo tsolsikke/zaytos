@@ -1399,6 +1399,7 @@ fn main() -> Result<()> {
        cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
        cargo xtask run --persist-test [--rebuild-between]
        cargo xtask run --persist-zi-test [--rebuild-between]
+       cargo xtask check [--update-reference]   (ホストテストの名前の集合を取り直す)
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
 
@@ -1717,7 +1718,11 @@ fn main() -> Result<()> {
             if full && commit {
                 bail!("--full already includes everything --commit runs; pass one of them");
             }
-            cmd_check(full, commit)
+            cmd_check(
+                full,
+                commit,
+                args[1..].iter().any(|a| a == "--update-reference"),
+            )
         }
         // `--full` から外した確率的な項目を手で回す。外した項目を回す手段が
         // なければ、外すことは「守らないと決める」ことになる。
@@ -9652,6 +9657,102 @@ const CHECKS: &[(&str, &[&str])] = &[
     ("fmt --check", &["fmt", "--all", "--", "--check"]),
 ];
 
+/// ホストテストの名前の集合を持つ参照。
+const HOST_TEST_REFERENCE: &str = "xtask/reference/host-tests.txt";
+
+/// ホストテストが走る単位。**`bootloader` も見る**（いまは 0 本だが、
+/// **0 本であることも「消えた」の判定に要る**）。
+const HOST_TEST_PACKAGES: &[&str] = &["common", "kernel", "xtask", "bootloader"];
+
+/// 走るホストテストの名前を、パッケージ名を冠して並べる。
+///
+/// **パッケージ名を冠する理由は、名前が衝突するためである**——
+/// `addr::tests::...` は `common` と `kernel` の両方に在りうる。
+fn collect_host_test_names(workspace_root: &Path) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for package in HOST_TEST_PACKAGES {
+        let output = Command::new("cargo")
+            .current_dir(workspace_root)
+            .args(["test", "-p", package, "--", "--list"])
+            .output()
+            .with_context(|| format!("failed to list the host tests of {package}"))?;
+        if !output.status.success() {
+            bail!("cargo test -p {package} -- --list did not succeed");
+        }
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if let Some(name) = line.strip_suffix(": test") {
+                names.push(format!("{package}::{name}"));
+            }
+        }
+    }
+    // **並べ替えるが、重複は落とさない。** **同じ名前が 2 つ在ることも
+    // 見えたほうがよい。**
+    names.sort();
+    Ok(names)
+}
+
+/// 走るホストテストの名前の集合を、参照と突き合わせる。
+///
+/// # なぜ本数ではなく名前なのか
+///
+/// **本数は相殺に弱い。** **実測で踏んだ**——**1 本が走らなくなった同じ
+/// コミットで 1 本足しており、合計が動かなかった**（2026-08-30。
+/// `docs/verification-coverage.md`）。**名前の集合なら、消えた名前が
+/// そのまま出る。**
+///
+/// # なぜ主張にしたのか（報告に留めなかったのか）
+///
+/// **取り直す手間を実測で比べた。** **`#[test]` を触ったコミットは 88 本、
+/// 起動ログの参照を取り直したコミットは 131 本である**（全 751 本のうち。
+/// 2026-08-30）。**既に払っている手間より軽い。**
+///
+/// # clippy と二重に持つ
+///
+/// **`--all-targets` を付けた clippy は、今回の形（属性が外れる）を
+/// 捕まえる。** **それでもこちらを持つ**——**捕まえる範囲が違う。**
+/// **`#[ignore]` を付ける・`cfg` の裏へ入る・丸ごと消す、は
+/// lint に出ない。** **「走る集合」を直接見るのはこちらだけである。**
+fn check_host_test_names(workspace_root: &Path, update: bool) -> Result<String> {
+    let names = collect_host_test_names(workspace_root)?;
+    let reference = workspace_root.join(HOST_TEST_REFERENCE);
+    let recorded = format!("{}\n", names.join("\n"));
+    if update {
+        if let Some(parent) = reference.parent() {
+            fs::create_dir_all(parent).context("failed to create the reference directory")?;
+        }
+        fs::write(&reference, &recorded).context("failed to record the host test names")?;
+        return Ok(format!(
+            "reference updated ({} name(s)) at {HOST_TEST_REFERENCE}",
+            names.len()
+        ));
+    }
+    let Ok(expected) = fs::read_to_string(&reference) else {
+        bail!(
+            "{HOST_TEST_REFERENCE} is missing; run `cargo xtask check --update-reference` once \
+             to record it"
+        )
+    };
+    let before: Vec<&str> = expected.lines().collect();
+    let after: Vec<&str> = names.iter().map(String::as_str).collect();
+    if before == after {
+        return Ok(format!("OK ({} name(s))", names.len()));
+    }
+    let gone: Vec<&&str> = before.iter().filter(|n| !after.contains(n)).collect();
+    let fresh: Vec<&&str> = after.iter().filter(|n| !before.contains(n)).collect();
+    for name in &gone {
+        println!("    gone:  {name}");
+    }
+    for name in &fresh {
+        println!("    new:   {name}");
+    }
+    bail!(
+        "{} name(s) gone and {} new; if the change is intended, re-record with \
+         `cargo xtask check --update-reference` and say so in the commit",
+        gone.len(),
+        fresh.len()
+    )
+}
+
 /// 直接の割り込み制御（`InterruptGuard` 非経由の `cli`/`sti`）を許可する箇所。
 ///
 /// 排他は `common::critical` の [`InterruptGuard`]/`Locked<T>` の裏に閉じる決まりで
@@ -12402,7 +12503,7 @@ fn check_one_manifest_default_features(
 ///
 /// **1 つ落ちてもそこで止めない。** 止めると「直しては再実行」を
 /// 繰り返すことになり、全体像が分からない。最後にまとめて報告する。
-fn cmd_check(full: bool, commit: bool) -> Result<()> {
+fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     // 外した確率的な項目の一覧が実態を指しているかを先に見る（列挙の腐りを防ぐ）。
     check_flaky_list_matches_tables()?;
 
@@ -12466,6 +12567,16 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
         } else {
             println!("--- {name}: FAILED ({status})");
             failed.push((*name).to_string());
+        }
+    }
+
+    total += 1;
+    begin_item("the host test names match the reference");
+    match check_host_test_names(&workspace_root, update_reference) {
+        Ok(message) => println!("--- host test names: {message}"),
+        Err(error) => {
+            println!("--- host test names: FAILED ({error})");
+            failed.push("host test names".to_string());
         }
     }
 
@@ -13773,8 +13884,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 25,
-    full: 254,
+    base: 26,
+    full: 255,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
