@@ -9541,6 +9541,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "O_TRUNC の切り詰めを落とし、古い中身の後ろへ追記する",
     ),
     (
+        "repaint-blank-cells-test",
+        cfg!(feature = "repaint-blank-cells-test"),
+        "代替画面から戻る描き直しが、塗った色のままの空白も描く",
+    ),
+    (
         "zi-test",
         cfg!(feature = "zi-test"),
         "打鍵の代わりに決定的な台本を read_bytes から返す",

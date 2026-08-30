@@ -76,6 +76,30 @@ impl Cell {
     /// **描き直す側は、印の在るセルを飛ばす**（左のセルが 2 桁ぶん描く）。
     pub const CONTINUATION: u8 = 0b0000_0001;
 
+    /// 面を `cleared_to` で丸ごと塗った後、このセルを描き直す必要があるか
+    /// （PERF-h）。
+    ///
+    /// # なぜ飛ばせるのか
+    ///
+    /// **代替画面から戻るとき、[`crate::screen`] の呼び手は裏面を背景色で
+    /// 丸ごと塗ってから、セルを1つずつ描き直している。** **空白のセルを
+    /// 描いても、塗ったのと同じ色で同じ矩形を塗り直すだけである**——
+    /// **出る絵は変わらない。**
+    ///
+    /// **字が空白でも、背景色が塗った色と違えば描く。** 選択や色付きの
+    /// 空白がそれである。
+    ///
+    /// **前景色は見ない。** **空白のグリフは何も描かないので、
+    /// 前景色は絵に出ない。**
+    ///
+    /// # なぜここに置くのか
+    ///
+    /// **判断は純粋である**（ハード依存が無い）。**ホストで固定する**
+    /// ——`CLAUDE.md` の絶対規則の 5 つ目。
+    pub fn needs_repaint_after_clear(&self, cleared_to: Rgb) -> bool {
+        self.ch != ' ' || self.bg != cleared_to
+    }
+
     /// 全角の右半分か（e-3）。
     pub const fn is_continuation(&self) -> bool {
         self.attrs & Self::CONTINUATION != 0
@@ -587,6 +611,37 @@ mod line_shift_tests {
 
 #[cfg(test)]
 mod tests {
+
+    /// **塗った後に描き直すセルの見分け（PERF-h）。**
+    ///
+    /// **主張は 2 つあり、飛ばさない側が主である。**
+    ///
+    /// - **空白で、背景が塗った色と同じなら飛ばす**（絵が変わらない）
+    /// - **それ以外は飛ばさない**——**字が在る / 背景が違う。**
+    ///   **こちらが要る**——**飛ばしすぎると絵が欠けるが、
+    ///   欠けたことは費用の計器には出ない。**
+    #[test]
+    fn only_blank_cells_on_the_cleared_colour_are_skipped() {
+        let cleared = Rgb::new(0, 0, 0);
+        let other = Rgb::new(9, 9, 9);
+        let fg = Rgb::new(1, 2, 3);
+        let cell = |ch, bg| Cell {
+            ch,
+            fg,
+            bg,
+            attrs: 0,
+        };
+
+        assert!(!cell(' ', cleared).needs_repaint_after_clear(cleared));
+        assert!(cell('a', cleared).needs_repaint_after_clear(cleared));
+        assert!(cell(' ', other).needs_repaint_after_clear(cleared));
+        assert!(cell('a', other).needs_repaint_after_clear(cleared));
+
+        // **前景色は見ない。** **空白のグリフは何も描かない。**
+        let mut bright = cell(' ', cleared);
+        bright.fg = Rgb::new(255, 255, 255);
+        assert!(!bright.needs_repaint_after_clear(cleared));
+    }
 
     /// **全角の右半分に印が付く（e-3）。**
     ///

@@ -79,6 +79,21 @@ pub struct FlushStats {
     pub foreground_writes: u64,
     /// その `write` が運んだバイト数の合計（PERF）。
     pub foreground_bytes: u64,
+    /// 代替画面から戻るときの全面描き直しに費やした TSC サイクル（P-c-2 の測定）。
+    ///
+    /// **`draw_cycles` の内訳ではない**——**[`Screen::repaint_from_cells`] は
+    /// `set_alternate_screen` の中から呼ばれ、`draw_cycles` の外側に居る。**
+    /// **別に測る理由は、`:wq` の待ちの支配項を探したことである**（P-c-2）。
+    pub repaint_cycles: u64,
+    /// その全面描き直しが走った回数（P-c-2 の測定）。
+    pub repaint_count: u64,
+    /// 全面描き直しで実際に描いたセルの数（PERF-h）。
+    ///
+    /// **サイクルと違って揺れない**ので、**判定はこちらで行う**
+    /// （運用者の指示。「回数か量で。サイクルは (info)」）。
+    /// **画面のセル数より少ないことが主張である**——
+    /// **塗った色のままの空白を飛ばしているなら、必ず少ない。**
+    pub repaint_cells: u64,
     /// グリフを描く呼び出しに費やした TSC サイクル（PERF-c の測定）。
     ///
     /// **`draw_cycles` の内訳である**——**消す経路とこれを引いた残りが、
@@ -500,7 +515,14 @@ impl Console {
             // **判定は画面の実物を読むので落ちる**（セルだけを読む判定では
             // 落ちない。だから ES-d の判定はピクセルまで見ている）。
             #[cfg(not(feature = "alt-screen-skip-repaint-test"))]
-            self.repaint_from_cells();
+            {
+                // **測るためだけに囲んである（P-c-2）。**
+                let started = common::cpu::read_timestamp_counter();
+                self.repaint_from_cells();
+                self.stats.repaint_cycles +=
+                    common::cpu::read_timestamp_counter().wrapping_sub(started);
+                self.stats.repaint_count += 1;
+            }
         }
     }
 
@@ -530,6 +552,23 @@ impl Console {
                 let Some(cell) = self.grid.cell(column, row) else {
                     continue;
                 };
+                // **塗った色のままの空白は飛ばす（PERF-h）。**
+                //
+                // **直前の `clear_all` が同じ色で同じ矩形を塗っている**ので、
+                // **描いても絵は変わらない。** 判断は
+                // [`common::screen::Cell::needs_repaint_after_clear`] が持ち、
+                // ホストで固定してある。
+                //
+                // 破壊 (PERF-h, repaint-blank-cells-test): 飛ばさない。
+                // **PERF-h の前の形そのものである**——**出る絵は同じで、
+                // 描くセルが 1,180 から 8,000 へ増える**（実測）。
+                // **画面を読む判定は 1 つも落ちない**ので、
+                // **描いたセルの数を見る判定でしか捕まらない。**
+                #[cfg(not(feature = "repaint-blank-cells-test"))]
+                if !cell.needs_repaint_after_clear(Self::rgb(self.background)) {
+                    continue;
+                }
+                self.stats.repaint_cells += 1;
                 let foreground = Color::rgb(cell.fg.red, cell.fg.green, cell.fg.blue);
                 let background = Color::rgb(cell.bg.red, cell.bg.green, cell.bg.blue);
                 let glyph = font::glyph(cell.ch);

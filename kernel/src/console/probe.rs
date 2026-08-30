@@ -550,12 +550,24 @@ fn observe_view_window(serial: &mut SerialPort, console: &mut crate::console::Co
 /// 描画の層ごとの数をそのまま出す（PERF）。
 ///
 /// **主張しない。** **差分を取るのはホスト側である。**
+/// 描く費用の観測点（PERF-c）。
+///
+/// # 項は末尾へ足すこと（PERF-h で踏んだ）
+///
+/// **ホスト側にはこの行を位置で読む者が居る**（`--view-test` と
+/// `--zi-test` の費用の差分。`split_whitespace` して番号で引く）。
+/// **途中へ項を挿すと、後ろの項の番号が全部ずれる。**
+/// **実測で 2 項目が落ちた**（2026-08-30。`view test` と
+/// `zi test (cursor-repaint-always-test)`）。
+/// **落ちたので気づけたが、番号がずれても値の形は同じなので、
+/// 別の項が偶然通る形もありうる。**
 fn observe_draw_stats(serial: &mut SerialPort, console: &mut crate::console::Console) {
     let stats = console.stats();
     let _ = writeln!(
         serial,
         "screen-cost: syscalls={} writes={} write_bytes={} glyphs={} draw_cycles={} erase_cycles={} glyph_cycles={} flushes={} \
-         flush_bytes={} flush_cycles={} full_screen_flushes={} ticks={}",
+         flush_bytes={} flush_cycles={} full_screen_flushes={} ticks={} repaints={} repaint_cells={} \
+         repaint_cycles={}",
         stats.terminal_writes,
         stats.foreground_writes,
         stats.foreground_bytes,
@@ -567,7 +579,10 @@ fn observe_draw_stats(serial: &mut SerialPort, console: &mut crate::console::Con
         stats.transferred_bytes,
         stats.flush_cycles_total,
         stats.full_screen_flush_count,
-        crate::idt::timer_ticks()
+        crate::idt::timer_ticks(),
+        stats.repaint_count,
+        stats.repaint_cells,
+        stats.repaint_cycles,
     );
 }
 

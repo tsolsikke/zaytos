@@ -191,6 +191,10 @@ write-file-wrong-inode-test = []
 open-skip-truncate-test = []
 # 検証（zi-d）: 打鍵の代わりに決定的な台本を read_bytes から返す。壊す経路では
 # ない（ansi-test と同じ検証用フック）。sendkey と違い時間に依存しない。
+# 破壊（PERF-h）: 代替画面から戻る描き直しが、塗った色のままの空白も描く。
+# PERF-h の前の形そのもので、出る絵は同じで描くセルが 1,180 から 8,000 へ増える。
+# 画面を読む判定は 1 つも落ちないので、描いたセルの数を見る判定が捕まえる。
+repaint-blank-cells-test = []
 zi-test = []
 # 検証（P-c-3）: 持ち越しの2度目で /data/lines を cat するだけの台本。
 # zi-test の台本はあの回で /data/lines を編集するので、2度目には使えない。

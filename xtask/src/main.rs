@@ -4092,6 +4092,61 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     // 落ちない**——`zi` の他の破壊は開いて閉じる経路を通るので、書き戻しは起きる。
     let save_reached_the_device = serial.contains("user-flush: /bin/zi wrote the image back");
 
+    // **代替画面から戻る描き直しが、塗った色のままの空白を飛ばしている
+    // こと（PERF-h）。**
+    //
+    // # なぜ数で見るのか
+    //
+    // **サイクルは揺れる**（機械と負荷で動く）。**描いたセルの数は
+    // 揺れない**——**台本が同じなら同じ画面になり、同じ数になる。**
+    // **判定は数で行い、サイクルは (info) の側へ置く**（運用者の指示）。
+    //
+    // # 期待値を定数で持たない
+    //
+    // **上限は「画面のセル数 x 描き直した回数」で、どちらもシリアルから
+    // 読む**——`zi: winsize rows=R columns=C` と `repaints=N` である。
+    // **飛ばしているなら必ずこれより少ない。**
+    // **飛ばさない形（`repaint-blank-cells-test`）では、ちょうど等しくなる。**
+    //
+    // # 0 も落とす
+    //
+    // **1 つも描いていなければ、絵が出ていない。** **`> 0` が要る**
+    // ——**「全部飛ばす」も上限より少ないので、上だけでは通ってしまう。**
+    let screen_size = serial
+        .lines()
+        .find_map(|line| line.split("zi: winsize rows=").nth(1))
+        .and_then(|rest| {
+            let mut parts = rest.split(" columns=");
+            let rows: u64 = parts.next()?.trim().parse().ok()?;
+            let columns: u64 = parts
+                .next()?
+                .split_whitespace()
+                .next()?
+                .trim_end_matches('\r')
+                .parse()
+                .ok()?;
+            Some(rows * columns)
+        });
+    let repaint_field = |name: &str| -> Option<u64> {
+        serial
+            .lines()
+            .rfind(|line: &&str| line.contains("screen-cost: "))
+            .and_then(|line| line.split(&format!("{name}=")).nth(1))
+            .and_then(|rest| {
+                rest.split_whitespace()
+                    .next()?
+                    .trim_end_matches('\r')
+                    .parse()
+                    .ok()
+            })
+    };
+    let repaints = repaint_field("repaints");
+    let repaint_cells = repaint_field("repaint_cells");
+    let repaint_skips_blank_cells = match (screen_size, repaints, repaint_cells) {
+        (Some(size), Some(times), Some(cells)) if times > 0 => cells > 0 && cells < size * times,
+        _ => false,
+    };
+
     // **画面の実物で色が出ていること（ES-d）。**
     //
     // **判定を出すのはカーネルである**（`kernel/src/console/probe.rs`）——
@@ -4903,6 +4958,11 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     );
     println!("{context}: the save reached the device = {save_reached_the_device}");
     println!(
+        "{context}: leaving the alternate screen skips the blank cells = \
+         {repaint_skips_blank_cells} (it drew {repaint_cells:?} cell(s) over {repaints:?} \
+         repaint(s); the screen holds {screen_size:?})"
+    );
+    println!(
         "{context}: the only failure in the round was the refused rmdir = \
          {only_the_refused_rmdir_failed} ({failures_in_the_round} non-zero exit(s))"
     );
@@ -4944,6 +5004,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && saved
         && roundtrip
         && save_reached_the_device
+        && repaint_skips_blank_cells
         && prompt_colored
         && prompt_symbol_plain
         && winsize_agrees
@@ -12644,6 +12705,8 @@ fn cmd_check(full: bool, commit: bool) -> Result<()> {
             "zi-edit-redraws-everything-test",
             // **P-c-1 で 1 つ増えた。** **据え忘れが黙る形を塞ぐ。**
             "virtio-skip-install-test",
+            // **PERF-h で 1 つ増えた。** **出る絵は同じで、費用だけが増える形。**
+            "repaint-blank-cells-test",
         ] {
             total += 1;
             begin_item(&format!("the zi test catches {feature}"));
@@ -13649,7 +13712,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 25,
-    full: 253,
+    full: 254,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
