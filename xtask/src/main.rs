@@ -8617,12 +8617,19 @@ fn cmd_persist_zi_test(rebuild_between: bool) -> Result<()> {
 
     // **Ring 3 が出した本文と、装置から読んだ本文を突き合わせる。**
     let plain = strip_ansi(&second);
+    // **`script-done:` ではなく次の行で区切る（f-1 で踏んだ）。**
+    //
+    // **`persist-check-test` の台本に `/bin/echo $TERM` が増えた**ので、
+    // **`script-done:` まで取ると `cat` の出力にあちらが混ざる**
+    // （実測。26 バイトのはずが 33 バイトになった）。
+    // **台本を変えるときは、台本に寄りかかっている判定を数え直すこと**
+    // （`--zi-test` の doc に同じ注意が在る。**2 度目である**）。
     let printed = program_output(
         plain
             .split("/bin/cat /data/lines")
             .nth(1)
             .unwrap_or("")
-            .split("script-done:")
+            .split("/bin/echo")
             .next()
             .unwrap_or(""),
     );
