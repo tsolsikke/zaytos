@@ -6568,13 +6568,30 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         .filter_map(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
         .filter_map(|digits| digits.parse().ok())
         .collect();
-    // **打った順に並ぶ。** 最初の 4 行は `echo $PATH` / `echo a $UNSET b` /
-    // `echo $UNSET` / `echo a$TERM b` で、**落とす形なら 2 / 3 / 1 / 3 である。**
+    // **添字ではなく名前で引く（f-2 で直した）。**
     //
-    // **SE-f で 2 行増えた**ので、**前の 4 つだけを見る**——**後ろの 2 行は
-    // 別の判定が見ている**（`Ctrl+W` と `$` の残り）。**全部を 1 本で見ると、
-    // 落ちたときにどれが壊れたか分からない。**
-    let echo_word_counts = echo_argcs.len() >= 6 && echo_argcs[..4] == [2usize, 3, 1, 3];
+    // **以前は生の添字だった**（`echo_argcs.get(4)` のように書いてあった）。
+    // **f-1 と f-1b が台本の途中へ `echo` の行を 4 つ足したとき、`Ctrl+W` と
+    // `$1` を見ている 2 本の添字がずれた**——**ずれた先の行の `argc` が
+    // たまたま同じ 2 だったので、判定は緑のままだった**（実測。2026-08-31）。
+    // **「偶然に頼った捕捉は捕捉ではない」の実例である。**
+    //
+    // **名前で引き、本数も突き合わせる**——**台本へ `echo` の行を足して
+    // ここへ名前を足さなければ、本数の判定が落ちる。** **静かにずれる形を、
+    // 落ちる形へ変えた。**
+    let echo_lines_are_accounted_for = echo_argcs.len() == ECHO_LINES_IN_ORDER.len();
+    let echo_argc = |name: &str| -> Option<usize> {
+        let index = ECHO_LINES_IN_ORDER
+            .iter()
+            .position(|entry| *entry == name)?;
+        echo_argcs.get(index).copied()
+    };
+    // **最初の 4 行は展開の規則を見ている**（`ADR-0049` の判定）。
+    // **落とす形なら 2 / 3 / 1 / 3 である。**
+    let echo_word_counts = echo_argc("echo $PATH") == Some(2)
+        && echo_argc("echo a $UNSET b") == Some(3)
+        && echo_argc("echo $UNSET") == Some(1)
+        && echo_argc("echo a$TERM b") == Some(3);
 
     let typed_echo_path = after_shell_plain.contains("zaytos$ echo $PATH\n");
     let expanded_a_value = typed_echo_path && after_shell.contains("\n/bin\n");
@@ -6585,7 +6602,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     let kept_the_empty_word = after_shell.contains("\na  b\n");
     let empty_word_was_dropped = dropped_the_empty_word && !kept_the_empty_word && echo_word_counts;
     // **語が 0 個になったこと。** **`argc` が 1（`echo` 自身だけ）である。**
-    let expanded_to_nothing = echo_argcs.get(2) == Some(&1);
+    let expanded_to_nothing = echo_argc("echo $UNSET") == Some(1);
     // **`$` の直後以外の字が壊れないこと。**
     let expanded_inside_a_word =
         after_shell.contains("\nazaytos b\n") && echo_argcs.get(3) == Some(&3);
@@ -6629,12 +6646,12 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     let ctrl_w_output = after_shell.contains("\nqq\n");
     let ctrl_w_left_the_word = after_shell.contains("\nqq rrw\n");
     let ctrl_w_deleted_the_word =
-        ctrl_w_output && !ctrl_w_left_the_word && echo_argcs.get(4) == Some(&2);
+        ctrl_w_output && !ctrl_w_left_the_word && echo_argc("echo qq rr + Ctrl+W") == Some(2);
 
     // **`$` の直後が名前の先頭でなければ字として残ること（SE-f。`ADR-0049` の 5）。**
     //
     // **`echo $1` を打った。** **出るのは `$1` そのものである。**
-    let dollar_stayed_literal = after_shell.contains("\n$1\n") && echo_argcs.get(5) == Some(&2);
+    let dollar_stayed_literal = after_shell.contains("\n$1\n") && echo_argc("echo $1") == Some(2);
 
     // **`~` が `HOME` へ展開されること（f-1。`ADR-0049` の Addendum）。**
     //
@@ -6833,6 +6850,12 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
          wanted {})",
         mode.expects_the_tilde_to_expand()
     );
+    println!(
+        "{context}: every /bin/echo run in the script is named = {echo_lines_are_accounted_for} \
+         (ran {} time(s), named {})",
+        echo_argcs.len(),
+        ECHO_LINES_IN_ORDER.len()
+    );
     println!("{context}: echo $PATH printed the value = {expanded_a_value}");
     println!("{context}: the empty word was dropped = {empty_word_was_dropped}");
     println!("{context}: an unset name expanded to nothing = {expanded_to_nothing}");
@@ -6878,6 +6901,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && dollar_stayed_literal
         && tilde_expanded
         && layout_is_in_use
+        && echo_lines_are_accounted_for
         && expanded_a_value
         && empty_word_was_dropped
         && expanded_to_nothing
@@ -6936,6 +6960,32 @@ static LONG_LINE_SCRIPT: [&str; LONG_LINE_KEYS + 1] = {
 /// **`/` を含む側を先に打つ。** あちらは 3 本目より前から通っていた道なので、
 /// **固定の既定を入れて壊れていないことを先に見る。**
 /// **そのあと `/` を含まない側を打つ。**
+/// 台本の中で `/bin/echo` を起こす行を、**打つ順に**並べた名前（f-2）。
+///
+/// # なぜ名前の一覧を持つのか
+///
+/// **判定が `argc` を添字で引いていたためである。** **台本の途中へ `echo` の行を
+/// 足すと添字がずれるが、ずれた先の値がたまたま同じなら緑のままになる**
+/// ——**f-1 と f-1b で実際にそうなっていた**（実測。2026-08-31。
+/// `Ctrl+W` と `$1` の 2 本が、`~` の行を見ていた）。
+///
+/// **ここに名前を並べ、本数を突き合わせる。** **台本へ `echo` の行を足したのに
+/// ここへ足さなければ、`echo lines accounted for` が落ちる。**
+///
+/// **名前は打った行そのものにしてある**（編集の鍵を使う行だけ、何をしたかを添える）。
+const ECHO_LINES_IN_ORDER: &[&str] = &[
+    "echo $PATH",
+    "echo a $UNSET b",
+    "echo $UNSET",
+    "echo a$TERM b",
+    "echo ~",
+    "echo ~/x",
+    "echo a~b",
+    "echo @+",
+    "echo qq rr + Ctrl+W",
+    "echo $1",
+];
+
 const SHELL_TEST_LINES: &[&[&str]] = &[
     // /bin/ls
     &["slash", "b", "i", "n", "slash", "l", "s", "ret"],
