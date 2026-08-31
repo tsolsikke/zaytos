@@ -13122,6 +13122,27 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }
         }
 
+        // **環境の源がファイルであること（f-1。`ADR-0052`）。**
+        //
+        // **`zi` で `/etc/environment` を書き換え、2 度目の環境が変わる。**
+        // **判定 4 本を 1 項目にまとめてある**——**どれが落ちても
+        // 「源がファイルになっていない」の 1 つの主張である。**
+        for (label, rebuild, ignore) in [
+            ("persist (env)", false, false),
+            ("persist (env, rebuilt in between)", true, false),
+            ("persist (env, the source is ignored)", false, true),
+        ] {
+            total += 1;
+            begin_item(&format!("the environment source claim: {label}"));
+            match cmd_persist_env_test(rebuild, ignore) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
+            }
+        }
+
         // **`zi` で保存したものが 2 度目に見えること（P-c-3）。**
         //
         // **P-a と変化の作り方が違う**——**あちらはカーネルの中の破壊、
