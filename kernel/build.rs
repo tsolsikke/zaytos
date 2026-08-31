@@ -132,6 +132,7 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
     // **載せないと、`common` 側を直してもユーザープログラムが建て直されない。**
     // **`userlib.rs` を載せているのと同じ理由である。**
     println!("cargo:rerun-if-changed={manifest_dir}/../common/src/window.rs");
+    println!("cargo:rerun-if-changed={manifest_dir}/../common/src/env.rs");
 
     let script = format!("{manifest_dir}/userland/user.ld");
     println!("cargo:rerun-if-changed={script}");
@@ -182,6 +183,10 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
         (
             "CARGO_FEATURE_SHELL_KEEP_CONTROL_BYTES_TEST",
             "zash_keep_control_bytes",
+        ),
+        (
+            "CARGO_FEATURE_SHELL_EXPORT_NOT_PUSHED_TEST",
+            "zash_export_not_pushed",
         ),
         (
             "CARGO_FEATURE_SHELL_SKIP_EXPANSION_TEST",

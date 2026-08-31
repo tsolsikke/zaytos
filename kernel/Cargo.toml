@@ -102,6 +102,10 @@ shell-keep-control-bytes-test = []
 # 破壊（SE-d。ADR-0049）: zash が `$NAME` を展開しない。`echo $PATH` が
 # `$PATH` をそのまま出すので、`--shell-test` の「展開が起きた」判定が落ちる。
 shell-skip-expansion-test = []
+# 破壊（f-2。ADR-0053）: zash が起動時に積まれていた本数までしか子へ渡さない。
+# `export` した名前が子へ届かなくなるので、`--shell-test` の「子が見る envc」の
+# 判定だけが落ちる。シェルの表は引けるままなので、`echo $NAME` と `set` は緑である。
+shell-export-not-pushed-test = []
 # 破壊（SE-c）: zash が打った行を履歴へ積まない。上キーでも Ctrl+P でも
 # 前の行が戻らないので、`--shell-test` の履歴の判定2本が落ちる。
 shell-drop-history-test = []

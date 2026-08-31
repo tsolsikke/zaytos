@@ -104,9 +104,15 @@ core::arch::global_asm!(
     "  jne 9f",
 
     // 孫を起こそうとする。**深さの上限に達しているので断られるはず。**
+    //
+    // **`envp` を明示的に置く（f-2。`ADR-0053` の Decision 2）。**
+    // **RDX に意味ができた**——**置かないと、入口の値がそのまま `envp` として
+    // 読まれ、`-EAGAIN` ではなく `-EFAULT` が返りうる**（写しは深さの判定より
+    // 前に走る）。**たまたま 0 でも置く**——**偶然に頼った捕捉は捕捉ではない。**
     "  mov eax, {sys_spawn}",
     "  lea rdi, [rip + HELLO_PATH]",
     "  lea rsi, [rip + ARGV_HELLO]",
+    "  lea rdx, [rip + ENVP_EMPTY]",
     "  int 0x80",
     "  cmp rax, {minus_eagain}",
     "  mov edi, 1",
@@ -129,6 +135,11 @@ core::arch::global_asm!(
     ".balign 8",
     "ARGV_HELLO:",
     "  .quad HELLO_ARG0",
+    "  .quad 0",
+    // **空の `envp`。** **「環境が無い」は空の配列で表す**（`argv` と同じ規則。
+    // NULL は `-EFAULT` である）。
+    ".balign 8",
+    "ENVP_EMPTY:",
     "  .quad 0",
     "HELLO_ARG0:",
     "  .asciz \"hello\"",

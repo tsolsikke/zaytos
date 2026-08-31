@@ -165,3 +165,236 @@ mod tests {
         assert_eq!(trim_env_line(b"   "), b"");
     }
 }
+
+/// `export` が断る理由（f-2。`ADR-0053` の Decision 5）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EnvSetError {
+    /// 行そのものが壊れている（名前の規則・長さ）。
+    Line(EnvReject),
+    /// 表が満杯である。**黙って切り詰めない**（`ADR-0041` の Decision 5 と同じ形）。
+    Full,
+}
+
+/// 環境の表（f-2。`ADR-0053`）。
+///
+/// # 誰が使うのか
+///
+/// **カーネルとシェルの両方である。** カーネルは `/etc/environment` の行を
+/// [`EnvTable::push`] で積み、シェルは `export` を [`EnvTable::set`] で受ける。
+///
+/// # 2 つの入口が在る理由
+///
+/// **`push` は追記だけで、同じ名前が 2 度来ても 2 行になる**——**源のファイルの
+/// 振る舞いを変えない**（`ADR-0052` は「先頭から採り、残りを落とす」と決めた）。
+///
+/// **`set` は上書きする**——**`export` は同じ名前を何度も打てるほうが自然で、
+/// 打つたびに枠が減る形は驚きが大きい。**
+///
+/// # NUL を持って置く
+///
+/// **行の直後に必ず NUL を置く**（[`EnvTable::line_with_nul`]）。
+/// **`spawn` へ渡すのは NUL 終端の文字列の配列だからである**——
+/// **渡す直前に写しを作る形にすると、写し先をもう 1 つ持つことになる。**
+pub struct EnvTable {
+    lines: [[u8; ENV_LINE_MAX + 1]; MAX_ENVP],
+    lens: [usize; MAX_ENVP],
+    count: usize,
+}
+
+impl Default for EnvTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EnvTable {
+    /// 空の表。
+    pub const fn new() -> Self {
+        Self {
+            lines: [[0; ENV_LINE_MAX + 1]; MAX_ENVP],
+            lens: [0; MAX_ENVP],
+            count: 0,
+        }
+    }
+
+    /// 入っている本数。
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    /// 全部落とす。
+    pub fn clear(&mut self) {
+        self.count = 0;
+    }
+
+    /// `index` 番目の行（NUL を含まない）。**範囲外なら空である。**
+    pub fn line(&self, index: usize) -> &[u8] {
+        if index >= self.count {
+            return b"";
+        }
+        &self.lines[index][..self.lens[index]]
+    }
+
+    /// `index` 番目の行（末尾の NUL を含む）。**範囲外なら空である。**
+    ///
+    /// **`spawn` へ渡すポインタはここから採る。**
+    pub fn line_with_nul(&self, index: usize) -> &[u8] {
+        if index >= self.count {
+            return b"";
+        }
+        &self.lines[index][..self.lens[index] + 1]
+    }
+
+    /// 追記する。**入らなければ偽を返す。** **同じ名前でも上書きしない。**
+    pub fn push(&mut self, line: &[u8]) -> bool {
+        if self.count >= MAX_ENVP || line.len() > ENV_LINE_MAX {
+            return false;
+        }
+        self.write(self.count, line);
+        self.count += 1;
+        true
+    }
+
+    /// `NAME=VALUE` を置く（`export`）。**同じ名前が在れば上書きし、枠を消費しない。**
+    ///
+    /// **断るのは 2 つの場合だけである**——**行が壊れているか、満杯か。**
+    /// **どちらでも表は変わらない**（部分的に適用しない）。
+    pub fn set(&mut self, line: &[u8]) -> Result<(), EnvSetError> {
+        match classify_env_line(line) {
+            // **`export` に「無視する行」は無い。** 空行も `#` で始まる行も
+            // `=` を持たないので、`NoEquals` として断る。
+            EnvLine::Ignore => return Err(EnvSetError::Line(EnvReject::NoEquals)),
+            EnvLine::Reject(reason) => return Err(EnvSetError::Line(reason)),
+            EnvLine::Take => {}
+        }
+        let equals = match line.iter().position(|byte| *byte == b'=') {
+            Some(at) => at,
+            // `classify_env_line` が `Take` を返した時点で `=` は在る。
+            None => return Err(EnvSetError::Line(EnvReject::NoEquals)),
+        };
+        if let Some(index) = self.index_of(&line[..equals]) {
+            self.write(index, line);
+            return Ok(());
+        }
+        if self.count >= MAX_ENVP {
+            return Err(EnvSetError::Full);
+        }
+        self.write(self.count, line);
+        self.count += 1;
+        Ok(())
+    }
+
+    /// 名前で値を引く。**無ければ `None`。**
+    ///
+    /// **前方一致では引かない**——`TERM` は `TERMINFO` に当たらない
+    /// （`userlib::environment` と同じ規則である）。
+    pub fn value(&self, name: &[u8]) -> Option<&[u8]> {
+        let index = self.index_of(name)?;
+        Some(&self.lines[index][name.len() + 1..self.lens[index]])
+    }
+
+    /// 名前の行の位置。
+    fn index_of(&self, name: &[u8]) -> Option<usize> {
+        (0..self.count).find(|index| {
+            let line = &self.lines[*index][..self.lens[*index]];
+            line.len() > name.len() && line[name.len()] == b'=' && &line[..name.len()] == name
+        })
+    }
+
+    /// 1 行を書き、直後に NUL を置く。
+    fn write(&mut self, index: usize, line: &[u8]) {
+        self.lines[index][..line.len()].copy_from_slice(line);
+        self.lines[index][line.len()] = 0;
+        self.lens[index] = line.len();
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use super::{EnvReject, EnvSetError, EnvTable, ENV_LINE_MAX, MAX_ENVP};
+
+    /// `export` は上書きで、枠を消費しない（f-2。`ADR-0053` の Decision 5）。
+    #[test]
+    fn setting_the_same_name_twice_overwrites_and_keeps_the_slot() {
+        let mut table = EnvTable::new();
+        table.set(b"TERM=zaytos").unwrap();
+        assert_eq!(table.count(), 1);
+        table.set(b"TERM=dumb").unwrap();
+        assert_eq!(table.count(), 1);
+        assert_eq!(table.value(b"TERM"), Some(&b"dumb"[..]));
+    }
+
+    /// 満杯なら断る。**表は変わらない**（黙って落とさない）。
+    #[test]
+    fn setting_a_new_name_when_full_is_refused_and_changes_nothing() {
+        let mut table = EnvTable::new();
+        for index in 0..MAX_ENVP {
+            let line = [b'A' + index as u8, b'=', b'1'];
+            assert!(table.set(&line).is_ok());
+        }
+        assert_eq!(table.count(), MAX_ENVP);
+        assert_eq!(table.set(b"Z=1"), Err(EnvSetError::Full));
+        assert_eq!(table.count(), MAX_ENVP);
+        assert_eq!(table.value(b"Z"), None);
+        // **満杯でも上書きは通る。** 枠を要らないからである。
+        assert!(table.set(b"A=2").is_ok());
+        assert_eq!(table.value(b"A"), Some(&b"2"[..]));
+    }
+
+    /// 壊れた行は断る。**表は変わらない。**
+    #[test]
+    fn setting_a_broken_line_is_refused_and_changes_nothing() {
+        let mut table = EnvTable::new();
+        assert_eq!(
+            table.set(b"1BAD=x"),
+            Err(EnvSetError::Line(EnvReject::BadName))
+        );
+        assert_eq!(
+            table.set(b"NOEQUALS"),
+            Err(EnvSetError::Line(EnvReject::NoEquals))
+        );
+        // **空行と `#` は「無視」ではなく「断る」である**（`export` の入口には
+        // 読み飛ばす行が無い）。
+        assert_eq!(table.set(b""), Err(EnvSetError::Line(EnvReject::NoEquals)));
+        let mut long = [b'A'; ENV_LINE_MAX + 1];
+        long[1] = b'=';
+        assert_eq!(table.set(&long), Err(EnvSetError::Line(EnvReject::TooLong)));
+        assert_eq!(table.count(), 0);
+    }
+
+    /// 名前で引く。**前方一致では引かない。**
+    #[test]
+    fn a_value_is_looked_up_by_the_whole_name() {
+        let mut table = EnvTable::new();
+        table.set(b"TERMINFO=/usr").unwrap();
+        assert_eq!(table.value(b"TERM"), None);
+        table.set(b"TERM=zaytos").unwrap();
+        assert_eq!(table.value(b"TERM"), Some(&b"zaytos"[..]));
+        // **空の値も引ける**（`NAME=` は「空の値」である）。
+        table.set(b"EMPTY=").unwrap();
+        assert_eq!(table.value(b"EMPTY"), Some(&b""[..]));
+    }
+
+    /// 行は NUL で終わる。**`spawn` へ渡すポインタがそれを要る。**
+    #[test]
+    fn every_line_carries_a_trailing_nul() {
+        let mut table = EnvTable::new();
+        table.set(b"PATH=/bin").unwrap();
+        assert_eq!(table.line(0), b"PATH=/bin");
+        assert_eq!(table.line_with_nul(0), b"PATH=/bin\0");
+        // **短い行で上書きしても、NUL の位置は追う。**
+        table.set(b"PATH=/").unwrap();
+        assert_eq!(table.line_with_nul(0), b"PATH=/\0");
+    }
+
+    /// `push` は上書きしない。**源のファイルの振る舞いを変えない。**
+    #[test]
+    fn pushing_the_same_name_twice_keeps_both_lines() {
+        let mut table = EnvTable::new();
+        assert!(table.push(b"TERM=a"));
+        assert!(table.push(b"TERM=b"));
+        assert_eq!(table.count(), 2);
+        // **引くのは先に置いたほうである**（`ADR-0052` の「先頭から採る」）。
+        assert_eq!(table.value(b"TERM"), Some(&b"a"[..]));
+    }
+}

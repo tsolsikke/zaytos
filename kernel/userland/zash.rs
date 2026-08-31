@@ -45,6 +45,16 @@
 #[path = "userlib.rs"]
 mod userlib;
 
+// **環境の表と 1 行の判定は `common` に在る**（f-2。`ADR-0053` / `ADR-0045`）。
+//
+// **`dead_code` を許す。** **カーネル側だけが使う口が在る**——`push` は源の
+// ファイルを積む側で、シェルは `set` しか呼ばない。
+#[path = "../../common/src/env.rs"]
+#[allow(dead_code)]
+mod env;
+
+use env::{EnvReject, EnvSetError, EnvTable, MAX_ENVP};
+
 use userlib::{exit, read, write_all, STDERR, STDOUT};
 
 /// 1 行の最大の長さ。
@@ -108,6 +118,24 @@ const SGR_RESET: &[u8] = b"\x1b[0m";
 const BANNER: &[u8] = b"zash: ready\n";
 /// 組み込みの `exit`。
 const BUILTIN_EXIT: &[u8] = b"exit";
+/// 組み込みの `export`（f-2。`ADR-0053` の Decision 3）。
+///
+/// **`ADR-0043` の基準(1) に当たる**——**シェル自身の状態（環境の表）を変える。**
+const BUILTIN_EXPORT: &[u8] = b"export";
+/// 組み込みの `set`（f-2。`ADR-0053` の Decision 4）。
+///
+/// **一覧の対象がシェル自身の表なので、外部に置かない。**
+const BUILTIN_SET: &[u8] = b"set";
+/// `export` の誤りの前半。
+const EXPORT_HEAD: &[u8] = b"zash: export: ";
+/// 名前として読めない語。
+const EXPORT_NOT_A_NAME: &[u8] = b": not a name\n";
+/// 行が長すぎる。
+const EXPORT_TOO_LONG: &[u8] = b": too long\n";
+/// 表が満杯である。
+const EXPORT_FULL: &[u8] = b": no room in the environment\n";
+/// 引数が無い。
+const EXPORT_USAGE: &[u8] = b"zash: export: NAME=VALUE\n";
 /// 起こせなかったときの返事（前半）。
 const NOT_FOUND_HEAD: &[u8] = b"zash: ";
 /// 起こせなかったときの返事（後半）。
@@ -174,8 +202,6 @@ const CTRL_E: u8 = 0x05;
 /// 制御バイトの上限。**これ未満は字ではない（SE-b。`ADR-0050`）。**
 const FIRST_PRINTABLE: u8 = 0x20;
 
-/// 環境の値として読む上限（SE-d）。**行より長い値は入りきらないので断る。**
-const VALUE_MAX: usize = 4096;
 
 /// 破壊 (SE-d, shell-skip-expansion-test): 展開を素通りさせる。
 const SKIP_EXPANSION: bool = cfg!(zash_skip_expansion);
@@ -301,41 +327,87 @@ const TERM_WITH_COLOR: &[u8] = b"zaytos";
 /// `TERM` を引く名前。
 const TERM_NAME: &[u8] = b"TERM";
 
-/// プロンプトに色を付けるか（EV）。**`zaytos_main` が起動時に決める。**
+/// シェルが持つ環境の表（f-2。`ADR-0053` の Decision 1）。
 ///
-/// # なぜ既定を「付けない」にするのか
+/// # なぜシェルが持つのか
 ///
-/// **`TERM` が読めなかったときに、読めたときと同じ見た目になってはいけない。**
-/// **同じにすると、環境が届いたかどうかを画面から区別できない**
-/// ——**判定が何も主張していないのと同じである**（ADR-0041 の到達条件）。
+/// **`export` で変えられるのはシェル自身の表だけだからである。**
+/// **初期スタックの `envp` は張り替えられない**——**1 ページの中に在り、
+/// 伸ばす場所が無い。**
 ///
-/// **端末の種類が分からないなら、装飾しないのが安全側でもある。**
-static COLOR_PROMPT: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+/// **子へ積むのもこの表である**（`spawn` の第 3 引数）。
+///
+/// # 書き手は 1 本である
+///
+/// **このプログラムは Ring 3 で 1 本だけ走る**（`RESOLVED` と同じ事情）。
+static mut ENVIRONMENT: EnvTable = EnvTable::new();
 
-/// `PATH` の値（DIR-1。ADR-0043）。**`zaytos_main` が起動時に控える。**
-///
-/// # 無ければ名前だけの語は起こせない
-///
-/// **既定の探索先を持たない。** **持つと、`PATH` が届かなかったときに
-/// 届いたときと同じ振る舞いになり、機構が観測できなくなる**
-/// （`COLOR_PROMPT` と同じ形である）。
-///
-/// **POSIX は `PATH` が未設定のときの振る舞いを実装定義としている。**
-/// **こちらは「探せない」を選ぶ。**
-static mut PATH_VALUE: *const u8 = core::ptr::null();
+/// 起動時に積まれていた本数（f-2）。**破壊のためだけに控える。**
+static mut INITIAL_ENV_COUNT: usize = 0;
 
-/// `PATH` を控える（DIR-1。ADR-0043）。
+/// 表を読む。
+///
+/// # Safety
+///
+/// **書き手はこのプログラムだけで、単一の実行文脈である。**
+unsafe fn environment_table() -> &'static EnvTable {
+    // SAFETY: 呼び出し元契約による。
+    unsafe { &*core::ptr::addr_of!(ENVIRONMENT) }
+}
+
+/// 表を書く。
+///
+/// # Safety
+///
+/// **書き手はこのプログラムだけで、単一の実行文脈である。**
+unsafe fn environment_table_mut() -> &'static mut EnvTable {
+    // SAFETY: 呼び出し元契約による。
+    unsafe { &mut *core::ptr::addr_of_mut!(ENVIRONMENT) }
+}
+
+/// 名前で値を引く（f-2）。**引く先は表であって、初期スタックではない。**
+fn environment_value(name: &[u8]) -> Option<&'static [u8]> {
+    // SAFETY: このプログラムは Ring 3 で 1 本だけ走る。
+    unsafe { environment_table() }.value(name)
+}
+
+/// 起動時の `envp` を表へ写す（f-2。`ADR-0053` の Decision 1）。
+///
+/// # 写す理由
+///
+/// **以後の引きも積みも表を源にするためである。** **初期スタックを引き続ける形に
+/// すると、`export` した名前だけ別の場所から来ることになり、源が 2 つになる。**
+///
+/// # 入らない行は落とす
+///
+/// **表の上限は [`MAX_ENVP`] である。** **カーネルが積む本数は同じ上限で
+/// 決まっている**ので、いまは落ちる行が無い。
 ///
 /// # Safety
 ///
 /// `stack` が `_start` の時点の `rsp` であること。
-unsafe fn remember_path(stack: *const u64) {
-    // SAFETY: 呼び出し元契約をそのまま渡す。
-    if let Some(value) = unsafe { userlib::environment(stack, PATH_NAME) } {
-        // SAFETY: このプログラムは Ring 3 で 1 本だけ走る。**書くのはここだけである。**
-        unsafe { PATH_VALUE = value };
+unsafe fn adopt_environment(stack: *const u64) {
+    let mut index = 0usize;
+    while index < MAX_ENVP {
+        // SAFETY: 呼び出し元契約をそのまま渡す。
+        let Some(entry) = (unsafe { userlib::environment_at(stack, index) }) else {
+            break;
+        };
+        // SAFETY: カーネルが NUL 終端で積んだ文字列である。
+        let length = unsafe { userlib::length_of(entry, env::ENV_LINE_MAX) };
+        let mut line = [0u8; env::ENV_LINE_MAX];
+        for at in 0..length {
+            // SAFETY: 上で数えた長さの範囲である。
+            line[at] = unsafe { *entry.add(at) };
+        }
+        // SAFETY: 書き手はこのプログラムだけである。
+        let _ = unsafe { environment_table_mut() }.push(&line[..length]);
+        index += 1;
     }
+    // SAFETY: 同上。
+    let count = unsafe { environment_table() }.count();
+    // SAFETY: 書くのはここだけで、起動時の 1 度である。
+    unsafe { INITIAL_ENV_COUNT = count };
 }
 
 /// `PATH` の要素の下で語を起こす（DIR-1。ADR-0043）。
@@ -361,37 +433,29 @@ unsafe fn remember_path(stack: *const u64) {
 /// # Safety
 ///
 /// `argv` が NULL 終端のポインタ配列であること。
-unsafe fn spawn_via_path(command: &[u8], argv: &[*const u8]) -> i64 {
-    // SAFETY: 書き手はこのプログラムだけで、起動時に一度だけ書く。
-    let path = unsafe { PATH_VALUE };
-    if path.is_null() {
+unsafe fn spawn_via_path(command: &[u8], argv: &[*const u8], envp: &[*const u8]) -> i64 {
+    // **引くたびに表から取る（f-2。`ADR-0053` の Decision 6）。**
+    // **起動時に控えると、`export PATH=...` が効かない**——**変えたのに
+    // 効かない形が残る。**
+    let Some(path) = environment_value(PATH_NAME) else {
         return userlib::MINUS_ENOENT;
-    }
+    };
 
     let mut at = 0usize;
     loop {
         // **要素を 1 つ取る。** 終端か区切りまで進む。
         let start = at;
         let mut length = 0usize;
-        loop {
-            // SAFETY: `PATH` はカーネルが NUL 終端で積んだ文字列である。
-            let byte = unsafe { *path.add(start + length) };
-            if byte == 0 || byte == PATH_SEPARATOR {
-                break;
-            }
+        while start + length < path.len() && path[start + length] != PATH_SEPARATOR {
             length += 1;
         }
-        // SAFETY: 上で数えた位置である。
-        let ended = unsafe { *path.add(start + length) } == 0;
+        let ended = start + length >= path.len();
 
         if length > 0 && length <= DIR_MAX && command.len() <= NAME_MAX {
             // SAFETY: このプログラムは Ring 3 で 1 本だけ走る。
             // **`RESOLVED` へ触るのはこの経路だけである。**
             let resolved = unsafe { &mut *core::ptr::addr_of_mut!(RESOLVED) };
-            for index in 0..length {
-                // SAFETY: 要素の範囲である。
-                resolved[index] = unsafe { *path.add(start + index) };
-            }
+            resolved[..length].copy_from_slice(&path[start..start + length]);
             let mut end = length;
             // **要素が `/` で終わっていたら重ねない。**
             if resolved[end - 1] != b'/' {
@@ -404,8 +468,9 @@ unsafe fn spawn_via_path(command: &[u8], argv: &[*const u8]) -> i64 {
             // 読まれない。
             resolved[end] = 0;
 
-            // SAFETY: 組み立てた先は NUL 終端で、`argv` は呼び出し元の契約による。
-            let status = unsafe { userlib::spawn(&resolved[..end], argv) };
+            // SAFETY: 組み立てた先は NUL 終端で、`argv` と `envp` は呼び出し元の
+            // 契約による。
+            let status = unsafe { userlib::spawn(&resolved[..end], argv, envp) };
             if status != userlib::MINUS_ENOENT {
                 return status;
             }
@@ -418,33 +483,18 @@ unsafe fn spawn_via_path(command: &[u8], argv: &[*const u8]) -> i64 {
     }
 }
 
-/// `TERM` を読んで、色を付けるかを決める（EV。ADR-0041）。
+/// `TERM` を読んで、色を付けるかを決める（EV。ADR-0041。f-2 で引き直す形にした）。
 ///
-/// # Safety
+/// # 起動時に控えない
 ///
-/// `stack` が `_start` の時点の `rsp` であること。
-unsafe fn decide_prompt_color(stack: *const u64) {
-    // SAFETY: 呼び出し元契約をそのまま渡す。
-    let Some(value) = (unsafe { userlib::environment(stack, TERM_NAME) }) else {
-        return;
-    };
-    // **突き合わせは NUL まで見る。** 前方一致で決めない——`zaytos2` を
-    // `zaytos` として扱わない。
-    let mut index = 0usize;
-    loop {
-        // SAFETY: 値はカーネルが NUL 終端で積んだ文字列である。
-        let byte = unsafe { *value.add(index) };
-        if index == TERM_WITH_COLOR.len() {
-            if byte == 0 {
-                COLOR_PROMPT.store(true, core::sync::atomic::Ordering::SeqCst);
-            }
-            return;
-        }
-        if byte != TERM_WITH_COLOR[index] {
-            return;
-        }
-        index += 1;
-    }
+/// **プロンプトを出すたびに表から引く**（`ADR-0053` の Decision 6）。
+/// **控えたままだと `export TERM=...` が効かない**——**変えたのに効かない形が残る。**
+///
+/// # 突き合わせは NUL まで見る
+///
+/// **前方一致で決めない**——`zaytos2` を `zaytos` として扱わない。
+fn prompt_is_colored() -> bool {
+    environment_value(TERM_NAME) == Some(TERM_WITH_COLOR)
 }
 
 fn write_prompt() {
@@ -455,9 +505,9 @@ fn write_prompt() {
     #[cfg(zash_prompt_drop_color)]
     let colored = false;
     // **`TERM` が決める（EV。ADR-0041）。** **環境が届かなければ色を付けない**
-    // ——**届いたかどうかが画面から見える形にしてある**（[`COLOR_PROMPT`]）。
+    // ——**届いたかどうかが画面から見える形にしてある**（[`prompt_is_colored`]）。
     #[cfg(not(zash_prompt_drop_color))]
-    let colored = COLOR_PROMPT.load(core::sync::atomic::Ordering::SeqCst);
+    let colored = prompt_is_colored();
 
     let mut out = [0u8; PROMPT_COLOR.len() + PROMPT.len() + SGR_RESET.len()];
     let mut at = 0usize;
@@ -486,12 +536,10 @@ fn write_prompt() {
 /// `stack` が `_start` の時点の `rsp` であること。
 #[no_mangle]
 pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
-    // **プロンプトを出す前に決める（EV。ADR-0041）。**
+    // **初期スタックの環境を表へ写す（f-2。`ADR-0053`）。**
+    // **以後、`TERM` も `PATH` も `$NAME` も、引くのは表である。**
     // SAFETY: 呼び出し元契約により `stack` は初期スタックの先頭を指す。
-    unsafe { decide_prompt_color(stack) };
-    // **`PATH` を控える（DIR-1。ADR-0043）。**
-    // SAFETY: 呼び出し元契約により `stack` は初期スタックの先頭を指す。
-    unsafe { remember_path(stack) };
+    unsafe { adopt_environment(stack) };
     write_all(STDOUT, BANNER);
     write_prompt();
 
@@ -659,9 +707,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                     // 伸ばすと終端の置き場が壊れる。**
                     // **終端の 1 バイトを別に持つ**（`line` と同じ形。上の SE-d の注記）。
                     let mut expanded = [0u8; LINE_MAX + 1];
-                    // SAFETY: `stack` は `zaytos_main` が受けた初期スタックである。
-                    match unsafe { expand_line(stack, &line[..length], &mut expanded[..LINE_MAX]) }
-                    {
+                    match expand_line(&line[..length], &mut expanded[..LINE_MAX]) {
                         // **語が 1 つも残らなかった。** 走らせるものが無い。
                         Some(0) => {}
                         Some(count) => {
@@ -976,7 +1022,7 @@ fn is_name_byte(byte: u8) -> bool {
 /// # Safety
 ///
 /// `stack` が `_start` の時点の `rsp` であること。
-unsafe fn expand_word(stack: *const u64, word: &[u8], out: &mut [u8]) -> Option<usize> {
+fn expand_word(word: &[u8], out: &mut [u8]) -> Option<usize> {
     let mut used = 0usize;
     let mut at = 0usize;
     // 溜める側の受け。
@@ -998,13 +1044,9 @@ unsafe fn expand_word(stack: *const u64, word: &[u8], out: &mut [u8]) -> Option<
     // （規則 4）。**`$HOME` を経由すると 2 度展開になり、値に `$` が
     // 含まれるときに差が出る。**
     if word.first() == Some(&b'~') && (word.len() == 1 || word[1] == b'/') {
-        // SAFETY: 呼び出し元契約をそのまま渡す。
-        if let Some(home) = (unsafe { userlib::environment(stack, b"HOME") }) {
-            // SAFETY: カーネルが NUL 終端で積んだ文字列である。
-            let length = unsafe { userlib::length_of(home, VALUE_MAX) };
-            for index in 0..length {
-                // SAFETY: 上で数えた長さの範囲である。
-                if !put(unsafe { *home.add(index) }, &mut used) {
+        if let Some(home) = environment_value(b"HOME") {
+            for byte in home {
+                if !put(*byte, &mut used) {
                     return None;
                 }
             }
@@ -1029,15 +1071,11 @@ unsafe fn expand_word(stack: *const u64, word: &[u8], out: &mut [u8]) -> Option<
         }
         at = end;
         // **未定義の名前は空へ落とす**（`ADR-0049` の 2）。**何も足さない。**
-        // SAFETY: 呼び出し元契約をそのまま渡す。
-        let Some(value) = (unsafe { userlib::environment(stack, &word[start..end]) }) else {
+        let Some(value) = environment_value(&word[start..end]) else {
             continue;
         };
-        // SAFETY: カーネルが NUL 終端で積んだ文字列である。
-        let length = unsafe { userlib::length_of(value, VALUE_MAX) };
-        for index in 0..length {
-            // SAFETY: 上で数えた長さの範囲である。
-            if !put(unsafe { *value.add(index) }, &mut used) {
+        for byte in value {
+            if !put(*byte, &mut used) {
                 return None;
             }
         }
@@ -1055,10 +1093,11 @@ unsafe fn expand_word(stack: *const u64, word: &[u8], out: &mut [u8]) -> Option<
 /// **展開の結果で語を割らない**（`ADR-0049` の 4）。**値の中に空白が在っても、
 /// 語は増えない**——ここが `sh` と違うところである。
 ///
-/// # Safety
+/// # 引く先は表である（f-2）
 ///
-/// `stack` が `_start` の時点の `rsp` であること。
-unsafe fn expand_line(stack: *const u64, line: &[u8], out: &mut [u8]) -> Option<usize> {
+/// **初期スタックではない**（`ADR-0053` の Decision 1）。**`export` で置いた名前も
+/// 同じ表から引ける。**
+fn expand_line(line: &[u8], out: &mut [u8]) -> Option<usize> {
     let mut used = 0usize;
     let mut at = 0usize;
     let mut word = [0u8; LINE_MAX];
@@ -1074,7 +1113,7 @@ unsafe fn expand_line(stack: *const u64, line: &[u8], out: &mut [u8]) -> Option<
             at += 1;
         }
         // SAFETY: 呼び出し元契約をそのまま渡す。
-        let length = unsafe { expand_word(stack, &line[start..at], &mut word) }?;
+        let length = expand_word(&line[start..at], &mut word)?;
         // **丸ごと空になった語は落とす**（`ADR-0049` の 3）。
         //
         // **ここを外しても振る舞いは変わらない。** **落とす代わりに空白が
@@ -1230,6 +1269,61 @@ fn run_line(line: &mut [u8]) {
     run_with_terminator(line, &starts[..count])
 }
 
+/// 組み込みの `export`（f-2。`ADR-0053` の Decision 3）。
+///
+/// # 書式は `NAME=VALUE` だけである
+///
+/// **`export NAME` は作らない**——**シェル変数という層が無い。**
+/// **作ると `$NAME` が 2 つの表を引くことになる**（`ADR-0053` の Decision 3）。
+///
+/// # 1 行に複数書ける。断ったところで止まる
+///
+/// **左から順に置く。** **最初に断ったところで止め、既に置いたものは残す。**
+///
+/// # 断ったことは必ず人に見える
+///
+/// **黙って切り詰めない・落とさない**（`ADR-0053` の Decision 5）。
+/// **エコー領域へ出す**（`ADR-0046`）。
+fn run_export(line: &[u8], starts: &[usize]) {
+    if starts.len() < 2 {
+        write_all(STDERR, EXPORT_USAGE);
+        return;
+    }
+    for start in &starts[1..] {
+        let word = word_at(line, *start);
+        // SAFETY: このプログラムは Ring 3 で 1 本だけ走る。**書くのはここだけである。**
+        let outcome = unsafe { environment_table_mut() }.set(word);
+        let tail = match outcome {
+            Ok(()) => continue,
+            Err(EnvSetError::Full) => EXPORT_FULL,
+            Err(EnvSetError::Line(EnvReject::TooLong)) => EXPORT_TOO_LONG,
+            Err(EnvSetError::Line(_)) => EXPORT_NOT_A_NAME,
+        };
+        write_all(STDERR, EXPORT_HEAD);
+        write_all(STDERR, word);
+        write_all(STDERR, tail);
+        return;
+    }
+}
+
+/// 組み込みの `set`（f-2。`ADR-0053` の Decision 4）。
+///
+/// # 一覧を出すだけである
+///
+/// **選択肢の切り替え（`set -e` 相当）は作らない**——**切り替える対象が無い。**
+///
+/// # 並べ替えない
+///
+/// **表の順にそのまま出す。** **並べ替えの規則を作る対象が無い。**
+fn run_set() {
+    // SAFETY: このプログラムは Ring 3 で 1 本だけ走る。
+    let table = unsafe { environment_table() };
+    for index in 0..table.count() {
+        write_all(STDOUT, table.line(index));
+        write_all(STDOUT, b"\n");
+    }
+}
+
 /// NUL で切り終えた行から `argv` を組み立て、起こす。
 fn run_with_terminator(line: &[u8], starts: &[usize]) {
     // **組み込みを先に見る。** **既定の前置よりも前である**——
@@ -1238,10 +1332,40 @@ fn run_with_terminator(line: &[u8], starts: &[usize]) {
     if command == BUILTIN_EXIT {
         exit(0);
     }
+    // **組み込みはここで終わる（f-2。`ADR-0053`）。** **`exit` と同じ位置に置く**
+    // ——**`PATH` の探索より前なので、`/bin/export` として探されることは無い。**
+    if command == BUILTIN_EXPORT {
+        run_export(line, starts);
+        return;
+    }
+    if command == BUILTIN_SET {
+        run_set();
+        return;
+    }
 
     let mut argv = [core::ptr::null::<u8>(); MAX_ARGS + 1];
     for (slot, start) in argv.iter_mut().zip(starts.iter()) {
         *slot = line[*start..].as_ptr();
+    }
+
+    // **子へ積む環境を組み立てる（f-2。`ADR-0053` の Decision 1）。**
+    //
+    // **NUL 終端の文字列の配列で、末尾は NULL である**——`argv` と同じ形である。
+    // **表が NUL を持って置いているので、ここで写しを作らない。**
+    let mut envp = [core::ptr::null::<u8>(); MAX_ENVP + 1];
+    // SAFETY: このプログラムは Ring 3 で 1 本だけ走る。
+    let table = unsafe { environment_table() };
+    // 破壊 (f-2, zash_export_not_pushed): **起動時に積まれていた本数までしか
+    // 渡さない。** **`export` した名前が子へ届かなくなる**——`user-load` の
+    // `envc` が変わらない。**シェルの表は引けるままなので、`echo $NAME` も
+    // `set` も緑である**（`ADR-0053` の「破壊」）。
+    #[cfg(zash_export_not_pushed)]
+    // SAFETY: 書くのは起動時の 1 度だけである。
+    let env_count = unsafe { INITIAL_ENV_COUNT };
+    #[cfg(not(zash_export_not_pushed))]
+    let env_count = table.count();
+    for (index, slot) in envp.iter_mut().enumerate().take(env_count) {
+        *slot = table.line_with_nul(index).as_ptr();
     }
 
     // **`/` を含まない語は `/bin/` の下で探す。** 前置した写しを作る。
@@ -1259,13 +1383,13 @@ fn run_with_terminator(line: &[u8], starts: &[usize]) {
         //
         // SAFETY: `command` は `line` の中の NUL 終端の語で、`argv` は NULL 終端の
         // ポインタ配列である（各要素も `line` の中の NUL 終端の語を指す）。
-        unsafe { userlib::spawn(command, &argv[..starts.len() + 1]) }
+        unsafe { userlib::spawn(command, &argv[..starts.len() + 1], &envp[..env_count + 1]) }
     } else {
         // **名前だけの語は `PATH` の下で探す（DIR-1。ADR-0043）。**
         //
         // SAFETY: `argv` は NULL 終端のポインタ配列で、各要素は `line` の中の
         // NUL 終端の語を指す。
-        unsafe { spawn_via_path(command, &argv[..starts.len() + 1]) }
+        unsafe { spawn_via_path(command, &argv[..starts.len() + 1], &envp[..env_count + 1]) }
     };
     if status < 0 {
         write_all(STDERR, NOT_FOUND_HEAD);

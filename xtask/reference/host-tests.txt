@@ -62,6 +62,12 @@ common::elf::tests::rejects_too_short_input
 common::elf::tests::rejects_wrong_machine
 common::elf::tests::segment_data_rejects_a_header_that_the_parser_did_not_produce
 common::elf::tests::walking_all_program_headers_of_an_accepted_image_does_not_panic
+common::env::table_tests::a_value_is_looked_up_by_the_whole_name
+common::env::table_tests::every_line_carries_a_trailing_nul
+common::env::table_tests::pushing_the_same_name_twice_keeps_both_lines
+common::env::table_tests::setting_a_broken_line_is_refused_and_changes_nothing
+common::env::table_tests::setting_a_new_name_when_full_is_refused_and_changes_nothing
+common::env::table_tests::setting_the_same_name_twice_overwrites_and_keeps_the_slot
 common::env::tests::an_environment_line_is_taken_ignored_or_rejected
 common::env::tests::an_environment_line_is_trimmed_on_both_sides
 common::ext2::tests::a_created_inode_names_the_extra_area_the_way_the_image_asks

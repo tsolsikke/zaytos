@@ -1969,7 +1969,7 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
             let _foreground = console
                 .as_deref_mut()
                 .map(kernel::console::install_foreground);
-            kernel::userland::spawn(SHELL_PATH, SHELL_ARGV, 1)
+            kernel::userland::spawn(SHELL_PATH, SHELL_ARGV, 1, None)
         };
         match outcome {
             Ok(outcome) => {
@@ -4981,7 +4981,7 @@ fn verify_bss_is_mapped(logger: &mut Logger<SerialPort>) {
     /// `argv`。**NUL 終端の 1 本である**（`SHELL_ARGV` と同じ形）。
     const BSS_TEST_ARGV: &[u8] = b"bss-test\0";
 
-    let outcome = kernel::userland::spawn(BSS_TEST_PATH, BSS_TEST_ARGV, 1);
+    let outcome = kernel::userland::spawn(BSS_TEST_PATH, BSS_TEST_ARGV, 1, None);
     logger.info(format_args!(
         "bss-check: /bin/bss-test ended {outcome:?} (0 means the .bss reads as zero, keeps \
          writes, and shares a page with .data)"
@@ -7556,7 +7556,7 @@ fn load_embedded_user_program(logger: &mut Logger<SerialPort>) -> Result<(), Use
         // 子の隔離は、下の突き合わせで足す。
         kernel::userland::reset_spawn_accounting();
         let (outcome, held, leaked) =
-            load_user_program(logger, program.image, true, name, program.argv);
+            load_user_program(logger, program.image, true, name, program.argv, None);
         let (child_held, child_leaked) = kernel::userland::spawn_accounting();
         let entry = outcome?;
 
@@ -7673,7 +7673,7 @@ fn verify_corrupt_user_program_is_not_loaded(logger: &mut Logger<SerialPort>) {
         };
 
         let (outcome, held, leaked) =
-            load_user_program(logger, image, false, "corrupt", &[b"corrupt"]);
+            load_user_program(logger, image, false, "corrupt", &[b"corrupt"], None);
 
         let Err(error) = outcome else {
             logger.error(format_args!(
@@ -9382,6 +9382,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "shell-drop-history-test",
         cfg!(feature = "shell-drop-history-test"),
         "zash が打った行を履歴へ積まず、辿れないようにする",
+    ),
+    (
+        "shell-export-not-pushed-test",
+        cfg!(feature = "shell-export-not-pushed-test"),
+        "zash が起動時に積まれていた本数までしか子へ渡さず、export した名前が届かない",
     ),
     (
         "shell-shift-delete-range-test",

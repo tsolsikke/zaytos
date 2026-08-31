@@ -73,6 +73,7 @@
 //! - `65` 伸ばした 2 ページ目の末尾が読み書きできなかった
 //! - `66` 上限を越える要求が `-ENOMEM` で断られなかった
 //! - `67` `brk` で元へ縮められなかった
+//! - `68` `spawn(path, argv, NULL)` が `-EFAULT` を返さなかった（f-2）
 //! - `35` `auxv` の終端（`AT_NULL`）が無かった
 //! - `36` `spawn("/bin/hello")` が 0 を返さなかった
 //! - `37` `spawn("/nope")` が `-ENOENT` を返さなかった
@@ -814,6 +815,7 @@ core::arch::global_asm!(
     "  mov eax, {sys_spawn}",
     "  lea rdi, [rip + HELLO_PATH]",
     "  lea rsi, [rip + ARGV_HELLO]",
+    "  lea rdx, [rip + ENVP_EMPTY]",
     "  int 0x80",
     "  test rax, rax",
     "  mov edi, 36",
@@ -823,6 +825,7 @@ core::arch::global_asm!(
     "  mov eax, {sys_spawn}",
     "  lea rdi, [rip + MISSING_PATH]",
     "  lea rsi, [rip + ARGV_HELLO]",
+    "  lea rdx, [rip + ENVP_EMPTY]",
     "  int 0x80",
     "  cmp rax, {minus_enoent}",
     "  mov edi, 37",
@@ -832,6 +835,7 @@ core::arch::global_asm!(
     "  mov eax, {sys_spawn}",
     "  lea rdi, [rip + ETC_PATH]",
     "  lea rsi, [rip + ARGV_HELLO]",
+    "  lea rdx, [rip + ENVP_EMPTY]",
     "  int 0x80",
     "  cmp rax, {minus_eisdir}",
     "  mov edi, 38",
@@ -842,6 +846,7 @@ core::arch::global_asm!(
     "  mov eax, {sys_spawn}",
     "  xor edi, edi",
     "  lea rsi, [rip + ARGV_HELLO]",
+    "  lea rdx, [rip + ENVP_EMPTY]",
     "  int 0x80",
     "  cmp rax, {minus_efault}",
     "  mov edi, 39",
@@ -853,6 +858,7 @@ core::arch::global_asm!(
     "  mov eax, {sys_spawn}",
     "  lea rdi, [rip + SPAWN_TEST_PATH]",
     "  lea rsi, [rip + ARGV_SPAWN_TEST]",
+    "  lea rdx, [rip + ENVP_EMPTY]",
     "  int 0x80",
     "  test rax, rax",
     "  mov edi, 40",
@@ -863,15 +869,29 @@ core::arch::global_asm!(
     "  mov eax, {sys_spawn}",
     "  lea rdi, [rip + HELLO_PATH]",
     "  xor esi, esi",
+    "  lea rdx, [rip + ENVP_EMPTY]",
     "  int 0x80",
     "  cmp rax, {minus_efault}",
     "  mov edi, 41",
+    "  jne 9f",
+
+    // --- 68. envp が NULL。**-EFAULT が返るはず**（f-2。`ADR-0053` の Decision 2）---
+    // **`argv` と同じ規則である。** 「環境が無い」は空の配列（先頭が NULL）で表す。
+    // **新しい規則を作らない**ので、判定も `argv` の隣に置く。
+    "  mov eax, {sys_spawn}",
+    "  lea rdi, [rip + HELLO_PATH]",
+    "  lea rsi, [rip + ARGV_HELLO]",
+    "  xor edx, edx",
+    "  int 0x80",
+    "  cmp rax, {minus_efault}",
+    "  mov edi, 68",
     "  jne 9f",
 
     // --- 42. 要素数が上限を越える argv。**-E2BIG が返るはず** ---
     "  mov eax, {sys_spawn}",
     "  lea rdi, [rip + HELLO_PATH]",
     "  lea rsi, [rip + ARGV_TOO_MANY]",
+    "  lea rdx, [rip + ENVP_EMPTY]",
     "  int 0x80",
     "  cmp rax, {minus_e2big}",
     "  mov edi, 42",
@@ -882,6 +902,7 @@ core::arch::global_asm!(
     "  mov eax, {sys_spawn}",
     "  lea rdi, [rip + HELLO_PATH]",
     "  lea rsi, [rip + ARGV_TOO_BIG]",
+    "  lea rdx, [rip + ENVP_EMPTY]",
     "  int 0x80",
     "  cmp rax, {minus_e2big}",
     "  mov edi, 43",
@@ -892,6 +913,7 @@ core::arch::global_asm!(
     "  mov eax, {sys_spawn}",
     "  lea rdi, [rip + LS_PATH]",
     "  lea rsi, [rip + ARGV_LS]",
+    "  lea rdx, [rip + ENVP_EMPTY]",
     "  int 0x80",
     "  test rax, rax",
     "  mov edi, 48",
@@ -901,6 +923,7 @@ core::arch::global_asm!(
     "  mov eax, {sys_spawn}",
     "  lea rdi, [rip + CAT_PATH]",
     "  lea rsi, [rip + ARGV_CAT]",
+    "  lea rdx, [rip + ENVP_EMPTY]",
     "  int 0x80",
     "  test rax, rax",
     "  mov edi, 49",
@@ -911,6 +934,7 @@ core::arch::global_asm!(
     "  mov eax, {sys_spawn}",
     "  lea rdi, [rip + CAT_PATH]",
     "  lea rsi, [rip + ARGV_CAT_ALONE]",
+    "  lea rdx, [rip + ENVP_EMPTY]",
     "  int 0x80",
     "  cmp rax, 2",
     "  mov edi, 50",
@@ -1185,6 +1209,14 @@ core::arch::global_asm!(
     ".balign 8",
     "ARGV_HELLO:",
     "  .quad SPAWN_ARG_HELLO",
+    "  .quad 0",
+    // **空の `envp`（f-2。`ADR-0053` の Decision 2）。**
+    //
+    // **`spawn` の第 3 引数に意味ができた。** **置かないと入口の RDX が
+    // そのまま `envp` として読まれる**——**たまたま 0 でも置く。**
+    // **「環境が無い」は空の配列で表す**（`argv` と同じ規則。NULL は `-EFAULT`）。
+    ".balign 8",
+    "ENVP_EMPTY:",
     "  .quad 0",
     // **`spawn-test` が受け取って検算する 2 本。** あちらの写しと対になっている。
     "ARGV_SPAWN_TEST:",

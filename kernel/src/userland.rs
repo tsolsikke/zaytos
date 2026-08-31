@@ -29,7 +29,7 @@ use common::log::{LogLevel, Logger};
 use common::serial::SerialPort;
 
 use crate::ring3::MAX_EXCURSION_DEPTH;
-use crate::syscall::{MAX_ARGV_BYTES, MAX_EXECUTABLE_SIZE, PATH_MAX};
+use crate::syscall::{MAX_ARGV_BYTES, MAX_ENVP_BYTES, MAX_EXECUTABLE_SIZE, PATH_MAX};
 
 /// ユーザープログラムを走らせる空間のユーザーサブツリーの添字（S9-b-1）。
 ///
@@ -54,7 +54,7 @@ const USER_PROGRAM_STACK_TOP: u64 = 0x0080_0000;
 /// [`UserLoadError::ArgumentsTooLong`] で拒む。
 pub const MAX_ARGV: usize = 8;
 
-use common::env::{classify_env_line, trim_env_line, EnvLine};
+use common::env::{classify_env_line, trim_env_line, EnvLine, EnvTable};
 /// 環境の 1 行の純粋な判定は `common` に在る（f-2。`ADR-0045` の形）。
 ///
 /// **シェルも同じものを `#[path]` で取り込む**——**カーネルが `/etc/environment` の
@@ -135,9 +135,8 @@ const ENV_SOURCE: &[u8] = b"/etc/environment";
 /// **`Locked<T>` の裏に閉じる**（`ADR-0023` の seam 整備の決まり）。
 /// **新しい `unsafe` を作らない。**
 struct Environment {
-    lines: [[u8; ENV_LINE_MAX]; MAX_ENVP],
-    lens: [usize; MAX_ENVP],
-    count: usize,
+    /// 表そのもの。**純粋な論理は `common` に在る**（f-2。`ADR-0053`）。
+    table: EnvTable,
     /// **ファイルから読めたか。** **判定はこちらを見る**
     /// （`ADR-0052` の Decision 4。落とす前を見る）。
     from_file: bool,
@@ -146,22 +145,9 @@ struct Environment {
 impl Environment {
     const fn new() -> Self {
         Self {
-            lines: [[0; ENV_LINE_MAX]; MAX_ENVP],
-            lens: [0; MAX_ENVP],
-            count: 0,
+            table: EnvTable::new(),
             from_file: false,
         }
-    }
-
-    /// 1 行を足す。**入らなければ偽を返す。**
-    fn push(&mut self, line: &[u8]) -> bool {
-        if self.count >= MAX_ENVP || line.len() > ENV_LINE_MAX {
-            return false;
-        }
-        self.lines[self.count][..line.len()].copy_from_slice(line);
-        self.lens[self.count] = line.len();
-        self.count += 1;
-        true
     }
 }
 
@@ -220,7 +206,7 @@ pub fn load_environment(logger: &mut Logger<SerialPort>) {
                         dropped += 1;
                         continue;
                     }
-                    if environment.push(line) {
+                    if environment.table.push(line) {
                         taken += 1;
                     } else {
                         dropped += 1;
@@ -242,9 +228,9 @@ pub fn load_environment(logger: &mut Logger<SerialPort>) {
     // 名前でコマンドを引けなくなる。**
     if taken == 0 {
         let mut environment = ENVIRONMENT.lock();
-        environment.count = 0;
+        environment.table.clear();
         for line in DEFAULT_ENVIRONMENT {
-            let _ = environment.push(line);
+            let _ = environment.table.push(line);
         }
         environment.from_file = false;
     } else {
@@ -257,7 +243,7 @@ pub fn load_environment(logger: &mut Logger<SerialPort>) {
     logger.info(format_args!(
         "env-source: {} took {taken} line(s) and dropped {dropped}; the table holds {} (from_file={})",
         core::str::from_utf8(ENV_SOURCE).unwrap_or("?"),
-        environment.count,
+        environment.table.count(),
         environment.from_file
     ));
 }
@@ -290,8 +276,8 @@ fn apply_keymap(logger: &mut Logger<SerialPort>) {
     let mut length = None;
     {
         let environment = ENVIRONMENT.lock();
-        for index in 0..environment.count {
-            let line = &environment.lines[index][..environment.lens[index]];
+        for index in 0..environment.table.count() {
+            let line = environment.table.line(index);
             if let Some(tail) = line.strip_prefix(KEYMAP) {
                 value[..tail.len()].copy_from_slice(tail);
                 length = Some(tail.len());
@@ -835,6 +821,14 @@ pub fn spawn_accounting() -> (usize, usize) {
 static mut SPAWN_ARGVS: [[u8; MAX_ARGV_BYTES]; MAX_SPAWN_IN_FLIGHT] =
     [[0; MAX_ARGV_BYTES]; MAX_SPAWN_IN_FLIGHT];
 
+/// `spawn` が受け取った `envp` を置く場所（f-2。`ADR-0053`）。
+///
+/// **[`SPAWN_ARGVS`] と同じ形である**——**NUL 区切りで並べたバイト列を、
+/// 深さごとに 1 本ずつ持つ。** **別に持つ理由は、`argv` と `envp` の上限が
+/// 別の理由で決まっているからである**（語の数と、環境の本数）。
+static mut SPAWN_ENVPS: [[u8; MAX_ENVP_BYTES]; MAX_SPAWN_IN_FLIGHT] =
+    [[0; MAX_ENVP_BYTES]; MAX_SPAWN_IN_FLIGHT];
+
 /// [`spawn`] が拒む形（S11-5）。
 ///
 /// **`errno` を知らない。** 写すのは `crate::syscall` の側である
@@ -957,6 +951,15 @@ pub struct UserProcess {
 /// 畳んだ結果（隔離へ入れた本数と、隔離が溢れて漏らした本数）を返す。
 /// **後始末が正しいことは、この会計で主張する。**
 ///
+/// # `envp` は「誰が積むか」で分かれる（f-2。`ADR-0053`）
+///
+/// **`None` なら起動時の環境を積む**——**カーネルの表である。**
+/// **`init` が起こす `/bin/zash` と、起動シーケンスの直線上のプログラムが
+/// これに当たる。**
+///
+/// **`Some` なら親が渡したものを積む**——**シェルが `spawn` の第 3 引数で
+/// 渡した表である。** **`export` で変えられるのはこちらだけである。**
+///
 /// # 終わり方は判定しない（S9-b-3-2a）
 ///
 /// 走らせた場合、返すのは像の entry である。**どう終わったかの判定は
@@ -969,6 +972,7 @@ pub fn load_user_program(
     run: bool,
     name: &'static str,
     argv: &[&[u8]],
+    envp: Option<&[&[u8]]>,
 ) -> (Result<u64, UserLoadError>, usize, usize) {
     use crate::address_space::AddressSpace;
 
@@ -1009,7 +1013,7 @@ pub fn load_user_program(
     };
 
     // **写像まではアロケータが要る。遠征では要らない。**
-    let mapped = load_user_program_into(logger, allocator, image, &mut process, argv);
+    let mapped = load_user_program_into(logger, allocator, image, &mut process, argv, envp);
     // **ここで返す。** 以降は Ring 3 の遠征があり、**その間はアロケータが
     // `static` に在るので、システムコールから取り出せる**（`ADR-0030` の要）。
     //
@@ -1137,6 +1141,7 @@ fn load_user_program_into(
     image: &[u8],
     process: &mut UserProcess,
     argv: &[&[u8]],
+    envp: Option<&[&[u8]]>,
 ) -> Result<(), UserLoadError> {
     use crate::paging::active::PageAttributes;
     use crate::paging::verify;
@@ -1359,20 +1364,27 @@ fn load_user_program_into(
     // 中に収まる。**
     let mut env_store = [[0u8; ENV_LINE_MAX]; MAX_ENVP];
     let mut env_lens = [0usize; MAX_ENVP];
-    let env_count = {
-        let environment = ENVIRONMENT.lock();
-        for index in 0..environment.count {
-            let length = environment.lens[index];
-            env_store[index][..length].copy_from_slice(&environment.lines[index][..length]);
-            env_lens[index] = length;
+    let mut env_slices: [&[u8]; MAX_ENVP] = [b""; MAX_ENVP];
+    let envp: &[&[u8]] = match envp {
+        // **親が渡したものをそのまま積む（f-2）。** 写しはもう取ってある
+        // （`spawn` が `SPAWN_ENVPS` へ控えている）ので、ここでは写さない。
+        Some(from_parent) => from_parent,
+        None => {
+            let env_count = {
+                let environment = ENVIRONMENT.lock();
+                for index in 0..environment.table.count() {
+                    let line = environment.table.line(index);
+                    env_store[index][..line.len()].copy_from_slice(line);
+                    env_lens[index] = line.len();
+                }
+                environment.table.count()
+            };
+            for index in 0..env_count {
+                env_slices[index] = &env_store[index][..env_lens[index]];
+            }
+            &env_slices[..env_count]
         }
-        environment.count
     };
-    let mut envp: [&[u8]; MAX_ENVP] = [b""; MAX_ENVP];
-    for index in 0..env_count {
-        envp[index] = &env_store[index][..env_lens[index]];
-    }
-    let envp = &envp[..env_count];
 
     // **初期スタックを Linux の形で積む（S11-1）。**
     // SAFETY: `dst` はいま張ったスタックページの direct map 越しの先頭で、
@@ -1398,7 +1410,7 @@ fn load_user_program_into(
         "user-load: {} initial stack at {initial_rsp:#x} (argc={}, envc={}, 16-byte aligned={},          initial data {initial_bytes} of {PAGE_SIZE} byte(s))",
         process.name,
         argv.len(),
-        env_count,
+        envp.len(),
         initial_rsp % 16 == 0
     ));
 
@@ -1719,6 +1731,7 @@ pub fn spawn(
     path: &[u8],
     argv_bytes: &[u8],
     argv_count: usize,
+    envp: Option<(&[u8], usize)>,
 ) -> Result<SpawnOutcome, SpawnError> {
     // **深さの上限。入る前に断る。**
     let depth = crate::ring3::depth();
@@ -1906,7 +1919,46 @@ pub fn spawn(
     }
     let argv: &[&[u8]] = &argv_slices[..argv_count];
 
-    let (outcome, held, leaked) = load_user_program(&mut logger, image, true, name, argv);
+    // **`envp` も同じ形で控えて切り分ける（f-2。`ADR-0053`）。**
+    //
+    // **`None` はカーネル側の呼び出しである**（`init` が `/bin/zash` を起こす形）。
+    // **そのときは起動時の環境を積む**——`load_user_program` が表から採る。
+    // **Ring 3 から来た `spawn` は必ず配列を渡す**（`copy_user_string_array` が
+    // NULL を `-EFAULT` で断る。`ADR-0053` の Decision 2）。
+    let mut envp_slices: [&'static [u8]; MAX_ENVP] = [b""; MAX_ENVP];
+    let envp: Option<&[&[u8]]> = match envp {
+        None => None,
+        Some((envp_bytes, envp_count)) => {
+            // **`argv` と同じく NUL 区切りで来る**——`copy_user_string_array` が
+            // 要素ごとに NUL を付けて並べている。**要素数だけ NUL があるはずで、
+            // 無ければこちらの不具合である。**
+            // SAFETY: `slot` は [`MAX_SPAWN_IN_FLIGHT`] の範囲内で、その深さで走って
+            // いるのはこの 1 本だけである（深さの判定が入れ子の重なりを禁じている）。
+            // 単一コアの実行文脈で、割り込みハンドラはここへ来ない。
+            let envp_slot: &'static mut [u8; MAX_ENVP_BYTES] =
+                unsafe { &mut (*core::ptr::addr_of_mut!(SPAWN_ENVPS))[slot] };
+            envp_slot[..envp_bytes.len()].copy_from_slice(envp_bytes);
+            let env_stored: &'static [u8] = &envp_slot[..envp_bytes.len()];
+
+            let mut env_at = 0usize;
+            for slice in envp_slices.iter_mut().take(envp_count) {
+                let Some(end) = env_stored[env_at..]
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .map(|i| env_at + i)
+                else {
+                    crate::syscall::restore_records(saved_records);
+                    crate::ring3::restore_fold_record(saved_fold);
+                    return Err(SpawnError::ArgvMalformed);
+                };
+                *slice = &env_stored[env_at..end];
+                env_at = end + 1;
+            }
+            Some(&envp_slices[..envp_count])
+        }
+    };
+
+    let (outcome, held, leaked) = load_user_program(&mut logger, image, true, name, argv, envp);
 
     // **子の終わり方をここで読む。** 戻す前に読まなければ、親のもので上書きされる。
     // **中断を先に見る（S12 前の手当て、C）。** **`exit` も畳みも通っていない**

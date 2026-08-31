@@ -606,9 +606,16 @@ pub const SYS_SPAWN: u64 = 0x1004;
 ///
 /// `path` が NUL 終端であること。`argv` が NULL 終端のポインタ配列で、
 /// **各要素が NUL 終端の文字列を指していること。**
-pub unsafe fn spawn(path: &[u8], argv: &[*const u8]) -> i64 {
+pub unsafe fn spawn(path: &[u8], argv: &[*const u8], envp: &[*const u8]) -> i64 {
     // SAFETY: 呼び出し元契約による。
-    unsafe { syscall3(SYS_SPAWN, path.as_ptr() as u64, argv.as_ptr() as u64, 0) }
+    unsafe {
+        syscall3(
+            SYS_SPAWN,
+            path.as_ptr() as u64,
+            argv.as_ptr() as u64,
+            envp.as_ptr() as u64,
+        )
+    }
 }
 
 /// `argc` と `argv` を、`_start` の時点の `rsp` から読む。
@@ -629,6 +636,31 @@ pub unsafe fn argument(stack: *const u64, index: usize) -> Option<*const u8> {
     }
     // SAFETY: `argv` は `argc` 本ぶん並んでおり、添字は範囲内である。
     let pointer = unsafe { *stack.add(1 + index) };
+    if pointer == 0 {
+        None
+    } else {
+        Some(pointer as *const u8)
+    }
+}
+
+/// `envp` の `index` 番目を返す（f-2。`ADR-0053`）。**終端に達したら `None`。**
+///
+/// # 名前で引く口と分けてある
+///
+/// **[`environment`] は名前で引く。** **こちらは並びをそのまま歩く**
+/// ——**シェルが起動時に自分の表へ写すために要る**（`ADR-0053` の Decision 1）。
+///
+/// # Safety
+///
+/// `stack` が `_start` の時点の `rsp` であること。
+pub unsafe fn environment_at(stack: *const u64, index: usize) -> Option<*const u8> {
+    // SAFETY: 呼び出し元契約により `stack` は初期スタックの先頭を指す。
+    let argc = unsafe { *stack } as usize;
+    // `argc` の 1 語 + `argv` の `argc` 本 + `argv` の終端 1 語。
+    let at = 1 + argc + 1 + index;
+    // SAFETY: `envp` は NULL で終わる。**終端より先は読まない**——
+    // 呼ぶ側は `None` が返った時点で止める契約である。
+    let pointer = unsafe { *stack.add(at) };
     if pointer == 0 {
         None
     } else {

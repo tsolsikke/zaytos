@@ -577,6 +577,23 @@ pub const MAX_EXECUTABLE_SIZE: usize = 32 * 1024;
 /// 越えない。**越えるなら `static` へ移す**（`MAX_EXECUTABLE_SIZE` と同じ形）。
 pub const MAX_ARGV_BYTES: usize = 1024;
 
+/// [`SYS_SPAWN`] が受け取る `envp` の総バイト数の上限（NUL を含む。f-2。`ADR-0053`）。
+///
+/// # `MAX_ARGV_BYTES` と同じ 1024 にしてある
+///
+/// **上限が別の理由で決まっているので、定数も別に持つ**——`argv` は語の数と
+/// 長さ、`envp` は環境の本数（[`crate::userland::MAX_ENVP`] = 8）と 1 行の長さ
+/// （[`crate::userland::ENV_LINE_MAX`] = 128）である。**8 × 128 = 1024 で、
+/// 表が満杯でも収まる。**
+///
+/// # ページの判定は最後に在る
+///
+/// **初期スタックは 1 ページである**（`crate::userland` の `build_initial_stack`）。
+/// **最悪で `argv` と `envp` の文字列が 2KiB、表が 144 バイトで、1 ページに収まる。**
+/// **残りはプログラム自身のスタックなので、`user-stack` の `over_half` を見ること**
+/// （`ADR-0041` の Decision 4）。
+pub const MAX_ENVP_BYTES: usize = 1024;
+
 /// 検証用 probe システムコールの番号（ZaytOS 独自。[`ZAYTOS_PRIVATE_BASE`]）。
 pub const PROBE_NUMBER: u64 = ZAYTOS_PRIVATE_BASE;
 
@@ -1171,6 +1188,7 @@ unsafe fn flush_root_image(bkl: &mut Option<crate::bkl::BklGuard>) -> Result<(),
 unsafe fn spawn_from_ring3(
     path: u64,
     argv: u64,
+    envp: u64,
     pml4_phys: PhysAddr,
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
@@ -1199,9 +1217,33 @@ unsafe fn spawn_from_ring3(
         Err(errno) => return (-errno) as u64,
     };
 
+    // **`envp` も同じ形で写す（f-2。`ADR-0053` の Decision 2）。**
+    //
+    // **NULL は `-EFAULT` である**——`argv` と同じ規則を使う。**「環境が無い」は
+    // 空の配列（先頭が NULL）で表す。** **新しい規則を作らない。**
+    let mut envp_bytes = [0u8; MAX_ENVP_BYTES];
+    // SAFETY: 呼び出し元契約をそのまま渡す。
+    let (envp_count, envp_used) = match unsafe {
+        copy_user_string_array(
+            &mut envp_bytes,
+            envp,
+            crate::userland::MAX_ENVP,
+            pml4_phys,
+            direct_map,
+        )
+    } {
+        Ok(pair) => pair,
+        Err(errno) => return (-errno) as u64,
+    };
+
     // **ここで解く。** 取り直すのは子が終わってからである。
     drop(bkl.take());
-    let result = crate::userland::spawn(&buf[..len], &argv_bytes[..argv_used], argv_count);
+    let result = crate::userland::spawn(
+        &buf[..len],
+        &argv_bytes[..argv_used],
+        argv_count,
+        Some((&envp_bytes[..envp_used], envp_count)),
+    );
     *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
 
     match result {
@@ -1300,7 +1342,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     // SAFETY: pml4_phys / direct_map は稼働中テーブルのもので、walk の契約を満たす。
     let ret = if number == SYS_SPAWN {
         // SAFETY: 同上。`bkl` はいま保持しているガードである。
-        unsafe { spawn_from_ring3(args[0], args[1], pml4_phys, direct_map, &mut bkl) }
+        unsafe { spawn_from_ring3(args[0], args[1], args[2], pml4_phys, direct_map, &mut bkl) }
     } else {
         // SAFETY: pml4_phys / direct_map は稼働中テーブルのもので、walk の契約を満たす。
         unsafe { dispatch(number, &args, pml4_phys, direct_map, &mut bkl) }
