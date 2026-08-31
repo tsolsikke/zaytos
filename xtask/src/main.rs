@@ -12217,6 +12217,102 @@ fn check_structural_guard_symbols_present(workspace_root: &Path) -> Result<Strin
 /// **同じ形が別の場所では誤りだった**（`stage_esp` が破壊ビルドへ既定の像を
 /// 載せていた。`docs/troubleshooting.md`）。**構成を渡す側と訊く側が分かれて
 /// いる形は、意図か誤りかを毎回書き分けること。**
+/// 像へ入れるテキストが ASCII だけであることを見る（2026-08-31。文字化けの手当て）。
+///
+/// # なぜ ASCII に限るのか
+///
+/// **フォントが収録しているのは可読 ASCII（`0x20..=0x7E`）と置換文字だけである**
+/// （`kernel/src/graphics/font/`。実測）。**それ以外の字は U+FFFD の箱になる。**
+/// **`/etc/environment` の日本語のコメントが、画面で箱の列に見えていた**
+/// （運用者の報告。2026-08-31）。**装置の中身は壊れていない**——`debugfs` が
+/// 読んだバイト列は種のものと一致した。**壊れていたのは見え方だけである。**
+///
+/// # 見るのは種の木だけである
+///
+/// **`kernel/fsimage/seed/` の下は、人が書いて像へ入るテキストである。**
+/// **`/bin` の実行ファイルは機械語なので対象にしない**——**実測で 0x80 以上の
+/// バイトを普通に含む**（`zash` は 3831 バイト。2026-08-31）。
+///
+/// **`build.rs` が像へ書くもの（`/data/*`）は見ていない。** **いまはどれも
+/// ASCII か、機械が読むだけの模様である**（実測。2026-08-31）。**人が読む
+/// テキストをあちらへ足すなら、この検査の範囲を広げること。**
+///
+/// # 公開前の監査とは別物である
+///
+/// **あちらは追跡下の全ファイルの非 ASCII を Unicode ブロック別に数え、
+/// 日本語が在ることを前提にしている**（`docs/verification-coverage.md` の
+/// 「公開前の監査」）。**こちらは像の中のテキストに ASCII を要求する。**
+/// **対象も判定も違うので、二重に持ったことにはならない。**
+fn check_image_text_is_ascii(workspace_root: &Path) -> Result<String> {
+    let root = workspace_root.join(IMAGE_TEXT_ROOT);
+    if !root.is_dir() {
+        bail!(
+            "xtask check: {IMAGE_TEXT_ROOT} is not a directory ({}). If the seed tree moved, \
+             update IMAGE_TEXT_ROOT in xtask along with it",
+            root.display()
+        );
+    }
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_files(&root, &mut files)?;
+    files.sort();
+
+    let mut bytes = 0usize;
+    for file in &files {
+        let content = fs::read(file)
+            .with_context(|| format!("could not read {} for the ASCII check", file.display()))?;
+        bytes += content.len();
+        // **落ちる位置を行と桁で言う。** 直す人が開く先はエディタである。
+        let mut line = 1usize;
+        let mut column = 1usize;
+        for byte in &content {
+            if *byte >= 0x80 {
+                let shown = file
+                    .strip_prefix(workspace_root)
+                    .unwrap_or(file.as_path())
+                    .display();
+                bail!(
+                    "xtask check: {shown} holds the non-ASCII byte {byte:#04x} at line {line}, \
+                     column {column}. Text that goes into the image must be ASCII: the console \
+                     font holds printable ASCII and the replacement character, so anything else \
+                     renders as a box (docs/coding-standards.md, the section named \
+                     「像へ入れるテキストはASCIIに限る」)"
+                );
+            }
+            if *byte == b'\n' {
+                line += 1;
+                column = 1;
+            } else {
+                column += 1;
+            }
+        }
+    }
+
+    Ok(format!(
+        "{} file(s) under {IMAGE_TEXT_ROOT}/, {bytes} byte(s), every byte below 0x80",
+        files.len()
+    ))
+}
+
+/// 像へ入るテキストの置き場（2026-08-31）。
+const IMAGE_TEXT_ROOT: &str = "kernel/fsimage/seed";
+
+/// `root` の下のファイルを再帰で集める（2026-08-31）。
+fn collect_files(root: &Path, into: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(root)
+        .with_context(|| format!("could not read the directory {}", root.display()))?
+    {
+        let entry = entry.with_context(|| format!("could not walk {}", root.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, into)?;
+        } else {
+            into.push(path);
+        }
+    }
+    Ok(())
+}
+
 fn check_fs_image_passes_e2fsck(workspace_root: &Path) -> Result<String> {
     let out_dir = kernel_build_out_dir(workspace_root)?;
     let image = out_dir.join(FS_IMAGE_NAME);
@@ -13923,6 +14019,18 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         }
     }
 
+    // 像へ入るテキストが ASCII だけであること（2026-08-31、静的）。
+    total += 1;
+    begin_item("text that goes into the image is ASCII only");
+    match check_image_text_is_ascii(&workspace_root) {
+        Ok(summary) => println!("--- image text ASCII: OK ({summary})"),
+        Err(e) => {
+            println!("    {e}");
+            println!("--- image text ASCII: FAILED");
+            failed.push("image text ASCII".to_string());
+        }
+    }
+
     // 埋め込む ext2 の像が `e2fsck` を通ること（S10-a、静的）。
     total += 1;
     begin_item("the embedded ext2 image passes e2fsck");
@@ -14259,8 +14367,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 26,
-    full: 259,
+    base: 27,
+    full: 260,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
