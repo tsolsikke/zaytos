@@ -1581,12 +1581,39 @@ fn main() -> Result<()> {
                 return cmd_virtio_test(&features);
             }
             if rest.iter().any(|a| a == "--shell-test") {
-                let mode = if rest.iter().any(|a| a == "--drop-arrows") {
-                    ShellTestMode::ArrowsDropped
-                } else if rest.iter().any(|a| a == "--drop-esc") {
-                    ShellTestMode::EscDropped
-                } else {
-                    ShellTestMode::Normal
+                // **破壊を 1 つだけ回す口（f-2）。**
+                //
+                // **以前は `--full` の中からしか回せなかった。** **`CLAUDE.md` の
+                // 「判定を直したら、その判定が捕まえるはずの破壊をその場で走らせる」を
+                // 満たすには、1 つだけ回せる必要がある**——`--virtio-test` と
+                // 同じ `--sabotage` の形にした。
+                let sabotage = rest
+                    .iter()
+                    .enumerate()
+                    .find(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .and_then(|(i, _)| rest.get(i + 1))
+                    .map(|name| name.as_str());
+                let mode = match sabotage {
+                    Some(name) => {
+                        // **一覧に無い名前は断る。** **打ち間違いが「既定の回」に
+                        // 化けると、破壊が捕まったことにならない。**
+                        let Some(known) = SHELL_TEST_SABOTAGES
+                            .iter()
+                            .find(|entry| **entry == name)
+                            .copied()
+                        else {
+                            bail!(
+                                "xtask run --shell-test --sabotage: {name:?} is not one of the \
+                                 shell sabotages ({SHELL_TEST_SABOTAGES:?})"
+                            );
+                        };
+                        ShellTestMode::MustFail(known)
+                    }
+                    None if rest.iter().any(|a| a == "--drop-arrows") => {
+                        ShellTestMode::ArrowsDropped
+                    }
+                    None if rest.iter().any(|a| a == "--drop-esc") => ShellTestMode::EscDropped,
+                    None => ShellTestMode::Normal,
                 };
                 return cmd_shell_test(mode);
             }
@@ -3567,6 +3594,11 @@ const SHELL_TEST_SABOTAGES: &[&str] = &[
     // 「範囲の計算が正しいこと」ではない**——**`Ctrl+K` が行頭まで消す形は、
     // 鍵が届いているのであちらでは捕まらない。**
     "shell-shift-delete-range-test",
+    // **f-2 で 1 つ増えた（`ADR-0053`）。** **`export` した表を子へ積まない。**
+    // **落ちるのは「子が見た `envc`」の 1 本だけである**——**シェルの表は
+    // 引けるままなので、`echo $ZF2` も `set` も緑である。** **その形でしか
+    // 落ちない判定が在るので置いた。**
+    "shell-export-not-pushed-test",
 ];
 
 impl ShellTestMode {
@@ -6593,6 +6625,60 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && echo_argc("echo $UNSET") == Some(1)
         && echo_argc("echo a$TERM b") == Some(3);
 
+    // **f-2（`export` と `set`。`ADR-0053`）の判定 5 本。**
+    //
+    // **`envc` も `argc` と同じ行から読める**（`user-load` の 1 行に両方が出る）。
+    // **打つ前が 3、打った後が 4 である**——**「子へ届いた」を主張しているのは
+    // これだけで、判定 1（`echo $ZF2` が値を出す）は主張しない**（展開はシェルが
+    // 行うので、子が何も知らなくても値は出る）。
+    let echo_envcs: Vec<usize> = after_shell
+        .lines()
+        .filter(|line| line.contains("/bin/echo initial stack"))
+        .filter_map(|line| line.split("envc=").nth(1))
+        .filter_map(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .filter_map(|digits| digits.parse().ok())
+        .collect();
+    let envc_before_export = ECHO_LINES_IN_ORDER
+        .iter()
+        .position(|entry| *entry == "echo $ZF2 (before export)")
+        .and_then(|index| echo_envcs.get(index).copied());
+    let envc_after_export = ECHO_LINES_IN_ORDER
+        .iter()
+        .position(|entry| *entry == "echo $ZF2 (after export)")
+        .and_then(|index| echo_envcs.get(index).copied());
+    // **前と後の両方を見る。** **後だけを見ると、もともと 4 本だった場合と
+    // 区別できない**（像に手で足した行が在れば 4 から始まりうる。実測で、
+    // 運用者の持ち越した `disk0.img` には `KEYMAP=jis` が入っていた）。
+    let the_child_saw_the_exported_name =
+        envc_before_export == Some(3) && envc_after_export == Some(4);
+
+    // **判定 1**——**`export` した名前がシェルの表から引けること。**
+    // **打つ前は語が 0 個になり、打った後は 2 個になる。**
+    let expanded_the_exported_name = after_shell.contains("\nexported\n")
+        && echo_argc("echo $ZF2 (before export)") == Some(1)
+        && echo_argc("echo $ZF2 (after export)") == Some(2);
+
+    // **判定 2**——**`set` が表を並べること。**
+    // **`ZF2` だけを見ない**——**源から来た 3 本も出ていることを同時に見る。**
+    let set_listed_the_table = after_shell.contains("\nZF2=exported\n")
+        && after_shell.contains("\nTERM=zaytos\n")
+        && after_shell.contains("\nPATH=/bin\n")
+        && after_shell.contains("\nHOME=/root\n");
+
+    // **判定 5**——**断ったことが人に見えること**（`ADR-0046` のエコー領域）。
+    // **ホストテストは「断る」までしか言わない。** **見えることは別の主張である。**
+    let export_refused_a_bad_name = after_shell.contains("zash: export: 1BAD=x: not a name");
+
+    // **判定 4**——**`export` がシェル自身の振る舞いを変えること**
+    // （`ADR-0053` の Decision 6。**控えたままだと効かない**）。
+    //
+    // **`PATH` を壊すと `hello` が起こせなくなり、戻すと起こせる。**
+    // **`hello` は台本で 3 度走る**——最初の `/bin/hello`、`PATH` を戻した後、
+    // **そして壊れている間の 1 度は走らない。**
+    let hello_runs = after_shell.matches("/bin/hello initial stack").count();
+    let export_changed_the_path =
+        after_shell.contains("zash: hello: cannot run") && hello_runs == 2;
+
     let typed_echo_path = after_shell_plain.contains("zaytos$ echo $PATH\n");
     let expanded_a_value = typed_echo_path && after_shell.contains("\n/bin\n");
     // **丸ごと空になった語が落ちたこと。** **空白の数を見る。**
@@ -6856,6 +6942,22 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         echo_argcs.len(),
         ECHO_LINES_IN_ORDER.len()
     );
+    println!(
+        "{context}: the exported name expanded = {expanded_the_exported_name} \
+         (before/after argc = {:?}/{:?})",
+        echo_argc("echo $ZF2 (before export)"),
+        echo_argc("echo $ZF2 (after export)")
+    );
+    println!(
+        "{context}: the child saw the exported name = {the_child_saw_the_exported_name} \
+         (envc {envc_before_export:?} -> {envc_after_export:?}, wanted 3 -> 4)"
+    );
+    println!("{context}: set listed the table = {set_listed_the_table}");
+    println!("{context}: export refused a bad name in the echo area = {export_refused_a_bad_name}");
+    println!(
+        "{context}: export changed the shell's own PATH = {export_changed_the_path} \
+         (/bin/hello ran {hello_runs} time(s), wanted 2)"
+    );
     println!("{context}: echo $PATH printed the value = {expanded_a_value}");
     println!("{context}: the empty word was dropped = {empty_word_was_dropped}");
     println!("{context}: an unset name expanded to nothing = {expanded_to_nothing}");
@@ -6902,6 +7004,11 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && tilde_expanded
         && layout_is_in_use
         && echo_lines_are_accounted_for
+        && expanded_the_exported_name
+        && the_child_saw_the_exported_name
+        && set_listed_the_table
+        && export_refused_a_bad_name
+        && export_changed_the_path
         && expanded_a_value
         && empty_word_was_dropped
         && expanded_to_nothing
@@ -6982,6 +7089,11 @@ const ECHO_LINES_IN_ORDER: &[&str] = &[
     "echo ~/x",
     "echo a~b",
     "echo @+",
+    // **f-2 で 2 本増えた。** **同じ行を 2 度打つ**——`export` の前と後である
+    // （`ADR-0053` の判定 1 と 3）。**名前が同じなので、引くのは前のほうになる**
+    // ——**後のほうは本数の差で見る**（下の `envc`）。
+    "echo $ZF2 (before export)",
+    "echo $ZF2 (after export)",
     "echo qq rr + Ctrl+W",
     "echo $1",
 ];
@@ -7169,6 +7281,117 @@ const SHELL_TEST_LINES: &[&[&str]] = &[
         "shift-semicolon",
         "ret",
     ],
+    // --- f-2（`export` と `set`。`ADR-0053`）。**ここから下は末尾に足した** ---
+    //
+    // **末尾に置く理由は 2 つある。** **`echo` の `argc` の並びを見ている判定が
+    // 前に在り、間へ入れると添字がずれる**（族「台本を変えるときは、台本に
+    // 寄りかかっている判定を数え直すこと」）。**そして `PATH` を壊す行が在るので、
+    // 後続の行に影響を出さない位置に置く。**
+    //
+    // `echo $ZF2`（打つ前）。**まだ置いていないので、語が 0 個になり空行が出る。**
+    // **`envc` は 3 である**——**「打つ前」を見る側である**（`ADR-0053` の判定 3）。
+    &[
+        "e", "c", "h", "o", "spc", "shift-4", "shift-z", "shift-f", "2", "ret",
+    ],
+    // `export ZF2=exported`。**`=` は JIS では `-` キーの Shift である。**
+    &[
+        "e",
+        "x",
+        "p",
+        "o",
+        "r",
+        "t",
+        "spc",
+        "shift-z",
+        "shift-f",
+        "2",
+        "shift-minus",
+        "e",
+        "x",
+        "p",
+        "o",
+        "r",
+        "t",
+        "e",
+        "d",
+        "ret",
+    ],
+    // `echo $ZF2`（打った後）。**シェルの表から引けること**（判定 1）。
+    // **`envc` は 4 になる**——**子へ届いたこと**（判定 3）。
+    &[
+        "e", "c", "h", "o", "spc", "shift-4", "shift-z", "shift-f", "2", "ret",
+    ],
+    // `set`。**表の一覧が出ること**（判定 2）。
+    &["s", "e", "t", "ret"],
+    // `export 1BAD=x`。**誤りが人に見えること**（判定 5。運用者の指示）。
+    //
+    // **名前の規則で断られる**——`[A-Za-z_]` で始まらない。
+    &[
+        "e",
+        "x",
+        "p",
+        "o",
+        "r",
+        "t",
+        "spc",
+        "1",
+        "shift-b",
+        "shift-a",
+        "shift-d",
+        "shift-minus",
+        "x",
+        "ret",
+    ],
+    // `export PATH=/nope` → `hello` → `export PATH=/bin` → `hello`（判定 4）。
+    //
+    // **シェル自身の振る舞いが変わること**（`ADR-0053` の Decision 6。
+    // **控えたままだと「変えたのに効かない」が残る**）。
+    //
+    // **`ls` ではなく `hello` を使う。** **`bare names resolved under /bin` が
+    // 「`zash: ls: cannot run` が出ないこと」を見ており、`ls` を落とすと
+    // あちらが壊れる**（族「台本を変えるときは、台本に寄りかかっている判定を
+    // 数え直すこと」。**数え直して見つけた**）。
+    &[
+        "e",
+        "x",
+        "p",
+        "o",
+        "r",
+        "t",
+        "spc",
+        "shift-p",
+        "shift-a",
+        "shift-t",
+        "shift-h",
+        "shift-minus",
+        "slash",
+        "n",
+        "o",
+        "p",
+        "e",
+        "ret",
+    ],
+    &["h", "e", "l", "l", "o", "ret"],
+    &[
+        "e",
+        "x",
+        "p",
+        "o",
+        "r",
+        "t",
+        "spc",
+        "shift-p",
+        "shift-a",
+        "shift-t",
+        "shift-h",
+        "shift-minus",
+        "slash",
+        "b",
+        "i",
+        "n",
+        "ret",
+    ],
+    &["h", "e", "l", "l", "o", "ret"],
     // aa / bb を打ってから 上 上（SE-c）。**履歴を矢印で辿る。**
     //
     // **辿れていれば `aa` が 2 度走る**（打ったときと、辿って Enter したとき）。
@@ -14418,7 +14641,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 27,
-    full: 260,
+    full: 261,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
