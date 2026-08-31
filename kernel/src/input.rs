@@ -758,23 +758,38 @@ pub(crate) mod script {
     /// **`PATH` を書き換えると、2 度目のシェルが名前でコマンドを引けなく
     /// なり、台本ごと動かない**（運用者の指示）。**`HOME` は `~` の展開が
     /// 使っており、そちらの判定と混ざる。**
+    ///
+    /// # 行は末尾から数える（f-2 の後に直した）
+    ///
+    /// **以前は先頭から `jj` で 3 行目（`TERM`）へ降りていた。**
+    /// **注釈の本数に寄りかかっており、注釈を 2 本から 3 本へ変えたときに
+    /// 静かにずれた**——**`X` が注釈の行に付き、`TERM` は変わらなかった**
+    /// （実測。2026-08-31。**`--full` でしか落ちない項目なので、基底でも
+    /// `--commit` でも緑のままだった**）。
+    ///
+    /// **`j` を余分に打つと最後の行で止まる**（`zi` の `move_down` は
+    /// 進めないとき偽を返す）。**そこから `k` で数える**——**変数は末尾の
+    /// 3 行なので、注釈が何本でも当たる。**
     #[cfg(feature = "env-rewrite-test")]
     const SCRIPT: &[u8] = b"/bin/zi /etc/environment\n\
-        jj\
+        jjjjjjjjjjjjjjjjjjjj\
+        kk\
         lllllllllll\
         aX\x1b\x04\
         :wq\n\x0c";
 
     /// 台本（f-1b）。**`/etc/environment` へ `KEYMAP=us` を足す。**
     ///
-    /// **行は上から注釈 2 本・`TERM`・`PATH`・`HOME` である。**
-    /// **`jjjj` で 5 行目（`HOME=/root`）へ降り、`l` を 10 回打って
-    /// 最後の字に居る**（それ以上は右端で止まる）。**`a` で後ろへ挿し、
-    /// Enter で行を割り、`KEYMAP=us` を打つ。**
+    /// **末尾の行（`HOME=/root`）の後ろへ挿す。** **`j` を余分に打つと
+    /// 最後の行で止まり、`l` を余分に打つと右端で止まる**ので、
+    /// **注釈の本数にも行の長さにも寄りかからない**（上の `env-rewrite-test`
+    /// と同じ直し方である。2026-08-31）。
+    ///
+    /// **`a` で後ろへ挿し、Enter で行を割り、`KEYMAP=us` を打つ。**
     #[cfg(feature = "keymap-rewrite-test")]
     const SCRIPT: &[u8] = b"/bin/zi /etc/environment\n\
-        jjjj\
-        llllllllll\
+        jjjjjjjjjjjjjjjjjjjj\
+        llllllllllllllllllll\
         a\nKEYMAP=us\x1b\x04\
         :wq\n\x0c";
 
