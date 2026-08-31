@@ -851,7 +851,7 @@ pub enum SpawnError {
     NotRegularFile,
     /// 写した `argv` のバイト列が、要素数と食い違った（S11-7）。
     ///
-    /// **カーネル側の不具合である**——`copy_user_argv` は要素ごとに NUL を付けて
+    /// **カーネル側の不具合である**——`copy_user_string_array` は要素ごとに NUL を付けて
     /// 並べるので、**要素数だけ NUL があるはずである。**
     ArgvMalformed,
     /// 像が [`MAX_EXECUTABLE_SIZE`] に収まらない。
@@ -1868,7 +1868,7 @@ pub fn spawn(
 
     // **`argv` を控えて、`&'static [u8]` の並びへ切り分ける（S11-7）。**
     //
-    // **切り分けは NUL で行う。** `copy_user_argv` が要素ごとに NUL を付けて
+    // **切り分けは NUL で行う。** `copy_user_string_array` が要素ごとに NUL を付けて
     // 並べているので、**要素数だけ NUL があるはずである。** 無ければこちらの
     // 不具合なので、[`SpawnError::ArgvMalformed`] で止める。
     // SAFETY: `slot` は [`MAX_SPAWN_IN_FLIGHT`] の範囲内で、その深さで走っている

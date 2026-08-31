@@ -1186,11 +1186,18 @@ unsafe fn spawn_from_ring3(
     };
     let mut argv_bytes = [0u8; MAX_ARGV_BYTES];
     // SAFETY: 呼び出し元契約をそのまま渡す。
-    let (argv_count, argv_used) =
-        match unsafe { copy_user_argv(&mut argv_bytes, argv, pml4_phys, direct_map) } {
-            Ok(pair) => pair,
-            Err(errno) => return (-errno) as u64,
-        };
+    let (argv_count, argv_used) = match unsafe {
+        copy_user_string_array(
+            &mut argv_bytes,
+            argv,
+            crate::userland::MAX_ARGV,
+            pml4_phys,
+            direct_map,
+        )
+    } {
+        Ok(pair) => pair,
+        Err(errno) => return (-errno) as u64,
+    };
 
     // **ここで解く。** 取り直すのは子が終わってからである。
     drop(bkl.take());
@@ -2840,48 +2847,52 @@ unsafe fn copy_user_string(
     Err(E2BIG)
 }
 
-/// ユーザーの `argv`（NULL 終端のポインタ配列）を写す（S11-7）。
+/// ユーザーの `argv` / `envp`（NULL 終端のポインタ配列）を写す（S11-7。f-2 で一般化）。
 ///
 /// 写したバイト列を `dst` へ NUL 区切りで並べ、`(要素数, 使ったバイト数)` を返す。
 ///
 /// # 線が当たる場所は 4 つある
 ///
 /// **配列の終端が無い形**——NULL に当たるまで歩くので、**上限が要る。**
-/// [`crate::userland::MAX_ARGV`] を越えたら `-E2BIG` で止める。
+/// `max_count`（`argv` なら [`crate::userland::MAX_ARGV`]、`envp` なら
+/// [`crate::userland::MAX_ENVP`]）を越えたら `-E2BIG` で止める。
 /// **`common::ext2` の走査と同じ形で、進む量が正（8 バイト）で上限が有限である。**
 ///
 /// **要素数の上限**——同上。**表と文字列が 1 ページに収まる根拠でもある。**
 ///
 /// **1 本あたりの長さの上限**——[`copy_user_string`] が `dst` の残りで切る。
 ///
-/// **全体の長さの上限**——[`MAX_ARGV_BYTES`]。**そして最後にページの判定がある**
+/// **全体の長さの上限**——`dst` の大きさ（`argv` なら [`MAX_ARGV_BYTES`]）。
+/// **そして最後にページの判定がある**
 /// （`build_initial_stack`）。**2 枚あるのは、緩衝の大きさとページの大きさが
 /// 別の理由で決まっているからである。**
 ///
-/// # `argv` そのものが NULL なら `-EFAULT`
+/// # 配列そのものが NULL なら `-EFAULT`
 ///
 /// **配列を要求している。** 「引数が無い」は**空の配列**（先頭が NULL）で表す。
+/// **`envp` も同じ規則である**（`ADR-0053` の Decision 2。**新しい規則を作らない**）。
 ///
 /// # Safety
 ///
 /// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
-unsafe fn copy_user_argv(
-    dst: &mut [u8; MAX_ARGV_BYTES],
-    argv: u64,
+unsafe fn copy_user_string_array(
+    dst: &mut [u8],
+    base: u64,
+    max_count: usize,
     pml4_phys: PhysAddr,
     direct_map: DirectMap,
 ) -> Result<(usize, usize), i64> {
     /// 1 要素の大きさ（ポインタ）。
     const WORD: u64 = 8;
 
-    if argv == 0 {
+    if base == 0 {
         return Err(EFAULT);
     }
 
     let mut count = 0usize;
     let mut used = 0usize;
     loop {
-        let slot = argv.checked_add(count as u64 * WORD).ok_or(EFAULT)?;
+        let slot = base.checked_add(count as u64 * WORD).ok_or(EFAULT)?;
         // SAFETY: 呼び出し元契約をそのまま渡す。
         let slice =
             unsafe { validate_user_range(pml4_phys, direct_map, slot, WORD) }.ok_or(EFAULT)?;
@@ -2895,7 +2906,7 @@ unsafe fn copy_user_argv(
         if pointer == 0 {
             return Ok((count, used));
         }
-        if count == crate::userland::MAX_ARGV {
+        if count == max_count {
             // 破壊 (S11-7, spawn-e2big-as-einval): 量の問題を `-EINVAL` で返す。
             // **どちらも「引数が受け付けられない」なので、雑に見ると同じに見える。**
             // **Linux は分けている**——`execve` は長すぎる引数に `E2BIG` を返す。
