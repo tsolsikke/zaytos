@@ -6838,6 +6838,26 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         .and_then(|token| token.parse::<usize>().ok());
     let kernel_stack_has_room = stack_spare.is_some_and(|spare| spare >= KERNEL_STACK_MIN_SPARE);
 
+    // **遠征スタックにも余裕が残っていること（f-2 の後の手当て）。**
+    //
+    // **見るのは全部の深さの最大である**——**深さごとに別の配列なので、
+    // どれか 1 つが細っていれば危ない。**
+    //
+    // **カナリアは踏んでから言う。** **こちらは踏む前に言う。**
+    let excursion_worst = serial
+        .lines()
+        .filter(|line| line.contains(" excursion stack ("))
+        .filter_map(|line| line.split(" used ").nth(1))
+        .filter_map(|rest| {
+            let mut parts = rest.split(" of ");
+            let used: usize = parts.next()?.trim().parse().ok()?;
+            let capacity: usize = parts.next()?.split_whitespace().next()?.parse().ok()?;
+            capacity.checked_sub(used)
+        })
+        .min();
+    let excursion_stack_has_room =
+        excursion_worst.is_some_and(|spare| spare >= EXCURSION_STACK_MIN_SPARE);
+
     // **`argv[0]` が打った語のままであること（3 本目）。**
     //
     // **`spawn-test beta` を `/bin/` を付けずに送っている。**
@@ -6908,6 +6928,10 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     println!(
         "{context}: the kernel stack kept at least {KERNEL_STACK_MIN_SPARE} byte(s) spare = \
          {kernel_stack_has_room} (spare {stack_spare:?})"
+    );
+    println!(
+        "{context}: every excursion stack kept at least {EXCURSION_STACK_MIN_SPARE} byte(s) \
+         spare = {excursion_stack_has_room} (worst spare {excursion_worst:?})"
     );
     println!("{context}: ctrl-k cut to the end = {ctrl_k_cut_to_the_end}");
     println!("{context}: ctrl-u cut to the start = {ctrl_u_cut_to_the_start}");
@@ -6992,6 +7016,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && history_walked_with_ctrl
         && ctrl_b_and_f_moved_the_insertion_point
         && kernel_stack_has_room
+        && excursion_stack_has_room
         && ctrl_k_cut_to_the_end
         && ctrl_u_cut_to_the_start
         && ctrl_w_deleted_the_word
@@ -7042,6 +7067,24 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
 /// 最大 4KiB である**（`objdump` でプロローグを走査した。2026-08-28）。
 /// **4 つ積んでも足りる幅を取ってある。**
 const KERNEL_STACK_MIN_SPARE: usize = 16 * 1024;
+
+/// 遠征スタックに残っていてほしい余裕（f-2 の後の手当て）。
+///
+/// **[`KERNEL_STACK_MIN_SPARE`] と同じ 16KiB である。** **根拠も同じ**——
+/// **関数 1 つの枠が最大 4KiB で、4 つ積んでも足りる幅である。**
+///
+/// # なぜ置くのか
+///
+/// **遠征スタックにはガードページが無い**（`.bss` の配列である。
+/// `kernel/src/userland.rs` の `ring3:` の行）。**溢れは静かに起きて、
+/// 下の静的領域を書く**——**実測で `EXCURSION_DEPTH` を壊したことがある**
+/// （`docs/troubleshooting.md`）。
+///
+/// **底のカナリアは在るが、あれは踏んでから言う。** **踏む前に言うものが
+/// 無かった**——**カーネルスタックで「緑であることと、余裕があることは違う」と
+/// 書いたのと同じ形が、こちらに残っていた**（実測。2026-08-31。
+/// **f-2 で深さ 0 の使用量が 40% から 43% へ動いたときに気づいた**）。
+const EXCURSION_STACK_MIN_SPARE: usize = 16 * 1024;
 
 /// `LINE_MAX` ちょうどの打鍵（SE-c）。**`z` を 128 個と Enter。**
 ///
