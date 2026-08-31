@@ -3705,6 +3705,17 @@ impl ShellTestMode {
         !self.expects_the_us_layout()
     }
 
+    /// `export` の台本が効くことを期待するか（f-2 の後に足した）。
+    ///
+    /// **US では `=` が打てない**——**台本は `shift-minus`（JIS の `-` の Shift）で
+    /// `=` を作っており、US ではあれが `_` である。** **`export ZF2_exported` に
+    /// なるので、シェルは「名前ではない」と断る。**
+    ///
+    /// **断る側も主張である**——**`~` の判定と同じ形で、両側を見る。**
+    fn expects_the_export_script(self) -> bool {
+        !self.expects_the_us_layout()
+    }
+
     /// この形が通ることを期待するか。**破壊は通らないことを期待する。**
     fn expects_to_pass(self) -> bool {
         !matches!(self, ShellTestMode::MustFail(_))
@@ -6628,7 +6639,14 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     // **f-2（`export` と `set`。`ADR-0053`）の判定 5 本。**
     //
     // **`envc` も `argc` と同じ行から読める**（`user-load` の 1 行に両方が出る）。
-    // **打つ前が 3、打った後が 4 である**——**「子へ届いた」を主張しているのは
+    //
+    // # 期待値を像の状態から切り離す（f-2 の後に直した）
+    //
+    // **最初は「3 から 4 へ」と書いていた。** **`keymap (us)` の回は像を作り直さない
+    // ので、`KEYMAP=us` が入って 4 から始まる**——**落ちた**（実測。2026-08-31。
+    // **`--full` でしか出ない形である**）。**差で見れば像に依らない。**
+    //
+    // **主張は「1 本増えたこと」である**——**「子へ届いた」を主張しているのは
     // これだけで、判定 1（`echo $ZF2` が値を出す）は主張しない**（展開はシェルが
     // 行うので、子が何も知らなくても値は出る）。
     let echo_envcs: Vec<usize> = after_shell
@@ -6638,46 +6656,66 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         .filter_map(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
         .filter_map(|digits| digits.parse().ok())
         .collect();
-    let envc_before_export = ECHO_LINES_IN_ORDER
-        .iter()
-        .position(|entry| *entry == "echo $ZF2 (before export)")
-        .and_then(|index| echo_envcs.get(index).copied());
-    let envc_after_export = ECHO_LINES_IN_ORDER
-        .iter()
-        .position(|entry| *entry == "echo $ZF2 (after export)")
-        .and_then(|index| echo_envcs.get(index).copied());
-    // **前と後の両方を見る。** **後だけを見ると、もともと 4 本だった場合と
-    // 区別できない**（像に手で足した行が在れば 4 から始まりうる。実測で、
-    // 運用者の持ち越した `disk0.img` には `KEYMAP=jis` が入っていた）。
-    let the_child_saw_the_exported_name =
-        envc_before_export == Some(3) && envc_after_export == Some(4);
+    let envc_at = |name: &str| -> Option<usize> {
+        let index = ECHO_LINES_IN_ORDER
+            .iter()
+            .position(|entry| *entry == name)?;
+        echo_envcs.get(index).copied()
+    };
+    let envc_before_export = envc_at("echo $ZF2 (before export)");
+    let envc_after_export = envc_at("echo $ZF2 (after export)");
+    // **US の回は `export` が断られるので、増えない。** **両側を見る。**
+    let wanted_envc_growth = usize::from(mode.expects_the_export_script());
+    let the_child_saw_the_exported_name = match (envc_before_export, envc_after_export) {
+        (Some(before), Some(after)) => after.checked_sub(before) == Some(wanted_envc_growth),
+        _ => false,
+    };
 
     // **判定 1**——**`export` した名前がシェルの表から引けること。**
     // **打つ前は語が 0 個になり、打った後は 2 個になる。**
-    let expanded_the_exported_name = after_shell.contains("\nexported\n")
-        && echo_argc("echo $ZF2 (before export)") == Some(1)
-        && echo_argc("echo $ZF2 (after export)") == Some(2);
+    // **US の回はどちらも 0 個である**（置けていないので空へ落ちる）。
+    let expanded_the_exported_name = if mode.expects_the_export_script() {
+        after_shell.contains("\nexported\n")
+            && echo_argc("echo $ZF2 (before export)") == Some(1)
+            && echo_argc("echo $ZF2 (after export)") == Some(2)
+    } else {
+        !after_shell.contains("\nexported\n")
+            && echo_argc("echo $ZF2 (before export)") == Some(1)
+            && echo_argc("echo $ZF2 (after export)") == Some(1)
+    };
 
     // **判定 2**——**`set` が表を並べること。**
     // **`ZF2` だけを見ない**——**源から来た 3 本も出ていることを同時に見る。**
-    let set_listed_the_table = after_shell.contains("\nZF2=exported\n")
-        && after_shell.contains("\nTERM=zaytos\n")
+    // **US の回は `ZF2` が入らない**ので、そちら側を見る。
+    let set_listed_the_source = after_shell.contains("\nTERM=zaytos\n")
         && after_shell.contains("\nPATH=/bin\n")
         && after_shell.contains("\nHOME=/root\n");
+    let set_listed_the_table = set_listed_the_source
+        && (after_shell.contains("\nZF2=exported\n") == mode.expects_the_export_script());
 
     // **判定 5**——**断ったことが人に見えること**（`ADR-0046` のエコー領域）。
     // **ホストテストは「断る」までしか言わない。** **見えることは別の主張である。**
-    let export_refused_a_bad_name = after_shell.contains("zash: export: 1BAD=x: not a name");
+    //
+    // **US の回は 1 行目から断られる**（`=` が `_` になるため）。**文言は同じで、
+    // 断られる語が違う。**
+    let export_refused_a_bad_name = if mode.expects_the_export_script() {
+        after_shell.contains("zash: export: 1BAD=x: not a name")
+    } else {
+        after_shell.contains("zash: export: ZF2_exported: not a name")
+    };
 
     // **判定 4**——**`export` がシェル自身の振る舞いを変えること**
     // （`ADR-0053` の Decision 6。**控えたままだと効かない**）。
     //
     // **`PATH` を壊すと `hello` が起こせなくなり、戻すと起こせる。**
-    // **`hello` は台本で 3 度走る**——最初の `/bin/hello`、`PATH` を戻した後、
-    // **そして壊れている間の 1 度は走らない。**
+    // **`hello` は既定の回で 2 度走る**——最初の `/bin/hello` と、`PATH` を戻した後である。
+    // **US の回は `PATH` が壊れないので 3 度走る**（`export` が断られる）。
     let hello_runs = after_shell.matches("/bin/hello initial stack").count();
-    let export_changed_the_path =
-        after_shell.contains("zash: hello: cannot run") && hello_runs == 2;
+    let export_changed_the_path = if mode.expects_the_export_script() {
+        after_shell.contains("zash: hello: cannot run") && hello_runs == 2
+    } else {
+        !after_shell.contains("zash: hello: cannot run") && hello_runs == 3
+    };
 
     let typed_echo_path = after_shell_plain.contains("zaytos$ echo $PATH\n");
     let expanded_a_value = typed_echo_path && after_shell.contains("\n/bin\n");
@@ -6974,13 +7012,14 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     );
     println!(
         "{context}: the child saw the exported name = {the_child_saw_the_exported_name} \
-         (envc {envc_before_export:?} -> {envc_after_export:?}, wanted 3 -> 4)"
+         (envc {envc_before_export:?} -> {envc_after_export:?}, wanted +{wanted_envc_growth})"
     );
     println!("{context}: set listed the table = {set_listed_the_table}");
     println!("{context}: export refused a bad name in the echo area = {export_refused_a_bad_name}");
     println!(
         "{context}: export changed the shell's own PATH = {export_changed_the_path} \
-         (/bin/hello ran {hello_runs} time(s), wanted 2)"
+         (/bin/hello ran {hello_runs} time(s); the export script works = {})",
+        mode.expects_the_export_script()
     );
     println!("{context}: echo $PATH printed the value = {expanded_a_value}");
     println!("{context}: the empty word was dropped = {empty_word_was_dropped}");
