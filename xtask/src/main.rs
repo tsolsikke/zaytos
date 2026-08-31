@@ -1400,6 +1400,7 @@ fn main() -> Result<()> {
        cargo xtask run --persist-test [--rebuild-between]
        cargo xtask run --persist-zi-test [--rebuild-between]
        cargo xtask run --persist-env-test [--rebuild-between]
+       cargo xtask run --keymap-test [--sabotage]
        cargo xtask check [--update-reference]   (ホストテストの名前の集合を取り直す)
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
@@ -1590,6 +1591,9 @@ fn main() -> Result<()> {
                 return cmd_shell_test(mode);
             }
             // **持ち越しの判定（P-a）。**
+            if rest.iter().any(|a| a == "--keymap-test") {
+                return cmd_keymap_test(rest.iter().any(|a| a == "--sabotage"));
+            }
             if rest.iter().any(|a| a == "--persist-env-test") {
                 return cmd_persist_env_test(
                     rest.iter().any(|a| a == "--rebuild-between"),
@@ -3472,6 +3476,16 @@ fn parse_hex(text: &str) -> Option<u64> {
 enum ShellTestMode {
     /// 既定ビルド。左矢印が挿入点を動かす。
     Normal,
+    /// `KEYMAP=us` を持ち越した回（f-1b）。**像を作り直さない。**
+    ///
+    /// **1 度目の起動が `zi` で `/etc/environment` へ `KEYMAP=us` を足し、
+    /// この回はその像の上で起きる。** **判定は 1 本だけ裏返る**
+    /// ——**打つ物理キーは同じで、出る字が変わる。**
+    KeymapUs,
+    /// 破壊（`keymap-always-jis-test`。f-1b）。**引く側が選択を見ない。**
+    ///
+    /// **カーネルの `keymap:` の行は `us` のままで、出る字だけが JIS である。**
+    KeymapUsAlwaysJis,
     /// 破壊（`keyboard-drop-arrows-test`）。矢印がデコーダで未対応へ戻るので、
     /// 前景へ 3 バイトが届かず、挿入点が動かない。
     ArrowsDropped,
@@ -3559,7 +3573,8 @@ impl ShellTestMode {
     /// この形で立てる feature。
     fn features(self) -> &'static [&'static str] {
         match self {
-            ShellTestMode::Normal => &[],
+            ShellTestMode::Normal | ShellTestMode::KeymapUs => &[],
+            ShellTestMode::KeymapUsAlwaysJis => &["keymap-always-jis-test"],
             ShellTestMode::ArrowsDropped => &["keyboard-drop-arrows-test"],
             ShellTestMode::EscDropped => &["keyboard-drop-esc-test"],
             // **1 要素の配列を作れないので、一覧から借りる。**
@@ -3579,6 +3594,8 @@ impl ShellTestMode {
     fn context(self) -> String {
         match self {
             ShellTestMode::Normal => "shell-test".to_string(),
+            ShellTestMode::KeymapUs => "shell-test keymap=us".to_string(),
+            ShellTestMode::KeymapUsAlwaysJis => "shell-test keymap-always-jis".to_string(),
             ShellTestMode::ArrowsDropped => "shell-test keyboard-drop-arrows".to_string(),
             ShellTestMode::EscDropped => "shell-test keyboard-drop-esc".to_string(),
             ShellTestMode::MustFail(feature) => format!("shell-test {feature}"),
@@ -3590,6 +3607,10 @@ impl ShellTestMode {
     fn serial_log_name(self) -> String {
         match self {
             ShellTestMode::Normal => "shell-test-serial.log".to_string(),
+            ShellTestMode::KeymapUs => "shell-test-keymap-us-serial.log".to_string(),
+            ShellTestMode::KeymapUsAlwaysJis => {
+                "shell-test-keymap-always-jis-serial.log".to_string()
+            }
             ShellTestMode::ArrowsDropped => "shell-test-drop-arrows-serial.log".to_string(),
             ShellTestMode::EscDropped => "shell-test-drop-esc-serial.log".to_string(),
             ShellTestMode::MustFail(feature) => format!("shell-test-{feature}-serial.log"),
@@ -3603,10 +3624,53 @@ impl ShellTestMode {
         self != ShellTestMode::ArrowsDropped
     }
 
+    /// 変換表について期待すること（f-1b）。**`true` は「US の表を引く」。**
+    fn expects_the_us_layout(self) -> bool {
+        // **破壊の側も真である。** **期待は「US の字が出ること」のままで、
+        // 引く側が見ないので落ちる**——**期待を裏返すと、破壊が緑になる。**
+        matches!(
+            self,
+            ShellTestMode::KeymapUs | ShellTestMode::KeymapUsAlwaysJis
+        )
+    }
+
+    /// この回は `disk0.img` を作り直さないか（f-1b）。
+    ///
+    /// **`KEYMAP=us` は 1 度目の起動が `zi` で書き込んだものなので、
+    /// 作り直すと消える。**
+    fn keeps_the_disk(self) -> bool {
+        matches!(
+            self,
+            ShellTestMode::KeymapUs | ShellTestMode::KeymapUsAlwaysJis
+        )
+    }
+
     /// Esc の実打鍵について期待すること（zi-a）。**`true` は「Esc `[` `D` の
     /// 3 打が CSI として解釈され、挿入点が動く」である。**
     fn expects_esc_to_reach_ring3(self) -> bool {
-        self != ShellTestMode::EscDropped
+        // **US の回も偽である（f-1b）。** **Esc は届いているが、
+        // 台本が `[` を作るのに打っている `bracket_right`（`0x1B`）は、
+        // US では `]` である**——**CSI にならないので挿入点が動かない。**
+        // **これは US の表が効いていることの、もう 1 つの現れである。**
+        !matches!(
+            self,
+            ShellTestMode::EscDropped | ShellTestMode::KeymapUs | ShellTestMode::KeymapUsAlwaysJis
+        )
+    }
+
+    /// 表の外の 2 キーについて期待すること（f-1b）。
+    ///
+    /// **US では何も出ない。** **運用者が目視で見る項目の 1 つでもある。**
+    fn expects_the_jis_only_keys(self) -> bool {
+        !self.expects_the_us_layout()
+    }
+
+    /// `~` の展開について期待すること（f-1b）。
+    ///
+    /// **US では `~` そのものが打てない**——**台本は `shift-equal`
+    /// （`0x0D` の Shift）で `~` を作っており、US ではあれが `+` である。**
+    fn expects_the_tilde_to_expand(self) -> bool {
+        !self.expects_the_us_layout()
     }
 
     /// この形が通ることを期待するか。**破壊は通らないことを期待する。**
@@ -6160,7 +6224,13 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let kernel_elf = build_kernel_with_features(&workspace_root, mode.features())?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    // **`KEYMAP=us` の回は `disk0.img` を作り直さない（f-1b）。**
+    // **1 度目の起動が `zi` で書き込んだものなので、作り直すと消える。**
+    let esp_dir = if mode.keeps_the_disk() {
+        stage_esp_keeping_the_disk(&workspace_root, &bootloader_efi, &kernel_elf)?
+    } else {
+        stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?
+    };
 
     let serial_log = workspace_root
         .join("target")
@@ -6359,7 +6429,14 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     //
     // **破壊ビルド（`keyboard-drop-esc-test`）では期待が裏返る。**
     let esc_moved = after_shell.contains("zash: nm: cannot run");
-    let esc_did_not_move = after_shell.contains("zash: m[Dn: cannot run");
+    // **届かなかったときに残る語は、変換表で変わる（f-1b）。**
+    // **台本は `bracket_right`（`0x1B`）を打っており、JIS では `[`、
+    // US では `]` である。**
+    let esc_did_not_move = if mode.expects_the_us_layout() {
+        after_shell.contains("zash: m]Dn: cannot run")
+    } else {
+        after_shell.contains("zash: m[Dn: cannot run")
+    };
     let esc_behaved_as_expected = if mode.expects_esc_to_reach_ring3() {
         esc_moved && !esc_did_not_move
     } else {
@@ -6571,7 +6648,19 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     let tilde_alone = after_shell.contains("\n/root\n");
     let tilde_with_path = after_shell.contains("\n/root/x\n");
     let tilde_inside_a_word = after_shell.contains("\na~b\n");
-    let tilde_expanded = tilde_alone && tilde_with_path && tilde_inside_a_word;
+    let tilde_expanded = (tilde_alone && tilde_with_path && tilde_inside_a_word)
+        == mode.expects_the_tilde_to_expand();
+
+    // **変換表が実行時に選ばれていること（f-1b）。**
+    //
+    // **既定は JIS なので `@+` が出る。** **`KEYMAP=us` の回では `[:` である。**
+    // **期待は構成から決まる**（[`ShellTestMode::expects_the_us_layout`]）。
+    let layout_output = if mode.expects_the_us_layout() {
+        "\n[:\n"
+    } else {
+        "\n@+\n"
+    };
+    let layout_is_in_use = after_shell.contains(layout_output);
 
     // **`Ctrl+K` が挿入点から行末まで消したこと（SE-f）。**
     let ctrl_k_cut = after_shell.contains("zash: kk: cannot run");
@@ -6679,7 +6768,9 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     );
     println!(
         "{context}: the two keys outside the table (ro, yen) reached ring 3 = \
-         {jis_only_keys_reached_ring3} (only one of them arrived = {only_one_jis_key_arrived})"
+         {jis_only_keys_reached_ring3} (only one of them arrived = {only_one_jis_key_arrived}; \
+         wanted {})",
+        mode.expects_the_jis_only_keys()
     );
 
     println!(
@@ -6733,8 +6824,14 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     );
     println!("{context}: the dollar stayed literal = {dollar_stayed_literal}");
     println!(
+        "{context}: the keyboard layout in use is the expected one = {layout_is_in_use} \
+         (expected {layout_output:?} from the two physical keys 0x1A and 0x27+Shift)"
+    );
+    println!(
         "{context}: ~ expands to HOME at the start of a word only = {tilde_expanded} \
-         (~ = {tilde_alone}, ~/x = {tilde_with_path}, a~b left alone = {tilde_inside_a_word})"
+         (~ = {tilde_alone}, ~/x = {tilde_with_path}, a~b left alone = {tilde_inside_a_word}; \
+         wanted {})",
+        mode.expects_the_tilde_to_expand()
     );
     println!("{context}: echo $PATH printed the value = {expanded_a_value}");
     println!("{context}: the empty word was dropped = {empty_word_was_dropped}");
@@ -6758,7 +6855,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && backspace_edited_the_line
         && arrow_behaved_as_expected
         && esc_behaved_as_expected
-        && jis_only_keys_reached_ring3
+        && (jis_only_keys_reached_ring3 == mode.expects_the_jis_only_keys())
         && !only_one_jis_key_arrived
         && home_and_end_moved_the_insertion_point
         && ctrl_a_and_e_moved_the_insertion_point
@@ -6780,6 +6877,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && duplicates_were_not_stored
         && dollar_stayed_literal
         && tilde_expanded
+        && layout_is_in_use
         && expanded_a_value
         && empty_word_was_dropped
         && expanded_to_nothing
@@ -6999,6 +7097,28 @@ const SHELL_TEST_LINES: &[&[&str]] = &[
     // **出るのは `a~b` そのものである。** **こちらが主張の主である**
     // ——**展開する側だけを見ると、どこでも展開する形が通る。**
     &["e", "c", "h", "o", "spc", "a", "shift-equal", "b", "ret"],
+    // `echo @+`（f-1b）。**変換表が実行時に選ばれていることを見る。**
+    //
+    // **物理キーを 2 つ打つ。** **`bracket_left` は `0x1A`、
+    // `shift-semicolon` は `0x27` の Shift である**（monitor のキー名は
+    // 物理の位置を指しており、名前は US の刻印から付いている）。
+    //
+    // **JIS では `@` と `+`、US では `[` と `:` が出る**（実測。
+    // `kernel/src/keyboard/decode.rs` の 2 つの表を突き合わせた）。
+    //
+    // **2 つに分けてあるのは、`character_for` の別の経路を通るためである**
+    // ——**`0x1A` は素の表、`0x27` は Shift の表から来る。**
+    // **片方だけ切り替わる形を捕まえる。**
+    &[
+        "e",
+        "c",
+        "h",
+        "o",
+        "spc",
+        "bracket_left",
+        "shift-semicolon",
+        "ret",
+    ],
     // aa / bb を打ってから 上 上（SE-c）。**履歴を矢印で辿る。**
     //
     // **辿れていれば `aa` が 2 度走る**（打ったときと、辿って Enter したとき）。
@@ -8803,6 +8923,91 @@ fn cmd_persist_env_test(rebuild_between: bool, ignore_file: bool) -> Result<()> 
             return Ok(());
         }
         bail!("{context}: at least one judgement did not hold")
+    }
+}
+
+/// キーボードの配列の切り替え（f-1b。`ADR-0052` の `KEYMAP`）。
+///
+/// # 主張は 1 つである
+///
+/// **「`/etc/environment` に `KEYMAP=us` を足すと、2 度目の起動から
+/// 変換表が US になる」。**
+///
+/// # 2 度起こす枠を使う
+///
+/// **1 度目は `zi` で `KEYMAP=us` を足す**（台本。デコーダを通らない）。
+/// **2 度目は `sendkey` で物理キーを打つ**（`--shell-test` の駆動。
+/// **デコーダを通る唯一の経路である**）。
+///
+/// **打つ鍵は 2 つで、`character_for` の別の経路を通る**——
+/// **`0x1A` は素の表（JIS `@` / US `[`）、`0x27` の Shift は Shift の表
+/// （JIS `+` / US `:`）である。** **片方だけ切り替わる形を捕まえる。**
+///
+/// # 破壊
+///
+/// **`keymap-always-jis-test` は、引く側が選択を見ない形である。**
+/// **`set_us_layout` は呼ばれており原子にも入っているので、
+/// カーネルの言う `keymap:` の行は `us` のままである**——
+/// **落ちるのは、出た字を見る判定だけである。**
+fn cmd_keymap_test(sabotage: bool) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let context = if sabotage {
+        "keymap-test keymap-always-jis-test"
+    } else {
+        "keymap-test"
+    };
+
+    println!("=== {context}: boot 1 (keymap-rewrite-test, rebuilding the disk)");
+    let first = capture_one_boot(
+        &workspace_root,
+        &["keymap-rewrite-test"],
+        DiskImage::Rebuild,
+        "keymap-boot1",
+        "script-done:",
+    )?;
+    let saved = first.contains("user-flush: /bin/zi wrote the image back");
+    println!("{context}: boot 1's save reached the device = {saved}");
+
+    let esp_dir = workspace_root.join("target").join("esp");
+    let disk = disk_image_path(&esp_dir);
+    let on_device = debugfs_read(&disk, "/etc/environment")?;
+    let device_carries_the_keymap = on_device
+        .as_ref()
+        .map(|bytes| {
+            String::from_utf8_lossy(bytes)
+                .lines()
+                .any(|line| line.trim_end() == "KEYMAP=us")
+        })
+        .unwrap_or(false);
+    println!("{context}: the device carries KEYMAP=us = {device_carries_the_keymap}");
+
+    if !saved || !device_carries_the_keymap {
+        println!("{context}: FAILED");
+        bail!("{context}: boot 1 did not put KEYMAP=us on the device")
+    }
+
+    println!("=== {context}: boot 2 (sendkey, keeping the disk)");
+    let outcome = cmd_shell_test(if sabotage {
+        ShellTestMode::KeymapUsAlwaysJis
+    } else {
+        ShellTestMode::KeymapUs
+    });
+    match outcome {
+        Ok(()) => {
+            println!("{context}: PASS");
+            if sabotage {
+                bail!("{context}: the sabotage was NOT caught; every judgement still held")
+            }
+            Ok(())
+        }
+        Err(error) => {
+            println!("{context}: FAILED ({error})");
+            if sabotage {
+                println!("{context}: the sabotage was caught (this run is expected to fail)");
+                return Ok(());
+            }
+            Err(error)
+        }
     }
 }
 
@@ -12252,53 +12457,6 @@ fn run_e2fsck(image: &Path) -> Result<String> {
     Ok(summary)
 }
 
-/// 破壊 feature を入れてホストの単体テストを走らせ、**落ちること**を見る（zi-e）。
-///
-/// # QEMU を起こさない破壊が初めて出た
-///
-/// **既存の破壊はすべて QEMU の側で捕まえていた。** キーボードの変換表は
-/// **純粋な変換なのでホストで回る**（`docs/coding-standards.md` の
-/// 「ハードウェア依存部と純粋ロジックを分離する」）。**捕まえる先がホストに
-/// あるなら、QEMU を起こす理由が無い**——1 本あたり数十秒の差である。
-///
-/// # 落ちた本数を数える。**status だけを見ない**
-///
-/// **ビルドが失敗しても `status` は成功以外になる。** 見るだけだと、
-/// **破壊が捕まったのか、そもそもコンパイルが通らなかったのかが区別できない**
-/// ——**後者は「破壊が緑を出す道」の 1 つ（機会が無い）そのものである。**
-///
-/// **したがって、落ちたテストが 1 本以上あることまで見る。**
-fn check_host_tests_fail_with(workspace_root: &Path, feature: &str) -> Result<String> {
-    let output = Command::new("cargo")
-        .current_dir(workspace_root)
-        .args(["test", "-p", KERNEL_PACKAGE, "--features", feature])
-        .output()
-        .with_context(|| format!("failed to invoke cargo test with {feature} enabled"))?;
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    let failed = text
-        .lines()
-        .filter(|line| line.starts_with("test ") && line.trim_end().ends_with("FAILED"))
-        .count();
-
-    if output.status.success() {
-        bail!(
-            "the host tests passed with {feature} enabled ({} test(s) reported as failed); \
-             the sabotage was NOT caught",
-            failed
-        );
-    }
-    if failed == 0 {
-        bail!(
-            "cargo test with {feature} enabled did not succeed, but no test reported FAILED; \
-             the run probably did not get as far as running tests\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    Ok(format!("{failed} host test(s) failed, as they should"))
-}
-
 /// `kernel/build.rs` が生成物を置いた `OUT_DIR`（既定の feature 構成）。
 ///
 /// **cargo の JSON 出力から引く。** `serde` は入れない——見るのは
@@ -13083,16 +13241,21 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }
         }
 
-        // **キーボードの変換表の破壊（zi-e）。** **ここだけ QEMU を起こさない。**
-        // **表は純粋な変換なので、捕まえる先がホストの単体テストにある。**
-        total += 1;
-        begin_item("the host tests catch keyboard-us-layout-test");
-        match check_host_tests_fail_with(&workspace_root, "keyboard-us-layout-test") {
-            Ok(summary) => println!("--- host tests (keyboard-us-layout-test): OK ({summary})"),
-            Err(error) => {
-                println!("    {error}");
-                println!("--- host tests (keyboard-us-layout-test): FAILED");
-                failed.push("host tests (keyboard-us-layout-test)".to_string());
+        // **キーボードの配列の切り替え（f-1b。`ADR-0052` の `KEYMAP`）。**
+        //
+        // **`zi-e` の `keyboard-us-layout-test` を置き換えた**——
+        // **実行時に選べるようになったので「US を選ぶ」は正常な経路で、
+        // 破壊ではない。** **表そのものの差はホストの単体テストが主張して
+        // いる**（`the_two_layouts_differ_where_they_should`）。
+        for (label, sabotage) in [("keymap (us)", false), ("keymap (us, always jis)", true)] {
+            total += 1;
+            begin_item(&format!("the keyboard layout claim: {label}"));
+            match cmd_keymap_test(sabotage) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
             }
         }
 
@@ -14097,7 +14260,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 26,
-    full: 258,
+    full: 259,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

@@ -291,7 +291,8 @@ pub fn read_bytes(dst: &mut [u8]) -> usize {
         feature = "zi-test",
         feature = "view-test",
         feature = "persist-check-test",
-        feature = "env-rewrite-test"
+        feature = "env-rewrite-test",
+        feature = "keymap-rewrite-test"
     ))]
     {
         let taken = script::next_bytes(dst);
@@ -532,7 +533,8 @@ pub fn arm_input_script() {
         feature = "zi-test",
         feature = "view-test",
         feature = "persist-check-test",
-        feature = "env-rewrite-test"
+        feature = "env-rewrite-test",
+        feature = "keymap-rewrite-test"
     ))]
     script::arm();
 }
@@ -558,7 +560,8 @@ pub fn arm_input_script() {
     feature = "zi-test",
     feature = "view-test",
     feature = "persist-check-test",
-    feature = "env-rewrite-test"
+    feature = "env-rewrite-test",
+    feature = "keymap-rewrite-test"
 ))]
 pub(crate) mod script {
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -760,6 +763,19 @@ pub(crate) mod script {
         jj\
         lllllllllll\
         aX\x1b\x04\
+        :wq\n\x0c";
+
+    /// 台本（f-1b）。**`/etc/environment` へ `KEYMAP=us` を足す。**
+    ///
+    /// **行は上から注釈 2 本・`TERM`・`PATH`・`HOME` である。**
+    /// **`jjjj` で 5 行目（`HOME=/root`）へ降り、`l` を 10 回打って
+    /// 最後の字に居る**（それ以上は右端で止まる）。**`a` で後ろへ挿し、
+    /// Enter で行を割り、`KEYMAP=us` を打つ。**
+    #[cfg(feature = "keymap-rewrite-test")]
+    const SCRIPT: &[u8] = b"/bin/zi /etc/environment\n\
+        jjjj\
+        llllllllll\
+        a\nKEYMAP=us\x1b\x04\
         :wq\n\x0c";
 
     /// 台本（VIEW-b）。**`less` を駆動する。**

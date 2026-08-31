@@ -249,32 +249,15 @@ const ARGV0_LEN: u32 = 13;
 /// `argv[1]` の長さ（NUL を含む）。
 const ARGV1_LEN: u32 = 6;
 
-/// 期待する環境の要素数（EV。DIR-1 で 2、f-1 で 3 になった）。
-///
-/// **既定は `TERM` と `PATH` と `HOME` の 3 つである**
-/// （`ADR-0041`・`ADR-0043`・`ADR-0052`）。
-/// **落とす破壊の構成では、そのぶん減る**——**破壊が入った構成で、
-/// この検算が別の理由で落ちないようにする。**
-/// **`kernel/build.rs` の `USER_PROGRAM_CFGS` が feature から `--cfg` を導く。**
-///
-/// # ここは源がファイルであることに寄りかかっている
-///
-/// **f-1 で環境の源は `/etc/environment` になった**（`ADR-0052`）。
-/// **この数は「種が置いた行が 3 本ある」ことを前提にしている**
-/// ——**`kernel/fsimage/seed/etc/environment` を編集すると、ここが落ちる。**
-/// **落ちるのは正しい**——**種を変えたなら、期待も変えるべきである。**
-const EXPECTED_ENVC: usize =
-    3 - (cfg!(env_drop_term) as usize) - (cfg!(env_drop_path) as usize);
 
-
-/// `envp` の終端の位置（`rsp` からのバイト）。
+/// `envp` を歩く上限（f-1b）。
 ///
-/// **`argc` 1 語 + `argv` 2 本 + `argv` の終端 1 語 = 32 バイトの次から
-/// `envp` が始まる。** 要素数ぶん進んだ先が終端である。
-const ENVP_TERMINATOR_OFFSET: usize = 32 + EXPECTED_ENVC * 8;
-
-/// `auxv` の型欄の位置（`rsp` からのバイト）。**`envp` の終端の次である。**
-const AUXV_TYPE_OFFSET: usize = ENVP_TERMINATOR_OFFSET + 8;
+/// **カーネルの `MAX_ENVP` より 1 つ大きい。** **終端そのものを踏む
+/// 余地が要る**——**上限ぴったりだと、いっぱいに積んだときに
+/// 終端へ届く前に打ち切ってしまう。**
+///
+/// **数え方**——**`kernel/src/userland.rs` の `MAX_ENVP`（8）に 1 を足した。**
+const ENVP_WALK_MAX: usize = 9;
 /// `spawn` の番号（`ZAYTOS_PRIVATE_BASE + 4`）。
 const SYS_SPAWN: u32 = 0x1004;
 
@@ -364,12 +347,37 @@ core::arch::global_asm!(
     "  cmp qword ptr [rsp + 32], 0",
     "  mov edi, 34",
     "  je 9f",
-    // envp の終端。**位置は要素数で決まる（EV）。**
-    "  cmp qword ptr [rsp + {envp_terminator}], 0",
+    // envp の終端を歩いて探す（f-1b）。
+    //
+    // **以前は位置を要素数から決めていた**（`ENVP_TERMINATOR_OFFSET`）。
+    // **f-1b でその前提が消えた**——**利用者が `/etc/environment` へ
+    // 1 行足すと要素数が変わり、固定の位置が終端を指さなくなって
+    // 起動が止まる。** **実際に踏んだ**（実測。2026-08-31。
+    // `KEYMAP=us` を足した 2 度目が止まった）。
+    //
+    // **同じ族の 3 度目である**——**`/data/writable` の演習、
+    // `envp[0]` の突き合わせ、そしてここ**（`docs/troubleshooting.md`）。
+    // **3 度とも「種の中身に寄りかかった判定」だった。**
+    //
+    // **歩けば要素数に寄りかからない。** **`rcx` を使う**——
+    // **ここより後の検算は `rbx` と `r12` を使っており、`rcx` は
+    // 直前の `repe cmpsb` が使い終えている。**
+    //
+    // **上限を置く**（`{envp_max}`）。**終端が無い像で無限に歩かない**
+    // ——**歩き切ったら 61 番で落ちる。**
+    "  lea rcx, [rsp + 32]",
+    "  mov edx, {envp_max}",
+    "10:",
+    "  cmp qword ptr [rcx], 0",
+    "  je 11f",
+    "  add rcx, 8",
+    "  dec edx",
+    "  jnz 10b",
     "  mov edi, 61",
-    "  jne 9f",
-    // auxv の終端（AT_NULL = 0）。
-    "  cmp qword ptr [rsp + {auxv_type}], 0",
+    "  jmp 9f",
+    "11:",
+    // auxv の終端（AT_NULL = 0）。**envp の終端の次である。**
+    "  cmp qword ptr [rcx + 8], 0",
     "  mov edi, 35",
     "  jne 9f",
 
@@ -1292,8 +1300,7 @@ core::arch::global_asm!(
     argc = const EXPECTED_ARGC,
     argv0_len = const ARGV0_LEN,
     argv1_len = const ARGV1_LEN,
-    envp_terminator = const ENVP_TERMINATOR_OFFSET,
-    auxv_type = const AUXV_TYPE_OFFSET,
+    envp_max = const ENVP_WALK_MAX,
     brk = const SYS_BRK,
     brk_growth = const BRK_GROWTH,
     brk_last = const BRK_LAST_WORD,

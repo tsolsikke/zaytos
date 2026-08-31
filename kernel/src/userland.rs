@@ -318,12 +318,75 @@ pub fn load_environment(logger: &mut Logger<SerialPort>) {
         ENVIRONMENT.lock().from_file = from_file;
     }
 
+    apply_keymap(logger);
+
     let environment = ENVIRONMENT.lock();
     logger.info(format_args!(
         "env-source: {} took {taken} line(s) and dropped {dropped}; the table holds {} (from_file={})",
         core::str::from_utf8(ENV_SOURCE).unwrap_or("?"),
         environment.count,
         environment.from_file
+    ));
+}
+
+/// `KEYMAP` を読んでキーボードの配列を選ぶ（f-1b）。
+///
+/// # 値は `jis` と `us` の 2 つである
+///
+/// **名指すのは配列であって、キーボードの型番ではない**——**表は 64 個の
+/// スキャンコードと 2 キーぶんしか持たず、`jp106` / `us101` が主張する
+/// キー数の精度を持っていない。**
+///
+/// # 未知の値は既定へ落ちる
+///
+/// **既定は `jis` である**（いまの振る舞いを変えない。**既定を US にすると、
+/// 設定ファイルが無いときに手元の刻印どおりに打てなくなる**）。
+/// **落としたことは出す**——`ADR-0052` の Decision 3 と同じ形で、
+/// **新しい規則を作らない。**
+///
+/// # 読む位置
+///
+/// **環境を組んだ直後である。** **キー割り込みが来るのは `start_timer` より
+/// 後なので、それより前に決まっていれば足りる**（実測。
+/// `kernel/src/main.rs` で、環境を読むのが像の複製の直後、
+/// `start_timer` はその下である）。
+fn apply_keymap(logger: &mut Logger<SerialPort>) {
+    const KEYMAP: &[u8] = b"KEYMAP=";
+    // **錠の下では写しだけを取る。** **借りたまま `drop` できない。**
+    let mut value = [0u8; ENV_LINE_MAX];
+    let mut length = None;
+    {
+        let environment = ENVIRONMENT.lock();
+        for index in 0..environment.count {
+            let line = &environment.lines[index][..environment.lens[index]];
+            if let Some(tail) = line.strip_prefix(KEYMAP) {
+                value[..tail.len()].copy_from_slice(tail);
+                length = Some(tail.len());
+            }
+        }
+    }
+    let chosen = length.map(|length| &value[..length]);
+
+    let us = match chosen {
+        None => false,
+        Some(b"jis") => false,
+        Some(b"us") => true,
+        Some(other) => {
+            logger.info(format_args!(
+                "keymap: {:?} is not a layout; falling back to jis",
+                core::str::from_utf8(other).unwrap_or("?")
+            ));
+            false
+        }
+    };
+    crate::keyboard::decode::set_us_layout(us);
+    logger.info(format_args!(
+        "keymap: the keyboard layout is {} (KEYMAP was {})",
+        if us { "us" } else { "jis" },
+        match chosen {
+            Some(value) => core::str::from_utf8(value).unwrap_or("?"),
+            None => "not set",
+        }
     ));
 }
 

@@ -9459,11 +9459,6 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "O_CREAT を受けても作らない",
     ),
     (
-        "keyboard-us-layout-test",
-        cfg!(feature = "keyboard-us-layout-test"),
-        "キーボードの変換表が JIS ではなく US のままになる",
-    ),
-    (
         "env-drop-term-test",
         cfg!(feature = "env-drop-term-test"),
         "envp から TERM を落とす",
@@ -9554,6 +9549,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "代替画面から戻る描き直しが、塗った色のままの空白も描く",
     ),
     (
+        "keymap-always-jis-test",
+        cfg!(feature = "keymap-always-jis-test"),
+        "KEYMAP を見ずに常に JIS の表を引く",
+    ),
+    (
         "zi-test",
         cfg!(feature = "zi-test"),
         "打鍵の代わりに決定的な台本を read_bytes から返す",
@@ -9562,6 +9562,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "env-ignore-file-test",
         cfg!(feature = "env-ignore-file-test"),
         "環境の源を読まず、常に既定へ落ちる",
+    ),
+    (
+        "keymap-rewrite-test",
+        cfg!(feature = "keymap-rewrite-test"),
+        "持ち越しの 1 度目で /etc/environment へ KEYMAP=us を足す台本を返す",
     ),
     (
         "env-rewrite-test",

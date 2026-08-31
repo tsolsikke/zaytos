@@ -154,7 +154,7 @@ fn control_byte_for(key: u8) -> Option<u8> {
     if index >= TABLE_LEN {
         return None;
     }
-    let character = UNSHIFTED[index];
+    let character = unshifted()[index];
     if character.is_ascii_lowercase() {
         Some(character as u8 - b'a' + 1)
     } else {
@@ -251,8 +251,65 @@ const SCANCODE_ENTER: u8 = 0x1C;
 /// **`0x73`（ろ）と `0x7D`（¥）は `0x40` を越えている。** 表を `0x80` まで
 /// 伸ばすと、**`0x40` から `0x72` までの 51 個が空欄で埋まる**——表の見た目が
 /// 「何も無い区間」に占められる。**2 つだけなので名前で持つ**
-/// （[`JIS_ONLY_KEYS`]）。
+/// （[`jis_only_keys`]）。
 const TABLE_LEN: usize = 0x40;
+
+/// いま引く配列（f-1b。`ADR-0052` の `KEYMAP`）。
+///
+/// # なぜ錠ではなく atomic なのか
+///
+/// **読むのは割り込みの文脈である**（キー割り込みからデコーダが引く）。
+/// **`Locked<T>` は持っている間ずっと割り込みを止めるので、
+/// 割り込みハンドラの中で取るのは形が違う。** **原子で足りる**——
+/// **書くのは起動時の 1 回だけで、読むのは字を作るときだけである。**
+///
+/// **既定は JIS である**（`false`）。**設定ファイルが無いときに
+/// いまの振る舞いを変えない**（`ADR-0052` の Decision 3 と同じ考え方）。
+static USE_US_LAYOUT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// 配列を選ぶ（f-1b）。**呼ぶのは起動時の 1 回だけである。**
+pub(crate) fn set_us_layout(us: bool) {
+    USE_US_LAYOUT.store(us, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// 破壊 (f-1b, keymap-always-jis-test): **`KEYMAP` を見ずに常に JIS を引く。**
+///
+/// **`set_us_layout` は呼ばれており、原子にも入っている**——**引く側だけが
+/// 見ない形である。** **出る字が JIS のままなので、`sendkey` で同じ物理キーを
+/// 打って出る字が変わることを見る判定が捕まえる。**
+fn use_us_layout() -> bool {
+    #[cfg(feature = "keymap-always-jis-test")]
+    return false;
+    #[cfg(not(feature = "keymap-always-jis-test"))]
+    USE_US_LAYOUT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Shift を押していないときの表。
+fn unshifted() -> &'static [char; TABLE_LEN] {
+    if use_us_layout() {
+        &US_UNSHIFTED
+    } else {
+        &JIS_UNSHIFTED
+    }
+}
+
+/// Shift を押しているときの表。
+fn shifted() -> &'static [char; TABLE_LEN] {
+    if use_us_layout() {
+        &US_SHIFTED
+    } else {
+        &JIS_SHIFTED
+    }
+}
+
+/// 表の外に居るキー。**US では空である。**
+fn jis_only_keys() -> &'static [(u8, char, char)] {
+    if use_us_layout() {
+        JIS_ONLY_KEYS_US
+    } else {
+        JIS_ONLY_KEYS_JIS
+    }
+}
 
 /// JIS 固有キー——`\` と `_` の刻印を持つ（**ろ**。右 Shift の左）。
 const SCANCODE_JIS_RO: u8 = 0x73;
@@ -266,14 +323,12 @@ const SCANCODE_JIS_YEN: u8 = 0x7D;
 ///
 /// **記号なので Shift だけが効く**（表の側と同じ規則。Caps Lock は関係しない）。
 ///
-/// 破壊 (zi-e, keyboard-us-layout-test): **空にする。**
-/// **US の表には対応するキーが無いので、無いことが US の表そのものである。**
-#[cfg(not(feature = "keyboard-us-layout-test"))]
-const JIS_ONLY_KEYS: &[(u8, char, char)] =
+/// **US の側は空である**——**対応するキーが無いことが、US の表そのもので
+/// ある。** **f-1b で、両方を置いて実行時に選ぶ形にした。**
+const JIS_ONLY_KEYS_JIS: &[(u8, char, char)] =
     &[(SCANCODE_JIS_RO, '\\', '_'), (SCANCODE_JIS_YEN, '\\', '|')];
 
-#[cfg(feature = "keyboard-us-layout-test")]
-const JIS_ONLY_KEYS: &[(u8, char, char)] = &[];
+const JIS_ONLY_KEYS_US: &[(u8, char, char)] = &[];
 
 /// Shift を押していないときの文字。JIS 配列。`'\0'` は「文字ではない」。
 ///
@@ -281,8 +336,7 @@ const JIS_ONLY_KEYS: &[(u8, char, char)] = &[];
 ///
 /// **US ではここが `` ` `` だが、JIS は変換の切り替えキーである。**
 /// 文字を持たないので `'\0'` を置く。**`` ` `` は Shift+`@`（`0x1A`）にある。**
-#[cfg(not(feature = "keyboard-us-layout-test"))]
-const UNSHIFTED: [char; TABLE_LEN] = [
+const JIS_UNSHIFTED: [char; TABLE_LEN] = [
     '\0', '\0', '1', '2', '3', '4', '5', '6', // 0x00-0x07
     '7', '8', '9', '0', '-', '^', '\0', '\0', // 0x08-0x0F (0x0E=BS, 0x0F=Tab)
     'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', // 0x10-0x17
@@ -303,8 +357,7 @@ const UNSHIFTED: [char; TABLE_LEN] = [
 ///
 /// **`'\0'` を置くので、Shift+`0` は [`KeyEvent::Unsupported`] になる。**
 /// **2 つの表が食い違う唯一の位置であり、単体テストがそう主張している。**
-#[cfg(not(feature = "keyboard-us-layout-test"))]
-const SHIFTED: [char; TABLE_LEN] = [
+const JIS_SHIFTED: [char; TABLE_LEN] = [
     '\0', '\0', '!', '"', '#', '$', '%', '&', // 0x00-0x07
     '\'', '(', ')', '\0', '=', '~', '\0', '\0', // 0x08-0x0F (0x0B=Shift+0 は無い)
     'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', // 0x10-0x17
@@ -315,22 +368,17 @@ const SHIFTED: [char; TABLE_LEN] = [
     '\0', ' ', '\0', '\0', '\0', '\0', '\0', '\0', // 0x38-0x3F
 ];
 
-// 破壊 (zi-e, keyboard-us-layout-test): **US の表のまま返す。**
+// **US の表（f-1b。以前は `keyboard-us-layout-test` という破壊だった）。**
 //
-// **既定を JIS にした段の判定が、実際に表を見ていることを確かめる。**
-// **記号の十数個と、JIS 固有の 2 キーが同時に US へ戻る**ので、
-// **ホストの単体テストが 6 本落ちる**（実測）——差の一覧・`:` の位置・
-// Shift+`0`・日本語入力キー・2 つの表の一致・JIS 固有キーである。
+// **実行時に選べるようになったので、「US を選ぶ」は正常な経路である**
+// ——**破壊ではない。** **代わりに `keymap-always-jis-test`（引く側が
+// 選択を見ない）を立てた。**
 //
-// **落ちない 1 本を書いておく。** 「ASCII の記号 32 個が全部打てる」は
-// **US でも成り立つので、配列を見分けない。** あれが守るのは
-// 「記号を打つ道を失わないこと」であって、**どちらの配列かではない。**
-//
-// **実機の側も落ちる**——`--shell-test` は `bracket_right`（`0x1B`）を打って
-// `[` を作っており、US ではあれが `]` になる。**ただし回帰としては置いていない**
-// （QEMU を 1 本余計に起こす費用に対して、捕まえる先がホストと同じである）。
-#[cfg(feature = "keyboard-us-layout-test")]
-const UNSHIFTED: [char; TABLE_LEN] = [
+// **JIS との差は 20 箇所と、表の外の 2 キーである**（実測。2026-08-31。
+// **数え方——`UNSHIFTED` と `SHIFTED` の項を 1 つずつ突き合わせ、
+// 違う位置を数えた。`UNSHIFTED` が 6、`SHIFTED` が 14 である**）。
+// **以前の記録は「14 箇所」だったが、あれは `SHIFTED` だけを数えていた。**
+const US_UNSHIFTED: [char; TABLE_LEN] = [
     '\0', '\0', '1', '2', '3', '4', '5', '6', // 0x00-0x07
     '7', '8', '9', '0', '-', '=', '\0', '\0', // 0x08-0x0F (0x0E=BS, 0x0F=Tab)
     'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', // 0x10-0x17
@@ -341,8 +389,7 @@ const UNSHIFTED: [char; TABLE_LEN] = [
     '\0', ' ', '\0', '\0', '\0', '\0', '\0', '\0', // 0x38-0x3F (0x39=Space, 0x3A=Caps)
 ];
 
-#[cfg(feature = "keyboard-us-layout-test")]
-const SHIFTED: [char; TABLE_LEN] = [
+const US_SHIFTED: [char; TABLE_LEN] = [
     '\0', '\0', '!', '@', '#', '$', '%', '^', // 0x00-0x07
     '&', '*', '(', ')', '_', '+', '\0', '\0', // 0x08-0x0F
     'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', // 0x10-0x17
@@ -612,10 +659,10 @@ impl Decoder {
     /// # 表より先に JIS 固有キーを見る
     ///
     /// **`0x73` と `0x7D` は `TABLE_LEN` の外に居る**ので、範囲の判定に
-    /// 先んじて引く（[`JIS_ONLY_KEYS`]）。**順序を逆にすると `None` で
+    /// 先んじて引く（[`jis_only_keys`]）。**順序を逆にすると `None` で
     /// 打ち切られ、2 つのキーが黙って消える。**
     fn character_for(&self, key: u8) -> Option<char> {
-        if let Some((_, plain, shifted)) = JIS_ONLY_KEYS.iter().find(|(code, ..)| *code == key) {
+        if let Some((_, plain, shifted)) = jis_only_keys().iter().find(|(code, ..)| *code == key) {
             return Some(if self.shift() { *shifted } else { *plain });
         }
 
@@ -624,7 +671,7 @@ impl Decoder {
             return None;
         }
 
-        let base = UNSHIFTED[index];
+        let base = unshifted()[index];
         if base == '\0' {
             return None;
         }
@@ -637,7 +684,7 @@ impl Decoder {
             self.shift()
         };
 
-        let character = if use_shifted { SHIFTED[index] } else { base };
+        let character = if use_shifted { shifted()[index] } else { base };
         if character == '\0' {
             None
         } else {
@@ -648,6 +695,41 @@ impl Decoder {
 
 #[cfg(test)]
 mod tests {
+
+    /// 2 つの配列は、あるべき場所で違う（f-1b）。
+    ///
+    /// # 数を主張にする
+    ///
+    /// **以前はこれを破壊（`keyboard-us-layout-test`）で見ていた**
+    /// ——**US の表へ倒すと、JIS を主張する単体テストが 6 本落ちた。**
+    /// **実行時に選べるようになると「US を選ぶ」は正常な経路になり、
+    /// 破壊ではなくなる**ので、**差そのものを主張する形へ移した。**
+    ///
+    /// **数え方**——**`UNSHIFTED` と `SHIFTED` の項を 1 つずつ突き合わせ、
+    /// 違う位置を数えた。** **表の外の 2 キーは別に数える。**
+    ///
+    /// **以前の記録は「14 箇所」だったが、あれは `SHIFTED` だけである**
+    /// （`docs/coding-standards.md` の「数を書くときは、何を数えたかを
+    /// 添える」の実例）。
+    #[test]
+    fn the_two_layouts_differ_where_they_should() {
+        let unshifted = (0..TABLE_LEN)
+            .filter(|index| JIS_UNSHIFTED[*index] != US_UNSHIFTED[*index])
+            .count();
+        let shifted = (0..TABLE_LEN)
+            .filter(|index| JIS_SHIFTED[*index] != US_SHIFTED[*index])
+            .count();
+        assert_eq!(unshifted, 6, "UNSHIFTED の差");
+        assert_eq!(shifted, 14, "SHIFTED の差");
+        assert_eq!(JIS_ONLY_KEYS_JIS.len(), 2, "表の外の JIS 固有キー");
+        assert!(JIS_ONLY_KEYS_US.is_empty(), "US には対応するキーが無い");
+
+        // **判定が打つ 2 つの鍵を名指しで固定する。**
+        // **片方は素の側、もう片方は Shift の側で、`character_for` の
+        // 別の経路を通る。**
+        assert_eq!((JIS_UNSHIFTED[0x1A], US_UNSHIFTED[0x1A]), ('@', '['));
+        assert_eq!((JIS_SHIFTED[0x27], US_SHIFTED[0x27]), ('+', ':'));
+    }
     use super::*;
 
     /// 押下と離脱を順に食べさせ、報告されたイベントだけを集める補助。
@@ -973,13 +1055,13 @@ mod tests {
 
         for index in 0..TABLE_LEN {
             if index == NO_SHIFT_LEGEND {
-                assert_eq!(UNSHIFTED[index], '0', "素の側は 0 である");
-                assert_eq!(SHIFTED[index], '\0', "Shift 側には字が無い");
+                assert_eq!(JIS_UNSHIFTED[index], '0', "素の側は 0 である");
+                assert_eq!(JIS_SHIFTED[index], '\0', "Shift 側には字が無い");
                 continue;
             }
             assert_eq!(
-                UNSHIFTED[index] == '\0',
-                SHIFTED[index] == '\0',
+                JIS_UNSHIFTED[index] == '\0',
+                JIS_SHIFTED[index] == '\0',
                 "scancode {index:#04x} で 2 つの表が食い違っている"
             );
         }

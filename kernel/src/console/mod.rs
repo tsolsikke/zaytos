@@ -30,7 +30,8 @@ pub mod dirty;
     feature = "zi-test",
     feature = "view-test",
     feature = "persist-check-test",
-    feature = "env-rewrite-test"
+    feature = "env-rewrite-test",
+    feature = "keymap-rewrite-test"
 ))]
 pub(crate) mod probe;
 pub mod screen;

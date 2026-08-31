@@ -460,6 +460,7 @@ kernel::keyboard::decode::tests::the_japanese_input_keys_are_reported_as_unsuppo
 kernel::keyboard::decode::tests::the_jis_only_keys_live_outside_the_table_and_do_not_break_the_decoder
 kernel::keyboard::decode::tests::the_keys_that_differ_between_us_and_jis_carry_the_jis_legends
 kernel::keyboard::decode::tests::the_pause_sequence_is_swallowed_whole_including_its_inner_prefix
+kernel::keyboard::decode::tests::the_two_layouts_differ_where_they_should
 kernel::keyboard::decode::tests::the_two_shift_keys_are_tracked_independently
 kernel::keyboard::decode::tests::the_two_tables_agree_except_at_the_one_key_that_has_no_shift_legend
 kernel::keyboard::decode::tests::unsupported_scancodes_are_reported_not_silently_dropped

@@ -151,8 +151,6 @@ zi-append-like-insert-test = []
 # 受理していないのと同じで、新しいファイルが作れることの判定だけが落ちる。
 open-ignore-create-test = []
 # 破壊（zi-e）: キーボードの変換表を US のまま返す。JIS 固有の 2 キーも消える。
-# 差し替えた記号の十数個が同時に US へ戻るので、ホストの単体テストが落ちる。
-keyboard-us-layout-test = []
 # 破壊（EV）: envp を空にする。zash が TERM を見つけられず、プロンプトの色を
 # 既定へ落とす。ES-d の色の判定（画面の実物のピクセル）が落ちる。
 env-drop-term-test = []
@@ -195,12 +193,18 @@ open-skip-truncate-test = []
 # PERF-h の前の形そのもので、出る絵は同じで描くセルが 1,180 から 8,000 へ増える。
 # 画面を読む判定は 1 つも落ちないので、描いたセルの数を見る判定が捕まえる。
 repaint-blank-cells-test = []
+# 破壊（f-1b）: KEYMAP を見ずに常に JIS の表を引く。set_us_layout は呼ばれて
+# おり原子にも入っているが、引く側だけが見ない。sendkey で同じ物理キーを
+# 打って出る字が変わることを見る判定が捕まえる。
+keymap-always-jis-test = []
 zi-test = []
 # 検証（P-c-3）: 持ち越しの2度目で /data/lines を cat するだけの台本。
 # zi-test の台本はあの回で /data/lines を編集するので、2度目には使えない。
 persist-check-test = []
 # 検証（f-1）: 持ち越しの1度目で zi が /etc/environment の TERM を書き換える台本。
 env-rewrite-test = []
+# 検証（f-1b）: 持ち越しの1度目で zi が /etc/environment へ KEYMAP=us を足す台本。
+keymap-rewrite-test = []
 # 破壊（f-1）: 環境の源を読まず、常に既定へ落ちる。ADR-0052 の Decision 1 を
 # 直接否定する形で、出る環境は種と同じなので値を見る判定は落ちない。
 env-ignore-file-test = []
