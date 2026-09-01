@@ -1618,6 +1618,16 @@ fn main() -> Result<()> {
                 return cmd_shell_test(mode);
             }
             // **持ち越しの判定（P-a）。**
+            if rest.iter().any(|a| a == "--utf8-test") {
+                let sabotage: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                let expect_pass = sabotage.is_empty();
+                return cmd_utf8_test(&sabotage, expect_pass);
+            }
             if rest.iter().any(|a| a == "--keymap-test") {
                 return cmd_keymap_test(rest.iter().any(|a| a == "--sabotage"));
             }
@@ -3554,6 +3564,12 @@ enum ShellTestMode {
 ///
 /// **名前を `KILL_SABOTAGES` のままにしない。** **一覧の名前が中身と
 /// 食い違うと、次に足す者が「中断ではないから別の一覧が要る」と考える。**
+/// `utf8-test` を「通らないこと」で回す破壊（`ADR-0054`）。
+///
+/// **落ちる判定が違う**——**幅の側は 2 本（全角のセル数と画面の桁）、
+/// 丸ごと落とす側は 1 本（壊れたバイトが行を消さない）である。**
+const UTF8_TEST_SABOTAGES: &[&str] = &["width-always-one-test", "console-drop-invalid-chunk-test"];
+
 const SHELL_TEST_SABOTAGES: &[&str] = &[
     "kill-ignore-interrupt-test",
     "kill-fold-at-depth-one-test",
@@ -3998,6 +4014,164 @@ fn cmd_boot_with_features(features: &[&str], marker: &str, wanted: &str) -> Resu
 ///
 /// **判定は `zi` の内部状態である**（`kernel/userland/zi.rs` のモジュール doc）。
 /// 画面に正しく描けたことは、この項目では観測できない。
+/// シリアルのログを、UTF-8 でないバイトを落として読む（`ADR-0054`）。
+///
+/// **`fs::read_to_string` は失敗すると `Err` を返し、呼ぶ側が
+/// `unwrap_or_default()` で空にしてしまう**——**「ログが空だ」と読める形になる。**
+/// **`utf8-test` は壊れたバイトを画面へ出す台本なので、ここだけは落として読む。**
+fn read_lossy(path: &Path) -> String {
+    match fs::read(path) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(_) => String::new(),
+    }
+}
+
+/// 多バイトの字の判定（`ADR-0054`）。**1 回の起動で 4 つ見る。**
+///
+/// # なぜ `zi` で見るのか
+///
+/// **`zi` は本文を画面の先頭行から描く。** **`cat` の出力は画面の下へ流れるので、
+/// 先頭 6 行を読む観測点（`OBSERVE_TEXT_ROWS`）に載らない。**
+///
+/// # 判定は 4 つである
+///
+/// 1. **壊れたバイトが行を消さないこと**（`/data/badutf8` が `x?y` と出る）
+/// 2. **全角が 2 セルを占めること**（`/data/utf8` が `? ? u` と出る。**間の空白は
+///    右半分のセルである**）
+/// 3. **画面の桁が字で進むこと**（`l` の後に `col=3 scol=2`）
+/// 4. **消すのが字であること**（保存後の装置の中身が `あu` である。**バイトを
+///    割っていない**）
+fn cmd_utf8_test(features: &[&str], expect_pass: bool) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let mut all_features: Vec<&str> = vec!["utf8-test"];
+    all_features.extend_from_slice(features);
+    let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let tag = all_features.join("-");
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("utf8-test-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the utf8 test")?;
+
+    // **合図は `script-done:` である**（`cmd_zi_test` と同じ。何も主張しない観測点）。
+    //
+    // # ここだけは UTF-8 として読めない
+    //
+    // **台本が `/data/badutf8` を開くので、その中身がそのままシリアルへ出る**
+    // ——**`fs::read_to_string` は失敗し、`unwrap_or_default()` が空文字を返す。**
+    // **実測で踏んだ**（2026-09-01。**「カーネルが起動しなかった」と報告された**）。
+    // **バイトで読んで、落として直す。**
+    let started_waiting = Instant::now();
+    let deadline = started_waiting + ZI_TEST_TIMEOUT;
+    while Instant::now() < deadline {
+        let text = read_lossy(&serial_log);
+        if strip_ansi(&text).contains("script-done:") {
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = read_lossy(&serial_log);
+    let context = if features.is_empty() {
+        "utf8-test".to_string()
+    } else {
+        format!("utf8-test {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    let qemu_debug = fs::read_to_string(&debug_log).unwrap_or_default();
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    // **先頭行の観測を打った順に拾う。** 1 本目が `badutf8`、2 本目が `utf8` である。
+    let rows: Vec<String> = strip_ansi(&serial)
+        .lines()
+        .filter(|line| line.contains("screen-text: row 0 says "))
+        .filter_map(|line| line.split("says ").nth(1).map(|rest| rest.to_string()))
+        .collect();
+    let broken_row = rows.first().cloned().unwrap_or_default();
+    let wide_row = rows.get(1).cloned().unwrap_or_default();
+
+    // **判定 1**——**壊れたバイトが行を消さない。**
+    // **`0xFF` は置換文字になり、非 ASCII なので観測点は `?` と書く。**
+    let broken_line_survived = broken_row.contains("x?y");
+    // **判定 2**——**全角は 2 セルである。** **間の空白が右半分のセルである。**
+    let wide_takes_two_cells = wide_row.contains("? ? u");
+    // **判定 3**——**画面の桁が字で進む。** **`col` はバイト、`scol` は幅の合計である。**
+    let column_counts_characters = strip_ansi(&serial)
+        .lines()
+        .any(|line| line.contains("zi: cursor") && line.contains("col=3 scol=2"));
+    // **判定 4**——**消すのは字である。** **`あいu` から `い` を消して `あu` になる。**
+    let disk = disk_image_path(&esp_dir);
+    let saved = debugfs_read(&disk, "/data/utf8")?;
+    let deleted_a_character = saved.as_deref() == Some("あu\n".as_bytes());
+
+    println!("{context}: the broken byte did not erase the line = {broken_line_survived} (row {broken_row})");
+    println!(
+        "{context}: a wide character takes two cells = {wide_takes_two_cells} (row {wide_row})"
+    );
+    println!("{context}: the screen column counts characters = {column_counts_characters}");
+    println!(
+        "{context}: deleting removed a whole character = {deleted_a_character} (the device says {:?})",
+        saved.as_deref().map(String::from_utf8_lossy)
+    );
+
+    let passed = broken_line_survived
+        && wide_takes_two_cells
+        && column_counts_characters
+        && deleted_a_character;
+    if passed {
+        println!("{context}: PASS");
+        if expect_pass {
+            Ok(())
+        } else {
+            bail!("{context}: the sabotage was NOT caught; every judgement still held")
+        }
+    } else {
+        println!("{context}: FAILED");
+        if expect_pass {
+            bail!("{context}: FAILED")
+        } else {
+            println!("{context}: the sabotage was caught (this run is expected to fail)");
+            Ok(())
+        }
+    }
+}
+
 fn cmd_zi_test(features: &[&str]) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
@@ -13447,6 +13621,35 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // 起こし直すところまでを見る。**
         // **既定の起動ログには入れていない**（`sendkey` はタイミングに依存する）。
         // **3 回連続で通ることを確かめてから入れた。落ちる回が出たら `flaky` へ移す。**
+        // **多バイトの字が画面と `zi` で正しく扱われること（`ADR-0054`）。**
+        //
+        // **1 回の起動で 4 つ見る**——**壊れたバイトが行を消さない / 全角が
+        // 2 セル / 画面の桁が字で進む / 消すのが字である。**
+        //
+        // **破壊は 2 つで、落ちる判定が違う**——**幅を 1 にすると 2 本、
+        // 丸ごと落とすと 1 本である。**
+        total += 1;
+        begin_item("multibyte characters take two cells and are edited whole");
+        match cmd_utf8_test(&[], true) {
+            Ok(()) => println!("--- utf8 test: OK"),
+            Err(error) => {
+                println!("--- utf8 test: FAILED ({error})");
+                failed.push("utf8 test".to_string());
+            }
+        }
+        for sabotage in UTF8_TEST_SABOTAGES {
+            total += 1;
+            let label = format!("utf8-test {sabotage}");
+            begin_item(&label);
+            match cmd_utf8_test(&[sabotage], false) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
+            }
+        }
+
         total += 1;
         begin_item("the shell takes keystrokes and init restarts it");
         match cmd_shell_test(ShellTestMode::Normal) {
@@ -14728,7 +14931,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 27,
-    full: 261,
+    full: 264,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
