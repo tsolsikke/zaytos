@@ -871,7 +871,12 @@ impl Console {
         // カーソルの跡が字の下に残る**——下線とグリフが重なる位置にあるため。
         self.erase_drawn_cursor();
         let glyph = font::glyph(c);
-        let step = self.grid.advance(c, glyph.width_cells());
+        // **幅は符号位置で決める（`ADR-0054` の Decision 1）。**
+        //
+        // **グリフから取らない**——**収録の無い字は置換文字のグリフになり、
+        // 幅が 1 になる。** **全角の字は、字形が無くても 2 セルぶんの場所を取る。**
+        let width_cells = common::text::width_cells(c);
+        let step = self.grid.advance(c, width_cells);
 
         // Step の順序どおりに処理する: スクロール → 行消去 → 描画。
         if step.scrolled {

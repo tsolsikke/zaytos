@@ -60,3 +60,12 @@ ext2-rmdir-ignore-nonempty = []
 # 破壊（S12-f-3）: 作った inode が i_extra_isize を名乗らない。e2fsck は 0 を
 # 受理するので通り抜ける（実測）。判定だけが落ちる。
 ext2-create-skip-extra-isize = []
+# 破壊（ADR-0054）: 字の幅を常に 1 にする。全角が 1 セルで進む。
+width-always-one = []
+
+# **ユーザープログラムは `--cfg` で同じ破壊を受ける**（`kernel/build.rs` の
+# `USER_PROGRAM_CFGS`）。**`common` を cargo が建てるときは feature、
+# `zi` を rustc が建てるときは素の cfg である**——**両方を書いてあるので、
+# cargo 側へ名前を教えておく。**
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(width_always_one)'] }

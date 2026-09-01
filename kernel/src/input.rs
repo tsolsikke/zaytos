@@ -292,7 +292,8 @@ pub fn read_bytes(dst: &mut [u8]) -> usize {
         feature = "view-test",
         feature = "persist-check-test",
         feature = "env-rewrite-test",
-        feature = "keymap-rewrite-test"
+        feature = "keymap-rewrite-test",
+        feature = "utf8-test"
     ))]
     {
         let taken = script::next_bytes(dst);
@@ -534,7 +535,8 @@ pub fn arm_input_script() {
         feature = "view-test",
         feature = "persist-check-test",
         feature = "env-rewrite-test",
-        feature = "keymap-rewrite-test"
+        feature = "keymap-rewrite-test",
+        feature = "utf8-test"
     ))]
     script::arm();
 }
@@ -561,7 +563,8 @@ pub fn arm_input_script() {
     feature = "view-test",
     feature = "persist-check-test",
     feature = "env-rewrite-test",
-    feature = "keymap-rewrite-test"
+    feature = "keymap-rewrite-test",
+    feature = "utf8-test"
 ))]
 pub(crate) mod script {
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -776,6 +779,26 @@ pub(crate) mod script {
         kk\
         lllllllllll\
         aX\x1b\x04\
+        :wq\n\x0c";
+
+    /// 台本（`ADR-0054`）。**多バイトの字を画面と `zi` で見る。**
+    ///
+    /// # 3 つを 1 回の起動で見る
+    ///
+    /// 1. **`zi /data/badutf8` を開いて画面を読む**——**壊れたバイトが行を
+    ///    消さないこと**（以前は `write` ごと落ちていた）。**`:q` で抜ける。**
+    /// 2. **`zi /data/utf8` を開いて画面を読む**——**全角が 2 セルを占めること。**
+    /// 3. **`l` で 1 文字進み、`x` で 1 文字消して保存する**——**桁が字で進むこと
+    ///    と、バイトを割らずに消えること**（後者はホスト側が `debugfs` で読む）。
+    ///
+    /// **`zi` で見るのは、`zi` が本文を画面の先頭行から描くからである**
+    /// ——**`cat` の出力は画面の下へ流れ、`0x14` が読む先頭 6 行に載らない。**
+    #[cfg(feature = "utf8-test")]
+    const SCRIPT: &[u8] = b"/bin/zi /data/badutf8\n\x14\
+        :q\n\
+        /bin/zi /data/utf8\n\x14\
+        l\
+        x\
         :wq\n\x0c";
 
     /// 台本（f-1b）。**`/etc/environment` へ `KEYMAP=us` を足す。**

@@ -64,6 +64,14 @@ mod userlib;
 #[allow(dead_code)]
 mod window;
 
+// **多バイトの字の扱いは `common` に在る**（`ADR-0054`。`ADR-0045` の形）。
+//
+// **`dead_code` を許す。** **カーネル側だけが使う口が在る**——`Utf8Decoder` は
+// 画面へ出す側で、`zi` は境界と桁だけを使う。
+#[path = "../../common/src/text.rs"]
+#[allow(dead_code)]
+mod text;
+
 use window::Window;
 
 use userlib::{
@@ -534,17 +542,30 @@ impl Buffer {
         true
     }
 
-    /// 1 バイト消す。**行末では何もしない**（`x` は行を繋げない）。
+    /// 1 文字消す（`ADR-0054` の Decision 5）。**行末では何もしない**
+    /// （`x` は行を繋げない）。
+    ///
+    /// # バイトではなく字である
+    ///
+    /// **多バイトの字を割ると、保存したファイルが壊れる**——**打つ人は
+    /// 日本語を入力できないが、消すことはできる**（`ADR-0054` の Context）。
+    /// **消えるのは 1 から 4 バイトである。**
+    ///
+    /// **境界の上に無いバイト（壊れた列）は 1 バイトだけ消す**
+    /// ——`common::text::char_at` がそう答える。
     fn remove(&mut self, row: usize, at: usize) -> bool {
         if at >= self.length(row) {
             return false;
         }
+        let Some((_, width)) = text::char_at(self.line(row), at) else {
+            return false;
+        };
         let used = self.used;
         let position = self.start_of(row) + at;
-        let text = self.text_mut();
-        text.copy_within(position + 1..used, position);
-        self.used = used - 1;
-        self.shift_index(row, -1);
+        let text_mut = self.text_mut();
+        text_mut.copy_within(position + width..used, position);
+        self.used = used - width;
+        self.shift_index(row, -(width as isize));
         true
     }
 }
@@ -903,11 +924,17 @@ fn leave_screen() {
 /// **描く関数はカーソルを戻さない。** **戻すのはここだけである。**
 /// **e-4 で下から2行目と最下行の2本になっても、増えるのはこの関数の
 /// 中身だけで済む。**
-fn restore_cursor(window: &Window, cursor_row: usize, cursor_col: usize) {
+fn restore_cursor(buffer: &Buffer, window: &Window, cursor_row: usize, cursor_col: usize) {
     // **窓の中の位置へ直す（VIEW-a）。** **窓の外なら動かさない**
     // ——**呼ぶ前に [`follow_window`] を通していれば、その形にはならない。**
+    //
+    // **桁はここで換算する（`ADR-0054` の Decision 5）。**
+    // **バッファはバイトの添字で持ち、画面は字の幅で数える**——
+    // **全角は 2 セルぶん進む。** **換算はこの 1 箇所である**（この doc の
+    // 「戻すのはここだけである」と同じ理由で、増やさない）。
     if let Some(screen) = window.screen_row(cursor_row) {
-        move_cursor(screen, cursor_col);
+        let column = text::display_column(buffer.line(cursor_row), cursor_col);
+        move_cursor(screen, column);
     }
     // **ここで 1 回だけ送る（PERF-b。回帰で位置を移した）。**
     //
@@ -956,7 +983,7 @@ fn follow_window(window: &mut Window, row: usize) -> bool {
 fn show_cursor(view: &View, buffer: &Buffer, window: &mut Window, status: &Status) {
     let before = window.top();
     if !follow_window(window, status.row) {
-        restore_cursor(window, status.row, status.col);
+        restore_cursor(buffer, window, status.row, status.col);
         return;
     }
     // **窓が 1 行だけ動いたなら、画面をずらす（PERF-e）。**
@@ -971,7 +998,7 @@ fn show_cursor(view: &View, buffer: &Buffer, window: &mut Window, status: &Statu
         scroll_by_one(view, buffer, window, moved == 1);
         // **最後にカーソルを戻す**（[`refresh`] が持つ順序）。
         // **PERF-b の回帰は、この順序を崩したときに出た。**
-        refresh(view, window, status);
+        refresh(view, buffer, window, status);
         return;
     }
     redraw(view, buffer, window, status);
@@ -1041,10 +1068,10 @@ fn scroll_by_one(view: &View, buffer: &Buffer, window: &Window, down: bool) {
 /// 2 本（状態行とコマンド行）を描き、最後にカーソルを戻す（e-3。e-4 で 2 本になった）。
 ///
 /// **画面を更新する入口である。** **順序はここが持つ**ので、呼ぶ側は考えない。
-fn refresh(view: &View, window: &Window, status: &Status) {
+fn refresh(view: &View, buffer: &Buffer, window: &Window, status: &Status) {
     draw_status(view, status);
     draw_command_line(view, status);
-    restore_cursor(window, status.row, status.col);
+    restore_cursor(buffer, window, status.row, status.col);
 }
 
 /// 画面を描き直す。**全面を消してから行ごとに置く。**
@@ -1078,7 +1105,7 @@ fn redraw(view: &View, buffer: &Buffer, window: &mut Window, status: &Status) {
             userlib::frame_push(STDOUT, line);
         }
     }
-    refresh(view, window, status);
+    refresh(view, buffer, window, status);
 }
 
 /// 判定行を出す。**内部状態であって画面ではない**（モジュール doc の限界）。
@@ -1115,6 +1142,14 @@ fn report_cursor(buffer: &Buffer, window: &Window, row: usize, col: usize, tag: 
     out[at..at + 5].copy_from_slice(b" col=");
     at += 5;
     let count = write_number(&mut digits, col);
+    out[at..at + count].copy_from_slice(&digits[..count]);
+    at += count;
+    // **画面の桁（`ADR-0054` の Decision 5）。** **`col` はバイトの添字で、
+    // こちらは幅の合計である**——**全角の字を跨ぐと 2 ずつ増える。**
+    // **`col` の意味は変えない**——**既存の判定があれを読んでいる。**
+    out[at..at + 6].copy_from_slice(b" scol=");
+    at += 6;
+    let count = write_number(&mut digits, text::display_column(buffer.line(row), col));
     out[at..at + count].copy_from_slice(&digits[..count]);
     at += count;
     out[at..at + 7].copy_from_slice(b" lines=");
@@ -1313,6 +1348,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
         if mode != shown_mode {
             refresh(
                 &view,
+                &buffer,
                 &window,
                 &Status {
                     mode,
@@ -1336,6 +1372,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
         if echo.take(STDERR) {
             refresh(
                 &view,
+                &buffer,
                 &window,
                 &Status {
                     mode,
@@ -1412,9 +1449,9 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 if removed {
                     // **行末を越えたら 1 つ左へ寄る**（ノーマルのみ。`x` と同じ）。
                     if mode == Mode::Normal {
-                        let length = buffer.length(row);
-                        if col >= length {
-                            col = length.saturating_sub(1);
+                        let line = buffer.line(row);
+                        if col >= line.len() {
+                            col = text::prev_boundary(line, line.len());
                         }
                     }
                     // **行の中の削除は 1 行だけが変わる（PERF-g）。**
@@ -1435,7 +1472,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                     #[cfg(not(zi_cursor_ignore_updown))]
                     b'B' => move_down(buffer, &mut row, &mut col),
                     b'C' => move_right(buffer, row, &mut col, mode),
-                    b'D' => move_left(&mut col),
+                    b'D' => move_left(buffer.line(row), &mut col),
                     // 知らない終端は捨てる。**字として入れない。**
                     _ => false,
                 };
@@ -1567,6 +1604,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                     {
                         refresh(
                             &view,
+                            &buffer,
                             &window,
                             &Status {
                                 mode,
@@ -1802,6 +1840,7 @@ fn finish_pending_escape(
     // **順序はあちらが持つ**ので、ここでは考えない。
     refresh(
         view,
+        buffer,
         window,
         &Status {
             mode: *mode,
@@ -1884,14 +1923,14 @@ fn handle_byte(
         Mode::Command => false,
         Mode::Normal => {
             let moved = match byte {
-                b'h' => move_left(col),
+                b'h' => move_left(buffer.line(*row), col),
                 b'j' => move_down(buffer, row, col),
                 b'k' => move_up(buffer, row, col),
                 b'l' => move_right(buffer, *row, col, *mode),
                 b'i' => {
                     *mode = Mode::Insert;
                     // **行は変わらないので窓も動かない。** カーソルだけ戻す。
-                    restore_cursor(window, *row, *col);
+                    restore_cursor(buffer, window, *row, *col);
                     report_cursor(buffer, window, *row, *col, b"insert");
                     // **モードを変えただけで、バッファは変わっていない。**
                     return false;
@@ -1915,7 +1954,7 @@ fn handle_byte(
                         }
                     }
                     // **行は変わらないので窓も動かない。** カーソルだけ戻す。
-                    restore_cursor(window, *row, *col);
+                    restore_cursor(buffer, window, *row, *col);
                     // **札は `insert` と分ける**——**判定が `i` と `a` を
                     // 見分けるためである**（`a` は直前の位置より 1 つ右）。
                     report_cursor(buffer, window, *row, *col, b"append");
@@ -1925,9 +1964,9 @@ fn handle_byte(
                     let removed = buffer.remove(*row, *col);
                     if removed {
                         // **行末を越えたら 1 つ左へ寄る**（vi の形）。
-                        let length = buffer.length(*row);
-                        if *col >= length {
-                            *col = length.saturating_sub(1);
+                        let line = buffer.line(*row);
+                        if *col >= line.len() {
+                            *col = text::prev_boundary(line, line.len());
                         }
                         redraw(
                             view,
@@ -1999,9 +2038,11 @@ fn handle_byte(
             // **Backspace（zi-f）。** 行頭なら前の行と繋げる。
             if byte == 0x08 {
                 if *col > 0 {
-                    let removed = buffer.remove(*row, *col - 1);
+                    // **1 文字ぶん戻ってから消す（`ADR-0054` の Decision 5）。**
+                    let back = text::prev_boundary(buffer.line(*row), *col);
+                    let removed = buffer.remove(*row, back);
                     if removed {
-                        *col -= 1;
+                        *col = back;
                         // **行の中の削除は 1 行だけが変わる（PERF-g）。**
                         redraw_line_here(view, buffer, window, *mode, *row, *col, b"");
                         report_cursor(buffer, window, *row, *col, b"erase");
@@ -2119,6 +2160,7 @@ fn redraw_line_here(
         }
         refresh(
             view,
+            buffer,
             window,
             &Status {
                 mode,
@@ -2163,11 +2205,13 @@ fn redraw_here(
 }
 
 /// 左へ 1 つ。**行頭では動かない**（前の行の末尾へは回らない）。
-fn move_left(col: &mut usize) -> bool {
+///
+/// **動くのは 1 バイトではなく 1 文字である**（`ADR-0054` の Decision 5）。
+fn move_left(line: &[u8], col: &mut usize) -> bool {
     if *col == 0 {
         return false;
     }
-    *col -= 1;
+    *col = text::prev_boundary(line, *col);
     true
 }
 
@@ -2176,17 +2220,23 @@ fn move_left(col: &mut usize) -> bool {
 /// **ノーマルでは最後の字の上まで、インサートでは末尾の 1 つ先まで**
 /// 動ける（vi の形。挿入は末尾へ足せる）。
 fn move_right(buffer: &Buffer, row: usize, col: &mut usize, mode: Mode) -> bool {
-    let length = buffer.length(row);
+    let line = buffer.line(row);
+    let length = line.len();
     let limit = match mode {
         // **コマンド行では矢印が来ない**（主ループが先に処理する）。
         // ノーマルと同じ扱いにしておく。
-        Mode::Normal | Mode::Command => length.saturating_sub(1),
+        Mode::Normal | Mode::Command => text::prev_boundary(line, length),
         Mode::Insert => length,
     };
     if *col >= limit {
         return false;
     }
-    *col += 1;
+    // **境界の上へ動く（`ADR-0054` の Decision 5）。**
+    let next = text::next_boundary(line, *col);
+    if next > limit {
+        return false;
+    }
+    *col = next;
     true
 }
 
@@ -2212,8 +2262,17 @@ fn move_down(buffer: &Buffer, row: &mut usize, col: &mut usize) -> bool {
 
 /// 移った先の行の長さへ桁を寄せる。
 fn clamp_column(buffer: &Buffer, row: usize, col: &mut usize) {
-    let limit = buffer.length(row).saturating_sub(1);
+    let line = buffer.line(row);
+    // **末尾の 1 文字ぶん手前が上限である**（`ADR-0054` の Decision 5）。
+    // **バイトで引くと、多バイトの字の途中へ落ちる。**
+    let limit = text::prev_boundary(line, line.len());
     if *col > limit {
         *col = limit;
+        return;
+    }
+    // **境界の上でなければ、前の境界へ寄せる**——**上下に動いた先で、
+    // 同じバイト位置が字の途中になりうる。**
+    if !text::is_boundary(line, *col) {
+        *col = text::prev_boundary(line, *col);
     }
 }

@@ -9389,6 +9389,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "zash が起動時に積まれていた本数までしか子へ渡さず、export した名前が届かない",
     ),
     (
+        "utf8-test",
+        cfg!(feature = "utf8-test"),
+        "多バイトの字を画面と zi で見る台本を流す（破壊ではない）",
+    ),
+    (
+        "console-drop-invalid-chunk-test",
+        cfg!(feature = "console-drop-invalid-chunk-test"),
+        "不正なバイトを含む write を丸ごと落とす（ADR-0054 の前の形）",
+    ),
+    (
+        "width-always-one-test",
+        cfg!(feature = "width-always-one-test"),
+        "字の幅を常に 1 セルにし、全角も 1 セルで進める",
+    ),
+    (
         "shell-shift-delete-range-test",
         cfg!(feature = "shell-shift-delete-range-test"),
         "zash が消す範囲の先頭を1つ後ろへずらし、消える字を1つ減らす",

@@ -31,7 +31,8 @@ pub mod dirty;
     feature = "view-test",
     feature = "persist-check-test",
     feature = "env-rewrite-test",
-    feature = "keymap-rewrite-test"
+    feature = "keymap-rewrite-test",
+    feature = "utf8-test"
 ))]
 pub(crate) mod probe;
 pub mod screen;
@@ -110,6 +111,22 @@ impl Drop for ForegroundConsole<'_> {
 static FOREGROUND_ANSI: common::critical::Locked<common::ansi::AnsiParser> =
     common::critical::Locked::new(common::ansi::AnsiParser::new());
 
+/// 前景経路の UTF-8 の復号器（`ADR-0054` の Decision 3）。
+///
+/// # なぜ静的が要るのか
+///
+/// **[`FOREGROUND_ANSI`] と同じ理由である**——**1 字が 2 回の `write` に割れて
+/// 届くことがある**（システムコールはページ単位で刻む）。**状態は `write` を
+/// またいで保つ必要がある。**
+///
+/// # 以前は `write` ごとに閉じていた
+///
+/// **`core::str::from_utf8` を通し、失敗したらその `write` を丸ごと落としていた。**
+/// **1 バイトの不正で画面が真っ白になる**ので、`ADR-0054` で改めた
+/// ——**1 バイトにつき 1 つの置換文字にする。**
+static FOREGROUND_UTF8: common::critical::Locked<common::text::Utf8Decoder> =
+    common::critical::Locked::new(common::text::Utf8Decoder::new());
+
 /// 全画面のアプリが動く間に `fd 2` へ来たエラーの控え（ADR-0046）。
 ///
 /// # なぜ静的なのか——実測で決めた
@@ -130,12 +147,45 @@ static FOREGROUND_ANSI: common::critical::Locked<common::ansi::AnsiParser> =
 static PENDING: common::critical::Locked<pending::Pending> =
     common::critical::Locked::new(pending::Pending::new());
 
+/// 字の途中で捨てたバイトを報せる（`ADR-0054` の Decision 4）。
+///
+/// # なぜ口を直に開けるのか
+///
+/// **この `lib` からロガーへ届かない**（`probe::observe` と同じ事情である）。
+/// **`xtask` の許可リストへ載せてある。**
+///
+/// # 画面へ出さない
+///
+/// **捨てたのは前のプログラムの都合である。** **次のプログラムの 1 字目を
+/// 箱にする理由が無い。** **シリアルは最優先の観測手段である**
+/// （`CLAUDE.md` の絶対ルール 4）。
+fn report_dropped_mid_character(dropped: usize) {
+    use core::fmt::Write as _;
+
+    let mut serial = common::serial::SerialPort::new(common::serial::SerialPort::COM1_BASE);
+    serial.init();
+    let _ = writeln!(
+        serial,
+        "[INFO] console: dropped {dropped} byte(s) held mid-character when the foreground changed"
+    );
+}
+
 /// 前景の [`Console`] を据える。**ガードが落ちるまで有効である。**
 pub fn install_foreground(console: &mut Console) -> ForegroundConsole<'_> {
     // **ANSI の状態を最初へ戻す（zi-b）。** 前のプログラムが CSI 列の途中で
     // 死んでいても、次のプログラムの 1 字目が列の続きに化けない
     // （`release_foreground` が溜まった入力を捨てるのと同じ向きの手当て）。
     FOREGROUND_ANSI.lock().reset();
+    // **字の途中のバイトも捨てる（`ADR-0054` の Decision 4）。**
+    // **前のプログラムが多バイトの字の途中で死んでいても、その 1〜3 バイトが
+    // 次のプログラムの 1 字目にくっつかない。**
+    //
+    // **捨てたことはシリアルへ出す。画面へは出さない**——**捨てたのは前の
+    // プログラムの都合で、次のプログラムの画面を汚す理由が無い。**
+    let dropped = FOREGROUND_UTF8.lock().reset();
+    if dropped > 0 {
+        report_dropped_mid_character(dropped);
+    }
     // **前のプログラムが残した控えを捨てる（ADR-0046）。**
     // **次のプログラムのエコーエリアへ、前のプログラムのエラーを出さない。**
     // **記録は残る**——シリアルには既に出ている。
@@ -318,68 +368,96 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
     // **数える（PERF）。** **落とすバイトも数える**——**Ring 3 から見れば
     // 送った量である。**
     console.note_foreground_write(bytes.len());
-    // **UTF-8 でないバイトは落とす。** Ring 3 から来る列に UTF-8 を要求しない
-    // （`load_user_program` の `argv` と同じ立場）。画面へ出せるのは字だけである。
-    if let Ok(text) = core::str::from_utf8(bytes) {
+    // **UTF-8 を `write` をまたいで復号する（`ADR-0054` の Decision 3）。**
+    // **Ring 3 から来る列に UTF-8 を要求しない**（`load_user_program` の `argv` と
+    // 同じ立場）——**復号できないバイトは 1 つにつき 1 つの置換文字にする。**
+    // **丸ごと落とさない**——**1 バイトの不正で画面が真っ白になっていた。**
+    {
         // 破壊 (zi-b, ansi-console-skip-parse-test): パーサを通さず素のまま描く。
         // **zi-b 前の接続そのものである**——パーサは在るのに前景経路が呼ばない。
         // CSI がグリフとして画面に出る（`[2;5H` が化けて見える）ので、
         // `ansi-test` のカーソル位置とセルの判定が落ちる。
-        #[cfg(feature = "ansi-console-skip-parse-test")]
-        {
-            let _ = console.write_str(text);
-            console.flush();
-            return;
-        }
+
         // **前景経路が ANSI を解釈する（zi-b。ADR-0029）。** 出す側
         // （`sys_write` の fd 1/2）の経路は不変で、解釈はここに集まる。
         // カーネルのログの経路（`Console::write_str` を直に呼ぶ側）は
         // 通らない——ログの行に CSI は無く、通す理由が無い。
         #[cfg(not(feature = "ansi-console-skip-parse-test"))]
         {
+            // 破壊 (ADR-0054, console-drop-invalid-chunk-test): **不正なバイトを含む
+            // `write` を丸ごと落とす。** **`ADR-0054` の前の形そのものである。**
+            // **画面から 1 行が消えるので、`utf8-test` の「壊れたバイトが行を
+            // 消さない」判定が落ちる。**
+            #[cfg(feature = "console-drop-invalid-chunk-test")]
+            if core::str::from_utf8(bytes).is_err() {
+                return;
+            }
             // **描く費用を測る（PERF-c の測定）。** **転送とは別の層である。**
             let started = common::cpu::read_timestamp_counter();
             // **写しを取り、描き終えてから書き戻す**（[`FOREGROUND_ANSI`] の doc）。
             let mut parser = *FOREGROUND_ANSI.lock();
-            for c in text.chars() {
-                match parser.feed(c) {
-                    None => {}
-                    Some(common::ansi::AnsiAction::Print(c)) => console.put_char(c),
-                    Some(common::ansi::AnsiAction::CursorTo { row, col }) => {
-                        // **1 起点から 0 起点へ。** 端の切り詰めは Grid が持つ。
-                        console.cursor_to_cell(col - 1, row - 1);
+            let mut decoder = *FOREGROUND_UTF8.lock();
+            for byte in bytes {
+                // **1 バイトから出る字は最大 4 つである**——**抱えていた 3 バイトを
+                // 置換文字にしてから、来たバイトを処理する場合が最大である。**
+                let mut decoded = ['\0'; 4];
+                let mut count = 0usize;
+                decoder.feed(*byte, &mut |c| {
+                    if count < decoded.len() {
+                        decoded[count] = c;
+                        count += 1;
                     }
-                    Some(common::ansi::AnsiAction::EraseDisplay(scope)) => {
-                        console.erase_in_display(scope)
-                    }
-                    Some(common::ansi::AnsiAction::EraseLine(scope)) => {
-                        console.erase_in_line(scope)
-                    }
-                    // **行の挿入と削除（PERF-d）。** **全画面のアプリが
-                    // 1 行ぶんだけ画面をずらすために要る**——**ずらせないと、
-                    // 窓が 1 行動くたびに全画面を描き直すことになる。**
-                    Some(common::ansi::AnsiAction::InsertLines(count)) => {
-                        console.insert_lines(count)
-                    }
-                    Some(common::ansi::AnsiAction::DeleteLines(count)) => {
-                        console.delete_lines(count)
-                    }
-                    // **SGR（ES-b。ADR-0040）。** 色は受理時に RGB へ
-                    // 展開されている——**ここから先は形が 1 つである。**
-                    Some(common::ansi::AnsiAction::SetGraphics(graphics)) => {
-                        console.set_graphics(graphics)
-                    }
-                    // **DECTCEM（ES-c）。** 出す / 隠すを切り替えるだけで、
-                    // **描き直すのは下の `flush` の直前である。**
-                    Some(common::ansi::AnsiAction::ShowCursor(show)) => console.show_cursor(show),
-                    // **代替画面バッファ（e-3。ADR-0040 の Addendum）。**
-                    // **戻すときに描き直すのはコンソールの側である**——
-                    // Ring 3 には画面を読み戻す手段が無い。
-                    Some(common::ansi::AnsiAction::AlternateScreen(alternate)) => {
-                        console.set_alternate_screen(alternate);
-                        // **戻ったら、取り出されずに残ったエラーを流す（ADR-0046）。**
-                        if !alternate {
-                            flush_pending_to_screen(console);
+                });
+                for c in &decoded[..count] {
+                    let c = *c;
+                    // 破壊 (zi-b, ansi-console-skip-parse-test): パーサを通さず素のまま描く。
+                    // **zi-b 前の接続そのものである**——パーサは在るのに前景経路が呼ばない。
+                    // CSI がグリフとして画面に出る（`[2;5H` が化けて見える）ので、
+                    // `ansi-test` のカーソル位置とセルの判定が落ちる。
+                    #[cfg(feature = "ansi-console-skip-parse-test")]
+                    console.put_char(c);
+                    #[cfg(not(feature = "ansi-console-skip-parse-test"))]
+                    match parser.feed(c) {
+                        None => {}
+                        Some(common::ansi::AnsiAction::Print(c)) => console.put_char(c),
+                        Some(common::ansi::AnsiAction::CursorTo { row, col }) => {
+                            // **1 起点から 0 起点へ。** 端の切り詰めは Grid が持つ。
+                            console.cursor_to_cell(col - 1, row - 1);
+                        }
+                        Some(common::ansi::AnsiAction::EraseDisplay(scope)) => {
+                            console.erase_in_display(scope)
+                        }
+                        Some(common::ansi::AnsiAction::EraseLine(scope)) => {
+                            console.erase_in_line(scope)
+                        }
+                        // **行の挿入と削除（PERF-d）。** **全画面のアプリが
+                        // 1 行ぶんだけ画面をずらすために要る**——**ずらせないと、
+                        // 窓が 1 行動くたびに全画面を描き直すことになる。**
+                        Some(common::ansi::AnsiAction::InsertLines(count)) => {
+                            console.insert_lines(count)
+                        }
+                        Some(common::ansi::AnsiAction::DeleteLines(count)) => {
+                            console.delete_lines(count)
+                        }
+                        // **SGR（ES-b。ADR-0040）。** 色は受理時に RGB へ
+                        // 展開されている——**ここから先は形が 1 つである。**
+                        Some(common::ansi::AnsiAction::SetGraphics(graphics)) => {
+                            console.set_graphics(graphics)
+                        }
+                        // **DECTCEM（ES-c）。** 出す / 隠すを切り替えるだけで、
+                        // **描き直すのは下の `flush` の直前である。**
+                        Some(common::ansi::AnsiAction::ShowCursor(show)) => {
+                            console.show_cursor(show)
+                        }
+                        // **代替画面バッファ（e-3。ADR-0040 の Addendum）。**
+                        // **戻すときに描き直すのはコンソールの側である**——
+                        // Ring 3 には画面を読み戻す手段が無い。
+                        Some(common::ansi::AnsiAction::AlternateScreen(alternate)) => {
+                            console.set_alternate_screen(alternate);
+                            // **戻ったら、取り出されずに残ったエラーを流す（ADR-0046）。**
+                            if !alternate {
+                                flush_pending_to_screen(console);
+                            }
                         }
                     }
                 }
@@ -396,6 +474,7 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
             #[cfg(feature = "flush-every-write-test")]
             console.flush();
             *FOREGROUND_ANSI.lock() = parser;
+            *FOREGROUND_UTF8.lock() = decoder;
             let elapsed = common::cpu::read_timestamp_counter().wrapping_sub(started);
             console.note_draw_cycles(elapsed);
         }

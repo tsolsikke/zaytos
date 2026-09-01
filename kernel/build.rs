@@ -176,6 +176,12 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
         // 構成だけである**——`write` は画面へも届くので、通常の起動で出すと
         // 全画面のアプリの本文を上書きする（`kernel/userland/zi.rs`）。
         ("CARGO_FEATURE_ZI_TEST", "zi_diagnostics"),
+        // **`utf8-test` も `zi` の診断を要る**（`ADR-0054` の判定 3 が
+        // `scol=` を読む）。**同じ cfg を 2 つの feature から立てる。**
+        ("CARGO_FEATURE_UTF8_TEST", "zi_diagnostics"),
+        // **`zi` の桁の計算も同じ破壊を受ける**（`ADR-0054`）。
+        // **カーネル側だけ幅を 1 にすると、画面と `scol=` が食い違う。**
+        ("CARGO_FEATURE_WIDTH_ALWAYS_ONE_TEST", "width_always_one"),
         (
             "CARGO_FEATURE_ZASH_PROMPT_DROP_COLOR_TEST",
             "zash_prompt_drop_color",
@@ -455,6 +461,24 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         b"alpha\nbravo\ncharlie\ndelta\n" as &[u8],
     )
     .expect("failed to write /data/lines into the staging");
+
+    // **多バイトの字の判定に使う（`ADR-0054`）。**
+    //
+    // **種の木へは置かない**——**`kernel/fsimage/seed/` は ASCII だけと決めてある**
+    // （`docs/coding-standards.md` の「像へ入れるテキストはASCIIに限る」）。
+    // **ここは `build.rs` が書くので、あの検査の範囲の外である。**
+    //
+    // **中身は `あいu` である**——**全角 2 つと半角 1 つで、画面では
+    // 2 + 2 + 1 = 5 セルぶんになる。**
+    std::fs::write(format!("{staging}/data/utf8"), "あいu\n".as_bytes())
+        .expect("failed to write /data/utf8 into the staging");
+
+    // **壊れたバイトを含むファイル（`ADR-0054`）。**
+    //
+    // **`0xFF` は UTF-8 の頭になれない。** **1 バイトにつき 1 つの置換文字に
+    // なることを見る**——**以前は `write` が丸ごと落ちて、行ごと消えていた。**
+    std::fs::write(format!("{staging}/data/badutf8"), [b'x', 0xFF, b'y', b'\n'])
+        .expect("failed to write /data/badutf8 into the staging");
 
     // **`zi` の上限が外れたことを示すファイル（H-b-2）。**
     //

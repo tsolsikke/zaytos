@@ -106,6 +106,14 @@ shell-skip-expansion-test = []
 # `export` した名前が子へ届かなくなるので、`--shell-test` の「子が見る envc」の
 # 判定だけが落ちる。シェルの表は引けるままなので、`echo $NAME` と `set` は緑である。
 shell-export-not-pushed-test = []
+# 台本（f-2 の後。ADR-0054）: 多バイトの字を画面と zi で見る回。破壊ではない。
+utf8-test = []
+# 破壊（ADR-0054）: 不正なバイトを含む write を丸ごと落とす（ADR-0054 の前の形）。
+# 画面から 1 行が消えるので、utf8-test の「壊れたバイトが行を消さない」判定が落ちる。
+console-drop-invalid-chunk-test = []
+# 破壊（ADR-0054）: 幅を常に 1 にする。全角が 1 セルで進むので、utf8-test の
+# 「全角は 2 セル」と「画面の桁が字で進む」の 2 判定が落ちる。
+width-always-one-test = ["common/width-always-one"]
 # 破壊（SE-c）: zash が打った行を履歴へ積まない。上キーでも Ctrl+P でも
 # 前の行が戻らないので、`--shell-test` の履歴の判定2本が落ちる。
 shell-drop-history-test = []

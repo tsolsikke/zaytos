@@ -10694,6 +10694,11 @@ const DIRECT_SERIAL_PORT_ALLOWLIST: &[DirectSerialPortSite] = &[
         reason: "画面の観測の判定行（ES-d）。sys_write と同じで、lib からロガーへ届かない",
     },
     DirectSerialPortSite {
+        file: "kernel/src/console/mod.rs",
+        item: "report_dropped_mid_character",
+        reason: "字の途中で捨てたバイトの報告（ADR-0054）。probe::observe と同じで、lib からロガーへ届かない",
+    },
+    DirectSerialPortSite {
         file: "kernel/src/userland.rs",
         item: "spawn",
         reason: "spawn の判定行。BKL を解いた区間で走る（ADR-0023 §1）ので、ロガーを渡す道が無い",

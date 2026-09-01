@@ -22,4 +22,5 @@ pub mod percpu;
 pub mod port;
 pub mod screen;
 pub mod serial;
+pub mod text;
 pub mod window;
