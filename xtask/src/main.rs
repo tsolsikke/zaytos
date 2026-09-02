@@ -2182,8 +2182,8 @@ fn run_panic_test(workspace_root: &Path, ovmf_vars: &Path, esp_dir: &Path) -> Re
     let _ = child.kill();
     let _ = child.wait();
 
-    let captured = fs::read_to_string(&serial_log_path).unwrap_or_default();
-    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+    let captured = read_lossy(&serial_log_path);
+    let qemu = read_lossy(&debug_log);
     println!("--- panic-test: captured serial output ---\n{captured}--- end ---");
 
     if found {
@@ -2205,9 +2205,7 @@ fn run_panic_test(workspace_root: &Path, ovmf_vars: &Path, esp_dir: &Path) -> Re
 }
 
 fn panic_markers_present(serial_log_path: &Path) -> bool {
-    let Ok(contents) = fs::read_to_string(serial_log_path) else {
-        return false;
-    };
+    let contents = read_lossy(serial_log_path);
     contents.contains(PANIC_MARKER_HEADER) && contents.contains(PANIC_MARKER_HALT)
 }
 
@@ -2622,7 +2620,8 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     let mut copied_line = None;
     while Instant::now() < deadline {
-        if let Ok(text) = fs::read_to_string(&serial_log) {
+        {
+            let text = read_lossy(&serial_log);
             // **完了の行を待ってから、複製の行を拾う。**
             if text.contains(ready_marker) {
                 if let Some(line) = text.lines().find(|l| l.contains(marker)) {
@@ -2699,8 +2698,8 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
     let _ = child.wait();
     let _ = fs::remove_file(&monitor_socket);
 
-    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
-    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+    let serial = read_lossy(&serial_log);
+    let qemu = read_lossy(&debug_log);
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
     {
@@ -3829,7 +3828,7 @@ fn cmd_ansi_test(features: &[&str]) -> Result<()> {
     let done_marker = "ansi-test: done";
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     while Instant::now() < deadline {
-        let text = fs::read_to_string(&serial_log).unwrap_or_default();
+        let text = read_lossy(&serial_log);
         if text.contains(done_marker) {
             break;
         }
@@ -3844,7 +3843,7 @@ fn cmd_ansi_test(features: &[&str]) -> Result<()> {
     let _ = child.kill();
     let _ = child.wait();
 
-    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let serial = read_lossy(&serial_log);
     let context = if features.is_empty() {
         "ansi-test".to_string()
     } else {
@@ -3853,7 +3852,7 @@ fn cmd_ansi_test(features: &[&str]) -> Result<()> {
     let context = context.as_str();
 
     // **落ちる前に、起動の失敗と切り分ける**（他の QEMU 項目と同じ作法）。
-    let qemu_debug = fs::read_to_string(&debug_log).unwrap_or_default();
+    let qemu_debug = read_lossy(&debug_log);
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
     {
@@ -3983,7 +3982,7 @@ fn cmd_boot_with_features(features: &[&str], marker: &str, wanted: &str) -> Resu
 
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     while Instant::now() < deadline {
-        let text = fs::read_to_string(&serial_log).unwrap_or_default();
+        let text = read_lossy(&serial_log);
         if text.lines().any(|line| line.contains(marker)) {
             break;
         }
@@ -3992,7 +3991,7 @@ fn cmd_boot_with_features(features: &[&str], marker: &str, wanted: &str) -> Resu
     let _ = child.kill();
     let _ = child.wait();
 
-    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let serial = read_lossy(&serial_log);
     let context = format!("boot {}", features.join("+"));
     let held = serial
         .lines()
@@ -4014,11 +4013,23 @@ fn cmd_boot_with_features(features: &[&str], marker: &str, wanted: &str) -> Resu
 ///
 /// **判定は `zi` の内部状態である**（`kernel/userland/zi.rs` のモジュール doc）。
 /// 画面に正しく描けたことは、この項目では観測できない。
-/// シリアルのログを、UTF-8 でないバイトを落として読む（`ADR-0054`）。
+/// ログを、UTF-8 でないバイトを落として読む（`ADR-0054` の後の手当て）。
 ///
-/// **`fs::read_to_string` は失敗すると `Err` を返し、呼ぶ側が
-/// `unwrap_or_default()` で空にしてしまう**——**「ログが空だ」と読める形になる。**
-/// **`utf8-test` は壊れたバイトを画面へ出す台本なので、ここだけは落として読む。**
+/// # 「失敗を空に落とす」形を 1 箇所へ寄せる
+///
+/// **`fs::read_to_string(...).unwrap_or_default()` は、読めなかったときに
+/// 空文字を返す**——**判定は「何も出ていない」として落ちる。** **落ちた理由が
+/// 「プログラムが壊れた」に見えるが、実際は「ログが UTF-8 として読めなかった」
+/// である。**
+///
+/// **実測で踏んだ**（2026-09-01）。**`utf8-test` の台本が `/data/badutf8` を
+/// 画面へ出し、その中身がシリアルへも出た。** **`xtask` は「カーネルが起動
+/// しなかった」と報告した**——**2 回続けて同じ形だったので、環境の揺れでは
+/// ないと分かった。**
+///
+/// **同じ形は 2 度目である**（1 度目は `find` の失敗を空として扱い、
+/// 「差が 0 ブロック」というもっともらしい結果を得た。`docs/troubleshooting.md`）。
+/// **したがって 1 箇所へ寄せ、ログを読む全箇所をここへ通した。**
 fn read_lossy(path: &Path) -> String {
     match fs::read(path) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -4109,7 +4120,7 @@ fn cmd_utf8_test(features: &[&str], expect_pass: bool) -> Result<()> {
     };
     let context = context.as_str();
 
-    let qemu_debug = fs::read_to_string(&debug_log).unwrap_or_default();
+    let qemu_debug = read_lossy(&debug_log);
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
     {
@@ -4231,7 +4242,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     let deadline = started_waiting + ZI_TEST_TIMEOUT;
     let mut finished_after = None;
     while Instant::now() < deadline {
-        let text = fs::read_to_string(&serial_log).unwrap_or_default();
+        let text = read_lossy(&serial_log);
         // **色の列を落としてから探す（ES-d）。** [`strip_ansi`] の doc。
         if strip_ansi(&text).contains(done_marker) {
             finished_after = Some(started_waiting.elapsed());
@@ -4248,7 +4259,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     let _ = child.kill();
     let _ = child.wait();
 
-    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let serial = read_lossy(&serial_log);
     let context = if features.is_empty() {
         "zi-test".to_string()
     } else {
@@ -4256,7 +4267,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     };
     let context = context.as_str();
 
-    let qemu_debug = fs::read_to_string(&debug_log).unwrap_or_default();
+    let qemu_debug = read_lossy(&debug_log);
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
     {
@@ -5415,7 +5426,7 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
     let deadline = started_waiting + ZI_TEST_TIMEOUT;
     let mut finished_after = None;
     while Instant::now() < deadline {
-        let text = fs::read_to_string(&serial_log).unwrap_or_default();
+        let text = read_lossy(&serial_log);
         if strip_ansi(&text).contains(done_marker) {
             finished_after = Some(started_waiting.elapsed());
             break;
@@ -5431,7 +5442,7 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
     let _ = child.kill();
     let _ = child.wait();
 
-    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let serial = read_lossy(&serial_log);
     let context = if features.is_empty() {
         "view-test".to_string()
     } else {
@@ -5439,7 +5450,7 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
     };
     let context = context.as_str();
 
-    let qemu_debug = fs::read_to_string(&debug_log).unwrap_or_default();
+    let qemu_debug = read_lossy(&debug_log);
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
     {
@@ -5893,7 +5904,7 @@ fn cmd_pci_test(features: &[&str]) -> Result<()> {
     let complete_marker = "pci: enumeration complete:";
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     while Instant::now() < deadline {
-        let text = fs::read_to_string(&serial_log).unwrap_or_default();
+        let text = read_lossy(&serial_log);
         if text.contains(complete_marker) {
             break;
         }
@@ -5925,8 +5936,8 @@ fn cmd_pci_test(features: &[&str]) -> Result<()> {
     let _ = child.wait();
     let _ = fs::remove_file(&monitor_socket);
 
-    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
-    let qemu_debug = fs::read_to_string(&debug_log).unwrap_or_default();
+    let serial = read_lossy(&serial_log);
+    let qemu_debug = read_lossy(&debug_log);
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
     {
@@ -6195,7 +6206,7 @@ fn cmd_virtio_test(features: &[&str]) -> Result<()> {
     let error_marker = "virtio-blk: ";
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     while Instant::now() < deadline {
-        let text = fs::read_to_string(&serial_log).unwrap_or_default();
+        let text = read_lossy(&serial_log);
         if text.contains(read_marker)
             || text
                 .lines()
@@ -6221,8 +6232,8 @@ fn cmd_virtio_test(features: &[&str]) -> Result<()> {
     let _ = child.kill();
     let _ = child.wait();
 
-    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
-    let qemu_debug = fs::read_to_string(&debug_log).unwrap_or_default();
+    let serial = read_lossy(&serial_log);
+    let qemu_debug = read_lossy(&debug_log);
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
     {
@@ -6355,7 +6366,7 @@ fn cmd_virtio_irq_test(features: &[&str]) -> Result<()> {
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     let mut grace: Option<Instant> = None;
     while Instant::now() < deadline {
-        let text = fs::read_to_string(&serial_log).unwrap_or_default();
+        let text = read_lossy(&serial_log);
         if text.contains(released_marker) || text.contains(error_marker) {
             break;
         }
@@ -6383,8 +6394,8 @@ fn cmd_virtio_irq_test(features: &[&str]) -> Result<()> {
     let _ = child.kill();
     let _ = child.wait();
 
-    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
-    let qemu_debug = fs::read_to_string(&debug_log).unwrap_or_default();
+    let serial = read_lossy(&serial_log);
+    let qemu_debug = read_lossy(&debug_log);
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
     {
@@ -6484,10 +6495,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     let mut ready = false;
     while Instant::now() < deadline {
-        if fs::read_to_string(&serial_log)
-            .map(|c| c.contains(ready_marker))
-            .unwrap_or(false)
-        {
+        if read_lossy(&serial_log).contains(ready_marker) {
             ready = true;
             break;
         }
@@ -6528,8 +6536,8 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     let _ = child.wait();
     let _ = fs::remove_file(&monitor_socket);
 
-    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
-    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+    let serial = read_lossy(&serial_log);
+    let qemu = read_lossy(&debug_log);
 
     let context = mode.context();
     let context = context.as_str();
@@ -7816,10 +7824,7 @@ fn run_keyboard_test(features: &[&str]) -> Result<KeyboardAssertions> {
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     let mut ready = false;
     while Instant::now() < deadline {
-        if fs::read_to_string(&serial_log)
-            .map(|c| c.contains(ready_marker))
-            .unwrap_or(false)
-        {
+        if read_lossy(&serial_log).contains(ready_marker) {
             ready = true;
             break;
         }
@@ -7857,8 +7862,8 @@ fn run_keyboard_test(features: &[&str]) -> Result<KeyboardAssertions> {
     let _ = child.wait();
     let _ = fs::remove_file(&monitor_socket);
 
-    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
-    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+    let serial = read_lossy(&serial_log);
+    let qemu = read_lossy(&debug_log);
 
     let context = "interrupt-test keyboard";
     if let BootOutcome::DidNotStart { firmware_rip } =
@@ -8177,8 +8182,8 @@ fn cmd_lapic_timer_test(kind: &str) -> Result<()> {
     let _ = child.kill();
     let _ = child.wait();
 
-    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
-    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+    let serial = read_lossy(&serial_log);
+    let qemu = read_lossy(&debug_log);
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
     {
@@ -8270,7 +8275,7 @@ const LAPIC_TIMER_MEASURE_WINDOW: Duration = Duration::from_secs(20);
 
 /// シリアルログの最後のハートビートが報告する経過秒とティック数。
 fn last_heartbeat_seconds(serial_log: &Path) -> Option<(u64, u64)> {
-    let content = fs::read_to_string(serial_log).ok()?;
+    let content = read_lossy(serial_log);
     let line = content.lines().rfind(|l| l.contains("heartbeat: ticks="))?;
     // 形は `heartbeat: ticks=256 (2 s), ...`
     let ticks_part = line.split("ticks=").nth(1)?;
@@ -8282,7 +8287,7 @@ fn last_heartbeat_seconds(serial_log: &Path) -> Option<(u64, u64)> {
 
 /// AP のハートビートが報告するティック数（S4-a）。
 fn last_ap_heartbeat_ticks(serial_log: &Path) -> Option<u64> {
-    let content = fs::read_to_string(serial_log).ok()?;
+    let content = read_lossy(serial_log);
     let line = content
         .lines()
         .rfind(|l| l.contains("smp: ap heartbeat: cpu=1 ticks="))?;
@@ -8369,8 +8374,8 @@ fn cmd_ap_timer_rate() -> Result<()> {
     let _ = child.kill();
     let _ = child.wait();
 
-    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
-    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+    let serial = read_lossy(&serial_log);
+    let qemu = read_lossy(&debug_log);
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
     {
@@ -8491,7 +8496,8 @@ fn cmd_kernel_entry_concurrency() -> Result<()> {
     let deadline = Instant::now() + KERNEL_ENTRY_CONCURRENCY_TIMEOUT;
     let mut observed = false;
     while Instant::now() < deadline {
-        if let Ok(text) = fs::read_to_string(&serial_log) {
+        {
+            let text = read_lossy(&serial_log);
             if text.contains(KERNEL_ENTRY_DEPTH_TWO_MARKER) {
                 observed = true;
                 break;
@@ -8508,8 +8514,8 @@ fn cmd_kernel_entry_concurrency() -> Result<()> {
     let _ = child.kill();
     let _ = child.wait();
 
-    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
-    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+    let serial = read_lossy(&serial_log);
+    let qemu = read_lossy(&debug_log);
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
     {
@@ -8638,7 +8644,7 @@ fn run_for_max_entry_depth(workspace_root: &Path, features: &str) -> Result<Opti
     let _ = child.kill();
     let _ = child.wait();
 
-    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
+    let serial = read_lossy(&serial_log);
     Ok(serial
         .lines()
         .filter_map(|line| line.split("max kernel entry depth=").nth(1))
@@ -8879,8 +8885,8 @@ fn cmd_highhalf_test(kind: &str) -> Result<()> {
     let _ = child.kill();
     let _ = child.wait();
 
-    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
-    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+    let serial = read_lossy(&serial_log);
+    let qemu = read_lossy(&debug_log);
 
     let context = format!("highhalf-test {}", test.name);
 
@@ -9581,7 +9587,7 @@ fn capture_one_boot(
     // **フラッシュが済むか、止まる文言が出るまで待つ。上限つき。**
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     loop {
-        let seen = fs::read_to_string(&serial_log).unwrap_or_default();
+        let seen = read_lossy(&serial_log);
         if seen.contains(until) || seen.contains("; halting") || Instant::now() >= deadline {
             break;
         }
@@ -9591,7 +9597,7 @@ fn capture_one_boot(
     thread::sleep(Duration::from_millis(500));
     let _ = child.kill();
     let _ = child.wait();
-    Ok(fs::read_to_string(&serial_log).unwrap_or_default())
+    Ok(read_lossy(&serial_log))
 }
 
 /// 持ち越しの判定（P-a）。**2 度起こして、1 度目に作った変化が 2 度目に見えることを主張する。**
@@ -9830,9 +9836,7 @@ fn capture_boot_log(workspace_root: &Path, smp: Option<u32>, tag: &str) -> Resul
     // ことの目印である。**上限は付ける**（出ない場合に無限に待たない）。
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     loop {
-        let seen = fs::read_to_string(&serial_log)
-            .map(|c| c.matches("heartbeat: ticks=").count())
-            .unwrap_or(0);
+        let seen = read_lossy(&serial_log).matches("heartbeat: ticks=").count();
         if seen >= 3 || Instant::now() >= deadline {
             break;
         }
@@ -9841,8 +9845,8 @@ fn capture_boot_log(workspace_root: &Path, smp: Option<u32>, tag: &str) -> Resul
     let _ = child.kill();
     let _ = child.wait();
 
-    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
-    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+    let serial = read_lossy(&serial_log);
+    let qemu = read_lossy(&debug_log);
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
     {
@@ -10043,8 +10047,8 @@ fn cmd_drift_test(minutes: u64, smp: Option<u32>) -> Result<()> {
     let _ = child.kill();
     let _ = child.wait();
 
-    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
-    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+    let serial = read_lossy(&serial_log);
+    let qemu = read_lossy(&debug_log);
     if let BootOutcome::DidNotStart { firmware_rip } =
         classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
     {
@@ -10192,11 +10196,10 @@ fn cmd_marker_test(
 
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     loop {
-        if !wait_for_full_timeout
-            && fs::read_to_string(&serial_log)
-                .map(|c| test.expected_markers.iter().all(|m| c.contains(m)))
-                .unwrap_or(false)
-        {
+        if !wait_for_full_timeout && {
+            let text = read_lossy(&serial_log);
+            test.expected_markers.iter().all(|m| text.contains(m))
+        } {
             break;
         }
         if Instant::now() >= deadline {
@@ -10217,8 +10220,8 @@ fn cmd_marker_test(
     let _ = child.kill();
     let _ = child.wait();
 
-    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
-    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+    let serial = read_lossy(&serial_log);
+    let qemu = read_lossy(&debug_log);
 
     let context = format!("{kind_label} {}", test.name);
 
@@ -10370,10 +10373,8 @@ fn cmd_exception_test(kind: &str) -> Result<()> {
 
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     let handler_ran = loop {
-        if fs::read_to_string(&serial_log)
-            .map(|c| c.contains(&expected_serial) && c.contains(DUMP_TERMINATOR))
-            .unwrap_or(false)
-        {
+        let text = read_lossy(&serial_log);
+        if text.contains(&expected_serial) && text.contains(DUMP_TERMINATOR) {
             break true;
         }
         if Instant::now() >= deadline {
@@ -10394,8 +10395,8 @@ fn cmd_exception_test(kind: &str) -> Result<()> {
     let _ = child.kill();
     let _ = child.wait();
 
-    let serial = fs::read_to_string(&serial_log).unwrap_or_default();
-    let qemu = fs::read_to_string(&debug_log).unwrap_or_default();
+    let serial = read_lossy(&serial_log);
+    let qemu = read_lossy(&debug_log);
 
     // テスト結果を読む前に、そもそもカーネルが起動したかを判定する。
     // 起動していなければ、以降の OK/NG は意味を持たない。
@@ -12549,10 +12550,7 @@ fn capture_serial_for_calibration(run: usize) -> Result<String> {
     // 較正が出るまで待つ。**上限を必ず付ける**（CLAUDE.md の「シェルコマンドの制約」）。
     let deadline = Instant::now() + CALIBRATION_RUN_TIMEOUT;
     loop {
-        if fs::read_to_string(&serial_log)
-            .map(|c| c.contains("apic: LAPIC timer calibration:"))
-            .unwrap_or(false)
-        {
+        if read_lossy(&serial_log).contains("apic: LAPIC timer calibration:") {
             break;
         }
         if Instant::now() >= deadline {
@@ -12563,7 +12561,7 @@ fn capture_serial_for_calibration(run: usize) -> Result<String> {
     let _ = child.kill();
     let _ = child.wait();
 
-    Ok(fs::read_to_string(&serial_log).unwrap_or_default())
+    Ok(read_lossy(&serial_log))
 }
 
 /// 較正 1 回あたりの上限。較正窓は 5 標本 × 100ms なので、起動と合わせて余裕を取る。
