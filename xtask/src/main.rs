@@ -13476,6 +13476,94 @@ fn check_one_manifest_default_features(
         .collect())
 }
 
+/// 並走している `xtask` / `qemu` を数える（2026-09-03）。
+///
+/// # なぜ機械で見るのか
+///
+/// **規律で守ろうとして、1 回目で失敗した。** **代償は 90 分と、信用できない
+/// 131 件の合否である**（`docs/troubleshooting.md`）。**`ps` は打っていたが、
+/// 起こすのと同じコマンドの中に書いたので、読む前に走り出していた。**
+///
+/// **この体制には前例がある**——**行末の `&` は hook で塞ぎ、`git add -A` も
+/// 機械で拒む形にした。** **同じ族である。**
+///
+/// # 何を見るか
+///
+/// **`/proc` の `comm` を見る**（Linux。この体制は WSL2 の Ubuntu 系である）。
+/// **`cargo` のロックは見ない**——**`cargo run` はビルドの間しか持たず、
+/// 走り出した `xtask` は持っていない**（実測。**`--full` の最中に
+/// `target/debug/.cargo-lock` は空いている**）。
+///
+/// # 自分を数えない
+///
+/// **自分の PID と、自分の親の PID を除く**（親は `cargo` だが、
+/// 名前が変わる形に備えて除いておく）。**`ps` の部分一致で自分を拾う形は、
+/// hook で 1 度踏んでいる**（`docs/troubleshooting.md` の 2026-08-28）。
+///
+/// # 逃げ道は置かない
+///
+/// **置くなら理由が要るが、思いつかない。** **並走させたい場面が無い**
+/// ——**`target/` と `disk0.img` を共有するので、両方が汚れる**
+/// （`CLAUDE.md` の絶対ルール 1）。**要るようになったら、そのとき足す。**
+fn concurrent_build_or_qemu() -> Vec<(u32, String)> {
+    let mut found = Vec::new();
+    let me = std::process::id();
+    let parent = std::fs::read_to_string("/proc/self/stat")
+        .ok()
+        .and_then(|stat| {
+            // `pid (comm) state ppid ...`。**`comm` に空白が入りうるので `)` で切る。**
+            let rest = stat.rsplit_once(')')?.1.to_string();
+            rest.split_whitespace().nth(1)?.parse::<u32>().ok()
+        })
+        .unwrap_or(0);
+
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|text| text.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid == me || pid == parent {
+            continue;
+        }
+        let Ok(comm) = fs::read_to_string(entry.path().join("comm")) else {
+            continue;
+        };
+        let comm = comm.trim().to_string();
+        // **`comm` は 15 文字で切られる**ので、`qemu-system-x86_64` は
+        // `qemu-system-x86` として出る。
+        if comm == "xtask" || comm.starts_with("qemu-system-") {
+            found.push((pid, comm));
+        }
+    }
+    found.sort();
+    found
+}
+
+/// 並走していたら断る（2026-09-03）。
+///
+/// **`--full` と `--commit` の入口で呼ぶ。** **基底の `check` では呼ばない**
+/// ——**数秒で終わり、QEMU も起こさないので、並走しても汚れない**
+/// （**コミット直後の hook がそれを回す**）。
+fn refuse_if_something_else_is_running(what: &str) -> Result<()> {
+    let others = concurrent_build_or_qemu();
+    if others.is_empty() {
+        return Ok(());
+    }
+    let list: Vec<String> = others
+        .iter()
+        .map(|(pid, comm)| format!("{comm} (pid {pid})"))
+        .collect();
+    bail!(
+        "xtask check {what}: another build or QEMU is running: {}. They share target/ and \
+         disk0.img, so running both dirties each other (CLAUDE.md, absolute rule 1). Stop them \
+         first: read .claude/skills/stop-a-process/SKILL.md, then kill the pid(s) above",
+        list.join(", ")
+    );
+}
+
 /// 全構成のビルド・テスト・clippy・fmt を順に実行する。
 ///
 /// **1 つ落ちてもそこで止めない。** 止めると「直しては再実行」を
@@ -13483,6 +13571,14 @@ fn check_one_manifest_default_features(
 fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     // 外した確率的な項目の一覧が実態を指しているかを先に見る（列挙の腐りを防ぐ）。
     check_flaky_list_matches_tables()?;
+
+    // **並走を機械で断る（2026-09-03）。** **規律で守ろうとして 1 回目で失敗した**
+    // （[`refuse_if_something_else_is_running`] の doc）。
+    if full {
+        refuse_if_something_else_is_running("--full")?;
+    } else if commit {
+        refuse_if_something_else_is_running("--commit")?;
+    }
 
     let workspace_root = workspace_root()?;
     let mut failed = Failures::default();
