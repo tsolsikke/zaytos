@@ -9495,6 +9495,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "字の幅を常に 1 セルにし、全角も 1 セルで進める",
     ),
     (
+        "zi-append-by-byte-test",
+        cfg!(feature = "zi-append-by-byte-test"),
+        "zi の a が挿入点を 1 バイトだけ進め、字の途中へ落ちる",
+    ),
+    (
         "shell-shift-delete-range-test",
         cfg!(feature = "shell-shift-delete-range-test"),
         "zash が消す範囲の先頭を1つ後ろへずらし、消える字を1つ減らす",

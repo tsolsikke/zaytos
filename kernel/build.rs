@@ -182,6 +182,7 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
         // **`zi` の桁の計算も同じ破壊を受ける**（`ADR-0054`）。
         // **カーネル側だけ幅を 1 にすると、画面と `scol=` が食い違う。**
         ("CARGO_FEATURE_WIDTH_ALWAYS_ONE_TEST", "width_always_one"),
+        ("CARGO_FEATURE_ZI_APPEND_BY_BYTE_TEST", "zi_append_by_byte"),
         (
             "CARGO_FEATURE_ZASH_PROMPT_DROP_COLOR_TEST",
             "zash_prompt_drop_color",

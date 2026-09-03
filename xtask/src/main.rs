@@ -3567,7 +3567,13 @@ enum ShellTestMode {
 ///
 /// **落ちる判定が違う**——**幅の側は 2 本（全角のセル数と画面の桁）、
 /// 丸ごと落とす側は 1 本（壊れたバイトが行を消さない）である。**
-const UTF8_TEST_SABOTAGES: &[&str] = &["width-always-one-test", "console-drop-invalid-chunk-test"];
+const UTF8_TEST_SABOTAGES: &[&str] = &[
+    "width-always-one-test",
+    "console-drop-invalid-chunk-test",
+    // **`a` がバイトで進む形（2026-09-03）。** **多バイトの段で見落としていた**
+    // ——**台本が全角の上で `a` を打っていなかったので、判定も捕まえていなかった。**
+    "zi-append-by-byte-test",
+];
 
 const SHELL_TEST_SABOTAGES: &[&str] = &[
     "kill-ignore-interrupt-test",
@@ -4149,7 +4155,9 @@ fn cmd_utf8_test(features: &[&str], expect_pass: bool) -> Result<()> {
     // **判定 4**——**消すのは字である。** **`あいu` から `い` を消して `あu` になる。**
     let disk = disk_image_path(&esp_dir);
     let saved = debugfs_read(&disk, "/data/utf8")?;
-    let deleted_a_character = saved.as_deref() == Some("あu\n".as_bytes());
+    // **`x` で `い` が消え、`a` で全角の次へ動いてから `Z` を入れた。**
+    // **`a` がバイトで進むと、`Z` が `あ` の途中へ入って中身が壊れる。**
+    let deleted_a_character = saved.as_deref() == Some("あZu\n".as_bytes());
 
     println!("{context}: the broken byte did not erase the line = {broken_line_survived} (row {broken_row})");
     println!(
@@ -4157,7 +4165,8 @@ fn cmd_utf8_test(features: &[&str], expect_pass: bool) -> Result<()> {
     );
     println!("{context}: the screen column counts characters = {column_counts_characters}");
     println!(
-        "{context}: deleting removed a whole character = {deleted_a_character} (the device says {:?})",
+        "{context}: deleting and appending stayed on character boundaries = \
+         {deleted_a_character} (the device says {:?})",
         saved.as_deref().map(String::from_utf8_lossy)
     );
 
@@ -15025,7 +15034,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 27,
-    full: 264,
+    full: 265,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

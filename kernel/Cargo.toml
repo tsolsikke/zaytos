@@ -114,6 +114,10 @@ console-drop-invalid-chunk-test = []
 # 破壊（ADR-0054）: 幅を常に 1 にする。全角が 1 セルで進むので、utf8-test の
 # 「全角は 2 セル」と「画面の桁が字で進む」の 2 判定が落ちる。
 width-always-one-test = ["common/width-always-one"]
+# 破壊（ADR-0054）: zi の `a` が挿入点を1バイトだけ進める（多バイトの段の前の形）。
+# 全角の上で `a` を打つと挿入点が字の途中へ落ちるので、utf8-test の
+# 「a が字の境界へ動く」判定が落ちる。
+zi-append-by-byte-test = []
 # 破壊（SE-c）: zash が打った行を履歴へ積まない。上キーでも Ctrl+P でも
 # 前の行が戻らないので、`--shell-test` の履歴の判定2本が落ちる。
 shell-drop-history-test = []

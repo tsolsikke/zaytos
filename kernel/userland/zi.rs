@@ -1949,8 +1949,24 @@ fn handle_byte(
                     // **落ちるのは「`a` は `i` より 1 つ右から始まる」判定だけである。**
                     #[cfg(not(zi_append_like_insert))]
                     {
-                        if *col < buffer.length(*row) {
-                            *col += 1;
+                        // **1 バイトではなく 1 文字ぶん右である**（`ADR-0054` の
+                        // Decision 5。**多バイトの段で見落としていた**）。
+                        //
+                        // **バイトで進めると、全角の上で `a` を打った挿入点が
+                        // 字の途中へ落ちる**——**そこへ字を入れるとファイルが壊れる。**
+                        //
+                        // 破壊 (ADR-0054, zi_append_by_byte): **バイトで進める。**
+                        // **`utf8-test` の「`a` が字の境界へ動く」判定が落ちる。**
+                        let line = buffer.line(*row);
+                        if *col < line.len() {
+                            #[cfg(zi_append_by_byte)]
+                            {
+                                *col += 1;
+                            }
+                            #[cfg(not(zi_append_by_byte))]
+                            {
+                                *col = text::next_boundary(line, *col);
+                            }
                         }
                     }
                     // **行は変わらないので窓も動かない。** カーソルだけ戻す。
