@@ -14,15 +14,59 @@ RULES = [
      "HOOK-PROBE-ADD: 全部足す形は使わない。パスを明示すること"),
     (re.compile(START + r"git\s+commit\s+(?:-[a-zA-Z]*a[a-zA-Z]*|--all)\b"), "exit2",
      "HOOK-PROBE-EXIT2: commit の -a は使わない"),
-    (re.compile(r"(?<!&)&\s*$"), "deny",
-     "HOOK-PROBE-AMP: 行末の & は使わない。run_in_background を使うこと"),
+    # **背景へ落とす `&` は「行末」だけではない**（2026-09-03。実測で踏んだ）。
+    #
+    # **`( ... &)` で起こしたら、この規則は拒まなかった**——**`&` の後ろに
+    # `)` が在ったからである。** **害は出なかったが、穴が在ることが分かった。**
+    #
+    # **形を 4 つ並べる**——**行末 / `)` の直前 / `;` の直前 / 改行の直前である。**
+    # **`&&` は除く**（`(?<!&)` と `(?!&)`）。**`2>&1` のような向き先も除く**
+    # （`&` の前が `>` や `<` なら、背景へ落とす `&` ではない）。
+    (re.compile(r"(?<![&><])&(?!&)\s*(?:$|[)\n;])"), "deny",
+     "HOOK-PROBE-AMP: 背景へ落とす & は使わない。run_in_background を使うこと"),
 ]
+
+def executable_part(command: str) -> str:
+    """引用と heredoc の中身を落とす（2026-09-03）。
+
+    **実行の形だけを見る**（このファイルの冒頭）。**`&` の形を増やしたら、
+    文中の言及まで拒むようになった**——**この規則を書くコミットメッセージ自身が
+    拒まれた**（実測）。**1 度目に踏んだ形と同じである。**
+
+    **落とすのは 3 つ**——`'...'`・`"..."`・heredoc の本文である。
+    **落とした跡は空白にする**（語が繋がって別の形に見えないように）。
+    """
+    out = []
+    i = 0
+    length = len(command)
+    while i < length:
+        c = command[i]
+        # heredoc（`<<EOF` / `<<'EOF'` / `<<-EOF`）。本文を終端まで落とす。
+        if c == "<" and command[i : i + 2] == "<<":
+            match = re.match(r"<<-?\s*(['\"]?)(\w+)\1", command[i:])
+            if match:
+                tag = match.group(2)
+                out.append(" ")
+                rest = command[i + match.end() :]
+                end = re.search(r"^\s*" + re.escape(tag) + r"\s*$", rest, re.M)
+                i += match.end() + (end.end() if end else len(rest))
+                continue
+        if c in ("'", '"'):
+            closing = command.find(c, i + 1)
+            out.append(" ")
+            i = len(command) if closing < 0 else closing + 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
 
 def main() -> int:
     try:
         command = json.load(sys.stdin).get("tool_input", {}).get("command", "")
     except Exception:
         return 0
+    command = executable_part(command)
     for pattern, how, reason in RULES:
         if not pattern.search(command):
             continue
@@ -57,12 +101,32 @@ def self_test() -> int:
         ("git " + "commit -m x", "allow"),
         ("git status --short", "allow"),
         ("cat a.txt | grep x", "allow"),
+        # **`&` の形を 4 つ並べる**（2026-09-03。**`( ... &)` で踏んだ**）。
+        ("(sleep 1 &)", "deny"),
+        ("(cargo xtask check --commit > out.txt 2>&1 &) ; sleep 2", "deny"),
+        ("sleep 1 &\npwd", "deny"),
+        ("sleep 1 & pwd", "allow"),
+        # **向き先の `&` は背景ではない。**
+        ("cargo build 2>&1 | tail -2", "allow"),
+        ("cmd >out 2>&1", "allow"),
+        # **文中の言及は通る**（**1 度目に踏んだ「部分一致が文書の言及まで拒む」を
+        # 再び踏まないためである**）。
+        ("echo '行末の & は使わない'", "allow"),
+        ("grep -n 'sleep 1 &' docs/troubleshooting.md", "allow"),
+        # **引用と heredoc の中身は実行の形ではない**（2026-09-03。
+        # **この規則を書くコミットメッセージ自身が拒まれた**）。
+        ("git " + "commit -m '( ... &)で踏んだ'", "allow"),
+        ("echo \"( sleep 1 &)\"", "allow"),
+        ("cat <<'EOF'\n( sleep 1 &)\nEOF", "allow"),
+        ("cat <<'EOF'\ngit " + "add -A\nEOF", "allow"),
+        # **引用の外は拒む。** 落としても形は残る。
+        ("echo 'x' ; (sleep 1 &)", "deny"),
     ]
     failures = 0
     for command, want in cases:
         got = "allow"
         for pattern, how, _ in RULES:
-            if pattern.search(command):
+            if pattern.search(executable_part(command)):
                 got = "deny" if how == "deny" else "exit2"
                 break
         if got != want:
