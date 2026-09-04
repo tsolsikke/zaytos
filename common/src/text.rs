@@ -258,6 +258,40 @@ pub fn prev_boundary(bytes: &[u8], at: usize) -> usize {
     }
 }
 
+/// 行末の字の先頭（zi の `$`）。
+///
+/// **「行末」はバイト長ではなく、最後の字の先頭である**（`ADR-0054` の
+/// Decision 5）。**ノーマルモードのカーソルは字の上に居るので、
+/// 全角の行末で `line.len()` を返すと字の途中へ落ちる。**
+///
+/// **空行では 0 である。**
+pub fn line_end(line: &[u8]) -> usize {
+    prev_boundary(line, line.len())
+}
+
+/// 行の最初の非空白バイトの位置（zi の `^`）。
+///
+/// **空白は `0x20` と `0x09`（タブ）の 2 つだけを数える。**
+/// **タブは `zi` が行へ入れない**（`ADR-0050`）**が、外で作ったファイルには
+/// 入っている**——**`zi` はどんなファイルでも開ける。**
+///
+/// **バイトで走査してよい。** **UTF-8 の 2 バイト目以降は必ず `0x80` 以上で、
+/// `0x20` にも `0x09` にもならない**——**多バイトの字の途中を空白と
+/// 見間違えることが無い。** **返る位置は必ず字の境界である。**
+///
+/// **空白しか無い行（空行を含む）では [`line_end`] と同じ位置を返す**
+/// ——**vi と同じである。**
+pub fn first_nonblank(line: &[u8]) -> usize {
+    let mut at = 0usize;
+    while at < line.len() {
+        if line[at] != b' ' && line[at] != b'\t' {
+            return at;
+        }
+        at += 1;
+    }
+    line_end(line)
+}
+
 /// `upto` までの表示の桁（`ADR-0054` の Decision 5）。
 ///
 /// **前の字の幅の合計である。** **バイトの添字ではない。**
@@ -415,5 +449,37 @@ mod tests {
         // **全角は 2 桁ぶんである。**
         assert_eq!(display_column(line, 4), 3);
         assert_eq!(display_column(line, 5), 4);
+    }
+
+    /// 行末は最後の字の先頭である（`ADR-0054` の Decision 5。zi の `$`）。
+    #[test]
+    fn the_line_end_is_the_last_character_not_the_last_byte() {
+        assert_eq!(line_end(b"abc"), 2);
+        // **全角の行末は、バイト長より 3 つ手前である。**
+        assert_eq!(line_end("aあ".as_bytes()), 1);
+        assert_eq!(line_end("あい".as_bytes()), 3);
+        // **空行は 0 である。**
+        assert_eq!(line_end(b""), 0);
+    }
+
+    /// 最初の非空白は空白 2 種だけを飛ばす（zi の `^`）。
+    #[test]
+    fn the_first_nonblank_skips_spaces_and_tabs() {
+        assert_eq!(first_nonblank(b"abc"), 0);
+        assert_eq!(first_nonblank(b"  abc"), 2);
+        // **タブも空白である**（外で作ったファイルには入っている）。
+        assert_eq!(first_nonblank(b"\t\t abc"), 3);
+        // **全角の前でも境界の上に止まる。**
+        assert_eq!(first_nonblank("  あい".as_bytes()), 2);
+    }
+
+    /// 空白しか無い行は行末へ寄る（vi と同じ）。
+    #[test]
+    fn a_blank_only_line_falls_back_to_the_line_end() {
+        // **最後の空白の上である**（`line_end` と同じ位置）。
+        assert_eq!(first_nonblank(b"   "), 2);
+        assert_eq!(first_nonblank(b"\t"), 0);
+        // **空行は 0 である。**
+        assert_eq!(first_nonblank(b""), 0);
     }
 }

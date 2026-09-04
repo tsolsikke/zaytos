@@ -5984,8 +5984,9 @@ static mut CORRUPT_FS_IMAGE: [u8; CORRUPT_FS_LEN] = [0; CORRUPT_FS_LEN];
 /// **写す長さは像から求める**（[`map_corrupt_fs`] の doc）。**ここは器の大きさで、
 /// 像の使用上端がこれを超えたら演習は落ちる**——**黙って足りない写しを作らない。**
 ///
-/// **160 ブロックの根拠は実測である**——**いまの使用上端は 134 で、
-/// `build.rs` が像へファイルを足すたびに 1 か 2 ずつ増える。**
+/// **160 ブロックの根拠は実測である**——**いまの使用上端は 135 で、
+/// `build.rs` が像へファイルを足すたびに 1 か 2 ずつ増える**
+/// （**VIM-1 で `/data/vimops` を足し、134 から 1 つ上がった**）。
 const CORRUPT_FS_BLOCKS: usize = 160;
 
 /// 作業領域のバイト数。
@@ -9498,6 +9499,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "zi-append-by-byte-test",
         cfg!(feature = "zi-append-by-byte-test"),
         "zi の a が挿入点を 1 バイトだけ進め、字の途中へ落ちる",
+    ),
+    (
+        "zi-line-end-stays-test",
+        cfg!(feature = "zi-line-end-stays-test"),
+        "zi の $ が動かず、同じ道を通る A と o も行末へ寄らない",
+    ),
+    (
+        "zi-first-nonblank-to-zero-test",
+        cfg!(feature = "zi-first-nonblank-to-zero-test"),
+        "zi の ^ が空白を飛ばさず、行頭へ動く",
+    ),
+    (
+        "zi-escape-by-byte-test",
+        cfg!(feature = "zi-escape-by-byte-test"),
+        "zi の Esc が挿入点を 1 バイトだけ戻し、字の途中へ落ちる",
     ),
     (
         "shell-shift-delete-range-test",

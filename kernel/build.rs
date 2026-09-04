@@ -183,6 +183,12 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
         // **カーネル側だけ幅を 1 にすると、画面と `scol=` が食い違う。**
         ("CARGO_FEATURE_WIDTH_ALWAYS_ONE_TEST", "width_always_one"),
         ("CARGO_FEATURE_ZI_APPEND_BY_BYTE_TEST", "zi_append_by_byte"),
+        ("CARGO_FEATURE_ZI_LINE_END_STAYS_TEST", "zi_line_end_stays"),
+        (
+            "CARGO_FEATURE_ZI_FIRST_NONBLANK_TO_ZERO_TEST",
+            "zi_first_nonblank_to_zero",
+        ),
+        ("CARGO_FEATURE_ZI_ESCAPE_BY_BYTE_TEST", "zi_escape_by_byte"),
         (
             "CARGO_FEATURE_ZASH_PROMPT_DROP_COLOR_TEST",
             "zash_prompt_drop_color",
@@ -480,6 +486,18 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     // なることを見る**——**以前は `write` が丸ごと落ちて、行ごと消えていた。**
     std::fs::write(format!("{staging}/data/badutf8"), [b'x', 0xFF, b'y', b'\n'])
         .expect("failed to write /data/badutf8 into the staging");
+
+    // **`$` と `^` を多バイトの行で見るファイル（VIM-1）。**
+    //
+    // **先頭に空白 2 つを置いてある**——**`^` が飛ばす先が在る形である。**
+    // **`  あいu` は 2 + 3 + 3 + 1 = 9 バイトで、`$` が指す最後の字の先頭は
+    // 8 バイト目である**（`u`）。**桁で数えると 2 + 2 + 2 = 6 である。**
+    // **`^` の行き先は 2 バイト目で、桁も 2 である**（`あ` の先頭）。
+    //
+    // **バイトと桁が食い違う形を 1 本で持てる**——**`$` と `^` が
+    // 字の境界に留まることを、同時に主張できる。**
+    std::fs::write(format!("{staging}/data/vimops"), "  あいu\n".as_bytes())
+        .expect("failed to write /data/vimops into the staging");
 
     // **`zi` の上限が外れたことを示すファイル（H-b-2）。**
     //

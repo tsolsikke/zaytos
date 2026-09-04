@@ -1835,7 +1835,22 @@ fn finish_pending_escape(
     }
     *mode = Mode::Normal;
     // **ノーマルへ戻ると、カーソルは 1 つ左へ寄る**（vi の形）。
-    *col = col.saturating_sub(1);
+    //
+    // **1 バイトではなく 1 文字ぶんである**（`ADR-0054` の Decision 5）。
+    // **`a` と同じ見落としが、こちら側にも在った**（VIM-1 で見つけた）。
+    // **全角の字を入れた直後に Esc を打つと、カーソルが字の途中へ落ちる**
+    // ——**そこで `x` を打つと 1 バイトだけ消えて、ファイルが壊れる。**
+    //
+    // 破壊 (VIM-1, zi_escape_by_byte): **バイトで戻す。**
+    // **`utf8-test` の「Esc が字の境界へ戻る」判定が落ちる。**
+    #[cfg(zi_escape_by_byte)]
+    {
+        *col = col.saturating_sub(1);
+    }
+    #[cfg(not(zi_escape_by_byte))]
+    {
+        *col = text::prev_boundary(buffer.line(row), *col);
+    }
     // **札を描いてからカーソルを戻す**（[`refresh`]）。
     // **順序はあちらが持つ**ので、ここでは考えない。
     refresh(
@@ -1938,43 +1953,53 @@ fn handle_byte(
                 // **カーソルの次から挿入する（e-4。vi の `a`）。**
                 //
                 // **`i` との違いは桁が 1 つ右になることだけである。**
-                // **行末では動かない**——インサートでは末尾の 1 つ先まで
-                // 許すので、`move_right` と同じ上限に合わせる。
-                // **`A` / `o` / `O` / `I` は作らない**（利用者が求めたのは
-                // `a` である。使う者がいない機構は検算が置けない）。
+                // **中身は [`enter_append`] にある**——**`A` が同じ道を通る**
+                // （VIM-1。`ADR-0054` の Addendum）。
                 b'a' => {
-                    *mode = Mode::Insert;
-                    // 破壊 (e-4, zi-append-like-insert): `a` を `i` と同じにする。
-                    // **モードは変わり、字も入る**ので、往復も本数も変わらない。
-                    // **落ちるのは「`a` は `i` より 1 つ右から始まる」判定だけである。**
-                    #[cfg(not(zi_append_like_insert))]
-                    {
-                        // **1 バイトではなく 1 文字ぶん右である**（`ADR-0054` の
-                        // Decision 5。**多バイトの段で見落としていた**）。
-                        //
-                        // **バイトで進めると、全角の上で `a` を打った挿入点が
-                        // 字の途中へ落ちる**——**そこへ字を入れるとファイルが壊れる。**
-                        //
-                        // 破壊 (ADR-0054, zi_append_by_byte): **バイトで進める。**
-                        // **`utf8-test` の「`a` が字の境界へ動く」判定が落ちる。**
-                        let line = buffer.line(*row);
-                        if *col < line.len() {
-                            #[cfg(zi_append_by_byte)]
-                            {
-                                *col += 1;
-                            }
-                            #[cfg(not(zi_append_by_byte))]
-                            {
-                                *col = text::next_boundary(line, *col);
-                            }
-                        }
-                    }
-                    // **行は変わらないので窓も動かない。** カーソルだけ戻す。
-                    restore_cursor(buffer, window, *row, *col);
-                    // **札は `insert` と分ける**——**判定が `i` と `a` を
-                    // 見分けるためである**（`a` は直前の位置より 1 つ右）。
-                    report_cursor(buffer, window, *row, *col, b"append");
+                    enter_append(buffer, window, *row, col, mode);
                     return false;
+                }
+                // **行末の字へ動く（VIM-1。vi の `$`）。**
+                //
+                // **行は変わらないので窓も動かない。** カーソルだけ戻す。
+                b'$' => {
+                    move_to_line_end(buffer.line(*row), col);
+                    restore_cursor(buffer, window, *row, *col);
+                    report_cursor(buffer, window, *row, *col, b"line-end");
+                    return false;
+                }
+                // **行の最初の非空白へ動く（VIM-1。vi の `^`）。**
+                //
+                // **`0`（行頭へ）は作らない**——**利用者が挙げていない。**
+                // **契機は `docs/deferred-decisions.md` に置いた。**
+                b'^' => {
+                    move_to_first_nonblank(buffer.line(*row), col);
+                    restore_cursor(buffer, window, *row, *col);
+                    report_cursor(buffer, window, *row, *col, b"first-nonblank");
+                    return false;
+                }
+                // **行末から挿入する（VIM-1。vi の `A`）。**
+                //
+                // **`$` + `a` と同じである。** **道を 1 つに寄せた**
+                // ——**`$` の破壊が `A` の判定も落とすことが、寄っている証拠
+                // である**（運用者の指示。2026-09-01）。
+                b'A' => {
+                    move_to_line_end(buffer.line(*row), col);
+                    enter_append(buffer, window, *row, col, mode);
+                    return false;
+                }
+                // **下に行を開いて挿入する（VIM-1。vi の `o`）。**
+                //
+                // **`A` + Enter と同じである**（vi の `o` は `A<CR>`）。
+                // **行を割るのはインサートの Enter と同じ経路なので、
+                // 費用も同じである**——**`zi-enter-does-nothing` が
+                // `o` の判定も落とすことが、寄っている証拠である。**
+                b'o' => {
+                    move_to_line_end(buffer.line(*row), col);
+                    enter_append(buffer, window, *row, col, mode);
+                    return handle_byte(
+                        view, b'\n', buffer, window, row, col, mode, dirty, message,
+                    );
                 }
                 b'x' => {
                     let removed = buffer.remove(*row, *col);
@@ -2254,6 +2279,94 @@ fn move_right(buffer: &Buffer, row: usize, col: &mut usize, mode: Mode) -> bool 
     }
     *col = next;
     true
+}
+
+/// 行末の字へ動く（VIM-1。vi の `$`）。**動いたら真。**
+///
+/// **「行末」はバイト長ではなく最後の字の先頭である**（`common::text::line_end`）。
+/// **`A` もここを通る**——**寄せてあるので、ここが壊れれば両方の判定が落ちる。**
+fn move_to_line_end(line: &[u8], col: &mut usize) -> bool {
+    // 破壊 (VIM-1, zi_line_end_stays): 動かさない。
+    // **`$` の判定が落ち、`A` と `o` の判定も同時に落ちる**
+    // ——**3 つが同じ道に立っていることの主張である。**
+    #[cfg(zi_line_end_stays)]
+    let end = {
+        let _ = line;
+        *col
+    };
+    #[cfg(not(zi_line_end_stays))]
+    let end = text::line_end(line);
+    if *col == end {
+        return false;
+    }
+    *col = end;
+    true
+}
+
+/// 行の最初の非空白へ動く（VIM-1。vi の `^`）。**動いたら真。**
+///
+/// **空白しか無い行では行末へ寄る**（`common::text::first_nonblank`）。
+fn move_to_first_nonblank(line: &[u8], col: &mut usize) -> bool {
+    // 破壊 (VIM-1, zi_first_nonblank_to_zero): 行頭へ動く。
+    // **空白を飛ばさないので、`^` の判定だけが落ちる**
+    // ——**`$` とは別の道である。**
+    #[cfg(zi_first_nonblank_to_zero)]
+    let at = {
+        let _ = line;
+        0usize
+    };
+    #[cfg(not(zi_first_nonblank_to_zero))]
+    let at = text::first_nonblank(line);
+    if *col == at {
+        return false;
+    }
+    *col = at;
+    true
+}
+
+/// インサートへ入り、挿入点を 1 文字ぶん右へ動かす（`a` と `A` の共通の道）。
+///
+/// **行末では動かない**——インサートでは末尾の 1 つ先まで許すので、
+/// [`move_right`] と同じ上限に合わせる。
+///
+/// **行は変わらないので窓も動かない。** カーソルだけ戻す。
+fn enter_append(
+    buffer: &Buffer,
+    window: &mut Window,
+    row: usize,
+    col: &mut usize,
+    mode: &mut Mode,
+) {
+    *mode = Mode::Insert;
+    // 破壊 (e-4, zi-append-like-insert): `a` を `i` と同じにする。
+    // **モードは変わり、字も入る**ので、往復も本数も変わらない。
+    // **落ちるのは「`a` は `i` より 1 つ右から始まる」判定だけである。**
+    #[cfg(not(zi_append_like_insert))]
+    {
+        // **1 バイトではなく 1 文字ぶん右である**（`ADR-0054` の
+        // Decision 5。**多バイトの段で見落としていた**）。
+        //
+        // **バイトで進めると、全角の上で `a` を打った挿入点が
+        // 字の途中へ落ちる**——**そこへ字を入れるとファイルが壊れる。**
+        //
+        // 破壊 (ADR-0054, zi_append_by_byte): **バイトで進める。**
+        // **`utf8-test` の「`a` が字の境界へ動く」判定が落ちる。**
+        let line = buffer.line(row);
+        if *col < line.len() {
+            #[cfg(zi_append_by_byte)]
+            {
+                *col += 1;
+            }
+            #[cfg(not(zi_append_by_byte))]
+            {
+                *col = text::next_boundary(line, *col);
+            }
+        }
+    }
+    restore_cursor(buffer, window, row, *col);
+    // **札は `insert` と分ける**——**判定が `i` と `a` を
+    // 見分けるためである**（`a` は直前の位置より 1 つ右）。
+    report_cursor(buffer, window, row, *col, b"append");
 }
 
 /// 上へ 1 行。**先頭行では動かない。** 桁は移った行の長さで切り詰める。

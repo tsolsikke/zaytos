@@ -187,6 +187,7 @@ common::screen::tests::the_real_screen_gives_160_by_50_cells
 common::screen::tests::the_repaint_predicate_skips_only_the_right_half
 common::screen::tests::wrapping_on_the_last_row_also_requests_a_scroll
 common::screen::tests::writing_past_a_full_line_wraps_to_the_next_row
+common::text::tests::a_blank_only_line_falls_back_to_the_line_end
 common::text::tests::a_broken_byte_becomes_one_replacement
 common::text::tests::a_broken_byte_moves_one_byte
 common::text::tests::a_character_split_across_two_writes_is_one_char
@@ -196,6 +197,8 @@ common::text::tests::ascii_passes_through
 common::text::tests::resetting_drops_the_pending_bytes
 common::text::tests::the_column_is_the_sum_of_the_widths
 common::text::tests::the_cursor_moves_by_characters
+common::text::tests::the_first_nonblank_skips_spaces_and_tabs
+common::text::tests::the_line_end_is_the_last_character_not_the_last_byte
 common::text::tests::wide_characters_take_two_cells
 common::window::tests::a_far_jump_lands_the_line_at_the_bottom
 common::window::tests::a_line_above_the_window_becomes_the_top

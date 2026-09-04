@@ -118,6 +118,15 @@ width-always-one-test = ["common/width-always-one"]
 # 全角の上で `a` を打つと挿入点が字の途中へ落ちるので、utf8-test の
 # 「a が字の境界へ動く」判定が落ちる。
 zi-append-by-byte-test = []
+# 破壊（VIM-1）: zi の `$` が動かない。`$` の判定と、同じ道を通る `A` と `o` の
+# 判定が同時に落ちる（3 つが 1 つの道に寄せてあることの主張である）。
+zi-line-end-stays-test = []
+# 破壊（VIM-1）: zi の `^` が空白を飛ばさず行頭へ動く。`^` の判定だけが落ちる。
+zi-first-nonblank-to-zero-test = []
+# 破壊（VIM-1）: zi の Esc が挿入点を1バイトだけ戻す（`a` と同じ見落としが
+# こちら側にも在った）。全角の直後に Esc を打つと字の途中へ落ちるので、
+# utf8-test の「Esc が字の境界へ戻る」判定が落ちる。
+zi-escape-by-byte-test = []
 # 破壊（SE-c）: zash が打った行を履歴へ積まない。上キーでも Ctrl+P でも
 # 前の行が戻らないので、`--shell-test` の履歴の判定2本が落ちる。
 shell-drop-history-test = []

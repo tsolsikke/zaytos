@@ -207,7 +207,7 @@ Hello, ZaytOS!
 [INFO] virtio-blk: host features=0x79007e54 (accepted 0)
 [INFO] virtio-blk: handshake: ACKNOWLEDGE -> DRIVER; capacity=4096 sector(s)
 [INFO] virtio-blk: queue 0: size 256; ring at phys 0x39000..0x3d000 (4 page(s), 4096-aligned=true); zeroed 16384 byte(s) (0 were nonzero before)
-[INFO] virtio-blk: read sector 2: 512 byte(s) requested, status=0 (OK); checksum=0x00078320 first bytes=[00, 01, 00, 00, 00, 02, 00, 00]
+[INFO] virtio-blk: read sector 2: 512 byte(s) requested, status=0 (OK); checksum=0x00078302 first bytes=[00, 01, 00, 00, 00, 02, 00, 00]
 [INFO] smp: mapped per-CPU stacks for slot 1 at 0xffff81000002b000 (PML4[258], not [257] which a sabotage VA depends on): kernel top 0xffff81000004c000, IST1 top 0xffff810000051000, IST2 top 0xffff810000056000; 43 frame(s) consumed (pages plus page tables), guards left unmapped
 [INFO] apic: LAPIC SVR=0x0000010f software_enabled=true spurious_vector=0x0f TPR=0x00000000
 [INFO] apic: LAPIC has 6 LVT entr(y/ies) (Max LVT Entry = 5); reading only those
@@ -297,32 +297,32 @@ task: cooperative switch verified
 [INFO] ext2: image 2097152 byte(s) built by "mke2fs 1.47.0 (5-Feb-2023)"
 [INFO] ext2: superblock rev=1 block_size=4096 inode_size=256 inodes=256 blocks=512 blocks_per_group=32768 inodes_per_group=256 first_ino=11 groups=1
 [INFO] ext2: features compat=0x38 incompat=0x2 ro_compat=0x3 (only unknown incompat bits are refused; unknown ro_compat and compat are accepted for reading, as Linux does)
-[INFO] ext2: superblock free counts: blocks=378 inodes=214
+[INFO] ext2: superblock free counts: blocks=377 inodes=213
 [INFO] ext2: group 0: block bitmap at 2 inode bitmap at 3 inode table at 4
-[INFO] ext2: group 0 free counts: blocks=378 inodes=214 dirs=7
+[INFO] ext2: group 0 free counts: blocks=377 inodes=213 dirs=7
 [INFO] ext2: root inode 2: mode=040755 size=4096 links=8 i_block[0]=20 directory=true
 [INFO] ext2: root directory block 0 of 1: 4096 byte(s) via the direct blocks
 [INFO] ext2: root directory: 8 entr(y/ies): . .. lost+found bin data etc root tmp
-[INFO] ext2: resolved /etc/motd to inode 40: 18 byte(s) = "welcome to ZaytOS" (trailing newline trimmed for this line only); matches the seed file byte for byte: true
+[INFO] ext2: resolved /etc/motd to inode 41: 18 byte(s) = "welcome to ZaytOS" (trailing newline trimmed for this line only); matches the seed file byte for byte: true
 [INFO] ext2: /data/direct-max inode=32 size=49152 blocks=12 single indirect=0 last byte=0xce (expected 0xce)
 [INFO] ext2: /data/indirect-first inode=33 size=49153 blocks=13 single indirect=122 last byte=0xcf (expected 0xcf)
 [INFO] fs-image-source: root_filesystem reads from virt 0xffff800001c00000 (phys 0x1c00000)
-[INFO] fs-image-copy: copied 2097152 byte(s) to phys 0x1c00000..0x1e00000 (512 frame(s), 2MiB-aligned=true), checksum=0xdd202480; the kernel image is 0x100000..0x397640
+[INFO] fs-image-copy: copied 2097152 byte(s) to phys 0x1c00000..0x1e00000 (512 frame(s), 2MiB-aligned=true), checksum=0x3158a9cd; the kernel image is 0x100000..0x397640
 [INFO] fs-sparse: /data/sparse-hole reads block 1 as a full block of zeros = true (the blocks around it have content: head=true tail=true); i_size=12288 i_blocks_512=16
-[INFO] fs-bitmap: allocated one block (number 134); free counts are now blocks=377 group0=377
-[INFO] fs-write: append 1 wrote 200 byte(s) to inode 37; free blocks are now 377
-[INFO] fs-write: append 2 wrote 4000 byte(s) to inode 37; free blocks are now 376
-[INFO] fs-truncate: shrank inode 37 to 8192 byte(s); free blocks 374 -> 376 (returned 2)
-[INFO] fs-truncate: shrank inode 37 to 4097 byte(s); free blocks 376 -> 376 (returned 0)
-[INFO] fs-truncate: shrank inode 37 to 4096 byte(s); free blocks 376 -> 377 (returned 1)
-[INFO] fs-truncate: shrank inode 37 to 4000 byte(s); free blocks 377 -> 377 (returned 0)
-[INFO] fs-truncate: restored inode 37 to 100 byte(s)
-[INFO] fs-create: created inode 43 under inode 29 and wrote 300 byte(s); free blocks=376 inodes=213, i_extra_isize=32
-[INFO] fs-create: unlinked inode 43; free blocks=377 inodes=214
-[INFO] fs-mkdir: created directory inode 43 under inode 29; free blocks=376 inodes=213 dirs=Ok(8)
+[INFO] fs-bitmap: allocated one block (number 135); free counts are now blocks=376 group0=376
+[INFO] fs-write: append 1 wrote 200 byte(s) to inode 38; free blocks are now 376
+[INFO] fs-write: append 2 wrote 4000 byte(s) to inode 38; free blocks are now 375
+[INFO] fs-truncate: shrank inode 38 to 8192 byte(s); free blocks 373 -> 375 (returned 2)
+[INFO] fs-truncate: shrank inode 38 to 4097 byte(s); free blocks 375 -> 375 (returned 0)
+[INFO] fs-truncate: shrank inode 38 to 4096 byte(s); free blocks 375 -> 376 (returned 1)
+[INFO] fs-truncate: shrank inode 38 to 4000 byte(s); free blocks 376 -> 376 (returned 0)
+[INFO] fs-truncate: restored inode 38 to 100 byte(s)
+[INFO] fs-create: created inode 44 under inode 29 and wrote 300 byte(s); free blocks=375 inodes=212, i_extra_isize=32
+[INFO] fs-create: unlinked inode 44; free blocks=376 inodes=213
+[INFO] fs-mkdir: created directory inode 44 under inode 29; free blocks=375 inodes=212 dirs=Ok(8)
 [INFO] fs-mkdir: rmdir on a directory that is not empty was refused = true
-[INFO] fs-mkdir: removed directory inode 43; free blocks=377 inodes=214 dirs=Ok(7)
-[INFO] fs-bitmap: freed block 134; the image should be back to what was built
+[INFO] fs-mkdir: removed directory inode 44; free blocks=376 inodes=213 dirs=Ok(7)
+[INFO] fs-bitmap: freed block 135; the image should be back to what was built
 [INFO] fs-image-flush: wrote 2097152 byte(s) back to the virtio disk
 [INFO] fs-image-ready: the image is in its final state for this run
 [INFO] keymap: the keyboard layout is jis (KEYMAP was not set)

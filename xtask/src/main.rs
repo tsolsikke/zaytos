@@ -3573,6 +3573,19 @@ const UTF8_TEST_SABOTAGES: &[&str] = &[
     // **`a` がバイトで進む形（2026-09-03）。** **多バイトの段で見落としていた**
     // ——**台本が全角の上で `a` を打っていなかったので、判定も捕まえていなかった。**
     "zi-append-by-byte-test",
+    // **VIM-1 で 4 つ増えた。** **`$` / `^` / `A` / `o` を足したので、台本が
+    // `/data/vimops` を開くようになった。**
+    //
+    // **`zi-line-end-stays-test` は 3 本落ちる**——**`$` の判定と、同じ道を
+    // 通る `A` と `o` の判定である**（**`A` と `o` に破壊を置かない判断が、
+    // 同時に「両方が `$` に寄っている」ことの主張になる**。運用者の指示。
+    // 2026-09-01）。
+    // **`zi-enter-does-nothing-test` は `o` を落とす**——**`o` は `A` の後に
+    // インサートの Enter を打つのと同じ道である。**
+    "zi-line-end-stays-test",
+    "zi-first-nonblank-to-zero-test",
+    "zi-escape-by-byte-test",
+    "zi-enter-does-nothing-test",
 ];
 
 const SHELL_TEST_SABOTAGES: &[&str] = &[
@@ -4050,14 +4063,31 @@ fn read_lossy(path: &Path) -> String {
 /// **`zi` は本文を画面の先頭行から描く。** **`cat` の出力は画面の下へ流れるので、
 /// 先頭 6 行を読む観測点（`OBSERVE_TEXT_ROWS`）に載らない。**
 ///
-/// # 判定は 4 つである
+/// # 判定は 9 つである
 ///
 /// 1. **壊れたバイトが行を消さないこと**（`/data/badutf8` が `x?y` と出る）
 /// 2. **全角が 2 セルを占めること**（`/data/utf8` が `? ? u` と出る。**間の空白は
 ///    右半分のセルである**）
-/// 3. **画面の桁が字で進むこと**（`l` の後に `col=3 scol=2`）
+/// 3. **画面の桁が字で進むこと**（`l` の後に `col=3 scol=2` の `move`）
 /// 4. **消すのが字であること**（保存後の装置の中身が `あu` である。**バイトを
 ///    割っていない**）
+///
+/// **VIM-1 で 5 本足した**（`/data/vimops` は `  あいu` である）。
+///
+/// 5. **`$` が行末の字へ動くこと**（`col=8 scol=6` の `line-end`。**バイト長の
+///    9 ではない**）
+/// 6. **`^` が最初の非空白へ動くこと**（`col=2 scol=2` の `first-nonblank`）
+/// 7. **Esc が字の境界へ戻ること**（`col=2 scol=2` の `normal`。**全角の上で
+///    `a` を打った直後なので、バイトで戻すと字の途中へ落ちる**）
+/// 8. **1 行目が `  いuX` であること**（**`x` が `あ` を丸ごと消し、`A` が
+///    行末から `X` を挿した**）
+/// 9. **`o` が下に行を開いたこと**（**2 行目が `Y` である**）
+///
+/// # 3 の札を見るのは、判定が別の行に当たらないようにするためである
+///
+/// **`col=3 scol=2` は、`l` の後の `move` にも、`Z` を入れた後の Esc の
+/// `normal` にも出る。** **札を見ないと、`l` が動かなくなっても Esc の行で
+/// 緑になりうる**（判定の当たり先がずれる形）。
 fn cmd_utf8_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
@@ -4149,15 +4179,36 @@ fn cmd_utf8_test(features: &[&str], expect_pass: bool) -> Result<()> {
     // **判定 2**——**全角は 2 セルである。** **間の空白が右半分のセルである。**
     let wide_takes_two_cells = wide_row.contains("? ? u");
     // **判定 3**——**画面の桁が字で進む。** **`col` はバイト、`scol` は幅の合計である。**
-    let column_counts_characters = strip_ansi(&serial)
-        .lines()
-        .any(|line| line.contains("zi: cursor") && line.contains("col=3 scol=2"));
+    let stripped = strip_ansi(&serial);
+    let cursor_says = |column: &str, tag: &str| {
+        stripped.lines().any(|line| {
+            line.contains("zi: cursor") && line.contains(column) && line.trim_end().ends_with(tag)
+        })
+    };
+    let column_counts_characters = cursor_says("col=3 scol=2", "move");
     // **判定 4**——**消すのは字である。** **`あいu` から `い` を消して `あu` になる。**
     let disk = disk_image_path(&esp_dir);
     let saved = debugfs_read(&disk, "/data/utf8")?;
     // **`x` で `い` が消え、`a` で全角の次へ動いてから `Z` を入れた。**
     // **`a` がバイトで進むと、`Z` が `あ` の途中へ入って中身が壊れる。**
     let deleted_a_character = saved.as_deref() == Some("あZu\n".as_bytes());
+
+    // **判定 5**——**`$` は行末の「字」へ動く。** **`  あいu` は 9 バイトで、
+    // 最後の字 `u` の先頭は 8 バイト目、桁は 6 である。**
+    let line_end_is_a_character = cursor_says("row=0 col=8 scol=6", "line-end");
+    // **判定 6**——**`^` は最初の非空白へ動く。** **空白 2 つを飛ばした先は
+    // `あ` の先頭で、バイトも桁も 2 である。**
+    let first_nonblank_skips_the_blanks = cursor_says("row=0 col=2 scol=2", "first-nonblank");
+    // **判定 7**——**Esc は字の境界へ戻る。** **全角の上で `a` を打った直後
+    // なので、バイトで戻すと `あ` の途中（4 バイト目）へ落ちる。**
+    let escape_lands_on_a_boundary = cursor_says("row=0 col=2 scol=2", "normal");
+    // **判定 8 と 9**——**装置の中身で見る。**
+    // **`x` が `あ` を丸ごと消し、`A` が行末から `X` を挿し、`o` が下に
+    // 行を開いて `Y` を載せた形である。**
+    let saved_vimops = debugfs_read(&disk, "/data/vimops")?;
+    let vimops = saved_vimops.as_deref().unwrap_or(&[]);
+    let the_line_kept_its_characters = vimops.starts_with("  いuX\n".as_bytes());
+    let opened_a_line_below = vimops.split(|byte| *byte == b'\n').nth(1) == Some(&b"Y"[..]);
 
     println!("{context}: the broken byte did not erase the line = {broken_line_survived} (row {broken_row})");
     println!(
@@ -4169,11 +4220,25 @@ fn cmd_utf8_test(features: &[&str], expect_pass: bool) -> Result<()> {
          {deleted_a_character} (the device says {:?})",
         saved.as_deref().map(String::from_utf8_lossy)
     );
+    println!("{context}: $ moved to the last character = {line_end_is_a_character}");
+    println!("{context}: ^ skipped the leading blanks = {first_nonblank_skips_the_blanks}");
+    println!("{context}: escape landed on a character boundary = {escape_lands_on_a_boundary}");
+    println!(
+        "{context}: the line kept its characters = {the_line_kept_its_characters} \
+         (the device says {:?})",
+        saved_vimops.as_deref().map(String::from_utf8_lossy)
+    );
+    println!("{context}: o opened a line below = {opened_a_line_below}");
 
     let passed = broken_line_survived
         && wide_takes_two_cells
         && column_counts_characters
-        && deleted_a_character;
+        && deleted_a_character
+        && line_end_is_a_character
+        && first_nonblank_skips_the_blanks
+        && escape_lands_on_a_boundary
+        && the_line_kept_its_characters
+        && opened_a_line_below;
     if passed {
         println!("{context}: PASS");
         if expect_pass {
@@ -13726,11 +13791,13 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **3 回連続で通ることを確かめてから入れた。落ちる回が出たら `flaky` へ移す。**
         // **多バイトの字が画面と `zi` で正しく扱われること（`ADR-0054`）。**
         //
-        // **1 回の起動で 4 つ見る**——**壊れたバイトが行を消さない / 全角が
-        // 2 セル / 画面の桁が字で進む / 消すのが字である。**
+        // **1 回の起動で 9 つ見る**——**壊れたバイトが行を消さない / 全角が
+        // 2 セル / 画面の桁が字で進む / 消すのが字である**（`ADR-0054`）、
+        // **`$` が行末の字へ動く / `^` が空白を飛ばす / Esc が境界へ戻る /
+        // 1 行目が字を保つ / `o` が下に行を開く**（VIM-1）。
         //
-        // **破壊は 2 つで、落ちる判定が違う**——**幅を 1 にすると 2 本、
-        // 丸ごと落とすと 1 本である。**
+        // **落ちる判定は破壊ごとに違う**——**一覧は
+        // [`UTF8_TEST_SABOTAGES`] と `docs/verification-coverage.md` にある。**
         total += 1;
         begin_item("multibyte characters take two cells and are edited whole");
         match cmd_utf8_test(&[], true) {
@@ -15034,7 +15101,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 27,
-    full: 265,
+    full: 269,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
