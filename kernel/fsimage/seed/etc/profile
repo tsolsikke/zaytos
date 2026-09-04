@@ -1,0 +1,10 @@
+# The system profile. zash runs it at start, before the first prompt,
+# every time the shell is started (there is no login shell here).
+# Blank lines and lines starting with # are ignored. ASCII only:
+# the console font holds nothing else.
+#
+# The two lines below are examples. The first names the file that set
+# it; the second shows that $NAME is expanded here exactly as it is
+# when the same line is typed at the prompt.
+export ZPROFILE=etc-profile
+export ZPROFILE_SOURCE=from-$ZPROFILE

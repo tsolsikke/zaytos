@@ -55,7 +55,7 @@ mod env;
 
 use env::{EnvReject, EnvSetError, EnvTable, MAX_ENVP};
 
-use userlib::{exit, read, write_all, STDERR, STDOUT};
+use userlib::{close, exit, open_read_only, read, write_all, STDERR, STDOUT};
 
 /// 1 行の最大の長さ。
 ///
@@ -190,6 +190,44 @@ static mut RESOLVED: [u8; DIR_MAX + 1 + NAME_MAX + 1] = {
 };
 /// 行が長すぎたときの断り書き。
 const TOO_LONG: &[u8] = b"zash: line too long\n";
+
+/// 起動時に読む系統の設定（PR-1）。
+const SYSTEM_PROFILE: &[u8] = b"/etc/profile\0";
+/// 利用者の設定の、`$HOME` の後ろに繋ぐ部分（PR-1）。
+const USER_PROFILE_TAIL: &[u8] = b"/.profile";
+
+/// 設定を丸ごと受ける器の大きさ（PR-1）。
+///
+/// # 1,024 の根拠
+///
+/// **測った値ではない。** **いま像に在る `/etc/environment` は 3 行 189
+/// バイトで、種として置く `/etc/profile` はそれより短い。** **1,024 は
+/// その 5 倍で、`LINE_MAX`（128）の 8 行ぶんに当たる。**
+///
+/// **上限を置く理由は、器が `.bss` に載るからである**——**大きくすると
+/// 像の確保する量がそのぶん増える**（`docs/roadmap.md` の
+/// 「像を何が食っているか」）。
+///
+/// **暫定である。** **越える設定を書く者が出たら、そこで測って決め直すこと**
+/// ——**越えたことは黙らない**（[`PROFILE_TOO_BIG`]）。
+const PROFILE_MAX: usize = 1024;
+
+/// `$HOME` から組み立てるパスの器（PR-1）。**NUL の 1 バイトを含む。**
+const PROFILE_PATH_MAX: usize = 64;
+
+/// 設定が読めなかったときの返事（前半。PR-1）。
+///
+/// **「無い」とは分ける**——**無いときは何も言わない**（設計の D3）。
+/// **ここへ来るのは「在るのに読めない」である**（ディレクトリを指した、
+/// 装置が答えない、など）。
+const PROFILE_UNREADABLE_HEAD: &[u8] = b"zash: cannot read ";
+/// 設定が読めなかったときの返事（後半）。
+const PROFILE_UNREADABLE_TAIL: &[u8] = b"\n";
+/// 設定が器に入りきらなかったときの返事（PR-1）。
+///
+/// **そこまでの行は走らせてから言う**——**黙って切らない**
+/// （`ADR-0053` の Decision 5）。
+const PROFILE_TOO_BIG: &[u8] = b"zash: the profile does not fit; the rest was not run\n";
 
 /// `-EAGAIN`。**溜まっていないという意味で、失敗ではない。**
 const MINUS_EAGAIN: i64 = -11;
@@ -547,6 +585,11 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     // SAFETY: 呼び出し元契約により `stack` は初期スタックの先頭を指す。
     unsafe { adopt_environment(stack) };
     write_all(STDOUT, BANNER);
+    // **設定を読んで走らせる（PR-1）。** **対話の前である**——
+    // **`export` した名前を、最初のプロンプトから使えるようにする。**
+    // **札の後にするのは、設定の出力が「シェルが起きた後の出力」として
+    // 読めるようにするためである。**
+    run_profiles();
     write_prompt();
 
     let mut line = [0u8; LINE_MAX];
@@ -1213,6 +1256,214 @@ fn expand_line(line: &[u8], out: &mut [u8]) -> Option<usize> {
 /// **空白を NUL へ置き換え、各語の先頭を指す配列を作る。**
 /// **写しを取らない**——`argv` の要素はカーネルが写すので、
 /// **この行が生きているあいだ有効であれば足りる。**
+/// 起動時に設定を読んで走らせる（PR-1）。
+///
+/// # 2 本を順に読む
+///
+/// **`/etc/profile` の後に `$HOME/.profile` である。** **後のほうが勝つ**
+/// ——`export` は上書きなので、利用者の設定が系統の設定を覆す。
+///
+/// # パスは `$HOME` から組み立てる
+///
+/// **`~` の展開は既に在る**（[`expand_word`] の規則 2）**が、ここは通さない**
+/// ——**設定のパスは語として解釈させず、[`open_read_only`] へ直に渡す。**
+/// **出来上がる文字列は `~/.profile` を展開したものと同じである**
+/// （**どちらも `HOME` を引く**）。
+/// **`HOME` が無いか、繋いだ長さが器を越えたら、2 本目を飛ばす**
+/// （**無いときと同じ扱いである**）。
+///
+/// # ログインシェルと対話シェルを分けない
+///
+/// **`zash` が起きるたびに読む。** **`init` が起こし直したときも読む。**
+/// **区別を持ち込まない**（運用者の指示。2026-09-04）——**利用者が 1 人で、
+/// 端末が 1 つなので、分けても言えることが増えない。**
+fn run_profiles() {
+    let mut path = [0u8; PROFILE_PATH_MAX];
+    let user = user_profile_path(&mut path);
+
+    // 破壊 (PR-1, shell-profile-order-swapped): 利用者の設定を先に読む。
+    // **どちらも走るので、置いた名前は全部見える**——**落ちるのは
+    // 「後のほうが勝つ」判定だけである。**
+    #[cfg(shell_profile_order_swapped)]
+    {
+        if let Some(length) = user {
+            run_profile(&path[..length]);
+        }
+        run_profile(SYSTEM_PROFILE);
+    }
+    #[cfg(not(shell_profile_order_swapped))]
+    {
+        run_profile(SYSTEM_PROFILE);
+        if let Some(length) = user {
+            run_profile(&path[..length]);
+        }
+    }
+}
+
+/// `$HOME/.profile` のパスを組み立てる（PR-1）。**NUL 終端まで含めた長さを返す。**
+///
+/// **`HOME` が無いか、器に入らなければ `None` である**——**呼ぶ側は
+/// 2 本目を飛ばす。**
+fn user_profile_path(path: &mut [u8; PROFILE_PATH_MAX]) -> Option<usize> {
+    let home = environment_value(b"HOME")?;
+    let length = home.len() + USER_PROFILE_TAIL.len();
+    // **NUL の 1 バイトを残す。**
+    if length + 1 > path.len() {
+        return None;
+    }
+    path[..home.len()].copy_from_slice(home);
+    path[home.len()..length].copy_from_slice(USER_PROFILE_TAIL);
+    path[length] = 0;
+    Some(length + 1)
+}
+
+/// 1 本の設定を読んで走らせる（PR-1）。**パスは NUL 終端であること。**
+///
+/// # 3 段で決めてある（`/etc/environment` と同じ形）
+///
+/// - **無い**（`open` が負）——**何も言わずに戻る。** **設定はもともと
+///   任意である。**
+/// - **在るのに読めない**（`read` が負）——**1 行言って、そのファイルを
+///   やめる。** **ディレクトリを指した場合もここへ来る**——**読み取りで
+///   開くのは通る**（`ls` が `getdents64` で使う道である）**が、`read` は
+///   `-EISDIR` を返す**（`kernel/src/syscall.rs`。`syscall-test` の検算が
+///   毎回確かめている）。
+/// - **器に入らない**（[`PROFILE_MAX`] を越えた）——**入ったぶんは走らせ、
+///   1 行言ってやめる。** **黙って切らない**（`ADR-0053` の Decision 5）。
+///
+/// # 1 行の扱いは対話と同じ
+///
+/// **`\r` と前後の空白を落とし、空行を飛ばす。** **`#` の行は
+/// [`run_line`] が飛ばす**——**方言を 2 つ作らない。**
+/// **残りは [`expand_and_run`] へ渡す**——**打った行と同じ道である。**
+///
+/// # 途中で失敗しても止めない
+///
+/// **[`run_line`] は成否を返さない。** **止める形にするには、走らせた語が
+/// 失敗したかを持ち回る機構が要る**——**設定のためだけに作るのは高い。**
+/// **設定は独立した行の並びなので、1 つ落ちたからといって残りを捨てる
+/// 理由も無い。** **失敗は `run_with_terminator` が画面へ出すので、
+/// 黙って進むわけではない。**
+fn run_profile(path: &[u8]) {
+    let fd = open_read_only(path);
+    if fd < 0 {
+        // **無い。** **何も言わない。**
+        //
+        // 破壊 (PR-1, shell-profile-missing-is-error): 無いことを報せる。
+        // **設定を置いていない人の画面に、毎起動 1 行出る形である。**
+        // **落ちるのは「無いときは何も言わない」判定だけである。**
+        #[cfg(shell_profile_missing_is_error)]
+        {
+            write_all(STDERR, PROFILE_UNREADABLE_HEAD);
+            write_all(STDERR, path_without_nul(path));
+            write_all(STDERR, PROFILE_UNREADABLE_TAIL);
+        }
+        return;
+    }
+    let fd = fd as u64;
+    let mut buffer = [0u8; PROFILE_MAX];
+    let mut filled = 0usize;
+    let mut unreadable = false;
+    let mut too_big = false;
+    loop {
+        if filled == buffer.len() {
+            // **もう 1 バイト読めたら、入りきっていない。**
+            let mut extra = [0u8; 1];
+            if read(fd, &mut extra) > 0 {
+                too_big = true;
+            }
+            break;
+        }
+        let got = read(fd, &mut buffer[filled..]);
+        if got < 0 {
+            unreadable = true;
+            break;
+        }
+        if got == 0 {
+            break;
+        }
+        filled += got as usize;
+    }
+    close(fd);
+
+    if unreadable {
+        write_all(STDERR, PROFILE_UNREADABLE_HEAD);
+        write_all(STDERR, path_without_nul(path));
+        write_all(STDERR, PROFILE_UNREADABLE_TAIL);
+        return;
+    }
+
+    for line in buffer[..filled].split(|byte| *byte == b'\n') {
+        let line = trim_profile_line(line);
+        if line.is_empty() {
+            continue;
+        }
+        if line.len() > LINE_MAX {
+            // **その行だけを飛ばす。** **次の行は走らせる。**
+            write_all(STDOUT, TOO_LONG);
+            continue;
+        }
+        let mut copy = [0u8; LINE_MAX + 1];
+        copy[..line.len()].copy_from_slice(line);
+        expand_and_run(&mut copy, line.len());
+        // 破壊 (PR-1, shell-profile-first-line-only): 1 行走らせたら戻る。
+        //
+        // **「失敗しても止めない」を直接否定する形にはしていない。**
+        // **そちらを主張するには、本番の像の `/etc/profile` へわざと
+        // 落ちる行を置くことになる**——**設定を置いていない人の画面に、
+        // 毎起動そのエラーが出る。** **検査のための機構を本番の像へ
+        // 常時載せない**（運用者の指摘。2026-09-01 の作業領域と同じ話）。
+        //
+        // **代わりに「全部の行が走る」を主張する。** **落ちるのは
+        // 「2 行目まで効いている」判定である。**
+        // **「失敗しても止めない」には判定が無い**——
+        // `docs/deferred-decisions.md` に行を立てた。
+        //
+        // **注釈の行では戻らない。** **[`run_line`] が飛ばす行を数えると、
+        // 種の設定は注釈で始まっているので 1 行も走らないことになり、
+        // 「設定を読まない」と同じ形になる**——**落ちる判定が他の破壊と
+        // 重なって、この破壊でしか落ちない判定が無くなる**（実測。
+        // 2026-09-04。**3 本のうち 2 本が落ちた**）。
+        #[cfg(shell_profile_first_line_only)]
+        if line.first() != Some(&b'#') {
+            return;
+        }
+    }
+
+    if too_big {
+        write_all(STDOUT, PROFILE_TOO_BIG);
+    }
+}
+
+/// NUL 終端のパスから、名前の部分だけを借りる（PR-1）。**報せに出す側である。**
+fn path_without_nul(path: &[u8]) -> &[u8] {
+    match path.iter().position(|byte| *byte == 0) {
+        Some(end) => &path[..end],
+        None => path,
+    }
+}
+
+/// 設定の 1 行から `\r` と前後の空白を落とす（PR-1）。
+///
+/// **`/etc/environment` の規則と同じである**（`common::env::trim_env_line`）。
+/// **`\r` を落とすのは、`disk0.img` を外の道具で触れるためである。**
+///
+/// **写さずに借りたまま返す。** **バイトで走査してよい**——**UTF-8 の
+/// 2 バイト目以降は必ず `0x80` 以上で、空白にも `\r` にもならない。**
+fn trim_profile_line(line: &[u8]) -> &[u8] {
+    let mut start = 0usize;
+    let mut end = line.len();
+    while start < end && (line[start] == b' ' || line[start] == b'\t') {
+        start += 1;
+    }
+    while end > start
+        && (line[end - 1] == b' ' || line[end - 1] == b'\t' || line[end - 1] == b'\r')
+    {
+        end -= 1;
+    }
+    &line[start..end]
+}
+
 /// 1 行を展開して走らせる。
 ///
 /// **打った行と、これから足す `/etc/profile` の行が、同じ道を通るための
@@ -1278,6 +1529,21 @@ fn run_line(line: &mut [u8]) {
         }
     }
     if count == 0 {
+        return;
+    }
+    // **注釈（PR-1）。** **行頭が `#` なら、その行は走らせない。**
+    //
+    // # 語頭ではなく行頭だけである
+    //
+    // **`bash` は語の先頭を見る**（`echo a #b` の `#b` から後ろが注釈）。
+    // **ここは行頭だけにした**——**引用も語の分割の規則も無いので、
+    // 「どこからが注釈か」を語ごとに決める理由が無い。**
+    // **行頭だけなら、読む人が 1 行を見て判断できる。**
+    // **語頭も見る形は、途中に注釈を書きたい者が出たら考えること。**
+    //
+    // **対話の行も設定の行も、同じここを通る**——**方言を 2 つ作らない**
+    // （運用者の決定。2026-09-04）。
+    if line[starts[0]] == b'#' {
         return;
     }
     // **残りの空白も NUL にする。** 語の切れ目はすべて NUL になる。

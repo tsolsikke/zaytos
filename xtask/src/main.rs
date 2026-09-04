@@ -1628,6 +1628,17 @@ fn main() -> Result<()> {
                 let expect_pass = sabotage.is_empty();
                 return cmd_utf8_test(&sabotage, expect_pass);
             }
+            // **起動時の設定の判定（PR-1）。**
+            if rest.iter().any(|a| a == "--profile-test") {
+                let sabotage: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                let expect_pass = sabotage.is_empty();
+                return cmd_profile_test(&sabotage, expect_pass);
+            }
             if rest.iter().any(|a| a == "--keymap-test") {
                 return cmd_keymap_test(rest.iter().any(|a| a == "--sabotage"));
             }
@@ -3590,6 +3601,19 @@ const UTF8_TEST_SABOTAGES: &[&str] = &[
     "zi-status-stale-column-test",
 ];
 
+/// `profile-test` を「通らないこと」で回す破壊（PR-1）。
+///
+/// **3 つとも、落ちる判定が 1 本ずつ違う。**
+///
+/// **`shell-skip-profile`（設定を読まない）は置いていない**——**落ちる判定が
+/// `shell-profile-first-line-only` と重なり、その形でしか落ちない判定を
+/// 持たないためである**（運用者の判断。2026-09-04）。
+const PROFILE_TEST_SABOTAGES: &[&str] = &[
+    "shell-profile-order-swapped-test",
+    "shell-profile-first-line-only-test",
+    "shell-profile-missing-is-error-test",
+];
+
 const SHELL_TEST_SABOTAGES: &[&str] = &[
     "kill-ignore-interrupt-test",
     "kill-fold-at-depth-one-test",
@@ -4263,6 +4287,146 @@ fn cmd_utf8_test(features: &[&str], expect_pass: bool) -> Result<()> {
         && the_line_kept_its_characters
         && opened_a_line_below
         && status_follows_the_cursor;
+    if passed {
+        println!("{context}: PASS");
+        if expect_pass {
+            Ok(())
+        } else {
+            bail!("{context}: the sabotage was NOT caught; every judgement still held")
+        }
+    } else {
+        println!("{context}: FAILED");
+        if expect_pass {
+            bail!("{context}: FAILED")
+        } else {
+            println!("{context}: the sabotage was caught (this run is expected to fail)");
+            Ok(())
+        }
+    }
+}
+
+/// 起動時の設定の判定（PR-1）。**1 回の起動で 2 度シェルを起こす。**
+///
+/// # 判定は 3 つである
+///
+/// 1. **2 行目まで走り、`$NAME` が展開されたこと**
+///    （`echo $ZPROFILE_SOURCE` が `from-etc-profile`）
+/// 2. **後のほうが勝つこと**（`echo $ZPROFILE` が `root-profile`。
+///    **`/etc/profile` が置いた値を `/root/.profile` が上書きした**）
+/// 3. **無いときは何も言わないこと**（`/root/.profile` を消して起こし直すと、
+///    `echo $ZPROFILE` が `etc-profile` に戻り、**消したパスを名指す行が
+///    出ていない**）
+///
+/// # 値を長くしてある
+///
+/// **`etc` と `home` で始めたら、`etc` が起動ログの `ls /` の出力に
+/// 当たった**（実測。2026-09-04。**起動シーケンスの `syscall-test` が
+/// `ls` を起こしており、その 1 行がまるごと `etc` である**）。
+/// **判定の当たり先がずれる族である。** **値を `etc-profile` /
+/// `root-profile` / `from-etc-profile` にして、像の他の行と当たらない
+/// 形にした。**
+///
+/// # 出力の数え方
+///
+/// **`echo` の出力は 1 行まるごとがその値である**（実測。プロンプトと
+/// 打った語はその前の行に在り、`zash` は台本の経路で反響しない）。
+/// **行がまるごと一致することを見る**——**部分一致にすると起動ログの
+/// 他の行に当たりうる**（`etc` は短い）。
+/// **1 度目と 2 度目は `init` の起こし直しの行で分ける。**
+fn cmd_profile_test(features: &[&str], expect_pass: bool) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let mut all_features: Vec<&str> = vec!["profile-test"];
+    all_features.extend_from_slice(features);
+    let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let tag = all_features.join("-");
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("profile-test-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the profile test")?;
+
+    // **合図は `script-done:` である**（`cmd_utf8_test` と同じ）。
+    let deadline = Instant::now() + ZI_TEST_TIMEOUT;
+    while Instant::now() < deadline {
+        let text = read_lossy(&serial_log);
+        if strip_ansi(&text).contains("script-done:") {
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = read_lossy(&serial_log);
+    let context = if features.is_empty() {
+        "profile-test".to_string()
+    } else {
+        format!("profile-test {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    let qemu_debug = read_lossy(&debug_log);
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    let stripped = strip_ansi(&serial);
+    // **1 度目と 2 度目を分ける。** **`init` の起こし直しの行が境である。**
+    let restart_marker = "init: starting /bin/zash (restart 1 of 3)";
+    let (first, second) = match stripped.find(restart_marker) {
+        Some(at) => (&stripped[..at], &stripped[at..]),
+        None => (stripped.as_str(), ""),
+    };
+    // **`echo` の出力はそれだけで 1 行になる。** **プロンプトと打った語は
+    // その前の行に在る**（`zash` は台本の経路で反響しない）。
+    // **行がまるごとその値であることを見る**——**部分一致にすると、
+    // 起動ログの他の行に当たりうる。**
+    let says = |text: &str, value: &str| text.lines().any(|line| line.trim() == value);
+
+    // **判定 1**——**2 行目まで走り、`$ZPROFILE` がその場で展開された。**
+    let every_line_ran = says(first, "from-etc-profile");
+    // **判定 2**——**後のほうが勝つ。** **`/root/.profile` が `etc` を覆した。**
+    let the_user_profile_wins = says(first, "root-profile");
+    // **判定 3**——**無いときは何も言わない。** **2 度目は `/etc/profile`
+    // しか無いので `etc` へ戻り、消したパスを名指す行は出ない。**
+    let missing_is_silent = says(second, "etc-profile") && !second.contains("/root/.profile");
+
+    println!("{context}: every line of /etc/profile ran = {every_line_ran}");
+    println!("{context}: ~/.profile won over /etc/profile = {the_user_profile_wins}");
+    println!("{context}: a missing profile said nothing = {missing_is_silent}");
+
+    let passed = every_line_ran && the_user_profile_wins && missing_is_silent;
     if passed {
         println!("{context}: PASS");
         if expect_pass {
@@ -13844,6 +14008,37 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }
         }
 
+        // **起動時の設定が走ること（PR-1）。**
+        //
+        // **1 回の起動で 3 つ見る**——**2 行目まで走って `$NAME` が展開される /
+        // 後のほうが勝つ / 無いときは何も言わない。**
+        // **破壊は 3 つで、落ちる判定が 1 本ずつ違う**（実測。2026-09-04）。
+        //
+        // **`--shell-test` へ足していない**——**あちらは `sendkey` で
+        // 1 キーずつ打つので、同じ主張が 12 構成に掛かって高い**
+        // （`kernel/src/input.rs` の `profile-test` の台本の doc）。
+        total += 1;
+        begin_item("the shell runs /etc/profile and ~/.profile at start");
+        match cmd_profile_test(&[], true) {
+            Ok(()) => println!("--- profile test: OK"),
+            Err(error) => {
+                println!("--- profile test: FAILED ({error})");
+                failed.push("profile test".to_string());
+            }
+        }
+        for sabotage in PROFILE_TEST_SABOTAGES {
+            total += 1;
+            let label = format!("profile-test {sabotage}");
+            begin_item(&label);
+            match cmd_profile_test(&[sabotage], false) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
+            }
+        }
+
         total += 1;
         begin_item("the shell takes keystrokes and init restarts it");
         match cmd_shell_test(ShellTestMode::Normal) {
@@ -15125,7 +15320,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 27,
-    full: 270,
+    full: 274,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

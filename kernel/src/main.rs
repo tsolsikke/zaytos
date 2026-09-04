@@ -5984,9 +5984,10 @@ static mut CORRUPT_FS_IMAGE: [u8; CORRUPT_FS_LEN] = [0; CORRUPT_FS_LEN];
 /// **写す長さは像から求める**（[`map_corrupt_fs`] の doc）。**ここは器の大きさで、
 /// 像の使用上端がこれを超えたら演習は落ちる**——**黙って足りない写しを作らない。**
 ///
-/// **160 ブロックの根拠は実測である**——**いまの使用上端は 135 で、
+/// **160 ブロックの根拠は実測である**——**いまの使用上端は 137 で、
 /// `build.rs` が像へファイルを足すたびに 1 か 2 ずつ増える**
-/// （**VIM-1 で `/data/vimops` を足し、134 から 1 つ上がった**）。
+/// （**VIM-1 で `/data/vimops` を、PR-1 で `/etc/profile` と
+/// `/root/.profile` を足し、134 から 3 つ上がった**）。
 const CORRUPT_FS_BLOCKS: usize = 160;
 
 /// 作業領域のバイト数。
@@ -9519,6 +9520,26 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "zi-status-stale-column-test",
         cfg!(feature = "zi-status-stale-column-test"),
         "zi が窓の動かない移動で状態行を描き直さず、行:桁 が古くなる",
+    ),
+    (
+        "profile-test",
+        cfg!(feature = "profile-test"),
+        "起動時の設定が走ったことを見る台本を流す（破壊ではない）",
+    ),
+    (
+        "shell-profile-order-swapped-test",
+        cfg!(feature = "shell-profile-order-swapped-test"),
+        "zash が ~/.profile を /etc/profile より先に読む",
+    ),
+    (
+        "shell-profile-first-line-only-test",
+        cfg!(feature = "shell-profile-first-line-only-test"),
+        "zash が設定の最初の 1 行だけを走らせ、後ろの行を捨てる",
+    ),
+    (
+        "shell-profile-missing-is-error-test",
+        cfg!(feature = "shell-profile-missing-is-error-test"),
+        "zash が「設定が無い」ことを誤りとして報せる",
     ),
     (
         "shell-shift-delete-range-test",

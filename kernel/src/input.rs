@@ -293,7 +293,8 @@ pub fn read_bytes(dst: &mut [u8]) -> usize {
         feature = "persist-check-test",
         feature = "env-rewrite-test",
         feature = "keymap-rewrite-test",
-        feature = "utf8-test"
+        feature = "utf8-test",
+        feature = "profile-test"
     ))]
     {
         let taken = script::next_bytes(dst);
@@ -536,7 +537,8 @@ pub fn arm_input_script() {
         feature = "persist-check-test",
         feature = "env-rewrite-test",
         feature = "keymap-rewrite-test",
-        feature = "utf8-test"
+        feature = "utf8-test",
+        feature = "profile-test"
     ))]
     script::arm();
 }
@@ -564,7 +566,8 @@ pub fn arm_input_script() {
     feature = "persist-check-test",
     feature = "env-rewrite-test",
     feature = "keymap-rewrite-test",
-    feature = "utf8-test"
+    feature = "utf8-test",
+    feature = "profile-test"
 ))]
 pub(crate) mod script {
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -915,6 +918,34 @@ pub(crate) mod script {
         /bin/more /data/big\n\x20q\
         /bin/more /data/big\n\x12\x20\x12\x20\x11\
         /bin/cat /data/big\n\x0c";
+
+    /// 台本（PR-1）。**起動時の設定が走ったことを見る。**
+    ///
+    /// # 2 度起こす
+    ///
+    /// **1 度目は 2 本とも在る。** **`echo $ZPROFILE` が `home`**
+    /// （`/root/.profile` が後に走って上書きした）、
+    /// **`echo $ZPROFILE_SOURCE` が `etc`**（`/etc/profile` の 2 行目まで
+    /// 走り、その場で `$ZPROFILE` が展開された）。
+    ///
+    /// **`rm /root/.profile` して `exit` する。** **`init` が起こし直す**
+    /// ——**台本は続きを、新しいシェルへ渡す**（読み手が変わるだけである）。
+    ///
+    /// **2 度目は 1 本しか無い。** **`echo $ZPROFILE` が `etc` に戻り、
+    /// 「無いほうについて何も言っていない」ことをホストが見る。**
+    ///
+    /// # `--shell-test` へ足さなかった
+    ///
+    /// **あちらは QEMU monitor の `sendkey` で 1 キーずつ打つ**
+    /// （1 キー 120ms、1 行の後に 800ms）。**`echo $ZPROFILE` の 1 行で
+    /// 約 3 秒で、`--full` では 12 構成に掛かる。** **台本の経路なら
+    /// バイトを直に差し込むので、同じ主張が 1 回の起動で済む。**
+    #[cfg(feature = "profile-test")]
+    const SCRIPT: &[u8] = b"/bin/echo $ZPROFILE\n\
+        /bin/echo $ZPROFILE_SOURCE\n\
+        /bin/rm /root/.profile\n\
+        exit\n\
+        /bin/echo $ZPROFILE\n\x0c";
 
     /// 観測点（ES-d）。**プロンプトの色を見る。**
     const OBSERVE_PROMPT: u8 = 0x01;

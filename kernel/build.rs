@@ -194,6 +194,18 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
             "zi_status_stale_column",
         ),
         (
+            "CARGO_FEATURE_SHELL_PROFILE_ORDER_SWAPPED_TEST",
+            "shell_profile_order_swapped",
+        ),
+        (
+            "CARGO_FEATURE_SHELL_PROFILE_FIRST_LINE_ONLY_TEST",
+            "shell_profile_first_line_only",
+        ),
+        (
+            "CARGO_FEATURE_SHELL_PROFILE_MISSING_IS_ERROR_TEST",
+            "shell_profile_missing_is_error",
+        ),
+        (
             "CARGO_FEATURE_ZASH_PROMPT_DROP_COLOR_TEST",
             "zash_prompt_drop_color",
         ),
