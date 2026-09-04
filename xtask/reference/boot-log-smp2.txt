@@ -307,7 +307,7 @@ task: cooperative switch verified
 [INFO] ext2: /data/direct-max inode=32 size=49152 blocks=12 single indirect=0 last byte=0xce (expected 0xce)
 [INFO] ext2: /data/indirect-first inode=33 size=49153 blocks=13 single indirect=122 last byte=0xcf (expected 0xcf)
 [INFO] fs-image-source: root_filesystem reads from virt 0xffff800001c00000 (phys 0x1c00000)
-[INFO] fs-image-copy: copied 2097152 byte(s) to phys 0x1c00000..0x1e00000 (512 frame(s), 2MiB-aligned=true), checksum=0x89125a35; the kernel image is 0x100000..0x397640
+[INFO] fs-image-copy: copied 2097152 byte(s) to phys 0x1c00000..0x1e00000 (512 frame(s), 2MiB-aligned=true), checksum=0x89e1f0d2; the kernel image is 0x100000..0x397640
 [INFO] fs-sparse: /data/sparse-hole reads block 1 as a full block of zeros = true (the blocks around it have content: head=true tail=true); i_size=12288 i_blocks_512=16
 [INFO] fs-bitmap: allocated one block (number 135); free counts are now blocks=376 group0=376
 [INFO] fs-write: append 1 wrote 200 byte(s) to inode 38; free blocks are now 376
@@ -546,7 +546,7 @@ bss-test: the .bss reads as zero, keeps writes, and shares a page with .data
 [INFO] init: starting /bin/zash (restart 0 of 3)
 [INFO] spawn: /bin/zash is 21056 byte(s) at inode 27; entering at depth 1 (the parent runs on the main kernel stack, which has a guard page)
 [INFO] user-load: /bin/zash mapped PT_LOAD 0x400000..0x402b44 (filesz=0x2b44 memsz=0x2b44 w=false) pages 0x400000..0x402000
-[INFO] user-load: /bin/zash mapped PT_LOAD 0x403000..0x403940 (filesz=0x940 memsz=0x940 w=false) pages 0x403000..0x403000
+[INFO] user-load: /bin/zash mapped PT_LOAD 0x403000..0x403948 (filesz=0x948 memsz=0x948 w=false) pages 0x403000..0x403000
 [INFO] user-load: /bin/zash mapped PT_LOAD 0x404000..0x404048 (filesz=0x48 memsz=0x48 w=true) pages 0x404000..0x404000
 [INFO] user-load: /bin/zash mapped PT_LOAD 0x404048..0x404d68 (filesz=0x0 memsz=0xd20 w=true) pages 0x404000..0x404000
 [INFO] user-load: /bin/zash PT_LOAD segments: declared=4 mapped=4 (they must match; a gap means a segment was skipped), pages shared with the previous segment=1

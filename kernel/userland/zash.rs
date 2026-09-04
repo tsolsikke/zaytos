@@ -698,34 +698,8 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 saved_length = 0;
                 if overflowed {
                     write_all(STDOUT, TOO_LONG);
-                } else if length > 0 && SKIP_EXPANSION {
-                    // 破壊 (SE-d, shell-skip-expansion-test): 展開を通さない。
-                    //
-                    // **終端を置いてから渡す。** 語の末尾は `line` の中の NUL で
-                    // 決まるので、**前の行の残りが続きとして読まれない**ように
-                    // ここで 1 バイト置く（`LINE_MAX` は 1 行より大きいので在る）。
-                    line[length] = 0;
-                    run_line(&mut line[..length]);
-                } else if length > 0 {
-                    // **`$NAME` を展開してから語へ切る（SE-d。`ADR-0049`）。**
-                    //
-                    // **写しへ展開する。** **展開は長さを変えるので、その場で
-                    // 伸ばすと終端の置き場が壊れる。**
-                    // **終端の 1 バイトを別に持つ**（`line` と同じ形。上の SE-d の注記）。
-                    let mut expanded = [0u8; LINE_MAX + 1];
-                    match expand_line(&line[..length], &mut expanded[..LINE_MAX]) {
-                        // **語が 1 つも残らなかった。** 走らせるものが無い。
-                        Some(0) => {}
-                        Some(count) => {
-                            expanded[count] = 0;
-                            run_line(&mut expanded[..count]);
-                        }
-                        // **入りきらなかった。** **部分的に展開した行を走らせない**
-                        // （`ADR-0049` の 6）。文言は打ちすぎと同じものを使う。
-                        None => {
-                            write_all(STDOUT, TOO_LONG);
-                        }
-                    }
+                } else {
+                    expand_and_run(&mut line, length);
                 }
                 length = 0;
                 cursor = 0;
@@ -1239,6 +1213,45 @@ fn expand_line(line: &[u8], out: &mut [u8]) -> Option<usize> {
 /// **空白を NUL へ置き換え、各語の先頭を指す配列を作る。**
 /// **写しを取らない**——`argv` の要素はカーネルが写すので、
 /// **この行が生きているあいだ有効であれば足りる。**
+/// 1 行を展開して走らせる。
+///
+/// **打った行と、これから足す `/etc/profile` の行が、同じ道を通るための
+/// 入口である**（振る舞いは括り出す前と同じで、中身は動かしていない）。
+///
+/// **`length` が 0 なら何もしない。** **`line` は `length` より長いこと**
+/// ——**終端の NUL を 1 バイト置く場所が要る。**
+fn expand_and_run(line: &mut [u8], length: usize) {
+    if length > 0 && SKIP_EXPANSION {
+        // 破壊 (SE-d, shell-skip-expansion-test): 展開を通さない。
+        //
+        // **終端を置いてから渡す。** 語の末尾は `line` の中の NUL で
+        // 決まるので、**前の行の残りが続きとして読まれない**ように
+        // ここで 1 バイト置く（`LINE_MAX` は 1 行より大きいので在る）。
+        line[length] = 0;
+        run_line(&mut line[..length]);
+    } else if length > 0 {
+        // **`$NAME` を展開してから語へ切る（SE-d。`ADR-0049`）。**
+        //
+        // **写しへ展開する。** **展開は長さを変えるので、その場で
+        // 伸ばすと終端の置き場が壊れる。**
+        // **終端の 1 バイトを別に持つ**（`line` と同じ形。上の SE-d の注記）。
+        let mut expanded = [0u8; LINE_MAX + 1];
+        match expand_line(&line[..length], &mut expanded[..LINE_MAX]) {
+            // **語が 1 つも残らなかった。** 走らせるものが無い。
+            Some(0) => {}
+            Some(count) => {
+                expanded[count] = 0;
+                run_line(&mut expanded[..count]);
+            }
+            // **入りきらなかった。** **部分的に展開した行を走らせない**
+            // （`ADR-0049` の 6）。文言は打ちすぎと同じものを使う。
+            None => {
+                write_all(STDOUT, TOO_LONG);
+            }
+        }
+    }
+}
+
 fn run_line(line: &mut [u8]) {
     // **語へ切る。** 空白は 1 種類だけ見る（`0x20`）。
     //
