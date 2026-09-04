@@ -4589,8 +4589,20 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         .filter(|line| line.contains("zi: cursor") && line.trim_end().ends_with("typed"))
         .count();
     let typed = typed_events >= 3;
-    let deleted = serial.contains("delete");
-    let back_to_normal = serial.contains("normal");
+    // **札で見る（2026-09-04 に直した）。** **以前は `serial.contains("normal")`
+    // だった**——**起動ログの `test hooks:` の行に `normal` が入っており、
+    // どの構成でも真になっていた**（実測。既定の構成は
+    // `(this is a normal build)`、破壊の構成は `do not treat this run as a
+    // normal result`）。**判定の当たり先がずれる族で、値が短いほど起きやすい**
+    // （`docs/troubleshooting.md` の 2026-09-04 の 2 件）。
+    // **`delete` は当たっていなかったが、同じ形なので一緒に締めた。**
+    let tagged = |tag: &str| {
+        serial
+            .lines()
+            .any(|line| line.contains("zi: cursor") && line.trim_end().ends_with(tag))
+    };
+    let deleted = tagged("delete");
+    let back_to_normal = tagged("normal");
 
     // **保存が要求した量を書いたこと（zi-d-2）。**
     //
@@ -4979,7 +4991,18 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         && !tail_output.is_empty()
         && cat_output.ends_with(&tail_output)
         && tail_output.len() < cat_output.len();
-    let fresh_content = serial
+    // **読み戻しの範囲を切ってから見る（2026-09-04 に締めた）。**
+    // **以前はシリアル全体から「まるごと `NEW` の行」を探していた**
+    // ——**当たってはいなかったが、`normal` が当たったのと同じ形である**
+    // （3 字の値をログ全体から探す）。**`cat /data/fresh` の出力だけを見る。**
+    let fresh_read_back = after_second
+        .split("/bin/cat /data/fresh")
+        .nth(1)
+        .unwrap_or("")
+        .split("/bin/zi")
+        .next()
+        .unwrap_or("");
+    let fresh_content = fresh_read_back
         .lines()
         .any(|line| line.trim_end_matches('\r') == "NEW");
 
