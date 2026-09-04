@@ -9516,6 +9516,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "zi の Esc が挿入点を 1 バイトだけ戻し、字の途中へ落ちる",
     ),
     (
+        "zi-status-stale-column-test",
+        cfg!(feature = "zi-status-stale-column-test"),
+        "zi が窓の動かない移動で状態行を描き直さず、行:桁 が古くなる",
+    ),
+    (
         "shell-shift-delete-range-test",
         cfg!(feature = "shell-shift-delete-range-test"),
         "zash が消す範囲の先頭を1つ後ろへずらし、消える字を1つ減らす",

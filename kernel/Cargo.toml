@@ -127,6 +127,10 @@ zi-first-nonblank-to-zero-test = []
 # こちら側にも在った）。全角の直後に Esc を打つと字の途中へ落ちるので、
 # utf8-test の「Esc が字の境界へ戻る」判定が落ちる。
 zi-escape-by-byte-test = []
+# 破壊（VIM-1b）: zi が窓の動かない移動で状態行を描き直さない（VIM-1b の前の形）。
+# 絵の本文は同じで、状態行の 行:桁 だけが古くなるので、utf8-test の
+# 「状態行がカーソルに追いつく」判定だけが落ちる。
+zi-status-stale-column-test = []
 # 破壊（SE-c）: zash が打った行を履歴へ積まない。上キーでも Ctrl+P でも
 # 前の行が戻らないので、`--shell-test` の履歴の判定2本が落ちる。
 shell-drop-history-test = []

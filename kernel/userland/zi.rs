@@ -977,14 +977,39 @@ fn follow_window(window: &mut Window, row: usize) -> bool {
 
 /// カーソルを動かした後の画面（VIEW-a）。
 ///
-/// **窓が動いたら描き直し、動かなければカーソルだけ戻す。**
+/// **窓が動いたら描き直し、動かなければ状態行を描き直してカーソルを戻す。**
 /// **描き直しは全面である**——**差分で描く形は測ってから決める**
 /// （`docs/roadmap.md` の VIEW 段）。
+///
+/// # 窓が動かなくても状態行は描き直す（VIM-1b）
+///
+/// **状態行は `行:桁` を出している**（`draw_status`）。
+/// **カーソルだけ戻すと、その数が古いまま残る**——**実測で、`$` で行末へ
+/// 飛んだ直後の状態行が `1:1` のままだった**（2026-09-04）。
+///
+/// **`$` を足したことで目立つようになった**——**`h` と `l` の 1 桁ずつなら
+/// 気づきにくいが、行末へ飛んで数が動かないのは見て分かる。**
+/// **状態行は人が見るためだけに在るので、古い数を出すのは嘘をつく形である。**
+///
+/// **編集の側は既にそうなっている**（`redraw_line_here` が [`refresh`] を
+/// 通す）。**移動の側だけが抜けていた。**
 fn show_cursor(view: &View, buffer: &Buffer, window: &mut Window, status: &Status) {
     let before = window.top();
     if !follow_window(window, status.row) {
-        restore_cursor(buffer, window, status.row, status.col);
-        return;
+        // 破壊 (VIM-1b, zi_status_stale_column): カーソルだけ戻す。
+        // **VIM-1b の前の形そのものである**——**絵の本文は同じで、
+        // 状態行の数だけが古くなる。** **`utf8-test` の「状態行が
+        // カーソルに追いつく」判定だけが落ちる。**
+        #[cfg(zi_status_stale_column)]
+        {
+            restore_cursor(buffer, window, status.row, status.col);
+            return;
+        }
+        #[cfg(not(zi_status_stale_column))]
+        {
+            refresh(view, buffer, window, status);
+            return;
+        }
     }
     // **窓が 1 行だけ動いたなら、画面をずらす（PERF-e）。**
     //
@@ -1964,7 +1989,10 @@ fn handle_byte(
                 // **行は変わらないので窓も動かない。** カーソルだけ戻す。
                 b'$' => {
                     move_to_line_end(buffer.line(*row), col);
-                    restore_cursor(buffer, window, *row, *col);
+                    // **[`show_cursor`] を通す**——**状態行の `行:桁` を
+                    // 追いつかせるのはあちらである**（VIM-1b）。
+                    // **窓は動かない**ので、描き直しにはならない。
+                    show_cursor(view, buffer, window, &moved_status(*row, *col, *mode, dirty));
                     report_cursor(buffer, window, *row, *col, b"line-end");
                     return false;
                 }
@@ -1974,7 +2002,7 @@ fn handle_byte(
                 // **契機は `docs/deferred-decisions.md` に置いた。**
                 b'^' => {
                     move_to_first_nonblank(buffer.line(*row), col);
-                    restore_cursor(buffer, window, *row, *col);
+                    show_cursor(view, buffer, window, &moved_status(*row, *col, *mode, dirty));
                     report_cursor(buffer, window, *row, *col, b"first-nonblank");
                     return false;
                 }
@@ -2279,6 +2307,22 @@ fn move_right(buffer: &Buffer, row: usize, col: &mut usize, mode: Mode) -> bool 
     }
     *col = next;
     true
+}
+
+/// 移動の後の [`Status`]（VIM-1）。
+///
+/// **`$` と `^` は行を移らないので、報せもコマンドも持たない**
+/// ——**`h` / `l` が組み立てているものと同じ形である。**
+fn moved_status(row: usize, col: usize, mode: Mode, dirty: bool) -> Status<'static> {
+    Status {
+        mode,
+        row,
+        col,
+        dirty,
+        command: &[],
+        in_command: false,
+        message: &[],
+    }
 }
 
 /// 行末の字へ動く（VIM-1。vi の `$`）。**動いたら真。**

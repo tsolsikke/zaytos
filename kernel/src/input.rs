@@ -846,7 +846,7 @@ pub(crate) mod script {
         aZ\x1b\x04\
         :wq\n\
         /bin/zi /data/vimops\n\
-        $\
+        $\x02\
         ^\
         a\x1b\x04\
         x\

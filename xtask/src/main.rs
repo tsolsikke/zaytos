@@ -3586,6 +3586,8 @@ const UTF8_TEST_SABOTAGES: &[&str] = &[
     "zi-first-nonblank-to-zero-test",
     "zi-escape-by-byte-test",
     "zi-enter-does-nothing-test",
+    // **VIM-1b で 1 つ増えた。** **状態行の `行:桁` が古くなる形である。**
+    "zi-status-stale-column-test",
 ];
 
 const SHELL_TEST_SABOTAGES: &[&str] = &[
@@ -4083,6 +4085,11 @@ fn read_lossy(path: &Path) -> String {
 ///    行末から `X` を挿した**）
 /// 9. **`o` が下に行を開いたこと**（**2 行目が `Y` である**）
 ///
+/// **VIM-1b で 1 本足した。**
+///
+/// 10. **状態行がカーソルに追いつくこと**（`$` の直後に `1:9` と出ている。
+///     **画面の実物を読む**——`\x02`）
+///
 /// # 3 の札を見るのは、判定が別の行に当たらないようにするためである
 ///
 /// **`col=3 scol=2` は、`l` の後の `move` にも、`Z` を入れた後の Esc の
@@ -4202,6 +4209,18 @@ fn cmd_utf8_test(features: &[&str], expect_pass: bool) -> Result<()> {
     // **判定 7**——**Esc は字の境界へ戻る。** **全角の上で `a` を打った直後
     // なので、バイトで戻すと `あ` の途中（4 バイト目）へ落ちる。**
     let escape_lands_on_a_boundary = cursor_says("row=0 col=2 scol=2", "normal");
+    // **判定 10**——**状態行がカーソルに追いつく（VIM-1b）。**
+    // **`$` の直後に画面から読む**（`\x02`）。**`  あいu` の行末は 9 桁目で、
+    // 状態行は 1 起点で出す**ので `1:9` である。
+    // **診断の行ではなく、画面の実物を読んでいる**——**状態行は人が見る
+    // ためだけに在るので、出している数そのものを見る必要がある。**
+    let status_row_says = stripped
+        .lines()
+        .filter_map(|line| line.split("screen-status: ").nth(1))
+        .next_back()
+        .unwrap_or_default()
+        .to_string();
+    let status_follows_the_cursor = status_row_says.contains("1:9");
     // **判定 8 と 9**——**装置の中身で見る。**
     // **`x` が `あ` を丸ごと消し、`A` が行末から `X` を挿し、`o` が下に
     // 行を開いて `Y` を載せた形である。**
@@ -4229,6 +4248,10 @@ fn cmd_utf8_test(features: &[&str], expect_pass: bool) -> Result<()> {
         saved_vimops.as_deref().map(String::from_utf8_lossy)
     );
     println!("{context}: o opened a line below = {opened_a_line_below}");
+    println!(
+        "{context}: the status line caught up with the cursor = \
+         {status_follows_the_cursor} ({status_row_says})"
+    );
 
     let passed = broken_line_survived
         && wide_takes_two_cells
@@ -4238,7 +4261,8 @@ fn cmd_utf8_test(features: &[&str], expect_pass: bool) -> Result<()> {
         && first_nonblank_skips_the_blanks
         && escape_lands_on_a_boundary
         && the_line_kept_its_characters
-        && opened_a_line_below;
+        && opened_a_line_below
+        && status_follows_the_cursor;
     if passed {
         println!("{context}: PASS");
         if expect_pass {
@@ -13791,7 +13815,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **3 回連続で通ることを確かめてから入れた。落ちる回が出たら `flaky` へ移す。**
         // **多バイトの字が画面と `zi` で正しく扱われること（`ADR-0054`）。**
         //
-        // **1 回の起動で 9 つ見る**——**壊れたバイトが行を消さない / 全角が
+        // **1 回の起動で 10 見る**——**壊れたバイトが行を消さない / 全角が
         // 2 セル / 画面の桁が字で進む / 消すのが字である**（`ADR-0054`）、
         // **`$` が行末の字へ動く / `^` が空白を飛ばす / Esc が境界へ戻る /
         // 1 行目が字を保つ / `o` が下に行を開く**（VIM-1）。
@@ -15101,7 +15125,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 27,
-    full: 269,
+    full: 270,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

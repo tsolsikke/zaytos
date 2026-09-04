@@ -656,6 +656,21 @@ fn observe_status(serial: &mut SerialPort, console: &mut crate::console::Console
         found.map(|(row, _, _)| row)
     );
 
+    // **行の中身をそのまま出す（VIM-1b）。**
+    //
+    // **札（色の付いた走り）だけでは位置が読めない**——**`zi` は
+    // `行:桁` を色の外へ出しており、[`find_colored_run`] の範囲に入らない。**
+    // **状態行は人が見るためだけに在るので、出している数が古くないことを
+    // 主張するには、行そのものを読む形が要る。**
+    let mut row_text = [0u8; 64];
+    let status_row = rows - 2;
+    let row_length = read_row_text(console, status_row, &mut row_text);
+    let _ = writeln!(
+        serial,
+        "screen-status: the zi status line (row {status_row}) says {:?}",
+        core::str::from_utf8(&row_text[..row_length]).unwrap_or("?")
+    );
+
     // **札を控えて、前に見たものと比べる。**
     let mut label = [0u8; LABEL_MAX];
     let mut length = 0usize;

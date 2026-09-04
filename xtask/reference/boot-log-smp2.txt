@@ -307,7 +307,7 @@ task: cooperative switch verified
 [INFO] ext2: /data/direct-max inode=32 size=49152 blocks=12 single indirect=0 last byte=0xce (expected 0xce)
 [INFO] ext2: /data/indirect-first inode=33 size=49153 blocks=13 single indirect=122 last byte=0xcf (expected 0xcf)
 [INFO] fs-image-source: root_filesystem reads from virt 0xffff800001c00000 (phys 0x1c00000)
-[INFO] fs-image-copy: copied 2097152 byte(s) to phys 0x1c00000..0x1e00000 (512 frame(s), 2MiB-aligned=true), checksum=0x3158a9cd; the kernel image is 0x100000..0x397640
+[INFO] fs-image-copy: copied 2097152 byte(s) to phys 0x1c00000..0x1e00000 (512 frame(s), 2MiB-aligned=true), checksum=0x89125a35; the kernel image is 0x100000..0x397640
 [INFO] fs-sparse: /data/sparse-hole reads block 1 as a full block of zeros = true (the blocks around it have content: head=true tail=true); i_size=12288 i_blocks_512=16
 [INFO] fs-bitmap: allocated one block (number 135); free counts are now blocks=376 group0=376
 [INFO] fs-write: append 1 wrote 200 byte(s) to inode 38; free blocks are now 376
