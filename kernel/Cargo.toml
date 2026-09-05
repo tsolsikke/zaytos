@@ -135,6 +135,14 @@ zi-status-stale-column-test = []
 # 置いた名前は全部見えるが、「後のほうが勝つ」判定だけが落ちる。
 # 台本（PR-1）: 起動時の設定が走ったことを見る回。破壊ではない。
 profile-test = []
+# 台本（HI-1）: 履歴がファイルで持ち越されることを見る回。破壊ではない。
+history-test = []
+# 破壊（HI-1）: zash が履歴をファイルへ書かない。読む側は生きているので、
+# 装置の中身の判定と、2度目の起動で辿れる判定が落ちる。
+shell-history-not-saved-test = []
+# 破壊（HI-1）: zash が「履歴が無い」ことを誤りとして報せる。無いときに何も
+# 言わないことの判定だけが落ちる。
+shell-history-missing-is-error-test = []
 shell-profile-order-swapped-test = []
 # 破壊（PR-1）: zash が設定の最初の1行だけを走らせる。2行目まで効いている
 # ことの判定だけが落ちる。

@@ -5984,10 +5984,12 @@ static mut CORRUPT_FS_IMAGE: [u8; CORRUPT_FS_LEN] = [0; CORRUPT_FS_LEN];
 /// **写す長さは像から求める**（[`map_corrupt_fs`] の doc）。**ここは器の大きさで、
 /// 像の使用上端がこれを超えたら演習は落ちる**——**黙って足りない写しを作らない。**
 ///
-/// **160 ブロックの根拠は実測である**——**いまの使用上端は 137 で、
+/// **160 ブロックの根拠は実測である**——**いまの使用上端は 138 で、
 /// `build.rs` が像へファイルを足すたびに 1 か 2 ずつ増える**
 /// （**VIM-1 で `/data/vimops` を、PR-1 で `/etc/profile` と
-/// `/root/.profile` を足し、134 から 3 つ上がった**）。
+/// `/root/.profile` を足し、HI-1 で `zash` が 1 ブロック太って、
+/// 134 から 4 つ上がった**）。**ファイルを足さなくても、
+/// ユーザープログラムが太れば上がる。**
 const CORRUPT_FS_BLOCKS: usize = 160;
 
 /// 作業領域のバイト数。
@@ -9540,6 +9542,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "shell-profile-missing-is-error-test",
         cfg!(feature = "shell-profile-missing-is-error-test"),
         "zash が「設定が無い」ことを誤りとして報せる",
+    ),
+    (
+        "history-test",
+        cfg!(feature = "history-test"),
+        "履歴がファイルで持ち越されることを見る台本を流す（破壊ではない）",
+    ),
+    (
+        "shell-history-not-saved-test",
+        cfg!(feature = "shell-history-not-saved-test"),
+        "zash が履歴をファイルへ書かない",
+    ),
+    (
+        "shell-history-missing-is-error-test",
+        cfg!(feature = "shell-history-missing-is-error-test"),
+        "zash が「履歴が無い」ことを誤りとして報せる",
     ),
     (
         "shell-shift-delete-range-test",

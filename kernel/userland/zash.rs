@@ -55,7 +55,9 @@ mod env;
 
 use env::{EnvReject, EnvSetError, EnvTable, MAX_ENVP};
 
-use userlib::{close, exit, open_read_only, read, write_all, STDERR, STDOUT};
+use userlib::{
+    close, exit, open_read_only, open_write_create, read, write_all, STDERR, STDOUT,
+};
 
 /// 1 行の最大の長さ。
 ///
@@ -223,6 +225,33 @@ const PROFILE_PATH_MAX: usize = 64;
 const PROFILE_UNREADABLE_HEAD: &[u8] = b"zash: cannot read ";
 /// 設定が読めなかったときの返事（後半）。
 const PROFILE_UNREADABLE_TAIL: &[u8] = b"\n";
+/// 履歴のファイルの、`$HOME` の後ろに繋ぐ部分（HI-1）。
+const HISTORY_TAIL: &[u8] = b"/.zash_history";
+
+/// 履歴を読むときに、これ以上は読まない量（HI-1）。
+///
+/// # 8 KiB の根拠
+///
+/// **暫定である。測った値ではない。** **こちらが書く形は最大でも
+/// `HISTORY_MAX * (LINE_MAX + 1)` = 2,064 バイトで、8,192 はその 4 倍である。**
+///
+/// **上限を置くのは、外で作ったファイルが幾らでも大きくなりうるからである**
+/// （`disk0.img` は持ち越すので、外の道具で触れる）。**読むのは起動の
+/// たびなので、際限なく読ませない。**
+///
+/// **越えたら黙って切らない**（`ADR-0053` の Decision 5）——
+/// **そこで読むのをやめて 1 行言う。** **輪は新しい側を残すので、
+/// 切れるのは古い側である。**
+const HISTORY_READ_MAX: usize = 8192;
+
+/// 履歴が読めなかったときの返事（HI-1）。**「無い」とは分ける。**
+const HISTORY_UNREADABLE: &[u8] = b"zash: cannot read the history\n";
+/// 履歴が上限まで来たときの返事（HI-1）。
+const HISTORY_TOO_BIG: &[u8] = b"zash: the history file is too long; only the newest lines were read\n";
+/// 履歴が保存できなかったときの返事（HI-1）。**1 度だけ出す**（[`SAVE_COMPLAINED`]）。
+const HISTORY_UNWRITABLE: &[u8] =
+    b"zash: cannot save the history; it will not be kept (said once)\n";
+
 /// 設定が器に入りきらなかったときの返事（PR-1）。
 ///
 /// **そこまでの行は走らせてから言う**——**黙って切らない**
@@ -334,6 +363,33 @@ static mut HISTORY_LEN: [usize; HISTORY_MAX] = [0; HISTORY_MAX];
 
 /// 積んだ本数。**増え続ける。輪の位置は剰余で出す。**
 static mut HISTORY_COUNT: usize = 0;
+
+/// 履歴のファイルのパス（HI-1）。**NUL 終端まで含む。**
+///
+/// # 起動時に 1 度だけ組み立てる
+///
+/// **`$HOME` は起動時の表から引く。** **`/etc/profile` が `HOME` を
+/// 書き換えても、読み書きの先は変わらない**——**シェル自身の状態が、
+/// 利用者のファイルの中身で動かないようにする**（運用者の決定。2026-09-04）。
+///
+/// **長さが 0 なら「ファイルを持たない」である**（`HOME` が無い、
+/// または器を越えた）。**そのときは再起動で消える形になる**（HI-1 の前と同じ）。
+static mut HISTORY_PATH: [u8; PROFILE_PATH_MAX] = [0; PROFILE_PATH_MAX];
+
+/// [`HISTORY_PATH`] の長さ（NUL を含む）。**0 は「持たない」。**
+static mut HISTORY_PATH_LEN: usize = 0;
+
+/// 保存できないと 1 度言ったか（HI-1）。
+///
+/// # 1 度だけ言う
+///
+/// **保存が失敗する状態は続く**（装置が答えない、`/root` が無い、など）。
+/// **毎行言うと、画面が報せで埋まって何も読めなくなる。**
+///
+/// **黙る形にするので、「また言う」条件を決めてある**——**一度でも保存に
+/// 成功したら、この旗を下ろす。** **状態が変わったときにだけ言い直す形で、
+/// 黙って落とし続けるのとは違う**（`ADR-0053` の Decision 5 の向き）。
+static mut SAVE_COMPLAINED: bool = false;
 
 /// 破壊 (SE-f, shell-shift-delete-range-test): 消す範囲を 1 つ狭める。
 ///
@@ -589,6 +645,10 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     // **`export` した名前を、最初のプロンプトから使えるようにする。**
     // **札の後にするのは、設定の出力が「シェルが起きた後の出力」として
     // 読めるようにするためである。**
+    // **履歴を読む（HI-1）。** **設定より先である**——**在り処も中身も、
+    // 利用者のファイルに左右されない**（`HISTORY_PATH` の doc）。
+    // SAFETY: このプログラムは Ring 3 で 1 本だけ走る。
+    unsafe { load_history() };
     run_profiles();
     write_prompt();
 
@@ -736,7 +796,14 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 // **打った行を履歴へ積む（SE-c）。** **展開の前の、打った形で積む**
                 // ——**辿って出てくるのは打った行である**（`$PATH` は `$PATH` のまま）。
                 // SAFETY: このプログラムは Ring 3 で 1 本だけ走る。
-                unsafe { remember_line(&line[..length]) };
+                let remembered = unsafe { remember_line(&line[..length]) };
+                // **積んだときだけファイルへ書き戻す（HI-1）。**
+                // **走らせる前である**——**コマンドが落ちても、打った行は残る。**
+                if remembered {
+                    // SAFETY: このプログラムは Ring 3 で 1 本だけ走る。
+                    // **履歴を読むのも書くのも、この 1 本だけである。**
+                    unsafe { save_history() };
+                }
                 history_back = 0;
                 saved_length = 0;
                 if overflowed {
@@ -903,12 +970,16 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
 /// **直前と同じ行は積まない。空行も積まない。**
 /// **辿るときに同じ行が並ぶと、辿る回数が増えるだけで情報が増えない。**
 ///
+/// **積んだら真を返す（HI-1）。** **呼ぶ側は、積んだときだけファイルへ
+/// 書き戻す**——**空の Enter や同じ行の繰り返しで、像の 2MiB を
+/// 書き直さないためである。**
+///
 /// # Safety
 ///
 /// **このプログラムは Ring 3 で 1 本だけ走る。** 履歴を書くのはここだけである。
-unsafe fn remember_line(line: &[u8]) {
+unsafe fn remember_line(line: &[u8]) -> bool {
     if line.is_empty() || DROP_HISTORY {
-        return;
+        return false;
     }
     // SAFETY: 上記のとおり、単一の実行者である。
     let count = unsafe { HISTORY_COUNT };
@@ -919,7 +990,7 @@ unsafe fn remember_line(line: &[u8]) {
         // SAFETY: 同上。**参照で取る**——値で取ると `[u8]` を動かすことになる。
         let stored = unsafe { &*core::ptr::addr_of!(HISTORY[last]) };
         if length == line.len() && &stored[..length] == line {
-            return;
+            return false;
         }
     }
     let slot = count % HISTORY_MAX;
@@ -929,6 +1000,7 @@ unsafe fn remember_line(line: &[u8]) {
         HISTORY_LEN[slot] = line.len();
         HISTORY_COUNT = count + 1;
     }
+    true
 }
 
 /// 履歴を辿る（SE-c）。`back` は「いくつ前か」で、`1` が直前である。
@@ -1256,6 +1328,209 @@ fn expand_line(line: &[u8], out: &mut [u8]) -> Option<usize> {
 /// **空白を NUL へ置き換え、各語の先頭を指す配列を作る。**
 /// **写しを取らない**——`argv` の要素はカーネルが写すので、
 /// **この行が生きているあいだ有効であれば足りる。**
+/// 履歴のパスを決めて、ファイルから読み込む（HI-1）。
+///
+/// # 設定より先に読む
+///
+/// **`/etc/profile` が `HOME` を書き換えても、履歴の在り処は変わらない**
+/// （[`HISTORY_PATH`] の doc）。**読むのも設定より先にしておく**——
+/// **同じ理由で、設定が何をしても履歴の中身は変わらない。**
+///
+/// # Safety
+///
+/// **このプログラムは Ring 3 で 1 本だけ走る。** 履歴とパスを書くのはここだけである。
+unsafe fn load_history() {
+    let Some(home) = environment_value(b"HOME") else {
+        return;
+    };
+    let length = home.len() + HISTORY_TAIL.len();
+    // **NUL の 1 バイトを残す。**
+    if length + 1 > PROFILE_PATH_MAX {
+        return;
+    }
+    // SAFETY: 呼び出し元契約により、単一の実行者である。
+    unsafe {
+        let path = &mut *core::ptr::addr_of_mut!(HISTORY_PATH);
+        path[..home.len()].copy_from_slice(home);
+        path[home.len()..length].copy_from_slice(HISTORY_TAIL);
+        path[length] = 0;
+        HISTORY_PATH_LEN = length + 1;
+    }
+
+    // SAFETY: 同上。**読むだけである。**
+    let path = unsafe { &*core::ptr::addr_of!(HISTORY_PATH) };
+    // SAFETY: 同上。
+    let path_len = unsafe { HISTORY_PATH_LEN };
+    let fd = open_read_only(&path[..path_len]);
+    if fd < 0 {
+        // **無い。** **何も言わない。** **履歴が空のまま始まる。**
+        //
+        // 破壊 (HI-1, shell-history-missing-is-error): 無いことを報せる。
+        // **履歴を持たない人の画面に、毎起動 1 行出る形である。**
+        // **落ちるのは「無いときは何も言わない」判定だけである。**
+        #[cfg(shell_history_missing_is_error)]
+        write_all(STDERR, HISTORY_UNREADABLE);
+        return;
+    }
+    let fd = fd as u64;
+
+    // **頭から順に読み、1 行ずつ輪へ積む。**
+    //
+    // **末尾を取るための位置合わせ（`lseek`）が要らない**——**輪が新しい
+    // 16 本を残すので、全部流し込めば残るのは新しい側である。**
+    let mut chunk = [0u8; 256];
+    let mut line = [0u8; LINE_MAX];
+    let mut line_len = 0usize;
+    let mut overflowed = false;
+    let mut read_total = 0usize;
+    let mut unreadable = false;
+    let mut too_big = false;
+    loop {
+        if read_total >= HISTORY_READ_MAX {
+            too_big = true;
+            break;
+        }
+        let got = read(fd, &mut chunk);
+        if got < 0 {
+            unreadable = true;
+            break;
+        }
+        if got == 0 {
+            break;
+        }
+        let got = got as usize;
+        read_total += got;
+        for byte in &chunk[..got] {
+            if *byte == b'\n' {
+                if overflowed {
+                    // **入りきらなかった行は積まない。** **黙って切らない。**
+                    write_all(STDOUT, TOO_LONG);
+                } else if line_len > 0 {
+                    // SAFETY: 呼び出し元契約により、単一の実行者である。
+                    unsafe { remember_line(&line[..line_len]) };
+                }
+                line_len = 0;
+                overflowed = false;
+                continue;
+            }
+            if line_len < line.len() {
+                line[line_len] = *byte;
+                line_len += 1;
+            } else {
+                overflowed = true;
+            }
+        }
+    }
+    close(fd);
+
+    // **改行で終わっていないファイルの、最後の 1 行も積む。**
+    if !overflowed && line_len > 0 {
+        // SAFETY: 同上。
+        unsafe { remember_line(&line[..line_len]) };
+    }
+
+    if unreadable {
+        write_all(STDERR, HISTORY_UNREADABLE);
+    }
+    if too_big {
+        write_all(STDOUT, HISTORY_TOO_BIG);
+    }
+}
+
+/// 履歴をファイルへ書き戻す（HI-1）。**打った行を積んだ直後に呼ぶ。**
+///
+/// # 輪を丸ごと書き直す
+///
+/// **カーネルが受理する書きの形は「切ってから書く」2 つだけである**
+/// （`ADR-0037`。`O_APPEND` は無い）。**輪は最大 2,064 バイトなので、
+/// 全置換で足りる。**
+///
+/// # 費用は測ってある
+///
+/// **書きで開いた口を閉じると、像の 2MiB が装置へ書き戻される**
+/// （`kernel/src/syscall.rs` の `SYS_CLOSE`）。**実測で 7.1M〜14.2M
+/// サイクル（約 2.0〜4.1ms）で、`touch` 1 回・`zi` の `:w` 1 回と
+/// 同じ費用である。** **1 行につき 1 回であって、打鍵ごとではない。**
+///
+/// # 失敗しても止めない。報せは 1 度だけ
+///
+/// **[`SAVE_COMPLAINED`] の doc にある。** **一度でも成功したら旗を下ろす。**
+///
+/// # Safety
+///
+/// **このプログラムは Ring 3 で 1 本だけ走る。**
+unsafe fn save_history() {
+    // SAFETY: 呼び出し元契約により、単一の実行者である。
+    let path_len = unsafe { HISTORY_PATH_LEN };
+    if path_len == 0 {
+        // **ファイルを持たない。** **再起動で消える形である。**
+        return;
+    }
+    // 破壊 (HI-1, shell-history-not-saved): 書かない。
+    // **読む側は生きているので、装置の中身の判定と、2 度目の起動で
+    // 辿れる判定が落ちる。**
+    #[cfg(shell_history_not_saved)]
+    return;
+
+    #[cfg(not(shell_history_not_saved))]
+    {
+        // SAFETY: 同上。**読むだけである。**
+        let path = unsafe { &*core::ptr::addr_of!(HISTORY_PATH) };
+        let fd = open_write_create(&path[..path_len]);
+        if fd < 0 {
+            complain_once_about_saving();
+            return;
+        }
+        let fd = fd as u64;
+        // SAFETY: 同上。
+        let count = unsafe { HISTORY_COUNT };
+        let held = count.min(HISTORY_MAX);
+        let mut ok = true;
+        for step in 0..held {
+            // **古いものから書く。** **読む側は頭から積むので、
+            // ファイルの末尾が新しい側になる。**
+            //
+            // **順を逆にする破壊は置いていない**——**落ちる判定が
+            // `shell-history-not-saved` の部分集合になる**（**書かなければ
+            // 順序の判定も落ちる**）。**その形でしか落ちない判定を持たない**
+            // （`docs/verification-coverage.md` の破壊を足す基準。
+            // PR-1 の `skip-profile` と同じ理由である）。
+            let index = count - held + step;
+            let slot = index % HISTORY_MAX;
+            // SAFETY: 同上。`slot` は剰余なので範囲内である。
+            let length = unsafe { HISTORY_LEN[slot] };
+            // SAFETY: 同上。**参照で取る**（値で取ると `[u8]` を動かすことになる）。
+            let stored = unsafe { &*core::ptr::addr_of!(HISTORY[slot]) };
+            if write_all(fd, &stored[..length]) < 0 || write_all(fd, b"\n") < 0 {
+                ok = false;
+                break;
+            }
+        }
+        if close(fd) < 0 {
+            ok = false;
+        }
+        if ok {
+            // **状態が変わったので、次に失敗したらまた言う。**
+            // SAFETY: 同上。
+            unsafe { SAVE_COMPLAINED = false };
+        } else {
+            complain_once_about_saving();
+        }
+    }
+}
+
+/// 保存できないことを 1 度だけ言う（HI-1）。
+fn complain_once_about_saving() {
+    // SAFETY: このプログラムは Ring 3 で 1 本だけ走る。
+    let said = unsafe { SAVE_COMPLAINED };
+    if said {
+        return;
+    }
+    write_all(STDERR, HISTORY_UNWRITABLE);
+    // SAFETY: 同上。
+    unsafe { SAVE_COMPLAINED = true };
+}
+
 /// 起動時に設定を読んで走らせる（PR-1）。
 ///
 /// # 2 本を順に読む

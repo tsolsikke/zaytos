@@ -206,6 +206,14 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
             "shell_profile_missing_is_error",
         ),
         (
+            "CARGO_FEATURE_SHELL_HISTORY_NOT_SAVED_TEST",
+            "shell_history_not_saved",
+        ),
+        (
+            "CARGO_FEATURE_SHELL_HISTORY_MISSING_IS_ERROR_TEST",
+            "shell_history_missing_is_error",
+        ),
+        (
             "CARGO_FEATURE_ZASH_PROMPT_DROP_COLOR_TEST",
             "zash_prompt_drop_color",
         ),

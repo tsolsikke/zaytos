@@ -294,7 +294,8 @@ pub fn read_bytes(dst: &mut [u8]) -> usize {
         feature = "env-rewrite-test",
         feature = "keymap-rewrite-test",
         feature = "utf8-test",
-        feature = "profile-test"
+        feature = "profile-test",
+        feature = "history-test"
     ))]
     {
         let taken = script::next_bytes(dst);
@@ -538,7 +539,8 @@ pub fn arm_input_script() {
         feature = "env-rewrite-test",
         feature = "keymap-rewrite-test",
         feature = "utf8-test",
-        feature = "profile-test"
+        feature = "profile-test",
+        feature = "history-test"
     ))]
     script::arm();
 }
@@ -567,7 +569,8 @@ pub fn arm_input_script() {
     feature = "env-rewrite-test",
     feature = "keymap-rewrite-test",
     feature = "utf8-test",
-    feature = "profile-test"
+    feature = "profile-test",
+    feature = "history-test"
 ))]
 pub(crate) mod script {
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -946,6 +949,32 @@ pub(crate) mod script {
         /bin/rm /root/.profile\n\
         exit\n\
         /bin/echo $ZPROFILE\n\x0c";
+
+    /// 台本（HI-1）。**履歴がファイルで持ち越されることを見る。**
+    ///
+    /// # 2 度起こす
+    ///
+    /// **1 度目に 2 本打って `exit` する。** **`init` が起こし直す**
+    /// ——**台本は続きを新しいシェルへ渡す**（`profile-test` と同じ）。
+    ///
+    /// **2 度目は上キーで辿る。** **`Ctrl+P` は使えない**——**`0x10` は
+    /// 観測点（`OBSERVE_VIEW_WINDOW`）で、台本の中では入力にならない。**
+    /// **`\x1b[A` は `zash` の状態機械が矢印として解釈する。**
+    ///
+    /// # 上 2 回で `hist-two` が戻る
+    ///
+    /// **1 度目の履歴は 3 本である**——`/bin/echo hist-one`・
+    /// `/bin/echo hist-two`・`exit`。**`exit` も打った行なので積まれる。**
+    /// **上 1 回は `exit` で、上 2 回が `/bin/echo hist-two` である**
+    /// （実測で確かめる。深さの数え方は `history_at` の doc）。
+    ///
+    /// **`exit` を走らせない深さを選んである**——**走らせると 3 度目が
+    /// 起きて、判定の範囲の切り方が増える。**
+    #[cfg(feature = "history-test")]
+    const SCRIPT: &[u8] = b"/bin/echo hist-one\n\
+        /bin/echo hist-two\n\
+        exit\n\
+        \x1b[A\x1b[A\n\x0c";
 
     /// 観測点（ES-d）。**プロンプトの色を見る。**
     const OBSERVE_PROMPT: u8 = 0x01;

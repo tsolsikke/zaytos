@@ -1628,6 +1628,17 @@ fn main() -> Result<()> {
                 let expect_pass = sabotage.is_empty();
                 return cmd_utf8_test(&sabotage, expect_pass);
             }
+            // **履歴の持ち越しの判定（HI-1）。**
+            if rest.iter().any(|a| a == "--history-test") {
+                let sabotage: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                let expect_pass = sabotage.is_empty();
+                return cmd_history_test(&sabotage, expect_pass);
+            }
             // **起動時の設定の判定（PR-1）。**
             if rest.iter().any(|a| a == "--profile-test") {
                 let sabotage: Vec<&str> = rest
@@ -3608,6 +3619,18 @@ const UTF8_TEST_SABOTAGES: &[&str] = &[
 /// **`shell-skip-profile`（設定を読まない）は置いていない**——**落ちる判定が
 /// `shell-profile-first-line-only` と重なり、その形でしか落ちない判定を
 /// 持たないためである**（運用者の判断。2026-09-04）。
+/// `history-test` を「通らないこと」で回す破壊（HI-1）。
+///
+/// **2 つとも、落ちる判定が 1 本ずつ違う。**
+///
+/// **`shell-history-order-reversed`（新しいものから書く）は置いていない**
+/// ——**書かない破壊が落とす判定の部分集合になる**（**書かなければ順序の
+/// 判定も落ちる**）。**その形でしか落ちない判定を持たない。**
+const HISTORY_TEST_SABOTAGES: &[&str] = &[
+    "shell-history-not-saved-test",
+    "shell-history-missing-is-error-test",
+];
+
 const PROFILE_TEST_SABOTAGES: &[&str] = &[
     "shell-profile-order-swapped-test",
     "shell-profile-first-line-only-test",
@@ -4427,6 +4450,139 @@ fn cmd_profile_test(features: &[&str], expect_pass: bool) -> Result<()> {
     println!("{context}: a missing profile said nothing = {missing_is_silent}");
 
     let passed = every_line_ran && the_user_profile_wins && missing_is_silent;
+    if passed {
+        println!("{context}: PASS");
+        if expect_pass {
+            Ok(())
+        } else {
+            bail!("{context}: the sabotage was NOT caught; every judgement still held")
+        }
+    } else {
+        println!("{context}: FAILED");
+        if expect_pass {
+            bail!("{context}: FAILED")
+        } else {
+            println!("{context}: the sabotage was caught (this run is expected to fail)");
+            Ok(())
+        }
+    }
+}
+
+/// 履歴がファイルで持ち越されることの判定（HI-1）。**2 度シェルを起こす。**
+///
+/// # 判定は 3 つである
+///
+/// 1. **前の起動で打った行が辿って戻ること**（2 度目に上 2 回で
+///    `/bin/echo hist-two` が走り、`hist-two` が出る）
+/// 2. **ファイルが古い順であること**（装置の `/root/.zash_history` で、
+///    `hist-one` の行が `hist-two` の行より前に在る）
+/// 3. **無いときは何も言わないこと**（**1 度目はファイルが無い**——
+///    像は毎回作り直すので、**その起動で履歴について何も言っていない**）
+///
+/// # 値は像の語と当たらないものにしてある
+///
+/// `docs/coding-standards.md` の「判定が探す値は、像とログの語と当たらない
+/// ものにする」。**`hist-one` / `hist-two` は像のどこにも無い。**
+fn cmd_history_test(features: &[&str], expect_pass: bool) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let mut all_features: Vec<&str> = vec!["history-test"];
+    all_features.extend_from_slice(features);
+    let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let tag = all_features.join("-");
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("history-test-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the history test")?;
+
+    let deadline = Instant::now() + ZI_TEST_TIMEOUT;
+    while Instant::now() < deadline {
+        let text = read_lossy(&serial_log);
+        if strip_ansi(&text).contains("script-done:") {
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = read_lossy(&serial_log);
+    let context = if features.is_empty() {
+        "history-test".to_string()
+    } else {
+        format!("history-test {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    let qemu_debug = read_lossy(&debug_log);
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    let stripped = strip_ansi(&serial);
+    let restart_marker = "init: starting /bin/zash (restart 1 of 3)";
+    let (first, second) = match stripped.find(restart_marker) {
+        Some(at) => (&stripped[..at], &stripped[at..]),
+        None => (stripped.as_str(), ""),
+    };
+
+    // **判定 1**——**辿って戻った行が走った。**
+    let recalled_the_previous_run = second.lines().any(|line| line.trim() == "hist-two");
+    // **判定 2**——**ファイルは古い順である。**
+    let disk = disk_image_path(&esp_dir);
+    let saved = debugfs_read(&disk, "/root/.zash_history")?;
+    let saved_text = saved
+        .as_deref()
+        .map(String::from_utf8_lossy)
+        .unwrap_or_default()
+        .into_owned();
+    let oldest_first = match (saved_text.find("hist-one"), saved_text.find("hist-two")) {
+        (Some(one), Some(two)) => one < two,
+        _ => false,
+    };
+    // **判定 3**——**無いときは何も言わない。** **1 度目はファイルが無い**
+    // （像は毎回作り直す）。
+    let missing_is_silent = !first.contains("the history");
+
+    println!("{context}: the previous run came back = {recalled_the_previous_run}");
+    println!(
+        "{context}: the file keeps the oldest line first = {oldest_first} \
+         (the device says {saved_text:?})"
+    );
+    println!("{context}: a missing history said nothing = {missing_is_silent}");
+
+    let passed = recalled_the_previous_run && oldest_first && missing_is_silent;
     if passed {
         println!("{context}: PASS");
         if expect_pass {
@@ -14062,6 +14218,33 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }
         }
 
+        // **履歴がファイルで持ち越されること（HI-1）。**
+        //
+        // **1 回の起動で 3 つ見る**——**前の起動で打った行が辿って戻る /
+        // ファイルが古い順である / 無いときは何も言わない。**
+        // **破壊は 2 つで、落ちる判定が 1 本ずつ違う**（実測。2026-09-04）。
+        total += 1;
+        begin_item("the shell keeps its history in a file");
+        match cmd_history_test(&[], true) {
+            Ok(()) => println!("--- history test: OK"),
+            Err(error) => {
+                println!("--- history test: FAILED ({error})");
+                failed.push("history test".to_string());
+            }
+        }
+        for sabotage in HISTORY_TEST_SABOTAGES {
+            total += 1;
+            let label = format!("history-test {sabotage}");
+            begin_item(&label);
+            match cmd_history_test(&[sabotage], false) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
+            }
+        }
+
         total += 1;
         begin_item("the shell takes keystrokes and init restarts it");
         match cmd_shell_test(ShellTestMode::Normal) {
@@ -15343,7 +15526,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 27,
-    full: 274,
+    full: 277,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
