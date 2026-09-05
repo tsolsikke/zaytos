@@ -9559,6 +9559,31 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "zash が「履歴が無い」ことを誤りとして報せる",
     ),
     (
+        "complete-test",
+        cfg!(feature = "complete-test"),
+        "Tab の補完を見る台本を流す（破壊ではない）",
+    ),
+    (
+        "shell-complete-no-common-prefix-test",
+        cfg!(feature = "shell-complete-no-common-prefix-test"),
+        "zash が共通接頭辞まで伸ばさず、候補が 1 本のときだけ補完する",
+    ),
+    (
+        "shell-complete-keeps-duplicates-test",
+        cfg!(feature = "shell-complete-keeps-duplicates-test"),
+        "zash が PATH の重複した名前を 2 度出す",
+    ),
+    (
+        "shell-complete-ignores-path-test",
+        cfg!(feature = "shell-complete-ignores-path-test"),
+        "zash が補完の候補を起動時の PATH から引く",
+    ),
+    (
+        "shell-complete-silent-when-no-progress-test",
+        cfg!(feature = "shell-complete-silent-when-no-progress-test"),
+        "zash が伸びなかったときに件数を出さず黙る",
+    ),
+    (
         "shell-shift-delete-range-test",
         cfg!(feature = "shell-shift-delete-range-test"),
         "zash が消す範囲の先頭を1つ後ろへずらし、消える字を1つ減らす",

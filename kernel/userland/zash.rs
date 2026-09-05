@@ -55,8 +55,15 @@ mod env;
 
 use env::{EnvReject, EnvSetError, EnvTable, MAX_ENVP};
 
+// **補完の純粋な部分は `common` に在る**（TAB-1。`ADR-0056`）。
+// **語の切り出しと共通接頭辞は、ハードに依らない判断なのでホストで固定する。**
+#[path = "../../common/src/complete.rs"]
+#[allow(dead_code)]
+mod complete;
+
 use userlib::{
-    close, exit, open_read_only, open_write_create, read, write_all, STDERR, STDOUT,
+    close, exit, for_each_dirent, getdents64, open_read_only, open_write_create, read, write_all,
+    STDERR, STDOUT,
 };
 
 /// 1 行の最大の長さ。
@@ -330,6 +337,48 @@ const CTRL_P: u8 = 0x10;
 /// `Ctrl+N`（SE-c）。**1 つ後の行。** `n` は `0x0E` である。
 const CTRL_N: u8 = 0x0E;
 
+/// `Tab`（TAB-1）。**補完する。** `0x09` である。
+///
+/// **`ADR-0050` は「知らない制御バイトを捨てる」と決め、Tab もそこに入っていた**
+/// ——**押しても何も起きない形だった。** **受け手ができたので、捨てる側から外す。**
+const TAB: u8 = 0x09;
+
+/// 候補の名前の受け皿（TAB-1）。**`NAME_MAX` と NUL の 1 バイト。**
+const CANDIDATE_MAX: usize = NAME_MAX + 1;
+
+/// `getdents64` へ渡す緩衝の大きさ（TAB-1）。
+///
+/// **`ls` は 1,024 をスタックに置いており、あちらの高水位は 4,096 中 1,928
+/// である**（実測）。**`zash` はもっと積んでいるので、同じ大きさは置けない。**
+/// **256 にして、足りなければ何度も呼ぶ**（`getdents64` は続きから返す）。
+const DIRENT_BUF: usize = 256;
+
+/// 一覧に出す上限（TAB-1）。**越えたら件数を添える。**
+const LIST_MAX: usize = 32;
+
+/// 件数を出すときの後半（TAB-1）。**短くする**——**行を消費する形だからである。**
+const MATCHES_TAIL: &[u8] = b" matches\n";
+
+/// 組み込みの名前（TAB-1）。**補完の候補にも出す。**
+///
+/// **`run_with_terminator` が `PATH` より先に見る 3 つと同じである。**
+const BUILTINS: [&[u8]; 3] = [BUILTIN_EXIT, BUILTIN_EXPORT, BUILTIN_SET];
+
+/// 破壊 (TAB-1, shell-complete-no-common-prefix): 共通接頭辞まで伸ばさない。
+/// **候補が 1 本のときだけ補完する。** **落ちるのは「共通接頭辞まで伸びる」判定
+/// だけである。**
+const NO_COMMON_PREFIX: bool = cfg!(shell_complete_no_common_prefix);
+
+/// 破壊 (TAB-1, shell-complete-keeps-duplicates): 左の要素に在る名前を落とさない。
+/// **`PATH` に同じ要素が 2 つ在るときだけ効く**——**落ちるのは「重複は 1 度だけ」
+/// の判定だけである。**
+const KEEPS_DUPLICATES: bool = cfg!(shell_complete_keeps_duplicates);
+
+/// 破壊 (TAB-1, shell-complete-silent-when-no-progress): 伸びなかったときに黙る。
+/// **一覧は 2 度目に出るままである**——**落ちるのは「件数が出る」判定だけである。**
+/// **TAB-1 の前に採ろうとしていた形そのものである**（`bash` の 2 段）。
+const SILENT_WHEN_NO_PROGRESS: bool = cfg!(shell_complete_silent_when_no_progress);
+
 /// 履歴の本数（SE-c）。
 ///
 /// # なぜ 16 本か
@@ -445,6 +494,15 @@ static mut ENVIRONMENT: EnvTable = EnvTable::new();
 /// 起動時に積まれていた本数（f-2）。**破壊のためだけに控える。**
 static mut INITIAL_ENV_COUNT: usize = 0;
 
+/// 起動時の `PATH`（TAB-1）。**破壊のためだけに控える。**
+///
+/// **既定のビルドでは誰も読まない**（`shell_complete_ignores_path` の側だけが
+/// 読む）。**控えるのは、`export PATH=...` が効かない形を作るためである。**
+static mut INITIAL_PATH: [u8; DIR_MAX * 2 + 2] = [0; DIR_MAX * 2 + 2];
+
+/// [`INITIAL_PATH`] の長さ（TAB-1）。
+static mut INITIAL_PATH_LEN: usize = 0;
+
 /// 表を読む。
 ///
 /// # Safety
@@ -508,6 +566,17 @@ unsafe fn adopt_environment(stack: *const u64) {
     let count = unsafe { environment_table() }.count();
     // SAFETY: 書くのはここだけで、起動時の 1 度である。
     unsafe { INITIAL_ENV_COUNT = count };
+
+    // **起動時の `PATH` も控える（TAB-1）。** **破壊のためだけである。**
+    if let Some(path) = environment_value(PATH_NAME) {
+        // SAFETY: 書くのはここだけで、起動時の 1 度である。
+        unsafe {
+            let held = &mut *core::ptr::addr_of_mut!(INITIAL_PATH);
+            let take = path.len().min(held.len());
+            held[..take].copy_from_slice(&path[..take]);
+            INITIAL_PATH_LEN = take;
+        }
+    }
 }
 
 /// `PATH` の要素の下で語を起こす（DIR-1。ADR-0043）。
@@ -673,6 +742,9 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     // **辿り始めたときの打ちかけの行。** `Ctrl+N` で `0` まで戻ると復す。
     let mut saved = [0u8; LINE_MAX];
     let mut saved_length = 0usize;
+    // **前の Tab が伸ばさなかったか（TAB-1）。** **立っていれば、次の Tab は
+    // 一覧を出す。** **Tab 以外の打鍵で落とす**——**下の輪の末尾で落としている。**
+    let mut completing = false;
 
     loop {
         let mut byte = [0u8; 1];
@@ -685,6 +757,14 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             // **端末が読めない。** 失敗として終わる。
             exit(1);
         }
+
+        // **Tab の段は、Tab 以外のどの打鍵でも落ちる（TAB-1）。**
+        //
+        // **ここで落とすのは、矢印の状態機械が下で `continue` するからである**
+        // ——**`match` の中で落とすと、矢印を挟んだときに段が残る。**
+        // **Tab の枝だけが、落とす前の値を受け取って立て直す。**
+        let was_completing = completing;
+        completing = false;
 
         // **3 バイトの状態機械を先に通す（S12 前の手当て）。**
         //
@@ -859,6 +939,16 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                         &mut saved_length,
                     );
                 }
+            }
+            TAB => {
+                // **補完する（TAB-1）。** **`ADR-0050` が捨てていた鍵に
+                // 受け手ができた。**
+                //
+                // **段は上で落としてある。** **落とす前の値を渡して、
+                // 立て直すのは [`complete_word`] である。**
+                completing = was_completing;
+                complete_word(&mut line, &mut length, &mut cursor, &mut completing);
+                continue;
             }
             CTRL_N => {
                 // **1 つ後の行（SE-c）。** **下矢印と同じ関数を通す。**
@@ -1529,6 +1619,357 @@ fn complain_once_about_saving() {
     write_all(STDERR, HISTORY_UNWRITABLE);
     // SAFETY: 同上。
     unsafe { SAVE_COMPLAINED = true };
+}
+
+/// Tab を受けて補完する（TAB-1。`ADR-0056`）。
+///
+/// # 2 段である
+///
+/// - **共通接頭辞まで伸びたら、そこで終わる。** **候補が 1 本なら空白を足す。**
+/// - **伸びなければ件数を 1 行出す**（`2 matches`）。**候補が 0 でも同じである**
+///   ——**黙ると「壊れているのか仕様か」が区別できない**（運用者の決定。
+///   2026-09-04。**`ADR-0050` が Tab を捨てたときの懸念そのものである**）。
+/// - **続けてもう一度 Tab を打つと一覧を出す。**
+///
+/// **`again` が「前の Tab が伸ばさなかった」である。** **他の打鍵で落とす**
+/// ——**呼ぶ側が落とす。**
+///
+/// # 一覧は行を消費する
+///
+/// **改行して出し、プロンプトと打ちかけの行を描き直す。** **`zash` は全画面の
+/// アプリではないので、固定の最下行を持たない**（`zi` の状態行とは層が違う）。
+/// **出したものは残ってよい**——**`more` と同じ側で、`less` とは逆である。**
+fn complete_word(line: &mut [u8], length: &mut usize, cursor: &mut usize, again: &mut bool) {
+    let word = complete::word_at_cursor(&line[..*length], *cursor);
+
+    // **1 度目の走査**——**数と共通接頭辞を求める。**
+    let mut count = 0usize;
+    let mut prefix = [0u8; CANDIDATE_MAX];
+    let mut prefix_len = 0usize;
+    for_each_candidate(line, word, &mut |name: &[u8]| {
+        if count == 0 {
+            prefix[..name.len()].copy_from_slice(name);
+            prefix_len = name.len();
+        } else {
+            prefix_len = complete::common_prefix_len(&prefix[..prefix_len], name);
+        }
+        count += 1;
+    });
+
+    let typed = word.len();
+    let grew = count > 0 && prefix_len > typed && !(NO_COMMON_PREFIX && count > 1);
+    if grew {
+        let single = count == 1;
+        insert_completion(line, length, cursor, word, &prefix[typed..prefix_len], single);
+        *again = false;
+        return;
+    }
+
+    if count > 0 && *again {
+        list_candidates(line, *length, *cursor, word, count);
+        *again = false;
+        return;
+    }
+
+    if !SILENT_WHEN_NO_PROGRESS {
+        announce_count(line, *length, *cursor, count);
+    }
+    // **候補が 0 なら一覧に出すものが無い。** **段を進めない。**
+    *again = count > 0;
+}
+
+/// 伸びたぶんを行へ入れる（TAB-1）。**候補が 1 本なら空白を 1 つ足す。**
+///
+/// **入らなければ入れない**（`TOO_LONG` を出す。**黙って切らない**）。
+fn insert_completion(
+    line: &mut [u8],
+    length: &mut usize,
+    cursor: &mut usize,
+    word: complete::Word,
+    extra: &[u8],
+    single: bool,
+) {
+    let space = usize::from(single);
+    // **終端の 1 バイトを残す**（`line[length] = 0` の置き場。SE-d の注記）。
+    if *length + extra.len() + space + 1 > line.len() {
+        write_all(STDOUT, TOO_LONG);
+        redraw_prompt_and_line(line, *length, *cursor);
+        return;
+    }
+    let added = extra.len() + space;
+    // **挿入点より後ろをずらす。**
+    line.copy_within(word.end..*length, word.end + added);
+    line[word.end..word.end + extra.len()].copy_from_slice(extra);
+    if single {
+        line[word.end + extra.len()] = b' ';
+    }
+    *length += added;
+    *cursor = word.end + added;
+    write_all(STDOUT, extra);
+    if single {
+        write_all(STDOUT, b" ");
+    }
+    // **挿入点より後ろは書き直す**（[`redraw_tail_without_gap`] と同じ理由）。
+    redraw_tail_without_gap(&line[*cursor..*length]);
+}
+
+/// 件数を 1 行出す（TAB-1）。**行を消費する。**
+fn announce_count(line: &[u8], length: usize, cursor: usize, count: usize) {
+    write_all(STDOUT, b"\n");
+    write_decimal(count as u64);
+    write_all(STDOUT, MATCHES_TAIL);
+    redraw_prompt_and_line(line, length, cursor);
+}
+
+/// 候補を並べて出す（TAB-1）。**2 度目の Tab である。**
+///
+/// **上限を越えたら件数を添える**（**黙って切らない**。`ADR-0053` の Decision 5）。
+fn list_candidates(line: &[u8], length: usize, cursor: usize, word: complete::Word, count: usize) {
+    write_all(STDOUT, b"\n");
+    let mut shown = 0usize;
+    // **2 度目の走査**（[`for_each_candidate`] の doc）。
+    for_each_candidate(line, word, &mut |name: &[u8]| {
+        if shown >= LIST_MAX {
+            return;
+        }
+        if shown > 0 {
+            write_all(STDOUT, b" ");
+        }
+        write_all(STDOUT, name);
+        shown += 1;
+    });
+    write_all(STDOUT, b"\n");
+    if count > shown {
+        write_decimal(count as u64);
+        write_all(STDOUT, MATCHES_TAIL);
+    }
+    redraw_prompt_and_line(line, length, cursor);
+}
+
+/// プロンプトと打ちかけの行を描き直す（TAB-1）。**画面は消さない。**
+///
+/// **[`redraw_screen`] から画面消去を抜いた形である**——**あちらは `Ctrl+L` で、
+/// こちらは一覧を出した後である。**
+fn redraw_prompt_and_line(line: &[u8], length: usize, cursor: usize) {
+    write_prompt();
+    if length > 0 {
+        write_all(STDOUT, &line[..length]);
+    }
+    if cursor < length {
+        write_all(STDOUT, &BACKSPACES[..length - cursor]);
+    }
+}
+
+/// 補完の候補を歩く（TAB-1。`ADR-0056`）。
+///
+/// # 溜めない
+///
+/// **候補を配列に持たない。** **`zash` の書き込み可の区画はページの終わりまで
+/// 584 バイトしか無く、32 本の表を置くとページを 1 つ越える**（実測。
+/// 2026-09-04。**履歴を 16 本のままにしたのと同じ費用である**）。
+/// **数と共通接頭辞は 1 度目の走査で求め、一覧は 2 度目に歩いて出す。**
+///
+/// # 源は 2 つある
+///
+/// **行の最初の語で `/` を含まなければコマンド名**（組み込みと `PATH` の下）、
+/// **それ以外はパス**（語のディレクトリの部分を読む）。**`bash` と同じ形である。**
+///
+/// # `/` を含まない引数は補完しない
+///
+/// **作業ディレクトリが無い**（`ADR-0043`）。**相対のパスを解決する先が無いので、
+/// 候補は 0 である。**
+///
+/// # `~` は展開して探し、書き戻すのは打った形である
+///
+/// **候補を探すときだけ `$HOME` に読み替える。** **行へ書き戻すのは `~/` の
+/// ままである**——**行は打った形のまま保つ**（履歴も打った形で積んでおり、
+/// `$NAME` の展開は走らせる直前に別の写しへ行う）。
+fn for_each_candidate(line: &[u8], word: complete::Word, body: &mut dyn FnMut(&[u8])) {
+    let text = &line[word.start..word.end];
+    if word.first && !text.contains(&b'/') {
+        for name in BUILTINS {
+            if complete::starts_with(name, text) {
+                body(name);
+            }
+        }
+        walk_path_elements(text, body);
+        return;
+    }
+    let (dir, prefix) = complete::split_path(text);
+    if dir.is_empty() {
+        // **相対のパスは解決できない**（doc のとおり）。
+        return;
+    }
+    let mut resolved = [0u8; PROFILE_PATH_MAX];
+    let Some(length) = resolve_directory(dir, &mut resolved) else {
+        return;
+    };
+    walk_directory(&resolved[..length], prefix, body);
+}
+
+/// `PATH` の各要素の下を歩く（TAB-1）。**左の要素に在る名前は 2 度出さない。**
+///
+/// **引くたびに表から読む**（`spawn_via_path` と同じ規律。`ADR-0053` の
+/// Decision 6）——**起動時に控えると `export PATH=...` が効かない。**
+fn walk_path_elements(prefix: &[u8], body: &mut dyn FnMut(&[u8])) {
+    // 破壊 (TAB-1, shell-complete-ignores-path): 起動時の `PATH` を控えて使う。
+    // **`export PATH=...` が補完に効かなくなる**——**落ちるのは「`PATH` を
+    // 変えると候補の源が変わる」判定だけである。**
+    #[cfg(shell_complete_ignores_path)]
+    let path: &[u8] = {
+        // SAFETY: このプログラムは Ring 3 で 1 本だけ走る。
+        let held = unsafe { &*core::ptr::addr_of!(INITIAL_PATH) };
+        // SAFETY: 同上。
+        let length = unsafe { INITIAL_PATH_LEN };
+        &held[..length]
+    };
+    #[cfg(not(shell_complete_ignores_path))]
+    let Some(path) = environment_value(PATH_NAME) else {
+        return;
+    };
+
+    let mut at = 0usize;
+    let mut index = 0usize;
+    loop {
+        let start = at;
+        let mut length = 0usize;
+        while start + length < path.len() && path[start + length] != PATH_SEPARATOR {
+            length += 1;
+        }
+        let ended = start + length >= path.len();
+        if length > 0 {
+            let element = &path[start..start + length];
+            walk_directory_deduped(path, index, element, prefix, body);
+        }
+        if ended {
+            return;
+        }
+        at = start + length + 1;
+        index += 1;
+    }
+}
+
+/// 1 つの要素の下を歩き、**左の要素に在る名前を落とす**（TAB-1）。
+///
+/// **左を再走査する。** **候補を溜めないので、覚えておく場所が無い**
+/// ——**`PATH` の要素は 1 つか 2 つなので、歩き直す費用のほうが安い。**
+fn walk_directory_deduped(
+    path: &[u8],
+    index: usize,
+    element: &[u8],
+    prefix: &[u8],
+    body: &mut dyn FnMut(&[u8]),
+) {
+    walk_directory(element, prefix, &mut |name: &[u8]| {
+        if !KEEPS_DUPLICATES && earlier_element_has(path, index, name) {
+            return;
+        }
+        body(name);
+    });
+}
+
+/// `index` より左の要素に、その名前が在るか（TAB-1）。
+fn earlier_element_has(path: &[u8], index: usize, name: &[u8]) -> bool {
+    let mut at = 0usize;
+    let mut seen = 0usize;
+    while seen < index {
+        let start = at;
+        let mut length = 0usize;
+        while start + length < path.len() && path[start + length] != PATH_SEPARATOR {
+            length += 1;
+        }
+        if length > 0 {
+            let mut found = false;
+            walk_directory(&path[start..start + length], name, &mut |other: &[u8]| {
+                if other == name {
+                    found = true;
+                }
+            });
+            if found {
+                return true;
+            }
+        }
+        if start + length >= path.len() {
+            return false;
+        }
+        at = start + length + 1;
+        seen += 1;
+    }
+    false
+}
+
+/// `~` を `$HOME` に読み替えて、開けるパスを組み立てる（TAB-1）。
+///
+/// **NUL 終端まで含めた長さを返す。** **入らなければ `None` である。**
+fn resolve_directory(dir: &[u8], out: &mut [u8; PROFILE_PATH_MAX]) -> Option<usize> {
+    let mut length = 0usize;
+    let rest = if dir.first() == Some(&b'~') && (dir.len() == 1 || dir[1] == b'/') {
+        let home = environment_value(b"HOME")?;
+        if home.len() >= out.len() {
+            return None;
+        }
+        out[..home.len()].copy_from_slice(home);
+        length = home.len();
+        &dir[1..]
+    } else {
+        dir
+    };
+    if length + rest.len() + 1 > out.len() {
+        return None;
+    }
+    out[length..length + rest.len()].copy_from_slice(rest);
+    length += rest.len();
+    // **末尾の `/` は落とす**（`open` はどちらでも通るが、揃えておく）。
+    while length > 1 && out[length - 1] == b'/' {
+        length -= 1;
+    }
+    out[length] = 0;
+    Some(length + 1)
+}
+
+/// 1 つのディレクトリを歩き、接頭辞で絞る（TAB-1）。**パスは NUL 終端であること。**
+///
+/// **`.` と `..` は出さない。** **補完の候補として役に立たない。**
+fn walk_directory(dir: &[u8], prefix: &[u8], body: &mut dyn FnMut(&[u8])) {
+    let mut path = [0u8; PROFILE_PATH_MAX];
+    let length = if dir.last() == Some(&0) {
+        if dir.len() > path.len() {
+            return;
+        }
+        path[..dir.len()].copy_from_slice(dir);
+        dir.len()
+    } else {
+        if dir.len() + 1 > path.len() {
+            return;
+        }
+        path[..dir.len()].copy_from_slice(dir);
+        path[dir.len()] = 0;
+        dir.len() + 1
+    };
+    let fd = open_read_only(&path[..length]);
+    if fd < 0 {
+        return;
+    }
+    let fd = fd as u64;
+    let mut buf = [0u8; DIRENT_BUF];
+    loop {
+        let got = getdents64(fd, &mut buf);
+        if got <= 0 {
+            break;
+        }
+        for_each_dirent(&buf[..got as usize], |name| {
+            if name == b"." || name == b".." {
+                return;
+            }
+            if name.len() > NAME_MAX {
+                return;
+            }
+            if complete::starts_with(name, prefix) {
+                body(name);
+            }
+        });
+    }
+    close(fd);
 }
 
 /// 起動時に設定を読んで走らせる（PR-1）。

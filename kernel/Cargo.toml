@@ -137,6 +137,20 @@ zi-status-stale-column-test = []
 profile-test = []
 # 台本（HI-1）: 履歴がファイルで持ち越されることを見る回。破壊ではない。
 history-test = []
+# 台本（TAB-1）: Tab の補完を見る回。破壊ではない。
+complete-test = []
+# 破壊（TAB-1）: 共通接頭辞まで伸ばさず、候補が1本のときだけ補完する。
+# 「共通接頭辞まで伸びる」判定だけが落ちる。
+shell-complete-no-common-prefix-test = []
+# 破壊（TAB-1）: PATH の左の要素に在る名前を落とさない。同じ要素が2つ在るときだけ
+# 効くので、「重複は1度だけ」の判定だけが落ちる。
+shell-complete-keeps-duplicates-test = []
+# 破壊（TAB-1）: 補完の候補を起動時の PATH から引く。export PATH=... が効かなく
+# なるので、「PATH を変えると候補の源が変わる」判定だけが落ちる。
+shell-complete-ignores-path-test = []
+# 破壊（TAB-1）: 伸びなかったときに黙る（bash の2段そのもの）。一覧は2度目に出る
+# ままなので、「件数が出る」判定だけが落ちる。
+shell-complete-silent-when-no-progress-test = []
 # 破壊（HI-1）: zash が履歴をファイルへ書かない。読む側は生きているので、
 # 装置の中身の判定と、2度目の起動で辿れる判定が落ちる。
 shell-history-not-saved-test = []

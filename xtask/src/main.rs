@@ -1628,6 +1628,17 @@ fn main() -> Result<()> {
                 let expect_pass = sabotage.is_empty();
                 return cmd_utf8_test(&sabotage, expect_pass);
             }
+            // **Tab の補完の判定（TAB-1）。**
+            if rest.iter().any(|a| a == "--complete-test") {
+                let sabotage: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                let expect_pass = sabotage.is_empty();
+                return cmd_complete_test(&sabotage, expect_pass);
+            }
             // **履歴の持ち越しの判定（HI-1）。**
             if rest.iter().any(|a| a == "--history-test") {
                 let sabotage: Vec<&str> = rest
@@ -3637,6 +3648,19 @@ const PROFILE_TEST_SABOTAGES: &[&str] = &[
     "shell-profile-missing-is-error-test",
 ];
 
+/// `complete-test` を「通らないこと」で回す破壊（TAB-1）。
+///
+/// **4 つとも、落ちる判定が 1 本ずつ違う。**
+///
+/// **「Tab を捨てる」は置いていない**——**落ちる判定が他の部分集合になる**
+/// （`skip-profile` と `history-order-reversed` と同じ判断である）。
+const COMPLETE_TEST_SABOTAGES: &[&str] = &[
+    "shell-complete-no-common-prefix-test",
+    "shell-complete-keeps-duplicates-test",
+    "shell-complete-ignores-path-test",
+    "shell-complete-silent-when-no-progress-test",
+];
+
 const SHELL_TEST_SABOTAGES: &[&str] = &[
     "kill-ignore-interrupt-test",
     "kill-fold-at-depth-one-test",
@@ -4583,6 +4607,174 @@ fn cmd_history_test(features: &[&str], expect_pass: bool) -> Result<()> {
     println!("{context}: a missing history said nothing = {missing_is_silent}");
 
     let passed = recalled_the_previous_run && oldest_first && missing_is_silent;
+    if passed {
+        println!("{context}: PASS");
+        if expect_pass {
+            Ok(())
+        } else {
+            bail!("{context}: the sabotage was NOT caught; every judgement still held")
+        }
+    } else {
+        println!("{context}: FAILED");
+        if expect_pass {
+            bail!("{context}: FAILED")
+        } else {
+            println!("{context}: the sabotage was caught (this run is expected to fail)");
+            Ok(())
+        }
+    }
+}
+
+/// Tab の補完の判定（TAB-1）。**1 回の起動で 5 つ見る。**
+///
+/// # 判定は 5 つである
+///
+/// 1. **候補が 1 本なら語を置き換えて空白を足す**（`ec` + Tab で
+///    `echo tab-one` が走る）
+/// 2. **共通接頭辞まで伸びる**（`r` + Tab で `rm` になり、`rmx` を打ったと
+///    シェルが言う。**伸びなければ `rx` である**）
+/// 3. **伸びなければ件数が出る**（`2 matches`）
+/// 4. **もう一度 Tab を打つと一覧が出る**（`rm rmdir`）
+/// 5. **`PATH` を変えると候補の源が変わる**（`export PATH=/data` の後に
+///    `l` + Tab で `lines ` になり、シェルが `lines` を引けないと言う。
+///    **控えていれば `ly` である**）
+///
+/// **重複は一覧で見る**——**`export PATH=/bin:/bin` の後の一覧が 2 本目で、
+/// 落とさなければ `rm rmdir rm rmdir` である。** **件数では見ない**
+/// ——**黙る破壊でも落ちてしまい、1 つの破壊が 2 本落とす形になる**（実測）。
+///
+/// # 走らせずに見る
+///
+/// **補完した語に字を足して `cannot run` にする。** **シェルの返事に語が
+/// そのまま出るので、補完の結果が 1 行で読める**（`kernel/src/input.rs` の
+/// 台本の doc）。
+fn cmd_complete_test(features: &[&str], expect_pass: bool) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let mut all_features: Vec<&str> = vec!["complete-test"];
+    all_features.extend_from_slice(features);
+    let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let tag = all_features.join("-");
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("complete-test-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the completion test")?;
+
+    let deadline = Instant::now() + ZI_TEST_TIMEOUT;
+    while Instant::now() < deadline {
+        let text = read_lossy(&serial_log);
+        if strip_ansi(&text).contains("script-done:") {
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = read_lossy(&serial_log);
+    let context = if features.is_empty() {
+        "complete-test".to_string()
+    } else {
+        format!("complete-test {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    let qemu_debug = read_lossy(&debug_log);
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    let stripped = strip_ansi(&serial);
+    // **シェルが出た後だけを見る**（起動シーケンスでも `echo` は走る）。
+    let after_shell = stripped
+        .find("zash: ready")
+        .map(|at| &stripped[at..])
+        .unwrap_or("");
+
+    // **判定 1**——**候補 1 本で空白まで足りた。**
+    let single_completed = after_shell.lines().any(|line| line.trim() == "tab-one");
+    // **判定 2**——**共通接頭辞まで伸びた。**
+    let grew_to_the_common_prefix = after_shell.contains("zash: rmx:");
+    // **判定 3 と 4**——**件数と一覧。** **件数は打った順に 2 本出る**
+    // （1 本目が `PATH=/bin`、2 本目が `PATH=/bin:/bin` である）。
+    let counts: Vec<&str> = after_shell
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| line.ends_with(" matches"))
+        .collect();
+    let announced_the_count = counts.first() == Some(&"2 matches");
+    // **一覧は打った順に 2 本出る**（1 本目が `PATH=/bin`、2 本目が
+    // `PATH=/bin:/bin` である）。
+    let lists: Vec<&str> = after_shell
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| line.starts_with("rm rmdir"))
+        .collect();
+    let listed_on_the_second_tab = lists.first() == Some(&"rm rmdir");
+    // **重複を落としたか**——**2 本目の一覧である。**
+    //
+    // **件数では見ない。** **件数で見ると、黙る破壊（件数を出さない側）でも
+    // 落ちてしまい、1 つの破壊が 2 本落とす形になる**（実測。2026-09-05）。
+    // **一覧は黙る破壊でも出るので、重複だけを見分けられる。**
+    let dropped_the_duplicates = lists.get(1) == Some(&"rm rmdir");
+    // **判定 5**——**`PATH` を変えると候補の源が変わる。**
+    // **候補が 1 本なので空白が付く**——**続けて打った `y` は次の語になる。**
+    // **シェルの返事に出るのは `lines` である**（実測。2026-09-05）。
+    // **起動時の `PATH` を控えていると `ls` と `less` で伸びず、`ly` になる。**
+    let followed_the_path = after_shell.contains("zash: lines:");
+
+    println!("{context}: a single candidate completed with a space = {single_completed}");
+    println!("{context}: the word grew to the common prefix = {grew_to_the_common_prefix}");
+    println!(
+        "{context}: a tab that did not grow announced the count = {announced_the_count} \
+         (the count lines were {counts:?})"
+    );
+    println!(
+        "{context}: the second tab listed the candidates = {listed_on_the_second_tab} \
+         (the lists were {lists:?})"
+    );
+    println!(
+        "{context}: a duplicated PATH element listed each name once = {dropped_the_duplicates}"
+    );
+    println!("{context}: the candidates followed PATH = {followed_the_path}");
+
+    let passed = single_completed
+        && grew_to_the_common_prefix
+        && announced_the_count
+        && listed_on_the_second_tab
+        && dropped_the_duplicates
+        && followed_the_path;
     if passed {
         println!("{context}: PASS");
         if expect_pass {
@@ -7207,6 +7399,23 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     //
     // **打ったのは `k` → Tab → `l` で、走るのは `kl` である。**
     // **捨てていなければ `0x09` が語に混ざる。**
+    //
+    // # 前提が TAB-1 で変わった（2026-09-05）
+    //
+    // **`ADR-0056` まで、Tab は捨てられていた。** **いまは補完が走る**
+    // ——**`k` で始まる名前が `/bin` に無いので候補が 0 本になり、
+    // 行は変わらないまま `0 matches` が出る。**
+    //
+    // **判定は同じ形で通る**（実測）**が、通る理由が変わった。**
+    // **「捨てているから入らない」ではなく「補完が行を変えなかったから
+    // 入らない」である。** **`0x09` が語に混ざらないことは、どちらでも
+    // 主張できている。**
+    //
+    // **`/bin` に `k` で始まる名前を置くと、この判定は補完の結果を見る
+    // ことになる**——**そのときは打つ字を変えること。**
+    // **族は `docs/troubleshooting.md` の「能力を足すと、既存の判定の
+    // 前提が消える」である**（**これは 5 例目で、初めて落ちずに意味だけが
+    // 変わった**）。
     let tab_dropped = after_shell.contains("zash: kl: cannot run");
     let tab_kept = after_shell.contains("zash: k\tl: cannot run");
     let tab_stayed_out_of_the_line = tab_dropped && !tab_kept;
@@ -14251,6 +14460,33 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }
         }
 
+        // **Tab の補完（TAB-1）。**
+        //
+        // **1 回の起動で 5 つ見る**——**単一候補 / 共通接頭辞 / 件数 / 一覧 /
+        // `PATH` に従うこと**（重複は 2 本目の件数で見る）。
+        // **破壊は 4 つで、落ちる判定が 1 本ずつ違う。**
+        total += 1;
+        begin_item("tab completes the word at the cursor");
+        match cmd_complete_test(&[], true) {
+            Ok(()) => println!("--- complete test: OK"),
+            Err(error) => {
+                println!("--- complete test: FAILED ({error})");
+                failed.push("complete test".to_string());
+            }
+        }
+        for sabotage in COMPLETE_TEST_SABOTAGES {
+            total += 1;
+            let label = format!("complete-test {sabotage}");
+            begin_item(&label);
+            match cmd_complete_test(&[sabotage], false) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
+            }
+        }
+
         total += 1;
         begin_item("the shell takes keystrokes and init restarts it");
         match cmd_shell_test(ShellTestMode::Normal) {
@@ -15532,7 +15768,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 27,
-    full: 277,
+    full: 282,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

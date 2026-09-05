@@ -12,6 +12,7 @@
 pub mod addr;
 pub mod ansi;
 pub mod boot_info;
+pub mod complete;
 pub mod cpu;
 pub mod critical;
 pub mod elf;

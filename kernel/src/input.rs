@@ -295,7 +295,8 @@ pub fn read_bytes(dst: &mut [u8]) -> usize {
         feature = "keymap-rewrite-test",
         feature = "utf8-test",
         feature = "profile-test",
-        feature = "history-test"
+        feature = "history-test",
+        feature = "complete-test"
     ))]
     {
         let taken = script::next_bytes(dst);
@@ -540,7 +541,8 @@ pub fn arm_input_script() {
         feature = "keymap-rewrite-test",
         feature = "utf8-test",
         feature = "profile-test",
-        feature = "history-test"
+        feature = "history-test",
+        feature = "complete-test"
     ))]
     script::arm();
 }
@@ -570,7 +572,8 @@ pub fn arm_input_script() {
     feature = "keymap-rewrite-test",
     feature = "utf8-test",
     feature = "profile-test",
-    feature = "history-test"
+    feature = "history-test",
+    feature = "complete-test"
 ))]
 pub(crate) mod script {
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -975,6 +978,49 @@ pub(crate) mod script {
         /bin/echo hist-two\n\
         exit\n\
         \x1b[A\x1b[A\n\x0c";
+
+    /// 台本（TAB-1）。**Tab の補完を見る。**
+    ///
+    /// # 走らせずに見る
+    ///
+    /// **補完した語をそのまま走らせない。** **`cannot run` になる字を足して
+    /// Enter を打つ**——**シェルの返事に語がそのまま出るので、補完の結果が
+    /// 1 行で読める。** **`rm` を走らせてしまう形を避けられる。**
+    ///
+    /// # 打鍵の順
+    ///
+    /// 1. **`ec` + Tab + `tab-one`**——**候補は `echo` だけなので、
+    ///    語が `echo ` になる**（空白が付く）。**走らせて `tab-one` を出す。**
+    /// 2. **`r` + Tab + `x`**——**`rm` と `rmdir` の共通接頭辞は `rm` である。**
+    ///    **`rmx` になる**（伸びなければ `rx` である）。
+    /// 3. **`rm` + Tab + Tab**——**伸びないので件数が出て、2 度目で一覧が出る。**
+    ///    **`Ctrl+C` で行を捨てる。**
+    /// 4. **`export PATH=/bin:/bin` の後に `rm` + Tab + Tab**——**重複を落とすので
+    ///    2 度目の一覧も `rm rmdir` である**（落とさなければ `rm rmdir rm rmdir`
+    ///    である）。**件数ではなく一覧で見る**——**件数で見ると、黙る破壊でも
+    ///    落ちてしまう**（実測。2026-09-05。**1 つの破壊が 2 本落とす形だった**）。
+    /// 5. **`export PATH=/data` の後に `l` + Tab + `y`**——**`/data` で `l` に
+    ///    始まるのは `lines` だけなので、候補 1 本として空白が付き、`lines y`
+    ///    になる**（起動時の `PATH` を控えていると `ls` と `less` で伸びず、
+    ///    `ly` である）。**シェルの返事に出る語で見分ける。**
+    ///
+    /// **`PATH` を戻してから終わる**——**`/data` のままにすると、次に名前で
+    /// 打った語が引けない**（f-1 で踏んだ形である）。
+    ///
+    /// **最後に `exit` を打つ。** **`zash` が終わると、スタックの高水位が
+    /// 判定行に出る**（`user-stack:`）——**`getdents64` の緩衝をスタックへ
+    /// 置いたので、測れる形にしておく**（`ADR-0041` の規律）。
+    /// **`init` が起こし直し、次のシェルが `\x0c` を読んで台本が終わる。**
+    #[cfg(feature = "complete-test")]
+    const SCRIPT: &[u8] = b"ec\ttab-one\n\
+        r\tx\n\
+        rm\t\t\x03\
+        export PATH=/bin:/bin\n\
+        rm\t\t\x03\
+        export PATH=/data\n\
+        l\ty\n\
+        export PATH=/bin\n\
+        exit\n\x0c";
 
     /// 観測点（ES-d）。**プロンプトの色を見る。**
     const OBSERVE_PROMPT: u8 = 0x01;

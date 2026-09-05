@@ -214,6 +214,22 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
             "shell_history_missing_is_error",
         ),
         (
+            "CARGO_FEATURE_SHELL_COMPLETE_NO_COMMON_PREFIX_TEST",
+            "shell_complete_no_common_prefix",
+        ),
+        (
+            "CARGO_FEATURE_SHELL_COMPLETE_KEEPS_DUPLICATES_TEST",
+            "shell_complete_keeps_duplicates",
+        ),
+        (
+            "CARGO_FEATURE_SHELL_COMPLETE_IGNORES_PATH_TEST",
+            "shell_complete_ignores_path",
+        ),
+        (
+            "CARGO_FEATURE_SHELL_COMPLETE_SILENT_WHEN_NO_PROGRESS_TEST",
+            "shell_complete_silent_when_no_progress",
+        ),
+        (
             "CARGO_FEATURE_ZASH_PROMPT_DROP_COLOR_TEST",
             "zash_prompt_drop_color",
         ),

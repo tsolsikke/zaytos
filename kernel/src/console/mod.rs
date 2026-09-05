@@ -34,7 +34,8 @@ pub mod dirty;
     feature = "keymap-rewrite-test",
     feature = "utf8-test",
     feature = "profile-test",
-    feature = "history-test"
+    feature = "history-test",
+    feature = "complete-test"
 ))]
 pub(crate) mod probe;
 pub mod screen;

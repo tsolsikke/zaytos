@@ -40,6 +40,12 @@ common::boot_info::tests::the_handoff_layout_did_not_change
 common::boot_info::tests::validate_accepts_matching_magic_and_version
 common::boot_info::tests::validate_rejects_bad_magic
 common::boot_info::tests::validate_rejects_wrong_version
+common::complete::tests::an_empty_line_gives_an_empty_first_word
+common::complete::tests::the_common_prefix_can_split_a_character
+common::complete::tests::the_common_prefix_stops_at_the_first_difference
+common::complete::tests::the_first_word_is_the_one_with_only_blanks_before_it
+common::complete::tests::the_path_splits_at_the_last_slash
+common::complete::tests::the_word_ends_at_the_cursor
 common::cpu::tests::a_disabled_local_apic_is_not_mmio_accessible
 common::cpu::tests::a_typical_bsp_value_decodes_to_an_mmio_accessible_local_apic
 common::cpu::tests::bits_above_maxphyaddr_are_masked_out_of_the_base
