@@ -5495,7 +5495,10 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         "{context}: (info) the script finished {finished_after:?} into the wait \
          (the wait allows {ZI_TEST_TIMEOUT:?}; None means it never finished)"
     );
-    println!("{context}: zi started = {started}");
+    // **合図である（2026-09-04）。** **偽なら台本ごと動かないので、
+    // 「これだけが落ちる破壊」は在りえない。** **合否には載せたままで、
+    // 読み方だけを分ける**——`tools/judgement-map.py` が `(signal)` を数えない。
+    println!("{context}: (signal) zi started = {started}");
     println!(
         "{context}: the up/down arrows moved the cursor between lines = {arrows_moved} \
          (rows seen with the arrow tag: {arrow_rows:?})"
@@ -6101,8 +6104,9 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
         (Some(1), Some(1))
     );
 
+    // **合図である（2026-09-04）。** 上の `zi started` と同じ。
     println!(
-        "{context}: script finished = {} ({:?})",
+        "{context}: (signal) script finished = {} ({:?})",
         finished_after.is_some(),
         finished_after
     );
@@ -6997,7 +7001,9 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     }
     println!("--- end ---");
 
-    println!("{context}: the shell printed its prompt = {ready}");
+    // **合図である（2026-09-04）。** **プロンプトが出ていなければ、
+    // この下の判定はすべて範囲を取れない**（`after_shell` が空になる）。
+    println!("{context}: (signal) the shell printed its prompt = {ready}");
 
     // **シェルが出た後だけを見る（S12 前の手当ての 1 本目）。**
     //
