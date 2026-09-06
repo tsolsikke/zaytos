@@ -7247,6 +7247,14 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     // **足すときにその場で確かめた**（`docs/coding-standards.md` の
     // 「判定を足すときは、その場で『落とす破壊が在るか』を確かめる」）。
     let ran_c_hello = after_shell.contains("hello from C");
+    // **自前の libc がヒープを取れたこと（C-c。`ADR-0057`）。**
+    //
+    // **ホストの単体テストでは覆えない面である**——**あちらは純粋な関数だけで、
+    // `brk` はシステムコールである。** **ここでしか主張できない。**
+    //
+    // **落とす破壊は無い。** **`brk-skip-shrink-test` は縮める側を壊すもので、
+    // 伸ばす側は通る**（実測でこの行は緑のままである）。**足すときに確かめた。**
+    let c_heap_worked = after_shell.contains("heap ok");
 
     // **`/` を含まない語が `/bin/` の下で見つかること（S12 前の手当ての 3 本目）。**
     //
@@ -7763,6 +7771,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     println!("{context}: cat printed /etc/motd = {ran_cat}");
     println!("{context}: hello ran = {ran_hello}");
     println!("{context}: the C program ran = {ran_c_hello}");
+    println!("{context}: the C program took heap from brk = {c_heap_worked}");
     println!("{context}: bare names resolved under /bin = {bare_names_resolved}");
     println!("{context}: argv[0] stayed as typed = {argv0_is_as_typed}");
     println!("{context}: backspace edited the line = {backspace_edited_the_line}");
@@ -7887,6 +7896,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && ran_cat
         && ran_hello
         && ran_c_hello
+        && c_heap_worked
         && bare_names_resolved
         && argv0_is_as_typed
         && backspace_edited_the_line
@@ -12297,6 +12307,50 @@ const DOC_PATH_PREFIXES: &[&str] = &[
 /// **リンクではない参照が、25 日間リポジトリに無いファイルを指していた**
 /// （`probes/` の調査。2026-09-06。**当時の名前は `.local-probes/` である**）。**`docstyle` の `S5` はリンクしか
 /// 見ないので、その形は素通りする。**
+/// 自前の libc の純粋な関数を、ホストで建てて走らせる（C-c。`ADR-0057` の Decision 5）。
+///
+/// # QEMU を起こさない
+///
+/// **`ADR-0045` と同じ形である**——**ハード依存の無いロジックは、ホストで固定する。**
+/// **`kernel/userland/libc_string.c` はシステムコールを 1 つも出さない。**
+///
+/// # 同じ源を 2 度建てる
+///
+/// **ZaytOS 向け（freestanding）と、ホスト（この項目）である。**
+/// **名前が `zt_` で始まるのは、ホストの libc と衝突させないためである**
+/// （`libc_string.c` の doc）。
+///
+/// # `cc` が無ければ落ちる
+///
+/// **黙って飛ばさない。** **飛ばすと「検査が在るのに走っていない」形になる**
+/// ——**この体制がいちばん嫌う形である。** **前提は `README` に在る。**
+fn check_libc_string_tests(workspace_root: &Path) -> Result<String> {
+    let userland = workspace_root.join("kernel/userland");
+    let binary = workspace_root.join("target/libc-string-test");
+    let compile = Command::new(std::env::var("CC").unwrap_or_else(|_| "cc".into()))
+        .current_dir(workspace_root)
+        .args(["-O2", "-Wall", "-Wextra", "-Werror", "-o"])
+        .arg(&binary)
+        .arg(userland.join("libc_string.c"))
+        .arg(userland.join("libc_string_test.c"))
+        .output()
+        .context("failed to run cc for the libc string tests")?;
+    if !compile.status.success() {
+        bail!(
+            "cc failed for the libc string tests:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+    let run = Command::new(&binary)
+        .output()
+        .context("failed to run the libc string tests")?;
+    let stdout = String::from_utf8_lossy(&run.stdout).trim().to_string();
+    if !run.status.success() {
+        bail!("the libc string tests failed:\n{stdout}");
+    }
+    Ok(stdout)
+}
+
 fn check_markdown_references(workspace_root: &Path) -> Result<Vec<String>> {
     let tracked = tracked_paths(workspace_root, &["*"])?;
     let markdown = tracked_paths(workspace_root, &["*.md"])?;
@@ -15724,6 +15778,16 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
+    begin_item("the libc pure functions pass their host tests");
+    match check_libc_string_tests(&workspace_root) {
+        Ok(summary) => println!("--- libc string tests: OK ({summary})"),
+        Err(error) => {
+            println!("--- libc string tests: FAILED ({error})");
+            failed.push("libc string tests".to_string());
+        }
+    }
+
+    total += 1;
     begin_item("markdown links, anchors and backticked paths resolve (tracked .md)");
     let references = check_markdown_references(&workspace_root)?;
     if references.is_empty() {
@@ -16142,8 +16206,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 29,
-    full: 284,
+    base: 30,
+    full: 285,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

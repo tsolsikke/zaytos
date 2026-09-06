@@ -387,6 +387,14 @@ fn build_c_programs(manifest_dir: &str, out_dir: &str, script: &str) {
     /// C で書いたユーザープログラム。**足すときはここへ 1 行足す。**
     const C_PROGRAMS: &[&str] = &["chello"];
 
+    /// 自前の libc（C-c。`ADR-0057`）。**すべての C のプログラムと一緒に建てる。**
+    const LIBC_SOURCES: &[&str] = &["libc.c", "libc_string.c"];
+
+    for source in LIBC_SOURCES {
+        println!("cargo:rerun-if-changed={manifest_dir}/userland/{source}");
+    }
+    println!("cargo:rerun-if-changed={manifest_dir}/userland/libc.h");
+
     for name in C_PROGRAMS {
         let source = format!("{manifest_dir}/userland/{name}.c");
         let output = format!("{out_dir}/{name}.elf");
@@ -406,12 +414,19 @@ fn build_c_programs(manifest_dir: &str, out_dir: &str, script: &str) {
                 "-Wall",
                 "-Wextra",
                 "-Werror",
+                "-I",
+                &format!("{manifest_dir}/userland"),
                 "-T",
                 script,
                 "-o",
                 &output,
                 &source,
             ])
+            .args(
+                LIBC_SOURCES
+                    .iter()
+                    .map(|source| format!("{manifest_dir}/userland/{source}")),
+            )
             .status()
             .unwrap_or_else(|e| panic!("failed to run cc for the C program {name}: {e}"));
 

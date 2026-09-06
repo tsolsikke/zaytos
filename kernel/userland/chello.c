@@ -1,64 +1,52 @@
-/* chello: C で書いた最初のユーザープログラム（C-a。ADR-0057）。
+/* chello: C で書いたユーザープログラム（C-a で置き、C-c で libc を使う形にした）。
  *
  * # 何をするか
  *
- * write(1, "...", n) を int 0x80 で 1 回発行し、exit(0) で終わる。
- * Rust の hello と同じ形で、言語だけが違う。
+ * 自前の libc の面を一通り使い、結果を画面へ出す。**libc が動いていることの
+ * 実演であり、判定の材料でもある**（`--shell-test` が出力の行を見る）。
  *
  * # crate ではない
  *
- * kernel/build.rs が gcc を 1 回呼んで単独でリンクする。cargo は関わらない。
- * リンクスクリプトは Rust のユーザープログラムと同じ user.ld である
- * （ADR-0057 の Decision 2。実測で、これを通さないと PT_LOAD が 3 つになり、
- * 1 つが像より下の 0x3ff000 へ出る）。
- *
- * # SSE を使わずに建てる
- *
- * ADR-0057 の Decision 3。-mno-sse -mno-mmx -mno-80387 で建てる。
- * ABI の選択なので、この先 libc を足すときも同じフラグで建てること。
- *
- * # libc はまだ無い
- *
- * C-a は「C で書いたプログラムが走る」までである。システムコールの殻を
- * このファイルの中に持っている。C-c で libc へ切り出す。 */
+ * `kernel/build.rs` が `gcc` を呼んで、`libc.c` と `libc_string.c` と一緒に
+ * リンクする。リンクスクリプトは Rust のユーザープログラムと同じ `user.ld` で、
+ * フラグは `ADR-0057` の Decision 2 と 3 のものである。 */
 
-/* システムコールの番号（kernel/src/syscall.rs。Linux x86-64 から採っている）。 */
-#define SYS_WRITE 1
-#define SYS_EXIT  60
+#include "libc.h"
 
-/* 標準出力。 */
-#define STDOUT 1
+int main(void) {
+    /* 1. 標準入出力。 */
+    puts("hello from C");
 
-/* int 0x80 の呼び出し規約は Linux x86-64 と同じ並びである
- * （rax=番号、rdi/rsi/rdx=引数、rax=返り）。
- *
- * memory の clobber は、緩衝の中身をカーネルが読むためである。 */
-static long syscall3(long number, long a, long b, long c) {
-    long result;
-    __asm__ volatile("int $0x80"
-                     : "=a"(result)
-                     : "a"(number), "D"(a), "S"(b), "d"(c)
-                     : "memory");
-    return result;
-}
+    /* 2. 文字列。**長さと比較と複製を 1 行で見せる。** */
+    char copy[32];
+    strcpy(copy, "zaytos");
+    puts("strlen/strcmp/strcpy:");
+    putu(strlen(copy));
+    write(STDOUT, " ", 1);
+    putu((unsigned long)(strcmp(copy, "zaytos") == 0));
+    write(STDOUT, " ", 1);
+    puts(copy);
 
-static void write_all(long fd, const char *bytes, long length) {
-    long done = 0;
-    while (done < length) {
-        long written = syscall3(SYS_WRITE, fd, (long)(bytes + done), length - done);
-        if (written <= 0) {
-            return;
-        }
-        done += written;
+    /* 3. メモリ。**重なる向きの `memmove` を見せる**——
+     * 前から写すと壊れる形である。 */
+    char buffer[8];
+    memset(buffer, 'a', sizeof buffer);
+    memcpy(buffer, "xy", 2);
+    memmove(buffer + 1, buffer, 6);
+    buffer[7] = '\0';
+    puts("memset/memcpy/memmove:");
+    puts(buffer);
+
+    /* 4. ヒープ。**取って、書いて、返す。** */
+    char *heap = (char *)malloc(16);
+    if (heap == 0) {
+        puts("malloc failed");
+        return 1;
     }
-}
+    strcpy(heap, "heap ok");
+    puts(heap);
+    free(heap);
 
-/* exit は戻らない。戻ってきた場合の行き先を用意しておく（Rust の hello と
- * 同じ理由）——ud2 なら、戻ってきたことが確定的な #UD として現れる。 */
-void _start(void) {
-    static const char line[] = "hello from C\n";
-    write_all(STDOUT, line, (long)(sizeof line - 1));
-    syscall3(SYS_EXIT, 0, 0, 0);
-    __asm__ volatile("ud2");
-    __builtin_unreachable();
+    /* 5. 終了状態。**0 以外を返すとシェルが数を出す**ので、0 で終わる。 */
+    return 0;
 }
