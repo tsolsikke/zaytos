@@ -54,7 +54,7 @@ M4でIDT・例外ハンドラを実装した際は、以下を行う:
 - CPU例外用の例外ハンドラ（`extern "x86-interrupt"`関数等）では、CPUが積む本物の例外フレームからRIP・RSP・RFLAGS・（該当する例外であれば）エラーコードを読み取り、本ADRが本来意図する意味のあるGPRダンプを実装する。
 - Rustレベルの`panic!()`を捕捉する`#[panic_handler]`（本M1実装）は、そのままの位置づけ（RSP + `PanicInfo`のみ）を維持してよい。両者はそもそも捕捉する事象が異なり、後者に前者相当のGPRダンプを追加しても意味のある情報は増えないため。
 
-参照実装: `kernel/src/panic.rs`, `kernel/src/cpu.rs`（`read_rsp`）。
+参照実装（当時）: `kernel/src/panic.rs`, `kernel/src/cpu.rs`（`read_rsp`）。**`cpu.rs`はM2-0aで`common`へ移り、いまのパスには無い。**
 
 ## Addendum（2026-08-10、S8: fail-fastの適用範囲をRing 0に限る）
 
