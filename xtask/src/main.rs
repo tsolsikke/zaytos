@@ -1402,6 +1402,7 @@ fn main() -> Result<()> {
        cargo xtask run --persist-zi-test [--rebuild-between]
        cargo xtask run --persist-env-test [--rebuild-between]
        cargo xtask run --keymap-test [--sabotage]
+       cargo xtask run --fp-test [--sabotage FEATURE]
        cargo xtask check [--update-reference]   (ホストテストの名前の集合を取り直す)
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
@@ -1628,6 +1629,17 @@ fn main() -> Result<()> {
                     .collect();
                 let expect_pass = sabotage.is_empty();
                 return cmd_utf8_test(&sabotage, expect_pass);
+            }
+            // **FP の状態の判定（B-a。`ADR-0058`）。**
+            if rest.iter().any(|a| a == "--fp-test") {
+                let sabotage: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                let expect_pass = sabotage.is_empty();
+                return cmd_fp_test(&sabotage, expect_pass);
             }
             // **Tab の補完の判定（TAB-1）。**
             if rest.iter().any(|a| a == "--complete-test") {
@@ -3662,6 +3674,21 @@ const COMPLETE_TEST_SABOTAGES: &[&str] = &[
     "shell-complete-silent-when-no-progress-test",
 ];
 
+/// `fp-test` を「通らないこと」で回す破壊（B-a。`ADR-0058`）。
+///
+/// **3 つで、落ちる判定が 1 本ずつ違う。**
+///
+/// **「切り替えで復元しない」は置いていない**——**落とす判定が作れなかった。**
+/// **Ring 3 が走っている間、走行可能なタスクはメインだけで、切り替えそのものが
+/// 起きない**（`ADR-0058` の「決定 1 の判定」）。**もう 1 人の使い手を用意しよう
+/// として、切り替えが遠征の RSP0 と噛み合わないことが分かった**（実測。
+/// `docs/troubleshooting.md` の 2026-09-07）。
+const FP_TEST_SABOTAGES: &[&str] = &[
+    "fp-no-fresh-state",
+    "fp-spawn-no-save",
+    "fp-mf-not-foldable-test",
+];
+
 const SHELL_TEST_SABOTAGES: &[&str] = &[
     "kill-ignore-interrupt-test",
     "kill-fold-at-depth-one-test",
@@ -4648,6 +4675,199 @@ fn cmd_history_test(features: &[&str], expect_pass: bool) -> Result<()> {
 ///
 /// **補完した語に字を足して `cannot run` にする。** **シェルの返事に語が
 /// そのまま出るので、補完の結果が 1 行で読める**（`kernel/src/input.rs` の
+/// FP の状態が保たれることを見る（B-a。`ADR-0058`）。
+///
+/// # 判定は 3 つで、決定に 1 対 1 で対応する
+///
+/// - **起こされた時点の XMM が 0 である**（決定 4）。**`/bin/fptest` を 2 回
+///   起こし、2 回とも 0 であることを見る**——**1 回目が終わりに目印を残すので、
+///   2 回目が汚れていれば既定値から始めていない。**
+/// - **浮動小数点の足し上げが期待値と一致する**（決定 1）。**200 万回足すので、
+///   その間にタイマが何度も食い込む。**
+/// - **`spawn` を跨いで親の XMM が残る**（決定 2 の遠征の側）。
+///
+/// # 子が走ったことは合図である
+///
+/// **子が走らなければ 3 番目は主張にならない**（親の値が誰にも壊されない）。
+/// **`(signal)` として出す**——**判定ではなく前提である。**
+fn cmd_fp_test(features: &[&str], expect_pass: bool) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let mut all_features: Vec<&str> = vec!["fp-test"];
+    all_features.extend_from_slice(features);
+    let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let tag = all_features.join("-");
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("fp-test-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the fp test")?;
+
+    let deadline = Instant::now() + ZI_TEST_TIMEOUT;
+    while Instant::now() < deadline {
+        let text = read_lossy(&serial_log);
+        if strip_ansi(&text).contains("script-done:") {
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = read_lossy(&serial_log);
+    let context = if features.is_empty() {
+        "fp-test".to_string()
+    } else {
+        format!("fp-test {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    let qemu_debug = read_lossy(&debug_log);
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    // **シェルの前後を分けない**——**`init` が起こした 1 回目はシェルより
+    // 前に出る。** 他の台本の判定と違い、**ここは起動シーケンスの語と当たらない**
+    // （`fp:` で始まる行はこの 2 本のプログラムしか出さない）。
+    let stripped = strip_ansi(&serial);
+
+    // **判定 1**——**起こされた時点の XMM が 0 である**（決定 4）。
+    // **`init` が起こした 1 回目はシェルより前に出る**ので、全体から拾う。
+    let starts: Vec<&str> = stripped
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| line.starts_with("fp: xmm0 at start = "))
+        .collect();
+    // **3 本出る**——`init` が起こした `fptest`、その子の `fpchild`、
+    // シェルから起こした `fptest` である。
+    //
+    // **子の 1 本が決定 4 の観測点である**——**親は XMM に目印を載せてから
+    // 子を起こす。** **親の側では見えない**（親が終わるときに残した目印は、
+    // 親を起こした側の復元が消す。**実測で、それに気づくまで判定が空振りした**）。
+    let fresh_at_start = starts.len() == 3
+        && starts
+            .iter()
+            .all(|line| line.ends_with("0x0000000000000000"));
+
+    // **判定 2**——**足し上げが期待値と一致する**（決定 1）。
+    // **200 万回 × 1.5 を 2 倍した値である**（`fptest.c` が整数で出す）。
+    let sums: Vec<&str> = stripped
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| line.starts_with("fp: sum = "))
+        .collect();
+    let sum_survived = sums.len() == 2 && sums.iter().all(|line| *line == "fp: sum = 6000000");
+
+    // **判定 3**——**`spawn` を跨いで親の XMM が残る**（決定 2）。
+    let after_spawn: Vec<&str> = stripped
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| line.starts_with("fp: xmm0 after spawn = "))
+        .collect();
+    // **1 本目だけが主張を担う**——**`init` が起こした深さ 1 の回である。**
+    // **2 本目はシェルから起こした深さ 2 の回で、子は深さの上限で断られる**
+    // （`-EAGAIN`。実測。`MAX_EXCURSION_DEPTH` = 2）。**そちらは計器である。**
+    let parent_kept_xmm0 = after_spawn.first().is_some_and(|line| {
+        line.contains("0x1122334455667788") && line.contains("(child returned 0)")
+    });
+
+    // **判定 4**——**Ring 3 が浮動小数点の例外を上げても、カーネルは止まらない**
+    // （`ADR-0058` で `#MF`(16) と `#XM`(19) を畳めるベクタへ入れた）。
+    //
+    // **観測できるのは `#MF` の側だけである**——**`#XM` は QEMU の TCG では
+    // 上がらない**（実測。2026-09-07。**同じコードはホストで `SIGFPE` になる**）。
+    // **`/bin/fpfault` は両方を試し、上がったほうで畳まれる。**
+    let folded_the_fp_fault = stripped.contains("/bin/fpfault ended (Folded(16))");
+    // **止まっていないことは、台本が最後まで進んだことで言う。**
+    let script_finished = stripped.contains("script-done:");
+
+    // **計器**——**TCG が `#XM` を配送しないことを、出力に残しておく。**
+    let simd_did_not_fire = stripped.contains("the SIMD exception did not fire");
+
+    // **合図**——**子が走っていなければ、判定 3 は何も主張していない。**
+    let child_ran = stripped.matches("fpchild: clobbered xmm0").count() == 1;
+
+    println!("{context}: (signal) the child ran and clobbered xmm0 = {child_ran}");
+    println!(
+        "{context}: a freshly started program sees xmm0 = 0 = {fresh_at_start} \
+         (the lines were {starts:?})"
+    );
+    println!(
+        "{context}: the floating-point sum survived the switches = {sum_survived} \
+         (the lines were {sums:?})"
+    );
+    println!(
+        "{context}: the parent kept xmm0 across spawn = {parent_kept_xmm0} \
+         (the lines were {after_spawn:?})"
+    );
+    println!(
+        "{context}: a floating-point exception folded the program instead of halting the \
+         kernel = {folded_the_fp_fault} (the script ran to the end = {script_finished})"
+    );
+    println!(
+        "{context}: (info) QEMU's TCG did not deliver #XM, so only #MF is observed here = \
+         {simd_did_not_fire}"
+    );
+
+    if !child_ran {
+        println!("{context}: FAILED");
+        bail!("{context}: the child did not run, so the spawn judgement asserts nothing")
+    }
+
+    let passed = fresh_at_start
+        && sum_survived
+        && parent_kept_xmm0
+        && folded_the_fp_fault
+        && script_finished;
+    if passed {
+        println!("{context}: PASS");
+        if expect_pass {
+            Ok(())
+        } else {
+            bail!("{context}: the sabotage was NOT caught; every judgement still held")
+        }
+    } else {
+        println!("{context}: FAILED");
+        if expect_pass {
+            bail!("{context}: FAILED")
+        } else {
+            println!("{context}: the sabotage was caught (this is the expected outcome)");
+            Ok(())
+        }
+    }
+}
+
 /// 台本の doc）。
 fn cmd_complete_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
@@ -9806,6 +10026,10 @@ const BOOT_LOG_CORE_COUNT_MARKERS: &[&str] = &[
     "entry type=0 (Processor Local APIC)",
     "signature=\"APIC\" length=",
     "acpi: MADT enumeration complete",
+    // AP で SSE を有効にした行（`ADR-0058`）。**コアの数だけ出る。**
+    // **隠したものを見る者**: **`-smp 2` の参照にはこの行が残る**ので、
+    // 「AP でも有効になっている」は参照の側が見ている。
+    "fp: SSE is enabled on ap",
     // virtio-blk の feature bits（S13-b）。**実測でコア数に依る**——QEMU は
     // キューの数を vCPU 数に合わせるので、`-smp 1` と `-smp 2` で 0x1000 違う。
     // capacity などの判定は別の行にあり、そちらは残る。
@@ -13882,6 +14106,72 @@ fn check_image_text_is_ascii(workspace_root: &Path) -> Result<String> {
 /// 像へ入るテキストの置き場（2026-08-31）。
 const IMAGE_TEXT_ROOT: &str = "kernel/fsimage/seed";
 
+/// カーネルが XMM の命令を 1 つも持たないことを見る（`ADR-0058` の Decision 5）。
+///
+/// # なぜこれが要るのか
+///
+/// **「カーネルへ入って同じタスクへ戻るだけなら FP の退避が要らない」の根拠が、
+/// これだからである。** **カーネルがうっかり浮動小数点を使うと、その前提が
+/// 黙って崩れる**——**ユーザーの XMM がシステムコールの中で壊れ、しかも
+/// どの判定も鳴らない。**
+///
+/// # 既定の構成だけを見る
+///
+/// **feature で入る検査用のコードは対象外である。** 見るのは
+/// `cargo build -p kernel` が作る既定の像で、**そこに XMM が現れないこと。**
+///
+/// # 落とす破壊
+///
+/// **カーネルへ XMM の命令を 1 つ入れると落ちる。** **置くときに一度作って
+/// 確かめた**（`docs/coding-standards.md` の「新しい静的な検査は、主張が偽の
+/// 状態を一度作って落ちることを確かめてから置く」）。
+fn check_kernel_has_no_xmm(workspace_root: &Path) -> Result<String> {
+    let kernel = build_kernel_with_features(workspace_root, &[])?;
+    let output = external_tool("objdump")
+        .arg("-d")
+        .arg(&kernel.elf)
+        .output()
+        .context("failed to run objdump on the kernel")?;
+    if !output.status.success() {
+        bail!("objdump failed on {}", kernel.elf.display());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut sites: Vec<String> = Vec::new();
+    for line in text.lines() {
+        // **レジスタ名で見る。** `fxsave` / `fxrstor` / `ldmxcsr` は当たらない
+        // ——**あれらは XMM の状態を丸ごと動かす命令で、レジスタを名指ししない。**
+        let uses_xmm = line
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| {
+                word.starts_with("xmm")
+                    && word[3..].chars().all(|c| c.is_ascii_digit())
+                    && word.len() > 3
+            });
+        if uses_xmm {
+            sites.push(line.trim().to_string());
+        }
+    }
+    if !sites.is_empty() {
+        let shown: Vec<String> = sites.iter().take(3).cloned().collect();
+        bail!(
+            "the kernel uses {} XMM register(s) ({}{}). ADR-0058 Decision 5 rests on the kernel \
+             never touching FP state: if it does, a syscall clobbers the caller's registers and \
+             nothing catches it",
+            sites.len(),
+            shown.join(" | "),
+            if sites.len() > shown.len() {
+                " | ..."
+            } else {
+                ""
+            }
+        );
+    }
+    Ok(format!(
+        "no XMM register appears in {} disassembled line(s) of the default kernel",
+        text.lines().count()
+    ))
+}
+
 /// `root` の下のファイルを再帰で集める（2026-08-31）。
 fn collect_files(root: &Path, into: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(root)
@@ -15002,6 +15292,33 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }
         }
 
+        // **FP の状態（B-a。`ADR-0058`）。**
+        //
+        // **1 回の起動で 3 つ見る**——**起こされた時点の XMM が 0（決定 4）/
+        // 足し上げが期待値と一致する（決定 1）/ `spawn` を跨いで親の XMM が
+        // 残る（決定 2）。** **破壊は 2 つで、落ちる判定が 1 本ずつ違う。**
+        total += 1;
+        begin_item("floating-point state survives programs and spawn");
+        match cmd_fp_test(&[], true) {
+            Ok(()) => println!("--- fp test: OK"),
+            Err(error) => {
+                println!("--- fp test: FAILED ({error})");
+                failed.push("fp test".to_string());
+            }
+        }
+        for sabotage in FP_TEST_SABOTAGES {
+            total += 1;
+            let label = format!("fp-test {sabotage}");
+            begin_item(&label);
+            match cmd_fp_test(&[sabotage], false) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
+            }
+        }
+
         total += 1;
         begin_item("the shell takes keystrokes and init restarts it");
         match cmd_shell_test(ShellTestMode::Normal) {
@@ -15988,6 +16305,18 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         }
     }
 
+    // カーネルが XMM を持たないこと（`ADR-0058` の Decision 5、静的）。
+    total += 1;
+    begin_item("the kernel never touches FP state (no XMM register in the default build)");
+    match check_kernel_has_no_xmm(&workspace_root) {
+        Ok(summary) => println!("--- kernel has no XMM: OK ({summary})"),
+        Err(e) => {
+            println!("    {e}");
+            println!("--- kernel has no XMM: FAILED");
+            failed.push("kernel has no XMM".to_string());
+        }
+    }
+
     // 埋め込む ext2 の像が `e2fsck` を通ること（S10-a、静的）。
     total += 1;
     begin_item("the embedded ext2 image passes e2fsck");
@@ -16336,8 +16665,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 31,
-    full: 286,
+    base: 32,
+    full: 291,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
@@ -17317,7 +17646,8 @@ fn stage_esp_with_disk(
 /// **どの判定がどの文言に乗っているかは `docs/verification-coverage.md` の
 /// 「外の道具の文言に乗っている判定」に集めてある。** **版を上げるときは
 /// あの節を読むこと。**
-const PARSED_EXTERNAL_TOOLS: &[&str] = &["e2fsck", "dumpe2fs", "debugfs", "mke2fs", "nm"];
+const PARSED_EXTERNAL_TOOLS: &[&str] =
+    &["e2fsck", "dumpe2fs", "debugfs", "mke2fs", "nm", "objdump"];
 
 /// 出力を解析する外の道具を呼ぶ（e-4 の後の手当て）。**言語を固定する。**
 ///

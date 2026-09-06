@@ -187,6 +187,56 @@ pub fn read_cr4() -> u64 {
 /// CR4 の PGE（Page Global Enable）ビット。
 pub const CR4_PAGE_GLOBAL_ENABLE: u64 = 1 << 7;
 
+/// CR4 へ書く（`ADR-0058`）。
+///
+/// # Safety
+///
+/// **CR4 はコアごとのレジスタで、翻訳と例外の挙動を決める。**
+/// 呼び出し側は、**立てるビットがこのコアで意味を持つこと**と、
+/// **既存のビットを落とさないこと**（読んで OR して書く）を保証すること。
+pub unsafe fn write_cr4(value: u64) {
+    // SAFETY: 呼び出し側の契約。`mov cr4, reg` はこのコアの CR4 だけを変える。
+    unsafe {
+        core::arch::asm!("mov cr4, {}", in(reg) value, options(nostack, preserves_flags));
+    }
+}
+
+/// CR0 を読む。
+pub fn read_cr0() -> u64 {
+    let value: u64;
+    // SAFETY: `mov reg, cr0` は読み取り専用で、副作用が無い。
+    unsafe {
+        core::arch::asm!("mov {}, cr0", out(reg) value, options(nostack, preserves_flags));
+    }
+    value
+}
+
+/// CR0 へ書く（`ADR-0058`）。
+///
+/// # Safety
+///
+/// [`write_cr4`] と同じ。**保護と浮動小数点の挙動を決めるレジスタである。**
+/// **PE や PG を落とすと即座に世界が壊れる**ので、読んで必要なビットだけを
+/// 変えて書くこと。
+pub unsafe fn write_cr0(value: u64) {
+    // SAFETY: 呼び出し側の契約。
+    unsafe {
+        core::arch::asm!("mov cr0, {}", in(reg) value, options(nostack, preserves_flags));
+    }
+}
+
+/// CR0 の MP（Monitor Coprocessor）ビット。**`fxsave` を使うなら 1 にする。**
+pub const CR0_MONITOR_COPROCESSOR: u64 = 1 << 1;
+/// CR0 の EM（Emulation）ビット。**1 だと SSE 命令が `#UD` になる。0 にする。**
+pub const CR0_EMULATION: u64 = 1 << 2;
+/// CR0 の TS（Task Switched）ビット。**遅延退避で使うビットである。**
+/// **`ADR-0058` は常時退避を採ったので、立てない。**
+pub const CR0_TASK_SWITCHED: u64 = 1 << 3;
+/// CR4 の OSFXSR。**1 にすると `fxsave`/`fxrstor` が XMM まで扱い、SSE が使える。**
+pub const CR4_OS_FXSR: u64 = 1 << 9;
+/// CR4 の OSXMMEXCPT。**SSE の非マスク例外を `#XM` として受けると宣言する。**
+pub const CR4_OS_XMM_EXCEPT: u64 = 1 << 10;
+
 /// 1 ページ分の TLB エントリを無効化する（`invlpg`）。
 ///
 /// # CR3 のリロードとの使い分け

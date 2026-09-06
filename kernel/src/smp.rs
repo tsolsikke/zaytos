@@ -1373,6 +1373,33 @@ unsafe fn bring_up_application_processor(info: ApBringUp) -> ! {
         crate::idt::load_shared();
     }
 
+    // 3. このコアで SSE を有効にする（`ADR-0058` の Decision 3）。
+    //
+    // **CR0 と CR4 はコアごとのレジスタなので、BSP で立てても AP には効かない。**
+    // **忘れると、このコアの上で SSE 命令が `#UD` で落ちる**——**いま Ring 3 は
+    // BSP の上でしか走らないので、落とす判定が無い**（`ADR-0058` の
+    // 「決定 3 に判定が無い理由」）。**だから忘れやすい。ここに置く理由でもある。**
+    // SAFETY: このコアにつき 1 回だけで、まだ FP を使うコードは走っていない。
+    unsafe {
+        crate::fp::enable_on_this_cpu();
+    }
+    {
+        // **読み戻して言う。** **BSP の行は AP について何も言わない**ので、
+        // **コアごとに 1 行ずつ出す。**
+        let state = crate::fp::enabled_state();
+        let mut port = SerialPort::new(SerialPort::COM1_BASE);
+        port.init();
+        let _ = writeln!(
+            port,
+            "[INFO] fp: SSE is enabled on ap {}: CR0={:#x} CR4={:#x}, as intended = {} \
+             [read back from the registers]",
+            info.slot,
+            state.cr0,
+            state.cr4,
+            state.as_intended()
+        );
+    }
+
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
     serial.init();
     let _ = writeln!(

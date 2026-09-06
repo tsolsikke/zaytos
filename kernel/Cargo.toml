@@ -478,6 +478,17 @@ stack-guard-test = []
 # （下記 idt::init 参照）、溢れ → 壊れたスタック上での #PF → #DF の連鎖を出す。
 # M4-b-2 の代用（#PF ゲートの Present 落とし）とは別経路。`--stack-test df`。
 stack-overflow-df-test = ["stack-guard-test"]
+# `#MF`（ベクタ16）を畳めなくする（`ADR-0058`）。Ring 3 の浮動小数点の
+# 例外で、カーネルが止まる形へ戻る。
+fp-mf-not-foldable-test = []
+# FP の状態の台本を流す（`ADR-0058`）。`/bin/fptest` を 2 回起こす。
+fp-test = []
+# `spawn` で、子へ入る前に親の FP の状態を保存しない（`ADR-0058`）。
+# 親が `spawn` を跨いで値を保てなくなる。
+fp-spawn-no-save = []
+# プログラムを起こすときに FP の状態を既定値へ戻さない（`ADR-0058`）。
+# 前のプログラムが XMM へ残した値が、次のプログラムから読める。
+fp-no-fresh-state = []
 # 協調的スイッチで、次タスクの保存コンテキストの rbx を壊す。復帰した
 # タスクが GPR 照合で検出する。`cargo xtask run --task-test drop-reg`。
 task-switch-drop-reg = []

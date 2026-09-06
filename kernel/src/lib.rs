@@ -39,6 +39,7 @@ pub mod address_space;
 pub mod apic;
 pub mod bkl;
 pub mod console;
+pub mod fp;
 pub mod frame_allocator;
 pub mod gdt;
 pub mod graphics;

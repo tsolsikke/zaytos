@@ -1587,6 +1587,16 @@ unsafe fn run_loaded_program(
     // **どの深さの遠征スタックを使うかを控える（S11-5）。** 戻った後は深さが
     // 元へ戻っているので、そのときには引けない。
     let entered_at_depth = crate::ring3::depth();
+    // **起こすプログラムの FP は既定値から始める（`ADR-0058` の Decision 4）。**
+    // **前のプログラムが XMM へ残した値が、次のプログラムから読めてはならない。**
+    //
+    // 破壊確認: `fp-no-fresh-state` では戻さない。**前の値がそのまま見える。**
+    #[cfg(not(feature = "fp-no-fresh-state"))]
+    // SAFETY: [`crate::fp::FpArea::fresh`] は `fxsave` の形に沿った並びで、
+    // MXCSR も予約ビットを立てていない（`#GP` にならない）。
+    unsafe {
+        crate::fp::restore(&crate::fp::FpArea::fresh())
+    };
     // SAFETY: entry と stack は今張ったユーザーページで、`ud2` が必ずフォルト
     // する。main_rsp0_top はメインのカーネルスタック上端。単一実行文脈である。
     unsafe {
@@ -1958,7 +1968,32 @@ pub fn spawn(
         }
     };
 
+    // **親の FP の状態を控える（`ADR-0058` の Decision 2）。**
+    //
+    // **`spawn` は新しいタスクを作らない**——**同じタスクの上で遠征が入れ子に
+    // なり、親はカーネルの中で子の終了を待つ。** **切り替えは 1 度も起きないので、
+    // 切り替えの退避（[`crate::task`]）では守れない。** 子が XMM を使えば、
+    // 親が Ring 3 に持っていた値はそのまま消える。
+    //
+    // 破壊確認: `fp-spawn-no-save` では控えない。**親が `spawn` を跨いで
+    // 浮動小数点の値を保てなくなる。**
+    #[cfg(not(feature = "fp-spawn-no-save"))]
+    let parent_fp = {
+        let mut area = crate::fp::FpArea::fresh();
+        // SAFETY: 単一の実行文脈で、この領域はこの関数の中にしかない。
+        unsafe { crate::fp::save(&mut area) };
+        area
+    };
+
     let (outcome, held, leaked) = load_user_program(&mut logger, image, true, name, argv, envp);
+
+    // **親の FP の状態を戻す。** **子が XMM に残したものを消す**ので、
+    // 情報の漏れも同時に塞がる（決定 4 と同じ向きである）。
+    #[cfg(not(feature = "fp-spawn-no-save"))]
+    // SAFETY: `parent_fp` は直前に `fxsave` が書いた 512 バイトである。
+    unsafe {
+        crate::fp::restore(&parent_fp)
+    };
 
     // **子の終わり方をここで読む。** 戻す前に読まなければ、親のもので上書きされる。
     // **中断を先に見る（S12 前の手当て、C）。** **`exit` も畳みも通っていない**

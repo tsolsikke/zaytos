@@ -35,7 +35,8 @@ pub mod dirty;
     feature = "utf8-test",
     feature = "profile-test",
     feature = "history-test",
-    feature = "complete-test"
+    feature = "complete-test",
+    feature = "fp-test"
 ))]
 pub(crate) mod probe;
 pub mod screen;

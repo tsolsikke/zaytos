@@ -43,6 +43,16 @@ const TASK_COUNT: usize = WORKER_COUNT + 2;
 /// メインタスクの添字。bootstrap processor の既定タスクでもある（S4-c-3-1）。
 const MAIN_TASK: usize = 0;
 
+/// タスクごとの FP 退避領域（`ADR-0058` の Decision 1）。
+///
+/// # なぜ `scheduler` の中に置かないのか
+///
+/// **あのモジュールは「`&mut Scheduler` や `&Scheduler` を返す関数を足さない」
+/// を明文の規則にしている**（`task/scheduler.rs` の doc）。**512 バイトの領域は
+/// 参照で渡すしかない**ので、規則に触れずに置ける場所がここになる。
+/// **触るのは [`schedule_switch`] だけで、そこは IF=0 かつ BKL の内側である。**
+static mut FP_AREAS: [crate::fp::FpArea; TASK_COUNT] = [crate::fp::FpArea::fresh(); TASK_COUNT];
+
 /// AP 用アイドルタスクの添字（S4-c-2）。AP の既定タスクである（S4-c-3-1）。
 ///
 /// `pick_next` はワーカー（`1..=WORKER_COUNT`）しか巡回の候補にしないので、これが
@@ -1065,6 +1075,24 @@ fn schedule_switch(current_rsp: u64) -> u64 {
                 next_bottom, next_top
             ));
             common::cpu::halt_forever();
+        }
+
+        // **FP の状態を入れ替える（`ADR-0058` の Decision 1）。**
+        //
+        // **ここが「切り替えの 1 点」である。** カーネルは XMM を使わない
+        // （決定 5）ので、**カーネルへ入って同じタスクへ戻るだけなら退避は
+        // 要らない。** **別のタスクへ移るこの 1 点だけが要る。**
+        //
+        // **`spawn` はここを通らない**——同じタスクの上で入れ子になるので、
+        // あちらは遠征の側で退避する（決定 2）。
+        //
+        // SAFETY: IF=0 かつ BKL の内側で、この配列に触るのはここだけである。
+        // 添字は `current` と `next` で、どちらも `TASK_COUNT` 未満である
+        // （`pick_next` と `current_index` の値域）。
+        unsafe {
+            let areas = &mut *core::ptr::addr_of_mut!(FP_AREAS);
+            crate::fp::save(&mut areas[current]);
+            crate::fp::restore(&areas[next]);
         }
 
         set_current_index(next);

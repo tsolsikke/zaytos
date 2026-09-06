@@ -1832,7 +1832,41 @@ pub unsafe fn clear_present(vector: usize) {
 /// **失効条件——畳みの条件がベクタごとに分岐するようになったら、4 本置く案を
 /// 再検討すること。** S9 でシグナルやプロセス終了が入ると、ベクタごとに処理が
 /// 分かれる可能性がある。分かれた時点で「共有機構だから 1 本でよい」が崩れる。
-const FOLDABLE_VECTORS: [u8; 4] = [0, 6, 13, 14];
+const FOLDABLE_VECTORS: [u8; FOLDABLE_VECTOR_COUNT] = FOLDABLE_VECTORS_VALUE;
+
+/// 畳めるベクタの本数。
+#[cfg(not(feature = "fp-mf-not-foldable-test"))]
+pub const FOLDABLE_VECTOR_COUNT: usize = 6;
+#[cfg(feature = "fp-mf-not-foldable-test")]
+pub const FOLDABLE_VECTOR_COUNT: usize = 5;
+
+/// 畳めるベクタ（`ADR-0058` で 2 つ増えた）。
+///
+/// # なぜ `#MF`(16) と `#XM`(19) を足したのか
+///
+/// **SSE を有効にした時点で、この 2 つが Ring 3 から届くようになった**
+/// （`ADR-0058` の Decision 3）。**`MXCSR` の既定は全例外マスク（0x1F80）だが、
+/// Ring 3 のプログラムは `ldmxcsr` でマスクを外せる**——**利用者の操作で
+/// 到達できる経路である。**
+///
+/// **足さないと、Ring 3 の 1 命令でカーネルが止まる**（畳めない例外は
+/// dump+halt へ落ちる）。
+///
+/// # 観測できるのは `#MF` の側だけである
+///
+/// **`#XM` は QEMU の TCG では上がらない**（実測。2026-09-07。**`MXCSR` の
+/// マスクを外して 0 で割っても何も起きない**——**同じコードはホストで
+/// `SIGFPE` になる**）。**`#MF`（x87）は上がる**ので、**判定と破壊はそちらに
+/// 置いた**（`--fp-test` の `/bin/fpfault`）。
+///
+/// **`#XM` は実機のために入れてある。** **観測できないので、観測できないと
+/// 書く。**
+#[cfg(not(feature = "fp-mf-not-foldable-test"))]
+const FOLDABLE_VECTORS_VALUE: [u8; FOLDABLE_VECTOR_COUNT] = [0, 6, 13, 14, 16, 19];
+/// 破壊確認: `#MF` を畳めなくする（`ADR-0058`）。**Ring 3 の浮動小数点の
+/// 例外で、カーネルが止まる形へ戻る**——**台本が最後まで進まない。**
+#[cfg(feature = "fp-mf-not-foldable-test")]
+const FOLDABLE_VECTORS_VALUE: [u8; FOLDABLE_VECTOR_COUNT] = [0, 6, 13, 14, 19];
 
 /// 中断（Ctrl+C）が要求されていれば、走っている子の遠征を畳む（S12 前の手当て、C）。
 ///

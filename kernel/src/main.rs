@@ -19,6 +19,7 @@ use common::serial::SerialPort;
 use core::ptr::addr_of;
 use kernel::console::Console;
 
+use kernel::fp;
 use kernel::frame_allocator;
 use kernel::gdt;
 use kernel::graphics::{Color, Framebuffer, FramebufferLayout};
@@ -345,6 +346,15 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
         idt::init(Some(gdt::DOUBLE_FAULT_IST_INDEX as u8), page_fault_ist);
     }
 
+    // このコアで SSE を有効にする（`ADR-0058` の Decision 3）。
+    // **AP 側は `smp::bring_up_application_processor` が同じことをする**
+    // ——**CR0 と CR4 はコアごとのレジスタである。**
+    // SAFETY: 起動の途中で、このコアにつき 1 回だけである。FP を使うコード
+    // （Ring 3 の C のプログラム）はまだ走っていない。
+    unsafe {
+        fp::enable_on_this_cpu();
+    }
+
     // SAFETY: 起動時の単一実行文脈であり、他に誰もこの static に触れていない。
     unsafe {
         let handoff = addr_of!(BOOT_HANDOFF) as *mut BootHandoff;
@@ -446,6 +456,24 @@ extern "sysv64" fn kernel_main() -> ! {
             "build: {} cargo feature(s) enabled: {}",
             kernel::enabled_features::ENABLED_FEATURES.len(),
             FeatureList(kernel::enabled_features::ENABLED_FEATURES)
+        ));
+    }
+
+    // **SSE が有効になっていることを、レジスタから読んで言う**（`ADR-0058`）。
+    // **立てたのは `_start` の側で、ここは読み戻しである**——**書いたつもりでは
+    // なく、いまの状態を見る。** **AP の側は `smp` が同じ行を出す**
+    // （**CR0 と CR4 はコアごとなので、BSP の行は AP について何も言わない**）。
+    {
+        let state = fp::enabled_state();
+        logger.info(format_args!(
+            "fp: SSE is enabled on the bootstrap processor: CR0={:#x} (MP={}, EM={}),              CR4={:#x} (OSFXSR={}, OSXMMEXCPT={}), as intended = {} [read back from the registers]",
+            state.cr0,
+            state.cr0 & common::cpu::CR0_MONITOR_COPROCESSOR != 0,
+            state.cr0 & common::cpu::CR0_EMULATION != 0,
+            state.cr4,
+            state.cr4 & common::cpu::CR4_OS_FXSR != 0,
+            state.cr4 & common::cpu::CR4_OS_XMM_EXCEPT != 0,
+            state.as_intended()
         ));
     }
 
@@ -1947,6 +1975,25 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
     // **借り直しながら回す。** `Option<&mut _>` は `Copy` ではないので、
     // 各周で `as_deref_mut` を取る（`interrupts::drain_keyboard` と同じ形）。
     let mut console = console;
+
+    // **`init` が `/bin/fptest` を 1 度だけ起こす（B-a。`ADR-0058`）。**
+    //
+    // **深さのためである。** **シェルから起こすと `fptest` は深さ 2 になり、
+    // 子を起こせない**（`MAX_EXCURSION_DEPTH` = 2。**実測で `-EAGAIN` を見た**）。
+    // **ここは深さ 0 なので、`fptest` が 1、その子が 2 に収まる。**
+    //
+    // **台本の側でも 1 度起こす**（`input.rs` の `SCRIPT`）——**あちらは
+    // 「起こされた時点の XMM が 0」を、この 1 回目が残した目印に対して見る。**
+    #[cfg(feature = "fp-test")]
+    {
+        let outcome = kernel::userland::spawn(b"/bin/fptest", b"fptest\0", 1, None);
+        log_both(
+            logger,
+            console.as_deref_mut(),
+            LogLevel::Info,
+            format_args!("init: the fp test at depth 1 ended ({outcome:?})"),
+        );
+    }
 
     let mut restarts = 0usize;
     loop {
@@ -9562,6 +9609,26 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "complete-test",
         cfg!(feature = "complete-test"),
         "Tab の補完を見る台本を流す（破壊ではない）",
+    ),
+    (
+        "fp-test",
+        cfg!(feature = "fp-test"),
+        "FP の状態を見る台本を流す（破壊ではない。ADR-0058）",
+    ),
+    (
+        "fp-spawn-no-save",
+        cfg!(feature = "fp-spawn-no-save"),
+        "spawn で親の FP の状態を控えない",
+    ),
+    (
+        "fp-no-fresh-state",
+        cfg!(feature = "fp-no-fresh-state"),
+        "プログラムを起こすときに FP の状態を既定値へ戻さない",
+    ),
+    (
+        "fp-mf-not-foldable-test",
+        cfg!(feature = "fp-mf-not-foldable-test"),
+        "#MF（ベクタ16）を畳めるベクタから外す",
     ),
     (
         "shell-complete-no-common-prefix-test",

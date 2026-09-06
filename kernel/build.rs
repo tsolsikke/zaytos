@@ -389,14 +389,18 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
 /// - `-T{script}`——**Rust のユーザープログラムと同じ `user.ld` である。**
 ///   **付けないと `PT_LOAD` が 3 つになり、1 つが像より下の `0x3ff000` へ出る**
 ///   （実測。2026-09-06）
-/// - `-mno-sse -mno-mmx -mno-80387`——**`ADR-0057` の Decision 3。**
-///   **カーネルは SSE を有効にしておらず、文脈切り替えで FP を保存していない**
+/// - **SSE は使う（`ADR-0058`。2026-09-07 に切り替えた）。**
+///   **`ADR-0057` の Decision 3（`-mno-sse -mno-mmx -mno-80387`）は、外の C を
+///   持ってくる段で役目を終えた**——**`stb_truetype` は `-mno-sse` では建たない。**
+///   **カーネルが SSE を有効にし、切り替えと遠征で FP の状態を退避するように
+///   なったので、フラグを外した。** **ABI の選択なので、libc も利用側も
+///   同じフラグで建てる**（Decision 4 はそのまま生きている）
 /// - `-fno-stack-protector`——**守りの実体（カナリアの置き場）が無い**
 /// - `-O2`——**Rust 側の `opt-level=s` と揃える意図は無い。**
 ///   **C は最適化を切ると `memcpy` の呼び出しが増える**ので、既定を `-O2` にする
 fn build_c_programs(manifest_dir: &str, out_dir: &str, script: &str) {
     /// C で書いたユーザープログラム。**足すときはここへ 1 行足す。**
-    const C_PROGRAMS: &[&str] = &["chello"];
+    const C_PROGRAMS: &[&str] = &["chello", "fptest", "fpchild", "fpfault"];
 
     /// 自前の libc（C-c。`ADR-0057`）。**すべての C のプログラムと一緒に建てる。**
     const LIBC_SOURCES: &[&str] = &["libc.c", "libc_string.c"];
@@ -417,9 +421,6 @@ fn build_c_programs(manifest_dir: &str, out_dir: &str, script: &str) {
                 "-nostdlib",
                 "-no-pie",
                 "-static",
-                "-mno-sse",
-                "-mno-mmx",
-                "-mno-80387",
                 "-fno-stack-protector",
                 "-O2",
                 "-Wall",
@@ -593,6 +594,10 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         "echo",
         // **C で書いたもの（C-a。`ADR-0057`）。** **`gcc` が建てる。**
         "chello",
+        // **FP の状態の判定（B-a。`ADR-0058`）。** **親と子の 2 本で 1 組である。**
+        "fptest",
+        "fpchild",
+        "fpfault",
     ] {
         std::fs::copy(
             format!("{out_dir}/{name}.elf"),

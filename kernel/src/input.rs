@@ -296,7 +296,8 @@ pub fn read_bytes(dst: &mut [u8]) -> usize {
         feature = "utf8-test",
         feature = "profile-test",
         feature = "history-test",
-        feature = "complete-test"
+        feature = "complete-test",
+        feature = "fp-test"
     ))]
     {
         let taken = script::next_bytes(dst);
@@ -542,7 +543,8 @@ pub fn arm_input_script() {
         feature = "utf8-test",
         feature = "profile-test",
         feature = "history-test",
-        feature = "complete-test"
+        feature = "complete-test",
+        feature = "fp-test"
     ))]
     script::arm();
 }
@@ -573,7 +575,8 @@ pub fn arm_input_script() {
     feature = "utf8-test",
     feature = "profile-test",
     feature = "history-test",
-    feature = "complete-test"
+    feature = "complete-test",
+    feature = "fp-test"
 ))]
 pub(crate) mod script {
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -1011,6 +1014,18 @@ pub(crate) mod script {
     /// 判定行に出る**（`user-stack:`）——**`getdents64` の緩衝をスタックへ
     /// 置いたので、測れる形にしておく**（`ADR-0041` の規律）。
     /// **`init` が起こし直し、次のシェルが `\x0c` を読んで台本が終わる。**
+    /// FP の状態の台本（B-a。`ADR-0058`）。
+    ///
+    /// **`/bin/fptest` を 2 回起こす。** **2 回目が要るのは決定 4 のためである**
+    /// ——**1 回目が終わりに XMM へ目印を残すので、2 回目の「起こされた時点」が
+    /// 0 でなければ、既定値から始めていない。**
+    ///
+    /// **`fptest` は中で `/bin/fpchild` を起こす**（遠征の側の判定）。
+    #[cfg(feature = "fp-test")]
+    const SCRIPT: &[u8] = b"/bin/fptest\n\
+        /bin/fpfault\n\
+        exit\n\x0c";
+
     #[cfg(feature = "complete-test")]
     const SCRIPT: &[u8] = b"ec\ttab-one\n\
         r\tx\n\
