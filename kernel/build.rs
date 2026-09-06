@@ -485,9 +485,11 @@ fn parse_symbol(script: &str, name: &str) -> Option<u64> {
 ///   `Filesystem created` は現在時刻のままだった。**版によっては対応が入って
 ///   いるので、「効かない」と一般化しないこと**
 ///
-/// **残る差は時刻だけなので、建てた後に 0 で上書きする。** 上書きするのは
-/// superblock の 3 つと、全 inode の 4 つである。**ext2 にはチェックサムが
-/// 無い**ので、バイトを書き換えても整合は崩れない（`e2fsck -fn` で確かめる）。
+/// **残る差は建てた後に 0 で上書きする**（[`zero_image_build_traces`]）。
+/// **時刻と所有者である**——**所有者は 2026-09-06 に足した。** **「同じ機械で
+/// 2 回建てて一致する」では見えず、CI で初めて出た**（`docs/troubleshooting.md`）。
+/// **ext2 にはチェックサムが無い**ので、バイトを書き換えても整合は崩れない
+/// （`e2fsck -fn` で確かめる）。
 ///
 /// # ビルド環境への要求
 ///
@@ -734,7 +736,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         });
     assert!(status.success(), "mke2fs failed for the ext2 test image");
 
-    zero_image_timestamps(&image);
+    zero_image_build_traces(&image);
 
     // **版を判定行へ載せる**（S10-a）。**別の版で既定値が変われば、決めた
     // パラメータ（block 4096・inode size 256・rev 1）が動く。**
@@ -917,15 +919,34 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
 
 /// 像の時刻フィールドを 0 にして、出力を決定的にする（S10-a）。
 ///
-/// **触るのは superblock の 4 つと、全 inode の 4 つだけである。**
+/// **触るのは superblock の 4 つと、全 inode の 4 つ + 所有者である。**
 /// superblock: `s_mtime`(44) / `s_wtime`(48) / `s_lastcheck`(64) / `s_mkfs_time`(264)。
-/// inode: `i_atime`(8) / `i_ctime`(12) / `i_mtime`(16) / `i_dtime`(20)。
+/// inode: `i_atime`(8) / `i_ctime`(12) / `i_mtime`(16) / `i_dtime`(20)、
+/// および `i_uid`(2) / `i_gid`(24) と、その上位半分（`l_i_uid_high`(120) /
+/// `l_i_gid_high`(122)）。
+///
+/// # 所有者は「誰が建てたか」である（2026-09-06 に足した）
+///
+/// **`mke2fs -d` は種のファイルの所有者をそのまま像へ写す。** **手元では
+/// uid 1000、CI では別の uid になるので、像のバイトが建てた人で変わる。**
+/// **実測で見つけた**——CI が赤になり、コンテナで再現し、`cmp -l` の位置が
+/// 全 inode の 2 と 24 に揃っていた（`docs/troubleshooting.md` の 2026-09-06）。
+///
+/// **`chown` は使えない**（root でなければ 0 にできない）。**建てた後に
+/// 0 で上書きするのは、時刻と同じ形である。** **利用者の概念がまだ無いので、
+/// 0 にして失うものは無い。**
+///
+/// # 名前を変えた
+///
+/// **`zero_image_timestamps` だったが、時刻だけではなくなった**
+/// （`docs/coding-standards.md` の「名前は、実装の範囲が広がった瞬間に
+/// 誤りになる」）。
 ///
 /// **inode の位置は group descriptor から引く。** ここが ext2 の読み取りと
 /// 重なるが、**読むのは 1 フィールド（`bg_inode_table`）だけで、カーネル側の
 /// パーサとは別物である。** 正しさは「2 回建てて md5 が一致すること」と
 /// 「`e2fsck -fn` が clean と言うこと」で確かめる。
-fn zero_image_timestamps(image: &str) {
+fn zero_image_build_traces(image: &str) {
     let mut bytes = std::fs::read(image).expect("failed to read the image back");
 
     let u16_at = |b: &[u8], o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
@@ -959,6 +980,13 @@ fn zero_image_timestamps(image: &str) {
             }
             for offset in [8usize, 12, 16, 20] {
                 bytes[inode + offset..inode + offset + 4].copy_from_slice(&0u32.to_le_bytes());
+            }
+            // `i_uid`(2) / `i_gid`(24)。**どちらも 2 バイトで、上位半分が
+            // `i_osd2` の中にある**（Linux の形。`l_i_uid_high`(120) /
+            // `l_i_gid_high`(122)）。**上位半分は uid が 65535 を超えた
+            // ときにだけ効くが、同じ理由で潰す。**
+            for offset in [2usize, 24, 120, 122] {
+                bytes[inode + offset..inode + offset + 2].copy_from_slice(&0u16.to_le_bytes());
             }
             // **256 バイトの inode は、128 バイトの外に時刻をもう 5 つ持つ。**
             // `i_ctime_extra`(132) / `i_mtime_extra`(136) / `i_atime_extra`(140) /
