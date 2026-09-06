@@ -7,6 +7,11 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PROJECT_DIR}/.claude/hooks/deny_dangerous_bash.py"
+          },
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PROJECT_DIR}/.claude/hooks/deny_push_when_red.py",
+            "timeout": 300
           }
         ]
       }
