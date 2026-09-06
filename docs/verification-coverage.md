@@ -236,7 +236,7 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 
 **同族は洗ってある**（`docs/troubleshooting.md`の同じ日の記録に、洗った範囲と結論がある）。
 
-### CI（`push`のたびの基底の検査）
+### CI（`push`のたびの検査）
 
 **`.github/workflows/check.yml`が、`push`のたびに2つのジョブを走らせる**
 （2026-09-06に入れた）。**基底の`cargo xtask check`と、`cargo xtask check --commit`
