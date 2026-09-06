@@ -1836,9 +1836,9 @@ const FOLDABLE_VECTORS: [u8; FOLDABLE_VECTOR_COUNT] = FOLDABLE_VECTORS_VALUE;
 
 /// 畳めるベクタの本数。
 #[cfg(not(feature = "fp-mf-not-foldable-test"))]
-pub const FOLDABLE_VECTOR_COUNT: usize = 6;
+pub const FOLDABLE_VECTOR_COUNT: usize = 7;
 #[cfg(feature = "fp-mf-not-foldable-test")]
-pub const FOLDABLE_VECTOR_COUNT: usize = 5;
+pub const FOLDABLE_VECTOR_COUNT: usize = 6;
 
 /// 畳めるベクタ（`ADR-0058` で 2 つ増えた）。
 ///
@@ -1861,12 +1861,22 @@ pub const FOLDABLE_VECTOR_COUNT: usize = 5;
 ///
 /// **`#XM` は実機のために入れてある。** **観測できないので、観測できないと
 /// 書く。**
+///
+/// # `#DB`(1) は掃きで見つけた
+///
+/// **`EFLAGS.TF` は Ring 3 から `popfq` で立てられる**（`IF` と違って IOPL を
+/// 見ない）。**立てると次の命令の後に `#DB` が上がり、畳めないので
+/// カーネルが止まっていた**（実測。2026-09-07。`/bin/dbfault`）。
+///
+/// **ハードウェアブレークポイント（`DR` レジスタ）は Ring 3 から触れない**
+/// ので、**この経路は単一ステップだけである。** **カーネル由来の `#DB` は
+/// 畳まれない**（条件 2 の `CS.RPL == 3` が弾く）。
 #[cfg(not(feature = "fp-mf-not-foldable-test"))]
-const FOLDABLE_VECTORS_VALUE: [u8; FOLDABLE_VECTOR_COUNT] = [0, 6, 13, 14, 16, 19];
+const FOLDABLE_VECTORS_VALUE: [u8; FOLDABLE_VECTOR_COUNT] = [0, 1, 6, 13, 14, 16, 19];
 /// 破壊確認: `#MF` を畳めなくする（`ADR-0058`）。**Ring 3 の浮動小数点の
 /// 例外で、カーネルが止まる形へ戻る**——**台本が最後まで進まない。**
 #[cfg(feature = "fp-mf-not-foldable-test")]
-const FOLDABLE_VECTORS_VALUE: [u8; FOLDABLE_VECTOR_COUNT] = [0, 6, 13, 14, 19];
+const FOLDABLE_VECTORS_VALUE: [u8; FOLDABLE_VECTOR_COUNT] = [0, 1, 6, 13, 14, 19];
 
 /// 中断（Ctrl+C）が要求されていれば、走っている子の遠征を畳む（S12 前の手当て、C）。
 ///

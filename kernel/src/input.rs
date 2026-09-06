@@ -1021,8 +1021,16 @@ pub(crate) mod script {
     /// 0 でなければ、既定値から始めていない。**
     ///
     /// **`fptest` は中で `/bin/fpchild` を起こす**（遠征の側の判定）。
+    ///
+    /// # 順序に意味がある
+    ///
+    /// **`dbfault` を `fpfault` より先に打つ。** **畳めないベクタが在ると
+    /// カーネルが止まり、それ以降の行は走らない**——**後ろに置くと、
+    /// `#MF` の破壊が `#DB` の判定まで落とす**（**1 つの破壊が 2 本落とす形**。
+    /// `docs/troubleshooting.md` の 2026-09-05）。
     #[cfg(feature = "fp-test")]
     const SCRIPT: &[u8] = b"/bin/fptest\n\
+        /bin/dbfault\n\
         /bin/fpfault\n\
         exit\n\x0c";
 

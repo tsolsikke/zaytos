@@ -4809,6 +4809,11 @@ fn cmd_fp_test(features: &[&str], expect_pass: bool) -> Result<()> {
     // 上がらない**（実測。2026-09-07。**同じコードはホストで `SIGFPE` になる**）。
     // **`/bin/fpfault` は両方を試し、上がったほうで畳まれる。**
     let folded_the_fp_fault = stripped.contains("/bin/fpfault ended (Folded(16))");
+    // **判定 5**——**単一ステップ（`EFLAGS.TF`）でもカーネルは止まらない。**
+    // **掃きで見つけた3つ目の穴である**（`ADR-0058` の「Ring 3 から届くベクタを
+    // 洗った」）。**破壊は置いていない**——**`fp-mf-not-foldable-test` が
+    // 「畳めるベクタの一覧が効いていること」を既に主張している。**
+    let folded_the_debug_fault = stripped.contains("/bin/dbfault ended (Folded(1))");
     // **止まっていないことは、台本が最後まで進んだことで言う。**
     let script_finished = stripped.contains("script-done:");
 
@@ -4835,6 +4840,7 @@ fn cmd_fp_test(features: &[&str], expect_pass: bool) -> Result<()> {
         "{context}: a floating-point exception folded the program instead of halting the \
          kernel = {folded_the_fp_fault} (the script ran to the end = {script_finished})"
     );
+    println!("{context}: single-stepping itself folded the program too = {folded_the_debug_fault}");
     println!(
         "{context}: (info) QEMU's TCG did not deliver #XM, so only #MF is observed here = \
          {simd_did_not_fire}"
@@ -4849,6 +4855,7 @@ fn cmd_fp_test(features: &[&str], expect_pass: bool) -> Result<()> {
         && sum_survived
         && parent_kept_xmm0
         && folded_the_fp_fault
+        && folded_the_debug_fault
         && script_finished;
     if passed {
         println!("{context}: PASS");

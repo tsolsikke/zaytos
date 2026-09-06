@@ -400,7 +400,7 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
 ///   **C は最適化を切ると `memcpy` の呼び出しが増える**ので、既定を `-O2` にする
 fn build_c_programs(manifest_dir: &str, out_dir: &str, script: &str) {
     /// C で書いたユーザープログラム。**足すときはここへ 1 行足す。**
-    const C_PROGRAMS: &[&str] = &["chello", "fptest", "fpchild", "fpfault"];
+    const C_PROGRAMS: &[&str] = &["chello", "fptest", "fpchild", "fpfault", "dbfault"];
 
     /// 自前の libc（C-c。`ADR-0057`）。**すべての C のプログラムと一緒に建てる。**
     const LIBC_SOURCES: &[&str] = &["libc.c", "libc_string.c"];
@@ -598,6 +598,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         "fptest",
         "fpchild",
         "fpfault",
+        "dbfault",
     ] {
         std::fs::copy(
             format!("{out_dir}/{name}.elf"),
