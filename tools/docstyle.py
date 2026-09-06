@@ -80,7 +80,7 @@ def list_files(ref=None):
         "README.md",
         "CLAUDE.md",
         "docs/",
-        ".local-probes/",
+        "probes/",
     ]
     out = subprocess.check_output(args, text=True).split()
     # --cached と --others は排他なので重複しないが、念のため順序を保って

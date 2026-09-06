@@ -133,3 +133,12 @@ WCを導入することになっても、この構成は変わらず、転送そ
 `cargo xtask run --kvm`は計測専用。
 KVMでは`-d int`の記録が一切残らないため、`v=0e` / `v=08`による例外チェックが常に0を返す （`docs/troubleshooting.md`参照）。
 デバッグと動作確認は既定のTCGで行うこと。
+
+## Addendum（2026-09-06。プローブの置き場が改名された）
+
+**本文とAddendum 2は`.local-probes/m3c-flush-cost-probe.patch`と書いている。**
+**いまの在り処は`probes/m3c-flush-cost-probe.patch`である。**
+
+**本文は書き換えない**（記録は当時のまま残す）。**改名の理由は
+`probes/README.md`にある**——**`ADR-0031`で追跡下へ入れた時点で
+「local」が実態と合わなくなったためである。**

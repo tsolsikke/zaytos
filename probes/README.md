@@ -3,6 +3,11 @@
 一時的な計測コードを、必要になるまで残しておくための置き場。
 ビルドにも実行にも入らない。
 
+**以前は `.local-probes/` という名前だった。** **`ADR-0031` で追跡下へ入れた
+時点で「local」が実態と合わなくなったので、2026-09-06 に `probes/` へ改名した。**
+**`ADR-0015` の本文は当時の名前のままである**（記録は書き換えない。
+あちらの Addendum が現在の在り処を指している）。
+
 ## m3c-flush-cost-probe.patch
 
 バックバッファ→フレームバッファの転送コストを rdtsc で測るプローブ
@@ -10,7 +15,7 @@
 シリアルログに `probe:` 行として結果が出る。計測が済んだら revert すること。
 
 **このパッチはいまのツリーには当たらない。** M3 完了時点の main.rs を
-前提にしており、`git apply --check .local-probes/m3c-flush-cost-probe.patch`
+前提にしており、`git apply --check probes/m3c-flush-cost-probe.patch`
 は `patch does not apply` を返す（実測）。**残してあるのは、当てる先ではなく
 測り方（どこで何を数えるか）が資産だからである。** 次に測るときは、
 同じ計測を現在の main.rs に対して書き直す。
