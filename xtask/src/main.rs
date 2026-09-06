@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env,
     ffi::OsString,
     fs,
@@ -12189,6 +12190,284 @@ const COMMIT_STYLE_SINCE: &str = "2026-07-22T08:30:00+09:00";
 ///
 /// `git ls-files` で引く。未追跡の作業メモを対象にすると、コミットに関係のない
 /// ファイルで落ちる。
+/// バックティックの中のパスが実在しないことを承知で書いている箇所（TAB-1 の後の精査）。
+///
+/// # なぜ許可リストが要るのか
+///
+/// **「消したファイルについての記録」は、実在しないパスを書くのが正しい。**
+/// **文言では分けられない**ので、箇所を列挙する。
+///
+/// **`.claude` の索引の検査と同じ形である**——**列挙で守る検査なので、
+/// 新しく足したら一覧へも足すこと。**
+const DOC_PATH_ALLOWLIST: &[(&str, &str)] = &[
+    // **消したこと自体の記録である**（`unsafe/SAFETY` の検査が消えたファイルを
+    // 読もうとして落ちた話）。
+    ("docs/troubleshooting.md", "kernel/src/console/grid.rs"),
+    // **当時の参照実装である。** **M2-0a で `common` へ移った**と本文が書いている。
+    (
+        "docs/adr/0004-panic-policy-halt-and-dump.md",
+        "kernel/src/cpu.rs",
+    ),
+];
+
+/// バックティックの中のパスを、この順で前置して探す（TAB-1 の後の精査）。
+///
+/// **文書は `kernel/src/` を省いた断片で書くことが多い**（実測で 12 件）
+/// ——`heap/allocator.rs` のような形である。**除外せず、前置して確かめる。**
+const DOC_PATH_PREFIXES: &[&str] = &[
+    "",
+    "kernel/src/",
+    "kernel/",
+    "common/src/",
+    "common/",
+    "xtask/src/",
+    "bootloader/src/",
+];
+
+/// 追跡下の `.md` から、リンク先・アンカー・バックティックの中のパスの生存を見る。
+///
+/// # `tools/docstyle.py` から移した（2026-09-06）
+///
+/// **`S5`（リンクとアンカーの生存）は「レンダリング結果を見る必要がある」を理由に
+/// 移していなかったが、実装を読むと正規表現と `git ls-files` だけで、
+/// レンダラを使っていない**（実測。`docs/verification-coverage.md` の
+/// 「文体の検査を補助スクリプトからxtaskへ移した範囲」の表を直した）。
+///
+/// # バックティックの中のパスも見る
+///
+/// **リンクではない参照が、25 日間リポジトリに無いファイルを指していた**
+/// （`.local-probes` の調査。2026-09-06）。**`docstyle` の `S5` はリンクしか
+/// 見ないので、その形は素通りする。**
+fn check_markdown_references(workspace_root: &Path) -> Result<Vec<String>> {
+    let tracked = tracked_paths(workspace_root, &["*"])?;
+    let markdown = tracked_paths(workspace_root, &["*.md"])?;
+
+    // 見出しからアンカーを作る（`docstyle` の `S5` と同じ作り方）。
+    let mut anchors: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut bodies: BTreeMap<String, String> = BTreeMap::new();
+    for rel in &markdown {
+        let Ok(text) = fs::read_to_string(workspace_root.join(rel)) else {
+            continue;
+        };
+        let mut got = Vec::new();
+        for line in text.lines() {
+            let trimmed = line.trim_start_matches('#');
+            if trimmed.len() < line.len() && trimmed.starts_with(' ') {
+                got.push(heading_slug(trimmed.trim()));
+            }
+        }
+        anchors.insert(rel.clone(), got);
+        bodies.insert(rel.clone(), text);
+    }
+
+    let mut findings = Vec::new();
+    for rel in &markdown {
+        let Some(text) = bodies.get(rel) else {
+            continue;
+        };
+        let base = rel.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+        for (index, line) in text.lines().enumerate() {
+            let number = index + 1;
+            for target in markdown_link_targets(line) {
+                if target.starts_with("http://")
+                    || target.starts_with("https://")
+                    || target.starts_with("mailto:")
+                {
+                    continue;
+                }
+                let (path, fragment) = match target.split_once('#') {
+                    Some((path, fragment)) => (path, Some(fragment)),
+                    None => (target.as_str(), None),
+                };
+                let full = if path.is_empty() {
+                    rel.clone()
+                } else if base.is_empty() {
+                    path.to_string()
+                } else {
+                    format!("{base}/{path}")
+                };
+                let normal = full.trim_end_matches('/').to_string();
+                if !path.is_empty()
+                    && !tracked
+                        .iter()
+                        .any(|t| *t == normal || t.starts_with(&format!("{normal}/")))
+                {
+                    findings.push(format!("{rel}:{number}: リンク先が存在しない -> {target}"));
+                    continue;
+                }
+                if let Some(fragment) = fragment {
+                    if let Some(got) = anchors.get(&normal) {
+                        if !got.iter().any(|slug| slug == fragment) {
+                            findings
+                                .push(format!("{rel}:{number}: アンカーが存在しない -> {target}"));
+                        }
+                    }
+                }
+            }
+            for path in backticked_paths(line) {
+                if DOC_PATH_ALLOWLIST
+                    .iter()
+                    .any(|(file, allowed)| *file == rel && *allowed == path)
+                {
+                    continue;
+                }
+                let found = DOC_PATH_PREFIXES.iter().any(|prefix| {
+                    let candidate = format!("{prefix}{path}");
+                    tracked.contains(&candidate) || workspace_root.join(&candidate).exists()
+                });
+                if !found {
+                    findings.push(format!(
+                        "{rel}:{number}: バックティックの中のパスが存在しない -> `{path}`"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(findings)
+}
+
+/// 見出しの文字列からアンカーの綴りを作る（`docstyle` の `S5` と同じ規則）。
+fn heading_slug(heading: &str) -> String {
+    let mut slug = String::new();
+    for ch in heading.to_lowercase().chars() {
+        if ch.is_alphanumeric() || ch == '-' || ch == '_' {
+            slug.push(ch);
+        } else if ch == ' ' {
+            slug.push('-');
+        }
+    }
+    slug
+}
+
+/// `[...](...)` の行き先を集める。
+fn markdown_link_targets(line: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    let bytes: Vec<char> = line.chars().collect();
+    let mut at = 0usize;
+    while at < bytes.len() {
+        if bytes[at] == '[' {
+            if let Some(close) = (at + 1..bytes.len()).find(|i| bytes[*i] == ']') {
+                if close + 1 < bytes.len() && bytes[close + 1] == '(' {
+                    if let Some(end) = (close + 2..bytes.len()).find(|i| bytes[*i] == ')') {
+                        targets.push(bytes[close + 2..end].iter().collect());
+                        at = end + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        at += 1;
+    }
+    targets
+}
+
+/// バックティックで囲まれた、`/` を含むパス様の文字列を集める。
+///
+/// **拡張子を持つものだけを見る。** **コマンドの断片（`mke2fs -d` など）を
+/// パスと取り違えないためである**——**偽陽性を規則で外し、許可リストを短く保つ。**
+/// **`target/` の下は生成物なので見ない。**
+fn backticked_paths(line: &str) -> Vec<String> {
+    const EXTENSIONS: &[&str] = &[
+        ".rs", ".md", ".py", ".toml", ".json", ".ld", ".patch", ".txt", ".img", ".efi", ".elf",
+    ];
+    let mut paths = Vec::new();
+    for piece in line.split('`').skip(1).step_by(2) {
+        if !piece.contains('/') || piece.contains(' ') || piece.starts_with("target/") {
+            continue;
+        }
+        if !EXTENSIONS.iter().any(|ext| piece.ends_with(ext)) {
+            continue;
+        }
+        if piece.contains("..") {
+            // **`#[path]` に書く相対パスの引用である**（`../../common/src/text.rs`）。
+            continue;
+        }
+        // **形で外す**（実測で 3 件出た。2026-09-06）。
+        //
+        // **`*` は寄せ書き**（`kernel/userland/*.rs`）、**`<` と `>` は差し込みの
+        // 場所**（`common/src/<name>.rs`）、**`=` と `:` はコマンドの引数**
+        // （`cargo:rustc-link-arg=-T{manifest_dir}/link.ld`）**である。**
+        // **どれも「1 つのファイルを指す参照」ではないので、生存を問えない。**
+        //
+        // **許可リストではなく規則で外す**——**許可リストは「実在しないと
+        // 承知で書いた箇所」のためのもので、短く保つ。**
+        if piece.contains(['*', '<', '>', '{', '}', '=', ':']) {
+            continue;
+        }
+        paths.push(piece.to_string());
+    }
+    paths
+}
+
+/// 追跡下の `.md` の構造を見る（フェンスの対と、見出しレベルの飛び）。
+///
+/// # `tools/docstyle.py` から移した（2026-09-06）
+///
+/// **`S4` も「レンダリング結果を見る必要がある」を理由に移していなかったが、
+/// 実装は行を数えるだけでレンダラを使っていない**（実測）。
+fn check_markdown_structure(workspace_root: &Path) -> Result<Vec<String>> {
+    let markdown = tracked_paths(workspace_root, &["*.md"])?;
+    let mut findings = Vec::new();
+    for rel in &markdown {
+        let Ok(text) = fs::read_to_string(workspace_root.join(rel)) else {
+            continue;
+        };
+        let mut fences = 0usize;
+        let mut in_fence = false;
+        let mut previous = 0usize;
+        for (index, line) in text.lines().enumerate() {
+            if line.trim_start().starts_with("```") {
+                fences += 1;
+                in_fence = !in_fence;
+                continue;
+            }
+            if in_fence {
+                continue;
+            }
+            let level = line.len() - line.trim_start_matches('#').len();
+            if level == 0 || !line[level..].starts_with(' ') {
+                continue;
+            }
+            if previous > 0 && level > previous + 1 {
+                findings.push(format!(
+                    "{}:{}: 見出しレベルが {} から {} へ飛んでいる",
+                    rel,
+                    index + 1,
+                    previous,
+                    level
+                ));
+            }
+            previous = level;
+        }
+        if !fences.is_multiple_of(2) {
+            findings.push(format!(
+                "{rel}: コードフェンスが閉じていない（{fences} 本）"
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+/// `git ls-files` の結果を集める。
+fn tracked_paths(workspace_root: &Path, patterns: &[&str]) -> Result<Vec<String>> {
+    let mut args = vec!["ls-files"];
+    args.extend_from_slice(patterns);
+    let output = Command::new("git")
+        .current_dir(workspace_root)
+        .args(&args)
+        .output()
+        .context("failed to run git ls-files")?;
+    if !output.status.success() {
+        bail!("git ls-files failed");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 fn check_markdown_prose_style(workspace_root: &Path) -> Result<Vec<String>> {
     let output = Command::new("git")
         .current_dir(workspace_root)
@@ -15381,6 +15660,38 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
+    begin_item("markdown links, anchors and backticked paths resolve (tracked .md)");
+    let references = check_markdown_references(&workspace_root)?;
+    if references.is_empty() {
+        println!("--- markdown references: OK");
+    } else {
+        for finding in &references {
+            println!("    {finding}");
+        }
+        println!(
+            "--- markdown references: FAILED ({} finding(s))",
+            references.len()
+        );
+        failed.push("markdown references".to_string());
+    }
+
+    total += 1;
+    begin_item("markdown structure (fence pairs and heading levels, tracked .md)");
+    let structure = check_markdown_structure(&workspace_root)?;
+    if structure.is_empty() {
+        println!("--- markdown structure: OK");
+    } else {
+        for finding in &structure {
+            println!("    {finding}");
+        }
+        println!(
+            "--- markdown structure: FAILED ({} finding(s))",
+            structure.len()
+        );
+        failed.push("markdown structure".to_string());
+    }
+
+    total += 1;
     begin_item(&format!("commit message style (prefixes and blank line over all history; \
          body length after {COMMIT_BODY_RULE_COMMIT}; Japanese/ASCII gap since {COMMIT_STYLE_SINCE})"));
     let offenders = check_commit_message_style(&workspace_root)?;
@@ -15767,8 +16078,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 27,
-    full: 282,
+    base: 29,
+    full: 284,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
