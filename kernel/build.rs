@@ -338,6 +338,17 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
                 "2021",
                 "--target",
                 "x86_64-unknown-none",
+                // **像をチェックアウト先から切り離す（2026-09-06）。**
+                //
+                // **原本を絶対パスで渡しているので、`panic` の位置がその
+                // まま `.rodata` へ載る。** **像のバイトがチェックアウト先で
+                // 変わり、起動ログの checksum の判定が別の機械で落ちた**
+                // （CI の実測。`docs/troubleshooting.md` の 2026-09-06）。
+                //
+                // **`mke2fs` の出力を決定的にしたのと同じ族である**——
+                // **決定的にする範囲に、建てる場所も入る。**
+                "--remap-path-prefix",
+                &format!("{manifest_dir}=kernel"),
                 "-C",
                 "panic=abort",
                 // 既定に依存せず、非 PIE を明示する。
