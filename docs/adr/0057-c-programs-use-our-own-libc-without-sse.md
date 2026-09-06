@@ -75,6 +75,10 @@ GUIの段でotf/ttfを載せるには`stb_truetype`相当が要り、自作す�
 **`syscall` / `sysret`への差し替え**（自前のlibcが`int 0x80`を出すので要らない。TLSも要らない）。
 **`ioctl`の入口**（`termios`は対話する道具を移す段である）。**時刻の欄。**
 
+**libcの面のうち作らなかったもの**——**穴を管理する`malloc`、`printf`、`stdio`の緩衝。**
+**ここは決定の範囲を書く場所なので、いつ要るかは`docs/deferred-decisions.md`の行に在る**
+（3本立てた。2026-09-06）。
+
 ## Consequences
 
 - **Cのプログラムが`/bin`に置けるようになる。**
