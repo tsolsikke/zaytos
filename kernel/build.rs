@@ -358,6 +358,65 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
 
         assert!(status.success(), "rustc failed for the user program {name}");
     }
+
+    build_c_programs(manifest_dir, out_dir, &script);
+}
+
+/// C で書いたユーザープログラムを `gcc` で建てる（C-a。`ADR-0057`）。
+///
+/// # 建て方は 1 箇所に保つ
+///
+/// **`ADR-0057` の Decision 4 である。** **ABI のフラグ（`-mno-sse` ほか）は
+/// 選択なので、libc も利用側も同じもので建てなければならない**——
+/// **散らすと黙って食い違う。** **`rustc` を呼ぶ箇所と同じこのファイルへ置く。**
+///
+/// # フラグの理由
+///
+/// - `-ffreestanding` / `-nostdlib`——**libc も crt も無い。** `_start` から始まる
+/// - `-no-pie` / `-static`——**ELF ローダが `ET_EXEC` しか受けない**
+///   （`common/src/elf.rs`）
+/// - `-T{script}`——**Rust のユーザープログラムと同じ `user.ld` である。**
+///   **付けないと `PT_LOAD` が 3 つになり、1 つが像より下の `0x3ff000` へ出る**
+///   （実測。2026-09-06）
+/// - `-mno-sse -mno-mmx -mno-80387`——**`ADR-0057` の Decision 3。**
+///   **カーネルは SSE を有効にしておらず、文脈切り替えで FP を保存していない**
+/// - `-fno-stack-protector`——**守りの実体（カナリアの置き場）が無い**
+/// - `-O2`——**Rust 側の `opt-level=s` と揃える意図は無い。**
+///   **C は最適化を切ると `memcpy` の呼び出しが増える**ので、既定を `-O2` にする
+fn build_c_programs(manifest_dir: &str, out_dir: &str, script: &str) {
+    /// C で書いたユーザープログラム。**足すときはここへ 1 行足す。**
+    const C_PROGRAMS: &[&str] = &["chello"];
+
+    for name in C_PROGRAMS {
+        let source = format!("{manifest_dir}/userland/{name}.c");
+        let output = format!("{out_dir}/{name}.elf");
+        println!("cargo:rerun-if-changed={source}");
+
+        let status = std::process::Command::new(std::env::var("CC").unwrap_or("cc".into()))
+            .args([
+                "-ffreestanding",
+                "-nostdlib",
+                "-no-pie",
+                "-static",
+                "-mno-sse",
+                "-mno-mmx",
+                "-mno-80387",
+                "-fno-stack-protector",
+                "-O2",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-T",
+                script,
+                "-o",
+                &output,
+                &source,
+            ])
+            .status()
+            .unwrap_or_else(|e| panic!("failed to run cc for the C program {name}: {e}"));
+
+        assert!(status.success(), "cc failed for the C program {name}");
+    }
 }
 
 /// `NAME = 0x...;` の形の代入から値を読む。
@@ -473,6 +532,8 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         "less",
         "more",
         "echo",
+        // **C で書いたもの（C-a。`ADR-0057`）。** **`gcc` が建てる。**
+        "chello",
     ] {
         std::fs::copy(
             format!("{out_dir}/{name}.elf"),

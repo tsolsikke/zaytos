@@ -7239,6 +7239,14 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     let ran_ls = after_shell.contains("lost+found");
     let ran_cat = after_shell.contains("welcome to ZaytOS");
     let ran_hello = after_shell.contains("hello from ring 3");
+    // **C で書いたプログラムが走ったこと（C-a。`ADR-0057`）。**
+    //
+    // **落とす破壊は無い。** **到達条件だからである**——**`hello ran` と同じ族で、
+    // あちらも「落とす破壊が無い判定」の一覧に載っている**
+    // （`docs/verification-coverage.md` の「判定の側から見る」）。
+    // **足すときにその場で確かめた**（`docs/coding-standards.md` の
+    // 「判定を足すときは、その場で『落とす破壊が在るか』を確かめる」）。
+    let ran_c_hello = after_shell.contains("hello from C");
 
     // **`/` を含まない語が `/bin/` の下で見つかること（S12 前の手当ての 3 本目）。**
     //
@@ -7754,6 +7762,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     println!("{context}: ls listed the root = {ran_ls}");
     println!("{context}: cat printed /etc/motd = {ran_cat}");
     println!("{context}: hello ran = {ran_hello}");
+    println!("{context}: the C program ran = {ran_c_hello}");
     println!("{context}: bare names resolved under /bin = {bare_names_resolved}");
     println!("{context}: argv[0] stayed as typed = {argv0_is_as_typed}");
     println!("{context}: backspace edited the line = {backspace_edited_the_line}");
@@ -7877,6 +7886,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && ran_ls
         && ran_cat
         && ran_hello
+        && ran_c_hello
         && bare_names_resolved
         && argv0_is_as_typed
         && backspace_edited_the_line
@@ -8030,6 +8040,14 @@ const SHELL_TEST_LINES: &[&[&str]] = &[
     // /bin/hello
     &[
         "slash", "b", "i", "n", "slash", "h", "e", "l", "l", "o", "ret",
+    ],
+    // /bin/chello（C-a。`ADR-0057`）。**C で書いたプログラムが走ること。**
+    //
+    // **`hello` の隣に置く。** **主張が同じ族だからである**——
+    // **シェルが `/bin` の実行ファイルを起こせること。** **違うのは言語だけで、
+    // 通る道（ELF ローダ・`int 0x80`・`spawn`）は同じである。**
+    &[
+        "slash", "b", "i", "n", "slash", "c", "h", "e", "l", "l", "o", "ret",
     ],
     // ls（`/` を含まない。`/bin/` の下で見つかること）
     &["l", "s", "ret"],
