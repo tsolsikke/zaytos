@@ -428,5 +428,7 @@ socket のパス長で相手側が先に落ちたからで、規則が守られ�
 
 ### 14.3 一時的な破壊・変更の手順
 
-本体は `.claude/rules/temporary-changes.md` にある。
+本体は `docs/coding-standards.md` の「一時的な破壊・変更の手順」にある
+（`ADR-0048`。**実測を含むので docs 側である**）。
+`.claude/rules/temporary-changes.md` がそこを指している。
 
