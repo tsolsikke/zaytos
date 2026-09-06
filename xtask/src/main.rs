@@ -12229,6 +12229,10 @@ const COMMIT_STYLE_SINCE: &str = "2026-07-22T08:30:00+09:00";
 /// - **当時の在り処の記録**（参照実装・改名の前の名前。**記録は書き換えない**ので、
 ///   本文は当時のまま残り、Addendum が現在の在り処を指す）
 ///
+/// **「意図して追跡していないファイル」は、この一覧ではなく
+/// [`UNTRACKED_BY_DESIGN`] へ置く**——**ファイルの性質であって、
+/// それを書いた文書の性質ではないからである。**
+///
 /// **それ以外は直す側である。** **パスが古くなっただけなら、書き換えればよい。**
 ///
 /// **1 件につき理由を 1 行添えること。** **理由の書けない項目は、直す側である。**
@@ -12248,6 +12252,22 @@ const DOC_PATH_ALLOWLIST: &[(&str, &str)] = &[
         ".local-probes/m3c-flush-cost-probe.patch",
     ),
 ];
+
+/// **意図して追跡していないファイル**（`ADR-0031`。**個人の環境設定を公開
+/// リポジトリの設定に混ぜない**）。
+///
+/// # なぜ (ファイル, パス) の組ではなく、パスだけで持つのか
+///
+/// **追跡外であることは、その**ファイル**の性質であって、それを書いた文書の
+/// 性質ではない。** **組で持つと、同じ名前に触れる文書が増えるたびに 1 行
+/// 増える**——**実際に増えた**（実測。2026-09-06。**`ADR-0031` と
+/// `verification-coverage.md` で足りると思ったら、`troubleshooting.md` の
+/// 記録で 3 箇所目が出た**）。
+///
+/// **上の [`DOC_PATH_ALLOWLIST`] とは意味が違う。** **あちらは「その文書の、
+/// その 1 箇所」を許すもので、こちらは「このパスはリポジトリに無いのが正しい」
+/// である。**
+const UNTRACKED_BY_DESIGN: &[&str] = &[".claude/settings.local.json"];
 
 /// バックティックの中のパスを、この順で前置して探す（TAB-1 の後の精査）。
 ///
@@ -12347,13 +12367,18 @@ fn check_markdown_references(workspace_root: &Path) -> Result<Vec<String>> {
                 if DOC_PATH_ALLOWLIST
                     .iter()
                     .any(|(file, allowed)| *file == rel && *allowed == path)
+                    || UNTRACKED_BY_DESIGN.contains(&path.as_str())
                 {
                     continue;
                 }
-                let found = DOC_PATH_PREFIXES.iter().any(|prefix| {
-                    let candidate = format!("{prefix}{path}");
-                    tracked.contains(&candidate) || workspace_root.join(&candidate).exists()
-                });
+                // **追跡下だけを見る。** **作業ツリーに在るかは見ない**——
+                // **見ると、手元では通って CI では落ちる**（実測。2026-09-06。
+                // **`.claude/settings.local.json` は`ADR-0031`で追跡外と決めてあり、
+                // 手元にだけ在る**）。**この検査が主張したいのは
+                // 「リポジトリが、リポジトリに無いものを指していないこと」である。**
+                let found = DOC_PATH_PREFIXES
+                    .iter()
+                    .any(|prefix| tracked.contains(&format!("{prefix}{path}")));
                 if !found {
                     findings.push(format!(
                         "{rel}:{number}: バックティックの中のパスが存在しない -> `{path}`"
