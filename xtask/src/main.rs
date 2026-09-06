@@ -13918,6 +13918,118 @@ fn check_fs_image_passes_e2fsck(workspace_root: &Path) -> Result<String> {
     Ok(format!("{summary}; build.rs measured {constants}"))
 }
 
+/// 像に「どこで・誰が建てたか」が残っていないことを見る（2026-09-06、静的）。
+///
+/// # 何を主張するか
+///
+/// **同じ木からは、誰がどこで建てても同じ像が出ること。** 見るのは 2 つである。
+///
+/// - **建てた場所**——像のどこにも作業ツリーの絶対パスが現れないこと
+/// - **建てた人**——全 inode の `i_uid` / `i_gid`（と上位半分）が 0 であること
+///
+/// # 実測で 2 つとも出た（2026-09-06）
+///
+/// **CI へ `--commit` を足した 1 回目と 2 回目が、どちらもこれで赤になった。**
+/// **`rustc` へ原本を絶対パスで渡していたので `panic` の位置が像へ載り、
+/// `mke2fs -d` が種の所有者を写していたので uid が像へ載っていた**
+/// （`docs/troubleshooting.md` の 2026-09-06）。
+///
+/// # 起動ログの差分では代わりにならない
+///
+/// **あちらでも出る**（像の checksum が参照と違う）。**ただし 2 つの弱点がある。**
+///
+/// - **「checksum が違う」としか言わない。** 何が混ざったかは、像を取り出して
+///   突き合わせるまで分からない（実際にそうやって絞った）
+/// - **参照を録り直すと消える。** **録り直した人の uid が参照へ入るだけで、
+///   その人の手元だけが緑になる**——**この検査は参照に依らない。**
+///
+/// # 落とす破壊
+///
+/// **2 つとも、一度作って落ちることを確かめた**（`docs/coding-standards.md` の
+/// 「新しい静的な検査は、主張が偽の状態を一度作って落ちることを確かめてから
+/// 置く」）。**`kernel/build.rs` の `--remap-path-prefix` を外すと場所の側が、
+/// `zero_image_build_traces` の `i_uid` / `i_gid` の行を外すと人の側が落ちる。**
+fn check_image_has_no_build_traces(workspace_root: &Path) -> Result<String> {
+    let out_dir = kernel_build_out_dir(workspace_root)?;
+    let image = out_dir.join(FS_IMAGE_NAME);
+    let bytes = fs::read(&image)
+        .with_context(|| format!("could not read the image {}", image.display()))?;
+
+    // --- 建てた場所 ---
+    let root = workspace_root.to_string_lossy().into_owned();
+    let needle = root.as_bytes();
+    if let Some(at) = bytes.windows(needle.len()).position(|w| w == needle) {
+        bail!(
+            "the image carries the absolute path of this working tree at byte {at} ({root}). \
+             Something the build embeds is compiled with an absolute source path, so the image \
+             differs per checkout directory (see kernel/build.rs, --remap-path-prefix)"
+        );
+    }
+
+    // --- 建てた人 ---
+    // **inode の位置の引き方は `kernel/build.rs` の `zero_image_build_traces`
+    // と同じである。** **写しではあるが、片方が壊れたときにもう片方が落ちる
+    // 形なので、同じ出所から引いてはならない。**
+    let u16_at = |o: usize| u16::from_le_bytes([bytes[o], bytes[o + 1]]);
+    let u32_at =
+        |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+    const SUPERBLOCK_OFFSET: usize = 1024;
+    let sb = SUPERBLOCK_OFFSET;
+    let block_size = 1024usize << u32_at(sb + 24);
+    let inodes_count = u32_at(sb) as usize;
+    let inodes_per_group = u32_at(sb + 40) as usize;
+    let inode_size = u16_at(sb + 88) as usize;
+    let first_data_block = u32_at(sb + 20) as usize;
+    let group_count = inodes_count.div_ceil(inodes_per_group);
+    let gd_table = (first_data_block + 1) * block_size;
+
+    let mut owned: Vec<String> = Vec::new();
+    let mut seen = 0usize;
+    for group in 0..group_count {
+        let gd = gd_table + group * 32;
+        let inode_table = u32_at(gd + 8) as usize * block_size;
+        for index in 0..inodes_per_group {
+            let at = inode_table + index * inode_size;
+            if at + inode_size > bytes.len() {
+                break;
+            }
+            seen += 1;
+            let uid = u16_at(at + 2);
+            let gid = u16_at(at + 24);
+            let uid_high = u16_at(at + 120);
+            let gid_high = u16_at(at + 122);
+            if uid != 0 || gid != 0 || uid_high != 0 || gid_high != 0 {
+                let number = group * inodes_per_group + index + 1;
+                owned.push(format!(
+                    "inode {number} is owned by {}:{}",
+                    u32::from(uid) | (u32::from(uid_high) << 16),
+                    u32::from(gid) | (u32::from(gid_high) << 16)
+                ));
+            }
+        }
+    }
+    if !owned.is_empty() {
+        let shown: Vec<String> = owned.iter().take(3).cloned().collect();
+        bail!(
+            "{} of {seen} inode(s) carry the owner of whoever built the image ({}{}). \
+             mke2fs -d copies the seed files' owner; kernel/build.rs zeroes it after building",
+            owned.len(),
+            shown.join(", "),
+            if owned.len() > shown.len() {
+                ", ..."
+            } else {
+                ""
+            }
+        );
+    }
+
+    Ok(format!(
+        "{seen} inode(s) owned by 0:0, and the image does not carry this working tree's path \
+         ({} byte(s) scanned)",
+        bytes.len()
+    ))
+}
+
 /// `kernel/build.rs` が像から測って生成した定数の読み出し（e-5 の後の手当て）。
 ///
 /// # なぜ判定行に出すのか
@@ -15882,6 +15994,18 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         }
     }
 
+    // 像に「どこで・誰が建てたか」が残っていないこと（2026-09-06、静的）。
+    total += 1;
+    begin_item("the embedded ext2 image carries no trace of where or who built it");
+    match check_image_has_no_build_traces(&workspace_root) {
+        Ok(summary) => println!("--- image build traces: OK ({summary})"),
+        Err(e) => {
+            println!("    {e}");
+            println!("--- image build traces: FAILED");
+            failed.push("image build traces".to_string());
+        }
+    }
+
     let mut retries: Vec<String> = Vec::new();
     if full {
         // QEMU を起動する回帰チェック。1 種類ごとにカーネルをビルドし直して
@@ -16206,8 +16330,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 30,
-    full: 285,
+    base: 31,
+    full: 286,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
