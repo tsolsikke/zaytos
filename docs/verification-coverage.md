@@ -336,6 +336,61 @@ git clone -q file:///path/to/zaytos /tmp/clean && cd /tmp/clean && cargo xtask c
 `#SS`が上がる可能性は残る**——**そのときは畳めないので、実機で走らせる日が来たら
 ここへ戻ること。**
 
+### 列挙で守る機構の一覧（2026-09-07）
+
+**`#DB`の穴は、SSEを有効にする前から在った。** **`#XM`と`#MF`は浮動小数点を有効に
+したから開いた穴だが、`#DB`はS8（ユーザー例外の区別）を作った時点から在った**
+——**あのとき洗っていれば3つとも出ていた。** **能力を足したときだけでなく、
+機構を作ったときにも洗うこと**（規律は`docs/coding-standards.md`の
+「列挙で守る機構を作ったら、その場で空間を洗う」に置いた）。
+
+**範囲は、`xtask/src/main.rs`・`kernel/src/`・`kernel/build.rs`・`common/src/`の
+列挙のかたちをした定数である**（`grep`で約60件当たる）。**そのうち「一覧が
+完全であること」が何かの主張を担っているものを挙げる。** **残りは検査の献立で、
+落ちれば`EXPECTED_CHECK_COUNT`と会計行が言う。**
+
+**数え方は、定数の本体に並ぶ要素の数である**（平文の一覧は文字列の数、
+構造体の一覧は`file:`の数、対の一覧は`"docs/…"`の数）。
+
+| 機構 | 件数 | 足りないとき | 古い項が残っているとき |
+|---|---|---|---|
+| `FOLDABLE_VECTORS`（`kernel/src/idt`） | 7 | **静か**——Ring 3の1命令でカーネルが止まるまで、誰も言わない | **静か**——`#DF`を入れたら、畳んではならないものを畳む |
+| `PARSED_EXTERNAL_TOOLS` | 6 | **静か**——その道具の直呼びを検査が見ない | 無害（当たらないだけ） |
+| `PRIVATE_BOUNDARY_DIRS` | 4 | **静か**——その配下の可視性の漏れを見ない | 無害 |
+| `DOC_PATH_PREFIXES` | 7 | **静か**——その形のパスが「パス」として見られない | 自分で言う（誤検出で落ちる） |
+| `SABOTAGE_FEATURES` | 40 | **静か**——破壊featureが既定ビルドへ混ざっても気づかない | 自分で言う（死んだ項の検査が在る） |
+| `DIRECT_INTERRUPT_CONTROL_ALLOWLIST` | 12 | 自分で言う（許可されていない`cli`/`sti`で落ちる） | **静か**——消えた箇所を許し続ける |
+| `DIRECT_SERIAL_PORT_ALLOWLIST` | 24 | 自分で言う | **静か** |
+| `DOC_PATH_ALLOWLIST` | 3 | 自分で言う（参照が落ちる） | **静か** |
+| `UNTRACKED_BY_DESIGN` | 1 | 自分で言う | **静か** |
+| `FLAKY_EXCLUDED` | 4 | 自分で言う（`--full`が落ちる） | **静か**——覆いが減ったことを誰も言わない（名前の実在だけを見る検査は在る） |
+| `BOOT_LOG_VOLATILE_MARKERS` | 18 | 自分で言う（差分が揺れて落ちる） | **静か**——行ごと落とすので、参照から黙って抜ける |
+| `BOOT_LOG_CORE_COUNT_MARKERS` | 7 | 自分で言う（`-smp`の比較が落ちる） | **静か** |
+| `COMMIT_SUBJECT_PREFIXES` | 7 | 自分で言う（コミットが拒まれる） | 静かだが害が小さい |
+| `STRUCTURAL_GUARD_SYMBOL_FRAGMENTS` | 4 | **静か**——そのシンボルの生存を見ない | 自分で言う（見つからずに落ちる） |
+| `TEST_HOOKS_EXCLUSIONS` | 6 | 自分で言う | **静か** |
+
+**静かに効く側は、洗い方を書いておく。**
+
+- **`FOLDABLE_VECTORS`**——**32本のベクタを2軸で見る**（上の「Ring 3から届く例外を
+  洗った」）。**能力を足したとき（`CR0`/`CR4`のビットを触ったとき）に洗い直す。**
+- **`PARSED_EXTERNAL_TOOLS` / `PRIVATE_BOUNDARY_DIRS` / `DOC_PATH_PREFIXES` /
+  `STRUCTURAL_GUARD_SYMBOL_FRAGMENTS`**——**「見る対象の一覧」である。**
+  **`Command::new(` / `pub(crate) mod` / バックティックの中の形 / 構造的ガードの
+  シンボルを、それぞれ`grep`で全部出し、一覧との差を取る。** **どれも1コマンドで済む。**
+- **許可リストと除外の族**（`DIRECT_*_ALLOWLIST` / `DOC_PATH_ALLOWLIST` /
+  `UNTRACKED_BY_DESIGN` / `FLAKY_EXCLUDED` / `TEST_HOOKS_EXCLUSIONS` /
+  `BOOT_LOG_*_MARKERS`）——**古い項が静かに許す側である。** **各項が今も実在の
+  場所・行を指しているかを見る**（`FLAKY_EXCLUDED`は名前の実在を機械で見ているが、
+  **他は見ていない**）。
+
+**1つ、数えただけで確かめていないものが在る。** **`SABOTAGE_FEATURES`の40件のうち、
+7件は名前が`xtask/src/main.rs`の他の場所に出てこない**（実測。`misalign-test` /
+`tiny-key-buffer` / `exception-test` / `sched-ignore-owner` / `sched-ignore-current` /
+`sched-ignore-bootstrap-tripwire` / `smp-tlb-no-generation-bump`）。
+**これは「回されていない」の証拠ではない**——**構成の名前を組み立てて渡す経路が在る。**
+**数えたのは名前の出現だけである。** **持ち越しに行を立てた。**
+
 ### 判定の側から見る（`tools/judgement-map.py`）
 
 **下の表は「破壊→落ちる判定」の向きである。** **逆向き（判定→それを落とす破壊）は
