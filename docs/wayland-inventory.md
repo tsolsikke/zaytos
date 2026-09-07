@@ -1,0 +1,101 @@
+# Waylandのための基盤——調べた結果
+
+**これは材料であって、決定ではない。** **決まっているのは着手順序と通信方針だけである**
+（運用者。2026-09-08）——**ZaytOSにWaylandのための基盤を作る／Seinas（コンポジタ。
+ユーザー空間。別リポジトリ）／Kieli（日本語IME。別リポジトリ）の順で、
+通信はZaytOSでもLinuxでもWaylandを使う。** **ライブラリ・API・段の番号・
+初版の対応範囲は決まっていない。**
+
+**カーネルが提供するのは通信・記憶・装置の機能である。** **Waylandのメッセージ解釈も
+ウィンドウ管理も合成も、カーネルへは入れない。** **Linuxのsyscallに合わせる話でもなく、
+Linux向けELFを動かす話でもない。**
+
+## 一次資料と確認日
+
+| 資料 | 版 | 確認日 |
+|---|---|---|
+| `wayland.xml`（プロトコルの定義そのもの） | `gitlab.freedesktop.org/wayland/wayland` の `main` | 2026-09-08 |
+| Wayland公式ドキュメント「Wayland Protocol and Model of Operation」（Wire Format の章） | `wayland.freedesktop.org/docs/html/ch04.html` | 2026-09-08 |
+| `wayland-server`（Rust）の`Cargo.toml` | 0.31.13 | 2026-09-08 |
+| `wayland-backend`の`Cargo.toml` | 0.3.15 | 2026-09-08 |
+| `wayland-scanner`の`Cargo.toml` | 0.31.10 | 2026-09-08 |
+| `smithay`の`Cargo.toml` | 0.7.0 | 2026-09-08 |
+
+**数えたものは、いずれも上の版の本文である。**
+
+## Waylandのサーバーが要求すること（仕様の側）
+
+**「仕様が要求する」と「Linuxの実装がそうしている」を分ける。** **前者だけが必須である。**
+
+| 面 | 仕様が要求すること（一次資料） | Linuxの実装がしていること（必須ではない） |
+|---|---|---|
+| 接続 | **UNIXドメインの「ストリーム」ソケット。** 端点は既定で`wayland-0`、`WAYLAND_DISPLAY`で変えられる。**1.15以降、絶対パスの端点と、継承したfd（`WAYLAND_SOCKET`）も選べる** | `XDG_RUNTIME_DIR`の下に置くこと（ch04には出てこない） |
+| メッセージ | **32ビット語の並び。ホストのバイト順。** ヘッダは2語——**1語目が送り手のオブジェクトID、2語目の上位16ビットがバイト長、下位16ビットがopcode。** 引数は`int`/`uint`/`fixed`（符号つき24.8）/`string`（長さ＋NUL＋4バイト詰め）/`object`/`new_id`/`array`/`fd` | ——— |
+| fdの受け渡し | **fdはメッセージ本体に載らず、UNIXドメインソケットの補助データ（`msg_control`）で運ぶ。** **位置は規定されないが、順序はメッセージとfd引数の順と同じである** | `SCM_RIGHTS`（`msg_control`の具体形） |
+| 共有メモリ | **`wl_shm.create_pool`が`fd`と`size`を渡す。** 説明文は**「サーバーはそのfdを`size`バイト`mmap`する」**と書いている（`mmap`の語は`wayland.xml`に4箇所）。**`wl_shm_pool.resize`で伸ばせる。** 形式は`argb8888`(0)と`xrgb8888`(1) | `memfd`、`MAP_SHARED` |
+| 待ち | **仕様は待ち方を要求しない**（ch04にpoll/epollの語は無い） | `wl_event_loop`は`epoll`（libwayland） |
+| 時刻 | **入力と`wl_callback.done`の`time`は「ミリ秒の分解能のタイムスタンプ」**（`wayland.xml`に9箇所） | `CLOCK_MONOTONIC` |
+| 装置 | **仕様は要求しない**（サーバーの中の話） | DRM/KMS、libinput、udev、libseat |
+
+**fdを運ぶメッセージは、コアのプロトコル全体で4つしかない**（実測。`wayland.xml`で
+`type="fd"`を数えた）。
+
+- `wl_shm.create_pool`（要求。クライアント→サーバー）
+- `wl_data_offer.receive`（要求）／`wl_data_source.send`（事象）——**クリップボードとD&D**
+- `wl_keyboard.keymap`（事象。サーバー→クライアント）
+
+**最小の構成では1つで足りる見込みである。** **クリップボードとD&Dを初版で扱わなければ
+2つは要らず、`wl_keyboard.keymap`は`no_keymap`(0)を選べる**（`keymap_format`の実測。
+「クライアントが生のキーコードを解釈する」）。**ただしこれは「仕様上そう選べる」であって、
+既存のクライアントがそれで動くかは確かめていない。**
+
+**コアのプロトコルの規模は、インタフェース23／要求72／事象62である**（実測）。
+
+## 実装方式の候補（依存の実測。採用は決めていない）
+
+| 候補 | 言語 | 依存（実測） | ライセンス | ZaytOSで建つか |
+|---|---|---|---|---|
+| 自作（`wayland.xml`から自分で生成する） | Rust | 無し（`xml`を読む道具は建てるときだけ） | ——— | **建つ見込み。要求する面がいちばん狭い** |
+| `wayland-scanner`だけ使う | Rust | `proc-macro2` / `quote` / `quick-xml`（**ホスト側だけ。OSに依らない**） | MIT | **生成されたコードは`wayland-backend`の型を参照する**（実測）ので、そのままでは載らない |
+| `wayland-server`（純Rust側） | Rust | `wayland-backend`（`rustix`の`event`/`fs`/`net`/`process`）＋`smallvec`＋`bitflags` | MIT | **`rustix`はLinuxのsyscallを呼ぶ。** `std`前提 |
+| `smithay` | Rust | 上に加えて`calloop`（epoll）／`libc`／`rustix`（`mm`/`shm`/`time`/`pipe`ほか）／**`xkbcommon`（Cのライブラリ。省略できない依存）**／`tracing`ほか。DRM・libinput・udev・libseatは任意 | MIT | **`std`とLinuxの機能に依る。移植は大きい** |
+| `libwayland`（C） | C | libc（`epoll`/`socket`/`mmap`ほか） | MIT | **自前libcの面が大きく広がる** |
+
+**`stb_truetype`を選んだときと同じ基準（要求する面がいちばん狭いもの）で見ると、
+順序は上から下である。** **決めていない。**
+
+## ZaytOSの現在地（2026-09-08の実測）
+
+| 項目 | 実測 |
+|---|---|
+| システムコール | **番号の定義は17個**（うち1つは「実装しない」ための番号）。`socket`/`mmap`/`pipe`/`poll`/`futex`/時刻——**どれも無い**（語の`grep`で0件） |
+| プロセス | **同時に走るRing 3は1本。** `spawn`は同じタスクの上で遠征が入れ子になり、親はカーネルの中で子を待つ（`ADR-0058`の実測） |
+| 空間の切り替え | **`schedule_switch`はCR3を触らない**（実測で0件）。空間の切り替えは`AddressSpace::activate`で、遠征の経路にしか無い |
+| fdの表 | **`CURRENT_FILES`が1つだけ在り、プログラムを起こすときに入れ替える**（`swap_current_files`）。上限は16 |
+| 待ち | **無い。** `read(0)`は溜まっていなければ`-EAGAIN`を返し、`zash`は回して待つ |
+| 時刻 | **ユーザーへ出す口が無い。** カーネルの中にティックが在る（100Hz。要求値） |
+| 画面 | **カーネルが描く。** `install_foreground`で「走っているプログラムの間だけ」コンソールを渡す形で、フレームバッファをユーザーへ渡す口は無い（`syscall.rs`に`framebuffer`の語が0件） |
+| 入力 | キーボードのみ。**マウスは無い**（語の`grep`で0件） |
+| 容量 | 像2MiB／実行ファイル32KiB／ユーザー窓4MiB（`0x400000..0x800000`）／遠征の深さ2 |
+
+## 触れる既存の決定（挙げるだけ。書き換えていない）
+
+- **`ADR-0058`**（FPの退避）——**Decision 2が「`spawn`は同じタスクの上で入れ子」を前提に、
+  遠征の境界で退避すると書いている。** **プロセスを独立に走らせると、そこが変わる。**
+- **`ADR-0057`**（Cのプログラムの建て方）——**ユーザー空間の道具が増えると、libcの面が広がる。**
+- **`ADR-0022`**（プロセス別アドレス空間）／**`ADR-0020`**（`int 0x80`とLinux番号）——
+  **新しいシステムコールの番号をどこから採るか。**
+- **`ADR-0040`**（端末の状態を画面から切り離す）／**`ADR-0046`**（fd 2の行き先）——
+  **画面をユーザープロセスへ渡すと、いまの「前景」の考え方に触れる。**
+- **`ADR-0034`**（全像ロード）／**`ADR-0051`**（書き込みは装置まで届く）——**容量。**
+
+## 分からなかったこと
+
+- **既存のクライアントが`no_keymap`で動くか**（仕様上は選べる。実物で確かめていない）。
+- **`wayland-scanner`の出力を、`wayland-backend`抜きで使えるか**
+  （**生成物が`wayland-backend`の型を参照することは実測した**が、
+  差し替えの費用は測っていない）。
+- **`rustix`がZaytOSの上で建つか**（Linuxのsyscallを直に呼ぶ経路と、libc経由の経路が在る。
+  どちらもZaytOSには無い）。
+- **FHDのフレームバッファを毎フレーム写す費用**（`ADR-0034`の全像ロードと同じ問いが、
+  画面の側で出る）。
