@@ -12555,31 +12555,48 @@ const DOC_PATH_PREFIXES: &[&str] = &[
 ///
 /// **黙って飛ばさない。** **飛ばすと「検査が在るのに走っていない」形になる**
 /// ——**この体制がいちばん嫌う形である。** **前提は `README` に在る。**
-fn check_libc_string_tests(workspace_root: &Path) -> Result<String> {
+fn check_libc_host_tests(workspace_root: &Path) -> Result<String> {
+    /// 建てて走らせる組（B-b で 2 組目が増えた）。
+    ///
+    /// **名前・中身・試験・追加の旗の 4 つ組である。** **`libm` を要求するのは
+    /// 数学の側だけで、しかも要るのは試験の側である**——**中身は自前の
+    /// 4 つだけで、ホストの `libm` を呼ばない。**
+    const SUITES: &[(&str, &str, &str, &[&str])] = &[
+        ("string", "libc_string.c", "libc_string_test.c", &[]),
+        ("math", "libc_math.c", "libc_math_test.c", &["-lm"]),
+    ];
+
     let userland = workspace_root.join("kernel/userland");
-    let binary = workspace_root.join("target/libc-string-test");
-    let compile = Command::new(std::env::var("CC").unwrap_or_else(|_| "cc".into()))
-        .current_dir(workspace_root)
-        .args(["-O2", "-Wall", "-Wextra", "-Werror", "-o"])
-        .arg(&binary)
-        .arg(userland.join("libc_string.c"))
-        .arg(userland.join("libc_string_test.c"))
-        .output()
-        .context("failed to run cc for the libc string tests")?;
-    if !compile.status.success() {
-        bail!(
-            "cc failed for the libc string tests:\n{}",
-            String::from_utf8_lossy(&compile.stderr)
-        );
+    let mut lines: Vec<String> = Vec::new();
+    for (name, source, test, extra) in SUITES {
+        let binary = workspace_root.join(format!("target/libc-{name}-test"));
+        let mut command = Command::new(std::env::var("CC").unwrap_or_else(|_| "cc".into()));
+        command
+            .current_dir(workspace_root)
+            .args(["-O2", "-Wall", "-Wextra", "-Werror", "-o"])
+            .arg(&binary)
+            .arg(userland.join(source))
+            .arg(userland.join(test))
+            .args(*extra);
+        let compile = command
+            .output()
+            .with_context(|| format!("failed to run cc for the libc {name} tests"))?;
+        if !compile.status.success() {
+            bail!(
+                "cc failed for the libc {name} tests:\n{}",
+                String::from_utf8_lossy(&compile.stderr)
+            );
+        }
+        let run = Command::new(&binary)
+            .output()
+            .with_context(|| format!("failed to run the libc {name} tests"))?;
+        let stdout = String::from_utf8_lossy(&run.stdout).trim().to_string();
+        if !run.status.success() {
+            bail!("the libc {name} tests failed:\n{stdout}");
+        }
+        lines.push(stdout);
     }
-    let run = Command::new(&binary)
-        .output()
-        .context("failed to run the libc string tests")?;
-    let stdout = String::from_utf8_lossy(&run.stdout).trim().to_string();
-    if !run.status.success() {
-        bail!("the libc string tests failed:\n{stdout}");
-    }
-    Ok(stdout)
+    Ok(lines.join("; "))
 }
 
 fn check_markdown_references(workspace_root: &Path) -> Result<Vec<String>> {
@@ -16221,11 +16238,11 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
     total += 1;
     begin_item("the libc pure functions pass their host tests");
-    match check_libc_string_tests(&workspace_root) {
-        Ok(summary) => println!("--- libc string tests: OK ({summary})"),
+    match check_libc_host_tests(&workspace_root) {
+        Ok(summary) => println!("--- libc host tests: OK ({summary})"),
         Err(error) => {
-            println!("--- libc string tests: FAILED ({error})");
-            failed.push("libc string tests".to_string());
+            println!("--- libc host tests: FAILED ({error})");
+            failed.push("libc host tests".to_string());
         }
     }
 

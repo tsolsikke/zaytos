@@ -50,6 +50,17 @@ void *zt_memset(void *dst, int c, size_t n);
 void *zt_memmove(void *dst, const void *src, size_t n);
 int zt_utoa(char *out, unsigned long value);
 
+/* 数学の最小面（B-b。`libc_math.c`）。**4 つしか無い**——`stb_truetype` が
+ * ビットマップの経路で呼ぶのがこれだけだからである（あちらの doc）。
+ *
+ * **標準の名前（`sqrt` など）で包まない。** **包む相手が居ない**——
+ * `stb_truetype` はマクロ（`STBTT_sqrt` ほか）で名前を選べるので、
+ * `zt_` の名前をそのまま指せる。**要る人が現れたら包む。** */
+double zt_fabs(double value);
+double zt_floor(double value);
+double zt_ceil(double value);
+double zt_sqrt(double value);
+
 /* 文字列とメモリ。**中身は `libc_string.c` に在る。** */
 size_t strlen(const char *s);
 int strcmp(const char *a, const char *b);

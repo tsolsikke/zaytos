@@ -403,7 +403,7 @@ fn build_c_programs(manifest_dir: &str, out_dir: &str, script: &str) {
     const C_PROGRAMS: &[&str] = &["chello", "fptest", "fpchild", "fpfault", "dbfault"];
 
     /// 自前の libc（C-c。`ADR-0057`）。**すべての C のプログラムと一緒に建てる。**
-    const LIBC_SOURCES: &[&str] = &["libc.c", "libc_string.c"];
+    const LIBC_SOURCES: &[&str] = &["libc.c", "libc_string.c", "libc_math.c"];
 
     for source in LIBC_SOURCES {
         println!("cargo:rerun-if-changed={manifest_dir}/userland/{source}");
