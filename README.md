@@ -185,6 +185,8 @@ cargo xtask check --full
 | コンポーネント | 用途 | ライセンス |
 |---|---|---|
 | [GNU Unifont](third_party/unifont/) | コンソールフォント | SIL OFL 1.1 |
+| [stb_truetype](third_party/stb/) | TrueTypeの読み取りとラスタライズ | MIT（パブリックドメインとの選択制） |
+| [DejaVu Sans Mono](third_party/dejavu/) | `stb_truetype`が読むフォント | Bitstream Vera |
 
 GNU UnifontのグリフデータはSIL Open Font License 1.1とGNU GPL v2以降（フォント埋め込み例外つき）のデュアルライセンスで、ZaytOSはOFL 1.1の条件で利用している。
 日本語漢字グリフの元になっているjiskan16由来の部分はパブリックドメイン。
