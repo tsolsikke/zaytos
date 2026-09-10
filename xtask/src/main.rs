@@ -14070,6 +14070,11 @@ fn check_structural_guard_symbols_present(workspace_root: &Path) -> Result<Strin
 /// ASCII か、機械が読むだけの模様である**（実測。2026-08-31）。**人が読む
 /// テキストをあちらへ足すなら、この検査の範囲を広げること。**
 ///
+/// **機械が読むバイナリは、範囲を広げる対象ではない**（2026-09-10 に明記）。
+/// **フォント（`third_party/dejavu/`）のようなものを `build.rs` が像へ写しても、
+/// ここでは見ない**——**見る意味が無い**（`/bin` の実行ファイルと同じ理由である）。
+/// **置き場とライセンスは別の検査が見ている**（`tracked binaries`）。
+///
 /// # 公開前の監査とは別物である
 ///
 /// **あちらは追跡下の全ファイルの非 ASCII を Unicode ブロック別に数え、
@@ -14148,6 +14153,74 @@ const IMAGE_TEXT_ROOT: &str = "kernel/fsimage/seed";
 ///
 /// **カーネルへ XMM の命令を 1 つ入れると落ちる。** **置くときに一度作って
 /// 確かめた**（`docs/coding-standards.md` の「新しい静的な検査は、主張が偽の
+/// 追跡下のバイナリは `third_party/` の下にだけ在る（2026-09-10）。
+///
+/// # なぜ機械で見るのか
+///
+/// **バイナリは履歴から消しにくい。** **入ってから気づくと、消すのに履歴の
+/// 書き換えが要る**——**`CLAUDE.md` の「書き換えてよい境界」は、押した直後の
+/// 1 コミットしか許していない。** **公開前の監査は全件を目視すると書いているが、
+/// 回すのは公開の前だけである**（`docs/verification-coverage.md`）。
+///
+/// # 中身で見る。拡張子では見ない
+///
+/// **NUL バイトを含むか、UTF-8 として読めないものをバイナリとする**
+/// （`grep -I` と同じ判定である）。**拡張子で見ると、名前を変えただけの
+/// バイナリを見逃す。**
+///
+/// # 置き場と、隣の `README.md`
+///
+/// **`third_party/<名前>/` の下に在ること。** **同じディレクトリに `README.md`
+/// が在ること**——**出典・版・ライセンスの置き場がそこだからである**
+/// （`ADR-0031` の「公開できる水準へ整えた上で追加する」）。
+///
+/// # 落とす破壊
+///
+/// **追跡下の別の場所へバイナリを 1 つ置くと落ちる。** **一度作って確かめた**
+/// （実測。2026-09-10）。
+fn check_tracked_binaries(workspace_root: &Path) -> Result<String> {
+    let tracked = tracked_paths(workspace_root, &["*"])?;
+    let mut binaries: Vec<String> = Vec::new();
+    let mut findings: Vec<String> = Vec::new();
+    for relative in &tracked {
+        let path = workspace_root.join(relative);
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        let is_binary = bytes.contains(&0) || String::from_utf8(bytes).is_err();
+        if !is_binary {
+            continue;
+        }
+        binaries.push(relative.clone());
+        let Some(parent) = Path::new(relative).parent() else {
+            findings.push(format!("{relative} is a binary at the repository root"));
+            continue;
+        };
+        if !relative.starts_with("third_party/") {
+            findings.push(format!(
+                "{relative} is a binary outside third_party/ (a vendored file belongs under \
+                 third_party/<name>/ with its source and licence)"
+            ));
+            continue;
+        }
+        if !workspace_root.join(parent).join("README.md").exists() {
+            findings.push(format!(
+                "{relative} is a binary whose directory has no README.md (the source, version \
+                 and licence go there; see third_party/unifont/)"
+            ));
+        }
+    }
+    if !findings.is_empty() {
+        bail!("{}", findings.join("; "));
+    }
+    Ok(format!(
+        "{} tracked binary file(s), all under third_party/ with a README.md beside them ({} \
+         tracked file(s) scanned)",
+        binaries.len(),
+        tracked.len()
+    ))
+}
+
 /// 状態を一度作って落ちることを確かめてから置く」）。
 fn check_kernel_has_no_xmm(workspace_root: &Path) -> Result<String> {
     let kernel = build_kernel_with_features(workspace_root, &[])?;
@@ -16329,6 +16402,18 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         }
     }
 
+    // 追跡下のバイナリの置き場（2026-09-10、静的）。
+    total += 1;
+    begin_item("tracked binaries live under third_party/ with a README.md beside them");
+    match check_tracked_binaries(&workspace_root) {
+        Ok(summary) => println!("--- tracked binaries: OK ({summary})"),
+        Err(e) => {
+            println!("    {e}");
+            println!("--- tracked binaries: FAILED");
+            failed.push("tracked binaries".to_string());
+        }
+    }
+
     // カーネルが XMM を持たないこと（`ADR-0058` の Decision 5、静的）。
     total += 1;
     begin_item("the kernel never touches FP state (no XMM register in the default build)");
@@ -16689,8 +16774,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 32,
-    full: 291,
+    base: 33,
+    full: 292,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
