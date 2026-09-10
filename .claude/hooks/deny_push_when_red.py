@@ -60,12 +60,9 @@ def running_builds() -> list:
 
     **args で見ると、`git push` を含むこのシェル自身に当たる。**
     """
-    try:
-        out = subprocess.run(
-            ["ps", "-eo", "pid,comm"], capture_output=True, text=True, timeout=10
-        ).stdout
-    except Exception:
-        return []
+    out = subprocess.run(
+        ["ps", "-eo", "pid,comm"], capture_output=True, text=True, timeout=10
+    ).stdout
     found = []
     for line in out.splitlines()[1:]:
         parts = line.split(None, 1)
@@ -86,13 +83,23 @@ def deny(reason: str) -> int:
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
-    except Exception:
-        return 0
+    except Exception as error:
+        # **読めなければ拒む**（隣の hook と同じ理由。2026-09-10）。
+        print(
+            f"deny_push_when_red: 入力が読めなかった（{error}）。判定できないので拒む",
+            file=sys.stderr,
+        )
+        return 2
     command = payload.get("tool_input", {}).get("command", "")
     if not invokes_git_push(command):
         return 0
 
-    others = running_builds()
+    # **並走を確かめられなければ押さない。** **`ps` が落ちたときに「何も
+    # 走っていない」と答えると、確かめていないものを確かめたことにする。**
+    try:
+        others = running_builds()
+    except Exception as error:
+        return deny(f"並走を確かめられなかった（{error}）。確かめられないので押さない")
     if others:
         return deny(
             "push の前の基底 check が走らせられない（並走: "

@@ -34,8 +34,15 @@ def looks_like_a_commit(command: str) -> bool:
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
-    except Exception:
-        return 0
+    except Exception as error:
+        # **黙って通さない。** **読めなければ基底 check は走っていない**ので、
+        # **その事実を言って止める**（`docs/verification-coverage.md` の
+        # 「失敗を空に落とす形」。2026-09-10 に Python 側を洗って直した）。
+        print(
+            f"post-commit check: 入力が読めなかった（{error}）。基底 check は走っていない",
+            file=sys.stderr,
+        )
+        return 2
     command = payload.get("tool_input", {}).get("command", "")
     if not looks_like_a_commit(command):
         return 0

@@ -64,8 +64,14 @@ def executable_part(command: str) -> str:
 def main() -> int:
     try:
         command = json.load(sys.stdin).get("tool_input", {}).get("command", "")
-    except Exception:
-        return 0
+    except Exception as error:
+        # **読めなければ拒む。** **守る側が黙って通ると、守っていないことが
+        # 誰にも見えない**（2026-09-10 に Python 側を洗って直した）。
+        print(
+            f"deny_dangerous_bash: 入力が読めなかった（{error}）。判定できないので拒む",
+            file=sys.stderr,
+        )
+        return 2
     command = executable_part(command)
     for pattern, how, reason in RULES:
         if not pattern.search(command):
