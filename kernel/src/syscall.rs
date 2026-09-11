@@ -1297,6 +1297,15 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     // **`Option` にしてあるのは、出口以外で手放す経路が 2 つあるからである**
     // ——[`SYS_EXIT`]（longjmp で出ていくので `Drop` が走らない）と
     // [`SYS_SPAWN`]（Ring 3 へ降りている間は保持しない。`ADR-0023` §1）。
+    // **破壊（B-d）**——**カーネルへ入った時点で FP の状態を塗る。**
+    // **`ADR-0058` の Decision 2（カーネルは FP を壊さない）の反証である。**
+    //
+    // **割り込みの入口にも同じものが在る**（`idt::irq_entry`）。**2 つとも要る**
+    // ——**こちらは「必ず入る」側**（描画の途中で `malloc` が `brk` を呼ぶ）、
+    // **あちらは「レジスタが生きているところへ入る」側**である。
+    #[cfg(feature = "fp-clobber-on-kernel-entry-test")]
+    crate::fp::clobber_on_kernel_entry();
+
     let mut bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
 
     // カーネルへ入ったので「今 Ring 3 にいる」を降ろす（S8-b）。Ring 3 へ返る直前で

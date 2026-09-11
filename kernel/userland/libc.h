@@ -1,8 +1,10 @@
 /* 自前の libc の口（C-c。ADR-0057）。
  *
- * **面は 7 つである**（ADR-0057 の Decision 1）——起動と終了／`int 0x80` の
- * 呼び出し規約／標準入出力／`brk` の上の `malloc`／`str*` と `mem*`／
- * 終了状態／`errno`。**広げるときは ADR を見直すこと。**
+ * **面は 9 つである**（ADR-0057 の Decision 1 と、その Addendum 2 つ）——
+ * 起動と終了／`int 0x80` の呼び出し規約／標準入出力／`brk` の上の `malloc`／
+ * `str*` と `mem*`／終了状態／`errno`／**数学の最小面**（B-b）／
+ * **ファイルを開いて閉じる**（B-d。**読むのは既存の `read` である**）。
+ * **広げるときは ADR を見直すこと。**
  *
  * **ヘッダは 1 本である。** 標準の `<string.h>` や `<stdio.h>` の分け方を
  * 真似ない——**面が 7 つしか無いので、分けると読む先が増えるだけである。** */
@@ -30,6 +32,23 @@ void exit(int status) __attribute__((noreturn));
 /* 標準入出力。**失敗は -1 を返し、`errno` を据える。** */
 long write(int fd, const void *buf, size_t count);
 long read(int fd, void *buf, size_t count);
+
+/* ファイルを開いて読み、閉じる（B-d。9 つ目の面。ADR-0057 の Addendum）。
+ *
+ * **`open` が受け取る旗は `O_RDONLY` だけである。** **カーネルは書きの形も
+ * 受けるが**（`kernel/src/syscall.rs` の `sys_open`）、**この面の利用者
+ * （`/bin/ttfglyph`）は読みしか要らない。** **要る者が来たら、そのとき足す。**
+ *
+ * **大きさを知る口は無い。** **`stat` は持ってこない**（構造体の形をユーザー側へ
+ * 写す必要が出る）。**`lseek` も足さない**——**カーネルの `sys_lseek` は
+ * `SEEK_SET` しか受けず**（実測。`kernel/src/syscall.rs`）、**末尾へ跳ぶには
+ * カーネルの側を広げることになる。** **読む側が 0 が返るまで回れば足りる。**
+ *
+ * **名前と値はホストと同じである**——**`ttfglyph.c` は同じ源をホストでも
+ * 建てるので、そちらの `<fcntl.h>` / `<unistd.h>` と食い違わせない。** */
+#define O_RDONLY 0
+int open(const char *path, int flags);
+int close(int fd);
 
 /* 文字列を書いて改行を足す。**書けたら 0、失敗は -1。** */
 int puts(const char *s);

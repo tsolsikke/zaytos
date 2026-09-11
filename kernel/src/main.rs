@@ -5930,10 +5930,14 @@ fn try_verify_root_fs_image(logger: &mut Logger<SerialPort>) -> Result<(), FsRea
         Err(error) => return Err(FsReadCheckError::EmbeddedImageDidNotParse { error }),
     };
 
+    // **道具の版を 2 つとも出す（B-d）。** **像の checksum が赤になり、木に
+    // 変更が無いとき、残る入力は道具の版である**——**`mke2fs` は像の形を、
+    // `cc` は `/bin` の C のバイトを決める。**
     logger.info(format_args!(
-        "ext2: image {} byte(s) built by {:?}",
+        "ext2: image {} byte(s) built by {:?} and {:?}",
         image.len(),
-        fsimage_info::MKE2FS_VERSION
+        fsimage_info::MKE2FS_VERSION,
+        fsimage_info::CC_VERSION
     ));
     logger.info(format_args!(
         "ext2: superblock rev=1 block_size={} inode_size={} inodes={} blocks={} \
@@ -6031,13 +6035,20 @@ static mut CORRUPT_FS_IMAGE: [u8; CORRUPT_FS_LEN] = [0; CORRUPT_FS_LEN];
 /// **写す長さは像から求める**（[`map_corrupt_fs`] の doc）。**ここは器の大きさで、
 /// 像の使用上端がこれを超えたら演習は落ちる**——**黙って足りない写しを作らない。**
 ///
-/// **160 ブロックの根拠は実測である**——**いまの使用上端は 138 で、
-/// `build.rs` が像へファイルを足すたびに 1 か 2 ずつ増える**
-/// （**VIM-1 で `/data/vimops` を、PR-1 で `/etc/profile` と
-/// `/root/.profile` を足し、HI-1 で `zash` が 1 ブロック太って、
-/// 134 から 4 つ上がった**）。**ファイルを足さなくても、
+/// **根拠は実測である**——**いまの使用上端は 247 で、`build.rs` が像へ
+/// ファイルを足すたびに増える**（**VIM-1 で `/data/vimops` を、PR-1 で
+/// `/etc/profile` と `/root/.profile` を足し、HI-1 で `zash` が 1 ブロック
+/// 太って、134 から 4 つ上がった**）。**ファイルを足さなくても、
 /// ユーザープログラムが太れば上がる。**
-const CORRUPT_FS_BLOCKS: usize = 160;
+///
+/// **B-d で 160 から 288 へ上げた。** **`/lib/font.ttf`（343,140 バイト）が
+/// 85 ブロックを占め、使用上端が 141 から 247 へ跳ねた**（実測）。
+/// **ここまで、この定数は「1 か 2 ずつ増える」前提で余裕を取っていた**
+/// ——**1 本で 85 ブロック増える形は初めてである。**
+///
+/// **落ちたときの読み方は、その場の診断が言う**（「raise
+/// CORRUPT_FS_BLOCKS」）。**実際、B-d で最初に落ちたのはこれだった。**
+const CORRUPT_FS_BLOCKS: usize = 288;
 
 /// 作業領域のバイト数。
 const CORRUPT_FS_LEN: usize = CORRUPT_FS_BLOCKS * FS_BLOCK_SIZE;
@@ -9629,6 +9640,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "fp-mf-not-foldable-test",
         cfg!(feature = "fp-mf-not-foldable-test"),
         "#MF（ベクタ16）を畳めるベクタから外す",
+    ),
+    (
+        "fp-clobber-on-kernel-entry-test",
+        cfg!(feature = "fp-clobber-on-kernel-entry-test"),
+        "システムコールの入口で FP の状態を目印で塗る",
+    ),
+    (
+        "ttf-test",
+        cfg!(feature = "ttf-test"),
+        "フォントを読んで 1 文字ラスタライズする台本を流す（破壊ではない）",
     ),
     (
         "shell-complete-no-common-prefix-test",

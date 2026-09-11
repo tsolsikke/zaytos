@@ -297,7 +297,8 @@ pub fn read_bytes(dst: &mut [u8]) -> usize {
         feature = "profile-test",
         feature = "history-test",
         feature = "complete-test",
-        feature = "fp-test"
+        feature = "fp-test",
+        feature = "ttf-test"
     ))]
     {
         let taken = script::next_bytes(dst);
@@ -544,7 +545,8 @@ pub fn arm_input_script() {
         feature = "profile-test",
         feature = "history-test",
         feature = "complete-test",
-        feature = "fp-test"
+        feature = "fp-test",
+        feature = "ttf-test"
     ))]
     script::arm();
 }
@@ -576,7 +578,8 @@ pub fn arm_input_script() {
     feature = "profile-test",
     feature = "history-test",
     feature = "complete-test",
-    feature = "fp-test"
+    feature = "fp-test",
+    feature = "ttf-test"
 ))]
 pub(crate) mod script {
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -1032,6 +1035,15 @@ pub(crate) mod script {
     const SCRIPT: &[u8] = b"/bin/fptest\n\
         /bin/dbfault\n\
         /bin/fpfault\n\
+        exit\n\x0c";
+
+    /// フォントを読んで 1 文字ラスタライズする（B-d）。
+    ///
+    /// **1 本しか打たない。** **主張は「ホストで建てたものと、ZaytOS で
+    /// 建てたものが、バイト単位で一致する」ことだけで、回数を増やしても
+    /// 主張は増えない。**
+    #[cfg(feature = "ttf-test")]
+    const SCRIPT: &[u8] = b"/bin/ttfglyph\n\
         exit\n\x0c";
 
     #[cfg(feature = "complete-test")]

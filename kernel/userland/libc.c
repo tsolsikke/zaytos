@@ -7,16 +7,19 @@
  *
  * **`stdio` の緩衝も無い。** `write` はそのままシステムコールへ落ちる。
  *
- * # SSE を使わない
+ * # SSE を使う
  *
- * ADR-0057 の Decision 3。`kernel/build.rs` が `-mno-sse -mno-mmx -mno-80387`
- * を渡す。**ABI の選択なので、利用側も同じフラグで建てること。** */
+ * **`ADR-0058` で有効にした**（ADR-0057 の Decision 3 は役目を終えた）。
+ * **ABI の選択なので、libc も利用側も同じフラグで建てること** —— **建てる
+ * 場所は `kernel/build.rs` の 1 箇所である**（Decision 4）。 */
 
 #include "libc.h"
 
 /* システムコールの番号（`kernel/src/syscall.rs`。Linux x86-64 から採る）。 */
 #define SYS_READ 0
 #define SYS_WRITE 1
+#define SYS_OPEN 2
+#define SYS_CLOSE 3
 #define SYS_BRK 12
 #define SYS_EXIT 60
 
@@ -62,6 +65,14 @@ long read(int fd, void *buf, size_t count) {
 
 /* `write` は「届いた分だけ」を返しうるので繰り返す
  * （`userlib.rs` の `write_all` と同じ理由）。 */
+int open(const char *path, int flags) {
+    return (int)settle(syscall3(SYS_OPEN, (long)path, flags, 0));
+}
+
+int close(int fd) {
+    return (int)settle(syscall3(SYS_CLOSE, fd, 0, 0));
+}
+
 static int write_all(int fd, const char *bytes, size_t length) {
     size_t done = 0;
     while (done < length) {

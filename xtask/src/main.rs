@@ -1403,6 +1403,7 @@ fn main() -> Result<()> {
        cargo xtask run --persist-env-test [--rebuild-between]
        cargo xtask run --keymap-test [--sabotage]
        cargo xtask run --fp-test [--sabotage FEATURE]
+       cargo xtask run --ttf-test [--sabotage FEATURE]
        cargo xtask check [--update-reference]   (ホストテストの名前の集合を取り直す)
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
@@ -1640,6 +1641,17 @@ fn main() -> Result<()> {
                     .collect();
                 let expect_pass = sabotage.is_empty();
                 return cmd_fp_test(&sabotage, expect_pass);
+            }
+            // **フォントを像から読み、Ring 3 で 1 文字ラスタライズする判定（B-d）。**
+            if rest.iter().any(|a| a == "--ttf-test") {
+                let sabotage: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                let expect_pass = sabotage.is_empty();
+                return cmd_ttf_test(&sabotage, expect_pass);
             }
             // **Tab の補完の判定（TAB-1）。**
             if rest.iter().any(|a| a == "--complete-test") {
@@ -3689,6 +3701,18 @@ const FP_TEST_SABOTAGES: &[&str] = &[
     "fp-mf-not-foldable-test",
 ];
 
+/// `ttf-test` を「通らないこと」で回す破壊（B-d）。
+///
+/// **1 つである。** **`ADR-0058` の Decision 2——「カーネルは FP を使わないので、
+/// カーネルへ入って同じタスクへ戻るだけなら退避が要らない」——に、初めて
+/// 判定が付く。**
+///
+/// **既存の判定はどれもこれを落とさない**（実測で確かめた）——
+/// **`fp-test` の 5 本は、いずれも FP の値をシステムコールを挟んで持ち越さない。**
+/// **`/bin/ttfglyph` は挟む**——**`stb_truetype` が途中で `malloc` を呼び、
+/// それが `brk` へ落ちる。**
+const TTF_TEST_SABOTAGES: &[&str] = &["fp-clobber-on-kernel-entry-test"];
+
 const SHELL_TEST_SABOTAGES: &[&str] = &[
     "kill-ignore-interrupt-test",
     "kill-fold-at-depth-one-test",
@@ -4863,6 +4887,244 @@ fn cmd_fp_test(features: &[&str], expect_pass: bool) -> Result<()> {
             Ok(())
         } else {
             bail!("{context}: the sabotage was NOT caught; every judgement still held")
+        }
+    } else {
+        println!("{context}: FAILED");
+        if expect_pass {
+            bail!("{context}: FAILED")
+        } else {
+            println!("{context}: the sabotage was caught (this is the expected outcome)");
+            Ok(())
+        }
+    }
+}
+
+/// ホストで `/bin/ttfglyph` と同じ源を建て、走らせて `ttf:` の行を返す（B-d）。
+///
+/// **建て方は `kernel/build.rs` と揃える**——**`-Os` と `--gc-sections` である。**
+/// **違うのは 2 つだけで、どちらも入出力である**——`-DZT_HOST`（`#include` の
+/// 塊）と `-DZT_FONT_PATH`（フォントの在処）。
+///
+/// **`cc` が無ければ落ちる。** **黙って飛ばさない**（`check_libc_host_tests` の
+/// doc と同じ理由である）。
+fn build_and_run_host_ttfglyph(workspace_root: &Path) -> Result<Vec<String>> {
+    let userland = workspace_root.join("kernel/userland");
+    let font = workspace_root.join("third_party/dejavu/DejaVuSansMono.ttf");
+    let binary = workspace_root.join("target/ttfglyph-host");
+    let compiler = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+
+    let mut command = Command::new(&compiler);
+    command
+        .current_dir(workspace_root)
+        .args([
+            "-Os",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-ffunction-sections",
+            "-fdata-sections",
+            "-Wl,--gc-sections",
+            "-DZT_HOST",
+        ])
+        .arg(format!("-DZT_FONT_PATH=\"{}\"", font.display()))
+        .arg("-I")
+        .arg(&userland)
+        .arg("-I")
+        .arg(workspace_root.join("third_party/stb"))
+        .arg("-o")
+        .arg(&binary)
+        .arg(userland.join("ttfglyph.c"))
+        .arg(userland.join("libc_math.c"));
+    let compile = command
+        .output()
+        .with_context(|| format!("failed to run {compiler} for the host ttfglyph"))?;
+    if !compile.status.success() {
+        bail!(
+            "cc failed for the host ttfglyph:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+
+    let run = Command::new(&binary)
+        .current_dir(workspace_root)
+        .output()
+        .context("failed to run the host ttfglyph")?;
+    if !run.status.success() {
+        bail!(
+            "the host ttfglyph failed ({}):\n{}",
+            run.status,
+            String::from_utf8_lossy(&run.stdout)
+        );
+    }
+    Ok(String::from_utf8_lossy(&run.stdout)
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| line.starts_with("ttf: "))
+        .collect())
+}
+
+/// `cc --version` の 1 行目（B-d）。**判定行へ載せるために読む。**
+fn host_cc_version() -> String {
+    let compiler = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+    match Command::new(&compiler).arg("--version").output() {
+        Ok(output) => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .unwrap_or("unknown")
+            .trim()
+            .to_string(),
+        Err(_) => "unknown".to_string(),
+    }
+}
+
+/// フォントを像から読み、Ring 3 で 1 文字ラスタライズする判定（B-d）。
+///
+/// # 主張は 1 つである
+///
+/// **同じ源をホストと ZaytOS で建て、出るビットマップがバイト単位で一致する。**
+///
+/// **これは外の道具に判定させる形である**——**期待値を手で書き写さない。**
+/// **設計の前に成立を測った**（2026-09-10）——**`-O2` / `-Os` × ホストの
+/// `libm` / 自前の数学の 4 通り × 4 つの字で、16 通りとも一致した。**
+///
+/// # `cc` の版を出す
+///
+/// **判定がホスト側のビルドに依る。** **版が違えば突き合わせが落ちうる**
+/// ——**落ちたときに「版が違う」を 1 手で疑えるようにする**（`mke2fs` の版を
+/// 起動ログへ出しているのと同じ形である）。
+///
+/// **2 つ出る。** **像の中の `/bin/ttfglyph` を建てた版**（`kernel/build.rs`
+/// が定数へ出し、カーネルが像の判定行へ印字する）と、**この関数が建てた版**
+/// である。**普通は同じ機械の同じ `cc` なので一致する**——**食い違ったら、
+/// `target/` に古い像が残っている。**
+///
+/// # CI では走らない
+///
+/// **QEMU を起こすので `--full` の側である**（`.github/workflows/check.yml` は
+/// 基底と `--commit` の 2 段しか回さない）。**したがって CI の `gcc` の版は
+/// この判定に効かない。**
+fn cmd_ttf_test(features: &[&str], expect_pass: bool) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let mut all_features: Vec<&str> = vec!["ttf-test"];
+    all_features.extend_from_slice(features);
+    let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let tag = all_features.join("-");
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("ttf-test-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the ttf test")?;
+
+    let deadline = Instant::now() + ZI_TEST_TIMEOUT;
+    while Instant::now() < deadline {
+        let text = read_lossy(&serial_log);
+        if strip_ansi(&text).contains("script-done:") {
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = read_lossy(&serial_log);
+    let context = if features.is_empty() {
+        "ttf-test".to_string()
+    } else {
+        format!("ttf-test {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    let qemu_debug = read_lossy(&debug_log);
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    let stripped = strip_ansi(&serial);
+    let zaytos: Vec<String> = stripped
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| line.starts_with("ttf: "))
+        .collect();
+
+    // **ホスト側を建てて走らせる。** **破壊を掛けた回でも同じものを建てる**
+    // ——**破壊はカーネルの側にしか効かないので、ホスト側は基準のままである。**
+    let host = build_and_run_host_ttfglyph(&workspace_root)?;
+
+    // **合図**——**ホスト側が最後まで出ていなければ、突き合わせは何も主張しない。**
+    let host_complete = host.last().map(String::as_str) == Some("ttf: done");
+    // **合図**——**台本が最後まで進んだこと。**
+    let script_finished = stripped.contains("script-done:");
+
+    // **計器**——**像を建てた `cc` の版と、いまホスト側を建てた版。**
+    let built_by = stripped
+        .lines()
+        .find(|line| line.contains("ext2: image "))
+        .unwrap_or("(the image line was not printed)")
+        .trim()
+        .to_string();
+    let host_cc = host_cc_version();
+
+    // **判定**——**バイト単位で一致する。**
+    let matched = zaytos == host;
+    let first_difference = zaytos
+        .iter()
+        .zip(host.iter())
+        .find(|(a, b)| a != b)
+        .map(|(a, b)| format!("zaytos {a:?} vs host {b:?}"))
+        .unwrap_or_else(|| format!("zaytos has {} line(s), host {}", zaytos.len(), host.len()));
+
+    println!("{context}: (signal) the host side ran to its end = {host_complete}");
+    println!("{context}: (signal) the script reached its end = {script_finished}");
+    println!("{context}: (info) the image judgement line says {built_by:?}");
+    println!("{context}: (info) the host side was built by {host_cc:?}");
+    println!(
+        "{context}: the glyph rasterised inside Ring 3 matches the host byte for byte = \
+         {matched} ({} line(s); the first difference is {first_difference})",
+        host.len()
+    );
+
+    if !host_complete {
+        println!("{context}: FAILED");
+        bail!("{context}: the host side did not finish, so the comparison asserts nothing")
+    }
+
+    if matched && script_finished {
+        println!("{context}: PASS");
+        if expect_pass {
+            Ok(())
+        } else {
+            bail!("{context}: the sabotage was NOT caught; the bitmaps still matched")
         }
     } else {
         println!("{context}: FAILED");
@@ -10748,12 +11010,26 @@ fn capture_boot_log(workspace_root: &Path, smp: Option<u32>, tag: &str) -> Resul
         .spawn()
         .context("failed to launch qemu-system-x86_64 for the boot log capture")?;
 
-    // **ハートビートが 3 本出るまで待つ。** 起動が終わって定常状態へ入った
-    // ことの目印である。**上限は付ける**（出ない場合に無限に待たない）。
-    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    // **2 つとも満たすまで待つ**——**シェルが構えたこと**と、**ハートビートが
+    // 3 本出たこと**である。**上限は付ける**（出ない場合に無限に待たない）。
+    //
+    // # ハートビートだけでは、参照の長さが機械の速さに依る
+    //
+    // **B-d で踏んだ（2026-09-11）。** **像へフォントを 1 本足し、壊した像の
+    // 作業領域を 160 から 288 ブロックへ広げたら、起動が遅くなった**——
+    // **3 本目のハートビートが、ユーザープログラムが走る前に出た。**
+    // **参照が 512 行から 327 行へ縮み、185 行ぶんの覆いが黙って消えた**
+    // （実測）。**「緑のまま、主張している中身が減る」形である。**
+    //
+    // **したがって、止める条件に中身の目印を入れる。** **`zash: ready` は
+    // 起動シーケンスの終わりで、速さに依らない。** **ハートビートの条件は
+    // 残す**——**定常状態へ入ったことは、あちらでしか言えない。**
+    let deadline = Instant::now() + BOOT_LOG_CAPTURE_TIMEOUT;
     loop {
-        let seen = read_lossy(&serial_log).matches("heartbeat: ticks=").count();
-        if seen >= 3 || Instant::now() >= deadline {
+        let text = read_lossy(&serial_log);
+        let beats = text.matches("heartbeat: ticks=").count();
+        let shell_is_up = text.contains(SHELL_READY_MARKER);
+        if (beats >= 3 && shell_is_up) || Instant::now() >= deadline {
             break;
         }
         thread::sleep(PANIC_TEST_POLL_INTERVAL);
@@ -10773,6 +11049,25 @@ fn capture_boot_log(workspace_root: &Path, smp: Option<u32>, tag: &str) -> Resul
 
 /// 参照となる正規化済み起動ログの置き場所（S6-d）。
 const REFERENCE_BOOT_LOG: &str = "xtask/reference/boot-log-smp2.txt";
+
+/// シェルが構えたことを言う行（`kernel/userland/zash.rs`）。
+///
+/// **起動ログを取り終える条件の片方である**（[`capture_boot_log`]）。
+const SHELL_READY_MARKER: &str = "zash: ready";
+
+/// 起動ログを取り終えるまでの上限（B-d で分けた）。
+///
+/// **`EXCEPTION_TEST_TIMEOUT`（20 秒）を使っていた。** **あれは「例外が上がって
+/// 止まる」までの上限で、こちらは「起動が最後まで進む」までの上限である**
+/// ——**測るものが違うのに、同じ定数を使っていた。**
+///
+/// **B-d で足りなくなった。** **像へフォントを足し、壊した像の作業領域を広げた
+/// ところ、20 秒では起動シーケンスが終わらない回が出た**——**参照が 512 行から
+/// 327 行へ縮み、185 行ぶんの覆いが黙って消えた**（実測。2026-09-11）。
+///
+/// **90 秒にした。** **実測でシェルが構えるまで約 24 秒である**（機械の負荷で
+/// 揺れる。**同じ木で 20 秒を越える回と越えない回の両方を見た**）。
+const BOOT_LOG_CAPTURE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// 起動ログの突き合わせ（S6-d）。**2 つの主張を 1 つの機構で見る。**
 ///
@@ -15416,6 +15711,33 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }
         }
 
+        // **フォントを像へ（B-d）。**
+        //
+        // **1 回の起動で 1 つ見る**——**同じ源をホストと ZaytOS で建て、出る
+        // ビットマップがバイト単位で一致する。** **破壊は 1 つで、`ADR-0058` の
+        // Decision 2 に初めて判定を付ける。**
+        total += 1;
+        begin_item("a glyph rasterised inside Ring 3 matches the host byte for byte");
+        match cmd_ttf_test(&[], true) {
+            Ok(()) => println!("--- ttf test: OK"),
+            Err(error) => {
+                println!("--- ttf test: FAILED ({error})");
+                failed.push("ttf test".to_string());
+            }
+        }
+        for sabotage in TTF_TEST_SABOTAGES {
+            total += 1;
+            let label = format!("ttf-test {sabotage}");
+            begin_item(&label);
+            match cmd_ttf_test(&[sabotage], false) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
+            }
+        }
+
         total += 1;
         begin_item("the shell takes keystrokes and init restarts it");
         match cmd_shell_test(ShellTestMode::Normal) {
@@ -16775,7 +17097,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 33,
-    full: 292,
+    full: 294,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

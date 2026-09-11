@@ -223,14 +223,16 @@ const SYS_GETDENTS64: u32 = 217;
 ///
 /// **DIR-1c で 6 から 7 になった**——**`/tmp` を像に足したためである。**
 /// **f-1 で 8 になった**——**`/root` を足したためである**（`ADR-0052`）。
+/// **B-d で 9 になった**——**`/lib` を足したためである**（`ADR-0042` の
+/// Addendum。**既定のフォントの置き場である**）。
 ///
 /// **この数は像の中身に寄りかかっている。** **置き場所を足したら、
 /// ここも数え直すこと**（実測。**2 度とも、足した日にこの検算が起動を
 /// 止めた**——**止まるので気づける。**）。
 ///
 /// **数え方**——**ルート直下の項を数えた。** **`.` と `..` を含む**
-/// （いまは `. .. lost+found bin data etc tmp root` の 8 つである）。
-const ROOT_ENTRIES: u32 = 8;
+/// （いまは `. .. lost+found bin data etc lib root tmp` の 9 つである）。
+const ROOT_ENTRIES: u32 = 9;
 /// `linux_dirent64` の `d_reclen` の位置。
 const DIRENT_RECLEN_OFFSET: u32 = 16;
 /// `linux_dirent64` の `d_type` の位置。

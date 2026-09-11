@@ -1016,6 +1016,20 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     // yield ベクタのときだけ別タスクの RSP を返す（下の分岐）。
     let no_switch_rsp = context as u64;
 
+    // **破壊（B-d）**——**カーネルへ入った時点で FP の状態を塗る。**
+    // **`ADR-0058` の Decision 2（カーネルは FP を使わないので、入って同じ
+    // タスクへ戻るだけなら退避が要らない）の反証である。**
+    //
+    // **システムコールの入口にも同じものが在る。** **2 つとも要る**——
+    // **XMM のレジスタが生きているところへ入れるのは、非同期に入るこちら
+    // だけである**（C の呼び出し規約では XMM は全部 caller-saved で、
+    // `malloc` を跨ぐ時点で呼ぶ側が既に退避している）。**一方で、こちらが
+    // 描画の途中に入るかどうかは時機に依る**（実測で、1 文字の描画は
+    // 100 マイクロ秒ほど、ティックは 10 ミリ秒）。**必ず入るのは
+    // システムコールの側である。**
+    #[cfg(feature = "fp-clobber-on-kernel-entry-test")]
+    crate::fp::clobber_on_kernel_entry();
+
     // 測定用 IPI（S5-a）は BKL を取る前に処理して戻る。
     //
     // BKL 待ちと IPI の相性は未解決である（`deferred-decisions.md` の

@@ -396,11 +396,19 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
 ///   なったので、フラグを外した。** **ABI の選択なので、libc も利用側も
 ///   同じフラグで建てる**（Decision 4 はそのまま生きている）
 /// - `-fno-stack-protector`——**守りの実体（カナリアの置き場）が無い**
-/// - `-O2`——**Rust 側の `opt-level=s` と揃える意図は無い。**
-///   **C は最適化を切ると `memcpy` の呼び出しが増える**ので、既定を `-O2` にする
+/// - `-Os`——**B-d で `-O2` から替えた。** **`SYS_SPAWN` が受け取る像の上限が
+///   32 KiB で、`stb_truetype` を抱えた `/bin/ttfglyph` が `-O2` では越えた**
+///   （実測）。**最適化を切る形は採らない**——**C は切ると `memcpy` の
+///   呼び出しが増える。** **既存の `chello` は 9,888 から 9,696 へ縮んだ**
+///   （実測。**像の checksum が動くので、起動ログの参照を録り直す**）
+/// - `-ffunction-sections` / `-fdata-sections` / `-Wl,--gc-sections`——
+///   **`ttfglyph.c` が `stb_truetype` の SDF 用の 4 つを「宣言だけ」置き、
+///   ここが「どこからも届かない」を証明する**（あちらの doc）
 fn build_c_programs(manifest_dir: &str, out_dir: &str, script: &str) {
     /// C で書いたユーザープログラム。**足すときはここへ 1 行足す。**
-    const C_PROGRAMS: &[&str] = &["chello", "fptest", "fpchild", "fpfault", "dbfault"];
+    const C_PROGRAMS: &[&str] = &[
+        "chello", "fptest", "fpchild", "fpfault", "dbfault", "ttfglyph",
+    ];
 
     /// 自前の libc（C-c。`ADR-0057`）。**すべての C のプログラムと一緒に建てる。**
     const LIBC_SOURCES: &[&str] = &["libc.c", "libc_string.c", "libc_math.c"];
@@ -409,6 +417,8 @@ fn build_c_programs(manifest_dir: &str, out_dir: &str, script: &str) {
         println!("cargo:rerun-if-changed={manifest_dir}/userland/{source}");
     }
     println!("cargo:rerun-if-changed={manifest_dir}/userland/libc.h");
+    // **外から持ってきたヘッダ（B-c）。** **`ttfglyph` が丸ごと抱える。**
+    println!("cargo:rerun-if-changed={manifest_dir}/../third_party/stb/stb_truetype.h");
 
     for name in C_PROGRAMS {
         let source = format!("{manifest_dir}/userland/{name}.c");
@@ -422,12 +432,26 @@ fn build_c_programs(manifest_dir: &str, out_dir: &str, script: &str) {
                 "-no-pie",
                 "-static",
                 "-fno-stack-protector",
-                "-O2",
+                // **`-Os` にした（B-d）。** **像の中の 32 KiB の上限へ効く**
+                // ——`SYS_SPAWN` が受け取る像の上限である。**実測で、
+                // `stb_truetype` を抱えた `ttfglyph` は `-O2` で上限を
+                // 越えていた。** **既存の `chello` も 9,888 から 9,696 へ縮む。**
+                "-Os",
+                // **届かない関数を落とす（B-d）。** **`ttfglyph.c` が
+                // `stb_truetype` の SDF の 4 つを「宣言だけ」置いており、
+                // ここが「どこからも届かない」を証明する**——**呼ぶ経路が
+                // 生えたら、リンクがその場で落ちる**（あちらの doc）。
+                "-ffunction-sections",
+                "-fdata-sections",
+                "-Wl,--gc-sections",
                 "-Wall",
                 "-Wextra",
                 "-Werror",
                 "-I",
                 &format!("{manifest_dir}/userland"),
+                // **外から持ってきた C のヘッダ（B-c。`third_party/stb`）。**
+                "-I",
+                &format!("{manifest_dir}/../third_party/stb"),
                 "-T",
                 script,
                 "-o",
@@ -599,6 +623,8 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         "fpchild",
         "fpfault",
         "dbfault",
+        // **フォントを読んで 1 文字ラスタライズする（B-d）。**
+        "ttfglyph",
     ] {
         std::fs::copy(
             format!("{out_dir}/{name}.elf"),
@@ -614,6 +640,31 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     // **ADR-0042 が「作る」と決めた唯一のものである。**
     std::fs::create_dir_all(format!("{staging}/tmp"))
         .expect("failed to create /tmp in the staging");
+
+    // **`/lib` を作り、既定のフォントを置く（B-d。`ADR-0042` の Addendum）。**
+    //
+    // **`ADR-0042` は `/lib` を「作らない。保留」にして、契機を予告していた**
+    // ——**「GUI の段でプログラム側がフォントを読む形になれば、置き場が要る」。**
+    // **B-d がその契機である。**
+    //
+    // # 名前を `font.ttf` にする
+    //
+    // **「どのフォントか」ではなく「既定のフォント」という役割を表している。**
+    // **2 本目が来たら、そのとき名前で分ける**（`/lib/font.ttf` は既定のまま
+    // 残せる）。
+    //
+    // # 種の木を通らない
+    //
+    // **`kernel/fsimage/seed` はテキストだけである**（像の ASCII の検査が
+    // 種の木を見る）。**フォントは `third_party/` から直接ここへ写す**ので、
+    // **あの検査の範囲に入らない**（`docs/verification-coverage.md` の
+    // 「追跡下を走る道具が、バイナリをどう扱うか」）。
+    std::fs::create_dir_all(format!("{staging}/lib"))
+        .expect("failed to create /lib in the staging");
+    let font = format!("{manifest_dir}/../third_party/dejavu/DejaVuSansMono.ttf");
+    println!("cargo:rerun-if-changed={font}");
+    std::fs::copy(&font, format!("{staging}/lib/font.ttf"))
+        .expect("failed to place the default font into the staging");
 
     // **`/root` を作る（f-1。`ADR-0042` と `ADR-0052`）。** **中身は置かない**
     // ——**`root` のホームであって、像に焼くものではない。**
@@ -747,6 +798,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     drop(file);
 
     let version = mke2fs_version();
+    let cc = cc_version();
 
     // UUID とハッシュシードを固定する。**残る差（時刻）は下で潰す。**
     let status = external_tool("mke2fs")
@@ -801,6 +853,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         format!(
             "// build.rs が生成した。手で編集しないこと。\n\
              pub const MKE2FS_VERSION: &str = {version:?};\n\
+             pub const CC_VERSION: &str = {cc:?};\n\
              pub const IMAGE_BYTES: u64 = {IMAGE_BYTES};\n\
              pub const DIRECT_MAX_BYTES: u64 = {DIRECT_MAX_BYTES};\n\
              pub const DIRECT_MAX_LAST_BYTE: u8 = {direct_max_last};\n\
@@ -926,6 +979,33 @@ fn mke2fs_version() -> String {
     match output {
         Ok(o) => {
             let text = String::from_utf8_lossy(&o.stderr);
+            text.lines().next().unwrap_or("unknown").trim().to_string()
+        }
+        Err(_) => "unknown".to_string(),
+    }
+}
+
+/// `cc --version` の 1 行目（B-d）。**版を判定行へ載せるために読む。**
+///
+/// # なぜ載せるか
+///
+/// **`mke2fs` の版を載せているのと同じ理由である。** **像の checksum が
+/// 赤になったとき、木に変更が無ければ、人は「何が変わったのか」を探す**
+/// ——**残る入力は道具の版である。**
+///
+/// **`docs/deferred-decisions.md` にこの行が在った。** **契機は「像の
+/// checksum が赤になり、木に変更が無いとき」としてあったが、B-d で先に
+/// 来た**——**`/bin` の C が 6 本になり、像の中の C のバイトが 343 KiB の
+/// フォントの次に大きい塊になった。** **さらに B-d の判定そのものが、
+/// 同じ `cc` で建てた 2 つを突き合わせる形である。**
+fn cc_version() -> String {
+    let compiler = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+    // **`mke2fs -V` と同じ形である**——**成否は見ない。** **実際に建てる
+    // ときの失敗が、不在の診断を出す側である。**
+    let output = external_tool(&compiler).arg("--version").output();
+    match output {
+        Ok(o) => {
+            let text = String::from_utf8_lossy(&o.stdout);
             text.lines().next().unwrap_or("unknown").trim().to_string()
         }
         Err(_) => "unknown".to_string(),
