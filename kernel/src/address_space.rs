@@ -206,6 +206,28 @@ const PRIVATE_INDEX_RANGE: core::ops::Range<usize> = 0..KERNEL_PML4_FIRST_INDEX;
 /// （返すより安全である）。**隔離の容量と同じ桁にしてある。**
 const MAX_FRAMES_PER_DESTROY: usize = crate::quarantine::QUARANTINE_CAPACITY;
 
+/// 集めたフレームを一時的に置く場所（B-d で静的へ移した）。
+///
+/// # なぜスタックに置かないか
+///
+/// **`Option<PhysAddr>` は 16 バイトで、容量に比例してスタックを食う。**
+/// **B-d で隔離の容量を 64 から 256 へ上げたとき、これが 1 KiB から 4 KiB へ
+/// 育ち、遠征スタックの高水位が半分を越えて起動が止まった**（実測。
+/// **「半分を越えたらガードページを張るか、測って容量を上げるかを決める」と
+/// いう持ち越しの行が発火した**）。
+///
+/// **持ち越しの行は発火させない**——**育てたのはこちらの都合であって、
+/// 遠征スタックの要件が変わったわけではない。** **静的へ移せば、容量を
+/// いくつにしても遠征スタックは 1 バイトも増えない。**
+///
+/// # 同時に 2 つ走らない
+///
+/// **[`AddressSpace::destroy`] は BKL の内側でしか呼べない**（`_guard` が
+/// それを型で示している）。**入れ子にもならない**——**破棄は他の破棄を
+/// 呼ばない。**
+static mut COLLECTED_FRAMES: [Option<PhysAddr>; MAX_FRAMES_PER_DESTROY] =
+    [None; MAX_FRAMES_PER_DESTROY];
+
 impl AddressSpace {
     /// 4KiB のユーザーページを 1 枚張る（S7-d）。
     ///
@@ -370,7 +392,10 @@ impl AddressSpace {
         // 写像を読み直しうる。** **外し終えてから上げれば、その世代以降に
         // フラッシュしたコアは、外れた後の状態しか見ていない。**
         // **判定が `>=` で足りるのはこの順序による**（[`crate::bkl::generation_is_retired`]）。
-        let mut collected = [None; MAX_FRAMES_PER_DESTROY];
+        // SAFETY: BKL を保持している（`_guard`）。**破棄は入れ子にならないので、
+        // この参照が生きている間、他に触る者は居ない**（[`COLLECTED_FRAMES`] の doc）。
+        let collected: &mut [Option<PhysAddr>; MAX_FRAMES_PER_DESTROY] =
+            unsafe { &mut *core::ptr::addr_of_mut!(COLLECTED_FRAMES) };
         let mut count = 0usize;
         let mut leaked = 0usize;
 

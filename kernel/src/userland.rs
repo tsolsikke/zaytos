@@ -796,6 +796,28 @@ static mut SPAWN_PATHS: [[u8; PATH_MAX]; MAX_SPAWN_IN_FLIGHT] =
 /// **子の側で数えて、親が足す。** 親が子の内訳を知る必要はない。
 static SPAWN_QUARANTINED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
+/// 空間を破棄するときの隔離の置き場（B-d で静的へ移した）。
+///
+/// # なぜスタックに置かないか
+///
+/// **ここは遠征スタックの上である**（`run_loaded_program` は `spawn` の
+/// 経路で遠征スタックに乗る）。**`Quarantine` は容量に比例して太る**——
+/// **B-d で 64 から 256 へ上げたとき、遠征スタックの高水位が 30,376 から
+/// 34,984 バイト（46% から 53%）へ跳ね、「半分を越えたら決める」という
+/// 持ち越しの行が発火して起動が止まった**（実測。差の 4,608 バイトは
+/// ちょうど `(256 - 64) * 24` である）。
+///
+/// **持ち越しの行は発火させない**——**遠征スタックの要件が変わったのでは
+/// なく、ここが太っただけである。** **静的へ移せば、容量をいくつにしても
+/// 遠征スタックは 1 バイトも増えない。**
+///
+/// # 同時に 2 つ走らない
+///
+/// **触るのは BKL の内側だけである。** **破棄は入れ子にならない**——
+/// **子の破棄は、親の破棄が始まる前に終わっている**（`spawn` は同期である）。
+/// **使う前に [`crate::quarantine::Quarantine::reset`] で空にする。**
+static mut SPAWN_QUARANTINE: crate::quarantine::Quarantine = crate::quarantine::Quarantine::new();
+
 /// [`spawn`] が起こした子が漏らしたフレームの累計（S11-5）。
 static SPAWN_LEAKED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
@@ -1084,10 +1106,13 @@ pub fn load_user_program(
     let (held, leaked) = if keep_space {
         (0, 0)
     } else {
-        let mut quarantine = crate::quarantine::Quarantine::new();
         let guard = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
+        // SAFETY: BKL を保持している。**この隔離は破棄の間しか使わず、破棄は
+        // 入れ子にならない**（[`SPAWN_QUARANTINE`] の doc）。
+        let quarantine = unsafe { &mut *core::ptr::addr_of_mut!(SPAWN_QUARANTINE) };
+        quarantine.reset();
         // SAFETY: この空間はどのコアでも稼働していない。direct map は覆っている。
-        unsafe { process.space.destroy(direct_map, &mut quarantine, &guard) }
+        unsafe { process.space.destroy(direct_map, quarantine, &guard) }
     };
 
     (outcome, held, leaked)
