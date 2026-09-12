@@ -62,6 +62,9 @@ ext2-rmdir-ignore-nonempty = []
 ext2-create-skip-extra-isize = []
 # 破壊（ADR-0054）: 字の幅を常に 1 にする。全角が 1 セルで進む。
 width-always-one = []
+# 破壊（シリアルの排他の段）: UART の錠を取らない。2 コアが同時に書くと
+# 行がバイト単位で混ざる。kernel 側は serial-no-lock-test。
+serial-no-lock = []
 
 # **ユーザープログラムは `--cfg` で同じ破壊を受ける**（`kernel/build.rs` の
 # `USER_PROGRAM_CFGS`）。**`common` を cargo が建てるときは feature、
