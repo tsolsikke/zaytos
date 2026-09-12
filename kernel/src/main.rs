@@ -9652,6 +9652,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "フォントを読んで 1 文字ラスタライズする台本を流す（破壊ではない）",
     ),
     (
+        "serial-stress-test",
+        cfg!(feature = "serial-stress-test"),
+        "BSP と AP が同時にシリアルへ書く演習を回す（破壊ではない）",
+    ),
+    (
+        "serial-no-lock-test",
+        cfg!(feature = "serial-no-lock-test"),
+        "UART の錠を取らない。上の演習で行が混ざる",
+    ),
+    (
         "shell-complete-no-common-prefix-test",
         cfg!(feature = "shell-complete-no-common-prefix-test"),
         "zash が共通接頭辞まで伸ばさず、候補が 1 本のときだけ補完する",

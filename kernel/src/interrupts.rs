@@ -794,6 +794,12 @@ pub unsafe fn run_timer_loop(
                     report.started, report.attempted
                 ));
             }
+
+            // **シリアルの排他の演習（BSP 側）。** **合図を立ててから、AP と
+            // 同時に既知の行を書く。** **`kernel/src/smp.rs` の
+            // `run_serial_stress_on_ap` が相手である。**
+            #[cfg(feature = "serial-stress-test")]
+            run_serial_stress_on_bsp(logger);
         }
 
         // === S13-d: 割り込みが実際に届くことの実演 ===
@@ -931,10 +937,16 @@ pub unsafe fn run_timer_loop(
                     spun += 1;
                 }
                 // 触りが #PF になる側では、AP がダンプをシリアルへ書いている最中で
-                // ある。シリアルにはロックが無いので、ここですぐ書くと AP のダンプと
-                // バイト単位で混ざり、判定行が両方壊れる。**触れたか、予算を使い切る
-                // まで待ってから書く**——成功する側は touches の増分で早く抜け、
-                // 落ちる側は予算ぶんの時間が AP のダンプの完了に充てられる。
+                // ある。**触れたか、予算を使い切るまで待ってから書く**——成功する側は
+                // touches の増分で早く抜け、落ちる側は予算ぶんの時間が AP のダンプの
+                // 完了に充てられる。
+                //
+                // **理由が 2 つあったうちの 1 つは失効した（`ADR-0059`）。**
+                // **「シリアルにはロックが無いので、すぐ書くと AP のダンプとバイト単位
+                // で混ざる」を理由に挙げていたが、いまは錠が在る。** **待ちは残す**
+                // ——**もう 1 つの理由（触りが届くのを待つ）はそのまま生きている。**
+                // **外すなら、この判定の周りを触るときに測って決めること**
+                // （`docs/deferred-decisions.md` の「混線を避けて選んだ形」）。
                 let mut spun = 0u32;
                 while shootdown_probe::touches() == touches_before
                     && spun < SHOOTDOWN_PROBE_WAIT_SPINS
@@ -1227,7 +1239,8 @@ pub unsafe fn run_timer_loop(
                      heap_free={} heap_blocks={}, \
                      keys={} dropped={} \
                      stray={} spurious={} lapic_spurious={}, \
-                     irq1={} balanced={}, max tick jump={}, i8042 OBF={}, PIC ISR={}",
+                     irq1={} balanced={}, max tick jump={}, i8042 OBF={}, PIC ISR={}, \
+                     uart forced={} reentry={}",
                         ticks / crate::irq::timer_frequency_hz() as u64,
                         common::percpu::cpu_id(),
                         ap_tick_summary(),
@@ -1288,7 +1301,18 @@ pub unsafe fn run_timer_loop(
                         // ISR を読んでも元に戻す必要がない読み出し専用の操作しか
                         // しないため、競合しても値がずれるだけで壊れない。
                         // **失効条件は「AP がこの経路へ入るようになるとき」である。**
-                        unsafe { crate::irq::service_snapshot() }
+                        unsafe { crate::irq::service_snapshot() },
+                        // **UART の錠の計器（シリアルの排他の段）。**
+                        //
+                        // **どちらも 0 が正常である。** **`forced` が 0 でなければ
+                        // 上限か設計を見直す材料になり、`reentry` が 0 でなければ
+                        // 「割り込みハンドラは何も出力しない」が破られている。**
+                        // **あの規約は検査されていない**ので、ここが事後の観測になる。
+                        //
+                        // **判定にしない。** **揺れる値なので、揺れる行へ相乗りする**
+                        // （この行は `BOOT_LOG_VOLATILE_MARKERS` に在る）。
+                        common::serial::forced_write_count(),
+                        common::serial::reentry_count()
                     ),
                 );
             }
@@ -1386,6 +1410,44 @@ const fn ap_tick_summary() -> ApTickSummary {
 
 /// シリアルと画面の両方へ 1 行出す。必ずシリアルを先に書く
 /// （architecture.md §6.7）。
+/// シリアルの排他の演習（BSP 側）。
+///
+/// **合図を立て、AP と同時に既知の行を書き、AP が書き終えるのを待つ。**
+/// **待つのは、演習の途中でこの先の起動シーケンスが混ざらないようにするため
+/// である**——**混ざると、判定が「錠が効いていない」と「起動の行が挟まった」を
+/// 区別できなくなる。**
+#[cfg(feature = "serial-stress-test")]
+fn run_serial_stress_on_bsp(logger: &mut Logger<SerialPort>) {
+    use core::sync::atomic::Ordering;
+
+    crate::smp::SERIAL_STRESS_GO.store(true, Ordering::Release);
+    for index in 0..crate::smp::SERIAL_STRESS_LINES {
+        logger.info(format_args!(
+            "serial-stress: cpu0 {index:04} {}",
+            crate::smp::SERIAL_STRESS_PADDING
+        ));
+    }
+    // **上限つきで待つ。**
+    let started = common::cpu::read_timestamp_counter();
+    while !crate::smp::SERIAL_STRESS_AP_DONE.load(Ordering::Acquire) {
+        if common::cpu::read_timestamp_counter().wrapping_sub(started) > 20_000_000_000 {
+            logger.error(format_args!(
+                "serial-stress: the application processor never finished; the exercise asserts \
+                 nothing"
+            ));
+            return;
+        }
+        core::hint::spin_loop();
+    }
+    // **計器（判定にしない）。** **揺れる値なので `(info)` の側である。**
+    logger.info(format_args!(
+        "serial-stress: done; the uart lock was forced {} time(s) and re-entered on the same \
+         core {} time(s)",
+        common::serial::forced_write_count(),
+        common::serial::reentry_count()
+    ));
+}
+
 fn log_both(
     logger: &mut Logger<SerialPort>,
     console: Option<&mut crate::console::Console>,

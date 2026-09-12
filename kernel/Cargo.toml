@@ -496,6 +496,11 @@ fp-no-fresh-state = []
 fp-clobber-on-kernel-entry-test = []
 # フォントの台本を流す（B-d）。`/bin/ttfglyph` を 1 回起こす。
 ttf-test = []
+# シリアルの排他の演習（シリアルの排他の段）。BSP と AP が合図で揃えてから、
+# 既知の行を 200 本ずつ同時に書く。破壊ではない。
+serial-stress-test = []
+# 破壊（シリアルの排他の段）: UART の錠を取らない。上の演習で行が混ざる。
+serial-no-lock-test = ["serial-stress-test", "common/serial-no-lock"]
 # 協調的スイッチで、次タスクの保存コンテキストの rbx を壊す。復帰した
 # タスクが GPR 照合で検出する。`cargo xtask run --task-test drop-reg`。
 task-switch-drop-reg = []

@@ -1404,6 +1404,7 @@ fn main() -> Result<()> {
        cargo xtask run --keymap-test [--sabotage]
        cargo xtask run --fp-test [--sabotage FEATURE]
        cargo xtask run --ttf-test [--sabotage FEATURE]
+       cargo xtask run --serial-test [--sabotage FEATURE]
        cargo xtask check [--update-reference]   (ホストテストの名前の集合を取り直す)
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
@@ -1652,6 +1653,17 @@ fn main() -> Result<()> {
                     .collect();
                 let expect_pass = sabotage.is_empty();
                 return cmd_ttf_test(&sabotage, expect_pass);
+            }
+            // **シリアルの排他の判定（シリアルの排他の段）。**
+            if rest.iter().any(|a| a == "--serial-test") {
+                let sabotage: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                let expect_pass = sabotage.is_empty();
+                return cmd_serial_test(&sabotage, expect_pass);
             }
             // **Tab の補完の判定（TAB-1）。**
             if rest.iter().any(|a| a == "--complete-test") {
@@ -3713,6 +3725,13 @@ const FP_TEST_SABOTAGES: &[&str] = &[
 /// それが `brk` へ落ちる。**
 const TTF_TEST_SABOTAGES: &[&str] = &["fp-clobber-on-kernel-entry-test"];
 
+/// `serial-test` を「通らないこと」で回す破壊（シリアルの排他の段）。
+///
+/// **1 つである。** **錠を取らなければ、2 コアが同時に書いた行が混ざる。**
+/// **3 回続けて落ちることを確かめた**（実測。2026-09-12。**400 本のうち無傷は
+/// 222 / 160 / 191 本で、いちども 400 に届かない**）。
+const SERIAL_TEST_SABOTAGES: &[&str] = &["serial-no-lock-test"];
+
 const SHELL_TEST_SABOTAGES: &[&str] = &[
     "kill-ignore-interrupt-test",
     "kill-fold-at-depth-one-test",
@@ -5125,6 +5144,170 @@ fn cmd_ttf_test(features: &[&str], expect_pass: bool) -> Result<()> {
             Ok(())
         } else {
             bail!("{context}: the sabotage was NOT caught; the bitmaps still matched")
+        }
+    } else {
+        println!("{context}: FAILED");
+        if expect_pass {
+            bail!("{context}: FAILED")
+        } else {
+            println!("{context}: the sabotage was caught (this is the expected outcome)");
+            Ok(())
+        }
+    }
+}
+
+/// シリアルの排他の判定（`--serial-test`）。
+///
+/// # 稀な事象を確実にしてから判定にする
+///
+/// **BSP と AP の混線は稀である**（実測で 8 回に 3 回。S4-b-4 では 5 回に 1 回）。
+/// **そのままでは判定にならない**——**「1 回落ちたでは足りない」**
+/// （`docs/coding-standards.md`）。
+///
+/// **したがって演習を置く**——**2 コアが合図で揃えてから、既知の行を
+/// 200 本ずつ同時に書く。** **錠が無ければ必ず混ざる。**
+///
+/// # `-smp 2` で起こす
+///
+/// **既定の `-smp 1` には AP が無く、競合そのものが起きない。**
+fn cmd_serial_test(features: &[&str], expect_pass: bool) -> Result<()> {
+    /// 各コアが書く行数（`kernel/src/smp.rs` の `SERIAL_STRESS_LINES`）。
+    const LINES_PER_CPU: usize = 200;
+    /// 行の詰め物（同上の `SERIAL_STRESS_PADDING`）。
+    const PADDING: &str = "........................................................";
+
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let mut all_features: Vec<&str> = vec!["serial-stress-test"];
+    all_features.extend_from_slice(features);
+    let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let tag = all_features.join("-");
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("serial-test-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let mut qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
+    });
+    qemu_args.push("-smp".into());
+    qemu_args.push("2".into());
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the serial test")?;
+
+    let deadline = Instant::now() + BOOT_READY_TIMEOUT;
+    while Instant::now() < deadline {
+        if strip_ansi(&read_lossy(&serial_log)).contains("serial-stress: done;") {
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = read_lossy(&serial_log);
+    let context = if features.is_empty() {
+        "serial-test".to_string()
+    } else {
+        format!("serial-test {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    let qemu_debug = read_lossy(&debug_log);
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    let stripped = strip_ansi(&serial);
+
+    // **合図**——**両方が書き終えたこと。** **終わっていなければ、行数の
+    // 数え上げは何も主張しない。**
+    let both_finished = stripped.contains("serial-stress: done;");
+
+    // **期待する行を組み立てる。** **手で書き写さない**——**カーネル側と
+    // 同じ形をここで作る。**
+    let mut expected: Vec<String> = Vec::with_capacity(LINES_PER_CPU * 2);
+    for cpu in 0..2 {
+        for index in 0..LINES_PER_CPU {
+            expected.push(format!(
+                "[INFO] serial-stress: cpu{cpu} {index:04} {PADDING}"
+            ));
+        }
+    }
+
+    // **演習の行として読めたものを集める。** **裂けた行はここへ入らない**
+    // ——**接頭辞ごと食われるか、中身が食い違う。**
+    let seen: Vec<&str> = stripped
+        .lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .filter(|line| line.contains("serial-stress: cpu"))
+        .collect();
+    let intact = seen
+        .iter()
+        .filter(|line| expected.iter().any(|want| want == *line))
+        .count();
+    let torn: Vec<&&str> = seen
+        .iter()
+        .filter(|line| !expected.iter().any(|want| want == *line))
+        .take(3)
+        .collect();
+
+    // **計器**——**判定にしない**（揺れる）。
+    let instrument = stripped
+        .lines()
+        .find(|line| line.contains("serial-stress: done;"))
+        .unwrap_or("(the instrument line was not printed)")
+        .trim()
+        .to_string();
+
+    // **判定**——**2 コア分の行が、1 本残らず無傷である。**
+    let all_intact = intact == LINES_PER_CPU * 2;
+
+    println!("{context}: (signal) both cores finished writing = {both_finished}");
+    println!("{context}: (info) {instrument}");
+    println!(
+        "{context}: every line the two cores wrote at the same time is intact = {all_intact} \
+         ({intact} of {} intact; {} line(s) carried the marker; the first torn one(s) are {torn:?})",
+        LINES_PER_CPU * 2,
+        seen.len()
+    );
+
+    if !both_finished {
+        println!("{context}: FAILED");
+        bail!("{context}: the exercise did not finish, so the count asserts nothing")
+    }
+
+    if all_intact {
+        println!("{context}: PASS");
+        if expect_pass {
+            Ok(())
+        } else {
+            bail!("{context}: the sabotage was NOT caught; every line was still intact")
         }
     } else {
         println!("{context}: FAILED");
@@ -15747,6 +15930,32 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }
         }
 
+        // **シリアルの排他（シリアルの排他の段）。**
+        //
+        // **2 コアが合図で揃えてから 200 行ずつ同時に書き、1 本も混ざらないことを
+        // 見る。** **稀な事象を確実にしてから判定にした形である。**
+        total += 1;
+        begin_item("two cores writing to the serial port at once do not tear each other's lines");
+        match cmd_serial_test(&[], true) {
+            Ok(()) => println!("--- serial test: OK"),
+            Err(error) => {
+                println!("--- serial test: FAILED ({error})");
+                failed.push("serial test".to_string());
+            }
+        }
+        for sabotage in SERIAL_TEST_SABOTAGES {
+            total += 1;
+            let label = format!("serial-test {sabotage}");
+            begin_item(&label);
+            match cmd_serial_test(&[sabotage], false) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
+            }
+        }
+
         total += 1;
         begin_item("the shell takes keystrokes and init restarts it");
         match cmd_shell_test(ShellTestMode::Normal) {
@@ -17106,7 +17315,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 33,
-    full: 294,
+    full: 296,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

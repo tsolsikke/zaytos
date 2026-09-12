@@ -822,6 +822,66 @@ pub unsafe fn wake_application_processors(
     report
 }
 
+/// シリアルの排他の演習で、各コアが書く行数。
+///
+/// **混線は稀である**（実測で 8 回に 3 回。S4-b-4 では 5 回に 1 回）。
+/// **稀な事象を判定にするには、確実にする必要がある**——**2 コアが同時に
+/// 何百行も書けば、錠が無ければ必ず混ざる。**
+///
+/// **本数は測って決めた**（`docs/verification-coverage.md` の「シリアルの排他」）。
+#[cfg(feature = "serial-stress-test")]
+pub const SERIAL_STRESS_LINES: u32 = 200;
+
+/// 演習の合図。**BSP が立て、AP が待つ。**
+///
+/// **揃えないと重ならない**——**AP が先に書き終えてしまえば、錠が無くても
+/// 混ざらない。**
+#[cfg(feature = "serial-stress-test")]
+pub static SERIAL_STRESS_GO: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// AP が演習の行を書き終えたか。**BSP が待つ。**
+#[cfg(feature = "serial-stress-test")]
+pub static SERIAL_STRESS_AP_DONE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// 演習の行の本体。**両コアが同じ形で書く。** **cpu と番号だけが違う。**
+///
+/// **詰め物を付ける**——**短い行は、混ざっても形が壊れにくい。**
+#[cfg(feature = "serial-stress-test")]
+pub const SERIAL_STRESS_PADDING: &str = "........................................................";
+
+/// 演習の AP 側。**合図を待って書き、終わりを報せる。**
+#[cfg(feature = "serial-stress-test")]
+fn run_serial_stress_on_ap(serial: &mut SerialPort, slot: usize) {
+    use core::sync::atomic::Ordering;
+
+    // **上限つきで待つ**（`CLAUDE.md` の「上限のない待機ループを書かない」）。
+    let started = common::cpu::read_timestamp_counter();
+    while !SERIAL_STRESS_GO.load(Ordering::Acquire) {
+        if common::cpu::read_timestamp_counter().wrapping_sub(started) > WAIT_TIMEOUT_CYCLES {
+            let _ = writeln!(
+                serial,
+                "[ERROR] serial-stress: ap {slot} never saw the go signal; the exercise asserts \
+                 nothing"
+            );
+            return;
+        }
+        core::hint::spin_loop();
+    }
+    for index in 0..SERIAL_STRESS_LINES {
+        let _ = writeln!(
+            serial,
+            "[INFO] serial-stress: cpu{slot} {index:04} {SERIAL_STRESS_PADDING}"
+        );
+    }
+    SERIAL_STRESS_AP_DONE.store(true, Ordering::Release);
+}
+
+/// 演習が待てる上限（TSC のサイクル）。**BKL と同じ桁にしてある。**
+#[cfg(feature = "serial-stress-test")]
+const WAIT_TIMEOUT_CYCLES: u64 = 20_000_000_000;
+
 /// AP を起こすときの各段の待ちティック数。1 ティック = 10ms（100Hz）。
 const AP_WAKE_WAIT_TICKS: u64 = 1;
 /// 起動署名を待つ上限（ティック）。
@@ -1511,6 +1571,11 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
         "[INFO] smp: ap {slot} is up with its own per-CPU state (own GDT/TSS/IDT, own stacks \
          in PML4[258], production CR3); it now takes part in scheduling on its own idle task"
     );
+
+    // **シリアルの排他の演習（AP 側）。** **合図を待ってから、既知の行を
+    // [`SERIAL_STRESS_LINES`] 本書く。** **BSP も同時に書く。**
+    #[cfg(feature = "serial-stress-test")]
+    run_serial_stress_on_ap(&mut serial, slot);
 
     // 破壊 (S4-c-4-1, smp-ap-runs-preemptive-demo): AP にデモを呼ばせる。
     //
