@@ -7822,19 +7822,27 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
                         if writeln!(stream, "sendkey {key}").is_err() {
                             break;
                         }
-                        thread::sleep(Duration::from_millis(120));
+                        thread::sleep(SHELL_TEST_KEY_INTERVAL);
                     }
                     // **子が走り終えるのを待つ。** `ls` と `cat` は
                     // `spawn` で起こされ、終わるまでシェルは戻らない。
-                    thread::sleep(Duration::from_millis(800));
+                    thread::sleep(SHELL_TEST_LINE_INTERVAL);
                 }
             }
             Err(e) => println!("shell-test: could not reach the QEMU monitor: {e}"),
         }
-        // **起こし直しが判定行に出るまで待つ。**
-        // **3 つのコマンドを走らせた後なので、締めの `exit` が効いてから
-        // `init` が像を読み直すまでに時間がかかる。**
-        thread::sleep(Duration::from_secs(8));
+        // **起こし直しが判定行に出るまで待つ。上限つき。**
+        //
+        // **固定の待ちだった（8 秒）。** **出た時点で抜ける形へ替えた**
+        // ——**`--full` では 13 回走るので、固定だと待ち切りの差がそのまま積む。**
+        // **上限は元の固定値と同じ 8 秒である**（`SHELL_TEST_RESTART_WAIT`）。
+        let deadline = Instant::now() + SHELL_TEST_RESTART_WAIT;
+        while Instant::now() < deadline {
+            if strip_ansi(&read_lossy(&serial_log)).contains(SHELL_RESTART_MARKER) {
+                break;
+            }
+            thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        }
     }
 
     let qemu_exit = child
@@ -11232,6 +11240,44 @@ fn capture_boot_log(workspace_root: &Path, smp: Option<u32>, tag: &str) -> Resul
 
 /// 参照となる正規化済み起動ログの置き場所（S6-d）。
 const REFERENCE_BOOT_LOG: &str = "xtask/reference/boot-log-smp2.txt";
+
+/// `--shell-test` が 1 キーごとに空ける間隔。
+///
+/// # 根拠を書く（2026-09-12）
+///
+/// **ここには 2026-09-12 まで、`120` という数字だけが在って根拠が無かった**
+/// （実測。周りのコメントは「何を打つか」しか書いていなかった）。**暫定値には
+/// 根拠を残すという規律の、漏れである。**
+///
+/// # 何を待っているのか
+///
+/// **QEMU の monitor へ `sendkey` を投げてから、その打鍵がカーネルの
+/// キーボード割り込みを通り、`zash` の行編集へ届くまで**である。
+/// **速すぎると、届く前に次のキーが来て取りこぼす。**
+///
+/// # 境目を測って決めた
+///
+/// **表は `docs/verification-coverage.md` の「打鍵の間隔を測った」に在る。**
+const SHELL_TEST_KEY_INTERVAL: Duration = Duration::from_millis(32);
+
+/// `--shell-test` が 1 行を打ち終えてから空ける間隔。
+///
+/// **キーの間隔と違い、こちらは「子が走り終えるのを待つ」である**——
+/// `ls` と `cat` は `spawn` で起こされ、終わるまでシェルは戻らない。
+/// **根拠は [`SHELL_TEST_KEY_INTERVAL`] と同じ表に在る。**
+const SHELL_TEST_LINE_INTERVAL: Duration = Duration::from_millis(400);
+
+/// `--shell-test` が、締めの `exit` の後に `init` の起こし直しを待つ上限。
+///
+/// **かつては固定の待ちだった。** **いまは [`SHELL_RESTART_MARKER`] が出た時点で
+/// 抜け、ここは上限としてだけ効く**（値は元の固定値のままである）。
+const SHELL_TEST_RESTART_WAIT: Duration = Duration::from_secs(8);
+
+/// `init` がシェルを起こし直したことを言う行の断片。
+///
+/// **`--shell-test` の待ちの目印である。** **判定そのものは、この行を数えて
+/// 「ちょうど 1 回」を見る**（あちらは出力を全部読んでから数える）。
+const SHELL_RESTART_MARKER: &str = "init: starting /bin/zash (restart 1 of 3)";
 
 /// シェルが構えたことを言う行（`kernel/userland/zash.rs`）。
 ///
