@@ -2675,7 +2675,7 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
     let ready_marker = "fs-image-ready:";
     let marker = "fs-image-copy: copied ";
     let source_marker = "fs-image-source: root_filesystem reads from ";
-    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    let deadline = Instant::now() + BOOT_READY_TIMEOUT;
     let mut copied_line = None;
     while Instant::now() < deadline {
         {
@@ -7619,7 +7619,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
 
     // **プロンプトが出るまで待つ。上限つき。**
     let ready_marker = "zash: ready";
-    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    let deadline = Instant::now() + BOOT_READY_TIMEOUT;
     let mut ready = false;
     while Instant::now() < deadline {
         if read_lossy(&serial_log).contains(ready_marker) {
@@ -8995,7 +8995,7 @@ fn run_keyboard_test(features: &[&str]) -> Result<KeyboardAssertions> {
 
     // キーを送る前に、IRQ1 が解禁されるまで待つ。**上限つき。**
     let ready_marker = "keyboard: IRQ1 is unmasked";
-    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    let deadline = Instant::now() + BOOT_READY_TIMEOUT;
     let mut ready = false;
     while Instant::now() < deadline {
         if read_lossy(&serial_log).contains(ready_marker) {
@@ -10763,7 +10763,7 @@ fn capture_one_boot(
         .context("failed to launch qemu-system-x86_64 for the persist probe")?;
 
     // **フラッシュが済むか、止まる文言が出るまで待つ。上限つき。**
-    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    let deadline = Instant::now() + BOOT_READY_TIMEOUT;
     loop {
         let seen = read_lossy(&serial_log);
         if seen.contains(until) || seen.contains("; halting") || Instant::now() >= deadline {
@@ -11024,7 +11024,7 @@ fn capture_boot_log(workspace_root: &Path, smp: Option<u32>, tag: &str) -> Resul
     // **したがって、止める条件に中身の目印を入れる。** **`zash: ready` は
     // 起動シーケンスの終わりで、速さに依らない。** **ハートビートの条件は
     // 残す**——**定常状態へ入ったことは、あちらでしか言えない。**
-    let deadline = Instant::now() + BOOT_LOG_CAPTURE_TIMEOUT;
+    let deadline = Instant::now() + BOOT_READY_TIMEOUT;
     loop {
         let text = read_lossy(&serial_log);
         let beats = text.matches("heartbeat: ticks=").count();
@@ -11055,19 +11055,28 @@ const REFERENCE_BOOT_LOG: &str = "xtask/reference/boot-log-smp2.txt";
 /// **起動ログを取り終える条件の片方である**（[`capture_boot_log`]）。
 const SHELL_READY_MARKER: &str = "zash: ready";
 
-/// 起動ログを取り終えるまでの上限（B-d で分けた）。
+/// 起動が目印のところまで進むのを待つ上限（B-d で分け、B-e で広げた）。
+///
+/// # 借りていた上限を返した
 ///
 /// **`EXCEPTION_TEST_TIMEOUT`（20 秒）を使っていた。** **あれは「例外が上がって
 /// 止まる」までの上限で、こちらは「起動が最後まで進む」までの上限である**
 /// ——**測るものが違うのに、同じ定数を使っていた。**
 ///
-/// **B-d で足りなくなった。** **像へフォントを足し、壊した像の作業領域を広げた
-/// ところ、20 秒では起動シーケンスが終わらない回が出た**——**参照が 512 行から
-/// 327 行へ縮み、185 行ぶんの覆いが黙って消えた**（実測。2026-09-11）。
+/// **2 度足りなくなった。** **1 度目は起動ログの取り込みで、参照が 512 行から
+/// 327 行へ縮み、185 行ぶんの覆いが黙って消えた**（2026-09-11）。
+/// **2 度目は `--shell-test` で、`--full` の最中に `zash: ready` が 20 秒で
+/// 出ず、判定が全部 `false` になった**（2026-09-12。**同じ試験を単独で走らせると
+/// 通る**——実測で、この木で 154 秒、HEAD の木で 169 秒）。
 ///
-/// **90 秒にした。** **実測でシェルが構えるまで約 24 秒である**（機械の負荷で
-/// 揺れる。**同じ木で 20 秒を越える回と越えない回の両方を見た**）。
-const BOOT_LOG_CAPTURE_TIMEOUT: Duration = Duration::from_secs(90);
+/// # どこで使うか
+///
+/// **「起動がそこまで進んだ」を待つ箇所すべてである。** **例外が上がるのを
+/// 待つ箇所には使わない。** **区別は待つ目印で付く**——`zash: ready` や
+/// `fs-image-ready` は起動の進みで、`#PF` の報告は例外である。
+///
+/// **90 秒にした。** **実測で、シェルが構えるまでは起動だけで 40 秒ほどである。**
+const BOOT_READY_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// 起動ログの突き合わせ（S6-d）。**2 つの主張を 1 つの機構で見る。**
 ///
