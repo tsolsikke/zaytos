@@ -236,6 +236,36 @@ struct Task {
     iterations: u64,
     /// このタスクが再開された回数（会計用）。
     resumes: u64,
+    /// このタスクの RSP0（W1-a で置き場だけ作った。**使うのは W1-b**）。
+    ///
+    /// # なぜタスクが「値」を持つのか。**置き場を分けられないから**
+    ///
+    /// **RSP0 は TSS の決まった欄である**（`gdt::set_rsp0` が
+    /// `PerCpu::this_cpu_ptr(TSS)` の `privilege_stack_table[0]` を書く。実測）。
+    /// **スロットで引く形にできない。** **タスクが値を持ち、切り替えで
+    /// 入れ替えることになる。**
+    ///
+    /// **値は「そのタスクが Ring 3 の遠征に入っていなければカーネルスタック頂点、
+    /// 入っていればその深さの遠征スタックの上端」である**——**いまは大域の深さから
+    /// 計算している**（`kernel/src/userland.rs` の `main_rsp0_top`。実測）。
+    ///
+    /// **W1-b で `schedule_switch` が `stack_top` の代わりにこれを書く。**
+    /// **切り替えの側に「遠征中か」の分岐は足さない。**
+    ///
+    /// **`allow` を外すのは W1-b である。** **外し忘れると、使われないまま残る。**
+    #[allow(dead_code)]
+    rsp0: u64,
+    /// このタスクの回復点のアドレス（W1-a で置き場だけ作った。**使うのは W1-b**）。
+    ///
+    /// # これも「値」である
+    ///
+    /// **`CURRENT_RECOVERY` はアセンブラが `[rip + sym]` で読む**（実測。
+    /// `kernel/src/ring3.rs` の 2 つの `global_asm!`）。**単一の既知の番地で
+    /// なければならないので、スロットで引く形にできない。**
+    ///
+    /// **`allow` を外すのは W1-b である。**
+    #[allow(dead_code)]
+    current_recovery: u64,
     /// このタスクを走らせてよいコア（S4-c-1）。
     ///
     /// # なぜ静的な担当なのか
@@ -259,6 +289,8 @@ const EMPTY_TASK: Task = Task {
     saved_rsp: 0,
     stack_top: 0,
     stack_bottom: 0,
+    rsp0: 0,
+    current_recovery: 0,
     state: TaskState::Uninitialized,
     base: 0,
     rounds_left: 0,
@@ -901,6 +933,10 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
                 stack_top: top.as_u64(),
                 // 使えるスタックの下端はガードページの直上。
                 stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
+                // **W1-a では置き場だけである。** 初期値はカーネルスタック頂点で、
+                // **遠征に入っていないタスクの RSP0 がそれである**（使うのは W1-b）。
+                rsp0: top.as_u64(),
+                current_recovery: 0,
                 state: TaskState::Ready,
                 // BSP のワーカーである。`GPR_BUF` に触るので AP へ渡さない
                 // （ADR-0023 Addendum §5。タスクのコア間移動を実装しない）。
@@ -1584,6 +1620,9 @@ unsafe fn setup_preemptive_tasks() {
                 saved_rsp,
                 stack_top: top.as_u64(),
                 stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
+                // **W1-a では置き場だけである**（使うのは W1-b）。
+                rsp0: top.as_u64(),
+                current_recovery: 0,
                 state: TaskState::Ready,
                 // BSP のワーカーである。`GPR_BUF` に触るので AP へ渡さない
                 // （ADR-0023 Addendum §5。タスクのコア間移動を実装しない）。
