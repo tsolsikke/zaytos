@@ -637,21 +637,58 @@ static WRITE_FD: AtomicU64 = AtomicU64::new(0);
 static WRITE_LEN: AtomicU64 = AtomicU64::new(0);
 /// [`SYS_WRITE`] が最後に記録したバイト列。
 static WRITE_BUF: [AtomicU8; WRITE_BUF_LEN] = [const { AtomicU8::new(0) }; WRITE_BUF_LEN];
+/// 遠征の 1 本が持つ、システムコール側の正しさの状態（W1-a）。
+///
+/// # 計器と結果はここに無い
+///
+/// **`WRITE_*` / `LAST_*` / `PROBE_*` / `INVOCATION_COUNT` などは、
+/// 2 本同時のときに正しくない**（`docs/wayland-inventory.md` の
+/// 「W1-c の 2 本目は、17 個のうち何個を触るか」）。**W1-a では動かさない**
+/// ——**動かすと「緑のまま、主張している中身が変わる」形になる。**
+struct SyscallState {
+    /// 今 Ring 3 が使っている窓の下端と上端（S9-b-3-2b）。
+    ///
+    /// # 据えるのは Ring 3 へ落ちる側である
+    ///
+    /// [`crate::ring3::enter`] が遠征の間だけ据え、戻るときに元へ戻す。**据えないまま
+    /// ここへ来ることはない**——[`validate_user_range`] を呼ぶのは [`dispatch`] だけで、
+    /// あちらは `syscall_entry` からしか来ず、`syscall_entry` は Ring 3 からしか来ない。
+    ///
+    /// # 既定値は空の窓である
+    ///
+    /// `(0, 0)` は**どんな長さ 1 以上の範囲も受理しない。** 据え忘れたときに黙って
+    /// 通る形にしない。**安全側は「窓が無ければ何も通さない」である。**
+    user_window_start: AtomicU64,
+    user_window_end: AtomicU64,
+    /// [`SYS_EXIT`] を受け取ったか（S9-b-3-1）。**呼び出し側は、遠征から戻った理由が
+    /// 終了なのか畳みなのかをこれで区別する。**
+    process_exited: AtomicBool,
+    /// [`SYS_EXIT`] が受け取った終了状態（RDI）。[`SyscallState::process_exited`] が真のときだけ意味を持つ。
+    process_exit_status: AtomicU64,
+}
 
-/// 今 Ring 3 が使っている窓の下端と上端（S9-b-3-2b）。
+impl SyscallState {
+    const fn new() -> Self {
+        Self {
+            user_window_start: AtomicU64::new(0),
+            user_window_end: AtomicU64::new(0),
+            process_exited: AtomicBool::new(false),
+            process_exit_status: AtomicU64::new(0),
+        }
+    }
+}
+
+/// システムコール側の状態、スロットごと（W1-a）。
+static SYSCALL_STATE: [SyscallState; crate::ring3::RING3_SLOTS] =
+    [const { SyscallState::new() }; crate::ring3::RING3_SLOTS];
+
+/// 今のタスクのシステムコール側の状態を引く（W1-a）。
 ///
-/// # 据えるのは Ring 3 へ落ちる側である
-///
-/// [`crate::ring3::enter`] が遠征の間だけ据え、戻るときに元へ戻す。**据えないまま
-/// ここへ来ることはない**——[`validate_user_range`] を呼ぶのは [`dispatch`] だけで、
-/// あちらは `syscall_entry` からしか来ず、`syscall_entry` は Ring 3 からしか来ない。
-///
-/// # 既定値は空の窓である
-///
-/// `(0, 0)` は**どんな長さ 1 以上の範囲も受理しない。** 据え忘れたときに黙って
-/// 通る形にしない。**安全側は「窓が無ければ何も通さない」である。**
-static USER_WINDOW_START: AtomicU64 = AtomicU64::new(0);
-static USER_WINDOW_END: AtomicU64 = AtomicU64::new(0);
+/// **W1-a では常にスロット 0 である**（`crate::ring3::RING3_SLOTS` が 1）。
+#[inline(always)]
+fn state() -> &'static SyscallState {
+    &SYSCALL_STATE[0]
+}
 
 /// [`PROBE_NUMBER`] を受け取ったか（S9-b-3-2a）。
 static PROBE_INVOKED: AtomicBool = AtomicBool::new(false);
@@ -674,12 +711,6 @@ static PROBE_SEEN_ARGS: [AtomicU64; 6] = [
     AtomicU64::new(0),
     AtomicU64::new(0),
 ];
-
-/// [`SYS_EXIT`] を受け取ったか（S9-b-3-1）。**呼び出し側は、遠征から戻った理由が
-/// 終了なのか畳みなのかをこれで区別する。**
-static PROCESS_EXITED: AtomicBool = AtomicBool::new(false);
-/// [`SYS_EXIT`] が受け取った終了状態（RDI）。[`PROCESS_EXITED`] が真のときだけ意味を持つ。
-static PROCESS_EXIT_STATUS: AtomicU64 = AtomicU64::new(0);
 
 /// `syscall_entry` が呼ばれた回数（会計用）。
 static INVOCATION_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -1063,8 +1094,8 @@ unsafe fn dispatch(
             let status = args[0];
             #[cfg(feature = "user-exit-wrong-status")]
             let status = args[1];
-            PROCESS_EXIT_STATUS.store(status, Ordering::SeqCst);
-            PROCESS_EXITED.store(true, Ordering::SeqCst);
+            state().process_exit_status.store(status, Ordering::SeqCst);
+            state().process_exited.store(true, Ordering::SeqCst);
             // **溜まっている描画を送る（ADR-0047）。**
             //
             // **待たずに終わるプログラムを取りこぼさない**——`cat` と `ls` は
@@ -3124,8 +3155,8 @@ pub fn reset_counters() {
     }
     HANDLER_RSP.store(0, Ordering::SeqCst);
     IN_RING3_AT_ENTRY.store(false, Ordering::SeqCst);
-    PROCESS_EXITED.store(false, Ordering::SeqCst);
-    PROCESS_EXIT_STATUS.store(0, Ordering::SeqCst);
+    state().process_exited.store(false, Ordering::SeqCst);
+    state().process_exit_status.store(0, Ordering::SeqCst);
     WRITE_FD.store(0, Ordering::SeqCst);
     WRITE_LEN.store(0, Ordering::SeqCst);
     for slot in WRITE_BUF.iter() {
@@ -3196,8 +3227,8 @@ pub fn save_records() -> Records {
         last_args,
         handler_rsp: HANDLER_RSP.load(Ordering::SeqCst),
         in_ring3_at_entry: IN_RING3_AT_ENTRY.load(Ordering::SeqCst),
-        process_exited: PROCESS_EXITED.load(Ordering::SeqCst),
-        process_exit_status: PROCESS_EXIT_STATUS.load(Ordering::SeqCst),
+        process_exited: state().process_exited.load(Ordering::SeqCst),
+        process_exit_status: state().process_exit_status.load(Ordering::SeqCst),
         write_fd: WRITE_FD.load(Ordering::SeqCst),
         write_len: WRITE_LEN.load(Ordering::SeqCst),
         write_buf,
@@ -3215,8 +3246,12 @@ pub fn restore_records(records: Records) {
     }
     HANDLER_RSP.store(records.handler_rsp, Ordering::SeqCst);
     IN_RING3_AT_ENTRY.store(records.in_ring3_at_entry, Ordering::SeqCst);
-    PROCESS_EXITED.store(records.process_exited, Ordering::SeqCst);
-    PROCESS_EXIT_STATUS.store(records.process_exit_status, Ordering::SeqCst);
+    state()
+        .process_exited
+        .store(records.process_exited, Ordering::SeqCst);
+    state()
+        .process_exit_status
+        .store(records.process_exit_status, Ordering::SeqCst);
     WRITE_FD.store(records.write_fd, Ordering::SeqCst);
     WRITE_LEN.store(records.write_len, Ordering::SeqCst);
     for (slot, value) in WRITE_BUF.iter().zip(records.write_buf.iter()) {
@@ -3231,8 +3266,8 @@ pub fn restore_records(records: Records) {
 /// 今 Ring 3 が使っている窓を返す（S9-b-3-2b）。
 pub fn user_window() -> (u64, u64) {
     (
-        USER_WINDOW_START.load(Ordering::SeqCst),
-        USER_WINDOW_END.load(Ordering::SeqCst),
+        state().user_window_start.load(Ordering::SeqCst),
+        state().user_window_end.load(Ordering::SeqCst),
     )
 }
 
@@ -3243,8 +3278,8 @@ pub fn user_window() -> (u64, u64) {
 /// **入れ子にはならない**（Ring 3 の遠征は入れ子にならない）が、
 /// **前の値を返す形にしてあるので、入れ子になっても壊れない。**
 pub fn set_user_window(start: u64, end: u64) -> (u64, u64) {
-    let previous_start = USER_WINDOW_START.swap(start, Ordering::SeqCst);
-    let previous_end = USER_WINDOW_END.swap(end, Ordering::SeqCst);
+    let previous_start = state().user_window_start.swap(start, Ordering::SeqCst);
+    let previous_end = state().user_window_end.swap(end, Ordering::SeqCst);
     (previous_start, previous_end)
 }
 
@@ -3260,12 +3295,12 @@ pub fn probe_seen_args() -> [u64; 6] {
 
 /// [`SYS_EXIT`] を受け取ったか（S9-b-3-1）。
 pub fn process_exited() -> bool {
-    PROCESS_EXITED.load(Ordering::SeqCst)
+    state().process_exited.load(Ordering::SeqCst)
 }
 
 /// [`SYS_EXIT`] が受け取った終了状態。[`process_exited`] が真のときだけ意味を持つ。
 pub fn process_exit_status() -> u64 {
-    PROCESS_EXIT_STATUS.load(Ordering::SeqCst)
+    state().process_exit_status.load(Ordering::SeqCst)
 }
 
 /// `syscall_entry` が呼ばれた回数。
