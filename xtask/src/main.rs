@@ -10355,6 +10355,65 @@ fn cmd_highhalf_trampoline_check(
     Ok(())
 }
 
+/// `ipi-probe` の「AP が生き続けること」を、BSP のハートビートの関係で見る（2026-09-14）。
+///
+/// **受信が送った本数（4）に揃った最初のハートビートより、最後のハートビートの
+/// ほうが AP のティックが多いこと。** **AP が IPI を受けたあとで死んでいれば、
+/// 数は増えない。**
+///
+/// **マーカーでは書けない**——**「増えた」は 2 つの値の関係で、部分文字列の有無では
+/// 言えない**（`check_tlb_generation_relation` と同じ理由である）。
+///
+/// # 読むのは BSP の行だけである
+///
+/// **`ap_ticks=cpu1=` と `ipi_recv_cpu1=` は BSP のハートビートに載る。**
+/// **AP 自身の行（`smp: ap heartbeat:`）は読まない**——**あれが揺らいだので
+/// この形にした**（`SMP_AP_TESTS` の `ipi-probe` の doc）。
+///
+/// # 実測
+///
+/// **通った回は `(2, 4)` → `(101, 4)`、以前の形で落ちた回は `(1, 4)` → `(99, 4)`
+/// だった**（`(ap_ticks, ipi_recv)`）。**どちらもこの関係では通る。**
+///
+/// **受信が揃ったのが最後のハートビートなら、増えたかを言えないので落とす**
+/// ——**3 回の実測ではどれも 2 秒の時点で揃っていた。** **そこで落ちるようなら、
+/// 揺らぎの形が変わったということである。**
+fn check_ap_ticked_after_ipis(serial: &str) -> Result<String> {
+    let mut rows: Vec<(u64, u64)> = Vec::new();
+    for line in serial.lines() {
+        if !line.contains("heartbeat: ticks=") || line.contains("smp: ap heartbeat") {
+            continue;
+        }
+        let field = |key: &str| -> Option<u64> {
+            let rest = line.split(key).nth(1)?;
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            digits.parse().ok()
+        };
+        if let (Some(ap_ticks), Some(received)) = (field("ap_ticks=cpu1="), field("ipi_recv_cpu1="))
+        {
+            rows.push((ap_ticks, received));
+        }
+    }
+    let Some(landed) = rows.iter().position(|&(_, received)| received == 4) else {
+        bail!("no BSP heartbeat showed ipi_recv_cpu1=4 (rows {rows:?})");
+    };
+    let at_landing = rows[landed].0;
+    let Some(&(last, _)) = rows.last() else {
+        bail!("no BSP heartbeat carried ap_ticks");
+    };
+    if landed + 1 == rows.len() {
+        bail!("the IPIs landed at the last heartbeat, so growth cannot be seen (rows {rows:?})");
+    }
+    if last <= at_landing {
+        bail!(
+            "ap_ticks did not grow after the IPIs landed: {at_landing} -> {last} (rows {rows:?})"
+        );
+    }
+    Ok(format!(
+        "ap_ticks {at_landing} -> {last} after the IPIs landed"
+    ))
+}
+
 /// マーカー突き合わせ方式の回帰チェック（critical-test / interrupt-test 共通）。
 ///
 /// シリアルログに「出るべき行」がすべて出て、「出てはいけない行」が 1 つも
@@ -11677,12 +11736,22 @@ fn cmd_marker_test(
     // **`tlb-generation` だけ、マーカーでは表せない関係を見る（S7-d）。**
     // マーカーは部分文字列の有無しか言えないので、**絶対値でしか書けない。**
     // この探りが主張しているのは関係のほうなので、ここで別に確かめる。
-    let mut relation_note: Option<String> = None;
+    let mut relation_note: Option<(&str, String)> = None;
     if test.name == "tlb-generation" {
         match check_tlb_generation_relation(&serial) {
-            Ok(note) => relation_note = Some(note),
+            Ok(note) => relation_note = Some(("generation relation", note)),
             Err(error) => {
                 println!("{context}: the generation relation does not hold: {error}");
+                bail!("{context}: FAILED")
+            }
+        }
+    }
+    // **`ipi-probe` も関係で見る（2026-09-14）。** 表の doc を見ること。
+    if test.name == "ipi-probe" {
+        match check_ap_ticked_after_ipis(&serial) {
+            Ok(note) => relation_note = Some(("the AP kept ticking after the IPIs", note)),
+            Err(error) => {
+                println!("{context}: the AP did not keep ticking after the IPIs: {error}");
                 bail!("{context}: FAILED")
             }
         }
@@ -11752,8 +11821,8 @@ fn cmd_marker_test(
     }
 
     if ok {
-        if let Some(note) = relation_note {
-            println!("{context}: generation relation OK ({note})");
+        if let Some((label, note)) = relation_note {
+            println!("{context}: {label} = OK ({note})");
         }
         println!("{context}: PASS");
         Ok(())
@@ -14033,14 +14102,41 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
     // **判定は 2 つとも要る**——「受け取った本数が送った本数と一致すること」と
     // 「AP が生き続けること」。**前者だけだと、AP が死んでいても 0 と 0 で
     // 一致してしまう。** 実際、受け口を用意する前は AP が死んで両方 0 だった。
+    //
+    // # 「AP が生き続けること」は、マーカーではなく関係で見る（2026-09-14）
+    //
+    // **以前は `smp: ap heartbeat: cpu=1` の行を期待マーカーにしていた。**
+    // **`--full` で揺らいだ**——**AP はティックが 100 に達したときにだけその行を
+    // 出し、BSP は自分のハートビートの本数で定常の観測を締める。** **AP の
+    // ティックの始まりが 1 つ遅れると、99 で締まって行が出ない**（実測で
+    // `ap_ticks=cpu1=99`）。**窓の側を延ばしても直らない**——**締めているのは
+    // カーネルである。**
+    //
+    // **いまは `check_ap_ticked_after_ipis` が見る**——**BSP のハートビートで、
+    // 受信が 4 に揃った時点より後に AP のティックが増えていること。**
+    //
+    // **失ったもの**——**「このビルドで、AP が定常のあいだシリアルへ書けること」。**
+    // **覆っているのは `smp-ap-test ap-timer-rate` である**——**`--full` で毎回
+    // 走り、AP のハートビートの行が読めなければ `could not measure the AP tick
+    // rate = NG` で落ちる。** **AP が立ち上がりの途中で書けることは、`-smp 2` の
+    // 起動ログの参照が 4 行持っている。**
+    //
+    // **落とす破壊は、前もいまも無い**（機能の検査なので）。
     CriticalTest {
         name: "ipi-probe",
         feature: "smp-ipi-probe",
         expected_markers: &[
             // 送受信が一致した要約行。**本数まで含めて固定する。**
             "sent=4 received=4",
-            // AP が生き続けている証拠。**ハートビートが出るのは死んでいない側だけ。**
-            "smp: ap heartbeat: cpu=1",
+            // **定常の観測が締まったことの行。判定ではなく、待つ目印である。**
+            //
+            // **`cmd_marker_test` は期待マーカーが全部そろった時点で取り込みを
+            // やめる。** **受信の要約はハートビートより先に出るので、これが無いと
+            // BSP のハートビートが 1 本しか取り込まれず、`check_ap_ticked_after_ipis`
+            // が「増えたかを言えない」で落ちる**（実測。3 回とも落ちた）。
+            // **以前は AP のハートビートの行が、たまたまこの役を兼ねていた**
+            // ——**あれを外したら、待つ長さが黙って縮んだ。**
+            "this is the end of the steady-loop observation",
         ],
         forbidden_markers: &[
             "did not accept a probe IPI",
