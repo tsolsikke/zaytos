@@ -236,7 +236,7 @@ struct Task {
     iterations: u64,
     /// このタスクが再開された回数（会計用）。
     resumes: u64,
-    /// このタスクの RSP0（W1-a で置き場だけ作った。**使うのは W1-b**）。
+    /// このタスクの RSP0（W1-a で置き場を作り、W1-b で使い始めた）。
     ///
     /// # なぜタスクが「値」を持つのか。**置き場を分けられないから**
     ///
@@ -252,10 +252,21 @@ struct Task {
     /// **W1-b で `schedule_switch` が `stack_top` の代わりにこれを書く。**
     /// **切り替えの側に「遠征中か」の分岐は足さない。**
     ///
-    /// **`allow` を外すのは W1-b である。** **外し忘れると、使われないまま残る。**
-    #[allow(dead_code)]
+    /// **W1-b で使い始めた**（`schedule_switch` がこれを書く）。
     rsp0: u64,
-    /// このタスクの回復点のアドレス（W1-a で置き場だけ作った。**使うのは W1-b**）。
+    /// このタスクが Ring 3 の遠征に入っている深さ（W1-b）。**0 なら入っていない。**
+    ///
+    /// # なぜタスクが持つのか
+    ///
+    /// **スタック混在の検査が、どのスタックを期待してよいかを決めるためである。**
+    /// **深さ 0 ならカーネルスタック、深さ `n` ならそのタスクの深さ `n` の
+    /// 遠征スタックである。**
+    ///
+    /// **`ring3` 側の深さと二重に持っているのではない。** **あちらは「いま走って
+    /// いる遠征の深さ」で、こちらは「このタスクへ戻るとき、どこに居ることに
+    /// なっているか」である**——**`rsp0` が TSS と対になっているのと同じ形である。**
+    excursion_depth: usize,
+    /// このタスクの回復点のアドレス（W1-a で置き場を作り、W1-b で使い始めた）。
     ///
     /// # これも「値」である
     ///
@@ -263,8 +274,7 @@ struct Task {
     /// `kernel/src/ring3.rs` の 2 つの `global_asm!`）。**単一の既知の番地で
     /// なければならないので、スロットで引く形にできない。**
     ///
-    /// **`allow` を外すのは W1-b である。**
-    #[allow(dead_code)]
+    /// **W1-b で使い始めた**（`schedule_switch` が入れ替える）。
     current_recovery: u64,
     /// このタスクを走らせてよいコア（S4-c-1）。
     ///
@@ -290,6 +300,7 @@ const EMPTY_TASK: Task = Task {
     stack_top: 0,
     stack_bottom: 0,
     rsp0: 0,
+    excursion_depth: 0,
     current_recovery: 0,
     state: TaskState::Uninitialized,
     base: 0,
@@ -375,6 +386,58 @@ static CURRENT: PerCpu<AtomicUsize> =
 #[cfg(feature = "smp-ap-touch-scheduler-test")]
 pub fn debug_read_current_index() -> usize {
     current_index()
+}
+
+/// 今のタスクの番号。**まだ誰も走らせていなければ `None`（W1-b）。**
+///
+/// # [`current_index`] と違い、止めない
+///
+/// **あちらは「読んだ以上、答えが要る」場面のためにある**——**答えが無いのは
+/// スケジューラへ AP が入ったことを意味するので、丸めずに落とす。**
+///
+/// **こちらは「書く先が在れば書く」場面のためにある。** **起動の途中、
+/// タスクが 1 本も割り当てられていない時点で Ring 3 の遠征が走る**
+/// （`ring3` の検算と `syscall` の probe。**実測で、ここを `current_index` に
+/// すると起動が止まった**）。**そのとき控える先が無いのは正常である**
+/// ——**戻る先のタスクが存在しないので、控えても誰も読まない。**
+///
+/// **黙って飛ばしているのではない。** **飛ばしたことは観測できる**
+/// ——**`CURRENT` が番兵であることが、その時点の状態そのものである。**
+fn current_index_if_any() -> Option<usize> {
+    let value = CURRENT.this_cpu().load(Ordering::Relaxed);
+    (value != NO_CURRENT_TASK).then_some(value)
+}
+
+/// 今のタスクの `RSP0` の欄を据える（W1-b。遠征の出入りが呼ぶ）。
+///
+/// **`ring3::enter` が `gdt::set_rsp0` を呼ぶのと対である**——**あちらは
+/// TSS を書き、こちらは「次にこのタスクへ戻るとき、何を書くか」を残す。**
+/// **切り替えはこの欄を読む**（`schedule_switch`）。
+pub fn note_current_rsp0(top: u64) {
+    let Some(index) = current_index_if_any() else {
+        return;
+    };
+    scheduler::set_rsp0(index, top);
+}
+
+/// 今のタスクの遠征の深さの欄を据える（W1-b。遠征の出入りが呼ぶ）。
+pub fn note_current_excursion_depth(depth: usize) {
+    let Some(index) = current_index_if_any() else {
+        return;
+    };
+    scheduler::set_excursion_depth(index, depth);
+}
+
+/// 今のタスクの回復点の欄を据える（W1-b。遠征の出入りが呼ぶ）。
+///
+/// **`CURRENT_RECOVERY` は単一の既知の番地でなければならない**
+/// （アセンブラが `[rip + sym]` で読む。`ADR-0060`）。**だからタスクは
+/// 「値」を持ち、切り替えが入れ替える。**
+pub fn note_current_recovery(value: u64) {
+    let Some(index) = current_index_if_any() else {
+        return;
+    };
+    scheduler::set_current_recovery(index, value);
 }
 
 /// [`CURRENT`] の「まだ誰も走らせていない」を表す値（S3-b-2b-2）。
@@ -908,6 +971,11 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
         Task {
             stack_top: main_top,
             stack_bottom: crate::stack::kernel_stack_range().bottom.as_u64(),
+            // **遠征に入っていないタスクの RSP0 はカーネルスタック頂点である**
+            // （W1-b）。**`EMPTY_TASK` の 0 のままにすると、メインへ戻る切り替えが
+            // TSS へ 0 を書く**——**実測で踏んだ**（`TSS.RSP0 ... now 0x0 ...
+            // match=false`。起動ログの突き合わせが捕まえた）。
+            rsp0: main_top,
             // メインはワーカーが尽きたときだけ戻る。終了済みではない。
             state: TaskState::Blocked,
             ..EMPTY_TASK
@@ -933,9 +1001,10 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
                 stack_top: top.as_u64(),
                 // 使えるスタックの下端はガードページの直上。
                 stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
-                // **W1-a では置き場だけである。** 初期値はカーネルスタック頂点で、
-                // **遠征に入っていないタスクの RSP0 がそれである**（使うのは W1-b）。
+                // **初期値はカーネルスタック頂点である**——**遠征に入って
+                // いないタスクの RSP0 がそれである。**
                 rsp0: top.as_u64(),
+                excursion_depth: 0,
                 current_recovery: 0,
                 state: TaskState::Ready,
                 // BSP のワーカーである。`GPR_BUF` に触るので AP へ渡さない
@@ -1105,17 +1174,56 @@ fn schedule_switch(current_rsp: u64) -> u64 {
 
         // スタックが混ざっていないこと。次タスクの保存 RSP がそのタスクの
         // スタック範囲内にあること（範囲外なら別タスクのスタックを指している）。
+        //
+        // # W1-b で「広げる」ではなく「付け替え」にした（`ADR-0060`）
+        //
+        // **遠征中のタスクの `saved_rsp` は遠征スタックの中に在る。**
+        // **カーネルスタックだけを見ていると、W1-c でここに当たる。**
+        //
+        // **「カーネルスタック ∪ 遠征スタック全部」へ広げると、主張が鈍る。**
+        // **代わりに深さで付け替える**——**深さ 0 ならカーネルスタック、深さ `n`
+        // ならそのタスクの深さ `n` の遠征スタックである。**
+        //
+        // **主張は鋭くなっている。** **広げる前が「自分のカーネルスタックに
+        // 在る」だったのに対し、いまは「自分の、いまの深さのスタックに在る」を
+        // 見る**——**深さとスタックが食い違っている形も捕まえる。**
+        // **失ったのは「遠征中のタスクは中断されない」だけで、それは W1 が
+        // 合法にするものである。**
+        //
+        // **今日は必ず深さ 0 である**——**遠征中に切り替えが起きない。**
         let next_rsp = scheduler::saved_rsp(next);
-        let next_bottom = scheduler::stack_bottom(next);
-        let next_top = scheduler::stack_top(next);
+        let next_depth = scheduler::excursion_depth(next);
+        let (next_bottom, next_top) = if next_depth == 0 {
+            (scheduler::stack_bottom(next), scheduler::stack_top(next))
+        } else {
+            crate::ring3::excursion_stack_range_at(next_depth)
+        };
         if next_rsp < next_bottom || next_rsp >= next_top {
+            // **文言のうち `is outside its stack` と `stacks are mixed` は、
+            // 判定の期待マーカーである**（`xtask` の `smp-ap-test
+            // ap-forced-current-range-check`）。**深さを足すときに前者を書き換えて
+            // 落とした**（実測。2026-09-14）——**検出は効いていたのに、
+            // マーカーだけが外れた。** **`docs/coding-standards.md` の
+            // 「期待マーカーを合わせるのを忘れると……その破壊の項目だけが落ちる」
+            // の族である。** **両方を残したまま深さを足すこと。**
             serial_line(format_args!(
-                "[ERROR] task: task {next} saved_rsp {next_rsp:#x} is outside its stack \
-                 [{:#x}, {:#x}); stacks are mixed; halting",
+                "[ERROR] task: task {next} saved_rsp {next_rsp:#x} is outside its stack for \
+                 excursion depth {next_depth} [{:#x}, {:#x}); stacks are mixed; halting",
                 next_bottom, next_top
             ));
             common::cpu::halt_forever();
         }
+
+        // **回復点を入れ替える（W1-b。`ADR-0060`）。**
+        //
+        // **`CURRENT_RECOVERY` はアセンブラが `[rip + sym]` で読むので、
+        // 単一の番地でなければならない。** **スロットで引けない。**
+        // **したがって、出る側の値を控え、入る側の値を載せる。**
+        //
+        // **今日は必ず同じ値を書き戻す**——**遠征中に切り替えが起きないので、
+        // 両方とも 0 である。** **違う値になるのは W1-c からである。**
+        scheduler::set_current_recovery(current, crate::ring3::current_recovery());
+        crate::ring3::set_current_recovery(scheduler::current_recovery(next));
 
         // **FP の状態を入れ替える（`ADR-0058` の Decision 1）。**
         //
@@ -1141,7 +1249,19 @@ fn schedule_switch(current_rsp: u64) -> u64 {
 
         // RSP0 を次タスクのスタック頂点へ更新する（§2.2、効くのは M5-e）。
         // 破壊確認: drop-rsp0 では更新を落とす。読み戻し検査で捕まる。
-        let expected_rsp0 = next_top;
+        //
+        // **W1-b で、次のタスクの欄から取る形にした。** **かつては
+        // `stack_top(next)` を書いていた**——**そのタスクが Ring 3 の遠征に
+        // 入っている間は、それが誤りである**（`RSP0` は遠征スタックを指して
+        // いなければならない）。
+        //
+        // **切り替えの側に「遠征中か」の分岐は足さない。** **値の出どころが
+        // 変わるだけである**（`ADR-0060`）。
+        //
+        // **今日は必ず `stack_top(next)` に等しい**——**遠征中に切り替えが
+        // 起きないからである**（走行可能なタスクがメインだけで、上の
+        // `next == current` で早く戻る）。**等しくなくなるのは W1-c からである。**
+        let expected_rsp0 = scheduler::rsp0(next);
         #[cfg(not(feature = "task-switch-drop-rsp0"))]
         // SAFETY: stack_top は次タスクの有効なスタック頂点。切り替えの割り込み
         // 禁止区間から呼んでいる。
@@ -1620,8 +1740,8 @@ unsafe fn setup_preemptive_tasks() {
                 saved_rsp,
                 stack_top: top.as_u64(),
                 stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
-                // **W1-a では置き場だけである**（使うのは W1-b）。
                 rsp0: top.as_u64(),
+                excursion_depth: 0,
                 current_recovery: 0,
                 state: TaskState::Ready,
                 // BSP のワーカーである。`GPR_BUF` に触るので AP へ渡さない

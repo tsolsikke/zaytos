@@ -123,6 +123,36 @@ pub(super) fn set_saved_rsp(index: usize, rsp: u64) {
     unsafe { addr_of_mut!((*slot(index)).saved_rsp).write(rsp) }
 }
 
+pub(super) fn rsp0(index: usize) -> u64 {
+    // SAFETY: 有効なポインタ。IF=0 の切り替え経路と、遠征の出入りからのみ触る。
+    unsafe { addr_of_mut!((*slot(index)).rsp0).read() }
+}
+
+pub(super) fn set_rsp0(index: usize, top: u64) {
+    // SAFETY: 同上。
+    unsafe { addr_of_mut!((*slot(index)).rsp0).write(top) }
+}
+
+pub(super) fn excursion_depth(index: usize) -> usize {
+    // SAFETY: 有効なポインタ。IF=0 の切り替え経路と、遠征の出入りからのみ触る。
+    unsafe { addr_of_mut!((*slot(index)).excursion_depth).read() }
+}
+
+pub(super) fn set_excursion_depth(index: usize, depth: usize) {
+    // SAFETY: 同上。
+    unsafe { addr_of_mut!((*slot(index)).excursion_depth).write(depth) }
+}
+
+pub(super) fn current_recovery(index: usize) -> u64 {
+    // SAFETY: 同上。
+    unsafe { addr_of_mut!((*slot(index)).current_recovery).read() }
+}
+
+pub(super) fn set_current_recovery(index: usize, value: u64) {
+    // SAFETY: 同上。
+    unsafe { addr_of_mut!((*slot(index)).current_recovery).write(value) }
+}
+
 pub(super) fn stack_top(index: usize) -> u64 {
     // SAFETY: 有効なポインタ。起動時に書いた後は読むだけ。
     unsafe { addr_of_mut!((*slot(index)).stack_top).read() }

@@ -289,6 +289,25 @@ fn state() -> &'static ExcursionState {
     &EXCURSION_STATE[RING3_SLOT]
 }
 
+/// いま載っている回復点のアドレス（W1-b。切り替えが読む）。
+///
+/// **`CURRENT_RECOVERY` は単一の番地でなければならない**（`ADR-0060`）。
+/// **切り替えはこれを控えて、入る側の値を載せる。**
+pub fn current_recovery() -> u64 {
+    CURRENT_RECOVERY.load(Ordering::SeqCst)
+}
+
+/// 回復点のアドレスを載せる（W1-b。切り替えが書く）。
+///
+/// # Safety の代わりに、呼べる場所を狭めてある
+///
+/// **`pub` だが、呼ぶのは `crate::task::schedule_switch` だけである**
+/// （切り替えの割り込み禁止区間）。**遠征の出入りは [`enter`] の中で
+/// 直に触る**——あちらは入れ子の控えと戻しを一続きで行う。
+pub fn set_current_recovery(value: u64) {
+    CURRENT_RECOVERY.store(value, Ordering::SeqCst);
+}
+
 /// 今のタスクのスロットの番号（W1-a）。
 ///
 /// **W1-a では定数 0 である。** **W1-c でタスクから引く形になる**——
@@ -621,6 +640,14 @@ pub unsafe fn enter(
     unsafe {
         gdt::set_rsp0(excursion_top);
     }
+    // **タスクの欄にも残す（W1-b。`ADR-0060`）。** **TSS を書くのは「いま」で、
+    // こちらは「次にこのタスクへ戻るとき、何を書くか」である。**
+    // **切り替えがこの欄を読む。**
+    #[cfg(not(feature = "ring3-test-drop-rsp0"))]
+    crate::task::note_current_rsp0(excursion_top);
+    // **深さの欄も据える（W1-b）。** **スタック混在の検査が、どのスタックを
+    // 期待してよいかをこれで決める。**
+    crate::task::note_current_excursion_depth(depth);
     #[cfg(feature = "ring3-test-drop-rsp0")]
     let _ = excursion_top;
 
@@ -667,6 +694,11 @@ pub unsafe fn enter(
     unsafe {
         gdt::set_rsp0(main_rsp0_top);
     }
+    // **タスクの欄も戻す（W1-b）。** **入れ子のときは親の遠征スタックの上端が
+    // それである**——**上の `main_rsp0_top` と同じ値を入れる。**
+    crate::task::note_current_rsp0(main_rsp0_top);
+    // **深さの欄も戻す（W1-b）。** **入れ子なら親の深さへ、そうでなければ 0 へ。**
+    crate::task::note_current_excursion_depth(state().depth.load(Ordering::SeqCst));
 
     // **窓を戻す（S9-b-3-2b）。** ここは畳みで戻った場合も `exit` で戻った場合も
     // 通る（どちらの longjmp も `zaytos_enter_ring3` の復帰点へ帰る）。
