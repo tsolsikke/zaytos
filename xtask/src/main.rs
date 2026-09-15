@@ -1643,6 +1643,17 @@ fn main() -> Result<()> {
                 let expect_pass = sabotage.is_empty();
                 return cmd_fp_test(&sabotage, expect_pass);
             }
+            // **2 本の Ring 3 を同時に走らせる判定（W1-c-4。`ADR-0060`）。**
+            if rest.iter().any(|a| a == "--concurrent-test") {
+                let sabotage: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                let expect_pass = sabotage.is_empty();
+                return cmd_concurrent_test(&sabotage, expect_pass);
+            }
             // **フォントを像から読み、Ring 3 で 1 文字ラスタライズする判定（B-d）。**
             if rest.iter().any(|a| a == "--ttf-test") {
                 let sabotage: Vec<&str> = rest
@@ -3707,10 +3718,26 @@ const COMPLETE_TEST_SABOTAGES: &[&str] = &[
 /// 起きない**（`ADR-0058` の「決定 1 の判定」）。**もう 1 人の使い手を用意しよう
 /// として、切り替えが遠征の RSP0 と噛み合わないことが分かった**（実測。
 /// `docs/troubleshooting.md` の 2026-09-07）。
+///
+/// **W1-c-4 で置いた**（`CONCURRENT_TEST_SABOTAGES` の `fp-switch-no-restore`）。
+/// **2 本目の Ring 3 が走るようになり、落とす判定が作れた**——**ここには足さない。**
+/// **こちらの構成（`fp-test`）では、いまも切り替えが起きない。**
 const FP_TEST_SABOTAGES: &[&str] = &[
     "fp-no-fresh-state",
     "fp-spawn-no-save",
     "fp-mf-not-foldable-test",
+];
+
+/// `concurrent-test` を「通らないこと」で回す破壊（W1-c-4。`ADR-0060`）。
+///
+/// **4 つで、切り替えが入れ替えるもの（FP・回復点・CR3）と、遠征の状態を引くスロットに 1 つずつ置く。**
+/// **`fp-switch-no-restore` は、上の `FP_TEST_SABOTAGES` の doc が「置いていない」と書いた破壊である**
+/// ——**2 本目の Ring 3 ができて、落とす判定が作れた。**
+const CONCURRENT_TEST_SABOTAGES: &[&str] = &[
+    "fp-switch-no-restore",
+    "task-switch-keep-recovery",
+    "task-switch-no-cr3",
+    "ring3-slot-always-zero",
 ];
 
 /// `ttf-test` を「通らないこと」で回す破壊（B-d）。
@@ -4900,6 +4927,246 @@ fn cmd_fp_test(features: &[&str], expect_pass: bool) -> Result<()> {
         && folded_the_fp_fault
         && folded_the_debug_fault
         && script_finished;
+    if passed {
+        println!("{context}: PASS");
+        if expect_pass {
+            Ok(())
+        } else {
+            bail!("{context}: the sabotage was NOT caught; every judgement still held")
+        }
+    } else {
+        println!("{context}: FAILED");
+        if expect_pass {
+            bail!("{context}: FAILED")
+        } else {
+            println!("{context}: the sabotage was caught (this is the expected outcome)");
+            Ok(())
+        }
+    }
+}
+
+/// `concurrent-test` の起動を待つ上限（W1-c-4）。**`init` がシェルより前に 2 本を走らせ終えるまで。**
+const CONCURRENT_TEST_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// 2 本の Ring 3 が同時に進むことを見る（W1-c-4。`ADR-0060`）。
+///
+/// # 何を走らせるか
+///
+/// **`init` がシェルより前に、`/bin/tickera` を起こしっぱなしで（足した 1 本のタスク、スロット 1）、
+/// `/bin/tickerb` を `spawn` で（メインのタスク、スロット 0）起こす。** **2 本は同じ本体で、別の
+/// 空間の同じ VA に `.data` の名前を持ち、違う量を浮動小数点で足し上げる**（`kernel/userland/ticker.h`）。
+///
+/// # 判定は行の順序ではなく、カウンタと内容で見る
+///
+/// 1. **2 本が同時に進む**——**遠征の最中に切り替えで出た回数が、2 つのタスクとも 1 以上**で、
+///    **2 本とも終わりの行を出した**
+/// 2. **遠征スタックを取り違えない**——**`tickera` がスロット 1 で走り、2 本とも自分の遠征スタックの
+///    上でカーネルへ入り、その 2 つの範囲が違い、見張りが無傷**
+/// 3. **回復点を取り違えない**——**`tickera` は `Folded(6)`（`ud2`）、`tickerb` は `Exited(0)`**
+/// 4. **CR3 を入れ替える**——**載せ替えた回数が 2 以上**で、**2 本とも `name_ok=true`**
+/// 5. **FP を入れ替える**——**2 本とも `sum_ok=true`**
+/// 6. **起こしっぱなしは前景を取らない**——**断った回数が 1**
+///
+/// **禁止**——**`[ERROR]` が 1 行も無いこと**（既定の起動の参照にも 0 行である。実測）。
+///
+/// # 前提は合図として出す
+///
+/// **`tickera` が `tickerb` より後に終わること**（`was still running = true`）。**`spawn` の会計が
+/// 空きフレームの大域の差で閉じるので、逆だと `tickerb` の `spawn` が会計で落ちる**
+/// （`docs/wayland-inventory.md` の #4）。**判定ではなく前提である。**
+fn cmd_concurrent_test(features: &[&str], expect_pass: bool) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let mut all_features: Vec<&str> = vec!["concurrent-test"];
+    all_features.extend_from_slice(features);
+    let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let tag = all_features.join("-");
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("concurrent-test-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the concurrent test")?;
+
+    // **終わりの行か、`[ERROR]` の行が出たら止める。** **破壊は止まる形で落ちることが多いので、
+    // 上限まで待たない。**
+    let started = Instant::now();
+    let deadline = started + CONCURRENT_TEST_TIMEOUT;
+    while Instant::now() < deadline {
+        let text = strip_ansi(&read_lossy(&serial_log));
+        if text.contains("concurrent: done") || text.contains("[ERROR]") {
+            // **止まる行の後ろに続く行（ダンプ）も取る。**
+            thread::sleep(Duration::from_secs(2));
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+    let waited = started.elapsed();
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = read_lossy(&serial_log);
+    let context = if features.is_empty() {
+        "concurrent-test".to_string()
+    } else {
+        format!("concurrent-test {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    let qemu_debug = read_lossy(&debug_log);
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+    let stripped = strip_ansi(&serial);
+    let lines: Vec<&str> = stripped.lines().map(str::trim).collect();
+    let line_starting = |prefix: &str| lines.iter().find(|line| line.starts_with(prefix)).copied();
+
+    // **カウンタ**——`init` が最後に 1 行で出す。
+    let counters = line_starting("[INFO] concurrent: /bin/tickera finished");
+    let number_after = |line: &str, key: &str| -> Option<u64> {
+        let rest = &line[line.find(key)? + key.len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok()
+    };
+    let switches_main = counters.and_then(|line| number_after(line, "task 0 = "));
+    let switches_ring3 = counters.and_then(|line| number_after(line, "task 4 = "));
+    let cr3_loads = counters.and_then(|line| number_after(line, "CR3 loads on switch = "));
+    let refused = counters.and_then(|line| number_after(line, "the foreground was refused "));
+
+    let done_a = line_starting("ticker A done ");
+    let done_b = line_starting("ticker B done ");
+
+    // **判定 1**——2 本が同時に進む。
+    let both_progressed = switches_main.is_some_and(|n| n >= 1)
+        && switches_ring3.is_some_and(|n| n >= 1)
+        && done_a.is_some_and(|line| line.contains("rounds=24 "))
+        && done_b.is_some_and(|line| line.contains("rounds=8 "));
+
+    // **判定 2**——遠征スタックを取り違えない。
+    let spawn_a = line_starting("[INFO] spawn: /bin/tickera ended (");
+    let spawn_b = line_starting("[INFO] spawn: /bin/tickerb ended (");
+    let own_stack_range = |line: &str| -> Option<String> {
+        let rest = &line[line.find("inside its own excursion stack ")? + 31..];
+        let (range, verdict) = rest.split_once(" = ")?;
+        verdict.starts_with("true").then(|| range.to_string())
+    };
+    let range_a = spawn_a.and_then(own_stack_range);
+    let range_b = spawn_b.and_then(own_stack_range);
+    let a_on_slot_one = lines.contains(&"[INFO] detached: starting /bin/tickera on ring3 slot 1");
+    let canaries_intact = ["/bin/tickera", "/bin/tickerb"].iter().all(|name| {
+        lines.iter().any(|line| {
+            line.starts_with(&format!("[INFO] ring3: {name} used "))
+                && line.ends_with("the canary at its bottom is intact=true")
+        })
+    });
+    let stacks_kept_apart = a_on_slot_one
+        && canaries_intact
+        && matches!((&range_a, &range_b), (Some(a), Some(b)) if a != b);
+
+    // **判定 3**——回復点を取り違えない。
+    let a_folded =
+        lines.contains(&"[INFO] detached: /bin/tickera ended (Ok(Folded(6))) on ring3 slot 1");
+    let b_exited = lines
+        .iter()
+        .any(|line| line.starts_with("[INFO] concurrent: /bin/tickerb ended (Ok(Exited(0))) "));
+    let recoveries_kept_apart = a_folded && b_exited;
+
+    // **判定 4**——CR3 を入れ替える。
+    let spaces_kept_apart = cr3_loads.is_some_and(|n| n >= 2)
+        && done_a.is_some_and(|line| line.contains(" name_ok=true "))
+        && done_b.is_some_and(|line| line.contains(" name_ok=true "));
+
+    // **判定 5**——FP を入れ替える。
+    let fp_kept_apart = done_a.is_some_and(|line| line.ends_with(" sum_ok=true"))
+        && done_b.is_some_and(|line| line.ends_with(" sum_ok=true"));
+
+    // **判定 6**——起こしっぱなしは前景を取らない。
+    let foreground_refused_once = refused == Some(1);
+
+    // **禁止**——`[ERROR]` が 1 行も無い。
+    let error_lines: Vec<&str> = lines
+        .iter()
+        .filter(|line| line.contains("[ERROR]"))
+        .copied()
+        .take(4)
+        .collect();
+    let no_error = error_lines.is_empty();
+
+    // **合図**——`tickera` が `tickerb` より後に終わった（判定ではなく前提）。
+    let a_outlived_b = stripped.contains("/bin/tickera was still running = true");
+
+    println!(
+        "{context}: (signal) /bin/tickera was still running when /bin/tickerb ended = \
+         {a_outlived_b}"
+    );
+    println!(
+        "{context}: both programs progressed while the other was in Ring 3 = {both_progressed} \
+         (switches out of an excursion: task 0 = {switches_main:?}, task 4 = {switches_ring3:?}; \
+         the lines were {done_a:?} and {done_b:?})"
+    );
+    println!(
+        "{context}: each program entered the kernel on its own excursion stack = \
+         {stacks_kept_apart} (tickera on slot 1 = {a_on_slot_one}, canaries intact = \
+         {canaries_intact}, ranges {range_a:?} and {range_b:?})"
+    );
+    println!(
+        "{context}: each program returned to its own recovery point = {recoveries_kept_apart} \
+         (tickera folded by ud2 = {a_folded}, tickerb exited 0 = {b_exited})"
+    );
+    println!(
+        "{context}: each program kept its own address space = {spaces_kept_apart} (CR3 loads on \
+         switch = {cr3_loads:?})"
+    );
+    println!("{context}: each program kept its own floating-point state = {fp_kept_apart}");
+    println!(
+        "{context}: the detached program was refused the foreground once = \
+         {foreground_refused_once} (refused {refused:?} time(s))"
+    );
+    println!("{context}: no [ERROR] line = {no_error} (the first were {error_lines:?})");
+    for info in lines.iter().filter(|line| {
+        line.starts_with("[INFO] concurrent: ") || line.starts_with("task: the ring3 task (index")
+    }) {
+        println!("{context}: (info) {info}");
+    }
+    println!("{context}: (info) waited {:.1} s", waited.as_secs_f64());
+
+    let passed = a_outlived_b
+        && both_progressed
+        && stacks_kept_apart
+        && recoveries_kept_apart
+        && spaces_kept_apart
+        && fp_kept_apart
+        && foreground_refused_once
+        && no_error;
     if passed {
         println!("{context}: PASS");
         if expect_pass {
@@ -15462,6 +15729,11 @@ const STRUCTURAL_GUARD_SYMBOL_FRAGMENTS: &[&str] = &[
 /// **既定ビルドにこれらが入ってはならない。** 入ったまま出荷すると、
 /// 壊れた状態で測った結果を正常な結果として扱うことになる。
 const SABOTAGE_FEATURES: &[&str] = &[
+    // W1-c-4。**`concurrent-test` は破壊ではないので入れない**（`fp-test` と同じ扱い）。
+    "fp-switch-no-restore",
+    "task-switch-keep-recovery",
+    "task-switch-no-cr3",
+    "ring3-slot-always-zero",
     "percpu-fake-nonzero-cpu-id",
     "smp-tramp-corrupt-copy-test",
     "smp-ap-touch-scheduler-test",
@@ -16141,6 +16413,32 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("fp-test {sabotage}");
             begin_item(&label);
             match cmd_fp_test(&[sabotage], false) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
+            }
+        }
+
+        // **2 本の Ring 3 を同時に走らせる（W1-c-4。`ADR-0060`）。**
+        //
+        // **1 回の起動で 6 つ見る**——**同時に進む / 遠征スタック / 回復点 / CR3 / FP / 前景。**
+        // **破壊は 4 つで、切り替えが入れ替えるものとスロットに 1 つずつ置いた。**
+        total += 1;
+        begin_item("two Ring 3 programs run at the same time");
+        match cmd_concurrent_test(&[], true) {
+            Ok(()) => println!("--- concurrent test: OK"),
+            Err(error) => {
+                println!("--- concurrent test: FAILED ({error})");
+                failed.push("concurrent test".to_string());
+            }
+        }
+        for sabotage in CONCURRENT_TEST_SABOTAGES {
+            total += 1;
+            let label = format!("concurrent-test {sabotage}");
+            begin_item(&label);
+            match cmd_concurrent_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
                     println!("--- {label}: FAILED ({error})");
@@ -17561,7 +17859,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 33,
-    full: 296,
+    full: 301,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
