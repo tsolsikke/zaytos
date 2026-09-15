@@ -9765,6 +9765,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "遠征のスロットを常に 0 にする",
     ),
     (
+        "task-switch-holds-back-ring3-task",
+        cfg!(feature = "task-switch-holds-back-ring3-task"),
+        "出る側が遠征の最中なら、足した 1 本へ切り替えない",
+    ),
+    (
+        "foreground-claimable-from-any-slot",
+        cfg!(feature = "foreground-claimable-from-any-slot"),
+        "スロット 1 にも前景を取らせる",
+    ),
+    (
         "fp-spawn-no-save",
         cfg!(feature = "fp-spawn-no-save"),
         "spawn で親の FP の状態を控えない",

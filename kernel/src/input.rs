@@ -237,6 +237,11 @@ pub fn claim_foreground() -> bool {
     //
     // **ここで決める理由**——**`spawn` と `run_loaded_program` の形を変えずに済む。** **引数で渡すと、
     // 子が走っている間ずっと遠征スタックに載る枠が広がる**（`ADR-0060` の W1-c-3 の枠の表）。
+    //
+    // 破壊 (W1-c-4, foreground-claimable-from-any-slot): スロット 1 も断らない。**起こしっぱなしの
+    // 1 本が前景を取る。** **断った回数が 0 になり、判定 6 だけが落ちるはずである**（後から起こした
+    // 1 本は取れないまま走り、取った側が終わるときに返す）。
+    #[cfg(not(feature = "foreground-claimable-from-any-slot"))]
     if crate::ring3::current_slot() != 0 {
         FOREGROUND_REFUSED.fetch_add(1, Ordering::SeqCst);
         return false;

@@ -494,6 +494,10 @@ task-switch-keep-recovery = ["concurrent-test"]
 task-switch-no-cr3 = ["concurrent-test"]
 # 遠征のスロットを常に 0 にする（W1-c-4）。足した 1 本がシェルの系統と同じ状態を使う。
 ring3-slot-always-zero = ["concurrent-test"]
+# 出る側が遠征の最中なら、足した 1 本へ切り替えない（W1-c-4）。2 本が同時には進まない。
+task-switch-holds-back-ring3-task = ["concurrent-test"]
+# スロット 1 にも前景を取らせる（W1-c-4）。起こしっぱなしの 1 本が前景を取る。
+foreground-claimable-from-any-slot = ["concurrent-test"]
 # `spawn` で、子へ入る前に親の FP の状態を保存しない（`ADR-0058`）。
 # 親が `spawn` を跨いで値を保てなくなる。
 fp-spawn-no-save = []

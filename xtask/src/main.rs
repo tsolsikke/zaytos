@@ -3733,11 +3733,17 @@ const FP_TEST_SABOTAGES: &[&str] = &[
 /// **4 つで、切り替えが入れ替えるもの（FP・回復点・CR3）と、遠征の状態を引くスロットに 1 つずつ置く。**
 /// **`fp-switch-no-restore` は、上の `FP_TEST_SABOTAGES` の doc が「置いていない」と書いた破壊である**
 /// ——**2 本目の Ring 3 ができて、落とす判定が作れた。**
+///
+/// **後から 2 つ足した**（2026-09-16）——**判定 1（2 本が同時に進む）と判定 6（前景を取らない）には
+/// 固有の破壊が無かった**（運用者の指摘）。**`task-switch-holds-back-ring3-task` と
+/// `foreground-claimable-from-any-slot` は、それぞれその判定だけを落とす形である。**
 const CONCURRENT_TEST_SABOTAGES: &[&str] = &[
     "fp-switch-no-restore",
     "task-switch-keep-recovery",
     "task-switch-no-cr3",
     "ring3-slot-always-zero",
+    "task-switch-holds-back-ring3-task",
+    "foreground-claimable-from-any-slot",
 ];
 
 /// `ttf-test` を「通らないこと」で回す破壊（B-d）。
@@ -15734,6 +15740,8 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "task-switch-keep-recovery",
     "task-switch-no-cr3",
     "ring3-slot-always-zero",
+    "task-switch-holds-back-ring3-task",
+    "foreground-claimable-from-any-slot",
     "percpu-fake-nonzero-cpu-id",
     "smp-tramp-corrupt-copy-test",
     "smp-ap-touch-scheduler-test",
@@ -17859,7 +17867,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 33,
-    full: 301,
+    full: 303,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

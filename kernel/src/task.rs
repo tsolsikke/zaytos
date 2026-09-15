@@ -1646,6 +1646,14 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         if next == current {
             return current_rsp;
         }
+        // 破壊 (W1-c-4, task-switch-holds-back-ring3-task): 出る側が遠征の最中なら、足した 1 本へ
+        // 切り替えない。**2 本は交互には走るが、2 本とも Ring 3 に居る間は進まない**——**判定 1
+        // （遠征の最中の切り替えが両方 1 以上）だけを落とす形である。** **他の判定は通るはずである**
+        // （先に起こした 1 本はメインが待っている間に進み、もう 1 本の間は止まっているので後に終わる）。
+        #[cfg(feature = "task-switch-holds-back-ring3-task")]
+        if next == RING3_TASK && scheduler::excursion_depth(current) != 0 {
+            return current_rsp;
+        }
         // **遠征の最中に出たかを数える（W1-c-4 の計器）。**
         count_switch_out_of_excursion(current);
 
