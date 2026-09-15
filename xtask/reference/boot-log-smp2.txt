@@ -509,7 +509,6 @@ syscall-test wrote this
 [INFO] sti-check summary: 6. Locked<T> disables interrupts while held = VERIFIED
 [INFO] sti-check summary: 7. handlers issue EOI = UNVERIFIABLE
 [INFO] timer: waiting for the first tick (expected as vector 0x20); if nothing arrives, suspect the PIT setup, the IMR, or ICW2
-[INFO] apic: widest tick advance seen inside the calibration windows = 1 (1 means every edge was caught; the frequency above divides by the observed tick count, not the nominal one, so a larger value would not inflate it)
 [INFO] apic: untouched after calibration: SVR 0x000001ff->0x000001ff (software_enabled=true), LINT0 0x00000700->0x00000700, LVT timer 0x00030020->0x00030020 (masked=true)
 [INFO] apic: the I/O APIC controller reads its redirection entries: entries=24 masked=0x0000000000fff7fd (expected 0x0000000000fffffd) [read back from hardware], only the routed IRQs are open=false (the PIC still owns every other line)
 [INFO] lapic-timer: LVT timer read back: vector=0xfe masked=false periodic=true, matches what we programmed (vector 0xfe, unmasked, periodic) = true

@@ -10548,6 +10548,14 @@ const BOOT_LOG_VOLATILE_MARKERS: &[&str] = &[
     "address-space: the same VA",
     // TSC の較正。実行ごとに揺れる。
     "apic: LAPIC timer calibration",
+    // 較正の窓で見た取りこぼしの幅（2026-09-15 に入れた。`docs/deferred-decisions.md`）。
+    // **2 回揺れた**——**-smp 1 で 1 回、-smp 2 で 1 回、どちらも `= 2` を出して定義 3 を落とした。**
+    // **値は計器で、止める条件も警告も無い**（周波数は実測のティック数で割っている）。
+    //
+    // **隠したものを見る者**: **無い。** **参照が「取りこぼしが起きていない」を固定しなくなる。**
+    // **他に読む `cmd_calibration_spread` は手で回す道具で、`--full` に入らない**——**取りこぼしが
+    // 増えても、自動では誰も気づかない。**
+    "apic: widest tick advance seen inside the calibration windows",
     "lapic-timer: programmed from the calibration",
     "armed its own LAPIC timer with the BSP's calibration",
     // デモの反復回数。走った時間で変わる。
