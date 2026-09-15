@@ -1930,15 +1930,19 @@ pub fn spawn(
     // **遠征スタックは `.bss` の配列で、ガードページが無い**——溢れても止まらず、
     // 隣を静かに書く。**推測せずに測って出す。**
     // **深さ 0 の親は遠征スタックの上に居ない（S11-11 で直した）。**
-    // `init` はカーネルの直線上から呼ぶので、**メインのカーネルスタック**
-    // （ガードページ付き）の上に居る。**そちらは測らない**——
+    // **親は自分のタスクのカーネルスタック（ガードページ付き）の上に居る**——
+    // `init` ならメインのカーネルスタック、起こしっぱなしの 1 本（W1-c-4）なら
+    // そのタスクのスタックである。**そちらは測らない**——
     // **測る値打ちがあるのは、ガードの無い遠征スタックのほうである。**
+    //
+    // **行の文言は W1-c-4 の後に直した。** **以前は「the main kernel stack」と書いており、
+    // 起こしっぱなしの 1 本から呼んだときに嘘になった**（運用者の指摘。2026-09-16）。
     let stack_probe = 0u8;
     let rsp_now = &stack_probe as *const u8 as u64;
     if depth == 0 {
         logger.info(format_args!(
             "spawn: {name} is {size} byte(s) at inode {}; entering at depth {} (the parent \
-             runs on the main kernel stack, which has a guard page)",
+             runs on its task's kernel stack, which has a guard page)",
             inode.number,
             depth + 1
         ));
