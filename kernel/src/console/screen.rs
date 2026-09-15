@@ -103,6 +103,13 @@ pub struct FlushStats {
     ///
     /// **`draw_cycles` の内訳である**——**引いた残りが字を置く費用である。**
     pub erase_cycles: u64,
+    /// 消す経路（`EL` / `ED`）で、1 画素ずつ書いた画素の数（2026-09-15）。
+    ///
+    /// **判定はこちらで行う。** **[`Self::erase_cycles`] は (info) である**——
+    /// **コードの配置が 4KiB の境界をまたぐだけで、TCG の上で数倍動いた**
+    /// （`docs/troubleshooting.md`）。**バックバッファは RAM なので、一括の道で
+    /// 消していれば 0 である。**
+    pub erase_single_pixels: u64,
     /// 字を置く経路に費やした TSC サイクル（PERF-c の測定）。
     ///
     /// **転送とは別の層である**——**あちらは送る費用、こちらは描く費用である。**
@@ -743,6 +750,7 @@ impl Console {
     pub fn erase_in_line(&mut self, scope: common::ansi::EraseScope) {
         use common::ansi::EraseScope;
         let started = common::cpu::read_timestamp_counter();
+        let single_before = self.back.surface_mut().single_pixel_writes();
         let (column, row) = self.grid.cursor();
         let columns = self.grid.columns();
         match scope {
@@ -751,6 +759,11 @@ impl Console {
             EraseScope::All => self.erase_cells(row, 0, columns),
         }
         self.stats.erase_cycles += common::cpu::read_timestamp_counter().wrapping_sub(started);
+        self.stats.erase_single_pixels += self
+            .back
+            .surface_mut()
+            .single_pixel_writes()
+            .wrapping_sub(single_before);
     }
 
     /// 画面消去（ED。zi-b）。**カーソルは動かさない**——ここが [`Self::clear`]
@@ -759,6 +772,7 @@ impl Console {
     pub fn erase_in_display(&mut self, scope: common::ansi::EraseScope) {
         use common::ansi::EraseScope;
         let started = common::cpu::read_timestamp_counter();
+        let single_before = self.back.surface_mut().single_pixel_writes();
         let (column, row) = self.grid.cursor();
         let (columns, rows) = (self.grid.columns(), self.grid.rows());
         match scope {
@@ -794,6 +808,11 @@ impl Console {
             }
         }
         self.stats.erase_cycles += common::cpu::read_timestamp_counter().wrapping_sub(started);
+        self.stats.erase_single_pixels += self
+            .back
+            .surface_mut()
+            .single_pixel_writes()
+            .wrapping_sub(single_before);
     }
 
     /// セルの中に背景色でないピクセルが在るか（zi-b の判定用）。

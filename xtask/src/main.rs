@@ -6904,7 +6904,8 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
         Some(a.iter().zip(b).map(|(x, y)| y.saturating_sub(*x)).collect())
     };
     let cost_fields = "syscalls writes write_bytes glyphs draw_cycles erase_cycles glyph_cycles \
-         flushes flush_bytes flush_cycles full_flushes ticks";
+         flushes flush_bytes flush_cycles full_flushes ticks repaints repaint_cells \
+         repaint_cycles erase_single_pixels";
 
     // **1 回の動きにつき、転送は 1 回である（ADR-0047）。**
     //
@@ -6926,26 +6927,23 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
         .and_then(|values| values.get(3).copied())
         .is_some_and(|glyphs| glyphs <= 200);
 
-    // **消す費用が、同じ量を送る費用と同じ桁であること（PERF-c）。**
+    // **消す経路が 1 画素ずつ書いていないこと（PERF-c）。**
     //
-    // # なぜ比で見るのか
+    // # 比ではなく、道を通った画素の数で見る（2026-09-15 に直した）
     //
-    // **サイクルは揺れ、機械の周波数にも依る**（TSC はホストのサイクルである）。
-    // **同じ回の転送と比べれば、その両方が消える**——**どちらも 1 画面ぶん
-    // （4MB 前後）を動かす仕事である。**
+    // **以前は「消すサイクルが、同じページを送るサイクルの 30 倍以下」で見ていた**
+    // （実測で、一括の道は 9.8 倍、1 画素ずつの道は 113 倍だった）。
+    // **W1-c-1 でコードが 0x60 バイトずれたら、1 画素ずつ塗る `spec_fill` の
+    // ループが 4KiB の境界をまたぎ、TCG の上で 42 倍になって落ちた**——
+    // **道は変わっていなかった**（`docs/troubleshooting.md`）。
     //
-    // **実測**——**一括で消すと転送の 9.8 倍、1 画素ずつ消すと 113 倍である。**
-    // **上限を 30 倍に置くと、両側に 3 倍ほどの余裕がある。**
-    //
-    // **`ADR-0047` と `PERF-b` の判定が回数で言えるのと違い、ここは量の話なので
-    // 回数では言えない**——**同じ画素数を、遅い道と速い道のどちらで書いたかである。**
-    let erase_is_bulk = match delta(0, 1) {
-        Some(values) => match (values.get(5), values.get(9)) {
-            (Some(&erase), Some(&flush)) if flush > 0 => erase <= flush.saturating_mul(30),
-            _ => false,
-        },
-        None => false,
-    };
+    // **以前の doc は「ここは量の話なので回数では言えない——同じ画素数を、遅い道と
+    // 速い道のどちらで書いたかである」と書いていた。** **その「どちらの道か」は
+    // 数えられる**——**1 画素ずつの道を通った画素の数である**（`erase_single_pixels`）。
+    // **バックバッファは RAM なので、一括の道なら 0 である。**
+    // **サイクルと比は (info) に残す。**
+    let erase_single_pixels = delta(0, 1).and_then(|values| values.get(15).copied());
+    let erase_is_bulk = erase_single_pixels == Some(0);
 
     // **1 回の動きにつき、システムコールも 1 回である（PERF-b）。**
     //
@@ -6994,9 +6992,13 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
         delta(2, 3).and_then(|values| values.get(3).copied())
     );
     println!(
-        "{context}: erasing a page stays in the same order as sending one = {erase_is_bulk} \
-         (erase {:?} cycles, transfer {:?} cycles for the same page; the bulk path measured 9.8x \
-         and the pixel-by-pixel path 113x)",
+        "{context}: erasing a page writes no pixel one by one = {erase_is_bulk} \
+         (the erase wrote {erase_single_pixels:?} pixel(s) one by one)"
+    );
+    println!(
+        "{context}: (info) erase {:?} cycles, transfer {:?} cycles for the same page (the bulk \
+         path measured 9.8x and the pixel-by-pixel path 113x; a loop that straddles a 4KiB \
+         page under TCG measured 42x)",
         delta(0, 1).and_then(|values| values.get(5).copied()),
         delta(0, 1).and_then(|values| values.get(9).copied())
     );

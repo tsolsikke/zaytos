@@ -46,6 +46,16 @@ pub enum SurfaceKind {
 pub struct Framebuffer {
     kind: SurfaceKind,
     layout: FramebufferLayout,
+    /// 矩形を塗る経路で、1 画素ずつ書いた画素の数（2026-09-15）。
+    ///
+    /// # なぜ時間ではなく数を持つのか
+    ///
+    /// **「消す経路が一括で書いている」を、TSC のサイクルの比で見ていた**
+    /// （`--view-test`）。**W1-c-1 でコードが 0x60 バイトずれたら、1 画素ずつ
+    /// 塗るループが 4KiB の境界をまたぎ、TCG の上で消す費用が約 5 倍になって
+    /// 判定が落ちた**（`docs/troubleshooting.md`）。**経路は変わっていなかった。**
+    /// **主張は「どちらの道で書いたか」なので、道を通った画素を数える。数は揺れない。**
+    single_pixel_writes: u64,
 }
 
 impl Framebuffer {
@@ -65,6 +75,7 @@ impl Framebuffer {
         Self {
             kind: SurfaceKind::Mmio,
             layout,
+            single_pixel_writes: 0,
         }
     }
 
@@ -79,12 +90,20 @@ impl Framebuffer {
         Self {
             kind: SurfaceKind::Ram,
             layout,
+            single_pixel_writes: 0,
         }
     }
 
     /// 面の種別（PERF-c）。
     pub fn kind(&self) -> SurfaceKind {
         self.kind
+    }
+
+    /// 矩形を塗る経路で、1 画素ずつ書いた画素の数の累計（2026-09-15）。
+    ///
+    /// **呼び出し側が前後の差を取る**（`Console` の消す経路）。
+    pub fn single_pixel_writes(&self) -> u64 {
+        self.single_pixel_writes
     }
 
     pub fn layout(&self) -> &FramebufferLayout {
@@ -214,6 +233,9 @@ impl Framebuffer {
                 row_offset + (rect.width as u64) * BYTES_PER_PIXEL <= self.layout.size_bytes(),
                 "clipped row would run past the end of the framebuffer"
             );
+            // **1 画素ずつ書く道を通った画素を数える（2026-09-15）。** 行ごとに 1 回足す
+            // ——**ループの中で数えると、測りたい道そのものを重くする。**
+            self.single_pixel_writes += u64::from(rect.width);
             // SAFETY: row_offset は検証済みオフセットで、base..end はマップ済み。
             let row_ptr = unsafe { base.as_mut_ptr::<u32>().byte_add(row_offset as usize) };
             for column in 0..rect.width {

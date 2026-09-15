@@ -567,7 +567,7 @@ fn observe_draw_stats(serial: &mut SerialPort, console: &mut crate::console::Con
         serial,
         "screen-cost: syscalls={} writes={} write_bytes={} glyphs={} draw_cycles={} erase_cycles={} glyph_cycles={} flushes={} \
          flush_bytes={} flush_cycles={} full_screen_flushes={} ticks={} repaints={} repaint_cells={} \
-         repaint_cycles={}",
+         repaint_cycles={} erase_single_pixels={}",
         stats.terminal_writes,
         stats.foreground_writes,
         stats.foreground_bytes,
@@ -583,6 +583,8 @@ fn observe_draw_stats(serial: &mut SerialPort, console: &mut crate::console::Con
         stats.repaint_count,
         stats.repaint_cells,
         stats.repaint_cycles,
+        // **末尾へ足した（2026-09-15）。** 上の doc の「項は末尾へ足すこと」。
+        stats.erase_single_pixels,
     );
 }
 
