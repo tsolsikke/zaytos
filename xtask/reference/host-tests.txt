@@ -562,6 +562,7 @@ kernel::task::tests::layer_two_skips_a_task_that_another_cpu_is_running
 kernel::task::tests::main_is_chosen_when_no_worker_can_run
 kernel::task::tests::main_is_never_picked_as_a_rotation_candidate
 kernel::task::tests::only_ready_is_runnable
+kernel::task::tests::only_the_added_task_uses_the_second_ring3_slot
 kernel::task::tests::only_the_tasks_owned_by_this_cpu_are_rotated
 kernel::task::tests::the_current_worker_is_returned_when_it_is_the_only_runnable_one
 kernel::task::tests::the_demo_has_two_workers_and_one_main

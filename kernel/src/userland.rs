@@ -396,7 +396,11 @@ const HEAP_PAGE_SIZE: u64 = 4096;
 /// `crate::syscall::set_user_window` と同じ形である（S9-b-3-2b から続く形）。
 /// **`run_loaded_program` が入る直前に据え、戻ったら引き取る。**
 /// **深さの算術が消えるので、ずれようが無い。**
-static CURRENT_HEAP: Locked<Heap> = Locked::new(Heap::EMPTY);
+///
+/// **スロットごとに持つ（W1-c-3）。** **今のタスクのスロットで引く**（`crate::vfs` の
+/// `CURRENT_FILES` と同じ形）。**今日は必ずスロット 0 である。**
+static CURRENT_HEAP: [Locked<Heap>; crate::ring3::RING3_SLOTS] =
+    [const { Locked::new(Heap::EMPTY) }; crate::ring3::RING3_SLOTS];
 
 /// ヒープの下端と上端（H-a）。
 #[derive(Clone, Copy)]
@@ -482,12 +486,12 @@ impl Heap {
 
 /// 今のヒープを据え、前のものを返す（H-a）。**`swap_current_files` と同じ形。**
 pub fn swap_current_heap(heap: Heap) -> Heap {
-    core::mem::replace(&mut CURRENT_HEAP.lock(), heap)
+    core::mem::replace(&mut CURRENT_HEAP[crate::ring3::current_slot()].lock(), heap)
 }
 
 /// 今のヒープへ触る（H-a）。**`sys_brk` が使う。**
 pub fn with_current_heap<R>(body: impl FnOnce(&mut Heap) -> R) -> R {
-    body(&mut CURRENT_HEAP.lock())
+    body(&mut CURRENT_HEAP[crate::ring3::current_slot()].lock())
 }
 
 /// ヒープが越えられない上端（H-a。ADR-0044 の決定 4）。
@@ -772,7 +776,7 @@ const MAX_SPAWN_IN_FLIGHT: usize = MAX_EXCURSION_DEPTH;
 /// **深さだけで引くと、同時に走る 2 本が同じ深さの緩衝を使う。** **`init` は深さ 0 から
 /// IF=1 のまま読み込む**（BKL を持つのは IF=0 の区間だけである）**ので、読み込みの途中でも
 /// タイマが切り替えうる。** **[`SPAWN_PATHS`]・[`SPAWN_ARGVS`]・[`SPAWN_ENVPS`] も同じである。**
-/// **W1-c-1 では 2 つ目のスロットを誰も使わない**（[`crate::ring3::RING3_SLOT`] が定数 0）。
+/// **2 つ目のスロットはまだ誰も使わない**（`crate::ring3::current_slot` が今日は必ず 0 を返す）。
 static mut SPAWN_IMAGES: [[[u8; MAX_EXECUTABLE_SIZE]; MAX_SPAWN_IN_FLIGHT];
     crate::ring3::RING3_SLOTS] =
     [[[0; MAX_EXECUTABLE_SIZE]; MAX_SPAWN_IN_FLIGHT]; crate::ring3::RING3_SLOTS];
@@ -825,7 +829,13 @@ static SPAWN_QUARANTINED: core::sync::atomic::AtomicUsize = core::sync::atomic::
 /// **触るのは BKL の内側だけである。** **破棄は入れ子にならない**——
 /// **子の破棄は、親の破棄が始まる前に終わっている**（`spawn` は同期である）。
 /// **使う前に [`crate::quarantine::Quarantine::reset`] で空にする。**
-static mut SPAWN_QUARANTINE: crate::quarantine::Quarantine = crate::quarantine::Quarantine::new();
+///
+/// # スロットごとに持つ（W1-c-3）
+///
+/// **同時に走る 2 本は、それぞれ自分の破棄を持つ。** **1 つだけだと、片方の `reset` が
+/// もう片方の途中の破棄を空にする。** **今のタスクのスロットで引く。今日は必ずスロット 0 である。**
+static mut SPAWN_QUARANTINE: [crate::quarantine::Quarantine; crate::ring3::RING3_SLOTS] =
+    [const { crate::quarantine::Quarantine::new() }; crate::ring3::RING3_SLOTS];
 
 /// [`spawn`] が起こした子が漏らしたフレームの累計（S11-5）。
 static SPAWN_LEAKED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
@@ -1120,7 +1130,9 @@ pub fn load_user_program(
         let guard = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
         // SAFETY: BKL を保持している。**この隔離は破棄の間しか使わず、破棄は
         // 入れ子にならない**（[`SPAWN_QUARANTINE`] の doc）。
-        let quarantine = unsafe { &mut *core::ptr::addr_of_mut!(SPAWN_QUARANTINE) };
+        let quarantine = unsafe {
+            &mut (*core::ptr::addr_of_mut!(SPAWN_QUARANTINE))[crate::ring3::current_slot()]
+        };
         quarantine.reset();
         // **破棄する前に、この空間を指したままのタスクが無いかを見る（W1-b-2）。**
         // **遠征の戻りが元の値へ戻していれば、何も見つからない。** **見つかったら
@@ -1845,7 +1857,7 @@ pub fn spawn(
     // シェルを起こす。**S11-5 の時点では `dispatch` からしか来なかったので、
     // 深さ 0 を不具合として拒んでいた。** 呼び出し側が増えたので、その判定を外した。
     // **この `slot` は深さの番号である。** 遠征のスロット（W1-c-1）は
-    // `crate::ring3::RING3_SLOT` で引く。
+    // `crate::ring3::current_slot` で引く。
     let slot = depth;
 
     let mut port = SerialPort::new(SerialPort::COM1_BASE);
@@ -1873,7 +1885,7 @@ pub fn spawn(
     // のはこの 1 本だけである（深さの判定が入れ子の重なりを禁じている）。
     // 単一コアの実行文脈で、割り込みハンドラはここへ来ない。
     let path_slot: &'static mut [u8; PATH_MAX] =
-        unsafe { &mut (*core::ptr::addr_of_mut!(SPAWN_PATHS))[crate::ring3::RING3_SLOT][slot] };
+        unsafe { &mut (*core::ptr::addr_of_mut!(SPAWN_PATHS))[crate::ring3::current_slot()][slot] };
     path_slot[..name_len].copy_from_slice(&path[..name_len]);
     let name_bytes: &'static [u8] = &path_slot[..name_len];
     // **UTF-8 でなければ名前を伏せる。** パスは Ring 3 から来るバイト列で、
@@ -1883,8 +1895,9 @@ pub fn spawn(
 
     // **像をブロックごとに写す。** 借りたままにできない理由は [`SPAWN_IMAGES`]。
     // SAFETY: `slot` は範囲内で、その深さで使うのはこの 1 本だけである（上と同じ）。
-    let image_slot: &'static mut [u8; MAX_EXECUTABLE_SIZE] =
-        unsafe { &mut (*core::ptr::addr_of_mut!(SPAWN_IMAGES))[crate::ring3::RING3_SLOT][slot] };
+    let image_slot: &'static mut [u8; MAX_EXECUTABLE_SIZE] = unsafe {
+        &mut (*core::ptr::addr_of_mut!(SPAWN_IMAGES))[crate::ring3::current_slot()][slot]
+    };
     {
         let block_size = fs.block_size() as usize;
         let mut done = 0usize;
@@ -1990,7 +2003,7 @@ pub fn spawn(
     // のはこの 1 本だけである（深さの判定が入れ子の重なりを禁じている）。
     // 単一コアの実行文脈で、割り込みハンドラはここへ来ない。
     let argv_slot: &'static mut [u8; MAX_ARGV_BYTES] =
-        unsafe { &mut (*core::ptr::addr_of_mut!(SPAWN_ARGVS))[crate::ring3::RING3_SLOT][slot] };
+        unsafe { &mut (*core::ptr::addr_of_mut!(SPAWN_ARGVS))[crate::ring3::current_slot()][slot] };
     argv_slot[..argv_bytes.len()].copy_from_slice(argv_bytes);
     let stored: &'static [u8] = &argv_slot[..argv_bytes.len()];
 
@@ -2038,7 +2051,7 @@ pub fn spawn(
             // いるのはこの 1 本だけである（深さの判定が入れ子の重なりを禁じている）。
             // 単一コアの実行文脈で、割り込みハンドラはここへ来ない。
             let envp_slot: &'static mut [u8; MAX_ENVP_BYTES] = unsafe {
-                &mut (*core::ptr::addr_of_mut!(SPAWN_ENVPS))[crate::ring3::RING3_SLOT][slot]
+                &mut (*core::ptr::addr_of_mut!(SPAWN_ENVPS))[crate::ring3::current_slot()][slot]
             };
             envp_slot[..envp_bytes.len()].copy_from_slice(envp_bytes);
             let env_stored: &'static [u8] = &envp_slot[..envp_bytes.len()];

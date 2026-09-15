@@ -631,20 +631,18 @@ pub const PROBE_ARGS: [u64; 6] = [
 /// 記録され、`PROBE_ARGS[3]` と決定的に食い違う。
 pub const SENTINEL_RCX: u64 = 0xCCCC_CCCC;
 
-/// [`SYS_WRITE`] が最後に受け取った fd。
-static WRITE_FD: AtomicU64 = AtomicU64::new(0);
-/// [`SYS_WRITE`] が最後に記録したバイト数。
-static WRITE_LEN: AtomicU64 = AtomicU64::new(0);
-/// [`SYS_WRITE`] が最後に記録したバイト列。
-static WRITE_BUF: [AtomicU8; WRITE_BUF_LEN] = [const { AtomicU8::new(0) }; WRITE_BUF_LEN];
-/// 遠征の 1 本が持つ、システムコール側の正しさの状態（W1-a）。
+/// 遠征の 1 本が持つ、システムコール側の状態（W1-a。W1-c-3 で記録も加えた）。
 ///
-/// # 計器と結果はここに無い
+/// # 記録は W1-c-3 でここへ移した
 ///
-/// **`WRITE_*` / `LAST_*` / `PROBE_*` / `INVOCATION_COUNT` などは、
-/// 2 本同時のときに正しくない**（`docs/wayland-inventory.md` の
-/// 「W1-c の 2 本目は、17 個のうち何個を触るか」）。**W1-a では動かさない**
-/// ——**動かすと「緑のまま、主張している中身が変わる」形になる。**
+/// **W1-a では正しさの 4 つだけを置き、`WRITE_*` / `LAST_*` / `INVOCATION_COUNT` などの
+/// 記録は大域に残した**——**動かすと「緑のまま、主張している中身が変わる」形になるからである。**
+/// **W1-c-3 で、[`Records`] の欄（`PROBE_*` を除く 10 欄）をここへ移した**
+/// ——**2 本目が最初のシステムコールで 5 個、`write` で 3 個を触る**
+/// （`docs/wayland-inventory.md` の「W1-c の 2 本目は、17 個のうち何個を触るか」）。
+/// **スロットが今日は必ず 0 なので、中身は変わらない。**
+///
+/// **`PROBE_*` は移していない。** **起動時の probe しか使わない。**
 struct SyscallState {
     /// 今 Ring 3 が使っている窓の下端と上端（S9-b-3-2b）。
     ///
@@ -665,6 +663,23 @@ struct SyscallState {
     process_exited: AtomicBool,
     /// [`SYS_EXIT`] が受け取った終了状態（RDI）。[`SyscallState::process_exited`] が真のときだけ意味を持つ。
     process_exit_status: AtomicU64,
+    /// `syscall_entry` が呼ばれた回数（会計用。W1-c-3 で大域から移した）。
+    invocation_count: AtomicU64,
+    /// 直近に受け取った番号（RAX）。往復検証で PROBE_NUMBER と突き合わせる。
+    last_number: AtomicU64,
+    /// 直近に受け取った 6 引数（RDI/RSI/RDX/R10/R8/R9）。PROBE_ARGS と突き合わせる。
+    last_args: [AtomicU64; 6],
+    /// `syscall_entry` が走ったときの RSP（RSP0 スタックのはず）。読み戻し検証に使う。
+    handler_rsp: AtomicU64,
+    /// 入場時点の [`crate::ring3`] の「今 Ring 3 にいる」の値（S8-b）。**Ring 3 から
+    /// 来たのなら真のはず**で、往復検証が突き合わせる。
+    in_ring3_at_entry: AtomicBool,
+    /// [`SYS_WRITE`] が最後に受け取った fd。
+    write_fd: AtomicU64,
+    /// [`SYS_WRITE`] が最後に記録したバイト数。
+    write_len: AtomicU64,
+    /// [`SYS_WRITE`] が最後に記録したバイト列。
+    write_buf: [AtomicU8; WRITE_BUF_LEN],
 }
 
 impl SyscallState {
@@ -674,6 +689,14 @@ impl SyscallState {
             user_window_end: AtomicU64::new(0),
             process_exited: AtomicBool::new(false),
             process_exit_status: AtomicU64::new(0),
+            invocation_count: AtomicU64::new(0),
+            last_number: AtomicU64::new(0),
+            last_args: [const { AtomicU64::new(0) }; 6],
+            handler_rsp: AtomicU64::new(0),
+            in_ring3_at_entry: AtomicBool::new(false),
+            write_fd: AtomicU64::new(0),
+            write_len: AtomicU64::new(0),
+            write_buf: [const { AtomicU8::new(0) }; WRITE_BUF_LEN],
         }
     }
 }
@@ -682,19 +705,19 @@ impl SyscallState {
 static SYSCALL_STATE: [SyscallState; crate::ring3::RING3_SLOTS] =
     [const { SyscallState::new() }; crate::ring3::RING3_SLOTS];
 
-/// 今のタスクのシステムコール側の状態を引く（W1-a）。
+/// 今のタスクのシステムコール側の状態を引く（W1-a。W1-c-3 でタスクのスロットから引く形にした）。
 ///
-/// **W1-a では常にスロット 0 である**（`crate::ring3::RING3_SLOTS` が 1）。
+/// **今日は必ずスロット 0 である**（`crate::ring3::current_slot`）。
 #[inline(always)]
 fn state() -> &'static SyscallState {
-    &SYSCALL_STATE[0]
+    &SYSCALL_STATE[crate::ring3::current_slot()]
 }
 
 /// [`PROBE_NUMBER`] を受け取ったか（S9-b-3-2a）。
 static PROBE_INVOKED: AtomicBool = AtomicBool::new(false);
 /// [`PROBE_NUMBER`] の呼び出しで届いた 6 引数（S9-b-3-2a）。
 ///
-/// # なぜ [`LAST_ARGS`] で足りないか
+/// # なぜ `SyscallState::last_args` で足りないか
 ///
 /// あちらは**直近の呼び出し**を持つ。**起動時の battery は 1 回しか発行しないので
 /// 足りていた**が、ユーザープログラムは 4 回発行する（probe・`write`・未実装の
@@ -712,24 +735,8 @@ static PROBE_SEEN_ARGS: [AtomicU64; 6] = [
     AtomicU64::new(0),
 ];
 
-/// `syscall_entry` が呼ばれた回数（会計用）。
-static INVOCATION_COUNT: AtomicU64 = AtomicU64::new(0);
-/// 直近に受け取った番号（RAX）。往復検証で PROBE_NUMBER と突き合わせる。
-static LAST_NUMBER: AtomicU64 = AtomicU64::new(0);
-/// 直近に受け取った 6 引数（RDI/RSI/RDX/R10/R8/R9）。PROBE_ARGS と突き合わせる。
-static LAST_ARGS: [AtomicU64; 6] = [
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-];
-/// `syscall_entry` が走ったときの RSP（RSP0 スタックのはず）。読み戻し検証に使う。
-static HANDLER_RSP: AtomicU64 = AtomicU64::new(0);
-/// 入場時点の [`crate::ring3`] の「今 Ring 3 にいる」の値（S8-b）。**Ring 3 から
-/// 来たのなら真のはず**で、往復検証が突き合わせる。
-static IN_RING3_AT_ENTRY: AtomicBool = AtomicBool::new(false);
+// **`INVOCATION_COUNT` / `LAST_NUMBER` / `LAST_ARGS` / `HANDLER_RSP` /
+// `IN_RING3_AT_ENTRY` は W1-c-3 で [`SyscallState`] へ移した。**
 
 /// 検証済みのユーザー範囲を表す証明トークン（M5-f-2-2、案T）。
 ///
@@ -955,7 +962,7 @@ unsafe fn dispatch(
 ) -> u64 {
     match number {
         PROBE_NUMBER => {
-            // **この回の引数を残す（S9-b-3-2a）。** [`LAST_ARGS`] は後続の呼び出しで
+            // **この回の引数を残す（S9-b-3-2a）。** `SyscallState::last_args` は後続の呼び出しで
             // 上書きされるので、**主張したい 1 回**をここで押さえる。
             for (slot, value) in PROBE_SEEN_ARGS.iter().zip(args.iter()) {
                 slot.store(*value, Ordering::SeqCst);
@@ -1342,7 +1349,13 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     // カーネルへ入ったので「今 Ring 3 にいる」を降ろす（S8-b）。Ring 3 へ返る直前で
     // 立て直す。降ろす前の値を記録しておき、往復の検証で突き合わせる（Ring 3 から
     // 来たのなら真のはず）。
-    IN_RING3_AT_ENTRY.store(crate::ring3::note_kernel_entry(), Ordering::SeqCst);
+    // **今のタスクのシステムコール側の状態を 1 回だけ引く（W1-c-3）。** **引く箇所ごとに
+    // `state()` を呼ぶと、`dev` では呼んだ箇所の数だけ一時値が枠を広げた**（実測。この関数の枠が
+    // 408 から 616 バイトになった）。
+    let state = state();
+    state
+        .in_ring3_at_entry
+        .store(crate::ring3::note_kernel_entry(), Ordering::SeqCst);
 
     // SAFETY: スタブが直前に積んだ有効な IrqContext を指す。読み書きともこの
     // フレームに限る。
@@ -1363,12 +1376,12 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     let arg3 = ctx.rcx;
     let args = [ctx.rdi, ctx.rsi, ctx.rdx, arg3, ctx.r8, ctx.r9];
 
-    INVOCATION_COUNT.fetch_add(1, Ordering::SeqCst);
-    LAST_NUMBER.store(number, Ordering::SeqCst);
-    for (slot, value) in LAST_ARGS.iter().zip(args.iter()) {
+    state.invocation_count.fetch_add(1, Ordering::SeqCst);
+    state.last_number.store(number, Ordering::SeqCst);
+    for (slot, value) in state.last_args.iter().zip(args.iter()) {
         slot.store(*value, Ordering::SeqCst);
     }
-    HANDLER_RSP.store(rsp_at_call, Ordering::SeqCst);
+    state.handler_rsp.store(rsp_at_call, Ordering::SeqCst);
 
     // ポインタ検証のため、稼働中テーブルの PML4 物理と登録 direct map を用意する。
     let direct_map = common::addr::direct_map();
@@ -2781,11 +2794,15 @@ unsafe fn sys_write(
         done += read as u64;
     }
 
-    WRITE_FD.store(fd, Ordering::SeqCst);
-    for (slot, value) in WRITE_BUF.iter().zip(recorded.iter()) {
+    // **1 回だけ引く（W1-c-3。`syscall_entry` の同じ箇所の注記）。**
+    let state = state();
+    state.write_fd.store(fd, Ordering::SeqCst);
+    for (slot, value) in state.write_buf.iter().zip(recorded.iter()) {
         slot.store(*value, Ordering::SeqCst);
     }
-    WRITE_LEN.store(done.min(WRITE_BUF_LEN as u64), Ordering::SeqCst);
+    state
+        .write_len
+        .store(done.min(WRITE_BUF_LEN as u64), Ordering::SeqCst);
     done
 }
 
@@ -3120,18 +3137,18 @@ fn errno_for_file_table(error: crate::vfs::FileTableError) -> i64 {
 
 /// [`SYS_WRITE`] が最後に記録した fd。
 pub fn last_write_fd() -> u64 {
-    WRITE_FD.load(Ordering::SeqCst)
+    state().write_fd.load(Ordering::SeqCst)
 }
 
 /// [`SYS_WRITE`] が最後に記録したバイト数。
 pub fn last_write_len() -> usize {
-    WRITE_LEN.load(Ordering::SeqCst) as usize
+    state().write_len.load(Ordering::SeqCst) as usize
 }
 
 /// [`SYS_WRITE`] が最後に記録したバイト列を `dst` へ写す。写した長さを返す。
 pub fn last_write_bytes(dst: &mut [u8]) -> usize {
     let len = last_write_len().min(dst.len()).min(WRITE_BUF_LEN);
-    for (slot, value) in dst.iter_mut().zip(WRITE_BUF.iter()).take(len) {
+    for (slot, value) in dst.iter_mut().zip(state().write_buf.iter()).take(len) {
         *slot = value.load(Ordering::SeqCst);
     }
     len
@@ -3148,18 +3165,20 @@ pub fn last_write_bytes(dst: &mut [u8]) -> usize {
 /// 差が出ないので、複数になって初めて要る**（`FAULT_CS` の戻し忘れと同じ形で、
 /// `verification-coverage.md` に記録がある）。
 pub fn reset_counters() {
-    INVOCATION_COUNT.store(0, Ordering::SeqCst);
-    LAST_NUMBER.store(0, Ordering::SeqCst);
-    for slot in LAST_ARGS.iter() {
+    // **1 回だけ引く（W1-c-3。`syscall_entry` の同じ箇所の注記）。**
+    let state = state();
+    state.invocation_count.store(0, Ordering::SeqCst);
+    state.last_number.store(0, Ordering::SeqCst);
+    for slot in state.last_args.iter() {
         slot.store(0, Ordering::SeqCst);
     }
-    HANDLER_RSP.store(0, Ordering::SeqCst);
-    IN_RING3_AT_ENTRY.store(false, Ordering::SeqCst);
-    state().process_exited.store(false, Ordering::SeqCst);
-    state().process_exit_status.store(0, Ordering::SeqCst);
-    WRITE_FD.store(0, Ordering::SeqCst);
-    WRITE_LEN.store(0, Ordering::SeqCst);
-    for slot in WRITE_BUF.iter() {
+    state.handler_rsp.store(0, Ordering::SeqCst);
+    state.in_ring3_at_entry.store(false, Ordering::SeqCst);
+    state.process_exited.store(false, Ordering::SeqCst);
+    state.process_exit_status.store(0, Ordering::SeqCst);
+    state.write_fd.store(0, Ordering::SeqCst);
+    state.write_len.store(0, Ordering::SeqCst);
+    for slot in state.write_buf.iter() {
         slot.store(0, Ordering::SeqCst);
     }
     // **probe の記録も戻す（S9-b-3-2a）。** 起動時の battery が発行した probe の
@@ -3209,12 +3228,14 @@ pub struct Records {
 
 /// 今の記録を控える（S11-5）。**[`reset_counters`] が戻す欄と 1 対 1 である。**
 pub fn save_records() -> Records {
+    // **1 回だけ引く（W1-c-3。`syscall_entry` の同じ箇所の注記）。**
+    let state = state();
     let mut last_args = [0u64; 6];
-    for (slot, value) in last_args.iter_mut().zip(LAST_ARGS.iter()) {
+    for (slot, value) in last_args.iter_mut().zip(state.last_args.iter()) {
         *slot = value.load(Ordering::SeqCst);
     }
     let mut write_buf = [0u8; WRITE_BUF_LEN];
-    for (slot, value) in write_buf.iter_mut().zip(WRITE_BUF.iter()) {
+    for (slot, value) in write_buf.iter_mut().zip(state.write_buf.iter()) {
         *slot = value.load(Ordering::SeqCst);
     }
     let mut probe_seen_args = [0u64; 6];
@@ -3222,15 +3243,15 @@ pub fn save_records() -> Records {
         *slot = value.load(Ordering::SeqCst);
     }
     Records {
-        invocation_count: INVOCATION_COUNT.load(Ordering::SeqCst),
-        last_number: LAST_NUMBER.load(Ordering::SeqCst),
+        invocation_count: state.invocation_count.load(Ordering::SeqCst),
+        last_number: state.last_number.load(Ordering::SeqCst),
         last_args,
-        handler_rsp: HANDLER_RSP.load(Ordering::SeqCst),
-        in_ring3_at_entry: IN_RING3_AT_ENTRY.load(Ordering::SeqCst),
-        process_exited: state().process_exited.load(Ordering::SeqCst),
-        process_exit_status: state().process_exit_status.load(Ordering::SeqCst),
-        write_fd: WRITE_FD.load(Ordering::SeqCst),
-        write_len: WRITE_LEN.load(Ordering::SeqCst),
+        handler_rsp: state.handler_rsp.load(Ordering::SeqCst),
+        in_ring3_at_entry: state.in_ring3_at_entry.load(Ordering::SeqCst),
+        process_exited: state.process_exited.load(Ordering::SeqCst),
+        process_exit_status: state.process_exit_status.load(Ordering::SeqCst),
+        write_fd: state.write_fd.load(Ordering::SeqCst),
+        write_len: state.write_len.load(Ordering::SeqCst),
         write_buf,
         probe_invoked: PROBE_INVOKED.load(Ordering::SeqCst),
         probe_seen_args,
@@ -3239,22 +3260,32 @@ pub fn save_records() -> Records {
 
 /// 控えた記録を戻す（S11-5）。
 pub fn restore_records(records: Records) {
-    INVOCATION_COUNT.store(records.invocation_count, Ordering::SeqCst);
-    LAST_NUMBER.store(records.last_number, Ordering::SeqCst);
-    for (slot, value) in LAST_ARGS.iter().zip(records.last_args.iter()) {
+    // **1 回だけ引く（W1-c-3。`syscall_entry` の同じ箇所の注記）。**
+    let state = state();
+    state
+        .invocation_count
+        .store(records.invocation_count, Ordering::SeqCst);
+    state
+        .last_number
+        .store(records.last_number, Ordering::SeqCst);
+    for (slot, value) in state.last_args.iter().zip(records.last_args.iter()) {
         slot.store(*value, Ordering::SeqCst);
     }
-    HANDLER_RSP.store(records.handler_rsp, Ordering::SeqCst);
-    IN_RING3_AT_ENTRY.store(records.in_ring3_at_entry, Ordering::SeqCst);
-    state()
+    state
+        .handler_rsp
+        .store(records.handler_rsp, Ordering::SeqCst);
+    state
+        .in_ring3_at_entry
+        .store(records.in_ring3_at_entry, Ordering::SeqCst);
+    state
         .process_exited
         .store(records.process_exited, Ordering::SeqCst);
-    state()
+    state
         .process_exit_status
         .store(records.process_exit_status, Ordering::SeqCst);
-    WRITE_FD.store(records.write_fd, Ordering::SeqCst);
-    WRITE_LEN.store(records.write_len, Ordering::SeqCst);
-    for (slot, value) in WRITE_BUF.iter().zip(records.write_buf.iter()) {
+    state.write_fd.store(records.write_fd, Ordering::SeqCst);
+    state.write_len.store(records.write_len, Ordering::SeqCst);
+    for (slot, value) in state.write_buf.iter().zip(records.write_buf.iter()) {
         slot.store(*value, Ordering::SeqCst);
     }
     PROBE_INVOKED.store(records.probe_invoked, Ordering::SeqCst);
@@ -3305,25 +3336,25 @@ pub fn process_exit_status() -> u64 {
 
 /// `syscall_entry` が呼ばれた回数。
 pub fn invocation_count() -> u64 {
-    INVOCATION_COUNT.load(Ordering::SeqCst)
+    state().invocation_count.load(Ordering::SeqCst)
 }
 
 /// 直近に受け取った番号（RAX）。
 pub fn last_number() -> u64 {
-    LAST_NUMBER.load(Ordering::SeqCst)
+    state().last_number.load(Ordering::SeqCst)
 }
 
 /// 直近に受け取った 6 引数（RDI/RSI/RDX/R10/R8/R9 の順）。
 pub fn last_args() -> [u64; 6] {
-    core::array::from_fn(|i| LAST_ARGS[i].load(Ordering::SeqCst))
+    core::array::from_fn(|i| state().last_args[i].load(Ordering::SeqCst))
 }
 
 /// `syscall_entry` が走ったときの RSP。RSP0 スタック範囲との照合に使う。
 pub fn handler_rsp() -> u64 {
-    HANDLER_RSP.load(Ordering::SeqCst)
+    state().handler_rsp.load(Ordering::SeqCst)
 }
 
 /// 入場時点で「今 Ring 3 にいる」が立っていたか（S8-b）。
 pub fn in_ring3_at_entry() -> bool {
-    IN_RING3_AT_ENTRY.load(Ordering::SeqCst)
+    state().in_ring3_at_entry.load(Ordering::SeqCst)
 }

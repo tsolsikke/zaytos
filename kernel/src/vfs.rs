@@ -147,18 +147,27 @@ pub fn with_root_image_mut<R>(f: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
 ///
 /// **据え忘れたときに、前のプロセスの fd が見える形にしない。**
 /// 空の表なら、どの番号を引いても `BadDescriptor` である。
-static CURRENT_FILES: Locked<FileTable> = Locked::new(FileTable::new());
+///
+/// # スロットごとに持つ（W1-c-3）
+///
+/// **1 つだけだと、同時に走る 2 本が同じ表を据え合う。** **今のタスクのスロットで引く**
+/// （`crate::ring3::current_slot`）。**今日は必ずスロット 0 である。**
+static CURRENT_FILES: [Locked<FileTable>; crate::ring3::RING3_SLOTS] =
+    [const { Locked::new(FileTable::new()) }; crate::ring3::RING3_SLOTS];
 
 /// 表を据え、**据える前の表を返す**。
 ///
 /// **戻すのは呼び出し側の責任である**（[`CURRENT_FILES`] の doc）。
 pub fn swap_current_files(table: FileTable) -> FileTable {
-    core::mem::replace(&mut *CURRENT_FILES.lock(), table)
+    core::mem::replace(
+        &mut *CURRENT_FILES[crate::ring3::current_slot()].lock(),
+        table,
+    )
 }
 
 /// 今の表へ触る。**`dispatch` が `open` と `close` で使う。**
 pub fn with_current_files<R>(body: impl FnOnce(&mut FileTable) -> R) -> R {
-    body(&mut CURRENT_FILES.lock())
+    body(&mut CURRENT_FILES[crate::ring3::current_slot()].lock())
 }
 
 /// 1 つのプロセスが同時に開けるファイルの数（S10-b）。

@@ -44,8 +44,8 @@ pub const WORKER_COUNT: usize = 2;
 /// メインの他にもう 1 本が要る**（`ring3::RING3_SLOTS` が 2 であることと対になる）。
 /// **W1-c-1 では誰も使わない**——**`Uninitialized` のままで、`pick_next` の走査範囲
 /// （`1..=WORKER_COUNT`）の外にある。** **既存の添字は動かない**（AP 用アイドルは 3 のまま）。
-/// **添字に名前を付けるのは使い始める W1-c-4 である**——**いま付けると、使われない
-/// 定数に `#[allow(dead_code)]` が要る。**
+/// **W1-c-3 で名前を付けた**（`RING3_TASK`）——**スロットを引くのに使い始めたので、
+/// `#[allow(dead_code)]` は要らない。**
 const TASK_COUNT: usize = WORKER_COUNT + 3;
 
 /// メインタスクの添字。bootstrap processor の既定タスクでもある（S4-c-3-1）。
@@ -440,6 +440,39 @@ pub fn debug_read_current_index() -> usize {
 fn current_index_if_any() -> Option<usize> {
     let value = CURRENT.this_cpu().load(Ordering::Relaxed);
     (value != NO_CURRENT_TASK).then_some(value)
+}
+
+/// Ring 3 を同時に走らせるために足したタスクの添字（W1-c-1 で足し、W1-c-3 で名前を付けた）。
+///
+/// **末尾に置いてある**（[`TASK_COUNT`] の doc）。**Ring 3 のスロット 1 を使う。**
+const RING3_TASK: usize = TASK_COUNT - 1;
+
+/// タスクが使う Ring 3 のスロット（W1-c-3）。
+///
+/// **スロット 1 を使うのは [`RING3_TASK`] だけで、ほかはすべて 0 である。**
+/// **メインのタスク（`init` とシェルの系統）が 0 を使う。** **デモのワーカーと AP 用アイドルは
+/// Ring 3 へ降りないので、0 を返しても誰も読まない。**
+const fn ring3_slot_of(task: usize) -> usize {
+    if task == RING3_TASK {
+        1
+    } else {
+        0
+    }
+}
+
+/// 今のタスクが使う Ring 3 のスロット（W1-c-3）。
+///
+/// **まだ誰も走らせていなければ 0 である**——**起動の途中、タスクが 1 本も割り当てられていない
+/// 時点で Ring 3 の遠征が走る**（[`current_index_if_any`] の doc）。**それはメインのタスクになる
+/// 起動の直線上なので、スロット 0 が正しい。**
+///
+/// **今日は必ず 0 である**——**[`RING3_TASK`] はまだ走らない。**
+#[inline(always)]
+pub fn current_ring3_slot() -> usize {
+    match current_index_if_any() {
+        Some(task) => ring3_slot_of(task),
+        None => 0,
+    }
 }
 
 /// 今のタスクの `RSP0` の欄を据える（W1-b。遠征の出入りが呼ぶ）。
@@ -1364,7 +1397,8 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         let (next_bottom, next_top) = if next_depth == 0 {
             (scheduler::stack_bottom(next), scheduler::stack_top(next))
         } else {
-            crate::ring3::excursion_stack_range_at(next_depth)
+            // **入る側のタスクのスロットで引く（W1-c-3）。** 今のタスクのものではない。
+            crate::ring3::excursion_stack_range_of(ring3_slot_of(next), next_depth)
         };
         if next_rsp < next_bottom || next_rsp >= next_top {
             // **文言のうち `is outside its stack` と `stacks are mixed` は、
@@ -2437,5 +2471,15 @@ mod tests {
     #[test]
     fn a_task_with_a_user_space_loads_its_own_table() {
         assert_eq!(super::cr3_to_load(0x1234_5000, 0xf000), 0x1234_5000);
+    }
+
+    /// Ring 3 のスロット 1 を使うのは、末尾に足した 1 本だけである（W1-c-3）。
+    #[test]
+    fn only_the_added_task_uses_the_second_ring3_slot() {
+        for task in 0..TASK_COUNT {
+            let expected = if task == TASK_COUNT - 1 { 1 } else { 0 };
+            assert_eq!(super::ring3_slot_of(task), expected, "task {task}");
+        }
+        assert!(super::ring3_slot_of(TASK_COUNT - 1) < crate::ring3::RING3_SLOTS);
     }
 }

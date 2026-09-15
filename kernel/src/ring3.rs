@@ -142,7 +142,7 @@ pub const MAX_EXCURSION_DEPTH: usize = 2;
 /// **W1-a でスロットごとに分けた。** **W1-a の時点では [`RING3_SLOTS`] が 1 で、
 /// 本数も置き場も変わらなかった**——**`.bss` は 1 バイトも増えなかった。**
 /// **W1-c-1 で [`RING3_SLOTS`] を 2 にしたので、本数が倍になった。**
-/// **2 つ目のスロットはまだ誰も使わない**（[`RING3_SLOT`] が定数 0）。
+/// **2 つ目のスロットはまだ誰も使わない**（[`current_slot`] が今日は必ず 0 を返す）。
 static mut EXCURSION_STACKS: [[ExcursionStack; MAX_EXCURSION_DEPTH]; RING3_SLOTS] =
     [const { [const { ExcursionStack([0; EXCURSION_STACK_SIZE]) }; MAX_EXCURSION_DEPTH] };
         RING3_SLOTS];
@@ -202,7 +202,8 @@ static CURRENT_RECOVERY: AtomicU64 = AtomicU64::new(0);
 /// **W1-c で 2 本を同時に走らせるので、もう 1 本ぶんを持つ**
 /// （`task` の `TASK_COUNT` の末尾に足した 1 本と対になる）。
 ///
-/// **W1-c-1 では 2 つ目を誰も使わない**——**[`RING3_SLOT`] が定数 0 のままである。**
+/// **W1-c-1 では 2 つ目を誰も使わない**——**スロットを引く口（[`current_slot`]）は、
+/// W1-c-3 でタスクから引く形になった後も、今日は必ず 0 を返す。**
 /// **大きさだけを変えた段である**（遠征スタックが 128 KiB 増える。あちらの表）。
 pub const RING3_SLOTS: usize = 2;
 
@@ -216,9 +217,11 @@ pub const RING3_SLOTS: usize = 2;
 /// 決まった欄である。** **あの 2 つはタスクが値を持ち、切り替えで入れ替える形になる
 /// （W1-b）。**
 ///
-/// # W1-a は振る舞いを変えない
+/// # W1-a と W1-c-3 は振る舞いを変えない
 ///
-/// **[`RING3_SLOTS`] が 1 なので、引く先は常に同じ 1 つである。**
+/// **W1-a では [`RING3_SLOTS`] が 1 で、引く先は常に同じ 1 つだった。**
+/// **W1-c-3 で引く先をタスクのスロットにし、畳みの記録もここへ移したが、
+/// 今日は常にスロット 0 である**（[`current_slot`]）。
 /// **変わるのは「どこから引くか」だけで、値も順序も変わらない。**
 struct ExcursionState {
     /// 今の遠征の深さ（S11-2）。**0 なら Ring 3 の遠征に入っていない。**
@@ -267,6 +270,31 @@ struct ExcursionState {
     /// **こちらは「外から止めた」である。** 混ぜると、遠征から戻った側が
     /// **「子が落ちた」と「子を止めた」を区別できない。**
     interrupted: AtomicBool,
+    /// 畳んだ例外のベクタ。ハンドラが記録する（W1-c-3 で大域の `FAULT_VECTOR` から移した）。
+    fault_vector: AtomicU64,
+    /// 畳んだ例外のフォルト RIP。ハンドラが記録する。
+    ///
+    /// **かつてはここに「予期する RIP」を据え、厳密一致を畳みの条件にしていた
+    /// （M5-e-3 から S8-a まで）。** 判定から外して記録に変えたのは、S8 で畳む対象を
+    /// 4 ベクタへ広げるためである。**遠征のたびに違う 1 点を予期するのは呼び出し側の
+    /// 都合であって、畳んでよいかの条件ではない。** 呼び出し側が [`fault_rip`] を
+    /// 読んで自分の予期と突き合わせる。
+    fault_rip: AtomicU64,
+    /// フォルト時の RSP（Ring 3 のユーザースタックのはず）。ハンドラが記録する。
+    fault_rsp: AtomicU64,
+    /// #GP ハンドラ自身の RSP（RSP0 = 遠征専用スタックのはず）。
+    handler_rsp: AtomicU64,
+    /// フォルト時の CS（Ring 3 由来なら RPL=3）。Ring 3 到達の実証に使う。
+    fault_cs: AtomicU64,
+    /// フォルト時の CR2（S8-d）。**#PF のときだけ意味を持つ。**
+    ///
+    /// 他のベクタでは直前の #PF の残骸か未定義の値なので、呼び出し側は
+    /// ベクタが 14 のときだけ読むこと。**記録するだけで、ここでは出力しない。**
+    fault_cr2: AtomicU64,
+    /// フォルトのエラーコード（S8-e）。#PF では P/W/U のビットが「不在」と
+    /// 「権限違反」を区別する——**S7 の到達条件 3 の観測はこの区別に依る**
+    /// （カーネル VA への触りは P=1・U=1 の権限違反であって、穴ではない）。
+    fault_error_code: AtomicU64,
 }
 
 impl ExcursionState {
@@ -276,6 +304,13 @@ impl ExcursionState {
             in_ring3: AtomicBool::new(false),
             folded: AtomicBool::new(false),
             interrupted: AtomicBool::new(false),
+            fault_vector: AtomicU64::new(0),
+            fault_rip: AtomicU64::new(0),
+            fault_rsp: AtomicU64::new(0),
+            handler_rsp: AtomicU64::new(0),
+            fault_cs: AtomicU64::new(0),
+            fault_cr2: AtomicU64::new(0),
+            fault_error_code: AtomicU64::new(0),
         }
     }
 }
@@ -284,14 +319,12 @@ impl ExcursionState {
 static EXCURSION_STATE: [ExcursionState; RING3_SLOTS] =
     [const { ExcursionState::new() }; RING3_SLOTS];
 
-/// 今のタスクの遠征の状態を引く（W1-a）。
+/// 今のタスクの遠征の状態を引く（W1-a。W1-c-3 でタスクのスロットから引く形にした）。
 ///
-/// **W1-a では常にスロット 0 である**（[`RING3_SLOTS`] が 1）。
-/// **W1-c でタスクからスロットを引く形になる**——**そこが唯一の変更点になるように、
-/// 引く口をここ 1 つに絞ってある。**
+/// **引く口をここ 1 つに絞ってある**（[`current_slot`]）。**今日は必ずスロット 0 である。**
 #[inline(always)]
 fn state() -> &'static ExcursionState {
-    &EXCURSION_STATE[RING3_SLOT]
+    &EXCURSION_STATE[current_slot()]
 }
 
 /// いま載っている回復点のアドレス（W1-b。切り替えが読む）。
@@ -313,41 +346,27 @@ pub fn set_current_recovery(value: u64) {
     CURRENT_RECOVERY.store(value, Ordering::SeqCst);
 }
 
-/// 今のタスクのスロットの番号（W1-a）。
+/// 今のタスクのスロットの番号（W1-a。W1-c-3 でタスクから引く形にした）。
 ///
-/// **W1-a では定数 0 である。** **W1-c でタスクから引く形になる**——
-/// **添字を書いている箇所をここ 1 つへ集めてある。**
+/// **W1-a から W1-c-2 までは定数 0 だった。** **W1-c-3 で `crate::task` から引く。**
+/// **今日は必ず 0 である**——**スロット 1 を使うタスクはまだ走らない**
+/// （`task::current_ring3_slot` の doc）。
 ///
-/// **W1-c-1 から `crate::userland` の `SPAWN_*` もこれで引く**（深さだけで引いていた）。
-/// **「変わるのはここだけ」は偽になった**——**同じ形の大域が `ring3.rs` と `syscall.rs` の
-/// 外にも在った**（`ADR-0060` の Addendum）。
-pub(crate) const RING3_SLOT: usize = 0;
+/// **W1-c-1 から `crate::userland` の `SPAWN_*` もこれで引く。** **W1-c-3 で `CURRENT_FILES`・
+/// `CURRENT_HEAP`・`SPAWN_QUARANTINE` も加わった**（`ADR-0060` の Addendum）。
+///
+/// # `#[inline(never)]` にしてある（W1-c-3 で測って決めた）
+///
+/// **`#[inline(always)]` にすると、呼ぶ箇所ごとにタスクを引く処理が展開され、`dev` では
+/// その一時値が呼んだ側の枠に場所を取った**（実測。`ring3::enter` の枠が 216 から 328 バイト）。
+/// **呼ぶ箇所の枠には、呼び出しと戻り値だけが残る形にする。**
+#[inline(never)]
+pub(crate) fn current_slot() -> usize {
+    crate::task::current_ring3_slot()
+}
 
-/// 畳んだ例外のベクタ。ハンドラが記録する。
-static FAULT_VECTOR: AtomicU64 = AtomicU64::new(0);
-/// 畳んだ例外のフォルト RIP。ハンドラが記録する。
-///
-/// **かつてはここに「予期する RIP」を据え、厳密一致を畳みの条件にしていた
-/// （M5-e-3 から S8-a まで）。** 判定から外して記録に変えたのは、S8 で畳む対象を
-/// 4 ベクタへ広げるためである。**遠征のたびに違う 1 点を予期するのは呼び出し側の
-/// 都合であって、畳んでよいかの条件ではない。** 呼び出し側が [`fault_rip`] を
-/// 読んで自分の予期と突き合わせる。
-static FAULT_RIP: AtomicU64 = AtomicU64::new(0);
-/// フォルト時の RSP（Ring 3 のユーザースタックのはず）。ハンドラが記録する。
-static FAULT_RSP: AtomicU64 = AtomicU64::new(0);
-/// #GP ハンドラ自身の RSP（RSP0 = 遠征専用スタックのはず）。
-static HANDLER_RSP: AtomicU64 = AtomicU64::new(0);
-/// フォルト時の CS（Ring 3 由来なら RPL=3）。Ring 3 到達の実証に使う。
-static FAULT_CS: AtomicU64 = AtomicU64::new(0);
-/// フォルト時の CR2（S8-d）。**#PF のときだけ意味を持つ。**
-///
-/// 他のベクタでは直前の #PF の残骸か未定義の値なので、呼び出し側は
-/// ベクタが 14 のときだけ読むこと。**記録するだけで、ここでは出力しない。**
-static FAULT_CR2: AtomicU64 = AtomicU64::new(0);
-/// フォルトのエラーコード（S8-e）。#PF では P/W/U のビットが「不在」と
-/// 「権限違反」を区別する——**S7 の到達条件 3 の観測はこの区別に依る**
-/// （カーネル VA への触りは P=1・U=1 の権限違反であって、穴ではない）。
-static FAULT_ERROR_CODE: AtomicU64 = AtomicU64::new(0);
+// **畳みの記録（`FAULT_*` と `HANDLER_RSP`）は W1-c-3 で [`ExcursionState`] へ移した。**
+// **2 本が同時に走ると、片方の畳みがもう片方の記録を上書きするためである。**
 
 extern "C" {
     /// 偽フレームを積んで Ring 3 へ iretq する（setjmp 相当を内包）。畳みで
@@ -435,14 +454,24 @@ pub fn excursion_stack_range() -> (u64, u64) {
 /// 深さ `depth` の遠征スタックの (下端, 上端)（S11-2）。
 ///
 /// 範囲外の `depth` は深さ 0 のものを返す。**呼び出し側が上限を知らなくてよい。**
+#[inline(always)]
 pub fn excursion_stack_range_at(depth: usize) -> (u64, u64) {
+    excursion_stack_range_of(current_slot(), depth)
+}
+
+/// スロット `slot` の、深さ `depth` の遠征スタックの (下端, 上端)（W1-c-3）。
+///
+/// **切り替えが使う**——**見たいのは入る側のタスクのスロットで、今のタスクのスロットではない。**
+/// 範囲外の `slot` と `depth` は 0 のものを返す（[`excursion_stack_range_at`] と同じ規則）。
+pub fn excursion_stack_range_of(slot: usize, depth: usize) -> (u64, u64) {
+    let slot = if slot < RING3_SLOTS { slot } else { 0 };
     let index = if depth < MAX_EXCURSION_DEPTH {
         depth
     } else {
         0
     };
     // SAFETY: 静的配列の要素のアドレスを取るだけで、中身は読まない。
-    let bottom = unsafe { addr_of!(EXCURSION_STACKS[RING3_SLOT][index]) } as u64;
+    let bottom = unsafe { addr_of!(EXCURSION_STACKS[slot][index]) } as u64;
     (bottom, bottom + EXCURSION_STACK_SIZE as u64)
 }
 
@@ -461,7 +490,7 @@ unsafe fn fill_excursion_stack(depth: usize) {
     }
     // SAFETY: 呼び出し元契約により、この配列要素は今誰も使っていない。
     unsafe {
-        let stack = addr_of_mut!(EXCURSION_STACKS[RING3_SLOT][depth]) as *mut u8;
+        let stack = addr_of_mut!(EXCURSION_STACKS[current_slot()][depth]) as *mut u8;
         core::ptr::write_bytes(stack, EXCURSION_STACK_FILL, EXCURSION_STACK_SIZE);
     }
 }
@@ -478,7 +507,7 @@ pub fn excursion_stack_high_water(depth: usize) -> usize {
         return 0;
     }
     // SAFETY: 読み取りのみ。添字は上で範囲内にしてある。
-    let stack = unsafe { addr_of!(EXCURSION_STACKS[RING3_SLOT][depth]) } as *const u8;
+    let stack = unsafe { addr_of!(EXCURSION_STACKS[current_slot()][depth]) } as *const u8;
     for offset in 0..EXCURSION_STACK_SIZE {
         // SAFETY: offset は配列の中である。
         if unsafe { stack.add(offset).read_volatile() } != EXCURSION_STACK_FILL {
@@ -602,36 +631,42 @@ pub unsafe fn enter(
     user_stack_top: u64,
     user_window: (u64, u64),
 ) {
+    // **今のタスクの遠征の状態を 1 回だけ引く（W1-c-3）。** **引く箇所ごとに `state()` を
+    // 呼ぶと、`dev` では呼んだ箇所の数だけ一時値が枠を広げた**（実測。この関数の枠が
+    // 216 から 840 バイトになり、遠征スタックの高水位が動いた。`docs/coding-standards.md`
+    // の「番地以外が動いたら」）。**この関数の枠は、子が走っている間ずっと載っている。**
+    let state = state();
     // **この遠征の深さ（S11-2）。** 呼び出し側が [`depth`] で上限を確かめている。
-    let depth = state().depth.load(Ordering::SeqCst);
+    let depth = state.depth.load(Ordering::SeqCst);
     let (_, excursion_top) = excursion_stack_range_at(depth);
 
     // **この深さの回復点を据える。** 戻すのはこの関数の末尾である。
     // SAFETY: 静的配列の要素のアドレスを取るだけである。深さは上限未満（契約）。
     let slot =
-        unsafe { addr_of_mut!(RECOVERIES[RING3_SLOT][depth.min(MAX_EXCURSION_DEPTH - 1)]) } as u64;
+        unsafe { addr_of_mut!(RECOVERIES[current_slot()][depth.min(MAX_EXCURSION_DEPTH - 1)]) }
+            as u64;
     let previous_recovery = CURRENT_RECOVERY.swap(slot, Ordering::SeqCst);
-    state().depth.store(depth + 1, Ordering::SeqCst);
+    state.depth.store(depth + 1, Ordering::SeqCst);
 
     // **この遠征の間、ユーザーポインタとして受理する範囲を据える（S9-b-3-2b）。**
     // 戻すのは畳みでも `exit` でも同じ位置（下の longjmp から戻った先）である。
     let previous_window = crate::syscall::set_user_window(user_window.0, user_window.1);
 
-    state().folded.store(false, Ordering::SeqCst);
+    state.folded.store(false, Ordering::SeqCst);
     // **中断の記録も戻す（S12 前の手当て、C）。** 戻さないと、前の遠征を
     // 止めたことが次の遠征の判定行に出る（`FAULT_CS` を戻していなかった
     // S9-b-3-1 とまったく同じ形である）。
-    state().interrupted.store(false, Ordering::SeqCst);
-    FAULT_RSP.store(0, Ordering::SeqCst);
-    HANDLER_RSP.store(0, Ordering::SeqCst);
-    FAULT_VECTOR.store(0, Ordering::SeqCst);
-    FAULT_RIP.store(0, Ordering::SeqCst);
+    state.interrupted.store(false, Ordering::SeqCst);
+    state.fault_rsp.store(0, Ordering::SeqCst);
+    state.handler_rsp.store(0, Ordering::SeqCst);
+    state.fault_vector.store(0, Ordering::SeqCst);
+    state.fault_rip.store(0, Ordering::SeqCst);
     // **CS も戻す（S9-b-3-1）。** 戻していなかったので、畳まずに戻った遠征の
     // 判定行に**前の遠征の CS が出た。** 畳みで戻る遠征しか無かった間は誰も
     // 読まなかったが、`exit` で戻る経路ができて読まれるようになった。
-    FAULT_CS.store(0, Ordering::SeqCst);
-    FAULT_CR2.store(0, Ordering::SeqCst);
-    FAULT_ERROR_CODE.store(0, Ordering::SeqCst);
+    state.fault_cs.store(0, Ordering::SeqCst);
+    state.fault_cr2.store(0, Ordering::SeqCst);
+    state.fault_error_code.store(0, Ordering::SeqCst);
 
     // **使う前に既知のバイトで埋める（S11-5）。** 戻ってから走査して、
     // **実際に使った量と、見張り区間が無傷かを測る。**
@@ -663,7 +698,7 @@ pub unsafe fn enter(
     // Ring 3 に入ることを記す（畳みの条件3）。iretq の直前で立てる。
     // 破壊 (M5-e-4, no-fold-flag): 立てない。cli の #GP が畳まれず dump+halt する。
     #[cfg(not(feature = "ring3-test-no-fold-flag"))]
-    state().in_ring3.store(true, Ordering::SeqCst);
+    state.in_ring3.store(true, Ordering::SeqCst);
 
     // SAFETY: 偽フレームを積んで Ring 3 へ落ちる。ユーザーページは呼び出し側が
     // 張り済み。畳みで戻ってくる（callee-saved と RSP は longjmp が復元する）。
@@ -692,7 +727,7 @@ pub unsafe fn enter(
     }
 
     // **深さと回復点を戻す（S11-2）。** 畳みで戻っても `exit` で戻ってもここを通る。
-    state().depth.store(depth, Ordering::SeqCst);
+    state.depth.store(depth, Ordering::SeqCst);
     CURRENT_RECOVERY.store(previous_recovery, Ordering::SeqCst);
 
     // 畳みで戻った。RSP0 を呼び出し側が指定した上端へ戻す。
@@ -707,7 +742,7 @@ pub unsafe fn enter(
     // それである**——**上の `main_rsp0_top` と同じ値を入れる。**
     crate::task::note_current_rsp0(main_rsp0_top);
     // **深さの欄も戻す（W1-b）。** **入れ子なら親の深さへ、そうでなければ 0 へ。**
-    crate::task::note_current_excursion_depth(state().depth.load(Ordering::SeqCst));
+    crate::task::note_current_excursion_depth(state.depth.load(Ordering::SeqCst));
 
     // **窓を戻す（S9-b-3-2b）。** ここは畳みで戻った場合も `exit` で戻った場合も
     // 通る（どちらの longjmp も `zaytos_enter_ring3` の復帰点へ帰る）。
@@ -757,14 +792,18 @@ pub unsafe fn record_and_fold(
     fault_error_code: u64,
     handler_rsp: u64,
 ) -> ! {
-    FAULT_VECTOR.store(fault_vector, Ordering::SeqCst);
-    FAULT_RIP.store(fault_rip, Ordering::SeqCst);
-    FAULT_CS.store(fault_cs, Ordering::SeqCst);
-    FAULT_CR2.store(fault_cr2, Ordering::SeqCst);
-    FAULT_ERROR_CODE.store(fault_error_code, Ordering::SeqCst);
-    FAULT_RSP.store(fault_rsp, Ordering::SeqCst);
-    HANDLER_RSP.store(handler_rsp, Ordering::SeqCst);
-    state().folded.store(true, Ordering::SeqCst);
+    // **1 回だけ引く（W1-c-3。[`enter`] の同じ箇所の注記）。**
+    let state = state();
+    state.fault_vector.store(fault_vector, Ordering::SeqCst);
+    state.fault_rip.store(fault_rip, Ordering::SeqCst);
+    state.fault_cs.store(fault_cs, Ordering::SeqCst);
+    state.fault_cr2.store(fault_cr2, Ordering::SeqCst);
+    state
+        .fault_error_code
+        .store(fault_error_code, Ordering::SeqCst);
+    state.fault_rsp.store(fault_rsp, Ordering::SeqCst);
+    state.handler_rsp.store(handler_rsp, Ordering::SeqCst);
+    state.folded.store(true, Ordering::SeqCst);
     // SAFETY: 呼び出し側契約により遠征中で、RECOVERY は保存済み。
     unsafe { leave_ring3() }
 }
@@ -845,65 +884,73 @@ pub struct FoldRecord {
 
 /// 今の畳みの記録を控える（S11-5）。
 pub fn save_fold_record() -> FoldRecord {
+    // **1 回だけ引く（W1-c-3。[`enter`] の同じ箇所の注記）。**
+    let state = state();
     FoldRecord {
-        folded: state().folded.load(Ordering::SeqCst),
-        interrupted: state().interrupted.load(Ordering::SeqCst),
-        vector: FAULT_VECTOR.load(Ordering::SeqCst),
-        rip: FAULT_RIP.load(Ordering::SeqCst),
-        rsp: FAULT_RSP.load(Ordering::SeqCst),
-        handler_rsp: HANDLER_RSP.load(Ordering::SeqCst),
-        cs: FAULT_CS.load(Ordering::SeqCst),
-        cr2: FAULT_CR2.load(Ordering::SeqCst),
-        error_code: FAULT_ERROR_CODE.load(Ordering::SeqCst),
+        folded: state.folded.load(Ordering::SeqCst),
+        interrupted: state.interrupted.load(Ordering::SeqCst),
+        vector: state.fault_vector.load(Ordering::SeqCst),
+        rip: state.fault_rip.load(Ordering::SeqCst),
+        rsp: state.fault_rsp.load(Ordering::SeqCst),
+        handler_rsp: state.handler_rsp.load(Ordering::SeqCst),
+        cs: state.fault_cs.load(Ordering::SeqCst),
+        cr2: state.fault_cr2.load(Ordering::SeqCst),
+        error_code: state.fault_error_code.load(Ordering::SeqCst),
     }
 }
 
 /// 控えた畳みの記録を戻す（S11-5）。
 pub fn restore_fold_record(record: FoldRecord) {
-    state().folded.store(record.folded, Ordering::SeqCst);
-    state()
+    // **1 回だけ引く（W1-c-3。[`enter`] の同じ箇所の注記）。**
+    let state = state();
+    state.folded.store(record.folded, Ordering::SeqCst);
+    state
         .interrupted
         .store(record.interrupted, Ordering::SeqCst);
-    FAULT_VECTOR.store(record.vector, Ordering::SeqCst);
-    FAULT_RIP.store(record.rip, Ordering::SeqCst);
-    FAULT_RSP.store(record.rsp, Ordering::SeqCst);
-    HANDLER_RSP.store(record.handler_rsp, Ordering::SeqCst);
-    FAULT_CS.store(record.cs, Ordering::SeqCst);
-    FAULT_CR2.store(record.cr2, Ordering::SeqCst);
-    FAULT_ERROR_CODE.store(record.error_code, Ordering::SeqCst);
+    state.fault_vector.store(record.vector, Ordering::SeqCst);
+    state.fault_rip.store(record.rip, Ordering::SeqCst);
+    state.fault_rsp.store(record.rsp, Ordering::SeqCst);
+    state
+        .handler_rsp
+        .store(record.handler_rsp, Ordering::SeqCst);
+    state.fault_cs.store(record.cs, Ordering::SeqCst);
+    state.fault_cr2.store(record.cr2, Ordering::SeqCst);
+    state
+        .fault_error_code
+        .store(record.error_code, Ordering::SeqCst);
 }
 
 /// 記録したフォルト時 RSP（Ring 3 のユーザースタックのはず）。
 pub fn fault_rsp() -> u64 {
-    FAULT_RSP.load(Ordering::SeqCst)
+    state().fault_rsp.load(Ordering::SeqCst)
 }
 
 /// 記録した #GP ハンドラの RSP（RSP0 = 遠征専用スタックのはず）。
 pub fn handler_rsp() -> u64 {
-    HANDLER_RSP.load(Ordering::SeqCst)
+    state().handler_rsp.load(Ordering::SeqCst)
 }
 
 /// 記録したフォルト時 CS（Ring 3 由来なら RPL=3）。
 pub fn fault_cs() -> u64 {
-    FAULT_CS.load(Ordering::SeqCst)
+    state().fault_cs.load(Ordering::SeqCst)
 }
 
 /// 畳んだ例外のベクタ。呼び出し側が予期と突き合わせる。
 pub fn fault_vector() -> u64 {
-    FAULT_VECTOR.load(Ordering::SeqCst)
+    state().fault_vector.load(Ordering::SeqCst)
 }
 
 /// 畳んだ例外のフォルト RIP。呼び出し側が予期と突き合わせる。
 pub fn fault_rip() -> u64 {
-    FAULT_RIP.load(Ordering::SeqCst)
+    state().fault_rip.load(Ordering::SeqCst)
 }
 
-/// 畳んだ例外のフォルト CR2（[`FAULT_CR2`]）。**ベクタが 14 のときだけ読むこと。**
+/// 畳んだ例外のフォルト CR2（`ExcursionState::fault_cr2`）。**ベクタが 14 のときだけ読むこと。**
 pub fn fault_cr2() -> u64 {
-    FAULT_CR2.load(Ordering::SeqCst)
+    state().fault_cr2.load(Ordering::SeqCst)
 }
 
-/// 畳んだ例外のエラーコード（[`FAULT_ERROR_CODE`]）。
+/// 畳んだ例外のエラーコード（`ExcursionState::fault_error_code`）。
 pub fn fault_error_code() -> u64 {
-    FAULT_ERROR_CODE.load(Ordering::SeqCst)
+    state().fault_error_code.load(Ordering::SeqCst)
 }
