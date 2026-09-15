@@ -143,6 +143,16 @@ pub(super) fn set_excursion_depth(index: usize, depth: usize) {
     unsafe { addr_of_mut!((*slot(index)).excursion_depth).write(depth) }
 }
 
+pub(super) fn cr3(index: usize) -> u64 {
+    // SAFETY: 有効なポインタ。遠征の出入りと破棄の経路から、BKL の内側で触る。
+    unsafe { addr_of_mut!((*slot(index)).cr3).read() }
+}
+
+pub(super) fn set_cr3(index: usize, value: u64) {
+    // SAFETY: 同上。
+    unsafe { addr_of_mut!((*slot(index)).cr3).write(value) }
+}
+
 pub(super) fn current_recovery(index: usize) -> u64 {
     // SAFETY: 同上。
     unsafe { addr_of_mut!((*slot(index)).current_recovery).read() }

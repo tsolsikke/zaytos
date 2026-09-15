@@ -1111,11 +1111,42 @@ pub fn load_user_program(
         // 入れ子にならない**（[`SPAWN_QUARANTINE`] の doc）。
         let quarantine = unsafe { &mut *core::ptr::addr_of_mut!(SPAWN_QUARANTINE) };
         quarantine.reset();
+        // **破棄する前に、この空間を指したままのタスクが無いかを見る（W1-b-2）。**
+        // **遠征の戻りが元の値へ戻していれば、何も見つからない。** **見つかったら
+        // 不変条件が破れかけていたので、消してから声を出す**——**死んだテーブルを
+        // 載せる形は静かに効くので、黙って直さない。**
+        forget_task_cr3_before_destroy(logger, &process);
         // SAFETY: この空間はどのコアでも稼働していない。direct map は覆っている。
         unsafe { process.space.destroy(direct_map, quarantine, &guard) }
     };
 
     (outcome, held, leaked)
+}
+
+/// 破棄する空間を指したままのタスクがあれば消し、声を出す（W1-b-2）。
+///
+/// # 別の関数にしてある理由——**遠征スタックの枠を広げないため**
+///
+/// **`load_user_program` の枠は、`spawn` の子が走っている間ずっと深さ 0 の
+/// 遠征スタックに載る。** **`dev` では、通らない分岐の `format_args!` の一時値も
+/// その枠に場所を取る。** **ここへ出して `#[inline(never)]` にすれば、一時値は
+/// この関数の枠にだけ載り、呼んでいる間しか場所を取らない**——**呼ぶのは子が
+/// 走り終えた後である。**
+///
+/// **引数は `&UserProcess` の 1 つだけにしてある。** **名前と PML4 を呼ぶ側で
+/// 取り出して渡すと、その一時値が `load_user_program` の枠を 16 バイト広げた**
+/// （実測。`objdump` で前置きの `sub rsp` を読んだ。4,288 → 4,304 バイト）。
+#[inline(never)]
+fn forget_task_cr3_before_destroy(logger: &mut Logger<SerialPort>, process: &UserProcess) {
+    let name = process.name;
+    let pml4 = process.space.pml4().as_u64();
+    if crate::task::forget_cr3_if(pml4) {
+        logger.error(format_args!(
+            "task: a task still pointed its cr3 at {name}'s address space {pml4:#x} when the \
+             space was about to be destroyed; the field was cleared (the excursion return should \
+             have restored it)"
+        ));
+    }
 }
 
 /// 像を新しいアドレス空間へ写像し、`run` なら Ring 3 で走らせる（S9-b-1）。
@@ -1583,6 +1614,8 @@ unsafe fn run_loaded_program(
     // SAFETY: この空間はカーネルの上位を共有しており、切り替えても実行中の
     // コードとスタックは見え続ける。
     unsafe { crate::paging::switch::switch_to(process.space.pml4()) };
+    // **タスクの CR3 の欄を据える（W1-b-2。`ADR-0060`）。**
+    crate::task::note_current_cr3(process.space.pml4().as_u64());
     // **このプロセスの fd の表を据える（S10-b）。** `dispatch` はプロセスを
     // 知らないので、遠征の間だけ `crate::vfs` が持つ
     // （`syscall::set_user_window` と同じ形。据えるのは Ring 3 へ落ちる側である）。
@@ -1732,6 +1765,21 @@ unsafe fn run_loaded_program(
     ));
     // SAFETY: 本番のテーブルへ戻す。上位は同じなので連続して実行できる。
     unsafe { crate::paging::switch::switch_to(production) };
+    // **タスクの CR3 の欄も戻す（W1-b-2）。** **この空間の持ち主はこの後で
+    // 破棄されるので、ここで戻さないと死んだテーブルを指したまま残る。**
+    //
+    // **戻す値は深さから引く**——**深さ 0 なら 0（ユーザー空間を載せていない）、
+    // 入れ子なら入口で読んだ `production`（親の空間）である。** **上の
+    // `main_rsp0_top` と同じ読み方で、控えの局所変数を持たない。**
+    // **控えを持つ形にしたら、遠征スタックの高水位が 96 バイト増えた**（実測。
+    // `tools/boot-log-compare.py` が捕まえた。**`dev` では局所変数がそのまま
+    // 枠を広げ、この枠は子が走っている間ずっと深さ 0 のスタックに載る**）。
+    // **`ring3::enter` は深さを戻してから返るので、ここで読む深さは入口と同じである。**
+    crate::task::note_current_cr3(if crate::ring3::depth() == 0 {
+        0
+    } else {
+        production.as_u64()
+    });
 
     Ok(())
 }

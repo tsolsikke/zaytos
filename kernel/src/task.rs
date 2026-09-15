@@ -266,6 +266,31 @@ struct Task {
     /// いる遠征の深さ」で、こちらは「このタスクへ戻るとき、どこに居ることに
     /// なっているか」である**——**`rsp0` が TSS と対になっているのと同じ形である。**
     excursion_depth: usize,
+    /// このタスクが Ring 3 の遠征で載せている CR3 の値（W1-b-2）。**0 なら載せていない。**
+    ///
+    /// # なぜ「空間」ではなく「値」なのか
+    ///
+    /// **`Task` は `Copy` で、`AddressSpace` は持ち主が 1 つの型である**
+    /// （`destroy(self)` が自分を消費する）。**タスクへ空間を移すことはできない。**
+    /// **持ち主は `UserProcess` のまま動かさず、タスクは「載せる値」だけを持つ**
+    /// ——**`rsp0` と同じ形である**（`ADR-0060`）。
+    ///
+    /// # 不変条件——**0 以外を持つのは、その空間の持ち主が生きている間だけである**
+    ///
+    /// **型が寿命を守らなくなる。** **破れると、死んだページテーブルを載せる**
+    /// ——**静かに効く側である。** **守りは 2 つある。**
+    ///
+    /// - **遠征の戻りが必ず元の値へ戻す**（`userland::run_loaded_program`）。
+    ///   **載せてから戻すまでの間に抜ける経路は `halt_forever` の 2 つだけで、
+    ///   そこでは以後何も走らない**（実測）。**`ring3::enter` は終了と畳みの
+    ///   2 つの longjmp でしか戻らず、Ctrl+C も畳みとして戻る。**
+    /// - **破棄の経路が、その空間を指したままのタスクを見つけたら消す**
+    ///   （[`forget_cr3_if`]。**ユーザープロセスの空間を破棄する箇所は 1 つだけである**。実測）。
+    ///   **入れ子の `spawn` は同じタスクの上で走るので、無条件には消さない**
+    ///   ——**子の空間を破棄する時点で、タスクの値は既に親の空間へ戻っている。**
+    ///
+    /// **使うのは W1-c である**（`schedule_switch` がこれを載せる）。
+    cr3: u64,
     /// このタスクの回復点のアドレス（W1-a で置き場を作り、W1-b で使い始めた）。
     ///
     /// # これも「値」である
@@ -301,6 +326,7 @@ const EMPTY_TASK: Task = Task {
     stack_bottom: 0,
     rsp0: 0,
     excursion_depth: 0,
+    cr3: 0,
     current_recovery: 0,
     state: TaskState::Uninitialized,
     base: 0,
@@ -418,6 +444,33 @@ pub fn note_current_rsp0(top: u64) {
         return;
     };
     scheduler::set_rsp0(index, top);
+}
+
+/// 今のタスクの CR3 の欄を据える（W1-b-2。遠征の出入りが呼ぶ）。
+pub fn note_current_cr3(value: u64) {
+    let Some(index) = current_index_if_any() else {
+        return;
+    };
+    scheduler::set_cr3(index, value);
+}
+
+/// 破棄する空間を指したままのタスクがあれば、その欄を 0 へ戻す（W1-b-2）。
+///
+/// **戻したら `true` を返す。** **それは不変条件が破れかけていたことを意味する**
+/// ——**遠征の戻りが元の値へ戻していれば、ここは何も見つけない。**
+/// **呼ぶ側はそれを `ERROR` として報せる**（黙って直さない）。
+///
+/// **全タスクを見る。** **いまユーザー空間を載せるのは 1 本だけだが、
+/// W1-c で 2 本になっても同じ形で効く。**
+pub fn forget_cr3_if(pml4: u64) -> bool {
+    let mut forgot = false;
+    for index in 0..TASK_COUNT {
+        if scheduler::cr3(index) == pml4 {
+            scheduler::set_cr3(index, 0);
+            forgot = true;
+        }
+    }
+    forgot
 }
 
 /// 今のタスクの遠征の深さの欄を据える（W1-b。遠征の出入りが呼ぶ）。
@@ -1005,6 +1058,7 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
                 // いないタスクの RSP0 がそれである。**
                 rsp0: top.as_u64(),
                 excursion_depth: 0,
+                cr3: 0,
                 current_recovery: 0,
                 state: TaskState::Ready,
                 // BSP のワーカーである。`GPR_BUF` に触るので AP へ渡さない
@@ -1742,6 +1796,7 @@ unsafe fn setup_preemptive_tasks() {
                 stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
                 rsp0: top.as_u64(),
                 excursion_depth: 0,
+                cr3: 0,
                 current_recovery: 0,
                 state: TaskState::Ready,
                 // BSP のワーカーである。`GPR_BUF` に触るので AP へ渡さない
