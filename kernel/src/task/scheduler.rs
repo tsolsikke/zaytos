@@ -36,14 +36,14 @@
 //! |---|---|---|---|---|---|
 //! | `saved_rsp` | 読み書き | - | - | - | 書き |
 //! | `stack_top` / `stack_bottom` | 読み | - | - | - | 書き |
-//! | `state` | 書き / 読み | 書き | - | - | 書き |
+//! | `state` | 書き / 読み | 書き | - | 読み（W1-c-4 の `init` の待ち）/ 書き（足した 1 本が終わるとき） | 書き |
 //! | `base` | - | 読み | 読み | - | 書き |
 //! | `rounds_left` | - | 読み書き | - | 読み | 書き |
 //! | `iterations` | - | - | **加算** | **読み** | 書き |
 //! | `resumes` | **加算** | - | - | **読み** | 書き |
 //! | `switches` | **加算** | - | - | **読み** | 書き |
 //! | `demo_active` / `demo_deadline` | 読み書き | - | - | - | 書き（`InterruptGuard`下） |
-//! | `rsp0` / `excursion_depth` | 読み（切り替え） | - | - | 書き（遠征の出入り。入口は `cli` 下、出口は IF=0） | 書き |
+//! | `rsp0` / `excursion_depth` | 読み（切り替え） | - | - | 書き（遠征の出入り。入口は `cli` 下、出口は IF=0）/ `excursion_depth` の読み（W1-c-4 の `init` の待ち。別のタスクの欄） | 書き |
 //! | `cr3` | 読み（切り替え） | - | - | 書き（`InterruptGuard`下）/ 破棄の経路（BKL下） | 書き |
 //! | `current_recovery` | 読み書き（切り替え） | - | - | - | 書き |
 //!
@@ -168,6 +168,8 @@ pub(super) fn set_cr3(index: usize, value: u64) {
     unsafe { addr_of_mut!((*slot(index)).cr3).write(value) }
 }
 
+// 破壊 `task-switch-keep-recovery` では切り替えが入れ替えないので、読む者が居なくなる。
+#[cfg_attr(feature = "task-switch-keep-recovery", allow(dead_code))]
 pub(super) fn current_recovery(index: usize) -> u64 {
     // SAFETY: 同上。
     unsafe { addr_of_mut!((*slot(index)).current_recovery).read() }

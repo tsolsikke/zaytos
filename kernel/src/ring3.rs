@@ -346,6 +346,29 @@ pub fn set_current_recovery(value: u64) {
     CURRENT_RECOVERY.store(value, Ordering::SeqCst);
 }
 
+/// 回復点の番地が、スロット `slot` の行の中か（W1-c-4）。**0 は「まだ誰も入っていない」である。**
+///
+/// # なぜ番地の属する場所で見るのか
+///
+/// **切り替えの後、asm が longjmp で使うのは [`CURRENT_RECOVERY`] が指す 1 箇所である。**
+/// **入るタスクのスロットの行の外を指していたら、そのタスクが畳まれたときに別のタスクの回復点へ跳ぶ。**
+///
+/// **「入れ替えで書いた値が載ったか」を見る形にしない**——**同じ代入を 2 度読むだけになる**
+/// （`0 と 0 を比べて通る` の族である。W1-c-3c）。**これは `stacks are mixed` と同じ形の検算で、
+/// 入れ替えの実装とは独立な不変条件を見ている。**
+pub fn recovery_belongs_to_slot(recovery: u64, slot: usize) -> bool {
+    if recovery == 0 {
+        return true;
+    }
+    if slot >= RING3_SLOTS {
+        return false;
+    }
+    // SAFETY: 静的配列の行のアドレスを取るだけで、中身は読まない。
+    let row = unsafe { addr_of!(RECOVERIES[slot]) } as u64;
+    let size = (core::mem::size_of::<Recovery>() * MAX_EXCURSION_DEPTH) as u64;
+    recovery >= row && recovery < row + size
+}
+
 /// 今のタスクのスロットの番号（W1-a。W1-c-3 でタスクから引く形にした）。
 ///
 /// **W1-a から W1-c-2 までは定数 0 だった。** **W1-c-3 で `crate::task` から引く。**
@@ -362,6 +385,12 @@ pub fn set_current_recovery(value: u64) {
 /// **呼ぶ箇所の枠には、呼び出しと戻り値だけが残る形にする。**
 #[inline(never)]
 pub(crate) fn current_slot() -> usize {
+    // 破壊 (W1-c-4, ring3-slot-always-zero): 足した 1 本にもスロット 0 を返す。**2 本が同じ遠征の
+    // 状態とスタックを使う。** **切り替えの検算は入る側のタスクから引く（`task::ring3_slot_of`）ので、
+    // こちらだけを壊すと食い違いが出る。**
+    #[cfg(feature = "ring3-slot-always-zero")]
+    return 0;
+    #[cfg(not(feature = "ring3-slot-always-zero"))]
     crate::task::current_ring3_slot()
 }
 

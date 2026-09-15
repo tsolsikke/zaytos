@@ -2000,6 +2000,10 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
         );
     }
 
+    // **2 本の Ring 3 を同時に走らせる（W1-c-4。`ADR-0060`）。** **シェルより前に 1 度だけ行う。**
+    #[cfg(feature = "concurrent-test")]
+    run_concurrent_test(logger, console.as_deref_mut());
+
     let mut restarts = 0usize;
     loop {
         log_both(
@@ -2065,6 +2069,110 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
             cpu::halt_forever();
         }
     }
+}
+
+/// 2 本の Ring 3 を同時に走らせ、判定の材料を行に出す（W1-c-4。`ADR-0060`）。
+///
+/// **判定は `xtask` が行う**（カウンタと内容で見る。行の順序では見ない）。
+///
+/// # 順序で守っているもの
+///
+/// 1. **`/bin/tickera` を起こしっぱなしで起こし、Ring 3 へ入るまで待つ。** **フレームアロケータの
+///    貸し出しは大域に 1 つである**（`docs/wayland-inventory.md` の #4）——**2 本の読み込みを重ねない。**
+/// 2. **`/bin/tickerb` を `spawn` で起こす。** 終わるまで戻らない。
+/// 3. **`/bin/tickera` が終わるまで待つ。** **`tickera` のほうが長く回る**——**`spawn` の会計は
+///    空きフレームの大域の差で閉じるので、`tickerb` の間に `tickera` が破棄されると合わなくなる。**
+///    **その前提が成り立ったかを行に出す**（`was still running = `）。
+///
+/// **待つ間は `yield_now` で譲る。** **上限を越えたら止める**——**上限の無い待ちは、ハングと区別が付かない。**
+#[cfg(feature = "concurrent-test")]
+fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) {
+    /// Ring 3 へ入るまで待つ上限（ティック）。
+    const ENTER_LIMIT_TICKS: u64 = 2_000;
+    /// 終わるまで待つ上限（ティック）。
+    const FINISH_LIMIT_TICKS: u64 = 20_000;
+
+    let mut console = console;
+    let ring3_task = kernel::task::ring3_task_index();
+    let started = kernel::idt::timer_ticks();
+    kernel::userland::start_detached(b"/bin/tickera", b"tickera\0", 1);
+    while !kernel::task::ring3_task_in_excursion() {
+        if kernel::idt::timer_ticks().saturating_sub(started) > ENTER_LIMIT_TICKS {
+            log_both(
+                logger,
+                console.as_deref_mut(),
+                LogLevel::Error,
+                format_args!(
+                    "concurrent: /bin/tickera did not enter Ring 3 within {ENTER_LIMIT_TICKS} \
+                     tick(s); halting"
+                ),
+            );
+            cpu::halt_forever();
+        }
+        kernel::task::yield_now();
+    }
+    let entered = kernel::idt::timer_ticks();
+    log_both(
+        logger,
+        console.as_deref_mut(),
+        LogLevel::Info,
+        format_args!(
+            "concurrent: /bin/tickera entered Ring 3 on task {ring3_task} after {} tick(s); \
+             starting /bin/tickerb with spawn",
+            entered.saturating_sub(started)
+        ),
+    );
+
+    let outcome = kernel::userland::spawn(b"/bin/tickerb", b"tickerb\0", 1, None);
+    let b_ended = kernel::idt::timer_ticks();
+    let a_still_running = !kernel::task::ring3_task_finished();
+    log_both(
+        logger,
+        console.as_deref_mut(),
+        LogLevel::Info,
+        format_args!(
+            "concurrent: /bin/tickerb ended ({outcome:?}) {} tick(s) after /bin/tickera entered \
+             Ring 3; /bin/tickera was still running = {a_still_running}",
+            b_ended.saturating_sub(entered)
+        ),
+    );
+
+    while !kernel::task::ring3_task_finished() {
+        if kernel::idt::timer_ticks().saturating_sub(b_ended) > FINISH_LIMIT_TICKS {
+            log_both(
+                logger,
+                console.as_deref_mut(),
+                LogLevel::Error,
+                format_args!(
+                    "concurrent: /bin/tickera did not finish within {FINISH_LIMIT_TICKS} tick(s) \
+                     after /bin/tickerb ended; halting"
+                ),
+            );
+            cpu::halt_forever();
+        }
+        kernel::task::yield_now();
+    }
+    log_both(
+        logger,
+        console.as_deref_mut(),
+        LogLevel::Info,
+        format_args!(
+            "concurrent: /bin/tickera finished {} tick(s) after /bin/tickerb ended; switches out \
+             of an excursion: task 0 = {}, task {ring3_task} = {}; CR3 loads on switch = {}; the \
+             foreground was refused {} time(s)",
+            kernel::idt::timer_ticks().saturating_sub(b_ended),
+            kernel::task::switches_out_of_excursion(0),
+            kernel::task::switches_out_of_excursion(ring3_task),
+            kernel::task::cr3_loads_on_switch(),
+            kernel::input::foreground_refused_count()
+        ),
+    );
+    log_both(
+        logger,
+        console.as_deref_mut(),
+        LogLevel::Info,
+        format_args!("concurrent: done"),
+    );
 }
 
 /// シェルの像のパス。**NUL は付けない**（`spawn` はスライスを取る）。
@@ -9630,6 +9738,31 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "fp-test",
         cfg!(feature = "fp-test"),
         "FP の状態を見る台本を流す（破壊ではない。ADR-0058）",
+    ),
+    (
+        "concurrent-test",
+        cfg!(feature = "concurrent-test"),
+        "2 本の Ring 3 を同時に走らせる（破壊ではない。ADR-0060）",
+    ),
+    (
+        "fp-switch-no-restore",
+        cfg!(feature = "fp-switch-no-restore"),
+        "切り替えで入る側の FP の状態を載せない",
+    ),
+    (
+        "task-switch-keep-recovery",
+        cfg!(feature = "task-switch-keep-recovery"),
+        "切り替えで回復点を入れ替えない",
+    ),
+    (
+        "task-switch-no-cr3",
+        cfg!(feature = "task-switch-no-cr3"),
+        "切り替えで入る側の CR3 を載せない",
+    ),
+    (
+        "ring3-slot-always-zero",
+        cfg!(feature = "ring3-slot-always-zero"),
+        "遠征のスロットを常に 0 にする",
     ),
     (
         "fp-spawn-no-save",

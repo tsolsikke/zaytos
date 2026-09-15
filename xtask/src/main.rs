@@ -12467,6 +12467,11 @@ const DIRECT_SERIAL_PORT_ALLOWLIST: &[DirectSerialPortSite] = &[
         reason: "spawn の判定行。BKL を解いた区間で走る（ADR-0023 §1）ので、ロガーを渡す道が無い",
     },
     DirectSerialPortSite {
+        file: "kernel/src/userland.rs",
+        item: "run_detached_request",
+        reason: "起こしっぱなしの 1 本の判定行（W1-c-4）。タスクの入口から走るので、渡されるロガーが無い",
+    },
+    DirectSerialPortSite {
         file: "kernel/src/task.rs",
         item: "serial_line",
         reason: "スケジューラの観測行の唯一の出口（31 箇所の呼び出しを覆う。粒度の限界）",

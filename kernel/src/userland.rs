@@ -2206,6 +2206,61 @@ pub fn spawn(
     Ok(child)
 }
 
+/// 起こしっぱなしで走らせる 1 本の依頼（W1-c-4）。**パスと `argv` と要素数である。**
+#[cfg(feature = "concurrent-test")]
+type DetachedRequest = (&'static [u8], &'static [u8], usize);
+
+/// 足した 1 本のタスクへ渡す依頼（W1-c-4）。**[`start_detached`] が置き、そのタスクが取る。**
+#[cfg(feature = "concurrent-test")]
+static DETACHED_REQUEST: common::critical::Locked<Option<DetachedRequest>> =
+    common::critical::Locked::new(None);
+
+/// プログラムを起こしっぱなしで走らせる（W1-c-4。`ADR-0060`）。**終わるのを待たずに戻る。**
+///
+/// # [`spawn`] との違い
+///
+/// **`spawn` は親が待つ形で、変えていない。** **こちらは、足した 1 本のタスク（`crate::task` の
+/// `RING3_TASK`）に依頼を渡して `Ready` にするだけである。** **そのタスクが、自分のスロット（1）の
+/// 深さ 0 から `spawn` を呼ぶ**——**読み込み・遠征・破棄・会計は `spawn` の経路そのものである。**
+///
+/// # 前景は取らない
+///
+/// [`crate::input::claim_foreground`] がスロット 1 を断る。
+///
+/// # `concurrent-test` の構成にだけ在る
+///
+/// **最初の利用者はその構成の `init` である。** **既定の起動から呼ぶ者が現れたら、足した 1 本の
+/// スタックとガードページを既定の起動へ出すかと一緒に決める。**
+#[cfg(feature = "concurrent-test")]
+pub fn start_detached(path: &'static [u8], argv_bytes: &'static [u8], argv_count: usize) {
+    *DETACHED_REQUEST.lock() = Some((path, argv_bytes, argv_count));
+    crate::task::start_ring3_task();
+}
+
+/// 足した 1 本のタスクが、渡された依頼を走らせる（W1-c-4）。**そのタスクの本体だけが呼ぶ。**
+#[cfg(feature = "concurrent-test")]
+pub fn run_detached_request() {
+    let request = DETACHED_REQUEST.lock().take();
+    let mut port = SerialPort::new(SerialPort::COM1_BASE);
+    port.init();
+    let mut logger = Logger::new(port, LogLevel::Trace);
+    let Some((path, argv_bytes, argv_count)) = request else {
+        logger.error(format_args!(
+            "detached: the ring3 task started without a request; halting"
+        ));
+        common::cpu::halt_forever();
+    };
+    let name = core::str::from_utf8(path).unwrap_or("<not utf-8>");
+    let slot = crate::ring3::current_slot();
+    logger.info(format_args!(
+        "detached: starting {name} on ring3 slot {slot}"
+    ));
+    let outcome = spawn(path, argv_bytes, argv_count, None);
+    logger.info(format_args!(
+        "detached: {name} ended ({outcome:?}) on ring3 slot {slot}"
+    ));
+}
+
 #[cfg(test)]
 mod tests {
     /// 既定に `HOME` が入っていること（f-1。`ADR-0052` の Decision 5）。

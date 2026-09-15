@@ -464,6 +464,191 @@ const fn ring3_slot_of(task: usize) -> usize {
     }
 }
 
+/// 足した 1 本の添字（W1-c-4。`init` の判定行に出す）。
+pub const fn ring3_task_index() -> usize {
+    RING3_TASK
+}
+
+/// 遠征の最中に切り替えで出た回数、タスクごと（W1-c-4 の計器）。
+///
+/// **2 本が同時に進んだことの観測である。** **出る側のタスクの深さの欄が 0 でないときに数える**
+/// ——**そのタスクは Ring 3 に居るか、Ring 3 から入ったカーネルの中に居る。**
+/// **既定の起動では 0 のままである**（遠征の最中に切り替えが起きない）。
+static SWITCHES_OUT_OF_EXCURSION: [AtomicU64; TASK_COUNT] =
+    [const { AtomicU64::new(0) }; TASK_COUNT];
+
+/// 切り替えが CR3 を載せ替えた回数（W1-c-4 の計器。`docs/wayland-inventory.md` の #5）。
+static CR3_LOADS_ON_SWITCH: AtomicU64 = AtomicU64::new(0);
+
+/// タスク `task` が遠征の最中に切り替えで出た回数（W1-c-4）。
+pub fn switches_out_of_excursion(task: usize) -> u64 {
+    SWITCHES_OUT_OF_EXCURSION
+        .get(task)
+        .map_or(0, |count| count.load(Ordering::Relaxed))
+}
+
+/// 切り替えが CR3 を載せ替えた回数（W1-c-4）。
+pub fn cr3_loads_on_switch() -> u64 {
+    CR3_LOADS_ON_SWITCH.load(Ordering::Relaxed)
+}
+
+/// 出る側が遠征の最中なら数える（W1-c-4）。**`schedule_switch` の枠を広げないため、別の関数にしてある。**
+#[inline(never)]
+fn count_switch_out_of_excursion(current: usize) {
+    if scheduler::excursion_depth(current) != 0 {
+        SWITCHES_OUT_OF_EXCURSION[current].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// 足した 1 本のカーネルスタックの大きさ（W1-c-4）。
+///
+/// **読み込みと `spawn` をこのスタックの上で行う**——**`init` がメインのカーネルスタックの上で行う
+/// ことと同じである。** **ワーカーの 16 KiB では足りない見込みで、64 KiB から始めて測る**
+/// （終わりに高水位の行を出す）。
+#[cfg(feature = "concurrent-test")]
+const RING3_TASK_STACK_SIZE: usize = 64 * 1024;
+
+/// 足した 1 本のスタック（ガードページ + スタック本体。W1-c-4）。**[`WorkerStack`] と同じ作りである。**
+///
+/// **`concurrent-test` の構成にだけ置く**——**既定の起動に 68 KiB の `.bss` とガードページを足さない。**
+#[cfg(feature = "concurrent-test")]
+#[repr(C, align(4096))]
+struct Ring3TaskStack {
+    guard: [u8; GUARD_SIZE],
+    stack: [u8; RING3_TASK_STACK_SIZE],
+}
+
+#[cfg(feature = "concurrent-test")]
+static mut RING3_TASK_STACK: Ring3TaskStack = Ring3TaskStack {
+    guard: [0; GUARD_SIZE],
+    stack: [0; RING3_TASK_STACK_SIZE],
+};
+
+/// 足した 1 本のスタックの (ガードページ先頭, スタック頂点)（W1-c-4）。
+#[cfg(feature = "concurrent-test")]
+fn ring3_task_stack_bounds() -> (VirtAddr, VirtAddr) {
+    // 静的変数のアドレスを取るだけで、読み書きはしない（`addr_of!` は `static mut` でも `unsafe` を要さない）。
+    let base = addr_of!(RING3_TASK_STACK) as u64;
+    let guard = VirtAddr::new(base).expect("a .bss address is canonical");
+    let top = VirtAddr::new(base + GUARD_SIZE as u64 + RING3_TASK_STACK_SIZE as u64)
+        .expect("the ring3 task stack stays within the canonical range");
+    (guard, top)
+}
+
+/// 足した 1 本（[`RING3_TASK`]）を起こす（W1-c-4）。**呼ぶのは `userland::start_detached` だけである。**
+///
+/// **1 回しか起こせない。** **2 回目は止める**——**使い終わったスタックの上に次の文脈を積む形は、
+/// まだ要らないので作らない。**
+#[cfg(feature = "concurrent-test")]
+pub fn start_ring3_task() {
+    if scheduler::state(RING3_TASK) != TaskState::Uninitialized {
+        serial_line(format_args!(
+            "[ERROR] task: the ring3 task (index {RING3_TASK}) was started twice; halting"
+        ));
+        common::cpu::halt_forever();
+    }
+    let (guard, top) = ring3_task_stack_bounds();
+    let bottom = guard.as_u64() + GUARD_SIZE as u64;
+    // **高水位を測るために目印で埋める**（`crate::stack::KERNEL_STACK_FILL`。**文脈を積む前である**）。
+    // SAFETY: まだ誰も乗っていないスタック本体の全体で、ガードページは含まない。
+    unsafe {
+        core::ptr::write_bytes(
+            bottom as *mut u8,
+            crate::stack::KERNEL_STACK_FILL,
+            RING3_TASK_STACK_SIZE,
+        )
+    };
+    let entry = addr_of!(zaytos_ring3_task_body) as u64;
+    // SAFETY: top はガードページを張った静的スタックの頂点で、まだ誰も使っていない。
+    // 4KiB 境界（`align(4096)` の構造体の末尾）に載っている。
+    let saved_rsp = unsafe { build_initial_context(top, entry) };
+    // **登録から `Ready` までを割り込みを止めて一続きにする**——**書きかけの欄を切り替えが読まないため。**
+    let _no_switch = common::critical::InterruptGuard::enter();
+    scheduler::init_task(
+        RING3_TASK,
+        Task {
+            saved_rsp,
+            stack_top: top.as_u64(),
+            stack_bottom: bottom,
+            // **遠征に入っていないタスクの RSP0 はカーネルスタック頂点である**（W1-c-3c の 0 の関所）。
+            rsp0: top.as_u64(),
+            state: TaskState::Ready,
+            ..EMPTY_TASK
+        },
+    );
+}
+
+/// 足した 1 本が Ring 3 の遠征に入っているか（W1-c-4。`init` が待つ）。
+#[cfg(feature = "concurrent-test")]
+pub fn ring3_task_in_excursion() -> bool {
+    scheduler::excursion_depth(RING3_TASK) != 0
+}
+
+/// 足した 1 本が終わったか（W1-c-4。`init` が待つ）。
+#[cfg(feature = "concurrent-test")]
+pub fn ring3_task_finished() -> bool {
+    scheduler::state(RING3_TASK) == TaskState::Finished
+}
+
+#[cfg(feature = "concurrent-test")]
+extern "C" {
+    /// 足した 1 本の入口（`global_asm!`）。偽 `IrqContext` の RIP が指す。
+    static zaytos_ring3_task_body: u8;
+}
+
+// 足した 1 本の入口（W1-c-4）。**`call` で Rust へ入る**——**`iretq` した直後の RSP はスタック頂点
+// （16 の倍数）で、`call` が戻り番地を積むと、呼ばれた側の入口で 16 の倍数 - 8 になる**（System V の約束）。
+// **戻らない。** 戻ったら `ud2` で落とす。
+#[cfg(feature = "concurrent-test")]
+core::arch::global_asm!(
+    ".section .text",
+    ".p2align 4",
+    ".globl zaytos_ring3_task_body",
+    "zaytos_ring3_task_body:",
+    "  call {body}",
+    "  ud2",
+    body = sym ring3_task_main,
+);
+
+/// 足した 1 本の本体（W1-c-4）。**依頼された 1 本を走らせ、終わったら二度と選ばれない。**
+#[cfg(feature = "concurrent-test")]
+extern "sysv64" fn ring3_task_main() -> ! {
+    crate::userland::run_detached_request();
+    let used = ring3_task_stack_high_water();
+    serial_line(format_args!(
+        "task: the ring3 task (index {RING3_TASK}) used {used} of {RING3_TASK_STACK_SIZE} byte(s) \
+         of its kernel stack ({}%); the page below it is a guard page",
+        used * 100 / RING3_TASK_STACK_SIZE
+    ));
+    // **半分を越えたら止める**——**遠征スタックと同じ規則である**（`ring3::excursion_stack_within_budget`）。
+    // **大きさは測って決めた**（W1-c-4。**26,088 バイトで 39%。32 KiB だと 80% になる**）。
+    if used * 2 > RING3_TASK_STACK_SIZE {
+        serial_line(format_args!(
+            "[ERROR] task: the ring3 task used more than half of its kernel stack ({used} of \
+             {RING3_TASK_STACK_SIZE}); decide the size again with a measurement; halting"
+        ));
+        common::cpu::halt_forever();
+    }
+    scheduler::set_state(RING3_TASK, TaskState::Finished);
+    loop {
+        yield_now();
+    }
+}
+
+/// 足した 1 本のカーネルスタックの高水位（W1-c-4）。**底から目印でない最初の位置を探す。**
+#[cfg(feature = "concurrent-test")]
+fn ring3_task_stack_high_water() -> usize {
+    let (guard, _) = ring3_task_stack_bounds();
+    let bottom = (guard.as_u64() + GUARD_SIZE as u64) as *const u8;
+    for offset in 0..RING3_TASK_STACK_SIZE {
+        // SAFETY: `offset` はスタック本体の中である。読み取りのみ。
+        if unsafe { bottom.add(offset).read_volatile() } != crate::stack::KERNEL_STACK_FILL {
+            return RING3_TASK_STACK_SIZE - offset;
+        }
+    }
+    0
+}
+
 /// 切り替えで入るタスクの `rsp0` の欄が 0 だった（W1-c-3c）。**止める。**
 ///
 /// **別の関数にしてある理由**——**`schedule_switch` の枠を広げないため**
@@ -474,6 +659,21 @@ fn report_zero_rsp0_on_switch(next: usize) -> ! {
     serial_line(format_args!(
         "[ERROR] task: task {next} has RSP0 0 in its field; switching to it would load 0 into \
          TSS.RSP0 and the readback would compare 0 with 0 (W1-c-3c); halting"
+    ));
+    common::cpu::halt_forever();
+}
+
+/// 載った回復点が、入るタスクのスロットの行の外だった（W1-c-4）。**止める。**
+///
+/// **別の関数にしてある理由**——**`schedule_switch` の枠を広げないため**（`format_args!` の一時値）。
+#[inline(never)]
+#[cold]
+fn report_foreign_recovery_on_switch(next: usize, recovery: u64) -> ! {
+    serial_line(format_args!(
+        "[ERROR] task: switching to task {next} while the recovery point is {recovery:#x}, which \
+         is outside ring3 slot {}'s rows; folding that task would jump to another task's recovery \
+         point; halting",
+        ring3_slot_of(next)
     ));
     common::cpu::halt_forever();
 }
@@ -636,11 +836,19 @@ fn swap_cr3_for_switch(current: usize, next: usize) {
         ));
         common::cpu::halt_forever();
     };
-    // SAFETY: 入る側の値は、欄が 0 ならカーネルの表、0 以外ならその空間の持ち主が生きている間だけ
-    // 持つ値である（`Task::cr3` の不変条件）。どちらもカーネルの上位を共有するので、切り替えても
-    // 実行中のコードと、いま乗っているカーネルスタックは見え続ける。呼ぶのは `schedule_switch`
-    // だけで、IF=0 かつ BKL の内側である。
-    unsafe { crate::paging::switch::switch_to(table) };
+    // 破壊 (W1-c-4, task-switch-no-cr3): 載せない。**入ったタスクが出る側の空間で走り、次に出るときの
+    // 検算（上）が「欄と実物が違う」を見て止まる。**
+    #[cfg(not(feature = "task-switch-no-cr3"))]
+    {
+        CR3_LOADS_ON_SWITCH.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: 入る側の値は、欄が 0 ならカーネルの表、0 以外ならその空間の持ち主が生きている間だけ
+        // 持つ値である（`Task::cr3` の不変条件）。どちらもカーネルの上位を共有するので、切り替えても
+        // 実行中のコードと、いま乗っているカーネルスタックは見え続ける。呼ぶのは `schedule_switch`
+        // だけで、IF=0 かつ BKL の内側である。
+        unsafe { crate::paging::switch::switch_to(table) };
+    }
+    #[cfg(feature = "task-switch-no-cr3")]
+    let _ = table;
 }
 
 /// 破棄する空間を指したままのタスクがあれば、その欄を 0 へ戻す（W1-b-2）。
@@ -1265,6 +1473,24 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
             },
         );
     }
+
+    // **足した 1 本のカーネルスタックにもガードページを張る（W1-c-4）。** **張るにはアロケータが要り、
+    // 預ける前に張れるのはここである**（ワーカーと同じ）。
+    #[cfg(feature = "concurrent-test")]
+    {
+        let (guard, _) = ring3_task_stack_bounds();
+        // SAFETY: 起動時、自前のページテーブル上。足した 1 本のスタックの直下 1 ページで、以後ここへ
+        // 正規のアクセスは無い。
+        unsafe {
+            crate::stack::install_guard_page(
+                guard,
+                allocator,
+                "task",
+                "the ring3 task guard page",
+                &mut serial_line,
+            );
+        }
+    }
 }
 
 /// 協調的 yield。専用ベクタへソフトウェア割り込みを出す。
@@ -1419,6 +1645,8 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         if next == current {
             return current_rsp;
         }
+        // **遠征の最中に出たかを数える（W1-c-4 の計器）。**
+        count_switch_out_of_excursion(current);
 
         // スタックが混ざっていないこと。次タスクの保存 RSP がそのタスクの
         // スタック範囲内にあること（範囲外なら別タスクのスタックを指している）。
@@ -1481,8 +1709,24 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         //
         // **今日は必ず同じ値を書き戻す**——**遠征中に切り替えが起きないので、
         // 両方とも 0 である。** **違う値になるのは W1-c からである。**
-        scheduler::set_current_recovery(current, crate::ring3::current_recovery());
-        crate::ring3::set_current_recovery(scheduler::current_recovery(next));
+        //
+        // 破壊 (W1-c-4, task-switch-keep-recovery): 入れ替えない。**後から遠征へ入った側の回復点が
+        // 載ったまま残り、先に入った側が畳まれると、他方の回復点へ跳ぶ。**
+        #[cfg(not(feature = "task-switch-keep-recovery"))]
+        {
+            scheduler::set_current_recovery(current, crate::ring3::current_recovery());
+            crate::ring3::set_current_recovery(scheduler::current_recovery(next));
+        }
+        // **載った回復点が、入るタスクのスロットの行の中に在ること（W1-c-4）。**
+        //
+        // **`stacks are mixed` と同じ形の検算である**（`ring3::recovery_belongs_to_slot` の doc）。
+        // **入れ替えを省く破壊を落とすのはここである**——**畳みの側では落ちなかった。**
+        // **2 本が同時に走っても、畳みが起きるのは相手が Ring 3 を出た後だったので、
+        // `enter` 自身の控えと戻しが辻褄を合わせてしまった**（`ADR-0060` の W1-c-4 の Addendum）。
+        let recovery = crate::ring3::current_recovery();
+        if !crate::ring3::recovery_belongs_to_slot(recovery, ring3_slot_of(next)) {
+            report_foreign_recovery_on_switch(next, recovery);
+        }
 
         // **FP の状態を入れ替える（`ADR-0058` の Decision 1）。**
         //
@@ -1499,6 +1743,9 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         unsafe {
             let areas = &mut *core::ptr::addr_of_mut!(FP_AREAS);
             crate::fp::save(&mut areas[current]);
+            // 破壊 (W1-c-4, fp-switch-no-restore): 載せない（保存は残す）。**入ったタスクが出た側の
+            // XMM の値のまま走る。**
+            #[cfg(not(feature = "fp-switch-no-restore"))]
             crate::fp::restore(&areas[next]);
         }
 
@@ -1743,6 +1990,18 @@ fn pick_next(
         if states[cand].is_runnable() {
             return cand;
         }
+    }
+    // **足した 1 本（W1-c-4）。** **ワーカーの巡回より後に見る**——**デモの間は選ばれない**
+    // （デモは `init` より前に終わり、足した 1 本はその後に起こす）。
+    //
+    // **今のタスクがそれでなければ選び、それなら落ち先へ戻す**——**メインと交互に走る。**
+    // **2 層は同じ形で掛ける。** **担当は BSP なので、AP からは選ばれない。**
+    if current != RING3_TASK
+        && owners[RING3_TASK] == cpu
+        && !is_running_on_another_cpu(RING3_TASK, cpu, &currents)
+        && states[RING3_TASK].is_runnable()
+    {
+        return RING3_TASK;
     }
     // 走行可能な担当ワーカーが無いので、自コアの既定タスクへ落ちる（S4-c-3-1）。
     // 固定の `0` から変えた理由は [`default_task_for`] の doc。
@@ -2343,7 +2602,8 @@ mod tests {
             AP_IDLE_TASK
         );
         // ワーカーが全部走行不可でも同じ落ち先である。
-        let none_ready = states([false, false, false, true, true]);
+        // **足した 1 本は `Blocked` にする（W1-c-4 で引き直した）**——**`Ready` だと BSP 側がそれを選ぶ。**
+        let none_ready = states([false, false, false, true, false]);
         assert_eq!(
             super::pick_next(none_ready, PRODUCTION_OWNERS, NOBODY_RUNNING, ap, 0),
             AP_IDLE_TASK
@@ -2419,6 +2679,9 @@ mod tests {
     /// （本番では `Uninitialized` だが、`Ready` のほうが強い入力である）。
     /// **既存の表明はすべて「その 1 本が選ばれないこと」も同時に主張する。**
     /// **W1-c-4 でそれを候補に加えると、この前提が崩れる**——**そのときは期待値を引き直すこと。**
+    ///
+    /// **W1-c-4 で引き直した。** **落ち先（メイン）を期待する 2 本だけが崩れたので、その 2 本の入力で
+    /// 足した 1 本を `Blocked` にした。** **足した 1 本が選ばれる形は、下の W1-c-4 の表明が別に持つ。**
     fn states(flags: [bool; TASK_COUNT]) -> [TaskState; TASK_COUNT] {
         let mut out = [TaskState::Uninitialized; TASK_COUNT];
         for (slot, flag) in out.iter_mut().zip(flags) {
@@ -2455,9 +2718,9 @@ mod tests {
 
     #[test]
     fn main_is_chosen_when_no_worker_can_run() {
-        assert_eq!(pick_next(states([false, false, false, true, true]), 0), 0);
-        assert_eq!(pick_next(states([false, false, false, true, true]), 1), 0);
-        assert_eq!(pick_next(states([false, false, false, true, true]), 2), 0);
+        assert_eq!(pick_next(states([false, false, false, true, false]), 0), 0);
+        assert_eq!(pick_next(states([false, false, false, true, false]), 1), 0);
+        assert_eq!(pick_next(states([false, false, false, true, false]), 2), 0);
     }
 
     /// タスク 0（メイン）は候補として巡回されない。走行可能と印を付けても
@@ -2465,7 +2728,56 @@ mod tests {
     #[test]
     fn main_is_never_picked_as_a_rotation_candidate() {
         // メインだけが走行可能でも、返るのは 0（フォールバック経路）。
-        assert_eq!(pick_next(states([true, false, false, true, true]), 1), 0);
+        assert_eq!(pick_next(states([true, false, false, true, false]), 1), 0);
+    }
+
+    /// 足した 1 本が走れるなら、メインと交互に選ばれる（W1-c-4）。
+    ///
+    /// **今のタスクがそれでなければ選び、それなら落ち先（メイン）へ戻す。**
+    #[test]
+    fn the_ring3_task_alternates_with_main() {
+        let ring3_ready = states([false, false, false, true, true]);
+        assert_eq!(pick_next(ring3_ready, 0), super::RING3_TASK);
+        assert_eq!(pick_next(ring3_ready, super::RING3_TASK), 0);
+    }
+
+    /// ワーカーが走れる間は、足した 1 本より先にワーカーを選ぶ（W1-c-4）。
+    #[test]
+    fn workers_come_before_the_ring3_task() {
+        let all_ready = states([false, true, true, true, true]);
+        assert_eq!(pick_next(all_ready, 0), 1);
+        assert_eq!(pick_next(all_ready, 1), 2);
+        assert_eq!(pick_next(all_ready, super::RING3_TASK), 1);
+    }
+
+    /// `Ready` でない足した 1 本は選ばれない（W1-c-4）。
+    #[test]
+    fn the_ring3_task_is_not_chosen_unless_ready() {
+        for state in [
+            TaskState::Uninitialized,
+            TaskState::Blocked,
+            TaskState::Finished,
+        ] {
+            let mut input = states([false, false, false, true, false]);
+            input[super::RING3_TASK] = state;
+            assert_eq!(pick_next(input, 0), 0, "{state:?}");
+        }
+    }
+
+    /// AP は足した 1 本を選ばない（W1-c-4）。**担当が BSP だからである**（第 1 層）。
+    #[test]
+    fn the_application_processor_does_not_choose_the_ring3_task() {
+        let ring3_ready = states([false, false, false, true, true]);
+        assert_eq!(
+            super::pick_next(
+                ring3_ready,
+                PRODUCTION_OWNERS,
+                NOBODY_RUNNING,
+                1,
+                AP_IDLE_TASK
+            ),
+            AP_IDLE_TASK
+        );
     }
 
     #[test]

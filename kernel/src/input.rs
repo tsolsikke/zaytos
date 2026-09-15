@@ -229,6 +229,17 @@ impl PendingBytes {
 /// 通り抜けられる（`ADR-0030` で同じ判断をした）。
 /// **いまは単一コアの直線なので実害は出ないが、形を先に正しくしておく。**
 pub fn claim_foreground() -> bool {
+    // **前景を取るのはスロット 0 の系統（`init` とシェル）だけである（W1-c-4）。** **起こしっぱなしの
+    // 1 本（スロット 1）は取らない**——**入力の消費者は同時に 1 つで、取り合う規則をまだ決めていない**
+    // （`docs/wayland-inventory.md` の「W1-c-4 で一斉に発火するもの」の #7）。**取らないので、その 1 本の
+    // `read(0)` は `-EBADF` になる。**
+    //
+    // **ここで決める理由**——**`spawn` と `run_loaded_program` の形を変えずに済む。** **引数で渡すと、
+    // 子が走っている間ずっと遠征スタックに載る枠が広がる**（`ADR-0060` の W1-c-3 の枠の表）。
+    if crate::ring3::current_slot() != 0 {
+        FOREGROUND_REFUSED.fetch_add(1, Ordering::SeqCst);
+        return false;
+    }
     let claimed = FOREGROUND
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok();
@@ -238,6 +249,14 @@ pub fn claim_foreground() -> bool {
         FOREGROUND_DEPTH.store(crate::ring3::depth(), Ordering::SeqCst);
     }
     claimed
+}
+
+/// スロット 1 の遠征が前景を断られた回数（W1-c-4）。**判定行に出すためだけに持つ。**
+static FOREGROUND_REFUSED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// スロット 1 の遠征が前景を断られた回数（W1-c-4）。
+pub fn foreground_refused_count() -> u64 {
+    FOREGROUND_REFUSED.load(Ordering::SeqCst)
 }
 
 /// 前景を取った遠征の深さ（S12 前の手当て、C）。**判定行に出すためだけに持つ。**

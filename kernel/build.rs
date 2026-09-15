@@ -407,7 +407,7 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
 fn build_c_programs(manifest_dir: &str, out_dir: &str, script: &str) {
     /// C で書いたユーザープログラム。**足すときはここへ 1 行足す。**
     const C_PROGRAMS: &[&str] = &[
-        "chello", "fptest", "fpchild", "fpfault", "dbfault", "ttfglyph",
+        "chello", "fptest", "fpchild", "fpfault", "dbfault", "ttfglyph", "tickera", "tickerb",
     ];
 
     /// 自前の libc（C-c。`ADR-0057`）。**すべての C のプログラムと一緒に建てる。**
@@ -417,6 +417,8 @@ fn build_c_programs(manifest_dir: &str, out_dir: &str, script: &str) {
         println!("cargo:rerun-if-changed={manifest_dir}/userland/{source}");
     }
     println!("cargo:rerun-if-changed={manifest_dir}/userland/libc.h");
+    // **`tickera` と `tickerb` の本体（W1-c-4）。** **2 本が取り込む。**
+    println!("cargo:rerun-if-changed={manifest_dir}/userland/ticker.h");
     // **外から持ってきたヘッダ（B-c）。** **`ttfglyph` が丸ごと抱える。**
     println!("cargo:rerun-if-changed={manifest_dir}/../third_party/stb/stb_truetype.h");
 
@@ -623,6 +625,9 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         "fpchild",
         "fpfault",
         "dbfault",
+        // **2 本の Ring 3 を同時に走らせる判定（W1-c-4。`ADR-0060`）。** **同じ本体の 2 本で 1 組である。**
+        "tickera",
+        "tickerb",
         // **フォントを読んで 1 文字ラスタライズする（B-d）。**
         "ttfglyph",
     ] {
