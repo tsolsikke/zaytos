@@ -464,12 +464,13 @@ pub fn excursion_stack_range_at(depth: usize) -> (u64, u64) {
 /// **切り替えが使う**——**見たいのは入る側のタスクのスロットで、今のタスクのスロットではない。**
 /// 範囲外の `slot` と `depth` は 0 のものを返す（[`excursion_stack_range_at`] と同じ規則）。
 pub fn excursion_stack_range_of(slot: usize, depth: usize) -> (u64, u64) {
-    let slot = if slot < RING3_SLOTS { slot } else { 0 };
-    let index = if depth < MAX_EXCURSION_DEPTH {
-        depth
-    } else {
-        0
-    };
+    // **範囲外は止める（W1-c-3c）。** **以前は 0 のものを返していた**——**間違った添字が来ると、
+    // スロット 0 の深さ 0（シェルのスタック）と重なっても誰も言わなかった**
+    // （`docs/wayland-inventory.md` の「W1-c-4 で一斉に発火するもの」の #10）。
+    if slot >= RING3_SLOTS || depth >= MAX_EXCURSION_DEPTH {
+        report_excursion_index_out_of_range(slot, depth);
+    }
+    let index = depth;
     // SAFETY: 静的配列の要素のアドレスを取るだけで、中身は読まない。
     let bottom = unsafe { addr_of!(EXCURSION_STACKS[slot][index]) } as u64;
     (bottom, bottom + EXCURSION_STACK_SIZE as u64)
@@ -485,8 +486,9 @@ pub fn excursion_stack_range_of(slot: usize, depth: usize) -> (u64, u64) {
 ///
 /// `depth` が [`MAX_EXCURSION_DEPTH`] 未満で、そのスタックが今使われていないこと。
 unsafe fn fill_excursion_stack(depth: usize) {
+    // **範囲外は止める（W1-c-3c）。** **以前は黙って何もしなかった。**
     if depth >= MAX_EXCURSION_DEPTH {
-        return;
+        report_excursion_index_out_of_range(current_slot(), depth);
     }
     // SAFETY: 呼び出し元契約により、この配列要素は今誰も使っていない。
     unsafe {
@@ -503,8 +505,10 @@ unsafe fn fill_excursion_stack(depth: usize) {
 /// **[`fill_excursion_stack`] を通っていないスタックについては意味を持たない**
 /// （埋めていないので、走査は 0 バイト目で止まる）。
 pub fn excursion_stack_high_water(depth: usize) -> usize {
+    // **範囲外は止める（W1-c-3c）。** **以前は 0 を返していた**——**「0 バイト使った」と
+    // 読める値を、使っていない添字について出していた。**
     if depth >= MAX_EXCURSION_DEPTH {
-        return 0;
+        report_excursion_index_out_of_range(current_slot(), depth);
     }
     // SAFETY: 読み取りのみ。添字は上で範囲内にしてある。
     let stack = unsafe { addr_of!(EXCURSION_STACKS[current_slot()][depth]) } as *const u8;
@@ -638,13 +642,22 @@ pub unsafe fn enter(
     let state = state();
     // **この遠征の深さ（S11-2）。** 呼び出し側が [`depth`] で上限を確かめている。
     let depth = state.depth.load(Ordering::SeqCst);
+    // **契約が破れていたら止める（W1-c-3c）。** **以前は回復点の添字を `depth.min(上限 - 1)` へ
+    // 丸めていた**——**上限を越えて呼ばれると、親の回復点を黙って上書きした。**
+    if depth >= MAX_EXCURSION_DEPTH {
+        report_excursion_index_out_of_range(current_slot(), depth);
+    }
+    // **戻す RSP0 が 0 なら止める（W1-c-3c）。** **0 のまま遠征から戻ると、次に Ring 3 から
+    // カーネルへ入るとき RSP0=0 の上に積む。** **W1-b でメインのタスクの `rsp0` を 0 のまま
+    // 残した形の、Ring 3 へ降りる側の関所である**（`docs/wayland-inventory.md` の #2）。
+    if main_rsp0_top == 0 {
+        report_zero_rsp0_at_excursion_entry();
+    }
     let (_, excursion_top) = excursion_stack_range_at(depth);
 
     // **この深さの回復点を据える。** 戻すのはこの関数の末尾である。
     // SAFETY: 静的配列の要素のアドレスを取るだけである。深さは上限未満（契約）。
-    let slot =
-        unsafe { addr_of_mut!(RECOVERIES[current_slot()][depth.min(MAX_EXCURSION_DEPTH - 1)]) }
-            as u64;
+    let slot = unsafe { addr_of_mut!(RECOVERIES[current_slot()][depth]) } as u64;
     let previous_recovery = CURRENT_RECOVERY.swap(slot, Ordering::SeqCst);
     state.depth.store(depth + 1, Ordering::SeqCst);
 
@@ -780,6 +793,29 @@ pub unsafe fn enter(
     // **窓を戻す（S9-b-3-2b）。** ここは畳みで戻った場合も `exit` で戻った場合も
     // 通る（どちらの longjmp も `zaytos_enter_ring3` の復帰点へ帰る）。
     crate::syscall::set_user_window(previous_window.0, previous_window.1);
+}
+
+/// 遠征スタックと回復点の添字が範囲外だった（W1-c-3c）。**止める。**
+///
+/// **別の関数にしてある理由**——**呼ぶ側の枠を広げないため**（`panic!` の一時値。
+/// `ADR-0060` の W1-c-3 の Addendum の枠の表）。
+#[inline(never)]
+#[cold]
+fn report_excursion_index_out_of_range(slot: usize, depth: usize) -> ! {
+    panic!(
+        "ring3: excursion slot {slot} / depth {depth} is out of range (RING3_SLOTS = {RING3_SLOTS}, \
+         MAX_EXCURSION_DEPTH = {MAX_EXCURSION_DEPTH}); it used to be clamped to 0 silently (W1-c-3c)"
+    );
+}
+
+/// 遠征の入口で、戻す RSP0 が 0 だった（W1-c-3c）。**止める。**
+#[inline(never)]
+#[cold]
+fn report_zero_rsp0_at_excursion_entry() -> ! {
+    panic!(
+        "ring3: the RSP0 to restore after the excursion is 0; the next kernel entry from Ring 3 \
+         would push onto address 0 (W1-c-3c)"
+    );
 }
 
 /// RFLAGS の割り込み許可フラグ（IF。bit 9）。

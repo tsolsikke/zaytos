@@ -464,6 +464,20 @@ const fn ring3_slot_of(task: usize) -> usize {
     }
 }
 
+/// 切り替えで入るタスクの `rsp0` の欄が 0 だった（W1-c-3c）。**止める。**
+///
+/// **別の関数にしてある理由**——**`schedule_switch` の枠を広げないため**
+/// （[`swap_cr3_for_switch`] と同じ形）。
+#[inline(never)]
+#[cold]
+fn report_zero_rsp0_on_switch(next: usize) -> ! {
+    serial_line(format_args!(
+        "[ERROR] task: task {next} has RSP0 0 in its field; switching to it would load 0 into \
+         TSS.RSP0 and the readback would compare 0 with 0 (W1-c-3c); halting"
+    ));
+    common::cpu::halt_forever();
+}
+
 /// 切り替えで入るタスクの保存 RSP が、どのスタックに在るはずか（W1-c-3b）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExpectedStack {
@@ -888,6 +902,11 @@ pub fn init_ap_idle_task() {
             // おくのは、「必ず書かれる」を無条件と読まないためである。
             stack_top: top,
             stack_bottom: bottom,
+            // **スタックの上端で埋める（W1-c-3c）。** **以前は `EMPTY_TASK` の 0 のままで、
+            // AP で切り替えが起きる構成（`smp-stimulus-*`）では TSS.RSP0 へ 0 を書いていた**
+            // ——**AP は Ring 3 を走らせないので害は出ていなかった。** **W1-b でメインのタスクに
+            // 踏んだのと同じ形である。** **切り替えが 0 を拒むようにしたので、先に埋める。**
+            rsp0: top,
             // `Ready` にしておく。`pick_next` が巡回の候補にしないので選ばれないが、
             // 落ち先としては選ばれる（`default_task_for`）。
             state: TaskState::Ready,
@@ -1502,6 +1521,14 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         // 起きないからである**（走行可能なタスクがメインだけで、上の
         // `next == current` で早く戻る）。**等しくなくなるのは W1-c からである。**
         let expected_rsp0 = scheduler::rsp0(next);
+        // **0 なら止める（W1-c-3c）。** **下の読み戻しは「書いた値が載ったか」を見るので、
+        // 欄が 0 なら 0 と 0 を比べて通る**——**W1-b でメインのタスクの `rsp0` を 0 のまま
+        // 残した形を、起動ログの突き合わせだけが捕まえた**（`docs/verification-coverage.md`）。
+        // **同じ形が、W1-c-1 で足した 1 本（`RING3_TASK`）で繰り返しうる**
+        // （`docs/wayland-inventory.md` の「W1-c-4 で一斉に発火するもの」の #2）。
+        if expected_rsp0 == 0 {
+            report_zero_rsp0_on_switch(next);
+        }
         #[cfg(not(feature = "task-switch-drop-rsp0"))]
         // SAFETY: stack_top は次タスクの有効なスタック頂点。切り替えの割り込み
         // 禁止区間から呼んでいる。
@@ -1963,6 +1990,12 @@ unsafe fn setup_preemptive_tasks() {
         Task {
             stack_top: main_top,
             stack_bottom: crate::stack::kernel_stack_range().bottom.as_u64(),
+            // **メインのタスクの RSP0 を埋める（W1-c-3c で見つけた）。** **ここは `EMPTY_TASK` の
+            // 0 のままで、デモの締切でメインへ戻る切り替えが TSS.RSP0 へ 0 を書いていた。**
+            // **`setup_tasks` は W1-b で同じ欄を埋めた**（あちらの注記）**が、この再初期化で
+            // 0 に戻っていた。** **読み戻しは 0 と 0 を比べて通り、`init` が最初の遠征の戻り先
+            // として TSS から 0 を読んでいた。** **W1-c-3c の「0 なら止める」が起動の中で捕まえた。**
+            rsp0: main_top,
             state: TaskState::Blocked,
             ..EMPTY_TASK
         },
