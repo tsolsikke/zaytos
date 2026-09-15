@@ -595,12 +595,16 @@ xtask::font::tests::glyphs_are_sorted_by_code_point
 xtask::font::tests::half_width_rows_are_shifted_to_the_most_significant_bits
 xtask::font::tests::the_most_significant_bit_is_the_leftmost_pixel
 xtask::font::tests::the_rendered_table_keeps_index_and_rows_in_step
+xtask::tests::a_single_bsp_heartbeat_cannot_show_growth_and_fails
+xtask::tests::ap_ticks_that_grow_across_the_observation_pass_even_when_the_ap_line_is_missing
+xtask::tests::ap_ticks_that_stay_at_zero_fail_the_way_ap_no_svr_would
 xtask::tests::disk0_rd_bytes_is_parsed_and_other_drives_are_ignored
 xtask::tests::disk0_wr_bytes_is_parsed_and_other_drives_are_ignored
 xtask::tests::info_pci_output_is_parsed_and_subsystem_lines_are_ignored
 xtask::tests::kernel_pci_lines_are_parsed_and_other_pci_lines_are_ignored
 xtask::tests::kvm_still_keeps_the_failure_visibility_flags
 xtask::tests::manual_runs_record_cpu_reset_but_not_every_interrupt
+xtask::tests::no_bsp_heartbeat_fails_instead_of_reading_as_empty
 xtask::tests::no_keyboard_layout_is_ever_passed
 xtask::tests::only_the_manual_run_keeps_the_disk_by_default
 xtask::tests::opening_a_window_selects_sdl_and_gtk_stays_available
@@ -616,6 +620,7 @@ xtask::tests::qemu_args_reference_given_ovmf_and_esp_paths
 xtask::tests::qemu_args_separate_debug_log_from_serial
 xtask::tests::qemu_args_use_serial_file_sink_when_requested
 xtask::tests::the_agent_index_check_looks_both_ways
+xtask::tests::the_ap_heartbeat_line_is_not_read_as_a_bsp_row
 xtask::tests::the_commit_message_rules_catch_each_shape
 xtask::tests::the_commit_message_rules_pass_the_shapes_that_are_allowed
 xtask::tests::the_range_flags_turn_the_rules_off

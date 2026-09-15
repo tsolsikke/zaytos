@@ -10414,6 +10414,47 @@ fn check_ap_ticked_after_ipis(serial: &str) -> Result<String> {
     ))
 }
 
+/// `ap-timer` と `tlb-generation` の「AP が生き続けること」を、BSP のハートビートの
+/// 関係で見る（2026-09-15）。
+///
+/// **最初の BSP のハートビートより、最後のもののほうが AP のティックが多いこと。**
+///
+/// # `check_ap_ticked_after_ipis` と分けてある
+///
+/// **あちらは「受信が揃った時点より後に増えた」を見る。起点が在る。**
+/// **こちらには起点が無いので、観測の最初と最後を比べる。**
+///
+/// # 読むのは BSP の行だけである
+///
+/// **AP 自身の行（`smp: ap heartbeat:`）は読まない**——**あれが 1 ティックの余裕で
+/// 出たり出なかったりする**（`SMP_AP_TESTS` の `ap-timer` の doc）。
+fn check_ap_ticks_grew_across_observation(serial: &str) -> Result<String> {
+    let rows: Vec<u64> = serial
+        .lines()
+        .filter(|line| line.contains("heartbeat: ticks=") && !line.contains("smp: ap heartbeat"))
+        .filter_map(|line| {
+            let rest = line.split("ap_ticks=cpu1=").nth(1)?;
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            digits.parse().ok()
+        })
+        .collect();
+    let (Some(&first), Some(&last)) = (rows.first(), rows.last()) else {
+        bail!("no BSP heartbeat carried ap_ticks=cpu1=");
+    };
+    if rows.len() < 2 {
+        bail!("only one BSP heartbeat carried ap_ticks, so growth cannot be seen (rows {rows:?})");
+    }
+    if last <= first {
+        bail!(
+            "ap_ticks did not grow across the steady observation: {first} -> {last} (rows {rows:?})"
+        );
+    }
+    Ok(format!(
+        "ap_ticks {first} -> {last} across {} BSP heartbeat(s)",
+        rows.len()
+    ))
+}
+
 /// マーカー突き合わせ方式の回帰チェック（critical-test / interrupt-test 共通）。
 ///
 /// シリアルログに「出るべき行」がすべて出て、「出てはいけない行」が 1 つも
@@ -11742,6 +11783,25 @@ fn cmd_marker_test(
             Ok(note) => relation_note = Some(("generation relation", note)),
             Err(error) => {
                 println!("{context}: the generation relation does not hold: {error}");
+                bail!("{context}: FAILED")
+            }
+        }
+    }
+    // **`ap-timer` と `tlb-generation` の「AP が生き続けること」も関係で見る（2026-09-15）。**
+    // 表の doc を見ること。
+    if test.name == "ap-timer" || test.name == "tlb-generation" {
+        match check_ap_ticks_grew_across_observation(&serial) {
+            Ok(note) => {
+                relation_note = Some(match relation_note.take() {
+                    Some((_, earlier)) => (
+                        "generation relation and the AP kept ticking",
+                        format!("{earlier}; {note}"),
+                    ),
+                    None => ("the AP kept ticking across the observation", note),
+                });
+            }
+            Err(error) => {
+                println!("{context}: the AP did not keep ticking across the observation: {error}");
                 bail!("{context}: FAILED")
             }
         }
@@ -13861,6 +13921,28 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // # AP が生き続けることは、行ではなく関係で見る（2026-09-15）
+    //
+    // **以前は `smp: ap heartbeat: cpu=1` を期待マーカーにし、`ap_ticks=cpu1=0,` を
+    // 禁止マーカーにしていた。** **`ipi-probe` を揺らしたのと同じ仕組みである**
+    // ——**AP はティックが 100 に達したときにだけ行を出し、BSP は 2 本目のハートビートで
+    // 観測を締める。** **実測で、AP の行は `ticks=100`、締めた時点の BSP の行は
+    // `ap_ticks=cpu1=101` だった。余裕は 1 ティックである。** **禁止マーカーのほうも、
+    // 1 本目の BSP のハートビートの値（実測で 1 と 2）に寄りかかっていた。**
+    //
+    // **いまは `check_ap_ticks_grew_across_observation` が見る**——**最初の BSP の
+    // ハートビートより、最後のもののほうが AP のティックが多いこと。**
+    //
+    // **失ったものは 2 つある。**
+    // **(1) 「このビルドで、AP が定常のあいだシリアルへ書けること」。** **覆っているのは
+    // `smp-ap-test ap-timer-rate` である**——**`keep-steady-loop` の構成で観測が締まらない
+    // ので、この揺らぎを持たない。** **AP の行が読めなければ `could not measure the AP
+    // tick rate = NG` で落ちる。**
+    // **(2) 「1 本目の BSP のハートビートの時点で、AP が既に数え始めていること」。**
+    // **覆う判定は無い。** **この項目の主張は「AP のタイマが届き続けること」で、
+    // 始まる時刻ではない。** **関係は最後の値が 1 以上であることを含む。**
+    //
+    // **落とす破壊は `ap-no-svr` の形である**（AP のティックが 0 のまま。単体テストで固定した）。
     CriticalTest {
         name: "ap-timer",
         feature: "",
@@ -13870,24 +13952,18 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
             "software_enabled=true",
             // AP が自分の LVT タイマを開けたこと。
             "ap 1 armed its own LAPIC timer",
-            // **コアごとのハートビート。** AP 側は BSP と別の行である。
-            "smp: ap heartbeat: cpu=1",
-            // **AP のティックが進んでいること。** `cpu1=0` を禁止マーカーで落とす
-            // だけだと、行そのものが出ない構成を通してしまう。
+            // **AP のティックが載っていること。** 増えたかは関係で見る（上の doc）。
             "ap_ticks=cpu1=",
             // **会計が閉じること。**
             "timer_accounting_balanced=true",
             // 定常状態まで到達すること。
             "heartbeat: ticks=",
+            // **定常の観測が締まったことの行。判定ではなく、待つ目印である。**
+            // **`ipi-probe` と同じ理由で要る**——**AP の行を外すと、BSP のハートビートが
+            // 1 本しか取り込まれない。**
+            "this is the end of the steady-loop observation",
         ],
-        // **AP のティックが 1 本も進んでいない状態を落とす。** ハートビートは
-        // 100 ティックごとなので、1 本目のハートビートが出る時点で AP は既に
-        // 数え始めている。
-        forbidden_markers: &[
-            "ap_ticks=cpu1=0,",
-            "timer_accounting_balanced=false",
-            "halting",
-        ],
+        forbidden_markers: &["timer_accounting_balanced=false", "halting"],
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
@@ -14163,7 +14239,13 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
         // **関係のほうを見る**（[`check_tlb_generation_relation`]）——**探りが上げた
         // 世代に AP が追いつき、そのために 1 回以上フラッシュしたこと。**
         // **カーネルの出力は変えていない。** 既にある行から関係を導いている。
-        expected_markers: &["smp: ap heartbeat: cpu=1"],
+        //
+        // **「AP が生き続けること」も関係で見る（2026-09-15）。** **以前は
+        // `smp: ap heartbeat: cpu=1` を期待マーカーにしていたが、`ap-timer` と同じ
+        // 1 ティックの余裕に寄りかかっていた**（`ap-timer` の doc）。**探りはハートビートより
+        // 前に走るので、BSP のハートビートは全部探りの後である。**
+        // **失ったものと覆うものも `ap-timer` と同じである。**
+        expected_markers: &["this is the end of the steady-loop observation"],
         forbidden_markers: &[],
         wait_for_full_timeout: false,
         min_heartbeats: None,
@@ -18602,6 +18684,53 @@ fn qemu_launch_args(opts: &QemuLaunchOptions) -> Vec<OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `check_ap_ticks_grew_across_observation`（2026-09-15）。**行は実測のシリアルから
+    // 採り、判定に関わらない末尾を切った**（`smp-ap-test ap-timer` と `ap-no-svr`）。
+    const AP_TIMER_FIRST_HEARTBEAT: &str = "[INFO] heartbeat: ticks=259 (2 s), tsc_per_tick=0, \
+        cpu=0, ap_ticks=cpu1=2, ticks_total=261, lapic_timer_deliveries=261, \
+        timer_accounting_balanced=true";
+    const AP_TIMER_LAST_HEARTBEAT: &str = "[INFO] heartbeat: ticks=359 (3 s), \
+        tsc_per_tick=36231039, cpu=0, ap_ticks=cpu1=101, ticks_total=460, \
+        lapic_timer_deliveries=460, timer_accounting_balanced=true";
+    const AP_NO_SVR_HEARTBEAT: &str = "[INFO] heartbeat: ticks=259 (2 s), tsc_per_tick=0, \
+        cpu=0, ap_ticks=cpu1=0, ticks_total=259, lapic_timer_deliveries=259, \
+        timer_accounting_balanced=true";
+
+    #[test]
+    fn ap_ticks_that_grow_across_the_observation_pass_even_when_the_ap_line_is_missing() {
+        // **AP の行が 1 本も無い形である**——**以前の期待マーカーなら落ちていた。**
+        let serial = format!("{AP_TIMER_FIRST_HEARTBEAT}\n{AP_TIMER_LAST_HEARTBEAT}\n");
+        let note = check_ap_ticks_grew_across_observation(&serial).expect("2 -> 101 must pass");
+        assert!(note.contains("2 -> 101"), "{note}");
+    }
+
+    #[test]
+    fn the_ap_heartbeat_line_is_not_read_as_a_bsp_row() {
+        let serial = format!(
+            "{AP_TIMER_FIRST_HEARTBEAT}\n[INFO] smp: ap heartbeat: cpu=1 ticks=100 tsc=1\n\
+             {AP_TIMER_LAST_HEARTBEAT}\n"
+        );
+        let note = check_ap_ticks_grew_across_observation(&serial).expect("2 -> 101 must pass");
+        assert!(note.contains("across 2 BSP heartbeat(s)"), "{note}");
+    }
+
+    #[test]
+    fn ap_ticks_that_stay_at_zero_fail_the_way_ap_no_svr_would() {
+        let serial = format!("{AP_NO_SVR_HEARTBEAT}\n{AP_NO_SVR_HEARTBEAT}\n");
+        assert!(check_ap_ticks_grew_across_observation(&serial).is_err());
+    }
+
+    #[test]
+    fn a_single_bsp_heartbeat_cannot_show_growth_and_fails() {
+        let serial = format!("{AP_TIMER_LAST_HEARTBEAT}\n");
+        assert!(check_ap_ticks_grew_across_observation(&serial).is_err());
+    }
+
+    #[test]
+    fn no_bsp_heartbeat_fails_instead_of_reading_as_empty() {
+        assert!(check_ap_ticks_grew_across_observation("").is_err());
+    }
 
     fn base_options<'a>(serial: &'a SerialSink, debug_log: &'a Path) -> QemuLaunchOptions<'a> {
         QemuLaunchOptions {
