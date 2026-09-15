@@ -675,6 +675,23 @@ pub unsafe fn enter(
     // SAFETY: このスタックはこれから使うもので、今は誰も乗っていない。
     unsafe { fill_excursion_stack(depth) };
 
+    // **ここから `iretq` までを割り込み禁止にする（W1-c-3b）。**
+    //
+    // **下で TSS の RSP0 とタスクの欄（RSP0・深さ）を据えるが、据えてから `iretq` するまでは
+    // カーネルスタックの上を走る。** **その間に切り替わると、欄は「遠征中」を言うのに
+    // 保存 RSP はカーネルスタックに在り、戻ってくるときに TSS へ古い値を載せる。**
+    // **深さ 0 の最初の遠征は IF=1 でここへ来る**（`init` が `sti` の後に最初に起こす 1 本）。
+    //
+    // **`InterruptGuard` は使えない。** **Ring 3 に居る間ずっと入れ子の深さが 1 のまま残り、
+    // `on_timer_tick` が切り替えなくなる**——**目的そのものを壊す**（`ADR-0060` の W1-c-3 の Addendum）。
+    // **IF を戻すのは `iretq` が積んだ RFLAGS（`0x202`。IF=1）である。**
+    //
+    // **埋める（`fill_excursion_stack`。64 KiB）より後に置く**——**長い書き込みを
+    // 割り込み禁止の区間へ入れない。**
+    // SAFETY: 割り込みを止めるだけで、メモリには触らない。この後で割り込みを許すのは
+    // `zaytos_enter_ring3` の `iretq` だけで、そこまでに眠る処理も錠を取る処理も無い。
+    unsafe { common::cpu::disable_interrupts() };
+
     // RSP0 を遠征専用スタックへ据える。#GP はここへ切り替わる。
     // 破壊 (M5-e-4, drop-rsp0): 据えない。#GP がメインのスタックへ切り替わり、
     // handler_in_excursion が false になって捕まる（M5-d の task-switch-drop-rsp0 は
@@ -691,7 +708,12 @@ pub unsafe fn enter(
     crate::task::note_current_rsp0(excursion_top);
     // **深さの欄も据える（W1-b）。** **スタック混在の検査が、どのスタックを
     // 期待してよいかをこれで決める。**
-    crate::task::note_current_excursion_depth(depth);
+    //
+    // **欄は「入っている遠征の数」である（W1-c-3b で直した）。** **W1-b は入口で
+    // 増やす前の数（`depth`）を控えていた**——**最初の遠征の最中も欄が 0 で、検査が
+    // カーネルスタックを期待する食い違いがあった**（`ADR-0060` の W1-c-3 の Addendum の表）。
+    // **出口は戻した数を控えるので、こちらだけを直せば揃う。**
+    crate::task::note_current_excursion_depth(depth + 1);
     #[cfg(feature = "ring3-test-drop-rsp0")]
     let _ = excursion_top;
 
@@ -726,6 +748,16 @@ pub unsafe fn enter(
         );
     }
 
+    // **ここへ戻った時点で IF=0 であることを確かめる（W1-c-3b）。**
+    //
+    // **戻る道は longjmp だけで**（`exit` は `syscall_entry`、畳みは例外と Ctrl+C の入口から）、
+    // **どれも割り込みゲートを通って IF=0 になった文脈から跳ぶ。** **longjmp は RFLAGS を
+    // 戻さない。** **したがって下で欄を戻し終えるまで、切り替えは入らない**——**出口の窓が
+    // 閉じている根拠はこれだけなので、読みで済ませずに検算する。**
+    if common::cpu::read_rflags() & RFLAGS_INTERRUPT_FLAG != 0 {
+        report_resumed_with_interrupts_enabled();
+    }
+
     // **深さと回復点を戻す（S11-2）。** 畳みで戻っても `exit` で戻ってもここを通る。
     state.depth.store(depth, Ordering::SeqCst);
     CURRENT_RECOVERY.store(previous_recovery, Ordering::SeqCst);
@@ -741,12 +773,33 @@ pub unsafe fn enter(
     // **タスクの欄も戻す（W1-b）。** **入れ子のときは親の遠征スタックの上端が
     // それである**——**上の `main_rsp0_top` と同じ値を入れる。**
     crate::task::note_current_rsp0(main_rsp0_top);
-    // **深さの欄も戻す（W1-b）。** **入れ子なら親の深さへ、そうでなければ 0 へ。**
+    // **深さの欄も戻す（W1-b）。** **入れ子なら親の遠征の数へ、そうでなければ 0 へ**
+    // （**欄は「入っている遠征の数」である**。入口の注記）。
     crate::task::note_current_excursion_depth(state.depth.load(Ordering::SeqCst));
 
     // **窓を戻す（S9-b-3-2b）。** ここは畳みで戻った場合も `exit` で戻った場合も
     // 通る（どちらの longjmp も `zaytos_enter_ring3` の復帰点へ帰る）。
     crate::syscall::set_user_window(previous_window.0, previous_window.1);
+}
+
+/// RFLAGS の割り込み許可フラグ（IF。bit 9）。
+const RFLAGS_INTERRUPT_FLAG: u64 = 1 << 9;
+
+/// 遠征から IF=1 で戻ってきた（W1-c-3b）。**止める。**
+///
+/// **出口で欄を戻し終えるまでの窓が閉じているのは、戻った時点で IF=0 だからである**
+/// （[`enter`] の注記）。**それが崩れたら、切り替えが欄と実物の食い違う瞬間に入りうる**
+/// ——**静かに効く側なので止める。**
+///
+/// **別の関数にしてある理由**——**[`enter`] の枠を広げないため**（`panic!` の一時値。
+/// `ADR-0060` の W1-c-3 の Addendum の枠の表）。
+#[inline(never)]
+#[cold]
+fn report_resumed_with_interrupts_enabled() -> ! {
+    panic!(
+        "ring3: returned from an excursion with interrupts enabled; the window before the task's \
+         RSP0 and depth fields are restored is open to a switch (W1-c-3b)"
+    );
 }
 
 /// `exception_entry` が呼ぶ。今この例外を畳んでよいかを判定する。

@@ -43,6 +43,13 @@
 //! | `resumes` | **加算** | - | - | **読み** | 書き |
 //! | `switches` | **加算** | - | - | **読み** | 書き |
 //! | `demo_active` / `demo_deadline` | 読み書き | - | - | - | 書き（`InterruptGuard`下） |
+//! | `rsp0` / `excursion_depth` | 読み（切り替え） | - | - | 書き（遠征の出入り。入口は `cli` 下、出口は IF=0） | 書き |
+//! | `cr3` | 読み（切り替え） | - | - | 書き（`InterruptGuard`下）/ 破棄の経路（BKL下） | 書き |
+//! | `current_recovery` | 読み書き（切り替え） | - | - | - | 書き |
+//!
+//! **下の 3 行は W1-b から W1-c-2 で足した欄で、W1-c-3b でこの表へ加えた。** **加えるまで
+//! 「メイン文脈」の書き手を書いていなかったので、深さ 0 の遠征の入口が IF=1 で書く形を
+//! 見落としていた**（`ADR-0060` の W1-c-3 の Addendum）。
 //!
 //! **太字の 3 つ（`iterations` / `resumes` / `switches`）だけが、書き手と読み手が
 //! 並行する。** 会計を締めるのはデモ後のメイン文脈だが、そこは IF=1 であり、
@@ -124,7 +131,11 @@ pub(super) fn set_saved_rsp(index: usize, rsp: u64) {
 }
 
 pub(super) fn rsp0(index: usize) -> u64 {
-    // SAFETY: 有効なポインタ。IF=0 の切り替え経路と、遠征の出入りからのみ触る。
+    // SAFETY: 有効なポインタ。読むのは切り替え（IF=0）で、書くのは起動時と遠征の出入りである。
+    // 遠征の入口は割り込みを止めてから書き（W1-c-3b。`ring3::enter` の `cli`）、出口は
+    // longjmp で IF=0 のまま戻ってから書く（同じ関数の検算）。タスクは BSP だけが持つので、
+    // 同じコアの割り込みが入らなければ切り替えと重ならない。W1-b では「IF=0 の切り替え経路と、
+    // 遠征の出入りからのみ触る」とだけ書いており、深さ 0 の入口が IF=1 で書く形を見ていなかった。
     unsafe { addr_of_mut!((*slot(index)).rsp0).read() }
 }
 
@@ -134,7 +145,7 @@ pub(super) fn set_rsp0(index: usize, top: u64) {
 }
 
 pub(super) fn excursion_depth(index: usize) -> usize {
-    // SAFETY: 有効なポインタ。IF=0 の切り替え経路と、遠征の出入りからのみ触る。
+    // SAFETY: 有効なポインタ。`rsp0` と同じ文脈で触る（そちらの注記。W1-c-3b で直した）。
     unsafe { addr_of_mut!((*slot(index)).excursion_depth).read() }
 }
 

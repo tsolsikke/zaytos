@@ -551,6 +551,8 @@ kernel::stack::tests::the_canary_differs_from_the_heap_poison
 kernel::stack::tests::the_guards_are_a_multiple_of_the_alignment
 kernel::stack::tests::the_kernel_guard_is_exactly_one_aligned_page
 kernel::stack::tests::the_stacks_are_a_multiple_of_the_required_alignment
+kernel::task::tests::a_nested_excursion_uses_the_next_stack_and_the_parent_returns_to_the_first
+kernel::task::tests::a_task_outside_any_excursion_is_expected_on_its_kernel_stack
 kernel::task::tests::a_task_owned_by_another_cpu_is_not_a_candidate
 kernel::task::tests::a_task_with_a_user_space_loads_its_own_table
 kernel::task::tests::a_task_with_no_user_space_loads_the_kernel_table
@@ -567,6 +569,7 @@ kernel::task::tests::only_the_tasks_owned_by_this_cpu_are_rotated
 kernel::task::tests::the_current_worker_is_returned_when_it_is_the_only_runnable_one
 kernel::task::tests::the_demo_has_two_workers_and_one_main
 kernel::task::tests::the_fallback_of_every_core_is_a_task_that_core_owns
+kernel::task::tests::the_first_excursion_is_expected_on_excursion_stack_zero
 kernel::task::tests::the_layer_two_predicate_ignores_the_calling_cpu
 kernel::task::tests::the_sentinel_is_displayed_as_a_word_but_still_stored_as_usize_max
 kernel::task::tests::the_sentinel_is_not_treated_as_a_running_task

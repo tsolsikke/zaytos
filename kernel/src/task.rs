@@ -273,6 +273,10 @@ struct Task {
     /// **`ring3` 側の深さと二重に持っているのではない。** **あちらは「いま走って
     /// いる遠征の深さ」で、こちらは「このタスクへ戻るとき、どこに居ることに
     /// なっているか」である**——**`rsp0` が TSS と対になっているのと同じ形である。**
+    ///
+    /// **値は「入っている遠征の数」である（W1-c-3b で揃えた）。** **0 は遠征に入って
+    /// いない。** **W1-b は入口で増やす前の数を控えていた**——**最初の遠征の最中も 0 だった**
+    /// （`ADR-0060` の W1-c-3 の Addendum の表）。
     excursion_depth: usize,
     /// このタスクが Ring 3 の遠征で載せている CR3 の値（W1-b-2）。**0 なら載せていない。**
     ///
@@ -457,6 +461,30 @@ const fn ring3_slot_of(task: usize) -> usize {
         1
     } else {
         0
+    }
+}
+
+/// 切り替えで入るタスクの保存 RSP が、どのスタックに在るはずか（W1-c-3b）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpectedStack {
+    /// そのタスク自身のカーネルスタック。
+    Kernel,
+    /// そのタスクのスロットの、添字 `index` の遠征スタック。
+    Excursion { index: usize },
+}
+
+/// 深さの欄（入っている遠征の数）から、期待するスタックを引く（W1-c-3b）。
+///
+/// **0 は遠征に入っていない。** **`n` 個入っているなら、いちばん内側の遠征のカーネル入場は
+/// 添字 `n - 1` の遠征スタックに載る**（`ring3::enter` は深さ `d` の遠征の RSP0 を
+/// 添字 `d` のスタックの上端へ据え、その後で数を `d + 1` にする）。
+const fn expected_stack(depth_count: usize) -> ExpectedStack {
+    if depth_count == 0 {
+        ExpectedStack::Kernel
+    } else {
+        ExpectedStack::Excursion {
+            index: depth_count - 1,
+        }
     }
 }
 
@@ -1394,11 +1422,17 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         // **今日は必ず深さ 0 である**——**遠征中に切り替えが起きない。**
         let next_rsp = scheduler::saved_rsp(next);
         let next_depth = scheduler::excursion_depth(next);
-        let (next_bottom, next_top) = if next_depth == 0 {
-            (scheduler::stack_bottom(next), scheduler::stack_top(next))
-        } else {
-            // **入る側のタスクのスロットで引く（W1-c-3）。** 今のタスクのものではない。
-            crate::ring3::excursion_stack_range_of(ring3_slot_of(next), next_depth)
+        //
+        // **W1-c-3b で数え方を直した。** **欄は「入っている遠征の数」で、0 ならカーネル
+        // スタック、`n` なら添字 `n - 1` の遠征スタックである**（[`expected_stack`]）。
+        // **W1-b はここで添字 `n` を引いていた**——**入口が増やす前の数を控えていたので、
+        // 子の遠征の最中だけが合っていた**（`ADR-0060` の W1-c-3 の Addendum の表）。
+        let (next_bottom, next_top) = match expected_stack(next_depth) {
+            ExpectedStack::Kernel => (scheduler::stack_bottom(next), scheduler::stack_top(next)),
+            ExpectedStack::Excursion { index } => {
+                // **入る側のタスクのスロットで引く（W1-c-3）。** 今のタスクのものではない。
+                crate::ring3::excursion_stack_range_of(ring3_slot_of(next), index)
+            }
         };
         if next_rsp < next_bottom || next_rsp >= next_top {
             // **文言のうち `is outside its stack` と `stacks are mixed` は、
@@ -2481,5 +2515,37 @@ mod tests {
             assert_eq!(super::ring3_slot_of(task), expected, "task {task}");
         }
         assert!(super::ring3_slot_of(TASK_COUNT - 1) < crate::ring3::RING3_SLOTS);
+    }
+
+    /// 遠征に入っていないタスクは、カーネルスタックに居る（W1-c-3b）。
+    #[test]
+    fn a_task_outside_any_excursion_is_expected_on_its_kernel_stack() {
+        assert_eq!(super::expected_stack(0), super::ExpectedStack::Kernel);
+    }
+
+    /// 最初の遠征の最中は、添字 0 の遠征スタックに居る（W1-c-3b）。
+    ///
+    /// **W1-b の数え方ではここが食い違っていた**——**欄が 0 のままで、カーネルスタックを期待した。**
+    #[test]
+    fn the_first_excursion_is_expected_on_excursion_stack_zero() {
+        assert_eq!(
+            super::expected_stack(1),
+            super::ExpectedStack::Excursion { index: 0 }
+        );
+    }
+
+    /// 子の遠征の最中は添字 1、子から戻った親は添字 0 に居る（W1-c-3b）。
+    ///
+    /// **子から戻った親は、欄が 1 に戻る**（出口は戻した数を控える）——**添字 0 である。**
+    #[test]
+    fn a_nested_excursion_uses_the_next_stack_and_the_parent_returns_to_the_first() {
+        assert_eq!(
+            super::expected_stack(2),
+            super::ExpectedStack::Excursion { index: 1 }
+        );
+        assert_eq!(
+            super::expected_stack(1),
+            super::ExpectedStack::Excursion { index: 0 }
+        );
     }
 }
