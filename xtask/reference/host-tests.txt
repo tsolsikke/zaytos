@@ -552,6 +552,8 @@ kernel::stack::tests::the_guards_are_a_multiple_of_the_alignment
 kernel::stack::tests::the_kernel_guard_is_exactly_one_aligned_page
 kernel::stack::tests::the_stacks_are_a_multiple_of_the_required_alignment
 kernel::task::tests::a_task_owned_by_another_cpu_is_not_a_candidate
+kernel::task::tests::a_task_with_a_user_space_loads_its_own_table
+kernel::task::tests::a_task_with_no_user_space_loads_the_kernel_table
 kernel::task::tests::an_application_processor_falls_back_to_its_own_idle_task
 kernel::task::tests::an_unrunnable_worker_is_skipped
 kernel::task::tests::blocked_and_finished_are_both_unselectable_but_distinct

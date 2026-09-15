@@ -144,7 +144,11 @@ pub(super) fn set_excursion_depth(index: usize, depth: usize) {
 }
 
 pub(super) fn cr3(index: usize) -> u64 {
-    // SAFETY: 有効なポインタ。遠征の出入りと破棄の経路から、BKL の内側で触る。
+    // SAFETY: 有効なポインタ。書くのは `task::switch_cr3_and_note`（割り込み禁止の区間）と
+    // 破棄の経路（BKL の内側）で、読むのは切り替え（IF=0 かつ BKL の内側）である。
+    // W1-b-2 では「遠征の出入りと破棄の経路から、BKL の内側で触る」と書いていたが、
+    // 深さ 0 の `init` の遠征は BKL を持たずに通っていた（W1-c-2 で読んだ）。タスクは
+    // BSP だけが持つので、同じコアの割り込みを止めれば切り替えと重ならない。
     unsafe { addr_of_mut!((*slot(index)).cr3).read() }
 }
 

@@ -1549,6 +1549,11 @@ extern "sysv64" fn kernel_main() -> ! {
         }
     }
 
+    // **本番のカーネルの PML4 を控える（W1-c-2）。** **切り替えは、欄が 0 のタスクへ移るときに
+    // これを載せる**（`task::record_kernel_cr3` の doc）。**恒等の除去の区画の外に置く**——
+    // **`paging-test` の構成は除去を通らないが、本番の表はこの時点で同じである。**
+    kernel::task::record_kernel_cr3();
+
     // 破壊 (highhalf-panic-after-remove): 恒等除去の直後に意図的 panic する。パニック経路
     // （シリアル I/O・レジスタ値のみ・walk なし。ADR-0003）が恒等非依存であることを、
     // 恒等を外した実状態で確認する（B-2b-4(e)）。

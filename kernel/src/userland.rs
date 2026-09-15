@@ -1622,11 +1622,12 @@ unsafe fn run_loaded_program(
         crate::ring3::excursion_stack_range().1
     };
 
+    // **載せて、タスクの CR3 の欄を据える（W1-b-2。W1-c-2 で割り込みを止めて一続きにした）。**
     // SAFETY: この空間はカーネルの上位を共有しており、切り替えても実行中の
     // コードとスタックは見え続ける。
-    unsafe { crate::paging::switch::switch_to(process.space.pml4()) };
-    // **タスクの CR3 の欄を据える（W1-b-2。`ADR-0060`）。**
-    crate::task::note_current_cr3(process.space.pml4().as_u64());
+    unsafe {
+        crate::task::switch_cr3_and_note(process.space.pml4(), process.space.pml4().as_u64())
+    };
     // **このプロセスの fd の表を据える（S10-b）。** `dispatch` はプロセスを
     // 知らないので、遠征の間だけ `crate::vfs` が持つ
     // （`syscall::set_user_window` と同じ形。据えるのは Ring 3 へ落ちる側である）。
@@ -1774,9 +1775,8 @@ unsafe fn run_loaded_program(
         crate::vfs::MAX_OPEN_FILES,
         crate::input::delivered_count()
     ));
-    // SAFETY: 本番のテーブルへ戻す。上位は同じなので連続して実行できる。
-    unsafe { crate::paging::switch::switch_to(production) };
-    // **タスクの CR3 の欄も戻す（W1-b-2）。** **この空間の持ち主はこの後で
+    // **本番のテーブルへ戻し、タスクの CR3 の欄も戻す（W1-b-2。W1-c-2 で一続きにした）。**
+    // **この空間の持ち主はこの後で
     // 破棄されるので、ここで戻さないと死んだテーブルを指したまま残る。**
     //
     // **戻す値は深さから引く**——**深さ 0 なら 0（ユーザー空間を載せていない）、
@@ -1786,11 +1786,17 @@ unsafe fn run_loaded_program(
     // `tools/boot-log-compare.py` が捕まえた。**`dev` では局所変数がそのまま
     // 枠を広げ、この枠は子が走っている間ずっと深さ 0 のスタックに載る**）。
     // **`ring3::enter` は深さを戻してから返るので、ここで読む深さは入口と同じである。**
-    crate::task::note_current_cr3(if crate::ring3::depth() == 0 {
-        0
-    } else {
-        production.as_u64()
-    });
+    // SAFETY: 本番のテーブルへ戻す。上位は同じなので連続して実行できる。
+    unsafe {
+        crate::task::switch_cr3_and_note(
+            production,
+            if crate::ring3::depth() == 0 {
+                0
+            } else {
+                production.as_u64()
+            },
+        )
+    };
 
     Ok(())
 }
