@@ -460,12 +460,15 @@ pub unsafe fn deposit(allocator: FrameAllocator) {
 /// # 排他は `compare_exchange` が持つ
 ///
 /// **`load` してから `store` する形にしない。** それだと**2 つの実行文脈が同時に
-/// 通り抜けられる。** いまは単一コアの直線なので実害は出ないが、
+/// 通り抜けられる。** 書いた時点は単一コアの直線で実害は出なかったが、
 /// **S13 で I/O 待ちが入り、割り込みハンドラから取る経路ができた時点で壊れる。**
+/// **W1-c-4 で 2 本の Ring 3 が同時に走り、読み込みを重ねると実際に 2 つの文脈が取りに来る。**
 /// **`compare_exchange` なら、その時点でも契約が壊れない。**
 ///
 /// **`None` は「今は借りられない」である。** 起動シーケンスは単一コアの直線なので、
-/// **そこで `None` が返るのは返し忘れを意味する。**
+/// **そこで `None` が返るのは返し忘れを意味する。** **W1-c-4 の `concurrent-test` では、もう 1 本が
+/// 借りている最中という意味にもなりうる**——**だから `init` は 1 本を Ring 3 へ入れてから次を起こす**
+/// （`docs/wayland-inventory.md` の #4）。
 pub fn take() -> Option<&'static mut FrameAllocator> {
     if !PRESENT.load(Ordering::SeqCst) {
         return None;

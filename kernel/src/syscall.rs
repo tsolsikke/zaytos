@@ -640,7 +640,8 @@ pub const SENTINEL_RCX: u64 = 0xCCCC_CCCC;
 /// **W1-c-3 で、[`Records`] の欄（`PROBE_*` を除く 10 欄）をここへ移した**
 /// ——**2 本目が最初のシステムコールで 5 個、`write` で 3 個を触る**
 /// （`docs/wayland-inventory.md` の「W1-c の 2 本目は、17 個のうち何個を触るか」）。
-/// **スロットが今日は必ず 0 なので、中身は変わらない。**
+/// **W1-c-3 の時点ではスロットが必ず 0 だったので、中身は変わらなかった。** **W1-c-4 の
+/// `concurrent-test` で、足した 1 本がスロット 1 の欄を使う。**
 ///
 /// **`PROBE_*` は移していない。** **起動時の probe しか使わない。**
 struct SyscallState {
@@ -707,7 +708,8 @@ static SYSCALL_STATE: [SyscallState; crate::ring3::RING3_SLOTS] =
 
 /// 今のタスクのシステムコール側の状態を引く（W1-a。W1-c-3 でタスクのスロットから引く形にした）。
 ///
-/// **今日は必ずスロット 0 である**（`crate::ring3::current_slot`）。
+/// **既定の起動では必ずスロット 0 である**（`crate::ring3::current_slot`。**W1-c-4 の
+/// `concurrent-test` では足した 1 本がスロット 1 を引く**）。
 #[inline(always)]
 fn state() -> &'static SyscallState {
     &SYSCALL_STATE[crate::ring3::current_slot()]
@@ -3306,8 +3308,9 @@ pub fn user_window() -> (u64, u64) {
 ///
 /// **戻すのは呼び出し側の責任である。** 現在の呼び出し元は
 /// [`crate::ring3::enter`] だけで、あちらが遠征の前後で対にしている。
-/// **入れ子にはならない**（Ring 3 の遠征は入れ子にならない）が、
-/// **前の値を返す形にしてあるので、入れ子になっても壊れない。**
+/// **入れ子になる**（S11 の `spawn` から。**以前ここは「入れ子にならない」と書いていた**）。
+/// **前の値を返す形にしてあるので、入れ子でも壊れない。** **W1-c-3 から窓はスロットごとに持つので、
+/// W1-c-4 で 2 本が同時に走っても据え合わない。**
 pub fn set_user_window(start: u64, end: u64) -> (u64, u64) {
     let previous_start = state().user_window_start.swap(start, Ordering::SeqCst);
     let previous_end = state().user_window_end.swap(end, Ordering::SeqCst);

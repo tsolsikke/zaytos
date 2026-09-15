@@ -142,7 +142,8 @@ pub const MAX_EXCURSION_DEPTH: usize = 2;
 /// **W1-a でスロットごとに分けた。** **W1-a の時点では [`RING3_SLOTS`] が 1 で、
 /// 本数も置き場も変わらなかった**——**`.bss` は 1 バイトも増えなかった。**
 /// **W1-c-1 で [`RING3_SLOTS`] を 2 にしたので、本数が倍になった。**
-/// **2 つ目のスロットはまだ誰も使わない**（[`current_slot`] が今日は必ず 0 を返す）。
+/// **2 つ目のスロットを使うのは、足した 1 本のタスクだけである**（W1-c-4。**`concurrent-test` の
+/// 構成でだけ走る**。既定の起動では [`current_slot`] が必ず 0 を返す）。
 static mut EXCURSION_STACKS: [[ExcursionStack; MAX_EXCURSION_DEPTH]; RING3_SLOTS] =
     [const { [const { ExcursionStack([0; EXCURSION_STACK_SIZE]) }; MAX_EXCURSION_DEPTH] };
         RING3_SLOTS];
@@ -203,7 +204,8 @@ static CURRENT_RECOVERY: AtomicU64 = AtomicU64::new(0);
 /// （`task` の `TASK_COUNT` の末尾に足した 1 本と対になる）。
 ///
 /// **W1-c-1 では 2 つ目を誰も使わない**——**スロットを引く口（[`current_slot`]）は、
-/// W1-c-3 でタスクから引く形になった後も、今日は必ず 0 を返す。**
+/// W1-c-3 でタスクから引く形になった後も、W1-c-3c までは必ず 0 を返した。** **W1-c-4 から、
+/// `concurrent-test` の構成の足した 1 本だけが 1 を返す。**
 /// **大きさだけを変えた段である**（遠征スタックが 128 KiB 増える。あちらの表）。
 pub const RING3_SLOTS: usize = 2;
 
@@ -221,7 +223,8 @@ pub const RING3_SLOTS: usize = 2;
 ///
 /// **W1-a では [`RING3_SLOTS`] が 1 で、引く先は常に同じ 1 つだった。**
 /// **W1-c-3 で引く先をタスクのスロットにし、畳みの記録もここへ移したが、
-/// 今日は常にスロット 0 である**（[`current_slot`]）。
+/// 既定の起動では常にスロット 0 である**（[`current_slot`]。**W1-c-4 の `concurrent-test` では
+/// 足した 1 本がスロット 1 を引く**）。
 /// **変わるのは「どこから引くか」だけで、値も順序も変わらない。**
 struct ExcursionState {
     /// 今の遠征の深さ（S11-2）。**0 なら Ring 3 の遠征に入っていない。**
@@ -321,7 +324,8 @@ static EXCURSION_STATE: [ExcursionState; RING3_SLOTS] =
 
 /// 今のタスクの遠征の状態を引く（W1-a。W1-c-3 でタスクのスロットから引く形にした）。
 ///
-/// **引く口をここ 1 つに絞ってある**（[`current_slot`]）。**今日は必ずスロット 0 である。**
+/// **引く口をここ 1 つに絞ってある**（[`current_slot`]）。**既定の起動では必ずスロット 0 である**
+/// （W1-c-4 の `concurrent-test` では足した 1 本がスロット 1 を引く）。
 #[inline(always)]
 fn state() -> &'static ExcursionState {
     &EXCURSION_STATE[current_slot()]
@@ -372,8 +376,8 @@ pub fn recovery_belongs_to_slot(recovery: u64, slot: usize) -> bool {
 /// 今のタスクのスロットの番号（W1-a。W1-c-3 でタスクから引く形にした）。
 ///
 /// **W1-a から W1-c-2 までは定数 0 だった。** **W1-c-3 で `crate::task` から引く。**
-/// **今日は必ず 0 である**——**スロット 1 を使うタスクはまだ走らない**
-/// （`task::current_ring3_slot` の doc）。
+/// **既定の起動では必ず 0 である**——**スロット 1 を使う足した 1 本は、`concurrent-test` の構成で
+/// だけ走る**（W1-c-4。`task::current_ring3_slot` の doc）。
 ///
 /// **W1-c-1 から `crate::userland` の `SPAWN_*` もこれで引く。** **W1-c-3 で `CURRENT_FILES`・
 /// `CURRENT_HEAP`・`SPAWN_QUARANTINE` も加わった**（`ADR-0060` の Addendum）。
