@@ -139,8 +139,10 @@ pub const MAX_EXCURSION_DEPTH: usize = 2;
 /// **深さごとに 1 本持つ（S11-2）。** 入れ子のとき、**子がカーネルへ入るときに
 /// 親のスタックへ切り替わってはならない**——親はそのスタックの上で
 /// `spawn` の処理をしている最中である。
-/// **W1-a でスロットごとに分けた。** **[`RING3_SLOTS`] が 1 なので、いまは
-/// 本数も置き場も変わっていない**——**`.bss` は 1 バイトも増えていない。**
+/// **W1-a でスロットごとに分けた。** **W1-a の時点では [`RING3_SLOTS`] が 1 で、
+/// 本数も置き場も変わらなかった**——**`.bss` は 1 バイトも増えなかった。**
+/// **W1-c-1 で [`RING3_SLOTS`] を 2 にしたので、本数が倍になった。**
+/// **2 つ目のスロットはまだ誰も使わない**（[`RING3_SLOT`] が定数 0）。
 static mut EXCURSION_STACKS: [[ExcursionStack; MAX_EXCURSION_DEPTH]; RING3_SLOTS] =
     [const { [const { ExcursionStack([0; EXCURSION_STACK_SIZE]) }; MAX_EXCURSION_DEPTH] };
         RING3_SLOTS];
@@ -193,13 +195,16 @@ static CURRENT_RECOVERY: AtomicU64 = AtomicU64::new(0);
 
 /// Ring 3 へ降りられるタスクの本数（W1-a）。
 ///
-/// # いまは 1 である
+/// # W1-c-1 で 2 にした
 ///
-/// **タスクは 4 本あるが、Ring 3 へ降りるのは `init` / シェルの系統だけで、
-/// デモのワーカー 2 本は降りない**（実測。`docs/wayland-inventory.md`）。
-/// **W1-c で 2 本を同時に走らせるときに 2 にする。** **そのとき遠征スタックが
-/// 128 KiB 増える**（あちらの表）。
-pub const RING3_SLOTS: usize = 1;
+/// **W1-a の時点ではタスクが 4 本で、Ring 3 へ降りるのは `init` / シェルの系統だけ
+/// だった**（デモのワーカー 2 本は降りない。実測。`docs/wayland-inventory.md`）。
+/// **W1-c で 2 本を同時に走らせるので、もう 1 本ぶんを持つ**
+/// （`task` の `TASK_COUNT` の末尾に足した 1 本と対になる）。
+///
+/// **W1-c-1 では 2 つ目を誰も使わない**——**[`RING3_SLOT`] が定数 0 のままである。**
+/// **大きさだけを変えた段である**（遠征スタックが 128 KiB 増える。あちらの表）。
+pub const RING3_SLOTS: usize = 2;
 
 /// 1 本の遠征が持つ状態のうち、**置き場を分けられるもの**（W1-a）。
 ///
@@ -311,8 +316,12 @@ pub fn set_current_recovery(value: u64) {
 /// 今のタスクのスロットの番号（W1-a）。
 ///
 /// **W1-a では定数 0 である。** **W1-c でタスクから引く形になる**——
-/// **添字を書いている箇所をここ 1 つへ集めてあるので、変わるのはここだけである。**
-const RING3_SLOT: usize = 0;
+/// **添字を書いている箇所をここ 1 つへ集めてある。**
+///
+/// **W1-c-1 から `crate::userland` の `SPAWN_*` もこれで引く**（深さだけで引いていた）。
+/// **「変わるのはここだけ」は偽になった**——**同じ形の大域が `ring3.rs` と `syscall.rs` の
+/// 外にも在った**（`ADR-0060` の Addendum）。
+pub(crate) const RING3_SLOT: usize = 0;
 
 /// 畳んだ例外のベクタ。ハンドラが記録する。
 static FAULT_VECTOR: AtomicU64 = AtomicU64::new(0);

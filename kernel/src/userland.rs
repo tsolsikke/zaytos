@@ -766,8 +766,16 @@ const MAX_SPAWN_IN_FLIGHT: usize = MAX_EXCURSION_DEPTH;
 /// # スタックへ置かない
 ///
 /// [`MAX_EXECUTABLE_SIZE`] の doc（`deferred-decisions.md` の解禁条件の 2 度目）。
-static mut SPAWN_IMAGES: [[u8; MAX_EXECUTABLE_SIZE]; MAX_SPAWN_IN_FLIGHT] =
-    [[0; MAX_EXECUTABLE_SIZE]; MAX_SPAWN_IN_FLIGHT];
+///
+/// # スロットごとに持つ（W1-c-1）
+///
+/// **深さだけで引くと、同時に走る 2 本が同じ深さの緩衝を使う。** **`init` は深さ 0 から
+/// IF=1 のまま読み込む**（BKL を持つのは IF=0 の区間だけである）**ので、読み込みの途中でも
+/// タイマが切り替えうる。** **[`SPAWN_PATHS`]・[`SPAWN_ARGVS`]・[`SPAWN_ENVPS`] も同じである。**
+/// **W1-c-1 では 2 つ目のスロットを誰も使わない**（[`crate::ring3::RING3_SLOT`] が定数 0）。
+static mut SPAWN_IMAGES: [[[u8; MAX_EXECUTABLE_SIZE]; MAX_SPAWN_IN_FLIGHT];
+    crate::ring3::RING3_SLOTS] =
+    [[[0; MAX_EXECUTABLE_SIZE]; MAX_SPAWN_IN_FLIGHT]; crate::ring3::RING3_SLOTS];
 
 /// `spawn` が受け取ったパスを置く場所（S11-5）。
 ///
@@ -777,9 +785,10 @@ static mut SPAWN_IMAGES: [[u8; MAX_EXECUTABLE_SIZE]; MAX_SPAWN_IN_FLIGHT] =
 /// （判定行に出す名前と、初期スタックへ積む `argv[0]`）。**ユーザーから来た
 /// パスはカーネルスタックのローカルなので、そのままでは渡せない。**
 ///
-/// **像と同じく、深さごとに 1 本ずつ持つ**（[`MAX_SPAWN_IN_FLIGHT`]）。
-static mut SPAWN_PATHS: [[u8; PATH_MAX]; MAX_SPAWN_IN_FLIGHT] =
-    [[0; PATH_MAX]; MAX_SPAWN_IN_FLIGHT];
+/// **像と同じく、スロットと深さごとに 1 本ずつ持つ**（[`MAX_SPAWN_IN_FLIGHT`]。
+/// スロットは W1-c-1 で足した。[`SPAWN_IMAGES`] の doc）。
+static mut SPAWN_PATHS: [[[u8; PATH_MAX]; MAX_SPAWN_IN_FLIGHT]; crate::ring3::RING3_SLOTS] =
+    [[[0; PATH_MAX]; MAX_SPAWN_IN_FLIGHT]; crate::ring3::RING3_SLOTS];
 
 /// [`spawn`] が起こした子が隔離へ入れたフレームの累計（S11-5）。
 ///
@@ -839,17 +848,19 @@ pub fn spawn_accounting() -> (usize, usize) {
 ///
 /// **NUL 区切りで並べたバイト列である。** [`load_user_program`] が要求するのは
 /// `&[&[u8]]` で、**要素は `'static` でなければならない**（[`SPAWN_PATHS`] と
-/// 同じ理由）。**深さごとに 1 本ずつ持つ**（[`MAX_SPAWN_IN_FLIGHT`]）。
-static mut SPAWN_ARGVS: [[u8; MAX_ARGV_BYTES]; MAX_SPAWN_IN_FLIGHT] =
-    [[0; MAX_ARGV_BYTES]; MAX_SPAWN_IN_FLIGHT];
+/// 同じ理由）。**スロットと深さごとに 1 本ずつ持つ**（[`MAX_SPAWN_IN_FLIGHT`]。
+/// スロットは W1-c-1 で足した。[`SPAWN_IMAGES`] の doc）。
+static mut SPAWN_ARGVS: [[[u8; MAX_ARGV_BYTES]; MAX_SPAWN_IN_FLIGHT]; crate::ring3::RING3_SLOTS] =
+    [[[0; MAX_ARGV_BYTES]; MAX_SPAWN_IN_FLIGHT]; crate::ring3::RING3_SLOTS];
 
 /// `spawn` が受け取った `envp` を置く場所（f-2。`ADR-0053`）。
 ///
 /// **[`SPAWN_ARGVS`] と同じ形である**——**NUL 区切りで並べたバイト列を、
-/// 深さごとに 1 本ずつ持つ。** **別に持つ理由は、`argv` と `envp` の上限が
-/// 別の理由で決まっているからである**（語の数と、環境の本数）。
-static mut SPAWN_ENVPS: [[u8; MAX_ENVP_BYTES]; MAX_SPAWN_IN_FLIGHT] =
-    [[0; MAX_ENVP_BYTES]; MAX_SPAWN_IN_FLIGHT];
+/// スロットと深さごとに 1 本ずつ持つ。** **別に持つ理由は、`argv` と `envp` の上限が
+/// 別の理由で決まっているからである**（語の数と、環境の本数）。スロットは W1-c-1 で
+/// 足した（[`SPAWN_IMAGES`] の doc）。
+static mut SPAWN_ENVPS: [[[u8; MAX_ENVP_BYTES]; MAX_SPAWN_IN_FLIGHT]; crate::ring3::RING3_SLOTS] =
+    [[[0; MAX_ENVP_BYTES]; MAX_SPAWN_IN_FLIGHT]; crate::ring3::RING3_SLOTS];
 
 /// [`spawn`] が拒む形（S11-5）。
 ///
@@ -1827,6 +1838,8 @@ pub fn spawn(
     // **深さ 0 からも呼べる（S11-11）。** `init` がカーネルの直線上から
     // シェルを起こす。**S11-5 の時点では `dispatch` からしか来なかったので、
     // 深さ 0 を不具合として拒んでいた。** 呼び出し側が増えたので、その判定を外した。
+    // **この `slot` は深さの番号である。** 遠征のスロット（W1-c-1）は
+    // `crate::ring3::RING3_SLOT` で引く。
     let slot = depth;
 
     let mut port = SerialPort::new(SerialPort::COM1_BASE);
@@ -1854,7 +1867,7 @@ pub fn spawn(
     // のはこの 1 本だけである（深さの判定が入れ子の重なりを禁じている）。
     // 単一コアの実行文脈で、割り込みハンドラはここへ来ない。
     let path_slot: &'static mut [u8; PATH_MAX] =
-        unsafe { &mut (*core::ptr::addr_of_mut!(SPAWN_PATHS))[slot] };
+        unsafe { &mut (*core::ptr::addr_of_mut!(SPAWN_PATHS))[crate::ring3::RING3_SLOT][slot] };
     path_slot[..name_len].copy_from_slice(&path[..name_len]);
     let name_bytes: &'static [u8] = &path_slot[..name_len];
     // **UTF-8 でなければ名前を伏せる。** パスは Ring 3 から来るバイト列で、
@@ -1865,7 +1878,7 @@ pub fn spawn(
     // **像をブロックごとに写す。** 借りたままにできない理由は [`SPAWN_IMAGES`]。
     // SAFETY: `slot` は範囲内で、その深さで使うのはこの 1 本だけである（上と同じ）。
     let image_slot: &'static mut [u8; MAX_EXECUTABLE_SIZE] =
-        unsafe { &mut (*core::ptr::addr_of_mut!(SPAWN_IMAGES))[slot] };
+        unsafe { &mut (*core::ptr::addr_of_mut!(SPAWN_IMAGES))[crate::ring3::RING3_SLOT][slot] };
     {
         let block_size = fs.block_size() as usize;
         let mut done = 0usize;
@@ -1971,7 +1984,7 @@ pub fn spawn(
     // のはこの 1 本だけである（深さの判定が入れ子の重なりを禁じている）。
     // 単一コアの実行文脈で、割り込みハンドラはここへ来ない。
     let argv_slot: &'static mut [u8; MAX_ARGV_BYTES] =
-        unsafe { &mut (*core::ptr::addr_of_mut!(SPAWN_ARGVS))[slot] };
+        unsafe { &mut (*core::ptr::addr_of_mut!(SPAWN_ARGVS))[crate::ring3::RING3_SLOT][slot] };
     argv_slot[..argv_bytes.len()].copy_from_slice(argv_bytes);
     let stored: &'static [u8] = &argv_slot[..argv_bytes.len()];
 
@@ -2018,8 +2031,9 @@ pub fn spawn(
             // SAFETY: `slot` は [`MAX_SPAWN_IN_FLIGHT`] の範囲内で、その深さで走って
             // いるのはこの 1 本だけである（深さの判定が入れ子の重なりを禁じている）。
             // 単一コアの実行文脈で、割り込みハンドラはここへ来ない。
-            let envp_slot: &'static mut [u8; MAX_ENVP_BYTES] =
-                unsafe { &mut (*core::ptr::addr_of_mut!(SPAWN_ENVPS))[slot] };
+            let envp_slot: &'static mut [u8; MAX_ENVP_BYTES] = unsafe {
+                &mut (*core::ptr::addr_of_mut!(SPAWN_ENVPS))[crate::ring3::RING3_SLOT][slot]
+            };
             envp_slot[..envp_bytes.len()].copy_from_slice(envp_bytes);
             let env_stored: &'static [u8] = &envp_slot[..envp_bytes.len()];
 

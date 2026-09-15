@@ -33,12 +33,20 @@ use crate::idt::YIELD_VECTOR;
 /// ワーカータスクの本数（M5-c は 2 本）。
 pub const WORKER_COUNT: usize = 2;
 
-/// タスクの総数。メイン（0）+ ワーカー（`1..=WORKER_COUNT`）+ AP 用アイドル（末尾）。
+/// タスクの総数。メイン（0）+ ワーカー（`1..=WORKER_COUNT`）+ AP 用アイドル +
+/// Ring 3 を同時に走らせる 1 本（末尾）。
 ///
 /// S4-c-2 で 1 つ増えた。担当コアを入れると、AP にとっての「タスク 0」に相当する
 /// ものが要る。`pick_next` は走行可能な担当が無いときタスク 0 を返すが、タスク 0 は
 /// bootstrap processor の担当である。
-const TASK_COUNT: usize = WORKER_COUNT + 2;
+///
+/// **W1-c-1 でもう 1 つ増えた（末尾）。** **2 本の Ring 3 を同時に走らせるには、
+/// メインの他にもう 1 本が要る**（`ring3::RING3_SLOTS` が 2 であることと対になる）。
+/// **W1-c-1 では誰も使わない**——**`Uninitialized` のままで、`pick_next` の走査範囲
+/// （`1..=WORKER_COUNT`）の外にある。** **既存の添字は動かない**（AP 用アイドルは 3 のまま）。
+/// **添字に名前を付けるのは使い始める W1-c-4 である**——**いま付けると、使われない
+/// 定数に `#[allow(dead_code)]` が要る。**
+const TASK_COUNT: usize = WORKER_COUNT + 3;
 
 /// メインタスクの添字。bootstrap processor の既定タスクでもある（S4-c-3-1）。
 const MAIN_TASK: usize = 0;
@@ -2015,7 +2023,7 @@ mod tests {
     /// これにあたる。
     #[test]
     fn layer_two_skips_a_task_that_another_cpu_is_running() {
-        let all_ready = states([true, true, true, true]);
+        let all_ready = states([true, true, true, true, true]);
         // 全部 bootstrap processor 担当（= 第 1 層が何も弾かない構成）。
         let mut currents = NOBODY_RUNNING;
 
@@ -2106,7 +2114,7 @@ mod tests {
     /// 返ったら、AP が bootstrap processor のタスクを走らせることになる。
     #[test]
     fn an_application_processor_falls_back_to_its_own_idle_task() {
-        let all_ready = states([true, true, true, true]);
+        let all_ready = states([true, true, true, true, true]);
         let ap = super::AP_IDLE_TASK_OWNER;
         // ワーカーは 2 本とも BSP 担当なので、AP から見た候補は 0 本である。
         assert_eq!(
@@ -2124,7 +2132,7 @@ mod tests {
             AP_IDLE_TASK
         );
         // ワーカーが全部走行不可でも同じ落ち先である。
-        let none_ready = states([false, false, false, true]);
+        let none_ready = states([false, false, false, true, true]);
         assert_eq!(
             super::pick_next(none_ready, PRODUCTION_OWNERS, NOBODY_RUNNING, ap, 0),
             AP_IDLE_TASK
@@ -2160,7 +2168,7 @@ mod tests {
     /// 選ばれず、走行可能な担当が無いときの既存の経路（タスク 0）へ落ちる。
     #[test]
     fn a_task_owned_by_another_cpu_is_not_a_candidate() {
-        let all_ready = states([true, true, true, true]);
+        let all_ready = states([true, true, true, true, true]);
         // 全部 AP 担当にすると、bootstrap processor から見て候補が無い。
         let all_ap = [1usize; TASK_COUNT];
         assert_eq!(super::pick_next(all_ready, all_ap, NOBODY_RUNNING, 0, 0), 0);
@@ -2172,9 +2180,10 @@ mod tests {
     /// 担当が混ざっていても、自コアのぶんだけを回す（S4-c-1）。
     #[test]
     fn only_the_tasks_owned_by_this_cpu_are_rotated() {
-        let all_ready = states([true, true, true, true]);
+        let all_ready = states([true, true, true, true, true]);
         // ワーカー 1 = BSP、ワーカー 2 = AP。
-        let mixed = [0usize, 0, 1, 1];
+        // W1-c-1 で足した末尾の 1 本は BSP 担当（本番の既定と同じ）。
+        let mixed = [0usize, 0, 1, 1, 0];
         // BSP はワーカー 1 しか選べない。現タスクが 1 でも 1 を返す
         // （`pick_next` は現タスクを返しうるという既存の契約）。
         assert_eq!(super::pick_next(all_ready, mixed, NOBODY_RUNNING, 0, 0), 1);
@@ -2192,6 +2201,13 @@ mod tests {
     /// `pick_next` はワーカー（`1..=WORKER_COUNT`）しか候補にしないので結果は
     /// 変わらないが、既存の表明はすべて「AP 用アイドルタスクが選ばれないこと」も
     /// 同時に主張するようになった。入力が変わったことを書いておく。
+    ///
+    /// # W1-c-1 でもう 1 要素増えた
+    ///
+    /// **足したのは Ring 3 を同時に走らせる 1 本で、値は `Ready` にしてある**
+    /// （本番では `Uninitialized` だが、`Ready` のほうが強い入力である）。
+    /// **既存の表明はすべて「その 1 本が選ばれないこと」も同時に主張する。**
+    /// **W1-c-4 でそれを候補に加えると、この前提が崩れる**——**そのときは期待値を引き直すこと。**
     fn states(flags: [bool; TASK_COUNT]) -> [TaskState; TASK_COUNT] {
         let mut out = [TaskState::Uninitialized; TASK_COUNT];
         for (slot, flag) in out.iter_mut().zip(flags) {
@@ -2215,8 +2231,11 @@ mod tests {
     #[test]
     fn the_demo_has_two_workers_and_one_main() {
         assert_eq!(WORKER_COUNT, 2);
-        // メイン（0）+ ワーカー 2 + AP 用アイドル 1。
-        assert_eq!(TASK_COUNT, 4);
+        // メイン（0）+ ワーカー 2 + AP 用アイドル 1 + Ring 3 を同時に走らせる 1 本（W1-c-1）。
+        assert_eq!(TASK_COUNT, 5);
+        // **足した 1 本は AP 用アイドルの後ろ、末尾に置く。既存の添字は動かない**
+        // （起動ログの `registered the AP idle task as index 3` もそのまま）。
+        assert_eq!(TASK_COUNT, AP_IDLE_TASK + 2);
         // AP 用アイドルはワーカーの後ろに置く。`pick_next` の走査範囲
         // （`1..=WORKER_COUNT`）の外であることが、選ばれない理由である。
         assert_eq!(AP_IDLE_TASK, WORKER_COUNT + 1);
@@ -2225,9 +2244,9 @@ mod tests {
 
     #[test]
     fn main_is_chosen_when_no_worker_can_run() {
-        assert_eq!(pick_next(states([false, false, false, true]), 0), 0);
-        assert_eq!(pick_next(states([false, false, false, true]), 1), 0);
-        assert_eq!(pick_next(states([false, false, false, true]), 2), 0);
+        assert_eq!(pick_next(states([false, false, false, true, true]), 0), 0);
+        assert_eq!(pick_next(states([false, false, false, true, true]), 1), 0);
+        assert_eq!(pick_next(states([false, false, false, true, true]), 2), 0);
     }
 
     /// タスク 0（メイン）は候補として巡回されない。走行可能と印を付けても
@@ -2235,21 +2254,21 @@ mod tests {
     #[test]
     fn main_is_never_picked_as_a_rotation_candidate() {
         // メインだけが走行可能でも、返るのは 0（フォールバック経路）。
-        assert_eq!(pick_next(states([true, false, false, true]), 1), 0);
+        assert_eq!(pick_next(states([true, false, false, true, true]), 1), 0);
     }
 
     #[test]
     fn from_main_the_first_runnable_worker_is_chosen() {
-        assert_eq!(pick_next(states([false, true, true, true]), 0), 1);
-        assert_eq!(pick_next(states([false, false, true, true]), 0), 2);
-        assert_eq!(pick_next(states([false, true, false, true]), 0), 1);
+        assert_eq!(pick_next(states([false, true, true, true, true]), 0), 1);
+        assert_eq!(pick_next(states([false, false, true, true, true]), 0), 2);
+        assert_eq!(pick_next(states([false, true, false, true, true]), 0), 1);
     }
 
     /// ワーカーの間は巡回する（round-robin）。
     #[test]
     fn workers_rotate() {
-        assert_eq!(pick_next(states([false, true, true, true]), 1), 2);
-        assert_eq!(pick_next(states([false, true, true, true]), 2), 1);
+        assert_eq!(pick_next(states([false, true, true, true, true]), 1), 2);
+        assert_eq!(pick_next(states([false, true, true, true, true]), 2), 1);
     }
 
     /// 現タスクが再選択されうる。他に走れるワーカーがおらず自分だけが
@@ -2258,15 +2277,15 @@ mod tests {
     /// 成立している契約なので、状態機械化でもこの性質を保つこと。
     #[test]
     fn the_current_worker_is_returned_when_it_is_the_only_runnable_one() {
-        assert_eq!(pick_next(states([false, true, false, true]), 1), 1);
-        assert_eq!(pick_next(states([false, false, true, true]), 2), 2);
+        assert_eq!(pick_next(states([false, true, false, true, true]), 1), 1);
+        assert_eq!(pick_next(states([false, false, true, true, true]), 2), 2);
     }
 
     /// 走行不可のワーカーは飛ばされる。
     #[test]
     fn an_unrunnable_worker_is_skipped() {
-        assert_eq!(pick_next(states([false, false, true, true]), 1), 2);
-        assert_eq!(pick_next(states([false, true, false, true]), 2), 1);
+        assert_eq!(pick_next(states([false, false, true, true, true]), 1), 2);
+        assert_eq!(pick_next(states([false, true, false, true, true]), 2), 1);
     }
 
     /// `Ready` 以外はすべて選ばれない。状態を増やしたときに
