@@ -119,6 +119,21 @@ const fn default_task_for(cpu: usize) -> usize {
     }
 }
 
+/// そのコアのアイドルタスク（W2-c-1。`ADR-0061`）。
+///
+/// **[`default_task_for`] と違う。** **あちらは「走行可能な担当が無いときの帰り先」で、
+/// BSP ではメインである**（メインが帰り先の役を果たしている）。**こちらは「誰も走れないときに
+/// `hlt` する先」である。**
+///
+/// **AP では同じものを指す**——**AP の帰り先は最初からアイドルである。**
+const fn idle_task_for(cpu: usize) -> usize {
+    if cpu == common::percpu::BOOTSTRAP_PROCESSOR_SLOT {
+        BSP_IDLE_TASK
+    } else {
+        AP_IDLE_TASK
+    }
+}
+
 /// 各ワーカーのカーネルスタックの大きさ。デモは浅いので 16KiB で足りる。
 const TASK_STACK_SIZE: usize = 16 * 1024;
 
@@ -542,6 +557,26 @@ static SWITCHES_OUT_OF_EXCURSION: [AtomicU64; TASK_COUNT] =
 
 /// 切り替えが CR3 を載せ替えた回数（W1-c-4 の計器。`docs/wayland-inventory.md` の #5）。
 static CR3_LOADS_ON_SWITCH: AtomicU64 = AtomicU64::new(0);
+
+/// BSP 用アイドルタスクが `hlt` した回数（W2-c-1 の計器）。
+///
+/// **W2-c-1 では 0 のままである**——**誰も待たないので、アイドルが選ばれない。**
+/// **0 を先に記録しておくと、W2-c-2 の主張が「1 以上である」ではなく
+/// 「0 から 1 以上へ変わった」になる**（運用者の指摘。2026-09-16）。
+static IDLE_HALTS: AtomicU64 = AtomicU64::new(0);
+
+/// 切り替えが BSP 用アイドルを選んだ回数（W2-c-1 の計器）。**こちらも W2-c-1 では 0 である。**
+static IDLE_SELECTIONS: AtomicU64 = AtomicU64::new(0);
+
+/// BSP 用アイドルが `hlt` した回数（W2-c-1）。
+pub fn idle_halts() -> u64 {
+    IDLE_HALTS.load(Ordering::Relaxed)
+}
+
+/// 切り替えが BSP 用アイドルを選んだ回数（W2-c-1）。
+pub fn idle_selections() -> u64 {
+    IDLE_SELECTIONS.load(Ordering::Relaxed)
+}
 
 /// タスク `task` が遠征の最中に切り替えで出た回数（W1-c-4）。
 pub fn switches_out_of_excursion(task: usize) -> u64 {
@@ -1123,6 +1158,9 @@ core::arch::global_asm!(
 /// `Ready` にしてから割り込みを終えるので、取りこぼしは生じない**（あちらで判定を置く）。
 extern "sysv64" fn bsp_idle_main() -> ! {
     loop {
+        // **眠った回数を数える（W2-c-1 の計器）。** **眠る前に数える**——**起きてから
+        // 数えると、起こした割り込みの中で読む値が 1 つ足りない。**
+        IDLE_HALTS.fetch_add(1, Ordering::Relaxed);
         // SAFETY: 割り込みを許して眠るだけである。錠は 1 つも持っていない。
         // ハンドラは登録済みで、このタスクのスタックはガードページ付きである。
         unsafe { common::cpu::enable_interrupts_and_halt() };
@@ -1876,6 +1914,15 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         if next == RING3_TASK && scheduler::excursion_depth(current) != 0 {
             return current_rsp;
         }
+        // **アイドルを選んだ回数を数える（W2-c-1 の計器）。** **早い戻りより後に置く**
+        // ——**`next == current` で戻る形を数えると、「選び直した」ではなく
+        // 「既に乗っている」を数えてしまう。**
+        //
+        // **BSP のぶんだけ数える**——**AP のアイドルは最初から `CURRENT` に入っているので、
+        // 選び直しは起きない**（上の早い戻りで帰る）。
+        if next == BSP_IDLE_TASK {
+            IDLE_SELECTIONS.fetch_add(1, Ordering::Relaxed);
+        }
         // **遠征の最中に出たかを数える（W1-c-4 の計器）。**
         count_switch_out_of_excursion(current);
 
@@ -2236,6 +2283,20 @@ fn pick_next(
     {
         return RING3_TASK;
     }
+    // **既定のタスクが待っているなら、自コアのアイドルへ落ちる（W2-c-1。`ADR-0061`）。**
+    //
+    // **`Waiting` だけを見る。** **`Blocked` では落ちない**——**プリエンプティブデモは
+    // 締切でワーカーを `Blocked` にし、メインへ戻ることで終わる。** **そこをアイドルへ
+    // 変えると、デモから戻れず起動が進まない。** **`ADR-0061` の決定 3（`Waiting` を
+    // `Blocked` と分ける）が効く 2 つ目の場所である。**
+    //
+    // **W2-c-1 では誰も `Waiting` にならないので、この分岐は通らない。** **通るのは
+    // W2-c-2（`read(0)` が待つ）からである。**
+    let fallback = default_task_for(cpu);
+    if matches!(states[fallback], TaskState::Waiting(_)) {
+        return idle_task_for(cpu);
+    }
+
     // 走行可能な担当ワーカーが無いので、自コアの既定タスクへ落ちる（S4-c-3-1）。
     // 固定の `0` から変えた理由は [`default_task_for`] の doc。
     //
@@ -3024,6 +3085,35 @@ mod tests {
             input[super::RING3_TASK] = state;
             assert_eq!(pick_next(input, 0), 0, "{state:?}");
         }
+    }
+
+    /// 既定のタスクが待っているときだけ、アイドルへ落ちる（W2-c-1）。
+    ///
+    /// **`Blocked` では落ちない**——**デモは締切でワーカーを `Blocked` にし、メインへ
+    /// 戻ることで終わる**（`ADR-0061` の決定 3 が効く 2 つ目の場所）。
+    #[test]
+    fn the_fallback_goes_to_idle_only_when_the_default_task_is_waiting() {
+        // メインが `Blocked`（デモの形）——落ち先はメインのままである。
+        let blocked = states([false, false, false, true, false, true]);
+        assert_eq!(pick_next(blocked, 0), super::MAIN_TASK);
+        assert_eq!(pick_next(blocked, 1), super::MAIN_TASK);
+
+        // メインが `Waiting`——アイドルへ落ちる。
+        let mut waiting = blocked;
+        waiting[super::MAIN_TASK] = TaskState::Waiting(super::Wait::Keyboard);
+        assert_eq!(pick_next(waiting, 0), super::BSP_IDLE_TASK);
+        assert_eq!(pick_next(waiting, 1), super::BSP_IDLE_TASK);
+
+        // **走れるワーカーが在れば、そちらが先である**（落ち先まで来ない）。
+        let mut waiting_with_worker = waiting;
+        waiting_with_worker[1] = TaskState::Ready;
+        assert_eq!(pick_next(waiting_with_worker, 0), 1);
+
+        // AP は自分のアイドルへ落ちる（担当が違うので、BSP のアイドルへは行かない）。
+        assert_eq!(
+            super::pick_next(waiting, PRODUCTION_OWNERS, NOBODY_RUNNING, 1, AP_IDLE_TASK),
+            AP_IDLE_TASK
+        );
     }
 
     /// BSP 用アイドルは巡回されず、落ち先でもない（W2-a）。

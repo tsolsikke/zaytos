@@ -2047,6 +2047,19 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
                         kernel::input::delivered_count()
                     ),
                 );
+                // **アイドルの計器を出す（W2-c-1）。** **シリアルだけへ出す**
+                // ——**画面の書き手を増やさない。**
+                //
+                // **シェルが終わった後に出す。** **既定の起動ではシェルが終わらないので、
+                // この行は起動ログの参照には入らない**——**入るのは `--shell-test` の
+                // ログである。** **W2-c-1 では両方 0 のはずで、その 0 を記録しておくと、
+                // W2-c-2 の主張が「0 から 1 以上へ変わった」になる**（運用者の指摘）。
+                logger.info(format_args!(
+                    "idle: the bsp idle task halted {} time(s) and was selected {} time(s) \
+                     during this session (W2-c-1: nothing waits yet, so both should be 0)",
+                    kernel::task::idle_halts(),
+                    kernel::task::idle_selections()
+                ));
             }
             Err(error) => {
                 log_both(
