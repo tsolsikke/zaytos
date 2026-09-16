@@ -223,9 +223,43 @@ enum TaskState {
     /// `main_is_never_picked_as_a_rotation_candidate` が固定している）。
     /// メインを `Ready` にしても走るようにはならない。動く理由を取り違えないよう
     /// 書いておく。
+    /// **`Waiting` と分けてある（W2-b。`ADR-0061` の決定 3）。**
+    /// **こちらは「走行不可の理由が欄の外に在る」**——**メインは帰り先だから、ワーカーは
+    /// 締切で止めたから走らない。** **起こす側が「どの合図で起こすか」を欄から引けない。**
     Blocked,
+    /// 合図を待っている（W2-b。`ADR-0061` の決定 3）。**理由は欄が持つ。**
+    ///
+    /// # なぜ [`Blocked`] と分けるのか
+    ///
+    /// **起こす側が合図で引くためである。** **混ぜると、締切で止めたワーカーをキー入力で
+    /// 起こす形が作れてしまう**（[`Blocked`] の doc）。
+    ///
+    /// # W2-b では誰もこの状態にならない
+    ///
+    /// **欄と遷移の置き場だけを足した段である。** **待たせるのは W2-c で、`read(0)` が
+    /// 前景の持ち主を待たせるときである。** **起こすのは IRQ1 のハンドラである。**
+    ///
+    /// [`Blocked`]: TaskState::Blocked
+    Waiting(Wait),
     /// 全ラウンドを終えた。以後スケジューラはこのタスクを選ばない。
     Finished,
+}
+
+/// 何を待っているか（W2-b。`ADR-0061` の決定 4）。
+///
+/// **最初はキーボードだけである。** **タイマは W2-d（任意の段）で足す。** **I/O の完了は
+/// 足さない**——**virtio は既に BKL を解いて眠る形を持っている**（`ADR-0036`）。
+///
+/// **`Copy` である必要がある**——[`TaskState`] が `Copy` で、`scheduler::states()` が
+/// 配列で返す。
+// **W2-b では誰も作らない。** 作るのは W2-c の `read(0)` である。
+// **`allow` は W2-c で外すこと**——**外し忘れると、使われないまま残る**
+// （W1-a で同じ形を書いた。`ADR-0060`）。
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Wait {
+    /// 端末からのバイトを待っている（前景の持ち主だけがこの状態になる。`ADR-0061` の決定 1）。
+    Keyboard,
 }
 
 impl TaskState {
@@ -233,6 +267,9 @@ impl TaskState {
     ///
     /// `runnable: bool` からの置き換えで、この 1 関数が旧フィールドの役割を担う。
     /// 判定を 1 箇所に集めてあるので、状態を増やしたときに選択可否を決め忘れない。
+    ///
+    /// **W2-b で [`TaskState::Waiting`] を足したが、ここは変えていない**——**`Ready` だけが
+    /// 走行可能である。** **待っているタスクは選ばれない**（それが待つということである）。
     const fn is_runnable(self) -> bool {
         matches!(self, Self::Ready)
     }
@@ -903,6 +940,54 @@ pub fn note_current_excursion_depth(depth: usize) {
         return;
     };
     scheduler::set_excursion_depth(index, depth);
+}
+
+/// 今のタスクを待たせる（W2-b。`ADR-0061`）。**呼ぶ者は W2-c で足す。**
+///
+/// # 眠るのは呼び出し側である
+///
+/// **ここは欄を変えるだけで、`hlt` もしなければ切り替えもしない。** **呼び出し側が、
+/// 欄を変えてから `yield_now` で譲る**——**そこで `pick_next` がこのタスクを飛ばし、
+/// 走行可能な者が居なければ BSP 用アイドルへ落ちる**（W2-c で落ち先を変える）。
+///
+/// # 割り込みを止めてから呼ぶこと
+///
+/// **欄を変えてから譲るまでの間に合図が来ると、起こす側が「待っている者」を見つけられず、
+/// 誰も起こさないまま眠る。** **W2-c で、その窓を閉じる形（`cli` の内側で欄を変え、
+/// `sti; hlt` を隣接させる）を決める。**
+// **W2-b では呼ぶ者が居ない。** 置き場だけを先に作る段である。
+// **`allow` は W2-c で外すこと**——**外し忘れると、使われないまま残る。**
+#[allow(dead_code)]
+fn set_current_waiting(on: Wait) {
+    let Some(index) = current_index_if_any() else {
+        return;
+    };
+    scheduler::set_state(index, TaskState::Waiting(on));
+}
+
+/// その合図を待っているタスクを起こす（W2-b。`ADR-0061`）。**起こした本数を返す。**
+///
+/// # 合図で引く
+///
+/// **[`TaskState::Waiting`] の中身と突き合わせる**——**だから [`TaskState::Blocked`] と
+/// 分けてある**（あちらは理由が欄の外に在るので、キー入力で起こしてよいかが判らない）。
+///
+/// # 空振りで起こしてよい
+///
+/// **起こされた側は、読めなければまた待つ**（`ADR-0061`）。**離鍵のように、積まれても
+/// 読み手のバイトにならない合図が在るためである。**
+// **W2-b では呼ぶ者が居ない。** 呼ぶのは W2-c の IRQ1 のハンドラである。
+// **`allow` は W2-c で外すこと**——**外し忘れると、使われないまま残る。**
+#[allow(dead_code)]
+fn wake_tasks_waiting_on(on: Wait) -> usize {
+    let mut woken = 0;
+    for index in 0..TASK_COUNT {
+        if scheduler::state(index) == TaskState::Waiting(on) {
+            scheduler::set_state(index, TaskState::Ready);
+            woken += 1;
+        }
+    }
+    woken
 }
 
 /// 今のタスクの回復点の欄を据える（W1-b。遠征の出入りが呼ぶ）。
@@ -3049,6 +3134,13 @@ mod tests {
         assert!(!TaskState::Uninitialized.is_runnable());
         assert!(!TaskState::Blocked.is_runnable());
         assert!(!TaskState::Finished.is_runnable());
+        // **待っているタスクは選ばれない（W2-b）。** それが待つということである。
+        assert!(!TaskState::Waiting(super::Wait::Keyboard).is_runnable());
+        // **`Blocked` と `Waiting` は別の状態である**（`ADR-0061` の決定 3）。
+        assert_ne!(
+            TaskState::Blocked,
+            TaskState::Waiting(super::Wait::Keyboard)
+        );
     }
 
     /// `Uninitialized` が残っていても安全側に倒れる。`static` の初期値が
