@@ -267,12 +267,9 @@ enum TaskState {
 ///
 /// **`Copy` である必要がある**——[`TaskState`] が `Copy` で、`scheduler::states()` が
 /// 配列で返す。
-// **W2-b では誰も作らない。** 作るのは W2-c の `read(0)` である。
-// **`allow` は W2-c で外すこと**——**外し忘れると、使われないまま残る**
-// （W1-a で同じ形を書いた。`ADR-0060`）。
-#[allow(dead_code)]
+// **作るのは W2-c-2 の `read(0)` である。**
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Wait {
+pub enum Wait {
     /// 端末からのバイトを待っている（前景の持ち主だけがこの状態になる。`ADR-0061` の決定 1）。
     Keyboard,
 }
@@ -985,15 +982,16 @@ pub fn note_current_excursion_depth(depth: usize) {
 /// 欄を変えてから `yield_now` で譲る**——**そこで `pick_next` がこのタスクを飛ばし、
 /// 走行可能な者が居なければ BSP 用アイドルへ落ちる**（W2-c で落ち先を変える）。
 ///
-/// # 割り込みを止めてから呼ぶこと
+/// # 割り込みを止めた文脈から呼ぶこと
 ///
 /// **欄を変えてから譲るまでの間に合図が来ると、起こす側が「待っている者」を見つけられず、
-/// 誰も起こさないまま眠る。** **W2-c で、その窓を閉じる形（`cli` の内側で欄を変え、
-/// `sti; hlt` を隣接させる）を決める。**
-// **W2-b では呼ぶ者が居ない。** 置き場だけを先に作る段である。
-// **`allow` は W2-c で外すこと**——**外し忘れると、使われないまま残る。**
-#[allow(dead_code)]
-fn set_current_waiting(on: Wait) {
+/// 誰も起こさないまま眠る。** **W2-c-2 で確かめた**——**呼ぶのは `sys_read` で、`int 0x80` は
+/// 割り込みゲートなので IF=0 である。** **BKL を解いても IF は戻らない**
+/// （`EntryInterruptGuard` は保存した RFLAGS が IF=1 のときだけ戻す。実測）——**だから
+/// 窓は構造で閉じている。**
+// 破壊 `read-never-waits` では待たないので、呼ぶ者が居なくなる。
+#[cfg_attr(feature = "read-never-waits", allow(dead_code))]
+pub(crate) fn set_current_waiting(on: Wait) {
     let Some(index) = current_index_if_any() else {
         return;
     };
@@ -1011,18 +1009,41 @@ fn set_current_waiting(on: Wait) {
 ///
 /// **起こされた側は、読めなければまた待つ**（`ADR-0061`）。**離鍵のように、積まれても
 /// 読み手のバイトにならない合図が在るためである。**
-// **W2-b では呼ぶ者が居ない。** 呼ぶのは W2-c の IRQ1 のハンドラである。
-// **`allow` は W2-c で外すこと**——**外し忘れると、使われないまま残る。**
-#[allow(dead_code)]
-fn wake_tasks_waiting_on(on: Wait) -> usize {
+/// **呼ぶのは IRQ1 のハンドラである**（W2-c-2）。**IF=0 かつ BKL の内側で、切り替えが
+/// 状態を書くのと同じ文脈である。**
+// 破壊 `keyboard-does-not-wake` では呼ぶ者が居なくなる。
+#[cfg_attr(feature = "keyboard-does-not-wake", allow(dead_code))]
+pub(crate) fn wake_tasks_waiting_on(on: Wait) -> usize {
     let mut woken = 0;
     for index in 0..TASK_COUNT {
+        // **合図で引く。** **「合図を見ずに全部起こす」破壊は置けなかった（W2-c-2）**
+        // ——**合図が 1 つしか無いので、見なくても結果が同じである。** **3 回とも全判定を
+        // 通した**（実測。2026-09-16）。**待つ理由が増える段（W2-d のタイマ）で置くこと。**
         if scheduler::state(index) == TaskState::Waiting(on) {
             scheduler::set_state(index, TaskState::Ready);
             woken += 1;
         }
     }
+    if woken > 0 {
+        WAKES_ISSUED.fetch_add(woken as u64, Ordering::Relaxed);
+    }
     woken
+}
+
+/// その合図を待っているタスクが居るか（W2-c-2 の関係の検出器）。
+///
+/// **起こす側が「積んだが起こさなかった」を数えるために要る**——**積んだ時点で待っている者が
+/// 居たかどうかは、積む側にしか分からない。**
+pub(crate) fn someone_waits_on(on: Wait) -> bool {
+    (0..TASK_COUNT).any(|index| scheduler::state(index) == TaskState::Waiting(on))
+}
+
+/// 起こした本数の累計（W2-c-2 の計器）。**「積んだが起こさなかった」との関係で見る。**
+static WAKES_ISSUED: AtomicU64 = AtomicU64::new(0);
+
+/// 起こした本数の累計（W2-c-2）。
+pub fn wakes_issued() -> u64 {
+    WAKES_ISSUED.load(Ordering::Relaxed)
 }
 
 /// 今のタスクの回復点の欄を据える（W1-b。遠征の出入りが呼ぶ）。
@@ -1161,6 +1182,14 @@ extern "sysv64" fn bsp_idle_main() -> ! {
         // **眠った回数を数える（W2-c-1 の計器）。** **眠る前に数える**——**起きてから
         // 数えると、起こした割り込みの中で読む値が 1 つ足りない。**
         IDLE_HALTS.fetch_add(1, Ordering::Relaxed);
+        // 破壊 (W2-c-2, idle-holds-bkl-across-hlt): BKL を取ったまま眠る。
+        // **次に自分が入口へ入るときに再帰取得になって止まる**（`bkl` の検出器）。
+        //
+        // **`bkl-hold-across-hlt-test` は流用できない**（実測。2026-09-16）
+        // ——**あちらはハートビートのループに仕込み、`init` より前に発火するので、
+        // ここが観測されない。** **だから別の feature を立てた。**
+        #[cfg(feature = "idle-holds-bkl-across-hlt")]
+        let _held_across_hlt = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
         // SAFETY: 割り込みを許して眠るだけである。錠は 1 つも持っていない。
         // ハンドラは登録済みで、このタスクのスタックはガードページ付きである。
         unsafe { common::cpu::enable_interrupts_and_halt() };

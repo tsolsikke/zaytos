@@ -2056,9 +2056,32 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
                 // W2-c-2 の主張が「0 から 1 以上へ変わった」になる**（運用者の指摘）。
                 logger.info(format_args!(
                     "idle: the bsp idle task halted {} time(s) and was selected {} time(s) \
-                     during this session (W2-c-1: nothing waits yet, so both should be 0)",
+                     during this session",
                     kernel::task::idle_halts(),
                     kernel::task::idle_selections()
+                ));
+                // **待ちと起こしの計器（W2-c-2）。** **判定はこの行を読む。**
+                //
+                // **`pushed without waking` が関係の検出器である**——**待っている者が居たのに
+                // 起こさなかった回数で、本番では 0 である。** **時間の上限では見ない**（`ADR-0061`）。
+                logger.info(format_args!(
+                    "wait: read(0) waited {} time(s), woke with nothing {} time(s), hit the \
+                     safety net {} time(s); wakes issued {}, pushed without waking {}",
+                    kernel::syscall::keyboard_waits(),
+                    kernel::syscall::empty_wakes(),
+                    kernel::syscall::slow_waits(),
+                    kernel::task::wakes_issued(),
+                    kernel::keyboard::pushed_without_waking()
+                ));
+                // **「深さ 1 では畳まない」が働いた回数（W2-c-2 の手当て）。**
+                // **判定はこの行を読む。** **既定では 1 以上、破壊では 0 である。**
+                //
+                // **置いた理由は、覆いが 1 本だけだったことである**——**`kill-fold-at-depth-one`
+                // を落としていたのは `the shell was restarted exactly once` だけで、待つ形に
+                // したら真へ倒れて素通りした**（`ADR-0061`）。
+                logger.info(format_args!(
+                    "fold: depth one was not folded {} time(s) during this session",
+                    kernel::idt::depth_one_not_folded()
                 ));
             }
             Err(error) => {
@@ -9786,6 +9809,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "foreground-claimable-from-any-slot",
         cfg!(feature = "foreground-claimable-from-any-slot"),
         "スロット 1 にも前景を取らせる",
+    ),
+    (
+        "read-never-waits",
+        cfg!(feature = "read-never-waits"),
+        "read(0) が待たずに -EAGAIN を返す（回して待つ形へ戻る）",
+    ),
+    (
+        "keyboard-does-not-wake",
+        cfg!(feature = "keyboard-does-not-wake"),
+        "IRQ1 が積んでも、待っている者を起こさない",
+    ),
+    (
+        "idle-holds-bkl-across-hlt",
+        cfg!(feature = "idle-holds-bkl-across-hlt"),
+        "BSP 用アイドルが BKL を取ったまま hlt する",
     ),
     (
         "fp-spawn-no-save",

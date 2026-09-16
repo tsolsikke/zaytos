@@ -1922,6 +1922,34 @@ const FOLDABLE_VECTORS_VALUE: [u8; FOLDABLE_VECTOR_COUNT] = [0, 1, 6, 13, 14, 19
 ///
 /// `context` が有効な [`IrqContext`] を指すこと。遠征中（深さ 2 以上）なら
 /// `RECOVERY` は `ring3::enter` が保存済みである。EOI を送った後に呼ぶこと。
+/// 深さがちょうど 1 だったので畳まなかった回数（W2-c-2 の手当て。`ADR-0061`）。
+///
+/// **「深さ 1 では畳まない」が働いたことの観測である。** **判定は「1 以上」を見る。**
+///
+/// # 既定では必ず 1 以上になる
+///
+/// **シェルは遠征中（深さ 1）にタイマ IRQ を受け続けるので、ここを通る。**
+/// **打鍵にも待ちにも依らない**——**タイマは 100Hz で入り、セッションは数十秒ある。**
+///
+/// # 破壊では 0 になる
+///
+/// **`kill-fold-at-depth-one-test` は [`MINIMUM_DEPTH`] を 1 にするので、深さ 1 は
+/// この分岐へ来ない。**
+///
+/// # なぜ「深さ 1 で畳んだ回数」を数えないのか
+///
+/// **それでは破壊が捕まらない。** **畳むには「深さ 1」と「Ring 3 から来た IRQ」の
+/// 両方が要るが、待つ形ではシェルが Ring 3 に居るのは `read(0)` が戻ってから次の
+/// `read(0)` へ入るまでの μs 単位しかない**——**打鍵の間隔 32 ミリ秒に対して 1% 未満の
+/// 見込みで、破壊を立てても 0 のままになる**（`ADR-0061`。**実測で 4 回続けて
+/// 捕まらなかった**）。**弾いた側を数えると、その窓に依らない。**
+static DEPTH_ONE_NOT_FOLDED: AtomicU64 = AtomicU64::new(0);
+
+/// [`DEPTH_ONE_NOT_FOLDED`] の値（W2-c-2 の手当て。`init` がセッションの後に出す）。
+pub fn depth_one_not_folded() -> u64 {
+    DEPTH_ONE_NOT_FOLDED.load(Ordering::Relaxed)
+}
+
 unsafe fn fold_if_interrupted(context: &IrqContext, bkl: &mut Option<crate::bkl::BklGuard>) {
     // 破壊 (S12 前の手当て C, kill-fold-at-depth-one): 深さ 1 でも畳む。
     // **シェル自身が Ctrl+C で死ぬ**ので、`init` が起こし直す回数が増える。
@@ -1930,7 +1958,13 @@ unsafe fn fold_if_interrupted(context: &IrqContext, bkl: &mut Option<crate::bkl:
     #[cfg(not(feature = "kill-fold-at-depth-one-test"))]
     const MINIMUM_DEPTH: usize = 2;
 
-    if crate::ring3::depth() < MINIMUM_DEPTH {
+    let depth = crate::ring3::depth();
+    if depth < MINIMUM_DEPTH {
+        // **深さ 1 を弾いたことを数える（W2-c-2 の手当て）。**
+        // **既定では 1 以上、破壊では 0 である**（[`DEPTH_ONE_NOT_FOLDED`] の doc）。
+        if depth == 1 {
+            DEPTH_ONE_NOT_FOLDED.fetch_add(1, Ordering::Relaxed);
+        }
         return;
     }
     if (context.cs & 0b11) != 3 {

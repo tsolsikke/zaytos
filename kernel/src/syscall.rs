@@ -1465,6 +1465,106 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
 /// # Safety
 ///
 /// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+/// `read(0)` が待った回数（W2-c-2 の計器）。
+static KEYBOARD_WAITS: AtomicU64 = AtomicU64::new(0);
+
+/// 起こされたが読めなかった回数（W2-c-2 の計器）。**空振りの起床である。**
+///
+/// **0 でなくてよい**——**離鍵のように、積まれてもバイトにならない合図が在る**（`ADR-0061`）。
+static EMPTY_WAKES: AtomicU64 = AtomicU64::new(0);
+
+/// 安全網に当たった回数（W2-c-2）。**止めない。数えるだけである。**
+///
+/// **本番でも 0 でないことがある**——**人が席を外せば当たる。** **だから判定に使わない**
+/// （`ADR-0061`。時間の判定を避ける）。**計器の行に出すだけである。**
+static SLOW_WAITS: AtomicU64 = AtomicU64::new(0);
+
+/// 安全網の上限（W2-c-2。`ADR-0061`）。**6,000 ティック = 60 秒**（100Hz。実測の
+/// `pit::TARGET_FREQUENCY_HZ`）。
+///
+/// # 止めない
+///
+/// **当たっても待ち直す。** **本番のキー待ちに「止まる上限」を置くと、人が席を外しただけで
+/// 落ちる。** **「上限の無い待ちを書かない」は道具と検査の規律である**（`CLAUDE.md`）。
+///
+/// # これは主たる検出ではない
+///
+/// **起こす経路が壊れたことは、関係で見る**——**`keyboard::pushed_without_waking` が、
+/// 待っている者が居たのに起こさなかった回数を数える。** **1 回目の打鍵で出るので、
+/// 時間を待つ必要が無い。** **こちらは念のための網である。**
+// 破壊 `read-never-waits` では待たないので、上限も待つ関数も読まれない。
+#[cfg_attr(feature = "read-never-waits", allow(dead_code))]
+const SLOW_WAIT_TICKS: u64 = 6_000;
+
+/// `read(0)` が待った回数（W2-c-2）。
+pub fn keyboard_waits() -> u64 {
+    KEYBOARD_WAITS.load(Ordering::Relaxed)
+}
+
+/// 起こされたが読めなかった回数（W2-c-2）。
+pub fn empty_wakes() -> u64 {
+    EMPTY_WAKES.load(Ordering::Relaxed)
+}
+
+/// 安全網に当たった回数（W2-c-2）。**判定には使わない**（計器である）。
+pub fn slow_waits() -> u64 {
+    SLOW_WAITS.load(Ordering::Relaxed)
+}
+
+// **「セッションの回数」を返す関数は置かない（W2-c-2 で測って消した）。**
+//
+// **一度置いたが、間違った量を返していた**——**`invocation_count` はスロットの記録で、
+// `spawn` が子の後に親のものへ戻す。** **`init` がシェルの後に読むと、シェルが走る前の
+// 残りが出る**（実測で 76 と出た。同じ回のシェルの実数は 2,969 である）。
+//
+// **判定が読むべき数は、既に在る行が持っている**——**`spawn: /bin/zash ended ... after N
+// syscall(s)` は、親のものへ戻す前に読んでいる。** **新しい計器を足さず、あの行を読む。**
+
+/// 端末のバイトが来るまで待つ（W2-c-2。`ADR-0061`）。**起こされたら `true` を返す。**
+///
+/// **前景を失っていたら `false` を返す**——**呼び出し側は `-EBADF` を返す。**
+/// **待ち続けない**（前景を持たない者は読めない。決定 1）。
+///
+/// # 窓は構造で閉じている
+///
+/// **呼ばれるのは IF=0 の文脈である**（`int 0x80` は割り込みゲート）。**BKL を解いても
+/// IF は戻らない**（`EntryInterruptGuard` は保存した RFLAGS が IF=1 のときだけ戻す。実測）
+/// ——**だから「欄を `Waiting` にしてから譲る」までに合図は入らない。**
+///
+/// # BKL を解いてから譲る
+///
+/// **`ADR-0036` の「保持したまま眠らない・待たない」に従う。** **起きたら取り直す。**
+// 破壊 `read-never-waits` では呼ばれない（あちらは `-EAGAIN` を返して回る）。
+#[cfg_attr(feature = "read-never-waits", allow(dead_code))]
+fn wait_for_keyboard(bkl: &mut Option<crate::bkl::BklGuard>) -> bool {
+    KEYBOARD_WAITS.fetch_add(1, Ordering::Relaxed);
+    let since = crate::idt::timer_ticks();
+
+    // **欄を `Waiting` にする。** **ここは IF=0 で、まだ BKL を持っている。**
+    crate::task::set_current_waiting(crate::task::Wait::Keyboard);
+    // **BKL を解く。** 保持したまま譲ると、次に走るタスクがカーネルへ入れない。
+    drop(bkl.take());
+    // **譲る。** `pick_next` は待っている者を飛ばし、走れる者が居なければ BSP 用アイドルへ
+    // 落ちる（W2-c-1 で置いた）。**起こされるまでここへは戻らない。**
+    crate::task::yield_now();
+    // **起きた。BKL を取り直す。**
+    *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
+
+    // **安全網（`ADR-0061`）。止めない。数えるだけである。**
+    //
+    // **行を出さない形にした（W2-c-2）。** **`syscall.rs` にシリアルの口は無く、開けると
+    // 直接シリアルの許可リストに項目が増える**（`xtask` の `DIRECT_SERIAL_PORT_ALLOWLIST`）。
+    // **報せる先は既存の計器の行でよい**——**`init` がセッションの後に出す行がこの数を読む。**
+    // **そもそも主たる検出は関係のほうである**（`keyboard::pushed_without_waking`）。
+    let waited = crate::idt::timer_ticks().saturating_sub(since);
+    if waited > SLOW_WAIT_TICKS {
+        SLOW_WAITS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // **前景を持っていなければ、もう読めない。**
+    crate::input::foreground_is_claimed()
+}
+
 unsafe fn sys_read(
     fd: u64,
     buf: u64,
@@ -1524,12 +1624,85 @@ unsafe fn sys_read(
                 return (-EFAULT) as u64;
             };
             let mut kbuf = [0u8; TERMINAL_READ_MAX];
-            let got = crate::input::read_bytes(&mut kbuf[..want as usize]);
-            if got == 0 {
-                // **待たない。** 待つにはユーザープロセスのスケジューラが要る。
-                // **`0` を返さない**——Linux では末尾（EOF）の意味になる。
+            // **溜まっていなければ待つ（W2-c-2。`ADR-0061`）。**
+            //
+            // **以前は `-EAGAIN` を返し、シェルが `continue` で回していた**
+            // ——**1 セッションで 1,377,679 回のシステムコールを出していた**（実測。W2-c-1）。
+            //
+            // # 窓は構造で閉じている
+            //
+            // **`int 0x80` は割り込みゲートなので、ここは IF=0 である。** **BKL を解いても
+            // IF は戻らない**（`EntryInterruptGuard` は保存した RFLAGS が IF=1 のときだけ戻す。実測）。
+            // **したがって「空だと見てから `Waiting` にする」までに合図は入らない。**
+            //
+            // # BKL は解いてから譲る
+            //
+            // **`ADR-0036` の「保持したまま眠らない・待たない」に従う。** **`sys_read` は
+            // ガードを引数で受け取っているので、`take()` で落とすだけでよい**——**新しい配管は要らない**
+            // （`SYS_SPAWN` と virtio の待ちと同じ踊りである）。
+            // **この `read(0)` が既に待ったか（W2-c-2）。** **局所で持つ。**
+            //
+            // **大域の「誰かが待ったことがあるか」では数えられない**——**それだと、次の
+            // `read(0)` の 1 周目（まだ待っていない空振り）を空振りの起床として数えてしまう。**
+            // **数えたいのは「起こされたのに読めなかった」であって、「空だった」ではない。**
+            // 破壊 `read-never-waits` では待たないので、書き換わらない。
+            #[cfg_attr(feature = "read-never-waits", allow(unused_mut))]
+            let mut waited_once = false;
+            let got = loop {
+                let got = crate::input::read_bytes(&mut kbuf[..want as usize]);
+                if got != 0 {
+                    break got;
+                }
+                // **起こされたのに読めなかった回数（W2-c-2 の判定 5）。**
+                //
+                // **離鍵のように、積まれてもバイトにならない合図で起きた回数である。**
+                // **0 でなくてよい**（`ADR-0061`）。
+                if waited_once {
+                    EMPTY_WAKES.fetch_add(1, Ordering::Relaxed);
+                }
+                // **待つのは、対話の口が据えられている間だけである（W2-c-2 で測って狭めた）。**
+                //
+                // **`ADR-0061` の決定 1 は「待てるのは前景の持ち主だけ」と書いていたが、それでは
+                // 足りなかった**——**`run_loaded_program` はどのプログラムにも前景を取らせるので、
+                // 起動シーケンスの `syscall-test` も持ち主である。**
+                // **あれは `read(0)` が `-EAGAIN` を返すことを主張している**（失敗コード 51 と 52）
+                // ——**打鍵が無いのだから、それが正しい答えである。**
+                // **実測で踏んだ**——**無条件に待つ形にしたら、起動がそこで止まり、
+                // シェルまで届かなかった**（`docs/troubleshooting.md`）。
+                //
+                // **コンソールの前景が据えられているのは、`init` がシェルを起こす区間だけである**
+                // （`console::install_foreground`）。**そこだけが「誰かが打つ」場所である。**
+                if !crate::console::foreground_installed() {
+                    return (-EAGAIN) as u64;
+                }
+                // **台本が入力を駆動している間も待たない（W2-c-2 で踏んで足した）。**
+                //
+                // **台本が 0 を返す場面は 3 つある**——**出し切った・休み・作動前**。
+                // **どれも「もう入力は無い」であって、`-EAGAIN` がその答えだった**
+                // （`crate::input::script_drives_input` の doc）。
+                // **待つ形にしたら、誰も打たないので待ちが終わらず、`--full` が上限に
+                // 当たった**（実測。台本の族 6 項目が落ちた。`docs/troubleshooting.md`）。
+                //
+                // **待ちを見るのは、本物の打鍵を使う `--shell-test` の族だけである**
+                // （`docs/verification-coverage.md` の「待ちの経路を通る項目」）。
+                if crate::input::script_drives_input() {
+                    return (-EAGAIN) as u64;
+                }
+                // 破壊 (W2-c-2, read-never-waits): 待たずに `-EAGAIN` を返す。**回して待つ形へ戻る**
+                // ——**判定 1（回さずに待つ）が落ちる。**
+                #[cfg(feature = "read-never-waits")]
                 return (-EAGAIN) as u64;
-            }
+                #[cfg(not(feature = "read-never-waits"))]
+                {
+                    if wait_for_keyboard(bkl) {
+                        // **次の周で空振りだったら数える**（上の `waited_once`）。
+                        waited_once = true;
+                        continue;
+                    }
+                    // **前景を失った**（待っている間に取り上げられた）。**待ち続けない。**
+                    return (-EBADF) as u64;
+                }
+            };
             // SAFETY: slice は検証済みで、`got` は `want` を越えない。
             let written = unsafe { copy_to_user(&slice, 0, &kbuf[..got]) };
             return written as u64;

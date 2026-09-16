@@ -555,6 +555,34 @@ mod tests {
     }
 }
 
+/// 台本が入力を駆動しているか（W2-c-2 で足した）。
+///
+/// **真の間、`read(0)` は待たない**（`crate::syscall` の `sys_read`）。
+///
+/// # なぜ待ってはいけないのか
+///
+/// **台本が 0 を返す場面は 3 つある**——**出し切った・休み（`script` の
+/// `SCRIPT_PAUSE`）・作動前**である。**どれも「もう入力は無い」であって、
+/// `-EAGAIN` がその答えだった。** **とくに休みは、「入力が途切れた」を
+/// 読み手に見せるために、わざと 1 回だけ空を返す仕掛けである。**
+///
+/// **待つ形にすると、台本の走行では誰も打たないので待ちが終わらない。**
+/// **実測で `--full` が 120 分の上限に当たり、台本の族 6 項目が落ちた**
+/// （2026-09-16。`docs/troubleshooting.md`）。
+///
+/// # feature の一覧を写さない
+///
+/// **[`arm_input_script`] が立てる。** **あちらは 11 の feature の下でしか
+/// `script::arm` を呼ばないので、他の構成ではここが偽のままである**
+/// ——**構造で偽になるので、`cfg` の一覧を 3 つ目に増やさずに済む**
+/// （`docs/verification-coverage.md` の「列挙で守る機構の一覧」）。
+static SCRIPT_DRIVES: AtomicBool = AtomicBool::new(false);
+
+/// 台本が入力を駆動しているか（W2-c-2）。
+pub fn script_drives_input() -> bool {
+    SCRIPT_DRIVES.load(Ordering::SeqCst)
+}
+
 /// 台本を作動させる（zi-d。`zi-test` / `view-test` feature のときだけ効く）。
 ///
 /// **`init` がシェルを起こす直前に呼ぶ。** それより前に流すと、起動シーケンスの
@@ -573,7 +601,11 @@ pub fn arm_input_script() {
         feature = "fp-test",
         feature = "ttf-test"
     ))]
-    script::arm();
+    {
+        script::arm();
+        // **台本が駆動していることを、feature を見ない形で残す**（[`SCRIPT_DRIVES`]）。
+        SCRIPT_DRIVES.store(true, Ordering::SeqCst);
+    }
 }
 
 /// 決定的な台本入力（zi-d。`zi-test` feature）。

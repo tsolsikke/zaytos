@@ -119,9 +119,37 @@ pub(crate) fn handle_irq(vector: u64) {
         // **したがってここで見る。** 積むかどうかとは独立なので、
         // **溢れて捨てられるバイトでも中断は拾える。**
         crate::input::note_scancode_for_interrupt(code);
+        // **積む前に「待っている者が居るか」を見る（W2-c-2）。**
+        //
+        // **積んだ後では遅い**——**起こした側が `Ready` にしてしまうので、「積んだ時点で
+        // 待っていた」が読めなくなる。** **積んだ時点の事実は、積む側にしか分からない。**
+        let someone_was_waiting = crate::task::someone_waits_on(crate::task::Wait::Keyboard);
         // 積めなければ捨てて数える。読み出しは既に済んでいるので、
         // 捨てても IRQ1 は止まらない。
         buffer::record(code);
+        // **待っている者を起こす（W2-c-2。`ADR-0061` の決定 4）。**
+        //
+        // **積んだ直後に起こす。** **デコードの結果では起こせない**——**デコードは
+        // `input::read_bytes` の中、すなわち読み手の文脈でしか動かない。**
+        // **したがって空振りの起床が起きる**（離鍵など、バイトにならないコード）。
+        // **起こされた側は読めなければまた待つ**ので、それでよい。
+        //
+        // **IF=0 かつ BKL の内側である**（割り込みゲート経由。`irq_entry` が取っている）
+        // ——**切り替えが状態を書くのと同じ文脈である。**
+        //
+        // 破壊 (W2-c-2, keyboard-does-not-wake): 起こさない。**積んだ数と起こした数の関係が
+        // 食い違い、判定 4 が落ちる**（時間の上限を待たずに、1 回目の打鍵で出る）。
+        #[cfg(not(feature = "keyboard-does-not-wake"))]
+        let woken = crate::task::wake_tasks_waiting_on(crate::task::Wait::Keyboard);
+        #[cfg(feature = "keyboard-does-not-wake")]
+        let woken = 0usize;
+        // **積んだのに起こさなかった回数を数える（W2-c-2 の関係の検出器）。**
+        //
+        // **これが「起こさない」の主たる検出である**——**時間に依らない。**
+        // **待っている者が居たのに 1 本も起こさなかったら、起こす経路が壊れている。**
+        if someone_was_waiting && woken == 0 {
+            PUSHED_WITHOUT_WAKING.fetch_add(1, Ordering::Relaxed);
+        }
     } else {
         STRAY_COUNT.fetch_add(1, Ordering::Relaxed);
     }
@@ -129,6 +157,17 @@ pub(crate) fn handle_irq(vector: u64) {
 
 /// データを伴わなかった IRQ1 の回数。判定基準は [`handle_irq`]。
 static STRAY_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// 待っている者が居たのに、1 本も起こさなかった回数（W2-c-2 の関係の検出器）。
+///
+/// **本番では 0 でなければならない。** **0 でなければ、起こす経路が壊れている**
+/// ——**上限の時間を待たずに、1 回目の打鍵で出る**（`ADR-0061`。時間の判定を避ける）。
+static PUSHED_WITHOUT_WAKING: AtomicU64 = AtomicU64::new(0);
+
+/// 待っている者が居たのに起こさなかった回数（W2-c-2）。**本番では 0 である。**
+pub fn pushed_without_waking() -> u64 {
+    PUSHED_WITHOUT_WAKING.load(Ordering::Relaxed)
+}
 
 /// ハンドラが呼ばれた回数。
 ///

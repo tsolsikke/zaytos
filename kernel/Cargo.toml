@@ -498,6 +498,14 @@ ring3-slot-always-zero = ["concurrent-test"]
 task-switch-holds-back-ring3-task = ["concurrent-test"]
 # スロット 1 にも前景を取らせる（W1-c-4）。起こしっぱなしの 1 本が前景を取る。
 foreground-claimable-from-any-slot = ["concurrent-test"]
+# `read(0)` が待たずに `-EAGAIN` を返す（W2-c-2）。回して待つ形へ戻る。
+read-never-waits = []
+# IRQ1 が積んでも待っている者を起こさない（W2-c-2）。
+keyboard-does-not-wake = []
+# BSP 用アイドルが BKL を取ったまま `hlt` する（W2-c-2）。再帰取得の検出で止まる。
+# `bkl-hold-across-hlt-test` は流用できない（あちらはハートビートのループに仕込み、
+# `init` より前に発火するので、アイドルの場所が観測されない）。
+idle-holds-bkl-across-hlt = []
 # `spawn` で、子へ入る前に親の FP の状態を保存しない（`ADR-0058`）。
 # 親が `spawn` を跨いで値を保てなくなる。
 fp-spawn-no-save = []
