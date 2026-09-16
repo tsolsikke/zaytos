@@ -3765,7 +3765,31 @@ const TTF_TEST_SABOTAGES: &[&str] = &["fp-clobber-on-kernel-entry-test"];
 /// 222 / 160 / 191 本で、いちども 400 に届かない**）。
 const SERIAL_TEST_SABOTAGES: &[&str] = &["serial-no-lock-test"];
 
+/// 判定 1 の倍率（W2-c-2。`ADR-0061`）。
+///
+/// **`read(0)` が回っていないことを、届いたバイト数との関係で見る。** **回数そのものは
+/// 木で動く**（実測。1,377,679 回と 1,282,916 回）ので、**固定の閾値は置かない。**
+///
+/// **値は測ってから固定した**（運用者の条件。2026-09-16）。
+///
+/// | 何 | 実測 | 1 バイトあたり |
+/// |---|---|---|
+/// | 待つ形（W2-c-2） | 2,969 回 / 584 バイト | **5.08** |
+/// | 回す形（W2-c-1） | 1,377,679 回 / 584 バイト | **2,359** |
+///
+/// **16 にした。** **通る側に 3.1 倍の余裕があり、回す側の 147 分の 1 である。**
+/// **見込みで書いた 4 は使わなかった**——**測ったら 5.08 で、4 では落ちていた。**
+const SYSCALLS_PER_BYTE_BOUND: u64 = 16;
+
 const SHELL_TEST_SABOTAGES: &[&str] = &[
+    // **W2-c-2 の 3 つ（`ADR-0061`）。** **落ちる判定はそれぞれ違う。**
+    //
+    // **4 つ目（`wake-ignores-the-reason`）は置けなかった**——**合図が 1 つしか無いので、
+    // 「合図を見ずに全部起こす」は何も変えない。** **3 回とも全判定を通した**（実測。
+    // 2026-09-16）。**待つ理由が増える段（W2-d のタイマ）で置くこと。**
+    "read-never-waits",
+    "keyboard-does-not-wake",
+    "idle-holds-bkl-across-hlt",
     "kill-ignore-interrupt-test",
     "kill-fold-at-depth-one-test",
     "kill-keep-stale-interrupt-test",
@@ -8843,6 +8867,107 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
          count = {echoed_ctrl_c_count}, wanted 1)"
     );
 
+    // **待ちと起こしの計器を読む（W2-c-2。`ADR-0061`）。**
+    //
+    // **`init` がセッションの後に出す 2 行である**——**既定の起動では出ない**
+    // （シェルが終わらないので）。**だから起動ログの参照には入らない。**
+    let wait_line = after_shell
+        .lines()
+        .find(|line| line.contains("wait: read(0) waited"))
+        .unwrap_or("");
+    let idle_line = after_shell
+        .lines()
+        .find(|line| line.contains("idle: the bsp idle task halted"))
+        .unwrap_or("");
+    let fold_line = after_shell
+        .lines()
+        .find(|line| line.contains("fold: depth one was not folded"))
+        .unwrap_or("");
+    let number_after = |line: &str, key: &str| -> Option<u64> {
+        let rest = &line[line.find(key)? + key.len()..];
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok()
+    };
+    let waits = number_after(wait_line, "waited ");
+    let empty_wakes = number_after(wait_line, "woke with nothing ");
+    let slow_waits = number_after(wait_line, "hit the safety net ");
+    let wakes_issued = number_after(wait_line, "wakes issued ");
+    let pushed_without_waking = number_after(wait_line, "pushed without waking ");
+    // **回数とバイト数は、既に在る 2 行から読む（W2-c-2 で直した）。**
+    //
+    // **新しい計器を足して読んだら、間違った量だった**——**`invocation_count` はスロットの
+    // 記録で、`spawn` が子の後に親のものへ戻す。** **`init` がシェルの後に読むと、シェルが
+    // 走る前の残りが出る**（実測で 76。同じ回のシェルの実数は 2,969 である）。
+    // **`spawn` の行は戻す前に読んでいるので、あちらが正しい。**
+    let shell_syscalls = after_shell
+        .lines()
+        .find(|line| line.contains("/bin/zash ended ("))
+        .and_then(|line| number_after(line, "after "));
+    let delivered_bytes = after_shell
+        .lines()
+        .find(|line| line.contains("init: the shell ended"))
+        .and_then(|line| number_after(line, "handed "));
+    let idle_halts = number_after(idle_line, "halted ");
+    let idle_selections = number_after(idle_line, "was selected ");
+    let depth_one_not_folded = number_after(fold_line, "not folded ");
+
+    // **判定 1——回さずに待つ。** **関係で見る**（`ADR-0061`。**回数そのものは木で動く**
+    // ——W2-c-1 の実測で 1,377,679 回、それ以前の木で 1,282,916 回だった）。
+    let read_did_not_spin = match (shell_syscalls, delivered_bytes) {
+        (Some(calls), Some(bytes)) => calls <= bytes.saturating_mul(SYSCALLS_PER_BYTE_BOUND),
+        _ => false,
+    };
+    // **判定 5——空振りで起きても待ち直す。**
+    //
+    // **構造で起きる**——**打鍵は押しと離しの 2 つのコードを出し、離しはバイトにならない。**
+    // **実測で 1,153 回の待ちのうち 592 回が空振りだった**（W2-c-2）。**運ではない。**
+    let woke_empty_and_waited_again = empty_wakes.is_some_and(|count| count >= 1);
+    // **判定 2——BSP が眠る。** **W2-c-1 で 0 / 0 を記録してある**ので、
+    // **「0 から 1 以上へ変わった」を言える。**
+    let bsp_slept =
+        idle_halts.is_some_and(|halts| halts >= 1) && idle_selections.is_some_and(|sel| sel >= 1);
+    // **判定 4——起こしの取りこぼしが無い。** **これが「起こさない」の主たる検出である**
+    // ——**時間に依らず、1 回目の打鍵で出る。**
+    let no_missed_wake = pushed_without_waking == Some(0);
+    // **判定 6——「深さ 1 では畳まない」が働いた（W2-c-2 の手当て。`ADR-0061`）。**
+    //
+    // **`kill-fold-at-depth-one-test` の覆いを置き直したものである**——**あの破壊を
+    // 落としていたのは `the shell was restarted exactly once` の 1 本だけで、待つ形に
+    // したら真へ倒れて素通りした**（実測で 4 回続けて捕まらなかった）。
+    //
+    // **既定では 1 以上になる**——**シェルは遠征中（深さ 1）にタイマ IRQ を受け続けるので、
+    // 打鍵にも待ちにも依らない。** **破壊では 0 である**（あちらは `MINIMUM_DEPTH` を 1 に
+    // するので、弾く分岐へ来ない）。
+    //
+    // **畳んだ側ではなく弾いた側を数えている。** **畳んだ側では破壊が捕まらない**
+    // ——**深さ 1 で Ring 3 に居る窓が μs 単位で、打鍵の間隔 32 ミリ秒に対して 1% 未満の
+    // 見込みだからである**（`kernel/src/idt` の `DEPTH_ONE_NOT_FOLDED` の doc）。
+    let depth_one_was_not_folded = depth_one_not_folded.is_some_and(|count| count >= 1);
+
+    println!(
+        "{context}: read(0) waited instead of spinning = {read_did_not_spin} \
+         ({shell_syscalls:?} syscall(s) for {delivered_bytes:?} byte(s); the bound is \
+         {SYSCALLS_PER_BYTE_BOUND} per byte)"
+    );
+    println!(
+        "{context}: the bsp idle task slept = {bsp_slept} (halted {idle_halts:?}, selected \
+         {idle_selections:?}; W2-c-1 recorded 0 and 0)"
+    );
+    println!(
+        "{context}: every push woke a waiter = {no_missed_wake} (pushed without waking \
+         {pushed_without_waking:?}, wakes issued {wakes_issued:?})"
+    );
+    println!(
+        "{context}: woke with nothing and waited again = {woke_empty_and_waited_again} (waits \
+         {waits:?}, woke with nothing {empty_wakes:?}, hit the safety net {slow_waits:?})"
+    );
+    println!(
+        "{context}: depth one was not folded = {depth_one_was_not_folded} (count \
+         {depth_one_not_folded:?}; kill-fold-at-depth-one-test makes it 0)"
+    );
+    // **判定 3（起こされて進む）は、既存の判定が覆っている**——**打った字が届き、
+    // `ls`・`cat`・`hello` が走ったことを上で見ている。** **同じことを 2 度数えない。**
+
     if ready
         && ended
         && restarted
@@ -8894,6 +9019,12 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && ctrl_c_discarded_the_line
         && ctrl_c_stopped_the_child
         && restarted_only_once
+        // **W2-c-2 の判定 3 本**（1 / 2 / 4。`ADR-0061`）。
+        && read_did_not_spin
+        && bsp_slept
+        && no_missed_wake
+        && woke_empty_and_waited_again
+        && depth_one_was_not_folded
     {
         println!("{context}: PASS");
         if mode.expects_to_pass() {
@@ -15750,6 +15881,10 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "ring3-slot-always-zero",
     "task-switch-holds-back-ring3-task",
     "foreground-claimable-from-any-slot",
+    // W2-c-2。**待ちと起こしの破壊である。**
+    "read-never-waits",
+    "keyboard-does-not-wake",
+    "idle-holds-bkl-across-hlt",
     "percpu-fake-nonzero-cpu-id",
     "smp-tramp-corrupt-copy-test",
     "smp-ap-touch-scheduler-test",
@@ -17875,7 +18010,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 33,
-    full: 303,
+    full: 306,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
