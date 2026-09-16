@@ -46,7 +46,12 @@ pub const WORKER_COUNT: usize = 2;
 /// （`1..=WORKER_COUNT`）の外にある。** **既存の添字は動かない**（AP 用アイドルは 3 のまま）。
 /// **W1-c-3 で名前を付けた**（`RING3_TASK`）——**スロットを引くのに使い始めたので、
 /// `#[allow(dead_code)]` は要らない。**
-const TASK_COUNT: usize = WORKER_COUNT + 3;
+///
+/// **W2-a でもう 1 つ増えた（末尾）。** **BSP 用のアイドルタスクである**（[`BSP_IDLE_TASK`]）
+/// ——**待つタスクが出たとき、走行可能な者が居ない間に `hlt` する先が要る**（`ADR-0061` の決定 2）。
+/// **W2-a では誰も選ばない**——**`pick_next` の巡回にも落ち先にも入っていない**（[`default_task_for`]
+/// は今までどおりメインを返す）。**既存の添字は動かない**（[`RING3_TASK`] は 4 のままである。下の doc）。
+const TASK_COUNT: usize = WORKER_COUNT + 4;
 
 /// メインタスクの添字。bootstrap processor の既定タスクでもある（S4-c-3-1）。
 const MAIN_TASK: usize = 0;
@@ -67,6 +72,22 @@ static mut FP_AREAS: [crate::fp::FpArea; TASK_COUNT] = [crate::fp::FpArea::fresh
 /// 巡回で選ばれることはない。[`MAIN_TASK`] と同じ扱いで、落ち先としてだけ選ばれる
 /// （[`default_task_for`]）。
 const AP_IDLE_TASK: usize = WORKER_COUNT + 1;
+
+/// BSP 用アイドルタスクの添字（W2-a。`ADR-0061` の決定 2）。**末尾に置く。**
+///
+/// # なぜ要るのか
+///
+/// **待つタスクが出ると、走行可能な者が 1 本も居ない時点が生まれる。** **そのとき `hlt` する先が要る。**
+/// **落ち先のタスクがその場で `hlt` する形は採らない**——**落ち先を選ぶのは `schedule_switch` の中、
+/// すなわち割り込みハンドラの中であり、そこで眠るとBKLと割り込みの状態を持ったまま止まる。**
+///
+/// # W2-a では誰も選ばない
+///
+/// **`pick_next` の巡回はワーカーと [`RING3_TASK`] しか見ず、落ち先は [`default_task_for`] が
+/// 返すメインである。** **したがって登録しても選ばれない**——**S4-c-2 で AP 用アイドルを
+/// 「登録するが誰も走らせない」段として入れたのと同じ形である。**
+/// **選ぶようにするのは W2-c で、待つ者が出てからである。**
+const BSP_IDLE_TASK: usize = TASK_COUNT - 1;
 
 /// そのコアの既定タスク（アイドル）を返す（S4-c-3-1）。
 ///
@@ -448,8 +469,13 @@ fn current_index_if_any() -> Option<usize> {
 
 /// Ring 3 を同時に走らせるために足したタスクの添字（W1-c-1 で足し、W1-c-3 で名前を付けた）。
 ///
-/// **末尾に置いてある**（[`TASK_COUNT`] の doc）。**Ring 3 のスロット 1 を使う。**
-const RING3_TASK: usize = TASK_COUNT - 1;
+/// **Ring 3 のスロット 1 を使う。**
+///
+/// **添字は `WORKER_COUNT + 2`（= 4）で固定してある（W2-a で書き換えた）。** **以前は
+/// `TASK_COUNT - 1` だった**——**W2-a で `TASK_COUNT` が増えると 5 へ動き、判定の側が読む
+/// 行の文言（`switches out of an excursion: task 4 = `）が指す先が変わる**（`xtask` の
+/// `cmd_concurrent_task`）。**添字を式で導くのをやめ、位置を固定した。**
+const RING3_TASK: usize = WORKER_COUNT + 2;
 
 /// タスクが使う Ring 3 のスロット（W1-c-3）。
 ///
@@ -951,6 +977,72 @@ const EMPTY_WORKER_STACK: WorkerStack = WorkerStack {
 };
 
 static mut WORKER_STACKS: [WorkerStack; WORKER_COUNT] = [EMPTY_WORKER_STACK; WORKER_COUNT];
+
+/// BSP 用アイドルタスクのスタック（ガードページ + スタック本体。W2-a）。
+///
+/// **大きさはワーカーと同じ [`TASK_STACK_SIZE`] にした**——**本体は `sti; hlt` のループだけで
+/// 浅いが、割り込みが乗る**（ハンドラの枠と、ここから呼ばれるハートビートは無い）。
+/// **深さを測る道具は置いていない**——**W2-c で待つ者が出て、実際に眠るようになってから測る。**
+#[repr(C, align(4096))]
+struct BspIdleStack {
+    guard: [u8; GUARD_SIZE],
+    stack: [u8; TASK_STACK_SIZE],
+}
+
+static mut BSP_IDLE_STACK: BspIdleStack = BspIdleStack {
+    guard: [0; GUARD_SIZE],
+    stack: [0; TASK_STACK_SIZE],
+};
+
+/// BSP 用アイドルタスクのスタックの (ガードページ先頭, スタック頂点)（W2-a）。
+fn bsp_idle_stack_bounds() -> (VirtAddr, VirtAddr) {
+    // 静的変数のアドレスを取るだけで、読み書きはしない。
+    let base = addr_of!(BSP_IDLE_STACK) as u64;
+    let guard = VirtAddr::new(base).expect("a .bss address is canonical");
+    let top = VirtAddr::new(base + GUARD_SIZE as u64 + TASK_STACK_SIZE as u64)
+        .expect("the bsp idle stack stays within the canonical range");
+    (guard, top)
+}
+
+extern "C" {
+    /// BSP 用アイドルタスクの入口（`global_asm!`）。偽 `IrqContext` の RIP が指す。
+    static zaytos_bsp_idle_body: u8;
+}
+
+// BSP 用アイドルタスクの入口（W2-a）。**`call` で Rust へ入る**——**`iretq` した直後の RSP は
+// スタック頂点（16 の倍数）で、`call` が戻り番地を積むと呼ばれた側の入口で 16 の倍数 - 8 になる。**
+// **戻らない。** 戻ったら `ud2` で落とす。
+core::arch::global_asm!(
+    ".section .text",
+    ".p2align 4",
+    ".globl zaytos_bsp_idle_body",
+    "zaytos_bsp_idle_body:",
+    "  call {body}",
+    "  ud2",
+    body = sym bsp_idle_main,
+);
+
+/// BSP 用アイドルタスクの本体（W2-a）。**割り込みを許して眠るだけである。**
+///
+/// # 錠を持ち込まない
+///
+/// **BKL も `Locked` も取らない。** **保持したまま `hlt` すると、次に自分が入口へ入るときに
+/// 再帰取得になって止まる**（`bkl-hold-across-hlt-test` がその形を実証している）。
+/// **ここは何も取らないので、その危険が構造的に無い。**
+///
+/// # `sti` と `hlt` を隣接させる
+///
+/// **[`common::cpu::enable_interrupts_and_halt`] を使う**（`ADR-0018` のチェックリスト 10）。
+/// **条件を確かめてから眠る形にはしていない**——**このタスクが選ばれるのは「走行可能な者が
+/// 居ない」ときだけで、起こすのは割り込みである。** **W2-c で待つ者が出たら、起こす側が
+/// `Ready` にしてから割り込みを終えるので、取りこぼしは生じない**（あちらで判定を置く）。
+extern "sysv64" fn bsp_idle_main() -> ! {
+    loop {
+        // SAFETY: 割り込みを許して眠るだけである。錠は 1 つも持っていない。
+        // ハンドラは登録済みで、このタスクのスタックはガードページ付きである。
+        unsafe { common::cpu::enable_interrupts_and_halt() };
+    }
+}
 
 /// コアごとの、スケジューラを通った回数（S4-c-3-2a）。
 ///
@@ -1491,6 +1583,51 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
                 &mut serial_line,
             );
         }
+    }
+
+    // **BSP 用アイドルタスクを足す（W2-a。`ADR-0061` の決定 2）。**
+    //
+    // **登録するだけで、誰も選ばない**——**`pick_next` の巡回にも落ち先にも入っていない。**
+    // **S4-c-2 で AP 用アイドルを入れたときと同じ形である。**
+    {
+        let (guard, top) = bsp_idle_stack_bounds();
+        let bottom = guard.as_u64() + GUARD_SIZE as u64;
+        // SAFETY: 起動時、自前のページテーブル上。このスタックの直下 1 ページで、以後ここへ
+        // 正規のアクセスは無い。
+        unsafe {
+            crate::stack::install_guard_page(
+                guard,
+                allocator,
+                "task",
+                "the bsp idle task guard page",
+                &mut serial_line,
+            );
+        }
+        let entry = addr_of!(zaytos_bsp_idle_body) as u64;
+        // SAFETY: top は今ガードページを張った静的スタックの頂点で、まだ誰も使っていない。
+        // 4KiB 境界（`align(4096)` の構造体の末尾）に載っている。
+        let saved_rsp = unsafe { build_initial_context(top, entry) };
+        scheduler::init_task(
+            BSP_IDLE_TASK,
+            Task {
+                saved_rsp,
+                stack_top: top.as_u64(),
+                stack_bottom: bottom,
+                // **遠征に入っていないタスクの RSP0 はカーネルスタック頂点である**（W1-c-3c の 0 の関所）。
+                rsp0: top.as_u64(),
+                // **`Ready` にしておく。** **選ばれないのは `pick_next` の範囲によるもので、
+                // 状態が理由ではない**（AP 用アイドルと同じ）。
+                state: TaskState::Ready,
+                owner: common::percpu::BOOTSTRAP_PROCESSOR_SLOT,
+                ..EMPTY_TASK
+            },
+        );
+        serial_line(format_args!(
+            "task: registered the bsp idle task as index {BSP_IDLE_TASK} owned by cpu \
+             {} on its own stack [{bottom:#x}, {:#x}); nothing picks it yet (W2-a)",
+            common::percpu::BOOTSTRAP_PROCESSOR_SLOT,
+            top.as_u64()
+        ));
     }
 }
 
@@ -2504,7 +2641,7 @@ mod tests {
     /// これにあたる。
     #[test]
     fn layer_two_skips_a_task_that_another_cpu_is_running() {
-        let all_ready = states([true, true, true, true, true]);
+        let all_ready = states([true, true, true, true, true, true]);
         // 全部 bootstrap processor 担当（= 第 1 層が何も弾かない構成）。
         let mut currents = NOBODY_RUNNING;
 
@@ -2595,7 +2732,7 @@ mod tests {
     /// 返ったら、AP が bootstrap processor のタスクを走らせることになる。
     #[test]
     fn an_application_processor_falls_back_to_its_own_idle_task() {
-        let all_ready = states([true, true, true, true, true]);
+        let all_ready = states([true, true, true, true, true, true]);
         let ap = super::AP_IDLE_TASK_OWNER;
         // ワーカーは 2 本とも BSP 担当なので、AP から見た候補は 0 本である。
         assert_eq!(
@@ -2614,7 +2751,7 @@ mod tests {
         );
         // ワーカーが全部走行不可でも同じ落ち先である。
         // **足した 1 本は `Blocked` にする（W1-c-4 で引き直した）**——**`Ready` だと BSP 側がそれを選ぶ。**
-        let none_ready = states([false, false, false, true, false]);
+        let none_ready = states([false, false, false, true, false, true]);
         assert_eq!(
             super::pick_next(none_ready, PRODUCTION_OWNERS, NOBODY_RUNNING, ap, 0),
             AP_IDLE_TASK
@@ -2650,7 +2787,7 @@ mod tests {
     /// 選ばれず、走行可能な担当が無いときの既存の経路（タスク 0）へ落ちる。
     #[test]
     fn a_task_owned_by_another_cpu_is_not_a_candidate() {
-        let all_ready = states([true, true, true, true, true]);
+        let all_ready = states([true, true, true, true, true, true]);
         // 全部 AP 担当にすると、bootstrap processor から見て候補が無い。
         let all_ap = [1usize; TASK_COUNT];
         assert_eq!(super::pick_next(all_ready, all_ap, NOBODY_RUNNING, 0, 0), 0);
@@ -2662,10 +2799,12 @@ mod tests {
     /// 担当が混ざっていても、自コアのぶんだけを回す（S4-c-1）。
     #[test]
     fn only_the_tasks_owned_by_this_cpu_are_rotated() {
-        let all_ready = states([true, true, true, true, true]);
+        let all_ready = states([true, true, true, true, true, true]);
         // ワーカー 1 = BSP、ワーカー 2 = AP。
         // W1-c-1 で足した末尾の 1 本は BSP 担当（本番の既定と同じ）。
-        let mixed = [0usize, 0, 1, 1, 0];
+        // **末尾は BSP 用アイドルで、担当は BSP である（W2-a で足した）。**
+        // **期待値は動かない**——**あれは巡回の候補でも落ち先でもない。**
+        let mixed = [0usize, 0, 1, 1, 0, 0];
         // BSP はワーカー 1 しか選べない。現タスクが 1 でも 1 を返す
         // （`pick_next` は現タスクを返しうるという既存の契約）。
         assert_eq!(super::pick_next(all_ready, mixed, NOBODY_RUNNING, 0, 0), 1);
@@ -2693,6 +2832,11 @@ mod tests {
     ///
     /// **W1-c-4 で引き直した。** **落ち先（メイン）を期待する 2 本だけが崩れたので、その 2 本の入力で
     /// 足した 1 本を `Blocked` にした。** **足した 1 本が選ばれる形は、下の W1-c-4 の表明が別に持つ。**
+    ///
+    /// **W2-a でもう 1 要素増えた（末尾）。** **BSP 用アイドルタスクで、値は本番と同じ `Ready` である。**
+    /// **既存の期待値は 1 つも動いていない**——**`pick_next` の巡回にも落ち先にも入っていないので、
+    /// `Ready` にしても選ばれない。** **それを主張するのが
+    /// `the_bsp_idle_task_is_never_rotated_and_is_not_the_fallback` である。**
     fn states(flags: [bool; TASK_COUNT]) -> [TaskState; TASK_COUNT] {
         let mut out = [TaskState::Uninitialized; TASK_COUNT];
         for (slot, flag) in out.iter_mut().zip(flags) {
@@ -2716,11 +2860,21 @@ mod tests {
     #[test]
     fn the_demo_has_two_workers_and_one_main() {
         assert_eq!(WORKER_COUNT, 2);
-        // メイン（0）+ ワーカー 2 + AP 用アイドル 1 + Ring 3 を同時に走らせる 1 本（W1-c-1）。
-        assert_eq!(TASK_COUNT, 5);
-        // **足した 1 本は AP 用アイドルの後ろ、末尾に置く。既存の添字は動かない**
+        // メイン（0）+ ワーカー 2 + AP 用アイドル 1 + Ring 3 を同時に走らせる 1 本（W1-c-1）
+        // + BSP 用アイドル 1（W2-a）。
+        assert_eq!(TASK_COUNT, 6);
+        // **足した 1 本（Ring 3）の添字は 4 で固定してある（W2-a）。** **`TASK_COUNT` から
+        // 導くのをやめた**——**増やすと動き、判定が読む行の文言（`task 4 = `）が別の
+        // タスクを指す。**
+        assert_eq!(super::RING3_TASK, 4);
+        assert_eq!(super::RING3_TASK, WORKER_COUNT + 2);
+        // **BSP 用アイドルは末尾である。**
+        assert_eq!(super::BSP_IDLE_TASK, TASK_COUNT - 1);
+        assert_ne!(super::BSP_IDLE_TASK, AP_IDLE_TASK);
+        // **足した 1 本は AP 用アイドルの後ろに置く。既存の添字は動かない**
         // （起動ログの `registered the AP idle task as index 3` もそのまま）。
-        assert_eq!(TASK_COUNT, AP_IDLE_TASK + 2);
+        // **W2-a で末尾へ BSP 用アイドルが付いたので、差は 3 である。**
+        assert_eq!(TASK_COUNT, AP_IDLE_TASK + 3);
         // AP 用アイドルはワーカーの後ろに置く。`pick_next` の走査範囲
         // （`1..=WORKER_COUNT`）の外であることが、選ばれない理由である。
         assert_eq!(AP_IDLE_TASK, WORKER_COUNT + 1);
@@ -2729,9 +2883,18 @@ mod tests {
 
     #[test]
     fn main_is_chosen_when_no_worker_can_run() {
-        assert_eq!(pick_next(states([false, false, false, true, false]), 0), 0);
-        assert_eq!(pick_next(states([false, false, false, true, false]), 1), 0);
-        assert_eq!(pick_next(states([false, false, false, true, false]), 2), 0);
+        assert_eq!(
+            pick_next(states([false, false, false, true, false, true]), 0),
+            0
+        );
+        assert_eq!(
+            pick_next(states([false, false, false, true, false, true]), 1),
+            0
+        );
+        assert_eq!(
+            pick_next(states([false, false, false, true, false, true]), 2),
+            0
+        );
     }
 
     /// タスク 0（メイン）は候補として巡回されない。走行可能と印を付けても
@@ -2739,7 +2902,10 @@ mod tests {
     #[test]
     fn main_is_never_picked_as_a_rotation_candidate() {
         // メインだけが走行可能でも、返るのは 0（フォールバック経路）。
-        assert_eq!(pick_next(states([true, false, false, true, false]), 1), 0);
+        assert_eq!(
+            pick_next(states([true, false, false, true, false, true]), 1),
+            0
+        );
     }
 
     /// 足した 1 本が走れるなら、メインと交互に選ばれる（W1-c-4）。
@@ -2747,7 +2913,7 @@ mod tests {
     /// **今のタスクがそれでなければ選び、それなら落ち先（メイン）へ戻す。**
     #[test]
     fn the_ring3_task_alternates_with_main() {
-        let ring3_ready = states([false, false, false, true, true]);
+        let ring3_ready = states([false, false, false, true, true, true]);
         assert_eq!(pick_next(ring3_ready, 0), super::RING3_TASK);
         assert_eq!(pick_next(ring3_ready, super::RING3_TASK), 0);
     }
@@ -2755,7 +2921,7 @@ mod tests {
     /// ワーカーが走れる間は、足した 1 本より先にワーカーを選ぶ（W1-c-4）。
     #[test]
     fn workers_come_before_the_ring3_task() {
-        let all_ready = states([false, true, true, true, true]);
+        let all_ready = states([false, true, true, true, true, true]);
         assert_eq!(pick_next(all_ready, 0), 1);
         assert_eq!(pick_next(all_ready, 1), 2);
         assert_eq!(pick_next(all_ready, super::RING3_TASK), 1);
@@ -2769,16 +2935,42 @@ mod tests {
             TaskState::Blocked,
             TaskState::Finished,
         ] {
-            let mut input = states([false, false, false, true, false]);
+            let mut input = states([false, false, false, true, false, true]);
             input[super::RING3_TASK] = state;
             assert_eq!(pick_next(input, 0), 0, "{state:?}");
         }
     }
 
+    /// BSP 用アイドルは巡回されず、落ち先でもない（W2-a）。
+    ///
+    /// **これが W2-a の「振る舞いを変えていない」の主張である。** **登録して `Ready` にしても、
+    /// `pick_next` の巡回範囲（`1..=WORKER_COUNT` と [`super::RING3_TASK`]）に入っておらず、
+    /// 落ち先は [`super::default_task_for`] が返すメインである。**
+    /// **選ぶようにするのは W2-c で、待つ者が出てからである**（`ADR-0061`）。
+    #[test]
+    fn the_bsp_idle_task_is_never_rotated_and_is_not_the_fallback() {
+        let all_ready = states([true, true, true, true, true, true]);
+        // 巡回の候補にならない（ワーカーが走れるときも、走れないときも）。
+        assert_ne!(pick_next(all_ready, 0), super::BSP_IDLE_TASK);
+        assert_ne!(pick_next(all_ready, 1), super::BSP_IDLE_TASK);
+        assert_ne!(
+            pick_next(all_ready, super::BSP_IDLE_TASK),
+            super::BSP_IDLE_TASK
+        );
+        let none_ready = states([false, false, false, true, false, true]);
+        assert_eq!(pick_next(none_ready, 0), super::MAIN_TASK);
+        assert_eq!(pick_next(none_ready, 1), super::MAIN_TASK);
+        // BSP の落ち先はメインのままである。
+        assert_eq!(
+            super::default_task_for(common::percpu::BOOTSTRAP_PROCESSOR_SLOT),
+            super::MAIN_TASK
+        );
+    }
+
     /// AP は足した 1 本を選ばない（W1-c-4）。**担当が BSP だからである**（第 1 層）。
     #[test]
     fn the_application_processor_does_not_choose_the_ring3_task() {
-        let ring3_ready = states([false, false, false, true, true]);
+        let ring3_ready = states([false, false, false, true, true, true]);
         assert_eq!(
             super::pick_next(
                 ring3_ready,
@@ -2793,16 +2985,31 @@ mod tests {
 
     #[test]
     fn from_main_the_first_runnable_worker_is_chosen() {
-        assert_eq!(pick_next(states([false, true, true, true, true]), 0), 1);
-        assert_eq!(pick_next(states([false, false, true, true, true]), 0), 2);
-        assert_eq!(pick_next(states([false, true, false, true, true]), 0), 1);
+        assert_eq!(
+            pick_next(states([false, true, true, true, true, true]), 0),
+            1
+        );
+        assert_eq!(
+            pick_next(states([false, false, true, true, true, true]), 0),
+            2
+        );
+        assert_eq!(
+            pick_next(states([false, true, false, true, true, true]), 0),
+            1
+        );
     }
 
     /// ワーカーの間は巡回する（round-robin）。
     #[test]
     fn workers_rotate() {
-        assert_eq!(pick_next(states([false, true, true, true, true]), 1), 2);
-        assert_eq!(pick_next(states([false, true, true, true, true]), 2), 1);
+        assert_eq!(
+            pick_next(states([false, true, true, true, true, true]), 1),
+            2
+        );
+        assert_eq!(
+            pick_next(states([false, true, true, true, true, true]), 2),
+            1
+        );
     }
 
     /// 現タスクが再選択されうる。他に走れるワーカーがおらず自分だけが
@@ -2811,15 +3018,27 @@ mod tests {
     /// 成立している契約なので、状態機械化でもこの性質を保つこと。
     #[test]
     fn the_current_worker_is_returned_when_it_is_the_only_runnable_one() {
-        assert_eq!(pick_next(states([false, true, false, true, true]), 1), 1);
-        assert_eq!(pick_next(states([false, false, true, true, true]), 2), 2);
+        assert_eq!(
+            pick_next(states([false, true, false, true, true, true]), 1),
+            1
+        );
+        assert_eq!(
+            pick_next(states([false, false, true, true, true, true]), 2),
+            2
+        );
     }
 
     /// 走行不可のワーカーは飛ばされる。
     #[test]
     fn an_unrunnable_worker_is_skipped() {
-        assert_eq!(pick_next(states([false, false, true, true, true]), 1), 2);
-        assert_eq!(pick_next(states([false, true, false, true, true]), 2), 1);
+        assert_eq!(
+            pick_next(states([false, false, true, true, true, true]), 1),
+            2
+        );
+        assert_eq!(
+            pick_next(states([false, true, false, true, true, true]), 2),
+            1
+        );
     }
 
     /// `Ready` 以外はすべて選ばれない。状態を増やしたときに
@@ -2866,11 +3085,15 @@ mod tests {
     /// Ring 3 のスロット 1 を使うのは、末尾に足した 1 本だけである（W1-c-3）。
     #[test]
     fn only_the_added_task_uses_the_second_ring3_slot() {
+        // **添字は [`super::RING3_TASK`] から引く（W2-a で直した）。** **`TASK_COUNT - 1` で
+        // 書いていたが、W2-a で末尾が BSP 用アイドルになったので、そのままでは別のタスクに
+        // スロット 1 を期待してしまう。**
         for task in 0..TASK_COUNT {
-            let expected = if task == TASK_COUNT - 1 { 1 } else { 0 };
+            let expected = if task == super::RING3_TASK { 1 } else { 0 };
             assert_eq!(super::ring3_slot_of(task), expected, "task {task}");
         }
-        assert!(super::ring3_slot_of(TASK_COUNT - 1) < crate::ring3::RING3_SLOTS);
+        assert!(super::ring3_slot_of(super::RING3_TASK) < crate::ring3::RING3_SLOTS);
+        assert_eq!(super::ring3_slot_of(super::BSP_IDLE_TASK), 0);
     }
 
     /// 遠征に入っていないタスクは、カーネルスタックに居る（W1-c-3b）。

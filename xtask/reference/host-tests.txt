@@ -567,6 +567,7 @@ kernel::task::tests::only_ready_is_runnable
 kernel::task::tests::only_the_added_task_uses_the_second_ring3_slot
 kernel::task::tests::only_the_tasks_owned_by_this_cpu_are_rotated
 kernel::task::tests::the_application_processor_does_not_choose_the_ring3_task
+kernel::task::tests::the_bsp_idle_task_is_never_rotated_and_is_not_the_fallback
 kernel::task::tests::the_current_worker_is_returned_when_it_is_the_only_runnable_one
 kernel::task::tests::the_demo_has_two_workers_and_one_main
 kernel::task::tests::the_fallback_of_every_core_is_a_task_that_core_owns

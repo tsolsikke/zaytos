@@ -12853,6 +12853,14 @@ const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
         reason: "GPR_BUF（A/B 共有）の store と照合を守る排他。asm 文脈で InterruptGuard を \
                  使えないための例外。BKL で再検討（複数コアでは防げない）",
     },
+    DirectInterruptControlSite {
+        file: "kernel/src/task.rs",
+        item: "bsp_idle_main",
+        reason: "BSP 用アイドルタスクの本体（W2-a。ADR-0061）。**排他ではない。** \
+                 `sti` と `hlt` を隣接させる形は InterruptGuard では書けない \
+                 （ガードは drop で IF を戻すので、`sti` と `hlt` の間に窓が空く）。 \
+                 錠は 1 つも取らないので、保持したまま眠る危険が構造的に無い",
+    },
 ];
 
 /// 許可リストに無い直接の割り込み制御を探す。
