@@ -22,6 +22,14 @@
   持ち、`--self-test` が覆う**）
 - **呼ぶなら基底 `cargo xtask check` を回し、赤なら拒む**（2.3 秒。実測）
 
+# コミットと同じコマンドの `push` は、検査せずに拒む（2026-09-18）
+
+**この hook は `PreToolUse` で、コマンドが始まる前に 1 度だけ検査する。** **同じコマンドの中で
+コミットを作ってから押すと、検査が見るのは「これから作るコミット」ではなく 1 つ前の木である**
+——**実測で、本文 1 行のコミットをそのまま押した**（2026-09-18。`docs/troubleshooting.md`）。
+**そこで、同じコマンドに `git commit` の呼び出しが在れば、検査せずに拒む。** **コミットと
+`push` は別のコマンドにすること**——**基底 check の出力を読んでから、次のコマンドで押す。**
+
 # 並走していたら、検査せずに拒む
 
 **`cargo` は `target/` にファイルロックを取る。** **`--full` が走っている最中に
@@ -51,12 +59,23 @@ from deny_dangerous_bash import executable_part  # noqa: E402
 START = r"(?:^|[;&|(]\s*|\n\s*)"
 # `git -C dir push` のような大域の旗も通す。
 PUSH = re.compile(START + r"git\s+(?:-\S+\s+\S+\s+|-\S+\s+)*push\b")
+# **`commit-tree` のような下位の命令は当てない**（`\b` だと `-` の手前で切れて当たる）。
+COMMIT = re.compile(START + r"git\s+(?:-\S+\s+\S+\s+|-\S+\s+)*commit(?![-\w])")
 TIMEOUT_SECONDS = 240
 
 
 def invokes_git_push(command: str) -> bool:
     """発火するかを決める。**ここだけが判定であり、self-test が覆う。**"""
     return bool(PUSH.search(executable_part(command)))
+
+
+def commits_and_pushes(command: str) -> bool:
+    """同じコマンドの中で、コミットを作ってから押す形か。**self-test が覆う。**
+
+    **引用と heredoc の中の言及は数えない**（[`executable_part`] が落とす）。
+    """
+    body = executable_part(command)
+    return bool(PUSH.search(body)) and bool(COMMIT.search(body))
 
 
 def running_builds() -> list:
@@ -97,6 +116,15 @@ def main() -> int:
     command = payload.get("tool_input", {}).get("command", "")
     if not invokes_git_push(command):
         return 0
+
+    # **コミットと同じコマンドなら、検査の前に拒む。** **検査はコミットより前の木を見るので、
+    # 緑でも意味が無い**（この doc の「コミットと同じコマンドの `push`」）。
+    if commits_and_pushes(command):
+        return deny(
+            "同じコマンドの中で git commit と git push を呼んでいる。この hook はコマンドの前に "
+            "1 度だけ検査するので、これから作るコミットを見られない。コミットと push を別の"
+            "コマンドに分け、コミット直後の基底 check の出力を読んでから押すこと"
+        )
 
     # **並走を確かめられなければ押さない。** **`ps` が落ちたときに「何も
     # 走っていない」と答えると、確かめていないものを確かめたことにする。**
@@ -161,15 +189,36 @@ def self_test() -> int:
         (f"cat <<'EOF'\ngit {push} origin main\nEOF", False),
         ("cargo xtask check", False),
     ]
+    commit = "commit"
+    # **同じコマンドにコミットと push が在るか**（2026-09-18）。**文書の言及は通す**
+    # ——**部分一致が文書の言及まで拒む形を、隣の hook で 2 度踏んでいる。**
+    combined = [
+        # **2 度目に実際に押した形である**——**改行で並べていた。**
+        (f"git add a && git {commit} -q -m x -m y\ncargo xtask check\ngit {push}", True),
+        (f"git {commit} -m x && git {push}", True),
+        (f"git {commit} -q --amend -m x; cargo xtask check; git {push} origin main", True),
+        (f"(git {commit} -m x) && git {push}", True),
+        (f"git {push}", False),
+        (f"git {commit} -m x", False),
+        (f"git {commit}-tree abc -m x && git {push}", False),
+        (f"echo 'git {commit} の後に押す' && git {push}", False),
+        (f"git log --grep 'git {commit}' && git {push}", False),
+        (f"cat <<'EOF'\ngit {commit} -m x\nEOF\ngit {push}", False),
+    ]
     failures = 0
     for command, want in cases:
         got = invokes_git_push(command)
         if got != want:
             print(f"self-test: {command!r} wanted {want} but got {got}")
             failures += 1
+    for command, want in combined:
+        got = commits_and_pushes(command)
+        if got != want:
+            print(f"self-test (commit and push): {command!r} wanted {want} but got {got}")
+            failures += 1
     if failures:
         return 1
-    print(f"self-test: {len(cases)} case(s) decided as expected")
+    print(f"self-test: {len(cases) + len(combined)} case(s) decided as expected")
     return 0
 
 
