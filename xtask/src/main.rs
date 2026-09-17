@@ -3790,16 +3790,16 @@ const SHELL_TEST_SABOTAGES: &[&str] = &[
     "read-never-waits",
     "keyboard-does-not-wake",
     "idle-holds-bkl-across-hlt",
-    // **W2-d+ の破壊は 1 つも置けなかった（実測。2026-09-17）。**
+    // **W2-d+ の破壊（`ADR-0062`）。** **(a) の段では 1 つも置けなかった**——**利用者
+    // （`/bin/sleep`）ができた (b)(c) で、4 つが置けるようになった。**
     //
-    // **`clock-ap-also-ticks`**——**`--shell-test` は `-smp` を渡さないので 1 コアで走る**
-    // （`qemu_launch_args`。QEMU の既定は 1）。**AP が居ないので、AP も進める破壊は
-    // 何も変えない。** **実測で 3 回とも全判定を通した**（ティックの増加は素と同じ
-    // 4,378 対 4,382）。**戻す契機は「`-smp 2` で時刻を見る項目ができたとき」である。**
-    //
-    // **`clock-goes-backwards`**——**`clock_gettime` の中の破壊だが、計器は
-    // `idt::monotonic_ticks` を直に読むので効かない。** **戻す契機は「Ring 3 から
-    // 時刻を読む利用者ができたとき」で、`/bin/sleep`（(c) の段）がそれである。**
+    // **`clock-ap-also-ticks` だけはまだ置けない**——**`--shell-test` は `-smp` を渡さないので
+    // 1 コアで走る**（`qemu_launch_args`。QEMU の既定は 1）。**AP が居ないので何も変えない**
+    // （緑を出す道の「機会が無い」）。**戻す契機は「`-smp 2` で時刻を見る項目ができたとき」である。**
+    "clock-goes-backwards",
+    "wake-ignores-the-reason",
+    "timer-never-wakes",
+    "timer-wakes-before-deadline",
     "kill-ignore-interrupt-test",
     "kill-fold-at-depth-one-test",
     "kill-keep-stale-interrupt-test",
@@ -8926,6 +8926,22 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         .unwrap_or("");
     let clock_from = number_after(clock_line, "from ");
     let clock_to = number_after(clock_line, "to ");
+    let timer_line = after_shell
+        .lines()
+        .find(|line| line.contains("timer: nanosleep waited"))
+        .unwrap_or("");
+    let timer_waits = number_after(timer_line, "waited ");
+    let early_timer_wakes = number_after(timer_line, "woke early ");
+    let timer_wakes = number_after(timer_line, "timer wakes ");
+    let timer_woke_before_deadline = number_after(timer_line, "before the deadline ");
+    let woken_for_another_reason = number_after(timer_line, "another reason ");
+    let sleep_plain = strip_ansi(after_shell);
+    let sleep_line = sleep_plain
+        .lines()
+        .find(|line| line.contains("sleep: asked "))
+        .unwrap_or("");
+    let sleep_asked = number_after(sleep_line, "asked ");
+    let sleep_advanced = number_after(sleep_line, "advanced ");
 
     // **判定 1——回さずに待つ。** **関係で見る**（`ADR-0061`。**回数そのものは木で動く**
     // ——W2-c-1 の実測で 1,377,679 回、それ以前の木で 1,282,916 回だった）。
@@ -8968,10 +8984,34 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     //
     // **関係で見る。時間では見ない。** **ティックの増加は、深さ 1 の弾き（判定 6 の量）と
     // ほぼ 1 対 1 になる**——**どちらも BSP のタイマ割り込みで増えるからである。**
-    // **実測で 4,024 対 3,964 = 1.015 だった**（2026-09-17）。
+    // **実測で 4,024 対 3,964 = 1.015 だった**（2026-09-17）。**`sleep 1` を台本へ足した後は
+    // 4,129 対 3,967 = 1.041 である**——**眠っている 1 秒は深さ 2 なので、弾きに数えられない。**
     //
     // **上限は測ってから決めた**——**1.5 である。** **通る側（1.015）に 1.48 倍の余裕があり、
     // 破壊 `clock-ap-also-ticks` の側は約 2.0 になる**（`-smp 2` でティックだけが倍になる）。
+    // **判定 9——`sleep` は求めた長さ以上に眠った（W2-d+。`ADR-0062`）。**
+    //
+    // **比べるのはカーネルが答えた 2 つの時刻である**（`sleep` が前後で `clock_gettime` を
+    // 読む）。**外から時間を測らない。** **時刻の口を Ring 3 から通る最初の判定である**
+    // ——**`clock-goes-backwards` はここで落ちる**（後の値が前より小さくなり、行が出ない）。
+    let sleep_kept_its_length = matches!(
+        (sleep_asked, sleep_advanced),
+        (Some(1000), Some(advanced)) if advanced >= 1000
+    );
+    // **判定 10——実際にタイマで眠り、タイマが起こした（機会の確認）。**
+    //
+    // **これが偽なら下の 3 本の 0 は何も言っていない**——**眠っていなければ、早く起こされる
+    // 機会も無い**（緑を出す道の「機会が無い」）。
+    let slept_on_the_timer =
+        timer_waits.is_some_and(|count| count >= 1) && timer_wakes.is_some_and(|count| count >= 1);
+    // **判定 11——眠った側が、締切より前に起こされなかった（端から端の観測）。**
+    let no_early_timer_wake = early_timer_wakes == Some(0);
+    // **判定 12——合図と違う理由で待っていた者を起こさなかった。**
+    // **`wake-ignores-the-reason` はここで落ちる**（`exit` の打鍵が、眠っている `sleep` を起こす）。
+    let woke_only_for_the_reason = woken_for_another_reason == Some(0);
+    // **判定 13——タイマは締切を過ぎてから起こした。**
+    // **`timer-wakes-before-deadline` はここで落ちる**（毎ティック起こす）。
+    let timer_kept_the_deadline = timer_woke_before_deadline == Some(0);
     let clock_matches_the_timer = match (clock_from, clock_to, depth_one_not_folded) {
         (Some(from), Some(to), Some(folds)) if folds > 0 && to >= from => {
             (to - from) * 2 <= folds * 3
@@ -9006,7 +9046,27 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     );
     println!(
         "{context}: the clock kept pace with the timer = {clock_matches_the_timer} (ticks gained \
-         vs depth-one folds {depth_one_not_folded:?}; the bound is 1.5, measured 1.015)"
+         vs depth-one folds {depth_one_not_folded:?}; the bound is 1.5, measured 1.041)"
+    );
+    println!(
+        "{context}: sleep 1 kept its length = {sleep_kept_its_length} (asked {sleep_asked:?} ms, \
+         the monotonic clock advanced {sleep_advanced:?} ms)"
+    );
+    println!(
+        "{context}: sleep waited on the timer and the timer woke it = {slept_on_the_timer} \
+         (waits {timer_waits:?}, timer wakes {timer_wakes:?})"
+    );
+    println!(
+        "{context}: the sleeper was never woken before its deadline = {no_early_timer_wake} \
+         (woke early {early_timer_wakes:?})"
+    );
+    println!(
+        "{context}: every wake matched the reason the task waited for = \
+         {woke_only_for_the_reason} (woken for another reason {woken_for_another_reason:?})"
+    );
+    println!(
+        "{context}: the timer woke only after the deadline = {timer_kept_the_deadline} (woke \
+         before the deadline {timer_woke_before_deadline:?})"
     );
     // **判定 3（起こされて進む）は、既存の判定が覆っている**——**打った字が届き、
     // `ls`・`cat`・`hello` が走ったことを上で見ている。** **同じことを 2 度数えない。**
@@ -9071,6 +9131,12 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         // **W2-d+ の判定 2 本（`ADR-0062`）。**
         && clock_advanced
         && clock_matches_the_timer
+        // **W2-d+ の (b)(c) の判定 5 本（`ADR-0062`）。**
+        && sleep_kept_its_length
+        && slept_on_the_timer
+        && no_early_timer_wake
+        && woke_only_for_the_reason
+        && timer_kept_the_deadline
     {
         println!("{context}: PASS");
         if mode.expects_to_pass() {
@@ -9580,6 +9646,14 @@ const SHELL_TEST_LINES: &[&[&str]] = &[
     // ——**起きる前に送ると、旗が子より先に立って `spawn` が降ろしてしまう。**
     &["s", "p", "i", "n", "ret"],
     &["ctrl-c"],
+    // sleep 1（W2-d+。`ADR-0062`）。**タイマで眠る最初の利用者である。**
+    //
+    // **`exit` の直前に置く理由**——**次の行（`exit`）の打鍵は 400 ミリ秒後に届くので、
+    // 1 秒眠っている最中に積まれる。** **合図を取り違える破壊は、その打鍵で眠りを早く
+    // 起こす**——**機会を構造で作っている**（緑を出す道の「機会が無い」を避ける）。
+    // **普通に終わった子の後では、打ち込み済みの入力は捨てられない**（捨てるのは
+    // Ctrl+C で止めたときだけである。`userland.rs`）。
+    &["s", "l", "e", "e", "p", "spc", "1", "ret"],
     // exit
     &["e", "x", "i", "t", "ret"],
 ];
@@ -15934,6 +16008,9 @@ const SABOTAGE_FEATURES: &[&str] = &[
     // W2-d+。**時刻の口の破壊。** **どちらも値がもっともらしいまま壊れる。**
     "clock-goes-backwards",
     "clock-ap-also-ticks",
+    "wake-ignores-the-reason",
+    "timer-never-wakes",
+    "timer-wakes-before-deadline",
     "percpu-fake-nonzero-cpu-id",
     "smp-tramp-corrupt-copy-test",
     "smp-ap-touch-scheduler-test",
@@ -18168,7 +18245,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 34,
-    full: 307,
+    full: 311,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
