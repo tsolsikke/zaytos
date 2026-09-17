@@ -3790,6 +3790,16 @@ const SHELL_TEST_SABOTAGES: &[&str] = &[
     "read-never-waits",
     "keyboard-does-not-wake",
     "idle-holds-bkl-across-hlt",
+    // **W2-d+ の破壊は 1 つも置けなかった（実測。2026-09-17）。**
+    //
+    // **`clock-ap-also-ticks`**——**`--shell-test` は `-smp` を渡さないので 1 コアで走る**
+    // （`qemu_launch_args`。QEMU の既定は 1）。**AP が居ないので、AP も進める破壊は
+    // 何も変えない。** **実測で 3 回とも全判定を通した**（ティックの増加は素と同じ
+    // 4,378 対 4,382）。**戻す契機は「`-smp 2` で時刻を見る項目ができたとき」である。**
+    //
+    // **`clock-goes-backwards`**——**`clock_gettime` の中の破壊だが、計器は
+    // `idt::monotonic_ticks` を直に読むので効かない。** **戻す契機は「Ring 3 から
+    // 時刻を読む利用者ができたとき」で、`/bin/sleep`（(c) の段）がそれである。**
     "kill-ignore-interrupt-test",
     "kill-fold-at-depth-one-test",
     "kill-keep-stale-interrupt-test",
@@ -8910,6 +8920,12 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     let idle_halts = number_after(idle_line, "halted ");
     let idle_selections = number_after(idle_line, "was selected ");
     let depth_one_not_folded = number_after(fold_line, "not folded ");
+    let clock_line = after_shell
+        .lines()
+        .find(|line| line.contains("clock: monotonic ticks went from"))
+        .unwrap_or("");
+    let clock_from = number_after(clock_line, "from ");
+    let clock_to = number_after(clock_line, "to ");
 
     // **判定 1——回さずに待つ。** **関係で見る**（`ADR-0061`。**回数そのものは木で動く**
     // ——W2-c-1 の実測で 1,377,679 回、それ以前の木で 1,282,916 回だった）。
@@ -8943,6 +8959,25 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     // ——**深さ 1 で Ring 3 に居る窓が μs 単位で、打鍵の間隔 32 ミリ秒に対して 1% 未満の
     // 見込みだからである**（`kernel/src/idt` の `DEPTH_ONE_NOT_FOLDED` の doc）。
     let depth_one_was_not_folded = depth_one_not_folded.is_some_and(|count| count >= 1);
+    // **判定 7——単調な時刻が進む（W2-d+。`ADR-0062`）。**
+    let clock_advanced = match (clock_from, clock_to) {
+        (Some(from), Some(to)) => to > from,
+        _ => false,
+    };
+    // **判定 8——時刻の速さがタイマと合う（W2-d+）。**
+    //
+    // **関係で見る。時間では見ない。** **ティックの増加は、深さ 1 の弾き（判定 6 の量）と
+    // ほぼ 1 対 1 になる**——**どちらも BSP のタイマ割り込みで増えるからである。**
+    // **実測で 4,024 対 3,964 = 1.015 だった**（2026-09-17）。
+    //
+    // **上限は測ってから決めた**——**1.5 である。** **通る側（1.015）に 1.48 倍の余裕があり、
+    // 破壊 `clock-ap-also-ticks` の側は約 2.0 になる**（`-smp 2` でティックだけが倍になる）。
+    let clock_matches_the_timer = match (clock_from, clock_to, depth_one_not_folded) {
+        (Some(from), Some(to), Some(folds)) if folds > 0 && to >= from => {
+            (to - from) * 2 <= folds * 3
+        }
+        _ => false,
+    };
 
     println!(
         "{context}: read(0) waited instead of spinning = {read_did_not_spin} \
@@ -8964,6 +8999,14 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     println!(
         "{context}: depth one was not folded = {depth_one_was_not_folded} (count \
          {depth_one_not_folded:?}; kill-fold-at-depth-one-test makes it 0)"
+    );
+    println!(
+        "{context}: the monotonic clock advanced = {clock_advanced} (from {clock_from:?} to \
+         {clock_to:?} tick(s), 1 tick = 10 ms)"
+    );
+    println!(
+        "{context}: the clock kept pace with the timer = {clock_matches_the_timer} (ticks gained \
+         vs depth-one folds {depth_one_not_folded:?}; the bound is 1.5, measured 1.015)"
     );
     // **判定 3（起こされて進む）は、既存の判定が覆っている**——**打った字が届き、
     // `ls`・`cat`・`hello` が走ったことを上で見ている。** **同じことを 2 度数えない。**
@@ -9025,6 +9068,9 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         && no_missed_wake
         && woke_empty_and_waited_again
         && depth_one_was_not_folded
+        // **W2-d+ の判定 2 本（`ADR-0062`）。**
+        && clock_advanced
+        && clock_matches_the_timer
     {
         println!("{context}: PASS");
         if mode.expects_to_pass() {
@@ -15885,6 +15931,9 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "read-never-waits",
     "keyboard-does-not-wake",
     "idle-holds-bkl-across-hlt",
+    // W2-d+。**時刻の口の破壊。** **どちらも値がもっともらしいまま壊れる。**
+    "clock-goes-backwards",
+    "clock-ap-also-ticks",
     "percpu-fake-nonzero-cpu-id",
     "smp-tramp-corrupt-copy-test",
     "smp-ap-touch-scheduler-test",
