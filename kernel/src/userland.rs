@@ -2218,11 +2218,9 @@ pub fn spawn(
 }
 
 /// 起こしっぱなしで走らせる 1 本の依頼（W1-c-4）。**パスと `argv` と要素数である。**
-#[cfg(feature = "concurrent-test")]
 type DetachedRequest = (&'static [u8], &'static [u8], usize);
 
 /// 足した 1 本のタスクへ渡す依頼（W1-c-4）。**[`start_detached`] が置き、そのタスクが取る。**
-#[cfg(feature = "concurrent-test")]
 static DETACHED_REQUEST: common::critical::Locked<Option<DetachedRequest>> =
     common::critical::Locked::new(None);
 
@@ -2238,18 +2236,17 @@ static DETACHED_REQUEST: common::critical::Locked<Option<DetachedRequest>> =
 ///
 /// [`crate::input::claim_foreground`] がスロット 1 を断る。
 ///
-/// # `concurrent-test` の構成にだけ在る
+/// # 既定の起動にも在る（`ADR-0063` の (a)。2026-09-18）
 ///
-/// **最初の利用者はその構成の `init` である。** **既定の起動から呼ぶ者が現れたら、足した 1 本の
-/// スタックとガードページを既定の起動へ出すかと一緒に決める。**
-#[cfg(feature = "concurrent-test")]
+/// **W1-c-4 では `concurrent-test` の構成にだけ置いていた**（最初の利用者はその構成の `init`）。
+/// **シェルの `|` が 2 本を同時に走らせるので、足した 1 本のスタックとガードページと一緒に
+/// 既定の起動へ出した。** **既定の起動で呼ぶ者は、まだ居ない**——**(b)(c) でシェルが呼ぶ。**
 pub fn start_detached(path: &'static [u8], argv_bytes: &'static [u8], argv_count: usize) {
     *DETACHED_REQUEST.lock() = Some((path, argv_bytes, argv_count));
     crate::task::start_ring3_task();
 }
 
 /// 足した 1 本のタスクが、渡された依頼を走らせる（W1-c-4）。**そのタスクの本体だけが呼ぶ。**
-#[cfg(feature = "concurrent-test")]
 pub fn run_detached_request() {
     let request = DETACHED_REQUEST.lock().take();
     let mut port = SerialPort::new(SerialPort::COM1_BASE);

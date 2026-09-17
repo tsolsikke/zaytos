@@ -609,27 +609,26 @@ fn count_switch_out_of_excursion(current: usize) {
 /// **読み込みと `spawn` をこのスタックの上で行う**——**`init` がメインのカーネルスタックの上で行う
 /// ことと同じである。** **ワーカーの 16 KiB では足りない見込みで、64 KiB から始めて測る**
 /// （終わりに高水位の行を出す）。
-#[cfg(feature = "concurrent-test")]
 const RING3_TASK_STACK_SIZE: usize = 64 * 1024;
 
 /// 足した 1 本のスタック（ガードページ + スタック本体。W1-c-4）。**[`WorkerStack`] と同じ作りである。**
 ///
-/// **`concurrent-test` の構成にだけ置く**——**既定の起動に 68 KiB の `.bss` とガードページを足さない。**
-#[cfg(feature = "concurrent-test")]
+/// **既定の起動にも置く（`ADR-0063` の (a)。2026-09-18）。** **W1-c-4 では `concurrent-test` の構成にだけ
+/// 置き、「既定の起動に 68 KiB の `.bss` とガードページを足さない」としていた。** **パイプの `|` が
+/// 2 本を同時に走らせるので、既定の起動へ出した。** **登録はしない**——**起こすのは
+/// [`start_ring3_task`] を呼んだときだけで、それまで `pick_next` は選ばない（`Uninitialized`）。**
 #[repr(C, align(4096))]
 struct Ring3TaskStack {
     guard: [u8; GUARD_SIZE],
     stack: [u8; RING3_TASK_STACK_SIZE],
 }
 
-#[cfg(feature = "concurrent-test")]
 static mut RING3_TASK_STACK: Ring3TaskStack = Ring3TaskStack {
     guard: [0; GUARD_SIZE],
     stack: [0; RING3_TASK_STACK_SIZE],
 };
 
 /// 足した 1 本のスタックの (ガードページ先頭, スタック頂点)（W1-c-4）。
-#[cfg(feature = "concurrent-test")]
 fn ring3_task_stack_bounds() -> (VirtAddr, VirtAddr) {
     // 静的変数のアドレスを取るだけで、読み書きはしない（`addr_of!` は `static mut` でも `unsafe` を要さない）。
     let base = addr_of!(RING3_TASK_STACK) as u64;
@@ -643,7 +642,6 @@ fn ring3_task_stack_bounds() -> (VirtAddr, VirtAddr) {
 ///
 /// **1 回しか起こせない。** **2 回目は止める**——**使い終わったスタックの上に次の文脈を積む形は、
 /// まだ要らないので作らない。**
-#[cfg(feature = "concurrent-test")]
 pub fn start_ring3_task() {
     if scheduler::state(RING3_TASK) != TaskState::Uninitialized {
         serial_line(format_args!(
@@ -683,18 +681,15 @@ pub fn start_ring3_task() {
 }
 
 /// 足した 1 本が Ring 3 の遠征に入っているか（W1-c-4。`init` が待つ）。
-#[cfg(feature = "concurrent-test")]
 pub fn ring3_task_in_excursion() -> bool {
     scheduler::excursion_depth(RING3_TASK) != 0
 }
 
 /// 足した 1 本が終わったか（W1-c-4。`init` が待つ）。
-#[cfg(feature = "concurrent-test")]
 pub fn ring3_task_finished() -> bool {
     scheduler::state(RING3_TASK) == TaskState::Finished
 }
 
-#[cfg(feature = "concurrent-test")]
 extern "C" {
     /// 足した 1 本の入口（`global_asm!`）。偽 `IrqContext` の RIP が指す。
     static zaytos_ring3_task_body: u8;
@@ -703,7 +698,6 @@ extern "C" {
 // 足した 1 本の入口（W1-c-4）。**`call` で Rust へ入る**——**`iretq` した直後の RSP はスタック頂点
 // （16 の倍数）で、`call` が戻り番地を積むと、呼ばれた側の入口で 16 の倍数 - 8 になる**（System V の約束）。
 // **戻らない。** 戻ったら `ud2` で落とす。
-#[cfg(feature = "concurrent-test")]
 core::arch::global_asm!(
     ".section .text",
     ".p2align 4",
@@ -715,7 +709,6 @@ core::arch::global_asm!(
 );
 
 /// 足した 1 本の本体（W1-c-4）。**依頼された 1 本を走らせ、終わったら二度と選ばれない。**
-#[cfg(feature = "concurrent-test")]
 extern "sysv64" fn ring3_task_main() -> ! {
     crate::userland::run_detached_request();
     let used = ring3_task_stack_high_water();
@@ -740,7 +733,6 @@ extern "sysv64" fn ring3_task_main() -> ! {
 }
 
 /// 足した 1 本のカーネルスタックの高水位（W1-c-4）。**底から目印でない最初の位置を探す。**
-#[cfg(feature = "concurrent-test")]
 fn ring3_task_stack_high_water() -> usize {
     let (guard, _) = ring3_task_stack_bounds();
     let bottom = (guard.as_u64() + GUARD_SIZE as u64) as *const u8;
@@ -1814,7 +1806,7 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
 
     // **足した 1 本のカーネルスタックにもガードページを張る（W1-c-4）。** **張るにはアロケータが要り、
     // 預ける前に張れるのはここである**（ワーカーと同じ）。
-    #[cfg(feature = "concurrent-test")]
+    // **既定の起動でも張る（`ADR-0063` の (a)）**——**起動ログに 2 行増える。**
     {
         let (guard, _) = ring3_task_stack_bounds();
         // SAFETY: 起動時、自前のページテーブル上。足した 1 本のスタックの直下 1 ページで、以後ここへ
