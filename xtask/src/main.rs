@@ -16278,6 +16278,72 @@ fn refuse_if_something_else_is_running(what: &str) -> Result<()> {
     );
 }
 
+/// 列挙で守る機構の件数を出す（2026-09-17）。**数は出すだけで、検査しない。**
+///
+/// # なぜ検査しないのか
+///
+/// **増えるのが正常である**——**破壊を足せば `SABOTAGE_FEATURES` が増え、許可リストは
+/// 場所が増えれば増える。** **固定すると、1 件足すたびに定数を直す作業が生まれる**
+/// （`check_deferred_state_markers` と同じ判断。**`EXPECTED_CHECK_COUNT` の族にしない**）。
+///
+/// # なぜ出すのか
+///
+/// **`docs/verification-coverage.md` の「列挙で守る機構の一覧」が件数を表に持っていて、
+/// 古くなった**——**実測で `SABOTAGE_FEATURES` が 40 と書かれていたが 49 だった**
+/// （2026-09-17）。**表から件数を外し、この行が出す数を見る形にした。**
+///
+/// # この関数自身が列挙である
+///
+/// **漏れても静かに通る**——**表と同じ弱点を持つ。** **洗い方は「`xtask/src/main.rs` の
+/// `const ...: &[` と `static ...: &[` を `grep` し、この一覧との差を取る」である。**
+/// **`static` を見落として 1 度数え違えている**（2026-09-17。`docs/troubleshooting.md`）。
+///
+/// # `FOLDABLE_VECTORS` はここに出ない
+///
+/// **あれは `kernel/src/idt` に在り、`xtask` は kernel に依存せずビルドするだけなので
+/// `.len()` が取れない。** **ソースを読んで数える形にすると、この検査自身が列挙で
+/// 守られることになる**（新しい脆さ）。**表に「手で数えた（日付つき）」で残してある。**
+fn report_enumeration_counts() {
+    let counts: &[(&str, usize)] = &[
+        ("PARSED_EXTERNAL_TOOLS", PARSED_EXTERNAL_TOOLS.len()),
+        ("PRIVATE_BOUNDARY_DIRS", PRIVATE_BOUNDARY_DIRS.len()),
+        ("DOC_PATH_PREFIXES", DOC_PATH_PREFIXES.len()),
+        ("SABOTAGE_FEATURES", SABOTAGE_FEATURES.len()),
+        (
+            "DIRECT_INTERRUPT_CONTROL_ALLOWLIST",
+            DIRECT_INTERRUPT_CONTROL_ALLOWLIST.len(),
+        ),
+        (
+            "DIRECT_SERIAL_PORT_ALLOWLIST",
+            DIRECT_SERIAL_PORT_ALLOWLIST.len(),
+        ),
+        ("DOC_PATH_ALLOWLIST", DOC_PATH_ALLOWLIST.len()),
+        ("UNTRACKED_BY_DESIGN", UNTRACKED_BY_DESIGN.len()),
+        ("FLAKY_EXCLUDED", FLAKY_EXCLUDED.len()),
+        ("BOOT_LOG_VOLATILE_MARKERS", BOOT_LOG_VOLATILE_MARKERS.len()),
+        (
+            "BOOT_LOG_CORE_COUNT_MARKERS",
+            BOOT_LOG_CORE_COUNT_MARKERS.len(),
+        ),
+        ("COMMIT_SUBJECT_PREFIXES", COMMIT_SUBJECT_PREFIXES.len()),
+        (
+            "STRUCTURAL_GUARD_SYMBOL_FRAGMENTS",
+            STRUCTURAL_GUARD_SYMBOL_FRAGMENTS.len(),
+        ),
+        ("TEST_HOOKS_EXCLUSIONS", TEST_HOOKS_EXCLUSIONS.len()),
+    ];
+    let rendered: Vec<String> = counts
+        .iter()
+        .map(|(name, size)| format!("{name}={size}"))
+        .collect();
+    println!(
+        "--- enumeration counts: OK ({} listed here; FOLDABLE_VECTORS lives in kernel/src/idt and \
+         is counted by hand in docs/verification-coverage.md; reported, not enforced) {}",
+        counts.len(),
+        rendered.join(" ")
+    );
+}
+
 /// `--full` の前に基底の `check` を回し、赤なら降りる（2026-09-17）。
 ///
 /// # なぜ機械にするのか
@@ -17471,6 +17537,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
+    begin_item("the enumerations that guard by listing report their sizes");
+    report_enumeration_counts();
+
+    total += 1;
     begin_item("every Bash hook still decides the way it says it does");
     // **hook が読み込まれているかは、ここでは分からない**——**ツールの
     // 呼び出しを止めるのは harness の側で、`xtask` からは観測できない。**
@@ -18048,8 +18118,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 33,
-    full: 306,
+    base: 34,
+    full: 307,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
