@@ -2020,6 +2020,8 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
         // その後の `init` の行は、また `init` が書く。
         // **台本を作動させる（zi-d。`zi-test` のときだけ効く）。**
         // **起動シーケンスの検算より後である**（`kernel::input::arm_input_script`）。
+        // **セッションの開始のティックを控える（W2-d+）。** **終わった後との差を計器に出す。**
+        let clock_at_start = kernel::idt::monotonic_ticks();
         kernel::input::arm_input_script();
         let outcome = {
             let _foreground = console
@@ -2079,6 +2081,22 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
                 // **置いた理由は、覆いが 1 本だけだったことである**——**`kill-fold-at-depth-one`
                 // を落としていたのは `the shell was restarted exactly once` だけで、待つ形に
                 // したら真へ倒れて素通りした**（`ADR-0061`）。
+                // **単調な時刻が進んだこと（W2-d+）。** **判定はこの行を読む。**
+                //
+                // **関係で見る**——**ティックの増加は、上の `fold:` の回数と同じ桁になる。**
+                // **どちらも BSP のタイマ割り込みで増えるからである**（あちらは遠征中の
+                // 割り込みを弾いた回数、こちらは割り込みそのものの回数）。
+                // **破壊 `clock-ap-also-ticks` を立てると、ティックだけがコア数倍になるので
+                // 食い違う。** **時間では見ない。**
+                //
+                // **既定の起動では出ない**（シェルが終わらない）ので、**起動ログの参照には
+                // 入らない**——**入るのは `--shell-test` のログである。**
+                logger.info(format_args!(
+                    "clock: monotonic ticks went from {} to {} during this session (1 tick = {} ms)",
+                    clock_at_start,
+                    kernel::idt::monotonic_ticks(),
+                    1000 / u64::from(kernel::irq::timer_frequency_hz())
+                ));
                 logger.info(format_args!(
                     "fold: depth one was not folded {} time(s) during this session",
                     kernel::idt::depth_one_not_folded()
@@ -9824,6 +9842,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "idle-holds-bkl-across-hlt",
         cfg!(feature = "idle-holds-bkl-across-hlt"),
         "BSP 用アイドルが BKL を取ったまま hlt する",
+    ),
+    (
+        "clock-goes-backwards",
+        cfg!(feature = "clock-goes-backwards"),
+        "clock_gettime が呼ぶたびに減る値を返す",
+    ),
+    (
+        "clock-ap-also-ticks",
+        cfg!(feature = "clock-ap-also-ticks"),
+        "単調なティックを AP も進める（時刻がコア数倍の速さで進む）",
     ),
     (
         "fp-spawn-no-save",

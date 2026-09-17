@@ -506,6 +506,10 @@ keyboard-does-not-wake = []
 # `bkl-hold-across-hlt-test` は流用できない（あちらはハートビートのループに仕込み、
 # `init` より前に発火するので、アイドルの場所が観測されない）。
 idle-holds-bkl-across-hlt = []
+# `clock_gettime` が呼ぶたびに減る値を返す（W2-d+）。単調さが壊れる。
+clock-goes-backwards = []
+# 単調なティックを AP も進める（W2-d+）。時刻がコア数倍の速さで進む。
+clock-ap-also-ticks = []
 # `spawn` で、子へ入る前に親の FP の状態を保存しない（`ADR-0058`）。
 # 親が `spawn` を跨いで値を保てなくなる。
 fp-spawn-no-save = []

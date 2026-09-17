@@ -1128,6 +1128,8 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     // EOI は Local APIC へ送る。8259 は関与しない。
     if vector == LAPIC_TIMER_VECTOR {
         timer_ticks_slot().fetch_add(1, Ordering::Relaxed);
+        // **単調なティック（W2-d+）。** **較正の後はこちらが数える。**
+        advance_monotonic_ticks();
         // SAFETY: 割り込みハンドラの中であり、割り込みゲート経由なので IF=0。
         // 実際に配送された割り込みに対してのみ呼んでいる。
         //
@@ -1178,6 +1180,9 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         // 今は同じ値だが、S2-d-2 で Local APIC タイマへ移すと変わる。
         if vector == timer_delivery_vector() {
             timer_ticks_slot().fetch_add(1, Ordering::Relaxed);
+            // **単調なティック（W2-d+）。** **較正より前は 8259 経由なので、ここも数える**
+            // ——**2 箇所に置かないと、起動直後のティックが落ちる。**
+            advance_monotonic_ticks();
         }
 
         // キーボード（IRQ1）。EOI より先に呼ぶ。この中でデータポートを
@@ -1922,6 +1927,48 @@ const FOLDABLE_VECTORS_VALUE: [u8; FOLDABLE_VECTOR_COUNT] = [0, 1, 6, 13, 14, 19
 ///
 /// `context` が有効な [`IrqContext`] を指すこと。遠征中（深さ 2 以上）なら
 /// `RECOVERY` は `ring3::enter` が保存済みである。EOI を送った後に呼ぶこと。
+/// 起動からの単調なティック（W2-d+。時刻の口が読む）。
+///
+/// # 既存のカウンタは時刻に使えない
+///
+/// **`TIMER_TICKS` は per-CPU で、コアごとに違う値になる。**
+/// **[`timer_ticks_total`] は全コアの合計なので、コア数に比例して増える**
+/// ——**あれは会計の片辺である**（もう片辺は [`timer_delivery_count`]）。
+/// **時刻は 1 本の単調な数でなければならない。**
+///
+/// # BSP だけが増やす
+///
+/// **BSP は止まらない。** **アイドルでも `hlt` から起きる**（W2-a で置いたアイドルタスク）
+/// ——**実測で、1 セッションに 5,049 回 `hlt` し、深さ 1 の弾きが 3,966 回だった。**
+/// **どちらも 100Hz とほぼ一致する**（2026-09-17）。
+///
+/// **既存の会計には触っていない**——**`TIMER_TICKS` と配送数の一致はそのままである。**
+///
+/// # 1 ティックは 10ms である
+///
+/// **実測で 100.000 Hz**（起動ログの `lapic-timer: effective ...`）。
+/// **Wayland はミリ秒の分解能を要求しており、形式としては満たす**——**ただし粒度は
+/// 10ms のままである**（`ADR-0062` の「10ms で足りるか」）。
+static MONOTONIC_TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// 起動からの単調なティック数（W2-d+）。**1 ティックは 10ms である。**
+pub fn monotonic_ticks() -> u64 {
+    MONOTONIC_TICKS.load(Ordering::Relaxed)
+}
+
+/// 単調なティックを 1 つ進める（W2-d+）。**BSP だけが進める**（[`MONOTONIC_TICKS`] の doc）。
+fn advance_monotonic_ticks() {
+    // 破壊 (W2-d+, clock-ap-also-ticks): AP も進める。**時刻がコア数倍の速さで進む。**
+    // **`-smp 2` では約 2 倍になるので、単調さではなく速さが壊れる。**
+    #[cfg(feature = "clock-ap-also-ticks")]
+    MONOTONIC_TICKS.fetch_add(1, Ordering::Relaxed);
+    // **`cpu_id() == 0` と直に書かない**（`common::percpu::is_bootstrap_processor` の doc）。
+    #[cfg(not(feature = "clock-ap-also-ticks"))]
+    if common::percpu::is_bootstrap_processor() {
+        MONOTONIC_TICKS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// 深さがちょうど 1 だったので畳まなかった回数（W2-c-2 の手当て。`ADR-0061`）。
 ///
 /// **「深さ 1 では畳まない」が働いたことの観測である。** **判定は「1 以上」を見る。**

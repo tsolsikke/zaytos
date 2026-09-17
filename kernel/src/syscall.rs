@@ -335,6 +335,42 @@ const STAT_MODE: usize = 24;
 const STAT_SIZE: usize = 48;
 const STAT_BLOCKS: usize = 64;
 
+/// `clock_gettime(clockid, timespec)`（W2-d+）。**Linux の番号 228 をそのまま使う。**
+///
+/// # `CLOCK_MONOTONIC` だけを実装する
+///
+/// **壁時計（`CLOCK_REALTIME` = 0）は持てない**——**ZaytOS に実時刻の出所が無い**
+/// （RTC は未実装。`docs/deferred-decisions.md` の「時刻の欄」）。
+/// **0 を返して黙って答えると嘘の時刻が広がる**ので、`-EINVAL` を返す。
+pub const SYS_CLOCK_GETTIME: u64 = 228;
+
+/// `CLOCK_MONOTONIC`（Linux x86-64 の値）。**実測で確かめた**——
+/// `/usr/include/x86_64-linux-gnu/bits/time.h` が `1` と定義している（確認日 2026-09-17。
+/// **`CLOCK_REALTIME` は `0` である**）。
+pub const CLOCK_MONOTONIC: u64 = 1;
+
+/// `struct timespec` のバイト数（x86-64 の Linux）。**実測で確かめた。**
+///
+/// # 欄の位置
+///
+/// `gcc` の `offsetof` で測った値である（`cc` 13.3.0。確認日 2026-09-17）。
+/// **記憶から書かない**（[`STAT_LEN`] と同じ手順である）。
+///
+/// | 欄 | 位置 | 幅 |
+/// |---|---|---|
+/// | `tv_sec` | 0 | 8 |
+/// | `tv_nsec` | 8 | 8 |
+///
+/// **どちらも符号つき 64 ビットで、詰め物は無い**（`__time_t` と `__syscall_slong_t` が
+/// ともに `__SYSCALL_SLONG_TYPE` である）。
+///
+/// **[`STAT_LEN`] の表の `st_atim`（位置 72、幅 16）と整合する**——**あちらが既に
+/// この配置を前提にしていた。**
+pub const TIMESPEC_LEN: usize = 16;
+
+/// `struct timespec` の `tv_nsec` の位置。**上の表と対になっている。**
+const TIMESPEC_NSEC: usize = 8;
+
 /// `open(path, flags, mode)`（S10-b）。**Linux の番号 2 をそのまま使う。**
 ///
 /// # `openat`（257）は採らない
@@ -1055,6 +1091,10 @@ unsafe fn dispatch(
             unsafe { sys_brk(args[0], direct_map) }
         }
         SYS_LSEEK => sys_lseek(args[0], args[1], args[2]),
+        SYS_CLOCK_GETTIME => {
+            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+            unsafe { sys_clock_gettime(args[0], args[1], pml4_phys, direct_map) }
+        }
         SYS_MKDIR => {
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
             unsafe { sys_directory(args[0], DirectoryOp::Create, pml4_phys, direct_map) }
@@ -2484,6 +2524,53 @@ const DIRENT64_MAX_RECORD: usize = (DIRENT64_HEADER_LEN + 255 + 1).next_multiple
 /// # Safety
 ///
 /// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+/// `clock_gettime`（W2-d+）。**`CLOCK_MONOTONIC` だけを答える。**
+///
+/// # 秒とナノ秒は 1 本のティックから導く
+///
+/// **1 ティックは 10ms である**（実測で 100.000 Hz）。**周波数はカーネルの値を読む**
+/// ——**定数を写すと、周波数を変えた日に片方だけが古くなる。**
+///
+/// **粒度は 10ms のままである。** **Wayland のミリ秒の分解能は形式として満たすが、
+/// 入力の時刻印を付ける段で足りるかを判断すること**（`ADR-0062`）。
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn sys_clock_gettime(
+    clockid: u64,
+    out: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+) -> u64 {
+    if clockid != CLOCK_MONOTONIC {
+        return (-EINVAL) as u64;
+    }
+    let ticks = crate::idt::monotonic_ticks();
+    // 破壊 (W2-d+, clock-goes-backwards): 呼ぶたびに減る値を返す。**単調さが壊れる。**
+    // **値はもっともらしいまま進むので、2 回読んで比べる検算でしか捕まらない。**
+    #[cfg(feature = "clock-goes-backwards")]
+    let ticks = u64::MAX - ticks;
+    let hz = u64::from(crate::irq::timer_frequency_hz());
+    let secs = ticks / hz;
+    let nsecs = (ticks % hz) * (1_000_000_000 / hz);
+
+    let mut buf = [0u8; TIMESPEC_LEN];
+    buf[..TIMESPEC_NSEC].copy_from_slice(&secs.to_le_bytes());
+    buf[TIMESPEC_NSEC..].copy_from_slice(&nsecs.to_le_bytes());
+
+    // **踏み込む前に検証する。**
+    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    let Some(slice) =
+        (unsafe { validate_user_range(pml4_phys, direct_map, out, TIMESPEC_LEN as u64) })
+    else {
+        return (-EFAULT) as u64;
+    };
+    // SAFETY: slice は検証済みで、長さは TIMESPEC_LEN ちょうどである。
+    unsafe { copy_to_user(&slice, 0, &buf) };
+    0
+}
+
 unsafe fn sys_stat(path: u64, statbuf: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -> u64 {
     let mut name = [0u8; PATH_MAX];
     // SAFETY: 呼び出し元契約をそのまま渡す。
