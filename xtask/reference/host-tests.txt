@@ -206,6 +206,10 @@ common::text::tests::the_cursor_moves_by_characters
 common::text::tests::the_first_nonblank_skips_spaces_and_tabs
 common::text::tests::the_line_end_is_the_last_character_not_the_last_byte
 common::text::tests::wide_characters_take_two_cells
+common::time::tests::a_partial_tick_rounds_up_so_the_sleep_is_never_short
+common::time::tests::out_of_range_values_are_refused
+common::time::tests::ticks_become_seconds_and_nanos
+common::time::tests::whole_seconds_become_exact_ticks
 common::window::tests::a_far_jump_lands_the_line_at_the_bottom
 common::window::tests::a_line_above_the_window_becomes_the_top
 common::window::tests::a_line_below_the_window_pulls_it_down_by_the_least

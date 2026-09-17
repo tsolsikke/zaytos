@@ -2097,6 +2097,20 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
                     kernel::idt::monotonic_ticks(),
                     1000 / u64::from(kernel::irq::timer_frequency_hz())
                 ));
+                // **タイマの待ちと起こし（W2-d+）。** **判定はこの行を読む。**
+                //
+                // **関係の検出器が 3 つある**——**眠った側が締切前に起こされた回数、合図と違う
+                // 理由で起こした回数、タイマが締切前に起こした回数である。** **本番ではどれも
+                // 0 である。** **眠った側は待ち直すので、所要には出ない**——**ここでしか見えない。**
+                logger.info(format_args!(
+                    "timer: nanosleep waited {} time(s), woke early {} time(s); timer wakes {}, \
+                     woke before the deadline {}, woken for another reason {}",
+                    kernel::syscall::timer_waits(),
+                    kernel::syscall::early_timer_wakes(),
+                    kernel::task::timer_wakes(),
+                    kernel::task::timer_woke_before_deadline(),
+                    kernel::task::woken_for_another_reason()
+                ));
                 logger.info(format_args!(
                     "fold: depth one was not folded {} time(s) during this session",
                     kernel::idt::depth_one_not_folded()
@@ -9852,6 +9866,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "clock-ap-also-ticks",
         cfg!(feature = "clock-ap-also-ticks"),
         "単調なティックを AP も進める（時刻がコア数倍の速さで進む）",
+    ),
+    (
+        "wake-ignores-the-reason",
+        cfg!(feature = "wake-ignores-the-reason"),
+        "合図を見ずに、待っている者を全部起こす",
+    ),
+    (
+        "timer-never-wakes",
+        cfg!(feature = "timer-never-wakes"),
+        "タイマが眠っている者を誰も起こさない",
+    ),
+    (
+        "timer-wakes-before-deadline",
+        cfg!(feature = "timer-wakes-before-deadline"),
+        "タイマが締切を見ずに毎ティック起こす",
     ),
     (
         "fp-spawn-no-save",

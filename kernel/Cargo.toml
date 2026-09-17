@@ -510,6 +510,13 @@ idle-holds-bkl-across-hlt = []
 clock-goes-backwards = []
 # 単調なティックを AP も進める（W2-d+）。時刻がコア数倍の速さで進む。
 clock-ap-also-ticks = []
+# 合図を見ずに、待っている者を全部起こす（W2-d+。W2-c-2 では置けなかった）。
+# 打鍵が、タイマで眠っている者を締切より前に起こす。
+wake-ignores-the-reason = []
+# タイマが誰も起こさない（W2-d+）。眠った者が戻らない。
+timer-never-wakes = []
+# タイマが締切を見ずに毎ティック起こす（W2-d+）。眠った側は待ち直すので所要は変わらない。
+timer-wakes-before-deadline = []
 # `spawn` で、子へ入る前に親の FP の状態を保存しない（`ADR-0058`）。
 # 親が `spawn` を跨いで値を保てなくなる。
 fp-spawn-no-save = []

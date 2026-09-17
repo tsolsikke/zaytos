@@ -1965,7 +1965,10 @@ fn advance_monotonic_ticks() {
     // **`cpu_id() == 0` と直に書かない**（`common::percpu::is_bootstrap_processor` の doc）。
     #[cfg(not(feature = "clock-ap-also-ticks"))]
     if common::percpu::is_bootstrap_processor() {
-        MONOTONIC_TICKS.fetch_add(1, Ordering::Relaxed);
+        let now = MONOTONIC_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+        // **締切を過ぎたタイマの待ちを起こす（W2-d+）。** **進めた直後に、同じ文脈で起こす**
+        // ——**IF=0 かつ BKL の内側である**（`irq_entry` が取っている）。
+        crate::task::wake_expired_timers(now);
     }
 }
 

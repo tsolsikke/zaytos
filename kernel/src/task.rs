@@ -262,7 +262,7 @@ enum TaskState {
 
 /// 何を待っているか（W2-b。`ADR-0061` の決定 4）。
 ///
-/// **最初はキーボードだけである。** **タイマは W2-d（任意の段）で足す。** **I/O の完了は
+/// **最初はキーボードだけだった。** **W2-d+ でタイマを足した**（`ADR-0062`）。**I/O の完了は
 /// 足さない**——**virtio は既に BKL を解いて眠る形を持っている**（`ADR-0036`）。
 ///
 /// **`Copy` である必要がある**——[`TaskState`] が `Copy` で、`scheduler::states()` が
@@ -272,6 +272,15 @@ enum TaskState {
 pub enum Wait {
     /// 端末からのバイトを待っている（前景の持ち主だけがこの状態になる。`ADR-0061` の決定 1）。
     Keyboard,
+    /// 単調なティックが締切に届くのを待っている（W2-d+。`ADR-0062`）。
+    ///
+    /// **締切は `nanosleep` の締切であって、安全網ではない**——**本番の待ちに上限は
+    /// 置かない**（`ADR-0061`）。**起こすのはタイマ割り込みである**
+    /// （[`wake_expired_timers`]）。
+    Timer {
+        /// 起こしてよい最初の単調なティック（`idt::monotonic_ticks` の値）。
+        deadline: u64,
+    },
 }
 
 impl TaskState {
@@ -1016,10 +1025,24 @@ pub(crate) fn set_current_waiting(on: Wait) {
 pub(crate) fn wake_tasks_waiting_on(on: Wait) -> usize {
     let mut woken = 0;
     for index in 0..TASK_COUNT {
-        // **合図で引く。** **「合図を見ずに全部起こす」破壊は置けなかった（W2-c-2）**
-        // ——**合図が 1 つしか無いので、見なくても結果が同じである。** **3 回とも全判定を
-        // 通した**（実測。2026-09-16）。**待つ理由が増える段（W2-d のタイマ）で置くこと。**
-        if scheduler::state(index) == TaskState::Waiting(on) {
+        let state = scheduler::state(index);
+        // **合図で引く。**
+        //
+        // 破壊 (W2-d+, wake-ignores-the-reason): 合図を見ずに、待っている者を全部起こす。
+        // **W2-c-2 では置けなかった**——**合図が 1 つしか無かったので、見なくても結果が
+        // 同じだった**（緑を出す道の「変化が無い」）。**タイマの待ちが入ったので、打鍵が
+        // 眠っている者を起こす形で初めて効く。**
+        #[cfg(not(feature = "wake-ignores-the-reason"))]
+        let matches = state == TaskState::Waiting(on);
+        #[cfg(feature = "wake-ignores-the-reason")]
+        let matches = matches!(state, TaskState::Waiting(_));
+        if matches {
+            // **起こす前に、理由が合っていたかを別に確かめる（W2-d+ の関係の検出器）。**
+            // **上の選び方とは独立に、欄の中身と合図を突き合わせる**——**選び方が壊れると
+            // ここが数える。** **本番では構造で 0 である。**
+            if state != TaskState::Waiting(on) {
+                WOKEN_FOR_ANOTHER_REASON.fetch_add(1, Ordering::Relaxed);
+            }
             scheduler::set_state(index, TaskState::Ready);
             woken += 1;
         }
@@ -1044,6 +1067,76 @@ static WAKES_ISSUED: AtomicU64 = AtomicU64::new(0);
 /// 起こした本数の累計（W2-c-2）。
 pub fn wakes_issued() -> u64 {
     WAKES_ISSUED.load(Ordering::Relaxed)
+}
+
+/// 合図と違う理由で待っていた者を起こした回数（W2-d+ の関係の検出器）。**本番では 0 である。**
+static WOKEN_FOR_ANOTHER_REASON: AtomicU64 = AtomicU64::new(0);
+
+/// 合図と違う理由で待っていた者を起こした回数（W2-d+）。
+pub fn woken_for_another_reason() -> u64 {
+    WOKEN_FOR_ANOTHER_REASON.load(Ordering::Relaxed)
+}
+
+/// タイマが起こした本数の累計（W2-d+）。
+static TIMER_WAKES: AtomicU64 = AtomicU64::new(0);
+
+/// タイマが起こした本数の累計（W2-d+）。
+pub fn timer_wakes() -> u64 {
+    TIMER_WAKES.load(Ordering::Relaxed)
+}
+
+/// タイマが締切より前に起こした回数（W2-d+ の関係の検出器）。**本番では 0 である。**
+static TIMER_WOKE_BEFORE_DEADLINE: AtomicU64 = AtomicU64::new(0);
+
+/// タイマが締切より前に起こした回数（W2-d+）。
+pub fn timer_woke_before_deadline() -> u64 {
+    TIMER_WOKE_BEFORE_DEADLINE.load(Ordering::Relaxed)
+}
+
+/// 締切を過ぎたタイマの待ちを起こす（W2-d+。`ADR-0062`）。**起こした本数を返す。**
+///
+/// # 呼ぶのは BSP のタイマ割り込みである
+///
+/// **単調なティックを進めた直後に呼ぶ**（`idt::advance_monotonic_ticks`）。**IF=0 かつ BKL の
+/// 内側で、キーボードの起こしと同じ文脈である**（`irq_entry` が取っている）。
+///
+/// # 締切の比べ方
+///
+/// **`deadline <= now` で起こす。** **起きた側でも締切を見直す**（`syscall` の `sys_nanosleep`）
+/// ——**早く起こされたら、また待つ。**
+pub(crate) fn wake_expired_timers(now: u64) -> usize {
+    let mut woken = 0;
+    for index in 0..TASK_COUNT {
+        let TaskState::Waiting(Wait::Timer { deadline }) = scheduler::state(index) else {
+            continue;
+        };
+        // 破壊 (W2-d+, timer-never-wakes): 誰も起こさない。**眠った者が戻らず、セッションが
+        // 終わらない。**
+        #[cfg(feature = "timer-never-wakes")]
+        let expired = {
+            let _ = deadline;
+            false
+        };
+        // 破壊 (W2-d+, timer-wakes-before-deadline): 締切を見ずに毎ティック起こす。
+        // **眠った側は締切を見直して待ち直すので、所要は変わらない**——**下の検出器でしか
+        // 見えない。**
+        #[cfg(feature = "timer-wakes-before-deadline")]
+        let expired = true;
+        #[cfg(not(any(feature = "timer-never-wakes", feature = "timer-wakes-before-deadline")))]
+        let expired = deadline <= now;
+        if expired {
+            // **起こす前に、締切を別に確かめる（W2-d+ の関係の検出器）。** **本番では 0 である。**
+            if deadline > now {
+                TIMER_WOKE_BEFORE_DEADLINE.fetch_add(1, Ordering::Relaxed);
+            }
+            scheduler::set_state(index, TaskState::Ready);
+            woken += 1;
+        }
+    }
+    if woken > 0 {
+        TIMER_WAKES.fetch_add(woken as u64, Ordering::Relaxed);
+    }
+    woken
 }
 
 /// 今のタスクの回復点の欄を据える（W1-b。遠征の出入りが呼ぶ）。

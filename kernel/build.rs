@@ -120,6 +120,8 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
         "less",
         "more",
         "echo",
+        // **タイマで眠る最初の利用者（W2-d+。`ADR-0062`）。**
+        "sleep",
     ];
 
     // **共有する包み（S11-9）。** `ls` と `cat` が `mod userlib;` で取り込む。
@@ -618,6 +620,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         "less",
         "more",
         "echo",
+        "sleep",
         // **C で書いたもの（C-a。`ADR-0057`）。** **`gcc` が建てる。**
         "chello",
         // **FP の状態の判定（B-a。`ADR-0058`）。** **親と子の 2 本で 1 組である。**

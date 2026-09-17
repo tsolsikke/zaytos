@@ -371,6 +371,14 @@ pub const TIMESPEC_LEN: usize = 16;
 /// `struct timespec` の `tv_nsec` の位置。**上の表と対になっている。**
 const TIMESPEC_NSEC: usize = 8;
 
+/// `nanosleep(req, rem)`（W2-d+）。**Linux の番号 35 をそのまま使う。**
+///
+/// # `rem` には書かない
+///
+/// **Linux が `rem` へ書くのは、シグナルで割り込まれて `EINTR` を返すときだけである。**
+/// **ZaytOS にシグナルは無い**ので、**割り込まれて戻る道が無い。** **受け取って読まない。**
+pub const SYS_NANOSLEEP: u64 = 35;
+
 /// `open(path, flags, mode)`（S10-b）。**Linux の番号 2 をそのまま使う。**
 ///
 /// # `openat`（257）は採らない
@@ -1094,6 +1102,10 @@ unsafe fn dispatch(
         SYS_CLOCK_GETTIME => {
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
             unsafe { sys_clock_gettime(args[0], args[1], pml4_phys, direct_map) }
+        }
+        SYS_NANOSLEEP => {
+            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+            unsafe { sys_nanosleep(args[0], pml4_phys, direct_map, bkl) }
         }
         SYS_MKDIR => {
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
@@ -2552,8 +2564,8 @@ unsafe fn sys_clock_gettime(
     #[cfg(feature = "clock-goes-backwards")]
     let ticks = u64::MAX - ticks;
     let hz = u64::from(crate::irq::timer_frequency_hz());
-    let secs = ticks / hz;
-    let nsecs = (ticks % hz) * (1_000_000_000 / hz);
+    // **換算はホストで固定してある**（`common::time`）。
+    let (secs, nsecs) = common::time::timespec_from_ticks(ticks, hz);
 
     let mut buf = [0u8; TIMESPEC_LEN];
     buf[..TIMESPEC_NSEC].copy_from_slice(&secs.to_le_bytes());
@@ -2568,6 +2580,89 @@ unsafe fn sys_clock_gettime(
     };
     // SAFETY: slice は検証済みで、長さは TIMESPEC_LEN ちょうどである。
     unsafe { copy_to_user(&slice, 0, &buf) };
+    0
+}
+
+/// `nanosleep` が待ちに入った回数（W2-d+ の計器）。
+static TIMER_WAITS: AtomicU64 = AtomicU64::new(0);
+
+/// 眠った側が、起こされた時点でまだ締切に届いていなかった回数（W2-d+ の計器）。
+///
+/// **本番では 0 である**——**起こすのはタイマで、締切を過ぎてから起こす。**
+/// **0 でなければ、誰かが締切より前に起こした**（合図を取り違えた起こし、または締切を
+/// 見ないタイマ）。**眠った側は待ち直すので、所要には出ない**——**ここでしか見えない。**
+static EARLY_TIMER_WAKES: AtomicU64 = AtomicU64::new(0);
+
+/// `nanosleep` が待ちに入った回数（W2-d+）。
+pub fn timer_waits() -> u64 {
+    TIMER_WAITS.load(Ordering::Relaxed)
+}
+
+/// 締切より前に起こされた回数（W2-d+）。
+pub fn early_timer_wakes() -> u64 {
+    EARLY_TIMER_WAKES.load(Ordering::Relaxed)
+}
+
+/// `nanosleep`（W2-d+。`ADR-0062`）。**締切まで `Waiting(Timer)` で眠る。**
+///
+/// # 待ち方は `read(0)` と同じ踊りである
+///
+/// **欄を `Waiting` にし、BKL を解いて譲り、起きたら取り直す**（`wait_for_keyboard`）。
+/// **呼ばれるのは IF=0 の文脈なので、「欄を変えてから譲る」までにタイマは入らない**
+/// ——**窓は構造で閉じている**（W2-c-2 で実測した理由と同じ）。
+///
+/// # 上限は置かない
+///
+/// **締切は呼び手が求めた長さであって、安全網ではない**（`ADR-0061`）。
+///
+/// # 早く起こされたら待ち直す
+///
+/// **起きたら締切を見直す。** **届いていなければ数えて、また眠る**——**眠る長さは
+/// 求めた長さより短くならない。**
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn sys_nanosleep(
+    req: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    bkl: &mut Option<crate::bkl::BklGuard>,
+) -> u64 {
+    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    let Some(slice) =
+        (unsafe { validate_user_range(pml4_phys, direct_map, req, TIMESPEC_LEN as u64) })
+    else {
+        return (-EFAULT) as u64;
+    };
+    let mut raw = [0u8; TIMESPEC_LEN];
+    // SAFETY: slice は検証済みで、長さは TIMESPEC_LEN ちょうどである。
+    unsafe { copy_from_user(&mut raw, &slice) };
+    let mut seconds = [0u8; 8];
+    seconds.copy_from_slice(&raw[..TIMESPEC_NSEC]);
+    let mut nanos = [0u8; 8];
+    nanos.copy_from_slice(&raw[TIMESPEC_NSEC..]);
+
+    let hz = u64::from(crate::irq::timer_frequency_hz());
+    let Ok(ticks) = common::time::ticks_for_duration(
+        i64::from_le_bytes(seconds),
+        i64::from_le_bytes(nanos),
+        hz,
+    ) else {
+        return (-EINVAL) as u64;
+    };
+    let deadline = crate::idt::monotonic_ticks().saturating_add(ticks);
+
+    while crate::idt::monotonic_ticks() < deadline {
+        TIMER_WAITS.fetch_add(1, Ordering::Relaxed);
+        crate::task::set_current_waiting(crate::task::Wait::Timer { deadline });
+        drop(bkl.take());
+        crate::task::yield_now();
+        *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
+        if crate::idt::monotonic_ticks() < deadline {
+            EARLY_TIMER_WAKES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
     0
 }
 
