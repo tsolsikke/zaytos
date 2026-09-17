@@ -16278,6 +16278,43 @@ fn refuse_if_something_else_is_running(what: &str) -> Result<()> {
     );
 }
 
+/// `--full` の前に基底の `check` を回し、赤なら降りる（2026-09-17）。
+///
+/// # なぜ機械にするのか
+///
+/// **規律では守られなかった。** **docs を 5 箇所直した後に基底を回さず `--full` へ入り、
+/// 文体の 1 行で 68 分を捨てた**（実測。2026-09-17）。**「意志で守る」が破られた前例が
+/// 多い**——**行末の `&` が 5 回、`git add -A`、赤のまま `push`、コミット本文 1 行が 3 回。**
+///
+/// **費用の差が根拠である**——**基底は 2 秒、`--full` は 68 分。**
+///
+/// # 置き場は [`cmd_check`] の入口である
+///
+/// **`--full` を起こす経路は 1 つしかない**（`main` の引数解析からここへ。**実測で
+/// 呼び出し元は 1 箇所である**）。**並走の禁止と同じ場所なので、どの起こし方でも効く。**
+/// **hook へは置かない**——**すり抜けた前例が在る**（`( ... &)` の形。`CLAUDE.md`）。
+///
+/// # 重複は承知である
+///
+/// **`--full` は基底の項目も回すので、ここは二重である。** **早く知るための重複である**
+/// ——**赤を 68 分後に知るか、2 秒後に知るかの違いである。**
+fn run_base_check_before_full() -> Result<()> {
+    println!("=== xtask check --full: the base check must be green first");
+    let status = Command::new("cargo")
+        .args(["xtask", "check"])
+        .current_dir(workspace_root()?)
+        .status()
+        .context("xtask check --full: could not start the base check")?;
+    if status.success() {
+        println!("--- base check before --full: OK");
+        return Ok(());
+    }
+    bail!(
+        "xtask check --full: the base check is red, so --full would spend its run on a tree that \
+         already fails. Fix what the base check printed above, then start --full again"
+    );
+}
+
 /// 全構成のビルド・テスト・clippy・fmt を順に実行する。
 ///
 /// **1 つ落ちてもそこで止めない。** 止めると「直しては再実行」を
@@ -16290,6 +16327,8 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     // （[`refuse_if_something_else_is_running`] の doc）。
     if full {
         refuse_if_something_else_is_running("--full")?;
+        // **基底を先に回し、赤なら降りる（2026-09-17）。**
+        run_base_check_before_full()?;
     } else if commit {
         refuse_if_something_else_is_running("--commit")?;
     }
