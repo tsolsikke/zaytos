@@ -760,10 +760,15 @@ const RING3_TESTS: &[CriticalTest] = &[
         min_heartbeats: None,
     },
     // 終了しても空間を畳まない。**会計が合わなくなる。**
+    //
+    // **待つ文言を変えた（`ADR-0063` の (b1)。2026-09-18）。** **会計を空間ごとにしたので、
+    // 大域の差（`left the allocator short`）より先に、空間ごとの会計が捕まえる**
+    // ——**実測で `the space took 8 frame(s) but the destroy collected 0` が出る。**
+    // **捕まる主張は変わっていない**（畳まなければ落ちる）。**捕まる場所が早くなった。**
     CriticalTest {
         name: "user-exit-keep-space",
         feature: "user-exit-keep-space",
-        expected_markers: &["left the allocator short", "halting"],
+        expected_markers: &["left the space short", "halting"],
         forbidden_markers: &["user-load: hello ran as a process"],
         wait_for_full_timeout: false,
         min_heartbeats: None,
