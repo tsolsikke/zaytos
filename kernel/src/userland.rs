@@ -2438,10 +2438,27 @@ pub fn wait_for_ring3_task(handle: u64) -> ChildStatus {
         // **逃すと永久に待つ**——**打鍵やティックと違って、子の終わりは 1 度しか起こさない。**
         // **見てから据えるまでにティックが食い込み、その先で子が終わって起こすと、まだ待って
         // いない親は見つからない。** **その後に親が「待っている」と書くと、二度と起きない。**
+        // 破壊 (`ADR-0063` の (b2), wait-window-is-wide): 窓を広げる。**ガードを取らず、
+        // ティックが 2 つ入るまで空回りする**——**その間に子が終わると、起こしが取りこぼされる。**
+        // **「機会が無い」破壊を、機会を作って落とす形である**（`docs/coding-standards.md` の
+        // 「破壊が「機会が無い」になるなら、置く前に機会を作れないかを見る」）。
+        #[cfg(not(feature = "wait-window-is-wide"))]
+        let guard = common::critical::InterruptGuard::enter();
         if crate::task::ring3_task_finished() {
             break;
         }
+        #[cfg(feature = "wait-window-is-wide")]
+        {
+            let opened = crate::idt::monotonic_ticks();
+            while crate::idt::monotonic_ticks().saturating_sub(opened) < 2 {
+                core::hint::spin_loop();
+            }
+        }
         crate::task::set_current_waiting(crate::task::Wait::Child { handle });
+        // **譲る前に割り込みを戻す。** **据えた後の窓は無害である**——**親は既に「待っている」
+        // ので、そこで起こされれば走行可能へ戻り、譲ってもすぐ選ばれる。**
+        #[cfg(not(feature = "wait-window-is-wide"))]
+        drop(guard);
         crate::task::yield_now();
         if !crate::task::handle_is_current(handle) {
             return ChildStatus::NoSuchChild;

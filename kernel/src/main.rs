@@ -9958,6 +9958,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "回収しても Uninitialized へ戻さない",
     ),
     (
+        "wait-window-is-wide",
+        cfg!(feature = "wait-window-is-wide"),
+        "待ちを据える前の窓を広げる",
+    ),
+    (
         "fp-spawn-no-save",
         cfg!(feature = "fp-spawn-no-save"),
         "spawn で親の FP の状態を控えない",

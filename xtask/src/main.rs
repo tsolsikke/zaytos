@@ -3755,6 +3755,9 @@ const CONCURRENT_TEST_SABOTAGES: &[&str] = &[
     "wait-ignores-the-generation",
     "finish-does-not-wake",
     "reap-does-not-reset",
+    // **窓を広げる破壊は、直しの側の観測である**（`ADR-0063` の (b2)）。**閉じた窓は
+    // 他の破壊では落ちない**——**起こさない破壊は、窓の有無に関わらず同じ形で止まる。**
+    "wait-window-is-wide",
 ];
 
 /// `ttf-test` を「通らないこと」で回す破壊（B-d）。
@@ -16081,10 +16084,11 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "wake-ignores-the-reason",
     "timer-never-wakes",
     "timer-wakes-before-deadline",
-    // `ADR-0063` の (b2)。**手形と回収の破壊。**
+    // `ADR-0063` の (b2)。**手形と回収の破壊と、取りこぼしの窓を広げる破壊。**
     "wait-ignores-the-generation",
     "finish-does-not-wake",
     "reap-does-not-reset",
+    "wait-window-is-wide",
     "percpu-fake-nonzero-cpu-id",
     "smp-tramp-corrupt-copy-test",
     "smp-ap-touch-scheduler-test",
@@ -18319,7 +18323,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 34,
-    full: 314,
+    full: 315,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

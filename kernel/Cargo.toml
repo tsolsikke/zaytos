@@ -523,6 +523,8 @@ wait-ignores-the-generation = ["concurrent-test"]
 finish-does-not-wake = ["concurrent-test"]
 # 回収しても Uninitialized へ戻さない（ADR-0063 の (b2)）。次の起こしが断られる。
 reap-does-not-reset = ["concurrent-test"]
+# 待ちを据える前の窓を広げる（ADR-0063 の (b2)）。取りこぼしが起きて、親が永久に待つ。
+wait-window-is-wide = ["concurrent-test"]
 # `spawn` で、子へ入る前に親の FP の状態を保存しない（`ADR-0058`）。
 # 親が `spawn` を跨いで値を保てなくなる。
 fp-spawn-no-save = []
