@@ -8183,11 +8183,10 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         .context("failed to launch qemu-system-x86_64 for the shell test")?;
 
     // **プロンプトが出るまで待つ。上限つき。**
-    let ready_marker = "zash: ready";
     let deadline = Instant::now() + BOOT_READY_TIMEOUT;
     let mut ready = false;
     while Instant::now() < deadline {
-        if read_lossy(&serial_log).contains(ready_marker) {
+        if read_lossy(&serial_log).contains(SHELL_READY_MARKER) {
             ready = true;
             break;
         }
@@ -8238,13 +8237,31 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
 
     let serial = read_lossy(&serial_log);
     let qemu = read_lossy(&debug_log);
+    judge_shell_session(mode, &serial, &qemu, qemu_exit.as_deref(), ready)
+}
 
+/// `--shell-test` の判定（`ADR-0063` の (b3) で駆動から分けた）。
+///
+/// **駆動（起こして打つ）と判定（serial を読む）を分ける。** **判定はファイルの中身だけを
+/// 見る**——**`serial` と `qemu` のデバッグログと、起動の合図（`ready`）と、QEMU の終了状態
+/// である。** **駆動の側が QEMU を持つので、判定はプロセスに触れない。**
+///
+/// **分けた理由は、同じ判定を台本で駆動した起動へも当てるためである**（`--full` の余裕。
+/// **打鍵を見ない破壊を台本の族へ移す**——`ADR-0063` の決定 4）。**この関数そのものは
+/// 振る舞いを変えていない**——**中身は `cmd_shell_test` の後半をそのまま切り出したものである。**
+fn judge_shell_session(
+    mode: ShellTestMode,
+    serial: &str,
+    qemu: &str,
+    qemu_exit: Option<&str>,
+    ready: bool,
+) -> Result<()> {
     let context = mode.context();
     let context = context.as_str();
     if let BootOutcome::DidNotStart { firmware_rip } =
-        classify_boot(&serial, &qemu, KERNEL_STARTED_MARKER)
+        classify_boot(serial, qemu, KERNEL_STARTED_MARKER)
     {
-        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        report_did_not_start(context, firmware_rip, qemu_exit)?;
         bail!("{context}: the kernel did not start");
     }
 
@@ -8271,7 +8288,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     // **`ready` が偽なら範囲が取れない。** そのときは空にして下の判定をすべて
     // 偽にする——**プロンプトが出ていないなら、シェルは何も起こしていない。**
     let after_shell = serial
-        .find(ready_marker)
+        .find(SHELL_READY_MARKER)
         .map(|at| &serial[at..])
         .unwrap_or("");
 
