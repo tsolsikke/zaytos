@@ -2148,22 +2148,33 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
 /// 1. **`/bin/tickera` を起こしっぱなしで起こし、Ring 3 へ入るまで待つ。** **フレームアロケータの
 ///    貸し出しは大域に 1 つである**（`docs/wayland-inventory.md` の #4）——**2 本の読み込みを重ねない。**
 /// 2. **`/bin/tickerb` を `spawn` で起こす。** 終わるまで戻らない。
-/// 3. **`/bin/tickera` が終わるまで待つ。** **`tickera` のほうが長く回る**——**`spawn` の会計は
-///    空きフレームの大域の差で閉じるので、`tickerb` の間に `tickera` が破棄されると合わなくなる。**
-///    **その前提が成り立ったかを行に出す**（`was still running = `）。
+/// 3. **`/bin/tickera` を手形で待って回収する**（`ADR-0063` の (b2)）。**`tickera` のほうが長く回る**
+///    ——**`spawn` の会計は空きフレームの大域の差で閉じるので、`tickerb` の間に `tickera` が
+///    破棄されると合わなくなる。** **その前提が成り立ったかを行に出す**（`was still running = `）。
+/// 4. **回収したので、`/bin/tickera` をもう一度起こして待つ。** **`|` は 2 回打たれる**
+///    ——**再起動できることを見る。**
+/// 5. **古い手形で待ち、断られることを見る。** **世代を見ているからである。**
 ///
-/// **待つ間は `yield_now` で譲る。** **上限を越えたら止める**——**上限の無い待ちは、ハングと区別が付かない。**
+/// **待つ間は `yield_now` で譲る。** **Ring 3 へ入るまでの待ちには上限を置く**——**上限の無い待ちは、
+/// ハングと区別が付かない。** **終わるまでの待ちには置かない**——**本番の待ちに上限は置かない**
+/// （`ADR-0061`）。**この検査そのものの上限は、`cargo xtask check --concurrent-test` の側が持つ。**
 #[cfg(feature = "concurrent-test")]
 fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) {
     /// Ring 3 へ入るまで待つ上限（ティック）。
     const ENTER_LIMIT_TICKS: u64 = 2_000;
-    /// 終わるまで待つ上限（ティック）。
-    const FINISH_LIMIT_TICKS: u64 = 20_000;
 
     let mut console = console;
     let ring3_task = kernel::task::ring3_task_index();
     let started = kernel::idt::timer_ticks();
-    kernel::userland::start_detached(b"/bin/tickera", b"tickera\0", 1);
+    let Some(handle) = kernel::userland::start_detached(b"/bin/tickera", b"tickera\0", 1) else {
+        log_both(
+            logger,
+            console.as_deref_mut(),
+            LogLevel::Error,
+            format_args!("concurrent: could not start /bin/tickera; halting"),
+        );
+        cpu::halt_forever();
+    };
     while !kernel::task::ring3_task_in_excursion() {
         if kernel::idt::timer_ticks().saturating_sub(started) > ENTER_LIMIT_TICKS {
             log_both(
@@ -2205,21 +2216,43 @@ fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Con
         ),
     );
 
-    while !kernel::task::ring3_task_finished() {
-        if kernel::idt::timer_ticks().saturating_sub(b_ended) > FINISH_LIMIT_TICKS {
-            log_both(
-                logger,
-                console.as_deref_mut(),
-                LogLevel::Error,
-                format_args!(
-                    "concurrent: /bin/tickera did not finish within {FINISH_LIMIT_TICKS} tick(s) \
-                     after /bin/tickerb ended; halting"
-                ),
-            );
-            cpu::halt_forever();
-        }
-        kernel::task::yield_now();
-    }
+    // **手形で待って回収する（`ADR-0063` の (b2)）。** **ティックの上限で回す形はやめた**
+    // ——**本番の待ちに上限は置かない**（`ADR-0061`）。**上限は `--concurrent-test` の側が持つ。**
+    let a_status = kernel::userland::wait_for_ring3_task(handle);
+    // **この時点で取る。** **下の行はこの後の再起動を挟んでから出るので、そこで測ると
+    // 2 本目の走行を含んでしまう。**
+    let a_finished = kernel::idt::timer_ticks();
+    log_both(
+        logger,
+        console.as_deref_mut(),
+        LogLevel::Info,
+        format_args!(
+            "concurrent: waited for /bin/tickera with its handle and reaped it ({a_status:?}); \
+             unreaped child left = {}, start refused {} time(s)",
+            kernel::task::has_unreaped_child(),
+            kernel::task::unreaped_refusals()
+        ),
+    );
+
+    // **回収したので、2 本目をもう一度起こせる（`ADR-0063` の (b2)）。**
+    // **`|` は 2 回打たれるので、再起動できることを見る。**
+    let restarted = kernel::userland::start_detached(b"/bin/tickera", b"tickera\0", 1);
+    let second_status = match restarted {
+        Some(second) => Some(kernel::userland::wait_for_ring3_task(second)),
+        None => None,
+    };
+    // **古い手形で待つと断られる（`ADR-0063` の (b2)）。** **世代を見ているからである**
+    // ——**破壊 `wait-ignores-the-generation` はここで落ちる。**
+    let stale = kernel::userland::wait_for_ring3_task(handle);
+    log_both(
+        logger,
+        console.as_deref_mut(),
+        LogLevel::Info,
+        format_args!(
+            "concurrent: the ring3 task restarted and was reaped again ({second_status:?}); \
+             waiting with the stale handle returned {stale:?}"
+        ),
+    );
     log_both(
         logger,
         console.as_deref_mut(),
@@ -2228,7 +2261,7 @@ fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Con
             "concurrent: /bin/tickera finished {} tick(s) after /bin/tickerb ended; switches out \
              of an excursion: task 0 = {}, task {ring3_task} = {}; CR3 loads on switch = {}; the \
              foreground was refused {} time(s)",
-            kernel::idt::timer_ticks().saturating_sub(b_ended),
+            a_finished.saturating_sub(b_ended),
             kernel::task::switches_out_of_excursion(0),
             kernel::task::switches_out_of_excursion(ring3_task),
             kernel::task::cr3_loads_on_switch(),
@@ -9908,6 +9941,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "timer-wakes-before-deadline",
         cfg!(feature = "timer-wakes-before-deadline"),
         "タイマが締切を見ずに毎ティック起こす",
+    ),
+    (
+        "wait-ignores-the-generation",
+        cfg!(feature = "wait-ignores-the-generation"),
+        "待つ口が手形の世代を見ない",
+    ),
+    (
+        "finish-does-not-wake",
+        cfg!(feature = "finish-does-not-wake"),
+        "2 本目が終わっても待っている親を起こさない",
+    ),
+    (
+        "reap-does-not-reset",
+        cfg!(feature = "reap-does-not-reset"),
+        "回収しても Uninitialized へ戻さない",
     ),
     (
         "fp-spawn-no-save",

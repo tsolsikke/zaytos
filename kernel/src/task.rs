@@ -272,6 +272,14 @@ enum TaskState {
 pub enum Wait {
     /// 端末からのバイトを待っている（前景の持ち主だけがこの状態になる。`ADR-0061` の決定 1）。
     Keyboard,
+    /// 起こしっぱなしにした子が終わるのを待っている（`ADR-0063` の (b2)）。
+    ///
+    /// **手形は世代つきである**——**`(世代 << 8) | スロット`。** **終わった子の手形で次の子を
+    /// 待つ形を、構造で防ぐ**（[`ring3_task_handle`] の doc）。
+    Child {
+        /// 待っている子の手形。
+        handle: u64,
+    },
     /// 単調なティックが締切に届くのを待っている（W2-d+。`ADR-0062`）。
     ///
     /// **締切は `nanosleep` の締切であって、安全網ではない**——**本番の待ちに上限は
@@ -638,17 +646,73 @@ fn ring3_task_stack_bounds() -> (VirtAddr, VirtAddr) {
     (guard, top)
 }
 
-/// 足した 1 本（[`RING3_TASK`]）を起こす（W1-c-4）。**呼ぶのは `userland::start_detached` だけである。**
+/// 足した 1 本の世代（`ADR-0063` の (b2)）。**起こすたびに 1 つ進む。**
+static RING3_TASK_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// 回収されていない子が居るために、起こすのを断った回数（`ADR-0063` の (b2) の計器）。
 ///
-/// **1 回しか起こせない。** **2 回目は止める**——**使い終わったスタックの上に次の文脈を積む形は、
-/// まだ要らないので作らない。**
-pub fn start_ring3_task() {
-    if scheduler::state(RING3_TASK) != TaskState::Uninitialized {
-        serial_line(format_args!(
-            "[ERROR] task: the ring3 task (index {RING3_TASK}) was started twice; halting"
-        ));
-        common::cpu::halt_forever();
+/// **本番では 0 である。** **0 でなければ、誰も待たずに終わった子が残っている**
+/// ——**2 本目が二度と起こせない形なので、詰まったときの理由になる**（運用者の指摘）。
+static UNREAPED_REFUSALS: AtomicU64 = AtomicU64::new(0);
+
+/// 回収されていない子が居るために断った回数（`ADR-0063` の (b2)）。
+pub fn unreaped_refusals() -> u64 {
+    UNREAPED_REFUSALS.load(Ordering::Relaxed)
+}
+
+/// 回収されていない子が居るか（`ADR-0063` の (b2) の計器）。
+pub fn has_unreaped_child() -> bool {
+    scheduler::state(RING3_TASK) == TaskState::Finished
+}
+
+/// 足した 1 本の手形（`ADR-0063` の (b2)）。
+///
+/// # 世代つきにする理由
+///
+/// **スロット番号そのものを手形にすると、終わった子の手形で次の子を待てる。**
+/// **世代を上の桁へ載せておけば、待つ側の世代が合わないことで分かる**——**`-ECHILD` になる。**
+/// **終わった後の二重待ちも同じ返り値になる。**
+pub fn ring3_task_handle(generation: u64) -> u64 {
+    (generation << 8) | ring3_slot_of(RING3_TASK) as u64
+}
+
+/// 足した 1 本の、いまの手形（`ADR-0063` の (b2)）。
+pub fn current_ring3_task_handle() -> u64 {
+    ring3_task_handle(RING3_TASK_GENERATION.load(Ordering::Relaxed))
+}
+
+/// 足した 1 本（[`RING3_TASK`]）を起こす（W1-c-4。`ADR-0063` の (b2) で作り直した）。
+///
+/// **呼ぶのは `userland::start_detached` だけである。** **起こせたら手形を返す。**
+///
+/// # 回収してから起こす
+///
+/// **終わった子を回収していなければ断る**（`Finished` のまま残っている形）。**黙って上書きすると、
+/// 使い終わったスタックの上に次の文脈を積むことになる。** **回収は待つ口が行う**
+/// （`userland::wait_for_ring3_task`）。**走っている最中も断る**——**2 本目のタスクは 1 本だけである。**
+///
+/// **W1-c-4 では「1 回しか起こせない」で、2 回目は止めていた。** **`|` が 2 回打たれるので、
+/// 回収してから起こす形へ変えた。**
+pub fn start_ring3_task() -> Option<u64> {
+    match scheduler::state(RING3_TASK) {
+        TaskState::Uninitialized => {}
+        TaskState::Finished => {
+            UNREAPED_REFUSALS.fetch_add(1, Ordering::Relaxed);
+            serial_line(format_args!(
+                "[ERROR] task: the ring3 task (index {RING3_TASK}) still holds a child that \
+                 nobody reaped; start refused"
+            ));
+            return None;
+        }
+        other => {
+            serial_line(format_args!(
+                "[ERROR] task: the ring3 task (index {RING3_TASK}) is already running \
+                 ({other:?}); start refused"
+            ));
+            return None;
+        }
     }
+    let generation = RING3_TASK_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     let (guard, top) = ring3_task_stack_bounds();
     let bottom = guard.as_u64() + GUARD_SIZE as u64;
     // **高水位を測るために目印で埋める**（`crate::stack::KERNEL_STACK_FILL`。**文脈を積む前である**）。
@@ -678,6 +742,39 @@ pub fn start_ring3_task() {
             ..EMPTY_TASK
         },
     );
+    Some(ring3_task_handle(generation))
+}
+
+/// 足した 1 本を回収する（`ADR-0063` の (b2)）。
+///
+/// **`Finished` かつ手形が合えば、`Uninitialized` へ戻して真を返す**——**戻せば次の `|` で
+/// 起こせる。** **合わなければ何もしない。**
+///
+/// 破壊 (`ADR-0063` の (b2), reap-does-not-reset): 戻さない。**次の起こしが断られる**
+/// ——**「回収してから起こす」の主張が落ちる。**
+pub fn reap_ring3_task(handle: u64) -> bool {
+    if scheduler::state(RING3_TASK) != TaskState::Finished || !handle_is_current(handle) {
+        return false;
+    }
+    #[cfg(not(feature = "reap-does-not-reset"))]
+    scheduler::set_state(RING3_TASK, TaskState::Uninitialized);
+    true
+}
+
+/// その手形が、いまの子のものか（`ADR-0063` の (b2)）。
+///
+/// 破壊 (`ADR-0063` の (b2), wait-ignores-the-generation): 世代を見ない。
+/// **終わった子の手形で、次の子を待てる形になる。**
+pub fn handle_is_current(handle: u64) -> bool {
+    #[cfg(feature = "wait-ignores-the-generation")]
+    {
+        let _ = handle;
+        true
+    }
+    #[cfg(not(feature = "wait-ignores-the-generation"))]
+    {
+        handle == current_ring3_task_handle()
+    }
 }
 
 /// 足した 1 本が Ring 3 の遠征に入っているか（W1-c-4。`init` が待つ）。
@@ -726,7 +823,13 @@ extern "sysv64" fn ring3_task_main() -> ! {
         ));
         common::cpu::halt_forever();
     }
+    let handle = current_ring3_task_handle();
+    // **欄を `Finished` にしてから起こす（`ADR-0063` の (b2)）**——**起こしてから書くと、
+    // 起きた親がまだ `Finished` でない欄を読む。**
     scheduler::set_state(RING3_TASK, TaskState::Finished);
+    // 破壊 (`ADR-0063` の (b2), finish-does-not-wake): 起こさない。**親が永久に待つ。**
+    #[cfg(not(feature = "finish-does-not-wake"))]
+    wake_tasks_waiting_on(Wait::Child { handle });
     loop {
         yield_now();
     }

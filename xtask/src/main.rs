@@ -3749,6 +3749,12 @@ const CONCURRENT_TEST_SABOTAGES: &[&str] = &[
     "ring3-slot-always-zero",
     "task-switch-holds-back-ring3-task",
     "foreground-claimable-from-any-slot",
+    // **`ADR-0063` の (b2) で 3 つ足した。** **手形と回収を、それぞれ固有の判定で落とす**
+    // ——**世代を見ない（古い手形が通る）／終わっても起こさない（親が永久に待つ）／
+    // 回収しても戻さない（次の起こしが断られる）。**
+    "wait-ignores-the-generation",
+    "finish-does-not-wake",
+    "reap-does-not-reset",
 ];
 
 /// `ttf-test` を「通らないこと」で回す破壊（B-d）。
@@ -4993,6 +4999,12 @@ fn cmd_fp_test(features: &[&str], expect_pass: bool) -> Result<()> {
 /// `concurrent-test` の起動を待つ上限（W1-c-4）。**`init` がシェルより前に 2 本を走らせ終えるまで。**
 const CONCURRENT_TEST_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// `concurrent-test` の「出力が伸びない」上限（(b2)。`ADR-0063`）。
+///
+/// **黙って止まる破壊のために置く。** **既定の全体が 12.4 秒である**（実測。2026-09-18）
+/// ——**4 倍以上の余裕を取る。** **これを越えたら、待っても増えないと見て降りる。**
+const CONCURRENT_TEST_STALL_LIMIT: Duration = Duration::from_secs(60);
+
 /// 2 本の Ring 3 が同時に進むことを見る（W1-c-4。`ADR-0060`）。
 ///
 /// # 何を走らせるか
@@ -5055,13 +5067,28 @@ fn cmd_concurrent_test(features: &[&str], expect_pass: bool) -> Result<()> {
 
     // **終わりの行か、`[ERROR]` の行が出たら止める。** **破壊は止まる形で落ちることが多いので、
     // 上限まで待たない。**
+    //
+    // **出力が伸びなくなったときも降りる**（(b2)。`ADR-0063`）。**待ちに上限を置かない設計にしたので、
+    // 起こさない破壊（`finish-does-not-wake`）は行を出さずに黙る**——**`CONCURRENT_TEST_TIMEOUT` を
+    // 丸ごと待つと、`--full` が 1 項目で 5 分伸びる。** **既定の全体が 12.4 秒なので**（実測。
+    // 2026-09-18）**`CONCURRENT_TEST_STALL_LIMIT` は 4 倍以上の余裕を持つ。**
     let started = Instant::now();
     let deadline = started + CONCURRENT_TEST_TIMEOUT;
+    let mut last_len = 0usize;
+    let mut last_growth = started;
+    let mut stalled = false;
     while Instant::now() < deadline {
         let text = strip_ansi(&read_lossy(&serial_log));
         if text.contains("concurrent: done") || text.contains("[ERROR]") {
             // **止まる行の後ろに続く行（ダンプ）も取る。**
             thread::sleep(Duration::from_secs(2));
+            break;
+        }
+        if text.len() > last_len {
+            last_len = text.len();
+            last_growth = Instant::now();
+        } else if last_growth.elapsed() > CONCURRENT_TEST_STALL_LIMIT {
+            stalled = true;
             break;
         }
         thread::sleep(PANIC_TEST_POLL_INTERVAL);
@@ -5155,7 +5182,34 @@ fn cmd_concurrent_test(features: &[&str], expect_pass: bool) -> Result<()> {
         && done_b.is_some_and(|line| line.ends_with(" sum_ok=true"));
 
     // **判定 6**——起こしっぱなしは前景を取らない。
-    let foreground_refused_once = refused == Some(1);
+    // **回数を固定しない**——**(b2) で 2 本目を起こし直すようにしたので、1 で書くと動く**
+    // （実測で 1 から 2 へ動いた。2026-09-18）。**起こした回数を行から数え、それと比べる**
+    // ——**主張は「起こしっぱなしの 1 本は、起こすたびに 1 度断られる」である。**
+    let detached_starts = lines
+        .iter()
+        .filter(|line| **line == "[INFO] detached: starting /bin/tickera on ring3 slot 1")
+        .count() as u64;
+    let foreground_refused_once = detached_starts >= 1 && refused == Some(detached_starts);
+
+    // **判定 7**——回収した後に、同じスロットをもう一度起こせる（(b2)。`ADR-0063`）。
+    // **`|` は 2 回打たれる**——**1 回で詰まると、2 本目が二度と起こせない。**
+    // **ゾンビが残っていないことも同じ行で見る。**
+    let first_reaped = line_starting("[INFO] concurrent: waited for /bin/tickera with its handle");
+    let no_zombie_left = first_reaped.is_some_and(|line| {
+        line.contains("unreaped child left = false") && line.contains("start refused 0 time(s)")
+    });
+    let restart_line = line_starting("[INFO] concurrent: the ring3 task restarted");
+    let restarted_and_reaped = restart_line.is_some_and(|line| {
+        line.contains("reaped it (Ended(") || line.contains("again (Some(Ended(")
+    });
+    let reaped_child_can_restart = first_reaped
+        .is_some_and(|line| line.contains("reaped it (Ended("))
+        && no_zombie_left
+        && restarted_and_reaped;
+
+    // **判定 8**——古い手形では待てない（(b2)。`ADR-0063`）。**世代を見ているからである。**
+    let stale_handle_refused = restart_line
+        .is_some_and(|line| line.contains("waiting with the stale handle returned NoSuchChild"));
 
     // **禁止**——`[ERROR]` が 1 行も無い。
     let error_lines: Vec<&str> = lines
@@ -5193,16 +5247,25 @@ fn cmd_concurrent_test(features: &[&str], expect_pass: bool) -> Result<()> {
     );
     println!("{context}: each program kept its own floating-point state = {fp_kept_apart}");
     println!(
-        "{context}: the detached program was refused the foreground once = \
-         {foreground_refused_once} (refused {refused:?} time(s))"
+        "{context}: the detached program was refused the foreground once per start = \
+         {foreground_refused_once} (refused {refused:?} time(s) for {detached_starts} start(s))"
     );
+    println!(
+        "{context}: a reaped child can be started again = {reaped_child_can_restart} (the first \
+         wait line was {first_reaped:?}, no zombie left = {no_zombie_left}, the restart line was \
+         {restart_line:?})"
+    );
+    println!("{context}: waiting with a stale handle is refused = {stale_handle_refused}");
     println!("{context}: no [ERROR] line = {no_error} (the first were {error_lines:?})");
     for info in lines.iter().filter(|line| {
         line.starts_with("[INFO] concurrent: ") || line.starts_with("task: the ring3 task (index")
     }) {
         println!("{context}: (info) {info}");
     }
-    println!("{context}: (info) waited {:.1} s", waited.as_secs_f64());
+    println!(
+        "{context}: (info) waited {:.1} s (the serial log stopped growing = {stalled})",
+        waited.as_secs_f64()
+    );
 
     let passed = a_outlived_b
         && both_progressed
@@ -5211,6 +5274,8 @@ fn cmd_concurrent_test(features: &[&str], expect_pass: bool) -> Result<()> {
         && spaces_kept_apart
         && fp_kept_apart
         && foreground_refused_once
+        && reaped_child_can_restart
+        && stale_handle_refused
         && no_error;
     if passed {
         println!("{context}: PASS");
@@ -16016,6 +16081,10 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "wake-ignores-the-reason",
     "timer-never-wakes",
     "timer-wakes-before-deadline",
+    // `ADR-0063` の (b2)。**手形と回収の破壊。**
+    "wait-ignores-the-generation",
+    "finish-does-not-wake",
+    "reap-does-not-reset",
     "percpu-fake-nonzero-cpu-id",
     "smp-tramp-corrupt-copy-test",
     "smp-ap-touch-scheduler-test",
@@ -18250,7 +18319,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 34,
-    full: 311,
+    full: 314,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。

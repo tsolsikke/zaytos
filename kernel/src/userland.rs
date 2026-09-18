@@ -2382,9 +2382,79 @@ static DETACHED_REQUEST: common::critical::Locked<Option<DetachedRequest>> =
 /// **W1-c-4 では `concurrent-test` の構成にだけ置いていた**（最初の利用者はその構成の `init`）。
 /// **シェルの `|` が 2 本を同時に走らせるので、足した 1 本のスタックとガードページと一緒に
 /// 既定の起動へ出した。** **既定の起動で呼ぶ者は、まだ居ない**——**(b)(c) でシェルが呼ぶ。**
-pub fn start_detached(path: &'static [u8], argv_bytes: &'static [u8], argv_count: usize) {
+pub fn start_detached(
+    path: &'static [u8],
+    argv_bytes: &'static [u8],
+    argv_count: usize,
+) -> Option<u64> {
     *DETACHED_REQUEST.lock() = Some((path, argv_bytes, argv_count));
-    crate::task::start_ring3_task();
+    let handle = crate::task::start_ring3_task();
+    if handle.is_none() {
+        // **起こせなかったら依頼を片づける**——**次に起こす者が古い依頼を走らせないため。**
+        *DETACHED_REQUEST.lock() = None;
+    }
+    handle
+}
+
+/// 起こしっぱなしにした子の終わり方（`ADR-0063` の (b2)）。**手形と一緒に置く。**
+///
+/// **`SpawnOutcome` をそのまま置かない**——**`SpawnError` は `Copy` ではない。**
+/// **待つ側が要るのは「終わったこと」と「終わり方」なので、`SYS_SPAWN` と同じ形の
+/// ビットへ畳む**（[`crate::syscall::SPAWN_FOLDED_FLAG`]）。
+static DETACHED_STATUS: common::critical::Locked<Option<(u64, u64)>> =
+    common::critical::Locked::new(None);
+
+/// 待つ口が返す、子の終わり方（`ADR-0063` の (b2)）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildStatus {
+    /// 終わり方のビット（`SYS_SPAWN` と同じ形）。
+    Ended(u64),
+    /// 手形が合わない（終わった後の二重待ちも、これである）。
+    NoSuchChild,
+}
+
+/// 起こしっぱなしにした子が終わるのを待ち、回収する（`ADR-0063` の (b2)）。
+///
+/// # 上限は置かない
+///
+/// **本番の待ちは上限で止めない**（`ADR-0061`）。**回り続ける子を待つと永久に待つ**
+/// ——**(b2) の限界として `ADR-0063` に書いた。**
+///
+/// # 回収してから戻る
+///
+/// **`Finished` になったら終わり方を読み、タスクを `Uninitialized` へ戻す**
+/// （`crate::task::reap_ring3_task`）。**戻せば次の `|` で起こせる。**
+pub fn wait_for_ring3_task(handle: u64) -> ChildStatus {
+    if !crate::task::handle_is_current(handle) {
+        return ChildStatus::NoSuchChild;
+    }
+    loop {
+        // **「終わったか」を見てから待ちの欄を据えるまでの間、割り込みを止める。**
+        //
+        // **`set_current_waiting` の doc が「割り込みを止めた文脈から呼ぶこと」と書いている。**
+        // **`sys_read` と `sys_nanosleep` は `int 0x80`（割り込みゲート）の内側なので IF=0 だが、
+        // ここは `init` のカーネル文脈で IF=1 である**——**窓が開く。**
+        //
+        // **逃すと永久に待つ**——**打鍵やティックと違って、子の終わりは 1 度しか起こさない。**
+        // **見てから据えるまでにティックが食い込み、その先で子が終わって起こすと、まだ待って
+        // いない親は見つからない。** **その後に親が「待っている」と書くと、二度と起きない。**
+        if crate::task::ring3_task_finished() {
+            break;
+        }
+        crate::task::set_current_waiting(crate::task::Wait::Child { handle });
+        crate::task::yield_now();
+        if !crate::task::handle_is_current(handle) {
+            return ChildStatus::NoSuchChild;
+        }
+    }
+    let status = match *DETACHED_STATUS.lock() {
+        Some((stored, bits)) if stored == handle => bits,
+        _ => u64::MAX,
+    };
+    if !crate::task::reap_ring3_task(handle) {
+        return ChildStatus::NoSuchChild;
+    }
+    ChildStatus::Ended(status)
 }
 
 /// 足した 1 本のタスクが、渡された依頼を走らせる（W1-c-4）。**そのタスクの本体だけが呼ぶ。**
@@ -2405,6 +2475,14 @@ pub fn run_detached_request() {
         "detached: starting {name} on ring3 slot {slot}"
     ));
     let outcome = spawn(path, argv_bytes, argv_count, None);
+    // **終わり方を手形と一緒に置く（`ADR-0063` の (b2)）。** **待つ側がこれを読む。**
+    let bits = match &outcome {
+        Ok(SpawnOutcome::Exited(status)) => *status,
+        Ok(SpawnOutcome::Folded(vector)) => crate::syscall::SPAWN_FOLDED_FLAG | *vector,
+        Ok(SpawnOutcome::Interrupted) => crate::syscall::SPAWN_INTERRUPTED_FLAG,
+        Err(_) => u64::MAX,
+    };
+    *DETACHED_STATUS.lock() = Some((crate::task::current_ring3_task_handle(), bits));
     logger.info(format_args!(
         "detached: {name} ended ({outcome:?}) on ring3 slot {slot}"
     ));

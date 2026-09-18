@@ -517,6 +517,12 @@ wake-ignores-the-reason = []
 timer-never-wakes = []
 # タイマが締切を見ずに毎ティック起こす（W2-d+）。眠った側は待ち直すので所要は変わらない。
 timer-wakes-before-deadline = []
+# 待つ口が手形の世代を見ない（ADR-0063 の (b2)）。終わった子の手形で次の子を待てる。
+wait-ignores-the-generation = ["concurrent-test"]
+# 2 本目が終わっても待っている親を起こさない（ADR-0063 の (b2)）。親が永久に待つ。
+finish-does-not-wake = ["concurrent-test"]
+# 回収しても Uninitialized へ戻さない（ADR-0063 の (b2)）。次の起こしが断られる。
+reap-does-not-reset = ["concurrent-test"]
 # `spawn` で、子へ入る前に親の FP の状態を保存しない（`ADR-0058`）。
 # 親が `spawn` を跨いで値を保てなくなる。
 fp-spawn-no-save = []
