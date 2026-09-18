@@ -64,11 +64,12 @@ def wants_commit_check(paths: list[str]) -> bool:
     return any(path.startswith(IMAGE_PATH_PREFIXES) for path in paths)
 
 
-def paths_in_head(root: str) -> list[str]:
-    """直前のコミットが触ったパス。**読めなければ空を返す。**
+def paths_in_head(root: str) -> list[str] | None:
+    """直前のコミットが触ったパス。**読めなければ `None` を返す。**
 
-    **空なら基底を回す**——**`--commit` を回せないより、回さないほうが
-    害が小さい**（回らなければ次の `--commit` か `--full` が言う）。
+    **空の一覧と「読めなかった」を分ける**——**分けないと、読めなかったときに
+    黙って基底へ落ちる**（「失敗を空に落とすと、もっともらしい誤りが出る」の族。
+    運用者の指摘。2026-09-18）。**どちらにするかは [`decide`] が決める。**
     """
     try:
         done = subprocess.run(
@@ -79,10 +80,28 @@ def paths_in_head(root: str) -> list[str]:
             timeout=30,
         )
     except Exception:
-        return []
+        return None
     if done.returncode != 0:
-        return []
+        return None
     return [line.strip() for line in done.stdout.splitlines() if line.strip()]
+
+
+UNREADABLE_NOTICE = (
+    "post-commit check: 直前のコミットのパスが読めなかったので、基底に落とした。"
+    "カーネルに触ったコミットなら、自分で cargo xtask check --commit を回すこと"
+)
+
+
+def decide(paths: list[str] | None) -> tuple[bool, str | None]:
+    """どちらの check を回すかと、言うべきことを決める。**引数だけで決める。**
+
+    **読めなければ基底へ落とす**——**`--commit` を回せないより、回さないほうが
+    害が小さい。** **ただし黙らない**——**落としたことを言い、`exit 2` で終える**
+    （シリアルの錠の fail open と同じ形。理由が在り、観測が残る）。
+    """
+    if paths is None:
+        return False, UNREADABLE_NOTICE
+    return wants_commit_check(paths), None
 
 
 def main() -> int:
@@ -101,8 +120,7 @@ def main() -> int:
     if not looks_like_a_commit(command):
         return 0
     root = os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or "."
-    touched = paths_in_head(root)
-    commit_check = wants_commit_check(touched)
+    commit_check, notice = decide(paths_in_head(root))
     argv = ["cargo", "xtask", "check"] + (["--commit"] if commit_check else [])
     label = "--commit" if commit_check else "基底"
     try:
@@ -124,6 +142,12 @@ def main() -> int:
     if done.returncode == 0:
         summary = [l for l in done.stdout.splitlines() if "check(s) passed" in l]
         print(f"post-commit check（{label}）: " + (summary[-1] if summary else "OK"))
+        if notice is not None:
+            # **通ったが、落とした事実は言って終える。** **`exit 2` にするのは、
+            # `exit 0` の stdout は読み手に届かないためである**（実測。通った回の
+            # 行は一度も見えていない）。
+            print(notice, file=sys.stderr)
+            return 2
         return 0
     # **落ちた行と、その所見だけを出す。** 通った項目まで出すと、
     # **落ちた1行が20行の緑に埋もれる**（実測で埋もれた）。
@@ -143,6 +167,8 @@ def main() -> int:
     )
     for line in (detail + reasons)[:20]:
         print("  " + line.rstrip(), file=sys.stderr)
+    if notice is not None:
+        print(notice, file=sys.stderr)
     return 2
 
 
@@ -187,9 +213,24 @@ def self_test() -> int:
         if got != want:
             print(f"self-test: {paths!r} wanted {want} but got {got}")
             failures += 1
+    # **読めなかったときは基底へ落ちつつ、言う**（2026-09-18。運用者の足す1点）。
+    decide_cases = [
+        (None, (False, True)),
+        ([], (False, False)),
+        (["kernel/src/task.rs"], (True, False)),
+        (["docs/roadmap.md"], (False, False)),
+    ]
+    for paths, (want_commit, want_notice) in decide_cases:
+        got_commit, got_notice = decide(paths)
+        if got_commit != want_commit or (got_notice is not None) != want_notice:
+            print(
+                f"self-test: decide({paths!r}) wanted ({want_commit}, notice={want_notice}) "
+                f"but got ({got_commit}, notice={got_notice is not None})"
+            )
+            failures += 1
     if failures:
         return 1
-    total = len(cases) + len(path_cases)
+    total = len(cases) + len(path_cases) + len(decide_cases)
     print(f"self-test: {total} case(s) decided as expected")
     return 0
 
