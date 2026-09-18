@@ -1021,7 +1021,7 @@ pub fn load_user_program(
     name: &'static str,
     argv: &[&[u8]],
     envp: Option<&[&[u8]]>,
-) -> (Result<u64, UserLoadError>, usize, usize) {
+) -> (Result<u64, UserLoadError>, usize, usize, usize) {
     use crate::address_space::AddressSpace;
 
     let direct_map = common::addr::direct_map();
@@ -1030,7 +1030,7 @@ pub fn load_user_program(
     // **アロケータを借りる（S11-3。`ADR-0030`）。** 写像の間だけ持ち、
     // **Ring 3 へ落ちる前に返す。**
     let Some(allocator) = crate::frame_allocator::take() else {
-        return (Err(UserLoadError::AllocatorUnavailable), 0, 0);
+        return (Err(UserLoadError::AllocatorUnavailable), 0, 0, 0);
     };
 
     // SAFETY: production は稼働中の PML4、direct_map は登録済みの窓。
@@ -1044,7 +1044,7 @@ pub fn load_user_program(
             // フレームは呼び出し側が返す」と決めた場所と同じ関数で、
             // 今度はアロケータ自体を返す。**
             crate::frame_allocator::give_back(allocator);
-            return (Err(UserLoadError::AddressSpace(e)), 0, 0);
+            return (Err(UserLoadError::AddressSpace(e)), 0, 0, 0);
         }
     };
 
@@ -1128,6 +1128,9 @@ pub fn load_user_program(
     // **走らせたときだけ飛ばす。** 壊した像の後始末（S9-b-2）はこの破壊の対象では
     // なく、そちらまで飛ばすと**あちらの会計が先に落ちて、終了の側を観測できない。**
     // **実測で踏んだ**——先に落ちるほうだけを見ていた。
+    // **破棄の前に、この空間が取った本数を聞く（`ADR-0063` の (b1)）。**
+    // **`destroy` は自分を取るので、後からは聞けない。**
+    let taken = process.space.frames_taken();
     let keep_space = cfg!(feature = "user-exit-keep-space") && run;
     let (held, leaked) = if keep_space {
         (0, 0)
@@ -1148,7 +1151,116 @@ pub fn load_user_program(
         unsafe { process.space.destroy(direct_map, quarantine, &guard) }
     };
 
-    (outcome, held, leaked)
+    // **空間ごとの会計（`ADR-0063` の (b1)）。** **取った本数と、破棄が集めた本数が
+    // 一致すること。** **大域の空きフレーム数の差と違って、2 本の窓が交差しても閉じる。**
+    //
+    // **破壊 `user-exit-keep-space` では畳まないので、集めた本数が 0 になって落ちる**
+    // ——**大域の差の側と同じ形で捕まる。**
+    let collected = held + leaked;
+    if !keep_space && collected != taken {
+        SPACE_ACCOUNTING_MISMATCHES.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        logger.error(format_args!(
+            "user-space: the space of {name} took {taken} frame(s) but the destroy collected \
+             {collected} ({held} quarantined + {leaked} leaked)"
+        ));
+    }
+    (outcome, held, leaked, taken)
+}
+
+/// 空間ごとの会計が合わなかった回数（`ADR-0063` の (b1)）。**本番では 0 である。**
+static SPACE_ACCOUNTING_MISMATCHES: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// 空間ごとの会計が合わなかった回数（`ADR-0063` の (b1)）。
+pub fn space_accounting_mismatches() -> u64 {
+    SPACE_ACCOUNTING_MISMATCHES.load(core::sync::atomic::Ordering::SeqCst)
+}
+
+/// いま開いている `spawn` の窓の数、Ring 3 のスロットごと（`ADR-0063` の (b1)）。
+///
+/// # なぜスロットごとに数えるのか
+///
+/// **入れ子と交差を分けるためである。** **入れ子（親の窓の中で子の窓が開く）では、大域の差は
+/// 閉じる**——**外側の差に内側の分が両辺とも入る**（`spawn` の doc）。**閉じないのは交差、
+/// すなわち別のタスクの窓と半分だけ重なる形である。**
+///
+/// **入れ子は同じスロットの中で起きる**（`spawn` は同じタスクの上で遠征が入れ子になる）。
+/// **交差は別のスロットどうしで起きる**（足した 1 本はスロット 1 を使う）。
+/// **実測で踏んだ**——**スロットを見ずに数えたら、既定の起動の入れ子 6 つが「交差」と出た。**
+static SPAWN_WINDOWS_OPEN: [core::sync::atomic::AtomicUsize; crate::ring3::RING3_SLOTS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::ring3::RING3_SLOTS];
+
+/// これまでに開いた `spawn` の窓の数、スロットごと（`ADR-0063` の (b1)）。
+static SPAWN_WINDOW_STARTS: [core::sync::atomic::AtomicU64; crate::ring3::RING3_SLOTS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::ring3::RING3_SLOTS];
+
+/// 大域の差を実際に主張した回数（`ADR-0063` の (b1)）。
+///
+/// # 数える理由
+///
+/// **条件つきの判定は、条件が満たされなくなれば「確かめなかった」と書きながら緑のまま死ぬ**
+/// （運用者の指摘。2026-09-18）。**`FLAKY_EXCLUDED` と手で回す形の前例と同じ族である。**
+/// **回数を行へ出し、参照が固定する**——**0 になれば差分で出る。**
+static GLOBAL_DIFFERENCE_CHECKS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// `spawn` の会計の窓（`ADR-0063` の (b1)）。**開いたときの様子を控える。**
+pub struct SpawnWindow {
+    /// 開いたときのスロット。**閉じるときも同じスロットである。**
+    slot: usize,
+    /// 開いたとき、他のスロットで開いていた窓の数。
+    open_elsewhere_at_entry: usize,
+    /// 開いたときの、他のスロットの窓の累計。
+    starts_elsewhere_at_entry: u64,
+}
+
+/// 他のスロットで開いている窓の数と、その累計（`ADR-0063` の (b1)）。
+fn windows_elsewhere(slot: usize) -> (usize, u64) {
+    let mut open = 0usize;
+    let mut starts = 0u64;
+    for other in 0..crate::ring3::RING3_SLOTS {
+        if other == slot {
+            continue;
+        }
+        open += SPAWN_WINDOWS_OPEN[other].load(core::sync::atomic::Ordering::SeqCst);
+        starts += SPAWN_WINDOW_STARTS[other].load(core::sync::atomic::Ordering::SeqCst);
+    }
+    (open, starts)
+}
+
+/// 会計の窓を開く（`ADR-0063` の (b1)）。
+pub fn open_spawn_window() -> SpawnWindow {
+    let slot = crate::ring3::current_slot();
+    let (open_elsewhere_at_entry, starts_elsewhere_at_entry) = windows_elsewhere(slot);
+    SPAWN_WINDOW_STARTS[slot].fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    SPAWN_WINDOWS_OPEN[slot].fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    SpawnWindow {
+        slot,
+        open_elsewhere_at_entry,
+        starts_elsewhere_at_entry,
+    }
+}
+
+/// 会計の窓を閉じる（`ADR-0063` の (b1)）。**他の窓と交差したかを返す。**
+///
+/// **交差の見方は 3 つである**——**開いたときに他のスロットの窓が開いていたか、閉じるときに
+/// 開いているか、自分の間に他のスロットの窓が開いたか。** **どれかなら、大域の差は相手の分を
+/// 取り込んでいる。** **同じスロットの入れ子は交差ではない**（[`SPAWN_WINDOWS_OPEN`] の doc）。
+pub fn close_spawn_window(window: SpawnWindow) -> bool {
+    SPAWN_WINDOWS_OPEN[window.slot].fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
+    let (open_elsewhere, starts_elsewhere) = windows_elsewhere(window.slot);
+    let crossed = window.open_elsewhere_at_entry > 0
+        || open_elsewhere > 0
+        || starts_elsewhere != window.starts_elsewhere_at_entry;
+    if !crossed {
+        GLOBAL_DIFFERENCE_CHECKS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+    crossed
+}
+
+/// 大域の差を主張した回数（`ADR-0063` の (b1)）。
+pub fn global_difference_checks() -> u64 {
+    GLOBAL_DIFFERENCE_CHECKS.load(core::sync::atomic::Ordering::SeqCst)
 }
 
 /// 破棄する空間を指したままのタスクがあれば消し、声を出す（W1-b-2）。
@@ -1974,6 +2086,8 @@ pub fn spawn(
     // **シェルが `ls` と `cat` と `hello` を起こしたところで出た**——
     // 実測で 35 枚消えて、シェル自身の隔離は 9 枚だった（9 + 9 + 9 + 8）。
     let (children_before, leaked_before) = spawn_accounting();
+    // **会計の窓を開く（`ADR-0063` の (b1)）。** **他の窓と交差したら、大域の差は主張しない。**
+    let window = open_spawn_window();
 
     // **戻ってくるべき RSP0 を控える（S11-11 で直した）。**
     //
@@ -2102,7 +2216,8 @@ pub fn spawn(
         area
     };
 
-    let (outcome, held, leaked) = load_user_program(&mut logger, image, true, name, argv, envp);
+    let (outcome, held, leaked, taken) =
+        load_user_program(&mut logger, image, true, name, argv, envp);
 
     // **親の FP の状態を戻す。** **子が XMM に残したものを消す**ので、
     // 情報の漏れも同時に塞がる（決定 4 と同じ向きである）。
@@ -2170,6 +2285,8 @@ pub fn spawn(
     }
 
     let consumed = free_before.saturating_sub(free_after) as usize;
+    // **窓を閉じる。** **交差していたら、大域の差は相手の分を取り込んでいる**（`ADR-0063` の (b1)）。
+    let crossed = close_spawn_window(window);
     // **孫のぶんを足す。** 子が更に起こしていれば、そのぶんも消えている。
     let (children_after, leaked_after) = spawn_accounting();
     let quarantined = held + children_after.saturating_sub(children_before);
@@ -2183,9 +2300,19 @@ pub fn spawn(
          RSP {child_handler_rsp:#x} (inside its own excursion stack \
          {child_bottom:#x}..{child_top:#x} = {handler_on_child_stack}); the space was destroyed \
          ({consumed} frame(s) left the allocator and {quarantined} reached quarantine \
-         ({held} its own + {} from what it spawned), match={} leaked={all_leaked})",
+         ({held} its own + {} from what it spawned), match={} leaked={all_leaked}); the space \
+         took {taken} frame(s) and the destroy collected {} (match={}); the global difference \
+         was {} (checked {} time(s) so far)",
         children_after.saturating_sub(children_before),
-        consumed == quarantined
+        consumed == quarantined,
+        held + leaked,
+        held + leaked == taken,
+        if crossed {
+            "not checked because another spawn window crossed this one"
+        } else {
+            "checked"
+        },
+        global_difference_checks()
     ));
 
     // **ロードの失敗を 1 行で出す（ADR-0039）。**
@@ -2202,7 +2329,21 @@ pub fn spawn(
     };
     let _ = entry;
 
-    if consumed != quarantined || all_leaked != 0 {
+    // **空間ごとの一致はいつも見る。** **大域の差は、交差しなかったときだけ見る**
+    // （`ADR-0063` の (b1)。**交差したときは上の行が「確かめなかった」と書く**）。
+    if held + leaked != taken {
+        logger.error(format_args!(
+            "spawn: {name} left the space short: the space took {taken} frame(s) but the destroy \
+             collected {} ({held} quarantined + {leaked} leaked)",
+            held + leaked
+        ));
+        return Err(SpawnError::DestroyAccounting {
+            consumed: taken,
+            quarantined: held + leaked,
+            leaked: all_leaked,
+        });
+    }
+    if !crossed && (consumed != quarantined || all_leaked != 0) {
         logger.error(format_args!(
             "spawn: {name} left the allocator short: {consumed} frame(s) consumed but \
              {quarantined} quarantined ({all_leaked} leaked)"

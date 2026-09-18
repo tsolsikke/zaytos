@@ -7889,8 +7889,12 @@ fn load_embedded_user_program(logger: &mut Logger<SerialPort>) -> Result<(), Use
         // **子の会計を 0 に戻す（S11-5）。** このプログラムが `spawn` で起こした
         // 子の隔離は、下の突き合わせで足す。
         kernel::userland::reset_spawn_accounting();
-        let (outcome, held, leaked) =
+        // **会計の窓を開く（`ADR-0063` の (b1)）。** **起動時は交差しないが、同じ形で数える**
+        // ——**「確かめた回数」を 1 か所で数えるためである。**
+        let window = kernel::userland::open_spawn_window();
+        let (outcome, held, leaked, taken) =
             load_user_program(logger, program.image, true, name, program.argv, None);
+        let crossed = kernel::userland::close_spawn_window(window);
         let (child_held, child_leaked) = kernel::userland::spawn_accounting();
         let entry = outcome?;
 
@@ -7910,7 +7914,20 @@ fn load_embedded_user_program(logger: &mut Logger<SerialPort>) -> Result<(), Use
         let consumed = (free_before - frame_count_now(logger)) as usize;
         let quarantined = held + child_held;
         let all_leaked = leaked + child_leaked;
-        if consumed != quarantined || all_leaked != 0 {
+        // **空間ごとの一致はいつも見る**（`ADR-0063` の (b1)）。
+        if held + leaked != taken {
+            logger.error(format_args!(
+                "user-load: {name} left the space short: the space took {taken} frame(s) but the \
+                 destroy collected {} ({held} quarantined + {leaked} leaked)",
+                held + leaked
+            ));
+            return Err(UserLoadError::DestroyAccounting {
+                consumed: taken,
+                quarantined: held + leaked,
+                leaked: all_leaked,
+            });
+        }
+        if !crossed && (consumed != quarantined || all_leaked != 0) {
             logger.error(format_args!(
                 "user-load: {name} left the allocator short: {consumed} frame(s) consumed but \
                  {quarantined} quarantined ({held} its own + {child_held} from the process(es) \
@@ -7926,8 +7943,18 @@ fn load_embedded_user_program(logger: &mut Logger<SerialPort>) -> Result<(), Use
             "user-load: {name} ran as a process in its own address space, ended as expected, \
              and the kernel continued after the process was gone; the space was destroyed \
              ({consumed} frame(s) left the allocator and {quarantined} reached quarantine \
-             ({held} its own + {child_held} spawned), match={} leaked={all_leaked})",
-            consumed == quarantined
+             ({held} its own + {child_held} spawned), match={} leaked={all_leaked}); the space \
+             took {taken} frame(s) and the destroy collected {} (match={}); the global \
+             difference was {} (checked {} time(s) so far)",
+            consumed == quarantined,
+            held + leaked,
+            held + leaked == taken,
+            if crossed {
+                "not checked because another spawn window crossed this one"
+            } else {
+                "checked"
+            },
+            kernel::userland::global_difference_checks()
         ));
 
         // **空き範囲の数を別の行で出す。** フレームアロケータの容量（256）の
@@ -8006,7 +8033,7 @@ fn verify_corrupt_user_program_is_not_loaded(logger: &mut Logger<SerialPort>) {
             &buf[..]
         };
 
-        let (outcome, held, leaked) =
+        let (outcome, held, leaked, _taken) =
             load_user_program(logger, image, false, "corrupt", &[b"corrupt"], None);
 
         let Err(error) = outcome else {

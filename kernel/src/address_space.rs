@@ -84,6 +84,22 @@ pub struct AddressSpace {
     /// **プロセスごとに違ってよい。** 全空間が同じ添字を使う前提は、
     /// **プロセス別アドレス空間の目的と逆を向いている**（S7-e で言い換えた）。
     user_pml4_index: usize,
+    /// **この空間のために取ったフレームの本数**（`ADR-0063` の (b1)。2026-09-18）。
+    ///
+    /// # なぜ空間が数えるのか
+    ///
+    /// **破棄の会計を、大域の空きフレーム数の差ではなく、空間ごとの数で閉じるためである。**
+    /// **大域の差は、2 本の `spawn` の窓が交差すると相手の分を取り込む**——**実測で、
+    /// 2 本の「消費」と「隔離」がちょうど入れ替わった**（`ADR-0063`）。
+    ///
+    /// **数えるのは 3 か所である**——**PML4（[`AddressSpace::new`]）、途中のテーブル、
+    /// 葉（どちらも [`AddressSpace::map_user_4kib`]）。** **葉のフレームは呼び出し側が
+    /// 取るが、写したときに数えるので、呼び出し側は数えなくてよい**——**取ったのに
+    /// 写さなかったフレームは、この空間のものにならない**（呼び出し側が戻す）。
+    ///
+    /// **[`AddressSpace::destroy`] が集める本数と突き合わせる**——**あちらは
+    /// ページテーブルから辿れるものを集めるので、「取ったのに繋がっていない」が差になる。**
+    frames_taken: usize,
 }
 
 impl AddressSpace {
@@ -107,6 +123,7 @@ impl AddressSpace {
         let pml4 = allocator
             .allocate_frame()
             .ok_or(AddressSpaceError::OutOfFrames)?;
+        // **PML4 も破棄が集める**（`collect(self.pml4, ...)`）ので、ここで 1 本数える。
 
         // **direct map が覆っているかを先に見る。** `phys_to_virt` は覆いを検査せず
         // 加算するだけなので、**覆いの外を渡すと黙って別のアドレスを返す。**
@@ -141,6 +158,7 @@ impl AddressSpace {
         Ok(Self {
             pml4,
             user_pml4_index,
+            frames_taken: 1,
         })
     }
 
@@ -311,6 +329,8 @@ impl AddressSpace {
                     let _ = allocator.deallocate_frame(fresh);
                     return Err(AddressSpaceError::Unreachable);
                 }
+                // **この空間のものになった**（`ADR-0063` の (b1)）。**戻す枝より後で数える。**
+                self.frames_taken += 1;
                 // SAFETY: いま取ったフレームで、direct map が覆っている。
                 unsafe { zero_table(direct_map, fresh) };
                 // SAFETY: 中間テーブルなので U ビットを立てる。立てないと、葉で
@@ -358,7 +378,17 @@ impl AddressSpace {
         }
         // SAFETY: 葉。ユーザーから到達できる 4KiB ページ。
         unsafe { write_entry(direct_map, table, leaf_index, leaf) };
+        // **葉もこの空間のものである**（`ADR-0063` の (b1)）。**写した後で数える**
+        // ——**途中で弾かれた枝（`AlreadyMapped` など）では、呼び出し側がフレームを持ったままである。**
+        self.frames_taken += 1;
         Ok(())
+    }
+
+    /// この空間のために取ったフレームの本数（`ADR-0063` の (b1)）。
+    ///
+    /// **破棄の前に聞く。** [`AddressSpace::destroy`] は自分を取るので、後からは聞けない。
+    pub fn frames_taken(&self) -> usize {
+        self.frames_taken
     }
 
     /// この空間を破棄し、**下位で使っていたフレームをすべて隔離へ入れる**（S7-d）。
