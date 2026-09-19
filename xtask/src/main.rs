@@ -1731,6 +1731,17 @@ fn main() -> Result<()> {
                 let expect_pass = sabotage.is_empty();
                 return cmd_pipe_test(&sabotage, expect_pass);
             }
+            // **unix ドメインのストリームソケットの判定（`ADR-0064`）。台本の族である。**
+            if rest.iter().any(|a| a == "--socket-test") {
+                let sabotage: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                let expect_pass = sabotage.is_empty();
+                return cmd_socket_test(&sabotage, expect_pass);
+            }
             if rest.iter().any(|a| a == "--history-test") {
                 let sabotage: Vec<&str> = rest
                     .iter()
@@ -4983,6 +4994,287 @@ fn cmd_pipe_test(features: &[&str], expect_pass: bool) -> Result<()> {
         println!("{context}: FAILED");
         if expect_pass {
             bail!("{context}: FAILED")
+        } else {
+            println!("{context}: the sabotage was caught (this run is expected to fail)");
+            Ok(())
+        }
+    }
+}
+
+/// `socket-test` を「通らないこと」で回す破壊（`ADR-0064`）。**8 本とも落ちる判定が違う。**
+const SOCKET_TEST_SABOTAGES: &[&str] = &[
+    // **`accept` が待たずに `-EAGAIN` を返す**——`sockd` が `accept failed` で終わり、
+    // 判定 1（`hello` の返事）と判定 3（accept の待ち）が落ちる。
+    "socket-accept-does-not-wait",
+    // **`connect` が名前を見ない**——`nobody` が `sockd` に繋がり、判定 5 が落ちる。
+    "socket-connect-ignores-name",
+    // **`bind` が取られた名前を見ない**——`sockc bind` が 0 で通り、判定 6 が落ちる
+    // （listener は 2 本持てるので、2 本目が取れてしまう形で見える）。
+    "socket-bind-ignores-taken-name",
+    // **端を閉じても閉じたことにしない**——`sockd` に EOF が来ず、次の `big` で書き手が
+    // 永久に待つ。**出力が伸びなくなる形で落ちる**（`SOCKET_TEST_STALL_LIMIT`）。
+    "socket-close-keeps-peer-open",
+    // **相手が閉じているのを見ずに書く**——`quit` の後の `write` が 4 を返し、判定 8 が落ちる。
+    "socket-write-ignores-peer-closed",
+    // **書いても読み手を起こさない**——`hello` で双方が待ち、出力が伸びなくなる。
+    "socket-write-does-not-wake-reader",
+    // **空を EOF と誤る**——返事が届く前に `sockc` が読み終え、判定 1 が落ちる。
+    "socket-read-empty-returns-zero",
+    // **両端が閉じても枠を返さない**——`twice` の 1 本目が `-EAGAIN` で繋げず、判定 9 が落ちる。
+    "socket-release-keeps-slot",
+];
+
+/// `socket-test` の上限（秒）。**既定は台本の族の水準（10 秒の桁）の見込みなので、その 10 倍。**
+const SOCKET_TEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// `socket-test` の「出力が伸びない」上限（秒）。**黙って止まる破壊が 2 つ在る**
+/// （`PIPE_TEST_STALL_LIMIT` と同じ形）。
+const SOCKET_TEST_STALL_LIMIT: Duration = Duration::from_secs(30);
+
+/// unix ドメインのストリームソケットの判定（`ADR-0064`）。**台本の族で、1 回の起動で
+/// `sockc` の 6 つの形を見る。** **`sockd` は `init` が起こしっぱなしで起こす。**
+///
+/// # 判定は内容と計器で見る。順序では見ない
+///
+/// 1. **`hello` が往復する**（`sockc: hello reply=hello`）
+/// 2. **`/data/big`（2,181 バイト）が往復し、書き手が満杯で待った**（輪は 1,024）
+/// 3. **`accept` が待った**（`sockd` は client より先に待つ）
+/// 4. **読み手が両側で待ち、書きが起こした**（`sockd` は要求を、`sockc` は返事を待つ）
+/// 5. **無い名前への `connect` は `-ECONNREFUSED`**（`-111`）
+/// 6. **取られた名前への `bind` は `-EADDRINUSE`**（`-98`）
+/// 7. **相手が閉じたら EOF**——`sockd` が `client left` を 4 回、EOF の計器が 5
+///    （4 回は `sockd`、1 回は `quit` の `sockc`）
+/// 8. **相手が閉じた後の `write` は `-EPIPE`**（`quit` の後の `write=-32`）
+/// 9. **待ち行列と枠**——`twice` の 2 本目が待ち行列で待って通り、接続は 5 つ作られ
+///    同時には 2 つまで、5 つとも枠が返り、listener は 1 本取られて 1 本返った
+/// 10. **`sockd` が 0 で終わり、台本が最後まで届いた**
+///
+/// **禁止**——**`[ERROR]` が 1 行も無いこと。**
+fn cmd_socket_test(features: &[&str], expect_pass: bool) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let mut all_features: Vec<&str> = vec!["socket-test"];
+    all_features.extend_from_slice(features);
+    let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let tag = all_features.join("-");
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("socket-test-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the socket test")?;
+
+    // **終わりの印が出るか、出力が伸びなくなるか、上限まで待つ。** **黙って止まる破壊が
+    // 2 つ在る**（起こさない・EOF が来ない）。
+    let started = Instant::now();
+    let deadline = started + SOCKET_TEST_TIMEOUT;
+    let mut last_len = 0usize;
+    let mut last_growth = started;
+    let mut stalled = false;
+    while Instant::now() < deadline {
+        let text = strip_ansi(&read_lossy(&serial_log));
+        if text.contains("script-done:") {
+            thread::sleep(Duration::from_secs(1));
+            break;
+        }
+        if text.len() > last_len {
+            last_len = text.len();
+            last_growth = Instant::now();
+        } else if last_growth.elapsed() > SOCKET_TEST_STALL_LIMIT {
+            stalled = true;
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+    let waited = started.elapsed();
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = read_lossy(&serial_log);
+    let context = if features.is_empty() {
+        "socket-test".to_string()
+    } else {
+        format!("socket-test {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    let qemu_debug = read_lossy(&debug_log);
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    let stripped = strip_ansi(&serial);
+    let lines: Vec<&str> = stripped.lines().map(str::trim_end).collect();
+    let count_line = |wanted: &str| lines.iter().filter(|line| line.trim() == wanted).count();
+    let number_after = |line: &str, key: &str| -> Option<u64> {
+        let rest = &line[line.find(key)? + key.len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok()
+    };
+    // **`socket:` の行は長く、logger が空白の連なりで折り返す**（実測。`cat -A` で確かめた）——
+    // **鍵（`woken by a write`）が空白で割れ、数と鍵の間にも空白が入る。** **空白を 1 つに畳んでから読む。**
+    let gauge_line: Option<String> = lines
+        .iter()
+        .find(|line| line.contains("[INFO] socket: listeners bound "))
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "));
+    let g = |key: &str| {
+        gauge_line
+            .as_deref()
+            .and_then(|line| number_after(line, key))
+    };
+    let bound = g("listeners bound ");
+    let listeners_released = g("released ");
+    let bind_refused = g("bind refused ");
+    let created = g("connections created ");
+    let at_once = g("at most ");
+    let connections_released = g("at once) released ");
+    let connect_refused = g("connect refused ");
+    let backlog_full = g("backlog full ");
+    let accept_waits = g("accepts waited ");
+    let reader_waits = g("readers waited ");
+    let readers_woken_by_write = g("woken by a write ");
+    let writer_waits = g("writers waited ");
+    let writers_woken_by_read = g("woken by a read ");
+    let epipe = g("writes to a closed peer ");
+    let eof = g("EOF seen ");
+
+    let judgements: Vec<(&str, bool)> = vec![
+        (
+            "hello_went_round",
+            count_line("sockc: hello reply=hello") == 1,
+        ),
+        (
+            "big_went_round_and_the_writer_waited",
+            count_line("sockc: big sent=1536 got=1536 match=true") == 1
+                && writer_waits.is_some_and(|n| n >= 1)
+                && writers_woken_by_read.is_some_and(|n| n >= 1),
+        ),
+        ("accept_waited", accept_waits.is_some_and(|n| n >= 1)),
+        (
+            "readers_waited_both_ways_and_a_write_woke_them",
+            reader_waits.is_some_and(|n| n >= 2) && readers_woken_by_write.is_some_and(|n| n >= 1),
+        ),
+        (
+            // **`>= 1` は `== 1` ではない**——**計器は大域で、起動時の `syscall-test` の 66 番
+            // （無い名前への `connect`）も乗るので、既定でも `connect refused` は 1、この台本の
+            // `sockc nobody` と合わせて 2 になる**（`kernel/src/main.rs` の `socket:` の doc）。
+            // **`sockc nobody` が `-111` を出したことは `count_line` の側で見る。**
+            "an_unknown_name_is_refused",
+            count_line("sockc: connect nobody -> -111") == 1
+                && connect_refused.is_some_and(|n| n >= 1),
+        ),
+        (
+            "a_taken_name_is_refused",
+            count_line("sockc: bind wayland-0 -> -98") == 1 && bind_refused == Some(1),
+        ),
+        (
+            "eof_after_the_peer_closed",
+            count_line("sockd: client left") == 4 && eof == Some(5),
+        ),
+        (
+            "epipe_after_the_peer_closed",
+            count_line("sockc: quit read=0 write=-32") == 1 && epipe == Some(1),
+        ),
+        (
+            "the_queue_and_the_slots",
+            count_line("sockc: twice second=0 reply=one reply=two") == 1
+                && created == Some(5)
+                && at_once == Some(2)
+                && connections_released == Some(5)
+                && backlog_full == Some(0)
+                && bound == Some(1)
+                && listeners_released == Some(1),
+        ),
+        (
+            "the_server_ended_and_the_script_reached_its_end",
+            count_line("sockd: quit") == 1
+                && lines
+                    .iter()
+                    .any(|line| line.contains("[INFO] socket-test: /bin/sockd ended (Ended(0))"))
+                && stripped.contains("script-done:"),
+        ),
+    ];
+
+    // **禁止**——`[ERROR]` が 1 行も無い。
+    let error_lines: Vec<&str> = lines
+        .iter()
+        .filter(|line| line.contains("[ERROR]"))
+        .copied()
+        .take(4)
+        .collect();
+    let no_error = error_lines.is_empty();
+
+    let failed: Vec<&str> = judgements
+        .iter()
+        .filter(|(_, held)| !held)
+        .map(|(name, _)| *name)
+        .collect();
+    for (name, held) in &judgements {
+        println!("{context}: {name} = {held}");
+    }
+    println!("{context}: no [ERROR] line = {no_error} (the first were {error_lines:?})");
+    println!(
+        "{context}: (info) gauges: bound {bound:?} released {listeners_released:?}, bind refused \
+         {bind_refused:?}; connections created {created:?} at most {at_once:?} at once, released \
+         {connections_released:?}, connect refused {connect_refused:?}, backlog full \
+         {backlog_full:?}; accept waits {accept_waits:?}, reader waits {reader_waits:?} (woken by \
+         a write {readers_woken_by_write:?}), writer waits {writer_waits:?} (woken by a read \
+         {writers_woken_by_read:?}), epipe {epipe:?}, eof {eof:?}"
+    );
+    for info in lines.iter().filter(|line| {
+        line.contains("[INFO] socket")
+            || line.contains("sockd: ")
+            || line.contains("sockc: ")
+            || line.contains("[INFO] detached: ")
+    }) {
+        println!("{context}: (info) {}", info.trim());
+    }
+    println!(
+        "{context}: (info) waited {:.1} s (the serial log stopped growing = {stalled})",
+        waited.as_secs_f64()
+    );
+
+    let passed = failed.is_empty() && no_error;
+    if passed {
+        println!("{context}: PASS");
+        if expect_pass {
+            Ok(())
+        } else {
+            bail!("{context}: the sabotage was NOT caught; every judgement still held")
+        }
+    } else {
+        println!("{context}: FAILED (judgements that fell: {failed:?})");
+        if expect_pass {
+            bail!("{context}: FAILED ({failed:?})")
         } else {
             println!("{context}: the sabotage was caught (this run is expected to fail)");
             Ok(())
@@ -16945,6 +17237,31 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }
         }
 
+        // **unix ドメインのストリームソケット（`ADR-0064`）。** **台本の族で、1 回の起動で
+        // `sockc` の 6 つの形を見る。** **破壊は 8 つで、落ちる判定がそれぞれ違う**
+        // （`SOCKET_TEST_SABOTAGES` の doc）。
+        total += 1;
+        begin_item("a client and a server talk through the kernel's unix stream socket");
+        match cmd_socket_test(&[], true) {
+            Ok(()) => println!("--- socket test: OK"),
+            Err(error) => {
+                println!("--- socket test: FAILED ({error})");
+                failed.push("socket test".to_string());
+            }
+        }
+        for sabotage in SOCKET_TEST_SABOTAGES {
+            total += 1;
+            let label = format!("socket-test {sabotage}");
+            begin_item(&label);
+            match cmd_socket_test(&[sabotage], false) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
+            }
+        }
+
         // **Tab の補完（TAB-1）。**
         //
         // **1 回の起動で 5 つ見る**——**単一候補 / 共通接頭辞 / 件数 / 一覧 /
@@ -18466,7 +18783,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 35,
-    full: 325,
+    full: 334,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
