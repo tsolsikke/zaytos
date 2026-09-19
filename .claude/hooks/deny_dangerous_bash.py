@@ -28,7 +28,31 @@ RULES = [
     # （`&` の前が `>` や `<` なら、背景へ落とす `&` ではない）。
     (re.compile(r"(?<![&><])&(?!&)\s*(?:$|[)\n;])"), "deny",
      "HOOK-PROBE-AMP: 背景へ落とす & は使わない。run_in_background を使うこと"),
+    # **走行の前の `;` と改行は、前が落ちても走行を始める**（2026-09-19。実測で踏んだ
+    # ——**一覧を書き換える Python が落ちたのに、`;` の先の走行が進み、移していない木で
+    # `--full` が緑を出した**。`docs/troubleshooting.md`）。
+    #
+    # **編集の側では塞げない**——**編集の形は列挙できない**（Python の heredoc・`sed -i`・
+    # リダイレクト・…）。**走行の側は 3 つで尽きる**——`cargo`・`git commit`・`git push`
+    # （`timeout` 付きも）。**`&&` の後の改行と `do`/`then`/`else` の後の改行は区切りでは
+    # ないので、[`executable_part`] が先に畳む。** **走行の後の `;` は見ない**（前が落ちる話
+    # ではない）。
+    (re.compile(r"(?:;|\n)[ \t]*(?:timeout\s+\S+\s+)?(?:cargo\b|git\s+(?:commit|push)\b)"), "deny",
+     "HOOK-PROBE-SEMI: 走行（cargo / git commit / git push）の前の ; と改行は使わない。"
+     "前の編集が落ちても走行が始まる。&& で繋ぐこと"),
 ]
+
+CONTINUATION = re.compile(r"(&&|\|\||\||\\|\b(?:do|then|else))[ \t]*\n[ \t]*")
+
+
+def joined(text: str) -> str:
+    """行の続きを 1 行に畳む（2026-09-19）。
+
+    **`&&` の後の改行は「前が通ったら」であって、区切りではない。** **`do`/`then`/`else` の
+    後の改行も同じである**（ループと分岐の本文の 1 行目）。**畳まなければ、走行の前の改行を
+    拒む規則が、`&&` の後に改行を置いて `cargo` を続ける形まで拒む。**
+    """
+    return CONTINUATION.sub(r"\1 ", text)
 
 def executable_part(command: str) -> str:
     """引用と heredoc の中身を落とす（2026-09-03）。
@@ -62,7 +86,7 @@ def executable_part(command: str) -> str:
             continue
         out.append(c)
         i += 1
-    return "".join(out)
+    return joined("".join(out))
 
 
 def main() -> int:
@@ -131,6 +155,22 @@ def self_test() -> int:
         ("cat <<'EOF'\ngit " + "add -A\nEOF", "allow"),
         # **引用の外は拒む。** 落としても形は残る。
         ("echo 'x' ; (sleep 1 &)", "deny"),
+        # **走行の前の `;` と改行は拒む**（2026-09-19。**編集が黙って落ちたのに走行が進んだ**）。
+        ("python3 move.py; cargo xtask check", "deny"),
+        ("sed -i 's/a/b/' x.rs\ncargo fmt --all", "deny"),
+        ("cat <<'EOF' > x.rs\nfn main() {}\nEOF\ncargo xtask check", "deny"),
+        ("git " + "add x; git " + "commit -m x", "deny"),
+        ("git log -1; git push", "deny"),
+        ("echo x; timeout 600 cargo xtask check --full", "deny"),
+        # **`&&` と行の続きは通る。** **走行の後の `;` も通る**（前が落ちる話ではない）。
+        ("python3 move.py && cargo xtask check", "allow"),
+        ("cargo fmt --all &&\n  cargo xtask check", "allow"),
+        ("for i in 1 2 3; do timeout 600 cargo xtask check; done", "allow"),
+        ("while true; do\n  timeout 60 cargo xtask check\ndone", "allow"),
+        ("timeout 600 cargo xtask check --full; echo done", "allow"),
+        # **文中の言及は通る。**
+        ("echo 'x; cargo xtask check'", "allow"),
+        ("grep -n 'x; git " + "commit' docs/a.md", "allow"),
     ]
     failures = 0
     for command, want in cases:
