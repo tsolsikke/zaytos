@@ -302,9 +302,42 @@ pub enum File {
     /// **番号（2）で見ない。** **表の中身で分岐するのはS11-10からの形で、
     /// `dup`が来ても性質が複製に付いて回る**（番号で見ると付いて回らない）。
     Terminal { errors: bool },
+    /// パイプの読み端（`ADR-0063` の (b3)）。**`pipe` は `crate::pipe` の表の添字である。**
+    ///
+    /// **番号で見ない。** **`a | b` の右の fd 0 に据える**——**表の中身で分岐するので、
+    /// `read` は端末と同じ経路の手前で分かれる。**
+    PipeRead { pipe: u8 },
+    /// パイプの書き端（`ADR-0063` の (b3)）。**`a | b` の左の fd 1 に据える。**
+    PipeWrite { pipe: u8 },
 }
 
 impl File {
+    /// パイプの読み端なら、その添字。
+    pub fn pipe_read_end(&self) -> Option<u8> {
+        match self {
+            Self::PipeRead { pipe } => Some(*pipe),
+            _ => None,
+        }
+    }
+
+    /// パイプの書き端なら、その添字。
+    pub fn pipe_write_end(&self) -> Option<u8> {
+        match self {
+            Self::PipeWrite { pipe } => Some(*pipe),
+            _ => None,
+        }
+    }
+
+    /// パイプの端を返す（`ADR-0063` の (b3)）。**閉じる経路はここへ集める**——
+    /// **`close` からも、表の `Drop`（プロセスの終わり）からも来る。**
+    pub fn release_pipe_end(&self) {
+        match self {
+            Self::PipeRead { pipe } => crate::pipe::close_read_end(*pipe),
+            Self::PipeWrite { pipe } => crate::pipe::close_write_end(*pipe),
+            _ => {}
+        }
+    }
+
     /// 先頭から読む状態で開く。
     pub fn new(inode: Inode) -> Self {
         Self::Regular {
@@ -347,19 +380,19 @@ impl File {
         matches!(self, Self::Terminal { errors: true })
     }
 
-    /// 実体。**端末には無い。**
+    /// 実体。**端末とパイプには無い。**
     pub fn inode(&self) -> Option<&Inode> {
         match self {
             Self::Regular { inode, .. } => Some(inode),
-            Self::Terminal { .. } => None,
+            Self::Terminal { .. } | Self::PipeRead { .. } | Self::PipeWrite { .. } => None,
         }
     }
 
-    /// 次に読む位置（バイト）。**端末は 0 である。**
+    /// 次に読む位置（バイト）。**端末とパイプは 0 である。**
     pub fn offset(&self) -> u64 {
         match self {
             Self::Regular { offset, .. } => *offset,
-            Self::Terminal { .. } => 0,
+            Self::Terminal { .. } | Self::PipeRead { .. } | Self::PipeWrite { .. } => 0,
         }
     }
 
@@ -387,6 +420,21 @@ impl File {
 /// **`errno` をここでは知らない。** 対応づけは syscall の側が持つ
 /// （`common::ext2::Ext2Error` と同じ線である。**下の層を `errno` から
 /// 独立に保つ**）。
+/// 表が捨てられるとき、パイプの端を返す（`ADR-0063` の (b3)）。
+///
+/// **プロセスの終わりで表は捨てられるだけだった**（`File` は `Copy` で `Drop` を持たない）。
+/// **端を返さないと、最後の書き手が閉じたことが読み手へ届かず、EOF が来ない。**
+/// **読み込みに失敗した経路（遠征へ入る前に捨てる）も同じここを通る。**
+///
+/// **`close` で外した端は `remove` が返すので、ここでは見ない**——**外した後の欄は空である。**
+impl Drop for FileTable {
+    fn drop(&mut self) {
+        for slot in self.slots.iter().flatten() {
+            slot.release_pipe_end();
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileTableError {
     /// 空きが無い（Linux なら `EMFILE`）。
@@ -493,6 +541,20 @@ impl FileTable {
             .get_mut(fd)
             .and_then(Option::as_mut)
             .ok_or(FileTableError::BadDescriptor(fd))
+    }
+
+    /// その番号の中身を差し替える（`ADR-0063` の (b3)）。**前の中身を返す。**
+    ///
+    /// **`a | b` の子の 0 と 1 をパイプの端にするのに使う。** **端末の 3 つは `new` が
+    /// 据えているので、差し替える形になる**——**前の中身がパイプの端なら返す**
+    /// （据える側は端末しか差し替えないが、形として閉じる）。
+    pub fn replace(&mut self, fd: usize, file: File) -> Option<File> {
+        let slot = self.slots.get_mut(fd)?;
+        let previous = slot.replace(file);
+        if let Some(previous) = previous {
+            previous.release_pipe_end();
+        }
+        previous
     }
 
     /// 開いている本数。**判定行に出す。**

@@ -92,7 +92,9 @@
 //! - `53` `read(3)` が `-EBADF` を返さなかった（開いていない）
 //! - `48` `spawn("/bin/ls", ["ls"])` が 0 を返さなかった
 //! - `49` `spawn("/bin/cat", ["cat", "/etc/motd"])` が 0 を返さなかった
-//! - `50` `spawn("/bin/cat", ["cat"])` が 2 を返さなかった（引数が無い）
+//! - `50` `spawn("/bin/cat", ["cat", "/nope"])` が 1 を返さなかった（開けない。
+//!   **(b3) までは「引数が無い」の 2 を見ていた**——`cat` が標準入力を読むようになり、
+//!   引数なしは打鍵を待つ形になったので、**「子の 0 以外の状態が親へ届く」を別の入口で見る**）
 //! - `54` `open("/data/writable", O_WRONLY|O_TRUNC)` が fd 3 を返さなかった
 //! - `55` 書きで開いた fd への `read` が `-EBADF` を返さなかった
 //! - `56` ファイルへの `write` が渡したバイト数を返さなかった
@@ -931,14 +933,16 @@ core::arch::global_asm!(
     "  mov edi, 49",
     "  jne 9f",
 
-    // --- 50. spawn("/bin/cat", ["cat"])。**引数が無いので 2 で終わるはず** ---
-    // **標準入力がまだ無いので、黙って何もしない形にはしていない。**
+    // --- 50. spawn("/bin/cat", ["cat", "/nope"])。**開けないので 1 で終わるはず** ---
+    // **見ているのは「子の 0 以外の終了状態が親へ届くこと」である。** **(b3) までは引数なしの
+    // 2 を見ていたが、`cat` が標準入力を読むようになった**（`ADR-0063` の (b3)）**ので、
+    // 引数なしは打鍵を待つ形になる。** **無いファイルなら待たずに 1 で終わる。**
     "  mov eax, {sys_spawn}",
     "  lea rdi, [rip + CAT_PATH]",
-    "  lea rsi, [rip + ARGV_CAT_ALONE]",
+    "  lea rsi, [rip + ARGV_CAT_MISSING]",
     "  lea rdx, [rip + ENVP_EMPTY]",
     "  int 0x80",
-    "  cmp rax, 2",
+    "  cmp rax, 1",
     "  mov edi, 50",
     "  jne 9f",
 
@@ -1249,9 +1253,13 @@ core::arch::global_asm!(
     "  .quad SPAWN_ARG_CAT",
     "  .quad MOTD_PATH",
     "  .quad 0",
-    "ARGV_CAT_ALONE:",
+    "ARGV_CAT_MISSING:",
     "  .quad SPAWN_ARG_CAT",
+    "  .quad CAT_MISSING_PATH",
     "  .quad 0",
+    "CAT_MISSING_PATH:",
+    "  .asciz \"/nope\"",
+    ".balign 8",
     "SPAWN_ARG_LS:",
     "  .asciz \"ls\"",
     "SPAWN_ARG_CAT:",

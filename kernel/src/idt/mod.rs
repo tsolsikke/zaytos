@@ -2009,7 +2009,17 @@ unsafe fn fold_if_interrupted(context: &IrqContext, bkl: &mut Option<crate::bkl:
     const MINIMUM_DEPTH: usize = 2;
 
     let depth = crate::ring3::depth();
-    if depth < MINIMUM_DEPTH {
+    // **起こしっぱなしのスロットは深さ 1 でも畳む（`ADR-0063` の (b3)）。** **そこに居るのは
+    // 常に子で、シェルは居ない**——**`spin | cat` の `spin` はスロット 1 の深さ 1 である。**
+    // **1 回の押しで畳むのは 1 本である**（旗は `take` で 1 回だけ消費される）。**両方が
+    // Ring 3 で回っていれば 2 回押す。** **カーネルの中で待っている子には届かない**
+    // （`ADR-0063` の (b3) の限界）。
+    let minimum_depth = if crate::ring3::current_slot() == crate::task::detached_slot() {
+        1
+    } else {
+        MINIMUM_DEPTH
+    };
+    if depth < minimum_depth {
         // **深さ 1 を弾いたことを数える（W2-c-2 の手当て）。**
         // **既定では 1 以上、破壊では 0 である**（[`DEPTH_ONE_NOT_FOLDED`] の doc）。
         if depth == 1 {

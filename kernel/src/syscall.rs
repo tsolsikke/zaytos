@@ -97,6 +97,14 @@ pub const EIO: i64 = 5;
 /// **遠征の深さが上限に達しているときに返す。**
 pub const EAGAIN: i64 = 11;
 
+/// `-EPIPE`（読み手の居ないパイプへ書いた）の errno（`ADR-0063` の (b3)）。値は Linux と同じ
+/// 32 である。**`SIGPIPE` は送らない**——**シグナルを持たない**（`crate::pipe` の doc）。
+pub const EPIPE: i64 = 32;
+
+/// `-ECHILD`（その手形の子は居ない）の errno（`ADR-0063` の (b3)）。値は Linux と同じ 10 である。
+/// **終わった後の二重待ちも同じ値である**（手形の世代が合わない。`crate::task::ring3_task_handle`）。
+pub const ECHILD: i64 = 10;
+
 /// **端末に対する要求ではない**（Linux の `ENOTTY` = 25。実測。
 /// `/usr/include/asm-generic/errno-base.h`）。
 ///
@@ -582,6 +590,47 @@ pub const SPAWN_FOLDED_FLAG: u64 = 0x100;
 /// 与えると、**「`SIGINT` が配送された」と読める値を、配送していないのに返す。**
 /// **シグナルを実装する段（(4)）で、そのとき改めて決めること。**
 pub const SPAWN_INTERRUPTED_FLAG: u64 = 0x200;
+
+/// 起こしっぱなしで子を起こす（`ADR-0063` の (b3)）。**私物である**（[`SYS_SPAWN`] と同じ判断
+/// ——Linux に同じ意味の口が無い。`posix_spawn` はライブラリの関数で、システムコールではない）。
+///
+/// 引数は `path` / `argv` / `envp` / `flags`（[`DETACHED_STDOUT_TO_PIPE`]）。**戻り値は手形**
+/// （`crate::task::ring3_task_handle`。(b2) の形）**か `-errno`。**
+///
+/// # 子が Ring 3 へ入るか終わるまで戻らない
+///
+/// **フレームアロケータの貸し出しは大域に 1 つである**（`docs/wayland-inventory.md` の #4）。
+/// **戻ってすぐシェルが右を `spawn` すると、左の読み込みと重なって `AllocatorUnavailable` に
+/// なる。** **`concurrent-test` が「1 本を Ring 3 へ入れてから次を起こす」で避けたのと同じ順序を、
+/// 口の中で守る。** **待ちは `Wait` を使わず、譲るの繰り返しである**——**`Wait::ChildStarted` を
+/// 作れば起こす側も作れる（子が入った時点で起こす）が、待つ長さが読み込み 1 回ぶん
+/// （ティックの桁）なので足さない。** **待ったティック数は計器に出す**
+/// （[`detached_entry_wait_ticks_max`]）。**上限は置かない**——**読み込みは必ず成功か失敗で終わる。**
+///
+/// **見つからなければ同期で `-ENOENT` を返す**（起こす前に探す。`crate::userland::probe_program`）
+/// ——**シェルの `PATH` の輪が次の要素へ進める。**
+pub const SYS_SPAWN_DETACHED: u64 = ZAYTOS_PRIVATE_BASE + 5;
+
+/// [`SYS_SPAWN_DETACHED`] の `flags`——子の fd 1 をパイプの書き端にし、読み手を予約する
+/// （`crate::pipe` の doc の「読み手の予約」）。
+pub const DETACHED_STDOUT_TO_PIPE: u64 = 1;
+
+/// 予約したパイプの読み端を fd 0 にして、入れ子で起こす（`ADR-0063` の (b3)）。**私物。**
+///
+/// **[`SYS_SPAWN`] と同じ形で戻る**（終わり方のビット）。**予約が無ければ `-EINVAL`。**
+/// **[`SYS_SPAWN`] に `flags` を足さない理由**——**既存の呼び手は `r10` を置かないので、
+/// 4 つ目の引数を見る形にすると、置いていない値を読む。**
+pub const SYS_SPAWN_WITH_PIPED_STDIN: u64 = ZAYTOS_PRIVATE_BASE + 6;
+
+/// 起こしっぱなしの子を待って回収する（`ADR-0063` の (b3)）。**私物。**
+///
+/// **引数は手形。** **戻り値は終わり方のビット**（[`SYS_SPAWN`] と同じ）**か `-ECHILD`**
+/// （手形が合わない・終わった後の二重待ち）。**`wait4` を採らない**——**形が合わない**
+/// （`docs/architecture.md` の「合わせるのは合わせられる形について」）。
+///
+/// **使われなかった読み手の予約は、ここで消す**——**右が見つからなかったとき、左が満杯で
+/// 永久に待つのを防ぐ**（`crate::pipe::drop_reservation`）。
+pub const SYS_WAIT_CHILD: u64 = ZAYTOS_PRIVATE_BASE + 7;
 
 /// [`SYS_SPAWN`] が受け入れる像の最大の大きさ（S11-5）。
 ///
@@ -1126,9 +1175,12 @@ unsafe fn dispatch(
             // 1 回の保存になるからである**——**書きのたびに書き戻すと、
             // 1 回の保存で何度も 2MiB を書くことになる。**
             let closed = crate::vfs::with_current_files(|files| {
-                files
-                    .remove(args[0] as usize)
-                    .map(|file| file.is_writable_file())
+                files.remove(args[0] as usize).map(|file| {
+                    // **パイプの端なら返す（`ADR-0063` の (b3)）。** **`remove` が返した
+                    // `File` は `Copy` で `Drop` を持たないので、ここで明示に返す。**
+                    file.release_pipe_end();
+                    file.is_writable_file()
+                })
             });
             match closed {
                 Ok(true) => {
@@ -1274,6 +1326,345 @@ unsafe fn flush_root_image(bkl: &mut Option<crate::bkl::BklGuard>) -> Result<(),
     match outcome {
         Ok(()) => Ok(()),
         Err(_) => Err(EIO),
+    }
+}
+
+/// 起こしっぱなしのスロットから端末へ書いた回数（`ADR-0063` の (b3) の計器）。
+static TERMINAL_WRITES_FROM_DETACHED: AtomicU64 = AtomicU64::new(0);
+
+/// [`TERMINAL_WRITES_FROM_DETACHED`] の値。
+pub fn terminal_writes_from_detached() -> u64 {
+    TERMINAL_WRITES_FROM_DETACHED.load(Ordering::Relaxed)
+}
+
+/// [`SYS_SPAWN_DETACHED`] が子の入場を待ったティック数の最大（計器）。**桁で小さいことを
+/// 示すために持つ**（`Wait` を足さない根拠。[`SYS_SPAWN_DETACHED`] の doc）。
+static DETACHED_ENTRY_WAIT_TICKS_MAX: AtomicU64 = AtomicU64::new(0);
+
+/// [`SYS_SPAWN_DETACHED`] を通った回数（計器）。
+static DETACHED_STARTS: AtomicU64 = AtomicU64::new(0);
+
+/// [`DETACHED_ENTRY_WAIT_TICKS_MAX`] の値。
+pub fn detached_entry_wait_ticks_max() -> u64 {
+    DETACHED_ENTRY_WAIT_TICKS_MAX.load(Ordering::Relaxed)
+}
+
+/// [`DETACHED_STARTS`] の値。
+pub fn detached_starts() -> u64 {
+    DETACHED_STARTS.load(Ordering::Relaxed)
+}
+
+/// パイプの読み端から読む（`ADR-0063` の (b3)）。**空なら待つ。**
+///
+/// # 窓は構造で閉じている
+///
+/// **`int 0x80` は割り込みゲートなので IF=0 である**——**「空だと見てから `Waiting` にする」
+/// までに書き手の起こしは入らない**（`sys_read` の端末の待ちと同じ）。**BKL は解いてから譲る**
+/// （`ADR-0036`）。
+///
+/// # 安全性
+///
+/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+unsafe fn read_from_pipe(
+    pipe: u8,
+    buf: u64,
+    count: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    bkl: &mut Option<crate::bkl::BklGuard>,
+) -> u64 {
+    if count == 0 {
+        return 0;
+    }
+    let want = count.min(crate::pipe::PIPE_RING as u64);
+    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, buf, want) }) else {
+        return (-EFAULT) as u64;
+    };
+    let mut kbuf = [0u8; crate::pipe::PIPE_RING];
+    loop {
+        match crate::pipe::read_into(pipe, &mut kbuf[..want as usize]) {
+            crate::pipe::ReadOutcome::Bytes(got) => {
+                // SAFETY: `slice` は検証済みで、`got` はその長さを越えない。
+                let written = unsafe { copy_to_user(&slice, 0, &kbuf[..got]) };
+                return written as u64;
+            }
+            crate::pipe::ReadOutcome::Eof => return 0,
+            crate::pipe::ReadOutcome::Empty => {
+                crate::pipe::note_reader_wait();
+                crate::task::set_current_waiting(crate::task::Wait::PipeReadable { pipe });
+                drop(bkl.take());
+                crate::task::yield_now();
+                *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
+            }
+        }
+    }
+}
+
+/// パイプの書き端へ書く（`ADR-0063` の (b3)）。**満杯なら待つ。読み手が居なければ `-EPIPE`。**
+///
+/// **部分書きである**——**入った数を返す。** **`userlib::write_all` が残りを回す。**
+///
+/// # 安全性
+///
+/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+unsafe fn write_to_pipe(
+    pipe: u8,
+    buf: u64,
+    count: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    bkl: &mut Option<crate::bkl::BklGuard>,
+) -> u64 {
+    if count == 0 {
+        return 0;
+    }
+    let want = count.min(crate::pipe::PIPE_RING as u64);
+    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, buf, want) }) else {
+        return (-EFAULT) as u64;
+    };
+    let mut kbuf = [0u8; crate::pipe::PIPE_RING];
+    // SAFETY: `slice` は検証済みで、`want` はその長さである。
+    let read = unsafe { copy_from_user(&mut kbuf[..want as usize], &slice) };
+    if read == 0 {
+        return (-EFAULT) as u64;
+    }
+    loop {
+        match crate::pipe::write_from(pipe, &kbuf[..read]) {
+            crate::pipe::WriteOutcome::Bytes(put) => return put as u64,
+            crate::pipe::WriteOutcome::NoReader => return (-EPIPE) as u64,
+            crate::pipe::WriteOutcome::Full => {
+                crate::pipe::note_writer_wait();
+                crate::task::set_current_waiting(crate::task::Wait::PipeWritable { pipe });
+                drop(bkl.take());
+                crate::task::yield_now();
+                *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
+            }
+        }
+    }
+}
+
+/// [`SYS_SPAWN_DETACHED`] の本体。**引数の写しは [`spawn_from_ring3`] と同じ形である。**
+///
+/// # 安全性
+///
+/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+unsafe fn spawn_detached_from_ring3(
+    path: u64,
+    argv: u64,
+    envp: u64,
+    flags: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    bkl: &mut Option<crate::bkl::BklGuard>,
+) -> u64 {
+    if flags & !DETACHED_STDOUT_TO_PIPE != 0 {
+        return (-EINVAL) as u64;
+    }
+    let mut buf = [0u8; PATH_MAX];
+    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    let len = match unsafe { copy_user_path(&mut buf, path, pml4_phys, direct_map) } {
+        Ok(len) => len,
+        Err(errno) => return (-errno) as u64,
+    };
+    let mut argv_bytes = [0u8; MAX_ARGV_BYTES];
+    // SAFETY: 同上。
+    let (argv_count, argv_used) = match unsafe {
+        copy_user_string_array(
+            &mut argv_bytes,
+            argv,
+            crate::userland::MAX_ARGV,
+            pml4_phys,
+            direct_map,
+        )
+    } {
+        Ok(pair) => pair,
+        Err(errno) => return (-errno) as u64,
+    };
+    let mut envp_bytes = [0u8; MAX_ENVP_BYTES];
+    // SAFETY: 同上。
+    let (envp_count, envp_used) = match unsafe {
+        copy_user_string_array(
+            &mut envp_bytes,
+            envp,
+            crate::userland::MAX_ENVP,
+            pml4_phys,
+            direct_map,
+        )
+    } {
+        Ok(pair) => pair,
+        Err(errno) => return (-errno) as u64,
+    };
+
+    // **起こす前に探す。** **無ければ同期で `-ENOENT`**（シェルの `PATH` の輪が次へ進む）。
+    if let Err(error) = crate::userland::probe_program(&buf[..len]) {
+        return (-errno_for_spawn(error)) as u64;
+    }
+
+    let stdout_pipe = if flags & DETACHED_STDOUT_TO_PIPE != 0 {
+        match crate::pipe::create(true) {
+            Some(pipe) => Some(pipe),
+            None => return (-EBUSY) as u64,
+        }
+    } else {
+        None
+    };
+
+    let Some(handle) = crate::userland::start_detached(
+        &buf[..len],
+        &argv_bytes[..argv_used],
+        argv_count,
+        Some((&envp_bytes[..envp_used], envp_count)),
+        stdout_pipe,
+    ) else {
+        // **起こせなかった**（回収されていない子が居る・走っている最中）。**作ったパイプを
+        // 片づける**——**書き端と予約の両方を返す。**
+        if let Some(pipe) = stdout_pipe {
+            crate::pipe::drop_reservation(pipe);
+            crate::pipe::close_write_end(pipe);
+        }
+        return (-EAGAIN) as u64;
+    };
+    if let Some(pipe) = stdout_pipe {
+        crate::userland::set_pending_stdin(crate::ring3::current_slot(), pipe);
+    }
+    DETACHED_STARTS.fetch_add(1, Ordering::Relaxed);
+
+    // **子が Ring 3 へ入るか終わるまで戻らない**（[`SYS_SPAWN_DETACHED`] の doc）。
+    //
+    // 破壊 (`ADR-0063` の (b3), spawn-detached-returns-early): **入場を待たず、1 度だけ譲って
+    // 戻る。** **左が読み込みに入った直後にシェルへ戻し、左の読み込み（`load_user_program`。
+    // 同じ破壊が貸し出しを持ったまま 2 ティック回る）の最中に右を `spawn` させる**——
+    // **右が `AllocatorUnavailable` で起こせない。** **「機会を作る」形である**——**待たない
+    // だけでは、右の `spawn` は左が走り出す前（μs）に終わり、21 本の `|` で 1 度も重ならなかった。**
+    // **右の読み込みに回りを置く形は誤りだった**——**システムコールの中は BKL を解いても IF=0 の
+    // ままで、ティックを見られずに永久に回った**（実測。`docs/troubleshooting.md`）。
+    #[cfg(feature = "spawn-detached-returns-early")]
+    {
+        drop(bkl.take());
+        crate::task::yield_now();
+        *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
+    }
+    #[cfg(not(feature = "spawn-detached-returns-early"))]
+    {
+        let since = crate::idt::timer_ticks();
+        drop(bkl.take());
+        while !(crate::task::ring3_task_in_excursion() || crate::task::ring3_task_finished()) {
+            crate::task::yield_now();
+        }
+        *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
+        let waited = crate::idt::timer_ticks().saturating_sub(since);
+        DETACHED_ENTRY_WAIT_TICKS_MAX.fetch_max(waited, Ordering::Relaxed);
+    }
+    handle
+}
+
+/// [`SYS_SPAWN_WITH_PIPED_STDIN`] の本体。
+///
+/// **予約の消費は探した後である**——**`PATH` の輪が `-ENOENT` で次へ進む間、予約は残る。**
+///
+/// # 安全性
+///
+/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+unsafe fn spawn_with_piped_stdin_from_ring3(
+    path: u64,
+    argv: u64,
+    envp: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    bkl: &mut Option<crate::bkl::BklGuard>,
+) -> u64 {
+    let slot = crate::ring3::current_slot();
+    let Some(pipe) = crate::userland::peek_pending_stdin(slot) else {
+        return (-EINVAL) as u64;
+    };
+    let mut buf = [0u8; PATH_MAX];
+    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    let len = match unsafe { copy_user_path(&mut buf, path, pml4_phys, direct_map) } {
+        Ok(len) => len,
+        Err(errno) => return (-errno) as u64,
+    };
+    if let Err(error) = crate::userland::probe_program(&buf[..len]) {
+        return (-errno_for_spawn(error)) as u64;
+    }
+    let mut argv_bytes = [0u8; MAX_ARGV_BYTES];
+    // SAFETY: 同上。
+    let (argv_count, argv_used) = match unsafe {
+        copy_user_string_array(
+            &mut argv_bytes,
+            argv,
+            crate::userland::MAX_ARGV,
+            pml4_phys,
+            direct_map,
+        )
+    } {
+        Ok(pair) => pair,
+        Err(errno) => return (-errno) as u64,
+    };
+    let mut envp_bytes = [0u8; MAX_ENVP_BYTES];
+    // SAFETY: 同上。
+    let (envp_count, envp_used) = match unsafe {
+        copy_user_string_array(
+            &mut envp_bytes,
+            envp,
+            crate::userland::MAX_ENVP,
+            pml4_phys,
+            direct_map,
+        )
+    } {
+        Ok(pair) => pair,
+        Err(errno) => return (-errno) as u64,
+    };
+
+    // **ここで予約を消費する。** **探した後なので、`-ENOENT` の輪では消費されない。**
+    let _ = crate::userland::take_pending_stdin(slot);
+    if !crate::pipe::claim_reserved_reader(pipe) {
+        return (-EINVAL) as u64;
+    }
+    crate::userland::set_inherit_stdin(slot, pipe);
+
+    drop(bkl.take());
+    let result = crate::userland::spawn(
+        &buf[..len],
+        &argv_bytes[..argv_used],
+        argv_count,
+        Some((&envp_bytes[..envp_used], envp_count)),
+    );
+    *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
+
+    // **消費されなかったら（読み込みの前に失敗した）、読み端を返す**——**左が `-EPIPE` で戻れる。**
+    if let Some(unused) = crate::userland::take_inherit_stdin(slot) {
+        crate::pipe::close_read_end(unused);
+    }
+
+    match result {
+        Ok(crate::userland::SpawnOutcome::Exited(status)) => status & 0xFF,
+        Ok(crate::userland::SpawnOutcome::Folded(vector)) => SPAWN_FOLDED_FLAG | (vector << 9),
+        Ok(crate::userland::SpawnOutcome::Interrupted) => SPAWN_INTERRUPTED_FLAG,
+        Err(error) => (-errno_for_spawn(error)) as u64,
+    }
+}
+
+/// [`SYS_WAIT_CHILD`] の本体。
+fn wait_child_from_ring3(handle: u64, bkl: &mut Option<crate::bkl::BklGuard>) -> u64 {
+    // **使われなかった予約を消す**（[`SYS_WAIT_CHILD`] の doc）。
+    //
+    // 破壊 (`ADR-0063` の (b3), wait-child-keeps-reservation): 消さない。**右が見つからなかった
+    // 回の後、パイプが空かず、次の `|` が `-EBUSY` になる。**
+    #[cfg(not(feature = "wait-child-keeps-reservation"))]
+    if let Some(pipe) = crate::userland::take_pending_stdin(crate::ring3::current_slot()) {
+        crate::pipe::drop_reservation(pipe);
+    }
+    drop(bkl.take());
+    let status = crate::userland::wait_for_ring3_task(handle);
+    *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
+    match status {
+        // **起こせなかった子は `u64::MAX` で記録されている**（`run_detached_request`）。
+        // **`-errno` の範囲と紛れない値にする**——**`-EIO` へ写す。**
+        crate::userland::ChildStatus::Ended(u64::MAX) => (-EIO) as u64,
+        crate::userland::ChildStatus::Ended(bits) => bits,
+        crate::userland::ChildStatus::NoSuchChild => (-ECHILD) as u64,
     }
 }
 
@@ -1450,6 +1841,24 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     let ret = if number == SYS_SPAWN {
         // SAFETY: 同上。`bkl` はいま保持しているガードである。
         unsafe { spawn_from_ring3(args[0], args[1], args[2], pml4_phys, direct_map, &mut bkl) }
+    } else if number == SYS_SPAWN_DETACHED {
+        // **`spawn_from_ring3` と同じ理由で `dispatch` の外に置く**——**写しの枠（2.3 KiB）を
+        // `dispatch` の枠に乗せない。**
+        // SAFETY: 同上。
+        unsafe {
+            spawn_detached_from_ring3(
+                args[0], args[1], args[2], args[3], pml4_phys, direct_map, &mut bkl,
+            )
+        }
+    } else if number == SYS_SPAWN_WITH_PIPED_STDIN {
+        // SAFETY: 同上。
+        unsafe {
+            spawn_with_piped_stdin_from_ring3(
+                args[0], args[1], args[2], pml4_phys, direct_map, &mut bkl,
+            )
+        }
+    } else if number == SYS_WAIT_CHILD {
+        wait_child_from_ring3(args[0], &mut bkl)
     } else {
         // SAFETY: pml4_phys / direct_map は稼働中テーブルのもので、walk の契約を満たす。
         unsafe { dispatch(number, &args, pml4_phys, direct_map, &mut bkl) }
@@ -1646,6 +2055,18 @@ unsafe fn sys_read(
         drop(bkl.take());
         crate::console::flush_foreground();
         *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
+    }
+
+    // **パイプの読み端（`ADR-0063` の (b3)）。** **表の中身で分岐する**（端末と同じ形）。
+    let pipe_read = crate::vfs::with_current_files(|files| {
+        files
+            .get(fd as usize)
+            .ok()
+            .and_then(|file| file.pipe_read_end())
+    });
+    if let Some(pipe) = pipe_read {
+        // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+        return unsafe { read_from_pipe(pipe, buf, count, pml4_phys, direct_map, bkl) };
     }
 
     // **表を握る区間を短くする。** ここでは inode と位置の写しだけを取り、
@@ -3021,6 +3442,18 @@ unsafe fn sys_write(
     //
     // **エラーの出口かどうかも、ここで表から取る（ADR-0046）。**
     // **番号（2）で見ない**——**表の中身で分ける形をS11-10から続けている。**
+    // **パイプの書き端（`ADR-0063` の (b3)）。** **端末と通常ファイルの手前で分かれる。**
+    let pipe_write = crate::vfs::with_current_files(|files| {
+        files
+            .get(fd as usize)
+            .ok()
+            .and_then(|file| file.pipe_write_end())
+    });
+    if let Some(pipe) = pipe_write {
+        // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+        return unsafe { write_to_pipe(pipe, buf, count, pml4_phys, direct_map, bkl) };
+    }
+
     #[cfg(not(feature = "write-ignores-fd"))]
     let errors = {
         let kind = crate::vfs::with_current_files(|files| {
@@ -3072,6 +3505,11 @@ unsafe fn sys_write(
     // **システムコールの回数を数える（PERF-b）。** **刻む前に 1 回だけである**
     // ——**刻んだ後の回数は `foreground_writes` が別に持つ。**
     crate::console::note_terminal_write();
+    // **起こしっぱなしのスロットから端末へ書いた回数（`ADR-0063` の (b3) の計器）。**
+    // **`a | b` の左は端末へ書かないはずである**——**判定が「0」を見る。**
+    if crate::ring3::current_slot() == crate::task::detached_slot() {
+        TERMINAL_WRITES_FROM_DETACHED.fetch_add(1, Ordering::Relaxed);
+    }
 
     let mut port = common::serial::SerialPort::new(common::serial::SerialPort::COM1_BASE);
     port.init();

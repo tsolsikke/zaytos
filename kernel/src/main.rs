@@ -2115,6 +2115,25 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
                     "fold: depth one was not folded {} time(s) during this session",
                     kernel::idt::depth_one_not_folded()
                 ));
+                // **パイプの計器（`ADR-0063` の (b3)）。** **既定の起動では全部 0 である**
+                // ——**`|` を打つ者が居ない。** **台本の族（`pipe-test`）が読む。**
+                logger.info(format_args!(
+                    "pipe: created {}, readers waited {} time(s) and were woken by a write {} \
+                     time(s), writers waited {} time(s), writes without a reader {}, \
+                     reservations dropped {}; two tasks were waiting at once {} time(s); \
+                     detached starts {} waited at most {} tick(s) for the child to enter Ring 3; \
+                     the detached slot wrote to the terminal {} time(s)",
+                    kernel::pipe::created(),
+                    kernel::pipe::reader_waits(),
+                    kernel::pipe::readers_woken_by_write(),
+                    kernel::pipe::writer_waits(),
+                    kernel::pipe::epipe_seen(),
+                    kernel::pipe::reservations_dropped(),
+                    kernel::task::waiting_together(),
+                    kernel::syscall::detached_starts(),
+                    kernel::syscall::detached_entry_wait_ticks_max(),
+                    kernel::syscall::terminal_writes_from_detached()
+                ));
             }
             Err(error) => {
                 log_both(
@@ -2166,7 +2185,9 @@ fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Con
     let mut console = console;
     let ring3_task = kernel::task::ring3_task_index();
     let started = kernel::idt::timer_ticks();
-    let Some(handle) = kernel::userland::start_detached(b"/bin/tickera", b"tickera\0", 1) else {
+    let Some(handle) =
+        kernel::userland::start_detached(b"/bin/tickera", b"tickera\0", 1, None, None)
+    else {
         log_both(
             logger,
             console.as_deref_mut(),
@@ -2236,7 +2257,7 @@ fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Con
 
     // **回収したので、2 本目をもう一度起こせる（`ADR-0063` の (b2)）。**
     // **`|` は 2 回打たれるので、再起動できることを見る。**
-    let restarted = kernel::userland::start_detached(b"/bin/tickera", b"tickera\0", 1);
+    let restarted = kernel::userland::start_detached(b"/bin/tickera", b"tickera\0", 1, None, None);
     let second_status = match restarted {
         Some(second) => Some(kernel::userland::wait_for_ring3_task(second)),
         None => None,
@@ -7726,7 +7747,7 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
     ),
     (
         50,
-        "spawn(\"/bin/cat\", [\"cat\"]) did not return 2; cat did not refuse the missing argument",
+        "spawn(\"/bin/cat\", [\"cat\", \"/nope\"]) did not return 1; cat did not refuse the missing file",
     ),
     (
         54,
@@ -9961,6 +9982,51 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "wait-window-is-wide",
         cfg!(feature = "wait-window-is-wide"),
         "待ちを据える前の窓を広げる",
+    ),
+    (
+        "pipe-test",
+        cfg!(feature = "pipe-test"),
+        "シェルの | を台本で回す",
+    ),
+    (
+        "shell-script-test",
+        cfg!(feature = "shell-script-test"),
+        "--shell-test の台本を台本の族で回す",
+    ),
+    (
+        "pipe-write-does-not-wake-reader",
+        cfg!(feature = "pipe-write-does-not-wake-reader"),
+        "パイプへ書いても読み手を起こさない",
+    ),
+    (
+        "pipe-close-keeps-writer-count",
+        cfg!(feature = "pipe-close-keeps-writer-count"),
+        "書き端を閉じても数を減らさない",
+    ),
+    (
+        "pipe-read-empty-returns-zero",
+        cfg!(feature = "pipe-read-empty-returns-zero"),
+        "空のパイプを EOF と誤る",
+    ),
+    (
+        "pipe-write-ignores-full",
+        cfg!(feature = "pipe-write-ignores-full"),
+        "満杯のパイプへ上書きする",
+    ),
+    (
+        "pipe-reader-not-reserved",
+        cfg!(feature = "pipe-reader-not-reserved"),
+        "読み手を予約しない",
+    ),
+    (
+        "spawn-detached-returns-early",
+        cfg!(feature = "spawn-detached-returns-early"),
+        "起こしっぱなしの口が入場を待たずに譲り、左の読み込みが貸し出しを持つ間に回る",
+    ),
+    (
+        "wait-child-keeps-reservation",
+        cfg!(feature = "wait-child-keeps-reservation"),
+        "待つ口が使われなかった予約を消さない",
     ),
     (
         "fp-spawn-no-save",

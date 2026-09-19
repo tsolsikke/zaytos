@@ -323,7 +323,9 @@ pub fn read_bytes(dst: &mut [u8]) -> usize {
         feature = "history-test",
         feature = "complete-test",
         feature = "fp-test",
-        feature = "ttf-test"
+        feature = "ttf-test",
+        feature = "pipe-test",
+        feature = "shell-script-test"
     ))]
     {
         let taken = script::next_bytes(dst);
@@ -599,7 +601,9 @@ pub fn arm_input_script() {
         feature = "history-test",
         feature = "complete-test",
         feature = "fp-test",
-        feature = "ttf-test"
+        feature = "ttf-test",
+        feature = "pipe-test",
+        feature = "shell-script-test"
     ))]
     {
         script::arm();
@@ -636,7 +640,9 @@ pub fn arm_input_script() {
     feature = "history-test",
     feature = "complete-test",
     feature = "fp-test",
-    feature = "ttf-test"
+    feature = "ttf-test",
+    feature = "pipe-test",
+    feature = "shell-script-test"
 ))]
 pub(crate) mod script {
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -1042,6 +1048,34 @@ pub(crate) mod script {
         exit\n\
         \x1b[A\x1b[A\n\x0c";
 
+    /// 台本（`ADR-0063` の (b3)）。**シェルの `|` を見る。** **判定は `xtask` の `pipe-test` が読む。**
+    ///
+    /// **7 本の `|` で、判定と対になっている**（`docs/verification-coverage.md`）。
+    ///
+    /// - **`sleep 0.2 | cat`** は読み手が先に待つ形——**`sleep` は Timer、`cat` は PipeReadable で、
+    ///   2 本が同時に待つ**（持ち越しの行「作っても出ない」が偽になる観測）
+    /// - **`cat /data/big | cat`** は書き手が待つ形（2181 バイト > 輪 256）
+    /// - **`cat /data/big | hello`** は読み手が読まずに終わる形（`-EPIPE`）
+    /// - **`echo x | nonexist`** は右が居ない形（予約が消え、左が回収される）
+    /// - **`echo again | cat`** は 2 本目が起こし直せる形
+    ///
+    /// **`exit` を最後に打つ**——**計器の行（`pipe:`）はセッションが終わってから出る。**
+    /// **起こし直したシェルが読んだところで `\x0c` が `script-done:` を出す。**
+    /// 台本（`ADR-0063` の (b3) の (b)）。**`--shell-test` と同じ行を、キーごとに 1 回の休止を
+    /// 挟んで写したものである**（`common::shell_script`）。**打鍵を見ない破壊をここで落とす。**
+    #[cfg(feature = "shell-script-test")]
+    const SCRIPT: &[u8] = common::shell_script::SCRIPT;
+
+    #[cfg(feature = "pipe-test")]
+    const SCRIPT: &[u8] = b"/bin/echo hello | /bin/cat\n\
+        echo one two | cat\n\
+        /bin/sleep 0.2 | /bin/cat\n\
+        /bin/cat /data/big | /bin/cat\n\
+        /bin/cat /data/big | /bin/hello\n\
+        /bin/echo x | /bin/nonexist\n\
+        /bin/echo again | /bin/cat\n\
+        exit\n\x0c";
+
     /// 台本（TAB-1）。**Tab の補完を見る。**
     ///
     /// # 走らせずに見る
@@ -1186,6 +1220,13 @@ pub(crate) mod script {
     /// 分かる値を選んである。**
     const SCRIPT_PAUSE: u8 = 0x04;
 
+    /// 「次のバイトは字である」の逃げ（`ADR-0063` の (b3) の (b)）。
+    ///
+    /// **観測記号は制御のバイトで、Ctrl+英字と衝突する**（`ctrl-l` の 0x0c が「終わり」と読まれた。
+    /// 実測）。**逃げの次の 1 バイトは、記号でも休止でもなく、そのまま Ring 3 へ届ける。**
+    /// **どのキーも 0xFF は作らない**（`common::shell_script::LITERAL` と同じ値）。
+    const SCRIPT_LITERAL: u8 = 0xff;
+
     /// 台本の中の観測点か（ES-d）。
     ///
     /// **観測点は入力ではない。** [`next_bytes`] が食べて、Ring 3 へは
@@ -1237,6 +1278,19 @@ pub(crate) mod script {
         if SCRIPT[at] == SCRIPT_PAUSE {
             AT.store(at + 1, Ordering::SeqCst);
             return 0;
+        }
+        // **逃げの次の 1 バイトを、そのまま届ける**（[`SCRIPT_LITERAL`]）。
+        if SCRIPT[at] == SCRIPT_LITERAL {
+            let Some(literal) = SCRIPT.get(at + 1).copied() else {
+                AT.store(at + 1, Ordering::SeqCst);
+                return 0;
+            };
+            if dst.is_empty() {
+                return 0;
+            }
+            dst[0] = literal;
+            AT.store(at + 2, Ordering::SeqCst);
+            return 1;
         }
         // **次の観測点の手前までしか渡さない。** 1 度に多くを求められても、
         // **観測点を跨いで渡すと、見るはずだった時点を通り過ぎる。**

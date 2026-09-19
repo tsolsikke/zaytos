@@ -265,6 +265,11 @@ zi-test = []
 persist-check-test = []
 # 検証（f-1）: 持ち越しの1度目で zi が /etc/environment の TERM を書き換える台本。
 env-rewrite-test = []
+# シェルの `|` を台本で回す（ADR-0063 の (b3)）。判定は xtask の pipe-test が読む。
+pipe-test = []
+# --shell-test の台本をそのまま台本の族で回す（ADR-0063 の (b3) の (b)）。打鍵を見ない破壊を
+# ここへ移す。台本は common::shell_script が写す。
+shell-script-test = []
 # 検証（f-1b）: 持ち越しの1度目で zi が /etc/environment へ KEYMAP=us を足す台本。
 keymap-rewrite-test = []
 # 破壊（f-1）: 環境の源を読まず、常に既定へ落ちる。ADR-0052 の Decision 1 を
@@ -525,6 +530,21 @@ finish-does-not-wake = ["concurrent-test"]
 reap-does-not-reset = ["concurrent-test"]
 # 待ちを据える前の窓を広げる（ADR-0063 の (b2)）。取りこぼしが起きて、親が永久に待つ。
 wait-window-is-wide = ["concurrent-test"]
+# パイプへ書いても読み手を起こさない（ADR-0063 の (b3)）。読み手が永久に待つ。
+pipe-write-does-not-wake-reader = ["pipe-test"]
+# 書き端を閉じても数を減らさない（ADR-0063 の (b3)）。EOF が来ない。
+pipe-close-keeps-writer-count = ["pipe-test"]
+# 空のパイプを EOF と誤る（ADR-0063 の (b3)）。読み手が途中で終わる。
+pipe-read-empty-returns-zero = ["pipe-test"]
+# 満杯のパイプへ上書きする（ADR-0063 の (b3)）。中身が食い違う。
+pipe-write-ignores-full = ["pipe-test"]
+# 読み手を予約しない（ADR-0063 の (b3)）。右が起きる前の書きが -EPIPE になる。
+pipe-reader-not-reserved = ["pipe-test"]
+# 起こしっぱなしの口が入場を待たずに 1 度譲って戻り、左の読み込みが貸し出しを持つ間に
+# 2 ティック回る（ADR-0063 の (b3)）。貸し出しが重なり、右が AllocatorUnavailable で起こせない。
+spawn-detached-returns-early = ["pipe-test"]
+# 待つ口が使われなかった予約を消さない（ADR-0063 の (b3)）。次の `|` が通らない。
+wait-child-keeps-reservation = ["pipe-test"]
 # `spawn` で、子へ入る前に親の FP の状態を保存しない（`ADR-0058`）。
 # 親が `spawn` を跨いで値を保てなくなる。
 fp-spawn-no-save = []

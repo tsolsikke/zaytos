@@ -37,7 +37,9 @@ pub mod dirty;
     feature = "history-test",
     feature = "complete-test",
     feature = "fp-test",
-    feature = "ttf-test"
+    feature = "ttf-test",
+    feature = "pipe-test",
+    feature = "shell-script-test"
 ))]
 pub(crate) mod probe;
 pub mod screen;

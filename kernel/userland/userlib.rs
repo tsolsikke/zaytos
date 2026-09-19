@@ -597,6 +597,87 @@ pub fn getdents64(fd: u64, buf: &mut [u8]) -> i64 {
 /// `spawn` の番号（`ZAYTOS_PRIVATE_BASE + 4`。ZaytOS 独自）。
 pub const SYS_SPAWN: u64 = 0x1004;
 
+/// 起こしっぱなしで起こす口の番号（`ZAYTOS_PRIVATE_BASE + 5`。`ADR-0063` の (b3)）。
+pub const SYS_SPAWN_DETACHED: u64 = 0x1005;
+
+/// 予約したパイプの読み端を fd 0 にして入れ子で起こす口の番号（`+ 6`。`ADR-0063` の (b3)）。
+pub const SYS_SPAWN_WITH_PIPED_STDIN: u64 = 0x1006;
+
+/// 起こしっぱなしの子を待って回収する口の番号（`+ 7`。`ADR-0063` の (b3)）。
+pub const SYS_WAIT_CHILD: u64 = 0x1007;
+
+/// [`SYS_SPAWN_DETACHED`] の `flags`——子の fd 1 をパイプの書き端にする。
+/// **カーネル側の `DETACHED_STDOUT_TO_PIPE` と同じ値である**（番号を写しているのと同じ形）。
+pub const DETACHED_STDOUT_TO_PIPE: u64 = 1;
+
+/// 引数 4 つのシステムコール。**4 つ目は `r10` である**（Linux x86-64 の規約。`ADR-0020`）。
+///
+/// # Safety
+///
+/// 番号と引数がカーネルの契約に合っていること。
+pub unsafe fn syscall4(number: u64, a: u64, b: u64, c: u64, d: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: 呼び出し元契約による。
+    unsafe {
+        core::arch::asm!(
+            "int 0x80",
+            inlateout("rax") number => ret,
+            in("rdi") a,
+            in("rsi") b,
+            in("rdx") c,
+            in("r10") d,
+        );
+    }
+    ret
+}
+
+/// `spawn_detached(path, argv, envp, flags)`。**子が Ring 3 へ入るか終わるまで戻る。**
+/// **戻り値は手形（0 以上）か `-errno`。**
+///
+/// # Safety
+///
+/// [`spawn`] と同じ。
+pub unsafe fn spawn_detached(
+    path: &[u8],
+    argv: &[*const u8],
+    envp: &[*const u8],
+    flags: u64,
+) -> i64 {
+    // SAFETY: 呼び出し元契約による。
+    unsafe {
+        syscall4(
+            SYS_SPAWN_DETACHED,
+            path.as_ptr() as u64,
+            argv.as_ptr() as u64,
+            envp.as_ptr() as u64,
+            flags,
+        )
+    }
+}
+
+/// `spawn_with_piped_stdin(path, argv, envp)`。**[`spawn`] と同じ形で戻る。**
+///
+/// # Safety
+///
+/// [`spawn`] と同じ。
+pub unsafe fn spawn_with_piped_stdin(path: &[u8], argv: &[*const u8], envp: &[*const u8]) -> i64 {
+    // SAFETY: 呼び出し元契約による。
+    unsafe {
+        syscall3(
+            SYS_SPAWN_WITH_PIPED_STDIN,
+            path.as_ptr() as u64,
+            argv.as_ptr() as u64,
+            envp.as_ptr() as u64,
+        )
+    }
+}
+
+/// `wait_child(handle)`。**終わり方のビット（[`spawn`] と同じ）か `-errno`（`-ECHILD` など）。**
+pub fn wait_child(handle: u64) -> i64 {
+    // SAFETY: 引数は手形 1 つで、カーネルは範囲を見て `-ECHILD` を返す。
+    unsafe { syscall3(SYS_WAIT_CHILD, handle, 0, 0) }
+}
+
 /// `spawn(path, argv)`。**子が終わるまで戻らない。**
 ///
 /// 戻り値は子の終了状態（`0..=255`）か `-errno` である

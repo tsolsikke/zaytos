@@ -1033,6 +1033,20 @@ pub fn load_user_program(
         return (Err(UserLoadError::AllocatorUnavailable), 0, 0, 0);
     };
 
+    // 破壊 (`ADR-0063` の (b3), spawn-detached-returns-early): **起こしっぱなしのスロット（左）の
+    // 読み込みが、貸し出しを持ったまま 2 ティック回る。** **起こす口が入場を待たずに譲る形と
+    // 組で、貸し出しが重なる機会を作る**——**このタスクはカーネルのタスクで IF=1 なので、
+    // ティックでシェルへ切り替わり、シェルが右を `spawn` して `AllocatorUnavailable` に当たる。**
+    // **右（スロット 0。システムコールの中）に置くと IF=0 で永久に回る**（実測）。
+    // **`wait-window-is-wide` と同じ「機会を作る」形である。**
+    #[cfg(feature = "spawn-detached-returns-early")]
+    if crate::ring3::current_slot() == crate::task::detached_slot() {
+        let opened = crate::idt::monotonic_ticks();
+        while crate::idt::monotonic_ticks().saturating_sub(opened) < 2 {
+            core::hint::spin_loop();
+        }
+    }
+
     // SAFETY: production は稼働中の PML4、direct_map は登録済みの窓。
     let space = match unsafe {
         AddressSpace::new(allocator, direct_map, production, USER_PROGRAM_PML4_INDEX)
@@ -1057,7 +1071,19 @@ pub fn load_user_program(
         stack_scratch: 0,
         heap: Heap::EMPTY,
         name,
-        files: crate::vfs::FileTable::new(),
+        files: {
+            // **次の `spawn` へ渡す端を据える（`ADR-0063` の (b3)）。** **`a | b` の右は
+            // fd 0 が読み端、左は fd 1 が書き端になる。** **端末の欄を差し替える。**
+            let mut files = crate::vfs::FileTable::new();
+            let slot = crate::ring3::current_slot();
+            if let Some(pipe) = take_inherit_stdin(slot) {
+                files.replace(crate::vfs::STDIN_FD, crate::vfs::File::PipeRead { pipe });
+            }
+            if let Some(pipe) = take_inherit_stdout(slot) {
+                files.replace(crate::vfs::STDOUT_FD, crate::vfs::File::PipeWrite { pipe });
+            }
+            files
+        },
     };
 
     // **写像まではアロケータが要る。遠征では要らない。**
@@ -1958,6 +1984,89 @@ unsafe fn run_loaded_program(
 /// 子は [`crate::syscall::reset_counters`] を通り、自分の `write` と `exit` を
 /// 記録する。**親の記録はここで控えて戻す**（`crate::syscall::Records` と
 /// [`crate::ring3::FoldRecord`]）。
+/// 起こせる像かを、起こす前に確かめる（`ADR-0063` の (b3)）。
+///
+/// **[`spawn`] の探索と同じ 4 つを見る**——**在る・ディレクトリでない・通常ファイル・大きさ。**
+/// **起こしっぱなしの口が「見つからなければ同期で `-ENOENT`」を返すために切り出した**
+/// ——**子の中で探すと、`-ENOENT` が親へ届くのは子が終わった後になり、シェルの `PATH` の輪が
+/// 回せない。** **子はもう一度探す**（[`spawn`] の中）。**2 度探す費用は、像の索引を読むだけである。**
+pub fn probe_program(path: &[u8]) -> Result<(), SpawnError> {
+    let fs = crate::vfs::root_filesystem().map_err(SpawnError::Lookup)?;
+    let inode = fs.lookup(path).map_err(SpawnError::Lookup)?;
+    if inode.is_directory() {
+        return Err(SpawnError::IsDirectory);
+    }
+    if !inode.is_regular_file() {
+        return Err(SpawnError::NotRegularFile);
+    }
+    if inode.size > MAX_EXECUTABLE_SIZE as u64 {
+        return Err(SpawnError::TooLarge(inode.size));
+    }
+    Ok(())
+}
+
+/// 次の `spawn` へ渡す fd（`ADR-0063` の (b3)）。**スロットごとに 1 つ。**
+///
+/// **`spawn` の引数を変えない**（W1-c の決定）。**代わりに、起こす直前に側道へ置き、
+/// 子の表を作るところ（[`load_user_program`]）が取る**——**`DETACHED_REQUEST` と同じ形である。**
+struct InheritedEnds {
+    /// 子の fd 0 に据えるパイプの読み端。
+    stdin: Option<u8>,
+    /// 子の fd 1 に据えるパイプの書き端。
+    stdout: Option<u8>,
+}
+
+static INHERITED_ENDS: [common::critical::Locked<InheritedEnds>; crate::ring3::RING3_SLOTS] = [
+    common::critical::Locked::new(InheritedEnds {
+        stdin: None,
+        stdout: None,
+    }),
+    common::critical::Locked::new(InheritedEnds {
+        stdin: None,
+        stdout: None,
+    }),
+];
+
+/// 予約した読み端のうち、まだ次の `spawn` に渡していないもの（`ADR-0063` の (b3)）。
+/// **スロットごとに 1 つ**——**シェルが `a | b` の左を起こしてから右を起こすまでの間、ここに在る。**
+static PENDING_STDIN: [common::critical::Locked<Option<u8>>; crate::ring3::RING3_SLOTS] = [
+    common::critical::Locked::new(None),
+    common::critical::Locked::new(None),
+];
+
+/// 次の入れ子の `spawn` の fd 0 に据える読み端を置く。
+pub fn set_inherit_stdin(slot: usize, pipe: u8) {
+    INHERITED_ENDS[slot].lock().stdin = Some(pipe);
+}
+
+/// 置いてあった読み端を取る（無ければ `None`）。
+pub fn take_inherit_stdin(slot: usize) -> Option<u8> {
+    INHERITED_ENDS[slot].lock().stdin.take()
+}
+
+fn set_inherit_stdout(slot: usize, pipe: u8) {
+    INHERITED_ENDS[slot].lock().stdout = Some(pipe);
+}
+
+fn take_inherit_stdout(slot: usize) -> Option<u8> {
+    INHERITED_ENDS[slot].lock().stdout.take()
+}
+
+/// 予約した読み端を「次の `spawn` へ」として控える。
+pub fn set_pending_stdin(slot: usize, pipe: u8) {
+    *PENDING_STDIN[slot].lock() = Some(pipe);
+}
+
+/// 控えてある予約を見る（取らない）。
+pub fn peek_pending_stdin(slot: usize) -> Option<u8> {
+    *PENDING_STDIN[slot].lock()
+}
+
+/// 控えてある予約を取る。
+pub fn take_pending_stdin(slot: usize) -> Option<u8> {
+    PENDING_STDIN[slot].lock().take()
+}
+
 pub fn spawn(
     path: &[u8],
     argv_bytes: &[u8],
@@ -2359,7 +2468,42 @@ pub fn spawn(
 }
 
 /// 起こしっぱなしで走らせる 1 本の依頼（W1-c-4）。**パスと `argv` と要素数である。**
-type DetachedRequest = (&'static [u8], &'static [u8], usize);
+/// 起こしっぱなしの依頼（`ADR-0063` の (b3) で置き場つきに作り直した）。
+///
+/// **W1-c-4 では `&'static [u8]` の 3 つ組だった**（依頼するのが `init` で、像の中の文字列を
+/// 渡せた）。**Ring 3 から来る `path` / `argv` / `envp` はシステムコールのスタックの写しなので、
+/// 静的な置き場が要る。** **大きさは `spawn_from_ring3` の写しと同じである**（256 + 1024 + 1024）。
+///
+/// **`Locked` の中に置くので `.data` へ行く**（(b2) の実測と同じ機序。
+/// `docs/coding-standards.md` の「コードが増える段では」の 3）。
+struct DetachedRequest {
+    path: [u8; crate::syscall::PATH_MAX],
+    path_len: usize,
+    argv: [u8; crate::syscall::MAX_ARGV_BYTES],
+    argv_used: usize,
+    argv_count: usize,
+    envp: [u8; crate::syscall::MAX_ENVP_BYTES],
+    envp_used: usize,
+    envp_count: usize,
+    has_envp: bool,
+    /// 子の fd 1 に据えるパイプの書き端。
+    stdout_pipe: Option<u8>,
+}
+
+impl DetachedRequest {
+    const EMPTY: Self = Self {
+        path: [0; crate::syscall::PATH_MAX],
+        path_len: 0,
+        argv: [0; crate::syscall::MAX_ARGV_BYTES],
+        argv_used: 0,
+        argv_count: 0,
+        envp: [0; crate::syscall::MAX_ENVP_BYTES],
+        envp_used: 0,
+        envp_count: 0,
+        has_envp: false,
+        stdout_pipe: None,
+    };
+}
 
 /// 足した 1 本のタスクへ渡す依頼（W1-c-4）。**[`start_detached`] が置き、そのタスクが取る。**
 static DETACHED_REQUEST: common::critical::Locked<Option<DetachedRequest>> =
@@ -2383,11 +2527,29 @@ static DETACHED_REQUEST: common::critical::Locked<Option<DetachedRequest>> =
 /// **シェルの `|` が 2 本を同時に走らせるので、足した 1 本のスタックとガードページと一緒に
 /// 既定の起動へ出した。** **既定の起動で呼ぶ者は、まだ居ない**——**(b)(c) でシェルが呼ぶ。**
 pub fn start_detached(
-    path: &'static [u8],
-    argv_bytes: &'static [u8],
+    path: &[u8],
+    argv_bytes: &[u8],
     argv_count: usize,
+    envp: Option<(&[u8], usize)>,
+    stdout_pipe: Option<u8>,
 ) -> Option<u64> {
-    *DETACHED_REQUEST.lock() = Some((path, argv_bytes, argv_count));
+    let mut request = DetachedRequest::EMPTY;
+    let path_len = path.len().min(request.path.len());
+    request.path[..path_len].copy_from_slice(&path[..path_len]);
+    request.path_len = path_len;
+    let argv_used = argv_bytes.len().min(request.argv.len());
+    request.argv[..argv_used].copy_from_slice(&argv_bytes[..argv_used]);
+    request.argv_used = argv_used;
+    request.argv_count = argv_count;
+    if let Some((envp_bytes, envp_count)) = envp {
+        let envp_used = envp_bytes.len().min(request.envp.len());
+        request.envp[..envp_used].copy_from_slice(&envp_bytes[..envp_used]);
+        request.envp_used = envp_used;
+        request.envp_count = envp_count;
+        request.has_envp = true;
+    }
+    request.stdout_pipe = stdout_pipe;
+    *DETACHED_REQUEST.lock() = Some(request);
     let handle = crate::task::start_ring3_task();
     if handle.is_none() {
         // **起こせなかったら依頼を片づける**——**次に起こす者が古い依頼を走らせないため。**
@@ -2476,22 +2638,49 @@ pub fn wait_for_ring3_task(handle: u64) -> ChildStatus {
 
 /// 足した 1 本のタスクが、渡された依頼を走らせる（W1-c-4）。**そのタスクの本体だけが呼ぶ。**
 pub fn run_detached_request() {
-    let request = DETACHED_REQUEST.lock().take();
+    // **依頼は静的の置き場から借りる。値で取らない（`ADR-0063` の (b3)）。** **値で取ると
+    // 約 2.4 KiB がこのタスクのカーネルスタックに 2 度乗り**（`take()` と `let Some(..)` で、
+    // dev プロファイルは畳まない）**、高水位が半分の見張りを越えて止まった**（実測。
+    // 33,864 / 65,536 バイト）。
+    let request: *const DetachedRequest = match &*DETACHED_REQUEST.lock() {
+        Some(request) => request as *const DetachedRequest,
+        None => core::ptr::null(),
+    };
     let mut port = SerialPort::new(SerialPort::COM1_BASE);
     port.init();
     let mut logger = Logger::new(port, LogLevel::Trace);
-    let Some((path, argv_bytes, argv_count)) = request else {
+    if request.is_null() {
         logger.error(format_args!(
             "detached: the ring3 task started without a request; halting"
         ));
         common::cpu::halt_forever();
-    };
+    }
+    // SAFETY: 置き場は `static` なので番地は生き続ける。**書く者は `start_detached` だけで、
+    // このタスクが走っている間は `start_ring3_task` が起こしを断る**ので、読んでいる間に
+    // 書き換えられることは無い。**錠は上で外してある**（持ったまま `spawn` へ入ると、
+    // `Locked` が割り込みを止めたままになる）。
+    let request: &DetachedRequest = unsafe { &*request };
+    let path = &request.path[..request.path_len];
+    let argv_bytes = &request.argv[..request.argv_used];
+    let argv_count = request.argv_count;
+    let envp = request
+        .has_envp
+        .then_some((&request.envp[..request.envp_used], request.envp_count));
     let name = core::str::from_utf8(path).unwrap_or("<not utf-8>");
     let slot = crate::ring3::current_slot();
     logger.info(format_args!(
         "detached: starting {name} on ring3 slot {slot}"
     ));
-    let outcome = spawn(path, argv_bytes, argv_count, None);
+    // **子の fd 1 に据える書き端を側道へ置く（`ADR-0063` の (b3)）。** **`spawn` の中で子の表を
+    // 作るときに取られる。**
+    if let Some(pipe) = request.stdout_pipe {
+        set_inherit_stdout(slot, pipe);
+    }
+    let outcome = spawn(path, argv_bytes, argv_count, envp);
+    // **取られなかったら（読み込みの前に失敗した）、書き端を返す**——**読み手が EOF を見に行ける。**
+    if let Some(unused) = take_inherit_stdout(slot) {
+        crate::pipe::close_write_end(unused);
+    }
     // **終わり方を手形と一緒に置く（`ADR-0063` の (b2)）。** **待つ側がこれを読む。**
     let bits = match &outcome {
         Ok(SpawnOutcome::Exited(status)) => *status,

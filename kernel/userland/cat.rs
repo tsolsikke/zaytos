@@ -5,17 +5,13 @@
 //! `ls.rs` と同じで、cargo のパッケージに属さない。**Rust で書いてある**
 //! （`userlib.rs` の doc）。
 //!
-//! # `argv[1]` が無いときは読まない
+//! # `argv[1]` が無いときは標準入力を読む（`ADR-0063` の (b3)）
 //!
-//! **Linux は標準入力を読む。ここにはまだ標準入力が無い**——`write` は fd 1 と 2 を
-//! 受けるが、**fd 0 は配送路が無いので拒まれる**（`kernel/src/syscall.rs` の
-//! `sys_write`）。
+//! **Linux と同じ形である。** **S11-9 では「標準入力が来たら、そのとき Linux の形へ
+//! 寄せる」と書いて、使い方を出して終了状態 2 で終わっていた。** **パイプが来たので寄せた**
+//! ——**`a | cat` の右は fd 0 から読む。**
 //!
-//! **黙って何もしない形にはしない。** 使い方を標準エラーへ出して、終了状態 2 で
-//! 終わる。**「引数を忘れた」と「空のファイルだった」が区別できる形にする。**
-//!
-//! **標準入力が来たら、そのとき Linux の形へ寄せる**
-//! （`docs/roadmap.md` の S11 の入力の配送）。
+//! **端末の fd 0 を読む形にもなる**（`cat` と打つと打鍵を待つ）。**それも Linux と同じである。**
 //!
 //! # 1 つしか受けない
 //!
@@ -26,9 +22,11 @@
 //!
 //! - `0` 出し終わった
 //! - `1` 開けなかった
-//! - `2` 引数が無かった
 //! - `3` 読めなかった
 //! - `4` 出力が失敗した
+//!
+//! **`2`（引数が無かった）は (b3) で消えた**——**引数が無いのは使い方ではなく、標準入力を
+//! 読む指示である。**
 
 #![no_std]
 #![no_main]
@@ -46,8 +44,8 @@ const PATH_MAX: usize = 256;
 /// 小さいほうを返すので、**繰り返せば端まで届く。**
 const CHUNK: usize = 256;
 
-/// 引数が無いときの使い方。
-const USAGE: &[u8] = b"cat: usage: cat PATH\n";
+/// 標準入力の fd。**引数が無いときはこれを読む。**
+const STDIN: u64 = 0;
 /// 開けなかったときの断り書き。
 const OPEN_FAILED: &[u8] = b"cat: cannot open\n";
 /// 読めなかったときの断り書き。
@@ -61,26 +59,27 @@ const READ_FAILED: &[u8] = b"cat: cannot read\n";
 #[no_mangle]
 pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     // SAFETY: 呼び出し元契約により `stack` は初期スタックの先頭を指す。
-    let Some(pointer) = (unsafe { userlib::argument(stack, 1) }) else {
-        write_all(STDERR, USAGE);
-        exit(2);
+    let (fd, opened) = match unsafe { userlib::argument(stack, 1) } {
+        Some(pointer) => {
+            let mut path = [0u8; PATH_MAX];
+            // SAFETY: `argv` の要素はカーネルが NUL 終端で積んだ文字列である。
+            let length = unsafe { length_of(pointer, PATH_MAX - 1) };
+            for index in 0..length {
+                // SAFETY: 上で数えた長さの範囲である。
+                path[index] = unsafe { *pointer.add(index) };
+            }
+            path[length] = 0;
+
+            let fd = open_read_only(&path[..length + 1]);
+            if fd < 0 {
+                write_all(STDERR, OPEN_FAILED);
+                exit(1);
+            }
+            (fd as u64, true)
+        }
+        // **引数が無ければ標準入力を読む**（モジュールの doc）。**開いていないので閉じない。**
+        None => (STDIN, false),
     };
-
-    let mut path = [0u8; PATH_MAX];
-    // SAFETY: `argv` の要素はカーネルが NUL 終端で積んだ文字列である。
-    let length = unsafe { length_of(pointer, PATH_MAX - 1) };
-    for index in 0..length {
-        // SAFETY: 上で数えた長さの範囲である。
-        path[index] = unsafe { *pointer.add(index) };
-    }
-    path[length] = 0;
-
-    let fd = open_read_only(&path[..length + 1]);
-    if fd < 0 {
-        write_all(STDERR, OPEN_FAILED);
-        exit(1);
-    }
-    let fd = fd as u64;
 
     let mut chunk = [0u8; CHUNK];
     let mut status = 0u64;
@@ -99,7 +98,9 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             break;
         }
     }
-    close(fd);
+    if opened {
+        close(fd);
+    }
 
     if status == 3 {
         write_all(STDERR, READ_FAILED);

@@ -23,6 +23,7 @@ pub mod percpu;
 pub mod port;
 pub mod screen;
 pub mod serial;
+pub mod shell_script;
 pub mod text;
 pub mod time;
 pub mod window;

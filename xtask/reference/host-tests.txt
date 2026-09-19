@@ -193,6 +193,9 @@ common::screen::tests::the_real_screen_gives_160_by_50_cells
 common::screen::tests::the_repaint_predicate_skips_only_the_right_half
 common::screen::tests::wrapping_on_the_last_row_also_requests_a_scroll
 common::screen::tests::writing_past_a_full_line_wraps_to_the_next_row
+common::shell_script::tests::every_key_name_in_the_lines_has_a_mapping_and_the_script_fits
+common::shell_script::tests::the_jis_legends_are_the_ones_the_kernel_decodes
+common::shell_script::tests::the_keystroke_only_lines_are_left_out_and_every_key_pauses_once
 common::text::tests::a_blank_only_line_falls_back_to_the_line_end
 common::text::tests::a_broken_byte_becomes_one_replacement
 common::text::tests::a_broken_byte_moves_one_byte
@@ -537,6 +540,9 @@ kernel::paging::plan::tests::resolve_pages_marks_mmio_as_uncacheable
 kernel::paging::plan::tests::resolve_pages_never_produces_zero_size_gaps_between_core_and_fringe
 kernel::paging::plan::tests::resolve_pages_uses_2mib_core_and_4kib_fringe
 kernel::paging::plan::tests::unmapped_types_are_excluded
+kernel::pipe::tests::a_full_ring_takes_nothing_more
+kernel::pipe::tests::the_pipe_frees_itself_only_when_both_ends_and_the_reservation_are_gone
+kernel::pipe::tests::the_ring_wraps_without_losing_order
 kernel::quarantine::tests::a_frame_is_not_returned_while_its_generation_is_still_live
 kernel::quarantine::tests::a_frame_is_returned_once_every_core_has_passed_its_generation
 kernel::quarantine::tests::a_released_slot_can_be_reused_by_a_later_free

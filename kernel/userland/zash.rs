@@ -178,6 +178,19 @@ const SPAWN_INTERRUPTED: u64 = 0x200;
 /// 止められたときに出す 1 行。
 const INTERRUPTED_LINE: &[u8] = b"interrupted\n";
 
+/// パイプの語（`ADR-0063` の (b3)）。**語として打つ**（空白で囲む。`a|b` は 1 語である）。
+///
+/// **引用も語の分割の規則も無いので、`|` を語の途中で切る理由が無い**——**注釈を行頭だけで
+/// 見るのと同じ判断である**（[`run_line`]）。
+const PIPE_WORD: &[u8] = b"|";
+/// `|` が 2 つ以上あったときの断り。**パイプは 1 本である**（2 本目の Ring 3 が 1 本しか無い）。
+const PIPE_TOO_MANY: &[u8] = b"zash: only one pipe\n";
+/// `|` の片側が空だったときの断り。
+const PIPE_EMPTY_SIDE: &[u8] = b"zash: empty side of a pipe\n";
+/// 左が 0 以外で終わったときの返事（前半）。**右の状態は Linux と同じく「その行の状態」として
+/// 出し、左は別に言う**——**判定が読める形にしてある。**
+const LEFT_STATUS_HEAD: &[u8] = b"zash: the left side ended with ";
+
 /// Ctrl+C が届くバイト（ASCII の ETX）。
 const CTRL_C: u8 = 0x03;
 /// 0 以外で終わったときの返事（前半）。
@@ -614,7 +627,42 @@ unsafe fn adopt_environment(stack: *const u64) {
 /// # Safety
 ///
 /// `argv` が NULL 終端のポインタ配列であること。
-unsafe fn spawn_via_path(command: &[u8], argv: &[*const u8], envp: &[*const u8]) -> i64 {
+/// 起こし方（`ADR-0063` の (b3)）。**3 つの口を 1 つの探索で回すために分けた。**
+#[derive(Clone, Copy)]
+enum Launch {
+    /// `spawn`。**子が終わるまで戻らない。**
+    Sync,
+    /// `spawn_detached`。**fd 1 をパイプの書き端にし、手形で戻る。**
+    DetachedToPipe,
+    /// `spawn_with_piped_stdin`。**fd 0 を予約した読み端にして、子が終わるまで戻らない。**
+    FromPipe,
+}
+
+/// 1 つの口を叩く。**`Launch` で分ける。**
+///
+/// # Safety
+///
+/// `path` が NUL 終端であること。`argv` と `envp` が NULL 終端のポインタ配列で、
+/// 各要素が NUL 終端の文字列を指していること。
+unsafe fn launch(path: &[u8], argv: &[*const u8], envp: &[*const u8], how: Launch) -> i64 {
+    // SAFETY: 呼び出し元契約による。
+    unsafe {
+        match how {
+            Launch::Sync => userlib::spawn(path, argv, envp),
+            Launch::DetachedToPipe => {
+                userlib::spawn_detached(path, argv, envp, userlib::DETACHED_STDOUT_TO_PIPE)
+            }
+            Launch::FromPipe => userlib::spawn_with_piped_stdin(path, argv, envp),
+        }
+    }
+}
+
+unsafe fn spawn_via_path(
+    command: &[u8],
+    argv: &[*const u8],
+    envp: &[*const u8],
+    how: Launch,
+) -> i64 {
     // **引くたびに表から取る（f-2。`ADR-0053` の Decision 6）。**
     // **起動時に控えると、`export PATH=...` が効かない**——**変えたのに
     // 効かない形が残る。**
@@ -651,7 +699,7 @@ unsafe fn spawn_via_path(command: &[u8], argv: &[*const u8], envp: &[*const u8])
 
             // SAFETY: 組み立てた先は NUL 終端で、`argv` と `envp` は呼び出し元の
             // 契約による。
-            let status = unsafe { userlib::spawn(&resolved[..end], argv, envp) };
+            let status = unsafe { launch(&resolved[..end], argv, envp, how) };
             if status != userlib::MINUS_ENOENT {
                 return status;
             }
@@ -2356,16 +2404,92 @@ fn run_with_terminator(line: &[u8], starts: &[usize]) {
         return;
     }
 
+    // **`|` で割る（`ADR-0063` の (b3)）。** **1 つだけで、両側が空でないこと。**
+    if let Some(at) = starts
+        .iter()
+        .position(|start| word_at(line, *start) == PIPE_WORD)
+    {
+        if starts[at + 1..]
+            .iter()
+            .any(|start| word_at(line, *start) == PIPE_WORD)
+        {
+            write_all(STDERR, PIPE_TOO_MANY);
+            return;
+        }
+        if at == 0 || at + 1 >= starts.len() {
+            write_all(STDERR, PIPE_EMPTY_SIDE);
+            return;
+        }
+        run_pipeline(line, &starts[..at], &starts[at + 1..]);
+        return;
+    }
+
     let mut argv = [core::ptr::null::<u8>(); MAX_ARGS + 1];
     for (slot, start) in argv.iter_mut().zip(starts.iter()) {
         *slot = line[*start..].as_ptr();
     }
 
-    // **子へ積む環境を組み立てる（f-2。`ADR-0053` の Decision 1）。**
-    //
-    // **NUL 終端の文字列の配列で、末尾は NULL である**——`argv` と同じ形である。
-    // **表が NUL を持って置いているので、ここで写しを作らない。**
+    // **子へ積む環境を組み立てる（f-2。`ADR-0053` の Decision 1）。** **`|` と同じ組み立てなので
+    // 1 箇所にした**（[`build_envp`]）。
     let mut envp = [core::ptr::null::<u8>(); MAX_ENVP + 1];
+    let env_count = build_envp(&mut envp);
+
+    // **`/` を含まない語は `/bin/` の下で探す。** 前置した写しを作る。
+    //
+    // **`argv[0]` は書き換えない。** 上で組み立てた `argv` は `line` の中の語を
+    // 指したままで、**打った語がそのまま子へ届く**（Unix と同じ扱いである。
+    // `spawn-test` が `argv[0]` を突き合わせているので、前置してしまうと落ちる）。
+    //
+    // **前置き済みの静的を使う。** `/bin/` は毎回同じなので、**書くのは語の
+    // ぶんだけ**である（スタックに置いて毎回組み立てると、`.text` がそのぶん増える。
+    // **この程度の差が効くほど余裕が無い**——`kernel/userland/user.ld` の
+    // 受け皿の位置を見ること）。
+    // SAFETY: `command` は `line` の中の NUL 終端の語で、`argv` は NULL 終端の
+    // ポインタ配列である（各要素も `line` の中の NUL 終端の語を指す）。
+    let status = unsafe {
+        launch_command(
+            command,
+            &argv[..starts.len() + 1],
+            &envp[..env_count + 1],
+            Launch::Sync,
+        )
+    };
+    if status < 0 {
+        write_all(STDERR, NOT_FOUND_HEAD);
+        write_all(STDERR, command);
+        write_all(STDERR, NOT_FOUND_TAIL);
+        return;
+    }
+    report_status(status);
+}
+
+/// 語を起こす。**`/` を含む語はそのまま、含まない語は `PATH` の下で探す**（DIR-1。ADR-0043）。
+///
+/// # Safety
+///
+/// [`launch`] と同じ。
+unsafe fn launch_command(
+    command: &[u8],
+    argv: &[*const u8],
+    envp: &[*const u8],
+    how: Launch,
+) -> i64 {
+    // SAFETY: 呼び出し元契約による。
+    unsafe {
+        if command.contains(&b'/') {
+            // **`/` を含む語は、そのまま渡す。** 探索はしない（Unix と同じ）。
+            launch(command, argv, envp, how)
+        } else {
+            spawn_via_path(command, argv, envp, how)
+        }
+    }
+}
+
+/// 子へ積む環境を組み立てる（f-2。`ADR-0053` の Decision 1）。**積んだ本数を返す。**
+///
+/// **NUL 終端の文字列の配列で、末尾は NULL である**——`argv` と同じ形である。
+/// **表が NUL を持って置いているので、ここで写しを作らない。**
+fn build_envp(envp: &mut [*const u8; MAX_ENVP + 1]) -> usize {
     // SAFETY: このプログラムは Ring 3 で 1 本だけ走る。
     let table = unsafe { environment_table() };
     // 破壊 (f-2, zash_export_not_pushed): **起動時に積まれていた本数までしか
@@ -2380,36 +2504,86 @@ fn run_with_terminator(line: &[u8], starts: &[usize]) {
     for (index, slot) in envp.iter_mut().enumerate().take(env_count) {
         *slot = table.line_with_nul(index).as_ptr();
     }
+    env_count
+}
 
-    // **`/` を含まない語は `/bin/` の下で探す。** 前置した写しを作る。
-    //
-    // **`argv[0]` は書き換えない。** 上で組み立てた `argv` は `line` の中の語を
-    // 指したままで、**打った語がそのまま子へ届く**（Unix と同じ扱いである。
-    // `spawn-test` が `argv[0]` を突き合わせているので、前置してしまうと落ちる）。
-    //
-    // **前置き済みの静的を使う。** `/bin/` は毎回同じなので、**書くのは語の
-    // ぶんだけ**である（スタックに置いて毎回組み立てると、`.text` がそのぶん増える。
-    // **この程度の差が効くほど余裕が無い**——`kernel/userland/user.ld` の
-    // 受け皿の位置を見ること）。
-    let status = if command.contains(&b'/') {
-        // **`/` を含む語は、そのまま渡す。** 探索はしない（Unix と同じ）。
-        //
-        // SAFETY: `command` は `line` の中の NUL 終端の語で、`argv` は NULL 終端の
-        // ポインタ配列である（各要素も `line` の中の NUL 終端の語を指す）。
-        unsafe { userlib::spawn(command, &argv[..starts.len() + 1], &envp[..env_count + 1]) }
-    } else {
-        // **名前だけの語は `PATH` の下で探す（DIR-1。ADR-0043）。**
-        //
-        // SAFETY: `argv` は NULL 終端のポインタ配列で、各要素は `line` の中の
-        // NUL 終端の語を指す。
-        unsafe { spawn_via_path(command, &argv[..starts.len() + 1], &envp[..env_count + 1]) }
+/// `a | b` を走らせる（`ADR-0063` の (b3)）。
+///
+/// # 順序
+///
+/// 1. **左を起こしっぱなしで起こす**（fd 1 がパイプの書き端。読み手は予約される）。
+///    **戻ったときには左は Ring 3 へ入っている**（口が待つ）。
+/// 2. **右を入れ子で起こす**（fd 0 が読み端）。**右が終わるまで戻らない。**
+/// 3. **左を待って回収する。** **右が起こせなかったときも待つ**——**予約はそこで消え、
+///    左は `-EPIPE` か EOF で終われる。**
+///
+/// **状態の出し方は Linux と同じく右の状態を「その行の状態」にし、左が 0 以外なら別に言う。**
+fn run_pipeline(line: &[u8], left: &[usize], right: &[usize]) {
+    let mut envp = [core::ptr::null::<u8>(); MAX_ENVP + 1];
+    let env_count = build_envp(&mut envp);
+
+    let mut left_argv = [core::ptr::null::<u8>(); MAX_ARGS + 1];
+    for (slot, start) in left_argv.iter_mut().zip(left.iter()) {
+        *slot = line[*start..].as_ptr();
+    }
+    let left_command = word_at(line, left[0]);
+    // SAFETY: `left_command` は `line` の中の NUL 終端の語で、`left_argv` は NULL 終端の
+    // ポインタ配列である（各要素も `line` の中の NUL 終端の語を指す）。
+    let handle = unsafe {
+        launch_command(
+            left_command,
+            &left_argv[..left.len() + 1],
+            &envp[..env_count + 1],
+            Launch::DetachedToPipe,
+        )
     };
-    if status < 0 {
+    if handle < 0 {
         write_all(STDERR, NOT_FOUND_HEAD);
-        write_all(STDERR, command);
+        write_all(STDERR, left_command);
         write_all(STDERR, NOT_FOUND_TAIL);
         return;
     }
+
+    let mut right_argv = [core::ptr::null::<u8>(); MAX_ARGS + 1];
+    for (slot, start) in right_argv.iter_mut().zip(right.iter()) {
+        *slot = line[*start..].as_ptr();
+    }
+    let right_command = word_at(line, right[0]);
+    // SAFETY: 同上。
+    let status = unsafe {
+        launch_command(
+            right_command,
+            &right_argv[..right.len() + 1],
+            &envp[..env_count + 1],
+            Launch::FromPipe,
+        )
+    };
+    if status < 0 {
+        write_all(STDERR, NOT_FOUND_HEAD);
+        write_all(STDERR, right_command);
+        write_all(STDERR, NOT_FOUND_TAIL);
+    }
+
+    // **右が起こせなくても左は待つ**（doc の 3）。
+    let left_status = userlib::wait_child(handle as u64);
+
+    if status >= 0 {
+        report_status(status);
+    }
+    if left_status != 0 {
+        write_all(STDOUT, LEFT_STATUS_HEAD);
+        if left_status < 0 {
+            write_all(STDOUT, b"-");
+            write_decimal(left_status.unsigned_abs());
+        } else {
+            write_decimal(left_status as u64);
+        }
+        write_all(STDOUT, b"\n");
+    }
+}
+
+/// 子の終わり方を報せる。**止められた子は 1 行、0 以外は状態、0 は黙る。**
+fn report_status(status: i64) {
     // **止められた子は、状態ではなく 1 行で報せる（S12 前の手当て、C）。**
     //
     // **子に落ち度が無いので、終了状態として数字を出さない。**

@@ -280,6 +280,16 @@ pub enum Wait {
         /// 待っている子の手形。
         handle: u64,
     },
+    /// パイプにバイトが溜まるのを待っている（`ADR-0063` の (b3)）。**書き手が起こす。**
+    PipeReadable {
+        /// `crate::pipe` の表の添字。
+        pipe: u8,
+    },
+    /// パイプに空きができるのを待っている（`ADR-0063` の (b3)）。**読み手が起こす。**
+    PipeWritable {
+        /// `crate::pipe` の表の添字。
+        pipe: u8,
+    },
     /// 単調なティックが締切に届くのを待っている（W2-d+。`ADR-0062`）。
     ///
     /// **締切は `nanosleep` の締切であって、安全網ではない**——**本番の待ちに上限は
@@ -1099,7 +1109,32 @@ pub(crate) fn set_current_waiting(on: Wait) {
     let Some(index) = current_index_if_any() else {
         return;
     };
+    // **2 本が同時に待つ形を数える（`ADR-0063` の (b3) の計器）。** **他のタスクが既に
+    // 待っていれば 1 つ足す。** **`sleep 0.2 | cat` で初めて出る**——**持ち越しの行
+    // 「作っても出ない」が偽になる観測である**（`docs/deferred-decisions.md`）。
+    let another_is_waiting = (0..TASK_COUNT)
+        .filter(|other| *other != index)
+        .any(|other| matches!(scheduler::state(other), TaskState::Waiting(_)));
+    if another_is_waiting {
+        WAITING_TOGETHER.fetch_add(1, Ordering::Relaxed);
+    }
     scheduler::set_state(index, TaskState::Waiting(on));
+}
+
+/// 待ちの欄を据えたとき、他のタスクも既に待っていた回数（`ADR-0063` の (b3) の計器）。
+static WAITING_TOGETHER: AtomicU64 = AtomicU64::new(0);
+
+/// [`WAITING_TOGETHER`] の値。**`init` がセッションの後に出す。**
+pub fn waiting_together() -> u64 {
+    WAITING_TOGETHER.load(Ordering::Relaxed)
+}
+
+/// 起こしっぱなしの 1 本が走る Ring 3 のスロット（`ADR-0063` の (b3)）。
+///
+/// **このスロットに居るのは常に子である**（シェルはスロット 0 の深さ 1）。**Ctrl+C の畳みが
+/// 深さ 1 でも効くのはここだけである**（`idt::fold_if_interrupted`）。
+pub fn detached_slot() -> usize {
+    ring3_slot_of(RING3_TASK)
 }
 
 /// その合図を待っているタスクを起こす（W2-b。`ADR-0061`）。**起こした本数を返す。**
