@@ -16761,6 +16761,16 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
+    begin_item("the shell sabotages are split between sendkey and the script as recorded");
+    match check_shell_sabotage_split() {
+        Ok(message) => println!("--- shell sabotage split: {message}"),
+        Err(error) => {
+            println!("--- shell sabotage split: FAILED ({error})");
+            failed.push("shell sabotage split".to_string());
+        }
+    }
+
+    total += 1;
     begin_item("unsafe blocks carry a SAFETY comment");
     let missing = find_unsafe_without_safety_comment(&workspace_root)?;
     if missing.is_empty() {
@@ -18455,9 +18465,65 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 34,
-    full: 324,
+    base: 35,
+    full: 325,
 };
+
+/// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
+///
+/// # 項目数では見えないので、駆動する側の一覧を数える
+///
+/// **移す編集が黙って落ちても、`--full` の項目数は移しても移さなくても同じである**
+/// （2026-09-19 に実測で踏んだ。**移していない木で 324 項目とも緑が出た。**
+/// `docs/troubleshooting.md`）。**`SHELL_SCRIPT_SABOTAGES` と `SHELL_TEST_SABOTAGES` を
+/// 数えれば見える。** **基底で数えるので、コミット直後の hook が捕まえる**（`--full` の
+/// 76 分より前）。
+///
+/// # 限界——定数と一覧を同じ編集で書けば、両方が落ちたときに合ってしまう
+///
+/// **この定数は一覧から離して置き、一覧とは別の編集で更新する。** **一覧を動かすときは、
+/// まずここを上げて基底が落ちるのを見てから一覧を動かすこと。**
+struct ExpectedShellSabotageSplit {
+    /// `sendkey` で打つ `--shell-test` に残した破壊（`SHELL_TEST_SABOTAGES`）。
+    sendkey: usize,
+    /// 台本の族で回す破壊（`SHELL_SCRIPT_SABOTAGES`）。
+    script: usize,
+}
+
+/// 分け方の現在値。**破壊を移したら、一覧とは別の編集でここを直すこと。**
+const EXPECTED_SHELL_SABOTAGE_SPLIT: ExpectedShellSabotageSplit = ExpectedShellSabotageSplit {
+    sendkey: 10,
+    script: 10,
+};
+
+/// 破壊の分け方が [`EXPECTED_SHELL_SABOTAGE_SPLIT`] のとおりで、重なりが無いことを見る。
+fn check_shell_sabotage_split() -> Result<String> {
+    let overlap: Vec<&&str> = SHELL_SCRIPT_SABOTAGES
+        .iter()
+        .filter(|feature| SHELL_TEST_SABOTAGES.contains(feature))
+        .collect();
+    if !overlap.is_empty() {
+        bail!(
+            "{} sabotage(s) are listed for both sendkey and the script: {overlap:?}",
+            overlap.len()
+        );
+    }
+    let sendkey = SHELL_TEST_SABOTAGES.len();
+    let script = SHELL_SCRIPT_SABOTAGES.len();
+    let expected = &EXPECTED_SHELL_SABOTAGE_SPLIT;
+    if sendkey != expected.sendkey || script != expected.script {
+        bail!(
+            "SHELL_TEST_SABOTAGES lists {sendkey} and SHELL_SCRIPT_SABOTAGES lists {script}, but \
+             EXPECTED_SHELL_SABOTAGE_SPLIT records {} by sendkey and {} by the script. If you \
+             moved a sabotage, update that constant in a separate edit from the lists",
+            expected.sendkey,
+            expected.script
+        );
+    }
+    Ok(format!(
+        "OK ({sendkey} by sendkey, {script} by the script; both lists counted, no overlap)"
+    ))
+}
 
 /// 実際に走った項目数が会計行と一致するかを見る。
 ///
