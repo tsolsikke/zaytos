@@ -775,7 +775,7 @@ git clone -q file:///path/to/zaytos /tmp/clean && cd /tmp/clean && cargo xtask c
 - **台本の族は、待ちを一度も検査していない。** **修正前の回では待ちの経路を通っていた**（だから1.60倍に伸びた）**が、待ちの判定行は1本も印字されていない**——**`cmd_shell_test`を通らないので、計器を読む側が居ない。** **つまり修正で失ったのは覆いではなく、費用だけである**
 - **台本が時間に依存しない形であることが、そもそも選んだ理由である**（`input::script`の doc）。**待ちを入れると、待ちを解く者が台本の中に居ない**——**起こすのはIRQ1であって、台本は割り込みを起こさない**
 
-**待つ理由は5つになった**（`Keyboard` / `Timer` / `Child` / `PipeReadable` / `PipeWritable`）。**この一覧は`read(0)`の待ち（`Keyboard`）の分業である。** **`Timer`は`--shell-test`の`/bin/sleep`が通り、`Child`は`--concurrent-test`が通る**（(b2)。`ADR-0063`）。**`PipeReadable`と`PipeWritable`は台本の族（`pipe-test`）が通る**（(b3)）——**パイプの待ちは`read(0)`の待ちと違い、台本が駆動していても本物の待ちを通る**（`read(0)`だけが「台本が駆動している間は待たない」）。**`Child`も`pipe-test`が通る**（`SYS_WAIT_CHILD`）。
+**待つ理由は5つになった**（`Keyboard` / `Timer` / `Child` / `PipeReadable` / `PipeWritable`）。**`ADR-0064`で8つになった**（`SocketAcceptable` / `SocketReadable` / `SocketWritable`を足した）。**この一覧は`read(0)`の待ち（`Keyboard`）の分業である。** **`Timer`は`--shell-test`の`/bin/sleep`が通り、`Child`は`--concurrent-test`が通る**（(b2)。`ADR-0063`）。**`PipeReadable`と`PipeWritable`は台本の族（`pipe-test`）が通る**（(b3)）——**パイプの待ちは`read(0)`の待ちと違い、台本が駆動していても本物の待ちを通る**（`read(0)`だけが「台本が駆動している間は待たない」）。**`Child`も`pipe-test`が通る**（`SYS_WAIT_CHILD`）。
 
 **破壊3つが落ちる場所。** **どれも`--shell-test`の族の中である**（実測）。**台本の族には1つも無い。**
 
@@ -1095,6 +1095,44 @@ higher-halfの破壊feature（B-2a-5、破壊feature `highhalf-*`）について
 - **(a)(b)の失敗モードはファームウェアへ逃げる形なので、OVMFのバージョン更新時にこの2テストの挙動が変わりうる。** UEFIのIDT/フォルト処理が変われば、位置署名やheartbeat=0の成立が崩れる可能性がある。OVMFを更新したときの確認対象とする。
 - **M2-d/A-1の切替前検査は物理範囲のメンバシップ検査のみで、高位マッピングの欠落を検出しない。** `highhalf-no-kernel-high-in-live-table`(c)がこれを実証した。必須マッピング検証は「切替後の必須領域が物理範囲に属するか」を見るだけで、A-1/B-1が持つ「新テーブルを独立walkerで実際に引く」検査を持たない。恒等が物理を覆っている限り高位マッピングの欠落を見逃す。walkベースへの強化はB-2bの検討事項（ADR-0024 / ADR-0021 B Addendum）。
 - **トランポリンのバイト単位一致検査（base検査）。** ビルド済みkernel.elfの入口24バイトを期待リテラルと比較する（`common::elf`再利用、新規外部クレートなし）。既定ビルドで一致（B-2a-2/B-2a-3b/B-2a-5で3度、再リンク・B-1撤去を跨いで不変を実証）、`highhalf-trampoline-absolute-ref`で不一致。rel32がすべて`.text.trampoline`内なので配置非依存で安定。`cargo xtask check`のbase検査なので`--full`でなくても毎回走る。
+
+### `ADR-0064`で、unixドメインのストリームソケットが入った（2026-09-19）
+
+**利用者は検査用の組（`/bin/sockd`と`/bin/sockc`）である**——**本番の利用者（Seinas）がまだ無い、初めての段である**（`ADR-0064`の「本番の利用者が無い、初めての段」）。**`init`が`sockd`を起こしっぱなしで起こし、台本が`sockc`の6つの形を1つずつ打つ。** **判定は`judge`せず、`cmd_socket_test`が計器と行で見る。**
+
+**判定は10本。** **どれも内容と計器で見る。順序では見ない。**
+
+| # | 判定 | 見るもの |
+|---|---|---|
+| 1 | `hello`が往復する | `sockc: hello reply=hello`が1回 |
+| 2 | `big`（1,536バイト）が往復し、書き手が待った | `sockc: big sent=1536 got=1536 match=true`、書き手の待ちが1以上、読みが書き手を起こした回数が1以上 |
+| 3 | `accept`が待った | `accepts waited`が1以上 |
+| 4 | 読み手が両側で待ち、書きが起こした | 読み手の待ちが2以上、書きが読み手を起こした回数が1以上 |
+| 5 | 無い名前への`connect`は`-ECONNREFUSED` | `connect nobody -> -111`が1回、`connect refused`が1以上 |
+| 6 | 取られた名前への`bind`は`-EADDRINUSE` | `bind wayland-0 -> -98`が1回、`bind refused`が1 |
+| 7 | 相手が閉じたらEOF | `sockd: client left`が4回、`EOF seen`が5 |
+| 8 | 相手が閉じた後の`write`は`-EPIPE` | `quit read=0 write=-32`が1回、`writes to a closed peer`が1 |
+| 9 | 待ち行列と枠 | `twice second=0 reply=one reply=two`が1回、作った接続5・同時に2まで・返した5・`backlog full`0・listener取った1返した1 |
+| 10 | サーバーが0で終わり、台本が最後まで届いた | `sockd: quit`が1回、`/bin/sockd ended (Ended(0))`、`script-done:` |
+
+**禁止**——**`[ERROR]`が1行も無いこと。**
+
+**破壊は8つで、落ちる判定がそれぞれ違う**（`SOCKET_TEST_SABOTAGES`。**8つとも3回続けて落ちた**。実測。2026-09-19）。
+
+| 破壊 | すること | 落ちる判定（実測） |
+|---|---|---|
+| `socket-accept-does-not-wait` | `accept`が待たずに`-EAGAIN` | `sockd`が`accept failed`で終わり、ほぼ全判定が落ちる |
+| `socket-connect-ignores-name` | `connect`が名前を見ない | 5（`nobody`が繋がる）・7・9 |
+| `socket-bind-ignores-taken-name` | `bind`が取られた名前を見ない | 6 |
+| `socket-close-keeps-peer-open` | 端を閉じても閉じたことにしない | EOFが来ず`sockd`が永久に待つ。**出力が伸びなくなる形で落ちる**（`SOCKET_TEST_STALL_LIMIT`）。ほぼ全判定 |
+| `socket-write-ignores-peer-closed` | 相手が閉じているのを見ずに書く | 8（`quit`の`write`が`-32`にならない） |
+| `socket-write-does-not-wake-reader` | 書いても読み手を起こさない | 双方が待ち、出力が伸びなくなる。ほぼ全判定 |
+| `socket-read-empty-returns-zero` | 空をEOFと誤る | 1（返事が届く前に`sockc`が読み終える） |
+| `socket-release-keeps-slot` | 両端が閉じても枠を返さない | 9（3つ目の接続が`-EAGAIN`） |
+
+**待つ理由は5つから8つになった**（`Keyboard` / `Timer` / `Child` / `PipeReadable` / `PipeWritable` / `SocketAcceptable` / `SocketReadable` / `SocketWritable`）。**この一覧は`kernel/src/task.rs`の`Wait`が本体である。**
+
+**`sockd`/`sockc`はSeinasが来ても捨てない**——**カーネルの口の判定を、コンポジタの都合から切り離しておくためである**（`ADR-0064`）。
 
 **項目会計**: 検査を足したとき数が閉じていることを、この行だけで追う。**現在の項目数は`cargo xtask check`の出力（`all N check(s) passed`）を正とし、docsの他の場所には書かない。** 総数は検査を足すたびに増えるので、導出元から離れた場所に書けば必ずstaleになる（実際に`--full`=64がroadmapとdeferred-decisionsに残り、同じ型の誤りの3件目になった）。数え方は、base = `CHECKS`（build 4 / test 1 / clippy 4 / fmt 1）+ 静的検査、`--commit` = base + boot log diff（期待値はbase+1で導出し、定数を持たない）、`--full` = base + QEMU + highhalfである。
 

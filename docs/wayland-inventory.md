@@ -29,7 +29,7 @@ Linux向けELFを動かす話でもない。**
 
 | 面 | 仕様が要求すること（一次資料） | Linuxの実装がしていること（必須ではない） |
 |---|---|---|
-| 接続 | **UNIXドメインの「ストリーム」ソケット。** 端点は既定で`wayland-0`、`WAYLAND_DISPLAY`で変えられる。**1.15以降、絶対パスの端点と、継承したfd（`WAYLAND_SOCKET`）も選べる** | `XDG_RUNTIME_DIR`の下に置くこと（ch04には出てこない） |
+| 接続 | **UNIXドメインの「ストリーム」ソケット。** 端点は既定で`wayland-0`、`WAYLAND_DISPLAY`で変えられる。**1.15以降、絶対パスの端点と、継承したfd（`WAYLAND_SOCKET`）も選べる**。**揃った（2026-09-20。`ADR-0064`）**——**`socket`/`bind`/`listen`/`accept`/`connect`が`AF_UNIX`の`SOCK_STREAM`で動く。名前はカーネルの表（既定`wayland-0`。ファイルシステムには現れない）。継承したfdと絶対パスの端点は無い（fdの受け渡しの段）** | `XDG_RUNTIME_DIR`の下に置くこと（ch04には出てこない） |
 | メッセージ | **32ビット語の並び。ホストのバイト順。** ヘッダは2語——**1語目が送り手のオブジェクトID、2語目の上位16ビットがバイト長、下位16ビットがopcode。** 引数は`int`/`uint`/`fixed`（符号つき24.8）/`string`（長さ＋NUL＋4バイト詰め）/`object`/`new_id`/`array`/`fd` | ——— |
 | fdの受け渡し | **fdはメッセージ本体に載らず、UNIXドメインソケットの補助データ（`msg_control`）で運ぶ。** **位置は規定されないが、順序はメッセージとfd引数の順と同じである** | `SCM_RIGHTS`（`msg_control`の具体形） |
 | 共有メモリ | **`wl_shm.create_pool`が`fd`と`size`を渡す。** 説明文は**「サーバーはそのfdを`size`バイト`mmap`する」**と書いている（`mmap`の語は`wayland.xml`に4箇所）。**`wl_shm_pool.resize`で伸ばせる。** 形式は`argb8888`(0)と`xrgb8888`(1) | `memfd`、`MAP_SHARED` |
