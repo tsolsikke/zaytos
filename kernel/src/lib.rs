@@ -54,6 +54,7 @@ pub mod paging;
 pub mod pci;
 pub mod pipe;
 pub mod quarantine;
+pub mod ring;
 pub mod ring3;
 pub mod smp;
 pub mod stack;

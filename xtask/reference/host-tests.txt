@@ -540,14 +540,15 @@ kernel::paging::plan::tests::resolve_pages_marks_mmio_as_uncacheable
 kernel::paging::plan::tests::resolve_pages_never_produces_zero_size_gaps_between_core_and_fringe
 kernel::paging::plan::tests::resolve_pages_uses_2mib_core_and_4kib_fringe
 kernel::paging::plan::tests::unmapped_types_are_excluded
-kernel::pipe::tests::a_full_ring_takes_nothing_more
 kernel::pipe::tests::the_pipe_frees_itself_only_when_both_ends_and_the_reservation_are_gone
-kernel::pipe::tests::the_ring_wraps_without_losing_order
 kernel::quarantine::tests::a_frame_is_not_returned_while_its_generation_is_still_live
 kernel::quarantine::tests::a_frame_is_returned_once_every_core_has_passed_its_generation
 kernel::quarantine::tests::a_released_slot_can_be_reused_by_a_later_free
 kernel::quarantine::tests::only_the_retired_generations_are_returned
 kernel::quarantine::tests::overflowing_the_quarantine_leaks_instead_of_handing_the_frame_back
+kernel::ring::tests::a_full_ring_takes_nothing_more
+kernel::ring::tests::the_capacity_is_the_parameter
+kernel::ring::tests::the_ring_wraps_without_losing_order
 kernel::smp::tests::a_frame_above_one_mib_is_not_addressable
 kernel::smp::tests::a_high_only_allocator_is_rejected
 kernel::smp::tests::a_low_frame_is_sipi_addressable

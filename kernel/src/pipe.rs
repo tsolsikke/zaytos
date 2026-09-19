@@ -34,6 +34,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use common::critical::Locked;
 
+use crate::ring::Ring;
+
 /// 輪の大きさ（バイト）。**256 の根拠はモジュールの doc にある。**
 pub const PIPE_RING: usize = 256;
 
@@ -42,11 +44,8 @@ pub const MAX_PIPES: usize = 1;
 
 /// パイプ 1 本の状態。
 struct Pipe {
-    buf: [u8; PIPE_RING],
-    /// 次に読む位置。
-    head: usize,
-    /// 溜まっているバイト数。
-    len: usize,
+    /// 輪（`crate::ring`。**ソケットと共通の核**）。
+    ring: Ring<PIPE_RING>,
     /// 読み端を持つ者の数。
     readers: u8,
     /// 書き端を持つ者の数。
@@ -59,9 +58,7 @@ struct Pipe {
 
 impl Pipe {
     const EMPTY: Self = Self {
-        buf: [0; PIPE_RING],
-        head: 0,
-        len: 0,
+        ring: Ring::EMPTY,
         readers: 0,
         writers: 0,
         reserved_reader: false,
@@ -216,7 +213,7 @@ pub fn read_into(pipe: u8, dst: &mut [u8]) -> ReadOutcome {
     };
     let outcome = {
         let mut state = slot.lock();
-        if state.len == 0 {
+        if state.ring.is_empty() {
             #[cfg(feature = "pipe-read-empty-returns-zero")]
             {
                 ReadOutcome::Eof
@@ -228,13 +225,7 @@ pub fn read_into(pipe: u8, dst: &mut [u8]) -> ReadOutcome {
                 ReadOutcome::Empty
             }
         } else {
-            let take = dst.len().min(state.len);
-            for byte in dst.iter_mut().take(take) {
-                *byte = state.buf[state.head];
-                state.head = (state.head + 1) % PIPE_RING;
-            }
-            state.len -= take;
-            ReadOutcome::Bytes(take)
+            ReadOutcome::Bytes(state.ring.take(dst))
         }
     };
     if matches!(outcome, ReadOutcome::Bytes(_)) {
@@ -274,18 +265,12 @@ pub fn write_from(pipe: u8, src: &[u8]) -> WriteOutcome {
             WriteOutcome::NoReader
         } else {
             #[cfg(not(feature = "pipe-write-ignores-full"))]
-            let room = PIPE_RING - state.len;
+            let put = state.ring.put(src);
             #[cfg(feature = "pipe-write-ignores-full")]
-            let room = PIPE_RING;
-            let put = src.len().min(room);
+            let put = state.ring.put_overwriting(src);
             if put == 0 {
                 WriteOutcome::Full
             } else {
-                for byte in &src[..put] {
-                    let at = (state.head + state.len) % PIPE_RING;
-                    state.buf[at] = *byte;
-                    state.len = (state.len + 1).min(PIPE_RING);
-                }
                 WriteOutcome::Bytes(put)
             }
         }
@@ -350,67 +335,12 @@ pub fn close_write_end(pipe: u8) {
 mod tests {
     use super::*;
 
-    // **`Locked` と起こしはホストでは動かないので、輪の計算だけを見る。**
-    fn fresh() -> Pipe {
-        let mut pipe = Pipe::EMPTY;
-        pipe.in_use = true;
-        pipe.writers = 1;
-        pipe.readers = 1;
-        pipe
-    }
-
-    fn put(pipe: &mut Pipe, src: &[u8]) -> usize {
-        let room = PIPE_RING - pipe.len;
-        let put = src.len().min(room);
-        for byte in &src[..put] {
-            let at = (pipe.head + pipe.len) % PIPE_RING;
-            pipe.buf[at] = *byte;
-            pipe.len += 1;
-        }
-        put
-    }
-
-    fn take(pipe: &mut Pipe, dst: &mut [u8]) -> usize {
-        let take = dst.len().min(pipe.len);
-        for byte in dst.iter_mut().take(take) {
-            *byte = pipe.buf[pipe.head];
-            pipe.head = (pipe.head + 1) % PIPE_RING;
-        }
-        pipe.len -= take;
-        take
-    }
-
-    #[test]
-    fn the_ring_wraps_without_losing_order() {
-        let mut pipe = fresh();
-        let mut out = [0u8; 300];
-        // 200 入れて 150 取り、また 200 入れる——境を跨ぐ。
-        let first: [u8; 200] = core::array::from_fn(|i| i as u8);
-        assert_eq!(put(&mut pipe, &first), 200);
-        assert_eq!(take(&mut pipe, &mut out[..150]), 150);
-        assert_eq!(&out[..150], &first[..150]);
-        let second: [u8; 200] = core::array::from_fn(|i| (i + 100) as u8);
-        assert_eq!(put(&mut pipe, &second), 200);
-        assert_eq!(pipe.len, 250);
-        assert_eq!(take(&mut pipe, &mut out[..250]), 250);
-        assert_eq!(&out[..50], &first[150..]);
-        assert_eq!(&out[50..250], &second[..]);
-    }
-
-    #[test]
-    fn a_full_ring_takes_nothing_more() {
-        let mut pipe = fresh();
-        let block = [7u8; PIPE_RING];
-        assert_eq!(put(&mut pipe, &block), PIPE_RING);
-        assert_eq!(put(&mut pipe, &[1, 2, 3]), 0);
-        let mut out = [0u8; 4];
-        assert_eq!(take(&mut pipe, &mut out), 4);
-        assert_eq!(put(&mut pipe, &[1, 2, 3]), 3);
-    }
-
+    // **輪の計算は `crate::ring` が持ち、そこで検査する。** **ここは端の数と予約だけを見る**
+    // （`Locked` と起こしはホストでは動かない）。
     #[test]
     fn the_pipe_frees_itself_only_when_both_ends_and_the_reservation_are_gone() {
-        let mut pipe = fresh();
+        let mut pipe = Pipe::EMPTY;
+        pipe.in_use = true;
         pipe.reserved_reader = true;
         pipe.readers = 0;
         pipe.writers = 0;
