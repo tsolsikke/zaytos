@@ -298,5 +298,27 @@ Accepted
 
 ### 所要
 
-**台本の素は11.3秒、`sendkey`の素は49.8秒である**（実測）。**移した破壊1本あたり約50秒縮む見込みで、実測は下の表に書く。**
+**台本の素は11.3秒、`sendkey`の素は49.8秒である**（実測）。
+
+### 移したもの——候補10本とも台本の形で3回続けて落ちた（実測。2026-09-19）
+
+| 破壊 | 落ちた判定（台本の形） | 所要（3回） | 縮む見込み |
+|---|---|---|---|
+| `clock-goes-backwards` | `clock_matches_the_timer`／`sleep_kept_its_length` | 11.3 / 11.3 / 11.2秒 | 約47秒 |
+| `timer-never-wakes` | セッションが終わらない（`ended`／`restarted`。止まる形） | 39.3 / 39.2 / 39.3秒 | 約19秒 |
+| `timer-wakes-before-deadline` | `no_early_timer_wake`／`timer_kept_the_deadline` | 11.3 / 11.3 / 11.3秒 | 約47秒 |
+| `env-drop-path-test` | `bare_names_resolved` | 11.0 / 11.0 / 11.0秒 | 約47秒 |
+| `shell-skip-expansion-test` | `tilde_expanded`／`expanded_*`／`empty_word_was_dropped` | 11.3 / 11.4 / 11.3秒 | 約47秒 |
+| `shell-export-not-pushed-test` | `the_child_saw_the_exported_name` | 11.3 / 11.3 / 11.3秒 | 約47秒 |
+| `shell-drop-history-test` | `history_walked_with_*`／`duplicates_were_not_stored` | 11.1 / 11.2 / 11.1秒 | 約47秒 |
+| `shell-shift-delete-range-test` | `backspace_edited_the_line`／`delete_removed_the_character`／`ctrl_k_*`… | 11.3 / 11.3 / 11.4秒 | 約47秒 |
+| `shell-keep-control-bytes-test` | `unknown_ctrl_stayed_out_of_the_line` | 11.4 / 11.3 / 11.3秒 | 約47秒 |
+| `idle-holds-bkl-across-hlt` | セッションが終わらない（止まる形） | 39.3 / 39.3 / 39.3秒 | 約19秒 |
+
+**`--shell-test`に残るのは10本である**——**打鍵のIRQに依るもの**（`read-never-waits`／`keyboard-does-not-wake`／`wake-ignores-the-reason`／`keyboard-drop-*`の2つ）**と、Ctrl+Cの畳みに依るもの**（`kill-*`の5つ）。**項目数は動かない**（1本は1本）——**台本の素が1項目増えて324である。** **縮む見込みは合計で約7分**（8×47秒+2×19秒）。
+
+**残った10本を台本へ移す手は無い**——**IRQ1の経路とCtrl+Cの畳みは、台本が起こせない。**
+
+**移し損ねた回が1度ある**（2026-09-19）。**一覧を書き換えるPythonが最初の照合で止まり、繋いだシェルがそのまま先へ進んだ**——**`--full`は移していない木で緑を出し、報告は「移した」と書いた。** **経緯は`docs/troubleshooting.md`にある。** **移した木での`--full`の実測は、その次の回である。**
+
 
