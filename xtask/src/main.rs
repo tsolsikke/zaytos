@@ -1693,6 +1693,44 @@ fn main() -> Result<()> {
                 return cmd_complete_test(&sabotage, expect_pass);
             }
             // **履歴の持ち越しの判定（HI-1）。**
+            // **`--shell-test` の台本を台本の族で回す（`ADR-0063` の (b3) の (b)）。**
+            if rest.iter().any(|a| a == "--shell-script-test") {
+                let sabotage = rest
+                    .iter()
+                    .enumerate()
+                    .find(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .and_then(|(i, _)| rest.get(i + 1))
+                    .map(|name| name.as_str());
+                let mode = match sabotage {
+                    Some(name) => {
+                        let Some(known) = SHELL_SCRIPT_SABOTAGES
+                            .iter()
+                            .chain(SHELL_TEST_SABOTAGES.iter())
+                            .find(|entry| **entry == name)
+                            .copied()
+                        else {
+                            bail!(
+                                "xtask run --shell-script-test --sabotage: {name:?} is not a \
+                                 shell sabotage"
+                            );
+                        };
+                        ShellTestMode::ScriptMustFail(known)
+                    }
+                    None => ShellTestMode::ScriptNormal,
+                };
+                return cmd_shell_script_test(mode);
+            }
+            // **シェルの `|` の判定（`ADR-0063` の (b3)）。台本の族である。**
+            if rest.iter().any(|a| a == "--pipe-test") {
+                let sabotage: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                let expect_pass = sabotage.is_empty();
+                return cmd_pipe_test(&sabotage, expect_pass);
+            }
             if rest.iter().any(|a| a == "--history-test") {
                 let sabotage: Vec<&str> = rest
                     .iter()
@@ -3635,7 +3673,25 @@ enum ShellTestMode {
     /// **起動しなかった場合は Ok にしない。** あちらは環境の失敗で、
     /// **捕まえたことにはならない**（`classify_boot` が先に切り分ける）。
     MustFail(&'static str),
+    /// 台本で駆動する素（`ADR-0063` の (b3) の (b)）。**判定は同じ関数で、台本では見ない
+    /// ものを [`SCRIPT_SKIPS`] で外す。**
+    ScriptNormal,
+    /// 台本で駆動する破壊。**通らないことを期待する。**
+    ScriptMustFail(&'static str),
 }
+
+/// 台本で駆動したときに見ない判定（`ADR-0063` の (b3) の (b)）。**実測で決めた**——**台本の素を
+/// 1 回回し、落ちた判定を「台本では成り立たない理由」ごとに分けた**（`docs/verification-coverage.md`）。
+const SCRIPT_SKIPS: &[&str] = &[
+    // **`spin` と `ctrl-c` の行を外している**（Ctrl+C の畳みは IRQ の経路）。
+    "ctrl_c_stopped_the_child",
+    // **台本が駆動している間、`read(0)` は待たない**（空振りで起きる機会が無い）。
+    "woke_empty_and_waited_again",
+];
+
+/// `shell-script-test` で回す破壊（`ADR-0063` の (b3) の (b)）。**`SHELL_TEST_SABOTAGES` から
+/// 移したもの**——**台本の形で 3 回続けて落ちたものだけを移す。**
+const SHELL_SCRIPT_SABOTAGES: &[&str] = &[];
 
 /// `--shell-test` が「通らないこと」で捕まえる破壊（S12 前の手当て、C）。
 ///
@@ -3693,6 +3749,21 @@ const UTF8_TEST_SABOTAGES: &[&str] = &[
 const HISTORY_TEST_SABOTAGES: &[&str] = &[
     "shell-history-not-saved-test",
     "shell-history-missing-is-error-test",
+];
+
+/// `pipe-test` を「通らないこと」で回す破壊（`ADR-0063` の (b3)）。
+///
+/// **それぞれ固有の判定で落とす**——**起こさない／閉じても数を減らさない（黙って止まる形）、
+/// 空を EOF と誤る（読み手が待たない）、満杯に上書き（中身が食い違う）、予約しない（`hello` が
+/// 届かない）、入場を待たない（貸し出しが重なる）、予約を消さない（次の `|` が通らない）。**
+const PIPE_TEST_SABOTAGES: &[&str] = &[
+    "pipe-write-does-not-wake-reader",
+    "pipe-close-keeps-writer-count",
+    "pipe-read-empty-returns-zero",
+    "pipe-write-ignores-full",
+    "pipe-reader-not-reserved",
+    "spawn-detached-returns-early",
+    "wait-child-keeps-reservation",
 ];
 
 const PROFILE_TEST_SABOTAGES: &[&str] = &[
@@ -3862,22 +3933,38 @@ const SHELL_TEST_SABOTAGES: &[&str] = &[
 
 impl ShellTestMode {
     /// この形で立てる feature。
-    fn features(self) -> &'static [&'static str] {
+    fn features(self) -> Vec<&'static str> {
         match self {
-            ShellTestMode::Normal | ShellTestMode::KeymapUs => &[],
-            ShellTestMode::KeymapUsAlwaysJis => &["keymap-always-jis-test"],
-            ShellTestMode::ArrowsDropped => &["keyboard-drop-arrows-test"],
-            ShellTestMode::EscDropped => &["keyboard-drop-esc-test"],
-            // **1 要素の配列を作れないので、一覧から借りる。**
+            ShellTestMode::Normal | ShellTestMode::KeymapUs => vec![],
+            ShellTestMode::KeymapUsAlwaysJis => vec!["keymap-always-jis-test"],
+            ShellTestMode::ArrowsDropped => vec!["keyboard-drop-arrows-test"],
+            ShellTestMode::EscDropped => vec!["keyboard-drop-esc-test"],
             // `SHELL_TEST_SABOTAGES` に在る名前だけを受け取る契約である。
             ShellTestMode::MustFail(feature) => {
-                let index = SHELL_TEST_SABOTAGES
-                    .iter()
-                    .position(|name| *name == feature)
-                    .expect("MustFail takes a feature listed in SHELL_TEST_SABOTAGES");
-                &SHELL_TEST_SABOTAGES[index..index + 1]
+                assert!(
+                    SHELL_TEST_SABOTAGES.contains(&feature),
+                    "MustFail takes a feature listed in SHELL_TEST_SABOTAGES"
+                );
+                vec![feature]
+            }
+            ShellTestMode::ScriptNormal => vec!["shell-script-test"],
+            ShellTestMode::ScriptMustFail(feature) => {
+                assert!(
+                    SHELL_SCRIPT_SABOTAGES.contains(&feature)
+                        || SHELL_TEST_SABOTAGES.contains(&feature),
+                    "ScriptMustFail takes a shell sabotage"
+                );
+                vec!["shell-script-test", feature]
             }
         }
+    }
+
+    /// 台本で駆動しているか。**打鍵の IRQ に依る判定を [`SCRIPT_SKIPS`] で外す。**
+    fn driven_by_script(self) -> bool {
+        matches!(
+            self,
+            ShellTestMode::ScriptNormal | ShellTestMode::ScriptMustFail(_)
+        )
     }
 
     /// 判定行の頭。**破壊の側を別の名前にする**——`--full` の出力で
@@ -3890,6 +3977,8 @@ impl ShellTestMode {
             ShellTestMode::ArrowsDropped => "shell-test keyboard-drop-arrows".to_string(),
             ShellTestMode::EscDropped => "shell-test keyboard-drop-esc".to_string(),
             ShellTestMode::MustFail(feature) => format!("shell-test {feature}"),
+            ShellTestMode::ScriptNormal => "shell-script-test".to_string(),
+            ShellTestMode::ScriptMustFail(feature) => format!("shell-script-test {feature}"),
         }
     }
 
@@ -3905,6 +3994,10 @@ impl ShellTestMode {
             ShellTestMode::ArrowsDropped => "shell-test-drop-arrows-serial.log".to_string(),
             ShellTestMode::EscDropped => "shell-test-drop-esc-serial.log".to_string(),
             ShellTestMode::MustFail(feature) => format!("shell-test-{feature}-serial.log"),
+            ShellTestMode::ScriptNormal => "shell-script-test-serial.log".to_string(),
+            ShellTestMode::ScriptMustFail(feature) => {
+                format!("shell-script-test-{feature}-serial.log")
+            }
         }
     }
 
@@ -3977,7 +4070,10 @@ impl ShellTestMode {
 
     /// この形が通ることを期待するか。**破壊は通らないことを期待する。**
     fn expects_to_pass(self) -> bool {
-        !matches!(self, ShellTestMode::MustFail(_))
+        !matches!(
+            self,
+            ShellTestMode::MustFail(_) | ShellTestMode::ScriptMustFail(_)
+        )
     }
 }
 
@@ -4659,6 +4755,269 @@ fn cmd_profile_test(features: &[&str], expect_pass: bool) -> Result<()> {
 ///
 /// `docs/coding-standards.md` の「判定が探す値は、像とログの語と当たらない
 /// ものにする」。**`hist-one` / `hist-two` は像のどこにも無い。**
+/// `pipe-test` の上限（秒）。**既定は台本の族の水準（約 10 秒）の見込みなので、その 10 倍。**
+const PIPE_TEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// `pipe-test` の「出力が伸びない」上限（秒）。**黙って止まる破壊のために置く**
+/// （`CONCURRENT_TEST_STALL_LIMIT` と同じ形。`ADR-0063` の (b2)）。**既定の全体の 3 倍以上を取る。**
+const PIPE_TEST_STALL_LIMIT: Duration = Duration::from_secs(30);
+
+/// シェルの `|` の判定（`ADR-0063` の (b3)）。**台本の族で、1 回の起動で 7 本の `|` を見る。**
+///
+/// # 判定は内容と計器で見る。順序では見ない
+///
+/// 1. **中身がパイプを通る**——`hello` / `one two` / `again` が 1 回ずつ出て、
+///    **起こしっぱなしのスロットは端末へ 1 度も書かない**（計器）
+/// 2. **読み手が先に待つ形が出た**——読み手の待ちが 1 以上、**書きが読み手を起こした回数が 1 以上**、
+///    **かつ 2 本が同時に待った回数が 1 以上**（`sleep 0.2 | cat`）
+/// 3. **書き手が待つ形が出た**——書き手の待ちが 1 以上（`/data/big` は輪の 8.5 倍）
+/// 4. **`/data/big` がバイト単位で通る**（像から `debugfs` で読んだものと同じ）
+/// 5. **読み手が読まずに終わると、書き手は `-EPIPE` を見る**——計器が 1 以上、`cat` が 4 で終わる
+/// 6. **右が居なくても詰まらない**——`cannot run` が出て、予約が 1 つ消え、次の `|` が通る
+/// 7. **7 本とも左が起きた**（計器が 7）、**台本が最後まで届いた**（`script-done:`）
+///
+/// **禁止**——**`[ERROR]` が 1 行も無いこと**（`AllocatorUnavailable` と会計をこれで覆う）。
+fn cmd_pipe_test(features: &[&str], expect_pass: bool) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let mut all_features: Vec<&str> = vec!["pipe-test"];
+    all_features.extend_from_slice(features);
+    let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let tag = all_features.join("-");
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("pipe-test-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the pipe test")?;
+
+    // **終わりの印が出るか、出力が伸びなくなるか、上限まで待つ。** **黙って止まる破壊が
+    // 2 つ在る**（起こさない・EOF が来ない）。
+    let started = Instant::now();
+    let deadline = started + PIPE_TEST_TIMEOUT;
+    let mut last_len = 0usize;
+    let mut last_growth = started;
+    let mut stalled = false;
+    while Instant::now() < deadline {
+        let text = strip_ansi(&read_lossy(&serial_log));
+        if text.contains("script-done:") {
+            thread::sleep(Duration::from_secs(1));
+            break;
+        }
+        if text.len() > last_len {
+            last_len = text.len();
+            last_growth = Instant::now();
+        } else if last_growth.elapsed() > PIPE_TEST_STALL_LIMIT {
+            stalled = true;
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+    let waited = started.elapsed();
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = read_lossy(&serial_log);
+    let context = if features.is_empty() {
+        "pipe-test".to_string()
+    } else {
+        format!("pipe-test {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    let qemu_debug = read_lossy(&debug_log);
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    let stripped = strip_ansi(&serial);
+    let lines: Vec<&str> = stripped.lines().map(str::trim_end).collect();
+    let count_line = |wanted: &str| lines.iter().filter(|line| line.trim() == wanted).count();
+    let number_after = |line: &str, key: &str| -> Option<u64> {
+        let rest = &line[line.find(key)? + key.len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok()
+    };
+    let gauge = lines
+        .iter()
+        .find(|line| line.contains("[INFO] pipe: created "))
+        .copied();
+    let g = |key: &str| gauge.and_then(|line| number_after(line, key));
+    let created = g("created ");
+    let reader_waits = g("readers waited ");
+    let readers_woken_by_write = g("woken by a write ");
+    let writer_waits = g("writers waited ");
+    let epipe = g("writes without a reader ");
+    let reservations_dropped = g("reservations dropped ");
+    let waiting_together = g("waiting at once ");
+    let detached_starts = g("detached starts ");
+    let entry_wait_ticks = g("waited at most ");
+    let terminal_writes = g("wrote to the terminal ");
+
+    // **判定 1**——中身がパイプを通る。
+    let hello_once = count_line("hello") == 1;
+    let one_two_once = count_line("one two") == 1;
+    let again_once = count_line("again") == 1;
+    let detached_kept_off_the_terminal = terminal_writes == Some(0);
+    let content_went_through =
+        hello_once && one_two_once && again_once && detached_kept_off_the_terminal;
+
+    // **判定 2**——読み手が先に待つ形。**書きが読み手を起こしたことも見る**——**破壊
+    // `pipe-write-does-not-wake-reader` は止まる形では落ちない**（閉じの起こしが肩代わりする。
+    // `kernel/src/pipe.rs` の `READERS_WOKEN_BY_WRITE`）。
+    let reader_waited_first = reader_waits.is_some_and(|n| n >= 1)
+        && readers_woken_by_write.is_some_and(|n| n >= 1)
+        && waiting_together.is_some_and(|n| n >= 1);
+
+    // **判定 3**——書き手が待つ形。
+    let writer_waited = writer_waits.is_some_and(|n| n >= 1);
+
+    // **判定 4**——`/data/big` がバイト単位で通る。
+    let disk = disk_image_path(&esp_dir);
+    let big_on_disk = debugfs_read(&disk, "/data/big")?
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    // **カーネルの行が内容の行の途中に挟まる**（実測。2026-09-19）——**右の `cat` が 1 行を
+    // 書いている途中で左のタスクが終わり、`[INFO] user-stack:` と `task:` の行が serial に
+    // 割り込んだ**（`big-lin` + `[INFO] ...` + `e-093-xxxxxx`）。**パイプの中身ではなく serial の
+    // 交錯なので、挟まった行を取り除いてから比べる。**
+    let big_printed = program_output(&strip_embedded_kernel_lines(
+        stripped
+            .split("/bin/cat /data/big | /bin/cat")
+            .nth(1)
+            .unwrap_or("")
+            .split("zaytos$")
+            .next()
+            .unwrap_or(""),
+    ));
+    let big_went_through =
+        !big_on_disk.is_empty() && big_printed.trim_end() == big_on_disk.trim_end();
+
+    // **判定 5**——読み手が読まずに終わると、書き手は `-EPIPE` を見る。
+    let writer_saw_epipe =
+        epipe.is_some_and(|n| n >= 1) && count_line("zash: the left side ended with 4") == 1;
+
+    // **判定 6**——右が居なくても詰まらない。
+    let right_missing_did_not_hang = count_line("zash: /bin/nonexist: cannot run") == 1
+        && reservations_dropped == Some(1)
+        && again_once;
+
+    // **判定 7**——7 本とも左が起き、台本が最後まで届いた。
+    let reached_the_end = stripped.contains("script-done:");
+    let all_left_sides_started = detached_starts == Some(7) && created == Some(7);
+
+    // **禁止**——`[ERROR]` が 1 行も無い。
+    let error_lines: Vec<&str> = lines
+        .iter()
+        .filter(|line| line.contains("[ERROR]"))
+        .copied()
+        .take(4)
+        .collect();
+    let no_error = error_lines.is_empty();
+
+    println!(
+        "{context}: the content went through the pipe = {content_went_through} (hello once = \
+         {hello_once}, one two once = {one_two_once}, again once = {again_once}, the detached \
+         slot wrote to the terminal {terminal_writes:?} time(s))"
+    );
+    println!(
+        "{context}: the reader waited first, a write woke it, and two tasks waited at once = \
+         {reader_waited_first} (reader waits {reader_waits:?}, woken by a write \
+         {readers_woken_by_write:?}, waiting together {waiting_together:?})"
+    );
+    println!("{context}: the writer waited on a full ring = {writer_waited} (writer waits {writer_waits:?})");
+    println!(
+        "{context}: /data/big went through byte for byte = {big_went_through} ({} byte(s) printed, \
+         {} on the disk)",
+        big_printed.len(),
+        big_on_disk.len()
+    );
+    println!(
+        "{context}: the writer saw EPIPE when the reader left = {writer_saw_epipe} (writes without \
+         a reader {epipe:?})"
+    );
+    println!(
+        "{context}: a missing right side did not hang = {right_missing_did_not_hang} (reservations \
+         dropped {reservations_dropped:?})"
+    );
+    println!(
+        "{context}: every left side started and the script reached its end = {} (detached starts \
+         {detached_starts:?}, pipes created {created:?}, reached the end = {reached_the_end})",
+        all_left_sides_started && reached_the_end
+    );
+    println!("{context}: no [ERROR] line = {no_error} (the first were {error_lines:?})");
+    println!(
+        "{context}: (info) detached starts waited at most {entry_wait_ticks:?} tick(s) for the \
+         child to enter Ring 3"
+    );
+    for info in lines.iter().filter(|line| {
+        line.contains("[INFO] pipe: ")
+            || line.contains("zash: ")
+            || line.contains("[INFO] detached: ")
+    }) {
+        println!("{context}: (info) {}", info.trim());
+    }
+    println!(
+        "{context}: (info) waited {:.1} s (the serial log stopped growing = {stalled})",
+        waited.as_secs_f64()
+    );
+
+    let passed = content_went_through
+        && reader_waited_first
+        && writer_waited
+        && big_went_through
+        && writer_saw_epipe
+        && right_missing_did_not_hang
+        && reached_the_end
+        && all_left_sides_started
+        && no_error;
+    if passed {
+        println!("{context}: PASS");
+        if expect_pass {
+            Ok(())
+        } else {
+            bail!("{context}: the sabotage was NOT caught; every judgement still held")
+        }
+    } else {
+        println!("{context}: FAILED");
+        if expect_pass {
+            bail!("{context}: FAILED")
+        } else {
+            println!("{context}: the sabotage was caught (this run is expected to fail)");
+            Ok(())
+        }
+    }
+}
+
 fn cmd_history_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
@@ -7050,6 +7409,32 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
 ///
 /// **`zi-test` と `view-test` が同じものを使う**（VIEW-b で閉包から切り出した。
 /// **同じ切り出し方を2つ書かない**）。
+/// 行の途中に挟まったカーネルの行を取り除く（`ADR-0063` の (b3)）。
+///
+/// **2 本の Ring 3 が同時に走ると、片方の出力の途中でもう片方のカーネルの行が serial へ
+/// 割り込む。** **`[INFO] ` か `task: the ring3 task` から、その行の終わりまでを消す。**
+/// **行頭から始まるカーネルの行は [`program_output`] が落とすので、ここで消えても同じである。**
+fn strip_embedded_kernel_lines(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    let mut rest = segment;
+    loop {
+        let next = ["[INFO] ", "task: the ring3 task"]
+            .iter()
+            .filter_map(|marker| rest.find(marker))
+            .min();
+        let Some(at) = next else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..at]);
+        rest = match rest[at..].find('\n') {
+            Some(end) => &rest[at + end + 1..],
+            None => "",
+        };
+    }
+    out
+}
+
 fn program_output(segment: &str) -> String {
     segment
         .lines()
@@ -8139,11 +8524,89 @@ fn cmd_virtio_irq_test(features: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// `--shell-test` の台本を、カーネルの台本として差し込んで回す（`ADR-0063` の (b3) の (b)）。
+///
+/// **駆動だけが違う。** **判定は [`judge_shell_session`] で同じである**——**台本では成り立たない
+/// 判定だけ [`SCRIPT_SKIPS`] で外す。** **打鍵を見ない破壊をここへ移すと、1 本あたり約 50 秒
+/// 縮む**（`--shell-test` の破壊は 58 秒、台本の族は 8.5 秒。実測）。
+fn cmd_shell_script_test(mode: ShellTestMode) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let kernel_elf = build_kernel_with_features(&workspace_root, &mode.features())?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let serial_log = workspace_root
+        .join("target")
+        .join(mode.serial_log_name().as_str());
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the shell script test")?;
+
+    // **台本の終わり（`script-done:`）か、起こし直しの印か、出力が伸びなくなるまで待つ。**
+    let started = Instant::now();
+    let deadline = started + PIPE_TEST_TIMEOUT;
+    let mut last_len = 0usize;
+    let mut last_growth = started;
+    let mut stalled = false;
+    while Instant::now() < deadline {
+        let text = strip_ansi(&read_lossy(&serial_log));
+        if text.contains("script-done:") || text.contains(SHELL_RESTART_MARKER) {
+            thread::sleep(Duration::from_secs(1));
+            break;
+        }
+        if text.len() > last_len {
+            last_len = text.len();
+            last_growth = Instant::now();
+        } else if last_growth.elapsed() > PIPE_TEST_STALL_LIMIT {
+            stalled = true;
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+    let waited = started.elapsed();
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = read_lossy(&serial_log);
+    let qemu = read_lossy(&debug_log);
+    let ready = serial.contains(SHELL_READY_MARKER);
+    println!(
+        "{}: (info) waited {:.1} s (the serial log stopped growing = {stalled})",
+        mode.context(),
+        waited.as_secs_f64()
+    );
+    judge_shell_session(mode, &serial, &qemu, qemu_exit.as_deref(), ready)
+}
+
 fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
-    let kernel_elf = build_kernel_with_features(&workspace_root, mode.features())?;
+    let kernel_elf = build_kernel_with_features(&workspace_root, &mode.features())?;
     // **`KEYMAP=us` の回は `disk0.img` を作り直さない（f-1b）。**
     // **1 度目の起動が `zi` で書き込んだものなので、作り直すと消える。**
     let esp_dir = if mode.keeps_the_disk() {
@@ -8198,8 +8661,8 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
             Ok(mut stream) => {
                 // **到達条件の 3 つを順に打つ。** そのあと `exit` で締める。
                 // **`slash` と `spc` と `minus` は monitor のキー名である。**
-                for line in SHELL_TEST_LINES {
-                    for key in *line {
+                for line in common::shell_script::LINES {
+                    for key in line.keys {
                         if writeln!(stream, "sendkey {key}").is_err() {
                             break;
                         }
@@ -9102,9 +9565,13 @@ fn judge_shell_session(
     // **判定 13——タイマは締切を過ぎてから起こした。**
     // **`timer-wakes-before-deadline` はここで落ちる**（毎ティック起こす）。
     let timer_kept_the_deadline = timer_woke_before_deadline == Some(0);
+    // **眠っていた間（深さ 2）は弾きに数えられないので、時計の進みから引く**（(b3) の (b)）。
+    // **台本で駆動するとセッションが 193 ティックで、`sleep 1` の 100 ティックが 6 割を占め、
+    // 引かないと関係が構造的に崩れた**（実測。sendkey では 4137 ティックのうちの 100 で効かなかった）。
+    let slept_ticks = sleep_advanced.unwrap_or(0) / 10;
     let clock_matches_the_timer = match (clock_from, clock_to, depth_one_not_folded) {
         (Some(from), Some(to), Some(folds)) if folds > 0 && to >= from => {
-            (to - from) * 2 <= folds * 3
+            (to - from).saturating_sub(slept_ticks) * 2 <= folds * 3
         }
         _ => false,
     };
@@ -9136,7 +9603,18 @@ fn judge_shell_session(
     );
     println!(
         "{context}: the clock kept pace with the timer = {clock_matches_the_timer} (ticks gained \
-         vs depth-one folds {depth_one_not_folded:?}; the bound is 1.5, measured 1.041)"
+         {:?} minus {slept_ticks} slept vs depth-one folds {depth_one_not_folded:?}; the bound \
+         is 1.5, measured {})",
+        clock_from
+            .zip(clock_to)
+            .map(|(from, to)| to.saturating_sub(from)),
+        match (clock_from, clock_to, depth_one_not_folded) {
+            (Some(from), Some(to), Some(folds)) if folds > 0 => format!(
+                "{:.3}",
+                (to.saturating_sub(from).saturating_sub(slept_ticks)) as f64 / folds as f64
+            ),
+            _ => "n/a".to_string(),
+        }
     );
     println!(
         "{context}: sleep 1 kept its length = {sleep_kept_its_length} (asked {sleep_asked:?} ms, \
@@ -9161,73 +9639,111 @@ fn judge_shell_session(
     // **判定 3（起こされて進む）は、既存の判定が覆っている**——**打った字が届き、
     // `ls`・`cat`・`hello` が走ったことを上で見ている。** **同じことを 2 度数えない。**
 
-    if ready
-        && ended
-        && restarted
-        && echoed
-        && ran_ls
-        && ran_cat
-        && ran_hello
-        && ran_c_hello
-        && c_heap_worked
-        && bare_names_resolved
-        && argv0_is_as_typed
-        && backspace_edited_the_line
-        && arrow_behaved_as_expected
-        && esc_behaved_as_expected
-        && (jis_only_keys_reached_ring3 == mode.expects_the_jis_only_keys())
-        && !only_one_jis_key_arrived
-        && home_and_end_moved_the_insertion_point
-        && ctrl_a_and_e_moved_the_insertion_point
-        && delete_removed_the_character
-        && tab_stayed_out_of_the_line
-        && unknown_ctrl_stayed_out_of_the_line
-        && long_line_was_refused
-        && history_walked_with_arrows
-        && history_walked_with_ctrl
-        && ctrl_b_and_f_moved_the_insertion_point
-        && kernel_stack_has_room
-        && excursion_stack_has_room
-        && ctrl_k_cut_to_the_end
-        && ctrl_u_cut_to_the_start
-        && ctrl_w_deleted_the_word
-        && ctrl_d_deleted_the_character
-        && ctrl_d_on_an_empty_line_did_nothing
-        && ctrl_l_redrew_the_screen
-        && the_pending_line_came_back
-        && duplicates_were_not_stored
-        && dollar_stayed_literal
-        && tilde_expanded
-        && layout_is_in_use
-        && echo_lines_are_accounted_for
-        && expanded_the_exported_name
-        && the_child_saw_the_exported_name
-        && set_listed_the_table
-        && export_refused_a_bad_name
-        && export_changed_the_path
-        && expanded_a_value
-        && empty_word_was_dropped
-        && expanded_to_nothing
-        && expanded_inside_a_word
-        && ctrl_c_discarded_the_line
-        && ctrl_c_stopped_the_child
-        && restarted_only_once
-        // **W2-c-2 の判定 3 本**（1 / 2 / 4。`ADR-0061`）。
-        && read_did_not_spin
-        && bsp_slept
-        && no_missed_wake
-        && woke_empty_and_waited_again
-        && depth_one_was_not_folded
-        // **W2-d+ の判定 2 本（`ADR-0062`）。**
-        && clock_advanced
-        && clock_matches_the_timer
-        // **W2-d+ の (b)(c) の判定 5 本（`ADR-0062`）。**
-        && sleep_kept_its_length
-        && slept_on_the_timer
-        && no_early_timer_wake
-        && woke_only_for_the_reason
-        && timer_kept_the_deadline
-    {
+    // **判定を名前つきの一覧にする（`ADR-0063` の (b3) の (b)）。** **台本で駆動したときは
+    // [`SCRIPT_SKIPS`] の判定を見ない**——**見なかったことと、落ちた名前を行に出す。**
+    let judgements: &[(&str, bool)] = &[
+        ("ready", ready),
+        ("ended", ended),
+        ("restarted", restarted),
+        ("echoed", echoed),
+        ("ran_ls", ran_ls),
+        ("ran_cat", ran_cat),
+        ("ran_hello", ran_hello),
+        ("ran_c_hello", ran_c_hello),
+        ("c_heap_worked", c_heap_worked),
+        ("bare_names_resolved", bare_names_resolved),
+        ("argv0_is_as_typed", argv0_is_as_typed),
+        ("backspace_edited_the_line", backspace_edited_the_line),
+        ("arrow_behaved_as_expected", arrow_behaved_as_expected),
+        ("esc_behaved_as_expected", esc_behaved_as_expected),
+        (
+            "jis_only_keys_reached_ring",
+            (jis_only_keys_reached_ring3 == mode.expects_the_jis_only_keys()),
+        ),
+        ("only_one_jis_key_arrived", !only_one_jis_key_arrived),
+        (
+            "home_and_end_moved_the_insertion_point",
+            home_and_end_moved_the_insertion_point,
+        ),
+        (
+            "ctrl_a_and_e_moved_the_insertion_point",
+            ctrl_a_and_e_moved_the_insertion_point,
+        ),
+        ("delete_removed_the_character", delete_removed_the_character),
+        ("tab_stayed_out_of_the_line", tab_stayed_out_of_the_line),
+        (
+            "unknown_ctrl_stayed_out_of_the_line",
+            unknown_ctrl_stayed_out_of_the_line,
+        ),
+        ("long_line_was_refused", long_line_was_refused),
+        ("history_walked_with_arrows", history_walked_with_arrows),
+        ("history_walked_with_ctrl", history_walked_with_ctrl),
+        (
+            "ctrl_b_and_f_moved_the_insertion_point",
+            ctrl_b_and_f_moved_the_insertion_point,
+        ),
+        ("kernel_stack_has_room", kernel_stack_has_room),
+        ("excursion_stack_has_room", excursion_stack_has_room),
+        ("ctrl_k_cut_to_the_end", ctrl_k_cut_to_the_end),
+        ("ctrl_u_cut_to_the_start", ctrl_u_cut_to_the_start),
+        ("ctrl_w_deleted_the_word", ctrl_w_deleted_the_word),
+        ("ctrl_d_deleted_the_character", ctrl_d_deleted_the_character),
+        (
+            "ctrl_d_on_an_empty_line_did_nothing",
+            ctrl_d_on_an_empty_line_did_nothing,
+        ),
+        ("ctrl_l_redrew_the_screen", ctrl_l_redrew_the_screen),
+        ("the_pending_line_came_back", the_pending_line_came_back),
+        ("duplicates_were_not_stored", duplicates_were_not_stored),
+        ("dollar_stayed_literal", dollar_stayed_literal),
+        ("tilde_expanded", tilde_expanded),
+        ("layout_is_in_use", layout_is_in_use),
+        ("echo_lines_are_accounted_for", echo_lines_are_accounted_for),
+        ("expanded_the_exported_name", expanded_the_exported_name),
+        (
+            "the_child_saw_the_exported_name",
+            the_child_saw_the_exported_name,
+        ),
+        ("set_listed_the_table", set_listed_the_table),
+        ("export_refused_a_bad_name", export_refused_a_bad_name),
+        ("export_changed_the_path", export_changed_the_path),
+        ("expanded_a_value", expanded_a_value),
+        ("empty_word_was_dropped", empty_word_was_dropped),
+        ("expanded_to_nothing", expanded_to_nothing),
+        ("expanded_inside_a_word", expanded_inside_a_word),
+        ("ctrl_c_discarded_the_line", ctrl_c_discarded_the_line),
+        ("ctrl_c_stopped_the_child", ctrl_c_stopped_the_child),
+        ("restarted_only_once", restarted_only_once),
+        ("read_did_not_spin", read_did_not_spin),
+        ("bsp_slept", bsp_slept),
+        ("no_missed_wake", no_missed_wake),
+        ("woke_empty_and_waited_again", woke_empty_and_waited_again),
+        ("depth_one_was_not_folded", depth_one_was_not_folded),
+        ("clock_advanced", clock_advanced),
+        ("clock_matches_the_timer", clock_matches_the_timer),
+        ("sleep_kept_its_length", sleep_kept_its_length),
+        ("slept_on_the_timer", slept_on_the_timer),
+        ("no_early_timer_wake", no_early_timer_wake),
+        ("woke_only_for_the_reason", woke_only_for_the_reason),
+        ("timer_kept_the_deadline", timer_kept_the_deadline),
+    ];
+    let skipped: Vec<&str> = judgements
+        .iter()
+        .filter(|(name, _)| mode.driven_by_script() && SCRIPT_SKIPS.contains(name))
+        .map(|(name, _)| *name)
+        .collect();
+    let failed: Vec<&str> = judgements
+        .iter()
+        .filter(|(name, held)| !held && !skipped.contains(name))
+        .map(|(name, _)| *name)
+        .collect();
+    if !skipped.is_empty() {
+        println!("{context}: (info) not judged under the script driver: {skipped:?}");
+    }
+    if !failed.is_empty() {
+        println!("{context}: (info) judgements that did not hold: {failed:?}");
+    }
+    if failed.is_empty() {
         println!("{context}: PASS");
         if mode.expects_to_pass() {
             Ok(())
@@ -9272,19 +9788,11 @@ const KERNEL_STACK_MIN_SPARE: usize = 16 * 1024;
 /// **f-2 で深さ 0 の使用量が 40% から 43% へ動いたときに気づいた**）。
 const EXCURSION_STACK_MIN_SPARE: usize = 16 * 1024;
 
-/// `LINE_MAX` ちょうどの打鍵（SE-c）。**`z` を 128 個と Enter。**
-///
-/// **`kernel/userland/zash.rs` の `LINE_MAX` と同じ数である。**
-/// **あちらを変えたらここも変えること**——**数が合わないと、溢れの境目を
-/// 打たなくなる**（判定は静かに緑になる）。
-const LONG_LINE_KEYS: usize = 128;
-
-/// 上の打鍵を並べたもの。
-static LONG_LINE_SCRIPT: [&str; LONG_LINE_KEYS + 1] = {
-    let mut keys = ["z"; LONG_LINE_KEYS + 1];
-    keys[LONG_LINE_KEYS] = "ret";
-    keys
-};
+// **`--shell-test` が打つ行は `common::shell_script::LINES` にある**（`ADR-0063` の (b3) の (b)）。
+//
+// **ここに在った一覧を `common` へ移した**——**同じ台本を、`sendkey` で打つ形（ここ）と
+// カーネルの台本として差し込む形（`shell-script-test`）の両方が読むためである。**
+// **各行の意味は、あちらの行頭のコメントと、ここの判定の doc にある。**
 
 /// `--shell-test` が打つ行（S11-11。S12 前の手当ての 3 本目で伸ばした）。
 ///
@@ -9325,427 +9833,6 @@ const ECHO_LINES_IN_ORDER: &[&str] = &[
     "echo $ZF2 (after export)",
     "echo qq rr + Ctrl+W",
     "echo $1",
-];
-
-const SHELL_TEST_LINES: &[&[&str]] = &[
-    // /bin/ls
-    &["slash", "b", "i", "n", "slash", "l", "s", "ret"],
-    // /bin/cat /etc/motd
-    &[
-        "slash", "b", "i", "n", "slash", "c", "a", "t", "spc", "slash", "e", "t", "c", "slash",
-        "m", "o", "t", "d", "ret",
-    ],
-    // /bin/hello
-    &[
-        "slash", "b", "i", "n", "slash", "h", "e", "l", "l", "o", "ret",
-    ],
-    // /bin/chello（C-a。`ADR-0057`）。**C で書いたプログラムが走ること。**
-    //
-    // **`hello` の隣に置く。** **主張が同じ族だからである**——
-    // **シェルが `/bin` の実行ファイルを起こせること。** **違うのは言語だけで、
-    // 通る道（ELF ローダ・`int 0x80`・`spawn`）は同じである。**
-    &[
-        "slash", "b", "i", "n", "slash", "c", "h", "e", "l", "l", "o", "ret",
-    ],
-    // ls（`/` を含まない。`/bin/` の下で見つかること）
-    &["l", "s", "ret"],
-    // cat /etc/motd（`/` を含まない語 + `/` を含む引数）
-    &[
-        "c", "a", "t", "spc", "slash", "e", "t", "c", "slash", "m", "o", "t", "d", "ret",
-    ],
-    // spawn-test beta（`argv[0]` が打った語のままであること）
-    &[
-        "s", "p", "a", "w", "n", "minus", "t", "e", "s", "t", "spc", "b", "e", "t", "a", "ret",
-    ],
-    // abc → Backspace → x（S12 前の手当て）。**行編集が効いていることを見る。**
-    //
-    // **打つのは `abc`、消してから `x` なので、走るのは `abx` である。**
-    // **消えていなければ `abcx` になる**——判定は 2 本で、
-    // **出る側（`abx`）と出ない側（`abcx`）の両方を見る。**
-    // どちらも実在しない語なので、シェルは `cannot run` を返す。
-    &["a", "b", "c", "backspace", "x", "ret"],
-    // pq → 左 → y（S12 前の手当て）。**挿入点が動いたことを見る。**
-    //
-    // **左へ 1 つ動いてから `y` を入れるので、走るのは `pyq` である。**
-    // **動いていなければ `pqy` になる。** ここも 2 本で見る。
-    &["p", "q", "left", "y", "ret"],
-    // m → Esc → [ → D → n（zi-a）。**Esc が Ring 3 へ届いたことを見る。**
-    //
-    // **Esc キーそのものを打ち、`[` と `D` を続ける。** 届いていれば zash の
-    // 状態機械が 3 打を `\x1b[D`（左）として解釈し、挿入点が 1 つ戻って
-    // `n` が頭へ入る——**走るのは `nm` である。**
-    // **届いていなければ Esc は捨てられ、`[` と `D` が字のまま入る**——
-    // `m[Dn` になる。ここも 2 本で見る。
-    // **`shift-d` は monitor のキー名である**（大文字 D。zash は `D` だけを
-    // 左と解釈する）。
-    //
-    // **`bracket_right` で `[` を打つ（zi-e）。** **monitor のキー名は物理の
-    // 位置を指しており、名前は US の刻印から付いている**——`bracket_left` は
-    // `0x1A` で、**JIS ではそこが `@` である。** **既定を JIS にした段で、
-    // 打つ位置を `0x1B`（JIS の `[`）へ移した。**
-    //
-    // **この 1 本が、実機で変換表を通る唯一の判定である**（台本の経路は
-    // `read_bytes` へ直に差し込むのでデコーダを通らない。`kernel/src/input.rs`）。
-    &["m", "esc", "bracket_right", "shift-d", "n", "ret"],
-    // ろ → ¥ → Enter（zi-e）。**変換表の外に居る 2 キーが Ring 3 へ届くこと。**
-    //
-    // **どちらも `\` を出すので、走るのは `\\` である**（実在しない語なので
-    // `cannot run` が返る）。**片方でも落ちれば語が `\` 1 文字になり、
-    // 両方落ちれば空行になって何も走らない。** 3 つの結果が区別できる。
-    //
-    // **ここが見るのは前景の経路である**——`--interrupt-test keyboard` が
-    // 見ているのはカーネル側の消費者（`drain_keyboard`）で、**消費者が違う。**
-    // **同じ表を引くが、通る層が違うので両方に置く。**
-    &["ro", "yen", "ret"],
-    // **上下で行が壊れないことを見る台本は、SE-c で外した。**
-    //
-    // **あれは「zash が上下を読んで捨てる」ことに寄りかかっていた**（zi-a。
-    // 履歴が無かった）。**SE-c で上下に意味ができたので、前提そのものが消えた。**
-    // **上下が届くことは、下の履歴の判定が主張している。**
-    // a → b → Home → c → End → d（SE-b。ADR-0050）。**Home と End が端へ動かす。**
-    //
-    // **走るのは `cabd` である**（`ab` の頭へ `c` を入れ、末尾へ `d` を入れる）。
-    // **届いていなければ挿入点が動かず、`abcd` になる。** ここも 2 本で見る。
-    &["a", "b", "home", "c", "end", "d", "ret"],
-    // e → f → Ctrl+A → g → Ctrl+E → h（SE-b。ADR-0050）。**Ctrl+A と Ctrl+E。**
-    //
-    // **走るのは `gefh` である。** **一般化が外れていれば Ctrl+A は `a` を、
-    // Ctrl+E は `e` を出す**ので、`efageh` になる。**その形も見る。**
-    &["e", "f", "ctrl-a", "g", "ctrl-e", "h", "ret"],
-    // i → j → 左 → Delete（SE-b）。**Delete が挿入点の字を消す。**
-    //
-    // **走るのは `i` である。** **扱っていなければ `3` と `~` が字として入り、
-    // `i3~j` になる**——**実測でその形だった**（2026-08-28）。
-    &["i", "j", "left", "delete", "ret"],
-    // k → Tab → l（SE-b。ADR-0050）。**Tab が行へ入らない。**
-    //
-    // **走るのは `kl` である。** **捨てていなければ `0x09` が語に混ざる**
-    // ——**実測でそうなっていた**（2026-08-28）。
-    //
-    // **Ctrl+D と別の行にしてある。** **落ちる破壊が違う**——
-    // **Tab は Ctrl+英字ではないので、`keyboard-drop-ctrl-letters-test` では
-    // 緑のままである。**
-    &["k", "tab", "l", "ret"],
-    // n → Ctrl+G → o（SE-b。ADR-0050。**SE-f で Ctrl+D から移した**）。
-    // **一般化した Ctrl+英字のうち、受け手が決まっていないものが行へ入らない。**
-    //
-    // **走るのは `no` である。** **捨てていなければ `0x07` が語に混ざる。**
-    // **以前は Ctrl+D を打っていたが、SE-f であれに意味ができた**
-    // ——**受け手が決まった鍵では「捨てる」を主張できない。**
-    // **`Ctrl+G` を選んだのは、受け手が無く、`0x0A`（Enter）や `0x09`（Tab）と
-    // 重ならないためである。**
-    // **`keyboard-drop-ctrl-letters-test` では Ctrl+G が `g` を出す**ので
-    // `ngo` になり、この判定も落ちる。
-    &["n", "ctrl-g", "o", "ret"],
-    // `echo $PATH`（SE-d と SE-e。ADR-0049 と ADR-0043）。**展開が起きたこと。**
-    //
-    // **`$` は Shift+4 である**（JIS の表。`kernel/src/keyboard/decode.rs`）。
-    // **出るのは `/bin` である。** **展開していなければ `$PATH` がそのまま出る。**
-    &[
-        "e", "c", "h", "o", "spc", "shift-4", "shift-p", "shift-a", "shift-t", "shift-h", "ret",
-    ],
-    // `echo a $UNSET b`（SE-d）。**丸ごと空になった語が落ちること。**
-    //
-    // **出るのは `a b` で、空白は 1 つである。** **落としていなければ
-    // 空の語が `argv` に残り、`a  b` になる**（空白 2 つ）。
-    // **この 1 本だけが `shell-keep-empty-word-test` を捕まえる。**
-    &[
-        "e", "c", "h", "o", "spc", "a", "spc", "shift-4", "shift-u", "shift-n", "shift-s",
-        "shift-e", "shift-t", "spc", "b", "ret",
-    ],
-    // `echo $UNSET`（SE-d）。**語が 0 個になること。**
-    //
-    // **出るのは空行である。** **`echo` は引数が無くても改行を出す。**
-    &[
-        "e", "c", "h", "o", "spc", "shift-4", "shift-u", "shift-n", "shift-s", "shift-e",
-        "shift-t", "ret",
-    ],
-    // `echo a$TERM b`（SE-d）。**`$` の直後以外の字が壊れないこと。**
-    //
-    // **出るのは `azaytos b` である**（`TERM` は `zaytos`。ADR-0041）。
-    &[
-        "e", "c", "h", "o", "spc", "a", "shift-4", "shift-t", "shift-e", "shift-r", "shift-m",
-        "spc", "b", "ret",
-    ],
-    // `echo ~`（f-1。`ADR-0049` の Addendum）。**`~` が `HOME` へ展開されること。**
-    //
-    // **`~` は Shift+`^` である**（JIS の表。`0x0D`）。**monitor のキー名は
-    // 物理の位置を指しており、名前は US の刻印から付いている**ので
-    // `shift-equal` である（`bracket_right` と同じ事情）。
-    //
-    // **出るのは `/root` である**（`ADR-0052` の Decision 5）。
-    // **展開していなければ `~` がそのまま出る。**
-    &["e", "c", "h", "o", "spc", "shift-equal", "ret"],
-    // `echo ~/x`（f-1）。**`~/` の形も展開されること。**
-    //
-    // **出るのは `/root/x` である。** **`~` 単独だけを見ると、
-    // 「`~` で始まる語をすべて `HOME` に置き換える」形が通ってしまう。**
-    &[
-        "e",
-        "c",
-        "h",
-        "o",
-        "spc",
-        "shift-equal",
-        "slash",
-        "x",
-        "ret",
-    ],
-    // `echo a~b`（f-1。Addendum の規則 1）。**語の先頭でなければ字である。**
-    //
-    // **出るのは `a~b` そのものである。** **こちらが主張の主である**
-    // ——**展開する側だけを見ると、どこでも展開する形が通る。**
-    &["e", "c", "h", "o", "spc", "a", "shift-equal", "b", "ret"],
-    // `echo @+`（f-1b）。**変換表が実行時に選ばれていることを見る。**
-    //
-    // **物理キーを 2 つ打つ。** **`bracket_left` は `0x1A`、
-    // `shift-semicolon` は `0x27` の Shift である**（monitor のキー名は
-    // 物理の位置を指しており、名前は US の刻印から付いている）。
-    //
-    // **JIS では `@` と `+`、US では `[` と `:` が出る**（実測。
-    // `kernel/src/keyboard/decode.rs` の 2 つの表を突き合わせた）。
-    //
-    // **2 つに分けてあるのは、`character_for` の別の経路を通るためである**
-    // ——**`0x1A` は素の表、`0x27` は Shift の表から来る。**
-    // **片方だけ切り替わる形を捕まえる。**
-    &[
-        "e",
-        "c",
-        "h",
-        "o",
-        "spc",
-        "bracket_left",
-        "shift-semicolon",
-        "ret",
-    ],
-    // --- f-2（`export` と `set`。`ADR-0053`）。**ここから下は末尾に足した** ---
-    //
-    // **末尾に置く理由は 2 つある。** **`echo` の `argc` の並びを見ている判定が
-    // 前に在り、間へ入れると添字がずれる**（族「台本を変えるときは、台本に
-    // 寄りかかっている判定を数え直すこと」）。**そして `PATH` を壊す行が在るので、
-    // 後続の行に影響を出さない位置に置く。**
-    //
-    // `echo $ZF2`（打つ前）。**まだ置いていないので、語が 0 個になり空行が出る。**
-    // **`envc` は 3 である**——**「打つ前」を見る側である**（`ADR-0053` の判定 3）。
-    &[
-        "e", "c", "h", "o", "spc", "shift-4", "shift-z", "shift-f", "2", "ret",
-    ],
-    // `export ZF2=exported`。**`=` は JIS では `-` キーの Shift である。**
-    &[
-        "e",
-        "x",
-        "p",
-        "o",
-        "r",
-        "t",
-        "spc",
-        "shift-z",
-        "shift-f",
-        "2",
-        "shift-minus",
-        "e",
-        "x",
-        "p",
-        "o",
-        "r",
-        "t",
-        "e",
-        "d",
-        "ret",
-    ],
-    // `echo $ZF2`（打った後）。**シェルの表から引けること**（判定 1）。
-    // **`envc` は 4 になる**——**子へ届いたこと**（判定 3）。
-    &[
-        "e", "c", "h", "o", "spc", "shift-4", "shift-z", "shift-f", "2", "ret",
-    ],
-    // `set`。**表の一覧が出ること**（判定 2）。
-    &["s", "e", "t", "ret"],
-    // `export 1BAD=x`。**誤りが人に見えること**（判定 5。運用者の指示）。
-    //
-    // **名前の規則で断られる**——`[A-Za-z_]` で始まらない。
-    &[
-        "e",
-        "x",
-        "p",
-        "o",
-        "r",
-        "t",
-        "spc",
-        "1",
-        "shift-b",
-        "shift-a",
-        "shift-d",
-        "shift-minus",
-        "x",
-        "ret",
-    ],
-    // `export PATH=/nope` → `hello` → `export PATH=/bin` → `hello`（判定 4）。
-    //
-    // **シェル自身の振る舞いが変わること**（`ADR-0053` の Decision 6。
-    // **控えたままだと「変えたのに効かない」が残る**）。
-    //
-    // **`ls` ではなく `hello` を使う。** **`bare names resolved under /bin` が
-    // 「`zash: ls: cannot run` が出ないこと」を見ており、`ls` を落とすと
-    // あちらが壊れる**（族「台本を変えるときは、台本に寄りかかっている判定を
-    // 数え直すこと」。**数え直して見つけた**）。
-    &[
-        "e",
-        "x",
-        "p",
-        "o",
-        "r",
-        "t",
-        "spc",
-        "shift-p",
-        "shift-a",
-        "shift-t",
-        "shift-h",
-        "shift-minus",
-        "slash",
-        "n",
-        "o",
-        "p",
-        "e",
-        "ret",
-    ],
-    &["h", "e", "l", "l", "o", "ret"],
-    &[
-        "e",
-        "x",
-        "p",
-        "o",
-        "r",
-        "t",
-        "spc",
-        "shift-p",
-        "shift-a",
-        "shift-t",
-        "shift-h",
-        "shift-minus",
-        "slash",
-        "b",
-        "i",
-        "n",
-        "ret",
-    ],
-    &["h", "e", "l", "l", "o", "ret"],
-    // aa / bb を打ってから 上 上（SE-c）。**履歴を矢印で辿る。**
-    //
-    // **辿れていれば `aa` が 2 度走る**（打ったときと、辿って Enter したとき）。
-    // **積んでいなければ上は何もせず、空行になって 1 度きりである。**
-    // **数で見る**——同じ語なので、出る側と出ない側では分けられない。
-    &["a", "a", "ret"],
-    &["b", "b", "ret"],
-    &["up", "up", "ret"],
-    // cc / dd を打ってから Ctrl+P Ctrl+P Ctrl+N（SE-c）。**同じ履歴を Ctrl で辿る。**
-    //
-    // **2 つ戻って 1 つ進むので、走るのは `dd` である**（2 度目）。
-    // **矢印と同じ関数を通しているが、それは判定になっていない**ので、
-    // **両方の経路に判定を置く。**
-    &["c", "c", "ret"],
-    &["d", "d", "ret"],
-    &["ctrl-p", "ctrl-p", "ctrl-n", "ret"],
-    // r s → Ctrl+B → t → Ctrl+F → u（SE-c）。**Ctrl+B と Ctrl+F が左右へ動かす。**
-    //
-    // **走るのは `rtsu` である。** **効いていなければ `b` と `f` が字として入り、
-    // `rsbtfu` になる**（`keyboard-drop-ctrl-letters-test` がその形である）。
-    &["r", "s", "ctrl-b", "t", "ctrl-f", "u", "ret"],
-    // `LINE_MAX` ちょうどの行（SE-c。`d7de0ce` の修正に判定を置く）。
-    //
-    // **`z` を 128 打ってから Enter する。** **入るのは 127 までで、128 打目は
-    // 溢れとして捨てられる**ので、**出るのは `zash: line too long` である。**
-    //
-    // **直す前はここで畳まれていた**——**`length` が `LINE_MAX` になり、
-    // `line[length] = 0` が配列の外を書いた。** **畳まれるとシェルが止まるので、
-    // この行より後ろの判定が全部落ちる。**
-    //
-    // **費用は打鍵の数である**（実測。この 1 行で `--shell-test` が 69.7 秒から
-    // 86.0 秒へ延びた。**`--full` は 14 回走らせるので約 3.8 分増える**）。
-    &LONG_LINE_SCRIPT,
-    // echo qq rr → Ctrl+W（SE-f）。**直前の語を消す。**
-    //
-    // **切れ目は空白だけである**（`zash` の `word_start`）。**`qq rr` の末尾で
-    // 打つと `qq ` が残るので、出るのは `qq` で `argc` は 2 である。**
-    // **効いていなければ `w` が字として入り、`qq rrw` になる**（`argc` は 3）。
-    &[
-        "e", "c", "h", "o", "spc", "q", "q", "spc", "r", "r", "ctrl-w", "ret",
-    ],
-    // echo $1（SE-f。`ADR-0049` の 5）。**`$` の直後が名前の先頭でなければ字である。**
-    //
-    // **出るのは `$1` そのものである。** **展開していれば消えるか、別の値になる。**
-    &["e", "c", "h", "o", "spc", "shift-4", "1", "ret"],
-    // kkxx → Ctrl+A → Ctrl+F Ctrl+F → Ctrl+K（SE-f）。**挿入点から行末まで消す。**
-    //
-    // **走るのは `kk` である。** **効いていなければ `kkxx` のままである。**
-    &[
-        "k", "k", "x", "x", "ctrl-a", "ctrl-f", "ctrl-f", "ctrl-k", "ret",
-    ],
-    // uuyy → Ctrl+A → Ctrl+F Ctrl+F → Ctrl+U（SE-f）。**行頭から挿入点まで消す。**
-    //
-    // **走るのは `yy` である。** **効いていなければ `uuyy` のままである。**
-    // **`Ctrl+K` と範囲の計算が逆なので、別の 1 本にする。**
-    &[
-        "u", "u", "y", "y", "ctrl-a", "ctrl-f", "ctrl-f", "ctrl-u", "ret",
-    ],
-    // mxmy → Ctrl+A → Ctrl+F → Ctrl+D（SE-f）。**挿入点の字を消す。**
-    //
-    // **走るのは `mmy` である。** **効いていなければ `mxmy` のままである。**
-    &["m", "x", "m", "y", "ctrl-a", "ctrl-f", "ctrl-d", "ret"],
-    // 空行で Ctrl+D → ee（SE-f）。**空行では何もしない。**
-    //
-    // **`bash` はここで EOF になりシェルが終わる。** **ZaytOS は何もしない**ので、
-    // **続けて打った `ee` がそのまま走る。** **終わっていれば `init` が起こし直し、
-    // 「ちょうど 1 回」の判定が落ちる。**
-    &["ctrl-d", "e", "e", "ret"],
-    // ll → Ctrl+L（SE-f）。**画面を消して描き直す。行は消さない。**
-    //
-    // **走るのは `ll` である。** **消す並びが出ていることは別に見る。**
-    &["l", "l", "ctrl-l", "ret"],
-    // st → 上 → Ctrl+N（SE-c の宿題）。**打ちかけの行が戻ること。**
-    //
-    // **辿ってから戻ると、打ちかけだった `st` が復る。** **復らなければ、
-    // 辿った先の行か空行になる。**
-    // **矢印を落とす構成でも `st` のままである**（上が届かないので辿らない）
-    // ——**どちらの構成でも同じ主張になる。**
-    &["s", "t", "up", "ctrl-n", "ret"],
-    // oo / pp / pp → 上 上（SE-c の宿題）。**同じ行が 2 つ並ばないこと。**
-    //
-    // **積まなければ履歴は `oo` `pp` の 2 本で、上 上 は `oo` へ届く。**
-    // **並べば `pp` `pp` になり、上 上 は `pp` で止まる。**
-    &["o", "o", "ret"],
-    &["p", "p", "ret"],
-    &["p", "p", "ret"],
-    &["up", "up", "ret"],
-    // 打ちかけの行を Ctrl+C で捨てる（S12 前の手当て、C）。**深さ 1 の側である。**
-    //
-    // **`zz` と打ってから Ctrl+C を送り、そのまま `ret` を打つ。**
-    // **捨てられていれば空行なので何も走らない。**
-    // **捨てられていなければ `zz` が走り、`cannot run` が出る。**
-    //
-    // **ここだけ右 Ctrl を使う**（`ctrl_r`。深さ 2 の側は左 Ctrl のままである）。
-    // **左右で同じに扱うと決めた**——右は `0xE0 0x1D` で来るので、接頭辞を
-    // 読み捨てないと左と区別が付く。**決めたことを回帰で守る。**
-    // **項目は増えない**——同じ 1 本の中で、左右の両方が通る形にしてある。
-    &["z", "z", "ctrl_r-c", "ret"],
-    // 回り続ける子を Ctrl+C で止める（S12 前の手当て、C）。**深さ 2 の側である。**
-    //
-    // **`spin` はシステムコールを出さずに回る**ので、**止められなければ
-    // ここで永久に止まる**（`--shell-test` は待ち時間の上限で落ちる）。
-    //
-    // **`ret` の後に間が要る。** 子が起きて 1 行出すまで待ってから Ctrl+C を送る
-    // ——**起きる前に送ると、旗が子より先に立って `spawn` が降ろしてしまう。**
-    &["s", "p", "i", "n", "ret"],
-    &["ctrl-c"],
-    // sleep 1（W2-d+。`ADR-0062`）。**タイマで眠る最初の利用者である。**
-    //
-    // **`exit` の直前に置く理由**——**次の行（`exit`）の打鍵は 400 ミリ秒後に届くので、
-    // 1 秒眠っている最中に積まれる。** **合図を取り違える破壊は、その打鍵で眠りを早く
-    // 起こす**——**機会を構造で作っている**（緑を出す道の「機会が無い」を避ける）。
-    // **普通に終わった子の後では、打ち込み済みの入力は捨てられない**（捨てるのは
-    // Ctrl+C で止めたときだけである。`userland.rs`）。
-    &["s", "l", "e", "e", "p", "spc", "1", "ret"],
-    // exit
-    &["e", "x", "i", "t", "ret"],
 ];
 
 fn cmd_keyboard_test() -> Result<()> {
@@ -16106,6 +16193,14 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "finish-does-not-wake",
     "reap-does-not-reset",
     "wait-window-is-wide",
+    // `ADR-0063` の (b3)。**パイプと口の破壊。**
+    "pipe-write-does-not-wake-reader",
+    "pipe-close-keeps-writer-count",
+    "pipe-read-empty-returns-zero",
+    "pipe-write-ignores-full",
+    "pipe-reader-not-reserved",
+    "spawn-detached-returns-early",
+    "wait-child-keeps-reservation",
     "percpu-fake-nonzero-cpu-id",
     "smp-tramp-corrupt-copy-test",
     "smp-ap-touch-scheduler-test",
@@ -16836,6 +16931,30 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("history-test {sabotage}");
             begin_item(&label);
             match cmd_history_test(&[sabotage], false) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
+            }
+        }
+
+        // **シェルの `|`（`ADR-0063` の (b3)）。** **台本の族で、1 回の起動で 7 本の `|` を見る。**
+        // **破壊は 7 つで、落ちる判定がそれぞれ違う**（`PIPE_TEST_SABOTAGES` の doc）。
+        total += 1;
+        begin_item("the shell runs a pipeline through the kernel's pipe");
+        match cmd_pipe_test(&[], true) {
+            Ok(()) => println!("--- pipe test: OK"),
+            Err(error) => {
+                println!("--- pipe test: FAILED ({error})");
+                failed.push("pipe test".to_string());
+            }
+        }
+        for sabotage in PIPE_TEST_SABOTAGES {
+            total += 1;
+            let label = format!("pipe-test {sabotage}");
+            begin_item(&label);
+            match cmd_pipe_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
                     println!("--- {label}: FAILED ({error})");
@@ -17631,6 +17750,31 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 }
             }
         }
+
+        // **同じ台本を台本の族で回す（`ADR-0063` の (b3) の (b)）。** **打鍵を見ない破壊は
+        // こちらで落とす**——**1 本あたり約 50 秒縮む。**
+        total += 1;
+        begin_item("the shell session is judged the same way when the script drives it");
+        match cmd_shell_script_test(ShellTestMode::ScriptNormal) {
+            Ok(()) => println!("--- shell script test: OK"),
+            Err(error) => {
+                println!("--- shell script test: FAILED ({error})");
+                failed.push("shell script test".to_string());
+            }
+        }
+        for feature in SHELL_SCRIPT_SABOTAGES {
+            total += 1;
+            begin_item(&format!(
+                "the shell script test catches the sabotage {feature}"
+            ));
+            match cmd_shell_script_test(ShellTestMode::ScriptMustFail(feature)) {
+                Ok(()) => println!("--- shell script test ({feature}): OK"),
+                Err(error) => {
+                    println!("--- shell script test ({feature}): FAILED ({error})");
+                    failed.push(format!("shell script test ({feature})"));
+                }
+            }
+        }
     }
 
     total += 1;
@@ -18340,7 +18484,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 34,
-    full: 315,
+    full: 324,
 };
 
 /// 実際に走った項目数が会計行と一致するかを見る。
