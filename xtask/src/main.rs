@@ -3691,7 +3691,21 @@ const SCRIPT_SKIPS: &[&str] = &[
 
 /// `shell-script-test` で回す破壊（`ADR-0063` の (b3) の (b)）。**`SHELL_TEST_SABOTAGES` から
 /// 移したもの**——**台本の形で 3 回続けて落ちたものだけを移す。**
-const SHELL_SCRIPT_SABOTAGES: &[&str] = &[];
+const SHELL_SCRIPT_SABOTAGES: &[&str] = &[
+    // **10 本とも台本の形で 3 回続けて落ちた**（実測。2026-09-19。**8 本は約 11 秒、
+    // `timer-never-wakes` と `idle-holds-bkl-across-hlt` は止まる形で 39 秒**）。
+    // **1 本あたり 47 秒か 19 秒縮む**（`--shell-test` の破壊は 58 秒）。
+    "clock-goes-backwards",
+    "timer-never-wakes",
+    "timer-wakes-before-deadline",
+    "env-drop-path-test",
+    "shell-skip-expansion-test",
+    "shell-export-not-pushed-test",
+    "shell-drop-history-test",
+    "shell-shift-delete-range-test",
+    "shell-keep-control-bytes-test",
+    "idle-holds-bkl-across-hlt",
+];
 
 /// `--shell-test` が「通らないこと」で捕まえる破壊（S12 前の手当て、C）。
 ///
@@ -3867,68 +3881,26 @@ const SERIAL_TEST_SABOTAGES: &[&str] = &["serial-no-lock-test"];
 const SYSCALLS_PER_BYTE_BOUND: u64 = 16;
 
 const SHELL_TEST_SABOTAGES: &[&str] = &[
-    // **W2-c-2 の 3 つ（`ADR-0061`）。** **落ちる判定はそれぞれ違う。**
+    // **打鍵の IRQ か Ctrl+C の畳みに依るものだけが残る**（`ADR-0063` の (b3) の (b)。2026-09-19）。
+    // **それ以外の 10 本は `SHELL_SCRIPT_SABOTAGES` へ移した**——**台本の形で 3 回続けて落ちた。**
     //
-    // **4 つ目（`wake-ignores-the-reason`）は置けなかった**——**合図が 1 つしか無いので、
-    // 「合図を見ずに全部起こす」は何も変えない。** **3 回とも全判定を通した**（実測。
-    // 2026-09-16）。**待つ理由が増える段（W2-d のタイマ）で置くこと。**
+    // **W2-c-2 の 2 つと W2-d+ の 1 つ（`ADR-0061` / `ADR-0062`）。** **`read(0)` の待ちと、
+    // 眠っている最中の打鍵に依る。** **`wake-ignores-the-reason` は W2-c-2 では置けず
+    // （合図が 1 つしか無かった）、W2-d+ で置けた。**
     "read-never-waits",
     "keyboard-does-not-wake",
-    "idle-holds-bkl-across-hlt",
-    // **W2-d+ の破壊（`ADR-0062`）。** **(a) の段では 1 つも置けなかった**——**利用者
-    // （`/bin/sleep`）ができた (b)(c) で、4 つが置けるようになった。**
-    //
-    // **`clock-ap-also-ticks` だけはまだ置けない**——**`--shell-test` は `-smp` を渡さないので
-    // 1 コアで走る**（`qemu_launch_args`。QEMU の既定は 1）。**AP が居ないので何も変えない**
-    // （緑を出す道の「機会が無い」）。**戻す契機は「`-smp 2` で時刻を見る項目ができたとき」である。**
-    "clock-goes-backwards",
     "wake-ignores-the-reason",
-    "timer-never-wakes",
-    "timer-wakes-before-deadline",
+    // **Ctrl+C の畳み（S12 前の手当て C）。** **旗を立てるのは IRQ1 のハンドラである。**
     "kill-ignore-interrupt-test",
     "kill-fold-at-depth-one-test",
     "kill-keep-stale-interrupt-test",
     "kill-fold-keep-bkl-test",
     "kill-keep-typed-input-test",
-    "env-drop-path-test",
-    // **SE-a と SE-b で 3 つ増えた（`ADR-0050`）。** 落ちる判定はそれぞれ違う——
-    // **Home / End の 1 本、Ctrl+A / Ctrl+E の 1 本、制御バイトの 1 本である。**
-    //
-    // **実測で、落ちた判定はこうだった**（2026-08-28。`--full`）。
-    // **`keyboard-drop-home-end-test` は 1 本**（Home と End）。
-    // **`keyboard-drop-ctrl-letters-test` は 2 本**（Ctrl+A / Ctrl+E と Ctrl+D）
-    // ——**Ctrl+英字そのものを外すので、Ctrl+英字を使う判定は全部落ちる。**
-    // **`shell-keep-control-bytes-test` は 2 本**（Tab と Ctrl+D）。
-    //
-    // **`keyboard-drop-ctrl-letters-test` は、止めた子の判定を落とさない**
-    // （実測で緑のままだった）。**中断の旗は割り込み側の別経路だからである**
-    // （`ADR-0050` の条件 1）。
-    // **どの判定が落ちたかは出力に並ぶ**（[`ShellTestMode::MustFail`] の doc）。
+    // **デコーダを外す破壊（SE-a / SE-b。`ADR-0050`）。** **台本はデコーダを通らないので、
+    // 打鍵でしか効かない。** **落ちる判定は `keyboard-drop-home-end-test` が 1 本、
+    // `keyboard-drop-ctrl-letters-test` が 2 本**（実測。2026-08-28）。
     "keyboard-drop-home-end-test",
     "keyboard-drop-ctrl-letters-test",
-    "shell-keep-control-bytes-test",
-    // **SE-d で 2 つ増えた（`ADR-0049`）。**
-    // **`shell-skip-expansion-test` は 4 本とも落とす**（どの行も展開に寄りかかる）。
-    //
-    // **`shell-keep-empty-word-test` は置かなかった。** **書いて走らせたが
-    // 捕まらなかった**（実測。2026-08-28）——**空の語を落とさなくても、
-    // `zash` の語へ切る側が空白の連なりを読み飛ばすので `argv` が変わらない。**
-    // **「状態が変わらない」で緑になる形である**（`ADR-0049` の Addendum）。
-    "shell-skip-expansion-test",
-    // **SE-c で 1 つ増えた。** **履歴を積まない。**
-    // **「上で辿れた」の判定は、既定の構成ではこの破壊でしか落ちない**
-    // ——**矢印を落とす破壊は期待のほうを裏返すので、落ちない。**
-    "shell-drop-history-test",
-    // **SE-f で 1 つ増えた。** **消す範囲の先頭を 1 つずらす。**
-    // **`keyboard-drop-ctrl-letters-test` が覆うのは「鍵が届くこと」であって、
-    // 「範囲の計算が正しいこと」ではない**——**`Ctrl+K` が行頭まで消す形は、
-    // 鍵が届いているのであちらでは捕まらない。**
-    "shell-shift-delete-range-test",
-    // **f-2 で 1 つ増えた（`ADR-0053`）。** **`export` した表を子へ積まない。**
-    // **落ちるのは「子が見た `envc`」の 1 本だけである**——**シェルの表は
-    // 引けるままなので、`echo $ZF2` も `set` も緑である。** **その形でしか
-    // 落ちない判定が在るので置いた。**
-    "shell-export-not-pushed-test",
 ];
 
 impl ShellTestMode {
