@@ -299,6 +299,25 @@ pub enum Wait {
         /// 起こしてよい最初の単調なティック（`idt::monotonic_ticks` の値）。
         deadline: u64,
     },
+    /// 待ち行列に接続が来るのを待っている（`ADR-0064`）。**`connect` が起こす。**
+    SocketAcceptable {
+        /// `crate::socket` の listener の添字。
+        listener: u8,
+    },
+    /// ソケットにバイトが来るのを待っている（`ADR-0064`）。**相手側の書きと閉じが起こす。**
+    SocketReadable {
+        /// `crate::socket` の接続の添字。
+        conn: u8,
+        /// 待っている側。
+        side: crate::socket::Side,
+    },
+    /// ソケットに空きができるのを待っている（`ADR-0064`）。**相手側の読みと閉じが起こす。**
+    SocketWritable {
+        /// `crate::socket` の接続の添字。
+        conn: u8,
+        /// 待っている側。
+        side: crate::socket::Side,
+    },
 }
 
 impl TaskState {

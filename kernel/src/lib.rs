@@ -57,6 +57,7 @@ pub mod quarantine;
 pub mod ring;
 pub mod ring3;
 pub mod smp;
+pub mod socket;
 pub mod stack;
 pub mod syscall;
 pub mod task;

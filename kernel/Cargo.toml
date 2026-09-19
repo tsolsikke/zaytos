@@ -270,6 +270,9 @@ pipe-test = []
 # --shell-test の台本をそのまま台本の族で回す（ADR-0063 の (b3) の (b)）。打鍵を見ない破壊を
 # ここへ移す。台本は common::shell_script が写す。
 shell-script-test = []
+# unix ドメインのストリームソケットを台本で回す（ADR-0064）。init が /bin/sockd を起こしっぱなしで
+# 起こし、台本が /bin/sockc の 6 つの形を打つ。判定は xtask の socket-test が読む。
+socket-test = []
 # 検証（f-1b）: 持ち越しの1度目で zi が /etc/environment へ KEYMAP=us を足す台本。
 keymap-rewrite-test = []
 # 破壊（f-1）: 環境の源を読まず、常に既定へ落ちる。ADR-0052 の Decision 1 を
@@ -545,6 +548,22 @@ pipe-reader-not-reserved = ["pipe-test"]
 spawn-detached-returns-early = ["pipe-test"]
 # 待つ口が使われなかった予約を消さない（ADR-0063 の (b3)）。次の `|` が通らない。
 wait-child-keeps-reservation = ["pipe-test"]
+# accept が待たずに -EAGAIN を返す（ADR-0064）。sockd が accept failed で終わる。
+socket-accept-does-not-wait = ["socket-test"]
+# connect が名前を見ない（ADR-0064）。無い名前への connect が繋がってしまう。
+socket-connect-ignores-name = ["socket-test"]
+# bind が取られた名前を見ない（ADR-0064）。同じ名前の 2 本目が -EADDRINUSE にならない。
+socket-bind-ignores-taken-name = ["socket-test"]
+# 端を閉じても閉じたことにしない（ADR-0064）。相手に EOF が来ず、永久に待つ。
+socket-close-keeps-peer-open = ["socket-test"]
+# 相手が閉じているのを見ずに書く（ADR-0064）。-EPIPE が返らない。
+socket-write-ignores-peer-closed = ["socket-test"]
+# ソケットへ書いても読み手を起こさない（ADR-0064）。双方が待つ。
+socket-write-does-not-wake-reader = ["socket-test"]
+# 空のソケットを EOF と誤る（ADR-0064）。返事が届く前にクライアントが終わる。
+socket-read-empty-returns-zero = ["socket-test"]
+# 両端が閉じても接続の枠を返さない（ADR-0064）。3 つ目の接続が -EAGAIN になる。
+socket-release-keeps-slot = ["socket-test"]
 # `spawn` で、子へ入る前に親の FP の状態を保存しない（`ADR-0058`）。
 # 親が `spawn` を跨いで値を保てなくなる。
 fp-spawn-no-save = []

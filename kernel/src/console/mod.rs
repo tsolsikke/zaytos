@@ -39,6 +39,7 @@ pub mod dirty;
     feature = "fp-test",
     feature = "ttf-test",
     feature = "pipe-test",
+    feature = "socket-test",
     feature = "shell-script-test"
 ))]
 pub(crate) mod probe;

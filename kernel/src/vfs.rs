@@ -269,6 +269,17 @@ impl Inode {
 ///
 /// **同じ実体を 2 回開けば、位置は 2 つある。** Linux が位置を `struct file` に
 /// 置いているのと同じ理由で、**[`Inode`] は位置を持たない。**
+/// ソケットの fd の状態（`ADR-0064`）。**表の添字は `crate::socket` のものである。**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocketState {
+    /// `socket()` の直後。**名前も接続もまだ無い。**
+    Unbound,
+    /// `bind` 済み（`listen` 前後とも）。**名前は listener が持つ。**
+    Listener { listener: u8 },
+    /// 繋がっている。**`accept` した側は `Server`、`connect` した側は `Client`。**
+    Stream { conn: u8, side: crate::socket::Side },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum File {
     /// ファイルシステムの実体を開いたもの。
@@ -309,6 +320,10 @@ pub enum File {
     PipeRead { pipe: u8 },
     /// パイプの書き端（`ADR-0063` の (b3)）。**`a | b` の左の fd 1 に据える。**
     PipeWrite { pipe: u8 },
+    /// unix ドメインのストリームソケット（`ADR-0064`）。**1 つの fd で読み書き両方**——
+    /// **向きは [`SocketState::Stream`] の `side` が持つ。** **`socket` → `bind`/`listen` →
+    /// `accept`、または `socket` → `connect` で、状態がその場で進む**（[`FileTable::replace`]）。
+    Socket { state: SocketState },
 }
 
 impl File {
@@ -328,13 +343,31 @@ impl File {
         }
     }
 
-    /// パイプの端を返す（`ADR-0063` の (b3)）。**閉じる経路はここへ集める**——
-    /// **`close` からも、表の `Drop`（プロセスの終わり）からも来る。**
-    pub fn release_pipe_end(&self) {
+    /// ソケットなら、その状態。
+    pub fn socket_state(&self) -> Option<SocketState> {
+        match self {
+            Self::Socket { state } => Some(*state),
+            _ => None,
+        }
+    }
+
+    /// パイプとソケットの端を返す（`ADR-0063` の (b3)、`ADR-0064`）。**閉じる経路はここへ
+    /// 集める**——**`close` からも、表の `Drop`（プロセスの終わり）からも来る。**
+    pub fn release_end(&self) {
         match self {
             Self::PipeRead { pipe } => crate::pipe::close_read_end(*pipe),
             Self::PipeWrite { pipe } => crate::pipe::close_write_end(*pipe),
-            _ => {}
+            Self::Socket {
+                state: SocketState::Stream { conn, side },
+            } => crate::socket::close_end(*conn, *side),
+            Self::Socket {
+                state: SocketState::Listener { listener },
+            } => crate::socket::close_listener(*listener),
+            Self::Socket {
+                state: SocketState::Unbound,
+            }
+            | Self::Regular { .. }
+            | Self::Terminal { .. } => {}
         }
     }
 
@@ -384,7 +417,10 @@ impl File {
     pub fn inode(&self) -> Option<&Inode> {
         match self {
             Self::Regular { inode, .. } => Some(inode),
-            Self::Terminal { .. } | Self::PipeRead { .. } | Self::PipeWrite { .. } => None,
+            Self::Terminal { .. }
+            | Self::PipeRead { .. }
+            | Self::PipeWrite { .. }
+            | Self::Socket { .. } => None,
         }
     }
 
@@ -392,7 +428,10 @@ impl File {
     pub fn offset(&self) -> u64 {
         match self {
             Self::Regular { offset, .. } => *offset,
-            Self::Terminal { .. } | Self::PipeRead { .. } | Self::PipeWrite { .. } => 0,
+            Self::Terminal { .. }
+            | Self::PipeRead { .. }
+            | Self::PipeWrite { .. }
+            | Self::Socket { .. } => 0,
         }
     }
 
@@ -430,7 +469,7 @@ impl File {
 impl Drop for FileTable {
     fn drop(&mut self) {
         for slot in self.slots.iter().flatten() {
-            slot.release_pipe_end();
+            slot.release_end();
         }
     }
 }
@@ -552,7 +591,7 @@ impl FileTable {
         let slot = self.slots.get_mut(fd)?;
         let previous = slot.replace(file);
         if let Some(previous) = previous {
-            previous.release_pipe_end();
+            previous.release_end();
         }
         previous
     }

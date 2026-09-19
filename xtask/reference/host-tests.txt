@@ -555,6 +555,9 @@ kernel::smp::tests::a_low_frame_is_sipi_addressable
 kernel::smp::tests::an_empty_allocator_reports_no_free_frame
 kernel::smp::tests::the_limit_itself_is_not_addressable
 kernel::smp::tests::the_recorded_ap_kernel_stack_range_matches_the_mapped_layout
+kernel::socket::tests::a_connection_starts_open_on_both_sides_and_is_not_accepted
+kernel::socket::tests::the_listener_name_is_the_recorded_length
+kernel::socket::tests::the_side_and_its_peer_index_the_two_rings
 kernel::stack::tests::a_range_contains_its_own_bounds
 kernel::stack::tests::each_stack_sits_directly_above_its_guard
 kernel::stack::tests::the_block_is_exactly_the_sum_of_its_parts

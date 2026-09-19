@@ -325,6 +325,7 @@ pub fn read_bytes(dst: &mut [u8]) -> usize {
         feature = "fp-test",
         feature = "ttf-test",
         feature = "pipe-test",
+        feature = "socket-test",
         feature = "shell-script-test"
     ))]
     {
@@ -603,6 +604,7 @@ pub fn arm_input_script() {
         feature = "fp-test",
         feature = "ttf-test",
         feature = "pipe-test",
+        feature = "socket-test",
         feature = "shell-script-test"
     ))]
     {
@@ -642,6 +644,7 @@ pub fn arm_input_script() {
     feature = "fp-test",
     feature = "ttf-test",
     feature = "pipe-test",
+    feature = "socket-test",
     feature = "shell-script-test"
 ))]
 pub(crate) mod script {
@@ -1065,6 +1068,23 @@ pub(crate) mod script {
     /// 挟んで写したものである**（`common::shell_script`）。**打鍵を見ない破壊をここで落とす。**
     #[cfg(feature = "shell-script-test")]
     const SCRIPT: &[u8] = common::shell_script::SCRIPT;
+
+    /// 台本（`ADR-0064`）。**`sockc` の 6 つの形を 1 つずつ打つ。** **判定は `xtask` の
+    /// `socket-test` が読む。** **`sockd` は `init` が起こしっぱなしで起こしてある。**
+    ///
+    /// - **`hello`** 往復 / **`big`** 書き手が待つ形（2,181 > 輪 1,024）/ **`nobody`** 無い名前
+    /// - **`bind`** 取られた名前 / **`twice`** 待ち行列 / **`quit`** 相手が閉じた後の read と write
+    ///
+    /// **`|` は打たない**——**起こしっぱなしの 1 本はサーバーが使っている。**
+    /// **`exit` を最後に打つ**——**計器の行（`socket:`）と回収の行はセッションが終わってから出る。**
+    #[cfg(feature = "socket-test")]
+    const SCRIPT: &[u8] = b"/bin/sockc hello\n\
+        /bin/sockc big\n\
+        /bin/sockc nobody\n\
+        /bin/sockc bind\n\
+        /bin/sockc twice\n\
+        /bin/sockc quit\n\
+        exit\n\x0c";
 
     #[cfg(feature = "pipe-test")]
     const SCRIPT: &[u8] = b"/bin/echo hello | /bin/cat\n\

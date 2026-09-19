@@ -632,6 +632,49 @@ pub const SYS_SPAWN_WITH_PIPED_STDIN: u64 = ZAYTOS_PRIVATE_BASE + 6;
 /// 永久に待つのを防ぐ**（`crate::pipe::drop_reservation`）。
 pub const SYS_WAIT_CHILD: u64 = ZAYTOS_PRIVATE_BASE + 7;
 
+/// `socket` の番号（Linux x86-64。`ADR-0064`）。**番号と `sockaddr_un` の配置は Linux から採る**
+/// （`ADR-0020`。**私物にしない**——**パイプの口が私物だったのは `spawn` の形に付いたからで、
+/// ソケットは Linux の形そのものが在る**）。
+///
+/// **受けるのは `socket(AF_UNIX, SOCK_STREAM, 0)` だけである。** **`type` の旗
+/// （`SOCK_CLOEXEC` / `SOCK_NONBLOCK`）も `-EINVAL` で断る**（限界。契機は `ADR-0064`）。
+pub const SYS_SOCKET: u64 = 41;
+/// `connect` の番号（`ADR-0064`）。**名前で繋ぐ。** **待ち受けが無ければ `-ECONNREFUSED`、
+/// 待ち行列が満杯なら `-EAGAIN`。**
+pub const SYS_CONNECT: u64 = 42;
+/// `accept` の番号（`ADR-0064`）。**待ち行列が空なら待つ**（[`crate::task::Wait::SocketAcceptable`]）。
+/// **`addr` は NULL しか受けない**（相手の名前は返さない。限界）。
+pub const SYS_ACCEPT: u64 = 43;
+/// `bind` の番号（`ADR-0064`）。**名前はカーネルの表に置く**——**ファイルシステムに inode は
+/// 作らない。** **抽象名（先頭 NUL）は `-EINVAL`。**
+pub const SYS_BIND: u64 = 49;
+/// `listen` の番号（`ADR-0064`）。**`backlog` は接続の上限で頭を切る**（Linux の `somaxconn` と同じ形）。
+pub const SYS_LISTEN: u64 = 50;
+
+/// `AF_UNIX`（Linux の値）。
+pub const AF_UNIX: u64 = 1;
+/// `SOCK_STREAM`（Linux の値）。
+pub const SOCK_STREAM: u64 = 1;
+/// `sockaddr_un` の大きさ（`sa_family_t` 2 + `sun_path` 108。Linux の配置）。
+pub const SOCKADDR_UN_LEN: u64 = 110;
+
+/// `ENOTSOCK`（ソケットでない fd への `bind` など）。
+pub const ENOTSOCK: i64 = 88;
+/// `EPROTONOSUPPORT`（`protocol` が 0 でない）。
+pub const EPROTONOSUPPORT: i64 = 93;
+/// `EAFNOSUPPORT`（`AF_UNIX` 以外）。
+pub const EAFNOSUPPORT: i64 = 97;
+/// `EADDRINUSE`（名前が取られている）。
+pub const EADDRINUSE: i64 = 98;
+/// `ENOBUFS`（listener の枠が無い）。
+pub const ENOBUFS: i64 = 105;
+/// `EISCONN`（繋がっている fd への `connect`）。
+pub const EISCONN: i64 = 106;
+/// `ENOTCONN`（繋がっていないソケットへの `read` / `write`）。
+pub const ENOTCONN: i64 = 107;
+/// `ECONNREFUSED`（その名前で待ち受けている者が居ない）。
+pub const ECONNREFUSED: i64 = 111;
+
 /// [`SYS_SPAWN`] が受け入れる像の最大の大きさ（S11-5）。
 ///
 /// # 32 KiB の根拠は実測である
@@ -1168,6 +1211,18 @@ unsafe fn dispatch(
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
             unsafe { sys_unlink(args[0], pml4_phys, direct_map) }
         }
+        // **unix ドメインのストリームソケット（`ADR-0064`）。** **5 つとも本体は
+        // `#[inline(never)]` の関数である**——**この `match` の枠に局所を乗せない。**
+        // **`spawn` の経路には載っていないので、`syscall-test` の高水位は動かない見込みである。**
+        SYS_SOCKET => socket_from_ring3(args[0], args[1], args[2]),
+        // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+        SYS_BIND => unsafe { bind_from_ring3(args[0], args[1], args[2], pml4_phys, direct_map) },
+        SYS_LISTEN => listen_from_ring3(args[0], args[1]),
+        SYS_ACCEPT => accept_from_ring3(args[0], args[1], bkl),
+        // SAFETY: 同上。
+        SYS_CONNECT => unsafe {
+            connect_from_ring3(args[0], args[1], args[2], pml4_phys, direct_map)
+        },
         SYS_CLOSE => {
             // **書きで開いた口を閉じたら、像を装置へ書き戻す（P-c-1）。**
             //
@@ -1176,9 +1231,10 @@ unsafe fn dispatch(
             // 1 回の保存で何度も 2MiB を書くことになる。**
             let closed = crate::vfs::with_current_files(|files| {
                 files.remove(args[0] as usize).map(|file| {
-                    // **パイプの端なら返す（`ADR-0063` の (b3)）。** **`remove` が返した
-                    // `File` は `Copy` で `Drop` を持たないので、ここで明示に返す。**
-                    file.release_pipe_end();
+                    // **パイプとソケットの端なら返す（`ADR-0063` の (b3)、`ADR-0064`）。**
+                    // **`remove` が返した `File` は `Copy` で `Drop` を持たないので、ここで
+                    // 明示に返す。**
+                    file.release_end();
                     file.is_writable_file()
                 })
             });
@@ -1437,6 +1493,336 @@ unsafe fn write_to_pipe(
             crate::pipe::WriteOutcome::Full => {
                 crate::pipe::note_writer_wait();
                 crate::task::set_current_waiting(crate::task::Wait::PipeWritable { pipe });
+                drop(bkl.take());
+                crate::task::yield_now();
+                *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
+            }
+        }
+    }
+}
+
+/// fd がソケットならその状態。**ソケットでなければ `Err(-ENOTSOCK)`、無い fd なら `Err(-EBADF)`。**
+fn socket_state_of(fd: u64) -> Result<crate::vfs::SocketState, u64> {
+    let found = crate::vfs::with_current_files(|files| {
+        files.get(fd as usize).map(|file| file.socket_state())
+    });
+    match found {
+        Ok(Some(state)) => Ok(state),
+        Ok(None) => Err((-ENOTSOCK) as u64),
+        Err(error) => Err((-errno_for_file_table(error)) as u64),
+    }
+}
+
+/// `sockaddr_un` を読み、名前を `name` へ写す。**長さを返す。失敗は `-errno`。**
+///
+/// **`sun_path` の先頭から最初の NUL まで、または `addrlen - 2` までが名前である**（Linux の形）。
+/// **空と抽象名（先頭 NUL）は `-EINVAL`、`NAME_MAX` を超えれば `-ENAMETOOLONG`。**
+///
+/// # 安全性
+///
+/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+unsafe fn read_socket_name(
+    addr: u64,
+    addrlen: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    name: &mut [u8; crate::socket::NAME_MAX],
+) -> Result<usize, i64> {
+    if !(2..=SOCKADDR_UN_LEN).contains(&addrlen) {
+        return Err(EINVAL);
+    }
+    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, addr, addrlen) }) else {
+        return Err(EFAULT);
+    };
+    let mut raw = [0u8; SOCKADDR_UN_LEN as usize];
+    // SAFETY: `slice` は検証済みで、`addrlen` はその長さである。
+    let read = unsafe { copy_from_user(&mut raw[..addrlen as usize], &slice) };
+    if read != addrlen as usize {
+        return Err(EFAULT);
+    }
+    if u16::from_le_bytes([raw[0], raw[1]]) != AF_UNIX as u16 {
+        return Err(EINVAL);
+    }
+    let path = &raw[2..addrlen as usize];
+    let len = path
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(path.len());
+    if len == 0 {
+        return Err(EINVAL);
+    }
+    if len > crate::socket::NAME_MAX {
+        return Err(ENAMETOOLONG);
+    }
+    name[..len].copy_from_slice(&path[..len]);
+    Ok(len)
+}
+
+/// [`SYS_SOCKET`] の本体。**`AF_UNIX` の `SOCK_STREAM` だけを受け、繋がっていない
+/// ソケットを最小の空き fd に置く。**
+#[inline(never)]
+fn socket_from_ring3(domain: u64, kind: u64, protocol: u64) -> u64 {
+    if domain != AF_UNIX {
+        return (-EAFNOSUPPORT) as u64;
+    }
+    if kind != SOCK_STREAM {
+        return (-EINVAL) as u64;
+    }
+    if protocol != 0 {
+        return (-EPROTONOSUPPORT) as u64;
+    }
+    let inserted = crate::vfs::with_current_files(|files| {
+        files.insert(crate::vfs::File::Socket {
+            state: crate::vfs::SocketState::Unbound,
+        })
+    });
+    match inserted {
+        Ok(fd) => fd as u64,
+        Err(error) => (-errno_for_file_table(error)) as u64,
+    }
+}
+
+/// [`SYS_BIND`] の本体。**名前を取り、fd を listener にする**（`listen` はまだ）。
+///
+/// # 安全性
+///
+/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+#[inline(never)]
+unsafe fn bind_from_ring3(
+    fd: u64,
+    addr: u64,
+    addrlen: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+) -> u64 {
+    match socket_state_of(fd) {
+        Ok(crate::vfs::SocketState::Unbound) => {}
+        Ok(_) => return (-EINVAL) as u64,
+        Err(errno) => return errno,
+    }
+    let mut name = [0u8; crate::socket::NAME_MAX];
+    // SAFETY: 呼び出し元契約による。
+    let len = match unsafe { read_socket_name(addr, addrlen, pml4_phys, direct_map, &mut name) } {
+        Ok(len) => len,
+        Err(errno) => return (-errno) as u64,
+    };
+    match crate::socket::bind(&name[..len]) {
+        Ok(listener) => {
+            crate::vfs::with_current_files(|files| {
+                files.replace(
+                    fd as usize,
+                    crate::vfs::File::Socket {
+                        state: crate::vfs::SocketState::Listener { listener },
+                    },
+                )
+            });
+            0
+        }
+        Err(crate::socket::BindError::NameTaken) => (-EADDRINUSE) as u64,
+        Err(crate::socket::BindError::NoRoom) => (-ENOBUFS) as u64,
+    }
+}
+
+/// [`SYS_LISTEN`] の本体。**`bind` 済みの fd だけを受ける。** **`backlog` は見ない**
+/// （接続の上限で頭を切る）。
+#[inline(never)]
+fn listen_from_ring3(fd: u64, _backlog: u64) -> u64 {
+    match socket_state_of(fd) {
+        Ok(crate::vfs::SocketState::Listener { listener }) => {
+            if crate::socket::listen(listener) {
+                0
+            } else {
+                (-EINVAL) as u64
+            }
+        }
+        Ok(_) => (-EINVAL) as u64,
+        Err(errno) => errno,
+    }
+}
+
+/// [`SYS_ACCEPT`] の本体。**待ち行列が空なら待つ。** **繋がった接続を新しい fd に置く。**
+///
+/// 破壊 (`ADR-0064`, socket-accept-does-not-wait): 待たずに `-EAGAIN` を返す。
+/// **`sockd` が `accept failed` で終わる。**
+#[inline(never)]
+fn accept_from_ring3(fd: u64, addr: u64, bkl: &mut Option<crate::bkl::BklGuard>) -> u64 {
+    let listener = match socket_state_of(fd) {
+        Ok(crate::vfs::SocketState::Listener { listener }) => listener,
+        Ok(_) => return (-EINVAL) as u64,
+        Err(errno) => return errno,
+    };
+    // **相手の名前は返さない**（限界）。**NULL 以外は断る**——黙って書かない形にしない。
+    if addr != 0 {
+        return (-EINVAL) as u64;
+    }
+    loop {
+        match crate::socket::accept(listener) {
+            crate::socket::AcceptOutcome::Connection(conn) => {
+                let inserted = crate::vfs::with_current_files(|files| {
+                    files.insert(crate::vfs::File::Socket {
+                        state: crate::vfs::SocketState::Stream {
+                            conn,
+                            side: crate::socket::Side::Server,
+                        },
+                    })
+                });
+                return match inserted {
+                    Ok(new_fd) => new_fd as u64,
+                    Err(error) => {
+                        // **表が満杯なら、取った接続の server 側を閉じる**——相手は EOF を見る。
+                        crate::socket::close_end(conn, crate::socket::Side::Server);
+                        (-errno_for_file_table(error)) as u64
+                    }
+                };
+            }
+            crate::socket::AcceptOutcome::NoListener => return (-EINVAL) as u64,
+            crate::socket::AcceptOutcome::Empty => {
+                #[cfg(feature = "socket-accept-does-not-wait")]
+                return (-EAGAIN) as u64;
+                #[cfg(not(feature = "socket-accept-does-not-wait"))]
+                {
+                    crate::socket::note_accept_wait();
+                    crate::task::set_current_waiting(crate::task::Wait::SocketAcceptable {
+                        listener,
+                    });
+                    drop(bkl.take());
+                    crate::task::yield_now();
+                    *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
+                }
+            }
+        }
+    }
+}
+
+/// [`SYS_CONNECT`] の本体。**名前で繋ぎ、fd をその場でストリームにする。**
+///
+/// # 安全性
+///
+/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+#[inline(never)]
+unsafe fn connect_from_ring3(
+    fd: u64,
+    addr: u64,
+    addrlen: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+) -> u64 {
+    match socket_state_of(fd) {
+        Ok(crate::vfs::SocketState::Unbound) => {}
+        Ok(crate::vfs::SocketState::Stream { .. }) => return (-EISCONN) as u64,
+        Ok(crate::vfs::SocketState::Listener { .. }) => return (-EINVAL) as u64,
+        Err(errno) => return errno,
+    }
+    let mut name = [0u8; crate::socket::NAME_MAX];
+    // SAFETY: 呼び出し元契約による。
+    let len = match unsafe { read_socket_name(addr, addrlen, pml4_phys, direct_map, &mut name) } {
+        Ok(len) => len,
+        Err(errno) => return (-errno) as u64,
+    };
+    match crate::socket::connect(&name[..len]) {
+        Ok(conn) => {
+            crate::vfs::with_current_files(|files| {
+                files.replace(
+                    fd as usize,
+                    crate::vfs::File::Socket {
+                        state: crate::vfs::SocketState::Stream {
+                            conn,
+                            side: crate::socket::Side::Client,
+                        },
+                    },
+                )
+            });
+            0
+        }
+        Err(crate::socket::ConnectError::NoListener) => (-ECONNREFUSED) as u64,
+        Err(crate::socket::ConnectError::NoRoom) => (-EAGAIN) as u64,
+    }
+}
+
+/// ソケットのストリームから読む（`ADR-0064`）。**空なら待つ。相手が閉じていれば 0（EOF）。**
+///
+/// # 安全性
+///
+/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+#[inline(never)]
+unsafe fn read_from_socket(
+    conn: u8,
+    side: crate::socket::Side,
+    buf: u64,
+    count: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    bkl: &mut Option<crate::bkl::BklGuard>,
+) -> u64 {
+    if count == 0 {
+        return 0;
+    }
+    let want = count.min(crate::socket::SOCKET_RING as u64);
+    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, buf, want) }) else {
+        return (-EFAULT) as u64;
+    };
+    let mut kbuf = [0u8; crate::socket::SOCKET_RING];
+    loop {
+        match crate::socket::read_into(conn, side, &mut kbuf[..want as usize]) {
+            crate::socket::ReadOutcome::Bytes(got) => {
+                // SAFETY: `slice` は検証済みで、`got` はその長さを越えない。
+                let written = unsafe { copy_to_user(&slice, 0, &kbuf[..got]) };
+                return written as u64;
+            }
+            crate::socket::ReadOutcome::Eof => return 0,
+            crate::socket::ReadOutcome::NoConnection => return (-ENOTCONN) as u64,
+            crate::socket::ReadOutcome::Empty => {
+                crate::socket::note_reader_wait();
+                crate::task::set_current_waiting(crate::task::Wait::SocketReadable { conn, side });
+                drop(bkl.take());
+                crate::task::yield_now();
+                *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
+            }
+        }
+    }
+}
+
+/// ソケットのストリームへ書く（`ADR-0064`）。**満杯なら待つ。相手が閉じていれば `-EPIPE`。**
+///
+/// **部分書きである**——**入った数を返す。** **`userlib::write_all` が残りを回す。**
+///
+/// # 安全性
+///
+/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+#[inline(never)]
+unsafe fn write_to_socket(
+    conn: u8,
+    side: crate::socket::Side,
+    buf: u64,
+    count: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    bkl: &mut Option<crate::bkl::BklGuard>,
+) -> u64 {
+    if count == 0 {
+        return 0;
+    }
+    let want = count.min(crate::socket::SOCKET_RING as u64);
+    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, buf, want) }) else {
+        return (-EFAULT) as u64;
+    };
+    let mut kbuf = [0u8; crate::socket::SOCKET_RING];
+    // SAFETY: `slice` は検証済みで、`want` はその長さである。
+    let read = unsafe { copy_from_user(&mut kbuf[..want as usize], &slice) };
+    if read == 0 {
+        return (-EFAULT) as u64;
+    }
+    loop {
+        match crate::socket::write_from(conn, side, &kbuf[..read]) {
+            crate::socket::WriteOutcome::Bytes(put) => return put as u64,
+            crate::socket::WriteOutcome::PeerClosed => return (-EPIPE) as u64,
+            crate::socket::WriteOutcome::NoConnection => return (-ENOTCONN) as u64,
+            crate::socket::WriteOutcome::Full => {
+                crate::socket::note_writer_wait();
+                crate::task::set_current_waiting(crate::task::Wait::SocketWritable { conn, side });
                 drop(bkl.take());
                 crate::task::yield_now();
                 *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
@@ -2067,6 +2453,22 @@ unsafe fn sys_read(
     if let Some(pipe) = pipe_read {
         // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
         return unsafe { read_from_pipe(pipe, buf, count, pml4_phys, direct_map, bkl) };
+    }
+
+    // **ソケット（`ADR-0064`）。** **繋がっていなければ `-ENOTCONN`。**
+    let socket = crate::vfs::with_current_files(|files| {
+        files
+            .get(fd as usize)
+            .ok()
+            .and_then(|file| file.socket_state())
+    });
+    match socket {
+        Some(crate::vfs::SocketState::Stream { conn, side }) => {
+            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+            return unsafe { read_from_socket(conn, side, buf, count, pml4_phys, direct_map, bkl) };
+        }
+        Some(_) => return (-ENOTCONN) as u64,
+        None => {}
     }
 
     // **表を握る区間を短くする。** ここでは inode と位置の写しだけを取り、
@@ -3452,6 +3854,22 @@ unsafe fn sys_write(
     if let Some(pipe) = pipe_write {
         // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
         return unsafe { write_to_pipe(pipe, buf, count, pml4_phys, direct_map, bkl) };
+    }
+
+    // **ソケット（`ADR-0064`）。** **繋がっていなければ `-ENOTCONN`。**
+    let socket = crate::vfs::with_current_files(|files| {
+        files
+            .get(fd as usize)
+            .ok()
+            .and_then(|file| file.socket_state())
+    });
+    match socket {
+        Some(crate::vfs::SocketState::Stream { conn, side }) => {
+            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+            return unsafe { write_to_socket(conn, side, buf, count, pml4_phys, direct_map, bkl) };
+        }
+        Some(_) => return (-ENOTCONN) as u64,
+        None => {}
     }
 
     #[cfg(not(feature = "write-ignores-fd"))]

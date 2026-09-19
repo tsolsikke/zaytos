@@ -106,6 +106,8 @@
 //! - `62` 端末への `ioctl(TIOCGWINSZ)` が 0 を返さなかった
 //! - `63` 画面の無い文脈なのに行が 0 でなかった（**起動シーケンスには前景が無い**）
 //! - `64` 知らない要求が `-ENOTTY` を返さなかった
+//! - `65` `socket(AF_UNIX, SOCK_STREAM, 0)` が最小の空き番号（3）を返さなかった、または閉じられなかった（`ADR-0064`）
+//! - `66` 待ち受けの無い名前への `connect` が `-ECONNREFUSED` を返さなかった（`ADR-0064`）
 //!
 //! # `argv` は `_start` の時点の `rsp` から読む
 //!
@@ -154,6 +156,14 @@ const SYS_EXIT: u32 = 60;
 const NEVER_IMPLEMENTED: u32 = 0x10FF;
 /// `-ENOSYS`。失敗は `-errno` で返る（`ADR-0020`）。
 const MINUS_ENOSYS: i32 = -38;
+/// `socket` の番号（Linux x86-64。`ADR-0064`）。
+const SYS_SOCKET: u32 = 41;
+/// `connect` の番号。
+const SYS_CONNECT: u32 = 42;
+/// `-ECONNREFUSED`。
+const MINUS_ECONNREFUSED: i32 = -111;
+/// `SOCKADDR_NOBODY` の長さ（`sa_family_t` 2 + `"nobody"` 6 + NUL 1）。
+const SOCKADDR_NOBODY_LEN: u32 = 9;
 /// 送るバイト列の長さ。
 const MESSAGE_LEN: u32 = 24;
 /// `open` の番号（Linux と同じ 2）。
@@ -1175,6 +1185,42 @@ core::arch::global_asm!(
     "  mov edi, 64",
     "  jne 9f",
 
+    // 65: socket(AF_UNIX, SOCK_STREAM, 0) は最小の空き番号（3。端末の 3 つの次）を返し、
+    //     閉じられる（ADR-0064）。**ここまでに開いた fd は全部閉じてある。**
+    "  mov eax, {sys_socket}",
+    "  mov edi, {af_unix}",
+    "  mov esi, {sock_stream}",
+    "  xor edx, edx",
+    "  int 0x80",
+    "  cmp rax, 3",
+    "  mov edi, 65",
+    "  jne 9f",
+    "  mov eax, {sys_close}",
+    "  mov edi, 3",
+    "  int 0x80",
+    "  test rax, rax",
+    "  mov edi, 65",
+    "  jne 9f",
+    // 66: 待ち受けの無い名前への connect は -ECONNREFUSED（ADR-0064）。**起動シーケンスに
+    //     サーバーは居ない。**
+    "  mov eax, {sys_socket}",
+    "  mov edi, {af_unix}",
+    "  mov esi, {sock_stream}",
+    "  xor edx, edx",
+    "  int 0x80",
+    "  mov r12, rax",
+    "  mov eax, {sys_connect}",
+    "  mov rdi, r12",
+    "  lea rsi, [rip + SOCKADDR_NOBODY]",
+    "  mov edx, {sockaddr_nobody_len}",
+    "  int 0x80",
+    "  cmp rax, {minus_econnrefused}",
+    "  mov edi, 66",
+    "  jne 9f",
+    "  mov eax, {sys_close}",
+    "  mov rdi, r12",
+    "  int 0x80",
+
     // すべて通った。
     "  xor edi, edi",
 
@@ -1259,6 +1305,11 @@ core::arch::global_asm!(
     "  .quad 0",
     "CAT_MISSING_PATH:",
     "  .asciz \"/nope\"",
+    // **`sockaddr_un`**（`sa_family_t` = AF_UNIX の 2 バイトと、NUL 終端の名前）。
+    ".balign 2",
+    "SOCKADDR_NOBODY:",
+    "  .short 1",
+    "  .asciz \"nobody\"",
     ".balign 8",
     "SPAWN_ARG_LS:",
     "  .asciz \"ls\"",
@@ -1354,6 +1405,12 @@ core::arch::global_asm!(
     minus_e2big = const MINUS_E2BIG,
     minus_eagain = const MINUS_EAGAIN,
     long_len = const LONG_MESSAGE_LEN,
+    sys_socket = const SYS_SOCKET,
+    sys_connect = const SYS_CONNECT,
+    af_unix = const 1,
+    sock_stream = const 1,
+    sockaddr_nobody_len = const SOCKADDR_NOBODY_LEN,
+    minus_econnrefused = const MINUS_ECONNREFUSED,
 );
 
 #[panic_handler]

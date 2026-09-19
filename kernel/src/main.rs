@@ -2004,6 +2004,11 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
     #[cfg(feature = "concurrent-test")]
     run_concurrent_test(logger, console.as_deref_mut());
 
+    // **ソケットのサーバーを起こしっぱなしで起こす（`ADR-0064`）。** **シェルより前に 1 度だけ。**
+    // **手形はセッションの締めで待つ。**
+    #[cfg(feature = "socket-test")]
+    let socket_server = start_socket_server(logger, console.as_deref_mut());
+
     let mut restarts = 0usize;
     loop {
         log_both(
@@ -2134,6 +2139,48 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
                     kernel::syscall::detached_entry_wait_ticks_max(),
                     kernel::syscall::terminal_writes_from_detached()
                 ));
+                // **ソケットの計器（`ADR-0064`）。** **台本の族（`socket-test`）が読む。**
+                //
+                // **計器は大域である**——**起動時の `syscall-test`（65・66 番）の分も乗る。**
+                // **66 番が無い名前へ `connect` するので、既定の起動でも `connect refused` は 1 で、
+                // `socket-test` の `sockc nobody` と合わせて 2 になる**（実測。一時のログで
+                // "nobody" が 2 回来ることを確かめた）。**だから `socket-test` の判定 5 は
+                // `connect refused >= 1` で見る。** **`pipe:` は大域だが起動時に触られない**
+                // ——**`syscall-test` はパイプを使わず、`pipe::create` は `|` の経路にしか無い**
+                // ——**ので `pipe-test` の判定は `== 7` で見てよい。**
+                logger.info(format_args!(
+                    "socket: listeners bound {} released {}, bind refused {}; connections created {} \
+                     (at most {} at once) released {}, connect refused {}, backlog full {}; \
+                     accepts waited {} time(s), readers waited {} time(s) and were woken by a \
+                     write {} time(s), writers waited {} time(s) and were woken by a read {} \
+                     time(s); writes to a closed peer {}, EOF seen {}",
+                    kernel::socket::bound(),
+                    kernel::socket::listeners_released(),
+                    kernel::socket::bind_refused(),
+                    kernel::socket::connections_created(),
+                    kernel::socket::connections_at_once_max(),
+                    kernel::socket::connections_released(),
+                    kernel::socket::connect_refused(),
+                    kernel::socket::connect_backlog_full(),
+                    kernel::socket::accept_waits(),
+                    kernel::socket::reader_waits(),
+                    kernel::socket::readers_woken_by_write(),
+                    kernel::socket::writer_waits(),
+                    kernel::socket::writers_woken_by_read(),
+                    kernel::socket::epipe_seen(),
+                    kernel::socket::eof_seen()
+                ));
+                // **`socket-test` のサーバーを手形で待って回収する（`ADR-0064`）。** **台本は
+                // `quit` を打ってから `exit` するので、ここでは既に終わっている。** **終わっていない
+                // なら（破壊）永久に待ち、`xtask` の「出力が伸びない」上限が落とす。**
+                #[cfg(feature = "socket-test")]
+                if restarts == 0 {
+                    let status = kernel::userland::wait_for_ring3_task(socket_server);
+                    logger.info(format_args!(
+                        "socket-test: /bin/sockd ended ({status:?}); unreaped child left = {}",
+                        kernel::task::has_unreaped_child()
+                    ));
+                }
             }
             Err(error) => {
                 log_both(
@@ -2177,6 +2224,56 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
 /// **待つ間は `yield_now` で譲る。** **Ring 3 へ入るまでの待ちには上限を置く**——**上限の無い待ちは、
 /// ハングと区別が付かない。** **終わるまでの待ちには置かない**——**本番の待ちに上限は置かない**
 /// （`ADR-0061`）。**この検査そのものの上限は、`cargo xtask check --concurrent-test` の側が持つ。**
+/// `socket-test` のサーバー（`/bin/sockd`）を起こしっぱなしで起こし、Ring 3 へ入るまで待つ
+/// （`ADR-0064`）。**手形を返す。**
+///
+/// **`concurrent-test` の `tickera` と同じ形である**——**シェルより前に 1 度だけ起こす。**
+/// **回収はセッションの締めで行う**（`run_init`）。**Seinas が来たときの形の予行である**
+/// ——**コンポジタは起動時に起こされ、名前で待ち、クライアントはシェルから名前で繋ぐ。**
+#[cfg(feature = "socket-test")]
+fn start_socket_server(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> u64 {
+    /// Ring 3 へ入るまで待つ上限（ティック）。
+    const ENTER_LIMIT_TICKS: u64 = 2_000;
+
+    let mut console = console;
+    let started = kernel::idt::timer_ticks();
+    let Some(handle) = kernel::userland::start_detached(b"/bin/sockd", b"sockd\0", 1, None, None)
+    else {
+        log_both(
+            logger,
+            console.as_deref_mut(),
+            LogLevel::Error,
+            format_args!("socket-test: could not start /bin/sockd; halting"),
+        );
+        cpu::halt_forever();
+    };
+    while !kernel::task::ring3_task_in_excursion() {
+        if kernel::idt::timer_ticks().saturating_sub(started) > ENTER_LIMIT_TICKS {
+            log_both(
+                logger,
+                console.as_deref_mut(),
+                LogLevel::Error,
+                format_args!(
+                    "socket-test: /bin/sockd did not enter Ring 3 within {ENTER_LIMIT_TICKS} \
+                     tick(s); halting"
+                ),
+            );
+            cpu::halt_forever();
+        }
+        kernel::task::yield_now();
+    }
+    log_both(
+        logger,
+        console.as_deref_mut(),
+        LogLevel::Info,
+        format_args!(
+            "socket-test: /bin/sockd entered Ring 3 after {} tick(s); starting the shell",
+            kernel::idt::timer_ticks().saturating_sub(started)
+        ),
+    );
+    handle
+}
+
 #[cfg(feature = "concurrent-test")]
 fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) {
     /// Ring 3 へ入るまで待つ上限（ティック）。
@@ -9987,6 +10084,51 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "pipe-test",
         cfg!(feature = "pipe-test"),
         "シェルの | を台本で回す",
+    ),
+    (
+        "socket-test",
+        cfg!(feature = "socket-test"),
+        "unix ドメインのストリームソケットを台本で回す",
+    ),
+    (
+        "socket-accept-does-not-wait",
+        cfg!(feature = "socket-accept-does-not-wait"),
+        "accept が待たずに -EAGAIN を返す",
+    ),
+    (
+        "socket-connect-ignores-name",
+        cfg!(feature = "socket-connect-ignores-name"),
+        "connect が名前を見ない",
+    ),
+    (
+        "socket-bind-ignores-taken-name",
+        cfg!(feature = "socket-bind-ignores-taken-name"),
+        "bind が取られた名前を見ない",
+    ),
+    (
+        "socket-close-keeps-peer-open",
+        cfg!(feature = "socket-close-keeps-peer-open"),
+        "端を閉じても閉じたことにしない",
+    ),
+    (
+        "socket-write-ignores-peer-closed",
+        cfg!(feature = "socket-write-ignores-peer-closed"),
+        "相手が閉じているのを見ずに書く",
+    ),
+    (
+        "socket-write-does-not-wake-reader",
+        cfg!(feature = "socket-write-does-not-wake-reader"),
+        "ソケットへ書いても読み手を起こさない",
+    ),
+    (
+        "socket-read-empty-returns-zero",
+        cfg!(feature = "socket-read-empty-returns-zero"),
+        "空のソケットを EOF と誤る",
+    ),
+    (
+        "socket-release-keeps-slot",
+        cfg!(feature = "socket-release-keeps-slot"),
+        "両端が閉じても接続の枠を返さない",
     ),
     (
         "shell-script-test",

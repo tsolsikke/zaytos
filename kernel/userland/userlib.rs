@@ -1089,3 +1089,63 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     // SAFETY: 確定的に #UD にする。
     unsafe { core::arch::asm!("ud2", options(noreturn)) }
 }
+
+/// `socket` の番号（Linux x86-64。`ADR-0064`）。**番号と `sockaddr_un` の配置は Linux から採る**
+/// （`ADR-0020`）。
+pub const SYS_SOCKET: u64 = 41;
+/// `connect` の番号。
+pub const SYS_CONNECT: u64 = 42;
+/// `accept` の番号。
+pub const SYS_ACCEPT: u64 = 43;
+/// `bind` の番号。
+pub const SYS_BIND: u64 = 49;
+/// `listen` の番号。
+pub const SYS_LISTEN: u64 = 50;
+/// `AF_UNIX`。**カーネルが受けるのはこれだけである。**
+pub const AF_UNIX: u64 = 1;
+/// `SOCK_STREAM`。**カーネルが受けるのはこれだけである**（旗も付けられない）。
+pub const SOCK_STREAM: u64 = 1;
+/// `sockaddr_un` の大きさ（`sa_family_t` 2 + `sun_path` 108）。
+const SOCKADDR_UN_LEN: usize = 110;
+
+/// `socket(AF_UNIX, SOCK_STREAM, 0)`。**fd か `-errno`。**
+pub fn socket() -> i64 {
+    // SAFETY: 引数は 3 つの数だけである。
+    unsafe { syscall3(SYS_SOCKET, AF_UNIX, SOCK_STREAM, 0) }
+}
+
+/// `sockaddr_un` を組む。**長さは `sun_path` の先頭から NUL までである**（Linux の慣行）。
+fn sockaddr_un(name: &[u8]) -> ([u8; SOCKADDR_UN_LEN], u64) {
+    let mut addr = [0u8; SOCKADDR_UN_LEN];
+    addr[..2].copy_from_slice(&(AF_UNIX as u16).to_le_bytes());
+    let len = name.len().min(SOCKADDR_UN_LEN - 3);
+    addr[2..2 + len].copy_from_slice(&name[..len]);
+    (addr, (2 + len + 1) as u64)
+}
+
+/// `bind(fd, name)`。**0 か `-errno`**（`-EADDRINUSE` など）。
+pub fn bind(fd: u64, name: &[u8]) -> i64 {
+    let (addr, len) = sockaddr_un(name);
+    // SAFETY: `addr` は自分のスタックの中で、長さを正しく渡す。
+    unsafe { syscall3(SYS_BIND, fd, addr.as_ptr() as u64, len) }
+}
+
+/// `listen(fd, backlog)`。**0 か `-errno`。**
+pub fn listen(fd: u64, backlog: u64) -> i64 {
+    // SAFETY: 引数は数だけである。
+    unsafe { syscall3(SYS_LISTEN, fd, backlog, 0) }
+}
+
+/// `accept(fd, NULL, NULL)`。**繋がった fd か `-errno`。** **相手の名前は受け取らない**
+/// （カーネルは `addr` に NULL しか受けない。`ADR-0064` の限界）。
+pub fn accept(fd: u64) -> i64 {
+    // SAFETY: 引数は fd と NULL だけである。
+    unsafe { syscall3(SYS_ACCEPT, fd, 0, 0) }
+}
+
+/// `connect(fd, name)`。**0 か `-errno`**（`-ECONNREFUSED` など）。
+pub fn connect(fd: u64, name: &[u8]) -> i64 {
+    let (addr, len) = sockaddr_un(name);
+    // SAFETY: `addr` は自分のスタックの中で、長さを正しく渡す。
+    unsafe { syscall3(SYS_CONNECT, fd, addr.as_ptr() as u64, len) }
+}
