@@ -581,6 +581,19 @@ pub fn read(fd: u64, buf: &mut [u8]) -> i64 {
     unsafe { syscall3(SYS_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64) }
 }
 
+/// 入力の生イベントの fd を開く（`ADR-0066` の Y-a）。**私物。**
+pub const SYS_OPEN_INPUT: u64 = 0x1008;
+
+/// 入力の生イベント 1 つのバイト数（`struct input_event`。`ADR-0066` の Y-a）。
+pub const INPUT_EVENT_LEN: usize = 24;
+
+/// 入力の生イベントの fd を開く（`ADR-0066` の Y-a）。**前景の持ち主でなければ `-EBADF`。**
+/// **読みは `read` が `struct input_event`（[`INPUT_EVENT_LEN`] バイト）を返す。**
+pub fn open_input() -> i64 {
+    // SAFETY: 引数を取らない口である。
+    unsafe { syscall3(SYS_OPEN_INPUT, 0, 0, 0) }
+}
+
 /// `getdents64(fd, buf, len)`。
 pub fn getdents64(fd: u64, buf: &mut [u8]) -> i64 {
     // SAFETY: `buf` は自分のスタックの中で、長さを正しく渡す。
