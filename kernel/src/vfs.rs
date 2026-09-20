@@ -327,6 +327,12 @@ pub enum File {
     /// 共有メモリ（`ADR-0065`）。**`shm` は `crate::shm` の表の添字。** **`memfd_create` が作り、
     /// `mmap` が自分の空間へ張り、`sendmsg` の `SCM_RIGHTS` で相手の表へ写る。**
     Shm { shm: u8 },
+    /// 入力の生イベント（`ADR-0066` の Y-a）。**`read` が `struct input_event` を返す。**
+    ///
+    /// **前景の持ち主だけが `open_input` で開ける**（開く時点の1箇所で守る。`ADR-0066` の
+    /// 「入力 fd の前景の関所」）。**キーボードは1つなので添字を持たない。** **`SCM_RIGHTS` は
+    /// shm の fd だけを運ぶので、この fd は相手の表へ写らない**（開いた持ち主に留まる）。
+    Input,
 }
 
 impl File {
@@ -371,8 +377,14 @@ impl File {
                 state: SocketState::Unbound,
             }
             | Self::Regular { .. }
-            | Self::Terminal { .. } => {}
+            | Self::Terminal { .. }
+            | Self::Input => {}
         }
+    }
+
+    /// 入力の生イベントの fd か（`ADR-0066` の Y-a）。
+    pub fn is_input(&self) -> bool {
+        matches!(self, Self::Input)
     }
 
     /// 先頭から読む状態で開く。
@@ -425,7 +437,8 @@ impl File {
             | Self::PipeRead { .. }
             | Self::PipeWrite { .. }
             | Self::Socket { .. }
-            | Self::Shm { .. } => None,
+            | Self::Shm { .. }
+            | Self::Input => None,
         }
     }
 
@@ -437,7 +450,8 @@ impl File {
             | Self::PipeRead { .. }
             | Self::PipeWrite { .. }
             | Self::Socket { .. }
-            | Self::Shm { .. } => 0,
+            | Self::Shm { .. }
+            | Self::Input => 0,
         }
     }
 

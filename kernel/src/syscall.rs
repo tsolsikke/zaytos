@@ -632,6 +632,16 @@ pub const SYS_SPAWN_WITH_PIPED_STDIN: u64 = ZAYTOS_PRIVATE_BASE + 6;
 /// 永久に待つのを防ぐ**（`crate::pipe::drop_reservation`）。
 pub const SYS_WAIT_CHILD: u64 = ZAYTOS_PRIVATE_BASE + 7;
 
+/// 入力の生イベントの fd を開く（`ADR-0066` の Y-a）。**私物。**
+///
+/// **Linux に対応する syscall が無い**——**あちらは `/dev/input/eventX` を `open` する**が、
+/// ZaytOS に装置のファイルシステムは無い。**したがって番号は私物にする**（`SYS_SPAWN` 等と
+/// 同じ。`ADR-0020` の「合わせられる形について合わせる」）。
+///
+/// **前景の持ち主でなければ `-EBADF`**（開く時点の1箇所で守る。`ADR-0066` の
+/// 「入力 fd の前景の関所」）。**読みは `read` が `struct input_event` を返す。**
+pub const SYS_OPEN_INPUT: u64 = ZAYTOS_PRIVATE_BASE + 8;
+
 /// `socket` の番号（Linux x86-64。`ADR-0064`）。**番号と `sockaddr_un` の配置は Linux から採る**
 /// （`ADR-0020`。**私物にしない**——**パイプの口が私物だったのは `spawn` の形に付いたからで、
 /// ソケットは Linux の形そのものが在る**）。
@@ -1214,6 +1224,7 @@ unsafe fn dispatch(
         // **unix ドメインのストリームソケット（`ADR-0064`）。** **5 つとも本体は
         // `#[inline(never)]` の関数である**——**この `match` の枠に局所を乗せない。**
         // **`spawn` の経路には載っていないので、`syscall-test` の高水位は動かない見込みである。**
+        SYS_OPEN_INPUT => open_input_from_ring3(),
         SYS_SOCKET => socket_from_ring3(args[0], args[1], args[2]),
         // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
         SYS_BIND => unsafe { bind_from_ring3(args[0], args[1], args[2], pml4_phys, direct_map) },
@@ -1591,6 +1602,95 @@ fn socket_from_ring3(domain: u64, kind: u64, protocol: u64) -> u64 {
         Ok(fd) => fd as u64,
         Err(error) => (-errno_for_file_table(error)) as u64,
     }
+}
+
+/// 1 回の入力読みで返す最大バイト数（`ADR-0066` の Y-a）。**イベントの整数倍**
+/// （4 つ。[`crate::input::INPUT_EVENT_LEN`] × 4）。
+const INPUT_READ_MAX: usize = 96;
+
+/// [`SYS_OPEN_INPUT`] の本体（`ADR-0066` の Y-a）。**前景の持ち主にだけ入力の生イベントの
+/// fd を渡す。**
+///
+/// # 前景の関所は開く時点の 1 箇所
+///
+/// **前景が取られていなければ `-EBADF`**（`crate::input::foreground_is_claimed`）。**前景は
+/// プログラムの走行の間ずっと持たれる**ので、fd が前景より長生きしない。**`SCM_RIGHTS` は
+/// shm の fd だけを運ぶので、この fd は相手の表へ写らない**（`ADR-0066` の「前景の関所」）。
+#[inline(never)]
+fn open_input_from_ring3() -> u64 {
+    if !crate::input::foreground_is_claimed() {
+        return (-EBADF) as u64;
+    }
+    let inserted = crate::vfs::with_current_files(|files| files.insert(crate::vfs::File::Input));
+    match inserted {
+        Ok(fd) => fd as u64,
+        Err(error) => (-errno_for_file_table(error)) as u64,
+    }
+}
+
+/// 入力の生イベントを読む（`ADR-0066` の Y-a）。**`read` が `File::Input` に当たったときの経路。**
+///
+/// **端末の `read(0)` と同じ踊り**——**溜まっていなければ `Wait::Keyboard` で待つ。** **待つ条件も
+/// 端末と同じ**（前景が据えられ、台本が駆動していないとき）。**違うのは、復号済みバイトではなく
+/// `struct input_event` を返すことだけである。**
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+#[inline(never)]
+unsafe fn read_input_events(
+    buf: u64,
+    count: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    bkl: &mut Option<crate::bkl::BklGuard>,
+) -> u64 {
+    if count == 0 {
+        return 0;
+    }
+    // **イベント 1 つに満たない要求は断る**（半端なイベントは返せない）。
+    if count < crate::input::INPUT_EVENT_LEN as u64 {
+        return (-EINVAL) as u64;
+    }
+    let want = count.min(INPUT_READ_MAX as u64);
+    // **イベントの整数倍に切り下げる。**
+    let cap = (want as usize / crate::input::INPUT_EVENT_LEN) * crate::input::INPUT_EVENT_LEN;
+    // **踏み込む前に検証する。**
+    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, buf, cap as u64) })
+    else {
+        return (-EFAULT) as u64;
+    };
+    let mut kbuf = [0u8; INPUT_READ_MAX];
+    let got = loop {
+        let got = crate::input::read_events(&mut kbuf[..cap]);
+        if got != 0 {
+            break got;
+        }
+        // **待つ条件は端末と同じ**（`sys_read` の端末分岐の doc）。**据えられていない・台本が
+        // 駆動している間は待たない**——**起動シーケンスと台本の族が止まらないように。**
+        if !crate::console::foreground_installed() {
+            return (-EAGAIN) as u64;
+        }
+        if crate::input::script_drives_input() {
+            return (-EAGAIN) as u64;
+        }
+        // 破壊 (Y-a, input-read-never-waits): 待たずに `-EAGAIN` を返す。**回して待つ形へ戻る**
+        // ——**判定「打鍵で起きる」が落ちる。**
+        #[cfg(feature = "input-read-never-waits")]
+        return (-EAGAIN) as u64;
+        #[cfg(not(feature = "input-read-never-waits"))]
+        {
+            if wait_for_keyboard(bkl) {
+                continue;
+            }
+            // **前景を失った。** 待ち続けない。
+            return (-EBADF) as u64;
+        }
+    };
+    // SAFETY: slice は検証済みで、got は cap を越えない。
+    let written = unsafe { copy_to_user(&slice, 0, &kbuf[..got]) };
+    written as u64
 }
 
 /// [`SYS_BIND`] の本体。**名前を取り、fd を listener にする**（`listen` はまだ）。
@@ -2853,6 +2953,20 @@ unsafe fn sys_read(
         }
         Some(_) => return (-ENOTCONN) as u64,
         None => {}
+    }
+
+    // **入力の生イベントの fd（Y-a。`ADR-0066`）。** **表の中身で分岐する**——**端末（inode が
+    // None）と同じ枝へ落ちる前に分ける。** **`read` は `struct input_event` を返す。**
+    let is_input = crate::vfs::with_current_files(|files| {
+        files
+            .get(fd as usize)
+            .ok()
+            .map(|file| file.is_input())
+            .unwrap_or(false)
+    });
+    if is_input {
+        // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+        return unsafe { read_input_events(buf, count, pml4_phys, direct_map, bkl) };
     }
 
     // **表を握る区間を短くする。** ここでは inode と位置の写しだけを取り、

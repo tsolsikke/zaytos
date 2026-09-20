@@ -291,6 +291,60 @@ pub fn delivered_count() -> u64 {
     DELIVERED.load(Ordering::SeqCst)
 }
 
+/// 生入力イベント 1 つのバイト数（`ADR-0066` の Y-a）。**Linux の `struct input_event` の
+/// 配置に合わせる**（`ADR-0020`。`tv_sec`(8)＋`tv_usec`(8)＋`type`(2)＋`code`(2)＋`value`(4)）。
+pub const INPUT_EVENT_LEN: usize = 24;
+
+/// `EV_KEY`（`struct input_event` の `type`）。
+const EV_KEY: u16 = 1;
+
+/// Ring 3 へ届けた生入力イベントの累計（`ADR-0066` の Y-a。判定行）。
+static INPUT_EVENTS_DELIVERED: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Ring 3 へ届けた生入力イベントの累計（`ADR-0066` の Y-a）。
+pub fn input_events_delivered() -> u64 {
+    INPUT_EVENTS_DELIVERED.load(Ordering::SeqCst)
+}
+
+/// `struct input_event` の生イベントを取り出す（`ADR-0066` の Y-a）。**書いたバイト数を返す
+/// （[`INPUT_EVENT_LEN`] の倍数。0 もありうる）。**
+///
+/// # デコーダを通さない
+///
+/// **`read_bytes` の復号器は押下中心で離脱を落とすので、生イベントには使えない**
+/// （`kernel/src/keyboard/decode.rs` の `feed`）。**ここはリングの生スキャンコードを
+/// そのまま割る**——**`code` は set-1 のメイクコード（`& 0x7F`）、`value` は押下 1 / 離脱 0。**
+/// **拡張接頭辞（`0xE0`）は 1 イベントになる**（v1 の限界。`ADR-0066`）。
+pub fn read_events(dst: &mut [u8]) -> usize {
+    let ticks = crate::idt::monotonic_ticks();
+    let hz = u64::from(crate::irq::timer_frequency_hz());
+    let (secs, nanos) = common::time::timespec_from_ticks(ticks, hz);
+    let usecs = nanos / 1000;
+
+    let mut written = 0usize;
+    while written + INPUT_EVENT_LEN <= dst.len() {
+        let code = {
+            let mut ring = crate::keyboard::buffer::SCANCODES.lock();
+            ring.pop()
+        };
+        let Some(code) = code else {
+            break;
+        };
+        let released = code & 0x80 != 0;
+        let keycode = u16::from(code & 0x7F);
+        let value: i32 = if released { 0 } else { 1 };
+        dst[written..written + 8].copy_from_slice(&secs.to_le_bytes());
+        dst[written + 8..written + 16].copy_from_slice(&usecs.to_le_bytes());
+        dst[written + 16..written + 18].copy_from_slice(&EV_KEY.to_le_bytes());
+        dst[written + 18..written + 20].copy_from_slice(&keycode.to_le_bytes());
+        dst[written + 20..written + 24].copy_from_slice(&value.to_le_bytes());
+        written += INPUT_EVENT_LEN;
+        INPUT_EVENTS_DELIVERED.fetch_add(1, Ordering::SeqCst);
+    }
+    written
+}
+
 /// デコード済みのバイトを取り出す。**取れた数を返す（0 もありうる）。**
 ///
 /// # スキャンコードをここでデコードする

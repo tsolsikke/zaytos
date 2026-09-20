@@ -1975,10 +1975,14 @@ const SHELL_AFTER_HEARTBEATS: u64 = if cfg!(feature = "keep-steady-loop") {
 /// **`init` の 3 種類は変わらずこの関数が書く**——据えるのは `spawn` の間だけである。
 fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> ! {
     /// 起こし直す上限。**同じ失敗を無限に繰り返さない。**
+    /// **`input-test` はシェルを起こさない**ので、そのときは使われない（`ADR-0066` の Y-a）。
+    #[cfg_attr(feature = "input-test", allow(dead_code))]
     const MAX_RESTARTS: usize = 3;
 
     // **借り直しながら回す。** `Option<&mut _>` は `Copy` ではないので、
     // 各周で `as_deref_mut` を取る（`interrupts::drain_keyboard` と同じ形）。
+    // **`input-test` は `console` を `run_input_test` へ移すだけなので `mut` は要らない。**
+    #[cfg_attr(feature = "input-test", allow(unused_mut))]
     let mut console = console;
 
     // **`init` が `/bin/fptest` を 1 度だけ起こす（B-a。`ADR-0058`）。**
@@ -2009,7 +2013,17 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
     #[cfg(feature = "socket-test")]
     let socket_server = start_socket_server(logger, console.as_deref_mut());
 
+    // **入力の生イベントの fd を検査する（`ADR-0066` の Y-a）。** **`inputd` を前景で 1 度
+    // 起こして締める**——**シェルは起こさない**（入力の消費者は 1 つで、`inputd` が読む）。
+    #[cfg(feature = "input-test")]
+    {
+        run_input_test(logger, console);
+        cpu::halt_forever()
+    }
+
+    #[cfg(not(feature = "input-test"))]
     let mut restarts = 0usize;
+    #[cfg(not(feature = "input-test"))]
     loop {
         log_both(
             logger,
@@ -2215,6 +2229,36 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
     }
 }
 
+/// 入力の生イベントの fd を検査する（`ADR-0066` の Y-a）。**`/bin/inputd` を前景で 1 度起こし、
+/// 締めに計器を出す。** **シェルは起こさない**（`init` が `input-test` のとき、これで締める）。
+///
+/// **`inputd` は入力の fd を開いて `read` で待ち、本物の打鍵（`sendkey`）が起こす。** **判定は
+/// `xtask` の `input-test` が、印字したイベントと計器の行を読んで行う。**
+///
+/// **`keyboard waited` は `read(0)` と入力 fd で共有の計器である**（`wait_for_keyboard`）。
+/// **この構成はシェルを起こさないので、`inputd` の待ちだけが乗る。**
+#[cfg(feature = "input-test")]
+fn run_input_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) {
+    let mut console = console;
+    let outcome = {
+        let _foreground = console
+            .as_deref_mut()
+            .map(kernel::console::install_foreground);
+        kernel::userland::spawn(b"/bin/inputd", b"inputd\0", 1, None)
+    };
+    log_both(
+        logger,
+        console,
+        LogLevel::Info,
+        format_args!("input-test: /bin/inputd ended ({outcome:?})"),
+    );
+    logger.info(format_args!(
+        "input: events delivered {}, keyboard waited {} time(s)",
+        kernel::input::input_events_delivered(),
+        kernel::syscall::keyboard_waits()
+    ));
+}
+
 /// 2 本の Ring 3 を同時に走らせ、判定の材料を行に出す（W1-c-4。`ADR-0060`）。
 ///
 /// **判定は `xtask` が行う**（カウンタと内容で見る。行の順序では見ない）。
@@ -2405,10 +2449,14 @@ fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Con
 }
 
 /// シェルの像のパス。**NUL は付けない**（`spawn` はスライスを取る）。
+/// **`input-test` はシェルを起こさない**ので、そのときは使われない（`ADR-0066` の Y-a）。
+#[cfg_attr(feature = "input-test", allow(dead_code))]
 const SHELL_PATH: &[u8] = b"/bin/zash";
 /// 判定行に出すためのパス。
+#[cfg_attr(feature = "input-test", allow(dead_code))]
 const SHELL_PATH_TEXT: &str = "/bin/zash";
 /// シェルへ渡す `argv`。**NUL 区切りで並べる**（`spawn` の受け取る形）。
+#[cfg_attr(feature = "input-test", allow(dead_code))]
 const SHELL_ARGV: &[u8] = b"zash\0";
 
 /// フレームバッファを検証し、描画ハンドルを作る（M3-a）。
@@ -10163,6 +10211,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "socket-msghdr-ignores-iovlen",
         cfg!(feature = "socket-msghdr-ignores-iovlen"),
         "sendmsg の msghdr の msg_iovlen を見ない",
+    ),
+    (
+        "input-test",
+        cfg!(feature = "input-test"),
+        "inputd が入力の生イベントの fd を読む（ADR-0066 の Y-a）",
+    ),
+    (
+        "input-read-never-waits",
+        cfg!(feature = "input-read-never-waits"),
+        "入力 fd の read が空でも待たず -EAGAIN を返す",
     ),
     (
         "shell-script-test",

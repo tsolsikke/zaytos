@@ -572,6 +572,11 @@ shm-close-keeps-refs = ["socket-test"]
 shm-mmap-maps-nothing = ["socket-test"]
 # sendmsg/recvmsg の msghdr の msg_iovlen を見ない（ADR-0065）。iovlen が 2 でも受ける。
 socket-msghdr-ignores-iovlen = ["socket-test"]
+# Y-a: 入力を fd にする（ADR-0066）。init が /bin/inputd を前景で起こし、入力 fd を開いて
+# 生イベントを待つ。判定は xtask の input-test が読む。sendkey で本物の打鍵を送る。
+input-test = []
+# 入力 fd の read が空でも待たず -EAGAIN を返す（ADR-0066 の Y-a）。打鍵で起きる判定が落ちる。
+input-read-never-waits = ["input-test"]
 # `spawn` で、子へ入る前に親の FP の状態を保存しない（`ADR-0058`）。
 # 親が `spawn` を跨いで値を保てなくなる。
 fp-spawn-no-save = []
