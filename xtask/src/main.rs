@@ -1742,6 +1742,17 @@ fn main() -> Result<()> {
                 let expect_pass = sabotage.is_empty();
                 return cmd_socket_test(&sabotage, expect_pass);
             }
+            // **入力の生イベントの fd の判定（`ADR-0066` の Y-a）。`sendkey` で本物の打鍵を送る。**
+            if rest.iter().any(|a| a == "--input-test") {
+                let sabotage: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                let expect_pass = sabotage.is_empty();
+                return cmd_input_test(&sabotage, expect_pass);
+            }
             if rest.iter().any(|a| a == "--history-test") {
                 let sabotage: Vec<&str> = rest
                     .iter()
@@ -5312,6 +5323,204 @@ fn cmd_socket_test(features: &[&str], expect_pass: bool) -> Result<()> {
     );
 
     let passed = failed.is_empty() && no_error;
+    if passed {
+        println!("{context}: PASS");
+        if expect_pass {
+            Ok(())
+        } else {
+            bail!("{context}: the sabotage was NOT caught; every judgement still held")
+        }
+    } else {
+        println!("{context}: FAILED (judgements that fell: {failed:?})");
+        if expect_pass {
+            bail!("{context}: FAILED ({failed:?})")
+        } else {
+            println!("{context}: the sabotage was caught (this run is expected to fail)");
+            Ok(())
+        }
+    }
+}
+
+/// `--input-test` の破壊（`ADR-0066` の Y-a）。**判定 2（read が待った）を落とす。**
+const INPUT_TEST_SABOTAGES: &[&str] = &["input-read-never-waits"];
+
+/// `--input-test` の上限（秒）。**打鍵で起きるのを待つ**（`sendkey` はタイミングに依る）。
+const INPUT_TEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// `inputd` が入力の fd を開いた印（`ADR-0066` の Y-a）。
+const INPUT_TEST_READY_MARKER: &str = "inputd: opened input fd";
+/// `inputd` が押下のイベントを受けた印。
+const INPUT_TEST_DONE_MARKER: &str = "inputd: got a key press";
+/// 送る打鍵（`a` = set-1 のメイクコード 0x1E = 30）。**monitor のキー名。**
+const INPUT_TEST_KEY: &str = "a";
+
+/// 入力の生イベントの fd を検査する（`ADR-0066` の Y-a）。
+///
+/// **`inputd` を前景で起こし、入力の fd を開かせ、`sendkey` で本物の打鍵を送り、生イベントが
+/// 届いて `read` が待ったかを見る。** **判定は 2 本**——
+///
+/// 1. **押下のイベントが届いた**（`a` = `code=30` `value=1`）
+/// 2. **`read` が待った**（`keyboard waited >= 1`）——**回して待つ形（破壊）では 0 になる。**
+///
+/// **`--socket-test` と同じ形で駆動する**（monitor で `sendkey`、シリアルを読んで判定）。
+fn cmd_input_test(features: &[&str], expect_pass: bool) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let mut all_features: Vec<&str> = vec!["input-test"];
+    all_features.extend_from_slice(features);
+    let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let tag = all_features.join("-");
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("input-test-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+    let monitor_socket = PathBuf::from(format!(
+        "/tmp/zaytos-xtask-input-{}.sock",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&monitor_socket);
+    ensure_socket_path_fits(&monitor_socket)?;
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: Some(&monitor_socket),
+        accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the input test")?;
+
+    // **入力の fd を開くまで待つ。上限つき。**
+    let started = Instant::now();
+    let deadline = started + BOOT_READY_TIMEOUT;
+    let mut ready = false;
+    while Instant::now() < deadline {
+        if read_lossy(&serial_log).contains(INPUT_TEST_READY_MARKER) {
+            ready = true;
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    if ready {
+        // **`inputd` が read で待ちに入る間をおく**（判定 2 は「待った」ことを見る）。
+        thread::sleep(Duration::from_millis(500));
+        match connect_monitor_with_retry(&monitor_socket) {
+            Ok(mut stream) => {
+                // **本物の打鍵を送る**（`a` の押下と離脱）。**数回送って、待ちに入った後に
+                // 1 度は届くようにする。**
+                for _ in 0..3 {
+                    if writeln!(stream, "sendkey {INPUT_TEST_KEY}").is_err() {
+                        break;
+                    }
+                    thread::sleep(SHELL_TEST_KEY_INTERVAL);
+                }
+            }
+            Err(e) => println!("input-test: could not reach the QEMU monitor: {e}"),
+        }
+        // **押下のイベントが出るまで待つ。上限つき。**
+        let deadline = Instant::now() + INPUT_TEST_TIMEOUT;
+        while Instant::now() < deadline {
+            if read_lossy(&serial_log).contains(INPUT_TEST_DONE_MARKER) {
+                break;
+            }
+            thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        }
+    }
+    let waited = started.elapsed();
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = fs::remove_file(&monitor_socket);
+
+    let serial = read_lossy(&serial_log);
+    let context = if features.is_empty() {
+        "input-test".to_string()
+    } else {
+        format!("input-test {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    let qemu_debug = read_lossy(&debug_log);
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    let stripped = strip_ansi(&serial);
+    let lines: Vec<&str> = stripped.lines().map(str::trim_end).collect();
+    let number_after = |line: &str, key: &str| -> Option<u64> {
+        let rest = &line[line.find(key)? + key.len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok()
+    };
+    let keyboard_waited: Option<u64> = lines
+        .iter()
+        .find(|line| line.contains("[INFO] input: events delivered "))
+        .and_then(|line| number_after(line, "keyboard waited "));
+
+    let judgements: [(&str, bool); 2] = [
+        (
+            // **押下のイベントが届いた**（`a` = code 30、value 1）。
+            "a_key_press_went_through",
+            stripped.contains("inputd: event code=30 value=1"),
+        ),
+        (
+            // **read が待った**（回して待つ形では 0）。
+            "the_read_waited",
+            keyboard_waited.is_some_and(|n| n >= 1),
+        ),
+    ];
+
+    // **禁止**——`[ERROR]` が 1 行も無い。
+    let error_lines: Vec<&str> = lines
+        .iter()
+        .filter(|line| line.contains("[ERROR]"))
+        .copied()
+        .take(4)
+        .collect();
+    let no_error = error_lines.is_empty();
+
+    let failed: Vec<&str> = judgements
+        .iter()
+        .filter(|(_, held)| !held)
+        .map(|(name, _)| *name)
+        .collect();
+    for (name, held) in &judgements {
+        println!("{context}: {name} = {held}");
+    }
+    println!("{context}: no [ERROR] line = {no_error} (the first were {error_lines:?})");
+    println!("{context}: (info) keyboard waited = {keyboard_waited:?}");
+    for info in lines.iter().filter(|line| {
+        line.contains("[INFO] input:") || line.contains("inputd: ") || line.contains("input-test:")
+    }) {
+        println!("{context}: (info) {}", info.trim());
+    }
+    println!(
+        "{context}: (info) waited {:.1} s (ready = {ready})",
+        waited.as_secs_f64()
+    );
+
+    let passed = ready && failed.is_empty() && no_error;
     if passed {
         println!("{context}: PASS");
         if expect_pass {
@@ -17310,6 +17519,31 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }
         }
 
+        // **入力の生イベントの fd（`ADR-0066` の Y-a）。** **`inputd` を前景で起こし、`sendkey` で
+        // 本物の打鍵を送り、生イベントが届いて `read` が待ったかを見る。** **破壊は 1 つ**
+        // （`INPUT_TEST_SABOTAGES`。判定 2「read が待った」を落とす）。
+        total += 1;
+        begin_item("a foreground process reads raw input events through the input fd");
+        match cmd_input_test(&[], true) {
+            Ok(()) => println!("--- input test: OK"),
+            Err(error) => {
+                println!("--- input test: FAILED ({error})");
+                failed.push("input test".to_string());
+            }
+        }
+        for sabotage in INPUT_TEST_SABOTAGES {
+            total += 1;
+            let label = format!("input-test {sabotage}");
+            begin_item(&label);
+            match cmd_input_test(&[sabotage], false) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
+            }
+        }
+
         // **Tab の補完（TAB-1）。**
         //
         // **1 回の起動で 5 つ見る**——**単一候補 / 共通接頭辞 / 件数 / 一覧 /
@@ -18836,7 +19070,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 35,
-    full: 338,
+    full: 340,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
