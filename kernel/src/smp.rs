@@ -525,6 +525,7 @@ pub unsafe fn prepare_shootdown_probe<const CAP: usize>(
         user: false,
         writable: true,
         cacheable: true,
+        shared: false,
     };
     // SAFETY: 稼働中のテーブルへ、まだ誰も使っていない VA を張る。
     if let Err(error) = unsafe { table.map_4kib(virt, frame, attributes, allocator) } {
@@ -1259,6 +1260,7 @@ pub unsafe fn map_ap_stacks<const CAP: usize>(
                 user: false,
                 writable: true,
                 cacheable: true,
+                shared: false,
             };
             // SAFETY: 稼働中のテーブルへ、まだ誰も使っていない VA を張る。
             if let Err(error) = unsafe { table.map_4kib(virt, frame, attributes, allocator) } {

@@ -1149,3 +1149,132 @@ pub fn connect(fd: u64, name: &[u8]) -> i64 {
     // SAFETY: `addr` は自分のスタックの中で、長さを正しく渡す。
     unsafe { syscall3(SYS_CONNECT, fd, addr.as_ptr() as u64, len) }
 }
+
+/// `memfd_create` の番号（Linux x86-64。`ADR-0065`）。
+pub const SYS_MEMFD_CREATE: u64 = 319;
+/// `ftruncate` の番号。
+pub const SYS_FTRUNCATE: u64 = 77;
+/// `mmap` の番号。
+pub const SYS_MMAP: u64 = 9;
+/// `sendmsg` の番号。
+pub const SYS_SENDMSG: u64 = 46;
+/// `recvmsg` の番号。
+pub const SYS_RECVMSG: u64 = 47;
+/// `PROT_READ | PROT_WRITE`。
+pub const PROT_READ_WRITE: u64 = 3;
+/// `MAP_SHARED`。
+pub const MAP_SHARED: u64 = 1;
+/// `SOL_SOCKET`（`cmsghdr` の level）。
+const SOL_SOCKET: u32 = 1;
+/// `SCM_RIGHTS`（`cmsghdr` の type）。
+const SCM_RIGHTS: u32 = 1;
+
+/// 引数 6 つのシステムコール（`mmap`。`ADR-0065`）。**Linux x86-64 の規約で
+/// `r10`／`r8`／`r9`。**
+///
+/// # Safety
+///
+/// 番号と引数がカーネルの契約に合っていること。
+pub unsafe fn syscall6(number: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: 呼び出し元契約による。
+    unsafe {
+        core::arch::asm!(
+            "int 0x80",
+            inlateout("rax") number => ret,
+            in("rdi") a,
+            in("rsi") b,
+            in("rdx") c,
+            in("r10") d,
+            in("r8") e,
+            in("r9") f,
+        );
+    }
+    ret
+}
+
+/// `memfd_create(name, flags)`。**fd か `-errno`。** **名前と旗はカーネルが見ない。**
+pub fn memfd_create() -> i64 {
+    // SAFETY: 引数はカーネルが見ない（0 を渡す）。
+    unsafe { syscall3(SYS_MEMFD_CREATE, 0, 0, 0) }
+}
+
+/// `ftruncate(fd, size)`。**0 か `-errno`。**
+pub fn ftruncate(fd: u64, size: u64) -> i64 {
+    // SAFETY: 引数は数だけ。
+    unsafe { syscall3(SYS_FTRUNCATE, fd, size, 0) }
+}
+
+/// `mmap(NULL, len, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)`。**張った番地か `-errno`。**
+pub fn mmap_shared(fd: u64, len: u64) -> i64 {
+    // SAFETY: カーネルが張る場所を決め、範囲を検証する。
+    unsafe { syscall6(SYS_MMAP, 0, len, PROT_READ_WRITE, MAP_SHARED, fd, 0) }
+}
+
+/// `sendmsg`／`recvmsg` に渡す `msghdr` と、その中身（`iovec`・`cmsghdr`）を 1 つに持つ。
+///
+/// **`repr(C)` で Linux の配置に合わせる**（`ADR-0065`。カーネルが番地で読む）。
+#[repr(C)]
+pub struct MsgBuffers {
+    iov_base: u64,
+    iov_len: u64,
+    /// `cmsghdr`（cmsg_len, level, type）＋ fd 1 つ。**24 バイトへ整列。**
+    cmsg: [u8; 24],
+    hdr: [u8; 56],
+}
+
+impl MsgBuffers {
+    /// データの緩衝と、fd を運ぶかで作る。**`fd` が `Some` なら `SCM_RIGHTS` を積む。**
+    ///
+    /// # Safety
+    ///
+    /// `data` がこの構造体より長生きすること（`msghdr` が指す）。
+    pub unsafe fn new(data: &mut [u8], fd: Option<u32>) -> Self {
+        let mut buffers = Self {
+            iov_base: data.as_mut_ptr() as u64,
+            iov_len: data.len() as u64,
+            cmsg: [0u8; 24],
+            hdr: [0u8; 56],
+        };
+        if let Some(fd) = fd {
+            buffers.cmsg[0..8].copy_from_slice(&20u64.to_le_bytes());
+            buffers.cmsg[8..12].copy_from_slice(&SOL_SOCKET.to_le_bytes());
+            buffers.cmsg[12..16].copy_from_slice(&SCM_RIGHTS.to_le_bytes());
+            buffers.cmsg[16..20].copy_from_slice(&fd.to_le_bytes());
+        }
+        buffers
+    }
+
+    /// `msghdr` を組んで、その番地を返す。**呼ぶ直前に組む**（自分の番地が要るため）。
+    fn build_hdr(&mut self, with_control: bool) -> u64 {
+        let iov_ptr = core::ptr::addr_of!(self.iov_base) as u64;
+        self.hdr = [0u8; 56];
+        self.hdr[16..24].copy_from_slice(&iov_ptr.to_le_bytes());
+        self.hdr[24..32].copy_from_slice(&1u64.to_le_bytes());
+        if with_control {
+            let cmsg_ptr = core::ptr::addr_of!(self.cmsg) as u64;
+            self.hdr[32..40].copy_from_slice(&cmsg_ptr.to_le_bytes());
+            self.hdr[40..48].copy_from_slice(&24u64.to_le_bytes());
+        }
+        core::ptr::addr_of!(self.hdr) as u64
+    }
+
+    /// 受け取った fd（`recvmsg` の後）。**`cmsg` の 16 バイト目から。**
+    pub fn received_fd(&self) -> u32 {
+        u32::from_le_bytes([self.cmsg[16], self.cmsg[17], self.cmsg[18], self.cmsg[19]])
+    }
+}
+
+/// `sendmsg(fd, &msg, 0)`。**`with_control` が真なら `SCM_RIGHTS` を送る。** **送ったバイト数か `-errno`。**
+pub fn sendmsg(fd: u64, buffers: &mut MsgBuffers, with_control: bool) -> i64 {
+    let hdr = buffers.build_hdr(with_control);
+    // SAFETY: `hdr` は自分の構造体の中で、Linux の `msghdr` の配置である。
+    unsafe { syscall3(SYS_SENDMSG, fd, hdr, 0) }
+}
+
+/// `recvmsg(fd, &msg, 0)`。**受けたバイト数か `-errno`。** **fd は [`MsgBuffers::received_fd`] で取る。**
+pub fn recvmsg(fd: u64, buffers: &mut MsgBuffers) -> i64 {
+    let hdr = buffers.build_hdr(true);
+    // SAFETY: `hdr` は自分の構造体の中で、Linux の `msghdr` の配置である。
+    unsafe { syscall3(SYS_RECVMSG, fd, hdr, 0) }
+}

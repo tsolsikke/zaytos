@@ -324,6 +324,9 @@ pub enum File {
     /// **向きは [`SocketState::Stream`] の `side` が持つ。** **`socket` → `bind`/`listen` →
     /// `accept`、または `socket` → `connect` で、状態がその場で進む**（[`FileTable::replace`]）。
     Socket { state: SocketState },
+    /// 共有メモリ（`ADR-0065`）。**`shm` は `crate::shm` の表の添字。** **`memfd_create` が作り、
+    /// `mmap` が自分の空間へ張り、`sendmsg` の `SCM_RIGHTS` で相手の表へ写る。**
+    Shm { shm: u8 },
 }
 
 impl File {
@@ -363,6 +366,7 @@ impl File {
             Self::Socket {
                 state: SocketState::Listener { listener },
             } => crate::socket::close_listener(*listener),
+            Self::Shm { shm } => crate::shm::detach(*shm),
             Self::Socket {
                 state: SocketState::Unbound,
             }
@@ -420,7 +424,8 @@ impl File {
             Self::Terminal { .. }
             | Self::PipeRead { .. }
             | Self::PipeWrite { .. }
-            | Self::Socket { .. } => None,
+            | Self::Socket { .. }
+            | Self::Shm { .. } => None,
         }
     }
 
@@ -431,7 +436,8 @@ impl File {
             Self::Terminal { .. }
             | Self::PipeRead { .. }
             | Self::PipeWrite { .. }
-            | Self::Socket { .. } => 0,
+            | Self::Socket { .. }
+            | Self::Shm { .. } => 0,
         }
     }
 

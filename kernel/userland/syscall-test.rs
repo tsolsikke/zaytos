@@ -108,6 +108,8 @@
 //! - `64` 知らない要求が `-ENOTTY` を返さなかった
 //! - `65` `socket(AF_UNIX, SOCK_STREAM, 0)` が最小の空き番号（3）を返さなかった、または閉じられなかった（`ADR-0064`）
 //! - `66` 待ち受けの無い名前への `connect` が `-ECONNREFUSED` を返さなかった（`ADR-0064`）
+//! - `67` `memfd_create`＋`ftruncate`＋`mmap` した共有メモリへ書いた値が読み戻せなかった（`ADR-0065`）
+//! - `68` 共有メモリでない fd（stdin）の `mmap` が `-EBADF` を返さなかった（`ADR-0065`）
 //!
 //! # `argv` は `_start` の時点の `rsp` から読む
 //!
@@ -164,6 +166,22 @@ const SYS_CONNECT: u32 = 42;
 const MINUS_ECONNREFUSED: i32 = -111;
 /// `SOCKADDR_NOBODY` の長さ（`sa_family_t` 2 + `"nobody"` 6 + NUL 1）。
 const SOCKADDR_NOBODY_LEN: u32 = 9;
+/// `memfd_create` の番号（`ADR-0065`）。
+const SYS_MEMFD_CREATE: u32 = 319;
+/// `ftruncate` の番号。
+const SYS_FTRUNCATE: u32 = 77;
+/// `mmap` の番号。
+const SYS_MMAP: u32 = 9;
+/// `mmap` の大きさ（1 ページ）。
+const SHM_TEST_LEN: u32 = 4096;
+/// `mmap` に書き込む印（像とログの語に当たらない）。
+const SHM_TEST_PATTERN: u32 = 0x5C0F_1234;
+/// `PROT_READ | PROT_WRITE`。
+const PROT_RW: u32 = 3;
+/// `MAP_SHARED`。
+const MAP_SHARED: u32 = 1;
+/// `-EBADF`。
+const MINUS_EBADF_SHM: i32 = -9;
 /// 送るバイト列の長さ。
 const MESSAGE_LEN: u32 = 24;
 /// `open` の番号（Linux と同じ 2）。
@@ -1220,6 +1238,52 @@ core::arch::global_asm!(
     "  mov eax, {sys_close}",
     "  mov rdi, r12",
     "  int 0x80",
+    // 67: memfd_create+ftruncate+mmap した共有メモリへ書いた値が読み戻せる（ADR-0065）。
+    "  mov eax, {sys_memfd}",
+    "  xor edi, edi",
+    "  xor esi, esi",
+    "  xor edx, edx",
+    "  int 0x80",
+    "  mov r12, rax",              // shm の fd
+    "  mov eax, {sys_ftruncate}",
+    "  mov rdi, r12",
+    "  mov esi, {shm_len}",
+    "  int 0x80",
+    "  test rax, rax",
+    "  mov edi, 67",
+    "  jne 9f",
+    "  mov eax, {sys_mmap}",
+    "  xor edi, edi",              // addr=NULL（カーネルが決める）
+    "  mov esi, {shm_len}",
+    "  mov edx, {prot_rw}",
+    "  mov r10d, {map_shared}",
+    "  mov r8, r12",               // fd
+    "  xor r9, r9",                // offset=0
+    "  int 0x80",
+    "  cmp rax, 0",                // 張った番地は正（負なら errno）
+    "  mov edi, 67",
+    "  jl 9f",
+    "  mov r13, rax",              // 張った番地
+    "  mov dword ptr [r13], {shm_pattern}",
+    "  mov eax, dword ptr [r13]",
+    "  cmp eax, {shm_pattern}",
+    "  mov edi, 67",
+    "  jne 9f",
+    // 68: 共有メモリでない fd（stdin=0）の mmap は -EBADF（ADR-0065）。
+    "  mov eax, {sys_mmap}",
+    "  xor edi, edi",
+    "  mov esi, {shm_len}",
+    "  mov edx, {prot_rw}",
+    "  mov r10d, {map_shared}",
+    "  xor r8, r8",                // fd=0（stdin。共有メモリでない）
+    "  xor r9, r9",
+    "  int 0x80",
+    "  cmp rax, {minus_ebadf_shm}",
+    "  mov edi, 68",
+    "  jne 9f",
+    "  mov eax, {sys_close}",      // shm の fd を閉じる
+    "  mov rdi, r12",
+    "  int 0x80",
 
     // すべて通った。
     "  xor edi, edi",
@@ -1405,6 +1469,14 @@ core::arch::global_asm!(
     minus_e2big = const MINUS_E2BIG,
     minus_eagain = const MINUS_EAGAIN,
     long_len = const LONG_MESSAGE_LEN,
+    sys_memfd = const SYS_MEMFD_CREATE,
+    sys_ftruncate = const SYS_FTRUNCATE,
+    sys_mmap = const SYS_MMAP,
+    shm_len = const SHM_TEST_LEN,
+    shm_pattern = const SHM_TEST_PATTERN,
+    prot_rw = const PROT_RW,
+    map_shared = const MAP_SHARED,
+    minus_ebadf_shm = const MINUS_EBADF_SHM,
     sys_socket = const SYS_SOCKET,
     sys_connect = const SYS_CONNECT,
     af_unix = const 1,

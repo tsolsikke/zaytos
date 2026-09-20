@@ -403,6 +403,30 @@ const HEAP_PAGE_SIZE: u64 = 4096;
 static CURRENT_HEAP: [Locked<Heap>; crate::ring3::RING3_SLOTS] =
     [const { Locked::new(Heap::EMPTY) }; crate::ring3::RING3_SLOTS];
 
+/// 載せた後にアロケータから取った中間ページテーブルの数（スロットごと。`ADR-0065` の (a)）。
+///
+/// **`mmap` が新しい領域へ張ると中間表を取るが、`AddressSpace::frames_taken` は載せた時点で
+/// 測るので入らない。** **破棄の会計の `taken` にこれを足す**——**さもないと `collected > taken`
+/// になる。** **`mmap` のためではなく、載せた後に PT を取る経路すべてのためである**——**`brk` が
+/// 境を越えれば同じ穴を踏むので、同時に閉じる。**
+static POST_LOAD_FRAMES: [core::sync::atomic::AtomicUsize; crate::ring3::RING3_SLOTS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::ring3::RING3_SLOTS];
+
+/// 載せた後に取った PT の数を足す（`crate::syscall` の `mmap` が呼ぶ）。
+pub fn note_post_load_frames(slot: usize, count: usize) {
+    if let Some(cell) = POST_LOAD_FRAMES.get(slot) {
+        cell.fetch_add(count, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// そのスロットの「載せた後に取った PT」を読んで 0 に戻す（破棄の会計が呼ぶ）。
+fn take_post_load_frames(slot: usize) -> usize {
+    POST_LOAD_FRAMES
+        .get(slot)
+        .map(|cell| cell.swap(0, core::sync::atomic::Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
 /// ヒープの下端と上端（H-a）。
 #[derive(Clone, Copy)]
 pub struct Heap {
@@ -1156,7 +1180,9 @@ pub fn load_user_program(
     // **実測で踏んだ**——先に落ちるほうだけを見ていた。
     // **破棄の前に、この空間が取った本数を聞く（`ADR-0063` の (b1)）。**
     // **`destroy` は自分を取るので、後からは聞けない。**
-    let taken = process.space.frames_taken();
+    // **載せた後に `mmap` が取った PT を足す（`ADR-0065` の (a)）。** **`frames_taken` は
+    // 載せた時点の分だけなので、これを足さないと `collected > taken` になる。**
+    let taken = process.space.frames_taken() + take_post_load_frames(crate::ring3::current_slot());
     let keep_space = cfg!(feature = "user-exit-keep-space") && run;
     let (held, leaked) = if keep_space {
         (0, 0)
@@ -1485,6 +1511,7 @@ fn load_user_program_into(
                 user: true,
                 writable: writable || cfg!(feature = "user-run-writable-text"),
                 cacheable: true,
+                shared: false,
             };
             // SAFETY: この空間はまだ稼働していない。direct map は覆っている。
             if let Err(e) = unsafe {
@@ -1558,6 +1585,7 @@ fn load_user_program_into(
         user: true,
         writable: true,
         cacheable: true,
+        shared: false,
     };
     // SAFETY: この空間はまだ稼働していない。direct map は覆っている。
     if let Err(e) = unsafe {
@@ -2215,6 +2243,7 @@ pub fn spawn(
 
     // **会計のために借りて、すぐ返す**（`ADR-0030`）。**借りられなければ
     // 子も起こせない**ので、そのまま [`UserLoadError::AllocatorUnavailable`] へ落とす。
+    let shared_before = crate::shm::frames_held();
     let free_before = match crate::frame_allocator::take() {
         Some(allocator) => {
             let count = allocator.free_frame_count();
@@ -2393,7 +2422,14 @@ pub fn spawn(
         crate::ring3::restore_fold_record(saved_fold);
     }
 
-    let consumed = free_before.saturating_sub(free_after) as usize;
+    // **共有フレームを `consumed` から除く（`ADR-0065` の (A-3)）。** **窓の間にアロケータから
+    // 取ったまま返っていない共有フレームは、`consumed` に入るが `destroy` が飛ばして
+    // `quarantined` に入らない**——**その差を消す。** **(E) では 0**（プールはアロケータの外）。
+    // **失うもの**——**`consumed == quarantined` の素の等式（共有分について）。**
+    // **覆う判定**——**`shm` の created==released（フレームは参照数で返る。`shm:` の計器）。**
+    let shared_after = crate::shm::frames_held();
+    let shared_net = shared_after.saturating_sub(shared_before) as usize;
+    let consumed = (free_before.saturating_sub(free_after) as usize).saturating_sub(shared_net);
     // **窓を閉じる。** **交差していたら、大域の差は相手の分を取り込んでいる**（`ADR-0063` の (b1)）。
     let crossed = close_spawn_window(window);
     // **孫のぶんを足す。** 子が更に起こしていれば、そのぶんも消えている。

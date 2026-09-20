@@ -323,6 +323,7 @@ fn map_mmio_page<const CAP: usize>(
                     user: false,
                     writable: true,
                     cacheable: false,
+                    shared: false,
                 },
                 allocator,
             )

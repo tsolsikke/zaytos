@@ -1083,6 +1083,8 @@ pub(crate) mod script {
         /bin/sockc nobody\n\
         /bin/sockc bind\n\
         /bin/sockc twice\n\
+        /bin/sockc shm\n\
+        /bin/sockc badmsg\n\
         /bin/sockc quit\n\
         exit\n\x0c";
 

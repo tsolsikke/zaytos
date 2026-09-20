@@ -1223,6 +1223,16 @@ unsafe fn dispatch(
         SYS_CONNECT => unsafe {
             connect_from_ring3(args[0], args[1], args[2], pml4_phys, direct_map)
         },
+        // **共有メモリと fd の受け渡し（`ADR-0065`）。** **5 つとも `#[inline(never)]` で、
+        // `spawn` の経路には載っていない**——**`mmap` は `brk` と同じ `map_4kib` を使う。**
+        SYS_MEMFD_CREATE => memfd_create_from_ring3(),
+        SYS_FTRUNCATE => ftruncate_from_ring3(args[0], args[1]),
+        // SAFETY: 呼び出し元契約により direct_map は有効で、遠征の中なので CR3 はこのプロセスのもの。
+        SYS_MMAP => unsafe { mmap_from_ring3(args[1], args[2], args[4], args[5], direct_map) },
+        // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+        SYS_SENDMSG => unsafe { sendmsg_from_ring3(args[0], args[1], pml4_phys, direct_map, bkl) },
+        // SAFETY: 同上。
+        SYS_RECVMSG => unsafe { recvmsg_from_ring3(args[0], args[1], pml4_phys, direct_map, bkl) },
         SYS_CLOSE => {
             // **書きで開いた口を閉じたら、像を装置へ書き戻す（P-c-1）。**
             //
@@ -1828,6 +1838,380 @@ unsafe fn write_to_socket(
                 *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
             }
         }
+    }
+}
+
+/// `mmap` の番号（Linux x86-64。`ADR-0065`）。**共有メモリの fd を自分の空間へ張る。**
+pub const SYS_MMAP: u64 = 9;
+/// `ftruncate` の番号。**共有メモリの大きさを据える（ページを取る）。**
+pub const SYS_FTRUNCATE: u64 = 77;
+/// `sendmsg` の番号。**iov のバイトをソケットへ、`SCM_RIGHTS` の fd を相手の表へ。**
+pub const SYS_SENDMSG: u64 = 46;
+/// `recvmsg` の番号。**ソケットのバイトを iov へ、渡された fd を自分の表へ。**
+pub const SYS_RECVMSG: u64 = 47;
+/// `memfd_create` の番号。**無名の共有メモリを作り fd を返す。**
+pub const SYS_MEMFD_CREATE: u64 = 319;
+
+/// `PROT_WRITE`（`mmap`。書ける葉を張る）。
+const PROT_WRITE: u64 = 2;
+/// `SOL_SOCKET`（`cmsghdr` の level）。
+const SOL_SOCKET: u32 = 1;
+/// `SCM_RIGHTS`（`cmsghdr` の type。fd を運ぶ）。
+const SCM_RIGHTS: u32 = 1;
+/// `EMSGSIZE`（補助データが規定の形でない）。
+const EMSGSIZE: i64 = 90;
+
+/// `mmap` が張る基点（プロセスごと）。**像・ヒープ・スタックは `0x400000..0x800000` に
+/// 収まっているので、その上（PML4[0] の空き）へ順に張る**（`ADR-0065`。窓の拡張は要らない）。
+const MMAP_BASE: u64 = 0x1000_0000;
+
+/// 次に `mmap` で張る番地（スロットごと。`MMAP_BASE` から上へ）。
+static MMAP_NEXT: [core::sync::atomic::AtomicU64; crate::ring3::RING3_SLOTS] =
+    [const { core::sync::atomic::AtomicU64::new(MMAP_BASE) }; crate::ring3::RING3_SLOTS];
+
+/// fd から共有メモリの添字を引く。**共有メモリでなければ `Err(-EBADF)`。**
+fn shm_of(fd: u64) -> Result<u8, u64> {
+    let found = crate::vfs::with_current_files(|files| {
+        files.get(fd as usize).ok().and_then(|file| match file {
+            crate::vfs::File::Shm { shm } => Some(*shm),
+            _ => None,
+        })
+    });
+    found.ok_or((-EBADF) as u64)
+}
+
+/// [`SYS_MEMFD_CREATE`] の本体。**無名の共有メモリを作り、最小の空き fd に据える。**
+/// **名前と旗は見ない**（最小のため。Linux は名前をデバッグに使うだけ）。
+#[inline(never)]
+fn memfd_create_from_ring3() -> u64 {
+    let Some(shm) = crate::shm::create() else {
+        return (-ENOMEM) as u64;
+    };
+    let inserted =
+        crate::vfs::with_current_files(|files| files.insert(crate::vfs::File::Shm { shm }));
+    match inserted {
+        Ok(fd) => fd as u64,
+        Err(error) => {
+            crate::shm::detach(shm);
+            (-errno_for_file_table(error)) as u64
+        }
+    }
+}
+
+/// [`SYS_FTRUNCATE`] の本体。**共有メモリの大きさを据える（ページを取る）。**
+#[inline(never)]
+fn ftruncate_from_ring3(fd: u64, size: u64) -> u64 {
+    let shm = match shm_of(fd) {
+        Ok(shm) => shm,
+        Err(errno) => return errno,
+    };
+    match crate::shm::set_size(shm, size) {
+        crate::shm::TruncateOutcome::Pages(_) => 0,
+        crate::shm::TruncateOutcome::TooLarge | crate::shm::TruncateOutcome::NoRoom => {
+            (-ENOMEM) as u64
+        }
+        crate::shm::TruncateOutcome::AlreadySet => (-EINVAL) as u64,
+        crate::shm::TruncateOutcome::NoShm => (-EBADF) as u64,
+    }
+}
+
+/// [`SYS_MMAP`] の本体。**共有メモリの fd を自分の空間の `MMAP_BASE` から上へ張る。**
+/// **`addr` は見ない（張る場所はカーネルが決める）。`offset` は 0 だけ。**
+///
+/// 破壊 (`ADR-0065`, shm-mmap-maps-nothing): 張らずに番地だけ返す。**読み書きが #PF になり、
+/// 往復が成り立たない。**
+///
+/// # 安全性
+///
+/// 呼び出し元契約により `direct_map` は有効で、遠征の中なので CR3 はこのプロセスのもの。
+#[inline(never)]
+unsafe fn mmap_from_ring3(len: u64, prot: u64, fd: u64, offset: u64, direct_map: DirectMap) -> u64 {
+    use crate::paging::active::{ActivePageTable, PageAttributes};
+
+    if offset != 0 {
+        return (-EINVAL) as u64;
+    }
+    let shm = match shm_of(fd) {
+        Ok(shm) => shm,
+        Err(errno) => return errno,
+    };
+    let mut frames = [common::addr::PhysAddr::new_const(0); crate::shm::MAX_SHM_PAGES];
+    let Some((pages, shm_len)) = crate::shm::frames_of(shm, &mut frames) else {
+        return (-EINVAL) as u64;
+    };
+    // **要求は据えた大きさを越えない。**
+    if len == 0 || len > shm_len {
+        return (-EINVAL) as u64;
+    }
+    let want_pages = crate::shm::pages_for(len);
+    if want_pages > pages {
+        return (-EINVAL) as u64;
+    }
+    let slot = crate::ring3::current_slot();
+    let base = MMAP_NEXT[slot].fetch_add(
+        (want_pages * crate::shm::PAGE_SIZE) as u64,
+        core::sync::atomic::Ordering::SeqCst,
+    );
+    let attributes = PageAttributes {
+        user: true,
+        writable: prot & PROT_WRITE != 0,
+        cacheable: true,
+        // **共有メモリの葉に印を立てる（`ADR-0065`）。** **`destroy` が集めず、`crate::shm` が
+        // 参照数で返す。**
+        shared: true,
+    };
+    // SAFETY: 遠征の中なので CR3 はこのプロセスの表である。
+    let mut table = unsafe { ActivePageTable::current(direct_map) };
+    let Some(allocator) = crate::frame_allocator::take() else {
+        return (-ENOMEM) as u64;
+    };
+    // **載せた後に取った PT を数える（`ADR-0065` の (a)）。** **`map_4kib` が新しい領域へ
+    // 中間表を取るので、その分を破棄の会計の `taken` に足す**——**葉は共有フレームで
+    // アロケータに触らないので、差は表の分だけである。**
+    let free_before_map = allocator.free_frame_count();
+    // **借りたら必ず返す**（`sys_brk` と同じ。**どの出口でも `give_back` する**）。
+    let mut outcome = base;
+    for (page, frame) in frames.iter().enumerate().take(want_pages) {
+        let Some(virt) = common::addr::VirtAddr::new(base + (page * crate::shm::PAGE_SIZE) as u64)
+        else {
+            outcome = (-EINVAL) as u64;
+            break;
+        };
+        // 破壊 (`ADR-0065`, shm-mmap-maps-nothing): 張らない。
+        #[cfg(not(feature = "shm-mmap-maps-nothing"))]
+        {
+            // SAFETY: 稼働中の表へ、ユーザーの範囲を、共有メモリの物理ページで張る。
+            if unsafe { table.map_4kib(virt, *frame, attributes, allocator) }.is_err() {
+                outcome = (-ENOMEM) as u64;
+                break;
+            }
+            crate::shm::note_mapped_page();
+        }
+        #[cfg(feature = "shm-mmap-maps-nothing")]
+        {
+            let _ = (&mut table, *frame, attributes, virt);
+        }
+    }
+    let tables_taken = free_before_map.saturating_sub(allocator.free_frame_count());
+    crate::frame_allocator::give_back(allocator);
+    crate::userland::note_post_load_frames(crate::ring3::current_slot(), tables_taken as usize);
+    outcome
+}
+
+/// `msghdr` を読んで、iov の 1 本目と `SCM_RIGHTS` の fd 1 つを取り出す（`ADR-0065`）。
+///
+/// **形は Wayland が打つものに絞る**——**iov は 1 本、補助データは `SCM_RIGHTS` の fd 1 つ。**
+/// **それ以外は `-EMSGSIZE` / `-EINVAL` で断る**（黙って別の形を通さない）。
+struct ParsedMsg {
+    iov_base: u64,
+    iov_len: u64,
+    control: u64,
+    controllen: u64,
+    control_fd: Option<u64>,
+}
+
+/// `msghdr` の欄を読む（56 バイト）。**iov は 1 本だけ受ける。**
+///
+/// # 安全性
+///
+/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+unsafe fn read_msghdr(
+    msg: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    want_fd: bool,
+) -> Result<ParsedMsg, i64> {
+    // SAFETY: 呼び出し元契約による。
+    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, msg, 56) }) else {
+        return Err(EFAULT);
+    };
+    let mut hdr = [0u8; 56];
+    // SAFETY: `slice` は検証済みで 56 バイト。
+    if unsafe { copy_from_user(&mut hdr, &slice) } != 56 {
+        return Err(EFAULT);
+    }
+    let u64_at = |off: usize| u64::from_le_bytes(hdr[off..off + 8].try_into().unwrap());
+    let name = u64_at(0);
+    let iov = u64_at(16);
+    let iovlen = u64_at(24);
+    let control = u64_at(32);
+    let controllen = u64_at(40);
+    // **受け付ける形を絞る（`ADR-0065`）。** **一覧は `ADR-0065` の「`msghdr` の絞った範囲」に
+    // 在る。** **`msg_name` は NULL だけ**（繋がったストリームは宛先を持たない）。
+    if name != 0 {
+        return Err(EINVAL);
+    }
+    // **`msg_iovlen` は 1 だけ**（散らばり集めは持たない）。
+    //
+    // 破壊 (`ADR-0065`, socket-msghdr-ignores-iovlen): これを見ない。**iovlen が 2 でも受けて
+    // 1 本目だけ送る**——**`sockc` の badmsg が `-EINVAL` を得られず、送ったバイト数が返る。**
+    #[cfg(not(feature = "socket-msghdr-ignores-iovlen"))]
+    if iovlen != 1 {
+        return Err(EINVAL);
+    }
+    // **iovec を読む（16 バイト）。**
+    // SAFETY: 呼び出し元契約による。
+    let Some(iov_slice) = (unsafe { validate_user_range(pml4_phys, direct_map, iov, 16) }) else {
+        return Err(EFAULT);
+    };
+    let mut iovbuf = [0u8; 16];
+    // SAFETY: 検証済み 16 バイト。
+    if unsafe { copy_from_user(&mut iovbuf, &iov_slice) } != 16 {
+        return Err(EFAULT);
+    }
+    let iov_base = u64::from_le_bytes(iovbuf[0..8].try_into().unwrap());
+    let iov_len = u64::from_le_bytes(iovbuf[8..16].try_into().unwrap());
+
+    let mut control_fd = None;
+    if want_fd && control != 0 && controllen >= 20 {
+        // **cmsghdr を読む（16 バイト）＋ fd（4 バイト）。**
+        // SAFETY: 呼び出し元契約による。
+        let Some(cmsg_slice) = (unsafe { validate_user_range(pml4_phys, direct_map, control, 20) })
+        else {
+            return Err(EFAULT);
+        };
+        let mut cbuf = [0u8; 20];
+        // SAFETY: 検証済み 20 バイト。
+        if unsafe { copy_from_user(&mut cbuf, &cmsg_slice) } != 20 {
+            return Err(EFAULT);
+        }
+        let level = u32::from_le_bytes(cbuf[8..12].try_into().unwrap());
+        let ctype = u32::from_le_bytes(cbuf[12..16].try_into().unwrap());
+        if level != SOL_SOCKET || ctype != SCM_RIGHTS {
+            return Err(EINVAL);
+        }
+        control_fd = Some(u32::from_le_bytes(cbuf[16..20].try_into().unwrap()) as u64);
+    }
+    Ok(ParsedMsg {
+        iov_base,
+        iov_len,
+        control,
+        controllen,
+        control_fd,
+    })
+}
+
+/// [`SYS_SENDMSG`] の本体。**iov のバイトをソケットへ書き、`SCM_RIGHTS` の fd を相手へ渡す。**
+///
+/// # 安全性
+///
+/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+#[inline(never)]
+unsafe fn sendmsg_from_ring3(
+    fd: u64,
+    msg: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    bkl: &mut Option<crate::bkl::BklGuard>,
+) -> u64 {
+    let (conn, side) = match socket_state_of(fd) {
+        Ok(crate::vfs::SocketState::Stream { conn, side }) => (conn, side),
+        Ok(_) => return (-ENOTCONN) as u64,
+        Err(errno) => return errno,
+    };
+    // SAFETY: 呼び出し元契約による。
+    let parsed = match unsafe { read_msghdr(msg, pml4_phys, direct_map, true) } {
+        Ok(parsed) => parsed,
+        Err(errno) => return (-errno) as u64,
+    };
+    // **fd を先に渡す**——**`SCM_RIGHTS`。共有メモリの fd を相手の待ち行列へ。**
+    if let Some(shm_fd) = parsed.control_fd {
+        let shm = match shm_of(shm_fd) {
+            Ok(shm) => shm,
+            Err(errno) => return errno,
+        };
+        if !crate::socket::queue_fd(conn, side, shm) {
+            return (-EAGAIN) as u64;
+        }
+        crate::shm::attach(shm);
+        crate::shm::note_fd_sent();
+    }
+    // **iov のバイトを書く**（ソケットの書きと同じ経路）。
+    // SAFETY: 呼び出し元契約による。
+    unsafe {
+        write_to_socket(
+            conn,
+            side,
+            parsed.iov_base,
+            parsed.iov_len,
+            pml4_phys,
+            direct_map,
+            bkl,
+        )
+    }
+}
+
+/// [`SYS_RECVMSG`] の本体。**ソケットのバイトを iov へ、渡された fd を自分の表へ。**
+///
+/// # 安全性
+///
+/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+#[inline(never)]
+unsafe fn recvmsg_from_ring3(
+    fd: u64,
+    msg: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    bkl: &mut Option<crate::bkl::BklGuard>,
+) -> u64 {
+    let (conn, side) = match socket_state_of(fd) {
+        Ok(crate::vfs::SocketState::Stream { conn, side }) => (conn, side),
+        Ok(_) => return (-ENOTCONN) as u64,
+        Err(errno) => return errno,
+    };
+    // SAFETY: 呼び出し元契約による。
+    let parsed = match unsafe { read_msghdr(msg, pml4_phys, direct_map, false) } {
+        Ok(parsed) => parsed,
+        Err(errno) => return (-errno) as u64,
+    };
+    // **渡された fd が在れば、自分の表へ据え、cmsghdr を書き戻す。**
+    if let Some(shm) = crate::socket::take_fd(conn, side) {
+        let inserted =
+            crate::vfs::with_current_files(|files| files.insert(crate::vfs::File::Shm { shm }));
+        let new_fd = match inserted {
+            Ok(new_fd) => new_fd as u64,
+            Err(error) => {
+                crate::shm::detach(shm);
+                return (-errno_for_file_table(error)) as u64;
+            }
+        };
+        if parsed.control == 0 || parsed.controllen < 20 {
+            return (-EMSGSIZE) as u64;
+        }
+        // **cmsghdr（cmsg_len=20, level=SOL_SOCKET, type=SCM_RIGHTS）＋ fd を書く。**
+        let mut cbuf = [0u8; 20];
+        cbuf[0..8].copy_from_slice(&20u64.to_le_bytes());
+        cbuf[8..12].copy_from_slice(&SOL_SOCKET.to_le_bytes());
+        cbuf[12..16].copy_from_slice(&SCM_RIGHTS.to_le_bytes());
+        cbuf[16..20].copy_from_slice(&(new_fd as u32).to_le_bytes());
+        // SAFETY: 呼び出し元契約による。
+        let Some(cslice) =
+            (unsafe { validate_user_range(pml4_phys, direct_map, parsed.control, 20) })
+        else {
+            return (-EFAULT) as u64;
+        };
+        // SAFETY: 検証済み 20 バイト。
+        unsafe { copy_to_user(&cslice, 0, &cbuf) };
+        // **msg_controllen を 20 に書き戻す。**
+        // SAFETY: 呼び出し元契約による。
+        if let Some(mslice) = unsafe { validate_user_range(pml4_phys, direct_map, msg + 40, 8) } {
+            // SAFETY: 検証済み 8 バイト。
+            unsafe { copy_to_user(&mslice, 0, &20u64.to_le_bytes()) };
+        }
+        crate::shm::note_fd_received();
+    }
+    // **バイトを読む**（ソケットの読みと同じ経路）。
+    // SAFETY: 呼び出し元契約による。
+    unsafe {
+        read_from_socket(
+            conn,
+            side,
+            parsed.iov_base,
+            parsed.iov_len,
+            pml4_phys,
+            direct_map,
+            bkl,
+        )
     }
 }
 
@@ -2852,6 +3236,7 @@ unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
         user: true,
         writable: true,
         cacheable: true,
+        shared: false,
     };
 
     let mut outcome = requested;

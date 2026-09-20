@@ -62,6 +62,12 @@ pub const PDE_HUGE_PAT: u64 = 1 << 12;
 /// Global。CR4.PGE が有効なとき、CR3 リロードでも TLB から追い出されない。
 pub const PTE_GLOBAL: u64 = 1 << 8;
 
+/// 共有メモリの印（ソフトウェア用の空きビット 9。`ADR-0065`）。**CPU は無視する。**
+/// **`AddressSpace::destroy` が「この葉はアロケータのものではない（`crate::shm` が
+/// 参照数で返す）」を見分けるのに使う。** **Linux も `struct page` 相当の管理に空きビットを
+/// 使う思想である**（`docs/architecture.md` の「ABIの形は合わせる」）。
+pub const PTE_SHARED: u64 = 1 << 9;
+
 /// 4KiB ページのアドレス部分（ビット 12-51）。
 pub const ADDR_MASK_4K: u64 = 0x000F_FFFF_FFFF_F000;
 
@@ -90,6 +96,10 @@ pub const fn is_present(entry: u64) -> bool {
 ///
 /// **PT レベル（4KiB）のエントリに対して呼んではならない。** そちらでは同じ
 /// ビットが PAT を意味する。
+pub const fn is_shared(entry: u64) -> bool {
+    entry & PTE_SHARED != 0
+}
+
 pub const fn is_huge(entry: u64) -> bool {
     entry & PDE_PAGE_SIZE != 0
 }

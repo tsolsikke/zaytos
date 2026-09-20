@@ -102,6 +102,11 @@ struct Connection {
     open: [bool; 2],
     /// 各側へ流れる輪（`[client へ, server へ]`）。
     rings: [Ring<SOCKET_RING>; 2],
+    /// 各側へ渡す途中の fd（`SCM_RIGHTS`。`[client が受ける, server が受ける]`。`ADR-0065`）。
+    ///
+    /// **1 つだけ**——**`wl_shm.create_pool` は fd を 1 つ運ぶ。** **中身は共有メモリの添字
+    /// （`crate::shm`）で、`sendmsg` が置き、`recvmsg` が取る。**
+    pending_fd: [Option<u8>; 2],
 }
 
 impl Connection {
@@ -111,6 +116,7 @@ impl Connection {
         accepted: false,
         open: [false, false],
         rings: [Ring::EMPTY, Ring::EMPTY],
+        pending_fd: [None, None],
     };
 
     fn is_open(&self, side: Side) -> bool {
@@ -510,6 +516,42 @@ pub fn close_listener(listener: u8) {
             close_end(index as u8, Side::Server);
         }
     }
+}
+
+/// `SCM_RIGHTS` で渡す fd（共有メモリの添字）を相手側の待ち行列へ置く（`ADR-0065`）。
+///
+/// **既に 1 つ待っていれば偽**（最小のため 1 つだけ）。**相手側の読み手を起こす。**
+pub fn queue_fd(conn: u8, side: Side, shm: u8) -> bool {
+    let Some(slot) = CONNECTIONS.get(conn as usize) else {
+        return false;
+    };
+    let peer = side.peer() as usize;
+    let queued = {
+        let mut state = slot.lock();
+        if !state.in_use || state.pending_fd[peer].is_some() {
+            false
+        } else {
+            state.pending_fd[peer] = Some(shm);
+            true
+        }
+    };
+    if queued {
+        task::wake_tasks_waiting_on(Wait::SocketReadable {
+            conn,
+            side: side.peer(),
+        });
+    }
+    queued
+}
+
+/// 自分の側へ渡された fd を取る（`ADR-0065`）。**無ければ `None`。**
+pub fn take_fd(conn: u8, side: Side) -> Option<u8> {
+    let slot = CONNECTIONS.get(conn as usize)?;
+    let mut state = slot.lock();
+    if !state.in_use {
+        return None;
+    }
+    state.pending_fd[side as usize].take()
 }
 
 #[cfg(test)]

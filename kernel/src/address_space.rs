@@ -464,7 +464,14 @@ impl AddressSpace {
                         // SAFETY: 上で present を確かめたテーブル。
                         let pt_entry = unsafe { read_entry(direct_map, pt, pt_index) };
                         if entry::is_present(pt_entry) {
-                            collect(entry::page_address_4k(pt_entry), &mut count, &mut leaked);
+                            // **共有メモリの葉は集めない（`ADR-0065` の「共有フレームの寿命」）。**
+                            // **印は PTE のビット 9（`is_shared`。立てるのは `mmap` だけ）。**
+                            // **返すのは `crate::shm` の参照数である**——**ここで集めると、もう片側の
+                            // fd がまだ在るのに返り、二重解放になる。** **表のフレーム（下の
+                            // `pt`/`pd`/…）はアロケータのものなので集める。**
+                            if !entry::is_shared(pt_entry) {
+                                collect(entry::page_address_4k(pt_entry), &mut count, &mut leaked);
+                            }
                         }
                     }
                     collect(pt, &mut count, &mut leaked);

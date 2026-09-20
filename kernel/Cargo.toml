@@ -564,6 +564,14 @@ socket-write-does-not-wake-reader = ["socket-test"]
 socket-read-empty-returns-zero = ["socket-test"]
 # 両端が閉じても接続の枠を返さない（ADR-0064）。3 つ目の接続が -EAGAIN になる。
 socket-release-keeps-slot = ["socket-test"]
+# ftruncate が要る分のページを取らない（ADR-0065）。模様の後ろが欠ける。
+shm-ftruncate-ignores-size = ["socket-test"]
+# close で参照を減らさない（ADR-0065）。プールのページが返らない。
+shm-close-keeps-refs = ["socket-test"]
+# mmap が葉を張らずに番地だけ返す（ADR-0065）。読み書きが #PF になる。
+shm-mmap-maps-nothing = ["socket-test"]
+# sendmsg/recvmsg の msghdr の msg_iovlen を見ない（ADR-0065）。iovlen が 2 でも受ける。
+socket-msghdr-ignores-iovlen = ["socket-test"]
 # `spawn` で、子へ入る前に親の FP の状態を保存しない（`ADR-0058`）。
 # 親が `spawn` を跨いで値を保てなくなる。
 fp-spawn-no-save = []

@@ -236,6 +236,9 @@ pub struct PageAttributes {
     pub writable: bool,
     /// キャッシュしてよいか。偽なら PCD を立てる（MMIO 用）。
     pub cacheable: bool,
+    /// 共有メモリの葉か（`ADR-0065`）。**真なら PTE のビット 9 を立てる**——
+    /// **`destroy` はこの葉を集めない（`crate::shm` が参照数で返す）。** **葉だけに効く。**
+    pub shared: bool,
 }
 
 /// 分割の結果。呼び出し側が照合に使う。
@@ -615,6 +618,11 @@ impl ActivePageTable {
         }
         if !attributes.cacheable {
             leaf_flags |= entry::PTE_PCD;
+        }
+        // **共有メモリの葉に印を立てる（`ADR-0065`）。** **`destroy` が集めないための印で、
+        // 立てる者は `crate::syscall` の `mmap` だけである**（A-4 まで誰も立てない）。
+        if attributes.shared {
+            leaf_flags |= entry::PTE_SHARED;
         }
         // SAFETY: pt/添字は上記の契約。書く値は 4KiB ページを指す正しい PTE。
         unsafe {

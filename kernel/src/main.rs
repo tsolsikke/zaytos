@@ -2170,6 +2170,16 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
                     kernel::socket::epipe_seen(),
                     kernel::socket::eof_seen()
                 ));
+                // **共有メモリの計器（`ADR-0065`）。** **既定の起動では `syscall-test` の
+                // mmap の検査の分だけ動く。** **台本の族（`socket-test`）が読む。**
+                logger.info(format_args!(
+                    "shm: created {}, released {}, mapped pages {}; fds sent {}, received {}",
+                    kernel::shm::created(),
+                    kernel::shm::released(),
+                    kernel::shm::mapped_pages(),
+                    kernel::shm::fds_sent(),
+                    kernel::shm::fds_received()
+                ));
                 // **`socket-test` のサーバーを手形で待って回収する（`ADR-0064`）。** **台本は
                 // `quit` を打ってから `exit` するので、ここでは既に終わっている。** **終わっていない
                 // なら（破壊）永久に待ち、`xtask` の「出力が伸びない」上限が落とす。**
@@ -4281,6 +4291,7 @@ fn demo_two_address_spaces(
             user: true,
             writable: true,
             cacheable: true,
+            shared: false,
         };
         // SAFETY: どちらもまだ稼働していない。direct map は覆っている。
         if let Err(error) =
@@ -8488,6 +8499,7 @@ fn verify_user_page_mapping<const CAP: usize>(
         user: true,
         writable: true,
         cacheable: true,
+        shared: false,
     };
     // SAFETY: virt はまだマップされていない空き PML4 スロット配下。leaf_phys は
     // 今確保した未使用フレーム。allocator は中間テーブルの確保に使う。
@@ -8683,6 +8695,7 @@ fn verify_ring3_excursion<const CAP: usize>(
             user: user_flag,
             writable,
             cacheable: true,
+            shared: false,
         };
         // SAFETY: いずれも未マップのユーザーサブツリー内アドレス。frame は未使用。
         if let Err(e) = unsafe { table.map_4kib(virt, phys, attributes, allocator) } {
@@ -9206,6 +9219,7 @@ fn verify_syscall_pointer<const CAP: usize>(
         user: false,
         writable: true,
         cacheable: true,
+        shared: false,
     };
     // SAFETY: sup はユーザーサブツリー内の未マップ VA。user=false で張るので Ring 3 から
     // 到達不可（walk_user_accessible が SupervisorOnly で弾く）。frame は未使用。
@@ -10129,6 +10143,26 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "socket-release-keeps-slot",
         cfg!(feature = "socket-release-keeps-slot"),
         "両端が閉じても接続の枠を返さない",
+    ),
+    (
+        "shm-ftruncate-ignores-size",
+        cfg!(feature = "shm-ftruncate-ignores-size"),
+        "ftruncate が要る分のページを取らない",
+    ),
+    (
+        "shm-close-keeps-refs",
+        cfg!(feature = "shm-close-keeps-refs"),
+        "close で参照を減らさない",
+    ),
+    (
+        "shm-mmap-maps-nothing",
+        cfg!(feature = "shm-mmap-maps-nothing"),
+        "mmap が葉を張らずに番地だけ返す",
+    ),
+    (
+        "socket-msghdr-ignores-iovlen",
+        cfg!(feature = "socket-msghdr-ignores-iovlen"),
+        "sendmsg の msghdr の msg_iovlen を見ない",
     ),
     (
         "shell-script-test",

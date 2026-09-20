@@ -549,6 +549,7 @@ kernel::quarantine::tests::overflowing_the_quarantine_leaks_instead_of_handing_t
 kernel::ring::tests::a_full_ring_takes_nothing_more
 kernel::ring::tests::the_capacity_is_the_parameter
 kernel::ring::tests::the_ring_wraps_without_losing_order
+kernel::shm::tests::pages_round_up
 kernel::smp::tests::a_frame_above_one_mib_is_not_addressable
 kernel::smp::tests::a_high_only_allocator_is_rejected
 kernel::smp::tests::a_low_frame_is_sipi_addressable
