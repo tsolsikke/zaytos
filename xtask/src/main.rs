@@ -5022,6 +5022,15 @@ const SOCKET_TEST_SABOTAGES: &[&str] = &[
     "socket-read-empty-returns-zero",
     // **両端が閉じても枠を返さない**——`twice` の 1 本目が `-EAGAIN` で繋げず、判定 9 が落ちる。
     "socket-release-keeps-slot",
+    // **共有メモリ（`ADR-0065`）。**
+    // **ftruncate が要る分を取らない**——2 ページの模様が mmap で `-EINVAL` になり、往復が落ちる。
+    "shm-ftruncate-ignores-size",
+    // **close で参照を減らさない**——フレームが返らず、created != released で落ちる。
+    "shm-close-keeps-refs",
+    // **mmap が葉を張らない**——書いた模様が読めず、往復が落ちる。
+    "shm-mmap-maps-nothing",
+    // **msghdr の msg_iovlen を見ない**——iovlen=2 が `-EINVAL` にならず、badmsg の判定が落ちる。
+    "socket-msghdr-ignores-iovlen",
 ];
 
 /// `socket-test` の上限（秒）。**既定は台本の族の水準（10 秒の桁）の見込みなので、その 10 倍。**
@@ -5151,6 +5160,19 @@ fn cmd_socket_test(features: &[&str], expect_pass: bool) -> Result<()> {
             .as_deref()
             .and_then(|line| number_after(line, key))
     };
+    // **共有メモリの計器（`ADR-0065`）。** **`shm:` の行も畳んで読む。** **計器は大域で、
+    // 起動時の `syscall-test` の mmap の検査（67）も乗る**——**created/released/mapped は
+    // その分だけ多い（`>=` で見る）。** **fds は台本だけ（起動時は fd を送らない）なので `==`。**
+    let shm_line: Option<String> = lines
+        .iter()
+        .find(|line| line.contains("[INFO] shm: created "))
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "));
+    let sg = |key: &str| shm_line.as_deref().and_then(|line| number_after(line, key));
+    let shm_created = sg("shm: created ");
+    let shm_released = sg("released ");
+    let shm_mapped = sg("mapped pages ");
+    let shm_fds_sent = sg("fds sent ");
+    let shm_fds_received = sg("received ");
     let bound = g("listeners bound ");
     let listeners_released = g("released ");
     let bind_refused = g("bind refused ");
@@ -5173,10 +5195,12 @@ fn cmd_socket_test(features: &[&str], expect_pass: bool) -> Result<()> {
             count_line("sockc: hello reply=hello") == 1,
         ),
         (
-            "big_went_round_and_the_writer_waited",
-            count_line("sockc: big sent=1536 got=1536 match=true") == 1
-                && writer_waits.is_some_and(|n| n >= 1)
-                && writers_woken_by_read.is_some_and(|n| n >= 1),
+            // **1,536 バイトを 1,024 の輪で往復させ、バイト単位で一致した**——**輪が境を跨いで
+            // 正しく渡すことの検査（`ADR-0065`）。** **書き手が「満杯で待つ」かは時機に依る
+            // （tick が2回の write の間に入るか）ので判定に載せない**——**書き手の待ちの経路は
+            // `Ring` をパイプと共有し、`pipe-test` が輪の 8.5 倍の `/data/big` で確実に踏ませる。**
+            "big_went_round",
+            count_line("sockc: big sent=1536 got=1536 match=true") == 1,
         ),
         ("accept_waited", accept_waits.is_some_and(|n| n >= 1)),
         (
@@ -5198,7 +5222,7 @@ fn cmd_socket_test(features: &[&str], expect_pass: bool) -> Result<()> {
         ),
         (
             "eof_after_the_peer_closed",
-            count_line("sockd: client left") == 4 && eof == Some(5),
+            count_line("sockd: client left") == 6 && eof == Some(7),
         ),
         (
             "epipe_after_the_peer_closed",
@@ -5207,12 +5231,36 @@ fn cmd_socket_test(features: &[&str], expect_pass: bool) -> Result<()> {
         (
             "the_queue_and_the_slots",
             count_line("sockc: twice second=0 reply=one reply=two") == 1
-                && created == Some(5)
+                && created == Some(7)
                 && at_once == Some(2)
-                && connections_released == Some(5)
+                && connections_released == Some(7)
                 && backlog_full == Some(0)
                 && bound == Some(1)
                 && listeners_released == Some(1),
+        ),
+        (
+            // **共有メモリの往復（`ADR-0065`）。** **sockc が 6000 バイト（2 ページ）の模様を書き、fd を送り、sockd が
+            // 同じ物理ページを mmap して読み、バイト単位で一致した。**
+            "shm_went_round",
+            count_line("sockc: shm sent=3 reply=shm-ok") == 1
+                && count_line("sockd: shm 6000 bytes ok=true") == 1,
+        ),
+        (
+            // **共有メモリの計器（`ADR-0065`）。** **created/released/mapped は起動時の
+            // `syscall-test` の分も乗るので `>=`、fds は台本だけなので `==`。**
+            "shm_gauges_are_coherent",
+            shm_created.is_some_and(|n| n >= 2)
+                && shm_released.is_some_and(|n| n >= 2)
+                && shm_created == shm_released
+                && shm_mapped.is_some_and(|n| n >= 3)
+                && shm_fds_sent == Some(1)
+                && shm_fds_received == Some(1),
+        ),
+        (
+            // **絞った範囲の外を確かめる（`ADR-0065`）。** **`msg_iovlen` が 2 の `sendmsg` は
+            // `-EINVAL`（-22）。** **破壊 `socket-msghdr-ignores-iovlen` はこれを落とす。**
+            "an_unsupported_iovlen_is_rejected",
+            count_line("sockc: badmsg iovlen2 -> -22") == 1,
         ),
         (
             "the_server_ended_and_the_script_reached_its_end",
@@ -18783,7 +18831,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 35,
-    full: 334,
+    full: 338,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
