@@ -1753,6 +1753,17 @@ fn main() -> Result<()> {
                 let expect_pass = sabotage.is_empty();
                 return cmd_input_test(&sabotage, expect_pass);
             }
+            // **入力とソケットを同時に待つ判定（`ADR-0066` の Y-b）。`sendkey` で本物の打鍵を送る。**
+            if rest.iter().any(|a| a == "--poll-test") {
+                let sabotage: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                let expect_pass = sabotage.is_empty();
+                return cmd_poll_test(&sabotage, expect_pass);
+            }
             if rest.iter().any(|a| a == "--history-test") {
                 let sabotage: Vec<&str> = rest
                     .iter()
@@ -5544,6 +5555,261 @@ fn cmd_input_test(features: &[&str], expect_pass: bool) -> Result<()> {
     );
     for info in lines.iter().filter(|line| {
         line.contains("[INFO] input:") || line.contains("inputd: ") || line.contains("input-test:")
+    }) {
+        println!("{context}: (info) {}", info.trim());
+    }
+    println!(
+        "{context}: (info) waited {:.1} s (ready = {ready})",
+        waited.as_secs_f64()
+    );
+
+    let passed = ready && failed.is_empty() && no_error;
+    if passed {
+        println!("{context}: PASS");
+        if expect_pass {
+            Ok(())
+        } else {
+            bail!("{context}: the sabotage was NOT caught; every judgement still held")
+        }
+    } else {
+        println!("{context}: FAILED (judgements that fell: {failed:?})");
+        if expect_pass {
+            bail!("{context}: FAILED ({failed:?})")
+        } else {
+            println!("{context}: the sabotage was caught (this run is expected to fail)");
+            Ok(())
+        }
+    }
+}
+
+/// `--poll-test` の破壊（`ADR-0066` の Y-b）。**落ちる判定は `ADR-0066` の表に在る。**
+///
+/// - `poll-never-waits` —— 判定 4（`poll` が待った）だけ
+/// - `poll-mistakes-the-member` —— 判定 1・2（どちらで起きたか）
+/// - `poll-waits-on-one-member` —— 判定 6（集合に 2 本入った）と、戻らないので他も
+/// - `wake-ignores-the-reason` —— 判定 5（集合の外の者を起こしていない）だけ
+///
+/// **`wake-ignores-the-reason` は W2-d+ で置いた破壊である**（`--shell-test` の族も駆動して
+/// いる）。**ここでも回すのは、集合の下で不変条件が言い換わったからである**——**待ち 3 の間、
+/// `polld` は {入力, 接続}、`pollc` は接続だけを待っている。** **打鍵で `pollc` まで起こすと
+/// `on ∉ S` が 1 以上になる**（`ADR-0066` の Q3）。**空振りの起床は無害なので、走行は終わり、
+/// 落ちるのは判定 5 だけである。**
+const POLL_TEST_SABOTAGES: &[&str] = &[
+    "poll-never-waits",
+    "poll-mistakes-the-member",
+    "poll-waits-on-one-member",
+    "wake-ignores-the-reason",
+];
+
+/// `--poll-test` の 1 段ごとの上限（秒）。**打鍵と相手の返しを待つ。**
+const POLL_TEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// `polld` が待ち受けた印（`ADR-0066` の Y-b）。
+const POLL_TEST_READY_MARKER: &str = "polld: listening on poll-0";
+/// `polld` が待ち 2 を終えた印。**ここまで打鍵を送らない**——**先に送ると、待ち 1 と 2 が
+/// 入力でも起きてしまい、どちらで起きたかの判定が混ざる。**
+const POLL_TEST_SOCKET_MARKER: &str = "polld: socket gave ";
+/// `polld` が 3 回とも起きて終えた印。
+const POLL_TEST_DONE_MARKER: &str = "polld: done";
+
+/// 入力とソケットを同時に待つ形を検査する（`ADR-0066` の Y-b）。
+///
+/// **`polld` を前景で起こす。** **`polld` は自分で `pollc` を起こしっぱなしで起こし、
+/// 同じ集合 {入力, ソケット} で 3 回待つ**——**1 回目は相手の `connect`、2 回目は相手の返し、
+/// 3 回目は本物の打鍵で起きる。**
+///
+/// **判定は 6 本**——
+///
+/// 1. 待ち 1 が listener で起きた
+/// 2. 待ち 2 がソケットで起きた
+/// 3. 待ち 3 が入力で起きた
+/// 4. `poll` が待った（回して待つ形では 0）
+/// 5. 集合の外の理由で起こした者が 0（`on ∉ S`。`ADR-0066` の Q3 の言い換え）
+/// 6. 集合に 2 本入った（実測。大きさを決めた根拠でもある）
+///
+/// **打鍵は待ち 2 が終わった後に送る**（[`POLL_TEST_SOCKET_MARKER`]）。
+fn cmd_poll_test(features: &[&str], expect_pass: bool) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let mut all_features: Vec<&str> = vec!["poll-test"];
+    all_features.extend_from_slice(features);
+    let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let tag = all_features.join("-");
+    let serial_log = workspace_root
+        .join("target")
+        .join(format!("poll-test-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+    let monitor_socket = PathBuf::from(format!(
+        "/tmp/zaytos-xtask-poll-{}.sock",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&monitor_socket);
+    ensure_socket_path_fits(&monitor_socket)?;
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: Some(&monitor_socket),
+        accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the poll test")?;
+
+    // **印が出るまで待つ。上限つき。**
+    let started = Instant::now();
+    let wait_for = |marker: &str, limit: Duration| -> bool {
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            if read_lossy(&serial_log).contains(marker) {
+                return true;
+            }
+            thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        }
+        false
+    };
+
+    let ready = wait_for(POLL_TEST_READY_MARKER, BOOT_READY_TIMEOUT);
+    if ready {
+        // **待ち 2 が終わるまで打鍵を送らない**（[`POLL_TEST_SOCKET_MARKER`] の doc）。
+        let past_socket = wait_for(POLL_TEST_SOCKET_MARKER, POLL_TEST_TIMEOUT);
+        if past_socket {
+            // **待ち 3 が眠りに入る間をおく**（判定 4 は「待った」ことを見る）。
+            thread::sleep(Duration::from_millis(500));
+            match connect_monitor_with_retry(&monitor_socket) {
+                Ok(mut stream) => {
+                    // **本物の打鍵を送る。** **数回送って、待ちに入った後に 1 度は届くようにする。**
+                    for _ in 0..3 {
+                        if writeln!(stream, "sendkey {INPUT_TEST_KEY}").is_err() {
+                            break;
+                        }
+                        thread::sleep(SHELL_TEST_KEY_INTERVAL);
+                    }
+                }
+                Err(e) => println!("poll-test: could not reach the QEMU monitor: {e}"),
+            }
+        }
+        wait_for(POLL_TEST_DONE_MARKER, POLL_TEST_TIMEOUT);
+    }
+    let waited = started.elapsed();
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = fs::remove_file(&monitor_socket);
+
+    let serial = read_lossy(&serial_log);
+    let context = if features.is_empty() {
+        "poll-test".to_string()
+    } else {
+        format!("poll-test {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    let qemu_debug = read_lossy(&debug_log);
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    let stripped = strip_ansi(&serial);
+    let lines: Vec<&str> = stripped.lines().map(str::trim_end).collect();
+    let number_after = |line: &str, key: &str| -> Option<u64> {
+        let rest = &line[line.find(key)? + key.len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok()
+    };
+    // **計器の行は `polld` が戻ってから出る**——**戻らない破壊では 3 つとも `None` になる。**
+    let counters = lines
+        .iter()
+        .find(|line| line.contains("[INFO] poll: waited "));
+    let poll_waits = counters.and_then(|line| number_after(line, "waited "));
+    let max_wait_set = counters.and_then(|line| number_after(line, "max wait set "));
+    let woken_outside = counters.and_then(|line| number_after(line, "woken outside the set "));
+
+    let judgements: [(&str, bool); 6] = [
+        (
+            // **待ち 1 は相手の `connect` で起きる**（listener が読めるようになる）。
+            "the_listener_woke_the_first_poll",
+            stripped.contains("polld: poll 1 ready=listener"),
+        ),
+        (
+            // **待ち 2 は相手の返しで起きる**（接続が読めるようになる）。
+            "the_socket_woke_the_second_poll",
+            stripped.contains("polld: poll 2 ready=socket"),
+        ),
+        (
+            // **待ち 3 は本物の打鍵で起きる**（同じ集合で、起きる理由が入れ替わる）。
+            "the_input_woke_the_third_poll",
+            stripped.contains("polld: poll 3 ready=input"),
+        ),
+        (
+            // **`poll` が待った**（回して待つ形では 0）。
+            //
+            // **構造で待つのは待ち 3 だけである**——**打鍵はこちらが送るまで来ない。**
+            // **待ち 1 と 2 は、相手が別の CPU で先に進めば待たずに済む**（実測で、
+            // 待ち 2 が待たない回が出た。SMP で `pollc` が同時に走る）。**だから 1 以上で
+            // 見る**——**`input-test` の「`read` が待った」と同じ形である。**
+            "the_poll_waited",
+            poll_waits.is_some_and(|n| n >= 1),
+        ),
+        (
+            // **集合の外の理由で起こした者が 0**（`on ∉ S`）。**本番では構造で 0 である**
+            // ——**所属判定が起こす条件そのものだからである**（`ADR-0066` の Q3）。
+            "no_task_was_woken_outside_its_set",
+            woken_outside == Some(0),
+        ),
+        (
+            // **集合に 2 本入った**（入力とソケット）。**`Wait` が 1 理由だった形では 1 になる。**
+            "the_wait_set_held_two_reasons",
+            max_wait_set == Some(2),
+        ),
+    ];
+
+    // **禁止**——`[ERROR]` が 1 行も無い。
+    let error_lines: Vec<&str> = lines
+        .iter()
+        .filter(|line| line.contains("[ERROR]"))
+        .copied()
+        .take(4)
+        .collect();
+    let no_error = error_lines.is_empty();
+
+    let failed: Vec<&str> = judgements
+        .iter()
+        .filter(|(_, held)| !held)
+        .map(|(name, _)| *name)
+        .collect();
+    for (name, held) in &judgements {
+        println!("{context}: {name} = {held}");
+    }
+    println!("{context}: no [ERROR] line = {no_error} (the first were {error_lines:?})");
+    println!(
+        "{context}: (info) poll waited = {poll_waits:?}, max wait set = {max_wait_set:?}, \
+         woken outside the set = {woken_outside:?}"
+    );
+    for info in lines.iter().filter(|line| {
+        line.contains("[INFO] poll:")
+            || line.contains("polld: ")
+            || line.contains("pollc: ")
+            || line.contains("poll-test:")
     }) {
         println!("{context}: (info) {}", info.trim());
     }
@@ -17552,8 +17818,8 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         }
 
         // **入力の生イベントの fd（`ADR-0066` の Y-a）。** **`inputd` を前景で起こし、`sendkey` で
-        // 本物の打鍵を送り、生イベントが届いて `read` が待ったかを見る。** **破壊は 1 つ**
-        // （`INPUT_TEST_SABOTAGES`。判定 2「read が待った」を落とす）。
+        // 本物の打鍵を送り、生イベントが届いて `read` が待ったかを見る。** **破壊は 3 つで、
+        // 落ちる判定が 1 本ずつ違う**（`INPUT_TEST_SABOTAGES`）。
         total += 1;
         begin_item("a foreground process reads raw input events through the input fd");
         match cmd_input_test(&[], true) {
@@ -17568,6 +17834,30 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("input-test {sabotage}");
             begin_item(&label);
             match cmd_input_test(&[sabotage], false) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
+            }
+        }
+
+        // **入力とソケットを同時に待つ形（`ADR-0066` の Y-b）。** **`polld` が同じ集合で 3 回待ち、
+        // 2 回はソケット側、1 回は本物の打鍵で起きる。** **破壊は 3 つ**（`POLL_TEST_SABOTAGES`）。
+        total += 1;
+        begin_item("a process waits on the input fd and a socket at the same time");
+        match cmd_poll_test(&[], true) {
+            Ok(()) => println!("--- poll test: OK"),
+            Err(error) => {
+                println!("--- poll test: FAILED ({error})");
+                failed.push("poll test".to_string());
+            }
+        }
+        for sabotage in POLL_TEST_SABOTAGES {
+            total += 1;
+            let label = format!("poll-test {sabotage}");
+            begin_item(&label);
+            match cmd_poll_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
                     println!("--- {label}: FAILED ({error})");
@@ -19102,7 +19392,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 35,
-    full: 342,
+    full: 347,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。

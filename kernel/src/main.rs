@@ -1975,14 +1975,15 @@ const SHELL_AFTER_HEARTBEATS: u64 = if cfg!(feature = "keep-steady-loop") {
 /// **`init` の 3 種類は変わらずこの関数が書く**——据えるのは `spawn` の間だけである。
 fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> ! {
     /// 起こし直す上限。**同じ失敗を無限に繰り返さない。**
-    /// **`input-test` はシェルを起こさない**ので、そのときは使われない（`ADR-0066` の Y-a）。
-    #[cfg_attr(feature = "input-test", allow(dead_code))]
+    /// **`input-test` と `poll-test` はシェルを起こさない**ので、そのときは使われない
+    /// （`ADR-0066` の Y-a / Y-b）。
+    #[cfg_attr(any(feature = "input-test", feature = "poll-test"), allow(dead_code))]
     const MAX_RESTARTS: usize = 3;
 
     // **借り直しながら回す。** `Option<&mut _>` は `Copy` ではないので、
     // 各周で `as_deref_mut` を取る（`interrupts::drain_keyboard` と同じ形）。
-    // **`input-test` は `console` を `run_input_test` へ移すだけなので `mut` は要らない。**
-    #[cfg_attr(feature = "input-test", allow(unused_mut))]
+    // **`input-test` と `poll-test` は `console` を検査の関数へ移すだけなので `mut` は要らない。**
+    #[cfg_attr(any(feature = "input-test", feature = "poll-test"), allow(unused_mut))]
     let mut console = console;
 
     // **`init` が `/bin/fptest` を 1 度だけ起こす（B-a。`ADR-0058`）。**
@@ -2021,9 +2022,17 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
         cpu::halt_forever()
     }
 
-    #[cfg(not(feature = "input-test"))]
+    // **入力とソケットを同時に待つ形を検査する（`ADR-0066` の Y-b）。** **`polld` を前景で 1 度
+    // 起こして締める**——**`input-test` と同じ形で、シェルは起こさない。**
+    #[cfg(feature = "poll-test")]
+    {
+        run_poll_test(logger, console);
+        cpu::halt_forever()
+    }
+
+    #[cfg(not(any(feature = "input-test", feature = "poll-test")))]
     let mut restarts = 0usize;
-    #[cfg(not(feature = "input-test"))]
+    #[cfg(not(any(feature = "input-test", feature = "poll-test")))]
     loop {
         log_both(
             logger,
@@ -2259,6 +2268,52 @@ fn run_input_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>
     ));
 }
 
+/// 入力とソケットを同時に待つ形を検査する（`ADR-0066` の Y-b）。**`/bin/polld` を前景で 1 度
+/// 起こし、締めに計器を出す。** **シェルは起こさない**（`init` が `poll-test` のとき、これで締める）。
+///
+/// **`polld` が自分で `/bin/pollc` を起こしっぱなしで起こす**——**Ring 3 のスロットは 2 で、
+/// `a | b` と同じ形である**（`ADR-0063` の (b3)）。**待つ側が先に待ち受けてから起こすので、
+/// 繋ぎ直しの回しが要らない。**
+///
+/// **前景はこの関数が据える**——**`polld` が入力の fd を開けるのは前景が取られている間だけ
+/// である**（`ADR-0066` の「入力 fd の前景の関所」）。
+///
+/// **判定は `xtask` の `poll-test` が、印字した行と計器の行を読んで行う。**
+#[cfg(feature = "poll-test")]
+fn run_poll_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) {
+    let mut console = console;
+    let outcome = {
+        let _foreground = console
+            .as_deref_mut()
+            .map(kernel::console::install_foreground);
+        kernel::userland::spawn(b"/bin/polld", b"polld\0", 1, None)
+    };
+    log_both(
+        logger,
+        console,
+        LogLevel::Info,
+        format_args!("poll-test: /bin/polld ended ({outcome:?})"),
+    );
+    // **判定が読む 3 つの数を 1 行に出す。**
+    //
+    // - **`poll waited`**——**眠った回数**（待たない破壊では 0）。
+    // - **`max wait set`**——**集合に入った理由の最大本数**（**大きさを実測で決めた根拠でもある**。
+    //   `task::MAX_WAIT_REASONS` の doc）。
+    // - **`woken outside the set`**——**`on ∉ S` の者を起こした回数**（**本番では構造で 0**。
+    //   `ADR-0066` の Q3 の言い換え）。
+    logger.info(format_args!(
+        "poll: waited {} time(s), max wait set {}, woken outside the set {}",
+        kernel::syscall::poll_waits(),
+        kernel::task::max_wait_set_len(),
+        kernel::task::woken_for_another_reason()
+    ));
+    logger.info(format_args!(
+        "poll: input events delivered {}, keyboard waited {} time(s)",
+        kernel::input::input_events_delivered(),
+        kernel::syscall::keyboard_waits()
+    ));
+}
+
 /// 2 本の Ring 3 を同時に走らせ、判定の材料を行に出す（W1-c-4。`ADR-0060`）。
 ///
 /// **判定は `xtask` が行う**（カウンタと内容で見る。行の順序では見ない）。
@@ -2449,14 +2504,15 @@ fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Con
 }
 
 /// シェルの像のパス。**NUL は付けない**（`spawn` はスライスを取る）。
-/// **`input-test` はシェルを起こさない**ので、そのときは使われない（`ADR-0066` の Y-a）。
-#[cfg_attr(feature = "input-test", allow(dead_code))]
+/// **`input-test` と `poll-test` はシェルを起こさない**ので、そのときは使われない
+/// （`ADR-0066` の Y-a / Y-b）。
+#[cfg_attr(any(feature = "input-test", feature = "poll-test"), allow(dead_code))]
 const SHELL_PATH: &[u8] = b"/bin/zash";
 /// 判定行に出すためのパス。
-#[cfg_attr(feature = "input-test", allow(dead_code))]
+#[cfg_attr(any(feature = "input-test", feature = "poll-test"), allow(dead_code))]
 const SHELL_PATH_TEXT: &str = "/bin/zash";
 /// シェルへ渡す `argv`。**NUL 区切りで並べる**（`spawn` の受け取る形）。
-#[cfg_attr(feature = "input-test", allow(dead_code))]
+#[cfg_attr(any(feature = "input-test", feature = "poll-test"), allow(dead_code))]
 const SHELL_ARGV: &[u8] = b"zash\0";
 
 /// フレームバッファを検証し、描画ハンドルを作る（M3-a）。
@@ -10216,6 +10272,26 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "input-test",
         cfg!(feature = "input-test"),
         "inputd が入力の生イベントの fd を読む（ADR-0066 の Y-a）",
+    ),
+    (
+        "poll-test",
+        cfg!(feature = "poll-test"),
+        "polld が入力とソケットを同時に待つ（ADR-0066 の Y-b）",
+    ),
+    (
+        "poll-never-waits",
+        cfg!(feature = "poll-never-waits"),
+        "poll が待たずに 0 を返す（ADR-0066 の Y-b）",
+    ),
+    (
+        "poll-mistakes-the-member",
+        cfg!(feature = "poll-mistakes-the-member"),
+        "poll が revents を隣の欄へ付ける（ADR-0066 の Y-b）",
+    ),
+    (
+        "poll-waits-on-one-member",
+        cfg!(feature = "poll-waits-on-one-member"),
+        "poll が集合へ最初の 1 本だけを入れる（ADR-0066 の Y-b）",
     ),
     (
         "input-read-never-waits",
