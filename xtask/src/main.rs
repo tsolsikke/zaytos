@@ -19518,7 +19518,7 @@ static TIME_LIMIT: std::sync::Mutex<Option<(Instant, std::time::Duration)>> =
 /// **いちばん遅い実測は壁時計121.7分（338項目。共有メモリの回）で、1.6倍は194.7分である。**
 ///
 /// **弱点への手当てを、上限とは別に足した**——**`--full` の締めで、項目の所要の合計を
-/// 直前の緑の回と比べ、1.3倍を超えたら計器に出す（止めない。[`report_item_time_slowness`]）。**
+/// 直近の高負荷の緑の回と比べ、1.3倍を超えたら計器に出す（止めない。[`report_item_time_slowness`]）。**
 /// **以前は「壁時計が120分を超えたとき」という絶対の契機を立てていたが、上限が195分に
 /// なると120分は毎回超えるので、相対の計器へ替えた。** **項目数の契機は330から380へ
 /// 上げた**（どちらも `docs/deferred-decisions.md`）。
@@ -19539,11 +19539,19 @@ const FULL_TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(195 
 /// `docs/verification-coverage.md`）。**止めると揺れで誤って落ちる**ので、
 /// **`(info)` の行に出すだけにする**（判定行にはしない。同 doc の規律）。
 ///
-/// # 更新の運用
+/// # 比べる相手は「直近の高負荷の緑の回」——直前でも最小でもない
 ///
-/// **緑の回を記録するとき、その回の合計へ更新する**（`docs/roadmap.md` の
-/// 「最後に全部緑だった回」と対で動かす）。**「直前の緑の回」と比べる約束なので、
-/// 比べる相手が古びない。** **いまの値は共有メモリの回の109.5分である。**
+/// **項目の所要は同じ338項目でも負荷で大きく揺れる**——**低負荷の回で75.7分、
+/// 高負荷の回で109.5分（1.45倍。実測。2026-09-20）。** **この揺れは1.3倍の閾値より
+/// 大きいので、「直前の回」や「最小の回」を相手にすると、次に負荷の高い回が来たとき
+/// 誤って合図が出る。** **だから相手はいちばん遅い正常な回（高負荷の水準）に置く**
+/// ——**いまは共有メモリの回の109.5分。** **低負荷の回では下げない。**
+///
+/// # いつ更新するか
+///
+/// **成長で高負荷の水準が上がったと確かめたとき**（計器が合図を出し、負荷ではなく
+/// コードの増分だと分かったとき）だけ、この値を新しい高負荷の水準へ上げる。
+/// **`docs/roadmap.md` の「最後に全部緑だった回」の記録と一緒に見る。**
 const GREEN_ITEM_SUM_BASELINE: std::time::Duration = std::time::Duration::from_secs(6570);
 
 /// 遅さの計器の倍率（1.3倍。`ADR-0065`）。**分子と分母で持つ**——**浮動小数の
@@ -19551,7 +19559,7 @@ const GREEN_ITEM_SUM_BASELINE: std::time::Duration = std::time::Duration::from_s
 const SLOWNESS_WARN_NUMER: u32 = 13;
 const SLOWNESS_WARN_DENOM: u32 = 10;
 
-/// `--full` の締めで、項目の所要の合計を直前の緑の回と比べる（`ADR-0065`）。
+/// `--full` の締めで、項目の所要の合計を直近の高負荷の緑の回と比べる（`ADR-0065`）。
 ///
 /// **止めない。** [`GREEN_ITEM_SUM_BASELINE`] の doc の理由による。**計器に出すだけである。**
 fn report_item_time_slowness() {
@@ -19569,8 +19577,9 @@ fn report_item_time_slowness() {
     if total > threshold {
         println!(
             "(info) WARNING: item time total {:.1} min is over {}/{} of the baseline ({:.1} min). \
-             The check still passed; this only flags that --full got slower. Update \
-             GREEN_ITEM_SUM_BASELINE when you record the next green run.",
+             The check still passed; this only flags that --full may have got slower. Confirm it \
+             is code growth, not host load (the item sum swings ~1.45x with load alone); if it is \
+             growth, raise GREEN_ITEM_SUM_BASELINE to the new high-load level.",
             total.as_secs_f64() / 60.0,
             SLOWNESS_WARN_NUMER,
             SLOWNESS_WARN_DENOM,
