@@ -10223,6 +10223,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "入力 fd の read が空でも待たず -EAGAIN を返す",
     ),
     (
+        "input-events-mistake-the-code",
+        cfg!(feature = "input-events-mistake-the-code"),
+        "生イベントのキーコードを取り違える（+1）",
+    ),
+    (
+        "input-events-zero-the-time",
+        cfg!(feature = "input-events-zero-the-time"),
+        "生イベントの時刻を入れない（ティックを 0 と読む）",
+    ),
+    (
         "shell-script-test",
         cfg!(feature = "shell-script-test"),
         "--shell-test の台本を台本の族で回す",

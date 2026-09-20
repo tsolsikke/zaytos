@@ -317,7 +317,15 @@ pub fn input_events_delivered() -> u64 {
 /// そのまま割る**——**`code` は set-1 のメイクコード（`& 0x7F`）、`value` は押下 1 / 離脱 0。**
 /// **拡張接頭辞（`0xE0`）は 1 イベントになる**（v1 の限界。`ADR-0066`）。
 pub fn read_events(dst: &mut [u8]) -> usize {
-    let ticks = crate::idt::monotonic_ticks();
+    // 破壊 (Y-a, input-events-zero-the-time): 時刻を入れない（ティックを 0 と読む）。
+    // **`struct input_event` の欄は Linux の配置のまま在り、値だけが 0 になる**——
+    // **判定「時刻が入っている」が落ちる。** **`cfg!` で書くのは、`#[cfg]` で影を作ると
+    // 元の束縛が読まれずに警告になるためである。**
+    let ticks = if cfg!(feature = "input-events-zero-the-time") {
+        0
+    } else {
+        crate::idt::monotonic_ticks()
+    };
     let hz = u64::from(crate::irq::timer_frequency_hz());
     let (secs, nanos) = common::time::timespec_from_ticks(ticks, hz);
     let usecs = nanos / 1000;
@@ -332,7 +340,13 @@ pub fn read_events(dst: &mut [u8]) -> usize {
             break;
         };
         let released = code & 0x80 != 0;
-        let keycode = u16::from(code & 0x7F);
+        // 破壊 (Y-a, input-events-mistake-the-code): キーコードを取り違える（+1）。
+        // **`a` の押下が 30 ではなく 31 で届くので、判定「押下のイベントが届いた」が落ちる。**
+        let keycode = if cfg!(feature = "input-events-mistake-the-code") {
+            u16::from(code & 0x7F).wrapping_add(1)
+        } else {
+            u16::from(code & 0x7F)
+        };
         let value: i32 = if released { 0 } else { 1 };
         dst[written..written + 8].copy_from_slice(&secs.to_le_bytes());
         dst[written + 8..written + 16].copy_from_slice(&usecs.to_le_bytes());

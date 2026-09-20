@@ -577,6 +577,10 @@ socket-msghdr-ignores-iovlen = ["socket-test"]
 input-test = []
 # 入力 fd の read が空でも待たず -EAGAIN を返す（ADR-0066 の Y-a）。打鍵で起きる判定が落ちる。
 input-read-never-waits = ["input-test"]
+# 生イベントのキーコードを取り違える（+1。ADR-0066 の Y-a）。押下が届く判定が落ちる。
+input-events-mistake-the-code = ["input-test"]
+# 生イベントの時刻を入れない（ティックを 0 と読む。ADR-0066 の Y-a）。時刻の判定が落ちる。
+input-events-zero-the-time = ["input-test"]
 # `spawn` で、子へ入る前に親の FP の状態を保存しない（`ADR-0058`）。
 # 親が `spawn` を跨いで値を保てなくなる。
 fp-spawn-no-save = []

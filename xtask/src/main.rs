@@ -5341,8 +5341,20 @@ fn cmd_socket_test(features: &[&str], expect_pass: bool) -> Result<()> {
     }
 }
 
-/// `--input-test` の破壊（`ADR-0066` の Y-a）。**判定 2（read が待った）を落とす。**
-const INPUT_TEST_SABOTAGES: &[&str] = &["input-read-never-waits"];
+/// `--input-test` の破壊（`ADR-0066` の Y-a）。**落ちる判定が 1 本ずつ違う。**
+///
+/// - `input-read-never-waits` —— 判定 2（`read` が待った）
+/// - `input-events-mistake-the-code` —— 判定 1（押下のイベントが届いた）
+/// - `input-events-zero-the-time` —— 判定 3（時刻が入っている）
+///
+/// **判定 1 と 3 の破壊は、運用者の指摘で後から置いた**（`ADR-0066`。**判定を足すときは、
+/// その場で落とす破壊が在るかを確かめる**）。**「離脱を押下と読む」は置けなかった**
+/// ——理由は `ADR-0066` に在る。
+const INPUT_TEST_SABOTAGES: &[&str] = &[
+    "input-read-never-waits",
+    "input-events-mistake-the-code",
+    "input-events-zero-the-time",
+];
 
 /// `--input-test` の上限（秒）。**打鍵で起きるのを待つ**（`sendkey` はタイミングに依る）。
 const INPUT_TEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -5478,7 +5490,17 @@ fn cmd_input_test(features: &[&str], expect_pass: bool) -> Result<()> {
         .find(|line| line.contains("[INFO] input: events delivered "))
         .and_then(|line| number_after(line, "keyboard waited "));
 
-    let judgements: [(&str, bool); 2] = [
+    // **押下のイベントの行から時刻の欄を読む**（`struct input_event` の `tv_sec`/`tv_usec`）。
+    //
+    // **`code=` に依らない形で拾う**——**キーコードを取り違える破壊でも時刻の判定が落ちないように
+    // する**（**破壊ごとに落ちる判定を1本ずつに分ける**）。
+    let press_line = lines
+        .iter()
+        .find(|line| line.contains("inputd: event ") && line.contains("value=1"));
+    let press_sec = press_line.and_then(|line| number_after(line, "sec="));
+    let press_usec = press_line.and_then(|line| number_after(line, "usec="));
+
+    let judgements: [(&str, bool); 3] = [
         (
             // **押下のイベントが届いた**（`a` = code 30、value 1）。
             "a_key_press_went_through",
@@ -5488,6 +5510,13 @@ fn cmd_input_test(features: &[&str], expect_pass: bool) -> Result<()> {
             // **read が待った**（回して待つ形では 0）。
             "the_read_waited",
             keyboard_waited.is_some_and(|n| n >= 1),
+        ),
+        (
+            // **時刻が入っている**（入れない破壊では `tv_sec` と `tv_usec` が両方 0）。
+            // **両方 0 でないことだけを見る**——**起動から何秒目かは負荷で揺れるので、
+            // 秒の下限を主張しない。**
+            "the_event_carries_a_timestamp",
+            press_sec.is_some() && !(press_sec == Some(0) && press_usec == Some(0)),
         ),
     ];
 
@@ -5509,7 +5538,10 @@ fn cmd_input_test(features: &[&str], expect_pass: bool) -> Result<()> {
         println!("{context}: {name} = {held}");
     }
     println!("{context}: no [ERROR] line = {no_error} (the first were {error_lines:?})");
-    println!("{context}: (info) keyboard waited = {keyboard_waited:?}");
+    println!(
+        "{context}: (info) keyboard waited = {keyboard_waited:?}, event time sec={press_sec:?} \
+         usec={press_usec:?}"
+    );
     for info in lines.iter().filter(|line| {
         line.contains("[INFO] input:") || line.contains("inputd: ") || line.contains("input-test:")
     }) {
@@ -19070,7 +19102,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 35,
-    full: 340,
+    full: 342,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。

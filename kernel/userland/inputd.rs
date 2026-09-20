@@ -89,6 +89,20 @@ fn say(text: &[u8]) {
     line.end();
 }
 
+/// 生イベントの `tv_sec`（`struct input_event` の位置 0。リトルエンディアン u64）。
+fn event_sec(event: &[u8]) -> u64 {
+    u64::from_le_bytes([
+        event[0], event[1], event[2], event[3], event[4], event[5], event[6], event[7],
+    ])
+}
+
+/// 生イベントの `tv_usec`（位置 8。リトルエンディアン u64）。
+fn event_usec(event: &[u8]) -> u64 {
+    u64::from_le_bytes([
+        event[8], event[9], event[10], event[11], event[12], event[13], event[14], event[15],
+    ])
+}
+
 /// 生イベントの `code`（`struct input_event` の位置 18。リトルエンディアン u16）。
 fn event_code(event: &[u8]) -> u16 {
     u16::from_le_bytes([event[18], event[19]])
@@ -146,6 +160,12 @@ pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
             line.push_decimal(i64::from(code));
             line.push(b" value=");
             line.push_decimal(i64::from(value));
+            // **時刻の欄も出す**（`struct input_event` の `tv_sec`/`tv_usec`）。**判定が
+            // 「時刻が入っている」を見る**——**入れない破壊が在る（`ADR-0066` の Y-a）。**
+            line.push(b" sec=");
+            line.push_decimal(event_sec(event) as i64);
+            line.push(b" usec=");
+            line.push_decimal(event_usec(event) as i64);
             line.end();
             if value == 1 {
                 saw_press = true;
