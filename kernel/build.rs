@@ -127,6 +127,9 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
         "sockc",
         // **入力の生イベントを読む最初の利用者（`ADR-0066` の Y-a）。**
         "inputd",
+        // **入力とソケットを同時に待つ組（`ADR-0066` の Y-b）。** **待つ側と繋ぐ側で 1 組である。**
+        "polld",
+        "pollc",
     ];
 
     // **共有する包み（S11-9）。** `ls` と `cat` が `mod userlib;` で取り込む。
@@ -631,6 +634,9 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         "sockc",
         // **入力の生イベントを読む最初の利用者（`ADR-0066` の Y-a）。**
         "inputd",
+        // **入力とソケットを同時に待つ組（`ADR-0066` の Y-b）。** **待つ側と繋ぐ側で 1 組である。**
+        "polld",
+        "pollc",
         // **C で書いたもの（C-a。`ADR-0057`）。** **`gcc` が建てる。**
         "chello",
         // **FP の状態の判定（B-a。`ADR-0058`）。** **親と子の 2 本で 1 組である。**

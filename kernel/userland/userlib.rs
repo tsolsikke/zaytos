@@ -1163,6 +1163,64 @@ pub fn connect(fd: u64, name: &[u8]) -> i64 {
     unsafe { syscall3(SYS_CONNECT, fd, addr.as_ptr() as u64, len) }
 }
 
+/// `poll` の番号（Linux x86-64。`ADR-0066` の Y-b）。**番号と `struct pollfd` の配置は
+/// Linux から採る**（`ADR-0020`）。
+pub const SYS_POLL: u64 = 7;
+
+/// `POLLIN`（読めるようになった）。**カーネルが見る唯一のビットである。**
+pub const POLLIN: u16 = 0x001;
+
+/// `poll` の `timeout`——**無限に待つ**（Linux と同じ -1）。
+pub const POLL_FOREVER: i64 = -1;
+
+/// `struct pollfd`（Linux の配置。`fd` 4＋`events` 2＋`revents` 2）。
+///
+/// **Linux は `events`/`revents` を `short` で持つ**が、**立てるビットは正の小さな値なので
+/// `u16` と配置は同じである**（`ADR-0020` は配置を合わせることを求めている）。
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PollFd {
+    /// 待つ fd。
+    pub fd: i32,
+    /// 何を待つか（[`POLLIN`] だけ）。
+    pub events: u16,
+    /// 何が起きたか（カーネルが書く）。
+    pub revents: u16,
+}
+
+impl PollFd {
+    /// 「読めるまで」の 1 件。
+    pub const fn readable(fd: u64) -> Self {
+        Self {
+            fd: fd as i32,
+            events: POLLIN,
+            revents: 0,
+        }
+    }
+
+    /// 読めるようになったか。
+    pub const fn is_readable(&self) -> bool {
+        self.revents & POLLIN != 0
+    }
+}
+
+/// `poll(fds, nfds, timeout)`。**読める件数か `-errno`。**
+///
+/// **`timeout` は [`POLL_FOREVER`] か 0 だけである**（カーネルの v1 の限界）。
+/// **`-EAGAIN` が返ることが在る**——**対話の口が据えられていない間は待たない**ので、
+/// **呼ぶ側が回して待つ**（`polld` の `poll_until`）。
+pub fn poll(fds: &mut [PollFd], timeout: i64) -> i64 {
+    // SAFETY: `fds` は呼ぶ側が持つ可変の借りで、長さを正しく渡す。
+    unsafe {
+        syscall3(
+            SYS_POLL,
+            fds.as_mut_ptr() as u64,
+            fds.len() as u64,
+            timeout as u64,
+        )
+    }
+}
+
 /// `memfd_create` の番号（Linux x86-64。`ADR-0065`）。
 pub const SYS_MEMFD_CREATE: u64 = 319;
 /// `ftruncate` の番号。
