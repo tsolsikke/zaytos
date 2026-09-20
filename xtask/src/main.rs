@@ -18761,6 +18761,11 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     // **最後の項目の所要を出す**（[`begin_item`] の doc。**次の見出しが
     // 前の項目の終わりなので、最後だけはここで締める**）。
     finish_item();
+    // **`--full` だけ、遅さの計器を出す**（[`report_item_time_slowness`]）。
+    // **base と `--commit` は数分で終わるので、比べる相手が無い。**
+    if full {
+        report_item_time_slowness();
+    }
     check_count_matches_accounting(&workspace_root, total, full, commit)?;
 
     if failed.is_empty() {
@@ -19439,6 +19444,10 @@ static FAILED_SO_FAR: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomic
 /// ここまでに走った項目の数（VIEW-c の後）。
 static ITEMS_DONE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// 項目の所要の合計（ミリ秒。`ADR-0065` の後）。**`--full` の締めで直前の緑の回と
+/// 比べる**（[`report_item_time_slowness`]）。**[`finish_item`] が項目ごとに足す。**
+static ITEM_TIME_TOTAL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// `--full` の自前の上限（VIEW-c の後）。**過ぎたらそこで止める。**
 static TIME_LIMIT: std::sync::Mutex<Option<(Instant, std::time::Duration)>> =
     std::sync::Mutex::new(None);
@@ -19502,7 +19511,73 @@ static TIME_LIMIT: std::sync::Mutex<Option<(Instant, std::time::Duration)>> =
 /// 切れて気づけた遅さを、170分は黙って通す。** **そのために2つの契機を
 /// `docs/deferred-decisions.md` に立てた**——**負荷の高い回でも一度でも壁時計が
 /// 120分を超えたとき、または `--full` が330項目を超えたときに、2本に分ける手を決める。**
-const FULL_TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(170 * 60);
+///
+/// # 170分から195分へ上げた（2026-09-20。`ADR-0065` の後。運用者の承認）
+///
+/// **規則は変えていない。いちばん遅い実測を今の値にしただけである。**
+/// **いちばん遅い実測は壁時計121.7分（338項目。共有メモリの回）で、1.6倍は194.7分である。**
+///
+/// **弱点への手当てを、上限とは別に足した**——**`--full` の締めで、項目の所要の合計を
+/// 直前の緑の回と比べ、1.3倍を超えたら計器に出す（止めない。[`report_item_time_slowness`]）。**
+/// **以前は「壁時計が120分を超えたとき」という絶対の契機を立てていたが、上限が195分に
+/// なると120分は毎回超えるので、相対の計器へ替えた。** **項目数の契機は330から380へ
+/// 上げた**（どちらも `docs/deferred-decisions.md`）。
+const FULL_TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(195 * 60);
+
+/// 直前の緑の回の項目所要の合計（`ADR-0065` の後）。
+///
+/// # 何のためか
+///
+/// **[`FULL_TIME_LIMIT`] の弱点を埋める**——**遅くなったことを、上限は知らせない**
+/// （195分に収まる限り黙って通す）。**そこで `--full` の締めで項目の所要の合計を
+/// この値と比べ、1.3倍（[`SLOWNESS_WARN_NUMER`]/[`SLOWNESS_WARN_DENOM`]）を超えたら
+/// 計器に出す。** **止めない。**
+///
+/// # 揺れる値なので、止めるのではなく出すだけ
+///
+/// **項目の所要はホストの負荷で揺れる**（同じ木で30分違った例が複数在る。
+/// `docs/verification-coverage.md`）。**止めると揺れで誤って落ちる**ので、
+/// **`(info)` の行に出すだけにする**（判定行にはしない。同 doc の規律）。
+///
+/// # 更新の運用
+///
+/// **緑の回を記録するとき、その回の合計へ更新する**（`docs/roadmap.md` の
+/// 「最後に全部緑だった回」と対で動かす）。**「直前の緑の回」と比べる約束なので、
+/// 比べる相手が古びない。** **いまの値は共有メモリの回の109.5分である。**
+const GREEN_ITEM_SUM_BASELINE: std::time::Duration = std::time::Duration::from_secs(6570);
+
+/// 遅さの計器の倍率（1.3倍。`ADR-0065`）。**分子と分母で持つ**——**浮動小数の
+/// 比較を避け、`Duration` の整数演算で閾値を出す。**
+const SLOWNESS_WARN_NUMER: u32 = 13;
+const SLOWNESS_WARN_DENOM: u32 = 10;
+
+/// `--full` の締めで、項目の所要の合計を直前の緑の回と比べる（`ADR-0065`）。
+///
+/// **止めない。** [`GREEN_ITEM_SUM_BASELINE`] の doc の理由による。**計器に出すだけである。**
+fn report_item_time_slowness() {
+    let total = std::time::Duration::from_millis(
+        ITEM_TIME_TOTAL_MS.load(std::sync::atomic::Ordering::SeqCst),
+    );
+    let baseline = GREEN_ITEM_SUM_BASELINE;
+    let threshold = baseline * SLOWNESS_WARN_NUMER / SLOWNESS_WARN_DENOM;
+    println!(
+        "(info) item time total: {:.1} min (baseline {:.1} min, {:.2}x)",
+        total.as_secs_f64() / 60.0,
+        baseline.as_secs_f64() / 60.0,
+        total.as_secs_f64() / baseline.as_secs_f64()
+    );
+    if total > threshold {
+        println!(
+            "(info) WARNING: item time total {:.1} min is over {}/{} of the baseline ({:.1} min). \
+             The check still passed; this only flags that --full got slower. Update \
+             GREEN_ITEM_SUM_BASELINE when you record the next green run.",
+            total.as_secs_f64() / 60.0,
+            SLOWNESS_WARN_NUMER,
+            SLOWNESS_WARN_DENOM,
+            threshold.as_secs_f64() / 60.0
+        );
+    }
+}
 
 /// 項目の所要を測る時計（VIEW-b の後）。
 ///
@@ -19567,9 +19642,14 @@ fn stop_if_over_the_time_limit() {
 fn finish_item() {
     let taken = ITEM_CLOCK.lock().ok().and_then(|mut clock| clock.take());
     if let Some((started, label)) = taken {
+        let elapsed = started.elapsed();
+        ITEM_TIME_TOTAL_MS.fetch_add(
+            elapsed.as_millis() as u64,
+            std::sync::atomic::Ordering::SeqCst,
+        );
         println!(
             "(info) item time: {:.1}s for {label}",
-            started.elapsed().as_secs_f64()
+            elapsed.as_secs_f64()
         );
     }
 }
