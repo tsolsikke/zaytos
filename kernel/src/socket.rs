@@ -336,6 +336,45 @@ pub fn accept(listener: u8) -> AcceptOutcome {
     AcceptOutcome::Empty
 }
 
+/// 待ち行列に接続が待っているか（`ADR-0066` の Y-b）。**取らない**（覗くだけ）。
+///
+/// **`poll` が listener の fd の「読める」を決めるのに使う**——**Linux でも、待ち受けの
+/// ソケットは接続が来ると `POLLIN` になる。** **[`accept`] は取ってしまうので、判定には
+/// 使えない**（`crate::input::has_raw_events` と同じ理由）。
+pub fn acceptable(listener: u8) -> bool {
+    let Some(slot) = LISTENERS.get(listener as usize) else {
+        return false;
+    };
+    {
+        let state = slot.lock();
+        if !state.in_use || !state.listening {
+            return false;
+        }
+    }
+    CONNECTIONS.iter().any(|slot| {
+        let connection = slot.lock();
+        connection.in_use && connection.listener == listener && !connection.accepted
+    })
+}
+
+/// その側が今すぐ読めるか（`ADR-0066` の Y-b）。**取らない**（覗くだけ）。
+///
+/// # 相手が閉じていれば「読める」である
+///
+/// **EOF は読める**——**`read` が 0 を返して終わる**ので、待たせてはいけない。
+/// **Linux の `poll` も `POLLHUP` を立てて返す**（v1 は `POLLIN` だけを立てる。
+/// `crate::syscall` の `poll` の限界）。
+pub fn readable(conn: u8, side: Side) -> bool {
+    let Some(slot) = CONNECTIONS.get(conn as usize) else {
+        return false;
+    };
+    let state = slot.lock();
+    if !state.in_use {
+        return false;
+    }
+    !state.rings[side as usize].is_empty() || !state.is_open(side.peer())
+}
+
 /// 読んだ結果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadOutcome {

@@ -571,6 +571,9 @@ kernel::task::tests::a_task_outside_any_excursion_is_expected_on_its_kernel_stac
 kernel::task::tests::a_task_owned_by_another_cpu_is_not_a_candidate
 kernel::task::tests::a_task_with_a_user_space_loads_its_own_table
 kernel::task::tests::a_task_with_no_user_space_loads_the_kernel_table
+kernel::task::tests::a_wait_set_holds_more_than_one_reason
+kernel::task::tests::a_wait_set_is_a_set_and_has_a_limit
+kernel::task::tests::a_wait_set_only_looks_at_the_reasons_it_holds
 kernel::task::tests::an_application_processor_falls_back_to_its_own_idle_task
 kernel::task::tests::an_unrunnable_worker_is_skipped
 kernel::task::tests::blocked_and_finished_are_both_unselectable_but_distinct
@@ -593,6 +596,7 @@ kernel::task::tests::the_ring3_task_alternates_with_main
 kernel::task::tests::the_ring3_task_is_not_chosen_unless_ready
 kernel::task::tests::the_sentinel_is_displayed_as_a_word_but_still_stored_as_usize_max
 kernel::task::tests::the_sentinel_is_not_treated_as_a_running_task
+kernel::task::tests::the_state_array_stays_small_enough_for_the_switch_frame
 kernel::task::tests::uninitialized_slots_are_never_chosen
 kernel::task::tests::workers_come_before_the_ring3_task
 kernel::task::tests::workers_rotate

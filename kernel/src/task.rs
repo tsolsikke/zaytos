@@ -254,8 +254,13 @@ enum TaskState {
     /// **欄と遷移の置き場だけを足した段である。** **待たせるのは W2-c で、`read(0)` が
     /// 前景の持ち主を待たせるときである。** **起こすのは IRQ1 のハンドラである。**
     ///
+    /// # W2-b では 1 理由だったが、Y-b で集合になった
+    ///
+    /// **`ADR-0066` の Q3 である**——**Seinas は入力とソケットの両方を待つ。** **起こす側は
+    /// [`WaitSet`] に「その理由が入っているか」で引く。**
+    ///
     /// [`Blocked`]: TaskState::Blocked
-    Waiting(Wait),
+    Waiting(WaitSet),
     /// 全ラウンドを終えた。以後スケジューラはこのタスクを選ばない。
     Finished,
 }
@@ -318,6 +323,135 @@ pub enum Wait {
         /// 待っている側。
         side: crate::socket::Side,
     },
+}
+
+/// 1 つのタスクが同時に待てる理由の本数（`ADR-0066` の Y-b）。
+///
+/// # 設計の見込みは 8 だった。測って 4 にした
+///
+/// **`ADR-0066` の Q3 は「小さな固定長」を 8 と見込んでいた。** **2 つの実測で 4 に決めた。**
+///
+/// **1 つ目——v1 で塞がりうる理由の本数。** **入力 1**（キーボードは 1 つで、添字を持たない）
+/// **＋ listener 1**（[`crate::socket::MAX_LISTENERS`]）**＋ 接続 2**
+/// （[`crate::socket::MAX_CONNECTIONS`]）**＝ 4 である。** **これが `poll` に渡せる fd の
+/// 上限でもある**（`crate::syscall` の `MAX_POLL_FDS`）。
+///
+/// **2 つ目——写しの費用。** **[`TaskState`] は `Copy` で、[`scheduler::states`] が配列で
+/// 返す**ので、**この型の大きさが `schedule_switch` の枠に乗る。** **実測**（`size_of` の
+/// 写しで測った。2026-09-21）——**`[TaskState; TASK_COUNT]` は 96 バイト（いまの 1 理由）/
+/// 432 バイト（4 本）/ 816 バイト（8 本）。** **遠征スタックの高水位は残り 904 バイトである**
+/// （`ADR-0066` の Q4）——**8 本は入らない。**
+///
+/// **契機**——**[`crate::socket::MAX_CONNECTIONS`] を広げるとき。** **同じ段で一緒に上げること**
+/// （**上げると `[TaskState; TASK_COUNT]` の写しも伸びるので、遠征スタックを測り直す**）。
+pub const MAX_WAIT_REASONS: usize = 4;
+
+/// 待っている理由の集合（`ADR-0066` の Q3）。**起こす条件は「`on ∈ S`」である。**
+///
+/// # なぜ集合にするのか
+///
+/// **Seinas は入力とソケットの両方を待つ**（`docs/wayland-inventory.md` の実測）。
+/// **理由が 1 つしか入らない欄では、どちらか一方しか待てない。**
+///
+/// # 起こす側は理由を運ばない
+///
+/// **[`wake_tasks_waiting_on`] は今までどおり合図 1 つで引く**——**変わったのは突き合わせ方
+/// （完全一致 → 所属）だけである。** **起こされた側が、集合の各理由を非ブロッキングで
+/// 問い合わせ直す**（`crate::syscall` の `poll`）。**空振りで起こしてよい形は W2-c からの
+/// ものである**（`ADR-0061`）。
+///
+/// # 固定長で、並べ替えない
+///
+/// **ヒープは無い。** **余った枠には前の値が残るので、生きているのは先頭 `len` 本だけである**
+/// ——**比較と表示は前列だけを見る**（下の `PartialEq` と `Debug`）。
+#[derive(Clone, Copy)]
+pub struct WaitSet {
+    /// 理由の並び。**生きているのは先頭 [`Self::len`] 本である。**
+    reasons: [Wait; MAX_WAIT_REASONS],
+    /// 入っている本数。
+    len: u8,
+}
+
+impl WaitSet {
+    /// 理由 1 本の集合（**W2-b からの `Waiting(Wait)` と同じもの**）。
+    pub const fn single(on: Wait) -> Self {
+        Self {
+            reasons: [on; MAX_WAIT_REASONS],
+            len: 1,
+        }
+    }
+
+    /// 空の集合。**[`Self::push`] で足す。**
+    pub const fn empty() -> Self {
+        Self {
+            reasons: [Wait::Keyboard; MAX_WAIT_REASONS],
+            len: 0,
+        }
+    }
+
+    /// 理由を足す。**既に入っていれば足さない**（集合である）。**満杯なら `false` を返す。**
+    pub fn push(&mut self, on: Wait) -> bool {
+        if self.contains(on) {
+            return true;
+        }
+        if self.len as usize == MAX_WAIT_REASONS {
+            return false;
+        }
+        self.reasons[self.len as usize] = on;
+        self.len += 1;
+        true
+    }
+
+    /// その理由が入っているか。**これが起こす条件そのものである**（[`wake_tasks_waiting_on`]）。
+    pub fn contains(&self, on: Wait) -> bool {
+        self.reasons[..self.len as usize].contains(&on)
+    }
+
+    /// 入っている本数。
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// 1 本も入っていないか。
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// タイマの理由が入っていれば、その締切（[`wake_expired_timers`] が使う）。
+    ///
+    /// **先に見つかった 1 本を返す。** **v1 では `nanosleep` の 1 本だけで、集合に 2 本の
+    /// タイマは入らない**（`poll` はタイマを集合へ入れない。`crate::syscall` の `poll`）。
+    pub fn timer_deadline(&self) -> Option<u64> {
+        self.reasons[..self.len as usize]
+            .iter()
+            .find_map(|reason| match reason {
+                Wait::Timer { deadline } => Some(*deadline),
+                _ => None,
+            })
+    }
+}
+
+impl PartialEq for WaitSet {
+    /// **生きている前列だけを比べる**（余った枠には前の値が残るので、全部を比べると嘘になる）。
+    ///
+    /// **並びも見る**——**同じ理由を違う順で入れた 2 つは等しくない。** **組む場所は 1 つで、
+    /// 順は渡された fd の順である**ので、v1 では区別が要る場面が無い。
+    fn eq(&self, other: &Self) -> bool {
+        self.len == other.len
+            && self.reasons[..self.len as usize] == other.reasons[..other.len as usize]
+    }
+}
+
+impl Eq for WaitSet {}
+
+impl core::fmt::Debug for WaitSet {
+    /// **生きている前列だけを出す**（余った枠を出すと、ログに死んだ理由が並ぶ）。
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_list()
+            .entries(self.reasons[..self.len as usize].iter())
+            .finish()
+    }
 }
 
 impl TaskState {
@@ -1125,9 +1259,24 @@ pub fn note_current_excursion_depth(depth: usize) {
 // 破壊 `read-never-waits` では待たないので、呼ぶ者が居なくなる。
 #[cfg_attr(feature = "read-never-waits", allow(dead_code))]
 pub(crate) fn set_current_waiting(on: Wait) {
+    set_current_waiting_set(WaitSet::single(on));
+}
+
+/// 今のタスクを、理由の集合で待たせる（`ADR-0066` の Y-b）。**呼ぶのは `poll` である。**
+///
+/// **1 理由の口（[`set_current_waiting`]）はこれを 1 本の集合で呼ぶ**——**欄を据える場所を
+/// 2 つに分けない。**
+///
+/// # 眠るのは呼び出し側である。割り込みを止めた文脈から呼ぶこと
+///
+/// **[`set_current_waiting`] の doc と同じである。** ここに複製しない。
+pub(crate) fn set_current_waiting_set(set: WaitSet) {
     let Some(index) = current_index_if_any() else {
         return;
     };
+    // **集合に入った本数の最大を数える（Y-b の計器）。** **大きさを実測で決めるためである**
+    // （[`MAX_WAIT_REASONS`] の doc）。**判定も読む**（`poll` の検査の判定「集合に 2 本入った」）。
+    MAX_WAIT_SET_LEN.fetch_max(set.len() as u64, Ordering::Relaxed);
     // **2 本が同時に待つ形を数える（`ADR-0063` の (b3) の計器）。** **他のタスクが既に
     // 待っていれば 1 つ足す。** **`sleep 0.2 | cat` で初めて出る**——**持ち越しの行
     // 「作っても出ない」が偽になる観測である**（`docs/deferred-decisions.md`）。
@@ -1137,7 +1286,15 @@ pub(crate) fn set_current_waiting(on: Wait) {
     if another_is_waiting {
         WAITING_TOGETHER.fetch_add(1, Ordering::Relaxed);
     }
-    scheduler::set_state(index, TaskState::Waiting(on));
+    scheduler::set_state(index, TaskState::Waiting(set));
+}
+
+/// 待ちの集合に入った理由の最大本数（`ADR-0066` の Y-b の計器）。
+static MAX_WAIT_SET_LEN: AtomicU64 = AtomicU64::new(0);
+
+/// 待ちの集合に入った理由の最大本数（`ADR-0066` の Y-b）。**`init` が検査の締めに出す。**
+pub fn max_wait_set_len() -> u64 {
+    MAX_WAIT_SET_LEN.load(Ordering::Relaxed)
 }
 
 /// 待ちの欄を据えたとき、他のタスクも既に待っていた回数（`ADR-0063` の (b3) の計器）。
@@ -1182,14 +1339,18 @@ pub(crate) fn wake_tasks_waiting_on(on: Wait) -> usize {
         // 同じだった**（緑を出す道の「変化が無い」）。**タイマの待ちが入ったので、打鍵が
         // 眠っている者を起こす形で初めて効く。**
         #[cfg(not(feature = "wake-ignores-the-reason"))]
-        let matches = state == TaskState::Waiting(on);
+        let matches = waits_on(state, on);
         #[cfg(feature = "wake-ignores-the-reason")]
         let matches = matches!(state, TaskState::Waiting(_));
         if matches {
             // **起こす前に、理由が合っていたかを別に確かめる（W2-d+ の関係の検出器）。**
             // **上の選び方とは独立に、欄の中身と合図を突き合わせる**——**選び方が壊れると
             // ここが数える。** **本番では構造で 0 である。**
-            if state != TaskState::Waiting(on) {
+            //
+            // **Y-b で言い換えた**——**「合図と違う理由で待っていた」から「`on ∉ S` の者を
+            // 起こした」へ**（`ADR-0066` の Q3）。**構造で 0 である理由も同じ**——**所属判定が
+            // 起こす条件そのものだからである。**
+            if !waits_on(state, on) {
                 WOKEN_FOR_ANOTHER_REASON.fetch_add(1, Ordering::Relaxed);
             }
             scheduler::set_state(index, TaskState::Ready);
@@ -1207,7 +1368,15 @@ pub(crate) fn wake_tasks_waiting_on(on: Wait) -> usize {
 /// **起こす側が「積んだが起こさなかった」を数えるために要る**——**積んだ時点で待っている者が
 /// 居たかどうかは、積む側にしか分からない。**
 pub(crate) fn someone_waits_on(on: Wait) -> bool {
-    (0..TASK_COUNT).any(|index| scheduler::state(index) == TaskState::Waiting(on))
+    (0..TASK_COUNT).any(|index| waits_on(scheduler::state(index), on))
+}
+
+/// その状態がその合図を待っているか（`ADR-0066` の Y-b）。**所属判定を 1 箇所に集める。**
+///
+/// **起こす側と「待っている者が居るか」の両方がこれを通る**——**2 箇所で書くと、片方だけが
+/// 集合の意味からずれる。**
+fn waits_on(state: TaskState, on: Wait) -> bool {
+    matches!(state, TaskState::Waiting(set) if set.contains(on))
 }
 
 /// 起こした本数の累計（W2-c-2 の計器）。**「積んだが起こさなかった」との関係で見る。**
@@ -1256,7 +1425,13 @@ pub fn timer_woke_before_deadline() -> u64 {
 pub(crate) fn wake_expired_timers(now: u64) -> usize {
     let mut woken = 0;
     for index in 0..TASK_COUNT {
-        let TaskState::Waiting(Wait::Timer { deadline }) = scheduler::state(index) else {
+        // **集合からタイマの理由を引く（`ADR-0066` の Y-b）。** **`nanosleep` は 1 本の集合で
+        // 待つが、引き方は集合のままにしておく**——**`poll` にタイマを入れる段が来ても、
+        // ここは変わらない。**
+        let TaskState::Waiting(set) = scheduler::state(index) else {
+            continue;
+        };
+        let Some(deadline) = set.timer_deadline() else {
             continue;
         };
         // 破壊 (W2-d+, timer-never-wakes): 誰も起こさない。**眠った者が戻らず、セッションが
@@ -3371,7 +3546,8 @@ mod tests {
 
         // メインが `Waiting`——アイドルへ落ちる。
         let mut waiting = blocked;
-        waiting[super::MAIN_TASK] = TaskState::Waiting(super::Wait::Keyboard);
+        waiting[super::MAIN_TASK] =
+            TaskState::Waiting(super::WaitSet::single(super::Wait::Keyboard));
         assert_eq!(pick_next(waiting, 0), super::BSP_IDLE_TASK);
         assert_eq!(pick_next(waiting, 1), super::BSP_IDLE_TASK);
 
@@ -3496,11 +3672,82 @@ mod tests {
         assert!(!TaskState::Blocked.is_runnable());
         assert!(!TaskState::Finished.is_runnable());
         // **待っているタスクは選ばれない（W2-b）。** それが待つということである。
-        assert!(!TaskState::Waiting(super::Wait::Keyboard).is_runnable());
+        assert!(!TaskState::Waiting(super::WaitSet::single(super::Wait::Keyboard)).is_runnable());
         // **`Blocked` と `Waiting` は別の状態である**（`ADR-0061` の決定 3）。
         assert_ne!(
             TaskState::Blocked,
-            TaskState::Waiting(super::Wait::Keyboard)
+            TaskState::Waiting(super::WaitSet::single(super::Wait::Keyboard))
+        );
+    }
+
+    /// 集合は「入っているか」で引く（`ADR-0066` の Y-b）。
+    ///
+    /// **起こす条件そのものである**（`waits_on`）。**入れた 2 本の両方で真になり、
+    /// 入れていない理由では偽になる。**
+    #[test]
+    fn a_wait_set_holds_more_than_one_reason() {
+        let mut set = super::WaitSet::empty();
+        assert!(set.is_empty());
+        assert!(set.push(super::Wait::Keyboard));
+        assert!(set.push(super::Wait::SocketAcceptable { listener: 0 }));
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(super::Wait::Keyboard));
+        assert!(set.contains(super::Wait::SocketAcceptable { listener: 0 }));
+        // **入れていない理由では起こさない。**
+        assert!(!set.contains(super::Wait::SocketAcceptable { listener: 1 }));
+        assert!(!set.contains(super::Wait::Timer { deadline: 1 }));
+    }
+
+    /// 同じ理由は 2 度入らない（集合である）。**満杯なら断る。**
+    #[test]
+    fn a_wait_set_is_a_set_and_has_a_limit() {
+        let mut set = super::WaitSet::single(super::Wait::Keyboard);
+        assert_eq!(set.len(), 1);
+        assert!(set.push(super::Wait::Keyboard));
+        assert_eq!(set.len(), 1, "同じ理由を足しても増えない");
+        for conn in 0..(super::MAX_WAIT_REASONS as u8 - 1) {
+            assert!(set.push(super::Wait::SocketReadable {
+                conn,
+                side: crate::socket::Side::Client,
+            }));
+        }
+        assert_eq!(set.len(), super::MAX_WAIT_REASONS);
+        // **満杯の先は断る**（`poll` は `-EINVAL` を返す）。
+        assert!(!set.push(super::Wait::Timer { deadline: 1 }));
+        assert_eq!(set.len(), super::MAX_WAIT_REASONS);
+    }
+
+    /// 余った枠に残る前の値を、比較と締切の引き方が見ない。
+    ///
+    /// **固定長なので、`push` していない枠には前の値が残る**（[`super::WaitSet`] の doc）。
+    /// **全部を比べると「1 本の集合」と「2 本の集合」が等しくなりうる。**
+    #[test]
+    fn a_wait_set_only_looks_at_the_reasons_it_holds() {
+        let one = super::WaitSet::single(super::Wait::Keyboard);
+        let mut two = one;
+        assert!(two.push(super::Wait::Timer { deadline: 7 }));
+        assert_ne!(one, two);
+        // **締切も前列からだけ引く。**
+        assert_eq!(one.timer_deadline(), None);
+        assert_eq!(two.timer_deadline(), Some(7));
+        // **同じ 1 本なら等しい**（`single` は余りを同じ値で埋める）。
+        assert_eq!(one, super::WaitSet::single(super::Wait::Keyboard));
+    }
+
+    /// 状態の欄が `schedule_switch` の枠で運べる大きさに収まっている。
+    ///
+    /// **[`super::MAX_WAIT_REASONS`] の 2 つ目の根拠を機械で留める**——**`scheduler::states()`
+    /// は `[TaskState; TASK_COUNT]` を値で返すので、この大きさがそのまま枠に乗る。**
+    /// **遠征スタックの残りは 904 バイトである**（`ADR-0066` の Q4）。**理由を 8 本に増やすと
+    /// 816 バイトになり、ここが落ちる。**
+    #[test]
+    fn the_state_array_stays_small_enough_for_the_switch_frame() {
+        use core::mem::size_of;
+        assert_eq!(size_of::<super::Wait>(), 16);
+        assert!(
+            size_of::<[TaskState; TASK_COUNT]>() <= 432,
+            "状態の配列が {} バイトある（432 を越えたら遠征スタックを測り直すこと）",
+            size_of::<[TaskState; TASK_COUNT]>()
         );
     }
 

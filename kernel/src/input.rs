@@ -307,6 +307,21 @@ pub fn input_events_delivered() -> u64 {
     INPUT_EVENTS_DELIVERED.load(Ordering::SeqCst)
 }
 
+/// 生イベントが今すぐ取れるか（`ADR-0066` の Y-b）。**取らない**（覗くだけ）。
+///
+/// # `poll` が「読める」を決めるのに使う
+///
+/// **`read_events` は取ってしまう**ので、**多重待ちの判定には使えない**——**どの理由が
+/// 起きたかを返す前に、イベントが消える。** **輪が空でないことだけを見る。**
+///
+/// # 押下でなくても「読める」である
+///
+/// **離鍵も生イベントである**（`read_events` は両方を返す）。**端末の復号器と違って
+/// 落とさない**ので、**輪に何か在れば `read` は必ず 1 つ以上返す。**
+pub fn has_raw_events() -> bool {
+    !crate::keyboard::buffer::SCANCODES.lock().is_empty()
+}
+
 /// `struct input_event` の生イベントを取り出す（`ADR-0066` の Y-a）。**書いたバイト数を返す
 /// （[`INPUT_EVENT_LEN`] の倍数。0 もありうる）。**
 ///

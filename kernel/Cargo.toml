@@ -581,6 +581,16 @@ input-read-never-waits = ["input-test"]
 input-events-mistake-the-code = ["input-test"]
 # 生イベントの時刻を入れない（ティックを 0 と読む。ADR-0066 の Y-a）。時刻の判定が落ちる。
 input-events-zero-the-time = ["input-test"]
+# Y-b: Wait を集合にする（ADR-0066）。init が /bin/polld を前景で起こし、polld が /bin/pollc を
+# 起こしっぱなしで起こす。入力とソケットを同時に待ち、3 回のうち 2 回はソケット側、1 回は
+# 本物の打鍵で起きる。判定は xtask の poll-test が読む。
+poll-test = []
+# poll が読める者が居なくても待たず 0 を返す（ADR-0066 の Y-b）。待った回数の判定が落ちる。
+poll-never-waits = ["poll-test"]
+# poll が revents を隣の欄へ付ける（ADR-0066 の Y-b）。どちらで起きたかの判定が落ちる。
+poll-mistakes-the-member = ["poll-test"]
+# poll が集合へ最初の 1 本だけを入れる（ADR-0066 の Y-b）。落ちた合図で誰も起こさない。
+poll-waits-on-one-member = ["poll-test"]
 # `spawn` で、子へ入る前に親の FP の状態を保存しない（`ADR-0058`）。
 # 親が `spawn` を跨いで値を保てなくなる。
 fp-spawn-no-save = []

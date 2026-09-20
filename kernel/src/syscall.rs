@@ -1225,6 +1225,12 @@ unsafe fn dispatch(
         // `#[inline(never)]` の関数である**——**この `match` の枠に局所を乗せない。**
         // **`spawn` の経路には載っていないので、`syscall-test` の高水位は動かない見込みである。**
         SYS_OPEN_INPUT => open_input_from_ring3(),
+        // **多重待ち（`ADR-0066` の Y-b）。** **`#[inline(never)]` で、写しは `dispatch` の
+        // 枠に乗らない。**
+        // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+        SYS_POLL => unsafe {
+            poll_from_ring3(args[0], args[1], args[2], pml4_phys, direct_map, bkl)
+        },
         SYS_SOCKET => socket_from_ring3(args[0], args[1], args[2]),
         // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
         SYS_BIND => unsafe { bind_from_ring3(args[0], args[1], args[2], pml4_phys, direct_map) },
@@ -1691,6 +1697,225 @@ unsafe fn read_input_events(
     // SAFETY: slice は検証済みで、got は cap を越えない。
     let written = unsafe { copy_to_user(&slice, 0, &kbuf[..got]) };
     written as u64
+}
+
+/// `poll` の番号（Linux x86-64。`ADR-0066` の Y-b）。
+///
+/// # 番号と配置は Linux から採る。意味は最小の部分集合である
+///
+/// **`ADR-0020` に従う**——**`poll`(7) と `struct pollfd`（`fd` 4＋`events` 2＋`revents` 2）を
+/// そのまま採る。** **独自番号にしない**（**Linux に対応する口が在るので、`ZAYTOS_PRIVATE_BASE`
+/// は使わない**。`ADR-0066` の「番号」）。
+///
+/// **`ADR-0066` の Q3 は「一般の `poll` は作らない」と決めた。** **作らないのは意味の側である**
+/// ——**v1 が見るのは [`POLLIN`] だけで、`timeout` は -1（無限）と 0（待たない）だけを受ける。**
+/// **それ以外は `-EINVAL` である**（下の限界）。
+pub const SYS_POLL: u64 = 7;
+
+/// `struct pollfd` のバイト数（`fd` 4＋`events` 2＋`revents` 2。Linux の配置）。
+const POLLFD_LEN: usize = 8;
+
+/// `POLLIN`（読めるようになった）。**v1 が見る唯一のビットである。**
+const POLLIN: u16 = 0x001;
+
+/// 1 回の `poll` に渡せる fd の数。**待ちの集合の大きさと同じである**
+/// （[`crate::task::MAX_WAIT_REASONS`]。**集合に入らない数の fd を受けても待てない**）。
+const MAX_POLL_FDS: usize = crate::task::MAX_WAIT_REASONS;
+
+/// `poll` が待った回数（`ADR-0066` の Y-b の計器）。**判定「`poll` が待った」が読む。**
+static POLL_WAITS: AtomicU64 = AtomicU64::new(0);
+
+/// `poll` が待った回数（`ADR-0066` の Y-b）。
+pub fn poll_waits() -> u64 {
+    POLL_WAITS.load(Ordering::Relaxed)
+}
+
+/// その fd を待つときの理由（`ADR-0066` の Y-b）。**`poll` が受ける fd はこの 3 種だけである。**
+///
+/// **入力 fd → [`crate::task::Wait::Keyboard`]、接続 → `SocketReadable`、listener →
+/// `SocketAcceptable`。** **`Wait` の種類は減らない**（`ADR-0066` の刻みの注）——
+/// **対応づけるだけである。**
+///
+/// **パイプと端末は v1 では受けない**（`None` を返して `-EBADF`）。**契機：パイプを待つ
+/// プログラムが出たとき。**
+fn poll_reason_of(fd: u64) -> Option<crate::task::Wait> {
+    crate::vfs::with_current_files(|files| {
+        let file = files.get(fd as usize).ok()?;
+        if file.is_input() {
+            return Some(crate::task::Wait::Keyboard);
+        }
+        match file.socket_state() {
+            Some(crate::vfs::SocketState::Stream { conn, side }) => {
+                Some(crate::task::Wait::SocketReadable { conn, side })
+            }
+            Some(crate::vfs::SocketState::Listener { listener }) => {
+                Some(crate::task::Wait::SocketAcceptable { listener })
+            }
+            _ => None,
+        }
+    })
+}
+
+/// その理由が今すぐ満たされているか（`ADR-0066` の Y-b）。**覗くだけで、取らない。**
+///
+/// **取ってしまうと、どの理由で起きたかを返す前にイベントが消える**
+/// （`crate::input::has_raw_events` の doc）。
+fn poll_is_ready(reason: crate::task::Wait) -> bool {
+    match reason {
+        crate::task::Wait::Keyboard => crate::input::has_raw_events(),
+        crate::task::Wait::SocketReadable { conn, side } => crate::socket::readable(conn, side),
+        crate::task::Wait::SocketAcceptable { listener } => crate::socket::acceptable(listener),
+        // **[`poll_reason_of`] が返すのは上の 3 種だけである。** **残りは待てない。**
+        _ => false,
+    }
+}
+
+/// [`SYS_POLL`] の本体（`ADR-0066` の Y-b）。**読める fd の数か `-errno` を返す。**
+///
+/// # 待つ形は W2-c からのものである
+///
+/// **読める者が居なければ、理由の集合で待つ**（[`crate::task::set_current_waiting_set`]）。
+/// **起こされたら集合の各理由を覗き直す**——**空振りで起こしてよい**（`ADR-0061`）。
+/// **BKL は解いてから譲り、起きたら取り直す**（`ADR-0036`）。
+///
+/// # 窓は構造で閉じている
+///
+/// **`int 0x80` は割り込みゲートなので IF=0 である。** **BKL を解いても IF は戻らない**
+/// （`EntryInterruptGuard` は保存した RFLAGS が IF=1 のときだけ戻す。実測）——**「空だと
+/// 見てから `Waiting` にする」までに合図は入らない。**
+///
+/// # 深い枠に写しを置かない
+///
+/// **`#[inline(never)]` である**（`ADR-0063` の口 3 つと同じ手）。**`struct pollfd` の写しは
+/// [`MAX_POLL_FDS`] 個ぶんの 32 バイトで、`dispatch` の枠には乗らない**（`ADR-0066` の Q4）。
+///
+/// # v1 の限界（契機つき）
+///
+/// - **`events` は [`POLLIN`] だけを受ける**（`POLLOUT` などは `-EINVAL`）。**黙って無視すると、
+///   書ける待ちを頼んだ側が読める待ちで眠る。** **契機：書ける待ちが要るとき。**
+/// - **`timeout` は -1 と 0 だけを受ける。** **契機：締切つきの待ちが要るとき**
+///   （**集合に [`crate::task::Wait::Timer`] を入れれば足りる**）。
+/// - **開いていない fd は `-EBADF` である**（Linux は `revents` に `POLLNVAL` を立てて
+///   その 1 件だけを失敗にする）。**契機：混ざった集合を渡す利用者が出たとき。**
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+#[inline(never)]
+unsafe fn poll_from_ring3(
+    fds: u64,
+    nfds: u64,
+    timeout: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    bkl: &mut Option<crate::bkl::BklGuard>,
+) -> u64 {
+    // **`timeout` は `int` である**（Linux の署名）。**下位 32 ビットを符号つきで読む。**
+    let timeout = timeout as u32 as i32;
+    if nfds == 0 || nfds > MAX_POLL_FDS as u64 {
+        return (-EINVAL) as u64;
+    }
+    if timeout != -1 && timeout != 0 {
+        return (-EINVAL) as u64;
+    }
+    let count = nfds as usize;
+    let bytes = (count * POLLFD_LEN) as u64;
+    // **踏み込む前に検証する。**
+    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, fds, bytes) }) else {
+        return (-EFAULT) as u64;
+    };
+    let mut raw = [0u8; MAX_POLL_FDS * POLLFD_LEN];
+    // SAFETY: `slice` は検証済みで、長さはちょうど `bytes` である。
+    let read = unsafe { copy_from_user(&mut raw[..count * POLLFD_LEN], &slice) };
+    if read != count * POLLFD_LEN {
+        return (-EFAULT) as u64;
+    }
+    // **欄を割って、待つ理由へ対応づける。**
+    let mut reasons = [None; MAX_POLL_FDS];
+    for (index, slot) in reasons.iter_mut().enumerate().take(count) {
+        let at = index * POLLFD_LEN;
+        let fd = i32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]);
+        let events = u16::from_le_bytes([raw[at + 4], raw[at + 5]]);
+        if fd < 0 || events != POLLIN {
+            return (-EINVAL) as u64;
+        }
+        let Some(reason) = poll_reason_of(fd as u64) else {
+            return (-EBADF) as u64;
+        };
+        *slot = Some(reason);
+    }
+    loop {
+        // **読める者を数え、`revents` を組む。**
+        let mut ready = 0usize;
+        let mut revents = [0u16; MAX_POLL_FDS];
+        for (index, slot) in reasons.iter().enumerate().take(count) {
+            let Some(reason) = *slot else {
+                continue;
+            };
+            if !poll_is_ready(reason) {
+                continue;
+            }
+            // 破壊 (Y-b, poll-mistakes-the-member): 隣の欄へ印を付ける。**待ちも起こしも
+            // 正しいままで、「どの fd が読めるか」だけが入れ替わる**——**判定「listener で
+            // 起きた」「ソケットで起きた」が落ちる。**
+            let at = if cfg!(feature = "poll-mistakes-the-member") {
+                (index + 1) % count
+            } else {
+                index
+            };
+            revents[at] = POLLIN;
+            ready += 1;
+        }
+        if ready > 0 {
+            for (index, revent) in revents.iter().enumerate().take(count) {
+                let at = index * POLLFD_LEN;
+                raw[at + 6..at + 8].copy_from_slice(&revent.to_le_bytes());
+            }
+            // SAFETY: `slice` は検証済みで、書く長さは検証した `bytes` を越えない。
+            unsafe { copy_to_user(&slice, 0, &raw[..count * POLLFD_LEN]) };
+            return ready as u64;
+        }
+        // **待たない頼み（`timeout` = 0）は、ここで 0 を返す。**
+        if timeout == 0 {
+            return 0;
+        }
+        // **待つ条件は端末の `read(0)` と同じである**（`sys_read` の端末分岐の doc）。
+        // **対話の口が据えられていない間と、台本が入力を駆動している間は待たない**
+        // ——**起動シーケンスと台本の族が止まらないようにするためである。**
+        // **呼ぶ側は `-EAGAIN` を回して待つ**（`polld` と `inputd` の形）。
+        if !crate::console::foreground_installed() || crate::input::script_drives_input() {
+            return (-EAGAIN) as u64;
+        }
+        // **理由の集合を組む。**
+        let mut set = crate::task::WaitSet::empty();
+        for slot in reasons.iter().take(count) {
+            // 破壊 (Y-b, poll-waits-on-one-member): 集合へ入れるのは最初の 1 本だけにする。
+            // **落ちた合図では誰も起こさないので `polld` が戻らない**——**判定「集合に 2 本
+            // 入った」が落ち、戻らないので計器の行も出ない**（`ADR-0066` の Y-b の表）。
+            if cfg!(feature = "poll-waits-on-one-member") && !set.is_empty() {
+                break;
+            }
+            let Some(reason) = *slot else {
+                continue;
+            };
+            if !set.push(reason) {
+                // **集合に入らない**——**[`MAX_POLL_FDS`] で断っているので、ここへは来ない。**
+                return (-EINVAL) as u64;
+            }
+        }
+        // 破壊 (Y-b, poll-never-waits): 待たずに 0 を返す。**呼ぶ側が回して待つ形へ戻る**
+        // ——**判定「`poll` が待った」だけが落ちる。** **`cfg!` で書くのは、`#[cfg]` の早い
+        // 戻りにすると「回らない回し」になって `clippy` が止めるためである。**
+        if cfg!(feature = "poll-never-waits") {
+            return 0;
+        }
+        POLL_WAITS.fetch_add(1, Ordering::Relaxed);
+        crate::task::set_current_waiting_set(set);
+        drop(bkl.take());
+        crate::task::yield_now();
+        *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
+    }
 }
 
 /// [`SYS_BIND`] の本体。**名前を取り、fd を listener にする**（`listen` はまだ）。
