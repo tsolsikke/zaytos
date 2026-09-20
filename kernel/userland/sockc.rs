@@ -33,7 +33,10 @@
 #[path = "userlib.rs"]
 mod userlib;
 
-use userlib::{bind, close, connect, exit, length_of, read, socket, write_all, STDOUT};
+use userlib::{
+    bind, close, connect, exit, ftruncate, length_of, memfd_create, mmap_shared, read, sendmsg,
+    socket, write_all, MsgBuffers, STDOUT,
+};
 
 /// 名前の最大長（カーネルの `NAME_MAX` と同じ）。
 const NAME_MAX: usize = 31;
@@ -262,6 +265,94 @@ fn mode_quit(name: &[u8]) {
     close(fd);
 }
 
+/// `shm`——共有メモリを作って模様を書き、fd を `SCM_RIGHTS` で送る（`ADR-0065`）。
+///
+/// **`create_pool` の予行そのものである**——**`memfd_create`＋`ftruncate`＋`mmap` で
+/// `size` バイトの無名の共有メモリを作り、模様を書き、fd を `sendmsg` で送る。** **サーバーが
+/// 同じ fd を `mmap` して読み、確かめて返す。** **同じ物理ページを両側が張る（真の共有）。**
+fn mode_shm(name: &[u8]) {
+    const SHM_LEN: usize = 6000;
+    let shm_fd = memfd_create();
+    if shm_fd < 0 {
+        let mut line = Line::new();
+        line.push(b"sockc: memfd failed ");
+        line.push_decimal(shm_fd);
+        line.end();
+        return;
+    }
+    let shm_fd = shm_fd as u64;
+    if ftruncate(shm_fd, SHM_LEN as u64) < 0 {
+        let mut line = Line::new();
+        line.push(b"sockc: ftruncate failed");
+        line.end();
+        close(shm_fd);
+        return;
+    }
+    let mapped = mmap_shared(shm_fd, SHM_LEN as u64);
+    if mapped < 0 {
+        let mut line = Line::new();
+        line.push(b"sockc: mmap failed ");
+        line.push_decimal(mapped);
+        line.end();
+        close(shm_fd);
+        return;
+    }
+    // **模様を書く。** SAFETY: たった今 mmap した共有メモリの範囲である。
+    let base = mapped as usize as *mut u8;
+    for index in 0..SHM_LEN {
+        // SAFETY: 上の mmap の範囲内。
+        unsafe { *base.add(index) = big_byte(index) };
+    }
+
+    let Some(fd) = connected(name) else {
+        close(shm_fd);
+        return;
+    };
+    // **fd を送る。** データは "shm" の 3 バイト。
+    let mut data = *b"shm";
+    // SAFETY: `data` はこの関数の間だけ生き、`msg` より長生きする（`msghdr` が指す）。
+    let mut msg = unsafe { MsgBuffers::new(&mut data, Some(shm_fd as u32)) };
+    let sent = sendmsg(fd, &mut msg, true);
+    close(shm_fd);
+    let mut reply = [0u8; REPLY_CAP];
+    let got = read(fd, &mut reply);
+    let mut line = Line::new();
+    line.push(b"sockc: shm sent=");
+    line.push_decimal(sent);
+    if got > 0 {
+        line.push(b" reply=");
+        line.push(&reply[..got as usize]);
+    } else {
+        line.push(b" read=");
+        line.push_decimal(got);
+    }
+    line.end();
+    close(fd);
+}
+
+/// `badmsg`——`msg_iovlen` が 2 の `msghdr` を送り、`-EINVAL` が返ることを見る（`ADR-0065`）。
+///
+/// **絞った範囲の外を1つ確かめる**——**カーネルは `iovlen` を 1 だけ受ける**（散らばり集めは
+/// 持たない。範囲の一覧は `ADR-0065` の「`msghdr` の絞った範囲」）。
+fn mode_badmsg(name: &[u8]) {
+    let Some(fd) = connected(name) else {
+        return;
+    };
+    let data = *b"x";
+    // **iovec を 2 本並べる**（受け付けない形）。`[base0, len0, base1, len1]`。
+    let iovs: [u64; 4] = [data.as_ptr() as u64, 1, data.as_ptr() as u64, 1];
+    let mut hdr = [0u8; 56];
+    hdr[16..24].copy_from_slice(&(iovs.as_ptr() as u64).to_le_bytes());
+    hdr[24..32].copy_from_slice(&2u64.to_le_bytes());
+    // SAFETY: `hdr` は Linux の `msghdr` の配置で、`iovs`／`data` はこのスコープの間だけ生きる。
+    let result = unsafe { userlib::syscall3(userlib::SYS_SENDMSG, fd, hdr.as_ptr() as u64, 0) };
+    let mut line = Line::new();
+    line.push(b"sockc: badmsg iovlen2 -> ");
+    line.push_decimal(result);
+    line.end();
+    close(fd);
+}
+
 /// `_start` から呼ばれる（`userlib.rs` の `global_asm!`）。
 ///
 /// # Safety
@@ -282,7 +373,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             length
         }
         None => {
-            write_all(STDOUT, b"sockc: usage: sockc <hello|big|nobody|bind|twice|quit> [name]\n");
+            write_all(STDOUT, b"sockc: usage: sockc <hello|big|nobody|bind|twice|quit|shm|badmsg> [name]\n");
             exit(1);
         }
     };
@@ -312,6 +403,8 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
         b"bind" => mode_bind(name),
         b"twice" => mode_twice(name),
         b"quit" => mode_quit(name),
+        b"shm" => mode_shm(name),
+        b"badmsg" => mode_badmsg(name),
         _ => {
             write_all(STDOUT, b"sockc: unknown mode\n");
             exit(1);

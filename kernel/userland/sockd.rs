@@ -31,7 +31,10 @@
 #[path = "userlib.rs"]
 mod userlib;
 
-use userlib::{accept, bind, close, exit, length_of, listen, read, socket, write_all, STDOUT};
+use userlib::{
+    accept, bind, close, exit, length_of, listen, mmap_shared, recvmsg, socket, write_all,
+    MsgBuffers, STDOUT,
+};
 
 /// 名前の最大長（カーネルの `NAME_MAX` と同じ）。
 const NAME_MAX: usize = 31;
@@ -43,6 +46,14 @@ const CHUNK: usize = 1024;
 const QUIT: &[u8] = b"quit";
 /// 待ち行列の長さ（カーネルは接続の上限で頭を切る）。
 const BACKLOG: u64 = 2;
+/// 共有メモリの模様の長さ（`sockc` と同じ。`ADR-0065`）。
+const SHM_LEN: usize = 6000;
+/// 模様の種（`sockc` と同じ。**251 は素数で境で繰り返さない**）。
+const BIG_SEED: usize = 7;
+
+fn big_byte(index: usize) -> u8 {
+    ((BIG_SEED + index) % 251) as u8
+}
 
 /// 1 行を組んで 1 回で出す（モジュールの doc）。
 struct Line {
@@ -166,10 +177,15 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
         let stream = stream as u64;
         say(b"sockd: accepted");
         loop {
-            let got = read(stream, &mut chunk);
+            // **`recvmsg` で読む**——**`SCM_RIGHTS` の fd（共有メモリ）が来るかもしれない
+            // （`ADR-0065`）。** **fd が無ければ `read` と同じでバイトだけ来る。** **毎回作り直して
+            // `cmsg` を 0 にする**（前の回の fd を残さない。受けた fd は 3 以上なので 0 は「無し」）。
+            // SAFETY: `chunk` はこのスコープの間だけ `msghdr` が指す。
+            let mut msg = unsafe { MsgBuffers::new(&mut chunk, None) };
+            let got = recvmsg(stream, &mut msg);
             if got < 0 {
                 let mut line = Line::new();
-                line.push(b"sockd: read failed ");
+                line.push(b"sockd: recvmsg failed ");
                 line.push_decimal(got);
                 line.end();
                 exit(2);
@@ -180,6 +196,37 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 break;
             }
             let got = got as usize;
+            let shm_fd = msg.received_fd();
+            if shm_fd != 0 {
+                // **共有メモリの fd が来た**——**張って模様を確かめ、結果を返す（`ADR-0065`）。**
+                let mapped = mmap_shared(shm_fd as u64, SHM_LEN as u64);
+                let ok = if mapped < 0 {
+                    false
+                } else {
+                    let base = mapped as usize as *const u8;
+                    let mut ok = true;
+                    for index in 0..SHM_LEN {
+                        // SAFETY: たった今 mmap した共有メモリの範囲である。
+                        if unsafe { *base.add(index) } != big_byte(index) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    ok
+                };
+                let mut line = Line::new();
+                line.push(b"sockd: shm ");
+                line.push_decimal(SHM_LEN as i64);
+                line.push(if ok { b" bytes ok=true" } else { b" bytes ok=false" });
+                line.end();
+                close(shm_fd as u64);
+                let reply: &[u8] = if ok { b"shm-ok" } else { b"shm-bad" };
+                if write_all(stream, reply) < 0 {
+                    say(b"sockd: write failed");
+                    break;
+                }
+                continue;
+            }
             if chunk[..got].starts_with(QUIT) {
                 say(b"sockd: quit");
                 close(stream);
