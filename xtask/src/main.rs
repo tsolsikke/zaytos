@@ -5228,7 +5228,7 @@ fn cmd_socket_test(features: &[&str], expect_pass: bool) -> Result<()> {
         report_sabotage_reach(
             context,
             &serial,
-            &[BOOT_HANDED_OFF_MARKER, SHELL_READY_MARKER],
+            &[BOOT_HANDED_OFF_MARKER, SOCKET_TEST_BEGAN_MARKER],
         );
     }
 
@@ -6228,6 +6228,14 @@ fn cmd_screen_test(features: &[&str], expect_pass: bool) -> Result<()> {
 /// 組の判定まで届いていない。**
 const BOOT_HANDED_OFF_MARKER: &str = "the shell takes the foreground from here";
 
+/// `socket-test` の組が始まった行。**`sockd` はシェルより先に起こしっぱなしで起こす**ので、
+/// シェルの `zash: ready` を印にすると、`sockd` が落ちる破壊を「始まる前に止まった」と読む
+/// （(c) の計器の最初の `--full` で踏んだ。2026-09-22）。
+const SOCKET_TEST_BEGAN_MARKER: &str = "detached: starting /bin/sockd";
+
+/// `concurrent-test` の組が始まった行。**2 本の Ring 3 はシェルより先に走る**（上と同じ理由）。
+const CONCURRENT_TEST_BEGAN_MARKER: &str = "detached: starting /bin/tickera";
+
 /// 破壊の回が、組の始まりまで届いたかを 1 行出す（`ADR-0066` の Y-d の締め。運用者の (c)）。
 ///
 /// **破壊の回は、赤なら「捕まった」と出る。** **起動の途中で止まっても捕まえたことになる**
@@ -7025,7 +7033,7 @@ fn cmd_concurrent_test(features: &[&str], expect_pass: bool) -> Result<()> {
         report_sabotage_reach(
             context,
             &serial,
-            &[BOOT_HANDED_OFF_MARKER, SHELL_READY_MARKER],
+            &[BOOT_HANDED_OFF_MARKER, CONCURRENT_TEST_BEGAN_MARKER],
         );
     }
     let stripped = strip_ansi(&serial);
