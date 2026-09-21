@@ -1619,12 +1619,15 @@ const INPUT_READ_MAX: usize = 96;
 ///
 /// # 前景の関所は開く時点の 1 箇所
 ///
-/// **前景が取られていなければ `-EBADF`**（`crate::input::foreground_is_claimed`）。**前景は
+/// **呼んだ者が前景の系統でなければ `-EBADF`**（`crate::input::caller_is_foreground`。**Y-a では
+/// 大域の `foreground_is_claimed` を見ていた**——Y-c で直した）。**前景は
 /// プログラムの走行の間ずっと持たれる**ので、fd が前景より長生きしない。**`SCM_RIGHTS` は
 /// shm の fd だけを運ぶので、この fd は相手の表へ写らない**（`ADR-0066` の「前景の関所」）。
 #[inline(never)]
 fn open_input_from_ring3() -> u64 {
-    if !crate::input::foreground_is_claimed() {
+    // **呼んだ者が前景の系統かを見る（Y-c で直した）。** **Y-a では大域の印を見ていたので、
+    // 起こしっぱなしの 1 本でも開けた**（`crate::input::caller_is_foreground` の doc）。
+    if !crate::input::caller_is_foreground() {
         return (-EBADF) as u64;
     }
     let inserted = crate::vfs::with_current_files(|files| files.insert(crate::vfs::File::Input));

@@ -282,8 +282,34 @@ pub fn release_foreground() {
 }
 
 /// Ring 3 が前景を持っているか。**カーネル側の消費者が見る。**
+///
+/// **「誰かが持っているか」であって「呼んだ者が持っているか」ではない**（大域の印である）。
+/// **呼んだ者を問う口は [`caller_is_foreground`] である。**
 pub fn foreground_is_claimed() -> bool {
     FOREGROUND.load(Ordering::SeqCst)
+}
+
+/// 呼んだ者が前景の系統か（`ADR-0066` の Y-c）。**開く口の関所はこれを見る。**
+///
+/// # なぜ要るのか
+///
+/// **[`foreground_is_claimed`] は大域の印で、スロット 0 が前景を持っていれば、起こしっぱなしの
+/// 1 本（スロット 1）から見ても真になる。** **Y-a の `open_input` はそれを見ていた**——**`ADR-0066`
+/// は「開く時点で前景を要求する」と書いたが、実装は「誰かが持っていれば開ける」だった**
+/// （Y-c の下調べで見つけた。2026-09-21）。
+///
+/// # スロットで決まる
+///
+/// **前景を取れるのはスロット 0 の系統だけである**（[`claim_foreground`] がスロット 1 を断る）。
+/// **スロット 0 の中では入れ子も前景である**——**シェルの下の `cat` は深さ 2 で、前景の読み手で
+/// ある。** **したがって「取られていて、呼んだ者がスロット 0」が正確な問いになる。**
+pub fn caller_is_foreground() -> bool {
+    // 破壊 (Y-c, foreground-ignores-the-slot): 大域の印だけを見る（Y-a までの形）。**起こしっぱなしの
+    // 1 本が、親の前景で画面と入力の fd を開けてしまう**——**判定「前景でない者は開けない」2 本が落ちる。**
+    if cfg!(feature = "foreground-ignores-the-slot") {
+        return foreground_is_claimed();
+    }
+    foreground_is_claimed() && crate::ring3::current_slot() == 0
 }
 
 /// Ring 3 へ届けたバイトの累計（判定行）。

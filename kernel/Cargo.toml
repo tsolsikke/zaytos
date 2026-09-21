@@ -591,6 +591,9 @@ poll-never-waits = ["poll-test"]
 poll-mistakes-the-member = ["poll-test"]
 # poll が集合へ最初の 1 本だけを入れる（ADR-0066 の Y-b）。落ちた合図で誰も起こさない。
 poll-waits-on-one-member = ["poll-test"]
+# 前景の関所が大域の印だけを見る（Y-a までの形。ADR-0066 の Y-c）。前景でない者が開ける。
+# input-test と screen-test の両方が回すので、どちらにも寄りかからない（xtask が構成を足す）。
+foreground-ignores-the-slot = []
 # `spawn` で、子へ入る前に親の FP の状態を保存しない（`ADR-0058`）。
 # 親が `spawn` を跨いで値を保てなくなる。
 fp-spawn-no-save = []

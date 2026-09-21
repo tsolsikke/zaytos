@@ -10279,6 +10279,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "polld が入力とソケットを同時に待つ（ADR-0066 の Y-b）",
     ),
     (
+        "foreground-ignores-the-slot",
+        cfg!(feature = "foreground-ignores-the-slot"),
+        "前景の関所が大域の印だけを見る（ADR-0066 の Y-c）",
+    ),
+    (
         "poll-never-waits",
         cfg!(feature = "poll-never-waits"),
         "poll が待たずに 0 を返す（ADR-0066 の Y-b）",
