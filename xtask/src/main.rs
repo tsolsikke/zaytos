@@ -1775,6 +1775,17 @@ fn main() -> Result<()> {
                 let expect_pass = sabotage.is_empty();
                 return cmd_screen_test(&sabotage, expect_pass);
             }
+            // **画面・入力・ソケット・共有メモリを 1 つの組で通す判定（`ADR-0066` の Y-d）。**
+            if rest.iter().any(|a| a == "--compose-test") {
+                let sabotage: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                let expect_pass = sabotage.is_empty();
+                return cmd_compose_test(&sabotage, expect_pass);
+            }
             if rest.iter().any(|a| a == "--history-test") {
                 let sabotage: Vec<&str> = rest
                     .iter()
@@ -6137,6 +6148,289 @@ fn cmd_screen_test(features: &[&str], expect_pass: bool) -> Result<()> {
             || line.contains("gfxd: ")
             || line.contains("gfxc: ")
             || line.contains("screen-test:")
+    }) {
+        println!("{context}: (info) {}", info.trim());
+    }
+    println!(
+        "{context}: (info) waited {:.1} s (ready = {ready})",
+        waited.as_secs_f64()
+    );
+
+    let passed = ready && failed.is_empty() && no_error;
+    if passed {
+        println!("{context}: PASS");
+        if expect_pass {
+            Ok(())
+        } else {
+            bail!("{context}: the sabotage was NOT caught; every judgement still held")
+        }
+    } else {
+        println!("{context}: FAILED (judgements that fell: {failed:?})");
+        if expect_pass {
+            bail!("{context}: FAILED ({failed:?})")
+        } else {
+            println!("{context}: the sabotage was caught (this run is expected to fail)");
+            Ok(())
+        }
+    }
+}
+
+/// `--compose-test` の破壊（`ADR-0066` の Y-d）。**各段の既存の破壊を、組の中でもう 1 度回す。**
+///
+/// - `screen-present-does-not-copy`（Y-c）—— 判定 1（プールの画素が画面に届いた）
+/// - `poll-waits-on-one-member`（Y-b）—— 判定 2（3 本の集合で待った）
+/// - `screen-leave-does-not-repaint`（Y-c）—— 判定 4（文字コンソールが戻った）
+/// - `wake-ignores-the-reason`（W2-d+）—— 判定 5（集合の外の者を起こしていない）
+///
+/// **判定 3（打鍵で終わった）は合図である**——**`xtask` が次へ進む前提で、落とす破壊を置かない**
+/// （`docs/coding-standards.md` の「判定を足すときは」。`(signal)` の形）。
+///
+/// **`shm-mmap-maps-nothing` は置けない**——**起動時の `syscall-test`（67 番）が先に共有メモリを
+/// `mmap` し、その場で止まる。** **組の判定には届かない**（実測。3 回とも起動が止まり、5 本が
+/// `None` で落ちた）。**同じことが `socket-test` でも起きている**（`ADR-0066` の Y-d の節）。
+const COMPOSE_TEST_SABOTAGES: &[&str] = &[
+    "screen-present-does-not-copy",
+    "poll-waits-on-one-member",
+    "screen-leave-does-not-repaint",
+    "wake-ignores-the-reason",
+];
+
+/// `--compose-test` の 1 段ごとの上限。
+const COMPOSE_TEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// `compd` が待ち受けた印（`ADR-0066` の Y-d）。
+const COMPOSE_TEST_READY_MARKER: &str = "compd: listening on comp-0";
+/// `compc` が返事の `ok` を受けた印。**ここで 1 度目の読み戻しをし、打鍵を送る**（来なければ
+/// 上限の後に読む）。
+///
+/// **`compd` の「合成した」の行ではなく、こちらを待つ。** **この行が出た時点で、`compd` は `ok` を
+/// 書き終え、`compc` は閉じられるのを待つ `read` へ入るところである**——**打鍵より前に、`compd` が
+/// 3 本の集合で眠り、`compc` が別の理由で眠っている形を作る**（判定 2 と判定 5 の機会。
+/// `kernel/userland/compc.rs` の「閉じられるまで居残る」）。
+const COMPOSE_TEST_COMPOSITED_MARKER: &str = "compc: the server composited the tile";
+/// `init` が締めの計器を出した印。**ここで 2 度目の読み戻しをする。**
+const COMPOSE_TEST_DONE_MARKER: &str = "[INFO] compose: entered ";
+/// 四角の象限の中心と色（`compc` が描く。**赤と青が等しい色だけ**）。
+const COMPOSE_TEST_QUADRANTS: [(u32, u32, [u8; 3]); 4] = [
+    (416, 316, [255, 0, 255]),
+    (448, 316, [0, 255, 0]),
+    (416, 348, [255, 255, 255]),
+    (448, 348, [128, 128, 128]),
+];
+
+/// 象限の中心が、期待の色だった数（`ADR-0066` の Y-d）。**読めなければ `None`。**
+fn quadrants_matching(image: &Option<(u32, u32, Vec<u8>)>) -> Option<usize> {
+    let (width, height, rgb) = image.as_ref()?;
+    let mut count = 0usize;
+    for (x, y, color) in COMPOSE_TEST_QUADRANTS {
+        if x >= *width || y >= *height {
+            return None;
+        }
+        let at = ((y * width + x) * 3) as usize;
+        if rgb[at..at + 3] == color {
+            count += 1;
+        }
+    }
+    Some(count)
+}
+
+/// 画面・入力・ソケット・共有メモリを 1 つの組で通す（`ADR-0066` の Y-d。設計 Q5）。
+///
+/// **`compd` を前景で起こす。** **`compd` は入力 fd と画面を開き、名前で待ち受け、`compc` を
+/// 起こしっぱなしで起こし、{入力, listener, クライアント} の集合で待つ。** **`compc` は shm のプールに
+/// 4 色の四角を描いて fd を送る。** **`compd` がプールを `mmap` して裏バッファへ合成し、`present` で
+/// 写す。** **打鍵で終わり、接続と画面を閉じる**（**`compc` は `ok` の後も閉じられるまで居残る**
+/// ——**判定 2 と判定 5 の機会を形で作る。** `COMPOSE_TEST_COMPOSITED_MARKER` の doc）。
+///
+/// **判定は 5 本**——
+///
+/// 1. プールの画素が画面に届いた（4 つの象限の中心が期待の色）
+/// 2. サーバが 3 本の集合で待った（`max wait set` が 3）
+/// 3. 打鍵で終わった（合図）
+/// 4. 文字コンソールが戻った（4 つの象限の中心が、どれも四角の色でない）
+/// 5. 集合の外の者を起こしていない（`woken outside the set` が 0）
+fn cmd_compose_test(features: &[&str], expect_pass: bool) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let mut all_features: Vec<&str> = vec!["compose-test"];
+    all_features.extend_from_slice(features);
+    let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let tag = all_features.join("-");
+    let target = workspace_root.join("target");
+    let serial_log = target.join(format!("compose-test-{tag}-serial.log"));
+    let composited_ppm = target.join(format!("compose-test-{tag}-composited.ppm"));
+    let left_ppm = target.join(format!("compose-test-{tag}-left.ppm"));
+    for stale in [&serial_log, &composited_ppm, &left_ppm] {
+        let _ = fs::remove_file(stale);
+    }
+    let debug_log = target.join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+    let monitor_socket = PathBuf::from(format!(
+        "/tmp/zaytos-xtask-compose-{}.sock",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&monitor_socket);
+    ensure_socket_path_fits(&monitor_socket)?;
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: Some(&monitor_socket),
+        accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the compose test")?;
+
+    let started = Instant::now();
+    let wait_for = |marker: &str, limit: Duration| -> bool {
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            if read_lossy(&serial_log).contains(marker) {
+                return true;
+            }
+            thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        }
+        false
+    };
+
+    let ready = wait_for(COMPOSE_TEST_READY_MARKER, BOOT_READY_TIMEOUT);
+    let mut composited = None;
+    let mut left = None;
+    if ready {
+        // **`compc` が返事を受けるのを待つ。** **来なくても先へ進む**——**プールが届かない破壊でも、
+        // 打鍵で終わらせて計器の行を読むためである**（判定を 1 本ずつに分ける）。
+        wait_for(COMPOSE_TEST_COMPOSITED_MARKER, COMPOSE_TEST_TIMEOUT);
+        match capture_screendump(&monitor_socket, &composited_ppm) {
+            Ok(()) => composited = read_complete_ppm(&composited_ppm, SCREENDUMP_FILE_TIMEOUT),
+            Err(e) => println!("compose-test: the first screendump failed: {e}"),
+        }
+        match connect_monitor_with_retry(&monitor_socket) {
+            Ok(mut stream) => {
+                for _ in 0..3 {
+                    if writeln!(stream, "sendkey {INPUT_TEST_KEY}").is_err() {
+                        break;
+                    }
+                    thread::sleep(SHELL_TEST_KEY_INTERVAL);
+                }
+            }
+            Err(e) => println!("compose-test: could not reach the QEMU monitor: {e}"),
+        }
+        if wait_for(COMPOSE_TEST_DONE_MARKER, COMPOSE_TEST_TIMEOUT) {
+            thread::sleep(Duration::from_millis(500));
+            match capture_screendump(&monitor_socket, &left_ppm) {
+                Ok(()) => left = read_complete_ppm(&left_ppm, SCREENDUMP_FILE_TIMEOUT),
+                Err(e) => println!("compose-test: the second screendump failed: {e}"),
+            }
+        }
+    }
+    let waited = started.elapsed();
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = fs::remove_file(&monitor_socket);
+
+    let serial = read_lossy(&serial_log);
+    let context = if features.is_empty() {
+        "compose-test".to_string()
+    } else {
+        format!("compose-test {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    let qemu_debug = read_lossy(&debug_log);
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    let stripped = strip_ansi(&serial);
+    let lines: Vec<&str> = stripped.lines().map(str::trim_end).collect();
+    let number_after = |line: &str, key: &str| -> Option<u64> {
+        let rest = &line[line.find(key)? + key.len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok()
+    };
+    let counters = lines
+        .iter()
+        .find(|line| line.contains(COMPOSE_TEST_DONE_MARKER));
+    let max_wait_set = counters.and_then(|line| number_after(line, "max wait set "));
+    let woken_outside = counters.and_then(|line| number_after(line, "woken outside the set "));
+    let tile_after_composite = quadrants_matching(&composited);
+    let tile_after_leaving = quadrants_matching(&left);
+
+    let judgements: [(&str, bool); 5] = [
+        (
+            // **プールの画素が画面に届いた**——**4 つの象限の中心が全部、期待の色である。**
+            // **位置と向き（行と桁の取り違え・上下の反転）も見分ける。**
+            "the_client_pool_reached_the_screen",
+            tile_after_composite == Some(COMPOSE_TEST_QUADRANTS.len()),
+        ),
+        (
+            // **サーバが {入力, listener, クライアント} の 3 本で待った。**
+            "the_server_waited_on_input_listener_and_client_at_once",
+            max_wait_set == Some(3),
+        ),
+        (
+            // **(signal) 打鍵で終わった**——**`xtask` が次へ進む前提である。**
+            "the_key_ended_the_session",
+            stripped.contains("compd: a key ended the session") && stripped.contains("compd: done"),
+        ),
+        (
+            // **文字コンソールが戻った**——**象限の中心が、どれも四角の色でない。**
+            "the_text_console_came_back",
+            tile_after_leaving == Some(0),
+        ),
+        (
+            // **集合の外の者を起こしていない**（`on ∉ S`。Y-b の言い換え）。
+            "no_task_was_woken_outside_its_set",
+            woken_outside == Some(0),
+        ),
+    ];
+
+    let error_lines: Vec<&str> = lines
+        .iter()
+        .filter(|line| line.contains("[ERROR]"))
+        .copied()
+        .take(4)
+        .collect();
+    let no_error = error_lines.is_empty();
+
+    let failed: Vec<&str> = judgements
+        .iter()
+        .filter(|(_, held)| !held)
+        .map(|(name, _)| *name)
+        .collect();
+    for (name, held) in &judgements {
+        println!("{context}: {name} = {held}");
+    }
+    println!("{context}: no [ERROR] line = {no_error} (the first were {error_lines:?})");
+    println!(
+        "{context}: (info) quadrants in the tile's colors: after compositing = \
+         {tile_after_composite:?}, after leaving = {tile_after_leaving:?}; max wait set = \
+         {max_wait_set:?}, woken outside the set = {woken_outside:?}"
+    );
+    for info in lines.iter().filter(|line| {
+        line.contains("[INFO] compose:")
+            || line.contains("compd: ")
+            || line.contains("compc: ")
+            || line.contains("compose-test:")
     }) {
         println!("{context}: (info) {}", info.trim());
     }
@@ -18217,6 +18511,30 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }
         }
 
+        // **画面・入力・ソケット・共有メモリを 1 つの組で通す（`ADR-0066` の Y-d。第1段階の締め）。**
+        // **破壊は各段の既存のものを 4 つ、組の中でもう 1 度回す**（`COMPOSE_TEST_SABOTAGES`）。
+        total += 1;
+        begin_item("a compositor composites a client's shm pool on the screen and ends on a key");
+        match cmd_compose_test(&[], true) {
+            Ok(()) => println!("--- compose test: OK"),
+            Err(error) => {
+                println!("--- compose test: FAILED ({error})");
+                failed.push("compose test".to_string());
+            }
+        }
+        for sabotage in COMPOSE_TEST_SABOTAGES {
+            total += 1;
+            let label = format!("compose-test {sabotage}");
+            begin_item(&label);
+            match cmd_compose_test(&[sabotage], false) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
+            }
+        }
+
         // **Tab の補完（TAB-1）。**
         //
         // **1 回の起動で 5 つ見る**——**単一候補 / 共通接頭辞 / 件数 / 一覧 /
@@ -19743,7 +20061,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 35,
-    full: 352,
+    full: 357,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
