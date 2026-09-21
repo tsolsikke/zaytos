@@ -4516,6 +4516,13 @@ fn cmd_utf8_test(features: &[&str], expect_pass: bool) -> Result<()> {
         report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
         bail!("{context}: the kernel did not start");
     }
+    if !expect_pass {
+        report_sabotage_reach(
+            context,
+            &serial,
+            &[BOOT_HANDED_OFF_MARKER, SHELL_READY_MARKER],
+        );
+    }
 
     // **先頭行の観測を打った順に拾う。** 1 本目が `badutf8`、2 本目が `utf8` である。
     let rows: Vec<String> = strip_ansi(&serial)
@@ -4722,6 +4729,13 @@ fn cmd_profile_test(features: &[&str], expect_pass: bool) -> Result<()> {
         report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
         bail!("{context}: the kernel did not start");
     }
+    if !expect_pass {
+        report_sabotage_reach(
+            context,
+            &serial,
+            &[BOOT_HANDED_OFF_MARKER, SHELL_READY_MARKER],
+        );
+    }
 
     let stripped = strip_ansi(&serial);
     // **1 度目と 2 度目を分ける。** **`init` の起こし直しの行が境である。**
@@ -4884,6 +4898,13 @@ fn cmd_pipe_test(features: &[&str], expect_pass: bool) -> Result<()> {
     {
         report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
         bail!("{context}: the kernel did not start");
+    }
+    if !expect_pass {
+        report_sabotage_reach(
+            context,
+            &serial,
+            &[BOOT_HANDED_OFF_MARKER, SHELL_READY_MARKER],
+        );
     }
 
     let stripped = strip_ansi(&serial);
@@ -5202,6 +5223,13 @@ fn cmd_socket_test(features: &[&str], expect_pass: bool) -> Result<()> {
     {
         report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
         bail!("{context}: the kernel did not start");
+    }
+    if !expect_pass {
+        report_sabotage_reach(
+            context,
+            &serial,
+            &[BOOT_HANDED_OFF_MARKER, SHELL_READY_MARKER],
+        );
     }
 
     let stripped = strip_ansi(&serial);
@@ -5535,6 +5563,13 @@ fn cmd_input_test(features: &[&str], expect_pass: bool) -> Result<()> {
         report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
         bail!("{context}: the kernel did not start");
     }
+    if !expect_pass {
+        report_sabotage_reach(
+            context,
+            &serial,
+            &[BOOT_HANDED_OFF_MARKER, INPUT_TEST_READY_MARKER],
+        );
+    }
 
     let stripped = strip_ansi(&serial);
     let lines: Vec<&str> = stripped.lines().map(str::trim_end).collect();
@@ -5780,6 +5815,13 @@ fn cmd_poll_test(features: &[&str], expect_pass: bool) -> Result<()> {
     {
         report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
         bail!("{context}: the kernel did not start");
+    }
+    if !expect_pass {
+        report_sabotage_reach(
+            context,
+            &serial,
+            &[BOOT_HANDED_OFF_MARKER, POLL_TEST_READY_MARKER],
+        );
     }
 
     let stripped = strip_ansi(&serial);
@@ -6091,6 +6133,13 @@ fn cmd_screen_test(features: &[&str], expect_pass: bool) -> Result<()> {
         report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
         bail!("{context}: the kernel did not start");
     }
+    if !expect_pass {
+        report_sabotage_reach(
+            context,
+            &serial,
+            &[BOOT_HANDED_OFF_MARKER, SCREEN_TEST_READY_MARKER],
+        );
+    }
 
     let stripped = strip_ansi(&serial);
     let lines: Vec<&str> = stripped.lines().map(str::trim_end).collect();
@@ -6172,6 +6221,37 @@ fn cmd_screen_test(features: &[&str], expect_pass: bool) -> Result<()> {
             println!("{context}: the sabotage was caught (this run is expected to fail)");
             Ok(())
         }
+    }
+}
+
+/// 起動が組へ渡した行（`kernel/src/main.rs` の定常の観測の締め）。**これより前で止まった破壊は、
+/// 組の判定まで届いていない。**
+const BOOT_HANDED_OFF_MARKER: &str = "the shell takes the foreground from here";
+
+/// 破壊の回が、組の始まりまで届いたかを 1 行出す（`ADR-0066` の Y-d の締め。運用者の (c)）。
+///
+/// **破壊の回は、赤なら「捕まった」と出る。** **起動の途中で止まっても捕まえたことになる**
+/// ——**Y-d の `shm-mmap-maps-nothing` がそれで、起動時の `syscall-test` の 67 番が先に止め、
+/// 組の判定は 1 本も走っていなかった**（ES-d、`ADR-0063` の (b3) に次いで 3 例目）。
+///
+/// **止めない。計器として出すだけである**——**起動で止まるのが正しい破壊も在る。**
+/// **`--full` の出力をこの行で引いて、「それで正しい」と「判定に届いていない」に分ける**
+/// （`docs/verification-coverage.md` の「置けない破壊の一覧」）。
+///
+/// `began` は、組が始まったと言える印の並びである。**全部が出ていれば「始まった」とする。**
+fn report_sabotage_reach(context: &str, serial: &str, began: &[&str]) {
+    let text = strip_ansi(serial);
+    let missing: Vec<&str> = began
+        .iter()
+        .copied()
+        .filter(|marker| !text.contains(marker))
+        .collect();
+    if missing.is_empty() {
+        println!("{context}: (info) sabotage reach: the test began");
+    } else {
+        println!(
+            "{context}: (info) sabotage reach: stopped before the test began (missing {missing:?})"
+        );
     }
 }
 
@@ -6359,6 +6439,13 @@ fn cmd_compose_test(features: &[&str], expect_pass: bool) -> Result<()> {
         report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
         bail!("{context}: the kernel did not start");
     }
+    if !expect_pass {
+        report_sabotage_reach(
+            context,
+            &serial,
+            &[BOOT_HANDED_OFF_MARKER, COMPOSE_TEST_READY_MARKER],
+        );
+    }
 
     let stripped = strip_ansi(&serial);
     let lines: Vec<&str> = stripped.lines().map(str::trim_end).collect();
@@ -6524,6 +6611,13 @@ fn cmd_history_test(features: &[&str], expect_pass: bool) -> Result<()> {
         report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
         bail!("{context}: the kernel did not start");
     }
+    if !expect_pass {
+        report_sabotage_reach(
+            context,
+            &serial,
+            &[BOOT_HANDED_OFF_MARKER, SHELL_READY_MARKER],
+        );
+    }
 
     let stripped = strip_ansi(&serial);
     let restart_marker = "init: starting /bin/zash (restart 1 of 3)";
@@ -6678,6 +6772,13 @@ fn cmd_fp_test(features: &[&str], expect_pass: bool) -> Result<()> {
     {
         report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
         bail!("{context}: the kernel did not start");
+    }
+    if !expect_pass {
+        report_sabotage_reach(
+            context,
+            &serial,
+            &[BOOT_HANDED_OFF_MARKER, SHELL_READY_MARKER],
+        );
     }
 
     // **シェルの前後を分けない**——**`init` が起こした 1 回目はシェルより
@@ -6919,6 +7020,13 @@ fn cmd_concurrent_test(features: &[&str], expect_pass: bool) -> Result<()> {
     {
         report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
         bail!("{context}: the kernel did not start");
+    }
+    if !expect_pass {
+        report_sabotage_reach(
+            context,
+            &serial,
+            &[BOOT_HANDED_OFF_MARKER, SHELL_READY_MARKER],
+        );
     }
     let stripped = strip_ansi(&serial);
     let lines: Vec<&str> = stripped.lines().map(str::trim).collect();
@@ -7267,6 +7375,13 @@ fn cmd_ttf_test(features: &[&str], expect_pass: bool) -> Result<()> {
         report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
         bail!("{context}: the kernel did not start");
     }
+    if !expect_pass {
+        report_sabotage_reach(
+            context,
+            &serial,
+            &[BOOT_HANDED_OFF_MARKER, SHELL_READY_MARKER],
+        );
+    }
 
     let stripped = strip_ansi(&serial);
     let zaytos: Vec<String> = stripped
@@ -7421,6 +7536,9 @@ fn cmd_serial_test(features: &[&str], expect_pass: bool) -> Result<()> {
         report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
         bail!("{context}: the kernel did not start");
     }
+    if !expect_pass {
+        report_sabotage_reach(context, &serial, &["serial-stress: cpu"]);
+    }
 
     let stripped = strip_ansi(&serial);
 
@@ -7565,6 +7683,13 @@ fn cmd_complete_test(features: &[&str], expect_pass: bool) -> Result<()> {
     {
         report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
         bail!("{context}: the kernel did not start");
+    }
+    if !expect_pass {
+        report_sabotage_reach(
+            context,
+            &serial,
+            &[BOOT_HANDED_OFF_MARKER, SHELL_READY_MARKER],
+        );
     }
 
     let stripped = strip_ansi(&serial);
@@ -10166,6 +10291,13 @@ fn judge_shell_session(
     {
         report_did_not_start(context, firmware_rip, qemu_exit)?;
         bail!("{context}: the kernel did not start");
+    }
+    if !mode.expects_to_pass() {
+        report_sabotage_reach(
+            context,
+            serial,
+            &[BOOT_HANDED_OFF_MARKER, SHELL_READY_MARKER],
+        );
     }
 
     println!("--- {context}: relevant output ---");
