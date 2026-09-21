@@ -4969,6 +4969,9 @@ use kernel::userland::{load_user_program, UserLoadError};
 ///
 /// **生成をやめない。** **`xtask` が判定行へ出しており、人が「像がどう動いたか」
 /// を読む材料である**（`fs image e2fsck` の行）。**機械が寄りかからないだけである。**
+///
+/// **例外が 1 つある**——**`USED_BLOCKS` は壊した像の器の大きさに使う**（[`CORRUPT_FS_BLOCKS`]。
+/// `ADR-0066` の Y-c）。**位置ではなく大きさなので、構成による揺れは余裕で吸える。**
 #[allow(dead_code)]
 mod fsimage_info {
     include!(concat!(env!("OUT_DIR"), "/fsimage_info.rs"));
@@ -6493,9 +6496,41 @@ static mut CORRUPT_FS_IMAGE: [u8; CORRUPT_FS_LEN] = [0; CORRUPT_FS_LEN];
 /// **ここまで、この定数は「1 か 2 ずつ増える」前提で余裕を取っていた**
 /// ——**1 本で 85 ブロック増える形は初めてである。**
 ///
-/// **落ちたときの読み方は、その場の診断が言う**（「raise
-/// CORRUPT_FS_BLOCKS」）。**実際、B-d で最初に落ちたのはこれだった。**
-const CORRUPT_FS_BLOCKS: usize = 288;
+/// **落ちたときの読み方は、その場の診断が言う**（**B-d では「raise CORRUPT_FS_BLOCKS」と
+/// 言っていた。** Y-c から「disk を作り直すか、余裕を上げよ」になった）。**実際、B-d で最初に
+/// 落ちたのはこれだった。**
+///
+/// # 定数をやめて、像から導く（`ADR-0066` の Y-c。運用者の指摘）
+///
+/// **Y-c で器を越えた**——**像へ `/bin/gfxd` と `/bin/gfxc` を足し、使用上端が 284 から 293 へ上がって
+/// 288 を越え、起動がこの診断で止まった**（実測）。**1 組（2 本）で +9 ブロックである。**
+/// **これは「像が太ると動く器」で、手で余裕を取る限り、プログラムを足すたびにまた越える。**
+///
+/// **そこで `build.rs` が測った使用上端（`fsimage_info::USED_BLOCKS`）に余裕を足して導く。**
+/// **像が太れば器も同じだけ伸びる**——**`.bss` の増分は像の増分そのものになる。** **余裕が覆うもの
+/// は [`CORRUPT_FS_SLACK_BLOCKS`] の doc にある。**
+///
+/// **`fsimage_info` の位置の定数は使わない規則がある**（[`fsimage_info`] の doc）。**使わないのは
+/// 「壊す位置」で、ここは「器の大きさ」である**——**位置は構成ごとにずれると当たらなくなるが、
+/// 大きさは余裕で揺れを吸える。** **吸えなければこの診断で止まる**（黙って足りない写しを作らない）。
+const CORRUPT_FS_BLOCKS: usize = fsimage_info::USED_BLOCKS + CORRUPT_FS_SLACK_BLOCKS;
+
+/// 壊した像の器の余裕（ブロック。`ADR-0066` の Y-c）。
+///
+/// **起動時に読む像の使用上端が、建てた像の使用上端より大きくなる場合を吸う。** **2 つある**——
+///
+/// - **構成による揺れ**——**同じ木から建った 175 構成で、使用上端は 284 か 285 だった**（実測。
+///   2026-09-21。**破壊が `userlib` を太らせる構成がある**）。**検査は毎回その構成の像から
+///   `disk0.img` を作り直すので、揺れが効くのは他の構成の像を持ち越す回だけである。**
+/// - **持ち越しの回が書いたぶん**——**persist の 2 項目と `--manual` は、前の起動が書いた
+///   `disk0.img` を持ち越す。**
+///
+/// **使っている量と器の大きさは、毎起動の締めの行に出る**（`ext2-corrupt: all ... refused`）。
+///
+/// **16 は実測から決めた**（2026-09-21）——**persist の 3 項目の 6 回の起動で、起動時に読んだ像の
+/// 使用上端は 293〜297、建てた像との差は最大 +4 だった**（persist-zi の 2 回目。297 を 309 の器で
+/// 読んだ）。**構成による揺れは +1。** **16 は実測の最大の 4 倍である。**
+const CORRUPT_FS_SLACK_BLOCKS: usize = 16;
 
 /// 作業領域のバイト数。
 const CORRUPT_FS_LEN: usize = CORRUPT_FS_BLOCKS * FS_BLOCK_SIZE;
@@ -6954,7 +6989,11 @@ fn verify_corrupt_fs_image_is_rejected(logger: &mut Logger<SerialPort>) {
         CorruptFsCheckError::PrefixProbeFailed { name, error: e } => logger.error(format_args!(
             "ext2-corrupt: the untouched {CORRUPT_FS_BLOCKS}-block prefix failed \
              the \"{name}\" probe with {e:?}. The prefix is too short to hold \
-             everything the image references; raise CORRUPT_FS_BLOCKS. halting"
+             everything the image references; the image read at boot is larger than the \
+             one this kernel was built with ({} block(s)) plus the slack of \
+             {CORRUPT_FS_SLACK_BLOCKS}: rebuild the disk, or raise \
+             CORRUPT_FS_SLACK_BLOCKS. halting",
+            fsimage_info::USED_BLOCKS
         )),
         CorruptFsCheckError::PrefixDidNotParse { error: e } => logger.error(format_args!(
             "ext2-corrupt: the untouched {CORRUPT_FS_BLOCKS}-block prefix did not parse \
@@ -7498,7 +7537,8 @@ fn try_verify_corrupt_fs_image_is_rejected(
     logger.info(format_args!(
         "ext2-corrupt: all {rejected} corrupted image(s) were refused with the expected reason, \
          and the kernel continued (the embedded image is untouched; each case patches a fresh \
-         copy of its first {CORRUPT_FS_BLOCKS} blocks)"
+         copy of the {} block(s) the image uses, in a {CORRUPT_FS_BLOCKS}-block buffer)",
+        map.blocks
     ));
 
     // 壊した後も、抱えている像が読めること。**壊す処理が元を汚していないことの主張。**

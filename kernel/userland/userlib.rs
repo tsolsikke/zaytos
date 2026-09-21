@@ -594,6 +594,81 @@ pub fn open_input() -> i64 {
     unsafe { syscall3(SYS_OPEN_INPUT, 0, 0, 0) }
 }
 
+/// 画面を開く口の番号（`ZAYTOS_PRIVATE_BASE + 9`。`ADR-0066` の Y-c）。
+pub const SYS_OPEN_SCREEN: u64 = 0x1009;
+/// `FBIOGET_VSCREENINFO`（Linux の fbdev）。**カーネルの値と同じ。**
+pub const FBIOGET_VSCREENINFO: u64 = 0x4600;
+/// `FBIOGET_FSCREENINFO`（Linux の fbdev）。
+pub const FBIOGET_FSCREENINFO: u64 = 0x4602;
+/// 画面の矩形を写す要求（ZaytOS 独自。引数は `struct drm_clip_rect`）。
+pub const FBIOZPRESENT: u64 = 0x5A03;
+
+/// 画面を開く（`ADR-0066` の Y-c）。**開くと図形モードへ入り、`close` で抜ける。**
+/// **前景の系統でなければ `-EBADF`、既に誰かが図形モードなら `-EBUSY`。**
+pub fn open_screen() -> i64 {
+    // SAFETY: 引数を取らない口である。
+    unsafe { syscall3(SYS_OPEN_SCREEN, 0, 0, 0) }
+}
+
+/// 画面の形（`ADR-0066` の Y-c）。**fbdev の 2 つの構造体から、要る欄だけを読む。**
+#[derive(Clone, Copy)]
+pub struct ScreenInfo {
+    /// 横のピクセル数（`xres`）。
+    pub width: u32,
+    /// 縦のピクセル数（`yres`）。
+    pub height: u32,
+    /// 1 画素のビット数（`bits_per_pixel`）。
+    pub bits_per_pixel: u32,
+    /// 赤のビット位置（`red.offset`）。
+    pub red_offset: u32,
+    /// 青のビット位置（`blue.offset`）。
+    pub blue_offset: u32,
+    /// 1 行のバイト数（`line_length`）。
+    pub line_length: u32,
+    /// 面のバイト数（`smem_len`）。**`mmap` に渡す長さである。**
+    pub smem_len: u32,
+}
+
+fn le_u32(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+}
+
+/// 画面の形を訊く（`ADR-0066` の Y-c）。**欄の位置は `<linux/fb.h>` の配置である。**
+pub fn screen_info(fd: u64) -> Result<ScreenInfo, i64> {
+    let mut var = [0u8; 160];
+    // SAFETY: `var` は自分のスタックの上にあり、カーネルが書く長さ（160）を収める。
+    let ret = unsafe { syscall3(SYS_IOCTL, fd, FBIOGET_VSCREENINFO, var.as_mut_ptr() as u64) };
+    if ret < 0 {
+        return Err(ret);
+    }
+    let mut fix = [0u8; 80];
+    // SAFETY: 同上（80）。
+    let ret = unsafe { syscall3(SYS_IOCTL, fd, FBIOGET_FSCREENINFO, fix.as_mut_ptr() as u64) };
+    if ret < 0 {
+        return Err(ret);
+    }
+    Ok(ScreenInfo {
+        width: le_u32(&var, 0),
+        height: le_u32(&var, 4),
+        bits_per_pixel: le_u32(&var, 24),
+        red_offset: le_u32(&var, 32),
+        blue_offset: le_u32(&var, 56),
+        line_length: le_u32(&fix, 48),
+        smem_len: le_u32(&fix, 24),
+    })
+}
+
+/// 矩形を画面へ写す（`ADR-0066` の Y-c）。**x2・y2 は含まない**（`struct drm_clip_rect`）。
+pub fn present(fd: u64, x1: u16, y1: u16, x2: u16, y2: u16) -> i64 {
+    let mut rect = [0u8; 8];
+    rect[0..2].copy_from_slice(&x1.to_le_bytes());
+    rect[2..4].copy_from_slice(&y1.to_le_bytes());
+    rect[4..6].copy_from_slice(&x2.to_le_bytes());
+    rect[6..8].copy_from_slice(&y2.to_le_bytes());
+    // SAFETY: `rect` は自分のスタックの上にあり、カーネルが読む長さ（8）を収める。
+    unsafe { syscall3(SYS_IOCTL, fd, FBIOZPRESENT, rect.as_ptr() as u64) }
+}
+
 /// `getdents64(fd, buf, len)`。
 pub fn getdents64(fd: u64, buf: &mut [u8]) -> i64 {
     // SAFETY: `buf` は自分のスタックの中で、長さを正しく渡す。

@@ -130,6 +130,9 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
         // **入力とソケットを同時に待つ組（`ADR-0066` の Y-b）。** **待つ側と繋ぐ側で 1 組である。**
         "polld",
         "pollc",
+        // **画面へ画素を出す組（`ADR-0066` の Y-c）。** **描く側と、開けないことを見る側で 1 組である。**
+        "gfxd",
+        "gfxc",
     ];
 
     // **共有する包み（S11-9）。** `ls` と `cat` が `mod userlib;` で取り込む。
@@ -637,6 +640,9 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         // **入力とソケットを同時に待つ組（`ADR-0066` の Y-b）。** **待つ側と繋ぐ側で 1 組である。**
         "polld",
         "pollc",
+        // **画面へ画素を出す組（`ADR-0066` の Y-c）。** **描く側と、開けないことを見る側で 1 組である。**
+        "gfxd",
+        "gfxc",
         // **C で書いたもの（C-a。`ADR-0057`）。** **`gcc` が建てる。**
         "chello",
         // **FP の状態の判定（B-a。`ADR-0058`）。** **親と子の 2 本で 1 組である。**
@@ -872,6 +878,10 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         .indirect_block
         .expect("debugfs did not report the single indirect block");
     let first_free = first_free_block(&image);
+    // **使用上端 + 1（`ADR-0066` の Y-c）。** **カーネルが壊した像の器の大きさをここから導く**
+    // （`kernel_main` の `CORRUPT_FS_BLOCKS`）。**`first_free` とは別に測る**——**あちらは「最初の
+    // 空きの範囲の始まり」で、途中に穴があれば上端より手前になる。**
+    let used_blocks = used_blocks(&image);
     std::fs::write(
         format!("{out_dir}/fsimage_info.rs"),
         format!(
@@ -887,7 +897,8 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
              pub const MOTD_INODE: usize = {motd_inode};\n\
              pub const MOTD_DATA_BLOCK: usize = {motd_block};\n\
              pub const INDIRECT_TABLE_BLOCK: usize = {indirect_table};\n\
-             pub const FIRST_FREE_BLOCK: usize = {first_free};\n",
+             pub const FIRST_FREE_BLOCK: usize = {first_free};\n\
+             pub const USED_BLOCKS: usize = {used_blocks};\n",
             DIRECT_MAX_BYTES + 1
         ),
     )
@@ -988,6 +999,38 @@ fn first_free_block(image: &str) -> usize {
             // **`93-511` の形と、`93` だけの形がある。**
             let first = rest.split(&['-', ','][..]).next().unwrap_or("").trim();
             if let Ok(block) = first.parse::<usize>() {
+                return block;
+            }
+        }
+    }
+    panic!("dumpe2fs did not report a free block range for the image")
+}
+
+/// 像の使用上端 + 1（`ADR-0066` の Y-c）。**最後の空きの範囲の始まりである。**
+///
+/// **`dumpe2fs` の群の節の `Free blocks:` は `93-100, 293-511` のように範囲を並べる。** **最後の範囲は
+/// 像の終わりまで続く空きなので、その始まりが「使っている最後のブロック + 1」になる**——**途中の
+/// 穴に惑わされない**（[`first_free_block`] は最初の範囲を読むので、穴があると手前を返す）。
+fn used_blocks(image: &str) -> usize {
+    let output = external_tool("dumpe2fs")
+        .arg(image)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run dumpe2fs: {e} (e2fsprogs)"));
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut in_group = false;
+    for line in text.lines() {
+        if line.starts_with("Group ") {
+            in_group = true;
+            continue;
+        }
+        if !in_group {
+            continue;
+        }
+        if let Some(rest) = line.trim().strip_prefix("Free blocks: ") {
+            // **最後の範囲の始まりを読む。** **範囲は `,` で区切られ、`a-b` か `a` の形である。**
+            let last = rest.split(',').next_back().unwrap_or("").trim();
+            let start = last.split('-').next().unwrap_or("").trim();
+            if let Ok(block) = start.parse::<usize>() {
                 return block;
             }
         }
