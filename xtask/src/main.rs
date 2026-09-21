@@ -4951,6 +4951,20 @@ fn cmd_pipe_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let reached_the_end = stripped.contains("script-done:");
     let all_left_sides_started = detached_starts == Some(7) && created == Some(7);
 
+    // **判定 8**——起こせなかった右は `/bin/nonexist` だけである（`ADR-0066` の Y-c の `--full` で
+    // 足した。2026-09-21）。**破壊 `spawn-detached-returns-early` は、左の読み込みと右の `spawn` を
+    // 貸し出しで衝突させる。** **どの管に当たるかは時間で決まる**——**Y-b の `--full` では中身を
+    // 判定している管に当たって捕まったが、Y-c の `--full` では `sleep 0.2 | cat` などに当たり、
+    // `cat` と `hello` が起こせなかったのに判定 1 から 7 が全部通った**（実測）。**衝突の位置に
+    // 依らない形で見る。**
+    let cannot_run: Vec<&str> = lines
+        .iter()
+        .filter(|line| line.contains("zash: ") && line.trim_end().ends_with(": cannot run"))
+        .copied()
+        .collect();
+    let every_right_side_started =
+        cannot_run.len() == 1 && cannot_run[0].contains("zash: /bin/nonexist: cannot run");
+
     // **禁止**——`[ERROR]` が 1 行も無い。
     let error_lines: Vec<&str> = lines
         .iter()
@@ -4990,6 +5004,10 @@ fn cmd_pipe_test(features: &[&str], expect_pass: bool) -> Result<()> {
          {detached_starts:?}, pipes created {created:?}, reached the end = {reached_the_end})",
         all_left_sides_started && reached_the_end
     );
+    println!(
+        "{context}: every right side started except the missing one = {every_right_side_started} \
+         (could not run: {cannot_run:?})"
+    );
     println!("{context}: no [ERROR] line = {no_error} (the first were {error_lines:?})");
     println!(
         "{context}: (info) detached starts waited at most {entry_wait_ticks:?} tick(s) for the \
@@ -5015,6 +5033,7 @@ fn cmd_pipe_test(features: &[&str], expect_pass: bool) -> Result<()> {
         && right_missing_did_not_hang
         && reached_the_end
         && all_left_sides_started
+        && every_right_side_started
         && no_error;
     if passed {
         println!("{context}: PASS");
