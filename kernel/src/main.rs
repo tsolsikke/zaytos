@@ -1977,13 +1977,19 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
     /// 起こし直す上限。**同じ失敗を無限に繰り返さない。**
     /// **`input-test` と `poll-test` はシェルを起こさない**ので、そのときは使われない
     /// （`ADR-0066` の Y-a / Y-b）。
-    #[cfg_attr(any(feature = "input-test", feature = "poll-test"), allow(dead_code))]
+    #[cfg_attr(
+        any(feature = "input-test", feature = "poll-test", feature = "screen-test"),
+        allow(dead_code)
+    )]
     const MAX_RESTARTS: usize = 3;
 
     // **借り直しながら回す。** `Option<&mut _>` は `Copy` ではないので、
     // 各周で `as_deref_mut` を取る（`interrupts::drain_keyboard` と同じ形）。
     // **`input-test` と `poll-test` は `console` を検査の関数へ移すだけなので `mut` は要らない。**
-    #[cfg_attr(any(feature = "input-test", feature = "poll-test"), allow(unused_mut))]
+    #[cfg_attr(
+        any(feature = "input-test", feature = "poll-test", feature = "screen-test"),
+        allow(unused_mut)
+    )]
     let mut console = console;
 
     // **`init` が `/bin/fptest` を 1 度だけ起こす（B-a。`ADR-0058`）。**
@@ -2030,9 +2036,17 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
         cpu::halt_forever()
     }
 
-    #[cfg(not(any(feature = "input-test", feature = "poll-test")))]
+    // **画面へ画素を出す形を検査する（`ADR-0066` の Y-c）。** **`gfxd` を前景で 1 度起こして締める**
+    // ——**`input-test` と同じ形で、シェルは起こさない。**
+    #[cfg(feature = "screen-test")]
+    {
+        run_screen_test(logger, console);
+        cpu::halt_forever()
+    }
+
+    #[cfg(not(any(feature = "input-test", feature = "poll-test", feature = "screen-test")))]
     let mut restarts = 0usize;
-    #[cfg(not(any(feature = "input-test", feature = "poll-test")))]
+    #[cfg(not(any(feature = "input-test", feature = "poll-test", feature = "screen-test")))]
     loop {
         log_both(
             logger,
@@ -2314,6 +2328,35 @@ fn run_poll_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>)
     ));
 }
 
+/// 画面へ画素を出す形を検査する（`ADR-0066` の Y-c）。**`/bin/gfxd` を前景で 1 度起こし、締めに
+/// 計器を出す。** **シェルは起こさない**（`init` が `screen-test` のとき、これで締める）。
+///
+/// **前景はこの関数が据える**——**`gfxd` が画面を開けるのは前景の系統だけである**
+/// （`input::caller_is_foreground`）。**`gfxd` が起こす `gfxc`（スロット 1）は開けない。**
+///
+/// **判定は `xtask` の `screen-test` が、画面の読み戻し（`screendump`）と行を読んで行う。**
+#[cfg(feature = "screen-test")]
+fn run_screen_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) {
+    let mut console = console;
+    let outcome = {
+        let _foreground = console
+            .as_deref_mut()
+            .map(kernel::console::install_foreground);
+        kernel::userland::spawn(b"/bin/gfxd", b"gfxd\0", 1, None)
+    };
+    log_both(
+        logger,
+        console,
+        LogLevel::Info,
+        format_args!("screen-test: /bin/gfxd ended ({outcome:?})"),
+    );
+    let (entered, left, presented) = kernel::console::graphics_counts();
+    logger.info(format_args!(
+        "screen: entered {entered}, left {left}, presented {presented}, pages mapped {}",
+        kernel::syscall::screen_pages_mapped()
+    ));
+}
+
 /// 2 本の Ring 3 を同時に走らせ、判定の材料を行に出す（W1-c-4。`ADR-0060`）。
 ///
 /// **判定は `xtask` が行う**（カウンタと内容で見る。行の順序では見ない）。
@@ -2506,13 +2549,22 @@ fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Con
 /// シェルの像のパス。**NUL は付けない**（`spawn` はスライスを取る）。
 /// **`input-test` と `poll-test` はシェルを起こさない**ので、そのときは使われない
 /// （`ADR-0066` の Y-a / Y-b）。
-#[cfg_attr(any(feature = "input-test", feature = "poll-test"), allow(dead_code))]
+#[cfg_attr(
+    any(feature = "input-test", feature = "poll-test", feature = "screen-test"),
+    allow(dead_code)
+)]
 const SHELL_PATH: &[u8] = b"/bin/zash";
 /// 判定行に出すためのパス。
-#[cfg_attr(any(feature = "input-test", feature = "poll-test"), allow(dead_code))]
+#[cfg_attr(
+    any(feature = "input-test", feature = "poll-test", feature = "screen-test"),
+    allow(dead_code)
+)]
 const SHELL_PATH_TEXT: &str = "/bin/zash";
 /// シェルへ渡す `argv`。**NUL 区切りで並べる**（`spawn` の受け取る形）。
-#[cfg_attr(any(feature = "input-test", feature = "poll-test"), allow(dead_code))]
+#[cfg_attr(
+    any(feature = "input-test", feature = "poll-test", feature = "screen-test"),
+    allow(dead_code)
+)]
 const SHELL_ARGV: &[u8] = b"zash\0";
 
 /// フレームバッファを検証し、描画ハンドルを作る（M3-a）。

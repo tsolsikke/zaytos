@@ -17,10 +17,17 @@
 //! **そのときは回して待つ**——**シェルの `read(0)` と同じ形。** **打鍵は結局届くが、
 //! カーネルは眠らないので「待った回数」が 0 になる**（判定が落ちる）。
 //!
+//! # 前景でない者が開けないことも見る（`ADR-0066` の Y-c の足す1点）
+//!
+//! **関所を置いたら、関所で断られる側を判定にする**（`docs/coding-standards.md`）。**Y-a の検査は
+//! 前景のプロセスが開けることだけを見ていて、関所が大域の印を見ている穴に気づかなかった。**
+//! **最初に自分をスロット 1 へ `probe` の引数で起こしっぱなしにし、終わるまで待つ。** **`probe` の
+//! 1 本は入力の fd を開こうとして、返った値を印字して終わる**（`-EBADF` のはずである）。
+//!
 //! # 終了状態の意味
 //!
-//! - `0` 押下のイベントを 1 つ受けて終わった
-//! - `1` 入力の fd が開けなかった
+//! - `0` 押下のイベントを 1 つ受けて終わった（`probe` なら、開けずに終わった）
+//! - `1` 入力の fd が開けなかった（`probe` なら、開けてしまった）
 //! - `2` `read` が失敗した（`-EAGAIN` 以外）
 
 #![no_std]
@@ -29,7 +36,15 @@
 #[path = "userlib.rs"]
 mod userlib;
 
-use userlib::{exit, open_input, read, write_all, INPUT_EVENT_LEN, STDOUT};
+use userlib::{
+    exit, open_input, read, spawn_detached, wait_child, write_all, INPUT_EVENT_LEN, STDOUT,
+};
+
+/// 自分の像。**NUL 終端である**（`spawn_detached` はポインタで渡す）。
+const SELF_PATH: &[u8] = b"/bin/inputd\0";
+/// `probe` の 1 本の `argv`（NUL 終端の 2 つ）。
+const SELF_ARG0: &[u8] = b"inputd\0";
+const PROBE_ARG: &[u8] = b"probe\0";
 
 /// 1 回に読む大きさ（イベント 4 つ分）。
 const CHUNK: usize = INPUT_EVENT_LEN * 4;
@@ -119,7 +134,28 @@ fn event_value(event: &[u8]) -> i32 {
 ///
 /// `stack` が `_start` の時点の `rsp` であること。
 #[no_mangle]
-pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
+pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
+    // **`probe` の 1 本——開こうとして、返った値を印字して終わる**（モジュールの doc）。**引数が
+    // 在れば `probe` である**（起こすのはこのプログラム自身だけ）。
+    // SAFETY: 呼び出し元契約により `stack` は初期スタックの先頭を指す。
+    if unsafe { userlib::argument(stack, 1) }.is_some() {
+        let fd = open_input();
+        let mut line = Line::new();
+        line.push(b"inputd probe: open_input returned ");
+        line.push_decimal(fd);
+        line.end();
+        exit(if fd >= 0 { 1 } else { 0 });
+    }
+    // **先に、前景でない者が開けないことを見る**（モジュールの doc）。
+    let probe_argv: [*const u8; 3] = [SELF_ARG0.as_ptr(), PROBE_ARG.as_ptr(), core::ptr::null()];
+    let probe_envp: [*const u8; 1] = [core::ptr::null()];
+    // SAFETY: パスと `argv` の各要素は NUL 終端で、表は NULL で終わっている。
+    let probe = unsafe { spawn_detached(SELF_PATH, &probe_argv, &probe_envp, 0) };
+    let mut line = Line::new();
+    line.push(b"inputd: probe ended ");
+    line.push_decimal(if probe < 0 { probe } else { wait_child(probe as u64) });
+    line.end();
+
     let fd = open_input();
     if fd < 0 {
         let mut line = Line::new();

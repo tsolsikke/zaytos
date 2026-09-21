@@ -1764,6 +1764,17 @@ fn main() -> Result<()> {
                 let expect_pass = sabotage.is_empty();
                 return cmd_poll_test(&sabotage, expect_pass);
             }
+            // **画面へ画素を出す判定（`ADR-0066` の Y-c）。`screendump` で画面を読み戻す。**
+            if rest.iter().any(|a| a == "--screen-test") {
+                let sabotage: Vec<&str> = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
+                    .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
+                    .collect();
+                let expect_pass = sabotage.is_empty();
+                return cmd_screen_test(&sabotage, expect_pass);
+            }
             if rest.iter().any(|a| a == "--history-test") {
                 let sabotage: Vec<&str> = rest
                     .iter()
@@ -5358,13 +5369,19 @@ fn cmd_socket_test(features: &[&str], expect_pass: bool) -> Result<()> {
 /// - `input-events-mistake-the-code` —— 判定 1（押下のイベントが届いた）
 /// - `input-events-zero-the-time` —— 判定 3（時刻が入っている）
 ///
+/// - `foreground-ignores-the-slot` —— 判定 4（前景でない者は開けない）
+///
 /// **判定 1 と 3 の破壊は、運用者の指摘で後から置いた**（`ADR-0066`。**判定を足すときは、
 /// その場で落とす破壊が在るかを確かめる**）。**「離脱を押下と読む」は置けなかった**
 /// ——理由は `ADR-0066` に在る。
+///
+/// **判定 4 と 4 本目は Y-c で足した**（運用者の足す1点）——**関所で断られる側を見ていなかった
+/// ので、Y-a の検査だけでは関所の穴が見えなかった。** **`screen-test` も同じ破壊を回す。**
 const INPUT_TEST_SABOTAGES: &[&str] = &[
     "input-read-never-waits",
     "input-events-mistake-the-code",
     "input-events-zero-the-time",
+    "foreground-ignores-the-slot",
 ];
 
 /// `--input-test` の上限（秒）。**打鍵で起きるのを待つ**（`sendkey` はタイミングに依る）。
@@ -5511,7 +5528,7 @@ fn cmd_input_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let press_sec = press_line.and_then(|line| number_after(line, "sec="));
     let press_usec = press_line.and_then(|line| number_after(line, "usec="));
 
-    let judgements: [(&str, bool); 3] = [
+    let judgements: [(&str, bool); 4] = [
         (
             // **押下のイベントが届いた**（`a` = code 30、value 1）。
             "a_key_press_went_through",
@@ -5528,6 +5545,12 @@ fn cmd_input_test(features: &[&str], expect_pass: bool) -> Result<()> {
             // 秒の下限を主張しない。**
             "the_event_carries_a_timestamp",
             press_sec.is_some() && !(press_sec == Some(0) && press_usec == Some(0)),
+        ),
+        (
+            // **前景でない者は開けない**（Y-c で足した）。**`inputd` が自分をスロット 1 へ `probe` で
+            // 起こし、その 1 本の `open_input` が `-EBADF` で断られることを見る。**
+            "a_process_outside_the_foreground_could_not_open_the_input_fd",
+            stripped.contains("inputd probe: open_input returned -9"),
         ),
     ];
 
@@ -5810,6 +5833,291 @@ fn cmd_poll_test(features: &[&str], expect_pass: bool) -> Result<()> {
             || line.contains("polld: ")
             || line.contains("pollc: ")
             || line.contains("poll-test:")
+    }) {
+        println!("{context}: (info) {}", info.trim());
+    }
+    println!(
+        "{context}: (info) waited {:.1} s (ready = {ready})",
+        waited.as_secs_f64()
+    );
+
+    let passed = ready && failed.is_empty() && no_error;
+    if passed {
+        println!("{context}: PASS");
+        if expect_pass {
+            Ok(())
+        } else {
+            bail!("{context}: the sabotage was NOT caught; every judgement still held")
+        }
+    } else {
+        println!("{context}: FAILED (judgements that fell: {failed:?})");
+        if expect_pass {
+            bail!("{context}: FAILED ({failed:?})")
+        } else {
+            println!("{context}: the sabotage was caught (this run is expected to fail)");
+            Ok(())
+        }
+    }
+}
+
+/// `--screen-test` の破壊（`ADR-0066` の Y-c）。**落ちる判定は `ADR-0066` の表に在る。**
+///
+/// - `screen-present-does-not-copy` —— 判定 1（書いた画素が MMIO に届いた）だけ
+/// - `screen-leave-does-not-repaint` —— 判定 2（文字コンソールが戻った）だけ
+/// - `foreground-ignores-the-slot` —— 判定 3・4（前景でない者は画面と入力を開けない）
+const SCREEN_TEST_SABOTAGES: &[&str] = &[
+    "screen-present-does-not-copy",
+    "screen-leave-does-not-repaint",
+    "foreground-ignores-the-slot",
+];
+
+/// `--screen-test` の 1 段ごとの上限。
+const SCREEN_TEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// `gfxd` が写し終えて打鍵を待っている印（`ADR-0066` の Y-c）。**ここで 1 度目の読み戻しをする。**
+const SCREEN_TEST_READY_MARKER: &str = "gfxd: waiting for a key";
+/// `init` が締めの計器を出した印。**ここで 2 度目の読み戻しをする。**
+const SCREEN_TEST_DONE_MARKER: &str = "[INFO] screen: entered ";
+/// 四角の位置と一辺（`gfxd` と同じ値）。
+const SCREEN_TEST_SQUARE: (u32, u32, u32) = (200, 200, 160);
+
+/// `screendump` の PPM（P6）を読む。**書き終わるまで待つ**——**ファイルが現れた時点では、
+/// まだ途中までしか書かれていないことがある。** **`(幅, 高さ, RGB の並び)` を返す。**
+fn read_complete_ppm(path: &Path, timeout: Duration) -> Option<(u32, u32, Vec<u8>)> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(bytes) = fs::read(path) {
+            // **見出しは「P6」「幅 高さ」「255」を空白で区切った 4 語である。**
+            let mut fields = Vec::new();
+            let mut at = 0usize;
+            while fields.len() < 4 && at < bytes.len() {
+                while at < bytes.len() && bytes[at].is_ascii_whitespace() {
+                    at += 1;
+                }
+                let start = at;
+                while at < bytes.len() && !bytes[at].is_ascii_whitespace() {
+                    at += 1;
+                }
+                fields.push(String::from_utf8_lossy(&bytes[start..at]).to_string());
+            }
+            // **最後の語の後ろの空白 1 つで画素が始まる。**
+            at += 1;
+            if fields.len() == 4 && fields[0] == "P6" {
+                if let (Ok(width), Ok(height)) =
+                    (fields[1].parse::<u32>(), fields[2].parse::<u32>())
+                {
+                    let want = (width as usize) * (height as usize) * 3;
+                    if bytes.len() >= at + want {
+                        return Some((width, height, bytes[at..at + want].to_vec()));
+                    }
+                }
+            }
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+    None
+}
+
+/// 四角の中のマゼンタ（赤 255・緑 0・青 255）の画素数（`ADR-0066` の Y-c）。**読めなければ `None`。**
+fn magenta_in_square(image: &Option<(u32, u32, Vec<u8>)>) -> Option<u32> {
+    let (width, height, rgb) = image.as_ref()?;
+    let (x0, y0, size) = SCREEN_TEST_SQUARE;
+    if x0 + size > *width || y0 + size > *height {
+        return None;
+    }
+    let mut count = 0u32;
+    for y in y0..y0 + size {
+        for x in x0..x0 + size {
+            let at = ((y * width + x) * 3) as usize;
+            if rgb[at] == 255 && rgb[at + 1] == 0 && rgb[at + 2] == 255 {
+                count += 1;
+            }
+        }
+    }
+    Some(count)
+}
+
+/// 画面へ画素を出す形を検査する（`ADR-0066` の Y-c）。
+///
+/// **`gfxd` を前景で起こす。** **`gfxd` は `gfxc`（スロット 1）を起こして終わるまで待ち、画面を開き、
+/// 裏バッファを `mmap` して四角をマゼンタで塗り、その矩形を `present` で写し、打鍵を待つ。**
+/// **打鍵を受けたら画面の fd を閉じる**（図形モードから抜ける）。
+///
+/// **判定は 4 本**——
+///
+/// 1. 書いた画素が MMIO に届いた（写した直後の `screendump` で、四角が全部マゼンタ）
+/// 2. 文字コンソールが戻った（抜けた後の `screendump` で、四角にマゼンタが 1 画素も無い）
+/// 3. 前景でない者は画面を開けない（`gfxc` の `open_screen` が `-EBADF`）
+/// 4. 前景でない者は入力の fd を開けない（`gfxc` の `open_input` が `-EBADF`。**Y-a の穴を塞いだ側**）
+///
+/// **読み戻しは外の道具である**（QEMU の `screendump`）——**カーネルの言い分ではなく、画面の実物を読む。**
+fn cmd_screen_test(features: &[&str], expect_pass: bool) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let mut all_features: Vec<&str> = vec!["screen-test"];
+    all_features.extend_from_slice(features);
+    let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let tag = all_features.join("-");
+    let target = workspace_root.join("target");
+    let serial_log = target.join(format!("screen-test-{tag}-serial.log"));
+    let presented_ppm = target.join(format!("screen-test-{tag}-presented.ppm"));
+    let left_ppm = target.join(format!("screen-test-{tag}-left.ppm"));
+    for stale in [&serial_log, &presented_ppm, &left_ppm] {
+        let _ = fs::remove_file(stale);
+    }
+    let debug_log = target.join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+    let monitor_socket = PathBuf::from(format!(
+        "/tmp/zaytos-xtask-screen-{}.sock",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&monitor_socket);
+    ensure_socket_path_fits(&monitor_socket)?;
+
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: Some(&monitor_socket),
+        accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
+    });
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for the screen test")?;
+
+    let started = Instant::now();
+    let wait_for = |marker: &str, limit: Duration| -> bool {
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            if read_lossy(&serial_log).contains(marker) {
+                return true;
+            }
+            thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        }
+        false
+    };
+
+    let ready = wait_for(SCREEN_TEST_READY_MARKER, BOOT_READY_TIMEOUT);
+    let mut presented = None;
+    let mut left = None;
+    if ready {
+        // **1 度目の読み戻し——写した直後。** **`gfxd` は打鍵を待っているので、画面は動かない。**
+        match capture_screendump(&monitor_socket, &presented_ppm) {
+            Ok(()) => presented = read_complete_ppm(&presented_ppm, SCREENDUMP_FILE_TIMEOUT),
+            Err(e) => println!("screen-test: the first screendump failed: {e}"),
+        }
+        match connect_monitor_with_retry(&monitor_socket) {
+            Ok(mut stream) => {
+                for _ in 0..3 {
+                    if writeln!(stream, "sendkey {INPUT_TEST_KEY}").is_err() {
+                        break;
+                    }
+                    thread::sleep(SHELL_TEST_KEY_INTERVAL);
+                }
+            }
+            Err(e) => println!("screen-test: could not reach the QEMU monitor: {e}"),
+        }
+        if wait_for(SCREEN_TEST_DONE_MARKER, SCREEN_TEST_TIMEOUT) {
+            // **2 度目の読み戻し——抜けた後。** **描き直しは締めの流しで済んでいる**
+            // （`init` が計器の行を出すのは `gfxd` の終わりの後）。**念のため少し間をおく。**
+            thread::sleep(Duration::from_millis(500));
+            match capture_screendump(&monitor_socket, &left_ppm) {
+                Ok(()) => left = read_complete_ppm(&left_ppm, SCREENDUMP_FILE_TIMEOUT),
+                Err(e) => println!("screen-test: the second screendump failed: {e}"),
+            }
+        }
+    }
+    let waited = started.elapsed();
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = fs::remove_file(&monitor_socket);
+
+    let serial = read_lossy(&serial_log);
+    let context = if features.is_empty() {
+        "screen-test".to_string()
+    } else {
+        format!("screen-test {}", features.join("+"))
+    };
+    let context = context.as_str();
+
+    let qemu_debug = read_lossy(&debug_log);
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    let stripped = strip_ansi(&serial);
+    let lines: Vec<&str> = stripped.lines().map(str::trim_end).collect();
+    let (_, _, square) = SCREEN_TEST_SQUARE;
+    let magenta_presented = magenta_in_square(&presented);
+    let magenta_left = magenta_in_square(&left);
+
+    let judgements: [(&str, bool); 4] = [
+        (
+            // **写した直後の画面で、四角が全部マゼンタ。** **`present` が写さなければ 0 のまま。**
+            "the_pixels_reached_the_framebuffer",
+            magenta_presented == Some(square * square),
+        ),
+        (
+            // **抜けた後の画面で、四角にマゼンタが 1 画素も無い。** **描き直さなければ残る。**
+            "the_text_console_came_back",
+            magenta_left == Some(0),
+        ),
+        (
+            // **前景でない者（スロット 1）は画面を開けない。**
+            "a_process_outside_the_foreground_could_not_open_the_screen",
+            stripped.contains("gfxc: open_screen returned -9"),
+        ),
+        (
+            // **前景でない者は入力の fd も開けない**（Y-a の関所を、呼んだ者を問う形へ直した）。
+            "a_process_outside_the_foreground_could_not_open_the_input_fd",
+            stripped.contains("gfxc: open_input returned -9"),
+        ),
+    ];
+
+    // **禁止**——`[ERROR]` が 1 行も無い。
+    let error_lines: Vec<&str> = lines
+        .iter()
+        .filter(|line| line.contains("[ERROR]"))
+        .copied()
+        .take(4)
+        .collect();
+    let no_error = error_lines.is_empty();
+
+    let failed: Vec<&str> = judgements
+        .iter()
+        .filter(|(_, held)| !held)
+        .map(|(name, _)| *name)
+        .collect();
+    for (name, held) in &judgements {
+        println!("{context}: {name} = {held}");
+    }
+    println!("{context}: no [ERROR] line = {no_error} (the first were {error_lines:?})");
+    println!(
+        "{context}: (info) magenta pixels in the {square}x{square} square: after present = \
+         {magenta_presented:?}, after leaving = {magenta_left:?}"
+    );
+    for info in lines.iter().filter(|line| {
+        line.contains("[INFO] screen:")
+            || line.contains("gfxd: ")
+            || line.contains("gfxc: ")
+            || line.contains("screen-test:")
     }) {
         println!("{context}: (info) {}", info.trim());
     }
@@ -17866,6 +18174,30 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }
         }
 
+        // **画面へ画素を出す形（`ADR-0066` の Y-c）。** **`gfxd` が裏バッファを `mmap` して四角を塗り、
+        // `present` で写す。`screendump` で 2 度読み戻す。** **破壊は 3 つ**（`SCREEN_TEST_SABOTAGES`）。
+        total += 1;
+        begin_item("a foreground process draws on the screen through the back buffer");
+        match cmd_screen_test(&[], true) {
+            Ok(()) => println!("--- screen test: OK"),
+            Err(error) => {
+                println!("--- screen test: FAILED ({error})");
+                failed.push("screen test".to_string());
+            }
+        }
+        for sabotage in SCREEN_TEST_SABOTAGES {
+            total += 1;
+            let label = format!("screen-test {sabotage}");
+            begin_item(&label);
+            match cmd_screen_test(&[sabotage], false) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
+            }
+        }
+
         // **Tab の補完（TAB-1）。**
         //
         // **1 回の起動で 5 つ見る**——**単一候補 / 共通接頭辞 / 件数 / 一覧 /
@@ -19392,7 +19724,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 35,
-    full: 347,
+    full: 352,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
