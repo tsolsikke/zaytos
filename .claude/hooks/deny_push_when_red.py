@@ -46,6 +46,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 # **`.pyc` を書かせない。** **隣を import すると `.claude/hooks/__pycache__/`
 # ができ、`git status` に未追跡として出る**（実測。2026-09-06）。
@@ -54,6 +55,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # **引用と heredoc を落とす道具は隣の hook が持っている。** **写さない**
 # ——**2 つ持つと、片方だけが「文書の言及まで拒む」形へ戻る。**
 from deny_dangerous_bash import executable_part  # noqa: E402
+# **緑の知らせと、harness の上限の読み方は隣の hook が持っている。** **写さない。**
+from check_after_commit import announce, announce_payload, registered_timeout  # noqa: E402
 
 # **`(` も始まりに数える**（隣の hook が `( ... &)` で穴を踏んだのと同じ形）。
 START = r"(?:^|[;&|(]\s*|\n\s*)"
@@ -141,6 +144,7 @@ def main() -> int:
         )
 
     root = os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or "."
+    started = time.monotonic()
     try:
         done = subprocess.run(
             ["cargo", "xtask", "check"],
@@ -152,7 +156,16 @@ def main() -> int:
     except Exception as error:
         return deny(f"push の前の基底 check を走らせられなかった（{error}）")
     if done.returncode == 0:
-        return 0
+        # **緑も言う**（2026-09-21。運用者の足す1点）。**黙って通すと、hook が読み込まれて
+        # いなくても押せてしまい、「検査して通した」と区別が付かない**
+        # （`check_after_commit.py` の「緑のときも言う」と同じ族）。
+        summary = [l for l in done.stdout.splitlines() if "check(s) passed" in l]
+        return announce(
+            "PreToolUse",
+            "push 前の基底 check: "
+            + (summary[-1] if summary else "OK")
+            + f"（{time.monotonic() - started:.0f} 秒）",
+        )
 
     detail = [line for line in done.stdout.splitlines() if "FAILED" in line]
     reasons = [line for line in done.stderr.splitlines() if line.startswith("Error:")]
@@ -216,9 +229,24 @@ def self_test() -> int:
         if got != want:
             print(f"self-test (commit and push): {command!r} wanted {want} but got {got}")
             failures += 1
+    # **緑の知らせの形と、harness の上限が内部の上限より長いこと**（2026-09-21）。
+    announced = announce_payload("PreToolUse", "x")
+    if (
+        announced.get("hookSpecificOutput", {}).get("hookEventName") != "PreToolUse"
+        or "permissionDecision" in announced.get("hookSpecificOutput", {})
+    ):
+        print(f"self-test: announce_payload has the wrong shape: {announced!r}")
+        failures += 1
+    harness = registered_timeout("deny_push_when_red.py")
+    if harness is None or harness <= TIMEOUT_SECONDS:
+        print(
+            f"self-test: settings.json gives this hook {harness} s, which must be longer than "
+            f"its own check limit of {TIMEOUT_SECONDS} s"
+        )
+        failures += 1
     if failures:
         return 1
-    print(f"self-test: {len(cases) + len(combined)} case(s) decided as expected")
+    print(f"self-test: {len(cases) + len(combined) + 2} case(s) decided as expected")
     return 0
 
 

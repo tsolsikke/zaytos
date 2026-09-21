@@ -23,7 +23,7 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PROJECT_DIR}/.claude/hooks/check_after_commit.py",
-            "timeout": 300
+            "timeout": 960
           }
         ]
       }

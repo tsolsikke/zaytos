@@ -17,14 +17,25 @@
 **実行の形だけを見る。** 部分一致にすると、文書に書いた文字列で発火する
 （`deny_dangerous_bash.py` が実測で踏んだ形である）。
 
+**緑のときも言う**（運用者の足す1点。2026-09-21）。**以前は緑の1行を素の
+stdout に出していたが、`exit 0` の stdout は読み手に届かない**（通った回の行は
+一度も見えていなかった）。**緑も黙り、走らなかったときも黙るので、区別が
+付かなかった**——**実際に、コミットの後で自分で `--commit` を打ち直した**
+（`ADR-0066` の Y-b の締め）。**いまは緑のとき JSON で言う**——`systemMessage`
+（利用者の画面）と `additionalContext`（読み手の文脈）の両方へ（[`announce`]）。
+**これで、黙っていれば「終わらなかった」と読める。**
+
 **限界が 3 つある。**
 
 - **温まっていれば 1.5 秒だが、冷えていればビルドの時間が乗る**
   （実測。温まった状態で 1.46 / 1.47 / 1.48 秒）。
-  **harness 側の上限で先に切られることがある。**
 - **`--commit` は起動ログを 3 構成ぶん捕る**（実測で 270 秒）。
   **harness に切られたら、hook は何も言わずに消える**——**そのときは
-  自分で `cargo xtask check --commit` を打つこと。**
+  自分で `cargo xtask check --commit` を打つこと。** **以前は harness の上限
+  （`settings.json` の 300 秒）が、この hook の内部の上限（900 秒）より短かった**
+  ——**内部の上限が効く前に harness が切るので、「走らせられなかった」と言う機会が
+  無かった。** **いまは harness の上限を内部の上限より長くしてあり、`--self-test` が
+  その大小を毎回確かめる**（[`registered_timeout`]）。
 - **これは「コミットの後」であって「前」ではない。** 落ちたら `--amend` か
   次のコミットで直す。**前で止める形は、コミットの経路を hook から
   横取りすることになるので採らない。**
@@ -38,6 +49,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 COMMIT = re.compile(r"(?:^|[;&|]\s*|\n\s*)git\s+commit\b")
 TIMEOUT_SECONDS = 240
@@ -104,6 +116,44 @@ def decide(paths: list[str] | None) -> tuple[bool, str | None]:
     return wants_commit_check(paths), None
 
 
+def announce_payload(event: str, text: str) -> dict:
+    """緑の知らせの JSON。**引数だけで決める**（`--self-test` が形を覆う）。
+
+    **`systemMessage` は利用者の画面へ、`additionalContext` は読み手の文脈へ届く。**
+    **`exit 0` の素の stdout はどちらにも届かない**（この doc の「緑のときも言う」）。
+    **`permissionDecision` は入れない**——**入れると、許可の流れを hook が決めてしまう。**
+    """
+    return {
+        "systemMessage": text,
+        "hookSpecificOutput": {"hookEventName": event, "additionalContext": text},
+    }
+
+
+def announce(event: str, text: str) -> int:
+    """緑の知らせを出して `exit 0` で終える。**`deny_push_when_red.py` も使う。**"""
+    print(json.dumps(announce_payload(event, text), ensure_ascii=False))
+    return 0
+
+
+def registered_timeout(script: str) -> float | None:
+    """`settings.json` がこの hook に付けた上限（秒）。**無ければ `None`。**
+
+    **harness の上限は、hook の内部の上限より長くなければならない**——**短いと、
+    内部の上限が効く前に harness が切り、hook は何も言えずに消える**（この doc の
+    「限界」）。**`--self-test` がこれを読んで大小を確かめる。**
+    """
+    settings = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "settings.json")
+    with open(settings, encoding="utf-8") as handle:
+        config = json.load(handle)
+    for entries in config.get("hooks", {}).values():
+        for entry in entries:
+            for hook in entry.get("hooks", []):
+                if script in hook.get("command", ""):
+                    timeout = hook.get("timeout")
+                    return None if timeout is None else float(timeout)
+    return None
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -123,6 +173,7 @@ def main() -> int:
     commit_check, notice = decide(paths_in_head(root))
     argv = ["cargo", "xtask", "check"] + (["--commit"] if commit_check else [])
     label = "--commit" if commit_check else "基底"
+    started = time.monotonic()
     try:
         done = subprocess.run(
             argv,
@@ -139,16 +190,22 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    seconds = time.monotonic() - started
     if done.returncode == 0:
         summary = [l for l in done.stdout.splitlines() if "check(s) passed" in l]
-        print(f"post-commit check（{label}）: " + (summary[-1] if summary else "OK"))
+        text = (
+            f"post-commit check（{label}）: "
+            + (summary[-1] if summary else "OK")
+            + f"（{seconds:.0f} 秒）"
+        )
         if notice is not None:
-            # **通ったが、落とした事実は言って終える。** **`exit 2` にするのは、
-            # `exit 0` の stdout は読み手に届かないためである**（実測。通った回の
-            # 行は一度も見えていない）。
+            # **通ったが、落とした事実は言って終える。** **`exit 2` の stderr が読み手に
+            # 届くので、緑の行もそちらへ出す**（**素の stdout は届かない**）。
+            print(text, file=sys.stderr)
             print(notice, file=sys.stderr)
             return 2
-        return 0
+        # **緑も言う**（この doc の「緑のときも言う」）。
+        return announce("PostToolUse", text)
     # **落ちた行と、その所見だけを出す。** 通った項目まで出すと、
     # **落ちた1行が20行の緑に埋もれる**（実測で埋もれた）。
     detail = [
@@ -228,9 +285,29 @@ def self_test() -> int:
                 f"but got ({got_commit}, notice={got_notice is not None})"
             )
             failures += 1
+    # **緑の知らせの形**（2026-09-21。運用者の足す1点）。**読み手と利用者の両方へ届く鍵が
+    # 在り、許可の判断は入っていないこと。**
+    announced = announce_payload("PostToolUse", "x")
+    if (
+        announced.get("systemMessage") != "x"
+        or announced.get("hookSpecificOutput", {}).get("additionalContext") != "x"
+        or announced.get("hookSpecificOutput", {}).get("hookEventName") != "PostToolUse"
+        or "permissionDecision" in announced.get("hookSpecificOutput", {})
+    ):
+        print(f"self-test: announce_payload has the wrong shape: {announced!r}")
+        failures += 1
+    # **harness の上限が内部の上限より長いこと**（2026-09-21）。**短いと、`--commit` の
+    # 途中で harness が切り、何も言わずに消える。**
+    harness = registered_timeout("check_after_commit.py")
+    if harness is None or harness <= COMMIT_CHECK_TIMEOUT_SECONDS:
+        print(
+            f"self-test: settings.json gives this hook {harness} s, which must be longer than "
+            f"its own --commit limit of {COMMIT_CHECK_TIMEOUT_SECONDS} s"
+        )
+        failures += 1
     if failures:
         return 1
-    total = len(cases) + len(path_cases) + len(decide_cases)
+    total = len(cases) + len(path_cases) + len(decide_cases) + 2
     print(f"self-test: {total} case(s) decided as expected")
     return 0
 
