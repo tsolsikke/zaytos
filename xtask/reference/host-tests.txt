@@ -566,6 +566,10 @@ kernel::stack::tests::the_canary_differs_from_the_heap_poison
 kernel::stack::tests::the_guards_are_a_multiple_of_the_alignment
 kernel::stack::tests::the_kernel_guard_is_exactly_one_aligned_page
 kernel::stack::tests::the_stacks_are_a_multiple_of_the_required_alignment
+kernel::syscall::tests::a_clip_rect_is_half_open_and_refuses_empty_ones
+kernel::syscall::tests::the_color_offsets_follow_the_pixel_order
+kernel::syscall::tests::the_fixed_screen_info_follows_the_linux_layout
+kernel::syscall::tests::the_variable_screen_info_follows_the_linux_layout
 kernel::task::tests::a_nested_excursion_uses_the_next_stack_and_the_parent_returns_to_the_first
 kernel::task::tests::a_task_outside_any_excursion_is_expected_on_its_kernel_stack
 kernel::task::tests::a_task_owned_by_another_cpu_is_not_a_candidate

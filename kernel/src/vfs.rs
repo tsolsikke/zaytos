@@ -333,6 +333,14 @@ pub enum File {
     /// 「入力 fd の前景の関所」）。**キーボードは1つなので添字を持たない。** **`SCM_RIGHTS` は
     /// shm の fd だけを運ぶので、この fd は相手の表へ写らない**（開いた持ち主に留まる）。
     Input,
+    /// 画面（`ADR-0066` の Y-c）。**持っている間は図形モードである。**
+    ///
+    /// **前景の系統だけが `open_screen` で開ける**（`crate::input::caller_is_foreground`）。
+    /// **開くと図形モードへ入り、解放（`close` かプロセスの終わり）で抜ける**
+    /// （[`File::release_end`]）。**`mmap` が裏バッファを張り、`ioctl` が形を答えて写す。**
+    /// **画面は 1 つなので添字を持たない。** **`SCM_RIGHTS` は shm の fd だけを運ぶので、
+    /// この fd も相手の表へ写らない。**
+    Screen,
 }
 
 impl File {
@@ -373,6 +381,9 @@ impl File {
                 state: SocketState::Listener { listener },
             } => crate::socket::close_listener(*listener),
             Self::Shm { shm } => crate::shm::detach(*shm),
+            // **画面の fd を手放したら図形モードから抜ける（`ADR-0066` の Y-c）。** **プロセスが
+            // 終われば表ごと解放されるので、`close` を忘れて落ちたプログラムでも文字の画面へ戻る。**
+            Self::Screen => crate::console::leave_graphics(),
             Self::Socket {
                 state: SocketState::Unbound,
             }
@@ -385,6 +396,11 @@ impl File {
     /// 入力の生イベントの fd か（`ADR-0066` の Y-a）。
     pub fn is_input(&self) -> bool {
         matches!(self, Self::Input)
+    }
+
+    /// 画面の fd か（`ADR-0066` の Y-c）。
+    pub fn is_screen(&self) -> bool {
+        matches!(self, Self::Screen)
     }
 
     /// 先頭から読む状態で開く。
@@ -438,7 +454,8 @@ impl File {
             | Self::PipeWrite { .. }
             | Self::Socket { .. }
             | Self::Shm { .. }
-            | Self::Input => None,
+            | Self::Input
+            | Self::Screen => None,
         }
     }
 
@@ -451,7 +468,8 @@ impl File {
             | Self::PipeWrite { .. }
             | Self::Socket { .. }
             | Self::Shm { .. }
-            | Self::Input => 0,
+            | Self::Input
+            | Self::Screen => 0,
         }
     }
 

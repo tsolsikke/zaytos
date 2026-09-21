@@ -10279,6 +10279,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "polld が入力とソケットを同時に待つ（ADR-0066 の Y-b）",
     ),
     (
+        "screen-test",
+        cfg!(feature = "screen-test"),
+        "gfxd が画面を開いて描き present で写す（ADR-0066 の Y-c）",
+    ),
+    (
+        "screen-present-does-not-copy",
+        cfg!(feature = "screen-present-does-not-copy"),
+        "present が写さない（ADR-0066 の Y-c）",
+    ),
+    (
+        "screen-leave-does-not-repaint",
+        cfg!(feature = "screen-leave-does-not-repaint"),
+        "図形モードから抜けても描き直さない（ADR-0066 の Y-c）",
+    ),
+    (
         "foreground-ignores-the-slot",
         cfg!(feature = "foreground-ignores-the-slot"),
         "前景の関所が大域の印だけを見る（ADR-0066 の Y-c）",

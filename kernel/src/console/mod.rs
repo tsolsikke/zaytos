@@ -56,7 +56,7 @@ pub use common::screen::{
 };
 pub use screen::{Console, ConsoleError, FlushStats};
 
-use core::sync::atomic::{AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 /// 前景の [`Console`]。**遠征の間だけ据える。**
 ///
@@ -330,6 +330,160 @@ pub fn note_terminal_write() {
     console.note_terminal_write();
 }
 
+/// 図形モードの面（`ADR-0066` の Y-c）。**[`enter_graphics`] と [`graphics_surface`] が返す。**
+///
+/// **裏バッファそのものである**——**新しく取らない**（Q1。起動時に確保済みの連続フレーム）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct GraphicsSurface {
+    /// 裏バッファの物理位置（フレームの境。`kernel_main` の `init_console` が連続で取った）。
+    pub phys: common::addr::PhysAddr,
+    /// 面のバイト数（`stride * height * 4`。ページへは丸めない）。
+    pub size_bytes: u64,
+    /// 横のピクセル数。
+    pub width: u32,
+    /// 縦のピクセル数。
+    pub height: u32,
+    /// 1 行のピクセル数（`width` 以上）。
+    pub stride: u32,
+    /// 画素の並び（`Rgb` か `Bgr`。**`FramebufferLayout` が他を断っている**）。
+    pub format: common::boot_info::PixelFormat,
+}
+
+/// [`enter_graphics`] が断った理由。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GraphicsError {
+    /// 前景のコンソールが据えられていない（画面を持たない文脈）。
+    NoConsole,
+    /// 既に誰かが図形モードに居る（持ち主は 1 つ）。
+    Busy,
+}
+
+/// 図形モードに居るか（`ADR-0066` の Y-c）。**持ち主は 1 つである。**
+///
+/// # 静的に置く
+///
+/// **入るのは `open_screen`、抜けるのは fd の解放で、どちらもコンソールの借りの外である**
+/// ——[`FOREGROUND`] と同じ理由で、据えた先へ届く道が要る。
+static GRAPHICS_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// 図形モードへ入った回数（判定行）。
+static GRAPHICS_ENTERED: AtomicU64 = AtomicU64::new(0);
+/// 図形モードから抜けた回数（判定行）。
+static GRAPHICS_LEFT: AtomicU64 = AtomicU64::new(0);
+/// `present` で写した回数（判定行）。
+static GRAPHICS_PRESENTS: AtomicU64 = AtomicU64::new(0);
+
+/// 図形モードに居るか（`ADR-0066` の Y-c）。
+pub fn graphics_active() -> bool {
+    GRAPHICS_ACTIVE.load(Ordering::Acquire)
+}
+
+/// 図形モードへ入った回数・抜けた回数・`present` の回数（`ADR-0066` の Y-c。判定行）。
+pub fn graphics_counts() -> (u64, u64, u64) {
+    (
+        GRAPHICS_ENTERED.load(Ordering::Relaxed),
+        GRAPHICS_LEFT.load(Ordering::Relaxed),
+        GRAPHICS_PRESENTS.load(Ordering::Relaxed),
+    )
+}
+
+/// いまの面の形と位置（`ADR-0066` の Y-c）。**前景のコンソールが無ければ `None`。**
+///
+/// **`ioctl` の画面の形と `mmap` が使う。** **図形モードかどうかは見ない**——**見るのは
+/// 呼ぶ側である**（fd を持っていれば図形モードに居る。`File::Screen` の doc）。
+pub fn graphics_surface() -> Option<GraphicsSurface> {
+    let console = FOREGROUND.load(Ordering::Acquire);
+    if console.is_null() {
+        return None;
+    }
+    // SAFETY: [`foreground_geometry`] と同じ根拠。**読むだけである。**
+    let console = unsafe { &*console };
+    let (base, size_bytes) = console.back_buffer_region();
+    let phys = common::addr::direct_map().virt_to_phys(base)?;
+    let layout = console.framebuffer_layout();
+    Some(GraphicsSurface {
+        phys,
+        size_bytes,
+        width: layout.width(),
+        height: layout.height(),
+        stride: layout.stride(),
+        format: layout.format(),
+    })
+}
+
+/// 図形モードへ入る（`ADR-0066` の Y-c）。**前景かどうかは呼ぶ側が見る**（`open_screen`）。
+///
+/// # 入ったら字を描かない
+///
+/// **[`write_foreground_bytes`] と [`flush_foreground`] が図形モードの間は描かない。**
+/// **裏バッファは、ここから Ring 3 の画素の面になる。**
+pub fn enter_graphics() -> Result<GraphicsSurface, GraphicsError> {
+    let surface = graphics_surface().ok_or(GraphicsError::NoConsole)?;
+    // **持ち主は 1 つ**——`compare_exchange` で取る（`claim_foreground` と同じ形）。
+    if GRAPHICS_ACTIVE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(GraphicsError::Busy);
+    }
+    GRAPHICS_ENTERED.fetch_add(1, Ordering::Relaxed);
+    Ok(surface)
+}
+
+/// 図形モードの矩形を MMIO へ写す（`ADR-0066` の Y-c）。**写したバイト数を返す。**
+///
+/// **切り替えではない**——**裏バッファの矩形を前へ写す**（Q1）。**図形モードでなければ 0。**
+///
+/// # 呼ぶ側の前提
+///
+/// **BKL を解いてから呼ぶこと**（[`flush_foreground`] と同じ。**全面転送は 5.05M サイクル**）。
+pub fn present_graphics(x: u32, y: u32, width: u32, height: u32) -> u64 {
+    if !graphics_active() {
+        return 0;
+    }
+    let console = FOREGROUND.load(Ordering::Acquire);
+    if console.is_null() {
+        return 0;
+    }
+    GRAPHICS_PRESENTS.fetch_add(1, Ordering::Relaxed);
+    // 破壊 (Y-c, screen-present-does-not-copy): 写さない。**Ring 3 は画素を書いたが、画面へは
+    // 届かない**——**判定「書いた画素が MMIO に届いた」だけが落ちる。**
+    if cfg!(feature = "screen-present-does-not-copy") {
+        return 0;
+    }
+    // SAFETY: [`flush_foreground`] と同じ根拠。
+    let console = unsafe { &mut *console };
+    console.present(x, y, width, height)
+}
+
+/// 図形モードから抜ける（`ADR-0066` の Y-c）。**図形モードでなければ何もしない。**
+///
+/// # 描き直しは次の流しで行う
+///
+/// **呼ばれるのは fd の解放**（`close` か、プロセスの終わりの表の解放）**で、BKL を持っている。**
+/// **ここでは印を立てるだけで、セルからの描き直しと転送は次の [`flush_foreground`]
+/// （プロセスの終わりか前景の手放しで必ず来る）が行う**（`Console::request_repaint`）。
+pub fn leave_graphics() {
+    if GRAPHICS_ACTIVE
+        .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    GRAPHICS_LEFT.fetch_add(1, Ordering::Relaxed);
+    // 破壊 (Y-c, screen-leave-does-not-repaint): 描き直さない。**文字の経路は戻るが、画面には
+    // Ring 3 の画素が残る**——**判定「文字コンソールが戻った」だけが落ちる。**
+    if cfg!(feature = "screen-leave-does-not-repaint") {
+        return;
+    }
+    let console = FOREGROUND.load(Ordering::Acquire);
+    if console.is_null() {
+        return;
+    }
+    // SAFETY: [`flush_foreground`] と同じ根拠。**印を立てるだけで、描かない。**
+    let console = unsafe { &mut *console };
+    console.request_repaint();
+}
+
 /// 溜まっている描画を画面へ送る（ADR-0047）。**溜まっていなければ何もしない。**
 ///
 /// # 呼ぶ側の前提
@@ -344,6 +498,11 @@ pub fn note_terminal_write() {
 pub fn flush_foreground() {
     let console = FOREGROUND.load(Ordering::Acquire);
     if console.is_null() {
+        return;
+    }
+    // **図形モードの間は流さない（`ADR-0066` の Y-c）。** **流すとカーソルを描いてから送るので、
+    // Ring 3 の画素の上に下線が乗る**（`Console::flush` の doc）。**送るのは `present` だけである。**
+    if graphics_active() {
         return;
     }
     // SAFETY: 非 null なら [`install_foreground`] のガードが生きており、
@@ -376,6 +535,12 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
     // **数える（PERF）。** **落とすバイトも数える**——**Ring 3 から見れば
     // 送った量である。**
     console.note_foreground_write(bytes.len());
+    // **図形モードの間は字を描かない（`ADR-0066` の Y-c）。** **裏バッファは Ring 3 の画素の面で、
+    // 字を描くと絵を壊す。** **セルにも置かない**——**戻ったときの画面は、図形モードへ入る
+    // 前の文字の画面である**（**字はシリアルには出ている**。v1 の限界。`ADR-0066`）。
+    if graphics_active() {
+        return;
+    }
     // **UTF-8 を `write` をまたいで復号する（`ADR-0054` の Decision 3）。**
     // **Ring 3 から来る列に UTF-8 を要求しない**（`load_user_program` の `argv` と
     // 同じ立場）——**復号できないバイトは 1 つにつき 1 つの置換文字にする。**

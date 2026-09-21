@@ -181,6 +181,12 @@ pub struct Console {
     inactive: Screen<'static>,
     /// いま代替画面に居るか（e-3）。
     alternate_active: bool,
+    /// 次の [`Self::flush`] でセルから描き直すか（`ADR-0066` の Y-c）。
+    ///
+    /// **図形モードから戻るときに立てる。** **戻す場所（fd の解放）は重い描き直しを
+    /// してよい文脈とは限らない**ので、**BKL を解いて呼ばれる [`Self::flush`] まで
+    /// 延ばす**（`crate::console::flush_foreground` の doc）。
+    repaint_requested: bool,
     stats: FlushStats,
 }
 
@@ -278,6 +284,7 @@ impl Console {
             cursor_drawn_at: None,
             inactive,
             alternate_active: false,
+            repaint_requested: false,
             stats,
         };
         // 画面に残っている前の内容（ファームウェアの表示など）を消しておく。
@@ -854,6 +861,12 @@ impl Console {
     /// （ADR-0004）。フラッシュはパニック経路から呼ばれないので、ここで
     /// 停止しても再帰の懸念はない。
     pub fn flush(&mut self) {
+        // **図形モードから戻った後なら、先にセルから描き直す（`ADR-0066` の Y-c）。**
+        // **裏バッファには Ring 3 の画素が残っている**——**セルが持つ文字の画面へ戻す。**
+        if self.repaint_requested {
+            self.repaint_requested = false;
+            self.repaint_from_cells();
+        }
         // **カーソルを描き直してから送る（ES-c）。**
         //
         // **`take` より前である**——描き直すと未転送範囲が増えるので、
@@ -879,6 +892,48 @@ impl Console {
             }
             Err(error) => report_flush_failure_and_halt(&error),
         }
+    }
+
+    /// 裏バッファの位置と大きさ（`ADR-0066` の Y-c）。**図形モードで Ring 3 へ張る面である。**
+    ///
+    /// **返すのは direct map の番地とバイト数である。** **物理位置は呼ぶ側が
+    /// direct map を引き戻して得る**（裏バッファは起動時に連続のフレームで取ってある。
+    /// `kernel_main` の `init_console`）。
+    pub fn back_buffer_region(&self) -> (VirtAddr, u64) {
+        (self.back.base(), self.back.layout().size_bytes())
+    }
+
+    /// 図形モードの間の転送（`ADR-0066` の Y-c）。**矩形を裏バッファから MMIO へ写す。**
+    ///
+    /// # カーソルを描かない
+    ///
+    /// **[`Self::flush`] は送る前にカーソルを描く**（ES-c）——**図形モードでそれをすると、
+    /// Ring 3 の画素の上に下線が乗る。** **ここは画素をそのまま写すだけである。**
+    ///
+    /// **矩形は画面へ切り詰める**（[`DirtyRegion::mark`] と同じ規則）。**写したバイト数を返す。**
+    pub fn present(&mut self, x: u32, y: u32, width: u32, height: u32) -> u64 {
+        let mut region = DirtyRegion::new(self.back.layout().width(), self.back.layout().height());
+        region.mark(x, y, width, height);
+        let Some(rect) = region.take() else {
+            return 0;
+        };
+        match self.back.flush_rect(&mut self.front, rect) {
+            Ok(transferred) => {
+                self.stats.flush_count += 1;
+                self.stats.transferred_bytes += transferred;
+                transferred
+            }
+            Err(error) => report_flush_failure_and_halt(&error),
+        }
+    }
+
+    /// 図形モードから戻る印を立てる（`ADR-0066` の Y-c）。**描き直しは次の [`Self::flush`] で行う。**
+    ///
+    /// **カーソルの跡を忘れる**——**図形モードの間に Ring 3 が上書きしているので、
+    /// 消そうとして元の画素を戻すと、Ring 3 の画素を画面に残す。**
+    pub fn request_repaint(&mut self) {
+        self.cursor_drawn_at = None;
+        self.repaint_requested = true;
     }
 
     /// 1 文字書く。転送はしない。

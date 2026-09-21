@@ -128,6 +128,12 @@ impl BackBuffer {
         self.surface.layout()
     }
 
+    /// 面の先頭（direct map の番地）。**図形モードで Ring 3 へ張るために要る**
+    /// （`ADR-0066` の Y-c。物理位置は direct map を引き戻して得る）。
+    pub fn base(&self) -> VirtAddr {
+        self.base
+    }
+
     /// バックバッファ全体をピクセルのスライスとして見る。
     ///
     /// 一括操作専用。返したスライスが生きている間に [`Self::surface_mut`]

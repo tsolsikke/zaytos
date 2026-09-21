@@ -591,6 +591,14 @@ poll-never-waits = ["poll-test"]
 poll-mistakes-the-member = ["poll-test"]
 # poll が集合へ最初の 1 本だけを入れる（ADR-0066 の Y-b）。落ちた合図で誰も起こさない。
 poll-waits-on-one-member = ["poll-test"]
+# Y-c: 画面出力（ADR-0066）。init が /bin/gfxd を前景で起こす。gfxd は /bin/gfxc を起こしっぱなしで
+# 起こして（前景でない者が画面と入力を開けないことを見る）、画面を開き、裏バッファを mmap して
+# 四角を描き、present で写す。判定は xtask の screen-test が screendump を読んで行う。
+screen-test = []
+# present が写さない（ADR-0066 の Y-c）。書いた画素が MMIO に届く判定が落ちる。
+screen-present-does-not-copy = ["screen-test"]
+# 図形モードから抜けても描き直さない（ADR-0066 の Y-c）。文字コンソールが戻る判定が落ちる。
+screen-leave-does-not-repaint = ["screen-test"]
 # 前景の関所が大域の印だけを見る（Y-a までの形。ADR-0066 の Y-c）。前景でない者が開ける。
 # input-test と screen-test の両方が回すので、どちらにも寄りかからない（xtask が構成を足す）。
 foreground-ignores-the-slot = []

@@ -642,6 +642,113 @@ pub const SYS_WAIT_CHILD: u64 = ZAYTOS_PRIVATE_BASE + 7;
 /// 「入力 fd の前景の関所」）。**読みは `read` が `struct input_event` を返す。**
 pub const SYS_OPEN_INPUT: u64 = ZAYTOS_PRIVATE_BASE + 8;
 
+/// 画面を開く口の番号（`ADR-0066` の Y-c）。**開くと図形モードへ入る。**
+///
+/// **Linux に対応する syscall が無い**——**あちらは `/dev/fb0`（fbdev）か `/dev/dri/card0`（DRM）を
+/// `open` する**が、ZaytOS に装置のファイルシステムは無い。**番号は私物にする**（[`SYS_OPEN_INPUT`] と
+/// 同じ理由）。**開いた後の形は Linux の fbdev に合わせる**——**形は `ioctl` の
+/// [`FBIOGET_VSCREENINFO`] / [`FBIOGET_FSCREENINFO`]、画素は `mmap`。**
+///
+/// **呼んだ者が前景の系統でなければ `-EBADF`**（`crate::input::caller_is_foreground`）。
+/// **既に誰かが図形モードなら `-EBUSY`、画面が無ければ `-ENODEV`。**
+pub const SYS_OPEN_SCREEN: u64 = ZAYTOS_PRIVATE_BASE + 9;
+
+/// `FBIOGET_VSCREENINFO`（Linux の fbdev。`<linux/fb.h>`）。**`struct fb_var_screeninfo` を返す。**
+pub const FBIOGET_VSCREENINFO: u64 = 0x4600;
+/// `FBIOGET_FSCREENINFO`（Linux の fbdev）。**`struct fb_fix_screeninfo` を返す。**
+pub const FBIOGET_FSCREENINFO: u64 = 0x4602;
+/// 画面の矩形を写す要求（ZaytOS 独自。`ADR-0066` の Y-c）。**引数は `struct drm_clip_rect`。**
+///
+/// **fbdev に対応するものが無い**——**fbdev は実物のフレームバッファを張るので、写す必要が無い。**
+/// **ZaytOS は裏バッファを張る**（Q1。MMIO を Ring 3 へ出さない）**ので、写す口が要る。**
+/// **Linux で近いのは DRM の `DRM_IOCTL_MODE_DIRTYFB` で、矩形の配置（`struct drm_clip_rect`）だけを
+/// 採る**——**DIRTYFB そのものは DRM の大きな ABI の一部なので採らない。** **番号は [`TIOCZTAKE`] と
+/// 同じ `'Z'` の帯に置く。**
+pub const FBIOZPRESENT: u64 = 0x5A03;
+
+/// `struct fb_var_screeninfo` のバイト数（`cc` の `sizeof` で測った。2026-09-21）。
+pub const FB_VAR_SCREENINFO_LEN: usize = 160;
+/// `struct fb_fix_screeninfo` のバイト数（同上）。
+pub const FB_FIX_SCREENINFO_LEN: usize = 80;
+/// `struct drm_clip_rect` のバイト数（同上。`u16` の x1・y1・x2・y2）。
+pub const DRM_CLIP_RECT_LEN: usize = 8;
+/// `FB_TYPE_PACKED_PIXELS`（`<linux/fb.h>`）。
+const FB_TYPE_PACKED_PIXELS: u32 = 0;
+/// `FB_VISUAL_TRUECOLOR`（`<linux/fb.h>`）。
+const FB_VISUAL_TRUECOLOR: u32 = 2;
+/// `ENODEV`（画面が無い）。
+const ENODEV: i64 = 19;
+
+/// 画素の色の並び（`struct fb_bitfield` の `offset`）。**青・緑・赤の順に返す。**
+///
+/// **UEFI の `Bgr` は「バイト 0 が青」、`Rgb` は「バイト 0 が赤」である**（`PixelFormat` の doc）。
+/// **リトルエンディアンの 32 ビットで読むので、バイトの位置 × 8 がビットの位置になる。**
+pub const fn fb_color_offsets(bgr: bool) -> (u32, u32, u32) {
+    if bgr {
+        (0, 8, 16)
+    } else {
+        (16, 8, 0)
+    }
+}
+
+/// `struct fb_var_screeninfo` を組む（`ADR-0066` の Y-c）。**引数だけで決める**（ホストで固定する）。
+///
+/// **欄の位置は `cc` の `offsetof` で測った**（2026-09-21。`cc` 13.3.0。`<linux/fb.h>`）——
+/// `xres` 0 / `yres` 4 / `xres_virtual` 8 / `yres_virtual` 12 / `bits_per_pixel` 24 /
+/// `red` 32 / `green` 44 / `blue` 56 / `transp` 68（`struct fb_bitfield` は `offset` 0・`length` 4・
+/// `msb_right` 8 の 12 バイト）。**それ以外の欄は 0 である**（パンも回転も持たない）。
+pub fn fb_var_screeninfo(width: u32, height: u32, bgr: bool) -> [u8; FB_VAR_SCREENINFO_LEN] {
+    let mut out = [0u8; FB_VAR_SCREENINFO_LEN];
+    let mut put = |at: usize, value: u32| out[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    put(0, width);
+    put(4, height);
+    put(8, width);
+    put(12, height);
+    put(24, 32);
+    let (blue, green, red) = fb_color_offsets(bgr);
+    // **`struct fb_bitfield` は `offset`・`length`・`msb_right` の順である。**
+    put(32, red);
+    put(36, 8);
+    put(44, green);
+    put(48, 8);
+    put(56, blue);
+    put(60, 8);
+    out
+}
+
+/// `struct fb_fix_screeninfo` を組む（`ADR-0066` の Y-c）。**引数だけで決める。**
+///
+/// **欄の位置は `offsetof` で測った**——`id` 0（16 バイト）/ `smem_start` 16 / `smem_len` 24 /
+/// `type` 28 / `visual` 36 / `line_length` 48（2026-09-21）。
+///
+/// **`smem_start`（物理番地）は 0 にする**——**合わせなかった。** **Ring 3 へ物理番地を出す理由が
+/// 無い**（`mmap` は fd から張るので、番地を知らなくてよい）。
+pub fn fb_fix_screeninfo(size_bytes: u32, line_length: u32) -> [u8; FB_FIX_SCREENINFO_LEN] {
+    let mut out = [0u8; FB_FIX_SCREENINFO_LEN];
+    let id = b"zaytos-fb";
+    out[..id.len()].copy_from_slice(id);
+    out[24..28].copy_from_slice(&size_bytes.to_le_bytes());
+    out[28..32].copy_from_slice(&FB_TYPE_PACKED_PIXELS.to_le_bytes());
+    out[36..40].copy_from_slice(&FB_VISUAL_TRUECOLOR.to_le_bytes());
+    out[48..52].copy_from_slice(&line_length.to_le_bytes());
+    out
+}
+
+/// `struct drm_clip_rect` を読む（`ADR-0066` の Y-c）。**`(x, y, 幅, 高さ)` を返す。空なら `None`。**
+///
+/// **x2・y2 は含まない**（DRM の DIRTYFB と同じ半開区間）。**画面への切り詰めは写す側が行う**
+/// （`Console::present`）。
+pub fn parse_clip_rect(raw: &[u8; DRM_CLIP_RECT_LEN]) -> Option<(u32, u32, u32, u32)> {
+    let x1 = u32::from(u16::from_le_bytes([raw[0], raw[1]]));
+    let y1 = u32::from(u16::from_le_bytes([raw[2], raw[3]]));
+    let x2 = u32::from(u16::from_le_bytes([raw[4], raw[5]]));
+    let y2 = u32::from(u16::from_le_bytes([raw[6], raw[7]]));
+    if x2 <= x1 || y2 <= y1 {
+        return None;
+    }
+    Some((x1, y1, x2 - x1, y2 - y1))
+}
+
 /// `socket` の番号（Linux x86-64。`ADR-0064`）。**番号と `sockaddr_un` の配置は Linux から採る**
 /// （`ADR-0020`。**私物にしない**——**パイプの口が私物だったのは `spawn` の形に付いたからで、
 /// ソケットは Linux の形そのものが在る**）。
@@ -1192,8 +1299,16 @@ unsafe fn dispatch(
             unsafe { sys_open(args[0], args[1], pml4_phys, direct_map) }
         }
         SYS_IOCTL => {
+            // **画面の fd は別の口（`ADR-0066` の Y-c）。** **`present` は BKL を解いて写す**ので、
+            // ガードを渡せる口へ分ける。**`#[inline(never)]` で、写しは `dispatch` の枠に乗らない。**
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-            unsafe { sys_ioctl(args[0], args[1], args[2], pml4_phys, direct_map) }
+            match unsafe {
+                screen_ioctl_from_ring3(args[0], args[1], args[2], pml4_phys, direct_map, bkl)
+            } {
+                Some(result) => result,
+                // SAFETY: 同上。
+                None => unsafe { sys_ioctl(args[0], args[1], args[2], pml4_phys, direct_map) },
+            }
         }
         SYS_BRK => {
             // SAFETY: 呼び出し元契約により direct_map は有効で、
@@ -1225,6 +1340,7 @@ unsafe fn dispatch(
         // `#[inline(never)]` の関数である**——**この `match` の枠に局所を乗せない。**
         // **`spawn` の経路には載っていないので、`syscall-test` の高水位は動かない見込みである。**
         SYS_OPEN_INPUT => open_input_from_ring3(),
+        SYS_OPEN_SCREEN => open_screen_from_ring3(),
         // **多重待ち（`ADR-0066` の Y-b）。** **`#[inline(never)]` で、写しは `dispatch` の
         // 枠に乗らない。**
         // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
@@ -1700,6 +1816,211 @@ unsafe fn read_input_events(
     // SAFETY: slice は検証済みで、got は cap を越えない。
     let written = unsafe { copy_to_user(&slice, 0, &kbuf[..got]) };
     written as u64
+}
+
+/// [`SYS_OPEN_SCREEN`] の本体（`ADR-0066` の Y-c）。**前景の系統にだけ画面の fd を渡し、図形モードへ入る。**
+///
+/// # 前景の関所は開く時点の 1 箇所
+///
+/// **[`open_input_from_ring3`] と同じ形である**——**呼んだ者が前景の系統でなければ `-EBADF`。**
+/// **fd は前景より長生きしない**（前景はプログラムの走行の間ずっと持たれる）**し、`SCM_RIGHTS` は
+/// shm の fd だけを運ぶので相手の表へ写らない。**
+///
+/// # 表に入らなければ抜ける
+///
+/// **図形モードへ入ってから fd を表へ入れる。** **入らなければ（`-EMFILE`）すぐ抜ける**——
+/// **fd の無い図形モードを残すと、誰も抜けさせられない。**
+fn open_screen_from_ring3() -> u64 {
+    if !crate::input::caller_is_foreground() {
+        return (-EBADF) as u64;
+    }
+    match crate::console::enter_graphics() {
+        Ok(_) => {}
+        Err(crate::console::GraphicsError::NoConsole) => return (-ENODEV) as u64,
+        Err(crate::console::GraphicsError::Busy) => return (-EBUSY) as u64,
+    }
+    let inserted = crate::vfs::with_current_files(|files| files.insert(crate::vfs::File::Screen));
+    match inserted {
+        Ok(fd) => fd as u64,
+        Err(error) => {
+            crate::console::leave_graphics();
+            (-errno_for_file_table(error)) as u64
+        }
+    }
+}
+
+/// fd が画面か（`ADR-0066` の Y-c）。**表の中身で見る**（番号では分けない）。
+fn is_screen_fd(fd: u64) -> bool {
+    crate::vfs::with_current_files(|files| {
+        files
+            .get(fd as usize)
+            .ok()
+            .map(|file| file.is_screen())
+            .unwrap_or(false)
+    })
+}
+
+/// 画面の fd への `ioctl`（`ADR-0066` の Y-c）。**画面の fd でなければ `None`**（`sys_ioctl` へ回す）。
+///
+/// - [`FBIOGET_VSCREENINFO`]——`struct fb_var_screeninfo`（Linux の配置）
+/// - [`FBIOGET_FSCREENINFO`]——`struct fb_fix_screeninfo`（Linux の配置）
+/// - [`FBIOZPRESENT`]——`struct drm_clip_rect` の矩形を MMIO へ写す（ZaytOS 独自）
+///
+/// **それ以外は `-ENOTTY`**（Linux の fbdev と同じ）。
+///
+/// # BKL を解いて写す
+///
+/// **全面の転送は 5.05M サイクル掛かる**（`crate::console::flush_foreground` の doc）。**保持したまま
+/// 写すと、その間もう一方のコアがカーネルへ入れない**（`ADR-0023` の Addendum）。
+///
+/// # 深い枠に写しを置かない
+///
+/// **`#[inline(never)]` である**——**160 バイトの構造体は `dispatch` の枠に乗らない**（`ADR-0066` の Q4）。
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+#[inline(never)]
+unsafe fn screen_ioctl_from_ring3(
+    fd: u64,
+    request: u64,
+    arg: u64,
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    bkl: &mut Option<crate::bkl::BklGuard>,
+) -> Option<u64> {
+    if !is_screen_fd(fd) {
+        return None;
+    }
+    let Some(surface) = crate::console::graphics_surface() else {
+        return Some((-ENODEV) as u64);
+    };
+    let bgr = matches!(surface.format, common::boot_info::PixelFormat::Bgr);
+    match request {
+        FBIOGET_VSCREENINFO => {
+            let out = fb_var_screeninfo(surface.width, surface.height, bgr);
+            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+            let Some(slice) =
+                (unsafe { validate_user_range(pml4_phys, direct_map, arg, out.len() as u64) })
+            else {
+                return Some((-EFAULT) as u64);
+            };
+            // SAFETY: `slice` は検証済みで、長さはちょうど `out.len()` である。
+            unsafe { copy_to_user(&slice, 0, &out) };
+            Some(0)
+        }
+        FBIOGET_FSCREENINFO => {
+            let out = fb_fix_screeninfo(surface.size_bytes as u32, surface.stride * 4);
+            // SAFETY: 同上。
+            let Some(slice) =
+                (unsafe { validate_user_range(pml4_phys, direct_map, arg, out.len() as u64) })
+            else {
+                return Some((-EFAULT) as u64);
+            };
+            // SAFETY: 同上。
+            unsafe { copy_to_user(&slice, 0, &out) };
+            Some(0)
+        }
+        FBIOZPRESENT => {
+            // SAFETY: 同上。
+            let Some(slice) = (unsafe {
+                validate_user_range(pml4_phys, direct_map, arg, DRM_CLIP_RECT_LEN as u64)
+            }) else {
+                return Some((-EFAULT) as u64);
+            };
+            let mut raw = [0u8; DRM_CLIP_RECT_LEN];
+            // SAFETY: `slice` は検証済みで、長さはちょうど `raw.len()` である。
+            if unsafe { copy_from_user(&mut raw, &slice) } != DRM_CLIP_RECT_LEN {
+                return Some((-EFAULT) as u64);
+            }
+            let Some((x, y, width, height)) = parse_clip_rect(&raw) else {
+                return Some((-EINVAL) as u64);
+            };
+            // **BKL を解いて写す**（この関数の doc）。
+            drop(bkl.take());
+            crate::console::present_graphics(x, y, width, height);
+            *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
+            Some(0)
+        }
+        _ => Some((-ENOTTY) as u64),
+    }
+}
+
+/// 画面の `mmap` で張ったページの累計（`ADR-0066` の Y-c の計器）。
+static SCREEN_PAGES_MAPPED: AtomicU64 = AtomicU64::new(0);
+
+/// 画面の `mmap` で張ったページの累計（`ADR-0066` の Y-c）。
+pub fn screen_pages_mapped() -> u64 {
+    SCREEN_PAGES_MAPPED.load(Ordering::Relaxed)
+}
+
+/// 画面の fd の `mmap`（`ADR-0066` の Y-c）。**裏バッファを自分の空間の `MMAP_BASE` から上へ張る。**
+///
+/// # 共有メモリと同じ張り方である
+///
+/// **葉に `PTE_SHARED` の印を立てる**（`ADR-0065`）——**`destroy` は印の在る葉を集めない**ので、
+/// **プロセスが終わっても裏バッファのフレームはアロケータへ返らない。** **返すのはコンソールで、
+/// 返さない**（起動時に取って、ずっと持つ）。**参照数は使わない**（Q1。カーネル常駐）。
+///
+/// # 新しく取らない
+///
+/// **葉は裏バッファのフレームで、アロケータから取るのは中間表だけである**——**その数を破棄の会計へ
+/// 足す**（共有メモリの `mmap` と同じ）。
+///
+/// # Safety
+///
+/// `direct_map` が有効であること（遠征の中で呼ぶ）。
+#[inline(never)]
+unsafe fn mmap_screen_from_ring3(len: u64, prot: u64, direct_map: DirectMap) -> u64 {
+    use crate::paging::active::{ActivePageTable, PageAttributes};
+
+    let Some(surface) = crate::console::graphics_surface() else {
+        return (-ENODEV) as u64;
+    };
+    const PAGE: u64 = crate::frame_allocator::FRAME_SIZE;
+    let limit = surface.size_bytes.div_ceil(PAGE) * PAGE;
+    if len == 0 || len > limit {
+        return (-EINVAL) as u64;
+    }
+    let pages = len.div_ceil(PAGE);
+    let slot = crate::ring3::current_slot();
+    let base = MMAP_NEXT[slot].fetch_add(pages * PAGE, Ordering::SeqCst);
+    let attributes = PageAttributes {
+        user: true,
+        writable: prot & PROT_WRITE != 0,
+        // **裏バッファは普通の RAM である**（MMIO ではない。`BackBuffer` の doc）。
+        cacheable: true,
+        // **印を立てる**——**`destroy` が集めない**（この関数の doc）。
+        shared: true,
+    };
+    // SAFETY: 遠征の中なので CR3 はこのプロセスの表である。
+    let mut table = unsafe { ActivePageTable::current(direct_map) };
+    let Some(allocator) = crate::frame_allocator::take() else {
+        return (-ENOMEM) as u64;
+    };
+    let free_before_map = allocator.free_frame_count();
+    // **借りたら必ず返す**（`sys_brk` と同じ。**どの出口でも `give_back` する**）。
+    let mut outcome = base;
+    for page in 0..pages {
+        let (Some(virt), Some(frame)) = (
+            common::addr::VirtAddr::new(base + page * PAGE),
+            common::addr::PhysAddr::new(surface.phys.as_u64() + page * PAGE),
+        ) else {
+            outcome = (-EINVAL) as u64;
+            break;
+        };
+        // SAFETY: 稼働中の表へ、ユーザーの範囲を、裏バッファの物理ページで張る。**裏バッファは
+        // 起動時に `pages` ぶん以上を連続で取ってある**（`limit` で切った）。
+        if unsafe { table.map_4kib(virt, frame, attributes, allocator) }.is_err() {
+            outcome = (-ENOMEM) as u64;
+            break;
+        }
+        SCREEN_PAGES_MAPPED.fetch_add(1, Ordering::Relaxed);
+    }
+    let tables_taken = free_before_map.saturating_sub(allocator.free_frame_count());
+    crate::frame_allocator::give_back(allocator);
+    crate::userland::note_post_load_frames(slot, tables_taken as usize);
+    outcome
 }
 
 /// `poll` の番号（Linux x86-64。`ADR-0066` の Y-b）。
@@ -2258,6 +2579,12 @@ unsafe fn mmap_from_ring3(len: u64, prot: u64, fd: u64, offset: u64, direct_map:
 
     if offset != 0 {
         return (-EINVAL) as u64;
+    }
+    // **画面の fd なら裏バッファを張る（`ADR-0066` の Y-c）。** **張り方は共有メモリと同じ**
+    // （`PTE_SHARED`）。
+    if is_screen_fd(fd) {
+        // SAFETY: 呼び出し元契約をそのまま渡す。
+        return unsafe { mmap_screen_from_ring3(len, prot, direct_map) };
     }
     let shm = match shm_of(fd) {
         Ok(shm) => shm,
@@ -3195,6 +3522,19 @@ unsafe fn sys_read(
     if is_input {
         // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
         return unsafe { read_input_events(buf, count, pml4_phys, direct_map, bkl) };
+    }
+    // **画面の fd は読めない（`ADR-0066` の Y-c）。** **入力 fd と同じで inode が None なので、
+    // 分けないと端末の枝へ落ちて打鍵を読んでしまう。** **Linux の fbdev は `read` で画素を返すが、
+    // 合わせなかった**——**画素は `mmap` で読める**ので、2 つ目の道を持たない。
+    let is_screen = crate::vfs::with_current_files(|files| {
+        files
+            .get(fd as usize)
+            .ok()
+            .map(|file| file.is_screen())
+            .unwrap_or(false)
+    });
+    if is_screen {
+        return (-EINVAL) as u64;
     }
 
     // **表を握る区間を短くする。** ここでは inode と位置の写しだけを取り、
@@ -5298,4 +5638,78 @@ pub fn handler_rsp() -> u64 {
 /// 入場時点で「今 Ring 3 にいる」が立っていたか（S8-b）。
 pub fn in_ring3_at_entry() -> bool {
     state().in_ring3_at_entry.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+mod tests {
+    //! 画面の `ioctl` が返す構造体の配置（`ADR-0066` の Y-c）。**`cc` の `offsetof` で測った値を
+    //! 機械で留める**（2026-09-21。`cc` 13.3.0。`<linux/fb.h>` と `<drm/drm.h>`）。**欄の位置を
+    //! 動かすと、Linux の配置から外れたことがここで分かる。**
+
+    use super::*;
+
+    fn u32_at(bytes: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+    }
+
+    /// `struct fb_var_screeninfo` の欄の位置（`offsetof` の値）。
+    #[test]
+    fn the_variable_screen_info_follows_the_linux_layout() {
+        let out = fb_var_screeninfo(1280, 800, true);
+        assert_eq!(out.len(), 160, "sizeof(struct fb_var_screeninfo)");
+        assert_eq!(u32_at(&out, 0), 1280, "xres @0");
+        assert_eq!(u32_at(&out, 4), 800, "yres @4");
+        assert_eq!(u32_at(&out, 8), 1280, "xres_virtual @8");
+        assert_eq!(u32_at(&out, 12), 800, "yres_virtual @12");
+        assert_eq!(u32_at(&out, 24), 32, "bits_per_pixel @24");
+        // **`Bgr` は「バイト 0 が青」——青 0・緑 8・赤 16。**
+        assert_eq!(u32_at(&out, 32), 16, "red.offset @32");
+        assert_eq!(u32_at(&out, 36), 8, "red.length @36");
+        assert_eq!(u32_at(&out, 44), 8, "green.offset @44");
+        assert_eq!(u32_at(&out, 56), 0, "blue.offset @56");
+        assert_eq!(u32_at(&out, 60), 8, "blue.length @60");
+    }
+
+    /// `Rgb` では赤と青の位置が入れ替わる。
+    #[test]
+    fn the_color_offsets_follow_the_pixel_order() {
+        assert_eq!(fb_color_offsets(true), (0, 8, 16));
+        assert_eq!(fb_color_offsets(false), (16, 8, 0));
+        let out = fb_var_screeninfo(1280, 800, false);
+        assert_eq!(u32_at(&out, 32), 0, "red.offset for Rgb");
+        assert_eq!(u32_at(&out, 56), 16, "blue.offset for Rgb");
+    }
+
+    /// `struct fb_fix_screeninfo` の欄の位置。**物理番地（`smem_start`）は 0 のままである。**
+    #[test]
+    fn the_fixed_screen_info_follows_the_linux_layout() {
+        let out = fb_fix_screeninfo(4_096_000, 5120);
+        assert_eq!(out.len(), 80, "sizeof(struct fb_fix_screeninfo)");
+        assert_eq!(&out[..9], b"zaytos-fb", "id @0");
+        assert_eq!(&out[16..24], &[0u8; 8], "smem_start @16 is not given out");
+        assert_eq!(u32_at(&out, 24), 4_096_000, "smem_len @24");
+        assert_eq!(u32_at(&out, 28), FB_TYPE_PACKED_PIXELS, "type @28");
+        assert_eq!(u32_at(&out, 36), FB_VISUAL_TRUECOLOR, "visual @36");
+        assert_eq!(u32_at(&out, 48), 5120, "line_length @48");
+    }
+
+    /// `struct drm_clip_rect` は半開区間である。**空の矩形は断る。**
+    #[test]
+    fn a_clip_rect_is_half_open_and_refuses_empty_ones() {
+        let rect = |x1: u16, y1: u16, x2: u16, y2: u16| {
+            let mut raw = [0u8; DRM_CLIP_RECT_LEN];
+            raw[0..2].copy_from_slice(&x1.to_le_bytes());
+            raw[2..4].copy_from_slice(&y1.to_le_bytes());
+            raw[4..6].copy_from_slice(&x2.to_le_bytes());
+            raw[6..8].copy_from_slice(&y2.to_le_bytes());
+            raw
+        };
+        assert_eq!(
+            parse_clip_rect(&rect(200, 200, 360, 360)),
+            Some((200, 200, 160, 160))
+        );
+        assert_eq!(parse_clip_rect(&rect(0, 0, 1, 1)), Some((0, 0, 1, 1)));
+        assert_eq!(parse_clip_rect(&rect(10, 10, 10, 20)), None, "width 0");
+        assert_eq!(parse_clip_rect(&rect(10, 20, 20, 10)), None, "upside down");
+    }
 }
