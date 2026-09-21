@@ -602,6 +602,10 @@ screen-leave-does-not-repaint = ["screen-test"]
 # 前景の関所が大域の印だけを見る（Y-a までの形。ADR-0066 の Y-c）。前景でない者が開ける。
 # input-test と screen-test の両方が回すので、どちらにも寄りかからない（xtask が構成を足す）。
 foreground-ignores-the-slot = []
+# Y-d: 画面・入力・ソケット・共有メモリを 1 つの組で通す（ADR-0066 の設計 Q5）。init が /bin/compd を
+# 前景で起こし、compd が /bin/compc を起こしっぱなしで起こす。compc が shm のプールに描いて送り、
+# compd が合成して present する。判定は xtask の compose-test が screendump を読んで行う。
+compose-test = []
 # `spawn` で、子へ入る前に親の FP の状態を保存しない（`ADR-0058`）。
 # 親が `spawn` を跨いで値を保てなくなる。
 fp-spawn-no-save = []

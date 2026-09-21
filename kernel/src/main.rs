@@ -1978,7 +1978,12 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
     /// **`input-test` と `poll-test` はシェルを起こさない**ので、そのときは使われない
     /// （`ADR-0066` の Y-a / Y-b）。
     #[cfg_attr(
-        any(feature = "input-test", feature = "poll-test", feature = "screen-test"),
+        any(
+            feature = "input-test",
+            feature = "poll-test",
+            feature = "screen-test",
+            feature = "compose-test"
+        ),
         allow(dead_code)
     )]
     const MAX_RESTARTS: usize = 3;
@@ -1987,7 +1992,12 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
     // 各周で `as_deref_mut` を取る（`interrupts::drain_keyboard` と同じ形）。
     // **`input-test` と `poll-test` は `console` を検査の関数へ移すだけなので `mut` は要らない。**
     #[cfg_attr(
-        any(feature = "input-test", feature = "poll-test", feature = "screen-test"),
+        any(
+            feature = "input-test",
+            feature = "poll-test",
+            feature = "screen-test",
+            feature = "compose-test"
+        ),
         allow(unused_mut)
     )]
     let mut console = console;
@@ -2044,9 +2054,27 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
         cpu::halt_forever()
     }
 
-    #[cfg(not(any(feature = "input-test", feature = "poll-test", feature = "screen-test")))]
+    // **画面・入力・ソケット・共有メモリを 1 つの組で通す（`ADR-0066` の Y-d）。** **`compd` を
+    // 前景で 1 度起こして締める**——**シェルは起こさない。**
+    #[cfg(feature = "compose-test")]
+    {
+        run_compose_test(logger, console);
+        cpu::halt_forever()
+    }
+
+    #[cfg(not(any(
+        feature = "input-test",
+        feature = "poll-test",
+        feature = "screen-test",
+        feature = "compose-test"
+    )))]
     let mut restarts = 0usize;
-    #[cfg(not(any(feature = "input-test", feature = "poll-test", feature = "screen-test")))]
+    #[cfg(not(any(
+        feature = "input-test",
+        feature = "poll-test",
+        feature = "screen-test",
+        feature = "compose-test"
+    )))]
     loop {
         log_both(
             logger,
@@ -2357,6 +2385,39 @@ fn run_screen_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console
     ));
 }
 
+/// 画面・入力・ソケット・共有メモリを 1 つの組で通す（`ADR-0066` の Y-d。設計 Q5）。
+/// **`/bin/compd` を前景で 1 度起こし、締めに計器を出す。** **シェルは起こさない。**
+///
+/// **`compd` が `/bin/compc` を起こしっぱなしで起こす**（`a | b` と同じスロットの形）。**クライアントが
+/// shm のプールを `SCM_RIGHTS` で送り、`compd` が {入力, listener, クライアント} の集合で待って受け、
+/// 裏バッファへ合成して `present` する。** **打鍵で終わる。**
+///
+/// **判定は `xtask` の `compose-test` が、画面の読み戻し（`screendump`）と行を読んで行う。**
+#[cfg(feature = "compose-test")]
+fn run_compose_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) {
+    let mut console = console;
+    let outcome = {
+        let _foreground = console
+            .as_deref_mut()
+            .map(kernel::console::install_foreground);
+        kernel::userland::spawn(b"/bin/compd", b"compd\0", 1, None)
+    };
+    log_both(
+        logger,
+        console,
+        LogLevel::Info,
+        format_args!("compose-test: /bin/compd ended ({outcome:?})"),
+    );
+    let (entered, left, presented) = kernel::console::graphics_counts();
+    logger.info(format_args!(
+        "compose: entered {entered}, left {left}, presented {presented}, poll waited {} time(s), \
+         max wait set {}, woken outside the set {}",
+        kernel::syscall::poll_waits(),
+        kernel::task::max_wait_set_len(),
+        kernel::task::woken_for_another_reason()
+    ));
+}
+
 /// 2 本の Ring 3 を同時に走らせ、判定の材料を行に出す（W1-c-4。`ADR-0060`）。
 ///
 /// **判定は `xtask` が行う**（カウンタと内容で見る。行の順序では見ない）。
@@ -2550,19 +2611,34 @@ fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Con
 /// **`input-test` と `poll-test` はシェルを起こさない**ので、そのときは使われない
 /// （`ADR-0066` の Y-a / Y-b）。
 #[cfg_attr(
-    any(feature = "input-test", feature = "poll-test", feature = "screen-test"),
+    any(
+        feature = "input-test",
+        feature = "poll-test",
+        feature = "screen-test",
+        feature = "compose-test"
+    ),
     allow(dead_code)
 )]
 const SHELL_PATH: &[u8] = b"/bin/zash";
 /// 判定行に出すためのパス。
 #[cfg_attr(
-    any(feature = "input-test", feature = "poll-test", feature = "screen-test"),
+    any(
+        feature = "input-test",
+        feature = "poll-test",
+        feature = "screen-test",
+        feature = "compose-test"
+    ),
     allow(dead_code)
 )]
 const SHELL_PATH_TEXT: &str = "/bin/zash";
 /// シェルへ渡す `argv`。**NUL 区切りで並べる**（`spawn` の受け取る形）。
 #[cfg_attr(
-    any(feature = "input-test", feature = "poll-test", feature = "screen-test"),
+    any(
+        feature = "input-test",
+        feature = "poll-test",
+        feature = "screen-test",
+        feature = "compose-test"
+    ),
     allow(dead_code)
 )]
 const SHELL_ARGV: &[u8] = b"zash\0";
@@ -10369,6 +10445,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "poll-test",
         cfg!(feature = "poll-test"),
         "polld が入力とソケットを同時に待つ（ADR-0066 の Y-b）",
+    ),
+    (
+        "compose-test",
+        cfg!(feature = "compose-test"),
+        "compd と compc が画面・入力・ソケット・共有メモリを 1 つの組で通す（ADR-0066 の Y-d）",
     ),
     (
         "screen-test",

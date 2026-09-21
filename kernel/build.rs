@@ -133,6 +133,9 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
         // **画面へ画素を出す組（`ADR-0066` の Y-c）。** **描く側と、開けないことを見る側で 1 組である。**
         "gfxd",
         "gfxc",
+        // **画面・入力・ソケット・共有メモリを 1 つの組で通す（`ADR-0066` の Y-d）。**
+        "compd",
+        "compc",
     ];
 
     // **共有する包み（S11-9）。** `ls` と `cat` が `mod userlib;` で取り込む。
@@ -643,6 +646,9 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         // **画面へ画素を出す組（`ADR-0066` の Y-c）。** **描く側と、開けないことを見る側で 1 組である。**
         "gfxd",
         "gfxc",
+        // **画面・入力・ソケット・共有メモリを 1 つの組で通す（`ADR-0066` の Y-d）。**
+        "compd",
+        "compc",
         // **C で書いたもの（C-a。`ADR-0057`）。** **`gcc` が建てる。**
         "chello",
         // **FP の状態の判定（B-a。`ADR-0058`）。** **親と子の 2 本で 1 組である。**
