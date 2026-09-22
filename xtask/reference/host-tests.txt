@@ -337,6 +337,7 @@ kernel::frame_allocator::tests::insert_then_allocate_returns_frames_from_the_ran
 kernel::frame_allocator::tests::new_allocator_is_empty
 kernel::frame_allocator::tests::non_adjacent_regions_stay_as_separate_ranges
 kernel::frame_allocator::tests::ranges_stay_in_address_order_whatever_the_map_order
+kernel::frame_allocator::tests::the_handoff_area_is_never_a_free_range
 kernel::gdt::layout::tests::a_new_tss_has_no_stacks_and_no_io_bitmap
 kernel::gdt::layout::tests::a_selector_packs_the_index_above_the_rpl
 kernel::gdt::layout::tests::a_tss_descriptor_is_present_and_marked_as_an_available_tss
@@ -517,6 +518,7 @@ kernel::memory_map::tests::find_entry_treats_the_descriptor_end_as_exclusive
 kernel::memory_map::tests::parses_multiple_entries_with_nonstandard_descriptor_size
 kernel::memory_map::tests::parses_single_entry_at_real_observed_descriptor_size
 kernel::memory_map::tests::rejects_descriptor_size_too_small_to_hold_required_fields
+kernel::memory_map::tests::the_handoff_area_is_never_free
 kernel::memory_map::tests::type_names_cover_the_values_the_specification_defines
 kernel::memory_map::tests::zero_page_count_entry_is_parsed_but_carries_no_pages
 kernel::paging::entry::tests::a_non_canonical_address_cannot_be_built

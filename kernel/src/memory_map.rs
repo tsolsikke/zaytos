@@ -61,6 +61,12 @@ pub enum RegionPolicy {
 pub const fn classify(ty: u32) -> RegionPolicy {
     match ty {
         memory_type::CONVENTIONAL => RegionPolicy::Free,
+        // **`LOADER_DATA` は受け渡しの領域の種類である**（BootInfo とメモリマップの写し。
+        // `ADR-0068` の HW-a）。**実測で `0x3ffef000..0x40000000` の 17 ページとして載る。**
+        // **配ってはならない**——**恒久に取っておく形であり、「読み終えたら回収する」
+        // 最適化を入れると、受け渡しを読む前に配ってしまう。** **入れるなら、読み手が
+        // 全部終わっていることを先に確かめること**（`ADR-0068` の HW-a の実測）。
+        // **この性質は下のホストテストで固定してある**（`the_handoff_area_is_never_free`）。
         memory_type::LOADER_CODE
         | memory_type::LOADER_DATA
         | memory_type::BOOT_SERVICES_CODE
@@ -293,6 +299,19 @@ mod tests {
                 "type {ty} should be cacheable ReservedButMapped"
             );
         }
+    }
+
+    /// **受け渡しの領域（BootInfo とメモリマップの写し）は `LOADER_DATA` として載る**
+    /// （`ADR-0068` の HW-a。実測で 17 ページ）。**配られないことが、切り替えの後に
+    /// BootInfo と写しを読める根拠である。** **`Free` へ動かす変更は、ここで落ちる。**
+    #[test]
+    fn the_handoff_area_is_never_free() {
+        assert_eq!(
+            classify(memory_type::LOADER_DATA),
+            RegionPolicy::ReservedButMapped { cacheable: true },
+            "LoaderData carries the handoff (BootInfo and the copy of the memory map); \
+             handing it out would let the allocator overwrite what the kernel still reads"
+        );
     }
 
     #[test]

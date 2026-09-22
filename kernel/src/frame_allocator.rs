@@ -816,6 +816,54 @@ mod tests {
     /// **メモリマップが番地の順でなくても、範囲は番地の順に保たれ、最も低い空きから配る**
     /// （`ADR-0068` の HW-a）。**UEFI の仕様はマップの並びを約束しない。** **切り替え前の
     /// ページ表の組み立ては、この性質で初期ページ表の届く範囲（[0, 1GiB)）に収まる。**
+    /// UEFI の記述子を 1 本作る（`descriptor_size` は実測の 48）。
+    fn descriptor(memory_type: u32, phys_start: u64, page_count: u64) -> Vec<u8> {
+        let mut bytes = vec![0u8; 48];
+        bytes[0..4].copy_from_slice(&memory_type.to_le_bytes());
+        bytes[8..16].copy_from_slice(&phys_start.to_le_bytes());
+        bytes[24..32].copy_from_slice(&page_count.to_le_bytes());
+        bytes
+    }
+
+    /// **受け渡しの領域は、空きの表に一度も入らない**（`ADR-0068` の HW-a）。
+    ///
+    /// **ブートローダは BootInfo とメモリマップの写しを `LOADER_DATA` として取る**
+    /// （1GiB のすぐ下。実測で `0x3ffef000..0x40000000` の 17 ページ）。**切り替えの後に
+    /// カーネルがそこを読むので、配られてはならない。** **`classify` の側もホストテストで
+    /// 固定してある**（`memory_map` の `the_handoff_area_is_never_free`）——**こちらは
+    /// 「アロケータまで届いていること」を見る。**
+    #[test]
+    fn the_handoff_area_is_never_a_free_range() {
+        const HANDOFF_START: u64 = 0x3ffe_f000;
+        const HANDOFF_PAGES: u64 = 17;
+        let mut raw = Vec::new();
+        raw.extend(descriptor(
+            crate::memory_map::memory_type::CONVENTIONAL,
+            0x10_0000,
+            0x3fee_f,
+        ));
+        raw.extend(descriptor(
+            crate::memory_map::memory_type::LOADER_DATA,
+            HANDOFF_START,
+            HANDOFF_PAGES,
+        ));
+        raw.extend(descriptor(
+            crate::memory_map::memory_type::CONVENTIONAL,
+            0x4000_0000,
+            0x1000,
+        ));
+
+        let (allocator, _stats) = build(&raw, 48).unwrap();
+        let handoff = HANDOFF_START / FRAME_SIZE..(HANDOFF_START / FRAME_SIZE + HANDOFF_PAGES);
+        for (start, count) in allocator.free_ranges() {
+            let range = start..start + count;
+            assert!(
+                range.end <= handoff.start || range.start >= handoff.end,
+                "the free range {range:?} overlaps the handoff area {handoff:?}"
+            );
+        }
+    }
+
     #[test]
     fn ranges_stay_in_address_order_whatever_the_map_order() {
         let mut allocator = FrameAllocator::<8>::new();
