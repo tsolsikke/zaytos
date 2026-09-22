@@ -11238,12 +11238,17 @@ fn judge_shell_session(
     //
     // **高水位は揺れない**（起動シーケンスは決定的である。2 回続けて同じ値を
     // 実測した）ので、判定に載せられる。
+    //
+    // **行は 2 つ以上出る**（`init` の前までと、Ring 3 へ落ちる直前のプログラムごと。`ADR-0068` の (c)）。
+    // **最小を見る**——**1 つ目だけを見ていたので、`init` より後の経路（`/bin/zash` の読み込みが
+    // 4KiB ほど深い）を数えていなかった。**
     let stack_spare = serial
         .lines()
-        .find(|line| line.contains("stack-water: the kernel stack used"))
-        .and_then(|line| line.split("byte(s); ").nth(1))
-        .and_then(|rest| rest.split_whitespace().next())
-        .and_then(|token| token.parse::<usize>().ok());
+        .filter(|line| line.contains("stack-water:"))
+        .filter_map(|line| line.split("byte(s); ").nth(1))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .filter_map(|token| token.parse::<usize>().ok())
+        .min();
     let kernel_stack_has_room = stack_spare.is_some_and(|spare| spare >= KERNEL_STACK_MIN_SPARE);
 
     // **遠征スタックにも余裕が残っていること（f-2 の後の手当て）。**

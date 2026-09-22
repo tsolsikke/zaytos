@@ -427,9 +427,12 @@ extern "sysv64" fn kernel_main() -> ! {
     //   （`kernel::stack` のモジュール doc）
     //
     // **スタックの大きさに結び付けてある。** **広げるたびに手で測り直さない**
-    // ——**余裕は「大きさ - 使用量」で、使用量は 65,744 バイトである**（実測。
-    // `stack-water:` の行）。**半分（65,536）は余裕（65,328）より 208 バイト
-    // 大きく、ガードページの中に収まる。**
+    // ——**余裕は「大きさ - 使用量」である。** **使用量は 2 つの行が言う**
+    // （`stack-water:`。2026-09-23 に 2 つにした）——**`init` の前までが 66,816 バイト、
+    // Ring 3 へ落ちる直前（`/bin/zash`）が 70,968 バイトである**（実測）。
+    // **半分（65,536）は `init` の前の余裕（64,256）より 1,280 バイト大きい**
+    // ——**最初にそこを越えるのは起動の最初期（`build_and_verify_high_half` の経路。
+    // `ADR-0068` の「起動時のスタックの最深経路」）なので、踏むのはガードページの中である。**
     //
     // **使用量が大きく減ったら、この結び付けは成り立たなくなる**——
     // **そのときは `stack-water:` の値を見て決め直すこと。**
@@ -1871,11 +1874,17 @@ extern "sysv64" fn kernel_main() -> ! {
     //
     // **遠征スタックには同じ形が既に在った**（`ring3:` の行）。
     // **カーネルスタックにだけ無かった。** その非対称を埋める。
+    //
+    // **この行は `init` より前までである**（`ADR-0068` の (c)。運用者の決定。2026-09-23）。
+    // **`run_init` が `/bin/zash` を読み込む経路は、ここより 4KiB ほど深い**
+    // （`ADR-0068` の「起動時のスタックの最深経路」）。**「高水位」を名乗って `init` の前しか
+    // 測っていなかったので、意味を行に書き、続きは `userland::run_loaded_program` が
+    // Ring 3 へ落ちる直前に出す形にした。**
     {
         let used = stack::kernel_stack_high_water();
         let capacity = stack::kernel_stack_capacity();
         logger.info(format_args!(
-            "stack-water: the kernel stack used {used} of {capacity} byte(s); {} left",
+            "stack-water: before init, the kernel stack used {used} of {capacity} byte(s); {} left",
             capacity.saturating_sub(used)
         ));
     }

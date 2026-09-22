@@ -1776,6 +1776,24 @@ fn report_user_stack_high_water(logger: &mut Logger<SerialPort>, process: &UserP
     ));
 }
 
+/// カーネルスタックの高水位を 1 行出す（`ADR-0068` の (c)）。
+///
+/// **`#[inline(never)]` にしてある**——**`format_args!` の一時値を [`run_loaded_program`] の枠へ
+/// 乗せないためである。** **`dev` では、通らない分岐の一時値も呼び出しの引数の一時値も、そのまま枠を
+/// 広げる**（`docs/coding-standards.md` の「番地以外が動いたら、まず枠の大きさを静的に読む」）。
+/// **乗せた形を 1 度実測した**——**計器自身がカーネルスタックの高水位と遠征スタックの高水位を
+/// 208 バイトずつ深くした**（2026-09-23。`tools/frame-sizes.py` で枠を読んだ）。
+#[inline(never)]
+fn report_stack_water_before_ring3(logger: &mut Logger<SerialPort>, name: &'static str) {
+    let used = crate::stack::kernel_stack_high_water();
+    let capacity = crate::stack::kernel_stack_capacity();
+    logger.info(format_args!(
+        "stack-water: before entering {name} in Ring 3, the kernel stack used {used} of \
+         {capacity} byte(s); {} left",
+        capacity.saturating_sub(used)
+    ));
+}
+
 unsafe fn run_loaded_program(
     logger: &mut Logger<SerialPort>,
     process: &mut UserProcess,
@@ -1850,6 +1868,22 @@ unsafe fn run_loaded_program(
     unsafe {
         crate::fp::restore(&crate::fp::FpArea::fresh())
     };
+    // **カーネルスタックの高水位を、Ring 3 へ落ちる直前にも出す**（`ADR-0068` の (c)。
+    // 運用者の決定。2026-09-23）。
+    //
+    // **`kernel_main` の `stack-water:` の行は `init` の前までしか測っていない**——
+    // **`/bin/zash` を読み込む経路（この関数が `FileTable` を作り直す所）が、そこより
+    // 4KiB ほど深い**（`ADR-0068` の「起動時のスタックの最深経路」）。
+    //
+    // **深さ 0 のときだけ出す。** **入れ子（深さ 1 以上）はこのカーネルスタックの上に
+    // 居ない**——親の遠征スタックの上である。
+    //
+    // **Ring 3 へ落ちた後、そのプログラムのカーネル入場は遠征スタックに乗る**ので、
+    // **この値は、そのプログラムが走っている間ずっとの値である。**
+    if crate::ring3::depth() == 0 {
+        report_stack_water_before_ring3(logger, process.name);
+    }
+
     // SAFETY: entry と stack は今張ったユーザーページで、`ud2` が必ずフォルト
     // する。main_rsp0_top はメインのカーネルスタック上端。単一実行文脈である。
     unsafe {

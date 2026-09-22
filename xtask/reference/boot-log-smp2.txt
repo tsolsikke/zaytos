@@ -13,7 +13,7 @@ Hello, ZaytOS!
 [INFO] build: 2 cargo feature(s) enabled: default,heap-poison
 [INFO] fp: SSE is enabled on the bootstrap processor: CR0=0x80010033 (MP=true, EM=false),              CR4=0x668 (OSFXSR=true, OSXMMEXCPT=true), as intended = true [read back from the registers]
 [INFO] boot stack: 648 of 16384 bytes used (high-water; 15736 bytes poison intact)
-[INFO] higher-half: arrived at high VA. RIP=0xffffffff801e2d38 in [0xffffffff80100000, 0xffffffff804a98b0)=true, RSP=0xffffffff8040c200 high=true, CR3=0x248000 == bootstrap PML4 0x248000 = true, identity alive (phys 0x100000 read via low==high) = true
+[INFO] higher-half: arrived at high VA. RIP=0xffffffff801e2ef8 in [0xffffffff80100000, 0xffffffff804a98b0)=true, RSP=0xffffffff8040c200 high=true, CR3=0x248000 == bootstrap PML4 0x248000 = true, identity alive (phys 0x100000 read via low==high) = true
 [INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff80421218 first slot=0xffffffff80421218 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
 [INFO] interrupts: RFLAGS.IF before cli = false (raw RFLAGS=0x96)
 [INFO] interrupts: RFLAGS.IF after cli = false (raw RFLAGS=0x96)
@@ -75,7 +75,7 @@ Hello, ZaytOS!
 [INFO] paging: required range [framebuffer] 0x80000000..0x803e8000: OK
 [INFO] paging: required range [new page tables (PML4)] 0x3000..0x4000: OK
 [INFO] paging: required range [current RSP] 0x40c460..0x40c461: OK
-[INFO] paging: required range [current RIP] 0x1e2d38..0x1e2d39: OK
+[INFO] paging: required range [current RIP] 0x1e2ef8..0x1e2ef9: OK
 [INFO] paging: all required ranges mapped. proceeding to CR3 switch (d-2).
 [INFO] paging: current CR3 = 0x248000
 [INFO] paging: CR3 switch instruction executed
@@ -109,7 +109,7 @@ Hello, ZaytOS!
 [INFO] console: 104 log line(s) were emitted before the console existed (serial only)
 [INFO] heap: arena 0x4aa000..0x5aa000 (256 frames, 1 MiB), mapped=true
 [INFO] heap: initialized (1048576 bytes free, 1 block(s))
-[INFO] granularity: executing code (RIP) 0xffffffff801e2d38 -> phys 0x1e2d38, mapped by a 4KiB page at 0xffffffff801e2000 (entry=0x1e2023)
+[INFO] granularity: executing code (RIP) 0xffffffff801e2ef8 -> phys 0x1e2ef8, mapped by a 4KiB page at 0xffffffff801e2000 (entry=0x1e2023)
 [INFO] granularity: kernel stack (RSP) 0xffffffff8040bee0 -> phys 0x40bee0, mapped by a 4KiB page at 0xffffffff8040b000 (entry=0x40b063)
 [INFO] granularity: heap arena 0x4aa000 -> phys 0x4aa000, mapped by a 2MiB page at 0x400000 (entry=0x400083)
 [INFO] granularity: framebuffer 0x80000000 -> phys 0x80000000, mapped by a 2MiB page at 0x80000000 (entry=0x800000b3)
@@ -256,7 +256,7 @@ Hello, ZaytOS!
 [INFO] percpu: 2 usable CPU(s) enumerated, 2 per-CPU slot(s) available, every CPU has a slot=true (cpu_id() is the constant 0 and only the bootstrap processor runs, so no slot is indexed out of range yet)
 [INFO] identity-removal: begin. live PML4=0xf000, saved PML4[0]=0x10023
 [INFO] identity-removal: PML4[0] subtree table frames = 7 (28 KiB) become unreachable; intentional leak. subtree frames [256]=10 [511]=5. disjoint(0,256)=true disjoint(0,511)=true disjoint(256,511)=true
-[INFO] identity-removal: required [RIP] 0xffffffff801e2d38 -> phys 0x1e2d38 (huge=false): OK
+[INFO] identity-removal: required [RIP] 0xffffffff801e2ef8 -> phys 0x1e2ef8 (huge=false): OK
 [INFO] identity-removal: required [RSP] 0xffffffff8040bd30 -> phys 0x40bd30 (huge=false): OK
 [INFO] identity-removal: required [direct map window] 0xffff80000000f000 -> phys 0xf000 (huge=false): OK
 [INFO] identity-removal: required [kernel image] 0xffffffff80100000 -> phys 0x100000 (huge=false): OK
@@ -386,6 +386,7 @@ task: cooperative switch verified
 [INFO] user-load: hello PT_LOAD segments: declared=2 mapped=2 (they must match; a gap means a segment was skipped), pages shared with the previous segment=0
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
 [INFO] user-load: hello initial stack at 0x7fff80 (argc=1, envc=3, 16-byte aligned=true,          initial data 128 of 4096 byte(s))
+[INFO] stack-water: before entering hello in Ring 3, the kernel stack used 66816 of 131072 byte(s); 64256 left
 hello from ring 3
 [INFO] user-stack: hello used 128 of 4096 byte(s) (3%), over half=false          (the initial argv/envp table is counted in; ADR-0041 says to decide about growing          the stack when this goes over half)
 [INFO] ring3: hello used 2818 of 65536 byte(s) of the depth-0 excursion stack (4%), the canary at its bottom is intact=true
@@ -397,6 +398,7 @@ hello from ring 3
 [INFO] user-load: fault-test PT_LOAD segments: declared=1 mapped=1 (they must match; a gap means a segment was skipped), pages shared with the previous segment=0
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
 [INFO] user-load: fault-test initial stack at 0x7fff80 (argc=1, envc=3, 16-byte aligned=true,          initial data 128 of 4096 byte(s))
+[INFO] stack-water: before entering fault-test in Ring 3, the kernel stack used 66816 of 131072 byte(s); 64256 left
 [INFO] user-stack: fault-test used 128 of 4096 byte(s) (3%), over half=false          (the initial argv/envp table is counted in; ADR-0041 says to decide about growing          the stack when this goes over half)
 [INFO] ring3: fault-test used 0 of 65536 byte(s) of the depth-0 excursion stack (0%), the canary at its bottom is intact=true
 [INFO] vfs: fault-test opened 0 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
@@ -408,6 +410,7 @@ hello from ring 3
 [INFO] user-load: syscall-test PT_LOAD segments: declared=2 mapped=2 (they must match; a gap means a segment was skipped), pages shared with the previous segment=0
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
 [INFO] user-load: syscall-test initial stack at 0x7fff70 (argc=2, envc=3, 16-byte aligned=true,          initial data 144 of 4096 byte(s))
+[INFO] stack-water: before entering syscall-test in Ring 3, the kernel stack used 66816 of 131072 byte(s); 64256 left
 syscall-test wrote this
 [INFO] spawn: /bin/hello is 8576 byte(s) at inode 25; entering at depth 2 (the parent's excursion stack 0xffffffff80443290..0xffffffff80453290 has 10017 byte(s) used and 55519 left)
 [INFO] user-load: /bin/hello mapped PT_LOAD 0x400000..0x400042 (filesz=0x42 memsz=0x42 w=false) pages 0x400000..0x400000
@@ -526,7 +529,7 @@ syscall-test wrote this
 [INFO] lapic-timer: the timer now arrives as vector 0xfe, which the 8259 cannot produce
 task: starting preemptive demo with 2 busy-loop workers for 200 ticks
 [INFO] smp: the installed AP trampoline matches the template outside the patched fields: 4048 byte(s) compared, 48 excluded (gdtr base at 0xf22, far jump target at 0x3b, data block 0xf40..0xf68), mismatches=0
-[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x248000, rust entry 0xffffffff8019e3c0
+[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x248000, rust entry 0xffffffff8019e3e0
 [INFO] smp: starting application processor apic id 1 as slot 1 (trampoline at 0x1000, vector 0x01, stack top 0x3000 identity-mapped, cr3 0x248000 = the static boot page table)
 [INFO] smp: application processor 1 started (long mode reached, running on the static boot page table; no per-CPU GDT/TSS/IDT yet, so cpu_id() is not used here)
 [INFO] fp: SSE is enabled on ap 1: CR0=0xe0000013 CR4=0x620, as intended = true [read back from the registers]
@@ -539,7 +542,7 @@ task: starting preemptive demo with 2 busy-loop workers for 200 ticks
 [INFO] virtio-blk: blocking read: released the BKL before waiting; the completion was seen
 [INFO] timer: first tick arrived as vector 0x20 - this is the proof that ICW2 was written correctly (it cannot be read back)
 [INFO] timer: this is the end of the steady-loop observation, timer_accounting_balanced=true; the shell takes the foreground from here
-[INFO] stack-water: the kernel stack used 66816 of 131072 byte(s); 64256 left
+[INFO] stack-water: before init, the kernel stack used 66816 of 131072 byte(s); 64256 left
 [INFO] spawn: /bin/bss-test is 12800 byte(s) at inode 13; entering at depth 1 (the parent runs on its task's kernel stack, which has a guard page)
 [INFO] user-load: /bin/bss-test mapped PT_LOAD 0x400000..0x4000f5 (filesz=0xf5 memsz=0xf5 w=false) pages 0x400000..0x400000
 [INFO] user-load: /bin/bss-test mapped PT_LOAD 0x401000..0x4010bc (filesz=0xbc memsz=0xbc w=false) pages 0x401000..0x401000
@@ -548,6 +551,7 @@ task: starting preemptive demo with 2 busy-loop workers for 200 ticks
 [INFO] user-load: /bin/bss-test PT_LOAD segments: declared=4 mapped=4 (they must match; a gap means a segment was skipped), pages shared with the previous segment=1
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
 [INFO] user-load: /bin/bss-test initial stack at 0x7fff80 (argc=1, envc=3, 16-byte aligned=true,          initial data 128 of 4096 byte(s))
+[INFO] stack-water: before entering /bin/bss-test in Ring 3, the kernel stack used 68280 of 131072 byte(s); 62792 left
 bss-test: the .bss reads as zero, keeps writes, and shares a page with .data
 [INFO] user-stack: /bin/bss-test used 160 of 4096 byte(s) (3%), over half=false          (the initial argv/envp table is counted in; ADR-0041 says to decide about growing          the stack when this goes over half)
 [INFO] ring3: /bin/bss-test used 2818 of 65536 byte(s) of the depth-0 excursion stack (4%), the canary at its bottom is intact=true
@@ -564,5 +568,6 @@ bss-test: the .bss reads as zero, keeps writes, and shares a page with .data
 [INFO] user-load: /bin/zash PT_LOAD segments: declared=4 mapped=4 (they must match; a gap means a segment was skipped), pages shared with the previous segment=1
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
 [INFO] user-load: /bin/zash initial stack at 0x7fff80 (argc=1, envc=3, 16-byte aligned=true,          initial data 128 of 4096 byte(s))
+[INFO] stack-water: before entering /bin/zash in Ring 3, the kernel stack used 70968 of 131072 byte(s); 60104 left
 zash: ready
 [38;2;0;200;0mzaytos[0m$ 
