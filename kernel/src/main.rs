@@ -1339,8 +1339,10 @@ extern "sysv64" fn kernel_main() -> ! {
     // ログはシリアルのみ（`log_both` を使わない）。近傍の検証サイトはいずれもシリアル
     // のみで、`log_both` は人が読む要約に使っている。ACPI の走査は検証の材料なので
     // 前者へ揃える。
-    let apic_mmio =
-        kernel::acpi::survey(&mut logger, acpi_rsdp, raw_map, memory_map_descriptor_size);
+    let kernel::acpi::Survey {
+        apic: apic_mmio,
+        i8042,
+    } = kernel::acpi::survey(&mut logger, acpi_rsdp, raw_map, memory_map_descriptor_size);
 
     // === S1-c: APIC MMIO を direct map 窓へ 4KiB 粒度で写像する ===
     //
@@ -1842,6 +1844,7 @@ extern "sysv64" fn kernel_main() -> ! {
         SHELL_AFTER_HEARTBEATS,
         mapped_apic.as_ref(),
         Some(&mut virtio_disk),
+        i8042,
     );
 
     // === P-c-1: 装置をシェルの文脈から届く場所へ据える ===
@@ -4247,7 +4250,16 @@ fn trigger_interrupt_test(
         /// 500 ティックで約 1 万行・800KB 程度に収まる（M4-b-1 のログが 14,400 行
         /// だったので同程度）。通常起動では止めずに回し続ける。
         const STOP_AFTER_TICKS: u64 = 500;
-        start_timer(logger, console, STOP_AFTER_TICKS, 0, None, None);
+        // ACPI を走査しない経路なので、FADT の答えは無い（探って決める）。
+        start_timer(
+            logger,
+            console,
+            STOP_AFTER_TICKS,
+            0,
+            None,
+            None,
+            kernel::acpi::I8042Presence::NotStated,
+        );
     }
 
     logger.info(format_args!(
@@ -4721,6 +4733,7 @@ fn start_timer(
     shell_after_heartbeats: u64,
     apic: Option<&kernel::apic::MappedApic>,
     mut virtio: Option<&mut kernel::virtio::VirtioBlk>,
+    i8042: kernel::acpi::I8042Presence,
 ) {
     // --- 1. PIT を設定する ---
     // SAFETY: 起動時に 1 回だけ。この時点で IRQ0 はマスクされている
@@ -4768,13 +4781,15 @@ fn start_timer(
     }
 
     // --- 4.5 キーボード（IRQ1）を用意する ---
-    setup_keyboard(logger);
+    let keyboard_present = setup_keyboard(logger, i8042);
 
     // --- 4.6 キーボードの配送を I/O APIC 経由へ移す（S2-d-1c）---
     //
     // `sti` より前に切り替え終える。割り込みが有効な状態で切り替えると、4 手の途中で
-    // IRQ1 が届く形になりうる。
-    switch_keyboard_to_io_apic(logger, apic);
+    // IRQ1 が届く形になりうる。**i8042 が無ければ配線しない**（HW-b。IRQ1 は閉じたまま）。
+    if keyboard_present {
+        switch_keyboard_to_io_apic(logger, apic);
+    }
 
     // --- 4.7 virtio-blk の割り込みを配線する（S13-d。ADR-0035）---
     //
@@ -4835,10 +4850,12 @@ fn start_timer(
     cpu::halt_forever();
 }
 
-/// i8042 を検証してから IRQ1 を解禁する（M4-e）。
+/// i8042 を検証してから IRQ1 を解禁する（M4-e）。**i8042 が無ければ、開けずに `false` を返す**
+/// （HW-b。`ADR-0068`）。
 ///
 /// 順序に意味がある。
 ///
+/// 0. FADT が「無い」と言っていれば探らない。**探って答えが無ければ、無いとして続ける**
 /// 1. コンフィグバイトを読んで、翻訳（セット 1）と割り込みが有効かを見る
 /// 2. 落ちていれば立てて書き戻し、読み直して一致を確認する
 /// 3. 出力バッファの残留データを読み捨てる
@@ -4848,8 +4865,33 @@ fn start_timer(
 /// 3 を 4 より前に置くのが要点。ファームウェアが残したバイトが最初のキー入力として
 /// 現れる事故を防ぐ。OVMF はブートメニューでキーを扱っているので、何か残っていても
 /// おかしくない。
-fn setup_keyboard(logger: &mut Logger<SerialPort>) {
+///
+/// # 無いときに止めない理由
+///
+/// **i8042 の無い機械は在りうる**（推測。`docs/hardware-inventory.md`）。**キーボードが無くても、
+/// シェルのプロンプトまでは進める**——入力の無いシェルは使えないが、止まって何も出さないより
+/// 多くが見える（USB の入力は HW-f）。**在るのに答えない場合は止めない代わりに `[ERROR]` を出す**
+/// （FADT が「在る」と言ったとき）。
+fn setup_keyboard(logger: &mut Logger<SerialPort>, i8042: kernel::acpi::I8042Presence) -> bool {
+    use kernel::acpi::I8042Presence;
     use keyboard::controller;
+
+    // --- 0. FADT の答えを見る（HW-b）---
+    match i8042 {
+        I8042Presence::Absent => {
+            logger.info(format_args!(
+                "i8042: the FADT says there is no 8042 controller; not probing ports 0x60/0x64, \
+                 continuing without a PS/2 keyboard (IRQ1 stays closed)"
+            ));
+            return false;
+        }
+        I8042Presence::Present => logger.info(format_args!(
+            "i8042: the FADT says there is an 8042 controller; probing it"
+        )),
+        I8042Presence::NotStated => logger.info(format_args!(
+            "i8042: the FADT does not say whether there is an 8042 controller; probing it"
+        )),
+    }
 
     // --- 1. コンフィグバイトを読む ---
     // SAFETY: 起動シーケンス中で IRQ1 はマスクされており、他の実行文脈が i8042 を
@@ -4857,10 +4899,21 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>) {
     let config = match unsafe { controller::read_config() } {
         Ok(config) => config,
         Err(error) => {
-            logger.error(format_args!(
-                "i8042: failed to read the configuration byte ({error:?}); halting"
-            ));
-            cpu::halt_forever();
+            let status = controller::status();
+            if i8042 == I8042Presence::Present {
+                logger.error(format_args!(
+                    "i8042: the FADT says there is an 8042 controller, but it did not answer \
+                     ({error:?}, status {status:#04x}); continuing without a PS/2 keyboard \
+                     (IRQ1 stays closed)"
+                ));
+            } else {
+                logger.warn(format_args!(
+                    "i8042: no controller answered on ports 0x60/0x64 ({error:?}, status \
+                     {status:#04x}); taking it as absent and continuing without a PS/2 keyboard \
+                     (IRQ1 stays closed)"
+                ));
+            }
+            return false;
         }
     };
     logger.info(format_args!(
@@ -4904,6 +4957,8 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>) {
     }
 
     // --- 4. IRQ1 を解禁する ---
+    // 開ける前に、在ることを記録する（`sti` 前の検証と心拍の行がこれを見る）。
+    keyboard::mark_controller_present();
     // SAFETY: ベクタ 0x21 には IRQ スタイルのスタブが入っており、ハンドラはデータ
     // ポートを読み切ってから EOI を送る。
     unsafe {
@@ -4925,6 +4980,7 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>) {
          (S2-d-1c re-routes it through the I/O APIC before sti, which changes the vector)",
         keyboard::delivery_vector()
     ));
+    true
 }
 
 /// キーボード（IRQ1）の配送を I/O APIC 経由へ切り替える（S2-d-1c）。

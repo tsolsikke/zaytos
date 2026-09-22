@@ -19,6 +19,10 @@
 //! [`ApicMmio`] として出す。**したがって「物理アドレスは境界の中に留まる」は
 //! もう成り立たない。** 留まるのは生バイトとパーサの型である。
 //!
+//! **HW-b で 2 つ目の消費者が現れた**（`ADR-0068`）。**`setup_keyboard` が、i8042 を
+//! 探るかどうかを FADT に訊く。** 出すのはその答え（[`I8042Presence`]）だけで、
+//! FADT の生の値は出さない。
+//!
 //! **物理アドレスなら出してよい理由。** 物理アドレスは `acpi` と `paging` が
 //! 共有する語彙であり、**写像する側がそれを受け取らなければ仕事ができない。**
 //! 境界が隠すべきなのは、その境界の内側だけで意味を持つ表現（テーブルの生バイト、
@@ -48,6 +52,7 @@
 //! （実測で `0xf6ed000..0xf76d000`）の中に落ちる可能性が構造的にある。
 //! そこを踏んだときに #PF で落ちるのではなく、検出して報告する。
 
+mod fadt;
 mod madt;
 mod rsdp;
 mod sabotage;
@@ -289,6 +294,36 @@ impl ApicMmio {
     }
 }
 
+/// FADT が i8042 について言っていること（HW-b。`ADR-0068`）。
+///
+/// **FADT の生の値は出さない**（モジュールの doc の「何を公開するか」）。**消費者
+/// （`setup_keyboard`）が要るのは、探るかどうかの答えだけである。**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum I8042Presence {
+    /// `IAPC_BOOT_ARCH` の 8042 のビットが立っている。
+    Present,
+    /// リビジョン 3 以上の FADT で、8042 のビットが落ちている。**探らない。**
+    Absent,
+    /// 言っていない（FADT のリビジョンが 3 未満か、FADT が無いか読めない）。**探って決める。**
+    NotStated,
+}
+
+/// [`survey`] が読み取ったもの。
+#[derive(Debug, Clone, Copy)]
+pub struct Survey {
+    pub apic: ApicMmio,
+    pub i8042: I8042Presence,
+}
+
+impl Survey {
+    const fn empty() -> Self {
+        Self {
+            apic: ApicMmio::empty(),
+            i8042: I8042Presence::NotStated,
+        }
+    }
+}
+
 /// 署名や OEM ID を、そのままログへ出せる形にする。
 ///
 /// **UTF-8 でないバイト列は実在する。** 壊れたテーブルを読んだときにここで
@@ -505,20 +540,21 @@ fn report_memory_type(
 ///
 /// # 戻り値
 ///
-/// 見つかった APIC の MMIO の所在（S1-c が写像に使う）。走査のどこかで
-/// 断念した場合は空を返す。**理由はこの関数がログへ出しているので、
+/// 見つかった APIC の MMIO の所在（S1-c が写像に使う）と、FADT が i8042 について
+/// 言っていること（HW-b）。走査のどこかで断念した場合は、それぞれ空と
+/// 「言っていない」を返す。**理由はこの関数がログへ出しているので、
 /// 呼び出し側が「なぜ空か」を再構成する必要はない。**
 pub fn survey(
     logger: &mut Logger<SerialPort>,
     rsdp_phys: PhysAddr,
     memory_map_bytes: &[u8],
     descriptor_size: u64,
-) -> ApicMmio {
+) -> Survey {
     if rsdp_phys.as_u64() == 0 {
         logger.error(format_args!(
             "acpi: the bootloader reported no RSDP; nothing to survey (S2 will need it)"
         ));
-        return ApicMmio::empty();
+        return Survey::empty();
     }
 
     // 破壊確認（未マップ / 窓の外）。既定ビルドでは受け取った値をそのまま返す。
@@ -543,7 +579,7 @@ pub fn survey(
     let mut buffer = [0u8; rsdp::READ_BUFFER_LENGTH];
     if let Err(e) = reader.read(rsdp_phys, &mut buffer[..rsdp::V1_LENGTH]) {
         report_read_error(logger, "the RSDP", e);
-        return ApicMmio::empty();
+        return Survey::empty();
     }
 
     let header = match rsdp::parse_header(&buffer[..rsdp::V1_LENGTH]) {
@@ -553,7 +589,7 @@ pub fn survey(
                 "acpi: the RSDP at {:#x} failed validation: {e:?}",
                 rsdp_phys.as_u64()
             ));
-            return ApicMmio::empty();
+            return Survey::empty();
         }
     };
     logger.info(format_args!(
@@ -593,11 +629,11 @@ pub fn survey(
             logger.error(format_args!(
                 "acpi: the RSDP names neither an XSDT nor an RSDT; there is no table to follow"
             ));
-            return ApicMmio::empty();
+            return Survey::empty();
         }
     };
 
-    let Some(madt_phys) = walk_root_table(
+    let Some(tables) = walk_root_table(
         logger,
         &reader,
         root_phys,
@@ -605,16 +641,31 @@ pub fn survey(
         memory_map_bytes,
         descriptor_size,
     ) else {
-        return ApicMmio::empty();
+        return Survey::empty();
     };
 
-    walk_madt(
-        logger,
-        &reader,
-        madt_phys,
-        memory_map_bytes,
-        descriptor_size,
-    )
+    let apic = match tables.madt {
+        Some(madt_phys) => walk_madt(
+            logger,
+            &reader,
+            madt_phys,
+            memory_map_bytes,
+            descriptor_size,
+        ),
+        None => ApicMmio::empty(),
+    };
+    // **MADT の後に読む**（HW-b）。**起動ログの既存の行の並びを動かさないためである。**
+    let i8042 = match tables.fadt {
+        Some(fadt_phys) => read_fadt(
+            logger,
+            &reader,
+            fadt_phys,
+            memory_map_bytes,
+            descriptor_size,
+        ),
+        None => I8042Presence::NotStated,
+    };
+    Survey { apic, i8042 }
 }
 
 /// 物理アドレスを [`PhysAddr`] にする。表せない値は報告して `None`。
@@ -730,10 +781,20 @@ fn read_and_verify_table(
     Some(length)
 }
 
-/// ルートテーブル（XSDT / RSDT）を走査し、MADT の物理アドレスを返す。
+/// ルートテーブルが挙げた表のうち、読むもの。
+struct RootTables {
+    madt: Option<PhysAddr>,
+    /// FADT（署名 `FACP`）。**i8042 が在るかを読む**（HW-b）。
+    fadt: Option<PhysAddr>,
+}
+
+/// ルートテーブル（XSDT / RSDT）を走査し、MADT と FADT の物理アドレスを返す。
 ///
 /// 各エントリが指すテーブルのヘッダを読んで署名を出す。**黙って MADT だけを
 /// 探して他を捨てない。** 何が置かれているかは S2 以降で効いてくる情報である。
+///
+/// **`None` はルートテーブル自体が読めなかったときである。** 表が見つからなかった
+/// ことは、それぞれ `None` の欄で返す。
 fn walk_root_table(
     logger: &mut Logger<SerialPort>,
     reader: &PhysReader,
@@ -741,7 +802,7 @@ fn walk_root_table(
     width: sdt::EntryWidth,
     memory_map_bytes: &[u8],
     descriptor_size: u64,
-) -> Option<PhysAddr> {
+) -> Option<RootTables> {
     let root_phys = checked_phys(logger, "the root table pointer", root_phys)?;
     report_memory_type(
         logger,
@@ -787,6 +848,8 @@ fn walk_root_table(
 
     let mut madt_phys: Option<PhysAddr> = None;
     let mut madt_count = 0usize;
+    let mut fadt_phys: Option<PhysAddr> = None;
+    let mut fadt_count = 0usize;
     // MCFG（PCIe の ECAM）の数（S13-a）。**読むのは数だけで、中身は解釈しない。**
     // PCI の走査（`kernel::pci`）はポート（`0xCF8`/`0xCFC`）を使っており、
     // **その前提「i440FX に ECAM は無い」が崩れたらこの判定行で見える。**
@@ -822,6 +885,13 @@ fn walk_root_table(
                 if header.has_signature(b"MCFG") {
                     mcfg_count += 1;
                 }
+                if header.has_signature(&fadt::SIGNATURE) {
+                    fadt_count += 1;
+                    // MADT と同じく、最初のものを採る。
+                    if fadt_phys.is_none() {
+                        fadt_phys = Some(phys);
+                    }
+                }
             }
             Err(e) => logger.error(format_args!(
                 "acpi:   [{index}] {:#x}: the header is not usable: {e:?}",
@@ -853,7 +923,90 @@ fn walk_root_table(
             as_text(&madt::SIGNATURE)
         ));
     }
-    madt_phys
+    if fadt_count > 1 {
+        logger.warn(format_args!(
+            "acpi: the root table lists {fadt_count} tables with the signature {:?}; \
+             using the first one at {:#x} and ignoring the rest",
+            as_text(&fadt::SIGNATURE),
+            fadt_phys.map(|p| p.as_u64()).unwrap_or(0)
+        ));
+    }
+    if fadt_phys.is_none() {
+        logger.warn(format_args!(
+            "acpi: no table with the signature {:?} (FADT) is listed; \
+             nothing says whether there is an 8042 controller",
+            as_text(&fadt::SIGNATURE)
+        ));
+    }
+    Some(RootTables {
+        madt: madt_phys,
+        fadt: fadt_phys,
+    })
+}
+
+/// FADT を検証して、i8042 について言っていることを読む（HW-b。`ADR-0068`）。
+///
+/// **読めなければ「言っていない」を返す**——**探る側が決める。** 理由はログへ出す。
+fn read_fadt(
+    logger: &mut Logger<SerialPort>,
+    reader: &PhysReader,
+    fadt_phys: PhysAddr,
+    memory_map_bytes: &[u8],
+    descriptor_size: u64,
+) -> I8042Presence {
+    report_memory_type(
+        logger,
+        "the FADT",
+        fadt_phys,
+        memory_map_bytes,
+        descriptor_size,
+    );
+
+    let mut buffer = [0u8; TABLE_READ_BUFFER_LENGTH];
+    let Some(length) = read_and_verify_table(
+        logger,
+        reader,
+        TableRequest {
+            what: "the FADT",
+            target: sabotage::Target::Fadt,
+            phys: fadt_phys,
+            expected_signature: &fadt::SIGNATURE,
+            minimum_length: fadt::V1_LENGTH as u32,
+        },
+        &mut buffer,
+    ) else {
+        return I8042Presence::NotStated;
+    };
+
+    let table = match fadt::parse(&buffer[..length]) {
+        Ok(table) => table,
+        Err(e) => {
+            logger.error(format_args!("acpi: the FADT is not usable: {e:?}"));
+            return I8042Presence::NotStated;
+        }
+    };
+    match (table.iapc_boot_arch, table.has_8042()) {
+        (Some(flags), Some(present)) => {
+            logger.info(format_args!(
+                "acpi: FADT revision {}: IAPC_BOOT_ARCH={flags:#06x} (8042 present={present})",
+                table.revision
+            ));
+            if present {
+                I8042Presence::Present
+            } else {
+                I8042Presence::Absent
+            }
+        }
+        _ => {
+            logger.info(format_args!(
+                "acpi: FADT revision {} predates the 8042 flag in IAPC_BOOT_ARCH (revision {}), \
+                 so it does not say whether there is an 8042 controller",
+                table.revision,
+                fadt::FIRST_REVISION_WITH_THE_8042_FLAG
+            ));
+            I8042Presence::NotStated
+        }
+    }
 }
 
 /// MADT を検証して列挙する。

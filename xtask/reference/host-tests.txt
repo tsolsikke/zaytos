@@ -226,6 +226,10 @@ common::window::tests::scrolling_down_stops_at_the_last_screenful
 common::window::tests::scrolling_up_stops_at_the_top
 common::window::tests::the_screen_row_is_none_outside_the_window
 common::window::tests::visible_never_passes_the_end
+kernel::acpi::fadt::tests::a_revision_3_table_says_whether_there_is_an_8042
+kernel::acpi::fadt::tests::a_table_before_revision_3_does_not_say
+kernel::acpi::fadt::tests::a_table_shorter_than_acpi_1_0_is_rejected
+kernel::acpi::fadt::tests::only_the_8042_bit_decides
 kernel::acpi::madt::tests::a_decoder_refuses_an_entry_of_another_type
 kernel::acpi::madt::tests::a_fixed_part_shorter_than_44_bytes_is_rejected
 kernel::acpi::madt::tests::a_single_trailing_byte_cannot_hold_an_entry_header

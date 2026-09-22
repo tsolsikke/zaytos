@@ -138,7 +138,12 @@ pub fn verify_ready_for_sti_with_timer(logger: &mut Logger<SerialPort>) -> Readi
     // 移すと、8259 側ではマスクされているのが正しい。移行後も IRQ1 を
     // 「開いているはず」と期待すると、正しい状態でこの検査が落ちる。
     // 移行状態を見て期待を作るので、移行の前後どちらでも成立する。
-    if crate::irq::routed_to_apic(crate::keyboard::KEYBOARD_IRQ) {
+    //
+    // **i8042 が無ければ IRQ1 は開けていない**（HW-b。`ADR-0068`）。8259 でも閉じている
+    // のが正しい。
+    if crate::irq::routed_to_apic(crate::keyboard::KEYBOARD_IRQ)
+        || !crate::keyboard::controller_present()
+    {
         return verify_ready(logger, &[0], true);
     }
     verify_ready(logger, &[0, crate::keyboard::KEYBOARD_IRQ], true)
@@ -1293,7 +1298,16 @@ pub unsafe fn run_timer_loop(
                         // PIC ISR にビットが残っていれば「EOI を送っていない」。
                         // どちらも「1 回動いて止まる」症状になるので、この 2 つが
                         // 無いと区別できない。
-                        crate::keyboard::controller::output_buffer_full() as u8,
+                        //
+                        // **i8042 が無ければ読まない**（HW-b。探らないと決めた機械で
+                        // ポートを叩かない）。
+                        if !crate::keyboard::controller_present() {
+                            "absent"
+                        } else if crate::keyboard::controller::output_buffer_full() {
+                            "1"
+                        } else {
+                            "0"
+                        },
                         // SAFETY: メインループは通常文脈で、ここは割り込み禁止中
                         // ではない。i8042/PIC を同時に触りうる別の実行文脈は、この
                         // コアの割り込みハンドラだけである（この関数を走らせるのは

@@ -32,6 +32,8 @@ pub enum Target {
     /// XSDT / RSDT。
     RootTable,
     Madt,
+    /// FADT（HW-b）。**壊す破壊は無い**（`read_and_verify_table` が対象を要るので名前を持つ）。
+    Fadt,
 }
 
 /// ヘッダを読んだ直後、検証の直前に効かせる破壊（署名・長さ）。

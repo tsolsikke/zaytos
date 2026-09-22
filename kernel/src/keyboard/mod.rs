@@ -10,7 +10,7 @@ pub mod buffer;
 pub mod controller;
 pub mod decode;
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// キーボード（IRQ1）の 8259 でのベクタ。
 ///
@@ -35,6 +35,23 @@ pub fn delivery_vector() -> usize {
 
 /// キーボードの IRQ 番号。
 pub const KEYBOARD_IRQ: u8 = 1;
+
+/// i8042 を確かめて IRQ1 を開けたか（HW-b。`ADR-0068`）。**`setup_keyboard` が開ける直前に立てる。**
+///
+/// **立っていなければ、ポート 0x60/0x64 を読まない**——**FADT が「無い」と言った機械では
+/// 探らないと決めた**（`ADR-0068` の HW-b）ので、心拍の行も読まない。**IRQ1 の期待
+/// （`sti` 前の検証）もこれで決まる。**
+static CONTROLLER_PRESENT: AtomicBool = AtomicBool::new(false);
+
+/// i8042 を確かめたことを記録する。**起動の順路で 1 回だけ呼ぶ。**
+pub fn mark_controller_present() {
+    CONTROLLER_PRESENT.store(true, Ordering::Relaxed);
+}
+
+/// i8042 を確かめて IRQ1 を開けたか。
+pub fn controller_present() -> bool {
+    CONTROLLER_PRESENT.load(Ordering::Relaxed)
+}
 
 /// 最初のキー入力が届いたベクタ番号。まだなら [`NO_VECTOR_YET`]。
 ///
