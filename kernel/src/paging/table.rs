@@ -40,6 +40,15 @@ pub enum PageTableError {
     UnexpectedHugePageEntry,
     /// 範囲の長さが 4KiB の倍数でない、または加算が範囲を出る。
     MisalignedRange,
+    /// フレームアロケータが配ったテーブルのフレームが、今の窓で触れる範囲の外だった
+    /// （`ADR-0068` の HW-a）。**自前のページ表へ切り替える前は、静的な初期ページ表が恒等で
+    /// 張る範囲（`BOOT_IDENTITY_REACH` の下）しか触れない。** **書く前に止める。**
+    FrameBeyondReach {
+        /// 配られたフレームの物理アドレス。
+        phys: u64,
+        /// 触れる範囲の終わり（排他）。
+        reach: u64,
+    },
 }
 
 /// `table_phys[index]` の生エントリを読む。
@@ -145,6 +154,11 @@ pub struct PageTableBuilder<'a, const CAP: usize> {
     /// グローバルな `direct_map()` を毎回引く形では表せない
     /// （`docs/deferred-decisions.md`）。
     direct_map: DirectMap,
+    /// テーブルのフレームとして受け取ってよい物理の範囲の終わり（排他。`ADR-0068` の HW-a）。
+    ///
+    /// **`None` は「窓が配られるフレームを全部覆う」である**（自前のページ表へ切り替えた後）。
+    /// **切り替え前の組み立ては、初期ページ表が恒等で張る `BOOT_IDENTITY_REACH` を渡す。**
+    reach: Option<u64>,
 }
 
 impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
@@ -153,12 +167,34 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
         frames: &'a mut FrameAllocator<CAP>,
         direct_map: DirectMap,
     ) -> Result<Self, PageTableError> {
-        let pml4_phys = Self::alloc_zeroed_table(frames, direct_map)?;
+        Self::with_reach(frames, direct_map, None)
+    }
+
+    /// 触れる範囲を限って構築を始める（`ADR-0068` の HW-a）。
+    ///
+    /// **自前のページ表へ切り替える前の組み立てで使う。** **配られたフレームが `reach` の外なら、
+    /// 書く前に [`PageTableError::FrameBeyondReach`] を返す**——**窓の外へ書けば、その場で
+    /// #PF になり、理由が残らない。**
+    pub fn new_within_reach(
+        frames: &'a mut FrameAllocator<CAP>,
+        direct_map: DirectMap,
+        reach: u64,
+    ) -> Result<Self, PageTableError> {
+        Self::with_reach(frames, direct_map, Some(reach))
+    }
+
+    fn with_reach(
+        frames: &'a mut FrameAllocator<CAP>,
+        direct_map: DirectMap,
+        reach: Option<u64>,
+    ) -> Result<Self, PageTableError> {
+        let pml4_phys = Self::alloc_zeroed_table(frames, direct_map, reach)?;
         Ok(Self {
             frames,
             pml4_phys,
             frames_used: 1,
             direct_map,
+            reach,
         })
     }
 
@@ -173,14 +209,26 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
     fn alloc_zeroed_table(
         frames: &mut FrameAllocator<CAP>,
         direct_map: DirectMap,
+        reach: Option<u64>,
     ) -> Result<PhysAddr, PageTableError> {
         let phys = frames.allocate_frame().ok_or(PageTableError::OutOfFrames)?;
+        // **触れる範囲の外なら、書く前に止める**（`ADR-0068` の HW-a）。
+        if let Some(reach) = reach {
+            if phys.as_u64() + FRAME_SIZE > reach {
+                return Err(PageTableError::FrameBeyondReach {
+                    phys: phys.as_u64(),
+                    reach,
+                });
+            }
+        }
         // SAFETY: `phys` は今このフレームアロケータから確保したばかりの、
-        // 他の誰も参照していないフレームである。フレームアロケータの
-        // 空き集合は `crate::memory_map::classify` の `Free` 判定に
-        // 由来し、`super::plan` が同じ判定を使ってこの領域も恒等
-        // マッピング対象に含めているため、現在有効な（UEFI 由来の）
-        // ページテーブル下でこのアドレスへアクセスできる（ADR-0009）。
+        // 他の誰も参照していないフレームである。**今の窓でこのアドレスへ届くことは、
+        // 呼び出し側が決めた `reach` で上で確かめた**（`ADR-0068` の HW-a）。**`reach` が
+        // `None` なのは、窓が配られるフレームを全部覆うとき（自前のページ表へ切り替えた後）
+        // だけである**——**フレームアロケータの空き集合は `crate::memory_map::classify` の
+        // `Free` 判定に由来し、`super::plan` が同じ判定でこの領域も張っている（ADR-0009）。**
+        // **以前は「現在有効な（UEFI 由来の）ページテーブル」と書いていたが、切り替え前に
+        // 有効なのはカーネルの静的な初期ページ表で、[0, 1GiB) しか張らない。**
         // 1 ページ分をゼロ初期化することで、未初期化のゴミが
         // Present ビットの立った不正なエントリとして解釈されるのを
         // 防ぐ。
@@ -214,7 +262,7 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
             }
             return Ok(PhysAddr::new_const(existing & ADDR_MASK));
         }
-        let child_phys = Self::alloc_zeroed_table(self.frames, self.direct_map)?;
+        let child_phys = Self::alloc_zeroed_table(self.frames, self.direct_map, self.reach)?;
         self.frames_used += 1;
         // SAFETY: `table_phys`/`index` は上記と同じ契約。新規に確保した
         // `child_phys` を Present + Writable な中間エントリとして書く

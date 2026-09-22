@@ -12855,6 +12855,14 @@ const BOOT_LOG_VOLATILE_MARKERS: &[&str] = &[
     // **バイト数の行は落とさない。** あちらは同じ起動シーケンスなら同じ量を送るので、
     // **参照の対象として成立している。** 落とすのは所要の行だけである。
     "console: flush cycles",
+    // 受け渡しの領域の番地（`ADR-0068` の HW-a）。**OVMF の配り方で動き、`-smp` の数でも動く**
+    // （実測。1・2・4 で 0xde5f000・0xde74000・0xde78000）。**`memory map: descriptors_len=` と
+    // 同じ理由である。**
+    //
+    // **隠したものを見る者**: **「1GiB の下に置いた」は、機械の変種（`q35` の 6GiB）が起動する
+    // ことが覆う。** **受け渡しを上へ戻す破壊（`handoff-anywhere`）は、その判定を落とす。**
+    "handoff: BootInfo at",
+    "handoff: copied the memory map",
 ];
 
 /// 起動ログのうち、**コア数で変わる行**（S6-d の定義 3）。

@@ -271,6 +271,10 @@ impl<const CAP: usize> FrameAllocator<CAP> {
     }
 
     /// 空きフレームを1つ確保する。確保順は先頭（最小のフレーム番号）から。
+    ///
+    /// **範囲は [`Self::insert_free_range`] が番地の順に保つので、最も低い空きから配る。**
+    /// **切り替え前のページ表の組み立ては、この性質に寄りかかる**（`ADR-0068` の HW-a。
+    /// 静的な初期ページ表は [0, 1GiB) しか張らない）。
     pub fn allocate_frame(&mut self) -> Option<PhysAddr> {
         if self.range_count == 0 {
             return None;
@@ -669,6 +673,26 @@ mod tests {
         assert_eq!(allocator.allocate_frame(), Some(f(12)));
         assert_eq!(allocator.free_frame_count(), 0);
         assert_eq!(allocator.allocate_frame(), None);
+    }
+
+    /// **メモリマップが番地の順でなくても、範囲は番地の順に保たれ、最も低い空きから配る**
+    /// （`ADR-0068` の HW-a）。**UEFI の仕様はマップの並びを約束しない。** **切り替え前の
+    /// ページ表の組み立ては、この性質で初期ページ表の届く範囲（[0, 1GiB)）に収まる。**
+    #[test]
+    fn ranges_stay_in_address_order_whatever_the_map_order() {
+        let mut allocator = FrameAllocator::<8>::new();
+        // 高い番地から入れる（4GiB の上、2GiB の辺り、1MiB の辺り）。
+        allocator.insert_free_range(0x10_0000, 16).unwrap();
+        allocator.insert_free_range(0x8_0000, 16).unwrap();
+        allocator.insert_free_range(0x100, 16).unwrap();
+
+        let starts: Vec<u64> = allocator.free_ranges().map(|(start, _)| start).collect();
+        assert_eq!(starts, vec![0x100, 0x8_0000, 0x10_0000], "番地の順に並ぶ");
+        assert_eq!(
+            allocator.allocate_frame(),
+            Some(f(0x100)),
+            "最も低い空きから配る"
+        );
     }
 
     #[test]

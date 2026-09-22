@@ -332,6 +332,7 @@ kernel::frame_allocator::tests::insert_that_exactly_fills_a_gap_merges_both_neig
 kernel::frame_allocator::tests::insert_then_allocate_returns_frames_from_the_range
 kernel::frame_allocator::tests::new_allocator_is_empty
 kernel::frame_allocator::tests::non_adjacent_regions_stay_as_separate_ranges
+kernel::frame_allocator::tests::ranges_stay_in_address_order_whatever_the_map_order
 kernel::gdt::layout::tests::a_new_tss_has_no_stacks_and_no_io_bitmap
 kernel::gdt::layout::tests::a_selector_packs_the_index_above_the_rpl
 kernel::gdt::layout::tests::a_tss_descriptor_is_present_and_marked_as_an_available_tss

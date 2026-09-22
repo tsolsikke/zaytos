@@ -161,6 +161,11 @@ core::arch::global_asm!(
     hi_after = const BOOT_PDPT_HIGH_AFTER,
 );
 
+// **初期ページ表が恒等で張る範囲は、`BOOT_IDENTITY_REACH` と一致する**（`ADR-0068` の HW-a）。
+// **2MiB ページ 512 枚（`.rept 512`）で 1GiB である。** **ブートローダはこの値の下へ受け渡しを置く**
+// ——**片方だけが動けば、受け渡しが恒等の外へ出る。**
+const _: () = assert!(common::boot_info::BOOT_IDENTITY_REACH == 512 * (2 << 20));
+
 /// ブートスタックの大きさ。トランポリンが CR3 切り替え後に RSP をここへ移す。
 ///
 /// `_start` の序盤だけで使う浅いスタックで、深さは [`report_boot_stack_usage`]
@@ -803,13 +808,20 @@ extern "sysv64" fn kernel_main() -> ! {
     }
 
     // ここから実際にページテーブルへ書き込む（`paging::table`）。
-    let mut builder = PageTableBuilder::new(&mut allocator, common::addr::direct_map())
-        .unwrap_or_else(|e| {
-            logger.error(format_args!(
-                "paging: failed to start page table build: {e:?}"
-            ));
-            cpu::halt_forever();
-        });
+    //
+    // **切り替え前なので、触れるのは静的な初期ページ表が恒等で張る範囲だけである**
+    // （`ADR-0068` の HW-a）。**配られたフレームがその外なら、書く前に止めて理由を出す。**
+    // **アロケータは範囲を番地の順に保ち（`insert_free_range`）、先頭から配るので、
+    // 低い RAM から配られる。** **この確かめは、その性質が崩れたときに声を出すためのものである。**
+    let mut builder = PageTableBuilder::new_within_reach(
+        &mut allocator,
+        common::addr::direct_map(),
+        common::boot_info::BOOT_IDENTITY_REACH,
+    )
+    .unwrap_or_else(|e| {
+        report_page_table_error_before_switch(&mut logger, "start the page table build", e);
+        cpu::halt_forever();
+    });
 
     let mut huge_page_count: u64 = 0;
     let mut small_page_count: u64 = 0;
@@ -835,6 +847,12 @@ extern "sysv64" fn kernel_main() -> ! {
             m.huge,
             e
         ));
+        if matches!(
+            e,
+            kernel::paging::table::PageTableError::FrameBeyondReach { .. }
+        ) {
+            report_page_table_error_before_switch(&mut logger, "map a planned page", e);
+        }
         cpu::halt_forever();
     }
 
@@ -1085,7 +1103,6 @@ extern "sysv64" fn kernel_main() -> ! {
     logger.info(format_args!(
         "paging: CR3 switch verified. now running under self-built page tables."
     ));
-
     // === higher-half A-1: direct physical map の導入 ===
     //
     // 恒等と direct map 窓（DIRECT_MAP_BASE + phys）の両方を持つ新テーブルを構築し、
@@ -12385,6 +12402,26 @@ fn activate_direct_map_window(logger: &mut Logger<SerialPort>) {
          high addresses. identity kept.",
         now.base().as_u64()
     ));
+}
+
+/// 切り替え前のページ表の組み立てが失敗した理由を出す（`ADR-0068` の HW-a）。
+///
+/// **届く範囲の外のフレームだけは、専用の 1 行を出す**——**`xtask` の機械の変種の破壊
+/// （配りを高い番地からにする）が、狙いどおりにここで止まったことを判定に使う。**
+fn report_page_table_error_before_switch(
+    logger: &mut Logger<SerialPort>,
+    what: &str,
+    error: kernel::paging::table::PageTableError,
+) {
+    match error {
+        kernel::paging::table::PageTableError::FrameBeyondReach { phys, reach } => {
+            logger.error(format_args!(
+                "paging: the frame allocator handed out a page-table frame at {phys:#x} before the \
+                 CR3 switch, but the boot page table reaches only below {reach:#x}; halting"
+            ));
+        }
+        other => logger.error(format_args!("paging: failed to {what}: {other:?}")),
+    }
 }
 
 /// A-2: フレームバッファのハンドルを高位 base へ載せ替える。

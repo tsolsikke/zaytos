@@ -9,7 +9,8 @@ use core::mem;
 use common::addr::PhysAddr;
 use common::boot_info::{
     BootInfo, FramebufferInfo, KernelEntryFn, MemoryMapInfo, PixelFormat as BiPixelFormat,
-    BOOT_INFO_MAGIC, BOOT_INFO_PAGE_COUNT, BOOT_INFO_VERSION,
+    BOOT_IDENTITY_REACH, BOOT_INFO_MAGIC, BOOT_INFO_PAGE_COUNT, BOOT_INFO_VERSION,
+    HANDOFF_MEMORY_MAP_PAGES,
 };
 use common::elf::Elf;
 use common::log::Logger;
@@ -229,18 +230,15 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
         framebuffer.size_bytes
     ));
 
-    // --- 3. BootInfo 用ページの確保 ---
-    let boot_info_ptr = uefi::boot::allocate_pages(
-        AllocateType::AnyPages,
-        MemoryType::LOADER_DATA,
-        BOOT_INFO_PAGE_COUNT,
-    )
-    .unwrap_or_else(|e| {
-        logger.error(format_args!("AllocatePages for BootInfo failed: {e:?}"));
-        panic!("failed to allocate the BootInfo page");
-    })
-    .as_ptr()
-    .cast::<BootInfo>();
+    // --- 3. 受け渡しの領域の確保（`ADR-0068` の HW-a）---
+    //
+    // **BootInfo とメモリマップの写しを、カーネルの静的な初期ページ表が恒等で張る範囲
+    // （`BOOT_IDENTITY_REACH` の下）に置く。** **カーネルは自前のページ表へ切り替えるまで、
+    // その範囲しか恒等で触れない。** **`AnyPages` はファームウェアの配り方しだいで上へ行き、
+    // メモリが 1GiB を超えると、カーネルが最初に BootInfo を読む所で #PF になった**
+    // （`tools/qemu-variants.py` の `q35-1500m`）。
+    let handoff = allocate_handoff(&mut logger);
+    let boot_info_ptr = handoff.boot_info;
 
     // --- 3.5. ACPI の RSDP を引く（ExitBootServices より前）---
     //
@@ -265,14 +263,15 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
     logger.info(format_args!("ExitBootServices: done"));
 
     let meta = memory_map.meta();
-    // 恒等マッピングの下なので、このポインタは物理アドレスそのものである。
-    let descriptors_ptr = PhysAddr::new(memory_map.buffer().as_ptr() as u64)
-        .expect("the memory map buffer address does not fit in 52 bits");
+    // **メモリマップを受け渡しの領域へ写す**（`ADR-0068` の HW-a）。**uefi-rs のバッファは
+    // ファームウェアの配り方しだいで 1GiB の上に在りうる。** ExitBootServices の後も、
+    // ブートローダはファームウェアの恒等写像の下で動いているので、両方とも読み書きできる。
+    let descriptors_ptr = handoff.take_memory_map(&mut logger, memory_map.buffer(), meta.map_size);
 
-    // SAFETY: boot_info_ptr は直前に AllocatePages(AnyPages, ..,
-    // BOOT_INFO_PAGE_COUNT) で確保した、他に誰も参照していない領域を指す。
-    // BootInfo 一つ分の書き込みはそのページ内に収まる
-    // (size_of::<BootInfo>() < BOOT_INFO_PAGE_COUNT * 4096)。
+    // SAFETY: boot_info_ptr は `allocate_handoff` が AllocatePages で確保した受け渡しの
+    // 領域の先頭の `BOOT_INFO_PAGE_COUNT` ページを指し、他に誰も参照していない
+    // （メモリマップの写しはその後ろのページである）。BootInfo 一つ分の書き込みは
+    // そのページ内に収まる (size_of::<BootInfo>() < BOOT_INFO_PAGE_COUNT * 4096)。
     unsafe {
         boot_info_ptr.write(BootInfo {
             magic: BOOT_INFO_MAGIC,
@@ -312,6 +311,89 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
     // 戻らない（kernel 側の `_start` は `-> !`）。ExitBootServices は既に
     // 済んでおり、以降 Boot Services には触れない。
     unsafe { entry(boot_info_ptr) }
+}
+
+/// 受け渡しの領域（`ADR-0068` の HW-a）。**BootInfo を先頭の 1 ページに、メモリマップの写しを
+/// その後ろに置く。**
+struct Handoff {
+    boot_info: *mut BootInfo,
+    /// メモリマップの写しの先頭。
+    memory_map: *mut u8,
+}
+
+impl Handoff {
+    /// メモリマップの写しに使えるバイト数。
+    const MEMORY_MAP_CAPACITY: usize = HANDOFF_MEMORY_MAP_PAGES * PAGE_SIZE as usize;
+
+    /// ExitBootServices が返したメモリマップを領域へ写し、写しの物理アドレスを返す。
+    ///
+    /// **入りきらなければ、飛ぶ前に止まり、理由を出す。** **ExitBootServices の後は確保できない。**
+    fn take_memory_map(
+        &self,
+        logger: &mut Logger<SerialPort>,
+        buffer: &[u8],
+        map_size: usize,
+    ) -> PhysAddr {
+        if map_size > Self::MEMORY_MAP_CAPACITY || map_size > buffer.len() {
+            logger.error(format_args!(
+                "handoff: the memory map is {map_size} byte(s) but the handoff area holds {} \
+                 (HANDOFF_MEMORY_MAP_PAGES={HANDOFF_MEMORY_MAP_PAGES}); halting before the jump",
+                Self::MEMORY_MAP_CAPACITY
+            ));
+            panic!("the memory map does not fit in the handoff area");
+        }
+        // SAFETY: 写し先は `allocate_handoff` が LOADER_DATA で確保した、他に誰も参照していない
+        // 領域で、`MEMORY_MAP_CAPACITY` バイトある（上で大きさを確かめた）。写し元は
+        // ExitBootServices が返したバッファで、`map_size` バイトは `buffer` の内側である。
+        // 2 つは別々の確保なので重ならない。ブートローダは恒等写像の下で動いている。
+        unsafe {
+            core::ptr::copy_nonoverlapping(buffer.as_ptr(), self.memory_map, map_size);
+        }
+        let phys = PhysAddr::new(self.memory_map as u64)
+            .expect("the handoff area lies below BOOT_IDENTITY_REACH");
+        logger.info(format_args!(
+            "handoff: copied the memory map ({map_size} byte(s)) to {:#x}; the firmware's buffer \
+             was at {:#x}",
+            phys.as_u64(),
+            buffer.as_ptr() as u64
+        ));
+        phys
+    }
+}
+
+/// 受け渡しの領域を、カーネルの初期ページ表が恒等で張る範囲の下に確保する（`ADR-0068` の HW-a）。
+///
+/// **`AllocateType::MaxAddress` は「この番地以下に置く」である**（UEFI の仕様）。
+/// **確保できなければ止まる**——**上に置けば、カーネルが最初の一読で #PF になる。**
+fn allocate_handoff(logger: &mut Logger<SerialPort>) -> Handoff {
+    let pages = BOOT_INFO_PAGE_COUNT + HANDOFF_MEMORY_MAP_PAGES;
+    let base = uefi::boot::allocate_pages(
+        AllocateType::MaxAddress(BOOT_IDENTITY_REACH - 1),
+        MemoryType::LOADER_DATA,
+        pages,
+    )
+    .unwrap_or_else(|e| {
+        logger.error(format_args!(
+            "handoff: AllocatePages below {BOOT_IDENTITY_REACH:#x} for {pages} page(s) failed: \
+             {e:?}; halting"
+        ));
+        panic!("failed to allocate the handoff area");
+    })
+    .as_ptr();
+    let base_phys = base as u64;
+    let end = base_phys + pages as u64 * PAGE_SIZE;
+    logger.info(format_args!(
+        "handoff: BootInfo at {base_phys:#x}, the handoff area is {base_phys:#x}..{end:#x} \
+         (below {BOOT_IDENTITY_REACH:#x} = {})",
+        end <= BOOT_IDENTITY_REACH
+    ));
+    // SAFETY: `base` は今確保した `pages` ページの先頭で、先頭の `BOOT_INFO_PAGE_COUNT` ページを
+    // BootInfo に、その後ろをメモリマップの写しに使う。足し算は確保した範囲の内側である。
+    let memory_map = unsafe { base.add(BOOT_INFO_PAGE_COUNT * PAGE_SIZE as usize) };
+    Handoff {
+        boot_info: base.cast::<BootInfo>(),
+        memory_map,
+    }
 }
 
 /// UEFI の configuration table から ACPI の RSDP の物理アドレスを引く。
