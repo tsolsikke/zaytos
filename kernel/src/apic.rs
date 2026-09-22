@@ -1894,6 +1894,16 @@ pub fn calibrate_timer(
                 pm_timer.port(),
                 pm_timer.bits()
             ));
+            // 破壊 (HW-c, pm-timer-double-frequency): PM タイマの周波数の定数を 2 倍にする。
+            // **カーネル内の比は自己無矛盾のまま、実時間との比が半分になる**（`lapic-timer-test`
+            // の `scaled-calibration` と同じ検出経路）。**当たったことを出す**——**出ていなければ
+            // 空振りなので、判定の側が落とす。**
+            #[cfg(feature = "pm-timer-double-frequency")]
+            logger.warn(format_args!(
+                "apic: SABOTAGE applied - the PM timer frequency constant is doubled \
+                 ({} Hz instead of the specification's 3579545 Hz)",
+                crate::pmtimer::HZ
+            ));
             match sample_with_pm_timer(lapic, pm_timer) {
                 Some(samples) => (samples, CalibrationReference::PmTimer),
                 None => {

@@ -23,7 +23,15 @@
 use common::port::inl;
 
 /// PM タイマの周波数（ACPI が定める値）。**機械に依らない。**
-pub const HZ: u64 = 3_579_545;
+///
+/// 破壊 (HW-c, pm-timer-double-frequency): **2 倍にする。** **較正が 2 倍に出て、タイマは半分の
+/// 速さで走る。** **カーネル内の比は自己無矛盾のままなので、実時間と突き合わせて初めて見える**
+/// （`lapic-timer-test` の速さの判定）。
+pub const HZ: u64 = if cfg!(feature = "pm-timer-double-frequency") {
+    2 * 3_579_545
+} else {
+    3_579_545
+};
 
 /// いちばん狭い幅（ビット）。**24 ビットの PM タイマは約 4.7 秒で一周する。**
 ///

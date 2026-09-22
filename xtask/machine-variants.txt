@@ -15,5 +15,6 @@ pc-6g            pc                6G      file
 q35-no-i8042     q35,i8042=off     256M    file
 pc-no-i8042      pc,i8042=off      256M    file
 q35-no-pit       q35,pit=off       256M    file
+pc-no-pit        pc,pit=off        256M    file
 q35-no-hpet      q35,hpet=off      256M    file
 pc-no-serial     pc                256M    none

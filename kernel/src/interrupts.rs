@@ -718,6 +718,14 @@ pub unsafe fn run_timer_loop(
     // 較正は測るだけで、LAPIC タイマをタイマとして使わない。LVT Timer は
     // マスクされたままで、LINT0 と SVR にも触らない。
     if let Some(apic) = apic {
+        // 破壊 (HW-c, pm-timer-treated-as-absent): PM タイマを無いものとして渡す。
+        // **PIT が刻まない構成（`pit=off`）で、両方無い道を通す**——**較正の基準が 1 つも
+        // 無いことを言って止まる行が出る。** **直す前は黙って止まっていた。**
+        let pm_timer = if cfg!(feature = "pm-timer-treated-as-absent") {
+            None
+        } else {
+            pm_timer
+        };
         let calibration = crate::apic::calibrate_timer(logger, apic, pm_timer);
 
         // === S2-d-1b: 2 つ目のコントローラ実装を 1 回だけ読ませる ===

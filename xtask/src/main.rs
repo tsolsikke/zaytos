@@ -6362,6 +6362,7 @@ fn machine_variant(name: &str) -> Result<MachineVariant> {
 /// - `q35-no-i8042`（HW-b）——**FADT（リビジョン 3）が「8042 は無い」と言う。探らずに続く行を見る。**
 /// - `pc-no-i8042`（HW-b）——**FADT（リビジョン 1）は何も言わない。探って答えが無く、続く行を見る。**
 ///   **`q35` だけでは探る側の道を通らない**（FADT が先に答える）ので、2 つ置く。
+/// - `q35-no-pit`（HW-c）——**PIT が刻まない。** **ACPI の PM タイマで較正して進む行を見る。**
 const MACHINE_VARIANT_CHECKS: &[(&str, VariantExpect)] = &[
     ("q35-6g", VariantExpect::Prompt),
     (
@@ -6371,6 +6372,10 @@ const MACHINE_VARIANT_CHECKS: &[(&str, VariantExpect)] = &[
     (
         "pc-no-i8042",
         VariantExpect::PromptAndLine("i8042: no controller answered"),
+    ),
+    (
+        "q35-no-pit",
+        VariantExpect::PromptAndLine("apic: LAPIC timer calibration against the ACPI PM timer"),
     ),
 ];
 
@@ -6404,6 +6409,14 @@ const MACHINE_VARIANT_SABOTAGES: &[(&str, &str, bool, VariantExpect)] = &[
         VariantExpect::StopsWith(
             "i8042: failed to read the configuration byte (InputBufferStuck); halting",
         ),
+    ),
+    // **PM タイマを無いものとして扱う**——**較正の基準が 1 つも無いと言って止まる行。**
+    // **直す前はここで黙って止まっていた**（`halting` の行も出なかった）。
+    (
+        "q35-no-pit",
+        "pm-timer-treated-as-absent",
+        false,
+        VariantExpect::StopsWith("apic: the PIT did not tick and the FADT names no PM timer"),
     ),
 ];
 
@@ -6443,6 +6456,16 @@ const MACHINE_VARIANT_CONFIGS: &[(&str, &str, VariantExpect)] = &[(
 /// 256MiB と 1GiB。2026-09-22）**ので、その 7 倍に取る。**
 const MACHINE_VARIANT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// 起こし方へ機械の変種を当てる（`ADR-0068`）。**メモリと機械だけを変える**——**他の引数は
+/// 既定の起動と同じである。** **`--machine-variant` と `--lapic-timer-test` が共有する。**
+fn apply_machine_variant(qemu_args: &mut Vec<std::ffi::OsString>, variant: &MachineVariant) {
+    if let Some(at) = qemu_args.iter().position(|a| a == "-m") {
+        qemu_args[at + 1] = variant.memory.into();
+    }
+    qemu_args.push("-machine".into());
+    qemu_args.push(variant.machine.into());
+}
+
 /// 機械の変種を 1 つ起こして判定する（`ADR-0068`）。
 fn cmd_machine_variant(
     variant: &MachineVariant,
@@ -6477,12 +6500,7 @@ fn cmd_machine_variant(
         accelerator: Accelerator::Tcg,
         debug_events: DebugEvents::IntAndCpuReset,
     });
-    // **メモリと機械だけを変える。** 他の引数は既定の起動と同じである。
-    if let Some(at) = qemu_args.iter().position(|a| a == "-m") {
-        qemu_args[at + 1] = variant.memory.into();
-    }
-    qemu_args.push("-machine".into());
-    qemu_args.push(variant.machine.into());
+    apply_machine_variant(&mut qemu_args, variant);
 
     let mut child = Command::new("qemu-system-x86_64")
         .args(&qemu_args)
@@ -12089,14 +12107,20 @@ struct LapicTimerTest {
     features: &'static [&'static str],
     /// 実時間との比がこの範囲に入るべきか。
     expect_within_tolerance: bool,
-    /// 破壊が適用されたことを示すマーカー（空なら見ない）。
+    /// この回で必ず出ていなければならない行（空なら見ない）。
     ///
-    /// **破壊のフックが踏まれなかった場合、破壊ビルドは正常に見えて緑になる。**
-    /// 適用の痕跡を必須にして、空振りを落とす。
-    sabotage_marker: &'static str,
+    /// **破壊の回では、破壊のフックを踏んだ痕跡である**——**踏まれなければ、破壊ビルドは
+    /// 正常に見えて緑になる。** **正常の回では、その道を通った痕跡である**
+    /// （`rate-on-pm-timer` は「PM タイマで較正した」の行。`ADR-0068` の HW-c）。
+    required_marker: &'static str,
     /// 空でなければ、**カーネルがこの行を出して停止することを期待する。**
     /// 速さの比ではなく、名指しの検出で捕まる破壊に使う。
     expect_halt_marker: &'static str,
+    /// 空でなければ、**その機械の変種で起こす**（`ADR-0068` の HW-c）。
+    ///
+    /// **`pit=off` の機械で、PM タイマを基準に較正したタイマの速さを見るために足した**——
+    /// **プロンプトが出るだけでは、較正値が 2 倍でも通る。**
+    machine_variant: &'static str,
 }
 
 const LAPIC_TIMER_TESTS: &[LapicTimerTest] = &[
@@ -12105,8 +12129,9 @@ const LAPIC_TIMER_TESTS: &[LapicTimerTest] = &[
         // **シェルへ渡さない構成で測る（S11-11）。** 20 秒ぶんのティックが要る。
         features: &["keep-steady-loop"],
         expect_within_tolerance: true,
-        sabotage_marker: "",
+        required_marker: "",
         expect_halt_marker: "",
+        machine_variant: "",
     },
     // 較正の戻り値を 2 倍にする。**カーネル内の比は変わらないが、実時間との
     // 比は倍になる。** これが「較正値が初期カウントへ実際に流れている」ことの
@@ -12115,8 +12140,9 @@ const LAPIC_TIMER_TESTS: &[LapicTimerTest] = &[
         name: "scaled-calibration",
         features: &["lapic-timer-scale-calibration-test"],
         expect_within_tolerance: false,
-        sabotage_marker: "apic: SABOTAGE applied - the calibration result is scaled",
+        required_marker: "apic: SABOTAGE applied - the calibration result is scaled",
         expect_halt_marker: "",
+        machine_variant: "",
     },
     // 較正で書く分周と、戻り値に載せる分周を食い違わせる。**較正は分周なしで
     // 測るので周波数が 16 倍に出て、運用は 16 分周で走る。** 実時間との比が
@@ -12129,8 +12155,9 @@ const LAPIC_TIMER_TESTS: &[LapicTimerTest] = &[
         name: "wrong-divide",
         features: &["lapic-timer-wrong-divide-test"],
         expect_within_tolerance: false,
-        sabotage_marker: "",
+        required_marker: "",
         expect_halt_marker: "",
+        machine_variant: "",
     },
     // PIC を全マスクせずに LVT を開ける。**速さの比では捕まらない。**
     // 切り替えの直後に IMR を読み戻す検査が、IRQ0 が開いたままであることを
@@ -12140,8 +12167,33 @@ const LAPIC_TIMER_TESTS: &[LapicTimerTest] = &[
         name: "no-mask-all",
         features: &["lapic-timer-no-mask-all-test"],
         expect_within_tolerance: false,
-        sabotage_marker: "",
+        required_marker: "",
         expect_halt_marker: "lapic-timer: the 8259 is not fully masked",
+        machine_variant: "",
+    },
+    // **PM タイマを基準に較正したタイマの速さ**（`ADR-0068` の HW-c）。
+    //
+    // **`pit=off` の機械で走らせる**——**PIT が刻まないので、較正は PM タイマへ倒れる。**
+    // **プロンプトが出るだけでは足りない**——**周波数の定数や式を間違えてタイマが 2 倍の速さで
+    // 刻んでも、起動は通る**（レビューの足す1点。2026-09-23）。**ホストの実時間と突き合わせる。**
+    LapicTimerTest {
+        name: "rate-on-pm-timer",
+        features: &["keep-steady-loop"],
+        expect_within_tolerance: true,
+        required_marker: "apic: LAPIC timer calibration against the ACPI PM timer",
+        expect_halt_marker: "",
+        machine_variant: "q35-no-pit",
+    },
+    // **PM タイマの周波数の定数を 2 倍にする。** **較正が 2 倍に出て、タイマは半分の速さで走る。**
+    // **カーネル内の比は自己無矛盾のままなので、実時間との比だけが崩れる**
+    // （`scaled-calibration` と同じ検出経路で、主張は「PM タイマの周波数が正しいこと」である）。
+    LapicTimerTest {
+        name: "pm-timer-double-frequency",
+        features: &["keep-steady-loop", "pm-timer-double-frequency"],
+        expect_within_tolerance: false,
+        required_marker: "apic: SABOTAGE applied - the PM timer frequency constant is doubled",
+        expect_halt_marker: "",
+        machine_variant: "q35-no-pit",
     },
 ];
 
@@ -12177,7 +12229,7 @@ fn cmd_lapic_timer_test(kind: &str) -> Result<()> {
     let debug_log = workspace_root.join("target").join("qemu-debug.log");
     let _ = fs::remove_file(&debug_log);
 
-    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+    let mut qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
@@ -12188,6 +12240,10 @@ fn cmd_lapic_timer_test(kind: &str) -> Result<()> {
         accelerator: Accelerator::Tcg,
         debug_events: DebugEvents::IntAndCpuReset,
     });
+    // **機械の変種を当てる**（`ADR-0068` の HW-c）。**起こし方の表は 1 つである。**
+    if !test.machine_variant.is_empty() {
+        apply_machine_variant(&mut qemu_args, &machine_variant(test.machine_variant)?);
+    }
 
     let mut child = Command::new("qemu-system-x86_64")
         .args(&qemu_args)
@@ -12238,17 +12294,19 @@ fn cmd_lapic_timer_test(kind: &str) -> Result<()> {
 
     let mut ok = true;
 
-    // 破壊が実際に適用されたこと。**空振りを落とす。**
-    if !test.sabotage_marker.is_empty() {
-        let applied = serial.contains(test.sabotage_marker);
+    // **この回が通ったはずの道の痕跡。** **空振りを落とす**（破壊なら踏まれたこと、
+    // 正常なら PM タイマで較正したこと）。
+    if !test.required_marker.is_empty() {
+        let seen = serial.contains(test.required_marker);
         println!(
-            "{context}: the sabotage was actually applied = {}",
-            if applied { "OK" } else { "NG" }
+            "{context}: the run carried the required line = {} (`{}`)",
+            if seen { "OK" } else { "NG" },
+            test.required_marker
         );
-        if !applied {
-            println!("{context}: the sabotage hook was never reached, so this run proves nothing");
+        if !seen {
+            println!("{context}: that line never appeared, so this run proves nothing");
         }
-        ok &= applied;
+        ok &= seen;
     }
 
     // 名指しの検出で捕まる破壊は、速さの比を見ない。
@@ -18234,6 +18292,8 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "frame-allocator-hands-out-high-first",
     // `ADR-0068` の HW-b。**i8042 を探って答えが無ければ止める（直す前の形）。**
     "i8042-halts-when-absent",
+    // `ADR-0068` の HW-c。**ACPI の PM タイマを無いものとして扱う。**
+    "pm-timer-treated-as-absent",
 ];
 
 /// 内部を隠す約束のディレクトリ。
@@ -20677,7 +20737,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 35,
-    full: 364,
+    full: 368,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。

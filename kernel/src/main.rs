@@ -10598,6 +10598,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "i8042 を探って答えが無ければ止める（直す前の形。ADR-0068 の HW-b）",
     ),
     (
+        "pm-timer-treated-as-absent",
+        cfg!(feature = "pm-timer-treated-as-absent"),
+        "ACPI の PM タイマを無いものとして扱う（ADR-0068 の HW-c）",
+    ),
+    (
+        "pm-timer-double-frequency",
+        cfg!(feature = "pm-timer-double-frequency"),
+        "PM タイマの周波数の定数を 2 倍にする（ADR-0068 の HW-c）",
+    ),
+    (
         "poll-never-waits",
         cfg!(feature = "poll-never-waits"),
         "poll が待たずに 0 を返す（ADR-0066 の Y-b）",

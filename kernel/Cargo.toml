@@ -615,6 +615,12 @@ frame-allocator-high-after-switch = []
 # 破壊（ADR-0068 の HW-b）: i8042 を探って答えが無ければ止める（直す前の形）。pc の i8042=off
 # （FADT がリビジョン 1 で何も言わないので探る）で、プロンプトの前に止まる。
 i8042-halts-when-absent = []
+# 破壊（ADR-0068 の HW-c）: ACPI の PM タイマを無いものとして扱う。q35 の pit=off で、較正の基準が
+# 1 つも無い道を通す（理由を出して止まる）。両方無い機械の形である。
+pm-timer-treated-as-absent = []
+# 破壊（ADR-0068 の HW-c）: PM タイマの周波数の定数を 2 倍にする。較正が 2 倍に出て、タイマは半分の
+# 速さで走る。カーネル内の比は変わらないので、ホストの実時間と突き合わせる速さの判定だけが落ちる。
+pm-timer-double-frequency = []
 # Y-d: 画面・入力・ソケット・共有メモリを 1 つの組で通す（ADR-0066 の設計 Q5）。init が /bin/compd を
 # 前景で起こし、compd が /bin/compc を起こしっぱなしで起こす。compc が shm のプールに描いて送り、
 # compd が合成して present する。判定は xtask の compose-test が screendump を読んで行う。
