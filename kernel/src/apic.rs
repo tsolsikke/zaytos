@@ -1529,10 +1529,62 @@ const CALIBRATION_SAMPLES: usize = 5;
 /// 十分に長く、かつ人が待てる範囲にしてある。
 const CALIBRATION_EDGE_TIMEOUT_CYCLES: u64 = 10_000_000_000;
 
+/// 最初のエッジだけの上限（TSC サイクル。HW-c。`ADR-0068`）。
+///
+/// **短くする理由は、実機の起動時間である**（レビューの確かめ。2026-09-23）。**PIT が刻まない機械では、
+/// この締切ぶんだけ起動が延びる**——**上の 10^10 サイクルは実測で 2.71 秒だった**（`pit=off` の起動が
+/// 既定より約 2.4 秒長かった理由のほぼ全部である）。
+///
+/// **10^9 サイクルにする。** **TSC が 1GHz なら 1 秒、4GHz なら 0.25 秒で、100Hz のティック
+/// （10ms 周期）に対して 25 周期以上の余裕がある。** **ここで待つのは「1 本目が来るか」だけで、
+/// 窓の中の待ちには上の長い上限をそのまま使う**（取りこぼしの回を諦めさせない）。
+const FIRST_EDGE_TIMEOUT_CYCLES: u64 = 1_000_000_000;
+
+/// 較正の基準（HW-c。`ADR-0068`）。**どちらで測ったかを、戻り値と行に載せる。**
+///
+/// **PIT を既定にする。** **PM タイマへ倒すのは、PIT のティックが 1 本も来なかったときだけである**
+/// ——**倒す条件を「較正が失敗した」に広げない**（PIT が刻んでいるのに窓が閉じなかった回は、
+/// 今までどおり較正を諦めて PIT のまま進む）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalibrationReference {
+    /// PIT の IRQ0 のティック（既定）。
+    Pit,
+    /// ACPI の PM タイマ（`crate::pmtimer`）。**割り込みを要らず、ポートを読むだけである。**
+    PmTimer,
+}
+
+impl core::fmt::Display for CalibrationReference {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Pit => write!(f, "the PIT"),
+            Self::PmTimer => write!(f, "the ACPI PM timer"),
+        }
+    }
+}
+
+/// PM タイマで測る窓の長さ（刻み）。**PIT の窓（10 ティック = 100ms）と同じ実時間にする。**
+const PM_CALIBRATION_WINDOW_TICKS: u32 = (crate::pmtimer::HZ / 10) as u32;
+
+/// **窓は、いちばん狭い幅（24 ビット）の一周より十分短くなければならない。**
+///
+/// **幅で包み込む差は、一周までしか正しくない**（`crate::pmtimer::elapsed_with_width`）——
+/// **24 ビットは約 4.7 秒で一周するので、窓がそれに近づくと「一周した窓」を短い窓と読み、
+/// 較正が過大になる。** **構造で守る**（レビューの確かめ。2026-09-23）——**窓を広げるか
+/// 周波数の定数を変えたら、ここが建たない。**
+///
+/// **余裕は 10 倍に取る。** **実測の窓は 357,954 刻み（100ms）で、24 ビットの一周は
+/// 16,777,216 刻み（約 4.7 秒）である**（比は約 46.9）。
+const _: () = assert!(
+    PM_CALIBRATION_WINDOW_TICKS as u64 * 10 <= 1 << crate::pmtimer::NARROWEST_WIDTH_BITS,
+    "the PM timer calibration window must stay far below the 24-bit wrap (about 4.7 s)"
+);
+
 /// 較正の結果。
 pub struct TimerCalibration {
     /// 標本ごとの周波数（Hz）。
     samples: [u64; CALIBRATION_SAMPLES],
+    /// 何を基準に測ったか（HW-c）。
+    reference: CalibrationReference,
     /// 中央の標本（ソート後）。平均ではない。外れ値に引きずられない。
     median_hz: u64,
     /// 最小と最大の差。
@@ -1553,6 +1605,11 @@ impl TimerCalibration {
     /// リテラルで焼かない。
     pub const fn median_hz(&self) -> u64 {
         self.median_hz
+    }
+
+    /// 何を基準に測ったか（HW-c）。**判定行に出す。**
+    pub const fn reference(&self) -> CalibrationReference {
+        self.reference
     }
 
     /// 標本のばらつき。許容幅を決める入力である。
@@ -1590,6 +1647,12 @@ impl TimerCalibration {
 ///
 /// 期限を過ぎたら `None`。
 fn wait_for_tick_edge() -> Option<(u64, u64)> {
+    wait_for_tick_edge_within(CALIBRATION_EDGE_TIMEOUT_CYCLES)
+}
+
+/// 上限を指定してエッジを待つ（HW-c）。**最初のエッジだけ短い上限を使う**
+/// （[`FIRST_EDGE_TIMEOUT_CYCLES`]）。
+fn wait_for_tick_edge_within(deadline_cycles: u64) -> Option<(u64, u64)> {
     let start = crate::idt::timer_ticks();
     let deadline_base = cpu::read_timestamp_counter();
     loop {
@@ -1597,13 +1660,141 @@ fn wait_for_tick_edge() -> Option<(u64, u64)> {
         if now != start {
             return Some((now, now.wrapping_sub(start)));
         }
-        if cpu::read_timestamp_counter().wrapping_sub(deadline_base)
-            > CALIBRATION_EDGE_TIMEOUT_CYCLES
-        {
+        if cpu::read_timestamp_counter().wrapping_sub(deadline_base) > deadline_cycles {
             return None;
         }
         core::hint::spin_loop();
     }
+}
+
+/// PIT 基準の標本取りの結果（HW-c）。**「1 本も来ない」と「窓が閉じない」を分ける。**
+///
+/// **分ける理由は、倒す先が違うことである。** **1 本も来ないのは「PIT が刻んでいない」機械で、
+/// PM タイマへ倒す。** **窓が閉じないのは「刻んでいるが取りこぼした」回で、較正を諦めて PIT のまま
+/// 進む**（直す前の振る舞い）。
+enum PitSampling {
+    Done {
+        samples: [u64; CALIBRATION_SAMPLES],
+        widest_edge_advance: u64,
+    },
+    /// 最初のエッジが来なかった。**PIT が刻んでいない。**
+    NoTickAtAll,
+    /// エッジは来たが、窓が締切までに閉じなかった。
+    WindowIncomplete,
+}
+
+/// PIT のティックを基準に標本を取る（S2-c の本体を関数へ出したもの）。
+fn sample_with_pit(logger: &mut Logger<SerialPort>, lapic: u64) -> PitSampling {
+    let mut samples = [0u64; CALIBRATION_SAMPLES];
+    // 較正自身が取りこぼしを見る。`interrupts::max_tick_jump()` はこの時点では
+    // 使えない。あれを更新するのは `run_timer_loop` の定常ループで、較正はその
+    // 手前で走るので、前後どちらを読んでも 0 のままになる。前後が同じ 0 なのは
+    // 「取りこぼしが無い」のではなく「まだ数えていない」である。一度その形で
+    // 書いてしまったので、較正の中で自前に数える形へ直した。
+    let mut widest_edge_advance = 0u64;
+    for (index, slot) in samples.iter_mut().enumerate() {
+        // 窓の始まりをティックのエッジへ揃える。
+        // **1 本目だけ短い上限で待つ**（HW-c）——**刻まない機械の起動を、その差だけ縮める。**
+        let deadline = if index == 0 {
+            FIRST_EDGE_TIMEOUT_CYCLES
+        } else {
+            CALIBRATION_EDGE_TIMEOUT_CYCLES
+        };
+        let Some((begin_tick, _)) = wait_for_tick_edge_within(deadline) else {
+            // **1 本目で来なかったときだけ「刻んでいない」と言える。** **2 本目以降で
+            // 来なくなったのは、刻んでいたものが止まった形で、基準を替える話ではない。**
+            //
+            // **1 本目の沈黙をここで `[ERROR]` にしない**（HW-c）——**PM タイマへ倒せる機械では
+            // 異常ではない。** **声を出すのは呼び出し側で、倒せなかったときだけ `[ERROR]` になる。**
+            if index == 0 {
+                return PitSampling::NoTickAtAll;
+            }
+            logger.error(format_args!(
+                "apic: no timer tick arrived within the calibration deadline (sample {index} of \
+                 {CALIBRATION_SAMPLES}); the local APIC timer was NOT calibrated"
+            ));
+            return PitSampling::WindowIncomplete;
+        };
+        // SAFETY: `calibrate_timer` が写像を確認したページの中を読む。読み取りのみ。
+        let count_begin = unsafe { read_lapic(lapic, LAPIC_REGISTER_TIMER_CURRENT_COUNT) };
+
+        // 窓の終わりも同じくエッジで揃える。
+        let count_end;
+        let elapsed_ticks;
+        loop {
+            let Some((now, advance)) = wait_for_tick_edge() else {
+                logger.error(format_args!(
+                    "apic: the calibration window did not close within the deadline; the local \
+                     APIC timer was NOT calibrated"
+                ));
+                return PitSampling::WindowIncomplete;
+            };
+            // SAFETY: 上と同じ。読み取りのみ。
+            let observed = unsafe { read_lapic(lapic, LAPIC_REGISTER_TIMER_CURRENT_COUNT) };
+            widest_edge_advance = widest_edge_advance.max(advance);
+            if now.wrapping_sub(begin_tick) >= CALIBRATION_WINDOW_TICKS {
+                count_end = observed;
+                // 名目の N ではなく、実際に進んだティック数で割る。
+                // 取りこぼして N を飛び越えた場合、窓の実時間は N×10ms より長い。
+                // 名目で割ると較正結果が過大になる。実測で割れば、飛び越えても
+                // 結果は正しいままである（系統誤差が構造的に消える）。
+                elapsed_ticks = now.wrapping_sub(begin_tick);
+                break;
+            }
+        }
+
+        // 数え下がりなので begin > end。
+        let elapsed_counts = u64::from(count_begin.wrapping_sub(count_end));
+        // 窓は elapsed_ticks × (1 / timer_frequency_hz) 秒である。
+        // PIT の周波数もリテラルで持たない。境界の問いから取る。
+        let reference_hz = u64::from(crate::irq::timer_frequency_hz());
+        *slot = elapsed_counts * reference_hz / elapsed_ticks;
+    }
+    PitSampling::Done {
+        samples,
+        widest_edge_advance,
+    }
+}
+
+/// ACPI の PM タイマを基準に標本を取る（HW-c。`ADR-0068`）。
+///
+/// **割り込みを使わない。** **ポートを読んで窓を測るだけで、PIT が刻まなくても進む。**
+/// **進まなければ `None` を返す**（上限は TSC で掛ける。**上限のない待機を書かない**）。
+///
+/// **式は PIT 基準と同じ形である**——**窓の実時間（PM タイマの刻み）で割る。**
+fn sample_with_pm_timer(
+    lapic: u64,
+    pm_timer: crate::pmtimer::PmTimer,
+) -> Option<[u64; CALIBRATION_SAMPLES]> {
+    let mut samples = [0u64; CALIBRATION_SAMPLES];
+    for slot in samples.iter_mut() {
+        let begin_pm = pm_timer.read();
+        // SAFETY: `calibrate_timer` が写像を確認したページの中を読む。読み取りのみ。
+        let count_begin = unsafe { read_lapic(lapic, LAPIC_REGISTER_TIMER_CURRENT_COUNT) };
+        let deadline_base = cpu::read_timestamp_counter();
+        let elapsed_pm;
+        let count_end;
+        loop {
+            let now_pm = pm_timer.read();
+            let elapsed = pm_timer.elapsed(begin_pm, now_pm);
+            if elapsed >= PM_CALIBRATION_WINDOW_TICKS {
+                // SAFETY: 上と同じ。読み取りのみ。
+                count_end = unsafe { read_lapic(lapic, LAPIC_REGISTER_TIMER_CURRENT_COUNT) };
+                elapsed_pm = elapsed;
+                break;
+            }
+            if cpu::read_timestamp_counter().wrapping_sub(deadline_base)
+                > CALIBRATION_EDGE_TIMEOUT_CYCLES
+            {
+                return None;
+            }
+            core::hint::spin_loop();
+        }
+        // 数え下がりなので begin > end。
+        let elapsed_counts = u64::from(count_begin.wrapping_sub(count_end));
+        *slot = crate::pmtimer::lapic_hz_from_ticks(elapsed_counts, u64::from(elapsed_pm));
+    }
+    Some(samples)
 }
 
 /// Local APIC タイマの周波数を PIT 基準で測る（S2-c）。
@@ -1627,6 +1818,7 @@ fn wait_for_tick_edge() -> Option<(u64, u64)> {
 pub fn calibrate_timer(
     logger: &mut Logger<SerialPort>,
     mapped: &MappedApic,
+    pm_timer: Option<crate::pmtimer::PmTimer>,
 ) -> Option<TimerCalibration> {
     let direct_map = common::addr::direct_map();
     let lapic = direct_map.phys_to_virt(mapped.local_apic).as_u64();
@@ -1665,57 +1857,58 @@ pub fn calibrate_timer(
         write_lapic(lapic, LAPIC_REGISTER_TIMER_INITIAL_COUNT, u32::MAX);
     }
 
-    let mut samples = [0u64; CALIBRATION_SAMPLES];
-    // 較正自身が取りこぼしを見る。`interrupts::max_tick_jump()` はこの時点では
-    // 使えない。あれを更新するのは `run_timer_loop` の定常ループで、較正はその
-    // 手前で走るので、前後どちらを読んでも 0 のままになる。前後が同じ 0 なのは
-    // 「取りこぼしが無い」のではなく「まだ数えていない」である。一度その形で
-    // 書いてしまったので、較正の中で自前に数える形へ直した。
-    let mut widest_edge_advance = 0u64;
-    for slot in samples.iter_mut() {
-        // 窓の始まりをティックのエッジへ揃える。
-        let Some((begin_tick, _)) = wait_for_tick_edge() else {
-            logger.error(format_args!(
-                "apic: no timer tick arrived within the calibration deadline; the local APIC \
-                 timer was NOT calibrated"
+    // **標本を取る。** **PIT のティックを基準にするのが既定である**（S2-c）。
+    // **ティックが 1 本も来なければ、ACPI の PM タイマへ倒す**（HW-c。`ADR-0068`）。
+    let (samples, reference) = match sample_with_pit(logger, lapic) {
+        PitSampling::Done {
+            samples,
+            widest_edge_advance,
+        } => {
+            // 取りこぼしは較正を過大評価させる。窓の実時間が名目より長くなり、
+            // そのぶん減少量が増えるためである。上の計算は実測ティック数で割っている
+            // ので系統誤差は構造的に消えているが、取りこぼしが起きたかどうかは
+            // それ自体が観測に値するので出す。1 なら 1 ティックずつ捉えている。
+            logger.info(format_args!(
+                "apic: widest tick advance seen inside the calibration windows = \
+                 {widest_edge_advance} (1 means every edge was caught; the frequency above divides by \
+                 the observed tick count, not the nominal one, so a larger value would not inflate it)"
             ));
-            return None;
-        };
-        // SAFETY: 上と同じ。読み取りのみ。
-        let count_begin = unsafe { read_lapic(lapic, LAPIC_REGISTER_TIMER_CURRENT_COUNT) };
-
-        // 窓の終わりも同じくエッジで揃える。
-        let count_end;
-        let elapsed_ticks;
-        loop {
-            let Some((now, advance)) = wait_for_tick_edge() else {
+            (samples, CalibrationReference::Pit)
+        }
+        // **PIT は刻んでいるが窓が閉じなかった回**——**今までどおり較正を諦める。**
+        // **PM タイマへ倒さない**（刻んでいるのに基準を替えると、替えた理由が消える）。
+        PitSampling::WindowIncomplete => return None,
+        PitSampling::NoTickAtAll => {
+            let Some(pm_timer) = pm_timer else {
+                // **両方無い。** **理由を出して止まる**（運用者の決定。2026-09-22）——
+                // **この先はティックを待つ所で黙るので、黙るより止まるほうが多くを言う。**
                 logger.error(format_args!(
-                    "apic: the calibration window did not close within the deadline; the local \
-                     APIC timer was NOT calibrated"
+                    "apic: the PIT did not tick and the FADT names no PM timer, so there is no \
+                     time reference to calibrate the local APIC timer against; halting"
                 ));
-                return None;
+                cpu::halt_forever();
             };
-            // SAFETY: 上と同じ。読み取りのみ。
-            let observed = unsafe { read_lapic(lapic, LAPIC_REGISTER_TIMER_CURRENT_COUNT) };
-            widest_edge_advance = widest_edge_advance.max(advance);
-            if now.wrapping_sub(begin_tick) >= CALIBRATION_WINDOW_TICKS {
-                count_end = observed;
-                // 名目の N ではなく、実際に進んだティック数で割る。
-                // 取りこぼして N を飛び越えた場合、窓の実時間は N×10ms より長い。
-                // 名目で割ると較正結果が過大になる。実測で割れば、飛び越えても
-                // 結果は正しいままである（系統誤差が構造的に消える）。
-                elapsed_ticks = now.wrapping_sub(begin_tick);
-                break;
+            logger.warn(format_args!(
+                "apic: no PIT tick arrived within the calibration deadline; calibrating against \
+                 the ACPI PM timer at port {:#06x} ({}-bit) instead",
+                pm_timer.port(),
+                pm_timer.bits()
+            ));
+            match sample_with_pm_timer(lapic, pm_timer) {
+                Some(samples) => (samples, CalibrationReference::PmTimer),
+                None => {
+                    // **PM タイマが在ると FADT が言ったのに進まない。** **止まる**（同上）。
+                    logger.error(format_args!(
+                        "apic: the PIT did not tick and the PM timer at port {:#06x} did not \
+                         advance within the deadline either; there is no time reference to \
+                         calibrate the local APIC timer against; halting",
+                        pm_timer.port()
+                    ));
+                    cpu::halt_forever();
+                }
             }
         }
-
-        // 数え下がりなので begin > end。
-        let elapsed_counts = u64::from(count_begin.wrapping_sub(count_end));
-        // 窓は elapsed_ticks × (1 / timer_frequency_hz) 秒である。
-        // PIT の周波数もリテラルで持たない。境界の問いから取る。
-        let reference_hz = u64::from(crate::irq::timer_frequency_hz());
-        *slot = elapsed_counts * reference_hz / elapsed_ticks;
-    }
+    };
 
     let mut sorted = samples;
     sorted.sort_unstable();
@@ -1742,23 +1935,17 @@ pub fn calibrate_timer(
     };
 
     logger.info(format_args!(
-        "apic: LAPIC timer calibration: median={median_hz} Hz spread={spread_hz} Hz \
-         (divide by 16, window {CALIBRATION_WINDOW_TICKS} PIT tick(s) at {} Hz, \
-         {CALIBRATION_SAMPLES} sample(s), edges aligned to tick transitions)",
-        crate::irq::timer_frequency_hz()
+        "apic: LAPIC timer calibration against {reference}: median={median_hz} Hz \
+         spread={spread_hz} Hz (divide by 16, {CALIBRATION_SAMPLES} sample(s), \
+         windows of {} each)",
+        match reference {
+            CalibrationReference::Pit => "10 PIT tick(s)",
+            CalibrationReference::PmTimer => "357,954 PM timer tick(s) (100 ms)",
+        }
     ));
     logger.info(format_args!(
         "apic: LAPIC timer calibration samples: {:?} Hz",
         samples
-    ));
-    // 取りこぼしは較正を過大評価させる。窓の実時間が名目より長くなり、
-    // そのぶん減少量が増えるためである。上の計算は実測ティック数で割っている
-    // ので系統誤差は構造的に消えているが、取りこぼしが起きたかどうかは
-    // それ自体が観測に値するので出す。1 なら 1 ティックずつ捉えている。
-    logger.info(format_args!(
-        "apic: widest tick advance seen inside the calibration windows = \
-         {widest_edge_advance} (1 means every edge was caught; the frequency above divides by \
-         the observed tick count, not the nominal one, so a larger value would not inflate it)"
     ));
 
     // 触らないことにしたレジスタが変わっていないことを読み戻す。
@@ -1785,6 +1972,7 @@ pub fn calibrate_timer(
 
     Some(TimerCalibration {
         samples,
+        reference,
         median_hz,
         spread_hz,
         // 上の `write_lapic` で実際に書いた値をそのまま返す。定数を

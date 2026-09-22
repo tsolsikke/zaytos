@@ -1344,7 +1344,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // 前者へ揃える。
     let kernel::acpi::Survey {
         apic: apic_mmio,
-        i8042,
+        fadt: fadt_facts,
     } = kernel::acpi::survey(&mut logger, acpi_rsdp, raw_map, memory_map_descriptor_size);
 
     // === S1-c: APIC MMIO を direct map 窓へ 4KiB 粒度で写像する ===
@@ -1847,7 +1847,7 @@ extern "sysv64" fn kernel_main() -> ! {
         SHELL_AFTER_HEARTBEATS,
         mapped_apic.as_ref(),
         Some(&mut virtio_disk),
-        i8042,
+        fadt_facts,
     );
 
     // === P-c-1: 装置をシェルの文脈から届く場所へ据える ===
@@ -4267,7 +4267,7 @@ fn trigger_interrupt_test(
             0,
             None,
             None,
-            kernel::acpi::I8042Presence::NotStated,
+            kernel::acpi::FadtFacts::unknown(),
         );
     }
 
@@ -4742,7 +4742,7 @@ fn start_timer(
     shell_after_heartbeats: u64,
     apic: Option<&kernel::apic::MappedApic>,
     mut virtio: Option<&mut kernel::virtio::VirtioBlk>,
-    i8042: kernel::acpi::I8042Presence,
+    fadt: kernel::acpi::FadtFacts,
 ) {
     // --- 1. PIT を設定する ---
     // SAFETY: 起動時に 1 回だけ。この時点で IRQ0 はマスクされている
@@ -4790,7 +4790,7 @@ fn start_timer(
     }
 
     // --- 4.5 キーボード（IRQ1）を用意する ---
-    let keyboard_present = setup_keyboard(logger, i8042);
+    let keyboard_present = setup_keyboard(logger, fadt.i8042);
 
     // --- 4.6 キーボードの配送を I/O APIC 経由へ移す（S2-d-1c）---
     //
@@ -4828,6 +4828,7 @@ fn start_timer(
             shell_after_heartbeats,
             apic,
             virtio,
+            fadt.pm_timer,
         );
     }
 

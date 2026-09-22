@@ -680,6 +680,7 @@ pub unsafe fn run_timer_loop(
     shell_after_heartbeats: u64,
     apic: Option<&crate::apic::MappedApic>,
     virtio: Option<&mut crate::virtio::VirtioBlk>,
+    pm_timer: Option<crate::pmtimer::PmTimer>,
 ) {
     // 最初のティックが来るまで何も出ないとハングと区別できないので、
     // 待ちに入ることを先に宣言する。
@@ -702,6 +703,10 @@ pub unsafe fn run_timer_loop(
         cpu::enable_interrupts();
     }
 
+    // **PIT が 1 本も刻まなかったか**（HW-c。`ADR-0068`）。**較正の基準で決まる。**
+    // **ICW2 の事後証明が取れるかが、これで変わる。**
+    let mut pit_never_ticked = false;
+
     // === S2-c: Local APIC タイマの較正 ===
     //
     // この位置でなければならない。基準に使う `TIMER_TICKS` は IRQ0 が
@@ -713,7 +718,7 @@ pub unsafe fn run_timer_loop(
     // 較正は測るだけで、LAPIC タイマをタイマとして使わない。LVT Timer は
     // マスクされたままで、LINT0 と SVR にも触らない。
     if let Some(apic) = apic {
-        let calibration = crate::apic::calibrate_timer(logger, apic);
+        let calibration = crate::apic::calibrate_timer(logger, apic, pm_timer);
 
         // === S2-d-1b: 2 つ目のコントローラ実装を 1 回だけ読ませる ===
         //
@@ -752,6 +757,13 @@ pub unsafe fn run_timer_loop(
         // 求めるためである。そして切り替えの区間ではティックが 1 本も
         // 来ないので、`TIMER_TICKS` を待つ処理（較正のエッジ待ち）は
         // ここより前に済んでいる必要がある。
+        // **PIT が刻まなかった回は、ICW2 の事後証明が取れない**（HW-c。`ADR-0068`）——
+        // **PIC の割り込みが 1 本も届かないので、`first_pic_vector` は `None` のままである。**
+        // **較正の基準を見て決める**（`None` を一色に扱うと、ICW2 の誤りと PIT の不在が混ざる）。
+        pit_never_ticked = matches!(
+            calibration.as_ref().map(|value| value.reference()),
+            Some(crate::apic::CalibrationReference::PmTimer)
+        );
         if let Some(calibration) = calibration {
             switch_timer_to_lapic(logger, calibration);
         } else {
@@ -1155,6 +1167,16 @@ pub unsafe fn run_timer_loop(
                              proof that ICW2 was written correctly (it cannot be read back)"
                         ),
                     );
+                }
+                // **PIT が刻まない機械では、PIC の割り込みが 1 本も届かない**（HW-c）。
+                // **ICW2 の事後証明は取れない。** **止めない**——**言えないことを言えないと
+                // 書く**（`sti` 前の項目 4 と同じ立ち位置）。
+                None if pit_never_ticked => {
+                    logger.info(format_args!(
+                        "timer: no PIC interrupt ever arrived because the PIT does not tick on \
+                         this machine, so ICW2 has no after-the-fact proof; the timer runs on \
+                         the local APIC (the calibration used the ACPI PM timer)"
+                    ));
                 }
                 other => {
                     logger.error(format_args!(

@@ -308,18 +308,37 @@ pub enum I8042Presence {
     NotStated,
 }
 
+/// FADT が言っていること（HW-b と HW-c）。
+#[derive(Debug, Clone, Copy)]
+pub struct FadtFacts {
+    pub i8042: I8042Presence,
+    /// **読めるポートが在るときだけ `Some` である**——**「無い」と「読めない形」は
+    /// どちらも `None` で、理由はログに出す。**
+    pub pm_timer: Option<crate::pmtimer::PmTimer>,
+}
+
+impl FadtFacts {
+    /// 何も言っていない形（FADT が無い・読めない、ACPI を走査しない経路）。
+    pub const fn unknown() -> Self {
+        Self {
+            i8042: I8042Presence::NotStated,
+            pm_timer: None,
+        }
+    }
+}
+
 /// [`survey`] が読み取ったもの。
 #[derive(Debug, Clone, Copy)]
 pub struct Survey {
     pub apic: ApicMmio,
-    pub i8042: I8042Presence,
+    pub fadt: FadtFacts,
 }
 
 impl Survey {
     const fn empty() -> Self {
         Self {
             apic: ApicMmio::empty(),
-            i8042: I8042Presence::NotStated,
+            fadt: FadtFacts::unknown(),
         }
     }
 }
@@ -655,7 +674,7 @@ pub fn survey(
         None => ApicMmio::empty(),
     };
     // **MADT の後に読む**（HW-b）。**起動ログの既存の行の並びを動かさないためである。**
-    let i8042 = match tables.fadt {
+    let fadt = match tables.fadt {
         Some(fadt_phys) => read_fadt(
             logger,
             &reader,
@@ -663,9 +682,9 @@ pub fn survey(
             memory_map_bytes,
             descriptor_size,
         ),
-        None => I8042Presence::NotStated,
+        None => FadtFacts::unknown(),
     };
-    Survey { apic, i8042 }
+    Survey { apic, fadt }
 }
 
 /// 物理アドレスを [`PhysAddr`] にする。表せない値は報告して `None`。
@@ -944,7 +963,7 @@ fn walk_root_table(
     })
 }
 
-/// FADT を検証して、i8042 について言っていることを読む（HW-b。`ADR-0068`）。
+/// FADT を検証して、i8042（HW-b）と PM タイマ（HW-c）について言っていることを読む（`ADR-0068`）。
 ///
 /// **読めなければ「言っていない」を返す**——**探る側が決める。** 理由はログへ出す。
 fn read_fadt(
@@ -953,7 +972,7 @@ fn read_fadt(
     fadt_phys: PhysAddr,
     memory_map_bytes: &[u8],
     descriptor_size: u64,
-) -> I8042Presence {
+) -> FadtFacts {
     report_memory_type(
         logger,
         "the FADT",
@@ -975,16 +994,65 @@ fn read_fadt(
         },
         &mut buffer,
     ) else {
-        return I8042Presence::NotStated;
+        return FadtFacts::unknown();
     };
 
     let table = match fadt::parse(&buffer[..length]) {
         Ok(table) => table,
         Err(e) => {
             logger.error(format_args!("acpi: the FADT is not usable: {e:?}"));
-            return I8042Presence::NotStated;
+            return FadtFacts::unknown();
         }
     };
+    FadtFacts {
+        i8042: read_i8042_flag(logger, &table),
+        pm_timer: read_pm_timer(logger, &buffer[..length], table.revision),
+    }
+}
+
+/// PM タイマの所在をログへ出し、読めるものだけを返す（HW-c）。
+fn read_pm_timer(
+    logger: &mut Logger<SerialPort>,
+    table_bytes: &[u8],
+    revision: u8,
+) -> Option<crate::pmtimer::PmTimer> {
+    match fadt::pm_timer_block(table_bytes, revision) {
+        fadt::PmTimerBlock::Port {
+            port,
+            bits,
+            from_extended,
+        } => {
+            logger.info(format_args!(
+                "acpi: FADT PM timer: port {port:#06x}, {bits}-bit, from {} ({} Hz by the specification)",
+                if from_extended {
+                    "X_PM_TMR_BLK"
+                } else {
+                    "PM_TMR_BLK"
+                },
+                crate::pmtimer::HZ
+            ));
+            Some(crate::pmtimer::PmTimer::new(port, bits))
+        }
+        fadt::PmTimerBlock::Absent => {
+            logger.info(format_args!(
+                "acpi: FADT PM timer: none (neither PM_TMR_BLK nor X_PM_TMR_BLK names one); \
+                 the local APIC timer can only be calibrated against the PIT"
+            ));
+            None
+        }
+        fadt::PmTimerBlock::Unsupported { space_id, address } => {
+            logger.warn(format_args!(
+                "acpi: FADT PM timer at {address:#x} in address space {space_id} is not \
+                 port I/O, so it is not read (a hardware-reduced platform would need an MMIO \
+                 reader); treating it as absent"
+            ));
+            None
+        }
+    }
+}
+
+/// i8042 について言っていることをログへ出して返す（HW-b）。
+fn read_i8042_flag(logger: &mut Logger<SerialPort>, table: &fadt::Fadt) -> I8042Presence {
     match (table.iapc_boot_arch, table.has_8042()) {
         (Some(flags), Some(present)) => {
             logger.info(format_args!(

@@ -226,10 +226,14 @@ common::window::tests::scrolling_down_stops_at_the_last_screenful
 common::window::tests::scrolling_up_stops_at_the_top
 common::window::tests::the_screen_row_is_none_outside_the_window
 common::window::tests::visible_never_passes_the_end
+kernel::acpi::fadt::tests::a_revision_1_table_falls_back_to_the_legacy_field
 kernel::acpi::fadt::tests::a_revision_3_table_says_whether_there_is_an_8042
 kernel::acpi::fadt::tests::a_table_before_revision_3_does_not_say
 kernel::acpi::fadt::tests::a_table_shorter_than_acpi_1_0_is_rejected
+kernel::acpi::fadt::tests::a_zero_extended_block_falls_back_to_the_legacy_field
+kernel::acpi::fadt::tests::an_absent_or_unreadable_pm_timer_is_reported_as_such
 kernel::acpi::fadt::tests::only_the_8042_bit_decides
+kernel::acpi::fadt::tests::the_extended_block_is_preferred_over_the_legacy_field
 kernel::acpi::madt::tests::a_decoder_refuses_an_entry_of_another_type
 kernel::acpi::madt::tests::a_fixed_part_shorter_than_44_bytes_is_rejected
 kernel::acpi::madt::tests::a_single_trailing_byte_cannot_hold_an_entry_header
@@ -548,6 +552,9 @@ kernel::paging::plan::tests::resolve_pages_never_produces_zero_size_gaps_between
 kernel::paging::plan::tests::resolve_pages_uses_2mib_core_and_4kib_fringe
 kernel::paging::plan::tests::unmapped_types_are_excluded
 kernel::pipe::tests::the_pipe_frees_itself_only_when_both_ends_and_the_reservation_are_gone
+kernel::pmtimer::tests::bits_above_the_width_do_not_reach_the_difference
+kernel::pmtimer::tests::the_difference_wraps_at_the_declared_width
+kernel::pmtimer::tests::the_frequency_comes_from_the_observed_window
 kernel::quarantine::tests::a_frame_is_not_returned_while_its_generation_is_still_live
 kernel::quarantine::tests::a_frame_is_returned_once_every_core_has_passed_its_generation
 kernel::quarantine::tests::a_released_slot_can_be_reused_by_a_later_free
