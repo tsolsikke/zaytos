@@ -24,3 +24,6 @@ uefi = { version = "0.39.0", features = ["alloc", "global_allocator"] }
 # フィーチャ。`cargo xtask run --panic-test` が有効化する。通常ビルドでは
 # 無効（ADR-0004 の fail-fast 挙動そのものには影響しない）。
 panic-test = []
+# 破壊（`ADR-0068` の HW-a）: BootInfo を `AnyPages` で取り、メモリマップを写さない（直す前の形）。
+# メモリが 1GiB を超えると、カーネルが BootInfo の最初の一読で #PF になる。
+handoff-anywhere = []

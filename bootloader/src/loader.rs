@@ -317,7 +317,7 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
 /// その後ろに置く。**
 struct Handoff {
     boot_info: *mut BootInfo,
-    /// メモリマップの写しの先頭。
+    /// メモリマップの写しの先頭。**破壊 `handoff-anywhere` では null で、写さない。**
     memory_map: *mut u8,
 }
 
@@ -334,6 +334,11 @@ impl Handoff {
         buffer: &[u8],
         map_size: usize,
     ) -> PhysAddr {
+        if self.memory_map.is_null() {
+            // **破壊 `handoff-anywhere`**——uefi-rs のバッファをそのまま渡す（直す前の形）。
+            return PhysAddr::new(buffer.as_ptr() as u64)
+                .expect("the memory map buffer address does not fit in 52 bits");
+        }
         if map_size > Self::MEMORY_MAP_CAPACITY || map_size > buffer.len() {
             logger.error(format_args!(
                 "handoff: the memory map is {map_size} byte(s) but the handoff area holds {} \
@@ -366,33 +371,63 @@ impl Handoff {
 /// **`AllocateType::MaxAddress` は「この番地以下に置く」である**（UEFI の仕様）。
 /// **確保できなければ止まる**——**上に置けば、カーネルが最初の一読で #PF になる。**
 fn allocate_handoff(logger: &mut Logger<SerialPort>) -> Handoff {
-    let pages = BOOT_INFO_PAGE_COUNT + HANDOFF_MEMORY_MAP_PAGES;
-    let base = uefi::boot::allocate_pages(
-        AllocateType::MaxAddress(BOOT_IDENTITY_REACH - 1),
-        MemoryType::LOADER_DATA,
-        pages,
-    )
-    .unwrap_or_else(|e| {
-        logger.error(format_args!(
-            "handoff: AllocatePages below {BOOT_IDENTITY_REACH:#x} for {pages} page(s) failed: \
-             {e:?}; halting"
+    #[cfg(feature = "handoff-anywhere")]
+    {
+        // **破壊 `handoff-anywhere`（`ADR-0068` の HW-a）**——BootInfo を `AnyPages` で取り、
+        // メモリマップは写さない（直す前の形）。**6GiB の起動が、BootInfo の最初の一読で
+        // #PF になることを見る。**
+        let boot_info = uefi::boot::allocate_pages(
+            AllocateType::AnyPages,
+            MemoryType::LOADER_DATA,
+            BOOT_INFO_PAGE_COUNT,
+        )
+        .unwrap_or_else(|e| {
+            logger.error(format_args!("AllocatePages for BootInfo failed: {e:?}"));
+            panic!("failed to allocate the BootInfo page");
+        })
+        .as_ptr()
+        .cast::<BootInfo>();
+        logger.info(format_args!(
+            "handoff: BootInfo at {:#x} (anywhere; below {BOOT_IDENTITY_REACH:#x} = {}; the \
+             sabotage handoff-anywhere is on)",
+            boot_info as u64,
+            (boot_info as u64) < BOOT_IDENTITY_REACH
         ));
-        panic!("failed to allocate the handoff area");
-    })
-    .as_ptr();
-    let base_phys = base as u64;
-    let end = base_phys + pages as u64 * PAGE_SIZE;
-    logger.info(format_args!(
-        "handoff: BootInfo at {base_phys:#x}, the handoff area is {base_phys:#x}..{end:#x} \
-         (below {BOOT_IDENTITY_REACH:#x} = {})",
-        end <= BOOT_IDENTITY_REACH
-    ));
-    // SAFETY: `base` は今確保した `pages` ページの先頭で、先頭の `BOOT_INFO_PAGE_COUNT` ページを
-    // BootInfo に、その後ろをメモリマップの写しに使う。足し算は確保した範囲の内側である。
-    let memory_map = unsafe { base.add(BOOT_INFO_PAGE_COUNT * PAGE_SIZE as usize) };
-    Handoff {
-        boot_info: base.cast::<BootInfo>(),
-        memory_map,
+        Handoff {
+            boot_info,
+            memory_map: core::ptr::null_mut(),
+        }
+    }
+    #[cfg(not(feature = "handoff-anywhere"))]
+    {
+        let pages = BOOT_INFO_PAGE_COUNT + HANDOFF_MEMORY_MAP_PAGES;
+        let base = uefi::boot::allocate_pages(
+            AllocateType::MaxAddress(BOOT_IDENTITY_REACH - 1),
+            MemoryType::LOADER_DATA,
+            pages,
+        )
+        .unwrap_or_else(|e| {
+            logger.error(format_args!(
+                "handoff: AllocatePages below {BOOT_IDENTITY_REACH:#x} for {pages} page(s) failed: \
+                 {e:?}; halting"
+            ));
+            panic!("failed to allocate the handoff area");
+        })
+        .as_ptr();
+        let base_phys = base as u64;
+        let end = base_phys + pages as u64 * PAGE_SIZE;
+        logger.info(format_args!(
+            "handoff: BootInfo at {base_phys:#x}, the handoff area is {base_phys:#x}..{end:#x} \
+             (below {BOOT_IDENTITY_REACH:#x} = {})",
+            end <= BOOT_IDENTITY_REACH
+        ));
+        // SAFETY: `base` は今確保した `pages` ページの先頭で、先頭の `BOOT_INFO_PAGE_COUNT` ページを
+        // BootInfo に、その後ろをメモリマップの写しに使う。足し算は確保した範囲の内側である。
+        let memory_map = unsafe { base.add(BOOT_INFO_PAGE_COUNT * PAGE_SIZE as usize) };
+        Handoff {
+            boot_info: base.cast::<BootInfo>(),
+            memory_map,
+        }
     }
 }
 

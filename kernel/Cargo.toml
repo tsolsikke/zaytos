@@ -605,6 +605,13 @@ screen-leave-does-not-repaint = []
 # 前景の関所が大域の印だけを見る（Y-a までの形。ADR-0066 の Y-c）。前景でない者が開ける。
 # input-test と screen-test の両方が回すので、どちらにも寄りかからない（xtask が構成を足す）。
 foreground-ignores-the-slot = []
+# 破壊（ADR-0068 の HW-a）: フレームアロケータが最も高い空きから配る。6GiB の起動で、切り替え前の
+# ページ表のフレームが初期ページ表の届く範囲（1GiB）の外になり、組み立ての確かめが止める。
+frame-allocator-hands-out-high-first = []
+# 検査の構成（ADR-0068 の HW-a。破壊ではない）: 自前のページ表へ切り替えた後から、フレームアロケータが
+# 最も高い空きから配る。6GiB の起動で、ヒープ・ユーザーのページ・ページ表・virtio のリングが 4GiB の上から
+# 取られる。番地を 32 ビットへ切り詰める箇所を表に出す。4GiB の上から配った枚数を計器に出す。
+frame-allocator-high-after-switch = []
 # Y-d: 画面・入力・ソケット・共有メモリを 1 つの組で通す（ADR-0066 の設計 Q5）。init が /bin/compd を
 # 前景で起こし、compd が /bin/compc を起こしっぱなしで起こす。compc が shm のプールに描いて送り、
 # compd が合成して present する。判定は xtask の compose-test が screendump を読んで行う。

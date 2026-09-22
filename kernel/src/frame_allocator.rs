@@ -279,6 +279,15 @@ impl<const CAP: usize> FrameAllocator<CAP> {
         if self.range_count == 0 {
             return None;
         }
+        // **高い側から配る形**（`ADR-0068` の HW-a）。破壊 `frame-allocator-hands-out-high-first` は
+        // 最初から、検査の構成 `frame-allocator-high-after-switch` は切り替えの後から、こちらを通る。
+        #[cfg(any(
+            feature = "frame-allocator-hands-out-high-first",
+            feature = "frame-allocator-high-after-switch"
+        ))]
+        if HIGH_FIRST.load(Ordering::Relaxed) {
+            return self.allocate_frame_high();
+        }
         let frame = self.ranges[0].start_frame;
         self.ranges[0].start_frame += 1;
         self.ranges[0].frame_count -= 1;
@@ -328,6 +337,13 @@ impl<const CAP: usize> FrameAllocator<CAP> {
         if count == 0 || align_frames == 0 || !align_frames.is_power_of_two() {
             return None;
         }
+        #[cfg(any(
+            feature = "frame-allocator-hands-out-high-first",
+            feature = "frame-allocator-high-after-switch"
+        ))]
+        if HIGH_FIRST.load(Ordering::Relaxed) {
+            return self.allocate_contiguous_aligned_high(count, align_frames);
+        }
         for i in 0..self.range_count {
             let start = self.ranges[i].start_frame;
             let end = start + self.ranges[i].frame_count;
@@ -374,6 +390,13 @@ impl<const CAP: usize> FrameAllocator<CAP> {
         if count == 0 {
             return None;
         }
+        #[cfg(any(
+            feature = "frame-allocator-hands-out-high-first",
+            feature = "frame-allocator-high-after-switch"
+        ))]
+        if HIGH_FIRST.load(Ordering::Relaxed) {
+            return self.allocate_contiguous_aligned_high(count, 1);
+        }
         for i in 0..self.range_count {
             if self.ranges[i].frame_count >= count {
                 let start = self.ranges[i].start_frame;
@@ -391,6 +414,121 @@ impl<const CAP: usize> FrameAllocator<CAP> {
         }
         None
     }
+}
+
+/// 高い側から配る形（`ADR-0068` の HW-a）。**既定のビルドには無い。**
+///
+/// **破壊 `frame-allocator-hands-out-high-first`** は最初から通り、切り替え前のページ表を
+/// 初期ページ表の届く範囲の外から取らせる。**検査の構成 `frame-allocator-high-after-switch`**
+/// （破壊ではない）は自前のページ表へ切り替えた後から通り、ヒープ・ユーザーのページ・ページ表・
+/// virtio のリングを 4GiB の上から取らせる——**番地を 32 ビットへ切り詰める箇所を表に出すため。**
+#[cfg(any(
+    feature = "frame-allocator-hands-out-high-first",
+    feature = "frame-allocator-high-after-switch"
+))]
+impl<const CAP: usize> FrameAllocator<CAP> {
+    fn allocate_frame_high(&mut self) -> Option<PhysAddr> {
+        self.allocate_contiguous_aligned_high(1, 1)
+    }
+
+    /// 最も高い番地に収まる、`align_frames` に揃った `count` 枚を取る。
+    fn allocate_contiguous_aligned_high(
+        &mut self,
+        count: u64,
+        align_frames: u64,
+    ) -> Option<PhysAddr> {
+        for i in (0..self.range_count).rev() {
+            let start = self.ranges[i].start_frame;
+            let end = start + self.ranges[i].frame_count;
+            let Some(highest) = end.checked_sub(count) else {
+                continue;
+            };
+            // 範囲の終わりに収まる、揃った先頭のうち最も高いもの。
+            let aligned = highest - highest % align_frames;
+            if aligned < start {
+                continue;
+            }
+            let leading = aligned - start;
+            let trailing = end - (aligned + count);
+            if leading == 0 && trailing == 0 {
+                for j in i..(self.range_count - 1) {
+                    self.ranges[j] = self.ranges[j + 1];
+                }
+                self.range_count -= 1;
+            } else if leading == 0 {
+                self.ranges[i].start_frame = aligned + count;
+                self.ranges[i].frame_count = trailing;
+            } else if trailing == 0 {
+                self.ranges[i].frame_count = leading;
+            } else {
+                if self.range_count == CAP {
+                    return None;
+                }
+                self.ranges[i].frame_count = leading;
+                for j in (i + 1..self.range_count).rev() {
+                    self.ranges[j + 1] = self.ranges[j];
+                }
+                self.ranges[i + 1] = FrameRange {
+                    start_frame: aligned + count,
+                    frame_count: trailing,
+                };
+                self.range_count += 1;
+            }
+            count_frames_above_4gib(aligned, count);
+            return PhysAddr::from_frame_number(aligned);
+        }
+        None
+    }
+}
+
+/// 高い側から配るか（`ADR-0068` の HW-a）。**破壊では最初から立ち、検査の構成では切り替えの後に立つ。**
+#[cfg(any(
+    feature = "frame-allocator-hands-out-high-first",
+    feature = "frame-allocator-high-after-switch"
+))]
+static HIGH_FIRST: AtomicBool =
+    AtomicBool::new(cfg!(feature = "frame-allocator-hands-out-high-first"));
+
+/// ここから高い側から配る（検査の構成 `frame-allocator-high-after-switch`。`ADR-0068` の HW-a）。
+///
+/// **自前のページ表へ切り替えた後に 1 度呼ぶ。** **切り替え前は初期ページ表の届く範囲しか触れない。**
+#[cfg(feature = "frame-allocator-high-after-switch")]
+pub fn hand_out_high_first_from_now() {
+    HIGH_FIRST.store(true, Ordering::Relaxed);
+}
+
+/// 4GiB の上から配ったフレームの枚数（`ADR-0068` の HW-a の計器）。
+#[cfg(any(
+    feature = "frame-allocator-hands-out-high-first",
+    feature = "frame-allocator-high-after-switch"
+))]
+static FRAMES_ABOVE_4GIB: AtomicU64 = AtomicU64::new(0);
+
+/// 4GiB の最初のフレーム番号。
+#[cfg(any(
+    feature = "frame-allocator-hands-out-high-first",
+    feature = "frame-allocator-high-after-switch"
+))]
+const FIRST_FRAME_ABOVE_4GIB: u64 = (1 << 32) / FRAME_SIZE;
+
+#[cfg(any(
+    feature = "frame-allocator-hands-out-high-first",
+    feature = "frame-allocator-high-after-switch"
+))]
+fn count_frames_above_4gib(start_frame: u64, count: u64) {
+    let end = start_frame + count;
+    let above = end.saturating_sub(start_frame.max(FIRST_FRAME_ABOVE_4GIB));
+    FRAMES_ABOVE_4GIB.fetch_add(above, Ordering::Relaxed);
+}
+
+/// 4GiB の上から配ったフレームの枚数を返す（`ADR-0068` の HW-a の計器）。**0 なら、4GiB の上は
+/// 配られていない**——**検査の構成で 0 なら、その回は何も確かめていない。**
+#[cfg(any(
+    feature = "frame-allocator-hands-out-high-first",
+    feature = "frame-allocator-high-after-switch"
+))]
+pub fn frames_handed_out_above_4gib() -> u64 {
+    FRAMES_ABOVE_4GIB.load(Ordering::Relaxed)
 }
 
 impl<const CAP: usize> Default for FrameAllocator<CAP> {

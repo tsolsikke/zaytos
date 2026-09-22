@@ -1410,6 +1410,7 @@ fn main() -> Result<()> {
        cargo xtask run --fp-test [--sabotage FEATURE]
        cargo xtask run --ttf-test [--sabotage FEATURE]
        cargo xtask run --serial-test [--sabotage FEATURE]
+       cargo xtask run --machine-variant NAME [--sabotage FEATURE | --config FEATURE]   (ADR-0068。NAME は q35-6g)
        cargo xtask check [--update-reference]   (ホストテストの名前の集合を取り直す)
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
@@ -1776,6 +1777,47 @@ fn main() -> Result<()> {
                 return cmd_screen_test(&sabotage, expect_pass);
             }
             // **画面・入力・ソケット・共有メモリを 1 つの組で通す判定（`ADR-0066` の Y-d）。**
+            if let Some(index) = rest.iter().position(|a| a == "--machine-variant") {
+                let name = rest
+                    .get(index + 1)
+                    .context("--machine-variant needs a variant name (see MACHINE_VARIANTS)")?;
+                let variant = MACHINE_VARIANTS
+                    .iter()
+                    .find(|variant| variant.name == name.as_str())
+                    .with_context(|| format!("unknown machine variant {name:?}"))?;
+                if let Some(config) = rest
+                    .iter()
+                    .position(|a| a == "--config")
+                    .and_then(|at| rest.get(at + 1))
+                {
+                    let Some(&(_, feature, expect)) = MACHINE_VARIANT_CONFIGS
+                        .iter()
+                        .find(|(on, f, _)| *on == variant.name && *f == config.as_str())
+                    else {
+                        bail!("no configuration {config:?} is listed for the machine variant {name:?}");
+                    };
+                    return cmd_machine_variant(variant, &[feature], &[], expect);
+                }
+                let sabotage = rest
+                    .iter()
+                    .position(|a| a == "--sabotage")
+                    .and_then(|at| rest.get(at + 1));
+                let Some(feature) = sabotage else {
+                    return cmd_machine_variant(variant, &[], &[], VariantExpect::Prompt);
+                };
+                let Some(&(_, feature, bootloader, expect)) = MACHINE_VARIANT_SABOTAGES
+                    .iter()
+                    .find(|(on, f, _, _)| *on == variant.name && *f == feature.as_str())
+                else {
+                    bail!("no sabotage {feature:?} is listed for the machine variant {name:?}");
+                };
+                let (kernel, boot): (&[&str], &[&str]) = if bootloader {
+                    (&[], &[feature])
+                } else {
+                    (&[feature], &[])
+                };
+                return cmd_machine_variant(variant, kernel, boot, expect);
+            }
             if rest.iter().any(|a| a == "--compose-test") {
                 let sabotage: Vec<&str> = rest
                     .iter()
@@ -2551,6 +2593,17 @@ fn wait_for_file(path: &Path, timeout: Duration) -> Result<()> {
 /// `.efi` バイナリのパスを返す。`panic_test` が true の場合、起動完了直後に
 /// 意図的に `panic!` する `panic-test` フィーチャを有効にする。
 fn build_bootloader(workspace_root: &Path, panic_test: bool) -> Result<PathBuf> {
+    let features: &[&str] = if panic_test {
+        &[PANIC_TEST_FEATURE]
+    } else {
+        &[]
+    };
+    build_bootloader_with_features(workspace_root, features)
+}
+
+/// ブートローダを feature つきで建てる（`ADR-0068` の HW-a。**受け渡しの破壊を建てるため**）。
+fn build_bootloader_with_features(workspace_root: &Path, features: &[&str]) -> Result<PathBuf> {
+    let joined = features.join(",");
     let mut args = vec![
         "build",
         "--target",
@@ -2560,9 +2613,9 @@ fn build_bootloader(workspace_root: &Path, panic_test: bool) -> Result<PathBuf> 
         "--bin",
         BOOTLOADER_PACKAGE,
     ];
-    if panic_test {
+    if !features.is_empty() {
         args.push("--features");
-        args.push(PANIC_TEST_FEATURE);
+        args.push(&joined);
     }
 
     let status = Command::new("cargo")
@@ -6221,6 +6274,251 @@ fn cmd_screen_test(features: &[&str], expect_pass: bool) -> Result<()> {
             println!("{context}: the sabotage was caught (this run is expected to fail)");
             Ok(())
         }
+    }
+}
+
+/// 機械の変種（`ADR-0068`）。**既定の像を、QEMU の機械の属性だけを変えて起こす。**
+///
+/// **`xtask` の QEMU は 256MiB の `pc` で走るので、実機との差が検査の死角になる**——**メモリが
+/// 1GiB を超えると起動しない壁が隠れていた**（`docs/hardware-inventory.md`）。**人が読む道具
+/// （`tools/qemu-variants.py`）と違い、こちらは判定を持つ。**
+struct MachineVariant {
+    name: &'static str,
+    /// `-machine` に渡す値。
+    machine: &'static str,
+    /// `-m` に渡す値。
+    memory: &'static str,
+}
+
+/// 機械の変種の表（`ADR-0068`）。**小段ごとに足す。**
+///
+/// - `q35-6g`（HW-a）——**4GiB を超える RAM を持つ。** **受け渡しと切り替え前の配りが、初期ページ表の
+///   届く範囲（1GiB）に収まっていることを見る。**
+const MACHINE_VARIANTS: &[MachineVariant] = &[MachineVariant {
+    name: "q35-6g",
+    machine: "q35",
+    memory: "6G",
+}];
+
+/// 機械の変種の破壊（`ADR-0068`）。**狙いどおりの所で止まったことまでを判定にする**
+/// （レビューの足す1点。2026-09-22）——**起動が別の所で止まっても「捕まった」にしないため**
+/// （`shm-mmap-maps-nothing` と `shm-close-keeps-refs` で 2 回踏んだ形）。
+///
+/// (変種の名前, feature, ブートローダの feature か, 何が起きれば狙いどおりか)
+const MACHINE_VARIANT_SABOTAGES: &[(&str, &str, bool, VariantExpect)] = &[
+    // **受け渡しを `AnyPages` へ戻す**——**#PF の `cr2` が、ブートローダが出した BootInfo の番地と
+    // 等しいこと。** **最初の一読で落ちたことを番地で言う。**
+    (
+        "q35-6g",
+        "handoff-anywhere",
+        true,
+        VariantExpect::FaultAtBootInfo,
+    ),
+    // **配りを高い番地からにする**——**切り替え前の組み立ての確かめが止める行。**
+    (
+        "q35-6g",
+        "frame-allocator-hands-out-high-first",
+        false,
+        VariantExpect::StopsWith("paging: the frame allocator handed out a page-table frame at"),
+    ),
+];
+
+/// 機械の変種で、何が起きれば正しいか。
+#[derive(Clone, Copy)]
+enum VariantExpect {
+    /// プロンプトが出て、`[ERROR]` の行が無い。
+    Prompt,
+    /// 狙いどおりに止まった行が出て、プロンプトが出ない（破壊の回）。
+    StopsWith(&'static str),
+    /// #PF の `cr2` が、ブートローダが出した BootInfo の番地と等しく、プロンプトが出ない
+    /// （破壊 `handoff-anywhere`）。
+    FaultAtBootInfo,
+    /// プロンプトが出て `[ERROR]` の行が無く、計器の数が 0 でない（検査の構成）。
+    /// **0 なら、その回は何も確かめていない**（偽の緑）。
+    PromptAndCounter(&'static str),
+}
+
+/// 機械の変種の検査の構成（`ADR-0068`）。**破壊ではない**——**`SABOTAGE_FEATURES` に入れない。**
+///
+/// (変種の名前, カーネルの feature, 何が起きれば正しいか)
+///
+/// - `frame-allocator-high-after-switch`——**自前のページ表へ切り替えた後から、アロケータが最も高い
+///   空きから配る。** **6GiB で起動すると 4GiB の上のフレームが実際に配られる**（既定では低い番地から
+///   配るので、4GiB の上は張ってあることしか確かめられない。レビューの足す1点。2026-09-22）。
+///   **番地を 32 ビットへ切り詰める箇所を表に出す。**
+const MACHINE_VARIANT_CONFIGS: &[(&str, &str, VariantExpect)] = &[(
+    "q35-6g",
+    "frame-allocator-high-after-switch",
+    VariantExpect::PromptAndCounter("frame-allocator: handed out "),
+)];
+
+/// 機械の変種の上限。**既定の像がプロンプトまで 7.5〜8.7 秒だった**（実測。`pc` と `q35`、
+/// 256MiB と 1GiB。2026-09-22）**ので、その 7 倍に取る。**
+const MACHINE_VARIANT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 機械の変種を 1 つ起こして判定する（`ADR-0068`）。
+fn cmd_machine_variant(
+    variant: &MachineVariant,
+    kernel_features: &[&str],
+    bootloader_features: &[&str],
+    expect: VariantExpect,
+) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader_with_features(&workspace_root, bootloader_features)?;
+    let kernel_elf = build_kernel_with_features(&workspace_root, kernel_features)?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+
+    let mut tag_parts: Vec<&str> = vec![variant.name];
+    tag_parts.extend_from_slice(bootloader_features);
+    tag_parts.extend_from_slice(kernel_features);
+    let tag = tag_parts.join("-");
+    let target = workspace_root.join("target");
+    let serial_log = target.join(format!("machine-variant-{tag}-serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    let debug_log = target.join("qemu-debug.log");
+    let _ = fs::remove_file(&debug_log);
+
+    let mut qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
+    });
+    // **メモリと機械だけを変える。** 他の引数は既定の起動と同じである。
+    if let Some(at) = qemu_args.iter().position(|a| a == "-m") {
+        qemu_args[at + 1] = variant.memory.into();
+    }
+    qemu_args.push("-machine".into());
+    qemu_args.push(variant.machine.into());
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .args(&qemu_args)
+        .spawn()
+        .context("failed to launch qemu-system-x86_64 for a machine variant")?;
+
+    // **プロンプトか停止の行を待つ。** どちらも来なければ上限で切る。
+    let started = Instant::now();
+    let deadline = started + MACHINE_VARIANT_TIMEOUT;
+    while Instant::now() < deadline {
+        let text = strip_ansi(&read_lossy(&serial_log));
+        if text.contains(SHELL_READY_MARKER) || text.contains("halting") {
+            thread::sleep(Duration::from_millis(500));
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+    let waited = started.elapsed();
+
+    let qemu_exit = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format!("{status}"));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let serial = read_lossy(&serial_log);
+    let context = if bootloader_features.is_empty() && kernel_features.is_empty() {
+        format!("machine-variant {}", variant.name)
+    } else {
+        let mut features: Vec<&str> = bootloader_features.to_vec();
+        features.extend_from_slice(kernel_features);
+        format!("machine-variant {} {}", variant.name, features.join("+"))
+    };
+    let context = context.as_str();
+
+    let qemu_debug = read_lossy(&debug_log);
+    if let BootOutcome::DidNotStart { firmware_rip } =
+        classify_boot(&serial, &qemu_debug, KERNEL_STARTED_MARKER)
+    {
+        report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
+        bail!("{context}: the kernel did not start");
+    }
+
+    let text = strip_ansi(&serial);
+    let ready = text.contains(SHELL_READY_MARKER);
+    let error_lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("[ERROR]"))
+        .take(3)
+        .collect();
+    println!(
+        "{context}: (info) -machine {} -m {}; waited {:.1} s; the prompt appeared = {ready}",
+        variant.machine,
+        variant.memory,
+        waited.as_secs_f64()
+    );
+    let held = match expect {
+        VariantExpect::Prompt => {
+            let no_error = error_lines.is_empty();
+            println!("{context}: the_shell_printed_its_prompt = {ready}");
+            println!("{context}: no [ERROR] line = {no_error} (the first were {error_lines:?})");
+            ready && no_error
+        }
+        VariantExpect::StopsWith(marker) => {
+            let stopped_there = text.contains(marker);
+            println!("{context}: it_stopped_at_the_intended_line = {stopped_there} (`{marker}`)");
+            println!("{context}: the prompt did not appear = {}", !ready);
+            stopped_there && !ready
+        }
+        VariantExpect::PromptAndCounter(marker) => {
+            let no_error = error_lines.is_empty();
+            let counted: Option<u64> =
+                text.lines()
+                    .find(|line| line.contains(marker))
+                    .and_then(|line| {
+                        let rest = &line[line.find(marker)? + marker.len()..];
+                        let digits: String =
+                            rest.chars().take_while(char::is_ascii_digit).collect();
+                        digits.parse().ok()
+                    });
+            let counted_some = counted.is_some_and(|value| value > 0);
+            println!("{context}: the_shell_printed_its_prompt = {ready}");
+            println!("{context}: no [ERROR] line = {no_error} (the first were {error_lines:?})");
+            println!(
+                "{context}: the_counter_is_not_zero = {counted_some} (`{marker}` {})",
+                counted.map_or_else(|| "none".to_string(), |value| value.to_string())
+            );
+            ready && no_error && counted_some
+        }
+        VariantExpect::FaultAtBootInfo => {
+            let hex_after = |key: &str| -> Option<u64> {
+                let line = text.lines().find(|line| line.contains(key))?;
+                let rest = &line[line.find(key)? + key.len()..];
+                let digits: String = rest
+                    .trim_start_matches("0x")
+                    .chars()
+                    .take_while(char::is_ascii_hexdigit)
+                    .collect();
+                u64::from_str_radix(&digits, 16).ok()
+            };
+            let boot_info = hex_after("handoff: BootInfo at ");
+            let cr2 = hex_after("cr2=");
+            let at_boot_info = boot_info.is_some() && boot_info == cr2;
+            let shown = |value: Option<u64>| {
+                value.map_or_else(|| "none".to_string(), |address| format!("{address:#x}"))
+            };
+            println!(
+                "{context}: the_page_fault_hit_boot_info = {at_boot_info} (BootInfo {}, cr2 {})",
+                shown(boot_info),
+                shown(cr2)
+            );
+            println!("{context}: the prompt did not appear = {}", !ready);
+            at_boot_info && !ready
+        }
+    };
+    if held {
+        println!("{context}: PASS");
+        Ok(())
+    } else {
+        println!("{context}: FAILED");
+        bail!("{context}: FAILED")
     }
 }
 
@@ -17829,6 +18127,11 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "smp-tlb-generation-probe",
     "smp-tlb-shootdown-probe",
     "smp-tlb-no-generation-bump",
+    // `ADR-0068` の HW-a。**受け渡しを上へ戻す（ブートローダ）と、配りを高い番地からにする。**
+    // **`frame-allocator-high-after-switch` は入れない**——**破壊ではなく検査の構成である**
+    // （`MACHINE_VARIANT_CONFIGS`。`concurrent-test` と同じ扱い）。
+    "handoff-anywhere",
+    "frame-allocator-hands-out-high-first",
 ];
 
 /// 内部を隠す約束のディレクトリ。
@@ -18675,6 +18978,61 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("compose-test {sabotage}");
             begin_item(&label);
             match cmd_compose_test(&[sabotage], false) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
+            }
+        }
+
+        // **機械の変種（`ADR-0068`）。** **既定の像を、QEMU の機械の属性だけを変えて起こす。**
+        // **1GiB を超える構成を検査に足すのは必須である**（運用者の決定。**1GiB の壁が隠れていた
+        // 理由である**）。**破壊は、狙いどおりの所で止まったことまでを見る。**
+        for variant in MACHINE_VARIANTS {
+            total += 1;
+            let label = format!("machine-variant {}", variant.name);
+            begin_item(&label);
+            match cmd_machine_variant(variant, &[], &[], VariantExpect::Prompt) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
+            }
+        }
+        for &(name, feature, expect) in MACHINE_VARIANT_CONFIGS {
+            total += 1;
+            let label = format!("machine-variant {name} {feature}");
+            begin_item(&label);
+            let Some(variant) = MACHINE_VARIANTS.iter().find(|variant| variant.name == name) else {
+                println!("--- {label}: FAILED (no machine variant named {name:?})");
+                failed.push(label.to_string());
+                continue;
+            };
+            match cmd_machine_variant(variant, &[feature], &[], expect) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
+            }
+        }
+        for &(name, feature, bootloader, expect) in MACHINE_VARIANT_SABOTAGES {
+            total += 1;
+            let label = format!("machine-variant {name} {feature}");
+            begin_item(&label);
+            let Some(variant) = MACHINE_VARIANTS.iter().find(|variant| variant.name == name) else {
+                println!("--- {label}: FAILED (no machine variant named {name:?})");
+                failed.push(label.to_string());
+                continue;
+            };
+            let (kernel, boot): (&[&str], &[&str]) = if bootloader {
+                (&[], &[feature])
+            } else {
+                (&[feature], &[])
+            };
+            match cmd_machine_variant(variant, kernel, boot, expect) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
                     println!("--- {label}: FAILED ({error})");
@@ -20209,7 +20567,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 35,
-    full: 357,
+    full: 361,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。

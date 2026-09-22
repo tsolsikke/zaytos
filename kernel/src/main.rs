@@ -1103,6 +1103,19 @@ extern "sysv64" fn kernel_main() -> ! {
     logger.info(format_args!(
         "paging: CR3 switch verified. now running under self-built page tables."
     ));
+    // **検査の構成（破壊ではない。`ADR-0068` の HW-a）**——**ここから高い側から配る。**
+    // **ヒープ・ユーザーのページ・ページ表・virtio のリングが 4GiB の上から取られ、番地を
+    // 32 ビットへ切り詰める箇所が表に出る。** **切り替え前は初期ページ表の届く範囲しか触れないので、
+    // この位置より前には置けない。**
+    #[cfg(feature = "frame-allocator-high-after-switch")]
+    {
+        kernel::frame_allocator::hand_out_high_first_from_now();
+        logger.info(format_args!(
+            "frame-allocator: from here the allocator hands out the highest free frames first \
+             (the high-after-switch configuration; ADR-0068)"
+        ));
+    }
+
     // === higher-half A-1: direct physical map の導入 ===
     //
     // 恒等と direct map 窓（DIRECT_MAP_BASE + phys）の両方を持つ新テーブルを構築し、
@@ -1801,6 +1814,14 @@ extern "sysv64" fn kernel_main() -> ! {
         "frame-allocator: after the user programs, lent out {taken_after} time(s), given back \
          {returned_after} time(s), balanced={}, present={present_after}",
         taken_after == returned_after
+    ));
+    // **検査の構成の計器（`ADR-0068` の HW-a）**——**4GiB の上から配った枚数。** **0 なら、その回は
+    // 4GiB の上の扱いを何も確かめていない**（`xtask` の判定が見る）。
+    #[cfg(feature = "frame-allocator-high-after-switch")]
+    logger.info(format_args!(
+        "frame-allocator: handed out {} frame(s) at or above 4GiB so far (the high-after-switch \
+         configuration)",
+        kernel::frame_allocator::frames_handed_out_above_4gib()
     ));
     if taken_after != returned_after || !present_after {
         logger.error(format_args!(
@@ -10487,6 +10508,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "foreground-ignores-the-slot",
         cfg!(feature = "foreground-ignores-the-slot"),
         "前景の関所が大域の印だけを見る（ADR-0066 の Y-c）",
+    ),
+    (
+        "frame-allocator-hands-out-high-first",
+        cfg!(feature = "frame-allocator-hands-out-high-first"),
+        "フレームアロケータが最も高い空きから配る（ADR-0068 の HW-a）",
+    ),
+    (
+        "frame-allocator-high-after-switch",
+        cfg!(feature = "frame-allocator-high-after-switch"),
+        "切り替えの後から、フレームアロケータが最も高い空きから配る（検査の構成。破壊ではない。ADR-0068 の HW-a）",
     ),
     (
         "poll-never-waits",
