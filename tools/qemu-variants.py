@@ -17,6 +17,11 @@
 **直した後にもう一度使う**（6GiB で起動する、`i8042=off` と `pit=off` で止まらない）。
 **毎回手で組むと、起こし方がぶれる。**
 
+# 変種の表
+
+**起こし方は `xtask/machine-variants.txt` に在り、`xtask` と共有する**（`ADR-0068` の HW-b。
+**HW-a の時点では両方に書いていた**）。**判定は `xtask` だけが持つ。**
+
 # 使い方
 
     cargo xtask run --boot-log-diff                 # 既定の像を target/esp と target/disk0.img へ置く
@@ -56,20 +61,28 @@ OVMF_CODE = "/usr/share/OVMF/OVMF_CODE_4M.fd"
 OVMF_VARS = "/usr/share/OVMF/OVMF_VARS_4M.fd"
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
-# 変種の名前 → (-machine, -m, シリアル)。**`xtask` の既定は `pc-default` である。**
-VARIANTS = {
-    "pc-default": ("pc", "256M", "file"),
-    "q35": ("q35", "256M", "file"),
-    "q35-1g": ("q35", "1G", "file"),
-    "q35-1500m": ("q35", "1500M", "file"),
-    "q35-2g": ("q35", "2G", "file"),
-    "q35-6g": ("q35", "6G", "file"),
-    "pc-6g": ("pc", "6G", "file"),
-    "q35-no-i8042": ("q35,i8042=off", "256M", "file"),
-    "q35-no-pit": ("q35,pit=off", "256M", "file"),
-    "q35-no-hpet": ("q35,hpet=off", "256M", "file"),
-    "pc-no-serial": ("pc", "256M", "none"),
-}
+TABLE = os.path.join(ROOT, "xtask", "machine-variants.txt")
+
+
+def load_variants():
+    """変種の名前 → (-machine, -m, シリアル)。**`xtask` の既定は `pc-default` である。**
+
+    **形の崩れた行は、行番号を添えて止める**（`xtask` の `parse_machine_variants` と同じ規則）。
+    """
+    variants = {}
+    with open(TABLE, encoding="utf-8") as handle:
+        for number, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            fields = line.split()
+            if len(fields) != 4 or fields[3] not in ("file", "none") or fields[0] in variants:
+                sys.exit(f"{TABLE} line {number}: not a well-formed row: {line!r}")
+            variants[fields[0]] = tuple(fields[1:])
+    return variants
+
+
+VARIANTS = load_variants()
 
 
 def ppm_to_png(ppm_path, png_path):

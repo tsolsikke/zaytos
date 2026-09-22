@@ -4899,6 +4899,13 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>, i8042: kernel::acpi::I8042Pre
     let config = match unsafe { controller::read_config() } {
         Ok(config) => config,
         Err(error) => {
+            // **破壊 `i8042-halts-when-absent`**——直す前の形（探って答えが無ければ止める）。
+            if cfg!(feature = "i8042-halts-when-absent") {
+                logger.error(format_args!(
+                    "i8042: failed to read the configuration byte ({error:?}); halting"
+                ));
+                cpu::halt_forever();
+            }
             let status = controller::status();
             if i8042 == I8042Presence::Present {
                 logger.error(format_args!(
@@ -10574,6 +10581,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "frame-allocator-high-after-switch",
         cfg!(feature = "frame-allocator-high-after-switch"),
         "切り替えの後から、フレームアロケータが最も高い空きから配る（検査の構成。破壊ではない。ADR-0068 の HW-a）",
+    ),
+    (
+        "i8042-halts-when-absent",
+        cfg!(feature = "i8042-halts-when-absent"),
+        "i8042 を探って答えが無ければ止める（直す前の形。ADR-0068 の HW-b）",
     ),
     (
         "poll-never-waits",

@@ -1,0 +1,19 @@
+# 機械の変種の起こし方（ADR-0068）。xtask と tools/qemu-variants.py が両方ここを読む。
+#
+# 起こし方だけを持つ。何が起きれば正しいか（判定）は xtask が持ち
+# （MACHINE_VARIANT_CHECKS ほか）、--full が回すのはそこに名前が在る変種だけである。
+# シリアルが none の変種は人が画面で読むためのもので、xtask は起こさない（判定がシリアルを読む）。
+#
+# 名前           -machine          -m      シリアル
+pc-default       pc                256M    file
+q35              q35               256M    file
+q35-1g           q35               1G      file
+q35-1500m        q35               1500M   file
+q35-2g           q35               2G      file
+q35-6g           q35               6G      file
+pc-6g            pc                6G      file
+q35-no-i8042     q35,i8042=off     256M    file
+pc-no-i8042      pc,i8042=off      256M    file
+q35-no-pit       q35,pit=off       256M    file
+q35-no-hpet      q35,hpet=off      256M    file
+pc-no-serial     pc                256M    none

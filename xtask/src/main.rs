@@ -1410,7 +1410,7 @@ fn main() -> Result<()> {
        cargo xtask run --fp-test [--sabotage FEATURE]
        cargo xtask run --ttf-test [--sabotage FEATURE]
        cargo xtask run --serial-test [--sabotage FEATURE]
-       cargo xtask run --machine-variant NAME [--sabotage FEATURE | --config FEATURE]   (ADR-0068。NAME は q35-6g)
+       cargo xtask run --machine-variant NAME [--sabotage FEATURE | --config FEATURE]   (ADR-0068。NAME は xtask/machine-variants.txt の名前)
        cargo xtask check [--update-reference]   (ホストテストの名前の集合を取り直す)
        cargo xtask run --boot-log-diff [--update-reference]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
@@ -1778,13 +1778,10 @@ fn main() -> Result<()> {
             }
             // **画面・入力・ソケット・共有メモリを 1 つの組で通す判定（`ADR-0066` の Y-d）。**
             if let Some(index) = rest.iter().position(|a| a == "--machine-variant") {
-                let name = rest
-                    .get(index + 1)
-                    .context("--machine-variant needs a variant name (see MACHINE_VARIANTS)")?;
-                let variant = MACHINE_VARIANTS
-                    .iter()
-                    .find(|variant| variant.name == name.as_str())
-                    .with_context(|| format!("unknown machine variant {name:?}"))?;
+                let name = rest.get(index + 1).context(
+                    "--machine-variant needs a variant name (see xtask/machine-variants.txt)",
+                )?;
+                let variant = &machine_variant(name)?;
                 if let Some(config) = rest
                     .iter()
                     .position(|a| a == "--config")
@@ -1803,7 +1800,12 @@ fn main() -> Result<()> {
                     .position(|a| a == "--sabotage")
                     .and_then(|at| rest.get(at + 1));
                 let Some(feature) = sabotage else {
-                    return cmd_machine_variant(variant, &[], &[], VariantExpect::Prompt);
+                    // **`--full` が回す変種なら、その判定で見る。** 回さない変種はプロンプトだけを見る。
+                    let expect = MACHINE_VARIANT_CHECKS
+                        .iter()
+                        .find(|(on, _)| *on == variant.name)
+                        .map_or(VariantExpect::Prompt, |&(_, expect)| expect);
+                    return cmd_machine_variant(variant, &[], &[], expect);
                 };
                 let Some(&(_, feature, bootloader, expect)) = MACHINE_VARIANT_SABOTAGES
                     .iter()
@@ -6282,23 +6284,95 @@ fn cmd_screen_test(features: &[&str], expect_pass: bool) -> Result<()> {
 /// **`xtask` の QEMU は 256MiB の `pc` で走るので、実機との差が検査の死角になる**——**メモリが
 /// 1GiB を超えると起動しない壁が隠れていた**（`docs/hardware-inventory.md`）。**人が読む道具
 /// （`tools/qemu-variants.py`）と違い、こちらは判定を持つ。**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MachineVariant {
     name: &'static str,
     /// `-machine` に渡す値。
     machine: &'static str,
     /// `-m` に渡す値。
     memory: &'static str,
+    /// シリアルをファイルへ出すか。**出さない変種は人が画面で読むためのもので、`xtask` は起こさない**
+    /// （判定がシリアルを読む）。
+    serial: bool,
 }
 
-/// 機械の変種の表（`ADR-0068`）。**小段ごとに足す。**
+/// 機械の変種の起こし方の表（`ADR-0068`）。**`tools/qemu-variants.py` も同じファイルを読む**
+/// ——**二重に持たない**（HW-a の時点では両方に書いていた）。**判定はここに持たない**
+/// （[`MACHINE_VARIANT_CHECKS`] ほか）。
+const MACHINE_VARIANT_TABLE: &str = include_str!("../machine-variants.txt");
+
+/// 起こし方の表を読む。**形の崩れた行は、行番号を添えて拒む**（黙って読み飛ばさない）。
+fn parse_machine_variants(table: &'static str) -> Result<Vec<MachineVariant>> {
+    let mut variants: Vec<MachineVariant> = Vec::new();
+    for (index, line) in table.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&'static str> = line.split_whitespace().collect();
+        let &[name, machine, memory, serial] = fields.as_slice() else {
+            bail!(
+                "machine-variants.txt line {}: expected 4 fields (name, -machine, -m, serial), got {}",
+                index + 1,
+                fields.len()
+            );
+        };
+        let serial = match serial {
+            "file" => true,
+            "none" => false,
+            other => bail!(
+                "machine-variants.txt line {}: the serial column is {other:?}, not file or none",
+                index + 1
+            ),
+        };
+        if variants.iter().any(|variant| variant.name == name) {
+            bail!(
+                "machine-variants.txt line {}: the name {name:?} appears twice",
+                index + 1
+            );
+        }
+        variants.push(MachineVariant {
+            name,
+            machine,
+            memory,
+            serial,
+        });
+    }
+    Ok(variants)
+}
+
+/// 名前で変種を引く。**判定を持つ側から使うので、シリアルの無い変種は拒む。**
+fn machine_variant(name: &str) -> Result<MachineVariant> {
+    let variant = parse_machine_variants(MACHINE_VARIANT_TABLE)?
+        .into_iter()
+        .find(|variant| variant.name == name)
+        .with_context(|| {
+            format!("no machine variant named {name:?} in xtask/machine-variants.txt")
+        })?;
+    if !variant.serial {
+        bail!("the machine variant {name:?} has no serial port; xtask judges by the serial log");
+    }
+    Ok(variant)
+}
+
+/// `--full` が回す機械の変種と、何が起きれば正しいか（`ADR-0068`）。**小段ごとに足す。**
 ///
 /// - `q35-6g`（HW-a）——**4GiB を超える RAM を持つ。** **受け渡しと切り替え前の配りが、初期ページ表の
 ///   届く範囲（1GiB）に収まっていることを見る。**
-const MACHINE_VARIANTS: &[MachineVariant] = &[MachineVariant {
-    name: "q35-6g",
-    machine: "q35",
-    memory: "6G",
-}];
+/// - `q35-no-i8042`（HW-b）——**FADT（リビジョン 3）が「8042 は無い」と言う。探らずに続く行を見る。**
+/// - `pc-no-i8042`（HW-b）——**FADT（リビジョン 1）は何も言わない。探って答えが無く、続く行を見る。**
+///   **`q35` だけでは探る側の道を通らない**（FADT が先に答える）ので、2 つ置く。
+const MACHINE_VARIANT_CHECKS: &[(&str, VariantExpect)] = &[
+    ("q35-6g", VariantExpect::Prompt),
+    (
+        "q35-no-i8042",
+        VariantExpect::PromptAndLine("i8042: the FADT says there is no 8042 controller"),
+    ),
+    (
+        "pc-no-i8042",
+        VariantExpect::PromptAndLine("i8042: no controller answered"),
+    ),
+];
 
 /// 機械の変種の破壊（`ADR-0068`）。**狙いどおりの所で止まったことまでを判定にする**
 /// （レビューの足す1点。2026-09-22）——**起動が別の所で止まっても「捕まった」にしないため**
@@ -6321,6 +6395,16 @@ const MACHINE_VARIANT_SABOTAGES: &[(&str, &str, bool, VariantExpect)] = &[
         false,
         VariantExpect::StopsWith("paging: the frame allocator handed out a page-table frame at"),
     ),
+    // **探って答えが無ければ止める（直す前の形）**——**直す前に `i8042=off` で止まった行そのもの。**
+    // **`pc` で見る**——**`q35` では FADT が先に「無い」と答え、探る道へ入らない。**
+    (
+        "pc-no-i8042",
+        "i8042-halts-when-absent",
+        false,
+        VariantExpect::StopsWith(
+            "i8042: failed to read the configuration byte (InputBufferStuck); halting",
+        ),
+    ),
 ];
 
 /// 機械の変種で、何が起きれば正しいか。
@@ -6336,6 +6420,9 @@ enum VariantExpect {
     /// プロンプトが出て `[ERROR]` の行が無く、計器の数が 0 でない（検査の構成）。
     /// **0 なら、その回は何も確かめていない**（偽の緑）。
     PromptAndCounter(&'static str),
+    /// プロンプトが出て `[ERROR]` の行が無く、この行が出た（HW-b）。**プロンプトだけでは、
+    /// どの道を通って続いたかが分からない。**
+    PromptAndLine(&'static str),
 }
 
 /// 機械の変種の検査の構成（`ADR-0068`）。**破壊ではない**——**`SABOTAGE_FEATURES` に入れない。**
@@ -6486,6 +6573,14 @@ fn cmd_machine_variant(
                 counted.map_or_else(|| "none".to_string(), |value| value.to_string())
             );
             ready && no_error && counted_some
+        }
+        VariantExpect::PromptAndLine(marker) => {
+            let no_error = error_lines.is_empty();
+            let line_seen = text.contains(marker);
+            println!("{context}: the_shell_printed_its_prompt = {ready}");
+            println!("{context}: no [ERROR] line = {no_error} (the first were {error_lines:?})");
+            println!("{context}: the_line_appeared = {line_seen} (`{marker}`)");
+            ready && no_error && line_seen
         }
         VariantExpect::FaultAtBootInfo => {
             let hex_after = |key: &str| -> Option<u64> {
@@ -18132,6 +18227,8 @@ const SABOTAGE_FEATURES: &[&str] = &[
     // （`MACHINE_VARIANT_CONFIGS`。`concurrent-test` と同じ扱い）。
     "handoff-anywhere",
     "frame-allocator-hands-out-high-first",
+    // `ADR-0068` の HW-b。**i8042 を探って答えが無ければ止める（直す前の形）。**
+    "i8042-halts-when-absent",
 ];
 
 /// 内部を隠す約束のディレクトリ。
@@ -18989,11 +19086,13 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **機械の変種（`ADR-0068`）。** **既定の像を、QEMU の機械の属性だけを変えて起こす。**
         // **1GiB を超える構成を検査に足すのは必須である**（運用者の決定。**1GiB の壁が隠れていた
         // 理由である**）。**破壊は、狙いどおりの所で止まったことまでを見る。**
-        for variant in MACHINE_VARIANTS {
+        for &(name, expect) in MACHINE_VARIANT_CHECKS {
             total += 1;
-            let label = format!("machine-variant {}", variant.name);
+            let label = format!("machine-variant {name}");
             begin_item(&label);
-            match cmd_machine_variant(variant, &[], &[], VariantExpect::Prompt) {
+            match machine_variant(name)
+                .and_then(|variant| cmd_machine_variant(&variant, &[], &[], expect))
+            {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
                     println!("--- {label}: FAILED ({error})");
@@ -19005,12 +19104,15 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             total += 1;
             let label = format!("machine-variant {name} {feature}");
             begin_item(&label);
-            let Some(variant) = MACHINE_VARIANTS.iter().find(|variant| variant.name == name) else {
-                println!("--- {label}: FAILED (no machine variant named {name:?})");
-                failed.push(label.to_string());
-                continue;
+            let variant = match machine_variant(name) {
+                Ok(variant) => variant,
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                    continue;
+                }
             };
-            match cmd_machine_variant(variant, &[feature], &[], expect) {
+            match cmd_machine_variant(&variant, &[feature], &[], expect) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
                     println!("--- {label}: FAILED ({error})");
@@ -19022,17 +19124,20 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             total += 1;
             let label = format!("machine-variant {name} {feature}");
             begin_item(&label);
-            let Some(variant) = MACHINE_VARIANTS.iter().find(|variant| variant.name == name) else {
-                println!("--- {label}: FAILED (no machine variant named {name:?})");
-                failed.push(label.to_string());
-                continue;
+            let variant = match machine_variant(name) {
+                Ok(variant) => variant,
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                    continue;
+                }
             };
             let (kernel, boot): (&[&str], &[&str]) = if bootloader {
                 (&[], &[feature])
             } else {
                 (&[feature], &[])
             };
-            match cmd_machine_variant(variant, kernel, boot, expect) {
+            match cmd_machine_variant(&variant, kernel, boot, expect) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
                     println!("--- {label}: FAILED ({error})");
@@ -20567,7 +20672,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 35,
-    full: 361,
+    full: 364,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -22433,5 +22538,49 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         assert!(panic_markers_present(&path));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// **判定を持つ表が名前で指す変種は、起こし方の表に在り、シリアルを持つ**（`ADR-0068`）。
+    /// 名前を打ち違えると、`--full` の項目が「変種が無い」で赤になる——**基底で先に捕まえる。**
+    #[test]
+    fn every_judged_machine_variant_is_in_the_table_with_a_serial_port() {
+        let names = MACHINE_VARIANT_CHECKS
+            .iter()
+            .map(|&(name, _)| name)
+            .chain(MACHINE_VARIANT_CONFIGS.iter().map(|&(name, _, _)| name))
+            .chain(
+                MACHINE_VARIANT_SABOTAGES
+                    .iter()
+                    .map(|&(name, _, _, _)| name),
+            );
+        for name in names {
+            let variant = machine_variant(name).unwrap();
+            assert!(variant.serial, "{name}");
+        }
+    }
+
+    /// **`tools/qemu-variants.py` と同じファイルを読むので、形の崩れた行は両方を壊す。**
+    #[test]
+    fn the_machine_variant_table_parses_and_rejects_broken_rows() {
+        let variants = parse_machine_variants(MACHINE_VARIANT_TABLE).unwrap();
+        assert!(variants.iter().any(|variant| variant.name == "q35-6g"
+            && variant.machine == "q35"
+            && variant.memory == "6G"
+            && variant.serial));
+        assert!(variants
+            .iter()
+            .any(|variant| variant.name == "pc-no-serial" && !variant.serial));
+        assert!(parse_machine_variants("a q35 6G\n").is_err());
+        assert!(parse_machine_variants("a q35 6G tty\n").is_err());
+        assert!(parse_machine_variants("a q35 6G file\na pc 1G file\n").is_err());
+        assert_eq!(
+            parse_machine_variants("# comment\n\nb pc 1G none\n").unwrap(),
+            vec![MachineVariant {
+                name: "b",
+                machine: "pc",
+                memory: "1G",
+                serial: false,
+            }]
+        );
     }
 }

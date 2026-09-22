@@ -612,6 +612,9 @@ frame-allocator-hands-out-high-first = []
 # 最も高い空きから配る。6GiB の起動で、ヒープ・ユーザーのページ・ページ表・virtio のリングが 4GiB の上から
 # 取られる。番地を 32 ビットへ切り詰める箇所を表に出す。4GiB の上から配った枚数を計器に出す。
 frame-allocator-high-after-switch = []
+# 破壊（ADR-0068 の HW-b）: i8042 を探って答えが無ければ止める（直す前の形）。pc の i8042=off
+# （FADT がリビジョン 1 で何も言わないので探る）で、プロンプトの前に止まる。
+i8042-halts-when-absent = []
 # Y-d: 画面・入力・ソケット・共有メモリを 1 つの組で通す（ADR-0066 の設計 Q5）。init が /bin/compd を
 # 前景で起こし、compd が /bin/compc を起こしっぱなしで起こす。compc が shm のプールに描いて送り、
 # compd が合成して present する。判定は xtask の compose-test が screendump を読んで行う。
