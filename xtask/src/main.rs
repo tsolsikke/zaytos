@@ -1802,6 +1802,24 @@ fn main() -> Result<()> {
                         expect,
                     );
                 }
+                // **起動媒体の破壊（`ADR-0068` の HW-e）。** **カーネルの feature ではないので、
+                // `--sabotage` とは別の旗である。**
+                if let Some(media) = rest
+                    .iter()
+                    .position(|a| a == "--media")
+                    .and_then(|at| rest.get(at + 1))
+                {
+                    let Some(&(_, contents, expect)) =
+                        MEDIA_SABOTAGES.iter().find(|(on, contents, _)| {
+                            *on == variant.name && contents.label() == media.as_str()
+                        })
+                    else {
+                        bail!(
+                            "no media sabotage {media:?} is listed for the machine variant {name:?}"
+                        );
+                    };
+                    return cmd_machine_variant(variant, &[], &[], contents, expect);
+                }
                 let sabotage = rest
                     .iter()
                     .position(|a| a == "--sabotage")
@@ -6430,7 +6448,34 @@ const MACHINE_VARIANT_CHECKS: &[(&str, VariantExpect)] = &[
         "pc-no-virtio",
         VariantExpect::PromptAndLine("fs-image-load: copied"),
     ),
+    (
+        "media-only",
+        VariantExpect::PromptAndLine("fs-image-load: copied"),
+    ),
 ];
+
+/// 起動媒体の破壊（`ADR-0068` の HW-e）。**カーネルの feature ではなく、像の中身を変える。**
+///
+/// **`\zaytos\fs.img` を入れずに像を建てる**——**装置も像も無い形になり、起動の列挙の所で
+/// 止まる。** **HW-d の破壊（`fs-ram-image-ignored`）とは止まる所が違う**（実測。2026-09-23）
+/// ——**あちらは像を渡された上で見ないので、写す所まで進んで止まる。** **こちらは像そのものが
+/// 無いので、その前の「装置も像も無い」の検査で止まる。**
+///
+/// **既定の回（[`MACHINE_VARIANT_CHECKS`] の `media-only`）が進むことの裏返しの証明である**
+/// ——**像に `fs.img` が入っていなければ、既定の回もこの行で止まるはずだからである。**
+/// **理由の行も見る**——**止まった行だけでは「像から外れていた」ことは言えない**（装置の無い
+/// 構成なら、別の理由でも同じ行になる）。
+///
+/// (変種の名前, 像の中身, 何が起きれば狙いどおりか)
+const MEDIA_SABOTAGES: &[(&str, MediaContents, VariantExpect)] = &[(
+    "media-only",
+    MediaContents::WithoutFsImage,
+    VariantExpect::StopsWithReason {
+        line: "virtio-blk: no device with an I/O BAR0 was found on bus 0, and the bootloader \
+               handed over no RAM image",
+        reason: "fs-image: no \\zaytos\\fs.img on the ESP",
+    },
+)];
 
 /// 機械の変種の破壊（`ADR-0068`）。**狙いどおりの所で止まったことまでを判定にする**
 /// （レビューの足す1点。2026-09-22）——**起動が別の所で止まっても「捕まった」にしないため**
@@ -6497,6 +6542,17 @@ enum VariantExpect {
     Prompt,
     /// 狙いどおりに止まった行が出て、プロンプトが出ない（破壊の回）。
     StopsWith(&'static str),
+    /// 狙いどおりに止まった行と、**なぜそうなったかの行**の両方が出て、プロンプトが出ない
+    /// （HW-e。`ADR-0068`）。
+    ///
+    /// **止まった行だけでは足りない場合が在る。** **像から `fs.img` を外した回は、装置も像も
+    /// 無い形になって止まる**が、**装置の無い構成なら、像から外れていなくても同じ行で止まりうる**
+    /// （ブートローダが読めなかった等）——**理由の行（ブートローダが「ESP に `fs.img` が無い」と
+    /// 言う行）まで見て、初めて「像から外れていた」ことの観測になる。**
+    StopsWithReason {
+        line: &'static str,
+        reason: &'static str,
+    },
     /// #PF の `cr2` が、ブートローダが出した BootInfo の番地と等しく、プロンプトが出ない
     /// （破壊 `handoff-anywhere`）。
     FaultAtBootInfo,
@@ -6620,7 +6676,7 @@ fn apply_machine_variant(
 enum MediaContents {
     /// 3 つの成果物と `startup.nsh` を全部入れる。
     Complete,
-    /// **`\zaytos\fs.img` を入れない**（破壊に使う）。
+    /// **`\zaytos\fs.img` を入れない**（破壊。[`MEDIA_SABOTAGES`]）。
     WithoutFsImage,
 }
 
@@ -6792,7 +6848,7 @@ fn verify_partition_table(image: &Path) -> Result<()> {
 
 /// `cargo xtask image`（`ADR-0068` の HW-e）。**起動媒体の像を建てて確かめる。**
 ///
-/// **`--without-fs-image` は破壊に使う。** **別の名前の像を書く**
+/// **`--without-fs-image` は破壊である**（[`MEDIA_SABOTAGES`]）。**別の名前の像を書く**
 /// ——**運用者が VirtualBox へ渡す像（`zaytos.img`）を上書きしない。**
 fn cmd_image(contents: MediaContents) -> Result<()> {
     let workspace_root = workspace_root()?;
@@ -6806,6 +6862,58 @@ fn cmd_image(contents: MediaContents) -> Result<()> {
     let out = media_image_path(&workspace_root, name);
     println!("image: {}", write_boot_media(&esp_dir, &out, contents)?);
     Ok(())
+}
+
+/// 基底の項目——**起動媒体の像を建て、読み返し、外の道具と突き合わせる**（`ADR-0068` の HW-e）。
+///
+/// # なぜ基底に置くのか
+///
+/// **像を書く側が壊れたことを、`--full` の 2 時間を待たずに知りたい。** **建てるのは
+/// 66MiB の書き込みと読み返しで、実測 2 秒である**（カーネルとブートローダは
+/// [`CHECKS`] が既に建てている）。**起動そのものは `--full` の `media-only` が見る。**
+fn check_boot_media(workspace_root: &Path) -> Result<String> {
+    let bootloader_efi = build_bootloader_with_features(workspace_root, &[])?;
+    let kernel = build_kernel_with_features(workspace_root, &[])?;
+    let esp_dir = stage_esp(workspace_root, &bootloader_efi, &kernel)?;
+    let out = media_image_path(workspace_root, "zaytos");
+    write_boot_media(&esp_dir, &out, MediaContents::Complete)
+}
+
+/// 基底の項目——**VirtualBox の道具が、接頭辞の無い名前を `VBoxManage` を呼ばずに拒むこと**
+/// （`ADR-0068` の HW-e。運用者の決定。2026-09-22）。
+///
+/// **道具の `selftest` を回す。** **VirtualBox が入っていなくても走る**——**走り手を
+/// 「呼ばれたら落ちる」ものに差し替えて確かめる形だからである。** **印の行を要求する**
+/// ——**終了値だけだと、`selftest` が何も確かめずに通る形を見逃す**
+/// （`.claude/hooks` の `--self-test` と同じ扱い）。
+fn check_vbox_tool(workspace_root: &Path) -> Result<String> {
+    let script = workspace_root.join("tools").join("vbox-vm.py");
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg("selftest")
+        .current_dir(workspace_root)
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("failed to run {}", script.display()))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() {
+        bail!(
+            "{} selftest failed ({}): {}{}",
+            script.display(),
+            output.status,
+            text,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("selftest: OK"))
+        .context("the selftest printed no verdict line")?;
+    // **「1 度も呼んでいない」ことを判定にする**——**拒む経路で外の道具へ触れていたら赤。**
+    if !line.contains("VBoxManage の呼び出し 0 回") {
+        bail!("the selftest said {line:?}");
+    }
+    Ok(line.to_string())
 }
 
 /// 機械の変種を 1 つ起こして判定する（`ADR-0068`）。
@@ -6947,6 +7055,14 @@ fn cmd_machine_variant(
             println!("{context}: it_stopped_at_the_intended_line = {stopped_there} (`{marker}`)");
             println!("{context}: the prompt did not appear = {}", !ready);
             stopped_there && !ready
+        }
+        VariantExpect::StopsWithReason { line, reason } => {
+            let stopped_there = text.contains(line);
+            let reason_seen = text.contains(reason);
+            println!("{context}: it_stopped_at_the_intended_line = {stopped_there} (`{line}`)");
+            println!("{context}: the_reason_was_logged = {reason_seen} (`{reason}`)");
+            println!("{context}: the prompt did not appear = {}", !ready);
+            stopped_there && reason_seen && !ready
         }
         VariantExpect::PromptAndCounter(marker) => {
             let no_error = error_lines.is_empty();
@@ -19255,6 +19371,26 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
+    begin_item("the boot media image is built, read back and cross-checked");
+    match check_boot_media(&workspace_root) {
+        Ok(message) => println!("--- boot media: OK ({message})"),
+        Err(error) => {
+            println!("--- boot media: FAILED ({error})");
+            failed.push("boot media".to_string());
+        }
+    }
+
+    total += 1;
+    begin_item("the VirtualBox tool refuses names without the zaytos- prefix");
+    match check_vbox_tool(&workspace_root) {
+        Ok(message) => println!("--- VirtualBox tool: OK ({message})"),
+        Err(error) => {
+            println!("--- VirtualBox tool: FAILED ({error})");
+            failed.push("VirtualBox tool".to_string());
+        }
+    }
+
+    total += 1;
     begin_item("the host test names match the reference");
     match check_host_test_names(&workspace_root, update_reference) {
         Ok(message) => println!("--- host test names: {message}"),
@@ -19601,6 +19737,26 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 }
             };
             match cmd_machine_variant(&variant, &[feature], &[], MediaContents::Complete, expect) {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                }
+            }
+        }
+        for &(name, contents, expect) in MEDIA_SABOTAGES {
+            total += 1;
+            let label = format!("machine-variant {name} {}", contents.label());
+            begin_item(&label);
+            let variant = match machine_variant(name) {
+                Ok(variant) => variant,
+                Err(error) => {
+                    println!("--- {label}: FAILED ({error})");
+                    failed.push(label.to_string());
+                    continue;
+                }
+            };
+            match cmd_machine_variant(&variant, &[], &[], contents, expect) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
                     println!("--- {label}: FAILED ({error})");
@@ -21159,8 +21315,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 35,
-    full: 372,
+    base: 37,
+    full: 376,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -23055,7 +23211,8 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
                 MACHINE_VARIANT_SABOTAGES
                     .iter()
                     .map(|&(name, _, _, _)| name),
-            );
+            )
+            .chain(MEDIA_SABOTAGES.iter().map(|&(name, _, _)| name));
         for name in names {
             let variant = machine_variant(name).unwrap();
             assert!(variant.serial, "{name}");
