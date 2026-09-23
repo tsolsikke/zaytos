@@ -5534,6 +5534,9 @@ const INPUT_TEST_TIMEOUT: Duration = Duration::from_secs(60);
 const INPUT_TEST_READY_MARKER: &str = "inputd: opened input fd";
 /// `inputd` が押下のイベントを受けた印。
 const INPUT_TEST_DONE_MARKER: &str = "inputd: got a key press";
+/// **判定が読むカーネルの締めの行**（`inputd` が終わった後に出る）。**利用者の印の後に、ここまで待つ**
+/// （2026-09-23。`poll-test` が `--full` で 1 度、締めの行の前に止めて落ちた。同じ形がここにも在った）。
+const INPUT_TEST_SUMMARY_MARKER: &str = "[INFO] input: events delivered ";
 /// 送る打鍵（`a` = set-1 のメイクコード 0x1E = 30）。**monitor のキー名。**
 const INPUT_TEST_KEY: &str = "a";
 
@@ -5614,11 +5617,18 @@ fn cmd_input_test(features: &[&str], expect_pass: bool) -> Result<()> {
             }
             Err(e) => println!("input-test: could not reach the QEMU monitor: {e}"),
         }
-        // **押下のイベントが出るまで待つ。上限つき。**
+        // **押下のイベントが出るまで待つ。上限つき。** **出たら、判定が読むカーネルの締めの行まで待つ**
+        // ——**利用者の印の直後に止めると、締めの行が出る前に止まることがある**
+        // （[`INPUT_TEST_SUMMARY_MARKER`] の doc）。
         let deadline = Instant::now() + INPUT_TEST_TIMEOUT;
+        let mut marker = INPUT_TEST_DONE_MARKER;
         while Instant::now() < deadline {
-            if read_lossy(&serial_log).contains(INPUT_TEST_DONE_MARKER) {
-                break;
+            if read_lossy(&serial_log).contains(marker) {
+                if marker == INPUT_TEST_SUMMARY_MARKER {
+                    break;
+                }
+                marker = INPUT_TEST_SUMMARY_MARKER;
+                continue;
             }
             thread::sleep(PANIC_TEST_POLL_INTERVAL);
         }
@@ -5784,6 +5794,12 @@ const POLL_TEST_READY_MARKER: &str = "polld: listening on poll-0";
 const POLL_TEST_SOCKET_MARKER: &str = "polld: socket gave ";
 /// `polld` が 3 回とも起きて終えた印。
 const POLL_TEST_DONE_MARKER: &str = "polld: done";
+/// **判定が読むカーネルの締めの行の、最後の 1 本**（`polld` が終わった後に `poll: waited …` と
+/// 続けて出る）。**`polld: done` の直後に止めると、締めの行が出る前に止まることがある**——
+/// **`--full` で 1 度そう落ちた**（2026-09-23。利用者の 3 回の `poll` は正しく起きていたのに、
+/// 計器の行が無く「待った」「集合の外で起こした者が 0」「集合に 2 つ」の 3 本が落ちた。
+/// `docs/troubleshooting.md`）。
+const POLL_TEST_SUMMARY_MARKER: &str = "[INFO] poll: input events delivered ";
 
 /// 入力とソケットを同時に待つ形を検査する（`ADR-0066` の Y-b）。
 ///
@@ -5874,7 +5890,12 @@ fn cmd_poll_test(features: &[&str], expect_pass: bool) -> Result<()> {
                 Err(e) => println!("poll-test: could not reach the QEMU monitor: {e}"),
             }
         }
-        wait_for(POLL_TEST_DONE_MARKER, POLL_TEST_TIMEOUT);
+        // **利用者の「終えた」の後に、判定が読むカーネルの締めの行まで待つ**
+        // （[`POLL_TEST_SUMMARY_MARKER`] の doc）。**「終えた」が来なかった回（破壊）は待ち直さない**
+        // ——**締めの行も来ないので、上限を 2 度払うだけである。**
+        if wait_for(POLL_TEST_DONE_MARKER, POLL_TEST_TIMEOUT) {
+            wait_for(POLL_TEST_SUMMARY_MARKER, POLL_TEST_TIMEOUT);
+        }
     }
     let waited = started.elapsed();
 
