@@ -14,6 +14,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 
 mod font;
+mod media;
 
 const OVMF_CODE_PATH: &str = "/usr/share/OVMF/OVMF_CODE_4M.fd";
 const OVMF_VARS_TEMPLATE_PATH: &str = "/usr/share/OVMF/OVMF_VARS_4M.fd";
@@ -1413,7 +1414,7 @@ fn main() -> Result<()> {
        cargo xtask run --machine-variant NAME [--sabotage FEATURE | --config FEATURE]   (ADR-0068。NAME は xtask/machine-variants.txt の名前)
        cargo xtask check [--update-reference]   (ホストテストの名前の集合を取り直す)
        cargo xtask run --boot-log-diff [--update-reference]
-       cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask gen-font";
+       cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask image [--without-fs-image]   (ADR-0068 の HW-e。起動媒体の像を建てて確かめる)\n       cargo xtask gen-font";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -1793,7 +1794,13 @@ fn main() -> Result<()> {
                     else {
                         bail!("no configuration {config:?} is listed for the machine variant {name:?}");
                     };
-                    return cmd_machine_variant(variant, &[feature], &[], expect);
+                    return cmd_machine_variant(
+                        variant,
+                        &[feature],
+                        &[],
+                        MediaContents::Complete,
+                        expect,
+                    );
                 }
                 let sabotage = rest
                     .iter()
@@ -1805,7 +1812,7 @@ fn main() -> Result<()> {
                         .iter()
                         .find(|(on, _)| *on == variant.name)
                         .map_or(VariantExpect::Prompt, |&(_, expect)| expect);
-                    return cmd_machine_variant(variant, &[], &[], expect);
+                    return cmd_machine_variant(variant, &[], &[], MediaContents::Complete, expect);
                 };
                 let Some(&(_, feature, bootloader, expect)) = MACHINE_VARIANT_SABOTAGES
                     .iter()
@@ -1818,7 +1825,7 @@ fn main() -> Result<()> {
                 } else {
                     (&[feature], &[])
                 };
-                return cmd_machine_variant(variant, kernel, boot, expect);
+                return cmd_machine_variant(variant, kernel, boot, MediaContents::Complete, expect);
             }
             if rest.iter().any(|a| a == "--compose-test") {
                 let sabotage: Vec<&str> = rest
@@ -2000,6 +2007,12 @@ fn main() -> Result<()> {
         Some("flaky") => cmd_flaky(),
         Some("screenshot") => cmd_screenshot(&args[1..]),
         Some("gen-font") => font::generate(&workspace_root()?),
+        // **起動媒体の像（`ADR-0068` の HW-e）。** **`--without-fs-image` は破壊である。**
+        Some("image") => cmd_image(if args[1..].iter().any(|a| a == "--without-fs-image") {
+            MediaContents::WithoutFsImage
+        } else {
+            MediaContents::Complete
+        }),
         Some(other) => bail!("unknown xtask subcommand: {other}\n\n{USAGE}"),
         None => bail!("missing xtask subcommand\n\n{USAGE}"),
     }
@@ -6299,6 +6312,17 @@ struct MachineVariant {
     /// **付けない変種では、カーネルは ESP の `\zaytos\fs.img` を RAM ディスクとして使う**
     /// ——**VirtualBox と実機には virtio-blk が無いので、その道を検査に入れる。**
     virtio_disk: bool,
+    /// ESP をファームウェアへどう渡すか（`ADR-0068` の HW-e）。
+    esp: EspSource,
+}
+
+/// ESP の渡し方（`ADR-0068` の HW-e）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EspSource {
+    /// QEMU の `fat:rw:` でディレクトリを FAT に見せる。**QEMU だけの道である。**
+    Directory,
+    /// **GPT と FAT32 を自分で書いた 1 つの像を渡す**（[`media`]）。**VirtualBox と実機と同じ形。**
+    Media,
 }
 
 /// 機械の変種の起こし方の表（`ADR-0068`）。**`tools/qemu-variants.py` も同じファイルを読む**
@@ -6315,9 +6339,9 @@ fn parse_machine_variants(table: &'static str) -> Result<Vec<MachineVariant>> {
             continue;
         }
         let fields: Vec<&'static str> = line.split_whitespace().collect();
-        let &[name, machine, memory, serial, disk] = fields.as_slice() else {
+        let &[name, machine, memory, serial, disk, esp] = fields.as_slice() else {
             bail!(
-                "machine-variants.txt line {}: expected 5 fields (name, -machine, -m, serial, disk), got {}",
+                "machine-variants.txt line {}: expected 6 fields (name, -machine, -m, serial, disk, esp), got {}",
                 index + 1,
                 fields.len()
             );
@@ -6338,6 +6362,14 @@ fn parse_machine_variants(table: &'static str) -> Result<Vec<MachineVariant>> {
                 index + 1
             ),
         };
+        let esp = match esp {
+            "dir" => EspSource::Directory,
+            "media" => EspSource::Media,
+            other => bail!(
+                "machine-variants.txt line {}: the esp column is {other:?}, not dir or media",
+                index + 1
+            ),
+        };
         if variants.iter().any(|variant| variant.name == name) {
             bail!(
                 "machine-variants.txt line {}: the name {name:?} appears twice",
@@ -6350,6 +6382,7 @@ fn parse_machine_variants(table: &'static str) -> Result<Vec<MachineVariant>> {
             memory,
             serial,
             virtio_disk,
+            esp,
         });
     }
     Ok(variants)
@@ -6529,7 +6562,11 @@ const MACHINE_VARIANT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 起こし方へ機械の変種を当てる（`ADR-0068`）。**メモリと機械だけを変える**——**他の引数は
 /// 既定の起動と同じである。** **`--machine-variant` と `--lapic-timer-test` が共有する。**
-fn apply_machine_variant(qemu_args: &mut Vec<std::ffi::OsString>, variant: &MachineVariant) {
+fn apply_machine_variant(
+    qemu_args: &mut Vec<std::ffi::OsString>,
+    variant: &MachineVariant,
+    media: Option<&Path>,
+) -> Result<()> {
     if let Some(at) = qemu_args.iter().position(|a| a == "-m") {
         qemu_args[at + 1] = variant.memory.into();
     }
@@ -6552,6 +6589,223 @@ fn apply_machine_variant(qemu_args: &mut Vec<std::ffi::OsString>, variant: &Mach
             qemu_args.drain(at - 1..=at);
         }
     }
+    // **ESP を 1 つの像で渡す変種（`ADR-0068` の HW-e）。** **`fat:rw:` の drive を、
+    // 媒体の像と入れ替える**——**位置を変えない**（OVMF の起動の順に効く）。
+    match (variant.esp, media) {
+        (EspSource::Directory, _) => {}
+        (EspSource::Media, None) => {
+            bail!(
+                "the machine variant {} takes its ESP from a boot media image, but none was built",
+                variant.name
+            )
+        }
+        (EspSource::Media, Some(image)) => {
+            let at = qemu_args
+                .iter()
+                .position(|a| a.to_string_lossy().starts_with("format=raw,file=fat:rw:"))
+                .with_context(|| {
+                    format!(
+                        "the launch arguments have no fat:rw: drive to replace for {}",
+                        variant.name
+                    )
+                })?;
+            qemu_args[at] = format!("format=raw,file={}", image.display()).into();
+        }
+    }
+    Ok(())
+}
+
+/// 起動媒体に何を入れるか（`ADR-0068` の HW-e）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaContents {
+    /// 3 つの成果物と `startup.nsh` を全部入れる。
+    Complete,
+    /// **`\zaytos\fs.img` を入れない**（破壊に使う）。
+    WithoutFsImage,
+}
+
+impl MediaContents {
+    /// 項目の名前と、`--media` に渡す語。
+    fn label(self) -> &'static str {
+        match self {
+            MediaContents::Complete => "complete",
+            MediaContents::WithoutFsImage => "no-fs-image",
+        }
+    }
+
+    /// 像へ入れる道。**順序をここで固定する**——**像が決定的であることは、この順序に依る**
+    /// （`media` の [`build_boot_media`](media::build_boot_media) は渡された順に並べる）。
+    fn paths(self) -> &'static [&'static str] {
+        match self {
+            MediaContents::Complete => &[
+                "EFI/BOOT/BOOTX64.EFI",
+                "zaytos/kernel.elf",
+                "zaytos/fs.img",
+                "startup.nsh",
+            ],
+            MediaContents::WithoutFsImage => {
+                &["EFI/BOOT/BOOTX64.EFI", "zaytos/kernel.elf", "startup.nsh"]
+            }
+        }
+    }
+}
+
+/// 起動媒体の像の置き場（`ADR-0068` の HW-e）。**`target/media/` の下に置く。**
+fn media_image_path(workspace_root: &Path, name: &str) -> PathBuf {
+    workspace_root
+        .join("target")
+        .join("media")
+        .join(format!("{name}.img"))
+}
+
+/// ESP のディレクトリから起動媒体の像を建て、書き、読み返す（`ADR-0068` の HW-e）。
+///
+/// # 3 つの道で確かめる
+///
+/// **書いた像を、書く側の計算を使わずに読み返す**（`media::read_boot_media`）——**道と中身が
+/// バイト単位で一致すること。** **分割表は外の道具でも読む**（[`verify_partition_table`]）。
+/// **そして、その像から実際に起動する**（`media-only` の変種）。**3 つとも別の道である。**
+fn write_boot_media(esp_dir: &Path, out: &Path, contents: MediaContents) -> Result<String> {
+    let mut loaded: Vec<(&str, Vec<u8>)> = Vec::new();
+    for &name in contents.paths() {
+        let path = esp_dir.join(name);
+        let bytes = fs::read(&path)
+            .with_context(|| format!("failed to read {} for the boot media", path.display()))?;
+        loaded.push((name, bytes));
+    }
+    let files: Vec<media::MediaFile> = loaded
+        .iter()
+        .map(|(name, bytes)| media::MediaFile {
+            path: name,
+            bytes: bytes.as_slice(),
+        })
+        .collect();
+    let built = media::build_boot_media(&files)?;
+    let parent = out.parent().context("the image path has no parent")?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    fs::write(out, &built.bytes).with_context(|| format!("failed to write {}", out.display()))?;
+
+    // **読み返す。** **「書けた」は「読める」の証明にならない。**
+    let read = media::read_boot_media(&built.bytes)?;
+    if read.esp != (media::ESP_FIRST_LBA, media::ESP_SECTORS) {
+        bail!(
+            "{}: the image says the ESP is at LBA {} for {} sector(s)",
+            out.display(),
+            read.esp.0,
+            read.esp.1
+        );
+    }
+    if read.layout != built.layout {
+        bail!(
+            "{}: the BPB reads back as {:?}, not {:?}",
+            out.display(),
+            read.layout,
+            built.layout
+        );
+    }
+    if read.label != "ZAYTOS" {
+        bail!(
+            "{}: the volume label reads back as {:?}",
+            out.display(),
+            read.label
+        );
+    }
+    if read.files.len() != loaded.len() {
+        bail!(
+            "{}: the image holds {} file(s), not {}",
+            out.display(),
+            read.files.len(),
+            loaded.len()
+        );
+    }
+    for (name, bytes) in &loaded {
+        let Some((_, got)) = read.files.iter().find(|(path, _)| path.as_str() == *name) else {
+            bail!("{}: the image does not hold {name}", out.display());
+        };
+        if got != bytes {
+            bail!(
+                "{}: {name} came back as {} byte(s), not {}",
+                out.display(),
+                got.len(),
+                bytes.len()
+            );
+        }
+    }
+    verify_partition_table(out)?;
+    Ok(format!(
+        "{} ({} MiB, {}) holds {} file(s); ESP at LBA {}..{}; FAT32 {} cluster(s) of {} byte(s), \
+         {} sector(s) per FAT, {} used; read back byte for byte and sfdisk agrees",
+        out.display(),
+        media::IMAGE_SECTORS * media::SECTOR_BYTES as u64 / (1024 * 1024),
+        contents.label(),
+        read.files.len(),
+        media::ESP_FIRST_LBA,
+        media::ESP_FIRST_LBA + media::ESP_SECTORS - 1,
+        read.layout.clusters,
+        read.layout.bytes_per_cluster(),
+        read.layout.sectors_per_fat,
+        built.used_clusters,
+    ))
+}
+
+/// 分割表を外の道具で読む（`ADR-0068` の HW-e）。
+///
+/// **`sfdisk` は util-linux に在る**——**どの Linux にも入っているので、パッケージの要求が
+/// 増えない**（`mkfs.vfat` と `mtools` はこの環境に無い。実測。2026-09-23）。
+///
+/// **JSON を解析しない。** **要る 5 つの値を、出力の中に文字として探す**——**依存を増やさない
+/// ためである。** **`sfdisk` の版が上がって綴りが変わればここが落ちる**
+/// （`docs/verification-coverage.md` の「外の道具の文言に乗っている判定」に行が在る）。
+fn verify_partition_table(image: &Path) -> Result<()> {
+    let output = external_tool("sfdisk")
+        .arg("--json")
+        .arg(image)
+        .output()
+        .context("failed to invoke sfdisk (it ships with util-linux)")?;
+    if !output.status.success() {
+        bail!(
+            "sfdisk --json {} failed ({}): {}",
+            image.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let wanted = [
+        "\"label\": \"gpt\"".to_string(),
+        format!("\"start\": {}", media::ESP_FIRST_LBA),
+        format!("\"size\": {}", media::ESP_SECTORS),
+        format!("\"type\": \"{}\"", media::ESP_TYPE_GUID_TEXT),
+        // **使える最後の LBA は、末尾の控え（33 セクタ）の 1 つ前である。**
+        format!("\"lastlba\": {}", media::IMAGE_SECTORS - 34),
+    ];
+    for value in wanted {
+        if !text.contains(&value) {
+            bail!(
+                "sfdisk did not report {value} for {}:\n{text}",
+                image.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `cargo xtask image`（`ADR-0068` の HW-e）。**起動媒体の像を建てて確かめる。**
+///
+/// **`--without-fs-image` は破壊に使う。** **別の名前の像を書く**
+/// ——**運用者が VirtualBox へ渡す像（`zaytos.img`）を上書きしない。**
+fn cmd_image(contents: MediaContents) -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let bootloader_efi = build_bootloader_with_features(&workspace_root, &[])?;
+    let kernel = build_kernel_with_features(&workspace_root, &[])?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel)?;
+    let name = match contents {
+        MediaContents::Complete => "zaytos",
+        MediaContents::WithoutFsImage => "zaytos-no-fs-image",
+    };
+    let out = media_image_path(&workspace_root, name);
+    println!("image: {}", write_boot_media(&esp_dir, &out, contents)?);
+    Ok(())
 }
 
 /// 機械の変種を 1 つ起こして判定する（`ADR-0068`）。
@@ -6559,6 +6813,7 @@ fn cmd_machine_variant(
     variant: &MachineVariant,
     kernel_features: &[&str],
     bootloader_features: &[&str],
+    media: MediaContents,
     expect: VariantExpect,
 ) -> Result<()> {
     let workspace_root = workspace_root()?;
@@ -6572,6 +6827,30 @@ fn cmd_machine_variant(
     tag_parts.extend_from_slice(kernel_features);
     let tag = tag_parts.join("-");
     let target = workspace_root.join("target");
+    // **ESP を 1 つの像で渡す変種（`ADR-0068` の HW-e）。** **いま積んだ ESP から像を建てる**
+    // ——**破壊の構成のカーネルが入っていなければ、破壊が像に載らない。**
+    let media_image = match variant.esp {
+        EspSource::Directory => {
+            if media != MediaContents::Complete {
+                bail!(
+                    "the machine variant {} takes its ESP from a directory, so the media contents \
+                     {} have nowhere to go",
+                    variant.name,
+                    media.label()
+                );
+            }
+            None
+        }
+        EspSource::Media => {
+            let out = media_image_path(&workspace_root, &format!("machine-variant-{tag}"));
+            println!(
+                "machine-variant {}: (info) {}",
+                variant.name,
+                write_boot_media(&esp_dir, &out, media)?
+            );
+            Some(out)
+        }
+    };
     let serial_log = target.join(format!("machine-variant-{tag}-serial.log"));
     let _ = fs::remove_file(&serial_log);
     let debug_log = target.join("qemu-debug.log");
@@ -6588,7 +6867,7 @@ fn cmd_machine_variant(
         accelerator: Accelerator::Tcg,
         debug_events: DebugEvents::IntAndCpuReset,
     });
-    apply_machine_variant(&mut qemu_args, variant);
+    apply_machine_variant(&mut qemu_args, variant, media_image.as_deref())?;
 
     let mut child = Command::new("qemu-system-x86_64")
         .args(&qemu_args)
@@ -12371,7 +12650,11 @@ fn cmd_lapic_timer_test(kind: &str) -> Result<()> {
     });
     // **機械の変種を当てる**（`ADR-0068` の HW-c）。**起こし方の表は 1 つである。**
     if !test.machine_variant.is_empty() {
-        apply_machine_variant(&mut qemu_args, &machine_variant(test.machine_variant)?);
+        apply_machine_variant(
+            &mut qemu_args,
+            &machine_variant(test.machine_variant)?,
+            None,
+        )?;
     }
 
     let mut child = Command::new("qemu-system-x86_64")
@@ -19295,9 +19578,9 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             total += 1;
             let label = format!("machine-variant {name}");
             begin_item(&label);
-            match machine_variant(name)
-                .and_then(|variant| cmd_machine_variant(&variant, &[], &[], expect))
-            {
+            match machine_variant(name).and_then(|variant| {
+                cmd_machine_variant(&variant, &[], &[], MediaContents::Complete, expect)
+            }) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
                     println!("--- {label}: FAILED ({error})");
@@ -19317,7 +19600,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                     continue;
                 }
             };
-            match cmd_machine_variant(&variant, &[feature], &[], expect) {
+            match cmd_machine_variant(&variant, &[feature], &[], MediaContents::Complete, expect) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
                     println!("--- {label}: FAILED ({error})");
@@ -19342,7 +19625,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             } else {
                 (&[feature], &[])
             };
-            match cmd_machine_variant(&variant, kernel, boot, expect) {
+            match cmd_machine_variant(&variant, kernel, boot, MediaContents::Complete, expect) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
                     println!("--- {label}: FAILED ({error})");
@@ -22030,8 +22313,9 @@ fn stage_esp_with_disk(
 /// **どの判定がどの文言に乗っているかは `docs/verification-coverage.md` の
 /// 「外の道具の文言に乗っている判定」に集めてある。** **版を上げるときは
 /// あの節を読むこと。**
-const PARSED_EXTERNAL_TOOLS: &[&str] =
-    &["e2fsck", "dumpe2fs", "debugfs", "mke2fs", "nm", "objdump"];
+const PARSED_EXTERNAL_TOOLS: &[&str] = &[
+    "e2fsck", "dumpe2fs", "debugfs", "mke2fs", "nm", "objdump", "sfdisk",
+];
 
 /// 出力を解析する外の道具を呼ぶ（e-4 の後の手当て）。**言語を固定する。**
 ///
@@ -22794,21 +23078,40 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         assert!(variants
             .iter()
             .any(|variant| variant.name == "pc-no-virtio" && !variant.virtio_disk));
+        // **HW-e で足した欄**（`ADR-0068`）——**ESP を 1 つの像で渡す変種が在る。**
+        assert!(variants.iter().any(|variant| variant.name == "media-only"
+            && variant.esp == EspSource::Media
+            && !variant.virtio_disk));
+        assert!(
+            variants
+                .iter()
+                .filter(|variant| variant.esp == EspSource::Directory)
+                .count()
+                == variants.len() - 1
+        );
         assert!(
             parse_machine_variants("a q35 6G file\n").is_err(),
             "欄が 4 つでは足りない"
         );
-        assert!(parse_machine_variants("a q35 6G tty virtio\n").is_err());
-        assert!(parse_machine_variants("a q35 6G file sata\n").is_err());
-        assert!(parse_machine_variants("a q35 6G file virtio\na pc 1G file virtio\n").is_err());
+        assert!(
+            parse_machine_variants("a q35 6G file virtio\n").is_err(),
+            "欄が 5 つでは足りない（HW-e で ESP の欄を足した）"
+        );
+        assert!(parse_machine_variants("a q35 6G tty virtio dir\n").is_err());
+        assert!(parse_machine_variants("a q35 6G file sata dir\n").is_err());
+        assert!(parse_machine_variants("a q35 6G file virtio nfs\n").is_err());
+        assert!(
+            parse_machine_variants("a q35 6G file virtio dir\na pc 1G file virtio dir\n").is_err()
+        );
         assert_eq!(
-            parse_machine_variants("# comment\n\nb pc 1G none none\n").unwrap(),
+            parse_machine_variants("# comment\n\nb pc 1G none none dir\n").unwrap(),
             vec![MachineVariant {
                 name: "b",
                 machine: "pc",
                 memory: "1G",
                 serial: false,
                 virtio_disk: false,
+                esp: EspSource::Directory,
             }]
         );
     }

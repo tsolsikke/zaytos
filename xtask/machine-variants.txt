@@ -5,19 +5,23 @@
 # シリアルが none の変種は人が画面で読むためのもので、xtask は起こさない（判定がシリアルを読む）。
 # ディスクが none の変種では virtio-blk を付けない。カーネルは ESP の \zaytos\fs.img を
 # RAM ディスクとして使う（ADR-0068 の HW-d）。
+# ESP の欄は、ファームウェアへ ESP をどう渡すかである（ADR-0068 の HW-e）。
+#   dir   = QEMU の fat:rw: でディレクトリを FAT に見せる（既定。QEMU だけの道である）
+#   media = GPT と FAT32 を自分で書いた 1 つの像を渡す（VirtualBox と実機と同じ形）
 #
-# 名前           -machine          -m      シリアル  ディスク
-pc-default       pc                256M    file      virtio
-q35              q35               256M    file      virtio
-q35-1g           q35               1G      file      virtio
-q35-1500m        q35               1500M   file      virtio
-q35-2g           q35               2G      file      virtio
-q35-6g           q35               6G      file      virtio
-pc-6g            pc                6G      file      virtio
-q35-no-i8042     q35,i8042=off     256M    file      virtio
-pc-no-i8042      pc,i8042=off      256M    file      virtio
-q35-no-pit       q35,pit=off       256M    file      virtio
-pc-no-pit        pc,pit=off        256M    file      virtio
-q35-no-hpet      q35,hpet=off      256M    file      virtio
-pc-no-serial     pc                256M    none      virtio
-pc-no-virtio     pc                256M    file      none
+# 名前           -machine          -m      シリアル  ディスク  ESP
+pc-default       pc                256M    file      virtio    dir
+q35              q35               256M    file      virtio    dir
+q35-1g           q35               1G      file      virtio    dir
+q35-1500m        q35               1500M   file      virtio    dir
+q35-2g           q35               2G      file      virtio    dir
+q35-6g           q35               6G      file      virtio    dir
+pc-6g            pc                6G      file      virtio    dir
+q35-no-i8042     q35,i8042=off     256M    file      virtio    dir
+pc-no-i8042      pc,i8042=off      256M    file      virtio    dir
+q35-no-pit       q35,pit=off       256M    file      virtio    dir
+pc-no-pit        pc,pit=off        256M    file      virtio    dir
+q35-no-hpet      q35,hpet=off      256M    file      virtio    dir
+pc-no-serial     pc                256M    none      virtio    dir
+pc-no-virtio     pc                256M    file      none      dir
+media-only       pc                256M    file      none      media

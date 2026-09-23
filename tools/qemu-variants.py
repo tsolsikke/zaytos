@@ -76,8 +76,9 @@ def load_variants():
             if not line or line.startswith("#"):
                 continue
             fields = line.split()
-            if (len(fields) != 5 or fields[3] not in ("file", "none")
-                    or fields[4] not in ("virtio", "none") or fields[0] in variants):
+            if (len(fields) != 6 or fields[3] not in ("file", "none")
+                    or fields[4] not in ("virtio", "none")
+                    or fields[5] not in ("dir", "media") or fields[0] in variants):
                 sys.exit(f"{TABLE} line {number}: not a well-formed row: {line!r}")
             variants[fields[0]] = tuple(fields[1:])
     return variants
@@ -104,7 +105,7 @@ def ppm_to_png(ppm_path, png_path):
 
 
 def run_variant(name, wait):
-    machine, mem, serial, disk = VARIANTS[name]
+    machine, mem, serial, disk, esp = VARIANTS[name]
     out = os.path.join(OUT, name)
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(out)
@@ -120,8 +121,16 @@ def run_variant(name, wait):
         "qemu-system-x86_64", "-machine", machine, "-m", mem,
         "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF_CODE}",
         "-drive", f"if=pflash,format=raw,file={out}/vars.fd",
-        "-drive", f"format=raw,file=fat:rw:{out}/esp",
     ]
+    # **ESP の渡し方（`ADR-0068` の HW-e）。** **`media` の変種は、GPT と FAT32 を自分で書いた
+    # 1 つの像を渡す**（VirtualBox と実機と同じ形）——**`fat:rw:` は QEMU だけの道である。**
+    # **像は `cargo xtask image` が置く。**
+    if esp == "media":
+        image = os.path.join(ROOT, "target", "media", "zaytos.img")
+        shutil.copy(image, os.path.join(out, "zaytos.img"))
+        args += ["-drive", f"format=raw,file={out}/zaytos.img"]
+    else:
+        args += ["-drive", f"format=raw,file=fat:rw:{out}/esp"]
     # **ディスクが none の変種では virtio-blk を付けない**（`ADR-0068` の HW-d）。
     # **カーネルは ESP の `\zaytos\fs.img` を RAM ディスクとして使う。**
     if disk == "virtio":
@@ -180,8 +189,11 @@ def main():
     parser.add_argument("--list", action="store_true", help="変種の一覧を出して終わる")
     options = parser.parse_args()
     if options.list:
-        for name, (machine, mem, serial, disk) in VARIANTS.items():
-            print(f"{name}: -machine {machine} -m {mem} -serial {serial} disk={disk}")
+        for name, (machine, mem, serial, disk, esp) in VARIANTS.items():
+            print(
+                f"{name}: -machine {machine} -m {mem} -serial {serial} "
+                f"disk={disk} esp={esp}"
+            )
         return 0
     for name in options.variants:
         if name not in VARIANTS:
