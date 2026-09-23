@@ -13319,6 +13319,10 @@ const BOOT_LOG_VOLATILE_MARKERS: &[&str] = &[
     // ことが覆う。** **受け渡しを上へ戻す破壊（`handoff-anywhere`）は、その判定を落とす。**
     "handoff: BootInfo at",
     "handoff: copied the memory map",
+    // **RAM ディスクの像の番地**（`ADR-0068` の HW-d）。**受け渡しと同じ理由で `-smp` の数で動く**
+    // ——**ファームウェアの配りが CPU の数で変わる**（実測で 1・2・4 が `0xd353000`・`0xd361000`・
+    // `0xd36b000`）。**隠したものを見る者**: **`pc-no-virtio` の変種が、この像から起動する。**
+    "fs-image: handed over",
 ];
 
 /// 起動ログのうち、**コア数で変わる行**（S6-d の定義 3）。
@@ -21836,6 +21840,20 @@ fn stage_esp_with_disk(
     // ロードするようになった。像は決定的（`build.rs` が時刻を潰す）なので、
     // どの feature 構成でも同じバイト列になる。大きさも像と同じにする
     // （16MiB に伸ばす根拠が無くなった）。
+    // **RAM ディスクの像を ESP にも置く（`ADR-0068` の HW-d）。**
+    //
+    // **ブートローダが `\zaytos\fs.img` として読み、BootInfo で渡す。** **virtio-blk が在る回は
+    // 使われない**（カーネルは装置を優先する）——**それでも常に置く。** **VirtualBox と実機には
+    // 装置が無く、起動媒体の像（HW-e）にもこのファイルが入るからである。**
+    // **中身は `disk0.img` と同じ、いま積んだカーネルが建てた像である。**
+    let staged_fs_image = kernel_dir.join(FS_IMAGE_NAME);
+    fs::copy(kernel.out_dir.join(FS_IMAGE_NAME), &staged_fs_image).with_context(|| {
+        format!(
+            "failed to copy the fs image into {}",
+            staged_fs_image.display()
+        )
+    })?;
+
     let disk_image = disk_image_path(&esp_dir);
     // **載せる像は、いま積んだカーネルが埋め込んでいるものと同じである**
     // （[`KernelBuild`] の doc）。**別の構成の像を載せると、カーネルの

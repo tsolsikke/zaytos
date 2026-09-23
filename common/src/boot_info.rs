@@ -18,7 +18,9 @@ use crate::addr::PhysAddr;
 pub const BOOT_INFO_MAGIC: u64 = u64::from_le_bytes(*b"ZAYTBOOT");
 
 /// `BootInfo` のレイアウトバージョン。フィールドを追加・変更したら上げる。
-pub const BOOT_INFO_VERSION: u32 = 2;
+///
+/// **3 は `ADR-0068` の HW-d で、RAM ディスクの像の欄を足したものである。**
+pub const BOOT_INFO_VERSION: u32 = 3;
 
 /// bootloader が `BootInfo` 自身のために確保するページ数。kernel はこの値と
 /// 受け取った `BootInfo` へのポインタから、bootloader が確保した領域の
@@ -72,6 +74,21 @@ pub struct BootInfo {
     /// 「引いたアドレスをそのまま渡す」だけである。**フィールドは末尾に足す**
     /// （既存のオフセットを動かさないため）。
     pub acpi_rsdp: PhysAddr,
+    /// ブートローダが ESP から読んだファイルシステムの像（`ADR-0068` の HW-d）。
+    ///
+    /// **無ければ番地 0・長さ 0 である**（`\zaytos\fs.img` が置かれていない回）。
+    /// **在れば、ブートローダが `LOADER_DATA` として取った連続の物理範囲を指す**
+    /// ——**`memory_map::classify` が「張るが配らない」に分類するので、アロケータは
+    /// そこを配らない**（受け渡しの領域と同じ性質。HW-a の実測）。
+    ///
+    /// **カーネルは virtio-blk が在ればそちらを使い、無ければこの像を使う。**
+    /// **どちらも無ければ止まる。** **ブートローダは中身を検証しない**（`ADR-0008`
+    /// 「ローダは薄く」）——**ext2 として読めるかはカーネルが見る。**
+    ///
+    /// **欄は末尾に足す**（既存のオフセットを動かさない）。
+    pub fs_image: PhysAddr,
+    /// [`Self::fs_image`] の長さ（バイト）。**0 なら像は無い。**
+    pub fs_image_bytes: u64,
 }
 
 /// UEFI メモリマップ（ExitBootServices 呼び出し時に確定した最終スナップショット）
@@ -156,6 +173,17 @@ impl fmt::Display for ValidationError {
 }
 
 impl BootInfo {
+    /// RAM ディスクの像が在るか（`ADR-0068` の HW-d）。
+    ///
+    /// **番地と長さの両方を見る**——**片方だけが 0 の形は渡す側の誤りである。**
+    /// **そのときは「無い」とし、理由は呼び出し側が行に出す。**
+    pub fn fs_image_range(&self) -> Option<(PhysAddr, u64)> {
+        if self.fs_image.as_u64() == 0 || self.fs_image_bytes == 0 {
+            return None;
+        }
+        Some((self.fs_image, self.fs_image_bytes))
+    }
+
     /// `magic`/`version` を検証する。bootloader と kernel のビルドが
     /// 食い違っている場合、ここで検出する（バイナリ境界の契約チェック）。
     pub fn validate(&self) -> Result<(), ValidationError> {
@@ -197,7 +225,28 @@ mod tests {
                 blue_mask: 0,
             },
             acpi_rsdp: PhysAddr::new_const(0),
+            fs_image: PhysAddr::new_const(0),
+            fs_image_bytes: 0,
         }
+    }
+
+    /// **片方だけが 0 の形は「無い」として扱う**（`ADR-0068` の HW-d）。
+    #[test]
+    fn the_fs_image_range_needs_both_the_address_and_the_length() {
+        let mut info = sample();
+        assert_eq!(info.fs_image_range(), None, "両方 0 なら無い");
+
+        info.fs_image = PhysAddr::new_const(0x100_0000);
+        assert_eq!(info.fs_image_range(), None, "長さが 0 なら無い");
+
+        info.fs_image_bytes = 64 * 1024;
+        assert_eq!(
+            info.fs_image_range(),
+            Some((PhysAddr::new_const(0x100_0000), 64 * 1024))
+        );
+
+        info.fs_image = PhysAddr::new_const(0);
+        assert_eq!(info.fs_image_range(), None, "番地が 0 なら無い");
     }
 
     #[test]
@@ -244,13 +293,16 @@ mod tests {
     fn the_handoff_layout_did_not_change() {
         use core::mem::{align_of, offset_of, size_of};
 
-        assert_eq!(size_of::<BootInfo>(), 104);
+        assert_eq!(size_of::<BootInfo>(), 120);
         assert_eq!(align_of::<BootInfo>(), 8);
         assert_eq!(offset_of!(BootInfo, magic), 0);
         assert_eq!(offset_of!(BootInfo, version), 8);
         assert_eq!(offset_of!(BootInfo, memory_map), 16);
         assert_eq!(offset_of!(BootInfo, framebuffer), 48);
         assert_eq!(offset_of!(BootInfo, acpi_rsdp), 96);
+        // **HW-d で足した欄は末尾である**（既存のオフセットが動いていないことを、上の行が見る）。
+        assert_eq!(offset_of!(BootInfo, fs_image), 104);
+        assert_eq!(offset_of!(BootInfo, fs_image_bytes), 112);
         // 1 ページ（BOOT_INFO_PAGE_COUNT * 4096）に収まり続けること。
         assert!(size_of::<BootInfo>() <= BOOT_INFO_PAGE_COUNT * 4096);
 

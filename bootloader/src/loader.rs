@@ -24,6 +24,8 @@ use uefi::table::cfg::ConfigTableEntry;
 
 const PAGE_SIZE: u64 = 4096;
 const KERNEL_ELF_PATH: &uefi::CStr16 = cstr16!("\\zaytos\\kernel.elf");
+/// RAM ディスクの像（`ADR-0068` の HW-d）。**無ければ渡さない**——**カーネルは virtio-blk を使う。**
+const FS_IMAGE_PATH: &uefi::CStr16 = cstr16!("\\zaytos\\fs.img");
 
 fn align_down(addr: u64, align: u64) -> u64 {
     addr & !(align - 1)
@@ -40,6 +42,9 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
     // fs/elf_bytes/elf はこのブロックの終わりでスコープを抜けて破棄される。
     // elf_bytes は Boot Services のプールアロケータ（Vec）に由来するため、
     // ExitBootServices より前に破棄しておく必要がある。
+    // **像はブロックの中で読み、ブロックの外へ持ち出す**（`ADR-0068` の HW-d）
+    // ——**ファイルシステムはこのブロックの終わりで閉じる。**
+    let fs_image;
     let entry_point = {
         let mut fs = FileSystem::new(
             uefi::boot::get_image_file_system(uefi::boot::image_handle())
@@ -48,6 +53,9 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
         let elf_bytes = fs
             .read(Path::new(KERNEL_ELF_PATH))
             .expect("failed to read \\zaytos\\kernel.elf from the ESP");
+        // **RAM ディスクの像を読む（`ADR-0068` の HW-d）。** **ここでしか読めない**
+        // ——**ExitBootServices の後はファイルシステムが無い。** **無ければ空のまま進む。**
+        fs_image = read_fs_image(&mut logger, &mut fs);
 
         let elf = Elf::parse(&elf_bytes).expect("failed to parse kernel.elf as ELF64");
         logger.info(format_args!(
@@ -284,6 +292,8 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
             },
             framebuffer,
             acpi_rsdp,
+            fs_image: fs_image.phys,
+            fs_image_bytes: fs_image.bytes,
         });
     }
 
@@ -370,6 +380,83 @@ impl Handoff {
 ///
 /// **`AllocateType::MaxAddress` は「この番地以下に置く」である**（UEFI の仕様）。
 /// **確保できなければ止まる**——**上に置けば、カーネルが最初の一読で #PF になる。**
+/// ブートローダが渡す RAM ディスクの像（`ADR-0068` の HW-d）。
+struct FsImage {
+    phys: PhysAddr,
+    bytes: u64,
+}
+
+impl FsImage {
+    const fn empty() -> Self {
+        Self {
+            phys: PhysAddr::new_const(0),
+            bytes: 0,
+        }
+    }
+}
+
+/// ESP の `\zaytos\fs.img` を読み、`LOADER_DATA` の連続ページへ置く（`ADR-0068` の HW-d）。
+///
+/// **無ければ空を返す**（起動は続く。カーネルが virtio-blk を使う）。**中身は検証しない**
+/// ——**ext2 として読めるかはカーネルが見る**（`ADR-0008` 「ローダは薄く」）。
+///
+/// **置き場は `AnyPages` でよい。** **受け渡し（BootInfo とメモリマップの写し）と違い、
+/// カーネルが像を読むのは自前のページ表へ切り替えた後である**——**1GiB の下である必要は無い。**
+/// **`LOADER_DATA` なので、アロケータは配らない**（`memory_map::classify`。HW-a の実測）。
+///
+/// **読めたのに置けなかったときは止める。** **像が在るのに黙って無いことにすると、
+/// カーネルは「装置も像も無い」と言って止まり、理由が 1 段ずれる。**
+fn read_fs_image(logger: &mut Logger<SerialPort>, fs: &mut FileSystem) -> FsImage {
+    let bytes = match fs.read(Path::new(FS_IMAGE_PATH)) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            logger.info(format_args!(
+                "fs-image: no \\zaytos\\fs.img on the ESP ({error:?}); the kernel will need a \
+                 virtio-blk device"
+            ));
+            return FsImage::empty();
+        }
+    };
+    if bytes.is_empty() {
+        logger.warn(format_args!(
+            "fs-image: \\zaytos\\fs.img is empty, so it is not handed over"
+        ));
+        return FsImage::empty();
+    }
+    let pages = align_up(bytes.len() as u64, PAGE_SIZE) / PAGE_SIZE;
+    let buffer = uefi::boot::allocate_pages(
+        AllocateType::AnyPages,
+        MemoryType::LOADER_DATA,
+        pages as usize,
+    )
+    .unwrap_or_else(|e| {
+        logger.error(format_args!(
+            "fs-image: AllocatePages for the {}-byte image ({pages} page(s)) failed: {e:?}; \
+             halting",
+            bytes.len()
+        ));
+        panic!("failed to allocate pages for the RAM disk image");
+    });
+    // SAFETY: いま確保した `pages` ページ（>= bytes.len()）の先頭へ、読んだ像をそのまま写す。
+    // 他に誰もこの領域を参照していない。
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.as_ptr(), bytes.len());
+    }
+    let phys =
+        PhysAddr::new(buffer.as_ptr() as u64).expect("the image address does not fit in 52 bits");
+    logger.info(format_args!(
+        "fs-image: handed over {} byte(s) from \\zaytos\\fs.img at {:#x}..{:#x} ({pages} page(s), \
+         LoaderData)",
+        bytes.len(),
+        phys.as_u64(),
+        phys.as_u64() + pages * PAGE_SIZE
+    ));
+    FsImage {
+        phys,
+        bytes: bytes.len() as u64,
+    }
+}
+
 fn allocate_handoff(logger: &mut Logger<SerialPort>) -> Handoff {
     #[cfg(feature = "handoff-anywhere")]
     {

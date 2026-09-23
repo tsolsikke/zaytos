@@ -888,6 +888,19 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     // （`kernel_main` の `CORRUPT_FS_BLOCKS`）。**`first_free` とは別に測る**——**あちらは「最初の
     // 空きの範囲の始まり」で、途中に穴があれば上端より手前になる。**
     let used_blocks = used_blocks(&image);
+    // **像の検査値（`ADR-0068` の HW-d）。** **カーネルが、渡された RAM ディスクの像がこの像で
+    // あることを確かめるのに使う**——**長さが同じで中身が古い `fs.img` は長さでは捕まらない**
+    // （VDI の作り直し忘れ、ESP の片方だけの差し替え。レビューの指摘。2026-09-23）。
+    // **式はカーネルの `image_checksum` と同じ重み付き和である**（`byte * (index + 1)` の総和を
+    // ラップさせて足す）。**2 つに増やさない。**
+    let image_bytes =
+        std::fs::read(&image).expect("failed to read the built fs image for its checksum");
+    let checksum = image_bytes
+        .iter()
+        .enumerate()
+        .fold(0u32, |sum, (index, byte)| {
+            sum.wrapping_add(u32::from(*byte).wrapping_mul(index as u32 + 1))
+        });
     std::fs::write(
         format!("{out_dir}/fsimage_info.rs"),
         format!(
@@ -904,7 +917,8 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
              pub const MOTD_DATA_BLOCK: usize = {motd_block};\n\
              pub const INDIRECT_TABLE_BLOCK: usize = {indirect_table};\n\
              pub const FIRST_FREE_BLOCK: usize = {first_free};\n\
-             pub const USED_BLOCKS: usize = {used_blocks};\n",
+             pub const USED_BLOCKS: usize = {used_blocks};\n\
+             pub const IMAGE_CHECKSUM: u32 = {checksum:#010x};\n",
             DIRECT_MAX_BYTES + 1
         ),
     )

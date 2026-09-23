@@ -622,6 +622,9 @@ extern "sysv64" fn kernel_main() -> ! {
     // 抽出済みの値だけで完結させる。`raw_map` も同じ理由で既に抽出済みである。
     let acpi_rsdp = boot_info.acpi_rsdp;
     let memory_map_descriptor_size = boot_info.memory_map.descriptor_size;
+    // **RAM ディスクの像の範囲も、ここで抜き出す**（`ADR-0068` の HW-d。上と同じ理由）。
+    // **読むのは自前のページ表へ切り替えた後である**（direct map 窓を通す）。
+    let fs_image_range = boot_info.fs_image_range();
 
     let (mut allocator, stats) =
         frame_allocator::build(raw_map, boot_info.memory_map.descriptor_size).unwrap_or_else(|e| {
@@ -1393,7 +1396,7 @@ extern "sysv64" fn kernel_main() -> ! {
                     Ok(blk)
                 });
             match outcome {
-                Ok(blk) => blk,
+                Ok(blk) => Some(blk),
                 Err(reason) => {
                     match reason {
                         kernel::virtio::VirtioBlkError::QueueSizeZero => {
@@ -1429,12 +1432,11 @@ extern "sysv64" fn kernel_main() -> ! {
             }
         }
         None => {
-            // **黙って進まない。** 装置は xtask が常設しているので、無いのは
-            // 構成が壊れた形である（S13-a の突き合わせも先に落ちるはずである）。
-            logger.error(format_args!(
-                "virtio-blk: no device with an I/O BAR0 was found on bus 0; halting"
-            ));
-            cpu::halt_forever()
+            // **装置が無くても、ブートローダが像を渡していれば続ける**（`ADR-0068` の HW-d）。
+            // **VirtualBox と実機には virtio-blk が無い**——**RAM ディスクで起動する道である。**
+            // **どちらも無ければ止まる**（直す前と同じ。**黙って進まない**）。
+            report_no_virtio_device(&mut logger, fs_image_range);
+            None
         }
     };
 
@@ -1778,7 +1780,8 @@ extern "sysv64" fn kernel_main() -> ! {
     // **像の検査は複製の中へ移した（P-e）。** **埋め込みを外したので、複製する前に
     // 読める像が無い**（`ADR-0034` の Addendum）。**置き場は複製の直後・`exercise` の
     // 前である**——[`try_copy_fs_image_to_frames`] にある。
-    let (image_phys, image_bytes) = copy_fs_image_to_frames(&mut logger, &mut virtio_disk);
+    let (image_phys, image_bytes) =
+        copy_fs_image_to_frames(&mut logger, virtio_disk.as_mut(), fs_image_range);
 
     // **環境の源を読む（f-1。`ADR-0052` の Decision 2）。**
     //
@@ -1846,7 +1849,7 @@ extern "sysv64" fn kernel_main() -> ! {
         0,
         SHELL_AFTER_HEARTBEATS,
         mapped_apic.as_ref(),
-        Some(&mut virtio_disk),
+        virtio_disk.as_mut(),
         fadt_facts,
     );
 
@@ -1862,10 +1865,19 @@ extern "sysv64" fn kernel_main() -> ! {
     // 届かなくなる**——**書き戻しは黙って飛ばされる**（据えられていなければ
     // 書き戻さない形にしてあるため）。**`--zi-test` の「保存が装置へ届いた」
     // 判定が落ちる。** **据え忘れが黙る形を、これで塞ぐ。**
+    //
+    // **装置が無い回（RAM ディスク。`ADR-0068` の HW-d）は据えるものが無い**
+    // ——**書き戻しは飛ばされ、書いた内容は残らない。** **そのことを 1 行出す。**
     #[cfg(not(feature = "virtio-skip-install-test"))]
-    let _installed_disk = kernel::virtio::install(&mut virtio_disk, image_phys, image_bytes);
+    let _installed_disk = match virtio_disk.as_mut() {
+        Some(device) => Some(kernel::virtio::install(device, image_phys, image_bytes)),
+        None => {
+            report_ram_only_file_system(&mut logger);
+            None
+        }
+    };
     #[cfg(feature = "virtio-skip-install-test")]
-    let _ = (&mut virtio_disk, image_phys, image_bytes);
+    let _ = (virtio_disk.as_mut(), image_phys, image_bytes);
 
     // **カーネルスタックの高水位を出す（P-c-1 の手当て）。**
     //
@@ -5343,11 +5355,51 @@ fn verify_embedded_user_elf(logger: &mut Logger<SerialPort>) {
 /// 像を装置から複製する。**複製先の物理の置き場と長さを返す（P-c-1）。**
 ///
 /// **返すのは、後で書き戻す者へ渡すためである**（`kernel::virtio::install`）。
+/// ファイルシステムが RAM だけに在ることを 1 行出す（`ADR-0068` の HW-d）。
+///
+/// **`#[inline(never)]` の理由は [`report_no_virtio_device`] と同じである。**
+#[inline(never)]
+fn report_ram_only_file_system(logger: &mut Logger<SerialPort>) {
+    logger.info(format_args!(
+        "fs-image: the file system lives in RAM only (no virtio-blk device), so the write-back \
+         at the end is skipped and nothing persists"
+    ));
+}
+
+/// virtio-blk が無いことを 1 行出す（`ADR-0068` の HW-d）。**RAM の像も無ければ止まる。**
+///
+/// **`#[inline(never)]` にしてある**——**`format_args!` の一時値を `kernel_main` の枠へ
+/// 乗せないためである。** **乗せた形を実測した**——**起動時のスタックの高水位が 208 バイト
+/// 深くなった**（`kernel_main` は最深の経路の上に在る。`ADR-0068` の「起動時のスタックの
+/// 最深経路」と (c)）。
+#[inline(never)]
+fn report_no_virtio_device(
+    logger: &mut Logger<SerialPort>,
+    fs_image_range: Option<(common::addr::PhysAddr, u64)>,
+) {
+    match fs_image_range {
+        Some((phys, bytes)) => logger.info(format_args!(
+            "virtio-blk: no device with an I/O BAR0 was found on bus 0; using the {bytes}-byte \
+             RAM image the bootloader handed over at {:#x} instead (nothing written will persist)",
+            phys.as_u64()
+        )),
+        None => {
+            logger.error(format_args!(
+                "virtio-blk: no device with an I/O BAR0 was found on bus 0, and the bootloader \
+                 handed over no RAM image (\\zaytos\\fs.img); there is no file system to read; \
+                 halting"
+            ));
+            cpu::halt_forever()
+        }
+    }
+}
+
 fn copy_fs_image_to_frames(
     logger: &mut Logger<SerialPort>,
-    blk: &mut kernel::virtio::VirtioBlk,
+    blk: Option<&mut kernel::virtio::VirtioBlk>,
+    ram_image: Option<(common::addr::PhysAddr, u64)>,
 ) -> (u64, u64) {
-    let reason = match try_copy_fs_image_to_frames(logger, blk) {
+    let reason = match try_copy_fs_image_to_frames(logger, blk, ram_image) {
         Ok(placed) => return placed,
         Err(reason) => reason,
     };
@@ -5375,6 +5427,24 @@ fn copy_fs_image_to_frames(
         FsImageCopyError::DeviceWriteFailed { error } => logger.error(format_args!(
             "fs-image-flush: writing the image back to the virtio disk failed: {error:?}; halting"
         )),
+        FsImageCopyError::NoSource => logger.error(format_args!(
+            "fs-image: there is no virtio-blk device and no RAM image to copy from; halting"
+        )),
+        FsImageCopyError::RamImageWrongSize { handed, expected } => logger.error(format_args!(
+            "fs-image: the bootloader handed over {handed} byte(s) but this kernel was built for \
+             an {expected}-byte image; halting"
+        )),
+        FsImageCopyError::RamImageNotCovered { base, last } => logger.error(format_args!(
+            "fs-image: the direct map does not cover the handed-over image {base:#x}..{last:#x}; \
+             halting"
+        )),
+        FsImageCopyError::RamImageChecksumMismatch { found, expected } => {
+            logger.error(format_args!(
+                "fs-image: the handed-over image has checksum {found:#010x} but this kernel was \
+                 built for {expected:#010x} (the length matched, so the \\zaytos\\fs.img on the \
+                 boot medium is stale); halting"
+            ))
+        }
     }
     cpu::halt_forever();
 }
@@ -5422,6 +5492,14 @@ enum FsImageCopyError {
     DeviceWriteFailed {
         error: kernel::virtio::VirtioBlkError,
     },
+    /// 装置も RAM の像も無い（`ADR-0068` の HW-d）。**読む源が 1 つも無い。**
+    NoSource,
+    /// 渡された像の長さが、この像を建てたときの長さと違う（同）。
+    RamImageWrongSize { handed: u64, expected: u64 },
+    /// direct map が渡された像を覆っていない（同）。**写す前に確かめる。**
+    RamImageNotCovered { base: u64, last: u64 },
+    /// 渡された像の検査値が、建てたときの値と違う（同）。**長さが同じでも中身が古い形を捕まえる。**
+    RamImageChecksumMismatch { found: u32, expected: u32 },
 }
 
 /// 像をフレームへ複製する検査部（T3-1）。**止めない。`Err` を返す。**
@@ -5487,7 +5565,8 @@ const FS_LOAD_CHUNK: u32 = 4096;
 
 fn try_copy_fs_image_to_frames(
     logger: &mut Logger<SerialPort>,
-    blk: &mut kernel::virtio::VirtioBlk,
+    blk: Option<&mut kernel::virtio::VirtioBlk>,
+    ram_image: Option<(common::addr::PhysAddr, u64)>,
 ) -> Result<(u64, u64), FsImageCopyError> {
     use kernel::frame_allocator::FRAME_SIZE;
 
@@ -5532,7 +5611,14 @@ fn try_copy_fs_image_to_frames(
     //
     // **破壊 `fs-load-from-embedded-test` は消した（P-e）。** **装置以外の源が
     // 無いので、戻す先が無い**（`ADR-0034` の Addendum の引き継ぎの表）。
-    {
+    //
+    // **HW-d で源が 2 つになった**（`ADR-0068`）——**装置が無ければ、ブートローダが
+    // 渡した RAM の像から写す。** **どちらも無ければ `NoSource` で止まる。**
+    // **判定の側から見ると、行が違う**（`fs-image-load:` の文言）。
+    let mut blk = blk;
+    // **どちらから写したかを控える**（下の検査値の照合で見る）。
+    let copied_from_ram = blk.is_none();
+    if let Some(blk) = blk.as_deref_mut() {
         // 破壊 (S13-c, virtio-load-skip-first-test): 先頭の 1 かたまりを読まない。
         // **superblock（オフセット 1024）が 0 のままになり、突き合わせが落ちる。**
         // **末尾を欠く形にしない**——像の末尾は 0 なので（S12-a の実測）、
@@ -5569,6 +5655,45 @@ fn try_copy_fs_image_to_frames(
             "fs-image-load: read {} byte(s) from the virtio disk into the copy destination",
             bytes - start_chunk * 4096
         ));
+    } else {
+        // **RAM の像から写す**（`ADR-0068` の HW-d）。**装置は無い。**
+        //
+        let Some((image_phys, handed)) = ram_image else {
+            return Err(FsImageCopyError::NoSource);
+        };
+        // **長さが違えば止める。** **建てたときの長さで器を取っているので、
+        // 短い像を黙って写すと後ろが 0 のまま残り、ext2 の読みが別の所で落ちる。**
+        if handed != bytes {
+            return Err(FsImageCopyError::RamImageWrongSize {
+                handed,
+                expected: bytes,
+            });
+        }
+        // **覆いを先に見る**（複製先と同じ作法）。
+        let Some(image_last) = common::addr::PhysAddr::new(image_phys.as_u64() + handed - 1) else {
+            return Err(FsImageCopyError::RamImageNotCovered {
+                base: image_phys.as_u64(),
+                last: image_phys.as_u64() + handed - 1,
+            });
+        };
+        if !direct_map.covers(image_phys) || !direct_map.covers(image_last) {
+            return Err(FsImageCopyError::RamImageNotCovered {
+                base: image_phys.as_u64(),
+                last: image_last.as_u64(),
+            });
+        }
+        let source = direct_map.phys_to_virt(image_phys).as_u64() as *const u8;
+        // SAFETY: 源はブートローダが `LOADER_DATA` として取った連続の範囲で、direct map が
+        // 覆っていることを直前に確かめた（アロケータは `LOADER_DATA` を配らない）。
+        // 先は今確保した連続フレームで、同じく覆いを確かめてある。重なりは無い。
+        unsafe {
+            core::ptr::copy_nonoverlapping(source, destination, bytes as usize);
+        }
+        logger.info(format_args!(
+            "fs-image-load: copied {bytes} byte(s) from the RAM image at {:#x} into the copy \
+             destination (no virtio-blk device)",
+            image_phys.as_u64()
+        ));
     }
 
     // **書いたものを読み戻して突き合わせる。** 複製したことを主張の根拠にしない
@@ -5600,6 +5725,22 @@ fn try_copy_fs_image_to_frames(
     //
     // **費用は前と同じ位である**——**前も 2MiB のスライス比較で 2MiB を歩いていた。**
     let checksum = image_checksum(copied);
+
+    // **RAM の像から写した回は、検査値でも照合する**（`ADR-0068` の HW-d。レビューの 1 点）。
+    //
+    // **長さが同じで中身が古い `fs.img` は、長さでは捕まらない**——**VDI の作り直し忘れや、
+    // ESP の片方だけの差し替えで起きる**（HW-e で VirtualBox を回し始めると起きやすい）。
+    // **建てたときの値は `build.rs` が出している**（`fsimage_info::IMAGE_CHECKSUM`）。
+    //
+    // **装置から読んだ回は照合しない**——**持ち越しの構成（`--keep-disk` の族）では、`disk0.img` が
+    // 前の起動で書いた中身を持っており、建てたときの値と違うのが正しい。** **そちらはホストが
+    // `disk0.img` から独立に計算して突き合わせる**（上の doc）。
+    if copied_from_ram && checksum != fsimage_info::IMAGE_CHECKSUM {
+        return Err(FsImageCopyError::RamImageChecksumMismatch {
+            found: checksum,
+            expected: fsimage_info::IMAGE_CHECKSUM,
+        });
+    }
 
     // **アロケータを返す。** 取ったフレームは返さないが、**借りたものは返す。**
     kernel::frame_allocator::give_back(allocator);
@@ -5664,8 +5805,19 @@ fn try_copy_fs_image_to_frames(
     // `e2fsck` を当てられる。既定ビルドでは最終形が建てた像と同じなので、
     // 書き戻しても `disk0.img` は変わらない——**flush は既定でも走る。閉じては
     // いない**（破壊は `fs-flush-skip`。keep 変種のとき `disk0.img` の差で捕まる）。
-    if let Err(error) = flush_fs_image_to_device(logger, blk, base, bytes) {
-        return Err(FsImageCopyError::DeviceWriteFailed { error });
+    //
+    // **装置が無い回（RAM ディスク。`ADR-0068` の HW-d）は書き戻さない。** **1 行出して飛ばす**
+    // ——**黙って飛ばすと、「書き戻したのに残らない」と「書き戻していない」が区別できない。**
+    match blk {
+        Some(device) => {
+            if let Err(error) = flush_fs_image_to_device(logger, device, base, bytes) {
+                return Err(FsImageCopyError::DeviceWriteFailed { error });
+            }
+        }
+        None => logger.info(format_args!(
+            "fs-image-flush: there is no virtio-blk device, so the image is not written back \
+             (the RAM copy is the only one; nothing persists across a reboot)"
+        )),
     }
 
     // **像がこの起動での最終形になったことを告げる（S12-d）。**
