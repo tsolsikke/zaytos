@@ -93,6 +93,23 @@
 - **フレームバッファがuncached（PCD）で、Write-Combining（PAT）は持ち越しの行に在る**（`docs/deferred-decisions.md`の「Write-Combining / PATの導入」。**契機は「実機で測れるようになった時点」**）。**Seinasは毎フレーム合成するので、ZaytOSへ載せる前に要る見込み**（運用者の見立て）。**4Kの画面では、1枚の転送が1280×800の8倍になる**（計算）。
 - **シリアルの38,400 baud**（上の表）。
 
+## PCIと割り込みの能力（実機対応の調査で実測。2026-09-23）
+
+**どれもVMで測った値で、実機では未観測である。** **VMの固定値を、一般の機械の前提にしない。**
+
+| 装置 | QEMU（`pc`・`q35`） | VirtualBox（PIIX3。既定） | VirtualBox（ICH9） |
+|---|---|---|---|
+| xHCI | MSI-X 16本（MSIは無い）・INTx | INTxだけ | MSI 1本（32ビットの番地）・INTx |
+| AHCI | MSI 1本（64ビットの番地）・INTx（`q35`の内蔵） | INTxだけ | MSI・INTx |
+| NVMe | MSI-X 65本・INTx | INTxだけ | MSIとMSI-X（2048）・INTx |
+
+- **4GiBの上のBAR**——**QEMU `pc`のxHCIのBAR0は0xC0_0000_0000**（64ビット）。`q35`のNVMeも0xC0_2000_0000。**カーネルの列挙はいまBARの生の値を出すだけで、上位と下位を組んでいない。**
+- **bus 0の外**——**`q35`でPCIeのroot portの下に置いたxHCIはbus 1に居て、いまの列挙（bus 0だけ）には出ない。**
+- **能力の一覧の指す先が0**——**VirtualBox（PIIX3）のxHCIとNVMeは、状態レジスタが「一覧あり」と言うのに、指す先が0である。**
+- **PCIのINTxの行き先**——**VirtualBoxでは割り込み線が10・11なのに、INTA#はI/O APICの20〜23番へ行く**（持ち越しの行を立てた）。
+- **xHCIの所有権の受け渡し**——**QEMUにもVirtualBoxにもUSB Legacy Supportの能力が無い**ので、VMでは通らない。**どちらもExitBootServicesの後はHCが止まっている。** **VirtualBoxはファームウェアが設定したDCBAAとコマンドリングの指し先を残している。**
+- **I/O APICのID**——**VirtualBoxのMADTはI/O APICのIDをCPUの数と同じ値にし**（CPU 1個で1、4個で4）、**IDレジスタは0のままである。** **それでもIRQ1はI/O APICを通ってベクタ0x42で届く**（VirtualBoxのデバッガのベクタごとの計数で、打鍵4バイトで0x42が+4、8259のベクタ0x21は0回）。
+
 ## 起動媒体（`ADR-0068`のHW-eで作った）
 
 **QEMUの既定の起動は、ESPのディレクトリをFATに見せる形である**（`fat:rw:`）。**VirtualBoxにも実機にも、この形は無い。**
