@@ -40,7 +40,8 @@ pub mod dirty;
     feature = "ttf-test",
     feature = "pipe-test",
     feature = "socket-test",
-    feature = "shell-script-test"
+    feature = "shell-script-test",
+    feature = "ram-disk-write-test"
 ))]
 pub(crate) mod probe;
 pub mod screen;

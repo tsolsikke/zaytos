@@ -6294,6 +6294,11 @@ struct MachineVariant {
     /// シリアルをファイルへ出すか。**出さない変種は人が画面で読むためのもので、`xtask` は起こさない**
     /// （判定がシリアルを読む）。
     serial: bool,
+    /// virtio-blk を付けるか（`ADR-0068` の HW-d）。
+    ///
+    /// **付けない変種では、カーネルは ESP の `\zaytos\fs.img` を RAM ディスクとして使う**
+    /// ——**VirtualBox と実機には virtio-blk が無いので、その道を検査に入れる。**
+    virtio_disk: bool,
 }
 
 /// 機械の変種の起こし方の表（`ADR-0068`）。**`tools/qemu-variants.py` も同じファイルを読む**
@@ -6310,9 +6315,9 @@ fn parse_machine_variants(table: &'static str) -> Result<Vec<MachineVariant>> {
             continue;
         }
         let fields: Vec<&'static str> = line.split_whitespace().collect();
-        let &[name, machine, memory, serial] = fields.as_slice() else {
+        let &[name, machine, memory, serial, disk] = fields.as_slice() else {
             bail!(
-                "machine-variants.txt line {}: expected 4 fields (name, -machine, -m, serial), got {}",
+                "machine-variants.txt line {}: expected 5 fields (name, -machine, -m, serial, disk), got {}",
                 index + 1,
                 fields.len()
             );
@@ -6322,6 +6327,14 @@ fn parse_machine_variants(table: &'static str) -> Result<Vec<MachineVariant>> {
             "none" => false,
             other => bail!(
                 "machine-variants.txt line {}: the serial column is {other:?}, not file or none",
+                index + 1
+            ),
+        };
+        let virtio_disk = match disk {
+            "virtio" => true,
+            "none" => false,
+            other => bail!(
+                "machine-variants.txt line {}: the disk column is {other:?}, not virtio or none",
                 index + 1
             ),
         };
@@ -6336,6 +6349,7 @@ fn parse_machine_variants(table: &'static str) -> Result<Vec<MachineVariant>> {
             machine,
             memory,
             serial,
+            virtio_disk,
         });
     }
     Ok(variants)
@@ -6363,6 +6377,8 @@ fn machine_variant(name: &str) -> Result<MachineVariant> {
 /// - `pc-no-i8042`（HW-b）——**FADT（リビジョン 1）は何も言わない。探って答えが無く、続く行を見る。**
 ///   **`q35` だけでは探る側の道を通らない**（FADT が先に答える）ので、2 つ置く。
 /// - `q35-no-pit`（HW-c）——**PIT が刻まない。** **ACPI の PM タイマで較正して進む行を見る。**
+/// - `pc-no-virtio`（HW-d）——**virtio-blk が無い。** **ESP の `\zaytos\fs.img` を RAM ディスクとして
+///   使って進む行を見る**（VirtualBox と実機に virtio-blk は無い）。
 const MACHINE_VARIANT_CHECKS: &[(&str, VariantExpect)] = &[
     ("q35-6g", VariantExpect::Prompt),
     (
@@ -6376,6 +6392,10 @@ const MACHINE_VARIANT_CHECKS: &[(&str, VariantExpect)] = &[
     (
         "q35-no-pit",
         VariantExpect::PromptAndLine("apic: LAPIC timer calibration against the ACPI PM timer"),
+    ),
+    (
+        "pc-no-virtio",
+        VariantExpect::PromptAndLine("fs-image-load: copied"),
     ),
 ];
 
@@ -6418,6 +6438,23 @@ const MACHINE_VARIANT_SABOTAGES: &[(&str, &str, bool, VariantExpect)] = &[
         false,
         VariantExpect::StopsWith("apic: the PIT did not tick and the FADT names no PM timer"),
     ),
+    // **RAM ディスクの像を見ない**——**装置も像も無い形になり、読む源が 1 つも無いと言って止まる。**
+    // **RAM ディスクの道が実際に使われていることの裏返しの証明である**（見ていなければ、
+    // 既定の回もこの行で止まるはずだからである）。
+    (
+        "pc-no-virtio",
+        "fs-ram-image-ignored",
+        false,
+        VariantExpect::StopsWith("fs-image: there is no virtio-blk device and no RAM image"),
+    ),
+    // **装置が無いのに書き戻しの完了を待つ**（待ちを残した形）。**締切で panic して止まる**
+    // ——**黙って固まる形を、行にして見えるようにしてある。** **台本を伴う**（保存の操作が要る）。
+    (
+        "pc-no-virtio",
+        "flush-waits-without-device",
+        false,
+        VariantExpect::StopsWith("fs-image-flush: waited for a completion that cannot come"),
+    ),
 ];
 
 /// 機械の変種で、何が起きれば正しいか。
@@ -6436,6 +6473,19 @@ enum VariantExpect {
     /// プロンプトが出て `[ERROR]` の行が無く、この行が出た（HW-b）。**プロンプトだけでは、
     /// どの道を通って続いたかが分からない。**
     PromptAndLine(&'static str),
+    /// 台本が書いて読み直せた（HW-d。`ADR-0068`）。
+    ///
+    /// **`line` に一致する行が出て、`markers` の全部が出て、`[ERROR]` が無いこと。**
+    /// **一致は「行そのもの」で見る**——**打った字も serial に出るので、部分一致では
+    /// `cat` の出力と区別できない**（`zi` の描画は同じ行に状態も載せる）。
+    /// **待つのは `line` が出るまでで、プロンプトではない**（台本はプロンプトの後に走る）。
+    PromptAndScript {
+        line: &'static str,
+        markers: &'static [&'static str],
+        /// **出ていてはいけない行**（HW-d）。**書き戻しの計器は 1 度でも書き戻せば出る**ので、
+        /// **出ていないことが「1 度も書き戻していない」の観測になる。**
+        forbidden: &'static [&'static str],
+    },
 }
 
 /// 機械の変種の検査の構成（`ADR-0068`）。**破壊ではない**——**`SABOTAGE_FEATURES` に入れない。**
@@ -6446,11 +6496,32 @@ enum VariantExpect {
 ///   空きから配る。** **6GiB で起動すると 4GiB の上のフレームが実際に配られる**（既定では低い番地から
 ///   配るので、4GiB の上は張ってあることしか確かめられない。レビューの足す1点。2026-09-22）。
 ///   **番地を 32 ビットへ切り詰める箇所を表に出す。**
-const MACHINE_VARIANT_CONFIGS: &[(&str, &str, VariantExpect)] = &[(
-    "q35-6g",
-    "frame-allocator-high-after-switch",
-    VariantExpect::PromptAndCounter("frame-allocator: handed out "),
-)];
+const MACHINE_VARIANT_CONFIGS: &[(&str, &str, VariantExpect)] = &[
+    // **RAM ディスクの上で書いて読み直す（HW-d。`ADR-0068`）。** **書き戻しの入口が装置の無い
+    // 構成で待たないことを見る**——**心配なのは止まる形ではなく、黙って固まる形である。**
+    // **`user-flush:` の行が 0 回であることも見る**（装置が無いので、書き戻しは 1 度も起きない）。
+    (
+        "pc-no-virtio",
+        "ram-disk-write-test",
+        VariantExpect::PromptAndScript {
+            line: "RAMDISK-OK",
+            // **保存が通ったこと**（`zi` は保存に失敗すれば 0 で終わらない）**と、この回が装置の
+            // 無い構成であること。**
+            markers: &[
+                "spawn: /bin/zi ended (Exited(0))",
+                "fs-image-flush: there is no virtio-blk device",
+            ],
+            // **書き戻しの計器は 1 度でも書き戻せば出る**——**出ていないことが「1 度も書き戻して
+            // いない」の観測である。**
+            forbidden: &["user-flush: /bin/zi wrote the image back"],
+        },
+    ),
+    (
+        "q35-6g",
+        "frame-allocator-high-after-switch",
+        VariantExpect::PromptAndCounter("frame-allocator: handed out "),
+    ),
+];
 
 /// 機械の変種の上限。**既定の像がプロンプトまで 7.5〜8.7 秒だった**（実測。`pc` と `q35`、
 /// 256MiB と 1GiB。2026-09-22）**ので、その 7 倍に取る。**
@@ -6464,6 +6535,23 @@ fn apply_machine_variant(qemu_args: &mut Vec<std::ffi::OsString>, variant: &Mach
     }
     qemu_args.push("-machine".into());
     qemu_args.push(variant.machine.into());
+    // **virtio-blk を外す変種（`ADR-0068` の HW-d）。** **`-device` と、それが参照する
+    // `-drive` の対を落とす**——**片方だけ落とすと QEMU が起動しない**（drive が
+    // 使われないか、device が参照先を失う）。
+    if !variant.virtio_disk {
+        if let Some(at) = qemu_args
+            .iter()
+            .position(|a| a == "virtio-blk-pci,drive=disk0")
+        {
+            qemu_args.drain(at - 1..=at);
+        }
+        if let Some(at) = qemu_args
+            .iter()
+            .position(|a| a.to_string_lossy().starts_with("if=none,id=disk0,"))
+        {
+            qemu_args.drain(at - 1..=at);
+        }
+    }
 }
 
 /// 機械の変種を 1 つ起こして判定する（`ADR-0068`）。
@@ -6508,11 +6596,20 @@ fn cmd_machine_variant(
         .context("failed to launch qemu-system-x86_64 for a machine variant")?;
 
     // **プロンプトか停止の行を待つ。** どちらも来なければ上限で切る。
+    // **台本の回は、台本が書いて読み直した行を待つ**（HW-d）——**プロンプトはその前に出る。**
+    let script_line = match expect {
+        VariantExpect::PromptAndScript { line, .. } => Some(line),
+        _ => None,
+    };
     let started = Instant::now();
     let deadline = started + MACHINE_VARIANT_TIMEOUT;
     while Instant::now() < deadline {
         let text = strip_ansi(&read_lossy(&serial_log));
-        if text.contains(SHELL_READY_MARKER) || text.contains("halting") {
+        let reached = match script_line {
+            Some(line) => text.lines().any(|seen| seen.trim() == line),
+            None => text.contains(SHELL_READY_MARKER),
+        };
+        if reached || text.contains("halting") || text.contains(PANIC_MARKER_HEADER) {
             thread::sleep(Duration::from_millis(500));
             break;
         }
@@ -6599,6 +6696,38 @@ fn cmd_machine_variant(
             println!("{context}: no [ERROR] line = {no_error} (the first were {error_lines:?})");
             println!("{context}: the_line_appeared = {line_seen} (`{marker}`)");
             ready && no_error && line_seen
+        }
+        VariantExpect::PromptAndScript {
+            line,
+            markers,
+            forbidden,
+        } => {
+            let no_error = error_lines.is_empty();
+            let read_back = text.lines().any(|seen| seen.trim() == line);
+            let missing: Vec<&str> = markers
+                .iter()
+                .copied()
+                .filter(|marker| !text.contains(marker))
+                .collect();
+            let seen_forbidden: Vec<&str> = forbidden
+                .iter()
+                .copied()
+                .filter(|marker| text.contains(marker))
+                .collect();
+            println!("{context}: the_shell_printed_its_prompt = {ready}");
+            println!("{context}: no [ERROR] line = {no_error} (the first were {error_lines:?})");
+            println!(
+                "{context}: the_script_read_the_file_back = {read_back} (a line equal to `{line}`)"
+            );
+            println!(
+                "{context}: every required line appeared = {} (missing {missing:?})",
+                missing.is_empty()
+            );
+            println!(
+                "{context}: nothing wrote the image back = {} (seen {seen_forbidden:?})",
+                seen_forbidden.is_empty()
+            );
+            ready && no_error && read_back && missing.is_empty() && seen_forbidden.is_empty()
         }
         VariantExpect::FaultAtBootInfo => {
             let hex_after = |key: &str| -> Option<u64> {
@@ -18296,8 +18425,15 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "frame-allocator-hands-out-high-first",
     // `ADR-0068` の HW-b。**i8042 を探って答えが無ければ止める（直す前の形）。**
     "i8042-halts-when-absent",
-    // `ADR-0068` の HW-c。**ACPI の PM タイマを無いものとして扱う。**
+    // `ADR-0068` の HW-c。**ACPI の PM タイマを無いものとして扱う**（変種で見る）**と、
+    // 周波数の定数を 2 倍にする**（速さの判定で見る）。
     "pm-timer-treated-as-absent",
+    "pm-timer-double-frequency",
+    // `ADR-0068` の HW-d。**ブートローダが渡した RAM ディスクの像を見ない**と、**装置が無いのに
+    // 書き戻しの完了を待つ。** **`ram-disk-write-test` は台本で、破壊ではない**（`concurrent-test`
+    // と同じ扱い）。
+    "fs-ram-image-ignored",
+    "flush-waits-without-device",
 ];
 
 /// 内部を隠す約束のディレクトリ。
@@ -20741,7 +20877,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 35,
-    full: 368,
+    full: 372,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -22649,20 +22785,30 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         assert!(variants.iter().any(|variant| variant.name == "q35-6g"
             && variant.machine == "q35"
             && variant.memory == "6G"
-            && variant.serial));
+            && variant.serial
+            && variant.virtio_disk));
         assert!(variants
             .iter()
             .any(|variant| variant.name == "pc-no-serial" && !variant.serial));
-        assert!(parse_machine_variants("a q35 6G\n").is_err());
-        assert!(parse_machine_variants("a q35 6G tty\n").is_err());
-        assert!(parse_machine_variants("a q35 6G file\na pc 1G file\n").is_err());
+        // **HW-d で足した欄**（`ADR-0068`）——**virtio-blk を付けない変種が在る。**
+        assert!(variants
+            .iter()
+            .any(|variant| variant.name == "pc-no-virtio" && !variant.virtio_disk));
+        assert!(
+            parse_machine_variants("a q35 6G file\n").is_err(),
+            "欄が 4 つでは足りない"
+        );
+        assert!(parse_machine_variants("a q35 6G tty virtio\n").is_err());
+        assert!(parse_machine_variants("a q35 6G file sata\n").is_err());
+        assert!(parse_machine_variants("a q35 6G file virtio\na pc 1G file virtio\n").is_err());
         assert_eq!(
-            parse_machine_variants("# comment\n\nb pc 1G none\n").unwrap(),
+            parse_machine_variants("# comment\n\nb pc 1G none none\n").unwrap(),
             vec![MachineVariant {
                 name: "b",
                 machine: "pc",
                 memory: "1G",
                 serial: false,
+                virtio_disk: false,
             }]
         );
     }

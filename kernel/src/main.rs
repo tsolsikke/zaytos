@@ -5658,7 +5658,10 @@ fn try_copy_fs_image_to_frames(
     } else {
         // **RAM の像から写す**（`ADR-0068` の HW-d）。**装置は無い。**
         //
-        let Some((image_phys, handed)) = ram_image else {
+        // 破壊 (HW-d, fs-ram-image-ignored): 像を見ない。**装置も像も無い形になり、
+        // `NoSource` で止まる**——**RAM ディスクの道が実際に使われていることの証明である。**
+        let ignored = cfg!(feature = "fs-ram-image-ignored");
+        let Some((image_phys, handed)) = ram_image.filter(|_| !ignored) else {
             return Err(FsImageCopyError::NoSource);
         };
         // **長さが違えば止める。** **建てたときの長さで器を取っているので、
@@ -10760,6 +10763,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "PM タイマの周波数の定数を 2 倍にする（ADR-0068 の HW-c）",
     ),
     (
+        "fs-ram-image-ignored",
+        cfg!(feature = "fs-ram-image-ignored"),
+        "ブートローダが渡した RAM ディスクの像を見ない（ADR-0068 の HW-d）",
+    ),
+    (
+        "flush-waits-without-device",
+        cfg!(feature = "flush-waits-without-device"),
+        "装置が無いのに書き戻しの完了を待つ（ADR-0068 の HW-d）",
+    ),
+    (
         "poll-never-waits",
         cfg!(feature = "poll-never-waits"),
         "poll が待たずに 0 を返す（ADR-0066 の Y-b）",
@@ -11058,6 +11071,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "zi-test",
         cfg!(feature = "zi-test"),
         "打鍵の代わりに決定的な台本を read_bytes から返す",
+    ),
+    (
+        "ram-disk-write-test",
+        cfg!(feature = "ram-disk-write-test"),
+        "RAM ディスクの上で zi が書いて保存し、cat で読み直す台本（ADR-0068 の HW-d）",
     ),
     (
         "env-ignore-file-test",

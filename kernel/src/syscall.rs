@@ -1497,6 +1497,12 @@ unsafe fn dispatch(
 /// # Safety
 ///
 /// `bkl` が、いま保持している BKL のガードであること。
+/// 破壊 `flush-waits-without-device` の締切（TSC サイクル）。**約 0.3 秒**（実測で TSC は約 3.5GHz）。
+///
+/// **破壊にだけ在る。** **既定のビルドでは、装置が無ければ待たずに戻る。**
+#[cfg_attr(not(feature = "flush-waits-without-device"), allow(dead_code))]
+const FLUSH_WITHOUT_DEVICE_DEADLINE_CYCLES: u64 = 1_000_000_000;
+
 unsafe fn flush_root_image(bkl: &mut Option<crate::bkl::BklGuard>) -> Result<(), i64> {
     // **据えられていなければ書き戻さない（P-c-1）。**
     //
@@ -1504,6 +1510,24 @@ unsafe fn flush_root_image(bkl: &mut Option<crate::bkl::BklGuard>) -> Result<(),
     // **あれらは据える前に走る**——**断ると起動が止まる**（実測。2026-08-28）。
     // **起動シーケンスが最後に自分で書き戻すので、失われるものが無い。**
     if !crate::virtio::installed() {
+        // 破壊 (HW-d, flush-waits-without-device): **装置が無いのに完了を待つ**（待ちを残した形）。
+        // **RAM ディスクで動く VirtualBox では、これが「黙って固まる」形になる**——**完了割り込みは
+        // 永遠に来ない。** **締切を置いて止まる形にしてある**（黙る形を、行にして見えるようにする）。
+        //
+        // **声は panic で出す**——**`syscall.rs` にシリアルの口は無い**（開けると直接シリアルの
+        // 許可リストに項目が増える）。**パニックの方針は Halt and Dump である**（`ADR-0004`）。
+        if cfg!(feature = "flush-waits-without-device") {
+            let started = common::cpu::read_timestamp_counter();
+            while common::cpu::read_timestamp_counter().wrapping_sub(started)
+                < FLUSH_WITHOUT_DEVICE_DEADLINE_CYCLES
+            {
+                core::hint::spin_loop();
+            }
+            panic!(
+                "fs-image-flush: waited for a completion that cannot come (there is no \
+                 virtio-blk device)"
+            );
+        }
         return Ok(());
     }
     let Some(mut claim) = crate::virtio::claim() else {

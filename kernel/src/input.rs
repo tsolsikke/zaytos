@@ -435,7 +435,8 @@ pub fn read_bytes(dst: &mut [u8]) -> usize {
         feature = "ttf-test",
         feature = "pipe-test",
         feature = "socket-test",
-        feature = "shell-script-test"
+        feature = "shell-script-test",
+        feature = "ram-disk-write-test"
     ))]
     {
         let taken = script::next_bytes(dst);
@@ -714,7 +715,8 @@ pub fn arm_input_script() {
         feature = "ttf-test",
         feature = "pipe-test",
         feature = "socket-test",
-        feature = "shell-script-test"
+        feature = "shell-script-test",
+        feature = "ram-disk-write-test"
     ))]
     {
         script::arm();
@@ -754,7 +756,8 @@ pub fn arm_input_script() {
     feature = "ttf-test",
     feature = "pipe-test",
     feature = "socket-test",
-    feature = "shell-script-test"
+    feature = "shell-script-test",
+    feature = "ram-disk-write-test"
 ))]
 pub(crate) mod script {
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -938,6 +941,29 @@ pub(crate) mod script {
     #[cfg(feature = "persist-check-test")]
     const SCRIPT: &[u8] = b"/bin/cat /data/lines\n\
         /bin/echo $TERM\n\x0c";
+
+    /// 台本（`ADR-0068` の HW-d）。**RAM ディスクの上で書いて、読み直す。**
+    ///
+    /// # 何を見るのか
+    ///
+    /// **書き戻しの入口が、装置の無い構成で待たないことである**（レビューの足す1点。2026-09-23）。
+    /// **止まる形ではなく、待ち続ける形が心配である**——**完了割り込みを待つ形が残っていれば、
+    /// 割り込みは永遠に来ず、黙って固まる**（PIT の沈黙と同じ族）。
+    ///
+    /// **`zi` で新しいファイルを作って保存し、`cat` で読み直す。** **保存は `close` を通るので、
+    /// 書き戻しの入口（`syscall` の `flush_root_image`）を 1 度通る。** **固まれば `cat` の行が出ない。**
+    ///
+    /// **打った字も serial に出る**（`zi` が画面へ描く）。**判定は「行そのものが本文と一致する」
+    /// ことで見る**——**`cat` の出力だけが、余分な字の無い 1 行になる。**
+    ///
+    /// **Esc の後に休み（`\x04`）を置く。** **`zi` は溜めた Esc を「入力が途切れたとき」に確定する**
+    /// （e-2。CSI の途中かを見分けるため）——**置かないと Esc が効かず、続きが本文として打たれる**
+    /// （実測で踏んだ。2026-09-23。`:wq` も `/bin/cat` も本文になった）。**既存の台本も同じ形である。**
+    #[cfg(feature = "ram-disk-write-test")]
+    const SCRIPT: &[u8] = b"/bin/zi /data/ramdisk\n\
+        iRAMDISK-OK\x1b\x04\
+        :wq\n\
+        /bin/cat /data/ramdisk\n\x0c";
 
     /// 台本（f-1）。**持ち越しの1度目で `/etc/environment` を書き換える。**
     ///

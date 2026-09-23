@@ -13,7 +13,7 @@ Hello, ZaytOS!
 [INFO] build: 2 cargo feature(s) enabled: default,heap-poison
 [INFO] fp: SSE is enabled on the bootstrap processor: CR0=0x80010033 (MP=true, EM=false),              CR4=0x668 (OSFXSR=true, OSXMMEXCPT=true), as intended = true [read back from the registers]
 [INFO] boot stack: 648 of 16384 bytes used (high-water; 15736 bytes poison intact)
-[INFO] higher-half: arrived at high VA. RIP=0xffffffff801e5668 in [0xffffffff80100000, 0xffffffff804ad8b0)=true, RSP=0xffffffff80410180 high=true, CR3=0x24c000 == bootstrap PML4 0x24c000 = true, identity alive (phys 0x100000 read via low==high) = true
+[INFO] higher-half: arrived at high VA. RIP=0xffffffff801e5778 in [0xffffffff80100000, 0xffffffff804ad8b0)=true, RSP=0xffffffff80410180 high=true, CR3=0x24c000 == bootstrap PML4 0x24c000 = true, identity alive (phys 0x100000 read via low==high) = true
 [INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff80425218 first slot=0xffffffff80425218 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
 [INFO] interrupts: RFLAGS.IF before cli = false (raw RFLAGS=0x96)
 [INFO] interrupts: RFLAGS.IF after cli = false (raw RFLAGS=0x96)
@@ -42,7 +42,7 @@ Hello, ZaytOS!
 [INFO] idt: base=0xffffffff803f7af9 limit=4095 (expected base=0xffffffff803f7af9 limit=4095)
 [INFO] idt: 256 entries, all present=true, all interrupt gates=true, DPL layout ok=true (syscall vector 0x80 DPL=Some(3), others DPL 0)
 [INFO] idt: #DF (vector 8) IST index=Some(1), #DE (vector 0) IST index=None
-[INFO] idt: stub table 0xffffffff801537e0..0xffffffff801547e0 size=4096 (expected 4096), stride=OK, entries=OK
+[INFO] idt: stub table 0xffffffff801538f0..0xffffffff801548f0 size=4096 (expected 4096), stride=OK, entries=OK
 [INFO] idt: dedicated stubs outside the exception table: 7 checked, every gate points at its own stub=true
 [INFO] idt: loaded (exceptions now reach our handlers; interrupts stay disabled until M4-d)
 [INFO] critical: IF before any guard = false
@@ -75,7 +75,7 @@ Hello, ZaytOS!
 [INFO] paging: required range [framebuffer] 0x80000000..0x803e8000: OK
 [INFO] paging: required range [new page tables (PML4)] 0x3000..0x4000: OK
 [INFO] paging: required range [current RSP] 0x4103e0..0x4103e1: OK
-[INFO] paging: required range [current RIP] 0x1e5668..0x1e5669: OK
+[INFO] paging: required range [current RIP] 0x1e5778..0x1e5779: OK
 [INFO] paging: all required ranges mapped. proceeding to CR3 switch (d-2).
 [INFO] paging: current CR3 = 0x24c000
 [INFO] paging: CR3 switch instruction executed
@@ -109,7 +109,7 @@ Hello, ZaytOS!
 [INFO] console: 104 log line(s) were emitted before the console existed (serial only)
 [INFO] heap: arena 0x4ae000..0x5ae000 (256 frames, 1 MiB), mapped=true
 [INFO] heap: initialized (1048576 bytes free, 1 block(s))
-[INFO] granularity: executing code (RIP) 0xffffffff801e5668 -> phys 0x1e5668, mapped by a 4KiB page at 0xffffffff801e5000 (entry=0x1e5023)
+[INFO] granularity: executing code (RIP) 0xffffffff801e5778 -> phys 0x1e5778, mapped by a 4KiB page at 0xffffffff801e5000 (entry=0x1e5023)
 [INFO] granularity: kernel stack (RSP) 0xffffffff8040fe60 -> phys 0x40fe60, mapped by a 4KiB page at 0xffffffff8040f000 (entry=0x40f063)
 [INFO] granularity: heap arena 0x4ae000 -> phys 0x4ae000, mapped by a 2MiB page at 0x400000 (entry=0x400083)
 [INFO] granularity: framebuffer 0x80000000 -> phys 0x80000000, mapped by a 2MiB page at 0x80000000 (entry=0x800000b3)
@@ -257,7 +257,7 @@ Hello, ZaytOS!
 [INFO] percpu: 2 usable CPU(s) enumerated, 2 per-CPU slot(s) available, every CPU has a slot=true (cpu_id() is the constant 0 and only the bootstrap processor runs, so no slot is indexed out of range yet)
 [INFO] identity-removal: begin. live PML4=0xf000, saved PML4[0]=0x10023
 [INFO] identity-removal: PML4[0] subtree table frames = 7 (28 KiB) become unreachable; intentional leak. subtree frames [256]=10 [511]=5. disjoint(0,256)=true disjoint(0,511)=true disjoint(256,511)=true
-[INFO] identity-removal: required [RIP] 0xffffffff801e5668 -> phys 0x1e5668 (huge=false): OK
+[INFO] identity-removal: required [RIP] 0xffffffff801e5778 -> phys 0x1e5778 (huge=false): OK
 [INFO] identity-removal: required [RSP] 0xffffffff8040fcb0 -> phys 0x40fcb0 (huge=false): OK
 [INFO] identity-removal: required [direct map window] 0xffff80000000f000 -> phys 0xf000 (huge=false): OK
 [INFO] identity-removal: required [kernel image] 0xffffffff80100000 -> phys 0x100000 (huge=false): OK
@@ -509,7 +509,7 @@ syscall-test wrote this
 [INFO] ioapic: virtio IRQ 11 routed: vector=0x44 (expected 0x44), level=true active-low=false masked=false; matches the platform's declaration = true [read back from hardware]
 [INFO] sti-check 1: GDT base=0xffffffff80425218 (expected 0xffffffff80425218), CS=0x0008 (expected 0x0008), DS=0x0010 SS=0x0010 (expected 0x0010)
 [INFO] sti-check 2: TR=0x0030 (expected 0x0030), IST1 top=0xffffffff8041f000, #DF gate IST index=Some(1)
-[INFO] sti-check 3: IDT base=0xffffffff803f7af9 limit=4095, first 32 gates ok=true, exception stub table ok=true, irq stub table ok=true (0xffffffff80154810..0xffffffff80154a20, size=528 expected=528)
+[INFO] sti-check 3: IDT base=0xffffffff803f7af9 limit=4095, first 32 gates ok=true, exception stub table ok=true, irq stub table ok=true (0xffffffff80154920..0xffffffff80154b30, size=528 expected=528)
 [INFO] sti-check 5: PIC IMR master=0xfe slave=0xff (expected 0xfe/0xff) [read back from hardware]
 [INFO] sti-check 4: cannot be verified at this point; the timer still goes through the 8259 here (calibration needs PIT ticks, so the move to the local APIC timer happens after sti), and the 8259 ICW2 is write-only. Proceeding is safe only because check 5 holds: with every IRQ masked, a wrong offset delivers nothing. Proof arrives when the first timer IRQ shows up as vector 0x20. The other two paths are read back where they are set up: the I/O APIC redirection entry (IRQ1) and the LVT timer
 [INFO] sti-check 6: IF before=false while holding the lock=false after=false (must be false while held, and back to the entry value afterwards)
@@ -530,7 +530,7 @@ syscall-test wrote this
 [INFO] lapic-timer: the timer now arrives as vector 0xfe, which the 8259 cannot produce
 task: starting preemptive demo with 2 busy-loop workers for 200 ticks
 [INFO] smp: the installed AP trampoline matches the template outside the patched fields: 4048 byte(s) compared, 48 excluded (gdtr base at 0xf22, far jump target at 0x3b, data block 0xf40..0xf68), mismatches=0
-[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x24c000, rust entry 0xffffffff801a09a0
+[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x24c000, rust entry 0xffffffff801a0ab0
 [INFO] smp: starting application processor apic id 1 as slot 1 (trampoline at 0x1000, vector 0x01, stack top 0x3000 identity-mapped, cr3 0x24c000 = the static boot page table)
 [INFO] smp: application processor 1 started (long mode reached, running on the static boot page table; no per-CPU GDT/TSS/IDT yet, so cpu_id() is not used here)
 [INFO] fp: SSE is enabled on ap 1: CR0=0xe0000013 CR4=0x620, as intended = true [read back from the registers]

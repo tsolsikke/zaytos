@@ -76,7 +76,8 @@ def load_variants():
             if not line or line.startswith("#"):
                 continue
             fields = line.split()
-            if len(fields) != 4 or fields[3] not in ("file", "none") or fields[0] in variants:
+            if (len(fields) != 5 or fields[3] not in ("file", "none")
+                    or fields[4] not in ("virtio", "none") or fields[0] in variants):
                 sys.exit(f"{TABLE} line {number}: not a well-formed row: {line!r}")
             variants[fields[0]] = tuple(fields[1:])
     return variants
@@ -103,7 +104,7 @@ def ppm_to_png(ppm_path, png_path):
 
 
 def run_variant(name, wait):
-    machine, mem, serial = VARIANTS[name]
+    machine, mem, serial, disk = VARIANTS[name]
     out = os.path.join(OUT, name)
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(out)
@@ -120,8 +121,13 @@ def run_variant(name, wait):
         "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF_CODE}",
         "-drive", f"if=pflash,format=raw,file={out}/vars.fd",
         "-drive", f"format=raw,file=fat:rw:{out}/esp",
-        "-drive", f"if=none,id=disk0,format=raw,file={out}/disk0.img",
-        "-device", "virtio-blk-pci,drive=disk0",
+    ]
+    # **ディスクが none の変種では virtio-blk を付けない**（`ADR-0068` の HW-d）。
+    # **カーネルは ESP の `\zaytos\fs.img` を RAM ディスクとして使う。**
+    if disk == "virtio":
+        args += ["-drive", f"if=none,id=disk0,format=raw,file={out}/disk0.img",
+                 "-device", "virtio-blk-pci,drive=disk0"]
+    args += [
         "-serial", serial_arg, "-display", "none", "-no-reboot", "-no-shutdown",
         "-d", "int,cpu_reset", "-D", f"{out}/qemu-debug.log",
         "-monitor", f"unix:{sock},server,nowait",
@@ -174,8 +180,8 @@ def main():
     parser.add_argument("--list", action="store_true", help="変種の一覧を出して終わる")
     options = parser.parse_args()
     if options.list:
-        for name, (machine, mem, serial) in VARIANTS.items():
-            print(f"{name}: -machine {machine} -m {mem} -serial {serial}")
+        for name, (machine, mem, serial, disk) in VARIANTS.items():
+            print(f"{name}: -machine {machine} -m {mem} -serial {serial} disk={disk}")
         return 0
     for name in options.variants:
         if name not in VARIANTS:

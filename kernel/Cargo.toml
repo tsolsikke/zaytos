@@ -621,6 +621,15 @@ pm-timer-treated-as-absent = []
 # 破壊（ADR-0068 の HW-c）: PM タイマの周波数の定数を 2 倍にする。較正が 2 倍に出て、タイマは半分の
 # 速さで走る。カーネル内の比は変わらないので、ホストの実時間と突き合わせる速さの判定だけが落ちる。
 pm-timer-double-frequency = []
+# 破壊（ADR-0068 の HW-d）: ブートローダが渡した RAM ディスクの像を見ない。virtio-blk を外した
+# 構成で、装置も像も無い形になり、読む源が 1 つも無いと言って止まる。
+fs-ram-image-ignored = []
+# 台本（ADR-0068 の HW-d）: RAM ディスクの上で zi で書いて保存し、cat で読み直す。書き戻しの入口を
+# 1 度通る。装置が無い構成で待たないことを見る。
+ram-disk-write-test = []
+# 破壊（ADR-0068 の HW-d）: 装置が無いのに書き戻しの完了を待つ（待ちを残した形）。締切でpanicして
+# 止まる。保存の操作が要るので台本を伴う。
+flush-waits-without-device = ["ram-disk-write-test"]
 # Y-d: 画面・入力・ソケット・共有メモリを 1 つの組で通す（ADR-0066 の設計 Q5）。init が /bin/compd を
 # 前景で起こし、compd が /bin/compc を起こしっぱなしで起こす。compc が shm のプールに描いて送り、
 # compd が合成して present する。判定は xtask の compose-test が screendump を読んで行う。
