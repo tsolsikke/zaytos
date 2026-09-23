@@ -134,6 +134,7 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 | `fs alloc`（割り当てたブロックを残す） | **不満がちょうど1本で、それがビットマップのものであること。** **中身に乗っている**（`Block bitmap differences`を探す） | **中身** |
 | `fs create` / `fs truncate` / `fs mkdir`の会計 | `dumpe2fs`の`Free blocks:`などの**欄の名前** | **中身** |
 | `build.rs`が生成する像の定数 | `debugfs`の`stat`の出力の**欄の名前**（`MOTD_INODE`ほか3つ） | **中身** |
+| `boot media`（`ADR-0068`のHW-e） | `sfdisk --json`の**キーの綴りと値の書き方**（`"start": 2048`のように、JSONを解析せず文字として探している） | **中身** |
 
 **「有無」の側も無傷ではない。** **`E2FSCK_NOISE`は「不満でない行」を列挙している**ので、**版が新しい雑音の行を出せば、それが不満として数えられる。** **逆に、いまの雑音の文言が変われば、本物の不満が雑音として落ちる。**
 
@@ -1368,6 +1369,25 @@ higher-halfの破壊feature（B-2a-5、破壊feature `highhalf-*`）について
 **既定の回は3回とも通った**（実測。プロンプトまで9.0〜9.2秒）。**破壊の回は4.8秒で止まった。**
 
 **ESPには常に像を置く**（`stage_esp`）。**virtio-blkが在る回は使われない**——**VirtualBoxと実機には装置が無く、起動媒体の像（HW-e）にも同じファイルが入るからである。** **既定の起動ログに増えたのは、ブートローダの「渡した」の1行だけである。**
+
+### `ADR-0068`のHW-eで、起動媒体の像だけで起動するようになった（2026-09-23）
+
+**機械の変種を1つ足した**——**`media-only`（`-machine pc`、virtio-blkも`fat:rw:`も無し）。** **ファームウェアに見えるのは、GPTとFAT32を自分で書いた1つの像だけである**（`xtask/src/media.rs`）。**`fat:rw:`はQEMUだけの道なので、VirtualBoxと実機はこちらの形でしか起動しない。**
+
+**起こし方の表に「ESPをどう渡すか」の欄が増えた**（`dir` / `media`）。**`media`では`fat:rw:`のdriveを媒体の像と入れ替える**——**位置は変えない**（OVMFの起動の順に効く）。
+
+**基底に2項目を足した。** **像の起動は`--full`にしか無いので、書く側が壊れたことに2時間気づけない形だった。**
+
+| 項目 | 見るもの | 深さ |
+|---|---|---|
+| `boot media` | **像を建て、書いた像を別の道で読み返し、道と中身がバイト単位で一致すること。** **`sfdisk --json`が分割表を同じ値で報せること** | 退行の検出（**正しさの証明は`media-only`の起動である**） |
+| `VirtualBox tool` | **`tools/vbox-vm.py`が、接頭辞`zaytos-`の無い名前を`VBoxManage`を呼ばずに拒むこと**（15個の名前で、コマンドの入口まで通して確かめる。**呼び出し0回であることを判定にする**） | 有無（**VirtualBoxが入っていなくても走る**） |
+
+**`sfdisk`が`PARSED_EXTERNAL_TOOLS`の7つ目になった**（上記「外の道具の文言に乗っている判定」に行が在る）。
+
+| 破壊 | すること | 狙いどおりに止まったことの判定 |
+|---|---|---|
+| 像から`fs.img`を外す | `MediaContents::WithoutFsImage`で像を建てる（カーネルのfeatureではない） | **ブートローダの`fs-image: no \zaytos\fs.img on the ESP`と、カーネルの`virtio-blk: no device with an I/O BAR0 was found on bus 0, and the bootloader handed over no RAM image`の両方が出て、プロンプトが出ないこと**（実測4.4秒で止まった）。**理由の行まで見るのは、「装置も像も無い」で止まる形が、像から外れていなくても起きうるからである。** **止まる所はHW-dの破壊より前である**——**あちらは像を渡された上で見ないので、写す所まで進む** |
 
 **項目会計**: 検査を足したとき数が閉じていることを、この行だけで追う。**現在の項目数は`cargo xtask check`の出力（`all N check(s) passed`）を正とし、docsの他の場所には書かない。** 総数は検査を足すたびに増えるので、導出元から離れた場所に書けば必ずstaleになる（実際に`--full`=64がroadmapとdeferred-decisionsに残り、同じ型の誤りの3件目になった）。数え方は、base = `CHECKS`（build 4 / test 1 / clippy 4 / fmt 1）+ 静的検査、`--commit` = base + boot log diff（期待値はbase+1で導出し、定数を持たない）、`--full` = base + QEMU + highhalfである。
 

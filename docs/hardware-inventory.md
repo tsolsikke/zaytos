@@ -56,6 +56,20 @@
 
 **VirtualBoxで実地に確かめられるもの**——**メモリの大きさ、シリアルを外した構成、EFIの画面のモードとstride、ACPIの表（MADTとx2APICの設定、HPETの有無）、ディスクの制御器、USBの制御器。** **i8042とPITが無い形はVirtualBoxでは作れない**（どちらも常に在る。推測）——**そちらはQEMUの`i8042=off`と`pit=off`で見る。**
 
+### VirtualBoxのEFIは、CPUが2個と3個だと起動の途中で落ちる（`ADR-0068`のHW-eで実測）
+
+**`!!!! X64 Exception Type - 0D(#GP - General Protection) CPU Apic ID - 00000000 !!!!`が出て、そこで止まる**（`RIP 0x7E50EFD8`。ファームウェアが自分で`CpuDxe.pdb`を指した）。**ZaytOSの行は1行も出ない。**
+
+**こちらの像とは関係が無い**——**ディスクを1つも繋がずに同じ構成で起こしても、同じ所で同じ#GPが出た**（実測）。**ZaytOSが走る前の問題である**（「EFI単体の欠陥」とまでは断定しない）。**この機械のVirtualBoxはHyper-Vの上のNEMで走っている**（`HM: HMR3Init: Attempting fall back to NEM: VT-x is not available`。実測）。
+
+**CPUの数で比べると、1個と4個は起動し、2個と3個は同じ所で落ちる**（実測。ディスク無しで完全停止から2巡。2026-09-23）。**4個ならZaytOSがSMPで起動する**（AP 1が起き、残りは`MAX_CPUS=2`の方針で起こさない）。**VirtualBoxの障害報告#799は「2個で止まり3個以上で起きる」で、こちらと違う**——**同じ族かは未確定である。**
+
+### I/O APICのIDレジスタが、MADTの言う値と食い違う機械がある（`ADR-0068`のHW-eで実測）
+
+**VirtualBoxでは、I/O APICのIDレジスタが0を返すのに、MADTは1と言う**（`apic: the I/O APIC MMIO does not look decoded (version=0x00170020 plausible=true, ID register reports 0 while the MADT says 1, matching=false)`）。**QEMUでは一致する。**
+
+**カーネルは`[ERROR]`を1行出して進む。** **割り込みは実際に届いた**（打鍵がシェルに届いている）。**「プロンプトが出て`[ERROR]`が無い」を判定にしている検査は、この機械では通らない**（`--full`はQEMUで走るので、いまは影響しない）。**持ち越しの行を立てた。**
+
 ## (B) 装置が無い
 
 ### ディスク——virtio-blkが無いと起動が止まる（`ADR-0068`のHW-dで直した）
@@ -79,13 +93,15 @@
 - **フレームバッファがuncached（PCD）で、Write-Combining（PAT）は持ち越しの行に在る**（`docs/deferred-decisions.md`の「Write-Combining / PATの導入」。**契機は「実機で測れるようになった時点」**）。**Seinasは毎フレーム合成するので、ZaytOSへ載せる前に要る見込み**（運用者の見立て）。**4Kの画面では、1枚の転送が1280×800の8倍になる**（計算）。
 - **シリアルの38,400 baud**（上の表）。
 
-## 起動媒体
+## 起動媒体（`ADR-0068`のHW-eで作った）
 
-**いまの起動は、QEMUがESPのディレクトリをFATに見せる形である**（`fat:rw:`）。**VirtualBoxにも実機にも、この形は無い。**
+**QEMUの既定の起動は、ESPのディレクトリをFATに見せる形である**（`fat:rw:`）。**VirtualBoxにも実機にも、この形は無い。**
 
-- **VirtualBox**——**GPTの生の像（ESPはFAT32で、`\EFI\BOOT\BOOTX64.EFI`とカーネルと像を置く）を`qemu-img convert -O vdi`でVDIへ変える形が、道具の手持ちで作れる**（`qemu-img`と`sgdisk`は在る。実測）。**ISOも作れるが、ISOの道具（`xorriso`）は入っていない。**
+**`cargo xtask image`が、GPTとFAT32を入れた66MiBの像（`target/media/zaytos.img`）を建てる**（2026-09-23）。**FATは`xtask`の中で書いた**（`dosfstools`も`mtools`も無く、外の依存を増やさないため）。**分割表は`sfdisk --json`で突き合わせる**（util-linuxはどのLinuxにも在る）。**`media-only`の変種が、この像だけで起動することを`--full`で見る。**
+
+- **VirtualBox**——**GPTの生の像（ESPはFAT32で、`\EFI\BOOT\BOOTX64.EFI`とカーネルと像を置く）を`VBoxManage convertfromraw`でVDIへ変える**（HW-eで採った。**VirtualBox自身の道具である**）。**以前は`qemu-img convert -O vdi`の案だった**が、道具の手持ちで作れる（`qemu-img`と`sgdisk`は在る。実測）。**ISOも作れるが、ISOの道具（`xorriso`）は入っていない。**
 - **実機のUSBメモリ**——**同じGPTの生の像を、そのまま書き込める。** **1つの像で両方を賄える。**
-- **FATを作る道具（`dosfstools`・`mtools`）は入っていない**（実測）。**`xtask`の中で作るか、道具を入れるかは実機の段の設計で決める。**
+- **FATを作る道具（`dosfstools`・`mtools`）は入っていない**（実測）。**`xtask`の中で書くことにした**（HW-e。2026-09-23）。
 - **セキュアブートは切る前提である**（運用者の決定）。
 
 ## VirtualBoxでの走行を`xtask`に載せるか（費用の見積もり）
