@@ -43,6 +43,17 @@ stdout に出していたが、`exit 0` の stdout は読み手に届かない**
   横取りすることになるので採らない。**
 
 
+# 錠で断られたら「走らせなかった」と言う（2026-09-25。検査の体系の改善の ③）
+
+**全検査の間は、`--commit` が検査の錠で断られる**（`xtask/src/check_lock.rs`。終了の値 75）。
+**断られた回は緑に数えない**——**「走らせなかった」と言い、`exit 2` で終える。** **記録には
+`xtask` が「断られた」を残し、push の前の関門（`deny_push_when_red.py`）は、そのコミットの合格の記録が
+在るまで押させない**（コミットは既に積まれているので、ここでは止められない）。**基底は錠を取らない**
+——**全検査の間も走る。**
+
+**環境変数を前に置いたコミットも見る**（`X=1 git commit`。2026-09-25 に見つけた穴）。
+
+
 **全部拒むようになったときの抜け方は `docs/coding-standards.md` の
 「hookが全部拒むようになったときの抜け方」にある。** **ここに写さない。**
 """
@@ -53,7 +64,10 @@ import subprocess
 import sys
 import time
 
-COMMIT = re.compile(r"(?:^|[;&|]\s*|\n\s*)git\s+commit\b")
+# **環境変数の代入を前に置いた形も当てる**（`X=1 git commit`）——**以前は `git` の直前に区切りを
+# 求めていたので、代入を前に置くと発火しなかった**（2026-09-25 に見つけた）。
+ASSIGNMENTS = r"(?:\w+=(?:'[^']*'|\"[^\"]*\"|\S*)\s+)*"
+COMMIT = re.compile(r"(?:^|[;&|]\s*|\n\s*)" + ASSIGNMENTS + r"git\s+commit\b")
 TIMEOUT_SECONDS = 240
 """基底 check の上限（秒）。"""
 
@@ -62,7 +76,13 @@ COMMIT_CHECK_TIMEOUT_SECONDS = 900
 270 秒）。**冷えていればビルドの時間が乗るので、上限は下げていない。**"""
 
 IMAGE_PATH_PREFIXES = ("kernel/", "common/")
-"""この下に触ったコミットは `--commit` を回す。**像の番地が動く側である。**"""
+"""この下に触ったコミットは `--commit` を回す。**像の番地が動く側である。**
+
+**`xtask/src/full_check.rs` の `IMAGE_PATH_PREFIXES` と同じである**（あちらは記録と push の前の関門で
+要る検査を決める）。**基底の確かめが一致を見る。**"""
+
+REFUSED_EXIT_CODE = 75
+"""検査の錠が取れずに `xtask` が断ったときの終了の値（`xtask/src/check_lock.rs`）。"""
 
 
 def looks_like_a_commit(command: str) -> bool:
@@ -99,6 +119,24 @@ def paths_in_head(root: str) -> list[str] | None:
     if done.returncode != 0:
         return None
     return [line.strip() for line in done.stdout.splitlines() if line.strip()]
+
+
+def refused_notice(label: str, stderr: str) -> str:
+    """錠で断られたときに言うこと。**引数だけで決める**（`--self-test` が形を覆う）。"""
+    rerun = "cargo xtask check" + (" --commit" if label == "--commit" else "")
+    lines = [
+        f"post-commit check: 走らせなかった（{label}。検査の錠が取れなかった——全検査が走っている）。"
+        "緑に数えない。",
+        f"  記録には「断られた」が残る。push の前の関門は、このコミットの {label} の合格の記録が"
+        "在るまで押させない。",
+        f"  全検査が終わってから、このコミットが HEAD のうちに {rerun} を打ち直すこと"
+        "（HEAD が進んだら cargo xtask full <コミット> で確かめる）。",
+    ]
+    # **`cargo` の進みの行は落とす**（`Finished`・`Running`・`Compiling`。断りの行が埋もれる）。
+    noise = ("Finished ", "Running ", "Compiling ", "Blocking ")
+    kept = [line for line in stderr.splitlines() if line.strip() and not line.strip().startswith(noise)]
+    lines += ["  " + line for line in kept][:12]
+    return "\n".join(lines)
 
 
 UNREADABLE_NOTICE = (
@@ -194,6 +232,12 @@ def main() -> int:
         )
         return 2
     seconds = time.monotonic() - started
+    # **錠で断られた回は、緑にも赤にも数えない**——**走らせなかったと言う**（この doc の 2026-09-25）。
+    if done.returncode == REFUSED_EXIT_CODE:
+        print(refused_notice(label, done.stderr), file=sys.stderr)
+        if notice is not None:
+            print(notice, file=sys.stderr)
+        return 2
     if done.returncode == 0:
         summary = [l for l in done.stdout.splitlines() if "check(s) passed" in l]
         text = (
@@ -247,6 +291,10 @@ def self_test() -> int:
         ("git " + "log --oneline -3", False),
         ("echo '`git " + "commit` の話'", False),
         ("cargo xtask check", False),
+        # **代入を前に置いた形も当てる**（2026-09-25）。
+        ("X=1 git " + "commit -m x", True),
+        ("A='a b' B=2 git " + "commit -q -F -", True),
+        ("X=1 cargo xtask check", False),
     ]
     failures = 0
     for command, want in cases:
@@ -299,6 +347,22 @@ def self_test() -> int:
     ):
         print(f"self-test: announce_payload has the wrong shape: {announced!r}")
         failures += 1
+    # **錠で断られたときの知らせ**（2026-09-25）。**走らせなかったと言い、緑に数えず、打ち直す
+    # 検査と持ち主の行を出す。**
+    refused = refused_notice(
+        "--commit",
+        "    Finished `dev` profile\nxtask: the check lock is held\n  holder: pid 42 (exclusive)",
+    )
+    for needle in ("走らせなかった", "緑に数えない", "cargo xtask check --commit", "holder: pid 42"):
+        if needle not in refused:
+            print(f"self-test: refused_notice lacks {needle!r}: {refused!r}")
+            failures += 1
+    if "Finished" in refused:
+        print(f"self-test: refused_notice kept the cargo progress line: {refused!r}")
+        failures += 1
+    if "--commit" in refused_notice("基底", ""):
+        print("self-test: refused_notice for the base check names --commit")
+        failures += 1
     # **harness の上限が内部の上限より長いこと**（2026-09-21）。**短いと、`--commit` の
     # 途中で harness が切り、何も言わずに消える。**
     harness = registered_timeout("check_after_commit.py")
@@ -310,7 +374,7 @@ def self_test() -> int:
         failures += 1
     if failures:
         return 1
-    total = len(cases) + len(path_cases) + len(decide_cases) + 2
+    total = len(cases) + len(path_cases) + len(decide_cases) + 5
     print(f"self-test: {total} case(s) decided as expected")
     return 0
 

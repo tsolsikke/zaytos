@@ -37,6 +37,27 @@
 ——**走っているものを止めるか、終わってから押すこと。** **これは安全側である**
 （`CLAUDE.md` の絶対ルール 1 と同じ理由で、並走そのものを避ける）。
 
+**同じ木の `xtask` だけを数える**（2026-09-25。検査の体系の改善の ③）——**全検査は別の作業木
+（`target/full-check/wt`）で回り、`target/` は木ごとに別である。** **作業木の全検査の間も、本の木で
+基底を回して押せる。** **同じ木かは `/proc/<pid>/exe` が本の木の `target/debug/xtask` を指すかで見る。**
+**`cargo xtask full` の親は数えない**——**本の木の `xtask` として走るが、作業木の子を待つだけで、
+本の木では何も建てない。**
+
+# 要る検査を済ませていないコミットを止める（2026-09-25。運用者の足す1点）
+
+**コミットの後の hook は、全検査の間は `--commit` を錠で断られる**——**コミットは既に積まれている。**
+**そこで基底が緑のあと `cargo xtask full --gate` を回し、押すコミット（どのリモートにも無いもの）の
+それぞれに、要る検査（`kernel/` か `common/` に触れたものは `--commit`、他は基底）の合格の記録が
+在るかを見る。** **無ければ、足りない検査とコミットを出して拒む。** **読むのは
+`cargo xtask full --status` と同じ記録である**（本の木の `target/full-check/records.tsv`）。
+
+**旗で越えられる**——**`ZAYTOS_PUSH_UNCHECKED='<理由>' git push ...`**（理由は空にできない）。
+**越えたコミットは、理由と一緒に記録へ「override」として残る。** **使うのは、要る検査を後から
+回せないときだけである**（例: 全検査の間に積んだコミットで、HEAD が先へ進んだ）。
+
+**環境変数を前に置いた `push` も見る**（`X=1 git push`。**以前は `git` の直前に区切りを求めていたので、
+代入を前に置くとこの hook が発火しなかった**。2026-09-25 に見つけた）。
+
 
 **全部拒むようになったときの抜け方は `docs/coding-standards.md` の
 「hookが全部拒むようになったときの抜け方」にある。** **ここに写さない。**
@@ -59,12 +80,21 @@ from deny_dangerous_bash import executable_part  # noqa: E402
 from check_after_commit import announce, announce_payload, registered_timeout  # noqa: E402
 
 # **`(` も始まりに数える**（隣の hook が `( ... &)` で穴を踏んだのと同じ形）。
-START = r"(?:^|[;&|(]\s*|\n\s*)"
+# **環境変数の代入を前に置いた形も当てる**（`X=1 git push`。2026-09-25）——**引用は
+# [`executable_part`] が空白に落とすので、値は `\S*` で足りる。**
+START = r"(?:^|[;&|(]\s*|\n\s*)(?:\w+=\S*\s+)*"
 # `git -C dir push` のような大域の旗も通す。
 PUSH = re.compile(START + r"git\s+(?:-\S+\s+\S+\s+|-\S+\s+)*push\b")
 # **`commit-tree` のような下位の命令は当てない**（`\b` だと `-` の手前で切れて当たる）。
 COMMIT = re.compile(START + r"git\s+(?:-\S+\s+\S+\s+|-\S+\s+)*commit(?![-\w])")
 TIMEOUT_SECONDS = 240
+GATE_TIMEOUT_SECONDS = 50
+"""関門（`cargo xtask full --gate`）の上限（秒）。**基底の直後なので建てる時間は乗らない。**"""
+
+# **旗**（この doc の「要る検査を済ませていないコミットを止める」）。**実行の形に在ることを見てから、
+# 理由を元の文から読む**——**引用は実行の形では空白に落ちる。**
+OVERRIDE = re.compile(START + r"ZAYTOS_PUSH_UNCHECKED=\S*\s+git\s+(?:-\S+\s+\S+\s+|-\S+\s+)*push\b")
+OVERRIDE_REASON = re.compile(r"ZAYTOS_PUSH_UNCHECKED=(?:'([^']*)'|\"([^\"]*)\"|(\S+))")
 
 
 def invokes_git_push(command: str) -> bool:
@@ -81,20 +111,58 @@ def commits_and_pushes(command: str) -> bool:
     return bool(PUSH.search(body)) and bool(COMMIT.search(body))
 
 
-def running_builds() -> list:
-    """並走している QEMU / xtask を挙げる（`comm` で見る。args では見ない）。
+def override_reason(command: str) -> str | None:
+    """旗の理由（旗が無ければ `None`、在って空なら `""`）。**self-test が覆う。**"""
+    if not OVERRIDE.search(executable_part(command)):
+        return None
+    match = OVERRIDE_REASON.search(command)
+    if match is None:
+        return ""
+    return next((group for group in match.groups() if group is not None), "").strip()
+
+
+def same_tree_builds(processes: list, binary: str) -> list:
+    """同じ木の `xtask` を挙げる（`(pid, comm, 本体の道, 引数)` の並びから。**self-test が覆う。**）
+
+    **建て直されて消えた本体は ` (deleted)` を外して比べる。** **`cargo xtask full` の親（最初の
+    引数が `full`）は数えない**——**作業木の子を待つだけで、本の木では何も建てない。**
+    """
+    found = []
+    for pid, comm, exe, args in processes:
+        if comm != "xtask" or exe is None or exe.removesuffix(" (deleted)") != binary:
+            continue
+        if len(args) > 1 and args[1] == "full":
+            continue
+        found.append(f"{comm} (pid {pid})")
+    return found
+
+
+def running_builds(root: str) -> list:
+    """並走している同じ木の `xtask` を挙げる（`/proc` の `comm` と `exe` で見る。args では見ない）。
 
     **args で見ると、`git push` を含むこのシェル自身に当たる。**
     """
-    out = subprocess.run(
-        ["ps", "-eo", "pid,comm"], capture_output=True, text=True, timeout=10
-    ).stdout
-    found = []
-    for line in out.splitlines()[1:]:
-        parts = line.split(None, 1)
-        if len(parts) == 2 and re.search(r"qemu|xtask", parts[1]):
-            found.append(f"{parts[1].strip()} (pid {parts[0]})")
-    return found
+    processes = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/comm", encoding="utf-8") as handle:
+                comm = handle.read().strip()
+        except OSError:
+            continue
+        try:
+            exe = os.readlink(f"/proc/{entry}/exe")
+        except OSError:
+            exe = None
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as handle:
+                args = [part.decode("utf-8", "replace") for part in handle.read().split(b"\0") if part]
+        except OSError:
+            args = []
+        processes.append((int(entry), comm, exe, args))
+    binary = os.path.realpath(os.path.join(root, "target", "debug", "xtask"))
+    return same_tree_builds(processes, binary)
 
 
 def deny(reason: str) -> int:
@@ -129,21 +197,28 @@ def main() -> int:
             "コマンドに分け、コミット直後の基底 check の出力を読んでから押すこと"
         )
 
-    # **並走を確かめられなければ押さない。** **`ps` が落ちたときに「何も
+    # **旗は理由を要る**（空の理由では越えさせない）。
+    reason = override_reason(command)
+    if reason == "":
+        return deny(
+            "ZAYTOS_PUSH_UNCHECKED の理由が空である。要る検査を後から回せない理由を書くこと"
+            "（記録に残る）"
+        )
+
+    root = os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or "."
+    # **並走を確かめられなければ押さない。** **`/proc` が読めないときに「何も
     # 走っていない」と答えると、確かめていないものを確かめたことにする。**
     try:
-        others = running_builds()
+        others = running_builds(root)
     except Exception as error:
         return deny(f"並走を確かめられなかった（{error}）。確かめられないので押さない")
     if others:
         return deny(
-            "push の前の基底 check が走らせられない（並走: "
+            "push の前の基底 check が走らせられない（同じ木で並走: "
             + ", ".join(others)
             + "）。target/ のロックで待たされるので検査しない。"
             "止めるか終わるまで待つこと（.claude/skills/stop-a-process/SKILL.md）"
         )
-
-    root = os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or "."
     started = time.monotonic()
     try:
         done = subprocess.run(
@@ -156,6 +231,25 @@ def main() -> int:
     except Exception as error:
         return deny(f"push の前の基底 check を走らせられなかった（{error}）")
     if done.returncode == 0:
+        # **基底が緑なら、要る検査の記録を見る**（この doc の「要る検査を済ませていないコミットを
+        # 止める」）。
+        gate = ["cargo", "xtask", "full", "--gate"] + (["--override", reason] if reason else [])
+        try:
+            checked = subprocess.run(
+                gate, cwd=root, capture_output=True, text=True, timeout=GATE_TIMEOUT_SECONDS
+            )
+        except Exception as error:
+            return deny(f"push の前の関門を走らせられなかった（{error}）")
+        lines = [line for line in checked.stdout.splitlines() if line.strip()]
+        if checked.returncode != 0:
+            reasons = [line for line in checked.stderr.splitlines() if line.startswith("Error:")]
+            return deny(
+                "push の前の関門: 要る検査の合格の記録が無いコミットがある（コミットは既に"
+                "積まれている）。そのコミットが HEAD のうちに要る検査を回すか、cargo xtask full "
+                "<コミット> で確かめること。後から回せないときだけ、運用者に確かめて "
+                "ZAYTOS_PUSH_UNCHECKED='<理由>' git push で越える（記録に残る）:\n  "
+                + "\n  ".join((lines + reasons)[:20])
+            )
         # **緑も言う**（2026-09-21。運用者の足す1点）。**黙って通すと、hook が読み込まれて
         # いなくても押せてしまい、「検査して通した」と区別が付かない**
         # （`check_after_commit.py` の「緑のときも言う」と同じ族）。
@@ -164,7 +258,8 @@ def main() -> int:
             "PreToolUse",
             "push 前の基底 check: "
             + (summary[-1] if summary else "OK")
-            + f"（{time.monotonic() - started:.0f} 秒）",
+            + f"（{time.monotonic() - started:.0f} 秒）。"
+            + (lines[-1] if lines else "関門: 出力なし"),
         )
 
     detail = [line for line in done.stdout.splitlines() if "FAILED" in line]
@@ -201,6 +296,11 @@ def self_test() -> int:
         (f"grep -n 'git {push}' docs/troubleshooting.md", False),
         (f"cat <<'EOF'\ngit {push} origin main\nEOF", False),
         ("cargo xtask check", False),
+        # **代入を前に置いた形も当てる**（2026-09-25。**以前は発火しなかった**）。
+        (f"X=1 git {push}", True),
+        (f"ZAYTOS_PUSH_UNCHECKED='the reason' git {push} origin main", True),
+        (f"cd /x && A=1 B=2 git {push}", True),
+        (f"echo 'X=1 git {push}'", False),
     ]
     commit = "commit"
     # **同じコマンドにコミットと push が在るか**（2026-09-18）。**文書の言及は通す**
@@ -218,7 +318,40 @@ def self_test() -> int:
         (f"git log --grep 'git {commit}' && git {push}", False),
         (f"cat <<'EOF'\ngit {commit} -m x\nEOF\ngit {push}", False),
     ]
+    # **旗の理由**（2026-09-25）。**実行の形に在るときだけ読み、引用の中の言及は旗にしない。**
+    flag = "ZAYTOS_PUSH_UNCHECKED"
+    overrides = [
+        (f"{flag}='refused during a full' git {push} origin main", "refused during a full"),
+        (f'{flag}="two words" git {push}', "two words"),
+        (f"{flag}=plain git {push}", "plain"),
+        (f"{flag}='' git {push}", ""),
+        (f"{flag}='  ' git {push}", ""),
+        (f"git {push}", None),
+        (f"echo '{flag}=x git {push}'", None),
+        (f"{flag}=x cargo xtask check", None),
+    ]
+    # **同じ木の `xtask` だけを数える**（2026-09-25）。**消えた本体も同じ木に数え、別の木と QEMU は
+    # 数えない。**
+    binary = "/r/target/debug/xtask"
+    xtask = "target/debug/xtask"
+    processes = [
+        (1, "xtask", "/r/target/debug/xtask", [xtask, "check"]),
+        (2, "xtask", "/r/target/debug/xtask (deleted)", [xtask, "check", "--full"]),
+        (3, "xtask", "/r/target/full-check/wt/target/debug/xtask", [xtask, "check", "--full"]),
+        (4, "qemu-system-x86", "/usr/bin/qemu-system-x86_64", ["qemu-system-x86_64"]),
+        (5, "xtask", None, []),
+        (6, "xtask", "/r/target/debug/xtask", [xtask, "full", "HEAD"]),
+    ]
     failures = 0
+    for command, want in overrides:
+        got = override_reason(command)
+        if got != want:
+            print(f"self-test (override): {command!r} wanted {want!r} but got {got!r}")
+            failures += 1
+    same = same_tree_builds(processes, binary)
+    if same != ["xtask (pid 1)", "xtask (pid 2)"]:
+        print(f"self-test (same tree): got {same!r}")
+        failures += 1
     for command, want in cases:
         got = invokes_git_push(command)
         if got != want:
@@ -237,16 +370,19 @@ def self_test() -> int:
     ):
         print(f"self-test: announce_payload has the wrong shape: {announced!r}")
         failures += 1
+    # **harness の上限は、基底と関門の上限の和より長いこと**（2026-09-25。関門を足した）。
     harness = registered_timeout("deny_push_when_red.py")
-    if harness is None or harness <= TIMEOUT_SECONDS:
+    inner = TIMEOUT_SECONDS + GATE_TIMEOUT_SECONDS
+    if harness is None or harness <= inner:
         print(
             f"self-test: settings.json gives this hook {harness} s, which must be longer than "
-            f"its own check limit of {TIMEOUT_SECONDS} s"
+            f"its own limits of {TIMEOUT_SECONDS} + {GATE_TIMEOUT_SECONDS} s"
         )
         failures += 1
     if failures:
         return 1
-    print(f"self-test: {len(cases) + len(combined) + 2} case(s) decided as expected")
+    total = len(cases) + len(combined) + len(overrides) + 1 + 2
+    print(f"self-test: {total} case(s) decided as expected")
     return 0
 
 

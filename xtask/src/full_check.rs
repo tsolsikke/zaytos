@@ -708,14 +708,117 @@ fn append_cut(main: &Path, commit: &str, tree: &str, note: &str) {
     }
 }
 
-/// `cargo xtask full [<コミット>] | --status`。
+/// push の前の関門の結果。
+#[derive(Debug, PartialEq, Eq)]
+pub struct Gate {
+    /// 押すコミットの数。
+    pub pending: usize,
+    /// 要る検査の記録が無いコミット（旗で越えたものを含む）。
+    pub missing: Vec<String>,
+    /// 旗で越えたか。
+    pub overridden: bool,
+}
+
+/// push の前の関門（運用者の足す1点。2026-09-25）。**押すコミット（どのリモートにも無いもの）の
+/// それぞれに、要る検査の合格の記録が在るかを見る。** **旗の理由が在れば、無いコミットを「旗で
+/// 越えた」と記録して通す。**
+///
+/// **読むのは `--status` と同じ記録である**（二重に持たない）。
+pub fn gate(root: &Path, override_reason: Option<&str>) -> Result<Gate> {
+    let main = check_lock::main_tree(root)?;
+    let records = read_records(&main)?;
+    let pending = git_line(
+        &main,
+        &["rev-list", "--reverse", "HEAD", "--not", "--remotes"],
+    )?;
+    let pending: Vec<&str> = pending.lines().filter(|line| !line.is_empty()).collect();
+    let mut missing = Vec::new();
+    for commit in &pending {
+        let (line, covered) = commit_line(&main, &records, commit)?;
+        if !covered {
+            println!("{line}");
+            missing.push(commit.to_string());
+        }
+    }
+    let overridden = !missing.is_empty() && override_reason.is_some();
+    if let (true, Some(reason)) = (overridden, override_reason) {
+        let (unix, when) = check_lock::now();
+        for commit in &missing {
+            let tree = git_line(&main, &["rev-parse", &format!("{commit}^{{tree}}")])?;
+            append(
+                &main,
+                &Record {
+                    unix,
+                    when: when.clone(),
+                    level: "push".to_string(),
+                    outcome: "override".to_string(),
+                    commit: commit.clone(),
+                    tree,
+                    dirty: 0,
+                    items: None,
+                    item_seconds: None,
+                    build_seconds: None,
+                    note: reason.to_string(),
+                },
+            )?;
+        }
+    }
+    Ok(Gate {
+        pending: pending.len(),
+        missing,
+        overridden,
+    })
+}
+
+/// `cargo xtask full [<コミット>] | --status | --gate [--override <理由>]`。
 pub fn command(args: &[String]) -> Result<()> {
     if args.iter().any(|arg| arg == "--status") {
         return status(&crate::workspace_root()?);
     }
+    if args.iter().any(|arg| arg == "--gate") {
+        let reason = match args.iter().position(|arg| arg == "--override") {
+            Some(index) => {
+                let reason = args
+                    .get(index + 1)
+                    .map(|reason| reason.trim())
+                    .filter(|reason| !reason.is_empty())
+                    .context("--override needs a reason")?;
+                Some(reason)
+            }
+            None => None,
+        };
+        let gate = gate(&crate::workspace_root()?, reason)?;
+        if gate.missing.is_empty() {
+            println!(
+                "push gate: {} commit(s) to push, each with the check it needs recorded as passed",
+                gate.pending
+            );
+            return Ok(());
+        }
+        if gate.overridden {
+            println!(
+                "push gate: passed by the flag for {} of {} commit(s) without the check they need; \
+                 recorded as override in {}",
+                gate.missing.len(),
+                gate.pending,
+                records_path(&crate::workspace_root()?)?.display()
+            );
+            return Ok(());
+        }
+        bail!(
+            "push gate: {} of {} commit(s) to push have no passing record of the check they need \
+             (listed above). Run that check while the commit is HEAD (cargo xtask check or \
+             cargo xtask check --commit), or check it in the worktree with cargo xtask full <commit>",
+            gate.missing.len(),
+            gate.pending
+        );
+    }
     let targets: Vec<&String> = args.iter().filter(|arg| !arg.starts_with("--")).collect();
     if targets.len() > 1 || args.iter().any(|arg| arg.starts_with("--")) {
-        bail!("usage: cargo xtask full [<commit>] | cargo xtask full --status");
+        bail!(
+            "usage: cargo xtask full [<commit>] | cargo xtask full --status | \
+             cargo xtask full --gate [--override <reason>]"
+        );
     }
     run(targets.first().map_or("HEAD", |target| target.as_str()))
 }
@@ -796,6 +899,95 @@ mod tests {
         assert!(covering(&records, "c4b", "t4", Level::Base).is_none());
         assert!(covering(&records, "c5", "t5", Level::Commit).is_some());
         assert!(covering(&records, "c6", "t6", Level::Base).is_none());
+    }
+
+    /// **push の前の関門**（運用者の足す1点。2026-09-25）。**記録が在るコミットは通り、無いコミットは
+    /// 断られ、旗で越えると記録が残る。** **作った git の木とリモートで確かめる。**
+    #[test]
+    fn the_push_gate_passes_recorded_commits_refuses_the_rest_and_records_the_flag() {
+        let scratch = std::env::temp_dir().join(format!("zaytos-gate-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&scratch);
+        let repo = scratch.join("repo");
+        let remote = scratch.join("remote.git");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&remote).unwrap();
+        let run = |dir: &Path, args: &[&str]| git_line(dir, args).unwrap();
+        run(
+            &remote,
+            &["-c", "init.defaultBranch=main", "init", "-q", "--bare"],
+        );
+        run(&repo, &["-c", "init.defaultBranch=main", "init", "-q"]);
+        let commit = |dir: &Path, path: &str| {
+            let file = dir.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, path).unwrap();
+            run(dir, &["add", path]);
+            run(
+                dir,
+                &[
+                    "-c",
+                    "user.name=check",
+                    "-c",
+                    "user.email=check@localhost",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-q",
+                    "-m",
+                    path,
+                ],
+            );
+            run(dir, &["rev-parse", "HEAD"])
+        };
+        commit(&repo, "README");
+        let remote_arg = remote.to_string_lossy().into_owned();
+        run(&repo, &["remote", "add", "origin", &remote_arg]);
+        run(&repo, &["push", "-q", "origin", "main"]);
+        let kernel = commit(&repo, "kernel/src/a.rs");
+        let docs = commit(&repo, "docs/a.md");
+        let pass = |commit: &str, level: Level| Record {
+            level: level.label().to_string(),
+            ..record("-", "pass", commit, "-", 1)
+        };
+
+        // **--commit の要るコミットに基底の記録しか無ければ断る。**
+        append(&repo, &pass(&kernel, Level::Base)).unwrap();
+        append(&repo, &pass(&docs, Level::Base)).unwrap();
+        let refused = gate(&repo, None).unwrap();
+        assert_eq!(
+            (refused.pending, refused.missing.clone(), refused.overridden),
+            (2, vec![kernel.clone()], false)
+        );
+
+        // **要る段の合格が在れば通る。**
+        append(&repo, &pass(&kernel, Level::Commit)).unwrap();
+        assert!(gate(&repo, None).unwrap().missing.is_empty());
+
+        // **旗で越えると、越えたことが記録に残る。**
+        let more = commit(&repo, "common/src/b.rs");
+        let flagged = gate(&repo, Some("the check was refused during a full check")).unwrap();
+        assert_eq!(
+            (flagged.missing.clone(), flagged.overridden),
+            (vec![more.clone()], true)
+        );
+        let records = read_records(&repo).unwrap();
+        let last = records.last().unwrap();
+        assert_eq!(
+            (
+                last.level.as_str(),
+                last.outcome.as_str(),
+                last.commit.as_str(),
+                last.note.as_str()
+            ),
+            (
+                "push",
+                "override",
+                more.as_str(),
+                "the check was refused during a full check"
+            )
+        );
+        assert!(gate(&repo, None).unwrap().missing.is_empty());
+        let _ = fs::remove_dir_all(&scratch);
     }
 
     /// **記録の読み方は汚れを言う。**
