@@ -1546,23 +1546,9 @@ fn drain_keyboard(
 
         if !*announced_first {
             *announced_first = true;
-            // IRQ1 の配送経路の証明。タイマで 0x20 を確認したのと同じ趣旨。
-            match crate::keyboard::first_keyboard_vector() {
-                Some(vector) if vector as usize == crate::keyboard::delivery_vector() => {
-                    logger.info(format_args!(
-                        "keyboard: first key arrived as vector {vector:#04x} - IRQ1 is wired \
-                         through our stub correctly"
-                    ));
-                }
-                other => {
-                    logger.error(format_args!(
-                        "keyboard: the first key arrived as vector {other:?}, expected {:#04x}; \
-                         halting",
-                        crate::keyboard::delivery_vector()
-                    ));
-                    cpu::halt_forever();
-                }
-            }
+            // IRQ1 の配送経路の証明。タイマで 0x20 を確認したのと同じ趣旨。**プログラムを起こす入口と
+            // 同じ関数で 1 度だけ出す**（HW-e-2。`crate::keyboard::report_first_delivery_once`）。
+            crate::keyboard::report_first_delivery_once(logger);
         }
 
         // 生のスキャンコード。押下と離脱で 2 回出るので、エコーと二重に

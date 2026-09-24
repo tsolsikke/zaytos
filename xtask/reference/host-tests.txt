@@ -287,6 +287,11 @@ kernel::address_space::tests::indices_past_the_table_are_not_shared
 kernel::address_space::tests::the_lower_half_is_not_shared
 kernel::address_space::tests::the_split_is_exactly_half_of_the_table
 kernel::address_space::tests::the_upper_half_is_shared
+kernel::apic::tests::a_zero_id_register_with_a_plausible_version_still_decodes
+kernel::apic::tests::all_zeros_and_all_ones_are_undecoded
+kernel::apic::tests::coverage_counts_from_the_gsi_base
+kernel::apic::tests::qemu_matches_its_madt
+kernel::apic::tests::the_id_comes_from_bits_27_to_24
 kernel::console::dirty::tests::a_fully_offscreen_update_is_ignored
 kernel::console::dirty::tests::a_new_region_has_nothing_to_transfer
 kernel::console::dirty::tests::a_single_update_is_recorded_as_is

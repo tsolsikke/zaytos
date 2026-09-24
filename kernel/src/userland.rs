@@ -2153,6 +2153,9 @@ pub fn spawn(
     let mut port = SerialPort::new(SerialPort::COM1_BASE);
     port.init();
     let mut logger = Logger::new(port, LogLevel::Trace);
+    // **シェルの後の最初の打鍵の配送を、ここで 1 度だけ報せる**（HW-e-2。`ADR-0068`）——**シェルが Enter の
+    // エコーを終えた後なので、行の途中に入らない。** **パスを引く前なので、無い名前を打った回でも出る。**
+    crate::keyboard::report_first_delivery_once(&mut logger);
 
     let fs = crate::vfs::root_filesystem().map_err(SpawnError::Lookup)?;
     let inode = fs.lookup(path).map_err(SpawnError::Lookup)?;

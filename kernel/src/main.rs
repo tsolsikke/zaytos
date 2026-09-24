@@ -10778,6 +10778,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "装置が無いのに書き戻しの完了を待つ（ADR-0068 の HW-d）",
     ),
     (
+        "ioapic-id-mismatch-test",
+        cfg!(feature = "ioapic-id-mismatch-test"),
+        "MADT の I/O APIC の ID を 1 つずらして比べる（検査の構成。破壊ではない。ADR-0068 の HW-e-2）",
+    ),
+    (
+        "ioapic-reads-the-wrong-register",
+        cfg!(feature = "ioapic-reads-the-wrong-register"),
+        "I/O APIC の版を ID の添字で読む（ADR-0068 の HW-e-2）",
+    ),
+    (
         "poll-never-waits",
         cfg!(feature = "poll-never-waits"),
         "poll が待たずに 0 を返す（ADR-0066 の Y-b）",

@@ -850,24 +850,96 @@ pub fn survey_registers(logger: &mut Logger<SerialPort>, mapped: &MappedApic) {
     ));
 
     // --- I/O APIC ---
+    //
+    // **IRQ1 の GSI を、デコードされた I/O APIC の項目が覆うこと**（HW-e-2。`ADR-0068`）——
+    // **覆わなければ、キーボードの転送を書いても届かない。** **止めて名前を出す。**
+    // **I/O APIC が 1 台も無い機械は、ここでは止めない**（前からの振る舞い。IRQ を移す側が扱う）。
+    let irq1_gsi = mapped.mmio.gsi_for_irq(crate::keyboard::KEYBOARD_IRQ);
+    let mut irq1_covered = false;
     for slot in mapped.io_apics.iter().take(mapped.io_apic_count) {
         let Some(io_apic) = slot else { continue };
-        survey_io_apic(
+        let entries = survey_io_apic(
             logger,
             direct_map.phys_to_virt(io_apic.phys).as_u64(),
             io_apic,
         );
+        if covers_gsi(io_apic.global_system_interrupt_base, entries, irq1_gsi) {
+            irq1_covered = true;
+        }
+    }
+    if mapped.io_apic_count > 0 && !irq1_covered {
+        logger.error(format_args!(
+            "apic: no decoded I/O APIC covers GSI {irq1_gsi} (IRQ1's); the keyboard could not \
+             be routed; halting"
+        ));
+        cpu::halt_forever();
     }
 }
 
-/// I/O APIC 1 台のレジスタを読む。
-fn survey_io_apic(logger: &mut Logger<SerialPort>, base_virt: u64, io_apic: &IoApicLocation) {
+/// I/O APIC 1 台の読みの判定（純粋ロジック。HW-e-2。`ADR-0068`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IoApicVerdict {
+    /// 版のレジスタが未デコードの見え方（全 0・全 1）でない。
+    decoded: bool,
+    /// 転送の項目の数（版のレジスタの最大の添字 + 1）。
+    entry_count: u32,
+    /// ID レジスタが名乗る ID。
+    reported_id: u8,
+    /// それが MADT の ID と一致する。
+    id_matches: bool,
+}
+
+/// I/O APIC の ID と版のレジスタから判定する（純粋ロジック。HW-e-2）。
+///
+/// # ID の一致は「写っている」の証拠にしない
+///
+/// **VirtualBox は ID レジスタを 0 のまま置き、MADT は CPU の数を ID にする**（実測。CPU 1 個で 1、
+/// 4 個で 4）。**それでも IRQ1 はこの I/O APIC を通ってベクタ 0x42 で届く**（VirtualBox のデバッガの
+/// ベクタごとの計数。`docs/hardware-inventory.md`）。**写像の証拠は版のレジスタと、IRQ1 の GSI を
+/// 覆うこと**（[`covers_gsi`]）、**配送の証拠は最初の打鍵のベクタ**（`crate::keyboard`）である。
+fn io_apic_verdict(version_raw: u32, id_raw: u32, madt_id: u8) -> IoApicVerdict {
+    let decoded = version_raw != 0 && version_raw != u32::MAX;
+    let max_redirection_entry = (version_raw >> IOAPIC_MAX_REDIRECTION_SHIFT) & 0xFF;
+    let reported_id = ((id_raw >> IOAPIC_ID_SHIFT) & IOAPIC_ID_MASK) as u8;
+    IoApicVerdict {
+        decoded,
+        entry_count: max_redirection_entry.saturating_add(1),
+        reported_id,
+        id_matches: reported_id == madt_id,
+    }
+}
+
+/// `gsi_base` から `entries` 本の項目が `gsi` を覆うか（純粋ロジック。HW-e-2）。**デコードされて
+/// いない I/O APIC（`None`）は何も覆わない。**
+fn covers_gsi(gsi_base: u32, entries: Option<u32>, gsi: u32) -> bool {
+    match entries {
+        Some(count) => gsi >= gsi_base && gsi - gsi_base < count,
+        None => false,
+    }
+}
+
+/// I/O APIC 1 台のレジスタを読む。**デコードされていれば項目の数を返す。**
+///
+/// **デコードされていなければ止める**（HW-e-2）——**転送の項目を書いても届かないので、先へ進むと
+/// 割り込みが来ない所で黙る。**
+fn survey_io_apic(
+    logger: &mut Logger<SerialPort>,
+    base_virt: u64,
+    io_apic: &IoApicLocation,
+) -> Option<u32> {
+    // 破壊 (HW-e-2, ioapic-reads-the-wrong-register): 版を ID の添字で読む。**QEMU の I/O APIC の ID
+    // レジスタは 0 なので、版が 0（未デコードの見え方）に見え、写像の判定で止まる。**
+    let version_index = if cfg!(feature = "ioapic-reads-the-wrong-register") {
+        IOAPIC_INDEX_ID
+    } else {
+        IOAPIC_INDEX_VERSION
+    };
     // SAFETY: `map_and_probe` が写像を確認したページの中だけを触る。
     // IOREGSEL への書き込みと IOWIN からの読み出しは、この 1 ページに閉じる。
     let (id_raw, version_raw) = unsafe {
         (
             read_io_apic(base_virt, IOAPIC_INDEX_ID),
-            read_io_apic(base_virt, IOAPIC_INDEX_VERSION),
+            read_io_apic(base_virt, version_index),
         )
     };
 
@@ -886,32 +958,46 @@ fn survey_io_apic(logger: &mut Logger<SerialPort>, base_virt: u64, io_apic: &IoA
         io_apic.global_system_interrupt_base
     ));
 
-    // 判定を 1 行にまとめる。S1-c では「IO-APIC の MMIO が実際にデコードされるか」
-    // を未確認のまま残していた（読むには IOREGSEL への書き込みが要り、S1-c は書き込みを
-    // 行わない段だったため）。ここがその積み残しを閉じる行である。
+    // 判定を 3 つに分ける（HW-e-2。`ADR-0068`）。S1-c では「IO-APIC の MMIO が実際にデコード
+    // されるか」を未確認のまま残し、S2-a で「版がもっともらしい」かつ「ID レジスタ＝MADT の ID」で
+    // 閉じた。**後者は写像の証拠にならなかった**——**VirtualBox は ID レジスタを 0 のまま置く**
+    // （[`io_apic_verdict`] の doc）。
     //
-    // 根拠を 2 つ独立に取る。
-    //   version レジスタが未デコードの見え方（全 0 / 全 1）でないこと
-    //   ID レジスタの名乗る ID が、MADT が名乗った ID と一致すること
-    // 後者は出所が別（MMIO とファームウェアの表）なので、偶然の一致になりにくい。
-    // 片方だけでは弱い。全 0 のページでも ID は 0 に見えるので、MADT の ID が 0 の
-    // 環境では ID の一致だけでは未デコードと区別できない。
-    let version_plausible = version_raw != 0 && version_raw != u32::MAX;
-    let reported_id = ((id_raw >> IOAPIC_ID_SHIFT) & IOAPIC_ID_MASK) as u8;
-    let id_matches = reported_id == io_apic.id;
-
-    if version_plausible && id_matches {
+    // - 写像——版のレジスタが未デコードの見え方でない（ここ）と、IRQ1 の GSI を覆う（呼び出し側）。
+    // - 配送——最初の打鍵が I/O APIC のベクタで届いた（`crate::keyboard`）。
+    // - ID——不一致は [WARN]。**ID レジスタは書かない**（警告を消すために書き換えない）。
+    //
+    // 構成 (HW-e-2, ioapic-id-mismatch-test): MADT の ID を 1 つずらして比べる（VirtualBox の形を
+    // QEMU で作る）。**[WARN] が出て、止まらず、打鍵が届くことを見る。**
+    let madt_id = if cfg!(feature = "ioapic-id-mismatch-test") {
+        io_apic.id.wrapping_add(1)
+    } else {
+        io_apic.id
+    };
+    let verdict = io_apic_verdict(version_raw, id_raw, madt_id);
+    if !verdict.decoded {
+        logger.error(format_args!(
+            "apic: the I/O APIC MMIO does not look decoded (version={version_raw:#010x}, which \
+             is what a read reports when nothing answers there); halting"
+        ));
+        cpu::halt_forever();
+    }
+    logger.info(format_args!(
+        "apic: I/O APIC MMIO decodes: the version register is not an undecoded read; \
+         {entry_count} redirection entr(y/ies) from GSI {}",
+        io_apic.global_system_interrupt_base
+    ));
+    if verdict.id_matches {
         logger.info(format_args!(
-            "apic: I/O APIC MMIO decodes: the version register is not an undecoded read and \
-             the ID register reports {reported_id}, matching the MADT; \
-             {entry_count} redirection entr(y/ies)"
+            "apic: the I/O APIC ID register reports {}, matching the MADT",
+            verdict.reported_id
         ));
     } else {
-        logger.error(format_args!(
-            "apic: the I/O APIC MMIO does not look decoded (version={version_raw:#010x} \
-             plausible={version_plausible}, ID register reports {reported_id} while the MADT \
-             says {}, matching={id_matches}); the redirection entries below are not trustworthy",
-            io_apic.id
+        logger.warn(format_args!(
+            "apic: the I/O APIC ID register reports {} while the MADT says {madt_id}; that alone \
+             does not show the MMIO is undecoded (VirtualBox leaves the register at 0), so the \
+             mapping and the delivery are checked on their own",
+            verdict.reported_id
         ));
     }
 
@@ -941,6 +1027,7 @@ fn survey_io_apic(logger: &mut Logger<SerialPort>, base_virt: u64, io_apic: &IoA
             redirection_destination(high)
         ));
     }
+    Some(entry_count)
 }
 
 // ===========================================================================
@@ -2000,4 +2087,52 @@ pub fn calibrate_timer(
 unsafe fn write_lapic(base_virt: u64, offset: u64, value: u32) {
     // SAFETY: 呼び出し元契約。MMIO なので `write_volatile` で書く。
     unsafe { ((base_virt + offset) as *mut u32).write_volatile(value) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **VirtualBox の読み**（実測。版 0x00170020・ID レジスタ 0・MADT の ID 1）——**写っていて、
+    /// ID だけが食い違う。**
+    #[test]
+    fn a_zero_id_register_with_a_plausible_version_still_decodes() {
+        let verdict = io_apic_verdict(0x0017_0020, 0, 1);
+        assert!(verdict.decoded);
+        assert_eq!(verdict.entry_count, 24);
+        assert_eq!(verdict.reported_id, 0);
+        assert!(!verdict.id_matches);
+    }
+
+    /// **QEMU の読み**（実測。ID は 0 同士で一致）。
+    #[test]
+    fn qemu_matches_its_madt() {
+        let verdict = io_apic_verdict(0x0017_0020, 0, 0);
+        assert!(verdict.decoded && verdict.id_matches);
+    }
+
+    /// **未デコードの見え方**（全 0・全 1）は写っていない。
+    #[test]
+    fn all_zeros_and_all_ones_are_undecoded() {
+        assert!(!io_apic_verdict(0, 0, 0).decoded);
+        assert!(!io_apic_verdict(u32::MAX, u32::MAX, 0).decoded);
+    }
+
+    /// ID は bits 27:24 である（上の桁を拾わない）。
+    #[test]
+    fn the_id_comes_from_bits_27_to_24() {
+        assert_eq!(io_apic_verdict(0x0017_0020, 0x0400_0000, 4).reported_id, 4);
+        assert!(io_apic_verdict(0x0017_0020, 0xF400_0000, 4).id_matches);
+    }
+
+    /// **項目は `gsi_base` から数える。** **デコードされていなければ何も覆わない。**
+    #[test]
+    fn coverage_counts_from_the_gsi_base() {
+        assert!(covers_gsi(0, Some(24), 1));
+        assert!(covers_gsi(0, Some(24), 23));
+        assert!(!covers_gsi(0, Some(24), 24));
+        assert!(covers_gsi(24, Some(8), 24));
+        assert!(!covers_gsi(24, Some(8), 23));
+        assert!(!covers_gsi(0, None, 1));
+    }
 }

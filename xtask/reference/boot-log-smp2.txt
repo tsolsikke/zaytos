@@ -13,11 +13,11 @@ Hello, ZaytOS!
 [INFO] build: 2 cargo feature(s) enabled: default,heap-poison
 [INFO] fp: SSE is enabled on the bootstrap processor: CR0=0x80010033 (MP=true, EM=false),              CR4=0x668 (OSFXSR=true, OSXMMEXCPT=true), as intended = true [read back from the registers]
 [INFO] boot stack: 648 of 16384 bytes used (high-water; 15736 bytes poison intact)
-[INFO] higher-half: arrived at high VA. RIP=0xffffffff801e5998 in [0xffffffff80100000, 0xffffffff804ad8b0)=true, RSP=0xffffffff80410180 high=true, CR3=0x24c000 == bootstrap PML4 0x24c000 = true, identity alive (phys 0x100000 read via low==high) = true
-[INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff80425218 first slot=0xffffffff80425218 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
+[INFO] higher-half: arrived at high VA. RIP=0xffffffff801e5bb8 in [0xffffffff80100000, 0xffffffff804ad8b0)=true, RSP=0xffffffff80410180 high=true, CR3=0x24c000 == bootstrap PML4 0x24c000 = true, identity alive (phys 0x100000 read via low==high) = true
+[INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff80425220 first slot=0xffffffff80425220 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
 [INFO] interrupts: RFLAGS.IF before cli = false (raw RFLAGS=0x96)
 [INFO] interrupts: RFLAGS.IF after cli = false (raw RFLAGS=0x96)
-[INFO] gdt: base=0xffffffff80425218 limit=63 (expected base=0xffffffff80425218)
+[INFO] gdt: base=0xffffffff80425220 limit=63 (expected base=0xffffffff80425220)
 [INFO] gdt: CS=0x8 (expected 0x8), TR=0x30 (expected 0x30)
 [INFO] gdt: limit=63 (expected 63)
 [INFO] gdt[1] kcode: 0x00af9a000000ffff DPL=0 present=1 kind=code accessed=0 (expected 0x00af9a000000ffff, accessed bit is CPU-managed)
@@ -75,7 +75,7 @@ Hello, ZaytOS!
 [INFO] paging: required range [framebuffer] 0x80000000..0x803e8000: OK
 [INFO] paging: required range [new page tables (PML4)] 0x3000..0x4000: OK
 [INFO] paging: required range [current RSP] 0x4103e0..0x4103e1: OK
-[INFO] paging: required range [current RIP] 0x1e5998..0x1e5999: OK
+[INFO] paging: required range [current RIP] 0x1e5bb8..0x1e5bb9: OK
 [INFO] paging: all required ranges mapped. proceeding to CR3 switch (d-2).
 [INFO] paging: current CR3 = 0x24c000
 [INFO] paging: CR3 switch instruction executed
@@ -109,7 +109,7 @@ Hello, ZaytOS!
 [INFO] console: 104 log line(s) were emitted before the console existed (serial only)
 [INFO] heap: arena 0x4ae000..0x5ae000 (256 frames, 1 MiB), mapped=true
 [INFO] heap: initialized (1048576 bytes free, 1 block(s))
-[INFO] granularity: executing code (RIP) 0xffffffff801e5998 -> phys 0x1e5998, mapped by a 4KiB page at 0xffffffff801e5000 (entry=0x1e5023)
+[INFO] granularity: executing code (RIP) 0xffffffff801e5bb8 -> phys 0x1e5bb8, mapped by a 4KiB page at 0xffffffff801e5000 (entry=0x1e5023)
 [INFO] granularity: kernel stack (RSP) 0xffffffff8040fe60 -> phys 0x40fe60, mapped by a 4KiB page at 0xffffffff8040f000 (entry=0x40f063)
 [INFO] granularity: heap arena 0x4ae000 -> phys 0x4ae000, mapped by a 2MiB page at 0x400000 (entry=0x400083)
 [INFO] granularity: framebuffer 0x80000000 -> phys 0x80000000, mapped by a 2MiB page at 0x80000000 (entry=0x800000b3)
@@ -226,7 +226,8 @@ Hello, ZaytOS!
 [INFO] apic:   LVT Error: raw=0x00010000 vector=0x00 delivery=0 (Fixed) masked=true level_triggered=false active_low=false pending=false
 [INFO] apic: LAPIC ISR/IRR are readable (OR of all 8 dwords: ISR=0x00000000 IRR=0x00000000); read outside any handler, so this shows readability only, not that EOI works
 [INFO] apic: I/O APIC id=0 at 0xfec00000: ID reg=0x00000000 VER reg=0x00170020 version=0x20 max_redirection_entry=23 (SDM defines this as the entry count minus one, so there are 24) gsi_base=0
-[INFO] apic: I/O APIC MMIO decodes: the version register is not an undecoded read and the ID register reports 0, matching the MADT; 24 redirection entr(y/ies)
+[INFO] apic: I/O APIC MMIO decodes: the version register is not an undecoded read; 24 redirection entr(y/ies) from GSI 0
+[INFO] apic: the I/O APIC ID register reports 0, matching the MADT
 [INFO] apic:   redirection entry  0 (gsi 0): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
 [INFO] apic:   redirection entry  1 (gsi 1): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
 [INFO] apic:   redirection entry  2 (gsi 2): low=0x00010000 high=0x00000000 vector=0x00 delivery=Fixed masked=true level_triggered=false active_low=false remote_irr=false destination_mode=physical destination=0x00
@@ -257,7 +258,7 @@ Hello, ZaytOS!
 [INFO] percpu: 2 usable CPU(s) enumerated, 2 per-CPU slot(s) available, every CPU has a slot=true (cpu_id() is the constant 0 and only the bootstrap processor runs, so no slot is indexed out of range yet)
 [INFO] identity-removal: begin. live PML4=0xf000, saved PML4[0]=0x10023
 [INFO] identity-removal: PML4[0] subtree table frames = 7 (28 KiB) become unreachable; intentional leak. subtree frames [256]=10 [511]=5. disjoint(0,256)=true disjoint(0,511)=true disjoint(256,511)=true
-[INFO] identity-removal: required [RIP] 0xffffffff801e5998 -> phys 0x1e5998 (huge=false): OK
+[INFO] identity-removal: required [RIP] 0xffffffff801e5bb8 -> phys 0x1e5bb8 (huge=false): OK
 [INFO] identity-removal: required [RSP] 0xffffffff8040fcb0 -> phys 0x40fcb0 (huge=false): OK
 [INFO] identity-removal: required [direct map window] 0xffff80000000f000 -> phys 0xf000 (huge=false): OK
 [INFO] identity-removal: required [kernel image] 0xffffffff80100000 -> phys 0x100000 (huge=false): OK
@@ -507,7 +508,7 @@ syscall-test wrote this
 [INFO] ioapic: IRQ1 redirection entry read back: vector=0x42 masked=false level_triggered=false active_low=false destination_mode=physical destination=0x00, vector matches what we wrote (0x42) = true, destination is physical mode and equals the bootstrap processor (0x00) = true
 [INFO] ioapic: IRQ1 now goes through the I/O APIC as vector 0x42; the 8259 line is masked (the first key must arrive as that vector, which the 8259 cannot produce)
 [INFO] ioapic: virtio IRQ 11 routed: vector=0x44 (expected 0x44), level=true active-low=false masked=false; matches the platform's declaration = true [read back from hardware]
-[INFO] sti-check 1: GDT base=0xffffffff80425218 (expected 0xffffffff80425218), CS=0x0008 (expected 0x0008), DS=0x0010 SS=0x0010 (expected 0x0010)
+[INFO] sti-check 1: GDT base=0xffffffff80425220 (expected 0xffffffff80425220), CS=0x0008 (expected 0x0008), DS=0x0010 SS=0x0010 (expected 0x0010)
 [INFO] sti-check 2: TR=0x0030 (expected 0x0030), IST1 top=0xffffffff8041f000, #DF gate IST index=Some(1)
 [INFO] sti-check 3: IDT base=0xffffffff803f7af9 limit=4095, first 32 gates ok=true, exception stub table ok=true, irq stub table ok=true (0xffffffff80154920..0xffffffff80154b30, size=528 expected=528)
 [INFO] sti-check 5: PIC IMR master=0xfe slave=0xff (expected 0xfe/0xff) [read back from hardware]
@@ -530,7 +531,7 @@ syscall-test wrote this
 [INFO] lapic-timer: the timer now arrives as vector 0xfe, which the 8259 cannot produce
 task: starting preemptive demo with 2 busy-loop workers for 200 ticks
 [INFO] smp: the installed AP trampoline matches the template outside the patched fields: 4048 byte(s) compared, 48 excluded (gdtr base at 0xf22, far jump target at 0x3b, data block 0xf40..0xf68), mismatches=0
-[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x24c000, rust entry 0xffffffff801a0cd0
+[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x24c000, rust entry 0xffffffff801a10b0
 [INFO] smp: starting application processor apic id 1 as slot 1 (trampoline at 0x1000, vector 0x01, stack top 0x3000 identity-mapped, cr3 0x24c000 = the static boot page table)
 [INFO] smp: application processor 1 started (long mode reached, running on the static boot page table; no per-CPU GDT/TSS/IDT yet, so cpu_id() is not used here)
 [INFO] fp: SSE is enabled on ap 1: CR0=0xe0000013 CR4=0x620, as intended = true [read back from the registers]

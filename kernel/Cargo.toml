@@ -632,6 +632,12 @@ ram-disk-write-test = []
 # 破壊（ADR-0068 の HW-d）: 装置が無いのに書き戻しの完了を待つ（待ちを残した形）。締切でpanicして
 # 止まる。保存の操作が要るので台本を伴う。
 flush-waits-without-device = ["ram-disk-write-test"]
+# 構成（ADR-0068 の HW-e-2。破壊ではない）: MADT の I/O APIC の ID を 1 つずらして比べる。VirtualBox の
+# 形（ID レジスタ 0、MADT は別の値）を QEMU で作る。[WARN] が出て止まらず、打鍵が届くことを見る。
+ioapic-id-mismatch-test = []
+# 破壊（ADR-0068 の HW-e-2）: I/O APIC の版を ID の添字で読む。QEMU の ID レジスタは 0 なので版が 0 に
+# 見え、写像の判定（未デコードの見え方）で止まる。
+ioapic-reads-the-wrong-register = []
 # Y-d: 画面・入力・ソケット・共有メモリを 1 つの組で通す（ADR-0066 の設計 Q5）。init が /bin/compd を
 # 前景で起こし、compd が /bin/compc を起こしっぱなしで起こす。compc が shm のプールに描いて送り、
 # compd が合成して present する。判定は xtask の compose-test が screendump を読んで行う。

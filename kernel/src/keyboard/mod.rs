@@ -70,6 +70,46 @@ pub fn first_keyboard_vector() -> Option<u64> {
     }
 }
 
+/// [`report_first_delivery_once`] が既に出したか。
+static FIRST_DELIVERY_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// 最初のキー入力が届いたベクタを 1 度だけ報せる（IRQ1 の配送経路の証明。HW-e-2。`ADR-0068`）。
+///
+/// **行の境目から呼ぶ**——**起動前のループと、プログラムを起こす入口（`userland::spawn`）の 2 か所である。**
+/// **以前は起動前のループでしか出なかったので、シェルが起きてから打つ機械（VirtualBox の走行）では配送の
+/// 証拠が残らなかった。**
+///
+/// # 読み手の中では出さない
+///
+/// **最初は端末の `read` と入力の fd の読み手から出していた**が、**シェルがエコーしている行の途中へ
+/// 割り込み、`--full` の打鍵の検査 4 本が「打った行がエコーされた」で落ちた**（2026-09-24）。
+/// **起こす入口はシェルが Enter のエコーを終えた後なので、行の途中に入らない。** **パスを引く前に呼ぶ
+/// ので、無い名前（`a`）を打った回でも出る。**
+///
+/// **違うベクタで届いていたら止める**（今までどおり）。**8259 経由（0x21）なら、I/O APIC へ移したはずの
+/// IRQ1 が 8259 から来たことになる。**
+pub fn report_first_delivery_once(logger: &mut common::log::Logger<common::serial::SerialPort>) {
+    let Some(vector) = first_keyboard_vector() else {
+        return;
+    };
+    if FIRST_DELIVERY_REPORTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    if vector as usize == delivery_vector() {
+        logger.info(format_args!(
+            "keyboard: first key arrived as vector {vector:#04x} - IRQ1 is wired through our \
+             stub correctly"
+        ));
+    } else {
+        logger.error(format_args!(
+            "keyboard: the first key arrived as vector {:?}, expected {:#04x}; halting",
+            Some(vector),
+            delivery_vector()
+        ));
+        common::cpu::halt_forever();
+    }
+}
+
 /// IRQ1 のハンドラ本体。割り込みハンドラから呼ばれる。
 ///
 /// 出力しない（ADR-0018 §5）。共有状態を更新するだけで、表示はメインループが行う。
