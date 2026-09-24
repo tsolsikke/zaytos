@@ -81,11 +81,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y e2fsprogs
 
+      # tools/docstyle.py が使う。版を固定し、木には写さない（2026-09-25）。
+      - name: 文体の道具の依存を入れる
+        run: python3 -m pip install --user --break-system-packages 'markdown-it-py==3.0.0' 'mdurl==0.1.2'
+
       - name: 版を出す
         run: |
           rustc --version
           cargo --version
           mke2fs -V
+          python3 -c "import markdown_it; print('markdown-it-py', markdown_it.__version__)"
 
       - name: 基底の検査
         run: cargo xtask check
@@ -103,11 +108,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y e2fsprogs qemu-system-x86 ovmf
 
+      # tools/docstyle.py が使う（--commit も基底を含む）。版を固定し、木には写さない（2026-09-25）。
+      - name: 文体の道具の依存を入れる
+        run: python3 -m pip install --user --break-system-packages 'markdown-it-py==3.0.0' 'mdurl==0.1.2'
+
       - name: 版を出す
         run: |
           rustc --version
           cargo --version
           mke2fs -V
+          python3 -c "import markdown_it; print('markdown-it-py', markdown_it.__version__)"
           qemu-system-x86_64 --version | head -1
           dpkg-query -W -f='ovmf ${Version}\n' ovmf
 

@@ -20,6 +20,7 @@ HW-b で 2 度読み違えた**（HW-a の +240 を最深の経路の上に無�
     python3 tools/frame-sizes.py --base f8f07a2           # 基底の版を選ぶ
     python3 tools/frame-sizes.py kernel::kernel_main      # 名前を挙げた関数は、動いていなくても出す
     python3 tools/frame-sizes.py --largest 20             # 作業木で枠の大きい関数を 20 出す
+    python3 tools/frame-sizes.py --working-tree-only --largest 3   # 基底の版を建てずに作業木だけ見る
 
 **名前は `nm -C` の形で、完全一致である。** **末尾に `*` を付けると前方一致になる。**
 
@@ -99,7 +100,19 @@ def main():
     parser.add_argument("--features", default="", help="両方の建てに渡す feature（既定は無し）")
     parser.add_argument("--top", type=int, default=30, help="動いた関数を大きい順にいくつ出すか（既定 30）")
     parser.add_argument("--largest", type=int, default=0, help="作業木で枠の大きい関数をいくつ出すか")
+    parser.add_argument("--working-tree-only", action="store_true",
+                        help="基底の版を建てず、作業木の枠だけを読む（`cargo xtask check` の軽い確かめが使う）")
     options = parser.parse_args()
+
+    # **基底の版を建てない形**（2026-09-25）。**基底の版の取り出しと建てには分の単位が掛かる**ので、
+    # **`cargo xtask check` の基底は、作業木の `.debug_frame` を読めることだけを見る。**
+    if options.working_tree_only:
+        after = frames(build(ROOT, options.features))
+        print(f"the working tree only; frame = max CFA offset - 8 (byte); {len(after)} function(s)")
+        print(f"\nthe {options.largest} largest frame(s) in the working tree:")
+        for name, size in sorted(after.items(), key=lambda row: -row[1])[: options.largest]:
+            print(f"  {size:>7}  {name[:150]}")
+        return 0
 
     tree, commit = base_tree(options.base)
     before = frames(build(tree, options.features))

@@ -177,28 +177,65 @@ pub fn render_table(glyphs: &[ParsedGlyph], source_note: &str) -> String {
     out
 }
 
-/// `cargo xtask gen-font` の本体。
-pub fn generate(workspace_root: &Path) -> Result<()> {
-    let input_path = workspace_root
+/// 生成の入力（Unifont の抜き出し）。
+fn input_path(workspace_root: &Path) -> std::path::PathBuf {
+    workspace_root
         .join("third_party")
         .join("unifont")
-        .join("unifont-subset.hex");
-    let output_path = workspace_root
+        .join("unifont-subset.hex")
+}
+
+/// 生成の出力（カーネルの字形の表）。
+fn output_path(workspace_root: &Path) -> std::path::PathBuf {
+    workspace_root
         .join("kernel")
         .join("src")
         .join("graphics")
         .join("font")
-        .join("unifont_glyphs.rs");
+        .join("unifont_glyphs.rs")
+}
 
+/// 入力を読み、字形と、出力になる表の中身を返す。
+fn render(workspace_root: &Path) -> Result<(Vec<ParsedGlyph>, String)> {
+    let input_path = input_path(workspace_root);
     let contents = fs::read_to_string(&input_path)
         .with_context(|| format!("failed to read {}", input_path.display()))?;
     let glyphs = parse_hex(&contents)
         .with_context(|| format!("failed to parse {}", input_path.display()))?;
+    let table = render_table(&glyphs, "third_party/unifont/unifont-subset.hex");
+    Ok((glyphs, table))
+}
+
+/// 木に在る字形の表が、`gen-font` の出力そのものであること（2026-09-25。手で使う道具の軽い確かめ）。
+///
+/// **書かずに比べる**——**書くと更新の時刻が変わり、カーネルの作り直しを招く。** **生成器が
+/// 腐っても、手で表を直しても、ここで分かる。**
+pub fn check_generated_is_committed(workspace_root: &Path) -> Result<String> {
+    let (glyphs, table) = render(workspace_root)?;
+    let output_path = output_path(workspace_root);
+    let committed = fs::read_to_string(&output_path)
+        .with_context(|| format!("failed to read {}", output_path.display()))?;
+    if committed != table {
+        bail!(
+            "{} is not what `cargo xtask gen-font` generates from the Unifont subset; \
+             regenerate it (or fix the generator) and commit the result",
+            output_path.display()
+        );
+    }
+    Ok(format!(
+        "{} glyph(s); the committed table is byte for byte what gen-font generates",
+        glyphs.len()
+    ))
+}
+
+/// `cargo xtask gen-font` の本体。
+pub fn generate(workspace_root: &Path) -> Result<()> {
+    let output_path = output_path(workspace_root);
+    let (glyphs, table) = render(workspace_root)?;
 
     let half = glyphs.iter().filter(|g| g.width_cells == 1).count();
     let full = glyphs.len() - half;
 
-    let table = render_table(&glyphs, "third_party/unifont/unifont-subset.hex");
     let parent = output_path
         .parent()
         .context("failed to resolve the output directory")?;

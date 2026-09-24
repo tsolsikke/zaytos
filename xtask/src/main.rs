@@ -16,6 +16,7 @@ mod font;
 mod launch;
 mod media;
 mod metrics;
+mod tool_checks;
 mod vbox;
 
 const OVMF_CODE_PATH: &str = "/usr/share/OVMF/OVMF_CODE_4M.fd";
@@ -1568,7 +1569,7 @@ fn main() -> Result<()> {
        cargo xtask run --serial-test [--sabotage FEATURE]
        cargo xtask run --machine-variant NAME [--sabotage FEATURE | --config FEATURE]   (ADR-0068。NAME は xtask/machine-variants.txt の名前)
        cargo xtask check [--update-reference]   (ホストテストの名前の集合を取り直す)
-       cargo xtask run --boot-log-diff [--update-reference [--allow-shrink]]
+       cargo xtask run --boot-log-diff [--update-reference [--allow-shrink]]\n       cargo xtask run --tool-checks
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask image [--without-fs-image]   (ADR-0068 の HW-e。起動媒体の像を建てて確かめる)\n       cargo xtask gen-font\n       cargo xtask judge-vbox <記録>   (ADR-0068 の 2-2。tools/vbox-vm.py run が残した記録を判定する)";
 
     let args: Vec<String> = env::args().skip(1).collect();
@@ -2049,6 +2050,9 @@ fn main() -> Result<()> {
             }
             if rest.iter().any(|a| a == "--persist-test") {
                 return cmd_persist_test(rest.iter().any(|a| a == "--rebuild-between"));
+            }
+            if rest.iter().any(|a| a == "--tool-checks") {
+                return cmd_tool_checks();
             }
             if rest.iter().any(|a| a == "--boot-log-diff") {
                 let update = rest.iter().any(|a| a == "--update-reference");
@@ -5003,6 +5007,106 @@ fn report_sabotage_verdict(
             );
             failed.push(name);
         }
+    }
+}
+
+/// 手で使う道具の確かめ 1 つ（項目の見出し、失敗の行の短い名前、確かめ）。
+type ToolCheck = fn(&Path) -> Result<String>;
+
+/// 基底に置く、手で使う道具の軽い確かめ（2026-09-25。QEMU を起こさない）。
+const TOOL_CHECKS_BASE: [(&str, &str, ToolCheck); 7] = [
+    (
+        "tools/boot-log-compare.py still compares boot logs",
+        "boot-log-compare tool",
+        tool_checks::boot_log_compare,
+    ),
+    (
+        "tools/decisions-touched.py still runs over a commit range",
+        "decisions-touched tool",
+        tool_checks::decisions_touched,
+    ),
+    (
+        "tools/docstyle.py still passes",
+        "docstyle tool",
+        tool_checks::docstyle,
+    ),
+    (
+        "tools/frame-sizes.py still reads frame sizes from the working tree",
+        "frame-sizes tool",
+        tool_checks::frame_sizes,
+    ),
+    (
+        "tools/judgement-map.py still counts judgements",
+        "judgement-map tool",
+        tool_checks::judgement_map,
+    ),
+    (
+        "tools/qemu-variants.py --list names the same variants as xtask",
+        "qemu-variants tool",
+        tool_checks::qemu_variants,
+    ),
+    (
+        "the committed font table is what cargo xtask gen-font generates",
+        "gen-font",
+        font::check_generated_is_committed,
+    ),
+];
+
+/// `--full` に置く、QEMU を起こす手の道具の確かめ（2026-09-25）。
+const TOOL_CHECKS_FULL: [(&str, &str, ToolCheck); 3] = [
+    (
+        "tools/stack-deepest.py still measures the deepest stack path",
+        "stack-deepest tool",
+        tool_checks::stack_deepest,
+    ),
+    (
+        "cargo xtask run --calibration-spread still captures a calibration value",
+        "calibration-spread tool",
+        tool_checks::calibration_spread,
+    ),
+    (
+        "cargo xtask screenshot still writes a PNG of the screen",
+        "screenshot tool",
+        tool_checks::screenshot,
+    ),
+];
+
+/// 既定の像を `target/esp` と `target/disk0.img` へ置く（2026-09-25。手の道具が起こす像）。
+fn stage_default_image(workspace_root: &Path) -> Result<()> {
+    let bootloader_efi = build_bootloader(workspace_root, false)?;
+    let kernel_elf = build_kernel(workspace_root, false)?;
+    stage_esp(workspace_root, &bootloader_efi, &kernel_elf)?;
+    Ok(())
+}
+
+/// 手で使う道具の確かめを、それだけ回す（`cargo xtask run --tool-checks`。2026-09-25）。
+///
+/// **基底の 7 つと `--full` の 3 つを、検査の本体と同じ表で回す。**
+fn cmd_tool_checks() -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let mut failed = Vec::new();
+    for (label, short, check) in TOOL_CHECKS_BASE.iter().chain(TOOL_CHECKS_FULL.iter()) {
+        println!("=== tool check: {label}");
+        match check(&workspace_root) {
+            Ok(message) => println!("--- {short}: OK ({message})"),
+            Err(error) => {
+                println!("--- {short}: FAILED ({error:#})");
+                failed.push(*short);
+            }
+        }
+    }
+    if failed.is_empty() {
+        println!(
+            "tool checks: all {} passed",
+            TOOL_CHECKS_BASE.len() + TOOL_CHECKS_FULL.len()
+        );
+        Ok(())
+    } else {
+        bail!(
+            "tool checks: {} failed: {}",
+            failed.len(),
+            failed.join(", ")
+        )
     }
 }
 
@@ -19270,8 +19374,11 @@ const DEFAULT_CALIBRATION_RUNS: usize = 5;
 /// Local APIC タイマの較正結果を、複数回の起動にわたって集める（S2-c）。
 ///
 /// **これは検査項目ではない。** 合否を判定せず、値を並べて出すだけである。
-/// 許容幅を決めるための入力を人が読む形で集めるのが目的で、`--full` には
-/// 入れていない（項目数は増えない）。
+/// 許容幅を決めるための入力を人が読む形で集めるのが目的である。
+///
+/// **ただし道具として動くことは `--full` が見る**（2026-09-25。1 回で値が 1 つ採れること。
+/// 値そのものは判定しない）。**HW-c で行の文言が変わった後、ずっと何も採れていなかった**
+/// ——**手の道具は黙って腐る**（`docs/troubleshooting.md`）。
 ///
 /// **手で 5 回回して記録する形を採らないのは、手動確認が再現されず必ず腐るから
 /// である**（`-smp 2` の確認を検査項目にしたのと同じ判断）。ここでは合否を
@@ -19318,8 +19425,8 @@ fn cmd_calibration_spread(runs: usize) -> Result<()> {
     );
     println!("min={low} Hz max={high} Hz spread={spread} Hz ({relative_ppm} ppm of max)");
     println!(
-        "note: this command reports values only. it does not decide pass or fail, so it is \
-         not one of the `--full` check items."
+        "note: this command reports values only. it does not decide pass or fail on them; \
+         `--full` only checks that a value is captured at all."
     );
     Ok(())
 }
@@ -20973,6 +21080,20 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         }
     }
 
+    // **手で使う道具の軽い確かめ**（2026-09-25。検査の体系の改善。運用者の決定）。**QEMU を
+    // 起こさないものを基底に置く。** **動いて、空でない値を出すことだけを見る**（`tool_checks` の doc）。
+    for (label, short, check) in TOOL_CHECKS_BASE {
+        total += 1;
+        begin_item(label);
+        match check(&workspace_root) {
+            Ok(message) => println!("--- {short}: OK ({message})"),
+            Err(error) => {
+                println!("--- {short}: FAILED ({error:#})");
+                failed.push(short.to_string());
+            }
+        }
+    }
+
     // **`--commit` はここで終わる**——基底 + boot log diff の 1 項目。
     // カーネルのコードに触れたコミットの前に回す（`docs/coding-standards.md` の
     // 「回帰チェックの必須条件」）。起動ログの参照が古いままコミットされる形
@@ -20990,6 +21111,19 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     if full {
+        // **手で使う道具のうち、QEMU を起こすもの**（2026-09-25。運用者の決定）。
+        for (label, short, check) in TOOL_CHECKS_FULL {
+            total += 1;
+            begin_item(label);
+            match check(&workspace_root) {
+                Ok(message) => println!("--- {short}: OK ({message})"),
+                Err(error) => {
+                    println!("--- {short}: FAILED ({error:#})");
+                    failed.push(short.to_string());
+                }
+            }
+        }
+
         // **シェルへ打鍵を送る（S11-11）。** **破壊ではない**——
         // **打鍵が Ring 3 まで届き、組み込みの `exit` が効き、`init` が
         // 起こし直すところまでを見る。**
@@ -22960,8 +23094,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 39,
-    full: 397,
+    base: 46,
+    full: 407,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -23509,9 +23643,22 @@ fn cmd_flaky() -> Result<()> {
         }
     }
 
+    // **段の締めで回す、手の道具の確かめ**（2026-09-25。運用者の決定）。**drift は分の単位なので
+    // `--full` に入れない。** **段の締めで手で回す口がここだけなので、ここへ置く。** **確率的な
+    // 項目ではない**——1 回だけ、最短の 1 分で走らせ、標本が採れて判定まで進むことを見る。
+    println!("=== flaky: the drift tool (stage close; not a probabilistic item)");
+    match cmd_drift_test(1, None) {
+        Ok(()) => println!("--- flaky: drift tool: OK (a one-minute run compared its samples)"),
+        Err(error) => {
+            println!("--- flaky: drift tool: FAILED ({error:#})");
+            never_passed.push("drift tool".to_string());
+        }
+    }
+
     if never_passed.is_empty() {
         println!(
-            "flaky: all {} excluded item(s) passed within {FLAKY_ATTEMPTS} attempt(s)",
+            "flaky: all {} excluded item(s) passed within {FLAKY_ATTEMPTS} attempt(s), and the \
+             drift tool ran",
             FLAKY_EXCLUDED.len()
         );
         Ok(())
@@ -24220,6 +24367,11 @@ impl ExternalTool {
         value: impl AsRef<std::ffi::OsStr>,
     ) -> &mut Self {
         self.0.env(key, value);
+        self
+    }
+
+    fn current_dir(&mut self, dir: impl AsRef<Path>) -> &mut Self {
+        self.0.current_dir(dir);
         self
     }
 
