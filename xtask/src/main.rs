@@ -4912,6 +4912,12 @@ const SABOTAGE_STOP_REASONS: &[StopReason] = &[
         note: "the parse stops the boot before the byte-for-byte check can run",
     },
     StopReason {
+        feature: "brk-skip-shrink-test",
+        reason: "DestroyAccounting",
+        note: "the boot-time syscall-test leaves its space short and the kernel's own accounting \
+               halts the boot; zi's own judgements are not reached",
+    },
+    StopReason {
         feature: "fp-mf-not-foldable-test",
         reason: "exception: vector=16 (#MF",
         note: "the kernel halts on the #MF from Ring 3 instead of folding the program, as intended",
@@ -9923,11 +9929,20 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     let started_waiting = Instant::now();
     let deadline = started_waiting + ZI_TEST_TIMEOUT;
     let mut finished_after = None;
+    let mut stop = StopWatch::default();
+    let mut stopped = None;
     while Instant::now() < deadline && !child.was_cut() {
         let text = read_lossy(&serial_log);
         // **色の列を落としてから探す（ES-d）。** [`strip_ansi`] の doc。
         if strip_ansi(&text).contains(done_marker) {
             finished_after = Some(started_waiting.elapsed());
+            break;
+        }
+        // **止まった印で待つのをやめる**（5.b。2026-09-25）。**起動の中の検査が止めると、
+        // 台本は走らない**——**以前は上限の 60 秒まで待っていた**（実測で、`brk` の破壊が
+        // 止まるのは起こしてから 4.8 秒）。
+        if let Some(sign) = stop.settled(stop_sign_in(&text, "")) {
+            stopped = Some(sign);
             break;
         }
         metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
@@ -9955,6 +9970,12 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     {
         report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
         bail!("{context}: the kernel did not start");
+    }
+
+    // **止まったなら判定へ進まない**（5.b）。**判定は呼ぶ側が止まった理由で分ける**（[`judge_sabotage`]）。
+    if let Some(sign) = stopped {
+        println!("{context}: the kernel stopped before the script finished: {sign}");
+        return Err(anyhow::Error::new(StoppedEarly { sign, serial }));
     }
 
     // **カーソルの推移を判定行から拾う。** `row` の列がそのまま台本の答えである。
@@ -21730,13 +21751,8 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         ] {
             total += 1;
             begin_item(&format!("the zi test catches {feature}"));
-            match cmd_zi_test(&[feature]) {
-                Ok(()) => {
-                    println!("--- zi test ({feature}): FAILED (the sabotage was NOT caught)");
-                    failed.push(format!("zi test ({feature})"));
-                }
-                Err(_) => println!("--- zi test ({feature}): OK (the sabotage was caught)"),
-            }
+            let result = cmd_zi_test(&[feature]);
+            report_sabotage_verdict("zi test", feature, &[feature], &result, &mut failed);
         }
 
         // **キーボードの配列の切り替え（f-1b。`ADR-0052` の `KEYMAP`）。**
