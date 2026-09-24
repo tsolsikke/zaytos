@@ -5537,10 +5537,15 @@ fn cmd_socket_test(features: &[&str], expect_pass: bool) -> Result<()> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the socket test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "socket-test",
+        SOCKET_TEST_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     // **終わりの印が出るか、出力が伸びなくなるか、上限まで待つ。** **黙って止まる破壊が
     // 2 つ在る**（起こさない・EOF が来ない）。
@@ -5549,7 +5554,7 @@ fn cmd_socket_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let mut last_len = 0usize;
     let mut last_growth = started;
     let mut stalled = false;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         let text = strip_ansi(&read_lossy(&serial_log));
         if text.contains("script-done:") {
             thread::sleep(Duration::from_secs(1));
@@ -5872,16 +5877,21 @@ fn cmd_input_test(features: &[&str], expect_pass: bool) -> Result<()> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the input test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "input-test",
+        BOOT_READY_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     // **入力の fd を開くまで待つ。上限つき。**
     let started = Instant::now();
     let deadline = started + BOOT_READY_TIMEOUT;
     let mut ready = false;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         if read_lossy(&serial_log).contains(INPUT_TEST_READY_MARKER) {
             ready = true;
             break;
@@ -5910,7 +5920,7 @@ fn cmd_input_test(features: &[&str], expect_pass: bool) -> Result<()> {
         // （[`INPUT_TEST_SUMMARY_MARKER`] の doc）。
         let deadline = Instant::now() + INPUT_TEST_TIMEOUT;
         let mut marker = INPUT_TEST_DONE_MARKER;
-        while Instant::now() < deadline {
+        while Instant::now() < deadline && !child.was_cut() {
             if read_lossy(&serial_log).contains(marker) {
                 if marker == INPUT_TEST_SUMMARY_MARKER {
                     break;
@@ -6140,16 +6150,21 @@ fn cmd_poll_test(features: &[&str], expect_pass: bool) -> Result<()> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the poll test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "poll-test",
+        Duration::ZERO,
+        launch::Deadline::Normal,
+    ))?;
 
     // **印が出るまで待つ。上限つき。**
     let started = Instant::now();
     let wait_for = |marker: &str, limit: Duration| -> bool {
         let deadline = Instant::now() + limit;
-        while Instant::now() < deadline {
+        while Instant::now() < deadline && !child.was_cut() {
             if read_lossy(&serial_log).contains(marker) {
                 return true;
             }
@@ -6455,15 +6470,20 @@ fn cmd_screen_test(features: &[&str], expect_pass: bool) -> Result<()> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the screen test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "screen-test",
+        Duration::ZERO,
+        launch::Deadline::Normal,
+    ))?;
 
     let started = Instant::now();
     let wait_for = |marker: &str, limit: Duration| -> bool {
         let deadline = Instant::now() + limit;
-        while Instant::now() < deadline {
+        while Instant::now() < deadline && !child.was_cut() {
             if read_lossy(&serial_log).contains(marker) {
                 return true;
             }
@@ -8110,15 +8130,20 @@ fn cmd_compose_test(features: &[&str], expect_pass: bool) -> Result<()> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the compose test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "compose-test",
+        Duration::ZERO,
+        launch::Deadline::Normal,
+    ))?;
 
     let started = Instant::now();
     let wait_for = |marker: &str, limit: Duration| -> bool {
         let deadline = Instant::now() + limit;
-        while Instant::now() < deadline {
+        while Instant::now() < deadline && !child.was_cut() {
             if read_lossy(&serial_log).contains(marker) {
                 return true;
             }
@@ -8318,13 +8343,18 @@ fn cmd_history_test(features: &[&str], expect_pass: bool) -> Result<()> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the history test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "history-test",
+        ZI_TEST_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     let deadline = Instant::now() + ZI_TEST_TIMEOUT;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         let text = read_lossy(&serial_log);
         if strip_ansi(&text).contains("script-done:") {
             break;
@@ -8480,13 +8510,18 @@ fn cmd_fp_test(features: &[&str], expect_pass: bool) -> Result<()> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the fp test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "fp-test",
+        ZI_TEST_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     let deadline = Instant::now() + ZI_TEST_TIMEOUT;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         let text = read_lossy(&serial_log);
         if strip_ansi(&text).contains("script-done:") {
             break;
@@ -8707,10 +8742,15 @@ fn cmd_concurrent_test(features: &[&str], expect_pass: bool) -> Result<()> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the concurrent test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "concurrent-test",
+        CONCURRENT_TEST_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     // **終わりの行か、`[ERROR]` の行が出たら止める。** **破壊は止まる形で落ちることが多いので、
     // 上限まで待たない。**
@@ -8724,7 +8764,7 @@ fn cmd_concurrent_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let mut last_len = 0usize;
     let mut last_growth = started;
     let mut stalled = false;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         let text = strip_ansi(&read_lossy(&serial_log));
         if text.contains("concurrent: done") || text.contains("[ERROR]") {
             // **止まる行の後ろに続く行（ダンプ）も取る。**
