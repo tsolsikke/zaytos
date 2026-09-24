@@ -14,6 +14,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 
 mod font;
+mod launch;
 mod media;
 mod vbox;
 
@@ -1932,6 +1933,10 @@ fn main() -> Result<()> {
                 return cmd_screen_test(&sabotage, expect_pass);
             }
             // **画面・入力・ソケット・共有メモリを 1 つの組で通す判定（`ADR-0066` の Y-d）。**
+            // **書く側の上限を確かめる項目を単独で起こす**（2026-09-24。`--full` と同じ関数）。
+            if rest.iter().any(|a| a == "--write-cap-check") {
+                return check_the_write_cap_stops_qemu();
+            }
             if let Some(index) = rest.iter().position(|a| a == "--machine-variant") {
                 let name = rest.get(index + 1).context(
                     "--machine-variant needs a variant name (see xtask/machine-variants.txt)",
@@ -2796,7 +2801,19 @@ fn build_bootloader(workspace_root: &Path, panic_test: bool) -> Result<PathBuf> 
 }
 
 /// ブートローダを feature つきで建てる（`ADR-0068` の HW-a。**受け渡しの破壊を建てるため**）。
+/// **失敗は検査装置の故障として包む**（`launch::classify`。2026-09-24）。
 fn build_bootloader_with_features(workspace_root: &Path, features: &[&str]) -> Result<PathBuf> {
+    launch::as_harness(
+        build_bootloader_with_features_unwrapped(workspace_root, features),
+        "building the bootloader",
+    )
+}
+
+/// 本体（[`build_bootloader_with_features`] が包む）。
+fn build_bootloader_with_features_unwrapped(
+    workspace_root: &Path,
+    features: &[&str],
+) -> Result<PathBuf> {
     let joined = features.join(",");
     let mut args = vec![
         "build",
@@ -7083,6 +7100,146 @@ const KEY_ANSWER: &str = "zash: a: cannot run";
 /// 256MiB と 1GiB。2026-09-22）**ので、その 7 倍に取る。**
 const MACHINE_VARIANT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// 書く側の上限を確かめる項目の、ファイル 1 つの上限（2026-09-24）。**`-d int` は起動の間に毎秒数 MB
+/// 出る**ので確実に着く。**書かれるほかのファイル（OVMF の変数 528 KiB、シリアル）より大きい。**
+const WRITE_CAP_TEST_LIMIT: u64 = 8 << 20;
+
+/// 同じ項目の待ちの上限。
+const WRITE_CAP_TEST_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// **書く側の上限が QEMU を止め、コアを吐かせないことを確かめる**（2026-09-24。ホストの保護。
+/// レビューの足す1点）。既定の像を `-d int` で起こし、`-D` の記録に小さい上限を掛けて、次を見る。
+///
+/// 1. 走行が `-D` の記録の上限で切られる（見張りの糸が見つける）
+/// 2. `-D` の記録は上限を越えていない（カーネルの RLIMIT_FSIZE）
+/// 3. QEMU は SIGKILL で終わり、コアを吐いていない（SIGXFSZ を無視して起こした）
+/// 4. QEMU の組に誰も残っていない
+/// 5. 起こした後の QEMU は SIGXFSZ を無視している（`/proc/<pid>/status` の SigIgn）
+/// 6. `core_pattern` を記録する。**行き先がパイプで、WSL のダンプの置き場が見えるなら、増えていない**
+fn check_the_write_cap_stops_qemu() -> Result<()> {
+    use std::os::unix::process::ExitStatusExt;
+    let workspace_root = workspace_root()?;
+    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let bootloader_efi = build_bootloader(&workspace_root, false)?;
+    let kernel = build_kernel_with_features(&workspace_root, &[])?;
+    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel)?;
+    let target = workspace_root.join("target");
+    let serial_log = target.join("write-cap-serial.log");
+    let debug_log = target.join("qemu-debug.log");
+    let _ = fs::remove_file(&serial_log);
+    let _ = fs::remove_file(&debug_log);
+    let qemu_args = qemu_launch_args(&QemuLaunchOptions {
+        ovmf_code: Path::new(OVMF_CODE_PATH),
+        ovmf_vars: &ovmf_vars,
+        esp_dir: &esp_dir,
+        serial: &SerialSink::File(serial_log.clone()),
+        debug_log: &debug_log,
+        display: DisplayMode::None,
+        monitor_socket: None,
+        accelerator: Accelerator::Tcg,
+        debug_events: DebugEvents::IntAndCpuReset,
+    });
+    let core_pattern = fs::read_to_string("/proc/sys/kernel/core_pattern").unwrap_or_default();
+    let core_pattern = core_pattern.trim();
+    let piped = core_pattern.starts_with('|');
+    println!(
+        "write-cap: (info) core_pattern is {core_pattern:?}{}",
+        if piped {
+            " (a pipe: RLIMIT_CORE does not reach it, which is why QEMU starts with SIGXFSZ ignored)"
+        } else {
+            ""
+        }
+    );
+    let dumps_before = wsl_crash_dump_count();
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut spec = launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "write-cap",
+        WRITE_CAP_TEST_TIMEOUT,
+        launch::Deadline::Failure,
+    );
+    spec.file_limit = WRITE_CAP_TEST_LIMIT;
+    let mut run = launch::spawn(&spec)?;
+    // **exec の連なり（sh → prlimit → QEMU）が終わるのを待ってから、SigIgn を読む。**
+    thread::sleep(Duration::from_millis(500));
+    let ignored = fs::read_to_string(format!("/proc/{}/status", run.id()))
+        .ok()
+        .and_then(|status| sigign_has_sigxfsz(&status));
+    let deadline = Instant::now() + WRITE_CAP_TEST_TIMEOUT;
+    while Instant::now() < deadline && !run.was_cut() {
+        if run.try_wait()?.is_some() {
+            break;
+        }
+        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+    }
+    let cut = run.was_cut();
+    // **切れていなければ、ここで止める**（止まっている組へ送っても害は無い）。
+    let _ = run.kill();
+    run.wait()?;
+    let record = run.record();
+    let left = run.anyone_left();
+    let debug_bytes = fs::metadata(&debug_log).map(|meta| meta.len()).unwrap_or(0);
+    let dumps_after = wsl_crash_dump_count();
+    let cut_on_debug_log = matches!(
+        record.as_ref().and_then(|run| run.cut.clone()),
+        Some(launch::Cut::FileLimit { ref file, .. }) if *file == debug_log
+    );
+    let status = record.as_ref().and_then(|run| run.status);
+    let killed = status.and_then(|status| status.signal()) == Some(9);
+    let no_core = status.is_some_and(|status| !status.core_dumped());
+    println!("write-cap: the run was cut = {cut} (on the -D log: {cut_on_debug_log})");
+    println!(
+        "write-cap: the -D log stayed within the limit = {} ({debug_bytes} of {WRITE_CAP_TEST_LIMIT} \
+         byte(s))",
+        debug_bytes <= WRITE_CAP_TEST_LIMIT
+    );
+    println!("write-cap: QEMU ended by SIGKILL = {killed} (status {status:?})");
+    println!("write-cap: QEMU dumped no core = {no_core}");
+    println!(
+        "write-cap: nobody is left in QEMU's process group = {}",
+        !left
+    );
+    println!("write-cap: QEMU ignored SIGXFSZ = {ignored:?}");
+    println!("write-cap: WSL crash dumps before / after = {dumps_before:?} / {dumps_after:?}");
+    let held = cut
+        && cut_on_debug_log
+        && debug_bytes <= WRITE_CAP_TEST_LIMIT
+        && killed
+        && no_core
+        && !left
+        && ignored == Some(true)
+        && dumps_after == dumps_before;
+    if !held {
+        bail!("write-cap: FAILED");
+    }
+    Ok(())
+}
+
+/// `/proc/<pid>/status` の `SigIgn:` に SIGXFSZ（25 番。ビット 24）が在るか（純粋な論理）。
+fn sigign_has_sigxfsz(status: &str) -> Option<bool> {
+    let mask = status
+        .lines()
+        .find_map(|line| line.strip_prefix("SigIgn:"))?
+        .trim();
+    let mask = u64::from_str_radix(mask, 16).ok()?;
+    Some(mask & (1 << 24) != 0)
+}
+
+/// **WSL のクラッシュのダンプの置き場（Windows 側の `%TEMP%\wsl-crashes`）にあるファイルの数**
+/// （読むだけ）。**置き場が見えない機械では `None`。**
+fn wsl_crash_dump_count() -> Option<usize> {
+    let users = fs::read_dir("/mnt/c/Users").ok()?;
+    let mut found = None;
+    for user in users.flatten() {
+        let dir = user.path().join("AppData/Local/Temp/wsl-crashes");
+        if let Ok(entries) = fs::read_dir(&dir) {
+            *found.get_or_insert(0) += entries.flatten().count();
+        }
+    }
+    found
+}
+
 /// 起こし方へ機械の変種を当てる（`ADR-0068`）。**メモリと機械だけを変える**——**他の引数は
 /// 既定の起動と同じである。** **`--machine-variant` と `--lapic-timer-test` が共有する。**
 fn apply_machine_variant(
@@ -7466,10 +7623,16 @@ fn cmd_machine_variant(
     });
     apply_machine_variant(&mut qemu_args, variant, media_image.as_deref())?;
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for a machine variant")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let what = format!("machine-variant {}", variant.name);
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        &what,
+        MACHINE_VARIANT_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     // **プロンプトか停止の行を待つ。** どちらも来なければ上限で切る。
     // **台本の回は、台本が書いて読み直した行を待つ**（HW-d）——**プロンプトはその前に出る。**
@@ -7481,7 +7644,8 @@ fn cmd_machine_variant(
     let deadline = started + MACHINE_VARIANT_TIMEOUT;
     let mut keys_sent = false;
     let mut machine_check_sent = false;
-    while Instant::now() < deadline {
+    // **見張りが走行を切ったら抜ける**——切った後は何も出ない。
+    while Instant::now() < deadline && !child.was_cut() {
         let text = strip_ansi(&read_lossy(&serial_log));
         if wants_machine_check && !machine_check_sent && text.contains(SHELL_READY_MARKER) {
             machine_check_sent = true;
@@ -20150,7 +20314,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             match cmd_utf8_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -20181,7 +20348,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             match cmd_profile_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -20208,7 +20378,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             match cmd_history_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -20232,7 +20405,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             match cmd_pipe_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -20257,7 +20433,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             match cmd_socket_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -20282,7 +20461,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             match cmd_input_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -20306,7 +20488,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             match cmd_poll_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -20330,7 +20515,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             match cmd_screen_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -20354,7 +20542,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             match cmd_compose_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -20372,7 +20563,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -20384,7 +20578,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let variant = match machine_variant(name) {
                 Ok(variant) => variant,
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                     continue;
                 }
@@ -20392,7 +20589,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             match cmd_machine_variant(&variant, &[feature], &[], MediaContents::Complete, expect) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -20404,7 +20604,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let variant = match machine_variant(name) {
                 Ok(variant) => variant,
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                     continue;
                 }
@@ -20412,7 +20615,26 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             match cmd_machine_variant(&variant, &[], &[], contents, expect) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
+                    failed.push(label.to_string());
+                }
+            }
+        }
+        // **書く側の上限が QEMU を止め、コアを吐かせない**（2026-09-24。ホストの保護。レビューの足す1点）。
+        {
+            total += 1;
+            let label = "the write cap stops QEMU without a core dump";
+            begin_item(label);
+            match check_the_write_cap_stops_qemu() {
+                Ok(()) => println!("--- {label}: OK"),
+                Err(error) => {
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -20424,7 +20646,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let variant = match machine_variant(name) {
                 Ok(variant) => variant,
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                     continue;
                 }
@@ -20437,7 +20662,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             match cmd_machine_variant(&variant, kernel, boot, MediaContents::Complete, expect) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -20464,7 +20692,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             match cmd_complete_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -20491,7 +20722,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             match cmd_fp_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -20517,7 +20751,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             match cmd_concurrent_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -20544,7 +20781,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             match cmd_ttf_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -20570,7 +20810,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             match cmd_serial_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -20838,7 +21081,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             match cmd_keymap_test(sabotage) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -20892,7 +21138,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             match cmd_persist_env_test(rebuild, ignore) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
-                    println!("--- {label}: FAILED ({error})");
+                    println!(
+                        "--- {label}: FAILED [{}] ({error})",
+                        failure_category(&error)
+                    );
                     failed.push(label.to_string());
                 }
             }
@@ -21932,6 +22181,22 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         report_item_time_slowness();
     }
     check_count_matches_accounting(&workspace_root, total, full, commit)?;
+    // **失敗の分け方と、起こした QEMU の数**（2026-09-24）。
+    let kinds: Vec<String> = launch::Category::ALL
+        .iter()
+        .map(|kind| {
+            format!(
+                "{}={}",
+                kind.label(),
+                FAILURE_CATEGORIES[*kind as usize].load(std::sync::atomic::Ordering::SeqCst)
+            )
+        })
+        .collect();
+    println!(
+        "(info) failures by kind: {}; QEMU runs started: {}",
+        kinds.join(" "),
+        launch::runs_started()
+    );
 
     if failed.is_empty() {
         println!("xtask check: all {total} check(s) passed");
@@ -22001,7 +22266,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 38,
-    full: 395,
+    full: 396,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -22782,6 +23047,8 @@ static ITEM_CLOCK: std::sync::Mutex<Option<(Instant, String)>> = std::sync::Mute
 /// 項目の見出しを出し、時計を始める（VIEW-b の後）。
 fn begin_item(label: &str) {
     finish_item();
+    // **走行の記録は項目ごとに空にする**（失敗の分け方と計測が項目の単位で読む）。
+    launch::reset_item_runs();
     ITEMS_DONE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     stop_if_over_the_time_limit();
     println!("=== xtask check: {label}");
@@ -22830,7 +23097,32 @@ fn finish_item() {
             "(info) item time: {:.1}s for {label}",
             elapsed.as_secs_f64()
         );
+        // **QEMU の走行の数と時間と、最も大きかった出力**（2026-09-24。検査の時間の計測。7.(1)）。
+        let runs = launch::item_runs();
+        if !runs.is_empty() {
+            let seconds: f64 = runs.iter().map(|run| run.elapsed.as_secs_f64()).sum();
+            let largest = runs.iter().map(|run| run.largest_output).max().unwrap_or(0);
+            println!(
+                "(info) item qemu: {} run(s), {seconds:.1}s, largest output {largest} byte(s) for \
+                 {label}",
+                runs.len()
+            );
+        }
     }
+}
+
+/// 失敗した項目の分け方の数（`launch::Category` の順）。**締めのまとめで出す。**
+static FAILURE_CATEGORIES: [std::sync::atomic::AtomicU64; 5] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+
+/// **失敗した項目を分ける**（`launch::classify`。2026-09-24）——**log-limit / harness / timeout / os**、
+/// QEMU を起こさなかった項目は check。**失敗の行に出し、締めで数える。**
+fn failure_category(error: &anyhow::Error) -> &'static str {
+    let category = launch::classify(launch::is_harness(error), &launch::item_runs());
+    if let Some(count) = FAILURE_CATEGORIES.get(category as usize) {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    category.label()
 }
 
 fn run_regression(
@@ -22851,7 +23143,10 @@ fn run_regression(
 
     let did_not_start = format!("{error:#}").contains(DID_NOT_START_MARKER);
     if !did_not_start {
-        println!("--- {name}: FAILED ({error:#})");
+        println!(
+            "--- {name}: FAILED [{}] ({error:#})",
+            failure_category(&error)
+        );
         failed.push(name.to_string());
         return;
     }
@@ -22861,7 +23156,10 @@ fn run_regression(
     match body() {
         Ok(()) => println!("--- {name}: OK (on the retry)"),
         Err(error) => {
-            println!("--- {name}: FAILED ({error:#})");
+            println!(
+                "--- {name}: FAILED [{}] ({error:#})",
+                failure_category(&error)
+            );
             failed.push(name.to_string());
         }
     }
@@ -22891,7 +23189,17 @@ struct KernelBuild {
 ///
 /// **`OUT_DIR` は同じ `cargo` の出力から取る**——**別の呼び出しで訊くと、
 /// 訊いた構成が違いうる**（それが上記の取り違えの原因だった）。
+///
+/// **失敗は検査装置の故障として包む**（`launch::classify`。2026-09-24）。
 fn run_kernel_build(workspace_root: &Path, features: &[&str]) -> Result<KernelBuild> {
+    launch::as_harness(
+        run_kernel_build_unwrapped(workspace_root, features),
+        "building the kernel",
+    )
+}
+
+/// 本体（[`run_kernel_build`] が包む）。
+fn run_kernel_build_unwrapped(workspace_root: &Path, features: &[&str]) -> Result<KernelBuild> {
     let mut command = Command::new("cargo");
     command.current_dir(workspace_root).args([
         "build",
@@ -23051,7 +23359,21 @@ fn stage_esp(
     stage_esp_with_disk(workspace_root, bootloader_efi, kernel, DiskImage::Rebuild)
 }
 
+/// **失敗は検査装置の故障として包む**（`launch::classify`。2026-09-24）。
 fn stage_esp_with_disk(
+    workspace_root: &Path,
+    bootloader_efi: &Path,
+    kernel: &KernelBuild,
+    disk: DiskImage,
+) -> Result<PathBuf> {
+    launch::as_harness(
+        stage_esp_with_disk_unwrapped(workspace_root, bootloader_efi, kernel, disk),
+        "staging the ESP",
+    )
+}
+
+/// 本体（[`stage_esp_with_disk`] が包む）。
+fn stage_esp_with_disk_unwrapped(
     workspace_root: &Path,
     bootloader_efi: &Path,
     kernel: &KernelBuild,
@@ -23188,7 +23510,16 @@ fn workspace_root() -> Result<PathBuf> {
 
 /// OVMF の変数領域 (NVRAM) は QEMU が起動時に書き込むため、パッケージ配布物を
 /// そのまま渡さず target/ovmf/ 配下に書き込み可能なコピーを用意する。
+/// **失敗は検査装置の故障として包む**（`launch::classify`。2026-09-24）。
 fn prepare_ovmf_vars(workspace_root: &Path) -> Result<PathBuf> {
+    launch::as_harness(
+        prepare_ovmf_vars_unwrapped(workspace_root),
+        "preparing the OVMF variables",
+    )
+}
+
+/// 本体（[`prepare_ovmf_vars`] が包む）。
+fn prepare_ovmf_vars_unwrapped(workspace_root: &Path) -> Result<PathBuf> {
     let ovmf_dir = workspace_root.join("target").join("ovmf");
     fs::create_dir_all(&ovmf_dir)
         .with_context(|| format!("failed to create {}", ovmf_dir.display()))?;
@@ -23320,6 +23651,20 @@ fn qemu_launch_args(opts: &QemuLaunchOptions) -> Vec<OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `/proc/<pid>/status` の `SigIgn:`（実測の形）から SIGXFSZ を読む。
+    #[test]
+    fn sigign_is_read_for_sigxfsz() {
+        assert_eq!(
+            sigign_has_sigxfsz("Name:\tqemu\nSigIgn:\t0000000001001000\nSigCgt:\t0\n"),
+            Some(true)
+        );
+        assert_eq!(
+            sigign_has_sigxfsz("SigIgn:\t0000000000001000\n"),
+            Some(false)
+        );
+        assert_eq!(sigign_has_sigxfsz("Name:\tqemu\n"), None);
+    }
 
     /// **QEMU 8.2.2 が書いた 2 つの形を、どちらも shutdown と読む**（2026-09-24 の実測の行）。
     #[test]
