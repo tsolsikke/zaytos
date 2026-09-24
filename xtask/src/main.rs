@@ -16276,7 +16276,13 @@ fn cmd_drift_test(minutes: u64, smp: Option<u32>) -> Result<()> {
     let workspace_root = workspace_root()?;
     let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
-    let kernel_elf = build_kernel(&workspace_root, false)?;
+    // **定常のループを保つ構成で起こす**（2026-09-25）。**既定の構成はハートビート 2 本でシェルへ渡し、
+    // その後はハートビートを出さない**（S11-11。`kernel/src/main.rs` の `SHELL_AFTER_HEARTBEATS`）。
+    // **それ以来この測定は標本を 1 つしか採れず、「ティックが進まない」で落ちていた**——**手で回す
+    // 道具なので、誰も気づかなかった**（2026-09-25 に手の道具の確かめを置いて見つけた。
+    // `docs/troubleshooting.md`）。**`keep-steady-loop` は、LAPIC タイマの速さの項目が同じ理由で
+    // 使っている構成である。**
+    let kernel_elf = build_kernel_with_features(&workspace_root, &["keep-steady-loop"])?;
     let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
 
     let serial_log = workspace_root.join("target").join("drift-serial.log");
@@ -16346,10 +16352,19 @@ fn cmd_drift_test(minutes: u64, smp: Option<u32>) -> Result<()> {
         heartbeats.len(),
         samples.len()
     );
+    // **比べるには標本が 2 つ要る**（2026-09-25）。**1 つでは「全標本が同じ」が空の真になる**
+    // ——**前提が崩れていた間、2 つの量はこの形で OK と出ていた。**
+    let mut failed = false;
+    if samples.len() < 2 {
+        println!(
+            "--- drift test: {} sample(s); drift needs at least two to compare: FAILED",
+            samples.len()
+        );
+        failed = true;
+    }
 
     // **動かないはずの量。** 増える量（ティック等）はここに入れない。
     const INVARIANTS: &[&str] = &["heap_free=", "heap_blocks="];
-    let mut failed = false;
     for field in INVARIANTS {
         let values: Vec<String> = samples
             .iter()
