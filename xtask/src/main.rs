@@ -9122,13 +9122,18 @@ fn cmd_ttf_test(features: &[&str], expect_pass: bool) -> Result<()> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the ttf test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "ttf-test",
+        ZI_TEST_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     let deadline = Instant::now() + ZI_TEST_TIMEOUT;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         let text = read_lossy(&serial_log);
         if strip_ansi(&text).contains("script-done:") {
             break;
@@ -9284,13 +9289,18 @@ fn cmd_serial_test(features: &[&str], expect_pass: bool) -> Result<()> {
     qemu_args.push("-smp".into());
     qemu_args.push("2".into());
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the serial test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "serial-test",
+        BOOT_READY_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     let deadline = Instant::now() + BOOT_READY_TIMEOUT;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         if strip_ansi(&read_lossy(&serial_log)).contains("serial-stress: done;") {
             break;
         }
@@ -9431,13 +9441,18 @@ fn cmd_complete_test(features: &[&str], expect_pass: bool) -> Result<()> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the completion test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "complete-test",
+        ZI_TEST_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     let deadline = Instant::now() + ZI_TEST_TIMEOUT;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         let text = read_lossy(&serial_log);
         if strip_ansi(&text).contains("script-done:") {
             break;
@@ -9583,10 +9598,15 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the zi test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "zi-test",
+        ZI_TEST_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     // **台本の最後の出力が出るまで待つ。** 上限つき。
     //
@@ -9612,7 +9632,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
     let started_waiting = Instant::now();
     let deadline = started_waiting + ZI_TEST_TIMEOUT;
     let mut finished_after = None;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         let text = read_lossy(&serial_log);
         // **色の列を落としてから探す（ES-d）。** [`strip_ansi`] の doc。
         if strip_ansi(&text).contains(done_marker) {
@@ -10837,10 +10857,15 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the view test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "view-test",
+        ZI_TEST_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     // **合図は `script-done:` である**（`zi-test` と同じ。**主張を持つ行を
     // 待ちの合図に使わない**）。
@@ -10848,7 +10873,7 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
     let started_waiting = Instant::now();
     let deadline = started_waiting + ZI_TEST_TIMEOUT;
     let mut finished_after = None;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         let text = read_lossy(&serial_log);
         if strip_ansi(&text).contains(done_marker) {
             finished_after = Some(started_waiting.elapsed());
@@ -11321,15 +11346,20 @@ fn cmd_pci_test(features: &[&str]) -> Result<()> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the pci test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "pci-test",
+        EXCEPTION_TEST_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     // 列挙の完了を待つ。上限つき。
     let complete_marker = "pci: enumeration complete:";
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         let text = read_lossy(&serial_log);
         if text.contains(complete_marker) {
             break;
@@ -11622,16 +11652,21 @@ fn cmd_virtio_test(features: &[&str]) -> Result<()> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the virtio test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "virtio-test",
+        EXCEPTION_TEST_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     // 読みの判定行か、停止の行が出るまで待つ。上限つき。
     let read_marker = "virtio-blk: read sector ";
     let error_marker = "virtio-blk: ";
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         let text = read_lossy(&serial_log);
         if text.contains(read_marker)
             || text
@@ -11769,10 +11804,15 @@ fn cmd_virtio_irq_test(features: &[&str]) -> Result<()> {
         accelerator: Accelerator::Tcg,
         debug_events: DebugEvents::IntAndCpuReset,
     });
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the virtio irq test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "virtio-irq-test",
+        EXCEPTION_TEST_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     let exercise_marker = "virtio-blk: interrupt exercise:";
     let error_marker = "virtio-blk: the interrupt exercise failed";
@@ -11791,7 +11831,7 @@ fn cmd_virtio_irq_test(features: &[&str]) -> Result<()> {
     // **演習の行を見たら猶予を置いて切る**（上限は全体の締切より短い）。
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     let mut grace: Option<Instant> = None;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         let text = read_lossy(&serial_log);
         if text.contains(released_marker) || text.contains(error_marker) {
             break;
