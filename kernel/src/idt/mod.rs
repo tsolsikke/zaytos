@@ -115,6 +115,9 @@ core::arch::global_asm!(
     ".globl zaytos_exception_stubs_end",
     "zaytos_exception_stubs_end:",
     ".p2align 4",
+    // **ラベルを公開する（2026-09-24）。** 全ゲートの飛び先を突き合わせる見張り
+    // （[`check_gates_lead_to_common_entries`]）が、この番地を読む。
+    ".globl zaytos_exception_common",
     "zaytos_exception_common:",
     // ここに来た時点のスタック:
     //   [rsp]=ベクタ, +8=エラーコード, +16=RIP, +24=CS, +32=RFLAGS, +40=RSP, +48=SS
@@ -222,6 +225,13 @@ const CLEAR_DF_ON_IRQ_ENTRY: usize = if cfg!(feature = "irq-entry-keeps-df-test"
     0
 } else {
     1
+};
+/// 破壊 `idt-stub-skips-common-entry-test` が立っているか（1 なら、測定用 IPI のスタブが共通の
+/// 入口を飛ばす）。**`.if` で出し入れする**（[`CLEAR_DF_ON_EXCEPTION_ENTRY`] と同じ理由）。
+const STUB_SKIPS_COMMON_ENTRY: usize = if cfg!(feature = "idt-stub-skips-common-entry-test") {
+    1
+} else {
+    0
 };
 /// システムコールの入口の分（[`CLEAR_DF_ON_EXCEPTION_ENTRY`]）。
 const CLEAR_DF_ON_SYSCALL_ENTRY: usize = if cfg!(feature = "syscall-entry-keeps-df-test") {
@@ -341,7 +351,14 @@ core::arch::global_asm!(
     ".globl zaytos_ipi_probe_stub",
     "zaytos_ipi_probe_stub:",
     "  .byte 0x68, 0x43, 0x00, 0x00, 0x00",
+    // 破壊 (2026-09-24, idt-stub-skips-common-entry): 共通の入口を通らず、Rust の `irq_entry` へ
+    // 直に飛ぶ。**`cld` も退避も飛ばす入口が 1 つ増えた形である。** **ゲートはこのスタブを指した
+    // ままなので、ゲートとスタブの既存の検査は通り、飛び先の見張りだけが捕まえる。**
+    "  .if {stub_skips_common_entry}",
+    "  jmp {skipped_to}",
+    "  .else",
     "  jmp zaytos_irq_common",
+    "  .endif",
     ".p2align 4",
     // virtio-blk 用スタブ（S13-d）。既存の専用スタブと同じ形である。
     ".globl zaytos_virtio_blk_stub",
@@ -349,6 +366,7 @@ core::arch::global_asm!(
     "  .byte 0x68, 0x44, 0x00, 0x00, 0x00",
     "  jmp zaytos_irq_common",
     ".p2align 4",
+    ".globl zaytos_irq_common",
     "zaytos_irq_common:",
     // 入場時のスタック: [rsp]=ベクタ, +8=RIP, +16=CS, +24=RFLAGS, +32=RSP, +40=SS
     //
@@ -421,6 +439,8 @@ core::arch::global_asm!(
     adjust = const STACK_ALIGN_ADJUST,
     yield_vector = const YIELD_VECTOR,
     clear_df = const CLEAR_DF_ON_IRQ_ENTRY,
+    stub_skips_common_entry = const STUB_SKIPS_COMMON_ENTRY,
+    skipped_to = sym irq_entry,
 );
 
 extern "C" {
@@ -450,6 +470,7 @@ core::arch::global_asm!(
     "  push {syscall_vector}",
     "  jmp zaytos_syscall_common",
     ".p2align 4",
+    ".globl zaytos_syscall_common",
     "zaytos_syscall_common:",
     // 入場時のスタック: [rsp]=ベクタ, +8=RIP, +16=CS, +24=RFLAGS, +32=RSP, +40=SS
     // GPR を退避する。順序は IrqContext のフィールド順と一対一（IRQ と同じ）。
@@ -1617,6 +1638,90 @@ pub fn check_dedicated_stubs() -> [DedicatedStubCheck; DEDICATED_STUB_COUNT] {
         expected_handler,
         actual_handler: entry(vector).map_or(0, |e| e.handler_address()),
     })
+}
+
+extern "C" {
+    /// 3 つの共通の入口（2026-09-24。[`check_gates_lead_to_common_entries`] が飛び先と突き合わせる）。
+    static zaytos_exception_common: u8;
+    static zaytos_irq_common: u8;
+    static zaytos_syscall_common: u8;
+}
+
+/// 全ゲートの飛び先を 3 つの共通の入口と突き合わせた結果（2026-09-24。`ADR-0018` の Addendum 9）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CommonEntryCheck {
+    /// 例外の共通の入口へ行くゲートの数。
+    pub exception: usize,
+    /// IRQ の共通の入口へ行くゲートの数。
+    pub irq: usize,
+    /// システムコールの共通の入口へ行くゲートの数。
+    pub syscall: usize,
+    /// どれにも行かなかった最初のゲート（ベクタ・ゲートの指す番地・読めた飛び先）。
+    pub first_stray: Option<(usize, u64, Option<u64>)>,
+}
+
+impl CommonEntryCheck {
+    /// 全ゲートが 3 つのどれかへ行ったか。
+    pub fn is_ok(&self) -> bool {
+        self.first_stray.is_none() && self.exception + self.irq + self.syscall == IDT_ENTRY_COUNT
+    }
+}
+
+/// **IDT の全ゲートが、3 つの共通の入口のどれかへ行くことを確かめる**（2026-09-24。`ADR-0018` の
+/// Addendum 9 の棚卸しの見張り）。
+///
+/// # なぜ要るのか
+///
+/// **方向フラグを降ろす `cld` は、3 つの共通の入口にしか無い。** **ゲートがスタブを指すことは
+/// [`check_stub_table`]・[`check_irq_stub_table`]・[`check_dedicated_stubs`] が見ている**が、
+/// **スタブが共通の入口へ飛ぶことは誰も見ていなかった**——**共通の入口を飛ばすスタブを 1 本足すと、
+/// 棚卸しの「入口は 3 つ」が黙って偽になる。**
+///
+/// # 読むのは既知のスタブだけである
+///
+/// **ゲートの指す番地が、例外のスタブの表・IRQ のスタブの表・専用のスタブのどれかであるときだけ、
+/// その先の 16 バイトを読む。** **それ以外の番地は読まずに「どれにも行かない」とする**——任意の
+/// 番地を読んで #PF にしない。
+pub fn check_gates_lead_to_common_entries() -> CommonEntryCheck {
+    let exception_common = addr_of!(zaytos_exception_common) as u64;
+    let irq_common = addr_of!(zaytos_irq_common) as u64;
+    let syscall_common = addr_of!(zaytos_syscall_common) as u64;
+    let exception_table =
+        addr_of!(zaytos_exception_stubs) as u64..addr_of!(zaytos_exception_stubs_end) as u64;
+    let irq_table = addr_of!(zaytos_irq_stubs) as u64..addr_of!(zaytos_irq_stubs_end) as u64;
+    let dedicated = dedicated_stubs();
+    let mut check = CommonEntryCheck {
+        exception: 0,
+        irq: 0,
+        syscall: 0,
+        first_stray: None,
+    };
+    for vector in 0..IDT_ENTRY_COUNT {
+        let handler = entry(vector).map_or(0, |e| e.handler_address());
+        let known_stub = exception_table.contains(&handler)
+            || irq_table.contains(&handler)
+            || dedicated.iter().any(|&(_, stub)| stub == handler);
+        let target = if known_stub {
+            // SAFETY: `handler` はこのカーネルの `.text` に在るスタブの番地である（上の 3 つの
+            // どれかと一致した）。スタブは 16 バイトの枠に収まっており（`STUB_SIZE`）、読むだけで
+            // 書かない。
+            let bytes = unsafe { core::slice::from_raw_parts(handler as *const u8, STUB_SIZE) };
+            layout::stub_jump_target(bytes, handler)
+        } else {
+            None
+        };
+        match target {
+            Some(t) if t == exception_common => check.exception += 1,
+            Some(t) if t == irq_common => check.irq += 1,
+            Some(t) if t == syscall_common => check.syscall += 1,
+            _ => {
+                if check.first_stray.is_none() {
+                    check.first_stray = Some((vector, handler, target));
+                }
+            }
+        }
+    }
+    check
 }
 
 /// スタブ表の刻み幅と、IDT エントリがそれを正しく指していることを検証する。

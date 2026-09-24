@@ -365,6 +365,33 @@ unsafe fn read_msr(msr: u32) -> u64 {
     ((high as u64) << 32) | low as u64
 }
 
+/// `IA32_EFER`（`0xC000_0080`）。
+const IA32_EFER: u32 = 0xC000_0080;
+
+/// EFER の読み（2026-09-24。`ADR-0018` の Addendum 9 の棚卸しの見張り）。
+///
+/// **解釈した型で外へ出す**（[`read_msr`] の doc の方針）。**生の値は起動ログへ出すためだけに
+/// 開ける**（[`Efer::raw`]）——**ビットの意味はこの型と `kernel::cpu_state` が持つ。**
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Efer(u64);
+
+impl Efer {
+    /// SCE（bit 0）。**`syscall` と `sysret` を許す。** **0 なら `syscall` 命令は `#UD` になる。**
+    pub const SYSCALL_ENABLE: u64 = 1 << 0;
+
+    /// 生の値（起動ログへ出すため）。
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+/// EFER を読む。
+pub fn read_efer() -> Efer {
+    // SAFETY: IA32_EFER は長モードへ入るのに LME を立てる MSR で、長モードで走っている CPU には
+    // 必ず在る（このコードは長モードでしか走らない）。
+    Efer(unsafe { read_msr(IA32_EFER) })
+}
+
 /// CPU が Local APIC を持つか（`CPUID.01H:EDX[9]`）。
 ///
 /// **`IA32_APIC_BASE` を読む前に確かめる。** Local APIC を持たない CPU では

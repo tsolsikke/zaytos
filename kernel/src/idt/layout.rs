@@ -177,10 +177,78 @@ pub fn exception_name(vector: u8) -> &'static str {
     }
 }
 
+/// スタブの先頭のバイト列から、飛び先を読む（2026-09-24。`ADR-0018` の Addendum 9 の見張り）。
+///
+/// **スタブの形は「`push` を 0〜2 個、続けて `jmp`」である**——例外のスタブ（ダミーの 0 とベクタ）、
+/// IRQ のスタブ（ベクタ）、専用のスタブ（ベクタ）。**`push imm8` は `6A ib`、`push imm32` は `68 id`、
+/// `jmp rel32` は `E9 cd`、`jmp rel8` は `EB cb` である**（Intel SDM の命令の符号化）。
+/// **ほかの形なら `None` を返す**——**共通の入口を通らない入口の候補として、呼び出し側が止める。**
+pub fn stub_jump_target(bytes: &[u8], stub_address: u64) -> Option<u64> {
+    let mut at = 0usize;
+    for _ in 0..2 {
+        match *bytes.get(at)? {
+            0x6A => at += 2,
+            0x68 => at += 5,
+            _ => break,
+        }
+    }
+    let (next, displacement) = match *bytes.get(at)? {
+        0xE9 => (
+            at + 5,
+            i64::from(i32::from_le_bytes(
+                bytes.get(at + 1..at + 5)?.try_into().ok()?,
+            )),
+        ),
+        0xEB => (at + 2, i64::from(*bytes.get(at + 1)? as i8)),
+        _ => return None,
+    };
+    Some(
+        stub_address
+            .wrapping_add(next as u64)
+            .wrapping_add(displacement as u64),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::gdt::KERNEL_CODE_SELECTOR;
+
+    /// 例外のスタブの形（`push 0` / `push 14` / `jmp rel32`）。飛び先は後ろへ 0x1000。
+    #[test]
+    fn an_exception_stub_leads_to_its_jump_target() {
+        let target: i32 = 0x1000 - 9;
+        let mut bytes = vec![0x6A, 0x00, 0x6A, 0x0E, 0xE9];
+        bytes.extend_from_slice(&target.to_le_bytes());
+        assert_eq!(stub_jump_target(&bytes, 0x5000), Some(0x6000));
+    }
+
+    /// 専用のスタブの形（`push imm32` / `jmp rel32`）。飛び先は前へ戻る。
+    #[test]
+    fn a_dedicated_stub_can_jump_backwards() {
+        let target: i32 = -0x100 - 10;
+        let mut bytes = vec![0x68, 0x43, 0x00, 0x00, 0x00, 0xE9];
+        bytes.extend_from_slice(&target.to_le_bytes());
+        assert_eq!(stub_jump_target(&bytes, 0x5000), Some(0x4F00));
+    }
+
+    /// システムコールのスタブは共通の入口の直前に在るので、`jmp rel8` になりうる。
+    #[test]
+    fn a_short_jump_is_read_too() {
+        let bytes = [0x68, 0x80, 0x00, 0x00, 0x00, 0xEB, 0x09];
+        assert_eq!(stub_jump_target(&bytes, 0x5000), Some(0x5010));
+    }
+
+    /// **`push` の後に `jmp` が無ければ、飛び先は無い**（共通の入口を通らない候補）。
+    #[test]
+    fn a_stub_that_does_not_jump_has_no_target() {
+        assert_eq!(
+            stub_jump_target(&[0x6A, 0x00, 0x6A, 0x0E, 0x55, 0x90], 0x5000),
+            None
+        );
+        assert_eq!(stub_jump_target(&[0x55, 0x48, 0x89, 0xE5], 0x5000), None);
+        assert_eq!(stub_jump_target(&[0xE9, 0x00], 0x5000), None);
+    }
 
     #[test]
     fn an_entry_is_sixteen_bytes() {

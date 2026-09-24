@@ -215,12 +215,34 @@ fn verify_ready(
         irq_stubs.actual_size,
         irq_stubs.expected_size
     ));
-    let idt_and_exception_gates =
-        if exception_gates_ok && exception_stubs.is_ok() && irq_stubs.is_ok() {
-            CheckState::Verified
-        } else {
-            CheckState::Failed
-        };
+    // **全ゲートが 3 つの共通の入口のどれかへ行くこと**（2026-09-24。`ADR-0018` の Addendum 9）。
+    // **上の 2 つはゲートがスタブを指すことまでを見る。** **スタブの飛び先はここが見る。**
+    let common_entries = idt::check_gates_lead_to_common_entries();
+    logger.info(format_args!(
+        "sti-check 3b: all {} IDT gate(s) lead to one of the 3 common entries = {} (exception {}, \
+         irq {}, syscall {})",
+        idt::IDT_ENTRY_COUNT,
+        common_entries.is_ok(),
+        common_entries.exception,
+        common_entries.irq,
+        common_entries.syscall
+    ));
+    if let Some((vector, handler, target)) = common_entries.first_stray {
+        logger.error(format_args!(
+            "sti-check 3b: gate {vector:#04x} (stub {handler:#x}) leads to {target:#x?}, not to one of \
+             the 3 common entries; an entry that skips them skips cld and the direction-flag check - \
+             redo the inventory in ADR-0018 Addendum 9"
+        ));
+    }
+    let idt_and_exception_gates = if exception_gates_ok
+        && exception_stubs.is_ok()
+        && irq_stubs.is_ok()
+        && common_entries.is_ok()
+    {
+        CheckState::Verified
+    } else {
+        CheckState::Failed
+    };
 
     // --- 5. IRQ マスク（項目 4 の判断に必要なので先に評価する）---
     // 判定と表示は同じ 1 回の読み出しから導く（`MaskCheck`）。別々に読むと

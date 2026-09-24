@@ -315,6 +315,9 @@ kernel::console::screen::tests::the_baseline_is_zero_before_any_flush
 kernel::console::screen::tests::the_percentage_compares_against_full_screen_transfers
 kernel::console::screen::tests::transferring_everything_every_time_shows_as_one_hundred_percent
 kernel::console::tests::the_grid_can_hold_the_widest_glyph_in_the_font
+kernel::cpu_state::tests::each_inventory_bit_is_named_when_set
+kernel::cpu_state::tests::smep_and_umip_do_not_break_the_inventory
+kernel::cpu_state::tests::the_measured_state_breaks_nothing
 kernel::frame_allocator::tests::adjacent_free_regions_are_coalesced_into_one_range
 kernel::frame_allocator::tests::aligned_allocation_consuming_the_whole_range
 kernel::frame_allocator::tests::aligned_allocation_fails_when_only_the_alignment_is_missing
@@ -431,10 +434,14 @@ kernel::idt::decode::tests::the_double_fault_error_code_is_marked_as_always_zero
 kernel::idt::decode::tests::the_kind_matches_the_error_code_table
 kernel::idt::decode::tests::the_reserved_bit_violation_is_detected
 kernel::idt::decode::tests::the_upper_page_fault_bits_are_decoded
+kernel::idt::layout::tests::a_dedicated_stub_can_jump_backwards
 kernel::idt::layout::tests::a_missing_entry_is_not_present
 kernel::idt::layout::tests::a_nonzero_dpl_is_encoded
+kernel::idt::layout::tests::a_short_jump_is_read_too
+kernel::idt::layout::tests::a_stub_that_does_not_jump_has_no_target
 kernel::idt::layout::tests::a_trap_gate_is_a_different_type_from_an_interrupt_gate
 kernel::idt::layout::tests::an_entry_is_sixteen_bytes
+kernel::idt::layout::tests::an_exception_stub_leads_to_its_jump_target
 kernel::idt::layout::tests::an_interrupt_gate_is_encoded_as_type_0xe
 kernel::idt::layout::tests::clearing_the_present_bit_keeps_everything_else
 kernel::idt::layout::tests::every_cpu_defined_vector_has_a_name

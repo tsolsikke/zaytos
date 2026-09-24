@@ -1803,6 +1803,9 @@ extern "sysv64" fn kernel_main() -> ! {
         taken == returned
     ));
 
+    // **棚卸しの前提（2026-09-24。`ADR-0018` の Addendum 9）。** **最初のユーザープログラムより前に見る。**
+    kernel::cpu_state::check_and_report(&mut logger);
+
     if let Err(error) = load_embedded_user_program(&mut logger) {
         // **この段ではまだ止める。** 既定の `hello` は成功するので、ここへは来ない。
         // 壊した像を渡してプロセスだけを失敗させるのは S9-b-2 の 2 つ目である。
@@ -10936,6 +10939,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "syscall-entry-keeps-df-test",
         cfg!(feature = "syscall-entry-keeps-df-test"),
         "システムコールの入口のスタブが方向フラグを降ろさない",
+    ),
+    (
+        "kernel-uses-gs-test",
+        cfg!(feature = "kernel-uses-gs-test"),
+        "gs: を読む関数を像に残す（呼ばない）",
+    ),
+    (
+        "cpu-state-sees-sce-test",
+        cfg!(feature = "cpu-state-sees-sce-test"),
+        "EFER.SCE が立っているものとして棚卸しの前提を判定する（MSR は書かない）",
+    ),
+    (
+        "idt-stub-skips-common-entry-test",
+        cfg!(feature = "idt-stub-skips-common-entry-test"),
+        "測定用 IPI のスタブが共通の入口を飛ばして irq_entry へ直に飛ぶ",
     ),
     (
         "ttf-test",
