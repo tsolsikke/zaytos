@@ -5248,6 +5248,11 @@ const SOCKET_TEST_SABOTAGES: &[&str] = &[
     "shm-mmap-maps-nothing",
     // **msghdr の msg_iovlen を見ない**——iovlen=2 が `-EINVAL` にならず、badmsg の判定が落ちる。
     "socket-msghdr-ignores-iovlen",
+    // **recvmsg が待つ前に fd を取る（直す前の形。2026-09-23）**——`shmlate` で受け手が先に待つので
+    // fd を取りこぼし、`shm-ok` ではなく `shm` が返る。**落ちるのは「受け手が先に待った回」の判定 1 本だけ**
+    // （実測。3 回とも）。**fd の計器は落ちない**——**取りこぼした fd は、次の `recvmsg`（EOF を読む回）の
+    // 入口で拾われ、送った数と受けた数が合ってしまう。**
+    "socket-recvmsg-takes-fd-first",
 ];
 
 /// `socket-test` の上限（秒）。**既定は台本の族の水準（10 秒の桁）の見込みなので、その 10 倍。**
@@ -5446,7 +5451,7 @@ fn cmd_socket_test(features: &[&str], expect_pass: bool) -> Result<()> {
         ),
         (
             "eof_after_the_peer_closed",
-            count_line("sockd: client left") == 6 && eof == Some(7),
+            count_line("sockd: client left") == 7 && eof == Some(8),
         ),
         (
             "epipe_after_the_peer_closed",
@@ -5455,9 +5460,9 @@ fn cmd_socket_test(features: &[&str], expect_pass: bool) -> Result<()> {
         (
             "the_queue_and_the_slots",
             count_line("sockc: twice second=0 reply=one reply=two") == 1
-                && created == Some(7)
+                && created == Some(8)
                 && at_once == Some(2)
-                && connections_released == Some(7)
+                && connections_released == Some(8)
                 && backlog_full == Some(0)
                 && bound == Some(1)
                 && listeners_released == Some(1),
@@ -5467,18 +5472,27 @@ fn cmd_socket_test(features: &[&str], expect_pass: bool) -> Result<()> {
             // 同じ物理ページを mmap して読み、バイト単位で一致した。**
             "shm_went_round",
             count_line("sockc: shm sent=3 reply=shm-ok") == 1
-                && count_line("sockd: shm 6000 bytes ok=true") == 1,
+                && count_line("sockd: shm 6000 bytes ok=true") >= 1,
+        ),
+        (
+            // **受け手が先に `recvmsg` で待っていても fd が届く（2026-09-23）。** **`sockc shmlate` は
+            // 繋いでから 200ms 眠って送る。** **直す前の形（`recvmsg` が待つ前に fd を取る）では、
+            // 受け手が fd を取りこぼしてデータの `shm` だけを返した**（`--full` で 1 度落ちた形を、
+            // 順序を固定して必ず起こす）。**サーバーの確かめの行は 2 回ぶんになる。**
+            "shm_went_round_when_the_server_waited_first",
+            count_line("sockc: shmlate sent=3 reply=shm-ok") == 1
+                && count_line("sockd: shm 6000 bytes ok=true") == 2,
         ),
         (
             // **共有メモリの計器（`ADR-0065`）。** **created/released/mapped は起動時の
             // `syscall-test` の分も乗るので `>=`、fds は台本だけなので `==`。**
             "shm_gauges_are_coherent",
-            shm_created.is_some_and(|n| n >= 2)
-                && shm_released.is_some_and(|n| n >= 2)
+            shm_created.is_some_and(|n| n >= 3)
+                && shm_released.is_some_and(|n| n >= 3)
                 && shm_created == shm_released
-                && shm_mapped.is_some_and(|n| n >= 3)
-                && shm_fds_sent == Some(1)
-                && shm_fds_received == Some(1),
+                && shm_mapped.is_some_and(|n| n >= 5)
+                && shm_fds_sent == Some(2)
+                && shm_fds_received == Some(2),
         ),
         (
             // **絞った範囲の外を確かめる（`ADR-0065`）。** **`msg_iovlen` が 2 の `sendmsg` は
@@ -21384,7 +21398,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 37,
-    full: 376,
+    full: 377,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。

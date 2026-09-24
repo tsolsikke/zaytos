@@ -3,7 +3,7 @@
 //! # 本番の形の予行である
 //!
 //! **Wayland のクライアントと同じ形で繋ぐ**——**名前（既定は `wayland-0`）で `connect` し、
-//! 書いて、返事を読む。** **`sockd` と対で、`socket-test` の台本が 6 つの形を 1 つずつ打つ。**
+//! 書いて、返事を読む。** **`sockd` と対で、`socket-test` の台本が 9 つの形を 1 つずつ打つ。**
 //! **Seinas が来たら、この組は検査に残す**（`sockd` の doc）。
 //!
 //! # 形（`argv[1]`）
@@ -15,6 +15,10 @@
 //! - `bind` `sockd` が取った名前を取ろうとする（`-EADDRINUSE`）
 //! - `twice` 2 本繋いで、1 本目を閉じてから 2 本目で話す（待ち行列）
 //! - `quit` `quit` を送り、相手が閉じた後の `read`（0）と `write`（`-EPIPE`）を見る
+//! - `shm` 共有メモリの fd を `SCM_RIGHTS` で送る（`ADR-0065`）
+//! - `shmlate` `shm` と同じだが、**繋いでから 200ms 眠って送る**——**受け手が先に `recvmsg` で
+//!   待つ順序を必ず作る**（2026-09-23。`recvmsg` が待つ前に fd を取っていた競合の回帰の検査）
+//! - `badmsg` `msg_iovlen` が 2 の `msghdr` を送る（`-EINVAL`）
 //!
 //! **`argv[2]` が在ればそれを名前にする。**
 //!
@@ -35,8 +39,22 @@ mod userlib;
 
 use userlib::{
     bind, close, connect, exit, ftruncate, length_of, memfd_create, mmap_shared, read, sendmsg,
-    socket, write_all, MsgBuffers, STDOUT,
+    socket, syscall3, write_all, MsgBuffers, STDOUT,
 };
+
+/// `nanosleep`（Linux x86-64 の番号）。**`shmlate` だけが使う。**
+const SYS_NANOSLEEP: u64 = 35;
+
+/// `shmlate` が繋いでから送るまで眠る長さ（ナノ秒）。**受け手は `accept` の後すぐ `recvmsg` へ入るので、
+/// 200ms あれば受け手が先に待っている**（ティックは 10ms の桁）。
+const SHM_LATE_DELAY_NANOS: i64 = 200_000_000;
+
+/// `struct timespec`（Linux x86-64 の配置。`tv_sec` と `tv_nsec` がともに 8 バイト）。
+#[repr(C)]
+struct Timespec {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
 
 /// 名前の最大長（カーネルの `NAME_MAX` と同じ）。
 const NAME_MAX: usize = 31;
@@ -270,7 +288,9 @@ fn mode_quit(name: &[u8]) {
 /// **`create_pool` の予行そのものである**——**`memfd_create`＋`ftruncate`＋`mmap` で
 /// `size` バイトの無名の共有メモリを作り、模様を書き、fd を `sendmsg` で送る。** **サーバーが
 /// 同じ fd を `mmap` して読み、確かめて返す。** **同じ物理ページを両側が張る（真の共有）。**
-fn mode_shm(name: &[u8]) {
+///
+/// **`late` なら、繋いでから眠って送る**（`shmlate`）——**受け手が先に `recvmsg` で待つ順序を作る。**
+fn mode_shm(name: &[u8], late: bool) {
     const SHM_LEN: usize = 6000;
     let shm_fd = memfd_create();
     if shm_fd < 0 {
@@ -308,6 +328,14 @@ fn mode_shm(name: &[u8]) {
         close(shm_fd);
         return;
     };
+    if late {
+        let request = Timespec {
+            tv_sec: 0,
+            tv_nsec: SHM_LATE_DELAY_NANOS,
+        };
+        // SAFETY: `request` は 16 バイトの読める領域である。`rem` は渡さない（0）。
+        unsafe { syscall3(SYS_NANOSLEEP, &request as *const Timespec as u64, 0, 0) };
+    }
     // **fd を送る。** データは "shm" の 3 バイト。
     let mut data = *b"shm";
     // SAFETY: `data` はこの関数の間だけ生き、`msg` より長生きする（`msghdr` が指す）。
@@ -317,7 +345,7 @@ fn mode_shm(name: &[u8]) {
     let mut reply = [0u8; REPLY_CAP];
     let got = read(fd, &mut reply);
     let mut line = Line::new();
-    line.push(b"sockc: shm sent=");
+    line.push(if late { b"sockc: shmlate sent=" as &[u8] } else { b"sockc: shm sent=" });
     line.push_decimal(sent);
     if got > 0 {
         line.push(b" reply=");
@@ -403,7 +431,8 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
         b"bind" => mode_bind(name),
         b"twice" => mode_twice(name),
         b"quit" => mode_quit(name),
-        b"shm" => mode_shm(name),
+        b"shm" => mode_shm(name, false),
+        b"shmlate" => mode_shm(name, true),
         b"badmsg" => mode_badmsg(name),
         _ => {
             write_all(STDOUT, b"sockc: unknown mode\n");
