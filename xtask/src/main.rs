@@ -4911,6 +4911,11 @@ const SABOTAGE_STOP_REASONS: &[StopReason] = &[
         reason: "ext2: the image on the device did not parse: BadMagic",
         note: "the parse stops the boot before the byte-for-byte check can run",
     },
+    StopReason {
+        feature: "fp-mf-not-foldable-test",
+        reason: "exception: vector=16 (#MF",
+        note: "the kernel halts on the #MF from Ring 3 instead of folding the program, as intended",
+    },
 ];
 
 /// 破壊の回の判定（5.b。2026-09-25）。
@@ -4927,14 +4932,18 @@ enum SabotageVerdict {
     DidNotStop { error: String },
 }
 
-/// 破壊の回の結果を分ける（5.b。2026-09-25）。**表に載る破壊だけ、狙った理由を見る。**
-fn judge_sabotage(features: &[&str], result: &Result<()>) -> SabotageVerdict {
-    let reason = features.iter().find_map(|feature| {
+/// 構成の feature のうち、[`SABOTAGE_STOP_REASONS`] に載るものの行を返す（5.b）。
+fn stop_reason_for(features: &[&str]) -> Option<&'static StopReason> {
+    features.iter().find_map(|feature| {
         SABOTAGE_STOP_REASONS
             .iter()
             .find(|reason| reason.feature == *feature)
-    });
-    match (result, reason) {
+    })
+}
+
+/// 破壊の回の結果を分ける（5.b。2026-09-25）。**表に載る破壊だけ、狙った理由を見る。**
+fn judge_sabotage(features: &[&str], result: &Result<()>) -> SabotageVerdict {
+    match (result, stop_reason_for(features)) {
         (Ok(()), _) => SabotageVerdict::NotCaught,
         (Err(_), None) => SabotageVerdict::CaughtByAnyError,
         (Err(error), Some(reason)) => match error.downcast_ref::<StoppedEarly>() {
@@ -8774,9 +8783,18 @@ fn cmd_fp_test(features: &[&str], expect_pass: bool) -> Result<()> {
     ))?;
 
     let deadline = Instant::now() + ZI_TEST_TIMEOUT;
+    let mut stop = StopWatch::default();
+    let mut stopped = None;
     while Instant::now() < deadline && !child.was_cut() {
         let text = read_lossy(&serial_log);
         if strip_ansi(&text).contains("script-done:") {
+            break;
+        }
+        // **止まった印で待つのをやめる**（5.b。2026-09-25）。**`#MF` を畳めない破壊は、台本の
+        // 途中でカーネルを止める**——**以前は上限の 60 秒まで待っていた**（実測で、止まるのは
+        // 起こしてから 8.6 秒）。
+        if let Some(sign) = stop.settled(stop_sign_in(&text, "")) {
+            stopped = Some(sign);
             break;
         }
         metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
@@ -8902,6 +8920,25 @@ fn cmd_fp_test(features: &[&str], expect_pass: bool) -> Result<()> {
          {simd_did_not_fire}"
     );
 
+    // **止まることで捕まる破壊は、狙った理由の行で止まったときだけ捕まえたとする**
+    // （5.b。2026-09-25。[`SABOTAGE_STOP_REASONS`]）。**止まらなかった・別の理由で止まった、は落とす。**
+    // **子が走ったかを見る前に置く**——**止まる所が早い破壊も、理由で判定する。**
+    if let (false, Some(reason)) = (expect_pass, stop_reason_for(features)) {
+        return match &stopped {
+            Some(sign) if strip_ansi(&serial).contains(reason.reason) => {
+                println!(
+                    "{context}: the sabotage was caught for the intended reason: {sign}; {}",
+                    reason.note
+                );
+                Ok(())
+            }
+            Some(sign) => {
+                bail!("{context}: the machine stopped, but not for the intended reason: {sign}")
+            }
+            None => bail!("{context}: the intended stop never came"),
+        };
+    }
+
     if !child_ran {
         println!("{context}: FAILED");
         bail!("{context}: the child did not run, so the spawn judgement asserts nothing")
@@ -8913,6 +8950,7 @@ fn cmd_fp_test(features: &[&str], expect_pass: bool) -> Result<()> {
         && folded_the_fp_fault
         && folded_the_debug_fault
         && script_finished;
+
     if passed {
         println!("{context}: PASS");
         if expect_pass {
