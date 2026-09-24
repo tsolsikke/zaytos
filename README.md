@@ -143,6 +143,15 @@ cargo xtask check --full
 上記に加えて、QEMUを繰り返し起動する回帰チェックを順に実行する。
 1種類ごとにカーネルをビルドし直して起動するため、1時間強かかる。
 
+```
+cargo xtask full
+```
+
+同じ全検査を、HEADを取り出した別の作業木（`target/full-check/wt`）で回す。
+走っている間も作業中の木を触れる。全検査の間は、QEMUやVirtualBoxを使う検査は
+錠で断られる。`cargo xtask full --status`は、HEADの木が全検査に合格したかと、
+その後のコミットをそれぞれ何で確かめたかを出す。
+
 個別の回帰チェックは`cargo xtask run --<名前>-test`の形で単体でも走らせられる
 （`cargo xtask`を引数なしで実行すると、使い方の一覧が出る）。
 

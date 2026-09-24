@@ -22,3 +22,10 @@ description: 走っている QEMU や xtask を止める手順（pkill を使わ
 
 `grep '[q]emu...'` と書くと grep 自身がマッチしない。パターンを
 ブラケットで囲むのはそのためである。
+
+**全検査（`cargo xtask full`）を止めたとき、検査の錠は自分で放れる**
+（flock はプロセスが終われば、SIGKILL でもカーネルが放す。2026-09-25）——
+**錠のファイルを消す手順は要らない。** **錠の持ち主は `cargo xtask full --status`
+で見る。** **QEMU の子だけが残ることはある**（錠では見えない）——**上の 1 で
+`qemu` が出たら、同じ手順で止める。** **次の `cargo xtask full` と
+`cargo xtask check --commit` は、残った QEMU が在れば断る。**
