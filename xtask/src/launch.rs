@@ -31,7 +31,7 @@
 //! - **log-limit**——ファイルの上限か空きの下限で切った。**判定の真偽より先に立てる**——**切った走行
 //!   では「出なかった」を言えない。**
 //! - **harness**——検査装置の故障（QEMU が起きない、準備やビルドの失敗、空きが足りない）。
-//! - **timeout**——期限に着き、判定が偽。**期限に着くのが正常な項目は除く**（その選択は、使う箇所を移すときに足す）。
+//! - **timeout**——期限に着き、判定が偽。**期限に着くのが正常な項目（[`Deadline::Normal`]）は除く。**
 //! - **os**——走行は普通に終わったのに、判定が偽。
 //!
 //! **QEMU を起こさなかった項目（静的な検査など）は `check` とする**——上の 4 つのどれでもない。
@@ -86,12 +86,24 @@ pub const OTHER_WRITES: &[(&str, u64)] = &[
 /// `sh -c <これ> <名前> <命令> <引数>...` の形で使う（`$0` が名前、`$@` が命令と引数）。
 const IGNORE_XFSZ_THEN_EXEC: &str = "trap '' XFSZ; exec \"$@\"";
 
-/// 期限に着いたことの意味（[`classify`] が使う）。**「期限に着くのが正常」（止まることや、窓いっぱい
-/// 待つことを見る項目）の選択は、それを使う箇所を移すときに足す。**
+/// 期限に着いたことの意味（[`classify`] が使う）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Deadline {
     /// 期限に着いたら失敗（「着くまで待つ」項目）。**判定が偽なら `timeout` に分ける。**
     Failure,
+    /// **期限に着くのが正常**（決まった時間走らせる・窓の間眠る・窓いっぱい待つ項目）、または**期限を
+    /// 1 つに持たない**項目。**判定が偽でも `timeout` にしない**——**取り違えるよりは、分けない側に倒す。**
+    Normal,
+}
+
+/// 組の扱い。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Group {
+    /// 自分の組で起こし、終わりに組ごと止める（自動の検査）。**QEMU の子も残らない。**
+    Own,
+    /// **端末の組のまま起こす**（手で触る起動）。**別の組だと、端末から読んだ時点で SIGTTIN で止まる。**
+    /// **止めるのは QEMU だけである。**
+    Terminal,
 }
 
 /// 走行を切った理由。
@@ -227,6 +239,11 @@ pub fn classify(harness: bool, runs: &[RunRecord]) -> Category {
     }
 }
 
+/// 期限に着いたか（純粋な論理）。**[`Deadline::Normal`] の走行は着いたことにしない。**
+fn reached_deadline(deadline: Deadline, elapsed: Duration, timeout: Duration) -> bool {
+    deadline == Deadline::Failure && elapsed >= timeout
+}
+
 /// 誤りが検査装置の故障か。
 pub fn is_harness(error: &anyhow::Error) -> bool {
     error.downcast_ref::<HarnessFault>().is_some()
@@ -256,24 +273,35 @@ fn available_bytes(dir: &Path) -> Option<u64> {
     parse_df_avail(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// 止める相手（QEMU の組。組の番号は QEMU の pid と同じ）。**端末の組のまま起こす選択（手で触る
-/// 起動。別の組だと、端末から読んだ時点で SIGTTIN で止まる）は、その箇所を移すときに足す。**
+/// 止める相手。
 #[derive(Clone, Copy, Debug)]
-struct KillTarget(u32);
+enum KillTarget {
+    /// QEMU の組（組の番号は QEMU の pid と同じ）。
+    Group(u32),
+    /// QEMU だけ（端末の組のまま起こしたとき）。
+    Process(u32),
+}
 
 impl KillTarget {
-    /// 組ごと SIGKILL を送る（コアを吐かない）。**外の `kill` を使う**——依存を増やさない
-    /// （レビューの判断 (d)）。
+    /// `kill` に渡す相手（組なら負の番号）。
+    fn operand(self) -> String {
+        match self {
+            KillTarget::Group(pgid) => format!("-{pgid}"),
+            KillTarget::Process(pid) => pid.to_string(),
+        }
+    }
+
+    /// SIGKILL を送る（コアを吐かない）。**外の `kill` を使う**——依存を増やさない（レビューの判断 (d)）。
     fn kill(self) {
         let _ = Command::new("kill")
-            .args(["-KILL", "--", &format!("-{}", self.0)])
+            .args(["-KILL", "--", &self.operand()])
             .status();
     }
 
-    /// 組の中にまだ誰か残っているか（`kill -0`）。
+    /// まだ誰か残っているか（`kill -0`）。
     fn alive(self) -> bool {
         Command::new("kill")
-            .args(["-0", "--", &format!("-{}", self.0)])
+            .args(["-0", "--", &self.operand()])
             .stderr(std::process::Stdio::null())
             .status()
             .map(|status| status.success())
@@ -315,6 +343,7 @@ pub struct Spec<'a> {
     /// 呼ぶ側の期限（[`Deadline`] の判断に使う）。
     pub timeout: Duration,
     pub deadline: Deadline,
+    pub group: Group,
     /// ファイル 1 つの上限（既定は [`FILE_LIMIT_BYTES`]。上限を確かめる項目だけが小さくする）。
     pub file_limit: u64,
 }
@@ -335,6 +364,7 @@ impl<'a> Spec<'a> {
             what,
             timeout,
             deadline,
+            group: Group::Own,
             file_limit: FILE_LIMIT_BYTES,
         }
     }
@@ -378,7 +408,9 @@ pub fn spawn(spec: &Spec<'_>) -> Result<QemuRun> {
         .arg(spec.program)
         .args(spec.args);
     // **自分の組で起こす**——終わりに組ごと止めれば、QEMU の子も残らない。
-    command.process_group(0);
+    if spec.group == Group::Own {
+        command.process_group(0);
+    }
     let child = command.spawn().map_err(|error| {
         anyhow::Error::new(HarnessFault(format!(
             "{}: failed to launch {} under prlimit ({error}); are qemu-system-x86 and util-linux \
@@ -387,7 +419,10 @@ pub fn spawn(spec: &Spec<'_>) -> Result<QemuRun> {
         )))
     })?;
     RUNS_STARTED.fetch_add(1, Ordering::SeqCst);
-    let target = KillTarget(child.id());
+    let target = match spec.group {
+        Group::Own => KillTarget::Group(child.id()),
+        Group::Terminal => KillTarget::Process(child.id()),
+    };
     let watch = Arc::new(Watch {
         stop: AtomicBool::new(false),
         cut: Mutex::new(None),
@@ -512,7 +547,7 @@ impl QemuRun {
             what: self.what.clone(),
             elapsed,
             cut: self.watch.cut.lock().ok().and_then(|cut| cut.clone()),
-            reached_deadline: self.deadline == Deadline::Failure && elapsed >= self.timeout,
+            reached_deadline: reached_deadline(self.deadline, elapsed, self.timeout),
             status: self.status,
             largest_output: self.watch.largest.load(Ordering::SeqCst),
         };
@@ -587,6 +622,26 @@ mod tests {
         assert_eq!(classify(false, &[run(None, false)]), Category::Os);
         assert_eq!(classify(false, &[]), Category::Check);
         assert_eq!(classify(true, &[]), Category::Harness);
+    }
+
+    /// **期限に着くのが正常な走行は、期限に着いても timeout にしない**（記録を作る側の規則）。
+    #[test]
+    fn a_normal_deadline_never_reaches_timeout() {
+        assert!(reached_deadline(
+            Deadline::Failure,
+            Duration::from_secs(61),
+            Duration::from_secs(60)
+        ));
+        assert!(!reached_deadline(
+            Deadline::Failure,
+            Duration::from_secs(59),
+            Duration::from_secs(60)
+        ));
+        assert!(!reached_deadline(
+            Deadline::Normal,
+            Duration::from_secs(61),
+            Duration::from_secs(60)
+        ));
     }
 
     /// **上限は、QEMU が書く `-D` の記録以外のどのファイルよりも大きい**（fsize はディスクの像にも
