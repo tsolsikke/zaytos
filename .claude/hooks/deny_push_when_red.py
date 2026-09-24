@@ -75,14 +75,14 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # **引用と heredoc を落とす道具は隣の hook が持っている。** **写さない**
 # ——**2 つ持つと、片方だけが「文書の言及まで拒む」形へ戻る。**
-from deny_dangerous_bash import executable_part  # noqa: E402
+from deny_dangerous_bash import PREFIX, executable_part  # noqa: E402
 # **緑の知らせと、harness の上限の読み方は隣の hook が持っている。** **写さない。**
 from check_after_commit import announce, announce_payload, registered_timeout  # noqa: E402
 
 # **`(` も始まりに数える**（隣の hook が `( ... &)` で穴を踏んだのと同じ形）。
-# **環境変数の代入を前に置いた形も当てる**（`X=1 git push`。2026-09-25）——**引用は
-# [`executable_part`] が空白に落とすので、値は `\S*` で足りる。**
-START = r"(?:^|[;&|(]\s*|\n\s*)(?:\w+=\S*\s+)*"
+# **前に置けるもの（代入・`env`・`timeout` 等）は [`PREFIX`] で読み飛ばす**（隣の hook が持つ。
+# 2026-09-25。**以前は代入や `timeout` を前に置くと、この hook が発火しなかった**）。
+START = r"(?:^|[;&|(]\s*|\n\s*)" + PREFIX
 # `git -C dir push` のような大域の旗も通す。
 PUSH = re.compile(START + r"git\s+(?:-\S+\s+\S+\s+|-\S+\s+)*push\b")
 # **`commit-tree` のような下位の命令は当てない**（`\b` だと `-` の手前で切れて当たる）。
@@ -301,6 +301,16 @@ def self_test() -> int:
         (f"ZAYTOS_PUSH_UNCHECKED='the reason' git {push} origin main", True),
         (f"cd /x && A=1 B=2 git {push}", True),
         (f"echo 'X=1 git {push}'", False),
+        # **前に命令を置いた形も当てる**（2026-09-25）。
+        (f"timeout 60 git {push} origin main", True),
+        # **値を取る旗（`-k 5`）の後は読まない**（限界。この形は打たない）。
+        (f"timeout -k 5 60 git {push}", False),
+        (f"env X=1 git {push}", True),
+        (f"env -i PATH=/usr/bin git {push}", True),
+        (f"nice -n 10 git {push}", True),
+        (f"command git {push}", True),
+        (f"exec git {push}", True),
+        (f"timeout 60 cargo xtask check", False),
     ]
     commit = "commit"
     # **同じコマンドにコミットと push が在るか**（2026-09-18）。**文書の言及は通す**

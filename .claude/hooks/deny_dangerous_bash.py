@@ -12,7 +12,17 @@ import json
 import re
 import sys
 
-START = r"(?:^|[;&|]\s*|\n\s*)"
+# **前に置けるものを読み飛ばす**（2026-09-25）——**環境変数の代入（`X=1 git push`）と、
+# `env`・`command`・`exec`・`nice`・`timeout`（`timeout 60 git push`）。** **以前は判定が `git` の直前に
+# 区切りを求めていたので、これらを前に置くと 3 本の hook のどれも発火しなかった**
+# （`docs/troubleshooting.md`）。**引用は [`executable_part`] が空白に落とすので、代入の値は `\S*` で
+# 足りる。** **値を取る旗（`timeout -k 5 60`）の後は読まない**（限界。この形は打たない）。
+# **隣の 2 本もこれを使う**——**写さない**（片方だけが古くなる）。
+PREFIX = (
+    r"(?:\w+=\S*\s+|(?:env|command|exec)\s+(?:-\S+\s+)*"
+    r"|nice\s+(?:-n\s*\S+\s+|-\S+\s+)?|timeout\s+(?:-\S+\s+)*\S+\s+)*"
+)
+START = r"(?:^|[;&|]\s*|\n\s*)" + PREFIX
 RULES = [
     (re.compile(START + r"git\s+add\s+(?:-A|--all)\b"), "deny",
      "HOOK-PROBE-ADD: 全部足す形は使わない。パスを明示すること"),
@@ -37,7 +47,7 @@ RULES = [
     # （`timeout` 付きも）。**`&&` の後の改行と `do`/`then`/`else` の後の改行は区切りでは
     # ないので、[`executable_part`] が先に畳む。** **走行の後の `;` は見ない**（前が落ちる話
     # ではない）。
-    (re.compile(r"(?:;|\n)[ \t]*(?:timeout\s+\S+\s+)?(?:cargo\b|git\s+(?:commit|push)\b)"), "deny",
+    (re.compile(r"(?:;|\n)[ \t]*" + PREFIX + r"(?:cargo\b|git\s+(?:commit|push)\b)"), "deny",
      "HOOK-PROBE-SEMI: 走行（cargo / git commit / git push）の前の ; と改行は使わない。"
      "前の編集が落ちても走行が始まる。&& で繋ぐこと"),
 ]
@@ -171,6 +181,14 @@ def self_test() -> int:
         # **文中の言及は通る。**
         ("echo 'x; cargo xtask check'", "allow"),
         ("grep -n 'x; git " + "commit' docs/a.md", "allow"),
+        # **前に置いたものを読み飛ばす**（2026-09-25。**以前は素通りした**）。
+        ("X=1 git " + "add -A", "deny"),
+        ("timeout 60 git " + "add --all", "deny"),
+        ("env git " + "commit -am x", "exit2"),
+        ("echo x; X=1 cargo xtask check", "deny"),
+        ("echo x\nenv -i PATH=/usr/bin cargo build", "deny"),
+        ("git log -1; nice git push", "deny"),
+        ("X=1 cargo xtask check; echo done", "allow"),
     ]
     failures = 0
     for command, want in cases:

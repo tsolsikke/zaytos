@@ -64,10 +64,16 @@ import subprocess
 import sys
 import time
 
-# **環境変数の代入を前に置いた形も当てる**（`X=1 git commit`）——**以前は `git` の直前に区切りを
-# 求めていたので、代入を前に置くと発火しなかった**（2026-09-25 に見つけた）。
-ASSIGNMENTS = r"(?:\w+=(?:'[^']*'|\"[^\"]*\"|\S*)\s+)*"
-COMMIT = re.compile(r"(?:^|[;&|]\s*|\n\s*)" + ASSIGNMENTS + r"git\s+commit\b")
+# **`.pyc` を書かせない**（隣を import すると `.claude/hooks/__pycache__/` ができ、`git status` に出る）。
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# **引用と heredoc を落とす道具と、前に置けるものの並びは隣の hook が持っている。** **写さない。**
+from deny_dangerous_bash import PREFIX, executable_part  # noqa: E402
+
+# **実行の形（引用と heredoc を落とした後）に当てる**（2026-09-25）。**前に置けるもの（代入・`env`・
+# `timeout` 等）は [`PREFIX`] で読み飛ばす**——**以前は `git` の直前に区切りを求めていたので、これらを
+# 前に置くと発火しなかった。**
+COMMIT = re.compile(r"(?:^|[;&|]\s*|\n\s*)" + PREFIX + r"git\s+commit\b")
 TIMEOUT_SECONDS = 240
 """基底 check の上限（秒）。"""
 
@@ -87,7 +93,7 @@ REFUSED_EXIT_CODE = 75
 
 def looks_like_a_commit(command: str) -> bool:
     """発火するかを決める。**ここだけが判定であり、self-test が覆う。**"""
-    return bool(COMMIT.search(command))
+    return bool(COMMIT.search(executable_part(command)))
 
 
 def wants_commit_check(paths: list[str]) -> bool:
@@ -295,6 +301,10 @@ def self_test() -> int:
         ("X=1 git " + "commit -m x", True),
         ("A='a b' B=2 git " + "commit -q -F -", True),
         ("X=1 cargo xtask check", False),
+        ("timeout 60 git " + "commit -m x", True),
+        ("env X=1 git " + "commit -m x", True),
+        ("nice git " + "commit -m x", True),
+        ("timeout 60 cargo xtask check", False),
     ]
     failures = 0
     for command, want in cases:
