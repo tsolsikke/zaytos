@@ -655,6 +655,12 @@ kernel::vfs::tests::the_table_is_small_enough_to_live_inside_a_process
 kernel::vfs::tests::the_writable_mark_follows_how_the_file_was_opened
 kernel::vfs::tests::two_descriptors_on_one_inode_keep_separate_offsets
 kernel::vfs::tests::unopened_and_out_of_range_descriptors_are_refused
+xtask::check_lock::tests::a_refusal_names_the_holder_and_shows_only_its_own_content
+xtask::check_lock::tests::device_numbers_split_as_glibc_does
+xtask::check_lock::tests::flock_lines_are_read_from_proc_locks
+xtask::check_lock::tests::only_a_descendant_of_a_holder_goes_ahead_without_the_lock
+xtask::check_lock::tests::other_runs_are_counted_from_the_start_of_the_full_check
+xtask::check_lock::tests::the_parent_pid_is_read_after_the_last_parenthesis
 xtask::font::tests::a_full_width_glyph_is_parsed_as_two_cells
 xtask::font::tests::a_half_width_glyph_is_parsed_as_one_cell
 xtask::font::tests::a_line_without_a_separator_is_rejected

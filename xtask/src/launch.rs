@@ -387,7 +387,11 @@ impl<'a> Spec<'a> {
 }
 
 /// **QEMU を起こす**（唯一の口）。**起こす前に空きを確かめ、下限を割っていれば故障として断る。**
+///
+/// **検査の錠を共有で持っていることも確かめる**（`check_lock`。2026-09-25）——**入口で取っていれば
+/// 何もしない。** **取っていなければここで取る**（口で見るので漏れない。AArch64 の走行もここを通る）。
 pub fn spawn(spec: &Spec<'_>) -> Result<QemuRun> {
+    crate::check_lock::hold_for_qemu(spec.what)?;
     let dir = spec
         .outputs
         .first()

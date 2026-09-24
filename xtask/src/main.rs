@@ -12,6 +12,7 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 
+mod check_lock;
 mod font;
 mod launch;
 mod media;
@@ -1573,6 +1574,19 @@ fn main() -> Result<()> {
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask image [--without-fs-image]   (ADR-0068 の HW-e。起動媒体の像を建てて確かめる)\n       cargo xtask gen-font\n       cargo xtask judge-vbox <記録>   (ADR-0068 の 2-2。tools/vbox-vm.py run が残した記録を判定する)";
 
     let args: Vec<String> = env::args().skip(1).collect();
+    // **QEMU を使う入口は、最初に錠を共有で取る**（`check_lock`。2026-09-25。検査の体系の改善の ③）。
+    // **走行の途中で断られる形を避けるため、入口で取ってプロセスの終わりまで持つ。** **起動の口
+    // （`launch::spawn`）でも取る**——**入口で取り損ねた経路の裏打ちである。**
+    if matches!(
+        args.first().map(String::as_str),
+        Some("run" | "flaky" | "screenshot")
+    ) {
+        check_lock::hold_or_exit(
+            check_lock::Mode::Shared,
+            &format!("cargo xtask {}", args.join(" ")),
+            None,
+        )?;
+    }
     match args.first().map(String::as_str) {
         Some("run") => {
             let rest = &args[1..];
@@ -2202,6 +2216,8 @@ fn main() -> Result<()> {
         } else {
             MediaContents::Complete
         }),
+        // **検査の錠の基底の確かめが使う**（`check_lock::command`。人が打つためのものではない）。
+        Some("check-lock") => check_lock::command(&args[1..]),
         Some(other) => bail!("unknown xtask subcommand: {other}\n\n{USAGE}"),
         None => bail!("missing xtask subcommand\n\n{USAGE}"),
     }
@@ -20969,9 +20985,11 @@ fn report_enumeration_counts() {
 /// ——**赤を 68 分後に知るか、2 秒後に知るかの違いである。**
 fn run_base_check_before_full() -> Result<()> {
     println!("=== xtask check --full: the base check must be green first");
-    let status = Command::new("cargo")
-        .args(["xtask", "check"])
-        .current_dir(workspace_root()?)
+    let mut base = Command::new("cargo");
+    base.args(["xtask", "check"]).current_dir(workspace_root()?);
+    // **全検査の一部として走る**——**「全検査の間に走った他の検査」に数えさせない。**
+    check_lock::pass_owner(&mut base);
+    let status = base
         .status()
         .context("xtask check --full: could not start the base check")?;
     if status.success() {
@@ -20989,6 +21007,33 @@ fn run_base_check_before_full() -> Result<()> {
 /// **1 つ落ちてもそこで止めない。** 止めると「直しては再実行」を
 /// 繰り返すことになり、全体像が分からない。最後にまとめて報告する。
 fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
+    // **検査の錠**（`check_lock`。2026-09-25。検査の体系の改善の ③）。**全検査は排他、`--commit` は
+    // 共有で取る。** **取れなければ断って 75 で終える**（待たない）。**基底は取らない**——QEMU を
+    // 起こさない。**全検査の間に走ったことだけを残す**（全検査のまとめが数える）。
+    let command = format!(
+        "cargo xtask {}",
+        env::args().skip(1).collect::<Vec<_>>().join(" ")
+    );
+    if full {
+        let root = workspace_root()?;
+        let commit = check_lock::git_line(&root, &["rev-parse", "HEAD"])?;
+        let tree = check_lock::git_line(&root, &["rev-parse", "HEAD^{tree}"])?;
+        check_lock::hold_or_exit(
+            check_lock::Mode::Exclusive,
+            &command,
+            Some(check_lock::owner_content(
+                &command,
+                &commit,
+                &tree,
+                "(this process's output)",
+            )),
+        )?;
+    } else if commit {
+        check_lock::hold_or_exit(check_lock::Mode::Shared, &command, None)?;
+    } else {
+        check_lock::note_a_run_without_the_lock(&command);
+    }
+
     // 外した確率的な項目の一覧が実態を指しているかを先に見る（列挙の腐りを防ぐ）。
     check_flaky_list_matches_tables()?;
 
@@ -21082,6 +21127,20 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         Err(error) => {
             println!("--- VirtualBox tool: FAILED ({error})");
             failed.push("VirtualBox tool".to_string());
+        }
+    }
+
+    // **検査の錠**（2026-09-25。運用者の回答 3）。**道が本の木・作業木・環境を減らした子で同じで、
+    // flock が効き、殺された持ち主の錠が放れ、断りが 75 で終わり、持ち主の子だけが取らずに進むこと。**
+    total += 1;
+    begin_item(
+        "the check lock has one path, works, is released by a killed holder and refuses with 75",
+    );
+    match check_lock::self_check(&workspace_root) {
+        Ok(message) => println!("--- check lock: OK ({message})"),
+        Err(error) => {
+            println!("--- check lock: FAILED ({error:#})");
+            failed.push("check lock".to_string());
         }
     }
 
@@ -23130,8 +23189,17 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     finish_item();
     // **`--full` だけ、遅さの計器を出す**（[`report_item_time_slowness`]）。
     // **base と `--commit` は数分で終わるので、比べる相手が無い。**
+    // **全検査の間に走った他の検査を数え、在れば遅さの行に「比べられない」を添える**（運用者の
+    // 決定 (7)。2026-09-25。**遅さの計器は、他の重い走行が無いことを前提にしている**）。
     if full {
-        report_item_time_slowness();
+        let others = check_lock::other_runs_during_this_full().unwrap_or_default();
+        println!(
+            "(info) other checks during this full check: {}{}{}",
+            others.len(),
+            if others.is_empty() { "" } else { ": " },
+            others.join("; ")
+        );
+        report_item_time_slowness(others.len());
     }
     check_count_matches_accounting(&workspace_root, total, full, commit)?;
     // **失敗の分け方と、起こした QEMU の数**（2026-09-24）。
@@ -23234,8 +23302,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 46,
-    full: 407,
+    base: 47,
+    full: 408,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -23979,17 +24047,22 @@ const SLOWNESS_WARN_DENOM: u32 = 10;
 /// `--full` の締めで、項目の所要の合計を直近の高負荷の緑の回と比べる（`ADR-0065`）。
 ///
 /// **止めない。** [`GREEN_ITEM_SUM_BASELINE`] の doc の理由による。**計器に出すだけである。**
-fn report_item_time_slowness() {
+fn report_item_time_slowness(other_runs: usize) {
     let total = std::time::Duration::from_millis(
         ITEM_TIME_TOTAL_MS.load(std::sync::atomic::Ordering::SeqCst),
     );
     let baseline = GREEN_ITEM_SUM_BASELINE;
     let threshold = baseline * SLOWNESS_WARN_NUMER / SLOWNESS_WARN_DENOM;
     println!(
-        "(info) item time total: {:.1} min (baseline {:.1} min, {:.2}x)",
+        "(info) item time total: {:.1} min (baseline {:.1} min, {:.2}x){}",
         total.as_secs_f64() / 60.0,
         baseline.as_secs_f64() / 60.0,
-        total.as_secs_f64() / baseline.as_secs_f64()
+        total.as_secs_f64() / baseline.as_secs_f64(),
+        if other_runs == 0 {
+            String::new()
+        } else {
+            format!("; not comparable: {other_runs} other check(s) ran during this full check")
+        }
     );
     if total > threshold {
         println!(
@@ -24554,6 +24627,9 @@ fn external_tool(name: &str) -> ExternalTool {
     let mut command = Command::new(name);
     // **英語で出させる。** **解析しているのは見出しの語と数の並びである。**
     command.env("LC_ALL", "C");
+    // **錠を持っていれば、持ち主の pid を渡す**（`check_lock`）。**全検査の中から起こす道具は、
+    // 錠を取らずに進む**——**取ろうとすると、持ち主に断られる。**
+    check_lock::pass_owner(&mut command);
     ExternalTool(command)
 }
 
