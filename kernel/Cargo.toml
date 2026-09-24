@@ -671,6 +671,13 @@ ap-keeps-its-own-control-registers-test = []
 # ファームウェアが CR0.CD を立てて渡し、カーネルが落とさない形を BSP で作る（2026-09-24）。
 # cpu-state の「カーネルが要るビット」の見張りが CR0.CD を名指しして止まる。
 bsp-keeps-cd-test = []
+# その製造元で「分類していない」最初のビットが立っているものとして判定する（2026-09-24。レジスタは
+# 書かない。QEMU の既定の AMD では EFER.SVME）。[WARN] が名前つきで出て、起動は止まらない。
+cpu-state-sees-an-unclassified-bit-test = []
+# EFER.FFXSR（AMD では 0 であるべき）が立っているものとして判定する（2026-09-24。MSR は書かない）。
+cpu-state-sees-ffxsr-test = []
+# cpu-state の判定の後で BSP の CR4.MCE を落とす（2026-09-24）。注入した機械チェックが shutdown になる。
+mce-off-after-the-check-test = []
 # フォントの台本を流す（B-d）。`/bin/ttfglyph` を 1 回起こす。
 ttf-test = []
 # シリアルの排他の演習（シリアルの排他の段）。BSP と AP が合図で揃えてから、

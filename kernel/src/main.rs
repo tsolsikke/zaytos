@@ -10976,6 +10976,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "ファームウェアが CD を立てて渡し、カーネルが落とさない形を BSP で作る",
     ),
     (
+        "cpu-state-sees-an-unclassified-bit-test",
+        cfg!(feature = "cpu-state-sees-an-unclassified-bit-test"),
+        "その製造元で分類していない最初のビットが立っているものとして判定する",
+    ),
+    (
+        "cpu-state-sees-ffxsr-test",
+        cfg!(feature = "cpu-state-sees-ffxsr-test"),
+        "EFER.FFXSR（AMD では 0 であるべき）が立っているものとして判定する",
+    ),
+    (
+        "mce-off-after-the-check-test",
+        cfg!(feature = "mce-off-after-the-check-test"),
+        "cpu-state の判定の後で CR4.MCE を落とす（注入した機械チェックが shutdown になる）",
+    ),
+    (
         "ttf-test",
         cfg!(feature = "ttf-test"),
         "フォントを読んで 1 文字ラスタライズする台本を流す（破壊ではない）",
