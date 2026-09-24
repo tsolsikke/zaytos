@@ -590,7 +590,15 @@ def lock_refusals():
 
     **置き場は一時の場所へ差し替える**（本の錠には触れない——**確かめが本の全検査や `--commit` を
     断らせないため**）。**「起こしたまま」の印が書けて消せることも見る。**
+
+    **`start` と `run` を直に呼ぶ。`main` は通さない**——**`main` は `Vm` を作り、`Vm` は VM の置き場の
+    道を `wslpath` で直すが、`wslpath` は WSL にしか無い。** **2026-09-25 に `main` を通して書き、
+    CI（WSL ではない）で `FileNotFoundError` になって基底と `--commit` が赤くなった**（手元の WSL では
+    通っていた）。**名前だけを持つ VM を組んで渡す**——**錠を見る前に道を使わないことも、これで分かる。**
     """
+    vm = Vm.__new__(Vm)
+    vm.name = guard("zaytos-selftest")
+    calls = (("start", lambda: start(vm, False)), ("run", lambda: run(vm, "/dev/null", 1)))
     with tempfile.TemporaryDirectory(prefix="zaytos-vbox-selftest-") as directory:
         holder = subprocess.Popen(
             [sys.executable, "-c", HOLD_EXCLUSIVELY, os.path.join(directory, "check.lock")],
@@ -602,10 +610,10 @@ def lock_refusals():
             ready, _, _ = select.select([holder.stdout], [], [], 10)
             assert ready and holder.stdout.readline().strip() == "held", "錠を持つ子が 10 秒で持たなかった"
             count = 0
-            for command in ("start", "run"):
+            for command, call in calls:
                 with contextlib.redirect_stderr(io.StringIO()):
                     try:
-                        main([command, "--name", "zaytos-selftest"])
+                        call()
                     except SystemExit as leaving:
                         assert leaving.code == check_lock.REFUSED_EXIT_CODE, (
                             f"{command} が {leaving.code} で終わった"

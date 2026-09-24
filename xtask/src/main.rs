@@ -8084,10 +8084,27 @@ fn check_boot_media(workspace_root: &Path) -> Result<String> {
 /// （`.claude/hooks` の `--self-test` と同じ扱い）。
 fn check_vbox_tool(workspace_root: &Path) -> Result<String> {
     let script = workspace_root.join("tools").join("vbox-vm.py");
-    let output = Command::new("python3")
+    // **python3 だけを置いた PATH で回す**（2026-09-25）——**WSL にしか無い道具（`wslpath` 等）へ
+    // selftest が触れたら、手元でも落ちる。** **selftest が `wslpath` を通り、手元の WSL では通って
+    // CI（WSL ではない）で落ちた**（`docs/troubleshooting.md`）。**selftest は python3 と標準の
+    // モジュールしか使わない。**
+    let bare = workspace_root.join("target").join("check-vbox-path");
+    let _ = fs::remove_dir_all(&bare);
+    fs::create_dir_all(&bare).with_context(|| format!("failed to create {}", bare.display()))?;
+    let python = env::var_os("PATH")
+        .and_then(|paths| {
+            env::split_paths(&paths)
+                .map(|dir| dir.join("python3"))
+                .find(|path| path.is_file())
+        })
+        .context("python3 is not on PATH")?;
+    std::os::unix::fs::symlink(&python, bare.join("python3"))
+        .with_context(|| format!("failed to link python3 into {}", bare.display()))?;
+    let output = Command::new(bare.join("python3"))
         .arg(&script)
         .arg("selftest")
         .current_dir(workspace_root)
+        .env("PATH", &bare)
         .stdin(Stdio::null())
         .output()
         .with_context(|| format!("failed to run {}", script.display()))?;
