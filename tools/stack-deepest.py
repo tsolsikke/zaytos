@@ -29,7 +29,9 @@
 
 **像は直前に置かれたものを使う**（`tools/qemu-variants.py` と同じ注意。**どの像だったかは `build:` の行に出る**）。
 **起こし方は `xtask` の既定と同じ**（`-machine pc -m 256M -smp 2`）。**作業物は `target/stack-deepest/` へ置く。**
-**`target/` を `xtask` と共有するので、`--full` と並べて走らせない。**
+**`target/` を `xtask` と共有するので、`--full` と並べて走らせない。** **全検査の間は錠で断る**
+（`tools/check_lock.py`。終了の値 75。2026-09-25）。**`--full` の道具の確かめから呼ばれたときは、
+全検査の下で取らずに進む。**
 
 **何も主張しない。** **`cargo xtask check` は回さない。** **人が読むためのものである。**
 """
@@ -44,6 +46,13 @@ import subprocess
 import sys
 import time
 import signal
+
+# **`.pyc` を書かせない**（隣を import すると `tools/__pycache__/` ができ、`git status` に出る）。
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# **全検査の間は QEMU を起こさない**（`tools/check_lock.py`。2026-09-25。検査の体系の改善の ③）。
+# **全検査の中から呼ばれたとき（`--full` の道具の確かめ）は、持ち主の下で取らずに進む。**
+import check_lock  # noqa: E402
 
 
 # **QEMU は xtask の起動の口（`xtask/src/launch.rs`）と同じ形で起こす**（2026-09-24。ホストの保護）。
@@ -285,6 +294,7 @@ def main():
     parser = argparse.ArgumentParser(description="起動時のカーネルスタックの最深経路を実測する")
     parser.add_argument("--depth", type=int, action="append", help="見る深さ（バイト。繰り返せる）")
     options = parser.parse_args()
+    check_lock.hold_shared_or_exit("tools/stack-deepest.py " + " ".join(sys.argv[1:]))
     os.makedirs(OUT, exist_ok=True)
 
     prompt_depth, text = dump_at_prompt()

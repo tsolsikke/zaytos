@@ -35,7 +35,8 @@
 **どの像だったかは、各変種の `build:` の行に出る。**
 
 **`target/` と `disk0.img` を `xtask` と共有するので、`--full` と並べて走らせない**
-（`CLAUDE.md` の絶対ルール 1）。**ESP・ディスク・OVMF の変数は変種ごとに
+（`CLAUDE.md` の絶対ルール 1）。**全検査の間は錠で断る**（`tools/check_lock.py`。終了の値 75。
+2026-09-25）——**変種を起こす前に、検査の錠を共有で取る。** **`--list` は QEMU を起こさないので取らない。****ESP・ディスク・OVMF の変数は変種ごとに
 `target/hw/<変種>/` へ写してから使う**（元を汚さない）。
 
 # 待ち方
@@ -55,6 +56,12 @@ import sys
 import time
 import zlib
 import signal
+
+# **`.pyc` を書かせない**（隣を import すると `tools/__pycache__/` ができ、`git status` に出る）。
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# **全検査の間は QEMU を起こさない**（`tools/check_lock.py`。2026-09-25。検査の体系の改善の ③）。
+import check_lock  # noqa: E402
 
 
 # **QEMU は xtask の起動の口（`xtask/src/launch.rs`）と同じ形で起こす**（2026-09-24。ホストの保護）。
@@ -131,7 +138,8 @@ def run_variant(name, wait):
     shutil.copy(os.path.join(ROOT, "target", "disk0.img"), os.path.join(out, "disk0.img"))
     shutil.copy(OVMF_VARS, os.path.join(out, "vars.fd"))
     # **socket のパスは短く保つ**（`sun_path` は 108 バイト。`xtask` の `ensure_socket_path_fits`）。
-    sock = f"/tmp/zaytos-variant-{name}.sock"
+    # **pid を入れる**（2026-09-25）——**/tmp はホスト全体で共有され、同じ変種を 2 つ起こすとぶつかる。**
+    sock = f"/tmp/zaytos-variant-{name}-{os.getpid()}.sock"
     if os.path.exists(sock):
         os.remove(sock)
     serial_arg = "none" if serial == "none" else f"file:{out}/serial.log"
@@ -227,7 +235,9 @@ def main():
         if not os.path.exists(need):
             print(f"{need} is missing; run `cargo xtask run --boot-log-diff` first", file=sys.stderr)
             return 2
-    for name in options.variants or list(VARIANTS):
+    names = options.variants or list(VARIANTS)
+    check_lock.hold_shared_or_exit("tools/qemu-variants.py " + " ".join(names))
+    for name in names:
         run_variant(name, options.wait)
     return 0
 

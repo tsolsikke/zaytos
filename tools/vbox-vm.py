@@ -50,6 +50,14 @@
     python3 tools/vbox-vm.py stop   --name zaytos-hw-e
     python3 tools/vbox-vm.py delete --name zaytos-hw-e
 
+# 全検査の間は VM を起こさない（2026-09-25。検査の体系の改善の ③）
+
+**`start` と `run` は、`VBoxManage` を呼ぶ前に検査の錠を共有で取る**（`tools/check_lock.py`）。
+**全検査の間は 75 で断る。** **`start` は VM を起こしたまま終わるので錠を持ち続けられない**——
+**錠の置き場に「起こしたまま」の印を残し、`stop` と `delete` で消す。** **全検査の入口は、印が在れば断る**
+（VM は Windows 側で走るので `/proc` では見えず、一覧を読む操作は使わない決まりである）。
+**VirtualBox の画面から止めたときは、印が残る**——**`stop` を打てば消える。**
+
 # 走行の記録（2-2。2026-09-24）
 
 **`run` は 1 回の走行を `target/vbox/<名前>/<時刻>/` に残す**——**判定はしない。** **判定は
@@ -73,10 +81,18 @@ import hashlib
 import io
 import os
 import re
+import select
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+
+# **`.pyc` を書かせない**（隣を import すると `tools/__pycache__/` ができ、`git status` に出る）。
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# **全検査の間は VM を起こさない**（`tools/check_lock.py`。2026-09-25。検査の体系の改善の ③）。
+import check_lock  # noqa: E402
 
 #: 名前の形。**`zaytos-` で始まり、続きは小文字・数字・`-` で 1〜24 文字。**
 #:
@@ -315,9 +331,14 @@ def create(vm, image, memory, cpus, replace):
 
 
 def start(vm, gui):
+    # **錠を先に見る**——**全検査の間は、`VBoxManage` を 1 度も呼ばずに 75 で断る**（2026-09-25）。
+    # **起こしたまま終わるので錠を持ち続けられない。** **「起こしたまま」の印を残し、`stop` で消す**
+    # ——**全検査の入口は、印が在れば断る**（`tools/check_lock.py`）。
+    check_lock.hold_shared_or_exit(f"tools/vbox-vm.py start --name {vm.name}")
     if not vm.exists():
         raise Refused(f"{vm.name} が無い（先に `create` を回すこと）")
     vboxmanage(["startvm", vm.name, "--type", "gui" if gui else "headless"])
+    check_lock.mark_vbox_running(vm.name)
     print(f"started: {vm.name}（{'画面あり' if gui else '画面なし'}）")
     print(f"  シリアル: tail -f {vm.serial}")
 
@@ -337,6 +358,7 @@ def stop(vm):
     done = vboxmanage(["controlvm", vm.name, "poweroff"], check=False)
     if done.returncode != 0:
         print("（走っていなかった）")
+    check_lock.clear_vbox_running(vm.name)
     print(f"stopped: {vm.name}")
 
 
@@ -358,6 +380,7 @@ def delete(vm):
         vboxmanage(["closemedium", "disk", windows_path(vm.vdi), "--delete"], check=False)
     if vm.exists():
         vboxmanage(["unregistervm", vm.name, "--delete"], check=False)
+    check_lock.clear_vbox_running(vm.name)
     # **道具が置いたものも消す**（2-2）。**`unregistervm --delete` は VirtualBox の知っている
     # ファイルしか消さない**——**シリアルの写しと画面が残り、フォルダが空にならなかった**（実測）。
     for leftover in (vm.raw, vm.vdi, vm.serial, os.path.join(vm.folder, "screen.png")):
@@ -397,6 +420,9 @@ def run(vm, image, timeout):
     起こす → プロンプトを待つ → 計数を読む → 打鍵を送る → シェルの答えを待つ → 計数を読む → 止める
     → 写す。**待ちには上限がある**（`timeout` 秒。出なければ、そこまでの記録を残して止める）。
     """
+    # **錠を先に見る**——**全検査の間は、`VBoxManage` を 1 度も呼ばずに 75 で断る**（2026-09-25）。
+    # **走る間は錠を持つ**（プロセスが終わるまで）。
+    check_lock.hold_shared_or_exit(f"tools/vbox-vm.py run --name {vm.name}")
     if not vm.exists():
         raise Refused(f"{vm.name} が無い（先に `create` を回すこと）")
     info = vboxmanage(["showvminfo", vm.name, "--machinereadable"]).stdout.replace("\r", "")
@@ -537,13 +563,66 @@ def selftest():
                     code = main([command, "--name", name, "--image", "/dev/null"])
                 assert code == 2, f"{command} {name!r} が {code} で終わった"
         assert not calls, f"VBoxManage を {len(calls)} 回呼んだ"
+        locked = lock_refusals()
+        assert not calls, f"錠で断る道で VBoxManage を {len(calls)} 回呼んだ"
     finally:
         RUNNER = _run
     refusals = sink.getvalue().count("refused:")
     print(
         f"selftest: OK（受ける名前 {len(ACCEPTED_NAMES)} 個、拒む名前 {len(REFUSED_NAMES)} 個、"
-        f"コマンドの入口での断り {refusals} 回、VBoxManage の呼び出し {len(calls)} 回）"
+        f"コマンドの入口での断り {refusals} 回、錠を別のプロセスが排他で持つ間の断り {locked} 回、"
+        f"VBoxManage の呼び出し {len(calls)} 回）"
     )
+
+
+#: 別のプロセスとして錠を排他で持つ（`lock_refusals` が使う）。**上限 30 秒で自分で降りる。**
+HOLD_EXCLUSIVELY = (
+    "import fcntl, sys, time\n"
+    "handle = open(sys.argv[1], 'a+')\n"
+    "fcntl.flock(handle, fcntl.LOCK_EX)\n"
+    "print('held', flush=True)\n"
+    "time.sleep(30)\n"
+)
+
+
+def lock_refusals():
+    """**別のプロセスが錠を排他で持つ間、`start` と `run` が `VBoxManage` を呼ばずに 75 で断ること。**
+
+    **置き場は一時の場所へ差し替える**（本の錠には触れない——**確かめが本の全検査や `--commit` を
+    断らせないため**）。**「起こしたまま」の印が書けて消せることも見る。**
+    """
+    with tempfile.TemporaryDirectory(prefix="zaytos-vbox-selftest-") as directory:
+        holder = subprocess.Popen(
+            [sys.executable, "-c", HOLD_EXCLUSIVELY, os.path.join(directory, "check.lock")],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        check_lock.DIR_FOR_TESTS = directory
+        try:
+            ready, _, _ = select.select([holder.stdout], [], [], 10)
+            assert ready and holder.stdout.readline().strip() == "held", "錠を持つ子が 10 秒で持たなかった"
+            count = 0
+            for command in ("start", "run"):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    try:
+                        main([command, "--name", "zaytos-selftest"])
+                    except SystemExit as leaving:
+                        assert leaving.code == check_lock.REFUSED_EXIT_CODE, (
+                            f"{command} が {leaving.code} で終わった"
+                        )
+                        count += 1
+                        continue
+                raise AssertionError(f"{command} が錠を別のプロセスが持つ間に断らなかった")
+            check_lock.mark_vbox_running("zaytos-selftest")
+            marker = os.path.join(check_lock.vbox_marker_dir(), "zaytos-selftest")
+            assert os.path.isfile(marker), "「起こしたまま」の印が書けなかった"
+            check_lock.clear_vbox_running("zaytos-selftest")
+            assert not os.path.exists(marker), "「起こしたまま」の印が消えなかった"
+            return count
+        finally:
+            check_lock.DIR_FOR_TESTS = None
+            holder.kill()
+            holder.wait(timeout=10)
 
 
 def main(argv=None):

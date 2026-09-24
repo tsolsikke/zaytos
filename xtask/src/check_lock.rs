@@ -335,6 +335,8 @@ fn started_unix_in(content: &str) -> Option<u64> {
 struct Refusal {
     holders: Vec<(u32, Mode, String)>,
     content: String,
+    /// `tools/vbox-vm.py start` が起こしたまま残した VM（全検査を断る理由になる）。
+    vms: Vec<String>,
 }
 
 /// 取った結果。
@@ -367,6 +369,21 @@ fn attempt(path: &Path, mode: Mode, content: Option<&str>) -> Result<Attempt> {
     };
     match tried {
         Ok(()) => {
+            // **VirtualBox の VM が起こしたままなら、全検査は断る**（`tools/vbox-vm.py start` が残す印）。
+            // **VM は Windows 側で走るので `/proc` では見えず、一覧を読む操作は使わない決まりである。**
+            let vms = if mode == Mode::Exclusive {
+                vbox_left_running(dir)
+            } else {
+                Vec::new()
+            };
+            if !vms.is_empty() {
+                let _ = file.unlock();
+                return Ok(Attempt::Refused(Refusal {
+                    holders: Vec::new(),
+                    content: String::new(),
+                    vms,
+                }));
+            }
             if let (Mode::Exclusive, Some(content)) = (mode, content) {
                 write_content(&file, content)?;
             }
@@ -420,11 +437,36 @@ fn refusal(file: &File) -> Refusal {
     Refusal {
         holders,
         content: read_content(file),
+        vms: Vec::new(),
     }
+}
+
+/// `tools/vbox-vm.py start` が起こしたまま残した VM の名前（錠の置き場の `vbox-running/`）。
+fn vbox_left_running(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir.join("vbox-running"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
 }
 
 /// 断りの文（純粋な論理）。
 fn refusal_message(what: &str, path: &Path, refusal: &Refusal) -> String {
+    if !refusal.vms.is_empty() {
+        return format!(
+            "xtask: VirtualBox VM(s) started by tools/vbox-vm.py start are still marked as running, so \
+             `{what}` was not run (exit {REFUSED_EXIT_CODE}): {}.\n  Stop each with \
+             `python3 tools/vbox-vm.py stop --name <name>` (that removes the mark in {}), then \
+             start this again.",
+            refusal.vms.join(", "),
+            path.with_file_name("vbox-running").display()
+        );
+    }
     let mut text = format!(
         "xtask: the check lock is held, so `{what}` was not run (exit {REFUSED_EXIT_CODE}).\n  \
          lock: {}\n",
@@ -591,56 +633,85 @@ pub fn other_runs_during_this_full() -> Option<Vec<String>> {
     Some(runs_since(&runs, since))
 }
 
-/// 基底の確かめ（2026-09-25。運用者の回答 3）。**錠の道が 3 か所から同じで、flock が効き、殺された
-/// 持ち主の錠が放れ、断りが 75 で終わり、持ち主の子だけが取らずに進むこと。**
+/// 基底の確かめ（2026-09-25。運用者の回答 3）。**錠の道が本の木・作業木・環境を減らした子で同じで
+/// （`xtask` と `tools/check_lock.py` の両方）、flock が効き、殺された持ち主の錠が放れ、断りが 75 で
+/// 終わり、持ち主の子だけが取らずに進み、VM を起こしたままなら全検査が断られること。**
 pub fn self_check(root: &Path) -> Result<String> {
     let exe = std::env::current_exe().context("could not find the xtask binary")?;
+    let tool = root.join("tools").join("check_lock.py");
     let scratch = root.join("target").join("check-lock");
     let _ = fs::remove_dir_all(&scratch);
     fs::create_dir_all(&scratch)
         .with_context(|| format!("could not create {}", scratch.display()))?;
+    let xtask_argv = [
+        exe.clone().into_os_string(),
+        "check-lock".into(),
+        "path".into(),
+    ];
+    let python_argv = [
+        "python3".into(),
+        tool.clone().into_os_string(),
+        "path".into(),
+    ];
 
-    // (1) 道——本の木（このプロセス）、環境を減らした子、全検査の作業木（在れば）、作った作業木。
+    // (1) 道——本の木（このプロセス）、環境を減らした子（`xtask` と Python）、全検査の作業木（在れば）、
+    // 作った作業木。**hook の環境は、環境を減らした子で代える**（`XDG_RUNTIME_DIR` も `HOME` も無く、
+    // `GIT_DIR` は嘘の場所を指す）。
     let here = lock_path(root)?;
-    let reduced = reduced_env_path(&exe, None)?;
-    if reduced != here {
-        bail!(
-            "the lock path differs with a reduced environment: {} here, {} there",
-            here.display(),
-            reduced.display()
-        );
+    for (who, argv) in [
+        ("xtask", &xtask_argv),
+        ("tools/check_lock.py", &python_argv),
+    ] {
+        let there = reduced_env_path(argv, None)?;
+        if there != here {
+            bail!(
+                "{who} with a reduced environment gave another lock path: {} here, {} there",
+                here.display(),
+                there.display()
+            );
+        }
     }
-    let mut places = vec!["the main tree", "a reduced environment with GIT_DIR set"];
+    let mut places = vec![
+        "the main tree",
+        "xtask and tools/check_lock.py with a reduced environment and GIT_DIR set",
+    ];
     let full_worktree = root.join("target").join("full-check").join("wt");
     if full_worktree.join(".git").is_file() {
         let there = lock_path(&full_worktree)?;
-        if there != here {
+        let python = reduced_env_path(&python_argv, Some(&full_worktree))?;
+        if there != here || python != here {
             bail!(
-                "the lock path differs in the full-check worktree: {} here, {} there",
+                "the full-check worktree gave another lock path: {} here, {} there, {} from \
+                 tools/check_lock.py",
                 here.display(),
-                there.display()
+                there.display(),
+                python.display()
             );
         }
         places.push("the full-check worktree");
     }
     let (repo, worktree) = make_repo_with_worktree(&scratch)?;
-    let (from_repo, from_worktree) = (lock_path(&repo)?, lock_path(&worktree)?);
-    let from_worktree_reduced = reduced_env_path(&exe, Some(&worktree))?;
-    if from_repo != from_worktree || from_repo != from_worktree_reduced {
+    let from_repo = lock_path(&repo)?;
+    let made = [
+        lock_path(&worktree)?,
+        reduced_env_path(&xtask_argv, Some(&worktree))?,
+        reduced_env_path(&python_argv, Some(&worktree))?,
+    ];
+    if made.iter().any(|path| *path != from_repo) {
         bail!(
-            "a made worktree gave another lock path: {} from its main tree, {} from the worktree, \
-             {} from the worktree with a reduced environment",
+            "a made worktree gave another lock path: {} from its main tree, {:?} from the worktree \
+             (in-process, xtask and tools/check_lock.py with a reduced environment)",
             from_repo.display(),
-            from_worktree.display(),
-            from_worktree_reduced.display()
+            made
         );
     }
-    places.push("a made worktree (in the usual and a reduced environment)");
+    places.push("a made worktree");
 
     // (2) flock が効く（取るたびにも見る）。
     probe(here.parent().context("the lock path has no directory")?)?;
 
-    // (3) 殺された持ち主の錠は放れる。(4) 断りは 75。(5) 持ち主の子だけが取らずに進む。
+    // (3) 断りは 75 で、持ち主を挙げる（`xtask` も Python も）。(4) 持ち主を名乗っても、子孫でなければ
+    // 断られる。(5) 殺された持ち主の錠は放れる。
     let lock = scratch.join("check.lock");
     let mut holder = spawn_holder(&exe, &lock, &[])?;
     let outcome = (|| -> Result<()> {
@@ -648,25 +719,27 @@ pub fn self_check(root: &Path) -> Result<String> {
         if !matches!(file.try_lock_shared(), Err(TryLockError::WouldBlock)) {
             bail!("the lock was free while a child held it exclusively");
         }
-        let refused = try_in_child(&exe, &lock, Mode::Shared, None)?;
-        if refused.0 != Some(REFUSED_EXIT_CODE)
-            || !refused.1.contains(&format!("pid {}", holder.id()))
-        {
-            bail!(
-                "a shared try while a child held the lock ended with {:?}, not {REFUSED_EXIT_CODE} \
-                 naming the holder: {}",
-                refused.0,
-                refused.1
-            );
-        }
-        let stranger = try_in_child(&exe, &lock, Mode::Shared, Some(holder.id()))?;
-        if stranger.0 != Some(REFUSED_EXIT_CODE) {
-            bail!(
-                "a try that named the holder without being its descendant ended with {:?}, not \
-                 {REFUSED_EXIT_CODE}: {}",
-                stranger.0,
-                stranger.1
-            );
+        let named = format!("pid {}", holder.id());
+        for (who, tried) in [
+            ("xtask", try_in_child(&exe, &lock, Mode::Shared, None)?),
+            ("tools/check_lock.py", try_in_python(&tool, &lock, None)?),
+            (
+                "xtask naming the holder without being its descendant",
+                try_in_child(&exe, &lock, Mode::Shared, Some(holder.id()))?,
+            ),
+            (
+                "tools/check_lock.py naming the holder without being its descendant",
+                try_in_python(&tool, &lock, Some(holder.id()))?,
+            ),
+        ] {
+            if tried.0 != Some(REFUSED_EXIT_CODE) || !tried.1.contains(&named) {
+                bail!(
+                    "{who}: a shared try while a child held the lock ended with {:?}, not \
+                     {REFUSED_EXIT_CODE} naming the holder: {}",
+                    tried.0,
+                    tried.1
+                );
+            }
         }
         Ok(())
     })();
@@ -680,48 +753,67 @@ pub fn self_check(root: &Path) -> Result<String> {
         .map_err(|error| anyhow!("could not unlock: {error}"))?;
     drop(file);
 
+    // (6) VM を起こしたままなら、全検査（排他）は断られる。
+    let marks = scratch.join("vbox-running");
+    fs::create_dir_all(&marks).with_context(|| format!("could not create {}", marks.display()))?;
+    fs::write(
+        marks.join("zaytos-selfcheck"),
+        "started by the self-check\n",
+    )
+    .context("could not write a VirtualBox mark")?;
+    let refused = try_in_child(&exe, &lock, Mode::Exclusive, None)?;
+    if refused.0 != Some(REFUSED_EXIT_CODE) || !refused.1.contains("zaytos-selfcheck") {
+        bail!(
+            "an exclusive try with a VM marked as running ended with {:?}, not {REFUSED_EXIT_CODE} \
+             naming the VM: {}",
+            refused.0,
+            refused.1
+        );
+    }
+    fs::remove_dir_all(&marks).with_context(|| format!("could not remove {}", marks.display()))?;
+
+    // (7) 持ち主の子（`xtask` も Python も）は取らずに進む。
     let mut parent = spawn_holder(&exe, &lock, &["--then-try", "shared"])?;
-    let mut report = String::new();
     let waited = read_line_within(
         parent.stdout.take().context("no stdout from the holder")?,
-        Duration::from_secs(20),
-        2,
+        Duration::from_secs(40),
+        3,
     );
     let _ = parent.kill();
     let _ = parent.wait();
-    if let Some(lines) = waited {
-        report = lines.join(" / ");
-    }
-    if !report.contains("child: covered by") {
+    let report = waited.map(|lines| lines.join(" / ")).unwrap_or_default();
+    if !report.contains("xtask child: covered by") || !report.contains("python child: covered by") {
         bail!("a child of the holder did not go ahead under it: {report}");
     }
     let _ = fs::remove_dir_all(&scratch);
     Ok(format!(
-        "one path from {}; flock works there; a killed holder's lock was released; a refusal ended \
-         with {REFUSED_EXIT_CODE} and named the holder; only a descendant of the holder went ahead \
-         without taking it",
+        "one path from {}; flock works there; a refusal ended with {REFUSED_EXIT_CODE} and named the \
+         holder, in xtask and tools/check_lock.py, also for a non-descendant naming it; a killed \
+         holder's lock was released; a VM marked as running refused the full check; only descendants \
+         of the holder went ahead without taking it",
         places.join(", ")
     ))
 }
 
-/// 環境を減らした子で道を出させる（`GIT_DIR` を嘘の場所に向けて）。
-fn reduced_env_path(exe: &Path, root: Option<&Path>) -> Result<PathBuf> {
-    let mut child = Command::new(exe);
+/// 環境を減らした子で道を出させる（`GIT_DIR` を嘘の場所に向けて）。**`HOME` も
+/// `XDG_RUNTIME_DIR` も無い**——**hook の環境で変数が欠けても、道は変わらないことを見る。**
+fn reduced_env_path(argv: &[std::ffi::OsString], root: Option<&Path>) -> Result<PathBuf> {
+    let (program, args) = argv.split_first().context("an empty command")?;
+    let mut child = Command::new(program);
     child
+        .args(args)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("GIT_DIR", "/nonexistent-git-dir")
-        .env("GIT_COMMON_DIR", "/nonexistent-git-dir")
-        .args(["check-lock", "path"]);
+        .env("GIT_COMMON_DIR", "/nonexistent-git-dir");
     if let Some(root) = root {
         child.arg("--root").arg(root);
     }
-    let output = child
-        .output()
-        .context("could not run xtask with a reduced environment")?;
+    let output = output_within(&mut child, Duration::from_secs(20))
+        .with_context(|| format!("could not run {argv:?} with a reduced environment"))?;
     if !output.status.success() {
         bail!(
-            "xtask check-lock path failed with a reduced environment: {}",
+            "{argv:?} failed with a reduced environment: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -831,6 +923,21 @@ fn try_in_child(
     ))
 }
 
+/// Python の道具で一時の錠を共有で取ってみる（終了の値と標準エラー）。
+fn try_in_python(tool: &Path, lock: &Path, named: Option<u32>) -> Result<(Option<i32>, String)> {
+    let mut child = Command::new("python3");
+    child.arg(tool).arg("try").arg(lock).env_remove(OWNER_ENV);
+    if let Some(named) = named {
+        child.env(OWNER_ENV, named.to_string());
+    }
+    let output = output_within(&mut child, Duration::from_secs(20))
+        .context("could not run tools/check_lock.py to try the lock")?;
+    Ok((
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
+}
+
 /// 子を走らせ、上限つきで終わりを待つ（`CLAUDE.md` の「シェルコマンドの制約」）。**上限を過ぎたら止めて
 /// 誤りにする。** 出力は小さいものだけに使う。
 fn output_within(command: &mut Command, limit: Duration) -> Result<std::process::Output> {
@@ -903,20 +1010,23 @@ pub fn command(args: &[String]) -> Result<()> {
             println!("held");
             std::io::stdout().flush().ok();
             if let Some(then) = then {
+                // **自分の子に同じ錠を取らせる**——**`xtask` と Python の道具の両方。**
                 let exe = std::env::current_exe().context("could not find the xtask binary")?;
-                let mut child = Command::new(exe);
-                child
-                    .args(["check-lock", "try"])
-                    .arg(&file)
-                    .arg(then.label())
-                    .env(OWNER_ENV, std::process::id().to_string());
-                let output = output_within(&mut child, Duration::from_secs(20))?;
-                println!(
-                    "child: {} (exit {:?})",
-                    String::from_utf8_lossy(&output.stdout).trim(),
-                    output.status.code()
-                );
-                std::io::stdout().flush().ok();
+                let tool = crate::workspace_root()?.join("tools").join("check_lock.py");
+                let mut xtask = Command::new(exe);
+                xtask.args(["check-lock", "try"]).arg(&file).arg(then.label());
+                let mut python = Command::new("python3");
+                python.arg(tool).arg("try").arg(&file);
+                for (who, mut child) in [("xtask", xtask), ("python", python)] {
+                    child.env(OWNER_ENV, std::process::id().to_string());
+                    let output = output_within(&mut child, Duration::from_secs(20))?;
+                    println!(
+                        "{who} child: {} (exit {:?})",
+                        String::from_utf8_lossy(&output.stdout).trim(),
+                        output.status.code()
+                    );
+                    std::io::stdout().flush().ok();
+                }
             }
             // **上限つきで眠る**——**親が死んでも、60 秒で自分で降りる。**
             std::thread::sleep(Duration::from_secs(60));
@@ -1045,6 +1155,7 @@ mod tests {
         let current = Refusal {
             holders: vec![(42, Mode::Exclusive, "xtask full".to_string())],
             content: "pid: 42\ncommit: abc\n".to_string(),
+            vms: Vec::new(),
         };
         let text = refusal_message("cargo xtask check --commit", path, &current);
         assert!(text.contains("exit 75"), "{text}");
@@ -1056,8 +1167,19 @@ mod tests {
         let stale = Refusal {
             holders: vec![(43, Mode::Shared, "xtask run".to_string())],
             content: "pid: 42\ncommit: abc\n".to_string(),
+            vms: Vec::new(),
         };
         let text = refusal_message("cargo xtask check --full", path, &stale);
         assert!(!text.contains("commit: abc"), "{text}");
+        // **VirtualBox の VM を起こしたままなら、名前と止め方を出す。**
+        let vms = Refusal {
+            holders: Vec::new(),
+            content: String::new(),
+            vms: vec!["zaytos-hw-e".to_string()],
+        };
+        let text = refusal_message("cargo xtask check --full", path, &vms);
+        assert!(text.contains("zaytos-hw-e"), "{text}");
+        assert!(text.contains("tools/vbox-vm.py stop --name"), "{text}");
+        assert!(text.contains("exit 75"), "{text}");
     }
 }
