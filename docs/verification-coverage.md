@@ -1392,6 +1392,21 @@ higher-halfの破壊feature（B-2a-5、破壊feature `highhalf-*`）について
 |---|---|---|
 | 像から`fs.img`を外す | `MediaContents::WithoutFsImage`で像を建てる（カーネルのfeatureではない） | **ブートローダの`fs-image: no \zaytos\fs.img on the ESP`と、カーネルの`virtio-blk: no device with an I/O BAR0 was found on bus 0, and the bootloader handed over no RAM image`の両方が出て、プロンプトが出ないこと**（実測4.4秒で止まった）。**理由の行まで見るのは、「装置も像も無い」で止まる形が、像から外れていなくても起きうるからである。** **止まる所はHW-dの破壊より前である**——**あちらは像を渡された上で見ないので、写す所まで進む** |
 
+### `ADR-0068`のHW-e-2で、I/O APICの判定を写像・配送・IDに分けた（2026-09-24）
+
+**打鍵を送る判定の形を足した**（`VariantExpect::PromptKeyAndLines`）——**プロンプトの後にmonitorから`a`とEnterを打ち、
+シェルの答え（`zash: a: cannot run`）と、要る行と、出てはいけない行を見る。** **プロンプトと`[ERROR]`の有無だけでは、
+入力経路を主張しない**（レビューの条件）。**USBの装置を付けた変種には使わない**（`sendkey`がPS/2へ行かない。持ち越しの行）。
+
+| 項目 | 見るもの | 実測 |
+|---|---|---|
+| `machine-variant pc-default` | **配送の行（`first key arrived as vector 0x42`）と写像の行が出て、`[ERROR]`・`[WARN] apic:`・`vector 0x21`が出ない** | 9.4秒で通った |
+| `machine-variant pc-default ioapic-id-mismatch-test`（構成。破壊ではない） | **MADTのIDを1つずらして比べる（VirtualBoxの形）。`[WARN]`が出て、止まらず、`[ERROR]`が無く、打鍵が届く** | 9.4秒で通った |
+| `machine-variant pc-default ioapic-reads-the-wrong-register`（破壊） | **版をIDの添字で読む。写像の判定の行（`the I/O APIC MMIO does not look decoded`）で止まる** | 4.6秒で止まった |
+
+**VirtualBoxの走行は`--full`に入れない**が、**同じ形を道具で確かめた**——**`[ERROR]`が消え、`[WARN]`と配送の行が出て、
+VirtualBoxの計数でベクタ0x42が打鍵4バイトで+4、8259のベクタ0x21は0回だった**（`ADR-0068`のHW-e-2の実測）。
+
 ### 入口で方向フラグを降ろす（2026-09-24。`ADR-0018`のAddendum 9）
 
 **判定は3つ、破壊は3つである。** **見張りはDF=1がRustへ届いたときにしか鳴らない**ので、**DF=1のまま入る前提の判定を系統ごとに置いた。**
