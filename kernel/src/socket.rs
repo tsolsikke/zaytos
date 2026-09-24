@@ -375,6 +375,18 @@ pub fn readable(conn: u8, side: Side) -> bool {
     !state.rings[side as usize].is_empty() || !state.is_open(side.peer())
 }
 
+/// その側の `recvmsg` が待たずに進めるか（2026-09-23）。**読める（データか EOF）か、接続がもう無い。**
+///
+/// **接続が無ければ待たない**——**続く読みが `-ENOTCONN` を返す。** [`readable`] は無い接続に偽を
+/// 返すので、そのまま待ちの条件に使うと永久に待つ。
+pub fn readable_or_gone(conn: u8, side: Side) -> bool {
+    let Some(slot) = CONNECTIONS.get(conn as usize) else {
+        return true;
+    };
+    let state = slot.lock();
+    !state.in_use || !state.rings[side as usize].is_empty() || !state.is_open(side.peer())
+}
+
 /// 読んだ結果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadOutcome {

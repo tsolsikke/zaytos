@@ -10703,6 +10703,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "sendmsg の msghdr の msg_iovlen を見ない",
     ),
     (
+        "socket-recvmsg-takes-fd-first",
+        cfg!(feature = "socket-recvmsg-takes-fd-first"),
+        "recvmsg が待つ前に渡された fd を取る（直す前の形）",
+    ),
+    (
         "input-test",
         cfg!(feature = "input-test"),
         "inputd が入力の生イベントの fd を読む（ADR-0066 の Y-a）",

@@ -2467,6 +2467,25 @@ unsafe fn read_from_socket(
     }
 }
 
+/// ソケットのその側が読める（データか EOF）か、接続が無くなるまで待つ（2026-09-23）。
+///
+/// **読みはしない**——**続く [`read_from_socket`] が読む。** **待ち方は [`read_from_socket`] と同じで、
+/// 待ちの数も同じ計器へ数える。** **接続が無ければ待たない**（続く読みが `-ENOTCONN` を返す）。
+#[cfg_attr(feature = "socket-recvmsg-takes-fd-first", allow(dead_code))]
+fn wait_until_readable(
+    conn: u8,
+    side: crate::socket::Side,
+    bkl: &mut Option<crate::bkl::BklGuard>,
+) {
+    while !crate::socket::readable_or_gone(conn, side) {
+        crate::socket::note_reader_wait();
+        crate::task::set_current_waiting(crate::task::Wait::SocketReadable { conn, side });
+        drop(bkl.take());
+        crate::task::yield_now();
+        *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
+    }
+}
+
 /// ソケットのストリームへ書く（`ADR-0064`）。**満杯なら待つ。相手が閉じていれば `-EPIPE`。**
 ///
 /// **部分書きである**——**入った数を返す。** **`userlib::write_all` が残りを回す。**
@@ -2843,6 +2862,17 @@ unsafe fn recvmsg_from_ring3(
         Ok(parsed) => parsed,
         Err(errno) => return (-errno) as u64,
     };
+    // **読めるようになるまで待ってから、渡された fd を取る**（2026-09-23）。
+    //
+    // **入口で取ると、受け手が先に待っていた回に取りこぼす**——**待つ間は BKL を放すので、その間に
+    // 送り手が「fd を置く→データを書く」を済ませ、起きた後はデータだけを返していた**（`--full` で
+    // 1 度落ちた。`docs/troubleshooting.md` の 2026-09-23 の項）。**送り手は fd を先に置くので、
+    // データが読めるなら fd は既に置かれている。**
+    //
+    // 破壊 (2026-09-23, socket-recvmsg-takes-fd-first): 待たずに取る（直す前の形）。**受け手が先に
+    // 待つ台本（`sockc shmlate`）で fd が届かず、`shm-ok` が返らない。**
+    #[cfg(not(feature = "socket-recvmsg-takes-fd-first"))]
+    wait_until_readable(conn, side, bkl);
     // **渡された fd が在れば、自分の表へ据え、cmsghdr を書き戻す。**
     if let Some(shm) = crate::socket::take_fd(conn, side) {
         let inserted =
