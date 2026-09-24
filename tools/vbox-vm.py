@@ -32,7 +32,8 @@
     2. storageattach ... --medium none  （VDI を外す。付けたまま消すと登録が残る）
     3. closemedium disk <VDI> --delete  （登録から外し、ファイルを消す）
     4. unregistervm <名前> --delete     （.vbox と VM フォルダを消す）
-    5. 残ったフォルダが空なら消す
+    5. 道具が置いたもの（シリアルの写し・画面）を消す
+    6. 残ったフォルダが空なら消す。空でなければ、残ったものの名前を出す
 
 **`create` で VDI を作り直すときも 3 を先に行う**——**同じパス・同じ名前の媒体が
 登録に残っていると、VirtualBox は「別の UUID の同じファイル」として拒む。**
@@ -41,23 +42,41 @@
 
     python3 tools/vbox-vm.py selftest
     python3 tools/vbox-vm.py create --name zaytos-hw-e --image target/media/zaytos.img
+    python3 tools/vbox-vm.py run    --name zaytos-hw-e
+    cargo xtask judge-vbox target/vbox/zaytos-hw-e/<時刻>
     python3 tools/vbox-vm.py start  --name zaytos-hw-e --gui
     python3 tools/vbox-vm.py log    --name zaytos-hw-e
     python3 tools/vbox-vm.py screenshot --name zaytos-hw-e
     python3 tools/vbox-vm.py stop   --name zaytos-hw-e
     python3 tools/vbox-vm.py delete --name zaytos-hw-e
 
+# 走行の記録（2-2。2026-09-24）
+
+**`run` は 1 回の走行を `target/vbox/<名前>/<時刻>/` に残す**——**判定はしない。** **判定は
+`cargo xtask judge-vbox <その場所>` だけが持つ**（道具は起こす・打つ・採るだけである）。
+
+- `record.txt`——git の HEAD、未コミットの変更が在るか、`git diff HEAD` の sha256、今の像の sha256、
+  作ったときの記録（`create` が残す `latest-create.txt`）、VirtualBox の版
+- `showvminfo.txt`——`showvminfo --machinereadable`（VM の設定）
+- `serial.log`——シリアルの写し。**起こす前に古いものを消す**（前の走行と混ざらない）
+- `counters-before.txt` / `counters-after.txt`——打鍵の前後の APIC のベクタごとの計数
+  （`debugvm statistics`。**VM の外から数えた証拠**）
+- `keys.txt`——送った打鍵（PS/2 のスキャンコード）
+- `vbox-nem.txt`——`VBox.log` の `NEM` の行
+
 **`log` は 2 つを出す**——**`VBox.log` の `NEM` の行**（Hyper-V の上で走っているかが分かる。
 WSL2 が入っている機械では VirtualBox は自前の VT-x を使えない）**と、シリアルの末尾。**
 """
 import argparse
 import contextlib
+import hashlib
 import io
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 
 #: 名前の形。**`zaytos-` で始まり、続きは小文字・数字・`-` で 1〜24 文字。**
 #:
@@ -73,6 +92,20 @@ CONTROLLER = "SATA"
 
 #: シリアルの口（カーネルは 0x3F8 を見る）。
 SERIAL_PORT, SERIAL_IRQ = "0x3f8", "4"
+
+#: 走行の記録の置き場（リポジトリの `target/` の下。**公開物ではない**）。
+RECORD_ROOT = os.path.join("target", "vbox")
+
+#: `run` が送る打鍵: `a` と Enter の押下と解放（PS/2 のセット 1）。**4 バイトである。**
+#: **`judge-vbox` は、ベクタ 0x42 の増えがこのバイト数と等しいことを見る。**
+KEYS = ["1e", "9e", "1c", "9c"]
+
+#: `run` が待つ行。**待つための合図であって、判定ではない**（判定は `judge-vbox`）。
+READY_MARKERS = ["zash: ready", "halting"]
+ANSWER_MARKER = "zash: a: cannot run"
+
+#: `run` が数える計数（APIC のベクタごと。CPU をまたぐ）。
+COUNTER_PATTERN = "/Devices/apic/*/Vectors/*"
 
 
 class Refused(Exception):
@@ -141,6 +174,35 @@ class Vm:
     def exists(self):
         """登録に在るか。**`list vms` を使わない**——**接頭辞を確かめた名前だけを渡す。**"""
         return vboxmanage(["showvminfo", self.name], check=False).returncode == 0
+
+
+def sha256_of_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def git_state():
+    """HEAD・未コミットの変更が無いか・`git diff HEAD` の sha256。**走行を木へ結びつける。**"""
+    head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    porcelain = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True).stdout
+    diff = subprocess.run(["git", "diff", "HEAD"], capture_output=True).stdout
+    return [
+        f"git-head: {head or '(not a git tree)'}",
+        f"git-clean: {'true' if porcelain.strip() == '' else 'false'}",
+        f"git-diff-head-sha256: {hashlib.sha256(diff).hexdigest()}",
+    ]
+
+
+def virtualbox_version():
+    return vboxmanage(["--version"], check=False).stdout.strip() or "(unknown)"
+
+
+def write_lines(path, lines):
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
 
 
 def check_image(image):
@@ -229,6 +291,22 @@ def create(vm, image, memory, cpus, replace):
             "--medium", windows_path(vm.vdi),
         ]
     )
+    # **作ったときの記録を残す**（2-2）。**`run` がこれを写す**——**VM の中の像がどの木から
+    # 建ったかを、走行の記録から辿れるようにする。**
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    folder = os.path.join(RECORD_ROOT, vm.name)
+    os.makedirs(folder, exist_ok=True)
+    created = [
+        f"created: {stamp}",
+        f"image: {image}",
+        f"image-sha256: {sha256_of_file(image)}",
+        *git_state(),
+        f"cpus: {cpus}",
+        f"memory-mib: {memory}",
+        f"virtualbox: {virtualbox_version()}",
+    ]
+    write_lines(os.path.join(folder, f"create-{stamp}.txt"), created)
+    write_lines(os.path.join(folder, "latest-create.txt"), created)
     print(f"created: {vm.name}")
     print(f"  VM フォルダ : {windows_path(vm.folder)}")
     print(f"  VDI         : {windows_path(vm.vdi)}")
@@ -280,12 +358,104 @@ def delete(vm):
         vboxmanage(["closemedium", "disk", windows_path(vm.vdi), "--delete"], check=False)
     if vm.exists():
         vboxmanage(["unregistervm", vm.name, "--delete"], check=False)
-    for leftover in (vm.raw, vm.vdi):
+    # **道具が置いたものも消す**（2-2）。**`unregistervm --delete` は VirtualBox の知っている
+    # ファイルしか消さない**——**シリアルの写しと画面が残り、フォルダが空にならなかった**（実測）。
+    for leftover in (vm.raw, vm.vdi, vm.serial, os.path.join(vm.folder, "screen.png")):
         if os.path.isfile(leftover):
             os.unlink(leftover)
-    if os.path.isdir(vm.folder) and not os.listdir(vm.folder):
-        os.rmdir(vm.folder)
-    print(f"deleted: {vm.name}")
+    if os.path.isdir(vm.folder):
+        remaining = sorted(os.listdir(vm.folder))
+        if remaining:
+            print(f"（フォルダが空にならなかった。残ったもの: {remaining}）")
+        else:
+            os.rmdir(vm.folder)
+    print(f"deleted: {vm.name}（フォルダが{'残った' if os.path.isdir(vm.folder) else '無くなった'}）")
+
+
+def wait_for(path, markers, deadline):
+    """`path` に `markers` のどれかが出るまで待つ。**上限は `deadline`**（出なければ None）。"""
+    while time.monotonic() < deadline:
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+            for marker in markers:
+                if marker in text:
+                    return marker
+        time.sleep(1)
+    return None
+
+
+def read_counters(vm):
+    return vboxmanage(
+        ["debugvm", vm.name, "statistics", "--pattern", COUNTER_PATTERN], check=False
+    ).stdout.replace("\r", "")
+
+
+def run(vm, image, timeout):
+    """1 回の走行を記録する（2-2）。**判定はしない**——`cargo xtask judge-vbox` が行う。
+
+    起こす → プロンプトを待つ → 計数を読む → 打鍵を送る → シェルの答えを待つ → 計数を読む → 止める
+    → 写す。**待ちには上限がある**（`timeout` 秒。出なければ、そこまでの記録を残して止める）。
+    """
+    if not vm.exists():
+        raise Refused(f"{vm.name} が無い（先に `create` を回すこと）")
+    info = vboxmanage(["showvminfo", vm.name, "--machinereadable"]).stdout.replace("\r", "")
+    if 'VMState="running"' in info:
+        raise Refused(f"{vm.name} は走っている。先に `stop` を回すこと（シリアルが前の走行と混ざる）")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    record = os.path.join(RECORD_ROOT, vm.name, stamp)
+    os.makedirs(record)
+    latest = os.path.join(RECORD_ROOT, vm.name, "latest-create.txt")
+    created = open(latest, encoding="utf-8").read().splitlines() if os.path.isfile(latest) else [
+        "(no create record: the VM was made before 2-2 or by hand)"
+    ]
+    write_lines(
+        os.path.join(record, "record.txt"),
+        [
+            f"run: {stamp}",
+            f"vm: {vm.name}",
+            *git_state(),
+            f"current-image: {image}",
+            f"current-image-sha256: {sha256_of_file(image) if os.path.isfile(image) else '(missing)'}",
+            f"virtualbox: {virtualbox_version()}",
+            "--- latest-create.txt ---",
+            *created,
+        ],
+    )
+    write_lines(os.path.join(record, "showvminfo.txt"), [info.rstrip()])
+    if os.path.isfile(vm.serial):
+        os.unlink(vm.serial)
+    deadline = time.monotonic() + timeout
+    vboxmanage(["startvm", vm.name, "--type", "headless"])
+    try:
+        ready = wait_for(vm.serial, READY_MARKERS, deadline)
+        print(f"  起動: {ready or '上限までに合図が出なかった'}")
+        if ready == "zash: ready":
+            write_lines(os.path.join(record, "counters-before.txt"), [read_counters(vm).rstrip()])
+            vboxmanage(["controlvm", vm.name, "keyboardputscancode", *KEYS])
+            write_lines(os.path.join(record, "keys.txt"), [" ".join(KEYS)])
+            answered = wait_for(vm.serial, [ANSWER_MARKER], deadline)
+            print(f"  打鍵: {'シェルが答えた' if answered else '上限までに答えが出なかった'}")
+            # **最後の解放（9c）の配送を待ってから読む。** 答えは Enter の押下で出る。
+            time.sleep(1)
+            write_lines(os.path.join(record, "counters-after.txt"), [read_counters(vm).rstrip()])
+    finally:
+        vboxmanage(["controlvm", vm.name, "poweroff"], check=False)
+        # **止まりきるまで待つ**（`VBox.log` を写すため）。上限つき。
+        stop_deadline = time.monotonic() + 30
+        while time.monotonic() < stop_deadline:
+            state = vboxmanage(["showvminfo", vm.name, "--machinereadable"], check=False).stdout
+            if 'VMState="running"' not in state and 'VMState="stopping"' not in state:
+                break
+            time.sleep(1)
+        if os.path.isfile(vm.serial):
+            shutil.copyfile(vm.serial, os.path.join(record, "serial.log"))
+        if os.path.isfile(vm.vbox_log):
+            with open(vm.vbox_log, encoding="utf-8", errors="replace") as handle:
+                nem = [line.rstrip() for line in handle if "NEM" in line]
+            write_lines(os.path.join(record, "vbox-nem.txt"), nem or ["(no NEM line)"])
+    print(f"recorded: {record}")
+    print(f"judge:    cargo xtask judge-vbox {record}")
 
 
 def log(vm, lines):
@@ -361,7 +531,7 @@ def selftest():
         for name in REFUSED_NAMES:
             if name is None:
                 continue
-            for command in ("create", "start", "stop", "delete", "log", "screenshot"):
+            for command in ("create", "start", "stop", "delete", "log", "screenshot", "run"):
                 # **断りの文はここでは読まない**（数だけを見る。出すと検査の出力が埋まる）。
                 with contextlib.redirect_stderr(sink):
                     code = main([command, "--name", name, "--image", "/dev/null"])
@@ -384,19 +554,21 @@ def main(argv=None):
     )
     parser.add_argument(
         "command",
-        choices=["create", "start", "stop", "delete", "log", "screenshot", "selftest"],
+        choices=["create", "start", "stop", "delete", "log", "screenshot", "run", "selftest"],
     )
     parser.add_argument("--name", help="VM の名前（zaytos- で始まること）")
     parser.add_argument("--image", default="target/media/zaytos.img", help="起動媒体の像")
     parser.add_argument("--basefolder", default=DEFAULT_BASEFOLDER, help="VDI と .vbox の置き場")
     parser.add_argument("--memory", type=int, default=2048, help="メモリ（MiB）")
-    # **既定は 1 個**（2026-09-23）。**VirtualBox の EFI は 2 個と 3 個で落ちる**（1 個と 4 個は起動する。
-    # 実測）。**1 個か 4 個かは運用者の判断を待つ**——答えが出るまでは 1 個にしておく（レビューの指示）。
-    parser.add_argument("--cpus", type=int, default=1, help="CPU の数（2 と 3 は EFI が落ちる）")
+    # **既定は 4 個**（運用者の判断 3。2026-09-24）。**VirtualBox の EFI は 2 個と 3 個で落ちる**
+    # （1 個と 4 個は起動する。実測。2026-09-23）。**カーネルの `MAX_CPUS` は 2 なので、4 個では
+    # AP を 1 つ起こして SMP で走る。**
+    parser.add_argument("--cpus", type=int, default=4, help="CPU の数（2 と 3 は EFI が落ちる）")
     parser.add_argument("--gui", action="store_true", help="画面を開いて起こす")
     parser.add_argument("--replace", action="store_true", help="在る VM を消してから作る")
     parser.add_argument("--lines", type=int, default=20, help="シリアルの末尾の行数")
     parser.add_argument("--out", help="画面の PNG の置き場（既定は VM フォルダの screen.png）")
+    parser.add_argument("--timeout", type=int, default=180, help="run の待ちの上限（秒）")
     args = parser.parse_args(argv)
     try:
         if args.command == "selftest":
@@ -417,6 +589,8 @@ def main(argv=None):
             log(vm, args.lines)
         elif args.command == "screenshot":
             screenshot(vm, args.out)
+        elif args.command == "run":
+            run(vm, args.image, args.timeout)
         return 0
     except Refused as refused:
         print(f"refused: {refused}", file=sys.stderr)

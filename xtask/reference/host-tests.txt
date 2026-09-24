@@ -696,3 +696,8 @@ xtask::tests::the_commit_message_rules_pass_the_shapes_that_are_allowed
 xtask::tests::the_machine_variant_table_parses_and_rejects_broken_rows
 xtask::tests::the_range_flags_turn_the_rules_off
 xtask::tests::the_two_s13b_markers_drop_their_lines_and_nothing_else
+xtask::vbox::tests::a_keystroke_that_also_came_through_the_8259_fails
+xtask::vbox::tests::an_empty_counter_output_reads_as_nothing_and_does_not_hold
+xtask::vbox::tests::fewer_deliveries_than_key_bytes_fail
+xtask::vbox::tests::four_key_bytes_that_raise_0x42_by_four_hold
+xtask::vbox::tests::the_measured_counter_output_is_read_per_vector_across_cpus

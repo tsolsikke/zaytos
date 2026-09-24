@@ -15,6 +15,7 @@ use anyhow::{bail, Context, Result};
 
 mod font;
 mod media;
+mod vbox;
 
 const OVMF_CODE_PATH: &str = "/usr/share/OVMF/OVMF_CODE_4M.fd";
 const OVMF_VARS_TEMPLATE_PATH: &str = "/usr/share/OVMF/OVMF_VARS_4M.fd";
@@ -1441,7 +1442,7 @@ fn main() -> Result<()> {
        cargo xtask run --machine-variant NAME [--sabotage FEATURE | --config FEATURE]   (ADR-0068。NAME は xtask/machine-variants.txt の名前)
        cargo xtask check [--update-reference]   (ホストテストの名前の集合を取り直す)
        cargo xtask run --boot-log-diff [--update-reference]
-       cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask image [--without-fs-image]   (ADR-0068 の HW-e。起動媒体の像を建てて確かめる)\n       cargo xtask gen-font";
+       cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask image [--without-fs-image]   (ADR-0068 の HW-e。起動媒体の像を建てて確かめる)\n       cargo xtask gen-font\n       cargo xtask judge-vbox <記録>   (ADR-0068 の 2-2。tools/vbox-vm.py run が残した記録を判定する)";
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -2052,6 +2053,13 @@ fn main() -> Result<()> {
         Some("flaky") => cmd_flaky(),
         Some("screenshot") => cmd_screenshot(&args[1..]),
         Some("gen-font") => font::generate(&workspace_root()?),
+        // **VirtualBox の走行の記録を判定する（`ADR-0068` の 2-2）。** **判定は xtask だけが持つ。**
+        Some("judge-vbox") => {
+            let record = args
+                .get(1)
+                .context("judge-vbox requires a record directory (target/vbox/<VM>/<時刻>)")?;
+            cmd_judge_vbox(Path::new(record))
+        }
         // **起動媒体の像（`ADR-0068` の HW-e）。** **`--without-fs-image` は破壊である。**
         Some("image") => cmd_image(if args[1..].iter().any(|a| a == "--without-fs-image") {
             MediaContents::WithoutFsImage
@@ -6770,6 +6778,110 @@ const MACHINE_VARIANT_CONFIGS: &[(&str, &str, VariantExpect)] = &[
     ),
 ];
 
+/// 打鍵を送った回の判定（HW-e-2。2-2 で関数に抜き出した）。**QEMU の変種と VirtualBox の
+/// 記録（`judge-vbox`）が同じ関数を通る**——**判定を 2 か所で持たない。**
+///
+/// **プロンプト、シェルの答え（[`KEY_ANSWER`]）、要る行の全部、出てはいけない行が 1 つも無いこと。**
+fn judge_prompt_key_and_lines(
+    context: &str,
+    text: &str,
+    lines: &[&str],
+    forbidden: &[&str],
+) -> bool {
+    let ready = text.contains(SHELL_READY_MARKER);
+    let answered = text.contains(KEY_ANSWER);
+    let missing: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| !text.contains(line))
+        .collect();
+    let seen_forbidden: Vec<&str> = forbidden
+        .iter()
+        .copied()
+        .filter(|line| text.contains(line))
+        .collect();
+    println!("{context}: the_shell_printed_its_prompt = {ready}");
+    println!("{context}: the_shell_answered_the_keys = {answered} (`{KEY_ANSWER}`)");
+    println!(
+        "{context}: every required line appeared = {} (missing {missing:?})",
+        missing.is_empty()
+    );
+    println!(
+        "{context}: no forbidden line appeared = {} (seen {seen_forbidden:?})",
+        seen_forbidden.is_empty()
+    );
+    ready && answered && missing.is_empty() && seen_forbidden.is_empty()
+}
+
+/// VirtualBox の PS/2 の VM で要る行（2-2）。**写像の行と配送の行である。**
+///
+/// **`[WARN] apic:` を禁じない**——**VirtualBox は I/O APIC の ID レジスタを 0 のまま置く**ので、
+/// ID の `[WARN]` が出るのが正しい（`ADR-0068` の HW-e-2）。**QEMU の既定の変種とはそこだけが違う。**
+const VBOX_PS2_LINES: &[&str] = &[
+    "keyboard: first key arrived as vector 0x42",
+    "apic: I/O APIC MMIO decodes",
+];
+/// VirtualBox の PS/2 の VM で出てはいけない行（2-2）。
+const VBOX_PS2_FORBIDDEN: &[&str] = &["[ERROR]", "vector 0x21"];
+
+/// `cargo xtask judge-vbox <記録>`（`ADR-0068` の 2-2）。**道具（`tools/vbox-vm.py run`）が残した
+/// 1 回の走行の記録を判定する。** **VirtualBox を呼ばない**——**記録だけを読む。**
+///
+/// **判定は 2 つの出所から取る**——**シリアル**（カーネルの言い分。QEMU の変種と同じ関数）と、
+/// **VirtualBox のデバッガの計数**（VM の外から数えた値。[`vbox`] の doc）。
+fn cmd_judge_vbox(record: &Path) -> Result<()> {
+    let context = format!("judge-vbox {}", record.display());
+    let context = context.as_str();
+    let read = |name: &str| -> Result<String> {
+        let path = record.join(name);
+        if !path.is_file() {
+            bail!(
+                "{context}: {} is missing (the run did not get that far?)",
+                path.display()
+            );
+        }
+        Ok(read_lossy(&path))
+    };
+    // **記録がどの木から来たかを先に出す**（判定ではない）。
+    for line in read("record.txt")?.lines().take(8) {
+        println!("{context}: (info) {line}");
+    }
+    let text = strip_ansi(&read("serial.log")?);
+    let serial_holds =
+        judge_prompt_key_and_lines(context, &text, VBOX_PS2_LINES, VBOX_PS2_FORBIDDEN);
+    let id_warning = text
+        .lines()
+        .find(|line| line.contains("[WARN] apic: the I/O APIC ID register reports"));
+    println!("{context}: (info) the I/O APIC ID line: {id_warning:?}");
+
+    let before = vbox::apic_vector_counts(&read("counters-before.txt")?);
+    let after = vbox::apic_vector_counts(&read("counters-after.txt")?);
+    let key_bytes = vbox::key_bytes(&read("keys.txt")?);
+    let verdict = vbox::counter_verdict(&before, &after);
+    println!(
+        "{context}: (info) counters read: {} vector(s) before, {} after",
+        before.len(),
+        after.len()
+    );
+    println!(
+        "{context}: the keyboard vector {:#04x} rose by the key bytes sent = {} (rose by {}, sent {key_bytes})",
+        vbox::KEYBOARD_VECTOR,
+        verdict.keyboard_delta == key_bytes as u64,
+        verdict.keyboard_delta
+    );
+    println!(
+        "{context}: no 8259 vector (0x20..=0x2f) rose during the keys = {} (rose: {:?})",
+        verdict.legacy_pic_increases.is_empty(),
+        verdict.legacy_pic_increases
+    );
+    if serial_holds && verdict.holds(key_bytes) {
+        println!("{context}: PASS");
+        Ok(())
+    } else {
+        bail!("{context}: FAILED")
+    }
+}
+
 /// 打鍵の回でシェルが返す答え（HW-e-2）。**`a` という命令は無いので、シェルがこう答える。**
 /// **打った字がシェルまで届いたことの印である**（エコーだけでは届いたと言えない）。
 const KEY_ANSWER: &str = "zash: a: cannot run";
@@ -7259,28 +7371,7 @@ fn cmd_machine_variant(
             stopped_there && !ready
         }
         VariantExpect::PromptKeyAndLines { lines, forbidden } => {
-            let answered = text.contains(KEY_ANSWER);
-            let missing: Vec<&str> = lines
-                .iter()
-                .copied()
-                .filter(|line| !text.contains(line))
-                .collect();
-            let seen_forbidden: Vec<&str> = forbidden
-                .iter()
-                .copied()
-                .filter(|line| text.contains(line))
-                .collect();
-            println!("{context}: the_shell_printed_its_prompt = {ready}");
-            println!("{context}: the_shell_answered_the_keys = {answered} (`{KEY_ANSWER}`)");
-            println!(
-                "{context}: every required line appeared = {} (missing {missing:?})",
-                missing.is_empty()
-            );
-            println!(
-                "{context}: no forbidden line appeared = {} (seen {seen_forbidden:?})",
-                seen_forbidden.is_empty()
-            );
-            ready && answered && missing.is_empty() && seen_forbidden.is_empty()
+            judge_prompt_key_and_lines(context, &text, lines, forbidden)
         }
         VariantExpect::StopsWithReason { line, reason } => {
             let stopped_there = text.contains(line);
