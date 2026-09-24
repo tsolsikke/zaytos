@@ -1884,6 +1884,10 @@ unsafe fn run_loaded_program(
         report_stack_water_before_ring3(logger, process.name);
     }
 
+    // **DF=1 の文脈から入った割り込みを数える起点（2026-09-24）。** **`spin` は `std` の後で
+    // 回る**ので、止められるまでに来たタイマはどれも DF=1 の文脈から入る（下の判定行）。
+    let irq_entries_from_df_before =
+        crate::idt::entries_from_direction_flag_set(crate::idt::EntryPath::Irq);
     // SAFETY: entry と stack は今張ったユーザーページで、`ud2` が必ずフォルト
     // する。main_rsp0_top はメインのカーネルスタック上端。単一実行文脈である。
     unsafe {
@@ -1922,6 +1926,18 @@ unsafe fn run_loaded_program(
              claimed here={claimed_foreground}",
             process.name,
             crate::input::foreground_depth()
+        ));
+        // **方向フラグの前提（2026-09-24）。** **`--shell-test` が止める `spin` が作る。**
+        // **0 なら、IRQ の入口が DF を降ろすという主張は何も確かめていない**
+        // （`crate::idt::check_direction_flag`）。**判定は `xtask` が行う。**
+        let irq_entries_from_df =
+            crate::idt::entries_from_direction_flag_set(crate::idt::EntryPath::Irq)
+                - irq_entries_from_df_before;
+        logger.info(format_args!(
+            "direction flag: {} was interrupted from a context with DF=1 {irq_entries_from_df} \
+             time(s) while it ran, and every handler ran with DF=0 (the stub clears it; a \
+             handler that sees DF=1 halts)",
+            process.name
         ));
     }
     // **ユーザースタックをどれだけ使ったかを出す（EV。ADR-0041）。**

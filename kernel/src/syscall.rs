@@ -3253,6 +3253,11 @@ unsafe fn spawn_from_ring3(
 /// `context` はスタブが積んだ有効な [`IrqContext`] を指していること。
 /// `rsp_at_call` はスタブが `call` 直前に読んだ RSP であること。
 pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
+    // **方向フラグを何より先に見る（2026-09-24）。** `crate::idt::check_direction_flag` の doc。
+    // SAFETY: スタブが直前に積んだ有効な IrqContext を指す。読み取りのみ。
+    let (vector, rflags) = unsafe { ((*context).vector, (*context).rflags) };
+    crate::idt::check_direction_flag(crate::idt::EntryPath::Syscall, vector, rflags);
+
     // **BKL を取る（S4-b-2）。** 割り込みゲート経由なので入場時点で IF=0 だが、
     // BKL の保持区間であることを型で表すためにガードを取る。
     //

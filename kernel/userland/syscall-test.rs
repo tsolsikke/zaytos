@@ -110,6 +110,8 @@
 //! - `66` 待ち受けの無い名前への `connect` が `-ECONNREFUSED` を返さなかった（`ADR-0064`）
 //! - `67` `memfd_create`＋`ftruncate`＋`mmap` した共有メモリへ書いた値が読み戻せなかった（`ADR-0065`）
 //! - `68` 共有メモリでない fd（stdin）の `mmap` が `-EBADF` を返さなかった（`ADR-0065`）
+//! - `69` 方向フラグを立てたまま打った `clock_gettime` が 0 を返さなかった（2026-09-24。
+//!   **判定の本体はカーネルの入口の見張りである**——こちらは前提を作り、戻り値だけを見る）
 //!
 //! # `argv` は `_start` の時点の `rsp` から読む
 //!
@@ -162,6 +164,10 @@ const MINUS_ENOSYS: i32 = -38;
 const SYS_SOCKET: u32 = 41;
 /// `connect` の番号。
 const SYS_CONNECT: u32 = 42;
+/// `clock_gettime` の番号（Linux x86-64）。
+const SYS_CLOCK_GETTIME: u32 = 228;
+/// `CLOCK_MONOTONIC`（Linux x86-64）。**カーネルが答えるのはこの時計だけである。**
+const CLOCK_MONOTONIC: u32 = 1;
 /// `-ECONNREFUSED`。
 const MINUS_ECONNREFUSED: i32 = -111;
 /// `SOCKADDR_NOBODY` の長さ（`sa_family_t` 2 + `"nobody"` 6 + NUL 1）。
@@ -1285,6 +1291,22 @@ core::arch::global_asm!(
     "  mov rdi, r12",
     "  int 0x80",
 
+    // 69: 方向フラグを立てたまま `int 0x80` を打つ（2026-09-24）。**入口が DF を降ろすことの
+    // 前提を作る**——カーネルはこの入場を数え、数えられなければ止まる
+    // （`kernel/src/main.rs` の `check_direction_flag_premise`）。**書き戻しのある呼び出しを
+    // 選んだ**——**降ろさなければ、カーネルの写しの向きをこちらが決めることになる。**
+    "  sub rsp, 16",
+    "  std",
+    "  mov eax, {sys_clock_gettime}",
+    "  mov edi, {clock_monotonic}",
+    "  mov rsi, rsp",
+    "  int 0x80",
+    "  cld",
+    "  add rsp, 16",
+    "  test rax, rax",
+    "  mov edi, 69",
+    "  jne 9f",
+
     // すべて通った。
     "  xor edi, edi",
 
@@ -1479,6 +1501,8 @@ core::arch::global_asm!(
     minus_ebadf_shm = const MINUS_EBADF_SHM,
     sys_socket = const SYS_SOCKET,
     sys_connect = const SYS_CONNECT,
+    sys_clock_gettime = const SYS_CLOCK_GETTIME,
+    clock_monotonic = const CLOCK_MONOTONIC,
     af_unix = const 1,
     sock_stream = const 1,
     sockaddr_nobody_len = const SOCKADDR_NOBODY_LEN,

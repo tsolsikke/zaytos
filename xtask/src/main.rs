@@ -15848,6 +15848,11 @@ const DIRECT_SERIAL_PORT_ALLOWLIST: &[DirectSerialPortSite] = &[
         reason: "スタブ入口の境界違反の報告。違反した状態で呼び出しを増やさない",
     },
     DirectSerialPortSite {
+        file: "kernel/src/idt/mod.rs",
+        item: "check_direction_flag",
+        reason: "スタブ入口で DF=1 が Rust へ届いた報告。BKL を取る前に呼び、停止する経路である",
+    },
+    DirectSerialPortSite {
         file: "common/src/critical.rs",
         item: "report_contended_lock_and_halt",
         reason: "Locked<T> の競合の報告。停止する経路である",

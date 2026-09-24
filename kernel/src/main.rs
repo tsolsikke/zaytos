@@ -8491,6 +8491,12 @@ struct UserProgram {
     /// **`argv[0]` はプログラム名である**——Unix の慣行であって、
     /// **カーネルが強制するものではない**（`execve` は呼び出し側に決めさせる）。
     argv: &'static [&'static [u8]],
+    /// **方向フラグ（DF=1）のまま、どの入口からカーネルへ入るか**（2026-09-24）。
+    ///
+    /// **入口が DF を降ろすという主張の前提を作る。** 走らせた後に、その入口の計器
+    /// （`kernel::idt::entries_from_direction_flag_set`）が増えたことを見る。
+    /// **増えていなければ、見張りは何も確かめていない**ので止まる。
+    enters_with_direction_flag: Option<kernel::idt::EntryPath>,
 }
 
 /// 走らせるプログラムの一覧（S9-b-3-1、S9-b-3-2a で期待を持たせた）。
@@ -8515,6 +8521,7 @@ const USER_PROGRAMS: &[UserProgram] = &[
         probes_abi: false,
         status_meanings: &[],
         argv: &[b"hello"],
+        enters_with_direction_flag: None,
     },
     UserProgram {
         name: "fault-test",
@@ -8530,6 +8537,8 @@ const USER_PROGRAMS: &[UserProgram] = &[
         probes_abi: false,
         status_meanings: &[],
         argv: &[b"fault-test"],
+        // **`std` の後で #PF を起こす**（`kernel/userland/fault-test.rs`）。
+        enters_with_direction_flag: Some(kernel::idt::EntryPath::Exception),
     },
     UserProgram {
         name: "syscall-test",
@@ -8542,8 +8551,40 @@ const USER_PROGRAMS: &[UserProgram] = &[
         // **2 要素にしてある。** `argc` が 1 のままだと、
         // **「積んでいない」と「1 つ積んだ」が区別できない。**
         argv: &[b"syscall-test", b"alpha"],
+        // **`std` の後で `int 0x80` を打つ**（`kernel/userland/syscall-test.rs` の 69 番）。
+        enters_with_direction_flag: Some(kernel::idt::EntryPath::Syscall),
     },
 ];
+
+/// **方向フラグの前提が作れたこと**（2026-09-24。[`UserProgram::enters_with_direction_flag`]）。
+///
+/// **見張り（`kernel::idt::check_direction_flag`）は DF=1 が Rust へ届いたときにしか鳴らない。**
+/// **DF=1 のまま入る入場が 1 度も無ければ、スタブが降ろしていなくても黙って通る。**
+fn check_direction_flag_premise(
+    logger: &mut Logger<SerialPort>,
+    program: &UserProgram,
+    before: Option<u64>,
+) {
+    let (Some(path), Some(before)) = (program.enters_with_direction_flag, before) else {
+        return;
+    };
+    let name = program.name;
+    let entries = kernel::idt::entries_from_direction_flag_set(path) - before;
+    if entries == 0 {
+        logger.error(format_args!(
+            "direction flag: {name} was to enter the kernel through the {} entry with DF=1, but \
+             no such entry was counted; the check that the stub clears DF saw nothing. halting",
+            path.name()
+        ));
+        cpu::halt_forever();
+    }
+    logger.info(format_args!(
+        "direction flag: {name} entered the kernel through the {} entry with DF=1 {entries} \
+         time(s), and the handler ran with DF=0 each time (the stub clears it; a handler that \
+         sees DF=1 halts)",
+        path.name()
+    ));
+}
 
 /// 今の空きフレーム数（S11-3）。**会計のために短く借りて、すぐ返す。**
 ///
@@ -8592,6 +8633,9 @@ fn load_embedded_user_program(logger: &mut Logger<SerialPort>) -> Result<(), Use
         // **会計の窓を開く（`ADR-0063` の (b1)）。** **起動時は交差しないが、同じ形で数える**
         // ——**「確かめた回数」を 1 か所で数えるためである。**
         let window = kernel::userland::open_spawn_window();
+        let df_entries_before = program
+            .enters_with_direction_flag
+            .map(kernel::idt::entries_from_direction_flag_set);
         let (outcome, held, leaked, taken) =
             load_user_program(logger, program.image, true, name, program.argv, None);
         let crossed = kernel::userland::close_spawn_window(window);
@@ -8601,6 +8645,7 @@ fn load_embedded_user_program(logger: &mut Logger<SerialPort>) -> Result<(), Use
         // **終わり方を判定する。** ここで止まっても空間は既に畳まれている
         // （`load_user_program` が成否によらず畳む）ので、会計はこの後で見られる。
         check_user_program_outcome(logger, program, entry)?;
+        check_direction_flag_premise(logger, program, df_entries_before);
 
         // **畳んだ会計。** 消えた枚数と隔離へ入れた枚数が一致すること。
         // **空きフレームの絶対値は出さない**（コア数で変わる。
@@ -10876,6 +10921,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "fp-clobber-on-kernel-entry-test",
         cfg!(feature = "fp-clobber-on-kernel-entry-test"),
         "システムコールの入口で FP の状態を目印で塗る",
+    ),
+    (
+        "exception-entry-keeps-df-test",
+        cfg!(feature = "exception-entry-keeps-df-test"),
+        "例外の入口のスタブが方向フラグを降ろさない",
+    ),
+    (
+        "irq-entry-keeps-df-test",
+        cfg!(feature = "irq-entry-keeps-df-test"),
+        "IRQ の入口のスタブが方向フラグを降ろさない",
+    ),
+    (
+        "syscall-entry-keeps-df-test",
+        cfg!(feature = "syscall-entry-keeps-df-test"),
+        "システムコールの入口のスタブが方向フラグを降ろさない",
     ),
     (
         "ttf-test",

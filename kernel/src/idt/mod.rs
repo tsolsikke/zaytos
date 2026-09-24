@@ -143,6 +143,15 @@ core::arch::global_asm!(
     // 前に取る必要がある。rax は既に退避済みなので、作業用に使ってよい。
     "  mov rax, cr2",
     "  push rax",
+    // **方向フラグを降ろす（2026-09-24）。** **割り込みと例外は DF を変えずに入る**ので、
+    // 割り込まれた側の DF=1 がそのまま Rust へ届く。**SysV ABI は関数の入口で DF=0 を
+    // 前提にしており、`rep movs` が逆向きに写す**——**ユーザーの `memmove` の逆向きの
+    // 写しの最中にタイマが入り、カーネルがスタックを越えて `.bss` の末尾まで写した**
+    // （実測。`docs/troubleshooting.md`）。**`iretq` が RFLAGS を戻すので、割り込まれた側の
+    // DF はそのまま返る。** **3 つの入口に同じものが在る**（IRQ とシステムコール）。
+    "  .if {clear_df}",
+    "  cld",
+    "  .endif",
     // ここで rsp が ExceptionContext の先頭を指している。
     "  mov rdi, rsp",
     // SysV ABI は call の直前に RSP が 16 バイト境界であることを要求する
@@ -157,6 +166,7 @@ core::arch::global_asm!(
     "  ud2",
     handler = sym exception_entry,
     adjust = const STACK_ALIGN_ADJUST,
+    clear_df = const CLEAR_DF_ON_EXCEPTION_ENTRY,
 );
 
 /// `call` の直前に RSP から引いて 16 バイト境界へ合わせる量。
@@ -197,6 +207,28 @@ const STACK_ALIGN_ADJUST: usize = 8;
 /// （`--interrupt-test misaligned`）。
 #[cfg(feature = "misalign-test")]
 const STACK_ALIGN_ADJUST: usize = 0;
+
+/// 共通の入口が方向フラグ（DF）を降ろすか（2026-09-24）。**1 なら `cld` を出す。**
+///
+/// **`.if` で出し入れするのは、破壊の feature で系統ごとに抜くためである**
+/// ——**3 つの入口は別々の `global_asm!` なので、1 つを抜いても他の 2 つは残る。**
+const CLEAR_DF_ON_EXCEPTION_ENTRY: usize = if cfg!(feature = "exception-entry-keeps-df-test") {
+    0
+} else {
+    1
+};
+/// IRQ の入口の分（[`CLEAR_DF_ON_EXCEPTION_ENTRY`]）。
+const CLEAR_DF_ON_IRQ_ENTRY: usize = if cfg!(feature = "irq-entry-keeps-df-test") {
+    0
+} else {
+    1
+};
+/// システムコールの入口の分（[`CLEAR_DF_ON_EXCEPTION_ENTRY`]）。
+const CLEAR_DF_ON_SYSCALL_ENTRY: usize = if cfg!(feature = "syscall-entry-keeps-df-test") {
+    0
+} else {
+    1
+};
 
 // IRQ スタイル（GPR を復元して `iretq` で戻る）のスタブ表。
 //
@@ -337,6 +369,10 @@ core::arch::global_asm!(
     "  push rbx",
     "  push rax",
     // CR2 は積まない。IRQ はページフォルトではないので意味を持たない。
+    // **方向フラグを降ろす（2026-09-24）。** 理由は例外の共通ルーチンの同じ行にある。
+    "  .if {clear_df}",
+    "  cld",
+    "  .endif",
     "  mov rdi, rsp",
     "  sub rsp, {adjust}",
     "  mov rsi, rsp",
@@ -384,6 +420,7 @@ core::arch::global_asm!(
     handler = sym irq_entry,
     adjust = const STACK_ALIGN_ADJUST,
     yield_vector = const YIELD_VECTOR,
+    clear_df = const CLEAR_DF_ON_IRQ_ENTRY,
 );
 
 extern "C" {
@@ -431,6 +468,12 @@ core::arch::global_asm!(
     "  push rcx",
     "  push rbx",
     "  push rax",
+    // **方向フラグを降ろす（2026-09-24）。** 理由は例外の共通ルーチンの同じ行にある。
+    // **ユーザーは `std` の後に `int 0x80` を打てる**——**降ろさなければ、カーネルの写しの
+    // 向きをユーザーが決められる。**
+    "  .if {clear_df}",
+    "  cld",
+    "  .endif",
     "  mov rdi, rsp",
     "  sub rsp, {adjust}",
     "  mov rsi, rsp",
@@ -460,6 +503,7 @@ core::arch::global_asm!(
     handler = sym crate::syscall::syscall_entry,
     adjust = const STACK_ALIGN_ADJUST,
     syscall_vector = const SYSCALL_VECTOR,
+    clear_df = const CLEAR_DF_ON_SYSCALL_ENTRY,
 );
 
 extern "C" {
@@ -994,6 +1038,74 @@ pub(crate) fn check_stack_alignment(rsp_at_call: u64, path: &str, vector: u64) {
     cpu::halt_forever();
 }
 
+/// RFLAGS の方向フラグ（DF, bit 10）。
+const RFLAGS_DIRECTION_FLAG: u64 = 1 << 10;
+
+/// カーネルへの入口の系統（2026-09-24）。**方向フラグの計器の添字である。**
+#[derive(Clone, Copy)]
+pub enum EntryPath {
+    Exception,
+    Irq,
+    Syscall,
+}
+
+impl EntryPath {
+    /// 判定行に出す名前。
+    pub fn name(self) -> &'static str {
+        match self {
+            EntryPath::Exception => "exception",
+            EntryPath::Irq => "irq",
+            EntryPath::Syscall => "syscall",
+        }
+    }
+}
+
+/// 割り込まれた側が DF=1 だった入場の数（2026-09-24。系統ごと）。
+///
+/// **前提の計器である。** **0 なら、入口が DF を降ろすという主張は何も確かめていない**
+/// ——**普段のプログラムは DF=1 の窓がごく短い**（`memmove` の逆向きの写しの間だけ）。
+/// **前提を作るのは `fault-test`・`syscall-test`・`spin` である。**
+static ENTRIES_FROM_DF_SET: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+
+/// [`ENTRIES_FROM_DF_SET`] の今の値。
+pub fn entries_from_direction_flag_set(path: EntryPath) -> u64 {
+    ENTRIES_FROM_DF_SET[path as usize].load(Ordering::Relaxed)
+}
+
+/// Rust の入口の先頭で呼ぶ（2026-09-24）。**スタブが DF を降ろしたことを確かめる。**
+///
+/// # なぜ先頭なのか
+///
+/// **DF=1 のまま走った Rust は、構造体の写しや配列の初期化の `rep movs` を逆向きに
+/// 走らせる。** **実測で、`scheduler::states` の配列の初期化が自分のループの終わりの
+/// 番地を潰し、`.bss` の末尾まで写した**（`docs/troubleshooting.md`）。**何かを写すより
+/// 前に見る。**
+///
+/// # 見つけたら止まる
+///
+/// **スタブが降ろさなかったのはカーネルの誤りである**（Halt and Dump）。**書式の組み立ても
+/// 写しを使いうるので、報告より先に降ろす。**
+pub(crate) fn check_direction_flag(path: EntryPath, vector: u64, interrupted_rflags: u64) {
+    if interrupted_rflags & RFLAGS_DIRECTION_FLAG != 0 {
+        ENTRIES_FROM_DF_SET[path as usize].fetch_add(1, Ordering::Relaxed);
+    }
+    if cpu::read_rflags() & RFLAGS_DIRECTION_FLAG == 0 {
+        return;
+    }
+    // SAFETY: `cld` は RFLAGS.DF を 0 にするだけで、メモリにもスタックにも触れない。
+    unsafe { core::arch::asm!("cld", options(nomem, nostack)) };
+    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    serial.init();
+    let _ = writeln!(
+        serial,
+        "[ERROR] direction flag: the {} stub let DF=1 into Rust (vector={vector}, interrupted \
+         RFLAGS={interrupted_rflags:#x}); a string copy here would run backwards",
+        path.name()
+    );
+    let _ = writeln!(serial, "[ERROR] halting (cli + hlt loop)");
+    cpu::halt_forever();
+}
+
 /// IRQ の共通処理。戻る。
 ///
 /// スタブから `extern "sysv64"` で呼ばれる（ADR-0018 のチェックリスト 11）。
@@ -1010,6 +1122,11 @@ pub(crate) fn check_stack_alignment(rsp_at_call: u64, path: &str, vector: u64) {
 /// `context` はスタブが積んだ [`IrqContext`] を指していること。
 /// `rsp_at_call` はスタブが `call` 直前に読んだ RSP であること。
 extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u64 {
+    // **方向フラグを何より先に見る（2026-09-24）。** [`check_direction_flag`] の doc。
+    // SAFETY: スタブが直前に積んだ有効な `IrqContext` を指す。読み取りのみ。
+    let (vector, rflags) = unsafe { ((*context).vector, (*context).rflags) };
+    check_direction_flag(EntryPath::Irq, vector, rflags);
+
     // 切り替え不要なときに返す RSP。入場時の IrqContext 先頭そのもので、
     // スタブの復帰部で `mov rsp, rax` してもこれなら現状と同じ場所へ戻る
     // （ADR-0019 §2.1）。M5-c ではここが切り替えの唯一の分岐点になり、
@@ -2127,6 +2244,11 @@ fn exception_frame_is_trustworthy(vector: u8, cs: u64, handler_rsp: u64) -> bool
 ///
 /// `context` はスタブが積んだ [`ExceptionContext`] を指していること。
 extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call: u64) -> ! {
+    // **方向フラグを何より先に見る（2026-09-24）。** [`check_direction_flag`] の doc。
+    // SAFETY: スタブが直前に積んだ有効な `ExceptionContext` を指す。読み取りのみ。
+    let (vector, rflags) = unsafe { ((*context).vector, (*context).rflags) };
+    check_direction_flag(EntryPath::Exception, vector, rflags);
+
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
     serial.init();
 
