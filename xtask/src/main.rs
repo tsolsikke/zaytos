@@ -697,6 +697,20 @@ const RING3_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // **例外の入口のスタブが方向フラグを降ろさない（2026-09-24）。** **`fault-test` は `std` の
+    // 後で #PF を起こす**ので、Rust の入口の見張り（`check_direction_flag`）が止める。
+    // **止まらなければ起動の途中の前提の行が出るので、それを禁じた行にする。**
+    CriticalTest {
+        name: "exception-entry-keeps-df",
+        feature: "exception-entry-keeps-df-test",
+        expected_markers: &[
+            "direction flag: the exception stub let DF=1 into Rust",
+            "halting",
+        ],
+        forbidden_markers: &["direction flag: fault-test entered the kernel"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // S9-b-1: 埋め込んだユーザープログラムの破壊確認。
     CriticalTest {
         name: "user-skip-load",
@@ -794,6 +808,19 @@ const RING3_TESTS: &[CriticalTest] = &[
 /// int 0x80 システムコールの破壊確認（M5-f-1-2）。いずれも probe の往復が verified に
 /// 到達しないことを確かめる。
 const SYSCALL_TESTS: &[CriticalTest] = &[
+    // **システムコールの入口のスタブが方向フラグを降ろさない（2026-09-24）。** **`syscall-test` は
+    // `std` の後で `int 0x80` を打つ**（69 番）ので、Rust の入口の見張りが止める。
+    CriticalTest {
+        name: "syscall-entry-keeps-df",
+        feature: "syscall-entry-keeps-df-test",
+        expected_markers: &[
+            "direction flag: the syscall stub let DF=1 into Rust",
+            "halting",
+        ],
+        forbidden_markers: &["direction flag: syscall-test entered the kernel"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // 第 4 引数を context.r10 でなく context.rcx から読む。probe が記録した第 4 引数が
     // 期待値と食い違い、検証が argument register mismatch で止まる（R10 規約の実証）。
     CriticalTest {
@@ -3826,6 +3853,8 @@ enum ShellTestMode {
 const SCRIPT_SKIPS: &[&str] = &[
     // **`spin` と `ctrl-c` の行を外している**（Ctrl+C の畳みは IRQ の経路）。
     "ctrl_c_stopped_the_child",
+    // **`spin` を起こさないので、方向フラグの前提も作られない**（2026-09-24）。
+    "spin_was_interrupted_with_df_set",
     // **台本が駆動している間、`read(0)` は待たない**（空振りで起きる機会が無い）。
     "woke_empty_and_waited_again",
 ];
@@ -4042,6 +4071,9 @@ const SHELL_TEST_SABOTAGES: &[&str] = &[
     // `keyboard-drop-ctrl-letters-test` が 2 本**（実測。2026-08-28）。
     "keyboard-drop-home-end-test",
     "keyboard-drop-ctrl-letters-test",
+    // **IRQ の入口のスタブが方向フラグを降ろさない（2026-09-24）。** **`spin` の間のタイマで
+    // Rust の入口の見張りが止める**——**`spin` は Ctrl+C でしか止まらないので、打鍵の側に置く。**
+    "irq-entry-keeps-df-test",
 ];
 
 impl ShellTestMode {
@@ -11624,6 +11656,21 @@ fn judge_shell_session(
         && kernel_reported_the_interruption
         && echoed_ctrl_c_count == 1;
 
+    // **方向フラグの前提（2026-09-24）。** **`spin` は `std` の後で回る**ので、止められるまでに
+    // 来たタイマはどれも DF=1 の文脈から入る（`kernel/userland/spin.rs`）。**カーネルは止めたときに
+    // その数を出す。** **0 なら、IRQ の入口が DF を降ろすという主張は何も確かめていない**
+    // （`kernel/src/idt/mod.rs` の `check_direction_flag`）。**破壊（`irq-entry-keeps-df-test`）では
+    // 最初のタイマで止まり、この行は出ない。**
+    let spin_interrupts_from_df = after_shell.lines().find_map(|line| {
+        line.split("direction flag: /bin/spin was interrupted from a context with DF=1 ")
+            .nth(1)?
+            .split(' ')
+            .next()?
+            .parse::<u64>()
+            .ok()
+    });
+    let spin_was_interrupted_with_df_set = spin_interrupts_from_df.is_some_and(|count| count >= 1);
+
     // **Home と End が挿入点を端へ動かしたこと（SE-b。`ADR-0050`）。**
     //
     // **打ったのは `ab` → Home → `c` → End → `d` で、走るのは `cabd` である。**
@@ -12143,6 +12190,11 @@ fn judge_shell_session(
         "{context}: ctrl-c stopped the spinning child = {ctrl_c_stopped_the_child} (echoed ^C \
          count = {echoed_ctrl_c_count}, wanted 1)"
     );
+    println!(
+        "{context}: the timer interrupted the spinning child with DF=1 and the handlers ran with \
+         DF=0 = {spin_was_interrupted_with_df_set} ({spin_interrupts_from_df:?} interrupt(s), \
+         wanted at least 1)"
+    );
 
     // **待ちと起こしの計器を読む（W2-c-2。`ADR-0061`）。**
     //
@@ -12427,6 +12479,10 @@ fn judge_shell_session(
         ("expanded_inside_a_word", expanded_inside_a_word),
         ("ctrl_c_discarded_the_line", ctrl_c_discarded_the_line),
         ("ctrl_c_stopped_the_child", ctrl_c_stopped_the_child),
+        (
+            "spin_was_interrupted_with_df_set",
+            spin_was_interrupted_with_df_set,
+        ),
         ("restarted_only_once", restarted_only_once),
         ("read_did_not_spin", read_did_not_spin),
         ("bsp_slept", bsp_slept),
@@ -21515,7 +21571,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 37,
-    full: 380,
+    full: 383,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -21541,7 +21597,7 @@ struct ExpectedShellSabotageSplit {
 
 /// 分け方の現在値。**破壊を移したら、一覧とは別の編集でここを直すこと。**
 const EXPECTED_SHELL_SABOTAGE_SPLIT: ExpectedShellSabotageSplit = ExpectedShellSabotageSplit {
-    sendkey: 10,
+    sendkey: 11,
     script: 10,
 };
 
