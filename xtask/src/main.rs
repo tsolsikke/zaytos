@@ -218,7 +218,92 @@ const CRITICAL_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // **棚卸しの前提の見張り（2026-09-24。`ADR-0018` の Addendum 9）。** **EFER.SCE が立っている
+    // ものとして判定する**（MSR は書かない）。**最初のユーザープログラムより前に止まる。**
+    CriticalTest {
+        name: "cpu-state-sees-sce",
+        feature: "cpu-state-sees-sce-test",
+        expected_markers: &[
+            "cpu-state: EFER.SCE is 1",
+            "redo the inventory in ADR-0018 Addendum 9",
+            "cpu-state: halting",
+        ],
+        forbidden_markers: &["user-run: hello"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // **全ゲートの飛び先の見張り（2026-09-24。`ADR-0018` の Addendum 9）。** **測定用 IPI のスタブが
+    // 共通の入口を飛ばす。** **ゲートはスタブを指したままなので、ゲートの検査は通り、sti-check 3b
+    // だけが落ちて sti を断る。**
+    CriticalTest {
+        name: "idt-stub-skips-common-entry",
+        feature: "idt-stub-skips-common-entry-test",
+        expected_markers: &[
+            "sti-check 3b: gate 0x43",
+            "redo the inventory in ADR-0018 Addendum 9",
+            "refusing to sti",
+        ],
+        forbidden_markers: &["sti: interrupts are now enabled"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
 ];
+
+/// 逆アセンブル（`objdump -d` の AT&T 記法）の中で、棚卸しが「使わない」ことに依っている番地指定と
+/// 命令を探す（2026-09-24。`ADR-0018` の Addendum 9）。**命令の欄だけを見る**（記号の名前に当たらない）。
+fn segment_or_smap_sites(disassembly: &str) -> Vec<String> {
+    const MNEMONICS: [&str; 7] = [
+        "swapgs", "wrgsbase", "rdgsbase", "wrfsbase", "rdfsbase", "clac", "stac",
+    ];
+    disassembly
+        .lines()
+        .filter(|line| {
+            // **記号の名前（`<...>`）は見ない**——`call` の行の飛び先の名前に当たらないように。
+            let instruction = line.splitn(3, '\t').nth(2).unwrap_or("");
+            let instruction = instruction.split('<').next().unwrap_or("");
+            instruction.contains("%fs:")
+                || instruction.contains("%gs:")
+                || instruction
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .any(|word| MNEMONICS.contains(&word))
+        })
+        .map(|line| line.trim().to_string())
+        .collect()
+}
+
+/// **カーネルが FS・GS の番地指定も、`swapgs`・FS/GS の基底の命令・`clac`・`stac` も使わないこと**
+/// （2026-09-24。`ADR-0018` の Addendum 9 の棚卸しの見張り）。
+///
+/// **棚卸しの「GS の基底を使わない」と「SMAP の命令を使わない」は、いまの像に依っている。** **1 つでも
+/// 足すと結論が黙って偽になる**ので、[`check_kernel_has_no_xmm`] と同じ形で機械に見させる。
+fn check_kernel_has_no_segment_or_smap(workspace_root: &Path, features: &[&str]) -> Result<String> {
+    let kernel = build_kernel_with_features(workspace_root, features)?;
+    let output = external_tool("objdump")
+        .arg("-d")
+        .arg(&kernel.elf)
+        .output()
+        .context("failed to run objdump on the kernel")?;
+    if !output.status.success() {
+        bail!("objdump failed on {}", kernel.elf.display());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let sites = segment_or_smap_sites(&text);
+    if !sites.is_empty() {
+        let shown: Vec<String> = sites.iter().take(3).cloned().collect();
+        bail!(
+            "the kernel has {} FS/GS operand or swapgs/fsgsbase/SMAP instruction site(s) ({}{}); the \
+             inventory of user-changeable CPU state rests on there being none - redo the inventory in \
+             ADR-0018 Addendum 9",
+            sites.len(),
+            shown.join(" | "),
+            if sites.len() > shown.len() { " | ..." } else { "" }
+        );
+    }
+    Ok(format!(
+        "no fs:/gs: operand and no swapgs, rd/wr fs/gs base, clac or stac in {} disassembled line(s)",
+        text.lines().count()
+    ))
+}
 
 /// 割り込みを有効化する経路の回帰チェック（`--interrupt-test <kind>`）。
 ///
@@ -15127,11 +15212,21 @@ fn first_difference(expected: &[String], actual: &[String]) -> Option<String> {
     let limit = expected.len().min(actual.len());
     for index in 0..limit {
         if expected[index] != actual[index] {
+            // **棚卸しの証拠の行なら、合図を添える**（2026-09-24。`ADR-0018` の Addendum 9）。
+            let inventory_line = [&expected[index], &actual[index]]
+                .iter()
+                .any(|line| line.contains("cpu-state:") || line.contains("sti-check 3b:"));
             return Some(format!(
-                "    line {}:\n      expected: {}\n      actual:   {}",
+                "    line {}:\n      expected: {}\n      actual:   {}{}",
                 index + 1,
                 expected[index],
-                actual[index]
+                actual[index],
+                if inventory_line {
+                    "\n      (this line is evidence for the inventory of user-changeable CPU state; if it \
+                     changed, redo the inventory in ADR-0018 Addendum 9 before re-recording)"
+                } else {
+                    ""
+                }
             ));
         }
     }
@@ -21308,6 +21403,21 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         }
     }
 
+    // **カーネルが FS/GS も SMAP の命令も使わないこと**（2026-09-24。`ADR-0018` の Addendum 9、静的）。
+    total += 1;
+    begin_item(
+        "the kernel uses no fs:/gs: operand and no swapgs, fsgsbase or SMAP instruction (the \
+         inventory in ADR-0018 Addendum 9)",
+    );
+    match check_kernel_has_no_segment_or_smap(&workspace_root, &[]) {
+        Ok(summary) => println!("--- kernel has no FS/GS or SMAP use: OK ({summary})"),
+        Err(e) => {
+            println!("    {e}");
+            println!("--- kernel has no FS/GS or SMAP use: FAILED");
+            failed.push("kernel has no FS/GS or SMAP use".to_string());
+        }
+    }
+
     // 埋め込む ext2 の像が `e2fsck` を通ること（S10-a、静的）。
     total += 1;
     begin_item("the embedded ext2 image passes e2fsck");
@@ -21352,6 +21462,23 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 cmd_marker_test(CRITICAL_TESTS, "critical-test", test.name, None)
             });
         }
+        // **静的な見張りの破壊（2026-09-24。`ADR-0018` の Addendum 9）。** **`gs:` を読む関数を像に
+        // 残した版で、基底の項目が `%gs:` を名指しして落ちること。**
+        total += 1;
+        run_regression(
+            "the FS/GS and SMAP check catches kernel-uses-gs-test",
+            &mut failed,
+            &mut retries,
+            || match check_kernel_has_no_segment_or_smap(&workspace_root, &["kernel-uses-gs-test"])
+            {
+                Err(e) if e.to_string().contains("%gs:") => {
+                    println!("--- the FS/GS and SMAP check caught kernel-uses-gs-test: OK ({e})");
+                    Ok(())
+                }
+                Err(e) => bail!("it failed, but not on the gs: operand: {e}"),
+                Ok(summary) => bail!("the sabotage was NOT caught ({summary})"),
+            },
+        );
         for test in PAGING_TESTS {
             total += 1;
             let name = format!("paging-test {}", test.name);
@@ -21661,8 +21788,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 37,
-    full: 383,
+    base: 38,
+    full: 387,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -23517,6 +23644,42 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         assert!(args.iter().any(|a| a == "-no-reboot"));
         assert!(args.iter().any(|a| a == "-no-shutdown"));
         assert!(args.iter().any(|a| a == "int,cpu_reset"));
+    }
+
+    /// 2026-09-24 の破壊の像（`kernel-uses-gs-test`）の逆アセンブルの形。
+    #[test]
+    fn a_gs_operand_in_the_instruction_field_is_found() {
+        let text = "ffffffff80100000 <read_through_gs>:\n\
+                    ffffffff80100000:\t65 48 8b 04 25 00 00 00 00 \tmov    %gs:0x0,%rax\n\
+                    ffffffff80100009:\tc3                   \tret\n";
+        let sites = segment_or_smap_sites(text);
+        assert_eq!(sites.len(), 1, "{sites:?}");
+        assert!(sites[0].contains("%gs:"));
+    }
+
+    #[test]
+    fn smap_and_fsgsbase_instructions_are_found_but_symbol_names_are_not() {
+        let text = "ffffffff80100000 <stac_clac_swapgs_names>:\n\
+                    ffffffff80100000:\t0f 01 cb             \tstac\n\
+                    ffffffff80100003:\t0f 01 ca             \tclac\n\
+                    ffffffff80100006:\tf3 48 0f ae d8       \twrgsbase %rax\n\
+                    ffffffff8010000b:\te8 00 00 00 00       \tcall   ffffffff80100010 <swapgs_is_only_a_name>\n";
+        assert_eq!(segment_or_smap_sites(text).len(), 3);
+    }
+
+    #[test]
+    fn a_boot_log_difference_on_the_cpu_state_line_asks_to_redo_the_inventory() {
+        let expected = vec!["[INFO] cpu-state: CR0=0x80010033 CR4=0x668 EFER=0xd00".to_string()];
+        let actual = vec!["[INFO] cpu-state: CR0=0x80010033 CR4=0x668 EFER=0xd01".to_string()];
+        let report = first_difference(&expected, &actual).expect("they differ");
+        assert!(
+            report.contains("redo the inventory in ADR-0018 Addendum 9"),
+            "{report}"
+        );
+        let one = vec!["[INFO] something".to_string()];
+        let two = vec!["[INFO] something else".to_string()];
+        let plain = first_difference(&one, &two).expect("they differ");
+        assert!(!plain.contains("redo the inventory"), "{plain}");
     }
 
     #[test]

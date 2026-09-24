@@ -669,6 +669,8 @@ xtask::media::tests::the_image_is_deterministic
 xtask::media::tests::the_media_reads_back_what_was_written
 xtask::media::tests::the_same_path_twice_is_refused
 xtask::media::tests::the_sixty_four_mib_partition_has_the_geometry_we_recorded
+xtask::tests::a_boot_log_difference_on_the_cpu_state_line_asks_to_redo_the_inventory
+xtask::tests::a_gs_operand_in_the_instruction_field_is_found
 xtask::tests::a_log_over_the_limit_keeps_its_head_and_tail_and_says_what_was_skipped
 xtask::tests::a_log_within_the_limit_is_read_whole
 xtask::tests::a_single_bsp_heartbeat_cannot_show_growth_and_fails
@@ -696,6 +698,7 @@ xtask::tests::qemu_args_omit_monitor_by_default
 xtask::tests::qemu_args_reference_given_ovmf_and_esp_paths
 xtask::tests::qemu_args_separate_debug_log_from_serial
 xtask::tests::qemu_args_use_serial_file_sink_when_requested
+xtask::tests::smap_and_fsgsbase_instructions_are_found_but_symbol_names_are_not
 xtask::tests::the_agent_index_check_looks_both_ways
 xtask::tests::the_ap_heartbeat_line_is_not_read_as_a_bsp_row
 xtask::tests::the_commit_message_rules_catch_each_shape
