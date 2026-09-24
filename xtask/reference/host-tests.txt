@@ -694,6 +694,7 @@ xtask::tests::a_gs_operand_in_the_instruction_field_is_found
 xtask::tests::a_log_over_the_limit_keeps_its_head_and_tail_and_says_what_was_skipped
 xtask::tests::a_log_within_the_limit_is_read_whole
 xtask::tests::a_single_bsp_heartbeat_cannot_show_growth_and_fails
+xtask::tests::a_stop_sign_is_a_halting_line_or_a_triple_fault
 xtask::tests::ap_ticks_that_grow_across_the_observation_pass_even_when_the_ap_line_is_missing
 xtask::tests::ap_ticks_that_stay_at_zero_fail_the_way_ap_no_svr_would
 xtask::tests::both_forms_of_the_qemu_shutdown_line_are_read
@@ -729,6 +730,7 @@ xtask::tests::the_commit_message_rules_catch_each_shape
 xtask::tests::the_commit_message_rules_pass_the_shapes_that_are_allowed
 xtask::tests::the_machine_variant_table_parses_and_rejects_broken_rows
 xtask::tests::the_range_flags_turn_the_rules_off
+xtask::tests::the_stop_watch_waits_one_more_round
 xtask::tests::the_two_s13b_markers_drop_their_lines_and_nothing_else
 xtask::vbox::tests::a_keystroke_that_also_came_through_the_8259_fails
 xtask::vbox::tests::an_empty_counter_output_reads_as_nothing_and_does_not_hold

@@ -4757,6 +4757,74 @@ fn read_bounded(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// ログの末尾だけを読む（5.b。2026-09-25）。**回る待ちの中で `-D` のログの三重フォルトを探すのに使う**
+/// ——**丸ごと読むと、例外の多い構成では 1 周ごとに数十 MB を読む。**
+fn read_tail(path: &Path, bytes: u64) -> String {
+    use std::io::{Seek, SeekFrom};
+    let Ok(mut file) = fs::File::open(path) else {
+        return String::new();
+    };
+    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = size.saturating_sub(bytes);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut tail = Vec::new();
+    let _ = file.take(size - start).read_to_end(&mut tail);
+    String::from_utf8_lossy(&tail).into_owned()
+}
+
+/// 止まった印を探す `-D` のログの末尾の長さ（5.b）。**三重フォルトの行は最後の数行に在る。**
+const STOP_SIGN_TAIL_BYTES: u64 = 64 * 1024;
+
+/// カーネルが止まる直前に出す語（5.b。2026-09-25）。
+///
+/// **`…; halting` と `halting (cli + hlt loop)` の 2 形がある**（カーネルの文言に 253 か所。
+/// 2026-09-25 に数えた）。**既定の起動の参照には 1 行も無い。**
+const STOP_SIGN_HALTING: &str = "halting";
+
+/// QEMU が `-d cpu_reset` で出す三重フォルトの行（5.b）。**カーネルに入る前か、自前の IDT を
+/// 据える前に死ぬ破壊は、シリアルに何も残さない**——**高位半分の (a)(b)(c) がそれである**（実測）。
+const STOP_SIGN_TRIPLE_FAULT: &str = "Triple fault";
+
+/// 機械が止まった印を返す（5.b。2026-09-25）。**シリアルの `halting` を含む最初の行か、
+/// `-D` のログの三重フォルトの行。** **無ければ `None`。**
+fn stop_sign_in(serial: &str, qemu_debug_tail: &str) -> Option<String> {
+    if let Some(line) = strip_ansi(serial)
+        .lines()
+        .find(|line| line.contains(STOP_SIGN_HALTING))
+    {
+        return Some(line.trim().to_string());
+    }
+    qemu_debug_tail
+        .lines()
+        .find(|line| line.contains(STOP_SIGN_TRIPLE_FAULT))
+        .map(|line| format!("QEMU: {}", line.trim()))
+}
+
+/// 止まった印を 2 周続けて見たら、待つのをやめる（5.b。2026-09-25。運用者の決定）。
+///
+/// **1 周だけ置くのは、同じ書き込みの続き（レジスタの写しの残り）を取りこぼさないためである。**
+/// **止まった後は何も出ない**——**CPU は 1 つで、`cli` と `hlt` で止まるか、三重フォルトで
+/// 機械ごと止まる**（2026-09-25 に測った構成）。**だから期限まで待っても判定は変わらない。**
+#[derive(Default)]
+struct StopWatch {
+    seen: Option<String>,
+}
+
+impl StopWatch {
+    /// 今回の印を渡す。**前回も今回も印が在れば、それを返す。**
+    fn settled(&mut self, now: Option<String>) -> Option<String> {
+        let settled = self.seen.is_some() && now.is_some();
+        self.seen = now;
+        if settled {
+            self.seen.clone()
+        } else {
+            None
+        }
+    }
+}
+
 /// 多バイトの字の判定（`ADR-0054`）。**1 回の起動で 4 つ見る。**
 ///
 /// # なぜ `zi` で見るのか
@@ -14453,11 +14521,15 @@ fn cmd_highhalf_test(kind: &str) -> Result<()> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    // **必ずタイムアウトまで待つ。** 破壊ビルドは「死んで止まる」ので、present
-    // marker が出た時点で kill すると、死亡直前までのシリアルが流れ切る前に切って
-    // しまい、absent marker（死亡点の手前）まで届かないことがある。full timeout まで
-    // 待てば、死ぬまでに出るログがすべて流れ、かつ定常（heartbeat）へ進まないことも
-    // 確かめられる。到達しても heartbeat が延々出るだけなので上限は変わらない。
+    // **機械が止まった印を見るまで待つ。present marker では止めない**（5.b。2026-09-25）。
+    // 破壊ビルドは「死んで止まる」ので、present marker が出た時点で kill すると、死亡直前までの
+    // シリアルが流れ切る前に切ってしまい、absent marker（死亡点の手前）まで届かないことがある。
+    // **以前はそのために必ずタイムアウト（20 秒）まで待っていた。** **いまは止まった印
+    // （シリアルの `halting` か、`-D` のログの三重フォルト）を 2 周続けて見たら抜ける**
+    // （[`StopWatch`]）——**止まった後は何も出ないので、死ぬまでのログは流れ切っており、
+    // 定常（heartbeat）へも進まない。** **印が出なければ、いままでどおりタイムアウトまで待つ**
+    // （到達しても heartbeat が延々出るだけなので上限は変わらない）。**実測で、止まるのは
+    // 起こしてから 4 秒ほどだった**（2026-09-25。(a)(c) は三重フォルト、remove-verify-fail は `halting`）。
     // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
     let outputs = [serial_log.as_path(), debug_log.as_path()];
     let mut child = launch::spawn(&launch::Spec::new(
@@ -14468,9 +14540,20 @@ fn cmd_highhalf_test(kind: &str) -> Result<()> {
         launch::Deadline::Failure,
     ))?;
 
-    let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
+    let started = Instant::now();
+    let deadline = started + EXCEPTION_TEST_TIMEOUT;
+    let mut stop = StopWatch::default();
+    let mut stopped = None;
     while Instant::now() < deadline && !child.was_cut() {
         metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
+        let sign = stop_sign_in(
+            &read_lossy(&serial_log),
+            &read_tail(&debug_log, STOP_SIGN_TAIL_BYTES),
+        );
+        if let Some(sign) = stop.settled(sign) {
+            stopped = Some((sign, started.elapsed()));
+            break;
+        }
     }
 
     let qemu_exit = child
@@ -14485,6 +14568,17 @@ fn cmd_highhalf_test(kind: &str) -> Result<()> {
     let qemu = read_lossy(&debug_log);
 
     let context = format!("highhalf-test {}", test.name);
+    match &stopped {
+        Some((sign, after)) => println!(
+            "{context}: (info) the machine stopped ({sign}); stopped waiting after {:.1}s instead of {}s",
+            after.as_secs_f64(),
+            EXCEPTION_TEST_TIMEOUT.as_secs()
+        ),
+        None => println!(
+            "{context}: (info) no stop sign within {}s; waited the whole window",
+            EXCEPTION_TEST_TIMEOUT.as_secs()
+        ),
+    }
 
     // テスト基盤自体が動いたか（bootloader が起動したか）を先に確かめる。
     // カーネルが起動しないのは (a)(b) では期待挙動なので、KERNEL ではなく
@@ -24107,6 +24201,46 @@ mod tests {
         assert!(!shell_prompt_follows_ready(&format!(
             "{prompt}\n[INFO] no ready line yet"
         )));
+    }
+
+    /// **機械が止まった印を見分ける**（5.b。2026-09-25 の実測の行）。**`halts` のような
+    /// 似た語では止まったと読まない。**
+    #[test]
+    fn a_stop_sign_is_a_halting_line_or_a_triple_fault() {
+        assert_eq!(
+            stop_sign_in(
+                "[INFO] a\n[ERROR] fs-mkdir: could not create: NoRoomInDirectory; halting\n",
+                ""
+            ),
+            Some("[ERROR] fs-mkdir: could not create: NoRoomInDirectory; halting".to_string())
+        );
+        assert_eq!(
+            stop_sign_in(
+                "[INFO] jumping to kernel entry point 0x100000\n",
+                "check_exception old: 0x8 new 0xe\nTriple fault\n"
+            ),
+            Some("QEMU: Triple fault".to_string())
+        );
+        assert_eq!(
+            stop_sign_in("[INFO] a handler that sees DF=1 halts)\n", ""),
+            None
+        );
+        assert_eq!(
+            stop_sign_in("\x1b[31m[ERROR] halting (cli + hlt loop)\x1b[0m\n", ""),
+            Some("[ERROR] halting (cli + hlt loop)".to_string())
+        );
+    }
+
+    /// **止まった印は 2 周続けて見てから抜ける**（5.b）——**1 周目は同じ書き込みの続きを待つ。**
+    #[test]
+    fn the_stop_watch_waits_one_more_round() {
+        let mut watch = StopWatch::default();
+        assert_eq!(watch.settled(None), None);
+        assert_eq!(watch.settled(Some("halting".to_string())), None);
+        assert_eq!(
+            watch.settled(Some("halting".to_string())),
+            Some("halting".to_string())
+        );
     }
 
     /// **参照がプロンプトで終わっていない形を、基底の項目が断る**（5.a の見張りの (iii)）。
