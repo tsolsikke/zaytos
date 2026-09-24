@@ -1463,6 +1463,26 @@ VirtualBoxの計数でベクタ0x42が打鍵4バイトで+4、8259のベクタ0x
 
 **残るもの。** **「どの誤りでも捕まえた」と数える破壊は、締めの`--full`で83項目あった。** **今回狭めたのはそのうち6つ（fsの5つ・ziの1つ）で、残る77は族ごとの数を計器で出す**（運用者の決定。契機は、その族を「族にまとめる段」で扱うとき）。
 
+### 手で使う道具の軽い確かめ（2026-09-25。検査の体系の改善。運用者の決定）
+
+**検査の項目でない道具は、黙って腐る**——`--calibration-spread`はHW-cの後ずっと何も採れず、`tools/qemu-variants.py --list`とdriftは、置いた時点で落ちていた（`docs/troubleshooting.md`）。**道具ごとに「動いて、空でない値を出す」ことだけを見る。** **道具の中身の正しさは見ない**——それは道具を使う人が読む。**本体は`xtask/src/tool_checks.rs`と`xtask/src/font.rs`で、`cargo xtask run --tool-checks`でそれだけを回せる。**
+
+| 置き場 | 道具 | 見ること |
+|---|---|---|
+| 基底 | `tools/boot-log-compare.py` | 参照を自分と比べて0行、1行だけ変えた写しと比べて1行 |
+| 基底 | `tools/decisions-touched.py` | 最後の1コミットで走り、見出しの行を出す |
+| 基底 | `tools/docstyle.py` | S1・S2・S4・S5が全部通る（CIには`markdown-it-py`を版を固定して入れる） |
+| 基底 | `tools/frame-sizes.py` | 作業木の枠を読み、関数が出る（**基底の版は建てない**。`--working-tree-only`） |
+| 基底 | `tools/judgement-map.py` | 小さな抜き書きから、判定2本・偽1本と数える（カーネルの行と`(info)`を数えない） |
+| 基底 | `tools/qemu-variants.py --list` | 名前の並びが`xtask`の読んだものと同じ |
+| 基底 | `cargo xtask gen-font` | 木に在る字形の表が、生成器の出力とバイトで同じ（書かずに比べる） |
+| `--full` | `tools/stack-deepest.py` | 既定の像を置いてから1つの深さで走らせ、プロンプトの深さと経路が出る |
+| `--full` | `cargo xtask run --calibration-spread 1` | 較正の値が1つ採れる（値は判定しない） |
+| `--full` | `cargo xtask screenshot` | PNGが書かれ、大きさを持つ（実測で1280x800） |
+| 段の締め | `cargo xtask run --drift-test 1`（`cargo xtask flaky`の末尾） | 標本が2つ以上採れ、判定まで進む |
+
+**置いたとき、7つを同時に壊して基底を回し、7つとも名前つきで落ちることを確かめた。** **戻した後にmd5を確かめた。** **`tools/vbox-vm.py`は名前の拒否だけを基底が見る**——**VMを動かす側はVirtualBoxが要り、手で回す。**
+
 ### VirtualBoxの走行の記録を判定する（2026-09-24。`ADR-0068`の2-2）
 
 **`cargo xtask judge-vbox <記録>`は`--full`に入らない**（VirtualBoxは運用者の機械の上で、`tools/vbox-vm.py run`を通して手で回す）。
