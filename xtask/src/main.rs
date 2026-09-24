@@ -23870,6 +23870,22 @@ fn qemu_launch_args(opts: &QemuLaunchOptions) -> Vec<OsString> {
 mod tests {
     use super::*;
 
+    /// **QEMU を直に起こす所は、起動の口（`launch`）の外に 1 つも無い**（2026-09-24。ホストの保護）。
+    /// **口を通らない起こし方は、書く側の上限も組ごとの停止も持たない。** 足すなら `launch::spawn` を使う。
+    #[test]
+    fn qemu_is_started_only_through_the_launch_module() {
+        let direct = concat!("Command::new(\"qemu", "-system");
+        for (name, source) in [
+            ("main.rs", include_str!("main.rs")),
+            ("media.rs", include_str!("media.rs")),
+            ("vbox.rs", include_str!("vbox.rs")),
+            ("font.rs", include_str!("font.rs")),
+            ("launch.rs", include_str!("launch.rs")),
+        ] {
+            assert_eq!(source.matches(direct).count(), 0, "{name}");
+        }
+    }
+
     /// `/proc/<pid>/status` の `SigIgn:`（実測の形）から SIGXFSZ を読む。
     #[test]
     fn sigign_is_read_for_sigxfsz() {
