@@ -220,6 +220,20 @@ const CRITICAL_TESTS: &[CriticalTest] = &[
     },
     // **棚卸しの前提の見張り（2026-09-24。`ADR-0018` の Addendum 9）。** **EFER.SCE が立っている
     // ものとして判定する**（MSR は書かない）。**最初のユーザープログラムより前に止まる。**
+    // **カーネルが要るビットの見張り（2026-09-24。レビューの足す1点）。** **ファームウェアが CR0.CD を
+    // 立てて渡し、カーネルが落とさない形を BSP で作る。** **CR0.CD を名指しして、最初のユーザー
+    // プログラムより前に止まる。**
+    CriticalTest {
+        name: "bsp-keeps-cd",
+        feature: "bsp-keeps-cd-test",
+        expected_markers: &[
+            "cpu-state: CR0.CD is 1, but the kernel needs it to be 0",
+            "cpu-state: halting",
+        ],
+        forbidden_markers: &["user-run: hello"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     CriticalTest {
         name: "cpu-state-sees-sce",
         feature: "cpu-state-sees-sce-test",
@@ -21812,7 +21826,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 38,
-    full: 388,
+    full: 389,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
