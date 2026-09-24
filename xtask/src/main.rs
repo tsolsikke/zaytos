@@ -223,6 +223,33 @@ const CRITICAL_TESTS: &[CriticalTest] = &[
     // **カーネルが要るビットの見張り（2026-09-24。レビューの足す1点）。** **ファームウェアが CR0.CD を
     // 立てて渡し、カーネルが落とさない形を BSP で作る。** **CR0.CD を名指しして、最初のユーザー
     // プログラムより前に止まる。**
+    // **分類していないビットが立って見える形**（2026-09-24）。**その製造元で分類していない最初のビットを
+    // 立てる**——**QEMU の既定（AMD）では EFER.SVME。** **[WARN] が名前つきで出て、起動は止まらない**
+    // （最初のユーザープログラムまで進む）。
+    CriticalTest {
+        name: "cpu-state-sees-an-unclassified-bit",
+        feature: "cpu-state-sees-an-unclassified-bit-test",
+        expected_markers: &[
+            "[WARN] cpu-state: EFER.SVME is 1 and is not classified yet",
+            "user-run: hello",
+        ],
+        forbidden_markers: &["cpu-state: halting"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // **EFER.FFXSR が立って見える形**（2026-09-24。運用者の決定）。**AMD では「0 であるべき」なので、
+    // 名前つきで止まる**——**1 だと CPL 0 の `fxsave` が XMM を退避しない**（APM Vol.2 3.1.7）。
+    CriticalTest {
+        name: "cpu-state-sees-ffxsr",
+        feature: "cpu-state-sees-ffxsr-test",
+        expected_markers: &[
+            "cpu-state: EFER.FFXSR is 1, but the kernel needs it to be 0",
+            "cpu-state: halting",
+        ],
+        forbidden_markers: &["user-run: hello"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     CriticalTest {
         name: "bsp-keeps-cd",
         feature: "bsp-keeps-cd-test",
@@ -6553,6 +6580,9 @@ struct MachineVariant {
     virtio_disk: bool,
     /// ESP をファームウェアへどう渡すか（`ADR-0068` の HW-e）。
     esp: EspSource,
+    /// `-cpu` に渡す値（2026-09-24。運用者の決定）。**`None` なら付けない**——**QEMU の既定の qemu64 は、
+    /// 製造元が AuthenticAMD である**（実測）。
+    cpu: Option<&'static str>,
 }
 
 /// ESP の渡し方（`ADR-0068` の HW-e）。
@@ -6578,13 +6608,14 @@ fn parse_machine_variants(table: &'static str) -> Result<Vec<MachineVariant>> {
             continue;
         }
         let fields: Vec<&'static str> = line.split_whitespace().collect();
-        let &[name, machine, memory, serial, disk, esp] = fields.as_slice() else {
+        let &[name, machine, memory, serial, disk, esp, cpu] = fields.as_slice() else {
             bail!(
-                "machine-variants.txt line {}: expected 6 fields (name, -machine, -m, serial, disk, esp), got {}",
+                "machine-variants.txt line {}: expected 7 fields (name, -machine, -m, serial, disk, esp, cpu), got {}",
                 index + 1,
                 fields.len()
             );
         };
+        let cpu = (cpu != "-").then_some(cpu);
         let serial = match serial {
             "file" => true,
             "none" => false,
@@ -6622,6 +6653,7 @@ fn parse_machine_variants(table: &'static str) -> Result<Vec<MachineVariant>> {
             serial,
             virtio_disk,
             esp,
+            cpu,
         });
     }
     Ok(variants)
@@ -6682,7 +6714,31 @@ const MACHINE_VARIANT_CHECKS: &[(&str, VariantExpect)] = &[
                 "keyboard: first key arrived as vector 0x42",
                 "apic: I/O APIC MMIO decodes",
             ],
-            forbidden: &["[ERROR]", "[WARN] apic:", "vector 0x21"],
+            forbidden: &[
+                "[ERROR]",
+                "[WARN] apic:",
+                "vector 0x21",
+                "[WARN] cpu-state:",
+            ],
+        },
+    ),
+    // **注入した機械チェックが #MC として見える形で止まる**（2026-09-24。`ADR-0018` の Addendum 9）。
+    // **起こし方は `pc-default` と同じで、名前だけを分ける**——**`--full` の項目名が重ならないため。**
+    ("pc-mce", VariantExpect::PromptThenMachineCheck),
+    // **製造元ごとの表の両方で判定される**（2026-09-24。運用者の決定）。**既定の qemu64 は
+    // AMD なので、Intel の表は `pc-intel` とVirtualBox だけが通る。**
+    (
+        "pc-epyc",
+        VariantExpect::PromptAndLines {
+            lines: &["cpu-state: the CPU vendor is AuthenticAMD (CPUID leaf 0)"],
+            forbidden: &["[ERROR]", "[WARN] cpu-state:"],
+        },
+    ),
+    (
+        "pc-intel",
+        VariantExpect::PromptAndLines {
+            lines: &["cpu-state: the CPU vendor is GenuineIntel (CPUID leaf 0)"],
+            forbidden: &["[ERROR]", "[WARN] cpu-state:"],
         },
     ),
 ];
@@ -6774,6 +6830,14 @@ const MACHINE_VARIANT_SABOTAGES: &[(&str, &str, bool, VariantExpect)] = &[
         false,
         VariantExpect::StopsWith("apic: the I/O APIC MMIO does not look decoded"),
     ),
+    // **判定の後で CR4.MCE を落とす**（2026-09-24）——**注入した機械チェックが SDM のとおり shutdown に
+    // なり、#MC がカーネルに届かない。** **MCE を「1 であるべき」に入れた理由の裏返しの証明である。**
+    (
+        "pc-mce",
+        "mce-off-after-the-check-test",
+        false,
+        VariantExpect::MachineCheckShutsDown,
+    ),
 ];
 
 /// 機械の変種で、何が起きれば正しいか。
@@ -6813,6 +6877,13 @@ enum VariantExpect {
     /// プロンプトが出て `[ERROR]` の行が無く、この行が出た（HW-b）。**プロンプトだけでは、
     /// どの道を通って続いたかが分からない。**
     PromptAndLine(&'static str),
+    /// プロンプトが出て、`lines` の全部が出て、`forbidden` のどれも出ない（2026-09-24。運用者の決定）。
+    /// **CPU の型か製造元を変えた変種で、その製造元の表で判定されたことと、`[WARN] cpu-state:` が
+    /// 出ないことを見る。**
+    PromptAndLines {
+        lines: &'static [&'static str],
+        forbidden: &'static [&'static str],
+    },
     /// 台本が書いて読み直せた（HW-d。`ADR-0068`）。
     ///
     /// **`line` に一致する行が出て、`markers` の全部が出て、`[ERROR]` が無いこと。**
@@ -6826,6 +6897,27 @@ enum VariantExpect {
         /// **出ていないことが「1 度も書き戻していない」の観測になる。**
         forbidden: &'static [&'static str],
     },
+    /// プロンプトの後に monitor から機械チェックを注入し（[`MACHINE_CHECK_INJECTION`]）、**カーネルの例外の
+    /// 処理が #MC（ベクタ 18）を名指しして止まり、QEMU の記録に shutdown の印が無い**（2026-09-24。
+    /// `ADR-0018` の Addendum 9）。**CR4.MCE が 1 なら機械チェックは見える形で止まる**ことの判定である。
+    PromptThenMachineCheck,
+    /// 機械チェックを注入すると **shutdown になる**（QEMU の記録に shutdown の印が在り、#MC の行が無い。
+    /// [`qemu_shut_the_machine_down`]）。
+    /// **CR4.MCE を落とした破壊の回に使う**——**0 だと SDM のとおり shutdown になることを見る。**
+    MachineCheckShutsDown,
+}
+
+/// 機械チェックを注入する monitor の命令（2026-09-24）。**CPU 0 のバンク 1 へ、訂正できない
+/// （UC）・処理器の文脈が壊れた（PCC）誤りを入れる**（`status` は VAL・UC・EN・PCC）。
+/// **QEMU の TCG で #MC が届くことを実測で確かめた**（`target/investigation/mce_probe.py`）。
+const MACHINE_CHECK_INJECTION: &str = "mce 0 1 0xbd00000000000000 0x5 0 0";
+
+/// **QEMU が機械を shutdown にした印**（2026-09-24）。**CPU の三重フォルトは `Triple fault` と書き、
+/// 機械チェックの注入が CR4.MCE の 0 に当たると `CPU 0: MCE capability is not enabled, raising triple
+/// fault` と書く**（QEMU 8.2.2 の実測）。**大文字と小文字が違うので、両方を見る**——**`Triple fault`
+/// だけを見ていたので、破壊の回が「shutdown していない」と読まれた。**
+fn qemu_shut_the_machine_down(debug: &str) -> bool {
+    debug.contains("Triple fault") || debug.contains("raising triple fault")
 }
 
 /// 機械の変種の検査の構成（`ADR-0068`）。**破壊ではない**——**`SABOTAGE_FEATURES` に入れない。**
@@ -6923,7 +7015,7 @@ const VBOX_PS2_LINES: &[&str] = &[
     "started AP(s) match the BSP's CR0, CR4 and EFER",
 ];
 /// VirtualBox の PS/2 の VM で出てはいけない行（2-2）。
-const VBOX_PS2_FORBIDDEN: &[&str] = &["[ERROR]", "vector 0x21"];
+const VBOX_PS2_FORBIDDEN: &[&str] = &["[ERROR]", "vector 0x21", "[WARN] cpu-state:"];
 
 /// `cargo xtask judge-vbox <記録>`（`ADR-0068` の 2-2）。**道具（`tools/vbox-vm.py run`）が残した
 /// 1 回の走行の記録を判定する。** **VirtualBox を呼ばない**——**記録だけを読む。**
@@ -7003,6 +7095,11 @@ fn apply_machine_variant(
     }
     qemu_args.push("-machine".into());
     qemu_args.push(variant.machine.into());
+    // **CPU の型か製造元を変える変種（2026-09-24。運用者の決定）。**
+    if let Some(cpu) = variant.cpu {
+        qemu_args.push("-cpu".into());
+        qemu_args.push(cpu.into());
+    }
     // **virtio-blk を外す変種（`ADR-0068` の HW-d）。** **`-device` と、それが参照する
     // `-drive` の対を落とす**——**片方だけ落とすと QEMU が起動しない**（drive が
     // 使われないか、device が参照先を失う）。
@@ -7341,11 +7438,17 @@ fn cmd_machine_variant(
 
     // **打鍵を送る回だけ monitor を開く**（HW-e-2。[`VariantExpect::PromptKeyAndLines`]）。
     let wants_keys = matches!(expect, VariantExpect::PromptKeyAndLines { .. });
+    // **機械チェックを注入する回も monitor を開く**（2026-09-24）。
+    let wants_machine_check = matches!(
+        expect,
+        VariantExpect::PromptThenMachineCheck | VariantExpect::MachineCheckShutsDown
+    );
+    let wants_monitor = wants_keys || wants_machine_check;
     let monitor_socket = PathBuf::from(format!(
         "/tmp/zaytos-xtask-variant-{}.sock",
         std::process::id()
     ));
-    if wants_keys {
+    if wants_monitor {
         let _ = fs::remove_file(&monitor_socket);
         ensure_socket_path_fits(&monitor_socket)?;
     }
@@ -7357,7 +7460,7 @@ fn cmd_machine_variant(
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
-        monitor_socket: wants_keys.then_some(monitor_socket.as_path()),
+        monitor_socket: wants_monitor.then_some(monitor_socket.as_path()),
         accelerator: Accelerator::Tcg,
         debug_events: DebugEvents::IntAndCpuReset,
     });
@@ -7377,8 +7480,34 @@ fn cmd_machine_variant(
     let started = Instant::now();
     let deadline = started + MACHINE_VARIANT_TIMEOUT;
     let mut keys_sent = false;
+    let mut machine_check_sent = false;
     while Instant::now() < deadline {
         let text = strip_ansi(&read_lossy(&serial_log));
+        if wants_machine_check && !machine_check_sent && text.contains(SHELL_READY_MARKER) {
+            machine_check_sent = true;
+            thread::sleep(Duration::from_millis(500));
+            // **返事のプロンプトまで読んでから閉じる**（`query_monitor`）——**書いた直後に閉じると、
+            // QEMU が命令を処理せずに捨てることがある**（実測。2026-09-24。`sendkey` の回は打鍵の間を
+            // おくので、閉じる前に処理されていた）。
+            let sent = connect_monitor_with_retry(&monitor_socket)
+                .and_then(|mut stream| query_monitor(&mut stream, MACHINE_CHECK_INJECTION));
+            match sent {
+                Ok(_) => println!(
+                    "machine-variant {}: (info) the QEMU monitor took `{MACHINE_CHECK_INJECTION}`",
+                    variant.name
+                ),
+                Err(e) => println!(
+                    "machine-variant {}: could not inject the machine check: {e}",
+                    variant.name
+                ),
+            }
+            continue;
+        }
+        // **shutdown は QEMU の記録に出る**（`-no-shutdown` なので止まるだけで、終わらない）。
+        if machine_check_sent && qemu_shut_the_machine_down(&read_lossy(&debug_log)) {
+            thread::sleep(Duration::from_millis(500));
+            break;
+        }
         // **打鍵を送る回は、プロンプトが出たら `a` と Enter を打ち、シェルの答えを待つ**（HW-e-2）。
         if wants_keys && !keys_sent && text.contains(SHELL_READY_MARKER) {
             keys_sent = true;
@@ -7400,8 +7529,11 @@ fn cmd_machine_variant(
             }
             continue;
         }
+        // **機械チェックの回は、プロンプトではなく停止か shutdown を待つ。**
         let reached = if wants_keys {
             text.contains(KEY_ANSWER)
+        } else if wants_machine_check {
+            false
         } else {
             match script_line {
                 Some(line) => text.lines().any(|seen| seen.trim() == line),
@@ -7415,7 +7547,7 @@ fn cmd_machine_variant(
         thread::sleep(PANIC_TEST_POLL_INTERVAL);
     }
     let waited = started.elapsed();
-    if wants_keys {
+    if wants_monitor {
         let _ = fs::remove_file(&monitor_socket);
     }
 
@@ -7566,6 +7698,49 @@ fn cmd_machine_variant(
             );
             println!("{context}: the prompt did not appear = {}", !ready);
             at_boot_info && !ready
+        }
+        VariantExpect::PromptAndLines { lines, forbidden } => {
+            let missing: Vec<&str> = lines
+                .iter()
+                .copied()
+                .filter(|line| !text.contains(line))
+                .collect();
+            let seen: Vec<&str> = forbidden
+                .iter()
+                .copied()
+                .filter(|line| text.contains(line))
+                .collect();
+            println!("{context}: the_shell_printed_its_prompt = {ready}");
+            println!(
+                "{context}: every required line appeared = {} (missing {missing:?})",
+                missing.is_empty()
+            );
+            println!(
+                "{context}: no forbidden line appeared = {} (seen {seen:?})",
+                seen.is_empty()
+            );
+            ready && missing.is_empty() && seen.is_empty()
+        }
+        VariantExpect::PromptThenMachineCheck => {
+            let reached = text.contains("exception: vector=18 (#MC machine check)");
+            let halted = text.contains("halting");
+            let shut_down = qemu_shut_the_machine_down(&qemu_debug);
+            println!("{context}: the_shell_printed_its_prompt = {ready}");
+            println!(
+                "{context}: the injected machine check arrived as #MC and halted = {} (vector 18 {reached}, \
+                 halting {halted})",
+                reached && halted
+            );
+            println!("{context}: the machine did not shut down = {}", !shut_down);
+            ready && reached && halted && !shut_down
+        }
+        VariantExpect::MachineCheckShutsDown => {
+            let reached = text.contains("vector=18");
+            let shut_down = qemu_shut_the_machine_down(&qemu_debug);
+            println!("{context}: the_shell_printed_its_prompt = {ready}");
+            println!("{context}: the injected machine check shut the machine down = {shut_down}");
+            println!("{context}: no #MC reached the kernel = {}", !reached);
+            ready && shut_down && !reached
         }
     };
     if held {
@@ -21826,7 +22001,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 38,
-    full: 389,
+    full: 395,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -23146,6 +23321,18 @@ fn qemu_launch_args(opts: &QemuLaunchOptions) -> Vec<OsString> {
 mod tests {
     use super::*;
 
+    /// **QEMU 8.2.2 が書いた 2 つの形を、どちらも shutdown と読む**（2026-09-24 の実測の行）。
+    #[test]
+    fn both_forms_of_the_qemu_shutdown_line_are_read() {
+        assert!(qemu_shut_the_machine_down(
+            "CPU 0: MCE capability is not enabled, raising triple fault\n"
+        ));
+        assert!(qemu_shut_the_machine_down(
+            "check_exception old: 0x8 new 0xd\nTriple fault\n"
+        ));
+        assert!(!qemu_shut_the_machine_down("CPU Reset (CPU 0)\n"));
+    }
+
     // `check_ap_ticks_grew_across_observation`（2026-09-15）。**行は実測のシリアルから
     // 採り、判定に関わらない末尾を切った**（`smp-ap-test ap-timer` と `ap-no-svr`）。
     const AP_TIMER_FIRST_HEARTBEAT: &str = "[INFO] heartbeat: ticks=259 (2 s), tsc_per_tick=0, \
@@ -23835,14 +24022,19 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
             parse_machine_variants("a q35 6G file virtio\n").is_err(),
             "欄が 5 つでは足りない（HW-e で ESP の欄を足した）"
         );
-        assert!(parse_machine_variants("a q35 6G tty virtio dir\n").is_err());
-        assert!(parse_machine_variants("a q35 6G file sata dir\n").is_err());
-        assert!(parse_machine_variants("a q35 6G file virtio nfs\n").is_err());
         assert!(
-            parse_machine_variants("a q35 6G file virtio dir\na pc 1G file virtio dir\n").is_err()
+            parse_machine_variants("a q35 6G file virtio dir\n").is_err(),
+            "欄が 6 つでは足りない（2026-09-24 に CPU の欄を足した）"
+        );
+        assert!(parse_machine_variants("a q35 6G tty virtio dir -\n").is_err());
+        assert!(parse_machine_variants("a q35 6G file sata dir -\n").is_err());
+        assert!(parse_machine_variants("a q35 6G file virtio nfs -\n").is_err());
+        assert!(
+            parse_machine_variants("a q35 6G file virtio dir -\na pc 1G file virtio dir -\n")
+                .is_err()
         );
         assert_eq!(
-            parse_machine_variants("# comment\n\nb pc 1G none none dir\n").unwrap(),
+            parse_machine_variants("# comment\n\nb pc 1G none none dir -\n").unwrap(),
             vec![MachineVariant {
                 name: "b",
                 machine: "pc",
@@ -23850,7 +24042,21 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
                 serial: false,
                 virtio_disk: false,
                 esp: EspSource::Directory,
+                cpu: None,
             }]
+        );
+        // **CPU の欄**（2026-09-24。運用者の決定）——**製造元ごとの判定を両方回す変種が在る。**
+        assert!(variants
+            .iter()
+            .any(|variant| variant.name == "pc-epyc" && variant.cpu == Some("EPYC")));
+        assert!(variants.iter().any(|variant| variant.name == "pc-intel"
+            && variant.cpu == Some("qemu64,vendor=GenuineIntel")));
+        assert_eq!(
+            variants
+                .iter()
+                .filter(|variant| variant.cpu.is_some())
+                .count(),
+            2
         );
     }
 }

@@ -65,7 +65,7 @@ TABLE = os.path.join(ROOT, "xtask", "machine-variants.txt")
 
 
 def load_variants():
-    """変種の名前 → (-machine, -m, シリアル)。**`xtask` の既定は `pc-default` である。**
+    """変種の名前 → (-machine, -m, シリアル, ディスク, ESP, CPU)。**`xtask` の既定は `pc-default` である。**
 
     **形の崩れた行は、行番号を添えて止める**（`xtask` の `parse_machine_variants` と同じ規則）。
     """
@@ -76,7 +76,7 @@ def load_variants():
             if not line or line.startswith("#"):
                 continue
             fields = line.split()
-            if (len(fields) != 6 or fields[3] not in ("file", "none")
+            if (len(fields) != 7 or fields[3] not in ("file", "none")
                     or fields[4] not in ("virtio", "none")
                     or fields[5] not in ("dir", "media") or fields[0] in variants):
                 sys.exit(f"{TABLE} line {number}: not a well-formed row: {line!r}")
@@ -105,7 +105,7 @@ def ppm_to_png(ppm_path, png_path):
 
 
 def run_variant(name, wait):
-    machine, mem, serial, disk, esp = VARIANTS[name]
+    machine, mem, serial, disk, esp, cpu = VARIANTS[name]
     out = os.path.join(OUT, name)
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(out)
@@ -122,6 +122,9 @@ def run_variant(name, wait):
         "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF_CODE}",
         "-drive", f"if=pflash,format=raw,file={out}/vars.fd",
     ]
+    # **CPU の欄（2026-09-24。運用者の決定）。** **`-` なら既定の qemu64（製造元は AuthenticAMD）。**
+    if cpu != "-":
+        args += ["-cpu", cpu]
     # **ESP の渡し方（`ADR-0068` の HW-e）。** **`media` の変種は、GPT と FAT32 を自分で書いた
     # 1 つの像を渡す**（VirtualBox と実機と同じ形）——**`fat:rw:` は QEMU だけの道である。**
     # **像は `cargo xtask image` が置く。**

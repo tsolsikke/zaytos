@@ -8,20 +8,29 @@
 # ESP の欄は、ファームウェアへ ESP をどう渡すかである（ADR-0068 の HW-e）。
 #   dir   = QEMU の fat:rw: でディレクトリを FAT に見せる（既定。QEMU だけの道である）
 #   media = GPT と FAT32 を自分で書いた 1 つの像を渡す（VirtualBox と実機と同じ形）
+# CPU の欄は -cpu に渡す値である（2026-09-24。運用者の決定）。- なら付けない。
+#   QEMU の既定（qemu64）の製造元は AuthenticAMD である（monitor の qom-get で実測）。
 #
-# 名前           -machine          -m      シリアル  ディスク  ESP
-pc-default       pc                256M    file      virtio    dir
-q35              q35               256M    file      virtio    dir
-q35-1g           q35               1G      file      virtio    dir
-q35-1500m        q35               1500M   file      virtio    dir
-q35-2g           q35               2G      file      virtio    dir
-q35-6g           q35               6G      file      virtio    dir
-pc-6g            pc                6G      file      virtio    dir
-q35-no-i8042     q35,i8042=off     256M    file      virtio    dir
-pc-no-i8042      pc,i8042=off      256M    file      virtio    dir
-q35-no-pit       q35,pit=off       256M    file      virtio    dir
-pc-no-pit        pc,pit=off        256M    file      virtio    dir
-q35-no-hpet      q35,hpet=off      256M    file      virtio    dir
-pc-no-serial     pc                256M    none      virtio    dir
-pc-no-virtio     pc                256M    file      none      dir
-media-only       pc                256M    file      none      media
+# 名前           -machine          -m      シリアル  ディスク  ESP    CPU
+pc-default       pc                256M    file      virtio    dir    -
+q35              q35               256M    file      virtio    dir    -
+q35-1g           q35               1G      file      virtio    dir    -
+q35-1500m        q35               1500M   file      virtio    dir    -
+q35-2g           q35               2G      file      virtio    dir    -
+q35-6g           q35               6G      file      virtio    dir    -
+pc-6g            pc                6G      file      virtio    dir    -
+q35-no-i8042     q35,i8042=off     256M    file      virtio    dir    -
+pc-no-i8042      pc,i8042=off      256M    file      virtio    dir    -
+q35-no-pit       q35,pit=off       256M    file      virtio    dir    -
+pc-no-pit        pc,pit=off        256M    file      virtio    dir    -
+q35-no-hpet      q35,hpet=off      256M    file      virtio    dir    -
+pc-no-serial     pc                256M    none      virtio    dir    -
+pc-no-virtio     pc                256M    file      none      dir    -
+media-only       pc                256M    file      none      media  -
+# 機械チェックを注入する回（2026-09-24。ADR-0018 の Addendum 9）。起こし方は pc-default と同じ。
+pc-mce           pc                256M    file      virtio    dir    -
+# 製造元ごとの判定を両方回す（2026-09-24。運用者の決定——Intel と AMD の両方に対応する）。
+# EPYC は AMD の型で、TCG が持たない機能は QEMU が落とす（警告を出す）。
+# 既定の qemu64 の製造元だけを GenuineIntel にしたものが Intel の回である。
+pc-epyc          pc                256M    file      virtio    dir    EPYC
+pc-intel         pc                256M    file      virtio    dir    qemu64,vendor=GenuineIntel

@@ -688,6 +688,7 @@ xtask::tests::a_log_within_the_limit_is_read_whole
 xtask::tests::a_single_bsp_heartbeat_cannot_show_growth_and_fails
 xtask::tests::ap_ticks_that_grow_across_the_observation_pass_even_when_the_ap_line_is_missing
 xtask::tests::ap_ticks_that_stay_at_zero_fail_the_way_ap_no_svr_would
+xtask::tests::both_forms_of_the_qemu_shutdown_line_are_read
 xtask::tests::disk0_rd_bytes_is_parsed_and_other_drives_are_ignored
 xtask::tests::disk0_wr_bytes_is_parsed_and_other_drives_are_ignored
 xtask::tests::every_judged_machine_variant_is_in_the_table_with_a_serial_port
