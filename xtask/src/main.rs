@@ -6534,6 +6534,18 @@ const MACHINE_VARIANT_CHECKS: &[(&str, VariantExpect)] = &[
         "media-only",
         VariantExpect::PromptAndLine("fs-image-load: copied"),
     ),
+    // **打鍵が PS/2 から I/O APIC を通ってシェルまで届く**（HW-e-2）。**最初の打鍵が I/O APIC のベクタ
+    // 0x42 で届いた行と、写像の行が出て、ID の [WARN] も [ERROR] も 8259 のベクタ（0x21）も出ない。**
+    (
+        "pc-default",
+        VariantExpect::PromptKeyAndLines {
+            lines: &[
+                "keyboard: first key arrived as vector 0x42",
+                "apic: I/O APIC MMIO decodes",
+            ],
+            forbidden: &["[ERROR]", "[WARN] apic:", "vector 0x21"],
+        },
+    ),
 ];
 
 /// 起動媒体の破壊（`ADR-0068` の HW-e）。**カーネルの feature ではなく、像の中身を変える。**
@@ -6615,6 +6627,14 @@ const MACHINE_VARIANT_SABOTAGES: &[(&str, &str, bool, VariantExpect)] = &[
         false,
         VariantExpect::StopsWith("fs-image-flush: waited for a completion that cannot come"),
     ),
+    // **I/O APIC の版を ID の添字で読む**（HW-e-2）——**版が 0 に見え、写像の判定（未デコードの見え方）で
+    // 止まる。** **本物の写像の異常を捕まえることの判定である**（ID の不一致とは別に止まる）。
+    (
+        "pc-default",
+        "ioapic-reads-the-wrong-register",
+        false,
+        VariantExpect::StopsWith("apic: the I/O APIC MMIO does not look decoded"),
+    ),
 ];
 
 /// 機械の変種で、何が起きれば正しいか。
@@ -6624,6 +6644,16 @@ enum VariantExpect {
     Prompt,
     /// 狙いどおりに止まった行が出て、プロンプトが出ない（破壊の回）。
     StopsWith(&'static str),
+    /// プロンプトの後に monitor から `a` と Enter を打ち、シェルが答え（[`KEY_ANSWER`]）、`lines` の全部が
+    /// 出て、`forbidden` のどれも出ない（HW-e-2。`ADR-0068`）。
+    ///
+    /// **打鍵が PS/2 から I/O APIC を通ってシェルまで届いたことを見る**——**プロンプトと `[ERROR]` の有無
+    /// だけでは、入力経路を主張しない**（レビューの条件）。**USB の装置を付けた変種には使わない**——
+    /// **`sendkey` が PS/2 へ行かない**（実測。`docs/deferred-decisions.md` の行）。
+    PromptKeyAndLines {
+        lines: &'static [&'static str],
+        forbidden: &'static [&'static str],
+    },
     /// 狙いどおりに止まった行と、**なぜそうなったかの行**の両方が出て、プロンプトが出ない
     /// （HW-e。`ADR-0068`）。
     ///
@@ -6692,7 +6722,25 @@ const MACHINE_VARIANT_CONFIGS: &[(&str, &str, VariantExpect)] = &[
         "frame-allocator-high-after-switch",
         VariantExpect::PromptAndCounter("frame-allocator: handed out "),
     ),
+    // **I/O APIC の ID が MADT と食い違う形**（HW-e-2）——**VirtualBox の形を QEMU で作る。** **[WARN] が
+    // 出て、止まらず、[ERROR] が無く、打鍵が I/O APIC を通って届く**（ID の不一致だけでは止めない）。
+    (
+        "pc-default",
+        "ioapic-id-mismatch-test",
+        VariantExpect::PromptKeyAndLines {
+            lines: &[
+                "keyboard: first key arrived as vector 0x42",
+                "apic: I/O APIC MMIO decodes",
+                "[WARN] apic: the I/O APIC ID register reports",
+            ],
+            forbidden: &["[ERROR]", "vector 0x21"],
+        },
+    ),
 ];
+
+/// 打鍵の回でシェルが返す答え（HW-e-2）。**`a` という命令は無いので、シェルがこう答える。**
+/// **打った字がシェルまで届いたことの印である**（エコーだけでは届いたと言えない）。
+const KEY_ANSWER: &str = "zash: a: cannot run";
 
 /// 機械の変種の上限。**既定の像がプロンプトまで 7.5〜8.7 秒だった**（実測。`pc` と `q35`、
 /// 256MiB と 1GiB。2026-09-22）**ので、その 7 倍に取る。**
@@ -7046,6 +7094,17 @@ fn cmd_machine_variant(
     let debug_log = target.join("qemu-debug.log");
     let _ = fs::remove_file(&debug_log);
 
+    // **打鍵を送る回だけ monitor を開く**（HW-e-2。[`VariantExpect::PromptKeyAndLines`]）。
+    let wants_keys = matches!(expect, VariantExpect::PromptKeyAndLines { .. });
+    let monitor_socket = PathBuf::from(format!(
+        "/tmp/zaytos-xtask-variant-{}.sock",
+        std::process::id()
+    ));
+    if wants_keys {
+        let _ = fs::remove_file(&monitor_socket);
+        ensure_socket_path_fits(&monitor_socket)?;
+    }
+
     let mut qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
@@ -7053,7 +7112,7 @@ fn cmd_machine_variant(
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
-        monitor_socket: None,
+        monitor_socket: wants_keys.then_some(monitor_socket.as_path()),
         accelerator: Accelerator::Tcg,
         debug_events: DebugEvents::IntAndCpuReset,
     });
@@ -7072,11 +7131,37 @@ fn cmd_machine_variant(
     };
     let started = Instant::now();
     let deadline = started + MACHINE_VARIANT_TIMEOUT;
+    let mut keys_sent = false;
     while Instant::now() < deadline {
         let text = strip_ansi(&read_lossy(&serial_log));
-        let reached = match script_line {
-            Some(line) => text.lines().any(|seen| seen.trim() == line),
-            None => text.contains(SHELL_READY_MARKER),
+        // **打鍵を送る回は、プロンプトが出たら `a` と Enter を打ち、シェルの答えを待つ**（HW-e-2）。
+        if wants_keys && !keys_sent && text.contains(SHELL_READY_MARKER) {
+            keys_sent = true;
+            // **シェルが読みに入る間をおく**（既存の打鍵の検査と同じ形）。
+            thread::sleep(Duration::from_millis(500));
+            match connect_monitor_with_retry(&monitor_socket) {
+                Ok(mut stream) => {
+                    for key in ["a", "ret"] {
+                        if writeln!(stream, "sendkey {key}").is_err() {
+                            break;
+                        }
+                        thread::sleep(SHELL_TEST_KEY_INTERVAL);
+                    }
+                }
+                Err(e) => println!(
+                    "machine-variant {}: could not reach the QEMU monitor: {e}",
+                    variant.name
+                ),
+            }
+            continue;
+        }
+        let reached = if wants_keys {
+            text.contains(KEY_ANSWER)
+        } else {
+            match script_line {
+                Some(line) => text.lines().any(|seen| seen.trim() == line),
+                None => text.contains(SHELL_READY_MARKER),
+            }
         };
         if reached || text.contains("halting") || text.contains(PANIC_MARKER_HEADER) {
             thread::sleep(Duration::from_millis(500));
@@ -7085,6 +7170,9 @@ fn cmd_machine_variant(
         thread::sleep(PANIC_TEST_POLL_INTERVAL);
     }
     let waited = started.elapsed();
+    if wants_keys {
+        let _ = fs::remove_file(&monitor_socket);
+    }
 
     let qemu_exit = child
         .try_wait()
@@ -7137,6 +7225,30 @@ fn cmd_machine_variant(
             println!("{context}: it_stopped_at_the_intended_line = {stopped_there} (`{marker}`)");
             println!("{context}: the prompt did not appear = {}", !ready);
             stopped_there && !ready
+        }
+        VariantExpect::PromptKeyAndLines { lines, forbidden } => {
+            let answered = text.contains(KEY_ANSWER);
+            let missing: Vec<&str> = lines
+                .iter()
+                .copied()
+                .filter(|line| !text.contains(line))
+                .collect();
+            let seen_forbidden: Vec<&str> = forbidden
+                .iter()
+                .copied()
+                .filter(|line| text.contains(line))
+                .collect();
+            println!("{context}: the_shell_printed_its_prompt = {ready}");
+            println!("{context}: the_shell_answered_the_keys = {answered} (`{KEY_ANSWER}`)");
+            println!(
+                "{context}: every required line appeared = {} (missing {missing:?})",
+                missing.is_empty()
+            );
+            println!(
+                "{context}: no forbidden line appeared = {} (seen {seen_forbidden:?})",
+                seen_forbidden.is_empty()
+            );
+            ready && answered && missing.is_empty() && seen_forbidden.is_empty()
         }
         VariantExpect::StopsWithReason { line, reason } => {
             let stopped_there = text.contains(line);
@@ -21398,7 +21510,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 37,
-    full: 377,
+    full: 380,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
