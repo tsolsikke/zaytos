@@ -1400,7 +1400,7 @@ higher-halfの破壊feature（B-2a-5、破壊feature `highhalf-*`）について
 
 | 項目 | 見るもの | 実測 |
 |---|---|---|
-| `machine-variant pc-default` | **配送の行（`first key arrived as vector 0x42`）と写像の行が出て、`[ERROR]`・`[WARN] apic:`・`vector 0x21`が出ない** | 9.4秒で通った |
+| `machine-variant pc-default` | **配送の行（`first key arrived as vector 0x42`）と写像の行が出て、`[ERROR]`・`[WARN] apic:`・`vector 0x21`が出ない**（2026-09-24に`[WARN] cpu-state:`も足した。全ビットの分類） | 9.4秒で通った |
 | `machine-variant pc-default ioapic-id-mismatch-test`（構成。破壊ではない） | **MADTのIDを1つずらして比べる（VirtualBoxの形）。`[WARN]`が出て、止まらず、`[ERROR]`が無く、打鍵が届く** | 9.4秒で通った |
 | `machine-variant pc-default ioapic-reads-the-wrong-register`（破壊） | **版をIDの添字で読む。写像の判定の行（`the I/O APIC MMIO does not look decoded`）で止まる** | 4.6秒で止まった |
 
@@ -1428,7 +1428,7 @@ VirtualBoxの計数でベクタ0x42が打鍵4バイトで+4、8259のベクタ0x
 **`cargo xtask judge-vbox <記録>`は`--full`に入らない**（VirtualBoxは運用者の機械の上で、`tools/vbox-vm.py run`を通して手で回す）。
 **判定は記録だけを読む**——**シリアルはQEMUの変種と同じ関数**（`judge_prompt_key_and_lines`）で見て、**VirtualBoxのデバッガの計数で、
 打鍵のバイト数だけベクタ0x42が増え、8259のベクタ（0x20〜0x2F）が増えないこと**を見る（レビューの追加の条件）。
-**計数の読みと判定はホストのテスト5本が守る**（`xtask/src/vbox.rs`）。**CPU 4個のzaytos-hw-eの1回がPASSだった**——**0x42が+4、
+**計数の読みと判定はホストのテスト5本が守る**（`xtask/src/vbox.rs`）。**シリアルに`[WARN] cpu-state:`が出ないことも見る**（2026-09-24。全ビットの分類）。**CPU 4個のzaytos-hw-eの1回がPASSだった**——**0x42が+4、
 8259のベクタの増えは0。** **項目は増えない**（ホストのテストの名前が5本増える）。
 
 ### 棚卸しの根拠を機械の見張りにした（2026-09-24。`ADR-0018`のAddendum 9）
@@ -1440,6 +1440,12 @@ VirtualBoxの計数でベクタ0x42が打鍵4バイトで+4、8259のベクタ0x
 | `critical-test cpu-state-sees-sce`（破壊） | **`cpu-state: EFER.SCE is 1`と棚卸しの文言で止まり、最初のユーザープログラムが走らない** | 通った |
 | `critical-test bsp-keeps-cd`（破壊。2026-09-24） | **ファームウェアがCDを立てて渡し、カーネルが落とさない形で、`cpu-state: CR0.CD is 1, but the kernel needs it to be 0`で止まり、最初のユーザープログラムが走らない** | 通った。**CR0が`0x80010033 -> 0xc0010033`になり、見張りがCR0.CDを名指しした** |
 | `smp-ap-test ap-keeps-its-own-control-registers`（破壊。2026-09-24） | **APがBSPの値を写さない形で、`cpu-state: ap 1 differs from the BSP in CR0`と`CD set on the AP`と棚卸しの文言で止まり、まとめの行が出ない** | 通った。**CR0・CR4・EFERの違いを名前で出した**（NE・WP・NW・CD、DE・MCE、NXE） |
+| `critical-test cpu-state-sees-an-unclassified-bit`（破壊。2026-09-24） | **その製造元で分類していない最初のビットが立って見える形で、`[WARN] cpu-state: EFER.SVME is 1 and is not classified yet`が出て、止まらず、最初のユーザープログラムが走る**（QEMUの既定はAMDなのでEFER.SVME） | 通った |
+| `critical-test cpu-state-sees-ffxsr`（破壊。2026-09-24） | **EFER.FFXSRが立って見える形で、`cpu-state: EFER.FFXSR is 1, but the kernel needs it to be 0`で止まり、最初のユーザープログラムが走らない** | 通った |
+| `machine-variant pc-epyc`（2026-09-24） | **`-cpu EPYC`で、`cpu-state: the CPU vendor is AuthenticAMD (CPUID leaf 0)`が出て、`[ERROR]`と`[WARN] cpu-state:`が出ない** | 8.8秒で通った。**CR4は`0x668`で、AMDの表の22ビットが成り立った** |
+| `machine-variant pc-intel`（2026-09-24） | **`-cpu qemu64,vendor=GenuineIntel`で、`cpu-state: the CPU vendor is GenuineIntel (CPUID leaf 0)`が出て、`[ERROR]`と`[WARN] cpu-state:`が出ない** | 9.3秒で通った。**Intelの表の20ビットが成り立った** |
+| `machine-variant pc-mce`（2026-09-24） | **プロンプトの後にmonitorから機械チェックを注入し、`exception: vector=18 (#MC machine check)`と`halting`が出て、QEMUの記録にshutdownの印（`Triple fault`か`raising triple fault`）が無い** | 9.8秒で通った |
+| `machine-variant pc-mce mce-off-after-the-check-test`（破壊。2026-09-24） | **判定の後でBSPのCR4.MCEを落とし、同じ注入でQEMUの記録にshutdownの印が出て、#MCの行が出ない** | 9.8秒で通った。**QEMUの記録に`CPU 0: MCE capability is not enabled, raising triple fault`が出た** |
 | `critical-test idt-stub-skips-common-entry`（破壊） | **`sti-check 3b: gate 0x43`と棚卸しの文言が出て、`sti`を断る** | 通った。**`sti-check 3`（ゲートの検査）は`ok=true`のまま**で、3bだけが落ちた |
 
 **既定の起動の新しい2行**——**`cpu-state: CR0=0x80010033 CR4=0x668 EFER=0xd00`と、`sti-check 3b`の「例外216・IRQ 39・システムコール1」。** **どちらも起動ログの参照に載る。** **参照の突き合わせは、この2行で差が出たときに「棚卸しをやり直すこと」の合図を添える**（ホストのテスト）。

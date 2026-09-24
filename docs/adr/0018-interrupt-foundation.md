@@ -621,14 +621,45 @@ LAPICタイマの割り込みはLAPICのISRに載るので、ハンドラ内でI
 | 見張り | 見るもの | 破壊 |
 |---|---|---|
 | 基底の項目（静的） | **既定の像の逆アセンブルで、`fs:`・`gs:`の番地指定と、`swapgs`・FS/GSの基底の命令・`clac`・`stac`が0個であること**（「kernel has no XMM」と同じ形） | `kernel-uses-gs-test`（`gs:`を読む関数を像に残す。呼ばない） |
-| 起動ログの`cpu-state`の行 | **CR0・CR4・EFERの値を出し、棚卸しが0であることに依っているビット**（CR0.AM・CR4.SMAP・CR4.FSGSBASE・CR4.PKE・CR4.OSXSAVE・EFER.SCE）**が立っていれば止める。** **値は起動ログの参照にも載る**——**棚卸しに関わらないビット（SMEP・UMIPなど）が変わっても、参照の突き合わせが合図を添えて落ちる** | `cpu-state-sees-sce-test`（EFER.SCEが立っているものとして判定する。MSRは書かない） |
-| 起動ログの「カーネルが要るビット」の行（2026-09-24。レビューの足す1点） | **カーネルのコードが依っているビットの一覧（`kernel::cpu_state::REQUIRED_BITS`）で、「1であるべき」（CR0のPE・MP・NE・WP・PG、CR4のPAE・OSFXSR・OSXMMEXCPT、EFERのLME・LMA）と「0であるべき」（CR0のEM・NW・CD）を確かめ、崩れていれば名前つきで止まる。** **棚卸しの「0であるべき」と対になる**——**あちらはユーザーが変えられる状態の結論が依るビット、こちらはカーネルのコードが依るビットである。** **WP・NEを立ててCD・NWを落とすのは、BSPでカーネル自身が行う**（前はファームウェア任せだった） | `bsp-keeps-cd-test`（ファームウェアがCDを立てて渡し、カーネルが落とさない形をBSPで作る） |
+| 起動ログの`cpu-state`の行 | **CR0・CR4・EFERの値を出し、棚卸しが0であることに依っているビット**（CR0.AM・CR4.SMAP・CR4.FSGSBASE・CR4.PKE・CR4.OSXSAVE・CR4.PVI・EFER.SCE。PVIは全ビットの分類で足した）**が立っていれば止める。** **値は起動ログの参照にも載る**——**棚卸しに関わらないビット（SMEP・UMIPなど）が変わっても、参照の突き合わせが合図を添えて落ちる** | `cpu-state-sees-sce-test`（EFER.SCEが立っているものとして判定する。MSRは書かない） |
+| 起動ログの「カーネルが要るビット」の行（2026-09-24。レビューの足す1点） | **カーネルのコードが依っているビットの一覧（`kernel::cpu_state::REQUIRED_BITS`）で、「1であるべき」（CR0のPE・MP・NE・WP・PG、CR4のPAE・MCE・OSFXSR・OSXMMEXCPT、EFERのLME・LMA）と「0であるべき」（CR0のEM・TS・NW・CD、CR4のLA57・PCIDE。MCE・TS・LA57・PCIDEは全ビットの分類で足した）を確かめ、崩れていれば名前つきで止まる。** **棚卸しの「0であるべき」と対になる**——**あちらはユーザーが変えられる状態の結論が依るビット、こちらはカーネルのコードが依るビットである。** **WP・NEを立ててCD・NWを落とすのは、BSPでカーネル自身が行う**（前はファームウェア任せだった） | `bsp-keeps-cd-test`（ファームウェアがCDを立てて渡し、カーネルが落とさない形をBSPで作る） |
 | 起動ログの`cpu-state: ap`の行（2026-09-24。レビューの足す1点） | **起きたAPのCR0・CR4・EFERが、BSPの値と一致すること。** **APは起きた直後にBSPの値を写し、起動の終わりに自分の値を控える。** **BSPは起床のまとめの後で突き合わせ、食い違えば違うビットの名前を出して止まる。** **VirtualBoxの走行も`judge-vbox`が見る** | `ap-keeps-its-own-control-registers-test`（APがBSPの値を写さない。直す前の形そのもの） |
+| 起動ログの全ビットの分類（2026-09-24。レビューの足す1点。製造元ごとの表は運用者の決定） | **CPUIDの葉0で製造元を見分け、CR0・CR4・EFERの全ビットを、その製造元の表で棚卸しの0・要るビット・「どちらでもよい」・「分類していない」・予約のちょうど1つに入れる**（ホストのテストが製造元ごとに守る）。**予約のビットが立っていれば`[ERROR]`で止まる。** **分類していないビットが立っていれば`[WARN]`で名前を出し、止まらない。** **QEMUの`pc-default`・`pc-epyc`・`pc-intel`と`judge-vbox`は、その`[WARN]`が出ないことを見る** | `cpu-state-sees-an-unclassified-bit-test`（その製造元で分類していない最初のビットが立っているものとして判定する。QEMUの既定のAMDではEFER.SVME）、`cpu-state-sees-ffxsr-test`（EFER.FFXSRが立っているものとして判定する。AMDの表で名前つきで止まる） |
+| `machine-variant pc-mce`（2026-09-24。レビューの(3)） | **プロンプトの後にQEMUのmonitorから機械チェックを注入し、`exception: vector=18 (#MC machine check)`で止まり、QEMUの記録にshutdownの印が無いこと**（`Triple fault`と`raising triple fault`の両方を見る） | `mce-off-after-the-check-test`（判定の後でBSPのCR4.MCEを落とす。**注入がshutdownになり、#MCがカーネルに届かない**） |
 | `sti-check 3b` | **IDTの全ゲートが、3つの共通の入口のどれかへ行くこと。** **ゲートがスタブを指すことは既存の検査が見ており、スタブの飛び先はここが見る**（既知のスタブの16バイトだけを読んで`jmp`を解く） | `idt-stub-skips-common-entry-test`（測定用IPIのスタブが共通の入口を飛ばして`irq_entry`へ直に飛ぶ。既存のゲートの検査は通る） |
 
 **限界**——**静的な見張りは既定の像だけを見る**（破壊の構成の像は見ない）。**APの確かめは起きたAPだけを見る**（`MAX_CPUS`の方針で起こさないCPUは走らないので、見なくてよい）。
 
 **APの確かめを足して、APの食い違いが見つかった**（2026-09-24。`docs/troubleshooting.md`）——**APはINITの直後のCR0のまま走っていた**（CDとNWが1でキャッシュが効かず、WPとNEが0。CR4にDEとMCEが無く、EFERにNXEが無い）。**QEMUとVirtualBoxの両方で同じ値だった**（実測）。**実機での害**——**APがキャッシュ無しで走り（遅い）、WPが0なので読み取り専用のページへの書き込みが止まらない**（推測を含む）。**QEMUのTCGはキャッシュを模さないので、VMの中では害が見えなかった。** **APが起きた直後にBSPの値を写す形で直した。** **根はその手前にある**——**カーネルが要るCR0・CR4・EFERの値を、どのCPUでも自分で決めていなかった。** **BSPはファームウェアが良い値で渡していたので動いていただけで、実機のファームウェアが違う値で渡せばBSPも同じ目に遭う**（OVMFとVirtualBoxのEFIは同じ値で渡すので、2台の機械では見えない）。**BSPでカーネルが要るビットを自分で立て、APはそのBSPを写し、「1であるべき／0であるべき」の一覧で見張る形にした**（レビューの足す1点）。**NXEは一覧に入れていない**——**カーネルは実行禁止のビット（XD）を使っていない**（`docs/deferred-decisions.md`の「EFER.NXEの有効化とNXビット」）。
+
+### 全ビットの分類とMCE（2026-09-24。レビューの足す1点と(3)。製造元ごとの表は運用者の決定）
+
+**CR0・CR4・EFERの全ビットを、製造元ごとに分類した。** **起動のたびにCPUIDの葉0で製造元を見分け、その製造元の表で判定する**（運用者の決定——IntelとAMDの両方に対応する）。**出所はIntel SDM Vol.3A（253668-082US）の2.5節と2.2.1節、AMD APM Vol.2（24593 Rev. 3.45）の3.1.1節・3.1.3節・3.1.7節である。** **どの製造元でも、どのビットもちょうど1つの分類に入る**（`kernel::cpu_state`。ホストのテストが守る）。
+
+| 分類 | 両社 | Intelだけ | AMDだけ | 崩れたとき |
+|---|---|---|---|---|
+| 棚卸しの0 | CR0.AM、CR4のPVI・FSGSBASE・OSXSAVE・SMAP・PKE、EFER.SCE | — | — | `[ERROR]`で止まる |
+| 1であるべき | CR0のPE・MP・NE・WP・PG、CR4のPAE・MCE・OSFXSR・OSXMMEXCPT、EFERのLME・LMA | — | — | `[ERROR]`で止まる |
+| 0であるべき | CR0のEM・TS・NW・CD、CR4のLA57・PCIDE・CET | CR4のPKS・UINTR | EFERのLMSLE・FFXSR・TCE・UAIE | `[ERROR]`で止まる |
+| どちらでもよい（理由つき） | CR0.ET、CR4のVME・TSD・DE・PSE・PGE・PCE・UMIP・SMEP、EFER.NXE | CR4のVMXE・SMXE・KL | EFERのINTWB・AIBRSE・EnhancedTlbi | 何も出さない |
+| 分類していない | — | — | EFERのSVME・MCOMMIT | `[WARN]`で名前を出し、止まらない |
+| 予約 | 表のどれにも入らない全部。**片方だけが定義するビットは、もう片方では予約である** | — | — | **0であるべきとして扱い、`[ERROR]`で止まる** |
+
+**IntelでもAMDでもない製造元は、両社が同じ意味で定義するビットだけで判定する。** **それ以外のビット（片方だけが定義するものと、予約）が立っていれば、止めずに`[WARN]`で名前を出す**（運用者の決定）。
+
+**CET・PKS・UINTRは本文を読んで「0であるべき」へ入れた**（レビューの判断B）——**どれも、カーネルが設定も退避もしていない状態に効き目が依る。** CETは「If CR4.CET = 1, certain memory accesses are identified as shadow-stack accesses and certain linear addresses translate to shadow-stack pages」（SDM 4.1.3）。PKSは「this flag allows use of the IA32_PKRS MSR to specify ... whether supervisor-mode linear addresses with that protection key can be read or written」（2.5）。UINTRは「The user-interrupt feature is XSAVE-managed」（7.2）——**カーネルが退避するのは`fxsave`の分だけである**（`ADR-0058`）。
+
+**AMDだけのEFERのビットも本文で分類した。** **FFXSR**は「Setting this bit to 1 enables the FXSAVE and FXRSTOR instructions to execute faster in 64-bit mode at CPL 0. This is accomplished by not saving or restoring the XMM registers」（APM 3.1.7）——**ユーザーのFPの退避（`ADR-0058`）はCPL 0の64ビットで`fxsave`する**ので、**1だと切り替えでXMMが退避も復元もされない**（本文からの帰結）。**LMSLE**はRing 3のDS・ES・FS・SSの読み書きに限界の検査を掛け、**空の区画では効き目が未定義である**（4.12.2）。**TCE**は「Page table management software must be written in a way that takes this behavior into account」（3.1.7）で、**カーネルのページ表の扱いはそれを前提に書いていない。** **UAIE**はDSとESの参照で63〜57番の正規の検査を外す（5.10.2）——**壊れた番地が#GPにならず、別の番地に重なる。**
+
+**「分類していない」はEFERのSVMEとMCOMMITの2つだけである**——**決めるのに要るAPM Vol.3（命令の本文）が、AMDの文書ポータルからは取得できなかった**（2026-09-24）。**推測で分類しない。** **止めないのは、実機のファームウェアが無害なビットを立てて渡したときに起動できなくなるのを避けるためである**（レビューの指示）。**Intelの表には「分類していない」が無い。** **PVIは棚卸しへ入れた**——**立つと、Ring 3の`cli`・`sti`が`#GP`ではなくVIFを変える**（SDMのCLIの擬似コード）。**棚卸しの「IFはRing 3から変えられない」が依っている。**
+
+**QEMUの既定のCPU（`qemu64`）の製造元はAuthenticAMDだった**（monitorの`qom-get`で実測）——**いままでのQEMUの検査は、全部AMDの表で判定されていた。** **VirtualBoxはホストのCPU（Intel）の製造元を見せる。** **両方の表を`--full`で回すために、`pc-epyc`（AMDの型）と`pc-intel`（`qemu64`の製造元だけをGenuineIntelにしたもの）を機械の変種に足した**（変種の表にCPUの欄を足した）。
+
+**MCEは「1であるべき」へ入れた。** **SDMの本文で確かめた**——「If the machine-check mechanism is not enabled (the MCE flag in control register CR4 is clear), a machine-check exception causes the processor to enter the shutdown state.」（Vol.3A 6-52、Interrupt 18）。**Halt and Dumpの方針（ADR-0004）は、見える形で止まることである**——**shutdownは何も出さずに止まる。** **BSPのCR4（`0x668`）にはファームウェアが既に立てていた**——**いま効いているものを、カーネルの要求として明示した。** **APはBSPを写すので、どのCPUでも1になる。**
+
+**QEMUのTCGで機械チェックを注入できた**（実測）——**monitorの`mce 0 1 0xbd00000000000000 0x5 0 0`**（CPU 0のバンク1へ、訂正できない誤り）**で、カーネルは`exception: vector=18 (#MC machine check)`を出して止まり、QEMUの記録にshutdownの印は無かった。** **MCEを落とした破壊では、同じ注入でQEMUの記録に`CPU 0: MCE capability is not enabled, raising triple fault`が出て、#MCの行は出なかった**（QEMU 8.2.2。**SDMの本文のとおりshutdownになった**）。**判定と破壊を`--full`に置いた**（上の表）。**VirtualBoxと実機では注入していない**（未観測）。
+
+**#MCとNMIのゲートはISTを使っていない**（ISTを使うのは#DFのIST1と#PFのIST2だけ。`kernel/src/idt/mod.rs`）。**持ち越しにした**（`docs/deferred-decisions.md`の「#MCとNMIがISTを使っていない」）。
 
 ## Alternatives Considered
 
