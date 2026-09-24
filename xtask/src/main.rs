@@ -4483,11 +4483,58 @@ fn cmd_boot_with_features(features: &[&str], marker: &str, wanted: &str) -> Resu
 /// **同じ形は 2 度目である**（1 度目は `find` の失敗を空として扱い、
 /// 「差が 0 ブロック」というもっともらしい結果を得た。`docs/troubleshooting.md`）。
 /// **したがって 1 箇所へ寄せ、ログを読む全箇所をここへ通した。**
+///
+/// # 読む量に上限を置く（2026-09-24）
+///
+/// **カーネルが例外の嵐に入ると、`-d int` のログが 1 分で 8.7 GB になった**（実測）。
+/// **丸ごと読んだ `xtask` が 14 GB まで膨らみ、WSL2 ごと止まった**——2 回である
+/// （`docs/troubleshooting.md`）。**上限を越えたら先頭と末尾だけを読み、
+/// 読まなかった量をログの中と標準出力の両方に書く。**
 fn read_lossy(path: &Path) -> String {
-    match fs::read(path) {
+    match read_bounded(path, LOG_READ_LIMIT) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(_) => String::new(),
     }
+}
+
+/// [`read_lossy`] が 1 つのログから読む量の上限。**普段のログは大きくて数十 MB である。**
+const LOG_READ_LIMIT: u64 = 256 * 1024 * 1024;
+
+/// `limit` を越えるファイルは、先頭と末尾を半分ずつ読み、間に読まなかった量の行を挟む。
+///
+/// **書かれている最中のファイルも読む**（QEMU が止まる前に読む項目がある）ので、
+/// **長さは開いた時点の値で決め、それより先は読まない。**
+fn read_bounded(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    if size <= limit {
+        let mut bytes = Vec::with_capacity(size as usize);
+        file.take(size).read_to_end(&mut bytes)?;
+        return Ok(bytes);
+    }
+    let half = limit / 2;
+    let skipped = size - 2 * half;
+    let mut bytes = vec![0; half as usize];
+    file.read_exact(&mut bytes)?;
+    bytes.extend_from_slice(
+        format!(
+            "\n(xtask: {skipped} byte(s) of this log were not read; the log is {size} byte(s), \
+             over the read limit of {limit})\n"
+        )
+        .as_bytes(),
+    );
+    file.seek(SeekFrom::Start(size - half))?;
+    let mut tail = vec![0; half as usize];
+    file.read_exact(&mut tail)?;
+    bytes.extend_from_slice(&tail);
+    println!(
+        "(warn) {}: {size} byte(s), over the read limit of {limit}; read the first and the last \
+         {half} byte(s) only (a log this large usually means the kernel was entered over and over \
+         without stopping)",
+        path.display()
+    );
+    Ok(bytes)
 }
 
 /// 多バイトの字の判定（`ADR-0054`）。**1 回の起動で 4 つ見る。**
@@ -23192,6 +23239,41 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         assert!(args.iter().any(|a| a == "-no-reboot"));
         assert!(args.iter().any(|a| a == "-no-shutdown"));
         assert!(args.iter().any(|a| a == "int,cpu_reset"));
+    }
+
+    #[test]
+    fn a_log_within_the_limit_is_read_whole() {
+        let dir = env::temp_dir().join(format!(
+            "zaytos-xtask-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("debug.log");
+        fs::write(&path, "0123456789").unwrap();
+        assert_eq!(read_bounded(&path, 10).unwrap(), b"0123456789");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_log_over_the_limit_keeps_its_head_and_tail_and_says_what_was_skipped() {
+        let dir = env::temp_dir().join(format!(
+            "zaytos-xtask-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("debug.log");
+        fs::write(&path, "HEADmiddle-that-is-dropped-TAIL").unwrap();
+        let text = String::from_utf8(read_bounded(&path, 8).unwrap()).unwrap();
+        assert!(text.starts_with("HEAD\n"), "{text}");
+        assert!(text.ends_with("\nTAIL"), "{text}");
+        assert!(!text.contains("dropped"), "{text}");
+        assert!(
+            text.contains("23 byte(s) of this log were not read; the log is 31 byte(s)"),
+            "{text}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
