@@ -6905,6 +6905,8 @@ fn judge_prompt_key_and_lines(
 const VBOX_PS2_LINES: &[&str] = &[
     "keyboard: first key arrived as vector 0x42",
     "apic: I/O APIC MMIO decodes",
+    // **起きた AP の CR0・CR4・EFER が BSP と一致すること**（2026-09-24。CPU 4 個の VM では AP 1 が起きる）。
+    "started AP(s) match the BSP's CR0, CR4 and EFER",
 ];
 /// VirtualBox の PS/2 の VM で出てはいけない行（2-2）。
 const VBOX_PS2_FORBIDDEN: &[&str] = &["[ERROR]", "vector 0x21"];
@@ -17659,6 +17661,22 @@ const COMMIT_BODY_LINES: core::ops::RangeInclusive<usize> = 2..=5;
 /// 正しく行われたか」なので、壊すべきはコピー側である。**
 /// AP の per-CPU 資産と CURRENT の sentinel の破壊確認（S3-b-2b-2）。
 const SMP_AP_TESTS: &[CriticalTest] = &[
+    // **AP が BSP の CR0・CR4・EFER を写さない**（2026-09-24。`ADR-0018` の Addendum 9 の見張り）。
+    // **直す前の形そのものである**——**AP は INIT の直後の CR0 のまま走り、起床のまとめの後の突き合わせで
+    // 止まる。** **狙いどおりの理由で止まったことを、違うビットの名前（CD）で見る。**
+    CriticalTest {
+        name: "ap-keeps-its-own-control-registers",
+        feature: "ap-keeps-its-own-control-registers-test",
+        expected_markers: &[
+            "cpu-state: ap 1 differs from the BSP in CR0",
+            "CD set on the AP",
+            "redo the inventory in ADR-0018 Addendum 9",
+            "cpu-state: halting",
+        ],
+        forbidden_markers: &["started AP(s) match the BSP's CR0, CR4 and EFER"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     CriticalTest {
         name: "ap-touch-scheduler",
         feature: "smp-ap-touch-scheduler-test",
@@ -21794,7 +21812,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 38,
-    full: 387,
+    full: 388,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
