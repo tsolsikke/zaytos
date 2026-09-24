@@ -666,6 +666,8 @@ kernel-uses-gs-test = []
 cpu-state-sees-sce-test = []
 # 測定用 IPI のスタブが共通の入口を飛ばして irq_entry へ直に飛ぶ。sti-check 3b で止まる。
 idt-stub-skips-common-entry-test = []
+# AP が BSP の CR0・CR4・EFER を写さない（直す前の形。2026-09-24）。起床のまとめの後の突き合わせで止まる。
+ap-keeps-its-own-control-registers-test = []
 # フォントの台本を流す（B-d）。`/bin/ttfglyph` を 1 回起こす。
 ttf-test = []
 # シリアルの排他の演習（シリアルの排他の段）。BSP と AP が合図で揃えてから、

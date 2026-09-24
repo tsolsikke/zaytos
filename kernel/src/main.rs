@@ -10956,6 +10956,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "測定用 IPI のスタブが共通の入口を飛ばして irq_entry へ直に飛ぶ",
     ),
     (
+        "ap-keeps-its-own-control-registers-test",
+        cfg!(feature = "ap-keeps-its-own-control-registers-test"),
+        "AP が BSP の CR0・CR4・EFER を写さない（直す前の形）",
+    ),
+    (
         "ttf-test",
         cfg!(feature = "ttf-test"),
         "フォントを読んで 1 文字ラスタライズする台本を流す（破壊ではない）",

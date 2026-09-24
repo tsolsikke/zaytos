@@ -841,6 +841,9 @@ pub unsafe fn run_timer_loop(
                     report.started, report.attempted
                 ));
             }
+            // **起きた AP の CR0・CR4・EFER が BSP と一致すること**（2026-09-24。`ADR-0018` の
+            // Addendum 9 の見張り。**棚卸しの結論は全 CPU についてである**）。
+            crate::cpu_state::check_aps_match_bsp(logger, report.started);
 
             // **シリアルの排他の演習（BSP 側）。** **合図を立ててから、AP と
             // 同時に既知の行を書く。** **`kernel/src/smp.rs` の

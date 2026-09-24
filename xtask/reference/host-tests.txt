@@ -317,6 +317,7 @@ kernel::console::screen::tests::transferring_everything_every_time_shows_as_one_
 kernel::console::tests::the_grid_can_hold_the_widest_glyph_in_the_font
 kernel::cpu_state::tests::each_inventory_bit_is_named_when_set
 kernel::cpu_state::tests::smep_and_umip_do_not_break_the_inventory
+kernel::cpu_state::tests::the_measured_ap_differences_are_named
 kernel::cpu_state::tests::the_measured_state_breaks_nothing
 kernel::frame_allocator::tests::adjacent_free_regions_are_coalesced_into_one_range
 kernel::frame_allocator::tests::aligned_allocation_consuming_the_whole_range

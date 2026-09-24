@@ -383,6 +383,41 @@ impl Efer {
     pub fn raw(self) -> u64 {
         self.0
     }
+
+    /// 生の値から作る（2026-09-24。AP が BSP の値を写すため）。
+    pub fn from_raw(value: u64) -> Self {
+        Efer(value)
+    }
+}
+
+/// EFER へ書く（2026-09-24。AP が BSP の値を写す）。
+///
+/// # Safety
+///
+/// **長モードで走っているこのコアの EFER として正しい値であること**——**LME を落とさない**
+/// （ページングが有効な間に LME を変えると `#GP`）。**LMA は CPU が持つ値で、書いても変わらない。**
+pub unsafe fn write_efer(value: Efer) {
+    // SAFETY: 呼び出し側の契約。IA32_EFER は長モードの CPU に必ず在る。
+    unsafe { write_msr(IA32_EFER, value.0) }
+}
+
+/// MSR を 1 つ書く。**公開しない**（[`read_msr`] と同じ方針）。
+///
+/// # Safety
+///
+/// `msr` がこの CPU に実在し、`value` がその MSR として正しいこと。
+unsafe fn write_msr(msr: u32, value: u64) {
+    // SAFETY: 呼び出し側の契約。`wrmsr` は ECX が指す MSR へ EDX:EAX を書くだけで、メモリにも
+    // スタックにも触れない。CPL 0 で実行していることは、カーネルからのみ呼ばれることによる。
+    unsafe {
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") msr,
+            in("eax") value as u32,
+            in("edx") (value >> 32) as u32,
+            options(nostack, preserves_flags),
+        );
+    }
 }
 
 /// EFER を読む。

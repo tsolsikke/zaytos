@@ -14303,6 +14303,11 @@ const BOOT_LOG_CORE_COUNT_MARKERS: &[&str] = &[
     // **隠したものを見る者**: **`-smp 2` の参照にはこの行が残る**ので、
     // 「AP でも有効になっている」は参照の側が見ている。
     "fp: SSE is enabled on ap",
+    // AP の CR0・CR4・EFER の突き合わせ（2026-09-24。`ADR-0018` の Addendum 9）。**AP の数だけ出て、
+    // まとめの行は起きた AP の数を言う。** **隠したものを見る者**: **`-smp 2` の参照にはこの行が残る**
+    // ので、「AP 1 が BSP と一致する」は参照の側が見ている。**食い違えばカーネルが止まる。**
+    "cpu-state: ap ",
+    "started AP(s) match the BSP's CR0, CR4 and EFER",
     // virtio-blk の feature bits（S13-b）。**実測でコア数に依る**——QEMU は
     // キューの数を vCPU 数に合わせるので、`-smp 1` と `-smp 2` で 0x1000 違う。
     // capacity などの判定は別の行にあり、そちらは残る。
