@@ -159,8 +159,11 @@ pub struct RunRecord {
     pub what: String,
     pub elapsed: Duration,
     pub cut: Option<Cut>,
-    /// 期限に着いた（[`Deadline::Failure`] の走行だけ真になりうる）。
+    /// 期限に着いた（[`Deadline::Failure`] の走行だけ真になりうる）。**宣言の無い期限の終わりである**
+    /// ——**待ちの条件が壊れている合図として数える**（2026-09-25。運用者の足す 1 点）。
     pub reached_deadline: bool,
+    /// 限度まで走った、**期限に着くのが正常と宣言した**（[`Deadline::Normal`]）走行か（2026-09-25）。
+    pub ran_to_declared_limit: bool,
     pub status: Option<ExitStatus>,
     /// 見張った出力のうち、最も大きかったもののバイト数。
     pub largest_output: u64,
@@ -249,6 +252,12 @@ pub fn classify(harness: bool, runs: &[RunRecord]) -> Category {
 /// 期限に着いたか（純粋な論理）。**[`Deadline::Normal`] の走行は着いたことにしない。**
 fn reached_deadline(deadline: Deadline, elapsed: Duration, timeout: Duration) -> bool {
     deadline == Deadline::Failure && elapsed >= timeout
+}
+
+/// 期限に着くのが正常と宣言した走行が、限度まで走ったか（純粋な論理。2026-09-25）。
+/// **限度を 1 つに持たない走行（`timeout` が 0）は数えない。**
+fn ran_to_declared_limit(deadline: Deadline, elapsed: Duration, timeout: Duration) -> bool {
+    deadline == Deadline::Normal && !timeout.is_zero() && elapsed >= timeout
 }
 
 /// 誤りが検査装置の故障か。
@@ -559,6 +568,7 @@ impl QemuRun {
             elapsed,
             cut: self.watch.cut.lock().ok().and_then(|cut| cut.clone()),
             reached_deadline: reached_deadline(self.deadline, elapsed, self.timeout),
+            ran_to_declared_limit: ran_to_declared_limit(self.deadline, elapsed, self.timeout),
             status: self.status,
             largest_output: self.watch.largest.load(Ordering::SeqCst),
         };
@@ -611,6 +621,7 @@ mod tests {
             elapsed: Duration::from_secs(1),
             cut,
             reached_deadline,
+            ran_to_declared_limit: false,
             status: None,
             largest_output: 0,
         }
@@ -652,6 +663,27 @@ mod tests {
             Deadline::Normal,
             Duration::from_secs(61),
             Duration::from_secs(60)
+        ));
+    }
+
+    /// **宣言のある走行が限度まで走ったことは、別に数える**（2026-09-25）。**限度を 1 つに持たない
+    /// 走行は数えない。**
+    #[test]
+    fn a_declared_run_that_ran_to_its_limit_is_counted_apart() {
+        assert!(ran_to_declared_limit(
+            Deadline::Normal,
+            Duration::from_secs(61),
+            Duration::from_secs(60)
+        ));
+        assert!(!ran_to_declared_limit(
+            Deadline::Failure,
+            Duration::from_secs(61),
+            Duration::from_secs(60)
+        ));
+        assert!(!ran_to_declared_limit(
+            Deadline::Normal,
+            Duration::from_secs(61),
+            Duration::ZERO
         ));
     }
 

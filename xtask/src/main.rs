@@ -23157,6 +23157,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         launch::runs_started(),
         launch::runs_total_time().as_secs_f64()
     );
+    // **期限で終わった待ち**（2026-09-25。QEMU を起こした回だけ。止めない）。
+    if launch::runs_started() > 0 {
+        println!("{}", deadline_ends_line());
+    }
     // **「どの誤りでも捕まえた」の族ごとの数と、ビルドの置き場の大きさ**（2026-09-25。`--full` だけ。止めない）。
     if full {
         println!("{}", any_error_verdicts_line());
@@ -24087,6 +24091,23 @@ fn finish_item() {
                  {deadlines} reached the deadline, {cuts} cut, for {label}",
                 runs.len()
             );
+            // **期限で終わった待ち**（2026-09-25。運用者の足す 1 点）。**期限に着くのが正常と
+            // 宣言していない走行（`launch::Deadline::Failure`）が期限に着いたら、待ちの条件が
+            // 壊れている合図として出す。** **止めない（計器）。** **起動ログの採取の 90 秒
+            // （2026-09-12 から毎回）と、期限まで待つ破壊 13 項目は、これで見えていた。**
+            if deadlines > 0 {
+                println!(
+                    "(info) item wait: {deadlines} run(s) ended at the time limit with no \
+                     declaration that this is normal; the wait's condition may be broken, for {label}"
+                );
+                if let Ok(mut list) = DEADLINE_ENDED_ITEMS.lock() {
+                    list.push(format!("{label} ({deadlines})"));
+                }
+            }
+            DECLARED_LIMIT_RUNS.fetch_add(
+                runs.iter().filter(|run| run.ran_to_declared_limit).count() as u64,
+                std::sync::atomic::Ordering::SeqCst,
+            );
         }
         // **ビルド・像の準備・外の道具・待ちの回数と時間**（同じ計測）。
         println!(
@@ -24094,6 +24115,32 @@ fn finish_item() {
             metrics::take_item_line()
         );
     }
+}
+
+/// 宣言なしに期限で終わった待ちを持つ項目（2026-09-25。**締めのまとめで一覧にする**）。
+static DEADLINE_ENDED_ITEMS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// 期限に着くのが正常と宣言した走行（`launch::Deadline::Normal`）のうち、限度まで走ったものの数。
+static DECLARED_LIMIT_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 期限で終わった待ちを 1 行にする（2026-09-25。まとめの計器。止めない）。
+///
+/// **宣言は起動の口の `Deadline` に持つ**——**`Normal` が「期限に着くのが正常」の宣言である**
+/// （決まった時間走らせる・窓いっぱい待つ・一定時間出ないことを見る項目。`CriticalTest` の
+/// `wait_for_full_timeout` もこれを選ぶ）。**宣言を別の表に二重に持たない**——片方だけが古くなる。
+fn deadline_ends_line() -> String {
+    let items = DEADLINE_ENDED_ITEMS
+        .lock()
+        .map(|items| items.clone())
+        .unwrap_or_default();
+    format!(
+        "(info) waits that ended at the time limit with no declaration: {} item(s){}{}; runs that \
+         reached a declared limit (launch::Deadline::Normal): {}",
+        items.len(),
+        if items.is_empty() { "" } else { ": " },
+        items.join("; "),
+        DECLARED_LIMIT_RUNS.load(std::sync::atomic::Ordering::SeqCst)
+    )
 }
 
 /// 失敗した項目の分け方の数（`launch::Category` の順）。**締めのまとめで出す。**

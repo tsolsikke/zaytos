@@ -670,6 +670,7 @@ xtask::font::tests::half_width_rows_are_shifted_to_the_most_significant_bits
 xtask::font::tests::the_most_significant_bit_is_the_leftmost_pixel
 xtask::font::tests::the_rendered_table_keeps_index_and_rows_in_step
 xtask::launch::tests::a_cut_run_is_log_limit_before_anything_else
+xtask::launch::tests::a_declared_run_that_ran_to_its_limit_is_counted_apart
 xtask::launch::tests::a_harness_fault_survives_added_context
 xtask::launch::tests::a_normal_deadline_never_reaches_timeout
 xtask::launch::tests::df_avail_is_read_from_the_last_line
