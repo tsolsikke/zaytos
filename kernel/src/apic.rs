@@ -1074,20 +1074,26 @@ fn survey_io_apic(
 /// `MAX_CPUS` を上げ忘れたまま AP を起こす段へ進むことを、起動ログで見える
 /// ようにしておく。`-smp 2` / `-smp 4` の構成で警告が出るので、
 /// S3-b-2a に入る時点で気づける。
+///
+/// # いまの形（2026-09-24。HW-e の締めで文言を直した）
+///
+/// **AP は起き、CPU の番号は GDTR から引く**（S3 の後）。**スロットの無い CPU は起こさない**（`smp` の行の
+/// 「skipped」）ので、配列外の索引は起きない。**行の文言は S3 の前の「cpu_id() は定数 0 で、AP は起こさない」
+/// のまま残っていた**ので、事実に合わせた。**検査が待つ WARN の行の頭（there are more usable CPUs than
+/// per-CPU slots）は変えていない。**
 pub fn report_per_cpu_slot_coverage(logger: &mut Logger<SerialPort>, enumerated_cpu_count: usize) {
     let slots = common::percpu::MAX_CPUS;
     let covered = enumerated_cpu_count <= slots;
     logger.info(format_args!(
         "percpu: {enumerated_cpu_count} usable CPU(s) enumerated, {slots} per-CPU slot(s) \
-         available, every CPU has a slot={covered} (cpu_id() is the constant 0 and only the \
-         bootstrap processor runs, so no slot is indexed out of range yet)"
+         available, every CPU has a slot={covered} (a CPU without a slot is not started, so no \
+         slot is indexed out of range)"
     ));
     if !covered {
         logger.warn(format_args!(
-            "percpu: there are more usable CPUs than per-CPU slots. This is not fatal yet \
-             because cpu_id() is the constant 0 and the APs are never started. It becomes fatal \
-             in the stage where cpu_id() can return a non-zero value; raise MAX_CPUS before \
-             starting APs"
+            "percpu: there are more usable CPUs than per-CPU slots ({enumerated_cpu_count} \
+             usable, {slots} slot(s)); the CPUs without a slot are not started. Raise MAX_CPUS, \
+             and measure again, before using them"
         ));
     }
 }
