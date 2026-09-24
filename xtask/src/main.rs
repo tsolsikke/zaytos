@@ -14,6 +14,7 @@ use anyhow::{bail, Context, Result};
 
 mod check_lock;
 mod font;
+mod full_check;
 mod launch;
 mod media;
 mod metrics;
@@ -1558,7 +1559,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gtk] [--gfx-test] [--kvm] [--no-limit] [--manual] [--key-probe] [--keep-disk | --rebuild-disk]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
+    const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask full [<commit>] | --status   (全検査を target/full-check/wt で回す。検査の体系の改善の ③)\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gtk] [--gfx-test] [--kvm] [--no-limit] [--manual] [--key-probe] [--keep-disk | --rebuild-disk]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
        cargo xtask run --shell-test [--drop-arrows | --drop-esc]\n       cargo xtask run --ansi-test [--sabotage FEATURE]\n       cargo xtask run --zi-test [--sabotage FEATURE]\n       cargo xtask run --view-test [--sabotage FEATURE]
        cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
        cargo xtask run --persist-test [--rebuild-between]
@@ -2218,6 +2219,8 @@ fn main() -> Result<()> {
         }),
         // **検査の錠の基底の確かめが使う**（`check_lock::command`。人が打つためのものではない）。
         Some("check-lock") => check_lock::command(&args[1..]),
+        // **全検査を別の作業木で回す**（`full_check`。2026-09-25。検査の体系の改善の ③）。
+        Some("full") => full_check::command(&args[1..]),
         Some(other) => bail!("unknown xtask subcommand: {other}\n\n{USAGE}"),
         None => bail!("missing xtask subcommand\n\n{USAGE}"),
     }
@@ -5035,12 +5038,41 @@ fn any_error_verdicts_line() -> String {
 /// ——**消してよい物の一覧は `docs/verification-coverage.md` の「ビルドの使い回し（5.c）は入れない」にある。**
 const BUILD_DIR_WARN_BYTES: u64 = 100 << 30;
 
-/// ビルドの置き場の大きさを 1 行出す（`--full` のまとめ。止めない）。
+/// ビルドの置き場の大きさを出す（`--full` のまとめ。止めない）。
+///
+/// **本の木と、全検査の作業木（`target/full-check/wt`）を分けて出す**（運用者の回答 2。2026-09-25）
+/// ——**作業木は本の木の `target/` の下に在るので、合わせて測ると 100 GiB の警告を毎回越える。**
+/// **警告はそれぞれに掛ける。**
 fn report_build_directory_size(workspace_root: &Path) {
-    let target = workspace_root.join("target");
-    let bytes = external_tool("du")
+    let main =
+        check_lock::main_tree(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
+    let worktree = main.join("target").join("full-check").join("wt");
+    let with_worktree = directory_bytes(&main.join("target"));
+    let worktree_bytes = if worktree.is_dir() {
+        directory_bytes(&worktree)
+    } else {
+        Some(0)
+    };
+    let main_bytes = with_worktree
+        .zip(worktree_bytes)
+        .map(|(all, part)| all.saturating_sub(part));
+    report_one_build_directory(
+        "the main tree's target/ (without the full-check worktree)",
+        main_bytes,
+    );
+    if worktree.is_dir() {
+        report_one_build_directory(
+            "the full-check worktree target/full-check/wt (its target/ and sources)",
+            worktree_bytes,
+        );
+    }
+}
+
+/// 置き場の大きさ（`du -sb`。読めなければ `None`）。
+fn directory_bytes(path: &Path) -> Option<u64> {
+    external_tool("du")
         .arg("-sb")
-        .arg(&target)
+        .arg(path)
         .output()
         .ok()
         .filter(|output| output.status.success())
@@ -5050,21 +5082,25 @@ fn report_build_directory_size(workspace_root: &Path) {
                 .next()?
                 .parse::<u64>()
                 .ok()
-        });
+        })
+}
+
+/// 置き場 1 つの大きさを 1 行出す（越えたら警告。止めない）。
+fn report_one_build_directory(what: &str, bytes: Option<u64>) {
     let gib = |value: u64| value as f64 / (1u64 << 30) as f64;
     match bytes {
         Some(bytes) if bytes > BUILD_DIR_WARN_BYTES => println!(
-            "(warn) the build directory target/ holds {:.1} GiB, over the {:.0} GiB mark; ask the \
-             operator before cleaning (what may be removed is listed in docs/verification-coverage.md)",
+            "(warn) {what} holds {:.1} GiB, over the {:.0} GiB mark; ask the operator before \
+             cleaning (what may be removed is listed in docs/verification-coverage.md)",
             gib(bytes),
             gib(BUILD_DIR_WARN_BYTES)
         ),
         Some(bytes) => println!(
-            "(info) the build directory target/ holds {:.1} GiB (a warning comes over {:.0} GiB)",
+            "(info) {what} holds {:.1} GiB (a warning comes over {:.0} GiB)",
             gib(bytes),
             gib(BUILD_DIR_WARN_BYTES)
         ),
-        None => println!("(info) the size of the build directory target/ could not be read"),
+        None => println!("(info) the size of {what} could not be read"),
     }
 }
 
@@ -20838,17 +20874,23 @@ fn check_one_manifest_default_features(
 /// **置くなら理由が要るが、思いつかない。** **並走させたい場面が無い**
 /// ——**`target/` と `disk0.img` を共有するので、両方が汚れる**
 /// （`CLAUDE.md` の絶対ルール 1）。**要るようになったら、そのとき足す。**
+///
+/// # `xtask` は同じ木のものだけを数える（2026-09-25。検査の体系の改善の ③）
+///
+/// **全検査を別の作業木（`target/full-check/wt`）で回す形にした。** **`target/` と `disk0.img` は
+/// 木ごとに別なので、別の木の `xtask` とは汚し合わない**——**作業木で全検査が走っている間も、
+/// 本の木で基底を回せるようにする。** **同じ木かは `/proc/<pid>/exe` が自分と同じ本体を指すかで
+/// 見る**（本体は木の `target/debug/xtask` である）。**QEMU は今までどおりホスト全体で数える**
+/// ——**持ち主が SIGKILL で死ぬと、QEMU の子だけが残り、錠では見えない。** **全検査との並走は
+/// 検査の錠が断る**（`check_lock`）。
 fn concurrent_build_or_qemu() -> Vec<(u32, String)> {
     let mut found = Vec::new();
     let me = std::process::id();
     let parent = std::fs::read_to_string("/proc/self/stat")
         .ok()
-        .and_then(|stat| {
-            // `pid (comm) state ppid ...`。**`comm` に空白が入りうるので `)` で切る。**
-            let rest = stat.rsplit_once(')')?.1.to_string();
-            rest.split_whitespace().nth(1)?.parse::<u32>().ok()
-        })
+        .and_then(|stat| check_lock::parent_pid(&stat))
         .unwrap_or(0);
+    let mine = process_binary(me);
 
     let Ok(entries) = fs::read_dir("/proc") else {
         return found;
@@ -20867,12 +20909,22 @@ fn concurrent_build_or_qemu() -> Vec<(u32, String)> {
         let comm = comm.trim().to_string();
         // **`comm` は 15 文字で切られる**ので、`qemu-system-x86_64` は
         // `qemu-system-x86` として出る。
-        if comm == "xtask" || comm.starts_with("qemu-system-") {
+        let same_tree_xtask = comm == "xtask" && mine.is_some() && process_binary(pid) == mine;
+        if same_tree_xtask || comm.starts_with("qemu-system-") {
             found.push((pid, comm));
         }
     }
     found.sort();
     found
+}
+
+/// プロセスの本体の道（`/proc/<pid>/exe`）。**建て直されて消えた本体は ` (deleted)` を外して読む。**
+fn process_binary(pid: u32) -> Option<PathBuf> {
+    let link = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let text = link.to_string_lossy();
+    Some(PathBuf::from(
+        text.strip_suffix(" (deleted)").unwrap_or(&text).to_string(),
+    ))
 }
 
 /// 並走していたら断る（2026-09-03）。
@@ -21014,24 +21066,38 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         "cargo xtask {}",
         env::args().skip(1).collect::<Vec<_>>().join(" ")
     );
-    if full {
-        let root = workspace_root()?;
-        let commit = check_lock::git_line(&root, &["rev-parse", "HEAD"])?;
-        let tree = check_lock::git_line(&root, &["rev-parse", "HEAD^{tree}"])?;
-        check_lock::hold_or_exit(
+    // **検査の記録**（`full_check`。2026-09-25）。**入口で木を採り、終わりに 1 行書く**——**断られた回も
+    // 書く**（push の前の関門が「要る検査を済ませていないコミット」を見る）。
+    let root = workspace_root()?;
+    full_check::begin(
+        &root,
+        if full {
+            full_check::Level::Full
+        } else if commit {
+            full_check::Level::Commit
+        } else {
+            full_check::Level::Base
+        },
+    );
+    let refused = if full {
+        let (commit, tree) = full_check::started_commit_and_tree().unwrap_or_default();
+        let log =
+            env::var(full_check::LOG_ENV).unwrap_or_else(|_| "(this process's output)".into());
+        check_lock::hold(
             check_lock::Mode::Exclusive,
             &command,
-            Some(check_lock::owner_content(
-                &command,
-                &commit,
-                &tree,
-                "(this process's output)",
-            )),
-        )?;
+            Some(check_lock::owner_content(&command, &commit, &tree, &log)),
+        )?
     } else if commit {
-        check_lock::hold_or_exit(check_lock::Mode::Shared, &command, None)?;
+        check_lock::hold(check_lock::Mode::Shared, &command, None)?
     } else {
         check_lock::note_a_run_without_the_lock(&command);
+        None
+    };
+    if let Some(message) = refused {
+        full_check::end("refused", None, None);
+        eprintln!("{message}");
+        std::process::exit(check_lock::REFUSED_EXIT_CODE);
     }
 
     // 外した確率的な項目の一覧が実態を指しているかを先に見る（列挙の腐りを防ぐ）。
@@ -22709,6 +22775,41 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 Err(error) => findings.push(format!("{}: could not run ({error})", hook.display())),
             }
         }
+        // **コミットに要る検査の規則は、コミットの後の hook と `full_check` の 2 か所に在る**
+        // （2026-09-25。検査の体系の改善の ③）——**hook は走らせる検査を決め、`full_check` は記録と
+        // push の前の関門で要る検査を決める。** **食い違うと、hook が基底で済ませたコミットを関門が
+        // 止める（逆もある）ので、ここで一致を見る。**
+        let prefixes = Command::new("python3")
+            .args([
+                "-c",
+                "import sys\nsys.dont_write_bytecode = True\nsys.path.insert(0, sys.argv[1])\n\
+                 import check_after_commit\nprint('\\n'.join(check_after_commit.IMAGE_PATH_PREFIXES))",
+            ])
+            .arg(&dir)
+            .stdin(Stdio::null())
+            .output();
+        match prefixes {
+            Ok(output) if output.status.success() => {
+                let hook: Vec<String> = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .map(str::to_string)
+                    .collect();
+                if hook != full_check::IMAGE_PATH_PREFIXES {
+                    findings.push(format!(
+                        "check_after_commit.py IMAGE_PATH_PREFIXES {hook:?} differs from \
+                         full_check::IMAGE_PATH_PREFIXES {:?}",
+                        full_check::IMAGE_PATH_PREFIXES
+                    ));
+                }
+            }
+            Ok(output) => findings.push(format!(
+                "could not read check_after_commit.py IMAGE_PATH_PREFIXES ({})",
+                output.status
+            )),
+            Err(error) => findings.push(format!(
+                "could not read check_after_commit.py IMAGE_PATH_PREFIXES ({error})"
+            )),
+        }
         if findings.is_empty() && !hooks.is_empty() {
             println!(
                 "--- bash hook self-test: OK ({} hook(s) under .claude/hooks/, each with a \
@@ -23235,15 +23336,23 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         report_build_directory_size(&workspace_root);
     }
 
+    let item_seconds = Some(item_time_total().as_secs_f64());
     if failed.is_empty() {
+        full_check::end("pass", Some(total), item_seconds);
         println!("xtask check: all {total} check(s) passed");
         return Ok(());
     }
+    full_check::end("fail", Some(total), item_seconds);
     bail!(
         "xtask check: {} of {total} check(s) failed: {}",
         failed.len(),
         failed.join(", ")
     );
+}
+
+/// 項目の所要の合計（遅さの計器と検査の記録が読む）。
+fn item_time_total() -> std::time::Duration {
+    std::time::Duration::from_millis(ITEM_TIME_TOTAL_MS.load(std::sync::atomic::Ordering::SeqCst))
 }
 
 /// 会計行に記録されている項目数（`docs/verification-coverage.md` の「項目会計」）。
@@ -24136,6 +24245,7 @@ fn stop_if_over_the_time_limit() {
          got slower.",
         FULL_TIME_LIMIT.as_secs() / 60
     );
+    full_check::end("cut", Some(done), Some(item_time_total().as_secs_f64()));
     std::process::exit(3);
 }
 

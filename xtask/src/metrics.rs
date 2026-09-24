@@ -128,6 +128,11 @@ pub fn take_item_line() -> String {
     line(&values)
 }
 
+/// 全体の分の時間（検査の記録へ残す。`cargo` の時間は遅さの計器が差し引く）。
+pub fn total_time(kind: Kind) -> Duration {
+    TOTAL[kind as usize].read().1
+}
+
 /// 全体の分を 1 行にする。
 pub fn total_line() -> String {
     let values = [0, 1, 2, 3, 4].map(|index| TOTAL[index].read());

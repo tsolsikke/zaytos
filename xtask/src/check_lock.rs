@@ -331,9 +331,12 @@ fn started_unix_in(content: &str) -> Option<u64> {
         .and_then(|value| value.trim().parse().ok())
 }
 
+/// 錠の持ち主（pid・取り方・コマンドの行）。
+pub type Holder = (u32, Mode, String);
+
 /// 断ったときに見せるもの。
 struct Refusal {
-    holders: Vec<(u32, Mode, String)>,
+    holders: Vec<Holder>,
     content: String,
     /// `tools/vbox-vm.py start` が起こしたまま残した VM（全検査を断る理由になる）。
     vms: Vec<String>,
@@ -501,11 +504,12 @@ fn refusal_message(what: &str, path: &Path, refusal: &Refusal) -> String {
     text
 }
 
-/// 錠を取る。**取れなければ、断りを出して [`REFUSED_EXIT_CODE`] で終える。**
+/// 錠を取る。**取れなければ、断りの文を返す**（走行の記録へ 1 行残してから）。
 ///
 /// **既に持っているか、持ち主の下で走っているなら何もしない。** `content` は排他で取ったときに
-/// 錠へ書く中身である（[`owner_content`]）。
-pub fn hold_or_exit(mode: Mode, what: &str, content: Option<String>) -> Result<()> {
+/// 錠へ書く中身である（[`owner_content`]）。**断りを受けた側は、自分の記録を書いてから
+/// [`REFUSED_EXIT_CODE`] で終えること**（`cmd_check` が検査の記録へ「断られた」を残す）。
+pub fn hold(mode: Mode, what: &str, content: Option<String>) -> Result<Option<String>> {
     {
         let state = STATE
             .lock()
@@ -515,9 +519,9 @@ pub fn hold_or_exit(mode: Mode, what: &str, content: Option<String>) -> Result<(
                 if mode == Mode::Exclusive && *held == Mode::Shared {
                     bail!("`{what}` asked for the check lock exclusively while holding it shared");
                 }
-                return Ok(());
+                return Ok(None);
             }
-            Some(State::Covered { .. }) => return Ok(()),
+            Some(State::Covered { .. }) => return Ok(None),
             None => {}
         }
     }
@@ -527,14 +531,47 @@ pub fn hold_or_exit(mode: Mode, what: &str, content: Option<String>) -> Result<(
             if let Ok(mut slot) = STATE.lock() {
                 *slot = Some(state);
             }
-            Ok(())
+            Ok(None)
         }
         Attempt::Refused(refusal) => {
             log_run(what, "refused");
-            eprintln!("{}", refusal_message(what, &path, &refusal));
-            std::process::exit(REFUSED_EXIT_CODE);
+            Ok(Some(refusal_message(what, &path, &refusal)))
         }
     }
+}
+
+/// 錠を取る。**取れなければ、断りを出して [`REFUSED_EXIT_CODE`] で終える。**
+pub fn hold_or_exit(mode: Mode, what: &str, content: Option<String>) -> Result<()> {
+    if let Some(message) = hold(mode, what, content)? {
+        eprintln!("{message}");
+        std::process::exit(REFUSED_EXIT_CODE);
+    }
+    Ok(())
+}
+
+/// 本の木（git の共通の置き場の親）。**記録は本の木の `target/full-check/` に置く**——**作業木で
+/// 走った全検査の記録も、本の木へ集める。**
+pub fn main_tree(root: &Path) -> Result<PathBuf> {
+    let common = git_common_dir(root)?;
+    common
+        .parent()
+        .map(Path::to_path_buf)
+        .with_context(|| format!("{} has no parent directory", common.display()))
+}
+
+/// いまの錠の持ち主（`/proc/locks` から。`--status` が出す）と、排他の持ち主が書いた中身。
+pub fn current_holders(root: &Path) -> Result<(Vec<Holder>, String)> {
+    let path = lock_path(root)?;
+    let Ok(file) = OpenOptions::new().read(true).open(&path) else {
+        return Ok((Vec::new(), String::new()));
+    };
+    let refusal = refusal(&file);
+    Ok((refusal.holders, refusal.content))
+}
+
+/// `tools/vbox-vm.py start` が起こしたまま残した VM（`--status` が出す）。
+pub fn vbox_marks(root: &Path) -> Result<Vec<String>> {
+    Ok(vbox_left_running(&lock_dir_in(&git_common_dir(root)?)))
 }
 
 /// QEMU を起こす前に呼ぶ（起動の口の裏打ち）。**入口で取り損ねた経路も、ここで取る。**
