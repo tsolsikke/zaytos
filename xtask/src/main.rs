@@ -3067,10 +3067,15 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the fs image extraction")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "fs-image-extract",
+        BOOT_READY_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     // **複製の行が出るまで待つ。上限つき。**
     // **取り出す合図。** **複製した直後ではなく、像の作業が終わった時点である。**
@@ -3081,7 +3086,7 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
     let source_marker = "fs-image-source: root_filesystem reads from ";
     let deadline = Instant::now() + BOOT_READY_TIMEOUT;
     let mut copied_line = None;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         {
             let text = read_lossy(&serial_log);
             // **完了の行を待ってから、複製の行を拾う。**
@@ -3124,7 +3129,7 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
                     if stream.write_all(command.as_bytes()).is_ok() {
                         // 書き終わるのを待つ。上限つき。
                         let deadline = Instant::now() + Duration::from_secs(30);
-                        while Instant::now() < deadline {
+                        while Instant::now() < deadline && !child.was_cut() {
                             if fs::metadata(&dump).map(|m| m.len()).unwrap_or(0) == size {
                                 extracted = true;
                                 break;
@@ -15285,14 +15290,22 @@ fn capture_one_boot(
         accelerator: Accelerator::Tcg,
         debug_events: DebugEvents::IntAndCpuReset,
     });
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the persist probe")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "persist-probe",
+        BOOT_READY_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     // **フラッシュが済むか、止まる文言が出るまで待つ。上限つき。**
     let deadline = Instant::now() + BOOT_READY_TIMEOUT;
     loop {
+        if child.was_cut() {
+            break;
+        }
         let seen = read_lossy(&serial_log);
         if seen.contains(until) || seen.contains("; halting") || Instant::now() >= deadline {
             break;
@@ -15533,10 +15546,15 @@ fn capture_boot_log(workspace_root: &Path, smp: Option<u32>, tag: &str) -> Resul
         qemu_args.push(count.to_string().into());
     }
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the boot log capture")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "boot-log",
+        BOOT_READY_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     // **2 つとも満たすまで待つ**——**シェルが構えたこと**と、**ハートビートが
     // 3 本出たこと**である。**上限は付ける**（出ない場合に無限に待たない）。
@@ -15554,6 +15572,9 @@ fn capture_boot_log(workspace_root: &Path, smp: Option<u32>, tag: &str) -> Resul
     // 残す**——**定常状態へ入ったことは、あちらでしか言えない。**
     let deadline = Instant::now() + BOOT_READY_TIMEOUT;
     loop {
+        if child.was_cut() {
+            break;
+        }
         let text = read_lossy(&serial_log);
         let beats = text.matches("heartbeat: ticks=").count();
         let shell_is_up = text.contains(SHELL_READY_MARKER);
@@ -15823,13 +15844,18 @@ fn cmd_drift_test(minutes: u64, smp: Option<u32>) -> Result<()> {
     let cores = smp.map_or("default".to_string(), |c| c.to_string());
     println!("=== drift test: {minutes} minute(s), -smp {cores}, sampling every {DRIFT_SAMPLE_STRIDE} heartbeat(s)");
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the drift test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "drift-test",
+        Duration::from_secs(minutes * 60),
+        launch::Deadline::Normal,
+    ))?;
 
     let deadline = Instant::now() + Duration::from_secs(minutes * 60);
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         if child.try_wait().ok().flatten().is_some() {
             break;
         }
@@ -15985,13 +16011,25 @@ fn cmd_marker_test(
     // 全部そろうまで待てば、遅れて届く行を取りこぼさない。到達しない場合は
     // 従来どおり `deadline` で打ち切るので、上限は変わらない。
     let wait_for_full_timeout = test.wait_for_full_timeout;
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the critical test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "critical-test",
+        EXCEPTION_TEST_TIMEOUT,
+        if wait_for_full_timeout {
+            launch::Deadline::Normal
+        } else {
+            launch::Deadline::Failure
+        },
+    ))?;
 
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     loop {
+        if child.was_cut() {
+            break;
+        }
         if !wait_for_full_timeout && {
             let text = read_lossy(&serial_log);
             test.expected_markers.iter().all(|m| text.contains(m))
@@ -16191,13 +16229,21 @@ fn cmd_exception_test(kind: &str) -> Result<()> {
     // （マーカーテストの「全マーカーがそろうまで待つ」と同じ考え）。
     const DUMP_TERMINATOR: &str = "[ERROR] halting (cli + hlt loop)";
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the exception test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "exception-test",
+        EXCEPTION_TEST_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     let handler_ran = loop {
+        if child.was_cut() {
+            break false;
+        }
         let text = read_lossy(&serial_log);
         if text.contains(&expected_serial) && text.contains(DUMP_TERMINATOR) {
             break true;
@@ -18842,14 +18888,22 @@ fn capture_serial_for_calibration(run: usize) -> Result<String> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the calibration run")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "calibration",
+        CALIBRATION_RUN_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     // 較正が出るまで待つ。**上限を必ず付ける**（CLAUDE.md の「シェルコマンドの制約」）。
     let deadline = Instant::now() + CALIBRATION_RUN_TIMEOUT;
     loop {
+        if child.was_cut() {
+            break;
+        }
         if read_lossy(&serial_log).contains("apic: LAPIC timer calibration:") {
             break;
         }
