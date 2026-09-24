@@ -54,6 +54,24 @@ import subprocess
 import sys
 import time
 import zlib
+import signal
+
+
+# **QEMU は xtask の起動の口（`xtask/src/launch.rs`）と同じ形で起こす**（2026-09-24。ホストの保護）。
+# 書く側の上限を prlimit の fsize でカーネルに持たせ、SIGXFSZ を無視して起こす（越えた書き込みは
+# EFBIG で失敗するだけで、コアを吐かない。WSL の core_pattern はパイプで、RLIMIT_CORE が届かない）。
+# 自分の組で起こし、止めるときは組ごと SIGKILL を送る。
+QEMU_FILE_LIMIT = 4 << 30
+CAPPED = ["sh", "-c", "trap '' XFSZ; exec \"$@\"", "zaytos-qemu", "prlimit",
+          f"--fsize={QEMU_FILE_LIMIT}", "--core=0", "--"]
+
+
+def stop_group(child):
+    """QEMU の組ごと SIGKILL で止める（コアを吐かない）。"""
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "target", "hw")
@@ -145,7 +163,8 @@ def run_variant(name, wait):
         "-monitor", f"unix:{sock},server,nowait",
     ]
     with open(os.path.join(out, "qemu.out"), "w") as log:
-        child = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT)
+        child = subprocess.Popen(CAPPED + args, stdout=log, stderr=subprocess.STDOUT,
+                                 start_new_session=True)
         try:
             time.sleep(wait)
             if child.poll() is None:
@@ -155,7 +174,7 @@ def run_variant(name, wait):
                 time.sleep(3)
                 monitor.close()
         finally:
-            child.kill()
+            stop_group(child)
             child.wait(timeout=30)
     if os.path.exists(sock):
         os.remove(sock)
