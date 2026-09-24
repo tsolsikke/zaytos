@@ -4973,6 +4973,85 @@ fn judge_sabotage(features: &[&str], result: &Result<()>) -> SabotageVerdict {
     }
 }
 
+/// 「どの誤りでも捕まえた」と数えた破壊の回の数（族ごと。2026-09-25。運用者の決定）。
+///
+/// **理由を見ていない判定を、`--full` のまとめで族ごとに数える**（検査の体系の改善）。**狭めるのは、
+/// その族を「族にまとめる段」で扱うとき**——**狭めた破壊は [`SABOTAGE_STOP_REASONS`] に載る。**
+static ANY_ERROR_VERDICTS: std::sync::Mutex<std::collections::BTreeMap<String, usize>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// 「どの誤りでも捕まえた」の行を出し、族の数を 1 つ足す（2026-09-25）。**出す行は前と同じ形である。**
+fn caught_by_any_error(family: &str, line: &str) {
+    println!("{line}");
+    if let Ok(mut counts) = ANY_ERROR_VERDICTS.lock() {
+        *counts.entry(family.to_string()).or_insert(0) += 1;
+    }
+}
+
+/// 「どの誤りでも捕まえた」の数を 1 行にする（まとめの計器。止めない）。
+fn any_error_verdicts_line() -> String {
+    let counts = ANY_ERROR_VERDICTS
+        .lock()
+        .map(|counts| counts.clone())
+        .unwrap_or_default();
+    let total: usize = counts.values().sum();
+    let mut families: Vec<(String, usize)> = counts.into_iter().collect();
+    families.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let listed: Vec<String> = families
+        .iter()
+        .map(|(family, count)| format!("{family} {count}"))
+        .collect();
+    format!(
+        "(info) sabotage verdicts that accept any error (the reason is not checked): {total} in {} \
+         famil(ies){}{}; narrowed to an intended stop: {} sabotage(s) (SABOTAGE_STOP_REASONS)",
+        families.len(),
+        if listed.is_empty() { "" } else { ": " },
+        listed.join(", "),
+        SABOTAGE_STOP_REASONS.len()
+    )
+}
+
+/// ビルドの置き場（`target/`）の大きさが越えたら警告する値（2026-09-25。運用者の決定で値は案のとおり）。
+///
+/// **5.c（ビルドの使い回し）を入れない代わりに、大きさを計器で見る。** **2026-09-25 の実測で 59GB**
+/// （うちカーネルの置き場 47GB、その incremental 38GB）。**100GiB は今の 1.7 倍で、急に増えたこと
+/// （掃除されない置き場ができた等）だけを知らせる。** **止めない。** **掃除は運用者に確かめてから行う**
+/// ——**消してよい物の一覧は `docs/verification-coverage.md` の「ビルドの使い回し（5.c）は入れない」にある。**
+const BUILD_DIR_WARN_BYTES: u64 = 100 << 30;
+
+/// ビルドの置き場の大きさを 1 行出す（`--full` のまとめ。止めない）。
+fn report_build_directory_size(workspace_root: &Path) {
+    let target = workspace_root.join("target");
+    let bytes = external_tool("du")
+        .arg("-sb")
+        .arg(&target)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()
+        });
+    let gib = |value: u64| value as f64 / (1u64 << 30) as f64;
+    match bytes {
+        Some(bytes) if bytes > BUILD_DIR_WARN_BYTES => println!(
+            "(warn) the build directory target/ holds {:.1} GiB, over the {:.0} GiB mark; ask the \
+             operator before cleaning (what may be removed is listed in docs/verification-coverage.md)",
+            gib(bytes),
+            gib(BUILD_DIR_WARN_BYTES)
+        ),
+        Some(bytes) => println!(
+            "(info) the build directory target/ holds {:.1} GiB (a warning comes over {:.0} GiB)",
+            gib(bytes),
+            gib(BUILD_DIR_WARN_BYTES)
+        ),
+        None => println!("(info) the size of the build directory target/ could not be read"),
+    }
+}
+
 /// 破壊の回の判定を 1 行にして出す（5.b。2026-09-25）。**落ちたら `failed` へ積む。**
 fn report_sabotage_verdict(
     family: &str,
@@ -4993,7 +5072,7 @@ fn report_sabotage_verdict(
             )
         }
         SabotageVerdict::CaughtByAnyError => {
-            println!("--- {name}: OK (the sabotage was caught)")
+            caught_by_any_error(family, &format!("--- {name}: OK (the sabotage was caught)"))
         }
         SabotageVerdict::StoppedForAnotherReason { sign } => {
             println!(
@@ -21719,7 +21798,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 println!("--- ansi test (skip parse): FAILED (the sabotage was NOT caught)");
                 failed.push("ansi test (skip parse)".to_string());
             }
-            Err(_) => println!("--- ansi test (skip parse): OK (the sabotage was caught)"),
+            Err(_) => caught_by_any_error(
+                "ansi test",
+                "--- ansi test (skip parse): OK (the sabotage was caught)",
+            ),
         }
 
         // **SGR の色を渡さない破壊（ES-b。ADR-0040）。** パーサは正しく
@@ -21732,7 +21814,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 println!("--- ansi test (sgr ignored): FAILED (the sabotage was NOT caught)");
                 failed.push("ansi test (sgr ignored)".to_string());
             }
-            Err(_) => println!("--- ansi test (sgr ignored): OK (the sabotage was caught)"),
+            Err(_) => caught_by_any_error(
+                "ansi test",
+                "--- ansi test (sgr ignored): OK (the sabotage was caught)",
+            ),
         }
 
         // **DECTCEM の隠す指示を無視する破壊（ES-c）。** 指示は届いて
@@ -21746,7 +21831,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 );
                 failed.push("ansi test (cursor ignores hide)".to_string());
             }
-            Err(_) => println!("--- ansi test (cursor ignores hide): OK (the sabotage was caught)"),
+            Err(_) => caught_by_any_error(
+                "ansi test",
+                "--- ansi test (cursor ignores hide): OK (the sabotage was caught)",
+            ),
         }
 
         // **穴を 0 として読まない破壊（ADR-0038）。** 既定の起動ログが
@@ -21761,7 +21849,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 println!("--- sparse read (refused): FAILED (the sabotage was NOT caught)");
                 failed.push("sparse read (refused)".to_string());
             }
-            Err(_) => println!("--- sparse read (refused): OK (the sabotage was caught)"),
+            Err(_) => caught_by_any_error(
+                "sparse read",
+                "--- sparse read (refused): OK (the sabotage was caught)",
+            ),
         }
 
         // **`.bss` を張らない破壊（ADR-0039）。** 既定の起動ログが
@@ -21774,7 +21865,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 println!("--- bss mapping (filesz only): FAILED (the sabotage was NOT caught)");
                 failed.push("bss mapping (filesz only)".to_string());
             }
-            Err(_) => println!("--- bss mapping (filesz only): OK (the sabotage was caught)"),
+            Err(_) => caught_by_any_error(
+                "bss mapping",
+                "--- bss mapping (filesz only): OK (the sabotage was caught)",
+            ),
         }
 
         // **`zi` の実演（zi-d）。** 決定的な台本入力で、開いて動いて編集し、
@@ -21827,7 +21921,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                     println!("--- view test ({feature}): FAILED (the sabotage was NOT caught)");
                     failed.push(format!("view test ({feature})"));
                 }
-                Err(_) => println!("--- view test ({feature}): OK (the sabotage was caught)"),
+                Err(_) => caught_by_any_error(
+                    "view test",
+                    &format!("--- view test ({feature}): OK (the sabotage was caught)"),
+                ),
             }
         }
 
@@ -21951,7 +22048,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         total += 1;
         begin_item("the persist test catches rebuilding the disk in between");
         match cmd_persist_test(true) {
-            Ok(()) => println!("--- persist (rebuilt in between): OK (the sabotage was caught)"),
+            Ok(()) => caught_by_any_error(
+                "persist",
+                "--- persist (rebuilt in between): OK (the sabotage was caught)",
+            ),
             Err(error) => {
                 println!("--- persist (rebuilt in between): FAILED ({error})");
                 failed.push("persist (rebuilt in between)".to_string());
@@ -22003,9 +22103,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         total += 1;
         begin_item("the zi persist test catches rebuilding the disk in between");
         match cmd_persist_zi_test(true) {
-            Ok(()) => {
-                println!("--- persist (zi, rebuilt in between): OK (the sabotage was caught)")
-            }
+            Ok(()) => caught_by_any_error(
+                "persist",
+                "--- persist (zi, rebuilt in between): OK (the sabotage was caught)",
+            ),
             Err(error) => {
                 println!("--- persist (zi, rebuilt in between): FAILED ({error})");
                 failed.push("persist (zi, rebuilt in between)".to_string());
@@ -22034,7 +22135,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 println!("--- fs extract (corrupt tail): FAILED (the sabotage was NOT caught)");
                 failed.push("fs extract (corrupt tail)".to_string());
             }
-            Err(_) => println!("--- fs extract (corrupt tail): OK (the sabotage was caught)"),
+            Err(_) => caught_by_any_error(
+                "fs extract",
+                "--- fs extract (corrupt tail): OK (the sabotage was caught)",
+            ),
         }
 
         // **「読む側を複製へ向けたことの反証」は P-e で落とした。**
@@ -22050,7 +22154,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 println!("--- fs extract (shifted field): FAILED (the sabotage was NOT caught)");
                 failed.push("fs extract (shifted field)".to_string());
             }
-            Err(_) => println!("--- fs extract (shifted field): OK (the sabotage was caught)"),
+            Err(_) => caught_by_any_error(
+                "fs extract",
+                "--- fs extract (shifted field): OK (the sabotage was caught)",
+            ),
         }
 
         // **割り当てと解放（S12-b の 3 段目）。**
@@ -22133,7 +22240,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                     println!("--- fs truncate ({label}): FAILED (the sabotage was NOT caught)");
                     failed.push(format!("fs truncate ({label})"));
                 }
-                Err(_) => println!("--- fs truncate ({label}): OK (the sabotage was caught)"),
+                Err(_) => caught_by_any_error(
+                    "fs truncate",
+                    &format!("--- fs truncate ({label}): OK (the sabotage was caught)"),
+                ),
             }
         }
 
@@ -22145,7 +22255,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                     println!("--- fs write ({label}): FAILED (the sabotage was NOT caught)");
                     failed.push(format!("fs write ({label})"));
                 }
-                Err(_) => println!("--- fs write ({label}): OK (the sabotage was caught)"),
+                Err(_) => caught_by_any_error(
+                    "fs write",
+                    &format!("--- fs write ({label}): OK (the sabotage was caught)"),
+                ),
             }
         }
 
@@ -22157,7 +22270,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                     println!("--- fs bitmap ({label}): FAILED (the sabotage was NOT caught)");
                     failed.push(format!("fs bitmap ({label})"));
                 }
-                Err(_) => println!("--- fs bitmap ({label}): OK (the sabotage was caught)"),
+                Err(_) => caught_by_any_error(
+                    "fs bitmap",
+                    &format!("--- fs bitmap ({label}): OK (the sabotage was caught)"),
+                ),
             }
         }
 
@@ -22181,7 +22297,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                     println!("--- pci enumeration ({label}): FAILED (the sabotage was NOT caught)");
                     failed.push(format!("pci enumeration ({label})"));
                 }
-                Err(_) => println!("--- pci enumeration ({label}): OK (the sabotage was caught)"),
+                Err(_) => caught_by_any_error(
+                    "pci enumeration",
+                    &format!("--- pci enumeration ({label}): OK (the sabotage was caught)"),
+                ),
             }
         }
 
@@ -22205,7 +22324,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                     println!("--- virtio blk read ({label}): FAILED (the sabotage was NOT caught)");
                     failed.push(format!("virtio blk read ({label})"));
                 }
-                Err(_) => println!("--- virtio blk read ({label}): OK (the sabotage was caught)"),
+                Err(_) => caught_by_any_error(
+                    "virtio blk read",
+                    &format!("--- virtio blk read ({label}): OK (the sabotage was caught)"),
+                ),
             }
         }
 
@@ -22228,7 +22350,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 println!("--- virtio irq (edge route): FAILED (the sabotage was NOT caught)");
                 failed.push("virtio irq (edge route)".to_string());
             }
-            Err(_) => println!("--- virtio irq (edge route): OK (the sabotage was caught)"),
+            Err(_) => caught_by_any_error(
+                "virtio irq",
+                "--- virtio irq (edge route): OK (the sabotage was caught)",
+            ),
         }
 
         // **落ち方が 4 形で全部違う**——edge は読み戻し、EOI 落としは 2 回目の
@@ -22248,7 +22373,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                     println!("--- virtio irq ({label}): FAILED (the sabotage was NOT caught)");
                     failed.push(format!("virtio irq ({label})"));
                 }
-                Err(_) => println!("--- virtio irq ({label}): OK (the sabotage was caught)"),
+                Err(_) => caught_by_any_error(
+                    "virtio irq",
+                    &format!("--- virtio irq ({label}): OK (the sabotage was caught)"),
+                ),
             }
         }
 
@@ -22286,7 +22414,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                     println!("--- fs image flush ({label}): FAILED (the sabotage was NOT caught)");
                     failed.push(format!("fs image flush ({label})"));
                 }
-                Err(_) => println!("--- fs image flush ({label}): OK (the sabotage was caught)"),
+                Err(_) => caught_by_any_error(
+                    "fs image flush",
+                    &format!("--- fs image flush ({label}): OK (the sabotage was caught)"),
+                ),
             }
         }
 
@@ -23026,6 +23157,11 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         launch::runs_started(),
         launch::runs_total_time().as_secs_f64()
     );
+    // **「どの誤りでも捕まえた」の族ごとの数と、ビルドの置き場の大きさ**（2026-09-25。`--full` だけ。止めない）。
+    if full {
+        println!("{}", any_error_verdicts_line());
+        report_build_directory_size(&workspace_root);
+    }
 
     if failed.is_empty() {
         println!("xtask check: all {total} check(s) passed");
@@ -24651,6 +24787,22 @@ mod tests {
             judge_sabotage(&rmdir, &stopped(intended).context("fs-extract")),
             SabotageVerdict::CaughtForTheReason { .. }
         ));
+    }
+
+    /// **「どの誤りでも捕まえた」を族ごとに数え、まとめの 1 行に出す**（2026-09-25。計器）。
+    #[test]
+    fn any_error_verdicts_are_counted_per_family() {
+        caught_by_any_error(
+            "zz family for the host test",
+            "--- zz family for the host test (a): OK (the sabotage was caught)",
+        );
+        caught_by_any_error(
+            "zz family for the host test",
+            "--- zz family for the host test (b): OK (the sabotage was caught)",
+        );
+        let line = any_error_verdicts_line();
+        assert!(line.contains("zz family for the host test 2"), "{line}");
+        assert!(line.contains("narrowed to an intended stop: "), "{line}");
     }
 
     /// **狙った理由の表に載る名前は、カーネルの feature として実在する**（5.b）——**名前を
