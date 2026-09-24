@@ -1568,7 +1568,7 @@ fn main() -> Result<()> {
        cargo xtask run --serial-test [--sabotage FEATURE]
        cargo xtask run --machine-variant NAME [--sabotage FEATURE | --config FEATURE]   (ADR-0068。NAME は xtask/machine-variants.txt の名前)
        cargo xtask check [--update-reference]   (ホストテストの名前の集合を取り直す)
-       cargo xtask run --boot-log-diff [--update-reference]
+       cargo xtask run --boot-log-diff [--update-reference [--allow-shrink]]
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask image [--without-fs-image]   (ADR-0068 の HW-e。起動媒体の像を建てて確かめる)\n       cargo xtask gen-font\n       cargo xtask judge-vbox <記録>   (ADR-0068 の 2-2。tools/vbox-vm.py run が残した記録を判定する)";
 
     let args: Vec<String> = env::args().skip(1).collect();
@@ -2052,7 +2052,8 @@ fn main() -> Result<()> {
             }
             if rest.iter().any(|a| a == "--boot-log-diff") {
                 let update = rest.iter().any(|a| a == "--update-reference");
-                return cmd_boot_log_diff(update);
+                let allow_shrink = rest.iter().any(|a| a == "--allow-shrink");
+                return cmd_boot_log_diff(update, allow_shrink);
             }
             if let Some(index) = rest.iter().position(|a| a == "--drift-test") {
                 let minutes = rest
@@ -15530,7 +15531,22 @@ fn cmd_persist_test(rebuild_between: bool) -> Result<()> {
     }
 }
 
-fn capture_boot_log(workspace_root: &Path, smp: Option<u32>, tag: &str) -> Result<String> {
+/// `zash: ready` の後にプロンプトの末尾が出ていること（5.a。2026-09-25）。**起動ログを取り終える条件である。**
+///
+/// **最後の `zash: ready` より後ろだけを見る**——**プロンプトは改行で終わらないので、行としては
+/// 取り出せない**（[`SHELL_PROMPT_TAIL`] の doc）。
+fn shell_prompt_follows_ready(serial: &str) -> bool {
+    serial
+        .rfind(SHELL_READY_MARKER)
+        .is_some_and(|at| serial[at..].contains(SHELL_PROMPT_TAIL))
+}
+
+fn capture_boot_log(
+    workspace_root: &Path,
+    smp: Option<u32>,
+    tag: &str,
+    quiet_after_prompt: Option<Duration>,
+) -> Result<String> {
     let ovmf_vars = prepare_ovmf_vars(workspace_root)?;
     let bootloader_efi = build_bootloader(workspace_root, false)?;
     let kernel_elf = build_kernel(workspace_root, false)?;
@@ -15569,32 +15585,51 @@ fn capture_boot_log(workspace_root: &Path, smp: Option<u32>, tag: &str) -> Resul
         launch::Deadline::Failure,
     ))?;
 
-    // **2 つとも満たすまで待つ**——**シェルが構えたこと**と、**ハートビートが
-    // 3 本出たこと**である。**上限は付ける**（出ない場合に無限に待たない）。
+    // **シェルが構え、プロンプトが出たら取り終える**（5.a。2026-09-25）。**上限は付ける**
+    // （出ない場合に無限に待たない）。**上限に着いたら名前つきで落とす**——**黙って比べに
+    // 進むと、差分の形でしか見えない。**
     //
-    // # ハートビートだけでは、参照の長さが機械の速さに依る
+    // # ハートビートの条件を外した
     //
-    // **B-d で踏んだ（2026-09-11）。** **像へフォントを 1 本足し、壊した像の
-    // 作業領域を 160 から 288 ブロックへ広げたら、起動が遅くなった**——
-    // **3 本目のハートビートが、ユーザープログラムが走る前に出た。**
-    // **参照が 512 行から 327 行へ縮み、185 行ぶんの覆いが黙って消えた**
-    // （実測）。**「緑のまま、主張している中身が減る」形である。**
+    // **2026-09-12（`d80f70f`）から「ハートビートが 3 本」も待っていたが、既定の構成では
+    // 満たされない。** **カーネルは 2 本目でシェルへ渡し（`kernel/src/main.rs` の
+    // `SHELL_AFTER_HEARTBEATS`）、その後は BSP も AP も出さない。** **採取は毎回、上限の
+    // 90 秒で終わっていた**（実測。プロンプトは 8.4〜8.6 秒で出て、その後は何も出ない）。
+    // **正規化はハートビートの行を落とすので、この条件は中身に効かず、待ち時間だけを決めていた。**
     //
-    // **したがって、止める条件に中身の目印を入れる。** **`zash: ready` は
-    // 起動シーケンスの終わりで、速さに依らない。** **ハートビートの条件は
-    // 残す**——**定常状態へ入ったことは、あちらでしか言えない。**
+    // **当時の注釈は、B-d で参照が 512 行から 327 行へ縮んだ理由を「3 本目のハートビートが
+    // ユーザープログラムより前に出た」と書いていたが、3 本目は出ない。** **その前の上限
+    // （`EXCEPTION_TEST_TIMEOUT` の 20 秒）で切れたのが実際の理由と読む**（推測。当時の
+    // 生のログは残っていない。`docs/troubleshooting.md`）。**`zash: ready` を目印に足したのは
+    // 正しく、効いていたのは上限を 90 秒へ広げたほうである。**
     let deadline = Instant::now() + BOOT_READY_TIMEOUT;
+    let mut reached_prompt = false;
     loop {
         if child.was_cut() {
             break;
         }
-        let text = read_lossy(&serial_log);
-        let beats = text.matches("heartbeat: ticks=").count();
-        let shell_is_up = text.contains(SHELL_READY_MARKER);
-        if (beats >= 3 && shell_is_up) || Instant::now() >= deadline {
+        if shell_prompt_follows_ready(&read_lossy(&serial_log)) {
+            reached_prompt = true;
+            break;
+        }
+        if Instant::now() >= deadline {
             break;
         }
         metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
+    }
+
+    // **プロンプトの後の沈黙を見る**（5.a の (b)。-smp 2 だけ）。**新しいバイトが 1 つでも
+    // 出たら、その時点で抜けて落とす。** **ここは期限まで待つのが正常な待ちである**——
+    // **「一定時間出ないこと」を見ている。**
+    let settled = fs::metadata(&serial_log).map(|m| m.len()).unwrap_or(0);
+    if let (true, Some(window)) = (reached_prompt, quiet_after_prompt) {
+        let quiet_until = Instant::now() + window;
+        while Instant::now() < quiet_until && !child.was_cut() {
+            metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
+            if fs::metadata(&serial_log).map(|m| m.len()).unwrap_or(0) != settled {
+                break;
+            }
+        }
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -15606,11 +15641,63 @@ fn capture_boot_log(workspace_root: &Path, smp: Option<u32>, tag: &str) -> Resul
     {
         bail!("boot log capture ({tag}): the kernel did not start (firmware rip {firmware_rip:?})");
     }
+    if !reached_prompt {
+        bail!(
+            "boot log capture ({tag}): the shell did not come up (no `{SHELL_READY_MARKER}` \
+             followed by the prompt within {}s)",
+            BOOT_READY_TIMEOUT.as_secs()
+        );
+    }
+    // **(i) 取り終えた所がプロンプトであること**（行数が減らないことの見張り。5.a）。
+    // **プロンプトの後に 1 バイトでも増えていたら落とす**——-smp 2 では沈黙の 10 秒の間、
+    // 他の構成では止めるまでの間である。
+    let bytes = fs::read(&serial_log).unwrap_or_default();
+    if bytes.len() as u64 != settled {
+        let start = (settled as usize).min(bytes.len());
+        let extra: String = String::from_utf8_lossy(&bytes[start..])
+            .chars()
+            .take(240)
+            .collect();
+        match quiet_after_prompt {
+            Some(window) => bail!(
+                "boot log capture ({tag}): new output appeared within {}s after the prompt \
+                 (the shell should sit idle): {extra:?}",
+                window.as_secs()
+            ),
+            None => bail!("boot log capture ({tag}): output continued after the prompt: {extra:?}"),
+        }
+    }
+    if !serial.ends_with(SHELL_PROMPT_TAIL) {
+        bail!("boot log capture ({tag}): the capture does not end at the shell prompt");
+    }
     Ok(serial)
 }
 
 /// 参照となる正規化済み起動ログの置き場所（S6-d）。
 const REFERENCE_BOOT_LOG: &str = "xtask/reference/boot-log-smp2.txt";
+
+/// 起動ログの参照が、シェルのプロンプトで終わっていること（5.a の見張りの (iii)。2026-09-25）。
+///
+/// **最後の 2 行が `zash: ready` とプロンプトであることを見る。** **途中で切れて縮んだ参照が
+/// 積まれる形（B-d で 512 行が 327 行になった）を、QEMU を起こさずに基底で止める。**
+/// **採取の側も同じ所で止まる**（[`capture_boot_log`]）ので、この形が崩れたら、採取か参照の
+/// どちらかが壊れている。
+fn boot_log_reference_ends_at_prompt(reference: &str) -> Result<String> {
+    let lines: Vec<&str> = reference.lines().collect();
+    let [.., ready, prompt] = lines.as_slice() else {
+        bail!("the reference has fewer than two lines");
+    };
+    if *ready != SHELL_READY_MARKER {
+        bail!("the line before the last is {ready:?}, not {SHELL_READY_MARKER:?}");
+    }
+    if !prompt.ends_with(SHELL_PROMPT_TAIL) {
+        bail!("the last line is {prompt:?}, not the shell prompt");
+    }
+    Ok(format!(
+        "{} line(s), ending with {SHELL_READY_MARKER:?} and the prompt",
+        lines.len()
+    ))
+}
 
 /// `--shell-test` が 1 キーごとに空ける間隔。
 ///
@@ -15655,6 +15742,20 @@ const SHELL_RESTART_MARKER: &str = "init: starting /bin/zash (restart 1 of 3)";
 /// **起動ログを取り終える条件の片方である**（[`capture_boot_log`]）。
 const SHELL_READY_MARKER: &str = "zash: ready";
 
+/// シェルのプロンプトの末尾（`kernel/userland/zash.rs` の `PROMPT_COLOR` の後の名前・`SGR_RESET`・`$ `）。
+///
+/// **起動ログを取り終える条件のもう片方である**（5.a。2026-09-25）。**プロンプトは改行で終わらない**
+/// ——**行としては取り出せないので、`zash: ready` の後ろに在るかで見る**（[`shell_prompt_follows_ready`]）。
+/// **参照の最後の行もこれで終わる**（基底の項目が見る）。
+const SHELL_PROMPT_TAIL: &str = "zaytos\x1b[0m$ ";
+
+/// プロンプトの後に「新しい行が出ないこと」を見る長さ（5.a の (b)。2026-09-25。運用者の決定）。
+///
+/// **`-smp 2` の採取だけに掛ける**——**参照と比べる構成である。** **期限まで待つのが正常な待ち
+/// である**（一定時間出ないことを見る）。**以前は止める条件が満たされず、偶然 80 秒あまりの沈黙を
+/// 見ていた**（[`capture_boot_log`] の注釈）。**その見張りを、名前つきの 10 秒に置き換えた。**
+const BOOT_LOG_QUIET_AFTER_PROMPT: Duration = Duration::from_secs(10);
+
 /// 起動が目印のところまで進むのを待つ上限（B-d で分け、B-e で広げた）。
 ///
 /// # 借りていた上限を返した
@@ -15686,20 +15787,43 @@ const BOOT_READY_TIMEOUT: Duration = Duration::from_secs(90);
 ///   除いて**一致すること。
 ///
 /// `--update-reference` を付けると参照を書き換える。**意図した変更のときだけ付ける。**
-fn cmd_boot_log_diff(update_reference: bool) -> Result<()> {
+/// **参照が縮む書き換えは、`--allow-shrink` も付けないと断る**（5.a の見張りの (ii)。2026-09-25）
+/// ——**B-d で参照が 512 行から 327 行へ縮み、緑のまま覆いが消えた形を塞ぐ。**
+fn cmd_boot_log_diff(update_reference: bool, allow_shrink: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
     let reference_path = workspace_root.join(REFERENCE_BOOT_LOG);
 
     println!("=== boot log diff: capturing -smp 1 / 2 / 4");
-    let smp1 = capture_boot_log(&workspace_root, Some(1), "smp1")?;
-    let smp2 = capture_boot_log(&workspace_root, Some(2), "smp2")?;
-    let smp4 = capture_boot_log(&workspace_root, Some(4), "smp4")?;
+    let smp1 = capture_boot_log(&workspace_root, Some(1), "smp1", None)?;
+    let smp2 = capture_boot_log(
+        &workspace_root,
+        Some(2),
+        "smp2",
+        Some(BOOT_LOG_QUIET_AFTER_PROMPT),
+    )?;
+    println!(
+        "--- boot log diff: -smp 2 sat idle for {}s after the prompt (no new output)",
+        BOOT_LOG_QUIET_AFTER_PROMPT.as_secs()
+    );
+    let smp4 = capture_boot_log(&workspace_root, Some(4), "smp4", None)?;
 
     let mut failed = false;
 
     // --- 1. 参照との一致 ---
     let current = normalize_boot_log(&smp2, false);
     if update_reference {
+        // **(ii) 縮む書き換えを断る。**
+        if let Ok(previous) = fs::read_to_string(&reference_path) {
+            let previous = previous.lines().count();
+            if current.len() < previous && !allow_shrink {
+                bail!(
+                    "boot log diff: the new reference has {} line(s), fewer than the current {previous}; \
+                     a shorter reference silently drops coverage. If the shrink is intended, pass \
+                     --allow-shrink as well and say so in the commit",
+                    current.len()
+                );
+            }
+        }
         if let Some(parent) = reference_path.parent() {
             fs::create_dir_all(parent).context("failed to create the reference directory")?;
         }
@@ -20498,6 +20622,20 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         failed.push("direct cli/sti".to_string());
     }
 
+    // **起動ログの参照の終わり**（5.a の見張りの (iii)。2026-09-25）。**QEMU を起こさずに見る。**
+    total += 1;
+    begin_item("the boot log reference ends at the shell prompt");
+    match fs::read_to_string(workspace_root.join(REFERENCE_BOOT_LOG))
+        .context("failed to read the boot log reference")
+        .and_then(|text| boot_log_reference_ends_at_prompt(&text))
+    {
+        Ok(message) => println!("--- boot log reference end: OK ({message})"),
+        Err(error) => {
+            println!("--- boot log reference end: FAILED ({error:#})");
+            failed.push("boot log reference end".to_string());
+        }
+    }
+
     // **`--commit` はここで終わる**——基底 + boot log diff の 1 項目。
     // カーネルのコードに触れたコミットの前に回す（`docs/coding-standards.md` の
     // 「回帰チェックの必須条件」）。起動ログの参照が古いままコミットされる形
@@ -20505,7 +20643,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     if full || commit {
         total += 1;
         begin_item("the boot log matches the reference and does not depend on the core count");
-        match cmd_boot_log_diff(false) {
+        match cmd_boot_log_diff(false, false) {
             Ok(()) => println!("--- boot log diff: OK"),
             Err(error) => {
                 println!("--- boot log diff: FAILED ({error})");
@@ -22503,8 +22641,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 38,
-    full: 396,
+    base: 39,
+    full: 397,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -23955,6 +24093,34 @@ mod tests {
             Some(false)
         );
         assert_eq!(sigign_has_sigxfsz("Name:\tqemu\n"), None);
+    }
+
+    /// **起動ログは、`zash: ready` の後にプロンプトが出た時点で取り終える**（5.a。2026-09-25）。
+    /// **`zash: ready` だけでは止めない**——**プロンプトの行が参照の最後の行である。**
+    #[test]
+    fn the_capture_stops_only_when_the_prompt_follows_ready() {
+        let prompt = "\x1b[38;2;0;200;0mzaytos\x1b[0m$ ";
+        assert!(!shell_prompt_follows_ready("[INFO] boot\nzash: ready\n"));
+        assert!(shell_prompt_follows_ready(&format!(
+            "[INFO] boot\nzash: ready\n{prompt}"
+        )));
+        assert!(!shell_prompt_follows_ready(&format!(
+            "{prompt}\n[INFO] no ready line yet"
+        )));
+    }
+
+    /// **参照がプロンプトで終わっていない形を、基底の項目が断る**（5.a の見張りの (iii)）。
+    /// **偽の形を作って落ちることを見る**——途中で切れた参照、プロンプトの無い参照、
+    /// プロンプトの後に行が続く参照。
+    #[test]
+    fn a_boot_log_reference_that_does_not_end_at_the_prompt_is_refused() {
+        let prompt = "\x1b[38;2;0;200;0mzaytos\x1b[0m$ ";
+        let good = format!("[INFO] boot\nzash: ready\n{prompt}\n");
+        assert!(boot_log_reference_ends_at_prompt(&good).is_ok());
+        assert!(boot_log_reference_ends_at_prompt("[INFO] boot\n[INFO] cut here\n").is_err());
+        assert!(boot_log_reference_ends_at_prompt("[INFO] boot\nzash: ready\n").is_err());
+        assert!(boot_log_reference_ends_at_prompt(&format!("{good}[INFO] after\n")).is_err());
+        assert!(boot_log_reference_ends_at_prompt("").is_err());
     }
 
     /// **QEMU 8.2.2 が書いた 2 つの形を、どちらも shutdown と読む**（2026-09-24 の実測の行）。
