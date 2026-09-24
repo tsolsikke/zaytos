@@ -24104,10 +24104,14 @@ fn finish_item() {
                     list.push(format!("{label} ({deadlines})"));
                 }
             }
-            DECLARED_LIMIT_RUNS.fetch_add(
-                runs.iter().filter(|run| run.ran_to_declared_limit).count() as u64,
-                std::sync::atomic::Ordering::SeqCst,
-            );
+            // **宣言のある走行が限度まで走った数を、項目の名前つきで残す**（2026-09-25。運用者の
+            // 回答 7）。**数だけでは、どの項目の走行かがまとめに出なかった。**
+            let declared = runs.iter().filter(|run| run.ran_to_declared_limit).count();
+            if declared > 0 {
+                if let Ok(mut list) = DECLARED_LIMIT_ITEMS.lock() {
+                    list.push((label.clone(), declared));
+                }
+            }
         }
         // **ビルド・像の準備・外の道具・待ちの回数と時間**（同じ計測）。
         println!(
@@ -24120,8 +24124,10 @@ fn finish_item() {
 /// 宣言なしに期限で終わった待ちを持つ項目（2026-09-25。**締めのまとめで一覧にする**）。
 static DEADLINE_ENDED_ITEMS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-/// 期限に着くのが正常と宣言した走行（`launch::Deadline::Normal`）のうち、限度まで走ったものの数。
-static DECLARED_LIMIT_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// 期限に着くのが正常と宣言した走行（`launch::Deadline::Normal`）のうち、限度まで走ったものを
+/// 持つ項目と、その走行の数（2026-09-25。**締めのまとめで一覧にする**）。
+static DECLARED_LIMIT_ITEMS: std::sync::Mutex<Vec<(String, usize)>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// 期限で終わった待ちを 1 行にする（2026-09-25。まとめの計器。止めない）。
 ///
@@ -24133,13 +24139,30 @@ fn deadline_ends_line() -> String {
         .lock()
         .map(|items| items.clone())
         .unwrap_or_default();
+    let declared = DECLARED_LIMIT_ITEMS
+        .lock()
+        .map(|items| items.clone())
+        .unwrap_or_default();
     format!(
-        "(info) waits that ended at the time limit with no declaration: {} item(s){}{}; runs that \
-         reached a declared limit (launch::Deadline::Normal): {}",
+        "(info) waits that ended at the time limit with no declaration: {} item(s){}{}; {}",
         items.len(),
         if items.is_empty() { "" } else { ": " },
         items.join("; "),
-        DECLARED_LIMIT_RUNS.load(std::sync::atomic::Ordering::SeqCst)
+        declared_limit_runs(&declared)
+    )
+}
+
+/// 宣言のある走行が限度まで走った数と、その項目の名前（純粋な論理。2026-09-25。運用者の回答 7）。
+fn declared_limit_runs(items: &[(String, usize)]) -> String {
+    let runs: usize = items.iter().map(|(_, count)| count).sum();
+    let named: Vec<String> = items
+        .iter()
+        .map(|(label, count)| format!("{label} ({count})"))
+        .collect();
+    format!(
+        "runs that reached a declared limit (launch::Deadline::Normal): {runs}{}{}",
+        if named.is_empty() { "" } else { ": " },
+        named.join("; ")
     )
 }
 
@@ -24850,6 +24873,21 @@ mod tests {
         let line = any_error_verdicts_line();
         assert!(line.contains("zz family for the host test 2"), "{line}");
         assert!(line.contains("narrowed to an intended stop: "), "{line}");
+    }
+
+    /// **宣言のある走行が限度まで走った数に、項目の名前を添える**（2026-09-25。運用者の回答 7）。
+    /// **0 回のときは名前の並びを出さない。**
+    #[test]
+    fn declared_limit_runs_are_listed_with_their_items() {
+        assert_eq!(
+            declared_limit_runs(&[]),
+            "runs that reached a declared limit (launch::Deadline::Normal): 0"
+        );
+        assert_eq!(
+            declared_limit_runs(&[("drift-test".to_string(), 1), ("zi-test a".to_string(), 2)]),
+            "runs that reached a declared limit (launch::Deadline::Normal): 3: drift-test (1); \
+             zi-test a (2)"
+        );
     }
 
     /// **狙った理由の表に載る名前は、カーネルの feature として実在する**（5.b）——**名前を
