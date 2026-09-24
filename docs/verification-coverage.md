@@ -1438,6 +1438,7 @@ VirtualBoxの計数でベクタ0x42が打鍵4バイトで+4、8259のベクタ0x
 | 基底「the kernel uses no fs:/gs: operand and no swapgs, fsgsbase or SMAP instruction」 | 既定の像の逆アセンブルで0個 | 279,064行で0個 |
 | `--full`「the FS/GS and SMAP check catches kernel-uses-gs-test」 | 破壊の像で、基底の項目が`%gs:`を名指しして落ちる | 破壊の像に`mov %gs:0x0,%rax`が1つ残った（手で建てて数えた） |
 | `critical-test cpu-state-sees-sce`（破壊） | **`cpu-state: EFER.SCE is 1`と棚卸しの文言で止まり、最初のユーザープログラムが走らない** | 通った |
+| `smp-ap-test ap-keeps-its-own-control-registers`（破壊。2026-09-24） | **APがBSPの値を写さない形で、`cpu-state: ap 1 differs from the BSP in CR0`と`CD set on the AP`と棚卸しの文言で止まり、まとめの行が出ない** | 通った。**CR0・CR4・EFERの違いを名前で出した**（NE・WP・NW・CD、DE・MCE、NXE） |
 | `critical-test idt-stub-skips-common-entry`（破壊） | **`sti-check 3b: gate 0x43`と棚卸しの文言が出て、`sti`を断る** | 通った。**`sti-check 3`（ゲートの検査）は`ok=true`のまま**で、3bだけが落ちた |
 
 **既定の起動の新しい2行**——**`cpu-state: CR0=0x80010033 CR4=0x668 EFER=0xd00`と、`sti-check 3b`の「例外216・IRQ 39・システムコール1」。** **どちらも起動ログの参照に載る。** **参照の突き合わせは、この2行で差が出たときに「棚卸しをやり直すこと」の合図を添える**（ホストのテスト）。
