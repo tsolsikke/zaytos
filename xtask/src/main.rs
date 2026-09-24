@@ -11944,10 +11944,15 @@ fn cmd_shell_script_test(mode: ShellTestMode) -> Result<()> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the shell script test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "shell-script-test",
+        PIPE_TEST_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     // **台本の終わり（`script-done:`）か、起こし直しの印か、出力が伸びなくなるまで待つ。**
     let started = Instant::now();
@@ -11955,7 +11960,7 @@ fn cmd_shell_script_test(mode: ShellTestMode) -> Result<()> {
     let mut last_len = 0usize;
     let mut last_growth = started;
     let mut stalled = false;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         let text = strip_ansi(&read_lossy(&serial_log));
         if text.contains("script-done:") || text.contains(SHELL_RESTART_MARKER) {
             thread::sleep(Duration::from_secs(1));
@@ -12029,15 +12034,20 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the shell test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "shell-test",
+        BOOT_READY_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     // **プロンプトが出るまで待つ。上限つき。**
     let deadline = Instant::now() + BOOT_READY_TIMEOUT;
     let mut ready = false;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         if read_lossy(&serial_log).contains(SHELL_READY_MARKER) {
             ready = true;
             break;
@@ -12070,7 +12080,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         // ——**`--full` では 13 回走るので、固定だと待ち切りの差がそのまま積む。**
         // **上限は元の固定値と同じ 8 秒である**（`SHELL_TEST_RESTART_WAIT`）。
         let deadline = Instant::now() + SHELL_TEST_RESTART_WAIT;
-        while Instant::now() < deadline {
+        while Instant::now() < deadline && !child.was_cut() {
             if strip_ansi(&read_lossy(&serial_log)).contains(SHELL_RESTART_MARKER) {
                 break;
             }
@@ -13307,16 +13317,21 @@ fn run_keyboard_test(features: &[&str]) -> Result<KeyboardAssertions> {
         debug_events: DebugEvents::IntAndCpuReset,
     });
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the keyboard test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "keyboard-test",
+        BOOT_READY_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     // キーを送る前に、IRQ1 が解禁されるまで待つ。**上限つき。**
     let ready_marker = "keyboard: IRQ1 is unmasked";
     let deadline = Instant::now() + BOOT_READY_TIMEOUT;
     let mut ready = false;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         if read_lossy(&serial_log).contains(ready_marker) {
             ready = true;
             break;
@@ -13678,10 +13693,15 @@ fn cmd_lapic_timer_test(kind: &str) -> Result<()> {
         )?;
     }
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the lapic timer test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "lapic-timer-test",
+        EXCEPTION_TEST_TIMEOUT + LAPIC_TIMER_MEASURE_WINDOW,
+        launch::Deadline::Failure,
+    ))?;
 
     // **最初のハートビートが出てから測り始める。** 起動処理の時間を
     // 分母に入れると、比が起動の重さに引きずられる。
@@ -13689,7 +13709,7 @@ fn cmd_lapic_timer_test(kind: &str) -> Result<()> {
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     let mut started_at = None;
     let mut first_seconds = 0u64;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         if let Some((seconds, _)) = last_heartbeat_seconds(&serial_log) {
             started_at = Some(Instant::now());
             first_seconds = seconds;
@@ -13873,17 +13893,22 @@ fn cmd_ap_timer_rate() -> Result<()> {
     qemu_args.push("-smp".into());
     qemu_args.push("2".into());
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the AP timer rate test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "ap-timer-rate",
+        EXCEPTION_TEST_TIMEOUT + LAPIC_TIMER_MEASURE_WINDOW,
+        launch::Deadline::Failure,
+    ))?;
 
     // **AP の最初のハートビートが出てから測り始める。** 起動処理の時間を
     // 分母に入れると、比が起動の重さに引きずられる（BSP 側の測り方と同じ）。
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     let mut started_at = None;
     let mut first_ticks = 0u64;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         if let Some(ticks) = last_ap_heartbeat_ticks(&serial_log) {
             started_at = Some(Instant::now());
             first_ticks = ticks;
@@ -14023,16 +14048,21 @@ fn cmd_kernel_entry_concurrency() -> Result<()> {
     qemu_args.push("-smp".into());
     qemu_args.push("2".into());
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the kernel entry concurrency test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "kernel-entry-concurrency",
+        KERNEL_ENTRY_CONCURRENCY_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     // **深さ 2 が出るまで待つ。** 出た時点で打ち切る（それ以上待っても
     // 主張は強くならない）。出なければ期限で打ち切る。
     let deadline = Instant::now() + KERNEL_ENTRY_CONCURRENCY_TIMEOUT;
     let mut observed = false;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         {
             let text = read_lossy(&serial_log);
             if text.contains(KERNEL_ENTRY_DEPTH_TWO_MARKER) {
@@ -14173,10 +14203,15 @@ fn run_for_max_entry_depth(workspace_root: &Path, features: &str) -> Result<Opti
     qemu_args.push("-smp".into());
     qemu_args.push("2".into());
 
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the BKL exclusion proof")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "bkl-exclusion-proof",
+        BKL_EXCLUSION_WINDOW,
+        launch::Deadline::Normal,
+    ))?;
     thread::sleep(BKL_EXCLUSION_WINDOW);
     let _ = child.kill();
     let _ = child.wait();
@@ -14404,13 +14439,18 @@ fn cmd_highhalf_test(kind: &str) -> Result<()> {
     // しまい、absent marker（死亡点の手前）まで届かないことがある。full timeout まで
     // 待てば、死ぬまでに出るログがすべて流れ、かつ定常（heartbeat）へ進まないことも
     // 確かめられる。到達しても heartbeat が延々出るだけなので上限は変わらない。
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&qemu_args)
-        .spawn()
-        .context("failed to launch qemu-system-x86_64 for the highhalf test")?;
+    // **起動の口から起こす**（`launch`。2026-09-24）——書く側の上限と、組ごとの停止。
+    let outputs = [serial_log.as_path(), debug_log.as_path()];
+    let mut child = launch::spawn(&launch::Spec::new(
+        &qemu_args,
+        &outputs,
+        "highhalf-test",
+        EXCEPTION_TEST_TIMEOUT,
+        launch::Deadline::Failure,
+    ))?;
 
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !child.was_cut() {
         thread::sleep(PANIC_TEST_POLL_INTERVAL);
     }
 
