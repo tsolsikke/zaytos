@@ -232,6 +232,14 @@ pub const CR0_EMULATION: u64 = 1 << 2;
 /// CR0 の TS（Task Switched）ビット。**遅延退避で使うビットである。**
 /// **`ADR-0058` は常時退避を採ったので、立てない。**
 pub const CR0_TASK_SWITCHED: u64 = 1 << 3;
+/// CR0 の NE（Numeric Error）ビット。**1 なら x87 の例外が `#MF` になる。**
+pub const CR0_NUMERIC_ERROR: u64 = 1 << 5;
+/// CR0 の WP（Write Protect）ビット。**1 ならカーネルも読み取り専用のページへ書けない。**
+pub const CR0_WRITE_PROTECT: u64 = 1 << 16;
+/// CR0 の NW（Not Write-through）ビット。**CD と対で、普通に使うなら 0 にする。**
+pub const CR0_NOT_WRITE_THROUGH: u64 = 1 << 29;
+/// CR0 の CD（Cache Disable）ビット。**1 だとキャッシュが効かない。0 にする。**
+pub const CR0_CACHE_DISABLE: u64 = 1 << 30;
 /// CR4 の OSFXSR。**1 にすると `fxsave`/`fxrstor` が XMM まで扱い、SSE が使える。**
 pub const CR4_OS_FXSR: u64 = 1 << 9;
 /// CR4 の OSXMMEXCPT。**SSE の非マスク例外を `#XM` として受けると宣言する。**

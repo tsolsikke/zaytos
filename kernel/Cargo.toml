@@ -668,6 +668,9 @@ cpu-state-sees-sce-test = []
 idt-stub-skips-common-entry-test = []
 # AP が BSP の CR0・CR4・EFER を写さない（直す前の形。2026-09-24）。起床のまとめの後の突き合わせで止まる。
 ap-keeps-its-own-control-registers-test = []
+# ファームウェアが CR0.CD を立てて渡し、カーネルが落とさない形を BSP で作る（2026-09-24）。
+# cpu-state の「カーネルが要るビット」の見張りが CR0.CD を名指しして止まる。
+bsp-keeps-cd-test = []
 # フォントの台本を流す（B-d）。`/bin/ttfglyph` を 1 回起こす。
 ttf-test = []
 # シリアルの排他の演習（シリアルの排他の段）。BSP と AP が合図で揃えてから、

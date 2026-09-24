@@ -225,8 +225,9 @@ pub enum MapUpdateError {
 ///
 /// # 足りない属性
 ///
-/// **実行可否（NX）は無い。** `EFER.NXE` が未有効で、立てると予約ビット違反の
-/// #PF になる。有効化は別項の解禁条件に従う（`docs/deferred-decisions.md`）。
+/// **実行可否（NX）は無い。** **カーネルは `EFER.NXE` を立てていない**（BSP ではファームウェア
+/// 次第。AP は BSP を写す）ので、NXE が 0 のコアで立てると予約ビット違反の #PF になる。
+/// 有効化は別項の解禁条件に従う（`docs/deferred-decisions.md`）。
 /// G と PWT と PAT も無い。前者は立てない方針、後の 2 つは要求が出ていない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageAttributes {

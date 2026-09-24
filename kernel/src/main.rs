@@ -351,6 +351,13 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
         idt::init(Some(gdt::DOUBLE_FAULT_IST_INDEX as u8), page_fault_ist);
     }
 
+    // **カーネルが要る CR0 のビットを、BSP で自分で立てる・落とす**（2026-09-24。`kernel::cpu_state`）。
+    // **ファームウェアが良い値で渡していたので動いていただけである。** **AP は BSP を丸ごと写す。**
+    // SAFETY: 起動の最初期に BSP で 1 回だけである。PE と PG には触れない。
+    unsafe {
+        kernel::cpu_state::establish_required_bits_on_bsp();
+    }
+
     // このコアで SSE を有効にする（`ADR-0058` の Decision 3）。
     // **AP 側は `smp::bring_up_application_processor` が同じことをする**
     // ——**CR0 と CR4 はコアごとのレジスタである。**
@@ -466,6 +473,9 @@ extern "sysv64" fn kernel_main() -> ! {
             FeatureList(kernel::enabled_features::ENABLED_FEATURES)
         ));
     }
+
+    // **カーネルが要る CR0 のビットを BSP で立てた前後を出す**（2026-09-24）。
+    kernel::cpu_state::report_established_bits(&mut logger);
 
     // **SSE が有効になっていることを、レジスタから読んで言う**（`ADR-0058`）。
     // **立てたのは `_start` の側で、ここは読み戻しである**——**書いたつもりでは
@@ -10959,6 +10969,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "ap-keeps-its-own-control-registers-test",
         cfg!(feature = "ap-keeps-its-own-control-registers-test"),
         "AP が BSP の CR0・CR4・EFER を写さない（直す前の形）",
+    ),
+    (
+        "bsp-keeps-cd-test",
+        cfg!(feature = "bsp-keeps-cd-test"),
+        "ファームウェアが CD を立てて渡し、カーネルが落とさない形を BSP で作る",
     ),
     (
         "ttf-test",

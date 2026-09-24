@@ -74,6 +74,165 @@ pub const INVENTORY_BITS: [(Register, u32, &str, &str); 6] = [
     ),
 ];
 
+/// **カーネルのコードが依っているビット**（2026-09-24。レビューの足す1点）——在りか・ビット・名前・
+/// あるべき値・崩れたときに困ること。**棚卸しの「0 であるべき」（[`INVENTORY_BITS`]）と対にする**——
+/// あちらはユーザーが変えられる状態についての結論が依るビット、こちらはカーネルのコードそのものが
+/// 依るビットである。
+///
+/// # 誰が立てるか
+///
+/// - **CR0 の WP・NE を立て、CD・NW を落とすのは [`establish_required_bits_on_bsp`] である**（BSP）。
+///   **前はファームウェアが良い値で渡していたので動いていただけで、カーネルは自分で決めていなかった**
+///   ——**OVMF と VirtualBox の EFI は同じ値で渡すので、2 台の機械では見えない。**
+/// - **MP・EM・OSFXSR・OSXMMEXCPT は `fp::enable_on_this_cpu` が持つ**（`ADR-0058`）。
+/// - **PE・PG・PAE・LME・LMA は、長モードで走っている時点で立っている**（ブートローダとトランポリン）。
+/// - **AP は BSP を丸ごと写す**（[`adopt_bsp_state_on_this_ap`]）。
+///
+/// # NXE を入れていない理由
+///
+/// **カーネルのページ表は実行禁止のビット（XD。63 番）を使っていない**（`kernel/src/paging`）。
+/// **NXE が 0 なら XD は予約のビットになる**（Intel SDM Vol.3A）が、**立てていないので落ちない。**
+/// **実行禁止の保護を入れる段で「1 であるべき」に移す**（`docs/deferred-decisions.md`）。
+pub const REQUIRED_BITS: [(Register, u32, &str, bool, &str); 13] = [
+    (
+        Register::Cr0,
+        0,
+        "CR0.PE",
+        true,
+        "the kernel runs in protected and long mode",
+    ),
+    (
+        Register::Cr0,
+        1,
+        "CR0.MP",
+        true,
+        "fxsave is used for the user FP state (ADR-0058)",
+    ),
+    (
+        Register::Cr0,
+        2,
+        "CR0.EM",
+        false,
+        "SSE instructions would raise #UD",
+    ),
+    (
+        Register::Cr0,
+        5,
+        "CR0.NE",
+        true,
+        "x87 errors must arrive as #MF, which is folded",
+    ),
+    (
+        Register::Cr0,
+        16,
+        "CR0.WP",
+        true,
+        "read-only pages must stop kernel writes too",
+    ),
+    (
+        Register::Cr0,
+        29,
+        "CR0.NW",
+        false,
+        "caching must be the normal write-back kind",
+    ),
+    (Register::Cr0, 30, "CR0.CD", false, "the caches must be on"),
+    (
+        Register::Cr0,
+        31,
+        "CR0.PG",
+        true,
+        "the kernel runs with paging",
+    ),
+    (Register::Cr4, 5, "CR4.PAE", true, "4-level paging needs it"),
+    (
+        Register::Cr4,
+        9,
+        "CR4.OSFXSR",
+        true,
+        "fxsave and SSE need it (ADR-0058)",
+    ),
+    (
+        Register::Cr4,
+        10,
+        "CR4.OSXMMEXCPT",
+        true,
+        "SIMD errors must arrive as #XM, which is folded",
+    ),
+    (
+        Register::Efer,
+        8,
+        "EFER.LME",
+        true,
+        "the kernel runs in long mode",
+    ),
+    (
+        Register::Efer,
+        10,
+        "EFER.LMA",
+        true,
+        "the kernel runs in long mode",
+    ),
+];
+
+/// あるべき値と違うビット（純粋ロジック）。
+pub fn required_violations(
+    cr0: u64,
+    cr4: u64,
+    efer: u64,
+) -> impl Iterator<Item = &'static (Register, u32, &'static str, bool, &'static str)> {
+    REQUIRED_BITS
+        .iter()
+        .filter(move |(register, bit, _, must_be_set, _)| {
+            let value = match register {
+                Register::Cr0 => cr0,
+                Register::Cr4 => cr4,
+                Register::Efer => efer,
+            };
+            (value & (1u64 << bit) != 0) != *must_be_set
+        })
+}
+
+/// [`establish_required_bits_on_bsp`] の前後の CR0（起動ログへ出すため）。
+static ESTABLISHED_CR0: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// **BSP で、カーネルが要る CR0 のビットを自分で立てる・落とす**（2026-09-24）——**WP と NE を立て、
+/// CD と NW を落とす。** **FP のビットは触らない**（`fp::enable_on_this_cpu` が持つ）。
+///
+/// # Safety
+///
+/// **起動の最初期に、BSP で 1 回だけ呼ぶこと。** **PE と PG には触れない。** **CD と NW は同時に落とす**
+/// （CD が 0 で NW が 1 の組は `#GP` になる）。
+pub unsafe fn establish_required_bits_on_bsp() {
+    use common::cpu::{
+        read_cr0, CR0_CACHE_DISABLE, CR0_NOT_WRITE_THROUGH, CR0_NUMERIC_ERROR, CR0_WRITE_PROTECT,
+    };
+    let before = read_cr0();
+    let after = (before | CR0_WRITE_PROTECT | CR0_NUMERIC_ERROR)
+        & !(CR0_CACHE_DISABLE | CR0_NOT_WRITE_THROUGH);
+    // 破壊 (2026-09-24, bsp-keeps-cd): **ファームウェアが CD を立てて渡し、カーネルが落とさない形**を
+    // 作る。**OVMF と VirtualBox の EFI は CD を落として渡すので、立てて作る。** **見張りが CR0.CD を
+    // 名指しして止まる。**
+    #[cfg(feature = "bsp-keeps-cd-test")]
+    let after = after | CR0_CACHE_DISABLE;
+    if after != before {
+        // SAFETY: 呼び出し側の契約。PE と PG を保ち、WP・NE・CD・NW だけを変える。
+        unsafe { common::cpu::write_cr0(after) };
+    }
+    ESTABLISHED_CR0[0].store(before, Ordering::SeqCst);
+    ESTABLISHED_CR0[1].store(common::cpu::read_cr0(), Ordering::SeqCst);
+}
+
+/// [`establish_required_bits_on_bsp`] の前後の CR0 を 1 行出す（ロガーが使えるようになってから）。
+pub fn report_established_bits(logger: &mut Logger<SerialPort>) {
+    let before = ESTABLISHED_CR0[0].load(Ordering::SeqCst);
+    let after = ESTABLISHED_CR0[1].load(Ordering::SeqCst);
+    logger.info(format_args!(
+        "cpu-state: the kernel set the CR0 bits it needs on the BSP (WP and NE set, CD and NW \
+         clear): CR0 {before:#x} -> {after:#x} [read back]"
+    ));
+}
+
 /// 立っていて棚卸しを崩すビット（純粋ロジック）。
 pub fn inventory_violations(
     cr0: u64,
@@ -131,6 +290,23 @@ pub fn check_and_report(logger: &mut Logger<SerialPort>) {
          CR4.OSXSAVE and EFER.SCE being 0"
     ));
     let mut violated = false;
+    for (_, _, name, must_be_set, needs) in required_violations(cr0, cr4, efer) {
+        violated = true;
+        logger.error(format_args!(
+            "cpu-state: {name} is {}, but the kernel needs it to be {} ({needs}); the bits the \
+             kernel needs are set on the BSP by cpu_state::establish_required_bits_on_bsp and the \
+             APs copy the BSP",
+            u8::from(!*must_be_set),
+            u8::from(*must_be_set)
+        ));
+    }
+    if !violated {
+        logger.info(format_args!(
+            "cpu-state: the {} bit(s) the kernel needs hold (CR0.PE, MP, NE, WP, PG set; EM, NW, CD \
+             clear; CR4.PAE, OSFXSR, OSXMMEXCPT set; EFER.LME, LMA set)",
+            REQUIRED_BITS.len()
+        ));
+    }
     for (_, _, name, breaks) in inventory_violations(cr0, cr4, efer) {
         violated = true;
         logger.error(format_args!(
@@ -376,6 +552,20 @@ mod tests {
             ap: 1 << 13,
         };
         assert_eq!(format!("{unknown}"), "bit 13 set on the AP");
+    }
+
+    #[test]
+    fn the_measured_state_has_every_required_bit() {
+        assert_eq!(required_violations(CR0, CR4, EFER).count(), 0);
+    }
+
+    /// **直す前の AP の値**（2026-09-24 の実測）で、崩れていたビットを名前で拾う。
+    #[test]
+    fn the_measured_ap_before_the_fix_breaks_the_required_bits() {
+        let names: Vec<&str> = required_violations(0xe000_0013, 0x620, 0x500)
+            .map(|(_, _, name, _, _)| *name)
+            .collect();
+        assert_eq!(names, vec!["CR0.NE", "CR0.WP", "CR0.NW", "CR0.CD"]);
     }
 
     /// **SMEP と UMIP は棚卸しの結論を崩さない**（起動ログの参照が見る）。
