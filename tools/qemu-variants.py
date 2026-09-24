@@ -211,10 +211,12 @@ def main():
     parser.add_argument("--list", action="store_true", help="変種の一覧を出して終わる")
     options = parser.parse_args()
     if options.list:
-        for name, (machine, mem, serial, disk, esp) in VARIANTS.items():
+        # **表の欄は 6 つである**（2026-09-24 に CPU の欄を足した）。**5 つで開いていたので、
+        # 足した後ずっと `--list` が落ちていた**（2026-09-25 に基底の確かめを置いて見つけた）。
+        for name, (machine, mem, serial, disk, esp, cpu) in VARIANTS.items():
             print(
                 f"{name}: -machine {machine} -m {mem} -serial {serial} "
-                f"disk={disk} esp={esp}"
+                f"disk={disk} esp={esp} cpu={cpu}"
             )
         return 0
     for name in options.variants:
