@@ -687,6 +687,7 @@ xtask::media::tests::the_image_is_deterministic
 xtask::media::tests::the_media_reads_back_what_was_written
 xtask::media::tests::the_same_path_twice_is_refused
 xtask::media::tests::the_sixty_four_mib_partition_has_the_geometry_we_recorded
+xtask::metrics::tests::the_line_names_every_kind_even_at_zero
 xtask::tests::a_boot_log_difference_on_the_cpu_state_line_asks_to_redo_the_inventory
 xtask::tests::a_gs_operand_in_the_instruction_field_is_found
 xtask::tests::a_log_over_the_limit_keeps_its_head_and_tail_and_says_what_was_skipped

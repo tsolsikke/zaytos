@@ -170,6 +170,8 @@ pub struct RunRecord {
 static ITEM_RUNS: Mutex<Vec<RunRecord>> = Mutex::new(Vec::new());
 /// 起こした走行の数（全体。計測のため）。
 static RUNS_STARTED: AtomicU64 = AtomicU64::new(0);
+/// 走行の時間の合計（ナノ秒。全体。計測のため）。
+static RUNS_NANOS: AtomicU64 = AtomicU64::new(0);
 
 /// 項目の始めに、その項目の走行の記録を空にする。
 pub fn reset_item_runs() {
@@ -189,6 +191,11 @@ pub fn item_runs() -> Vec<RunRecord> {
 /// 起こした走行の数（全体）。
 pub fn runs_started() -> u64 {
     RUNS_STARTED.load(Ordering::SeqCst)
+}
+
+/// 走行の時間の合計（全体）。
+pub fn runs_total_time() -> Duration {
+    Duration::from_nanos(RUNS_NANOS.load(Ordering::SeqCst))
 }
 
 /// 失敗の分け方（`--full` の失敗の行に出す）。
@@ -543,6 +550,10 @@ impl QemuRun {
             let _ = watcher.join();
         }
         let elapsed = self.started.elapsed();
+        RUNS_NANOS.fetch_add(
+            elapsed.as_nanos().min(u128::from(u64::MAX)) as u64,
+            Ordering::SeqCst,
+        );
         let record = RunRecord {
             what: self.what.clone(),
             elapsed,

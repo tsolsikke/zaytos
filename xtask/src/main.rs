@@ -7,7 +7,6 @@ use std::{
     os::unix::{ffi::OsStrExt, net::UnixStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    thread,
     time::{Duration, Instant},
 };
 
@@ -16,6 +15,7 @@ use anyhow::{bail, Context, Result};
 mod font;
 mod launch;
 mod media;
+mod metrics;
 mod vbox;
 
 const OVMF_CODE_PATH: &str = "/usr/share/OVMF/OVMF_CODE_4M.fd";
@@ -2558,7 +2558,7 @@ fn run_interactive(
                     let _ = child.wait();
                     return Ok(());
                 }
-                thread::sleep(PANIC_TEST_POLL_INTERVAL);
+                metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
             }
         }
     }
@@ -2610,7 +2610,7 @@ fn run_panic_test(workspace_root: &Path, ovmf_vars: &Path, esp_dir: &Path) -> Re
         if Instant::now() >= deadline {
             break false;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     };
 
     let _ = child.kill();
@@ -2741,7 +2741,7 @@ fn take_screenshot(
     ))?;
 
     println!("waiting {wait:?} for the boot sequence to settle before capturing...");
-    thread::sleep(wait);
+    metrics::sleep_fixed(wait);
 
     let result = capture_screendump(&monitor_socket, &ppm_path);
 
@@ -2780,7 +2780,7 @@ fn connect_monitor_with_retry(socket_path: &Path) -> Result<UnixStream> {
     loop {
         match UnixStream::connect(socket_path) {
             Ok(stream) => return Ok(stream),
-            Err(_) if Instant::now() < deadline => thread::sleep(POLL_INTERVAL),
+            Err(_) if Instant::now() < deadline => metrics::sleep_poll(POLL_INTERVAL),
             Err(e) => {
                 return Err(e).with_context(|| {
                     format!(
@@ -2802,7 +2802,7 @@ fn wait_for_file(path: &Path, timeout: Duration) -> Result<()> {
                 path.display()
             );
         }
-        thread::sleep(POLL_INTERVAL);
+        metrics::sleep_poll(POLL_INTERVAL);
     }
     Ok(())
 }
@@ -2822,10 +2822,12 @@ fn build_bootloader(workspace_root: &Path, panic_test: bool) -> Result<PathBuf> 
 /// ブートローダを feature つきで建てる（`ADR-0068` の HW-a。**受け渡しの破壊を建てるため**）。
 /// **失敗は検査装置の故障として包む**（`launch::classify`。2026-09-24）。
 fn build_bootloader_with_features(workspace_root: &Path, features: &[&str]) -> Result<PathBuf> {
-    launch::as_harness(
-        build_bootloader_with_features_unwrapped(workspace_root, features),
-        "building the bootloader",
-    )
+    metrics::timed(metrics::Kind::Build, || {
+        launch::as_harness(
+            build_bootloader_with_features_unwrapped(workspace_root, features),
+            "building the bootloader",
+        )
+    })
 }
 
 /// 本体（[`build_bootloader_with_features`] が包む）。
@@ -3097,7 +3099,7 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
                 }
             }
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     // **割り当てたままの像を取り出す構成か。**
@@ -3134,7 +3136,7 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
                                 extracted = true;
                                 break;
                             }
-                            thread::sleep(PANIC_TEST_POLL_INTERVAL);
+                            metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
                         }
                     }
                 }
@@ -4497,7 +4499,7 @@ fn cmd_ansi_test(features: &[&str]) -> Result<()> {
         if text.contains(done_marker) {
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     let qemu_exit = child
@@ -4656,7 +4658,7 @@ fn cmd_boot_with_features(features: &[&str], marker: &str, wanted: &str) -> Resu
         if text.lines().any(|line| line.contains(marker)) {
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -4845,7 +4847,7 @@ fn cmd_utf8_test(features: &[&str], expect_pass: bool) -> Result<()> {
         if strip_ansi(&text).contains("script-done:") {
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     let qemu_exit = child
@@ -5063,7 +5065,7 @@ fn cmd_profile_test(features: &[&str], expect_pass: bool) -> Result<()> {
         if strip_ansi(&text).contains("script-done:") {
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     let qemu_exit = child
@@ -5227,7 +5229,7 @@ fn cmd_pipe_test(features: &[&str], expect_pass: bool) -> Result<()> {
     while Instant::now() < deadline && !child.was_cut() {
         let text = strip_ansi(&read_lossy(&serial_log));
         if text.contains("script-done:") {
-            thread::sleep(Duration::from_secs(1));
+            metrics::sleep_fixed(Duration::from_secs(1));
             break;
         }
         if text.len() > last_len {
@@ -5237,7 +5239,7 @@ fn cmd_pipe_test(features: &[&str], expect_pass: bool) -> Result<()> {
             stalled = true;
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
     let waited = started.elapsed();
 
@@ -5562,7 +5564,7 @@ fn cmd_socket_test(features: &[&str], expect_pass: bool) -> Result<()> {
     while Instant::now() < deadline && !child.was_cut() {
         let text = strip_ansi(&read_lossy(&serial_log));
         if text.contains("script-done:") {
-            thread::sleep(Duration::from_secs(1));
+            metrics::sleep_fixed(Duration::from_secs(1));
             break;
         }
         if text.len() > last_len {
@@ -5572,7 +5574,7 @@ fn cmd_socket_test(features: &[&str], expect_pass: bool) -> Result<()> {
             stalled = true;
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
     let waited = started.elapsed();
 
@@ -5901,12 +5903,12 @@ fn cmd_input_test(features: &[&str], expect_pass: bool) -> Result<()> {
             ready = true;
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     if ready {
         // **`inputd` が read で待ちに入る間をおく**（判定 2 は「待った」ことを見る）。
-        thread::sleep(Duration::from_millis(500));
+        metrics::sleep_fixed(Duration::from_millis(500));
         match connect_monitor_with_retry(&monitor_socket) {
             Ok(mut stream) => {
                 // **本物の打鍵を送る**（`a` の押下と離脱）。**数回送って、待ちに入った後に
@@ -5915,7 +5917,7 @@ fn cmd_input_test(features: &[&str], expect_pass: bool) -> Result<()> {
                     if writeln!(stream, "sendkey {INPUT_TEST_KEY}").is_err() {
                         break;
                     }
-                    thread::sleep(SHELL_TEST_KEY_INTERVAL);
+                    metrics::sleep_fixed(SHELL_TEST_KEY_INTERVAL);
                 }
             }
             Err(e) => println!("input-test: could not reach the QEMU monitor: {e}"),
@@ -5933,7 +5935,7 @@ fn cmd_input_test(features: &[&str], expect_pass: bool) -> Result<()> {
                 marker = INPUT_TEST_SUMMARY_MARKER;
                 continue;
             }
-            thread::sleep(PANIC_TEST_POLL_INTERVAL);
+            metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
         }
     }
     let waited = started.elapsed();
@@ -6173,7 +6175,7 @@ fn cmd_poll_test(features: &[&str], expect_pass: bool) -> Result<()> {
             if read_lossy(&serial_log).contains(marker) {
                 return true;
             }
-            thread::sleep(PANIC_TEST_POLL_INTERVAL);
+            metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
         }
         false
     };
@@ -6184,7 +6186,7 @@ fn cmd_poll_test(features: &[&str], expect_pass: bool) -> Result<()> {
         let past_socket = wait_for(POLL_TEST_SOCKET_MARKER, POLL_TEST_TIMEOUT);
         if past_socket {
             // **待ち 3 が眠りに入る間をおく**（判定 4 は「待った」ことを見る）。
-            thread::sleep(Duration::from_millis(500));
+            metrics::sleep_fixed(Duration::from_millis(500));
             match connect_monitor_with_retry(&monitor_socket) {
                 Ok(mut stream) => {
                     // **本物の打鍵を送る。** **数回送って、待ちに入った後に 1 度は届くようにする。**
@@ -6192,7 +6194,7 @@ fn cmd_poll_test(features: &[&str], expect_pass: bool) -> Result<()> {
                         if writeln!(stream, "sendkey {INPUT_TEST_KEY}").is_err() {
                             break;
                         }
-                        thread::sleep(SHELL_TEST_KEY_INTERVAL);
+                        metrics::sleep_fixed(SHELL_TEST_KEY_INTERVAL);
                     }
                 }
                 Err(e) => println!("poll-test: could not reach the QEMU monitor: {e}"),
@@ -6399,7 +6401,7 @@ fn read_complete_ppm(path: &Path, timeout: Duration) -> Option<(u32, u32, Vec<u8
                 }
             }
         }
-        thread::sleep(POLL_INTERVAL);
+        metrics::sleep_poll(POLL_INTERVAL);
     }
     None
 }
@@ -6492,7 +6494,7 @@ fn cmd_screen_test(features: &[&str], expect_pass: bool) -> Result<()> {
             if read_lossy(&serial_log).contains(marker) {
                 return true;
             }
-            thread::sleep(PANIC_TEST_POLL_INTERVAL);
+            metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
         }
         false
     };
@@ -6512,7 +6514,7 @@ fn cmd_screen_test(features: &[&str], expect_pass: bool) -> Result<()> {
                     if writeln!(stream, "sendkey {INPUT_TEST_KEY}").is_err() {
                         break;
                     }
-                    thread::sleep(SHELL_TEST_KEY_INTERVAL);
+                    metrics::sleep_fixed(SHELL_TEST_KEY_INTERVAL);
                 }
             }
             Err(e) => println!("screen-test: could not reach the QEMU monitor: {e}"),
@@ -6520,7 +6522,7 @@ fn cmd_screen_test(features: &[&str], expect_pass: bool) -> Result<()> {
         if wait_for(SCREEN_TEST_DONE_MARKER, SCREEN_TEST_TIMEOUT) {
             // **2 度目の読み戻し——抜けた後。** **描き直しは締めの流しで済んでいる**
             // （`init` が計器の行を出すのは `gfxd` の終わりの後）。**念のため少し間をおく。**
-            thread::sleep(Duration::from_millis(500));
+            metrics::sleep_fixed(Duration::from_millis(500));
             match capture_screendump(&monitor_socket, &left_ppm) {
                 Ok(()) => left = read_complete_ppm(&left_ppm, SCREENDUMP_FILE_TIMEOUT),
                 Err(e) => println!("screen-test: the second screendump failed: {e}"),
@@ -7231,7 +7233,7 @@ fn check_the_write_cap_stops_qemu() -> Result<()> {
     spec.file_limit = WRITE_CAP_TEST_LIMIT;
     let mut run = launch::spawn(&spec)?;
     // **exec の連なり（sh → prlimit → QEMU）が終わるのを待ってから、SigIgn を読む。**
-    thread::sleep(Duration::from_millis(500));
+    metrics::sleep_fixed(Duration::from_millis(500));
     let ignored = fs::read_to_string(format!("/proc/{}/status", run.id()))
         .ok()
         .and_then(|status| sigign_has_sigxfsz(&status));
@@ -7240,7 +7242,7 @@ fn check_the_write_cap_stops_qemu() -> Result<()> {
         if run.try_wait()?.is_some() {
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
     let cut = run.was_cut();
     // **切れていなければ、ここで止める**（止まっている組へ送っても害は無い）。
@@ -7420,6 +7422,17 @@ fn media_image_path(workspace_root: &Path, name: &str) -> PathBuf {
 /// バイト単位で一致すること。** **分割表は外の道具でも読む**（[`verify_partition_table`]）。
 /// **そして、その像から実際に起動する**（`media-only` の変種）。**3 つとも別の道である。**
 fn write_boot_media(esp_dir: &Path, out: &Path, contents: MediaContents) -> Result<String> {
+    metrics::timed(metrics::Kind::Stage, || {
+        write_boot_media_unwrapped(esp_dir, out, contents)
+    })
+}
+
+/// 本体（[`write_boot_media`] が包む。像を書く時間を数えるため）。
+fn write_boot_media_unwrapped(
+    esp_dir: &Path,
+    out: &Path,
+    contents: MediaContents,
+) -> Result<String> {
     let mut loaded: Vec<(&str, Vec<u8>)> = Vec::new();
     for &name in contents.paths() {
         let path = esp_dir.join(name);
@@ -7718,7 +7731,7 @@ fn cmd_machine_variant(
         let text = strip_ansi(&read_lossy(&serial_log));
         if wants_machine_check && !machine_check_sent && text.contains(SHELL_READY_MARKER) {
             machine_check_sent = true;
-            thread::sleep(Duration::from_millis(500));
+            metrics::sleep_fixed(Duration::from_millis(500));
             // **返事のプロンプトまで読んでから閉じる**（`query_monitor`）——**書いた直後に閉じると、
             // QEMU が命令を処理せずに捨てることがある**（実測。2026-09-24。`sendkey` の回は打鍵の間を
             // おくので、閉じる前に処理されていた）。
@@ -7738,21 +7751,21 @@ fn cmd_machine_variant(
         }
         // **shutdown は QEMU の記録に出る**（`-no-shutdown` なので止まるだけで、終わらない）。
         if machine_check_sent && qemu_shut_the_machine_down(&read_lossy(&debug_log)) {
-            thread::sleep(Duration::from_millis(500));
+            metrics::sleep_fixed(Duration::from_millis(500));
             break;
         }
         // **打鍵を送る回は、プロンプトが出たら `a` と Enter を打ち、シェルの答えを待つ**（HW-e-2）。
         if wants_keys && !keys_sent && text.contains(SHELL_READY_MARKER) {
             keys_sent = true;
             // **シェルが読みに入る間をおく**（既存の打鍵の検査と同じ形）。
-            thread::sleep(Duration::from_millis(500));
+            metrics::sleep_fixed(Duration::from_millis(500));
             match connect_monitor_with_retry(&monitor_socket) {
                 Ok(mut stream) => {
                     for key in ["a", "ret"] {
                         if writeln!(stream, "sendkey {key}").is_err() {
                             break;
                         }
-                        thread::sleep(SHELL_TEST_KEY_INTERVAL);
+                        metrics::sleep_fixed(SHELL_TEST_KEY_INTERVAL);
                     }
                 }
                 Err(e) => println!(
@@ -7774,10 +7787,10 @@ fn cmd_machine_variant(
             }
         };
         if reached || text.contains("halting") || text.contains(PANIC_MARKER_HEADER) {
-            thread::sleep(Duration::from_millis(500));
+            metrics::sleep_fixed(Duration::from_millis(500));
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
     let waited = started.elapsed();
     if wants_monitor {
@@ -8152,7 +8165,7 @@ fn cmd_compose_test(features: &[&str], expect_pass: bool) -> Result<()> {
             if read_lossy(&serial_log).contains(marker) {
                 return true;
             }
-            thread::sleep(PANIC_TEST_POLL_INTERVAL);
+            metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
         }
         false
     };
@@ -8174,13 +8187,13 @@ fn cmd_compose_test(features: &[&str], expect_pass: bool) -> Result<()> {
                     if writeln!(stream, "sendkey {INPUT_TEST_KEY}").is_err() {
                         break;
                     }
-                    thread::sleep(SHELL_TEST_KEY_INTERVAL);
+                    metrics::sleep_fixed(SHELL_TEST_KEY_INTERVAL);
                 }
             }
             Err(e) => println!("compose-test: could not reach the QEMU monitor: {e}"),
         }
         if wait_for(COMPOSE_TEST_DONE_MARKER, COMPOSE_TEST_TIMEOUT) {
-            thread::sleep(Duration::from_millis(500));
+            metrics::sleep_fixed(Duration::from_millis(500));
             match capture_screendump(&monitor_socket, &left_ppm) {
                 Ok(()) => left = read_complete_ppm(&left_ppm, SCREENDUMP_FILE_TIMEOUT),
                 Err(e) => println!("compose-test: the second screendump failed: {e}"),
@@ -8364,7 +8377,7 @@ fn cmd_history_test(features: &[&str], expect_pass: bool) -> Result<()> {
         if strip_ansi(&text).contains("script-done:") {
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     let qemu_exit = child
@@ -8531,7 +8544,7 @@ fn cmd_fp_test(features: &[&str], expect_pass: bool) -> Result<()> {
         if strip_ansi(&text).contains("script-done:") {
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     let qemu_exit = child
@@ -8773,7 +8786,7 @@ fn cmd_concurrent_test(features: &[&str], expect_pass: bool) -> Result<()> {
         let text = strip_ansi(&read_lossy(&serial_log));
         if text.contains("concurrent: done") || text.contains("[ERROR]") {
             // **止まる行の後ろに続く行（ダンプ）も取る。**
-            thread::sleep(Duration::from_secs(2));
+            metrics::sleep_fixed(Duration::from_secs(2));
             break;
         }
         if text.len() > last_len {
@@ -8783,7 +8796,7 @@ fn cmd_concurrent_test(features: &[&str], expect_pass: bool) -> Result<()> {
             stalled = true;
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
     let waited = started.elapsed();
 
@@ -9143,7 +9156,7 @@ fn cmd_ttf_test(features: &[&str], expect_pass: bool) -> Result<()> {
         if strip_ansi(&text).contains("script-done:") {
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     let qemu_exit = child
@@ -9309,7 +9322,7 @@ fn cmd_serial_test(features: &[&str], expect_pass: bool) -> Result<()> {
         if strip_ansi(&read_lossy(&serial_log)).contains("serial-stress: done;") {
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     let qemu_exit = child
@@ -9462,7 +9475,7 @@ fn cmd_complete_test(features: &[&str], expect_pass: bool) -> Result<()> {
         if strip_ansi(&text).contains("script-done:") {
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     let qemu_exit = child
@@ -9644,7 +9657,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
             finished_after = Some(started_waiting.elapsed());
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     let qemu_exit = child
@@ -10884,7 +10897,7 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
             finished_after = Some(started_waiting.elapsed());
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     let qemu_exit = child
@@ -11369,7 +11382,7 @@ fn cmd_pci_test(features: &[&str]) -> Result<()> {
         if text.contains(complete_marker) {
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     let context = if features.is_empty() {
@@ -11680,7 +11693,7 @@ fn cmd_virtio_test(features: &[&str]) -> Result<()> {
         {
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     let context = if features.is_empty() {
@@ -11847,7 +11860,7 @@ fn cmd_virtio_irq_test(features: &[&str]) -> Result<()> {
                 break;
             }
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     let context = if features.is_empty() {
@@ -11968,7 +11981,7 @@ fn cmd_shell_script_test(mode: ShellTestMode) -> Result<()> {
     while Instant::now() < deadline && !child.was_cut() {
         let text = strip_ansi(&read_lossy(&serial_log));
         if text.contains("script-done:") || text.contains(SHELL_RESTART_MARKER) {
-            thread::sleep(Duration::from_secs(1));
+            metrics::sleep_fixed(Duration::from_secs(1));
             break;
         }
         if text.len() > last_len {
@@ -11978,7 +11991,7 @@ fn cmd_shell_script_test(mode: ShellTestMode) -> Result<()> {
             stalled = true;
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
     let waited = started.elapsed();
 
@@ -12057,7 +12070,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
             ready = true;
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     if ready {
@@ -12070,11 +12083,11 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
                         if writeln!(stream, "sendkey {key}").is_err() {
                             break;
                         }
-                        thread::sleep(SHELL_TEST_KEY_INTERVAL);
+                        metrics::sleep_fixed(SHELL_TEST_KEY_INTERVAL);
                     }
                     // **子が走り終えるのを待つ。** `ls` と `cat` は
                     // `spawn` で起こされ、終わるまでシェルは戻らない。
-                    thread::sleep(SHELL_TEST_LINE_INTERVAL);
+                    metrics::sleep_fixed(SHELL_TEST_LINE_INTERVAL);
                 }
             }
             Err(e) => println!("shell-test: could not reach the QEMU monitor: {e}"),
@@ -12089,7 +12102,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
             if strip_ansi(&read_lossy(&serial_log)).contains(SHELL_RESTART_MARKER) {
                 break;
             }
-            thread::sleep(PANIC_TEST_POLL_INTERVAL);
+            metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
         }
     }
 
@@ -13341,7 +13354,7 @@ fn run_keyboard_test(features: &[&str]) -> Result<KeyboardAssertions> {
             ready = true;
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     let mut expected_codes = 0u64;
@@ -13353,13 +13366,13 @@ fn run_keyboard_test(features: &[&str]) -> Result<KeyboardAssertions> {
                         break;
                     }
                     expected_codes += key.codes;
-                    thread::sleep(Duration::from_millis(200));
+                    metrics::sleep_fixed(Duration::from_millis(200));
                 }
             }
             Err(e) => println!("keyboard-test: could not reach the QEMU monitor: {e}"),
         }
         // 反映とハートビートの更新を待つ。
-        thread::sleep(Duration::from_secs(3));
+        metrics::sleep_fixed(Duration::from_secs(3));
     }
 
     // **kill する前に、既に終わっていないかを見る。** 自分から終了して
@@ -13720,12 +13733,12 @@ fn cmd_lapic_timer_test(kind: &str) -> Result<()> {
             first_seconds = seconds;
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     let mut measured = None;
     if let Some(started_at) = started_at {
-        thread::sleep(LAPIC_TIMER_MEASURE_WINDOW);
+        metrics::sleep_fixed(LAPIC_TIMER_MEASURE_WINDOW);
         if let Some((seconds, _)) = last_heartbeat_seconds(&serial_log) {
             measured = Some((
                 seconds.saturating_sub(first_seconds),
@@ -13919,12 +13932,12 @@ fn cmd_ap_timer_rate() -> Result<()> {
             first_ticks = ticks;
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     let mut measured = None;
     if let Some(started_at) = started_at {
-        thread::sleep(LAPIC_TIMER_MEASURE_WINDOW);
+        metrics::sleep_fixed(LAPIC_TIMER_MEASURE_WINDOW);
         if let Some(ticks) = last_ap_heartbeat_ticks(&serial_log) {
             measured = Some((
                 ticks.saturating_sub(first_ticks),
@@ -14075,7 +14088,7 @@ fn cmd_kernel_entry_concurrency() -> Result<()> {
                 break;
             }
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     let qemu_exit = child
@@ -14217,7 +14230,7 @@ fn run_for_max_entry_depth(workspace_root: &Path, features: &str) -> Result<Opti
         BKL_EXCLUSION_WINDOW,
         launch::Deadline::Normal,
     ))?;
-    thread::sleep(BKL_EXCLUSION_WINDOW);
+    metrics::sleep_fixed(BKL_EXCLUSION_WINDOW);
     let _ = child.kill();
     let _ = child.wait();
 
@@ -14456,7 +14469,7 @@ fn cmd_highhalf_test(kind: &str) -> Result<()> {
 
     let deadline = Instant::now() + EXCEPTION_TEST_TIMEOUT;
     while Instant::now() < deadline && !child.was_cut() {
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     let qemu_exit = child
@@ -15310,10 +15323,10 @@ fn capture_one_boot(
         if seen.contains(until) || seen.contains("; halting") || Instant::now() >= deadline {
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
     // **止まる形では文言の後も回り続ける**ので、少し待ってから落とす。
-    thread::sleep(Duration::from_millis(500));
+    metrics::sleep_fixed(Duration::from_millis(500));
     let _ = child.kill();
     let _ = child.wait();
     Ok(read_lossy(&serial_log))
@@ -15581,7 +15594,7 @@ fn capture_boot_log(workspace_root: &Path, smp: Option<u32>, tag: &str) -> Resul
         if (beats >= 3 && shell_is_up) || Instant::now() >= deadline {
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -15859,7 +15872,7 @@ fn cmd_drift_test(minutes: u64, smp: Option<u32>) -> Result<()> {
         if child.try_wait().ok().flatten().is_some() {
             break;
         }
-        thread::sleep(Duration::from_secs(5));
+        metrics::sleep_fixed(Duration::from_secs(5));
     }
     let qemu_exit = child
         .try_wait()
@@ -16039,7 +16052,7 @@ fn cmd_marker_test(
         if Instant::now() >= deadline {
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
 
     // **kill する前に、既に終わっていないかを見る。** 自分から終了して
@@ -16251,7 +16264,7 @@ fn cmd_exception_test(kind: &str) -> Result<()> {
         if Instant::now() >= deadline {
             break false;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     };
 
     // **kill する前に、既に終わっていないかを見る。** 自分から終了して
@@ -18910,7 +18923,7 @@ fn capture_serial_for_calibration(run: usize) -> Result<String> {
         if Instant::now() >= deadline {
             break;
         }
-        thread::sleep(PANIC_TEST_POLL_INTERVAL);
+        metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -22415,6 +22428,13 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         kinds.join(" "),
         launch::runs_started()
     );
+    // **検査の時間の内訳の合計**（2026-09-24。7.(1)）。
+    println!(
+        "(info) cost totals: {}; qemu {} run(s) ({:.1}s)",
+        metrics::total_line(),
+        launch::runs_started(),
+        launch::runs_total_time().as_secs_f64()
+    );
 
     if failed.is_empty() {
         println!("xtask check: all {total} check(s) passed");
@@ -23320,12 +23340,19 @@ fn finish_item() {
         if !runs.is_empty() {
             let seconds: f64 = runs.iter().map(|run| run.elapsed.as_secs_f64()).sum();
             let largest = runs.iter().map(|run| run.largest_output).max().unwrap_or(0);
+            let deadlines = runs.iter().filter(|run| run.reached_deadline).count();
+            let cuts = runs.iter().filter(|run| run.cut.is_some()).count();
             println!(
-                "(info) item qemu: {} run(s), {seconds:.1}s, largest output {largest} byte(s) for \
-                 {label}",
+                "(info) item qemu: {} run(s), {seconds:.1}s, largest output {largest} byte(s), \
+                 {deadlines} reached the deadline, {cuts} cut, for {label}",
                 runs.len()
             );
         }
+        // **ビルド・像の準備・外の道具・待ちの回数と時間**（同じ計測）。
+        println!(
+            "(info) item cost: {} for {label}",
+            metrics::take_item_line()
+        );
     }
 }
 
@@ -23410,10 +23437,12 @@ struct KernelBuild {
 ///
 /// **失敗は検査装置の故障として包む**（`launch::classify`。2026-09-24）。
 fn run_kernel_build(workspace_root: &Path, features: &[&str]) -> Result<KernelBuild> {
-    launch::as_harness(
-        run_kernel_build_unwrapped(workspace_root, features),
-        "building the kernel",
-    )
+    metrics::timed(metrics::Kind::Build, || {
+        launch::as_harness(
+            run_kernel_build_unwrapped(workspace_root, features),
+            "building the kernel",
+        )
+    })
 }
 
 /// 本体（[`run_kernel_build`] が包む）。
@@ -23584,10 +23613,12 @@ fn stage_esp_with_disk(
     kernel: &KernelBuild,
     disk: DiskImage,
 ) -> Result<PathBuf> {
-    launch::as_harness(
-        stage_esp_with_disk_unwrapped(workspace_root, bootloader_efi, kernel, disk),
-        "staging the ESP",
-    )
+    metrics::timed(metrics::Kind::Stage, || {
+        launch::as_harness(
+            stage_esp_with_disk_unwrapped(workspace_root, bootloader_efi, kernel, disk),
+            "staging the ESP",
+        )
+    })
 }
 
 /// 本体（[`stage_esp_with_disk`] が包む）。
@@ -23709,11 +23740,35 @@ const PARSED_EXTERNAL_TOOLS: &[&str] = &[
 /// 数だけを見ていると黙って通る。**
 ///
 /// **付け忘れは静的検査が見る**（[`PARSED_EXTERNAL_TOOLS`]）。
-fn external_tool(name: &str) -> Command {
+fn external_tool(name: &str) -> ExternalTool {
     let mut command = Command::new(name);
     // **英語で出させる。** **解析しているのは見出しの語と数の並びである。**
     command.env("LC_ALL", "C");
-    command
+    ExternalTool(command)
+}
+
+/// 外の道具（[`external_tool`]）。**走らせた回数と時間を数える**（2026-09-24。検査の時間の計測）。
+/// **呼ぶ側が使う操作（`arg`・`env`・`output`）だけを持つ。**
+struct ExternalTool(Command);
+
+impl ExternalTool {
+    fn arg(&mut self, arg: impl AsRef<std::ffi::OsStr>) -> &mut Self {
+        self.0.arg(arg);
+        self
+    }
+
+    fn env(
+        &mut self,
+        key: impl AsRef<std::ffi::OsStr>,
+        value: impl AsRef<std::ffi::OsStr>,
+    ) -> &mut Self {
+        self.0.env(key, value);
+        self
+    }
+
+    fn output(&mut self) -> std::io::Result<std::process::Output> {
+        metrics::timed(metrics::Kind::Tool, || self.0.output())
+    }
 }
 
 fn workspace_root() -> Result<PathBuf> {
@@ -23730,10 +23785,12 @@ fn workspace_root() -> Result<PathBuf> {
 /// そのまま渡さず target/ovmf/ 配下に書き込み可能なコピーを用意する。
 /// **失敗は検査装置の故障として包む**（`launch::classify`。2026-09-24）。
 fn prepare_ovmf_vars(workspace_root: &Path) -> Result<PathBuf> {
-    launch::as_harness(
-        prepare_ovmf_vars_unwrapped(workspace_root),
-        "preparing the OVMF variables",
-    )
+    metrics::timed(metrics::Kind::Stage, || {
+        launch::as_harness(
+            prepare_ovmf_vars_unwrapped(workspace_root),
+            "preparing the OVMF variables",
+        )
+    })
 }
 
 /// 本体（[`prepare_ovmf_vars`] が包む）。
