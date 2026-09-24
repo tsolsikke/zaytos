@@ -3089,6 +3089,8 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
     let source_marker = "fs-image-source: root_filesystem reads from ";
     let deadline = Instant::now() + BOOT_READY_TIMEOUT;
     let mut copied_line = None;
+    let mut stop = StopWatch::default();
+    let mut stopped = None;
     while Instant::now() < deadline && !child.was_cut() {
         {
             let text = read_lossy(&serial_log);
@@ -3098,6 +3100,13 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
                     copied_line = Some(line.to_string());
                     break;
                 }
+            }
+            // **止まった印で待つのをやめる**（5.b。2026-09-25）。**起動の中の検査が止めると、
+            // 完了の行は出ない**——**以前は上限の 90 秒まで待っていた**（実測で、止まるのは
+            // 起こしてから 4 秒ほど）。
+            if let Some(sign) = stop.settled(stop_sign_in(&text, "")) {
+                stopped = Some(sign);
+                break;
             }
         }
         metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
@@ -3175,6 +3184,11 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
     {
         report_did_not_start(context, firmware_rip, qemu_exit.as_deref())?;
         bail!("{context}: the kernel did not start");
+    }
+
+    if let Some(sign) = stopped {
+        println!("{context}: the kernel stopped before the image was ready: {sign}");
+        return Err(anyhow::Error::new(StoppedEarly { sign, serial }));
     }
 
     let Some(line) = copied_line else {
@@ -3690,6 +3704,12 @@ const CREATE_KEEP_FEATURE: &str = "fs-create-keep-test";
 /// **`unlink-mark-unused` は `e2fsck` を通り抜ける。**
 /// `inode = 0` の枠を残す形は **ext2 として不整合ではない**ので、
 /// **往復のバイト一致だけが捕まえる**（S12-d の 4 つと同じ機序である）。
+///
+/// **2026-09-25 の実測で、3 つは名前の検査まで届いていない**（5.b）——**同じ起動の後の操作が
+/// 壊れた状態につまずき、起動が止まる。** `skip-inode-bit` と `keep-prev-rec-len` は後の
+/// `unlink` が、`unlink-mark-unused` は後の `mkdir` が止める。**判定は止まった理由の行で見る**
+/// （[`SABOTAGE_STOP_REASONS`]）。**名前の検査へ届く形に直すのは、SATA の段の設計の前である**
+/// （`docs/deferred-decisions.md`）。
 /// ディレクトリを作ったままにする構成の feature 名（DIR-1c）。**変種である。**
 const MKDIR_KEEP_FEATURE: &str = "fs-mkdir-keep-test";
 
@@ -4821,6 +4841,152 @@ impl StopWatch {
             self.seen.clone()
         } else {
             None
+        }
+    }
+}
+
+/// 破壊の回で、機械が止まった印を見て待つのをやめた（5.b。2026-09-25）。
+///
+/// **判定の側（[`judge_sabotage`]）が、狙った理由の行がシリアルに在るかを見る**ので、
+/// **止まった時点のシリアルを持って返す。**
+#[derive(Debug)]
+struct StoppedEarly {
+    sign: String,
+    serial: String,
+}
+
+impl std::fmt::Display for StoppedEarly {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the machine stopped before the test finished: {}",
+            self.sign
+        )
+    }
+}
+
+impl std::error::Error for StoppedEarly {}
+
+/// 止まることで捕まる破壊と、狙った理由の行（5.b。2026-09-25。運用者の決定）。
+///
+/// **この表に載る破壊は、「どの誤りでも捕まえた」とは数えない。** **止まった印（[`StopWatch`]）で
+/// 待つのをやめ、シリアルに `reason` が在るときだけ捕まえたとする。** **止まらずに別の形で
+/// 落ちた、または別の理由で止まったなら落とす**（[`judge_sabotage`]）。
+///
+/// **`note` は、狙いが名前の検査に届いているかを書き、判定の行に出す。** **fs の 3 つは、
+/// 同じ起動の後の操作でつまずいて止まり、名前の検査（空き数の突き合わせ・`e2fsck`）には
+/// 届いていない**（`docs/deferred-decisions.md` の持ち越しの行。契機は SATA の段の設計）。
+struct StopReason {
+    feature: &'static str,
+    reason: &'static str,
+    note: &'static str,
+}
+
+const SABOTAGE_STOP_REASONS: &[StopReason] = &[
+    StopReason {
+        feature: "ext2-create-skip-inode-bit-test",
+        reason: "fs-create: could not unlink: NotADirectory",
+        note: "downstream: mkdir hands out the same inode again and unlink trips over it; \
+               the free counts and e2fsck are not reached",
+    },
+    StopReason {
+        feature: "ext2-create-keep-prev-rec-len-test",
+        reason: "fs-create: could not unlink: NoSuchEntry",
+        note: "downstream: the directory walk loses the new entry and unlink cannot find it; \
+               e2fsck is not reached",
+    },
+    StopReason {
+        feature: "ext2-unlink-mark-unused-test",
+        reason: "fs-mkdir: could not create: NoRoomInDirectory",
+        note: "downstream: the slot left behind fills the directory and the next mkdir fails; \
+               e2fsck is not reached",
+    },
+    StopReason {
+        feature: "ext2-rmdir-ignore-nonempty-test",
+        reason: "fs-mkdir: rmdir removed a directory that was not empty",
+        note: "the kernel's own check, as intended",
+    },
+    StopReason {
+        feature: "virtio-load-skip-first-test",
+        reason: "ext2: the image on the device did not parse: BadMagic",
+        note: "the parse stops the boot before the byte-for-byte check can run",
+    },
+];
+
+/// 破壊の回の判定（5.b。2026-09-25）。
+enum SabotageVerdict {
+    /// 通ってしまった。
+    NotCaught,
+    /// 狙った理由の行で止まった（[`SABOTAGE_STOP_REASONS`] に載る破壊）。
+    CaughtForTheReason { sign: String, note: &'static str },
+    /// どの誤りでも捕まえたとする（表に載らない破壊。理由を見ていない）。
+    CaughtByAnyError,
+    /// 止まったが、狙った理由の行が無い。
+    StoppedForAnotherReason { sign: String },
+    /// 止まらずに、別の形で落ちた。
+    DidNotStop { error: String },
+}
+
+/// 破壊の回の結果を分ける（5.b。2026-09-25）。**表に載る破壊だけ、狙った理由を見る。**
+fn judge_sabotage(features: &[&str], result: &Result<()>) -> SabotageVerdict {
+    let reason = features.iter().find_map(|feature| {
+        SABOTAGE_STOP_REASONS
+            .iter()
+            .find(|reason| reason.feature == *feature)
+    });
+    match (result, reason) {
+        (Ok(()), _) => SabotageVerdict::NotCaught,
+        (Err(_), None) => SabotageVerdict::CaughtByAnyError,
+        (Err(error), Some(reason)) => match error.downcast_ref::<StoppedEarly>() {
+            Some(stop) if strip_ansi(&stop.serial).contains(reason.reason) => {
+                SabotageVerdict::CaughtForTheReason {
+                    sign: stop.sign.clone(),
+                    note: reason.note,
+                }
+            }
+            Some(stop) => SabotageVerdict::StoppedForAnotherReason {
+                sign: stop.sign.clone(),
+            },
+            None => SabotageVerdict::DidNotStop {
+                error: format!("{error:#}"),
+            },
+        },
+    }
+}
+
+/// 破壊の回の判定を 1 行にして出す（5.b。2026-09-25）。**落ちたら `failed` へ積む。**
+fn report_sabotage_verdict(
+    family: &str,
+    label: &str,
+    features: &[&str],
+    result: &Result<()>,
+    failed: &mut Failures,
+) {
+    let name = format!("{family} ({label})");
+    match judge_sabotage(features, result) {
+        SabotageVerdict::NotCaught => {
+            println!("--- {name}: FAILED (the sabotage was NOT caught)");
+            failed.push(name);
+        }
+        SabotageVerdict::CaughtForTheReason { sign, note } => {
+            println!(
+                "--- {name}: OK (the sabotage was caught for the intended reason: {sign}; {note})"
+            )
+        }
+        SabotageVerdict::CaughtByAnyError => {
+            println!("--- {name}: OK (the sabotage was caught)")
+        }
+        SabotageVerdict::StoppedForAnotherReason { sign } => {
+            println!(
+                "--- {name}: FAILED (the machine stopped, but not for the intended reason: {sign})"
+            );
+            failed.push(name);
+        }
+        SabotageVerdict::DidNotStop { error } => {
+            println!(
+                "--- {name}: FAILED (the intended stop never came; the run failed otherwise: {error})"
+            );
+            failed.push(name);
         }
     }
 }
@@ -11690,6 +11856,9 @@ fn image_checksum(bytes: &[u8]) -> u32 {
 }
 
 /// 像のロードの破壊の一覧（S13-c）。
+///
+/// **先頭の欠けは、バイト一致の判定より前に、カーネルの ext2 の解析が `BadMagic` で起動を止める**
+/// （2026-09-25 の実測。5.b）。**判定は止まった理由の行で見る**（[`SABOTAGE_STOP_REASONS`]）。
 const FS_LOAD_SABOTAGES: &[(&str, &str)] = &[
     // **`fs-load-from-embedded-test` は P-e で消した。** **埋め込み像を外したので、
     // 装置以外の源が無い**——**戻す先が無い**（`ADR-0034` の Addendum）。
@@ -21731,13 +21900,8 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for (label, features) in FS_CREATE_SABOTAGES {
             total += 1;
             begin_item(&format!("the fs create check catches {label}"));
-            match cmd_fs_image_extract(features) {
-                Ok(()) => {
-                    println!("--- fs create ({label}): FAILED (the sabotage was NOT caught)");
-                    failed.push(format!("fs create ({label})"));
-                }
-                Err(_) => println!("--- fs create ({label}): OK (the sabotage was caught)"),
-            }
+            let result = cmd_fs_image_extract(features);
+            report_sabotage_verdict("fs create", label, features, &result, &mut failed);
         }
 
         // **ディレクトリの作成と削除（DIR-1c）。**
@@ -21754,13 +21918,8 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for (label, features) in FS_MKDIR_SABOTAGES {
             total += 1;
             begin_item(&format!("the fs mkdir check catches {label}"));
-            match cmd_fs_image_extract(features) {
-                Ok(()) => {
-                    println!("--- fs mkdir ({label}): FAILED (the sabotage was NOT caught)");
-                    failed.push(format!("fs mkdir ({label})"));
-                }
-                Err(_) => println!("--- fs mkdir ({label}): OK (the sabotage was caught)"),
-            }
+            let result = cmd_fs_image_extract(features);
+            report_sabotage_verdict("fs mkdir", label, features, &result, &mut failed);
         }
 
         for (label, features) in FS_TRUNCATE_SABOTAGES {
@@ -21890,18 +22049,15 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }
         }
 
-        // **像のロードの破壊（S13-c）。** どちらも fs extract の判定が捕まえる
-        // ——取り違えは blockstats の下限、先頭の欠けはバイト一致である。
+        // **像のロードの破壊（S13-c）。** **先頭の欠けは、バイト一致の判定より前に、カーネルの
+        // ext2 の解析が `BadMagic` で起動を止める**（2026-09-25 の実測。5.b）。**名前の検査
+        // （バイト一致）には届いていない**——`docs/verification-coverage.md` の「置けない破壊の一覧」。
+        // **判定は止まった理由の行で見る**（[`SABOTAGE_STOP_REASONS`]）。
         for (label, feature) in FS_LOAD_SABOTAGES {
             total += 1;
             begin_item(&format!("the fs image load catches {label}"));
-            match cmd_fs_image_extract(&[feature]) {
-                Ok(()) => {
-                    println!("--- fs image load ({label}): FAILED (the sabotage was NOT caught)");
-                    failed.push(format!("fs image load ({label})"));
-                }
-                Err(_) => println!("--- fs image load ({label}): OK (the sabotage was caught)"),
-            }
+            let result = cmd_fs_image_extract(&[feature]);
+            report_sabotage_verdict("fs image load", label, &[feature], &result, &mut failed);
         }
 
         // **書き戻し（flush）の破壊（S13-e）。** keep 変種と組む——最終形が
@@ -24229,6 +24385,65 @@ mod tests {
             stop_sign_in("\x1b[31m[ERROR] halting (cli + hlt loop)\x1b[0m\n", ""),
             Some("[ERROR] halting (cli + hlt loop)".to_string())
         );
+    }
+
+    /// **表に載る破壊は、狙った理由の行で止まったときだけ捕まえたとする**（5.b。2026-09-25）。
+    /// **別の理由で止まった・止まらずに落ちた・通った、の 3 つは落とす。** **表に載らない破壊は
+    /// いままでどおり、どの誤りでも捕まえたとする。** **文脈を足した誤りからも止まりを読む。**
+    #[test]
+    fn a_listed_sabotage_counts_only_when_it_stops_for_the_intended_reason() {
+        let stopped = |serial: &str| -> Result<()> {
+            Err(anyhow::Error::new(StoppedEarly {
+                sign: "[ERROR] x; halting".to_string(),
+                serial: serial.to_string(),
+            }))
+        };
+        let rmdir = ["ext2-rmdir-ignore-nonempty-test"];
+        let intended = "[ERROR] fs-mkdir: rmdir removed a directory that was not empty; halting\n";
+        assert!(matches!(
+            judge_sabotage(&rmdir, &stopped(intended)),
+            SabotageVerdict::CaughtForTheReason { .. }
+        ));
+        assert!(matches!(
+            judge_sabotage(
+                &rmdir,
+                &stopped("[ERROR] fs-create: could not unlink: NoSuchEntry; halting\n")
+            ),
+            SabotageVerdict::StoppedForAnotherReason { .. }
+        ));
+        assert!(matches!(
+            judge_sabotage(&rmdir, &Err(anyhow::anyhow!("e2fsck complained"))),
+            SabotageVerdict::DidNotStop { .. }
+        ));
+        assert!(matches!(
+            judge_sabotage(&rmdir, &Ok(())),
+            SabotageVerdict::NotCaught
+        ));
+        assert!(matches!(
+            judge_sabotage(
+                &["fs-create-keep-test", "ext2-create-skip-links-test"],
+                &Err(anyhow::anyhow!("any"))
+            ),
+            SabotageVerdict::CaughtByAnyError
+        ));
+        assert!(matches!(
+            judge_sabotage(&rmdir, &stopped(intended).context("fs-extract")),
+            SabotageVerdict::CaughtForTheReason { .. }
+        ));
+    }
+
+    /// **狙った理由の表に載る名前は、カーネルの feature として実在する**（5.b）——**名前を
+    /// 取り違えた行は 1 度も当たらず、その破壊を黙って「どの誤りでも」へ戻す。**
+    #[test]
+    fn every_stop_reason_names_a_kernel_feature() {
+        let manifest = include_str!("../../kernel/Cargo.toml");
+        for reason in SABOTAGE_STOP_REASONS {
+            assert!(
+                manifest.contains(&format!("\n{} = ", reason.feature)),
+                "{} is not a kernel feature",
+                reason.feature
+            );
+        }
     }
 
     /// **止まった印は 2 周続けて見てから抜ける**（5.b）——**1 周目は同じ書き込みの続きを待つ。**
