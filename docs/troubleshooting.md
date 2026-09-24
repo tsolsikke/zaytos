@@ -1349,6 +1349,20 @@ checksumが1行と、`.rodata`が縮んだぶんのPT_LOADが4行**（`/bin/ls`�
 **塞いだ**（2026-09-19。運用者の指示——**`;`で繋いで先へ進む形は3度目で、行末の`&`とコミットと`push`の連結は機械にしたのに、これだけ規律に残っていた**）。**走行の側で拒む**——**`.claude/hooks/deny_dangerous_bash.py`が、`;`か改行の直後の`cargo`／`git commit`／`git push`（`timeout`付きも）を拒む。** **編集の側では塞げない**——**編集の形は列挙できない**（Pythonのheredoc・`sed -i`・リダイレクト・……）。**`&&`の後の改行と`do`/`then`/`else`の後の改行は区切りではないので、先に畳む。** **判定表は35件になった。** **実際に打って確かめた**——**`true; cargo --version`と改行の形は拒まれ、`true && cargo --version`は通った。** **検出の側も足した**——**`--shell-test`の破壊の分け方（`sendkey`10本／台本10本）を基底で数える**（`xtask`の`EXPECTED_SHELL_SABOTAGE_SPLIT`。**移していない木なら、コミット直後のhookの基底で落ちる**——**定数を9にして落ちるのを見てから戻した**）。**限界**——**定数と一覧を同じ編集で書けば、両方が落ちたときに合ってしまう。** **定数は一覧から離して置き、別の編集で先に上げること。**
 
 
+## 2026-09-24: `prlimit --core=0`では、WSLのコアの捕まえ手を止められない——`core_pattern`がパイプだった（ホストの保護）
+
+**QEMUの書く側に`prlimit --fsize`で上限を掛ける設計で、レビューは「越えるとSIGXFSZで止まり、コアを吐く。`--core=0`で起こすこと」を足した。** **実測すると、WSLの`core_pattern`は`|/wsl-capture-crash %t %E %p %s`（パイプ）だった。** **Linuxの`fs/coredump.c`は「Normally core limits are irrelevant to pipes」と書き、RLIMIT_COREが0でもパイプの捕まえ手を起こす**（1だけが特別な値）。**Windows側の`%TEMP%\wsl-crashes`には、既に3つ（46 MiB。2026-09-21）のダンプが在った。** **QEMUのコアにはゲストのメモリが入りうるので、`--core=0`だけでは、上限でディスクを守る仕組みがWindowsのディスクを埋めうる。**
+
+**SIGXFSZを無視して起こす形にした**（`trap '' XFSZ`の後で`exec`。無視は`exec`を越えて引き継がれる）——**越える書き込みはEFBIGで失敗するだけで、QEMUは落ちない。** **見張りの糸が上限に着いたことを見つけ、SIGKILL（コアを吐かない）で組ごと止める。** **`--full`の項目で、SIGKILLで終わること・コアが無いこと・`/proc/<pid>/status`のSigIgnにSIGXFSZが在ること・WSLのダンプが増えないことを見る。**
+
+**一般の形**——**コアの上限は、`core_pattern`がファイルのときにしか効かない。** **止め方でコアを吐かせないこと。**
+
+## 2026-09-24: 手で使う`--calibration-spread`が、HW-cの後ずっと何も採れていなかった
+
+**起動の口への移し替えで代表を回したら、`--calibration-spread 1`が「no calibration result was captured」で落ちた。** **移し替えとは関係なく、HW-c（`ca5920f`）でカーネルの行が`apic: LAPIC timer calibration against the PIT: …`に変わってから、道具が待つ`apic: LAPIC timer calibration:`と合わなくなっていた。** **検査の項目ではないので、`--full`では見えなかった。** 待つ行と読む行の2か所を`calibration against`に直した（`fe52738`）。
+
+**一般の形**——**行の文言を変えたら、その行を待つ道具を`grep`する**——**検査の項目でない道具は、壊れても誰も気づかない。**
+
 ## 2026-09-24: 機械チェックの注入の判定で2つ踏んだ——monitorへ書いた直後に閉じると命令が捨てられ、shutdownの行は小文字だった（`ADR-0018`のAddendum 9）
 
 **MCEを「1であるべき」に入れるときに、QEMUのmonitorから機械チェックを注入する判定と破壊を置いた**（レビューの(3)）。**`xtask`の側で2つ踏んだ。**
