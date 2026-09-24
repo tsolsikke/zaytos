@@ -18810,7 +18810,7 @@ fn cmd_calibration_spread(runs: usize) -> Result<()> {
         let serial = capture_serial_for_calibration(run)?;
         let mut found = false;
         for line in serial.lines() {
-            if line.contains("apic: LAPIC timer calibration:") {
+            if line.contains("apic: LAPIC timer calibration against") {
                 println!("run {run}: {}", line.trim());
                 if let Some(median) = parse_labelled_number(line, "median=") {
                     medians.push(median);
@@ -18904,7 +18904,7 @@ fn capture_serial_for_calibration(run: usize) -> Result<String> {
         if child.was_cut() {
             break;
         }
-        if read_lossy(&serial_log).contains("apic: LAPIC timer calibration:") {
+        if read_lossy(&serial_log).contains("apic: LAPIC timer calibration against") {
             break;
         }
         if Instant::now() >= deadline {
