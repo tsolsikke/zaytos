@@ -1582,7 +1582,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 fn main() -> Result<()> {
     const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask full [<commit>] | --status   (全検査を target/full-check/wt で回す。検査の体系の改善の ③)\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gtk] [--gfx-test] [--kvm] [--no-limit] [--manual] [--key-probe] [--keep-disk | --rebuild-disk]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
        cargo xtask run --shell-test [--drop-arrows | --drop-esc]\n       cargo xtask run --ansi-test [--sabotage FEATURE]\n       cargo xtask run --zi-test [--sabotage FEATURE]\n       cargo xtask run --view-test [--sabotage FEATURE]
-       cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
+       cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --boot-marker-sabotage FEATURE   (起動の判定行の値で捕まる破壊を 1 つ回す)\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
        cargo xtask run --persist-test [--rebuild-between]
        cargo xtask run --persist-zi-test [--rebuild-between]
        cargo xtask run --persist-env-test [--rebuild-between]
@@ -1719,6 +1719,12 @@ fn main() -> Result<()> {
                     ACPI_SMP_TESTS[0].name,
                     Some(2),
                 );
+            }
+            if let Some(index) = rest.iter().position(|a| a == "--boot-marker-sabotage") {
+                let Some(feature) = rest.get(index + 1) else {
+                    bail!("--boot-marker-sabotage needs a feature\n\n{USAGE}");
+                };
+                return cmd_boot_marker_sabotage(feature);
             }
             if rest.iter().any(|a| a == "--fs-extract") {
                 let features: Vec<&str> = rest
@@ -4676,6 +4682,26 @@ fn cmd_ansi_test(features: &[&str]) -> Result<()> {
     }
 }
 
+/// 起動の判定行の値で捕まる破壊（`feature`, 目印, 期待する値。ADR-0038・ADR-0039）。
+///
+/// **既定の起動ログがその判定行を固定しているので、破壊は行の値が変わる形で出る。** **全検査と
+/// `cargo xtask run --boot-marker-sabotage FEATURE` が同じ表を読む**（2026-09-26。1 つずつ回せるように）。
+const BOOT_MARKER_SABOTAGES: [(&str, &str, &str); 2] = [
+    ("ext2-sparse-as-error-test", "fs-sparse", "= true"),
+    ("user-load-filesz-only", "bss-check", "Exited(0)"),
+];
+
+/// 起動の判定行の値で捕まる破壊を 1 つ回す（[`BOOT_MARKER_SABOTAGES`]）。
+fn cmd_boot_marker_sabotage(feature: &str) -> Result<()> {
+    let Some((_, marker, wanted)) = BOOT_MARKER_SABOTAGES
+        .iter()
+        .find(|(listed, _, _)| *listed == feature)
+    else {
+        bail!("{feature} is not in BOOT_MARKER_SABOTAGES");
+    };
+    cmd_boot_with_features(&[feature], marker, wanted)
+}
+
 /// 指定の feature で起動し、シリアルに目印が出ることを見る（ADR-0038）。
 ///
 /// **判定行そのものを見る形である。** 破壊の側では目印が出ないので `Err` になる。
@@ -4733,7 +4759,13 @@ fn cmd_boot_with_features(features: &[&str], marker: &str, wanted: &str) -> Resu
     let held = serial
         .lines()
         .any(|line| line.contains(marker) && line.contains(wanted));
-    println!("{context}: {marker} says {wanted} = {held}");
+    // **見つけた行を添える**（2026-09-26。族にまとめる段）——**目印の行が出て値だけが違ったのか、
+    // 行そのものが出なかったのか（起動が届かなかった）を分ける。**
+    let found = match serial.lines().find(|line| line.contains(marker)) {
+        Some(line) => format!("the line: {:?}", strip_ansi(line.trim())),
+        None => "no line carries the marker".to_string(),
+    };
+    println!("{context}: {marker} says {wanted} = {held} ({found})");
     if held {
         Ok(())
     } else {
@@ -5163,6 +5195,191 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
     NamedJudgement {
         key: "persist-zi-test rebuild-between",
         signs: &["boot 2's Ring 3 printed what the device carries = false"],
+        note: "",
+    },
+    // ── fs（切り詰め 6・書き込み 6・ビットマップ 4・作成 4・mkdir 3・取り出し 2・書き戻し 2・永続 1・疎な読み 1） ──
+    NamedJudgement {
+        key: "persist-test rebuild-between",
+        signs: &["boot 2 sees the change boot 1 made = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "fs-copy-corrupt-tail-test",
+        signs: &["the extracted image matches the built image byte for byte = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-group-count-offset-test",
+        signs: &["the free counts match dumpe2fs = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-create-skip-links-test",
+        signs: &[
+            "e2fsck found nothing to complain about = false",
+            "has deleted/unused inode",
+        ],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-create-skip-inode-count-test",
+        signs: &[
+            "e2fsck found nothing to complain about = false",
+            "Free inodes count wrong",
+        ],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-create-move-dirs-count-test",
+        signs: &[
+            "e2fsck found nothing to complain about = false",
+            "Directories count wrong",
+        ],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-create-skip-extra-isize-test",
+        signs: &["the new inode names the extra area the way the image asks = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-mkdir-skip-dot-dot-test",
+        signs: &[
+            "e2fsck found nothing to complain about = false",
+            "'..' in /data/made",
+        ],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-mkdir-skip-parent-link-test",
+        signs: &[
+            "e2fsck found nothing to complain about = false",
+            "ref count is",
+        ],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-mkdir-skip-dirs-count-test",
+        signs: &[
+            "e2fsck found nothing to complain about = false",
+            "Directories count wrong",
+        ],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-truncate-off-by-one-test",
+        signs: &["the extracted image matches the built image byte for byte = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-truncate-always-free-test",
+        signs: &["the extracted image matches the built image byte for byte = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-truncate-keep-slot-test",
+        signs: &["the extracted image matches the built image byte for byte = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-truncate-skip-free-test",
+        signs: &["the extracted image matches the built image byte for byte = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-truncate-keep-tail-test",
+        signs: &["the extracted image matches the built image byte for byte = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-truncate-skip-blocks-test",
+        signs: &["the extracted image matches the built image byte for byte = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-append-skip-size-test",
+        signs: &[
+            "e2fsck found nothing to complain about = false",
+            "i_size is",
+        ],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-append-round-size-test",
+        signs: &["the appended bytes read back exactly = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-append-skip-blocks-test",
+        signs: &[
+            "e2fsck found nothing to complain about = false",
+            "i_blocks is",
+        ],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-append-blocks-in-bytes-test",
+        signs: &[
+            "e2fsck found nothing to complain about = false",
+            "i_blocks is",
+        ],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-append-skip-link-test",
+        signs: &[
+            "e2fsck found nothing to complain about = false",
+            "Block bitmap differences",
+        ],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-append-always-allocate-test",
+        signs: &["the free blocks dropped by exactly one across both appends = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-alloc-skip-sb-count-test",
+        signs: &[
+            "e2fsck complains exactly once, about the bitmap = false",
+            "Free blocks count wrong (",
+        ],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-alloc-skip-bg-count-test",
+        signs: &[
+            "e2fsck complains exactly once, about the bitmap = false",
+            "Free blocks count wrong for group",
+        ],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-alloc-ignore-bitmap-test",
+        signs: &["e2fsck complains exactly once, about the bitmap = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-free-skip-bit-test",
+        signs: &["the extracted image matches the built image byte for byte = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "fs-flush-skip-test",
+        signs: &["at least the whole image went to the device = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "virtio-flush-short-test",
+        signs: &["at least the whole image went to the device = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ext2-sparse-as-error-test",
+        signs: &[
+            "fs-sparse says = true = false",
+            "reads block 1 as a full block of zeros = false",
+        ],
         note: "",
     },
 ];
@@ -22436,7 +22653,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             Family::Fs,
             "refusing holes breaks the sparse read and the corrupt-fs probe",
         );
-        let result = cmd_boot_with_features(&["ext2-sparse-as-error-test"], "fs-sparse", "= true");
+        let result = cmd_boot_marker_sabotage("ext2-sparse-as-error-test");
         report_sabotage_verdict(
             "sparse read",
             "refused",
@@ -22450,7 +22667,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // `Exited(0)` でなくなる形で出る**（実測では `Folded(14)`＝#PF）。
         total += 1;
         begin_item(Family::Process, "mapping segments by filesz drops the .bss");
-        let result = cmd_boot_with_features(&["user-load-filesz-only"], "bss-check", "Exited(0)");
+        let result = cmd_boot_marker_sabotage("user-load-filesz-only");
         report_sabotage_verdict(
             "bss mapping",
             "filesz only",
@@ -25726,9 +25943,11 @@ mod tests {
             judge_sabotage(&rmdir, &Ok(())),
             SabotageVerdict::NotCaught
         ));
+        // **どの表にも載らない破壊**（2026-09-26 に例を差し替えた。**以前の例の
+        // `ext2-create-skip-links-test` は、名前の判定の表へ移った**）。
         assert!(matches!(
             judge_sabotage(
-                &["fs-create-keep-test", "ext2-create-skip-links-test"],
+                &["fs-create-keep-test", "zz-unlisted-sabotage-test"],
                 &Err(anyhow::anyhow!("any"))
             ),
             SabotageVerdict::CaughtByAnyError
