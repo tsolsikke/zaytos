@@ -1112,8 +1112,19 @@ mod tests {
         held.try_lock().unwrap();
         let mut child = Command::new("sleep").arg("5").spawn().unwrap();
         drop(held);
+        // **ほかのテストの糸が子を起こす途中（fork の後、exec の前）は、その子が fd の写しを持つ**
+        // （2026-09-26。並べて回すと 30 回に 5 回落ち、糸 1 本では 30 回とも通った）。**写しは exec で
+        // 閉じるので、2 秒まで取り直す**——**継がれていれば、`sleep` の 5 秒のあいだ取れない。**
         let again = open(&path).unwrap();
-        let taken = again.try_lock();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let taken = loop {
+            match again.try_lock() {
+                Err(TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                other => break other,
+            }
+        };
         let _ = child.kill();
         let _ = child.wait();
         assert!(taken.is_ok(), "a child kept the lock: {taken:?}");
