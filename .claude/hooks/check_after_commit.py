@@ -54,6 +54,14 @@ stdout に出していたが、`exit 0` の stdout は読み手に届かない**
 **環境変数を前に置いたコミットも見る**（`X=1 git commit`。2026-09-25 に見つけた穴）。
 
 
+# 検査の後に、族の選びを出す（2026-09-26。選ぶのを表示する段。運用者の回答）
+
+**`cargo xtask full --select` を呼び、HEAD の選びを出す**——**最後の緑の全検査からの累積と、このコミット
+だけの 2 つ**（比較元・対象・選んだ理由・全部へ倒した理由）。**錠を取らず、QEMU を起こさない。**
+**回し方は変えない**（表示だけ。`ADR-0069` の決定 7 の 2）。**出せなければ「出せなかった」と言う**
+（黙らない）。**選びは `target/full-check/selections.tsv` に 1 度だけ残る**（当たりを後から数える材料）。
+
+
 **全部拒むようになったときの抜け方は `docs/coding-standards.md` の
 「hookが全部拒むようになったときの抜け方」にある。** **ここに写さない。**
 """
@@ -89,6 +97,38 @@ IMAGE_PATH_PREFIXES = ("kernel/", "common/")
 
 REFUSED_EXIT_CODE = 75
 """検査の錠が取れずに `xtask` が断ったときの終了の値（`xtask/src/check_lock.rs`）。"""
+
+SELECT_TIMEOUT_SECONDS = 30
+"""族の選び（`cargo xtask full --select`）の上限（秒）。**git と表と記録を読むだけなので 1 秒かからない。**"""
+
+
+def selection_from(returncode: int | None, stdout: str, stderr: str) -> list[str]:
+    """`cargo xtask full --select` の結果から出す行。**引数だけで決める**（`--self-test` が覆う）。
+
+    **出せなければ「出せなかった」と言う**——**黙ると、選びが無いのか hook が動いていないのかが分からない。**
+    """
+    if returncode is None:
+        return [f"族の選び: 出せなかった（{stderr.strip() or '走らせられなかった'}）"]
+    if returncode != 0:
+        reasons = [line for line in stderr.splitlines() if line.startswith("Error:")]
+        return [f"族の選び: 出せなかった（{reasons[-1] if reasons else f'exit {returncode}'}）"]
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    return lines if lines else ["族の選び: 出せなかった（出力が空）"]
+
+
+def selection_lines(root: str) -> list[str]:
+    """HEAD の族の選び（`cargo xtask full --select`）。**錠を取らず、QEMU を起こさない。**"""
+    try:
+        done = subprocess.run(
+            ["cargo", "xtask", "full", "--select"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=SELECT_TIMEOUT_SECONDS,
+        )
+    except Exception as error:
+        return selection_from(None, "", str(error))
+    return selection_from(done.returncode, done.stdout, done.stderr)
 
 
 def looks_like_a_commit(command: str) -> bool:
@@ -239,17 +279,20 @@ def main() -> int:
         return 2
     seconds = time.monotonic() - started
     # **錠で断られた回は、緑にも赤にも数えない**——**走らせなかったと言う**（この doc の 2026-09-25）。
+    selection = selection_lines(root)
     if done.returncode == REFUSED_EXIT_CODE:
         print(refused_notice(label, done.stderr), file=sys.stderr)
         if notice is not None:
             print(notice, file=sys.stderr)
+        print("\n".join(selection), file=sys.stderr)
         return 2
     if done.returncode == 0:
         summary = [l for l in done.stdout.splitlines() if "check(s) passed" in l]
         text = (
             f"post-commit check（{label}）: "
             + (summary[-1] if summary else "OK")
-            + f"（{seconds:.0f} 秒）"
+            + f"（{seconds:.0f} 秒）\n"
+            + "\n".join(selection)
         )
         if notice is not None:
             # **通ったが、落とした事実は言って終える。** **`exit 2` の stderr が読み手に
@@ -279,6 +322,7 @@ def main() -> int:
         print("  " + line.rstrip(), file=sys.stderr)
     if notice is not None:
         print(notice, file=sys.stderr)
+    print("\n".join(selection), file=sys.stderr)
     return 2
 
 
@@ -373,18 +417,32 @@ def self_test() -> int:
     if "--commit" in refused_notice("基底", ""):
         print("self-test: refused_notice for the base check names --commit")
         failures += 1
+    # **族の選びの行**（2026-09-26）。**出せたらそのまま、出せなければ「出せなかった」と言う。**
+    selection_cases = [
+        ((0, "selection for abc\n  families selected: none (nothing changed)\n", ""), 2, None),
+        ((1, "", "Error: git failed\n"), 1, "Error: git failed"),
+        ((None, "", "timed out"), 1, "timed out"),
+        ((0, "\n", ""), 1, "出力が空"),
+    ]
+    for (returncode, stdout, stderr), want_lines, want_text in selection_cases:
+        got = selection_from(returncode, stdout, stderr)
+        if len(got) != want_lines or (want_text is not None and want_text not in got[0]):
+            print(f"self-test: selection_from({returncode!r}, ...) gave {got!r}")
+            failures += 1
     # **harness の上限が内部の上限より長いこと**（2026-09-21）。**短いと、`--commit` の
-    # 途中で harness が切り、何も言わずに消える。**
+    # 途中で harness が切り、何も言わずに消える。** **選びの上限も足して比べる**（2026-09-26）。
     harness = registered_timeout("check_after_commit.py")
-    if harness is None or harness <= COMMIT_CHECK_TIMEOUT_SECONDS:
+    inner = COMMIT_CHECK_TIMEOUT_SECONDS + SELECT_TIMEOUT_SECONDS
+    if harness is None or harness <= inner:
         print(
             f"self-test: settings.json gives this hook {harness} s, which must be longer than "
-            f"its own --commit limit of {COMMIT_CHECK_TIMEOUT_SECONDS} s"
+            f"its own limits of {inner} s (--commit {COMMIT_CHECK_TIMEOUT_SECONDS} s and the "
+            f"selection {SELECT_TIMEOUT_SECONDS} s)"
         )
         failures += 1
     if failures:
         return 1
-    total = len(cases) + len(path_cases) + len(decide_cases) + 5
+    total = len(cases) + len(path_cases) + len(decide_cases) + len(selection_cases) + 5
     print(f"self-test: {total} case(s) decided as expected")
     return 0
 
