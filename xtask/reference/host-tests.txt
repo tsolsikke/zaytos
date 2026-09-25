@@ -686,7 +686,11 @@ xtask::launch::tests::a_harness_fault_survives_added_context
 xtask::launch::tests::a_normal_deadline_never_reaches_timeout
 xtask::launch::tests::df_avail_is_read_from_the_last_line
 xtask::launch::tests::the_file_limit_exceeds_every_other_write
+xtask::launch::tests::the_host_floor_is_judged_in_four_ways
+xtask::launch::tests::the_registry_names_each_distribution_and_its_base_path
+xtask::launch::tests::the_watched_drive_is_matched_against_the_registry
 xtask::launch::tests::the_wrapper_ignores_sigxfsz_before_exec
+xtask::launch::tests::wsl_is_told_from_the_kernel_release
 xtask::media::tests::a_broken_gpt_crc_is_caught
 xtask::media::tests::a_chain_without_an_end_is_caught
 xtask::media::tests::a_sixty_four_mib_partition_with_one_kib_clusters_is_refused

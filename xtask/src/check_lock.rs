@@ -977,7 +977,7 @@ fn try_in_python(tool: &Path, lock: &Path, named: Option<u32>) -> Result<(Option
 
 /// 子を走らせ、上限つきで終わりを待つ（`CLAUDE.md` の「シェルコマンドの制約」）。**上限を過ぎたら止めて
 /// 誤りにする。** 出力は小さいものだけに使う。
-fn output_within(command: &mut Command, limit: Duration) -> Result<std::process::Output> {
+pub fn output_within(command: &mut Command, limit: Duration) -> Result<std::process::Output> {
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

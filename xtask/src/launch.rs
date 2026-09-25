@@ -55,6 +55,29 @@ pub const FILE_LIMIT_BYTES: u64 = 4 << 30;
 /// 置き場の空きの下限（運用者の承認。2026-09-24）。
 pub const DISK_FLOOR_BYTES: u64 = 20 << 30;
 
+/// **VHD（WSL の置き場）が載っている Windows のドライブ**（WSL の中の道。運用者の決定。2026-09-25）。
+///
+/// **起動の口の空きの下限は、WSL の中とこのドライブの両方で見る**——**VHD は動的に伸びるので、WSL の中に
+/// 空きが在っても、ホストのドライブが先に埋まりうる**（2026-09-25 に C: が 98% だった。`docs/troubleshooting.md`）。
+/// **drvfs の `df` は Windows の値とバイトの単位で一致した**（実測。`Get-PSDrive` の Free と比べた）。
+///
+/// **VHD を動かしたら、ここだけを直す。** **定数を正とし、実物との食い違いだけを基底の確かめが捕まえる**
+/// （[`check_vhd_drive`]。レジストリの `BasePath` のドライブと比べる）——**自動で追いかける形より単純で、
+/// 黙って変わらない。** 2026-09-25 に C: から D: へ移した。
+pub const HOST_VHD_DRIVE: &str = "/mnt/d";
+
+/// **Windows そのもののドライブ**（計器だけ。止めない）。
+pub const HOST_SYSTEM_DRIVE: &str = "/mnt/c";
+
+/// ホストのドライブ（[`HOST_VHD_DRIVE`]）の空きの下限（運用者の決定。2026-09-25）。**30 GiB は損の非対称
+/// による**——**下限で断られる損は走行を後にするだけだが、ドライブが本当に埋まると VHD が伸びられず、WSL の中の
+/// ファイルシステムが書き込みの失敗を受けて壊れうる**（一般論）。**D: は VirtualBox の VM とバックアップとも
+/// 共有である。**
+pub const HOST_DISK_FLOOR_BYTES: u64 = 30 << 30;
+
+/// WSL の登録（ディストリビューションごとの `DistributionName` と `BasePath`）。**読むだけ。**
+const LXSS_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss";
+
 /// 見張りの間隔。**書く側の上限はカーネルが持つ**ので、この間隔は「越えた後に止めるまでの遅れ」
 /// だけを決める（その間 QEMU は書けない）。
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
@@ -115,8 +138,12 @@ pub enum Cut {
         bytes: u64,
         limit: u64,
     },
-    /// 置き場の空きが下限を割った。
-    DiskFloor { available: u64 },
+    /// 置き場の空きが下限を割った（WSL の中か、VHD の載ったホストのドライブ）。
+    DiskFloor {
+        place: PathBuf,
+        available: u64,
+        floor: u64,
+    },
 }
 
 impl fmt::Display for Cut {
@@ -127,9 +154,14 @@ impl fmt::Display for Cut {
                 "{} reached {bytes} byte(s), the per-file limit of {limit}",
                 file.display()
             ),
-            Cut::DiskFloor { available } => write!(
+            Cut::DiskFloor {
+                place,
+                available,
+                floor,
+            } => write!(
                 f,
-                "only {available} byte(s) were free, under the floor of {DISK_FLOOR_BYTES}"
+                "only {available} byte(s) were free under {}, under the floor of {floor}",
+                place.display()
             ),
         }
     }
@@ -289,6 +321,226 @@ fn available_bytes(dir: &Path) -> Option<u64> {
     parse_df_avail(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// WSL の中か（純粋な論理）。**`/proc/sys/kernel/osrelease` に `microsoft` が在るか**
+/// （実測で `6.18.33.2-microsoft-standard-WSL2`）。
+pub fn is_wsl_release(osrelease: &str) -> bool {
+    osrelease.to_ascii_lowercase().contains("microsoft")
+}
+
+/// WSL の中か。
+pub fn in_wsl() -> bool {
+    fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|text| is_wsl_release(&text))
+        .unwrap_or(false)
+}
+
+/// ホストのドライブの空きの判定。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HostFloor {
+    /// WSL の外（CI 等）。**見張らない**（「見張らない」と 1 度だけ言う）。
+    NotWatched,
+    Enough(u64),
+    Short(u64),
+    /// WSL の中なのに読めない。**故障として断る**——**黙って飛ばさない。**
+    Unreadable,
+}
+
+/// ホストのドライブの空きを判定する（純粋な論理）。
+pub fn host_floor(in_wsl: bool, available: Option<u64>, floor: u64) -> HostFloor {
+    match (in_wsl, available) {
+        (false, _) => HostFloor::NotWatched,
+        (true, None) => HostFloor::Unreadable,
+        (true, Some(available)) if available < floor => HostFloor::Short(available),
+        (true, Some(available)) => HostFloor::Enough(available),
+    }
+}
+
+/// 「見張らない」を言ったか（プロセスで 1 度だけ言う）。
+static HOST_NOT_WATCHED_SAID: AtomicBool = AtomicBool::new(false);
+
+/// QEMU を起こす前に、ホストのドライブの空きを見る。**割っていても読めなくても、故障として断る。**
+fn check_host_floor(what: &str) -> Result<()> {
+    let wsl = in_wsl();
+    let available = if wsl {
+        available_bytes(Path::new(HOST_VHD_DRIVE))
+    } else {
+        None
+    };
+    match host_floor(wsl, available, HOST_DISK_FLOOR_BYTES) {
+        HostFloor::NotWatched => {
+            if !HOST_NOT_WATCHED_SAID.swap(true, Ordering::SeqCst) {
+                println!("(info) the host drive: not watched (not WSL)");
+            }
+            Ok(())
+        }
+        HostFloor::Enough(_) => Ok(()),
+        HostFloor::Short(available) => Err(anyhow::Error::new(HarnessFault(format!(
+            "{what}: the Windows drive holding the WSL disk ({HOST_VHD_DRIVE}) has only {available} \
+             byte(s) free, under the floor of {HOST_DISK_FLOOR_BYTES}; not starting QEMU"
+        )))),
+        HostFloor::Unreadable => Err(anyhow::Error::new(HarnessFault(format!(
+            "{what}: could not read the free space of {HOST_VHD_DRIVE} (the Windows drive holding the \
+             WSL disk) with df; if the disk moved, update HOST_VHD_DRIVE in xtask/src/launch.rs"
+        )))),
+    }
+}
+
+/// `reg.exe query <Lxss> /s` の出力から、ディストリビューションの名前と置き場（`BasePath`）の組を読む
+/// （純粋な論理）。**形は実測**（2026-09-25）——**鍵の行（`HKEY_` で始まる）ごとに、`    名前    型    値` の
+/// 行が続く。** **値は空白を含みうるので、型の後ろを丸ごと読む。**
+pub fn parse_lxss(text: &str) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let mut name: Option<String> = None;
+    let mut base: Option<String> = None;
+    for line in text.lines().chain(std::iter::once("HKEY_END")) {
+        let line = line.trim_end_matches('\r');
+        if line.starts_with("HKEY_") {
+            if let (Some(name), Some(base)) = (name.take(), base.take()) {
+                found.push((name, base));
+            }
+            name = None;
+            base = None;
+            continue;
+        }
+        let Some((key, rest)) = line.trim_start().split_once(char::is_whitespace) else {
+            continue;
+        };
+        let Some((kind, value)) = rest.trim_start().split_once(char::is_whitespace) else {
+            continue;
+        };
+        if kind != "REG_SZ" {
+            continue;
+        }
+        match key {
+            "DistributionName" => name = Some(value.trim().to_string()),
+            "BasePath" => base = Some(value.trim().to_string()),
+            _ => {}
+        }
+    }
+    found
+}
+
+/// 置き場の道から、そのドライブの WSL の中の道を作る（純粋な論理）。**`\\?\` の前置きを外す**
+/// （`docker-desktop` の `BasePath` がその形だった。実測）。
+pub fn drive_mount_of(base_path: &str) -> Option<String> {
+    let path = base_path.strip_prefix(r"\\?\").unwrap_or(base_path);
+    let mut chars = path.chars();
+    let letter = chars.next()?;
+    (letter.is_ascii_alphabetic() && chars.next() == Some(':'))
+        .then(|| format!("/mnt/{}", letter.to_ascii_lowercase()))
+}
+
+/// 見張っているドライブが、本当にこのディストリビューションの VHD の在るドライブかの判定。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VhdDrive {
+    /// WSL の外（CI 等）。見ない。
+    NotWsl,
+    Match {
+        base_path: String,
+    },
+    Mismatch {
+        base_path: String,
+        mount: String,
+    },
+    /// WSL の中なのに読めない（理由）。
+    Unreadable(String),
+}
+
+/// 見張っているドライブを、レジストリの `BasePath` と突き合わせる（純粋な論理）。
+pub fn vhd_drive_verdict(
+    in_wsl: bool,
+    distro: Option<&str>,
+    lxss: Result<&str, &str>,
+    expected: &str,
+) -> VhdDrive {
+    if !in_wsl {
+        return VhdDrive::NotWsl;
+    }
+    let Some(distro) = distro.filter(|distro| !distro.is_empty()) else {
+        return VhdDrive::Unreadable(
+            "WSL_DISTRO_NAME is not set, so this distribution cannot be found in the registry"
+                .to_string(),
+        );
+    };
+    let text = match lxss {
+        Ok(text) => text,
+        Err(error) => return VhdDrive::Unreadable(error.to_string()),
+    };
+    let Some((_, base_path)) = parse_lxss(text)
+        .into_iter()
+        .find(|(name, _)| name == distro)
+    else {
+        return VhdDrive::Unreadable(format!("{distro} is not registered under {LXSS_KEY}"));
+    };
+    match drive_mount_of(&base_path) {
+        None => VhdDrive::Unreadable(format!(
+            "the BasePath {base_path:?} of {distro} names no drive"
+        )),
+        Some(mount) if mount == expected => VhdDrive::Match { base_path },
+        Some(mount) => VhdDrive::Mismatch { base_path, mount },
+    }
+}
+
+/// レジストリの WSL の登録を読む（`reg.exe query`。**読むだけ**）。**`reg.exe` は Windows のドライブの
+/// 決まった所から呼ぶ**——**PATH に依らない。**
+fn read_lxss() -> Result<String, String> {
+    let fixed = Path::new(HOST_SYSTEM_DRIVE).join("Windows/system32/reg.exe");
+    let program = if fixed.is_file() {
+        fixed
+    } else {
+        PathBuf::from("reg.exe")
+    };
+    let mut reg = Command::new(&program);
+    reg.args(["query", LXSS_KEY, "/s"]);
+    let output = crate::check_lock::output_within(&mut reg, Duration::from_secs(30))
+        .map_err(|error| format!("could not run {}: {error:#}", program.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{} query {LXSS_KEY} ended with {}",
+            program.display(),
+            output.status
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).replace('\r', ""))
+}
+
+/// 基底の確かめ（2026-09-25。運用者の足す1点）。**見張っているドライブ（[`HOST_VHD_DRIVE`]）が、本当に
+/// このディストリビューションの VHD の在るドライブか**——**VHD を別のドライブへ移しても、元のドライブが在れば
+/// 空きは読めてしまい、VHD の無いドライブを黙って見張り続ける。** **食い違えば名前つきで落とす。** **WSL の中で
+/// 読めなければ、それも落とす**（黙って飛ばさない）。**WSL の外（CI）では見ない。**
+pub fn check_vhd_drive() -> Result<String> {
+    let wsl = in_wsl();
+    let distro = std::env::var("WSL_DISTRO_NAME").ok();
+    let lxss = if wsl {
+        read_lxss()
+    } else {
+        Err("not WSL".to_string())
+    };
+    match vhd_drive_verdict(
+        wsl,
+        distro.as_deref(),
+        lxss.as_deref().map_err(String::as_str),
+        HOST_VHD_DRIVE,
+    ) {
+        VhdDrive::NotWsl => {
+            Ok("not WSL; the host drive is not watched, so not checked".to_string())
+        }
+        VhdDrive::Match { base_path } => Ok(format!(
+            "the WSL disk of {} lives under {base_path}, on the drive HOST_VHD_DRIVE watches \
+             ({HOST_VHD_DRIVE})",
+            distro.unwrap_or_default()
+        )),
+        VhdDrive::Mismatch { base_path, mount } => anyhow::bail!(
+            "the WSL disk of {} lives under {base_path} (on {mount}), but HOST_VHD_DRIVE watches \
+             {HOST_VHD_DRIVE}; update HOST_VHD_DRIVE in xtask/src/launch.rs",
+            distro.unwrap_or_default()
+        ),
+        VhdDrive::Unreadable(reason) => {
+            anyhow::bail!("could not confirm that {HOST_VHD_DRIVE} holds the WSL disk: {reason}")
+        }
+    }
+}
+
 /// 止める相手。
 #[derive(Clone, Copy, Debug)]
 enum KillTarget {
@@ -416,6 +668,9 @@ pub fn spawn(spec: &Spec<'_>) -> Result<QemuRun> {
             ))));
         }
     }
+    // **VHD の載ったホストのドライブの空きも見る**（2026-09-25。運用者の足す1点）。
+    check_host_floor(spec.what)?;
+    let watch_host = in_wsl();
     let mut command = Command::new("sh");
     command
         .arg("-c")
@@ -451,7 +706,9 @@ pub fn spawn(spec: &Spec<'_>) -> Result<QemuRun> {
     let outputs: Vec<PathBuf> = spec.outputs.iter().map(|path| path.to_path_buf()).collect();
     let file_limit = spec.file_limit;
     let shared = Arc::clone(&watch);
-    let watcher = thread::spawn(move || watch_outputs(&shared, &outputs, &dir, file_limit, target));
+    let watcher = thread::spawn(move || {
+        watch_outputs(&shared, &outputs, &dir, file_limit, watch_host, target)
+    });
     Ok(QemuRun {
         child,
         target,
@@ -472,6 +729,7 @@ fn watch_outputs(
     outputs: &[PathBuf],
     dir: &Path,
     file_limit: u64,
+    watch_host: bool,
     target: KillTarget,
 ) {
     let step = Duration::from_millis(100);
@@ -499,7 +757,24 @@ fn watch_outputs(
         if cut.is_none() {
             if let Some(available) = available_bytes(dir) {
                 if available < DISK_FLOOR_BYTES {
-                    cut = Some(Cut::DiskFloor { available });
+                    cut = Some(Cut::DiskFloor {
+                        place: dir.to_path_buf(),
+                        available,
+                        floor: DISK_FLOOR_BYTES,
+                    });
+                }
+            }
+        }
+        // **VHD の載ったホストのドライブも見る**（2026-09-25。運用者の決定）。**読めなければ切らない**
+        // ——**起こす前に読めたことは確かめてあり、走行の途中の 1 回の読み損ないで切ると、揺れで落ちる。**
+        if cut.is_none() && watch_host {
+            if let Some(available) = available_bytes(Path::new(HOST_VHD_DRIVE)) {
+                if available < HOST_DISK_FLOOR_BYTES {
+                    cut = Some(Cut::DiskFloor {
+                        place: PathBuf::from(HOST_VHD_DRIVE),
+                        available,
+                        floor: HOST_DISK_FLOOR_BYTES,
+                    });
                 }
             }
         }
@@ -634,7 +909,11 @@ mod tests {
     /// **切った走行が在れば、故障や期限より先に log-limit である**（設計の順序）。
     #[test]
     fn a_cut_run_is_log_limit_before_anything_else() {
-        let cut = Some(Cut::DiskFloor { available: 1 });
+        let cut = Some(Cut::DiskFloor {
+            place: PathBuf::from("/mnt/d"),
+            available: 1,
+            floor: HOST_DISK_FLOOR_BYTES,
+        });
         assert_eq!(
             classify(true, &[run(cut.clone(), true)]),
             Category::LogLimit
@@ -710,8 +989,122 @@ mod tests {
             parse_df_avail("        Avail\n913749635072\n"),
             Some(913_749_635_072)
         );
+        // **drvfs（`/mnt/d`）の形も同じである**（実測。2026-09-25）。
+        assert_eq!(
+            parse_df_avail("        Avail\n365876436992\n"),
+            Some(365_876_436_992)
+        );
         assert_eq!(parse_df_avail("Avail\n"), None);
         assert_eq!(parse_df_avail(""), None);
+    }
+
+    /// **WSL の印は osrelease の `microsoft`**（実測の値と、CI の Azure の核の形）。
+    #[test]
+    fn wsl_is_told_from_the_kernel_release() {
+        assert!(is_wsl_release("6.18.33.2-microsoft-standard-WSL2\n"));
+        assert!(is_wsl_release("5.15.167.4-Microsoft-standard-WSL2"));
+        assert!(!is_wsl_release("6.8.0-1015-azure"));
+        assert!(!is_wsl_release(""));
+    }
+
+    /// **ホストの下限**——**WSL の外は見張らない。WSL の中で読めなければ故障、割れば故障、足りれば進む。**
+    #[test]
+    fn the_host_floor_is_judged_in_four_ways() {
+        let floor = HOST_DISK_FLOOR_BYTES;
+        assert_eq!(host_floor(false, None, floor), HostFloor::NotWatched);
+        assert_eq!(host_floor(false, Some(1), floor), HostFloor::NotWatched);
+        assert_eq!(host_floor(true, None, floor), HostFloor::Unreadable);
+        assert_eq!(
+            host_floor(true, Some(floor - 1), floor),
+            HostFloor::Short(floor - 1)
+        );
+        assert_eq!(
+            host_floor(true, Some(floor), floor),
+            HostFloor::Enough(floor)
+        );
+        // **ホストの下限は WSL の中の下限より大きい**（運用者の決定。損の非対称）。
+        const { assert!(HOST_DISK_FLOOR_BYTES > DISK_FLOOR_BYTES) };
+    }
+
+    /// `reg.exe query <Lxss> /s` の形（実測。2026-09-25。他の値は削った）。
+    const LXSS_SAMPLE: &str = "\r\n\
+HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\r\n\
+    DefaultDistribution    REG_SZ    {33621c6c-8e52-460c-8999-2d844ce23eb7}\r\n\
+    DefaultVersion    REG_DWORD    0x2\r\n\
+\r\n\
+HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\\{33621c6c-8e52-460c-8999-2d844ce23eb7}\r\n\
+    State    REG_DWORD    0x1\r\n\
+    DistributionName    REG_SZ    Ubuntu-24.04\r\n\
+    BasePath    REG_SZ    D:\\WSL\\Ubuntu-24.04\r\n\
+    VhdFileName    REG_SZ    ext4.vhdx\r\n\
+\r\n\
+HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\\{ac6aa103-89d9-490a-91a5-02b03e6c62df}\r\n\
+    DistributionName    REG_SZ    docker-desktop\r\n\
+    BasePath    REG_SZ    \\\\?\\C:\\Users\\User\\AppData\\Local\\Docker\\wsl\\main\r\n\
+";
+
+    /// **レジストリの出力から、名前と置き場の組を読む。** **`\\?\` の前置きを外してドライブを読む。**
+    #[test]
+    fn the_registry_names_each_distribution_and_its_base_path() {
+        assert_eq!(
+            parse_lxss(LXSS_SAMPLE),
+            vec![
+                (
+                    "Ubuntu-24.04".to_string(),
+                    r"D:\WSL\Ubuntu-24.04".to_string()
+                ),
+                (
+                    "docker-desktop".to_string(),
+                    r"\\?\C:\Users\User\AppData\Local\Docker\wsl\main".to_string()
+                ),
+            ]
+        );
+        assert_eq!(
+            drive_mount_of(r"D:\WSL\Ubuntu-24.04").as_deref(),
+            Some("/mnt/d")
+        );
+        assert_eq!(
+            drive_mount_of(r"\\?\C:\Users\User\AppData\Local\Docker\wsl\main").as_deref(),
+            Some("/mnt/c")
+        );
+        assert_eq!(drive_mount_of("relative"), None);
+        assert_eq!(drive_mount_of(""), None);
+    }
+
+    /// **一致・食い違い・読めない**（運用者の足す1点）。**WSL の外では見ない。**
+    #[test]
+    fn the_watched_drive_is_matched_against_the_registry() {
+        let lxss = Ok(LXSS_SAMPLE);
+        assert_eq!(
+            vhd_drive_verdict(true, Some("Ubuntu-24.04"), lxss, "/mnt/d"),
+            VhdDrive::Match {
+                base_path: r"D:\WSL\Ubuntu-24.04".to_string()
+            }
+        );
+        // **VHD を E: へ移したのに定数が D: のまま、の逆の形**——見張りは /mnt/e、実物は D:。
+        assert_eq!(
+            vhd_drive_verdict(true, Some("Ubuntu-24.04"), lxss, "/mnt/e"),
+            VhdDrive::Mismatch {
+                base_path: r"D:\WSL\Ubuntu-24.04".to_string(),
+                mount: "/mnt/d".to_string()
+            }
+        );
+        assert!(matches!(
+            vhd_drive_verdict(true, None, lxss, "/mnt/d"),
+            VhdDrive::Unreadable(_)
+        ));
+        assert!(matches!(
+            vhd_drive_verdict(true, Some("Ubuntu-20.04"), lxss, "/mnt/d"),
+            VhdDrive::Unreadable(_)
+        ));
+        assert!(matches!(
+            vhd_drive_verdict(true, Some("Ubuntu-24.04"), Err("reg.exe failed"), "/mnt/d"),
+            VhdDrive::Unreadable(_)
+        ));
+        assert_eq!(
+            vhd_drive_verdict(false, None, Err("not WSL"), "/mnt/d"),
+            VhdDrive::NotWsl
+        );
     }
 
     /// **故障は、上から文脈を重ねても故障と分かる。**

@@ -21213,6 +21213,20 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         }
     }
 
+    // **見張っているホストのドライブが、本当に VHD の在るドライブか**（2026-09-25。運用者の足す1点）。
+    // **VHD を移しても元のドライブが在れば空きは読めてしまうので、レジストリの `BasePath` と突き合わせる。**
+    total += 1;
+    begin_item(
+        "the host drive watched for free space is the one holding this distribution's WSL disk",
+    );
+    match launch::check_vhd_drive() {
+        Ok(message) => println!("--- host drive: OK ({message})"),
+        Err(error) => {
+            println!("--- host drive: FAILED ({error:#})");
+            failed.push("host drive".to_string());
+        }
+    }
+
     // **検査の錠**（2026-09-25。運用者の回答 3）。**道が本の木・作業木・環境を減らした子で同じで、
     // flock が効き、殺された持ち主の錠が放れ、断りが 75 で終わり、持ち主の子だけが取らずに進むこと。**
     total += 1;
@@ -23428,8 +23442,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 47,
-    full: 408,
+    base: 48,
+    full: 409,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
