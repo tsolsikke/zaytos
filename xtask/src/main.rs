@@ -23,6 +23,25 @@ mod metrics;
 mod tool_checks;
 mod vbox;
 
+/// `println!` を、出したうえで項目の出力の写し（[`ITEM_OUTPUT`]）へも積む形に置き換える（2026-09-26。
+/// 族にまとめる段）。
+///
+/// **出す行は前と同じである。** **名前つきの判定で捕まる破壊が、狙いの判定の行を探すため**
+/// （[`SABOTAGE_JUDGEMENTS`]）。**判定の行を出す場所は 150 を越え、判定を出す助け（`screen-color:` 等）
+/// も別の関数に在る**——**呼ぶ側を書き換えると、1 つ漏れた判定だけが黙って見えなくなる**（`begin_item`
+/// が項目の終わりを呼ぶ側に書かせないのと同じ理由である）。**このファイルの中だけに効く**
+/// （モジュールの宣言より後に置いた）。
+macro_rules! println {
+    () => {
+        std::println!()
+    };
+    ($($arg:tt)*) => {{
+        let line = format!($($arg)*);
+        std::println!("{line}");
+        crate::copy_to_item_output(&line);
+    }};
+}
+
 const OVMF_CODE_PATH: &str = "/usr/share/OVMF/OVMF_CODE_4M.fd";
 const OVMF_VARS_TEMPLATE_PATH: &str = "/usr/share/OVMF/OVMF_VARS_4M.fd";
 const BOOTLOADER_PACKAGE: &str = "bootloader";
@@ -4949,12 +4968,266 @@ const SABOTAGE_STOP_REASONS: &[StopReason] = &[
     },
 ];
 
+/// 名前つきの判定で捕まる破壊と、狙いの判定の目印（2026-09-26。族にまとめる段。運用者の決定）。
+///
+/// **この表に載る破壊は、「どの誤りでも捕まえた」とは数えない。** **項目の出力（[`ITEM_OUTPUT`]）か
+/// 落ちた理由の 1 行に `signs` が全部在るときだけ捕まえたとする**——**`signs` は狙いの判定が偽になった
+/// 行の一部である**（判定の名前と `= false`。`e2fsck` の判定なら、不満の文言の頭も同じ行に在る）。
+/// **無ければ落とす**（別の判定で落ちた・止まった・建たなかった）。
+///
+/// **載せる前に 3 回回し、3 回とも狙いの判定が偽になったものだけを載せた**（運用者の足す 1 点。
+/// **どの判定が先に偽になるかが速さで変わる形を、狭めた後の揺らぎとして抱えないため**）。**3 回の結果は
+/// `docs/verification-coverage.md` の「「どの誤りでも捕まえた」を名前の判定へ絞る」にある。**
+///
+/// **`note` は、狙いが名前の検査に届いていないときにだけ書き、判定の行に出す**（[`StopReason`] と同じ）。
+struct NamedJudgement {
+    /// 破壊の feature（捕まえると `Ok` を返す永続の 2 つは、項目の文脈の名前）。
+    key: &'static str,
+    signs: &'static [&'static str],
+    note: &'static str,
+}
+
+const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
+    // ── apps（zi 26・view 7・zi の永続 1） ──
+    NamedJudgement {
+        key: "zi-cursor-ignore-updown-test",
+        signs: &["the up/down arrows moved the cursor between lines = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "zi-write-skip-body-test",
+        signs: &["cat read back exactly what zi edited = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "zi-insert-drop-first-test",
+        signs: &[
+            "a new file was created and read back = false",
+            "cat printed what zi wrote = false",
+        ],
+        note: "",
+    },
+    NamedJudgement {
+        key: "zash-prompt-drop-color-test",
+        signs: &["the zash prompt name is drawn in its own color = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "zi-status-freeze-mode-test",
+        signs: &["the zi status line followed the mode = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ioctl-winsize-swap-test",
+        signs: &["ioctl(TIOCGWINSZ) agrees with the console = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "zi-esc-needs-second-key-test",
+        signs: &["a lone Esc settled without another key = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "alt-screen-skip-repaint-test",
+        signs: &["the screen before the alternate screen came back = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "zi-status-below-text-test",
+        signs: &["the zi status line sits on the second-to-last row = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "zi-command-line-silent-test",
+        signs: &["the command line echoes what is being typed = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "zi-append-like-insert-test",
+        signs: &["a starts one column right of i = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "open-ignore-create-test",
+        signs: &[
+            "a new file was created and read back = false",
+            "it appeared in ls = false",
+        ],
+        note: "",
+    },
+    NamedJudgement {
+        key: "env-drop-term-test",
+        signs: &["the zash prompt name is drawn in its own color = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "unlink-ignore-request-test",
+        signs: &["rm removed it again = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "zi-enter-does-nothing-test",
+        signs: &["enter split the line = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "zi-skip-release-test",
+        signs: &["zi gave back every frame it took, on every run = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "zi-skip-grow-test",
+        signs: &["the big file read back with exactly the one edit = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "zi-join-does-nothing-test",
+        signs: &["backspace at the start of a line joined it to the one above = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "zi-window-frozen-test",
+        signs: &["the window followed the cursor down the file = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "stderr-on-screen-test",
+        signs: &["the error reached the echo area instead of the text = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "zi-skip-cursor-flush-test",
+        signs: &["the cursor on the screen followed the buffer = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "zi-redraw-whole-screen-test",
+        signs: &["moving the window one line draws one line = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "cursor-repaint-always-test",
+        signs: &["an idle read sends nothing = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "zi-edit-redraws-everything-test",
+        signs: &["inserting one character draws one line = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "virtio-skip-install-test",
+        signs: &["the save reached the device = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "repaint-blank-cells-test",
+        signs: &["leaving the alternate screen skips the blank cells = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "less-window-frozen-test",
+        signs: &["a line past the first screen became visible = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "more-uses-alternate-screen-test",
+        signs: &["what more printed is still on the screen after it left = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "flush-every-write-test",
+        signs: &["one move costs one transfer = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "read-skip-flush-test",
+        signs: &["one move costs one transfer = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "frame-write-per-piece-test",
+        signs: &["one move costs one syscall = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "draw-pixel-by-pixel-test",
+        signs: &["erasing a page writes no pixel one by one = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "less-redraw-whole-screen-test",
+        signs: &["moving one line draws one line = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "persist-zi-test rebuild-between",
+        signs: &["boot 2's Ring 3 printed what the device carries = false"],
+        note: "",
+    },
+];
+
+/// 名前の判定へ絞らず、「どの誤りでも」のまま置く破壊と、その理由（2026-09-26。運用者の足す 1 点）。
+///
+/// **3 回のうちに偽になる判定が変わったもの（揺れる）を載せる。** **まとめの行が数を出す。**
+const SABOTAGE_JUDGEMENTS_NOT_PLACED: &[(&str, &str)] = &[];
+
+/// 構成の feature（か文脈の名前）のうち、[`SABOTAGE_JUDGEMENTS`] に載るものの行を返す。
+fn named_judgement_for(keys: &[&str]) -> Option<&'static NamedJudgement> {
+    keys.iter()
+        .find_map(|key| SABOTAGE_JUDGEMENTS.iter().find(|named| named.key == *key))
+}
+
+/// 名前つきの判定で捕まる破壊の回を分ける（純粋な論理）。**写しが上限を越えていたら、読めないので落とす。**
+fn judgement_verdict(
+    named: &'static NamedJudgement,
+    output: Option<&str>,
+    error: Option<&anyhow::Error>,
+) -> SabotageVerdict {
+    let sign = named.signs.join(" ... ");
+    let Some(output) = output else {
+        return SabotageVerdict::MissedTheJudgement {
+            sign,
+            why: format!(
+                "the item's output went over {} MiB and was not kept",
+                ITEM_OUTPUT_LIMIT >> 20
+            ),
+        };
+    };
+    let reason = error.map(|error| format!("{error:#}")).unwrap_or_default();
+    let output = strip_ansi(output);
+    let reason_line = strip_ansi(&reason).replace('\n', " ");
+    let found = output
+        .lines()
+        .chain(std::iter::once(reason_line.as_str()))
+        .any(|line| named.signs.iter().all(|piece| line.contains(piece)));
+    if found {
+        SabotageVerdict::CaughtByTheJudgement {
+            sign,
+            note: named.note,
+        }
+    } else {
+        SabotageVerdict::MissedTheJudgement {
+            sign,
+            why: if reason.is_empty() {
+                "the run reported the catch without it".to_string()
+            } else {
+                format!("the run failed otherwise: {reason}")
+            },
+        }
+    }
+}
+
 /// 破壊の回の判定（5.b。2026-09-25）。
 enum SabotageVerdict {
     /// 通ってしまった。
     NotCaught,
     /// 狙った理由の行で止まった（[`SABOTAGE_STOP_REASONS`] に載る破壊）。
     CaughtForTheReason { sign: String, note: &'static str },
+    /// 狙った判定が偽になった（[`SABOTAGE_JUDGEMENTS`] に載る破壊）。
+    CaughtByTheJudgement { sign: String, note: &'static str },
+    /// 落ちたが、狙った判定の目印が出力に無い。
+    MissedTheJudgement { sign: String, why: String },
     /// どの誤りでも捕まえたとする（表に載らない破壊。理由を見ていない）。
     CaughtByAnyError,
     /// 止まったが、狙った理由の行が無い。
@@ -4976,7 +5249,10 @@ fn stop_reason_for(features: &[&str]) -> Option<&'static StopReason> {
 fn judge_sabotage(features: &[&str], result: &Result<()>) -> SabotageVerdict {
     match (result, stop_reason_for(features)) {
         (Ok(()), _) => SabotageVerdict::NotCaught,
-        (Err(_), None) => SabotageVerdict::CaughtByAnyError,
+        (Err(error), None) => match named_judgement_for(features) {
+            Some(named) => judgement_verdict(named, item_output().as_deref(), Some(error)),
+            None => SabotageVerdict::CaughtByAnyError,
+        },
         (Err(error), Some(reason)) => match error.downcast_ref::<StoppedEarly>() {
             Some(stop) if strip_ansi(&stop.serial).contains(reason.reason) => {
                 SabotageVerdict::CaughtForTheReason {
@@ -5048,11 +5324,15 @@ fn any_error_verdicts_line() -> String {
     let listed: Vec<&str> = families.iter().map(|(_, _, text)| text.as_str()).collect();
     format!(
         "(info) sabotage verdicts that accept any error (the reason is not checked): {total} in {} \
-         famil(ies){}{}; narrowed to an intended stop: {} sabotage(s) (SABOTAGE_STOP_REASONS)",
+         famil(ies){}{}; narrowed to an intended stop: {} sabotage(s) (SABOTAGE_STOP_REASONS), \
+         to a named judgement: {} (SABOTAGE_JUDGEMENTS); left on purpose with a reason: {} \
+         (SABOTAGE_JUDGEMENTS_NOT_PLACED)",
         families.len(),
         if listed.is_empty() { "" } else { ": " },
         listed.join("; "),
-        SABOTAGE_STOP_REASONS.len()
+        SABOTAGE_STOP_REASONS.len(),
+        SABOTAGE_JUDGEMENTS.len(),
+        SABOTAGE_JUDGEMENTS_NOT_PLACED.len()
     )
 }
 
@@ -5137,13 +5417,30 @@ fn report_one_build_directory(what: &str, bytes: Option<u64>) {
 fn report_inverted_sabotage_verdict(
     check: &str,
     label: &str,
+    key: &str,
     result: &Result<()>,
     failed: &mut Failures,
 ) {
     let name = format!("{check} ({label})");
-    match result {
-        Ok(()) => caught_by_any_error(check, &format!("--- {name}: OK (the sabotage was caught)")),
-        Err(error) => {
+    match (result, named_judgement_for(&[key])) {
+        (Ok(()), None) => {
+            caught_by_any_error(check, &format!("--- {name}: OK (the sabotage was caught)"))
+        }
+        (Ok(()), Some(named)) => match judgement_verdict(named, item_output().as_deref(), None) {
+            SabotageVerdict::CaughtByTheJudgement { sign, note } => println!(
+                "--- {name}: OK (the sabotage was caught by the intended judgement: {sign}{}{note})",
+                if note.is_empty() { "" } else { "; " }
+            ),
+            _ => {
+                println!(
+                    "--- {name}: FAILED (the intended judgement never read false: {:?} is not in \
+                     the item's output)",
+                    named.signs.join(" ... ")
+                );
+                failed.push(name);
+            }
+        },
+        (Err(error), _) => {
             println!("--- {name}: FAILED ({error})");
             failed.push(name);
         }
@@ -5168,6 +5465,17 @@ fn report_sabotage_verdict(
             println!(
                 "--- {name}: OK (the sabotage was caught for the intended reason: {sign}; {note})"
             )
+        }
+        SabotageVerdict::CaughtByTheJudgement { sign, note } => println!(
+            "--- {name}: OK (the sabotage was caught by the intended judgement: {sign}{}{note})",
+            if note.is_empty() { "" } else { "; " }
+        ),
+        SabotageVerdict::MissedTheJudgement { sign, why } => {
+            println!(
+                "--- {name}: FAILED (the intended judgement never read false: {sign:?} is not in \
+                 the item's output; {why})"
+            );
+            failed.push(name);
         }
         SabotageVerdict::CaughtByAnyError => {
             caught_by_any_error(check, &format!("--- {name}: OK (the sabotage was caught)"))
@@ -22332,7 +22640,13 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             "the persist test catches rebuilding the disk in between",
         );
         let result = cmd_persist_test(true);
-        report_inverted_sabotage_verdict("persist", "rebuilt in between", &result, &mut failed);
+        report_inverted_sabotage_verdict(
+            "persist",
+            "rebuilt in between",
+            "persist-test rebuild-between",
+            &result,
+            &mut failed,
+        );
 
         // **環境の源がファイルであること（f-1。`ADR-0052`）。**
         //
@@ -22385,7 +22699,13 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             "the zi persist test catches rebuilding the disk in between",
         );
         let result = cmd_persist_zi_test(true);
-        report_inverted_sabotage_verdict("persist", "zi, rebuilt in between", &result, &mut failed);
+        report_inverted_sabotage_verdict(
+            "persist",
+            "zi, rebuilt in between",
+            "persist-zi-test rebuild-between",
+            &result,
+            &mut failed,
+        );
 
         // **像を複製して取り出し、建てた像と突き合わせる（S12-a）。**
         // **判定 3 本を 1 項目にまとめてある**（複製先の位置・バイト一致・`e2fsck`）。
@@ -24507,6 +24827,36 @@ fn slowness_lines(
 static ITEM_CLOCK: std::sync::Mutex<Option<(Instant, String, Family)>> =
     std::sync::Mutex::new(None);
 
+/// 項目の出力の写し（2026-09-26。族にまとめる段）。**名前つきの判定で捕まる破壊が、狙いの判定の行を
+/// 探す**（[`SABOTAGE_JUDGEMENTS`]）。**`begin_item` が空にする。** **上限（[`ITEM_OUTPUT_LIMIT`]）を
+/// 越えたら積むのをやめ、越えたことを残す**——**項目を区切らない走行（`cargo xtask flaky` 等）で膨らませない。**
+static ITEM_OUTPUT: std::sync::Mutex<(String, bool)> =
+    std::sync::Mutex::new((String::new(), false));
+
+/// 項目の出力の写しの上限（2026-09-26）。**最も多く出す項目で 62KB だった**（`cargo` と QEMU の出力を
+/// 含めた項目の全体。`0249d12` の全検査のログ。`zi` の破壊の 1 つ）。**その 60 倍を越える。**
+const ITEM_OUTPUT_LIMIT: usize = 4 << 20;
+
+/// 1 行を項目の出力の写しへ積む（`println!` が呼ぶ）。
+fn copy_to_item_output(line: &str) {
+    if let Ok(mut output) = ITEM_OUTPUT.lock() {
+        let (text, overflowed) = &mut *output;
+        if text.len() + line.len() + 1 > ITEM_OUTPUT_LIMIT {
+            *overflowed = true;
+            return;
+        }
+        text.push_str(line);
+        text.push('\n');
+    }
+}
+
+/// 項目の出力の写し（越えていたら `None`）。
+fn item_output() -> Option<String> {
+    let output = ITEM_OUTPUT.lock().ok()?;
+    let (text, overflowed) = &*output;
+    (!overflowed).then(|| text.clone())
+}
+
 /// 項目の見出しを出し、時計を始める（VIEW-b の後）。
 ///
 /// **族を取る**（2026-09-26。族にまとめる段）——**族を名乗らない項目は建たない**（`family` の doc）。
@@ -24514,6 +24864,10 @@ fn begin_item(family: Family, label: &str) {
     finish_item();
     // **走行の記録は項目ごとに空にする**（失敗の分け方と計測が項目の単位で読む）。
     launch::reset_item_runs();
+    // **出力の写しも項目ごとに空にする**（名前つきの判定で捕まる破壊が読む）。
+    if let Ok(mut output) = ITEM_OUTPUT.lock() {
+        *output = (String::new(), false);
+    }
     ITEMS_DONE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     stop_if_over_the_time_limit();
     println!("=== xtask check: {label}");
@@ -25383,6 +25737,106 @@ mod tests {
             judge_sabotage(&rmdir, &stopped(intended).context("fs-extract")),
             SabotageVerdict::CaughtForTheReason { .. }
         ));
+    }
+
+    /// **名前つきの判定で捕まる破壊**（2026-09-26。族にまとめる段）。**目印が項目の出力か落ちた理由に
+    /// 在れば捕まえた、無ければ落とす。色の列は落として探す。写しが上限を越えていたら落とす。**
+    #[test]
+    fn a_named_judgement_needs_its_sign_in_the_output_or_the_reason() {
+        static NAMED: NamedJudgement = NamedJudgement {
+            key: "zz-host-test",
+            signs: &["the thing = false"],
+            note: "",
+        };
+        static TWO: NamedJudgement = NamedJudgement {
+            key: "zz-host-test-two",
+            signs: &[
+                "e2fsck found nothing to complain about = false",
+                "i_size is",
+            ],
+            note: "",
+        };
+        let failed = anyhow::anyhow!("zz: FAILED");
+        let caught = |verdict: SabotageVerdict| {
+            matches!(verdict, SabotageVerdict::CaughtByTheJudgement { .. })
+        };
+        assert!(caught(judgement_verdict(
+            &NAMED,
+            Some("zz: a = true\nzz: the thing = false (x)\n"),
+            Some(&failed)
+        )));
+        assert!(caught(judgement_verdict(
+            &NAMED,
+            Some("\x1b[1mzz: the thing = false\x1b[0m"),
+            None
+        )));
+        assert!(caught(judgement_verdict(
+            &NAMED,
+            Some("zz: other = false"),
+            Some(&anyhow::anyhow!("zz: the thing = false"))
+        )));
+        assert!(matches!(
+            judgement_verdict(&NAMED, Some("zz: other = false"), Some(&failed)),
+            SabotageVerdict::MissedTheJudgement { .. }
+        ));
+        assert!(matches!(
+            judgement_verdict(&NAMED, None, Some(&failed)),
+            SabotageVerdict::MissedTheJudgement { .. }
+        ));
+        // **目印が複数なら、同じ 1 行に全部が要る。**
+        assert!(caught(judgement_verdict(
+            &TWO,
+            Some(
+                "zz: e2fsck found nothing to complain about = false (complaints: [\"Inode 56, \
+                 i_size is 100\"])"
+            ),
+            Some(&failed)
+        )));
+        assert!(matches!(
+            judgement_verdict(
+                &TWO,
+                Some("zz: e2fsck found nothing to complain about = false\nzz: i_size is fine"),
+                Some(&failed)
+            ),
+            SabotageVerdict::MissedTheJudgement { .. }
+        ));
+    }
+
+    /// **`println!` は出したうえで項目の出力の写しへも積み、破壊の判定はその写しを読む**（2026-09-26）。
+    /// **表の引き・写し・判定を、端から端まで通す。**
+    #[test]
+    fn a_printed_judgement_line_reaches_the_sabotage_verdict() {
+        println!(
+            "zz-host-test: the up/down arrows moved the cursor between lines = false (host test)"
+        );
+        assert!(item_output().is_some_and(|text| text.contains("zz-host-test: the up/down")));
+        assert!(matches!(
+            judge_sabotage(
+                &["zi-cursor-ignore-updown-test"],
+                &Err(anyhow::anyhow!("zi-test: FAILED"))
+            ),
+            SabotageVerdict::CaughtByTheJudgement { .. }
+        ));
+    }
+
+    /// **表の鍵は、破壊を回す側にも在る名前である**（打ち間違いで絞りが黙って外れないように）。**同じ鍵を
+    /// 2 つの表に置かない**（止まった理由・名前の判定・置かない一覧）。
+    #[test]
+    fn named_judgement_keys_name_a_sabotage_and_sit_in_one_table() {
+        let source = include_str!("main.rs");
+        let mut keys: Vec<&str> = SABOTAGE_JUDGEMENTS.iter().map(|named| named.key).collect();
+        keys.extend(SABOTAGE_JUDGEMENTS_NOT_PLACED.iter().map(|(key, _)| *key));
+        keys.extend(SABOTAGE_STOP_REASONS.iter().map(|reason| reason.feature));
+        for key in &keys {
+            assert!(
+                source.matches(&format!("\"{key}\"")).count() >= 2,
+                "{key} appears only in the table"
+            );
+        }
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), keys.len(), "a key sits in two tables");
     }
 
     /// **「どの誤りでも捕まえた」を族ごとに数え、まとめの 1 行に出す**（2026-09-25。計器）。**項目の外で
