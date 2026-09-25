@@ -5585,14 +5585,32 @@ fn caught_by_any_error(check: &str, line: &str) {
     }
 }
 
-/// 「どの誤りでも捕まえた」の数を 1 行にする（まとめの計器。止めない）。
-fn any_error_verdicts_line() -> String {
-    let counts = ANY_ERROR_VERDICTS
-        .lock()
-        .map(|counts| counts.clone())
-        .unwrap_or_default();
+/// 「どれかの判定が偽なら捕まえた」と数えた破壊の回の数（2026-09-26。第三者レビューの取り込みで計器に
+/// 足した）。**鍵は全検査の族と検査の名前である。**
+///
+/// **検査の関数が自分の判定を反して「捕まえた」と返す形である**（`expect_pass = false`・`MustFail`・
+/// 永続の破壊の組）。**起動しなかったことは別に落とすので「どの誤りでも」より狭いが、どの判定が偽に
+/// なったかは見ていない**——**狙いの判定で捕まえたとは保証していない。** **棚卸しして絞るのは、
+/// 検査の体系の改善を閉じた後である**（運用者の決定 1 の ②）。
+static ANY_JUDGEMENT_VERDICTS: std::sync::Mutex<
+    std::collections::BTreeMap<(Option<Family>, String), usize>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// 「どれかの判定が偽なら捕まえた」の行を出し、数を 1 つ足す（2026-09-26）。**出す行は前と同じ形である。**
+fn caught_by_any_judgement(check: &str, line: &str) {
+    println!("{line}");
+    if let Ok(mut counts) = ANY_JUDGEMENT_VERDICTS.lock() {
+        *counts
+            .entry((current_family(), check.to_string()))
+            .or_insert(0) += 1;
+    }
+}
+
+/// 族と検査ごとの数を、族ごとに束ねた短い形にする（純粋な論理）。**多い順に並べる。**
+fn counts_by_family(
+    counts: std::collections::BTreeMap<(Option<Family>, String), usize>,
+) -> (usize, usize, String) {
     let total: usize = counts.values().sum();
-    // **族ごとに束ね、多い順に並べる。** 族の中も検査の多い順である。
     let mut by_family: std::collections::BTreeMap<Option<Family>, Vec<(String, usize)>> =
         std::collections::BTreeMap::new();
     for ((family, check), count) in counts {
@@ -5617,14 +5635,38 @@ fn any_error_verdicts_line() -> String {
         .collect();
     families.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     let listed: Vec<&str> = families.iter().map(|(_, _, text)| text.as_str()).collect();
+    (total, families.len(), listed.join("; "))
+}
+
+/// 「どれかの判定が偽なら捕まえた」の数を 1 行にする（2026-09-26。まとめの計器。止めない）。
+fn any_judgement_verdicts_line() -> String {
+    let counts = ANY_JUDGEMENT_VERDICTS
+        .lock()
+        .map(|counts| counts.clone())
+        .unwrap_or_default();
+    let (total, families, listed) = counts_by_family(counts);
     format!(
-        "(info) sabotage verdicts that accept any error (the reason is not checked): {total} in {} \
-         famil(ies){}{}; narrowed to an intended stop: {} sabotage(s) (SABOTAGE_STOP_REASONS), \
-         to a named judgement: {} (SABOTAGE_JUDGEMENTS); left on purpose with a reason: {} \
-         (SABOTAGE_JUDGEMENTS_NOT_PLACED)",
-        families.len(),
+        "(info) sabotage verdicts that accept any failed judgement (the test inverts its own \
+         judgements; which one failed is not checked, so these are not guaranteed as named catches): \
+         {total} in {families} famil(ies){}{listed}",
+        if listed.is_empty() { "" } else { ": " }
+    )
+}
+
+/// 「どの誤りでも捕まえた」の数を 1 行にする（まとめの計器。止めない）。
+fn any_error_verdicts_line() -> String {
+    let counts = ANY_ERROR_VERDICTS
+        .lock()
+        .map(|counts| counts.clone())
+        .unwrap_or_default();
+    // **族ごとに束ね、多い順に並べる。** 族の中も検査の多い順である（[`counts_by_family`]）。
+    let (total, families, listed) = counts_by_family(counts);
+    format!(
+        "(info) sabotage verdicts that accept any error (the reason is not checked): {total} in \
+         {families} famil(ies){}{listed}; narrowed to an intended stop: {} sabotage(s) \
+         (SABOTAGE_STOP_REASONS), to a named judgement: {} (SABOTAGE_JUDGEMENTS); left on purpose \
+         with a reason: {} (SABOTAGE_JUDGEMENTS_NOT_PLACED)",
         if listed.is_empty() { "" } else { ": " },
-        listed.join("; "),
         SABOTAGE_STOP_REASONS.len(),
         SABOTAGE_JUDGEMENTS.len(),
         SABOTAGE_JUDGEMENTS_NOT_PLACED.len()
@@ -22095,7 +22137,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("utf8-test {sabotage}");
             begin_item(Family::Shell, &label);
             match cmd_utf8_test(&[sabotage], false) {
-                Ok(()) => println!("--- {label}: OK"),
+                Ok(()) => caught_by_any_judgement("utf8 test", &format!("--- {label}: OK")),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22132,7 +22174,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("profile-test {sabotage}");
             begin_item(Family::Shell, &label);
             match cmd_profile_test(&[sabotage], false) {
-                Ok(()) => println!("--- {label}: OK"),
+                Ok(()) => caught_by_any_judgement("profile test", &format!("--- {label}: OK")),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22162,7 +22204,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("history-test {sabotage}");
             begin_item(Family::Shell, &label);
             match cmd_history_test(&[sabotage], false) {
-                Ok(()) => println!("--- {label}: OK"),
+                Ok(()) => caught_by_any_judgement("history test", &format!("--- {label}: OK")),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22192,7 +22234,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("pipe-test {sabotage}");
             begin_item(Family::Ipc, &label);
             match cmd_pipe_test(&[sabotage], false) {
-                Ok(()) => println!("--- {label}: OK"),
+                Ok(()) => caught_by_any_judgement("pipe test", &format!("--- {label}: OK")),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22223,7 +22265,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("socket-test {sabotage}");
             begin_item(Family::Ipc, &label);
             match cmd_socket_test(&[sabotage], false) {
-                Ok(()) => println!("--- {label}: OK"),
+                Ok(()) => caught_by_any_judgement("socket test", &format!("--- {label}: OK")),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22254,7 +22296,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("input-test {sabotage}");
             begin_item(Family::Ipc, &label);
             match cmd_input_test(&[sabotage], false) {
-                Ok(()) => println!("--- {label}: OK"),
+                Ok(()) => caught_by_any_judgement("input test", &format!("--- {label}: OK")),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22284,7 +22326,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("poll-test {sabotage}");
             begin_item(Family::Ipc, &label);
             match cmd_poll_test(&[sabotage], false) {
-                Ok(()) => println!("--- {label}: OK"),
+                Ok(()) => caught_by_any_judgement("poll test", &format!("--- {label}: OK")),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22314,7 +22356,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("screen-test {sabotage}");
             begin_item(Family::Ipc, &label);
             match cmd_screen_test(&[sabotage], false) {
-                Ok(()) => println!("--- {label}: OK"),
+                Ok(()) => caught_by_any_judgement("screen test", &format!("--- {label}: OK")),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22344,7 +22386,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("compose-test {sabotage}");
             begin_item(Family::Ipc, &label);
             match cmd_compose_test(&[sabotage], false) {
-                Ok(()) => println!("--- {label}: OK"),
+                Ok(()) => caught_by_any_judgement("compose test", &format!("--- {label}: OK")),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22494,7 +22536,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("complete-test {sabotage}");
             begin_item(Family::Shell, &label);
             match cmd_complete_test(&[sabotage], false) {
-                Ok(()) => println!("--- {label}: OK"),
+                Ok(()) => caught_by_any_judgement("complete test", &format!("--- {label}: OK")),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22527,7 +22569,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("fp-test {sabotage}");
             begin_item(Family::Process, &label);
             match cmd_fp_test(&[sabotage], false) {
-                Ok(()) => println!("--- {label}: OK"),
+                // **止まった理由の行で絞ったもの**（`fp-mf-not-foldable-test`。[`SABOTAGE_STOP_REASONS`]）
+                // **は数えない**——**関数の中で理由を見ている。**
+                Ok(()) if stop_reason_for(&[sabotage]).is_some() => println!("--- {label}: OK"),
+                Ok(()) => caught_by_any_judgement("fp test", &format!("--- {label}: OK")),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22556,7 +22601,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("concurrent-test {sabotage}");
             begin_item(Family::Process, &label);
             match cmd_concurrent_test(&[sabotage], false) {
-                Ok(()) => println!("--- {label}: OK"),
+                Ok(()) => caught_by_any_judgement("concurrent test", &format!("--- {label}: OK")),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22589,7 +22634,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("ttf-test {sabotage}");
             begin_item(Family::Apps, &label);
             match cmd_ttf_test(&[sabotage], false) {
-                Ok(()) => println!("--- {label}: OK"),
+                Ok(()) => caught_by_any_judgement("ttf test", &format!("--- {label}: OK")),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22621,7 +22666,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("serial-test {sabotage}");
             begin_item(Family::Smp, &label);
             match cmd_serial_test(&[sabotage], false) {
-                Ok(()) => println!("--- {label}: OK"),
+                Ok(()) => caught_by_any_judgement("serial test", &format!("--- {label}: OK")),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22918,6 +22963,9 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 &format!("the keyboard layout claim: {label}"),
             );
             match cmd_keymap_test(sabotage) {
+                Ok(()) if sabotage => {
+                    caught_by_any_judgement("keymap", &format!("--- {label}: OK"))
+                }
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
                     println!(
@@ -22982,6 +23030,9 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 &format!("the environment source claim: {label}"),
             );
             match cmd_persist_env_test(rebuild, ignore) {
+                Ok(()) if rebuild || ignore => {
+                    caught_by_any_judgement("persist (env)", &format!("--- {label}: OK"))
+                }
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
                     println!(
@@ -23314,7 +23365,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 &format!("the shell test catches the sabotage {feature}"),
             );
             match cmd_shell_test(ShellTestMode::MustFail(feature)) {
-                Ok(()) => println!("--- shell test ({feature}): OK"),
+                Ok(()) => caught_by_any_judgement(
+                    "shell test",
+                    &format!("--- shell test ({feature}): OK"),
+                ),
                 Err(error) => {
                     println!("--- shell test ({feature}): FAILED ({error})");
                     failed.push(format!("shell test ({feature})"));
@@ -23343,7 +23397,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 &format!("the shell script test catches the sabotage {feature}"),
             );
             match cmd_shell_script_test(ShellTestMode::ScriptMustFail(feature)) {
-                Ok(()) => println!("--- shell script test ({feature}): OK"),
+                Ok(()) => caught_by_any_judgement(
+                    "shell script test",
+                    &format!("--- shell script test ({feature}): OK"),
+                ),
                 Err(error) => {
                     println!("--- shell script test ({feature}): FAILED ({error})");
                     failed.push(format!("shell script test ({feature})"));
@@ -24173,6 +24230,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     // **「どの誤りでも捕まえた」の族ごとの数と、ビルドの置き場の大きさ**（2026-09-25。`--full` だけ。止めない）。
     if full {
         println!("{}", any_error_verdicts_line());
+        println!("{}", any_judgement_verdicts_line());
         report_build_directory_size(&workspace_root);
         // **空きの計器**（2026-09-25。運用者の足す1点）。**Windows のドライブが 20 GiB を割ったら (warn)。止めない。**
         for line in full_check::free_space_lines(&workspace_root) {
@@ -26318,6 +26376,20 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), keys.len(), "a key sits in two tables");
+    }
+
+    /// **「どれかの判定が偽なら捕まえた」は別の種類として数える**（2026-09-26）。**項目の外で数えた回は
+    /// 「族なし」に束ねる。**
+    #[test]
+    fn any_judgement_verdicts_are_counted_apart() {
+        caught_by_any_judgement("zz judgement check", "--- zz (a): OK");
+        caught_by_any_judgement("zz judgement check", "--- zz (b): OK");
+        let line = any_judgement_verdicts_line();
+        assert!(
+            line.contains("no family 2 (zz judgement check 2)"),
+            "{line}"
+        );
+        assert!(line.contains("not guaranteed as named catches"), "{line}");
     }
 
     /// **当たりの計器**（2026-09-26）。**(a) 共通部分と (b) 含まれるかを分け、全部を選んでいた回は別に数え、

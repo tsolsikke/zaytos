@@ -733,6 +733,7 @@ xtask::tests::a_printed_judgement_line_reaches_the_sabotage_verdict
 xtask::tests::a_single_bsp_heartbeat_cannot_show_growth_and_fails
 xtask::tests::a_stop_sign_is_a_halting_line_or_a_triple_fault
 xtask::tests::any_error_verdicts_are_counted_per_family
+xtask::tests::any_judgement_verdicts_are_counted_apart
 xtask::tests::ap_ticks_that_grow_across_the_observation_pass_even_when_the_ap_line_is_missing
 xtask::tests::ap_ticks_that_stay_at_zero_fail_the_way_ap_no_svr_would
 xtask::tests::both_forms_of_the_qemu_shutdown_line_are_read
