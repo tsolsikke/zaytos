@@ -1222,7 +1222,7 @@ higher-halfの破壊feature（B-2a-5、破壊feature `highhalf-*`）について
 
 **分け方は「破壊が緑を出す道は4つ」である**（機会が無い／変化が無い／判定に届かない／判定が見た時点が違う。上の「W2-d+の判定2本には、落とす破壊が無い」）。**4つに収まらないものが1つ出た**（下の表の最後の行）。
 
-#### いまも置けないもの（14）
+#### いまも置けないもの（15）
 
 | 破壊 | 4形 | 置けない理由 | 契機 | 本体 |
 |---|---|---|---|---|
@@ -1240,8 +1240,9 @@ higher-halfの破壊feature（B-2a-5、破壊feature `highhalf-*`）について
 | `ext2-unlink-mark-unused`を往復のバイト一致で落とす | **別の判定が先に止める** | **後の`mkdir`が`NoRoomInDirectory`で止まる**（同） | 同上 | 同上 |
 | `virtio-load-skip-first`を往復のバイト一致で落とす | **別の判定が先に止める** | **カーネルのext2の解析が`BadMagic`で起動を止める。** **注釈は「バイト一致で捕まる」と書いていた**（2026-09-25に直した） | **無い。** 先頭の欠けを解析が止めるのは正しい形である | 同上 |
 | `brk-skip-shrink`をziの判定で落とす | **別の判定が先に止める** | **起動時の`syscall-test`の後始末で、カーネルの会計（`DestroyAccounting`）が起動を止める。** **ziは走らない。** 止まる前に`syscall-test`の行（取った2・返した0）は出る | **無い。** 会計で止まるのは正しい形である（`shm-close-keeps-refs`と同じ） | 検査の体系の改善の5.b |
+| `virtio-short-desc`を中身の突き合わせで落とす | **別の判定が先に止める** | **QEMUが1バイト短い記述子の要求ごと拒み（status 1）、カーネルの状態の検査が起動を止める**（S13-bの実測） | **QEMUでは作れない**——短く書く別の形を選ぶか、拒まない装置で見る（持ち越しの行） | 族にまとめる段（2026-09-26） |
 
-**2026-09-25に5行足した**（検査の体系の改善の5.b）——**fsの4つとziの1つが、名前の検査に届かず、同じ起動の中の止まりで捕まっていた。** **判定は「どの誤りでも捕まえた」だったので見えていなかった。** **いまは止まった理由の行で判定する**（`xtask`の`SABOTAGE_STOP_REASONS`。止まらなければ落ちる）。
+**2026-09-26に1行足した**（族にまとめる段）——**`virtio-short-desc`も同じ形だった**（下の「「どの誤りでも捕まえた」を名前の判定へ絞る」）。**2026-09-25に5行足した**（検査の体系の改善の5.b）——**fsの4つとziの1つが、名前の検査に届かず、同じ起動の中の止まりで捕まっていた。** **判定は「どの誤りでも捕まえた」だったので見えていなかった。** **いまは止まった理由の行で判定する**（`xtask`の`SABOTAGE_STOP_REASONS`。止まらなければ落ちる）。
 
 **最後の7行は4形に収まらない。** **破壊は効いていて、捕まってもいる**——**捕まえたのが項目の判定ではなく、起動時の検査だった。** **ES-dの「項目が別の失敗を自分の成功として読んだ」と`ADR-0063`の(b3)の「止まったから落ちたを、破壊が効いたと読まない」と同じ形で、3例目である。** **`ADR-0065`の表は「往復が落ちる」「created != released で落ちる」と書いていた**（上の`ADR-0065`の節。**直した**）。**2行目は(c)の計器の最初の`--full`で見つかった**（下の「組の始まりまで届いたか」）。
 
@@ -1463,7 +1464,7 @@ VirtualBoxの計数でベクタ0x42が打鍵4バイトで+4、8259のベクタ0x
 
 **fsの3つと像の読み込みの1つ、ziの1つは、名前の検査に届いていない**（下の「置けない破壊の一覧」）。
 
-**残るもの。** **「どの誤りでも捕まえた」と数える破壊は、締めの`--full`で83項目あった。** **今回狭めたのはそのうち6つ（fsの5つ・ziの1つ）で、残る77は族ごとの数を計器で出す**（運用者の決定。契機は、その族を「族にまとめる段」で扱うとき）。
+**残るもの。** **「どの誤りでも捕まえた」と数える破壊は、締めの`--full`で83項目あった。** **今回狭めたのはそのうち6つ（fsの5つ・ziの1つ）で、残る77は族ごとの数を計器で出す**（運用者の決定。契機は、その族を「族にまとめる段」で扱うとき）。**2026-09-26に77とも名前の判定へ絞った**（下の「「どの誤りでも捕まえた」を名前の判定へ絞る」）。
 
 ### 宣言なしに期限で終わった待ちを出す（2026-09-25。検査の体系の改善の足す1点。運用者の指示）
 
@@ -1578,7 +1579,168 @@ VirtualBoxの計数でベクタ0x42が打鍵4バイトで+4、8259のベクタ0x
 | `target/aarch64-tools` | **消さない** | ARMの道具（展開したQEMUとAAVMF。`ADR-0070`） |
 | `target/amd` | **消さない** | AMDの資料（第三者の著作物なので木に入れていない） |
 
-**「どの誤りでも捕まえた」とする破壊の数も、同じまとめに族ごとに出す**（`any_error_verdicts_line`。止めない）——**狭めるのは、その族を「族にまとめる段」で扱うとき**（運用者の決定）。
+**「どの誤りでも捕まえた」とする破壊の数も、同じまとめに族ごとに出す**（`any_error_verdicts_line`。止めない）——**狭めるのは、その族を「族にまとめる段」で扱うとき**（運用者の決定）。**2026-09-26に77とも狭めたので、いまは0と出るはずである**（狭めた数と、置かなかった数も同じ行に出る）。
+
+### 全検査の項目を族にまとめ、変更したパスから族を選んで出す（2026-09-26。検査の体系の改善。運用者の決定）
+
+**全検査の項目を12の族に分けた**（`xtask/src/family.rs`の`Family`）。**どの項目も族を1つ名乗る**——**項目の見出しを出す口（`begin_item`）が族を取るので、名乗らない項目は建たない。** **項目ごとの所要の行に族を添え（`(info) item time: 11.1s [apps] for …`）、全検査のまとめに族ごとの本数と所要を出す**（`items and time by family`）。**分け方は、項目の見出しの形で409項目を振り分けて決めた**（他の走行が無い全検査`0249d12`のログ）。**当たらなかった3本の入れ先も運用者の決定である**——`gen-font`は基底、書く側の上限は手の道具、FS/GSの破壊は割り込み（コードの在り処が例外・クリティカルの塊の中）。
+
+| 族 | 項目 | 所要（分） | 中身 |
+|---|---|---|---|
+| base | 48 | 0.1 | 基底の静的な検査（どの選び方でも毎回回る）。`gen-font`を含む |
+| boot | 32 | 3.8 | 起動ログの突き合わせ・機械の変種・起動媒体の像・higher-half・panic・トランポリン |
+| harness | 4 | 1.7 | 手で使う道具の確かめ（`stack-deepest`・calibration・screenshot）と書く側の上限 |
+| interrupts | 40 | 6.2 | 例外・クリティカル・割り込み・APIC・IO-APIC・LAPICタイマ・ACPI・FS/GSの破壊 |
+| memory | 14 | 1.2 | ページング・スタック |
+| smp | 21 | 4.9 | BKL・AP・percpu・シリアルの並走 |
+| process | 60 | 9.1 | タスク・Ring 3・システムコール・FP・並行・`.bss` |
+| ipc | 41 | 12.4 | pipe・socket・poll・入力・画面・合成 |
+| shell | 55 | 21.6 | シェル・台本・UTF-8・profile・history・補完・ANSI・キー配列・環境 |
+| apps | 40 | 7.7 | `zi`・`less`/`more`・TTF |
+| fs | 41 | 3.4 | ext2の取り出し・作成・書き込み・切り詰め・ビットマップ・永続・疎な読み |
+| devices | 13 | 1.3 | PCI・virtio-blk・virtioの割り込み |
+
+**数えたのは、他の走行が無い全検査`0249d12`のログの`(info) item time`の行である**（409項目、計73.5分。**全検査の前に回す基底の子の48行は外した**）。**この段で基底に1項目足したので、いまは基底49・計410である**（下の対応表の確かめ）。
+
+**対応表**（`family::PATH_RULES`）。**変更したパスから、全部・族の集まり・基底だけのどれかを選ぶ。** **骨組みは運用者の決定である**——**土台は全部へ倒す／`xtask/src/main.rs`は全部／基底だけの置き場／1つのパスに複数の族。**
+
+- **読み方は和である**——**パスに当たる行を全部集め、1つでも全部なら全部、そうでなければ族の和、どれも基底だけなら基底だけ。** **行を足しても選びが狭まることは無い**（順序で意味が変わらない）。
+- **型はできるだけディレクトリの形で持つ**（`**`は`/`をまたぎ、`*`はまたがない。運用者の回答2）。**ファイル名を並べるのは、ディレクトリで言えないものだけである**（`kernel/src/`の直下の1ファイル1役のもの等）。
+- **表に行の無いパスは全部へ倒す**（「対象なし」で通さない）。**そのうえで基底が、追跡している全ファイル（と未追跡で無視していないファイル）に当たる行が在ることを強いる**（基底の1項目。`every tracked file has a row in the path-to-family table, and no row is dead`）——**新しいファイルを足したら、表に行を足すまで基底が落ちる。** **`kernel/`・`common/`・`bootloader/`の下は基底だけに当たってはならない**（族か全部）。**どのファイルにも当たらない型（死んだ行）も落とす**——**移したファイルの古い型が残ると、表を読んだ人がそこを覆っていると読む。**
+- **次の段（境界を切る）で作るCPU固有・機械固有・外部ABIの置き場は、はじめは全部へ倒す**（運用者の回答2）。**族へ振り分けるのは、境界が落ち着いてから。** **移したファイルは行の無いパスになるので、基底が落ちて行を足すことを強いる。**
+
+**案から変えたもの**（2026-09-26。**組み立てながら、どの族の項目がそのパスを通るかを読んで広げた**）。
+
+| パス | 案 | 入れた形 | 理由 |
+|---|---|---|---|
+| `kernel/src/idt/`・`irq/`・`interrupts.rs`・`apic.rs` | 割り込み | **全部** | **タイマの割り込みはスケジューラと眠りを動かし、どの族の項目も通る**（シェルの台本の破壊`timer-never-wakes`等） |
+| `kernel/src/task.rs`・`task/` | 実行 | **全部** | **SMPの項目もスケジューラに触れる**（`ap-touch-scheduler`・`ap-runs-preemptive-demo`） |
+| `kernel/src/syscall.rs`・`ring3.rs`・`userland.rs`・`common/src/elf.rs` | 実行 | **全部** | **既定の起動が`init`とシェルと起動時の`syscall-test`を走らせ、SMPの項目もRing 3をAPで走らせる** |
+| `common/src/time.rs` | 割り込み | **全部** | **時計は眠りとタイムアウトの全部が読む** |
+| `kernel/src/address_space.rs`・`quarantine.rs`・`stack.rs` | メモリ | **起動・メモリ・SMP・実行・IPC・シェル・アプリ** | **どのRing 3のプログラムも通り、APもスタックを持つ** |
+| `kernel/src/vfs.rs`・`common/src/ext2.rs` | fs | **起動・実行・IPC・シェル・アプリ・fs** | **どのプログラムもファイルシステムから起こす**（`userland::spawn`） |
+| `kernel/userland/zash.rs`と`common/src/{complete,shell_script,env}.rs` | シェル | **起動・実行・IPC・シェル・アプリ** | **シェルから起こす項目の全部が通る** |
+| キー配列の2項目（`the keyboard layout claim`） | 数の欄は割り込み、中身の欄はシェル | **シェル** | **報告の中身の欄に合わせた**（数の欄は見出しの振り分けで割り込みに入っていた） |
+| `xtask/src/font.rs` | 手の道具 | **基底だけ** | **使うのは基底の`gen-font`の項目だけである** |
+
+**選び方**——**`cargo xtask full --status`が、最後の緑の全検査（汚れ0）の木からHEADまでの累積の差分で選んだ族を、理由のパスつきで出す**（`paths changed since then`と`families selected`）。**木どうしの差で見る**——途中で足して戻した変更は数えない。**移したファイルは、移す前と後の両方のパスを数える**（`--no-renames`）。**作業ツリーの未コミットの変更は数えない。** **緑の全検査の記録が無ければ、全部と言う。**
+
+**この段では表示だけで、回し方は変えない**（`ADR-0069`の決定7の2。**表示が当たっているかを数回の段で確かめてから、自動で回す形へ移る**）。**族ごとに回す口（`check --family`）は、自動で回す段で作る**（運用者の回答3）。**次の段で、コミットの後のhookがHEADの選びを出し、全検査が落ちたときに、落ちた項目の族がその前の選びに入っていたかを数える**（当たりの計器）。
+
+**`ADR-0069`の「選別を機械で支える」の性質との対応。**
+
+| 性質 | この段 |
+|---|---|
+| 分類できない変更を「対象なし」で成功扱いにしない | **表に行の無いパスは全部。基底が表の網羅を強いる** |
+| 前回の全検査の合格からの累積の差分も見る | **緑の全検査の木からHEADまでの差で選ぶ** |
+| 対象が意図せず0件になったら検出する | **0になるのは、変更が全部「基底だけ」のときだけ。`kernel/`・`common/`・`bootloader/`は基底だけにできない** |
+| 前提を失う既存の判定も対象に含める | **土台のパスを全部へ倒し、1つのパスに複数の族を持たせる。漏れる形は全検査が受ける** |
+| 部分の合格と全検査の合格を区別する・未実行の項目を合格に数えない・選んだ理由を結果に残す | **自動で回す段で入れる**（この段は表示だけ。理由のパスは表示に出る） |
+| 全検査は残す | **残す** |
+
+**`--status`の見せ方も直した**（運用者の任意の1点）——**同じコミットに汚れ0の記録が在れば、後の汚れのある記録よりそちらを見せる。** **関門の答えは変わらない。**
+
+**限界。**
+
+- **表は人が書く。** **パスがどの族の項目を通るかを、読んで決めた**——**当たっているかは、次の段の当たりの計器が数える。**
+- **カーネルの土台の多くは全部へ倒れる**（割り込みの配送・タスクの切り替え・Ring 3の核・ページング・ヒープ等）。**カーネルに触れた変更で族が狭まるのは、葉の置き場（装置・管・画面・ファイルシステム・アプリ）に限られる。**
+- **`xtask/src/main.rs`は全部である**——**検査の本体なので、どの族の判定を変えたかをパスで言えない。**
+
+### 「どの誤りでも捕まえた」を名前の判定へ絞る（2026-09-26。族にまとめる段。運用者の決定）
+
+**残っていた77の破壊を、狙いの判定が偽になったときだけ捕まえたとする形へ絞った**（`xtask`の`SABOTAGE_JUDGEMENTS`）。**以前は、落ちれば理由を見ずに「捕まえた」と数えていた**——**ビルドが落ちても、起動が届かなくても、別の判定が落ちても同じだった。**
+
+**狙いは破壊の名前と注釈（`xtask`の一覧の注釈と、この文書の破壊の表）で決め、最後の全検査のログで偽になった判定の名前と突き合わせた。** **載せる前に1つずつ3回回し、3回とも狙いの判定が偽になったものだけを載せた**（運用者の足す1点。**どの判定が先に偽になるかが速さで変わる形を、絞った後の揺らぎとして抱えないため**）。**3回の記録は`target/narrow/`に残した**（追跡しない）。
+
+**読み方。** **`println!`を、出したうえで項目の出力の写しへも積む形に置き換えた**（`main.rs`の中だけ。**判定の行を出す場所は150を越え、判定を出す助けも別の関数に在るので、呼ぶ側を書き換えると1つ漏れた判定だけが黙って見えなくなる**）。**破壊の判定は、写しか落ちた理由の1行に目印が全部在るときだけ捕まえたとする**——**目印は判定の名前と`= false`で、`e2fsck`の判定なら不満の文言の頭も同じ行に置いた**（番号の入らない部分）。**無ければ「狙いの判定が偽にならなかった」として落とす。** **写しは項目ごとに空にし、4 MiBを越えたら積むのをやめて、読めないとして落とす**（最も多く出す項目で62KB）。
+
+**77件とも、3回とも狙いの判定が偽になり、偽になった判定の組も3回とも同じだった**（`target/narrow`の記録を`target/narrow/table.py`で数えた）。**揺れて置けなかったものは0である**（`SABOTAGE_JUDGEMENTS_NOT_PLACED`は空）。**目印を持たなかった5件は、目印を持つ形へ直してから3回回した**——**virtioの3件は、カーネルの止まりの行を添えた落ちた理由**（読みや実演が終わらない）、**ISRを読まない1件は、数だけが狂って`= false`の行が出なかったので、数の判定に名前を付けた**（`each read was delivered once and nothing else arrived`。既定の構成で3回とも真を確かめた）、**疎な読みと`.bss`は、判定行に見つけた行を添えた**（行が出て値だけが違ったことを、起動が届かなかった形と分ける）。
+
+| 族 | 破壊（鍵） | 狙いの判定の目印（同じ1行に全部） | 偽になった判定の数 | ほかに偽になった判定 |
+|---|---|---|---|---|
+| apps | `zi-cursor-ignore-updown-test` | `the up/down arrows moved the cursor between lines = false` | 1 | — |
+| apps | `zi-write-skip-body-test` | `cat read back exactly what zi edited = false` | 8 | a new file was created and read back・backspace at the start of a line joined it to the one above・enter split the line・tail printed the end of the file and nothing more ほか3本 |
+| apps | `zi-insert-drop-first-test` | `a new file was created and read back = false` … `cat printed what zi wrote = false` | 4 | backspace at the start of a line joined it to the one above・the big file read back with exactly the one edit・the round trip reads back as written |
+| apps | `zash-prompt-drop-color-test` | `the zash prompt name is drawn in its own color = false` | 2 | the prompt symbol kept the default color |
+| apps | `zi-status-freeze-mode-test` | `the zi status line followed the mode = false` | 2 | a lone Esc settled without another key |
+| apps | `ioctl-winsize-swap-test` | `ioctl(TIOCGWINSZ) agrees with the console = false` | 6 | a lone Esc settled without another key・the window followed the cursor down the file・the zi status line followed the mode・the zi status line is drawn in its own color ほか1本 |
+| apps | `zi-esc-needs-second-key-test` | `a lone Esc settled without another key = false` | 16 | backspace at the start of a line joined it to the one above・cat read back exactly what zi edited・enter split the line・mkdir made a directory and touch put a file in it ほか11本 |
+| apps | `alt-screen-skip-repaint-test` | `the screen before the alternate screen came back = false` | 2 | leaving the alternate screen skips the blank cells |
+| apps | `zi-status-below-text-test` | `the zi status line sits on the second-to-last row = false` | 1 | — |
+| apps | `zi-command-line-silent-test` | `the command line echoes what is being typed = false` | 1 | — |
+| apps | `zi-append-like-insert-test` | `a starts one column right of i = false` | 1 | — |
+| apps | `open-ignore-create-test` | `a new file was created and read back = false` … `it appeared in ls = false` | 21 | :w wrote every byte it asked for・a lone Esc settled without another key・backspace at the start of a line joined it to the one above・cat read back exactly what zi edited ほか16本 |
+| apps | `env-drop-term-test` | `the zash prompt name is drawn in its own color = false` | 2 | the prompt symbol kept the default color |
+| apps | `unlink-ignore-request-test` | `rm removed it again = false` | 3 | the directory was gone after the round trip・the only failure in the round was the refused rmdir |
+| apps | `zi-enter-does-nothing-test` | `enter split the line = false` | 3 | backspace at the start of a line joined it to the one above・the round trip reads back as written |
+| apps | `zi-skip-release-test` | `zi gave back every frame it took, on every run = false` | 1 | — |
+| apps | `zi-skip-grow-test` | `the big file read back with exactly the one edit = false` | 1 | — |
+| apps | `zi-join-does-nothing-test` | `backspace at the start of a line joined it to the one above = false` | 1 | — |
+| apps | `zi-window-frozen-test` | `the window followed the cursor down the file = false` | 1 | — |
+| apps | `stderr-on-screen-test` | `the error reached the echo area instead of the text = false` | 4 | cat read back exactly what zi edited・the cursor on the screen followed the buffer・the window followed the cursor down the file |
+| apps | `zi-skip-cursor-flush-test` | `the cursor on the screen followed the buffer = false` | 10 | a lone Esc settled without another key・cat read back exactly what zi edited・the command line echoes what is being typed・the error reached the echo area instead of the text ほか5本 |
+| apps | `zi-redraw-whole-screen-test` | `moving the window one line draws one line = false` | 1 | — |
+| apps | `cursor-repaint-always-test` | `an idle read sends nothing = false` | 1 | — |
+| apps | `zi-edit-redraws-everything-test` | `inserting one character draws one line = false` | 1 | — |
+| apps | `virtio-skip-install-test` | `the save reached the device = false` | 1 | — |
+| apps | `repaint-blank-cells-test` | `leaving the alternate screen skips the blank cells = false` | 1 | — |
+| apps | `less-window-frozen-test` | `a line past the first screen became visible = false` | 1 | — |
+| apps | `more-uses-alternate-screen-test` | `what more printed is still on the screen after it left = false` | 1 | — |
+| apps | `flush-every-write-test` | `one move costs one transfer = false` | 1 | — |
+| apps | `read-skip-flush-test` | `one move costs one transfer = false` | 1 | — |
+| apps | `frame-write-per-piece-test` | `one move costs one syscall = false` | 1 | — |
+| apps | `draw-pixel-by-pixel-test` | `erasing a page writes no pixel one by one = false` | 1 | — |
+| apps | `less-redraw-whole-screen-test` | `moving one line draws one line = false` | 2 | one move costs one syscall |
+| apps | `persist-zi-test rebuild-between` | `boot 2's Ring 3 printed what the device carries = false` | 2 | boot 2's checksum matches what the host read before it |
+| fs | `persist-test rebuild-between` | `boot 2 sees the change boot 1 made = false` | 3 | boot 2's checksum matches what the host read from the device before it・the disk was not rebuilt in between |
+| fs | `fs-copy-corrupt-tail-test` | `the extracted image matches the built image byte for byte = false` | 2 | the kernel's image checksum matches the host's |
+| fs | `ext2-group-count-offset-test` | `the free counts match dumpe2fs = false` | 1 | — |
+| fs | `ext2-create-skip-links-test` | `e2fsck found nothing to complain about = false` … `has deleted/unused inode` | 1 | — |
+| fs | `ext2-create-skip-inode-count-test` | `e2fsck found nothing to complain about = false` … `Free inodes count wrong` | 2 | one block and one inode went away, the directory count did not |
+| fs | `ext2-create-move-dirs-count-test` | `e2fsck found nothing to complain about = false` … `Directories count wrong` | 2 | one block and one inode went away, the directory count did not |
+| fs | `ext2-create-skip-extra-isize-test` | `the new inode names the extra area the way the image asks = false` | 1 | — |
+| fs | `ext2-mkdir-skip-dot-dot-test` | `e2fsck found nothing to complain about = false` … `'..' in /data/made` | 1 | — |
+| fs | `ext2-mkdir-skip-parent-link-test` | `e2fsck found nothing to complain about = false` … `ref count is` | 1 | — |
+| fs | `ext2-mkdir-skip-dirs-count-test` | `e2fsck found nothing to complain about = false` … `Directories count wrong` | 2 | one block and one inode went away and the directory count rose by one |
+| fs | `ext2-truncate-off-by-one-test` | `the extracted image matches the built image byte for byte = false` | 1 | — |
+| fs | `ext2-truncate-always-free-test` | `the extracted image matches the built image byte for byte = false` | 1 | — |
+| fs | `ext2-truncate-keep-slot-test` | `the extracted image matches the built image byte for byte = false` | 2 | e2fsck found nothing to complain about |
+| fs | `ext2-truncate-skip-free-test` | `the extracted image matches the built image byte for byte = false` | 2 | e2fsck found nothing to complain about |
+| fs | `ext2-truncate-keep-tail-test` | `the extracted image matches the built image byte for byte = false` | 1 | — |
+| fs | `ext2-truncate-skip-blocks-test` | `the extracted image matches the built image byte for byte = false` | 2 | e2fsck found nothing to complain about |
+| fs | `ext2-append-skip-size-test` | `e2fsck found nothing to complain about = false` … `i_size is` | 2 | the appended bytes read back exactly |
+| fs | `ext2-append-round-size-test` | `the appended bytes read back exactly = false` | 1 | — |
+| fs | `ext2-append-skip-blocks-test` | `e2fsck found nothing to complain about = false` … `i_blocks is` | 1 | — |
+| fs | `ext2-append-blocks-in-bytes-test` | `e2fsck found nothing to complain about = false` … `i_blocks is` | 1 | — |
+| fs | `ext2-append-skip-link-test` | `e2fsck found nothing to complain about = false` … `Block bitmap differences` | 2 | the appended bytes read back exactly |
+| fs | `ext2-append-always-allocate-test` | `the free blocks dropped by exactly one across both appends = false` | 3 | e2fsck found nothing to complain about・the appended bytes read back exactly |
+| fs | `ext2-alloc-skip-sb-count-test` | `e2fsck complains exactly once, about the bitmap = false` … `Free blocks count wrong (` | 2 | the free counts dropped by exactly one |
+| fs | `ext2-alloc-skip-bg-count-test` | `e2fsck complains exactly once, about the bitmap = false` … `Free blocks count wrong for group` | 2 | the free counts dropped by exactly one |
+| fs | `ext2-alloc-ignore-bitmap-test` | `e2fsck complains exactly once, about the bitmap = false` | 1 | — |
+| fs | `ext2-free-skip-bit-test` | `the extracted image matches the built image byte for byte = false` | 2 | e2fsck found nothing to complain about |
+| fs | `fs-flush-skip-test` | `at least the whole image went to the device = false` | 2 | the disk image the device wrote matches the RAM copy byte for byte・the virtio disk received Some(0) byte(s); at least the whole image went to the device |
+| fs | `virtio-flush-short-test` | `at least the whole image went to the device = false` | 2 | the disk image the device wrote matches the RAM copy byte for byte・the virtio disk received Some(2093056) byte(s); at least the whole image went to the device |
+| devices | `pci-config-offset-test` | `the sets match = false` | 1 | kernel enumerated 7 function(s), qemu reports 7; the sets match |
+| devices | `pci-ignore-multifunction-test` | `the sets match = false` | 1 | kernel enumerated 5 function(s), qemu reports 7; the sets match |
+| devices | `pci-stop-at-first-test` | `the sets match = false` | 1 | kernel enumerated 1 function(s), qemu reports 7; the sets match |
+| devices | `virtio-wrong-sector-test` | `checksum from the device` … `match = false` | 1 | checksum from the device = 0x000005b4, from the image file = 0x00078603; match |
+| devices | `virtio-intx-edge-test` | `route read back matching the platform's declaration = false` | 1 | delivered = Some(2), not mine = Some(0), route read back matching the platform's declaration |
+| devices | `virtio-wait-holding-bkl-test` | `the blocking read released the BKL before waiting = false` | 1 | — |
+| shell | `ansi-console-skip-parse-test` | `CUP moved the cursor = false` | 13 | DECTCEM brought the cursor back・ED(0) erased below and kept above・ED(2) erased the display・EL(0) erased right and kept left ほか8本 |
+| shell | `ansi-sgr-ignore-color-test` | `SGR colored the cell and the screen = false` | 1 | — |
+| shell | `ansi-cursor-ignore-hide-test` | `DECTCEM hid the cursor = false` | 3 | EL(0) erased right and kept left・SGR was consumed silently |
+| devices | `virtio-skip-notify-test` | `the read did not complete` … `the request was not completed after` | 0 | — |
+| devices | `virtio-short-desc-test` | `the read did not complete` … `the device reported status 1` | 0 | — |
+| devices | `virtio-skip-eoi-test` | `the exercise did not complete` … `RequestTimedOut` | 0 | — |
+| fs | `ext2-sparse-as-error-test` | `fs-sparse says = true = false` … `reads block 1 as a full block of zeros = false` | 1 | — |
+| process | `user-load-filesz-only` | `bss-check says Exited(0) = false` … `ended Ok(Folded(14))` | 1 | — |
+| devices | `virtio-skip-isr-read-test` | `each read was delivered once and nothing else arrived = false` | 1 | — |
+
+**数が0の3件は、偽の判定の行を出さずに落ちる**（落ちた理由の行で見る）。**`ほかに偽になった判定`は、同じ破壊の巻き添えである**——**狙いの判定だけを見るので、巻き添えが増えても減っても判定は変わらない。**
+
+**名前の検査に届いていないものが1件ある**——**`virtio-short-desc-test`は、狙いが「装置が黙って511バイトだけ書き、中身の突き合わせが落ちる」だったが、QEMUは要求ごと拒み（status 1）、カーネルの状態の検査が起動を止める**（S13-bの実測。カーネルの注釈は「見込みは外れたが、捕まる」と書いている）。**判定の行に届いていないことを添え**（`note`）、**上の「置けない破壊の一覧」と持ち越しに書いた**（fsの3つと同じ扱い。運用者の足す1点）。
+
+**落ちる判定の本数が、破壊の表と`xtask`の注釈に書いた実測とずれていたものが6つある**（直していない。**狙いの判定は偽のままなので、絞りは変わらない**）。**`zi-skip-cursor-flush-test`は1本→10本、`stderr-on-screen-test`は2本→4本、`unlink-ignore-request-test`は1本→3本、`less-redraw-whole-screen-test`は1本→2本、`zi-enter-does-nothing-test`は2本→3本、`env-drop-term-test`は3本→2本である**（書いた値→今回の3回）。**ずれた時期は調べていない**——**判定を後から足した段（行頭のBackspace等）で巻き添えが増えた形と見込む**（推測）。
 
 ### VirtualBoxの走行の記録を判定する（2026-09-24。`ADR-0068`の2-2）
 

@@ -59,7 +59,7 @@
    **全検査は `cargo xtask full` で別の作業木（`target/full-check/wt`）で回す**
    ——**検査している木を触らない。全検査の間は QEMU と VirtualBox を使う検査を
    走らせない**（**検査の錠が断る**。終了の値 75。`ADR-0069` の決定 7 の 3）。
-   **錠の持ち主と、HEAD の木が緑かは `cargo xtask full --status` で見る。**
+   **錠の持ち主と、HEAD の木が緑か、緑の木から後の変更で選ぶ族は `cargo xtask full --status` で見る。**
    **検査プロセスだけでなく、自分が起こした待ちのシェルも確かめる**
    （`ps -eo pid,args | grep '[u]ntil'`。**`sleep` を回している行が
    在れば、それは前の回の残骸である**）。**`qemu|xtask` の grep では
