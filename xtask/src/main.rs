@@ -5436,6 +5436,22 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         signs: &["each read was delivered once and nothing else arrived = false"],
         note: "",
     },
+    // ── shell（ANSI 3） ──
+    NamedJudgement {
+        key: "ansi-console-skip-parse-test",
+        signs: &["CUP moved the cursor = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ansi-sgr-ignore-color-test",
+        signs: &["SGR colored the cell and the screen = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "ansi-cursor-ignore-hide-test",
+        signs: &["DECTCEM hid the cursor = false"],
+        note: "",
+    },
 ];
 
 /// 名前の判定へ絞らず、「どの誤りでも」のまま置く破壊と、その理由（2026-09-26。運用者の足す 1 点）。
