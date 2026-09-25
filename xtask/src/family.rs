@@ -106,7 +106,7 @@ const SCREEN_FAMILIES: &[Family] = &[Family::Boot, Family::Ipc, Family::Shell, F
 /// **読み方は和である**——**パスに当たる行を全部集め、1 つでも全部なら全部、そうでなければ族の和、
 /// どれも基底だけなら基底だけ。** **行を足しても選びが狭まることは無い**（順序で意味が変わらない）。
 ///
-/// **当たる行が無いパスは全部へ倒す**（選ぶ側）。**そのうえで基底が、追跡している全ファイルに
+/// **当たる行が無いパスは全部へ倒す**（[`select`]）。**そのうえで基底が、追跡している全ファイルに
 /// 当たる行が在ることを強いる**（[`table_problems`]）——**新しいファイルを足したら、表に行を足すまで
 /// 基底が落ちる。** **`kernel/`・`common/`・`bootloader/` の下は基底だけに当たってはならない。**
 ///
@@ -456,6 +456,105 @@ pub fn table_problems(rules: &[PathRule], paths: &[&str]) -> Vec<String> {
     problems
 }
 
+/// 変更したパスの集まりから選んだもの。
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Selection {
+    /// 全部へ倒した理由のパスと、その訳（土台か、表に行が無いか）。
+    pub all: Vec<(String, &'static str)>,
+    /// 族ごとの、選んだ理由のパス。
+    pub families: std::collections::BTreeMap<Family, Vec<String>>,
+    /// 基底だけのパス。
+    pub base_only: Vec<String>,
+}
+
+/// 変更したパスから選ぶ（2026-09-26。**当たる行が無いパスは全部へ倒す**——**「対象なし」で通さない**）。
+pub fn select(rules: &[PathRule], paths: &[String]) -> Selection {
+    let mut selection = Selection::default();
+    for path in paths {
+        match reach_of(rules, path) {
+            None => selection.all.push((path.clone(), "no row in the table")),
+            Some(PathReach::All) => selection.all.push((path.clone(), "a foundation path")),
+            Some(PathReach::Families(families)) => {
+                for family in families {
+                    selection
+                        .families
+                        .entry(family)
+                        .or_default()
+                        .push(path.clone());
+                }
+            }
+            Some(PathReach::BaseOnly) => selection.base_only.push(path.clone()),
+        }
+    }
+    selection
+}
+
+impl Selection {
+    /// 人が読む行（`--status` が出す）。**理由のパスは族ごとに数本まで出し、残りは数で言う。**
+    pub fn lines(&self, changed: usize) -> Vec<String> {
+        const SHOWN: usize = 4;
+        let listed = |paths: &[String]| {
+            let mut text = paths
+                .iter()
+                .take(SHOWN)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            if paths.len() > SHOWN {
+                text.push_str(&format!(" and {} more", paths.len() - SHOWN));
+            }
+            text
+        };
+        if changed == 0 {
+            return vec!["families selected: none (nothing changed)".to_string()];
+        }
+        if !self.all.is_empty() {
+            let mut lines = vec![format!(
+                "families selected: all (the full check), because of {} path(s):",
+                self.all.len()
+            )];
+            lines.extend(
+                self.all
+                    .iter()
+                    .take(SHOWN * 2)
+                    .map(|(path, why)| format!("    {path} ({why})")),
+            );
+            if self.all.len() > SHOWN * 2 {
+                lines.push(format!("    and {} more", self.all.len() - SHOWN * 2));
+            }
+            return lines;
+        }
+        if self.families.is_empty() {
+            return vec![format!(
+                "families selected: none beyond the base ({} path(s), all base only: {})",
+                self.base_only.len(),
+                listed(&self.base_only)
+            )];
+        }
+        let mut lines = vec![format!(
+            "families selected: {} of {} ({})",
+            self.families.len(),
+            Family::ALL.len() - 1,
+            self.families
+                .keys()
+                .map(|family| family.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )];
+        for (family, paths) in &self.families {
+            lines.push(format!("    {}: {}", family.name(), listed(paths)));
+        }
+        if !self.base_only.is_empty() {
+            lines.push(format!(
+                "    base only: {} path(s): {}",
+                self.base_only.len(),
+                listed(&self.base_only)
+            ));
+        }
+        lines
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,5 +686,49 @@ mod tests {
         assert!(problems[1].starts_with("new.txt: no row"), "{problems:?}");
         assert!(problems[2].contains("gone/**"), "{problems:?}");
         assert!(table_problems(&rules[1..], &["kernel/src/main.rs", "gone/x"]).is_empty());
+    }
+
+    /// **選び方**——**行の無いパスは全部へ倒す（「対象なし」で通さない）。文書だけなら意図した 0。**
+    #[test]
+    fn selection_falls_to_all_for_an_unknown_path_and_to_none_for_documents_only() {
+        let paths = |list: &[&str]| list.iter().map(|path| path.to_string()).collect::<Vec<_>>();
+        let documents = select(PATH_RULES, &paths(&["docs/roadmap.md", "README.md"]));
+        assert!(documents.all.is_empty() && documents.families.is_empty());
+        assert_eq!(documents.base_only.len(), 2);
+        assert!(documents.lines(2)[0].starts_with("families selected: none beyond the base"));
+
+        let unknown = select(PATH_RULES, &paths(&["docs/roadmap.md", "arch/new.rs"]));
+        assert_eq!(
+            unknown.all,
+            vec![("arch/new.rs".to_string(), "no row in the table")]
+        );
+        assert!(unknown.lines(2)[0].starts_with("families selected: all"));
+
+        let leaf = select(
+            PATH_RULES,
+            &paths(&[
+                "kernel/userland/less.rs",
+                "kernel/src/socket.rs",
+                "docs/a.md",
+            ]),
+        );
+        assert!(leaf.all.is_empty());
+        assert_eq!(
+            leaf.families.keys().copied().collect::<Vec<_>>(),
+            vec![Family::Ipc, Family::Apps]
+        );
+        let lines = leaf.lines(3);
+        assert_eq!(lines[0], "families selected: 2 of 11 (ipc, apps)");
+        assert!(lines
+            .iter()
+            .any(|line| line == "    apps: kernel/userland/less.rs"));
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with("    base only: 1 path(s)")));
+
+        assert_eq!(
+            select(PATH_RULES, &[]).lines(0),
+            vec!["families selected: none (nothing changed)".to_string()]
+        );
     }
 }

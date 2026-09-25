@@ -36,6 +36,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 
 use crate::check_lock::{self, git, git_line};
+use crate::family;
 use crate::launch::{self, HarnessFault, HOST_SYSTEM_DRIVE, HOST_VHD_DRIVE};
 
 /// `cargo xtask full` が子の全検査へログの道を渡す環境変数（錠の中身と記録に書くだけ）。
@@ -627,18 +628,28 @@ fn paths_of(root: &Path, commit: &str) -> Result<Vec<String>> {
 /// - **合格の記録で、段が要る段以上であること。**
 /// - **コミットが同じか、木が同じで汚れが 0 であること**（木が同じなら中身は同じ）。
 /// - **旗で越えた記録（`override`）は、そのコミットだけを満たす。**
+///
+/// **汚れ 0 の記録を先に見せる**（2026-09-26。運用者の任意の 1 点）——**同じコミットで汚れのある回が
+/// 後に在っても、確かめた木が言える記録のほうが読める。** **関門の答えは変わらない**（どれかが当たれば
+/// 満たす）。
 pub fn covering<'a>(
     records: &'a [Record],
     commit: &str,
     tree: &str,
     need: Level,
 ) -> Option<&'a Record> {
-    records.iter().rev().find(|record| {
+    let covers = |record: &&Record| {
         let passed = record.outcome == "pass"
             && Level::parse(&record.level).is_some_and(|level| level >= need)
             && (record.commit == commit || (record.tree == tree && record.dirty == 0));
         passed || (record.outcome == "override" && record.commit == commit)
-    })
+    };
+    records
+        .iter()
+        .rev()
+        .filter(covers)
+        .find(|record| record.dirty == 0)
+        .or_else(|| records.iter().rev().find(covers))
 }
 
 /// 記録を人が読む形にする（純粋な論理）。
@@ -683,6 +694,54 @@ fn commit_line(root: &Path, records: &[Record], commit: &str) -> Result<(String,
         ),
         covered,
     ))
+}
+
+/// 緑の全検査の木から HEAD までに変わったパス（2026-09-26。族にまとめる段）。
+///
+/// **木どうしの差で見る**——**途中で足して戻した変更は数えない**（確かめる中身は HEAD の木である）。
+/// **移したファイルは、移す前と後の両方のパスを数える**（`--no-renames`）。**記録のコミットが読めなければ
+/// 木で読む**（`--amend` で消えたコミット）。**作業ツリーの未コミットの変更は数えない。**
+fn paths_since(root: &Path, record: &Record) -> Result<Vec<String>> {
+    let text = git_line(
+        root,
+        &[
+            "diff",
+            "--no-renames",
+            "--name-only",
+            &record.commit,
+            "HEAD",
+        ],
+    )
+    .or_else(|_| {
+        git_line(
+            root,
+            &["diff", "--no-renames", "--name-only", &record.tree, "HEAD"],
+        )
+    })?;
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// 緑の全検査から後の変更で選ぶ族を、人が読む行にする（2026-09-26）。**差が読めなければ全部と言う。**
+fn selection_since(root: &Path, record: &Record) -> Vec<String> {
+    match paths_since(root, record) {
+        Ok(paths) => {
+            let mut lines = vec![format!(
+                "paths changed since then (the cumulative diff to HEAD): {}",
+                paths.len()
+            )];
+            lines.extend(family::select(family::PATH_RULES, &paths).lines(paths.len()));
+            lines
+        }
+        Err(error) => vec![format!(
+            "families selected: all (the full check), because the diff since the last green full \
+             check could not be read: {error:#}"
+        )],
+    }
 }
 
 /// `cargo xtask full --status`——**HEAD の木が緑か、緑の木より後のコミットと、それぞれ何で確かめたか。**
@@ -732,11 +791,21 @@ fn status(root: &Path) -> Result<()> {
             for commit in commits {
                 println!("{}", commit_line(&main, &records, commit)?.0);
             }
+            // **族の選び**（2026-09-26。族にまとめる段）——**緑の木から HEAD までの累積の差分で選ぶ。**
+            // **この段では表示だけで、回し方は変えない**（`ADR-0069` の決定 7 の 2）。
+            for line in selection_since(&main, record) {
+                println!("{line}");
+            }
         }
-        None => println!(
-            "the last green full check: none recorded in {}",
-            records_path(&main)?.display()
-        ),
+        None => {
+            println!(
+                "the last green full check: none recorded in {}",
+                records_path(&main)?.display()
+            );
+            println!(
+                "families selected: all (the full check), because no green full check is recorded"
+            );
+        }
     }
     let (holders, content) = check_lock::current_holders(&main)?;
     if holders.is_empty() {
@@ -1329,6 +1398,25 @@ mod tests {
         assert!(covering(&records, "c4b", "t4", Level::Base).is_none());
         assert!(covering(&records, "c5", "t5", Level::Commit).is_some());
         assert!(covering(&records, "c6", "t6", Level::Base).is_none());
+    }
+
+    /// **同じコミットに汚れ 0 の記録が在れば、後の汚れのある記録よりそちらを見せる**（2026-09-26。
+    /// 運用者の任意の 1 点）。**無ければ、汚れのある記録で満たす**（関門の答えは変わらない）。
+    #[test]
+    fn a_clean_record_is_shown_before_a_later_dirty_one() {
+        let records = vec![
+            record("commit", "pass", "c1", "t1", 0),
+            record("base", "pass", "c1", "t1", 2),
+            record("base", "pass", "c2", "t2", 1),
+        ];
+        assert_eq!(
+            covering(&records, "c1", "t1", Level::Base).map(|record| record.dirty),
+            Some(0)
+        );
+        assert_eq!(
+            covering(&records, "c2", "t2", Level::Base).map(|record| record.dirty),
+            Some(1)
+        );
     }
 
     /// **push の前の関門**（運用者の足す1点。2026-09-25）。**記録が在るコミットは通り、無いコミットは
