@@ -21045,6 +21045,7 @@ fn report_enumeration_counts() {
             STRUCTURAL_GUARD_SYMBOL_FRAGMENTS.len(),
         ),
         ("TEST_HOOKS_EXCLUSIONS", TEST_HOOKS_EXCLUSIONS.len()),
+        ("PATH_RULES", family::PATH_RULES.len()),
     ];
     let rendered: Vec<String> = counts
         .iter()
@@ -21295,6 +21296,21 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         Err(error) => {
             println!("--- shell sabotage split: FAILED ({error})");
             failed.push("shell sabotage split".to_string());
+        }
+    }
+
+    // **変更したパスと族の対応表**（2026-09-26。族にまとめる段。運用者の決定）。**追跡している全ファイルに
+    // 当たる行が在り、`kernel/`・`common/`・`bootloader/` の下が基底だけに当たらず、死んだ行が無いこと。**
+    total += 1;
+    begin_item(
+        Family::Base,
+        "every tracked file has a row in the path-to-family table, and no row is dead",
+    );
+    match check_path_family_table(&workspace_root) {
+        Ok(message) => println!("--- path-to-family table: OK ({message})"),
+        Err(error) => {
+            println!("--- path-to-family table: FAILED ({error:#})");
+            failed.push("path-to-family table".to_string());
         }
     }
 
@@ -23671,8 +23687,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 48,
-    full: 409,
+    base: 49,
+    full: 410,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -23701,6 +23717,40 @@ const EXPECTED_SHELL_SABOTAGE_SPLIT: ExpectedShellSabotageSplit = ExpectedShellS
     sendkey: 11,
     script: 10,
 };
+
+/// 変更したパスと族の対応表が、追跡している全ファイルを覆うかを見る（2026-09-26。族にまとめる段）。
+///
+/// **未追跡も見る**（`--others --exclude-standard`）——**新しいファイルは、コミットの前に落ちる。**
+/// **判定は `family::table_problems`**（ホストのテストが覆う）。
+fn check_path_family_table(workspace_root: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(workspace_root)
+        .args(["ls-files", "--cached", "--others", "--exclude-standard"])
+        .output()
+        .context("failed to list the files for the path-to-family table")?;
+    if !output.status.success() {
+        bail!("git ls-files failed while listing the files for the path-to-family table");
+    }
+    let listing = String::from_utf8(output.stdout).context("git ls-files produced non-UTF-8")?;
+    let paths: Vec<&str> = listing.lines().filter(|line| !line.is_empty()).collect();
+    let problems = family::table_problems(family::PATH_RULES, &paths);
+    if !problems.is_empty() {
+        bail!("{} problem(s): {}", problems.len(), problems.join("; "));
+    }
+    let (mut all, mut families, mut base_only) = (0, 0, 0);
+    for path in &paths {
+        match family::reach_of(family::PATH_RULES, path) {
+            Some(family::PathReach::All) => all += 1,
+            Some(family::PathReach::Families(_)) => families += 1,
+            _ => base_only += 1,
+        }
+    }
+    Ok(format!(
+        "{} file(s): {all} select all, {families} select families, {base_only} base only; {} row(s)",
+        paths.len(),
+        family::PATH_RULES.len()
+    ))
+}
 
 /// 破壊の分け方が [`EXPECTED_SHELL_SABOTAGE_SPLIT`] のとおりで、重なりが無いことを見る。
 fn check_shell_sabotage_split() -> Result<String> {
