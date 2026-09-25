@@ -369,6 +369,8 @@ struct Start {
     when: String,
     /// 始めに読んだ、WSL の置き場の書いたセクタ数。
     disk_start: Option<u64>,
+    /// 検査の環境の指紋（全検査だけ。2026-09-26）。
+    env: Option<String>,
 }
 
 static START: Mutex<Option<Start>> = Mutex::new(None);
@@ -654,6 +656,7 @@ pub fn begin(root: &Path, level: Level) {
             unix,
             when,
             disk_start,
+            env: (level == Level::Full).then(|| environment_fingerprint(root)),
         });
     }
 }
@@ -698,7 +701,7 @@ pub fn end(outcome: &str, items: Option<usize>, item_seconds: Option<f64>) {
                     .flatten()
                     .filter(|state| !state.is_empty()),
                 other_runs: OTHER_RUNS.lock().ok().and_then(|slot| *slot),
-                env: None,
+                env: start.env.clone(),
                 selected: None,
                 score: None,
                 note: std::env::var(LOG_ENV).unwrap_or_else(|_| "-".to_string()),
@@ -809,52 +812,326 @@ fn commit_line(root: &Path, records: &[Record], commit: &str) -> Result<(String,
     ))
 }
 
-/// 緑の全検査の木から HEAD までに変わったパス（2026-09-26。族にまとめる段）。
+/// 環境の指紋が比べる外の道具のパッケージ（2026-09-26）。**全検査が起こす・呼ぶものである**——QEMU と
+/// OVMF、`e2fsck` 等、`objdump`・`nm`、`sfdisk`、C のユーザープログラムを建てる `gcc`、道具の `python3`。
+const ENVIRONMENT_PACKAGES: [&str; 7] = [
+    "qemu-system-x86",
+    "ovmf",
+    "e2fsprogs",
+    "binutils",
+    "fdisk",
+    "gcc",
+    "python3",
+];
+
+/// 検査の環境の指紋（2026-09-26。第三者レビューの取り込み）。**ファイルの差分に現れない変化**
+/// （`rustc`・QEMU・OVMF・外の道具の版・`CC` と `RUSTFLAGS`）を、選びが比べる。**全検査の記録に残す。**
 ///
-/// **木どうしの差で見る**——**途中で足して戻した変更は数えない**（確かめる中身は HEAD の木である）。
-/// **移したファイルは、移す前と後の両方のパスを数える**（`--no-renames`）。**記録のコミットが読めなければ
-/// 木で読む**（`--amend` で消えたコミット）。**作業ツリーの未コミットの変更は数えない。**
-fn paths_since(root: &Path, record: &Record) -> Result<Vec<String>> {
-    let text = git_line(
-        root,
-        &[
-            "diff",
-            "--no-renames",
-            "--name-only",
-            &record.commit,
-            "HEAD",
-        ],
-    )
-    .or_else(|_| {
-        git_line(
-            root,
-            &["diff", "--no-renames", "--name-only", &record.tree, "HEAD"],
-        )
-    })?;
-    Ok(text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
+/// **読めなかった欄は `?` と書く**——**読めない環境どうしは同じと見る**（読めないことが変わっていない）。
+/// **`rustc` は木の中で呼ぶ**（`rust-toolchain.toml` が決める版を見る）。
+pub fn environment_fingerprint(root: &Path) -> String {
+    let rustc = Command::new("rustc")
+        .current_dir(root)
+        .arg("-vV")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .map(|line| line.trim_start_matches("rustc ").trim().to_string())
+        })
+        .unwrap_or_else(|| "?".to_string());
+    // **言語を固定して呼ぶ**（`external_tool` と同じ理由。版の文字列は訳されないが、揃えておく）。
+    let listed = Command::new("dpkg-query")
+        .env("LC_ALL", "C")
+        .args(["-W", "-f=${Package}=${Version}\n"])
+        .args(ENVIRONMENT_PACKAGES)
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default();
+    let mut parts = vec![format!("rustc={rustc}")];
+    for package in ENVIRONMENT_PACKAGES {
+        let version = listed
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{package}=")))
+            .filter(|version| !version.is_empty())
+            .unwrap_or("?");
+        parts.push(format!("{package}={version}"));
+    }
+    for name in ["CC", "RUSTFLAGS"] {
+        parts.push(format!(
+            "{name}={}",
+            std::env::var(name).unwrap_or_else(|_| "-".to_string())
+        ));
+    }
+    parts.join("; ")
+}
+
+/// 2 つの指紋で違う欄（純粋な論理）。**`名前: 前 -> 今` の形で返す。**
+fn environment_differences(before: &str, now: &str) -> Vec<String> {
+    let parse = |text: &str| -> std::collections::BTreeMap<String, String> {
+        text.split("; ")
+            .filter_map(|part| part.split_once('='))
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    };
+    let (before, now) = (parse(before), parse(now));
+    let names: std::collections::BTreeSet<&String> = before.keys().chain(now.keys()).collect();
+    names
+        .into_iter()
+        .filter(|name| before.get(*name) != now.get(*name))
+        .map(|name| {
+            format!(
+                "{name}: {} -> {}",
+                before.get(name).map_or("(none)", String::as_str),
+                now.get(name).map_or("(none)", String::as_str)
+            )
+        })
+        .collect()
+}
+
+/// 2 つのコミットの間で変わったパス（2026-09-26）。
+///
+/// **木どうしの差で見る**——**途中で足して戻した変更は数えない。** **移したファイルは、移す前と後の
+/// 両方のパスを数える**（`--no-renames`）。**`-z` で読む**——**空白や改行を含む名前も 1 つに読む。**
+/// **作業ツリーの未コミットの変更は数えない。**
+fn changed_paths(root: &Path, from: &str, to: &str) -> Result<Vec<String>> {
+    let output = git(root)
+        .args(["diff", "--no-renames", "--name-only", "-z", from, to])
+        .output()
+        .context("could not run git diff")?;
+    if !output.status.success() {
+        bail!(
+            "git diff {from} {to} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
         .collect())
 }
 
-/// 緑の全検査から後の変更で選ぶ族を、人が読む行にする（2026-09-26）。**差が読めなければ全部と言う。**
-fn selection_since(root: &Path, record: &Record) -> Vec<String> {
-    match paths_since(root, record) {
-        Ok(paths) => {
-            let mut lines = vec![format!(
-                "paths changed since then (the cumulative diff to HEAD): {}",
-                paths.len()
-            )];
-            lines.extend(family::select(family::PATH_RULES, &paths).lines(paths.len()));
-            lines
+/// そのコミットが在るか。
+fn commit_exists(root: &Path, commit: &str) -> bool {
+    git(root)
+        .args(["cat-file", "-e", &format!("{commit}^{{commit}}")])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// `ancestor` が `commit` の祖先か（同じコミットを含む）。
+fn is_ancestor(root: &Path, ancestor: &str, commit: &str) -> bool {
+    git(root)
+        .args(["merge-base", "--is-ancestor", ancestor, commit])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// 最初の親（無ければ `None`）。
+fn first_parent(root: &Path, commit: &str) -> Result<Option<String>> {
+    let line = git_line(root, &["rev-list", "--parents", "-n", "1", commit])?;
+    Ok(line.split_whitespace().nth(1).map(str::to_string))
+}
+
+/// 選びの答え（2026-09-26。選ぶのを表示する段）。**比較元・対象・選んだ理由・全部へ倒した理由を持つ。**
+pub struct Selected {
+    /// 対象のコミットと木。
+    pub target: String,
+    pub target_tree: String,
+    /// 比較元（最後の緑の全検査。無ければ `None`）。
+    pub base: Option<Record>,
+    /// 累積の差分で変わったパスの数（比べられないときは 0）。
+    pub changed: usize,
+    /// 累積の選び（比べられない訳を含む）。
+    pub selection: family::Selection,
+    /// このコミットだけの差分で変わったパスの数と選び（親が無ければ `None`）。
+    pub this_commit: Option<(usize, family::Selection)>,
+}
+
+/// 対象のコミットの選びを作る（2026-09-26）。**比較元は記録の中の最後の緑の全検査（汚れ 0）である。**
+///
+/// **比べられない形は全部へ倒す**（第三者レビューの取り込み）——**比較元が無い・そのコミットが消えた・
+/// 対象の祖先でない（履歴が書き換えられた）・環境の指紋が無いか違う**（[`environment_fingerprint`]）。
+pub fn select_for(root: &Path, records: &[Record], target: &str) -> Result<Selected> {
+    let target_commit = git_line(
+        root,
+        &["rev-parse", "--verify", &format!("{target}^{{commit}}")],
+    )?;
+    let target_tree = git_line(root, &["rev-parse", &format!("{target_commit}^{{tree}}")])?;
+    let base = records
+        .iter()
+        .rev()
+        .find(|record| record.level == "full" && record.outcome == "pass" && record.dirty == 0)
+        .cloned();
+    let mut not_comparable = Vec::new();
+    let mut paths = Vec::new();
+    match &base {
+        None => not_comparable.push("no green full check is recorded".to_string()),
+        Some(base) => {
+            if !commit_exists(root, &base.commit) {
+                not_comparable.push(format!(
+                    "the commit of the last green full check ({}) is gone, so the history was rewritten",
+                    short(&base.commit)
+                ));
+            } else if !is_ancestor(root, &base.commit, &target_commit) {
+                not_comparable.push(format!(
+                    "the last green full check ({}) is not an ancestor of {}, so the history was rewritten",
+                    short(&base.commit),
+                    short(&target_commit)
+                ));
+            } else {
+                paths = changed_paths(root, &base.commit, &target_commit)?;
+            }
+            match base.env.as_deref() {
+                None => not_comparable.push(
+                    "the last green full check recorded no environment (rustc, QEMU, OVMF and the \
+                     tools), so it cannot be compared"
+                        .to_string(),
+                ),
+                Some(before) => {
+                    let differences =
+                        environment_differences(before, &environment_fingerprint(root));
+                    if !differences.is_empty() {
+                        not_comparable.push(format!(
+                            "the environment changed since the last green full check: {}",
+                            differences.join("; ")
+                        ));
+                    }
+                }
+            }
         }
-        Err(error) => vec![format!(
-            "families selected: all (the full check), because the diff since the last green full \
-             check could not be read: {error:#}"
-        )],
     }
+    let mut selection = family::select(family::PATH_RULES, &paths);
+    selection.not_comparable = not_comparable;
+    let this_commit = match first_parent(root, &target_commit)? {
+        Some(parent) => {
+            let paths = changed_paths(root, &parent, &target_commit)?;
+            Some((paths.len(), family::select(family::PATH_RULES, &paths)))
+        }
+        None => None,
+    };
+    Ok(Selected {
+        target: target_commit,
+        target_tree,
+        base,
+        changed: paths.len(),
+        selection,
+        this_commit,
+    })
+}
+
+impl Selected {
+    /// 人が読む行（`--status` と `--select` が出す）。**比較元・対象・選び・理由を出す。**
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines = vec![format!(
+            "selection for {} (tree {})",
+            short(&self.target),
+            short(&self.target_tree)
+        )];
+        lines.push(match &self.base {
+            Some(base) => format!(
+                "  compared with the last green full check {} (tree {}, {})",
+                short(&base.commit),
+                short(&base.tree),
+                base.when
+            ),
+            None => "  compared with: no green full check is recorded".to_string(),
+        });
+        lines.push(format!(
+            "  since then: {} path(s) changed (the cumulative diff; a moved file counts as both paths)",
+            self.changed
+        ));
+        lines.extend(
+            self.selection
+                .lines(self.changed)
+                .into_iter()
+                .map(|line| format!("  {line}")),
+        );
+        match &self.this_commit {
+            Some((changed, selection)) => {
+                lines.push(format!("  this commit alone: {changed} path(s) changed"));
+                lines.extend(
+                    selection
+                        .lines(*changed)
+                        .into_iter()
+                        .map(|line| format!("    {line}")),
+                );
+            }
+            None => lines.push("  this commit alone: it has no parent".to_string()),
+        }
+        lines
+    }
+}
+
+/// 選びの記録の頭の行（2026-09-26。選ぶのを表示する段）。**1 行が 1 コミットの選びである。**
+const SELECTIONS_HEADER: &str = "# version\tunix\twhen\tcommit\ttree\tbase\tchanged\tselected\t\
+                                 reasons\tthis_changed\tthis_selected\tend";
+
+/// 選びの記録の形の版（行の頭の欄）。**終わりの印は [`RECORD_END`] と同じである。**
+const SELECTION_VERSION: &str = "1";
+
+/// 選びの記録の置き場（本の木の `target/full-check/selections.tsv`。追跡しない）。
+fn selections_path(main: &Path) -> PathBuf {
+    main.join("target")
+        .join("full-check")
+        .join("selections.tsv")
+}
+
+/// 選びを記録へ 1 行足す（2026-09-26）。**同じコミットは 1 度だけ**——**足したら `true`。** **当たりの
+/// 計器と、表示が当たっているかを後から数える材料である。**
+fn record_selection(main: &Path, selected: &Selected) -> Result<bool> {
+    let path = selections_path(main);
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    if read_lines(&existing).any(|line| {
+        let fields: Vec<&str> = line.split('\t').collect();
+        fields.first() == Some(&SELECTION_VERSION)
+            && fields.last() == Some(&RECORD_END)
+            && fields.get(3) == Some(&selected.target.as_str())
+    }) {
+        return Ok(false);
+    }
+    let (unix, when) = check_lock::now();
+    let clean = |text: &str| text.replace(['\t', '\n', '\r'], " ");
+    let (this_changed, this_selected) = match &selected.this_commit {
+        Some((changed, selection)) => (changed.to_string(), selection.summary()),
+        None => ("-".to_string(), "-".to_string()),
+    };
+    let line = format!(
+        "{SELECTION_VERSION}\t{unix}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{this_changed}\t{this_selected}\t\
+         {RECORD_END}\n",
+        clean(&when),
+        selected.target,
+        selected.target_tree,
+        selected
+            .base
+            .as_ref()
+            .map_or("-".to_string(), |base| base.commit.clone()),
+        selected.changed,
+        selected.selection.summary(),
+        clean(&selected.selection.reasons(3)),
+    );
+    append_line(&path, SELECTIONS_HEADER, &line)?;
+    Ok(true)
+}
+
+/// `cargo xtask full --select`——**HEAD の選びを出し、選びの記録へ 1 度だけ残す**（2026-09-26。コミットの後の
+/// hook が呼ぶ）。**錠を取らず、QEMU を起こさない**（git と表と記録を読むだけ）。
+fn select_command(root: &Path) -> Result<()> {
+    let main = check_lock::main_tree(root)?;
+    let records = read_records(&main)?;
+    let selected = select_for(&main, &records, "HEAD")?;
+    for line in selected.lines() {
+        println!("{line}");
+    }
+    if let Err(error) = record_selection(&main, &selected) {
+        println!("(info) the selection could not be recorded: {error:#}");
+    }
+    Ok(())
 }
 
 /// `cargo xtask full --status`——**HEAD の木が緑か、緑の木より後のコミットと、それぞれ何で確かめたか。**
@@ -904,21 +1181,24 @@ fn status(root: &Path) -> Result<()> {
             for commit in commits {
                 println!("{}", commit_line(&main, &records, commit)?.0);
             }
-            // **族の選び**（2026-09-26。族にまとめる段）——**緑の木から HEAD までの累積の差分で選ぶ。**
-            // **この段では表示だけで、回し方は変えない**（`ADR-0069` の決定 7 の 2）。
-            for line in selection_since(&main, record) {
+        }
+        None => println!(
+            "the last green full check: none recorded in {}",
+            records_path(&main)?.display()
+        ),
+    }
+    // **族の選び**（2026-09-26）——**緑の木から HEAD までの累積の差分と、このコミットだけの差分で選ぶ。**
+    // **この段では表示だけで、回し方は変えない**（`ADR-0069` の決定 7 の 2）。
+    match select_for(&main, &records, "HEAD") {
+        Ok(selected) => {
+            for line in selected.lines() {
                 println!("{line}");
             }
         }
-        None => {
-            println!(
-                "the last green full check: none recorded in {}",
-                records_path(&main)?.display()
-            );
-            println!(
-                "families selected: all (the full check), because no green full check is recorded"
-            );
-        }
+        Err(error) => println!(
+            "families selected: all (the full check), because the selection could not be made: \
+             {error:#}"
+        ),
     }
     let (holders, content) = check_lock::current_holders(&main)?;
     if holders.is_empty() {
@@ -1382,10 +1662,13 @@ pub fn gate(root: &Path, override_reason: Option<&str>) -> Result<Gate> {
     })
 }
 
-/// `cargo xtask full [<コミット>] | --status | --gate [--override <理由>]`。
+/// `cargo xtask full [<コミット>] | --status | --select | --gate [--override <理由>]`。
 pub fn command(args: &[String]) -> Result<()> {
     if args.iter().any(|arg| arg == "--status") {
         return status(&crate::workspace_root()?);
+    }
+    if args.iter().any(|arg| arg == "--select") {
+        return select_command(&crate::workspace_root()?);
     }
     if args.iter().any(|arg| arg == "--gate") {
         let reason = match args.iter().position(|arg| arg == "--override") {
@@ -1429,7 +1712,7 @@ pub fn command(args: &[String]) -> Result<()> {
     if targets.len() > 1 || args.iter().any(|arg| arg.starts_with("--")) {
         bail!(
             "usage: cargo xtask full [<commit>] | cargo xtask full --status | \
-             cargo xtask full --gate [--override <reason>]"
+             cargo xtask full --select | cargo xtask full --gate [--override <reason>]"
         );
     }
     run(targets.first().map_or("HEAD", |target| target.as_str()))
@@ -1598,6 +1881,161 @@ mod tests {
         assert!(covering(&records, "c4b", "t4", Level::Base).is_none());
         assert!(covering(&records, "c5", "t5", Level::Commit).is_some());
         assert!(covering(&records, "c6", "t6", Level::Base).is_none());
+    }
+
+    /// **2 つの指紋で違う欄を名前つきで返す**（2026-09-26）。**同じなら空。**
+    #[test]
+    fn environment_differences_name_the_changed_tools() {
+        let before = "rustc=1.97.1 (a 2026-09-01); qemu-system-x86=1:8.2.2; CC=-";
+        assert!(environment_differences(before, before).is_empty());
+        assert_eq!(
+            environment_differences(
+                before,
+                "rustc=1.98.0 (b 2026-10-01); qemu-system-x86=1:8.2.2; CC=-"
+            ),
+            vec!["rustc: 1.97.1 (a 2026-09-01) -> 1.98.0 (b 2026-10-01)".to_string()]
+        );
+        assert_eq!(
+            environment_differences(before, "rustc=1.97.1 (a 2026-09-01); CC=-"),
+            vec!["qemu-system-x86: 1:8.2.2 -> (none)".to_string()]
+        );
+    }
+
+    /// **選びは比較元・対象・理由を出し、比べられない形を全部へ倒す**（2026-09-26。選ぶのを表示する段）。
+    /// **空白と改行を含む名前も 1 つに読み、移したファイルは前と後の両方を数える。** **作った git の木で見る。**
+    #[test]
+    fn the_selection_names_its_base_and_falls_to_all_when_it_cannot_compare() {
+        let scratch =
+            std::env::temp_dir().join(format!("zaytos-select-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&scratch);
+        let repo = scratch.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let run = |args: &[&str]| git_line(&repo, args).unwrap();
+        run(&["-c", "init.defaultBranch=main", "init", "-q"]);
+        let commit = |message: &str| {
+            run(&["add", "-A"]);
+            run(&[
+                "-c",
+                "user.name=check",
+                "-c",
+                "user.email=check@localhost",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                message,
+            ]);
+            run(&["rev-parse", "HEAD"])
+        };
+        let write = |path: &str| {
+            let file = repo.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, path).unwrap();
+        };
+        write("docs/a b.md");
+        write("kernel/src/pci.rs");
+        let green = commit("base");
+        let env = environment_fingerprint(&repo);
+        let base = Record {
+            env: Some(env.clone()),
+            ..record("full", "pass", &green, "t", 0)
+        };
+        // **比較元が無ければ全部。**
+        let none = select_for(&repo, &[], "HEAD").unwrap();
+        assert_eq!(none.selection.summary(), "all");
+        assert!(none
+            .lines()
+            .iter()
+            .any(|line| line.contains("no green full check")));
+        // **空白と改行を含む名前、移したファイル（前と後）、消したファイル。**
+        write("docs/new\nline.md");
+        run(&["mv", "kernel/src/pci.rs", "kernel/src/virtio.rs"]);
+        fs::remove_file(repo.join("docs/a b.md")).unwrap();
+        let head = commit("change");
+        let selected = select_for(&repo, std::slice::from_ref(&base), "HEAD").unwrap();
+        assert_eq!(selected.target, head);
+        assert_eq!(selected.changed, 4, "{:?}", selected.lines());
+        assert_eq!(selected.selection.summary(), "boot,apps,fs,devices");
+        assert!(selected.lines().iter().any(|line| line.contains(&format!(
+            "compared with the last green full check {}",
+            short(&green)
+        ))));
+        assert_eq!(
+            selected.this_commit.as_ref().map(|(changed, _)| *changed),
+            Some(4)
+        );
+        // **環境の記録が無い・違うなら全部。**
+        let no_env = Record {
+            env: None,
+            ..base.clone()
+        };
+        assert_eq!(
+            select_for(&repo, &[no_env], "HEAD")
+                .unwrap()
+                .selection
+                .summary(),
+            "all"
+        );
+        let other_env = Record {
+            env: Some(env.replace("rustc=", "rustc=0.0.0-other ")),
+            ..base.clone()
+        };
+        let changed = select_for(&repo, &[other_env], "HEAD").unwrap();
+        assert_eq!(changed.selection.summary(), "all");
+        assert!(changed
+            .selection
+            .not_comparable
+            .iter()
+            .any(|why| why.contains("the environment changed")));
+        // **履歴が書き換えられたら全部**（比較元が祖先でない・消えた）。
+        run(&["checkout", "-q", "-b", "other", &green]);
+        write("docs/other.md");
+        commit("other");
+        let rewritten = select_for(&repo, std::slice::from_ref(&base), &head).unwrap();
+        assert_eq!(rewritten.selection.summary(), "boot,apps,fs,devices");
+        let other = select_for(
+            &repo,
+            &[Record {
+                commit: run(&["rev-parse", "HEAD"]),
+                ..base.clone()
+            }],
+            &head,
+        )
+        .unwrap();
+        assert_eq!(other.selection.summary(), "all");
+        assert!(other
+            .selection
+            .not_comparable
+            .iter()
+            .any(|why| why.contains("not an ancestor")));
+        let gone = select_for(
+            &repo,
+            &[Record {
+                commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+                ..base.clone()
+            }],
+            &head,
+        )
+        .unwrap();
+        assert!(gone
+            .selection
+            .not_comparable
+            .iter()
+            .any(|why| why.contains("is gone")));
+        // **選びの記録は同じコミットを 1 度だけ残す。**
+        assert!(record_selection(&repo, &selected).unwrap());
+        assert!(!record_selection(&repo, &selected).unwrap());
+        let written = fs::read_to_string(selections_path(&repo)).unwrap();
+        assert_eq!(
+            read_lines(&written)
+                .filter(|line| !line.starts_with('#'))
+                .count(),
+            1
+        );
+        assert!(written.contains("\tboot,apps,fs,devices\t"), "{written}");
+        let _ = fs::remove_dir_all(&scratch);
     }
 
     /// **同じコミットに汚れ 0 の記録が在れば、後の汚れのある記録よりそちらを見せる**（2026-09-26。

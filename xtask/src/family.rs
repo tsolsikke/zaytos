@@ -465,6 +465,9 @@ pub struct Selection {
     pub families: std::collections::BTreeMap<Family, Vec<String>>,
     /// 基底だけのパス。
     pub base_only: Vec<String>,
+    /// 比べられないので全部へ倒した訳（2026-09-26。第三者レビューの取り込み）——**比較元が無い・消えた・
+    /// 履歴が書き換えられた・環境（`rustc`・QEMU 等）が変わった。** **パスより先に効く。**
+    pub not_comparable: Vec<String>,
 }
 
 /// 変更したパスから選ぶ（2026-09-26。**当たる行が無いパスは全部へ倒す**——**「対象なし」で通さない**）。
@@ -490,6 +493,52 @@ pub fn select(rules: &[PathRule], paths: &[String]) -> Selection {
 }
 
 impl Selection {
+    /// 選んだ族（`None` は全部。空は基底だけ。2026-09-26）。**当たりの計器が比べる。**
+    pub fn chosen(&self) -> Option<Vec<Family>> {
+        (self.not_comparable.is_empty() && self.all.is_empty())
+            .then(|| self.families.keys().copied().collect())
+    }
+
+    /// 記録に書く短い形（`all`・`none`・族の名前の並び）。
+    pub fn summary(&self) -> String {
+        match self.chosen() {
+            None => "all".to_string(),
+            Some(families) if families.is_empty() => "none".to_string(),
+            Some(families) => families
+                .iter()
+                .map(|family| family.name())
+                .collect::<Vec<_>>()
+                .join(","),
+        }
+    }
+
+    /// 記録に書く理由の短い形（先頭の `count` 本。2026-09-26）。**全部なら倒した訳、族なら族ごとの最初の
+    /// パス、基底だけなら最初のパスである。**
+    pub fn reasons(&self, count: usize) -> String {
+        let listed: Vec<String> = if !self.not_comparable.is_empty() {
+            self.not_comparable.iter().take(count).cloned().collect()
+        } else if !self.all.is_empty() {
+            self.all
+                .iter()
+                .take(count)
+                .map(|(path, why)| format!("{path} ({why})"))
+                .collect()
+        } else if !self.families.is_empty() {
+            self.families
+                .iter()
+                .take(count)
+                .map(|(family, paths)| format!("{}: {}", family.name(), paths[0]))
+                .collect()
+        } else {
+            self.base_only.iter().take(count).cloned().collect()
+        };
+        if listed.is_empty() {
+            "-".to_string()
+        } else {
+            listed.join(", ")
+        }
+    }
+
     /// 人が読む行（`--status` が出す）。**理由のパスは族ごとに数本まで出し、残りは数で言う。**
     pub fn lines(&self, changed: usize) -> Vec<String> {
         const SHOWN: usize = 4;
@@ -505,6 +554,15 @@ impl Selection {
             }
             text
         };
+        // **比べられない訳は、パスより先に言う**（変わったパスが 0 でも全部である）。
+        if !self.not_comparable.is_empty() {
+            let mut lines = vec![
+                "families selected: all (the full check), because the comparison is not possible:"
+                    .to_string(),
+            ];
+            lines.extend(self.not_comparable.iter().map(|why| format!("    {why}")));
+            return lines;
+        }
         if changed == 0 {
             return vec!["families selected: none (nothing changed)".to_string()];
         }
@@ -729,6 +787,28 @@ mod tests {
         assert_eq!(
             select(PATH_RULES, &[]).lines(0),
             vec!["families selected: none (nothing changed)".to_string()]
+        );
+        assert_eq!(leaf.summary(), "ipc,apps");
+        assert_eq!(
+            leaf.reasons(3),
+            "ipc: kernel/src/socket.rs, apps: kernel/userland/less.rs"
+        );
+        assert_eq!(unknown.reasons(3), "arch/new.rs (no row in the table)");
+        assert_eq!(documents.summary(), "none");
+        assert_eq!(unknown.summary(), "all");
+        // **比べられない訳は、変わったパスが 0 でも全部へ倒す**（2026-09-26）。
+        let mut gone = select(PATH_RULES, &[]);
+        gone.not_comparable
+            .push("the last green full check is gone".to_string());
+        assert_eq!(gone.chosen(), None);
+        assert_eq!(gone.summary(), "all");
+        assert_eq!(
+            gone.lines(0),
+            vec![
+                "families selected: all (the full check), because the comparison is not possible:"
+                    .to_string(),
+                "    the last green full check is gone".to_string()
+            ]
         );
     }
 }
