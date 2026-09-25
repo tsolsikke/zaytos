@@ -5424,7 +5424,9 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
     NamedJudgement {
         key: "virtio-short-desc-test",
         signs: &["the read did not complete", "the device reported status 1"],
-        note: "",
+        // **注釈どおり、中身の突き合わせまで届かない**（`kernel/src/virtio.rs` の破壊の注釈。持ち越しの行）。
+        note: "not reached: QEMU refuses the short descriptor with status 1, so the byte-for-byte \
+               check against the image file never runs",
     },
     NamedJudgement {
         key: "virtio-skip-eoi-test",
