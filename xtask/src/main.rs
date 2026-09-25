@@ -5452,6 +5452,12 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         signs: &["DECTCEM hid the cursor = false"],
         note: "",
     },
+    // ── process（.bss 1） ──
+    NamedJudgement {
+        key: "user-load-filesz-only",
+        signs: &["bss-check says Exited(0) = false", "ended Ok(Folded(14))"],
+        note: "",
+    },
 ];
 
 /// 名前の判定へ絞らず、「どの誤りでも」のまま置く破壊と、その理由（2026-09-26。運用者の足す 1 点）。
