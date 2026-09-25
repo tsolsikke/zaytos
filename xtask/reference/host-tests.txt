@@ -678,11 +678,14 @@ xtask::font::tests::the_rendered_table_keeps_index_and_rows_in_step
 xtask::full_check::tests::a_commit_that_touches_the_image_needs_the_commit_check
 xtask::full_check::tests::a_description_says_when_the_working_tree_had_other_changes
 xtask::full_check::tests::a_record_from_before_the_added_columns_still_reads
+xtask::full_check::tests::a_record_from_before_the_start_state_still_reads
 xtask::full_check::tests::a_record_reads_back_as_written
+xtask::full_check::tests::a_worktree_is_cold_without_target_when_small_or_built_by_another_rustc
 xtask::full_check::tests::only_a_pass_at_the_needed_level_or_above_covers_a_commit
-xtask::full_check::tests::the_estimate_comes_from_the_last_full_check_that_recorded_its_writes
+xtask::full_check::tests::the_estimate_is_chosen_by_whether_the_worktree_is_cold
 xtask::full_check::tests::the_full_check_needs_the_estimate_plus_the_floor_on_both_places
 xtask::full_check::tests::the_push_gate_passes_recorded_commits_refuses_the_rest_and_records_the_flag
+xtask::full_check::tests::the_rustc_fingerprint_is_read_from_cargo_s_record
 xtask::full_check::tests::the_sectors_written_are_read_from_diskstats
 xtask::launch::tests::a_cut_run_is_log_limit_before_anything_else
 xtask::launch::tests::a_declared_run_that_ran_to_its_limit_is_counted_apart

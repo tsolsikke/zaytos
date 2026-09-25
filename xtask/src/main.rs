@@ -23325,6 +23325,8 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     // 決定 (7)。2026-09-25。**遅さの計器は、他の重い走行が無いことを前提にしている**）。
     if full {
         let others = check_lock::other_runs_during_this_full().unwrap_or_default();
+        // **記録にも書く**（2026-09-26）——**見込みの書く量は、他の走行が無い回を先にとる。**
+        full_check::note_other_runs(others.len());
         println!(
             "(info) other checks during this full check: {}{}{}",
             others.len(),

@@ -45,6 +45,15 @@ pub const LOG_ENV: &str = "ZAYTOS_CHECK_LOG";
 /// （2026-09-25）。**作業木の取り出しの分も、その全検査の書いた量に含めるため。**
 pub const DISK_START_ENV: &str = "ZAYTOS_CHECK_DISK_START";
 
+/// `cargo xtask full` が子の全検査へ、作業木が冷えていたか（`cold`／`warm`）を渡す環境変数（2026-09-26。
+/// 記録に書くだけ）。
+pub const START_STATE_ENV: &str = "ZAYTOS_CHECK_START_STATE";
+
+/// 作業木の `target/` が本の木の `target/` のこの分の 1 より小さければ「冷えた」とみなす（2026-09-26。運用者の
+/// 足す1点。値は案）。**1 回走った後の作業木は本の木の 54% だった**（実測。30.7 GiB／56.8 GiB）。**incremental を
+/// 消すと 2 割ほどになる見込み**（推測。本の木の incremental は 43.2 GB）。
+const COLD_FRACTION_DENOM: u64 = 4;
+
 /// この下に触ったコミットは `--commit` が要る（`.claude/hooks/check_after_commit.py` の
 /// `IMAGE_PATH_PREFIXES` と同じ。**基底の確かめが一致を見る**）。
 pub const IMAGE_PATH_PREFIXES: [&str; 2] = ["kernel/", "common/"];
@@ -52,9 +61,10 @@ pub const IMAGE_PATH_PREFIXES: [&str; 2] = ["kernel/", "common/"];
 /// 記録の頭の行。
 ///
 /// **2026-09-25 に 4 欄を足した**（書いた量と、終わりの空き 3 つ。運用者の足す1点）。**足す前の 11 欄の行も読む。**
+/// **2026-09-26 にさらに 2 欄を足した**（全検査の始めに作業木が冷えていたか、その間に走った他の検査の数）。
 const RECORDS_HEADER: &str =
     "# unix\twhen\tlevel\toutcome\tcommit\ttree\tdirty\titems\titem_seconds\t\
-     build_seconds\twritten\twsl_free\thost_free\tsystem_free\tnote";
+     build_seconds\twritten\twsl_free\thost_free\tsystem_free\tstart_state\tother_runs\tnote";
 
 /// 検査の段。**並びが上下である**（`--full` ⊇ `--commit` ⊇ 基底）。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -113,6 +123,10 @@ pub struct Record {
     pub wsl_free: Option<u64>,
     pub host_free: Option<u64>,
     pub system_free: Option<u64>,
+    /// 全検査の始めに作業木が冷えていたか（`cold`／`warm`。作業木で回した全検査だけ）。
+    pub start_state: Option<String>,
+    /// 全検査の間に走った他の検査の数（全検査だけ）。
+    pub other_runs: Option<usize>,
     pub note: String,
 }
 
@@ -122,7 +136,7 @@ fn format_record(record: &Record) -> String {
     let number = |value: Option<f64>| value.map_or("-".to_string(), |value| format!("{value:.1}"));
     let bytes = |value: Option<u64>| value.map_or("-".to_string(), |value| value.to_string());
     format!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
         record.unix,
         clean(&record.when),
         clean(&record.level),
@@ -139,6 +153,10 @@ fn format_record(record: &Record) -> String {
         bytes(record.wsl_free),
         bytes(record.host_free),
         bytes(record.system_free),
+        record.start_state.as_deref().map_or("-".to_string(), clean),
+        record
+            .other_runs
+            .map_or("-".to_string(), |count| count.to_string()),
         clean(&record.note)
     )
 }
@@ -149,18 +167,20 @@ fn parse_record(line: &str) -> Option<Record> {
         return None;
     }
     let fields: Vec<&str> = line.split('\t').collect();
-    // **11 欄は 4 欄を足す前の行**（2026-09-25）。**足した欄は無いものとして読む。**
-    if fields.len() != 11 && fields.len() != 15 {
+    // **11 欄は 4 欄を足す前の行**（2026-09-25）、**15 欄は 2 欄を足す前の行**（2026-09-26）。
+    // **足した欄は無いものとして読む。**
+    if ![11, 15, 17].contains(&fields.len()) {
         return None;
     }
     fn optional<T: std::str::FromStr>(text: &str) -> Option<T> {
         (text != "-").then(|| text.parse().ok()).flatten()
     }
     let added = |index: usize| {
-        (fields.len() == 15)
+        (fields.len() >= 15)
             .then(|| optional(fields[index]))
             .flatten()
     };
+    let added_later = |index: usize| (fields.len() >= 17).then(|| fields[index]);
     Some(Record {
         unix: fields[0].parse().ok()?,
         when: fields[1].to_string(),
@@ -176,6 +196,10 @@ fn parse_record(line: &str) -> Option<Record> {
         wsl_free: added(11),
         host_free: added(12),
         system_free: added(13),
+        start_state: added_later(14)
+            .filter(|value| *value != "-")
+            .map(str::to_string),
+        other_runs: added_later(15).and_then(optional),
         note: fields[fields.len() - 1].to_string(),
     })
 }
@@ -237,6 +261,16 @@ struct Start {
 }
 
 static START: Mutex<Option<Start>> = Mutex::new(None);
+
+/// 全検査の間に走った他の検査の数（全検査のまとめが数えて置く。記録に書く）。
+static OTHER_RUNS: Mutex<Option<usize>> = Mutex::new(None);
+
+/// 全検査の間に走った他の検査の数を置く（記録に書くため）。
+pub fn note_other_runs(count: usize) {
+    if let Ok(mut slot) = OTHER_RUNS.lock() {
+        *slot = Some(count);
+    }
+}
 
 /// `/proc/diskstats` の中身から、ある装置の書いたセクタ数を読む（純粋な論理）。**1 から数えて 10 番目の欄**
 /// （`major minor 名前 …`）。
@@ -347,25 +381,134 @@ pub fn start_shortfalls(
     short
 }
 
-/// 全検査が書く量の見込み（純粋な論理）。**前回の全検査の記録の書いた量**を使う。**無ければ代わりの値**
-/// （本の木の `target/` の大きさ。**冷えた作業木の見込みとして**）。
+/// 全検査の始めに、作業木が冷えているか（2026-09-26。運用者の足す1点）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StartState {
+    /// 冷えた（理由）。**組ごとに初めから建てるので、多く書く**（初回は 47.8 GB。実測）。
+    Cold(String),
+    /// 温まった（理由）。
+    Warm(String),
+}
+
+impl StartState {
+    fn label(&self) -> &'static str {
+        match self {
+            StartState::Cold(_) => "cold",
+            StartState::Warm(_) => "warm",
+        }
+    }
+
+    fn reason(&self) -> &str {
+        match self {
+            StartState::Cold(reason) | StartState::Warm(reason) => reason,
+        }
+    }
+}
+
+/// 作業木が冷えているかを決める（純粋な論理）。**冷えたとみなすのは 3 つ**——**作業木に `target/` が無い**、
+/// **作業木の `target/` が本の木の `target/` の [`COLD_FRACTION_DENOM`] 分の 1 より小さい**、**作業木を建てた
+/// rustc が今の rustc と違うか、その控えが無い**（ツールチェーンを替えると、残った成果物は使われない）。
+fn start_state(
+    main_target: Option<u64>,
+    worktree_target: Option<u64>,
+    main_rustc: Option<&str>,
+    worktree_rustc: Option<&str>,
+) -> StartState {
+    let Some(worktree) = worktree_target.filter(|bytes| *bytes > 0) else {
+        return StartState::Cold("the worktree has no target/".to_string());
+    };
+    if let Some(main) = main_target {
+        if worktree < main / COLD_FRACTION_DENOM {
+            return StartState::Cold(format!(
+                "the worktree's target/ holds {}, under 1/{COLD_FRACTION_DENOM} of the main tree's {}",
+                gib(worktree),
+                gib(main)
+            ));
+        }
+    }
+    match (main_rustc, worktree_rustc) {
+        (_, None) => StartState::Cold(
+            "the worktree's target/ keeps no record of the rustc that built it".to_string(),
+        ),
+        (Some(main), Some(worktree)) if main != worktree => {
+            StartState::Cold("the worktree's target/ was built by another rustc".to_string())
+        }
+        _ => StartState::Warm(format!(
+            "the worktree's target/ holds {} and was built by the same rustc as the main tree",
+            gib(worktree)
+        )),
+    }
+}
+
+/// `target/.rustc_info.json` の `rustc_fingerprint`（cargo が rustc を見分けるために置く値）を読む（純粋な論理）。
+fn rustc_fingerprint_in(json: &str) -> Option<String> {
+    let rest = json.split_once("\"rustc_fingerprint\"")?.1;
+    let digits: String = rest
+        .trim_start_matches(|c: char| c == ':' || c.is_whitespace())
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    (!digits.is_empty()).then_some(digits)
+}
+
+/// 置き場の `target/` を建てた rustc の控え（無ければ `None`）。
+fn rustc_fingerprint(target: &Path) -> Option<String> {
+    rustc_fingerprint_in(&fs::read_to_string(target.join(".rustc_info.json")).ok()?)
+}
+
+/// 全検査が書く量の見込み（純粋な論理。2026-09-26 に冷えた・温まったで分けた。運用者の足す1点）。
+///
+/// - **冷えた**——**記録の中の冷えた回の書いた量の最大。** 無ければ代わりの値（本の木の `target/` の大きさ）。
+/// - **温まった**——**直近の温まった回の書いた量。他の走行が無い回を先にとる。** 無ければ、冷えたかが分からない
+///   古い記録の直近の値。それも無ければ代わりの値。
 fn estimate_to_write(
     records: &[Record],
+    state: &StartState,
     stand_in: impl FnOnce() -> Option<u64>,
 ) -> Option<(u64, String)> {
-    match records
-        .iter()
-        .rev()
-        .find(|record| record.level == "full" && record.written.is_some())
-    {
-        Some(record) => Some((
+    let fulls = || {
+        records
+            .iter()
+            .filter(|record| record.level == "full" && record.written.is_some())
+    };
+    let chosen = match state {
+        StartState::Cold(_) => fulls()
+            .filter(|record| record.start_state.as_deref() == Some("cold"))
+            .max_by_key(|record| record.written)
+            .map(|record| (record, "the most a cold full check wrote")),
+        StartState::Warm(_) => fulls()
+            .rev()
+            .find(|record| {
+                record.start_state.as_deref() == Some("warm") && record.other_runs == Some(0)
+            })
+            .map(|record| {
+                (
+                    record,
+                    "what the last warm full check with no other checks wrote",
+                )
+            })
+            .or_else(|| {
+                fulls()
+                    .rev()
+                    .find(|record| record.start_state.as_deref() == Some("warm"))
+                    .map(|record| (record, "what the last warm full check wrote"))
+            })
+            .or_else(|| {
+                fulls()
+                    .rev()
+                    .find(|record| record.start_state.is_none())
+                    .map(|record| (record, "what the last full check wrote"))
+            }),
+    };
+    match chosen {
+        Some((record, what)) => Some((
             record.written.unwrap_or(0),
-            format!("what the full check of {} wrote", record.when),
+            format!("{what}, {}", record.when),
         )),
         None => stand_in().map(|bytes| {
             (
                 bytes,
-                "the size of the main tree's target/, as no full check has recorded what it wrote"
+                "the size of the main tree's target/, as no suitable full check is recorded"
                     .to_string(),
             )
         }),
@@ -439,6 +582,11 @@ pub fn end(outcome: &str, items: Option<usize>, item_seconds: Option<f64>) {
                 wsl_free,
                 host_free,
                 system_free,
+                start_state: (start.level == Level::Full)
+                    .then(|| std::env::var(START_STATE_ENV).ok())
+                    .flatten()
+                    .filter(|state| !state.is_empty()),
+                other_runs: OTHER_RUNS.lock().ok().and_then(|slot| *slot),
                 note: std::env::var(LOG_ENV).unwrap_or_else(|_| "-".to_string()),
             },
         ))
@@ -824,9 +972,33 @@ fn run(target: &str) -> Result<()> {
     // **始める前に、見込みの書く量＋下限を、WSL の中と VHD の載ったドライブの両方で見る**（2026-09-25。
     // 運用者の足す1点）。**足りなければ検査装置の故障として断る。**
     let records = read_records(&main)?;
-    let (estimate, source) =
-        estimate_to_write(&records, || crate::directory_bytes(&main.join("target")))
-            .context("cargo xtask full: could not estimate how much the full check writes")?;
+    // **作業木が冷えているかで、見込みを選ぶ**（2026-09-26。運用者の足す1点）。**作業木は本の木の
+    // `target/` の下に在るので、本の木の大きさからは作業木の分を引く。**
+    let worktree_all = worktree
+        .is_dir()
+        .then(|| crate::directory_bytes(&worktree))
+        .flatten()
+        .unwrap_or(0);
+    let main_target = crate::directory_bytes(&main.join("target"))
+        .map(|bytes| bytes.saturating_sub(worktree_all));
+    let worktree_target = worktree
+        .join("target")
+        .is_dir()
+        .then(|| crate::directory_bytes(&worktree.join("target")))
+        .flatten();
+    let state = start_state(
+        main_target,
+        worktree_target,
+        rustc_fingerprint(&main.join("target")).as_deref(),
+        rustc_fingerprint(&worktree.join("target")).as_deref(),
+    );
+    let (estimate, source) = estimate_to_write(&records, &state, || main_target)
+        .context("cargo xtask full: could not estimate how much the full check writes")?;
+    println!(
+        "full: the worktree is {} ({})",
+        state.label(),
+        state.reason()
+    );
     let (wsl_free, host_free, system_free) = free_spaces(&main);
     let shown = |value: Option<u64>| value.map_or("unreadable".to_string(), gib);
     println!(
@@ -870,6 +1042,7 @@ fn run(target: &str) -> Result<()> {
             DISK_START_ENV,
             disk_start.map_or(String::new(), |sectors| sectors.to_string()),
         )
+        .env(START_STATE_ENV, state.label())
         .stdin(Stdio::null())
         .stdout(file.try_clone().context("could not share the log")?)
         .stderr(file)
@@ -944,6 +1117,8 @@ fn append_full_record(main: &Path, commit: &str, tree: &str, outcome: &str, note
         wsl_free,
         host_free,
         system_free,
+        start_state: None,
+        other_runs: None,
         note: note.to_string(),
     };
     if let Err(error) = append(main, &record) {
@@ -1005,6 +1180,8 @@ pub fn gate(root: &Path, override_reason: Option<&str>) -> Result<Gate> {
                     wsl_free: None,
                     host_free: None,
                     system_free: None,
+                    start_state: None,
+                    other_runs: None,
                     note: reason.to_string(),
                 },
             )?;
@@ -1090,6 +1267,8 @@ mod tests {
             wsl_free: Some(1 << 40),
             host_free: None,
             system_free: Some(20 << 30),
+            start_state: None,
+            other_runs: None,
             note: "a\tb\nc".to_string(),
         }
     }
@@ -1250,8 +1429,9 @@ mod tests {
             (read.items, read.written, read.wsl_free, read.note.as_str()),
             (Some(47), None, None, "-")
         );
+        // **いまの行は 17 欄である**（2026-09-26 に 2 欄を足した）。
         let new = format_record(&record("full", "pass", "c", "t", 0));
-        assert_eq!(new.trim_end_matches('\n').split('\t').count(), 15);
+        assert_eq!(new.trim_end_matches('\n').split('\t').count(), 17);
         let read = parse_record(new.trim_end_matches('\n')).unwrap();
         assert_eq!(
             (
@@ -1302,25 +1482,96 @@ mod tests {
         assert!(start_shortfalls(estimate, Some(wsl_need), false, None).is_empty());
     }
 
-    /// **見込みは前回の全検査の書いた量。** **無ければ代わりの値。** **書いた量の無い全検査の記録は飛ばす。**
+    fn full(written: u64, state: Option<&str>, other_runs: Option<usize>) -> Record {
+        Record {
+            written: Some(written),
+            start_state: state.map(str::to_string),
+            other_runs,
+            ..record("full", "pass", "c", "t", 0)
+        }
+    }
+
+    /// **冷えた・温まった・記録が無い**（運用者の足す1点。2026-09-26）。**冷えたら冷えた回の最大、温まったら
+    /// 直近の温まった回（他の走行が無い回が先）、無ければ代わりの値。**
     #[test]
-    fn the_estimate_comes_from_the_last_full_check_that_recorded_its_writes() {
-        let mut first = record("full", "pass", "c1", "t1", 0);
-        first.written = Some(50 << 30);
-        let mut refused = record("full", "refused", "c2", "t2", 0);
-        refused.written = None;
-        let mut base = record("base", "pass", "c3", "t3", 0);
-        base.written = Some(1);
-        let records = vec![first, refused, base];
+    fn the_estimate_is_chosen_by_whether_the_worktree_is_cold() {
+        let cold = StartState::Cold("x".to_string());
+        let warm = StartState::Warm("x".to_string());
+        let records = vec![
+            full(47 << 30, Some("cold"), Some(4)),
+            full(30 << 30, Some("cold"), Some(0)),
+            full(12 << 30, Some("warm"), Some(0)),
+            full(20 << 30, Some("warm"), Some(3)),
+        ];
+        let pick = |records: &[Record], state: &StartState, stand_in: Option<u64>| {
+            estimate_to_write(records, state, || stand_in).map(|pair| pair.0)
+        };
+        assert_eq!(pick(&records, &cold, Some(7)), Some(47 << 30));
+        // **温まった回は、他の走行が無い回を先にとる**（直近は他の走行が在った回でも）。
+        assert_eq!(pick(&records, &warm, Some(7)), Some(12 << 30));
+        // **冷えた回の記録が無ければ代わりの値。**
+        let warm_only = vec![full(12 << 30, Some("warm"), Some(0))];
+        assert_eq!(pick(&warm_only, &cold, Some(7)), Some(7));
+        // **冷えたかが分からない古い記録は、温まった側でだけ使う。**
+        let legacy = vec![full(44 << 30, None, None)];
+        assert_eq!(pick(&legacy, &warm, Some(7)), Some(44 << 30));
+        assert_eq!(pick(&legacy, &cold, Some(7)), Some(7));
+        // **記録が無ければ代わりの値。代わりも無ければ見込めない。**
+        assert_eq!(pick(&[], &warm, Some(7)), Some(7));
+        assert_eq!(pick(&[], &cold, None), None);
+    }
+
+    /// **冷えたとみなすのは 3 つ**——`target/` が無い、本の木の 1/4 より小さい、rustc が違うか控えが無い。
+    #[test]
+    fn a_worktree_is_cold_without_target_when_small_or_built_by_another_rustc() {
+        let gib = |value: u64| value << 30;
+        let same = Some("5921603053813812323");
+        let cold = |state: StartState| matches!(state, StartState::Cold(_));
+        assert!(cold(start_state(Some(gib(56)), None, same, same)));
+        assert!(cold(start_state(Some(gib(56)), Some(0), same, same)));
+        assert!(cold(start_state(Some(gib(56)), Some(gib(13)), same, same)));
+        assert!(!cold(start_state(Some(gib(56)), Some(gib(30)), same, same)));
+        assert!(cold(start_state(
+            Some(gib(56)),
+            Some(gib(30)),
+            same,
+            Some("1")
+        )));
+        assert!(cold(start_state(Some(gib(56)), Some(gib(30)), same, None)));
+        // **本の木が掃除されて小さくても、作業木が大きければ温まっている。**
+        assert!(!cold(start_state(Some(gib(10)), Some(gib(30)), same, same)));
+    }
+
+    /// `.rustc_info.json` の形（実測。2026-09-26）。**数字の並びだけを読む。**
+    #[test]
+    fn the_rustc_fingerprint_is_read_from_cargo_s_record() {
         assert_eq!(
-            estimate_to_write(&records, || Some(7)).map(|pair| pair.0),
-            Some(50 << 30)
+            rustc_fingerprint_in("{\"rustc_fingerprint\":5921603053813812323,\"outputs\":{}}")
+                .as_deref(),
+            Some("5921603053813812323")
         );
+        assert_eq!(rustc_fingerprint_in("{\"outputs\":{}}"), None);
+        assert_eq!(rustc_fingerprint_in(""), None);
+    }
+
+    /// **2 欄を足す前の 15 欄の行も読む**（足した欄は無いものとして）。
+    #[test]
+    fn a_record_from_before_the_start_state_still_reads() {
+        let old = "1\t2026-09-25 23:45:36\tfull\tpass\tc\tt\t0\t409\t4408.9\t16.3\t13481017344\t1\t2\t3\t-";
+        let read = parse_record(old).unwrap();
         assert_eq!(
-            estimate_to_write(&[], || Some(7)).map(|pair| pair.0),
-            Some(7)
+            (read.written, read.start_state, read.other_runs),
+            (Some(13_481_017_344), None, None)
         );
-        assert_eq!(estimate_to_write(&[], || None), None);
+        let mut new = full(1, Some("cold"), Some(4));
+        new.note = "-".to_string();
+        let line = format_record(&new);
+        assert_eq!(line.trim_end_matches('\n').split('\t').count(), 17);
+        let read = parse_record(line.trim_end_matches('\n')).unwrap();
+        assert_eq!(
+            (read.start_state.as_deref(), read.other_runs),
+            (Some("cold"), Some(4))
+        );
     }
 
     /// **記録の読み方は汚れを言う。**
