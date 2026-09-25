@@ -746,6 +746,7 @@ xtask::tests::qemu_args_separate_debug_log_from_serial
 xtask::tests::qemu_args_use_serial_file_sink_when_requested
 xtask::tests::qemu_is_started_only_through_the_launch_module
 xtask::tests::sigign_is_read_for_sigxfsz
+xtask::tests::slowness_is_compared_without_the_cargo_time
 xtask::tests::smap_and_fsgsbase_instructions_are_found_but_symbol_names_are_not
 xtask::tests::the_agent_index_check_looks_both_ways
 xtask::tests::the_ap_heartbeat_line_is_not_read_as_a_bsp_row

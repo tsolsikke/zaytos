@@ -24181,7 +24181,25 @@ const FULL_TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(195 
 ///
 /// **書いておく理由は、書かないと「合図が出たが誰も上げず、次も出る」形になるためである**
 /// （`FLAKY_EXCLUDED` や「手で回す形は回されない」と同じ族）。
-const GREEN_ITEM_SUM_BASELINE: std::time::Duration = std::time::Duration::from_secs(6570);
+///
+/// # 2026-09-25 に、`cargo` の時間を引いて比べる形へ改めた（`ADR-0069` の決定 7 の 4。運用者の決定）
+///
+/// **それまでの基準は、項目の所要の合計で 109.5 分（6570 秒。共有メモリの回）だった。** **`cargo` の時間は、
+/// 前の全検査からのカーネルの差の大きさで 5〜39 分動く**（実測。2026-09-25 の締めの `--full` は 5.1 分、
+/// その前は 39.1 分）——**負荷とも項目の増え方とも関係しない。** **引かずに比べると、差の小さい回は速く、
+/// 大きい回は遅く見える**（その締めの 0.73 倍のうち、34.0 分は `cargo` の差だった）。
+///
+/// **基準は、③（全検査を作業木で回す形と錠）を入れた後の、他の走行が無い回で取り直した**（運用者の決定）——
+/// **いまの値は仮である**——③を入れる前の、他の走行が無い回（`bb7e02a`。項目の所要79.5分から`cargo`の5.05分を引いた74.45分）を置いた。③を入れた後の回で取り直す。**比べ方は今までと同じで、1.3 倍を超えたら計器に出す（止めない）。** **成長なら上げ、負荷なら
+/// 上げない**（上の「いつ、誰が上げるか」）。**全検査の間に他の検査が走った回は「比べられない」を添える**
+/// （`check_lock`）。
+const GREEN_ITEM_MINUS_BUILD_BASELINE: std::time::Duration = std::time::Duration::from_secs(4467);
+
+/// 全検査の壁時計の契機（2026-09-25。`ADR-0069` の決定 7 の 4。運用者の決定で、項目数 380 の契機を時間で
+/// 見る形へ改めた）。**上限（[`FULL_TIME_LIMIT`]）の 8 割**——**一度でも越えたら、`--full` を 2 本に分ける手を
+/// 決める**（`docs/deferred-decisions.md` の「`--full`が120分の上限に当たったときの手」）。**止めない。**
+const FULL_WALL_CLOCK_TRIGGER: std::time::Duration =
+    std::time::Duration::from_secs(FULL_TIME_LIMIT.as_secs() * 8 / 10);
 
 /// 遅さの計器の倍率（1.3倍。`ADR-0065`）。**分子と分母で持つ**——**浮動小数の
 /// 比較を避け、`Duration` の整数演算で閾値を出す。**
@@ -24190,36 +24208,84 @@ const SLOWNESS_WARN_DENOM: u32 = 10;
 
 /// `--full` の締めで、項目の所要の合計を直近の高負荷の緑の回と比べる（`ADR-0065`）。
 ///
-/// **止めない。** [`GREEN_ITEM_SUM_BASELINE`] の doc の理由による。**計器に出すだけである。**
+/// **止めない。** [`GREEN_ITEM_MINUS_BUILD_BASELINE`] の doc の理由による。**計器に出すだけである。**
 fn report_item_time_slowness(other_runs: usize) {
-    let total = std::time::Duration::from_millis(
-        ITEM_TIME_TOTAL_MS.load(std::sync::atomic::Ordering::SeqCst),
-    );
-    let baseline = GREEN_ITEM_SUM_BASELINE;
+    let total = item_time_total();
+    let build = metrics::total_time(metrics::Kind::Build);
+    for line in slowness_lines(
+        total,
+        build,
+        GREEN_ITEM_MINUS_BUILD_BASELINE,
+        other_runs,
+        full_wall_clock(),
+    ) {
+        println!("{line}");
+    }
+}
+
+/// 全検査の壁時計（上限の時計が始まってから。**上限を置かない回は `None`**）。
+fn full_wall_clock() -> Option<std::time::Duration> {
+    TIME_LIMIT
+        .lock()
+        .ok()
+        .and_then(|limit| *limit)
+        .map(|(started, _)| started.elapsed())
+}
+
+/// 遅さの計器の行（純粋な論理。2026-09-25。`ADR-0069` の決定 7 の 4）。**項目の所要から `cargo` の時間を
+/// 引いたものを基準と比べ、1.3 倍を超えたら WARNING を添える。** **他の検査が走った回は「比べられない」。**
+/// **壁時計が上限の 8 割を越えたら、`--full` を 2 本に分ける契機を言う。** **どれも止めない。**
+fn slowness_lines(
+    total: std::time::Duration,
+    build: std::time::Duration,
+    baseline: std::time::Duration,
+    other_runs: usize,
+    wall_clock: Option<std::time::Duration>,
+) -> Vec<String> {
+    let minutes = |value: std::time::Duration| value.as_secs_f64() / 60.0;
+    let without = total.saturating_sub(build);
     let threshold = baseline * SLOWNESS_WARN_NUMER / SLOWNESS_WARN_DENOM;
-    println!(
-        "(info) item time total: {:.1} min (baseline {:.1} min, {:.2}x){}",
-        total.as_secs_f64() / 60.0,
-        baseline.as_secs_f64() / 60.0,
-        total.as_secs_f64() / baseline.as_secs_f64(),
+    let mut lines = vec![format!(
+        "(info) item time total: {:.1} min, of which cargo {:.1} min; without cargo {:.1} min \
+         (baseline {:.1} min, {:.2}x){}",
+        minutes(total),
+        minutes(build),
+        minutes(without),
+        minutes(baseline),
+        without.as_secs_f64() / baseline.as_secs_f64(),
         if other_runs == 0 {
             String::new()
         } else {
             format!("; not comparable: {other_runs} other check(s) ran during this full check")
         }
-    );
-    if total > threshold {
-        println!(
-            "(info) WARNING: item time total {:.1} min is over {}/{} of the baseline ({:.1} min). \
-             The check still passed; this only flags that --full may have got slower. Confirm it \
-             is code growth, not host load (the item sum swings ~1.45x with load alone); if it is \
-             growth, raise GREEN_ITEM_SUM_BASELINE to the new high-load level.",
-            total.as_secs_f64() / 60.0,
+    )];
+    if without > threshold {
+        lines.push(format!(
+            "(info) WARNING: item time without cargo {:.1} min is over {}/{} of the baseline \
+             ({:.1} min). The check still passed; this only flags that --full may have got slower. \
+             Confirm it is code growth, not host load (the item sum swings ~1.45x with load alone); \
+             if it is growth, raise GREEN_ITEM_MINUS_BUILD_BASELINE to the new level.",
+            minutes(without),
             SLOWNESS_WARN_NUMER,
             SLOWNESS_WARN_DENOM,
-            threshold.as_secs_f64() / 60.0
-        );
+            minutes(threshold)
+        ));
     }
+    if let Some(wall_clock) = wall_clock {
+        lines.push(format!(
+            "(info) wall clock: {:.1} min (the limit is {:.0} min; over {:.0} min once is the \
+             trigger to decide on splitting --full, docs/deferred-decisions.md){}",
+            minutes(wall_clock),
+            minutes(FULL_TIME_LIMIT),
+            minutes(FULL_WALL_CLOCK_TRIGGER),
+            if wall_clock > FULL_WALL_CLOCK_TRIGGER {
+                " - TRIGGERED"
+            } else {
+                ""
+            }
+        ));
+    }
+    lines
 }
 
 /// 項目の所要を測る時計（VIEW-b の後）。
@@ -25094,6 +25160,33 @@ mod tests {
         let line = any_error_verdicts_line();
         assert!(line.contains("zz family for the host test 2"), "{line}");
         assert!(line.contains("narrowed to an intended stop: "), "{line}");
+    }
+
+    /// **遅さの計器は `cargo` の時間を引いて比べる**（2026-09-25。`ADR-0069` の決定 7 の 4）。**1.3 倍を
+    /// 超えたら WARNING。** **他の検査が走った回は「比べられない」。** **壁時計が上限の 8 割を越えたら契機を言う。**
+    #[test]
+    fn slowness_is_compared_without_the_cargo_time() {
+        let minutes = |value: u64| std::time::Duration::from_secs(value * 60);
+        let baseline = minutes(70);
+        let calm = slowness_lines(minutes(80), minutes(10), baseline, 0, None);
+        assert_eq!(calm.len(), 1, "{calm:?}");
+        assert!(
+            calm[0].contains("without cargo 70.0 min (baseline 70.0 min, 1.00x)"),
+            "{calm:?}"
+        );
+        // **`cargo` が長いだけの回は遅くない**（引いて比べる）。
+        let long_build = slowness_lines(minutes(110), minutes(40), baseline, 0, None);
+        assert_eq!(long_build.len(), 1, "{long_build:?}");
+        let slow = slowness_lines(minutes(100), minutes(5), baseline, 2, None);
+        assert!(
+            slow[0].contains("not comparable: 2 other check(s)"),
+            "{slow:?}"
+        );
+        assert!(slow[1].contains("WARNING"), "{slow:?}");
+        let near = slowness_lines(minutes(80), minutes(10), baseline, 0, Some(minutes(157)));
+        assert!(near[1].contains("TRIGGERED"), "{near:?}");
+        let far = slowness_lines(minutes(80), minutes(10), baseline, 0, Some(minutes(100)));
+        assert!(!far[1].contains("TRIGGERED"), "{far:?}");
     }
 
     /// **宣言のある走行が限度まで走った数に、項目の名前を添える**（2026-09-25。運用者の回答 7）。
