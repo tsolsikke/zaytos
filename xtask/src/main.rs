@@ -21775,10 +21775,30 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
     // **並走を機械で断る（2026-09-03）。** **規律で守ろうとして 1 回目で失敗した**
     // （[`refuse_if_something_else_is_running`] の doc）。
+    // **走る前の選び**（2026-09-26。当たりの計器の S）——**最後の緑の全検査からの累積の差分で選んだ族。**
+    // **この段では回し方は変えない**（選んだ族も全部回す）。**`None` は全部を選んでいた。**
+    let mut chosen_before: Option<Vec<Family>> = None;
+    let mut selected_before = "all".to_string();
     if full {
         refuse_if_something_else_is_running("--full")?;
         // **基底を先に回し、赤なら降りる（2026-09-17）。**
         run_base_check_before_full()?;
+        match full_check::read_records(&root)
+            .and_then(|records| full_check::select_for(&root, &records, "HEAD"))
+        {
+            Ok(selected) => {
+                for line in selected.lines() {
+                    println!("(info) before the run: {line}");
+                }
+                chosen_before = selected.selection.chosen();
+                selected_before = selected.selection.summary();
+            }
+            Err(error) => println!(
+                "(info) before the run: the selection could not be made, so everything counts as \
+                 selected: {error:#}"
+            ),
+        }
+        full_check::note_selection(&selected_before);
     } else if commit {
         refuse_if_something_else_is_running("--commit")?;
     }
@@ -24113,6 +24133,14 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         report_item_time_slowness(others.len());
         // **族ごとの項目の数と所要**（2026-09-26。族にまとめる段）。
         println!("{}", family_times_line());
+        // **当たりの計器**（2026-09-26。選ぶのを表示する段）。**記録にも残し、`--status` が数える。**
+        let score = selection_score(chosen_before.as_deref(), &failed.kinds);
+        println!("{}", score.line(&selected_before));
+        full_check::note_score(&if failed.is_empty() {
+            "nothing-failed".to_string()
+        } else {
+            score.record()
+        });
     }
     check_count_matches_accounting(&workspace_root, total, full, commit)?;
     // **失敗の分け方と、起こした QEMU の数**（2026-09-24）。
@@ -24856,11 +24884,21 @@ const FLAKY_ATTEMPTS: usize = 5;
 #[derive(Default)]
 struct Failures {
     list: Vec<String>,
+    /// 落ちた項目の族と分け方（2026-09-26。当たりの計器が読む）。**`list` と同じ並びである。**
+    kinds: Vec<(Option<Family>, launch::Category)>,
 }
 
 impl Failures {
+    /// 落ちた項目を積む。**族は走っている項目の族、分け方は項目の中で [`failure_category`] が決めた
+    /// もの**（呼んでいなければ走行の記録から分ける。検査装置の故障は見分けられない）。
     fn push(&mut self, name: String) {
         FAILED_SO_FAR.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let category = ITEM_FAILURE_CATEGORY
+            .lock()
+            .ok()
+            .and_then(|slot| *slot)
+            .unwrap_or_else(|| launch::classify(false, &launch::item_runs()));
+        self.kinds.push((current_family(), category));
         self.list.push(name);
     }
 
@@ -25166,6 +25204,10 @@ fn begin_item(family: Family, label: &str) {
     if let Ok(mut output) = ITEM_OUTPUT.lock() {
         *output = (String::new(), false);
     }
+    // **失敗の分け方も項目ごとに空にする**（当たりの計器が読む）。
+    if let Ok(mut slot) = ITEM_FAILURE_CATEGORY.lock() {
+        *slot = None;
+    }
     ITEMS_DONE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     stop_if_over_the_time_limit();
     println!("=== xtask check: {label}");
@@ -25351,7 +25393,146 @@ fn failure_category(error: &anyhow::Error) -> &'static str {
     if let Some(count) = FAILURE_CATEGORIES.get(category as usize) {
         count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
+    // **項目の失敗に分け方を持たせる**（2026-09-26。当たりの計器）——**検査装置の故障は、誤りの型で
+    // しか見分けられないので、ここで決めた分け方を [`Failures::push`] が読む。**
+    if let Ok(mut slot) = ITEM_FAILURE_CATEGORY.lock() {
+        *slot = Some(category);
+    }
     category.label()
+}
+
+/// いまの項目の中で [`failure_category`] が決めた分け方（2026-09-26）。**`begin_item` が空にする。**
+static ITEM_FAILURE_CATEGORY: std::sync::Mutex<Option<launch::Category>> =
+    std::sync::Mutex::new(None);
+
+/// 当たりの計器の答え（2026-09-26。選ぶのを表示する段。第三者レビューの取り込み）。
+///
+/// **S は走る前に選んだ族、F は実際に偽になった製品側の判定の族である**（分け方が `os` か `check` の
+/// 失敗。基底は毎回回るので数えない）。**(a) S と F に共通部分があるか**（選んだ検査で不良を捕まえ
+/// られたか）と **(b) F が全部 S に含まれるか**（取りこぼしが無いか）を分けて出す——**1 件捕まえた
+/// ことを「全部選べた」と扱わない。** **全部を選んでいた回は、捕まえて当たり前なので別に数える。**
+/// **時間切れ・ログの欠け・検査装置の故障は F に混ぜず、数だけを出す。**
+#[derive(Debug, PartialEq, Eq)]
+struct SelectionScore {
+    /// 走る前の選びが全部だったか。
+    all_selected: bool,
+    /// F（製品側の判定が偽になった族）。
+    failed: std::collections::BTreeSet<Family>,
+    /// F のうち S の外の族（全部を選んでいれば空）。
+    missed: std::collections::BTreeSet<Family>,
+    /// (a) S と F に共通部分があるか。
+    caught: bool,
+    /// (b) F が全部 S に含まれるか。
+    complete: bool,
+    /// F に混ぜなかった失敗の数（時間切れ・ログの欠け・検査装置の故障）。
+    timeout: usize,
+    log_limit: usize,
+    harness: usize,
+}
+
+/// 当たりを数える（純粋な論理）。**`chosen` が `None` なら全部を選んでいた。**
+fn selection_score(
+    chosen: Option<&[Family]>,
+    kinds: &[(Option<Family>, launch::Category)],
+) -> SelectionScore {
+    let count = |wanted: launch::Category| kinds.iter().filter(|(_, got)| *got == wanted).count();
+    let failed: std::collections::BTreeSet<Family> = kinds
+        .iter()
+        .filter(|(_, category)| matches!(category, launch::Category::Os | launch::Category::Check))
+        .filter_map(|(family, _)| *family)
+        .filter(|family| *family != Family::Base)
+        .collect();
+    let missed: std::collections::BTreeSet<Family> = match chosen {
+        None => std::collections::BTreeSet::new(),
+        Some(chosen) => failed
+            .iter()
+            .filter(|family| !chosen.contains(family))
+            .copied()
+            .collect(),
+    };
+    SelectionScore {
+        all_selected: chosen.is_none(),
+        caught: !failed.is_empty() && missed.len() < failed.len(),
+        complete: missed.is_empty(),
+        failed,
+        missed,
+        timeout: count(launch::Category::Timeout),
+        log_limit: count(launch::Category::LogLimit),
+        harness: count(launch::Category::Harness),
+    }
+}
+
+impl SelectionScore {
+    /// 記録に書く短い形。
+    fn record(&self) -> String {
+        let names = |families: &std::collections::BTreeSet<Family>| {
+            if families.is_empty() {
+                "-".to_string()
+            } else {
+                families
+                    .iter()
+                    .map(|family| family.name())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            }
+        };
+        let yes = |value: bool| if value { "yes" } else { "no" };
+        format!(
+            "via={};failed={};caught={};complete={};missed={};timeout={};log-limit={};harness={}",
+            if self.all_selected { "all" } else { "narrow" },
+            names(&self.failed),
+            yes(self.caught),
+            yes(self.complete),
+            names(&self.missed),
+            self.timeout,
+            self.log_limit,
+            self.harness
+        )
+    }
+
+    /// まとめの 1 行。
+    fn line(&self, selected: &str) -> String {
+        if self.failed.is_empty() {
+            return format!(
+                "(info) selection score: no product-side judgement failed, so nothing to score \
+                 (selected before the run: {selected}; not scored: timeout {}, log-limit {}, \
+                 harness {})",
+                self.timeout, self.log_limit, self.harness
+            );
+        }
+        format!(
+            "(info) selection score: selected before the run: {selected}{}; product-side failures \
+             in {}; (a) caught by the selection: {}; (b) every failing family selected: {}{}; \
+             not scored: timeout {}, log-limit {}, harness {}",
+            if self.all_selected {
+                " (everything, so caught by construction)"
+            } else {
+                ""
+            },
+            self.failed
+                .iter()
+                .map(|family| family.name())
+                .collect::<Vec<_>>()
+                .join(", "),
+            if self.caught { "yes" } else { "no" },
+            if self.complete { "yes" } else { "no" },
+            if self.missed.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " (missed: {})",
+                    self.missed
+                        .iter()
+                        .map(|family| family.name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            },
+            self.timeout,
+            self.log_limit,
+            self.harness
+        )
+    }
 }
 
 fn run_regression(
@@ -26137,6 +26318,43 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), keys.len(), "a key sits in two tables");
+    }
+
+    /// **当たりの計器**（2026-09-26）。**(a) 共通部分と (b) 含まれるかを分け、全部を選んでいた回は別に数え、
+    /// 時間切れ・ログの欠け・検査装置の故障と基底は F に混ぜない。**
+    #[test]
+    fn the_selection_score_separates_caught_from_complete() {
+        use launch::Category::{Check, Harness, LogLimit, Os, Timeout};
+        let kinds = [
+            (Some(Family::Fs), Os),
+            (Some(Family::Apps), Os),
+            (Some(Family::Smp), Timeout),
+            (Some(Family::Ipc), Harness),
+            (Some(Family::Boot), LogLimit),
+            (Some(Family::Base), Check),
+        ];
+        let narrow = selection_score(Some(&[Family::Fs, Family::Devices]), &kinds);
+        assert_eq!(
+            narrow.failed.iter().copied().collect::<Vec<_>>(),
+            vec![Family::Apps, Family::Fs]
+        );
+        assert!(narrow.caught && !narrow.complete && !narrow.all_selected);
+        assert_eq!(
+            narrow.record(),
+            "via=narrow;failed=apps,fs;caught=yes;complete=no;missed=apps;timeout=1;log-limit=1;\
+             harness=1"
+        );
+        assert!(narrow
+            .line("fs,devices")
+            .contains("(b) every failing family selected: no (missed: apps)"));
+        let wrong = selection_score(Some(&[Family::Devices]), &kinds);
+        assert!(!wrong.caught && !wrong.complete);
+        let everything = selection_score(None, &kinds);
+        assert!(everything.caught && everything.complete && everything.all_selected);
+        assert!(everything.line("all").contains("caught by construction"));
+        let quiet = selection_score(Some(&[]), &[(Some(Family::Smp), Timeout)]);
+        assert!(quiet.failed.is_empty() && !quiet.caught);
+        assert!(quiet.line("none").contains("nothing to score"));
     }
 
     /// **「どの誤りでも捕まえた」を族ごとに数え、まとめの 1 行に出す**（2026-09-25。計器）。**項目の外で

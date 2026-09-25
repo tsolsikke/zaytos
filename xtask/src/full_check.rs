@@ -385,6 +385,26 @@ pub fn note_other_runs(count: usize) {
     }
 }
 
+/// 全検査の走る前の選び（2026-09-26。記録の `selected` の欄へ書く）。
+static SELECTED: Mutex<Option<String>> = Mutex::new(None);
+
+/// 全検査の当たりの計器の答え（2026-09-26。記録の `score` の欄へ書く）。
+static SCORE: Mutex<Option<String>> = Mutex::new(None);
+
+/// 走る前の選びを記録に残す（全検査の子が呼ぶ）。
+pub fn note_selection(selected: &str) {
+    if let Ok(mut slot) = SELECTED.lock() {
+        *slot = Some(selected.to_string());
+    }
+}
+
+/// 当たりの計器の答えを記録に残す（全検査の子が呼ぶ）。
+pub fn note_score(score: &str) {
+    if let Ok(mut slot) = SCORE.lock() {
+        *slot = Some(score.to_string());
+    }
+}
+
 /// `/proc/diskstats` の中身から、ある装置の書いたセクタ数を読む（純粋な論理）。**1 から数えて 10 番目の欄**
 /// （`major minor 名前 …`）。
 fn diskstats_sectors_written(text: &str, device: (u32, u32)) -> Option<u64> {
@@ -702,8 +722,8 @@ pub fn end(outcome: &str, items: Option<usize>, item_seconds: Option<f64>) {
                     .filter(|state| !state.is_empty()),
                 other_runs: OTHER_RUNS.lock().ok().and_then(|slot| *slot),
                 env: start.env.clone(),
-                selected: None,
-                score: None,
+                selected: SELECTED.lock().ok().and_then(|slot| slot.clone()),
+                score: SCORE.lock().ok().and_then(|slot| slot.clone()),
                 note: std::env::var(LOG_ENV).unwrap_or_else(|_| "-".to_string()),
             },
         ))
@@ -1134,6 +1154,36 @@ fn select_command(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 記録の当たりの計器を数えて 1 行にする（純粋な論理。2026-09-26）。**狭く選んだ回と全部を選んだ回を分ける。**
+fn score_summary(records: &[Record]) -> String {
+    let scored: Vec<&str> = records
+        .iter()
+        .filter(|record| record.level == "full")
+        .filter_map(|record| record.score.as_deref())
+        .collect();
+    let failed: Vec<&&str> = scored
+        .iter()
+        .filter(|score| score.contains("failed=") && !score.contains("failed=-"))
+        .collect();
+    let narrow: Vec<&&&str> = failed
+        .iter()
+        .filter(|score| score.contains("via=narrow"))
+        .collect();
+    let count =
+        |list: &[&&&str], needle: &str| list.iter().filter(|score| score.contains(needle)).count();
+    format!(
+        "selection scores: {} full check(s) scored since the display began; {} with product-side \
+         failures ({} with a narrow selection: (a) caught {}, (b) every failing family selected {}; \
+         {} with everything selected)",
+        scored.len(),
+        failed.len(),
+        narrow.len(),
+        count(&narrow, "caught=yes"),
+        count(&narrow, "complete=yes"),
+        failed.len() - narrow.len()
+    )
+}
+
 /// `cargo xtask full --status`——**HEAD の木が緑か、緑の木より後のコミットと、それぞれ何で確かめたか。**
 fn status(root: &Path) -> Result<()> {
     let main = check_lock::main_tree(root)?;
@@ -1187,6 +1237,8 @@ fn status(root: &Path) -> Result<()> {
             records_path(&main)?.display()
         ),
     }
+    // **当たりの計器の数え**（2026-09-26）——**赤の全検査のうち、製品側の判定が偽になった回だけを数える。**
+    println!("{}", score_summary(&records));
     // **族の選び**（2026-09-26）——**緑の木から HEAD までの累積の差分と、このコミットだけの差分で選ぶ。**
     // **この段では表示だけで、回し方は変えない**（`ADR-0069` の決定 7 の 2）。
     match select_for(&main, &records, "HEAD") {
@@ -1881,6 +1933,29 @@ mod tests {
         assert!(covering(&records, "c4b", "t4", Level::Base).is_none());
         assert!(covering(&records, "c5", "t5", Level::Commit).is_some());
         assert!(covering(&records, "c6", "t6", Level::Base).is_none());
+    }
+
+    /// **当たりの計器の数え**（2026-09-26）。**狭く選んだ回だけで (a) と (b) を数え、全部を選んだ回は別に数える。**
+    #[test]
+    fn score_summary_counts_narrow_selections_apart() {
+        let scored = |score: &str| Record {
+            score: Some(score.to_string()),
+            ..record("full", "fail", "c", "t", 0)
+        };
+        let records = vec![
+            scored("nothing-failed"),
+            scored("via=narrow;failed=fs;caught=yes;complete=yes;missed=-;timeout=0;log-limit=0;harness=0"),
+            scored("via=narrow;failed=fs,apps;caught=yes;complete=no;missed=apps;timeout=0;log-limit=0;harness=0"),
+            scored("via=all;failed=smp;caught=yes;complete=yes;missed=-;timeout=0;log-limit=0;harness=0"),
+            scored("via=narrow;failed=-;caught=no;complete=yes;missed=-;timeout=1;log-limit=0;harness=0"),
+            record("base", "pass", "c", "t", 0),
+        ];
+        assert_eq!(
+            score_summary(&records),
+            "selection scores: 5 full check(s) scored since the display began; 3 with product-side \
+             failures (2 with a narrow selection: (a) caught 2, (b) every failing family selected 1; \
+             1 with everything selected)"
+        );
     }
 
     /// **2 つの指紋で違う欄を名前つきで返す**（2026-09-26）。**同じなら空。**

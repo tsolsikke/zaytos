@@ -691,6 +691,7 @@ xtask::full_check::tests::a_worktree_is_cold_without_target_when_small_or_built_
 xtask::full_check::tests::appends_survive_a_torn_tail_and_concurrent_writers
 xtask::full_check::tests::environment_differences_name_the_changed_tools
 xtask::full_check::tests::only_a_pass_at_the_needed_level_or_above_covers_a_commit
+xtask::full_check::tests::score_summary_counts_narrow_selections_apart
 xtask::full_check::tests::the_estimate_is_chosen_by_whether_the_worktree_is_cold
 xtask::full_check::tests::the_full_check_needs_the_estimate_plus_the_floor_on_both_places
 xtask::full_check::tests::the_push_gate_passes_recorded_commits_refuses_the_rest_and_records_the_flag
@@ -771,6 +772,7 @@ xtask::tests::the_commit_message_rules_catch_each_shape
 xtask::tests::the_commit_message_rules_pass_the_shapes_that_are_allowed
 xtask::tests::the_machine_variant_table_parses_and_rejects_broken_rows
 xtask::tests::the_range_flags_turn_the_rules_off
+xtask::tests::the_selection_score_separates_caught_from_complete
 xtask::tests::the_stop_watch_waits_one_more_round
 xtask::tests::the_two_s13b_markers_drop_their_lines_and_nothing_else
 xtask::tool_checks::tests::png_dimensions_are_read_from_the_header
