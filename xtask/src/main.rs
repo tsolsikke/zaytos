@@ -11,8 +11,10 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
+use family::Family;
 
 mod check_lock;
+mod family;
 mod font;
 mod full_check;
 mod launch;
@@ -4992,18 +4994,23 @@ fn judge_sabotage(features: &[&str], result: &Result<()>) -> SabotageVerdict {
     }
 }
 
-/// 「どの誤りでも捕まえた」と数えた破壊の回の数（族ごと。2026-09-25。運用者の決定）。
+/// 「どの誤りでも捕まえた」と数えた破壊の回の数（2026-09-25。運用者の決定）。
 ///
 /// **理由を見ていない判定を、`--full` のまとめで族ごとに数える**（検査の体系の改善）。**狭めるのは、
 /// その族を「族にまとめる段」で扱うとき**——**狭めた破壊は [`SABOTAGE_STOP_REASONS`] に載る。**
-static ANY_ERROR_VERDICTS: std::sync::Mutex<std::collections::BTreeMap<String, usize>> =
-    std::sync::Mutex::new(std::collections::BTreeMap::new());
+/// **鍵は全検査の族（[`Family`]。走っている項目の族）と検査の名前である**（2026-09-26。**以前は
+/// 検査の名前だけを族と呼んでいた**）。
+static ANY_ERROR_VERDICTS: std::sync::Mutex<
+    std::collections::BTreeMap<(Option<Family>, String), usize>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
-/// 「どの誤りでも捕まえた」の行を出し、族の数を 1 つ足す（2026-09-25）。**出す行は前と同じ形である。**
-fn caught_by_any_error(family: &str, line: &str) {
+/// 「どの誤りでも捕まえた」の行を出し、数を 1 つ足す（2026-09-25）。**出す行は前と同じ形である。**
+fn caught_by_any_error(check: &str, line: &str) {
     println!("{line}");
     if let Ok(mut counts) = ANY_ERROR_VERDICTS.lock() {
-        *counts.entry(family.to_string()).or_insert(0) += 1;
+        *counts
+            .entry((current_family(), check.to_string()))
+            .or_insert(0) += 1;
     }
 }
 
@@ -5014,18 +5021,37 @@ fn any_error_verdicts_line() -> String {
         .map(|counts| counts.clone())
         .unwrap_or_default();
     let total: usize = counts.values().sum();
-    let mut families: Vec<(String, usize)> = counts.into_iter().collect();
-    families.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    let listed: Vec<String> = families
-        .iter()
-        .map(|(family, count)| format!("{family} {count}"))
+    // **族ごとに束ね、多い順に並べる。** 族の中も検査の多い順である。
+    let mut by_family: std::collections::BTreeMap<Option<Family>, Vec<(String, usize)>> =
+        std::collections::BTreeMap::new();
+    for ((family, check), count) in counts {
+        by_family.entry(family).or_default().push((check, count));
+    }
+    let mut families: Vec<(usize, Option<Family>, String)> = by_family
+        .into_iter()
+        .map(|(family, mut checks)| {
+            checks.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let sum: usize = checks.iter().map(|(_, count)| count).sum();
+            let checks: Vec<String> = checks
+                .iter()
+                .map(|(check, count)| format!("{check} {count}"))
+                .collect();
+            let text = format!(
+                "{} {sum} ({})",
+                family.map_or("no family", Family::name),
+                checks.join(", ")
+            );
+            (sum, family, text)
+        })
         .collect();
+    families.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let listed: Vec<&str> = families.iter().map(|(_, _, text)| text.as_str()).collect();
     format!(
         "(info) sabotage verdicts that accept any error (the reason is not checked): {total} in {} \
          famil(ies){}{}; narrowed to an intended stop: {} sabotage(s) (SABOTAGE_STOP_REASONS)",
         families.len(),
         if listed.is_empty() { "" } else { ": " },
-        listed.join(", "),
+        listed.join("; "),
         SABOTAGE_STOP_REASONS.len()
     )
 }
@@ -5106,13 +5132,13 @@ fn report_one_build_directory(what: &str, bytes: Option<u64>) {
 
 /// 破壊の回の判定を 1 行にして出す（5.b。2026-09-25）。**落ちたら `failed` へ積む。**
 fn report_sabotage_verdict(
-    family: &str,
+    check: &str,
     label: &str,
     features: &[&str],
     result: &Result<()>,
     failed: &mut Failures,
 ) {
-    let name = format!("{family} ({label})");
+    let name = format!("{check} ({label})");
     match judge_sabotage(features, result) {
         SabotageVerdict::NotCaught => {
             println!("--- {name}: FAILED (the sabotage was NOT caught)");
@@ -5124,7 +5150,7 @@ fn report_sabotage_verdict(
             )
         }
         SabotageVerdict::CaughtByAnyError => {
-            caught_by_any_error(family, &format!("--- {name}: OK (the sabotage was caught)"))
+            caught_by_any_error(check, &format!("--- {name}: OK (the sabotage was caught)"))
         }
         SabotageVerdict::StoppedForAnotherReason { sign } => {
             println!(
@@ -21143,7 +21169,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
     for (name, args) in CHECKS {
         total += 1;
-        begin_item(name);
+        begin_item(Family::Base, name);
         // **ホストテストの本数を記録へ残す（2026-08-30）。**
         //
         // **固定はしない。** **実測で決めた**——**`#[test]` を足すか消した
@@ -21194,7 +21220,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item("the boot media image is built, read back and cross-checked");
+    begin_item(
+        Family::Base,
+        "the boot media image is built, read back and cross-checked",
+    );
     match check_boot_media(&workspace_root) {
         Ok(message) => println!("--- boot media: OK ({message})"),
         Err(error) => {
@@ -21204,7 +21233,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item("the VirtualBox tool refuses names without the zaytos- prefix");
+    begin_item(
+        Family::Base,
+        "the VirtualBox tool refuses names without the zaytos- prefix",
+    );
     match check_vbox_tool(&workspace_root) {
         Ok(message) => println!("--- VirtualBox tool: OK ({message})"),
         Err(error) => {
@@ -21217,6 +21249,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     // **VHD を移しても元のドライブが在れば空きは読めてしまうので、レジストリの `BasePath` と突き合わせる。**
     total += 1;
     begin_item(
+        Family::Base,
         "the host drive watched for free space is the one holding this distribution's WSL disk",
     );
     match launch::check_vhd_drive() {
@@ -21231,6 +21264,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     // flock が効き、殺された持ち主の錠が放れ、断りが 75 で終わり、持ち主の子だけが取らずに進むこと。**
     total += 1;
     begin_item(
+        Family::Base,
         "the check lock has one path, works, is released by a killed holder and refuses with 75",
     );
     match check_lock::self_check(&workspace_root) {
@@ -21242,7 +21276,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item("the host test names match the reference");
+    begin_item(Family::Base, "the host test names match the reference");
     match check_host_test_names(&workspace_root, update_reference) {
         Ok(message) => println!("--- host test names: {message}"),
         Err(error) => {
@@ -21252,7 +21286,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item("the shell sabotages are split between sendkey and the script as recorded");
+    begin_item(
+        Family::Base,
+        "the shell sabotages are split between sendkey and the script as recorded",
+    );
     match check_shell_sabotage_split() {
         Ok(message) => println!("--- shell sabotage split: {message}"),
         Err(error) => {
@@ -21262,7 +21299,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item("unsafe blocks carry a SAFETY comment");
+    begin_item(Family::Base, "unsafe blocks carry a SAFETY comment");
     let missing = find_unsafe_without_safety_comment(&workspace_root)?;
     if missing.is_empty() {
         println!("--- unsafe/SAFETY: OK");
@@ -21275,7 +21312,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item("direct cli/sti stays on the approved list");
+    begin_item(Family::Base, "direct cli/sti stays on the approved list");
     let mut approved_occurrences = 0usize;
     let unapproved = find_unapproved_interrupt_control(&workspace_root, &mut approved_occurrences)?;
     if unapproved.is_empty() {
@@ -21303,7 +21340,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
     // **起動ログの参照の終わり**（5.a の見張りの (iii)。2026-09-25）。**QEMU を起こさずに見る。**
     total += 1;
-    begin_item("the boot log reference ends at the shell prompt");
+    begin_item(
+        Family::Base,
+        "the boot log reference ends at the shell prompt",
+    );
     match fs::read_to_string(workspace_root.join(REFERENCE_BOOT_LOG))
         .context("failed to read the boot log reference")
         .and_then(|text| boot_log_reference_ends_at_prompt(&text))
@@ -21319,7 +21359,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     // 起こさないものを基底に置く。** **動いて、空でない値を出すことだけを見る**（`tool_checks` の doc）。
     for (label, short, check) in TOOL_CHECKS_BASE {
         total += 1;
-        begin_item(label);
+        begin_item(Family::Base, label);
         match check(&workspace_root) {
             Ok(message) => println!("--- {short}: OK ({message})"),
             Err(error) => {
@@ -21335,7 +21375,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     // （S13-e-1 で実際に起きた）を、コミットの時点で止めるための段である。
     if full || commit {
         total += 1;
-        begin_item("the boot log matches the reference and does not depend on the core count");
+        begin_item(
+            Family::Boot,
+            "the boot log matches the reference and does not depend on the core count",
+        );
         match cmd_boot_log_diff(false, false) {
             Ok(()) => println!("--- boot log diff: OK"),
             Err(error) => {
@@ -21349,7 +21392,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **手で使う道具のうち、QEMU を起こすもの**（2026-09-25。運用者の決定）。
         for (label, short, check) in TOOL_CHECKS_FULL {
             total += 1;
-            begin_item(label);
+            begin_item(Family::Harness, label);
             match check(&workspace_root) {
                 Ok(message) => println!("--- {short}: OK ({message})"),
                 Err(error) => {
@@ -21374,7 +21417,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **落ちる判定は破壊ごとに違う**——**一覧は
         // [`UTF8_TEST_SABOTAGES`] と `docs/verification-coverage.md` にある。**
         total += 1;
-        begin_item("multibyte characters take two cells and are edited whole");
+        begin_item(
+            Family::Shell,
+            "multibyte characters take two cells and are edited whole",
+        );
         match cmd_utf8_test(&[], true) {
             Ok(()) => println!("--- utf8 test: OK"),
             Err(error) => {
@@ -21385,7 +21431,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for sabotage in UTF8_TEST_SABOTAGES {
             total += 1;
             let label = format!("utf8-test {sabotage}");
-            begin_item(&label);
+            begin_item(Family::Shell, &label);
             match cmd_utf8_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
@@ -21408,7 +21454,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // 1 キーずつ打つので、同じ主張が 12 構成に掛かって高い**
         // （`kernel/src/input.rs` の `profile-test` の台本の doc）。
         total += 1;
-        begin_item("the shell runs /etc/profile and ~/.profile at start");
+        begin_item(
+            Family::Shell,
+            "the shell runs /etc/profile and ~/.profile at start",
+        );
         match cmd_profile_test(&[], true) {
             Ok(()) => println!("--- profile test: OK"),
             Err(error) => {
@@ -21419,7 +21468,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for sabotage in PROFILE_TEST_SABOTAGES {
             total += 1;
             let label = format!("profile-test {sabotage}");
-            begin_item(&label);
+            begin_item(Family::Shell, &label);
             match cmd_profile_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
@@ -21438,7 +21487,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // ファイルが古い順である / 無いときは何も言わない。**
         // **破壊は 2 つで、落ちる判定が 1 本ずつ違う**（実測。2026-09-04）。
         total += 1;
-        begin_item("the shell keeps its history in a file");
+        begin_item(Family::Shell, "the shell keeps its history in a file");
         match cmd_history_test(&[], true) {
             Ok(()) => println!("--- history test: OK"),
             Err(error) => {
@@ -21449,7 +21498,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for sabotage in HISTORY_TEST_SABOTAGES {
             total += 1;
             let label = format!("history-test {sabotage}");
-            begin_item(&label);
+            begin_item(Family::Shell, &label);
             match cmd_history_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
@@ -21465,7 +21514,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **シェルの `|`（`ADR-0063` の (b3)）。** **台本の族で、1 回の起動で 7 本の `|` を見る。**
         // **破壊は 7 つで、落ちる判定がそれぞれ違う**（`PIPE_TEST_SABOTAGES` の doc）。
         total += 1;
-        begin_item("the shell runs a pipeline through the kernel's pipe");
+        begin_item(
+            Family::Ipc,
+            "the shell runs a pipeline through the kernel's pipe",
+        );
         match cmd_pipe_test(&[], true) {
             Ok(()) => println!("--- pipe test: OK"),
             Err(error) => {
@@ -21476,7 +21528,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for sabotage in PIPE_TEST_SABOTAGES {
             total += 1;
             let label = format!("pipe-test {sabotage}");
-            begin_item(&label);
+            begin_item(Family::Ipc, &label);
             match cmd_pipe_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
@@ -21493,7 +21545,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // `sockc` の 6 つの形を見る。** **破壊は 8 つで、落ちる判定がそれぞれ違う**
         // （`SOCKET_TEST_SABOTAGES` の doc）。
         total += 1;
-        begin_item("a client and a server talk through the kernel's unix stream socket");
+        begin_item(
+            Family::Ipc,
+            "a client and a server talk through the kernel's unix stream socket",
+        );
         match cmd_socket_test(&[], true) {
             Ok(()) => println!("--- socket test: OK"),
             Err(error) => {
@@ -21504,7 +21559,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for sabotage in SOCKET_TEST_SABOTAGES {
             total += 1;
             let label = format!("socket-test {sabotage}");
-            begin_item(&label);
+            begin_item(Family::Ipc, &label);
             match cmd_socket_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
@@ -21521,7 +21576,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // 本物の打鍵を送り、生イベントが届いて `read` が待ったかを見る。** **破壊は 3 つで、
         // 落ちる判定が 1 本ずつ違う**（`INPUT_TEST_SABOTAGES`）。
         total += 1;
-        begin_item("a foreground process reads raw input events through the input fd");
+        begin_item(
+            Family::Ipc,
+            "a foreground process reads raw input events through the input fd",
+        );
         match cmd_input_test(&[], true) {
             Ok(()) => println!("--- input test: OK"),
             Err(error) => {
@@ -21532,7 +21590,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for sabotage in INPUT_TEST_SABOTAGES {
             total += 1;
             let label = format!("input-test {sabotage}");
-            begin_item(&label);
+            begin_item(Family::Ipc, &label);
             match cmd_input_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
@@ -21548,7 +21606,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **入力とソケットを同時に待つ形（`ADR-0066` の Y-b）。** **`polld` が同じ集合で 3 回待ち、
         // 2 回はソケット側、1 回は本物の打鍵で起きる。** **破壊は 3 つ**（`POLL_TEST_SABOTAGES`）。
         total += 1;
-        begin_item("a process waits on the input fd and a socket at the same time");
+        begin_item(
+            Family::Ipc,
+            "a process waits on the input fd and a socket at the same time",
+        );
         match cmd_poll_test(&[], true) {
             Ok(()) => println!("--- poll test: OK"),
             Err(error) => {
@@ -21559,7 +21620,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for sabotage in POLL_TEST_SABOTAGES {
             total += 1;
             let label = format!("poll-test {sabotage}");
-            begin_item(&label);
+            begin_item(Family::Ipc, &label);
             match cmd_poll_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
@@ -21575,7 +21636,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **画面へ画素を出す形（`ADR-0066` の Y-c）。** **`gfxd` が裏バッファを `mmap` して四角を塗り、
         // `present` で写す。`screendump` で 2 度読み戻す。** **破壊は 3 つ**（`SCREEN_TEST_SABOTAGES`）。
         total += 1;
-        begin_item("a foreground process draws on the screen through the back buffer");
+        begin_item(
+            Family::Ipc,
+            "a foreground process draws on the screen through the back buffer",
+        );
         match cmd_screen_test(&[], true) {
             Ok(()) => println!("--- screen test: OK"),
             Err(error) => {
@@ -21586,7 +21650,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for sabotage in SCREEN_TEST_SABOTAGES {
             total += 1;
             let label = format!("screen-test {sabotage}");
-            begin_item(&label);
+            begin_item(Family::Ipc, &label);
             match cmd_screen_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
@@ -21602,7 +21666,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **画面・入力・ソケット・共有メモリを 1 つの組で通す（`ADR-0066` の Y-d。第1段階の締め）。**
         // **破壊は各段の既存のものを 4 つ、組の中でもう 1 度回す**（`COMPOSE_TEST_SABOTAGES`）。
         total += 1;
-        begin_item("a compositor composites a client's shm pool on the screen and ends on a key");
+        begin_item(
+            Family::Ipc,
+            "a compositor composites a client's shm pool on the screen and ends on a key",
+        );
         match cmd_compose_test(&[], true) {
             Ok(()) => println!("--- compose test: OK"),
             Err(error) => {
@@ -21613,7 +21680,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for sabotage in COMPOSE_TEST_SABOTAGES {
             total += 1;
             let label = format!("compose-test {sabotage}");
-            begin_item(&label);
+            begin_item(Family::Ipc, &label);
             match cmd_compose_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
@@ -21632,7 +21699,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for &(name, expect) in MACHINE_VARIANT_CHECKS {
             total += 1;
             let label = format!("machine-variant {name}");
-            begin_item(&label);
+            begin_item(Family::Boot, &label);
             match machine_variant(name).and_then(|variant| {
                 cmd_machine_variant(&variant, &[], &[], MediaContents::Complete, expect)
             }) {
@@ -21649,7 +21716,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for &(name, feature, expect) in MACHINE_VARIANT_CONFIGS {
             total += 1;
             let label = format!("machine-variant {name} {feature}");
-            begin_item(&label);
+            begin_item(Family::Boot, &label);
             let variant = match machine_variant(name) {
                 Ok(variant) => variant,
                 Err(error) => {
@@ -21675,7 +21742,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for &(name, contents, expect) in MEDIA_SABOTAGES {
             total += 1;
             let label = format!("machine-variant {name} {}", contents.label());
-            begin_item(&label);
+            begin_item(Family::Boot, &label);
             let variant = match machine_variant(name) {
                 Ok(variant) => variant,
                 Err(error) => {
@@ -21702,7 +21769,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         {
             total += 1;
             let label = "the write cap stops QEMU without a core dump";
-            begin_item(label);
+            begin_item(Family::Harness, label);
             match check_the_write_cap_stops_qemu() {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
@@ -21717,7 +21784,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for &(name, feature, bootloader, expect) in MACHINE_VARIANT_SABOTAGES {
             total += 1;
             let label = format!("machine-variant {name} {feature}");
-            begin_item(&label);
+            begin_item(Family::Boot, &label);
             let variant = match machine_variant(name) {
                 Ok(variant) => variant,
                 Err(error) => {
@@ -21752,7 +21819,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // `PATH` に従うこと**（重複は 2 本目の件数で見る）。
         // **破壊は 4 つで、落ちる判定が 1 本ずつ違う。**
         total += 1;
-        begin_item("tab completes the word at the cursor");
+        begin_item(Family::Shell, "tab completes the word at the cursor");
         match cmd_complete_test(&[], true) {
             Ok(()) => println!("--- complete test: OK"),
             Err(error) => {
@@ -21763,7 +21830,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for sabotage in COMPLETE_TEST_SABOTAGES {
             total += 1;
             let label = format!("complete-test {sabotage}");
-            begin_item(&label);
+            begin_item(Family::Shell, &label);
             match cmd_complete_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
@@ -21782,7 +21849,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // 足し上げが期待値と一致する（決定 1）/ `spawn` を跨いで親の XMM が
         // 残る（決定 2）。** **破壊は 2 つで、落ちる判定が 1 本ずつ違う。**
         total += 1;
-        begin_item("floating-point state survives programs and spawn");
+        begin_item(
+            Family::Process,
+            "floating-point state survives programs and spawn",
+        );
         match cmd_fp_test(&[], true) {
             Ok(()) => println!("--- fp test: OK"),
             Err(error) => {
@@ -21793,7 +21863,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for sabotage in FP_TEST_SABOTAGES {
             total += 1;
             let label = format!("fp-test {sabotage}");
-            begin_item(&label);
+            begin_item(Family::Process, &label);
             match cmd_fp_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
@@ -21811,7 +21881,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **1 回の起動で 6 つ見る**——**同時に進む / 遠征スタック / 回復点 / CR3 / FP / 前景。**
         // **破壊は 4 つで、切り替えが入れ替えるものとスロットに 1 つずつ置いた。**
         total += 1;
-        begin_item("two Ring 3 programs run at the same time");
+        begin_item(Family::Process, "two Ring 3 programs run at the same time");
         match cmd_concurrent_test(&[], true) {
             Ok(()) => println!("--- concurrent test: OK"),
             Err(error) => {
@@ -21822,7 +21892,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for sabotage in CONCURRENT_TEST_SABOTAGES {
             total += 1;
             let label = format!("concurrent-test {sabotage}");
-            begin_item(&label);
+            begin_item(Family::Process, &label);
             match cmd_concurrent_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
@@ -21841,7 +21911,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // ビットマップがバイト単位で一致する。** **破壊は 1 つで、`ADR-0058` の
         // Decision 2 に初めて判定を付ける。**
         total += 1;
-        begin_item("a glyph rasterised inside Ring 3 matches the host byte for byte");
+        begin_item(
+            Family::Apps,
+            "a glyph rasterised inside Ring 3 matches the host byte for byte",
+        );
         match cmd_ttf_test(&[], true) {
             Ok(()) => println!("--- ttf test: OK"),
             Err(error) => {
@@ -21852,7 +21925,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for sabotage in TTF_TEST_SABOTAGES {
             total += 1;
             let label = format!("ttf-test {sabotage}");
-            begin_item(&label);
+            begin_item(Family::Apps, &label);
             match cmd_ttf_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
@@ -21870,7 +21943,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **2 コアが合図で揃えてから 200 行ずつ同時に書き、1 本も混ざらないことを
         // 見る。** **稀な事象を確実にしてから判定にした形である。**
         total += 1;
-        begin_item("two cores writing to the serial port at once do not tear each other's lines");
+        begin_item(
+            Family::Smp,
+            "two cores writing to the serial port at once do not tear each other's lines",
+        );
         match cmd_serial_test(&[], true) {
             Ok(()) => println!("--- serial test: OK"),
             Err(error) => {
@@ -21881,7 +21957,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for sabotage in SERIAL_TEST_SABOTAGES {
             total += 1;
             let label = format!("serial-test {sabotage}");
-            begin_item(&label);
+            begin_item(Family::Smp, &label);
             match cmd_serial_test(&[sabotage], false) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
@@ -21895,7 +21971,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         }
 
         total += 1;
-        begin_item("the shell takes keystrokes and init restarts it");
+        begin_item(
+            Family::Shell,
+            "the shell takes keystrokes and init restarts it",
+        );
         match cmd_shell_test(ShellTestMode::Normal) {
             Ok(()) => println!("--- shell test: OK"),
             Err(error) => {
@@ -21910,7 +21989,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **打鍵を流す仕組みは上と同じもので、期待だけが裏返る**
         // （`ShellTestMode`）。
         total += 1;
-        begin_item("dropping the arrows stops the insertion point from moving");
+        begin_item(
+            Family::Shell,
+            "dropping the arrows stops the insertion point from moving",
+        );
         match cmd_shell_test(ShellTestMode::ArrowsDropped) {
             Ok(()) => println!("--- shell test (arrows dropped): OK"),
             Err(error) => {
@@ -21922,7 +22004,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **Esc を落とすと実打鍵の Esc `[` `D` が CSI にならないこと（zi-a）。**
         // 上の矢印の破壊と同じ形——**通常の側の「Esc が届いた」判定の反証である。**
         total += 1;
-        begin_item("dropping Esc keeps the literal Esc [ D keystrokes as characters");
+        begin_item(
+            Family::Shell,
+            "dropping Esc keeps the literal Esc [ D keystrokes as characters",
+        );
         match cmd_shell_test(ShellTestMode::EscDropped) {
             Ok(()) => println!("--- shell test (esc dropped): OK"),
             Err(error) => {
@@ -21935,7 +22020,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // 前景経路へ流し、カーソル位置とセルの中身を判定行で見る。
         // sendkey を使わないので決定的である。
         total += 1;
-        begin_item("the console interprets CUP / ED / EL through the foreground path");
+        begin_item(
+            Family::Shell,
+            "the console interprets CUP / ED / EL through the foreground path",
+        );
         match cmd_ansi_test(&[]) {
             Ok(()) => println!("--- ansi test: OK"),
             Err(error) => {
@@ -21948,7 +22036,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // 接続の取り違えである。CSI がグリフとして化けて出るので、
         // カーソル位置とセルの判定が落ちる。
         total += 1;
-        begin_item("the ansi test catches a foreground path that skips the parser");
+        begin_item(
+            Family::Shell,
+            "the ansi test catches a foreground path that skips the parser",
+        );
         match cmd_ansi_test(&["ansi-console-skip-parse-test"]) {
             Ok(()) => {
                 println!("--- ansi test (skip parse): FAILED (the sabotage was NOT caught)");
@@ -21964,7 +22055,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // 展開しており状態も届いているが、**渡す先だけが欠ける**——
         // zi-b の「接続の取り違え」と同じ族である。
         total += 1;
-        begin_item("the ansi test catches an SGR that never reaches the color");
+        begin_item(
+            Family::Shell,
+            "the ansi test catches an SGR that never reaches the color",
+        );
         match cmd_ansi_test(&["ansi-sgr-ignore-color-test"]) {
             Ok(()) => {
                 println!("--- ansi test (sgr ignored): FAILED (the sabotage was NOT caught)");
@@ -21979,7 +22073,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **DECTCEM の隠す指示を無視する破壊（ES-c）。** 指示は届いて
         // いるが、**描く側が見ない**——「隠した後に無い」判定が落ちる。
         total += 1;
-        begin_item("the ansi test catches a cursor that ignores DECTCEM");
+        begin_item(
+            Family::Shell,
+            "the ansi test catches a cursor that ignores DECTCEM",
+        );
         match cmd_ansi_test(&["ansi-cursor-ignore-hide-test"]) {
             Ok(()) => {
                 println!(
@@ -21999,7 +22096,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **`/data/sparse-hole` の読みが落ち、corrupt-fs の期待も食い違う**
         // （実測。2 つの経路で捕まる）。
         total += 1;
-        begin_item("refusing holes breaks the sparse read and the corrupt-fs probe");
+        begin_item(
+            Family::Fs,
+            "refusing holes breaks the sparse read and the corrupt-fs probe",
+        );
         match cmd_boot_with_features(&["ext2-sparse-as-error-test"], "fs-sparse", "= true") {
             Ok(()) => {
                 println!("--- sparse read (refused): FAILED (the sabotage was NOT caught)");
@@ -22015,7 +22115,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // `bss-check` の判定行を固定しているので、**破壊はその行が
         // `Exited(0)` でなくなる形で出る**（実測では `Folded(14)`＝#PF）。
         total += 1;
-        begin_item("mapping segments by filesz drops the .bss");
+        begin_item(Family::Process, "mapping segments by filesz drops the .bss");
         match cmd_boot_with_features(&["user-load-filesz-only"], "bss-check", "Exited(0)") {
             Ok(()) => {
                 println!("--- bss mapping (filesz only): FAILED (the sabotage was NOT caught)");
@@ -22030,7 +22130,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **`zi` の実演（zi-d）。** 決定的な台本入力で、開いて動いて編集し、
         // `:wq` で保存し、`cat` で読み戻すところまでを見る。
         total += 1;
-        begin_item("zi moves, edits, saves, and the file reads back");
+        begin_item(
+            Family::Apps,
+            "zi moves, edits, saves, and the file reads back",
+        );
         match cmd_zi_test(&[]) {
             Ok(()) => println!("--- zi test: OK"),
             Err(error) => {
@@ -22045,7 +22148,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         //
         // **判定は画面の実物である。** **`less` は内部状態を1つも出さない。**
         total += 1;
-        begin_item("less shows a window and gives the screen back; more leaves its output");
+        begin_item(
+            Family::Apps,
+            "less shows a window and gives the screen back; more leaves its output",
+        );
         match cmd_view_test(&[]) {
             Ok(()) => println!("--- view test: OK"),
             Err(error) => {
@@ -22071,7 +22177,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             "less-redraw-whole-screen-test",
         ] {
             total += 1;
-            begin_item(&format!("the view test catches {feature}"));
+            begin_item(Family::Apps, &format!("the view test catches {feature}"));
             match cmd_view_test(&[feature]) {
                 Ok(()) => {
                     println!("--- view test ({feature}): FAILED (the sabotage was NOT caught)");
@@ -22152,7 +22258,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             "repaint-blank-cells-test",
         ] {
             total += 1;
-            begin_item(&format!("the zi test catches {feature}"));
+            begin_item(Family::Apps, &format!("the zi test catches {feature}"));
             let result = cmd_zi_test(&[feature]);
             report_sabotage_verdict("zi test", feature, &[feature], &result, &mut failed);
         }
@@ -22165,7 +22271,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // いる**（`the_two_layouts_differ_where_they_should`）。
         for (label, sabotage) in [("keymap (us)", false), ("keymap (us, always jis)", true)] {
             total += 1;
-            begin_item(&format!("the keyboard layout claim: {label}"));
+            begin_item(
+                Family::Shell,
+                &format!("the keyboard layout claim: {label}"),
+            );
             match cmd_keymap_test(sabotage) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
@@ -22190,7 +22299,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **判定 7 本を 1 項目にまとめてある**——**どれが落ちても「持ち越せて
         // いない」の 1 つの主張である。**
         total += 1;
-        begin_item("a change made in one boot is there in the next");
+        begin_item(Family::Fs, "a change made in one boot is there in the next");
         match cmd_persist_test(false) {
             Ok(()) => println!("--- persist: OK"),
             Err(error) => {
@@ -22202,7 +22311,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **破壊の側（P-a）。** **2 度目の前に像を作り直す。**
         // **持ち越さない形へ戻すので、持ち越しを主張する 3 本が落ちる**（実測）。
         total += 1;
-        begin_item("the persist test catches rebuilding the disk in between");
+        begin_item(
+            Family::Fs,
+            "the persist test catches rebuilding the disk in between",
+        );
         match cmd_persist_test(true) {
             Ok(()) => caught_by_any_error(
                 "persist",
@@ -22225,7 +22337,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             ("persist (env, the source is ignored)", false, true),
         ] {
             total += 1;
-            begin_item(&format!("the environment source claim: {label}"));
+            begin_item(
+                Family::Shell,
+                &format!("the environment source claim: {label}"),
+            );
             match cmd_persist_env_test(rebuild, ignore) {
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
@@ -22245,7 +22360,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // まとめてある**——**どれが落ちても「保存が持ち越せていない」の
         // 1 つの主張である。**
         total += 1;
-        begin_item("what zi saved is there in the next boot");
+        begin_item(Family::Apps, "what zi saved is there in the next boot");
         match cmd_persist_zi_test(false) {
             Ok(()) => println!("--- persist (zi): OK"),
             Err(error) => {
@@ -22257,7 +22372,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **破壊の側（P-c-3）。** **2 度目の前に像を作り直す。**
         // **2 度目の Ring 3 は建てたままの本文を出すので、突き合わせが落ちる。**
         total += 1;
-        begin_item("the zi persist test catches rebuilding the disk in between");
+        begin_item(
+            Family::Apps,
+            "the zi persist test catches rebuilding the disk in between",
+        );
         match cmd_persist_zi_test(true) {
             Ok(()) => caught_by_any_error(
                 "persist",
@@ -22272,7 +22390,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **像を複製して取り出し、建てた像と突き合わせる（S12-a）。**
         // **判定 3 本を 1 項目にまとめてある**（複製先の位置・バイト一致・`e2fsck`）。
         total += 1;
-        begin_item("the copied ext2 image comes back byte for byte");
+        begin_item(Family::Fs, "the copied ext2 image comes back byte for byte");
         match cmd_fs_image_extract(&[]) {
             Ok(()) => println!("--- fs extract: OK"),
             Err(error) => {
@@ -22285,7 +22403,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // 使われていない末尾にあり、あちらは無傷と判定する（実測）。
         // **捕まえるのはバイト一致である。**
         total += 1;
-        begin_item("the fs extract catches a corrupted copy");
+        begin_item(Family::Fs, "the fs extract catches a corrupted copy");
         match cmd_fs_image_extract(&["fs-copy-corrupt-tail-test"]) {
             Ok(()) => {
                 println!("--- fs extract (corrupt tail): FAILED (the sabotage was NOT caught)");
@@ -22304,7 +22422,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **空き数の欄を正しい位置から読んでいることの反証（S12-b の 2 段目）。**
         // **自分の解析を自分で確かめても、欄を取り違えていれば気づけない。**
         total += 1;
-        begin_item("the fs extract catches a shifted group-descriptor field");
+        begin_item(
+            Family::Fs,
+            "the fs extract catches a shifted group-descriptor field",
+        );
         match cmd_fs_image_extract(&["ext2-group-count-offset-test"]) {
             Ok(()) => {
                 println!("--- fs extract (shifted field): FAILED (the sabotage was NOT caught)");
@@ -22321,7 +22442,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // 既定の構成が往復（バイト一致）、`fs-alloc-keep-test` が割り当て中
         // （`e2fsck` の不満が 1 本）である。
         total += 1;
-        begin_item("the block bitmap round trip restores the image");
+        begin_item(Family::Fs, "the block bitmap round trip restores the image");
         match cmd_fs_image_extract(&[KEEP_ALLOCATED_FEATURE]) {
             Ok(()) => println!("--- fs bitmap (allocated): OK"),
             Err(error) => {
@@ -22332,7 +22453,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
         // **追記（S12-c）。** **書いたままの像でしか判定 A・B・D は言えない。**
         total += 1;
-        begin_item("the appended bytes survive a round trip through the image");
+        begin_item(
+            Family::Fs,
+            "the appended bytes survive a round trip through the image",
+        );
         match cmd_fs_image_extract(&[WRITE_KEEP_FEATURE]) {
             Ok(()) => println!("--- fs write (kept): OK"),
             Err(error) => {
@@ -22343,7 +22467,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
         // **縮める道（S12-d）。** **0 まで縮める道は戻さない変種で通る。**
         total += 1;
-        begin_item("shrinking a file returns exactly the blocks it should");
+        begin_item(
+            Family::Fs,
+            "shrinking a file returns exactly the blocks it should",
+        );
         match cmd_fs_image_extract(&[TRUNCATE_KEEP_FEATURE]) {
             Ok(()) => println!("--- fs truncate (emptied): OK"),
             Err(error) => {
@@ -22354,7 +22481,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
         // **作成と削除（S12-e）。** **作ったままの像でしか判定 A・B・D は言えない。**
         total += 1;
-        begin_item("a created file survives a round trip through the image");
+        begin_item(
+            Family::Fs,
+            "a created file survives a round trip through the image",
+        );
         match cmd_fs_image_extract(&[CREATE_KEEP_FEATURE]) {
             Ok(()) => println!("--- fs create (kept): OK"),
             Err(error) => {
@@ -22365,14 +22495,17 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
         for (label, features) in FS_CREATE_SABOTAGES {
             total += 1;
-            begin_item(&format!("the fs create check catches {label}"));
+            begin_item(Family::Fs, &format!("the fs create check catches {label}"));
             let result = cmd_fs_image_extract(features);
             report_sabotage_verdict("fs create", label, features, &result, &mut failed);
         }
 
         // **ディレクトリの作成と削除（DIR-1c）。**
         total += 1;
-        begin_item("a created directory survives a round trip through the image");
+        begin_item(
+            Family::Fs,
+            "a created directory survives a round trip through the image",
+        );
         match cmd_fs_image_extract(&[MKDIR_KEEP_FEATURE]) {
             Ok(()) => println!("--- fs mkdir (kept): OK"),
             Err(error) => {
@@ -22383,14 +22516,17 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
         for (label, features) in FS_MKDIR_SABOTAGES {
             total += 1;
-            begin_item(&format!("the fs mkdir check catches {label}"));
+            begin_item(Family::Fs, &format!("the fs mkdir check catches {label}"));
             let result = cmd_fs_image_extract(features);
             report_sabotage_verdict("fs mkdir", label, features, &result, &mut failed);
         }
 
         for (label, features) in FS_TRUNCATE_SABOTAGES {
             total += 1;
-            begin_item(&format!("the fs truncate check catches {label}"));
+            begin_item(
+                Family::Fs,
+                &format!("the fs truncate check catches {label}"),
+            );
             match cmd_fs_image_extract(features) {
                 Ok(()) => {
                     println!("--- fs truncate ({label}): FAILED (the sabotage was NOT caught)");
@@ -22405,7 +22541,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
         for (label, features) in FS_WRITE_SABOTAGES {
             total += 1;
-            begin_item(&format!("the fs write check catches {label}"));
+            begin_item(Family::Fs, &format!("the fs write check catches {label}"));
             match cmd_fs_image_extract(features) {
                 Ok(()) => {
                     println!("--- fs write ({label}): FAILED (the sabotage was NOT caught)");
@@ -22420,7 +22556,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
         for (label, features) in FS_BITMAP_SABOTAGES {
             total += 1;
-            begin_item(&format!("the fs bitmap check catches {label}"));
+            begin_item(Family::Fs, &format!("the fs bitmap check catches {label}"));
             match cmd_fs_image_extract(features) {
                 Ok(()) => {
                     println!("--- fs bitmap ({label}): FAILED (the sabotage was NOT caught)");
@@ -22436,7 +22572,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **PCI の列挙（S13-a）。** 判定は QEMU 自身の帳簿（`info pci`）との
         // 突き合わせで、期待値の定数を持たない。
         total += 1;
-        begin_item("the pci enumeration matches qemu's own device list");
+        begin_item(
+            Family::Devices,
+            "the pci enumeration matches qemu's own device list",
+        );
         match cmd_pci_test(&[]) {
             Ok(()) => println!("--- pci enumeration: OK"),
             Err(error) => {
@@ -22447,7 +22586,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
         for (label, feature) in PCI_SABOTAGES {
             total += 1;
-            begin_item(&format!("the pci enumeration catches {label}"));
+            begin_item(
+                Family::Devices,
+                &format!("the pci enumeration catches {label}"),
+            );
             match cmd_pci_test(&[feature]) {
                 Ok(()) => {
                     println!("--- pci enumeration ({label}): FAILED (the sabotage was NOT caught)");
@@ -22463,7 +22605,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **virtio-blk の読み（S13-b）。** 判定はホスト側の像のファイルとの
         // 突き合わせで、期待値の定数を持たない。
         total += 1;
-        begin_item("the virtio-blk read agrees with the image file");
+        begin_item(
+            Family::Devices,
+            "the virtio-blk read agrees with the image file",
+        );
         match cmd_virtio_test(&[]) {
             Ok(()) => println!("--- virtio blk read: OK"),
             Err(error) => {
@@ -22474,7 +22619,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
         for (label, feature) in VIRTIO_SABOTAGES {
             total += 1;
-            begin_item(&format!("the virtio-blk read catches {label}"));
+            begin_item(
+                Family::Devices,
+                &format!("the virtio-blk read catches {label}"),
+            );
             match cmd_virtio_test(&[feature]) {
                 Ok(()) => {
                     println!("--- virtio blk read ({label}): FAILED (the sabotage was NOT caught)");
@@ -22490,7 +22638,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **割り込みの配送（S13-d）。** 判定は配線の読み戻し（level と
         // active-low がハードウェアに載っている）と、届いた数である。
         total += 1;
-        begin_item("the virtio interrupt arrives as routed");
+        begin_item(Family::Devices, "the virtio interrupt arrives as routed");
         match cmd_virtio_irq_test(&[]) {
             Ok(()) => println!("--- virtio irq: OK"),
             Err(error) => {
@@ -22500,7 +22648,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         }
 
         total += 1;
-        begin_item("the virtio interrupt catches an edge-signaled route");
+        begin_item(
+            Family::Devices,
+            "the virtio interrupt catches an edge-signaled route",
+        );
         match cmd_virtio_irq_test(&["virtio-intx-edge-test"]) {
             Ok(()) => {
                 println!("--- virtio irq (edge route): FAILED (the sabotage was NOT caught)");
@@ -22523,7 +22674,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             ("a wait that holds the BKL", "virtio-wait-holding-bkl-test"),
         ] {
             total += 1;
-            begin_item(&format!("the virtio interrupt catches {label}"));
+            begin_item(
+                Family::Devices,
+                &format!("the virtio interrupt catches {label}"),
+            );
             match cmd_virtio_irq_test(&[feature]) {
                 Ok(()) => {
                     println!("--- virtio irq ({label}): FAILED (the sabotage was NOT caught)");
@@ -22542,7 +22696,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **判定は止まった理由の行で見る**（[`SABOTAGE_STOP_REASONS`]）。
         for (label, feature) in FS_LOAD_SABOTAGES {
             total += 1;
-            begin_item(&format!("the fs image load catches {label}"));
+            begin_item(Family::Fs, &format!("the fs image load catches {label}"));
             let result = cmd_fs_image_extract(&[feature]);
             report_sabotage_verdict("fs image load", label, &[feature], &result, &mut failed);
         }
@@ -22564,7 +22718,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             ),
         ] {
             total += 1;
-            begin_item(&format!("the fs image flush catches {label}"));
+            begin_item(Family::Fs, &format!("the fs image flush catches {label}"));
             match cmd_fs_image_extract(features) {
                 Ok(()) => {
                     println!("--- fs image flush ({label}): FAILED (the sabotage was NOT caught)");
@@ -22579,7 +22733,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
         for feature in SHELL_TEST_SABOTAGES {
             total += 1;
-            begin_item(&format!("the shell test catches the sabotage {feature}"));
+            begin_item(
+                Family::Shell,
+                &format!("the shell test catches the sabotage {feature}"),
+            );
             match cmd_shell_test(ShellTestMode::MustFail(feature)) {
                 Ok(()) => println!("--- shell test ({feature}): OK"),
                 Err(error) => {
@@ -22592,7 +22749,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **同じ台本を台本の族で回す（`ADR-0063` の (b3) の (b)）。** **打鍵を見ない破壊は
         // こちらで落とす**——**1 本あたり約 50 秒縮む。**
         total += 1;
-        begin_item("the shell session is judged the same way when the script drives it");
+        begin_item(
+            Family::Shell,
+            "the shell session is judged the same way when the script drives it",
+        );
         match cmd_shell_script_test(ShellTestMode::ScriptNormal) {
             Ok(()) => println!("--- shell script test: OK"),
             Err(error) => {
@@ -22602,9 +22762,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         }
         for feature in SHELL_SCRIPT_SABOTAGES {
             total += 1;
-            begin_item(&format!(
-                "the shell script test catches the sabotage {feature}"
-            ));
+            begin_item(
+                Family::Shell,
+                &format!("the shell script test catches the sabotage {feature}"),
+            );
             match cmd_shell_script_test(ShellTestMode::ScriptMustFail(feature)) {
                 Ok(()) => println!("--- shell script test ({feature}): OK"),
                 Err(error) => {
@@ -22616,7 +22777,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item("direct serial ports stay on the approved list");
+    begin_item(
+        Family::Base,
+        "direct serial ports stay on the approved list",
+    );
     let mut approved_direct_serial_occurrences = 0usize;
     let unapproved_direct_serial = find_unapproved_direct_serial_ports(
         &workspace_root,
@@ -22646,7 +22810,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item("parsed external tools are called with a fixed locale");
+    begin_item(
+        Family::Base,
+        "parsed external tools are called with a fixed locale",
+    );
     let direct_tool_calls = find_direct_external_tool_calls(&workspace_root)?;
     if direct_tool_calls.is_empty() {
         println!(
@@ -22667,7 +22834,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item("private-by-design modules keep their internals private");
+    begin_item(
+        Family::Base,
+        "private-by-design modules keep their internals private",
+    );
     let leaks = find_boundary_visibility_leaks(&workspace_root)?;
     if leaks.is_empty() {
         println!(
@@ -22686,7 +22856,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item("every kernel feature appears in the runtime TEST_HOOKS table");
+    begin_item(
+        Family::Base,
+        "every kernel feature appears in the runtime TEST_HOOKS table",
+    );
     let uncovered = find_features_missing_from_test_hooks(&workspace_root)?;
     if uncovered.is_empty() {
         println!(
@@ -22710,7 +22883,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item("the default kernel build has no sabotage features");
+    begin_item(
+        Family::Base,
+        "the default kernel build has no sabotage features",
+    );
     let sabotage = check_default_features_are_clean(&workspace_root)?;
     if sabotage.is_empty() {
         println!("--- default features: OK");
@@ -22723,7 +22899,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item("every deferred decision carries a state marker");
+    begin_item(
+        Family::Base,
+        "every deferred decision carries a state marker",
+    );
     match check_deferred_state_markers(&workspace_root) {
         Ok((open, done)) => println!(
             "--- deferred markers: OK ({open} open, {done} settled, {} row(s) total; the count is \
@@ -22740,11 +22919,17 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item("the enumerations that guard by listing report their sizes");
+    begin_item(
+        Family::Base,
+        "the enumerations that guard by listing report their sizes",
+    );
     report_enumeration_counts();
 
     total += 1;
-    begin_item("every Bash hook still decides the way it says it does");
+    begin_item(
+        Family::Base,
+        "every Bash hook still decides the way it says it does",
+    );
     // **hook が読み込まれているかは、ここでは分からない**——**ツールの
     // 呼び出しを止めるのは harness の側で、`xtask` からは観測できない。**
     // **守れるのは「判定そのものが壊れていないこと」だけである。**
@@ -22860,7 +23045,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item("the index and the tracked .claude/ files name each other");
+    begin_item(
+        Family::Base,
+        "the index and the tracked .claude/ files name each other",
+    );
     match check_agent_index_links(&workspace_root) {
         Ok(count) => println!(
             "--- agent index links: OK (both directions; {count} tracked file(s) under .claude/, \
@@ -22879,7 +23067,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item("markdown prose style (tracked .md)");
+    begin_item(Family::Base, "markdown prose style (tracked .md)");
     let prose = check_markdown_prose_style(&workspace_root)?;
     if prose.is_empty() {
         println!("--- markdown prose style: OK");
@@ -22892,7 +23080,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item("the libc pure functions pass their host tests");
+    begin_item(
+        Family::Base,
+        "the libc pure functions pass their host tests",
+    );
     match check_libc_host_tests(&workspace_root) {
         Ok(summary) => println!("--- libc host tests: OK ({summary})"),
         Err(error) => {
@@ -22902,7 +23093,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item("markdown links, anchors and backticked paths resolve (tracked .md)");
+    begin_item(
+        Family::Base,
+        "markdown links, anchors and backticked paths resolve (tracked .md)",
+    );
     let references = check_markdown_references(&workspace_root)?;
     if references.is_empty() {
         println!("--- markdown references: OK");
@@ -22918,7 +23112,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item("markdown structure (fence pairs and heading levels, tracked .md)");
+    begin_item(
+        Family::Base,
+        "markdown structure (fence pairs and heading levels, tracked .md)",
+    );
     let structure = check_markdown_structure(&workspace_root)?;
     if structure.is_empty() {
         println!("--- markdown structure: OK");
@@ -22934,7 +23131,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item(&format!("commit message style (prefixes and blank line over all history; \
+    begin_item(Family::Base, &format!("commit message style (prefixes and blank line over all history; \
          body length after {COMMIT_BODY_RULE_COMMIT}; Japanese/ASCII gap since {COMMIT_STYLE_SINCE})"));
     let offenders = check_commit_message_style(&workspace_root)?;
     if offenders.is_empty() {
@@ -22949,7 +23146,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
     // 二重選択の検出器が既定ビルドに在ること（S4-c-3-2b、静的）。
     total += 1;
-    begin_item("the structural guards are present in the default build");
+    begin_item(
+        Family::Base,
+        "the structural guards are present in the default build",
+    );
     match check_structural_guard_symbols_present(&workspace_root) {
         Ok(symbol) => println!("--- guard symbols: OK ({symbol})"),
         Err(e) => {
@@ -22962,7 +23162,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     // トランポリンのバイト単位一致検査（B-2a-5、静的）。既定ビルドの入口 24 バイトが
     // 期待リテラルと一致すること。base 検査なので `--full` でなくても毎回走る。
     total += 1;
-    begin_item("trampoline byte match (default build)");
+    begin_item(Family::Base, "trampoline byte match (default build)");
     match cmd_highhalf_trampoline_check(&workspace_root, &[], true) {
         Ok(()) => println!("--- trampoline byte match: OK"),
         Err(e) => {
@@ -22974,7 +23174,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
     // 像へ入るテキストが ASCII だけであること（2026-08-31、静的）。
     total += 1;
-    begin_item("text that goes into the image is ASCII only");
+    begin_item(Family::Base, "text that goes into the image is ASCII only");
     match check_image_text_is_ascii(&workspace_root) {
         Ok(summary) => println!("--- image text ASCII: OK ({summary})"),
         Err(e) => {
@@ -22986,7 +23186,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
     // 追跡下のバイナリの置き場（2026-09-10、静的）。
     total += 1;
-    begin_item("tracked binaries live under third_party/ with a README.md beside them");
+    begin_item(
+        Family::Base,
+        "tracked binaries live under third_party/ with a README.md beside them",
+    );
     match check_tracked_binaries(&workspace_root) {
         Ok(summary) => println!("--- tracked binaries: OK ({summary})"),
         Err(e) => {
@@ -22998,7 +23201,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
     // カーネルが XMM を持たないこと（`ADR-0058` の Decision 5、静的）。
     total += 1;
-    begin_item("the kernel never touches FP state (no XMM register in the default build)");
+    begin_item(
+        Family::Base,
+        "the kernel never touches FP state (no XMM register in the default build)",
+    );
     match check_kernel_has_no_xmm(&workspace_root) {
         Ok(summary) => println!("--- kernel has no XMM: OK ({summary})"),
         Err(e) => {
@@ -23011,6 +23217,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     // **カーネルが FS/GS も SMAP の命令も使わないこと**（2026-09-24。`ADR-0018` の Addendum 9、静的）。
     total += 1;
     begin_item(
+        Family::Base,
         "the kernel uses no fs:/gs: operand and no swapgs, fsgsbase or SMAP instruction (the \
          inventory in ADR-0018 Addendum 9)",
     );
@@ -23025,7 +23232,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
     // 埋め込む ext2 の像が `e2fsck` を通ること（S10-a、静的）。
     total += 1;
-    begin_item("the embedded ext2 image passes e2fsck");
+    begin_item(Family::Base, "the embedded ext2 image passes e2fsck");
     match check_fs_image_passes_e2fsck(&workspace_root) {
         Ok(summary) => println!("--- fs image e2fsck: OK ({summary})"),
         Err(e) => {
@@ -23037,7 +23244,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
     // 像に「どこで・誰が建てたか」が残っていないこと（2026-09-06、静的）。
     total += 1;
-    begin_item("the embedded ext2 image carries no trace of where or who built it");
+    begin_item(
+        Family::Base,
+        "the embedded ext2 image carries no trace of where or who built it",
+    );
     match check_image_has_no_build_traces(&workspace_root) {
         Ok(summary) => println!("--- image build traces: OK ({summary})"),
         Err(e) => {
@@ -23056,14 +23266,14 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for test in EXCEPTION_TESTS {
             total += 1;
             let name = format!("exception-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
                 cmd_exception_test(test.name)
             });
         }
         for test in CRITICAL_TESTS {
             total += 1;
             let name = format!("critical-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
                 cmd_marker_test(CRITICAL_TESTS, "critical-test", test.name, None)
             });
         }
@@ -23071,6 +23281,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // 残した版で、基底の項目が `%gs:` を名指しして落ちること。**
         total += 1;
         run_regression(
+            Family::Interrupts,
             "the FS/GS and SMAP check catches kernel-uses-gs-test",
             &mut failed,
             &mut retries,
@@ -23087,55 +23298,56 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for test in PAGING_TESTS {
             total += 1;
             let name = format!("paging-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Memory, &name, &mut failed, &mut retries, || {
                 cmd_marker_test(PAGING_TESTS, "paging-test", test.name, None)
             });
         }
         for test in STACK_TESTS {
             total += 1;
             let name = format!("stack-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Memory, &name, &mut failed, &mut retries, || {
                 cmd_marker_test(STACK_TESTS, "stack-test", test.name, None)
             });
         }
         for test in TASK_TESTS {
             total += 1;
             let name = format!("task-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Process, &name, &mut failed, &mut retries, || {
                 cmd_marker_test(TASK_TESTS, "task-test", test.name, None)
             });
         }
         for test in RING3_TESTS {
             total += 1;
             let name = format!("ring3-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Process, &name, &mut failed, &mut retries, || {
                 cmd_marker_test(RING3_TESTS, "ring3-test", test.name, None)
             });
         }
         for test in SYSCALL_TESTS {
             total += 1;
             let name = format!("syscall-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Process, &name, &mut failed, &mut retries, || {
                 cmd_marker_test(SYSCALL_TESTS, "syscall-test", test.name, None)
             });
         }
         for test in ACPI_TESTS {
             total += 1;
             let name = format!("acpi-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
                 cmd_marker_test(ACPI_TESTS, "acpi-test", test.name, None)
             });
         }
         for test in ACPI_SMP_TESTS {
             total += 1;
             let name = format!("acpi-smp-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
                 cmd_marker_test(ACPI_SMP_TESTS, "acpi-smp-test", test.name, Some(2))
             });
         }
         // **BKL の相互排除の証明（S4-b-4）。KVM を要する。**
         total += 1;
         run_regression(
+            Family::Smp,
             "bkl-test exclusion-proof",
             &mut failed,
             &mut retries,
@@ -23145,7 +23357,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for test in BKL_TIMEOUT_TESTS {
             total += 1;
             let name = format!("bkl-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Smp, &name, &mut failed, &mut retries, || {
                 cmd_marker_test(BKL_TIMEOUT_TESTS, "bkl-test", test.name, Some(2))
             });
         }
@@ -23153,7 +23365,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for test in BKL_TESTS {
             total += 1;
             let name = format!("bkl-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Smp, &name, &mut failed, &mut retries, || {
                 cmd_marker_test(BKL_TESTS, "bkl-test", test.name, None)
             });
         }
@@ -23161,6 +23373,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // 較正値を BSP と共有するのは仮定なので、**カーネルの外の基準で確かめる。**
         total += 1;
         run_regression(
+            Family::Smp,
             "smp-ap-test ap-timer-rate",
             &mut failed,
             &mut retries,
@@ -23171,21 +23384,21 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for test in ACPI_SMP4_TESTS {
             total += 1;
             let name = format!("acpi-smp-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
                 cmd_marker_test(ACPI_SMP4_TESTS, "acpi-smp-test", test.name, Some(4))
             });
         }
         for test in APIC_TESTS {
             total += 1;
             let name = format!("apic-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
                 cmd_marker_test(APIC_TESTS, "apic-test", test.name, None)
             });
         }
         for test in APIC_DECODE_TESTS {
             total += 1;
             let name = format!("apic-decode-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
                 cmd_marker_test(APIC_DECODE_TESTS, "apic-decode-test", test.name, None)
             });
         }
@@ -23199,7 +23412,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }
             total += 1;
             let name = format!("interrupt-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
                 cmd_marker_test(INTERRUPT_TESTS, "interrupt-test", test.name, None)
             });
         }
@@ -23210,6 +23423,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         } else {
             total += 1;
             run_regression(
+                Family::Interrupts,
                 "interrupt-test keyboard",
                 &mut failed,
                 &mut retries,
@@ -23221,7 +23435,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for test in LAPIC_TIMER_TESTS {
             total += 1;
             let name = format!("lapic-timer-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
                 cmd_lapic_timer_test(test.name)
             });
         }
@@ -23236,7 +23450,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }
             total += 1;
             let name = format!("smp-ap-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Smp, &name, &mut failed, &mut retries, || {
                 cmd_marker_test(SMP_AP_TESTS, "smp-ap-test", test.name, Some(2))
             });
         }
@@ -23244,7 +23458,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for test in SMP_TRAMP_TESTS {
             total += 1;
             let name = format!("smp-tramp-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Boot, &name, &mut failed, &mut retries, || {
                 cmd_marker_test(SMP_TRAMP_TESTS, "smp-tramp-test", test.name, Some(2))
             });
         }
@@ -23252,7 +23466,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for test in PERCPU_TESTS {
             total += 1;
             let name = format!("percpu-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Smp, &name, &mut failed, &mut retries, || {
                 cmd_marker_test(PERCPU_TESTS, "percpu-test", test.name, None)
             });
         }
@@ -23262,36 +23476,43 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         for sabotage in IOAPIC_SABOTAGE_TESTS {
             total += 1;
             let name = format!("ioapic-test {}", sabotage.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
                 cmd_ioapic_sabotage(sabotage.name, sabotage.feature, sabotage.expected)
             });
         }
         total += 1;
-        run_regression("panic-test", &mut failed, &mut retries, || {
-            cmd_run(&RunOptions {
-                panic_test: true,
-                keep_disk: false,
-                rebuild_disk: false,
-                gui: false,
-                gtk: false,
-                gfx_test: false,
-                kvm: false,
-                no_limit: false,
-                manual: false,
-                key_probe: false,
-            })
-        });
+        run_regression(
+            Family::Boot,
+            "panic-test",
+            &mut failed,
+            &mut retries,
+            || {
+                cmd_run(&RunOptions {
+                    panic_test: true,
+                    keep_disk: false,
+                    rebuild_disk: false,
+                    gui: false,
+                    gtk: false,
+                    gfx_test: false,
+                    kvm: false,
+                    no_limit: false,
+                    manual: false,
+                    key_probe: false,
+                })
+            },
+        );
         // higher-half の破壊確認（B-2a-5）。(a)(b)(c) は QEMU で位置署名 + 定常未到達を
         // 判定、(d) はビルド + トランポリンのバイト不一致を静的に判定。
         for test in HIGHHALF_TESTS {
             total += 1;
             let name = format!("highhalf-test {}", test.name);
-            run_regression(&name, &mut failed, &mut retries, || {
+            run_regression(Family::Boot, &name, &mut failed, &mut retries, || {
                 cmd_highhalf_test(test.name)
             });
         }
         total += 1;
         run_regression(
+            Family::Boot,
             "highhalf-test trampoline-absolute-ref",
             &mut failed,
             &mut retries,
@@ -23334,6 +23555,8 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             others.join("; ")
         );
         report_item_time_slowness(others.len());
+        // **族ごとの項目の数と所要**（2026-09-26。族にまとめる段）。
+        println!("{}", family_times_line());
     }
     check_count_matches_accounting(&workspace_root, total, full, commit)?;
     // **失敗の分け方と、起こした QEMU の数**（2026-09-24）。
@@ -24309,10 +24532,13 @@ fn slowness_lines(
 /// **項目の終わりを呼ぶ側に書かせない。** **`--full` の項目は51箇所から
 /// 見出しを出しており、終わりを1つずつ書かせると、書き忘れた項目だけが
 /// 黙って消える。** **次の見出しが前の項目の終わりである。**
-static ITEM_CLOCK: std::sync::Mutex<Option<(Instant, String)>> = std::sync::Mutex::new(None);
+static ITEM_CLOCK: std::sync::Mutex<Option<(Instant, String, Family)>> =
+    std::sync::Mutex::new(None);
 
 /// 項目の見出しを出し、時計を始める（VIEW-b の後）。
-fn begin_item(label: &str) {
+///
+/// **族を取る**（2026-09-26。族にまとめる段）——**族を名乗らない項目は建たない**（`family` の doc）。
+fn begin_item(family: Family, label: &str) {
     finish_item();
     // **走行の記録は項目ごとに空にする**（失敗の分け方と計測が項目の単位で読む）。
     launch::reset_item_runs();
@@ -24320,7 +24546,7 @@ fn begin_item(label: &str) {
     stop_if_over_the_time_limit();
     println!("=== xtask check: {label}");
     if let Ok(mut clock) = ITEM_CLOCK.lock() {
-        *clock = Some((Instant::now(), label.to_string()));
+        *clock = Some((Instant::now(), label.to_string(), family));
     }
 }
 
@@ -24355,15 +24581,21 @@ fn stop_if_over_the_time_limit() {
 /// 走っている項目の所要を出す（VIEW-b の後）。**走っていなければ何もしない。**
 fn finish_item() {
     let taken = ITEM_CLOCK.lock().ok().and_then(|mut clock| clock.take());
-    if let Some((started, label)) = taken {
+    if let Some((started, label, family)) = taken {
         let elapsed = started.elapsed();
         ITEM_TIME_TOTAL_MS.fetch_add(
             elapsed.as_millis() as u64,
             std::sync::atomic::Ordering::SeqCst,
         );
+        if let Ok(mut times) = FAMILY_TIMES.lock() {
+            let entry = times.entry(family).or_insert((0, 0.0));
+            entry.0 += 1;
+            entry.1 += elapsed.as_secs_f64();
+        }
         println!(
-            "(info) item time: {:.1}s for {label}",
-            elapsed.as_secs_f64()
+            "(info) item time: {:.1}s [{}] for {label}",
+            elapsed.as_secs_f64(),
+            family.name()
         );
         // **QEMU の走行の数と時間と、最も大きかった出力**（2026-09-24。検査の時間の計測。7.(1)）。
         let runs = launch::item_runs();
@@ -24405,6 +24637,38 @@ fn finish_item() {
             metrics::take_item_line()
         );
     }
+}
+
+/// 族ごとの項目の数と所要の秒（2026-09-26。族にまとめる段。**`--full` のまとめで 1 行にする**）。
+static FAMILY_TIMES: std::sync::Mutex<std::collections::BTreeMap<Family, (usize, f64)>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// 族ごとの項目の数と所要を 1 行にする（2026-09-26。まとめの計器。止めない）。
+fn family_times_line() -> String {
+    let times = FAMILY_TIMES
+        .lock()
+        .map(|times| times.clone())
+        .unwrap_or_default();
+    let listed: Vec<String> = Family::ALL
+        .iter()
+        .filter_map(|family| {
+            let (items, seconds) = times.get(family)?;
+            Some(format!(
+                "{} {items} ({:.1} min)",
+                family.name(),
+                seconds / 60.0
+            ))
+        })
+        .collect();
+    format!("(info) items and time by family: {}", listed.join(", "))
+}
+
+/// 走っている項目の族（2026-09-26）。**項目の外なら `None`。**
+fn current_family() -> Option<Family> {
+    ITEM_CLOCK
+        .lock()
+        .ok()
+        .and_then(|clock| clock.as_ref().map(|(_, _, family)| *family))
 }
 
 /// 宣言なしに期限で終わった待ちを持つ項目（2026-09-25。**締めのまとめで一覧にする**）。
@@ -24467,12 +24731,13 @@ fn failure_category(error: &anyhow::Error) -> &'static str {
 }
 
 fn run_regression(
+    family: Family,
     name: &str,
     failed: &mut Failures,
     retries: &mut Vec<String>,
     mut body: impl FnMut() -> Result<()>,
 ) {
-    begin_item(name);
+    begin_item(family, name);
     let first = body();
     let error = match first {
         Ok(()) => {
@@ -25148,7 +25413,8 @@ mod tests {
         ));
     }
 
-    /// **「どの誤りでも捕まえた」を族ごとに数え、まとめの 1 行に出す**（2026-09-25。計器）。
+    /// **「どの誤りでも捕まえた」を族ごとに数え、まとめの 1 行に出す**（2026-09-25。計器）。**項目の外で
+    /// 数えた回は「族なし」に束ねる**（2026-09-26。ホストのテストは項目の外で呼ぶ）。
     #[test]
     fn any_error_verdicts_are_counted_per_family() {
         caught_by_any_error(
@@ -25160,7 +25426,10 @@ mod tests {
             "--- zz family for the host test (b): OK (the sabotage was caught)",
         );
         let line = any_error_verdicts_line();
-        assert!(line.contains("zz family for the host test 2"), "{line}");
+        assert!(
+            line.contains("no family 2 (zz family for the host test 2)"),
+            "{line}"
+        );
         assert!(line.contains("narrowed to an intended stop: "), "{line}");
     }
 
