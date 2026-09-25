@@ -63,9 +63,26 @@ pub const IMAGE_PATH_PREFIXES: [&str; 2] = ["kernel/", "common/"];
 ///
 /// **2026-09-25 に 4 欄を足した**（書いた量と、終わりの空き 3 つ。運用者の足す1点）。**足す前の 11 欄の行も読む。**
 /// **2026-09-26 にさらに 2 欄を足した**（全検査の始めに作業木が冷えていたか、その間に走った他の検査の数）。
+/// **同じ日に形を改めた**（第 2 版。第三者レビューの取り込み 4.(4)）——**行の頭に版の `2`、終わりに印の
+/// `end` を置き、環境・走行前の選び・当たりの 3 欄を足した**（[`RECORD_VERSION`]）。
 const RECORDS_HEADER: &str =
-    "# unix\twhen\tlevel\toutcome\tcommit\ttree\tdirty\titems\titem_seconds\t\
-     build_seconds\twritten\twsl_free\thost_free\tsystem_free\tstart_state\tother_runs\tnote";
+    "# version\tunix\twhen\tlevel\toutcome\tcommit\ttree\tdirty\titems\titem_seconds\t\
+     build_seconds\twritten\twsl_free\thost_free\tsystem_free\tstart_state\tother_runs\tenv\t\
+     selected\tscore\tnote\tend";
+
+/// 記録の形の版（行の頭の欄。2026-09-26）。
+///
+/// **途中で切れた行を合格として読まないため**——**第 2 版の行は頭が `2`、終わりが [`RECORD_END`] で、
+/// 欄の数がちょうど 22 である。** **どれかが欠けた行は読まない**（書く途中で落ちた・空きが尽きた等で
+/// 行の途中までしか書かれなかった形）。**頭の `2` は、切れた行を古い形（11・15・17 欄）として読ませない
+/// ためである**——**古い形の頭は時刻（10 桁）なので取り違えない。**
+const RECORD_VERSION: &str = "2";
+
+/// 第 2 版の行の終わりの印（2026-09-26）。
+const RECORD_END: &str = "end";
+
+/// 第 2 版の行の欄の数（版と終わりの印を含む）。
+const RECORD_FIELDS: usize = 22;
 
 /// 検査の段。**並びが上下である**（`--full` ⊇ `--commit` ⊇ 基底）。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -128,16 +145,25 @@ pub struct Record {
     pub start_state: Option<String>,
     /// 全検査の間に走った他の検査の数（全検査だけ）。
     pub other_runs: Option<usize>,
+    /// 検査の環境の指紋（全検査だけ。`rustc`・QEMU・OVMF・外の道具の版。2026-09-26）。**選びが比べる。**
+    pub env: Option<String>,
+    /// 走る前に選んだ族（全検査だけ。`all`・`none`・族の名前の並び。2026-09-26）。
+    pub selected: Option<String>,
+    /// 当たりの計器の答え（赤の全検査だけ。2026-09-26）。
+    pub score: Option<String>,
     pub note: String,
 }
 
-/// 記録を 1 行にする（純粋な論理）。**欄の区切りと改行は空白へ直す。**
+/// 記録を 1 行にする（純粋な論理）。**欄の区切りと改行は空白へ直す。** **第 2 版で書く**
+/// （頭に版、終わりに印。[`RECORD_VERSION`]）。
 fn format_record(record: &Record) -> String {
     let clean = |text: &str| text.replace(['\t', '\n', '\r'], " ");
     let number = |value: Option<f64>| value.map_or("-".to_string(), |value| format!("{value:.1}"));
     let bytes = |value: Option<u64>| value.map_or("-".to_string(), |value| value.to_string());
+    let text = |value: Option<&str>| value.map_or("-".to_string(), clean);
     format!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        "{RECORD_VERSION}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t\
+         {RECORD_END}\n",
         record.unix,
         clean(&record.when),
         clean(&record.level),
@@ -158,16 +184,41 @@ fn format_record(record: &Record) -> String {
         record
             .other_runs
             .map_or("-".to_string(), |count| count.to_string()),
+        text(record.env.as_deref()),
+        text(record.selected.as_deref()),
+        text(record.score.as_deref()),
         clean(&record.note)
     )
 }
 
 /// 記録の 1 行を読む（純粋な論理）。**頭の行と形の崩れた行は読まない。**
+///
+/// **第 2 版の行は、欄の数と終わりの印が揃ったときだけ読む**（[`RECORD_VERSION`]）。**古い形の行
+/// （11・15・17 欄）は前と同じに読む**——**書いた後に確かめる手段が無いので、そのまま受ける。**
 fn parse_record(line: &str) -> Option<Record> {
     if line.starts_with('#') {
         return None;
     }
-    let fields: Vec<&str> = line.split('\t').collect();
+    let all: Vec<&str> = line.split('\t').collect();
+    if all.first() == Some(&RECORD_VERSION) {
+        if all.len() != RECORD_FIELDS || all.last() != Some(&RECORD_END) {
+            return None;
+        }
+        let fields = &all[1..all.len() - 1];
+        let text = |value: &str| (value != "-").then(|| value.to_string());
+        return Some(Record {
+            env: text(fields[16]),
+            selected: text(fields[17]),
+            score: text(fields[18]),
+            note: fields[19].to_string(),
+            ..parse_legacy(&[&fields[..16], &fields[19..20]].concat())?
+        });
+    }
+    parse_legacy(&all)
+}
+
+/// 古い形（11・15・17 欄）の行を読む（純粋な論理）。**第 2 版の行も、足した欄を除けばこの形である。**
+fn parse_legacy(fields: &[&str]) -> Option<Record> {
     // **11 欄は 4 欄を足す前の行**（2026-09-25）、**15 欄は 2 欄を足す前の行**（2026-09-26）。
     // **足した欄は無いものとして読む。**
     if ![11, 15, 17].contains(&fields.len()) {
@@ -201,6 +252,9 @@ fn parse_record(line: &str) -> Option<Record> {
             .filter(|value| *value != "-")
             .map(str::to_string),
         other_runs: added_later(15).and_then(optional),
+        env: None,
+        selected: None,
+        score: None,
         note: fields[fields.len() - 1].to_string(),
     })
 }
@@ -213,39 +267,95 @@ pub fn records_path(root: &Path) -> Result<PathBuf> {
         .join("records.tsv"))
 }
 
-/// 記録を 1 行足す。**1 回の書き込みで足す**（`O_APPEND`。並んで書いても行は混ざらない）。
+/// 記録を 1 行足す（本の木の記録へ）。
 pub fn append(root: &Path, record: &Record) -> Result<()> {
-    let path = records_path(root)?;
+    append_line(&records_path(root)?, RECORDS_HEADER, &format_record(record))
+}
+
+/// 行を 1 つ足す（2026-09-26。第三者レビューの取り込み 4.(4)）。**記録と選びの記録が使う。**
+///
+/// - **錠を取って書く**（ファイルそのものに排他の `flock`。上限 [`APPEND_LOCK_WAIT`]）——**全検査の間に
+///   基底が書いても、行が混ざらない。** **錠は書き終えたら放す**（持つのは 1 行ぶんの間だけ）。
+/// - **1 回の書き込みで足す**（`O_APPEND`）。
+/// - **前の書き込みが途中で切れていれば、先に改行を足して区切る**——**切れた断片に次の行が繋がって、
+///   崩れた 1 行になるのを防ぐ。** **断片そのものは読まない**（[`parse_record`] と [`read_lines`]）。
+pub fn append_line(path: &Path, header: &str, line: &str) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("could not create {}", dir.display()))?;
     }
-    let fresh = !path.exists();
     let mut file = OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
-        .open(&path)
+        .open(path)
         .with_context(|| format!("could not open {}", path.display()))?;
-    let mut text = String::new();
-    if fresh {
-        text.push_str(RECORDS_HEADER);
-        text.push('\n');
+    let started = Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) if started.elapsed() < APPEND_LOCK_WAIT => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => {
+                bail!(
+                    "could not lock {} to append a line: {error}",
+                    path.display()
+                );
+            }
+        }
     }
-    text.push_str(&format_record(record));
-    file.write_all(text.as_bytes())
-        .with_context(|| format!("could not write {}", path.display()))
+    let length = file
+        .metadata()
+        .with_context(|| format!("could not read the size of {}", path.display()))?
+        .len();
+    let mut text = String::new();
+    if length == 0 {
+        text.push_str(header);
+        text.push('\n');
+    } else {
+        let mut last = [0u8; 1];
+        file.seek(SeekFrom::End(-1))
+            .and_then(|_| file.read_exact(&mut last))
+            .with_context(|| format!("could not read the end of {}", path.display()))?;
+        if last[0] != b'\n' {
+            text.push('\n');
+        }
+    }
+    text.push_str(line);
+    let written = file
+        .write_all(text.as_bytes())
+        .with_context(|| format!("could not write {}", path.display()));
+    let _ = file.unlock();
+    written
+}
+
+/// 足す行の錠を待つ上限（2026-09-26）。**持つ側は 1 行ぶんの間しか持たないので、待つのは短い。**
+const APPEND_LOCK_WAIT: Duration = Duration::from_secs(10);
+
+/// 改行で終わった行だけを返す（純粋な論理）。**終わりの改行が無い最後の断片は、書く途中で切れた形
+/// なので読まない。**
+pub fn read_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.split_inclusive('\n')
+        .filter(|line| line.ends_with('\n'))
+        .map(|line| line.trim_end_matches(['\n', '\r']))
 }
 
 /// 記録を全部読む（無ければ空）。
 pub fn read_records(root: &Path) -> Result<Vec<Record>> {
-    let path = records_path(root)?;
-    let text = match fs::read_to_string(&path) {
+    read_records_at(&records_path(root)?)
+}
+
+/// 置き場を指して記録を全部読む（無ければ空）。
+fn read_records_at(path: &Path) -> Result<Vec<Record>> {
+    let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => {
             return Err(error).with_context(|| format!("could not read {}", path.display()))
         }
     };
-    Ok(text.lines().filter_map(parse_record).collect())
+    Ok(read_lines(&text).filter_map(parse_record).collect())
 }
 
 /// 走り始めの木（`cmd_check` の入口で採り、終わりの記録に使う）。
@@ -588,6 +698,9 @@ pub fn end(outcome: &str, items: Option<usize>, item_seconds: Option<f64>) {
                     .flatten()
                     .filter(|state| !state.is_empty()),
                 other_runs: OTHER_RUNS.lock().ok().and_then(|slot| *slot),
+                env: None,
+                selected: None,
+                score: None,
                 note: std::env::var(LOG_ENV).unwrap_or_else(|_| "-".to_string()),
             },
         ))
@@ -1188,6 +1301,9 @@ fn append_full_record(main: &Path, commit: &str, tree: &str, outcome: &str, note
         system_free,
         start_state: None,
         other_runs: None,
+        env: None,
+        selected: None,
+        score: None,
         note: note.to_string(),
     };
     if let Err(error) = append(main, &record) {
@@ -1251,6 +1367,9 @@ pub fn gate(root: &Path, override_reason: Option<&str>) -> Result<Gate> {
                     system_free: None,
                     start_state: None,
                     other_runs: None,
+                    env: None,
+                    selected: None,
+                    score: None,
                     note: reason.to_string(),
                 },
             )?;
@@ -1338,6 +1457,9 @@ mod tests {
             system_free: Some(20 << 30),
             start_state: None,
             other_runs: None,
+            env: None,
+            selected: None,
+            score: None,
             note: "a\tb\nc".to_string(),
         }
     }
@@ -1361,6 +1483,84 @@ mod tests {
         );
         assert_eq!(parse_record(RECORDS_HEADER), None);
         assert_eq!(parse_record("1\t2\t3"), None);
+    }
+
+    /// **第 2 版の行は、欄の数と終わりの印が揃ったときだけ読む**（2026-09-26。4.(4)）。**古い形は前と同じに
+    /// 読む。** **切れた行は、どこで切れても読まない**——**頭の `2` があるので、古い形としても読まない。**
+    #[test]
+    fn a_torn_record_line_is_never_read_as_a_record() {
+        let written = Record {
+            env: Some("rustc 1.97.1; qemu 8.2.2".to_string()),
+            selected: Some("fs,apps".to_string()),
+            score: Some("caught=yes".to_string()),
+            ..record("full", "pass", "c1", "t1", 0)
+        };
+        let line = format_record(&written);
+        assert!(
+            line.starts_with("2\t") && line.ends_with("\tend\n"),
+            "{line}"
+        );
+        let read = parse_record(line.trim_end_matches('\n')).unwrap();
+        assert_eq!(read.env.as_deref(), Some("rustc 1.97.1; qemu 8.2.2"));
+        assert_eq!(read.selected.as_deref(), Some("fs,apps"));
+        assert_eq!(read.score.as_deref(), Some("caught=yes"));
+        assert_eq!(read.note, "a b c");
+        // **切れた行は、どの長さでも読まない**（最後の 1 字を落とした形まで）。
+        let body = line.trim_end_matches('\n');
+        for cut in 1..body.len() {
+            if body.is_char_boundary(cut) {
+                assert_eq!(
+                    parse_record(&body[..cut]),
+                    None,
+                    "cut at {cut}: {:?}",
+                    &body[..cut]
+                );
+            }
+        }
+        // **古い形（17 欄）は前と同じに読む。**
+        let legacy =
+            "1\t2026-09-25 10:00:00\tfull\tpass\tc\tt\t0\t409\t1.0\t0.1\t-\t-\t-\t-\twarm\t0\tlog";
+        assert_eq!(
+            parse_record(legacy).map(|record| record.note),
+            Some("log".to_string())
+        );
+    }
+
+    /// **切れた断片（改行の無い終わり）は読まず、次の追記は改行で区切ってから足す**（2026-09-26。4.(4)）。
+    /// **並んで書いても行は混ざらない**（錠と 1 回の書き込み）。
+    #[test]
+    fn appends_survive_a_torn_tail_and_concurrent_writers() {
+        let dir = std::env::temp_dir().join(format!("zaytos-records-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("records.tsv");
+        let line = format_record(&record("base", "pass", "c1", "t1", 0));
+        append_line(&path, RECORDS_HEADER, &line).unwrap();
+        // **書く途中で切れた形を作る**（行の半分だけ、改行なし）。
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(&line.as_bytes()[..line.len() / 2]).unwrap();
+        drop(file);
+        assert_eq!(read_records_at(&path).unwrap().len(), 1);
+        append_line(&path, RECORDS_HEADER, &line).unwrap();
+        assert_eq!(read_records_at(&path).unwrap().len(), 2);
+        // **並んで書く**（8 本の糸が 25 行ずつ）。
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                let line = line.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..25 {
+                        append_line(&path, RECORDS_HEADER, &line).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(read_records_at(&path).unwrap().len(), 2 + 8 * 25);
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().filter(|line| line.starts_with('#')).count(), 1);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// **`kernel/` か `common/` に触れたコミットは `--commit` が要る**（フックと同じ規則）。
@@ -1517,9 +1717,12 @@ mod tests {
             (read.items, read.written, read.wsl_free, read.note.as_str()),
             (Some(47), None, None, "-")
         );
-        // **いまの行は 17 欄である**（2026-09-26 に 2 欄を足した）。
+        // **いまの行は第 2 版の 22 欄である**（2026-09-26 に 2 欄を足し、同じ日に第 2 版へ改めた）。
         let new = format_record(&record("full", "pass", "c", "t", 0));
-        assert_eq!(new.trim_end_matches('\n').split('\t').count(), 17);
+        assert_eq!(
+            new.trim_end_matches('\n').split('\t').count(),
+            RECORD_FIELDS
+        );
         let read = parse_record(new.trim_end_matches('\n')).unwrap();
         assert_eq!(
             (
@@ -1654,7 +1857,10 @@ mod tests {
         let mut new = full(1, Some("cold"), Some(4));
         new.note = "-".to_string();
         let line = format_record(&new);
-        assert_eq!(line.trim_end_matches('\n').split('\t').count(), 17);
+        assert_eq!(
+            line.trim_end_matches('\n').split('\t').count(),
+            RECORD_FIELDS
+        );
         let read = parse_record(line.trim_end_matches('\n')).unwrap();
         assert_eq!(
             (read.start_state.as_deref(), read.other_runs),

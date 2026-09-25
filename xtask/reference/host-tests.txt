@@ -686,7 +686,9 @@ xtask::full_check::tests::a_description_says_when_the_working_tree_had_other_cha
 xtask::full_check::tests::a_record_from_before_the_added_columns_still_reads
 xtask::full_check::tests::a_record_from_before_the_start_state_still_reads
 xtask::full_check::tests::a_record_reads_back_as_written
+xtask::full_check::tests::a_torn_record_line_is_never_read_as_a_record
 xtask::full_check::tests::a_worktree_is_cold_without_target_when_small_or_built_by_another_rustc
+xtask::full_check::tests::appends_survive_a_torn_tail_and_concurrent_writers
 xtask::full_check::tests::only_a_pass_at_the_needed_level_or_above_covers_a_commit
 xtask::full_check::tests::the_estimate_is_chosen_by_whether_the_worktree_is_cold
 xtask::full_check::tests::the_full_check_needs_the_estimate_plus_the_floor_on_both_places
