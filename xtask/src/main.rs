@@ -5130,6 +5130,26 @@ fn report_one_build_directory(what: &str, bytes: Option<u64>) {
     }
 }
 
+/// 捕まえると `Ok` を返す破壊の回の判定（2026-09-26）。**`Err` は検査そのものの失敗である。**
+///
+/// **永続の 2 つ**（`--persist-test --rebuild-between` と `--persist-zi-test --rebuild-between`）は、
+/// 関数の中で向きを反す。
+fn report_inverted_sabotage_verdict(
+    check: &str,
+    label: &str,
+    result: &Result<()>,
+    failed: &mut Failures,
+) {
+    let name = format!("{check} ({label})");
+    match result {
+        Ok(()) => caught_by_any_error(check, &format!("--- {name}: OK (the sabotage was caught)")),
+        Err(error) => {
+            println!("--- {name}: FAILED ({error})");
+            failed.push(name);
+        }
+    }
+}
+
 /// 破壊の回の判定を 1 行にして出す（5.b。2026-09-25）。**落ちたら `failed` へ積む。**
 fn report_sabotage_verdict(
     check: &str,
@@ -22056,16 +22076,14 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             Family::Shell,
             "the ansi test catches a foreground path that skips the parser",
         );
-        match cmd_ansi_test(&["ansi-console-skip-parse-test"]) {
-            Ok(()) => {
-                println!("--- ansi test (skip parse): FAILED (the sabotage was NOT caught)");
-                failed.push("ansi test (skip parse)".to_string());
-            }
-            Err(_) => caught_by_any_error(
-                "ansi test",
-                "--- ansi test (skip parse): OK (the sabotage was caught)",
-            ),
-        }
+        let result = cmd_ansi_test(&["ansi-console-skip-parse-test"]);
+        report_sabotage_verdict(
+            "ansi test",
+            "skip parse",
+            &["ansi-console-skip-parse-test"],
+            &result,
+            &mut failed,
+        );
 
         // **SGR の色を渡さない破壊（ES-b。ADR-0040）。** パーサは正しく
         // 展開しており状態も届いているが、**渡す先だけが欠ける**——
@@ -22075,16 +22093,14 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             Family::Shell,
             "the ansi test catches an SGR that never reaches the color",
         );
-        match cmd_ansi_test(&["ansi-sgr-ignore-color-test"]) {
-            Ok(()) => {
-                println!("--- ansi test (sgr ignored): FAILED (the sabotage was NOT caught)");
-                failed.push("ansi test (sgr ignored)".to_string());
-            }
-            Err(_) => caught_by_any_error(
-                "ansi test",
-                "--- ansi test (sgr ignored): OK (the sabotage was caught)",
-            ),
-        }
+        let result = cmd_ansi_test(&["ansi-sgr-ignore-color-test"]);
+        report_sabotage_verdict(
+            "ansi test",
+            "sgr ignored",
+            &["ansi-sgr-ignore-color-test"],
+            &result,
+            &mut failed,
+        );
 
         // **DECTCEM の隠す指示を無視する破壊（ES-c）。** 指示は届いて
         // いるが、**描く側が見ない**——「隠した後に無い」判定が落ちる。
@@ -22093,18 +22109,14 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             Family::Shell,
             "the ansi test catches a cursor that ignores DECTCEM",
         );
-        match cmd_ansi_test(&["ansi-cursor-ignore-hide-test"]) {
-            Ok(()) => {
-                println!(
-                    "--- ansi test (cursor ignores hide): FAILED (the sabotage was NOT caught)"
-                );
-                failed.push("ansi test (cursor ignores hide)".to_string());
-            }
-            Err(_) => caught_by_any_error(
-                "ansi test",
-                "--- ansi test (cursor ignores hide): OK (the sabotage was caught)",
-            ),
-        }
+        let result = cmd_ansi_test(&["ansi-cursor-ignore-hide-test"]);
+        report_sabotage_verdict(
+            "ansi test",
+            "cursor ignores hide",
+            &["ansi-cursor-ignore-hide-test"],
+            &result,
+            &mut failed,
+        );
 
         // **穴を 0 として読まない破壊（ADR-0038）。** 既定の起動ログが
         // `fs-sparse` の判定行を固定しているので、**破壊は起動ログの差として
@@ -22116,32 +22128,28 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             Family::Fs,
             "refusing holes breaks the sparse read and the corrupt-fs probe",
         );
-        match cmd_boot_with_features(&["ext2-sparse-as-error-test"], "fs-sparse", "= true") {
-            Ok(()) => {
-                println!("--- sparse read (refused): FAILED (the sabotage was NOT caught)");
-                failed.push("sparse read (refused)".to_string());
-            }
-            Err(_) => caught_by_any_error(
-                "sparse read",
-                "--- sparse read (refused): OK (the sabotage was caught)",
-            ),
-        }
+        let result = cmd_boot_with_features(&["ext2-sparse-as-error-test"], "fs-sparse", "= true");
+        report_sabotage_verdict(
+            "sparse read",
+            "refused",
+            &["ext2-sparse-as-error-test"],
+            &result,
+            &mut failed,
+        );
 
         // **`.bss` を張らない破壊（ADR-0039）。** 既定の起動ログが
         // `bss-check` の判定行を固定しているので、**破壊はその行が
         // `Exited(0)` でなくなる形で出る**（実測では `Folded(14)`＝#PF）。
         total += 1;
         begin_item(Family::Process, "mapping segments by filesz drops the .bss");
-        match cmd_boot_with_features(&["user-load-filesz-only"], "bss-check", "Exited(0)") {
-            Ok(()) => {
-                println!("--- bss mapping (filesz only): FAILED (the sabotage was NOT caught)");
-                failed.push("bss mapping (filesz only)".to_string());
-            }
-            Err(_) => caught_by_any_error(
-                "bss mapping",
-                "--- bss mapping (filesz only): OK (the sabotage was caught)",
-            ),
-        }
+        let result = cmd_boot_with_features(&["user-load-filesz-only"], "bss-check", "Exited(0)");
+        report_sabotage_verdict(
+            "bss mapping",
+            "filesz only",
+            &["user-load-filesz-only"],
+            &result,
+            &mut failed,
+        );
 
         // **`zi` の実演（zi-d）。** 決定的な台本入力で、開いて動いて編集し、
         // `:wq` で保存し、`cat` で読み戻すところまでを見る。
@@ -22194,16 +22202,8 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         ] {
             total += 1;
             begin_item(Family::Apps, &format!("the view test catches {feature}"));
-            match cmd_view_test(&[feature]) {
-                Ok(()) => {
-                    println!("--- view test ({feature}): FAILED (the sabotage was NOT caught)");
-                    failed.push(format!("view test ({feature})"));
-                }
-                Err(_) => caught_by_any_error(
-                    "view test",
-                    &format!("--- view test ({feature}): OK (the sabotage was caught)"),
-                ),
-            }
+            let result = cmd_view_test(&[feature]);
+            report_sabotage_verdict("view test", feature, &[feature], &result, &mut failed);
         }
 
         // **`zi` の破壊 16 種。** 上下を捨てる（zi-d-1）、`:w` が中身を
@@ -22331,16 +22331,8 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             Family::Fs,
             "the persist test catches rebuilding the disk in between",
         );
-        match cmd_persist_test(true) {
-            Ok(()) => caught_by_any_error(
-                "persist",
-                "--- persist (rebuilt in between): OK (the sabotage was caught)",
-            ),
-            Err(error) => {
-                println!("--- persist (rebuilt in between): FAILED ({error})");
-                failed.push("persist (rebuilt in between)".to_string());
-            }
-        }
+        let result = cmd_persist_test(true);
+        report_inverted_sabotage_verdict("persist", "rebuilt in between", &result, &mut failed);
 
         // **環境の源がファイルであること（f-1。`ADR-0052`）。**
         //
@@ -22392,16 +22384,8 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             Family::Apps,
             "the zi persist test catches rebuilding the disk in between",
         );
-        match cmd_persist_zi_test(true) {
-            Ok(()) => caught_by_any_error(
-                "persist",
-                "--- persist (zi, rebuilt in between): OK (the sabotage was caught)",
-            ),
-            Err(error) => {
-                println!("--- persist (zi, rebuilt in between): FAILED ({error})");
-                failed.push("persist (zi, rebuilt in between)".to_string());
-            }
-        }
+        let result = cmd_persist_zi_test(true);
+        report_inverted_sabotage_verdict("persist", "zi, rebuilt in between", &result, &mut failed);
 
         // **像を複製して取り出し、建てた像と突き合わせる（S12-a）。**
         // **判定 3 本を 1 項目にまとめてある**（複製先の位置・バイト一致・`e2fsck`）。
@@ -22420,16 +22404,14 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **捕まえるのはバイト一致である。**
         total += 1;
         begin_item(Family::Fs, "the fs extract catches a corrupted copy");
-        match cmd_fs_image_extract(&["fs-copy-corrupt-tail-test"]) {
-            Ok(()) => {
-                println!("--- fs extract (corrupt tail): FAILED (the sabotage was NOT caught)");
-                failed.push("fs extract (corrupt tail)".to_string());
-            }
-            Err(_) => caught_by_any_error(
-                "fs extract",
-                "--- fs extract (corrupt tail): OK (the sabotage was caught)",
-            ),
-        }
+        let result = cmd_fs_image_extract(&["fs-copy-corrupt-tail-test"]);
+        report_sabotage_verdict(
+            "fs extract",
+            "corrupt tail",
+            &["fs-copy-corrupt-tail-test"],
+            &result,
+            &mut failed,
+        );
 
         // **「読む側を複製へ向けたことの反証」は P-e で落とした。**
         // **埋め込み像を外したので、読む先が 1 つしかない**——**あの破壊が
@@ -22442,16 +22424,14 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             Family::Fs,
             "the fs extract catches a shifted group-descriptor field",
         );
-        match cmd_fs_image_extract(&["ext2-group-count-offset-test"]) {
-            Ok(()) => {
-                println!("--- fs extract (shifted field): FAILED (the sabotage was NOT caught)");
-                failed.push("fs extract (shifted field)".to_string());
-            }
-            Err(_) => caught_by_any_error(
-                "fs extract",
-                "--- fs extract (shifted field): OK (the sabotage was caught)",
-            ),
-        }
+        let result = cmd_fs_image_extract(&["ext2-group-count-offset-test"]);
+        report_sabotage_verdict(
+            "fs extract",
+            "shifted field",
+            &["ext2-group-count-offset-test"],
+            &result,
+            &mut failed,
+        );
 
         // **割り当てと解放（S12-b の 3 段目）。**
         // **判定 1 と判定 2 は像の状態が違うので、同じ起動では両方言えない。**
@@ -22543,46 +22523,22 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 Family::Fs,
                 &format!("the fs truncate check catches {label}"),
             );
-            match cmd_fs_image_extract(features) {
-                Ok(()) => {
-                    println!("--- fs truncate ({label}): FAILED (the sabotage was NOT caught)");
-                    failed.push(format!("fs truncate ({label})"));
-                }
-                Err(_) => caught_by_any_error(
-                    "fs truncate",
-                    &format!("--- fs truncate ({label}): OK (the sabotage was caught)"),
-                ),
-            }
+            let result = cmd_fs_image_extract(features);
+            report_sabotage_verdict("fs truncate", label, features, &result, &mut failed);
         }
 
         for (label, features) in FS_WRITE_SABOTAGES {
             total += 1;
             begin_item(Family::Fs, &format!("the fs write check catches {label}"));
-            match cmd_fs_image_extract(features) {
-                Ok(()) => {
-                    println!("--- fs write ({label}): FAILED (the sabotage was NOT caught)");
-                    failed.push(format!("fs write ({label})"));
-                }
-                Err(_) => caught_by_any_error(
-                    "fs write",
-                    &format!("--- fs write ({label}): OK (the sabotage was caught)"),
-                ),
-            }
+            let result = cmd_fs_image_extract(features);
+            report_sabotage_verdict("fs write", label, features, &result, &mut failed);
         }
 
         for (label, features) in FS_BITMAP_SABOTAGES {
             total += 1;
             begin_item(Family::Fs, &format!("the fs bitmap check catches {label}"));
-            match cmd_fs_image_extract(features) {
-                Ok(()) => {
-                    println!("--- fs bitmap ({label}): FAILED (the sabotage was NOT caught)");
-                    failed.push(format!("fs bitmap ({label})"));
-                }
-                Err(_) => caught_by_any_error(
-                    "fs bitmap",
-                    &format!("--- fs bitmap ({label}): OK (the sabotage was caught)"),
-                ),
-            }
+            let result = cmd_fs_image_extract(features);
+            report_sabotage_verdict("fs bitmap", label, features, &result, &mut failed);
         }
 
         // **PCI の列挙（S13-a）。** 判定は QEMU 自身の帳簿（`info pci`）との
@@ -22606,16 +22562,8 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 Family::Devices,
                 &format!("the pci enumeration catches {label}"),
             );
-            match cmd_pci_test(&[feature]) {
-                Ok(()) => {
-                    println!("--- pci enumeration ({label}): FAILED (the sabotage was NOT caught)");
-                    failed.push(format!("pci enumeration ({label})"));
-                }
-                Err(_) => caught_by_any_error(
-                    "pci enumeration",
-                    &format!("--- pci enumeration ({label}): OK (the sabotage was caught)"),
-                ),
-            }
+            let result = cmd_pci_test(&[feature]);
+            report_sabotage_verdict("pci enumeration", label, &[feature], &result, &mut failed);
         }
 
         // **virtio-blk の読み（S13-b）。** 判定はホスト側の像のファイルとの
@@ -22639,16 +22587,8 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 Family::Devices,
                 &format!("the virtio-blk read catches {label}"),
             );
-            match cmd_virtio_test(&[feature]) {
-                Ok(()) => {
-                    println!("--- virtio blk read ({label}): FAILED (the sabotage was NOT caught)");
-                    failed.push(format!("virtio blk read ({label})"));
-                }
-                Err(_) => caught_by_any_error(
-                    "virtio blk read",
-                    &format!("--- virtio blk read ({label}): OK (the sabotage was caught)"),
-                ),
-            }
+            let result = cmd_virtio_test(&[feature]);
+            report_sabotage_verdict("virtio blk read", label, &[feature], &result, &mut failed);
         }
 
         // **割り込みの配送（S13-d）。** 判定は配線の読み戻し（level と
@@ -22668,16 +22608,14 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             Family::Devices,
             "the virtio interrupt catches an edge-signaled route",
         );
-        match cmd_virtio_irq_test(&["virtio-intx-edge-test"]) {
-            Ok(()) => {
-                println!("--- virtio irq (edge route): FAILED (the sabotage was NOT caught)");
-                failed.push("virtio irq (edge route)".to_string());
-            }
-            Err(_) => caught_by_any_error(
-                "virtio irq",
-                "--- virtio irq (edge route): OK (the sabotage was caught)",
-            ),
-        }
+        let result = cmd_virtio_irq_test(&["virtio-intx-edge-test"]);
+        report_sabotage_verdict(
+            "virtio irq",
+            "edge route",
+            &["virtio-intx-edge-test"],
+            &result,
+            &mut failed,
+        );
 
         // **落ち方が 4 形で全部違う**——edge は読み戻し、EOI 落としは 2 回目の
         // 上限つき待ち、ISR 読み落としは数の爆発、BKL 保持待ちは次に BKL を
@@ -22694,16 +22632,8 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 Family::Devices,
                 &format!("the virtio interrupt catches {label}"),
             );
-            match cmd_virtio_irq_test(&[feature]) {
-                Ok(()) => {
-                    println!("--- virtio irq ({label}): FAILED (the sabotage was NOT caught)");
-                    failed.push(format!("virtio irq ({label})"));
-                }
-                Err(_) => caught_by_any_error(
-                    "virtio irq",
-                    &format!("--- virtio irq ({label}): OK (the sabotage was caught)"),
-                ),
-            }
+            let result = cmd_virtio_irq_test(&[feature]);
+            report_sabotage_verdict("virtio irq", label, &[feature], &result, &mut failed);
         }
 
         // **像のロードの破壊（S13-c）。** **先頭の欠けは、バイト一致の判定より前に、カーネルの
@@ -22735,16 +22665,8 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         ] {
             total += 1;
             begin_item(Family::Fs, &format!("the fs image flush catches {label}"));
-            match cmd_fs_image_extract(features) {
-                Ok(()) => {
-                    println!("--- fs image flush ({label}): FAILED (the sabotage was NOT caught)");
-                    failed.push(format!("fs image flush ({label})"));
-                }
-                Err(_) => caught_by_any_error(
-                    "fs image flush",
-                    &format!("--- fs image flush ({label}): OK (the sabotage was caught)"),
-                ),
-            }
+            let result = cmd_fs_image_extract(features);
+            report_sabotage_verdict("fs image flush", label, features, &result, &mut failed);
         }
 
         for feature in SHELL_TEST_SABOTAGES {
