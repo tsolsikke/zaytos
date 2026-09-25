@@ -5014,6 +5014,9 @@ const SABOTAGE_STOP_REASONS: &[StopReason] = &[
 ///
 /// **`note` は、狙いが名前の検査に届いていないときにだけ書き、判定の行に出す**（[`StopReason`] と同じ）。
 struct NamedJudgement {
+    /// 検査の名前（判定の行と失敗の名前の頭。2026-09-26 に足した）。**同じ破壊を別の検査が回し、
+    /// 狙いの判定が違うことがある**（`zi-enter-does-nothing-test` は `zi test` と `utf8 test` の両方）。
+    check: &'static str,
     /// 破壊の feature（捕まえると `Ok` を返す永続の 2 つは、項目の文脈の名前）。
     key: &'static str,
     signs: &'static [&'static str],
@@ -5023,16 +5026,19 @@ struct NamedJudgement {
 const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
     // ── apps（zi 26・view 7・zi の永続 1） ──
     NamedJudgement {
+        check: "zi test",
         key: "zi-cursor-ignore-updown-test",
         signs: &["the up/down arrows moved the cursor between lines = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "zi-write-skip-body-test",
         signs: &["cat read back exactly what zi edited = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "zi-insert-drop-first-test",
         signs: &[
             "a new file was created and read back = false",
@@ -5041,46 +5047,55 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "zash-prompt-drop-color-test",
         signs: &["the zash prompt name is drawn in its own color = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "zi-status-freeze-mode-test",
         signs: &["the zi status line followed the mode = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "ioctl-winsize-swap-test",
         signs: &["ioctl(TIOCGWINSZ) agrees with the console = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "zi-esc-needs-second-key-test",
         signs: &["a lone Esc settled without another key = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "alt-screen-skip-repaint-test",
         signs: &["the screen before the alternate screen came back = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "zi-status-below-text-test",
         signs: &["the zi status line sits on the second-to-last row = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "zi-command-line-silent-test",
         signs: &["the command line echoes what is being typed = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "zi-append-like-insert-test",
         signs: &["a starts one column right of i = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "open-ignore-create-test",
         signs: &[
             "a new file was created and read back = false",
@@ -5089,132 +5104,158 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "env-drop-term-test",
         signs: &["the zash prompt name is drawn in its own color = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "unlink-ignore-request-test",
         signs: &["rm removed it again = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "zi-enter-does-nothing-test",
         signs: &["enter split the line = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "zi-skip-release-test",
         signs: &["zi gave back every frame it took, on every run = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "zi-skip-grow-test",
         signs: &["the big file read back with exactly the one edit = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "zi-join-does-nothing-test",
         signs: &["backspace at the start of a line joined it to the one above = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "zi-window-frozen-test",
         signs: &["the window followed the cursor down the file = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "stderr-on-screen-test",
         signs: &["the error reached the echo area instead of the text = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "zi-skip-cursor-flush-test",
         signs: &["the cursor on the screen followed the buffer = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "zi-redraw-whole-screen-test",
         signs: &["moving the window one line draws one line = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "cursor-repaint-always-test",
         signs: &["an idle read sends nothing = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "zi-edit-redraws-everything-test",
         signs: &["inserting one character draws one line = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "virtio-skip-install-test",
         signs: &["the save reached the device = false"],
         note: "",
     },
     NamedJudgement {
+        check: "zi test",
         key: "repaint-blank-cells-test",
         signs: &["leaving the alternate screen skips the blank cells = false"],
         note: "",
     },
     NamedJudgement {
+        check: "view test",
         key: "less-window-frozen-test",
         signs: &["a line past the first screen became visible = false"],
         note: "",
     },
     NamedJudgement {
+        check: "view test",
         key: "more-uses-alternate-screen-test",
         signs: &["what more printed is still on the screen after it left = false"],
         note: "",
     },
     NamedJudgement {
+        check: "view test",
         key: "flush-every-write-test",
         signs: &["one move costs one transfer = false"],
         note: "",
     },
     NamedJudgement {
+        check: "view test",
         key: "read-skip-flush-test",
         signs: &["one move costs one transfer = false"],
         note: "",
     },
     NamedJudgement {
+        check: "view test",
         key: "frame-write-per-piece-test",
         signs: &["one move costs one syscall = false"],
         note: "",
     },
     NamedJudgement {
+        check: "view test",
         key: "draw-pixel-by-pixel-test",
         signs: &["erasing a page writes no pixel one by one = false"],
         note: "",
     },
     NamedJudgement {
+        check: "view test",
         key: "less-redraw-whole-screen-test",
         signs: &["moving one line draws one line = false"],
         note: "",
     },
     NamedJudgement {
+        check: "persist",
         key: "persist-zi-test rebuild-between",
         signs: &["boot 2's Ring 3 printed what the device carries = false"],
         note: "",
     },
     // ── fs（切り詰め 6・書き込み 6・ビットマップ 4・作成 4・mkdir 3・取り出し 2・書き戻し 2・永続 1・疎な読み 1） ──
     NamedJudgement {
+        check: "persist",
         key: "persist-test rebuild-between",
         signs: &["boot 2 sees the change boot 1 made = false"],
         note: "",
     },
     NamedJudgement {
+        check: "fs extract",
         key: "fs-copy-corrupt-tail-test",
         signs: &["the extracted image matches the built image byte for byte = false"],
         note: "",
     },
     NamedJudgement {
+        check: "fs extract",
         key: "ext2-group-count-offset-test",
         signs: &["the free counts match dumpe2fs = false"],
         note: "",
     },
     NamedJudgement {
+        check: "fs create",
         key: "ext2-create-skip-links-test",
         signs: &[
             "e2fsck found nothing to complain about = false",
@@ -5223,6 +5264,7 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "",
     },
     NamedJudgement {
+        check: "fs create",
         key: "ext2-create-skip-inode-count-test",
         signs: &[
             "e2fsck found nothing to complain about = false",
@@ -5231,6 +5273,7 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "",
     },
     NamedJudgement {
+        check: "fs create",
         key: "ext2-create-move-dirs-count-test",
         signs: &[
             "e2fsck found nothing to complain about = false",
@@ -5239,11 +5282,13 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "",
     },
     NamedJudgement {
+        check: "fs create",
         key: "ext2-create-skip-extra-isize-test",
         signs: &["the new inode names the extra area the way the image asks = false"],
         note: "",
     },
     NamedJudgement {
+        check: "fs mkdir",
         key: "ext2-mkdir-skip-dot-dot-test",
         signs: &[
             "e2fsck found nothing to complain about = false",
@@ -5252,6 +5297,7 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "",
     },
     NamedJudgement {
+        check: "fs mkdir",
         key: "ext2-mkdir-skip-parent-link-test",
         signs: &[
             "e2fsck found nothing to complain about = false",
@@ -5260,6 +5306,7 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "",
     },
     NamedJudgement {
+        check: "fs mkdir",
         key: "ext2-mkdir-skip-dirs-count-test",
         signs: &[
             "e2fsck found nothing to complain about = false",
@@ -5268,36 +5315,43 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "",
     },
     NamedJudgement {
+        check: "fs truncate",
         key: "ext2-truncate-off-by-one-test",
         signs: &["the extracted image matches the built image byte for byte = false"],
         note: "",
     },
     NamedJudgement {
+        check: "fs truncate",
         key: "ext2-truncate-always-free-test",
         signs: &["the extracted image matches the built image byte for byte = false"],
         note: "",
     },
     NamedJudgement {
+        check: "fs truncate",
         key: "ext2-truncate-keep-slot-test",
         signs: &["the extracted image matches the built image byte for byte = false"],
         note: "",
     },
     NamedJudgement {
+        check: "fs truncate",
         key: "ext2-truncate-skip-free-test",
         signs: &["the extracted image matches the built image byte for byte = false"],
         note: "",
     },
     NamedJudgement {
+        check: "fs truncate",
         key: "ext2-truncate-keep-tail-test",
         signs: &["the extracted image matches the built image byte for byte = false"],
         note: "",
     },
     NamedJudgement {
+        check: "fs truncate",
         key: "ext2-truncate-skip-blocks-test",
         signs: &["the extracted image matches the built image byte for byte = false"],
         note: "",
     },
     NamedJudgement {
+        check: "fs write",
         key: "ext2-append-skip-size-test",
         signs: &[
             "e2fsck found nothing to complain about = false",
@@ -5306,11 +5360,13 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "",
     },
     NamedJudgement {
+        check: "fs write",
         key: "ext2-append-round-size-test",
         signs: &["the appended bytes read back exactly = false"],
         note: "",
     },
     NamedJudgement {
+        check: "fs write",
         key: "ext2-append-skip-blocks-test",
         signs: &[
             "e2fsck found nothing to complain about = false",
@@ -5319,6 +5375,7 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "",
     },
     NamedJudgement {
+        check: "fs write",
         key: "ext2-append-blocks-in-bytes-test",
         signs: &[
             "e2fsck found nothing to complain about = false",
@@ -5327,6 +5384,7 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "",
     },
     NamedJudgement {
+        check: "fs write",
         key: "ext2-append-skip-link-test",
         signs: &[
             "e2fsck found nothing to complain about = false",
@@ -5335,11 +5393,13 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "",
     },
     NamedJudgement {
+        check: "fs write",
         key: "ext2-append-always-allocate-test",
         signs: &["the free blocks dropped by exactly one across both appends = false"],
         note: "",
     },
     NamedJudgement {
+        check: "fs bitmap",
         key: "ext2-alloc-skip-sb-count-test",
         signs: &[
             "e2fsck complains exactly once, about the bitmap = false",
@@ -5348,6 +5408,7 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "",
     },
     NamedJudgement {
+        check: "fs bitmap",
         key: "ext2-alloc-skip-bg-count-test",
         signs: &[
             "e2fsck complains exactly once, about the bitmap = false",
@@ -5356,26 +5417,31 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "",
     },
     NamedJudgement {
+        check: "fs bitmap",
         key: "ext2-alloc-ignore-bitmap-test",
         signs: &["e2fsck complains exactly once, about the bitmap = false"],
         note: "",
     },
     NamedJudgement {
+        check: "fs bitmap",
         key: "ext2-free-skip-bit-test",
         signs: &["the extracted image matches the built image byte for byte = false"],
         note: "",
     },
     NamedJudgement {
+        check: "fs image flush",
         key: "fs-flush-skip-test",
         signs: &["at least the whole image went to the device = false"],
         note: "",
     },
     NamedJudgement {
+        check: "fs image flush",
         key: "virtio-flush-short-test",
         signs: &["at least the whole image went to the device = false"],
         note: "",
     },
     NamedJudgement {
+        check: "sparse read",
         key: "ext2-sparse-as-error-test",
         signs: &[
             "fs-sparse says = true = false",
@@ -5385,36 +5451,43 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
     },
     // ── devices（virtio の割り込み 4・PCI 3・virtio-blk 3） ──
     NamedJudgement {
+        check: "pci enumeration",
         key: "pci-config-offset-test",
         signs: &["the sets match = false"],
         note: "",
     },
     NamedJudgement {
+        check: "pci enumeration",
         key: "pci-ignore-multifunction-test",
         signs: &["the sets match = false"],
         note: "",
     },
     NamedJudgement {
+        check: "pci enumeration",
         key: "pci-stop-at-first-test",
         signs: &["the sets match = false"],
         note: "",
     },
     NamedJudgement {
+        check: "virtio blk read",
         key: "virtio-wrong-sector-test",
         signs: &["checksum from the device", "match = false"],
         note: "",
     },
     NamedJudgement {
+        check: "virtio irq",
         key: "virtio-intx-edge-test",
         signs: &["route read back matching the platform's declaration = false"],
         note: "",
     },
     NamedJudgement {
+        check: "virtio irq",
         key: "virtio-wait-holding-bkl-test",
         signs: &["the blocking read released the BKL before waiting = false"],
         note: "",
     },
     NamedJudgement {
+        check: "virtio blk read",
         key: "virtio-skip-notify-test",
         signs: &[
             "the read did not complete",
@@ -5423,6 +5496,7 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "",
     },
     NamedJudgement {
+        check: "virtio blk read",
         key: "virtio-short-desc-test",
         signs: &["the read did not complete", "the device reported status 1"],
         // **注釈どおり、中身の突き合わせまで届かない**（`kernel/src/virtio.rs` の破壊の注釈。持ち越しの行）。
@@ -5430,33 +5504,39 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
                check against the image file never runs",
     },
     NamedJudgement {
+        check: "virtio irq",
         key: "virtio-skip-eoi-test",
         signs: &["the exercise did not complete", "RequestTimedOut"],
         note: "",
     },
     NamedJudgement {
+        check: "virtio irq",
         key: "virtio-skip-isr-read-test",
         signs: &["each read was delivered once and nothing else arrived = false"],
         note: "",
     },
     // ── shell（ANSI 3） ──
     NamedJudgement {
+        check: "ansi test",
         key: "ansi-console-skip-parse-test",
         signs: &["CUP moved the cursor = false"],
         note: "",
     },
     NamedJudgement {
+        check: "ansi test",
         key: "ansi-sgr-ignore-color-test",
         signs: &["SGR colored the cell and the screen = false"],
         note: "",
     },
     NamedJudgement {
+        check: "ansi test",
         key: "ansi-cursor-ignore-hide-test",
         signs: &["DECTCEM hid the cursor = false"],
         note: "",
     },
     // ── process（.bss 1） ──
     NamedJudgement {
+        check: "bss mapping",
         key: "user-load-filesz-only",
         signs: &["bss-check says Exited(0) = false", "ended Ok(Folded(14))"],
         note: "",
@@ -5465,13 +5545,17 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
 
 /// 名前の判定へ絞らず、「どの誤りでも」のまま置く破壊と、その理由（2026-09-26。運用者の足す 1 点）。
 ///
-/// **3 回のうちに偽になる判定が変わったもの（揺れる）を載せる。** **まとめの行が数を出す。**
-const SABOTAGE_JUDGEMENTS_NOT_PLACED: &[(&str, &str)] = &[];
+/// **3 回のうちに偽になる判定が変わったもの（揺れる）を載せる。** **まとめの行が数を出す。** **組は
+/// （検査・破壊・理由）である**（2026-09-26。同じ破壊を別の検査が回すので、検査の名前も持つ）。
+const SABOTAGE_JUDGEMENTS_NOT_PLACED: &[(&str, &str, &str)] = &[];
 
-/// 構成の feature（か文脈の名前）のうち、[`SABOTAGE_JUDGEMENTS`] に載るものの行を返す。
-fn named_judgement_for(keys: &[&str]) -> Option<&'static NamedJudgement> {
-    keys.iter()
-        .find_map(|key| SABOTAGE_JUDGEMENTS.iter().find(|named| named.key == *key))
+/// 検査と構成の feature（か文脈の名前）の組が [`SABOTAGE_JUDGEMENTS`] に載っていれば、その行を返す。
+fn named_judgement_for(check: &str, keys: &[&str]) -> Option<&'static NamedJudgement> {
+    keys.iter().find_map(|key| {
+        SABOTAGE_JUDGEMENTS
+            .iter()
+            .find(|named| named.check == check && named.key == *key)
+    })
 }
 
 /// 名前つきの判定で捕まる破壊の回を分ける（純粋な論理）。**写しが上限を越えていたら、読めないので落とす。**
@@ -5542,10 +5626,10 @@ fn stop_reason_for(features: &[&str]) -> Option<&'static StopReason> {
 }
 
 /// 破壊の回の結果を分ける（5.b。2026-09-25）。**表に載る破壊だけ、狙った理由を見る。**
-fn judge_sabotage(features: &[&str], result: &Result<()>) -> SabotageVerdict {
+fn judge_sabotage(check: &str, features: &[&str], result: &Result<()>) -> SabotageVerdict {
     match (result, stop_reason_for(features)) {
         (Ok(()), _) => SabotageVerdict::NotCaught,
-        (Err(error), None) => match named_judgement_for(features) {
+        (Err(error), None) => match named_judgement_for(check, features) {
             Some(named) => judgement_verdict(named, item_output().as_deref(), Some(error)),
             None => SabotageVerdict::CaughtByAnyError,
         },
@@ -5596,6 +5680,35 @@ fn caught_by_any_error(check: &str, line: &str) {
 static ANY_JUDGEMENT_VERDICTS: std::sync::Mutex<
     std::collections::BTreeMap<(Option<Family>, String), usize>,
 > = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// 検査の関数が自分の判定を反して「捕まえた」と返した破壊の回を分ける（2026-09-26。計器の外の破壊を
+/// 絞る段）。**表（[`SABOTAGE_JUDGEMENTS`]）に検査と破壊の組が在れば、その判定が偽になったときだけ捕まえた
+/// とする。** **無ければ「どれかの判定が偽」として数える**（[`caught_by_any_judgement`]）。
+fn report_inverted_judgement(check: &str, key: &str, label: &str, failed: &mut Failures) {
+    let ok = format!("--- {label}: OK");
+    let Some(named) = named_judgement_for(check, &[key]) else {
+        caught_by_any_judgement(check, &ok);
+        return;
+    };
+    match judgement_verdict(named, item_output().as_deref(), None) {
+        SabotageVerdict::CaughtByTheJudgement { sign, note } => println!(
+            "{ok} (the sabotage was caught by the intended judgement: {sign}{}{note})",
+            if note.is_empty() { "" } else { "; " }
+        ),
+        SabotageVerdict::MissedTheJudgement { sign, why } => {
+            println!(
+                "--- {label}: FAILED (the intended judgement never read false: {sign:?} is not in \
+                 the item's output; {why})"
+            );
+            failed.push(label.to_string());
+        }
+        // **`judgement_verdict` は上の 2 つしか返さない。** **来たら落とす。**
+        _ => {
+            println!("--- {label}: FAILED (the intended judgement was not judged)");
+            failed.push(label.to_string());
+        }
+    }
+}
 
 /// 「どれかの判定が偽なら捕まえた」の行を出し、数を 1 つ足す（2026-09-26）。**出す行は前と同じ形である。**
 fn caught_by_any_judgement(check: &str, line: &str) {
@@ -5760,7 +5873,7 @@ fn report_inverted_sabotage_verdict(
     failed: &mut Failures,
 ) {
     let name = format!("{check} ({label})");
-    match (result, named_judgement_for(&[key])) {
+    match (result, named_judgement_for(check, &[key])) {
         (Ok(()), None) => {
             caught_by_any_error(check, &format!("--- {name}: OK (the sabotage was caught)"))
         }
@@ -5794,7 +5907,7 @@ fn report_sabotage_verdict(
     failed: &mut Failures,
 ) {
     let name = format!("{check} ({label})");
-    match judge_sabotage(features, result) {
+    match judge_sabotage(check, features, result) {
         SabotageVerdict::NotCaught => {
             println!("--- {name}: FAILED (the sabotage was NOT caught)");
             failed.push(name);
@@ -14440,6 +14553,17 @@ fn judge_shell_session(
     if !failed.is_empty() {
         println!("{context}: (info) judgements that did not hold: {failed:?}");
     }
+    // **カーネルが言った `[ERROR]` の行を出す**（2026-09-26。計器の外の破壊を絞る段）——**判定に使っていない
+    // ので、止まって捕まる破壊（BKL の再取得・DF の見張り）の理由が出力に無かった。** **出すだけで、判定には
+    // 使わない。**
+    let kernel_errors: Vec<&str> = serial
+        .lines()
+        .filter(|line| line.contains("[ERROR]"))
+        .take(3)
+        .collect();
+    if !kernel_errors.is_empty() {
+        println!("{context}: (info) the kernel reported: {kernel_errors:?}");
+    }
     if failed.is_empty() {
         println!("{context}: PASS");
         if mode.expects_to_pass() {
@@ -22153,7 +22277,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("utf8-test {sabotage}");
             begin_item(Family::Shell, &label);
             match cmd_utf8_test(&[sabotage], false) {
-                Ok(()) => caught_by_any_judgement("utf8 test", &format!("--- {label}: OK")),
+                Ok(()) => report_inverted_judgement("utf8 test", sabotage, &label, &mut failed),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22190,7 +22314,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("profile-test {sabotage}");
             begin_item(Family::Shell, &label);
             match cmd_profile_test(&[sabotage], false) {
-                Ok(()) => caught_by_any_judgement("profile test", &format!("--- {label}: OK")),
+                Ok(()) => report_inverted_judgement("profile test", sabotage, &label, &mut failed),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22220,7 +22344,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("history-test {sabotage}");
             begin_item(Family::Shell, &label);
             match cmd_history_test(&[sabotage], false) {
-                Ok(()) => caught_by_any_judgement("history test", &format!("--- {label}: OK")),
+                Ok(()) => report_inverted_judgement("history test", sabotage, &label, &mut failed),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22250,7 +22374,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("pipe-test {sabotage}");
             begin_item(Family::Ipc, &label);
             match cmd_pipe_test(&[sabotage], false) {
-                Ok(()) => caught_by_any_judgement("pipe test", &format!("--- {label}: OK")),
+                Ok(()) => report_inverted_judgement("pipe test", sabotage, &label, &mut failed),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22281,7 +22405,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("socket-test {sabotage}");
             begin_item(Family::Ipc, &label);
             match cmd_socket_test(&[sabotage], false) {
-                Ok(()) => caught_by_any_judgement("socket test", &format!("--- {label}: OK")),
+                Ok(()) => report_inverted_judgement("socket test", sabotage, &label, &mut failed),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22312,7 +22436,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("input-test {sabotage}");
             begin_item(Family::Ipc, &label);
             match cmd_input_test(&[sabotage], false) {
-                Ok(()) => caught_by_any_judgement("input test", &format!("--- {label}: OK")),
+                Ok(()) => report_inverted_judgement("input test", sabotage, &label, &mut failed),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22342,7 +22466,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("poll-test {sabotage}");
             begin_item(Family::Ipc, &label);
             match cmd_poll_test(&[sabotage], false) {
-                Ok(()) => caught_by_any_judgement("poll test", &format!("--- {label}: OK")),
+                Ok(()) => report_inverted_judgement("poll test", sabotage, &label, &mut failed),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22372,7 +22496,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("screen-test {sabotage}");
             begin_item(Family::Ipc, &label);
             match cmd_screen_test(&[sabotage], false) {
-                Ok(()) => caught_by_any_judgement("screen test", &format!("--- {label}: OK")),
+                Ok(()) => report_inverted_judgement("screen test", sabotage, &label, &mut failed),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22402,7 +22526,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("compose-test {sabotage}");
             begin_item(Family::Ipc, &label);
             match cmd_compose_test(&[sabotage], false) {
-                Ok(()) => caught_by_any_judgement("compose test", &format!("--- {label}: OK")),
+                Ok(()) => report_inverted_judgement("compose test", sabotage, &label, &mut failed),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22552,7 +22676,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("complete-test {sabotage}");
             begin_item(Family::Shell, &label);
             match cmd_complete_test(&[sabotage], false) {
-                Ok(()) => caught_by_any_judgement("complete test", &format!("--- {label}: OK")),
+                Ok(()) => report_inverted_judgement("complete test", sabotage, &label, &mut failed),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22588,7 +22712,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 // **止まった理由の行で絞ったもの**（`fp-mf-not-foldable-test`。[`SABOTAGE_STOP_REASONS`]）
                 // **は数えない**——**関数の中で理由を見ている。**
                 Ok(()) if stop_reason_for(&[sabotage]).is_some() => println!("--- {label}: OK"),
-                Ok(()) => caught_by_any_judgement("fp test", &format!("--- {label}: OK")),
+                Ok(()) => report_inverted_judgement("fp test", sabotage, &label, &mut failed),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22617,7 +22741,9 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("concurrent-test {sabotage}");
             begin_item(Family::Process, &label);
             match cmd_concurrent_test(&[sabotage], false) {
-                Ok(()) => caught_by_any_judgement("concurrent test", &format!("--- {label}: OK")),
+                Ok(()) => {
+                    report_inverted_judgement("concurrent test", sabotage, &label, &mut failed)
+                }
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22650,7 +22776,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("ttf-test {sabotage}");
             begin_item(Family::Apps, &label);
             match cmd_ttf_test(&[sabotage], false) {
-                Ok(()) => caught_by_any_judgement("ttf test", &format!("--- {label}: OK")),
+                Ok(()) => report_inverted_judgement("ttf test", sabotage, &label, &mut failed),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22682,7 +22808,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             let label = format!("serial-test {sabotage}");
             begin_item(Family::Smp, &label);
             match cmd_serial_test(&[sabotage], false) {
-                Ok(()) => caught_by_any_judgement("serial test", &format!("--- {label}: OK")),
+                Ok(()) => report_inverted_judgement("serial test", sabotage, &label, &mut failed),
                 Err(error) => {
                     println!(
                         "--- {label}: FAILED [{}] ({error})",
@@ -22981,7 +23107,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             );
             match cmd_keymap_test(sabotage) {
                 Ok(()) if sabotage => {
-                    caught_by_any_judgement("keymap", &format!("--- {label}: OK"))
+                    report_inverted_judgement("keymap", label, label, &mut failed)
                 }
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
@@ -23048,7 +23174,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             );
             match cmd_persist_env_test(rebuild, ignore) {
                 Ok(()) if rebuild || ignore => {
-                    caught_by_any_judgement("persist (env)", &format!("--- {label}: OK"))
+                    report_inverted_judgement("persist (env)", label, label, &mut failed)
                 }
                 Ok(()) => println!("--- {label}: OK"),
                 Err(error) => {
@@ -23382,9 +23508,11 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 &format!("the shell test catches the sabotage {feature}"),
             );
             match cmd_shell_test(ShellTestMode::MustFail(feature)) {
-                Ok(()) => caught_by_any_judgement(
+                Ok(()) => report_inverted_judgement(
                     "shell test",
-                    &format!("--- shell test ({feature}): OK"),
+                    feature,
+                    &format!("shell test ({feature})"),
+                    &mut failed,
                 ),
                 Err(error) => {
                     println!("--- shell test ({feature}): FAILED ({error})");
@@ -23414,9 +23542,11 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 &format!("the shell script test catches the sabotage {feature}"),
             );
             match cmd_shell_script_test(ShellTestMode::ScriptMustFail(feature)) {
-                Ok(()) => caught_by_any_judgement(
+                Ok(()) => report_inverted_judgement(
                     "shell script test",
-                    &format!("--- shell script test ({feature}): OK"),
+                    feature,
+                    &format!("shell script test ({feature})"),
+                    &mut failed,
                 ),
                 Err(error) => {
                     println!("--- shell script test ({feature}): FAILED ({error})");
@@ -26315,35 +26445,41 @@ mod tests {
         let rmdir = ["ext2-rmdir-ignore-nonempty-test"];
         let intended = "[ERROR] fs-mkdir: rmdir removed a directory that was not empty; halting\n";
         assert!(matches!(
-            judge_sabotage(&rmdir, &stopped(intended)),
+            judge_sabotage("fs mkdir", &rmdir, &stopped(intended)),
             SabotageVerdict::CaughtForTheReason { .. }
         ));
         assert!(matches!(
             judge_sabotage(
+                "fs mkdir",
                 &rmdir,
                 &stopped("[ERROR] fs-create: could not unlink: NoSuchEntry; halting\n")
             ),
             SabotageVerdict::StoppedForAnotherReason { .. }
         ));
         assert!(matches!(
-            judge_sabotage(&rmdir, &Err(anyhow::anyhow!("e2fsck complained"))),
+            judge_sabotage(
+                "fs mkdir",
+                &rmdir,
+                &Err(anyhow::anyhow!("e2fsck complained"))
+            ),
             SabotageVerdict::DidNotStop { .. }
         ));
         assert!(matches!(
-            judge_sabotage(&rmdir, &Ok(())),
+            judge_sabotage("fs mkdir", &rmdir, &Ok(())),
             SabotageVerdict::NotCaught
         ));
         // **どの表にも載らない破壊**（2026-09-26 に例を差し替えた。**以前の例の
         // `ext2-create-skip-links-test` は、名前の判定の表へ移った**）。
         assert!(matches!(
             judge_sabotage(
+                "fs create",
                 &["fs-create-keep-test", "zz-unlisted-sabotage-test"],
                 &Err(anyhow::anyhow!("any"))
             ),
             SabotageVerdict::CaughtByAnyError
         ));
         assert!(matches!(
-            judge_sabotage(&rmdir, &stopped(intended).context("fs-extract")),
+            judge_sabotage("fs mkdir", &rmdir, &stopped(intended).context("fs-extract")),
             SabotageVerdict::CaughtForTheReason { .. }
         ));
     }
@@ -26353,11 +26489,13 @@ mod tests {
     #[test]
     fn a_named_judgement_needs_its_sign_in_the_output_or_the_reason() {
         static NAMED: NamedJudgement = NamedJudgement {
+            check: "zz check",
             key: "zz-host-test",
             signs: &["the thing = false"],
             note: "",
         };
         static TWO: NamedJudgement = NamedJudgement {
+            check: "zz check",
             key: "zz-host-test-two",
             signs: &[
                 "e2fsck found nothing to complain about = false",
@@ -26421,6 +26559,7 @@ mod tests {
         assert!(item_output().is_some_and(|text| text.contains("zz-host-test: the up/down")));
         assert!(matches!(
             judge_sabotage(
+                "zi test",
                 &["zi-cursor-ignore-updown-test"],
                 &Err(anyhow::anyhow!("zi-test: FAILED"))
             ),
@@ -26428,24 +26567,83 @@ mod tests {
         ));
     }
 
-    /// **表の鍵は、破壊を回す側にも在る名前である**（打ち間違いで絞りが黙って外れないように）。**同じ鍵を
-    /// 2 つの表に置かない**（止まった理由・名前の判定・置かない一覧）。
+    /// **表の鍵は、破壊を回す側にも在る名前である**（打ち間違いで絞りが黙って外れないように）。**検査の
+    /// 名前も同じ**（2026-09-26）。**名前の判定と置かない一覧は、組（検査・鍵）で 1 度だけ置く。**
+    /// **止まった理由の鍵は、どの組にも置かない**——**`judge_sabotage` が鍵だけで先に引くので、組の側が
+    /// 黙って読まれなくなる。**
     #[test]
     fn named_judgement_keys_name_a_sabotage_and_sit_in_one_table() {
         let source = include_str!("main.rs");
-        let mut keys: Vec<&str> = SABOTAGE_JUDGEMENTS.iter().map(|named| named.key).collect();
-        keys.extend(SABOTAGE_JUDGEMENTS_NOT_PLACED.iter().map(|(key, _)| *key));
-        keys.extend(SABOTAGE_STOP_REASONS.iter().map(|reason| reason.feature));
-        for key in &keys {
-            assert!(
-                source.matches(&format!("\"{key}\"")).count() >= 2,
-                "{key} appears only in the table"
-            );
-        }
-        let mut sorted = keys.clone();
+        let mut pairs: Vec<(&str, &str)> = SABOTAGE_JUDGEMENTS
+            .iter()
+            .map(|named| (named.check, named.key))
+            .collect();
+        pairs.extend(
+            SABOTAGE_JUDGEMENTS_NOT_PLACED
+                .iter()
+                .map(|(check, key, _)| (*check, *key)),
+        );
+        let mut sorted = pairs.clone();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), keys.len(), "a key sits in two tables");
+        assert_eq!(
+            sorted.len(),
+            pairs.len(),
+            "a (check, key) sits in the tables twice"
+        );
+        let mut stops: Vec<&str> = SABOTAGE_STOP_REASONS
+            .iter()
+            .map(|reason| reason.feature)
+            .collect();
+        for stop in &stops {
+            assert!(
+                pairs.iter().all(|(_, key)| key != stop),
+                "{stop} sits in the stop table and in a (check, key) table"
+            );
+        }
+        let before = stops.len();
+        stops.sort_unstable();
+        stops.dedup();
+        assert_eq!(stops.len(), before, "a stop reason sits twice");
+        // **表の外（回す側）にも出ること。** 表の中で出る数より多いかで見る。
+        let in_tables = |text: &str| -> usize {
+            pairs
+                .iter()
+                .filter(|(check, key)| *check == text || *key == text)
+                .count()
+                + stops.iter().filter(|stop| **stop == text).count()
+        };
+        for text in pairs
+            .iter()
+            .flat_map(|(check, key)| [*check, *key])
+            .chain(stops.iter().copied())
+        {
+            assert!(
+                source.matches(&format!("\"{text}\"")).count() > in_tables(text),
+                "{text} appears only in the tables"
+            );
+        }
+    }
+
+    /// **反す形の破壊の回も、表に組が在れば狙いの判定を見る**（2026-09-26。計器の外の破壊を絞る段）。
+    /// **写しに目印が在れば捕まえた、無ければ落とす。** **表に無い組の側（数えるだけ）は、上の計器の
+    /// テストが見る**——**ここで数えると、そちらの数が変わる。**
+    #[test]
+    fn an_inverted_sabotage_counts_only_when_its_named_judgement_read_false() {
+        let named = |key: &str| {
+            SABOTAGE_JUDGEMENTS
+                .iter()
+                .find(|named| named.key == key)
+                .unwrap()
+        };
+        let caught = named("ext2-create-skip-links-test");
+        println!("zz-inverted: {}", caught.signs.join(" "));
+        let mut failed = Failures::default();
+        report_inverted_judgement(caught.check, caught.key, "zz inverted (a)", &mut failed);
+        assert!(failed.is_empty(), "{:?}", failed.list);
+        let missed = named("virtio-wrong-sector-test");
+        report_inverted_judgement(missed.check, missed.key, "zz inverted (b)", &mut failed);
+        assert_eq!(failed.list, ["zz inverted (b)"]);
     }
 
     /// **「どれかの判定が偽なら捕まえた」は別の種類として数える**（2026-09-26）。**項目の外で数えた回は

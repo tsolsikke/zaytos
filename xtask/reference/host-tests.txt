@@ -735,6 +735,7 @@ xtask::tests::a_named_judgement_needs_its_sign_in_the_output_or_the_reason
 xtask::tests::a_printed_judgement_line_reaches_the_sabotage_verdict
 xtask::tests::a_single_bsp_heartbeat_cannot_show_growth_and_fails
 xtask::tests::a_stop_sign_is_a_halting_line_or_a_triple_fault
+xtask::tests::an_inverted_sabotage_counts_only_when_its_named_judgement_read_false
 xtask::tests::any_error_verdicts_are_counted_per_family
 xtask::tests::any_judgement_verdicts_are_counted_apart
 xtask::tests::ap_ticks_that_grow_across_the_observation_pass_even_when_the_ap_line_is_missing
