@@ -23365,6 +23365,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     if full {
         println!("{}", any_error_verdicts_line());
         report_build_directory_size(&workspace_root);
+        // **空きの計器**（2026-09-25。運用者の足す1点）。**Windows のドライブが 20 GiB を割ったら (warn)。止めない。**
+        for line in full_check::free_space_lines(&workspace_root) {
+            println!("{line}");
+        }
     }
 
     let item_seconds = Some(item_time_total().as_secs_f64());

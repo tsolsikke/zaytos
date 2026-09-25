@@ -69,6 +69,9 @@ pub const HOST_VHD_DRIVE: &str = "/mnt/d";
 /// **Windows そのもののドライブ**（計器だけ。止めない）。
 pub const HOST_SYSTEM_DRIVE: &str = "/mnt/c";
 
+/// Windows のドライブ（[`HOST_SYSTEM_DRIVE`]）の空きがこれを割ったら `(warn)` を出す（運用者の決定。止めない）。
+pub const SYSTEM_DRIVE_WARN_BYTES: u64 = 20 << 30;
+
 /// ホストのドライブ（[`HOST_VHD_DRIVE`]）の空きの下限（運用者の決定。2026-09-25）。**30 GiB は損の非対称
 /// による**——**下限で断られる損は走行を後にするだけだが、ドライブが本当に埋まると VHD が伸びられず、WSL の中の
 /// ファイルシステムが書き込みの失敗を受けて壊れうる**（一般論）。**D: は VirtualBox の VM とバックアップとも
@@ -309,7 +312,7 @@ pub fn parse_df_avail(output: &str) -> Option<u64> {
 }
 
 /// 置き場の空き（バイト）。
-fn available_bytes(dir: &Path) -> Option<u64> {
+pub fn available_bytes(dir: &Path) -> Option<u64> {
     let output = Command::new("df")
         .args(["--output=avail", "-B1"])
         .arg(dir)

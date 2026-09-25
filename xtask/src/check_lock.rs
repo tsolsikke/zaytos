@@ -186,7 +186,7 @@ fn parse_flock_line(line: &str) -> Option<(Mode, u32, (u32, u32, u64))> {
 }
 
 /// 装置の番号を分ける（glibc の `major`・`minor` と同じ分け方。純粋な論理）。
-fn device_numbers(dev: u64) -> (u32, u32) {
+pub fn device_numbers(dev: u64) -> (u32, u32) {
     let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff);
     let minor = (dev & 0xff) | ((dev >> 12) & !0xff);
     (major as u32, minor as u32)

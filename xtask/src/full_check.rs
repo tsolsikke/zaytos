@@ -26,6 +26,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -35,17 +36,25 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 
 use crate::check_lock::{self, git, git_line};
+use crate::launch::{self, HarnessFault, HOST_SYSTEM_DRIVE, HOST_VHD_DRIVE};
 
 /// `cargo xtask full` が子の全検査へログの道を渡す環境変数（錠の中身と記録に書くだけ）。
 pub const LOG_ENV: &str = "ZAYTOS_CHECK_LOG";
+
+/// `cargo xtask full` が子の全検査へ、始めに読んだ WSL の置き場の書いたセクタ数を渡す環境変数
+/// （2026-09-25）。**作業木の取り出しの分も、その全検査の書いた量に含めるため。**
+pub const DISK_START_ENV: &str = "ZAYTOS_CHECK_DISK_START";
 
 /// この下に触ったコミットは `--commit` が要る（`.claude/hooks/check_after_commit.py` の
 /// `IMAGE_PATH_PREFIXES` と同じ。**基底の確かめが一致を見る**）。
 pub const IMAGE_PATH_PREFIXES: [&str; 2] = ["kernel/", "common/"];
 
 /// 記録の頭の行。
+///
+/// **2026-09-25 に 4 欄を足した**（書いた量と、終わりの空き 3 つ。運用者の足す1点）。**足す前の 11 欄の行も読む。**
 const RECORDS_HEADER: &str =
-    "# unix\twhen\tlevel\toutcome\tcommit\ttree\tdirty\titems\titem_seconds\tbuild_seconds\tnote";
+    "# unix\twhen\tlevel\toutcome\tcommit\ttree\tdirty\titems\titem_seconds\t\
+     build_seconds\twritten\twsl_free\thost_free\tsystem_free\tnote";
 
 /// 検査の段。**並びが上下である**（`--full` ⊇ `--commit` ⊇ 基底）。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -98,6 +107,12 @@ pub struct Record {
     pub items: Option<usize>,
     pub item_seconds: Option<f64>,
     pub build_seconds: Option<f64>,
+    /// その検査の間に WSL の置き場へ書いたバイト数（`/proc/diskstats` の差）。**他の走行の分も数える。**
+    pub written: Option<u64>,
+    /// 終わりの空き（WSL の中・VHD の載ったドライブ・Windows のドライブ）。**WSL の外ではドライブは `None`。**
+    pub wsl_free: Option<u64>,
+    pub host_free: Option<u64>,
+    pub system_free: Option<u64>,
     pub note: String,
 }
 
@@ -105,8 +120,9 @@ pub struct Record {
 fn format_record(record: &Record) -> String {
     let clean = |text: &str| text.replace(['\t', '\n', '\r'], " ");
     let number = |value: Option<f64>| value.map_or("-".to_string(), |value| format!("{value:.1}"));
+    let bytes = |value: Option<u64>| value.map_or("-".to_string(), |value| value.to_string());
     format!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
         record.unix,
         clean(&record.when),
         clean(&record.level),
@@ -119,6 +135,10 @@ fn format_record(record: &Record) -> String {
             .map_or("-".to_string(), |items| items.to_string()),
         number(record.item_seconds),
         number(record.build_seconds),
+        bytes(record.written),
+        bytes(record.wsl_free),
+        bytes(record.host_free),
+        bytes(record.system_free),
         clean(&record.note)
     )
 }
@@ -129,12 +149,18 @@ fn parse_record(line: &str) -> Option<Record> {
         return None;
     }
     let fields: Vec<&str> = line.split('\t').collect();
-    if fields.len() != 11 {
+    // **11 欄は 4 欄を足す前の行**（2026-09-25）。**足した欄は無いものとして読む。**
+    if fields.len() != 11 && fields.len() != 15 {
         return None;
     }
     fn optional<T: std::str::FromStr>(text: &str) -> Option<T> {
         (text != "-").then(|| text.parse().ok()).flatten()
     }
+    let added = |index: usize| {
+        (fields.len() == 15)
+            .then(|| optional(fields[index]))
+            .flatten()
+    };
     Some(Record {
         unix: fields[0].parse().ok()?,
         when: fields[1].to_string(),
@@ -146,7 +172,11 @@ fn parse_record(line: &str) -> Option<Record> {
         items: optional(fields[7]),
         item_seconds: optional(fields[8]),
         build_seconds: optional(fields[9]),
-        note: fields[10].to_string(),
+        written: added(10),
+        wsl_free: added(11),
+        host_free: added(12),
+        system_free: added(13),
+        note: fields[fields.len() - 1].to_string(),
     })
 }
 
@@ -202,9 +232,145 @@ struct Start {
     dirty: usize,
     unix: u64,
     when: String,
+    /// 始めに読んだ、WSL の置き場の書いたセクタ数。
+    disk_start: Option<u64>,
 }
 
 static START: Mutex<Option<Start>> = Mutex::new(None);
+
+/// `/proc/diskstats` の中身から、ある装置の書いたセクタ数を読む（純粋な論理）。**1 から数えて 10 番目の欄**
+/// （`major minor 名前 …`）。
+fn diskstats_sectors_written(text: &str, device: (u32, u32)) -> Option<u64> {
+    text.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let major: u32 = fields.first()?.parse().ok()?;
+        let minor: u32 = fields.get(1)?.parse().ok()?;
+        ((major, minor) == device)
+            .then(|| fields.get(9)?.parse().ok())
+            .flatten()
+    })
+}
+
+/// 木の載った装置（WSL の置き場）が書いたセクタ数（`/proc/diskstats`）。**WSL を起こし直すと 0 から
+/// 数え直す。** 実測で装置は 8:48（sdd）だった（2026-09-25）。
+fn sectors_written(root: &Path) -> Option<u64> {
+    let device = check_lock::device_numbers(fs::metadata(root).ok()?.dev());
+    diskstats_sectors_written(&fs::read_to_string("/proc/diskstats").ok()?, device)
+}
+
+/// 空き（WSL の中・VHD の載ったドライブ・Windows のドライブ）。**WSL の外では 2 つのドライブは `None`。**
+fn free_spaces(root: &Path) -> (Option<u64>, Option<u64>, Option<u64>) {
+    let wsl = launch::in_wsl();
+    let drive = |path: &str| {
+        wsl.then(|| launch::available_bytes(Path::new(path)))
+            .flatten()
+    };
+    (
+        launch::available_bytes(root),
+        drive(HOST_VHD_DRIVE),
+        drive(HOST_SYSTEM_DRIVE),
+    )
+}
+
+/// バイトを GiB で読める形にする（純粋な論理）。
+fn gib(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / (1u64 << 30) as f64)
+}
+
+/// 全検査のまとめに出す空きの行（Windows のドライブは計器。止めない）。
+pub fn free_space_lines(root: &Path) -> Vec<String> {
+    let (wsl, host, system) = free_spaces(root);
+    let shown = |value: Option<u64>| value.map_or("unreadable".to_string(), gib);
+    let mut lines = Vec::new();
+    if launch::in_wsl() {
+        lines.push(format!(
+            "(info) free space at the end: WSL {}; the drive holding the WSL disk ({HOST_VHD_DRIVE}) {}; \
+             Windows ({HOST_SYSTEM_DRIVE}) {}",
+            shown(wsl),
+            shown(host),
+            shown(system)
+        ));
+        if let Some(system) = system.filter(|system| *system < launch::SYSTEM_DRIVE_WARN_BYTES) {
+            lines.push(format!(
+                "(warn) Windows ({HOST_SYSTEM_DRIVE}) has only {} free, under the mark of {}; ask the \
+                 operator (this does not stop the check)",
+                gib(system),
+                gib(launch::SYSTEM_DRIVE_WARN_BYTES)
+            ));
+        }
+    } else {
+        lines.push(format!(
+            "(info) free space at the end: WSL {}; the Windows drives: not watched (not WSL)",
+            shown(wsl)
+        ));
+    }
+    lines
+}
+
+/// 全検査の入口の空きの判定（純粋な論理）。**見込みの書く量＋下限を、WSL の中と VHD の載ったドライブの
+/// 両方で見る**（運用者の足す1点）。**足りない置き場を全部挙げる。** **WSL の外ではドライブを見ない。**
+pub fn start_shortfalls(
+    estimate: u64,
+    wsl_free: Option<u64>,
+    in_wsl: bool,
+    host_free: Option<u64>,
+) -> Vec<String> {
+    let mut short = Vec::new();
+    let wsl_need = estimate + launch::DISK_FLOOR_BYTES;
+    match wsl_free {
+        Some(free) if free >= wsl_need => {}
+        Some(free) => short.push(format!(
+            "WSL has {} free, under the {} expected to be written plus the floor of {}",
+            gib(free),
+            gib(estimate),
+            gib(launch::DISK_FLOOR_BYTES)
+        )),
+        None => short.push("the free space inside WSL could not be read".to_string()),
+    }
+    if in_wsl {
+        let host_need = estimate + launch::HOST_DISK_FLOOR_BYTES;
+        match host_free {
+            Some(free) if free >= host_need => {}
+            Some(free) => short.push(format!(
+                "the drive holding the WSL disk ({HOST_VHD_DRIVE}) has {} free, under the {} expected \
+                 to be written plus the floor of {}",
+                gib(free),
+                gib(estimate),
+                gib(launch::HOST_DISK_FLOOR_BYTES)
+            )),
+            None => short.push(format!(
+                "the free space of {HOST_VHD_DRIVE} could not be read; if the WSL disk moved, update \
+                 HOST_VHD_DRIVE in xtask/src/launch.rs"
+            )),
+        }
+    }
+    short
+}
+
+/// 全検査が書く量の見込み（純粋な論理）。**前回の全検査の記録の書いた量**を使う。**無ければ代わりの値**
+/// （本の木の `target/` の大きさ。**冷えた作業木の見込みとして**）。
+fn estimate_to_write(
+    records: &[Record],
+    stand_in: impl FnOnce() -> Option<u64>,
+) -> Option<(u64, String)> {
+    match records
+        .iter()
+        .rev()
+        .find(|record| record.level == "full" && record.written.is_some())
+    {
+        Some(record) => Some((
+            record.written.unwrap_or(0),
+            format!("what the full check of {} wrote", record.when),
+        )),
+        None => stand_in().map(|bytes| {
+            (
+                bytes,
+                "the size of the main tree's target/, as no full check has recorded what it wrote"
+                    .to_string(),
+            )
+        }),
+    }
+}
 
 /// 検査の入口で木を採る。**採れなくても検査は止めない**（記録に `?` が残る）。
 pub fn begin(root: &Path, level: Level) {
@@ -219,6 +385,11 @@ pub fn begin(root: &Path, level: Level) {
             String::from_utf8_lossy(&output.stdout).lines().count()
         });
     let (unix, when) = check_lock::now();
+    // **`cargo xtask full` の子なら、親が始めに読んだ値を使う**（作業木の取り出しの分も含める）。
+    let disk_start = std::env::var(DISK_START_ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .or_else(|| sectors_written(root));
     if let Ok(mut start) = START.lock() {
         *start = Some(Start {
             level,
@@ -228,6 +399,7 @@ pub fn begin(root: &Path, level: Level) {
             dirty,
             unix,
             when,
+            disk_start,
         });
     }
 }
@@ -243,6 +415,11 @@ pub fn started_commit_and_tree() -> Option<(String, String)> {
 pub fn end(outcome: &str, items: Option<usize>, item_seconds: Option<f64>) {
     let Some(record) = START.lock().ok().and_then(|start| {
         let start = start.as_ref()?;
+        let written = start
+            .disk_start
+            .zip(sectors_written(&start.root))
+            .map(|(before, after)| after.saturating_sub(before) * 512);
+        let (wsl_free, host_free, system_free) = free_spaces(&start.root);
         Some((
             start.root.clone(),
             Record {
@@ -258,6 +435,10 @@ pub fn end(outcome: &str, items: Option<usize>, item_seconds: Option<f64>) {
                 build_seconds: Some(
                     crate::metrics::total_time(crate::metrics::Kind::Build).as_secs_f64(),
                 ),
+                written,
+                wsl_free,
+                host_free,
+                system_free,
                 note: std::env::var(LOG_ENV).unwrap_or_else(|_| "-".to_string()),
             },
         ))
@@ -430,6 +611,24 @@ fn status(root: &Path) -> Result<()> {
             "VirtualBox VM(s) marked as left running by tools/vbox-vm.py start: {}",
             marks.join(", ")
         );
+    }
+    // **空きの計器**（2026-09-25）。**記録の最後の値と、いまの値。**
+    let shown = |value: Option<u64>| value.map_or("-".to_string(), gib);
+    if let Some(record) = records
+        .iter()
+        .rev()
+        .find(|record| record.wsl_free.is_some())
+    {
+        println!(
+            "free space at the last recorded check ({}): WSL {}; {HOST_VHD_DRIVE} {}; {HOST_SYSTEM_DRIVE} {}",
+            record.when,
+            shown(record.wsl_free),
+            shown(record.host_free),
+            shown(record.system_free)
+        );
+    }
+    for line in free_space_lines(&main) {
+        println!("{}", line.replacen("at the end", "now", 1));
     }
     Ok(())
 }
@@ -622,6 +821,40 @@ fn run(target: &str) -> Result<()> {
     )?;
     let worktree = main.join("target").join("full-check").join("wt");
     refuse_if_a_previous_run_is_alive(&worktree)?;
+    // **始める前に、見込みの書く量＋下限を、WSL の中と VHD の載ったドライブの両方で見る**（2026-09-25。
+    // 運用者の足す1点）。**足りなければ検査装置の故障として断る。**
+    let records = read_records(&main)?;
+    let (estimate, source) =
+        estimate_to_write(&records, || crate::directory_bytes(&main.join("target")))
+            .context("cargo xtask full: could not estimate how much the full check writes")?;
+    let (wsl_free, host_free, system_free) = free_spaces(&main);
+    let shown = |value: Option<u64>| value.map_or("unreadable".to_string(), gib);
+    println!(
+        "full: expecting to write {} ({source}); free: WSL {}, the drive holding the WSL disk \
+         ({HOST_VHD_DRIVE}) {}, Windows ({HOST_SYSTEM_DRIVE}) {}",
+        gib(estimate),
+        shown(wsl_free),
+        if launch::in_wsl() {
+            shown(host_free)
+        } else {
+            "not watched (not WSL)".to_string()
+        },
+        if launch::in_wsl() {
+            shown(system_free)
+        } else {
+            "not watched (not WSL)".to_string()
+        }
+    );
+    let shortfalls = start_shortfalls(estimate, wsl_free, launch::in_wsl(), host_free);
+    if !shortfalls.is_empty() {
+        let message = format!(
+            "cargo xtask full: not enough free space to start: {}",
+            shortfalls.join("; ")
+        );
+        append_full_record(&main, &commit, &tree, "refused", &message);
+        return Err(anyhow::Error::new(HarnessFault(message)));
+    }
+    let disk_start = sectors_written(&main);
     prepare_worktree(&main, &worktree, &commit)?;
     if let Some(dir) = log.parent() {
         fs::create_dir_all(dir).with_context(|| format!("could not create {}", dir.display()))?;
@@ -633,6 +866,10 @@ fn run(target: &str) -> Result<()> {
         .current_dir(&worktree)
         .env(check_lock::OWNER_ENV, std::process::id().to_string())
         .env(LOG_ENV, &log)
+        .env(
+            DISK_START_ENV,
+            disk_start.map_or(String::new(), |sectors| sectors.to_string()),
+        )
         .stdin(Stdio::null())
         .stdout(file.try_clone().context("could not share the log")?)
         .stderr(file)
@@ -664,15 +901,16 @@ fn run(target: &str) -> Result<()> {
             child.id(),
             worktree.display()
         );
-        append_cut(&main, &commit, &tree, &message);
+        append_full_record(&main, &commit, &tree, "cut", &message);
         println!("xtask full: {message}");
         std::process::exit(3);
     };
     if status.code().is_none() {
-        append_cut(
+        append_full_record(
             &main,
             &commit,
             &tree,
+            "cut",
             &format!(
                 "the full check ended by a signal ({status}); log {}",
                 log.display()
@@ -687,20 +925,25 @@ fn run(target: &str) -> Result<()> {
     }
 }
 
-/// 子が記録を書けずに終わったときの記録（上限を過ぎた、信号で終わった）。
-fn append_cut(main: &Path, commit: &str, tree: &str, note: &str) {
+/// 子が記録を書けないときの全検査の記録（上限を過ぎた・信号で終わった・空きが足りずに始めなかった）。
+fn append_full_record(main: &Path, commit: &str, tree: &str, outcome: &str, note: &str) {
     let (unix, when) = check_lock::now();
+    let (wsl_free, host_free, system_free) = free_spaces(main);
     let record = Record {
         unix,
         when,
         level: Level::Full.label().to_string(),
-        outcome: "cut".to_string(),
+        outcome: outcome.to_string(),
         commit: commit.to_string(),
         tree: tree.to_string(),
         dirty: 0,
         items: None,
         item_seconds: None,
         build_seconds: None,
+        written: None,
+        wsl_free,
+        host_free,
+        system_free,
         note: note.to_string(),
     };
     if let Err(error) = append(main, &record) {
@@ -758,6 +1001,10 @@ pub fn gate(root: &Path, override_reason: Option<&str>) -> Result<Gate> {
                     items: None,
                     item_seconds: None,
                     build_seconds: None,
+                    written: None,
+                    wsl_free: None,
+                    host_free: None,
+                    system_free: None,
                     note: reason.to_string(),
                 },
             )?;
@@ -839,6 +1086,10 @@ mod tests {
             items: Some(47),
             item_seconds: Some(12.3),
             build_seconds: None,
+            written: Some(4096),
+            wsl_free: Some(1 << 40),
+            host_free: None,
+            system_free: Some(20 << 30),
             note: "a\tb\nc".to_string(),
         }
     }
@@ -988,6 +1239,88 @@ mod tests {
         );
         assert!(gate(&repo, None).unwrap().missing.is_empty());
         let _ = fs::remove_dir_all(&scratch);
+    }
+
+    /// **4 欄を足す前の 11 欄の行も読む**（足した欄は無いものとして）。
+    #[test]
+    fn a_record_from_before_the_added_columns_still_reads() {
+        let old = "1790293333\t2026-09-25 08:42:13\tbase\tpass\tc\tt\t0\t47\t4.8\t0.1\t-";
+        let read = parse_record(old).unwrap();
+        assert_eq!(
+            (read.items, read.written, read.wsl_free, read.note.as_str()),
+            (Some(47), None, None, "-")
+        );
+        let new = format_record(&record("full", "pass", "c", "t", 0));
+        assert_eq!(new.trim_end_matches('\n').split('\t').count(), 15);
+        let read = parse_record(new.trim_end_matches('\n')).unwrap();
+        assert_eq!(
+            (
+                read.written,
+                read.wsl_free,
+                read.host_free,
+                read.system_free
+            ),
+            (Some(4096), Some(1 << 40), None, Some(20 << 30))
+        );
+    }
+
+    /// **`/proc/diskstats` の 10 番目の欄が書いたセクタ数**（形は実測。2026-09-25）。
+    #[test]
+    fn the_sectors_written_are_read_from_diskstats() {
+        let stats = "   8       0 sda 100 0 200 5 0 0 0 0 0 10 5 0 0 0 0 0 0\n\
+                        8      48 sdd 5000 10 400000 900 7000 20 923728 3000 0 4000 3900 0 0 0 0 0 0\n";
+        assert_eq!(diskstats_sectors_written(stats, (8, 48)), Some(923_728));
+        assert_eq!(diskstats_sectors_written(stats, (8, 0)), Some(0));
+        assert_eq!(diskstats_sectors_written(stats, (8, 16)), None);
+        assert_eq!(diskstats_sectors_written("", (8, 48)), None);
+    }
+
+    /// **全検査の入口の空き**——**見込み＋下限を両方で見て、足りない置き場を全部挙げる。** **WSL の外では
+    /// ドライブを見ない。** **読めない置き場も足りないに数える。**
+    #[test]
+    fn the_full_check_needs_the_estimate_plus_the_floor_on_both_places() {
+        let estimate = 61 << 30;
+        let wsl_need = estimate + launch::DISK_FLOOR_BYTES;
+        let host_need = estimate + launch::HOST_DISK_FLOOR_BYTES;
+        assert!(start_shortfalls(estimate, Some(wsl_need), true, Some(host_need)).is_empty());
+        assert_eq!(
+            start_shortfalls(estimate, Some(wsl_need - 1), true, Some(host_need)).len(),
+            1
+        );
+        assert_eq!(
+            start_shortfalls(estimate, Some(wsl_need), true, Some(host_need - 1)).len(),
+            1
+        );
+        assert_eq!(start_shortfalls(estimate, Some(0), true, Some(0)).len(), 2);
+        assert_eq!(start_shortfalls(estimate, None, true, None).len(), 2);
+        let unreadable = start_shortfalls(estimate, Some(wsl_need), true, None);
+        assert!(
+            unreadable[0].contains("update HOST_VHD_DRIVE"),
+            "{unreadable:?}"
+        );
+        // **WSL の外（CI）ではドライブを見ない。**
+        assert!(start_shortfalls(estimate, Some(wsl_need), false, None).is_empty());
+    }
+
+    /// **見込みは前回の全検査の書いた量。** **無ければ代わりの値。** **書いた量の無い全検査の記録は飛ばす。**
+    #[test]
+    fn the_estimate_comes_from_the_last_full_check_that_recorded_its_writes() {
+        let mut first = record("full", "pass", "c1", "t1", 0);
+        first.written = Some(50 << 30);
+        let mut refused = record("full", "refused", "c2", "t2", 0);
+        refused.written = None;
+        let mut base = record("base", "pass", "c3", "t3", 0);
+        base.written = Some(1);
+        let records = vec![first, refused, base];
+        assert_eq!(
+            estimate_to_write(&records, || Some(7)).map(|pair| pair.0),
+            Some(50 << 30)
+        );
+        assert_eq!(
+            estimate_to_write(&[], || Some(7)).map(|pair| pair.0),
+            Some(7)
+        );
+        assert_eq!(estimate_to_write(&[], || None), None);
     }
 
     /// **記録の読み方は汚れを言う。**
