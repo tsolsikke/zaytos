@@ -691,9 +691,11 @@ xtask::full_check::tests::a_worktree_is_cold_without_target_when_small_or_built_
 xtask::full_check::tests::appends_survive_a_torn_tail_and_concurrent_writers
 xtask::full_check::tests::environment_differences_name_the_changed_tools
 xtask::full_check::tests::only_a_pass_at_the_needed_level_or_above_covers_a_commit
+xtask::full_check::tests::pre_push_lines_are_read_and_bad_ones_are_refused
 xtask::full_check::tests::score_summary_counts_narrow_selections_apart
 xtask::full_check::tests::the_estimate_is_chosen_by_whether_the_worktree_is_cold
 xtask::full_check::tests::the_full_check_needs_the_estimate_plus_the_floor_on_both_places
+xtask::full_check::tests::the_pre_push_gate_counts_what_git_sends
 xtask::full_check::tests::the_push_gate_passes_recorded_commits_refuses_the_rest_and_records_the_flag
 xtask::full_check::tests::the_rustc_fingerprint_is_read_from_cargo_s_record
 xtask::full_check::tests::the_sectors_written_are_read_from_diskstats

@@ -763,7 +763,8 @@ fn paths_of(root: &Path, commit: &str) -> Result<Vec<String>> {
 ///
 /// - **合格の記録で、段が要る段以上であること。**
 /// - **コミットが同じか、木が同じで汚れが 0 であること**（木が同じなら中身は同じ）。
-/// - **旗で越えた記録（`override`）は、そのコミットだけを満たす。**
+/// - **旗で越えた記録（`override`）は満たさない**（2026-09-26。運用者の決定 1 の ③）——**例外はその
+///   push だけに効かせる。** **以前はそのコミットを後まで満たしていた**（押し損ねた後の push も通った）。
 ///
 /// **汚れ 0 の記録を先に見せる**（2026-09-26。運用者の任意の 1 点）——**同じコミットで汚れのある回が
 /// 後に在っても、確かめた木が言える記録のほうが読める。** **関門の答えは変わらない**（どれかが当たれば
@@ -775,10 +776,9 @@ pub fn covering<'a>(
     need: Level,
 ) -> Option<&'a Record> {
     let covers = |record: &&Record| {
-        let passed = record.outcome == "pass"
+        record.outcome == "pass"
             && Level::parse(&record.level).is_some_and(|level| level >= need)
-            && (record.commit == commit || (record.tree == tree && record.dirty == 0));
-        passed || (record.outcome == "override" && record.commit == commit)
+            && (record.commit == commit || (record.tree == tree && record.dirty == 0))
     };
     records
         .iter()
@@ -791,7 +791,10 @@ pub fn covering<'a>(
 /// 記録を人が読む形にする（純粋な論理）。
 fn describe(record: &Record) -> String {
     let what = match (record.outcome.as_str(), Level::parse(&record.level)) {
-        ("override", _) => format!("the push gate was passed by the flag ({})", record.note),
+        ("override", _) => format!(
+            "pushed without the check it needs, by the flag ({}); not a pass",
+            record.note
+        ),
         (outcome, Some(level)) => format!("{} {outcome}", level.shown()),
         (outcome, None) => format!("{} {outcome}", record.level),
     };
@@ -822,9 +825,20 @@ fn commit_line(root: &Path, records: &[Record], commit: &str) -> Result<(String,
             false,
         ),
     };
+    // **足りなければ、要る検査の回し方を添える**（2026-09-26。運用者の決定 1 の ③ の条件 2）。
+    let how = if covered {
+        String::new()
+    } else {
+        format!(
+            "\n      to check it: cargo xtask full {} (in the worktree), or cargo xtask check{} while \
+             it is HEAD",
+            short(commit),
+            if need >= Level::Commit { " --commit" } else { "" }
+        )
+    };
     Ok((
         format!(
-            "  {} {subject}\n      needs {}; {state}",
+            "  {} {subject}\n      needs {}; {state}{how}",
             short(commit),
             need.shown()
         ),
@@ -1656,20 +1670,127 @@ pub struct Gate {
 
 /// push の前の関門（運用者の足す1点。2026-09-25）。**押すコミット（どのリモートにも無いもの）の
 /// それぞれに、要る検査の合格の記録が在るかを見る。** **旗の理由が在れば、無いコミットを「旗で
-/// 越えた」と記録して通す。**
+/// 越えた」と記録して通す**——**その push だけに効く**（記録は合格として数えない。[`covering`]）。
 ///
-/// **読むのは `--status` と同じ記録である**（二重に持たない）。
+/// **読むのは `--status` と同じ記録である**（二重に持たない）。**Claude Code の hook が呼ぶ形は HEAD から
+/// 数え、Git の pre-push が呼ぶ形（[`gate_pre_push`]）は標準入力の ref から数える**——**判定は同じ
+/// [`gate_commits`] である。**
 pub fn gate(root: &Path, override_reason: Option<&str>) -> Result<Gate> {
     let main = check_lock::main_tree(root)?;
-    let records = read_records(&main)?;
     let pending = git_line(
         &main,
         &["rev-list", "--reverse", "HEAD", "--not", "--remotes"],
     )?;
-    let pending: Vec<&str> = pending.lines().filter(|line| !line.is_empty()).collect();
+    let pending: Vec<String> = pending
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+    gate_commits(&main, &pending, override_reason)
+}
+
+/// Git の pre-push が標準入力で渡す 1 行（2026-09-26。運用者の決定 1 の ③）。
+#[derive(Debug, PartialEq, Eq)]
+pub struct PushLine {
+    pub local_ref: String,
+    pub local: String,
+    pub remote_ref: String,
+    pub remote: String,
+}
+
+/// pre-push の標準入力を読む（純粋な論理）。**`<local ref> <local oid> <remote ref> <remote oid>` の
+/// 行である**（`githooks(5)`）。**形の崩れた行は誤りにする**——**読めない行を「送るもの無し」に落とさない。**
+pub fn parse_push_lines(text: &str) -> Result<Vec<PushLine>> {
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            match fields.as_slice() {
+                [local_ref, local, remote_ref, remote] => Ok(PushLine {
+                    local_ref: local_ref.to_string(),
+                    local: local.to_string(),
+                    remote_ref: remote_ref.to_string(),
+                    remote: remote.to_string(),
+                }),
+                _ => bail!("a pre-push line has an unexpected form: {line:?}"),
+            }
+        })
+        .collect()
+}
+
+/// 全部 0 の名前か（削除か、リモートにまだ無い ref）。
+fn is_zero(oid: &str) -> bool {
+    !oid.is_empty() && oid.bytes().all(|byte| byte == b'0')
+}
+
+/// 1 行が実際に送るコミット（古いものから）。**削除は送るもの無し。** **タグは指すコミットへ剥がす**
+/// （コミットを指さないタグは送るもの無し）。**どのリモートにも無く、相手の今のコミットからも届かない
+/// ものだけを数える**（相手の oid が手元に在れば除く）。
+fn commits_in_push(root: &Path, line: &PushLine) -> Result<Vec<String>> {
+    if is_zero(&line.local) {
+        return Ok(Vec::new());
+    }
+    let Ok(commit) = git_line(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{}^{{commit}}", line.local),
+        ],
+    ) else {
+        return Ok(Vec::new());
+    };
+    let mut args = vec![
+        "rev-list".to_string(),
+        "--reverse".to_string(),
+        commit,
+        "--not".to_string(),
+        "--remotes".to_string(),
+    ];
+    if !is_zero(&line.remote) && commit_exists(root, &line.remote) {
+        args.push(line.remote.clone());
+    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    Ok(git_line(root, &args)?
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Git の pre-push の関門（2026-09-26。運用者の決定 1 の ③）。**標準入力の ref の行から、実際に送る
+/// コミットを数える**（HEAD ではない）——**別の枝・複数の ref・タグ・削除を 1 行ずつ扱う。**
+pub fn gate_pre_push(root: &Path, input: &str, override_reason: Option<&str>) -> Result<Gate> {
+    let main = check_lock::main_tree(root)?;
+    let mut pending: Vec<String> = Vec::new();
+    for line in parse_push_lines(input)? {
+        let commits = commits_in_push(&main, &line)?;
+        println!(
+            "push gate: {} -> {}: {}",
+            line.local_ref,
+            line.remote_ref,
+            if is_zero(&line.local) {
+                "a deletion, nothing to check".to_string()
+            } else {
+                format!("{} commit(s) not on any remote", commits.len())
+            }
+        );
+        for commit in commits {
+            if !pending.contains(&commit) {
+                pending.push(commit);
+            }
+        }
+    }
+    gate_commits(&main, &pending, override_reason)
+}
+
+/// 送るコミットのそれぞれに、要る検査の合格の記録が在るかを見る（2 つの関門が同じく呼ぶ）。
+fn gate_commits(main: &Path, pending: &[String], override_reason: Option<&str>) -> Result<Gate> {
+    let records = read_records(main)?;
     let mut missing = Vec::new();
-    for commit in &pending {
-        let (line, covered) = commit_line(&main, &records, commit)?;
+    for commit in pending {
+        let (line, covered) = commit_line(main, &records, commit)?;
         if !covered {
             println!("{line}");
             missing.push(commit.to_string());
@@ -1679,9 +1800,19 @@ pub fn gate(root: &Path, override_reason: Option<&str>) -> Result<Gate> {
     if let (true, Some(reason)) = (overridden, override_reason) {
         let (unix, when) = check_lock::now();
         for commit in &missing {
-            let tree = git_line(&main, &["rev-parse", &format!("{commit}^{{tree}}")])?;
+            // **同じ push を 2 つの関門が見る**（Claude Code の hook と Git の pre-push）。**同じコミットと
+            // 理由の記録が 10 分の内に在れば、足さない。**
+            if records.iter().any(|record| {
+                record.outcome == "override"
+                    && &record.commit == commit
+                    && record.note == reason
+                    && unix.saturating_sub(record.unix) < 600
+            }) {
+                continue;
+            }
+            let tree = git_line(main, &["rev-parse", &format!("{commit}^{{tree}}")])?;
             append(
-                &main,
+                main,
                 &Record {
                     unix,
                     when: when.clone(),
@@ -1714,7 +1845,38 @@ pub fn gate(root: &Path, override_reason: Option<&str>) -> Result<Gate> {
     })
 }
 
-/// `cargo xtask full [<コミット>] | --status | --select | --gate [--override <理由>]`。
+/// 関門の結果を言い、通すか決める（2 つの関門が同じく使う）。
+fn report_gate(gate: &Gate, main: &Path) -> Result<()> {
+    if gate.missing.is_empty() {
+        println!(
+            "push gate: {} commit(s) to push, each with the check it needs recorded as passed",
+            gate.pending
+        );
+        return Ok(());
+    }
+    if gate.overridden {
+        println!(
+            "push gate: passed by the flag for {} of {} commit(s) without the check they need; \
+             recorded as override in {} (for this push only; it is not a pass)",
+            gate.missing.len(),
+            gate.pending,
+            records_path(main)?.display()
+        );
+        return Ok(());
+    }
+    bail!(
+        "push gate: {} of {} commit(s) to push have no passing record of the check they need \
+         (listed above with how to check them). Only when the check cannot be run afterwards, ask the \
+         operator and push with ZAYTOS_PUSH_UNCHECKED='<reason>' (recorded; for that push only)",
+        gate.missing.len(),
+        gate.pending
+    )
+}
+
+/// push の前の関門を旗で越えるときの環境変数（理由を入れる）。**Claude Code の hook も同じ名前を読む。**
+const OVERRIDE_ENV: &str = "ZAYTOS_PUSH_UNCHECKED";
+
+/// `cargo xtask full [<コミット>] | --status | --select | --gate [--override <理由>] [--pre-push]`。
 pub fn command(args: &[String]) -> Result<()> {
     if args.iter().any(|arg| arg == "--status") {
         return status(&crate::workspace_root()?);
@@ -1734,37 +1896,29 @@ pub fn command(args: &[String]) -> Result<()> {
             }
             None => None,
         };
-        let gate = gate(&crate::workspace_root()?, reason)?;
-        if gate.missing.is_empty() {
-            println!(
-                "push gate: {} commit(s) to push, each with the check it needs recorded as passed",
-                gate.pending
-            );
-            return Ok(());
+        let root = crate::workspace_root()?;
+        let main = check_lock::main_tree(&root)?;
+        // **Git の pre-push から呼ばれた形**（`.githooks/pre-push`。2026-09-26）——**標準入力の ref の行を
+        // 読む。** **旗は環境変数で受ける**（`ZAYTOS_PUSH_UNCHECKED='<理由>' git push`。空の理由は断る）。
+        if args.iter().any(|arg| arg == "--pre-push") {
+            let from_env = std::env::var(OVERRIDE_ENV).ok();
+            let reason = match (reason, from_env.as_deref().map(str::trim)) {
+                (Some(reason), _) => Some(reason),
+                (None, Some("")) => bail!("{OVERRIDE_ENV} is set but empty; give the reason"),
+                (None, other) => other,
+            };
+            let mut input = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
+                .context("could not read the refs from git")?;
+            return report_gate(&gate_pre_push(&root, &input, reason)?, &main);
         }
-        if gate.overridden {
-            println!(
-                "push gate: passed by the flag for {} of {} commit(s) without the check they need; \
-                 recorded as override in {}",
-                gate.missing.len(),
-                gate.pending,
-                records_path(&crate::workspace_root()?)?.display()
-            );
-            return Ok(());
-        }
-        bail!(
-            "push gate: {} of {} commit(s) to push have no passing record of the check they need \
-             (listed above). Run that check while the commit is HEAD (cargo xtask check or \
-             cargo xtask check --commit), or check it in the worktree with cargo xtask full <commit>",
-            gate.missing.len(),
-            gate.pending
-        );
+        return report_gate(&gate(&root, reason)?, &main);
     }
     let targets: Vec<&String> = args.iter().filter(|arg| !arg.starts_with("--")).collect();
     if targets.len() > 1 || args.iter().any(|arg| arg.starts_with("--")) {
         bail!(
             "usage: cargo xtask full [<commit>] | cargo xtask full --status | \
-             cargo xtask full --select | cargo xtask full --gate [--override <reason>]"
+             cargo xtask full --select | cargo xtask full --gate [--override <reason>] [--pre-push]"
         );
     }
     run(targets.first().map_or("HEAD", |target| target.as_str()))
@@ -1931,7 +2085,8 @@ mod tests {
         // **汚れのある記録は、そのコミットだけを満たす。**
         assert!(covering(&records, "c4", "t4", Level::Commit).is_some());
         assert!(covering(&records, "c4b", "t4", Level::Base).is_none());
-        assert!(covering(&records, "c5", "t5", Level::Commit).is_some());
+        // **旗で越えた記録は満たさない**（2026-09-26。その push だけに効く）。
+        assert!(covering(&records, "c5", "t5", Level::Commit).is_none());
         assert!(covering(&records, "c6", "t6", Level::Base).is_none());
     }
 
@@ -2217,7 +2372,123 @@ mod tests {
                 "the check was refused during a full check"
             )
         );
-        assert!(gate(&repo, None).unwrap().missing.is_empty());
+        // **旗はその push だけに効く**（2026-09-26。運用者の決定 1 の ③）——**旗なしの次の関門は、また断る。**
+        assert_eq!(gate(&repo, None).unwrap().missing, vec![more.clone()]);
+        // **同じ push を 2 つの関門が見ても、旗の記録は 1 度だけ足す**（10 分の内の同じコミットと理由）。
+        gate(&repo, Some("the check was refused during a full check")).unwrap();
+        let overrides = read_records(&repo)
+            .unwrap()
+            .iter()
+            .filter(|record| record.outcome == "override")
+            .count();
+        assert_eq!(overrides, 1);
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    /// **pre-push の標準入力の行を読む**（2026-09-26。運用者の決定 1 の ③）。**形の崩れた行は誤りにする。**
+    #[test]
+    fn pre_push_lines_are_read_and_bad_ones_are_refused() {
+        let zero = "0000000000000000000000000000000000000000";
+        let lines = parse_push_lines(&format!(
+            "refs/heads/main 1111 refs/heads/main 2222\nrefs/heads/gone {zero} refs/heads/gone 3333\n\n"
+        ))
+        .unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1].local, zero);
+        assert!(is_zero(&lines[1].local) && !is_zero(&lines[0].local) && !is_zero(""));
+        assert!(parse_push_lines("refs/heads/main 1111 refs/heads/main").is_err());
+    }
+
+    /// **pre-push の関門は、Git が渡す ref から実際に送るコミットを数える**（HEAD ではない。2026-09-26）。
+    /// **別の枝・タグ・削除を 1 行ずつ扱い、足りなければ断り、旗はその push だけに効く。** **作った git の木と
+    /// リモートで確かめる。**
+    #[test]
+    fn the_pre_push_gate_counts_what_git_sends() {
+        let scratch =
+            std::env::temp_dir().join(format!("zaytos-prepush-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&scratch);
+        let repo = scratch.join("repo");
+        let remote = scratch.join("remote.git");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&remote).unwrap();
+        let run = |dir: &Path, args: &[&str]| git_line(dir, args).unwrap();
+        run(
+            &remote,
+            &["-c", "init.defaultBranch=main", "init", "-q", "--bare"],
+        );
+        run(&repo, &["-c", "init.defaultBranch=main", "init", "-q"]);
+        let identity = [
+            "-c",
+            "user.name=check",
+            "-c",
+            "user.email=check@localhost",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+        ];
+        let commit = |path: &str| {
+            let file = repo.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, path).unwrap();
+            run(&repo, &["add", path]);
+            let mut args = identity.to_vec();
+            args.extend(["commit", "-q", "-m", path]);
+            run(&repo, &args);
+            run(&repo, &["rev-parse", "HEAD"])
+        };
+        let first = commit("README");
+        let remote_arg = remote.to_string_lossy().into_owned();
+        run(&repo, &["remote", "add", "origin", &remote_arg]);
+        run(&repo, &["push", "-q", "origin", "main"]);
+        let docs = commit("docs/a.md");
+        run(&repo, &["checkout", "-q", "-b", "side"]);
+        let side = commit("docs/side.md");
+        run(&repo, &["checkout", "-q", "main"]);
+        let mut args = identity.to_vec();
+        args.extend(["tag", "-a", "-m", "t", "v1", &side]);
+        run(&repo, &args);
+        let tag = run(&repo, &["rev-parse", "v1"]);
+        let zero = "0000000000000000000000000000000000000000";
+        // **main の更新（相手は first）、新しい枝、タグ、削除の 4 行。**
+        let input = format!(
+            "refs/heads/main {docs} refs/heads/main {first}\n\
+             refs/heads/side {side} refs/heads/side {zero}\n\
+             refs/tags/v1 {tag} refs/tags/v1 {zero}\n\
+             (delete) {zero} refs/heads/old {first}\n"
+        );
+        let refused = gate_pre_push(&repo, &input, None).unwrap();
+        // **重なるコミットは 1 度だけ数える**（side は docs の上に在り、タグは side を指す）。
+        assert_eq!(refused.pending, 2, "docs and the side commit");
+        assert_eq!(refused.missing.len(), 2);
+        assert!(!refused.overridden);
+        // **記録が在れば通る**（基底の合格。docs と side は基底で足りる）。
+        let pass = |commit: &str| Record {
+            level: "base".to_string(),
+            ..record("-", "pass", commit, "-", 0)
+        };
+        for commit in [&docs, &side] {
+            append(&repo, &pass(commit)).unwrap();
+        }
+        let passed = gate_pre_push(&repo, &input, None).unwrap();
+        assert!(passed.missing.is_empty(), "{:?}", passed.missing);
+        // **削除だけの push は、送るもの無し。**
+        let deletion = gate_pre_push(
+            &repo,
+            &format!("(delete) {zero} refs/heads/old {first}\n"),
+            None,
+        )
+        .unwrap();
+        assert_eq!((deletion.pending, deletion.missing.len()), (0, 0));
+        // **記録の無いコミットは、旗でだけ越えられ、その push だけに効く。**
+        let late = commit("kernel/src/late.rs");
+        let late_input = format!("refs/heads/main {late} refs/heads/main {first}\n");
+        let flagged = gate_pre_push(&repo, &late_input, Some("left for later")).unwrap();
+        assert!(flagged.overridden && flagged.missing == vec![late.clone()]);
+        assert_eq!(
+            gate_pre_push(&repo, &late_input, None).unwrap().missing,
+            vec![late.clone()]
+        );
         let _ = fs::remove_dir_all(&scratch);
     }
 

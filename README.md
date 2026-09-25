@@ -152,6 +152,9 @@ cargo xtask full
 錠で断られる。`cargo xtask full --status`は、HEADの木が全検査に合格したかと、
 その後のコミットをそれぞれ何で確かめたかを出す。
 
+pushの前の関門は、Git自身のhook（`.githooks/pre-push`）にも置いている。cloneにhookは含まれないので、
+取り出したら1度`git config core.hooksPath .githooks`を打つ（基底の検査がWSLの中で設定を確かめる）。
+
 個別の回帰チェックは`cargo xtask run --<名前>-test`の形で単体でも走らせられる
 （`cargo xtask`を引数なしで実行すると、使い方の一覧が出る）。
 

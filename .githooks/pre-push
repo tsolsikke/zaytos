@@ -1,0 +1,15 @@
+#!/bin/sh
+# Git の push の前の関門（2026-09-26。運用者の決定 1 の ③）。
+#
+# Claude Code の hook（.claude/hooks/deny_push_when_red.py）と同じ判定（cargo xtask full --gate）を呼ぶ。
+# こちらは Git が標準入力で渡す ref の行から、実際に送るコミットを数える（HEAD ではない）。
+# 別の枝・複数の ref・タグ・削除を 1 行ずつ扱う。長い検査は起こさない——既存の合格の記録を照合する。
+#
+# 例外は ZAYTOS_PUSH_UNCHECKED='<理由>' git push である。その push だけに効き、理由と対象のコミットが
+# 記録に残る。検査の合格としては数えない。
+#
+# git push --no-verify は、この hook ごと迂回できる。すべての迂回を記録できるとは言わない——通常の操作の
+# 誤りを防ぐ仕組みである。CI が各 push で基底と --commit を回す。
+#
+# 入れ方: git config core.hooksPath .githooks（clone に hook は含まれない。基底が WSL の中で設定を確かめる）。
+exec cargo xtask full --gate --pre-push "$1" "$2"

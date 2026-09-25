@@ -21987,6 +21987,21 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         }
     }
 
+    // **Git の pre-push の関門が入っていること**（2026-09-26。運用者の決定 1 の ③ の条件 3）。**hook の本体が
+    // 追跡されて実行でき、WSL の中では `core.hooksPath` がそこを指していること。**
+    total += 1;
+    begin_item(
+        Family::Base,
+        "the Git pre-push hook is tracked, executable and installed (core.hooksPath, in WSL)",
+    );
+    match check_git_pre_push_hook(&workspace_root) {
+        Ok(message) => println!("--- git pre-push hook: OK ({message})"),
+        Err(error) => {
+            println!("--- git pre-push hook: FAILED ({error:#})");
+            failed.push("git pre-push hook".to_string());
+        }
+    }
+
     // **変更したパスと族の対応表**（2026-09-26。族にまとめる段。運用者の決定）。**追跡している全ファイルに
     // 当たる行が在り、`kernel/`・`common/`・`bootloader/` の下が基底だけに当たらず、死んだ行が無いこと。**
     total += 1;
@@ -24313,8 +24328,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 49,
-    full: 410,
+    base: 50,
+    full: 411,
 };
 
 /// `--shell-test` の破壊が `sendkey` と台本の族にどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -24343,6 +24358,59 @@ const EXPECTED_SHELL_SABOTAGE_SPLIT: ExpectedShellSabotageSplit = ExpectedShellS
     sendkey: 11,
     script: 10,
 };
+
+/// Git の pre-push の関門の置き場（2026-09-26。運用者の決定 1 の ③）。**`core.hooksPath` の値でもある。**
+const GIT_HOOKS_DIR: &str = ".githooks";
+
+/// Git の pre-push の関門が入っているかを見る（2026-09-26。運用者の決定 1 の ③ の条件 3）。
+///
+/// - **本体が追跡されて実行できること**（索引の `100755` と、ファイルの実行の権限）。
+/// - **WSL の中では `core.hooksPath` が `.githooks` を指していること**——**Git の hook は clone に
+///   含まれない**ので、取り出した後に 1 度設定する（README の「検査」）。**WSL の外では見ない**——
+///   **取り出した直後の CI では設定されていない**（CI は各 push で基底と `--commit` を回す）。
+fn check_git_pre_push_hook(workspace_root: &Path) -> Result<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let relative = format!("{GIT_HOOKS_DIR}/pre-push");
+    let staged = Command::new("git")
+        .current_dir(workspace_root)
+        .args(["ls-files", "--stage", "--", &relative])
+        .output()
+        .context("failed to ask git for the hook's mode")?;
+    let staged = String::from_utf8_lossy(&staged.stdout);
+    if !staged.starts_with("100755 ") {
+        bail!("{relative} is not tracked as an executable file (git ls-files --stage says {staged:?})");
+    }
+    let mode = fs::metadata(workspace_root.join(&relative))
+        .with_context(|| format!("could not read {relative}"))?
+        .permissions()
+        .mode();
+    if mode & 0o111 == 0 {
+        bail!("{relative} is not executable on disk (mode {mode:o})");
+    }
+    if !launch::in_wsl() {
+        return Ok(format!(
+            "{relative} is tracked and executable; core.hooksPath is not checked outside WSL (a \
+             fresh checkout such as CI does not set it, and CI checks each push)"
+        ));
+    }
+    let configured = Command::new("git")
+        .current_dir(workspace_root)
+        .args(["config", "--get", "core.hooksPath"])
+        .output()
+        .context("failed to ask git for core.hooksPath")?;
+    let configured = String::from_utf8_lossy(&configured.stdout)
+        .trim()
+        .to_string();
+    if configured != GIT_HOOKS_DIR {
+        bail!(
+            "core.hooksPath is {configured:?}, not {GIT_HOOKS_DIR:?}, so Git does not run the pre-push \
+             gate. Run: git config core.hooksPath {GIT_HOOKS_DIR}"
+        );
+    }
+    Ok(format!(
+        "{relative} is tracked and executable, and core.hooksPath points at {GIT_HOOKS_DIR}"
+    ))
+}
 
 /// 変更したパスと族の対応表が、追跡している全ファイルを覆うかを見る（2026-09-26。族にまとめる段）。
 ///

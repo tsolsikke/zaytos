@@ -350,6 +350,7 @@ pub const PATH_RULES: &[PathRule] = &[
     PathRule {
         patterns: &[
             "docs/**",
+            ".githooks/**",
             "*.md",
             "LICENSE",
             ".gitignore",
