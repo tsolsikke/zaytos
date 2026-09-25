@@ -5382,6 +5382,60 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         ],
         note: "",
     },
+    // ── devices（virtio の割り込み 4・PCI 3・virtio-blk 3） ──
+    NamedJudgement {
+        key: "pci-config-offset-test",
+        signs: &["the sets match = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "pci-ignore-multifunction-test",
+        signs: &["the sets match = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "pci-stop-at-first-test",
+        signs: &["the sets match = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "virtio-wrong-sector-test",
+        signs: &["checksum from the device", "match = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "virtio-intx-edge-test",
+        signs: &["route read back matching the platform's declaration = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "virtio-wait-holding-bkl-test",
+        signs: &["the blocking read released the BKL before waiting = false"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "virtio-skip-notify-test",
+        signs: &[
+            "the read did not complete",
+            "the request was not completed after",
+        ],
+        note: "",
+    },
+    NamedJudgement {
+        key: "virtio-short-desc-test",
+        signs: &["the read did not complete", "the device reported status 1"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "virtio-skip-eoi-test",
+        signs: &["the exercise did not complete", "RequestTimedOut"],
+        note: "",
+    },
+    NamedJudgement {
+        key: "virtio-skip-isr-read-test",
+        signs: &["each read was delivered once and nothing else arrived = false"],
+        note: "",
+    },
 ];
 
 /// 名前の判定へ絞らず、「どの誤りでも」のまま置く破壊と、その理由（2026-09-26。運用者の足す 1 点）。
@@ -13039,6 +13093,9 @@ fn cmd_virtio_irq_test(features: &[&str]) -> Result<()> {
         "{context}: delivered = {delivered:?} (wanted 2), not mine = {not_mine:?} (wanted 0), \
          route read back matching the platform's declaration = {route_ok}"
     );
+    // **数の判定に名前を付ける**（2026-09-26。族にまとめる段）——**上の行は数を並べるだけで、偽の判定の
+    // 形をしていなかった**（ISR を読まない破壊は数だけが狂い、`= false` の行が 1 本も出なかった）。
+    println!("{context}: each read was delivered once and nothing else arrived = {counts_ok}");
     // d-2: BKL を解いてから待ったこと（§6。ADR-0036）。
     let released = serial
         .lines()
