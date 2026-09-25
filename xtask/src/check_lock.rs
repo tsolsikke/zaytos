@@ -1099,6 +1099,27 @@ pub fn command(args: &[String]) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// **錠の fd は子へ継がれない**（2026-09-26。第三者レビューの取り込み 4.(3)）。**std はファイルを
+    /// `O_CLOEXEC` で開くので、起こした子（`exec` の後）は錠を持たない**——**持ち主が閉じれば、子が
+    /// 生きていても放れる。** **継がれていれば、子の写しが錠を持ち続け、2 度目の取りが断られる。**
+    #[test]
+    fn the_lock_is_not_inherited_by_a_child() {
+        let dir = std::env::temp_dir().join(format!("zaytos-lock-inherit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("check.lock");
+        let held = open(&path).unwrap();
+        held.try_lock().unwrap();
+        let mut child = Command::new("sleep").arg("5").spawn().unwrap();
+        drop(held);
+        let again = open(&path).unwrap();
+        let taken = again.try_lock();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(taken.is_ok(), "a child kept the lock: {taken:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// **`/proc/locks` の flock の行を読む**（形は実測。2026-09-25）。**待っている行と POSIX の錠は読まない。**
     #[test]
     fn flock_lines_are_read_from_proc_locks() {

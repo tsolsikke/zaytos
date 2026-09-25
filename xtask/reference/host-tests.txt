@@ -660,6 +660,7 @@ xtask::check_lock::tests::device_numbers_split_as_glibc_does
 xtask::check_lock::tests::flock_lines_are_read_from_proc_locks
 xtask::check_lock::tests::only_a_descendant_of_a_holder_goes_ahead_without_the_lock
 xtask::check_lock::tests::other_runs_are_counted_from_the_start_of_the_full_check
+xtask::check_lock::tests::the_lock_is_not_inherited_by_a_child
 xtask::check_lock::tests::the_parent_pid_is_read_after_the_last_parenthesis
 xtask::family::tests::a_path_takes_the_union_of_every_row_it_matches
 xtask::family::tests::every_family_is_listed_once_in_order_with_its_own_name
