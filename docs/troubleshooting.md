@@ -1351,7 +1351,7 @@ checksumが1行と、`.rodata`が縮んだぶんのPT_LOADが4行**（`/bin/ls`�
 
 ## 2026-09-25: 代入や`timeout`を前に置いた`git`の呼び出しで、hookが3本とも発火しなかった（検査の体系の改善の③）
 
-**3本のhookの判定は、`git`（と`cargo`）の直前に区切り（行頭・`;`・`&`・`|`・改行）を求めていた。** **`X=1 git push`や`timeout 60 git push`のように前に代入や命令を置くと、`git`の直前は区切りではないので、どのhookも発火しなかった**——**pushの前の基底checkが回らずに押せ、コミットの後の検査も回らず、`git add -A`と`commit -a`も拒まれない形だった。** **pushの前の関門を越える旗（`ZAYTOS_PUSH_UNCHECKED='<理由>' git push`）をこの形で書くと決めたときに見つけた。** **過去にこの形で打った回が在ったかは確かめていない。**
+**3本のhookの判定は、`git`（と`cargo`）の直前に区切り（行頭・`;`・`&`・`|`・改行）を求めていた。** **`X=1 git push`や`timeout 60 git push`のように前に代入や命令を置くと、`git`の直前は区切りではないので、どのhookも発火しなかった**——**pushの前の基底checkが回らずに押せ、コミットの後の検査も回らず、`git add -A`と`commit -a`も拒まれない形だった。** **pushの前の関門を越える旗（`ZAYTOS_PUSH_UNCHECKED='<理由>' git push`）をこの形で書くと決めたときに見つけた。** **過去にこの形で打った回が在ったかは確かめていない。** **過去のpushに、pushの前の基底を通っていないものが在りうる**（この形で打った回が在れば、hookは発火していない）——**ただしCIは各pushで基底と`--commit`を回していた。**
 
 **直した**（`649f1b2`で代入、`cb76476`で`env`・`command`・`exec`・`nice`・`timeout`）——**前に置けるものの並び（`PREFIX`）を`deny_dangerous_bash.py`に1つだけ持ち、隣の2本が取り込む。** **コミットの後のhookも、引用とheredocを落とした実行の形に当てる形にした。** **判定表に前置きの形を足し、実際に打って確かめた**——**`;`の後の`X=1 cargo`は拒まれ、`timeout 120 git push --dry-run`ではpushのhookが基底と関門を回し、`LC_ALL=C git commit`ではコミットの後のhookが回った。**
 
