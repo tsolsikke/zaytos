@@ -5916,13 +5916,261 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "a stop: the recursive-acquisition check halts at the first interrupt after the idle hlt",
         reached: true,
     },
+    // ── ipc（反す形。2026-09-26。socket 12・pipe 7・input 4・poll 4・compose 4・screen 3。socket の 1 つは置かない） ──
+    NamedJudgement {
+        check: "pipe test",
+        key: "pipe-write-does-not-wake-reader",
+        signs: &["a write woke it, and two tasks waited at once = false", "woken by a write Some(0)"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "pipe test",
+        key: "pipe-close-keeps-writer-count",
+        signs: &["every left side started and the script reached its end = false", "reached the end = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "pipe test",
+        key: "pipe-read-empty-returns-zero",
+        signs: &["a write woke it, and two tasks waited at once = false", "reader waits Some(0)"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "pipe test",
+        key: "pipe-write-ignores-full",
+        signs: &["/data/big went through byte for byte = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "pipe test",
+        key: "pipe-reader-not-reserved",
+        signs: &["the content went through the pipe = false", "hello once = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "pipe test",
+        key: "spawn-detached-returns-early",
+        signs: &["every right side started except the missing one = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "pipe test",
+        key: "wait-child-keeps-reservation",
+        signs: &["the content went through the pipe = false", "again once = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "socket test",
+        key: "socket-accept-does-not-wait",
+        signs: &["accept_waited = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "socket test",
+        key: "socket-connect-ignores-name",
+        signs: &["an_unknown_name_is_refused = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "socket test",
+        key: "socket-bind-ignores-taken-name",
+        signs: &["a_taken_name_is_refused = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "socket test",
+        key: "socket-close-keeps-peer-open",
+        signs: &["eof_after_the_peer_closed = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "socket test",
+        key: "socket-write-ignores-peer-closed",
+        signs: &["epipe_after_the_peer_closed = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "socket test",
+        key: "socket-write-does-not-wake-reader",
+        signs: &["readers_waited_both_ways_and_a_write_woke_them = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "socket test",
+        key: "socket-release-keeps-slot",
+        signs: &["the_queue_and_the_slots = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "socket test",
+        key: "shm-ftruncate-ignores-size",
+        signs: &["shm_went_round = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "socket test",
+        key: "shm-close-keeps-refs",
+        signs: &["no [ERROR] line = false", "syscall-test left the allocator short"],
+        note: "not reached: the boot-time syscall-test stops first on its frame accounting, so the socket-test judgements never run",
+        reached: false,
+    },
+    NamedJudgement {
+        check: "socket test",
+        key: "shm-mmap-maps-nothing",
+        signs: &["no [ERROR] line = false", "syscall-test folded instead of exiting"],
+        note: "not reached: the boot-time syscall-test maps shared memory first and folds, so the socket-test judgements never run",
+        reached: false,
+    },
+    NamedJudgement {
+        check: "socket test",
+        key: "socket-msghdr-ignores-iovlen",
+        signs: &["an_unsupported_iovlen_is_rejected = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "socket test",
+        key: "socket-recvmsg-takes-fd-first",
+        signs: &["shm_went_round_when_the_server_waited_first = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "input test",
+        key: "input-read-never-waits",
+        signs: &["the_read_waited = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "input test",
+        key: "input-events-mistake-the-code",
+        signs: &["a_key_press_went_through = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "input test",
+        key: "input-events-zero-the-time",
+        signs: &["the_event_carries_a_timestamp = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "input test",
+        key: "foreground-ignores-the-slot",
+        signs: &["a_process_outside_the_foreground_could_not_open_the_input_fd = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "poll test",
+        key: "poll-never-waits",
+        signs: &["the_poll_waited = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "poll test",
+        key: "poll-mistakes-the-member",
+        signs: &["the_listener_woke_the_first_poll = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "poll test",
+        key: "poll-waits-on-one-member",
+        signs: &["the_wait_set_held_two_reasons = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "poll test",
+        key: "wake-ignores-the-reason",
+        signs: &["no_task_was_woken_outside_its_set = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "screen test",
+        key: "screen-present-does-not-copy",
+        signs: &["the_pixels_reached_the_framebuffer = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "screen test",
+        key: "screen-leave-does-not-repaint",
+        signs: &["the_text_console_came_back = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "screen test",
+        key: "foreground-ignores-the-slot",
+        signs: &["a_process_outside_the_foreground_could_not_open_the_screen = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "compose test",
+        key: "screen-present-does-not-copy",
+        signs: &["the_client_pool_reached_the_screen = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "compose test",
+        key: "poll-waits-on-one-member",
+        signs: &["the_server_waited_on_input_listener_and_client_at_once = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "compose test",
+        key: "screen-leave-does-not-repaint",
+        signs: &["the_text_console_came_back = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "compose test",
+        key: "wake-ignores-the-reason",
+        signs: &["no_task_was_woken_outside_its_set = false"],
+        note: "",
+        reached: true,
+    },
 ];
 
 /// 名前の判定へ絞らず、「どの誤りでも」のまま置く破壊と、その理由（2026-09-26。運用者の足す 1 点）。
 ///
 /// **3 回のうちに偽になる判定が変わったもの（揺れる）を載せる。** **まとめの行が数を出す。** **組は
 /// （検査・破壊・理由）である**（2026-09-26。同じ破壊を別の検査が回すので、検査の名前も持つ）。
-const SABOTAGE_JUDGEMENTS_NOT_PLACED: &[(&str, &str, &str)] = &[];
+const SABOTAGE_JUDGEMENTS_NOT_PLACED: &[(&str, &str, &str)] = &[
+    // **説明の狙い（判定 1。返事が届く前に読み終える）が、3 回のうち 2 回だけ偽だった**（2026-09-26。計器の外の
+    // 破壊を絞る段）。**返事が先に届く回は、判定 1 が通る。** **3 回とも偽だった別の判定（`big` の往復）へは
+    // 付け替えない**——**説明の狙いではないので。**
+    (
+        "socket test",
+        "socket-read-empty-returns-zero",
+        "flaky: the intended judgement (hello_went_round, judgement 1) read false in 2 of 3 runs",
+    ),
+];
 
 /// 検査と構成の feature（か文脈の名前）の組が [`SABOTAGE_JUDGEMENTS`] に載っていれば、その行を返す。
 fn named_judgement_for(check: &str, keys: &[&str]) -> Option<&'static NamedJudgement> {
