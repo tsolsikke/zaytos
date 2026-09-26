@@ -6248,6 +6248,14 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "",
         reached: true,
     },
+    // ── smp（反す形。2026-09-26。serial 1） ──
+    NamedJudgement {
+        check: "serial test",
+        key: "serial-no-lock-test",
+        signs: &["every line the two cores wrote at the same time is intact = false"],
+        note: "",
+        reached: true,
+    },
 ];
 
 /// 名前の判定へ絞らず、「どの誤りでも」のまま置く破壊と、その理由（2026-09-26。運用者の足す 1 点）。
