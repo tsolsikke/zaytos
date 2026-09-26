@@ -6240,6 +6240,14 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "",
         reached: true,
     },
+    // ── apps（反す形。2026-09-26。ttf 1） ──
+    NamedJudgement {
+        check: "ttf test",
+        key: "fp-clobber-on-kernel-entry-test",
+        signs: &["the glyph rasterised inside Ring 3 matches the host byte for byte = false"],
+        note: "",
+        reached: true,
+    },
 ];
 
 /// 名前の判定へ絞らず、「どの誤りでも」のまま置く破壊と、その理由（2026-09-26。運用者の足す 1 点）。
