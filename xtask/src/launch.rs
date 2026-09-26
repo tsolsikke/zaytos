@@ -857,6 +857,15 @@ impl QemuRun {
         if let Some(cut) = &record.cut {
             println!("{}: (warn) the run was cut: {cut}", self.what);
         }
+        // **失敗の期限に着いた走行を出す**（2026-09-26。計器の外の破壊を絞る段の B）——**破壊の回の判定が
+        // 読むのは記録の側だが、ログから期限の終わりを見分けられなかった。**
+        if record.reached_deadline {
+            println!(
+                "{}: (info) the run reached its failure deadline ({:.1}s)",
+                self.what,
+                elapsed.as_secs_f64()
+            );
+        }
         if let Some(status) = self.status {
             if status.core_dumped() {
                 println!("{}: (warn) QEMU dumped core ({status})", self.what);

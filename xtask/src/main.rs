@@ -5614,6 +5614,83 @@ enum SabotageVerdict {
     StoppedForAnotherReason { sign: String },
     /// 止まらずに、別の形で落ちた。
     DidNotStop { error: String },
+    /// 検査装置の故障で落ちた（2026-09-26。計器の外の破壊を絞る段の B）。**捕まえたとしない。**
+    HarnessFault { error: String },
+}
+
+impl SabotageVerdict {
+    /// 捕まえたとする判定か（走行の側の理由を見る前）。
+    fn is_caught(&self) -> bool {
+        matches!(
+            self,
+            SabotageVerdict::CaughtForTheReason { .. }
+                | SabotageVerdict::CaughtByTheJudgement { .. }
+                | SabotageVerdict::CaughtByAnyError
+        )
+    }
+}
+
+/// 期限に着くのが捕まえ方である破壊の回（検査・破壊・なぜ期限か）（2026-09-26。計器の外の破壊を絞る段の B）。
+///
+/// **破壊の回が失敗の期限に着いたら、ふつうは捕まえたとしない**（[`sabotage_run_problem`]）——**時間切れの
+/// 途中の出力で、狙いの判定が偽に読めてしまう。** **起こさない・待たせる形の破壊は、期限に着くことが捕まえ方
+/// なので、ここに載せたものだけ期限を通す。** **載せる前に、3 回とも期限に着いたことを確かめる。**
+const SABOTAGES_CAUGHT_AT_THE_DEADLINE: &[(&str, &str, &str)] = &[];
+
+/// 検査と破壊の組が [`SABOTAGES_CAUGHT_AT_THE_DEADLINE`] に載っているか。
+fn caught_at_the_deadline(check: &str, keys: &[&str]) -> bool {
+    SABOTAGES_CAUGHT_AT_THE_DEADLINE
+        .iter()
+        .any(|(listed, key, _)| *listed == check && keys.contains(key))
+}
+
+/// 破壊の回が、走行の側の理由で終わっていたか（純粋な論理。2026-09-26。計器の外の破壊を絞る段の B）。
+///
+/// **ログの上限で切った走行が在れば、切れた出力で読んだ判定を捕まえたとしない。** **失敗の期限に着いた
+/// 走行も同じ**——**期限に着くのが捕まえ方と載せた破壊だけは通す**（`deadline_is_the_catch`）。
+/// **分け方も返す**（全検査の失敗の分け方と当たりの計器が読む）。
+fn sabotage_run_problem(
+    runs: &[launch::RunRecord],
+    deadline_is_the_catch: bool,
+) -> Option<(launch::Category, String)> {
+    if let Some(cut) = runs.iter().find_map(|run| run.cut.as_ref()) {
+        return Some((launch::Category::LogLimit, format!("a run was cut: {cut}")));
+    }
+    if deadline_is_the_catch {
+        return None;
+    }
+    runs.iter().find(|run| run.reached_deadline).map(|run| {
+        (
+            launch::Category::Timeout,
+            format!(
+                "{} reached its failure deadline ({:.1}s)",
+                run.what,
+                run.elapsed.as_secs_f64()
+            ),
+        )
+    })
+}
+
+/// 走行の側の理由で終わった破壊の回を落とす（2026-09-26。B）。**落としたら真を返す。**
+fn failed_on_the_run_side(name: &str, check: &str, keys: &[&str], failed: &mut Failures) -> bool {
+    let Some((category, problem)) =
+        sabotage_run_problem(&launch::item_runs(), caught_at_the_deadline(check, keys))
+    else {
+        return false;
+    };
+    if let Some(count) = FAILURE_CATEGORIES.get(category as usize) {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    if let Ok(mut slot) = ITEM_FAILURE_CATEGORY.lock() {
+        *slot = Some(category);
+    }
+    println!(
+        "--- {name}: FAILED [{}] (the sabotage run ended on the run side, so it is not counted as a \
+         catch: {problem})",
+        category.label()
+    );
+    failed.push(name.to_string());
+    true
 }
 
 /// 構成の feature のうち、[`SABOTAGE_STOP_REASONS`] に載るものの行を返す（5.b）。
@@ -5629,6 +5706,11 @@ fn stop_reason_for(features: &[&str]) -> Option<&'static StopReason> {
 fn judge_sabotage(check: &str, features: &[&str], result: &Result<()>) -> SabotageVerdict {
     match (result, stop_reason_for(features)) {
         (Ok(()), _) => SabotageVerdict::NotCaught,
+        // **検査装置の故障は、どの表の破壊でも捕まえたとしない**（2026-09-26。B）——**「どの誤りでも」の
+        // 破壊は、故障を捕まえたと読んでいた。**
+        (Err(error), _) if launch::is_harness(error) => SabotageVerdict::HarnessFault {
+            error: format!("{error:#}"),
+        },
         (Err(error), None) => match named_judgement_for(check, features) {
             Some(named) => judgement_verdict(named, item_output().as_deref(), Some(error)),
             None => SabotageVerdict::CaughtByAnyError,
@@ -5685,6 +5767,9 @@ static ANY_JUDGEMENT_VERDICTS: std::sync::Mutex<
 /// 絞る段）。**表（[`SABOTAGE_JUDGEMENTS`]）に検査と破壊の組が在れば、その判定が偽になったときだけ捕まえた
 /// とする。** **無ければ「どれかの判定が偽」として数える**（[`caught_by_any_judgement`]）。
 fn report_inverted_judgement(check: &str, key: &str, label: &str, failed: &mut Failures) {
+    if failed_on_the_run_side(label, check, &[key], failed) {
+        return;
+    }
     let ok = format!("--- {label}: OK");
     let Some(named) = named_judgement_for(check, &[key]) else {
         caught_by_any_judgement(check, &ok);
@@ -5873,6 +5958,9 @@ fn report_inverted_sabotage_verdict(
     failed: &mut Failures,
 ) {
     let name = format!("{check} ({label})");
+    if result.is_ok() && failed_on_the_run_side(&name, check, &[key], failed) {
+        return;
+    }
     match (result, named_judgement_for(check, &[key])) {
         (Ok(()), None) => {
             caught_by_any_error(check, &format!("--- {name}: OK (the sabotage was caught)"))
@@ -5907,7 +5995,11 @@ fn report_sabotage_verdict(
     failed: &mut Failures,
 ) {
     let name = format!("{check} ({label})");
-    match judge_sabotage(check, features, result) {
+    let verdict = judge_sabotage(check, features, result);
+    if verdict.is_caught() && failed_on_the_run_side(&name, check, features, failed) {
+        return;
+    }
+    match verdict {
         SabotageVerdict::NotCaught => {
             println!("--- {name}: FAILED (the sabotage was NOT caught)");
             failed.push(name);
@@ -5940,6 +6032,16 @@ fn report_sabotage_verdict(
         SabotageVerdict::DidNotStop { error } => {
             println!(
                 "--- {name}: FAILED (the intended stop never came; the run failed otherwise: {error})"
+            );
+            failed.push(name);
+        }
+        SabotageVerdict::HarnessFault { error } => {
+            if let Err(error) = result {
+                failure_category(error);
+            }
+            println!(
+                "--- {name}: FAILED [harness] (the harness failed, so it is not counted as a catch: \
+                 {error})"
             );
             failed.push(name);
         }
@@ -26623,6 +26725,48 @@ mod tests {
                 "{text} appears only in the tables"
             );
         }
+    }
+
+    /// **走行の側の理由で終わった破壊の回は、捕まえたとしない**（2026-09-26。B）。**切った走行は期限より
+    /// 先に言う。** **期限に着くのが捕まえ方と載せた破壊だけ、期限を通す。**
+    #[test]
+    fn a_sabotage_run_that_ended_on_the_run_side_is_not_a_catch() {
+        let run = |cut: Option<launch::Cut>, reached_deadline: bool| launch::RunRecord {
+            what: "zz-run".into(),
+            elapsed: Duration::from_secs(60),
+            cut,
+            reached_deadline,
+            ran_to_declared_limit: false,
+            status: None,
+            largest_output: 0,
+        };
+        let cut = launch::Cut::FileLimit {
+            file: PathBuf::from("serial.log"),
+            bytes: 9,
+            limit: 8,
+        };
+        assert_eq!(sabotage_run_problem(&[run(None, false)], false), None);
+        assert!(matches!(
+            sabotage_run_problem(&[run(None, true)], false),
+            Some((launch::Category::Timeout, _))
+        ));
+        assert_eq!(sabotage_run_problem(&[run(None, true)], true), None);
+        assert!(matches!(
+            sabotage_run_problem(&[run(None, true), run(Some(cut.clone()), false)], true),
+            Some((launch::Category::LogLimit, _))
+        ));
+        assert!(matches!(
+            judge_sabotage(
+                "fs create",
+                &["zz-unlisted-sabotage-test"],
+                &Err(anyhow::Error::new(launch::HarnessFault("zz".into())))
+            ),
+            SabotageVerdict::HarnessFault { .. }
+        ));
+        assert!(!SabotageVerdict::HarnessFault {
+            error: String::new()
+        }
+        .is_caught());
     }
 
     /// **反す形の破壊の回も、表に組が在れば狙いの判定を見る**（2026-09-26。計器の外の破壊を絞る段）。
