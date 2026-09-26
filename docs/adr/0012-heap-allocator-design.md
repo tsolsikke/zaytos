@@ -33,7 +33,7 @@ M2-eでカーネルヒープ（`alloc`クレートの有効化、`GlobalAlloc`�
 - `kernel/src/heap/allocator.rs`: 侵入型連結リストと`GlobalAlloc`実装（unsafe、意図的に非テスト）。
 
 侵入型連結リスト（実ポインタを空きブロックへ直接書き込む）を採用した理由: ADR-0011（フレームアロケータ）では固定長配列を採用したが、あれは「UEFIメモリマップの断片数」という起動時に決まる外部入力に上限があったため。
-ヒープの空きブロック数はalloc/deallocの履歴次第で理論上際限なく増えうるため、固定容量配列では現実的な上限を置けない。
+ヒープの空きブロック数はalloc/deallocの履歴次第で理論上際限なく増えうるため、固定容量配列では現実的な上限を設けられない。
 
 ### アラインメント処理
 空き領域`[region_start, region_end)`に対し、`max(requested_align, header_align)`に切り上げた位置を`user_addr`とする。
