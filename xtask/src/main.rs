@@ -20359,7 +20359,7 @@ fn mask_code_spans(line: &str) -> Vec<char> {
 ///
 /// # なぜハッシュで書くのか
 ///
-/// **規則ごとに当てる範囲が違うからである。** **接頭辞と 2 行目の空行は
+/// **規則ごとに当てる範囲が違うからである。** **件名の型と 2 行目の空行は
 /// 履歴全体が既に満たしているが**（実測）、**本文の行数（2 行から 5 行）は
 /// 遡って当てると落ちる**——**運用を変える前は 20 行を超える本文が普通だった**
 /// （実測で最長 77 行）。**したがって、この地点より後にだけ当てる。**
@@ -20372,12 +20372,49 @@ fn mask_code_spans(line: &str) -> Vec<char> {
 /// **「規則を書いたのはどれか」を指すほうが、なぜその地点なのかが読める。**
 const COMMIT_BODY_RULE_COMMIT: &str = "69d2a9e";
 
-/// 件名の接頭辞として許すもの（`CLAUDE.md` の「コミットメッセージ」）。
+/// 件名の型として許すもの（`CLAUDE.md` の「コミットメッセージ」）。
 ///
-/// **履歴の 576 件すべてがこの 7 つのいずれかである**（実測）。
-/// **したがって履歴全体へ当てられる。**
+/// **履歴の 576 件すべてがこの 7 つのいずれかである**（実測。書いた時点）。
+/// **したがって履歴全体へ当てられる。** **2026-09-26 に範囲つきの形（`type(scope): 説明`）を足した**
+/// （運用者の決定）——**その時点の履歴 1154 件は、どれも範囲の無い `type: 説明` の形だった**（実測）。
 const COMMIT_SUBJECT_PREFIXES: &[&str] =
     &["feat", "fix", "docs", "refactor", "test", "style", "chore"];
+
+/// 件名の頭（`type: ` か `type(scope): `）を読む（純粋な論理。2026-09-26。運用者の決定）。
+///
+/// - **型は [`COMMIT_SUBJECT_PREFIXES`] のどれか。**
+/// - **範囲は省いてよい。** 書くなら英数字とハイフンだけの 1 語（`ADR`・`kernel`・`xtask`・`hooks`）。
+/// - **コロンの後は空白 1 つと説明**（履歴の 1154 件がこの形である。実測）。
+///
+/// **崩れた形は、どこが崩れたかを返す**（括弧が閉じていない・範囲が空・範囲に使えない字・型が一覧に無い・
+/// 説明が無い）。
+fn commit_subject_head(subject: &str) -> Result<(&str, Option<&str>), &'static str> {
+    let Some((head, rest)) = subject.split_once(':') else {
+        return Err("no type before a colon");
+    };
+    let (kind, scope) = match head.split_once('(') {
+        None => (head, None),
+        Some((kind, tail)) => {
+            let Some(scope) = tail.strip_suffix(')') else {
+                return Err("the scope is not closed");
+            };
+            if scope.is_empty() {
+                return Err("the scope is empty");
+            }
+            if !scope.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                return Err("the scope may hold only letters, digits and hyphens");
+            }
+            (kind, Some(scope))
+        }
+    };
+    if !COMMIT_SUBJECT_PREFIXES.contains(&kind) {
+        return Err("the type is not in the list");
+    }
+    if !rest.starts_with(' ') || rest.trim().is_empty() {
+        return Err("the colon is not followed by a space and a description");
+    }
+    Ok((kind, scope))
+}
 
 /// 1 つのコミットメッセージを見る。**純粋関数である。**
 ///
@@ -20400,11 +20437,10 @@ fn commit_message_findings(
     let subject = lines.first().copied().unwrap_or("");
     let mut findings = Vec::new();
 
-    let prefix = subject.split_once(':').map(|(p, _)| p);
-    if !prefix.is_some_and(|p| COMMIT_SUBJECT_PREFIXES.contains(&p)) {
+    if let Err(why) = commit_subject_head(subject) {
         findings.push(format!(
-            "{short}: the subject prefix is not one of {COMMIT_SUBJECT_PREFIXES:?} \
-             (CLAUDE.md の「コミットメッセージ」): {subject}"
+            "{short}: the subject is not `type: description` or `type(scope): description` with a \
+             type from {COMMIT_SUBJECT_PREFIXES:?} ({why}; CLAUDE.md の「コミットメッセージ」): {subject}"
         ));
     }
 
@@ -20445,7 +20481,7 @@ fn commit_message_findings(
 ///
 /// # 規則ごとに当てる範囲が違う
 ///
-/// **履歴全体**——接頭辞と、本文があるときの 2 行目の空行。**どちらも履歴が
+/// **履歴全体**——件名の型（と範囲の形）と、本文があるときの 2 行目の空行。**どちらも履歴が
 /// 既に満たしている**（実測）。
 /// **[`COMMIT_BODY_RULE_COMMIT`] より後**——本文の行数。
 /// **[`COMMIT_STYLE_SINCE`] より後**——和文と英数字の間の空白（元からある規則）。
@@ -28084,11 +28120,35 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
     fn the_commit_message_rules_catch_each_shape() {
         let both = |m: &str| commit_message_findings("0000000", m, true, true);
 
-        // 接頭辞が集合の外。
-        assert_eq!(both("wip: 集合の外").len(), 1);
-        assert!(both("wip: 集合の外")[0].contains("prefix"));
-        // 接頭辞そのものが無い。
-        assert_eq!(both("接頭辞が無い").len(), 1);
+        // 型が一覧の外。
+        assert_eq!(both("wip: 一覧の外").len(), 1);
+        assert!(both("wip: 一覧の外")[0].contains("the type is not in the list"));
+        // 型そのものが無い。
+        assert_eq!(both("型が無い").len(), 1);
+        // **範囲つきの崩れた形**（2026-09-26。運用者の決定）。**1 つずつ、崩れた理由で落ちる。**
+        for (subject, why) in [
+            ("docs(ADR: 括弧が閉じていない", "the scope is not closed"),
+            ("docs(ADR)x: 括弧の後に字がある", "the scope is not closed"),
+            ("docs(): 範囲が空", "the scope is empty"),
+            ("docs(A B): 範囲に空白", "letters, digits and hyphens"),
+            ("docs(ADR_1): 範囲に下線", "letters, digits and hyphens"),
+            ("docs(a(b)): 範囲に括弧", "letters, digits and hyphens"),
+            ("wip(ADR): 型が一覧の外", "the type is not in the list"),
+            ("(ADR): 型が無い", "the type is not in the list"),
+            ("Docs(ADR): 型の大文字", "the type is not in the list"),
+            ("docs!: 型に記号", "the type is not in the list"),
+            (
+                "docs(ADR):説明の前に空白が無い",
+                "a space and a description",
+            ),
+            ("docs(ADR): ", "a space and a description"),
+            ("docs: ", "a space and a description"),
+            ("docs(ADR)： 全角のコロン", "no type before a colon"),
+        ] {
+            let found = both(subject);
+            assert_eq!(found.len(), 1, "{subject:?}: {found:?}");
+            assert!(found[0].contains(why), "{subject:?}: {found:?}");
+        }
 
         // 本文があるのに 2 行目が空でない。
         let joined = both("docs: 件名\n本文をすぐ書く");
@@ -28118,10 +28178,32 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         assert!(both("feat: 件名\n\n1。\n2。\n3。\n4。\n5。").is_empty());
         // 末尾の改行が余分にあっても数に入らない。
         assert!(both("fix: 件名\n\n1。\n2。\n\n").is_empty());
-        // 7 つの接頭辞すべて。
+        // 7 つの型すべて。範囲のあり・なしの両方（2026-09-26。運用者の決定）。
         for prefix in COMMIT_SUBJECT_PREFIXES {
             assert!(both(&format!("{prefix}: 件名")).is_empty(), "{prefix}");
+            assert!(
+                both(&format!("{prefix}(xtask): 件名")).is_empty(),
+                "{prefix}"
+            );
         }
+        // 運用者の挙げた例と、ハイフンと数字の範囲。
+        for subject in [
+            "docs(ADR): 言い回しを修正",
+            "feat(kernel): 件名",
+            "test(xtask): 件名",
+            "fix(hooks): 件名",
+            "chore(ci): 件名",
+            "docs(adr-0069): 件名",
+            "docs(ADR): 件名\n\n1。\n2。",
+        ] {
+            assert!(both(subject).is_empty(), "{subject:?}: {:?}", both(subject));
+        }
+        // 型と範囲を読み分ける。
+        assert_eq!(
+            commit_subject_head("docs(ADR): x"),
+            Ok(("docs", Some("ADR")))
+        );
+        assert_eq!(commit_subject_head("docs: x"), Ok(("docs", None)));
     }
 
     /// **範囲の旗が効くこと。** 当てない規則は、違反していても出ない。
