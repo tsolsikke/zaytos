@@ -76,7 +76,7 @@ impl FpArea {
         self.0[Self::MXCSR_OFFSET..Self::MXCSR_OFFSET + 4].copy_from_slice(&value.to_le_bytes());
     }
 
-    /// XMM0 の下位 8 バイトを読む（判定と破壊の観測に使う）。
+    /// XMM0 の下位 8 バイトを読む（判定と破壊テストの観測に使う）。
     ///
     /// **XMM レジスタの並びは領域の 160 バイト目から、1 本 16 バイトである。**
     pub fn xmm0_low(&self) -> u64 {

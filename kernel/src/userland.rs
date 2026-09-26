@@ -2692,7 +2692,7 @@ pub fn wait_for_ring3_task(handle: u64) -> ChildStatus {
         // 破壊 (`ADR-0063` の (b2), wait-window-is-wide): 窓を広げる。**ガードを取らず、
         // ティックが 2 つ入るまで空回りする**——**その間に子が終わると、起こしが取りこぼされる。**
         // **「機会が無い」破壊を、機会を作って落とす形である**（`docs/coding-standards.md` の
-        // 「破壊が「機会が無い」になるなら、置く前に機会を作れないかを見る」）。
+        // 「破壊テストが「機会が無い」になるなら、用意する前に機会を作れないかを見る」）。
         #[cfg(not(feature = "wait-window-is-wide"))]
         let guard = common::critical::InterruptGuard::enter();
         if crate::task::ring3_task_finished() {

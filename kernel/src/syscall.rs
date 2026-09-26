@@ -2137,7 +2137,7 @@ fn poll_is_ready(reason: crate::task::Wait) -> bool {
 /// **`#[inline(never)]` である**（`ADR-0063` の口 3 つと同じ手）。**`struct pollfd` の写しは
 /// [`MAX_POLL_FDS`] 個ぶんの 32 バイトで、`dispatch` の枠には乗らない**（`ADR-0066` の Q4）。
 ///
-/// # v1 の限界（契機つき）
+/// # v1 の限界（見直すきっかけつき）
 ///
 /// - **`events` は [`POLLIN`] だけを受ける**（`POLLOUT` などは `-EINVAL`）。**黙って無視すると、
 ///   書ける待ちを頼んだ側が読める待ちで眠る。** **契機：書ける待ちが要るとき。**

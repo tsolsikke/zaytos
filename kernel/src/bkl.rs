@@ -644,7 +644,7 @@ pub unsafe fn sabotage_enable_interrupts_while_held() {
     // 「その周回でたまたま何をしたか」で決まる。** 実際そうなっていた——
     // ハートビートの回のコンソールへの転送が窓を作っており、**画面へ出すのを
     // やめた瞬間に発火しなくなった**（`docs/verification-coverage.md` の
-    // 「破壊が、偶然の所要時間に乗って発火していた」）。
+    // 「破壊テストが、偶然の所要時間に乗って発火していた」）。
     //
     // **待てば、区間の長さは破壊の側が決める。**
     SABOTAGE_WAIT_START.store(common::cpu::read_timestamp_counter(), Ordering::Relaxed);

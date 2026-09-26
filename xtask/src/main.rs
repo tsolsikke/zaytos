@@ -3151,7 +3151,7 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
                     break;
                 }
             }
-            // **止まった印で待つのをやめる**（5.b。2026-09-25）。**起動の中の検査が止めると、
+            // **止まったマーカーで待つのをやめる**（5.b。2026-09-25）。**起動の中の検査が止めると、
             // 完了の行は出ない**——**以前は上限の 90 秒まで待っていた**（実測で、止まるのは
             // 起こしてから 4 秒ほど）。
             if let Some(sign) = stop.settled(stop_sign_in(&text, "")) {
@@ -10209,7 +10209,7 @@ const CONCURRENT_TEST_BEGAN_MARKER: &str = "detached: starting /bin/tickera";
 ///
 /// **止めない。計器として出すだけである**——**起動で止まるのが正しい破壊も在る。**
 /// **`--full` の出力をこの行で引いて、「それで正しい」と「判定に届いていない」に分ける**
-/// （`docs/verification-coverage.md` の「置けない破壊の一覧」）。
+/// （`docs/verification-coverage.md` の「用意できない破壊テストの一覧」）。
 ///
 /// `began` は、組が始まったと言える印の並びである。**全部が出ていれば「始まった」とする。**
 fn report_sabotage_reach(context: &str, serial: &str, began: &[&str]) {
@@ -10737,7 +10737,7 @@ fn cmd_fp_test(features: &[&str], expect_pass: bool) -> Result<()> {
         if strip_ansi(&text).contains("script-done:") {
             break;
         }
-        // **止まった印で待つのをやめる**（5.b。2026-09-25）。**`#MF` を畳めない破壊は、台本の
+        // **止まったマーカーで待つのをやめる**（5.b。2026-09-25）。**`#MF` を畳めない破壊は、台本の
         // 途中でカーネルを止める**——**以前は上限の 60 秒まで待っていた**（実測で、止まるのは
         // 起こしてから 8.6 秒）。
         if let Some(sign) = stop.settled(stop_sign_in(&text, "")) {
@@ -11879,7 +11879,7 @@ fn cmd_zi_test(features: &[&str]) -> Result<()> {
             finished_after = Some(started_waiting.elapsed());
             break;
         }
-        // **止まった印で待つのをやめる**（5.b。2026-09-25）。**起動の中の検査が止めると、
+        // **止まったマーカーで待つのをやめる**（5.b。2026-09-25）。**起動の中の検査が止めると、
         // 台本は走らない**——**以前は上限の 60 秒まで待っていた**（実測で、`brk` の破壊が
         // 止まるのは起こしてから 4.8 秒）。
         if let Some(sign) = stop.settled(stop_sign_in(&text, "")) {
@@ -24390,7 +24390,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
         // **像のロードの破壊（S13-c）。** **先頭の欠けは、バイト一致の判定より前に、カーネルの
         // ext2 の解析が `BadMagic` で起動を止める**（2026-09-25 の実測。5.b）。**名前の検査
-        // （バイト一致）には届いていない**——`docs/verification-coverage.md` の「置けない破壊の一覧」。
+        // （バイト一致）には届いていない**——`docs/verification-coverage.md` の「用意できない破壊テストの一覧」。
         // **判定は止まった理由の行で見る**（[`SABOTAGE_STOP_REASONS`]）。
         for (label, feature) in FS_LOAD_SABOTAGES {
             total += 1;
@@ -26217,7 +26217,7 @@ const FULL_TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(195 
 /// # 2026-09-25 に、`cargo` の時間を引いて比べる形へ改めた（`ADR-0069` の決定 7 の 4。運用者の決定）
 ///
 /// **それまでの基準は、項目の所要の合計で 109.5 分（6570 秒。共有メモリの回）だった。** **`cargo` の時間は、
-/// 前の全検査からのカーネルの差の大きさで 5〜39 分動く**（実測。2026-09-25 の締めの `--full` は 5.1 分、
+/// 前の全検査からのカーネルの差の大きさで 5〜39 分動く**（実測。2026-09-25 の完了時の `--full` は 5.1 分、
 /// その前は 39.1 分）——**負荷とも項目の増え方とも関係しない。** **引かずに比べると、差の小さい回は速く、
 /// 大きい回は遅く見える**（その締めの 0.73 倍のうち、34.0 分は `cargo` の差だった）。
 ///
