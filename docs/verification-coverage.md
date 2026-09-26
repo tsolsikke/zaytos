@@ -1222,7 +1222,7 @@ higher-halfの破壊feature（B-2a-5、破壊feature `highhalf-*`）について
 
 **分け方は「破壊が緑を出す道は4つ」である**（機会が無い／変化が無い／判定に届かない／判定が見た時点が違う。上の「W2-d+の判定2本には、落とす破壊が無い」）。**4つに収まらないものが1つ出た**（下の表の最後の行）。
 
-#### いまも置けないもの（15）
+#### いまも置けないもの（16）
 
 | 破壊 | 4形 | 置けない理由 | 契機 | 本体 |
 |---|---|---|---|---|
@@ -1241,8 +1241,9 @@ higher-halfの破壊feature（B-2a-5、破壊feature `highhalf-*`）について
 | `virtio-load-skip-first`を往復のバイト一致で落とす | **別の判定が先に止める** | **カーネルのext2の解析が`BadMagic`で起動を止める。** **注釈は「バイト一致で捕まる」と書いていた**（2026-09-25に直した） | **無い。** 先頭の欠けを解析が止めるのは正しい形である | 同上 |
 | `brk-skip-shrink`をziの判定で落とす | **別の判定が先に止める** | **起動時の`syscall-test`の後始末で、カーネルの会計（`DestroyAccounting`）が起動を止める。** **ziは走らない。** 止まる前に`syscall-test`の行（取った2・返した0）は出る | **無い。** 会計で止まるのは正しい形である（`shm-close-keeps-refs`と同じ） | 検査の体系の改善の5.b |
 | `virtio-short-desc`を中身の突き合わせで落とす | **別の判定が先に止める** | **QEMUが1バイト短い記述子の要求ごと拒み（status 1）、カーネルの状態の検査が起動を止める**（S13-bの実測） | **QEMUでは作れない**——短く書く別の形を選ぶか、拒まない装置で見る（持ち越しの行） | 族にまとめる段（2026-09-26） |
+| `socket-read-empty-returns-zero`を判定1（`hello_went_round`）で落とす | **揺れる**（4形に無い。狙いの判定が回で変わる） | **返事が先に届く回は、判定1が通る**（3回のうち2回だけ偽。2026-09-26の実測） | **返事の順序を固定するか、読んだ時点を測る観測を作るとき**（運用者の再判断。決定1の②のD） | この文書の「計器の外の破壊を狙いの判定へ絞る」 |
 
-**2026-09-26に1行足した**（族にまとめる段）——**`virtio-short-desc`も同じ形だった**（下の「「どの誤りでも捕まえた」を名前の判定へ絞る」）。**2026-09-25に5行足した**（検査の体系の改善の5.b）——**fsの4つとziの1つが、名前の検査に届かず、同じ起動の中の止まりで捕まっていた。** **判定は「どの誤りでも捕まえた」だったので見えていなかった。** **いまは止まった理由の行で判定する**（`xtask`の`SABOTAGE_STOP_REASONS`。止まらなければ落ちる）。
+**2026-09-26にもう1行足した**（計器の外の破壊を絞る段）——**`socket-read-empty-returns-zero`は揺れる形で、4形にも「別の判定が先に止める」にも収まらない。** **共有メモリの2行と`virtio-short-desc`は、いまは止めた側の名前の行で捕まえ、狙いの判定に届いていない捕まえ方として計器が別に数える。** **2026-09-26に1行足した**（族にまとめる段）——**`virtio-short-desc`も同じ形だった**（下の「「どの誤りでも捕まえた」を名前の判定へ絞る」）。**2026-09-25に5行足した**（検査の体系の改善の5.b）——**fsの4つとziの1つが、名前の検査に届かず、同じ起動の中の止まりで捕まっていた。** **判定は「どの誤りでも捕まえた」だったので見えていなかった。** **いまは止まった理由の行で判定する**（`xtask`の`SABOTAGE_STOP_REASONS`。止まらなければ落ちる）。
 
 **最後の7行は4形に収まらない。** **破壊は効いていて、捕まってもいる**——**捕まえたのが項目の判定ではなく、起動時の検査だった。** **ES-dの「項目が別の失敗を自分の成功として読んだ」と`ADR-0063`の(b3)の「止まったから落ちたを、破壊が効いたと読まない」と同じ形で、3例目である。** **`ADR-0065`の表は「往復が落ちる」「created != released で落ちる」と書いていた**（上の`ADR-0065`の節。**直した**）。**2行目は(c)の計器の最初の`--full`で見つかった**（下の「組の始まりまで届いたか」）。
 
@@ -1780,6 +1781,131 @@ VirtualBoxの計数でベクタ0x42が打鍵4バイトで+4、8259のベクタ0x
 **名前の検査に届いていないものが1件ある**——**`virtio-short-desc-test`は、狙いが「装置が黙って511バイトだけ書き、中身の突き合わせが落ちる」だったが、QEMUは要求ごと拒み（status 1）、カーネルの状態の検査が起動を止める**（S13-bの実測。カーネルの注釈は「見込みは外れたが、捕まる」と書いている）。**判定の行に届いていないことを添え**（`note`）、**上の「置けない破壊の一覧」と持ち越しに書いた**（fsの3つと同じ扱い。運用者の足す1点）。
 
 **落ちる判定の本数は、文書と注釈に手で書かない**（2026-09-26。運用者の回答）——**狙いの判定の名前だけを書き、本数は全検査の出力に任せる**（上の表の「偽になった判定の数」と「ほかに偽になった判定」も、書いた時点の3回の値である）。**書いていた本数のうち6つが、実測とずれていた**（`zi-skip-cursor-flush-test`は1本→10本、`stderr-on-screen-test`は2本→4本、`unlink-ignore-request-test`は1本→3本、`less-redraw-whole-screen-test`は1本→2本、`zi-enter-does-nothing-test`は2本→3本、`env-drop-term-test`は3本→2本。書いた値→今回の3回）**ので、絞った破壊の行と`xtask`の注釈から本数を外した。** **「どれかの判定が偽なら捕まえた」の破壊の行に書いた本数は、それを棚卸しする段で外す。**
+
+### 計器の外の破壊を狙いの判定へ絞る（2026-09-26。運用者の決定1の②）
+
+**「どれかの判定が偽なら捕まえた」と数えていた90件を、狙いの判定が偽になったときだけ捕まえたとする形へ絞った**（`xtask`の`SABOTAGE_JUDGEMENTS`）。**検査の関数が自分の判定を反して「捕まえた」と返す形である。** **以前は、どの判定が偽でも捕まえたと数え、計器の外（保証していない）として数だけを出していた。**
+
+**数える単位。** **88と3は、全検査の項目の数（検査と破壊の組）である。** **88は反す形で回す16の一覧の件数の和**（`utf8` 8・`profile` 3・`history` 2・`pipe` 7・`socket` 13・`input` 4・`poll` 4・`screen` 3・`compose` 4・`complete` 4・`fp` 3・`concurrent` 10・`ttf` 1・`serial` 1・打鍵 11・台本 10）、**3は永続の組**（keymap 1・環境の源 2）。**`fp-mf-not-foldable-test`は前の段で止まった理由へ絞ってあったので、残りは90件だった**（コードの一覧で数えた）。**77件とは項目が重ならない。** **破壊の名前が重なるのは`zi-enter-does-nothing-test`だけで、`zi test`（77件の側）と`utf8 test`（90件の側）で狙いの判定が違う**——**表の鍵を検査と破壊の組にした。** **90件の中でも、同じ破壊を2つか3つの検査が回す形が5つある**（`wake-ignores-the-reason`は打鍵・`poll`・`compose`の3つ）。
+
+**共通の処理で全件を扱えた。** **件ごとに要ったのは、目印を選ぶことだけである。** 直しは4つある。
+
+- **表の鍵を検査と破壊の組にし、反す形の口（`report_inverted_judgement`）も表を引く**（`f56760d`）。**シェルの検査が、カーネルの`[ERROR]`の行を出す**——**止まる形の破壊（BKLの再取得・方向フラグの見張り）の理由が、出力に無かった。** **出すだけで、判定には使わない。**
+- **走行の側の理由で終わった破壊の回を、捕まえたとしない**（`3c8f089`。決定1の②のB）。**ログの上限で切った走行・失敗の期限に着いた走行・検査装置の故障である**——**途中の出力でも、狙いの判定は偽に読める。** **期限に着くのが捕まえ方の破壊は一覧（`SABOTAGES_CAUGHT_AT_THE_DEADLINE`）に載せて通す。** **いまは空である**——**90件の3回で、失敗の期限に着いた回は無かった**（検査ごとの最長の所要が期限を下回ることで数えた。**所要はQEMUの走行の時間より長い**）。**失敗の期限に着いた走行は1行出す**（`the run reached its failure deadline`）。
+- **表に「狙いの判定に届いているか」を持たせ、届いていない捕まえ方を計器に別に数える**（`ae7b2ed`）。**捕まえたとは数えるが、「破壊で確かめた」の保証には混ぜない。** **77件の側の`virtio-short-desc-test`もこちらへ移した**（装置が要求ごと拒むので、中身の突き合わせまで届かない。前の段で`note`に書いていた）。
+- **族ごとに表の行を足した**（shell 41 `ab102b7`・ipc 34 `a570bb3`・process 12 `3f4372e`・apps 1 `7e562b1`・smp 1 `a164dab`）。
+
+**3回の結果。** **`f56760d`の木で、90件を1つずつ3回回した**（270回。どれも終了の値0。`target/narrow2`）。**89件は3回とも狙いの判定が偽だった**——**目印が3回のログのどれでも同じ1行にそろうことを、台本（`target/narrow2/signs.py`）で確かめた。** **偽になった判定の組は、86件で3回とも同じだった。** **3件は狙い以外の判定だけが回で変わった**（`pipe-read-empty-returns-zero`・`pipe-write-ignores-full`・`spawn-detached-returns-early`）。**これは「その3回では、狙いの判定の揺れを観測しなかった」という事実で、揺れが無い証明ではない。** **1件は説明の狙いが3回のうち2回だけ偽で、置かなかった**（`socket-read-empty-returns-zero`。下の「置けない破壊の一覧」）。
+
+**狙いの決め方。** **一覧の注釈とADRの表（「判定Nが落ちる」）で決め、偽になった行と突き合わせた。** **値が`None`の判定（計器の行が出る前に止まった）は、狙いの判定が測れていないとして目印にしない。** **例外は2つで、最初の待ちが戻らないことそのものが観測である形**（`finish-does-not-wake`・`wait-window-is-wide`）。**同じ行の別の値が`None`で、目印にした値は測った値だった形が3つある**（読んで確かめた。`signs.py`の`REVIEWED_NONE`）。**止まる形の破壊は、カーネルが言った止まりの行を目印にした**——**止まった理由が狙いの性質の検査であるときだけである**（BKLの再取得・方向フラグ・回復点・CR3の記録）。
+
+**分け（決定1の②の優先度）。**
+
+- **A（境界の段が移す・権限を変える経路に在る）31件。** タスクの切り替え・FP・CR3・遠征の枠・割り込みの入口・タイマ・打鍵のIRQ・シリアル・起こしっぱなしの起動と待ち。**全件を狙いの判定へ絞った。**
+- **B（検査装置の共通部分）。** **件ではなく経路である。** 上の2つ目（走行の側の理由）で直した。
+- **C（既存の観測で絞れた）56件。** **全件を狙いの判定へ絞った。**
+- **D（新しい観測が要る）3件と、1件の一部。** **運用者の再判断へ回す。** `socket-read-empty-returns-zero`（揺れる）、`shm-close-keeps-refs`と`shm-mmap-maps-nothing`（起動時の`syscall-test`が先に止める。捕まえた回は別に数える）、**`keyboard-does-not-wake`の関係の検出器**（件はセッションの側で絞ったが、検出器はシェルが止まって値が採れない）。
+
+**計器の見込み。** **「どの誤りでも」0件、「どれかの判定が偽」1件（揺れる1つ）、名前の判定の表166行（うち狙いの判定に届いていない3行）、止まった理由7件。** **締めの全検査で数える。**
+
+| 族 | 検査 | 破壊（鍵） | 狙いの判定の目印（同じ1行に全部） | 分け | 偽の組 | 注 |
+|---|---|---|---|---|---|---|
+| shell | utf8 test | `width-always-one-test` | `a wide character takes two cells = false` | C | 3回とも同じ | — |
+| shell | utf8 test | `console-drop-invalid-chunk-test` | `the broken byte did not erase the line = false` | C | 3回とも同じ | — |
+| shell | utf8 test | `zi-append-by-byte-test` | `deleting and appending stayed on character boundaries = false` | C | 3回とも同じ | — |
+| shell | utf8 test | `zi-line-end-stays-test` | `$ moved to the last character = false` | C | 3回とも同じ | — |
+| shell | utf8 test | `zi-first-nonblank-to-zero-test` | `^ skipped the leading blanks = false` | C | 3回とも同じ | — |
+| shell | utf8 test | `zi-escape-by-byte-test` | `escape landed on a character boundary = false` | C | 3回とも同じ | — |
+| shell | utf8 test | `zi-enter-does-nothing-test` | `o opened a line below = false` | C | 3回とも同じ | — |
+| shell | utf8 test | `zi-status-stale-column-test` | `the status line caught up with the cursor = false` | C | 3回とも同じ | — |
+| shell | profile test | `shell-profile-order-swapped-test` | `~/.profile won over /etc/profile = false` | C | 3回とも同じ | — |
+| shell | profile test | `shell-profile-first-line-only-test` | `every line of /etc/profile ran = false` | C | 3回とも同じ | — |
+| shell | profile test | `shell-profile-missing-is-error-test` | `a missing profile said nothing = false` | C | 3回とも同じ | — |
+| shell | history test | `shell-history-not-saved-test` | `the previous run came back = false` | C | 3回とも同じ | — |
+| shell | history test | `shell-history-missing-is-error-test` | `a missing history said nothing = false` | C | 3回とも同じ | — |
+| shell | complete test | `shell-complete-no-common-prefix-test` | `the word grew to the common prefix = false` | C | 3回とも同じ | — |
+| shell | complete test | `shell-complete-keeps-duplicates-test` | `a duplicated PATH element listed each name once = false` | C | 3回とも同じ | — |
+| shell | complete test | `shell-complete-ignores-path-test` | `the candidates followed PATH = false` | C | 3回とも同じ | — |
+| shell | complete test | `shell-complete-silent-when-no-progress-test` | `a tab that did not grow announced the count = false` | C | 3回とも同じ | — |
+| shell | keymap | `keymap (us, always jis)` | `the keyboard layout in use is the expected one = false` | C | 3回とも同じ | — |
+| shell | persist (env) | `persist (env, rebuilt in between)` | `boot 2's Ring 3 printed the rewritten TERM = false` | C | 3回とも同じ | — |
+| shell | persist (env) | `persist (env, the source is ignored)` | `boot 2 read the environment from the file = false` | C | 3回とも同じ | — |
+| shell | shell test | `read-never-waits` | `read(0) waited instead of spinning = false` | A | 3回とも同じ | — |
+| shell | shell test | `keyboard-does-not-wake` | `the typed line was echoed = false` | A | 3回とも同じ | ADR-0061の2つの捕まえ方のうち、セッションの側。関係の検出器はシェルが止まって計器の行が出ないので`None` |
+| shell | shell test | `wake-ignores-the-reason` | `every wake matched the reason the task waited for = false` | A | 3回とも同じ | — |
+| shell | shell test | `kill-ignore-interrupt-test` | `ctrl-c stopped the spinning child = false` … `echoed ^C count = 1` | A | 3回とも同じ | — |
+| shell | shell test | `kill-fold-at-depth-one-test` | `depth one was not folded = false` … `count Some(0)` | A | 3回とも同じ | — |
+| shell | shell test | `kill-keep-stale-interrupt-test` | `ctrl-c stopped the spinning child = false` … `echoed ^C count = 2` | A | 3回とも同じ | — |
+| shell | shell test | `kill-fold-keep-bkl-test` | `the kernel reported` … `bkl: recursive acquisition on cpu` … `at entry SteadyLoop (already held by cpu` … `at entry Irq` | A | 3回とも同じ | 止まる形。カーネルの再取得の検出が止める |
+| shell | shell test | `kill-keep-typed-input-test` | `ctrl-c stopped the spinning child = false` … `echoed ^C count = 2` | A | 3回とも同じ | — |
+| shell | shell test | `keyboard-drop-home-end-test` | `home and end moved the insertion point = false` | A | 3回とも同じ | — |
+| shell | shell test | `keyboard-drop-ctrl-letters-test` | `ctrl-a and ctrl-e moved the insertion point = false` | A | 3回とも同じ | — |
+| shell | shell test | `irq-entry-keeps-df-test` | `the kernel reported` … `direction flag: the irq stub let DF=1 into Rust` | A | 3回とも同じ | 止まる形。Rustの入口の見張りが止める |
+| shell | shell script test | `clock-goes-backwards` | `the clock kept pace with the timer = false` | A | 3回とも同じ | — |
+| shell | shell script test | `timer-never-wakes` | `the shell exited with 0 = false` | A | 3回とも同じ | 注釈のとおりセッションが終わらない。タイマの判定は`None` |
+| shell | shell script test | `timer-wakes-before-deadline` | `the sleeper was never woken before its deadline = false` | A | 3回とも同じ | — |
+| shell | shell script test | `env-drop-path-test` | `bare names resolved under /bin = false` | C | 3回とも同じ | — |
+| shell | shell script test | `shell-skip-expansion-test` | `echo $PATH printed the value = false` | C | 3回とも同じ | — |
+| shell | shell script test | `shell-export-not-pushed-test` | `the child saw the exported name = false` | C | 3回とも同じ | — |
+| shell | shell script test | `shell-drop-history-test` | `the history was walked with the arrows = false` | C | 3回とも同じ | — |
+| shell | shell script test | `shell-shift-delete-range-test` | `ctrl-k cut to the end = false` | C | 3回とも同じ | — |
+| shell | shell script test | `shell-keep-control-bytes-test` | `unknown control bytes stayed out of the line = false` | C | 3回とも同じ | — |
+| shell | shell script test | `idle-holds-bkl-across-hlt` | `the kernel reported` … `bkl: recursive acquisition on cpu` … `at entry Irq (already held by cpu` … `at entry SteadyLoop` | A | 3回とも同じ | 止まる形。アイドルのhltの後の最初の割り込みで再取得の検出が止める |
+| ipc | pipe test | `pipe-write-does-not-wake-reader` | `a write woke it, and two tasks waited at once = false` … `woken by a write Some(0)` | C | 3回とも同じ | — |
+| ipc | pipe test | `pipe-close-keeps-writer-count` | `every left side started and the script reached its end = false` … `reached the end = false` | C | 3回とも同じ | — |
+| ipc | pipe test | `pipe-read-empty-returns-zero` | `a write woke it, and two tasks waited at once = false` … `reader waits Some(0)` | C | 狙い以外が回で変わった | — |
+| ipc | pipe test | `pipe-write-ignores-full` | `/data/big went through byte for byte = false` | C | 狙い以外が回で変わった | — |
+| ipc | pipe test | `pipe-reader-not-reserved` | `the content went through the pipe = false` … `hello once = false` | C | 3回とも同じ | — |
+| ipc | pipe test | `spawn-detached-returns-early` | `every right side started except the missing one = false` | A | 狙い以外が回で変わった | — |
+| ipc | pipe test | `wait-child-keeps-reservation` | `the content went through the pipe = false` … `again once = false` | A | 3回とも同じ | — |
+| ipc | socket test | `socket-accept-does-not-wait` | `accept_waited = false` | C | 3回とも同じ | — |
+| ipc | socket test | `socket-connect-ignores-name` | `an_unknown_name_is_refused = false` | C | 3回とも同じ | — |
+| ipc | socket test | `socket-bind-ignores-taken-name` | `a_taken_name_is_refused = false` | C | 3回とも同じ | — |
+| ipc | socket test | `socket-close-keeps-peer-open` | `eof_after_the_peer_closed = false` | C | 3回とも同じ | — |
+| ipc | socket test | `socket-write-ignores-peer-closed` | `epipe_after_the_peer_closed = false` | C | 3回とも同じ | — |
+| ipc | socket test | `socket-write-does-not-wake-reader` | `readers_waited_both_ways_and_a_write_woke_them = false` | C | 3回とも同じ | — |
+| ipc | socket test | `socket-release-keeps-slot` | `the_queue_and_the_slots = false` | C | 3回とも同じ | — |
+| ipc | socket test | `shm-ftruncate-ignores-size` | `shm_went_round = false` | C | 3回とも同じ | — |
+| ipc | socket test | `shm-close-keeps-refs` | `no [ERROR] line = false` … `syscall-test left the allocator short` | D | 3回とも同じ | 届いていない。起動時の`syscall-test`がフレームの会計で先に止める |
+| ipc | socket test | `shm-mmap-maps-nothing` | `no [ERROR] line = false` … `syscall-test folded instead of exiting` | D | 3回とも同じ | 届いていない。起動時の`syscall-test`が先に共有メモリを張って畳まれる |
+| ipc | socket test | `socket-msghdr-ignores-iovlen` | `an_unsupported_iovlen_is_rejected = false` | C | 3回とも同じ | — |
+| ipc | socket test | `socket-recvmsg-takes-fd-first` | `shm_went_round_when_the_server_waited_first = false` | C | 3回とも同じ | — |
+| ipc | input test | `input-read-never-waits` | `the_read_waited = false` | C | 3回とも同じ | — |
+| ipc | input test | `input-events-mistake-the-code` | `a_key_press_went_through = false` | C | 3回とも同じ | — |
+| ipc | input test | `input-events-zero-the-time` | `the_event_carries_a_timestamp = false` | C | 3回とも同じ | — |
+| ipc | input test | `foreground-ignores-the-slot` | `a_process_outside_the_foreground_could_not_open_the_input_fd = false` | C | 3回とも同じ | — |
+| ipc | poll test | `poll-never-waits` | `the_poll_waited = false` | C | 3回とも同じ | — |
+| ipc | poll test | `poll-mistakes-the-member` | `the_listener_woke_the_first_poll = false` | C | 3回とも同じ | — |
+| ipc | poll test | `poll-waits-on-one-member` | `the_wait_set_held_two_reasons = false` | C | 3回とも同じ | — |
+| ipc | poll test | `wake-ignores-the-reason` | `no_task_was_woken_outside_its_set = false` | C | 3回とも同じ | — |
+| ipc | screen test | `screen-present-does-not-copy` | `the_pixels_reached_the_framebuffer = false` | C | 3回とも同じ | — |
+| ipc | screen test | `screen-leave-does-not-repaint` | `the_text_console_came_back = false` | C | 3回とも同じ | — |
+| ipc | screen test | `foreground-ignores-the-slot` | `a_process_outside_the_foreground_could_not_open_the_screen = false` | C | 3回とも同じ | — |
+| ipc | compose test | `screen-present-does-not-copy` | `the_client_pool_reached_the_screen = false` | C | 3回とも同じ | — |
+| ipc | compose test | `poll-waits-on-one-member` | `the_server_waited_on_input_listener_and_client_at_once = false` | C | 3回とも同じ | — |
+| ipc | compose test | `screen-leave-does-not-repaint` | `the_text_console_came_back = false` | C | 3回とも同じ | — |
+| ipc | compose test | `wake-ignores-the-reason` | `no_task_was_woken_outside_its_set = false` | C | 3回とも同じ | — |
+| process | concurrent test | `fp-switch-no-restore` | `each program kept its own floating-point state = false` | A | 3回とも同じ | — |
+| process | concurrent test | `task-switch-keep-recovery` | `no [ERROR] line = false` … `while the recovery point is` … `would jump to another task's recovery point` | A | 3回とも同じ | カーネルの回復点の検査が先に止める |
+| process | concurrent test | `task-switch-no-cr3` | `no [ERROR] line = false` … `is leaving with CR3` … `but its field expects` | A | 3回とも同じ | カーネルのCR3の記録の検査が先に止める |
+| process | concurrent test | `ring3-slot-always-zero` | `each program entered the kernel on its own excursion stack = false` … `tickera on slot 1 = false` | A | 3回とも同じ | — |
+| process | concurrent test | `task-switch-holds-back-ring3-task` | `both programs progressed while the other was in Ring 3 = false` … `task 0 = Some(0)` | A | 3回とも同じ | — |
+| process | concurrent test | `foreground-claimable-from-any-slot` | `the detached program was refused the foreground once per start = false` … `refused Some(0) time(s)` | A | 3回とも同じ | — |
+| process | concurrent test | `wait-ignores-the-generation` | `waiting with a stale handle is refused = false` | A | 3回とも同じ | — |
+| process | concurrent test | `finish-does-not-wake` | `a reaped child can be started again = false` … `the first wait line was None` | A | 3回とも同じ | 最初の待ちが戻らないので行が無い（`None`が観測そのもの） |
+| process | concurrent test | `reap-does-not-reset` | `a reaped child can be started again = false` … `unreaped child left = true` | A | 3回とも同じ | — |
+| process | concurrent test | `wait-window-is-wide` | `a reaped child can be started again = false` … `the first wait line was None` | A | 3回とも同じ | 窓で起こしを取りこぼし、最初の待ちの行が無い（`None`が観測そのもの） |
+| process | fp test | `fp-no-fresh-state` | `a freshly started program sees xmm0 = 0 = false` | A | 3回とも同じ | — |
+| process | fp test | `fp-spawn-no-save` | `the parent kept xmm0 across spawn = false` | A | 3回とも同じ | — |
+| apps | ttf test | `fp-clobber-on-kernel-entry-test` | `the glyph rasterised inside Ring 3 matches the host byte for byte = false` | A | 3回とも同じ | — |
+| smp | serial test | `serial-no-lock-test` | `every line the two cores wrote at the same time is intact = false` | A | 3回とも同じ | — |
+| ipc | socket test | `socket-read-empty-returns-zero` | （置かない） | D | 狙いが回で変わった | 説明の狙い（判定1。`hello_went_round`）が3回のうち2回だけ偽 |
+
+**確かめていない範囲。**
+
+- **走行の側の理由の直しを、全検査の中の実際の時間切れで通していない。** **確かめたのは、ホストのテストと、3通りに壊して落ちることだけである**（1項目だけを全検査の形で回す口が無い）。
+- **期限を1つに持たない検査（`poll`・`screen`・`compose`）の時間切れには、その直しが届かない**——**内側の待ちが上限に着いても、走行の記録には残らない。**
+- **狙いの判定の決め方は、注釈とADRの表に依る。** **注釈が古ければ、狙いを取り違える。** **この段でも古い注釈が2つ見つかった**——`keyboard-does-not-wake`の検出器（ADR-0061は落ちると書くが、いまは値が採れない）と、`env-drop-path-test`の「落ちるのは1本だけ」（台本の形では14本。注釈は`8acf989`で直した）。
 
 ### VirtualBoxの走行の記録を判定する（2026-09-24。`ADR-0068`の2-2）
 
