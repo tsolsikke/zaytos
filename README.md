@@ -38,7 +38,7 @@ Linuxディストリビューションや実用品の代替を目指すもので
 ## 技術的な特徴
 
 - **higher-half kernel**（`0xFFFFFFFF80000000`、非PIE）。恒等マッピングは起動の
-  途中で外し、以降は高位の窓と直接写像だけで動く（[ADR-0024](docs/adr/0024-higher-half-kernel.md)）
+  途中で外し、以降は高位のウィンドウと直接マッピングだけで動く（[ADR-0024](docs/adr/0024-higher-half-kernel.md)）
 - **SMPとBKL。** 先に大きなロックを1つ置き、細粒度化は測ってから判断する方針である
   （[ADR-0023](docs/adr/0023-smp-bkl-first.md)）。TLBの無効化は世代番号で追い、
   応答を待たない（[ADR-0027](docs/adr/0027-tlb-shootdown-without-ack.md)）
@@ -80,9 +80,9 @@ WSL2（Ubuntu系）+ WSLg、またはLinuxで開発している。
 - QEMUとOVMF: `sudo apt install qemu-system-x86 ovmf`
 - e2fsprogs: `sudo apt install e2fsprogs`（`mke2fs`と`e2fsck`）
 
-`mke2fs`はビルド時に使う。カーネルが読むext2の像を`build.rs`が建てるためで、
-外の道具が作った像を読めることが目的である（自作の書き手が作った像を読めても、
-自分の理解どうしの一致しか言えない）。`e2fsck`は、書いた像を独立に検証するために使う。
+`mke2fs`はビルド時に使う。カーネルが読むext2のイメージを`build.rs`がビルドするためで、
+外の道具が作ったイメージを読めることが目的である（自作の書き手が作ったイメージを読めても、
+自分の理解どうしの一致しか言えない）。`e2fsck`は、書いたイメージを独立に検証するために使う。
 
 `rustup`と違い、この要求は`rust-toolchain.toml`では固定できない。版が変わると
 `mke2fs`の既定値（ブロックサイズ、inodeサイズ）が動きうるので、実際に使った版は
@@ -98,7 +98,7 @@ QEMUを`-display none`で起動し、シリアル出力を端末へ流す。
 カーネルは停止せず動き続けるため、`run`は既定で120秒後にQEMUを自動停止する
 （`--no-limit`で解除）。
 
-手で触るときは窓を開ける。
+手で触るときはウィンドウを開く。
 
 ```
 cargo xtask run --gui --manual
@@ -107,9 +107,9 @@ cargo xtask run --gui --manual
 `--manual`を付けると上限が外れ、**`disk0.img`が起動間で持ち越される**
 （`zi`で保存したものが次の起動に在る）。`--keep-disk`でも持ち越せる。
 
-**ディスク像の扱いに注意。** 旗を付けない実行と`--rebuild-disk`は、
-`target/disk0.img`を建てたばかりの像で**上書きする**（前の起動で書いたものは消える）。
-検査は毎回同じ像から始めたいので、これが既定である。
+**ディスクイメージの扱いに注意。** フラグを付けない実行と`--rebuild-disk`は、
+`target/disk0.img`をビルドしたばかりのイメージで**上書きする**（前の起動で書いたものは消える）。
+検査は毎回同じイメージから始めたいので、これが既定である。
 残したいものが在るときは`--manual`か`--keep-disk`を使うこと。
 
 ## 検査
@@ -118,10 +118,10 @@ ZaytOSは「検査そのものが働いていること」を確かめる形を�
 考え方は5つである。
 
 - **外の道具で結果を確かめる。** `e2fsck`・`dumpe2fs`・`debugfs`・QEMUのmonitorを使い、
-  ZaytOSが書いた像をLinuxで実際にmountする手順も残してある。
+  ZaytOSが書いたイメージをLinuxで実際にmountする手順も残してある。
   自分で書いた読み手だけで成功を判定すると、自分の理解どうしの一致しか言えない
 - **わざと壊して、検査が落ちることを確かめる。** 意図的に振る舞いを変える構成
-  （破壊feature）を用意し、「その構成でだけ落ちる判定が在る」ことを確かめてから置く
+  （破壊テストのfeature）を用意し、「その構成でだけ落ちる判定が在る」ことを確かめてから設ける
 - **自動判定だけに頼らない。** 画面の見え方など、判定が見ていない範囲は
   運用者の目視で埋め、確かめていないものは「確かめていない」と書き残す
 - **通ったかだけでなく、通る理由が変わっていないかを見る。** 能力を足したときに、
@@ -147,13 +147,13 @@ cargo xtask check --full
 cargo xtask full
 ```
 
-同じ全検査を、HEADを取り出した別の作業木（`target/full-check/wt`）で回す。
-走っている間も作業中の木を触れる。全検査の間は、QEMUやVirtualBoxを使う検査は
-錠で断られる。`cargo xtask full --status`は、HEADの木が全検査に合格したかと、
+同じ全検査を、HEADをチェックアウトした別の作業ツリー（`target/full-check/wt`）で実行する。
+走っている間も作業中のツリーを触れる。全検査の間は、QEMUやVirtualBoxを使う検査は
+ロックで断られる。`cargo xtask full --status`は、HEADのツリーが全検査に合格したかと、
 その後のコミットをそれぞれ何で確かめたかを出す。
 
-pushの前の関門は、Git自身のhook（`.githooks/pre-push`）にも置いている。cloneにhookは含まれないので、
-取り出したら1度`git config core.hooksPath .githooks`を打つ（基底の検査がWSLの中で設定を確かめる）。
+pushの前の関門は、Git自身のhook（`.githooks/pre-push`）にも設けている。cloneにhookは含まれないので、
+チェックアウトしたら1度`git config core.hooksPath .githooks`を打つ（基本の検査がWSLの中で設定を確かめる）。
 
 個別の回帰チェックは`cargo xtask run --<名前>-test`の形で単体でも走らせられる
 （`cargo xtask`を引数なしで実行すると、使い方の一覧が出る）。
@@ -162,7 +162,7 @@ pushの前の関門は、Git自身のhook（`.githooks/pre-push`）にも置い�
 
 - [docs/architecture.md](docs/architecture.md) — 全体像
 - [docs/adr/](docs/adr/) — 個々の設計判断（採用理由と却下した案）
-- [docs/roadmap.md](docs/roadmap.md) — 段ごとの進み方と、各段の締め
+- [docs/roadmap.md](docs/roadmap.md) — 段階ごとの進み方と、各段階の完了
 - [docs/deferred-decisions.md](docs/deferred-decisions.md) — 保留した判断と、その解禁条件
 - [docs/verification-coverage.md](docs/verification-coverage.md) — 何を検査していて、何をしていないか
 - [docs/troubleshooting.md](docs/troubleshooting.md) — 実装で詰まった記録
@@ -177,7 +177,7 @@ pushの前の関門は、Git自身のhook（`.githooks/pre-push`）にも置い�
 ## 現在の制約・未実装機能
 
 使ってすぐ当たるものを挙げる。設計上の限界と、検査の穴の一覧は
-[docs/roadmap.md](docs/roadmap.md)の各段の締めと
+[docs/roadmap.md](docs/roadmap.md)の各段階の完了と
 [docs/deferred-decisions.md](docs/deferred-decisions.md)にある。
 
 - **日本語は表示できない。** フォントが収録しているのは可読ASCIIと置換文字だけで、
@@ -189,8 +189,8 @@ pushの前の関門は、Git自身のhook（`.githooks/pre-push`）にも置い�
 - 引用（`"`と`'`）と語の分割が無いので、空白を含む語を書けない
 - `zash`に`Ctrl+Y`（貼り付け）と`Ctrl+R`（逆向き検索）が無い
 - ディレクトリは1ブロックに収まる範囲だけで、越えると作成が断られる
-- 時刻の源が無いので、`touch`は既存のファイルに何もしない
-- ファイルへの書き込みは、像の全体（2MiB）を装置へ書き戻す形である
+- 時刻の出どころが無いので、`touch`は既存のファイルに何もしない
+- ファイルへの書き込みは、イメージの全体（2MiB）を装置へ書き戻す形である
 
 ## 同梱している第三者のコンポーネント
 
