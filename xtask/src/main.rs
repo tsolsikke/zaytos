@@ -5021,6 +5021,10 @@ struct NamedJudgement {
     key: &'static str,
     signs: &'static [&'static str],
     note: &'static str,
+    /// 狙いの判定に届いているか（2026-09-26。計器の外の破壊を絞る段。運用者の決定 1 の ②）。**偽の行は、
+    /// 別の判定が先に止める形である**（起動時の検査・装置の拒み）——**捕まえたとは数えるが、狙いの判定で
+    /// 捕まえたとは数えない。** **まとめの計器が別に数える**（[`not_reached_verdicts_line`]）。
+    reached: bool,
 }
 
 const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
@@ -5030,12 +5034,14 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         key: "zi-cursor-ignore-updown-test",
         signs: &["the up/down arrows moved the cursor between lines = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "zi-write-skip-body-test",
         signs: &["cat read back exactly what zi edited = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
@@ -5045,54 +5051,63 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
             "cat printed what zi wrote = false",
         ],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "zash-prompt-drop-color-test",
         signs: &["the zash prompt name is drawn in its own color = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "zi-status-freeze-mode-test",
         signs: &["the zi status line followed the mode = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "ioctl-winsize-swap-test",
         signs: &["ioctl(TIOCGWINSZ) agrees with the console = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "zi-esc-needs-second-key-test",
         signs: &["a lone Esc settled without another key = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "alt-screen-skip-repaint-test",
         signs: &["the screen before the alternate screen came back = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "zi-status-below-text-test",
         signs: &["the zi status line sits on the second-to-last row = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "zi-command-line-silent-test",
         signs: &["the command line echoes what is being typed = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "zi-append-like-insert-test",
         signs: &["a starts one column right of i = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
@@ -5102,138 +5117,161 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
             "it appeared in ls = false",
         ],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "env-drop-term-test",
         signs: &["the zash prompt name is drawn in its own color = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "unlink-ignore-request-test",
         signs: &["rm removed it again = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "zi-enter-does-nothing-test",
         signs: &["enter split the line = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "zi-skip-release-test",
         signs: &["zi gave back every frame it took, on every run = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "zi-skip-grow-test",
         signs: &["the big file read back with exactly the one edit = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "zi-join-does-nothing-test",
         signs: &["backspace at the start of a line joined it to the one above = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "zi-window-frozen-test",
         signs: &["the window followed the cursor down the file = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "stderr-on-screen-test",
         signs: &["the error reached the echo area instead of the text = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "zi-skip-cursor-flush-test",
         signs: &["the cursor on the screen followed the buffer = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "zi-redraw-whole-screen-test",
         signs: &["moving the window one line draws one line = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "cursor-repaint-always-test",
         signs: &["an idle read sends nothing = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "zi-edit-redraws-everything-test",
         signs: &["inserting one character draws one line = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "virtio-skip-install-test",
         signs: &["the save reached the device = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "zi test",
         key: "repaint-blank-cells-test",
         signs: &["leaving the alternate screen skips the blank cells = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "view test",
         key: "less-window-frozen-test",
         signs: &["a line past the first screen became visible = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "view test",
         key: "more-uses-alternate-screen-test",
         signs: &["what more printed is still on the screen after it left = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "view test",
         key: "flush-every-write-test",
         signs: &["one move costs one transfer = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "view test",
         key: "read-skip-flush-test",
         signs: &["one move costs one transfer = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "view test",
         key: "frame-write-per-piece-test",
         signs: &["one move costs one syscall = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "view test",
         key: "draw-pixel-by-pixel-test",
         signs: &["erasing a page writes no pixel one by one = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "view test",
         key: "less-redraw-whole-screen-test",
         signs: &["moving one line draws one line = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "persist",
         key: "persist-zi-test rebuild-between",
         signs: &["boot 2's Ring 3 printed what the device carries = false"],
         note: "",
+        reached: true,
     },
     // ── fs（切り詰め 6・書き込み 6・ビットマップ 4・作成 4・mkdir 3・取り出し 2・書き戻し 2・永続 1・疎な読み 1） ──
     NamedJudgement {
@@ -5241,18 +5279,21 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         key: "persist-test rebuild-between",
         signs: &["boot 2 sees the change boot 1 made = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs extract",
         key: "fs-copy-corrupt-tail-test",
         signs: &["the extracted image matches the built image byte for byte = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs extract",
         key: "ext2-group-count-offset-test",
         signs: &["the free counts match dumpe2fs = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs create",
@@ -5262,6 +5303,7 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
             "has deleted/unused inode",
         ],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs create",
@@ -5271,6 +5313,7 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
             "Free inodes count wrong",
         ],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs create",
@@ -5280,12 +5323,14 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
             "Directories count wrong",
         ],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs create",
         key: "ext2-create-skip-extra-isize-test",
         signs: &["the new inode names the extra area the way the image asks = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs mkdir",
@@ -5295,6 +5340,7 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
             "'..' in /data/made",
         ],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs mkdir",
@@ -5304,6 +5350,7 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
             "ref count is",
         ],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs mkdir",
@@ -5313,42 +5360,49 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
             "Directories count wrong",
         ],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs truncate",
         key: "ext2-truncate-off-by-one-test",
         signs: &["the extracted image matches the built image byte for byte = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs truncate",
         key: "ext2-truncate-always-free-test",
         signs: &["the extracted image matches the built image byte for byte = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs truncate",
         key: "ext2-truncate-keep-slot-test",
         signs: &["the extracted image matches the built image byte for byte = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs truncate",
         key: "ext2-truncate-skip-free-test",
         signs: &["the extracted image matches the built image byte for byte = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs truncate",
         key: "ext2-truncate-keep-tail-test",
         signs: &["the extracted image matches the built image byte for byte = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs truncate",
         key: "ext2-truncate-skip-blocks-test",
         signs: &["the extracted image matches the built image byte for byte = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs write",
@@ -5358,12 +5412,14 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
             "i_size is",
         ],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs write",
         key: "ext2-append-round-size-test",
         signs: &["the appended bytes read back exactly = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs write",
@@ -5373,6 +5429,7 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
             "i_blocks is",
         ],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs write",
@@ -5382,6 +5439,7 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
             "i_blocks is",
         ],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs write",
@@ -5391,12 +5449,14 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
             "Block bitmap differences",
         ],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs write",
         key: "ext2-append-always-allocate-test",
         signs: &["the free blocks dropped by exactly one across both appends = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs bitmap",
@@ -5406,6 +5466,7 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
             "Free blocks count wrong (",
         ],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs bitmap",
@@ -5415,30 +5476,35 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
             "Free blocks count wrong for group",
         ],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs bitmap",
         key: "ext2-alloc-ignore-bitmap-test",
         signs: &["e2fsck complains exactly once, about the bitmap = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs bitmap",
         key: "ext2-free-skip-bit-test",
         signs: &["the extracted image matches the built image byte for byte = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs image flush",
         key: "fs-flush-skip-test",
         signs: &["at least the whole image went to the device = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "fs image flush",
         key: "virtio-flush-short-test",
         signs: &["at least the whole image went to the device = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "sparse read",
@@ -5448,6 +5514,7 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
             "reads block 1 as a full block of zeros = false",
         ],
         note: "",
+        reached: true,
     },
     // ── devices（virtio の割り込み 4・PCI 3・virtio-blk 3） ──
     NamedJudgement {
@@ -5455,36 +5522,42 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         key: "pci-config-offset-test",
         signs: &["the sets match = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "pci enumeration",
         key: "pci-ignore-multifunction-test",
         signs: &["the sets match = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "pci enumeration",
         key: "pci-stop-at-first-test",
         signs: &["the sets match = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "virtio blk read",
         key: "virtio-wrong-sector-test",
         signs: &["checksum from the device", "match = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "virtio irq",
         key: "virtio-intx-edge-test",
         signs: &["route read back matching the platform's declaration = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "virtio irq",
         key: "virtio-wait-holding-bkl-test",
         signs: &["the blocking read released the BKL before waiting = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "virtio blk read",
@@ -5494,6 +5567,7 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
             "the request was not completed after",
         ],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "virtio blk read",
@@ -5502,18 +5576,21 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         // **注釈どおり、中身の突き合わせまで届かない**（`kernel/src/virtio.rs` の破壊の注釈。持ち越しの行）。
         note: "not reached: QEMU refuses the short descriptor with status 1, so the byte-for-byte \
                check against the image file never runs",
+        reached: false,
     },
     NamedJudgement {
         check: "virtio irq",
         key: "virtio-skip-eoi-test",
         signs: &["the exercise did not complete", "RequestTimedOut"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "virtio irq",
         key: "virtio-skip-isr-read-test",
         signs: &["each read was delivered once and nothing else arrived = false"],
         note: "",
+        reached: true,
     },
     // ── shell（ANSI 3） ──
     NamedJudgement {
@@ -5521,18 +5598,21 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         key: "ansi-console-skip-parse-test",
         signs: &["CUP moved the cursor = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "ansi test",
         key: "ansi-sgr-ignore-color-test",
         signs: &["SGR colored the cell and the screen = false"],
         note: "",
+        reached: true,
     },
     NamedJudgement {
         check: "ansi test",
         key: "ansi-cursor-ignore-hide-test",
         signs: &["DECTCEM hid the cursor = false"],
         note: "",
+        reached: true,
     },
     // ── process（.bss 1） ──
     NamedJudgement {
@@ -5540,6 +5620,7 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         key: "user-load-filesz-only",
         signs: &["bss-check says Exited(0) = false", "ended Ok(Folded(14))"],
         note: "",
+        reached: true,
     },
 ];
 
@@ -5585,6 +5666,7 @@ fn judgement_verdict(
         SabotageVerdict::CaughtByTheJudgement {
             sign,
             note: named.note,
+            reached: named.reached,
         }
     } else {
         SabotageVerdict::MissedTheJudgement {
@@ -5605,7 +5687,11 @@ enum SabotageVerdict {
     /// 狙った理由の行で止まった（[`SABOTAGE_STOP_REASONS`] に載る破壊）。
     CaughtForTheReason { sign: String, note: &'static str },
     /// 狙った判定が偽になった（[`SABOTAGE_JUDGEMENTS`] に載る破壊）。
-    CaughtByTheJudgement { sign: String, note: &'static str },
+    CaughtByTheJudgement {
+        sign: String,
+        note: &'static str,
+        reached: bool,
+    },
     /// 落ちたが、狙った判定の目印が出力に無い。
     MissedTheJudgement { sign: String, why: String },
     /// どの誤りでも捕まえたとする（表に載らない破壊。理由を見ていない）。
@@ -5776,10 +5862,11 @@ fn report_inverted_judgement(check: &str, key: &str, label: &str, failed: &mut F
         return;
     };
     match judgement_verdict(named, item_output().as_deref(), None) {
-        SabotageVerdict::CaughtByTheJudgement { sign, note } => println!(
-            "{ok} (the sabotage was caught by the intended judgement: {sign}{}{note})",
-            if note.is_empty() { "" } else { "; " }
-        ),
+        SabotageVerdict::CaughtByTheJudgement {
+            sign,
+            note,
+            reached,
+        } => report_named_catch(check, &ok, &sign, note, reached),
         SabotageVerdict::MissedTheJudgement { sign, why } => {
             println!(
                 "--- {label}: FAILED (the intended judgement never read false: {sign:?} is not in \
@@ -5793,6 +5880,48 @@ fn report_inverted_judgement(check: &str, key: &str, label: &str, failed: &mut F
             failed.push(label.to_string());
         }
     }
+}
+
+/// 名前の判定で捕まえたが、狙いの判定ではなかった回の数（2026-09-26。計器の外の破壊を絞る段）。**鍵は全検査の
+/// 族と検査の名前である。** **捕まえたとは数えるが、「破壊で確かめた」の保証には混ぜない**（運用者の決定 1 の ②）。
+static NOT_REACHED_VERDICTS: std::sync::Mutex<
+    std::collections::BTreeMap<(Option<Family>, String), usize>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// 名前の判定で捕まえた回の行を出す（2026-09-26）。**狙いの判定に届いていない行は、別に数える。**
+fn report_named_catch(check: &str, ok: &str, sign: &str, note: &str, reached: bool) {
+    let tail = if note.is_empty() {
+        String::new()
+    } else {
+        format!("; {note}")
+    };
+    if reached {
+        println!("{ok} (the sabotage was caught by the intended judgement: {sign}{tail})");
+        return;
+    }
+    println!(
+        "{ok} (the sabotage was caught by a named judgement that is not the intended one, so it is \
+         not counted as verified: {sign}{tail})"
+    );
+    if let Ok(mut counts) = NOT_REACHED_VERDICTS.lock() {
+        *counts
+            .entry((current_family(), check.to_string()))
+            .or_insert(0) += 1;
+    }
+}
+
+/// 狙いの判定ではない名前の判定で捕まえた回の数を 1 行にする（2026-09-26。まとめの計器。止めない）。
+fn not_reached_verdicts_line() -> String {
+    let counts = NOT_REACHED_VERDICTS
+        .lock()
+        .map(|counts| counts.clone())
+        .unwrap_or_default();
+    let (total, families, listed) = counts_by_family(counts);
+    format!(
+        "(info) sabotage verdicts caught by a named judgement that is not the intended one (another \
+         check stops first; not counted as verified): {total} in {families} famil(ies){}{listed}",
+        if listed.is_empty() { "" } else { ": " }
+    )
 }
 
 /// 「どれかの判定が偽なら捕まえた」の行を出し、数を 1 つ足す（2026-09-26）。**出す行は前と同じ形である。**
@@ -5863,11 +5992,15 @@ fn any_error_verdicts_line() -> String {
     format!(
         "(info) sabotage verdicts that accept any error (the reason is not checked): {total} in \
          {families} famil(ies){}{listed}; narrowed to an intended stop: {} sabotage(s) \
-         (SABOTAGE_STOP_REASONS), to a named judgement: {} (SABOTAGE_JUDGEMENTS); left on purpose \
-         with a reason: {} (SABOTAGE_JUDGEMENTS_NOT_PLACED)",
+         (SABOTAGE_STOP_REASONS), to a named judgement: {} (SABOTAGE_JUDGEMENTS; {} of them not the \
+         intended judgement); left on purpose with a reason: {} (SABOTAGE_JUDGEMENTS_NOT_PLACED)",
         if listed.is_empty() { "" } else { ": " },
         SABOTAGE_STOP_REASONS.len(),
         SABOTAGE_JUDGEMENTS.len(),
+        SABOTAGE_JUDGEMENTS
+            .iter()
+            .filter(|named| !named.reached)
+            .count(),
         SABOTAGE_JUDGEMENTS_NOT_PLACED.len()
     )
 }
@@ -5966,10 +6099,11 @@ fn report_inverted_sabotage_verdict(
             caught_by_any_error(check, &format!("--- {name}: OK (the sabotage was caught)"))
         }
         (Ok(()), Some(named)) => match judgement_verdict(named, item_output().as_deref(), None) {
-            SabotageVerdict::CaughtByTheJudgement { sign, note } => println!(
-                "--- {name}: OK (the sabotage was caught by the intended judgement: {sign}{}{note})",
-                if note.is_empty() { "" } else { "; " }
-            ),
+            SabotageVerdict::CaughtByTheJudgement {
+                sign,
+                note,
+                reached,
+            } => report_named_catch(check, &format!("--- {name}: OK"), &sign, note, reached),
             _ => {
                 println!(
                     "--- {name}: FAILED (the intended judgement never read false: {:?} is not in \
@@ -6009,10 +6143,11 @@ fn report_sabotage_verdict(
                 "--- {name}: OK (the sabotage was caught for the intended reason: {sign}; {note})"
             )
         }
-        SabotageVerdict::CaughtByTheJudgement { sign, note } => println!(
-            "--- {name}: OK (the sabotage was caught by the intended judgement: {sign}{}{note})",
-            if note.is_empty() { "" } else { "; " }
-        ),
+        SabotageVerdict::CaughtByTheJudgement {
+            sign,
+            note,
+            reached,
+        } => report_named_catch(check, &format!("--- {name}: OK"), &sign, note, reached),
         SabotageVerdict::MissedTheJudgement { sign, why } => {
             println!(
                 "--- {name}: FAILED (the intended judgement never read false: {sign:?} is not in \
@@ -24480,6 +24615,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     if full {
         println!("{}", any_error_verdicts_line());
         println!("{}", any_judgement_verdicts_line());
+        println!("{}", not_reached_verdicts_line());
         report_build_directory_size(&workspace_root);
         // **空きの計器**（2026-09-25。運用者の足す1点）。**Windows のドライブが 20 GiB を割ったら (warn)。止めない。**
         for line in full_check::free_space_lines(&workspace_root) {
@@ -26595,10 +26731,12 @@ mod tests {
             key: "zz-host-test",
             signs: &["the thing = false"],
             note: "",
+            reached: true,
         };
         static TWO: NamedJudgement = NamedJudgement {
             check: "zz check",
             key: "zz-host-test-two",
+            reached: true,
             signs: &[
                 "e2fsck found nothing to complain about = false",
                 "i_size is",
@@ -26788,6 +26926,29 @@ mod tests {
         let missed = named("virtio-wrong-sector-test");
         report_inverted_judgement(missed.check, missed.key, "zz inverted (b)", &mut failed);
         assert_eq!(failed.list, ["zz inverted (b)"]);
+    }
+
+    /// **狙いの判定ではない名前の判定で捕まえた回は、別に数える**（2026-09-26）。**狙いの判定で捕まえた回は
+    /// 数えない。**
+    #[test]
+    fn a_named_catch_that_is_not_the_intended_judgement_is_counted_apart() {
+        report_named_catch("zz reached check", "--- zz (a): OK", "the sign", "", true);
+        report_named_catch(
+            "zz not reached check",
+            "--- zz (b): OK",
+            "the sign",
+            "another check",
+            false,
+        );
+        let line = not_reached_verdicts_line();
+        assert!(line.contains("zz not reached check 1"), "{line}");
+        assert!(!line.contains("zz reached check"), "{line}");
+        assert!(
+            SABOTAGE_JUDGEMENTS
+                .iter()
+                .any(|named| named.key == "virtio-short-desc-test" && !named.reached),
+            "the short descriptor is caught before its intended judgement"
+        );
     }
 
     /// **「どれかの判定が偽なら捕まえた」は別の種類として数える**（2026-09-26）。**項目の外で数えた回は
