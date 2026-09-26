@@ -316,9 +316,13 @@ commit・次ステップへ進む。
 **本文は 5 行を超えない。** **2 行目は必ず空ける**（`git` の慣行。
 実測で、本文を持つ全コミットが既にそうなっている）。
 
-**件名の接頭辞は次の 7 つに限る**（Semantic Commit Messages）。
+**件名は `type(scope): 簡潔な説明` の形で書く**（Semantic Commit Messages。運用者の決定。2026-09-26）。
+**`type`（型）は必須で、次の 7 つのどれかにする。** **`(scope)`（範囲）は省いてよい。** 書くなら、
+影響するコードや文書の箇所を、英数字とハイフンだけの 1 語で書く（例: `docs(ADR): 言い回しを修正`、
+`test(xtask): …`、`fix(hooks): …`）。**2026-09-26 より前のコミットは範囲の無い `type: 説明` の形で、
+履歴は書き換えない。**
 
-| 接頭辞 | 使う場面 |
+| 型 | 使う場面 |
 |---|---|
 | `feat` | 振る舞いが増える |
 | `fix` | 壊れていたものを直す |
@@ -338,6 +342,18 @@ commit・次ステップへ進む。
 ——`cargo xtask check` そのものが CI の代わりなので、**`test` と区別が付かない。**
 **要る場面が出たら足すこと。** 外した理由をここに書いておくのは、
 **「標準に在るのに無い」を見た人が、抜けなのか判断なのかを分けられるようにするためである。**
+
+**範囲の名前の目安**（細かく決めすぎない。1 つに決まらない変更は範囲を省く）。
+
+- コード: `kernel`（`kernel/`）・`userland`（`kernel/userland/`）・`common`・`bootloader`・`xtask`・
+  `hooks`（`.claude/hooks/` と `.githooks/`）・`tools`・`ci`
+- 文書: `docs/` の中の分け方に合わせる——`ADR`（`docs/adr/`）・`testing`（検査の文書。
+  `verification-coverage.md`・`troubleshooting.md`）・`plan`（計画の文書。`roadmap.md`・
+  `deferred-decisions.md`・`vision.md`）・`rules`（規約。`coding-standards.md`・`architecture.md`・
+  `CLAUDE.md`）・`readme`（`README.md`）
+
+**件名の形は、基本の検査（`cargo xtask check`）が履歴全体で確かめる**——型が一覧に在ること、
+範囲が英数字とハイフンだけの 1 語であること、コロンの後に空白と説明があること。
 
 本文に書くのは**件名から読めないこと**だけである。
 
