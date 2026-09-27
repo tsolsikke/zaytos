@@ -2772,9 +2772,7 @@ pub fn run_detached_request() {
     }
     // **終わり方をハンドルと一緒に置く（`ADR-0063` の (b2)）。** **待つ側がこれを読む。**
     let bits = match &outcome {
-        Ok(SpawnOutcome::Exited(status)) => *status,
-        Ok(SpawnOutcome::Folded(vector)) => crate::syscall::SPAWN_FOLDED_FLAG | *vector,
-        Ok(SpawnOutcome::Interrupted) => crate::syscall::SPAWN_INTERRUPTED_FLAG,
+        Ok(ending) => crate::syscall::spawn_status(ending),
         Err(_) => u64::MAX,
     };
     *DETACHED_STATUS.lock() = Some((crate::task::current_ring3_task_handle(), bits));

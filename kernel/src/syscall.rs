@@ -567,7 +567,7 @@ pub const SYS_SPAWN: u64 = ZAYTOS_PRIVATE_BASE + 4;
 /// [`SYS_SPAWN`] の戻り値のうち「子は終了ではなく畳まれて終わった」を表すビット。
 ///
 /// **下位 8 ビットは終了状態なので、その上に置く。** 終了させられた場合は
-/// `SPAWN_FOLDED_FLAG | (vector << 9)` を返す。
+/// `SPAWN_FOLDED_FLAG | vector` を返す（[`spawn_status`]）。
 ///
 /// # Linux の `wait` の符号化には合わせない
 ///
@@ -590,6 +590,30 @@ pub const SPAWN_FOLDED_FLAG: u64 = 0x100;
 /// 与えると、**「`SIGINT` が配送された」と読める値を、配送していないのに返す。**
 /// **シグナルを実装する段階（(4)）で、そのとき改めて決めること。**
 pub const SPAWN_INTERRUPTED_FLAG: u64 = 0x200;
+
+/// 子の終わり方を、[`SYS_SPAWN`] と [`SYS_WAIT_CHILD`] が返す値にする（純粋な論理。2026-09-27 に 1 通りに揃えた）。
+///
+/// - `exit(status)` で終わった: `status & 0xFF`（下位 8 ビット）
+/// - 例外で終了処理された: [`SPAWN_FOLDED_FLAG`] ` | vector`（ベクタは 8 ビット）
+/// - 外から止めた: [`SPAWN_INTERRUPTED_FLAG`]
+///
+/// **以前は入口ごとに形が違った。** **`SYS_SPAWN` は `SPAWN_FOLDED_FLAG | (vector << 9)` を返し、奇数のベクタが
+/// [`SPAWN_INTERRUPTED_FLAG`] のビットと重なり、ベクタ 16 と 19 は `0x1FFF` を越えて `-errno` の範囲の決まり
+/// （`docs/coding-standards.md` の「`-errno` の範囲と紛れない値にする」）を破っていた。** **切り離して起動した子の
+/// 待ちは `SPAWN_FOLDED_FLAG | vector` だったが、終了の値を 8 ビットに切っていなかった**（`exit(256)` が終了処理と
+/// 同じビットを立てる）。**どちらも、この関数の形へ揃えた。**
+///
+/// # Linux の `wait` の状態へ置き換える予定
+///
+/// **この形は私物である。** **システムコールとシグナルの段階で、Linux の `wait` の状態の形（`WIFEXITED` などで
+/// 読む形）へ置き換える予定である**（`docs/deferred-decisions.md` の行）。
+pub fn spawn_status(outcome: &crate::userland::SpawnOutcome) -> u64 {
+    match outcome {
+        crate::userland::SpawnOutcome::Exited(status) => status & 0xFF,
+        crate::userland::SpawnOutcome::Folded(vector) => SPAWN_FOLDED_FLAG | (vector & 0xFF),
+        crate::userland::SpawnOutcome::Interrupted => SPAWN_INTERRUPTED_FLAG,
+    }
+}
 
 /// 子を切り離して起動する（`ADR-0063` の (b3)）。**私物である**（[`SYS_SPAWN`] と同じ判断
 /// ——Linux に同じ意味の入口が無い。`posix_spawn` はライブラリの関数で、システムコールではない）。
@@ -3118,9 +3142,7 @@ unsafe fn spawn_with_piped_stdin_from_ring3(
     }
 
     match result {
-        Ok(crate::userland::SpawnOutcome::Exited(status)) => status & 0xFF,
-        Ok(crate::userland::SpawnOutcome::Folded(vector)) => SPAWN_FOLDED_FLAG | (vector << 9),
-        Ok(crate::userland::SpawnOutcome::Interrupted) => SPAWN_INTERRUPTED_FLAG,
+        Ok(outcome) => spawn_status(&outcome),
         Err(error) => (-errno_for_spawn(error)) as u64,
     }
 }
@@ -3209,9 +3231,7 @@ unsafe fn spawn_from_ring3(
     *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
 
     match result {
-        Ok(crate::userland::SpawnOutcome::Exited(status)) => status & 0xFF,
-        Ok(crate::userland::SpawnOutcome::Folded(vector)) => SPAWN_FOLDED_FLAG | (vector << 9),
-        Ok(crate::userland::SpawnOutcome::Interrupted) => SPAWN_INTERRUPTED_FLAG,
+        Ok(outcome) => spawn_status(&outcome),
         Err(error) => {
             // 破壊テスト (S11-5, spawn-eagain-as-enosys): 深さで断ったことを
             // `-ENOSYS` として返す。**どちらも「できない」を意味するので、
@@ -5706,6 +5726,43 @@ mod tests {
     //! 動かすと、Linux の配置から外れたことがここで分かる。**
 
     use super::*;
+
+    /// **終了処理された子の値は、中断の目印（[`SPAWN_INTERRUPTED_FLAG`]）と重ならず、`0x1FFF` を越えない**
+    /// （2026-09-27。運用者の決定）。**奇数のベクタと、ベクタ 16（#MF）・19（#XM）で確かめる**——**以前の
+    /// `SYS_SPAWN` の形（`vector << 9`）では、奇数のベクタが目印のビットと重なり、16 と 19 は上限を越えた。**
+    /// **終了は下位 8 ビットだけを返し、目印のビットを立てない。**
+    #[test]
+    fn a_spawn_status_never_meets_the_interrupted_mark_nor_passes_the_limit() {
+        use crate::userland::SpawnOutcome;
+        for vector in (0..32u64).chain([1, 3, 13, 16, 19]) {
+            let status = spawn_status(&SpawnOutcome::Folded(vector));
+            assert_eq!(
+                status & SPAWN_INTERRUPTED_FLAG,
+                0,
+                "vector {vector}: {status:#x}"
+            );
+            assert!(status <= 0x1FFF, "vector {vector}: {status:#x}");
+            assert_eq!(
+                status & SPAWN_FOLDED_FLAG,
+                SPAWN_FOLDED_FLAG,
+                "vector {vector}"
+            );
+            assert_eq!(
+                status & !SPAWN_FOLDED_FLAG,
+                vector,
+                "vector {vector}: {status:#x}"
+            );
+        }
+        for exited in [0u64, 1, 0xFF, 0x100, 0x1FF, 0x2FF, u64::MAX] {
+            let status = spawn_status(&SpawnOutcome::Exited(exited));
+            assert_eq!(status, exited & 0xFF, "exit {exited:#x}");
+            assert_eq!(status & (SPAWN_FOLDED_FLAG | SPAWN_INTERRUPTED_FLAG), 0);
+        }
+        assert_eq!(
+            spawn_status(&SpawnOutcome::Interrupted),
+            SPAWN_INTERRUPTED_FLAG
+        );
+    }
 
     fn u32_at(bytes: &[u8], at: usize) -> u32 {
         u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])

@@ -606,6 +606,7 @@ kernel::stack::tests::the_guards_are_a_multiple_of_the_alignment
 kernel::stack::tests::the_kernel_guard_is_exactly_one_aligned_page
 kernel::stack::tests::the_stacks_are_a_multiple_of_the_required_alignment
 kernel::syscall::tests::a_clip_rect_is_half_open_and_refuses_empty_ones
+kernel::syscall::tests::a_spawn_status_never_meets_the_interrupted_mark_nor_passes_the_limit
 kernel::syscall::tests::the_color_offsets_follow_the_pixel_order
 kernel::syscall::tests::the_fixed_screen_info_follows_the_linux_layout
 kernel::syscall::tests::the_variable_screen_info_follows_the_linux_layout
