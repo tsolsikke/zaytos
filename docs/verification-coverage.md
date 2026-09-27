@@ -526,7 +526,7 @@ git clone -q file:///path/to/zaytos /tmp/clean && cd /tmp/clean && cargo xtask c
 |---|---|---|
 | `FOLDABLE_VECTORS`（`kernel/src/idt`。**手で数える。2026-09-07に7件**） | **静か**——Ring 3の1命令でカーネルが止まるまで、誰も言わない | **静か**——`#DF`を入れたら、畳んではならないものを畳む |
 | `PARSED_EXTERNAL_TOOLS` | **静か**——その道具の直呼びを検査が見ない | 無害（当たらないだけ） |
-| `PRIVATE_BOUNDARY_DIRS` | **静か**——その配下の可視性の漏れを見ない | 無害 |
+| `PRIVATE_BOUNDARY_DIRS` | **静か**——その配下の可視性の漏れを見ない | 自分で言う（どのファイルにも当たらない項を落とす。2026-09-27。以前は無害と書いたが、ディレクトリを移すと黙って何も見なくなっていた） |
 | `DOC_PATH_PREFIXES` | **静か**——その形のパスが「パス」として見られない | 自分で言う（誤検出で落ちる） |
 | `SABOTAGE_FEATURES` | **静か**——破壊テストのfeatureが既定ビルドへ混ざっても気づかない | 自分で言う（死んだ項の検査が在る） |
 | `DIRECT_INTERRUPT_CONTROL_ALLOWLIST` | 自分で言う（許可されていない`cli`/`sti`で落ちる） | **静か**——消えた箇所を許し続ける |
@@ -539,6 +539,10 @@ git clone -q file:///path/to/zaytos /tmp/clean && cd /tmp/clean && cargo xtask c
 | `COMMIT_SUBJECT_PREFIXES` | 自分で言う（コミットが拒まれる） | 静かだが害が小さい |
 | `STRUCTURAL_GUARD_SYMBOL_FRAGMENTS` | **静か**——そのシンボルの生存を見ない | 自分で言う（見つからずに落ちる） |
 | `TEST_HOOKS_EXCLUSIONS` | 自分で言う | **静か** |
+| `DOC_PATH_MOVES`（2026-09-27） | 自分で言う（以前のパスが落ちる） | 自分で言う（以前の置き場がまだ在る項と、今の置き場が無い項を落とす） |
+| `X86_WORD_HOMES`（2026-09-27） | 自分で言う（置き場へ移した言葉が共通の側として数えられ、基準を超える） | 静かだが害は無い（無い置き場を許し続ける） |
+| `X86_WORDS`・`X86_WORDS_WITH_NUMBERS`（2026-09-27） | **静か**——載っていない言葉は、共通の側へ戻っても数えない | 無害（当たらないだけ） |
+| `MASKED_SIZE_ANCHORS`（2026-09-27） | 自分で言う（伏せるべき大きさが違いとして残り、記録し直しが断られる） | **静か**——その所の数が変わっても伏せ続ける |
 
 **外した時点で、5件が食い違っていた**（実測。2026-09-17）——**`SABOTAGE_FEATURES`が40対49、`DIRECT_INTERRUPT_CONTROL_ALLOWLIST`が12対14、`DIRECT_SERIAL_PORT_ALLOWLIST`が24対25、`BOOT_LOG_VOLATILE_MARKERS`が18対19、`TEST_HOOKS_EXCLUSIONS`が6対3である。** **一致していたのは9件である。**
 

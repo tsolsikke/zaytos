@@ -20256,7 +20256,8 @@ const COMMIT_STYLE_SINCE: &str = "2026-07-22T08:30:00+09:00";
 /// [`UNTRACKED_BY_DESIGN`] へ置く**——**ファイルの性質であって、
 /// それを書いた文書の性質ではないからである。**
 ///
-/// **それ以外は直す側である。** **パスが古くなっただけなら、書き換えればよい。**
+/// **それ以外は直す側である。** **パスが古くなっただけなら、書き換えればよい。** **ファイルを移したときは、
+/// 文書を書き換えずに [`DOC_PATH_MOVES`] で今の置き場へ読み替える**（2026-09-27。境界の段階の手順 2）。
 ///
 /// **1 件につき理由を 1 行添えること。** **理由の書けない項目は、直す側である。**
 const DOC_PATH_ALLOWLIST: &[(&str, &str)] = &[
@@ -20275,6 +20276,56 @@ const DOC_PATH_ALLOWLIST: &[(&str, &str)] = &[
         ".local-probes/m3c-flush-cost-probe.patch",
     ),
 ];
+
+/// 移したファイルとディレクトリの、以前の置き場と今の置き場（2026-09-27。境界の段階の手順 2）。
+///
+/// **文書は書いた時点の置き場を指したまま残し、この表で今の置き場へ読み替えて、在ることを確かめる**
+/// ——**手順 2 は 36 のファイルを移し、文書の中の以前のパスは 20 本・115 件ある**（2026-09-27 に数えた）。
+/// [`DOC_PATH_ALLOWLIST`] の「当時の在り処の記録」を、移した分だけまとめて持つ形である（**文書ごとの
+/// Addendum の代わりに、今の置き場をここで示す**）。
+///
+/// **前方一致で読み替える**（ディレクトリは `/` で終える）。**以前の置き場がまだ在る項と、今の置き場が無い
+/// 項は落とす**（[`doc_path_move_problems`]）——**読み替えが実際の移動を指していることを保つ。**
+const DOC_PATH_MOVES: &[(&str, &str)] = &[];
+
+/// 以前の置き場を指すパスを、読み替えの表で今の置き場へ読み替えて、追跡下に在るかを見る（ファイルでも
+/// ディレクトリでもよい）。
+fn moved_path_is_tracked(path: &str, tracked: &[String], moves: &[(&str, &str)]) -> bool {
+    let as_directory = format!("{path}/");
+    moves.iter().any(|(old, new)| {
+        path.strip_prefix(old)
+            .or_else(|| as_directory.strip_prefix(old))
+            .is_some_and(|rest| {
+                let moved = format!("{new}{rest}");
+                let moved = moved.trim_end_matches('/');
+                tracked
+                    .iter()
+                    .any(|t| t == moved || t.starts_with(&format!("{moved}/")))
+            })
+    })
+}
+
+/// 読み替えの表の問題（以前の置き場がまだ在る項、今の置き場が無い項）。
+fn doc_path_move_problems(moves: &[(&str, &str)], tracked: &[String]) -> Vec<String> {
+    let exists = |path: &str| {
+        let path = path.trim_end_matches('/');
+        tracked
+            .iter()
+            .any(|t| t == path || t.starts_with(&format!("{path}/")))
+    };
+    let mut problems = Vec::new();
+    for (old, new) in moves {
+        if exists(old) {
+            problems.push(format!(
+                "DOC_PATH_MOVES: {old} is still tracked, so it has not moved"
+            ));
+        }
+        if !exists(new) {
+            problems.push(format!("DOC_PATH_MOVES: {new} is not tracked"));
+        }
+    }
+    problems
+}
 
 /// **意図して追跡していないファイル**（`ADR-0031`。**個人の環境設定を公開
 /// リポジトリの設定に混ぜない**）。
@@ -20434,6 +20485,7 @@ fn check_markdown_references(workspace_root: &Path) -> Result<Vec<String>> {
                     && !tracked
                         .iter()
                         .any(|t| *t == normal || t.starts_with(&format!("{normal}/")))
+                    && !moved_path_is_tracked(&normal, &tracked, DOC_PATH_MOVES)
                 {
                     findings.push(format!("{rel}:{number}: リンク先が存在しない -> {target}"));
                     continue;
@@ -20460,9 +20512,12 @@ fn check_markdown_references(workspace_root: &Path) -> Result<Vec<String>> {
                 // **`.claude/settings.local.json` は`ADR-0031`で追跡外と決めてあり、
                 // 手元にだけ在る**）。**この検査が主張したいのは
                 // 「リポジトリが、リポジトリに無いものを指していないこと」である。**
-                let found = DOC_PATH_PREFIXES
-                    .iter()
-                    .any(|prefix| tracked.contains(&format!("{prefix}{path}")));
+                // **移したファイルは、読み替えの表で今の置き場を見る**（2026-09-27）。
+                let found = DOC_PATH_PREFIXES.iter().any(|prefix| {
+                    let full = format!("{prefix}{path}");
+                    tracked.contains(&full)
+                        || moved_path_is_tracked(&full, &tracked, DOC_PATH_MOVES)
+                });
                 if !found {
                     findings.push(format!(
                         "{rel}:{number}: バックティックの中のパスが存在しない -> `{path}`"
@@ -20471,6 +20526,7 @@ fn check_markdown_references(workspace_root: &Path) -> Result<Vec<String>> {
             }
         }
     }
+    findings.extend(doc_path_move_problems(DOC_PATH_MOVES, &tracked));
     Ok(findings)
 }
 
@@ -23335,6 +23391,16 @@ fn find_boundary_visibility_leaks(workspace_root: &Path) -> Result<Vec<String>> 
     let listing = String::from_utf8(output.stdout).context("git ls-files produced non-UTF-8")?;
 
     let mut findings = Vec::new();
+    // **どのファイルにも当たらない項を落とす**（2026-09-27。境界の段階の手順 2）。**ディレクトリを移すと、
+    // 項が古いまま、この検査が黙って何も見なくなっていた。**
+    for dir in PRIVATE_BOUNDARY_DIRS {
+        if !listing.lines().any(|relative| relative.starts_with(dir)) {
+            findings.push(format!(
+                "PRIVATE_BOUNDARY_DIRS: {dir} matches no Rust source (moved? point the entry at \
+                 the new place)"
+            ));
+        }
+    }
     for relative in listing.lines().filter(|l| !l.is_empty()) {
         if !PRIVATE_BOUNDARY_DIRS
             .iter()
@@ -23643,6 +23709,11 @@ fn report_enumeration_counts() {
         ),
         ("TEST_HOOKS_EXCLUSIONS", TEST_HOOKS_EXCLUSIONS.len()),
         ("PATH_RULES", family::PATH_RULES.len()),
+        ("MASKED_SIZE_ANCHORS", MASKED_SIZE_ANCHORS.len()),
+        ("X86_WORDS", X86_WORDS.len()),
+        ("X86_WORDS_WITH_NUMBERS", X86_WORDS_WITH_NUMBERS.len()),
+        ("X86_WORD_HOMES", X86_WORD_HOMES.len()),
+        ("DOC_PATH_MOVES", DOC_PATH_MOVES.len()),
     ];
     let rendered: Vec<String> = counts
         .iter()
@@ -25433,7 +25504,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             println!("    {finding}");
         }
         println!(
-            "--- private boundaries: FAILED ({} export(s); the boundary must be the only way in)",
+            "--- private boundaries: FAILED ({} finding(s); the boundary must be the only way in)",
             leaks.len()
         );
         failed.push("private boundaries".to_string());
@@ -29329,6 +29400,40 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         let two = vec!["[INFO] something else".to_string()];
         let plain = first_difference(&one, &two).expect("they differ");
         assert!(!plain.contains("redo the inventory"), "{plain}");
+    }
+
+    /// **文書が指す以前の置き場は、読み替えの表で今の置き場へ読み替えて確かめる**（2026-09-27。境界の段階の
+    /// 手順 2）。**読み替えた先が無いパスは通さず、表の項が実際の移動を指していなければ落とす。**
+    #[test]
+    fn a_moved_path_in_a_document_is_checked_at_its_new_place() {
+        let tracked = vec![
+            "kernel/src/arch/x86_64/gdt/mod.rs".to_string(),
+            "common/src/arch/x86_64/cpu.rs".to_string(),
+        ];
+        let moves = [
+            ("kernel/src/gdt/", "kernel/src/arch/x86_64/gdt/"),
+            ("common/src/cpu.rs", "common/src/arch/x86_64/cpu.rs"),
+        ];
+        assert!(moved_path_is_tracked(
+            "kernel/src/gdt/mod.rs",
+            &tracked,
+            &moves
+        ));
+        assert!(moved_path_is_tracked("kernel/src/gdt", &tracked, &moves));
+        assert!(moved_path_is_tracked("common/src/cpu.rs", &tracked, &moves));
+        assert!(!moved_path_is_tracked(
+            "kernel/src/gdt/layout.rs",
+            &tracked,
+            &moves
+        ));
+        assert!(!moved_path_is_tracked(
+            "kernel/src/idt/mod.rs",
+            &tracked,
+            &moves
+        ));
+        assert!(doc_path_move_problems(&moves, &tracked).is_empty());
+        let backwards = [("kernel/src/arch/x86_64/gdt/", "kernel/src/gdt/")];
+        assert_eq!(doc_path_move_problems(&backwards, &tracked).len(), 2);
     }
 
     /// **x86 の言葉は、コードと `asm!` の中の文字列で数え、コメントとログの文言では数えない**（2026-09-27。
