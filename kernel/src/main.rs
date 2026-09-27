@@ -1946,16 +1946,25 @@ extern "sysv64" fn kernel_main() -> ! {
 
     // 破壊テスト (2026-09-27, kernel-top-write-after-boot-test): **起動の後に、カーネル側の PML4 の空いた添字
     // （260）へマップしに行く。** **書く側の守りが、項目を作る前に名前つきで止めることを確かめる。**
-    #[cfg(feature = "kernel-top-write-after-boot-test")]
+    // **`kernel-top-write-unguarded-test` は、書く側の守りを外して同じ書き込みをする**——**次の
+    // `AddressSpace::new` の突き合わせが、実際に書かれた項目を見つけることを確かめる。**
+    #[cfg(any(
+        feature = "kernel-top-write-after-boot-test",
+        feature = "kernel-top-write-unguarded-test"
+    ))]
     write_a_kernel_half_entry_after_boot(&mut logger);
 
     run_init(&mut logger, console.as_mut());
 }
 
-/// 破壊テスト `kernel-top-write-after-boot-test` の本体（2026-09-27。`ADR-0071` の決定 5）。**起動の後に、
-/// カーネル側の PML4 の空いた添字（260）の 1 ページをマップしに行く。** **書く側の守りがあれば、項目を作る前に
-/// 止まり、ここへは戻らない。** **戻ったら、守りが働かなかったことを出す。**
-#[cfg(feature = "kernel-top-write-after-boot-test")]
+/// 破壊テスト `kernel-top-write-after-boot-test` と `kernel-top-write-unguarded-test` の本体（2026-09-27。
+/// `ADR-0071` の決定 5）。**起動の後に、カーネル側の PML4 の空いた添字（260）の 1 ページをマップしに行く。**
+/// **書く側の守りがあれば、項目を作る前に止まり、ここへは戻らない。** **戻ったら、書き込みが通ったことを出す**
+/// ——**守りを外した形では戻るのが正しく、次の `AddressSpace::new` の突き合わせが見つける。**
+#[cfg(any(
+    feature = "kernel-top-write-after-boot-test",
+    feature = "kernel-top-write-unguarded-test"
+))]
 fn write_a_kernel_half_entry_after_boot(logger: &mut Logger<SerialPort>) {
     use kernel::paging::active::{ActivePageTable, PageAttributes};
     let Some(allocator) = frame_allocator::take() else {
@@ -1982,7 +1991,8 @@ fn write_a_kernel_half_entry_after_boot(logger: &mut Logger<SerialPort>) {
         shared: false,
     };
     // SAFETY: 破壊テスト。稼働中の表を direct map 越しに辿り、空いたカーネル側の添字へ、いま取ったフレームを
-    // 1 ページだけマップしに行く。**書く側の守りが、項目を作る前に止める。**
+    // 1 ページだけマップしに行く。**書く側の守りが、項目を作る前に止める**（守りを外した形では項目が作られ、
+    // 次の `AddressSpace::new` の突き合わせが見つける。どちらの形でも、この後にシェルは起動しない）。
     let result = unsafe {
         ActivePageTable::current(common::addr::direct_map())
             .map_4kib(virt, frame, attributes, allocator)
@@ -10535,6 +10545,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "kernel-top-write-after-boot-test",
         cfg!(feature = "kernel-top-write-after-boot-test"),
         "起動の後に、カーネル側の PML4 の空いた添字へマップしに行く",
+    ),
+    (
+        "kernel-top-write-unguarded-test",
+        cfg!(feature = "kernel-top-write-unguarded-test"),
+        "書く側の守りを外し、起動の後にカーネル側の PML4 の空いた添字へマップしに行く",
     ),
     (
         "no-eoi-test",

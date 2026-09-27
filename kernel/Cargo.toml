@@ -69,6 +69,9 @@ kernel-top-digest-mismatch-test = []
 # 2026-09-27（`ADR-0071` の決定 5）: 起動の後に、カーネル側の PML4 の空いた添字へマップしに行く。書く側の守りが
 # 作る前に止める。`--paging-test kernel-top-write-after-boot-test`。
 kernel-top-write-after-boot-test = []
+# 2026-09-27（`ADR-0071` の決定 5）: 書く側の守りを外し、同じ書き込みをする。突き合わせが、実際に書かれた項目を
+# 見つける。`--paging-test kernel-top-write-unguarded-test`。
+kernel-top-write-unguarded-test = []
 # タイマを実際に動かす(M4-d-2)。
 interrupt-test-timer = ["interrupt-test"]
 # EOI の発行をわざと落とし、ティックが 1 回で止まることを確認する。

@@ -579,6 +579,26 @@ const PAGING_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // 2026-09-27（`ADR-0071` の決定 5）: 書く側の守りを外し、同じ書き込み（起動の後に添字 260 へマップ）をする。
+    //
+    // **突き合わせ（`AddressSpace::new`）が、実際に書かれた項目を見つけ、シェルの起動が `KernelTopChanged` で
+    // 断られる。** **`kernel-top-digest-mismatch-test` は違う指紋を控える形なので、実際に書かれた変化を見つける
+    // ことは、こちらが見る。**
+    CriticalTest {
+        name: "kernel-top-write-unguarded-test",
+        feature: "kernel-top-write-unguarded-test",
+        expected_markers: &[
+            "sabotage: mapping a page into the empty kernel-half PML4 slot 260 after boot",
+            "sabotage: the write went through (Ok(()))",
+            "spawn: /bin/zash could not be loaded: AddressSpace(KernelTopChanged)",
+        ],
+        forbidden_markers: &[
+            "paging: refused to create a kernel-half PML4 entry",
+            "zash: ready",
+        ],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // S9-a: map_4kib の書き込み可否の引数を無視し、葉を常に W=1 で作る。
     //
     // **既定ビルドの主張は「writable=false で張った葉に Ring 3 が書くと #PF になる」**
@@ -22331,6 +22351,7 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "addrspace-no-kernel-share",
     "kernel-top-digest-mismatch-test",
     "kernel-top-write-after-boot-test",
+    "kernel-top-write-unguarded-test",
     "no-eoi-test",
     "alt-offset-test",
     "tiny-key-buffer",
@@ -25421,7 +25442,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 50,
-    full: 413,
+    full: 414,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。
