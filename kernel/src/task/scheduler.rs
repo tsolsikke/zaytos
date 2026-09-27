@@ -47,7 +47,7 @@
 //! | `resumes` | **加算** | - | - | **読み** | 書き |
 //! | `switches` | **加算** | - | - | **読み** | 書き |
 //! | `demo_active` / `demo_deadline` | 読み書き | - | - | - | 書き（`InterruptGuard`下） |
-//! | `rsp0` / `excursion_depth` | 読み（切り替え） | - | - | 書き（遠征の出入り。入口は `cli` 下、出口は IF=0）/ `excursion_depth` の読み（W1-c-4 の `init` の待ち。別のタスクの欄） | 書き |
+//! | `kernel_entry_stack_top` / `excursion_depth` | 読み（切り替え） | - | - | 書き（遠征の出入り。入口は `cli` 下、出口は IF=0）/ `excursion_depth` の読み（W1-c-4 の `init` の待ち。別のタスクの欄） | 書き |
 //! | `page_table_root` | 読み（切り替え） | - | - | 書き（`InterruptGuard`下）/ 破棄の経路（BKL下） | 書き |
 //! | `current_recovery` | 読み書き（切り替え） | - | - | - | 書き |
 //!
@@ -134,22 +134,22 @@ pub(super) fn set_saved_stack_pointer(index: usize, sp: u64) {
     unsafe { addr_of_mut!((*slot(index)).saved_stack_pointer).write(sp) }
 }
 
-pub(super) fn rsp0(index: usize) -> u64 {
+pub(super) fn kernel_entry_stack_top(index: usize) -> u64 {
     // SAFETY: 有効なポインタ。読むのは切り替え（IF=0）で、書くのは起動時と遠征の出入りである。
     // 遠征の入口は割り込みを止めてから書き（W1-c-3b。`ring3::enter` の `cli`）、出口は
     // longjmp で IF=0 のまま戻ってから書く（同じ関数の検算）。タスクは BSP だけが持つので、
     // 同じコアの割り込みが入らなければ切り替えと重ならない。W1-b では「IF=0 の切り替え経路と、
     // 遠征の出入りからのみ触る」とだけ書いており、深さ 0 の入口が IF=1 で書く形を見ていなかった。
-    unsafe { addr_of_mut!((*slot(index)).rsp0).read() }
+    unsafe { addr_of_mut!((*slot(index)).kernel_entry_stack_top).read() }
 }
 
-pub(super) fn set_rsp0(index: usize, top: u64) {
+pub(super) fn set_kernel_entry_stack_top(index: usize, top: u64) {
     // SAFETY: 同上。
-    unsafe { addr_of_mut!((*slot(index)).rsp0).write(top) }
+    unsafe { addr_of_mut!((*slot(index)).kernel_entry_stack_top).write(top) }
 }
 
 pub(super) fn excursion_depth(index: usize) -> usize {
-    // SAFETY: 有効なポインタ。`rsp0` と同じ文脈で触る（そちらの注記。W1-c-3b で直した）。
+    // SAFETY: 有効なポインタ。`kernel_entry_stack_top` と同じ文脈で触る（そちらの注記。W1-c-3b で直した）。
     unsafe { addr_of_mut!((*slot(index)).excursion_depth).read() }
 }
 

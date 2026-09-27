@@ -681,7 +681,7 @@ pub unsafe fn enter(
         report_excursion_index_out_of_range(current_slot(), depth);
     }
     // **戻す RSP0 が 0 なら止める（W1-c-3c）。** **0 のまま遠征から戻ると、次に Ring 3 から
-    // カーネルへ入るとき RSP0=0 の上に積む。** **W1-b でメインのタスクの `rsp0` を 0 のまま
+    // カーネルへ入るとき RSP0=0 の上に積む。** **W1-b でメインのタスクの `kernel_entry_stack_top` を 0 のまま
     // 残した形の、Ring 3 へ降りる側の関所である**（`docs/wayland-inventory.md` の #2）。
     if main_rsp0_top == 0 {
         report_zero_rsp0_at_excursion_entry();
@@ -751,7 +751,7 @@ pub unsafe fn enter(
     // こちらは「次にこのタスクへ戻るとき、何を書くか」である。**
     // **切り替えがこの欄を読む。**
     #[cfg(not(feature = "ring3-test-drop-rsp0"))]
-    crate::task::note_current_rsp0(excursion_top);
+    crate::task::note_current_kernel_entry_stack_top(excursion_top);
     // **深さの欄も据える（W1-b）。** **スタック混在の検査が、どのスタックを
     // 期待してよいかをこれで決める。**
     //
@@ -818,7 +818,7 @@ pub unsafe fn enter(
     }
     // **タスクの欄も戻す（W1-b）。** **入れ子のときは親の遠征スタックの上端が
     // それである**——**上の `main_rsp0_top` と同じ値を入れる。**
-    crate::task::note_current_rsp0(main_rsp0_top);
+    crate::task::note_current_kernel_entry_stack_top(main_rsp0_top);
     // **深さの欄も戻す（W1-b）。** **入れ子なら親の遠征の数へ、そうでなければ 0 へ**
     // （**欄は「入っている遠征の数」である**。入口の注記）。
     crate::task::note_current_excursion_depth(state.depth.load(Ordering::SeqCst));

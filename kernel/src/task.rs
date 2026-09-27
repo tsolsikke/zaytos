@@ -515,7 +515,7 @@ struct Task {
     /// **切り替えの側に「遠征中か」の分岐は足さない。**
     ///
     /// **W1-b で使い始めた**（`schedule_switch` がこれを書く）。
-    rsp0: u64,
+    kernel_entry_stack_top: u64,
     /// このタスクが Ring 3 の遠征に入っている深さ（W1-b）。**0 なら入っていない。**
     ///
     /// # なぜタスクが持つのか
@@ -526,7 +526,7 @@ struct Task {
     ///
     /// **`ring3` 側の深さと二重に持っているのではない。** **あちらは「いま走って
     /// いる遠征の深さ」で、こちらは「このタスクへ戻るとき、どこに居ることに
-    /// なっているか」である**——**`rsp0` が TSS と対になっているのと同じ形である。**
+    /// なっているか」である**——**`kernel_entry_stack_top` が TSS と対になっているのと同じ形である。**
     ///
     /// **値は「入っている遠征の数」である（W1-c-3b で揃えた）。** **0 は遠征に入って
     /// いない。** **W1-b は入口で増やす前の数を控えていた**——**最初の遠征の最中も 0 だった**
@@ -539,7 +539,7 @@ struct Task {
     /// **`Task` は `Copy` で、`AddressSpace` は持ち主が 1 つの型である**
     /// （`destroy(self)` が自分を消費する）。**タスクへ空間を移すことはできない。**
     /// **持ち主は `UserProcess` のまま動かさず、タスクは「載せる値」だけを持つ**
-    /// ——**`rsp0` と同じ形である**（`ADR-0060`）。
+    /// ——**`kernel_entry_stack_top` と同じ形である**（`ADR-0060`）。
     ///
     /// # 不変条件——**0 以外を持つのは、その空間の持ち主が生きている間だけである**
     ///
@@ -590,7 +590,7 @@ const EMPTY_TASK: Task = Task {
     saved_stack_pointer: 0,
     stack_top: 0,
     stack_bottom: 0,
-    rsp0: 0,
+    kernel_entry_stack_top: 0,
     excursion_depth: 0,
     page_table_root: 0,
     current_recovery: 0,
@@ -904,7 +904,7 @@ pub fn start_ring3_task() -> Option<u64> {
             stack_top: top.as_u64(),
             stack_bottom: bottom,
             // **遠征に入っていないタスクの RSP0 はカーネルスタック頂点である**（W1-c-3c の 0 の関所）。
-            rsp0: top.as_u64(),
+            kernel_entry_stack_top: top.as_u64(),
             state: TaskState::Ready,
             ..EMPTY_TASK
         },
@@ -1017,13 +1017,13 @@ fn ring3_task_stack_high_water() -> usize {
     0
 }
 
-/// 切り替えで入るタスクの `rsp0` の欄が 0 だった（W1-c-3c）。**止める。**
+/// 切り替えで入るタスクの `kernel_entry_stack_top` の欄が 0 だった（W1-c-3c）。**止める。**
 ///
 /// **別の関数にしてある理由**——**`schedule_switch` のフレームを広げないため**
 /// （[`swap_page_table_root_for_switch`] と同じ形）。
 #[inline(never)]
 #[cold]
-fn report_zero_rsp0_on_switch(next: usize) -> ! {
+fn report_zero_kernel_entry_stack_top_on_switch(next: usize) -> ! {
     serial_line(format_args!(
         "[ERROR] task: task {next} has RSP0 0 in its field; switching to it would load 0 into \
          TSS.RSP0 and the readback would compare 0 with 0 (W1-c-3c); halting"
@@ -1090,11 +1090,11 @@ pub fn current_ring3_slot() -> usize {
 /// **`ring3::enter` が `gdt::set_rsp0` を呼ぶのと対である**——**あちらは
 /// TSS を書き、こちらは「次にこのタスクへ戻るとき、何を書くか」を残す。**
 /// **切り替えはこの欄を読む**（`schedule_switch`）。
-pub fn note_current_rsp0(top: u64) {
+pub fn note_current_kernel_entry_stack_top(top: u64) {
     let Some(index) = current_index_if_any() else {
         return;
     };
-    scheduler::set_rsp0(index, top);
+    scheduler::set_kernel_entry_stack_top(index, top);
 }
 
 /// 今のタスクの CR3 の欄を据える（W1-b-2。遠征の出入りが呼ぶ）。
@@ -1785,7 +1785,7 @@ pub fn init_ap_idle_task() {
             // AP で切り替えが起きる構成（`smp-stimulus-*`）では TSS.RSP0 へ 0 を書いていた**
             // ——**AP は Ring 3 を走らせないので害は出ていなかった。** **W1-b でメインのタスクに
             // 踏んだのと同じ形である。** **切り替えが 0 を拒むようにしたので、先に埋める。**
-            rsp0: top,
+            kernel_entry_stack_top: top,
             // `Ready` にしておく。`pick_next` が巡回の候補にしないので選ばれないが、
             // 落ち先としては選ばれる（`default_task_for`）。
             state: TaskState::Ready,
@@ -2069,11 +2069,11 @@ pub fn run_cooperative_demo(allocator: &mut crate::frame_allocator::FrameAllocat
     let main_top = crate::arch::x86_64::stack::kernel_stack_range()
         .top
         .as_u64();
-    let rsp0 = gdt::privilege_stack_top();
+    let entry_top = gdt::privilege_stack_top();
     serial_line(format_args!(
-        "task: TSS.RSP0 tracked every switch; now {rsp0:#x} (main stack top {main_top:#x}, \
+        "task: TSS.RSP0 tracked every switch; now {entry_top:#x} (main stack top {main_top:#x}, \
          match={})",
-        rsp0 == main_top
+        entry_top == main_top
     ));
 
     serial_line(format_args!("task: cooperative switch verified"));
@@ -2107,7 +2107,7 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
             // （W1-b）。**`EMPTY_TASK` の 0 のままにすると、メインへ戻る切り替えが
             // TSS へ 0 を書く**——**実測で踏んだ**（`TSS.RSP0 ... now 0x0 ...
             // match=false`。起動ログの突き合わせが検出した）。
-            rsp0: main_top,
+            kernel_entry_stack_top: main_top,
             // メインはワーカーが尽きたときだけ戻る。終了済みではない。
             state: TaskState::Blocked,
             ..EMPTY_TASK
@@ -2135,7 +2135,7 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
                 stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
                 // **初期値はカーネルスタック頂点である**——**遠征に入って
                 // いないタスクの RSP0 がそれである。**
-                rsp0: top.as_u64(),
+                kernel_entry_stack_top: top.as_u64(),
                 excursion_depth: 0,
                 page_table_root: 0,
                 current_recovery: 0,
@@ -2198,7 +2198,7 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
                 stack_top: top.as_u64(),
                 stack_bottom: bottom,
                 // **遠征に入っていないタスクの RSP0 はカーネルスタック頂点である**（W1-c-3c の 0 の関所）。
-                rsp0: top.as_u64(),
+                kernel_entry_stack_top: top.as_u64(),
                 // **`Ready` にしておく。** **選ばれないのは `pick_next` の範囲によるもので、
                 // 状態が理由ではない**（AP 用アイドルと同じ）。
                 state: TaskState::Ready,
@@ -2513,29 +2513,29 @@ fn schedule_switch(current_sp: u64) -> u64 {
         // **既定の起動では `stack_top(next)` に等しい**——**遠征中に切り替えが
         // 起きないからである**（走行可能なタスクがメインだけで、上の
         // `next == current` で早く戻る）。**等しくなくなるのは W1-c-4 の `concurrent-test` である。**
-        let expected_rsp0 = scheduler::rsp0(next);
+        let expected_top = scheduler::kernel_entry_stack_top(next);
         // **0 なら止める（W1-c-3c）。** **下の読み戻しは「書いた値が載ったか」を見るので、
-        // 欄が 0 なら 0 と 0 を比べて通る**——**W1-b でメインのタスクの `rsp0` を 0 のまま
+        // 欄が 0 なら 0 と 0 を比べて通る**——**W1-b でメインのタスクの `kernel_entry_stack_top` を 0 のまま
         // 残した形を、起動ログの突き合わせだけが検出した**（`docs/verification-coverage.md`）。
         // **同じ形が、W1-c-1 で足した 1 本（`RING3_TASK`）で繰り返しうる**
         // （`docs/wayland-inventory.md` の「W1-c-4 で一斉に発火するもの」の #2）。
-        if expected_rsp0 == 0 {
-            report_zero_rsp0_on_switch(next);
+        if expected_top == 0 {
+            report_zero_kernel_entry_stack_top_on_switch(next);
         }
         #[cfg(not(feature = "task-switch-drop-rsp0"))]
         // SAFETY: stack_top は次タスクの有効なスタック頂点。切り替えの割り込み
         // 禁止区間から呼んでいる。
         unsafe {
-            gdt::set_rsp0(expected_rsp0);
+            gdt::set_rsp0(expected_top);
         }
         // 実際の状態を読む。RSP0 は M5-e まで挙動に現れないので、間違った値が書かれても
         // 誰も気づかない。TSS から読み戻して期待値と一致することをその場で確かめる
         // （A-1 / M5-b と同じく実状態を見る）。drop-rsp0 では更新を落としているので
         // ここで食い違い、halt する。
         let readback = gdt::privilege_stack_top();
-        if readback != expected_rsp0 {
+        if readback != expected_top {
             serial_line(format_args!(
-                "[ERROR] task: TSS.RSP0 readback {readback:#x} != expected {expected_rsp0:#x} \
+                "[ERROR] task: TSS.RSP0 readback {readback:#x} != expected {expected_top:#x} \
                  after switch to task {next}; halting",
             ));
             common::arch::x86_64::cpu::halt_forever();
@@ -2956,7 +2956,7 @@ unsafe fn setup_preemptive_tasks() {
             // **`setup_tasks` は W1-b で同じ欄を埋めた**（あちらの注記）**が、この再初期化で
             // 0 に戻っていた。** **読み戻しは 0 と 0 を比べて通り、`init` が最初の遠征の戻り先
             // として TSS から 0 を読んでいた。** **W1-c-3c の「0 なら止める」が起動の中で検出した。**
-            rsp0: main_top,
+            kernel_entry_stack_top: main_top,
             state: TaskState::Blocked,
             ..EMPTY_TASK
         },
@@ -2974,7 +2974,7 @@ unsafe fn setup_preemptive_tasks() {
                 saved_stack_pointer,
                 stack_top: top.as_u64(),
                 stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
-                rsp0: top.as_u64(),
+                kernel_entry_stack_top: top.as_u64(),
                 excursion_depth: 0,
                 page_table_root: 0,
                 current_recovery: 0,
