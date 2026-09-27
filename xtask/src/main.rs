@@ -1643,7 +1643,7 @@ fn main() -> Result<()> {
        cargo xtask run --serial-test [--sabotage FEATURE]
        cargo xtask run --machine-variant NAME [--sabotage FEATURE | --config FEATURE]   (ADR-0068。NAME は xtask/machine-variants.txt の名前)
        cargo xtask check [--update-reference]   (ホストテストの名前の集合を取り直す)
-       cargo xtask run --boot-log-diff [--update-reference [--allow-shrink]]\n       cargo xtask run --tool-checks
+       cargo xtask run --boot-log-diff [--update-reference [--allow-shrink] [--only-masked]]\n       cargo xtask run --tool-checks
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask image [--without-fs-image]   (ADR-0068 の HW-e。起動媒体の像を建てて確かめる)\n       cargo xtask gen-font\n       cargo xtask judge-vbox <記録>   (ADR-0068 の 2-2。tools/vbox-vm.py run が残した記録を判定する)";
 
     let args: Vec<String> = env::args().skip(1).collect();
@@ -2150,7 +2150,8 @@ fn main() -> Result<()> {
             if rest.iter().any(|a| a == "--boot-log-diff") {
                 let update = rest.iter().any(|a| a == "--update-reference");
                 let allow_shrink = rest.iter().any(|a| a == "--allow-shrink");
-                return cmd_boot_log_diff(update, allow_shrink);
+                let only_masked = rest.iter().any(|a| a == "--only-masked");
+                return cmd_boot_log_diff(update, allow_shrink, only_masked);
             }
             if let Some(index) = rest.iter().position(|a| a == "--drift-test") {
                 let minutes = rest
@@ -18123,7 +18124,13 @@ const BOOT_READY_TIMEOUT: Duration = Duration::from_secs(90);
 /// `--update-reference` を付けると参照を書き換える。**意図した変更のときだけ付ける。**
 /// **参照が縮む書き換えは、`--allow-shrink` も付けないと断る**（5.a の監視の (ii)。2026-09-25）
 /// ——**B-d で参照が 512 行から 327 行へ縮み、成功のまま覆いが消えた形を塞ぐ。**
-fn cmd_boot_log_diff(update_reference: bool, allow_shrink: bool) -> Result<()> {
+///
+/// **`--only-masked` を付けると、伏せた項目（[`MaskedItem`]）だけが違うときに限って記録し直す**
+/// （2026-09-27。境界の段階の手順 2）。**ファイルを移すだけのコミットは、この形で記録し直す。**
+fn cmd_boot_log_diff(update_reference: bool, allow_shrink: bool, only_masked: bool) -> Result<()> {
+    if only_masked && !update_reference {
+        bail!("boot log diff: --only-masked goes with --update-reference");
+    }
     let workspace_root = workspace_root()?;
     let reference_path = workspace_root.join(REFERENCE_BOOT_LOG);
 
@@ -18158,6 +18165,29 @@ fn cmd_boot_log_diff(update_reference: bool, allow_shrink: bool) -> Result<()> {
                 );
             }
         }
+        // **伏せた項目だけが違うときに限って記録し直す**（`--only-masked`。2026-09-27）。
+        if only_masked {
+            let previous: Vec<String> = fs::read_to_string(&reference_path)
+                .context(
+                    "--only-masked compares with the current reference, which could not be read",
+                )?
+                .lines()
+                .map(str::to_string)
+                .collect();
+            let comparison = compare_boot_logs_masked(&previous, &current)?;
+            if let Some(difference) = &comparison.unmasked {
+                println!("    {difference}");
+                bail!(
+                    "boot log diff: refused to re-record: a difference outside the masked items \
+                     (--only-masked)"
+                );
+            }
+            write_masked_differences(&workspace_root, &previous, &current, &comparison)?;
+            println!(
+                "--- boot log diff: {} (listed in {MASKED_DIFFERENCES_LOG})",
+                comparison.summary()
+            );
+        }
         if let Some(parent) = reference_path.parent() {
             fs::create_dir_all(parent).context("failed to create the reference directory")?;
         }
@@ -18185,6 +18215,22 @@ fn cmd_boot_log_diff(update_reference: bool, allow_shrink: bool) -> Result<()> {
             ),
             Some(report) => {
                 println!("{report}");
+                // **伏せた比べ方でも見て、違いの種類を添える**（2026-09-27。境界の段階の手順 2）。
+                match compare_boot_logs_masked(&reference, &current) {
+                    Ok(comparison) => match &comparison.unmasked {
+                        None => println!(
+                            "    ({}; if the change only moved code, re-record with \
+                             --update-reference --only-masked)",
+                            comparison.summary()
+                        ),
+                        Some(difference) => {
+                            println!("    (not only masked items: {difference})")
+                        }
+                    },
+                    Err(error) => {
+                        println!("    (the masked comparison could not be made: {error:#})")
+                    }
+                }
                 println!(
                     "--- boot log diff: differs from the reference: FAILED (if the change is \
                      intended, re-record with --update-reference and say so in the commit)"
@@ -18254,6 +18300,275 @@ fn first_difference(expected: &[String], actual: &[String]) -> Option<String> {
         ));
     }
     None
+}
+
+/// 起動ログの突き合わせで伏せる項目（2026-09-27。境界の段階の手順 2。`ADR-0071` の決定 1 の 2）。
+///
+/// **ファイルを移すだけの変更は、コードと静的な変数の置き場を動かす。** **そのとき起動ログで動いてよいのは、
+/// この 3 種類だけである**（[`compare_boot_logs_masked`]）。**行の並び・行の文言・判定の値・数えた件数は伏せない。**
+/// **伏せるのは、参照と今回で違った値だけである**——**同じ値は、種類に当たっても 1 文字ずつ比べる。**
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum MaskedItem {
+    /// カーネルのイメージの仮想アドレス（`0xffffffff80000000` から上）。関数・スタック・GDT・TSS・IDT の置き場。
+    KernelVirtual,
+    /// カーネルのイメージの物理アドレスと、イメージの終わりから決まる物理アドレス。**範囲はイメージの始めから、
+    /// 直後のヒープの置き場の終わりまで（両端を含む）で、比べる 2 本のログがそれぞれ自分の行で示す**
+    /// （[`kernel_physical_span`]）。直接マッピングの窓で見た同じアドレスも含む。**札が `user-` で始まる行
+    /// （ユーザーのプログラムの読み込みと実行）では伏せない**——**ユーザーの仮想アドレス（`0x400000` から）が、
+    /// たまたま同じ数の範囲に入るため。**
+    KernelPhysical,
+    /// 名前で挙げた所の、イメージの大きさで決まる数（[`MASKED_SIZE_ANCHORS`]）。**スタックの使用量は伏せない**
+    /// ——**移すだけなら動かず、動いたら振る舞いが動いている**（`tools/boot-log-compare.py` が 10 進を伏せない
+    /// のと同じ理由。W1-a で高水位の 16 バイトの増加を見つけた）。
+    Size,
+}
+
+impl MaskedItem {
+    fn name(self) -> &'static str {
+        match self {
+            MaskedItem::KernelVirtual => "kernel image virtual addresses",
+            MaskedItem::KernelPhysical => "kernel image physical addresses",
+            MaskedItem::Size => "sizes",
+        }
+    }
+}
+
+/// カーネルのイメージのリンクの基底（`kernel/link.ld` の `KERNEL_VIRT_BASE`）。**ここから上がイメージの仮想アドレス。**
+const MASK_KERNEL_VIRT_BASE: u64 = 0xFFFF_FFFF_8000_0000;
+
+/// 直接マッピングの窓の基底（起動ログの `direct-map:` の行が示す値）。
+const MASK_DIRECT_MAP_BASE: u64 = 0xFFFF_8000_0000_0000;
+
+/// 大きさを伏せる所。**前の文字列と後の文字列で挟まれた数だけを伏せる**（名前で挙げた所だけ。どちらも
+/// イメージの大きさで決まる）。
+const MASKED_SIZE_ANCHORS: &[(&str, &str)] = &[
+    // U/S の監査の、カーネル側の項目の数（イメージを 4KiB で張る枚数で変わる）。
+    ("kernel entries=", ""),
+    // `higher-half:` のイメージの長さ。
+    ("(len ", ")"),
+];
+
+/// 伏せた違いを 1 行ずつ書き出す置き場（`--only-masked` で記録し直したとき）。
+const MASKED_DIFFERENCES_LOG: &str = "target/boot-log-masked-differences.txt";
+
+/// 伏せる物理の範囲（イメージの始めから、直後のヒープの置き場の終わりまで。両端を含む）。
+///
+/// **ログ自身の行から読む**——ブートローダの `kernel segments placed and .bss zeroed (始め..終わり)` と、
+/// `heap: arena 始め..終わり` である。**前者が無ければ伏せられないので落とす。**
+fn kernel_physical_span(lines: &[String]) -> Result<(u64, u64)> {
+    fn range_after(line: &str, marker: &str) -> Option<(u64, u64)> {
+        let rest = &line[line.find(marker)? + marker.len()..];
+        let (start, rest) = rest.strip_prefix("0x")?.split_once("..")?;
+        let end: String = rest
+            .strip_prefix("0x")?
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .collect();
+        Some((
+            u64::from_str_radix(start, 16).ok()?,
+            u64::from_str_radix(&end, 16).ok()?,
+        ))
+    }
+    let (start, mut end) = lines
+        .iter()
+        .find_map(|line| range_after(line, "kernel segments placed and .bss zeroed ("))
+        .context(
+            "the log has no `kernel segments placed and .bss zeroed (..)` line, so the kernel image \
+             range is unknown",
+        )?;
+    if let Some((_, heap_end)) = lines
+        .iter()
+        .find_map(|line| range_after(line, "heap: arena "))
+    {
+        end = end.max(heap_end);
+    }
+    Ok((start, end))
+}
+
+/// 行を、数と、数の間の文字列に分ける。**数は `0x` で始まる 16 進の並びか、10 進の並びである**
+/// （文字列は数より 1 つ多い）。
+fn split_numbers(line: &str) -> (Vec<&str>, Vec<&str>) {
+    let bytes = line.as_bytes();
+    let mut texts = Vec::new();
+    let mut numbers = Vec::new();
+    let mut text_start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes[i] == b'0'
+            && bytes.get(i + 1) == Some(&b'x')
+            && bytes.get(i + 2).is_some_and(|b| b.is_ascii_hexdigit());
+        if !hex && !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let mut j = if hex { i + 2 } else { i };
+        while j < bytes.len()
+            && (if hex {
+                bytes[j].is_ascii_hexdigit()
+            } else {
+                bytes[j].is_ascii_digit()
+            })
+        {
+            j += 1;
+        }
+        texts.push(&line[text_start..i]);
+        numbers.push(&line[i..j]);
+        text_start = j;
+        i = j;
+    }
+    texts.push(&line[text_start..]);
+    (texts, numbers)
+}
+
+/// 行の札（`[INFO] ` などを除いた、最初の `:` までの語）。
+fn boot_log_tag(line: &str) -> &str {
+    let body = match line.strip_prefix('[') {
+        Some(rest) => rest.split_once("] ").map_or(line, |(_, body)| body),
+        None => line,
+    };
+    body.split(':').next().unwrap_or("")
+}
+
+/// 違った 1 つの数が、伏せる項目のどれに当たるか（当たらなければ `None`）。
+fn masked_item_of(
+    before: &str,
+    after: &str,
+    (old, new): (&str, &str),
+    tag: &str,
+    spans: ((u64, u64), (u64, u64)),
+) -> Option<MaskedItem> {
+    if MASKED_SIZE_ANCHORS
+        .iter()
+        .any(|(prefix, suffix)| before.ends_with(prefix) && after.starts_with(suffix))
+    {
+        return Some(MaskedItem::Size);
+    }
+    let hex = |text: &str| u64::from_str_radix(text.strip_prefix("0x")?, 16).ok();
+    let (old, new) = (hex(old)?, hex(new)?);
+    if old >= MASK_KERNEL_VIRT_BASE && new >= MASK_KERNEL_VIRT_BASE {
+        return Some(MaskedItem::KernelVirtual);
+    }
+    let physical = |value: u64, (start, end): (u64, u64)| {
+        let value = if (MASK_DIRECT_MAP_BASE..MASK_KERNEL_VIRT_BASE).contains(&value) {
+            value - MASK_DIRECT_MAP_BASE
+        } else {
+            value
+        };
+        (start..=end).contains(&value)
+    };
+    (!tag.starts_with("user-") && physical(old, spans.0) && physical(new, spans.1))
+        .then_some(MaskedItem::KernelPhysical)
+}
+
+/// 伏せた比べ方の結果（[`compare_boot_logs_masked`]）。
+#[derive(Debug, Default)]
+struct MaskedComparison {
+    /// 伏せた項目だけが違う行（1 から数えた行番号と、違った項目の種類。種類は重ねない）。
+    masked: Vec<(usize, Vec<MaskedItem>)>,
+    /// 伏せる項目に当たらない最初の違い（在れば）。
+    unmasked: Option<String>,
+}
+
+impl MaskedComparison {
+    /// 種類ごとの行の数の短い形。
+    fn summary(&self) -> String {
+        let mut counts: BTreeMap<MaskedItem, usize> = BTreeMap::new();
+        for (_, items) in &self.masked {
+            for item in items {
+                *counts.entry(*item).or_default() += 1;
+            }
+        }
+        let parts: Vec<String> = counts
+            .iter()
+            .map(|(item, count)| format!("{} on {count}", item.name()))
+            .collect();
+        format!(
+            "{} line(s) differ only in masked items ({})",
+            self.masked.len(),
+            if parts.is_empty() {
+                "none".to_string()
+            } else {
+                parts.join(", ")
+            }
+        )
+    }
+}
+
+/// 起動ログを、伏せる項目（[`MaskedItem`]）を除いて突き合わせる（2026-09-27。境界の段階の手順 2）。
+///
+/// **行の数と行の並びは同じでなければならない。** **違う行は、数の間の文字列が同じで、違う数がどれも伏せる項目に
+/// 当たるときだけ通す。** **伏せる物理の範囲は、2 本のログがそれぞれ自分の行で示すものを使う**（移すと範囲の
+/// 終わりも動くため）。
+fn compare_boot_logs_masked(reference: &[String], current: &[String]) -> Result<MaskedComparison> {
+    let spans = (
+        kernel_physical_span(reference)?,
+        kernel_physical_span(current)?,
+    );
+    let mut comparison = MaskedComparison::default();
+    if reference.len() != current.len() {
+        comparison.unmasked = Some(format!(
+            "the line count differs: the reference has {}, this boot has {}",
+            reference.len(),
+            current.len()
+        ));
+        return Ok(comparison);
+    }
+    for (index, (old_line, new_line)) in reference.iter().zip(current).enumerate() {
+        if old_line == new_line {
+            continue;
+        }
+        let unmasked = |why: String| {
+            Some(format!(
+                "line {}: {why}\n      reference: {old_line}\n      this boot: {new_line}",
+                index + 1
+            ))
+        };
+        let (old_texts, old_numbers) = split_numbers(old_line);
+        let (new_texts, new_numbers) = split_numbers(new_line);
+        if old_texts != new_texts {
+            comparison.unmasked = unmasked("the text around the numbers differs".to_string());
+            return Ok(comparison);
+        }
+        let tag = boot_log_tag(old_line);
+        let mut items = Vec::new();
+        for (k, (old, new)) in old_numbers.iter().zip(&new_numbers).enumerate() {
+            if old == new {
+                continue;
+            }
+            match masked_item_of(old_texts[k], old_texts[k + 1], (old, new), tag, spans) {
+                Some(item) if !items.contains(&item) => items.push(item),
+                Some(_) => {}
+                None => {
+                    comparison.unmasked = unmasked(format!("{old} -> {new} is not a masked item"));
+                    return Ok(comparison);
+                }
+            }
+        }
+        items.sort();
+        comparison.masked.push((index + 1, items));
+    }
+    Ok(comparison)
+}
+
+/// 伏せた違いを 1 行ずつ [`MASKED_DIFFERENCES_LOG`] へ書き出す（人が読んで確かめるため）。
+fn write_masked_differences(
+    workspace_root: &Path,
+    reference: &[String],
+    current: &[String],
+    comparison: &MaskedComparison,
+) -> Result<()> {
+    let mut text = format!("{}\n", comparison.summary());
+    for (line, items) in &comparison.masked {
+        let names: Vec<&str> = items.iter().map(|item| item.name()).collect();
+        text.push_str(&format!(
+            "line {line} [{}]\n  - {}\n  + {}\n",
+            names.join(", "),
+            reference[line - 1],
+            current[line - 1]
+        ));
+    }
+    fs::write(workspace_root.join(MASKED_DIFFERENCES_LOG), text)
+        .with_context(|| format!("failed to write {MASKED_DIFFERENCES_LOG}"))
 }
 
 /// 漂流の測定の既定の長さ（分）。**S6 の設計で先に固定した数である。**
@@ -23203,7 +23518,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             Family::Boot,
             "the boot log matches the reference and does not depend on the core count",
         );
-        match cmd_boot_log_diff(false, false) {
+        match cmd_boot_log_diff(false, false, false) {
             Ok(()) => println!("--- boot log diff: OK"),
             Err(error) => {
                 println!("--- boot log diff: FAILED ({error})");
@@ -28476,6 +28791,86 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         let two = vec!["[INFO] something else".to_string()];
         let plain = first_difference(&one, &two).expect("they differ");
         assert!(!plain.contains("redo the inventory"), "{plain}");
+    }
+
+    /// **伏せた比べ方は、コードを動かしただけの違いを通し、それ以外を 1 つでも止める**（2026-09-27。境界の段階の
+    /// 手順 2）。**行は、実際にコードが動いたコミット（`dbd8be9`）の前後の参照から取った。**
+    #[test]
+    fn a_boot_log_that_only_moved_code_differs_only_in_masked_items() {
+        let lines = |text: &str| text.lines().map(str::to_string).collect::<Vec<_>>();
+        let before = lines(
+            "[INFO] kernel segments placed and .bss zeroed (0x100000..0x4bc000)\n\
+             [INFO] higher-half: arrived at high VA. RIP=0xffffffff801ef928 in [0xffffffff80100000, 0xffffffff804bb910)=true, CR3=0x25a000 == bootstrap PML4 0x25a000 = true\n\
+             [INFO] higher-half: kernel image 0x100000..0x4bb910 mapped at 0xffffffff80100000 (len 0x3bc000), 4 new page-table frame(s)\n\
+             [INFO] heap: arena 0x4bc000..0x5bc000 (256 frames, 1 MiB), mapped=true\n\
+             [INFO] heap smoke test: Box<u32> value=0x12345678 ptr=0xffff8000004bc020 mapped=true\n\
+             [INFO] user-map: U/S audit: user subtree PML4[1] entries=4 violations(U=0)=0, kernel entries=3805 violations(U=1)=0\n\
+             [INFO] stack-water: before init, the kernel stack used 66944 of 131072 byte(s); 64128 left\n\
+             [INFO] spawn: /bin/hello is 8576 byte(s) at inode 25; entering at depth 2 (the parent's excursion stack 0xffffffff80455290..0xffffffff80465290 has 10033 byte(s) used and 55503 left)\n\
+             [INFO] user-load: /bin/zash mapped PT_LOAD 0x405000..0x405e78 (filesz=0xe78 memsz=0xe78 w=false) pages 0x405000..0x405000",
+        );
+        let after = lines(
+            "[INFO] kernel segments placed and .bss zeroed (0x100000..0x4bd000)\n\
+             [INFO] higher-half: arrived at high VA. RIP=0xffffffff801f0978 in [0xffffffff80100000, 0xffffffff804bc910)=true, CR3=0x25b000 == bootstrap PML4 0x25b000 = true\n\
+             [INFO] higher-half: kernel image 0x100000..0x4bc910 mapped at 0xffffffff80100000 (len 0x3bd000), 4 new page-table frame(s)\n\
+             [INFO] heap: arena 0x4bd000..0x5bd000 (256 frames, 1 MiB), mapped=true\n\
+             [INFO] heap smoke test: Box<u32> value=0x12345678 ptr=0xffff8000004bd020 mapped=true\n\
+             [INFO] user-map: U/S audit: user subtree PML4[1] entries=4 violations(U=0)=0, kernel entries=3806 violations(U=1)=0\n\
+             [INFO] stack-water: before init, the kernel stack used 66944 of 131072 byte(s); 64128 left\n\
+             [INFO] spawn: /bin/hello is 8576 byte(s) at inode 25; entering at depth 2 (the parent's excursion stack 0xffffffff80456290..0xffffffff80466290 has 10033 byte(s) used and 55503 left)\n\
+             [INFO] user-load: /bin/zash mapped PT_LOAD 0x405000..0x405e78 (filesz=0xe78 memsz=0xe78 w=false) pages 0x405000..0x405000",
+        );
+        let comparison = compare_boot_logs_masked(&before, &after).unwrap();
+        assert_eq!(comparison.unmasked, None);
+        assert_eq!(comparison.masked.len(), 7);
+        assert_eq!(
+            comparison.masked[1],
+            (
+                2,
+                vec![MaskedItem::KernelVirtual, MaskedItem::KernelPhysical]
+            )
+        );
+        assert_eq!(comparison.masked[5], (6, vec![MaskedItem::Size]));
+        assert_eq!(comparison.masked[6], (8, vec![MaskedItem::KernelVirtual]));
+
+        // **スタックの使用量は伏せない**——**移すだけなら動かない。**
+        let mut stack = after.clone();
+        stack[6] = stack[6].replace("used 66944 of", "used 66960 of");
+        assert!(compare_boot_logs_masked(&before, &stack)
+            .unwrap()
+            .unmasked
+            .is_some());
+
+        // **判定の値が 1 つ変わったら、同じ行のアドレスが伏せる項目でも止める。**
+        let mut verdict = after.clone();
+        verdict[1] = verdict[1].replace(")=true", ")=false");
+        let stopped = compare_boot_logs_masked(&before, &verdict).unwrap();
+        assert!(stopped
+            .unmasked
+            .expect("a verdict changed")
+            .contains("line 2:"));
+
+        // **ユーザーのプログラムのアドレスは、数がイメージの物理の範囲に入っても伏せない。**
+        let mut user = after.clone();
+        user[8] = user[8].replace("0x405000..0x405e78", "0x406000..0x406e78");
+        assert!(compare_boot_logs_masked(&before, &user)
+            .unwrap()
+            .unmasked
+            .is_some());
+
+        // **名前で挙げていない数（ここでは新しいページテーブルの枚数）は伏せない。**
+        let mut count = after.clone();
+        count[2] = count[2].replace("4 new page-table", "5 new page-table");
+        assert!(compare_boot_logs_masked(&before, &count)
+            .unwrap()
+            .unmasked
+            .is_some());
+
+        // **行の数が違えば止める。**
+        assert!(compare_boot_logs_masked(&before, &after[..8])
+            .unwrap()
+            .unmasked
+            .is_some());
     }
 
     #[test]
