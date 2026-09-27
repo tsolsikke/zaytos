@@ -1,4 +1,4 @@
-//! 起動媒体の像（`ADR-0068` の HW-e）。**GPT と FAT32 を自分で書き、書いた像を自分で読み返す。**
+//! 起動媒体のイメージ（`ADR-0068` の HW-e）。**GPT と FAT32 を自分で書き、書いたイメージを自分で読み返す。**
 //!
 //! # 何のために在るのか
 //!
@@ -11,14 +11,14 @@
 //! - **読み書きできる FAT の実装ではない。** **1 度だけ書き、そのまま読み返すだけである**
 //!   （[`read_boot_media`]）。**空きの再利用も、断片化も、名前の変更も無い。**
 //! - **長い名前（LFN）を書かない。** **置く 7 つの名前は全部 8.3 に収まる**——**小文字は
-//!   予約バイトの旗で見せる**（[`short_name`]）。**収まらない名前を渡されたら拒む**
+//!   予約バイトのフラグで見せる**（[`short_name`]）。**収まらない名前を渡されたら拒む**
 //!   ——**黙って切り詰めると、ファームウェアが別の名前で探すことになる。**
 //! - **ファイルを触らない。** **入口も出口もバイト列である**（`std::fs` を使わない）
 //!   ——**呼ぶ側（`xtask` の `cmd_image`）が読み書きする。** **こうしておくと、ホストの
 //!   テストが像を建てて読み返すところまでを、ファイルを 1 つも作らずに確かめられる。**
-//! - **時刻を持たない。** **FAT の紀元（1980-01-01 00:00）に固定する**——**像を決定的に
-//!   する**（`kernel/build.rs` が ext2 の時刻を潰しているのと同じ理由。**同じ木から建てた
-//!   像は、いつ建てても同じバイト列である**）。
+//! - **時刻を持たない。** **FAT の紀元（1980-01-01 00:00）に固定する**——**イメージを決定的に
+//!   する**（`kernel/build.rs` が ext2 の時刻を潰しているのと同じ理由。**同じツリーからビルドした
+//!   イメージは、いつビルドしても同じバイト列である**）。
 //!
 //! # なぜ外の道具を使わないのか
 //!
@@ -49,9 +49,9 @@ pub const ESP_FIRST_LBA: u64 = 2048;
 /// # なぜ 64MiB なのか。**FAT32 の下限がすぐ下に在る**
 ///
 /// **置くものは 9.4MB である**（実測。`kernel.elf` 7.2MB・`fs.img` 2MiB・`BOOTX64.EFI` 156KiB）。
-/// **64MiB はその 7 倍で、像の大きさは 66MiB に収まる。**
+/// **64MiB はその 7 倍で、イメージの大きさは 66MiB に収まる。**
 ///
-/// **これより小さくすると FAT32 で建てられない。** **FAT32 は塊の数が 65,525 以上であることを
+/// **これより小さくすると FAT32 でビルドできない。** **FAT32 は塊の数が 65,525 以上であることを
 /// 要求する**（[`MIN_FAT32_CLUSTERS`]）。**64MiB を 1 セクタ 1 塊で切ると 129,022 塊で、
 /// 下限の約 2 倍である**（[`Fat32Layout::for_sectors`] の doc に数が在る）。**32MiB では、
 /// 1 セクタ 1 塊にしても 65,000 塊ほどで下限を割る。**
@@ -61,17 +61,17 @@ pub const ESP_FIRST_LBA: u64 = 2048;
 /// `DskSzToSecPerClus`）と同じ選択で、260MB 以下の FAT32 は 1 セクタ 1 塊である。**
 pub const ESP_SECTORS: u64 = 131_072;
 
-/// 像全体の大きさ（セクタ数）。**66MiB。**
+/// イメージ全体の大きさ（セクタ数）。**66MiB。**
 ///
 /// **先頭の 2048 セクタ（保護 MBR と GPT と隙間）と、末尾の 33 セクタ（控えの GPT）が要る。**
-/// **`sgdisk` で同じ大きさの像を建てると `lastlba` が 135,134 になる**（実測。2026-09-23）
+/// **`sgdisk` で同じ大きさのイメージを作ると `lastlba` が 135,134 になる**（実測。2026-09-23）
 /// ——**こちらの計算と一致する**（135,168 − 34）。
 pub const IMAGE_SECTORS: u64 = 135_168;
 
 /// 1 塊のセクタ数。**1**（[`ESP_SECTORS`] の doc に理由が在る）。
 pub const SECTORS_PER_CLUSTER: u32 = 1;
 
-/// FAT32 が要求する塊の数の下限。**これを下回る像は FAT16 として読まれる**（fatgen103）。
+/// FAT32 が要求する塊の数の下限。**これを下回るイメージは FAT16 として読まれる**（fatgen103）。
 pub const MIN_FAT32_CLUSTERS: u32 = 65_525;
 
 /// FAT32 が扱える塊の数の上限（fatgen103）。**0x0FFFFFF7 以上は特別な値である。**
@@ -89,11 +89,11 @@ const ESP_TYPE_GUID: [u8; 16] = [
 /// ホストのテストが見る。**
 pub const ESP_TYPE_GUID_TEXT: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
 
-/// 像の GUID。**固定である。**
+/// イメージの GUID。**固定である。**
 ///
-/// # なぜ固定なのか。**像を決定的にするため**
+/// # なぜ固定なのか。**イメージを決定的にするため**
 ///
-/// **建てるたびに違う GUID を振ると、像のバイト列が毎回変わる**——**同じ木から建てた像が
+/// **ビルドするたびに違う GUID を振ると、イメージのバイト列が毎回変わる**——**同じツリーからビルドしたイメージが
 /// 同じであることを、チェックサムで言えなくなる**（`kernel/build.rs` が ext2 の時刻を
 /// 潰しているのと同じ理由）。
 ///
@@ -143,7 +143,7 @@ const FAT_EPOCH_DATE: u16 = (1 << 5) | 1;
 // CRC32（GPT が要求する。IEEE 802.3 の多項式）
 // ---------------------------------------------------------------------------
 
-/// GPT のヘッダと項目の配列に要る CRC32。**表を持たない**（要るのは 1 回の像の組み立てだけで、
+/// GPT のヘッダと項目の配列に要る CRC32。**表を持たない**（要るのは 1 回のイメージの組み立てだけで、
 /// 速さは関係が無い）。
 pub fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
@@ -195,7 +195,7 @@ impl Fat32Layout {
     /// # 塊の数を数え直す
     ///
     /// **決めた FAT の大きさから塊の数を引き算で出し直し、FAT32 の範囲に入っていることを
-    /// 見る**（[`MIN_FAT32_CLUSTERS`]・[`MAX_FAT32_CLUSTERS`]）。**下限を割った像は FAT16
+    /// 見る**（[`MIN_FAT32_CLUSTERS`]・[`MAX_FAT32_CLUSTERS`]）。**下限を割ったイメージは FAT16
     /// として読まれる**——**ファームウェアはこちらの意図を知らないので、BPB の
     /// `FilSysType`（文字列）を見て FAT32 と信じることはしない**（fatgen103 は
     /// 「あの文字列を判定に使ってはならない」と明記している）。
@@ -213,7 +213,7 @@ impl Fat32Layout {
             data / sectors_per_cluster
         };
         let needed_for = |sectors_per_fat: u32| -> u32 {
-            // **FAT の 0 番と 1 番は塊ではない**（媒体の種別と終わりの印）——**+2 する。**
+            // **FAT の 0 番と 1 番は塊ではない**（媒体の種別と終わりの目印）——**+2 する。**
             (clusters_for(sectors_per_fat) + 2).div_ceil(entries_per_sector)
         };
         // **足りる値まで増やす。**
@@ -292,21 +292,21 @@ fn is_short_name_char(byte: u8) -> bool {
         )
 }
 
-/// 名前を 8.3 の 11 バイトと、小文字の旗へ写す（純粋ロジック）。
+/// 名前を 8.3 の 11 バイトと、小文字のフラグへ写す（純粋ロジック）。
 ///
-/// # 小文字は旗で見せる。**LFN は書かない**
+/// # 小文字はフラグで見せる。**LFN は書かない**
 ///
 /// **FAT の名前の欄は大文字である。** **予約バイト（12 番）の 0x08 が「本体は小文字」、
 /// 0x10 が「拡張子は小文字」を表す**（Windows NT が足した慣行で、Linux の vfat も見る）。
 /// **`zaytos`・`kernel.elf`・`fs.img`・`startup.nsh` は、これで小文字のまま見える。**
 ///
-/// **ファームウェアがこの旗を見なくても、探す側は困らない**——**FAT の名前の照合は
-/// 大文字小文字を区別しない**（UEFI 仕様の `EFI_FILE_PROTOCOL.Open`）。**旗が無視されると、
+/// **ファームウェアがこのフラグを見なくても、探す側は困らない**——**FAT の名前の照合は
+/// 大文字小文字を区別しない**（UEFI 仕様の `EFI_FILE_PROTOCOL.Open`）。**フラグが無視されると、
 /// Linux で見たときに大文字で出るだけである**（見た目だけの違いである）。
 ///
-/// **本体と拡張子は、それぞれ全部大文字か全部小文字でなければ拒む**——**旗が部分ごとに
+/// **本体と拡張子は、それぞれ全部大文字か全部小文字でなければ拒む**——**フラグが部分ごとに
 /// 1 ビットしか無いので、混ざった名前は表せない。** **表せないものを黙って大文字にすると、
-/// 「置いた名前」と「見える名前」が違う像になる。**
+/// 「置いた名前」と「見える名前」が違うイメージになる。**
 pub fn short_name(name: &str) -> Result<([u8; 11], u8)> {
     let (base, extension) = match name.rsplit_once('.') {
         Some((base, extension)) => (base, extension),
@@ -351,7 +351,7 @@ pub fn short_name(name: &str) -> Result<([u8; 11], u8)> {
     Ok((bytes, flags))
 }
 
-/// 8.3 の 11 バイトと旗から、元の名前へ戻す（[`read_boot_media`] が使う）。
+/// 8.3 の 11 バイトとフラグから、元の名前へ戻す（[`read_boot_media`] が使う）。
 fn long_name(bytes: &[u8; 11], flags: u8) -> String {
     let mut name = String::new();
     for byte in bytes[..8].iter().copied() {
@@ -383,10 +383,10 @@ fn case_of(byte: u8, lower: bool) -> char {
 }
 
 // ---------------------------------------------------------------------------
-// 置くものの木
+// 置くもののツリー
 // ---------------------------------------------------------------------------
 
-/// 像に置くもの（呼ぶ側が渡す形）。**`path` は `/` で区切った、ESP の根からの道である。**
+/// イメージに置くもの（呼ぶ側が渡す形）。**`path` は `/` で区切った、ESP の根からの道である。**
 pub struct MediaFile<'a> {
     pub path: &'a str,
     pub bytes: &'a [u8],
@@ -407,9 +407,9 @@ enum NodeKind {
     File(usize),
 }
 
-/// 建てた像。
+/// ビルドしたイメージ。
 pub struct BootMedia {
-    /// 像そのもの（[`IMAGE_SECTORS`] × [`SECTOR_BYTES`] バイト）。
+    /// イメージそのもの（[`IMAGE_SECTORS`] × [`SECTOR_BYTES`] バイト）。
     pub bytes: Vec<u8>,
     /// 使った幾何（判定行に出す）。
     pub layout: Fat32Layout,
@@ -417,10 +417,10 @@ pub struct BootMedia {
     pub used_clusters: u32,
 }
 
-/// 起動媒体の像を建てる（`ADR-0068` の HW-e）。
+/// 起動媒体のイメージをビルドする（`ADR-0068` の HW-e）。
 ///
 /// **渡された順序のまま並べる**——**ディレクトリの項目の順も、塊の割り当ての順も、
-/// 渡された順である。** **像が決定的であることは、この順序に依る。**
+/// 渡された順である。** **イメージが決定的であることは、この順序に依る。**
 pub fn build_boot_media(files: &[MediaFile]) -> Result<BootMedia> {
     let esp = build_fat32(ESP_SECTORS as u32, SECTORS_PER_CLUSTER, files)?;
     let mut bytes = vec![0u8; IMAGE_SECTORS as usize * SECTOR_BYTES];
@@ -435,7 +435,7 @@ pub fn build_boot_media(files: &[MediaFile]) -> Result<BootMedia> {
     })
 }
 
-/// FAT32 の分割 1 つを建てる（純粋ロジック。**GPT を知らない**）。
+/// FAT32 の分割 1 つをビルドする（純粋ロジック。**GPT を知らない**）。
 fn build_fat32(total_sectors: u32, sectors_per_cluster: u32, files: &[MediaFile]) -> Result<Fat32> {
     let layout = Fat32Layout::for_sectors(total_sectors, sectors_per_cluster)?;
     let mut nodes: Vec<Node> = vec![Node {
@@ -508,7 +508,7 @@ struct Fat32 {
     used_clusters: u32,
 }
 
-/// 木へ 1 つ挿す。**途中のディレクトリは、無ければ作る。**
+/// ツリーへ 1 つ挿入する。**途中のディレクトリは、無ければ作る。**
 fn insert(nodes: &mut Vec<Node>, path: &str, file: usize, byte_len: u32) -> Result<()> {
     let mut at = 0usize;
     let mut parts = path.split('/').peekable();
@@ -516,7 +516,7 @@ fn insert(nodes: &mut Vec<Node>, path: &str, file: usize, byte_len: u32) -> Resu
         if part.is_empty() {
             bail!("{path:?} has an empty component");
         }
-        // **名前が 8.3 に収まることを、ここで見る**（挿す時点で拒む）。
+        // **名前が 8.3 に収まることを、ここで見る**（挿入する時点で拒む）。
         short_name(part)?;
         let last = parts.peek().is_none();
         let existing = match &nodes[at].kind {
@@ -777,7 +777,7 @@ struct Fat32Contents {
     files: Vec<(String, Vec<u8>)>,
 }
 
-/// 読み返した像。
+/// 読み返したイメージ。
 pub struct ReadBack {
     /// 道（`/` 区切り）と中身。**書いた順ではなく、ディレクトリの項目の順である。**
     pub files: Vec<(String, Vec<u8>)>,
@@ -789,12 +789,12 @@ pub struct ReadBack {
     pub esp: (u64, u64),
 }
 
-/// 像を読み返す（`ADR-0068` の HW-e）。**書く側の計算を使わずに、像のバイトだけから辿る。**
+/// イメージを読み返す（`ADR-0068` の HW-e）。**書く側の計算を使わずに、イメージのバイトだけから辿る。**
 ///
 /// # なぜ読み返すのか
 ///
-/// **「書けた」ことは「読める」ことの証明にならない。** **ファームウェアが読むのは像であって、
-/// こちらの意図ではない。** **CRC も塊の鎖も、像から読み直して確かめる**——**書く側と読む側で
+/// **「書けた」ことは「読める」ことの証明にならない。** **ファームウェアが読むのはイメージであって、
+/// こちらの意図ではない。** **CRC も塊の鎖も、イメージから読み直して確かめる**——**書く側と読む側で
 /// 同じ定数を共有しているが、道は別である**（[`Fat32Layout::for_sectors`] の答えと、BPB に
 /// 書かれた数が一致することも見る）。
 pub fn read_boot_media(image: &[u8]) -> Result<ReadBack> {
@@ -1051,7 +1051,7 @@ fn walk(
 mod tests {
     use super::*;
 
-    /// 拒まれたことと、その文を取り出す。**`unwrap_err` は `Debug` を要求するが、像の型に
+    /// 拒まれたことと、その文を取り出す。**`unwrap_err` は `Debug` を要求するが、イメージの型に
     /// `Debug` を持たせると 66MiB を印字できる形になる**——**持たせない。**
     fn refusal<T>(result: Result<T>) -> String {
         match result {
@@ -1133,7 +1133,7 @@ mod tests {
         );
     }
 
-    /// **8.3 に収まらない名前を拒む。** **小文字は旗で見せ、読み返しで元へ戻る。**
+    /// **8.3 に収まらない名前を拒む。** **小文字はフラグで見せ、読み返しで元へ戻る。**
     #[test]
     fn short_names_carry_the_case_in_a_flag() {
         let (name, flags) = short_name("kernel.elf").unwrap();
@@ -1174,7 +1174,7 @@ mod tests {
         build_boot_media(&files).unwrap()
     }
 
-    /// **書いた像を、書く側の計算を使わずに読み返せること。** **道と中身が一致する。**
+    /// **書いたイメージを、書く側の計算を使わずに読み返せること。** **道と中身が一致する。**
     #[test]
     fn the_media_reads_back_what_was_written() {
         let files = sample();
@@ -1201,7 +1201,7 @@ mod tests {
         assert_eq!(build(&files).bytes, build(&files).bytes);
     }
 
-    /// **壊れた CRC を読み返しが捕まえること**（GPT のヘッダの 1 バイトを変える）。
+    /// **壊れた CRC を読み返しが検出すること**（GPT のヘッダの 1 バイトを変える）。
     #[test]
     fn a_broken_gpt_crc_is_caught() {
         let mut media = build(&sample()).bytes;
@@ -1210,7 +1210,7 @@ mod tests {
         assert!(error.contains("CRC"), "got {error}");
     }
 
-    /// **壊れた FAT の鎖を読み返しが捕まえること**（終わりの印を消す）。
+    /// **壊れた FAT の鎖を読み返しが検出すること**（終わりの目印を消す）。
     #[test]
     fn a_chain_without_an_end_is_caught() {
         let mut media = build(&sample()).bytes;

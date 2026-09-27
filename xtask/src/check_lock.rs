@@ -1,9 +1,9 @@
-//! 検査の錠（2026-09-25。検査の体系の改善の ③。`ADR-0069` の決定 7 の 3。運用者の決定）。
+//! 検査のロック（2026-09-25。検査の体系の改善の ③。`ADR-0069` の決定 7 の 3。運用者の決定）。
 //!
 //! # 何を守るか
 //!
 //! **全検査（`check --full`）の間は、QEMU と VirtualBox を使う検査を走らせない**——ホストの負荷が
-//! 全検査の窓と遅さの計器を揺らす（`CLAUDE.md` の絶対ルール 1）。**全検査は排他で持ち、QEMU を起こす
+//! 全検査のウィンドウと遅さの計測を揺らす（`CLAUDE.md` の絶対ルール 1）。**全検査は排他で持ち、QEMU を起動する
 //! 入口は共有で持つ。** **取れなければ待たずに断る**（終了の値 [`REFUSED_EXIT_CODE`]）——**待たせると、
 //! コミットの後の hook の `--commit` が harness の上限で黙って切られる**（運用者の回答 1）。
 //!
@@ -11,34 +11,34 @@
 //!
 //! **`<git rev-parse --git-common-dir>/zaytos/check.lock`**（運用者の回答 3。2026-09-25）。
 //! **環境変数で置き場が変わる形は、排他を黙って外す**——**hook の環境に `XDG_RUNTIME_DIR` が無く、
-//! 全検査は `/run/user` 側を持つ、という形で錠が 2 つになりうる。**
+//! 全検査は `/run/user` 側を持つ、という形でロックが 2 つになりうる。**
 //!
 //! - **根はソースの在り処から決める**（`CARGO_MANIFEST_DIR`。Python の道具は `__file__`）。
 //! - **git は `GIT_*` を外して呼ぶ**——**`GIT_DIR` だけで git の答えが変わる**（実測。2026-09-25）。
-//! - **本の木からも、どの作業木（`git worktree`）からも同じ道になる**（共通の置き場は 1 つ）。
-//! - **置き場は木と同じファイルシステム（ext4）で、flock が効く。** **CI の取り出しにも在る。**
+//! - **メインの作業ツリーからも、どの作業ツリー（`git worktree`）からも同じ道になる**（共通の置き場は 1 つ）。
+//! - **置き場は作業ツリーと同じファイルシステム（ext4）で、flock が効く。** **CI のチェックアウトにも在る。**
 //!
 //! **`~/.cache` に固定する案は採らなかった**——**`HOME` も環境変数である。** 外して決めるには passwd を
 //! 読むことになり、`libc` を持たない `xtask` では /etc/passwd を手で読むことになる。
-//! **限界**——**別の clone は別の錠になる**（いまは clone は 1 つ）。
+//! **限界**——**別の clone は別のロックになる**（いまは clone は 1 つ）。
 //!
 //! # 取るたびに、置き場が flock を扱えることを確かめる
 //!
 //! **同じファイルを 2 度開き、片方で排他を取ると、もう片方は断られること**と、**`/proc/locks` に自分の
-//! 錠が見えること**を見る（[`probe`]）。**扱えなければ検査装置の故障として止める**（運用者の回答 3）
-//! ——**効かない錠は、黙って並走を通す。** **後者は、持ち主を `/proc/locks` で読む形の前提でもある。**
+//! ロックが見えること**を見る（[`probe`]）。**扱えなければ検査装置の故障として止める**（運用者の回答 3）
+//! ——**効かないロックは、黙って並行実行を通す。** **後者は、持ち主を `/proc/locks` で読む形の前提でもある。**
 //!
 //! # 持ち主の子は取らずに進む
 //!
-//! **全検査の中から起こす QEMU と道具は、錠を取らない**——**持ち主が排他で持っているので、取ろうと
+//! **全検査の中から起動する QEMU と道具は、ロックを取らない**——**持ち主が排他で持っているので、取ろうと
 //! すると自分の親に断られる。** **子へは持ち主の pid を [`OWNER_ENV`] で渡す。** **その pid が自分の
-//! 祖先で、かつ `/proc/locks` でこの錠を持っているときだけ、取らずに進む**——**残った環境変数で錠を
+//! 祖先で、かつ `/proc/locks` でこのロックを持っているときだけ、取らずに進む**——**残った環境変数でロックを
 //! すり抜けないようにするため。**
 //!
 //! # 死んだ持ち主
 //!
-//! **flock はプロセスが終われば（SIGKILL を含む）カーネルが放す**——**錠が残る状態は起きない**
-//! （基底の確かめが毎回見る）。**錠の中身（pid・コマンド・コミット・木・開始・ログ）は断るときに
+//! **flock はプロセスが終われば（SIGKILL を含む）カーネルが放す**——**ロックが残る状態は起きない**
+//! （基本の検査の確かめが毎回見る）。**ロックの中身（pid・コマンド・コミット・作業ツリー・開始・ログ）は断るときに
 //! 見せるためだけのもので、正は flock である。** **断るときの持ち主は `/proc/locks` から読む**
 //! ——**中身は前の持ち主のものが残っていることがある。**
 
@@ -58,13 +58,13 @@ use crate::launch::HarnessFault;
 /// 子へ持ち主の pid を渡す環境変数。**置き場は決めない**（置き場は git の共通の置き場だけで決まる）。
 pub const OWNER_ENV: &str = "ZAYTOS_CHECK_LOCK_OWNER";
 
-/// 錠が取れずに断ったときの終了の値（`EX_TEMPFAIL`）。**検査の失敗（1）とも上限（3）とも分ける。**
+/// ロックが取れずに断ったときの終了の値（`EX_TEMPFAIL`）。**検査の失敗（1）とも上限（3）とも分ける。**
 pub const REFUSED_EXIT_CODE: i32 = 75;
 
-/// 錠の取り方。
+/// ロックの取り方。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
-    /// QEMU を使う入口（`--commit`・`flaky`・`run`・`screenshot`、起動の口）。**並んで持てる。**
+    /// QEMU を使う入口（`--commit`・`flaky`・`run`・`screenshot`、起動の入口）。**並んで持てる。**
     Shared,
     /// 全検査（`check --full`）。
     Exclusive,
@@ -87,7 +87,7 @@ impl Mode {
     }
 }
 
-/// このプロセスの錠の状態。
+/// このプロセスのロックの状態。
 enum State {
     /// 自分で持っている。**ファイルを開いたまま、プロセスが終わるまで持つ**（閉じると放れる）。
     Held {
@@ -101,7 +101,7 @@ enum State {
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 
-/// 錠の置き場（純粋な論理）。**git の共通の置き場の下の `zaytos/`。**
+/// ロックの置き場（純粋な論理）。**git の共通の置き場の下の `zaytos/`。**
 pub fn lock_dir_in(common_dir: &Path) -> PathBuf {
     common_dir.join("zaytos")
 }
@@ -145,12 +145,12 @@ pub fn git_common_dir(root: &Path) -> Result<PathBuf> {
     fs::canonicalize(&path).with_context(|| format!("could not resolve {}", path.display()))
 }
 
-/// 錠のファイルの道。
+/// ロックのファイルの道。
 pub fn lock_path(root: &Path) -> Result<PathBuf> {
     Ok(lock_dir_in(&git_common_dir(root)?).join("check.lock"))
 }
 
-/// 錠を開く（無ければ作る。**中身は消さない**）。
+/// ロックを開く（無ければ作る。**中身は消さない**）。
 fn open(path: &Path) -> Result<File> {
     OpenOptions::new()
         .read(true)
@@ -242,7 +242,7 @@ fn ancestors() -> Vec<u32> {
     found
 }
 
-/// 持ち主の下で走っているか（純粋な論理）。**名前の pid が祖先で、その pid がこの錠を持っていること。**
+/// 持ち主の下で走っているか（純粋な論理）。**名前の pid が祖先で、その pid がこのロックを持っていること。**
 /// **排他を求めるなら、持ち主も排他で持っていること**（共有の持ち主の下では、ほかの共有が居うる）。
 fn covering_owner(
     named: Option<&str>,
@@ -313,7 +313,7 @@ pub fn now() -> (u64, String) {
     (unix, local)
 }
 
-/// 錠の中身（排他の持ち主が書く。**断るときに見せるためだけのもの**）。
+/// ロックの中身（排他の持ち主が書く。**断るときに見せるためだけのもの**）。
 pub fn owner_content(command: &str, commit: &str, tree: &str, log: &str) -> String {
     let (unix, local) = now();
     format!(
@@ -331,7 +331,7 @@ fn started_unix_in(content: &str) -> Option<u64> {
         .and_then(|value| value.trim().parse().ok())
 }
 
-/// 錠の持ち主（pid・取り方・コマンドの行）。
+/// ロックの持ち主（pid・取り方・コマンドの行）。
 pub type Holder = (u32, Mode, String);
 
 /// 断ったときに見せるもの。
@@ -348,7 +348,7 @@ enum Attempt {
     Refused(Refusal),
 }
 
-/// あるファイルで錠を取ってみる（本の錠と、基底の確かめの一時の錠が使う）。
+/// あるファイルでロックを取ってみる（本物のロックと、基本の検査の確かめの一時のロックが使う）。
 fn attempt(path: &Path, mode: Mode, content: Option<&str>) -> Result<Attempt> {
     let dir = path.parent().context("the lock path has no directory")?;
     fs::create_dir_all(dir).with_context(|| format!("could not create {}", dir.display()))?;
@@ -359,7 +359,7 @@ fn attempt(path: &Path, mode: Mode, content: Option<&str>) -> Result<Attempt> {
         return Ok(Attempt::Taken(State::Covered { owner }));
     }
     if let Some(named) = &named {
-        // **言ってから取りに行く**——**黙って取りに行くと、持ち主の子が断られた理由が読めない。**
+        // **出力してから取りに行く**——**黙って取りに行くと、持ち主の子が断られた理由が読めない。**
         eprintln!(
             "(info) the check lock: {OWNER_ENV}={named} does not name an ancestor holding {} as \
              needed; taking the lock in the usual way",
@@ -372,7 +372,7 @@ fn attempt(path: &Path, mode: Mode, content: Option<&str>) -> Result<Attempt> {
     };
     match tried {
         Ok(()) => {
-            // **VirtualBox の VM が起こしたままなら、全検査は断る**（`tools/vbox-vm.py start` が残す印）。
+            // **VirtualBox の VM が起こしたままなら、全検査は断る**（`tools/vbox-vm.py start` が残す目印）。
             // **VM は Windows 側で走るので `/proc` では見えず、一覧を読む操作は使わない決まりである。**
             let vms = if mode == Mode::Exclusive {
                 vbox_left_running(dir)
@@ -444,7 +444,7 @@ fn refusal(file: &File) -> Refusal {
     }
 }
 
-/// `tools/vbox-vm.py start` が起こしたまま残した VM の名前（錠の置き場の `vbox-running/`）。
+/// `tools/vbox-vm.py start` が起こしたまま残した VM の名前（ロックの置き場の `vbox-running/`）。
 fn vbox_left_running(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir.join("vbox-running"))
         .map(|entries| {
@@ -504,10 +504,10 @@ fn refusal_message(what: &str, path: &Path, refusal: &Refusal) -> String {
     text
 }
 
-/// 錠を取る。**取れなければ、断りの文を返す**（走行の記録へ 1 行残してから）。
+/// ロックを取る。**取れなければ、断りの文を返す**（実行の記録へ 1 行残してから）。
 ///
 /// **既に持っているか、持ち主の下で走っているなら何もしない。** `content` は排他で取ったときに
-/// 錠へ書く中身である（[`owner_content`]）。**断りを受けた側は、自分の記録を書いてから
+/// ロックへ書く中身である（[`owner_content`]）。**断りを受けた側は、自分の記録を書いてから
 /// [`REFUSED_EXIT_CODE`] で終えること**（`cmd_check` が検査の記録へ「断られた」を残す）。
 pub fn hold(mode: Mode, what: &str, content: Option<String>) -> Result<Option<String>> {
     {
@@ -540,7 +540,7 @@ pub fn hold(mode: Mode, what: &str, content: Option<String>) -> Result<Option<St
     }
 }
 
-/// 錠を取る。**取れなければ、断りを出して [`REFUSED_EXIT_CODE`] で終える。**
+/// ロックを取る。**取れなければ、断りを出して [`REFUSED_EXIT_CODE`] で終える。**
 pub fn hold_or_exit(mode: Mode, what: &str, content: Option<String>) -> Result<()> {
     if let Some(message) = hold(mode, what, content)? {
         eprintln!("{message}");
@@ -549,8 +549,8 @@ pub fn hold_or_exit(mode: Mode, what: &str, content: Option<String>) -> Result<(
     Ok(())
 }
 
-/// 本の木（git の共通の置き場の親）。**記録は本の木の `target/full-check/` に置く**——**作業木で
-/// 走った全検査の記録も、本の木へ集める。**
+/// メインの作業ツリー（git の共通の置き場の親）。**記録はメインの作業ツリーの `target/full-check/` に置く**——**作業ツリーで
+/// 走った全検査の記録も、メインの作業ツリーへ集める。**
 pub fn main_tree(root: &Path) -> Result<PathBuf> {
     let common = git_common_dir(root)?;
     common
@@ -559,7 +559,7 @@ pub fn main_tree(root: &Path) -> Result<PathBuf> {
         .with_context(|| format!("{} has no parent directory", common.display()))
 }
 
-/// いまの錠の持ち主（`/proc/locks` から。`--status` が出す）と、排他の持ち主が書いた中身。
+/// いまのロックの持ち主（`/proc/locks` から。`--status` が出す）と、排他の持ち主が書いた中身。
 pub fn current_holders(root: &Path) -> Result<(Vec<Holder>, String)> {
     let path = lock_path(root)?;
     let Ok(file) = OpenOptions::new().read(true).open(&path) else {
@@ -574,7 +574,7 @@ pub fn vbox_marks(root: &Path) -> Result<Vec<String>> {
     Ok(vbox_left_running(&lock_dir_in(&git_common_dir(root)?)))
 }
 
-/// QEMU を起こす前に呼ぶ（起動の口の裏打ち）。**入口で取り損ねた経路も、ここで取る。**
+/// QEMU を起動する前に呼ぶ（起動の入口の裏打ち）。**入口で取り損ねた経路も、ここで取る。**
 pub fn hold_for_qemu(what: &str) -> Result<()> {
     hold_or_exit(Mode::Shared, what, None)
 }
@@ -596,7 +596,7 @@ pub fn pass_owner(command: &mut Command) {
 }
 
 /// 全検査が走っているか（`/proc/locks` に排他の持ち主が居るか）と、その下で走っているか。
-/// **錠は取らない**——**基底は錠を取らずに走るので、見るだけである。**
+/// **ロックは取らない**——**基本の検査はロックを取らずに走るので、見るだけである。**
 fn full_check_state(root: &Path) -> Option<(bool, bool)> {
     let path = lock_path(root).ok()?;
     let file = OpenOptions::new().read(true).open(&path).ok()?;
@@ -607,10 +607,10 @@ fn full_check_state(root: &Path) -> Option<(bool, bool)> {
     Some((running, covered))
 }
 
-/// 基底の入口で呼ぶ。**全検査の間に走ったことだけを残す**（運用者の決定 (7)。止めない）。
+/// 基本の検査の入口で呼ぶ。**全検査の間に走ったことだけを残す**（運用者の決定 (7)。止めない）。
 ///
-/// **共有の持ち主は全検査と重ならない**（重なれば、どちらかが断られている）。**重なるのは、錠を
-/// 取らない基底と、断られた走行だけである**——**だから残すのはその 2 つだけでよい。**
+/// **共有の持ち主は全検査と重ならない**（重なれば、どちらかが断られている）。**重なるのは、ロックを
+/// 取らない基本の検査と、断られた実行だけである**——**だから残すのはその 2 つだけでよい。**
 pub fn note_a_run_without_the_lock(what: &str) {
     let Ok(root) = crate::workspace_root() else {
         return;
@@ -620,7 +620,7 @@ pub fn note_a_run_without_the_lock(what: &str) {
     }
 }
 
-/// 走行を 1 行残す（`<錠の置き場>/runs.tsv`）。**止めない**——**残せなくても検査は進める。**
+/// 実行を 1 行残す（`<錠の置き場>/runs.tsv`）。**止めない**——**残せなくても検査は進める。**
 pub fn log_run(what: &str, outcome: &str) {
     let Ok(root) = crate::workspace_root() else {
         return;
@@ -641,7 +641,7 @@ pub fn log_run(what: &str, outcome: &str) {
     }
 }
 
-/// 残した走行のうち、`since` 以降のもの（純粋な論理）。
+/// 残した実行のうち、`since` 以降のもの（純粋な論理）。
 fn runs_since(text: &str, since: u64) -> Vec<String> {
     text.lines()
         .filter_map(|line| {
@@ -670,8 +670,8 @@ pub fn other_runs_during_this_full() -> Option<Vec<String>> {
     Some(runs_since(&runs, since))
 }
 
-/// 基底の確かめ（2026-09-25。運用者の回答 3）。**錠の道が本の木・作業木・環境を減らした子で同じで
-/// （`xtask` と `tools/check_lock.py` の両方）、flock が効き、殺された持ち主の錠が放れ、断りが 75 で
+/// 基本の検査の確かめ（2026-09-25。運用者の回答 3）。**ロックの道がメインの作業ツリー・作業ツリー・環境を減らした子で同じで
+/// （`xtask` と `tools/check_lock.py` の両方）、flock が効き、殺された持ち主のロックが放れ、断りが 75 で
 /// 終わり、持ち主の子だけが取らずに進み、VM を起こしたままなら全検査が断られること。**
 pub fn self_check(root: &Path) -> Result<String> {
     let exe = std::env::current_exe().context("could not find the xtask binary")?;
@@ -691,8 +691,8 @@ pub fn self_check(root: &Path) -> Result<String> {
         "path".into(),
     ];
 
-    // (1) 道——本の木（このプロセス）、環境を減らした子（`xtask` と Python）、全検査の作業木（在れば）、
-    // 作った作業木。**hook の環境は、環境を減らした子で代える**（`XDG_RUNTIME_DIR` も `HOME` も無く、
+    // (1) 道——メインの作業ツリー（このプロセス）、環境を減らした子（`xtask` と Python）、全検査の作業ツリー（在れば）、
+    // 作った作業ツリー。**hook の環境は、環境を減らした子で代える**（`XDG_RUNTIME_DIR` も `HOME` も無く、
     // `GIT_DIR` は嘘の場所を指す）。
     let here = lock_path(root)?;
     for (who, argv) in [
@@ -748,7 +748,7 @@ pub fn self_check(root: &Path) -> Result<String> {
     probe(here.parent().context("the lock path has no directory")?)?;
 
     // (3) 断りは 75 で、持ち主を挙げる（`xtask` も Python も）。(4) 持ち主を名乗っても、子孫でなければ
-    // 断られる。(5) 殺された持ち主の錠は放れる。
+    // 断られる。(5) 殺された持ち主のロックは放れる。
     let lock = scratch.join("check.lock");
     let mut holder = spawn_holder(&exe, &lock, &[])?;
     let outcome = (|| -> Result<()> {
@@ -859,7 +859,7 @@ fn reduced_env_path(argv: &[std::ffi::OsString], root: Option<&Path>) -> Result<
     ))
 }
 
-/// 一時の置き場に、作業木を 1 つ持つ git の木を作る。
+/// 一時の置き場に、作業ツリーを 1 つ持つ git のリポジトリを作る。
 fn make_repo_with_worktree(scratch: &Path) -> Result<(PathBuf, PathBuf)> {
     let repo = scratch.join("repo");
     let worktree = scratch.join("wt");
@@ -887,7 +887,7 @@ fn make_repo_with_worktree(scratch: &Path) -> Result<(PathBuf, PathBuf)> {
     Ok((repo, worktree))
 }
 
-/// 一時の錠を排他で持つ子を起こし、持ったことを確かめる。
+/// 一時のロックを排他で持つ子を起動し、持ったことを確かめる。
 fn spawn_holder(exe: &Path, lock: &Path, extra: &[&str]) -> Result<std::process::Child> {
     let mut child = Command::new(exe)
         .args(["check-lock", "hold"])
@@ -936,7 +936,7 @@ fn read_line_within(
     receiver.recv_timeout(limit).ok()
 }
 
-/// 子で一時の錠を取ってみる（終了の値と標準エラー）。
+/// 子で一時のロックを取ってみる（終了の値と標準エラー）。
 fn try_in_child(
     exe: &Path,
     lock: &Path,
@@ -960,7 +960,7 @@ fn try_in_child(
     ))
 }
 
-/// Python の道具で一時の錠を共有で取ってみる（終了の値と標準エラー）。
+/// Python の道具で一時のロックを共有で取ってみる（終了の値と標準エラー）。
 fn try_in_python(tool: &Path, lock: &Path, named: Option<u32>) -> Result<(Option<i32>, String)> {
     let mut child = Command::new("python3");
     child.arg(tool).arg("try").arg(lock).env_remove(OWNER_ENV);
@@ -1014,12 +1014,12 @@ pub fn output_within(command: &mut Command, limit: Duration) -> Result<std::proc
     })
 }
 
-/// 隠した副命令 `cargo xtask check-lock ...`（基底の確かめが使う）。
+/// 隠したサブコマンド `cargo xtask check-lock ...`（基本の検査の確かめが使う）。
 ///
-/// - `path [--root DIR]`——錠の道を出す。
-/// - `hold FILE MODE [--then-try MODE]`——一時の錠を持ち、`held` と出して眠る（上限 60 秒）。
-///   `--then-try` なら、持ったまま自分の子に同じ錠を取らせ、その結果を出す。
-/// - `try FILE MODE`——一時の錠を取ってみる（取れれば 0、断られれば 75）。
+/// - `path [--root DIR]`——ロックの道を出す。
+/// - `hold FILE MODE [--then-try MODE]`——一時のロックを持ち、`held` と出して眠る（上限 60 秒）。
+///   `--then-try` なら、持ったまま自分の子に同じロックを取らせ、その結果を出す。
+/// - `try FILE MODE`——一時のロックを取ってみる（取れれば 0、断られれば 75）。
 pub fn command(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("path") => {
@@ -1047,7 +1047,7 @@ pub fn command(args: &[String]) -> Result<()> {
             println!("held");
             std::io::stdout().flush().ok();
             if let Some(then) = then {
-                // **自分の子に同じ錠を取らせる**——**`xtask` と Python の道具の両方。**
+                // **自分の子に同じロックを取らせる**——**`xtask` と Python の道具の両方。**
                 let exe = std::env::current_exe().context("could not find the xtask binary")?;
                 let tool = crate::workspace_root()?.join("tools").join("check_lock.py");
                 let mut xtask = Command::new(exe);
@@ -1065,7 +1065,7 @@ pub fn command(args: &[String]) -> Result<()> {
                     std::io::stdout().flush().ok();
                 }
             }
-            // **上限つきで眠る**——**親が死んでも、60 秒で自分で降りる。**
+            // **上限つきで眠る**——**親が死んでも、60 秒で自分で終了する。**
             std::thread::sleep(Duration::from_secs(60));
             drop(state);
             Ok(())
@@ -1099,9 +1099,9 @@ pub fn command(args: &[String]) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// **錠の fd は子へ継がれない**（2026-09-26。第三者レビューの取り込み 4.(3)）。**std はファイルを
-    /// `O_CLOEXEC` で開くので、起こした子（`exec` の後）は錠を持たない**——**持ち主が閉じれば、子が
-    /// 生きていても放れる。** **継がれていれば、子の写しが錠を持ち続け、2 度目の取りが断られる。**
+    /// **ロックの fd は子へ継がれない**（2026-09-26。第三者レビューの取り込み 4.(3)）。**std はファイルを
+    /// `O_CLOEXEC` で開くので、起動した子（`exec` の後）はロックを持たない**——**持ち主が閉じれば、子が
+    /// 生きていても放れる。** **継がれていれば、子のコピーがロックを持ち続け、2 度目の取りが断られる。**
     #[test]
     fn the_lock_is_not_inherited_by_a_child() {
         let dir = std::env::temp_dir().join(format!("zaytos-lock-inherit-{}", std::process::id()));
@@ -1112,8 +1112,8 @@ mod tests {
         held.try_lock().unwrap();
         let mut child = Command::new("sleep").arg("5").spawn().unwrap();
         drop(held);
-        // **ほかのテストの糸が子を起こす途中（fork の後、exec の前）は、その子が fd の写しを持つ**
-        // （2026-09-26。並べて回すと 30 回に 5 回落ち、糸 1 本では 30 回とも通った）。**写しは exec で
+        // **ほかのテストの糸が子を起動する途中（fork の後、exec の前）は、その子が fd のコピーを持つ**
+        // （2026-09-26。並べて実行すると 30 回に 5 回落ち、糸 1 本では 30 回とも通った）。**コピーは exec で
         // 閉じるので、2 秒まで取り直す**——**継がれていれば、`sleep` の 5 秒のあいだ取れない。**
         let again = open(&path).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -1131,7 +1131,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// **`/proc/locks` の flock の行を読む**（形は実測。2026-09-25）。**待っている行と POSIX の錠は読まない。**
+    /// **`/proc/locks` の flock の行を読む**（形は実測。2026-09-25）。**待っている行と POSIX のロックは読まない。**
     #[test]
     fn flock_lines_are_read_from_proc_locks() {
         let locks = "31: FLOCK  ADVISORY  WRITE 2317934 08:30:1000459 0 EOF\n\
@@ -1146,7 +1146,7 @@ mod tests {
     }
 
     /// **装置の番号は glibc の分け方で出す**——**`/proc/locks` の `08:30` と比べられる**（実測。
-    /// 2026-09-25 に、ここの木の置き場で `08:30` だった）。
+    /// 2026-09-25 に、ここの作業ツリーの置き場で `08:30` だった）。
     #[test]
     fn device_numbers_split_as_glibc_does() {
         assert_eq!(device_numbers(0x830), (0x08, 0x30));
@@ -1157,7 +1157,7 @@ mod tests {
         );
     }
 
-    /// **祖先で、しかも錠を持つ pid の下でだけ取らずに進む。** **排他を求めるなら、持ち主も排他。**
+    /// **祖先で、しかもロックを持つ pid の下でだけ取らずに進む。** **排他を求めるなら、持ち主も排他。**
     #[test]
     fn only_a_descendant_of_a_holder_goes_ahead_without_the_lock() {
         let holders = [(100, Mode::Exclusive), (200, Mode::Shared)];

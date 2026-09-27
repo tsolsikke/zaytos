@@ -1,10 +1,10 @@
-//! 検査の時間の計測（2026-09-24。検査の体系の見直しの 7.(1)。**計測のためだけの走行を増やさない**——
+//! 検査の時間の計測（2026-09-24。検査の体系の見直しの 7.(1)。**計測のためだけの実行を増やさない**——
 //! 完了時の `--full` に相乗りさせる）。
 //!
-//! **項目ごとに、ビルド・像の準備・外の道具・固定の待ち・回る待ちの回数と時間を数える。** QEMU の走行は
-//! 起動の口（`launch`）が数える。**「項目の数」「ビルドの回数」「VM の起動の回数」を分けて数える**
+//! **項目ごとに、ビルド・イメージの準備・外の道具・固定の待ち・空回りする待ちの回数と時間を数える。** QEMU の実行は
+//! 起動の入口（`launch`）が数える。**「項目の数」「ビルドの回数」「VM の起動の回数」を分けて数える**
 //! ——**ビルドは `cargo` を呼んだ回数で、中身が変わらず何もしなかった回も 1 回と数える**（時間は
-//! その分短い）。**共有の準備（同じ像を使い回す等）は、準備した項目にだけ数える。**
+//! その分短い）。**共有の準備（同じイメージを使い回す等）は、準備した項目にだけ数える。**
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -14,13 +14,13 @@ use std::time::{Duration, Instant};
 pub enum Kind {
     /// `cargo build`（カーネル・ブートローダ）。
     Build,
-    /// 像の準備（ESP の組み立て・起動媒体の像・OVMF の変数の写し）。
+    /// イメージの準備（ESP の組み立て・起動媒体のイメージ・OVMF の変数のコピー）。
     Stage,
     /// 外の道具（`debugfs`・`e2fsck`・`objdump`・`sfdisk` 等）。
     Tool,
     /// 固定の待ち（決まった時間眠る）。
     FixedWait,
-    /// 回る待ち（条件を見ては短く眠る。その眠りの合計）。
+    /// 空回りする待ち（条件を見ては短く眠る。その眠りの合計）。
     PollWait,
 }
 
@@ -105,7 +105,7 @@ pub fn sleep_fixed(duration: Duration) {
     timed(Kind::FixedWait, || std::thread::sleep(duration));
 }
 
-/// 回る待ちの 1 回分の眠り。
+/// 空回りする待ちの 1 回分の眠り。
 pub fn sleep_poll(duration: Duration) {
     timed(Kind::PollWait, || std::thread::sleep(duration));
 }
@@ -128,7 +128,7 @@ pub fn take_item_line() -> String {
     line(&values)
 }
 
-/// 全体の分の時間（検査の記録へ残す。`cargo` の時間は遅さの計器が差し引く）。
+/// 全体の分の時間（検査の記録へ残す。`cargo` の時間は遅さの計測が差し引く）。
 pub fn total_time(kind: Kind) -> Duration {
     TOTAL[kind as usize].read().1
 }

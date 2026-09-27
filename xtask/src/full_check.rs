@@ -1,28 +1,28 @@
-//! 全検査を別の作業木で回す口と、検査の記録（2026-09-25。検査の体系の改善の ③。`ADR-0069` の
+//! 全検査を別の作業ツリーで実行する入口と、検査の記録（2026-09-25。検査の体系の改善の ③。`ADR-0069` の
 //! 決定 7 の 3。運用者の決定）。
 //!
 //! # 形
 //!
-//! **`cargo xtask full [<コミット>]` を本の木から打つ**（既定は HEAD）。**錠を排他で取り、作業木
-//! （`target/full-check/wt`）を `<コミット>` に合わせ、そこで `cargo xtask check --full` を子として回す。**
-//! **検査しているのは作業木なので、走っている間も本の木は触ってよい**——**ただし QEMU と VirtualBox を
-//! 使う検査は錠で断られる**（`check_lock`）。**ログは本の木の `target/full-check/logs/` に書く。**
+//! **`cargo xtask full [<コミット>]` をメインの作業ツリーから打つ**（既定は HEAD）。**ロックを排他で取り、作業ツリー
+//! （`target/full-check/wt`）を `<コミット>` に合わせ、そこで `cargo xtask check --full` を子として実行する。**
+//! **検査しているのは作業ツリーなので、走っている間もメインの作業ツリーは触ってよい**——**ただし QEMU と VirtualBox を
+//! 使う検査はロックで断られる**（`check_lock`）。**ログはメインの作業ツリーの `target/full-check/logs/` に書く。**
 //! **待ち方は今と同じ**（Bash の背景実行と harness の知らせ）。
 //!
-//! **作業木は本の木の `target/` の下に置く**（運用者の回答 2）——`tools/frame-sizes.py` の作業木と
+//! **作業ツリーはメインの作業ツリーの `target/` の下に置く**（運用者の回答 2）——`tools/frame-sizes.py` の作業ツリーと
 //! 同じ形で、作業場所の中に収まる。**初回は冷えている**（組ごとの初回ビルド）。
 //!
 //! # 記録
 //!
-//! **検査の記録は本の木の `target/full-check/records.tsv` に 1 回 1 行で残す**——**基底・`--commit`・
-//! `--full` の全部と、断られた回**（`cmd_check` が書く）。**作業木で走った全検査の記録も本の木へ集める。**
-//! **木のハッシュと、走らせたときの作業ツリーの汚れ（`git status --porcelain` の行数）を持つ**——
+//! **検査の記録はメインの作業ツリーの `target/full-check/records.tsv` に 1 回 1 行で残す**——**基本の検査・`--commit`・
+//! `--full` の全部と、断られた回**（`cmd_check` が書く）。**作業ツリーで走った全検査の記録もメインの作業ツリーへ集める。**
+//! **ツリーのハッシュと、走らせたときの作業ツリーの汚れ（`git status --porcelain` の行数）を持つ**——
 //! **汚れが 0 の記録だけが「その木そのものが通った」と言える。**
 //!
 //! **`--status` と push の前の関門は、この記録だけを読む**（二重に持たない。運用者の足す1点）。
-//! **コミットに要る検査は、`kernel/` か `common/` に触れたものは `--commit`、他は基底である**
-//! （`.claude/hooks/check_after_commit.py` と同じ規則。**基底の確かめが両者の一致を見る**）。
-//! **上下は `--full` ⊇ `--commit` ⊇ 基底**（`--full` は起動ログの突き合わせも回す）。
+//! **コミットに要る検査は、`kernel/` か `common/` に触れたものは `--commit`、他は基本の検査である**
+//! （`.claude/hooks/check_after_commit.py` と同じ規則。**基本の検査の確かめが両者の一致を見る**）。
+//! **上下は `--full` ⊇ `--commit` ⊇ 基本の検査**（`--full` は起動ログの突き合わせも実行する）。
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -39,32 +39,32 @@ use crate::check_lock::{self, git, git_line};
 use crate::family;
 use crate::launch::{self, HarnessFault, HOST_SYSTEM_DRIVE, HOST_VHD_DRIVE};
 
-/// `cargo xtask full` が子の全検査へログの道を渡す環境変数（錠の中身と記録に書くだけ）。
+/// `cargo xtask full` が子の全検査へログのパスを渡す環境変数（ロックの中身と記録に書くだけ）。
 pub const LOG_ENV: &str = "ZAYTOS_CHECK_LOG";
 
 /// `cargo xtask full` が子の全検査へ、始めに読んだ WSL の置き場の書いたセクタ数を渡す環境変数
-/// （2026-09-25）。**作業木の取り出しの分も、その全検査の書いた量に含めるため。**
+/// （2026-09-25）。**作業ツリーのチェックアウトの分も、その全検査の書いた量に含めるため。**
 pub const DISK_START_ENV: &str = "ZAYTOS_CHECK_DISK_START";
 
-/// `cargo xtask full` が子の全検査へ、作業木が冷えていたか（`cold`／`warm`）を渡す環境変数（2026-09-26。
+/// `cargo xtask full` が子の全検査へ、作業ツリーが冷えていたか（`cold`／`warm`）を渡す環境変数（2026-09-26。
 /// 記録に書くだけ）。
 pub const START_STATE_ENV: &str = "ZAYTOS_CHECK_START_STATE";
 
-/// 作業木の `target/` が本の木の `target/` のこの分の 1 より小さければ「冷えた」とみなす（2026-09-26。運用者の
-/// 足す1点。値は案）。**1 回走った後の作業木は本の木の 54% だった**（実測。30.7 GiB／56.8 GiB）。**incremental を
-/// 消すと 2 割ほどになる見込み**（推測。本の木の incremental は 43.2 GB）。
+/// 作業ツリーの `target/` がメインの作業ツリーの `target/` のこの分の 1 より小さければ「冷えた」とみなす（2026-09-26。運用者の
+/// 足す1点。値は案）。**1 回走った後の作業ツリーはメインの作業ツリーの 54% だった**（実測。30.7 GiB／56.8 GiB）。**incremental を
+/// 消すと 2 割ほどになる見込み**（推測。メインの作業ツリーの incremental は 43.2 GB）。
 const COLD_FRACTION_DENOM: u64 = 4;
 
 /// この下に触ったコミットは `--commit` が要る（`.claude/hooks/check_after_commit.py` の
-/// `IMAGE_PATH_PREFIXES` と同じ。**基底の確かめが一致を見る**）。
+/// `IMAGE_PATH_PREFIXES` と同じ。**基本の検査の確かめが一致を見る**）。
 pub const IMAGE_PATH_PREFIXES: [&str; 2] = ["kernel/", "common/"];
 
 /// 記録の頭の行。
 ///
 /// **2026-09-25 に 4 欄を足した**（書いた量と、終わりの空き 3 つ。運用者の足す1点）。**足す前の 11 欄の行も読む。**
-/// **2026-09-26 にさらに 2 欄を足した**（全検査の始めに作業木が冷えていたか、その間に走った他の検査の数）。
-/// **同じ日に形を改めた**（第 2 版。第三者レビューの取り込み 4.(4)）——**行の頭に版の `2`、終わりに印の
-/// `end` を置き、環境・走行前の選び・当たりの 3 欄を足した**（[`RECORD_VERSION`]）。
+/// **2026-09-26 にさらに 2 欄を足した**（全検査の始めに作業ツリーが冷えていたか、その間に走った他の検査の数）。
+/// **同じ日に形を改めた**（第 2 版。第三者レビューの取り込み 4.(4)）——**行の頭に版の `2`、終わりにマーカーの
+/// `end` を置き、環境・実行前の選択・当たりの 3 欄を足した**（[`RECORD_VERSION`]）。
 const RECORDS_HEADER: &str =
     "# version\tunix\twhen\tlevel\toutcome\tcommit\ttree\tdirty\titems\titem_seconds\t\
      build_seconds\twritten\twsl_free\thost_free\tsystem_free\tstart_state\tother_runs\tenv\t\
@@ -78,13 +78,13 @@ const RECORDS_HEADER: &str =
 /// ためである**——**古い形の頭は時刻（10 桁）なので取り違えない。**
 const RECORD_VERSION: &str = "2";
 
-/// 第 2 版の行の終わりの印（2026-09-26）。
+/// 第 2 版の行の終わりのマーカー（2026-09-26）。
 const RECORD_END: &str = "end";
 
-/// 第 2 版の行の欄の数（版と終わりの印を含む）。
+/// 第 2 版の行の欄の数（版と終わりのマーカーを含む）。
 const RECORD_FIELDS: usize = 22;
 
-/// 検査の段。**並びが上下である**（`--full` ⊇ `--commit` ⊇ 基底）。
+/// 検査の段階。**並びが上下である**（`--full` ⊇ `--commit` ⊇ 基本の検査）。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Level {
     Base,
@@ -124,7 +124,7 @@ impl Level {
 pub struct Record {
     pub unix: u64,
     pub when: String,
-    /// `base`・`commit`・`full`、または push の関門を旗で越えた `push`。
+    /// `base`・`commit`・`full`、または push の関門をフラグで越えた `push`。
     pub level: String,
     /// `pass`・`fail`・`refused`・`cut`、または `override`。
     pub outcome: String,
@@ -135,27 +135,27 @@ pub struct Record {
     pub items: Option<usize>,
     pub item_seconds: Option<f64>,
     pub build_seconds: Option<f64>,
-    /// その検査の間に WSL の置き場へ書いたバイト数（`/proc/diskstats` の差）。**他の走行の分も数える。**
+    /// その検査の間に WSL の置き場へ書いたバイト数（`/proc/diskstats` の差）。**他の実行の分も数える。**
     pub written: Option<u64>,
     /// 終わりの空き（WSL の中・VHD の載ったドライブ・Windows のドライブ）。**WSL の外ではドライブは `None`。**
     pub wsl_free: Option<u64>,
     pub host_free: Option<u64>,
     pub system_free: Option<u64>,
-    /// 全検査の始めに作業木が冷えていたか（`cold`／`warm`。作業木で回した全検査だけ）。
+    /// 全検査の始めに作業ツリーが冷えていたか（`cold`／`warm`。作業ツリーで実行した全検査だけ）。
     pub start_state: Option<String>,
     /// 全検査の間に走った他の検査の数（全検査だけ）。
     pub other_runs: Option<usize>,
-    /// 検査の環境の指紋（全検査だけ。`rustc`・QEMU・OVMF・外の道具の版。2026-09-26）。**選びが比べる。**
+    /// 検査の環境の指紋（全検査だけ。`rustc`・QEMU・OVMF・外の道具の版。2026-09-26）。**選択が比べる。**
     pub env: Option<String>,
-    /// 走る前に選んだ族（全検査だけ。`all`・`none`・族の名前の並び。2026-09-26）。
+    /// 走る前に選んだグループ（全検査だけ。`all`・`none`・グループの名前の並び。2026-09-26）。
     pub selected: Option<String>,
-    /// 当たりの計器の答え（赤の全検査だけ。2026-09-26）。
+    /// 当たりの計測の答え（失敗した全検査だけ。2026-09-26）。
     pub score: Option<String>,
     pub note: String,
 }
 
 /// 記録を 1 行にする（純粋な論理）。**欄の区切りと改行は空白へ直す。** **第 2 版で書く**
-/// （頭に版、終わりに印。[`RECORD_VERSION`]）。
+/// （頭に版、終わりにマーカー。[`RECORD_VERSION`]）。
 fn format_record(record: &Record) -> String {
     let clean = |text: &str| text.replace(['\t', '\n', '\r'], " ");
     let number = |value: Option<f64>| value.map_or("-".to_string(), |value| format!("{value:.1}"));
@@ -193,7 +193,7 @@ fn format_record(record: &Record) -> String {
 
 /// 記録の 1 行を読む（純粋な論理）。**頭の行と形の崩れた行は読まない。**
 ///
-/// **第 2 版の行は、欄の数と終わりの印が揃ったときだけ読む**（[`RECORD_VERSION`]）。**古い形の行
+/// **第 2 版の行は、欄の数と終わりのマーカーが揃ったときだけ読む**（[`RECORD_VERSION`]）。**古い形の行
 /// （11・15・17 欄）は前と同じに読む**——**書いた後に確かめる手段が無いので、そのまま受ける。**
 fn parse_record(line: &str) -> Option<Record> {
     if line.starts_with('#') {
@@ -259,7 +259,7 @@ fn parse_legacy(fields: &[&str]) -> Option<Record> {
     })
 }
 
-/// 記録の置き場（本の木の `target/full-check/records.tsv`）。
+/// 記録の置き場（メインの作業ツリーの `target/full-check/records.tsv`）。
 pub fn records_path(root: &Path) -> Result<PathBuf> {
     Ok(check_lock::main_tree(root)?
         .join("target")
@@ -267,15 +267,15 @@ pub fn records_path(root: &Path) -> Result<PathBuf> {
         .join("records.tsv"))
 }
 
-/// 記録を 1 行足す（本の木の記録へ）。
+/// 記録を 1 行足す（メインの作業ツリーの記録へ）。
 pub fn append(root: &Path, record: &Record) -> Result<()> {
     append_line(&records_path(root)?, RECORDS_HEADER, &format_record(record))
 }
 
-/// 行を 1 つ足す（2026-09-26。第三者レビューの取り込み 4.(4)）。**記録と選びの記録が使う。**
+/// 行を 1 つ足す（2026-09-26。第三者レビューの取り込み 4.(4)）。**記録と選択の記録が使う。**
 ///
-/// - **錠を取って書く**（ファイルそのものに排他の `flock`。上限 [`APPEND_LOCK_WAIT`]）——**全検査の間に
-///   基底が書いても、行が混ざらない。** **錠は書き終えたら放す**（持つのは 1 行ぶんの間だけ）。
+/// - **ロックを取って書く**（ファイルそのものに排他の `flock`。上限 [`APPEND_LOCK_WAIT`]）——**全検査の間に
+///   基本の検査が書いても、行が混ざらない。** **ロックは書き終えたら放す**（持つのは 1 行ぶんの間だけ）。
 /// - **1 回の書き込みで足す**（`O_APPEND`）。
 /// - **前の書き込みが途中で切れていれば、先に改行を足して区切る**——**切れた断片に次の行が繋がって、
 ///   崩れた 1 行になるのを防ぐ。** **断片そのものは読まない**（[`parse_record`] と [`read_lines`]）。
@@ -330,7 +330,7 @@ pub fn append_line(path: &Path, header: &str, line: &str) -> Result<()> {
     written
 }
 
-/// 足す行の錠を待つ上限（2026-09-26）。**持つ側は 1 行ぶんの間しか持たないので、待つのは短い。**
+/// 足す行のロックを待つ上限（2026-09-26）。**持つ側は 1 行ぶんの間しか持たないので、待つのは短い。**
 const APPEND_LOCK_WAIT: Duration = Duration::from_secs(10);
 
 /// 改行で終わった行だけを返す（純粋な論理）。**終わりの改行が無い最後の断片は、書く途中で切れた形
@@ -358,7 +358,7 @@ fn read_records_at(path: &Path) -> Result<Vec<Record>> {
     Ok(read_lines(&text).filter_map(parse_record).collect())
 }
 
-/// 走り始めの木（`cmd_check` の入口で採り、終わりの記録に使う）。
+/// 走り始めのツリー（`cmd_check` の入口で採り、終わりの記録に使う）。
 struct Start {
     level: Level,
     root: PathBuf,
@@ -385,20 +385,20 @@ pub fn note_other_runs(count: usize) {
     }
 }
 
-/// 全検査の走る前の選び（2026-09-26。記録の `selected` の欄へ書く）。
+/// 全検査の走る前の選択（2026-09-26。記録の `selected` の欄へ書く）。
 static SELECTED: Mutex<Option<String>> = Mutex::new(None);
 
-/// 全検査の当たりの計器の答え（2026-09-26。記録の `score` の欄へ書く）。
+/// 全検査の当たりの計測の答え（2026-09-26。記録の `score` の欄へ書く）。
 static SCORE: Mutex<Option<String>> = Mutex::new(None);
 
-/// 走る前の選びを記録に残す（全検査の子が呼ぶ）。
+/// 走る前の選択を記録に残す（全検査の子が呼ぶ）。
 pub fn note_selection(selected: &str) {
     if let Ok(mut slot) = SELECTED.lock() {
         *slot = Some(selected.to_string());
     }
 }
 
-/// 当たりの計器の答えを記録に残す（全検査の子が呼ぶ）。
+/// 当たりの計測の答えを記録に残す（全検査の子が呼ぶ）。
 pub fn note_score(score: &str) {
     if let Ok(mut slot) = SCORE.lock() {
         *slot = Some(score.to_string());
@@ -418,7 +418,7 @@ fn diskstats_sectors_written(text: &str, device: (u32, u32)) -> Option<u64> {
     })
 }
 
-/// 木の載った装置（WSL の置き場）が書いたセクタ数（`/proc/diskstats`）。**WSL を起こし直すと 0 から
+/// 作業ツリーの載った装置（WSL の置き場）が書いたセクタ数（`/proc/diskstats`）。**WSL を起動し直すと 0 から
 /// 数え直す。** 実測で装置は 8:48（sdd）だった（2026-09-25）。
 fn sectors_written(root: &Path) -> Option<u64> {
     let device = check_lock::device_numbers(fs::metadata(root).ok()?.dev());
@@ -444,7 +444,7 @@ fn gib(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / (1u64 << 30) as f64)
 }
 
-/// 全検査のまとめに出す空きの行（Windows のドライブは計器。止めない）。
+/// 全検査のまとめに出す空きの行（Windows のドライブは計測。止めない）。
 pub fn free_space_lines(root: &Path) -> Vec<String> {
     let (wsl, host, system) = free_spaces(root);
     let shown = |value: Option<u64>| value.map_or("unreadable".to_string(), gib);
@@ -514,10 +514,10 @@ pub fn start_shortfalls(
     short
 }
 
-/// 全検査の始めに、作業木が冷えているか（2026-09-26。運用者の足す1点）。
+/// 全検査の始めに、作業ツリーが冷えているか（2026-09-26。運用者の足す1点）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StartState {
-    /// 冷えた（理由）。**組ごとに初めから建てるので、多く書く**（初回は 47.8 GB。実測）。
+    /// 冷えた（理由）。**組ごとに初めからビルドするので、多く書く**（初回は 47.8 GB。実測）。
     Cold(String),
     /// 温まった（理由）。
     Warm(String),
@@ -538,8 +538,8 @@ impl StartState {
     }
 }
 
-/// 作業木が冷えているかを決める（純粋な論理）。**冷えたとみなすのは 3 つ**——**作業木に `target/` が無い**、
-/// **作業木の `target/` が本の木の `target/` の [`COLD_FRACTION_DENOM`] 分の 1 より小さい**、**作業木を建てた
+/// 作業ツリーが冷えているかを決める（純粋な論理）。**冷えたとみなすのは 3 つ**——**作業ツリーに `target/` が無い**、
+/// **作業ツリーの `target/` がメインの作業ツリーの `target/` の [`COLD_FRACTION_DENOM`] 分の 1 より小さい**、**作業ツリーをビルドした
 /// rustc が今の rustc と違うか、その控えが無い**（ツールチェーンを替えると、残った成果物は使われない）。
 fn start_state(
     main_target: Option<u64>,
@@ -584,15 +584,15 @@ fn rustc_fingerprint_in(json: &str) -> Option<String> {
     (!digits.is_empty()).then_some(digits)
 }
 
-/// 置き場の `target/` を建てた rustc の控え（無ければ `None`）。
+/// 置き場の `target/` をビルドした rustc の控え（無ければ `None`）。
 fn rustc_fingerprint(target: &Path) -> Option<String> {
     rustc_fingerprint_in(&fs::read_to_string(target.join(".rustc_info.json")).ok()?)
 }
 
 /// 全検査が書く量の見込み（純粋な論理。2026-09-26 に冷えた・温まったで分けた。運用者の足す1点）。
 ///
-/// - **冷えた**——**記録の中の冷えた回の書いた量の最大。** 無ければ代わりの値（本の木の `target/` の大きさ）。
-/// - **温まった**——**直近の温まった回の書いた量。他の走行が無い回を先にとる。** 無ければ、冷えたかが分からない
+/// - **冷えた**——**記録の中の冷えた回の書いた量の最大。** 無ければ代わりの値（メインの作業ツリーの `target/` の大きさ）。
+/// - **温まった**——**直近の温まった回の書いた量。他の実行が無い回を先にとる。** 無ければ、冷えたかが分からない
 ///   古い記録の直近の値。それも無ければ代わりの値。
 fn estimate_to_write(
     records: &[Record],
@@ -648,7 +648,7 @@ fn estimate_to_write(
     }
 }
 
-/// 検査の入口で木を採る。**採れなくても検査は止めない**（記録に `?` が残る）。
+/// 検査の入口でツリーを採る。**採れなくても検査は止めない**（記録に `?` が残る）。
 pub fn begin(root: &Path, level: Level) {
     let commit = git_line(root, &["rev-parse", "HEAD"]).unwrap_or_else(|_| "?".to_string());
     let tree = git_line(root, &["rev-parse", "HEAD^{tree}"]).unwrap_or_else(|_| "?".to_string());
@@ -661,7 +661,7 @@ pub fn begin(root: &Path, level: Level) {
             String::from_utf8_lossy(&output.stdout).lines().count()
         });
     let (unix, when) = check_lock::now();
-    // **`cargo xtask full` の子なら、親が始めに読んだ値を使う**（作業木の取り出しの分も含める）。
+    // **`cargo xtask full` の子なら、親が始めに読んだ値を使う**（作業ツリーのチェックアウトの分も含める）。
     let disk_start = std::env::var(DISK_START_ENV)
         .ok()
         .and_then(|value| value.parse().ok())
@@ -681,14 +681,14 @@ pub fn begin(root: &Path, level: Level) {
     }
 }
 
-/// 走り始めの木（錠の中身に書く）。**`begin` の前なら `None`。**
+/// 走り始めのツリー（ロックの中身に書く）。**`begin` の前なら `None`。**
 pub fn started_commit_and_tree() -> Option<(String, String)> {
     let start = START.lock().ok()?;
     let start = start.as_ref()?;
     Some((start.commit.clone(), start.tree.clone()))
 }
 
-/// 検査の終わりに記録を 1 行書く。**書けなくても検査の結果は変えない**（言うだけ）。
+/// 検査の終わりに記録を 1 行書く。**書けなくても検査の結果は変えない**（出力するだけ）。
 pub fn end(outcome: &str, items: Option<usize>, item_seconds: Option<f64>) {
     let Some(record) = START.lock().ok().and_then(|start| {
         let start = start.as_ref()?;
@@ -761,13 +761,13 @@ fn paths_of(root: &Path, commit: &str) -> Result<Vec<String>> {
 
 /// そのコミットの要る検査を満たす記録（純粋な論理）。**新しいものから探す。**
 ///
-/// - **合格の記録で、段が要る段以上であること。**
-/// - **コミットが同じか、木が同じで汚れが 0 であること**（木が同じなら中身は同じ）。
-/// - **旗で越えた記録（`override`）は満たさない**（2026-09-26。運用者の決定 1 の ③）——**例外はその
-///   push だけに効かせる。** **以前はそのコミットを後まで満たしていた**（押し損ねた後の push も通った）。
+/// - **合格の記録で、段階が要る段階以上であること。**
+/// - **コミットが同じか、ツリーが同じで汚れが 0 であること**（ツリーが同じなら中身は同じ）。
+/// - **フラグで越えた記録（`override`）は満たさない**（2026-09-26。運用者の決定 1 の ③）——**例外はその
+///   push だけに効かせる。** **以前はそのコミットを後まで満たしていた**（プッシュし損ねた後の push も通った）。
 ///
 /// **汚れ 0 の記録を先に見せる**（2026-09-26。運用者の任意の 1 点）——**同じコミットで汚れのある回が
-/// 後に在っても、確かめた木が言える記録のほうが読める。** **関門の答えは変わらない**（どれかが当たれば
+/// 後に在っても、確かめたツリーが言える記録のほうが読める。** **関門の答えは変わらない**（どれかが当たれば
 /// 満たす）。
 pub fn covering<'a>(
     records: &'a [Record],
@@ -825,7 +825,7 @@ fn commit_line(root: &Path, records: &[Record], commit: &str) -> Result<(String,
             false,
         ),
     };
-    // **足りなければ、要る検査の回し方を添える**（2026-09-26。運用者の決定 1 の ③ の条件 2）。
+    // **足りなければ、要る検査の実行方法を添える**（2026-09-26。運用者の決定 1 の ③ の条件 2）。
     let how = if covered {
         String::new()
     } else {
@@ -846,8 +846,8 @@ fn commit_line(root: &Path, records: &[Record], commit: &str) -> Result<(String,
     ))
 }
 
-/// 環境の指紋が比べる外の道具のパッケージ（2026-09-26）。**全検査が起こす・呼ぶものである**——QEMU と
-/// OVMF、`e2fsck` 等、`objdump`・`nm`、`sfdisk`、C のユーザープログラムを建てる `gcc`、道具の `python3`。
+/// 環境の指紋が比べる外の道具のパッケージ（2026-09-26）。**全検査が起動する・呼ぶものである**——QEMU と
+/// OVMF、`e2fsck` 等、`objdump`・`nm`、`sfdisk`、C のユーザープログラムをビルドする `gcc`、道具の `python3`。
 const ENVIRONMENT_PACKAGES: [&str; 7] = [
     "qemu-system-x86",
     "ovmf",
@@ -859,10 +859,10 @@ const ENVIRONMENT_PACKAGES: [&str; 7] = [
 ];
 
 /// 検査の環境の指紋（2026-09-26。第三者レビューの取り込み）。**ファイルの差分に現れない変化**
-/// （`rustc`・QEMU・OVMF・外の道具の版・`CC` と `RUSTFLAGS`）を、選びが比べる。**全検査の記録に残す。**
+/// （`rustc`・QEMU・OVMF・外の道具の版・`CC` と `RUSTFLAGS`）を、選択が比べる。**全検査の記録に残す。**
 ///
 /// **読めなかった欄は `?` と書く**——**読めない環境どうしは同じと見る**（読めないことが変わっていない）。
-/// **`rustc` は木の中で呼ぶ**（`rust-toolchain.toml` が決める版を見る）。
+/// **`rustc` は作業ツリーの中で呼ぶ**（`rust-toolchain.toml` が決める版を見る）。
 pub fn environment_fingerprint(root: &Path) -> String {
     let rustc = Command::new("rustc")
         .current_dir(root)
@@ -928,7 +928,7 @@ fn environment_differences(before: &str, now: &str) -> Vec<String> {
 
 /// 2 つのコミットの間で変わったパス（2026-09-26）。
 ///
-/// **木どうしの差で見る**——**途中で足して戻した変更は数えない。** **移したファイルは、移す前と後の
+/// **ツリーどうしの差で見る**——**途中で足して戻した変更は数えない。** **移したファイルは、移す前と後の
 /// 両方のパスを数える**（`--no-renames`）。**`-z` で読む**——**空白や改行を含む名前も 1 つに読む。**
 /// **作業ツリーの未コミットの変更は数えない。**
 fn changed_paths(root: &Path, from: &str, to: &str) -> Result<Vec<String>> {
@@ -972,22 +972,22 @@ fn first_parent(root: &Path, commit: &str) -> Result<Option<String>> {
     Ok(line.split_whitespace().nth(1).map(str::to_string))
 }
 
-/// 選びの答え（2026-09-26。選ぶのを表示する段）。**比較元・対象・選んだ理由・全部へ倒した理由を持つ。**
+/// 選択の答え（2026-09-26。選ぶのを表示する段）。**比較元・対象・選んだ理由・全部へ倒した理由を持つ。**
 pub struct Selected {
-    /// 対象のコミットと木。
+    /// 対象のコミットとツリー。
     pub target: String,
     pub target_tree: String,
-    /// 比較元（最後の緑の全検査。無ければ `None`）。
+    /// 比較元（最後に成功した全検査。無ければ `None`）。
     pub base: Option<Record>,
     /// 累積の差分で変わったパスの数（比べられないときは 0）。
     pub changed: usize,
-    /// 累積の選び（比べられない訳を含む）。
+    /// 累積の選択（比べられない訳を含む）。
     pub selection: family::Selection,
-    /// このコミットだけの差分で変わったパスの数と選び（親が無ければ `None`）。
+    /// このコミットだけの差分で変わったパスの数と選択（親が無ければ `None`）。
     pub this_commit: Option<(usize, family::Selection)>,
 }
 
-/// 対象のコミットの選びを作る（2026-09-26）。**比較元は記録の中の最後の緑の全検査（汚れ 0）である。**
+/// 対象のコミットの選択を作る（2026-09-26）。**比較元は記録の中の最後に成功した全検査（汚れ 0）である。**
 ///
 /// **比べられない形は全部へ倒す**（第三者レビューの取り込み）——**比較元が無い・そのコミットが消えた・
 /// 対象の祖先でない（履歴が書き換えられた）・環境の指紋が無いか違う**（[`environment_fingerprint`]）。
@@ -1060,7 +1060,7 @@ pub fn select_for(root: &Path, records: &[Record], target: &str) -> Result<Selec
 }
 
 impl Selected {
-    /// 人が読む行（`--status` と `--select` が出す）。**比較元・対象・選び・理由を出す。**
+    /// 人が読む行（`--status` と `--select` が出す）。**比較元・対象・選択・理由を出す。**
     pub fn lines(&self) -> Vec<String> {
         let mut lines = vec![format!(
             "selection for {} (tree {})",
@@ -1102,22 +1102,22 @@ impl Selected {
     }
 }
 
-/// 選びの記録の頭の行（2026-09-26。選ぶのを表示する段）。**1 行が 1 コミットの選びである。**
+/// 選択の記録の頭の行（2026-09-26。選ぶのを表示する段）。**1 行が 1 コミットの選択である。**
 const SELECTIONS_HEADER: &str = "# version\tunix\twhen\tcommit\ttree\tbase\tchanged\tselected\t\
                                  reasons\tthis_changed\tthis_selected\tend";
 
-/// 選びの記録の形の版（行の頭の欄）。**終わりの印は [`RECORD_END`] と同じである。**
+/// 選択の記録の形の版（行の頭の欄）。**終わりのマーカーは [`RECORD_END`] と同じである。**
 const SELECTION_VERSION: &str = "1";
 
-/// 選びの記録の置き場（本の木の `target/full-check/selections.tsv`。追跡しない）。
+/// 選択の記録の置き場（メインの作業ツリーの `target/full-check/selections.tsv`。追跡しない）。
 fn selections_path(main: &Path) -> PathBuf {
     main.join("target")
         .join("full-check")
         .join("selections.tsv")
 }
 
-/// 選びを記録へ 1 行足す（2026-09-26）。**同じコミットは 1 度だけ**——**足したら `true`。** **当たりの
-/// 計器と、表示が当たっているかを後から数える材料である。**
+/// 選択を記録へ 1 行足す（2026-09-26）。**同じコミットは 1 度だけ**——**足したら `true`。** **当たりの
+/// 計測と、表示が当たっているかを後から数える材料である。**
 fn record_selection(main: &Path, selected: &Selected) -> Result<bool> {
     let path = selections_path(main);
     let existing = fs::read_to_string(&path).unwrap_or_default();
@@ -1153,8 +1153,8 @@ fn record_selection(main: &Path, selected: &Selected) -> Result<bool> {
     Ok(true)
 }
 
-/// `cargo xtask full --select`——**HEAD の選びを出し、選びの記録へ 1 度だけ残す**（2026-09-26。コミットの後の
-/// hook が呼ぶ）。**錠を取らず、QEMU を起こさない**（git と表と記録を読むだけ）。
+/// `cargo xtask full --select`——**HEAD の選択を出し、選択の記録へ 1 度だけ残す**（2026-09-26。コミットの後の
+/// hook が呼ぶ）。**ロックを取らず、QEMU を起動しない**（git と表と記録を読むだけ）。
 fn select_command(root: &Path) -> Result<()> {
     let main = check_lock::main_tree(root)?;
     let records = read_records(&main)?;
@@ -1168,7 +1168,7 @@ fn select_command(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 記録の当たりの計器を数えて 1 行にする（純粋な論理。2026-09-26）。**狭く選んだ回と全部を選んだ回を分ける。**
+/// 記録の当たりの計測を数えて 1 行にする（純粋な論理。2026-09-26）。**狭く選んだ回と全部を選んだ回を分ける。**
 fn score_summary(records: &[Record]) -> String {
     let scored: Vec<&str> = records
         .iter()
@@ -1198,7 +1198,7 @@ fn score_summary(records: &[Record]) -> String {
     )
 }
 
-/// `cargo xtask full --status`——**HEAD の木が緑か、緑の木より後のコミットと、それぞれ何で確かめたか。**
+/// `cargo xtask full --status`——**HEAD のツリーが成功しているか、成功したツリーより後のコミットと、それぞれ何で確かめたか。**
 fn status(root: &Path) -> Result<()> {
     let main = check_lock::main_tree(root)?;
     let records = read_records(&main)?;
@@ -1251,10 +1251,10 @@ fn status(root: &Path) -> Result<()> {
             records_path(&main)?.display()
         ),
     }
-    // **当たりの計器の数え**（2026-09-26）——**赤の全検査のうち、製品側の判定が偽になった回だけを数える。**
+    // **当たりの計測の数え**（2026-09-26）——**失敗した全検査のうち、製品側の判定が偽になった回だけを数える。**
     println!("{}", score_summary(&records));
-    // **族の選び**（2026-09-26）——**緑の木から HEAD までの累積の差分と、このコミットだけの差分で選ぶ。**
-    // **この段では表示だけで、回し方は変えない**（`ADR-0069` の決定 7 の 2）。
+    // **グループの選択**（2026-09-26）——**成功したツリーから HEAD までの累積の差分と、このコミットだけの差分で選ぶ。**
+    // **この段階では表示だけで、実行方法は変えない**（`ADR-0069` の決定 7 の 2）。
     match select_for(&main, &records, "HEAD") {
         Ok(selected) => {
             for line in selected.lines() {
@@ -1288,7 +1288,7 @@ fn status(root: &Path) -> Result<()> {
             marks.join(", ")
         );
     }
-    // **空きの計器**（2026-09-25）。**記録の最後の値と、いまの値。**
+    // **空きの計測**（2026-09-25）。**記録の最後の値と、いまの値。**
     let shown = |value: Option<u64>| value.map_or("-".to_string(), gib);
     if let Some(record) = records
         .iter()
@@ -1309,10 +1309,10 @@ fn status(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 前の全検査の子か QEMU が残っていたら断る（作業木を触る前に見る）。
+/// 前の全検査の子か QEMU が残っていたら断る（作業ツリーを触る前に見る）。
 ///
-/// **錠は持ち主が終われば放れるが、持ち主が上限で降りた後も子が残りうる**（固まった子は運用者に
-/// 確かめてから止める。`.claude/skills/stop-a-process/SKILL.md`）。**残った子が使っている作業木を
+/// **ロックは持ち主が終われば放れるが、持ち主が上限で終了した後も子が残りうる**（固まった子は運用者に
+/// 確かめてから止める。`.claude/skills/stop-a-process/SKILL.md`）。**残った子が使っている作業ツリーを
 /// 切り替えないため。**
 fn refuse_if_a_previous_run_is_alive(worktree: &Path) -> Result<()> {
     let binary = worktree.join("target").join("debug").join("xtask");
@@ -1349,7 +1349,7 @@ fn refuse_if_a_previous_run_is_alive(worktree: &Path) -> Result<()> {
     )
 }
 
-/// 作業木を `commit` に合わせ、汚れていないことを確かめる。
+/// 作業ツリーを `commit` に合わせ、汚れていないことを確かめる。
 fn prepare_worktree(main: &Path, worktree: &Path, commit: &str) -> Result<()> {
     git_line(main, &["worktree", "prune"])?;
     let listed = git_line(main, &["worktree", "list", "--porcelain"])?;
@@ -1413,7 +1413,7 @@ fn wait_within(child: &mut std::process::Child, limit: Duration) -> Result<Optio
     }
 }
 
-/// ログの締めを出す（落ちた行と、まとめの行）。
+/// ログのまとめを出す（落ちた行と、まとめの行）。
 fn print_log_summary(log: &Path) {
     let Ok(text) = fs::read(log).map(|bytes| String::from_utf8_lossy(&bytes).into_owned()) else {
         println!("(the log {} could not be read)", log.display());
@@ -1438,7 +1438,7 @@ fn print_log_summary(log: &Path) {
     }
 }
 
-/// 本の木へ `since` の後に積まれたコミットと、それぞれに要る検査を出す。
+/// メインの作業ツリーへ `since` の後に積まれたコミットと、それぞれに要る検査を出す。
 fn print_commits_since(main: &Path, since: &str) -> Result<()> {
     let records = read_records(main)?;
     let after = git_line(main, &["rev-list", "--reverse", &format!("{since}..HEAD")])?;
@@ -1500,8 +1500,8 @@ fn run(target: &str) -> Result<()> {
     // **始める前に、見込みの書く量＋下限を、WSL の中と VHD の載ったドライブの両方で見る**（2026-09-25。
     // 運用者の足す1点）。**足りなければ検査装置の故障として断る。**
     let records = read_records(&main)?;
-    // **作業木が冷えているかで、見込みを選ぶ**（2026-09-26。運用者の足す1点）。**作業木は本の木の
-    // `target/` の下に在るので、本の木の大きさからは作業木の分を引く。**
+    // **作業ツリーが冷えているかで、見込みを選ぶ**（2026-09-26。運用者の足す1点）。**作業ツリーはメインの作業ツリーの
+    // `target/` の下に在るので、メインの作業ツリーの大きさからは作業ツリーの分を引く。**
     let worktree_all = worktree
         .is_dir()
         .then(|| crate::directory_bytes(&worktree))
@@ -1575,7 +1575,7 @@ fn run(target: &str) -> Result<()> {
         .stdout(file.try_clone().context("could not share the log")?)
         .stderr(file)
         .process_group(0);
-    // **子の git が別の木を見ないように、`GIT_*` を外す**（錠の道と同じ理由）。
+    // **子の git が別の作業ツリーを見ないように、`GIT_*` を外す**（ロックのパスと同じ理由）。
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_") {
             child.env_remove(&key);
@@ -1660,16 +1660,16 @@ fn append_full_record(main: &Path, commit: &str, tree: &str, outcome: &str, note
 /// push の前の関門の結果。
 #[derive(Debug, PartialEq, Eq)]
 pub struct Gate {
-    /// 押すコミットの数。
+    /// プッシュするコミットの数。
     pub pending: usize,
-    /// 要る検査の記録が無いコミット（旗で越えたものを含む）。
+    /// 要る検査の記録が無いコミット（フラグで越えたものを含む）。
     pub missing: Vec<String>,
-    /// 旗で越えたか。
+    /// フラグで越えたか。
     pub overridden: bool,
 }
 
-/// push の前の関門（運用者の足す1点。2026-09-25）。**押すコミット（どのリモートにも無いもの）の
-/// それぞれに、要る検査の合格の記録が在るかを見る。** **旗の理由が在れば、無いコミットを「旗で
+/// push の前の関門（運用者の足す1点。2026-09-25）。**プッシュするコミット（どのリモートにも無いもの）の
+/// それぞれに、要る検査の合格の記録が在るかを見る。** **フラグの理由が在れば、無いコミットを「旗で
 /// 越えた」と記録して通す**——**その push だけに効く**（記録は合格として数えない。[`covering`]）。
 ///
 /// **読むのは `--status` と同じ記録である**（二重に持たない）。**Claude Code の hook が呼ぶ形は HEAD から
@@ -1845,7 +1845,7 @@ fn gate_commits(main: &Path, pending: &[String], override_reason: Option<&str>) 
     })
 }
 
-/// 関門の結果を言い、通すか決める（2 つの関門が同じく使う）。
+/// 関門の結果を出力し、通すか決める（2 つの関門が同じく使う）。
 fn report_gate(gate: &Gate, main: &Path) -> Result<()> {
     if gate.missing.is_empty() {
         println!(
@@ -1873,7 +1873,7 @@ fn report_gate(gate: &Gate, main: &Path) -> Result<()> {
     )
 }
 
-/// push の前の関門を旗で越えるときの環境変数（理由を入れる）。**Claude Code の hook も同じ名前を読む。**
+/// push の前の関門をフラグで越えるときの環境変数（理由を入れる）。**Claude Code の hook も同じ名前を読む。**
 const OVERRIDE_ENV: &str = "ZAYTOS_PUSH_UNCHECKED";
 
 /// `cargo xtask full [<コミット>] | --status | --select | --gate [--override <理由>] [--pre-push]`。
@@ -1899,7 +1899,7 @@ pub fn command(args: &[String]) -> Result<()> {
         let root = crate::workspace_root()?;
         let main = check_lock::main_tree(&root)?;
         // **Git の pre-push から呼ばれた形**（`.githooks/pre-push`。2026-09-26）——**標準入力の ref の行を
-        // 読む。** **旗は環境変数で受ける**（`ZAYTOS_PUSH_UNCHECKED='<理由>' git push`。空の理由は断る）。
+        // 読む。** **フラグは環境変数で受ける**（`ZAYTOS_PUSH_UNCHECKED='<理由>' git push`。空の理由は断る）。
         if args.iter().any(|arg| arg == "--pre-push") {
             let from_env = std::env::var(OVERRIDE_ENV).ok();
             let reason = match (reason, from_env.as_deref().map(str::trim)) {
@@ -1974,7 +1974,7 @@ mod tests {
         assert_eq!(parse_record("1\t2\t3"), None);
     }
 
-    /// **第 2 版の行は、欄の数と終わりの印が揃ったときだけ読む**（2026-09-26。4.(4)）。**古い形は前と同じに
+    /// **第 2 版の行は、欄の数と終わりのマーカーが揃ったときだけ読む**（2026-09-26。4.(4)）。**古い形は前と同じに
     /// 読む。** **切れた行は、どこで切れても読まない**——**頭の `2` があるので、古い形としても読まない。**
     #[test]
     fn a_torn_record_line_is_never_read_as_a_record() {
@@ -2016,7 +2016,7 @@ mod tests {
     }
 
     /// **切れた断片（改行の無い終わり）は読まず、次の追記は改行で区切ってから足す**（2026-09-26。4.(4)）。
-    /// **並んで書いても行は混ざらない**（錠と 1 回の書き込み）。
+    /// **並んで書いても行は混ざらない**（ロックと 1 回の書き込み）。
     #[test]
     fn appends_survive_a_torn_tail_and_concurrent_writers() {
         let dir = std::env::temp_dir().join(format!("zaytos-records-{}", std::process::id()));
@@ -2066,8 +2066,8 @@ mod tests {
         assert_eq!(needed_level(&paths(&[])), Level::Base);
     }
 
-    /// **要る段以上の合格だけが満たす。** **木が同じでも、汚れのある記録は別のコミットを満たさない。**
-    /// **旗で越えた記録は、そのコミットだけを満たす。**
+    /// **要る段階以上の合格だけが満たす。** **ツリーが同じでも、汚れのある記録は別のコミットを満たさない。**
+    /// **フラグで越えた記録は、そのコミットだけを満たす。**
     #[test]
     fn only_a_pass_at_the_needed_level_or_above_covers_a_commit() {
         let records = vec![
@@ -2080,17 +2080,17 @@ mod tests {
         assert!(covering(&records, "c1", "t1", Level::Base).is_some());
         assert!(covering(&records, "c1", "t1", Level::Commit).is_none());
         assert!(covering(&records, "c2", "t2", Level::Commit).is_none());
-        // **木が同じで汚れが 0 の全検査は、別のコミットでも満たす**（中身が同じ）。
+        // **ツリーが同じで汚れが 0 の全検査は、別のコミットでも満たす**（中身が同じ）。
         assert!(covering(&records, "c3", "t3", Level::Commit).is_some());
         // **汚れのある記録は、そのコミットだけを満たす。**
         assert!(covering(&records, "c4", "t4", Level::Commit).is_some());
         assert!(covering(&records, "c4b", "t4", Level::Base).is_none());
-        // **旗で越えた記録は満たさない**（2026-09-26。その push だけに効く）。
+        // **フラグで越えた記録は満たさない**（2026-09-26。その push だけに効く）。
         assert!(covering(&records, "c5", "t5", Level::Commit).is_none());
         assert!(covering(&records, "c6", "t6", Level::Base).is_none());
     }
 
-    /// **当たりの計器の数え**（2026-09-26）。**狭く選んだ回だけで (a) と (b) を数え、全部を選んだ回は別に数える。**
+    /// **当たりの計測の数え**（2026-09-26）。**狭く選んだ回だけで (a) と (b) を数え、全部を選んだ回は別に数える。**
     #[test]
     fn score_summary_counts_narrow_selections_apart() {
         let scored = |score: &str| Record {
@@ -2131,8 +2131,8 @@ mod tests {
         );
     }
 
-    /// **選びは比較元・対象・理由を出し、比べられない形を全部へ倒す**（2026-09-26。選ぶのを表示する段）。
-    /// **空白と改行を含む名前も 1 つに読み、移したファイルは前と後の両方を数える。** **作った git の木で見る。**
+    /// **選択は比較元・対象・理由を出し、比べられない形を全部へ倒す**（2026-09-26。選ぶのを表示する段）。
+    /// **空白と改行を含む名前も 1 つに読み、移したファイルは前と後の両方を数える。** **作った git のツリーで見る。**
     #[test]
     fn the_selection_names_its_base_and_falls_to_all_when_it_cannot_compare() {
         let scratch =
@@ -2254,7 +2254,7 @@ mod tests {
             .not_comparable
             .iter()
             .any(|why| why.contains("is gone")));
-        // **選びの記録は同じコミットを 1 度だけ残す。**
+        // **選択の記録は同じコミットを 1 度だけ残す。**
         assert!(record_selection(&repo, &selected).unwrap());
         assert!(!record_selection(&repo, &selected).unwrap());
         let written = fs::read_to_string(selections_path(&repo)).unwrap();
@@ -2288,7 +2288,7 @@ mod tests {
     }
 
     /// **push の前の関門**（運用者の足す1点。2026-09-25）。**記録が在るコミットは通り、無いコミットは
-    /// 断られ、旗で越えると記録が残る。** **作った git の木とリモートで確かめる。**
+    /// 断られ、フラグで越えると記録が残る。** **作った git のツリーとリモートで確かめる。**
     #[test]
     fn the_push_gate_passes_recorded_commits_refuses_the_rest_and_records_the_flag() {
         let scratch = std::env::temp_dir().join(format!("zaytos-gate-test-{}", std::process::id()));
@@ -2336,7 +2336,7 @@ mod tests {
             ..record("-", "pass", commit, "-", 1)
         };
 
-        // **--commit の要るコミットに基底の記録しか無ければ断る。**
+        // **--commit の要るコミットに基本の検査の記録しか無ければ断る。**
         append(&repo, &pass(&kernel, Level::Base)).unwrap();
         append(&repo, &pass(&docs, Level::Base)).unwrap();
         let refused = gate(&repo, None).unwrap();
@@ -2345,11 +2345,11 @@ mod tests {
             (2, vec![kernel.clone()], false)
         );
 
-        // **要る段の合格が在れば通る。**
+        // **要る段階の合格が在れば通る。**
         append(&repo, &pass(&kernel, Level::Commit)).unwrap();
         assert!(gate(&repo, None).unwrap().missing.is_empty());
 
-        // **旗で越えると、越えたことが記録に残る。**
+        // **フラグで越えると、越えたことが記録に残る。**
         let more = commit(&repo, "common/src/b.rs");
         let flagged = gate(&repo, Some("the check was refused during a full check")).unwrap();
         assert_eq!(
@@ -2372,9 +2372,9 @@ mod tests {
                 "the check was refused during a full check"
             )
         );
-        // **旗はその push だけに効く**（2026-09-26。運用者の決定 1 の ③）——**旗なしの次の関門は、また断る。**
+        // **フラグはその push だけに効く**（2026-09-26。運用者の決定 1 の ③）——**フラグなしの次の関門は、また断る。**
         assert_eq!(gate(&repo, None).unwrap().missing, vec![more.clone()]);
-        // **同じ push を 2 つの関門が見ても、旗の記録は 1 度だけ足す**（10 分の内の同じコミットと理由）。
+        // **同じ push を 2 つの関門が見ても、フラグの記録は 1 度だけ足す**（10 分の内の同じコミットと理由）。
         gate(&repo, Some("the check was refused during a full check")).unwrap();
         let overrides = read_records(&repo)
             .unwrap()
@@ -2400,7 +2400,7 @@ mod tests {
     }
 
     /// **pre-push の関門は、Git が渡す ref から実際に送るコミットを数える**（HEAD ではない。2026-09-26）。
-    /// **別の枝・タグ・削除を 1 行ずつ扱い、足りなければ断り、旗はその push だけに効く。** **作った git の木と
+    /// **別の枝・タグ・削除を 1 行ずつ扱い、足りなければ断り、フラグはその push だけに効く。** **作った git のツリーと
     /// リモートで確かめる。**
     #[test]
     fn the_pre_push_gate_counts_what_git_sends() {
@@ -2462,7 +2462,7 @@ mod tests {
         assert_eq!(refused.pending, 2, "docs and the side commit");
         assert_eq!(refused.missing.len(), 2);
         assert!(!refused.overridden);
-        // **記録が在れば通る**（基底の合格。docs と side は基底で足りる）。
+        // **記録が在れば通る**（基本の検査の合格。docs と side は基本の検査で足りる）。
         let pass = |commit: &str| Record {
             level: "base".to_string(),
             ..record("-", "pass", commit, "-", 0)
@@ -2480,7 +2480,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!((deletion.pending, deletion.missing.len()), (0, 0));
-        // **記録の無いコミットは、旗でだけ越えられ、その push だけに効く。**
+        // **記録の無いコミットは、フラグでだけ越えられ、その push だけに効く。**
         let late = commit("kernel/src/late.rs");
         let late_input = format!("refs/heads/main {late} refs/heads/main {first}\n");
         let flagged = gate_pre_push(&repo, &late_input, Some("left for later")).unwrap();
@@ -2567,7 +2567,7 @@ mod tests {
     }
 
     /// **冷えた・温まった・記録が無い**（運用者の足す1点。2026-09-26）。**冷えたら冷えた回の最大、温まったら
-    /// 直近の温まった回（他の走行が無い回が先）、無ければ代わりの値。**
+    /// 直近の温まった回（他の実行が無い回が先）、無ければ代わりの値。**
     #[test]
     fn the_estimate_is_chosen_by_whether_the_worktree_is_cold() {
         let cold = StartState::Cold("x".to_string());
@@ -2582,7 +2582,7 @@ mod tests {
             estimate_to_write(records, state, || stand_in).map(|pair| pair.0)
         };
         assert_eq!(pick(&records, &cold, Some(7)), Some(47 << 30));
-        // **温まった回は、他の走行が無い回を先にとる**（直近は他の走行が在った回でも）。
+        // **温まった回は、他の実行が無い回を先にとる**（直近は他の実行が在った回でも）。
         assert_eq!(pick(&records, &warm, Some(7)), Some(12 << 30));
         // **冷えた回の記録が無ければ代わりの値。**
         let warm_only = vec![full(12 << 30, Some("warm"), Some(0))];
@@ -2596,7 +2596,7 @@ mod tests {
         assert_eq!(pick(&[], &cold, None), None);
     }
 
-    /// **冷えたとみなすのは 3 つ**——`target/` が無い、本の木の 1/4 より小さい、rustc が違うか控えが無い。
+    /// **冷えたとみなすのは 3 つ**——`target/` が無い、メインの作業ツリーの 1/4 より小さい、rustc が違うか控えが無い。
     #[test]
     fn a_worktree_is_cold_without_target_when_small_or_built_by_another_rustc() {
         let gib = |value: u64| value << 30;
@@ -2613,7 +2613,7 @@ mod tests {
             Some("1")
         )));
         assert!(cold(start_state(Some(gib(56)), Some(gib(30)), same, None)));
-        // **本の木が掃除されて小さくても、作業木が大きければ温まっている。**
+        // **メインの作業ツリーが掃除されて小さくても、作業ツリーが大きければ温まっている。**
         assert!(!cold(start_state(Some(gib(10)), Some(gib(30)), same, same)));
     }
 
@@ -2652,7 +2652,7 @@ mod tests {
         );
     }
 
-    /// **記録の読み方は汚れを言う。**
+    /// **記録の読み方は汚れを示す。**
     #[test]
     fn a_description_says_when_the_working_tree_had_other_changes() {
         assert_eq!(

@@ -1,17 +1,17 @@
-//! QEMU を起こす口（2026-09-24。`ADR-0068` の HW-e を閉じる前。ホストの保護）。
+//! QEMU を起動する入口（2026-09-24。`ADR-0068` の HW-e を閉じる前。ホストの保護）。
 //!
 //! # なぜ 1 か所へ寄せるか
 //!
 //! **読む側には上限（`read_bounded`。256 MiB）を置いたが、書く側（QEMU の `-D`）には無かった。**
 //! **例外の嵐の間は 1 分で 8.7 GB 伸びる**（実測。2026-09-24 に WSL2 ごと止まった回。
-//! `docs/troubleshooting.md`）。**QEMU を起こす箇所が 40 あったので、ここへ寄せて上限を 1 か所で
+//! `docs/troubleshooting.md`）。**QEMU を起動する箇所が 40 あったので、ここへ寄せて上限を 1 か所で
 //! 掛ける。**
 //!
 //! # 書く側の上限はカーネルに持たせる
 //!
-//! **`prlimit --fsize` で起こす**——**QEMU が書くどのファイル（`-D` の記録・シリアル・ディスクの像・
-//! screendump・pmemsave）も上限を越えられない**（RLIMIT_FSIZE）。**見張りの糸が遅れても越えない。**
-//! **上限はディスクの像への書き込みにも掛かる**ので、[`OTHER_WRITES`] より大きく保つ（ホストのテスト）。
+//! **`prlimit --fsize` で起動する**——**QEMU が書くどのファイル（`-D` の記録・シリアル・ディスクのイメージ・
+//! screendump・pmemsave）も上限を越えられない**（RLIMIT_FSIZE）。**監視の糸が遅れても越えない。**
+//! **上限はディスクのイメージへの書き込みにも掛かる**ので、[`OTHER_WRITES`] より大きく保つ（ホストのテスト）。
 //!
 //! # コアを吐かせない
 //!
@@ -21,20 +21,20 @@
 //! pipes」）。**行き先は Windows 側の `%TEMP%\wsl-crashes` で、実測で既に 3 つ（46 MiB）在った。**
 //! **QEMU のコアにはゲストのメモリがまるごと入りうる。**
 //!
-//! **だから SIGXFSZ を無視した状態で起こす**（`trap '' XFSZ` の後で `exec`。無視は `exec` を越えて
-//! 引き継がれる）——**越える書き込みは EFBIG で失敗するだけで、QEMU は落ちない。** **止めるのは見張りの
+//! **だから SIGXFSZ を無視した状態で起動する**（`trap '' XFSZ` の後で `exec`。無視は `exec` を越えて
+//! 引き継がれる）——**越える書き込みは EFBIG で失敗するだけで、QEMU は落ちない。** **止めるのは監視の
 //! 糸で、SIGKILL（コアを吐かない）で組ごと止める。** **`--core=0` も掛ける**（パイプでない
 //! `core_pattern` の機械のため。レビューの足す1点）。
 //!
-//! # 判定の 4 分け（[`classify`]）
+//! # 判定の 4 つの分け方（[`classify`]）
 //!
-//! - **log-limit**——ファイルの上限か空きの下限で切った。**判定の真偽より先に立てる**——**切った走行
+//! - **log-limit**——ファイルの上限か空きの下限で切った。**判定の真偽より先に立てる**——**切った実行
 //!   では「出なかった」を言えない。**
-//! - **harness**——検査装置の故障（QEMU が起きない、準備やビルドの失敗、空きが足りない）。
+//! - **harness**——検査装置の故障（QEMU が起動しない、準備やビルドの失敗、空きが足りない）。
 //! - **timeout**——期限に着き、判定が偽。**期限に着くのが正常な項目（[`Deadline::Normal`]）は除く。**
-//! - **os**——走行は普通に終わったのに、判定が偽。
+//! - **os**——実行は普通に終わったのに、判定が偽。
 //!
-//! **QEMU を起こさなかった項目（静的な検査など）は `check` とする**——上の 4 つのどれでもない。
+//! **QEMU を起動しなかった項目（静的な検査など）は `check` とする**——上の 4 つのどれでもない。
 
 use std::fmt;
 use std::fs;
@@ -55,25 +55,25 @@ pub const FILE_LIMIT_BYTES: u64 = 4 << 30;
 /// 置き場の空きの下限（運用者の承認。2026-09-24）。
 pub const DISK_FLOOR_BYTES: u64 = 20 << 30;
 
-/// **VHD（WSL の置き場）が載っている Windows のドライブ**（WSL の中の道。運用者の決定。2026-09-25）。
+/// **VHD（WSL の置き場）が載っている Windows のドライブ**（WSL の中のパス。運用者の決定。2026-09-25）。
 ///
-/// **起動の口の空きの下限は、WSL の中とこのドライブの両方で見る**——**VHD は動的に伸びるので、WSL の中に
+/// **起動の入口の空きの下限は、WSL の中とこのドライブの両方で見る**——**VHD は動的に伸びるので、WSL の中に
 /// 空きが在っても、ホストのドライブが先に埋まりうる**（2026-09-25 に C: が 98% だった。`docs/troubleshooting.md`）。
 /// **drvfs の `df` は Windows の値とバイトの単位で一致した**（実測。`Get-PSDrive` の Free と比べた）。
 ///
-/// **VHD を動かしたら、ここだけを直す。** **定数を正とし、実物との食い違いだけを基底の確かめが捕まえる**
+/// **VHD を動かしたら、ここだけを直す。** **定数を正とし、実物との食い違いだけを基本の検査の確かめが検出する**
 /// （[`check_vhd_drive`]。レジストリの `BasePath` のドライブと比べる）——**自動で追いかける形より単純で、
 /// 黙って変わらない。** 2026-09-25 に C: から D: へ移した。
 pub const HOST_VHD_DRIVE: &str = "/mnt/d";
 
-/// **Windows そのもののドライブ**（計器だけ。止めない）。
+/// **Windows そのもののドライブ**（計測だけ。止めない）。
 pub const HOST_SYSTEM_DRIVE: &str = "/mnt/c";
 
 /// Windows のドライブ（[`HOST_SYSTEM_DRIVE`]）の空きがこれを割ったら `(warn)` を出す（運用者の決定。止めない）。
 pub const SYSTEM_DRIVE_WARN_BYTES: u64 = 20 << 30;
 
 /// ホストのドライブ（[`HOST_VHD_DRIVE`]）の空きの下限（運用者の決定。2026-09-25）。**30 GiB は損の非対称
-/// による**——**下限で断られる損は走行を後にするだけだが、ドライブが本当に埋まると VHD が伸びられず、WSL の中の
+/// による**——**下限で断られる損は実行を後にするだけだが、ドライブが本当に埋まると VHD が伸びられず、WSL の中の
 /// ファイルシステムが書き込みの失敗を受けて壊れうる**（一般論）。**D: は VirtualBox の VM とバックアップとも
 /// 共有である。**
 pub const HOST_DISK_FLOOR_BYTES: u64 = 30 << 30;
@@ -81,14 +81,14 @@ pub const HOST_DISK_FLOOR_BYTES: u64 = 30 << 30;
 /// WSL の登録（ディストリビューションごとの `DistributionName` と `BasePath`）。**読むだけ。**
 const LXSS_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss";
 
-/// 見張りの間隔。**書く側の上限はカーネルが持つ**ので、この間隔は「越えた後に止めるまでの遅れ」
+/// 監視の間隔。**書く側の上限はカーネルが持つ**ので、この間隔は「越えた後に止めるまでの遅れ」
 /// だけを決める（その間 QEMU は書けない）。
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 
 /// **QEMU が書く、`-D` の記録以外のファイルの最大**（実測。2026-09-24。レビューの判断 (a)）。
-/// **上限はこれらより大きく保つ**——**fsize の上限はディスクの像への書き込みにも掛かる。**
+/// **上限はこれらより大きく保つ**——**fsize の上限はディスクのイメージへの書き込みにも掛かる。**
 /// **monitor の socket は大きさを持たない。** **メモリ全体を pmemsave で書き出す検査は無い**
-/// （実測。pmemsave は ext2 の像の RAM の写し 2 MiB と、カーネルスタック 128 KiB だけ）。
+/// （実測。pmemsave は ext2 のイメージの RAM のコピー 2 MiB と、カーネルスタック 128 KiB だけ）。
 /// **ホストのテストだけが読む**（上限と比べる表）。
 #[cfg(test)]
 pub const OTHER_WRITES: &[(&str, u64)] = &[
@@ -117,7 +117,7 @@ const IGNORE_XFSZ_THEN_EXEC: &str = "trap '' XFSZ; exec \"$@\"";
 pub enum Deadline {
     /// 期限に着いたら失敗（「着くまで待つ」項目）。**判定が偽なら `timeout` に分ける。**
     Failure,
-    /// **期限に着くのが正常**（決まった時間走らせる・窓の間眠る・窓いっぱい待つ項目）、または**期限を
+    /// **期限に着くのが正常**（決まった時間走らせる・ウィンドウの間眠る・ウィンドウいっぱい待つ項目）、または**期限を
     /// 1 つに持たない**項目。**判定が偽でも `timeout` にしない**——**取り違えるよりは、分けない側に倒す。**
     Normal,
 }
@@ -125,14 +125,14 @@ pub enum Deadline {
 /// 組の扱い。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Group {
-    /// 自分の組で起こし、終わりに組ごと止める（自動の検査）。**QEMU の子も残らない。**
+    /// 自分の組で起動し、終わりに組ごと止める（自動の検査）。**QEMU の子も残らない。**
     Own,
-    /// **端末の組のまま起こす**（手で触る起動）。**別の組だと、端末から読んだ時点で SIGTTIN で止まる。**
+    /// **端末の組のまま起動する**（手で触る起動）。**別の組だと、端末から読んだ時点で SIGTTIN で止まる。**
     /// **止めるのは QEMU だけである。**
     Terminal,
 }
 
-/// 走行を切った理由。
+/// 実行を切った理由。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Cut {
     /// ファイルが上限に着いた（**上限そのものも持つ**——項目ごとに小さくできるので）。
@@ -170,7 +170,7 @@ impl fmt::Display for Cut {
     }
 }
 
-/// 検査装置の故障（[`classify`] で `harness` に分ける）。**QEMU を起こせない、準備やビルドの失敗、
+/// 検査装置の故障（[`classify`] で `harness` に分ける）。**QEMU を起動できない、準備やビルドの失敗、
 /// 空きが足りない。**
 #[derive(Debug)]
 pub struct HarnessFault(pub String);
@@ -188,37 +188,37 @@ pub fn as_harness<T>(result: Result<T>, what: &str) -> Result<T> {
     result.map_err(|error| anyhow::Error::new(HarnessFault(format!("{what}: {error:#}"))))
 }
 
-/// 1 回の走行の記録（項目の分け方と、検査の時間の計測に使う）。
+/// 1 回の実行の記録（項目の分け方と、検査の時間の計測に使う）。
 #[derive(Clone, Debug)]
 pub struct RunRecord {
     pub what: String,
     pub elapsed: Duration,
     pub cut: Option<Cut>,
-    /// 期限に着いた（[`Deadline::Failure`] の走行だけ真になりうる）。**宣言の無い期限の終わりである**
+    /// 期限に着いた（[`Deadline::Failure`] の実行だけ真になりうる）。**宣言の無い期限の終わりである**
     /// ——**待ちの条件が壊れている合図として数える**（2026-09-25。運用者の足す 1 点）。
     pub reached_deadline: bool,
-    /// 限度まで走った、**期限に着くのが正常と宣言した**（[`Deadline::Normal`]）走行か（2026-09-25）。
+    /// 限度まで走った、**期限に着くのが正常と宣言した**（[`Deadline::Normal`]）実行か（2026-09-25）。
     pub ran_to_declared_limit: bool,
     pub status: Option<ExitStatus>,
-    /// 見張った出力のうち、最も大きかったもののバイト数。
+    /// 監視した出力のうち、最も大きかったもののバイト数。
     pub largest_output: u64,
 }
 
-/// 項目の中の走行（`begin_item` で空にする）。
+/// 項目の中の実行（`begin_item` で空にする）。
 static ITEM_RUNS: Mutex<Vec<RunRecord>> = Mutex::new(Vec::new());
-/// 起こした走行の数（全体。計測のため）。
+/// 起動した実行の数（全体。計測のため）。
 static RUNS_STARTED: AtomicU64 = AtomicU64::new(0);
-/// 走行の時間の合計（ナノ秒。全体。計測のため）。
+/// 実行の時間の合計（ナノ秒。全体。計測のため）。
 static RUNS_NANOS: AtomicU64 = AtomicU64::new(0);
 
-/// 項目の始めに、その項目の走行の記録を空にする。
+/// 項目の始めに、その項目の実行の記録を空にする。
 pub fn reset_item_runs() {
     if let Ok(mut runs) = ITEM_RUNS.lock() {
         runs.clear();
     }
 }
 
-/// いまの項目の走行の記録。
+/// いまの項目の実行の記録。
 pub fn item_runs() -> Vec<RunRecord> {
     ITEM_RUNS
         .lock()
@@ -226,12 +226,12 @@ pub fn item_runs() -> Vec<RunRecord> {
         .unwrap_or_default()
 }
 
-/// 起こした走行の数（全体）。
+/// 起動した実行の数（全体）。
 pub fn runs_started() -> u64 {
     RUNS_STARTED.load(Ordering::SeqCst)
 }
 
-/// 走行の時間の合計（全体）。
+/// 実行の時間の合計（全体）。
 pub fn runs_total_time() -> Duration {
     Duration::from_nanos(RUNS_NANOS.load(Ordering::SeqCst))
 }
@@ -243,7 +243,7 @@ pub enum Category {
     Timeout,
     LogLimit,
     Harness,
-    /// QEMU を起こさなかった項目（静的な検査など）。
+    /// QEMU を起動しなかった項目（静的な検査など）。
     Check,
 }
 
@@ -267,9 +267,9 @@ impl Category {
     }
 }
 
-/// **失敗した項目を分ける**（純粋な論理）。**切った走行が 1 つでも在れば log-limit を先に立てる**
-/// ——**切った走行では「出なかった」を言えない。** 次に検査装置の故障、次に最後の走行が期限に
-/// 着いたか。**走行が 1 つも無く故障でもなければ `check`。**
+/// **失敗した項目を分ける**（純粋な論理）。**切った実行が 1 つでも在れば log-limit を先に立てる**
+/// ——**切った実行では「出なかった」を言えない。** 次に検査装置の故障、次に最後の実行が期限に
+/// 着いたか。**実行が 1 つも無く故障でもなければ `check`。**
 pub fn classify(harness: bool, runs: &[RunRecord]) -> Category {
     if runs.iter().any(|run| run.cut.is_some()) {
         return Category::LogLimit;
@@ -284,13 +284,13 @@ pub fn classify(harness: bool, runs: &[RunRecord]) -> Category {
     }
 }
 
-/// 期限に着いたか（純粋な論理）。**[`Deadline::Normal`] の走行は着いたことにしない。**
+/// 期限に着いたか（純粋な論理）。**[`Deadline::Normal`] の実行は着いたことにしない。**
 fn reached_deadline(deadline: Deadline, elapsed: Duration, timeout: Duration) -> bool {
     deadline == Deadline::Failure && elapsed >= timeout
 }
 
-/// 期限に着くのが正常と宣言した走行が、限度まで走ったか（純粋な論理。2026-09-25）。
-/// **限度を 1 つに持たない走行（`timeout` が 0）は数えない。**
+/// 期限に着くのが正常と宣言した実行が、限度まで走ったか（純粋な論理。2026-09-25）。
+/// **限度を 1 つに持たない実行（`timeout` が 0）は数えない。**
 fn ran_to_declared_limit(deadline: Deadline, elapsed: Duration, timeout: Duration) -> bool {
     deadline == Deadline::Normal && !timeout.is_zero() && elapsed >= timeout
 }
@@ -340,7 +340,7 @@ pub fn in_wsl() -> bool {
 /// ホストのドライブの空きの判定。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HostFloor {
-    /// WSL の外（CI 等）。**見張らない**（「見張らない」と 1 度だけ言う）。
+    /// WSL の外（CI 等）。**監視しない**（「見張らない」と 1 度だけ出力する）。
     NotWatched,
     Enough(u64),
     Short(u64),
@@ -358,10 +358,10 @@ pub fn host_floor(in_wsl: bool, available: Option<u64>, floor: u64) -> HostFloor
     }
 }
 
-/// 「見張らない」を言ったか（プロセスで 1 度だけ言う）。
+/// 「見張らない」を出力したか（プロセスで 1 度だけ出力する）。
 static HOST_NOT_WATCHED_SAID: AtomicBool = AtomicBool::new(false);
 
-/// QEMU を起こす前に、ホストのドライブの空きを見る。**割っていても読めなくても、故障として断る。**
+/// QEMU を起動する前に、ホストのドライブの空きを見る。**割っていても読めなくても、故障として断る。**
 fn check_host_floor(what: &str) -> Result<()> {
     let wsl = in_wsl();
     let available = if wsl {
@@ -389,7 +389,7 @@ fn check_host_floor(what: &str) -> Result<()> {
 }
 
 /// `reg.exe query <Lxss> /s` の出力から、ディストリビューションの名前と置き場（`BasePath`）の組を読む
-/// （純粋な論理）。**形は実測**（2026-09-25）——**鍵の行（`HKEY_` で始まる）ごとに、`    名前    型    値` の
+/// （純粋な論理）。**形は実測**（2026-09-25）——**キーの行（`HKEY_` で始まる）ごとに、`    名前    型    値` の
 /// 行が続く。** **値は空白を含みうるので、型の後ろを丸ごと読む。**
 pub fn parse_lxss(text: &str) -> Vec<(String, String)> {
     let mut found = Vec::new();
@@ -423,7 +423,7 @@ pub fn parse_lxss(text: &str) -> Vec<(String, String)> {
     found
 }
 
-/// 置き場の道から、そのドライブの WSL の中の道を作る（純粋な論理）。**`\\?\` の前置きを外す**
+/// 置き場のパスから、そのドライブの WSL の中のパスを作る（純粋な論理）。**`\\?\` の前置きを外す**
 /// （`docker-desktop` の `BasePath` がその形だった。実測）。
 pub fn drive_mount_of(base_path: &str) -> Option<String> {
     let path = base_path.strip_prefix(r"\\?\").unwrap_or(base_path);
@@ -433,7 +433,7 @@ pub fn drive_mount_of(base_path: &str) -> Option<String> {
         .then(|| format!("/mnt/{}", letter.to_ascii_lowercase()))
 }
 
-/// 見張っているドライブが、本当にこのディストリビューションの VHD の在るドライブかの判定。
+/// 監視しているドライブが、本当にこのディストリビューションの VHD の在るドライブかの判定。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VhdDrive {
     /// WSL の外（CI 等）。見ない。
@@ -449,7 +449,7 @@ pub enum VhdDrive {
     Unreadable(String),
 }
 
-/// 見張っているドライブを、レジストリの `BasePath` と突き合わせる（純粋な論理）。
+/// 監視しているドライブを、レジストリの `BasePath` と突き合わせる（純粋な論理）。
 pub fn vhd_drive_verdict(
     in_wsl: bool,
     distro: Option<&str>,
@@ -507,9 +507,9 @@ fn read_lxss() -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).replace('\r', ""))
 }
 
-/// 基底の確かめ（2026-09-25。運用者の足す1点）。**見張っているドライブ（[`HOST_VHD_DRIVE`]）が、本当に
+/// 基本の検査の確かめ（2026-09-25。運用者の足す1点）。**監視しているドライブ（[`HOST_VHD_DRIVE`]）が、本当に
 /// このディストリビューションの VHD の在るドライブか**——**VHD を別のドライブへ移しても、元のドライブが在れば
-/// 空きは読めてしまい、VHD の無いドライブを黙って見張り続ける。** **食い違えば名前つきで落とす。** **WSL の中で
+/// 空きは読めてしまい、VHD の無いドライブを黙って監視し続ける。** **食い違えば名前つきで落とす。** **WSL の中で
 /// 読めなければ、それも落とす**（黙って飛ばさない）。**WSL の外（CI）では見ない。**
 pub fn check_vhd_drive() -> Result<String> {
     let wsl = in_wsl();
@@ -549,7 +549,7 @@ pub fn check_vhd_drive() -> Result<String> {
 enum KillTarget {
     /// QEMU の組（組の番号は QEMU の pid と同じ）。
     Group(u32),
-    /// QEMU だけ（端末の組のまま起こしたとき）。
+    /// QEMU だけ（端末の組のまま起動したとき）。
     Process(u32),
 }
 
@@ -580,14 +580,14 @@ impl KillTarget {
     }
 }
 
-/// 見張りの糸と分け合う状態。
+/// 監視の糸と分け合う状態。
 struct Watch {
     stop: AtomicBool,
     cut: Mutex<Option<Cut>>,
     largest: AtomicU64,
 }
 
-/// 起こした QEMU。**`Child` と同じ名前の操作（`try_wait`・`kill`・`wait`）を持つ**——移し替えで
+/// 起動した QEMU。**`Child` と同じ名前の操作（`try_wait`・`kill`・`wait`）を持つ**——移し替えで
 /// 呼ぶ側の形を変えないため。**待たずに落としても、組ごと止めて記録する**（`Drop`）。
 pub struct QemuRun {
     child: Child,
@@ -602,12 +602,12 @@ pub struct QemuRun {
     recorded: bool,
 }
 
-/// 起こし方。
+/// 起動方法。
 pub struct Spec<'a> {
     /// QEMU の本体（`qemu-system-x86_64` 等）。
     pub program: &'a str,
     pub args: &'a [std::ffi::OsString],
-    /// **見張る出力**（シリアルの記録・`-D` の記録）。**最初のものの置き場で空きを見る。**
+    /// **監視する出力**（シリアルの記録・`-D` の記録）。**最初のものの置き場で空きを見る。**
     pub outputs: &'a [&'a Path],
     /// 失敗の行に出す名前。
     pub what: &'a str,
@@ -641,10 +641,10 @@ impl<'a> Spec<'a> {
     }
 }
 
-/// **QEMU を起こす**（唯一の口）。**起こす前に空きを確かめ、下限を割っていれば故障として断る。**
+/// **QEMU を起動する**（唯一の入口）。**起動する前に空きを確かめ、下限を割っていれば故障として断る。**
 ///
-/// **検査の錠を共有で持っていることも確かめる**（`check_lock`。2026-09-25）——**入口で取っていれば
-/// 何もしない。** **取っていなければここで取る**（口で見るので漏れない。AArch64 の走行もここを通る）。
+/// **検査のロックを共有で持っていることも確かめる**（`check_lock`。2026-09-25）——**入口で取っていれば
+/// 何もしない。** **取っていなければここで取る**（入口で見るので漏れない。AArch64 の実行もここを通る）。
 pub fn spawn(spec: &Spec<'_>) -> Result<QemuRun> {
     crate::check_lock::hold_for_qemu(spec.what)?;
     let dir = spec
@@ -685,7 +685,7 @@ pub fn spawn(spec: &Spec<'_>) -> Result<QemuRun> {
         .arg("--")
         .arg(spec.program)
         .args(spec.args);
-    // **自分の組で起こす**——終わりに組ごと止めれば、QEMU の子も残らない。
+    // **自分の組で起動する**——終わりに組ごと止めれば、QEMU の子も残らない。
     if spec.group == Group::Own {
         command.process_group(0);
     }
@@ -726,7 +726,7 @@ pub fn spawn(spec: &Spec<'_>) -> Result<QemuRun> {
     })
 }
 
-/// 見張りの糸の本体。**ファイルが上限に着くか、空きが下限を割ったら、SIGKILL で止めて理由を残す。**
+/// 監視の糸の本体。**ファイルが上限に着くか、空きが下限を割ったら、SIGKILL で止めて理由を残す。**
 fn watch_outputs(
     watch: &Watch,
     outputs: &[PathBuf],
@@ -769,7 +769,7 @@ fn watch_outputs(
             }
         }
         // **VHD の載ったホストのドライブも見る**（2026-09-25。運用者の決定）。**読めなければ切らない**
-        // ——**起こす前に読めたことは確かめてあり、走行の途中の 1 回の読み損ないで切ると、揺れで落ちる。**
+        // ——**起動する前に読めたことは確かめてあり、実行の途中の 1 回の読み損ないで切ると、揺れで落ちる。**
         if cut.is_none() && watch_host {
             if let Some(available) = available_bytes(Path::new(HOST_VHD_DRIVE)) {
                 if available < HOST_DISK_FLOOR_BYTES {
@@ -808,7 +808,7 @@ impl QemuRun {
         Ok(())
     }
 
-    /// `Child::wait` と同じ。**見張りを止め、走行を記録する。**
+    /// `Child::wait` と同じ。**監視を止め、実行を記録する。**
     pub fn wait(&mut self) -> std::io::Result<ExitStatus> {
         let status = self.child.wait()?;
         self.status = Some(status);
@@ -816,7 +816,7 @@ impl QemuRun {
         Ok(status)
     }
 
-    /// 見張りが走行を切ったか。**待ちのループは、これが真なら抜ける**（切った後は何も出ない）。
+    /// 監視が実行を切ったか。**待ちのループは、これが真なら抜ける**（切った後は何も出ない）。
     pub fn was_cut(&self) -> bool {
         self.watch
             .cut
@@ -830,7 +830,7 @@ impl QemuRun {
         self.target.alive()
     }
 
-    /// 見張りを止め、走行を記録する（1 度だけ）。
+    /// 監視を止め、実行を記録する（1 度だけ）。
     fn finish(&mut self) {
         if self.recorded {
             return;
@@ -857,7 +857,7 @@ impl QemuRun {
         if let Some(cut) = &record.cut {
             println!("{}: (warn) the run was cut: {cut}", self.what);
         }
-        // **失敗の期限に着いた走行を出す**（2026-09-26。計器の外の破壊を絞る段の B）——**破壊の回の判定が
+        // **失敗の期限に着いた実行を出す**（2026-09-26。計器の外の破壊を絞る段の B）——**破壊テストの実行の判定が
         // 読むのは記録の側だが、ログから期限の終わりを見分けられなかった。**
         if record.reached_deadline {
             println!(
@@ -876,7 +876,7 @@ impl QemuRun {
         }
     }
 
-    /// 走行の記録（`wait` の後）。
+    /// 実行の記録（`wait` の後）。
     pub fn record(&self) -> Option<RunRecord> {
         ITEM_RUNS
             .lock()
@@ -918,7 +918,7 @@ mod tests {
         }
     }
 
-    /// **切った走行が在れば、故障や期限より先に log-limit である**（設計の順序）。
+    /// **切った実行が在れば、故障や期限より先に log-limit である**（設計の順序）。
     #[test]
     fn a_cut_run_is_log_limit_before_anything_else() {
         let cut = Some(Cut::DiskFloor {
@@ -941,7 +941,7 @@ mod tests {
         assert_eq!(classify(true, &[]), Category::Harness);
     }
 
-    /// **期限に着くのが正常な走行は、期限に着いても timeout にしない**（記録を作る側の規則）。
+    /// **期限に着くのが正常な実行は、期限に着いても timeout にしない**（記録を作る側の規則）。
     #[test]
     fn a_normal_deadline_never_reaches_timeout() {
         assert!(reached_deadline(
@@ -961,8 +961,8 @@ mod tests {
         ));
     }
 
-    /// **宣言のある走行が限度まで走ったことは、別に数える**（2026-09-25）。**限度を 1 つに持たない
-    /// 走行は数えない。**
+    /// **宣言のある実行が限度まで走ったことは、別に数える**（2026-09-25）。**限度を 1 つに持たない
+    /// 実行は数えない。**
     #[test]
     fn a_declared_run_that_ran_to_its_limit_is_counted_apart() {
         assert!(ran_to_declared_limit(
@@ -982,7 +982,7 @@ mod tests {
         ));
     }
 
-    /// **上限は、QEMU が書く `-D` の記録以外のどのファイルよりも大きい**（fsize はディスクの像にも
+    /// **上限は、QEMU が書く `-D` の記録以外のどのファイルよりも大きい**（fsize はディスクのイメージにも
     /// 掛かる。レビューの判断 (a)）。**空きの下限は上限より大きい**——1 つのファイルで下限を割らない。
     #[test]
     fn the_file_limit_exceeds_every_other_write() {
@@ -1010,7 +1010,7 @@ mod tests {
         assert_eq!(parse_df_avail(""), None);
     }
 
-    /// **WSL の印は osrelease の `microsoft`**（実測の値と、CI の Azure の核の形）。
+    /// **WSL の目印は osrelease の `microsoft`**（実測の値と、CI の Azure のカーネルの形）。
     #[test]
     fn wsl_is_told_from_the_kernel_release() {
         assert!(is_wsl_release("6.18.33.2-microsoft-standard-WSL2\n"));
@@ -1019,7 +1019,7 @@ mod tests {
         assert!(!is_wsl_release(""));
     }
 
-    /// **ホストの下限**——**WSL の外は見張らない。WSL の中で読めなければ故障、割れば故障、足りれば進む。**
+    /// **ホストの下限**——**WSL の外は監視しない。WSL の中で読めなければ故障、割れば故障、足りれば進む。**
     #[test]
     fn the_host_floor_is_judged_in_four_ways() {
         let floor = HOST_DISK_FLOOR_BYTES;
@@ -1093,7 +1093,7 @@ HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\\{ac6aa103
                 base_path: r"D:\WSL\Ubuntu-24.04".to_string()
             }
         );
-        // **VHD を E: へ移したのに定数が D: のまま、の逆の形**——見張りは /mnt/e、実物は D:。
+        // **VHD を E: へ移したのに定数が D: のまま、の逆の形**——監視は /mnt/e、実物は D:。
         assert_eq!(
             vhd_drive_verdict(true, Some("Ubuntu-24.04"), lxss, "/mnt/e"),
             VhdDrive::Mismatch {

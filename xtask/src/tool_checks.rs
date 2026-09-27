@@ -2,11 +2,11 @@
 //!
 //! **検査の項目でない道具は、黙って腐る。** `--calibration-spread` は HW-c の後ずっと何も採れて
 //! いなかった（`docs/troubleshooting.md`）。`tools/qemu-variants.py --list` は、表に CPU の欄を
-//! 足した後ずっと落ちていた（2026-09-25 に、この確かめを置いて見つけた）。
+//! 足した後ずっと落ちていた（2026-09-25 に、この確かめを設けて見つけた）。
 //!
 //! **道具ごとに「動いて、空でない値を出す」ことだけを見る。** **道具の中身の正しさは見ない**
-//! ——それは道具を使う人が読む。**置き場は 3 つである。** QEMU を起こさないものは基底、起こすものは
-//! `--full`、分の単位のものは段の締め（`cargo xtask flaky`）。
+//! ——それは道具を使う人が読む。**置き場は 3 つである。** QEMU を起動しないものは基本の検査、起動するものは
+//! `--full`、分の単位のものは段階の完了（`cargo xtask flaky`）。
 
 use std::fs;
 use std::path::Path;
@@ -53,7 +53,7 @@ fn succeeded(script: &str, output: &Output) -> Result<String> {
     Ok(stdout)
 }
 
-/// `tools/boot-log-compare.py`——**参照をそれ自身と比べて 0 行、1 行だけ変えた写しと比べて 1 行。**
+/// `tools/boot-log-compare.py`——**参照をそれ自身と比べて 0 行、1 行だけ変えたコピーと比べて 1 行。**
 pub(super) fn boot_log_compare(root: &Path) -> Result<String> {
     let reference = root.join(REFERENCE_BOOT_LOG);
     let reference_arg = reference.to_string_lossy().into_owned();
@@ -69,7 +69,7 @@ pub(super) fn boot_log_compare(root: &Path) -> Result<String> {
         bail!("the reference compared with itself did not come out as 0 line(s): {same}");
     }
 
-    // **1 行の末尾に語を足す**——**行の数は変えない**（数が違うと道具は比べずに降りる）。
+    // **1 行の末尾に語を足す**——**行の数は変えない**（数が違うと道具は比べずに終了する）。
     let text = fs::read_to_string(&reference)
         .with_context(|| format!("failed to read {}", reference.display()))?;
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
@@ -139,9 +139,9 @@ pub(super) fn docstyle(root: &Path) -> Result<String> {
     ))
 }
 
-/// `tools/frame-sizes.py`——**作業木の `.debug_frame` を読み、関数の枠が 1 つ以上出る。**
+/// `tools/frame-sizes.py`——**作業ツリーの `.debug_frame` を読み、関数のフレームが 1 つ以上出る。**
 ///
-/// **基底の版は建てない**（`--working-tree-only`）——**取り出しと建てに分の単位が掛かる。**
+/// **基底の版はビルドしない**（`--working-tree-only`）——**チェックアウトとビルドに分の単位が掛かる。**
 pub(super) fn frame_sizes(root: &Path) -> Result<String> {
     let stdout = succeeded(
         "frame-sizes.py",
@@ -176,7 +176,7 @@ pub(super) fn frame_sizes(root: &Path) -> Result<String> {
 
 /// `tools/judgement-map.py`——**小さな抜き書きから、判定の本数と偽になった判定を数える。**
 ///
-/// **抜き書きはここに持つ**（木にファイルを置かない）。**カーネルの行と `(info)` を数えない**ことも見る。
+/// **抜き書きはここに持つ**（作業ツリーにファイルを置かない）。**カーネルの行と `(info)` を数えない**ことも見る。
 pub(super) fn judgement_map(root: &Path) -> Result<String> {
     const SAMPLE: &str = "\
 fs-extract: the copy lies outside the kernel image = true
@@ -228,10 +228,10 @@ pub(super) fn qemu_variants(root: &Path) -> Result<String> {
 }
 
 /// `tools/stack-deepest.py`——**1 つの深さで走らせ、プロンプトの深さと最初の書き込みの経路が出る**
-/// （`--full`。QEMU を 2 回起こす。実測で 22 秒ほど）。
+/// （`--full`。QEMU を 2 回起動する。実測で 22 秒ほど）。
 ///
-/// **道具は `target/esp` に置かれた像をそのまま起こす**ので、**先に既定の像を置く**——**前の項目が
-/// 破壊の構成の像を置いたままだと、別の像を測る。**
+/// **道具は `target/esp` に置かれたイメージをそのまま起動する**ので、**先に既定のイメージを置く**——**前の項目が
+/// 破壊テストの構成のイメージを置いたままだと、別のイメージを測る。**
 pub(super) fn stack_deepest(root: &Path) -> Result<String> {
     super::stage_default_image(root)?;
     let stdout = succeeded(

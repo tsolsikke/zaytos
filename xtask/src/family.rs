@@ -1,25 +1,25 @@
-//! 全検査の項目の族（2026-09-26。検査の体系の改善の、族にまとめる段。運用者の決定）。
+//! 全検査の項目のグループ（2026-09-26。検査の体系の改善の、族にまとめる段。運用者の決定）。
 //!
-//! **どの項目も族を 1 つ名乗る**——**項目の見出しを出す口（`begin_item`）が族を取るので、名乗らない
-//! 項目は建たない。** **族の分け方は、項目の見出しの形で 409 項目を振り分けて決めた**（2026-09-26。
-//! 他の走行が無い全検査 `0249d12` のログ）。**当たらなかった 3 本の入れ先も運用者の決定である**——
-//! `gen-font` は基底、書く側の上限は手の道具、FS/GS の破壊は割り込み（コードの在り処が例外・
+//! **どの項目もグループを 1 つ名乗る**——**項目の見出しを出す関数（`begin_item`）がグループを取るので、名乗らない
+//! 項目は作られない。** **グループの分け方は、項目の見出しの形で 409 項目を振り分けて決めた**（2026-09-26。
+//! 他の実行が無い全検査 `0249d12` のログ）。**当たらなかった 3 本の入れ先も運用者の決定である**——
+//! `gen-font` は基本の検査、書く側の上限は手の道具、FS/GS の破壊テストは割り込み（コードの在り処が例外・
 //! クリティカルの塊の中）。
 
-/// 全検査の項目の族（12）。**順序は全検査の項目の並びにおおよそ合わせた。**
+/// 全検査の項目のグループ（12）。**順序は全検査の項目の並びにおおよそ合わせた。**
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Family {
-    /// 基底の静的な検査（どの選び方でも毎回回る）。
+    /// 基本の検査の静的な検査（どの選び方でも毎回実行される）。
     Base,
-    /// 起動ログの突き合わせ・機械の変種・起動媒体の像・higher-half・panic・トランポリン。
+    /// 起動ログの突き合わせ・機械の変種・起動媒体のイメージ・higher-half・panic・トランポリン。
     Boot,
     /// 手で使う道具の確かめ（`stack-deepest`・calibration・screenshot）と書く側の上限。
     Harness,
-    /// 例外・クリティカル・割り込み・APIC・IO-APIC・LAPIC タイマ・ACPI・FS/GS の破壊。
+    /// 例外・クリティカル・割り込み・APIC・IO-APIC・LAPIC タイマ・ACPI・FS/GS の破壊テスト。
     Interrupts,
     /// ページング・スタック。
     Memory,
-    /// BKL・AP・percpu・シリアルの並走。
+    /// BKL・AP・percpu・シリアルの並行実行。
     Smp,
     /// タスク・Ring 3・システムコール・FP・並行・`.bss`。
     Process,
@@ -71,25 +71,25 @@ impl Family {
 }
 
 /// 変更したパスが選ぶもの（2026-09-26。**骨組みは運用者の決定**——土台は全部へ倒す／`xtask/src/main.rs`
-/// は全部／基底だけの置き場／1 つのパスに複数の族）。
+/// は全部／基底だけの置き場／1 つのパスに複数のグループ）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reach {
-    /// 全部（全検査）。**どの族の前提にもなる土台である。**
+    /// 全部（全検査）。**どのグループの前提にもなる土台である。**
     All,
-    /// 族の集まり（基底は毎回回るので数えない）。
+    /// グループの集まり（基本の検査は毎回実行されるので数えない）。
     Families(&'static [Family]),
-    /// 基底だけ（族は 0。**意図した 0 である**）。
+    /// 基底だけ（グループは 0。**意図した 0 である**）。
     BaseOnly,
 }
 
-/// 対応表の 1 行。**型はできるだけディレクトリの形で持つ**（運用者の回答 2。**次の段（境界を切る）で
+/// 対応表の 1 行。**型はできるだけディレクトリの形で持つ**（運用者の回答 2。**次の段階（境界を切る）で
 /// 多くのファイルが新しいディレクトリへ移る**）。**`**` は `/` をまたぎ、`*` はまたがない。**
 pub struct PathRule {
     pub patterns: &'static [&'static str],
     pub reach: Reach,
 }
 
-/// Ring 3 のプログラムを走らせる族と起動。**シェル（`zash`）と Ring 3 の核を通らない回が無い。**
+/// Ring 3 のプログラムを走らせるグループと起動。**シェル（`zash`）と Ring 3 の核を通らない回が無い。**
 const RING3_FAMILIES: &[Family] = &[
     Family::Boot,
     Family::Process,
@@ -98,29 +98,29 @@ const RING3_FAMILIES: &[Family] = &[
     Family::Apps,
 ];
 
-/// 画面に描く族と起動（コンソール・字形・描画）。
+/// 画面に描くグループと起動（コンソール・字形・描画）。
 const SCREEN_FAMILIES: &[Family] = &[Family::Boot, Family::Ipc, Family::Shell, Family::Apps];
 
-/// 変更したパスと族の対応表（2026-09-26。族にまとめる段）。
+/// 変更したパスとグループの対応表（2026-09-26。族にまとめる段）。
 ///
-/// **読み方は和である**——**パスに当たる行を全部集め、1 つでも全部なら全部、そうでなければ族の和、
-/// どれも基底だけなら基底だけ。** **行を足しても選びが狭まることは無い**（順序で意味が変わらない）。
+/// **読み方は和である**——**パスに当たる行を全部集め、1 つでも全部なら全部、そうでなければグループの和、
+/// どれも基底だけなら基底だけ。** **行を足しても選択が狭まることは無い**（順序で意味が変わらない）。
 ///
-/// **当たる行が無いパスは全部へ倒す**（[`select`]）。**そのうえで基底が、追跡している全ファイルに
+/// **当たる行が無いパスは全部へ倒す**（[`select`]）。**そのうえで基本の検査が、追跡している全ファイルに
 /// 当たる行が在ることを強いる**（[`table_problems`]）——**新しいファイルを足したら、表に行を足すまで
-/// 基底が落ちる。** **`kernel/`・`common/`・`bootloader/` の下は基底だけに当たってはならない。**
+/// 基本の検査が落ちる。** **`kernel/`・`common/`・`bootloader/` の下は基底だけに当たってはならない。**
 ///
-/// **境界の段で作る CPU 固有・機械固有・外部 ABI の置き場は、はじめは全部へ倒す**（運用者の回答 2）。
-/// **族へ振り分けるのは、境界が落ち着いてから。**
+/// **境界の段階で作る CPU 固有・機械固有・外部 ABI の置き場は、はじめは全部へ倒す**（運用者の回答 2）。
+/// **グループへ振り分けるのは、境界が落ち着いてから。**
 pub const PATH_RULES: &[PathRule] = &[
-    // ── 全部（土台）。**どの族の項目も通る。** ──
+    // ── 全部（土台）。**どのグループの項目も通る。** ──
     PathRule {
         patterns: &[
             "Cargo.toml",
             "Cargo.lock",
             "rust-toolchain.toml",
             ".cargo/**",
-            // **どの族の判定を変えたかを、パスで言えない**（検査の本体）。**起動の口はどの走行も通る。**
+            // **どのグループの判定を変えたかを、パスで言えない**（検査の本体）。**起動の入口はどの実行も通る。**
             "xtask/Cargo.toml",
             "xtask/src/main.rs",
             "xtask/src/launch.rs",
@@ -135,7 +135,7 @@ pub const PATH_RULES: &[PathRule] = &[
             "common/src/cpu.rs",
             "common/src/percpu.rs",
             "common/src/critical.rs",
-            // **時計は眠りとタイムアウトの全部が読む**（シェルの台本の破壊 `timer-never-wakes` 等）。
+            // **時計は眠りとタイムアウトの全部が読む**（シェルの台本の破壊テスト `timer-never-wakes` 等）。
             "common/src/time.rs",
             // **どの Ring 3 のプログラムも ELF として読む。**
             "common/src/elf.rs",
@@ -152,7 +152,7 @@ pub const PATH_RULES: &[PathRule] = &[
             "kernel/src/paging/**",
             "kernel/src/gdt/**",
             "kernel/src/heap/**",
-            // **割り込みの配送とタスクの切り替え**——**タイマの割り込みとスケジューラは、どの族の項目も
+            // **割り込みの配送とタスクの切り替え**——**タイマの割り込みとスケジューラは、どのグループの項目も
             // 通る**（AP の `ap-touch-scheduler`・シェルの台本の眠り）。
             "kernel/src/idt/**",
             "kernel/src/irq/**",
@@ -189,7 +189,7 @@ pub const PATH_RULES: &[PathRule] = &[
         reach: Reach::Families(&[Family::Interrupts, Family::Smp, Family::Ipc, Family::Shell]),
     },
     PathRule {
-        // **プロセスごとの空間・返した枠の置き場・カーネルのスタック**——**どの Ring 3 のプログラムも
+        // **プロセスごとの空間・返したフレームの置き場・カーネルのスタック**——**どの Ring 3 のプログラムも
         // 通り、AP も持つ。**
         patterns: &[
             "kernel/src/address_space.rs",
@@ -245,7 +245,7 @@ pub const PATH_RULES: &[PathRule] = &[
         ],
         reach: Reach::Families(&[Family::Ipc, Family::Shell, Family::Apps]),
     },
-    // ── 管・ソケット・入力・画面 ──
+    // ── パイプ・ソケット・入力・画面 ──
     PathRule {
         patterns: &["kernel/src/pipe.rs", "kernel/src/ring.rs"],
         reach: Reach::Families(&[Family::Ipc, Family::Shell]),
@@ -287,7 +287,7 @@ pub const PATH_RULES: &[PathRule] = &[
         reach: Reach::Families(SCREEN_FAMILIES),
     },
     PathRule {
-        // **シェルの一部である**——**シェルから起こす項目の全部が通る**（`zash.rs` と同じ）。
+        // **シェルの一部である**——**シェルから起動する項目の全部が通る**（`zash.rs` と同じ）。
         patterns: &[
             "common/src/complete.rs",
             "common/src/shell_script.rs",
@@ -296,7 +296,7 @@ pub const PATH_RULES: &[PathRule] = &[
         reach: Reach::Families(RING3_FAMILIES),
     },
     PathRule {
-        // **`utf8-test`（シェルの族）が `zi` を使う。**
+        // **`utf8-test`（シェルのグループ）が `zi` を使う。**
         patterns: &["kernel/userland/zi.rs"],
         reach: Reach::Families(&[Family::Shell, Family::Apps]),
     },
@@ -312,7 +312,7 @@ pub const PATH_RULES: &[PathRule] = &[
     },
     // ── ファイルシステムと装置 ──
     PathRule {
-        // **どのプログラムもファイルシステムから起こす**（`userland::spawn`）。
+        // **どのプログラムもファイルシステムから起動する**（`userland::spawn`）。
         patterns: &["kernel/src/vfs.rs", "common/src/ext2.rs"],
         reach: Reach::Families(&[
             Family::Boot,
@@ -329,7 +329,7 @@ pub const PATH_RULES: &[PathRule] = &[
         reach: Reach::Families(&[Family::Boot, Family::Apps, Family::Fs, Family::Devices]),
     },
     PathRule {
-        // **像の中身と、起動時の設定と環境**（`profile-test`・環境の出どころ）。
+        // **イメージの中身と、起動時の設定と環境**（`profile-test`・環境の出どころ）。
         patterns: &["kernel/fsimage/seed/**"],
         reach: Reach::Families(&[Family::Boot, Family::Shell, Family::Fs]),
     },
@@ -346,7 +346,7 @@ pub const PATH_RULES: &[PathRule] = &[
         patterns: &["xtask/src/tool_checks.rs", "tools/**"],
         reach: Reach::Families(&[Family::Harness]),
     },
-    // ── 基底だけ（ホストのテストと基底の確かめが覆う） ──
+    // ── 基底だけ（ホストのテストと基本の検査の確かめが覆う） ──
     PathRule {
         patterns: &[
             "docs/**",
@@ -369,7 +369,7 @@ pub const PATH_RULES: &[PathRule] = &[
     },
 ];
 
-/// 基底だけに当たってはならない置き場（族か全部）。
+/// 基底だけに当たってはならない置き場（グループか全部）。
 const NEVER_BASE_ONLY: [&str; 3] = ["kernel/", "common/", "bootloader/"];
 
 /// 型がパスに当たるか（`**` は `/` をまたぎ、`*` はまたがない。**`**/` は 0 段にも当たる**）。
@@ -426,7 +426,7 @@ pub enum PathReach {
     BaseOnly,
 }
 
-/// 表の問題（基底の確かめ。純粋な論理）。**当たる行が無いパス、基底だけに当たった `kernel/` 等の
+/// 表の問題（基本の検査の確かめ。純粋な論理）。**当たる行が無いパス、基底だけに当たった `kernel/` 等の
 /// パス、どのパスにも当たらない型（死んだ行）を返す。**
 pub fn table_problems(rules: &[PathRule], paths: &[&str]) -> Vec<String> {
     let mut problems = Vec::new();
@@ -462,7 +462,7 @@ pub fn table_problems(rules: &[PathRule], paths: &[&str]) -> Vec<String> {
 pub struct Selection {
     /// 全部へ倒した理由のパスと、その訳（土台か、表に行が無いか）。
     pub all: Vec<(String, &'static str)>,
-    /// 族ごとの、選んだ理由のパス。
+    /// グループごとの、選んだ理由のパス。
     pub families: std::collections::BTreeMap<Family, Vec<String>>,
     /// 基底だけのパス。
     pub base_only: Vec<String>,
@@ -494,13 +494,13 @@ pub fn select(rules: &[PathRule], paths: &[String]) -> Selection {
 }
 
 impl Selection {
-    /// 選んだ族（`None` は全部。空は基底だけ。2026-09-26）。**当たりの計器が比べる。**
+    /// 選んだグループ（`None` は全部。空は基底だけ。2026-09-26）。**当たりの計測が比べる。**
     pub fn chosen(&self) -> Option<Vec<Family>> {
         (self.not_comparable.is_empty() && self.all.is_empty())
             .then(|| self.families.keys().copied().collect())
     }
 
-    /// 記録に書く短い形（`all`・`none`・族の名前の並び）。
+    /// 記録に書く短い形（`all`・`none`・グループの名前の並び）。
     pub fn summary(&self) -> String {
         match self.chosen() {
             None => "all".to_string(),
@@ -513,7 +513,7 @@ impl Selection {
         }
     }
 
-    /// 記録に書く理由の短い形（先頭の `count` 本。2026-09-26）。**全部なら倒した訳、族なら族ごとの最初の
+    /// 記録に書く理由の短い形（先頭の `count` 本。2026-09-26）。**全部なら倒した訳、グループならグループごとの最初の
     /// パス、基底だけなら最初のパスである。**
     pub fn reasons(&self, count: usize) -> String {
         let listed: Vec<String> = if !self.not_comparable.is_empty() {
@@ -540,7 +540,7 @@ impl Selection {
         }
     }
 
-    /// 人が読む行（`--status` が出す）。**理由のパスは族ごとに数本まで出し、残りは数で言う。**
+    /// 人が読む行（`--status` が出す）。**理由のパスはグループごとに数本まで出し、残りは数で示す。**
     pub fn lines(&self, changed: usize) -> Vec<String> {
         const SHOWN: usize = 4;
         let listed = |paths: &[String]| {
@@ -555,7 +555,7 @@ impl Selection {
             }
             text
         };
-        // **比べられない訳は、パスより先に言う**（変わったパスが 0 でも全部である）。
+        // **比べられない訳は、パスより先に示す**（変わったパスが 0 でも全部である）。
         if !self.not_comparable.is_empty() {
             let mut lines = vec![
                 "families selected: all (the full check), because the comparison is not possible:"
@@ -663,7 +663,7 @@ mod tests {
         ));
     }
 
-    /// **表は和で読む**——**1 つでも全部なら全部、基底だけの行は族を減らさない。**
+    /// **表は和で読む**——**1 つでも全部なら全部、基底だけの行はグループを減らさない。**
     #[test]
     fn a_path_takes_the_union_of_every_row_it_matches() {
         assert_eq!(
@@ -687,7 +687,7 @@ mod tests {
                 Family::Devices
             ]))
         );
-        // **`third_party` の README は字形の族に入る**（基底だけの `*.md` は根の直下だけ）。
+        // **`third_party` の README は字形のグループに入る**（基底だけの `*.md` は根の直下だけ）。
         assert_eq!(
             reach_of(PATH_RULES, "third_party/dejavu/README.md"),
             Some(PathReach::Families(vec![Family::Apps]))
@@ -715,7 +715,7 @@ mod tests {
         assert_eq!(reach_of(&rules, "a/d.rs"), Some(PathReach::BaseOnly));
     }
 
-    /// **基底の確かめ**——**行の無いパス、基底だけの `kernel/` 等、死んだ行を挙げる。**
+    /// **基本の検査の確かめ**——**行の無いパス、基底だけの `kernel/` 等、死んだ行を挙げる。**
     #[test]
     fn the_table_check_names_unmatched_paths_base_only_kernel_paths_and_dead_rows() {
         let rules = [

@@ -1,6 +1,6 @@
-//! VirtualBox の走行の記録を判定する（`ADR-0068` の 2-2。2026-09-24）。
+//! VirtualBox の実行の記録を判定する（`ADR-0068` の 2-2。2026-09-24）。
 //!
-//! **判定は xtask だけが持つ。** **道具（`tools/vbox-vm.py` の `run`）は起こす・打つ・記録を
+//! **判定は xtask だけが持つ。** **道具（`tools/vbox-vm.py` の `run`）は起動する・打つ・記録を
 //! 採るだけである。** 記録の置き場は `target/vbox/<VM>/<時刻>/`（道具の doc）。
 //!
 //! # VM の外から数えた証拠を判定に入れる
@@ -65,7 +65,7 @@ pub fn key_bytes(text: &str) -> usize {
         .count()
 }
 
-/// 打鍵の窓の前後の計数の差。
+/// 打鍵のウィンドウの前後の計数の差。
 #[derive(Debug, PartialEq, Eq)]
 pub struct CounterVerdict {
     /// キーボードのベクタの増え。
