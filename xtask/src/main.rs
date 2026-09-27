@@ -548,6 +548,21 @@ const PAGING_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: true,
         min_heartbeats: None,
     },
+    // 2026-09-27（`ADR-0071` の決定 5）: 起動の終わりに控えるカーネル側の PML4 の指紋を、わざと違う値にする。
+    //
+    // **起動の後の最初のアドレス空間の作成が `KernelTopChanged` で断られ、シェルが起動しない。** **突き合わせる
+    // 所が実際に働くことの対照である**（指紋が項目の違いを拾うことは、ホストのテストが見る）。
+    CriticalTest {
+        name: "kernel-top-digest-mismatch-test",
+        feature: "kernel-top-digest-mismatch-test",
+        expected_markers: &[
+            "address-space: froze the kernel half of the PML4 before init",
+            "KernelTopChanged",
+        ],
+        forbidden_markers: &["zash: ready"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // S9-a: map_4kib の書き込み可否の引数を無視し、葉を常に W=1 で作る。
     //
     // **既定ビルドの主張は「writable=false で張った葉に Ring 3 が書くと #PF になる」**
@@ -22298,6 +22313,7 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "misalign-test",
     "idt-irq-stub-offset-test",
     "addrspace-no-kernel-share",
+    "kernel-top-digest-mismatch-test",
     "no-eoi-test",
     "alt-offset-test",
     "tiny-key-buffer",

@@ -1071,7 +1071,8 @@ pub fn load_user_program(
         }
     }
 
-    // SAFETY: production は稼働中の PML4、direct_map は登録済みのウィンドウ。
+    // SAFETY: production は稼働中の PML4、direct_map は登録済みのウィンドウ。**起動の後なので、カーネル側の
+    // PML4 の項目は誰も変えない**（`AddressSpace::new` の前提。起動の終わりの指紋と突き合わせる）。BKL は持っていない。
     let space = match unsafe {
         AddressSpace::new(allocator, direct_map, production, USER_PROGRAM_PML4_INDEX)
     } {

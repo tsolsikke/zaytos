@@ -1924,6 +1924,26 @@ extern "sysv64" fn kernel_main() -> ! {
     // **`init` へ入る前である**——あちらは戻らない。
     verify_bss_is_mapped(&mut logger);
 
+    // **カーネル側の PML4 の項目の指紋を採る**（2026-09-27。`ADR-0071` の決定 5）。**ここから後は、カーネル側の
+    // 項目を誰も変えない**——**`AddressSpace::new` が突き合わせる。**
+    // SAFETY: 稼働中の PML4 を direct map 越しに読むだけ。
+    match unsafe {
+        kernel::address_space::freeze_kernel_top(
+            common::addr::direct_map(),
+            kernel::paging::switch::read_cr3(),
+        )
+    } {
+        Some(present) => logger.info(format_args!(
+            "address-space: froze the kernel half of the PML4 before init ({present} present entries)"
+        )),
+        None => {
+            logger.error(format_args!(
+                "address-space: could not read the running PML4 to freeze its kernel half; halting"
+            ));
+            cpu::halt_forever();
+        }
+    }
+
     run_init(&mut logger, console.as_mut());
 }
 
@@ -10459,6 +10479,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "addrspace-no-kernel-share",
         cfg!(feature = "addrspace-no-kernel-share"),
         "新しいアドレス空間へカーネルの上位を写さない",
+    ),
+    (
+        "kernel-top-digest-mismatch-test",
+        cfg!(feature = "kernel-top-digest-mismatch-test"),
+        "起動の終わりに、カーネル側の PML4 の違う指紋を控える",
     ),
     (
         "no-eoi-test",

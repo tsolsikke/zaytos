@@ -63,6 +63,9 @@ idt-irq-stub-offset-test = []
 
 # S7-c: 新しいアドレス空間へカーネルの上位を写さない。切り替えた瞬間に死ぬ。
 addrspace-no-kernel-share = []
+# 2026-09-27（`ADR-0071` の決定 5）: 起動の終わりに違う指紋を控える。起動の後の最初のアドレス空間の作成が
+# `KernelTopChanged` で断られる。`--paging-test kernel-top-digest-mismatch-test`。
+kernel-top-digest-mismatch-test = []
 # タイマを実際に動かす(M4-d-2)。
 interrupt-test-timer = ["interrupt-test"]
 # EOI の発行をわざと落とし、ティックが 1 回で止まることを確認する。

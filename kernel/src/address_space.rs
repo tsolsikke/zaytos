@@ -23,6 +23,8 @@
 //! **これは検査できる主張である**（到達条件 4）。破壊テスト `addrspace-no-kernel-share`
 //! は上位をコピーしない。**切り替えた瞬間に命令フェッチが翻訳できなくなる。**
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use crate::frame_allocator::FrameAllocator;
 use crate::paging::active::PageAttributes;
 use common::addr::{DirectMap, PhysAddr};
@@ -66,6 +68,70 @@ pub enum AddressSpaceError {
     /// 見えなくなって漏れる。**区画が同じ 4KiB ページを共有する ELF がここへ
     /// 来る。**
     AlreadyMapped,
+    /// カーネル側の PML4 の項目が、起動の終わりに採った指紋と違う（2026-09-27。`ADR-0071` の決定 5）。
+    ///
+    /// **前提（起動の後は、カーネル側の PML4 の項目を誰も変えない）が崩れている。** **コピーした上位が
+    /// 稼働中の表と食い違っているかもしれないので、この空間を作らない。**
+    KernelTopChanged,
+}
+
+/// 起動の終わり（`run_init` の前）に採った、カーネル側の PML4 の項目（添字 256〜511）の指紋
+/// （2026-09-27。`ADR-0071` の決定 5）。**0 は「まだ採っていない」を表す**（[`kernel_top_digest`] は 0 を返さない）。
+static FROZEN_KERNEL_TOP: AtomicU64 = AtomicU64::new(0);
+
+/// カーネル側の PML4 の項目の指紋（純粋な論理）。**FNV-1a（64 ビット）で、添字と値を順に混ぜる。**
+/// **CPU が立てるアクセス済み（A、5 番）とダーティ（D、6 番）のビットは除く**——**表を辿るだけで立つので、
+/// 項目の変更ではない。** **最下位のビットを立てて返すので 0 にならない**（0 は「まだ採っていない」）。
+pub fn kernel_top_digest(entries: impl IntoIterator<Item = (usize, u64)>) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    const SET_BY_THE_CPU: u64 = (1 << 5) | (1 << 6);
+    let mut hash = OFFSET;
+    for (index, value) in entries {
+        let value = value & !SET_BY_THE_CPU;
+        for byte in (index as u64)
+            .to_le_bytes()
+            .into_iter()
+            .chain(value.to_le_bytes())
+        {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+    }
+    hash | 1
+}
+
+/// 起動の終わりに、稼働中の PML4 のカーネル側の指紋を採る（2026-09-27。`ADR-0071` の決定 5）。**`run_init` の前に
+/// 1 度だけ呼ぶ。** **ここから後は、[`AddressSpace::new`] がコピーした上位をこの指紋と突き合わせる。**
+/// **戻り値は present な項目の数**（起動ログに出す）。**覆いの外なら `None` で、採らない。**
+///
+/// **指紋は PML4 の上位の項目だけを見て、その下の段（PDPT など）は見ない**——**下の段は全部のアドレス空間が
+/// 同じ表を共有しているので、変わってもすべての空間に同時に見える。** **前提が守るのは、PML4 の項目を
+/// コピーした時点と今とで食い違わないことである。**
+///
+/// # Safety
+///
+/// `current_pml4` が稼働中の PML4 で、`direct_map` がそれを覆っていること。**読むだけである。**
+pub unsafe fn freeze_kernel_top(direct_map: DirectMap, current_pml4: PhysAddr) -> Option<usize> {
+    if !direct_map.covers(current_pml4) {
+        return None;
+    }
+    let table = direct_map.phys_to_virt(current_pml4).as_u64() as *const u64;
+    let mut present = 0;
+    let digest = kernel_top_digest((KERNEL_PML4_FIRST_INDEX..PML4_ENTRY_COUNT).map(|index| {
+        // SAFETY: direct map 越しの稼働中 PML4 の読み。覆いは上で確かめ、添字は 512 未満。
+        let value = unsafe { table.add(index).read_volatile() };
+        if value & 1 != 0 {
+            present += 1;
+        }
+        (index, value)
+    }));
+    // 破壊テスト (2026-09-27, kernel-top-digest-mismatch-test): **違う指紋を控える。** **起動の後の最初の
+    // アドレス空間の作成が `KernelTopChanged` で断られ、突き合わせる所が働くことを確かめる。**
+    #[cfg(feature = "kernel-top-digest-mismatch-test")]
+    let digest = digest ^ 2;
+    FROZEN_KERNEL_TOP.store(digest, Ordering::SeqCst);
+    Some(present)
 }
 
 /// プロセス 1 つ分のアドレス空間。
@@ -109,8 +175,14 @@ impl AddressSpace {
     ///
     /// - `current_pml4` が稼働中の PML4 を指していること。
     /// - `direct_map` がその PML4 と、これから取るフレームの両方を覆っていること。
-    /// - **呼び出し中に他コアがカーネル側の PML4 を変えないこと。** 現在これは BKL が
-    ///   与える（マッピングの変更は BKL の内側でのみ行う。ADR-0027 の Addendum）。
+    /// - **呼び出しの間に、カーネル側の PML4 の項目（添字 256〜511）が変わらないこと。**
+    ///   **起動の後（`run_init` から）は誰も変えない**——**書く経路は起動の間だけである**（AP の per-CPU の
+    ///   置き場と AP スタック〔添字 258〕と、試しの feature `smp-tlb-shootdown-probe` のときだけ作る探り用の
+    ///   ページ〔添字 259〕。どれも `kernel_main` の中で `run_init` より前に呼ぶ。`ADR-0071` の決定 5）。
+    ///   **BKL には依らない**（`spawn` は BKL を解いてから呼ぶ）。
+    ///   **起動の間に呼ぶなら、同じ文脈がカーネル側の項目を書いていないこと**（AP を起動する前の
+    ///   単一の文脈から呼ぶ）。**起動の後は、コピーした上位を起動の終わりの指紋
+    ///   （[`freeze_kernel_top`]）と突き合わせ、違えば [`AddressSpaceError::KernelTopChanged`] で断る。**
     pub unsafe fn new(
         allocator: &mut FrameAllocator,
         direct_map: DirectMap,
@@ -153,6 +225,21 @@ impl AddressSpace {
             };
             // SAFETY: いま取ったフレームの、direct map 越しの書き。範囲は 512 エントリ内。
             unsafe { new_table.add(index).write_volatile(value) };
+        }
+
+        // **起動の後は、コピーした上位を起動の終わりの指紋と突き合わせる**（`ADR-0071` の決定 5）。
+        // **違えば、前提が崩れているので作らない。**
+        let frozen = FROZEN_KERNEL_TOP.load(Ordering::SeqCst);
+        if frozen != 0 {
+            let copied =
+                kernel_top_digest((KERNEL_PML4_FIRST_INDEX..PML4_ENTRY_COUNT).map(|index| {
+                    // SAFETY: いま書いたフレームの、direct map 越しの読み。範囲は 512 エントリ内。
+                    (index, unsafe { new_table.add(index).read_volatile() })
+                }));
+            if copied != frozen {
+                let _ = allocator.deallocate_frame(pml4);
+                return Err(AddressSpaceError::KernelTopChanged);
+            }
         }
 
         Ok(Self {
@@ -538,6 +625,47 @@ unsafe fn zero_table(direct_map: DirectMap, table: PhysAddr) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **指紋は、どの項目の値が変わっても、同じ値の項目が別の添字へ移っても変わり、0 にならない**
+    /// （2026-09-27。`ADR-0071` の決定 5）。
+    #[test]
+    fn the_kernel_top_digest_changes_with_any_entry_and_is_never_zero() {
+        let base: Vec<(usize, u64)> = (KERNEL_PML4_FIRST_INDEX..PML4_ENTRY_COUNT)
+            .map(|index| {
+                (
+                    index,
+                    if index % 64 == 0 {
+                        0x1000 * index as u64 | 3
+                    } else {
+                        0
+                    },
+                )
+            })
+            .collect();
+        let digest = kernel_top_digest(base.iter().copied());
+        assert_ne!(digest, 0);
+        assert_eq!(digest, kernel_top_digest(base.iter().copied()));
+        for position in 0..base.len() {
+            let mut changed = base.clone();
+            changed[position].1 ^= 1;
+            assert_ne!(
+                kernel_top_digest(changed),
+                digest,
+                "entry {}",
+                base[position].0
+            );
+        }
+        // **CPU が立てる A と D のビットは、指紋を変えない。**
+        let mut walked = base.clone();
+        walked[0].1 |= 1 << 5;
+        walked[1].1 |= 1 << 6;
+        assert_eq!(kernel_top_digest(walked), digest);
+        let mut moved = base.clone();
+        moved[0].1 = 0;
+        moved[1].1 = base[0].1;
+        assert_ne!(kernel_top_digest(moved), digest);
+        assert_ne!(kernel_top_digest(core::iter::empty()), 0);
+    }
 
     #[test]
     fn the_lower_half_is_not_shared() {
