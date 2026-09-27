@@ -21983,6 +21983,382 @@ fn check_kernel_layout(workspace_root: &Path, update: bool) -> Result<String> {
     )
 }
 
+/// 共通の側と `main.rs` に出る x86 の言葉の数の基準（2026-09-27。境界の段階の手順 2。`ADR-0070` の 3 の (5)）。
+const REFERENCE_X86_WORDS: &str = "xtask/reference/x86-words.txt";
+
+/// CPU 固有・機械固有・外部 ABI の置き場（x86 の言葉を数えない側。境界の段階の手順 2 で作る）。
+const X86_WORD_HOMES: &[&str] = &[
+    "kernel/src/arch/",
+    "kernel/src/machine/",
+    "kernel/src/abi/",
+    "common/src/arch/",
+    "common/src/machine/",
+];
+
+/// 共通の側と分けて数えるファイル。**起動の順を持ち、手順 2 では分けない**（ARM の浅い仮対応の段階で分ける。
+/// 運用者の決定）。**置き場と同じく許すが、数は増えてはならない**——**移しきれないコードの置き場にしないため。**
+const X86_WORDS_BOOT_SEQUENCE: &str = "kernel/src/main.rs";
+
+/// x86 の言葉（小文字）。**識別子を `_` と大文字の切れ目で分けた語と、1 語ずつ比べる**（[`identifier_words`]）。
+///
+/// **`ADR-0070` の 3 の (5) の例に、制御レジスタ・レジスタの名前・ベクタ・ポート・MSR・COM1 などを足した。**
+/// **`x86` と `x86_64` そのものは数えない**——**移すコミットで、使う側の `use` が `arch::x86_64::…` に変わっても
+/// 数が増えないようにするため**（使う側の向きは、分けるコミットで関数へ置き換える）。
+const X86_WORDS: &[&str] = &[
+    // 制御レジスタ・MSR・命令
+    "cr0", "cr2", "cr3", "cr4", "cr8", "efer", "msr", "msrs", "rdmsr", "wrmsr", "cpuid", "rdtsc",
+    "tsc", "invlpg", "iretq", "sysretq", "swapgs", "hlt", "cli", "sti", "fxsave", "fxrstor",
+    "xsave", "xrstor", // 記述子の表・段・ページテーブルの段
+    "gdt", "gdtr", "idt", "idtr", "tss", "ist", "rsp0", "pml4", "pdpt", // レジスタ
+    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "r8", "r9", "r10", "r11", "r12", "r13",
+    "r14", "r15", "rip", "rflags",
+    // 割り込みの配送（x86 のベクタ）と、PC の装置
+    "vector", "vectors", "apic", "lapic", "ioapic", "x2apic", "pic", "pit", "i8042", "com1", "port",
+    "ports", "inb", "outb", "inw", "outw", "inl", "outl",
+];
+
+/// 後ろに番号が付いても同じ言葉として数えるもの（`IST1`・`COM2`・`pic8259`）。
+const X86_WORDS_WITH_NUMBERS: &[&str] = &["ist", "com", "pic"];
+
+/// 語が x86 の言葉か。
+fn is_x86_word(word: &str) -> bool {
+    if X86_WORDS.contains(&word) {
+        return true;
+    }
+    let stem = word.trim_end_matches(|c: char| c.is_ascii_digit());
+    stem.len() < word.len() && X86_WORDS_WITH_NUMBERS.contains(&stem)
+}
+
+/// 識別子を語に分ける（`_` と、小文字か数字から大文字への切れ目と、大文字の並びの後ろの大文字と小文字の切れ目）。
+/// **数字は前の語に付ける**（`cr3`・`IST1`・`COM1` は 1 語のまま）。返す語は小文字。
+fn identifier_words(identifier: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    for piece in identifier.split('_').filter(|piece| !piece.is_empty()) {
+        let chars: Vec<char> = piece.chars().collect();
+        let mut start = 0;
+        for i in 1..chars.len() {
+            let (previous, current) = (chars[i - 1], chars[i]);
+            let next_is_lower = chars.get(i + 1).is_some_and(|c| c.is_lowercase());
+            let boundary = ((previous.is_lowercase() || previous.is_ascii_digit())
+                && current.is_uppercase())
+                || (previous.is_uppercase() && current.is_uppercase() && next_is_lower);
+            if boundary {
+                words.push(chars[start..i].iter().collect::<String>().to_lowercase());
+                start = i;
+            }
+        }
+        words.push(chars[start..].iter().collect::<String>().to_lowercase());
+    }
+    words
+}
+
+/// `at` から始まる文字列の字句を読み、中身と次の位置を返す（文字列でなければ `None`）。
+/// 形は `"…"`・`b"…"`・`r"…"`・`r#"…"#`・`br"…"`・`br#"…"#` である。
+fn string_literal_at(chars: &[char], at: usize) -> Option<(String, usize)> {
+    let mut i = at;
+    if chars.get(i) == Some(&'b') {
+        i += 1;
+    }
+    let raw = chars.get(i) == Some(&'r');
+    if raw {
+        i += 1;
+    }
+    let mut hashes = 0;
+    while raw && chars.get(i) == Some(&'#') {
+        hashes += 1;
+        i += 1;
+    }
+    if chars.get(i) != Some(&'"') {
+        return None;
+    }
+    let start = i + 1;
+    let mut j = start;
+    while j < chars.len() {
+        if raw {
+            if chars[j] == '"' && (0..hashes).all(|k| chars.get(j + 1 + k) == Some(&'#')) {
+                return Some((chars[start..j].iter().collect(), j + 1 + hashes));
+            }
+            j += 1;
+        } else if chars[j] == '\\' {
+            j += 2;
+        } else if chars[j] == '"' {
+            return Some((chars[start..j].iter().collect(), j + 1));
+        } else {
+            j += 1;
+        }
+    }
+    Some((
+        chars[start.min(chars.len())..].iter().collect(),
+        chars.len(),
+    ))
+}
+
+/// `at` の `'` が文字の字句なら、その次の位置を返す（ライフタイムやラベルなら `None`）。
+fn char_literal_end(chars: &[char], at: usize) -> Option<usize> {
+    match chars.get(at + 1)? {
+        '\\' => (at + 3..chars.len().min(at + 14))
+            .find(|&i| chars[i] == '\'')
+            .map(|i| i + 1),
+        _ if chars.get(at + 2) == Some(&'\'') => Some(at + 3),
+        _ => None,
+    }
+}
+
+/// コメントと文字列を除いたコードを返す。**`asm!`・`global_asm!`・`naked_asm!` の中の文字列だけは残す**
+/// ——**命令は文字列の中に書かれるため。** **ほかの文字列（ログの文言）は数えない**——**起動ログを変えずに
+/// 移すので、文言の中の言葉は手順 2 では減らせない。**
+fn code_for_word_count(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let is_identifier = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(text.len());
+    let mut depth = 0usize;
+    let mut asm_depth: Option<usize> = None;
+    let mut asm_pending = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        if c == '/' && next == Some('/') {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == '/' && next == Some('*') {
+            let mut nest = 0usize;
+            while i < chars.len() {
+                if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+                    nest += 1;
+                    i += 2;
+                } else if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+                    nest -= 1;
+                    i += 2;
+                    if nest == 0 {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            out.push(' ');
+            continue;
+        }
+        let after_identifier = i > 0 && is_identifier(chars[i - 1]);
+        if !after_identifier && (c == '"' || c == 'b' || c == 'r') {
+            if let Some((content, end)) = string_literal_at(&chars, i) {
+                if asm_depth.is_some() {
+                    out.push(' ');
+                    out.push_str(&content);
+                    out.push(' ');
+                } else {
+                    out.push_str("\"\"");
+                }
+                i = end;
+                continue;
+            }
+        }
+        if c == '\'' {
+            if let Some(end) = char_literal_end(&chars, i) {
+                out.push_str("' '");
+                i = end;
+                continue;
+            }
+        }
+        if !after_identifier && (c.is_alphabetic() || c == '_') {
+            let start = i;
+            while i < chars.len() && is_identifier(chars[i]) {
+                i += 1;
+            }
+            let identifier: String = chars[start..i].iter().collect();
+            if matches!(identifier.as_str(), "asm" | "global_asm" | "naked_asm")
+                && chars[i..].iter().find(|c| !c.is_whitespace()) == Some(&'!')
+            {
+                asm_pending = true;
+            }
+            out.push_str(&identifier);
+            continue;
+        }
+        match c {
+            '(' | '[' | '{' => {
+                depth += 1;
+                if asm_pending {
+                    asm_depth = Some(depth);
+                    asm_pending = false;
+                }
+            }
+            ')' | ']' | '}' => {
+                if asm_depth == Some(depth) {
+                    asm_depth = None;
+                }
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// 1 つのファイルの x86 の言葉を、語ごとに数える（コメントとログの文言は数えない。[`code_for_word_count`]）。
+fn x86_words_in(text: &str) -> BTreeMap<String, usize> {
+    let code = code_for_word_count(text);
+    let mut counts = BTreeMap::new();
+    let mut identifier = String::new();
+    for c in code.chars().chain(std::iter::once(' ')) {
+        if c.is_alphanumeric() || c == '_' {
+            identifier.push(c);
+            continue;
+        }
+        if identifier.starts_with(|c: char| c.is_alphabetic() || c == '_') {
+            for word in identifier_words(&identifier) {
+                if is_x86_word(&word) {
+                    *counts.entry(word).or_default() += 1;
+                }
+            }
+        }
+        identifier.clear();
+    }
+    counts
+}
+
+/// ファイルが共通の側か、`main.rs` か、置き場か。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum X86WordSide {
+    Common,
+    BootSequence,
+    Home,
+}
+
+fn x86_word_side(path: &str) -> X86WordSide {
+    if path == X86_WORDS_BOOT_SEQUENCE {
+        X86WordSide::BootSequence
+    } else if X86_WORD_HOMES.iter().any(|home| path.starts_with(home)) {
+        X86WordSide::Home
+    } else {
+        X86WordSide::Common
+    }
+}
+
+/// 基準のファイルの形（`common <数>` と `kernel/src/main.rs <数>` の 2 行）を読む。
+fn read_x86_word_baseline(text: &str) -> Result<(usize, usize)> {
+    let mut common = None;
+    let mut boot = None;
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let (key, value) = line
+            .split_once(' ')
+            .with_context(|| format!("the line {line:?} is not `<name> <count>`"))?;
+        let value: usize = value
+            .trim()
+            .parse()
+            .with_context(|| format!("the count in {line:?} is not a number"))?;
+        match key {
+            "common" => common = Some(value),
+            X86_WORDS_BOOT_SEQUENCE => boot = Some(value),
+            other => bail!("unknown name {other:?} in {REFERENCE_X86_WORDS}"),
+        }
+    }
+    Ok((
+        common.context("the baseline has no `common` line")?,
+        boot.with_context(|| format!("the baseline has no `{X86_WORDS_BOOT_SEQUENCE}` line"))?,
+    ))
+}
+
+/// 共通の側と `main.rs` の x86 の言葉が、基準より増えていないこと（2026-09-27。境界の段階の手順 2。運用者の決定）。
+///
+/// **増えたら落ちる。** **減ったら、基準を下げるまで落ちる**——**下げずに置くと、減った分だけ後で増えても
+/// 落ちなくなるため。** 下げるのは `--update-reference` で、**上げる向きには書き換えない**（上げるなら手で書き、
+/// 理由をコミットに書く）。**数えるのは `kernel/src` と `common/src` の追跡下の `.rs` で、コメントとログの文言は
+/// 数えない**（[`code_for_word_count`]）。置き場（[`X86_WORD_HOMES`]）の中の数は出すだけである。
+fn check_x86_words(workspace_root: &Path, update: bool) -> Result<String> {
+    let mut common = 0usize;
+    let mut boot = 0usize;
+    let mut homes = 0usize;
+    let mut per_file: Vec<(String, BTreeMap<String, usize>)> = Vec::new();
+    for path in tracked_paths(workspace_root, &["kernel/src", "common/src"])? {
+        if !path.ends_with(".rs") {
+            continue;
+        }
+        let text = fs::read_to_string(workspace_root.join(&path))
+            .with_context(|| format!("failed to read {path}"))?;
+        let counts = x86_words_in(&text);
+        let total: usize = counts.values().sum();
+        match x86_word_side(&path) {
+            X86WordSide::Common => common += total,
+            X86WordSide::BootSequence => boot += total,
+            X86WordSide::Home => homes += total,
+        }
+        if x86_word_side(&path) != X86WordSide::Home {
+            per_file.push((path, counts));
+        }
+    }
+    let reference = workspace_root.join(REFERENCE_X86_WORDS);
+    let recorded = format!("common {common}\n{X86_WORDS_BOOT_SEQUENCE} {boot}\n");
+    let summary = format!(
+        "common side {common}, {X86_WORDS_BOOT_SEQUENCE} {boot}, arch/machine/abi {homes} (not limited)"
+    );
+    let Ok(text) = fs::read_to_string(&reference) else {
+        if update {
+            fs::write(&reference, &recorded).context("failed to record the x86 word baseline")?;
+            return Ok(format!(
+                "baseline recorded at {REFERENCE_X86_WORDS}: {summary}"
+            ));
+        }
+        bail!(
+            "{REFERENCE_X86_WORDS} is missing; run `cargo xtask check --update-reference` once to \
+             record it"
+        );
+    };
+    let (base_common, base_boot) = read_x86_word_baseline(&text)?;
+    if common > base_common || boot > base_boot {
+        // **どのファイルで増えたかを、HEAD の同じファイルと比べて出す。**
+        for (path, counts) in &per_file {
+            let before = Command::new("git")
+                .current_dir(workspace_root)
+                .args(["show", &format!("HEAD:{path}")])
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| x86_words_in(&String::from_utf8_lossy(&output.stdout)))
+                .unwrap_or_default();
+            let grown: Vec<String> = counts
+                .iter()
+                .filter(|(word, count)| **count > before.get(*word).copied().unwrap_or(0))
+                .map(|(word, count)| {
+                    format!(
+                        "{word} {} -> {count}",
+                        before.get(word).copied().unwrap_or(0)
+                    )
+                })
+                .collect();
+            if !grown.is_empty() {
+                println!("    {path} (against HEAD): {}", grown.join(", "));
+            }
+        }
+        bail!(
+            "x86 words grew: common side {base_common} -> {common}, {X86_WORDS_BOOT_SEQUENCE} \
+             {base_boot} -> {boot}. Keep CPU, machine and ABI words in arch/, machine/ and abi/ \
+             (call them through functions); the baseline is only lowered, never raised by the tool"
+        );
+    }
+    if (common, boot) == (base_common, base_boot) {
+        return Ok(format!("OK ({summary})"));
+    }
+    if update {
+        fs::write(&reference, &recorded).context("failed to lower the x86 word baseline")?;
+        return Ok(format!(
+            "baseline lowered: common side {base_common} -> {common}, {X86_WORDS_BOOT_SEQUENCE} \
+             {base_boot} -> {boot}"
+        ));
+    }
+    bail!(
+        "x86 words fell below the baseline (common side {base_common} -> {common}, \
+         {X86_WORDS_BOOT_SEQUENCE} {base_boot} -> {boot}); lower the baseline with \
+         `cargo xtask check --update-reference` in the same commit, so that it cannot grow back \
+         unnoticed"
+    )
+}
+
 /// **構造的なガードが既定ビルドのバイナリに在ること**を見る（S4-c-3-2b、S5-bで拡張）。
 ///
 /// **名前は主張を指す。** 当初は検出器だけを見ていたが、**世代フラッシュ（S5-b）も
@@ -25394,6 +25770,21 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         }
     }
 
+    // **共通の側と `main.rs` に x86 の言葉が増えないこと**（2026-09-27。境界の段階の手順 2。`ADR-0070` の
+    // 3 の (5)。運用者の決定）。
+    total += 1;
+    begin_item(
+        Family::Base,
+        "x86 words on the common side and in main.rs do not grow beyond the baseline",
+    );
+    match check_x86_words(&workspace_root, update_reference) {
+        Ok(message) => println!("--- x86 words: {message}"),
+        Err(e) => {
+            println!("--- x86 words: FAILED ({e:#})");
+            failed.push("x86 words".to_string());
+        }
+    }
+
     // イメージへ入るテキストが ASCII だけであること（2026-08-31、静的）。
     total += 1;
     begin_item(Family::Base, "text that goes into the image is ASCII only");
@@ -25903,8 +26294,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 51,
-    full: 415,
+    base: 52,
+    full: 416,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -28938,6 +29329,71 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         let two = vec!["[INFO] something else".to_string()];
         let plain = first_difference(&one, &two).expect("they differ");
         assert!(!plain.contains("redo the inventory"), "{plain}");
+    }
+
+    /// **x86 の言葉は、コードと `asm!` の中の文字列で数え、コメントとログの文言では数えない**（2026-09-27。
+    /// 境界の段階の手順 2）。**識別子は語に分けて比べる**（`SerialPort` の `port`、`read_cr3` の `cr3`）。
+    #[test]
+    fn x86_words_are_counted_in_code_and_asm_but_not_in_comments_or_log_text() {
+        let text = r##"
+// cr3 in a comment
+/// doc: gdt
+fn read_cr3() -> u64 {
+    let value: u64;
+    core::arch::asm!("mov {}, cr3", out(reg) value);
+    log("cr3 is {value}, the idt is fine");
+    let port = SerialPort::new(0x3F8);
+    let _ = '"'; let _: &'static str = r#"idt "tss""#;
+    /* ist1 /* nested */ ist2 */
+    let _ = IST1;
+    value
+}
+"##;
+        let counts = x86_words_in(text);
+        assert_eq!(counts.get("cr3"), Some(&2), "{counts:?}");
+        assert_eq!(counts.get("port"), Some(&2), "{counts:?}");
+        assert_eq!(counts.get("ist1"), Some(&1), "{counts:?}");
+        for absent in ["gdt", "idt", "tss", "ist2"] {
+            assert_eq!(counts.get(absent), None, "{absent}: {counts:?}");
+        }
+        assert_eq!(
+            identifier_words("IoApicTimer_COM1"),
+            ["io", "apic", "timer", "com1"]
+        );
+        assert_eq!(identifier_words("LAPICTimer"), ["lapic", "timer"]);
+        assert_eq!(identifier_words("Pml4Entry"), ["pml4", "entry"]);
+        assert!(is_x86_word("pic8259") && !is_x86_word("x86") && !is_x86_word("portable"));
+    }
+
+    /// **置き場（`arch`・`machine`・`abi`）の中と、起動の順（`main.rs`）と、共通の側を分ける**（2026-09-27）。
+    #[test]
+    fn the_x86_word_sides_follow_the_homes() {
+        assert_eq!(
+            x86_word_side("kernel/src/main.rs"),
+            X86WordSide::BootSequence
+        );
+        assert_eq!(
+            x86_word_side("kernel/src/arch/x86_64/gdt/mod.rs"),
+            X86WordSide::Home
+        );
+        assert_eq!(
+            x86_word_side("common/src/machine/pc/serial.rs"),
+            X86WordSide::Home
+        );
+        assert_eq!(
+            x86_word_side("kernel/src/abi/linux/x86_64/mod.rs"),
+            X86WordSide::Home
+        );
+        assert_eq!(x86_word_side("kernel/src/bkl.rs"), X86WordSide::Common);
+        assert_eq!(
+            x86_word_side("kernel/src/architecture.rs"),
+            X86WordSide::Common
+        );
+        assert_eq!(
+            read_x86_word_baseline("common 12\nkernel/src/main.rs 3\n").unwrap(),
+            (12, 3)
+        );
+        assert!(read_x86_word_baseline("common 12\n").is_err());
     }
 
     /// **区画の配置の行は、名前・権限・始めと終わりが載る 2MiB の番号だけを持つ**（2026-09-27）。**中身が伸びても
