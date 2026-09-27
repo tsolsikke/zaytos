@@ -589,14 +589,17 @@ impl StartState {
     }
 }
 
-/// 作業ツリーが冷えているかを決める（純粋な論理）。**冷えたとみなすのは 4 つ**——**作業ツリーに `target/` が無い**、
+/// 作業ツリーが冷えているかを決める（純粋な論理）。**冷えたとみなすのは 5 つ**——**作業ツリーに `target/` が無い**、
 /// **作業ツリーの `target/` がメインの作業ツリーの `target/` の [`COLD_FRACTION_DENOM`] 分の 1 より小さい**、**作業ツリーをビルドした
 /// rustc が今の rustc と違うか、その控えが無い**（ツールチェーンを替えると、残った成果物は使われない）、**作業ツリーの置き場が、
-/// 作業ツリーで走った前回の全検査の置き場と違うか、その記録が無い**（2026-09-27。運用者の足す1点。[`last_worktree_run`]）。
+/// 作業ツリーで走った前回の全検査の置き場と違うか、その記録が無い**（2026-09-27。運用者の足す1点。[`last_worktree_run`]）、
+/// **作業ツリーを前にチェックアウトした時から `kernel/` か `common/` のパスが変わったか、それが分からない**（2026-09-27）。
 ///
 /// **置き場が変わると、カーネルを組ごとに作り直す**（実測。2026-09-27）——**カーネルのビルドスクリプトが、読むファイルを
 /// 絶対のパスで cargo へ伝えるので、置き場が変わるとビルドスクリプトからやり直す**（1 つの組で 8.1 秒・83 MiB）。
 /// **作業ツリーを隣へ移した直後の全検査は、入口で温まったとみなされ、見込みの 13.4 GiB に対して 46.9 GiB を書いた。**
+/// **カーネルか common のソースが変わっても、組ごとにカーネルを作り直す**（1 つの組で、コメントを 1 行足しただけでも
+/// 58 MiB を書いた）。**温まった回の見込みは、どれもカーネルのソースが変わらなかった回である。**
 fn start_state(
     main_target: Option<u64>,
     worktree_target: Option<u64>,
@@ -604,6 +607,7 @@ fn start_state(
     worktree_rustc: Option<&str>,
     place: &Path,
     last_run: Option<&Record>,
+    image_changes: Option<(&str, usize)>,
 ) -> StartState {
     let Some(worktree) = worktree_target.filter(|bytes| *bytes > 0) else {
         return StartState::Cold("the worktree has no target/".to_string());
@@ -650,11 +654,44 @@ fn start_state(
         }
         Some(_) => {}
     }
+    match image_changes {
+        None => {
+            return StartState::Cold(
+                "could not tell whether kernel/ or common/ changed since the worktree was last \
+                 checked out"
+                    .to_string(),
+            )
+        }
+        Some((from, count)) if count > 0 => {
+            return StartState::Cold(format!(
+                "{count} path(s) under kernel/ or common/ changed since the worktree was last \
+                 checked out at {}; the kernel is built again for every feature set",
+                short(from)
+            ))
+        }
+        Some(_) => {}
+    }
     StartState::Warm(format!(
-        "the worktree's target/ holds {}, was built by the same rustc as the main tree, and is at \
-         the place of the last full check",
+        "the worktree's target/ holds {}, was built by the same rustc as the main tree, is at \
+         the place of the last full check, and kernel/ and common/ are unchanged since",
         gib(worktree)
     ))
+}
+
+/// 登録された作業ツリーの HEAD（`git worktree list --porcelain` の中身から。純粋な論理。2026-09-27）。
+/// **登録されていなければ `None`。**
+fn worktree_head_in(listing: &str, path: &Path) -> Option<String> {
+    let mut listed = None;
+    for line in listing.lines() {
+        if let Some(worktree) = line.strip_prefix("worktree ") {
+            listed = Some(worktree);
+        } else if let Some(head) = line.strip_prefix("HEAD ") {
+            if listed.is_some_and(|worktree| Path::new(worktree) == path) {
+                return Some(head.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// 作業ツリーで走った直近の全検査の記録（純粋な論理。2026-09-27）。**冷えたかの欄を持つ行は、`cargo xtask full` の子が
@@ -1668,6 +1705,23 @@ fn run(target: &str) -> Result<()> {
         .is_dir()
         .then(|| crate::directory_bytes(&current.join("target")))
         .flatten();
+    // **作業ツリーを前にチェックアウトした時から、`kernel/` か `common/` のパスがいくつ変わったか**（2026-09-27）。
+    // **作業ツリーの HEAD は、登録の一覧から読む**（読めなければ `None`）。
+    let image_changes = git_line(&main, &["worktree", "list", "--porcelain"])
+        .ok()
+        .and_then(|listing| worktree_head_in(&listing, &current))
+        .and_then(|from| {
+            let changed = changed_paths(&main, &from, &commit).ok()?;
+            let count = changed
+                .iter()
+                .filter(|path| {
+                    IMAGE_PATH_PREFIXES
+                        .iter()
+                        .any(|prefix| path.starts_with(prefix))
+                })
+                .count();
+            Some((from, count))
+        });
     // **置き場は、これから検査する作業ツリーの置き場で見る**（以前の置き場から移すなら、移した先）。
     let state = start_state(
         main_target,
@@ -1676,6 +1730,9 @@ fn run(target: &str) -> Result<()> {
         rustc_fingerprint(&current.join("target")).as_deref(),
         &worktree,
         last_worktree_run(&records),
+        image_changes
+            .as_ref()
+            .map(|(from, count)| (from.as_str(), *count)),
     );
     let (estimate, source) = estimate_to_write(&records, &state, || main_target)
         .context("cargo xtask full: could not estimate how much the full check writes")?;
@@ -2787,7 +2844,15 @@ mod tests {
         let here = Path::new("/w");
         let last = ran_at(Some("/w"));
         let state = |main: u64, worktree: Option<u64>, rustc: Option<&str>| {
-            start_state(Some(gib(main)), worktree, same, rustc, here, Some(&last))
+            start_state(
+                Some(gib(main)),
+                worktree,
+                same,
+                rustc,
+                here,
+                Some(&last),
+                Some(("c", 0)),
+            )
         };
         let cold = |state: StartState| matches!(state, StartState::Cold(_));
         assert!(cold(state(56, None, same)));
@@ -2807,7 +2872,15 @@ mod tests {
         let same = Some("5921603053813812323");
         let here = Path::new("/home/u/zaytos-full-check");
         let state = |last: Option<&Record>| {
-            start_state(Some(56 << 30), Some(30 << 30), same, same, here, last)
+            start_state(
+                Some(56 << 30),
+                Some(30 << 30),
+                same,
+                same,
+                here,
+                last,
+                Some(("c", 0)),
+            )
         };
         let cold = |state: StartState| matches!(state, StartState::Cold(_));
         assert!(!cold(state(Some(&ran_at(Some(
@@ -2839,6 +2912,49 @@ mod tests {
             Some("/home/u/zaytos-full-check")
         );
         assert!(!cold(state(last)));
+    }
+
+    /// **作業ツリーを前にチェックアウトした時から `kernel/` か `common/` が変わっていれば冷えている**（2026-09-27）。
+    /// **分からないときも冷えたとみなす。**
+    #[test]
+    fn a_worktree_is_cold_when_the_kernel_sources_changed_since_its_last_checkout() {
+        let same = Some("5921603053813812323");
+        let here = Path::new("/w");
+        let last = ran_at(Some("/w"));
+        let state = |changes: Option<(&str, usize)>| {
+            start_state(
+                Some(56 << 30),
+                Some(30 << 30),
+                same,
+                same,
+                here,
+                Some(&last),
+                changes,
+            )
+        };
+        let cold = |state: StartState| matches!(state, StartState::Cold(_));
+        assert!(!cold(state(Some(("4f1de846359d", 0)))));
+        let changed = state(Some(("4f1de846359d", 12)));
+        assert!(
+            changed.reason().contains("12 path(s)") && changed.reason().contains("4f1de846"),
+            "{changed:?}"
+        );
+        assert!(cold(changed));
+        assert!(cold(state(None)));
+    }
+
+    /// **作業ツリーの HEAD は、登録の一覧の同じ置き場の塊から読む**（形は実測。2026-09-27）。
+    #[test]
+    fn the_head_of_a_worktree_is_read_from_the_listing() {
+        let listing = "worktree /home/u/zaytos\nHEAD aeda6141\nbranch refs/heads/main\n\n\
+                       worktree /home/u/zaytos-full-check\nHEAD 4f1de846\ndetached\n";
+        let head = |path: &str| worktree_head_in(listing, Path::new(path));
+        assert_eq!(
+            head("/home/u/zaytos-full-check").as_deref(),
+            Some("4f1de846")
+        );
+        assert_eq!(head("/home/u/zaytos").as_deref(), Some("aeda6141"));
+        assert_eq!(head("/home/u/other"), None);
     }
 
     /// `.rustc_info.json` の形（実測。2026-09-26）。**数字の並びだけを読む。**

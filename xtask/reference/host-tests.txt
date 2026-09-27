@@ -693,6 +693,7 @@ xtask::full_check::tests::a_record_reads_back_as_written
 xtask::full_check::tests::a_torn_record_line_is_never_read_as_a_record
 xtask::full_check::tests::a_worktree_in_the_old_place_is_moved_next_to_the_main_tree
 xtask::full_check::tests::a_worktree_is_cold_when_it_is_not_where_the_last_full_check_ran
+xtask::full_check::tests::a_worktree_is_cold_when_the_kernel_sources_changed_since_its_last_checkout
 xtask::full_check::tests::a_worktree_is_cold_without_target_when_small_or_built_by_another_rustc
 xtask::full_check::tests::appends_survive_a_torn_tail_and_concurrent_writers
 xtask::full_check::tests::environment_differences_name_the_changed_tools
@@ -703,6 +704,7 @@ xtask::full_check::tests::score_summary_counts_narrow_selections_apart
 xtask::full_check::tests::the_estimate_is_chosen_by_whether_the_worktree_is_cold
 xtask::full_check::tests::the_full_check_needs_the_estimate_plus_the_floor_on_both_places
 xtask::full_check::tests::the_full_check_worktree_sits_next_to_the_main_tree
+xtask::full_check::tests::the_head_of_a_worktree_is_read_from_the_listing
 xtask::full_check::tests::the_pre_push_gate_counts_what_git_sends
 xtask::full_check::tests::the_push_gate_passes_recorded_commits_refuses_the_rest_and_records_the_flag
 xtask::full_check::tests::the_rustc_fingerprint_is_read_from_cargo_s_record
