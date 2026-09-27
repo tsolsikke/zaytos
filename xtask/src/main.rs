@@ -20290,6 +20290,11 @@ const DOC_PATH_MOVES: &[(&str, &str)] = &[
     ("common/src/cpu.rs", "common/src/arch/x86_64/cpu.rs"),
     ("common/src/port.rs", "common/src/arch/x86_64/port.rs"),
     ("common/src/serial.rs", "common/src/machine/pc/serial.rs"),
+    (
+        "kernel/src/cpu_state.rs",
+        "kernel/src/arch/x86_64/cpu_state.rs",
+    ),
+    ("kernel/src/fp.rs", "kernel/src/arch/x86_64/fp.rs"),
 ];
 
 /// 以前の置き場を指すパスを、読み替えの表で今の置き場へ読み替えて、追跡下に在るかを見る（ファイルでも

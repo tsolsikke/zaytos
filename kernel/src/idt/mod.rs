@@ -1166,7 +1166,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     // 100 マイクロ秒ほど、ティックは 10 ミリ秒）。**必ず入るのは
     // システムコールの側である。**
     #[cfg(feature = "fp-clobber-on-kernel-entry-test")]
-    crate::fp::clobber_on_kernel_entry();
+    crate::arch::x86_64::fp::clobber_on_kernel_entry();
 
     // 測定用 IPI（S5-a）は BKL を取る前に処理して戻る。
     //

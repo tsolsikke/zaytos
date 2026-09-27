@@ -3291,7 +3291,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     // ——**こちらは「必ず入る」側**（描画の途中で `malloc` が `brk` を呼ぶ）、
     // **あちらは「レジスタが生きているところへ入る」側**である。
     #[cfg(feature = "fp-clobber-on-kernel-entry-test")]
-    crate::fp::clobber_on_kernel_entry();
+    crate::arch::x86_64::fp::clobber_on_kernel_entry();
 
     let mut bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
 

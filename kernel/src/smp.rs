@@ -1415,12 +1415,12 @@ fn load_bringup(slot: usize) -> Option<ApBringUp> {
 ///
 /// AP 自身から、b-2b-1 のトランポリンで入った直後に 1 回だけ呼ぶこと。
 unsafe fn bring_up_application_processor(info: ApBringUp) -> ! {
-    // 0. **BSP の CR0・CR4・EFER をコピーする**（2026-09-24。`kernel::cpu_state`）。**トランポリンは INIT の直後の
+    // 0. **BSP の CR0・CR4・EFER をコピーする**（2026-09-24。`kernel::arch::x86_64::cpu_state`）。**トランポリンは INIT の直後の
     //    値に PAE・LME・PG と PE しか足さない**——**CD と NW が 1（キャッシュが効かない）で、WP と NE が 0 の
     //    まま走っていた**（実測）。**何より先にコピーする**——この先のコードをキャッシュと WP の下で走らせる。
     // SAFETY: AP の起動の途中で、長モードに居て、割り込みは禁止のままである。
     unsafe {
-        crate::cpu_state::adopt_bsp_state_on_this_ap();
+        crate::arch::x86_64::cpu_state::adopt_bsp_state_on_this_ap();
     }
 
     // 1. 自分の GDT / TSS を載せる。索引は引数で受け取ったものである
@@ -1453,12 +1453,12 @@ unsafe fn bring_up_application_processor(info: ApBringUp) -> ! {
     // 「決定 3 に判定が無い理由」）。**だから忘れやすい。ここに置く理由でもある。**
     // SAFETY: このコアにつき 1 回だけで、まだ FP を使うコードは走っていない。
     unsafe {
-        crate::fp::enable_on_this_cpu();
+        crate::arch::x86_64::fp::enable_on_this_cpu();
     }
     {
         // **読み戻して出力する。** **BSP の行は AP について何も示さない**ので、
         // **コアごとに 1 行ずつ出す。**
-        let state = crate::fp::enabled_state();
+        let state = crate::arch::x86_64::fp::enabled_state();
         let mut port = SerialPort::new(SerialPort::COM1_BASE);
         port.init();
         let _ = writeln!(
@@ -1554,7 +1554,7 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
     }
 
     // **自分の CR0・CR4・EFER を控える**（2026-09-24）。**BSP が起床のまとめの後で突き合わせる。**
-    crate::cpu_state::record_this_ap(slot);
+    crate::arch::x86_64::cpu_state::record_this_ap(slot);
     AP_BROUGHT_UP.fetch_add(1, Ordering::SeqCst);
 
     // === S4-c-3-2b: このコアの `CURRENT` を sentinel から解く ===

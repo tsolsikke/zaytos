@@ -149,7 +149,6 @@ pub const PATH_RULES: &[PathRule] = &[
             "kernel/src/main.rs",
             "kernel/src/lib.rs",
             "kernel/src/panic.rs",
-            "kernel/src/cpu_state.rs",
             "kernel/src/bkl.rs",
             "kernel/src/frame_allocator.rs",
             "kernel/src/memory_map.rs",
@@ -209,11 +208,6 @@ pub const PATH_RULES: &[PathRule] = &[
             Family::Shell,
             Family::Apps,
         ]),
-    },
-    PathRule {
-        // **FP の状態は切り替えのたびに移る**——**Ring 3 のどのプログラムも使いうる。**
-        patterns: &["kernel/src/fp.rs"],
-        reach: Reach::Families(RING3_FAMILIES),
     },
     // ── Ring 3 のプログラム ──
     PathRule {

@@ -19,7 +19,7 @@ use common::machine::pc::serial::SerialPort;
 use core::ptr::addr_of;
 use kernel::console::Console;
 
-use kernel::fp;
+use kernel::arch::x86_64::fp;
 use kernel::frame_allocator;
 use kernel::gdt;
 use kernel::graphics::{Color, Framebuffer, FramebufferLayout};
@@ -351,11 +351,11 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
         idt::init(Some(gdt::DOUBLE_FAULT_IST_INDEX as u8), page_fault_ist);
     }
 
-    // **カーネルが要る CR0 のビットを、BSP で自分で立てる・落とす**（2026-09-24。`kernel::cpu_state`）。
+    // **カーネルが要る CR0 のビットを、BSP で自分で立てる・落とす**（2026-09-24。`kernel::arch::x86_64::cpu_state`）。
     // **ファームウェアが良い値で渡していたので動いていただけである。** **AP は BSP を丸ごとコピーする。**
     // SAFETY: 起動の最初期に BSP で 1 回だけである。PE と PG には触れない。
     unsafe {
-        kernel::cpu_state::establish_required_bits_on_bsp();
+        kernel::arch::x86_64::cpu_state::establish_required_bits_on_bsp();
     }
 
     // このコアで SSE を有効にする（`ADR-0058` の Decision 3）。
@@ -475,7 +475,7 @@ extern "sysv64" fn kernel_main() -> ! {
     }
 
     // **カーネルが要る CR0 のビットを BSP で立てた前後を出す**（2026-09-24）。
-    kernel::cpu_state::report_established_bits(&mut logger);
+    kernel::arch::x86_64::cpu_state::report_established_bits(&mut logger);
 
     // **SSE が有効になっていることを、レジスタから読んで示す**（`ADR-0058`）。
     // **立てたのは `_start` の側で、ここは読み戻しである**——**書いたつもりでは
@@ -1814,7 +1814,7 @@ extern "sysv64" fn kernel_main() -> ! {
     ));
 
     // **棚卸しの前提（2026-09-24。`ADR-0018` の Addendum 9）。** **最初のユーザープログラムより前に見る。**
-    kernel::cpu_state::check_and_report(&mut logger);
+    kernel::arch::x86_64::cpu_state::check_and_report(&mut logger);
 
     if let Err(error) = load_embedded_user_program(&mut logger) {
         // **この段階ではまだ止める。** 既定の `hello` は成功するので、ここへは来ない。

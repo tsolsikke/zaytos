@@ -1864,10 +1864,10 @@ unsafe fn run_loaded_program(
     //
     // 破壊テストでの確認: `fp-no-fresh-state` では戻さない。**前の値がそのまま見える。**
     #[cfg(not(feature = "fp-no-fresh-state"))]
-    // SAFETY: [`crate::fp::FpArea::fresh`] は `fxsave` の形に沿った並びで、
+    // SAFETY: [`crate::arch::x86_64::fp::FpArea::fresh`] は `fxsave` の形に沿った並びで、
     // MXCSR も予約ビットを立てていない（`#GP` にならない）。
     unsafe {
-        crate::fp::restore(&crate::fp::FpArea::fresh())
+        crate::arch::x86_64::fp::restore(&crate::arch::x86_64::fp::FpArea::fresh())
     };
     // **カーネルスタックの高水位を、Ring 3 へ落ちる直前にも出す**（`ADR-0068` の (c)。
     // 運用者の決定。2026-09-23）。
@@ -2402,9 +2402,9 @@ pub fn spawn(
     // 浮動小数点の値を保てなくなる。**
     #[cfg(not(feature = "fp-spawn-no-save"))]
     let parent_fp = {
-        let mut area = crate::fp::FpArea::fresh();
+        let mut area = crate::arch::x86_64::fp::FpArea::fresh();
         // SAFETY: 単一の実行文脈で、この領域はこの関数の中にしかない。
-        unsafe { crate::fp::save(&mut area) };
+        unsafe { crate::arch::x86_64::fp::save(&mut area) };
         area
     };
 
@@ -2416,7 +2416,7 @@ pub fn spawn(
     #[cfg(not(feature = "fp-spawn-no-save"))]
     // SAFETY: `parent_fp` は直前に `fxsave` が書いた 512 バイトである。
     unsafe {
-        crate::fp::restore(&parent_fp)
+        crate::arch::x86_64::fp::restore(&parent_fp)
     };
 
     // **子の終わり方をここで読む。** 戻す前に読まなければ、親のもので上書きされる。

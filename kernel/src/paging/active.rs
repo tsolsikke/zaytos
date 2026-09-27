@@ -564,7 +564,7 @@ impl ActivePageTable {
     ///
     /// **主張してよいのは「Ring 3 から書くと #PF になる」までである。**
     /// 「カーネル（Ring 0）から書いても落ちる」は、まだ主張しない。**`CR0.WP` は 2026-09-24 から
-    /// BSP と各 AP で立てて確かめている**（`crate::cpu_state` の `check_aps_match_bsp`）が、
+    /// BSP と各 AP で立てて確かめている**（`crate::arch::x86_64::cpu_state` の `check_aps_match_bsp`）が、
     /// **Ring 0 の書きが落ちることを確かめる判定はまだ無い**（以前は AP で WP が立っていなかった。
     /// 経緯は `docs/deferred-decisions.md` の「AP の制御レジスタが BSP と違う」）。
     ///

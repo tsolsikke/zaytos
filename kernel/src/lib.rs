@@ -41,8 +41,6 @@ pub mod apic;
 pub mod arch;
 pub mod bkl;
 pub mod console;
-pub mod cpu_state;
-pub mod fp;
 pub mod frame_allocator;
 pub mod gdt;
 pub mod graphics;

@@ -890,7 +890,7 @@ pub fn check_and_report(logger: &mut Logger<SerialPort>) {
         violated = true;
         logger.error(format_args!(
             "cpu-state: bit {bit} of {} is 1, but {} reserves it; a set reserved bit means a \
-             processor newer than the classification - classify it in kernel::cpu_state before \
+             processor newer than the classification - classify it in kernel::arch::x86_64::cpu_state before \
              booting on it",
             register.name(),
             vendor.manual()
@@ -899,7 +899,7 @@ pub fn check_and_report(logger: &mut Logger<SerialPort>) {
     for (register, bit, why) in unclassified_set(vendor, values) {
         logger.warn(format_args!(
             "cpu-state: {} is 1 and is not classified yet ({why}); it does not stop the boot, but \
-             classify it in kernel::cpu_state",
+             classify it in kernel::arch::x86_64::cpu_state",
             BitName(register, bit)
         ));
     }

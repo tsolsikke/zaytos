@@ -64,7 +64,8 @@ const MAIN_TASK: usize = 0;
 /// を明文の規則にしている**（`task/scheduler.rs` の doc）。**512 バイトの領域は
 /// 参照で渡すしかない**ので、規則に触れずに置ける場所がここになる。
 /// **触るのは [`schedule_switch`] だけで、そこは IF=0 かつ BKL の内側である。**
-static mut FP_AREAS: [crate::fp::FpArea; TASK_COUNT] = [crate::fp::FpArea::fresh(); TASK_COUNT];
+static mut FP_AREAS: [crate::arch::x86_64::fp::FpArea; TASK_COUNT] =
+    [crate::arch::x86_64::fp::FpArea::fresh(); TASK_COUNT];
 
 /// AP 用アイドルタスクの添字（S4-c-2）。AP の既定タスクである（S4-c-3-1）。
 ///
@@ -2468,11 +2469,11 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         // （`pick_next` と `current_index` の値域）。
         unsafe {
             let areas = &mut *core::ptr::addr_of_mut!(FP_AREAS);
-            crate::fp::save(&mut areas[current]);
+            crate::arch::x86_64::fp::save(&mut areas[current]);
             // 破壊テスト (W1-c-4, fp-switch-no-restore): 載せない（保存は残す）。**入ったタスクが出た側の
             // XMM の値のまま走る。**
             #[cfg(not(feature = "fp-switch-no-restore"))]
-            crate::fp::restore(&areas[next]);
+            crate::arch::x86_64::fp::restore(&areas[next]);
         }
 
         set_current_index(next);
