@@ -71,7 +71,7 @@ jobs:
     name: cargo xtask check（基底）
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         # 履歴を全部取る。コミットメッセージの文体の検査が全履歴を見る。
         with:
           fetch-depth: 0
@@ -99,7 +99,7 @@ jobs:
     name: cargo xtask check --commit（QEMU を 3 回）
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
