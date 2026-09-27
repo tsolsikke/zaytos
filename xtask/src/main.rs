@@ -19672,7 +19672,7 @@ const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
                  いること」へ強化するなら、**このエントリは意図的な例外として扱うこと。**",
     },
     DirectInterruptControlSite {
-        file: "kernel/src/task.rs",
+        file: "kernel/src/arch/x86_64/worker_bodies.rs",
         item: "global_asm!",
         reason: "GPR_BUF（A/B 共有）の store と照合を守る排他。asm 文脈で InterruptGuard を \
                  使えないための例外。BKL で再検討（複数コアでは防げない）",
