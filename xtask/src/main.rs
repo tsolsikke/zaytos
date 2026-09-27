@@ -19663,7 +19663,7 @@ const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
     // 再検討が要る**（deferred-decisions.md の「per-CPU seam が MAX_CPUS > 1 で…」の
     // 隣に論点として記録した）。
     DirectInterruptControlSite {
-        file: "kernel/src/smp.rs",
+        file: "kernel/src/arch/x86_64/ap_trampoline.rs",
         item: "global_asm!",
         reason: "AP トランポリンの入口。**排他ではない。** SIPI 直後の AP は \
                  リアルモードで IDT を持たないので、割り込みが来ても行き先が無い。 \
