@@ -19401,7 +19401,8 @@ struct DirectSerialPortSite {
 /// # 名前は、見ているものを指す
 ///
 /// **動機は「BKL の外から書いてよい箇所を固定する」だが、実際に見ているのは
-/// `SerialPort::new(` を書いた箇所である。** 書き込みでも BKL の状態でもない。
+/// シリアルを直に開く書き方（[`DIRECT_SERIAL_PORT_OPENERS`]）を書いた箇所である。** 書き込みでも
+/// BKL の状態でもない。
 /// **守りたいことではなく、見ているものを名前にしてある**（同じずれを 3 度
 /// 起こしている。`verification-coverage.md` の失敗類型）。
 ///
@@ -19414,7 +19415,7 @@ struct DirectSerialPortSite {
 ///
 /// # 粒度の限界
 ///
-/// **見ているのは `SerialPort::new(` を書いた箇所である。** `kernel/src/task.rs` の
+/// **見ているのは、シリアルを直に開く書き方を書いた箇所である。** `kernel/src/task.rs` の
 /// `serial_line` のように**多数の呼び出しをまとめる出口**があると、**1 エントリが
 /// その全部を覆う**（実測で 31 箇所）。**「どのファイルのどの関数が口を開けるか」は
 /// 固定できるが、「その口を誰が使うか」は固定できない。**
@@ -19868,6 +19869,20 @@ fn find_direct_external_tool_calls(workspace_root: &Path) -> Result<Vec<String>>
     Ok(findings)
 }
 
+/// シリアルを直に開く書き方（2026-09-28。境界の段階の手順 2）。
+///
+/// **`open_direct_serial(` は、ポートを初期化して返す machine の入口である**（`common/src/machine/pc/serial.rs`）。
+/// **入口を呼ぶ所も、`SerialPort::new(` と同じく口を開ける所として数える**——**入口へ寄せたファイルの行が、
+/// 許可リストの外へ抜けないようにするため。** 入口の定義は、ポートの実装と同じファイルなので数えない。
+const DIRECT_SERIAL_PORT_OPENERS: &[&str] = &["SerialPort::new(", "open_direct_serial("];
+
+/// 行がシリアルを直に開くか（[`DIRECT_SERIAL_PORT_OPENERS`] のどれかを含むか）。
+fn opens_serial_port_directly(line: &str) -> bool {
+    DIRECT_SERIAL_PORT_OPENERS
+        .iter()
+        .any(|opener| line.contains(opener))
+}
+
 fn find_unapproved_direct_serial_ports(
     workspace_root: &Path,
     approved_occurrences: &mut usize,
@@ -19915,7 +19930,7 @@ fn find_unapproved_direct_serial_ports(
             {
                 continue;
             }
-            if !line.contains("SerialPort::new(") {
+            if !opens_serial_port_directly(line) {
                 continue;
             }
             let matched = DIRECT_SERIAL_PORT_ALLOWLIST
@@ -25579,7 +25594,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     if unapproved_direct_serial.is_empty() {
         println!(
             "--- direct serial ports: OK ({} approved entr(y/ies) = file+item pairs, covering {} \
-             occurrence(s) = SerialPort::new lines)",
+             occurrence(s) = lines that open the port directly)",
             DIRECT_SERIAL_PORT_ALLOWLIST.len(),
             approved_direct_serial_occurrences
         );
@@ -29681,6 +29696,26 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         let linked = dir.join("link").join("xtask").display().to_string();
         assert_eq!(built_elsewhere(&real, Some(&linked)), None);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// **シリアルを直に開く所は、`SerialPort::new(` と、machine の入口 `open_direct_serial(` の呼び出しである**
+    /// （2026-09-28）。**並べる行（`pub use`）と書く行は、口を開けていない。**
+    #[test]
+    fn a_line_opens_the_serial_port_through_the_port_or_the_machine_entry() {
+        for line in [
+            "    let mut serial = SerialPort::new(SerialPort::COM1_BASE);",
+            "    let mut serial = common::machine::pc::open_direct_serial();",
+            "    let mut port = crate::machine::pc::open_direct_serial();",
+        ] {
+            assert!(opens_serial_port_directly(line), "{line}");
+        }
+        for line in [
+            "pub use serial::open_direct_serial;",
+            "    let _ = writeln!(serial, \"{args}\");",
+            "    let port: SerialPort = make();",
+        ] {
+            assert!(!opens_serial_port_directly(line), "{line}");
+        }
     }
 
     /// **x86 の言葉は、コードと `asm!` の中の文字列で数え、コメントとログの文言では数えない**（2026-09-27。
