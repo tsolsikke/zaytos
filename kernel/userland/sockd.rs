@@ -3,15 +3,15 @@
 //! # 本番の形の予行である
 //!
 //! **本番の利用者（Seinas。コンポジタ）はまだ無い。** **この組は Wayland の形に合わせて
-//! ある**——**サーバーは起動時に起こされ、名前で待ち、クライアントは名前で繋ぐ。**
-//! **Seinas が来たら、この組は検査（`socket-test`）に残す**——**カーネルの口の判定は
+//! ある**——**サーバーは起動時に立ち上げられ、名前で待ち、クライアントは名前で繋ぐ。**
+//! **Seinas が来たら、この組は検査（`socket-test`）に残す**——**カーネルの入口の判定は
 //! コンポジタの都合から切り離しておくためである**（`ADR-0064`）。
 //!
 //! # 1 度に 1 本ずつ受ける
 //!
 //! **`accept` して、相手が閉じる（EOF）まで返し、また `accept` する。** **2 本目の
 //! `connect` は待ち行列で待つ**（`twice`）。**`quit` が来たら閉じて終わる**——
-//! **カーネルで待っている子には Ctrl+C が届かないので、終わる口を持たせてある。**
+//! **カーネルで待っている子には Ctrl+C が届かないので、終わるコマンドを持たせてある。**
 //!
 //! # 1 行は 1 回の `write` で出す
 //!
@@ -190,7 +190,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 line.end();
                 exit(2);
             }
-            // **0 は相手が閉じた印である**（EOF）。
+            // **0 は相手が閉じた目印である**（EOF）。
             if got == 0 {
                 say(b"sockd: client left");
                 break;
@@ -198,7 +198,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             let got = got as usize;
             let shm_fd = msg.received_fd();
             if shm_fd != 0 {
-                // **共有メモリの fd が来た**——**張って模様を確かめ、結果を返す（`ADR-0065`）。**
+                // **共有メモリの fd が来た**——**マップして模様を確かめ、結果を返す（`ADR-0065`）。**
                 let mapped = mmap_shared(shm_fd as u64, SHM_LEN as u64);
                 let ok = if mapped < 0 {
                     false

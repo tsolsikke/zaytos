@@ -3,7 +3,7 @@
 //! # 本番の形の予行である
 //!
 //! **本番の利用者（Seinas。コンポジタ）はまだ無い。** **この組は Wayland の形に合わせて
-//! ある**——**コンポジタは入力の fd と、クライアントの繋ぎ口と、繋がった接続を、同時に
+//! ある**——**コンポジタは入力の fd と、クライアントが繋ぐ入口と、繋がった接続を、同時に
 //! 待つ。** **仕様は `poll` を要求しないが、待つ理由が 2 つ以上あることは要求する**
 //! （`docs/wayland-inventory.md`）。
 //!
@@ -17,14 +17,14 @@
 //!
 //! # `-EAGAIN` と 0 は回して待つ
 //!
-//! **待たない構成（破壊 `poll-never-waits`）では `poll` が 0 を返す。** **そのときは回して
+//! **待たない構成（破壊テスト `poll-never-waits`）では `poll` が 0 を返す。** **そのときは回して
 //! 待つ**——**`inputd` が `-EAGAIN` を回すのと同じ形である。** **打鍵も返しも結局届くが、
 //! カーネルは眠らないので「待った回数」が 0 になる**（判定が落ちる）。
 //!
 //! # 終了状態の意味
 //!
 //! - `0` 3 回とも起きて、最後に打鍵を受けた
-//! - `1` 入力の fd が開けなかった／名前が取れなかった／`pollc` を起こせなかった
+//! - `1` 入力の fd が開けなかった／名前が取れなかった／`pollc` を起動できなかった
 //! - `2` `poll` / `accept` / `read` が失敗した
 
 #![no_std]
@@ -42,7 +42,7 @@ use userlib::{
 const NAME: &[u8] = b"poll-0";
 /// 待ち行列の長さ。
 const BACKLOG: u64 = 1;
-/// 繋ぐ側の像。**NUL 終端である**（`spawn_detached` はポインタで渡すので、終端が要る）。
+/// 繋ぐ側のイメージ。**NUL 終端である**（`spawn_detached` はポインタで渡すので、終端が要る）。
 const PEER_PATH: &[u8] = b"/bin/pollc\0";
 /// 繋ぐ側の `argv[0]`。**NUL 終端である。**
 const PEER_ARG0: &[u8] = b"pollc\0";
@@ -184,8 +184,8 @@ pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
     }
     say(b"polld: listening on poll-0");
 
-    // **繋ぐ側を起こしっぱなしで起こす**（`ADR-0063` の (b3) の口）。**先に待ち受けてから
-    // 起こすので、相手は 1 回目の `connect` で繋がる**——**回して繋ぎ直す形にしない。**
+    // **繋ぐ側を切り離して起動する**（`ADR-0063` の (b3) の入口）。**先に待ち受けてから
+    // 起動するので、相手は 1 回目の `connect` で繋がる**——**回して繋ぎ直す形にしない。**
     // **表は NULL で終える**（`spawn_detached` の契約。`userlib` の doc）。
     let peer_argv: [*const u8; 2] = [PEER_ARG0.as_ptr(), core::ptr::null()];
     let peer_envp: [*const u8; 1] = [core::ptr::null()];
@@ -254,7 +254,7 @@ pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
     // EOF で起きてしまう**（実測で踏んだ。2026-09-21）。
     close(stream);
     // **繋ぐ側を回収する**（`ADR-0063` の (b2)）。**残すと「回収していない子」が 1 本
-    // 残ったまま締める。**
+    // 残ったまま終える。**
     let status = wait_child(peer as u64);
     let mut line = Line::new();
     line.push(b"polld: pollc ended ");

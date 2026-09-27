@@ -3,16 +3,16 @@
 //! # 本番の形の予行である
 //!
 //! **本番の利用者（Seinas。コンポジタ）はまだ無い。** **コンポジタは画面を開き、面を `mmap` し、
-//! 合成した矩形を `present` で写す**——**その 3 つをここで回す。** **画面の形は Linux の fbdev の
+//! 合成した矩形を `present` でコピーする**——**その 3 つをここで実行する。** **画面の形は Linux の fbdev の
 //! `ioctl` で訊く**（`FBIOGET_VSCREENINFO` / `FBIOGET_FSCREENINFO`）。
 //!
 //! # 順序
 //!
-//! 1. **`/bin/gfxc` を起こしっぱなしで起こし、終わるまで待つ**——**前景でない者が画面と入力の
+//! 1. **`/bin/gfxc` を切り離して起動し、終わるまで待つ**——**前景でない者が画面と入力の
 //!    fd を開けないことを、図形モードへ入る前に見る**（入った後だと `-EBUSY` で断られ、前景の関所を
 //!    見たことにならない）。
 //! 2. **画面を開き、形を訊き、面を `mmap` する。**
-//! 3. **四角をマゼンタで塗り、その矩形だけを `present` で写す。** **マゼンタ（赤と青が 0xFF、緑が 0）は
+//! 3. **四角をマゼンタで塗り、その矩形だけを `present` でコピーする。** **マゼンタ（赤と青が 0xFF、緑が 0）は
 //!    `Rgb` でも `Bgr` でも同じ 32 ビットの値になる**——**並びを取り違えても色が変わらないので、
 //!    判定が並びの読み違いに引きずられない。**
 //! 4. **打鍵を待つ**——**その間に `xtask` が画面を読み戻す。**
@@ -20,8 +20,8 @@
 //!
 //! # 終了状態の意味
 //!
-//! - `0` 描いて写し、打鍵を受けて抜けた
-//! - `1` `gfxc` を起こせなかった／画面か入力が開けなかった
+//! - `0` 描いてコピーし、打鍵を受けて抜けた
+//! - `1` `gfxc` を起動できなかった／画面か入力が開けなかった
 //! - `2` 形が訊けなかった／`mmap` か `present` が失敗した
 
 #![no_std]
@@ -35,7 +35,7 @@ use userlib::{
     spawn_detached, wait_child, write_all, INPUT_EVENT_LEN, STDOUT,
 };
 
-/// 繋がない側の像。**NUL 終端である**（`spawn_detached` はポインタで渡す）。
+/// 繋がない側のイメージ。**NUL 終端である**（`spawn_detached` はポインタで渡す）。
 const PEER_PATH: &[u8] = b"/bin/gfxc\0";
 /// 繋がない側の `argv[0]`。
 const PEER_ARG0: &[u8] = b"gfxc\0";
@@ -129,7 +129,7 @@ pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
     line.push_decimal(status);
     line.end();
 
-    // **2. 画面を開き、形を訊き、面を張る。**
+    // **2. 画面を開き、形を訊き、面をマップする。**
     let screen = open_screen();
     if screen < 0 {
         fail(b"gfxd: open_screen failed ", screen, 1);
@@ -167,11 +167,11 @@ pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
     }
     let base = mapped as usize as *mut u8;
 
-    // **3. 四角を塗り、その矩形だけを写す。**
+    // **3. 四角を塗り、その矩形だけをコピーする。**
     for y in SQUARE_Y..SQUARE_Y + SQUARE_SIZE {
         for x in SQUARE_X..SQUARE_X + SQUARE_SIZE {
             let at = (y * info.line_length + x * 4) as usize;
-            // SAFETY: `at` は `smem_len` の内側である（上で形を確かめた）。**張った面は 4 バイト境界。**
+            // SAFETY: `at` は `smem_len` の内側である（上で形を確かめた）。**マップした面は 4 バイト境界。**
             unsafe { core::ptr::write_volatile(base.add(at).cast::<u32>(), MAGENTA) };
         }
     }

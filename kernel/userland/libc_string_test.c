@@ -1,9 +1,9 @@
 /* `libc_string.c` の純粋な関数を、ホストで固定する（C-c。ADR-0057 の Decision 5）。
  *
- * # QEMU を起こさない
+ * # QEMU を起動しない
  *
  * ADR-0045 と同じ理由である。**ハード依存が無いので、ホストで走らせられる。**
- * `cargo xtask check` の項目が、ホストの `cc` で建てて走らせる。
+ * `cargo xtask check` の項目が、ホストの `cc` でビルドして走らせる。
  *
  * # ホストの libc と一緒にリンクする
  *
@@ -53,7 +53,7 @@ int main(void) {
     zt_memcpy(buffer, "ab", 2);
     check(buffer[0] == 'a' && buffer[1] == 'b', "memcpy copies");
 
-    /* **重なりの両向きを見る。** 前から写す実装は、片方でだけ壊れる。 */
+    /* **重なりの両向きを見る。** 前からコピーする実装は、片方でだけ壊れる。 */
     char forward[8] = "abcdefg";
     zt_memmove(forward + 1, forward, 6);
     check(memcmp(forward, "aabcdef", 7) == 0, "memmove handles dst above src");

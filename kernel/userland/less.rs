@@ -8,10 +8,10 @@
 //! **作らないもの**——**検索（`/`）・行番号への移動・`-N`・横方向の移動・
 //! 複数のファイル。** **運用者が言うまで作らない**（運用者の指示。2026-08-23）。
 //!
-//! **`Ctrl+F` / `Ctrl+B` は入れない。** **いま `Ctrl` の経路は Ctrl+C の旗しか
+//! **`Ctrl+F` / `Ctrl+B` は入れない。** **いま `Ctrl` の経路は Ctrl+C のフラグしか
 //! 持たない**（`kernel/src/input.rs` の `note_scancode_for_interrupt`）ので、
 //! **押されたことが Ring 3 まで届かない。** **実測してから決めること**と
-//! なっていた項目で、**測った結果「届く道が無い」ので、この段では作らない。**
+//! なっていた項目で、**測った結果「届く道が無い」ので、この段階では作らない。**
 //!
 //! # 組み込みではなく外部である（ADR-0043 の基準へ当てた）
 //!
@@ -23,13 +23,13 @@
 //! **`zi` と同じ立場である**（あちらも全画面で、外部である）。
 //! **速さと文法は基準に採らない**（ADR-0043 の決定 1）。
 //!
-//! # 窓の計算は `common` から借りる（ADR-0045）
+//! # ウィンドウの計算は `common` から借りる（ADR-0045）
 //!
 //! **`#[path]` で `common/src/window.rs` を取り込む。** **`zi` と同じものを
 //! 2つ書かない**——**規則は同じである**（どの行から何行を見せるか）。
 //!
-//! **`zi` との違いは、動かすものである**——**`zi` はカーソルを動かし、窓が
-//! それを追う。** **`less` はカーソルを持たず、窓そのものを動かす。**
+//! **`zi` との違いは、動かすものである**——**`zi` はカーソルを動かし、ウィンドウが
+//! それを追う。** **`less` はカーソルを持たず、ウィンドウそのものを動かす。**
 //! **その差は `Window::scroll_down` / `scroll_up` として `common` に在る**
 //! （`more` も同じものを使う）。
 //!
@@ -50,7 +50,7 @@
 #[path = "userlib.rs"]
 mod userlib;
 
-// **窓の計算（VIEW-a。ADR-0045）。** **`zi` と同じものを取り込む。**
+// **ウィンドウの計算（VIEW-a。ADR-0045）。** **`zi` と同じものを取り込む。**
 #[path = "../../common/src/window.rs"]
 mod window;
 
@@ -72,7 +72,7 @@ const PATH_MAX: usize = 128;
 /// 一度に読むバイト数。
 const CHUNK: usize = 1024;
 
-/// 索引の初期の枠数（行数 + 番兵 1）。**足りなければ伸ばす。**
+/// 索引の初期のスロット数（行数 + 番兵 1）。**足りなければ伸ばす。**
 const INDEX_INITIAL: usize = 64;
 
 /// 状態行の色（VIEW-b）。**`zi` の状態行（黄）とは別の色にする**——
@@ -224,7 +224,7 @@ impl View {
     }
 }
 
-/// 本文を描く。**窓の中の行だけを、画面の先頭から並べる。**
+/// 本文を描く。**ウィンドウの中の行だけを、画面の先頭から並べる。**
 ///
 /// # 長い行は切る
 ///
@@ -324,11 +324,11 @@ fn redraw(view: &View, doc: &Doc, window: &Window, echo: &userlib::Echo) {
     draw_status(view, doc, window, echo);
 }
 
-/// 窓が 1 行動いたぶんだけ画面をずらす（PERF-d）。
+/// ウィンドウが 1 行動いたぶんだけ画面をずらす（PERF-d）。
 ///
 /// # なぜ全部描き直さないのか
 ///
-/// **窓が 1 行動くと、本文の行はすべて別の行を映す**ので、
+/// **ウィンドウが 1 行動くと、本文の行はすべて別の行を映す**ので、
 /// **「変わった行だけ描く」では 1 字も減らない**（実測。PERF-c）。
 /// **画面をずらせば、描き直すのは新しく現れた 1 行だけになる。**
 ///
@@ -344,9 +344,9 @@ fn redraw(view: &View, doc: &Doc, window: &Window, echo: &userlib::Echo) {
 /// **`DL` は最下行（状態行）も 1 行ぶん引き上げる。** **そのままだと状態行が
 /// 本文の位置に残るが、この後で必ず描き直すので、最後の絵は正しい。**
 fn scroll_by_one(view: &View, doc: &Doc, window: &Window, down: bool) {
-    // 破壊 (PERF-d, less-redraw-whole-screen): ずらさずに全部描き直す。
+    // 破壊テスト (PERF-d, less-redraw-whole-screen): ずらさずに全部描き直す。
     // **PERF-d の前の形そのものである**——**出る絵は同じで、描く字が
-    // 55 から 967 へ増える。** **描く字の数の判定が捕まえる。**
+    // 55 から 967 へ増える。** **描く字の数の判定が検出する。**
     #[cfg(less_redraw_whole_screen)]
     {
         let echo = userlib::Echo::new();
@@ -468,7 +468,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
         doc.used += 1;
     }
 
-    // **行を数えてから索引を作る。** **枠が足りなければ伸ばす**
+    // **行を数えてから索引を作る。** **スロットが足りなければ伸ばす**
     // （`userlib::heap::grow_to`）。
     let lines = doc.region[..doc.used]
         .iter()
@@ -609,15 +609,15 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     release_and_exit(doc, 0)
 }
 
-/// 窓を下へ動かす（VIEW-b）。**破壊の口はここ 1 つである。**
+/// ウィンドウを下へ動かす（VIEW-b）。**破壊テストの入口はここ 1 つである。**
 ///
 /// # なぜ包むのか
 ///
-/// **`Window` の口を直に呼ぶ場所が 4 つある**（`j` / `Space` / 矢印の下 /
-/// 矢印の上）。**破壊を 4 箇所へ書くと、片方だけ効く形が作れてしまう。**
-/// **通る道を 1 本にして、そこへ置く。**
+/// **`Window` の関数を直に呼ぶ場所が 4 つある**（`j` / `Space` / 矢印の下 /
+/// 矢印の上）。**破壊テストを 4 箇所へ書くと、片方だけ効く形が作れてしまう。**
+/// **通る道を 1 本にして、そこに設ける。**
 fn scroll_down(window: &mut Window, lines: usize, total: usize) -> bool {
-    // 破壊 (VIEW-b, less-window-frozen): 窓を動かさない。
+    // 破壊テスト (VIEW-b, less-window-frozen): ウィンドウを動かさない。
     // **画面は最初の 1 枚のままになる**——**打鍵は届いており、状態行も
     // 描き直されるので、雑に見ると動いていないことに気づけない。**
     // **落ちるのは「窓の外に在った行が見えるようになった」判定だけである。**
@@ -630,9 +630,9 @@ fn scroll_down(window: &mut Window, lines: usize, total: usize) -> bool {
     window.scroll_down(lines, total)
 }
 
-/// 窓を上へ動かす（VIEW-b）。**破壊の口は [`scroll_down`] と同じ理由でここである。**
+/// ウィンドウを上へ動かす（VIEW-b）。**破壊テストの入口は [`scroll_down`] と同じ理由でここである。**
 fn scroll_up(window: &mut Window, lines: usize) -> bool {
-    // 破壊 (VIEW-b, less-window-frozen): 窓を動かさない。
+    // 破壊テスト (VIEW-b, less-window-frozen): ウィンドウを動かさない。
     #[cfg(less_window_frozen)]
     {
         let _ = (window, lines);

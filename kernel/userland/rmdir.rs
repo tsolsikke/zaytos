@@ -7,7 +7,7 @@
 //! # 空でなければ断る
 //!
 //! **中身ごと消す道（`rm -r`）は無い。** **「何を消すか」を数える判断が要り、
-//! 別の段である**（`common/src/ext2.rs` の `AllocError::DirectoryNotEmpty`）。
+//! 別の段階である**（`common/src/ext2.rs` の `AllocError::DirectoryNotEmpty`）。
 //!
 //! # 1 つしか受けない
 //!

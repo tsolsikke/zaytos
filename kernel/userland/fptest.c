@@ -2,7 +2,7 @@
  *
  * **判定は3つで、ADR-0058 の決定に1対1で対応する。**
  *
- *   fp: xmm0 at start   決定4（起こすときは既定値から始める）
+ *   fp: xmm0 at start   決定4（起動するときは既定値から始める）
  *   fp: sum             決定1（切り替えを跨いで保たれる）
  *   fp: xmm0 after spawn 決定2の遠征の側（`spawn` を跨いで保たれる）
  *
@@ -73,7 +73,7 @@ int main(void) {
     putu(doubled);
     puts("");
 
-    /* 決定2の遠征の側。**子を起こしても親の XMM が残ること。** */
+    /* 決定2の遠征の側。**子を起動しても親の XMM が残ること。** */
     set_xmm0_low(PARENT_MARK);
     long spawned = spawn_child("/bin/fpchild");
     unsigned long after = xmm0_low();
@@ -83,7 +83,7 @@ int main(void) {
     putu((unsigned long)spawned);
     puts(")");
 
-    /* **次に起きるプログラムのために、目印を残して終わる**——決定4の破壊は
+    /* **次に起動するプログラムのために、目印を残して終わる**——決定4の破壊テストは
      * これを見る（`fp-no-fresh-state` では、次のプログラムがこれを読む）。 */
     set_xmm0_low(PARENT_MARK);
     return 0;

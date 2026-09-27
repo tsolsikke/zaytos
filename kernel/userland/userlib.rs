@@ -233,7 +233,7 @@ pub struct Echo {
     len: usize,
 }
 
-/// 溢れたことを示す印（ADR-0046）。**捨てた数そのものは出さない。**
+/// 溢れたことを示すマーカー（ADR-0046）。**捨てた数そのものは出さない。**
 ///
 /// **1 行に収まる長さで、かつ「これで全部ではない」と分かる形にする。**
 /// **正確な数はシリアルにある**——**そちらが記録で、こちらは控えである。**
@@ -273,7 +273,7 @@ impl Echo {
             self.text[self.len] = *byte;
             self.len += 1;
         }
-        // **溢れたことを隠さない（ADR-0046）。** **入らなければ印も出さない**
+        // **溢れたことを隠さない（ADR-0046）。** **入らなければマーカーも出さない**
         // ——**その場合は本文のほうが情報である。**
         if dropped > 0 && self.len + ECHO_TRUNCATED.len() <= ZDIAG_TEXT {
             self.text[self.len..self.len + ECHO_TRUNCATED.len()].copy_from_slice(ECHO_TRUNCATED);
@@ -363,7 +363,7 @@ static mut FRAME_USED: usize = 0;
 
 /// 溜める（PERF-b）。**入りきらなければ、そこまでを送ってから続ける。**
 pub fn frame_push(fd: u64, bytes: &[u8]) {
-    // 破壊 (PERF-b, frame-write-per-piece): 溜めずに、来たそのつど送る。
+    // 破壊テスト (PERF-b, frame-write-per-piece): 溜めずに、来たそのつど送る。
     // **PERF-b の前の形そのものである**——**システムコールの回数が桁で増える。**
     // **出るものは変わらない**ので、**画面を読む判定は1つも落ちない。**
     #[cfg(frame_write_per_piece)]
@@ -383,7 +383,7 @@ pub fn frame_push(fd: u64, bytes: &[u8]) {
         }
         let take = (FRAME_MAX - used).min(bytes.len() - at);
         // SAFETY: 単一の実行文脈であり、`used + take` は `FRAME_MAX` を越えない。
-        // **参照は作らず、ポインタで写す。**
+        // **参照は作らず、ポインタでコピーする。**
         unsafe {
             core::ptr::copy_nonoverlapping(
                 bytes.as_ptr().add(at),
@@ -404,7 +404,7 @@ pub fn frame_flush(fd: u64) {
     if used == 0 {
         return;
     }
-    // 破壊 (PERF-b, frame-write-per-piece-test): 溜めずに、来たそのつど送る。
+    // 破壊テスト (PERF-b, frame-write-per-piece-test): 溜めずに、来たそのつど送る。
     // **PERF-b の前の形そのものである**——**システムコールの回数が桁で増える。**
     // **出るものは変わらない**ので、画面を読む判定は 1 つも落ちない。
     // SAFETY: 単一の実行文脈であり、`used` は `FRAME_MAX` を越えない。
@@ -428,7 +428,7 @@ pub fn frame_flush(fd: u64) {
 pub fn write_all(fd: u64, bytes: &[u8]) -> i64 {
     let mut done = 0usize;
     while done < bytes.len() {
-        // SAFETY: `bytes` は自分の像かスタックの中で、残りの長さを正しく渡す。
+        // SAFETY: `bytes` は自分のイメージかスタックの中で、残りの長さを正しく渡す。
         let written = unsafe {
             syscall3(
                 SYS_WRITE,
@@ -455,7 +455,7 @@ pub fn open_read_only(path: &[u8]) -> i64 {
 
 /// 書き込みで開き、同時に長さ 0 へ切る（`O_WRONLY|O_TRUNC`。zi-d-2）。
 ///
-/// **カーネルが受理する 2 形のうちの一方である**（ADR-0037）。
+/// **カーネルが受理する 2 つの形のうちの一方である**（ADR-0037）。
 /// **読みながら書き先を開いておくことはできない**——open の時点で切るので、
 /// **読み切って閉じてから開き直す。**
 pub fn open_write_truncate(path: &[u8]) -> i64 {
@@ -590,23 +590,23 @@ pub const INPUT_EVENT_LEN: usize = 24;
 /// 入力の生イベントの fd を開く（`ADR-0066` の Y-a）。**前景の持ち主でなければ `-EBADF`。**
 /// **読みは `read` が `struct input_event`（[`INPUT_EVENT_LEN`] バイト）を返す。**
 pub fn open_input() -> i64 {
-    // SAFETY: 引数を取らない口である。
+    // SAFETY: 引数を取らない入口である。
     unsafe { syscall3(SYS_OPEN_INPUT, 0, 0, 0) }
 }
 
-/// 画面を開く口の番号（`ZAYTOS_PRIVATE_BASE + 9`。`ADR-0066` の Y-c）。
+/// 画面を開く入口の番号（`ZAYTOS_PRIVATE_BASE + 9`。`ADR-0066` の Y-c）。
 pub const SYS_OPEN_SCREEN: u64 = 0x1009;
 /// `FBIOGET_VSCREENINFO`（Linux の fbdev）。**カーネルの値と同じ。**
 pub const FBIOGET_VSCREENINFO: u64 = 0x4600;
 /// `FBIOGET_FSCREENINFO`（Linux の fbdev）。
 pub const FBIOGET_FSCREENINFO: u64 = 0x4602;
-/// 画面の矩形を写す要求（ZaytOS 独自。引数は `struct drm_clip_rect`）。
+/// 画面の矩形をコピーする要求（ZaytOS 独自。引数は `struct drm_clip_rect`）。
 pub const FBIOZPRESENT: u64 = 0x5A03;
 
 /// 画面を開く（`ADR-0066` の Y-c）。**開くと図形モードへ入り、`close` で抜ける。**
 /// **前景の系統でなければ `-EBADF`、既に誰かが図形モードなら `-EBUSY`。**
 pub fn open_screen() -> i64 {
-    // SAFETY: 引数を取らない口である。
+    // SAFETY: 引数を取らない入口である。
     unsafe { syscall3(SYS_OPEN_SCREEN, 0, 0, 0) }
 }
 
@@ -658,7 +658,7 @@ pub fn screen_info(fd: u64) -> Result<ScreenInfo, i64> {
     })
 }
 
-/// 矩形を画面へ写す（`ADR-0066` の Y-c）。**x2・y2 は含まない**（`struct drm_clip_rect`）。
+/// 矩形を画面へコピーする（`ADR-0066` の Y-c）。**x2・y2 は含まない**（`struct drm_clip_rect`）。
 pub fn present(fd: u64, x1: u16, y1: u16, x2: u16, y2: u16) -> i64 {
     let mut rect = [0u8; 8];
     rect[0..2].copy_from_slice(&x1.to_le_bytes());
@@ -685,13 +685,13 @@ pub fn getdents64(fd: u64, buf: &mut [u8]) -> i64 {
 /// `spawn` の番号（`ZAYTOS_PRIVATE_BASE + 4`。ZaytOS 独自）。
 pub const SYS_SPAWN: u64 = 0x1004;
 
-/// 起こしっぱなしで起こす口の番号（`ZAYTOS_PRIVATE_BASE + 5`。`ADR-0063` の (b3)）。
+/// 切り離して起動する入口の番号（`ZAYTOS_PRIVATE_BASE + 5`。`ADR-0063` の (b3)）。
 pub const SYS_SPAWN_DETACHED: u64 = 0x1005;
 
-/// 予約したパイプの読み端を fd 0 にして入れ子で起こす口の番号（`+ 6`。`ADR-0063` の (b3)）。
+/// 予約したパイプの読み端を fd 0 にして入れ子で起動する入口の番号（`+ 6`。`ADR-0063` の (b3)）。
 pub const SYS_SPAWN_WITH_PIPED_STDIN: u64 = 0x1006;
 
-/// 起こしっぱなしの子を待って回収する口の番号（`+ 7`。`ADR-0063` の (b3)）。
+/// 切り離して起動した子を待って回収する入口の番号（`+ 7`。`ADR-0063` の (b3)）。
 pub const SYS_WAIT_CHILD: u64 = 0x1007;
 
 /// [`SYS_SPAWN_DETACHED`] の `flags`——子の fd 1 をパイプの書き端にする。
@@ -720,7 +720,7 @@ pub unsafe fn syscall4(number: u64, a: u64, b: u64, c: u64, d: u64) -> i64 {
 }
 
 /// `spawn_detached(path, argv, envp, flags)`。**子が Ring 3 へ入るか終わるまで戻る。**
-/// **戻り値は手形（0 以上）か `-errno`。**
+/// **戻り値はハンドル（0 以上）か `-errno`。**
 ///
 /// # Safety
 ///
@@ -762,7 +762,7 @@ pub unsafe fn spawn_with_piped_stdin(path: &[u8], argv: &[*const u8], envp: &[*c
 
 /// `wait_child(handle)`。**終わり方のビット（[`spawn`] と同じ）か `-errno`（`-ECHILD` など）。**
 pub fn wait_child(handle: u64) -> i64 {
-    // SAFETY: 引数は手形 1 つで、カーネルは範囲を見て `-ECHILD` を返す。
+    // SAFETY: 引数はハンドル 1 つで、カーネルは範囲を見て `-ECHILD` を返す。
     unsafe { syscall3(SYS_WAIT_CHILD, handle, 0, 0) }
 }
 
@@ -814,10 +814,10 @@ pub unsafe fn argument(stack: *const u64, index: usize) -> Option<*const u8> {
 
 /// `envp` の `index` 番目を返す（f-2。`ADR-0053`）。**終端に達したら `None`。**
 ///
-/// # 名前で引く口と分けてある
+/// # 名前で引く関数と分けてある
 ///
 /// **[`environment`] は名前で引く。** **こちらは並びをそのまま歩く**
-/// ——**シェルが起動時に自分の表へ写すために要る**（`ADR-0053` の Decision 1）。
+/// ——**シェルが起動時に自分の表へコピーするために要る**（`ADR-0053` の Decision 1）。
 ///
 /// # Safety
 ///
@@ -1001,20 +1001,20 @@ pub mod heap {
     ///
     /// # 返るのは 0 で埋まった領域である
     ///
-    /// **カーネルが写す前にフレームを 0 で埋める**（`kernel/src/syscall.rs` の
+    /// **カーネルがマップする前にフレームを 0 で埋める**（`kernel/src/syscall.rs` の
     /// `sys_brk`。前の住人の中身をユーザーへ渡さないため）。
     /// **したがって `.bss` と同じ前提で使える。**
     ///
     /// # 取れなかったら何も残さない
     ///
-    /// **`brk` は途中で足りなくなると、写せた分を残したまま `-ENOMEM` を返す**
+    /// **`brk` は途中で足りなくなると、マップできた分を残したまま `-ENOMEM` を返す**
     /// （あちらの doc の「そこまでで止める」）。**ここで元の上端へ戻す**
     /// ——**半端に伸びた状態を呼ぶ側へ渡さない。** **戻せば会計も釣り合う。**
     pub fn reserve(bytes: usize) -> Option<&'static mut [u8]> {
         if bytes == 0 {
             return None;
         }
-        // SAFETY: 単一の実行文脈である（モジュールの doc）。値を写すだけで、
+        // SAFETY: 単一の実行文脈である（モジュールの doc）。値をコピーするだけで、
         // 参照は作らない。
         if unsafe { BASE } != 0 {
             return None;
@@ -1030,7 +1030,7 @@ pub mod heap {
         let reached = unsafe { syscall3(SYS_BRK, wanted, 0, 0) };
         if reached < 0 || reached as u64 != wanted {
             // **半端に伸びた分を返す。** **戻り値は見ない**——**ここで
-            // 戻せなかったことを言う先が無い。** **釣り合わなければ
+            // 戻せなかったことを伝える先が無い。** **釣り合わなければ
             // `user-heap:` の行に出る**（下の [`release`] の doc）。
             // SAFETY: 渡すのは数だけである。
             unsafe { syscall3(SYS_BRK, base, 0, 0) };
@@ -1041,7 +1041,7 @@ pub mod heap {
             BASE = base;
             LENGTH = bytes;
         };
-        // SAFETY: `brk` が `base..wanted` を写した。**この範囲を渡すのは
+        // SAFETY: `brk` が `base..wanted` をマップした。**この範囲を渡すのは
         // ここ 1 回だけである**（上で 2 回目を断っている）ので、
         // **別名は作られない。** 領域は [`release`] まで生き続ける。
         Some(unsafe { core::slice::from_raw_parts_mut(base as *mut u8, bytes) })
@@ -1085,7 +1085,7 @@ pub mod heap {
         // SAFETY: 渡すのは数だけである。
         let reached = unsafe { syscall3(SYS_BRK, wanted, 0, 0) };
         if reached < 0 || reached as u64 != wanted {
-            // **半端に伸びた分を元へ戻す**（[`reserve`] と同じ手当て）。
+            // **半端に伸びた分を元へ戻す**（[`reserve`] と同じ対策）。
             // SAFETY: 渡すのは数だけである。
             unsafe { syscall3(SYS_BRK, base + length as u64, 0, 0) };
             return Err(region);
@@ -1097,7 +1097,7 @@ pub mod heap {
         // （rustc も「参照を drop しても何も起きない」と警告する）。
         // **終わらせているのは所有である**——**値で受け取っているので、
         // 呼ぶ側はこの時点で既に古い参照を持っていない。**
-        // SAFETY: `brk` が `base..base+bytes` を写した。古い参照はこれ以降
+        // SAFETY: `brk` が `base..base+bytes` をマップした。古い参照はこれ以降
         // 使わず、呼ぶ側も手放しているので、この範囲を指す参照は 1 本だけである。
         Ok(unsafe { core::slice::from_raw_parts_mut(base as *mut u8, bytes) })
     }
@@ -1112,7 +1112,7 @@ pub mod heap {
     ///
     /// # 観測はカーネルの側にある
     ///
-    /// **成否を返さない。** **返ったかどうかは `user-heap:` の行が言う**
+    /// **成否を返さない。** **返ったかどうかは `user-heap:` の行が示す**
     /// （`kernel/src/userland.rs`。`brk` が取った数と返した数を並べる）。
     /// **こちらが「返した」と主張する形は、自分で書いて自分で読む形である。**
     pub fn release(region: &'static mut [u8]) {
@@ -1125,7 +1125,7 @@ pub mod heap {
         // 呼ばない）。**値で受け取っているので、下げた後に触れる道は
         // 呼ぶ側にも残っていない。**
         // SAFETY: 渡すのは数だけである。**下げる要求なので、カーネルは
-        // 写像を外してフレームを返す。**
+        // マッピングを外してフレームを返す。**
         unsafe { syscall3(SYS_BRK, base, 0, 0) };
         // SAFETY: 単一の実行文脈である。
         unsafe {
@@ -1145,7 +1145,7 @@ core::arch::global_asm!(
     ".globl _start",
     "_start:",
     // **入口の rsp をそのまま第 1 引数へ渡す。** ここより前で何も push していない。
-    // `call` が戻り番地を 1 つ積むので、呼ばれた側の rsp は 16 の倍数 + 8 になる
+    // `call` が戻りアドレスを 1 つ積むので、呼ばれた側の rsp は 16 の倍数 + 8 になる
     // （SysV の規約どおり）。
     "  mov rdi, rsp",
     "  call zaytos_main",
@@ -1162,7 +1162,7 @@ core::arch::global_asm!(
 // 行き先を、カーネル側が `entry + USER_RECEIVER_OFFSET` として主張するためである
 // （`USER_PROGRAMS` の `receiver_offset`）。
 //
-// **こちらは `USER_PROGRAMS` に載らない**（`spawn` で起こす）ので、
+// **こちらは `USER_PROGRAMS` に載らない**（`spawn` で起動する）ので、
 // **位置を主張する相手がいない。** そして**受け皿そのものは `exit` が持っている**
 // ——`userlib::exit` はシステムコールの直後に `ud2` を置いてある。
 //
@@ -1191,7 +1191,7 @@ pub const SYS_BIND: u64 = 49;
 pub const SYS_LISTEN: u64 = 50;
 /// `AF_UNIX`。**カーネルが受けるのはこれだけである。**
 pub const AF_UNIX: u64 = 1;
-/// `SOCK_STREAM`。**カーネルが受けるのはこれだけである**（旗も付けられない）。
+/// `SOCK_STREAM`。**カーネルが受けるのはこれだけである**（フラグも付けられない）。
 pub const SOCK_STREAM: u64 = 1;
 /// `sockaddr_un` の大きさ（`sa_family_t` 2 + `sun_path` 108）。
 const SOCKADDR_UN_LEN: usize = 110;
@@ -1339,7 +1339,7 @@ pub unsafe fn syscall6(number: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: u
     ret
 }
 
-/// `memfd_create(name, flags)`。**fd か `-errno`。** **名前と旗はカーネルが見ない。**
+/// `memfd_create(name, flags)`。**fd か `-errno`。** **名前とフラグはカーネルが見ない。**
 pub fn memfd_create() -> i64 {
     // SAFETY: 引数はカーネルが見ない（0 を渡す）。
     unsafe { syscall3(SYS_MEMFD_CREATE, 0, 0, 0) }
@@ -1351,15 +1351,15 @@ pub fn ftruncate(fd: u64, size: u64) -> i64 {
     unsafe { syscall3(SYS_FTRUNCATE, fd, size, 0) }
 }
 
-/// `mmap(NULL, len, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)`。**張った番地か `-errno`。**
+/// `mmap(NULL, len, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)`。**マップしたアドレスか `-errno`。**
 pub fn mmap_shared(fd: u64, len: u64) -> i64 {
-    // SAFETY: カーネルが張る場所を決め、範囲を検証する。
+    // SAFETY: カーネルがマップする場所を決め、範囲を検証する。
     unsafe { syscall6(SYS_MMAP, 0, len, PROT_READ_WRITE, MAP_SHARED, fd, 0) }
 }
 
 /// `sendmsg`／`recvmsg` に渡す `msghdr` と、その中身（`iovec`・`cmsghdr`）を 1 つに持つ。
 ///
-/// **`repr(C)` で Linux の配置に合わせる**（`ADR-0065`。カーネルが番地で読む）。
+/// **`repr(C)` で Linux の配置に合わせる**（`ADR-0065`。カーネルがアドレスで読む）。
 #[repr(C)]
 pub struct MsgBuffers {
     iov_base: u64,
@@ -1391,7 +1391,7 @@ impl MsgBuffers {
         buffers
     }
 
-    /// `msghdr` を組んで、その番地を返す。**呼ぶ直前に組む**（自分の番地が要るため）。
+    /// `msghdr` を組んで、そのアドレスを返す。**呼ぶ直前に組む**（自分のアドレスが要るため）。
     fn build_hdr(&mut self, with_control: bool) -> u64 {
         let iov_ptr = core::ptr::addr_of!(self.iov_base) as u64;
         self.hdr = [0u8; 56];

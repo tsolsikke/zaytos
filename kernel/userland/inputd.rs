@@ -13,15 +13,15 @@
 //!
 //! # `-EAGAIN` は回して待つ
 //!
-//! **待たない構成（破壊 `input-read-never-waits`）では `read` が `-EAGAIN` を返す。**
+//! **待たない構成（破壊テスト `input-read-never-waits`）では `read` が `-EAGAIN` を返す。**
 //! **そのときは回して待つ**——**シェルの `read(0)` と同じ形。** **打鍵は結局届くが、
 //! カーネルは眠らないので「待った回数」が 0 になる**（判定が落ちる）。
 //!
 //! # 前景でない者が開けないことも見る（`ADR-0066` の Y-c の足す1点）
 //!
 //! **関所を設けたら、関所で断られる側を判定にする**（`docs/coding-standards.md`）。**Y-a の検査は
-//! 前景のプロセスが開けることだけを見ていて、関所が大域の印を見ている穴に気づかなかった。**
-//! **最初に自分をスロット 1 へ `probe` の引数で起こしっぱなしにし、終わるまで待つ。** **`probe` の
+//! 前景のプロセスが開けることだけを見ていて、関所が大域の目印を見ている穴に気づかなかった。**
+//! **最初に自分をスロット 1 へ `probe` の引数で切り離して起動し、終わるまで待つ。** **`probe` の
 //! 1 本は入力の fd を開こうとして、返った値を印字して終わる**（`-EBADF` のはずである）。
 //!
 //! # 終了状態の意味
@@ -40,7 +40,7 @@ use userlib::{
     exit, open_input, read, spawn_detached, wait_child, write_all, INPUT_EVENT_LEN, STDOUT,
 };
 
-/// 自分の像。**NUL 終端である**（`spawn_detached` はポインタで渡す）。
+/// 自分のイメージ。**NUL 終端である**（`spawn_detached` はポインタで渡す）。
 const SELF_PATH: &[u8] = b"/bin/inputd\0";
 /// `probe` の 1 本の `argv`（NUL 終端の 2 つ）。
 const SELF_ARG0: &[u8] = b"inputd\0";
@@ -48,7 +48,7 @@ const PROBE_ARG: &[u8] = b"probe\0";
 
 /// 1 回に読む大きさ（イベント 4 つ分）。
 const CHUNK: usize = INPUT_EVENT_LEN * 4;
-/// `-EAGAIN`。**待たない構成で回って待つための印。**
+/// `-EAGAIN`。**待たない構成で空回りして待つための目印。**
 const MINUS_EAGAIN: i64 = -11;
 
 /// 1 行を組んで 1 回で出す（`sockd` と同じ形。`ADR-0063` の (b3)）。
@@ -136,7 +136,7 @@ fn event_value(event: &[u8]) -> i32 {
 #[no_mangle]
 pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     // **`probe` の 1 本——開こうとして、返った値を印字して終わる**（モジュールの doc）。**引数が
-    // 在れば `probe` である**（起こすのはこのプログラム自身だけ）。
+    // 在れば `probe` である**（起動するのはこのプログラム自身だけ）。
     // SAFETY: 呼び出し元契約により `stack` は初期スタックの先頭を指す。
     if unsafe { userlib::argument(stack, 1) }.is_some() {
         let fd = open_input();
@@ -197,7 +197,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             line.push(b" value=");
             line.push_decimal(i64::from(value));
             // **時刻の欄も出す**（`struct input_event` の `tv_sec`/`tv_usec`）。**判定が
-            // 「時刻が入っている」を見る**——**入れない破壊が在る（`ADR-0066` の Y-a）。**
+            // 「時刻が入っている」を見る**——**入れない破壊テストが在る（`ADR-0066` の Y-a）。**
             line.push(b" sec=");
             line.push_decimal(event_sec(event) as i64);
             line.push(b" usec=");

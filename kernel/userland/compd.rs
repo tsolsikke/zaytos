@@ -4,7 +4,7 @@
 //!
 //! **Seinas（コンポジタ）が来たら同じことをする**——**入力 fd と画面を開き、名前で待ち受け、
 //! {入力, listener, クライアント} を同じ集合で待つ。** **クライアントが shm のプールを
-//! `SCM_RIGHTS` で送ってきたら、プールを `mmap` して裏バッファへ合成し、`present` で写す。**
+//! `SCM_RIGHTS` で送ってきたら、プールを `mmap` して裏バッファへ合成し、`present` でコピーする。**
 //! **打鍵で終わり、クライアントとの接続を閉じる**（`compc` は閉じられるまで居残る。
 //! `kernel/userland/compc.rs` の doc）。**Y-a（入力 fd）・Y-b（多重待ち）・Y-c（画面）と
 //! `ADR-0065`（共有メモリ）を 1 本の流れで通す**（設計 Q5）。
@@ -16,7 +16,7 @@
 //!
 //! # 終了状態の意味
 //!
-//! - `0` 合成して写し、打鍵を受けて終わった
+//! - `0` 合成してコピーし、打鍵を受けて終わった
 //! - `1` 入力・画面・名前・`compc` のどれかが用意できなかった
 //! - `2` `poll`・`accept`・`recvmsg`・`mmap` が失敗した
 
@@ -36,7 +36,7 @@ use userlib::{
 const NAME: &[u8] = b"comp-0";
 /// 待ち行列の長さ。
 const BACKLOG: u64 = 1;
-/// クライアントの像と `argv[0]`（NUL 終端）。
+/// クライアントのイメージと `argv[0]`（NUL 終端）。
 const PEER_PATH: &[u8] = b"/bin/compc\0";
 const PEER_ARG0: &[u8] = b"compc\0";
 /// 見出しのバイト数（`u32` × 4）。
@@ -165,7 +165,7 @@ pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
     }
     say(b"compd: listening on comp-0");
 
-    // **クライアントを起こしっぱなしで起こす**（先に待ち受けたので、1 回目の `connect` で繋がる）。
+    // **クライアントを切り離して起動する**（先に待ち受けたので、1 回目の `connect` で繋がる）。
     let peer_argv: [*const u8; 2] = [PEER_ARG0.as_ptr(), core::ptr::null()];
     let peer_envp: [*const u8; 1] = [core::ptr::null()];
     // SAFETY: パスと `argv` の各要素は NUL 終端で、表は NULL で終わっている。
@@ -244,7 +244,7 @@ pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
                     fail(b"compd: mmap of the pool failed ", pool, 2);
                 }
                 let pool = pool as usize as *const u8;
-                // **合成する**——**プールの行を裏バッファの行へ写す**（プールは詰め物の無い行）。
+                // **合成する**——**プールの行を裏バッファの行へコピーする**（プールは詰め物の無い行）。
                 for row in 0..height {
                     // SAFETY: 行はプールと面の両方の範囲の内側である（上で大きさを確かめた）。
                     unsafe {

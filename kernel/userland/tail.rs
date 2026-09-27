@@ -9,7 +9,7 @@
 //! **`lseek` の部品（`vfs::File::seek_to`）は S10-b から在り、入口が無かった**
 //! （`docs/foundation-inventory.md` の「部品は在るが入口が無い」）。
 //! **入口だけ足しても、使う者が居なければ検算が置けない**
-//! （`docs/verification-coverage.md`）。**そこでこの 1 本を同じ段で作った。**
+//! （`docs/verification-coverage.md`）。**そこでこの 1 本を同じ段階で作った。**
 //!
 //! # 大きさは `stat` に訊く。**跳んだ先を推測しない**
 //!

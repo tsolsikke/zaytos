@@ -7,11 +7,11 @@
 //!
 //! # 何が観測でき、何が観測できないか
 //!
-//! **この段の自動判定が見るのは `zi` の内部状態であって、画面ではない。**
+//! **この段階の自動判定が見るのは `zi` の内部状態であって、画面ではない。**
 //! カーソル位置の判定行（`zi: cursor ...`）は**バッファ上の行と桁**で、
 //! **画面に何が描かれたかではない。** `zi` は Ring 3 に居て `Console` を
 //! 読めないので、**再描画の誤り（CUP の位置が 1 つずれる等）はこの判定では
-//! 捕まらない**——ファイルの中身が正しいまま画面だけが崩れる形が作れる。
+//! 検出されない**——ファイルの中身が正しいまま画面だけが崩れる形が作れる。
 //!
 //! **したがって「台本が緑だから画面も正しい」とは読めない。**
 //! ANSI の解釈そのもの（CUP・ED・EL がセルへどう効くか）は
@@ -57,7 +57,7 @@ mod userlib;
 //
 // **`less` と `more` も同じものを使う。** **自己完結でなければならない**
 // （`crate::` を参照しない）。**ホストテストは `cargo test -p common` が持つ。**
-// **`dead_code` を許す。** **`zi` が使わない口が在る**——`height()` は
+// **`dead_code` を許す。** **`zi` が使わない関数が在る**——`height()` は
 // `less` が使う見込みで、`top()` は診断の構成でしか呼ばれない。
 // **`common` の側では使われているので、あちらでは黙らせていない。**
 #[path = "../../common/src/window.rs"]
@@ -66,7 +66,7 @@ mod window;
 
 // **多バイトの字の扱いは `common` に在る**（`ADR-0054`。`ADR-0045` の形）。
 //
-// **`dead_code` を許す。** **カーネル側だけが使う口が在る**——`Utf8Decoder` は
+// **`dead_code` を許す。** **カーネル側だけが使う入口が在る**——`Utf8Decoder` は
 // 画面へ出す側で、`zi` は境界と桁だけを使う。
 #[path = "../../common/src/text.rs"]
 #[allow(dead_code)]
@@ -98,7 +98,7 @@ const TEXT_SLACK: usize = 4096;
 /// **1 バイト足りないたびに `brk` を呼ぶ形にしない。**
 const TEXT_STEP: usize = 4096;
 
-/// 索引の初期の枠（H-b-2）。**行数 + 番兵 1 である。**
+/// 索引の初期のスロット（H-b-2）。**行数 + 番兵 1 である。**
 ///
 /// **b-1 の初期容量（64 行）をそのまま持ってきた。** **開いた直後に
 /// 足りなければ [`Buffer::ensure_index`] が伸ばす**ので、**上限ではない。**
@@ -147,7 +147,7 @@ const NO_HEAP: &[u8] = b"zi: cannot reserve memory for the edit buffer\n";
 ///
 /// **黙って落とさない。** **`insert` が入らない字を落とすのと同じ判断だが、
 /// あちらは 1 字で、こちらは「行が作れない」である**——**使う人から見て
-/// 何も起きないので、言わないと分からない。**
+/// 何も起きないので、示さないと分からない。**
 ///
 /// # 64 行という値は消えた（H-b-2）
 ///
@@ -264,7 +264,7 @@ enum Escape {
 /// **数 KiB では問題にならないが、大きなファイルでは遅い。**
 /// **行ごとに確保する形なら動かさずに済むが、そちらは保存で並べ直しが
 /// 復活し、小さな確保が多数になって本物の割り当て器が要る**
-/// （H 段 b の設計）。**限界として引き受ける。**
+/// （H 段階 b の設計）。**限界として引き受ける。**
 struct Buffer {
     /// ヒープから取った領域の全体。
     ///
@@ -276,7 +276,7 @@ struct Buffer {
     ///
     /// **`usize` の倍数に保つ**——**索引の整列がここで決まる。**
     text_cap: usize,
-    /// 索引の枠の数（行数 + 番兵 1 まで入る）。
+    /// 索引のスロットの数（行数 + 番兵 1 まで入る）。
     index_cap: usize,
     /// 行数。
     count: usize,
@@ -397,7 +397,7 @@ impl Buffer {
         self.regrow(want, self.index_cap)
     }
 
-    /// 索引が `slots` 枠入るようにする（H-b-2）。**番兵の分は呼ぶ側が数える。**
+    /// 索引が `slots` スロット入るようにする（H-b-2）。**番兵の分は呼ぶ側が数える。**
     fn ensure_index(&mut self, slots: usize) -> bool {
         if slots <= self.index_cap {
             return true;
@@ -491,13 +491,13 @@ impl Buffer {
         if !self.ensure_text(self.used + 1) {
             return false;
         }
-        // **行が 1 つ増えるので、番兵まで入れて `count + 2` 枠が要る。**
+        // **行が 1 つ増えるので、番兵まで入れて `count + 2` スロットが要る。**
         if !self.ensure_index(self.count + 2) {
             return false;
         }
         let (used, count) = (self.used, self.count);
         let (text, starts) = self.parts_mut();
-        // **改行を 1 つ挿し込むだけである。** 後ろの中身は動かない
+        // **改行を 1 つ挿入するだけである。** 後ろの中身は動かない
         // ——**1 バイト分ずれるだけで、並びは変わらない。**
         let position = starts[row] + at;
         text.copy_within(position..used, position + 1);
@@ -518,7 +518,7 @@ impl Buffer {
     /// 長さで断ることは無くなった**——**繋げると本文は 1 バイト縮むので、
     /// ヒープも伸ばさなくてよい。**
     ///
-    /// # `zi` の締めは「行の連結」を実装しないと書いていた
+    /// # `zi` の完了時には「行の連結」を実装しないと書いていた
     ///
     /// **書いたのは `zi-d` の範囲としてである。** **zi-f で作ることにした**
     /// ——**行頭の Backspace が何もしないと、打ち間違いを直せない場面が
@@ -575,7 +575,7 @@ impl Buffer {
 /// # 中身は既に本体の中に在る
 ///
 /// **`total` は本文の先頭から読み込んだバイト数である。**
-/// **どこへも写さない**——**受け皿がそのまま本体である**ので、
+/// **どこへもコピーしない**——**受け皿がそのまま本体である**ので、
 /// **ここでやるのは改行を数えて索引を埋めることだけである。**
 ///
 /// # 末尾の改行を補う
@@ -605,7 +605,7 @@ fn index_lines(buffer: &mut Buffer, total: usize) -> bool {
         total + 1
     };
 
-    // **行を数えてから索引の枠を確かめる**（H-b-2）。**数えるほうが先である**
+    // **行を数えてから索引のスロットを確かめる**（H-b-2）。**数えるほうが先である**
     // ——**読む前には行数が分からない**（`stat` が答えるのは大きさだけである）。
     let lines = buffer.text()[..used]
         .iter()
@@ -613,11 +613,11 @@ fn index_lines(buffer: &mut Buffer, total: usize) -> bool {
         .count();
     // **番兵の分 + 続きを打つ余地。**
     //
-    // 破壊 (H-b-2, zi-skip-grow): 索引を伸ばさない。**初期の枠に入る行までで
+    // 破壊テスト (H-b-2, zi-skip-grow): 索引を伸ばさない。**初期のスロットに入る行までで
     // 切り詰める**——**b-1 までの上限（64 行）へ戻った形である。**
-    // **`zi` は何も言わずに開き、保存すると入らなかった行が消える。**
+    // **`zi` は何も示さずに開き、保存すると入らなかった行が消える。**
     // **落ちるのは「編集の前後で `cat` が同じ中身を出す」判定だけである**
-    // ——**開く前の `cat` は像を読むので、そちらは変わらない。**
+    // ——**開く前の `cat` はイメージを読むので、そちらは変わらない。**
     #[cfg(not(zi_skip_grow))]
     if !buffer.ensure_index(lines + 1 + INDEX_STEP) {
         return false;
@@ -631,8 +631,8 @@ fn index_lines(buffer: &mut Buffer, total: usize) -> bool {
             if text[position] != b'\n' {
                 continue;
             }
-            // **枠に入らない行は捨てる。** **既定の構成では上の
-            // `ensure_index` が枠を確かめているので、ここは通らない。**
+            // **スロットに入らない行は捨てる。** **既定の構成では上の
+            // `ensure_index` がスロットを確かめているので、ここは通らない。**
             if count + 1 >= starts.len() {
                 break;
             }
@@ -641,7 +641,7 @@ fn index_lines(buffer: &mut Buffer, total: usize) -> bool {
         }
     }
     // **`used` は番兵から取る。** **既定の構成では読み込んだ量と等しい**
-    // （最後の改行が番兵を据えるため）。**枠が足りずに切り詰めたときだけ、
+    // （最後の改行が番兵を据えるため）。**スロットが足りずに切り詰めたときだけ、
     // 入った行の終わりまで縮む**——**索引と本文が食い違ったまま残らない。**
     buffer.count = count;
     buffer.used = buffer.parts().1[count];
@@ -695,7 +695,7 @@ struct View<'a> {
     /// 画面の行数。**`ioctl(TIOCGWINSZ)` が答えた値である**（0 なら既定へ落ちる。
     /// `userlib::window_size_or_default`）。
     rows: usize,
-    /// 本文の行数。**破壊（`zi-status-below-text`）だけが使う**——
+    /// 本文の行数。**破壊テスト（`zi-status-below-text`）だけが使う**——
     /// **訊いた行数を使わない形が、どこへ置くかを決めるために要る。**
     #[cfg_attr(not(zi_status_below_text), allow(dead_code))]
     text_lines: usize,
@@ -706,7 +706,7 @@ struct View<'a> {
 impl View<'_> {
     /// 状態行の行（下から 2 行目。e-4）。
     fn status_row(&self) -> usize {
-        // 破壊 (e-4, zi-status-below-text): 訊いた行数を使わず、本文の 1 行下へ置く
+        // 破壊テスト (e-4, zi-status-below-text): 訊いた行数を使わず、本文の 1 行下へ置く
         // （ES-d までの形）。**画面の下端に在ることの判定だけが落ちる**——
         // **色も札も中身も変わらない。** **`ioctl` が答えた値を実際に使って
         // いることの主張が、これで初めて偽になる。**
@@ -761,7 +761,7 @@ struct Status<'a> {
 ///
 /// # 色が付くのはモードの札だけである
 ///
-/// **ファイル名・位置・変更の印は既定の色で出す。** **判定は色の付いた
+/// **ファイル名・位置・変更のマーカーは既定の色で出す。** **判定は色の付いた
 /// 連なりを読む**（`kernel/src/console/probe.rs`）ので、**位置のような
 /// 動く値を色の中へ入れると、札の並びを見る判定が揺れる。**
 ///
@@ -789,10 +789,10 @@ struct Status<'a> {
 /// **同じ判断が [`draw_command_line`] にも当てはまる。**
 fn draw_status(view: &View, status: &Status) {
     let mode = status.mode;
-    // 破壊 (ES-d, zi-status-freeze-mode): モードが変わっても NORMAL のまま描く。
+    // 破壊テスト (ES-d, zi-status-freeze-mode): モードが変わっても NORMAL のまま描く。
     // **色も位置も長さも変わらない**ので、「状態行が自分の色で描かれている」
-    // 判定は緑のままである。**落ちるのは「モードに従って変わる」判定だけ**で、
-    // **その形でしか落ちない**（`docs/verification-coverage.md` の破壊を足す基準）。
+    // 判定は成功のままである。**落ちるのは「モードに従って変わる」判定だけ**で、
+    // **その形でしか落ちない**（`docs/verification-coverage.md` の破壊テストを足す基準）。
     #[cfg(zi_status_freeze_mode)]
     let mode = {
         let _ = mode;
@@ -838,7 +838,7 @@ fn draw_status(view: &View, status: &Status) {
     let count = write_number(&mut digits, status.col + 1);
     out[at..at + count].copy_from_slice(&digits[..count]);
     at += count;
-    // **保存していない変更の印。** vi の `[+]` と同じ形である。
+    // **保存していない変更のマーカー。** vi の `[+]` と同じ形である。
     if status.dirty {
         let mark = b" [+]";
         out[at..at + mark.len()].copy_from_slice(mark);
@@ -862,7 +862,7 @@ fn draw_status(view: &View, status: &Status) {
 /// **`:q` を拒んだ理由、知らないコマンド、行が一杯であること**を、ここへ出す。
 /// **`STDERR` へ出していたものを移した**——**`zi` は代替画面に居るので、
 /// `STDERR` は「使う人が見る画面」ではない**（診断は検査の構成でしか出ない）。
-/// **e-4 で作った口に、利用者がここで来た。**
+/// **e-4 で作った関数に、利用者がここで来た。**
 ///
 /// # 組み立てはスタックの固定配列のままである（H-b-1）
 ///
@@ -892,7 +892,7 @@ fn draw_command_line(view: &View, status: &Status) {
 ///
 /// **全画面のアプリは、抜けた後に元の画面を返すべきである。**
 /// **`zi` が終わった後、編集していた本文が残り、シェルが `zi` のカーソル位置
-/// から続いていた**（運用者の目視。ES 段の締めの限界の節）。
+/// から続いていた**（運用者の目視。ES 段階の完了時の限界の節）。
 ///
 /// **戻す仕事はカーネル側にある**（ADR-0040 の Addendum）——
 /// **Ring 3 には画面を読み戻す手段が無い。** `zi` は入る / 出るを告げるだけである。
@@ -925,7 +925,7 @@ fn leave_screen() {
 /// **e-4 で下から2行目と最下行の2本になっても、増えるのはこの関数の
 /// 中身だけで済む。**
 fn restore_cursor(buffer: &Buffer, window: &Window, cursor_row: usize, cursor_col: usize) {
-    // **窓の中の位置へ直す（VIEW-a）。** **窓の外なら動かさない**
+    // **ウィンドウの中の位置へ直す（VIEW-a）。** **ウィンドウの外なら動かさない**
     // ——**呼ぶ前に [`follow_window`] を通していれば、その形にはならない。**
     //
     // **桁はここで換算する（`ADR-0054` の Decision 5）。**
@@ -946,7 +946,7 @@ fn restore_cursor(buffer: &Buffer, window: &Window, cursor_row: usize, cursor_co
     // **この関数はすべての描き終わりの最後に居る**——**`refresh` も
     // `show_cursor` も、最後にカーソルを戻す。** **送る場所はここが正しい。**
     //
-    // 破壊 (PERF-b の回帰, zi-skip-cursor-flush): ここで送らない。
+    // 破壊テスト (PERF-b の回帰, zi-skip-cursor-flush): ここで送らない。
     // **回帰そのものへ戻す**——**ノーマルモードの移動が画面へ届かず、
     // 画面のカーソルが古い位置に残る。** **バッファは正しいので、
     // 内部状態を見る判定は1つも落ちない。**
@@ -954,12 +954,12 @@ fn restore_cursor(buffer: &Buffer, window: &Window, cursor_row: usize, cursor_co
     userlib::frame_flush(STDOUT);
 }
 
-/// 窓を現在行へ追わせる（VIEW-a）。**動いたら真。**
+/// ウィンドウを現在行へ追わせる（VIEW-a）。**動いたら真。**
 ///
-/// **破壊の枝をここ 1 か所に置くために、包んである。**
+/// **破壊テストの枝をここ 1 か所に置くために、包んである。**
 fn follow_window(window: &mut Window, row: usize) -> bool {
-    // 破壊 (VIEW-a, zi-window-frozen): 窓を動かさない。
-    // **b-2 までの振る舞いに戻る**——**窓は先頭に据え置かれ、カーソルが
+    // 破壊テスト (VIEW-a, zi-window-frozen): ウィンドウを動かさない。
+    // **b-2 までの振る舞いに戻る**——**ウィンドウは先頭に据え置かれ、カーソルが
     // 下へ出ても画面は先頭の 48 行のままである。** **バッファは正しいので、
     // 内部状態を見る判定は 1 つも落ちない**——**落ちるのは画面を読む
     // 「窓が動いた」判定だけである。**
@@ -977,11 +977,11 @@ fn follow_window(window: &mut Window, row: usize) -> bool {
 
 /// カーソルを動かした後の画面（VIEW-a）。
 ///
-/// **窓が動いたら描き直し、動かなければ状態行を描き直してカーソルを戻す。**
+/// **ウィンドウが動いたら描き直し、動かなければ状態行を描き直してカーソルを戻す。**
 /// **描き直しは全面である**——**差分で描く形は測ってから決める**
-/// （`docs/roadmap.md` の VIEW 段）。
+/// （`docs/roadmap.md` の VIEW 段階）。
 ///
-/// # 窓が動かなくても状態行は描き直す（VIM-1b）
+/// # ウィンドウが動かなくても状態行は描き直す（VIM-1b）
 ///
 /// **状態行は `行:桁` を出している**（`draw_status`）。
 /// **カーソルだけ戻すと、その数が古いまま残る**——**実測で、`$` で行末へ
@@ -996,7 +996,7 @@ fn follow_window(window: &mut Window, row: usize) -> bool {
 fn show_cursor(view: &View, buffer: &Buffer, window: &mut Window, status: &Status) {
     let before = window.top();
     if !follow_window(window, status.row) {
-        // 破壊 (VIM-1b, zi_status_stale_column): カーソルだけ戻す。
+        // 破壊テスト (VIM-1b, zi_status_stale_column): カーソルだけ戻す。
         // **VIM-1b の前の形そのものである**——**絵の本文は同じで、
         // 状態行の数だけが古くなる。** **`utf8-test` の「状態行が
         // カーソルに追いつく」判定だけが落ちる。**
@@ -1011,7 +1011,7 @@ fn show_cursor(view: &View, buffer: &Buffer, window: &mut Window, status: &Statu
             return;
         }
     }
-    // **窓が 1 行だけ動いたなら、画面をずらす（PERF-e）。**
+    // **ウィンドウが 1 行だけ動いたなら、画面をずらす（PERF-e）。**
     //
     // **`less` と同じ機構である**（`common::ansi` の `IL` / `DL`）。
     // **2 つ目の経路を作らない。**
@@ -1029,7 +1029,7 @@ fn show_cursor(view: &View, buffer: &Buffer, window: &mut Window, status: &Statu
     redraw(view, buffer, window, status);
 }
 
-/// 窓が 1 行動いたぶんだけ画面をずらす（PERF-e）。
+/// ウィンドウが 1 行動いたぶんだけ画面をずらす（PERF-e）。
 ///
 /// # 本文だけをずらす
 ///
@@ -1039,13 +1039,13 @@ fn show_cursor(view: &View, buffer: &Buffer, window: &mut Window, status: &Statu
 ///
 /// # 新しく現れた 1 行だけを描く
 ///
-/// **窓が 1 行動くと、本文の行はすべて別の行を映す**ので、
+/// **ウィンドウが 1 行動くと、本文の行はすべて別の行を映す**ので、
 /// **「変わった行だけ描く」では 1 字も減らない**（実測。PERF-c）。
 /// **画面をずらせば、描き直すのは 1 行だけになる。**
 fn scroll_by_one(view: &View, buffer: &Buffer, window: &Window, down: bool) {
-    // 破壊 (PERF-e, zi-redraw-whole-screen): ずらさずに全部描き直す。
+    // 破壊テスト (PERF-e, zi-redraw-whole-screen): ずらさずに全部描き直す。
     // **PERF-e の前の形そのものである**——**出る絵は同じで、描く字が
-    // 桁で増える。** **描く字の数の判定が捕まえる。**
+    // 桁で増える。** **描く字の数の判定が検出する。**
     #[cfg(zi_redraw_whole_screen)]
     {
         let _ = down;
@@ -1106,7 +1106,7 @@ fn refresh(view: &View, buffer: &Buffer, window: &Window, status: &Status) {
 ///
 /// **状態行もここで描き直す（ES-d）**——`ED(2)` が消してしまうためである。
 fn redraw(view: &View, buffer: &Buffer, window: &mut Window, status: &Status) {
-    // **描く前に窓を追わせる（VIEW-a）。** **描く範囲がここで決まる。**
+    // **描く前にウィンドウを追わせる（VIEW-a）。** **描く範囲がここで決まる。**
     follow_window(window, status.row);
     // ED(2): 画面全体を消す。**カーソルは動かない**ので、この後に CUP を出す。
     userlib::frame_push(STDOUT, b"\x1b[2J");
@@ -1119,7 +1119,7 @@ fn redraw(view: &View, buffer: &Buffer, window: &mut Window, status: &Status) {
     // **H-b-2 で上限が消えたので、いまは入りきらないファイルが開く。**
     // **画面に出るのは先頭の `text_rows()` 行だけで、それより下の行は
     // 見えないまま編集される**（バッファは正しく、画面が足りない）。
-    // **限界として `docs/roadmap.md` に書いた。** **スクロールは別の段である。**
+    // **限界として `docs/roadmap.md` に書いた。** **スクロールは別の段階である。**
     let visible = window.visible(buffer.count);
     for row in visible.clone() {
         move_cursor(row - visible.start, 0);
@@ -1182,7 +1182,7 @@ fn report_cursor(buffer: &Buffer, window: &Window, row: usize, col: usize, tag: 
     let count = write_number(&mut digits, buffer.count);
     out[at..at + count].copy_from_slice(&digits[..count]);
     at += count;
-    // **窓の位置（VIEW-a）。** **状態行へは出さない**（判定が状態行の並びを
+    // **ウィンドウの位置（VIEW-a）。** **状態行へは出さない**（判定が状態行の並びを
     // 読んでおり、増やすと揺れる。運用者の判断）。**診断側に出す。**
     out[at..at + 5].copy_from_slice(b" top=");
     at += 5;
@@ -1230,7 +1230,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     // **無いパスは「新しいファイル」である（e-5）。** **空のバッファで始め、
     // `:w` が `O_CREAT` で作る**（vi と同じ形）。**開けない理由が「無い」以外
     // なら、従来どおり断って終わる**——**権限も何も無いこの体制では、
-    // ここへ来るのは像の側の失敗である。**
+    // ここへ来るのはイメージの側の失敗である。**
     // === 入れ物をヒープから取る（H-b-1。容量は H-b-2 で動くようになった） ===
     //
     // **開く前に大きさを訊く。** **`stat` が答えるのはファイルの大きさだけで、
@@ -1309,7 +1309,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     // **端末の大きさを訊く（e-1）。** **使うのは e-4 の2本立てである**——
     // **いまは受け取って判定行に出すだけで、置き場所には使っていない**
     // （状態行は本文の1行下のままである）。
-    // **訊く経路が本物の利用者を持たないと、検算が置けない。**
+    // **訊く経路が本物の利用者を持たないと、検算が用意できない。**
     report_window_size(userlib::window_size(0));
     // **使う値は既定へ落とした側である（e-4）。** **判定は落とす前を見る**
     // （上の行）——落とした後を見ると、訊けた場合と落ちた場合が同じ値になる。
@@ -1369,7 +1369,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
         // **読む直前に見る。** モードを変える場所は 4 つある（`i`・Esc・`:`・
         // コマンドの実行）が、**そのどれもが最後にここへ戻る**ので、
         // **`continue` が何本あっても漏れない。**
-        // **`-EAGAIN` で回っている間は変わらない**ので、何度も描かない。
+        // **`-EAGAIN` で空回りしている間は変わらない**ので、何度も描かない。
         if mode != shown_mode {
             refresh(
                 &view,
@@ -1416,7 +1416,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             // **溜めた Esc をここで確定する（e-2）。** **入力が途切れたので、
             // CSI の途中ではありえない**（[`finish_pending_escape`] の doc）。
             //
-            // 破壊 (e-2, zi-esc-needs-second-key): ここで確定しない。
+            // 破壊テスト (e-2, zi-esc-needs-second-key): ここで確定しない。
             // **溜めた Esc は次の 1 バイトが来るまで残る**ので、
             // **使う人は Esc を 2 回押すことになる**（e-2 で直した当の形である）。
             // **落ちるのは「Esc 1 回で戻る」判定だけである**——台本の残りは
@@ -1439,7 +1439,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             continue;
         }
         if got <= 0 {
-            // 端末が読めない。**この段では終わる**（`:q` は zi-d-2）。
+            // 端末が読めない。**この段階では終わる**（`:q` は zi-d-2）。
             break;
         }
         let byte = byte[0];
@@ -1489,9 +1489,9 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
             (Escape::Bracket, direction) => {
                 escape = Escape::Idle;
                 let moved = match direction {
-                    // 破壊 (zi-d-1, zi-cursor-ignore-updown): 上下を捨てる。
+                    // 破壊テスト (zi-d-1, zi-cursor-ignore-updown): 上下を捨てる。
                     // **カーソルが行を移らないので、編集が別の行に入る**——
-                    // 台本の判定（row の推移）が捕まえる。
+                    // 台本の判定（row の推移）が検出する。
                     #[cfg(not(zi_cursor_ignore_updown))]
                     b'A' => move_up(buffer, &mut row, &mut col),
                     #[cfg(not(zi_cursor_ignore_updown))]
@@ -1502,8 +1502,8 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                     _ => false,
                 };
                 if moved {
-                    // **上下の矢印は行を移る（VIEW-a）。** **窓の外へ出たら
-                    // 窓が動き、そのときは描き直しになる。**
+                    // **上下の矢印は行を移る（VIEW-a）。** **ウィンドウの外へ出たら
+                    // ウィンドウが動き、そのときは描き直しになる。**
                     show_cursor(
                         &view,
                         buffer,
@@ -1620,7 +1620,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                     // **打ち終わるまで何も見えない形は、打ち間違いに
                     // 気づけない**（運用者の指摘）。
                     //
-                    // 破壊 (e-4, zi-command-line-silent): 打っている間は描き直さない。
+                    // 破壊テスト (e-4, zi-command-line-silent): 打っている間は描き直さない。
                     // **`:` を打った時点の空のコマンド行のままになる**ので、
                     // **最下行に打鍵が出ていることの判定だけが落ちる。**
                     // **コマンド自身は効く**（改行で解釈するため）ので、
@@ -1688,7 +1688,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
 /// **カーネルが `user-heap:` の行に、取った数と返した数を並べる**
 /// （`kernel/src/userland.rs`）。**自分で書いて自分で読む形にしない。**
 fn release_and_exit(buffer: &mut Buffer, status: u64) -> ! {
-    // 破壊 (H-b-1, zi-skip-release): 返さずに終わる。**振る舞いは 1 つも
+    // 破壊テスト (H-b-1, zi-skip-release): 返さずに終わる。**振る舞いは 1 つも
     // 変わらない**——**編集も保存も読み戻しも、返す前に終わっている。**
     // **落ちるのは「`zi` が取った分を返した」判定だけである**
     // ——**カーネルの `user-heap:` の行が、取った数と返した数を並べる。**
@@ -1722,11 +1722,11 @@ fn save(path: &[u8], buffer: &Buffer) -> bool {
         return false;
     }
     let fd = fd as u64;
-    // 破壊 (zi-d-2, zi-write-skip-body): 中身を書かずに閉じる。
+    // 破壊テスト (zi-d-2, zi-write-skip-body): 中身を書かずに閉じる。
     // **open が長さ 0 へ切った後なので、ファイルが空のまま残る**——
     // `cat` の読み戻しが空になり、往復の判定が落ちる。
     // **`:w` の戻り値は「要求 0 に対して 0」になるので、量の判定は通る**
-    // ——**捕まえるのは往復のほうである。**
+    // ——**検出するのは往復のほうである。**
     #[cfg(zi_write_skip_body)]
     let at = 0usize;
     let written = write_all(STDOUT_UNUSED_MARKER.min(fd), &out[..at]);
@@ -1866,7 +1866,7 @@ fn finish_pending_escape(
     // **全角の字を入れた直後に Esc を打つと、カーソルが字の途中へ落ちる**
     // ——**そこで `x` を打つと 1 バイトだけ消えて、ファイルが壊れる。**
     //
-    // 破壊 (VIM-1, zi_escape_by_byte): **バイトで戻す。**
+    // 破壊テスト (VIM-1, zi_escape_by_byte): **バイトで戻す。**
     // **`utf8-test` の「Esc が字の境界へ戻る」判定が落ちる。**
     #[cfg(zi_escape_by_byte)]
     {
@@ -1969,7 +1969,7 @@ fn handle_byte(
                 b'l' => move_right(buffer, *row, col, *mode),
                 b'i' => {
                     *mode = Mode::Insert;
-                    // **行は変わらないので窓も動かない。** カーソルだけ戻す。
+                    // **行は変わらないのでウィンドウも動かない。** カーソルだけ戻す。
                     restore_cursor(buffer, window, *row, *col);
                     report_cursor(buffer, window, *row, *col, b"insert");
                     // **モードを変えただけで、バッファは変わっていない。**
@@ -1986,12 +1986,12 @@ fn handle_byte(
                 }
                 // **行末の字へ動く（VIM-1。vi の `$`）。**
                 //
-                // **行は変わらないので窓も動かない。** カーソルだけ戻す。
+                // **行は変わらないのでウィンドウも動かない。** カーソルだけ戻す。
                 b'$' => {
                     move_to_line_end(buffer.line(*row), col);
                     // **[`show_cursor`] を通す**——**状態行の `行:桁` を
                     // 追いつかせるのはあちらである**（VIM-1b）。
-                    // **窓は動かない**ので、描き直しにはならない。
+                    // **ウィンドウは動かない**ので、描き直しにはならない。
                     show_cursor(view, buffer, window, &moved_status(*row, *col, *mode, dirty));
                     report_cursor(buffer, window, *row, *col, b"line-end");
                     return false;
@@ -1999,7 +1999,7 @@ fn handle_byte(
                 // **行の最初の非空白へ動く（VIM-1。vi の `^`）。**
                 //
                 // **`0`（行頭へ）は作らない**——**利用者が挙げていない。**
-                // **契機は `docs/deferred-decisions.md` に置いた。**
+                // **見直すきっかけは `docs/deferred-decisions.md` に置いた。**
                 b'^' => {
                     move_to_first_nonblank(buffer.line(*row), col);
                     show_cursor(view, buffer, window, &moved_status(*row, *col, *mode, dirty));
@@ -2009,7 +2009,7 @@ fn handle_byte(
                 // **行末から挿入する（VIM-1。vi の `A`）。**
                 //
                 // **`$` + `a` と同じである。** **道を 1 つに寄せた**
-                // ——**`$` の破壊が `A` の判定も落とすことが、寄っている証拠
+                // ——**`$` の破壊テストが `A` の判定も落とすことが、寄っている証拠
                 // である**（運用者の指示。2026-09-01）。
                 b'A' => {
                     move_to_line_end(buffer.line(*row), col);
@@ -2060,8 +2060,8 @@ fn handle_byte(
                 _ => false,
             };
             if moved {
-                // **`j` と `k` は行を移る（VIEW-a）。** **窓の外へ出たら
-                // 窓が動き、そのときは描き直しになる。**
+                // **`j` と `k` は行を移る（VIEW-a）。** **ウィンドウの外へ出たら
+                // ウィンドウが動き、そのときは描き直しになる。**
                 show_cursor(
                     view,
                     buffer,
@@ -2085,7 +2085,7 @@ fn handle_byte(
             // **Enter で行を割る（zi-f）。** vi と同じで、カーソル以降が
             // 新しい行へ移り、カーソルは新しい行の先頭へ行く。
             if byte == b'\n' {
-                // 破壊 (zi-f, zi-enter-does-nothing): Enter を捨てる。
+                // 破壊テスト (zi-f, zi-enter-does-nothing): Enter を捨てる。
                 // **zi-d-1 までの振る舞いに戻る**（あの頃は「行の追加は
                 // 範囲外」として捨てていた）。**行が増えないので、読み戻しが
                 // 2 行にならない**——**「enter split the line」だけが落ちる。**
@@ -2122,7 +2122,7 @@ fn handle_byte(
                     // **1 行目の行頭では何もしない**（繋げる先が無い）。
                     return false;
                 }
-                // 破壊 (zi-f, zi-join-does-nothing): 行頭の Backspace を捨てる。
+                // 破壊テスト (zi-f, zi-join-does-nothing): 行頭の Backspace を捨てる。
                 // **行が繋がらないので、読み戻しが 2 行のまま残る**
                 // ——**「行頭の Backspace が前の行と繋げた」判定だけが落ちる。**
                 // **`zi-enter-does-nothing` と対である**（あちらは割る側）。
@@ -2147,8 +2147,8 @@ fn handle_byte(
                     return true;
                 }
             }
-            // 破壊 (zi-d-2, zi-insert-drop-first): 挿入の最初の 1 字を落とす。
-            // **`cat` の読み戻しが 1 字短くなる**ので、往復の判定が捕まえる。
+            // 破壊テスト (zi-d-2, zi-insert-drop-first): 挿入の最初の 1 字を落とす。
+            // **`cat` の読み戻しが 1 字短くなる**ので、往復の判定が検出する。
             // **画面の再描画も 1 字少ないが、それは観測できない**（モジュール doc）。
             #[cfg(zi_insert_drop_first)]
             let inserted = {
@@ -2184,16 +2184,16 @@ fn handle_byte(
 /// サイクル（約95ms）だった。** **自動繰り返しは毎秒 25〜30 回来るので、
 /// 生成が消費の 3 倍近くになり、押しっぱなしで溜まっていた。**
 ///
-/// # 窓は動かさない
+/// # ウィンドウは動かさない
 ///
-/// **行の中身が変わっただけなので、窓の位置は変わらない。**
-/// **窓が動く形（カーソルが窓の外へ出る）は [`show_cursor`] が持つ。**
+/// **行の中身が変わっただけなので、ウィンドウの位置は変わらない。**
+/// **ウィンドウが動く形（カーソルがウィンドウの外へ出る）は [`show_cursor`] が持つ。**
 ///
 /// # 行が増減する場合は使えない
 ///
 /// **`Enter` と行頭の `Backspace` は、その行から下が全部ずれる。**
 /// **そちらは [`redraw_here`]（全面）のままである**——`IL` / `DL` で
-/// ずらす形は測ってから決める（`docs/roadmap.md` の PERF 段）。
+/// ずらす形は測ってから決める（`docs/roadmap.md` の PERF 段階）。
 ///
 /// # カーソルは最後に戻す
 ///
@@ -2208,7 +2208,7 @@ fn redraw_line_here(
     col: usize,
     message: &[u8],
 ) {
-    // 破壊 (PERF-g, zi-edit-redraws-everything): 1 行ではなく全面を描き直す。
+    // 破壊テスト (PERF-g, zi-edit-redraws-everything): 1 行ではなく全面を描き直す。
     // **PERF-g の前の形そのものである**——**絵は同じで、描く字が桁で増える。**
     #[cfg(zi_edit_redraws_everything)]
     {
@@ -2330,7 +2330,7 @@ fn moved_status(row: usize, col: usize, mode: Mode, dirty: bool) -> Status<'stat
 /// **「行末」はバイト長ではなく最後の字の先頭である**（`common::text::line_end`）。
 /// **`A` もここを通る**——**寄せてあるので、ここが壊れれば両方の判定が落ちる。**
 fn move_to_line_end(line: &[u8], col: &mut usize) -> bool {
-    // 破壊 (VIM-1, zi_line_end_stays): 動かさない。
+    // 破壊テスト (VIM-1, zi_line_end_stays): 動かさない。
     // **`$` の判定が落ち、`A` と `o` の判定も同時に落ちる**
     // ——**3 つが同じ道に立っていることの主張である。**
     #[cfg(zi_line_end_stays)]
@@ -2351,7 +2351,7 @@ fn move_to_line_end(line: &[u8], col: &mut usize) -> bool {
 ///
 /// **空白しか無い行では行末へ寄る**（`common::text::first_nonblank`）。
 fn move_to_first_nonblank(line: &[u8], col: &mut usize) -> bool {
-    // 破壊 (VIM-1, zi_first_nonblank_to_zero): 行頭へ動く。
+    // 破壊テスト (VIM-1, zi_first_nonblank_to_zero): 行頭へ動く。
     // **空白を飛ばさないので、`^` の判定だけが落ちる**
     // ——**`$` とは別の道である。**
     #[cfg(zi_first_nonblank_to_zero)]
@@ -2373,7 +2373,7 @@ fn move_to_first_nonblank(line: &[u8], col: &mut usize) -> bool {
 /// **行末では動かない**——インサートでは末尾の 1 つ先まで許すので、
 /// [`move_right`] と同じ上限に合わせる。
 ///
-/// **行は変わらないので窓も動かない。** カーソルだけ戻す。
+/// **行は変わらないのでウィンドウも動かない。** カーソルだけ戻す。
 fn enter_append(
     buffer: &Buffer,
     window: &mut Window,
@@ -2382,18 +2382,18 @@ fn enter_append(
     mode: &mut Mode,
 ) {
     *mode = Mode::Insert;
-    // 破壊 (e-4, zi-append-like-insert): `a` を `i` と同じにする。
+    // 破壊テスト (e-4, zi-append-like-insert): `a` を `i` と同じにする。
     // **モードは変わり、字も入る**ので、往復も本数も変わらない。
     // **落ちるのは「`a` は `i` より 1 つ右から始まる」判定だけである。**
     #[cfg(not(zi_append_like_insert))]
     {
         // **1 バイトではなく 1 文字ぶん右である**（`ADR-0054` の
-        // Decision 5。**多バイトの段で見落としていた**）。
+        // Decision 5。**多バイトの段階で見落としていた**）。
         //
         // **バイトで進めると、全角の上で `a` を打った挿入点が
         // 字の途中へ落ちる**——**そこへ字を入れるとファイルが壊れる。**
         //
-        // 破壊 (ADR-0054, zi_append_by_byte): **バイトで進める。**
+        // 破壊テスト (ADR-0054, zi_append_by_byte): **バイトで進める。**
         // **`utf8-test` の「`a` が字の境界へ動く」判定が落ちる。**
         let line = buffer.line(row);
         if *col < line.len() {

@@ -11,10 +11,10 @@
 //! **前の画面へは戻れない。** **これは方針ではなく、作りである**——
 //! **`more` は読みながら出しており、出した行を持っていない。**
 //!
-//! **`less` は全部読んでから見せる**（窓を持ち、上下に動く）。
-//! **`more` は流しながら出す**（窓を持たない）。
+//! **`less` は全部読んでから見せる**（ウィンドウを持ち、上下に動く）。
+//! **`more` は流しながら出す**（ウィンドウを持たない）。
 //!
-//! # 窓の計算（`common/src/window.rs`）は借りない。理由を書く
+//! # ウィンドウの計算（`common/src/window.rs`）は借りない。理由を書く
 //!
 //! **VIEW-a と VIEW-b では `common/src/window.rs` を `#[path]` で借りた**
 //! （`ADR-0045`）。**`more` は借りない。**
@@ -79,7 +79,7 @@ const READ_FAILED: &[u8] = b"more: read failed\n";
 /// **`more` は戻らないので、出した行を持つ必要が無い。**
 /// **持たなければヒープも要らない**——**`more` は `brk` を1回も呼ばない。**
 ///
-/// **`less` とは形が違う。** **あちらは窓を上下に動かすので、全部持つ。**
+/// **`less` とは形が違う。** **あちらはウィンドウを上下に動かすので、全部持つ。**
 struct Lines {
     fd: u64,
     buffer: [u8; CHUNK],
@@ -104,7 +104,7 @@ impl Lines {
         }
     }
 
-    /// 次の 1 行を `out` へ写す。**返るのは長さで、`None` は終わりである。**
+    /// 次の 1 行を `out` へコピーする。**返るのは長さで、`None` は終わりである。**
     ///
     /// **改行は含めない。** **改行で終わらないファイルの最後の行も返す。**
     fn next(&mut self, out: &mut [u8; LINE_MAX]) -> Option<usize> {
@@ -177,7 +177,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     // **1 画面に出す行数。** **最下行は待ちの札に使う。**
     let page = (screen.rows as usize).saturating_sub(1).max(1);
 
-    // 破壊 (VIEW-c, more-uses-alternate-screen): 代替画面へ入る。
+    // 破壊テスト (VIEW-c, more-uses-alternate-screen): 代替画面へ入る。
     // **`less` の振る舞いそのものである**——**抜けると元の画面が戻り、
     // `more` の出したものが消える。** **「出力が残る」判定だけが落ちる。**
     #[cfg(more_uses_alternate_screen)]
@@ -253,7 +253,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
 
     close(fd);
 
-    // 破壊 (VIEW-c, more-uses-alternate-screen): 代替画面から出る。
+    // 破壊テスト (VIEW-c, more-uses-alternate-screen): 代替画面から出る。
     // **出した行はここで消える。**
     #[cfg(more_uses_alternate_screen)]
     write_all(STDOUT, b"\x1b[?1049l");

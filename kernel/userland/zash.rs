@@ -7,7 +7,7 @@
 //!
 //! # 組み込みは `exit` だけで、それ以外は `spawn` へ回す
 //!
-//! **外部として起こせないものが、少なくとも 1 つ要る**——分岐の形が最初から
+//! **外部として起動できないものが、少なくとも 1 つ要る**——分岐の形が最初から
 //! 在れば、後から足すときに構造を変えずに済む（`docs/vision.md` の
 //! 「コマンドの実行を組み込みと外部で分ける」）。
 //!
@@ -19,7 +19,7 @@
 //! **カーネルが待つ（W2-c-2。`ADR-0061`）。** `read(0)` は溜まっていなければ
 //! **`Waiting` になって眠り、IRQ1 が起こす。** **こちらは回さない。**
 //!
-//! **`hlt` は使えない。** Ring 3 では特権命令で、呼べば畳まれる。
+//! **`hlt` は使えない。** Ring 3 では特権命令で、呼べば終了させられる。
 //! **だから待つのはカーネルの側である。**
 //!
 //! # 以前ここに書いてあったことは、3 つとも偽になった（2026-09-17 に直した）
@@ -59,7 +59,7 @@ mod userlib;
 
 // **環境の表と 1 行の判定は `common` に在る**（f-2。`ADR-0053` / `ADR-0045`）。
 //
-// **`dead_code` を許す。** **カーネル側だけが使う口が在る**——`push` は源の
+// **`dead_code` を許す。** **カーネル側だけが使う関数が在る**——`push` は出どころの
 // ファイルを積む側で、シェルは `set` しか呼ばない。
 #[path = "../../common/src/env.rs"]
 #[allow(dead_code)]
@@ -163,9 +163,9 @@ const EXPORT_TOO_LONG: &[u8] = b": too long\n";
 const EXPORT_FULL: &[u8] = b": no room in the environment\n";
 /// 引数が無い。
 const EXPORT_USAGE: &[u8] = b"zash: export: NAME=VALUE\n";
-/// 起こせなかったときの返事（前半）。
+/// 起動できなかったときの返事（前半）。
 const NOT_FOUND_HEAD: &[u8] = b"zash: ";
-/// 起こせなかったときの返事（後半）。
+/// 起動できなかったときの返事（後半）。
 const NOT_FOUND_TAIL: &[u8] = b": cannot run\n";
 
 /// 中断（Ctrl+C）で子が止まったときに `spawn` が返す値（S12 前の手当て、C）。
@@ -180,7 +180,7 @@ const INTERRUPTED_LINE: &[u8] = b"interrupted\n";
 
 /// パイプの語（`ADR-0063` の (b3)）。**語として打つ**（空白で囲む。`a|b` は 1 語である）。
 ///
-/// **引用も語の分割の規則も無いので、`|` を語の途中で切る理由が無い**——**注釈を行頭だけで
+/// **引用も語の分割の規則も無いので、`|` を語の途中で切る理由が無い**——**コメントを行頭だけで
 /// 見るのと同じ判断である**（[`run_line`]）。
 const PIPE_WORD: &[u8] = b"|";
 /// `|` が 2 つ以上あったときの断り。**パイプは 1 本である**（2 本目の Ring 3 が 1 本しか無い）。
@@ -188,7 +188,7 @@ const PIPE_TOO_MANY: &[u8] = b"zash: only one pipe\n";
 /// `|` の片側が空だったときの断り。
 const PIPE_EMPTY_SIDE: &[u8] = b"zash: empty side of a pipe\n";
 /// 左が 0 以外で終わったときの返事（前半）。**右の状態は Linux と同じく「その行の状態」として
-/// 出し、左は別に言う**——**判定が読める形にしてある。**
+/// 出し、左は別に出力する**——**判定が読める形にしてある。**
 const LEFT_STATUS_HEAD: &[u8] = b"zash: the left side ended with ";
 
 /// Ctrl+C が届くバイト（ASCII の ETX）。
@@ -234,12 +234,12 @@ const USER_PROFILE_TAIL: &[u8] = b"/.profile";
 ///
 /// # 1,024 の根拠
 ///
-/// **測った値ではない。** **いま像に在る `/etc/environment` は 3 行 189
+/// **測った値ではない。** **いまイメージに在る `/etc/environment` は 3 行 189
 /// バイトで、種として置く `/etc/profile` はそれより短い。** **1,024 は
 /// その 5 倍で、`LINE_MAX`（128）の 8 行ぶんに当たる。**
 ///
 /// **上限を置く理由は、器が `.bss` に載るからである**——**大きくすると
-/// 像の確保する量がそのぶん増える**（`docs/roadmap.md` の
+/// イメージの確保する量がそのぶん増える**（`docs/roadmap.md` の
 /// 「イメージを何が食っているか」）。
 ///
 /// **暫定である。** **越える設定を書く者が出たら、そこで測って決め直すこと**
@@ -272,7 +272,7 @@ const HISTORY_TAIL: &[u8] = b"/.zash_history";
 /// たびなので、際限なく読ませない。**
 ///
 /// **越えたら黙って切らない**（`ADR-0053` の Decision 5）——
-/// **そこで読むのをやめて 1 行言う。** **輪は新しい側を残すので、
+/// **そこで読むのをやめて 1 行出力する。** **輪は新しい側を残すので、
 /// 切れるのは古い側である。**
 const HISTORY_READ_MAX: usize = 8192;
 
@@ -286,7 +286,7 @@ const HISTORY_UNWRITABLE: &[u8] =
 
 /// 設定が器に入りきらなかったときの返事（PR-1）。
 ///
-/// **そこまでの行は走らせてから言う**——**黙って切らない**
+/// **そこまでの行は走らせてから出力する**——**黙って切らない**
 /// （`ADR-0053` の Decision 5）。
 const PROFILE_TOO_BIG: &[u8] = b"zash: the profile does not fit; the rest was not run\n";
 
@@ -308,12 +308,12 @@ const CTRL_E: u8 = 0x05;
 const FIRST_PRINTABLE: u8 = 0x20;
 
 
-/// 破壊 (SE-d, shell-skip-expansion-test): 展開を素通りさせる。
+/// 破壊テスト (SE-d, shell-skip-expansion-test): 展開を素通りさせる。
 const SKIP_EXPANSION: bool = cfg!(zash_skip_expansion);
 
-/// 破壊 (SE-b, shell-keep-control-bytes-test): 制御バイトを捨てない。
+/// 破壊テスト (SE-b, shell-keep-control-bytes-test): 制御バイトを捨てない。
 ///
-/// **`cfg!` で持つ。** **`#[cfg]` を分岐へ付けると、破壊の側で
+/// **`cfg!` で持つ。** **`#[cfg]` を分岐へ付けると、破壊テストの側で
 /// [`FIRST_PRINTABLE`] が使われなくなって警告が出る。**
 const KEEP_CONTROL_BYTES: bool = cfg!(zash_keep_control_bytes);
 
@@ -389,17 +389,17 @@ const MATCHES_TAIL: &[u8] = b" matches\n";
 /// **`run_with_terminator` が `PATH` より先に見る 3 つと同じである。**
 const BUILTINS: [&[u8]; 3] = [BUILTIN_EXIT, BUILTIN_EXPORT, BUILTIN_SET];
 
-/// 破壊 (TAB-1, shell-complete-no-common-prefix): 共通接頭辞まで伸ばさない。
+/// 破壊テスト (TAB-1, shell-complete-no-common-prefix): 共通接頭辞まで伸ばさない。
 /// **候補が 1 本のときだけ補完する。** **落ちるのは「共通接頭辞まで伸びる」判定
 /// だけである。**
 const NO_COMMON_PREFIX: bool = cfg!(shell_complete_no_common_prefix);
 
-/// 破壊 (TAB-1, shell-complete-keeps-duplicates): 左の要素に在る名前を落とさない。
+/// 破壊テスト (TAB-1, shell-complete-keeps-duplicates): 左の要素に在る名前を落とさない。
 /// **`PATH` に同じ要素が 2 つ在るときだけ効く**——**落ちるのは「重複は 1 度だけ」
 /// の判定だけである。**
 const KEEPS_DUPLICATES: bool = cfg!(shell_complete_keeps_duplicates);
 
-/// 破壊 (TAB-1, shell-complete-silent-when-no-progress): 伸びなかったときに黙る。
+/// 破壊テスト (TAB-1, shell-complete-silent-when-no-progress): 伸びなかったときに黙る。
 /// **一覧は 2 度目に出るままである**——**落ちるのは「件数が出る」判定だけである。**
 /// **TAB-1 の前に採ろうとしていた形そのものである**（`bash` の 2 段）。
 const SILENT_WHEN_NO_PROGRESS: bool = cfg!(shell_complete_silent_when_no_progress);
@@ -419,12 +419,12 @@ const HISTORY_MAX: usize = 16;
 /// # なぜヒープを使わないのか
 ///
 /// **上限はどちらにせよ要る。** ヒープにしても無制限には伸ばせない
-/// （`brk` が像を食う）。**上限があるなら、固定で足りる。**
+/// （`brk` がイメージを食う）。**上限があるなら、固定で足りる。**
 ///
 /// **費用が静的に測れる。** **`16 * 128 + 16 * 8 = 2176` バイトが `.bss` に出る。**
 /// **`zash` の書き込み可の区画は `0x403040` から始まり、`.bss` は 81 バイトだった**
 /// （実測。2026-08-28）。**足しても `0x403911` で、ページの終わり `0x404000` を
-/// 越えない**——**写像は 1 ページも増えない。**
+/// 越えない**——**マッピングは 1 ページも増えない。**
 ///
 /// **`zash` はヒープを 1 度も使っていない**（実測。`brk` は 0 箇所）。
 /// **使い始めると `brk` の会計が 1 つ増える**（`zi` と `syscall-test` には
@@ -453,31 +453,31 @@ static mut HISTORY_PATH: [u8; PROFILE_PATH_MAX] = [0; PROFILE_PATH_MAX];
 /// [`HISTORY_PATH`] の長さ（NUL を含む）。**0 は「持たない」。**
 static mut HISTORY_PATH_LEN: usize = 0;
 
-/// 保存できないと 1 度言ったか（HI-1）。
+/// 保存できないと 1 度出力したか（HI-1）。
 ///
-/// # 1 度だけ言う
+/// # 1 度だけ出力する
 ///
 /// **保存が失敗する状態は続く**（装置が答えない、`/root` が無い、など）。
-/// **毎行言うと、画面が報せで埋まって何も読めなくなる。**
+/// **毎行出力すると、画面が報せで埋まって何も読めなくなる。**
 ///
 /// **黙る形にするので、「また言う」条件を決めてある**——**一度でも保存に
-/// 成功したら、この旗を下ろす。** **状態が変わったときにだけ言い直す形で、
+/// 成功したら、このフラグを下ろす。** **状態が変わったときにだけ出力し直す形で、
 /// 黙って落とし続けるのとは違う**（`ADR-0053` の Decision 5 の向き）。
 static mut SAVE_COMPLAINED: bool = false;
 
-/// 破壊 (SE-f, shell-shift-delete-range-test): 消す範囲を 1 つ狭める。
+/// 破壊テスト (SE-f, shell-shift-delete-range-test): 消す範囲を 1 つ狭める。
 ///
-/// # なぜこの破壊が要るのか
+/// # なぜこの破壊テストが要るのか
 ///
 /// **`keyboard-drop-ctrl-letters-test` が覆っているのは「鍵が届くこと」であって、
 /// 「範囲の計算が正しいこと」ではない。** **`Ctrl+K` が誤って行頭まで消す形は、
-/// 鍵が届いているので、あの破壊では捕まらない。**
+/// キーが届いているので、あの破壊テストでは検出されない。**
 ///
-/// **範囲を 1 つずらせば、消す鍵の判定が同時に落ちる**——**範囲の計算を
-/// 守っているのがそれらの判定であることを、この破壊が主張する。**
+/// **範囲を 1 つずらせば、消すキーの判定が同時に落ちる**——**範囲の計算を
+/// 守っているのがそれらの判定であることを、この破壊テストが主張する。**
 const SHIFT_DELETE_RANGE: bool = cfg!(zash_shift_delete_range);
 
-/// 破壊 (SE-c, shell-drop-history-test): 行を履歴へ積まない。
+/// 破壊テスト (SE-c, shell-drop-history-test): 行を履歴へ積まない。
 const DROP_HISTORY: bool = cfg!(zash_drop_history);
 
 /// 空白を並べた種。**消すときにまとめて 1 回で書くために持つ。**
@@ -486,7 +486,7 @@ const SPACES: [u8; LINE_MAX] = [b' '; LINE_MAX];
 /// 後退を並べた種。**まとめて 1 回で書くために持つ。**
 ///
 /// **1 バイトずつ書くと、行頭へ戻るだけで最大 128 回の `write` になる**
-/// ——PERF 段が減らした側である。
+/// ——PERF 段階が減らした側である。
 const BACKSPACES: [u8; LINE_MAX] = [BACKSPACE; LINE_MAX];
 
 /// プロンプトを出す（ES-d）。**色を付けてから戻す。**
@@ -516,10 +516,10 @@ const TERM_NAME: &[u8] = b"TERM";
 /// **このプログラムは Ring 3 で 1 本だけ走る**（`RESOLVED` と同じ事情）。
 static mut ENVIRONMENT: EnvTable = EnvTable::new();
 
-/// 起動時に積まれていた本数（f-2）。**破壊のためだけに控える。**
+/// 起動時に積まれていた本数（f-2）。**破壊テストのためだけに控える。**
 static mut INITIAL_ENV_COUNT: usize = 0;
 
-/// 起動時の `PATH`（TAB-1）。**破壊のためだけに控える。**
+/// 起動時の `PATH`（TAB-1）。**破壊テストのためだけに控える。**
 ///
 /// **既定のビルドでは誰も読まない**（`shell_complete_ignores_path` の側だけが
 /// 読む）。**控えるのは、`export PATH=...` が効かない形を作るためである。**
@@ -554,12 +554,12 @@ fn environment_value(name: &[u8]) -> Option<&'static [u8]> {
     unsafe { environment_table() }.value(name)
 }
 
-/// 起動時の `envp` を表へ写す（f-2。`ADR-0053` の Decision 1）。
+/// 起動時の `envp` を表へコピーする（f-2。`ADR-0053` の Decision 1）。
 ///
-/// # 写す理由
+/// # コピーする理由
 ///
-/// **以後の引きも積みも表を源にするためである。** **初期スタックを引き続ける形に
-/// すると、`export` した名前だけ別の場所から来ることになり、源が 2 つになる。**
+/// **以後の引きも積みも表を出どころにするためである。** **初期スタックを引き続ける形に
+/// すると、`export` した名前だけ別の場所から来ることになり、出どころが 2 つになる。**
 ///
 /// # 入らない行は落とす
 ///
@@ -592,7 +592,7 @@ unsafe fn adopt_environment(stack: *const u64) {
     // SAFETY: 書くのはここだけで、起動時の 1 度である。
     unsafe { INITIAL_ENV_COUNT = count };
 
-    // **起動時の `PATH` も控える（TAB-1）。** **破壊のためだけである。**
+    // **起動時の `PATH` も控える（TAB-1）。** **破壊テストのためだけである。**
     if let Some(path) = environment_value(PATH_NAME) {
         // SAFETY: 書くのはここだけで、起動時の 1 度である。
         unsafe {
@@ -604,11 +604,11 @@ unsafe fn adopt_environment(stack: *const u64) {
     }
 }
 
-/// `PATH` の要素の下で語を起こす（DIR-1。ADR-0043）。
+/// `PATH` の要素の下で語を起動する（DIR-1。ADR-0043）。
 ///
 /// # 探索の規則は 2 つだけである
 ///
-/// **左から順に試し、最初に起こせたものを採る。** **`-ENOENT` のときだけ
+/// **左から順に試し、最初に起動できたものを採る。** **`-ENOENT` のときだけ
 /// 次の要素へ進む**——**それ以外の失敗は、その要素で決まったことである**
 /// （ディレクトリだった、許されなかった）。**探し続けると、最初の要素で
 /// 起きた本当の理由が、最後の要素の `-ENOENT` に置き換わる。**
@@ -627,18 +627,18 @@ unsafe fn adopt_environment(stack: *const u64) {
 /// # Safety
 ///
 /// `argv` が NULL 終端のポインタ配列であること。
-/// 起こし方（`ADR-0063` の (b3)）。**3 つの口を 1 つの探索で回すために分けた。**
+/// 起動方法（`ADR-0063` の (b3)）。**3 つの入口を 1 つの探索で回すために分けた。**
 #[derive(Clone, Copy)]
 enum Launch {
     /// `spawn`。**子が終わるまで戻らない。**
     Sync,
-    /// `spawn_detached`。**fd 1 をパイプの書き端にし、手形で戻る。**
+    /// `spawn_detached`。**fd 1 をパイプの書き端にし、ハンドルで戻る。**
     DetachedToPipe,
     /// `spawn_with_piped_stdin`。**fd 0 を予約した読み端にして、子が終わるまで戻らない。**
     FromPipe,
 }
 
-/// 1 つの口を叩く。**`Launch` で分ける。**
+/// 1 つの入口を叩く。**`Launch` で分ける。**
 ///
 /// # Safety
 ///
@@ -727,7 +727,7 @@ fn prompt_is_colored() -> bool {
 }
 
 fn write_prompt() {
-    // 破壊 (ES-d, zash-prompt-drop-color): 色を送らずにプロンプトを出す。
+    // 破壊テスト (ES-d, zash-prompt-drop-color): 色を送らずにプロンプトを出す。
     // **プロンプトの字も位置も変わらない**ので、既存の判定はどれも動かない。
     // **画面のセルが既定前景のままになる**ので、zi-test の
     // 「プロンプトが自分の色で描かれている」判定だけが落ちる。
@@ -765,7 +765,7 @@ fn write_prompt() {
 /// `stack` が `_start` の時点の `rsp` であること。
 #[no_mangle]
 pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
-    // **初期スタックの環境を表へ写す（f-2。`ADR-0053`）。**
+    // **初期スタックの環境を表へコピーする（f-2。`ADR-0053`）。**
     // **以後、`TERM` も `PATH` も `$NAME` も、引くのは表である。**
     // SAFETY: 呼び出し元契約により `stack` は初期スタックの先頭を指す。
     unsafe { adopt_environment(stack) };
@@ -786,7 +786,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
     // **挿入点（S12 前の手当て）。** 次に字を入れる位置で、**常に `length` 以下**である。
     //
     // **いまは常に行末（`length` と等しい）である**——動かす手段がまだ無い。
-    // **それでも概念として先に置く。** 矢印を足す段で増えるのは
+    // **それでも概念として先に置く。** 矢印を足す段階で増えるのは
     // 「動かす手段」だけになり、Backspace と挿入の側を書き直さずに済む。
     let mut cursor = 0usize;
     let mut overflowed = false;
@@ -922,7 +922,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 // 1 バイトまで遅れても、外から見て何も変わらない**
                 // （どちらの順でも、溜めた分を捨てて次の字を普通に扱う）。
                 // **見える違いが無いものを直すと、直したことを主張する
-                // 判定が置けない。** **モードや意味を持たせる段で直すこと。**
+                // 判定が用意できない。** **モードや意味を持たせる段階で直すこと。**
                 escape = Escape::Idle;
             }
             (Escape::Idle, _) => {}
@@ -930,7 +930,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
 
         match byte[0] {
             b'\n' => {
-                // **打った改行を反響する。** 反響はシェルが行う——
+                // **打った改行をエコーする。** エコーはシェルが行う——
                 // **カーネルは前景を渡しているだけで、何も表示しない。**
                 write_all(STDOUT, b"\n");
                 // **打った行を履歴へ積む（SE-c）。** **展開の前の、打った形で積む**
@@ -964,7 +964,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 //
                 // **子が走っていないときの Ctrl+C はここへ来る。**
                 // **走っているときはこのバイトが届かない**——カーネルが
-                // 子の遠征を畳んでおり、シェルは `spawn` の中で待っている。
+                // 子の遠征を終了させており、シェルは `spawn` の中で待っている。
                 //
                 // **`^C` を出してから改行する。** 出さないと、捨てられた行が
                 // 画面に残ったまま次のプロンプトが出て、**何が起きたのか
@@ -1001,7 +1001,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 }
             }
             TAB => {
-                // **補完する（TAB-1）。** **`ADR-0050` が捨てていた鍵に
+                // **補完する（TAB-1）。** **`ADR-0050` が捨てていたキーに
                 // 受け手ができた。**
                 //
                 // **段は上で落としてある。** **落とす前の値を渡して、
@@ -1089,7 +1089,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                 //
                 // **以前は `length < line.len()` だった。** **`LINE_MAX` ちょうどまで
                 // 入るので、`length` が `LINE_MAX` になりうる**——**そのまま Enter を
-                // 打つと、下の `line[length] = 0` が配列の外を書いて畳まれる。**
+                // 打つと、下の `line[length] = 0` が配列の外を書いて終了させられる。**
                 // **`overflowed` は次の 1 打まで立たないので、間に合わない。**
                 //
                 // **すぐ上の doc が「`LINE_MAX` は 1 行より大きいので在る」と
@@ -1106,7 +1106,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
                     // （消えた分が無いため）。
                     redraw_tail_without_gap(&line[cursor..length]);
                 } else {
-                    // **越えたぶんは捨てる。** 反響もしない——
+                    // **越えたぶんは捨てる。** エコーもしない——
                     // **入っていないものを入ったように見せない。**
                     overflowed = true;
                 }
@@ -1121,7 +1121,7 @@ pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
 /// **辿るときに同じ行が並ぶと、辿る回数が増えるだけで情報が増えない。**
 ///
 /// **積んだら真を返す（HI-1）。** **呼ぶ側は、積んだときだけファイルへ
-/// 書き戻す**——**空の Enter や同じ行の繰り返しで、像の 2MiB を
+/// 書き戻す**——**空の Enter や同じ行の繰り返しで、イメージの 2MiB を
 /// 書き直さないためである。**
 ///
 /// # Safety
@@ -1364,10 +1364,10 @@ fn expand_line(line: &[u8], out: &mut [u8]) -> Option<usize> {
         // **ここを外しても振る舞いは変わらない。** **落とす代わりに空白が
         // 1 つ余分に出るだけで、`run_line` が空白の連なりを読み飛ばす**ので、
         // **`argv` に空の語は現れない。** **実測で確かめた**（2026-08-28。
-        // 破壊 feature を書いて `--full` を通し、捕まらなかった）。
+        // 破壊テストの feature を書いて `--full` を通し、検出されなかった）。
         //
         // **したがって、この規則は 2 重に守られている**——**ここと、語へ切る側である。**
-        // **その形でしか落ちない判定が作れないので、破壊は置かない**
+        // **その形でしか落ちない判定が作れないので、破壊テストは用意しない**
         // （`ADR-0049` の Addendum）。**明示は残す**——**語へ切る側の実装が
         // 変わったとき、ここが最後の守りになる。**
         if length == 0 {
@@ -1393,7 +1393,7 @@ fn expand_line(line: &[u8], out: &mut [u8]) -> Option<usize> {
 ///
 /// # 組み込みと外部を分ける
 ///
-/// **組み込みは `exit` だけである。** **外部として起こせないものが、少なくとも
+/// **組み込みは `exit` だけである。** **外部として起動できないものが、少なくとも
 /// 1 つ要る**——分岐の形が最初から在れば、後から足すときに構造を変えずに済む
 /// （`docs/vision.md` の「コマンドの実行を組み込みと外部で分ける」。
 /// **あそこが「コストがゼロで効く」として挙げている 2 点の 1 つである**）。
@@ -1407,7 +1407,7 @@ fn expand_line(line: &[u8], out: &mut [u8]) -> Option<usize> {
 ///   `export`・`umask`。**採る。** **`exit` がこれである**——外部の `/bin/exit` を
 ///   `spawn` しても**子が終わるだけで、親のシェルは生き続ける。**
 /// - **(2) 速さのため**——`echo`・`test`・`pwd`。外部でも書けるが、
-///   **毎回プロセスを起こすのが無駄だから組み込みにする。**
+///   **毎回プロセスを起動するのが無駄だから組み込みにする。**
 ///   **採らない。ZaytOS にはこの動機が無い**——[`userlib::spawn`] は同期で
 ///   1 本ずつ走らせる形なので、**比べる相手がいない。**
 ///   **「速いから組み込みにする」を理由にしない。**
@@ -1450,9 +1450,9 @@ fn expand_line(line: &[u8], out: &mut [u8]) -> Option<usize> {
 /// **`envp` をまだ開けていないので、読む先が無い。**
 /// **[`DEFAULT_DIR`] は 1 つだけの固定の既定で、探索の順序も無い。**
 ///
-/// **置き換えの条件は「`envp` を開けたとき」である。** 段の名前ではない
+/// **置き換えの条件は「`envp` を開けたとき」である。** 段階の名前ではない
 /// （`docs/coding-standards.md` の「段を閉じるときは、その段の名前で全 docs を
-/// grep する」——**段名で書いた条件は、どの段の grep にも出ない**）。
+/// grep する」——**段階名で書いた条件は、どの段階の grep にも出ない**）。
 /// **開いたら、この固定の既定を `PATH` の解決へ置き換える。**
 ///
 /// **出所。** 初期の Unix のシェルがこの形だった。**`PATH` は後から入った**
@@ -1476,7 +1476,7 @@ fn expand_line(line: &[u8], out: &mut [u8]) -> Option<usize> {
 /// # 行をその場で切る
 ///
 /// **空白を NUL へ置き換え、各語の先頭を指す配列を作る。**
-/// **写しを取らない**——`argv` の要素はカーネルが写すので、
+/// **コピーを取らない**——`argv` の要素はカーネルがコピーするので、
 /// **この行が生きているあいだ有効であれば足りる。**
 /// 履歴のパスを決めて、ファイルから読み込む（HI-1）。
 ///
@@ -1515,7 +1515,7 @@ unsafe fn load_history() {
     if fd < 0 {
         // **無い。** **何も言わない。** **履歴が空のまま始まる。**
         //
-        // 破壊 (HI-1, shell-history-missing-is-error): 無いことを報せる。
+        // 破壊テスト (HI-1, shell-history-missing-is-error): 無いことを報せる。
         // **履歴を持たない人の画面に、毎起動 1 行出る形である。**
         // **落ちるのは「無いときは何も言わない」判定だけである。**
         #[cfg(shell_history_missing_is_error)]
@@ -1597,14 +1597,14 @@ unsafe fn load_history() {
 ///
 /// # 費用は測ってある
 ///
-/// **書きで開いた口を閉じると、像の 2MiB が装置へ書き戻される**
+/// **書きで開いたファイルを閉じると、イメージの 2MiB が装置へ書き戻される**
 /// （`kernel/src/syscall.rs` の `SYS_CLOSE`）。**実測で 7.1M〜14.2M
 /// サイクル（約 2.0〜4.1ms）で、`touch` 1 回・`zi` の `:w` 1 回と
 /// 同じ費用である。** **1 行につき 1 回であって、打鍵ごとではない。**
 ///
 /// # 失敗しても止めない。報せは 1 度だけ
 ///
-/// **[`SAVE_COMPLAINED`] の doc にある。** **一度でも成功したら旗を下ろす。**
+/// **[`SAVE_COMPLAINED`] の doc にある。** **一度でも成功したらフラグを下ろす。**
 ///
 /// # Safety
 ///
@@ -1616,7 +1616,7 @@ unsafe fn save_history() {
         // **ファイルを持たない。** **再起動で消える形である。**
         return;
     }
-    // 破壊 (HI-1, shell-history-not-saved): 書かない。
+    // 破壊テスト (HI-1, shell-history-not-saved): 書かない。
     // **読む側は生きているので、装置の中身の判定と、2 度目の起動で
     // 辿れる判定が落ちる。**
     #[cfg(shell_history_not_saved)]
@@ -1640,10 +1640,10 @@ unsafe fn save_history() {
             // **古いものから書く。** **読む側は頭から積むので、
             // ファイルの末尾が新しい側になる。**
             //
-            // **順を逆にする破壊は置いていない**——**落ちる判定が
+            // **順を逆にする破壊テストは置いていない**——**落ちる判定が
             // `shell-history-not-saved` の部分集合になる**（**書かなければ
             // 順序の判定も落ちる**）。**その形でしか落ちない判定を持たない**
-            // （`docs/verification-coverage.md` の破壊を足す基準。
+            // （`docs/verification-coverage.md` の破壊テストを足す基準。
             // PR-1 の `skip-profile` と同じ理由である）。
             let index = count - held + step;
             let slot = index % HISTORY_MAX;
@@ -1669,7 +1669,7 @@ unsafe fn save_history() {
     }
 }
 
-/// 保存できないことを 1 度だけ言う（HI-1）。
+/// 保存できないことを 1 度だけ出力する（HI-1）。
 fn complain_once_about_saving() {
     // SAFETY: このプログラムは Ring 3 で 1 本だけ走る。
     let said = unsafe { SAVE_COMPLAINED };
@@ -1829,7 +1829,7 @@ fn redraw_prompt_and_line(line: &[u8], length: usize, cursor: usize) {
 /// 2026-09-04。**履歴を 16 本のままにしたのと同じ費用である**）。
 /// **数と共通接頭辞は 1 度目の走査で求め、一覧は 2 度目に歩いて出す。**
 ///
-/// # 源は 2 つある
+/// # 出どころは 2 つある
 ///
 /// **行の最初の語で `/` を含まなければコマンド名**（組み込みと `PATH` の下）、
 /// **それ以外はパス**（語のディレクトリの部分を読む）。**`bash` と同じ形である。**
@@ -1843,7 +1843,7 @@ fn redraw_prompt_and_line(line: &[u8], length: usize, cursor: usize) {
 ///
 /// **候補を探すときだけ `$HOME` に読み替える。** **行へ書き戻すのは `~/` の
 /// ままである**——**行は打った形のまま保つ**（履歴も打った形で積んでおり、
-/// `$NAME` の展開は走らせる直前に別の写しへ行う）。
+/// `$NAME` の展開は走らせる直前に別のコピーへ行う）。
 fn for_each_candidate(line: &[u8], word: complete::Word, body: &mut dyn FnMut(&[u8])) {
     let text = &line[word.start..word.end];
     if word.first && !text.contains(&b'/') {
@@ -1872,7 +1872,7 @@ fn for_each_candidate(line: &[u8], word: complete::Word, body: &mut dyn FnMut(&[
 /// **引くたびに表から読む**（`spawn_via_path` と同じ規律。`ADR-0053` の
 /// Decision 6）——**起動時に控えると `export PATH=...` が効かない。**
 fn walk_path_elements(prefix: &[u8], body: &mut dyn FnMut(&[u8])) {
-    // 破壊 (TAB-1, shell-complete-ignores-path): 起動時の `PATH` を控えて使う。
+    // 破壊テスト (TAB-1, shell-complete-ignores-path): 起動時の `PATH` を控えて使う。
     // **`export PATH=...` が補完に効かなくなる**——**落ちるのは「`PATH` を
     // 変えると候補の源が変わる」判定だけである。**
     #[cfg(shell_complete_ignores_path)]
@@ -2050,14 +2050,14 @@ fn walk_directory(dir: &[u8], prefix: &[u8], body: &mut dyn FnMut(&[u8])) {
 ///
 /// # ログインシェルと対話シェルを分けない
 ///
-/// **`zash` が起きるたびに読む。** **`init` が起こし直したときも読む。**
+/// **`zash` が起動するたびに読む。** **`init` が起こし直したときも読む。**
 /// **区別を持ち込まない**（運用者の指示。2026-09-04）——**利用者が 1 人で、
 /// 端末が 1 つなので、分けても言えることが増えない。**
 fn run_profiles() {
     let mut path = [0u8; PROFILE_PATH_MAX];
     let user = user_profile_path(&mut path);
 
-    // 破壊 (PR-1, shell-profile-order-swapped): 利用者の設定を先に読む。
+    // 破壊テスト (PR-1, shell-profile-order-swapped): 利用者の設定を先に読む。
     // **どちらも走るので、置いた名前は全部見える**——**落ちるのは
     // 「後のほうが勝つ」判定だけである。**
     #[cfg(shell_profile_order_swapped)]
@@ -2097,15 +2097,15 @@ fn user_profile_path(path: &mut [u8; PROFILE_PATH_MAX]) -> Option<usize> {
 ///
 /// # 3 段で決めてある（`/etc/environment` と同じ形）
 ///
-/// - **無い**（`open` が負）——**何も言わずに戻る。** **設定はもともと
+/// - **無い**（`open` が負）——**何も出力せずに戻る。** **設定はもともと
 ///   任意である。**
-/// - **在るのに読めない**（`read` が負）——**1 行言って、そのファイルを
+/// - **在るのに読めない**（`read` が負）——**1 行出力して、そのファイルを
 ///   やめる。** **ディレクトリを指した場合もここへ来る**——**読み取りで
 ///   開くのは通る**（`ls` が `getdents64` で使う道である）**が、`read` は
 ///   `-EISDIR` を返す**（`kernel/src/syscall.rs`。`syscall-test` の検算が
 ///   毎回確かめている）。
 /// - **器に入らない**（[`PROFILE_MAX`] を越えた）——**入ったぶんは走らせ、
-///   1 行言ってやめる。** **黙って切らない**（`ADR-0053` の Decision 5）。
+///   1 行出力してやめる。** **黙って切らない**（`ADR-0053` の Decision 5）。
 ///
 /// # 1 行の扱いは対話と同じ
 ///
@@ -2123,9 +2123,9 @@ fn user_profile_path(path: &mut [u8; PROFILE_PATH_MAX]) -> Option<usize> {
 fn run_profile(path: &[u8]) {
     let fd = open_read_only(path);
     if fd < 0 {
-        // **無い。** **何も言わない。**
+        // **無い。** **何も出力しない。**
         //
-        // 破壊 (PR-1, shell-profile-missing-is-error): 無いことを報せる。
+        // 破壊テスト (PR-1, shell-profile-missing-is-error): 無いことを報せる。
         // **設定を置いていない人の画面に、毎起動 1 行出る形である。**
         // **落ちるのは「無いときは何も言わない」判定だけである。**
         #[cfg(shell_profile_missing_is_error)]
@@ -2182,12 +2182,12 @@ fn run_profile(path: &[u8]) {
         let mut copy = [0u8; LINE_MAX + 1];
         copy[..line.len()].copy_from_slice(line);
         expand_and_run(&mut copy, line.len());
-        // 破壊 (PR-1, shell-profile-first-line-only): 1 行走らせたら戻る。
+        // 破壊テスト (PR-1, shell-profile-first-line-only): 1 行走らせたら戻る。
         //
         // **「失敗しても止めない」を直接否定する形にはしていない。**
-        // **そちらを主張するには、本番の像の `/etc/profile` へわざと
+        // **そちらを主張するには、本番のイメージの `/etc/profile` へわざと
         // 落ちる行を置くことになる**——**設定を置いていない人の画面に、
-        // 毎起動そのエラーが出る。** **検査のための機構を本番の像へ
+        // 毎起動そのエラーが出る。** **検査のための機構を本番のイメージへ
         // 常時載せない**（運用者の指摘。2026-09-01 の作業領域と同じ話）。
         //
         // **代わりに「全部の行が走る」を主張する。** **落ちるのは
@@ -2195,10 +2195,10 @@ fn run_profile(path: &[u8]) {
         // **「失敗しても止めない」には判定が無い**——
         // `docs/deferred-decisions.md` に行を立てた。
         //
-        // **注釈の行では戻らない。** **[`run_line`] が飛ばす行を数えると、
-        // 種の設定は注釈で始まっているので 1 行も走らないことになり、
-        // 「設定を読まない」と同じ形になる**——**落ちる判定が他の破壊と
-        // 重なって、この破壊でしか落ちない判定が無くなる**（実測。
+        // **コメントの行では戻らない。** **[`run_line`] が飛ばす行を数えると、
+        // 種の設定はコメントで始まっているので 1 行も走らないことになり、
+        // 「設定を読まない」と同じ形になる**——**落ちる判定が他の破壊テストと
+        // 重なって、この破壊テストでしか落ちない判定が無くなる**（実測。
         // 2026-09-04。**3 本のうち 2 本が落ちた**）。
         #[cfg(shell_profile_first_line_only)]
         if line.first() != Some(&b'#') {
@@ -2224,7 +2224,7 @@ fn path_without_nul(path: &[u8]) -> &[u8] {
 /// **`/etc/environment` の規則と同じである**（`common::env::trim_env_line`）。
 /// **`\r` を落とすのは、`disk0.img` を外の道具で触れるためである。**
 ///
-/// **写さずに借りたまま返す。** **バイトで走査してよい**——**UTF-8 の
+/// **コピーせずに借りたまま返す。** **バイトで走査してよい**——**UTF-8 の
 /// 2 バイト目以降は必ず `0x80` 以上で、空白にも `\r` にもならない。**
 fn trim_profile_line(line: &[u8]) -> &[u8] {
     let mut start = 0usize;
@@ -2249,7 +2249,7 @@ fn trim_profile_line(line: &[u8]) -> &[u8] {
 /// ——**終端の NUL を 1 バイト置く場所が要る。**
 fn expand_and_run(line: &mut [u8], length: usize) {
     if length > 0 && SKIP_EXPANSION {
-        // 破壊 (SE-d, shell-skip-expansion-test): 展開を通さない。
+        // 破壊テスト (SE-d, shell-skip-expansion-test): 展開を通さない。
         //
         // **終端を置いてから渡す。** 語の末尾は `line` の中の NUL で
         // 決まるので、**前の行の残りが続きとして読まれない**ように
@@ -2259,7 +2259,7 @@ fn expand_and_run(line: &mut [u8], length: usize) {
     } else if length > 0 {
         // **`$NAME` を展開してから語へ切る（SE-d。`ADR-0049`）。**
         //
-        // **写しへ展開する。** **展開は長さを変えるので、その場で
+        // **コピーへ展開する。** **展開は長さを変えるので、その場で
         // 伸ばすと終端の置き場が壊れる。**
         // **終端の 1 バイトを別に持つ**（`line` と同じ形。上の SE-d の注記）。
         let mut expanded = [0u8; LINE_MAX + 1];
@@ -2307,15 +2307,15 @@ fn run_line(line: &mut [u8]) {
     if count == 0 {
         return;
     }
-    // **注釈（PR-1）。** **行頭が `#` なら、その行は走らせない。**
+    // **コメント（PR-1）。** **行頭が `#` なら、その行は走らせない。**
     //
     // # 語頭ではなく行頭だけである
     //
-    // **`bash` は語の先頭を見る**（`echo a #b` の `#b` から後ろが注釈）。
+    // **`bash` は語の先頭を見る**（`echo a #b` の `#b` から後ろがコメント）。
     // **ここは行頭だけにした**——**引用も語の分割の規則も無いので、
     // 「どこからが注釈か」を語ごとに決める理由が無い。**
     // **行頭だけなら、読む人が 1 行を見て判断できる。**
-    // **語頭も見る形は、途中に注釈を書きたい者が出たら考えること。**
+    // **語頭も見る形は、途中にコメントを書きたい者が出たら考えること。**
     //
     // **対話の行も設定の行も、同じここを通る**——**方言を 2 つ作らない**
     // （運用者の決定。2026-09-04）。
@@ -2385,7 +2385,7 @@ fn run_set() {
     }
 }
 
-/// NUL で切り終えた行から `argv` を組み立て、起こす。
+/// NUL で切り終えた行から `argv` を組み立て、起動する。
 fn run_with_terminator(line: &[u8], starts: &[usize]) {
     // **組み込みを先に見る。** **既定の前置よりも前である**——
     // **`exit` が `/bin/exit` として探されることは無い。**
@@ -2434,7 +2434,7 @@ fn run_with_terminator(line: &[u8], starts: &[usize]) {
     let mut envp = [core::ptr::null::<u8>(); MAX_ENVP + 1];
     let env_count = build_envp(&mut envp);
 
-    // **`/` を含まない語は `/bin/` の下で探す。** 前置した写しを作る。
+    // **`/` を含まない語は `/bin/` の下で探す。** 前置したコピーを作る。
     //
     // **`argv[0]` は書き換えない。** 上で組み立てた `argv` は `line` の中の語を
     // 指したままで、**打った語がそのまま子へ届く**（Unix と同じ扱いである。
@@ -2463,7 +2463,7 @@ fn run_with_terminator(line: &[u8], starts: &[usize]) {
     report_status(status);
 }
 
-/// 語を起こす。**`/` を含む語はそのまま、含まない語は `PATH` の下で探す**（DIR-1。ADR-0043）。
+/// 語を起動する。**`/` を含む語はそのまま、含まない語は `PATH` の下で探す**（DIR-1。ADR-0043）。
 ///
 /// # Safety
 ///
@@ -2488,14 +2488,14 @@ unsafe fn launch_command(
 /// 子へ積む環境を組み立てる（f-2。`ADR-0053` の Decision 1）。**積んだ本数を返す。**
 ///
 /// **NUL 終端の文字列の配列で、末尾は NULL である**——`argv` と同じ形である。
-/// **表が NUL を持って置いているので、ここで写しを作らない。**
+/// **表が NUL を持って置いているので、ここでコピーを作らない。**
 fn build_envp(envp: &mut [*const u8; MAX_ENVP + 1]) -> usize {
     // SAFETY: このプログラムは Ring 3 で 1 本だけ走る。
     let table = unsafe { environment_table() };
-    // 破壊 (f-2, zash_export_not_pushed): **起動時に積まれていた本数までしか
+    // 破壊テスト (f-2, zash_export_not_pushed): **起動時に積まれていた本数までしか
     // 渡さない。** **`export` した名前が子へ届かなくなる**——`user-load` の
     // `envc` が変わらない。**シェルの表は引けるままなので、`echo $NAME` も
-    // `set` も緑である**（`ADR-0053` の「破壊」）。
+    // `set` も通る**（`ADR-0053` の「破壊」）。
     #[cfg(zash_export_not_pushed)]
     // SAFETY: 書くのは起動時の 1 度だけである。
     let env_count = unsafe { INITIAL_ENV_COUNT };
@@ -2511,13 +2511,13 @@ fn build_envp(envp: &mut [*const u8; MAX_ENVP + 1]) -> usize {
 ///
 /// # 順序
 ///
-/// 1. **左を起こしっぱなしで起こす**（fd 1 がパイプの書き端。読み手は予約される）。
-///    **戻ったときには左は Ring 3 へ入っている**（口が待つ）。
-/// 2. **右を入れ子で起こす**（fd 0 が読み端）。**右が終わるまで戻らない。**
-/// 3. **左を待って回収する。** **右が起こせなかったときも待つ**——**予約はそこで消え、
+/// 1. **左を切り離して起動する**（fd 1 がパイプの書き端。読み手は予約される）。
+///    **戻ったときには左は Ring 3 へ入っている**（入口が待つ）。
+/// 2. **右を入れ子で起動する**（fd 0 が読み端）。**右が終わるまで戻らない。**
+/// 3. **左を待って回収する。** **右が起動できなかったときも待つ**——**予約はそこで消え、
 ///    左は `-EPIPE` か EOF で終われる。**
 ///
-/// **状態の出し方は Linux と同じく右の状態を「その行の状態」にし、左が 0 以外なら別に言う。**
+/// **状態の出し方は Linux と同じく右の状態を「その行の状態」にし、左が 0 以外なら別に出力する。**
 fn run_pipeline(line: &[u8], left: &[usize], right: &[usize]) {
     let mut envp = [core::ptr::null::<u8>(); MAX_ENVP + 1];
     let env_count = build_envp(&mut envp);
@@ -2564,7 +2564,7 @@ fn run_pipeline(line: &[u8], left: &[usize], right: &[usize]) {
         write_all(STDERR, NOT_FOUND_TAIL);
     }
 
-    // **右が起こせなくても左は待つ**（doc の 3）。
+    // **右が起動できなくても左は待つ**（doc の 3）。
     let left_status = userlib::wait_child(handle as u64);
 
     if status >= 0 {
@@ -2687,7 +2687,7 @@ fn move_to_end(line: &[u8], cursor: &mut usize, length: usize) {
 ///
 /// # なぜ 1 本にするのか
 ///
-/// **消す鍵が 5 つある**（Backspace / Delete / `Ctrl+D` / `Ctrl+K` / `Ctrl+U` /
+/// **消すキーが 5 つある**（Backspace / Delete / `Ctrl+D` / `Ctrl+K` / `Ctrl+U` /
 /// `Ctrl+W`）。**違うのは範囲の計算だけで、消し方と描き直しは同じである。**
 /// **別々に書くと、6 つの経路で振る舞いがずれる**——`Ctrl+A` と Home を
 /// 同じ関数へ通したのと同じ判断である（SE-b）。
@@ -2705,7 +2705,7 @@ fn delete_range(
     start: usize,
     end: usize,
 ) {
-    // 破壊 (SE-f, shell-shift-delete-range-test): 先頭を 1 つ後ろへずらす。
+    // 破壊テスト (SE-f, shell-shift-delete-range-test): 先頭を 1 つ後ろへずらす。
     // **消える字が 1 つ減る**ので、走る語が変わる。
     let start = if SHIFT_DELETE_RANGE { start + 1 } else { start };
     if start >= end || end > *length {

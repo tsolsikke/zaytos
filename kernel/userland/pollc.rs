@@ -16,7 +16,7 @@
 //!
 //! **3 回目の待ちの間、2 本が別の理由で待っている**——**`polld` は {入力, 接続}、こちらは
 //! 接続だけである。** **打鍵で起こすとき、集合に入っていないこちらを起こしてはならない**
-//! （`WOKEN_FOR_ANOTHER_REASON`。`ADR-0066` の Q3）。**破壊 `wake-ignores-the-reason` は
+//! （`WOKEN_FOR_ANOTHER_REASON`。`ADR-0066` の Q3）。**破壊テスト `wake-ignores-the-reason` は
 //! ここで落ちる。**
 //!
 //! # 終了状態の意味

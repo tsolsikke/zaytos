@@ -1,4 +1,4 @@
-/* 自前の libc の口（C-c。ADR-0057）。
+/* 自前の libc の入口（C-c。ADR-0057）。
  *
  * **面は 9 つである**（ADR-0057 の Decision 1 と、その Addendum 2 つ）——
  * 起動と終了／`int 0x80` の呼び出し規約／標準入出力／`brk` の上の `malloc`／
@@ -35,17 +35,17 @@ long read(int fd, void *buf, size_t count);
 
 /* ファイルを開いて読み、閉じる（B-d。9 つ目の面。ADR-0057 の Addendum）。
  *
- * **`open` が受け取る旗は `O_RDONLY` だけである。** **カーネルは書きの形も
+ * **`open` が受け取るフラグは `O_RDONLY` だけである。** **カーネルは書きの形も
  * 受けるが**（`kernel/src/syscall.rs` の `sys_open`）、**この面の利用者
  * （`/bin/ttfglyph`）は読みしか要らない。** **要る者が来たら、そのとき足す。**
  *
- * **大きさを知る口は無い。** **`stat` は持ってこない**（構造体の形をユーザー側へ
- * 写す必要が出る）。**`lseek` も足さない**——**カーネルの `sys_lseek` は
+ * **大きさを知る関数は無い。** **`stat` は持ってこない**（構造体の形をユーザー側へ
+ * コピーする必要が出る）。**`lseek` も足さない**——**カーネルの `sys_lseek` は
  * `SEEK_SET` しか受けず**（実測。`kernel/src/syscall.rs`）、**末尾へ跳ぶには
  * カーネルの側を広げることになる。** **読む側が 0 が返るまで回れば足りる。**
  *
- * **名前と値はホストと同じである**——**`ttfglyph.c` は同じ源をホストでも
- * 建てるので、そちらの `<fcntl.h>` / `<unistd.h>` と食い違わせない。** */
+ * **名前と値はホストと同じである**——**`ttfglyph.c` は同じソースをホストでも
+ * ビルドするので、そちらの `<fcntl.h>` / `<unistd.h>` と食い違わせない。** */
 #define O_RDONLY 0
 int open(const char *path, int flags);
 int close(int fd);
@@ -59,7 +59,7 @@ int putu(unsigned long value);
 void *malloc(size_t size);
 void free(void *pointer);
 
-/* 純粋な中身（`libc_string.c`）。**ホストでも建てて単体テストを走らせるため、
+/* 純粋な中身（`libc_string.c`）。**ホストでもビルドして単体テストを走らせるため、
  * 標準の名前とは別に持つ**（あちらの doc）。 */
 size_t zt_strlen(const char *s);
 int zt_strcmp(const char *a, const char *b);

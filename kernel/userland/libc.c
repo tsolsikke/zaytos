@@ -10,7 +10,7 @@
  * # SSE を使う
  *
  * **`ADR-0058` で有効にした**（ADR-0057 の Decision 3 は役目を終えた）。
- * **ABI の選択なので、libc も利用側も同じフラグで建てること** —— **建てる
+ * **ABI の選択なので、libc も利用側も同じフラグで建てること** —— **ビルドする
  * 場所は `kernel/build.rs` の 1 箇所である**（Decision 4）。 */
 
 #include "libc.h"
@@ -107,7 +107,7 @@ int putu(unsigned long value) {
  * **穴を管理する構造を持たない。** **面を 7 つに絞ると決めたためである**
  * （ADR-0057 の Decision 1）。**足りなくなったら、そのとき測って決める。**
  *
- * **返る領域は 0 で埋まっている**（カーネルが写す前にフレームを 0 で埋める。
+ * **返る領域は 0 で埋まっている**（カーネルがマップする前にフレームを 0 で埋める。
  * `sys_brk` の doc）。 */
 
 /* いま返した最後の領域の先頭。**0 は「無い」。** */
@@ -156,7 +156,7 @@ void free(void *pointer) {
 
 /* `libc_string.c` の純粋な関数を、標準の名前で包む。
  *
- * **中身をここに持たないのは、ホストでも建てて単体テストを走らせるためである**
+ * **中身をここに持たないのは、ホストでもビルドして単体テストを走らせるためである**
  * （`libc_string.c` の doc）。 */
 size_t strlen(const char *s) { return zt_strlen(s); }
 int strcmp(const char *a, const char *b) { return zt_strcmp(a, b); }

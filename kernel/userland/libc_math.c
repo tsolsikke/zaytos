@@ -8,7 +8,7 @@
  * SDF の経路（`stbtt_GetGlyphSDF`）にしか出ない**ので、ここには無い
  * （`docs/deferred-decisions.md` に行が在る）。
  *
- * # 2 度建てる（`libc_string.c` と同じ形）
+ * # 2 度ビルドする（`libc_string.c` と同じ形）
  *
  *   1. ZaytOS 向け（freestanding）——`libc.c` が標準の名前で包む
  *   2. ホスト——ホストの libc と一緒にリンクして単体テストを走らせる

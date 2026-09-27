@@ -28,7 +28,7 @@ int main(void) {
     puts(copy);
 
     /* 3. メモリ。**重なる向きの `memmove` を見せる**——
-     * 前から写すと壊れる形である。 */
+     * 前からコピーすると壊れる形である。 */
     char buffer[8];
     memset(buffer, 'a', sizeof buffer);
     memcpy(buffer, "xy", 2);
