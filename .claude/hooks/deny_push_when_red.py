@@ -38,7 +38,7 @@
 （`CLAUDE.md` の絶対ルール 1 と同じ理由で、並走そのものを避ける）。
 
 **同じ木の `xtask` だけを数える**（2026-09-25。検査の体系の改善の ③）——**全検査は別の作業木
-（`target/full-check/wt`）で回り、`target/` は木ごとに別である。** **作業木の全検査の間も、本の木で
+（メインの作業木の隣の `<名前>-full-check`）で回り、`target/` は木ごとに別である。** **作業木の全検査の間も、本の木で
 基底を回して押せる。** **同じ木かは `/proc/<pid>/exe` が本の木の `target/debug/xtask` を指すかで見る。**
 **`cargo xtask full` の親は数えない**——**本の木の `xtask` として走るが、作業木の子を待つだけで、
 本の木では何も建てない。**
@@ -49,7 +49,7 @@
 **そこで基底が緑のあと `cargo xtask full --gate` を回し、押すコミット（どのリモートにも無いもの）の
 それぞれに、要る検査（`kernel/` か `common/` に触れたものは `--commit`、他は基底）の合格の記録が
 在るかを見る。** **無ければ、足りない検査とコミットを出して拒む。** **読むのは
-`cargo xtask full --status` と同じ記録である**（本の木の `target/full-check/records.tsv`）。
+`cargo xtask full --status` と同じ記録である**（git の共通の置き場の `zaytos/records.tsv`。2026-09-27 に移した）。
 
 **旗で越えられる**——**`ZAYTOS_PUSH_UNCHECKED='<理由>' git push ...`**（理由は空にできない）。
 **越えたコミットは、理由と一緒に記録へ「override」として残る。** **使うのは、要る検査を後から
@@ -355,7 +355,7 @@ def self_test() -> int:
     processes = [
         (1, "xtask", "/r/target/debug/xtask", [xtask, "check"]),
         (2, "xtask", "/r/target/debug/xtask (deleted)", [xtask, "check", "--full"]),
-        (3, "xtask", "/r/target/full-check/wt/target/debug/xtask", [xtask, "check", "--full"]),
+        (3, "xtask", "/r-full-check/target/debug/xtask", [xtask, "check", "--full"]),
         (4, "qemu-system-x86", "/usr/bin/qemu-system-x86_64", ["qemu-system-x86_64"]),
         (5, "xtask", None, []),
         (6, "xtask", "/r/target/debug/xtask", [xtask, "full", "HEAD"]),

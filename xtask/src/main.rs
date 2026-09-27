@@ -1580,7 +1580,7 @@ const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<()> {
-    const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask full [<commit>] | --status | --select   (全検査を target/full-check/wt で回す。--select は HEAD の族の選びを出す)\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gtk] [--gfx-test] [--kvm] [--no-limit] [--manual] [--key-probe] [--keep-disk | --rebuild-disk]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
+    const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask full [<commit>] | --status | --select   (全検査をメインの作業ツリーの隣の <名前>-full-check で実行する。--select は HEAD の族の選びを出す)\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gtk] [--gfx-test] [--kvm] [--no-limit] [--manual] [--key-probe] [--keep-disk | --rebuild-disk]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
        cargo xtask run --shell-test [--drop-arrows | --drop-esc]\n       cargo xtask run --ansi-test [--sabotage FEATURE]\n       cargo xtask run --zi-test [--sabotage FEATURE]\n       cargo xtask run --view-test [--sabotage FEATURE]
        cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --boot-marker-sabotage FEATURE   (起動の判定行の値で捕まる破壊を 1 つ回す)\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
        cargo xtask run --persist-test [--rebuild-between]
@@ -6662,31 +6662,37 @@ const BUILD_DIR_WARN_BYTES: u64 = 100 << 30;
 
 /// ビルドの置き場の大きさを出す（`--full` のまとめ。止めない）。
 ///
-/// **メインの作業ツリーと、全検査の作業ツリー（`target/full-check/wt`）を分けて出す**（運用者の回答 2。2026-09-25）
-/// ——**作業ツリーはメインの作業ツリーの `target/` の下に在るので、合わせて測ると 100 GiB の警告を毎回越える。**
+/// **メインの作業ツリーと、全検査の作業ツリー（メインの作業ツリーの隣。[`full_check::worktree_path`]）を分けて出す**
+/// （運用者の回答 2。2026-09-25。2026-09-27 に作業ツリーを隣へ移した）——**以前の置き場（`target/full-check/wt`）に
+/// 作業ツリーが残っていれば、その分はメインの作業ツリーの `target/` から引く**（合わせて測ると 100 GiB の警告を毎回越える）。
 /// **警告はそれぞれに掛ける。**
 fn report_build_directory_size(workspace_root: &Path) {
     let main =
         check_lock::main_tree(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
-    let worktree = main.join("target").join("full-check").join("wt");
-    let with_worktree = directory_bytes(&main.join("target"));
-    let worktree_bytes = if worktree.is_dir() {
-        directory_bytes(&worktree)
+    let legacy = full_check::legacy_worktree_path(&main);
+    let with_legacy = directory_bytes(&main.join("target"));
+    let legacy_bytes = if legacy.is_dir() {
+        directory_bytes(&legacy)
     } else {
         Some(0)
     };
-    let main_bytes = with_worktree
-        .zip(worktree_bytes)
+    let main_bytes = with_legacy
+        .zip(legacy_bytes)
         .map(|(all, part)| all.saturating_sub(part));
     report_one_build_directory(
-        "the main tree's target/ (without the full-check worktree)",
+        "the main tree's target/ (without a full-check worktree left inside it)",
         main_bytes,
     );
-    if worktree.is_dir() {
-        report_one_build_directory(
-            "the full-check worktree target/full-check/wt (its target/ and sources)",
-            worktree_bytes,
-        );
+    for worktree in [full_check::worktree_path(&main), legacy] {
+        if worktree.is_dir() {
+            report_one_build_directory(
+                &format!(
+                    "the full-check worktree {} (its target/ and sources)",
+                    worktree.display()
+                ),
+                directory_bytes(&worktree),
+            );
+        }
     }
 }
 
@@ -22633,7 +22639,7 @@ fn check_one_manifest_default_features(
 ///
 /// # `xtask` は同じ作業ツリーのものだけを数える（2026-09-25。検査の体系の改善の ③）
 ///
-/// **全検査を別の作業ツリー（`target/full-check/wt`）で実行する形にした。** **`target/` と `disk0.img` は
+/// **全検査を別の作業ツリー（2026-09-27 からはメインの作業ツリーの隣。[`full_check::worktree_path`]）で実行する形にした。** **`target/` と `disk0.img` は
 /// 作業ツリーごとに別なので、別の作業ツリーの `xtask` とは汚し合わない**——**作業ツリーで全検査が走っている間も、
 /// メインの作業ツリーで基本の検査を実行できるようにする。** **同じ作業ツリーかは `/proc/<pid>/exe` が自分と同じ本体を指すかで
 /// 見る**（本体は作業ツリーの `target/debug/xtask` である）。**QEMU は今までどおりホスト全体で数える**

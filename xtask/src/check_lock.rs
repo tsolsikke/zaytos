@@ -549,8 +549,8 @@ pub fn hold_or_exit(mode: Mode, what: &str, content: Option<String>) -> Result<(
     Ok(())
 }
 
-/// メインの作業ツリー（git の共通の置き場の親）。**記録はメインの作業ツリーの `target/full-check/` に置く**——**作業ツリーで
-/// 走った全検査の記録も、メインの作業ツリーへ集める。**
+/// メインの作業ツリー（git の共通の置き場の親）。**全検査のログはメインの作業ツリーの `target/full-check/logs/` に置く**——
+/// **作業ツリーで走った全検査のログも、メインの作業ツリーへ集める**（記録は 2026-09-27 から git の共通の置き場の `zaytos/`）。
 pub fn main_tree(root: &Path) -> Result<PathBuf> {
     let common = git_common_dir(root)?;
     common
@@ -712,7 +712,7 @@ pub fn self_check(root: &Path) -> Result<String> {
         "the main tree",
         "xtask and tools/check_lock.py with a reduced environment and GIT_DIR set",
     ];
-    let full_worktree = root.join("target").join("full-check").join("wt");
+    let full_worktree = crate::full_check::worktree_path(&main_tree(root)?);
     if full_worktree.join(".git").is_file() {
         let there = lock_path(&full_worktree)?;
         let python = reduced_env_path(&python_argv, Some(&full_worktree))?;

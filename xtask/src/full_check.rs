@@ -4,17 +4,22 @@
 //! # 形
 //!
 //! **`cargo xtask full [<コミット>]` をメインの作業ツリーから打つ**（既定は HEAD）。**ロックを排他で取り、作業ツリー
-//! （`target/full-check/wt`）を `<コミット>` に合わせ、そこで `cargo xtask check --full` を子として実行する。**
+//! （メインの作業ツリーの隣の `<名前>-full-check`。[`worktree_path`]）を `<コミット>` に合わせ、そこで
+//! `cargo xtask check --full` を子として実行する。**
 //! **検査しているのは作業ツリーなので、走っている間もメインの作業ツリーは触ってよい**——**ただし QEMU と VirtualBox を
 //! 使う検査はロックで断られる**（`check_lock`）。**ログはメインの作業ツリーの `target/full-check/logs/` に書く。**
 //! **待ち方は今と同じ**（Bash の背景実行と harness の知らせ）。
 //!
-//! **作業ツリーはメインの作業ツリーの `target/` の下に置く**（運用者の回答 2）——`tools/frame-sizes.py` の作業ツリーと
-//! 同じ形で、作業場所の中に収まる。**初回は冷えている**（組ごとの初回ビルド）。
+//! **作業ツリーはメインの作業ツリーの隣に置く**（2026-09-27。運用者の決定。**同じファイルシステムに限る**）。
+//! **以前は `target/full-check/wt` に置いていた**（運用者の回答 2）——**メインの作業ツリーの `cargo clean` が、作業ツリーの
+//! ビルドの控え（約 32 GiB）ごと消し、git の作業ツリーの登録だけが残るので、外へ出した。** **初回は冷えている**
+//! （組ごとの初回ビルド）。**以前の置き場に作業ツリーが在れば、始めるときに 1 度だけ `git worktree move` で移す。**
 //!
 //! # 記録
 //!
-//! **検査の記録はメインの作業ツリーの `target/full-check/records.tsv` に 1 回 1 行で残す**——**基本の検査・`--commit`・
+//! **検査の記録は git の共通の置き場の `zaytos/records.tsv` に 1 回 1 行で残す**（2026-09-27 にメインの作業ツリーの
+//! `target/full-check/records.tsv` から移した。**`cargo clean` で消えないように**。**移す前の記録は、以前の置き場からも
+//! 読む**——1 段階だけ残す）——**基本の検査・`--commit`・
 //! `--full` の全部と、断られた回**（`cmd_check` が書く）。**作業ツリーで走った全検査の記録もメインの作業ツリーへ集める。**
 //! **ツリーのハッシュと、走らせたときの作業ツリーの汚れ（`git status --porcelain` の行数）を持つ**——
 //! **汚れが 0 の記録だけが「その木そのものが通った」と言える。**
@@ -259,12 +264,35 @@ fn parse_legacy(fields: &[&str]) -> Option<Record> {
     })
 }
 
-/// 記録の置き場（メインの作業ツリーの `target/full-check/records.tsv`）。
+/// 記録の置き場（git の共通の置き場の `zaytos/records.tsv`。ロックと同じ場所。2026-09-27）。**メインの作業ツリーと
+/// どの作業ツリーからも同じパスになり、`cargo clean` で消えない。**
 pub fn records_path(root: &Path) -> Result<PathBuf> {
+    Ok(check_lock::lock_dir_in(&check_lock::git_common_dir(root)?).join("records.tsv"))
+}
+
+/// 以前の記録の置き場（メインの作業ツリーの `target/full-check/records.tsv`）。**読むだけで、書かない。**
+/// **2026-09-27 に移した。移す前の合格の記録を失わないために、1 段階だけ読む**（次の段階で外す）。
+fn legacy_records_path(root: &Path) -> Result<PathBuf> {
     Ok(check_lock::main_tree(root)?
         .join("target")
         .join("full-check")
         .join("records.tsv"))
+}
+
+/// 全検査の作業ツリーの置き場（2026-09-27。運用者の決定）。**メインの作業ツリーの隣の `<名前>-full-check`**
+/// ——**`target/` の外なので、メインの作業ツリーの `cargo clean` で消えない。**
+pub fn worktree_path(main: &Path) -> PathBuf {
+    let name = main.file_name().map_or_else(
+        || "zaytos".to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    main.with_file_name(format!("{name}-full-check"))
+}
+
+/// 以前の全検査の作業ツリーの置き場（メインの作業ツリーの `target/full-check/wt`）。**在れば、始めるときに
+/// 新しい置き場へ 1 度だけ移す**（2026-09-27。次の段階で外す）。
+pub fn legacy_worktree_path(main: &Path) -> PathBuf {
+    main.join("target").join("full-check").join("wt")
 }
 
 /// 記録を 1 行足す（メインの作業ツリーの記録へ）。
@@ -343,7 +371,10 @@ pub fn read_lines(text: &str) -> impl Iterator<Item = &str> {
 
 /// 記録を全部読む（無ければ空）。
 pub fn read_records(root: &Path) -> Result<Vec<Record>> {
-    read_records_at(&records_path(root)?)
+    // **以前の置き場の記録を先に読む**（移す前の記録なので、どれも新しい置き場の記録より古い）。
+    let mut records = read_records_at(&legacy_records_path(root)?)?;
+    records.extend(read_records_at(&records_path(root)?)?);
+    Ok(records)
 }
 
 /// 置き場を指して記録を全部読む（無ければ空）。
@@ -1109,8 +1140,14 @@ const SELECTIONS_HEADER: &str = "# version\tunix\twhen\tcommit\ttree\tbase\tchan
 /// 選択の記録の形の版（行の頭の欄）。**終わりのマーカーは [`RECORD_END`] と同じである。**
 const SELECTION_VERSION: &str = "1";
 
-/// 選択の記録の置き場（メインの作業ツリーの `target/full-check/selections.tsv`。追跡しない）。
-fn selections_path(main: &Path) -> PathBuf {
+/// 選択の記録の置き場（git の共通の置き場の `zaytos/selections.tsv`。追跡しない。2026-09-27 に移した）。
+fn selections_path(main: &Path) -> Result<PathBuf> {
+    Ok(check_lock::lock_dir_in(&check_lock::git_common_dir(main)?).join("selections.tsv"))
+}
+
+/// 以前の選択の記録の置き場（メインの作業ツリーの `target/full-check/selections.tsv`）。**読むだけ**
+/// （2026-09-27 に移した。1 段階だけ残す）。
+fn legacy_selections_path(main: &Path) -> PathBuf {
     main.join("target")
         .join("full-check")
         .join("selections.tsv")
@@ -1119,14 +1156,20 @@ fn selections_path(main: &Path) -> PathBuf {
 /// 選択を記録へ 1 行足す（2026-09-26）。**同じコミットは 1 度だけ**——**足したら `true`。** **当たりの
 /// 計測と、表示が当たっているかを後から数える材料である。**
 fn record_selection(main: &Path, selected: &Selected) -> Result<bool> {
-    let path = selections_path(main);
+    let path = selections_path(main)?;
+    let seen = |text: &str| {
+        read_lines(text).any(|line| {
+            let fields: Vec<&str> = line.split('\t').collect();
+            fields.first() == Some(&SELECTION_VERSION)
+                && fields.last() == Some(&RECORD_END)
+                && fields.get(3) == Some(&selected.target.as_str())
+        })
+    };
+    // **以前の置き場の選択も見る**——**移す前に残したコミットを、もう 1 度残さない。** **2 つのファイルは
+    // つなげずに別々に見る**（前のファイルの途中で切れた最後の行が、次のファイルの頭の行と 1 行に見えないように）。
+    let legacy = fs::read_to_string(legacy_selections_path(main)).unwrap_or_default();
     let existing = fs::read_to_string(&path).unwrap_or_default();
-    if read_lines(&existing).any(|line| {
-        let fields: Vec<&str> = line.split('\t').collect();
-        fields.first() == Some(&SELECTION_VERSION)
-            && fields.last() == Some(&RECORD_END)
-            && fields.get(3) == Some(&selected.target.as_str())
-    }) {
+    if seen(&legacy) || seen(&existing) {
         return Ok(false);
     }
     let (unix, when) = check_lock::now();
@@ -1349,15 +1392,52 @@ fn refuse_if_a_previous_run_is_alive(worktree: &Path) -> Result<()> {
     )
 }
 
+/// 作業ツリーの置き場が、メインの作業ツリーと同じファイルシステムに在ることを確かめる（2026-09-27。運用者の
+/// 決定）。**以前の置き場から移すのが名前の変更で済み、ビルドの控えを写さずに残せるのは、同じファイルシステムの
+/// ときだけである。** **置き場の親（メインの作業ツリーの親）は作らない**——**リポジトリの外に勝手に場所を作らない。**
+fn same_filesystem(main: &Path, worktree: &Path) -> Result<()> {
+    let parent = worktree
+        .parent()
+        .with_context(|| format!("{} has no parent directory", worktree.display()))?;
+    let device = |path: &Path| {
+        fs::metadata(path)
+            .map(|metadata| metadata.dev())
+            .with_context(|| format!("could not read {}", path.display()))
+    };
+    if device(main)? != device(parent)? {
+        bail!(
+            "{} is not on the same filesystem as the main tree {}; the full-check worktree must sit \
+             next to the main tree on the same filesystem",
+            parent.display(),
+            main.display()
+        );
+    }
+    Ok(())
+}
+
 /// 作業ツリーを `commit` に合わせ、汚れていないことを確かめる。
 fn prepare_worktree(main: &Path, worktree: &Path, commit: &str) -> Result<()> {
     git_line(main, &["worktree", "prune"])?;
-    let listed = git_line(main, &["worktree", "list", "--porcelain"])?;
-    let registered = listed.lines().any(|line| {
-        line.strip_prefix("worktree ")
-            .is_some_and(|path| Path::new(path) == worktree)
-    });
-    if registered {
+    let registered = |path: &Path| -> Result<bool> {
+        let listed = git_line(main, &["worktree", "list", "--porcelain"])?;
+        Ok(listed.lines().any(|line| {
+            line.strip_prefix("worktree ")
+                .is_some_and(|listed| Path::new(listed) == path)
+        }))
+    };
+    // **以前の置き場（`target/full-check/wt`）の作業ツリーを 1 度だけ移す**（2026-09-27。次の段階で外す）——
+    // **ビルドの控えを残したまま移すので、次の全検査も冷えない。**
+    let legacy = legacy_worktree_path(main);
+    if !worktree.exists() && registered(&legacy)? {
+        same_filesystem(main, worktree)?;
+        let from = legacy.to_string_lossy().into_owned();
+        let to = worktree.to_string_lossy().into_owned();
+        git_line(main, &["worktree", "move", &from, &to])?;
+        println!(
+            "full: moved the worktree from {from} to {to} (once; the old place is no longer used)"
+        );
+    }
+    if registered(worktree)? {
         git_line(worktree, &["checkout", "-q", "--detach", "--force", commit])?;
     } else if worktree.exists() {
         bail!(
@@ -1366,10 +1446,7 @@ fn prepare_worktree(main: &Path, worktree: &Path, commit: &str) -> Result<()> {
             worktree.display()
         );
     } else {
-        if let Some(parent) = worktree.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("could not create {}", parent.display()))?;
-        }
+        same_filesystem(main, worktree)?;
         let path = worktree.to_string_lossy().into_owned();
         git_line(main, &["worktree", "add", "-q", "--detach", &path, commit])?;
     }
@@ -1495,30 +1572,38 @@ fn run(target: &str) -> Result<()> {
             &log.display().to_string(),
         )),
     )?;
-    let worktree = main.join("target").join("full-check").join("wt");
+    let worktree = worktree_path(&main);
+    let legacy = legacy_worktree_path(&main);
     refuse_if_a_previous_run_is_alive(&worktree)?;
+    refuse_if_a_previous_run_is_alive(&legacy)?;
     // **始める前に、見込みの書く量＋下限を、WSL の中と VHD の載ったドライブの両方で見る**（2026-09-25。
     // 運用者の足す1点）。**足りなければ検査装置の故障として断る。**
     let records = read_records(&main)?;
-    // **作業ツリーが冷えているかで、見込みを選ぶ**（2026-09-26。運用者の足す1点）。**作業ツリーはメインの作業ツリーの
-    // `target/` の下に在るので、メインの作業ツリーの大きさからは作業ツリーの分を引く。**
-    let worktree_all = worktree
+    // **作業ツリーが冷えているかで、見込みを選ぶ**（2026-09-26。運用者の足す1点）。**冷えているかは、これから使う
+    // 作業ツリーで見る**——**以前の置き場から移す前なら、以前の置き場のものである**（移してもビルドの控えは残る）。
+    // **以前の置き場はメインの作業ツリーの `target/` の下に在るので、残っていればメインの作業ツリーの大きさから引く。**
+    let current = if worktree.is_dir() || !legacy.is_dir() {
+        worktree.clone()
+    } else {
+        legacy.clone()
+    };
+    let inside = legacy
         .is_dir()
-        .then(|| crate::directory_bytes(&worktree))
+        .then(|| crate::directory_bytes(&legacy))
         .flatten()
         .unwrap_or(0);
-    let main_target = crate::directory_bytes(&main.join("target"))
-        .map(|bytes| bytes.saturating_sub(worktree_all));
-    let worktree_target = worktree
+    let main_target =
+        crate::directory_bytes(&main.join("target")).map(|bytes| bytes.saturating_sub(inside));
+    let worktree_target = current
         .join("target")
         .is_dir()
-        .then(|| crate::directory_bytes(&worktree.join("target")))
+        .then(|| crate::directory_bytes(&current.join("target")))
         .flatten();
     let state = start_state(
         main_target,
         worktree_target,
         rustc_fingerprint(&main.join("target")).as_deref(),
-        rustc_fingerprint(&worktree.join("target")).as_deref(),
+        rustc_fingerprint(&current.join("target")).as_deref(),
     );
     let (estimate, source) = estimate_to_write(&records, &state, || main_target)
         .context("cargo xtask full: could not estimate how much the full check writes")?;
@@ -2257,7 +2342,7 @@ mod tests {
         // **選択の記録は同じコミットを 1 度だけ残す。**
         assert!(record_selection(&repo, &selected).unwrap());
         assert!(!record_selection(&repo, &selected).unwrap());
-        let written = fs::read_to_string(selections_path(&repo)).unwrap();
+        let written = fs::read_to_string(selections_path(&repo).unwrap()).unwrap();
         assert_eq!(
             read_lines(&written)
                 .filter(|line| !line.starts_with('#'))
@@ -2663,5 +2748,155 @@ mod tests {
             describe(&record("base", "pass", "c", "t", 2)),
             "the base check pass at 2026-09-25 10:00:00 (the working tree had 2 other change(s))"
         );
+    }
+
+    /// **全検査の作業ツリーは、メインの作業ツリーの隣に `<名前>-full-check` として置く**（2026-09-27。運用者の決定）。
+    /// **`target/` の外である。**
+    #[test]
+    fn the_full_check_worktree_sits_next_to_the_main_tree() {
+        let main = Path::new("/home/user/work/zaytos");
+        assert_eq!(
+            worktree_path(main),
+            Path::new("/home/user/work/zaytos-full-check")
+        );
+        assert_eq!(worktree_path(main).parent(), main.parent());
+        assert!(!worktree_path(main).starts_with(main));
+        assert_eq!(
+            legacy_worktree_path(main),
+            Path::new("/home/user/work/zaytos/target/full-check/wt")
+        );
+    }
+
+    /// **以前の置き場（`target/full-check/wt`）に登録された作業ツリーは、全検査を始めるときに隣へ移る**（2026-09-27）。
+    /// **移した後は新しい置き場で登録され、中に置いたビルドの控え（`target/` の下）も残る。** **作ったリポジトリで確かめる。**
+    #[test]
+    fn a_worktree_in_the_old_place_is_moved_next_to_the_main_tree() {
+        let scratch =
+            std::env::temp_dir().join(format!("zaytos-worktree-move-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&scratch);
+        let repo = scratch.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let repo = fs::canonicalize(&repo).unwrap();
+        let run = |dir: &Path, args: &[&str]| git_line(dir, args).unwrap();
+        run(&repo, &["-c", "init.defaultBranch=main", "init", "-q"]);
+        fs::write(repo.join("README"), "readme").unwrap();
+        // **本物と同じく `target/` を追跡しない**（作業ツリーの `target/` を汚れと数えないため）。
+        fs::write(repo.join(".gitignore"), "target/\n").unwrap();
+        run(&repo, &["add", "README", ".gitignore"]);
+        run(
+            &repo,
+            &[
+                "-c",
+                "user.name=check",
+                "-c",
+                "user.email=check@localhost",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "first",
+            ],
+        );
+        let commit = run(&repo, &["rev-parse", "HEAD"]);
+        let legacy = legacy_worktree_path(&repo);
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let legacy_arg = legacy.to_string_lossy().into_owned();
+        run(
+            &repo,
+            &["worktree", "add", "-q", "--detach", &legacy_arg, &commit],
+        );
+        // **ビルドの控えの代わりに、作業ツリーの `target/` に 1 つ置く**（移した後も残ることを見る）。
+        fs::create_dir_all(legacy.join("target")).unwrap();
+        fs::write(legacy.join("target").join("kept"), "cache").unwrap();
+
+        let worktree = worktree_path(&repo);
+        prepare_worktree(&repo, &worktree, &commit).unwrap();
+        assert!(!legacy.exists(), "{} is still there", legacy.display());
+        assert_eq!(
+            fs::read_to_string(worktree.join("target").join("kept")).unwrap(),
+            "cache"
+        );
+        let listed = run(&repo, &["worktree", "list", "--porcelain"]);
+        let registered: Vec<&str> = listed
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .collect();
+        assert!(
+            registered.contains(&worktree.to_string_lossy().as_ref()),
+            "{listed}"
+        );
+        assert!(!registered.contains(&legacy_arg.as_str()), "{listed}");
+        // **2 回目は移さず、そのまま使う。**
+        prepare_worktree(&repo, &worktree, &commit).unwrap();
+        assert_eq!(run(&worktree, &["rev-parse", "HEAD"]), commit);
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    /// **記録と選択の記録は git の共通の置き場の `zaytos/` に書き、以前の置き場（`target/full-check/`）の分も読む**
+    /// （2026-09-27。移す前の合格の記録を失わない）。**以前の置き場へは書かない。**
+    #[test]
+    fn records_are_written_to_the_git_dir_and_the_old_place_is_still_read() {
+        let scratch =
+            std::env::temp_dir().join(format!("zaytos-records-move-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&scratch);
+        let repo = scratch.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        git_line(&repo, &["-c", "init.defaultBranch=main", "init", "-q"]).unwrap();
+        let repo = fs::canonicalize(&repo).unwrap();
+        let new_path = records_path(&repo).unwrap();
+        assert_eq!(
+            new_path,
+            repo.join(".git").join("zaytos").join("records.tsv")
+        );
+        let old_path = legacy_records_path(&repo).unwrap();
+        assert_eq!(
+            old_path,
+            repo.join("target").join("full-check").join("records.tsv")
+        );
+
+        // **以前の置き場に 1 行だけ在る形を作り、新しい置き場へ 1 行足す。**
+        append_line(
+            &old_path,
+            RECORDS_HEADER,
+            &format_record(&record("commit", "pass", "old", "t", 0)),
+        )
+        .unwrap();
+        append(&repo, &record("base", "pass", "new", "t", 0)).unwrap();
+        let commits: Vec<String> = read_records(&repo)
+            .unwrap()
+            .into_iter()
+            .map(|record| record.commit)
+            .collect();
+        assert_eq!(commits, vec!["old".to_string(), "new".to_string()]);
+        let old_text = fs::read_to_string(&old_path).unwrap();
+        assert!(!old_text.contains("\tnew\t"), "{old_text}");
+
+        // **選択の記録も、以前の置き場に在るコミットはもう 1 度残さない。** **新しいコミットは新しい置き場へ書く。**
+        assert_eq!(
+            selections_path(&repo).unwrap(),
+            repo.join(".git").join("zaytos").join("selections.tsv")
+        );
+        let selected = |target: &str| Selected {
+            target: target.to_string(),
+            target_tree: "tree".to_string(),
+            base: None,
+            changed: 0,
+            selection: family::Selection::default(),
+            this_commit: None,
+        };
+        let line =
+            format!("{SELECTION_VERSION}\t1\tw\tseen\ttree\t-\t0\tall\t-\t-\t-\t{RECORD_END}\n");
+        append_line(&legacy_selections_path(&repo), SELECTIONS_HEADER, &line).unwrap();
+        assert!(!record_selection(&repo, &selected("seen")).unwrap());
+        assert!(record_selection(&repo, &selected("fresh")).unwrap());
+        let written = fs::read_to_string(selections_path(&repo).unwrap()).unwrap();
+        assert!(
+            written.contains("\tfresh\t") && !written.contains("\tseen\t"),
+            "{written}"
+        );
+        let old_selections = fs::read_to_string(legacy_selections_path(&repo)).unwrap();
+        assert!(!old_selections.contains("\tfresh\t"), "{old_selections}");
+        let _ = fs::remove_dir_all(&scratch);
     }
 }
