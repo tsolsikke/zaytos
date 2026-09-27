@@ -70,10 +70,11 @@ pub const IMAGE_PATH_PREFIXES: [&str; 2] = ["kernel/", "common/"];
 /// **2026-09-26 にさらに 2 欄を足した**（全検査の始めに作業ツリーが冷えていたか、その間に走った他の検査の数）。
 /// **同じ日に形を改めた**（第 2 版。第三者レビューの取り込み 4.(4)）——**行の頭に版の `2`、終わりにマーカーの
 /// `end` を置き、環境・実行前の選択・当たりの 3 欄を足した**（[`RECORD_VERSION`]）。
+/// **2026-09-27 に検査を実行した作業ツリーの置き場の欄を足した**（第 3 版。運用者の足す1点）。
 const RECORDS_HEADER: &str =
     "# version\tunix\twhen\tlevel\toutcome\tcommit\ttree\tdirty\titems\titem_seconds\t\
      build_seconds\twritten\twsl_free\thost_free\tsystem_free\tstart_state\tother_runs\tenv\t\
-     selected\tscore\tnote\tend";
+     selected\tscore\troot\tnote\tend";
 
 /// 記録の形の版（行の頭の欄。2026-09-26）。
 ///
@@ -81,13 +82,20 @@ const RECORDS_HEADER: &str =
 /// 欄の数がちょうど 22 である。** **どれかが欠けた行は読まない**（書く途中で落ちた・空きが尽きた等で
 /// 行の途中までしか書かれなかった形）。**頭の `2` は、切れた行を古い形（11・15・17 欄）として読ませない
 /// ためである**——**古い形の頭は時刻（10 桁）なので取り違えない。**
-const RECORD_VERSION: &str = "2";
+/// **第 3 版は置き場の欄を足した 23 欄で、頭が `3` である**（2026-09-27）。**第 2 版の行も読む。**
+const RECORD_VERSION: &str = "3";
 
-/// 第 2 版の行の終わりのマーカー（2026-09-26）。
+/// 第 2 版の頭（2026-09-26 から 2026-09-27 まで書いた形。読むだけ）。
+const RECORD_VERSION_2: &str = "2";
+
+/// 第 2 版からの行の終わりのマーカー（2026-09-26）。
 const RECORD_END: &str = "end";
 
+/// 第 3 版の行の欄の数（版と終わりのマーカーを含む）。
+const RECORD_FIELDS: usize = 23;
+
 /// 第 2 版の行の欄の数（版と終わりのマーカーを含む）。
-const RECORD_FIELDS: usize = 22;
+const RECORD_FIELDS_2: usize = 22;
 
 /// 検査の段階。**並びが上下である**（`--full` ⊇ `--commit` ⊇ 基本の検査）。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -156,10 +164,13 @@ pub struct Record {
     pub selected: Option<String>,
     /// 当たりの計測の答え（失敗した全検査だけ。2026-09-26）。
     pub score: Option<String>,
+    /// 検査を実行した作業ツリーの置き場（2026-09-27。第 3 版で足した）。**足す前の行と、子の代わりに親が書いた行は
+    /// `None`。** **全検査の入口が、前回の全検査と置き場が同じかを見る**（[`start_state`]）。
+    pub root: Option<String>,
     pub note: String,
 }
 
-/// 記録を 1 行にする（純粋な論理）。**欄の区切りと改行は空白へ直す。** **第 2 版で書く**
+/// 記録を 1 行にする（純粋な論理）。**欄の区切りと改行は空白へ直す。** **第 3 版で書く**
 /// （頭に版、終わりにマーカー。[`RECORD_VERSION`]）。
 fn format_record(record: &Record) -> String {
     let clean = |text: &str| text.replace(['\t', '\n', '\r'], " ");
@@ -167,7 +178,7 @@ fn format_record(record: &Record) -> String {
     let bytes = |value: Option<u64>| value.map_or("-".to_string(), |value| value.to_string());
     let text = |value: Option<&str>| value.map_or("-".to_string(), clean);
     format!(
-        "{RECORD_VERSION}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t\
+        "{RECORD_VERSION}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t\
          {RECORD_END}\n",
         record.unix,
         clean(&record.when),
@@ -192,37 +203,45 @@ fn format_record(record: &Record) -> String {
         text(record.env.as_deref()),
         text(record.selected.as_deref()),
         text(record.score.as_deref()),
+        text(record.root.as_deref()),
         clean(&record.note)
     )
 }
 
 /// 記録の 1 行を読む（純粋な論理）。**頭の行と形の崩れた行は読まない。**
 ///
-/// **第 2 版の行は、欄の数と終わりのマーカーが揃ったときだけ読む**（[`RECORD_VERSION`]）。**古い形の行
+/// **第 3 版と第 2 版の行は、欄の数と終わりのマーカーが揃ったときだけ読む**（[`RECORD_VERSION`]）。**古い形の行
 /// （11・15・17 欄）は前と同じに読む**——**書いた後に確かめる手段が無いので、そのまま受ける。**
 fn parse_record(line: &str) -> Option<Record> {
     if line.starts_with('#') {
         return None;
     }
     let all: Vec<&str> = line.split('\t').collect();
-    if all.first() == Some(&RECORD_VERSION) {
-        if all.len() != RECORD_FIELDS || all.last() != Some(&RECORD_END) {
-            return None;
-        }
-        let fields = &all[1..all.len() - 1];
-        let text = |value: &str| (value != "-").then(|| value.to_string());
-        return Some(Record {
-            env: text(fields[16]),
-            selected: text(fields[17]),
-            score: text(fields[18]),
-            note: fields[19].to_string(),
-            ..parse_legacy(&[&fields[..16], &fields[19..20]].concat())?
-        });
+    let expected = match all.first().copied() {
+        Some(RECORD_VERSION) => RECORD_FIELDS,
+        Some(RECORD_VERSION_2) => RECORD_FIELDS_2,
+        _ => return parse_legacy(&all),
+    };
+    if all.len() != expected || all.last() != Some(&RECORD_END) {
+        return None;
     }
-    parse_legacy(&all)
+    let fields = &all[1..all.len() - 1];
+    let text = |value: &str| (value != "-").then(|| value.to_string());
+    // **第 3 版は note の前に置き場の欄がある。**
+    let note = fields.len() - 1;
+    Some(Record {
+        env: text(fields[16]),
+        selected: text(fields[17]),
+        score: text(fields[18]),
+        root: (expected == RECORD_FIELDS)
+            .then(|| text(fields[19]))
+            .flatten(),
+        note: fields[note].to_string(),
+        ..parse_legacy(&[&fields[..16], &fields[note..=note]].concat())?
+    })
 }
 
-/// 古い形（11・15・17 欄）の行を読む（純粋な論理）。**第 2 版の行も、足した欄を除けばこの形である。**
+/// 古い形（11・15・17 欄）の行を読む（純粋な論理）。**第 2 版と第 3 版の行も、足した欄を除けばこの形である。**
 fn parse_legacy(fields: &[&str]) -> Option<Record> {
     // **11 欄は 4 欄を足す前の行**（2026-09-25）、**15 欄は 2 欄を足す前の行**（2026-09-26）。
     // **足した欄は無いものとして読む。**
@@ -260,6 +279,7 @@ fn parse_legacy(fields: &[&str]) -> Option<Record> {
         env: None,
         selected: None,
         score: None,
+        root: None,
         note: fields[fields.len() - 1].to_string(),
     })
 }
@@ -569,14 +589,21 @@ impl StartState {
     }
 }
 
-/// 作業ツリーが冷えているかを決める（純粋な論理）。**冷えたとみなすのは 3 つ**——**作業ツリーに `target/` が無い**、
+/// 作業ツリーが冷えているかを決める（純粋な論理）。**冷えたとみなすのは 4 つ**——**作業ツリーに `target/` が無い**、
 /// **作業ツリーの `target/` がメインの作業ツリーの `target/` の [`COLD_FRACTION_DENOM`] 分の 1 より小さい**、**作業ツリーをビルドした
-/// rustc が今の rustc と違うか、その控えが無い**（ツールチェーンを替えると、残った成果物は使われない）。
+/// rustc が今の rustc と違うか、その控えが無い**（ツールチェーンを替えると、残った成果物は使われない）、**作業ツリーの置き場が、
+/// 作業ツリーで走った前回の全検査の置き場と違うか、その記録が無い**（2026-09-27。運用者の足す1点。[`last_worktree_run`]）。
+///
+/// **置き場が変わると、カーネルを組ごとに作り直す**（実測。2026-09-27）——**カーネルのビルドスクリプトが、読むファイルを
+/// 絶対のパスで cargo へ伝えるので、置き場が変わるとビルドスクリプトからやり直す**（1 つの組で 8.1 秒・83 MiB）。
+/// **作業ツリーを隣へ移した直後の全検査は、入口で温まったとみなされ、見込みの 13.4 GiB に対して 46.9 GiB を書いた。**
 fn start_state(
     main_target: Option<u64>,
     worktree_target: Option<u64>,
     main_rustc: Option<&str>,
     worktree_rustc: Option<&str>,
+    place: &Path,
+    last_run: Option<&Record>,
 ) -> StartState {
     let Some(worktree) = worktree_target.filter(|bytes| *bytes > 0) else {
         return StartState::Cold("the worktree has no target/".to_string());
@@ -591,17 +618,53 @@ fn start_state(
         }
     }
     match (main_rustc, worktree_rustc) {
-        (_, None) => StartState::Cold(
-            "the worktree's target/ keeps no record of the rustc that built it".to_string(),
-        ),
-        (Some(main), Some(worktree)) if main != worktree => {
-            StartState::Cold("the worktree's target/ was built by another rustc".to_string())
+        (_, None) => {
+            return StartState::Cold(
+                "the worktree's target/ keeps no record of the rustc that built it".to_string(),
+            )
         }
-        _ => StartState::Warm(format!(
-            "the worktree's target/ holds {} and was built by the same rustc as the main tree",
-            gib(worktree)
-        )),
+        (Some(main), Some(worktree)) if main != worktree => {
+            return StartState::Cold(
+                "the worktree's target/ was built by another rustc".to_string(),
+            )
+        }
+        _ => {}
     }
+    let Some(last) = last_run else {
+        return StartState::Cold("no full check in the worktree is recorded".to_string());
+    };
+    match last.root.as_deref() {
+        None => {
+            return StartState::Cold(format!(
+                "the record of the last full check in the worktree ({}) does not say where it ran",
+                last.when
+            ))
+        }
+        Some(root) if Path::new(root) != place => {
+            return StartState::Cold(format!(
+                "the last full check in the worktree ({}) ran at {root}, not at {}; the kernel is \
+                 built again when the tree moves",
+                last.when,
+                place.display()
+            ))
+        }
+        Some(_) => {}
+    }
+    StartState::Warm(format!(
+        "the worktree's target/ holds {}, was built by the same rustc as the main tree, and is at \
+         the place of the last full check",
+        gib(worktree)
+    ))
+}
+
+/// 作業ツリーで走った直近の全検査の記録（純粋な論理。2026-09-27）。**冷えたかの欄を持つ行は、`cargo xtask full` の子が
+/// 作業ツリーで書いた行である**——**親が代わりに書いた行（断った・上限で切った）と、メインの作業ツリーで直に実行した
+/// `--full` の行は、その欄を持たない。**
+fn last_worktree_run(records: &[Record]) -> Option<&Record> {
+    records
+        .iter()
+        .rev()
+        .find(|record| record.level == "full" && record.start_state.is_some())
 }
 
 /// `target/.rustc_info.json` の `rustc_fingerprint`（cargo が rustc を見分けるために置く値）を読む（純粋な論理）。
@@ -755,6 +818,12 @@ pub fn end(outcome: &str, items: Option<usize>, item_seconds: Option<f64>) {
                 env: start.env.clone(),
                 selected: SELECTED.lock().ok().and_then(|slot| slot.clone()),
                 score: SCORE.lock().ok().and_then(|slot| slot.clone()),
+                root: Some(
+                    fs::canonicalize(&start.root)
+                        .unwrap_or_else(|_| start.root.clone())
+                        .display()
+                        .to_string(),
+                ),
                 note: std::env::var(LOG_ENV).unwrap_or_else(|_| "-".to_string()),
             },
         ))
@@ -1599,11 +1668,14 @@ fn run(target: &str) -> Result<()> {
         .is_dir()
         .then(|| crate::directory_bytes(&current.join("target")))
         .flatten();
+    // **置き場は、これから検査する作業ツリーの置き場で見る**（以前の置き場から移すなら、移した先）。
     let state = start_state(
         main_target,
         worktree_target,
         rustc_fingerprint(&main.join("target")).as_deref(),
         rustc_fingerprint(&current.join("target")).as_deref(),
+        &worktree,
+        last_worktree_run(&records),
     );
     let (estimate, source) = estimate_to_write(&records, &state, || main_target)
         .context("cargo xtask full: could not estimate how much the full check writes")?;
@@ -1735,6 +1807,7 @@ fn append_full_record(main: &Path, commit: &str, tree: &str, outcome: &str, note
         env: None,
         selected: None,
         score: None,
+        root: None,
         note: note.to_string(),
     };
     if let Err(error) = append(main, &record) {
@@ -1918,6 +1991,7 @@ fn gate_commits(main: &Path, pending: &[String], override_reason: Option<&str>) 
                     env: None,
                     selected: None,
                     score: None,
+                    root: None,
                     note: reason.to_string(),
                 },
             )?;
@@ -2034,6 +2108,7 @@ mod tests {
             env: None,
             selected: None,
             score: None,
+            root: None,
             note: "a\tb\nc".to_string(),
         }
     }
@@ -2059,26 +2134,38 @@ mod tests {
         assert_eq!(parse_record("1\t2\t3"), None);
     }
 
-    /// **第 2 版の行は、欄の数と終わりのマーカーが揃ったときだけ読む**（2026-09-26。4.(4)）。**古い形は前と同じに
-    /// 読む。** **切れた行は、どこで切れても読まない**——**頭の `2` があるので、古い形としても読まない。**
+    /// **第 2 版からの行は、欄の数と終わりのマーカーが揃ったときだけ読む**（2026-09-26。4.(4)）。**古い形は前と同じに
+    /// 読む。** **切れた行は、どこで切れても読まない**——**頭の版があるので、古い形としても読まない。**
+    /// **第 3 版は置き場の欄を足した**（2026-09-27）。
     #[test]
     fn a_torn_record_line_is_never_read_as_a_record() {
         let written = Record {
             env: Some("rustc 1.97.1; qemu 8.2.2".to_string()),
             selected: Some("fs,apps".to_string()),
             score: Some("caught=yes".to_string()),
+            root: Some("/home/u/zaytos-full-check".to_string()),
             ..record("full", "pass", "c1", "t1", 0)
         };
         let line = format_record(&written);
         assert!(
-            line.starts_with("2\t") && line.ends_with("\tend\n"),
+            line.starts_with("3\t") && line.ends_with("\tend\n"),
             "{line}"
         );
         let read = parse_record(line.trim_end_matches('\n')).unwrap();
         assert_eq!(read.env.as_deref(), Some("rustc 1.97.1; qemu 8.2.2"));
         assert_eq!(read.selected.as_deref(), Some("fs,apps"));
         assert_eq!(read.score.as_deref(), Some("caught=yes"));
+        assert_eq!(read.root.as_deref(), Some("/home/u/zaytos-full-check"));
         assert_eq!(read.note, "a b c");
+        // **第 2 版の行（置き場の欄が無い 22 欄）も読む。置き場は無いものとして読む。**
+        let second =
+            "2\t1\t2026-09-27 17:32:36\tfull\tpass\tc\tt\t0\t416\t1.0\t3044.2\t50394296320\t\
+                      1\t2\t3\twarm\t5\trustc\tall\t-\tlog\tend";
+        let read = parse_record(second).unwrap();
+        assert_eq!(
+            (read.start_state.as_deref(), read.root, read.note.as_str()),
+            (Some("warm"), None, "log")
+        );
         // **切れた行は、どの長さでも読まない**（最後の 1 字を落とした形まで）。
         let body = line.trim_end_matches('\n');
         for cut in 1..body.len() {
@@ -2586,7 +2673,8 @@ mod tests {
             (read.items, read.written, read.wsl_free, read.note.as_str()),
             (Some(47), None, None, "-")
         );
-        // **いまの行は第 2 版の 22 欄である**（2026-09-26 に 2 欄を足し、同じ日に第 2 版へ改めた）。
+        // **いまの行は第 3 版の 23 欄である**（2026-09-26 に 2 欄を足し、同じ日に第 2 版へ改めた。2026-09-27 に置き場の
+        // 欄を足して第 3 版にした）。
         let new = format_record(&record("full", "pass", "c", "t", 0));
         assert_eq!(
             new.trim_end_matches('\n').split('\t').count(),
@@ -2681,25 +2769,76 @@ mod tests {
         assert_eq!(pick(&[], &cold, None), None);
     }
 
+    /// 作業ツリーで走った全検査の記録（置き場つき）。
+    fn ran_at(root: Option<&str>) -> Record {
+        Record {
+            start_state: Some("warm".to_string()),
+            root: root.map(str::to_string),
+            ..record("full", "pass", "c", "t", 0)
+        }
+    }
+
     /// **冷えたとみなすのは 3 つ**——`target/` が無い、メインの作業ツリーの 1/4 より小さい、rustc が違うか控えが無い。
+    /// （4 つ目の置き場は次のテスト。ここでは前回と同じ置き場にしておく。）
     #[test]
     fn a_worktree_is_cold_without_target_when_small_or_built_by_another_rustc() {
         let gib = |value: u64| value << 30;
         let same = Some("5921603053813812323");
+        let here = Path::new("/w");
+        let last = ran_at(Some("/w"));
+        let state = |main: u64, worktree: Option<u64>, rustc: Option<&str>| {
+            start_state(Some(gib(main)), worktree, same, rustc, here, Some(&last))
+        };
         let cold = |state: StartState| matches!(state, StartState::Cold(_));
-        assert!(cold(start_state(Some(gib(56)), None, same, same)));
-        assert!(cold(start_state(Some(gib(56)), Some(0), same, same)));
-        assert!(cold(start_state(Some(gib(56)), Some(gib(13)), same, same)));
-        assert!(!cold(start_state(Some(gib(56)), Some(gib(30)), same, same)));
-        assert!(cold(start_state(
-            Some(gib(56)),
-            Some(gib(30)),
-            same,
-            Some("1")
-        )));
-        assert!(cold(start_state(Some(gib(56)), Some(gib(30)), same, None)));
+        assert!(cold(state(56, None, same)));
+        assert!(cold(state(56, Some(0), same)));
+        assert!(cold(state(56, Some(gib(13)), same)));
+        assert!(!cold(state(56, Some(gib(30)), same)));
+        assert!(cold(state(56, Some(gib(30)), Some("1"))));
+        assert!(cold(state(56, Some(gib(30)), None)));
         // **メインの作業ツリーが掃除されて小さくても、作業ツリーが大きければ温まっている。**
-        assert!(!cold(start_state(Some(gib(10)), Some(gib(30)), same, same)));
+        assert!(!cold(state(10, Some(gib(30)), same)));
+    }
+
+    /// **前回の全検査と置き場が違えば冷えている**（運用者の足す1点。2026-09-27）。**置き場の記録が無い前回と、
+    /// 前回が無いときも冷えたとみなす。** **前回は、作業ツリーで走った全検査（冷えたかの欄を持つ行）の直近である。**
+    #[test]
+    fn a_worktree_is_cold_when_it_is_not_where_the_last_full_check_ran() {
+        let same = Some("5921603053813812323");
+        let here = Path::new("/home/u/zaytos-full-check");
+        let state = |last: Option<&Record>| {
+            start_state(Some(56 << 30), Some(30 << 30), same, same, here, last)
+        };
+        let cold = |state: StartState| matches!(state, StartState::Cold(_));
+        assert!(!cold(state(Some(&ran_at(Some(
+            "/home/u/zaytos-full-check"
+        ))))));
+        let moved = state(Some(&ran_at(Some("/home/u/zaytos/target/full-check/wt"))));
+        assert!(
+            moved
+                .reason()
+                .contains("/home/u/zaytos/target/full-check/wt"),
+            "{moved:?}"
+        );
+        assert!(cold(moved));
+        assert!(cold(state(Some(&ran_at(None)))));
+        assert!(cold(state(None)));
+        // **前回は作業ツリーで走った全検査の直近**——親が代わりに書いた行と、基本の検査の行は見ない。
+        let records = vec![
+            ran_at(Some("/home/u/zaytos/target/full-check/wt")),
+            ran_at(Some("/home/u/zaytos-full-check")),
+            record("full", "cut", "c", "t", 0),
+            Record {
+                root: Some("/home/u/zaytos".to_string()),
+                ..record("base", "pass", "c", "t", 0)
+            },
+        ];
+        let last = last_worktree_run(&records);
+        assert_eq!(
+            last.and_then(|record| record.root.as_deref()),
+            Some("/home/u/zaytos-full-check")
+        );
+        assert!(!cold(state(last)));
     }
 
     /// `.rustc_info.json` の形（実測。2026-09-26）。**数字の並びだけを読む。**
