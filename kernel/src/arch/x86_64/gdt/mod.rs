@@ -393,7 +393,7 @@ pub fn double_fault_stack_top() -> u64 {
 /// `top` が現在のタスクの、有効でマップ済みのカーネルスタック上端であること。
 /// 起動時の単一実行文脈、またはコンテキストスイッチの割り込み禁止区間から
 /// 呼ぶこと。
-pub unsafe fn set_rsp0(top: u64) {
+pub unsafe fn set_active_kernel_entry_stack_top(top: u64) {
     // SAFETY: 呼び出し元契約による。TSS は起動時に構築済みの静的領域で、
     // 書き込むのは自コアのスロットの RSP0（privilege_stack_table[0]）のみ。
     unsafe {
@@ -403,7 +403,7 @@ pub unsafe fn set_rsp0(top: u64) {
 }
 
 /// TSS に設定済みの RSP0。
-pub fn privilege_stack_top() -> u64 {
+pub fn active_kernel_entry_stack_top() -> u64 {
     // SAFETY: 読み取りのみ。自コアのスロットを読む。
     unsafe {
         let tss = PerCpu::this_cpu_ptr(addr_of_mut!(TSS));

@@ -30,7 +30,7 @@
 //! # RSP0 の実利用
 //!
 //! Ring 3 の #GP は特権を上げる（3→0）ので、CPU は TSS.RSP0 のスタックへ
-//! 切り替える。これが `set_rsp0`（M5-c で配線、M5-d でスイッチごとに更新、
+//! 切り替える。これが `set_active_kernel_entry_stack_top`（M5-c で配線、M5-d でスイッチごとに更新、
 //! M5-e-1 で TSS を新 index へ）の初めての実挙動での回収点である。遠征専用の
 //! カーネルスタックを RSP0 に据えるのは、メイン（Ring 0）の休眠フレームを
 //! ハンドラが踏み潰すのを避けるため（メインの Ring 0 連鎖が RSP0 スタック上に
@@ -745,7 +745,7 @@ pub unsafe fn enter(
     #[cfg(not(feature = "ring3-test-drop-rsp0"))]
     // SAFETY: excursion_top は静的な遠征スタックの上端。単一実行文脈。
     unsafe {
-        gdt::set_rsp0(excursion_top);
+        gdt::set_active_kernel_entry_stack_top(excursion_top);
     }
     // **タスクの欄にも残す（W1-b。`ADR-0060`）。** **TSS を書くのは「いま」で、
     // こちらは「次にこのタスクへ戻るとき、何を書くか」である。**
@@ -814,7 +814,7 @@ pub unsafe fn enter(
     // **メインの上端へ戻すと親のカーネルスタックが変わってしまう。**
     // SAFETY: main_rsp0_top は呼び出し元が使っているカーネルスタックの上端。
     unsafe {
-        gdt::set_rsp0(main_rsp0_top);
+        gdt::set_active_kernel_entry_stack_top(main_rsp0_top);
     }
     // **タスクの欄も戻す（W1-b）。** **入れ子のときは親の遠征スタックの上端が
     // それである**——**上の `main_rsp0_top` と同じ値を入れる。**

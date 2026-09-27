@@ -500,7 +500,7 @@ struct Task {
     ///
     /// # なぜタスクが「値」を持つのか。**置き場を分けられないから**
     ///
-    /// **RSP0 は TSS の決まった欄である**（`gdt::set_rsp0` が
+    /// **RSP0 は TSS の決まった欄である**（`gdt::set_active_kernel_entry_stack_top` が
     /// `PerCpu::this_cpu_ptr(TSS)` の `privilege_stack_table[0]` を書く。実測）。
     /// **スロットで引く形にできない。** **タスクが値を持ち、切り替えで
     /// 入れ替えることになる。**
@@ -1085,7 +1085,7 @@ pub fn current_ring3_slot() -> usize {
 
 /// 今のタスクの `RSP0` の欄を据える（W1-b。遠征の出入りが呼ぶ）。
 ///
-/// **`ring3::enter` が `gdt::set_rsp0` を呼ぶのと対である**——**あちらは
+/// **`ring3::enter` が `gdt::set_active_kernel_entry_stack_top` を呼ぶのと対である**——**あちらは
 /// TSS を書き、こちらは「次にこのタスクへ戻るとき、何を書くか」を残す。**
 /// **切り替えはこの欄を読む**（`schedule_switch`）。
 pub fn note_current_kernel_entry_stack_top(top: u64) {
@@ -2027,14 +2027,15 @@ pub fn run_cooperative_demo(allocator: &mut crate::frame_allocator::FrameAllocat
         common::arch::x86_64::cpu::halt_forever();
     }
 
-    // RSP0 の確認（§2.2）。スイッチのたびに on_yield が set_rsp0 → 読み戻しで
+    // RSP0 の確認（§2.2）。スイッチのたびに on_yield が
+    // set_active_kernel_entry_stack_top → 読み戻しで
     // 一致を確かめており（不一致なら即 halt）、ここまで来た時点で全スイッチで
     // 一致していたことになる。最後のスイッチはメインへ戻ったので、現在の
     // TSS.RSP0 はメインのスタック頂点のはずである。それを読み戻して示す。
     let main_top = crate::arch::x86_64::stack::kernel_stack_range()
         .top
         .as_u64();
-    let entry_top = gdt::privilege_stack_top();
+    let entry_top = gdt::active_kernel_entry_stack_top();
     serial_line(format_args!(
         "task: TSS.RSP0 tracked every switch; now {entry_top:#x} (main stack top {main_top:#x}, \
          match={})",
@@ -2491,13 +2492,13 @@ fn schedule_switch(current_sp: u64) -> u64 {
         // SAFETY: stack_top は次タスクの有効なスタック頂点。切り替えの割り込み
         // 禁止区間から呼んでいる。
         unsafe {
-            gdt::set_rsp0(expected_top);
+            gdt::set_active_kernel_entry_stack_top(expected_top);
         }
         // 実際の状態を読む。RSP0 は M5-e まで挙動に現れないので、間違った値が書かれても
         // 誰も気づかない。TSS から読み戻して期待値と一致することをその場で確かめる
         // （A-1 / M5-b と同じく実状態を見る）。drop-rsp0 では更新を落としているので
         // ここで食い違い、halt する。
-        let readback = gdt::privilege_stack_top();
+        let readback = gdt::active_kernel_entry_stack_top();
         if readback != expected_top {
             serial_line(format_args!(
                 "[ERROR] task: TSS.RSP0 readback {readback:#x} != expected {expected_top:#x} \

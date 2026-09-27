@@ -1830,7 +1830,7 @@ unsafe fn run_loaded_program(
     // 子のスタックを指し、**次に子を起動したときに親のフレームを踏む。**
     // **`spawn` が戻り先の RSP0 を突き合わせて検出する。**
     let main_rsp0_top = if crate::arch::x86_64::ring3::depth() == 0 {
-        crate::arch::x86_64::gdt::privilege_stack_top()
+        crate::arch::x86_64::gdt::active_kernel_entry_stack_top()
     } else if cfg!(feature = "spawn-child-rsp0") {
         crate::arch::x86_64::ring3::excursion_stack_range_at(crate::arch::x86_64::ring3::depth()).1
     } else {
@@ -2311,7 +2311,7 @@ pub fn spawn(
     //
     // **控えて突き合わせる形なら、どちらの深さでも同じ 1 行で言える**
     // ——**「子が走る前と後で RSP0 が変わっていない」。**
-    let rsp0_before = crate::arch::x86_64::gdt::privilege_stack_top();
+    let rsp0_before = crate::arch::x86_64::gdt::active_kernel_entry_stack_top();
 
     // **親の記録を控える。** 子は `reset_counters` を通る。
     let saved_records = crate::syscall::save_records();
@@ -2468,7 +2468,7 @@ pub fn spawn(
     // **すぐには壊れない**——親はそのまま Ring 3 へ返り、次のシステムコールで
     // 別のスタックに乗る。**壊れるのは、次に子を起動して親のフレームを踏んだ
     // ときである。** 原因から遠いので、ここで突き合わせる。
-    let rsp0_after = crate::arch::x86_64::gdt::privilege_stack_top();
+    let rsp0_after = crate::arch::x86_64::gdt::active_kernel_entry_stack_top();
     if rsp0_after != rsp0_before {
         logger.error(format_args!(
             "spawn: RSP0 came back as {rsp0_after:#x} but it was {rsp0_before:#x} before the \

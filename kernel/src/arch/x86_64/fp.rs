@@ -156,7 +156,7 @@ pub unsafe fn enable_on_this_cpu() {
 
 /// いまこのコアで SSE が有効かを、レジスタから読んで返す（判定行に出すため）。
 ///
-/// **書いたつもりではなく、読み戻した値で示す**（`gdt::set_rsp0` の読み戻しと
+/// **書いたつもりではなく、読み戻した値で示す**（`gdt::set_active_kernel_entry_stack_top` の読み戻しと
 /// 同じ形である）。**AP でも呼ぶ**——**CR0 と CR4 はコアごとなので、
 /// 「BSP で立てたから大丈夫」は言えない。**
 pub fn enabled_state() -> Enabled {

@@ -723,7 +723,7 @@ ring3-test-user-desc-dpl0 = []
 # ユーザーページの USER を落とす（U=0）。M5-e-2 の両側監査が遠征前に user
 # violation として捕まえる。`--ring3-test user-page-supervisor`。
 ring3-test-user-page-supervisor = []
-# 遠征の RSP0 据え付け（ring3::enter の set_rsp0）を落とす。#GP がメインの
+# 遠征の RSP0 据え付け（ring3::enter の set_active_kernel_entry_stack_top）を落とす。#GP がメインの
 # スタックへ切り替わり、handler_in_excursion が false になって捕まる。M5-d の
 # task-switch-drop-rsp0（schedule_switch 側）とは別物。`--ring3-test drop-rsp0`。
 ring3-test-drop-rsp0 = []

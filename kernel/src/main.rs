@@ -3555,7 +3555,7 @@ fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
         gdt::tss_base(),
         gdt::DOUBLE_FAULT_IST_INDEX,
         gdt::double_fault_stack_top(),
-        gdt::privilege_stack_top()
+        gdt::active_kernel_entry_stack_top()
     ));
     logger.info(format_args!(
         "tss: RSP0 は特権レベル遷移（ユーザー -> カーネル）用で、M5 まで実際には使われない"
@@ -9413,7 +9413,7 @@ fn verify_ring3_excursion<const CAP: usize>(
     }
 
     // 遠征前の RSP0（メインのカーネルスタック上端）。遠征後にここへ戻す。
-    let main_rsp0_top = gdt::privilege_stack_top();
+    let main_rsp0_top = gdt::active_kernel_entry_stack_top();
     let (exc_bottom, exc_top) = ring3::excursion_stack_range();
 
     logger.info(format_args!(
@@ -9460,7 +9460,7 @@ fn verify_ring3_excursion<const CAP: usize>(
     // #GP ハンドラの RSP が遠征専用スタック範囲（RSP0 の実利用）。
     let handler_in_excursion = handler_rsp >= exc_bottom && handler_rsp < exc_top;
     // RSP0 がメインの上端へ戻っていること。
-    let rsp0_restored = gdt::privilege_stack_top() == main_rsp0_top;
+    let rsp0_restored = gdt::active_kernel_entry_stack_top() == main_rsp0_top;
 
     logger.info(format_args!(
         "ring3: folded expected #GP. fault CS={fault_cs:#x} (RPL={cs_rpl}), fault RSP={fault_rsp:#x} \
@@ -9635,7 +9635,7 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
 
     syscall::reset_counters();
 
-    let main_rsp0_top = gdt::privilege_stack_top();
+    let main_rsp0_top = gdt::active_kernel_entry_stack_top();
     let (exc_bottom, exc_top) = ring3::excursion_stack_range();
 
     logger.info(format_args!(
@@ -9676,7 +9676,7 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     let seen_args = syscall::last_args();
     let handler_rsp = syscall::handler_rsp();
     let handler_in_rsp0 = handler_rsp >= exc_bottom && handler_rsp < exc_top;
-    let rsp0_restored = gdt::privilege_stack_top() == main_rsp0_top;
+    let rsp0_restored = gdt::active_kernel_entry_stack_top() == main_rsp0_top;
     // SAFETY: store_slot はマップ済みのユーザースタックページ内。読み取りのみ。
     let stored = unsafe { core::ptr::read_volatile(store_slot as *const u64) };
 
@@ -9824,7 +9824,7 @@ fn issue_ptr_len_syscall(logger: &mut Logger<SerialPort>, number: u64, buf: u64,
     }
 
     syscall::reset_counters();
-    let main_rsp0_top = gdt::privilege_stack_top();
+    let main_rsp0_top = gdt::active_kernel_entry_stack_top();
 
     // SAFETY: ユーザーページはマップ済み。Ring 3 は cli_rip で cli を実行して #GP を起こす。
     // main_rsp0_top はメインの上端。起動時の単一実行文脈から呼ぶ。
@@ -10170,7 +10170,7 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
         ("#PF-write-ro", 14, &[], 10, READONLY_USER_VIRT, 0x7, true),
     ];
 
-    let main_rsp0_top = gdt::privilege_stack_top();
+    let main_rsp0_top = gdt::active_kernel_entry_stack_top();
     let code_ptr = ring3::USER_CODE_VIRT as *mut u8;
 
     for (name, expected_vector, bytes, fault_offset, load_target, expected_error, is_store) in cases
