@@ -34,7 +34,7 @@
 //!
 //! | フィールド | IF=0（割り込み） | IF=1 協調 | IF=1 プリエンプティブ | メイン文脈 | 起動時 |
 //! |---|---|---|---|---|---|
-//! | `saved_rsp` | 読み書き | - | - | - | 書き |
+//! | `saved_stack_pointer` | 読み書き | - | - | - | 書き |
 //! | `stack_top` / `stack_bottom` | 読み | - | - | - | 書き |
 //! | `state` | 書き / 読み | 書き | - | 読み（W1-c-4 の `init` の待ち）/ 書き（足した 1 本が終わるとき） | 書き |
 //!
@@ -124,14 +124,14 @@ pub(super) fn init_task(index: usize, task: Task) {
     unsafe { slot(index).write(task) }
 }
 
-pub(super) fn saved_rsp(index: usize) -> u64 {
+pub(super) fn saved_stack_pointer(index: usize) -> u64 {
     // SAFETY: 有効なポインタ。IF=0 の切り替え経路からのみ読む。
-    unsafe { addr_of_mut!((*slot(index)).saved_rsp).read() }
+    unsafe { addr_of_mut!((*slot(index)).saved_stack_pointer).read() }
 }
 
-pub(super) fn set_saved_rsp(index: usize, rsp: u64) {
+pub(super) fn set_saved_stack_pointer(index: usize, sp: u64) {
     // SAFETY: 有効なポインタ。IF=0 の切り替え経路からのみ書く。
-    unsafe { addr_of_mut!((*slot(index)).saved_rsp).write(rsp) }
+    unsafe { addr_of_mut!((*slot(index)).saved_stack_pointer).write(sp) }
 }
 
 pub(super) fn rsp0(index: usize) -> u64 {

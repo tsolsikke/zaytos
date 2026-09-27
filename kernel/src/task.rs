@@ -475,7 +475,7 @@ impl TaskState {
 #[derive(Clone, Copy)]
 struct Task {
     /// 保存された RSP（この値が指す先が `IrqContext`）。走行中は無効。
-    saved_rsp: u64,
+    saved_stack_pointer: u64,
     /// このタスクのカーネルスタック頂点（RSP0 用。§2.2、およびスタック範囲の
     /// 上端）。
     // no-swap の破壊テストのビルドではスイッチしないので RSP0 更新へ進まず未読になる。
@@ -587,7 +587,7 @@ struct Task {
 }
 
 const EMPTY_TASK: Task = Task {
-    saved_rsp: 0,
+    saved_stack_pointer: 0,
     stack_top: 0,
     stack_bottom: 0,
     rsp0: 0,
@@ -894,13 +894,13 @@ pub fn start_ring3_task() -> Option<u64> {
     let entry = addr_of!(zaytos_ring3_task_body) as u64;
     // SAFETY: top はガードページを設けた静的スタックの頂点で、まだ誰も使っていない。
     // 4KiB 境界（`align(4096)` の構造体の末尾）に載っている。
-    let saved_rsp = unsafe { build_initial_context(top, entry) };
+    let saved_stack_pointer = unsafe { build_initial_context(top, entry) };
     // **登録から `Ready` までを割り込みを止めて一続きにする**——**書きかけの欄を切り替えが読まないため。**
     let _no_switch = common::critical::InterruptGuard::enter();
     scheduler::init_task(
         RING3_TASK,
         Task {
-            saved_rsp,
+            saved_stack_pointer,
             stack_top: top.as_u64(),
             stack_bottom: bottom,
             // **遠征に入っていないタスクの RSP0 はカーネルスタック頂点である**（W1-c-3c の 0 の関所）。
@@ -1713,7 +1713,7 @@ pub fn ap_current_display() -> ApCurrent {
 ///
 /// 走らせ方を決めた時点で、その形では走らないと分かった。AP の `CURRENT` へこの添字を
 /// 書くと、AP の最初のティックで [`schedule_switch`] は「現タスク = 次タスク」になり
-/// 切り替えを行わない。組んだ初期コンテキストは `set_saved_rsp` に上書きされ、
+/// 切り替えを行わない。組んだ初期コンテキストは `set_saved_stack_pointer` に上書きされ、
 /// `ap_idle_entry` へは永久に入らない。専用スタックも使われない。
 ///
 /// bootstrap processor と同じ形に揃えた。あちらは起動コンテキストがそのままタスク 0
@@ -1764,15 +1764,15 @@ pub fn init_ap_idle_task() {
     scheduler::init_task(
         AP_IDLE_TASK,
         Task {
-            // `saved_rsp` は 0 のままにしてある。メイン（タスク 0）と同じ形で、この
+            // `saved_stack_pointer` は 0 のままにしてある。メイン（タスク 0）と同じ形で、この
             // タスクは登録された時点で既に走っている。
             //
             // 「読まれる前に必ず書かれる」は条件つきである（S4-c-4-2 で判明）。成り立つ
             // のは、この AP の `CURRENT` がこのタスクのままである間だけである。
-            // `schedule_switch` は `set_saved_rsp(current, ...)` を `pick_next` より前に
+            // `schedule_switch` は `set_saved_stack_pointer(current, ...)` を `pick_next` より前に
             // 行うので、`current` がこのタスクなら確かに先に埋まる。ところが `CURRENT` を
             // 外から別のタスクへ移されると、このタスクは切り替え先になり、0 のままの
-            // `saved_rsp` が読まれる。実際に踏んだ——`smp-ap-runs-preemptive-demo` +
+            // `saved_stack_pointer` が読まれる。実際に踏んだ——`smp-ap-runs-preemptive-demo` +
             // `sched-ignore-bootstrap-tripwire` では `setup_preemptive_tasks` が
             // `set_current_index(0)` を呼ぶので AP の `CURRENT` が 0 になり、次の
             // `pick_next` がこのタスクを選んだ時点で範囲検査が停止する。
@@ -1977,15 +1977,15 @@ fn worker_stack_bounds(index: usize) -> (VirtAddr, VirtAddr) {
 ///
 /// `top` が有効でマップ済みのスタック頂点（16 バイト境界）であること。
 unsafe fn build_initial_context(top: VirtAddr, entry: u64) -> u64 {
-    let saved_rsp = top.as_u64() - IRQ_CONTEXT_BYTES;
-    // saved_rsp から上へ 21 個の u64 を並べる（IrqContext のフィールド順）。
+    let saved_stack_pointer = top.as_u64() - IRQ_CONTEXT_BYTES;
+    // saved_stack_pointer から上へ 21 個の u64 を並べる（IrqContext のフィールド順）。
     // 0..15: GPR（rax..r15）、15: vector、16: rip、17: cs、18: rflags、
     // 19: rsp、20: ss。
     let slot = |i: usize, value: u64| {
-        // SAFETY: 呼び出し元契約により、[saved_rsp, top) はマップ済みで誰も
+        // SAFETY: 呼び出し元契約により、[saved_stack_pointer, top) はマップ済みで誰も
         // 使っていないスタック領域。i < 21。
         unsafe {
-            core::ptr::write_volatile((saved_rsp as *mut u64).add(i), value);
+            core::ptr::write_volatile((saved_stack_pointer as *mut u64).add(i), value);
         }
     };
     for i in 0..15 {
@@ -1997,7 +1997,7 @@ unsafe fn build_initial_context(top: VirtAddr, entry: u64) -> u64 {
     slot(18, 0x202); // rflags（IF=1、予約ビット1）
     slot(19, top.as_u64()); // rsp（iretq 後にタスクが使う RSP）
     slot(20, gdt::KERNEL_DATA_SELECTOR.bits() as u64); // ss
-    saved_rsp
+    saved_stack_pointer
 }
 
 /// 協調的マルチタスクのデモと検証を実行する（M5-c）。
@@ -2088,7 +2088,7 @@ pub fn run_cooperative_demo(allocator: &mut crate::frame_allocator::FrameAllocat
 unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
     let entry = addr_of!(zaytos_worker_body) as u64;
 
-    // タスク 0 = メイン。実行中なので saved_rsp は初回 yield で埋まる。
+    // タスク 0 = メイン。実行中なので saved_stack_pointer は初回 yield で埋まる。
     // メインのスタック頂点は通常のカーネルスタック（RSP0 用）。
     let main_top = crate::arch::x86_64::stack::kernel_stack_range()
         .top
@@ -2123,13 +2123,13 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
         }
         // SAFETY: top は今ガードページを設けたワーカースタックの頂点で、
         // まだ誰も使っていない。16 バイト境界（4KiB 境界）に載っている。
-        let saved_rsp = unsafe { build_initial_context(top, entry) };
+        let saved_stack_pointer = unsafe { build_initial_context(top, entry) };
         // タスク固有の base。A=0xA1A1_0000、B=0xB2B2_0000 のように区別する。
         let base = 0xA1A1_0000u64 + (w as u64) * 0x1111_0000;
         scheduler::init_task(
             1 + w,
             Task {
-                saved_rsp,
+                saved_stack_pointer,
                 stack_top: top.as_u64(),
                 // 使えるスタックの下端はガードページの直上。
                 stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
@@ -2190,11 +2190,11 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
         let entry = addr_of!(zaytos_bsp_idle_body) as u64;
         // SAFETY: top は今ガードページを設けた静的スタックの頂点で、まだ誰も使っていない。
         // 4KiB 境界（`align(4096)` の構造体の末尾）に載っている。
-        let saved_rsp = unsafe { build_initial_context(top, entry) };
+        let saved_stack_pointer = unsafe { build_initial_context(top, entry) };
         scheduler::init_task(
             BSP_IDLE_TASK,
             Task {
-                saved_rsp,
+                saved_stack_pointer,
                 stack_top: top.as_u64(),
                 stack_bottom: bottom,
                 // **遠征に入っていないタスクの RSP0 はカーネルスタック頂点である**（W1-c-3c の 0 の関所）。
@@ -2239,13 +2239,13 @@ pub fn yield_now() {
 
 /// yield ベクタが届いたときに `irq_entry` から呼ばれ、次に使う RSP を返す。
 ///
-/// `current_rsp` は現タスクの `IrqContext` 先頭（`irq_entry` に渡る `context`）
+/// `current_sp` は現タスクの `IrqContext` 先頭（`irq_entry` に渡る `context`）
 /// で、現タスクの保存 RSP として記録する。
 ///
 /// `Locked` / `InterruptGuard` を保持したまま yield してはならない。保持したまま
 /// 切り替えると、別タスクがクリティカルセクションの途中で走る。判定は critical nesting
 /// depth で行い、IF は見ない（ADR-0019 §5、yield は IF=0 から正当に呼ばれうる）。
-pub fn on_yield(current_rsp: u64) -> u64 {
+pub fn on_yield(current_sp: u64) -> u64 {
     // 保持中の yield を fail-fast する。int ゲート自身が積んだぶんは
     // InterruptGuard ではないのでカウンタには乗らない。したがってここが 0 で
     // なければ、呼び出し側が Locked / InterruptGuard を保持している。
@@ -2259,7 +2259,7 @@ pub fn on_yield(current_rsp: u64) -> u64 {
         common::arch::x86_64::cpu::halt_forever();
     }
 
-    schedule_switch(current_rsp)
+    schedule_switch(current_sp)
 }
 
 /// timer（IRQ0）のティックで `irq_entry` から呼ばれ、プリエンプティブに切り替える
@@ -2270,12 +2270,12 @@ pub fn on_yield(current_rsp: u64) -> u64 {
 /// しない。もっとも、`InterruptGuard` は cli してから深さを増やすので
 /// `depth>0 ⟹ IF=0 ⟹ timer は配送されない`（ADR-0019 §5）。このスキップは、その構造的
 /// 保証が崩れたときの防御である（`task-preempt-in-critical` で実際に崩して発火させる）。
-pub fn on_timer_tick(current_rsp: u64) -> u64 {
+pub fn on_timer_tick(current_sp: u64) -> u64 {
     // 防御的スキップ。critical 区間中はプリエンプトせず現タスクを続行する。
     // 既定ビルド（と feature 下で arm されていないとき）はここで守る。
     #[cfg(not(feature = "task-preempt-in-critical"))]
     if critical_nesting_depth() != 0 {
-        return current_rsp;
+        return current_sp;
     }
     // preempt-in-critical の破壊テストでの確認では、サボタージュが arm されている間だけこの
     // 防御を bypass して、cli 落とし（IF=1 のまま）と併せてプリエンプトをクリティカル
@@ -2283,7 +2283,7 @@ pub fn on_timer_tick(current_rsp: u64) -> u64 {
     // レースが起きない（かつては大域的に外していた。verification-coverage 参照）。
     #[cfg(feature = "task-preempt-in-critical")]
     if critical_nesting_depth() != 0 && !common::critical::sabotage_armed() {
-        return current_rsp;
+        return current_sp;
     }
 
     // set と store のウィンドウ（ワーカーが 15 GPR を保持している区間）でプリエンプト
@@ -2305,24 +2305,24 @@ pub fn on_timer_tick(current_rsp: u64) -> u64 {
         scheduler::set_demo_active(false);
     }
 
-    schedule_switch(current_rsp)
+    schedule_switch(current_sp)
 }
 
 /// スイッチの中核（yield と timer が共有）。現タスクの RSP を保存し、次タスクを
 /// 選び、RSP0 を更新して次タスクの RSP を返す。次が現タスクと同じなら何もしない。
-fn schedule_switch(current_rsp: u64) -> u64 {
+fn schedule_switch(current_sp: u64) -> u64 {
     // このコアがスケジューラを通った回数（S4-c-3-2a）。`current_index()` より前で
     // 数える。あちらは sentinel を読むと停止するので、後ろに置くと「入ったが数えられて
     // いない」が生じる（`smp-ap-no-sentinel-clear` の破壊テストはまさにその形で止まる）。
     SCHEDULE_PASSES.this_cpu().fetch_add(1, Ordering::Relaxed);
     let current = current_index();
-    scheduler::set_saved_rsp(current, current_rsp);
+    scheduler::set_saved_stack_pointer(current, current_sp);
 
     // 破壊テストでの確認 (ii): RSP の差し替えを省く。現タスクの RSP を返すのでスイッチが
     // 起きず、同じタスクが回り続ける。デモの会計・進捗で検出する。
     #[cfg(feature = "task-switch-no-swap")]
     {
-        return current_rsp;
+        return current_sp;
     }
 
     #[cfg(not(feature = "task-switch-no-swap"))]
@@ -2367,7 +2367,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         // 走らせるべき相手がいない（=現タスクのまま）なら何もしない。デモ後の
         // ハートビート区間（走行可能なワーカーが無い）ではここに来て no-op になる。
         if next == current {
-            return current_rsp;
+            return current_sp;
         }
         // 破壊テスト (W1-c-4, task-switch-holds-back-ring3-task): 出る側が遠征の最中なら、足した 1 本へ
         // 切り替えない。**2 本は交互には走るが、2 本とも Ring 3 に居る間は進まない**——**判定 1
@@ -2375,7 +2375,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         // （先に起動した 1 本はメインが待っている間に進み、もう 1 本の間は止まっているので後に終わる）。
         #[cfg(feature = "task-switch-holds-back-ring3-task")]
         if next == RING3_TASK && scheduler::excursion_depth(current) != 0 {
-            return current_rsp;
+            return current_sp;
         }
         // **アイドルを選んだ回数を数える（W2-c-1 の計測）。** **早い戻りより後に置く**
         // ——**`next == current` で戻る形を数えると、「選び直した」ではなく
@@ -2394,7 +2394,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         //
         // # W1-b で「広げる」ではなく「付け替え」にした（`ADR-0060`）
         //
-        // **遠征中のタスクの `saved_rsp` は遠征スタックの中に在る。**
+        // **遠征中のタスクの `saved_stack_pointer` は遠征スタックの中に在る。**
         // **カーネルスタックだけを見ていると、W1-c でここに当たる。**
         //
         // **「カーネルスタック ∪ 遠征スタック全部」へ広げると、主張が鈍る。**
@@ -2409,7 +2409,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         //
         // **既定の起動では必ず深さ 0 である**——**遠征中に切り替えが起きない。** **W1-c-4 の
         // `concurrent-test` では、深さ 1 のタスクへ切り替える**（遠征スタックの範囲を引く側を通る）。
-        let next_rsp = scheduler::saved_rsp(next);
+        let next_sp = scheduler::saved_stack_pointer(next);
         let next_depth = scheduler::excursion_depth(next);
         //
         // **W1-c-3b で数え方を直した。** **欄は「入っている遠征の数」で、0 ならカーネル
@@ -2423,7 +2423,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
                 crate::arch::x86_64::ring3::excursion_stack_range_of(ring3_slot_of(next), index)
             }
         };
-        if next_rsp < next_bottom || next_rsp >= next_top {
+        if next_sp < next_bottom || next_sp >= next_top {
             // **文言のうち `is outside its stack` と `stacks are mixed` は、
             // 判定の期待マーカーである**（`xtask` の `smp-ap-test
             // ap-forced-current-range-check`）。**深さを足すときに前者を書き換えて
@@ -2432,7 +2432,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
             // 「期待マーカーを合わせるのを忘れると……その破壊の項目だけが落ちる」
             // の種類である。** **両方を残したまま深さを足すこと。**
             serial_line(format_args!(
-                "[ERROR] task: task {next} saved_rsp {next_rsp:#x} is outside its stack for \
+                "[ERROR] task: task {next} saved_rsp {next_sp:#x} is outside its stack for \
                  excursion depth {next_depth} [{:#x}, {:#x}); stacks are mixed; halting",
                 next_bottom, next_top
             ));
@@ -2544,12 +2544,12 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         // 破壊テストでの確認 (i): 次タスクの保存コンテキストの rbx スロットを壊す。
         // 復帰した次タスクは rbx が base+1 と食い違うのを GPR 照合で検出する。
         #[cfg(feature = "task-switch-drop-reg")]
-        // SAFETY: next_rsp は次タスクの IrqContext 先頭。+8 は rbx のスロット。
+        // SAFETY: next_sp は次タスクの IrqContext 先頭。+8 は rbx のスロット。
         unsafe {
-            core::ptr::write_volatile((next_rsp as *mut u64).add(1), 0xDEAD_BEEF);
+            core::ptr::write_volatile((next_sp as *mut u64).add(1), 0xDEAD_BEEF);
         }
 
-        next_rsp
+        next_sp
     }
 }
 
@@ -2966,12 +2966,12 @@ unsafe fn setup_preemptive_tasks() {
         // ガードページは M5-c で設置済み。ここでは偽コンテキストだけ作り直す。
         // SAFETY: top はガードページ済みのワーカースタックの頂点。M5-c のデモは
         // 終わっており、このスタックは今は誰も使っていない。
-        let saved_rsp = unsafe { build_initial_context(top, entry) };
+        let saved_stack_pointer = unsafe { build_initial_context(top, entry) };
         let base = 0xA1A1_0000u64 + (w as u64) * 0x1111_0000;
         scheduler::init_task(
             1 + w,
             Task {
-                saved_rsp,
+                saved_stack_pointer,
                 stack_top: top.as_u64(),
                 stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
                 rsp0: top.as_u64(),
