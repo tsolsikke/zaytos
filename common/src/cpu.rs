@@ -376,7 +376,7 @@ unsafe fn read_msr(msr: u32) -> u64 {
 /// `IA32_EFER`（`0xC000_0080`）。
 const IA32_EFER: u32 = 0xC000_0080;
 
-/// EFER の読み（2026-09-24。`ADR-0018` の Addendum 9 の棚卸しの見張り）。
+/// EFER の読み（2026-09-24。`ADR-0018` の Addendum 9 の棚卸しの監視）。
 ///
 /// **解釈した型で外へ出す**（[`read_msr`] の doc の方針）。**生の値は起動ログへ出すためだけに
 /// 開ける**（[`Efer::raw`]）——**ビットの意味はこの型と `kernel::cpu_state` が持つ。**
@@ -392,13 +392,13 @@ impl Efer {
         self.0
     }
 
-    /// 生の値から作る（2026-09-24。AP が BSP の値を写すため）。
+    /// 生の値から作る（2026-09-24。AP が BSP の値をコピーするため）。
     pub fn from_raw(value: u64) -> Self {
         Efer(value)
     }
 }
 
-/// EFER へ書く（2026-09-24。AP が BSP の値を写す）。
+/// EFER へ書く（2026-09-24。AP が BSP の値をコピーする）。
 ///
 /// # Safety
 ///
@@ -478,8 +478,8 @@ pub struct ApicBase {
     pub x2apic: bool,
     /// この CPU が BSP（bit 8）。
     ///
-    /// **S3（AP 起こし）の入力になると書いていたが、S3 は使わなかった。**
-    /// AP 起こしは MADT の最初の使用可能なエントリで BSP を判定しており、
+    /// **S3（AP の起動）の入力になると書いていたが、S3 は使わなかった。**
+    /// AP の起動は MADT の最初の使用可能なエントリで BSP を判定しており、
     /// このビットは**ログへ出すだけである**（`kernel::apic`）。MADT の順序に
     /// 依存する形なので潜在的な欠陥であり、直さない判断と解禁条件は
     /// `docs/deferred-decisions.md` にある。**このビットは、直すときの
@@ -514,7 +514,7 @@ impl ApicBase {
 /// [`max_physical_address_bits`] の値で、取れなかった場合の 52 は `PhysAddr` の
 /// 上限と同じである（それ以上のビットはどのみち物理アドレスとして表せない）。
 const fn interpret_apic_base(raw: u64, address_bits: u8) -> ApicBase {
-    // `clamp` は const fn ではないので手で畳む。下限が 12 なのは、それ未満だと
+    // `clamp` は const fn ではないので手で範囲に収める。下限が 12 なのは、それ未満だと
     // アドレス部が空になりマスクが 0 になるためである。
     let bits = if address_bits < 12 {
         12

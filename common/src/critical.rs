@@ -79,14 +79,14 @@ pub fn critical_nesting_depth() -> usize {
     CRITICAL_NESTING_DEPTH.this_cpu().load(Ordering::Relaxed)
 }
 
-/// preempt-in-critical の破壊確認（M5-d）で、サボタージュ（[`InterruptGuard`] の
+/// preempt-in-critical の破壊テストでの確認（M5-d）で、サボタージュ（[`InterruptGuard`] の
 /// cli 省略と on_timer_tick の防御スキップ bypass）を「今だけ」有効にするフラグ。
 ///
 /// **かつてサボタージュは大域的だった。** feature を有効にすると全区間で cli を
 /// 落とし防御スキップを外していた。それだとデモ開始（setup / yield）時まで perturb
-/// して、検査対象（保持窓）へ到達する前に `switches=0` の startup レースで約10%落ちた
+/// して、検査対象（保持ウィンドウ）へ到達する前に `switches=0` の startup レースで約10%落ちた
 /// （既定ビルドは20/20健全なので、カーネルではなくサボタージュが原因と実測で確定）。
-/// arm 窓へ絞ることで、デモ開始は正常な cli の下で走り、二重取得を狙う保持窓だけを
+/// arm ウィンドウへ絞ることで、デモ開始は正常な cli の下で走り、二重取得を狙う保持ウィンドウだけを
 /// 壊す。**再び大域化すると startup レースが再発する**（`docs/verification-coverage.md`
 /// の「確率的なテストとフレークの署名」）。
 ///
@@ -169,9 +169,9 @@ impl InterruptGuard {
         let saved_rflags = cpu::read_rflags();
         // preempt-in-critical-break: サボタージュが arm されている間だけ cli を落とす。
         // Locked 保持中も IF=1 のままになり、timer プリエンプトがクリティカル区間へ
-        // 食い込む（M5-d の破壊確認）。**かつては大域的に落としていたが、それだと
+        // 食い込む（M5-d の破壊テストでの確認）。**かつては大域的に落としていたが、それだと
         // デモ開始時まで perturb して startup レースを起こした**（[`SABOTAGE_ARMED`]
-        // 参照）。arm 窓の外は通常どおり cli する。既定ビルドは feature オフなのでこの
+        // 参照）。arm ウィンドウの外は通常どおり cli する。既定ビルドは feature オフなのでこの
         // 判定ごと消え、常に cli する = production は不変。
         #[cfg(feature = "preempt-in-critical-break")]
         let drop_cli = SABOTAGE_ARMED.load(Ordering::Acquire);
@@ -185,7 +185,7 @@ impl InterruptGuard {
             }
         }
         // 入れ子深さを 1 増やす。**cli の後に触る**ので、この増分の最中に割り込みは
-        // 入らない（cli を落とす破壊ビルド + arm 中を除く）。自コアのスロットだけを
+        // 入らない（cli を落とす破壊テストのビルド + arm 中を除く）。自コアのスロットだけを
         // 触る（[`PerCpu::this_cpu`]）。
         CRITICAL_NESTING_DEPTH
             .this_cpu()
@@ -205,7 +205,7 @@ impl InterruptGuard {
 impl Drop for InterruptGuard {
     fn drop(&mut self) {
         // 入れ子深さを 1 減らす。**復元（sti）より前に**減らすことで、
-        // 「まだこのガードを数えているのに IF=1」という窓を作らない。この
+        // 「まだこのガードを数えているのに IF=1」というウィンドウを作らない。この
         // 時点ではまだ割り込み禁止なので、減算の最中に割り込みは入らない。
         CRITICAL_NESTING_DEPTH
             .this_cpu()
@@ -316,11 +316,11 @@ pub struct Locked<T> {
     /// **観測が同じままだと、どちらが起きたのかをログから決められない。**
     /// 保持者を持てば、その場で分かれる。
     ///
-    /// **この段（S4-b-1）ではまだ競合は起きない。** 本番経路で `Locked<T>` を
+    /// **この段階（S4-b-1）ではまだ競合は起きない。** 本番経路で `Locked<T>` を
     /// 触るのは bootstrap processor だけである（キーボードのリングバッファも
     /// ヒープもそうである）。**起きない競合への備えを先に入れているので、
     /// そう書いておく。** 競合が実際に起きうるのは、BKL が入って AP が
-    /// カーネルの共有物へ触るようになる段である。
+    /// カーネルの共有物へ触るようになる段階である。
     holder: AtomicUsize,
 }
 
@@ -359,13 +359,13 @@ impl<T> Locked<T> {
     pub fn lock(&self) -> LockGuard<'_, T> {
         // **この 2 行の順序に意味がある。** 先に割り込みを禁止し、その後で
         // フラグを立てる。逆にすると「フラグは立っているが割り込みはまだ
-        // 有効」という窓ができ、そこへ割り込みが入るとハンドラからは保持中に
+        // 有効」というウィンドウができ、そこへ割り込みが入るとハンドラからは保持中に
         // 見える。ハンドラが同じロックを取ろうとすれば、実際には誰も保持して
         // いないのに二重取得として停止する。現状は割り込みが常時禁止なので
-        // この窓は開かないが、M4-d で sti した後は実際に踏みうる。
+        // このウィンドウは開かないが、M4-d で sti した後は実際に踏みうる。
         //
         // **検査と更新が不可分なのは swap のほうである。** 割り込み禁止を先に
-        // 置くのは、フラグが立っているのに IF=1 という窓を作らないためで、
+        // 置くのは、フラグが立っているのに IF=1 というウィンドウを作らないためで、
         // 不可分性を担っているわけではない。**ここには「禁止してからフラグを
         // 立てれば、シングルコアではその間に横取りされない」と書いてあったが、
         // 別コアは割り込み禁止では止まらない。** 振る舞いは変えていない。
@@ -382,7 +382,7 @@ impl<T> Locked<T> {
             // **既に取られている。原因は 2 通りある（S4-b-1）。**
             //
             // 保持者の読みは競合しうる（読んだ瞬間に解放されているかもしれない）。
-            // **ただしこの段ではどちらの原因でも停止する**ので、判断が変わる
+            // **ただしこの段階ではどちらの原因でも停止する**ので、判断が変わる
             // のは出力する文言だけである。**分類は診断のためにある。**
             let holder = self.holder.load(Ordering::Relaxed);
             if holder == cpu_id() {
@@ -444,7 +444,7 @@ impl<T> Drop for LockGuard<'_, T> {
         // （`interrupts` フィールドはこの後に落ちる）。
         //
         // **保持者を先に消し、フラグを後で落とす。** 逆にすると、フラグが
-        // 落ちた後も保持者が残る窓ができ、次に取ったコアが上書きするまでの間、
+        // 落ちた後も保持者が残るウィンドウができ、次に取ったコアが上書きするまでの間、
         // 診断が古い値を指す。
         self.lock.holder.store(NO_HOLDER, Ordering::Relaxed);
         self.lock.acquired.store(false, Ordering::Release);
@@ -465,10 +465,10 @@ impl<T> Drop for LockGuard<'_, T> {
 /// 競合は「別のコアが同時に触った」である。**どちらも停止するが、直し方が違う。**
 /// 同じ文言で報告すると、ログを読む人が誤った方向を調べることになる。
 ///
-/// # この段では起きない
+/// # この段階では起きない
 ///
 /// 本番経路で `Locked<T>` を触るのは bootstrap processor だけなので、
-/// **この関数はまだ呼ばれない。** 呼ばれうるのは BKL が入る段からである。
+/// **この関数はまだ呼ばれない。** 呼ばれうるのは BKL が入る段階からである。
 fn report_contended_lock_and_halt(holder: usize) -> ! {
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
     serial.init();

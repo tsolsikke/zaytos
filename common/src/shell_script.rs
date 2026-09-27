@@ -6,8 +6,8 @@
 //! カーネルが台本として `read(0)` へ差し込む形である。** **打つ側と読む側の両方が同じ
 //! 一覧を見るので、`common` に置く**（`xtask` と `kernel` の両方が依存している）。
 //!
-//! **目的は `--full` の余裕である**——**打鍵を見ない破壊を、1 本あたり約 50 秒縮む台本の族へ
-//! 移す**（`--shell-test` の破壊は 58 秒、台本の族は 8.5 秒。実測。`ADR-0063` の決定 4）。
+//! **目的は `--full` の余裕である**——**打鍵を見ない破壊テストを、1 本あたり約 50 秒縮む台本のグループへ
+//! 移す**（`--shell-test` の破壊テストは 58 秒、台本のグループは 8.5 秒。実測。`ADR-0063` の決定 4）。
 //!
 //! # 写す規則
 //!
@@ -22,9 +22,9 @@
 //!
 //! # 台本では打てない行
 //!
-//! **Ctrl+C の畳みは IRQ の経路である**（旗を立てるのは IRQ1 のハンドラで、台本は割り込みを
+//! **Ctrl+C の終了処理は IRQ の経路である**（フラグを立てるのは IRQ1 のハンドラで、台本は割り込みを
 //! 起こさない）。**`spin` と、それを止める `ctrl-c` の 2 行は台本から外す**（[`Line::keystrokes_only`]）。
-//! **外した行に寄りかかる判定は、判定の側が「台本では見ない」と印を付ける**
+//! **外した行に寄りかかる判定は、判定の側が「台本では見ない」と目印を付ける**
 //! （`xtask` の `judge_shell_session`）。
 //!
 //! **`tab` は何も出さない**——**実打鍵では入力の輪が捨てる**（`ADR-0050`）**ので、台本でも
@@ -56,7 +56,7 @@ const fn keystrokes_only(keys: &'static [&'static str]) -> Line {
 /// `LINE_MAX` ちょうどの行を打つ本数（SE-c）。
 pub const LONG_LINE_KEYS: usize = 128;
 
-/// `z` を 128 個打って Enter（SE-c。`d7de0ce` の修正に判定を置く）。
+/// `z` を 128 個打って Enter（SE-c。`d7de0ce` の修正に判定を設ける）。
 const LONG_LINE: [&str; LONG_LINE_KEYS + 1] = {
     let mut keys = ["z"; LONG_LINE_KEYS + 1];
     keys[LONG_LINE_KEYS] = "ret";
@@ -297,7 +297,7 @@ pub const LINES: &[Line] = &[
     line(&["up", "up", "ret"]),
     // 打ちかけの行を Ctrl+C で捨てる（深さ 1 の側。バイトで動く）
     line(&["z", "z", "ctrl_r-c", "ret"]),
-    // 回り続ける子を Ctrl+C で止める（深さ 2 の側。IRQ の畳みが要る）
+    // 空回りし続ける子を Ctrl+C で止める（深さ 2 の側。IRQ による終了処理が要る）
     keystrokes_only(&["s", "p", "i", "n", "ret"]),
     keystrokes_only(&["ctrl-c"]),
     // sleep 1（W2-d+）
@@ -306,10 +306,10 @@ pub const LINES: &[Line] = &[
     line(&["e", "x", "i", "t", "ret"]),
 ];
 
-/// 1 回の `read` を空にする印（`kernel/src/input.rs` の `SCRIPT_PAUSE` と同じ値）。
+/// 1 回の `read` を空にする目印（`kernel/src/input.rs` の `SCRIPT_PAUSE` と同じ値）。
 pub const PAUSE: u8 = 0x04;
 
-/// 台本の終わりの印（`kernel/src/input.rs` の `OBSERVE_DONE` と同じ値）。
+/// 台本の終わりの目印（`kernel/src/input.rs` の `OBSERVE_DONE` と同じ値）。
 pub const DONE: u8 = 0x0c;
 
 /// 「次のバイトは字である」の逃げ（`kernel/src/input.rs` の `SCRIPT_LITERAL` と同じ値）。
@@ -384,7 +384,7 @@ const fn starts_with(a: &[u8], prefix: &[u8]) -> bool {
     true
 }
 
-/// キー名をバイトへ写す。**知らない名前は const の評価で止まる**（写し忘れを建て時に捕まえる）。
+/// キー名をバイトへ写す。**知らない名前は const の評価で止まる**（写し忘れをビルド時に検出する）。
 ///
 /// **JIS の刻印**——`shift-4` は `$`、`shift-minus` は `=`、`shift-equal` は `~`、
 /// `shift-semicolon` は `+`、`bracket_left` は `@`、`bracket_right` は `[`、`yen` と `ro` は
@@ -516,7 +516,7 @@ const RENDERED: ([u8; SCRIPT_CAP], usize) = render();
 /// 写した台本の長さ。
 pub const SCRIPT_LEN: usize = RENDERED.1;
 
-/// 長さちょうどの配列へもう一度写す（**const の中では `split_at` が使えない**）。
+/// 長さちょうどの配列へもう一度コピーする（**const の中では `split_at` が使えない**）。
 const SCRIPT_EXACT: [u8; SCRIPT_LEN] = {
     let mut out = [0u8; SCRIPT_LEN];
     let mut i = 0;
@@ -592,7 +592,7 @@ mod tests {
             );
             i += 1;
         }
-        // Ctrl+C の畳みが要る行の数は 2 である。
+        // Ctrl+C の終了処理が要る行の数は 2 である。
         assert_eq!(LINES.iter().filter(|l| l.keystrokes_only).count(), 2);
     }
 }

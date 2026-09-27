@@ -1,14 +1,14 @@
 //! 最小限の ext2 リーダー（S10-a）。
 //!
 //! バイトスライスの読み取りのみで完結する純粋ロジックであり、unsafe を
-//! 一切使わない。ホスト上の `cargo test` で検証する。**像をどこから持って
+//! 一切使わない。ホスト上の `cargo test` で検証する。**イメージをどこから持って
 //! くるかは呼び出し側の責務**で、ここには含めない（S10-a では
-//! `kernel/build.rs` が `mke2fs` で建てた像を `include_bytes!` で抱える）。
+//! `kernel/build.rs` が `mke2fs` でビルドしたイメージを `include_bytes!` で抱える）。
 //!
 //! # どんな入力でもパニックしない
 //!
 //! **この module の公開 API は、任意のバイト列に対してパニックしない。**
-//! 不正な像は [`Ext2Error`] で返る。`docs/roadmap.md` の S10 が
+//! 不正なイメージは [`Ext2Error`] で返る。`docs/roadmap.md` の S10 が
 //! 「壊したイメージでカーネルメモリを壊さずエラーを返すこと」を求めている。
 //!
 //! # 守る範囲は 4 つに分けてある
@@ -20,13 +20,13 @@
 //! - **線2: パーサーの出力が呼び出し側に強いる算術が落ちないこと。**
 //!   ext2 では `block * block_size`（ブロック番号からバイト位置を出す）と、
 //!   ブロックサイズそのもの（`1024 << s_log_block_size` が桁あふれする）
-//! - **線3: 参照が像の外を指さないこと。** ext2 は「番号」で他所を指す形が
+//! - **線3: 参照がイメージの外を指さないこと。** ext2 は「番号」で他所を指す形が
 //!   ELF より多い——ブロック番号、inode 番号、group descriptor が持つ 3 つの
-//!   ブロック番号。**番号だけを見ても妥当性が分からず、像の大きさと突き合わせて
+//!   ブロック番号。**番号だけを見ても妥当性が分からず、イメージの大きさと突き合わせて
 //!   初めて分かる**
 //! - **線4: 走査が止まること。** ディレクトリエントリの `rec_len` が 0 だと
 //!   走査が進まない。**ACPI の MADT で同じ形を踏んでいる**（エントリ長 0。
-//!   `acpi-test-zero-entry-length`）。**S10-a のディレクトリの刻みで当たる**
+//!   `acpi-test-zero-entry-length`）。**S10-a のディレクトリの手順で当たる**
 //!
 //! # 扱わないもの
 //!
@@ -42,7 +42,7 @@
 //! **この節はかつて「穴も扱わない」と書いていた。** 理由として
 //! 「借りて返す形の帰結で、返すべきゼロが像の中に無い」を挙げ、
 //! **「`mke2fs -d` は穴を作らないので、この段の像には現れない」と書いていた。**
-//! **その前提は誤りだった**——zi-d-1 で `/bin/zi` を像へ足したとき、
+//! **その前提は誤りだった**——zi-d-1 で `/bin/zi` をイメージへ足したとき、
 //! **ELF の中の全 0 の 1 ブロックが穴になった**（`debugfs` で実測）。
 //! **既存の 6 本がそれまで踏まなかったのは運である。**
 //!
@@ -53,15 +53,15 @@
 ///
 /// # なぜ静的に置くのか
 ///
-/// **[`Ext2::file_block`] は像の中のバイト列を借りて返す**（`&'a [u8]`）。
-/// **穴には対応するバイト列が像の中に無い**ので、借りる先をどこかに持つ
+/// **[`Ext2::file_block`] はイメージの中のバイト列を借りて返す**（`&'a [u8]`）。
+/// **穴には対応するバイト列がイメージの中に無い**ので、借りる先をどこかに持つ
 /// 必要がある。**戻り値を「借りた列」か「長さだけの穴」かの列挙へ変える案も
 /// あったが、呼び出し側すべてに分岐が増える**ので採らなかった（ADR-0038）。
 ///
 /// # 大きさ
 ///
 /// **ブロックサイズの上限は 65536 である**——`s_log_block_size` のシフト量を
-/// 6 で頭打ちにしてあり（`1024 << 6`）、それを越える像は
+/// 6 で頭打ちにしてあり（`1024 << 6`）、それを越えるイメージは
 /// [`Ext2Error::BadBlockSizeShift`] で拒む。**したがってこの配列で必ず足りる。**
 ///
 /// **`'static` なので、`&'a` としてそのまま貸せる**（`'static: 'a`）。
@@ -70,7 +70,7 @@ static ZERO_BLOCK: [u8; 65536] = [0; 65536];
 /// ext2 の magic（`s_magic`）。
 const EXT2_MAGIC: u16 = 0xEF53;
 
-/// superblock の像内オフセット。**ブロックサイズに依らず 1024 で固定である。**
+/// superblock のイメージ内オフセット。**ブロックサイズに依らず 1024 で固定である。**
 const SUPERBLOCK_OFFSET: usize = 1024;
 
 /// superblock のうち、この module が読む範囲。
@@ -80,7 +80,7 @@ const SUPERBLOCK_MIN_LEN: usize = 104;
 ///
 /// # [`SUPERBLOCK_MIN_LEN`] を伸ばさない
 ///
-/// **伸ばすと、受理する像が狭まる**——**いま通っている短い像を拒む方向に働く。**
+/// **伸ばすと、受理するイメージが狭まる**——**いま通っている短いイメージを拒む方向に働く。**
 /// **f-3 が変えたいのは書く側であって、受理する範囲ではない。**
 /// **そこで、届かなければ 0 として扱う**（[`Ext2::want_extra_isize`]）。
 const SUPERBLOCK_WANT_EXTRA_ISIZE: usize = 350;
@@ -112,7 +112,7 @@ const GROUP_DESCRIPTOR_FREE_INODES_COUNT: usize = 14;
 ///
 /// # `cfg` を外した（DIR-1c）
 ///
-/// **以前は破壊（`ext2-create-move-dirs-count`）だけが触る欄で、
+/// **以前は破壊テスト（`ext2-create-move-dirs-count`）だけが触る欄で、
 /// 同じ `cfg` で囲んであった**——**既定のビルドで一度も使われず
 /// `dead_code` が出るためである。**
 ///
@@ -197,7 +197,7 @@ const PATH_SEPARATOR: u8 = b'/';
 ///
 /// **要素 1 つにつきディレクトリを 1 回走査する。** パスは S10-b で
 /// ユーザー空間から来るので、**区切りだけを並べた長いパスは、走査を要素の数だけ
-/// 走らせる。** 上限を置くと、**そこで確実にエラーが返る**（黙って長く働かない）。
+/// 走らせる。** 上限を設けると、**そこで確実にエラーが返る**（黙って長く働かない）。
 ///
 /// **上限が要る理由と、止まる理由を分けて書いておく。** 混ぜると、
 /// 「上限があるから止まる」という誤った根拠が残る。
@@ -215,7 +215,7 @@ const PATH_SEPARATOR: u8 = b'/';
 /// # 外す条件
 ///
 /// **「ユーザー空間から来るパスで 64 では足りないと分かったとき」。**
-/// 今の木は `/data/indirect-first` が最も深くて 2 段しかない。
+/// 今のツリーは `/data/indirect-first` が最も深くて 2 段しかない。
 pub const MAX_PATH_COMPONENTS: usize = 64;
 
 /// `i_mode` のうちファイル種別を表すビット。
@@ -251,16 +251,16 @@ pub enum Ext2Error {
     ImageTooSmall { needed: u64, actual: u64 },
     /// ブロック番号が `s_blocks_count` の外を指している（線3）。
     BlockOutOfRange(u32),
-    /// group descriptor テーブルが像の外へ出る（線3）。
+    /// group descriptor テーブルがイメージの外へ出る（線3）。
     GroupDescriptorsOutOfRange,
     /// inode 番号が 0、または `s_inodes_count` を超えている（線3）。
     ///
     /// **ext2 の inode 番号は 1 始まりである。** 0 は「無い」を意味する値で、
     /// **`(ino - 1)` を先に計算すると桁借りする**（線2）。
     InodeOutOfRange(u32),
-    /// inode の在るはずのバイト位置が像の外へ出る（線2・線3）。
+    /// inode の在るはずのバイト位置がイメージの外へ出る（線2・線3）。
     ///
-    /// **group descriptor の `inode_table` が像の中を指していても、そこから
+    /// **group descriptor の `inode_table` がイメージの中を指していても、そこから
     /// `index * s_inode_size` だけ進んだ先が中とは限らない。**
     InodeTableOutOfRange { inode: u32, needed: u64 },
     /// ファイル内のブロック番号が `i_size` の外を指している。
@@ -272,7 +272,7 @@ pub enum Ext2Error {
     /// **ADR-0038 以降、`common::ext2` はこれを返さない。** 穴は全 0 として
     /// 読めるようになった（[`ZERO_BLOCK`]）ので、**この経路は到達不能である。**
     ///
-    /// **残す理由**: `kernel/src/userland.rs` の像の写しループが、進む量が 0 に
+    /// **残す理由**: `kernel/src/userland.rs` のイメージのコピーループが、進む量が 0 に
     /// なった場合の防御としてこの値を構成する（そちらも実際には到達しないが、
     /// **「進む量が必ず正である」という線 4 の主張を型で表している**）。
     /// 消すと errno の対応表とあちらの防御に手が入り、**得るものが無い。**
@@ -303,15 +303,15 @@ pub enum Ext2Error {
     NotFound,
 }
 
-/// 受理した ext2 の像。**元のバイトスライスを借用するのみで、コピーしない。**
+/// 受理した ext2 のイメージ。**元のバイトスライスを借用するのみで、コピーしない。**
 ///
 /// # 構築後に成り立っている不変条件
 ///
 /// - `block_size` は 1024..=65536 の 2 の冪で、`block_size * blocks_count` が
-///   像の長さ以下である
+///   イメージの長さ以下である
 /// - `blocks_per_group` と `inodes_per_group` は 0 でない
 /// - INCOMPAT の未知ビットが立っていない
-/// - **group descriptor テーブル全体が像の中にある**
+/// - **group descriptor テーブル全体がイメージの中にある**
 pub struct Ext2<'a> {
     image: &'a [u8],
     block_size: u32,
@@ -334,7 +334,7 @@ pub struct Ext2<'a> {
     want_extra_isize: u16,
 }
 
-/// **`Debug` は手で書く。** `derive` すると像そのもの（2 MiB）が
+/// **`Debug` は手で書く。** `derive` するとイメージそのもの（2 MiB）が
 /// `unwrap_err` の診断へ出る。**出したいのは形であって中身ではない。**
 impl core::fmt::Debug for Ext2<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -386,7 +386,7 @@ pub struct Inode {
     ///
     /// **間接ブロックも数に入る。** 実測で `/data/indirect-first` は 112 で、
     /// 14 ブロック分（データ 13 + 単一間接 1）× 4096 / 512 である。
-    /// **Linux の `st_blocks` がそのまま同じ意味なので、写すだけで足りる。**
+    /// **Linux の `st_blocks` がそのまま同じ意味なので、コピーするだけで足りる。**
     pub blocks_512: u32,
     /// `i_block`。0..12 が直接、12 が単一間接、13 が二重、14 が三重である。
     pub blocks: [u32; INODE_BLOCK_COUNT],
@@ -410,17 +410,17 @@ impl Inode {
     /// 呼び出し側から見て「短いファイル」と区別が付かない。** ファイル単位で
     /// 拒むほうが、扱えないことが呼び出し側へ確実に伝わる。
     ///
-    /// **今の像には現れない。** 二重間接が要るのは 12 + 1024 ブロック
-    /// （4 MiB 超）からで、2 MiB の像には収まらない。**壊した像に対する備えである。**
+    /// **今のイメージには現れない。** 二重間接が要るのは 12 + 1024 ブロック
+    /// （4 MiB 超）からで、2 MiB のイメージには収まらない。**壊したイメージに対する備えである。**
     pub fn uses_unsupported_indirection(&self) -> bool {
         self.blocks[DOUBLE_INDIRECT_SLOT] != 0 || self.blocks[TRIPLE_INDIRECT_SLOT] != 0
     }
 }
 
-/// ディレクトリエントリ 1 つ分。**名前は像から借りて返す。**
+/// ディレクトリエントリ 1 つ分。**名前はイメージから借りて返す。**
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirEntry<'a> {
-    /// 指している inode 番号。**0 のエントリ（未使用の枠）は走査が飛ばすので、
+    /// 指している inode 番号。**0 のエントリ（未使用のスロット）は走査が飛ばすので、
     /// ここへは現れない。**
     pub inode: u32,
     /// [`DIRENT_TYPE_REGULAR`] などの種別。
@@ -440,7 +440,7 @@ pub struct DirEntry<'a> {
     /// # 「ext2 だからバイト位置」であって「`d_off` がバイト位置だから」ではない
     ///
     /// **理由を取り違えると、次の判断が変わる。** ここが線形の走査でよいのは
-    /// **`dir_index`（COMPAT の機能ビット。像には立っているが実装していない）を
+    /// **`dir_index`（COMPAT の機能ビット。イメージには立っているが実装していない）を
     /// 辿っていないからである。**
     ///
     /// **`dir_index` を実装したら、バイト位置では足りなくなる。** 索引付きの
@@ -466,7 +466,7 @@ impl DirEntry<'_> {
 ///
 /// # 止まること（線4）
 ///
-/// **`rec_len` が 0 だと位置が動かず、走査が無限に回る。** ACPI の MADT で
+/// **`rec_len` が 0 だと位置が動かず、走査が無限に空回りする。** ACPI の MADT で
 /// 同じ形を踏んでいる（エントリ長 0。`acpi-test-zero-entry-length`）。
 /// **「止まらないこと」は「エラーが返ること」で観測する。**
 ///
@@ -576,7 +576,7 @@ impl<'a> Iterator for DirEntries<'_, 'a> {
             // 進む量は 8 以上、かつブロックの内側である。
             self.offset += usize::from(rec_len);
 
-            // inode 0 は未使用の枠である。**位置は進めた上で飛ばす。**
+            // inode 0 は未使用のスロットである。**位置は進めた上で飛ばす。**
             if inode == 0 {
                 continue;
             }
@@ -592,7 +592,7 @@ impl<'a> Iterator for DirEntries<'_, 'a> {
 }
 
 impl<'a> Ext2<'a> {
-    /// superblock を検証し、group descriptor テーブルが像に収まることまで確かめる。
+    /// superblock を検証し、group descriptor テーブルがイメージに収まることまで確かめる。
     ///
     /// **拒む理由は [`Ext2Error`] で区別できる。パニックはしない。**
     pub fn parse(image: &'a [u8]) -> Result<Self, Ext2Error> {
@@ -645,7 +645,7 @@ impl<'a> Ext2<'a> {
         // **新しい inode へ書く `i_extra_isize`（S12-f-3）。**
         //
         // **`SUPERBLOCK_MIN_LEN` の外にあるので、届くかを見てから読む。**
-        // **届かない像、値が 0 の像、追加領域が inode に収まらない像では 0 にする**
+        // **届かないイメージ、値が 0 のイメージ、追加領域が inode に収まらないイメージでは 0 にする**
         // ——**0 は「追加領域を持たない」という妥当な ext2 である。**
         // **倒れたことは呼び出し側から見える**（[`Ext2::want_extra_isize`] が 0 を返す）。
         let want_extra_isize = {
@@ -662,7 +662,7 @@ impl<'a> Ext2<'a> {
             }
         };
 
-        // 線3: 名乗った大きさが像に収まるか。**u64 で掛ける**（u32 では溢れる）。
+        // 線3: 名乗った大きさがイメージに収まるか。**u64 で掛ける**（u32 では溢れる）。
         let needed = u64::from(blocks_count) * u64::from(block_size);
         if needed > image.len() as u64 {
             return Err(Ext2Error::ImageTooSmall {
@@ -699,7 +699,7 @@ impl<'a> Ext2<'a> {
             want_extra_isize,
         };
 
-        // 線3: group descriptor テーブル全体が像の中にあるか。
+        // 線3: group descriptor テーブル全体がイメージの中にあるか。
         // **テーブルは superblock の次のブロックから始まる。**
         let table_start = u64::from(first_data_block + 1) * u64::from(block_size);
         let table_len = u64::from(group_count) * GROUP_DESCRIPTOR_SIZE as u64;
@@ -746,7 +746,7 @@ impl<'a> Ext2<'a> {
     pub fn feature_ro_compat(&self) -> u32 {
         self.feature_ro_compat
     }
-    /// 書き換えに要る配置を写して返す（S12-b）。**`Copy` なので像を借りない。**
+    /// 書き換えに要る配置をコピーして返す（S12-b）。**`Copy` なのでイメージを借りない。**
     pub fn layout(&self) -> Layout {
         Layout {
             block_size: self.block_size,
@@ -782,7 +782,7 @@ impl<'a> Ext2<'a> {
     ///
     /// **黙って倒れると、書いているつもりで書いていない状態になる。**
     /// **カーネルは起動ログへこの値を出す**ので、
-    /// **像を替えて 0 になったときに、判定行の側から気づける。**
+    /// **イメージを替えて 0 になったときに、判定行の側から気づける。**
     pub fn want_extra_isize(&self) -> u16 {
         self.want_extra_isize
     }
@@ -794,12 +794,12 @@ impl<'a> Ext2<'a> {
     ///
     /// # なぜコピーしないか
     ///
-    /// **像は既に RAM にあり、読み取り専用で、寿命が `'static` である**
+    /// **イメージは既に RAM にあり、読み取り専用で、寿命が `'static` である**
     /// （カーネルは `include_bytes!` で `.rodata` に抱える）。**コピーする形
     /// （`read_block(&self, block, dst)`）にすると、コピーを 1 つ増やすだけに
     /// なる。**
     ///
-    /// **借りて返す形が成立するのは、像が RAM 上にあるからである。実デバイスは
+    /// **借りて返す形が成立するのは、イメージが RAM 上にあるからである。実デバイスは
     /// 要求してから届くので、S13（永続ブロックストレージ）では
     /// `read_block` の形になる。****そこが trait を引く境界である。**
     pub fn block_bytes(&self, block: u32) -> Result<&'a [u8], Ext2Error> {
@@ -815,7 +815,7 @@ impl<'a> Ext2<'a> {
         Ok(&self.image[start as usize..end as usize])
     }
 
-    /// group descriptor を 1 つ読む。**3 つのブロック番号が像の外を指していない
+    /// group descriptor を 1 つ読む。**3 つのブロック番号がイメージの外を指していない
     /// ことまで確かめる**（線3）。
     pub fn group_descriptor(&self, group: u32) -> Result<BlockGroupDescriptor, Ext2Error> {
         if group >= self.group_count {
@@ -833,7 +833,7 @@ impl<'a> Ext2<'a> {
             block_bitmap: read_u32(raw, 0),
             inode_bitmap: read_u32(raw, 4),
             inode_table: read_u32(raw, 8),
-            // 破壊 (S12-b, ext2-group-count-offset): 空きブロック数を 2 バイト
+            // 破壊テスト (S12-b, ext2-group-count-offset): 空きブロック数を 2 バイト
             // 先（空き inode 数の欄）から読む。**外の道具の値と食い違う。**
             #[cfg(not(feature = "ext2-group-count-offset-break"))]
             free_blocks_count: read_u16(raw, 12),
@@ -862,7 +862,7 @@ impl<'a> Ext2<'a> {
     ///   ならない。**0 を弾くのは範囲の話だけではない**——`ino - 1` が桁借りする
     /// - **線2: テーブル内の位置の算術。** `inode_table * block_size` も
     ///   `index * inode_size` も u32 では溢れうるので、**u64 で組み立てる**
-    /// - **線3: `i_block` の 15 項。** 0 でない項が像の外を指していないことを、
+    /// - **線3: `i_block` の 15 項。** 0 でない項がイメージの外を指していないことを、
     ///   **返す前に全部見る**。**辿る側に番号の妥当性を持ち回らせない**
     pub fn inode(&self, ino: u32) -> Result<Inode, Ext2Error> {
         if ino == 0 || ino > self.inodes_count {
@@ -927,7 +927,7 @@ impl<'a> Ext2<'a> {
     /// [`Ext2Error::IndirectBlockUnsupported`] で返る（`docs/roadmap.md` の S10 が
     /// 実装しないと宣言している）。
     ///
-    /// **穴（ブロック番号 0）は全 0 が返る**（ADR-0038）。像の中に対応する
+    /// **穴（ブロック番号 0）は全 0 が返る**（ADR-0038）。イメージの中に対応する
     /// バイト列が無いので、[`ZERO_BLOCK`] を貸す。**最後のブロックの切り詰めは
     /// 穴でも同じに効く。**
     pub fn file_block(&self, inode: &Inode, index: u32) -> Result<&'a [u8], Ext2Error> {
@@ -945,8 +945,8 @@ impl<'a> Ext2<'a> {
         let block = self.block_number_of(inode, index)?;
         // **穴は全 0 として読む（ADR-0038）。**
         //
-        // 破壊 (ADR-0038, ext2-sparse-as-error): 穴を拒む形へ戻す。
-        // **`/data/sparse-hole` の読み出しが落ち**、`/bin/zi` も起こせなくなる
+        // 破壊テスト (ADR-0038, ext2-sparse-as-error): 穴を拒む形へ戻す。
+        // **`/data/sparse-hole` の読み出しが落ち**、`/bin/zi` も起動できなくなる
         // （この変更が入る前の挙動そのものである）。
         let bytes = if block == 0 {
             #[cfg(feature = "ext2-sparse-as-error")]
@@ -978,7 +978,7 @@ impl<'a> Ext2<'a> {
     ///   `entries_per_block` で先に頭打ちにしてあるので `block_size` を超えない
     /// - **線1: 表からの切り出し。** 上の理由で範囲内だが、**理由に頼らず
     ///   `get` で切る**。外れたらエラーで返る
-    /// - **線3: 表から読んだブロック番号。** **これは像の中の任意のバイト列である。**
+    /// - **線3: 表から読んだブロック番号。** **これはイメージの中の任意のバイト列である。**
     ///   `s_blocks_count` の内側を指す保証がどこにも無いので、
     ///   [`Self::block_bytes`] が突き合わせる。**`i_block` の 15 項と違い、
     ///   [`Self::inode`] では見られない**——表は inode の外にあるからである
@@ -1018,7 +1018,7 @@ impl<'a> Ext2<'a> {
     /// ディレクトリのエントリを走査する（S10-a）。
     ///
     /// **返るのは有限回で終わる走査である**（[`DirEntries`] に根拠がある）。
-    /// **未使用の枠（`inode` が 0）は飛ばす**ので、返るエントリはすべて
+    /// **未使用のスロット（`inode` が 0）は飛ばす**ので、返るエントリはすべて
     /// 実在の inode を指している。
     pub fn directory_entries(&self, inode: &Inode) -> Result<DirEntries<'_, 'a>, Ext2Error> {
         self.directory_entries_from(inode, 0)
@@ -1062,7 +1062,7 @@ impl<'a> Ext2<'a> {
     ///
     /// **`dentry` を置かない**（`docs/roadmap.md` の S10 で決めた）。
     /// キャッシュと参照カウントが目的の構造なので、**引く回数が問題になって
-    /// いない段では、毎回ルートから辿れば足りる。**
+    /// いない段階では、毎回ルートから辿れば足りる。**
     ///
     /// # 区切りの扱いは Linux に合わせる
     ///
@@ -1129,7 +1129,7 @@ impl<'a> Ext2<'a> {
     /// `i_size` を覆うのに要るブロックの数。
     ///
     /// **`i_size` が 0 なら 0 である。** 頭打ちにしない——**辿れるかどうかは
-    /// [`Self::file_block`] の結果で分かる**ので、ここでは大きさだけを言う。
+    /// [`Self::file_block`] の結果で分かる**ので、ここでは大きさだけを示す。
     pub fn block_span(&self, inode: &Inode) -> u64 {
         inode.size.div_ceil(u64::from(self.block_size))
     }
@@ -1138,17 +1138,17 @@ impl<'a> Ext2<'a> {
 // 添字で切り出して `unwrap` する。範囲内であることは呼び出し側が保証している
 // （`parse` 冒頭の長さ検査と、`group_descriptor` が渡す 32 バイトちょうどの
 // スライスが根拠で、どちらもオフセットは固定である）。
-/// 像を書き換えるのに要る配置（S12-b）。
+/// イメージを書き換えるのに要る配置（S12-b）。
 ///
 /// # なぜ `Ext2` を可変にしないのか
 ///
-/// **`Ext2` は像を借りている。** 全体を可変にすると、**読み取りの経路すべてが
+/// **`Ext2` はイメージを借りている。** 全体を可変にすると、**読み取りの経路すべてが
 /// 可変借用に巻き込まれる**——`lookup` も `file_block` も、返した参照が
 /// 生きている間は書けなくなる。
 ///
-/// **代わりに、配置だけを写して持ち出す。** これは `Copy` なので、
-/// **`Ext2` を落としてから像を可変で借り直せる。**
-/// **読む型と書く関数が、同じ像を同時に借りない形である。**
+/// **代わりに、配置だけをコピーして持ち出す。** これは `Copy` なので、
+/// **`Ext2` を落としてからイメージを可変で借り直せる。**
+/// **読む型と書く関数が、同じイメージを同時に借りない形である。**
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layout {
     block_size: u32,
@@ -1165,8 +1165,8 @@ pub struct Layout {
     /// 配ってよい最も小さい inode 番号（`s_first_ino`。S12-e）。
     ///
     /// **これより小さい番号は ext2 が用途を決めている**（ルートは 2 など）。
-    /// **ビットマップにも印が立っているはずだが、そこに頼らない**——
-    /// **印が落ちた像を渡されたときに、予約された番号を配ってしまう。**
+    /// **ビットマップにも目印が立っているはずだが、そこに頼らない**——
+    /// **目印が落ちたイメージを渡されたときに、予約された番号を配ってしまう。**
     first_inode: u32,
 }
 
@@ -1175,11 +1175,11 @@ pub struct Layout {
 pub enum AllocError {
     /// 空きが無い。
     Full,
-    /// 番号が像の外である。
+    /// 番号がイメージの外である。
     BlockOutOfRange(u32),
     /// 解放しようとしたブロックが、そもそも使われていない。
     NotAllocated(u32),
-    /// 像が短く、触ろうとした場所が入っていない。
+    /// イメージが短く、触ろうとした場所が入っていない。
     ImageTooSmall,
     /// 空き数の欄が、ビットマップと食い違っている。
     ///
@@ -1188,7 +1188,7 @@ pub enum AllocError {
     /// inode 番号が 0、または `s_inodes_count` を超えている（S12-e）。
     ///
     /// **[`AllocError::BlockOutOfRange`] を流用しない。** 追記と縮めは
-    /// inode 番号をあちらで返しているが（S12-c）、**番号の族が違うものを
+    /// inode 番号をあちらで返しているが（S12-c）、**番号の種類が違うものを
     /// 同じ変種で返すと、診断で取り違える。**
     InodeOutOfRange(u32),
     /// 名前が空、255 バイトを超える、`/` を含む、または `.` か `..`（S12-e）。
@@ -1215,7 +1215,7 @@ pub enum AllocError {
     /// ディレクトリが空でない（DIR-1c）。**`.` と `..` 以外の名前が残っている。**
     ///
     /// **`rmdir` が断る形である。** **中身ごと消す道（`rm -r`）は作らない**
-    /// ——**「何を消すか」を数える判断が要り、別の段である。**
+    /// ——**「何を消すか」を数える判断が要り、別の段階である。**
     DirectoryNotEmpty(u32),
     /// ディレクトリのバイト列が、エントリの並びとして読めない（S12-e）。
     ///
@@ -1235,9 +1235,9 @@ impl Layout {
         Some((index / self.blocks_per_group, index % self.blocks_per_group))
     }
 
-    /// inode の像内オフセット（S12-c）。**`Ext2::inode` と同じ算術である。**
+    /// inode のイメージ内オフセット（S12-c）。**`Ext2::inode` と同じ算術である。**
     ///
-    /// **テーブルの位置は群の descriptor にあるので、像を読む。**
+    /// **テーブルの位置は群の descriptor にあるので、イメージを読む。**
     fn inode_at(&self, image: &[u8], ino: u32) -> Option<usize> {
         if ino == 0 || ino > self.inodes_count {
             return None;
@@ -1261,12 +1261,12 @@ impl Layout {
     /// 1 ブロックあたりの 512 バイト単位の数（`i_blocks` の単位。S12-c）。
     ///
     /// **`i_blocks` はバイトでもブロックでもなく、512 バイト単位である。**
-    /// **既存の族に単位の取り違えがある**（`stat-blocks-in-bytes`）。
+    /// **既存のテストのグループに単位の取り違えがある**（`stat-blocks-in-bytes`）。
     fn sectors_per_block(&self) -> u32 {
         self.block_size / 512
     }
 
-    /// 群の descriptor の像内オフセット。
+    /// 群の descriptor のイメージ内オフセット。
     fn descriptor_at(&self, group: u32) -> Option<usize> {
         if group >= self.group_count {
             return None;
@@ -1276,18 +1276,18 @@ impl Layout {
         usize::try_from(offset).ok()
     }
 
-    /// ブロックの像内オフセット（T3-2）。
+    /// ブロックのイメージ内オフセット（T3-2）。
     ///
     /// **`block * block_size` を 1 箇所へ集めた。** 書く側の 8 箇所が
     /// 同じ算術を同じ `map_err` ごと書いていた。
     ///
     /// **読む側はまだ差し替えていない**——同じ算術が [`Ext2`] の側に残っている
     /// （`block_bytes` など）。**T3 の一覧は着手時に閉じるので、読む側は
-    /// 行を立てて次の整理の段で拾う**（`docs/deferred-decisions.md`）。
+    /// 行を立てて次の整理の段階で拾う**（`docs/deferred-decisions.md`）。
     ///
     /// **[`Layout::descriptor_at`] と違って `Option` でなく `Err` を返す**——
     /// あちらは呼ぶ側ごとに誤りの種類が違うが、**こちらは 8 箇所すべてが
-    /// [`AllocError::ImageTooSmall`] へ写していた。** 呼ぶ側に選ばせる理由が無い。
+    /// [`AllocError::ImageTooSmall`] へマップしていた。** 呼ぶ側に選ばせる理由が無い。
     fn block_at(&self, block: u32) -> Result<usize, AllocError> {
         usize::try_from(u64::from(block) * u64::from(self.block_size))
             .map_err(|_| AllocError::ImageTooSmall)
@@ -1305,7 +1305,7 @@ fn bitmap_slot(bitmap: usize, index: u32) -> (usize, u8) {
     (bitmap + (index / 8) as usize, 1u8 << (index % 8))
 }
 
-/// `i_block[index]` の像内オフセット（T3-2）。
+/// `i_block[index]` のイメージ内オフセット（T3-2）。
 ///
 /// **`+ 40 + index * 4` を 1 箇所へ集めた。** 40 は inode の中の `i_block` の
 /// 位置、4 はスロットの幅である。
@@ -1316,7 +1316,7 @@ fn bitmap_slot(bitmap: usize, index: u32) -> (usize, u8) {
 /// **ここに集めた時点で散らばりは消えている**ので、名前は要る場面が出たら付ける。
 ///
 /// **読む側はまだ差し替えていない**——[`Ext2::inode`] が同じ位置を自分で
-/// 読んでいる。**行を立てて次の整理の段で拾う**（`docs/deferred-decisions.md`）。
+/// 読んでいる。**行を立てて次の整理の段階で拾う**（`docs/deferred-decisions.md`）。
 fn i_block_slot(inode_at: usize, index: usize) -> usize {
     inode_at + 40 + index * 4
 }
@@ -1352,15 +1352,15 @@ pub fn allocate_block(image: &mut [u8], layout: &Layout) -> Result<u32, AllocErr
             if byte >= image.len() {
                 return Err(AllocError::ImageTooSmall);
             }
-            // 破壊 (S12-b, ext2-alloc-ignore-bitmap): 使用中でも取る。
+            // 破壊テスト (S12-b, ext2-alloc-ignore-bitmap): 使用中でも取る。
             // **ビットマップは既に 1 なので変わらず、会計だけが減る。**
-            // **e2fsck は会計とビットマップの食い違いとして捕まえる**（実測）。
+            // **e2fsck は会計とビットマップの食い違いとして検出する**（実測）。
             #[cfg(not(feature = "ext2-alloc-ignore-bitmap-break"))]
             if image[byte] & mask != 0 {
                 continue;
             }
             // **飽和させない。** ビットマップに空きがあるのに会計が 0 なら、
-            // **像がそもそも食い違っている。** 黙って 0 のままにすると、
+            // **イメージがそもそも食い違っている。** 黙って 0 のままにすると、
             // **解放で 1 増えて往復が戻らない**（実測で踏んだ）。
             let free = read_u16(image, descriptor + GROUP_DESCRIPTOR_FREE_BLOCKS_COUNT)
                 .checked_sub(1)
@@ -1369,13 +1369,13 @@ pub fn allocate_block(image: &mut [u8], layout: &Layout) -> Result<u32, AllocErr
                 .checked_sub(1)
                 .ok_or(AllocError::FreeCountInconsistent)?;
             image[byte] |= mask;
-            // 破壊 (S12-b, ext2-alloc-skip-bg-count): 群の欄を直さない。
+            // 破壊テスト (S12-b, ext2-alloc-skip-bg-count): 群の欄を直さない。
             // **e2fsck が `for group #0` 付きで報告する**（実測）。
             #[cfg(not(feature = "ext2-alloc-skip-bg-count-break"))]
             image[descriptor + GROUP_DESCRIPTOR_FREE_BLOCKS_COUNT
                 ..descriptor + GROUP_DESCRIPTOR_FREE_BLOCKS_COUNT + 2]
                 .copy_from_slice(&free.to_le_bytes());
-            // 破壊 (S12-b, ext2-alloc-skip-sb-count): superblock の欄を直さない。
+            // 破壊テスト (S12-b, ext2-alloc-skip-sb-count): superblock の欄を直さない。
             // **e2fsck が群の番号なしで報告する**（実測。文言で区別できる）。
             #[cfg(not(feature = "ext2-alloc-skip-sb-count-break"))]
             image[SUPERBLOCK_OFFSET + SUPERBLOCK_FREE_BLOCKS_COUNT
@@ -1390,7 +1390,7 @@ pub fn allocate_block(image: &mut [u8], layout: &Layout) -> Result<u32, AllocErr
 /// ブロックを 1 つ返し、会計も直す（S12-b）。
 ///
 /// **[`allocate_block`] とちょうど逆である**——3 つとも戻す。
-/// **戻し方が 1 つでも違えば、往復して像が元へ戻らない。**
+/// **戻し方が 1 つでも違えば、往復してイメージが元へ戻らない。**
 pub fn free_block(image: &mut [u8], layout: &Layout, block: u32) -> Result<(), AllocError> {
     let (group, index) = layout
         .locate(block)
@@ -1416,8 +1416,8 @@ pub fn free_block(image: &mut [u8], layout: &Layout, block: u32) -> Result<(), A
     let total = read_u32(image, SUPERBLOCK_OFFSET + SUPERBLOCK_FREE_BLOCKS_COUNT)
         .checked_add(1)
         .ok_or(AllocError::FreeCountInconsistent)?;
-    // 破壊 (S12-b, ext2-free-skip-bit): ビットを落とさず、会計だけ戻す。
-    // **往復しても像が元へ戻らない**——バイト一致が捕まえる。
+    // 破壊テスト (S12-b, ext2-free-skip-bit): ビットを落とさず、会計だけ戻す。
+    // **往復してもイメージが元へ戻らない**——バイト一致が検出する。
     #[cfg(not(feature = "ext2-free-skip-bit-break"))]
     {
         image[byte] &= !mask;
@@ -1449,8 +1449,8 @@ pub fn free_block(image: &mut [u8], layout: &Layout, block: u32) -> Result<(), A
 /// # 直すのは 3 つである
 ///
 /// 中身、`i_size`、`i_blocks`。**`i_blocks` は 512 バイト単位である。**
-/// **`i_size` を直さないと `e2fsck` が `i_size is …` と言い、
-/// `i_blocks` を直さないと `i_blocks is …` と言う**（実測。文言が違う）。
+/// **`i_size` を直さないと `e2fsck` が `i_size is …` と出力し、
+/// `i_blocks` を直さないと `i_blocks is …` と出力する**（実測。文言が違う）。
 ///
 /// # 直接ブロックだけを使う
 ///
@@ -1477,8 +1477,8 @@ pub fn append_to_file(
             return Err(AllocError::Full);
         }
 
-        // 破壊 (S12-c, ext2-append-always-allocate): 末尾の空きを見ずに、
-        // **毎回割り当てる。** **空き数が余計に減る**ので、外の道具が捕まえる。
+        // 破壊テスト (S12-c, ext2-append-always-allocate): 末尾の空きを見ずに、
+        // **毎回割り当てる。** **空き数が余計に減る**ので、外の道具が検出する。
         #[cfg(not(feature = "ext2-append-always-allocate-break"))]
         let needs_block = offset_in_block == 0;
         #[cfg(feature = "ext2-append-always-allocate-break")]
@@ -1488,7 +1488,7 @@ pub fn append_to_file(
         let slot = i_block_slot(inode, index as usize);
         let block = if needs_block {
             let block = allocate_block(image, layout)?;
-            // 破壊 (S12-c, ext2-append-skip-link): 取ったブロックを inode へ繋がない。
+            // 破壊テスト (S12-c, ext2-append-skip-link): 取ったブロックを inode へ繋がない。
             // **割り当てたのに誰も参照しないので、`Block bitmap differences` が出る。**
             #[cfg(not(feature = "ext2-append-skip-link"))]
             image[slot..slot + 4].copy_from_slice(&block.to_le_bytes());
@@ -1508,10 +1508,10 @@ pub fn append_to_file(
         size += take as u32;
     }
 
-    // 破壊 (S12-c, ext2-append-skip-size): `i_size` を直さない。
-    // **`e2fsck` が `i_size is …` と言い、取り出した中身も短くなる。**
+    // 破壊テスト (S12-c, ext2-append-skip-size): `i_size` を直さない。
+    // **`e2fsck` が `i_size is …` と出力し、取り出した中身も短くなる。**
     #[cfg(not(feature = "ext2-append-skip-size"))]
-    // 破壊 (S12-c, ext2-append-round-size): ブロック境界へ丸めた値を書く。
+    // 破壊テスト (S12-c, ext2-append-round-size): ブロック境界へ丸めた値を書く。
     // **`e2fsck` が期待する値そのものなので通り抜ける。** 中身の長さだけが違う。
     {
         #[cfg(not(feature = "ext2-append-round-size"))]
@@ -1523,13 +1523,13 @@ pub fn append_to_file(
 
     // `i_blocks` は 512 バイト単位で、使っているブロック数から導く。
     let used = size.div_ceil(block_size);
-    // 破壊 (S12-c, ext2-append-blocks-in-bytes): バイト単位で書く。
-    // **単位の取り違えで、既存の族と同じ機序である**（`stat-blocks-in-bytes`）。
+    // 破壊テスト (S12-c, ext2-append-blocks-in-bytes): バイト単位で書く。
+    // **単位の取り違えで、既存のテストのグループと同じ機序である**（`stat-blocks-in-bytes`）。
     #[cfg(not(feature = "ext2-append-blocks-in-bytes"))]
     let sectors = used * layout.sectors_per_block();
     #[cfg(feature = "ext2-append-blocks-in-bytes")]
     let sectors = used * block_size;
-    // 破壊 (S12-c, ext2-append-skip-blocks): `i_blocks` を直さない。
+    // 破壊テスト (S12-c, ext2-append-skip-blocks): `i_blocks` を直さない。
     #[cfg(not(feature = "ext2-append-skip-blocks"))]
     image[inode + 28..inode + 32].copy_from_slice(&sectors.to_le_bytes());
 
@@ -1539,7 +1539,7 @@ pub fn append_to_file(
 /// 追記を巻き戻して、元の大きさへ戻す（S12-c）。
 ///
 /// **truncate の一般形ではない。** **戻す先が「書く前の値」という既知の 1 点だけ**で、
-/// **任意の長さへ縮める形は後段である。**
+/// **任意の長さへ縮める形は後の段階である。**
 ///
 /// **書いた中身も 0 で埋め直す**——**ブロックを返すだけでは、
 /// 次に同じブロックを取った者が前の中身を見る。**
@@ -1558,8 +1558,8 @@ pub fn truncate_to(
         return Err(AllocError::NotAllocated(ino));
     }
 
-    // 破壊 (S12-d, ext2-truncate-off-by-one): 1 ブロック余分に返す。
-    // **`e2fsck` が参照されているブロックの不足を言う。**
+    // 破壊テスト (S12-d, ext2-truncate-off-by-one): 1 ブロック余分に返す。
+    // **`e2fsck` が参照されているブロックの不足を示す。**
     #[cfg(not(feature = "ext2-truncate-off-by-one"))]
     let keep = target.div_ceil(block_size);
     #[cfg(feature = "ext2-truncate-off-by-one")]
@@ -1567,12 +1567,12 @@ pub fn truncate_to(
 
     let have = size.div_ceil(block_size);
 
-    // 破壊 (S12-d, ext2-truncate-always-free): 返す必要が無くても 1 つ返す。
+    // 破壊テスト (S12-d, ext2-truncate-always-free): 返す必要が無くても 1 つ返す。
     // **同じブロックの中で縮める道**（会計が動かない道）**を壊す。**
     //
-    // **`have` を 1 つ増やす形では破壊にならなかった**（実測）——
+    // **`have` を 1 つ増やす形では破壊テストにならなかった**（実測）——
     // **file の外のスロットは 0 なので、ループが素通りする。**
-    // **実際に参照されているブロックを返さないと、状態が変わらない**（族の 1 つ目）。
+    // **実際に参照されているブロックを返さないと、状態が変わらない**（種類の 1 つ目）。
     #[cfg(feature = "ext2-truncate-always-free")]
     let keep = if keep == have {
         keep.saturating_sub(1)
@@ -1590,12 +1590,12 @@ pub fn truncate_to(
         if at + block_size as usize <= image.len() {
             image[at..at + block_size as usize].fill(0);
         }
-        // 破壊 (S12-d, ext2-truncate-keep-slot): `i_block` の欄を 0 にしない。
+        // 破壊テスト (S12-d, ext2-truncate-keep-slot): `i_block` の欄を 0 にしない。
         // **返したブロックを inode がまだ指しているので、
-        // `e2fsck` が多重請求として捕まえる。**
+        // `e2fsck` が多重請求として検出する。**
         #[cfg(not(feature = "ext2-truncate-keep-slot"))]
         image[slot..slot + 4].copy_from_slice(&0u32.to_le_bytes());
-        // 破壊 (S12-d, ext2-truncate-skip-free): ブロックを返さない。
+        // 破壊テスト (S12-d, ext2-truncate-skip-free): ブロックを返さない。
         // **`i_size` だけが縮み、空き数が増えない。**
         #[cfg(not(feature = "ext2-truncate-skip-free"))]
         free_block(image, layout, block)?;
@@ -1605,9 +1605,9 @@ pub fn truncate_to(
     if keep > 0 {
         let last = read_u32(image, i_block_slot(inode, (keep - 1) as usize));
         let tail = target % block_size;
-        // 破壊 (S12-d, ext2-truncate-keep-tail): 切った先を 0 で埋めない。
+        // 破壊テスト (S12-d, ext2-truncate-keep-tail): 切った先を 0 で埋めない。
         // **前の中身が残るので、読み戻すと出る。**
-        // **埋める前の中身が既に 0 なら効かない**（族の 1 つ目）ので、
+        // **埋める前の中身が既に 0 なら効かない**（種類の 1 つ目）ので、
         // **追記で書く中身は位置から決まる形にしてある。**
         #[cfg(feature = "ext2-truncate-keep-tail")]
         let tail = 0u32;
@@ -1622,7 +1622,7 @@ pub fn truncate_to(
 
     image[inode + 4..inode + 8].copy_from_slice(&target.to_le_bytes());
     let sectors = keep * layout.sectors_per_block();
-    // 破壊 (S12-d, ext2-truncate-skip-blocks): `i_blocks` を直さない。
+    // 破壊テスト (S12-d, ext2-truncate-skip-blocks): `i_blocks` を直さない。
     #[cfg(not(feature = "ext2-truncate-skip-blocks"))]
     image[inode + 28..inode + 32].copy_from_slice(&sectors.to_le_bytes());
     Ok(())
@@ -1654,7 +1654,7 @@ fn dirent_span(name_len: usize) -> usize {
 /// **ディレクトリを作るときだけ動く欄である。** **実測で確かめた**——
 /// `debugfs` でファイルを 1 つ作ると `5 directories` のまま、
 /// ディレクトリを 1 つ作ると `6 directories` になった。
-/// **動かすと `e2fsck` が `Directories count wrong for group #0` と言う**（実測）。
+/// **動かすと `e2fsck` が `Directories count wrong for group #0` と出力する**（実測）。
 pub fn allocate_inode(image: &mut [u8], layout: &Layout) -> Result<u32, AllocError> {
     for group in 0..layout.group_count {
         let descriptor = layout
@@ -1683,16 +1683,16 @@ pub fn allocate_inode(image: &mut [u8], layout: &Layout) -> Result<u32, AllocErr
             if image[byte] & mask != 0 {
                 continue;
             }
-            // 破壊 (S12-e, ext2-create-skip-inode-bit): 使用中の印を立てない。
+            // 破壊テスト (S12-e, ext2-create-skip-inode-bit): 使用中の目印を立てない。
             // **inode を配ったのにビットマップが空きのままなので、
             // `e2fsck` が `Inode bitmap differences` を出す。**
             #[cfg(not(feature = "ext2-create-skip-inode-bit"))]
             {
                 image[byte] |= mask;
             }
-            // 破壊 (S12-e, ext2-create-skip-inode-count): 空き数を直さない。
+            // 破壊テスト (S12-e, ext2-create-skip-inode-count): 空き数を直さない。
             // **[`allocate_block`] と違って群と superblock を分けない**——
-            // **分けても捕まえ方が同じで、破壊が 1 つ増えるだけだからである**
+            // **分けても検出の仕方が同じで、破壊テストが 1 つ増えるだけだからである**
             // （あちらは文言が違うことを見せるために分けてある）。
             #[cfg(not(feature = "ext2-create-skip-inode-count"))]
             {
@@ -1719,7 +1719,7 @@ pub fn allocate_inode(image: &mut [u8], layout: &Layout) -> Result<u32, AllocErr
 /// inode を 1 つ返し、会計も直す（S12-e）。
 ///
 /// **[`allocate_inode`] とちょうど逆である。**
-/// **戻し方が 1 つでも違えば、往復して像が元へ戻らない。**
+/// **戻し方が 1 つでも違えば、往復してイメージが元へ戻らない。**
 pub fn free_inode(image: &mut [u8], layout: &Layout, ino: u32) -> Result<(), AllocError> {
     if ino == 0 || ino > layout.inodes_count {
         return Err(AllocError::InodeOutOfRange(ino));
@@ -1769,14 +1769,14 @@ type DirectorySlot = (usize, Option<usize>);
 ///
 /// # 1 度で両方を見る
 ///
-/// **[`create_file`] は「名前が既に在るか」を全体について言う必要があり、
+/// **[`create_file`] は「名前が既に在るか」を全体について示す必要があり、
 /// [`unlink_file`] は「名前の在る位置と、その直前」が要る。**
 /// **走査を 2 度書くと、片方だけが壊れた並びの扱いを変える余地が生まれる。**
 ///
 /// # 直接ブロックだけを見る
 ///
 /// **単一間接を辿るディレクトリは扱わない。** 4096 バイトのブロックが 12 個
-/// あれば、この像のディレクトリはすべて 1 ブロックで収まっている（実測）。
+/// あれば、このイメージのディレクトリはすべて 1 ブロックで収まっている（実測）。
 fn scan_directory(
     image: &[u8],
     layout: &Layout,
@@ -1826,8 +1826,8 @@ fn scan_directory(
                 found = Some((at, previous));
             }
             // **使われているエントリの後ろの余りだけを見る。**
-            // **`inode == 0` の枠は、この設計では現れない**——
-            // [`unlink_file`] は隙間を前のエントリへ吸わせるので、枠が残らない。
+            // **`inode == 0` のスロットは、この設計では現れない**——
+            // [`unlink_file`] は隙間を前のエントリへ吸わせるので、スロットが残らない。
             //
             // **この引き算が桁借りしないことは、上の 3 つの検査に依存している。**
             // `rec_len` は 4 の倍数で、かつ `8 + name_len` 以上である。
@@ -1863,7 +1863,7 @@ fn scan_directory(
 /// **隙間が無ければ [`AllocError::NoRoomInDirectory`] を返す。**
 /// **伸ばす形はブロックの割り当てと `i_size` の更新が入り、
 /// [`append_to_file`] と同じ算術をディレクトリでもう一度書くことになる。**
-/// **要るようになったら足す**（この像のディレクトリは 1 ブロックに収まっている）。
+/// **要るようになったら足す**（このイメージのディレクトリは 1 ブロックに収まっている）。
 ///
 /// # `rec_len` が 0 になる道を作らない
 ///
@@ -1893,8 +1893,8 @@ pub fn create_file(
 
     let ino = allocate_inode(image, layout)?;
 
-    // **枠ごと 0 にしてから書く。** **空いている inode の枠の中身は決まっていない**
-    // ——取った枠に前の住人が残っていると、直さない欄がそのまま生き返る。
+    // **スロットごと 0 にしてから書く。** **空いている inode のスロットの中身は決まっていない**
+    // ——取ったスロットに前の住人が残っていると、直さない欄がそのまま生き返る。
     let at = layout
         .inode_at(image, ino)
         .ok_or(AllocError::InodeOutOfRange(ino))?;
@@ -1903,19 +1903,19 @@ pub fn create_file(
 
     // **追加領域の大きさを名乗る（S12-f-3）。**
     //
-    // **像そのものが `s_min_extra_isize` を宣言している**ので、
-    // **0 のままだと、像が自分で宣言した約束を、こちらが作った inode だけが破る。**
+    // **イメージそのものが `s_min_extra_isize` を宣言している**ので、
+    // **0 のままだと、イメージが自分で宣言した約束を、こちらが作った inode だけが破る。**
     // **`e2fsck` は 0 を受理する**（実測。範囲外は拒むので、欄は見ている）が、
     // **それは道具の寛容さに乗っているだけである。**
     //
     // **中身は書かない。** **追加領域に在るのは時刻まわりの欄で、
-    // S12-f-2 で「時刻は書かない」と決めた。** **枠は 0 で埋めてあるので、
-    // `mke2fs` が建てて `build.rs` が潰した inode と同じ形になる。**
+    // S12-f-2 で「時刻は書かない」と決めた。** **スロットは 0 で埋めてあるので、
+    // `mke2fs` が作って `build.rs` が潰した inode と同じ形になる。**
     //
     // **32 を直に書かない**——`s_want_extra_isize` から来る値である
-    // （像の中の数を実装にも判定にも埋めない）。
+    // （イメージの中の数を実装にも判定にも埋めない）。
     //
-    // 破壊 (S12-f-3, ext2-create-skip-extra-isize): 名乗らない。
+    // 破壊テスト (S12-f-3, ext2-create-skip-extra-isize): 名乗らない。
     // **`e2fsck` は通り抜ける**（0 を受理する）。**判定だけが落ちる。**
     #[cfg(not(feature = "ext2-create-skip-extra-isize"))]
     if layout.want_extra_isize != 0 {
@@ -1923,15 +1923,15 @@ pub fn create_file(
             .copy_from_slice(&layout.want_extra_isize.to_le_bytes());
     }
 
-    // 破壊 (S12-e, ext2-create-skip-links): `i_links_count` を 0 のままにする。
+    // 破壊テスト (S12-e, ext2-create-skip-links): `i_links_count` を 0 のままにする。
     // **ディレクトリから指されているのに参照が 0 なので、
-    // `e2fsck` が `Inode … ref count is 0, should be 1` と言う。**
+    // `e2fsck` が `Inode … ref count is 0, should be 1` と出力する。**
     #[cfg(not(feature = "ext2-create-skip-links"))]
     image[at + 26..at + 28].copy_from_slice(&1u16.to_le_bytes());
 
     insert_dirent(image, previous, ino, name, DIRENT_TYPE_REGULAR);
 
-    // 破壊 (S12-e, ext2-create-move-dirs-count): ファイルでも `bg_used_dirs_count`
+    // 破壊テスト (S12-e, ext2-create-move-dirs-count): ファイルでも `bg_used_dirs_count`
     // を動かす。**動くのはディレクトリのときだけである**（実測）。
     #[cfg(feature = "ext2-create-move-dirs-count")]
     {
@@ -1952,20 +1952,20 @@ pub fn create_file(
 ///
 /// # 逆であることが主張の中身である
 ///
-/// **作って消せば、像はバイト単位で元へ戻るはずである。**
+/// **作って消せば、イメージはバイト単位で元へ戻るはずである。**
 /// **`e2fsck` は使われていない場所の中身を見ない**ので、
-/// **返し過ぎ・消し残しは往復でしか捕まらない**（S12-d で実測した）。
+/// **返し過ぎ・消し残しは往復でしか検出されない**（S12-d で実測した）。
 ///
 /// # 戻すのは 4 つである
 ///
-/// 中身のブロック（[`truncate_to`] が返す）、inode の枠、inode ビットマップと
+/// 中身のブロック（[`truncate_to`] が返す）、inode のスロット、inode ビットマップと
 /// 空き数（[`free_inode`] が戻す）、ディレクトリの隙間。
 ///
 /// # 隙間は前のエントリへ吸わせる
 ///
-/// **`inode = 0` の枠として残す形も ext2 として正しい**（Linux もそう書く場面がある）。
-/// **採らないのは、それでは像が元へ戻らないからである**——
-/// 割った跡が `rec_len` の並びに残る。**破壊としてその形を立ててある。**
+/// **`inode = 0` のスロットとして残す形も ext2 として正しい**（Linux もそう書く場面がある）。
+/// **採らないのは、それではイメージが元へ戻らないからである**——
+/// 割った跡が `rec_len` の並びに残る。**破壊テストとしてその形を用意してある。**
 ///
 /// # ディレクトリは消さない
 ///
@@ -1992,7 +1992,7 @@ pub fn unlink_file(
         return Err(AllocError::NotARegularFile(ino));
     }
 
-    // **中身を返してから枠を消す。** 逆にすると `i_block` が読めなくなり、
+    // **中身を返してからスロットを消す。** 逆にすると `i_block` が読めなくなり、
     // **持っていたブロックが誰からも参照されないまま使用中に残る。**
     truncate_to(image, layout, ino, 0)?;
     image[at..at + usize::from(layout.inode_size)].fill(0);
@@ -2013,9 +2013,9 @@ pub fn unlink_file(
 /// - **`bg_used_dirs_count` が 1 増える**（**ディレクトリのときだけ動く欄である**。
 ///   実測は [`allocate_inode`] の doc にある）
 ///
-/// **どれを落としても `e2fsck` が別々の文言で言う。** 破壊を 3 つ立ててある。
+/// **どれを落としても `e2fsck` が別々の文言で出力する。** 破壊テストを 3 つ用意してある。
 ///
-/// # 入れ子の深さに上限を置かない
+/// # 入れ子の深さに上限を設けない
 ///
 /// **深さを数える処理を持たない。** **`PATH_MAX` がパスの長さを縛る**ので、
 /// **無限に深くはできない**（`kernel/src/syscall.rs`）。
@@ -2050,7 +2050,7 @@ pub fn create_directory(
     let ino = allocate_inode(image, layout)?;
     let block = allocate_block(image, layout)?;
 
-    // **枠ごと 0 にしてから書く**（[`create_file`] と同じ理由）。
+    // **スロットごと 0 にしてから書く**（[`create_file`] と同じ理由）。
     let at = layout
         .inode_at(image, ino)
         .ok_or(AllocError::InodeOutOfRange(ino))?;
@@ -2059,7 +2059,7 @@ pub fn create_directory(
     // **大きさはブロック 1 つぶんである。** ディレクトリの `i_size` は
     // 「使っている枠の合計」ではなく「持っているブロックの合計」である。
     image[at + 4..at + 8].copy_from_slice(&layout.block_size.to_le_bytes());
-    // 破壊 (DIR-1c, ext2-mkdir-skip-parent-link): 自分の links は 2 のままだが、
+    // 破壊テスト (DIR-1c, ext2-mkdir-skip-parent-link): 自分の links は 2 のままだが、
     // **親を増やさない**（下記）。ここは常に 2 である。
     image[at + 26..at + 28].copy_from_slice(&2u16.to_le_bytes());
     image[at + 28..at + 32].copy_from_slice(&layout.sectors_per_block().to_le_bytes());
@@ -2082,9 +2082,9 @@ pub fn create_directory(
     image[body + 7] = DIRENT_TYPE_DIRECTORY;
     image[body + DIRENT_HEADER_LEN] = b'.';
 
-    // 破壊 (DIR-1c, ext2-mkdir-skip-dot-dot): `..` を書かない。
+    // 破壊テスト (DIR-1c, ext2-mkdir-skip-dot-dot): `..` を書かない。
     // **`.` の `rec_len` がブロックの残り全部を吸う形にする**ので、
-    // **走査は壊れない**——**`e2fsck` が「`..` が無い」と言う。**
+    // **走査は壊れない**——**`e2fsck` が「`..` が無い」と出力する。**
     #[cfg(feature = "ext2-mkdir-skip-dot-dot")]
     image[body + 4..body + 6].copy_from_slice(&(block_size as u16).to_le_bytes());
 
@@ -2102,14 +2102,14 @@ pub fn create_directory(
 
     insert_dirent(image, previous, ino, name, DIRENT_TYPE_DIRECTORY);
 
-    // 破壊 (DIR-1c, ext2-mkdir-skip-parent-link): 親の `i_links_count` を増やさない。
+    // 破壊テスト (DIR-1c, ext2-mkdir-skip-parent-link): 親の `i_links_count` を増やさない。
     // **`..` が指しているのに数が合わないので、`e2fsck` が
-    // `Inode … ref count is …, should be …` と言う。**
+    // `Inode … ref count is …, should be …` と出力する。**
     #[cfg(not(feature = "ext2-mkdir-skip-parent-link"))]
     bump_links(image, layout, parent, 1)?;
 
-    // 破壊 (DIR-1c, ext2-mkdir-skip-dirs-count): 群の `bg_used_dirs_count` を
-    // 増やさない。**`e2fsck` が `Directories count wrong for group #0` と言う**
+    // 破壊テスト (DIR-1c, ext2-mkdir-skip-dirs-count): 群の `bg_used_dirs_count` を
+    // 増やさない。**`e2fsck` が `Directories count wrong for group #0` と出力する**
     // （文言は実測済みで、[`allocate_inode`] の doc に在る）。
     #[cfg(not(feature = "ext2-mkdir-skip-dirs-count"))]
     bump_used_dirs(image, layout, ino, 1)?;
@@ -2121,16 +2121,16 @@ pub fn create_directory(
 ///
 /// # 空でなければ断る
 ///
-/// **`.` と `..` 以外に、`inode` が 0 でない枠が 1 つでも在れば
+/// **`.` と `..` 以外に、`inode` が 0 でないスロットが 1 つでも在れば
 /// [`AllocError::DirectoryNotEmpty`] である。**
 ///
 /// # 戻すのは 6 つである
 ///
-/// 中身のブロック（[`truncate_to`] が返す）、inode の枠、inode ビットマップと
+/// 中身のブロック（[`truncate_to`] が返す）、inode のスロット、inode ビットマップと
 /// 空き数（[`free_inode`] が戻す）、ディレクトリの隙間、親の `i_links_count`、
 /// 群の `bg_used_dirs_count`。
 ///
-/// **作って消せば、像はバイト単位で元へ戻るはずである**（[`unlink_file`] と同じ主張）。
+/// **作って消せば、イメージはバイト単位で元へ戻るはずである**（[`unlink_file`] と同じ主張）。
 pub fn remove_directory(
     image: &mut [u8],
     layout: &Layout,
@@ -2152,7 +2152,7 @@ pub fn remove_directory(
         return Err(AllocError::NotADirectory(ino));
     }
 
-    // 破壊 (DIR-1c, ext2-rmdir-ignore-nonempty): 空かどうかを見ない。
+    // 破壊テスト (DIR-1c, ext2-rmdir-ignore-nonempty): 空かどうかを見ない。
     // **中身の在るディレクトリが消え、その中の inode がどこからも
     // 指されなくなる**——**「空でない rmdir が断られる」判定が落ちる。**
     #[cfg(not(feature = "ext2-rmdir-ignore-nonempty"))]
@@ -2160,7 +2160,7 @@ pub fn remove_directory(
         return Err(AllocError::DirectoryNotEmpty(ino));
     }
 
-    // **中身を返してから枠を消す**（[`unlink_file`] と同じ順序）。
+    // **中身を返してからスロットを消す**（[`unlink_file`] と同じ順序）。
     truncate_to(image, layout, ino, 0)?;
     image[at..at + usize::from(layout.inode_size)].fill(0);
     free_inode(image, layout, ino)?;
@@ -2173,10 +2173,10 @@ pub fn remove_directory(
 
 /// ディレクトリが `.` と `..` だけかを見る（DIR-1c）。
 ///
-/// # `inode` が 0 の枠は数えない
+/// # `inode` が 0 のスロットは数えない
 ///
-/// **消した跡が `inode = 0` の枠として残る形が在る**（`ext2-unlink-mark-unused`
-/// の破壊がそれを作る）。**あれは「名前が無い」ので、空である。**
+/// **消した跡が `inode = 0` のスロットとして残る形が在る**（`ext2-unlink-mark-unused`
+/// の破壊テストがそれを作る）。**あれは「名前が無い」ので、空である。**
 fn directory_is_empty(image: &[u8], layout: &Layout, ino: u32) -> Result<bool, AllocError> {
     let at = layout
         .inode_at(image, ino)
@@ -2192,7 +2192,7 @@ fn directory_is_empty(image: &[u8], layout: &Layout, ino: u32) -> Result<bool, A
     while offset + DIRENT_HEADER_LEN <= block_size {
         let entry = body + offset;
         let rec_len = usize::from(read_u16(image, entry + 4));
-        // **進む量が正であることを確かめる。** 0 だと同じ枠を回り続ける。
+        // **進む量が正であることを確かめる。** 0 だと同じスロットで空回りし続ける。
         if rec_len < DIRENT_HEADER_LEN || offset + rec_len > block_size {
             return Err(AllocError::DirectoryCorrupt);
         }
@@ -2212,7 +2212,7 @@ fn directory_is_empty(image: &[u8], layout: &Layout, ino: u32) -> Result<bool, A
 /// `i_links_count` を増減する（DIR-1c）。
 ///
 /// **`u16` を跨がせない。** 0 から減らそうとしたら
-/// [`AllocError::DirectoryCorrupt`] である——**像の側が既に食い違っている。**
+/// [`AllocError::DirectoryCorrupt`] である——**イメージの側が既に食い違っている。**
 fn bump_links(image: &mut [u8], layout: &Layout, ino: u32, delta: i16) -> Result<(), AllocError> {
     let at = layout
         .inode_at(image, ino)
@@ -2248,12 +2248,12 @@ fn bump_used_dirs(
     Ok(())
 }
 
-/// ディレクトリの枠を 1 つ割って、新しいエントリを書く（DIR-1c で切り出した）。
+/// ディレクトリのスロットを 1 つ割って、新しいエントリを書く（DIR-1c で切り出した）。
 ///
 /// # 2 つが使う
 ///
 /// [`create_file`] と [`create_directory`] である。**違うのは `file_type` だけ**
-/// ——**枠の割りかたは同じである。**
+/// ——**スロットの割りかたは同じである。**
 ///
 /// # 割った後の 2 つの `rec_len`
 ///
@@ -2263,10 +2263,10 @@ fn insert_dirent(image: &mut [u8], previous: usize, ino: u32, name: &[u8], file_
     let previous_len = dirent_span(usize::from(image[previous + 6]));
     let entry_len = usize::from(read_u16(image, previous + 4)) - previous_len;
 
-    // 破壊 (S12-e, ext2-create-keep-prev-rec-len): 前のエントリを縮めない。
+    // 破壊テスト (S12-e, ext2-create-keep-prev-rec-len): 前のエントリを縮めない。
     // **新しいエントリが前の `rec_len` の内側に入るので、走査が素通りする。**
     // **ext2 として不整合ではない**（隙間の中身は自由である）——
-    // **`e2fsck` は「どこからも指されていない inode」として捕まえ、
+    // **`e2fsck` は「どこからも指されていない inode」として検出し、
     // `debugfs` は名前を引けない。**
     #[cfg(not(feature = "ext2-create-keep-prev-rec-len"))]
     image[previous + 4..previous + 6].copy_from_slice(&(previous_len as u16).to_le_bytes());
@@ -2279,7 +2279,7 @@ fn insert_dirent(image: &mut [u8], previous: usize, ino: u32, name: &[u8], file_
     image[entry + DIRENT_HEADER_LEN..entry + DIRENT_HEADER_LEN + name.len()].copy_from_slice(name);
 }
 
-/// ディレクトリのエントリを 1 つ畳む（DIR-1c で切り出した）。
+/// ディレクトリのエントリを 1 つ取り除く（DIR-1c で切り出した）。
 ///
 /// # 2 つが使う
 ///
@@ -2287,15 +2287,15 @@ fn insert_dirent(image: &mut [u8], previous: usize, ino: u32, name: &[u8], file_
 ///
 /// # 隙間は前のエントリへ吸わせる
 ///
-/// 理由は [`unlink_file`] の doc にある（**像が元へ戻るため**）。
+/// 理由は [`unlink_file`] の doc にある（**イメージが元へ戻るため**）。
 fn remove_dirent(image: &mut [u8], entry: usize, previous: usize) -> Result<(), AllocError> {
     let entry_len = usize::from(read_u16(image, entry + 4));
-    // 破壊 (S12-e, ext2-unlink-mark-unused): 前のエントリへ吸わせず、
-    // **`inode = 0` の枠として残す。** **`e2fsck` は無傷と判定する**——
-    // **ext2 として不整合ではないからである。往復のバイト一致だけが捕まえる。**
+    // 破壊テスト (S12-e, ext2-unlink-mark-unused): 前のエントリへ吸わせず、
+    // **`inode = 0` のスロットとして残す。** **`e2fsck` は無傷と判定する**——
+    // **ext2 として不整合ではないからである。往復のバイト一致だけが検出する。**
     #[cfg(feature = "ext2-unlink-mark-unused")]
     {
-        // **前を探す検査そのものは残す**——**破壊で通る道が増えると、
+        // **前を探す検査そのものは残す**——**破壊テストで通る道が増えると、
         // 何を壊したのかが 1 つに絞れなくなる。**
         let _ = (previous, entry_len);
         image[entry..entry + 4].copy_from_slice(&0u32.to_le_bytes());
@@ -2306,7 +2306,7 @@ fn remove_dirent(image: &mut [u8], entry: usize, previous: usize) -> Result<(), 
             .map_err(|_| AllocError::DirectoryCorrupt)?;
         image[previous + 4..previous + 6].copy_from_slice(&merged.to_le_bytes());
         // **書いたバイトを消す。** **隙間の中身は ext2 として自由なので、
-        // 残しても `e2fsck` は何も言わない**——**往復のバイト一致のためである。**
+        // 残しても `e2fsck` は何も示さない**——**往復のバイト一致のためである。**
         image[entry..entry + entry_len].fill(0);
     }
     Ok(())
@@ -2324,12 +2324,12 @@ fn read_u32(data: &[u8], offset: usize) -> u32 {
 mod tests {
     use super::*;
 
-    /// 実測した `mke2fs 1.47.0` の既定に合わせた像を組み立てる。
+    /// 実測した `mke2fs 1.47.0` の既定に合わせたイメージを組み立てる。
     ///
     /// 2 MiB・ブロック 4096・inode 256・rev 1・INCOMPAT は FILETYPE だけ。
-    /// **`kernel/build.rs` が建てる像と同じ寸法にしてある**（`dumpe2fs` の実測。
+    /// **`kernel/build.rs` がビルドするイメージと同じ寸法にしてある**（`dumpe2fs` の実測。
     /// 512 ブロック・256 inode）。**中身は superblock と group descriptor だけで、
-    /// 残りはゼロである**（この段が読むのはそこまでである）。
+    /// 残りはゼロである**（この段階が読むのはそこまでである）。
     fn build_test_image() -> std::vec::Vec<u8> {
         const IMAGE_LEN: usize = 2 * 1024 * 1024;
         let mut image = std::vec![0u8; IMAGE_LEN];
@@ -2342,10 +2342,10 @@ mod tests {
         // **使っているブロックにビットを立てる（S12-c）。**
         //
         // **立てていなかった。** そのため [`allocate_block`] がブロック 0
-        // （superblock）を返し、**追記がテスト像そのものを壊していた**
+        // （superblock）を返し、**追記がテストイメージそのものを壊していた**
         // （実測。往復のバイト一致が落ちて気づいた）。
         //
-        // **この像が使うのは 60 番までである**（メタデータ・ルート・
+        // **このイメージが使うのは 60 番までである**（メタデータ・ルート・
         // 各ファイルのブロック）。**まとめて立てる**——1 つずつ数えると、
         // ファイルを足したときに合わなくなる。
         let bitmap = 2 * 4096;
@@ -2356,8 +2356,8 @@ mod tests {
         // **使っている inode にビットを立てる（S12-e）。**
         //
         // **ブロックの側と同じ理由である**——立てないと [`allocate_inode`] が
-        // **既に住人の居る枠を返し、作成がテスト像そのものを壊す。**
-        // **この像が使うのは 18 番までである**（ルート・各ディレクトリ・各ファイル）。
+        // **既に住人の居るスロットを返し、作成がテストイメージそのものを壊す。**
+        // **このイメージが使うのは 18 番までである**（ルート・各ディレクトリ・各ファイル）。
         let inode_bitmap = 3 * 4096;
         for ino in 1..=18u32 {
             image[inode_bitmap + ((ino - 1) / 8) as usize] |= 1 << ((ino - 1) % 8);
@@ -2369,7 +2369,7 @@ mod tests {
         image[table + 14..table + 16].copy_from_slice(&5u16.to_le_bytes());
         image[table + 16..table + 18].copy_from_slice(&3u16.to_le_bytes());
 
-        // ルート inode（2 番）。**実測した像と同じ形にする**（`debugfs -R "stat <2>"`。
+        // ルート inode（2 番）。**実測したイメージと同じ形にする**（`debugfs -R "stat <2>"`。
         // mode 040755・size 4096・`i_block[0]` = 20）。
         write_inode(
             &mut image,
@@ -2379,7 +2379,7 @@ mod tests {
             6,
             &[ROOT_DATA_BLOCK],
         );
-        // ルートディレクトリの中身。**実測した像と同じエントリを同じ `rec_len` で
+        // ルートディレクトリの中身。**実測したイメージと同じエントリを同じ `rec_len` で
         // 並べる**（`. .. lost+found bin data etc`。最後の 1 つがブロックの
         // 終わりまで伸びる）。
         write_dir_block(&mut image, ROOT_DATA_BLOCK, ROOT_ENTRIES);
@@ -2415,7 +2415,7 @@ mod tests {
         image[at..at + SHORT_FILE_CONTENT.len()].copy_from_slice(SHORT_FILE_CONTENT);
 
         // 直接を 1 バイト超える通常ファイル。**単一間接を実際に踏む側である**
-        // （実測した像の `/data/indirect-first` と同じ形。直接 43-54、`(IND)` 55、
+        // （実測したイメージの `/data/indirect-first` と同じ形。直接 43-54、`(IND)` 55、
         // その先の 13 ブロック目が 56）。
         let direct: std::vec::Vec<u32> = (0..DIRECT_BLOCK_COUNT as u32)
             .map(|i| INDIRECT_FILE_FIRST_BLOCK + i)
@@ -2440,7 +2440,7 @@ mod tests {
         // 13 ブロック目の先頭 1 バイトが、ファイルの最後の 1 バイトである。
         image[INDIRECT_FILE_DATA_BLOCK as usize * 4096] = INDIRECT_FILE_LAST_BYTE;
 
-        // **中間のディレクトリ**（パス解決が辿る側）。**実測した像と同じ木にする**
+        // **中間のディレクトリ**（パス解決が辿る側）。**実測したイメージと同じツリーにする**
         // ——`/bin/hello`・`/data/direct-max`・`/data/indirect-first`・`/etc/motd`。
         write_subdirectory(&mut image, LOST_FOUND_INODE, 21, &[]);
         write_subdirectory(
@@ -2482,7 +2482,7 @@ mod tests {
         write_dir_block(image, block, &entries);
     }
 
-    /// ルートディレクトリの中身が在るブロック（実測した像と同じ番号）。
+    /// ルートディレクトリの中身が在るブロック（実測したイメージと同じ番号）。
     const ROOT_DATA_BLOCK: u32 = 20;
     /// `/data` の中身が在るブロック（S12-e。`write_subdirectory` へ渡す番号と同じ）。
     const DATA_DATA_BLOCK: u32 = 23;
@@ -2492,22 +2492,22 @@ mod tests {
     /// 1 ブロックに満たない通常ファイル（`/etc/motd`）の inode 番号とブロック。
     const SHORT_FILE_INODE: u32 = 18;
     const SHORT_FILE_BLOCK: u32 = 58;
-    /// その中身。**長さは実測した像の `motd` と同じ 18 バイトである。**
+    /// その中身。**長さは実測したイメージの `motd` と同じ 18 バイトである。**
     const SHORT_FILE_CONTENT: &[u8] = b"welcome to ZaytOS\n";
-    /// ルート直下のディレクトリと `/bin/hello`（実測した像と同じ番号）。
+    /// ルート直下のディレクトリと `/bin/hello`（実測したイメージと同じ番号）。
     const LOST_FOUND_INODE: u32 = 11;
     const BIN_INODE: u32 = 12;
     const HELLO_INODE: u32 = 13;
     const DATA_INODE: u32 = 14;
     const ETC_INODE: u32 = 17;
-    /// 単一間接を踏む通常ファイル（実測した像と同じ配置）。
+    /// 単一間接を踏む通常ファイル（実測したイメージと同じ配置）。
     const INDIRECT_FILE_INODE: u32 = 16;
     const INDIRECT_FILE_FIRST_BLOCK: u32 = 43;
     const INDIRECT_FILE_TABLE_BLOCK: u32 = 55;
     const INDIRECT_FILE_DATA_BLOCK: u32 = 56;
     const INDIRECT_FILE_LAST_BYTE: u8 = 0xA7;
 
-    /// ルートディレクトリのエントリ（実測した像と同じ並び。inode 番号も同じ）。
+    /// ルートディレクトリのエントリ（実測したイメージと同じ並び。inode 番号も同じ）。
     const ROOT_ENTRIES: &[(u32, u8, &[u8])] = &[
         (ROOT_INODE, DIRENT_TYPE_DIRECTORY, b"."),
         (ROOT_INODE, DIRENT_TYPE_DIRECTORY, b".."),
@@ -2520,7 +2520,7 @@ mod tests {
     /// ディレクトリの 1 ブロックを組み立てる。
     ///
     /// **`rec_len` は 4 バイト境界へ切り上げ、最後の 1 つはブロックの終わりまで
-    /// 伸ばす**（ext2 の作り方であり、実測した像もそうなっている）。
+    /// 伸ばす**（ext2 の作り方であり、実測したイメージもそうなっている）。
     fn write_dir_block(image: &mut [u8], block: u32, entries: &[(u32, u8, &[u8])]) {
         let base = block as usize * 4096;
         let mut offset = 0usize;
@@ -2551,7 +2551,7 @@ mod tests {
         offset
     }
 
-    /// inode テーブルへ 1 つ書く。**テストの像は group 0 だけである。**
+    /// inode テーブルへ 1 つ書く。**テストのイメージは group 0 だけである。**
     fn write_inode(image: &mut [u8], ino: u32, mode: u16, size: u32, links: u16, blocks: &[u32]) {
         const INODE_TABLE_BLOCK: usize = 4;
         const INODE_SIZE: usize = 256;
@@ -2562,10 +2562,10 @@ mod tests {
         // `i_blocks` は 512 バイト単位である。**ブロックサイズ単位ではない。**
         let sectors = (blocks.len() as u32) * (4096 / 512);
         image[at + 28..at + 32].copy_from_slice(&sectors.to_le_bytes());
-        // `i_extra_isize`（S12-f-3）。**実測した像では全 inode が 32 である**
+        // `i_extra_isize`（S12-f-3）。**実測したイメージでは全 inode が 32 である**
         // （`debugfs`の`Size of extra inode fields`）。**置かないと、
         // 「こちらの inode が像の他と揃っている」を見る検査が、
-        // 両方 0 で通ってしまう**（実測で踏んだ——族の1つ目である）。
+        // 両方 0 で通ってしまう**（実測で踏んだ——種類の1つ目である）。
         image[at + INODE_EXTRA_ISIZE..at + INODE_EXTRA_ISIZE + 2]
             .copy_from_slice(&32u16.to_le_bytes());
         for (slot, block) in blocks.iter().enumerate() {
@@ -2598,7 +2598,7 @@ mod tests {
         put32(image, 92, 0x38); // COMPAT: dir_index | resize_inode | ext_attr
         put32(image, 96, INCOMPAT_FILETYPE);
         put32(image, 100, 0x03); // RO_COMPAT: sparse_super | large_file
-                                 // `s_want_extra_isize`（S12-f-3）。**実測した像と同じ 32 である**
+                                 // `s_want_extra_isize`（S12-f-3）。**実測したイメージと同じ 32 である**
                                  // （`dumpe2fs`の`Desired extra isize`）。**`s_min_extra_isize`(348)も同じ値だが、
                                  // 書く側が見るのは`want`のほうなので、そちらだけを置く。**
         put16(image, 350, 32);
@@ -2616,7 +2616,7 @@ mod tests {
         assert_eq!(fs.feature_incompat(), INCOMPAT_FILETYPE);
     }
 
-    /// テスト像の中の、追記できる通常ファイル。
+    /// テストイメージの中の、追記できる通常ファイル。
     /// **1 ブロックに満たないので、末尾に空きがある側である。**
     const TEST_WRITABLE_INO: u32 = SHORT_FILE_INODE;
 
@@ -2654,12 +2654,12 @@ mod tests {
         // **書いた中身が読み戻せること。**
         //
         // **空き数の差だけでは足りない。** あれは会計の主張で、
-        // **`allocating_moves_both_free_counts_by_one` が既に言っている。**
-        // **ここが言うべきなのは「取ったブロックが inode から参照され、
+        // **`allocating_moves_both_free_counts_by_one` が既に示している。**
+        // **ここが示すべきなのは「取ったブロックが inode から参照され、
         // 書いた中身がそこに在る」ことである。**
         //
-        // **実測でこの穴を踏んだ**——テスト像がビットマップを立てておらず、
-        // **割り当てがブロック 0（superblock）を返して像を潰していたのに、
+        // **実測でこの穴を踏んだ**——テストイメージがビットマップを立てておらず、
+        // **割り当てがブロック 0（superblock）を返してイメージを潰していたのに、
         // このテストは通っていた**（空き数は 1 つ減るので）。
         let fs = Ext2::parse(&image).unwrap();
         let inode = fs.inode(TEST_WRITABLE_INO).unwrap();
@@ -2704,7 +2704,7 @@ mod tests {
         let layout = Ext2::parse(&image).unwrap().layout();
 
         let block = allocate_block(&mut image, &layout).unwrap();
-        // **割り当てた時点では像が違う。** 違わなければ、割り当てが効いていない。
+        // **割り当てた時点ではイメージが違う。** 違わなければ、割り当てが効いていない。
         assert_ne!(image, original, "割り当てで像が変わること");
 
         free_block(&mut image, &layout, block).unwrap();
@@ -2740,14 +2740,14 @@ mod tests {
         let layout = Ext2::parse(&image).unwrap().layout();
         let block = allocate_block(&mut image, &layout).unwrap();
         free_block(&mut image, &layout, block).unwrap();
-        // **2 回目は断る。** 断らないと会計だけが増え、像が壊れる。
+        // **2 回目は断る。** 断らないと会計だけが増え、イメージが壊れる。
         assert_eq!(
             free_block(&mut image, &layout, block),
             Err(AllocError::NotAllocated(block))
         );
     }
 
-    /// 作る先のディレクトリ（テスト像の `/data`）。
+    /// 作る先のディレクトリ（テストイメージの `/data`）。
     /// **最後のエントリがブロックの終わりまで伸びているので、隙間がある側である。**
     const TEST_DIRECTORY_INO: u32 = DATA_INODE;
 
@@ -2771,14 +2771,14 @@ mod tests {
         let mut image = build_test_image();
         let layout = Ext2::parse(&image).unwrap().layout();
         let want = Ext2::parse(&image).unwrap().want_extra_isize();
-        // **テスト像は `mke2fs` と同じ 32 を宣言している。**
-        // **0 だと、この検査は何も主張しなくなる**（族の1つ目）。
+        // **テストイメージは `mke2fs` と同じ 32 を宣言している。**
+        // **0 だと、この検査は何も主張しなくなる**（種類の1つ目）。
         assert_ne!(want, 0, "像が s_want_extra_isize を宣言していること");
 
         let ino = create_file(&mut image, &layout, TEST_DIRECTORY_INO, b"created").unwrap();
         let at = layout.inode_at(&image, ino).unwrap();
         assert_eq!(read_u16(&image, at + INODE_EXTRA_ISIZE), want);
-        // **像の他の inode と同じ値であること。**
+        // **イメージの他の inode と同じ値であること。**
         let other = layout.inode_at(&image, DIRECT_FILE_INODE).unwrap();
         assert_eq!(
             read_u16(&image, at + INODE_EXTRA_ISIZE),
@@ -2806,10 +2806,10 @@ mod tests {
     #[test]
     fn an_image_too_short_to_reach_the_field_is_still_accepted() {
         // **`SUPERBLOCK_MIN_LEN` を伸ばしていないので、受理する範囲は変わらない。**
-        // **欄へ届かない像では 0 になるだけである。**
+        // **欄へ届かないイメージでは 0 になるだけである。**
         let image = build_test_image();
         let short = &image[..SUPERBLOCK_OFFSET + SUPERBLOCK_MIN_LEN + 8];
-        // 像そのものは短すぎて別の理由で拒まれるので、欄の位置だけを確かめる。
+        // イメージそのものは短すぎて別の理由で拒まれるので、欄の位置だけを確かめる。
         assert!(short.len() < SUPERBLOCK_OFFSET + SUPERBLOCK_WANT_EXTRA_ISIZE + 2);
         assert!(Ext2::parse(short).is_err());
     }
@@ -2954,7 +2954,7 @@ mod tests {
         let mut image = build_test_image();
         let layout = Ext2::parse(&image).unwrap().layout();
         // **予約された番号のビットを落としても、配らないこと。**
-        // **ビットマップの印に頼っていたら、ここで 3 番が返る。**
+        // **ビットマップの目印に頼っていたら、ここで 3 番が返る。**
         let inode_bitmap = 3 * 4096;
         image[inode_bitmap] = 0;
         image[inode_bitmap + 1] = 0;
@@ -3167,7 +3167,7 @@ mod tests {
         ));
     }
 
-    /// 線3: group descriptor の 3 つのブロック番号が像の外を指す。
+    /// 線3: group descriptor の 3 つのブロック番号がイメージの外を指す。
     #[test]
     fn rejects_a_group_descriptor_pointing_outside_the_filesystem() {
         let mut image = build_test_image();
@@ -3179,7 +3179,7 @@ mod tests {
         );
     }
 
-    /// ルート inode が、実測した像と同じ値で読めること。
+    /// ルート inode が、実測したイメージと同じ値で読めること。
     #[test]
     fn reads_the_root_inode() {
         let image = build_test_image();
@@ -3212,14 +3212,14 @@ mod tests {
         assert!(fs.inode(256).is_ok());
     }
 
-    /// 線2: inode テーブルの位置の算術が像の外へ出る。
+    /// 線2: inode テーブルの位置の算術がイメージの外へ出る。
     ///
-    /// `s_inodes_count` を上げると、末尾の inode が像の外に落ちる。**番号の検査
+    /// `s_inodes_count` を上げると、末尾の inode がイメージの外に落ちる。**番号の検査
     /// （線3）を通ってから位置の検査（線2）で止まることを見る。**
     #[test]
     fn rejects_an_inode_whose_position_falls_outside_the_image() {
         let mut image = build_test_image();
-        // inode を 1 グループぶん増やし、テーブルが像に収まらない状態にする。
+        // inode を 1 グループぶん増やし、テーブルがイメージに収まらない状態にする。
         image[SUPERBLOCK_OFFSET..SUPERBLOCK_OFFSET + 4].copy_from_slice(&600_000u32.to_le_bytes());
         image[SUPERBLOCK_OFFSET + 40..SUPERBLOCK_OFFSET + 44]
             .copy_from_slice(&600_000u32.to_le_bytes());
@@ -3232,7 +3232,7 @@ mod tests {
 
     /// 線3: `i_block` のブロック番号が `s_blocks_count` の外を指している。
     ///
-    /// **返す前に 15 項すべてを見る。** 直接ブロックだけでなく、この段では
+    /// **返す前に 15 項すべてを見る。** 直接ブロックだけでなく、この段階では
     /// まだ辿らない間接の 3 項も見る。**辿る側に妥当性を持ち回らせないためである。**
     #[test]
     fn rejects_an_inode_whose_block_pointer_leaves_the_filesystem() {
@@ -3351,7 +3351,7 @@ mod tests {
         );
     }
 
-    /// 線3: **間接ブロックの中身**が像の外を指している。
+    /// 線3: **間接ブロックの中身**がイメージの外を指している。
     ///
     /// **`i_block` の 15 項と違い、この番号は `inode` では見られない**——表は
     /// inode の外にあるからである。**辿るときに突き合わせる以外に道が無い。**
@@ -3485,7 +3485,7 @@ mod tests {
         );
     }
 
-    /// ルートディレクトリを走査し、実測した像と同じ並びが返ること。
+    /// ルートディレクトリを走査し、実測したイメージと同じ並びが返ること。
     #[test]
     fn walks_the_root_directory() {
         let image = build_test_image();
@@ -3514,7 +3514,7 @@ mod tests {
         assert!(entries.iter().all(|e| e.is_directory()));
     }
 
-    /// 停止性の試験を、時間で区切って回す。
+    /// 停止性の試験を、時間で区切って実行する。
     ///
     /// # なぜ要るのか。**停止性の試験は信号の形が他と違う**
     ///
@@ -3530,7 +3530,7 @@ mod tests {
     /// 待つだけである。実測で確かめた）。**そのままだと `check` と `--full` が
     /// 返らなくなり、`§14` の「ハングと待ちが区別できない」に落ちる。**
     ///
-    /// **別スレッドで回して時間で区切り、「返ってこない」を「落ちる」へ変換する。**
+    /// **別スレッドで実行して時間で区切り、「返ってこない」を「落ちる」へ変換する。**
     /// 空転したスレッドは止められないので**残る**が、**試験の処理が終われば
     /// プロセスごと消える**（他の試験を妨げない）。
     fn assert_returns_promptly(what: &str, body: impl FnOnce() + Send + 'static) {
@@ -3631,7 +3631,7 @@ mod tests {
     /// 線4: **ゼロで埋まったブロックでも走査が止まる。**
     ///
     /// **`rec_len = 0` かつ `inode = 0` は、無限ループの正準の入力である。**
-    /// 未使用の枠は飛ばす形なので、**進むことの検査が無ければ 1 つも返さずに
+    /// 未使用のスロットは飛ばす形なので、**進むことの検査が無ければ 1 つも返さずに
     /// 空転する**（上の試験は 2 つ返してから止まるので、空転の入り口が違う）。
     #[test]
     fn an_all_zero_directory_block_ends_the_walk() {
@@ -3744,7 +3744,7 @@ mod tests {
         assert_eq!(last, Err(Ext2Error::InodeOutOfRange(999)));
     }
 
-    /// `inode` が 0 の枠は未使用である。**飛ばすが、位置は進める。**
+    /// `inode` が 0 のスロットは未使用である。**飛ばすが、位置は進める。**
     #[test]
     fn skips_unused_entries_without_losing_the_rest() {
         let mut image = build_test_image();
@@ -3792,7 +3792,7 @@ mod tests {
         assert_eq!(fs.lookup(b"/bin/hello").unwrap().number, HELLO_INODE);
     }
 
-    /// 線1: **区切りの並びが、どう来ても同じ形に畳まれる。**
+    /// 線1: **区切りの並びが、どう来ても同じ形にまとめられる。**
     ///
     /// 空の要素は飛ばすので、**連続する区切りも、末尾の区切りも、
     /// 1 つの `/` と同じ扱いになる**（Linux と同じ）。
@@ -3842,7 +3842,7 @@ mod tests {
             fs.lookup(b"/etc/../etc/motd").unwrap().number,
             SHORT_FILE_INODE
         );
-        // **ルートの `..` はルート自身である**（実測した像もそうなっている）。
+        // **ルートの `..` はルート自身である**（実測したイメージもそうなっている）。
         assert_eq!(fs.lookup(b"/../etc/motd").unwrap().number, SHORT_FILE_INODE);
     }
 
@@ -3955,9 +3955,9 @@ mod tests {
 
     /// 線1: どんな短さでも `inode` がパニックしない。
     ///
-    /// **`parse` を通った像だけが `inode` に届く**ので、切り詰めた像は
+    /// **`parse` を通ったイメージだけが `inode` に届く**ので、切り詰めたイメージは
     /// `parse` で落ちる。**そこを抜けた形でも落ちないことを見るため、
-    /// `s_blocks_count` を下げて像だけを短くする。**
+    /// `s_blocks_count` を下げてイメージだけを短くする。**
     #[test]
     fn reading_an_inode_from_a_truncated_image_does_not_panic() {
         for blocks in 1u32..64 {

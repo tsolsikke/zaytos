@@ -268,7 +268,7 @@ impl VirtAddr {
     }
 }
 
-/// 物理メモリ全体を仮想アドレス空間へ線形に写した窓（ADR-0021）。
+/// 物理メモリ全体を仮想アドレス空間へ線形にマップしたウィンドウ（ADR-0021）。
 ///
 /// # 範囲を定数にしない
 ///
@@ -292,17 +292,17 @@ pub struct DirectMap {
 }
 
 impl DirectMap {
-    /// 窓を作る。上端が正規形に収まらなければ `None`。
+    /// ウィンドウを作る。上端が正規形に収まらなければ `None`。
     ///
-    /// **恒等窓（`base==0`）は恒等除去（B-2b）の後に作ってはならない。** 除去後の
-    /// 恒等窓構築は「低位ポインタを除去後に使おうとしている」ことの兆候なので、
+    /// **恒等ウィンドウ（`base==0`）は恒等除去（B-2b）の後に作ってはならない。** 除去後の
+    /// 恒等ウィンドウの構築は「低位ポインタを除去後に使おうとしている」ことの兆候なので、
     /// [`mark_identity_removed`] が呼ばれていれば fail-fast する。これが恒等の
     /// 利用を守る単一の関門である（`identity()` もここを通る。`new(base==0)` の
-    /// 直接呼び出しも捕まる）。高位窓（`base!=0`、direct map など）は対象外。
+    /// 直接呼び出しも検出される）。高位ウィンドウ（`base!=0`、direct map など）は対象外。
     ///
     /// **この関門のため `const fn` にできない**（実行時にフラグを読む）。const 文脈
     /// での利用が無いことを確認して外した。**const へ戻すには関門を外すことになり、
-    /// 恒等除去後の誤用を捕まえる安全網が静かに消える。** 戻さないこと。
+    /// 恒等除去後の誤用を検出する安全網が静かに消える。** 戻さないこと。
     pub fn new(base: VirtAddr, length: u64) -> Option<Self> {
         if base.as_u64() == 0 {
             use core::sync::atomic::Ordering;
@@ -321,7 +321,7 @@ impl DirectMap {
         Self::new(VirtAddr::new_const(0), length)
     }
 
-    /// 恒等窓が覆える最大の長さ。
+    /// 恒等ウィンドウが覆える最大の長さ。
     ///
     /// **物理空間全体（52 ビット）は恒等では覆えない。** base が 0 なので
     /// 上端は長さそのものになり、`0x0000_8000_0000_0000` 以上は正規形の穴に
@@ -332,7 +332,7 @@ impl DirectMap {
     ///
     /// # 終端は排他である
     ///
-    /// `length` は覆う長さであり、窓は `base .. base + length` を覆う。
+    /// `length` は覆う長さであり、ウィンドウは `base .. base + length` を覆う。
     /// **終端は含まない。** 下位半分で正規形として使える最大のアドレスは
     /// `0x0000_7FFF_FFFF_FFFF` なので、排他の終端としては
     /// `0x0000_8000_0000_0000` まで取れるはずだが、[`DirectMap::new`] は
@@ -345,12 +345,12 @@ impl DirectMap {
     /// 表せないと、境界の計算のたびに特別扱いが要る。
     pub const IDENTITY_MAX_LENGTH: u64 = 0x0000_7FFF_FFFF_F000;
 
-    /// direct physical map の高位窓の起点（ADR-0021）。
+    /// direct physical map の高位ウィンドウの起点（ADR-0021）。
     ///
     /// 正規形の上半分の先頭で、512GiB 境界（当然 2MiB 境界）に載っている。
     /// higher-half 移行の A で、`phys_to_virt(p) = DIRECT_MAP_BASE + p` の
-    /// 窓をページテーブルへ張り、A-2 で [`replace_direct_map`] により登録
-    /// 窓をこの base へ差し替える。base が 2MiB 境界にあるため、
+    /// ウィンドウをページテーブルへマップし、A-2 で [`replace_direct_map`] により登録
+    /// ウィンドウをこの base へ差し替える。base が 2MiB 境界にあるため、
     /// `DIRECT_MAP_BASE + phys` のアラインメントは `phys` のそれと一致する。
     pub const DIRECT_MAP_BASE: u64 = 0xFFFF_8000_0000_0000;
 
@@ -362,37 +362,37 @@ impl DirectMap {
         self.length
     }
 
-    /// この窓が覆っている物理アドレスか。
+    /// このウィンドウが覆っている物理アドレスか。
     ///
-    /// **窓の範囲内であることだけを意味する。そのアドレスが実際にマップ
-    /// されているかについては何も言わない。** マッピングの有無は
+    /// **ウィンドウの範囲内であることだけを意味する。そのアドレスが実際にマップ
+    /// されているかについては何も示さない。** マッピングの有無は
     /// `kernel::paging::plan::MappedRanges::contains_range`（計画の側）か
     /// `kernel::paging::active::translate`（実テーブルの側）で見る。
     ///
     /// 混同すると「covers が真だから触れるはず」という誤った推論が入り込む。
-    /// 恒等マッピングの間は窓が下位半分全体を覆っているため、この誤りは
-    /// 顕在化しない。higher-half 移行で窓が狭くなった瞬間、あるいは窓の外を
+    /// 恒等マッピングの間はウィンドウが下位半分全体を覆っているため、この誤りは
+    /// 顕在化しない。higher-half 移行でウィンドウが狭くなった瞬間、あるいはウィンドウの外を
     /// 触った瞬間に初めて出る。
     pub const fn covers(self, phys: PhysAddr) -> bool {
         phys.as_u64() < self.length
     }
 
-    /// 物理アドレスを仮想アドレスへ写す。**失敗しない。**
+    /// 物理アドレスを仮想アドレスへマップする。**失敗しない。**
     ///
-    /// direct physical map を採る決定（ADR-0021）により、写像は単なる加算で
-    /// あり、窓の構築時に上端が正規形に収まることを確かめてある。
+    /// direct physical map を採る決定（ADR-0021）により、マッピングは単なる加算で
+    /// あり、ウィンドウの構築時に上端が正規形に収まることを確かめてある。
     ///
-    /// **窓が覆っていない物理アドレスを渡した場合も値は返る。** 返るのは
+    /// **ウィンドウが覆っていない物理アドレスを渡した場合も値は返る。** 返るのは
     /// 正規形ではあるがマップされていないアドレスで、参照すれば #PF になる。
     /// 気にする呼び出し側は [`Self::covers`] を先に見ること。
     pub const fn phys_to_virt(self, phys: PhysAddr) -> VirtAddr {
         VirtAddr(self.base.as_u64().wrapping_add(phys.as_u64()))
     }
 
-    /// 仮想アドレスを物理アドレスへ戻す。**窓の中のときだけ `Some`。**
+    /// 仮想アドレスを物理アドレスへ戻す。**ウィンドウの中のときだけ `Some`。**
     ///
-    /// 窓の外の仮想アドレス（カーネルイメージ、MMIO の別窓など）は
-    /// この写像では物理アドレスを決められない。ページテーブルを辿る必要が
+    /// ウィンドウの外の仮想アドレス（カーネルイメージ、MMIO の別のウィンドウなど）は
+    /// このマッピングでは物理アドレスを決められない。ページテーブルを辿る必要が
     /// あり、それは `kernel::paging::active::translate` の仕事である。
     pub const fn virt_to_phys(self, virt: VirtAddr) -> Option<PhysAddr> {
         let base = self.base.as_u64();
@@ -411,7 +411,7 @@ impl DirectMap {
 ///
 /// # なぜ static なのか
 ///
-/// 窓は起動時に一度決まり、以後変わらない。ページテーブル操作・フレーム
+/// ウィンドウは起動時に一度決まり、以後変わらない。ページテーブル操作・フレーム
 /// アロケータ・グラフィックス層のいずれもが変換を必要とするので、各所へ
 /// 引き回すと呼び出し経路すべてに引数が増える。値が変わらない以上、
 /// 出所を 1 つに固定して、必要な型が構築時に受け取る形が素直である。
@@ -424,7 +424,7 @@ impl DirectMap {
 /// そうすることで、
 ///
 /// - その型がアドレス変換を必要とすることがシグネチャに現れる
-/// - ホストテストで偽の窓を渡せる余地が残る（static 直参照だと
+/// - ホストテストで偽のウィンドウを渡せる余地が残る（static 直参照だと
 ///   差し替えられない）
 ///
 /// # パニック経路と例外ハンドラから呼んではならない
@@ -440,17 +440,17 @@ mod direct_map_slot {
     pub(super) static READY: AtomicBool = AtomicBool::new(false);
 
     /// 恒等マッピング（`PML4[0]`）を除去した後 `true` になる（B-2b）。
-    /// 除去後に恒等窓（`DirectMap::new(base==0)`、`identity()`を含む）を作ろうと
-    /// する試みを [`super::DirectMap::new`] が fail-fast で捕まえる（反転設計:
+    /// 除去後に恒等ウィンドウ（`DirectMap::new(base==0)`、`identity()`を含む）を作ろうと
+    /// する試みを [`super::DirectMap::new`] が fail-fast で検出する（反転設計:
     /// 恒等の利用者を列挙して守るのではなく、除去済みかを構築の関門で見る）。
     pub(super) static IDENTITY_REMOVED: AtomicBool = AtomicBool::new(false);
 }
 
-/// 恒等マッピングを除去したことを記録する（B-2b-4）。以降、恒等窓
+/// 恒等マッピングを除去したことを記録する（B-2b-4）。以降、恒等ウィンドウ
 /// （`DirectMap::new(base==0)` / `DirectMap::identity`）の構築は fail-fast する。
 ///
 /// **除去（`PML4[0]`を落とし CR3 リロードで TLB を流す）が完了した後に呼ぶこと。**
-/// これより前に呼ぶと、まだ恒等が生きているのに恒等窓の構築が止まる。
+/// これより前に呼ぶと、まだ恒等が生きているのに恒等ウィンドウの構築が止まる。
 pub fn mark_identity_removed() {
     use core::sync::atomic::Ordering;
     direct_map_slot::IDENTITY_REMOVED.store(true, Ordering::SeqCst);
@@ -465,7 +465,7 @@ pub enum DirectMapInitError {
     NotInitialised,
 }
 
-/// 窓を最初に設定する。**未初期化のときだけ成功する。**
+/// ウィンドウを最初に設定する。**未初期化のときだけ成功する。**
 pub fn init_direct_map(map: DirectMap) -> Result<(), DirectMapInitError> {
     use core::sync::atomic::Ordering;
 
@@ -482,7 +482,7 @@ pub fn init_direct_map(map: DirectMap) -> Result<(), DirectMapInitError> {
         .map_err(|_| DirectMapInitError::AlreadyInitialised)
 }
 
-/// 窓を差し替える。**higher-half 移行専用。**
+/// ウィンドウを差し替える。**higher-half 移行専用。**
 ///
 /// # なぜ全体を `InterruptGuard` で囲むのか
 ///
@@ -496,7 +496,7 @@ pub fn init_direct_map(map: DirectMap) -> Result<(), DirectMapInitError> {
 /// どちらかしか観測しない。M4-c-2 の `Locked<T>` と同じ構造である。
 ///
 /// **別コアはこの禁止では止まらない。** 成り立っているのは、唯一の呼び出し側
-/// （higher-half 移行の A-2。`kernel/src/main.rs`）が **AP を起こすより前に走る**
+/// （higher-half 移行の A-2。`kernel/src/main.rs`）が **AP を起動するより前に走る**
 /// からである。**失効条件は「AP を起こす位置がこの呼び出しより前へ動くとき」**で、
 /// そのときはこの論法を作り直すこと。
 ///
@@ -518,18 +518,18 @@ pub unsafe fn replace_direct_map(map: DirectMap) -> Result<(), DirectMapInitErro
     Ok(())
 }
 
-/// 窓を取り出す。**未初期化なら panic する。**
+/// ウィンドウを取り出す。**未初期化なら panic する。**
 ///
-/// 未初期化の窓で変換すると、恒等でもない誤った値が返り、それが静かに
+/// 未初期化のウィンドウで変換すると、恒等でもない誤った値が返り、それが静かに
 /// 伝播する。`Option` を返して呼び出し側に判断させると `unwrap` が
 /// 散らばるだけで実質同じなので、ここで止める（ADR-0004 の fail-fast）。
 ///
 /// **パニック経路と例外ハンドラから呼んではならない。** 無限再帰になる。
 ///
-/// この関数は登録窓をモジュール内の構造体リテラルで再構築するので、
+/// この関数は登録ウィンドウをモジュール内の構造体リテラルで再構築するので、
 /// [`DirectMap::new`] の恒等除去の関門を通らない。恒等除去（B-2b）の後に
-/// `direct_map()` が恒等窓（`base==0`）を返すことは起きない。登録窓は A-2
-/// （[`replace_direct_map`]）が高位窓（`base!=0`）へ差し替え済みで、除去より
+/// `direct_map()` が恒等ウィンドウ（`base==0`）を返すことは起きない。登録ウィンドウは A-2
+/// （[`replace_direct_map`]）が高位ウィンドウ（`base!=0`）へ差し替え済みで、除去より
 /// はるか前だからである。A-2 の順序を変えるとこの前提が崩れる。
 pub fn direct_map() -> DirectMap {
     use core::sync::atomic::Ordering;
@@ -579,7 +579,7 @@ mod tests {
 
     /// **切り上げが正規形の穴へ入る場合を `None` にすること。**
     ///
-    /// 桁溢れは起きないので、u64 の `checked_add` だけでは捕まえられない。
+    /// 桁溢れは起きないので、u64 の `checked_add` だけでは検出できない。
     #[test]
     fn virt_align_up_refuses_to_land_in_the_non_canonical_hole() {
         // 0x0000_7FFF_FFFF_F001 を 4KiB へ切り上げると
@@ -680,7 +680,7 @@ mod tests {
         assert!(map.covers(phys));
     }
 
-    /// 窓の外は `virt_to_phys` が `None`。
+    /// ウィンドウの外は `virt_to_phys` が `None`。
     #[test]
     fn the_direct_map_rejects_addresses_outside_the_window() {
         let map = DirectMap::new(VirtAddr::new_const(0xFFFF_8000_0000_0000), 0x1000).unwrap();
@@ -695,7 +695,7 @@ mod tests {
         assert_eq!(map.virt_to_phys(below), None);
     }
 
-    /// 上端が正規形に収まらない窓は作れない。
+    /// 上端が正規形に収まらないウィンドウは作れない。
     #[test]
     fn a_direct_map_that_would_leave_the_canonical_range_is_rejected() {
         assert_eq!(DirectMap::new(VirtAddr::new_const(LOWER_TOP), 2), None);

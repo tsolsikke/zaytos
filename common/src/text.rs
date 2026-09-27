@@ -57,7 +57,7 @@ pub fn width_cells(c: char) -> u32 {
         | 0xFFE0..=0xFFE6      // 全角の記号
         | 0x20000..=0x3FFFD    // CJK 拡張 B 以降
     );
-    // 破壊 (ADR-0054, width-always-one-test): **幅を常に 1 にする。**
+    // 破壊テスト (ADR-0054, width-always-one-test): **幅を常に 1 にする。**
     // **`ADR-0054` の前の形そのものである**——**全角も 1 セルで進む。**
     // **`utf8-test` の「全角は 2 セル」と「桁が字で進む」が落ちる。**
     #[cfg(any(feature = "width-always-one", width_always_one))]
@@ -74,7 +74,7 @@ pub fn width_cells(c: char) -> u32 {
 /// # なぜ状態を持つのか
 ///
 /// **1 字が 2 回の `write` に割れて届くことがある**（システムコールはページ単位で
-/// 刻む。`FOREGROUND_ANSI` と同じ事情である）。**`write` ごとに
+/// 分けて進める。`FOREGROUND_ANSI` と同じ事情である）。**`write` ごとに
 /// `core::str::from_utf8` を通す形だと、割れた字は両方が不正になる。**
 ///
 /// # 不正なバイトは 1 つずつ置換文字にする

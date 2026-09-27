@@ -60,7 +60,7 @@ pub fn cpu_id_reader_installed() -> bool {
 ///
 /// # 据える前は `0` を返す
 ///
-/// GDT/TSS の構築は Local APIC を写像するより前に [`PerCpu::this_cpu_ptr`] を通る。
+/// GDT/TSS の構築は Local APIC をマップするより前に [`PerCpu::this_cpu_ptr`] を通る。
 /// その時点で走っているのは bootstrap processor だけなので `0` が正しい。
 ///
 /// # `0` を返すことに依存しない

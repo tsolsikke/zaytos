@@ -154,7 +154,7 @@ mod tests {
 
     /// 行の前後を落とす（f-1）。
     ///
-    /// **`\r` を落とすのは、像を外の道具で編集する道が在るためである。**
+    /// **`\r` を落とすのは、イメージを外の道具で編集する道が在るためである。**
     #[test]
     fn an_environment_line_is_trimmed_on_both_sides() {
         assert_eq!(trim_env_line(b"  TERM=zaytos  "), b"TERM=zaytos");
@@ -184,17 +184,17 @@ pub enum EnvSetError {
 ///
 /// # 2 つの入口が在る理由
 ///
-/// **`push` は追記だけで、同じ名前が 2 度来ても 2 行になる**——**源のファイルの
+/// **`push` は追記だけで、同じ名前が 2 度来ても 2 行になる**——**出どころのファイルの
 /// 振る舞いを変えない**（`ADR-0052` は「先頭から採り、残りを落とす」と決めた）。
 ///
 /// **`set` は上書きする**——**`export` は同じ名前を何度も打てるほうが自然で、
-/// 打つたびに枠が減る形は驚きが大きい。**
+/// 打つたびにスロットが減る形は驚きが大きい。**
 ///
 /// # NUL を持って置く
 ///
 /// **行の直後に必ず NUL を置く**（[`EnvTable::line_with_nul`]）。
 /// **`spawn` へ渡すのは NUL 終端の文字列の配列だからである**——
-/// **渡す直前に写しを作る形にすると、写し先をもう 1 つ持つことになる。**
+/// **渡す直前にコピーを作る形にすると、コピー先をもう 1 つ持つことになる。**
 pub struct EnvTable {
     lines: [[u8; ENV_LINE_MAX + 1]; MAX_ENVP],
     lens: [usize; MAX_ENVP],
@@ -255,7 +255,7 @@ impl EnvTable {
         true
     }
 
-    /// `NAME=VALUE` を置く（`export`）。**同じ名前が在れば上書きし、枠を消費しない。**
+    /// `NAME=VALUE` を置く（`export`）。**同じ名前が在れば上書きし、スロットを消費しない。**
     ///
     /// **断るのは 2 つの場合だけである**——**行が壊れているか、満杯か。**
     /// **どちらでも表は変わらない**（部分的に適用しない）。
@@ -313,7 +313,7 @@ impl EnvTable {
 mod table_tests {
     use super::{EnvReject, EnvSetError, EnvTable, ENV_LINE_MAX, MAX_ENVP};
 
-    /// `export` は上書きで、枠を消費しない（f-2。`ADR-0053` の Decision 5）。
+    /// `export` は上書きで、スロットを消費しない（f-2。`ADR-0053` の Decision 5）。
     #[test]
     fn setting_the_same_name_twice_overwrites_and_keeps_the_slot() {
         let mut table = EnvTable::new();
@@ -336,7 +336,7 @@ mod table_tests {
         assert_eq!(table.set(b"Z=1"), Err(EnvSetError::Full));
         assert_eq!(table.count(), MAX_ENVP);
         assert_eq!(table.value(b"Z"), None);
-        // **満杯でも上書きは通る。** 枠を要らないからである。
+        // **満杯でも上書きは通る。** スロットを要らないからである。
         assert!(table.set(b"A=2").is_ok());
         assert_eq!(table.value(b"A"), Some(&b"2"[..]));
     }
@@ -387,7 +387,7 @@ mod table_tests {
         assert_eq!(table.line_with_nul(0), b"PATH=/\0");
     }
 
-    /// `push` は上書きしない。**源のファイルの振る舞いを変えない。**
+    /// `push` は上書きしない。**出どころのファイルの振る舞いを変えない。**
     #[test]
     fn pushing_the_same_name_twice_keeps_both_lines() {
         let mut table = EnvTable::new();
