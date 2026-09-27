@@ -1597,9 +1597,9 @@ extern "sysv64" fn kernel_main() -> ! {
     }
 
     // **本番のカーネルの PML4 を控える（W1-c-2）。** **切り替えは、欄が 0 のタスクへ移るときに
-    // これを載せる**（`task::record_kernel_cr3` の doc）。**恒等の除去の区画の外に置く**——
+    // これを載せる**（`task::record_kernel_page_table_root` の doc）。**恒等の除去の区画の外に置く**——
     // **`paging-test` の構成は除去を通らないが、本番の表はこの時点で同じである。**
-    kernel::task::record_kernel_cr3();
+    kernel::task::record_kernel_page_table_root();
 
     // 破壊テスト (highhalf-panic-after-remove): 恒等除去の直後に意図的 panic する。パニック経路
     // （シリアル I/O・レジスタ値のみ・walk なし。ADR-0003）が恒等非依存であることを、
@@ -2746,7 +2746,7 @@ fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Con
             a_finished.saturating_sub(b_ended),
             kernel::task::switches_out_of_excursion(0),
             kernel::task::switches_out_of_excursion(ring3_task),
-            kernel::task::cr3_loads_on_switch(),
+            kernel::task::page_table_root_loads_on_switch(),
             kernel::input::foreground_refused_count()
         ),
     );

@@ -48,7 +48,7 @@
 //! | `switches` | **加算** | - | - | **読み** | 書き |
 //! | `demo_active` / `demo_deadline` | 読み書き | - | - | - | 書き（`InterruptGuard`下） |
 //! | `rsp0` / `excursion_depth` | 読み（切り替え） | - | - | 書き（遠征の出入り。入口は `cli` 下、出口は IF=0）/ `excursion_depth` の読み（W1-c-4 の `init` の待ち。別のタスクの欄） | 書き |
-//! | `cr3` | 読み（切り替え） | - | - | 書き（`InterruptGuard`下）/ 破棄の経路（BKL下） | 書き |
+//! | `page_table_root` | 読み（切り替え） | - | - | 書き（`InterruptGuard`下）/ 破棄の経路（BKL下） | 書き |
 //! | `current_recovery` | 読み書き（切り替え） | - | - | - | 書き |
 //!
 //! **下の 3 行は W1-b から W1-c-2 で足した欄で、W1-c-3b でこの表へ加えた。** **加えるまで
@@ -158,18 +158,18 @@ pub(super) fn set_excursion_depth(index: usize, depth: usize) {
     unsafe { addr_of_mut!((*slot(index)).excursion_depth).write(depth) }
 }
 
-pub(super) fn cr3(index: usize) -> u64 {
-    // SAFETY: 有効なポインタ。書くのは `task::switch_cr3_and_note`（割り込み禁止の区間）と
+pub(super) fn page_table_root(index: usize) -> u64 {
+    // SAFETY: 有効なポインタ。書くのは `task::switch_page_table_root_and_note`（割り込み禁止の区間）と
     // 破棄の経路（BKL の内側）で、読むのは切り替え（IF=0 かつ BKL の内側）である。
     // W1-b-2 では「遠征の出入りと破棄の経路から、BKL の内側で触る」と書いていたが、
     // 深さ 0 の `init` の遠征は BKL を持たずに通っていた（W1-c-2 で読んだ）。タスクは
     // BSP だけが持つので、同じコアの割り込みを止めれば切り替えと重ならない。
-    unsafe { addr_of_mut!((*slot(index)).cr3).read() }
+    unsafe { addr_of_mut!((*slot(index)).page_table_root).read() }
 }
 
-pub(super) fn set_cr3(index: usize, value: u64) {
+pub(super) fn set_page_table_root(index: usize, value: u64) {
     // SAFETY: 同上。
-    unsafe { addr_of_mut!((*slot(index)).cr3).write(value) }
+    unsafe { addr_of_mut!((*slot(index)).page_table_root).write(value) }
 }
 
 // 破壊テスト `task-switch-keep-recovery` では切り替えが入れ替えないので、読む者が居なくなる。

@@ -551,12 +551,12 @@ struct Task {
     ///   そこでは以後何も走らない**（実測）。**`ring3::enter` は終了と、例外による終了処理の
     ///   2 つの longjmp でしか戻らず、Ctrl+C も終了処理として戻る。**
     /// - **破棄の経路が、その空間を指したままのタスクを見つけたら消す**
-    ///   （[`forget_cr3_if`]。**ユーザープロセスの空間を破棄する箇所は 1 つだけである**。実測）。
+    ///   （[`forget_page_table_root_if`]。**ユーザープロセスの空間を破棄する箇所は 1 つだけである**。実測）。
     ///   **入れ子の `spawn` は同じタスクの上で走るので、無条件には消さない**
     ///   ——**子の空間を破棄する時点で、タスクの値は既に親の空間へ戻っている。**
     ///
     /// **使うのは W1-c である**（`schedule_switch` がこれを載せる）。
-    cr3: u64,
+    page_table_root: u64,
     /// このタスクの回復点のアドレス（W1-a で置き場を作り、W1-b で使い始めた）。
     ///
     /// # これも「値」である
@@ -592,7 +592,7 @@ const EMPTY_TASK: Task = Task {
     stack_bottom: 0,
     rsp0: 0,
     excursion_depth: 0,
-    cr3: 0,
+    page_table_root: 0,
     current_recovery: 0,
     state: TaskState::Uninitialized,
     base: 0,
@@ -737,7 +737,7 @@ static SWITCHES_OUT_OF_EXCURSION: [AtomicU64; TASK_COUNT] =
     [const { AtomicU64::new(0) }; TASK_COUNT];
 
 /// 切り替えが CR3 を載せ替えた回数（W1-c-4 の計測。`docs/wayland-inventory.md` の #5）。
-static CR3_LOADS_ON_SWITCH: AtomicU64 = AtomicU64::new(0);
+static PAGE_TABLE_ROOT_LOADS_ON_SWITCH: AtomicU64 = AtomicU64::new(0);
 
 /// BSP 用アイドルタスクが `hlt` した回数（W2-c-1 の計測）。
 ///
@@ -767,8 +767,8 @@ pub fn switches_out_of_excursion(task: usize) -> u64 {
 }
 
 /// 切り替えが CR3 を載せ替えた回数（W1-c-4）。
-pub fn cr3_loads_on_switch() -> u64 {
-    CR3_LOADS_ON_SWITCH.load(Ordering::Relaxed)
+pub fn page_table_root_loads_on_switch() -> u64 {
+    PAGE_TABLE_ROOT_LOADS_ON_SWITCH.load(Ordering::Relaxed)
 }
 
 /// 出る側が遠征の最中なら数える（W1-c-4）。**`schedule_switch` のフレームを広げないため、別の関数にしてある。**
@@ -1020,7 +1020,7 @@ fn ring3_task_stack_high_water() -> usize {
 /// 切り替えで入るタスクの `rsp0` の欄が 0 だった（W1-c-3c）。**止める。**
 ///
 /// **別の関数にしてある理由**——**`schedule_switch` のフレームを広げないため**
-/// （[`swap_cr3_for_switch`] と同じ形）。
+/// （[`swap_page_table_root_for_switch`] と同じ形）。
 #[inline(never)]
 #[cold]
 fn report_zero_rsp0_on_switch(next: usize) -> ! {
@@ -1099,20 +1099,20 @@ pub fn note_current_rsp0(top: u64) {
 
 /// 今のタスクの CR3 の欄を据える（W1-b-2。遠征の出入りが呼ぶ）。
 ///
-/// **W1-c-2 で `pub` を外した。** **呼ぶのは [`switch_cr3_and_note`] だけである**
+/// **W1-c-2 で `pub` を外した。** **呼ぶのは [`switch_page_table_root_and_note`] だけである**
 /// ——**載せ替えと控えを割り込みを止めて一続きにする経路を、1 つに絞るため。**
-fn note_current_cr3(value: u64) {
+fn note_current_page_table_root(value: u64) {
     let Some(index) = current_index_if_any() else {
         return;
     };
-    scheduler::set_cr3(index, value);
+    scheduler::set_page_table_root(index, value);
 }
 
-/// 本番のカーネルの PML4（W1-c-2）。**タスクの `cr3` の欄が 0 のとき、切り替えが載せる値である。**
+/// 本番のカーネルの PML4（W1-c-2）。**タスクの `page_table_root` の欄が 0 のとき、切り替えが載せる値である。**
 ///
 /// **0 は「まだ控えていない」である。** **控える前に切り替えが起きたら、切り替えが止める**
-/// （[`swap_cr3_for_switch`]）——**何を載せればよいか分からないまま進めない。**
-static KERNEL_CR3: AtomicU64 = AtomicU64::new(0);
+/// （[`swap_page_table_root_for_switch`]）——**何を載せればよいか分からないまま進めない。**
+static KERNEL_PAGE_TABLE_ROOT: AtomicU64 = AtomicU64::new(0);
 
 /// 本番のカーネルの PML4 を控える（W1-c-2）。**起動の直線上から 1 回だけ呼ぶ。**
 ///
@@ -1121,8 +1121,8 @@ static KERNEL_CR3: AtomicU64 = AtomicU64::new(0);
 ///
 /// **判定行は出さない。** **同じ値は起動ログの `identity-removal: begin. live PML4=` が出している**
 /// ——**行を足すと、この段階の「番地だけ」が崩れる。**
-pub fn record_kernel_cr3() {
-    KERNEL_CR3.store(
+pub fn record_kernel_page_table_root() {
+    KERNEL_PAGE_TABLE_ROOT.store(
         crate::arch::x86_64::paging::switch::read_cr3().as_u64(),
         Ordering::SeqCst,
     );
@@ -1130,10 +1130,10 @@ pub fn record_kernel_cr3() {
 
 /// 欄の値から、載せる CR3 を引く（W1-c-2）。
 ///
-/// **0 は「ユーザー空間を載せていない」なので、カーネルの表である**（`Task::cr3` の doc）。
-const fn cr3_to_load(field: u64, kernel_cr3: u64) -> u64 {
+/// **0 は「ユーザー空間を載せていない」なので、カーネルの表である**（`Task::page_table_root` の doc）。
+const fn page_table_root_to_load(field: u64, kernel_root: u64) -> u64 {
     if field == 0 {
-        kernel_cr3
+        kernel_root
     } else {
         field
     }
@@ -1158,11 +1158,11 @@ const fn cr3_to_load(field: u64, kernel_cr3: u64) -> u64 {
 /// [`crate::arch::x86_64::paging::switch::switch_to`] と同じ契約。**`noted` は、載せた後にこのタスクが
 /// 載せていることになる値である**（0 ならカーネルの表）。
 #[inline(never)]
-pub unsafe fn switch_cr3_and_note(load: common::addr::PhysAddr, noted: u64) {
+pub unsafe fn switch_page_table_root_and_note(load: common::addr::PhysAddr, noted: u64) {
     let _no_switch = common::critical::InterruptGuard::enter();
     // SAFETY: 呼び出し元契約。
     unsafe { crate::arch::x86_64::paging::switch::switch_to(load) };
-    note_current_cr3(noted);
+    note_current_page_table_root(noted);
 }
 
 /// 切り替えで CR3 を入れ替える（W1-c-2）。**出る側を検算し、入る側を載せる。**
@@ -1176,7 +1176,7 @@ pub unsafe fn switch_cr3_and_note(load: common::addr::PhysAddr, noted: u64) {
 /// # 既定の起動では必ず一致し、載せ替えも起きない
 ///
 /// **遠征中に切り替えが起きないので、切り替えるタスクの欄はどれも 0 である。** **違う値になるのは W1-c-4 からである。**
-/// **W1-c-4 の `concurrent-test` では実際に載せ替える**（実測で 82 回。`CR3_LOADS_ON_SWITCH`）。
+/// **W1-c-4 の `concurrent-test` では実際に載せ替える**（実測で 82 回。`PAGE_TABLE_ROOT_LOADS_ON_SWITCH`）。
 /// **それでも検算を設けるのは、「起きない見込み」を観測に変えるためである**——**起動時の空間の演習に
 /// 切り替えが割り込む形が在れば、ここで止まる。**
 ///
@@ -1184,26 +1184,26 @@ pub unsafe fn switch_cr3_and_note(load: common::addr::PhysAddr, noted: u64) {
 ///
 /// **`schedule_switch` のフレームを広げないため**（`format_args!` の一時値。`report_double_selection` と同じ形）。
 #[inline(never)]
-fn swap_cr3_for_switch(current: usize, next: usize) {
-    let kernel_cr3 = KERNEL_CR3.load(Ordering::SeqCst);
-    let live_cr3 = crate::arch::x86_64::paging::switch::read_cr3().as_u64();
-    let outgoing_cr3 = cr3_to_load(scheduler::cr3(current), kernel_cr3);
-    if kernel_cr3 == 0 || live_cr3 != outgoing_cr3 {
+fn swap_page_table_root_for_switch(current: usize, next: usize) {
+    let kernel_root = KERNEL_PAGE_TABLE_ROOT.load(Ordering::SeqCst);
+    let live_root = crate::arch::x86_64::paging::switch::read_cr3().as_u64();
+    let outgoing_root = page_table_root_to_load(scheduler::page_table_root(current), kernel_root);
+    if kernel_root == 0 || live_root != outgoing_root {
         serial_line(format_args!(
-            "[ERROR] task: task {current} is leaving with CR3 {live_cr3:#x} but its field expects \
-             {outgoing_cr3:#x} (kernel CR3 {kernel_cr3:#x}, 0 means it was never recorded); a CR3 \
+            "[ERROR] task: task {current} is leaving with CR3 {live_root:#x} but its field expects \
+             {outgoing_root:#x} (kernel CR3 {kernel_root:#x}, 0 means it was never recorded); a CR3 \
              change was not recorded in the task, so switching back would load the wrong table; \
              halting"
         ));
         common::arch::x86_64::cpu::halt_forever();
     }
-    let incoming_cr3 = cr3_to_load(scheduler::cr3(next), kernel_cr3);
-    if incoming_cr3 == live_cr3 {
+    let incoming_root = page_table_root_to_load(scheduler::page_table_root(next), kernel_root);
+    if incoming_root == live_root {
         return;
     }
-    let Some(table) = common::addr::PhysAddr::new(incoming_cr3) else {
+    let Some(table) = common::addr::PhysAddr::new(incoming_root) else {
         serial_line(format_args!(
-            "[ERROR] task: task {next} carries CR3 {incoming_cr3:#x}, which is not a physical \
+            "[ERROR] task: task {next} carries CR3 {incoming_root:#x}, which is not a physical \
              address; halting"
         ));
         common::arch::x86_64::cpu::halt_forever();
@@ -1212,9 +1212,9 @@ fn swap_cr3_for_switch(current: usize, next: usize) {
     // 検算（上）が「欄と実物が違う」を見て止まる。**
     #[cfg(not(feature = "task-switch-no-cr3"))]
     {
-        CR3_LOADS_ON_SWITCH.fetch_add(1, Ordering::Relaxed);
+        PAGE_TABLE_ROOT_LOADS_ON_SWITCH.fetch_add(1, Ordering::Relaxed);
         // SAFETY: 入る側の値は、欄が 0 ならカーネルの表、0 以外ならその空間の持ち主が生きている間だけ
-        // 持つ値である（`Task::cr3` の不変条件）。どちらもカーネルの上位を共有するので、切り替えても
+        // 持つ値である（`Task::page_table_root` の不変条件）。どちらもカーネルの上位を共有するので、切り替えても
         // 実行中のコードと、いま乗っているカーネルスタックは見え続ける。呼ぶのは `schedule_switch`
         // だけで、IF=0 かつ BKL の内側である。
         unsafe { crate::arch::x86_64::paging::switch::switch_to(table) };
@@ -1231,11 +1231,11 @@ fn swap_cr3_for_switch(current: usize, next: usize) {
 ///
 /// **全タスクを見る。** **いまユーザー空間を載せるのは 1 本だけだが、
 /// W1-c で 2 本になっても同じ形で効く。**
-pub fn forget_cr3_if(pml4: u64) -> bool {
+pub fn forget_page_table_root_if(root: u64) -> bool {
     let mut forgot = false;
     for index in 0..TASK_COUNT {
-        if scheduler::cr3(index) == pml4 {
-            scheduler::set_cr3(index, 0);
+        if scheduler::page_table_root(index) == root {
+            scheduler::set_page_table_root(index, 0);
             forgot = true;
         }
     }
@@ -2137,7 +2137,7 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
                 // いないタスクの RSP0 がそれである。**
                 rsp0: top.as_u64(),
                 excursion_depth: 0,
-                cr3: 0,
+                page_table_root: 0,
                 current_recovery: 0,
                 state: TaskState::Ready,
                 // BSP のワーカーである。`GPR_BUF` に触るので AP へ渡さない
@@ -2440,9 +2440,9 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         }
 
         // **CR3 を入れ替える（W1-c-2。`ADR-0060`）。** **出る側を検算してから、入る側を載せる**
-        // （[`swap_cr3_for_switch`] の doc）。**既定の起動では同じ値で、載せ替えは起きない**
+        // （[`swap_page_table_root_for_switch`] の doc）。**既定の起動では同じ値で、載せ替えは起きない**
         // （W1-c-4 の `concurrent-test` では載せ替える）。
-        swap_cr3_for_switch(current, next);
+        swap_page_table_root_for_switch(current, next);
 
         // **回復点を入れ替える（W1-b。`ADR-0060`）。**
         //
@@ -2976,7 +2976,7 @@ unsafe fn setup_preemptive_tasks() {
                 stack_bottom: guard.as_u64() + GUARD_SIZE as u64,
                 rsp0: top.as_u64(),
                 excursion_depth: 0,
-                cr3: 0,
+                page_table_root: 0,
                 current_recovery: 0,
                 state: TaskState::Ready,
                 // BSP のワーカーである。`GPR_BUF` に触るので AP へ渡さない
@@ -3652,13 +3652,16 @@ mod tests {
     /// 欄が 0 のタスクへ移るときは、カーネルの表を載せる（W1-c-2）。
     #[test]
     fn a_task_with_no_user_space_loads_the_kernel_table() {
-        assert_eq!(super::cr3_to_load(0, 0xf000), 0xf000);
+        assert_eq!(super::page_table_root_to_load(0, 0xf000), 0xf000);
     }
 
     /// 欄が 0 でないタスクへ移るときは、その値を載せる（W1-c-2）。
     #[test]
     fn a_task_with_a_user_space_loads_its_own_table() {
-        assert_eq!(super::cr3_to_load(0x1234_5000, 0xf000), 0x1234_5000);
+        assert_eq!(
+            super::page_table_root_to_load(0x1234_5000, 0xf000),
+            0x1234_5000
+        );
     }
 
     /// Ring 3 のスロット 1 を使うのは、末尾に足した 1 本だけである（W1-c-3）。

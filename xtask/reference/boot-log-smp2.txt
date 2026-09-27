@@ -15,10 +15,10 @@ Hello, ZaytOS!
 [INFO] fp: SSE is enabled on the bootstrap processor: CR0=0x80010033 (MP=true, EM=false),              CR4=0x668 (OSFXSR=true, OSXMMEXCPT=true), as intended = true [read back from the registers]
 [INFO] boot stack: 648 of 16384 bytes used (high-water; 15736 bytes poison intact)
 [INFO] higher-half: arrived at high VA. RIP=0xffffffff801e7248 in [0xffffffff80100000, 0xffffffff804bc8f8)=true, RSP=0xffffffff804a6130 high=true, CR3=0x25b000 == bootstrap PML4 0x25b000 = true, identity alive (phys 0x100000 read via low==high) = true
-[INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff80428148 first slot=0xffffffff80428148 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
+[INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff80428150 first slot=0xffffffff80428150 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
 [INFO] interrupts: RFLAGS.IF before cli = false (raw RFLAGS=0x96)
 [INFO] interrupts: RFLAGS.IF after cli = false (raw RFLAGS=0x96)
-[INFO] gdt: base=0xffffffff80428148 limit=63 (expected base=0xffffffff80428148)
+[INFO] gdt: base=0xffffffff80428150 limit=63 (expected base=0xffffffff80428150)
 [INFO] gdt: CS=0x8 (expected 0x8), TR=0x30 (expected 0x30)
 [INFO] gdt: limit=63 (expected 63)
 [INFO] gdt[1] kcode: 0x00af9a000000ffff DPL=0 present=1 kind=code accessed=0 (expected 0x00af9a000000ffff, accessed bit is CPU-managed)
@@ -513,7 +513,7 @@ syscall-test wrote this
 [INFO] ioapic: IRQ1 redirection entry read back: vector=0x42 masked=false level_triggered=false active_low=false destination_mode=physical destination=0x00, vector matches what we wrote (0x42) = true, destination is physical mode and equals the bootstrap processor (0x00) = true
 [INFO] ioapic: IRQ1 now goes through the I/O APIC as vector 0x42; the 8259 line is masked (the first key must arrive as that vector, which the 8259 cannot produce)
 [INFO] ioapic: virtio IRQ 11 routed: vector=0x44 (expected 0x44), level=true active-low=false masked=false; matches the platform's declaration = true [read back from hardware]
-[INFO] sti-check 1: GDT base=0xffffffff80428148 (expected 0xffffffff80428148), CS=0x0008 (expected 0x0008), DS=0x0010 SS=0x0010 (expected 0x0010)
+[INFO] sti-check 1: GDT base=0xffffffff80428150 (expected 0xffffffff80428150), CS=0x0008 (expected 0x0008), DS=0x0010 SS=0x0010 (expected 0x0010)
 [INFO] sti-check 2: TR=0x0030 (expected 0x0030), IST1 top=0xffffffff804b5000, #DF gate IST index=Some(1)
 [INFO] sti-check 3: IDT base=0xffffffff804ba899 limit=4095, first 32 gates ok=true, exception stub table ok=true, irq stub table ok=true (0xffffffff801db3a0..0xffffffff801db5b0, size=528 expected=528)
 [INFO] sti-check 3b: all 256 IDT gate(s) lead to one of the 3 common entries = true (exception 216, irq 39, syscall 1)

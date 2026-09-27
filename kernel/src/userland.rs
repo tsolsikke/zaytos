@@ -1345,7 +1345,7 @@ pub fn global_difference_checks() -> u64 {
 fn forget_task_cr3_before_destroy(logger: &mut Logger<SerialPort>, process: &UserProcess) {
     let name = process.name;
     let pml4 = process.space.pml4().as_u64();
-    if crate::task::forget_cr3_if(pml4) {
+    if crate::task::forget_page_table_root_if(pml4) {
         logger.error(format_args!(
             "task: a task still pointed its cr3 at {name}'s address space {pml4:#x} when the \
              space was about to be destroyed; the field was cleared (the excursion return should \
@@ -1841,7 +1841,10 @@ unsafe fn run_loaded_program(
     // SAFETY: この空間はカーネルの上位を共有しており、切り替えても実行中の
     // コードとスタックは見え続ける。
     unsafe {
-        crate::task::switch_cr3_and_note(process.space.pml4(), process.space.pml4().as_u64())
+        crate::task::switch_page_table_root_and_note(
+            process.space.pml4(),
+            process.space.pml4().as_u64(),
+        )
     };
     // **このプロセスの fd の表を据える（S10-b）。** `dispatch` はプロセスを
     // 知らないので、遠征の間だけ `crate::vfs` が持つ
@@ -2036,7 +2039,7 @@ unsafe fn run_loaded_program(
     // **`ring3::enter` は深さを戻してから返るので、ここで読む深さは入口と同じである。**
     // SAFETY: 本番のテーブルへ戻す。上位は同じなので連続して実行できる。
     unsafe {
-        crate::task::switch_cr3_and_note(
+        crate::task::switch_page_table_root_and_note(
             production,
             if crate::arch::x86_64::ring3::depth() == 0 {
                 0
