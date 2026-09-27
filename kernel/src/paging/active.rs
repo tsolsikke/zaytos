@@ -563,10 +563,10 @@ impl ActivePageTable {
     /// # `writable: false` でマップしたページについて、何を主張してよいか
     ///
     /// **主張してよいのは「Ring 3 から書くと #PF になる」までである。**
-    /// 「カーネル（Ring 0）から書いても落ちる」は主張しない。それには `CR0.WP` が
-    /// 要り、**AP では WP が立っていない**（BSP は立っている。実測値と経緯は
-    /// `docs/deferred-decisions.md` の「AP の制御レジスタが BSP と違う」）。
-    /// 揃えるかどうかはその項目の解禁条件に従う。
+    /// 「カーネル（Ring 0）から書いても落ちる」は、まだ主張しない。**`CR0.WP` は 2026-09-24 から
+    /// BSP と各 AP で立てて確かめている**（`crate::cpu_state` の `check_aps_match_bsp`）が、
+    /// **Ring 0 の書きが落ちることを確かめる判定はまだ無い**（以前は AP で WP が立っていなかった。
+    /// 経緯は `docs/deferred-decisions.md` の「AP の制御レジスタが BSP と違う」）。
     ///
     /// # Safety
     ///
