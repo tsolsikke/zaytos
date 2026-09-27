@@ -25421,7 +25421,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 50,
-    full: 411,
+    full: 413,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。
