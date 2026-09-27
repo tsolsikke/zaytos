@@ -1057,7 +1057,7 @@ pub fn load_user_program(
     use crate::arch::x86_64::paging::address_space::AddressSpace;
 
     let direct_map = common::addr::direct_map();
-    let production = crate::arch::x86_64::paging::switch::read_cr3();
+    let production = crate::arch::x86_64::paging::switch::active_page_table_root();
 
     // **アロケータを借りる（S11-3。`ADR-0030`）。** マッピングの間だけ持ち、
     // **Ring 3 へ落ちる前に返す。**
@@ -1812,7 +1812,7 @@ unsafe fn run_loaded_program(
     logger: &mut Logger<SerialPort>,
     process: &mut UserProcess,
 ) -> Result<(), UserLoadError> {
-    let production = crate::arch::x86_64::paging::switch::read_cr3();
+    let production = crate::arch::x86_64::paging::switch::active_page_table_root();
 
     crate::syscall::reset_counters();
     // **戻す RSP0 は「今この処理が乗っているカーネルスタックの上端」である。**

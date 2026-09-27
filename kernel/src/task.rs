@@ -1123,7 +1123,7 @@ static KERNEL_PAGE_TABLE_ROOT: AtomicU64 = AtomicU64::new(0);
 /// ——**行を足すと、この段階の「番地だけ」が崩れる。**
 pub fn record_kernel_page_table_root() {
     KERNEL_PAGE_TABLE_ROOT.store(
-        crate::arch::x86_64::paging::switch::read_cr3().as_u64(),
+        crate::arch::x86_64::paging::switch::active_page_table_root().as_u64(),
         Ordering::SeqCst,
     );
 }
@@ -1186,7 +1186,7 @@ pub unsafe fn switch_page_table_root_and_note(load: common::addr::PhysAddr, note
 #[inline(never)]
 fn swap_page_table_root_for_switch(current: usize, next: usize) {
     let kernel_root = KERNEL_PAGE_TABLE_ROOT.load(Ordering::SeqCst);
-    let live_root = crate::arch::x86_64::paging::switch::read_cr3().as_u64();
+    let live_root = crate::arch::x86_64::paging::switch::active_page_table_root().as_u64();
     let outgoing_root = page_table_root_to_load(scheduler::page_table_root(current), kernel_root);
     if kernel_root == 0 || live_root != outgoing_root {
         serial_line(format_args!(

@@ -533,7 +533,7 @@ fn sabotage_map_target(logger: &mut Logger<SerialPort>, what: &str, phys: PhysAd
 
     #[cfg(feature = "apic-test-wrong-target")]
     {
-        let pml4 = crate::arch::x86_64::paging::switch::read_cr3();
+        let pml4 = crate::arch::x86_64::paging::switch::active_page_table_root();
         logger.warn(format_args!(
             "apic: [apic-test-wrong-target] pointing the mapping of {what} at {:#x} \
              (the live PML4) instead of {:#x}",

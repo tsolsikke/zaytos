@@ -143,7 +143,7 @@ pub unsafe fn remove_identity(
     const PRESENT: u64 = 1 << 0;
 
     // (1) 稼働 PML4 と PML4[0] を控える。
-    let cr3 = switch::read_cr3();
+    let cr3 = switch::active_page_table_root();
     // SAFETY: cr3 は稼働中の自前テーブル、direct_map（高位ウィンドウ）でそのフレームを
     // 読める。読み取りのみ。
     let saved0 = unsafe { verify::read_pml4_entry(cr3, direct_map, IDENTITY_INDEX) };

@@ -11,7 +11,7 @@ use super::entry::ADDR_MASK_TABLE;
 ///
 /// PCID や PWT/PCD のビットは落として返す。呼び出し側がマスクを忘れる余地を
 /// 無くすため、ここで型に落とす。
-pub fn read_cr3() -> PhysAddr {
+pub fn active_page_table_root() -> PhysAddr {
     let value: u64;
     // SAFETY: `mov reg, cr3` は読み取りだけで、メモリにもスタックにも副作用が
     // ない。値は実行環境に依存するので `options` は指定しない。

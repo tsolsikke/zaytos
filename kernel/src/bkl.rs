@@ -414,7 +414,7 @@ fn flush_if_generation_is_stale() {
     // 取った後に走る。**したがってこの間に誰も上げられない。**
     // **これは「順序は BKL 自身が与える」（[`TLB_GENERATION`] の doc）とは
     // 別の命題である**——あちらは可視性、こちらは排他の話である。
-    let cr3 = crate::arch::x86_64::paging::switch::read_cr3();
+    let cr3 = crate::arch::x86_64::paging::switch::active_page_table_root();
     // SAFETY: 今読んだ値をそのまま書き戻すだけで、マッピングは変えない。
     unsafe { crate::arch::x86_64::paging::switch::switch_to(cr3) };
     seen.store(current, Ordering::Relaxed);

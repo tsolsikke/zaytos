@@ -1521,7 +1521,7 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
 
     // 恒等が無いことを AP 側で読み戻す（b-2b-1 から移した到達条件）。
     // SAFETY: 稼働中のテーブルを読むだけ。
-    let cr3_phys = crate::arch::x86_64::paging::switch::read_cr3();
+    let cr3_phys = crate::arch::x86_64::paging::switch::active_page_table_root();
     let cr3 = cr3_phys.as_u64();
     // SAFETY: 稼働中のテーブルを direct map 越しに読むだけ（本番テーブルには
     // direct map がある）。読み取りのみ。
@@ -1805,7 +1805,7 @@ pub unsafe fn prepare_ap_per_cpu<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
     allocator: &mut FrameAllocator<CAP>,
 ) {
-    let production_cr3 = crate::arch::x86_64::paging::switch::read_cr3().as_u64();
+    let production_cr3 = crate::arch::x86_64::paging::switch::active_page_table_root().as_u64();
     for slot in 1..common::percpu::MAX_CPUS {
         // SAFETY: 呼び出し元契約。まだ AP は走っていない。
         let Some(stacks) = (unsafe { map_ap_stacks(logger, slot, allocator) }) else {

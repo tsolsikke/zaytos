@@ -228,7 +228,7 @@ fn report_high_half_arrival(logger: &mut Logger<SerialPort>) {
 
     let rip = cpu::read_rip();
     let rsp = cpu::read_rsp();
-    let cr3 = paging::switch::read_cr3();
+    let cr3 = paging::switch::active_page_table_root();
 
     // 期待する高位範囲（イメージの VMA）。
     let image_lo = kernel::link_symbols::KERNEL_VIRT_BASE + kernel::link_symbols::KERNEL_LOAD_ADDR;
@@ -986,7 +986,7 @@ extern "sysv64" fn kernel_main() -> ! {
 
     // === M2-d (d-2): CR3 を新しいページテーブルへ切り替える ===
 
-    let old_cr3 = paging::switch::read_cr3();
+    let old_cr3 = paging::switch::active_page_table_root();
     logger.info(format_args!(
         "paging: current CR3 = {:#x}",
         old_cr3.as_u64()
@@ -1035,7 +1035,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // ここが出れば CR3 切り替え命令は実行できた（トリプルフォルトしていない）。
     logger.info(format_args!("paging: CR3 switch instruction executed"));
 
-    let new_cr3 = paging::switch::read_cr3();
+    let new_cr3 = paging::switch::active_page_table_root();
     let cr3_ok = new_cr3 == cr3_value;
     logger.info(format_args!(
         "paging: CR3 readback {:#x} (expected {:#x}): {}",
@@ -1457,7 +1457,7 @@ extern "sysv64" fn kernel_main() -> ! {
     //   - 本番テーブルが CR3 に載っていること
     //
     // 早すぎると壊れる。実際に踏んだ。最初はトランポリン用フレームの予約の直後
-    // （M2-d の CR3 切り替えより前）に置いたので、`read_cr3()` が bootstrap PML4 を
+    // （M2-d の CR3 切り替えより前）に置いたので、`active_page_table_root()` が bootstrap PML4 を
     // 返し、AP をそちらへ移してしまった。AP は自分のスタック（PML4[258]）までは
     // 動いたが、direct map（PML4[256]）が無いので最初の参照で #PF になった。
     //
@@ -1930,7 +1930,7 @@ extern "sysv64" fn kernel_main() -> ! {
     match unsafe {
         kernel::arch::x86_64::paging::address_space::freeze_kernel_top(
             common::addr::direct_map(),
-            kernel::arch::x86_64::paging::switch::read_cr3(),
+            kernel::arch::x86_64::paging::switch::active_page_table_root(),
         )
     } {
         Some(present) => logger.info(format_args!(
@@ -4562,7 +4562,7 @@ fn demo_address_space_switch(
     allocator: &mut kernel::frame_allocator::FrameAllocator,
 ) {
     let direct_map = common::addr::direct_map();
-    let production = kernel::arch::x86_64::paging::switch::read_cr3();
+    let production = kernel::arch::x86_64::paging::switch::active_page_table_root();
 
     // SAFETY: 稼働中の PML4 を読み、direct map が覆っている新しいフレームへコピーするだけ。
     // AP はまだ起動しておらず、他コアがマッピングを変えることはない。
@@ -4595,7 +4595,7 @@ fn demo_address_space_switch(
     unsafe { space.activate() };
 
     // この行が出ること自体が到達条件4の観測である。
-    let after = kernel::arch::x86_64::paging::switch::read_cr3();
+    let after = kernel::arch::x86_64::paging::switch::active_page_table_root();
     logger.info(format_args!(
         "address-space: still running after the switch (cr3 read back = {:#x}, expected {:#x}, \
          matches={})",
@@ -4607,7 +4607,7 @@ fn demo_address_space_switch(
     // SAFETY: 本番のテーブルへ戻すだけ。こちらは起動以来使っているものである。
     unsafe { kernel::arch::x86_64::paging::switch::switch_to(production) };
 
-    let restored = kernel::arch::x86_64::paging::switch::read_cr3();
+    let restored = kernel::arch::x86_64::paging::switch::active_page_table_root();
     logger.info(format_args!(
         "address-space: switched back to the production table (cr3 read back = {:#x}, \
          matches={})",
@@ -12738,7 +12738,7 @@ fn build_and_switch_direct_map(
     }
     logger.info(format_args!("direct-map: CR3 switch instruction executed"));
 
-    let new_cr3 = paging::switch::read_cr3();
+    let new_cr3 = paging::switch::active_page_table_root();
     if new_cr3 != new_pml4 {
         logger.error(format_args!(
             "direct-map: CR3 readback {:#x} (expected {:#x}); halting",
