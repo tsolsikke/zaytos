@@ -3923,7 +3923,7 @@ fn split_parent_and_name(path: &[u8]) -> Result<(&[u8], &[u8]), i64> {
     Ok((parent, name))
 }
 
-/// [`common::ext2::AllocError`] を errno へ写す（e-5）。
+/// [`common::ext2::AllocError`] を errno へ変換する（e-5）。
 ///
 /// **空きが尽きた形はすべて `-ENOSPC` である**——**inode でもブロックでも
 /// ディレクトリの隙間でも、使う側にできることは同じ（消して空ける）である。**
@@ -5410,7 +5410,7 @@ unsafe fn copy_user_string_array(
     }
 }
 
-/// [`common::ext2::Ext2Error`] を errno へ写す（S10-b）。
+/// [`common::ext2::Ext2Error`] を errno へ変換する（S10-b）。
 ///
 /// # 対応表はここに置く
 ///
@@ -5454,7 +5454,7 @@ fn errno_for_ext2(error: common::ext2::Ext2Error) -> i64 {
     }
 }
 
-/// [`crate::userland::UserLoadError`] を errno へ写す（S11-5）。
+/// [`crate::userland::UserLoadError`] を errno へ変換する（S11-5）。
 ///
 /// # 全 16 種を明示する
 ///
@@ -5491,7 +5491,7 @@ fn errno_for_user_load(error: crate::userland::UserLoadError) -> i64 {
     }
 }
 
-/// [`crate::userland::SpawnError`] を errno へ写す（S11-5）。
+/// [`crate::userland::SpawnError`] を errno へ変換する（S11-5）。
 fn errno_for_spawn(error: crate::userland::SpawnError) -> i64 {
     use crate::userland::SpawnError as E;
     match error {
@@ -5506,7 +5506,7 @@ fn errno_for_spawn(error: crate::userland::SpawnError) -> i64 {
     }
 }
 
-/// [`crate::vfs::FileTableError`] を errno へ写す（S10-b）。
+/// [`crate::vfs::FileTableError`] を errno へ変換する（S10-b）。
 fn errno_for_file_table(error: crate::vfs::FileTableError) -> i64 {
     match error {
         crate::vfs::FileTableError::NoFreeDescriptor => EMFILE,
