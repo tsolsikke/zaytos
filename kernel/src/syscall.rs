@@ -3963,7 +3963,7 @@ fn errno_for_alloc(error: common::ext2::AllocError) -> i64 {
 /// # 稼働中の表へマップする
 ///
 /// **遠征の中では CR3 がこのプロセスのものである**
-/// （`crate::userland` の `run_loaded_program` が `switch_to` してから入る）。
+/// （`crate::userland` の `run_loaded_program` が `set_active_page_table_root` してから入る）。
 /// **したがって [`crate::arch::x86_64::paging::active::ActivePageTable::current`] が
 /// 指すのはユーザーの表である。** **新しい経路を作らない**（ADR-0044）。
 ///

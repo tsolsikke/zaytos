@@ -335,7 +335,7 @@ fn state() -> &'static ExcursionState {
 ///
 /// **`CURRENT_RECOVERY` は単一のアドレスでなければならない**（`ADR-0060`）。
 /// **切り替えはこれを控えて、入る側の値を載せる。**
-pub fn current_recovery() -> u64 {
+pub fn current_excursion_recovery() -> u64 {
     CURRENT_RECOVERY.load(Ordering::SeqCst)
 }
 
@@ -346,7 +346,7 @@ pub fn current_recovery() -> u64 {
 /// **`pub` だが、呼ぶのは `crate::task::schedule_switch` だけである**
 /// （切り替えの割り込み禁止区間）。**遠征の出入りは [`enter`] の中で
 /// 直に触る**——あちらは入れ子の控えと戻しを一続きで行う。
-pub fn set_current_recovery(value: u64) {
+pub fn set_current_excursion_recovery(value: u64) {
     CURRENT_RECOVERY.store(value, Ordering::SeqCst);
 }
 
@@ -360,7 +360,7 @@ pub fn set_current_recovery(value: u64) {
 /// **「入れ替えで書いた値が載ったか」を見る形にしない**——**同じ代入を 2 度読むだけになる**
 /// （`0 と 0 を比べて通る` の種類である。W1-c-3c）。**これは `stacks are mixed` と同じ形の検算で、
 /// 入れ替えの実装とは独立な不変条件を見ている。**
-pub fn recovery_belongs_to_slot(recovery: u64, slot: usize) -> bool {
+pub fn excursion_recovery_belongs_to_slot(recovery: u64, slot: usize) -> bool {
     if recovery == 0 {
         return true;
     }

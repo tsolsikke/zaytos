@@ -407,7 +407,7 @@ impl ActivePageTable {
 
         // 手順 4。
         // SAFETY: CR3 の値をそのまま書き戻すだけで、指す先は変えていない。
-        unsafe { switch::switch_to(switch::active_page_table_root()) };
+        unsafe { switch::set_active_page_table_root(switch::active_page_table_root()) };
 
         Ok(SplitOutcome {
             huge_entry: pde,
@@ -452,7 +452,7 @@ impl ActivePageTable {
         // SAFETY: 同上。フラグを足すだけでアドレスは変えない。
         unsafe { self.write(pd, pd_index, pde | add) };
         // SAFETY: CR3 の値をそのまま書き戻す。指す先は変えていない。
-        unsafe { switch::switch_to(switch::active_page_table_root()) };
+        unsafe { switch::set_active_page_table_root(switch::active_page_table_root()) };
         Ok(pde)
     }
 

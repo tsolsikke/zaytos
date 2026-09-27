@@ -44,7 +44,7 @@ pub fn active_page_table_root() -> PhysAddr {
 ///
 /// `options` は意図的に指定しない。CR3 の書き換えは今後のロード/ストアが
 /// どの物理を指すかを変えるので、`nomem` は誤りであり、並べ替えを許さない。
-pub unsafe fn switch_to(pml4_phys: PhysAddr) {
+pub unsafe fn set_active_page_table_root(pml4_phys: PhysAddr) {
     // SAFETY: 呼び出し元契約を参照。
     unsafe {
         core::arch::asm!("mov cr3, {}", in(reg) pml4_phys.as_u64());

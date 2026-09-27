@@ -12,7 +12,7 @@
 //! **この前提は静的検査が守る**（`cargo xtask check` の「kernel が XMM を持たない」）。
 //!
 //! **したがって、ここでも XMM のレジスタ名を書かない。** 目印を載せるときも
-//! [`restore`] を使う——**512 バイトの並びを作って読み込ませれば、XMM の命令は
+//! [`restore_fp_state`] を使う——**512 バイトの並びを作って読み込ませれば、XMM の命令は
 //! 1 つも要らない。**
 
 use common::arch::x86_64::cpu;
@@ -115,7 +115,7 @@ impl FpArea {
 ///
 /// # XMM の命令を増やさない
 ///
-/// **[`restore`] で 512 バイトの並びを読み込ませる。** **XMM のレジスタ名を
+/// **[`restore_fp_state`] で 512 バイトの並びを読み込ませる。** **XMM のレジスタ名を
 /// 書かないので、Decision 5 の静的検査と衝突しない**（このモジュールの
 /// 冒頭の注記と同じ手である）。
 #[cfg(feature = "fp-clobber-on-kernel-entry-test")]
@@ -130,8 +130,8 @@ pub fn clobber_on_kernel_entry() {
     area.set_mxcsr(MXCSR_TOWARD_ZERO);
     // SAFETY: [`FpArea::fresh`] が作った並びに、XMM0 の 8 バイトを書いただけ
     // である。MXCSR とその mask は `fresh` のままなので、予約ビットで `#GP`
-    // にはならない（[`restore`] の契約）。
-    unsafe { restore(&area) };
+    // にはならない（[`restore_fp_state`] の契約）。
+    unsafe { restore_fp_state(&area) };
 }
 
 /// このコアで SSE を有効にする（`ADR-0058` の Decision 3）。
@@ -189,7 +189,7 @@ impl Enabled {
 /// # Safety
 ///
 /// `area` は 16 バイト境界の 512 バイトであること（型が保証する）。
-pub unsafe fn save(area: &mut FpArea) {
+pub unsafe fn save_fp_state(area: &mut FpArea) {
     // SAFETY: `fxsave` は領域 512 バイトへ書くだけで、他には触れない。
     // 境界は `FpArea` の `repr(align(16))` が保証する。
     unsafe {
@@ -203,7 +203,7 @@ pub unsafe fn save(area: &mut FpArea) {
 ///
 /// **領域の中身が `fxsave` が書いたものか、[`FpArea::fresh`] であること。**
 /// **でたらめなバイト列を渡すと、MXCSR の予約ビットで `#GP` になる。**
-pub unsafe fn restore(area: &FpArea) {
+pub unsafe fn restore_fp_state(area: &FpArea) {
     // SAFETY: 呼び出し側の契約。`fxrstor` は領域 512 バイトを読むだけである。
     unsafe {
         core::arch::asm!("fxrstor [{}]", in(reg) area.0.as_ptr(), options(nostack, readonly));

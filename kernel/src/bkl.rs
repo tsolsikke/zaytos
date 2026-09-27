@@ -416,7 +416,7 @@ fn flush_if_generation_is_stale() {
     // 別の命題である**——あちらは可視性、こちらは排他の話である。
     let cr3 = crate::arch::x86_64::paging::switch::active_page_table_root();
     // SAFETY: 今読んだ値をそのまま書き戻すだけで、マッピングは変えない。
-    unsafe { crate::arch::x86_64::paging::switch::switch_to(cr3) };
+    unsafe { crate::arch::x86_64::paging::switch::set_active_page_table_root(cr3) };
     seen.store(current, Ordering::Relaxed);
     GENERATION_FLUSHES
         .this_cpu()

@@ -313,7 +313,7 @@ impl AddressSpace {
     /// 他コアが同時に変えていないことに依存する。
     pub unsafe fn activate(&self) {
         // SAFETY: 上記の契約。上位をコピーしてあるので、実行中のコードとスタックは見え続ける。
-        unsafe { crate::arch::x86_64::paging::switch::switch_to(self.pml4) }
+        unsafe { crate::arch::x86_64::paging::switch::set_active_page_table_root(self.pml4) }
     }
 }
 

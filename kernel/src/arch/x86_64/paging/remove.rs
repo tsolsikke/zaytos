@@ -250,7 +250,7 @@ pub unsafe fn remove_identity(
     // 無効化できず、G=0 維持なので同じ PML4 を載せ直せば確実に落ちる。
     // SAFETY: 直前に必須領域が恒等なしで解決することを walk で確認した。同じ稼働
     // テーブル（cr3）を載せ直すだけ。
-    unsafe { switch::switch_to(cr3) };
+    unsafe { switch::set_active_page_table_root(cr3) };
 
     // (6) フラッシュ後の読み戻し（walk。デレフしない）。高位が健全、低位が未マップ。
     let mut post_ok = true;

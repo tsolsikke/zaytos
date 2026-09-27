@@ -1153,13 +1153,13 @@ const fn page_table_root_to_load(field: u64, kernel_root: u64) -> u64 {
 ///
 /// # Safety
 ///
-/// [`crate::arch::x86_64::paging::switch::switch_to`] と同じ契約。**`noted` は、載せた後にこのタスクが
+/// [`crate::arch::x86_64::paging::switch::set_active_page_table_root`] と同じ契約。**`noted` は、載せた後にこのタスクが
 /// 載せていることになる値である**（0 ならカーネルの表）。
 #[inline(never)]
 pub unsafe fn switch_page_table_root_and_note(load: common::addr::PhysAddr, noted: u64) {
     let _no_switch = common::critical::InterruptGuard::enter();
     // SAFETY: 呼び出し元契約。
-    unsafe { crate::arch::x86_64::paging::switch::switch_to(load) };
+    unsafe { crate::arch::x86_64::paging::switch::set_active_page_table_root(load) };
     note_current_page_table_root(noted);
 }
 
@@ -1215,7 +1215,7 @@ fn swap_page_table_root_for_switch(current: usize, next: usize) {
         // 持つ値である（`Task::page_table_root` の不変条件）。どちらもカーネルの上位を共有するので、切り替えても
         // 実行中のコードと、いま乗っているカーネルスタックは見え続ける。呼ぶのは `schedule_switch`
         // だけで、IF=0 かつ BKL の内側である。
-        unsafe { crate::arch::x86_64::paging::switch::switch_to(table) };
+        unsafe { crate::arch::x86_64::paging::switch::set_active_page_table_root(table) };
     }
     #[cfg(feature = "task-switch-no-cr3")]
     let _ = table;
@@ -2414,18 +2414,23 @@ fn schedule_switch(current_sp: u64) -> u64 {
         {
             scheduler::set_current_recovery(
                 current,
-                crate::arch::x86_64::ring3::current_recovery(),
+                crate::arch::x86_64::ring3::current_excursion_recovery(),
             );
-            crate::arch::x86_64::ring3::set_current_recovery(scheduler::current_recovery(next));
+            crate::arch::x86_64::ring3::set_current_excursion_recovery(
+                scheduler::current_recovery(next),
+            );
         }
         // **載った回復点が、入るタスクのスロットの行の中に在ること（W1-c-4）。**
         //
-        // **`stacks are mixed` と同じ形の検算である**（`ring3::recovery_belongs_to_slot` の doc）。
+        // **`stacks are mixed` と同じ形の検算である**（`ring3::excursion_recovery_belongs_to_slot` の doc）。
         // **入れ替えを省く破壊テストを落とすのはここである**——**例外による終了処理の側では落ちなかった。**
         // **2 本が同時に走っても、例外による終了処理が起きるのは相手が Ring 3 を出た後だったので、
         // `enter` 自身の控えと戻しが辻褄を合わせてしまった**（`ADR-0060` の W1-c-4 の Addendum）。
-        let recovery = crate::arch::x86_64::ring3::current_recovery();
-        if !crate::arch::x86_64::ring3::recovery_belongs_to_slot(recovery, ring3_slot_of(next)) {
+        let recovery = crate::arch::x86_64::ring3::current_excursion_recovery();
+        if !crate::arch::x86_64::ring3::excursion_recovery_belongs_to_slot(
+            recovery,
+            ring3_slot_of(next),
+        ) {
             report_foreign_recovery_on_switch(next, recovery);
         }
 
@@ -2443,11 +2448,11 @@ fn schedule_switch(current_sp: u64) -> u64 {
         // （`pick_next` と `current_index` の値域）。
         unsafe {
             let areas = &mut *core::ptr::addr_of_mut!(FP_AREAS);
-            crate::arch::x86_64::fp::save(&mut areas[current]);
+            crate::arch::x86_64::fp::save_fp_state(&mut areas[current]);
             // 破壊テスト (W1-c-4, fp-switch-no-restore): 載せない（保存は残す）。**入ったタスクが出た側の
             // XMM の値のまま走る。**
             #[cfg(not(feature = "fp-switch-no-restore"))]
-            crate::arch::x86_64::fp::restore(&areas[next]);
+            crate::arch::x86_64::fp::restore_fp_state(&areas[next]);
         }
 
         set_current_index(next);

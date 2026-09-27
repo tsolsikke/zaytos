@@ -1018,7 +1018,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // SAFETY: kernel_start は必須領域検証で読み取り可能を確認済み。
     let kernel_first_byte_before = unsafe { core::ptr::read_volatile(kernel_start as *const u8) };
 
-    // SAFETY: switch_to が要求する3つを、別々の機構が満たす。
+    // SAFETY: set_active_page_table_root が要求する3つを、別々の機構が満たす。
     // - 実行中のコードと現在のスタック: 再リンク（B-2a-3）後の RIP と RSP は kernel
     //   イメージ内の高位 VA（.text と .bss のカーネルスタック）で、引けるように
     //   しているのは上の map_kernel_high_half である。恒等ではない。必須領域検証の
@@ -1029,7 +1029,7 @@ extern "sysv64" fn kernel_main() -> ! {
     //   後にある。直後の verify_page_tables も A-2 より前で direct_map() の base が
     //   0 なので、同じ恒等で読む。
     unsafe {
-        paging::switch::switch_to(cr3_value);
+        paging::switch::set_active_page_table_root(cr3_value);
     }
 
     // ここが出れば CR3 切り替え命令は実行できた（トリプルフォルトしていない）。
@@ -4605,7 +4605,7 @@ fn demo_address_space_switch(
     ));
 
     // SAFETY: 本番のテーブルへ戻すだけ。こちらは起動以来使っているものである。
-    unsafe { kernel::arch::x86_64::paging::switch::switch_to(production) };
+    unsafe { kernel::arch::x86_64::paging::switch::set_active_page_table_root(production) };
 
     let restored = kernel::arch::x86_64::paging::switch::active_page_table_root();
     logger.info(format_args!(
@@ -4723,7 +4723,7 @@ fn demo_two_address_spaces(
         ptr.read_volatile()
     };
     // SAFETY: 本番のテーブルへ戻す。
-    unsafe { kernel::arch::x86_64::paging::switch::switch_to(production) };
+    unsafe { kernel::arch::x86_64::paging::switch::set_active_page_table_root(production) };
 
     logger.info(format_args!(
         "address-space: read {read_a:#x} in A and {read_b:#x} in B (A sees only its own={}, \
@@ -12734,7 +12734,7 @@ fn build_and_switch_direct_map(
     // SAFETY: 直前の切り替え前検証で、恒等側に現在の RIP・RSP・pml4 のフレームが
     // すべて含まれていることを確認済み（恒等は M2-d と解決が一致）。
     unsafe {
-        paging::switch::switch_to(new_pml4);
+        paging::switch::set_active_page_table_root(new_pml4);
     }
     logger.info(format_args!("direct-map: CR3 switch instruction executed"));
 
