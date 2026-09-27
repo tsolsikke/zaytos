@@ -68,8 +68,8 @@ const MAIN_TASK: usize = 0;
 /// を明文の規則にしている**（`task/scheduler.rs` の doc）。**512 バイトの領域は
 /// 参照で渡すしかない**ので、規則に触れずに置ける場所がここになる。
 /// **触るのは [`schedule_switch`] だけで、そこは IF=0 かつ BKL の内側である。**
-static mut FP_AREAS: [crate::arch::x86_64::fp::FpArea; TASK_COUNT] =
-    [crate::arch::x86_64::fp::FpArea::fresh(); TASK_COUNT];
+static mut FP_AREAS: [crate::arch::x86_64::FpArea; TASK_COUNT] =
+    [crate::arch::x86_64::FpArea::fresh(); TASK_COUNT];
 
 /// AP 用アイドルタスクの添字（S4-c-2）。AP の既定タスクである（S4-c-3-1）。
 ///
@@ -885,7 +885,7 @@ pub fn start_ring3_task() -> Option<u64> {
     unsafe {
         core::ptr::write_bytes(
             bottom as *mut u8,
-            crate::arch::x86_64::stack::KERNEL_STACK_FILL,
+            crate::arch::x86_64::KERNEL_STACK_FILL,
             RING3_TASK_STACK_SIZE,
         )
     };
@@ -986,7 +986,7 @@ extern "sysv64" fn ring3_task_main() -> ! {
             "[ERROR] task: the ring3 task used more than half of its kernel stack ({used} of \
              {RING3_TASK_STACK_SIZE}); decide the size again with a measurement; halting"
         ));
-        common::arch::x86_64::cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     }
     let handle = current_ring3_task_handle();
     // **欄を `Finished` にしてから起こす（`ADR-0063` の (b2)）**——**起こしてから書くと、
@@ -1006,9 +1006,7 @@ fn ring3_task_stack_high_water() -> usize {
     let bottom = (guard.as_u64() + GUARD_SIZE as u64) as *const u8;
     for offset in 0..RING3_TASK_STACK_SIZE {
         // SAFETY: `offset` はスタック本体の中である。読み取りのみ。
-        if unsafe { bottom.add(offset).read_volatile() }
-            != crate::arch::x86_64::stack::KERNEL_STACK_FILL
-        {
+        if unsafe { bottom.add(offset).read_volatile() } != crate::arch::x86_64::KERNEL_STACK_FILL {
             return RING3_TASK_STACK_SIZE - offset;
         }
     }
@@ -1026,7 +1024,7 @@ fn report_zero_kernel_entry_stack_top_on_switch(next: usize) -> ! {
         "[ERROR] task: task {next} has RSP0 0 in its field; switching to it would load 0 into \
          TSS.RSP0 and the readback would compare 0 with 0 (W1-c-3c); halting"
     ));
-    common::arch::x86_64::cpu::halt_forever();
+    common::arch::x86_64::halt_forever();
 }
 
 /// 載った回復点が、入るタスクのスロットの行の外だった（W1-c-4）。**止める。**
@@ -1041,7 +1039,7 @@ fn report_foreign_recovery_on_switch(next: usize, recovery: u64) -> ! {
          point; halting",
         ring3_slot_of(next)
     ));
-    common::arch::x86_64::cpu::halt_forever();
+    common::arch::x86_64::halt_forever();
 }
 
 /// 切り替えで入るタスクの保存 RSP が、どのスタックに在るはずか（W1-c-3b）。
@@ -1121,7 +1119,7 @@ static KERNEL_PAGE_TABLE_ROOT: AtomicU64 = AtomicU64::new(0);
 /// ——**行を足すと、この段階の「番地だけ」が崩れる。**
 pub fn record_kernel_page_table_root() {
     KERNEL_PAGE_TABLE_ROOT.store(
-        crate::arch::x86_64::paging::switch::active_page_table_root().as_u64(),
+        crate::arch::x86_64::active_page_table_root().as_u64(),
         Ordering::SeqCst,
     );
 }
@@ -1159,7 +1157,7 @@ const fn page_table_root_to_load(field: u64, kernel_root: u64) -> u64 {
 pub unsafe fn switch_page_table_root_and_note(load: common::addr::PhysAddr, noted: u64) {
     let _no_switch = common::critical::InterruptGuard::enter();
     // SAFETY: 呼び出し元契約。
-    unsafe { crate::arch::x86_64::paging::switch::set_active_page_table_root(load) };
+    unsafe { crate::arch::x86_64::set_active_page_table_root(load) };
     note_current_page_table_root(noted);
 }
 
@@ -1184,7 +1182,7 @@ pub unsafe fn switch_page_table_root_and_note(load: common::addr::PhysAddr, note
 #[inline(never)]
 fn swap_page_table_root_for_switch(current: usize, next: usize) {
     let kernel_root = KERNEL_PAGE_TABLE_ROOT.load(Ordering::SeqCst);
-    let live_root = crate::arch::x86_64::paging::switch::active_page_table_root().as_u64();
+    let live_root = crate::arch::x86_64::active_page_table_root().as_u64();
     let outgoing_root = page_table_root_to_load(scheduler::page_table_root(current), kernel_root);
     if kernel_root == 0 || live_root != outgoing_root {
         serial_line(format_args!(
@@ -1193,7 +1191,7 @@ fn swap_page_table_root_for_switch(current: usize, next: usize) {
              change was not recorded in the task, so switching back would load the wrong table; \
              halting"
         ));
-        common::arch::x86_64::cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     }
     let incoming_root = page_table_root_to_load(scheduler::page_table_root(next), kernel_root);
     if incoming_root == live_root {
@@ -1204,7 +1202,7 @@ fn swap_page_table_root_for_switch(current: usize, next: usize) {
             "[ERROR] task: task {next} carries CR3 {incoming_root:#x}, which is not a physical \
              address; halting"
         ));
-        common::arch::x86_64::cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     };
     // 破壊テスト (W1-c-4, task-switch-no-cr3): 載せない。**入ったタスクが出る側の空間で走り、次に出るときの
     // 検算（上）が「欄と実物が違う」を見て止まる。**
@@ -1215,7 +1213,7 @@ fn swap_page_table_root_for_switch(current: usize, next: usize) {
         // 持つ値である（`Task::page_table_root` の不変条件）。どちらもカーネルの上位を共有するので、切り替えても
         // 実行中のコードと、いま乗っているカーネルスタックは見え続ける。呼ぶのは `schedule_switch`
         // だけで、IF=0 かつ BKL の内側である。
-        unsafe { crate::arch::x86_64::paging::switch::set_active_page_table_root(table) };
+        unsafe { crate::arch::x86_64::set_active_page_table_root(table) };
     }
     #[cfg(feature = "task-switch-no-cr3")]
     let _ = table;
@@ -1512,7 +1510,7 @@ fn current_index() -> usize {
              (CURRENT is still the sentinel); this stage does not run tasks on application \
              processors; halting"
         ));
-        common::arch::x86_64::cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     }
     value
 }
@@ -1757,7 +1755,7 @@ pub fn init_ap_idle_task() {
             "[ERROR] task: the per-CPU stack for cpu {AP_IDLE_TASK_OWNER} is not mapped yet; \
              init_ap_idle_task must run after smp::prepare_ap_per_cpu; halting"
         ));
-        common::arch::x86_64::cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     };
     scheduler::init_task(
         AP_IDLE_TASK,
@@ -1923,7 +1921,7 @@ fn require_bootstrap_processor(what: &str) {
              GPR_BUF is shared and its asm exclusion is a bare cli, which cannot keep another \
              core out; halting"
         ));
-        common::arch::x86_64::cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     }
 }
 
@@ -1943,7 +1941,7 @@ unsafe fn install_worker_guard_page(
 ) {
     // SAFETY: 呼び出し元の契約をそのまま渡す。
     unsafe {
-        crate::arch::x86_64::stack::install_guard_page(
+        crate::arch::x86_64::install_guard_page(
             guard_virt,
             allocator,
             "task",
@@ -1996,7 +1994,7 @@ pub fn run_cooperative_demo(allocator: &mut crate::frame_allocator::FrameAllocat
         serial_line(format_args!(
             "[ERROR] task: yield returned while holding a guard; the yield guard did not fire; halting"
         ));
-        common::arch::x86_64::cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     }
 
     // 初回スイッチ。メインの文脈がここで保存され、ワーカー A へ入る。両ワーカー
@@ -2023,7 +2021,7 @@ pub fn run_cooperative_demo(allocator: &mut crate::frame_allocator::FrameAllocat
             "[ERROR] task: accounting did not balance (a switch did not resume a task, or a \
              worker did not finish); halting"
         ));
-        common::arch::x86_64::cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     }
 
     // RSP0 の確認（§2.2）。スイッチのたびに on_yield が
@@ -2031,9 +2029,7 @@ pub fn run_cooperative_demo(allocator: &mut crate::frame_allocator::FrameAllocat
     // 一致を確かめており（不一致なら即 halt）、ここまで来た時点で全スイッチで
     // 一致していたことになる。最後のスイッチはメインへ戻ったので、現在の
     // TSS.RSP0 はメインのスタック頂点のはずである。それを読み戻して示す。
-    let main_top = crate::arch::x86_64::stack::kernel_stack_range()
-        .top
-        .as_u64();
+    let main_top = crate::arch::x86_64::kernel_stack_range().top.as_u64();
     let entry_top = active_kernel_entry_stack_top();
     serial_line(format_args!(
         "task: TSS.RSP0 tracked every switch; now {entry_top:#x} (main stack top {main_top:#x}, \
@@ -2055,9 +2051,7 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
 
     // タスク 0 = メイン。実行中なので saved_stack_pointer は初回 yield で埋まる。
     // メインのスタック頂点は通常のカーネルスタック（RSP0 用）。
-    let main_top = crate::arch::x86_64::stack::kernel_stack_range()
-        .top
-        .as_u64();
+    let main_top = crate::arch::x86_64::kernel_stack_range().top.as_u64();
 
     set_current_index(0);
     scheduler::set_switches(0);
@@ -2065,9 +2059,7 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
         0,
         Task {
             stack_top: main_top,
-            stack_bottom: crate::arch::x86_64::stack::kernel_stack_range()
-                .bottom
-                .as_u64(),
+            stack_bottom: crate::arch::x86_64::kernel_stack_range().bottom.as_u64(),
             // **遠征に入っていないタスクの RSP0 はカーネルスタック頂点である**
             // （W1-b）。**`EMPTY_TASK` の 0 のままにすると、メインへ戻る切り替えが
             // TSS へ 0 を書く**——**実測で踏んだ**（`TSS.RSP0 ... now 0x0 ...
@@ -2124,7 +2116,7 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
         // SAFETY: 起動時、自前のページテーブル上。足した 1 本のスタックの直下 1 ページで、以後ここへ
         // 正規のアクセスは無い。
         unsafe {
-            crate::arch::x86_64::stack::install_guard_page(
+            crate::arch::x86_64::install_guard_page(
                 guard,
                 allocator,
                 "task",
@@ -2144,7 +2136,7 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
         // SAFETY: 起動時、自前のページテーブル上。このスタックの直下 1 ページで、以後ここへ
         // 正規のアクセスは無い。
         unsafe {
-            crate::arch::x86_64::stack::install_guard_page(
+            crate::arch::x86_64::install_guard_page(
                 guard,
                 allocator,
                 "task",
@@ -2213,7 +2205,7 @@ pub fn on_yield(current_sp: u64) -> u64 {
              critical section; halting",
             critical_nesting_depth()
         ));
-        common::arch::x86_64::cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     }
 
     schedule_switch(current_sp)
@@ -2375,7 +2367,7 @@ fn schedule_switch(current_sp: u64) -> u64 {
             ExpectedStack::Kernel => (scheduler::stack_bottom(next), scheduler::stack_top(next)),
             ExpectedStack::Excursion { index } => {
                 // **入る側のタスクのスロットで引く（W1-c-3）。** 今のタスクのものではない。
-                crate::arch::x86_64::ring3::excursion_stack_range_of(ring3_slot_of(next), index)
+                crate::arch::x86_64::excursion_stack_range_of(ring3_slot_of(next), index)
             }
         };
         if next_sp < next_bottom || next_sp >= next_top {
@@ -2391,7 +2383,7 @@ fn schedule_switch(current_sp: u64) -> u64 {
                  excursion depth {next_depth} [{:#x}, {:#x}); stacks are mixed; halting",
                 next_bottom, next_top
             ));
-            common::arch::x86_64::cpu::halt_forever();
+            common::arch::x86_64::halt_forever();
         }
 
         // **CR3 を入れ替える（W1-c-2。`ADR-0060`）。** **出る側を検算してから、入る側を載せる**
@@ -2414,11 +2406,9 @@ fn schedule_switch(current_sp: u64) -> u64 {
         {
             scheduler::set_current_recovery(
                 current,
-                crate::arch::x86_64::ring3::current_excursion_recovery(),
+                crate::arch::x86_64::current_excursion_recovery(),
             );
-            crate::arch::x86_64::ring3::set_current_excursion_recovery(
-                scheduler::current_recovery(next),
-            );
+            crate::arch::x86_64::set_current_excursion_recovery(scheduler::current_recovery(next));
         }
         // **載った回復点が、入るタスクのスロットの行の中に在ること（W1-c-4）。**
         //
@@ -2426,11 +2416,8 @@ fn schedule_switch(current_sp: u64) -> u64 {
         // **入れ替えを省く破壊テストを落とすのはここである**——**例外による終了処理の側では落ちなかった。**
         // **2 本が同時に走っても、例外による終了処理が起きるのは相手が Ring 3 を出た後だったので、
         // `enter` 自身の控えと戻しが辻褄を合わせてしまった**（`ADR-0060` の W1-c-4 の Addendum）。
-        let recovery = crate::arch::x86_64::ring3::current_excursion_recovery();
-        if !crate::arch::x86_64::ring3::excursion_recovery_belongs_to_slot(
-            recovery,
-            ring3_slot_of(next),
-        ) {
+        let recovery = crate::arch::x86_64::current_excursion_recovery();
+        if !crate::arch::x86_64::excursion_recovery_belongs_to_slot(recovery, ring3_slot_of(next)) {
             report_foreign_recovery_on_switch(next, recovery);
         }
 
@@ -2448,11 +2435,11 @@ fn schedule_switch(current_sp: u64) -> u64 {
         // （`pick_next` と `current_index` の値域）。
         unsafe {
             let areas = &mut *core::ptr::addr_of_mut!(FP_AREAS);
-            crate::arch::x86_64::fp::save_fp_state(&mut areas[current]);
+            crate::arch::x86_64::save_fp_state(&mut areas[current]);
             // 破壊テスト (W1-c-4, fp-switch-no-restore): 載せない（保存は残す）。**入ったタスクが出た側の
             // XMM の値のまま走る。**
             #[cfg(not(feature = "fp-switch-no-restore"))]
-            crate::arch::x86_64::fp::restore_fp_state(&areas[next]);
+            crate::arch::x86_64::restore_fp_state(&areas[next]);
         }
 
         set_current_index(next);
@@ -2498,7 +2485,7 @@ fn schedule_switch(current_sp: u64) -> u64 {
                 "[ERROR] task: TSS.RSP0 readback {readback:#x} != expected {expected_top:#x} \
                  after switch to task {next}; halting",
             ));
-            common::arch::x86_64::cpu::halt_forever();
+            common::arch::x86_64::halt_forever();
         }
 
         // 破壊テストでの確認 (i): 次タスクの保存コンテキストの rbx スロットを壊す。
@@ -2772,7 +2759,7 @@ pub(crate) extern "sysv64" fn verify_gprs_and_advance() -> u64 {
             "[ERROR] task: {name} round {round}: {mismatches} GPR(s) corrupted across the switch; \
              tag {tag} got {got:#x} expected {exp:#x}; halting"
         ));
-        common::arch::x86_64::cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     }
 
     if remaining == 0 {
@@ -2860,20 +2847,20 @@ pub fn run_preemptive_demo() {
             "[ERROR] task: a worker made no progress (A={a_iters}, B={b_iters}); the timer did \
              not preempt fairly; halting"
         ));
-        common::arch::x86_64::cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     }
     if !accounting {
         serial_line(format_args!(
             "[ERROR] task: preemptive accounting did not balance (switches != sum(resumes)); halting"
         ));
-        common::arch::x86_64::cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     }
     if !window_meaningful {
         serial_line(format_args!(
             "[ERROR] task: no preemption landed in the GPR window; the register check verified \
              nothing (widen the window or run longer); halting"
         ));
-        common::arch::x86_64::cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     }
 
     serial_line(format_args!(
@@ -2892,9 +2879,7 @@ pub fn run_preemptive_demo() {
 /// ここでは再設置しない）。
 unsafe fn setup_preemptive_tasks() {
     let entry = addr_of!(zaytos_preemptive_body) as u64;
-    let main_top = crate::arch::x86_64::stack::kernel_stack_range()
-        .top
-        .as_u64();
+    let main_top = crate::arch::x86_64::kernel_stack_range().top.as_u64();
 
     // SAFETY: 単一実行文脈。timer は IF=1 だが、この関数は yield する前に
     // 走り、スケジューラの current はメイン（0）のままである。ここでの更新中に
@@ -2908,9 +2893,7 @@ unsafe fn setup_preemptive_tasks() {
         0,
         Task {
             stack_top: main_top,
-            stack_bottom: crate::arch::x86_64::stack::kernel_stack_range()
-                .bottom
-                .as_u64(),
+            stack_bottom: crate::arch::x86_64::kernel_stack_range().bottom.as_u64(),
             // **メインのタスクの RSP0 を埋める（W1-c-3c で見つけた）。** **ここは `EMPTY_TASK` の
             // 0 のままで、デモの締切でメインへ戻る切り替えが TSS.RSP0 へ 0 を書いていた。**
             // **`setup_tasks` は W1-b で同じ欄を埋めた**（あちらの注記）**が、この再初期化で
@@ -2972,7 +2955,7 @@ pub(crate) extern "sysv64" fn verify_preemptive_gprs() {
                 buf[i],
                 base.wrapping_add(tag)
             ));
-            common::arch::x86_64::cpu::halt_forever();
+            common::arch::x86_64::halt_forever();
         }
     }
     scheduler::add_iteration(current);
