@@ -1,7 +1,9 @@
-//! 新しいタスクの最初の文脈（偽の `IrqContext`）を作る。
+//! 新しいタスクの最初の文脈（偽の `IrqContext`）を作る。yield のベクタへ割り込みを出す。
 //!
 //! **`kernel/src/task.rs` から移した**（2026-09-28。境界の段階の手順 2）。**割り込みのフレームの並び・セグメントの
 //! セレクタ・RFLAGS・ベクタを積むので、CPU 固有の置き場に置く。** **どのタスクをいつ作るかは `task` に残る。**
+//! **yield の `int`（[`raise_yield_interrupt`]）も、同じ日に `task::yield_now` から移した。** 偽の文脈は、
+//! この `int` で入ったときと同じ形に積む。**いつ yield するかは `task` に残る。**
 
 use common::addr::VirtAddr;
 
@@ -42,4 +44,20 @@ pub unsafe fn build_initial_context(top: VirtAddr, entry: u64) -> u64 {
     slot(19, top.as_u64()); // rsp（iretq 後にタスクが使う RSP）
     slot(20, gdt::KERNEL_DATA_SELECTOR.bits() as u64); // ss
     saved_stack_pointer
+}
+
+/// yield のベクタへソフトウェア割り込みを出し、切り替えの経路へ入る（[`crate::task::yield_now`] の中身）。
+///
+/// 次に呼び出し元のタスクが選ばれると、この `int` の直後へ戻る。
+#[inline(always)]
+pub fn raise_yield_interrupt() {
+    // SAFETY: yield_vector のゲートは IDT に登録済みで、専用スタブ経由で
+    // 共通ルーチンへ入る。レジスタは呼び出し規約どおりクロバー扱いにする。
+    unsafe {
+        core::arch::asm!(
+            "int {yv}",
+            yv = const YIELD_VECTOR,
+            clobber_abi("sysv64"),
+        );
+    }
 }

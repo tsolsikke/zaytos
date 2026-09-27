@@ -30,8 +30,9 @@ use common::critical::critical_nesting_depth;
 use common::machine::pc::serial::SerialPort;
 use common::percpu::{PerCpu, MAX_CPUS};
 
-use crate::arch::x86_64::idt::YIELD_VECTOR;
-use crate::arch::x86_64::{active_kernel_entry_stack_top, build_initial_context, timer_ticks};
+use crate::arch::x86_64::{
+    active_kernel_entry_stack_top, build_initial_context, raise_yield_interrupt, timer_ticks,
+};
 
 /// ワーカータスクの本数（M5-c は 2 本）。
 pub const WORKER_COUNT: usize = 2;
@@ -2180,7 +2181,7 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
     }
 }
 
-/// 協調的 yield。専用ベクタへソフトウェア割り込みを出す。
+/// 協調的 yield。専用ベクタへソフトウェア割り込みを出す（[`raise_yield_interrupt`]）。
 ///
 /// 切り替えの機序はモジュールの doc が正である。ここには複製しない。
 ///
@@ -2191,15 +2192,7 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
 /// - ガードの判定は [`on_yield`] 側で行う（`int` を通る全 yield を覆うため）
 #[inline(always)]
 pub fn yield_now() {
-    // SAFETY: yield_vector のゲートは IDT に登録済みで、専用スタブ経由で
-    // 共通ルーチンへ入る。レジスタは呼び出し規約どおりクロバー扱いにする。
-    unsafe {
-        core::arch::asm!(
-            "int {yv}",
-            yv = const YIELD_VECTOR,
-            clobber_abi("sysv64"),
-        );
-    }
+    raise_yield_interrupt();
 }
 
 /// yield ベクタが届いたときに `irq_entry` から呼ばれ、次に使う RSP を返す。
