@@ -79,6 +79,21 @@ pub enum AddressSpaceError {
 /// （2026-09-27。`ADR-0071` の決定 5）。**0 は「まだ採っていない」を表す**（[`kernel_top_digest`] は 0 を返さない）。
 static FROZEN_KERNEL_TOP: AtomicU64 = AtomicU64::new(0);
 
+/// 起動が終わったか（カーネル側の PML4 の指紋を採ったか）。**「起動の間」と「起動の後」を分ける目印は、
+/// 指紋を採った時点（`run_init` の直前）で切り替わるこれ 1 つである**（2026-09-27。`ADR-0071` の決定 5）。
+/// **書く側の守り（`ActivePageTable` の `ensure_child`）と突き合わせ（[`AddressSpace::new`]）は、
+/// どちらも同じ [`FROZEN_KERNEL_TOP`] を読む**——**目印を 2 か所で持たない。**
+pub fn kernel_top_is_frozen() -> bool {
+    FROZEN_KERNEL_TOP.load(Ordering::SeqCst) != 0
+}
+
+/// カーネル側の PML4 の項目を新しく作る書き込みを断るか（純粋な論理。2026-09-27）。**起動の後に、
+/// カーネル側の添字（256〜511）へ作るときだけ断る。** **ユーザー側の添字は、起動の後も各空間が自分の
+/// PML4 に作る。**
+pub const fn kernel_top_write_is_refused(index: usize, frozen: bool) -> bool {
+    frozen && is_shared_kernel_index(index)
+}
+
 /// カーネル側の PML4 の項目の指紋（純粋な論理）。**FNV-1a（64 ビット）で、添字と値を順に混ぜる。**
 /// **CPU が立てるアクセス済み（A、5 番）とダーティ（D、6 番）のビットは除く**——**表を辿るだけで立つので、
 /// 項目の変更ではない。** **最下位のビットを立てて返すので 0 にならない**（0 は「まだ採っていない」）。
@@ -628,6 +643,28 @@ mod tests {
 
     /// **指紋は、どの項目の値が変わっても、同じ値の項目が別の添字へ移っても変わり、0 にならない**
     /// （2026-09-27。`ADR-0071` の決定 5）。
+    /// **起動の後に、カーネル側の添字へ項目を作る書き込みだけを断る**（2026-09-27。`ADR-0071` の決定 5）。
+    /// **起動の間は断らず、ユーザー側の添字は起動の後も断らない。**
+    #[test]
+    fn a_kernel_half_entry_is_refused_only_after_boot() {
+        for index in [KERNEL_PML4_FIRST_INDEX, 258, 260, PML4_ENTRY_COUNT - 1] {
+            assert!(
+                !kernel_top_write_is_refused(index, false),
+                "index {index} during boot"
+            );
+            assert!(
+                kernel_top_write_is_refused(index, true),
+                "index {index} after boot"
+            );
+        }
+        for index in [0, 1, KERNEL_PML4_FIRST_INDEX - 1] {
+            assert!(
+                !kernel_top_write_is_refused(index, true),
+                "user index {index}"
+            );
+        }
+    }
+
     #[test]
     fn the_kernel_top_digest_changes_with_any_entry_and_is_never_zero() {
         let base: Vec<(usize, u64)> = (KERNEL_PML4_FIRST_INDEX..PML4_ENTRY_COUNT)

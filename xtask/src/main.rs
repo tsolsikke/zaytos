@@ -563,6 +563,22 @@ const PAGING_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // 2026-09-27（`ADR-0071` の決定 5）: 起動の後に、カーネル側の PML4 の空いた添字（260）へマップしに行く。
+    //
+    // **書く側の守り（`ActivePageTable` の `ensure_child`）が、項目を作る前に名前つきで止める。** **突き合わせ
+    // （`AddressSpace::new`）は後で見つける側で、こちらは書く前に止める側である。**
+    CriticalTest {
+        name: "kernel-top-write-after-boot-test",
+        feature: "kernel-top-write-after-boot-test",
+        expected_markers: &[
+            "sabotage: mapping a page into the empty kernel-half PML4 slot 260 after boot",
+            "paging: refused to create a kernel-half PML4 entry after boot (index 260)",
+            "halting (cli + hlt loop)",
+        ],
+        forbidden_markers: &["the write guard did not stop it", "zash: ready"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // S9-a: map_4kib の書き込み可否の引数を無視し、葉を常に W=1 で作る。
     //
     // **既定ビルドの主張は「writable=false で張った葉に Ring 3 が書くと #PF になる」**
@@ -22314,6 +22330,7 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "idt-irq-stub-offset-test",
     "addrspace-no-kernel-share",
     "kernel-top-digest-mismatch-test",
+    "kernel-top-write-after-boot-test",
     "no-eoi-test",
     "alt-offset-test",
     "tiny-key-buffer",

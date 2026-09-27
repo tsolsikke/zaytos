@@ -664,6 +664,22 @@ impl ActivePageTable {
             }
             return Ok(entry::table_address(existing));
         }
+        // **書く側の守り**（2026-09-27。`ADR-0071` の決定 5）: **起動の後に、カーネル側の PML4 の項目を新しく
+        // 作らない。作る前に名前つきで止める。** **作ると、先に作ったアドレス空間のコピーと食い違う**（突き合わせは
+        // 次の `AddressSpace::new` で見つけるが、こちらは書く前に止める）。**起動の後かは、指紋を採ったかの 1 つの
+        // 目印で見る**（`crate::address_space::kernel_top_is_frozen`）。破壊テスト `kernel-top-write-after-boot-test`
+        // が、ここで止まることを見る。
+        if table_phys == self.pml4_phys
+            && crate::address_space::kernel_top_write_is_refused(
+                index,
+                crate::address_space::kernel_top_is_frozen(),
+            )
+        {
+            panic!(
+                "paging: refused to create a kernel-half PML4 entry after boot (index {index}); the kernel \
+                 half is frozen before init (ADR-0071)"
+            );
+        }
         let child = frames.allocate_frame().ok_or(MapUpdateError::OutOfFrames)?;
         // SAFETY: 今確保したばかりの、他から参照されていないフレーム。空き集合は
         // すべてマップ済みなので direct map で書ける。ゼロ埋めして、ゴミが

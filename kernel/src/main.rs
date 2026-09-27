@@ -1944,7 +1944,53 @@ extern "sysv64" fn kernel_main() -> ! {
         }
     }
 
+    // 破壊テスト (2026-09-27, kernel-top-write-after-boot-test): **起動の後に、カーネル側の PML4 の空いた添字
+    // （260）へマップしに行く。** **書く側の守りが、項目を作る前に名前つきで止めることを確かめる。**
+    #[cfg(feature = "kernel-top-write-after-boot-test")]
+    write_a_kernel_half_entry_after_boot(&mut logger);
+
     run_init(&mut logger, console.as_mut());
+}
+
+/// 破壊テスト `kernel-top-write-after-boot-test` の本体（2026-09-27。`ADR-0071` の決定 5）。**起動の後に、
+/// カーネル側の PML4 の空いた添字（260）の 1 ページをマップしに行く。** **書く側の守りがあれば、項目を作る前に
+/// 止まり、ここへは戻らない。** **戻ったら、守りが働かなかったことを出す。**
+#[cfg(feature = "kernel-top-write-after-boot-test")]
+fn write_a_kernel_half_entry_after_boot(logger: &mut Logger<SerialPort>) {
+    use kernel::paging::active::{ActivePageTable, PageAttributes};
+    let Some(allocator) = frame_allocator::take() else {
+        logger.error(format_args!(
+            "sabotage: the frame allocator is not available"
+        ));
+        return;
+    };
+    let (Some(frame), Some(virt)) = (
+        allocator.allocate_frame(),
+        common::addr::VirtAddr::new(0xFFFF_8200_0000_0000),
+    ) else {
+        logger.error(format_args!("sabotage: no frame or no canonical address"));
+        frame_allocator::give_back(allocator);
+        return;
+    };
+    logger.info(format_args!(
+        "sabotage: mapping a page into the empty kernel-half PML4 slot 260 after boot"
+    ));
+    let attributes = PageAttributes {
+        user: false,
+        writable: true,
+        cacheable: true,
+        shared: false,
+    };
+    // SAFETY: 破壊テスト。稼働中の表を direct map 越しに辿り、空いたカーネル側の添字へ、いま取ったフレームを
+    // 1 ページだけマップしに行く。**書く側の守りが、項目を作る前に止める。**
+    let result = unsafe {
+        ActivePageTable::current(common::addr::direct_map())
+            .map_4kib(virt, frame, attributes, allocator)
+    };
+    logger.error(format_args!(
+        "sabotage: the write went through ({result:?}); the write guard did not stop it"
+    ));
+    frame_allocator::give_back(allocator);
 }
 
 /// ハートビートを何本出してからシェルへ渡すか（S11-11）。
@@ -10484,6 +10530,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "kernel-top-digest-mismatch-test",
         cfg!(feature = "kernel-top-digest-mismatch-test"),
         "起動の終わりに、カーネル側の PML4 の違う指紋を控える",
+    ),
+    (
+        "kernel-top-write-after-boot-test",
+        cfg!(feature = "kernel-top-write-after-boot-test"),
+        "起動の後に、カーネル側の PML4 の空いた添字へマップしに行く",
     ),
     (
         "no-eoi-test",
