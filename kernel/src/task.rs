@@ -30,9 +30,8 @@ use common::critical::critical_nesting_depth;
 use common::machine::pc::serial::SerialPort;
 use common::percpu::{PerCpu, MAX_CPUS};
 
-use crate::arch::x86_64::build_initial_context;
-use crate::arch::x86_64::gdt;
 use crate::arch::x86_64::idt::YIELD_VECTOR;
+use crate::arch::x86_64::{active_kernel_entry_stack_top, build_initial_context, timer_ticks};
 
 /// ワーカータスクの本数（M5-c は 2 本）。
 pub const WORKER_COUNT: usize = 2;
@@ -2035,7 +2034,7 @@ pub fn run_cooperative_demo(allocator: &mut crate::frame_allocator::FrameAllocat
     let main_top = crate::arch::x86_64::stack::kernel_stack_range()
         .top
         .as_u64();
-    let entry_top = gdt::active_kernel_entry_stack_top();
+    let entry_top = active_kernel_entry_stack_top();
     serial_line(format_args!(
         "task: TSS.RSP0 tracked every switch; now {entry_top:#x} (main stack top {main_top:#x}, \
          match={})",
@@ -2261,9 +2260,7 @@ pub fn on_timer_tick(current_sp: u64) -> u64 {
     }
 
     // 締切に達したらワーカーを走行不可にする。次の pick_next がメインを選ぶ。
-    if scheduler::demo_active()
-        && crate::arch::x86_64::idt::timer_ticks() >= scheduler::demo_deadline()
-    {
+    if scheduler::demo_active() && timer_ticks() >= scheduler::demo_deadline() {
         for w in 0..WORKER_COUNT {
             // 締切で止めるだけで、ラウンドを終えたわけではない。
             scheduler::set_state(1 + w, TaskState::Blocked);
@@ -2492,13 +2489,13 @@ fn schedule_switch(current_sp: u64) -> u64 {
         // SAFETY: stack_top は次タスクの有効なスタック頂点。切り替えの割り込み
         // 禁止区間から呼んでいる。
         unsafe {
-            gdt::set_active_kernel_entry_stack_top(expected_top);
+            crate::arch::x86_64::set_active_kernel_entry_stack_top(expected_top);
         }
         // 実際の状態を読む。RSP0 は M5-e まで挙動に現れないので、間違った値が書かれても
         // 誰も気づかない。TSS から読み戻して期待値と一致することをその場で確かめる
         // （A-1 / M5-b と同じく実状態を見る）。drop-rsp0 では更新を落としているので
         // ここで食い違い、halt する。
-        let readback = gdt::active_kernel_entry_stack_top();
+        let readback = active_kernel_entry_stack_top();
         if readback != expected_top {
             serial_line(format_args!(
                 "[ERROR] task: TSS.RSP0 readback {readback:#x} != expected {expected_top:#x} \
@@ -2956,7 +2953,7 @@ unsafe fn setup_preemptive_tasks() {
         );
     }
     scheduler::set_demo_active(true);
-    scheduler::set_demo_deadline(crate::arch::x86_64::idt::timer_ticks() + PREEMPTIVE_DEMO_TICKS);
+    scheduler::set_demo_deadline(timer_ticks() + PREEMPTIVE_DEMO_TICKS);
     PREEMPT_IN_WINDOW.store(0, Ordering::Relaxed);
     // _guard の drop でここを抜けると割り込みが復元される（元が IF=1 なら sti）。
 }
