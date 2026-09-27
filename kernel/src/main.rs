@@ -4337,7 +4337,7 @@ fn trigger_interrupt_test(
     const SPIN_CYCLES: u64 = 2_000_000_000;
     const HEARTBEAT_CYCLES: u64 = 400_000_000;
 
-    let report = interrupts::verify_ready_for_sti(logger);
+    let report = kernel::arch::x86_64::interrupt_readiness::verify_ready_for_sti(logger);
 
     if !report.may_enable_interrupts() {
         logger.error(format_args!(
@@ -4920,7 +4920,7 @@ fn start_timer(
     }
 
     // --- 5. sti 前 7 項目を再検証する ---
-    let report = interrupts::verify_ready_for_sti_with_timer(logger);
+    let report = kernel::arch::x86_64::interrupt_readiness::verify_ready_for_sti_with_timer(logger);
     if !report.may_enable_interrupts() {
         logger.error(format_args!(
             "interrupt-test: the pre-sti checks did not pass; refusing to sti (ADR-0018 §2)"

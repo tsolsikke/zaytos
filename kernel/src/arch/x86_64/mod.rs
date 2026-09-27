@@ -4,6 +4,7 @@ pub mod cpu_state;
 pub mod fp;
 pub mod gdt;
 pub mod idt;
+pub mod interrupt_readiness;
 pub mod paging;
 pub mod ring3;
 pub mod stack;

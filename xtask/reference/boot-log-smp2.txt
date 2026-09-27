@@ -27,9 +27,9 @@ Hello, ZaytOS!
 [INFO] gdt[4] udata: 0x00cff2000000ffff DPL=3 present=1 kind=data accessed=0 (expected 0x00cff2000000ffff, accessed bit is CPU-managed)
 [INFO] gdt[5] ucode64: 0x00affa000000ffff DPL=3 present=1 kind=code accessed=0 (expected 0x00affa000000ffff, accessed bit is CPU-managed)
 [INFO] gdt: kdata D/B=1, udata D/B=1 (must match; udata follows kdata)
-[INFO] gdt[6] tss: base=0xffffffff802c3d98 (expected 0xffffffff802c3d98) present=1 S=0 type=0xb (0xb = busy, set by ltr)
+[INFO] gdt[6] tss: base=0xffffffff802c3db0 (expected 0xffffffff802c3db0) present=1 S=0 type=0xb (0xb = busy, set by ltr)
 [INFO] gdt: all descriptors match (kernel + user DPL=3 in STAR-compatible order, TSS at new index)
-[INFO] tss: base=0xffffffff802c3d98 IST1=0xffffffff804b5000 RSP0=0xffffffff804b0000
+[INFO] tss: base=0xffffffff802c3db0 IST1=0xffffffff804b5000 RSP0=0xffffffff804b0000
 [INFO] tss: RSP0 は特権レベル遷移（ユーザー -> カーネル）用で、M5 まで実際には使われない
 [INFO] stack: old RSP=0xffffffff80262f78 (UEFI-derived), new RSP=0xffffffff804a5e00
 [INFO] stack: kernel stack 0xffffffff80490000..0xffffffff804b0000 (128 KiB)
@@ -537,7 +537,7 @@ syscall-test wrote this
 [INFO] lapic-timer: the timer now arrives as vector 0xfe, which the 8259 cannot produce
 task: starting preemptive demo with 2 busy-loop workers for 200 ticks
 [INFO] smp: the installed AP trampoline matches the template outside the patched fields: 4048 byte(s) compared, 48 excluded (gdtr base at 0xf22, far jump target at 0x3b, data block 0xf40..0xf68), mismatches=0
-[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x25b000, rust entry 0xffffffff801a2480
+[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x25b000, rust entry 0xffffffff801a3a30
 [INFO] smp: starting application processor apic id 1 as slot 1 (trampoline at 0x1000, vector 0x01, stack top 0x3000 identity-mapped, cr3 0x25b000 = the static boot page table)
 [INFO] smp: application processor 1 started (long mode reached, running on the static boot page table; no per-CPU GDT/TSS/IDT yet, so cpu_id() is not used here)
 [INFO] fp: SSE is enabled on ap 1: CR0=0x80010033 CR4=0x668, as intended = true [read back from the registers]
