@@ -20257,7 +20257,8 @@ const COMMIT_STYLE_SINCE: &str = "2026-07-22T08:30:00+09:00";
 /// それを書いた文書の性質ではないからである。**
 ///
 /// **それ以外は直す側である。** **パスが古くなっただけなら、書き換えればよい。** **ファイルを移したときは、
-/// 文書を書き換えずに [`DOC_PATH_MOVES`] で今の置き場へ読み替える**（2026-09-27。境界の段階の手順 2）。
+/// ADR と記録の文書は書き換えずに [`DOC_PATH_MOVES`] で今の置き場へ読み替え、今の状態を書く文書
+/// （[`CURRENT_STATE_DOCS`]）は今の置き場へ書き換える**（2026-09-27。境界の段階の手順 2）。
 ///
 /// **1 件につき理由を 1 行添えること。** **理由の書けない項目は、直す側である。**
 const DOC_PATH_ALLOWLIST: &[(&str, &str)] = &[
@@ -20280,7 +20281,7 @@ const DOC_PATH_ALLOWLIST: &[(&str, &str)] = &[
 /// 移したファイルとディレクトリの、以前の置き場と今の置き場（2026-09-27。境界の段階の手順 2）。
 ///
 /// **文書は書いた時点の置き場を指したまま残し、この表で今の置き場へ読み替えて、在ることを確かめる**
-/// ——**手順 2 で丸ごと移すファイルを指す文書の以前のパスは、20 本・106 件ある**（2026-09-27 に数えた）。
+/// （**今の状態を書く文書は除く**。[`CURRENT_STATE_DOCS`]）——**手順 2 で丸ごと移すファイルを指す文書の以前のパスは、20 本・106 件ある**（2026-09-27 に数えた）。
 /// [`DOC_PATH_ALLOWLIST`] の「当時の在り処の記録」を、移した分だけまとめて持つ形である（**文書ごとの
 /// Addendum の代わりに、今の置き場をここで示す**）。
 ///
@@ -20340,6 +20341,74 @@ fn moved_path_is_tracked(path: &str, tracked: &[String], moves: &[(&str, &str)])
                     .any(|t| t == moved || t.starts_with(&format!("{moved}/")))
             })
     })
+}
+
+/// 今の状態を書く文書（2026-09-27。運用者の決定）。**この中の backtick のパスは、[`DOC_PATH_MOVES`] で読み替えず、
+/// 今の置き場を書く**——**読む人がコードを探すのに使う文書だからである。** **ADR と記録の文書は、書いた時点の置き場の
+/// まま残し、読み替えの表で確かめる。**
+///
+/// **欄の番号を持つ文書は、状態の欄が `未` か `済` の表の行の、その欄だけを見る**——**`docs/deferred-decisions.md` の
+/// 出典の欄（3 番目）である。** **ほかの欄と、計測の記録の表は、書いた時点のまま残す。**
+const CURRENT_STATE_DOCS: &[(&str, Option<usize>)] = &[
+    ("docs/architecture.md", None),
+    ("docs/coding-standards.md", None),
+    ("docs/deferred-decisions.md", Some(3)),
+];
+
+/// 行の中で、今の置き場を書くべき部分（純粋な論理。無ければ `None`）。**欄の番号を持つ文書は、状態の欄が `未` か
+/// `済` の表の行の、その欄だけである**（番号は 1 から数える）。
+fn current_state_part<'a>(
+    rel: &str,
+    line: &'a str,
+    docs: &[(&str, Option<usize>)],
+) -> Option<&'a str> {
+    let (_, column) = docs.iter().find(|(doc, _)| *doc == rel)?;
+    let Some(column) = column else {
+        return Some(line);
+    };
+    if !line.starts_with('|') {
+        return None;
+    }
+    let cells: Vec<&str> = line.split('|').collect();
+    if !matches!(cells.get(1).map(|state| state.trim()), Some("未" | "済")) {
+        return None;
+    }
+    cells.get(*column).copied()
+}
+
+/// backtick の中から、移したファイルやディレクトリを以前のパスで指すものを集める（純粋な論理。2026-09-27）。
+/// **ディレクトリ（`/` で終わる）も見る**——**[`backticked_paths`] は拡張子を持つものだけを見るので、ここでは使わない。**
+/// **今も在るパスとして読めるものは数えない**（別の接頭辞で今のファイルに当たる形）。
+fn paths_before_a_move(part: &str, tracked: &[String], moves: &[(&str, &str)]) -> Vec<String> {
+    let exists = |path: &str| {
+        let path = path.trim_end_matches('/');
+        tracked
+            .iter()
+            .any(|t| t == path || t.starts_with(&format!("{path}/")))
+    };
+    let mut found = Vec::new();
+    for piece in part.split('`').skip(1).step_by(2) {
+        if !piece.contains('/') || piece.contains(' ') || piece.contains("..") {
+            continue;
+        }
+        let fulls: Vec<String> = DOC_PATH_PREFIXES
+            .iter()
+            .map(|prefix| format!("{prefix}{piece}"))
+            .collect();
+        if fulls.iter().any(|full| exists(full)) {
+            continue;
+        }
+        let moved = fulls.iter().any(|full| {
+            moves.iter().any(|(old, _)| {
+                full.trim_end_matches('/') == old.trim_end_matches('/')
+                    || (old.ends_with('/') && full.starts_with(old))
+            })
+        });
+        if moved {
+            found.push(piece.to_string());
+        }
+    }
+    found
 }
 
 /// 読み替えの表の問題（以前の置き場がまだ在る項、今の置き場が無い項）。
@@ -20561,9 +20630,26 @@ fn check_markdown_references(workspace_root: &Path) -> Result<Vec<String>> {
                     ));
                 }
             }
+            // **今の状態を書く文書は、読み替えの表に頼らず今の置き場を書く**（2026-09-27。運用者の決定）。
+            if let Some(part) = current_state_part(rel, line, CURRENT_STATE_DOCS) {
+                for path in paths_before_a_move(part, &tracked, DOC_PATH_MOVES) {
+                    findings.push(format!(
+                        "{rel}:{number}: 今の状態を書く文書が、移したものを以前のパスで指している -> `{path}`\
+                         （今の置き場を書く。CURRENT_STATE_DOCS）"
+                    ));
+                }
+            }
         }
     }
     findings.extend(doc_path_move_problems(DOC_PATH_MOVES, &tracked));
+    // **載せた文書が無くなったら落とす**——**改名すると、黙って何も見なくなる。**
+    for (doc, _) in CURRENT_STATE_DOCS {
+        if !markdown.iter().any(|rel| rel == doc) {
+            findings.push(format!(
+                "CURRENT_STATE_DOCS: {doc} is not a tracked document"
+            ));
+        }
+    }
     Ok(findings)
 }
 
@@ -23751,6 +23837,7 @@ fn report_enumeration_counts() {
         ("X86_WORDS_WITH_NUMBERS", X86_WORDS_WITH_NUMBERS.len()),
         ("X86_WORD_HOMES", X86_WORD_HOMES.len()),
         ("DOC_PATH_MOVES", DOC_PATH_MOVES.len()),
+        ("CURRENT_STATE_DOCS", CURRENT_STATE_DOCS.len()),
     ];
     let rendered: Vec<String> = counts
         .iter()
@@ -29471,6 +29558,58 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         assert!(doc_path_move_problems(&moves, &tracked).is_empty());
         let backwards = [("kernel/src/arch/x86_64/gdt/", "kernel/src/gdt/")];
         assert_eq!(doc_path_move_problems(&backwards, &tracked).len(), 2);
+    }
+
+    /// **今の状態を書く文書は、読み替えの表に頼らず今の置き場を書く**（2026-09-27。運用者の決定）。**欄の番号を持つ
+    /// 文書は、状態が `未` か `済` の表の行の、その欄だけを見る。** **ディレクトリも見る。**
+    #[test]
+    fn a_current_state_document_names_moved_files_by_their_new_place() {
+        let docs = [("docs/a.md", None), ("docs/d.md", Some(3))];
+        let row = "| 未 | 項目 | `kernel/src/gdt/mod.rs` | `idt/mod.rs` | 内容 |";
+        assert_eq!(current_state_part("docs/a.md", row, &docs), Some(row));
+        assert_eq!(
+            current_state_part("docs/d.md", row, &docs),
+            Some(" `kernel/src/gdt/mod.rs` ")
+        );
+        for other in [
+            "| 状態 | 項目 | 出典 | 条件 | 内容 |",
+            "| `kernel/src/gdt/mod.rs` | 53 | 44 |",
+            "本文の `kernel/src/gdt/mod.rs`",
+        ] {
+            assert_eq!(current_state_part("docs/d.md", other, &docs), None);
+        }
+        assert_eq!(current_state_part("docs/other.md", row, &docs), None);
+        let tracked = vec![
+            "kernel/src/arch/x86_64/gdt/mod.rs".to_string(),
+            "kernel/src/paging/plan.rs".to_string(),
+        ];
+        let moves = [
+            ("kernel/src/gdt/", "kernel/src/arch/x86_64/gdt/"),
+            (
+                "kernel/src/paging/switch.rs",
+                "kernel/src/arch/x86_64/paging/switch.rs",
+            ),
+        ];
+        assert_eq!(
+            paths_before_a_move(
+                "`kernel/src/gdt/mod.rs`・`gdt/layout.rs`・`kernel/src/gdt/`・`paging/switch.rs`",
+                &tracked,
+                &moves
+            ),
+            vec![
+                "kernel/src/gdt/mod.rs",
+                "gdt/layout.rs",
+                "kernel/src/gdt/",
+                "paging/switch.rs"
+            ]
+        );
+        // **今の置き場と、移していないファイルの残るディレクトリは数えない。**
+        assert!(paths_before_a_move(
+            "`kernel/src/arch/x86_64/gdt/mod.rs`・`kernel/src/paging/`・`paging/plan.rs`",
+            &tracked,
+            &moves
+        )
+        .is_empty());
     }
 
     /// **x86 の言葉は、コードと `asm!` の中の文字列で数え、コメントとログの文言では数えない**（2026-09-27。
