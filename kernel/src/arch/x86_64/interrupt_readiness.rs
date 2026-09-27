@@ -10,6 +10,12 @@
 //!
 //! **`kernel/src/interrupts.rs` から移した**（2026-09-27。境界の段階の手順 2）。**7 項目は x86 の記述子の表と
 //! PC の割り込みコントローラを読み戻すので、CPU 固有の置き場に置く。**
+//!
+//! **7 項目の後に、全 IRQ をマスクしたまま `sti` し、期限つきで待って何も届かないことを確かめる形
+//! （[`spin_with_interrupts_enabled`]。M4-d-1）も、同じ日に interrupts.rs から移した**（`RFLAGS` の IF・TSC・
+//! ベクタごとの数を読む）。
+
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use common::arch::x86_64::cpu;
 use common::log::Logger;
@@ -360,5 +366,129 @@ fn verify_lock_disables_interrupts(logger: &mut Logger<SerialPort>) -> CheckStat
         CheckState::Verified
     } else {
         CheckState::Failed
+    }
+}
+
+/// [`spin_with_interrupts_enabled`] が観測した、スピン中の割り込み増加分。
+static SPIN_INTERRUPT_DELTA: AtomicU64 = AtomicU64::new(0);
+
+/// スピン中に増えた割り込みの合計（絶対値ではなく増加分）。
+pub fn spin_interrupt_delta() -> u64 {
+    SPIN_INTERRUPT_DELTA.load(Ordering::Relaxed)
+}
+
+/// メインループが 1 周するたびに増やす周回カウンタ。
+///
+/// 「回っているが割り込みが来ない」と「そもそも回っていない」を区別する
+/// ためのもの。カウンタが増えないなら、`hlt` から起きていないか、そこへ
+/// 到達していない。
+static LOOP_ITERATIONS: AtomicU64 = AtomicU64::new(0);
+
+pub fn loop_iterations() -> u64 {
+    LOOP_ITERATIONS.load(Ordering::Relaxed)
+}
+
+/// 割り込みを有効にした状態で一定時間アイドルし、何も届かないことを確かめる。
+///
+/// # なぜ M4-d-1 では `hlt` しないのか
+///
+/// ADR-0018 §7 はメインループを `hlt` で待つ形にすると定めており、そのための
+/// [`cpu::enable_interrupts_and_halt`]（`sti; hlt` 隣接）も用意した。
+/// しかし M4-d-1 でそれを使うと、確実にハングする。
+///
+/// `hlt` は次の割り込みが来るまで CPU を止める命令である。M4-d-1 は全 IRQ を
+/// マスクした状態で `sti` するので、そもそも起こしてくれるものが存在しない。
+/// 最初の `hlt` に入った時点で永久に止まり、周回カウンタもハートビートも
+/// 進まず、期限の判定にも到達しない。外から見ると「`sti` した瞬間にハング
+/// した」という、まさに M4-d-1 で切り分けたい症状と区別がつかない形になる。
+///
+/// そこで M4-d-1 のこのループは期限つきのスピンにしてある。`hlt` を使う
+/// 本来の形は、起こしてくれるタイマが実在する M4-d-2 で初めて成立する。
+/// ビジーループを避ける理由（TCG のログ肥大）は、割り込みが 1 件も無い
+/// M4-d-1 では問題にならない。`-d int` は割り込みが起きたときだけ記録する
+/// ためである。
+///
+/// # Safety
+///
+/// 割り込みを有効化する。[`verify_ready_for_sti`](crate::arch::x86_64::interrupt_readiness::verify_ready_for_sti) が
+/// [`ReadinessReport::may_enable_interrupts`](crate::arch::x86_64::interrupt_readiness::ReadinessReport::may_enable_interrupts)
+/// を返した後にのみ呼ぶこと。
+pub unsafe fn spin_with_interrupts_enabled(
+    logger: &mut Logger<SerialPort>,
+    duration_tsc: u64,
+    heartbeat_interval: u64,
+) {
+    // SAFETY: 呼び出し側の契約により 7 項目の検証を通っている。
+    //
+    // `sti` を実行するのはここと [`run_timer_loop`] の 2 箇所だけである。
+    // ADR-0018 §2 は「`sti` は 1 箇所だけ」と決めたが、M4-d を d-1（期限つき
+    // スピンで sti 自体を検証する）と d-2（タイマループ。`hlt` で待つ本来の形）へ
+    // 分けた結果、実装は 2 箇所になった（ADR-0018 Addendum 5）。どちらも
+    // 7 項目の検証を通った後にしか実行しない、という §2 の本質は保たれている。
+    // かつてこのコメントは両方が自分を「唯一の箇所」と書いており、実際の数と
+    // 食い違っていた。「唯一」を前提に検査を設計すると許可対象を数え違える。
+    unsafe {
+        cpu::enable_interrupts();
+    }
+
+    // 基準点を取ってから測る。起動シーケンス中に既に発生している分
+    // （`--interrupt-test irq-path` のソフトウェア割り込みなど）を「今
+    // 届いたもの」と取り違えないようにする。
+    let baseline = idt::snapshot_counts();
+
+    let started = cpu::read_timestamp_counter();
+    let if_after_sti = cpu::read_rflags() & cpu::RFLAGS_INTERRUPT_FLAG != 0;
+    logger.info(format_args!(
+        "sti: interrupts are now enabled (IF={if_after_sti}, read back from RFLAGS)"
+    ));
+    if !if_after_sti {
+        logger.error(format_args!("sti: IF did not become set; halting"));
+        cpu::halt_forever();
+    }
+
+    let deadline = started + duration_tsc;
+    let mut next_heartbeat = started + heartbeat_interval;
+
+    loop {
+        let now = cpu::read_timestamp_counter();
+
+        let (total, first) = idt::delta_since(&baseline);
+        if let Some(vector) = first {
+            // M4-d-1 では 1 件も来ないのが正しい。届いたならマスクが効いて
+            // いないか、PIC 以外の経路（LAPIC）が生きている。NMI（ベクタ 2）は
+            // `cli` でマスクできないため、理論上はここに現れうる。
+            // どのベクタだったかを必ず出す。合計だけでは原因の見当が
+            // つかない。
+            logger.error(format_args!(
+                "idle: an interrupt arrived while every IRQ is masked \
+                 (total={total}, first non-zero vector={vector:#04x}, count for it={})",
+                idt::interrupt_count(vector)
+            ));
+            break;
+        }
+
+        if now >= next_heartbeat {
+            next_heartbeat = now + heartbeat_interval;
+            logger.info(format_args!(
+                "heartbeat: loop iterations={}, interrupts seen={total}, IF={}",
+                loop_iterations(),
+                cpu::read_rflags() & cpu::RFLAGS_INTERRUPT_FLAG != 0
+            ));
+        }
+
+        LOOP_ITERATIONS.fetch_add(1, Ordering::Relaxed);
+
+        if now >= deadline {
+            break;
+        }
+    }
+
+    let (final_total, _) = idt::delta_since(&baseline);
+    SPIN_INTERRUPT_DELTA.store(final_total, Ordering::Relaxed);
+
+    // 後片付け。M4-d-2 まで再び禁止しておく。
+    // SAFETY: 観測が終わったので、割り込みを禁止した既知の状態へ戻す。
+    unsafe {
+        cpu::disable_interrupts();
     }
 }

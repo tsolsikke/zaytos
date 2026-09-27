@@ -4379,7 +4379,11 @@ fn trigger_interrupt_test(
     // SAFETY: 直前に 7 項目を検証し、blocks_sti() な項目が無いことを確認した。
     // 全 IRQ はマスク済みで、IDT の全 256 ベクタに present なハンドラが入っている。
     unsafe {
-        interrupts::spin_with_interrupts_enabled(logger, SPIN_CYCLES, HEARTBEAT_CYCLES);
+        kernel::arch::x86_64::interrupt_readiness::spin_with_interrupts_enabled(
+            logger,
+            SPIN_CYCLES,
+            HEARTBEAT_CYCLES,
+        );
     }
 
     // 増加分で判定する。テスト用ベクタを PIC の範囲外へ移しても同じである。カウンタは
@@ -4389,9 +4393,9 @@ fn trigger_interrupt_test(
     //
     // 合計の対象を PIC の範囲だけに絞る案は採らない。ここで見たいのは「何も届かない
     // こと」で、`cli` でマスクできない NMI（ベクタ 2）を含む全ベクタが対象である。
-    let delta = interrupts::spin_interrupt_delta();
+    let delta = kernel::arch::x86_64::interrupt_readiness::spin_interrupt_delta();
     let (absolute_total, _) = idt::interrupt_total_and_first_nonzero();
-    let iterations = interrupts::loop_iterations();
+    let iterations = kernel::arch::x86_64::interrupt_readiness::loop_iterations();
     logger.info(format_args!(
         "interrupt-test: spin finished; loop iterations={iterations}, \
          interrupts during the spin={delta} (absolute total since boot={absolute_total})"

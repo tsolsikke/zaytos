@@ -19589,7 +19589,7 @@ const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
     },
     // (c)(d)(e) 割り込み許可状態の遷移。sti は検証 7 項目通過後のみ（ADR-0018 §2）。
     DirectInterruptControlSite {
-        file: "kernel/src/interrupts.rs",
+        file: "kernel/src/arch/x86_64/interrupt_readiness.rs",
         item: "spin_with_interrupts_enabled",
         reason: "sti する箇所の 1 つ（M4-d-1 の期限つきスピン）と観測後の復帰 cli",
     },
