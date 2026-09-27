@@ -88,7 +88,9 @@ static FIRST_DELIVERY_REPORTED: AtomicBool = AtomicBool::new(false);
 ///
 /// **違うベクタで届いていたら止める**（今までどおり）。**8259 経由（0x21）なら、I/O APIC へ移したはずの
 /// IRQ1 が 8259 から来たことになる。**
-pub fn report_first_delivery_once(logger: &mut common::log::Logger<common::serial::SerialPort>) {
+pub fn report_first_delivery_once(
+    logger: &mut common::log::Logger<common::machine::pc::serial::SerialPort>,
+) {
     let Some(vector) = first_keyboard_vector() else {
         return;
     };
@@ -106,7 +108,7 @@ pub fn report_first_delivery_once(logger: &mut common::log::Logger<common::seria
             Some(vector),
             delivery_vector()
         ));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     }
 }
 

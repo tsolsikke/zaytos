@@ -22,7 +22,7 @@
 //! 別コアは割り込み禁止では止まらない。**
 //!
 //! 復元の判断（保存時に IF=1 だった場合のみ `sti`）は純粋ロジックとして
-//! [`crate::cpu::should_restore_interrupts`] に切り出し、ホストテストで固定
+//! [`crate::arch::x86_64::cpu::should_restore_interrupts`] に切り出し、ホストテストで固定
 //! してある。ここはそれを使ってハードウェアを操作するだけ。
 
 use core::cell::UnsafeCell;
@@ -31,9 +31,9 @@ use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::cpu;
+use crate::arch::x86_64::cpu;
+use crate::machine::pc::serial::SerialPort;
 use crate::percpu::{cpu_id, PerCpu, MAX_CPUS};
-use crate::serial::SerialPort;
 
 /// 現在保持している [`InterruptGuard`] の数（クリティカルセクションの入れ子
 /// 深さ）。

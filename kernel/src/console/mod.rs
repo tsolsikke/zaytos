@@ -171,7 +171,9 @@ static PENDING: common::critical::Locked<pending::Pending> =
 fn report_dropped_mid_character(dropped: usize) {
     use core::fmt::Write as _;
 
-    let mut serial = common::serial::SerialPort::new(common::serial::SerialPort::COM1_BASE);
+    let mut serial = common::machine::pc::serial::SerialPort::new(
+        common::machine::pc::serial::SerialPort::COM1_BASE,
+    );
     serial.init();
     let _ = writeln!(
         serial,
@@ -567,7 +569,7 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
                 return;
             }
             // **描く費用を測る（PERF-c の測定）。** **転送とは別の層である。**
-            let started = common::cpu::read_timestamp_counter();
+            let started = common::arch::x86_64::cpu::read_timestamp_counter();
             // **コピーを取り、描き終えてから書き戻す**（[`FOREGROUND_ANSI`] の doc）。
             let mut parser = *FOREGROUND_ANSI.lock();
             let mut decoder = *FOREGROUND_UTF8.lock();
@@ -649,7 +651,7 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
             console.flush();
             *FOREGROUND_ANSI.lock() = parser;
             *FOREGROUND_UTF8.lock() = decoder;
-            let elapsed = common::cpu::read_timestamp_counter().wrapping_sub(started);
+            let elapsed = common::arch::x86_64::cpu::read_timestamp_counter().wrapping_sub(started);
             console.note_draw_cycles(elapsed);
         }
     }

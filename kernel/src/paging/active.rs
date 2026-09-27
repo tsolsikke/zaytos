@@ -26,7 +26,7 @@
 //! 独立に」確かめられる。M4 で `sgdt` / `sidt` / IMR の読み戻しを先に用意した
 //! のと同じ順序である。
 
-use common::cpu;
+use common::arch::x86_64::cpu;
 use common::critical::InterruptGuard;
 
 use crate::frame_allocator::{FrameAllocator, FRAME_SIZE};

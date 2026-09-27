@@ -14,7 +14,7 @@ use common::boot_info::{
 };
 use common::elf::Elf;
 use common::log::Logger;
-use common::serial::SerialPort;
+use common::machine::pc::serial::SerialPort;
 use uefi::boot::{AllocateType, MemoryType};
 use uefi::cstr16;
 use uefi::fs::{FileSystem, Path};

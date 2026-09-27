@@ -20,8 +20,8 @@
 use core::fmt::Write;
 use core::panic::PanicInfo;
 
-use common::cpu;
-use common::serial::SerialPort;
+use common::arch::x86_64::cpu;
+use common::machine::pc::serial::SerialPort;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {

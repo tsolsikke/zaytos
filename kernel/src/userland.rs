@@ -26,7 +26,7 @@
 
 use common::critical::Locked;
 use common::log::{LogLevel, Logger};
-use common::serial::SerialPort;
+use common::machine::pc::serial::SerialPort;
 
 use crate::ring3::MAX_EXCURSION_DEPTH;
 use crate::syscall::{MAX_ARGV_BYTES, MAX_ENVP_BYTES, MAX_EXECUTABLE_SIZE, PATH_MAX};
@@ -1973,7 +1973,7 @@ unsafe fn run_loaded_program(
             "ring3: the depth-{entered_at_depth} excursion stack ran into its bottom canary; \
              it has no guard page, so anything below it may already be overwritten. halting"
         ));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     }
     // **解禁条件を機械にする（S11-6）。**
     //
@@ -1994,7 +1994,7 @@ unsafe fn run_loaded_program(
              page says to decide here - either map them the way StackBlock is mapped (page \
              aligned, one page below unmapped) or raise the capacity with a measurement. halting"
         ));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     }
 
     // **表が動いたことの観測（S10-b）。** 開いたまま戻ったものが何本あるかを出す。
@@ -2449,7 +2449,7 @@ pub fn spawn(
             "spawn: RSP0 came back as {rsp0_after:#x} but it was {rsp0_before:#x} before the \
              child ran; the parent's next kernel entry would land on the wrong stack. halting"
         ));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     }
 
     let child_handler_rsp = crate::syscall::handler_rsp();
@@ -2743,7 +2743,7 @@ pub fn run_detached_request() {
         logger.error(format_args!(
             "detached: the ring3 task started without a request; halting"
         ));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     }
     // SAFETY: 置き場は `static` なのでアドレスは生き続ける。**書く者は `start_detached` だけで、
     // このタスクが走っている間は `start_ring3_task` が起動を断る**ので、読んでいる間に

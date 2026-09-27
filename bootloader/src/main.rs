@@ -4,7 +4,7 @@
 extern crate alloc;
 
 use common::log::{LogLevel, Logger};
-use common::serial::SerialPort;
+use common::machine::pc::serial::SerialPort;
 use uefi::prelude::*;
 use uefi::println;
 

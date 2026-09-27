@@ -1541,8 +1541,8 @@ unsafe fn flush_root_image(bkl: &mut Option<crate::bkl::BklGuard>) -> Result<(),
         // **声は panic で出す**——**`syscall.rs` にシリアルポートは無い**（開けると直接シリアルの
         // 許可リストに項目が増える）。**パニックの方針は Halt and Dump である**（`ADR-0004`）。
         if cfg!(feature = "flush-waits-without-device") {
-            let started = common::cpu::read_timestamp_counter();
-            while common::cpu::read_timestamp_counter().wrapping_sub(started)
+            let started = common::arch::x86_64::cpu::read_timestamp_counter();
+            while common::arch::x86_64::cpu::read_timestamp_counter().wrapping_sub(started)
                 < FLUSH_WITHOUT_DEVICE_DEADLINE_CYCLES
             {
                 core::hint::spin_loop();
@@ -1557,7 +1557,7 @@ unsafe fn flush_root_image(bkl: &mut Option<crate::bkl::BklGuard>) -> Result<(),
     let Some(mut claim) = crate::virtio::claim() else {
         return Err(EBUSY);
     };
-    let started = common::cpu::read_timestamp_counter();
+    let started = common::arch::x86_64::cpu::read_timestamp_counter();
     // **発行は BKL の下で行う。** リングを触るので、同じコアの再入も止める。
     // SAFETY: 呼び出し元契約により BKL を保持している。
     let Some((expected, before, bytes)) = (unsafe { claim.issue_image_write() }) else {
@@ -1568,7 +1568,7 @@ unsafe fn flush_root_image(bkl: &mut Option<crate::bkl::BklGuard>) -> Result<(),
     // SAFETY: BKL は解いてある。`expected` は直前の発行が返した値である。
     let outcome = unsafe { claim.wait_for_image_write(expected, before) };
     *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
-    let cycles = common::cpu::read_timestamp_counter().wrapping_sub(started);
+    let cycles = common::arch::x86_64::cpu::read_timestamp_counter().wrapping_sub(started);
     crate::virtio::note_flush(bytes, cycles);
     match outcome {
         Ok(()) => Ok(()),
@@ -4841,7 +4841,9 @@ unsafe fn ioctl_log_line(arg: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -
         return (-EINVAL) as u64;
     }
 
-    let mut port = common::serial::SerialPort::new(common::serial::SerialPort::COM1_BASE);
+    let mut port = common::machine::pc::serial::SerialPort::new(
+        common::machine::pc::serial::SerialPort::COM1_BASE,
+    );
     port.init();
     for byte in &buf[ZDIAG_TEXT_OFFSET..ZDIAG_TEXT_OFFSET + length] {
         port.write_byte(*byte);
@@ -5075,7 +5077,9 @@ unsafe fn sys_write(
         TERMINAL_WRITES_FROM_DETACHED.fetch_add(1, Ordering::Relaxed);
     }
 
-    let mut port = common::serial::SerialPort::new(common::serial::SerialPort::COM1_BASE);
+    let mut port = common::machine::pc::serial::SerialPort::new(
+        common::machine::pc::serial::SerialPort::COM1_BASE,
+    );
     port.init();
 
     let mut recorded = [0u8; WRITE_BUF_LEN];

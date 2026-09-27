@@ -12,7 +12,7 @@ use core::mem::{align_of, size_of};
 use core::ptr::NonNull;
 
 use common::critical::Locked;
-use common::serial::SerialPort;
+use common::machine::pc::serial::SerialPort;
 
 use super::plan::{self, AllocPlan};
 

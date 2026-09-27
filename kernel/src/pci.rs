@@ -23,9 +23,9 @@
 //! bus 0 / device 4 のような位置は QEMU の並べ方に依存するので、
 //! **カーネルが主張するのは「見つけられた」ことだけで、位置は出すだけである。**
 
+use common::arch::x86_64::port;
 use common::log::Logger;
-use common::port;
-use common::serial::SerialPort;
+use common::machine::pc::serial::SerialPort;
 
 /// `CONFIG_ADDRESS`。どの (bus, device, function, offset) を読むかを書く側。
 const CONFIG_ADDRESS: u16 = 0xCF8;

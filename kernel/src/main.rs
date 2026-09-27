@@ -12,10 +12,10 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use common::arch::x86_64::cpu;
 use common::boot_info::{BootInfo, BOOT_INFO_PAGE_COUNT};
-use common::cpu;
 use common::log::{LogLevel, Logger};
-use common::serial::SerialPort;
+use common::machine::pc::serial::SerialPort;
 use core::ptr::addr_of;
 use kernel::console::Console;
 
@@ -486,11 +486,11 @@ extern "sysv64" fn kernel_main() -> ! {
         logger.info(format_args!(
             "fp: SSE is enabled on the bootstrap processor: CR0={:#x} (MP={}, EM={}),              CR4={:#x} (OSFXSR={}, OSXMMEXCPT={}), as intended = {} [read back from the registers]",
             state.cr0,
-            state.cr0 & common::cpu::CR0_MONITOR_COPROCESSOR != 0,
-            state.cr0 & common::cpu::CR0_EMULATION != 0,
+            state.cr0 & common::arch::x86_64::cpu::CR0_MONITOR_COPROCESSOR != 0,
+            state.cr0 & common::arch::x86_64::cpu::CR0_EMULATION != 0,
             state.cr4,
-            state.cr4 & common::cpu::CR4_OS_FXSR != 0,
-            state.cr4 & common::cpu::CR4_OS_XMM_EXCEPT != 0,
+            state.cr4 & common::arch::x86_64::cpu::CR4_OS_FXSR != 0,
+            state.cr4 & common::arch::x86_64::cpu::CR4_OS_XMM_EXCEPT != 0,
             state.as_intended()
         ));
     }

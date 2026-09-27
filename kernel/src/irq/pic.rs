@@ -57,7 +57,7 @@
 //! 含まない関数として切り出してホスト `cargo test` で検証する。ポートを
 //! 叩く部分だけが `unsafe` になる。
 
-use common::port::{inb, io_wait, outb};
+use common::arch::x86_64::port::{inb, io_wait, outb};
 
 /// マスタ PIC のコマンドポート（ICW1 / OCW2 / OCW3）。
 const MASTER_COMMAND_PORT: u16 = 0x20;

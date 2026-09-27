@@ -19686,7 +19686,7 @@ const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
 /// （`enable_interrupts_and_halt` を含む）の呼び出しと、`asm!`/`global_asm!` 内の
 /// 生の `"cli"` / `"sti"`。
 ///
-/// `common/src/cpu.rs` は除外する（primitive の定義本体で、命令そのものはここに
+/// `common/src/arch/x86_64/cpu.rs` は除外する（primitive の定義本体で、命令そのものはここに
 /// 集約されている）。`halt_forever` の `cli; hlt` も同ファイルなので自動的に外れる
 /// （停止用であって排他ではない）。
 /// # 数の単位
@@ -19725,7 +19725,7 @@ fn find_unapproved_interrupt_control(
     let mut findings = Vec::new();
     for relative in listing.lines().filter(|l| !l.is_empty()) {
         // primitive の定義本体は対象外。
-        if relative == "common/src/cpu.rs" {
+        if relative == "common/src/arch/x86_64/cpu.rs" {
             continue;
         }
         // xtask はホスト上のビルドツールで、ring 0 の命令を実行しえない。この
@@ -19891,7 +19891,7 @@ fn find_unapproved_direct_serial_ports(
             continue;
         }
         // ポートの実装本体は対象外。
-        if relative == "common/src/serial.rs" {
+        if relative == "common/src/machine/pc/serial.rs" {
             continue;
         }
         let path = workspace_root.join(relative);
@@ -20286,7 +20286,11 @@ const DOC_PATH_ALLOWLIST: &[(&str, &str)] = &[
 ///
 /// **前方一致で読み替える**（ディレクトリは `/` で終える）。**以前の置き場がまだ在る項と、今の置き場が無い
 /// 項は落とす**（[`doc_path_move_problems`]）——**読み替えが実際の移動を指していることを保つ。**
-const DOC_PATH_MOVES: &[(&str, &str)] = &[];
+const DOC_PATH_MOVES: &[(&str, &str)] = &[
+    ("common/src/cpu.rs", "common/src/arch/x86_64/cpu.rs"),
+    ("common/src/port.rs", "common/src/arch/x86_64/port.rs"),
+    ("common/src/serial.rs", "common/src/machine/pc/serial.rs"),
+];
 
 /// 以前の置き場を指すパスを、読み替えの表で今の置き場へ読み替えて、追跡下に在るかを見る（ファイルでも
 /// ディレクトリでもよい）。

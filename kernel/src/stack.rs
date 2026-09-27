@@ -452,7 +452,7 @@ pub unsafe fn install_guard_page(
                          halting",
                         guard_virt.as_u64()
                     ));
-                    common::cpu::halt_forever();
+                    common::arch::x86_64::cpu::halt_forever();
                 }
             }
             // **split の後に、粒度をもう一度読み直す。**
@@ -466,7 +466,7 @@ pub unsafe fn install_guard_page(
                          ({other:?}); halting",
                         guard_virt.as_u64()
                     ));
-                    common::cpu::halt_forever();
+                    common::arch::x86_64::cpu::halt_forever();
                 }
             }
         }
@@ -475,7 +475,7 @@ pub unsafe fn install_guard_page(
                 "{tag}: {what} {:#x} does not resolve ({other:?}); halting",
                 guard_virt.as_u64()
             ));
-            common::cpu::halt_forever();
+            common::arch::x86_64::cpu::halt_forever();
         }
     }
 
@@ -536,7 +536,7 @@ pub unsafe fn install_guard_page(
                 log(format_args!(
                     "{tag}: {what} is still resolvable after unmap; halting"
                 ));
-                common::cpu::halt_forever();
+                common::arch::x86_64::cpu::halt_forever();
             }
         }
         Err(e) => {
@@ -544,7 +544,7 @@ pub unsafe fn install_guard_page(
                 "{tag}: failed to unmap {what} {:#x}: {e:?}; halting",
                 guard_virt.as_u64()
             ));
-            common::cpu::halt_forever();
+            common::arch::x86_64::cpu::halt_forever();
         }
     }
 }

@@ -42,9 +42,9 @@ use core::fmt::Write as _;
 use core::ptr::addr_of;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use common::cpu;
+use common::arch::x86_64::cpu;
+use common::machine::pc::serial::SerialPort;
 use common::percpu::{PerCpu, MAX_CPUS};
-use common::serial::SerialPort;
 
 use crate::gdt::KERNEL_CODE_SELECTOR;
 use context::{ExceptionContext, IrqContext};

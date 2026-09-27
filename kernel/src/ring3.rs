@@ -736,7 +736,7 @@ pub unsafe fn enter(
     // 割り込み禁止の区間へ入れない。**
     // SAFETY: 割り込みを止めるだけで、メモリには触らない。この後で割り込みを許すのは
     // `zaytos_enter_ring3` の `iretq` だけで、そこまでに眠る処理もロックを取る処理も無い。
-    unsafe { common::cpu::disable_interrupts() };
+    unsafe { common::arch::x86_64::cpu::disable_interrupts() };
 
     // RSP0 を遠征専用スタックへ据える。#GP はここへ切り替わる。
     // 破壊テスト (M5-e-4, drop-rsp0): 据えない。#GP がメインのスタックへ切り替わり、
@@ -800,7 +800,7 @@ pub unsafe fn enter(
     // **どれも割り込みゲートを通って IF=0 になった文脈から跳ぶ。** **longjmp は RFLAGS を
     // 戻さない。** **したがって下で欄を戻し終えるまで、切り替えは入らない**——**出口のウィンドウが
     // 閉じている根拠はこれだけなので、読みで済ませずに検算する。**
-    if common::cpu::read_rflags() & RFLAGS_INTERRUPT_FLAG != 0 {
+    if common::arch::x86_64::cpu::read_rflags() & RFLAGS_INTERRUPT_FLAG != 0 {
         report_resumed_with_interrupts_enabled();
     }
 

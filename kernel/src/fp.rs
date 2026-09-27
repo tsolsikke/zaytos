@@ -15,7 +15,7 @@
 //! [`restore`] を使う——**512 バイトの並びを作って読み込ませれば、XMM の命令は
 //! 1 つも要らない。**
 
-use common::cpu;
+use common::arch::x86_64::cpu;
 
 /// `fxsave` / `fxrstor` が使う領域（512 バイト・16 バイト境界）。
 ///

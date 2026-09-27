@@ -1,14 +1,14 @@
 //! COM1 (16550 互換 UART) 経由のシリアルポート出力。
 //!
 //! ADR-0003: 画面描画より先に確立する、最優先の観測手段。
-//! ハードウェアアクセスは [`crate::port`] の `unsafe fn`（`outb` / `inb`）
+//! ハードウェアアクセスは [`crate::arch::x86_64::port`] の `unsafe fn`（`outb` / `inb`）
 //! だけに閉じ込め、それ以外は呼び出し側から見て安全な API として公開する
 //! （unsafe は最小範囲に限定する）。
 
 use core::fmt;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use crate::port::{inb, outb};
+use crate::arch::x86_64::port::{inb, outb};
 
 /// UART を書いている間の排他（2026-09-12）。
 ///
@@ -131,7 +131,7 @@ fn acquire_uart() -> SerialGuard {
         return SerialGuard { owner: false };
     }
     let me = lock_identity();
-    let started = crate::cpu::read_timestamp_counter();
+    let started = crate::arch::x86_64::cpu::read_timestamp_counter();
     loop {
         match UART_LOCK.holder.compare_exchange_weak(
             NO_HOLDER,
@@ -146,7 +146,8 @@ fn acquire_uart() -> SerialGuard {
                     UART_LOCK.reentered.fetch_add(1, Ordering::Relaxed);
                     return SerialGuard { owner: false };
                 }
-                if crate::cpu::read_timestamp_counter().wrapping_sub(started) > WAIT_TIMEOUT_CYCLES
+                if crate::arch::x86_64::cpu::read_timestamp_counter().wrapping_sub(started)
+                    > WAIT_TIMEOUT_CYCLES
                 {
                     UART_LOCK.forced.fetch_add(1, Ordering::Relaxed);
                     return SerialGuard { owner: false };
@@ -223,7 +224,7 @@ const BAUD_DIVISOR: u16 = (UART_CLOCK_HZ / BAUD_RATE) as u16;
 /// COM1 シリアルポートのドライバ。
 ///
 /// `new` はポート番号を記憶するだけで実機には触れないため安全。実際の
-/// ハードウェアアクセスは [`crate::port`] の `outb` / `inb` に閉じ込め、
+/// ハードウェアアクセスは [`crate::arch::x86_64::port`] の `outb` / `inb` に閉じ込め、
 /// `init` / `write_byte` はその契約（固定の既知オフセットのみを、決められた
 /// 16550 初期化手順どおりに叩く）を自身で満たすことで安全な API として
 /// 公開する。

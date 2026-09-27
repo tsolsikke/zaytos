@@ -11,9 +11,9 @@ use crate::paging::active::{ActivePageTable, PageAttributes};
 #[allow(unused_imports)]
 use crate::paging::verify;
 use common::addr::{PhysAddr, VirtAddr};
-use common::cpu;
+use common::arch::x86_64::cpu;
 use common::log::Logger;
-use common::serial::SerialPort;
+use common::machine::pc::serial::SerialPort;
 
 use crate::frame_allocator::{FrameAllocator, FRAME_SIZE};
 
@@ -713,7 +713,7 @@ pub unsafe fn wake_application_processors(
     // 送ることになる。
     //
     // 権威のある出所は 2 つあり、どちらも既に読んでいる——`IA32_APIC_BASE` の
-    // bit 8（`common::cpu::ApicBase::bootstrap_processor`）と、自コアの Local APIC
+    // bit 8（`common::arch::x86_64::cpu::ApicBase::bootstrap_processor`）と、自コアの Local APIC
     // ID レジスタ（[`crate::apic`] が読んでいる）である。どちらも今はログへ出す
     // だけで、判定には使っていない。
     //
@@ -858,9 +858,11 @@ fn run_serial_stress_on_ap(serial: &mut SerialPort, slot: usize) {
     use core::sync::atomic::Ordering;
 
     // **上限つきで待つ**（`CLAUDE.md` の「上限のない待機ループを書かない」）。
-    let started = common::cpu::read_timestamp_counter();
+    let started = common::arch::x86_64::cpu::read_timestamp_counter();
     while !SERIAL_STRESS_GO.load(Ordering::Acquire) {
-        if common::cpu::read_timestamp_counter().wrapping_sub(started) > WAIT_TIMEOUT_CYCLES {
+        if common::arch::x86_64::cpu::read_timestamp_counter().wrapping_sub(started)
+            > WAIT_TIMEOUT_CYCLES
+        {
             let _ = writeln!(
                 serial,
                 "[ERROR] serial-stress: ap {slot} never saw the go signal; the exercise asserts \

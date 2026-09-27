@@ -27,7 +27,7 @@
 //! 読み直して一致を確認する。この検証によって、`decode` がセット 1 だけを
 //! 扱えばよいことが保証される。
 
-use common::port::{inb, io_wait, outb};
+use common::arch::x86_64::port::{inb, io_wait, outb};
 
 /// データポート。スキャンコードはここから読む。
 const DATA_PORT: u16 = 0x60;

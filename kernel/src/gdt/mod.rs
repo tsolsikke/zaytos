@@ -18,10 +18,10 @@ pub mod layout;
 use core::fmt::Write as _;
 use core::ptr::{addr_of, addr_of_mut};
 
-use common::cpu;
+use common::arch::x86_64::cpu;
 use common::log::Logger;
+use common::machine::pc::serial::SerialPort;
 use common::percpu::{PerCpu, MAX_CPUS};
-use common::serial::SerialPort;
 
 use layout::{
     tss_descriptor, user_segment_descriptor, SegmentSelector, TaskStateSegment, KERNEL_CODE_ACCESS,

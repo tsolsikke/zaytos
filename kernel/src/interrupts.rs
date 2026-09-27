@@ -10,9 +10,9 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use common::cpu;
+use common::arch::x86_64::cpu;
 use common::log::Logger;
-use common::serial::SerialPort;
+use common::machine::pc::serial::SerialPort;
 
 use crate::gdt;
 use crate::idt;
@@ -544,7 +544,7 @@ const FIRST_TICK_TIMEOUT_CYCLES: u64 = 20_000_000_000;
 /// 本当の意味でのティック取りこぼし（PIT が発火したのに CPU へ届かない、
 /// あるいは EOI が間に合わず次が抑止される）は、独立した第 2 の時間源が
 /// 無いと検出できない。現状 TSC しか無く、その TSC も仮想化環境では
-/// 信用できない（`common::cpu` 参照）。ここで測れるのは
+/// 信用できない（`common::arch::x86_64::cpu` 参照）。ここで測れるのは
 /// 「メインループの追従の遅れ」までである。
 static MAX_TICK_JUMP: AtomicU64 = AtomicU64::new(0);
 
@@ -874,7 +874,7 @@ pub unsafe fn run_timer_loop(
                     logger.error(format_args!(
                         "virtio-blk: the interrupt exercise failed ({reason:?}); halting"
                     ));
-                    common::cpu::halt_forever();
+                    common::arch::x86_64::cpu::halt_forever();
                 }
                 // d-2: BKL を解いて眠り、割り込みで起きる（ADR-0036）。
                 // SAFETY: 上と同じ位置（配線・武装済み、IF=1）。
@@ -884,7 +884,7 @@ pub unsafe fn run_timer_loop(
                     logger.error(format_args!(
                         "virtio-blk: the blocking read failed ({reason:?}); halting"
                     ));
-                    common::cpu::halt_forever();
+                    common::arch::x86_64::cpu::halt_forever();
                 }
             }
         }
@@ -1380,8 +1380,8 @@ pub unsafe fn run_timer_loop(
                         //
                         // **判定にしない。** **揺れる値なので、揺れる行へ相乗りする**
                         // （この行は `BOOT_LOG_VOLATILE_MARKERS` に在る）。
-                        common::serial::forced_write_count(),
-                        common::serial::reentry_count()
+                        common::machine::pc::serial::forced_write_count(),
+                        common::machine::pc::serial::reentry_count()
                     ),
                 );
             }
@@ -1497,9 +1497,11 @@ fn run_serial_stress_on_bsp(logger: &mut Logger<SerialPort>) {
         ));
     }
     // **上限つきで待つ。**
-    let started = common::cpu::read_timestamp_counter();
+    let started = common::arch::x86_64::cpu::read_timestamp_counter();
     while !crate::smp::SERIAL_STRESS_AP_DONE.load(Ordering::Acquire) {
-        if common::cpu::read_timestamp_counter().wrapping_sub(started) > 20_000_000_000 {
+        if common::arch::x86_64::cpu::read_timestamp_counter().wrapping_sub(started)
+            > 20_000_000_000
+        {
             logger.error(format_args!(
                 "serial-stress: the application processor never finished; the exercise asserts \
                  nothing"
@@ -1512,8 +1514,8 @@ fn run_serial_stress_on_bsp(logger: &mut Logger<SerialPort>) {
     logger.info(format_args!(
         "serial-stress: done; the uart lock was forced {} time(s) and re-entered on the same \
          core {} time(s)",
-        common::serial::forced_write_count(),
-        common::serial::reentry_count()
+        common::machine::pc::serial::forced_write_count(),
+        common::machine::pc::serial::reentry_count()
     ));
 }
 

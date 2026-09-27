@@ -128,11 +128,8 @@ pub const PATH_RULES: &[PathRule] = &[
             "common/Cargo.toml",
             "common/src/lib.rs",
             "common/src/log.rs",
-            "common/src/serial.rs",
-            "common/src/port.rs",
             "common/src/boot_info.rs",
             "common/src/addr.rs",
-            "common/src/cpu.rs",
             "common/src/percpu.rs",
             "common/src/critical.rs",
             // **時計は眠りとタイムアウトの全部が読む**（シェルの台本の破壊テスト `timer-never-wakes` 等）。

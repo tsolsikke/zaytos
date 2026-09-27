@@ -32,9 +32,9 @@
 //! カーネルが起動しなくなるのは機能的な後退である。致命へ格上げするのは S2 である。
 
 use common::addr::PhysAddr;
-use common::cpu;
+use common::arch::x86_64::cpu;
 use common::log::Logger;
-use common::serial::SerialPort;
+use common::machine::pc::serial::SerialPort;
 
 use crate::acpi::{ApicMmio, IoApicLocation};
 use crate::frame_allocator::{FrameAllocator, FRAME_SIZE};

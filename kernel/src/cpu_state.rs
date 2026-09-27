@@ -23,8 +23,8 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use common::log::Logger;
+use common::machine::pc::serial::SerialPort;
 use common::percpu::MAX_CPUS;
-use common::serial::SerialPort;
 
 /// 棚卸しが 0 であることに依っているビットの在りか。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -764,7 +764,7 @@ static ESTABLISHED_CR0: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 /// **起動の最初期に、BSP で 1 回だけ呼ぶこと。** **PE と PG には触れない。** **CD と NW は同時に落とす**
 /// （CD が 0 で NW が 1 の組は `#GP` になる）。
 pub unsafe fn establish_required_bits_on_bsp() {
-    use common::cpu::{
+    use common::arch::x86_64::cpu::{
         read_cr0, CR0_CACHE_DISABLE, CR0_NOT_WRITE_THROUGH, CR0_NUMERIC_ERROR, CR0_WRITE_PROTECT,
     };
     let before = read_cr0();
@@ -777,10 +777,10 @@ pub unsafe fn establish_required_bits_on_bsp() {
     let after = after | CR0_CACHE_DISABLE;
     if after != before {
         // SAFETY: 呼び出し側の契約。PE と PG を保ち、WP・NE・CD・NW だけを変える。
-        unsafe { common::cpu::write_cr0(after) };
+        unsafe { common::arch::x86_64::cpu::write_cr0(after) };
     }
     ESTABLISHED_CR0[0].store(before, Ordering::SeqCst);
-    ESTABLISHED_CR0[1].store(common::cpu::read_cr0(), Ordering::SeqCst);
+    ESTABLISHED_CR0[1].store(common::arch::x86_64::cpu::read_cr0(), Ordering::SeqCst);
 }
 
 /// [`establish_required_bits_on_bsp`] の前後の CR0 を 1 行出す（ロガーが使えるようになってから）。
@@ -817,9 +817,9 @@ const AP_RECORD_WAIT_TICKS: u64 = 200;
 
 fn read_this_cpu() -> [u64; 3] {
     [
-        common::cpu::read_cr0(),
-        common::cpu::read_cr4(),
-        common::cpu::read_efer().raw(),
+        common::arch::x86_64::cpu::read_cr0(),
+        common::arch::x86_64::cpu::read_cr4(),
+        common::arch::x86_64::cpu::read_efer().raw(),
     ]
 }
 
@@ -836,7 +836,7 @@ pub fn check_and_report(logger: &mut Logger<SerialPort>) {
     // 破壊テスト (2026-09-24, cpu-state-sees-sce): EFER.SCE が立っているものとして判定する。
     // **MSR は書かない**——**`syscall` 命令が本当に入口になる形は作らない。**
     #[cfg(feature = "cpu-state-sees-sce-test")]
-    let efer = efer | common::cpu::Efer::SYSCALL_ENABLE;
+    let efer = efer | common::arch::x86_64::cpu::Efer::SYSCALL_ENABLE;
     // 破壊テスト (2026-09-24, cpu-state-sees-an-unclassified-bit): **その製造元で「分類していない」最初のビット**が
     // 立っているものとして判定する（レジスタは書かない）。**[WARN] が名前つきで出て、起動は止まらない。**
     // **QEMU の既定（AMD）では EFER.SVME である。**
@@ -912,7 +912,7 @@ pub fn check_and_report(logger: &mut Logger<SerialPort>) {
     }
     if violated {
         logger.error(format_args!("cpu-state: halting"));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     }
     // 破壊テスト (2026-09-24, mce-off-after-the-check): **判定の後で** BSP の CR4.MCE を落とす（AP は控えた値を
     // コピーするので 1 のまま。注入は CPU 0 へ行う）。
@@ -920,7 +920,7 @@ pub fn check_and_report(logger: &mut Logger<SerialPort>) {
     #[cfg(feature = "mce-off-after-the-check-test")]
     // SAFETY: MCE だけを落とす。起動の途中の BSP で、割り込みは禁止のままである。
     unsafe {
-        common::cpu::write_cr4(common::cpu::read_cr4() & !(1 << 6));
+        common::arch::x86_64::cpu::write_cr4(common::arch::x86_64::cpu::read_cr4() & !(1 << 6));
     }
 }
 
@@ -945,9 +945,9 @@ pub unsafe fn adopt_bsp_state_on_this_ap() {
     let [cr0, cr4, efer] = [0, 1, 2].map(|index| BSP_STATE[index].load(Ordering::SeqCst));
     // SAFETY: 呼び出し側の契約。3 つとも同じカーネルの BSP が長モードで使っている値である。
     unsafe {
-        common::cpu::write_cr4(cr4);
-        common::cpu::write_efer(common::cpu::Efer::from_raw(efer));
-        common::cpu::write_cr0(cr0);
+        common::arch::x86_64::cpu::write_cr4(cr4);
+        common::arch::x86_64::cpu::write_efer(common::arch::x86_64::cpu::Efer::from_raw(efer));
+        common::arch::x86_64::cpu::write_cr0(cr0);
     }
 }
 
@@ -1149,7 +1149,7 @@ pub fn check_aps_match_bsp(logger: &mut Logger<SerialPort>, started: usize) {
     }
     if failed {
         logger.error(format_args!("cpu-state: halting"));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     }
     logger.info(format_args!(
         "cpu-state: {started} started AP(s) match the BSP's CR0, CR4 and EFER"

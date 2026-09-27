@@ -24,8 +24,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use common::addr::VirtAddr;
 use common::critical::critical_nesting_depth;
+use common::machine::pc::serial::SerialPort;
 use common::percpu::{PerCpu, MAX_CPUS};
-use common::serial::SerialPort;
 
 use crate::gdt;
 use crate::idt::YIELD_VECTOR;
@@ -984,7 +984,7 @@ extern "sysv64" fn ring3_task_main() -> ! {
             "[ERROR] task: the ring3 task used more than half of its kernel stack ({used} of \
              {RING3_TASK_STACK_SIZE}); decide the size again with a measurement; halting"
         ));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     }
     let handle = current_ring3_task_handle();
     // **欄を `Finished` にしてから起こす（`ADR-0063` の (b2)）**——**起こしてから書くと、
@@ -1022,7 +1022,7 @@ fn report_zero_rsp0_on_switch(next: usize) -> ! {
         "[ERROR] task: task {next} has RSP0 0 in its field; switching to it would load 0 into \
          TSS.RSP0 and the readback would compare 0 with 0 (W1-c-3c); halting"
     ));
-    common::cpu::halt_forever();
+    common::arch::x86_64::cpu::halt_forever();
 }
 
 /// 載った回復点が、入るタスクのスロットの行の外だった（W1-c-4）。**止める。**
@@ -1037,7 +1037,7 @@ fn report_foreign_recovery_on_switch(next: usize, recovery: u64) -> ! {
          point; halting",
         ring3_slot_of(next)
     ));
-    common::cpu::halt_forever();
+    common::arch::x86_64::cpu::halt_forever();
 }
 
 /// 切り替えで入るタスクの保存 RSP が、どのスタックに在るはずか（W1-c-3b）。
@@ -1186,7 +1186,7 @@ fn swap_cr3_for_switch(current: usize, next: usize) {
              change was not recorded in the task, so switching back would load the wrong table; \
              halting"
         ));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     }
     let incoming_cr3 = cr3_to_load(scheduler::cr3(next), kernel_cr3);
     if incoming_cr3 == live_cr3 {
@@ -1197,7 +1197,7 @@ fn swap_cr3_for_switch(current: usize, next: usize) {
             "[ERROR] task: task {next} carries CR3 {incoming_cr3:#x}, which is not a physical \
              address; halting"
         ));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     };
     // 破壊テスト (W1-c-4, task-switch-no-cr3): 載せない。**入ったタスクが出る側の空間で走り、次に出るときの
     // 検算（上）が「欄と実物が違う」を見て止まる。**
@@ -1505,7 +1505,7 @@ fn current_index() -> usize {
              (CURRENT is still the sentinel); this stage does not run tasks on application \
              processors; halting"
         ));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     }
     value
 }
@@ -1590,7 +1590,7 @@ core::arch::global_asm!(
 ///
 /// # `sti` と `hlt` を隣接させる
 ///
-/// **[`common::cpu::enable_interrupts_and_halt`] を使う**（`ADR-0018` のチェックリスト 10）。
+/// **[`common::arch::x86_64::cpu::enable_interrupts_and_halt`] を使う**（`ADR-0018` のチェックリスト 10）。
 /// **条件を確かめてから眠る形にはしていない**——**このタスクが選ばれるのは「走行可能な者が
 /// 居ない」ときだけで、起こすのは割り込みである。** **W2-c で待つ者が出たら、起こす側が
 /// `Ready` にしてから割り込みを終えるので、取りこぼしは生じない**（あちらで判定を設ける）。
@@ -1609,7 +1609,7 @@ extern "sysv64" fn bsp_idle_main() -> ! {
         let _held_across_hlt = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
         // SAFETY: 割り込みを許して眠るだけである。ロックは 1 つも持っていない。
         // ハンドラは登録済みで、このタスクのスタックはガードページ付きである。
-        unsafe { common::cpu::enable_interrupts_and_halt() };
+        unsafe { common::arch::x86_64::cpu::enable_interrupts_and_halt() };
     }
 }
 
@@ -1750,7 +1750,7 @@ pub fn init_ap_idle_task() {
             "[ERROR] task: the per-CPU stack for cpu {AP_IDLE_TASK_OWNER} is not mapped yet; \
              init_ap_idle_task must run after smp::prepare_ap_per_cpu; halting"
         ));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     };
     scheduler::init_task(
         AP_IDLE_TASK,
@@ -1917,7 +1917,7 @@ fn require_bootstrap_processor(what: &str) {
              GPR_BUF is shared and its asm exclusion is a bare cli, which cannot keep another \
              core out; halting"
         ));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     }
 }
 
@@ -2023,7 +2023,7 @@ pub fn run_cooperative_demo(allocator: &mut crate::frame_allocator::FrameAllocat
         serial_line(format_args!(
             "[ERROR] task: yield returned while holding a guard; the yield guard did not fire; halting"
         ));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     }
 
     // 初回スイッチ。メインの文脈がここで保存され、ワーカー A へ入る。両ワーカー
@@ -2050,7 +2050,7 @@ pub fn run_cooperative_demo(allocator: &mut crate::frame_allocator::FrameAllocat
             "[ERROR] task: accounting did not balance (a switch did not resume a task, or a \
              worker did not finish); halting"
         ));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     }
 
     // RSP0 の確認（§2.2）。スイッチのたびに on_yield が set_rsp0 → 読み戻しで
@@ -2241,7 +2241,7 @@ pub fn on_yield(current_rsp: u64) -> u64 {
              critical section; halting",
             critical_nesting_depth()
         ));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     }
 
     schedule_switch(current_rsp)
@@ -2419,7 +2419,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
                  excursion depth {next_depth} [{:#x}, {:#x}); stacks are mixed; halting",
                 next_bottom, next_top
             ));
-            common::cpu::halt_forever();
+            common::arch::x86_64::cpu::halt_forever();
         }
 
         // **CR3 を入れ替える（W1-c-2。`ADR-0060`）。** **出る側を検算してから、入る側を載せる**
@@ -2518,7 +2518,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
                 "[ERROR] task: TSS.RSP0 readback {readback:#x} != expected {expected_rsp0:#x} \
                  after switch to task {next}; halting",
             ));
-            common::cpu::halt_forever();
+            common::arch::x86_64::cpu::halt_forever();
         }
 
         // 破壊テストでの確認 (i): 次タスクの保存コンテキストの rbx スロットを壊す。
@@ -2792,7 +2792,7 @@ extern "sysv64" fn verify_gprs_and_advance() -> u64 {
             "[ERROR] task: {name} round {round}: {mismatches} GPR(s) corrupted across the switch; \
              tag {tag} got {got:#x} expected {exp:#x}; halting"
         ));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     }
 
     if remaining == 0 {
@@ -2942,20 +2942,20 @@ pub fn run_preemptive_demo() {
             "[ERROR] task: a worker made no progress (A={a_iters}, B={b_iters}); the timer did \
              not preempt fairly; halting"
         ));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     }
     if !accounting {
         serial_line(format_args!(
             "[ERROR] task: preemptive accounting did not balance (switches != sum(resumes)); halting"
         ));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     }
     if !window_meaningful {
         serial_line(format_args!(
             "[ERROR] task: no preemption landed in the GPR window; the register check verified \
              nothing (widen the window or run longer); halting"
         ));
-        common::cpu::halt_forever();
+        common::arch::x86_64::cpu::halt_forever();
     }
 
     serial_line(format_args!(
@@ -3050,7 +3050,7 @@ extern "sysv64" fn verify_preemptive_gprs() {
                 buf[i],
                 base.wrapping_add(tag)
             ));
-            common::cpu::halt_forever();
+            common::arch::x86_64::cpu::halt_forever();
         }
     }
     scheduler::add_iteration(current);

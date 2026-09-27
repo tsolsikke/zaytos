@@ -43,8 +43,8 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use common::critical::EntryInterruptGuard;
+use common::machine::pc::serial::SerialPort;
 use common::percpu::{cpu_id, PerCpu, MAX_CPUS};
-use common::serial::SerialPort;
 
 /// カーネル入口の分類（S4-b-2）。
 ///
@@ -436,7 +436,7 @@ pub fn acquire(entry: KernelEntry) -> BklGuard {
     let interrupts = EntryInterruptGuard::enter();
 
     // 2. 取れるまで待つ。**競合は最初から常時ある**（両コアが 100Hz で入る）。
-    let started = common::cpu::read_timestamp_counter();
+    let started = common::arch::x86_64::cpu::read_timestamp_counter();
     while BKL.held.swap(true, Ordering::Acquire) {
         // **自分が保持者なら再帰である。**
         //
@@ -445,7 +445,9 @@ pub fn acquire(entry: KernelEntry) -> BklGuard {
         if BKL.holder_cpu.load(Ordering::Relaxed) == cpu_id() {
             report_recursive_acquire_and_halt(entry);
         }
-        if common::cpu::read_timestamp_counter().wrapping_sub(started) > WAIT_TIMEOUT_CYCLES {
+        if common::arch::x86_64::cpu::read_timestamp_counter().wrapping_sub(started)
+            > WAIT_TIMEOUT_CYCLES
+        {
             report_timeout_and_halt(entry, started);
         }
         core::hint::spin_loop();
@@ -454,8 +456,10 @@ pub fn acquire(entry: KernelEntry) -> BklGuard {
     // 3. 勝った側だけがここへ来る。診断フィールドを埋める。
     BKL.holder_cpu.store(cpu_id(), Ordering::Relaxed);
     BKL.holder_entry.store(entry.as_u64(), Ordering::Relaxed);
-    BKL.acquired_tsc
-        .store(common::cpu::read_timestamp_counter(), Ordering::Relaxed);
+    BKL.acquired_tsc.store(
+        common::arch::x86_64::cpu::read_timestamp_counter(),
+        Ordering::Relaxed,
+    );
 
     // **マッピングが変わっていれば、ここで落とす（S5-b）。**
     // **取得してからマッピングを使い始めるまでの間である。**
@@ -517,7 +521,7 @@ fn report_recursive_acquire_and_halt(entry: KernelEntry) -> ! {
     // **上限よりはるかに短いことが、発火が時間に依存していないことの観測である。**
     #[cfg(feature = "bkl-hold-with-if-set-test")]
     {
-        let waited = common::cpu::read_timestamp_counter()
+        let waited = common::arch::x86_64::cpu::read_timestamp_counter()
             .wrapping_sub(SABOTAGE_WAIT_START.load(Ordering::Relaxed));
         let _ = writeln!(
             serial,
@@ -526,7 +530,7 @@ fn report_recursive_acquire_and_halt(entry: KernelEntry) -> ! {
         );
     }
     let _ = writeln!(serial, "[ERROR] halting (cli + hlt loop)");
-    common::cpu::halt_forever();
+    common::arch::x86_64::cpu::halt_forever();
 }
 
 /// 待ちが上限に達したことを報告して停止する。
@@ -537,7 +541,7 @@ fn report_recursive_acquire_and_halt(entry: KernelEntry) -> ! {
 /// **誰が・どの入口で・いつから保持しているか**を出す。
 /// 保持者側は診断なので、古い値でありうることも書く。
 fn report_timeout_and_halt(entry: KernelEntry, started: u64) -> ! {
-    let waited = common::cpu::read_timestamp_counter().wrapping_sub(started);
+    let waited = common::arch::x86_64::cpu::read_timestamp_counter().wrapping_sub(started);
     let (holder_cpu, holder_entry, since) = holder_snapshot();
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
     serial.init();
@@ -553,7 +557,7 @@ fn report_timeout_and_halt(entry: KernelEntry, started: u64) -> ! {
          tsc {since} (holder fields are diagnostic and may be stale)"
     );
     let _ = writeln!(serial, "[ERROR] halting (cli + hlt loop)");
-    common::cpu::halt_forever();
+    common::arch::x86_64::cpu::halt_forever();
 }
 
 /// 破壊テスト (S4-b-4, bkl-skip-timer-entry): **ロックは取らず、計数だけ行う。**
@@ -614,7 +618,7 @@ pub fn sabotage_hold_forever() -> ! {
     // **離さない。** ガードを忘れることで解放を起こさない。
     core::mem::forget(guard);
     // **IF=0 のまま止まる。** 割り込みで抜けると解放が走りうる形にしない。
-    common::cpu::halt_forever()
+    common::arch::x86_64::cpu::halt_forever()
 }
 
 /// 破壊テスト (S4-b-2, bkl-hold-with-if-set): 保持したまま IF=1 にする。
@@ -635,7 +639,7 @@ pub unsafe fn sabotage_enable_interrupts_while_held() {
          check should fire on the next tick"
     );
     // SAFETY: 破壊テストの feature 専用。呼び出し側が BKL を保持している。
-    unsafe { common::cpu::enable_interrupts() }
+    unsafe { common::arch::x86_64::cpu::enable_interrupts() }
 
     // **ここで待つ。戻らない。**
     //
@@ -647,12 +651,15 @@ pub unsafe fn sabotage_enable_interrupts_while_held() {
     // 「破壊テストが、偶然の所要時間に乗って発火していた」）。
     //
     // **待てば、区間の長さは破壊テストの側が決める。**
-    SABOTAGE_WAIT_START.store(common::cpu::read_timestamp_counter(), Ordering::Relaxed);
+    SABOTAGE_WAIT_START.store(
+        common::arch::x86_64::cpu::read_timestamp_counter(),
+        Ordering::Relaxed,
+    );
     loop {
         // **上限を必ず付ける**（[`WAIT_TIMEOUT_CYCLES`] と同じ規律）。
         // **上限に達したら、発火しなかったこと自体を出して止める。**
         // 破壊が効かなかったことを静かに通さない。
-        let waited = common::cpu::read_timestamp_counter()
+        let waited = common::arch::x86_64::cpu::read_timestamp_counter()
             .wrapping_sub(SABOTAGE_WAIT_START.load(Ordering::Relaxed));
         if waited > SABOTAGE_TICK_WAIT_CYCLES {
             report_sabotage_did_not_fire_and_halt(waited);
@@ -674,7 +681,7 @@ static SABOTAGE_WAIT_START: AtomicU64 = AtomicU64::new(0);
 /// **上限はその桁を大きく超える量にしてある**——上限に達したことが
 /// 「遅かった」ではなく**「来なかった」**を意味するようにする。
 ///
-/// **TSC は時刻源として使わない**（`common::cpu::read_timestamp_counter` の doc）。
+/// **TSC は時刻源として使わない**（`common::arch::x86_64::cpu::read_timestamp_counter` の doc）。
 /// ここでも絶対時間ではなく**回る量の目安**として使っており、
 /// [`WAIT_TIMEOUT_CYCLES`] と同じ扱いである。
 /// 実測は 29,102,067 サイクル（TCG、`-smp 2`、1 回）で、上限の約 3 パーセントだった。
@@ -692,5 +699,5 @@ fn report_sabotage_did_not_fire_and_halt(waited: u64) -> ! {
          holding the lock and no tick arrived (bound {SABOTAGE_TICK_WAIT_CYCLES})"
     );
     let _ = writeln!(serial, "[ERROR] halting (cli + hlt loop)");
-    common::cpu::halt_forever();
+    common::arch::x86_64::cpu::halt_forever();
 }

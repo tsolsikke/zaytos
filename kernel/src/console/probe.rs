@@ -19,7 +19,7 @@
 //! （`docs/verification-coverage.md` の破壊が緑を出す道の 4 つ目）。
 
 use crate::graphics::Color;
-use common::serial::SerialPort;
+use common::machine::pc::serial::SerialPort;
 use core::fmt::Write as _;
 use core::sync::atomic::Ordering;
 

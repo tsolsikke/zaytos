@@ -23,7 +23,7 @@
 
 use common::addr::PhysAddr;
 use common::log::Logger;
-use common::serial::SerialPort;
+use common::machine::pc::serial::SerialPort;
 
 /// 壊す対象のテーブル。**文字列で照合しない。** ログ用の表示名とは別に持つ。
 /// 表示名は文言を直した瞬間に一致しなくなるが、こちらは型で結び付く。

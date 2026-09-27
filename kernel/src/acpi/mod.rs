@@ -60,7 +60,7 @@ mod sdt;
 
 use common::addr::{DirectMap, PhysAddr};
 use common::log::Logger;
-use common::serial::SerialPort;
+use common::machine::pc::serial::SerialPort;
 
 use crate::frame_allocator::FRAME_SIZE;
 use crate::memory_map;

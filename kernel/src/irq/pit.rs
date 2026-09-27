@@ -22,8 +22,8 @@
 //! 誤差を明示的に補正すること。分周値と実周波数の計算は純粋関数として
 //! 切り出し、丸め誤差込みでホストテストに固定してある。
 
+use common::arch::x86_64::port::{io_wait, outb};
 use common::critical::InterruptGuard;
-use common::port::{io_wait, outb};
 
 /// PIT の入力クロック（Hz）。
 ///

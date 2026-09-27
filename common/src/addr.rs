@@ -39,7 +39,7 @@ use core::fmt;
 /// 判定に使うと、実行時の値でコンパイル時の不変条件を決めることになり、
 /// 同じバイナリが環境によって別の挙動をする。ここは 52 で固定し、
 /// MAXPHYADDR は観測値としてログに出すだけにする
-/// （`common::cpu::max_physical_address_bits`）。
+/// （`common::arch::x86_64::cpu::max_physical_address_bits`）。
 pub const PHYS_ADDR_BITS: u32 = 52;
 
 /// 物理アドレス。

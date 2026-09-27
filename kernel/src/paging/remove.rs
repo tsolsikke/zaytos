@@ -19,9 +19,9 @@
 //! [`remove_identity`]（`pub`）だけを呼ぶ。
 
 use common::addr::{DirectMap, PhysAddr, VirtAddr};
-use common::cpu;
+use common::arch::x86_64::cpu;
 use common::log::Logger;
-use common::serial::SerialPort;
+use common::machine::pc::serial::SerialPort;
 
 use super::{switch, table, verify};
 
