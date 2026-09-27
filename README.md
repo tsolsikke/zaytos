@@ -147,7 +147,7 @@ cargo xtask check --full
 cargo xtask full
 ```
 
-同じ全検査を、HEADをチェックアウトした別の作業ツリー（`target/full-check/wt`）で実行する。
+同じ全検査を、HEADをチェックアウトした別の作業ツリー（リポジトリの隣の`<リポジトリの名前>-full-check`）で実行する。
 走っている間も作業中のツリーを触れる。全検査の間は、QEMUやVirtualBoxを使う検査は
 ロックで断られる。`cargo xtask full --status`は、HEADのツリーが全検査に合格したかと、
 その後のコミットをそれぞれ何で確かめたかを出す。

@@ -56,7 +56,7 @@
    `cargo xtask check --full` が生き残っていることがある。同じ作業ツリーで
    並行実行すると、`target/` と `disk0.img` を共有するので両方が汚れる。
    止め方は `.claude/skills/stop-a-process/SKILL.md` にある。
-   **全検査は `cargo xtask full` で別の作業ツリー（`target/full-check/wt`）で実行する**
+   **全検査は `cargo xtask full` で別の作業ツリー（メインの作業ツリーの隣の `<名前>-full-check`）で実行する**
    ——**検査している木を触らない。全検査の間は QEMU と VirtualBox を使う検査を
    走らせない**（**検査のロックが断る**。終了の値 75。`ADR-0069` の決定 7 の 3）。
    **ロックの持ち主と、HEAD のツリーが成功しているか、成功したツリーから後の変更で選ぶテストのグループは `cargo xtask full --status` で見る。**
