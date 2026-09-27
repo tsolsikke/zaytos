@@ -1,0 +1,9 @@
+.text.trampoline r-x 0..0
+.text r-x 0..1
+.rodata.aptramp r-- 1..1
+.rodata r-- 1..1
+.got rw- 1..1
+.data.bootpt rw- 1..1
+.data.bootstack rw- 1..1
+.data rw- 1..1
+.bss rw- 1..2

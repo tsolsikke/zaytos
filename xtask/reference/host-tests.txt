@@ -784,6 +784,7 @@ xtask::tests::the_ap_heartbeat_line_is_not_read_as_a_bsp_row
 xtask::tests::the_capture_stops_only_when_the_prompt_follows_ready
 xtask::tests::the_commit_message_rules_catch_each_shape
 xtask::tests::the_commit_message_rules_pass_the_shapes_that_are_allowed
+xtask::tests::the_kernel_layout_names_each_section_and_its_two_mib_pages
 xtask::tests::the_machine_variant_table_parses_and_rejects_broken_rows
 xtask::tests::the_range_flags_turn_the_rules_off
 xtask::tests::the_selection_score_separates_caught_from_complete

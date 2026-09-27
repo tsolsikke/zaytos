@@ -18333,8 +18333,9 @@ impl MaskedItem {
     }
 }
 
-/// カーネルのイメージのリンクの基底（`kernel/link.ld` の `KERNEL_VIRT_BASE`）。**ここから上がイメージの仮想アドレス。**
-const MASK_KERNEL_VIRT_BASE: u64 = 0xFFFF_FFFF_8000_0000;
+/// カーネルのイメージのリンクの基底（`kernel/link.ld` の `KERNEL_VIRT_BASE`）。**ここから上がイメージの仮想アドレス**
+/// （伏せた比べ方と、区画の配置の突き合わせが使う）。
+const KERNEL_LINK_BASE: u64 = 0xFFFF_FFFF_8000_0000;
 
 /// 直接マッピングの窓の基底（起動ログの `direct-map:` の行が示す値）。
 const MASK_DIRECT_MAP_BASE: u64 = 0xFFFF_8000_0000_0000;
@@ -18445,11 +18446,11 @@ fn masked_item_of(
     }
     let hex = |text: &str| u64::from_str_radix(text.strip_prefix("0x")?, 16).ok();
     let (old, new) = (hex(old)?, hex(new)?);
-    if old >= MASK_KERNEL_VIRT_BASE && new >= MASK_KERNEL_VIRT_BASE {
+    if old >= KERNEL_LINK_BASE && new >= KERNEL_LINK_BASE {
         return Some(MaskedItem::KernelVirtual);
     }
     let physical = |value: u64, (start, end): (u64, u64)| {
-        let value = if (MASK_DIRECT_MAP_BASE..MASK_KERNEL_VIRT_BASE).contains(&value) {
+        let value = if (MASK_DIRECT_MAP_BASE..KERNEL_LINK_BASE).contains(&value) {
             value - MASK_DIRECT_MAP_BASE
         } else {
             value
@@ -21850,6 +21851,138 @@ const APIC_TESTS: &[CriticalTest] = &[
     },
 ];
 
+/// カーネルのイメージの区画の配置の参照（2026-09-27。境界の段階の手順 2。`ADR-0071` の決定 1 の 2）。
+const REFERENCE_KERNEL_LAYOUT: &str = "xtask/reference/kernel-layout.txt";
+
+/// ELF の区画の見出しのうち、配置の突き合わせに使う欄。
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ElfSection {
+    name: String,
+    address: u64,
+    size: u64,
+    flags: u64,
+}
+
+/// ELF の区画の見出しを読む（2026-09-27）。**メモリに載る区画（`SHF_ALLOC`）で、大きさが 0 でないものだけを、
+/// アドレスの順に返す。** **64 ビット・リトルエンディアンだけを読む**（カーネルの形）。
+fn read_alloc_sections(elf: &[u8]) -> Result<Vec<ElfSection>> {
+    const SHF_ALLOC: u64 = 0x2;
+    if elf.get(..6) != Some(&[0x7f, b'E', b'L', b'F', 2, 1][..]) {
+        bail!("not a 64-bit little-endian ELF");
+    }
+    let read = |at: usize, len: usize| -> Result<u64> {
+        let bytes = elf
+            .get(at..at + len)
+            .context("the ELF is shorter than its headers say")?;
+        Ok(bytes
+            .iter()
+            .rev()
+            .fold(0u64, |value, byte| (value << 8) | u64::from(*byte)))
+    };
+    let table = read(0x28, 8)? as usize;
+    let entry_size = read(0x3A, 2)? as usize;
+    let count = read(0x3C, 2)? as usize;
+    let names_index = read(0x3E, 2)? as usize;
+    let header = |index: usize| table + index * entry_size;
+    let names_offset = read(header(names_index) + 0x18, 8)? as usize;
+    let mut sections = Vec::new();
+    for index in 0..count {
+        let at = header(index);
+        let flags = read(at + 0x08, 8)?;
+        let size = read(at + 0x20, 8)?;
+        if flags & SHF_ALLOC == 0 || size == 0 {
+            continue;
+        }
+        let name_at = names_offset + read(at, 4)? as usize;
+        let name = elf
+            .get(name_at..)
+            .and_then(|rest| rest.split(|byte| *byte == 0).next())
+            .context("a section name lies outside the ELF")?;
+        sections.push(ElfSection {
+            name: String::from_utf8_lossy(name).into_owned(),
+            address: read(at + 0x10, 8)?,
+            size,
+            flags,
+        });
+    }
+    sections.sort_by_key(|section| section.address);
+    Ok(sections)
+}
+
+/// 区画の並びと 2MiB の境界との関係を、1 区画 1 行で出す（純粋な論理）。
+///
+/// **名前・権限（`r`・`w`・`x`）・始めと終わりが載る 2MiB のページの番号**を出す。番号はイメージの物理アドレス
+/// （リンクの基底を引いた値）を 2MiB で割ったものである。**アドレスと大きさそのものは出さない**——**移すだけの
+/// 変更で動くのは中身の大きさで、並びと、どの 2MiB に載るかは動かない**（`ADR-0071` の決定 1 の 2 と 4）。
+fn kernel_layout_lines(sections: &[ElfSection]) -> Vec<String> {
+    const SHF_WRITE: u64 = 0x1;
+    const SHF_EXECINSTR: u64 = 0x4;
+    const PAGE_2M: u64 = 2 * 1024 * 1024;
+    sections
+        .iter()
+        .map(|section| {
+            let start = section.address.wrapping_sub(KERNEL_LINK_BASE);
+            let last = start.wrapping_add(section.size - 1);
+            format!(
+                "{} r{}{} {}..{}",
+                section.name,
+                if section.flags & SHF_WRITE != 0 {
+                    "w"
+                } else {
+                    "-"
+                },
+                if section.flags & SHF_EXECINSTR != 0 {
+                    "x"
+                } else {
+                    "-"
+                },
+                start / PAGE_2M,
+                last / PAGE_2M
+            )
+        })
+        .collect()
+}
+
+/// カーネルのイメージの区画の並びと 2MiB の境界との関係が、参照と同じであること（2026-09-27。境界の段階の手順 2）。
+///
+/// **ファイルを移すだけのコミットで、区画の並びや、区画がどの 2MiB に載るかが変わっていないことを見る**
+/// （`ADR-0071` の決定 1 の 2）。**手順 4 の 2MiB の同居の判断も、この関係に依る。** 意図した変更のときは
+/// `--update-reference` で記録し直し、コミットにその旨を書く。
+fn check_kernel_layout(workspace_root: &Path, update: bool) -> Result<String> {
+    let kernel = build_kernel(workspace_root, false)?;
+    let elf = fs::read(&kernel.elf)
+        .with_context(|| format!("failed to read {}", kernel.elf.display()))?;
+    let lines = kernel_layout_lines(&read_alloc_sections(&elf)?);
+    let reference = workspace_root.join(REFERENCE_KERNEL_LAYOUT);
+    let recorded = format!("{}\n", lines.join("\n"));
+    if update {
+        fs::write(&reference, &recorded).context("failed to record the kernel layout")?;
+        return Ok(format!(
+            "reference updated ({} section(s)) at {REFERENCE_KERNEL_LAYOUT}",
+            lines.len()
+        ));
+    }
+    let Ok(expected) = fs::read_to_string(&reference) else {
+        bail!(
+            "{REFERENCE_KERNEL_LAYOUT} is missing; run `cargo xtask check --update-reference` once \
+             to record it"
+        )
+    };
+    if expected == recorded {
+        return Ok(format!("OK ({} section(s))", lines.len()));
+    }
+    for line in expected.lines() {
+        println!("    reference:  {line}");
+    }
+    for line in &lines {
+        println!("    this build: {line}");
+    }
+    bail!(
+        "the section order or the 2MiB pages differ from the reference; if the change is intended, \
+         re-record with `cargo xtask check --update-reference` and say so in the commit"
+    )
+}
+
 /// **構造的なガードが既定ビルドのバイナリに在ること**を見る（S4-c-3-2b、S5-bで拡張）。
 ///
 /// **名前は主張を指す。** 当初は検出器だけを見ていたが、**世代フラッシュ（S5-b）も
@@ -25247,6 +25380,20 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         }
     }
 
+    // **区画の並びと 2MiB の境界との関係**（2026-09-27。境界の段階の手順 2。静的）。
+    total += 1;
+    begin_item(
+        Family::Base,
+        "the kernel image's section order and 2MiB pages match the reference",
+    );
+    match check_kernel_layout(&workspace_root, update_reference) {
+        Ok(message) => println!("--- kernel layout: {message}"),
+        Err(e) => {
+            println!("--- kernel layout: FAILED ({e:#})");
+            failed.push("kernel layout".to_string());
+        }
+    }
+
     // イメージへ入るテキストが ASCII だけであること（2026-08-31、静的）。
     total += 1;
     begin_item(Family::Base, "text that goes into the image is ASCII only");
@@ -25756,8 +25903,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 50,
-    full: 414,
+    base: 51,
+    full: 415,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -28791,6 +28938,35 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         let two = vec!["[INFO] something else".to_string()];
         let plain = first_difference(&one, &two).expect("they differ");
         assert!(!plain.contains("redo the inventory"), "{plain}");
+    }
+
+    /// **区画の配置の行は、名前・権限・始めと終わりが載る 2MiB の番号だけを持つ**（2026-09-27）。**中身が伸びても
+    /// 2MiB の境界を越えなければ同じ行になり、越えれば変わる。** 値はいまのカーネルの `.text`・`.rodata`・`.bss`。
+    #[test]
+    fn the_kernel_layout_names_each_section_and_its_two_mib_pages() {
+        let section = |name: &str, address: u64, size: u64, flags: u64| ElfSection {
+            name: name.to_string(),
+            address,
+            size,
+            flags,
+        };
+        let text = section(".text", 0xFFFF_FFFF_8010_1000, 0x10_3584, 0x6);
+        let rodata = section(".rodata", 0xFFFF_FFFF_8020_6000, 0x5_42F1, 0x2);
+        let bss = section(".bss", 0xFFFF_FFFF_802C_6000, 0x1F_6910, 0x3);
+        assert_eq!(
+            kernel_layout_lines(&[text.clone(), rodata, bss]),
+            [".text r-x 0..1", ".rodata r-- 1..1", ".bss rw- 1..2"]
+        );
+        let longer = ElfSection {
+            size: 0x10_4000,
+            ..text.clone()
+        };
+        assert_eq!(kernel_layout_lines(&[longer]), [".text r-x 0..1"]);
+        let across = ElfSection {
+            size: 0x30_0000,
+            ..text
+        };
+        assert_eq!(kernel_layout_lines(&[across]), [".text r-x 0..2"]);
     }
 
     /// **伏せた比べ方は、コードを動かしただけの違いを通し、それ以外を 1 つでも止める**（2026-09-27。境界の段階の
