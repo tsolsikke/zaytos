@@ -1,2 +1,2 @@
-common 1680
+common 1677
 kernel/src/main.rs 722

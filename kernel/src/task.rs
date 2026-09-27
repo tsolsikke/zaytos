@@ -30,6 +30,7 @@ use common::critical::critical_nesting_depth;
 use common::machine::pc::serial::SerialPort;
 use common::percpu::{PerCpu, MAX_CPUS};
 
+use crate::arch::x86_64::build_initial_context;
 use crate::arch::x86_64::gdt;
 use crate::arch::x86_64::idt::YIELD_VECTOR;
 
@@ -163,9 +164,6 @@ pub(crate) const PREEMPT_WINDOW_SLED: usize = 200_000;
 
 /// ウィンドウを広げる遅延ループのカウンタ（メモリ上。レジスタを使わずに回すため）。
 pub(crate) static mut PREEMPT_DELAY: u64 = 0;
-
-/// `IrqContext` のバイト数（21 個の `u64`）。偽コンテキストの大きさに使う。
-const IRQ_CONTEXT_BYTES: u64 = 21 * 8;
 
 /// 15 本の GPR の、`IrqContext` 先頭からのオフセット順に対応するタグ。
 ///
@@ -1965,39 +1963,6 @@ fn worker_stack_bounds(index: usize) -> (VirtAddr, VirtAddr) {
     let top = VirtAddr::new(base + GUARD_SIZE as u64 + TASK_STACK_SIZE as u64)
         .expect("the worker stack stays within the canonical range");
     (guard, top)
-}
-
-/// 新規タスクの偽 `IrqContext` をスタック頂点に積み、保存 RSP を返す。
-///
-/// 初回スイッチで [`on_yield`] がこの RSP を返すと、`mov rsp, rax` → pop 15 →
-/// `add rsp, 8` → `iretq` の経路が、あたかも割り込みから戻るように `entry` へ
-/// IF=1 で入る。
-///
-/// # Safety
-///
-/// `top` が有効でマップ済みのスタック頂点（16 バイト境界）であること。
-unsafe fn build_initial_context(top: VirtAddr, entry: u64) -> u64 {
-    let saved_stack_pointer = top.as_u64() - IRQ_CONTEXT_BYTES;
-    // saved_stack_pointer から上へ 21 個の u64 を並べる（IrqContext のフィールド順）。
-    // 0..15: GPR（rax..r15）、15: vector、16: rip、17: cs、18: rflags、
-    // 19: rsp、20: ss。
-    let slot = |i: usize, value: u64| {
-        // SAFETY: 呼び出し元契約により、[saved_stack_pointer, top) はマップ済みで誰も
-        // 使っていないスタック領域。i < 21。
-        unsafe {
-            core::ptr::write_volatile((saved_stack_pointer as *mut u64).add(i), value);
-        }
-    };
-    for i in 0..15 {
-        slot(i, 0); // GPR は 0 で始める。ワーカーは自分で base を読み直す。
-    }
-    slot(15, YIELD_VECTOR as u64); // vector（add rsp,8 で捨てられる）
-    slot(16, entry); // rip
-    slot(17, gdt::KERNEL_CODE_SELECTOR.bits() as u64); // cs
-    slot(18, 0x202); // rflags（IF=1、予約ビット1）
-    slot(19, top.as_u64()); // rsp（iretq 後にタスクが使う RSP）
-    slot(20, gdt::KERNEL_DATA_SELECTOR.bits() as u64); // ss
-    saved_stack_pointer
 }
 
 /// 協調的マルチタスクのデモと検証を実行する（M5-c）。
