@@ -27,7 +27,7 @@ use common::critical::critical_nesting_depth;
 use common::machine::pc::serial::SerialPort;
 use common::percpu::{PerCpu, MAX_CPUS};
 
-use crate::gdt;
+use crate::arch::x86_64::gdt;
 use crate::idt::YIELD_VECTOR;
 
 /// ワーカータスクの本数（M5-c は 2 本）。
@@ -879,12 +879,12 @@ pub fn start_ring3_task() -> Option<u64> {
     let generation = RING3_TASK_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     let (guard, top) = ring3_task_stack_bounds();
     let bottom = guard.as_u64() + GUARD_SIZE as u64;
-    // **高水位を測るために目印で埋める**（`crate::stack::KERNEL_STACK_FILL`。**文脈を積む前である**）。
+    // **高水位を測るために目印で埋める**（`crate::arch::x86_64::stack::KERNEL_STACK_FILL`。**文脈を積む前である**）。
     // SAFETY: まだ誰も乗っていないスタック本体の全体で、ガードページは含まない。
     unsafe {
         core::ptr::write_bytes(
             bottom as *mut u8,
-            crate::stack::KERNEL_STACK_FILL,
+            crate::arch::x86_64::stack::KERNEL_STACK_FILL,
             RING3_TASK_STACK_SIZE,
         )
     };
@@ -1005,7 +1005,9 @@ fn ring3_task_stack_high_water() -> usize {
     let bottom = (guard.as_u64() + GUARD_SIZE as u64) as *const u8;
     for offset in 0..RING3_TASK_STACK_SIZE {
         // SAFETY: `offset` はスタック本体の中である。読み取りのみ。
-        if unsafe { bottom.add(offset).read_volatile() } != crate::stack::KERNEL_STACK_FILL {
+        if unsafe { bottom.add(offset).read_volatile() }
+            != crate::arch::x86_64::stack::KERNEL_STACK_FILL
+        {
             return RING3_TASK_STACK_SIZE - offset;
         }
     }
@@ -1924,7 +1926,7 @@ fn require_bootstrap_processor(what: &str) {
 
 /// あるワーカーのスタックのガードページを unmap する（M5-b と同じ機構）。
 ///
-/// **本体は [`crate::stack::install_guard_page`] にある**（S12 前の手当ての C で寄せた）。
+/// **本体は [`crate::arch::x86_64::stack::install_guard_page`] にある**（S12 前の手当ての C で寄せた）。
 /// **カーネルスタック側と同じ 1 本を通る**——**分けていたときに、分割の対処が
 /// あちらにしか入らず、イメージが育ったときにこちらが止めた。**
 ///
@@ -1938,7 +1940,7 @@ unsafe fn install_worker_guard_page(
 ) {
     // SAFETY: 呼び出し元の契約をそのまま渡す。
     unsafe {
-        crate::stack::install_guard_page(
+        crate::arch::x86_64::stack::install_guard_page(
             guard_virt,
             allocator,
             "task",
@@ -2058,7 +2060,9 @@ pub fn run_cooperative_demo(allocator: &mut crate::frame_allocator::FrameAllocat
     // 一致を確かめており（不一致なら即 halt）、ここまで来た時点で全スイッチで
     // 一致していたことになる。最後のスイッチはメインへ戻ったので、現在の
     // TSS.RSP0 はメインのスタック頂点のはずである。それを読み戻して示す。
-    let main_top = crate::stack::kernel_stack_range().top.as_u64();
+    let main_top = crate::arch::x86_64::stack::kernel_stack_range()
+        .top
+        .as_u64();
     let rsp0 = gdt::privilege_stack_top();
     serial_line(format_args!(
         "task: TSS.RSP0 tracked every switch; now {rsp0:#x} (main stack top {main_top:#x}, \
@@ -2080,7 +2084,9 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
 
     // タスク 0 = メイン。実行中なので saved_rsp は初回 yield で埋まる。
     // メインのスタック頂点は通常のカーネルスタック（RSP0 用）。
-    let main_top = crate::stack::kernel_stack_range().top.as_u64();
+    let main_top = crate::arch::x86_64::stack::kernel_stack_range()
+        .top
+        .as_u64();
 
     set_current_index(0);
     scheduler::set_switches(0);
@@ -2088,7 +2094,9 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
         0,
         Task {
             stack_top: main_top,
-            stack_bottom: crate::stack::kernel_stack_range().bottom.as_u64(),
+            stack_bottom: crate::arch::x86_64::stack::kernel_stack_range()
+                .bottom
+                .as_u64(),
             // **遠征に入っていないタスクの RSP0 はカーネルスタック頂点である**
             // （W1-b）。**`EMPTY_TASK` の 0 のままにすると、メインへ戻る切り替えが
             // TSS へ 0 を書く**——**実測で踏んだ**（`TSS.RSP0 ... now 0x0 ...
@@ -2145,7 +2153,7 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
         // SAFETY: 起動時、自前のページテーブル上。足した 1 本のスタックの直下 1 ページで、以後ここへ
         // 正規のアクセスは無い。
         unsafe {
-            crate::stack::install_guard_page(
+            crate::arch::x86_64::stack::install_guard_page(
                 guard,
                 allocator,
                 "task",
@@ -2165,7 +2173,7 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
         // SAFETY: 起動時、自前のページテーブル上。このスタックの直下 1 ページで、以後ここへ
         // 正規のアクセスは無い。
         unsafe {
-            crate::stack::install_guard_page(
+            crate::arch::x86_64::stack::install_guard_page(
                 guard,
                 allocator,
                 "task",
@@ -2975,7 +2983,9 @@ pub fn run_preemptive_demo() {
 /// ここでは再設置しない）。
 unsafe fn setup_preemptive_tasks() {
     let entry = addr_of!(zaytos_preemptive_body) as u64;
-    let main_top = crate::stack::kernel_stack_range().top.as_u64();
+    let main_top = crate::arch::x86_64::stack::kernel_stack_range()
+        .top
+        .as_u64();
 
     // SAFETY: 単一実行文脈。timer は IF=1 だが、この関数は yield する前に
     // 走り、スケジューラの current はメイン（0）のままである。ここでの更新中に
@@ -2989,7 +2999,9 @@ unsafe fn setup_preemptive_tasks() {
         0,
         Task {
             stack_top: main_top,
-            stack_bottom: crate::stack::kernel_stack_range().bottom.as_u64(),
+            stack_bottom: crate::arch::x86_64::stack::kernel_stack_range()
+                .bottom
+                .as_u64(),
             // **メインのタスクの RSP0 を埋める（W1-c-3c で見つけた）。** **ここは `EMPTY_TASK` の
             // 0 のままで、デモの締切でメインへ戻る切り替えが TSS.RSP0 へ 0 を書いていた。**
             // **`setup_tasks` は W1-b で同じ欄を埋めた**（あちらの注記）**が、この再初期化で

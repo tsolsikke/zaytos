@@ -2,4 +2,6 @@
 
 pub mod cpu_state;
 pub mod fp;
+pub mod gdt;
 pub mod paging;
+pub mod stack;

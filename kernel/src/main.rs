@@ -20,8 +20,9 @@ use core::ptr::addr_of;
 use kernel::console::Console;
 
 use kernel::arch::x86_64::fp;
+use kernel::arch::x86_64::gdt;
+use kernel::arch::x86_64::stack;
 use kernel::frame_allocator;
-use kernel::gdt;
 use kernel::graphics::{Color, Framebuffer, FramebufferLayout};
 use kernel::heap;
 use kernel::idt;
@@ -31,7 +32,6 @@ use kernel::keyboard;
 use kernel::paging;
 use kernel::paging::plan::{resolve_pages, MappedRanges};
 use kernel::paging::table::PageTableBuilder;
-use kernel::stack;
 
 mod panic;
 
@@ -431,7 +431,7 @@ extern "sysv64" fn kernel_main() -> ! {
     //   128KiB へ広げたら、2048 バイトでは届かなくなった）
     // - **上**: **ガードページ（4096 バイト）の外へ出ないこと。** 越えると
     //   `ALLOCATOR` や `TSS` を壊し、判定へ辿り着く前に起動が壊れる
-    //   （`kernel::stack` のモジュール doc）
+    //   （`kernel::arch::x86_64::stack` のモジュール doc）
     //
     // **スタックの大きさに結び付けてある。** **広げるたびに手で測り直さない**
     // ——**余裕は「大きさ - 使用量」である。** **使用量は 2 つの行が示す**
@@ -446,7 +446,7 @@ extern "sysv64" fn kernel_main() -> ! {
     //
     // **落ちるのは「張る前に手つかずだった」判定だけである。**
     #[cfg(feature = "stack-overflow-before-guard-test")]
-    let mut deepen_the_boot_stack = [0xA5u8; kernel::stack::KERNEL_STACK_SIZE / 2];
+    let mut deepen_the_boot_stack = [0xA5u8; kernel::arch::x86_64::stack::KERNEL_STACK_SIZE / 2];
     #[cfg(feature = "stack-overflow-before-guard-test")]
     core::hint::black_box(&mut deepen_the_boot_stack);
 
@@ -1742,7 +1742,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // 起動シーケンスは続行する。
     // **アロケータを渡す（S12 前の手当ての C の途中）。** ワーカーのガードページが
     // 2MiB ページに載っていたら、設ける前に分割するために要る
-    // （`kernel::stack::install_guard_page`）。
+    // （`kernel::arch::x86_64::stack::install_guard_page`）。
     kernel::task::run_cooperative_demo(&mut allocator);
 
     // 例外ハンドラの回帰チェック。起動シーケンスを最後まで通してから発火させる。
@@ -13051,14 +13051,14 @@ fn install_kernel_stack_guard_page(
     allocator: &mut kernel::frame_allocator::FrameAllocator,
 ) {
     let guard_virt = stack::kernel_guard_page().bottom;
-    // **設ける手順は `kernel::stack::install_guard_page` が持つ**（S12 前の手当ての C で
+    // **設ける手順は `kernel::arch::x86_64::stack::install_guard_page` が持つ**（S12 前の手当ての C で
     // 寄せた）。**ワーカースタック側と同じ 1 本を通る**——あちらの doc に、
     // 2 つに分かれていたときに対処が片側にしか入らなかった経緯がある。
     //
     // SAFETY: 自前のページテーブルへ切り替え済みで、guard_virt はカーネルスタックの
     // 直下の 1 ページ。今後このページへ正規のアクセスは無い。
     unsafe {
-        kernel::stack::install_guard_page(
+        kernel::arch::x86_64::stack::install_guard_page(
             guard_virt,
             allocator,
             "stack-guard",

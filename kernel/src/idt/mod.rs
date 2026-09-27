@@ -46,7 +46,7 @@ use common::arch::x86_64::cpu;
 use common::machine::pc::serial::SerialPort;
 use common::percpu::{PerCpu, MAX_CPUS};
 
-use crate::gdt::KERNEL_CODE_SELECTOR;
+use crate::arch::x86_64::gdt::KERNEL_CODE_SELECTOR;
 use context::{ExceptionContext, IrqContext};
 use decode::{error_code_kind, ErrorCodeKind, PageFaultErrorCode, SelectorErrorCode};
 use layout::{exception_name, GateType, IdtEntry};
@@ -2311,19 +2311,19 @@ unsafe fn fold_if_interrupted(context: &IrqContext, bkl: &mut Option<crate::bkl:
 /// 指すゲートがあれば**期待するスタックが決められない。** 決められないまま
 /// 終了処理するより、終了処理せずに dump+halt へ落とすほうが安全側である。
 fn exception_frame_is_trustworthy(vector: u8, cs: u64, handler_rsp: u64) -> bool {
-    let cs_is_known = cs == crate::gdt::USER_CODE_SELECTOR.bits() as u64
-        || cs == crate::gdt::USER_CODE32_SELECTOR.bits() as u64;
+    let cs_is_known = cs == crate::arch::x86_64::gdt::USER_CODE_SELECTOR.bits() as u64
+        || cs == crate::arch::x86_64::gdt::USER_CODE32_SELECTOR.bits() as u64;
     if !cs_is_known {
         return false;
     }
 
     let (bottom, top) = match entry(vector as usize).and_then(|gate| gate.ist_index()) {
-        Some(index) if index as usize == crate::gdt::DOUBLE_FAULT_IST_INDEX => {
-            let ist = crate::stack::double_fault_stack_range();
+        Some(index) if index as usize == crate::arch::x86_64::gdt::DOUBLE_FAULT_IST_INDEX => {
+            let ist = crate::arch::x86_64::stack::double_fault_stack_range();
             (ist.bottom.as_u64(), ist.top.as_u64())
         }
-        Some(index) if index as usize == crate::gdt::PAGE_FAULT_IST_INDEX => {
-            let ist = crate::stack::page_fault_stack_range();
+        Some(index) if index as usize == crate::arch::x86_64::gdt::PAGE_FAULT_IST_INDEX => {
+            let ist = crate::arch::x86_64::stack::page_fault_stack_range();
             (ist.bottom.as_u64(), ist.top.as_u64())
         }
         // 据えていない IST 番号を指すゲートは、こちらの想定が崩れている。
@@ -2458,7 +2458,7 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
         );
         // スタックオーバーフローを自己識別する。CR2 がカーネルスタックの
         // ガードページ内なら、この #PF は溢れによるものである（M5-b）。
-        let guard = crate::stack::kernel_guard_page();
+        let guard = crate::arch::x86_64::stack::kernel_guard_page();
         let in_guard =
             common::addr::VirtAddr::new(context.cr2).is_some_and(|cr2| guard.contains(cr2));
         let _ = writeln!(
@@ -2481,8 +2481,8 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
     // ハンドラが動いている（#PF がスタックオーバーフローで起きた場合、これが
     // 効いていないと #DF へ昇格して CR2 が失われる。ADR-0019 §3.1）。
     let ist_stack = match vector {
-        8 => Some((1u8, crate::stack::double_fault_stack_range())),
-        14 => Some((2u8, crate::stack::page_fault_stack_range())),
+        8 => Some((1u8, crate::arch::x86_64::stack::double_fault_stack_range())),
+        14 => Some((2u8, crate::arch::x86_64::stack::page_fault_stack_range())),
         _ => None,
     };
     if let Some((ist_number, ist)) = ist_stack {

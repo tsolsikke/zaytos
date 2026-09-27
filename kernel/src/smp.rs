@@ -130,8 +130,8 @@ mod tests {
     fn kernel_top_from_the_layout(slot: usize) -> u64 {
         AP_STACK_REGION_BASE
             + (slot as u64) * AP_STACK_STRIDE
-            + crate::stack::GUARD_SIZE as u64
-            + crate::stack::KERNEL_STACK_SIZE as u64
+            + crate::arch::x86_64::stack::GUARD_SIZE as u64
+            + crate::arch::x86_64::stack::KERNEL_STACK_SIZE as u64
     }
 
     /// AP 用アイドルタスクへ記述する範囲が、実際にマップした通常スタックと一致する
@@ -154,16 +154,19 @@ mod tests {
         // 幅はちょうど通常スタック 1 本ぶんで、IST を含んでいない。
         assert_eq!(
             recorded_top - bottom,
-            crate::stack::KERNEL_STACK_SIZE as u64
+            crate::arch::x86_64::stack::KERNEL_STACK_SIZE as u64
         );
 
         // 下端はガードの穴より上にある。ガードはマップしない穴なので、
         // 範囲がそこへ食い込むと「ガードの上で走ってよい」と記述したことになる。
         let slot_base = AP_STACK_REGION_BASE + (slot as u64) * AP_STACK_STRIDE;
-        assert_eq!(bottom, slot_base + crate::stack::GUARD_SIZE as u64);
+        assert_eq!(
+            bottom,
+            slot_base + crate::arch::x86_64::stack::GUARD_SIZE as u64
+        );
 
         // IST1 の下端より下にある（範囲が IST へ食い込んでいない）。
-        let ist1_bottom = recorded_top + crate::stack::GUARD_SIZE as u64;
+        let ist1_bottom = recorded_top + crate::arch::x86_64::stack::GUARD_SIZE as u64;
         assert!(recorded_top <= ist1_bottom);
 
         // 次のスロットの領域へはみ出していない。
@@ -448,7 +451,7 @@ pub fn ap_stack_frame(index: usize) -> Option<PhysAddr> {
 ///
 /// `cpu_id()` を呼ばない。`sgdt` 由来の実装は自コアの GDT がロードされた後
 /// でなければ正しくないが、この段階の AP は per-CPU GDT を持たない
-/// （`kernel/src/gdt/mod.rs` の載荷条件）。身元は引数で受け取る。
+/// （`kernel/src/arch/x86_64/gdt/mod.rs` の載荷条件）。身元は引数で受け取る。
 ///
 /// ロックを取らない。`Logger` と `SerialPort` にロックは無いので、
 /// BSP が 1 つずつ起動することで混線を避けている（同時に書くとバイトが混ざる）。
@@ -1191,12 +1194,12 @@ const AP_STACK_REGION_BASE: u64 = 0xffff_8100_0000_0000;
 /// ガード（4KiB）+ kernel（64KiB）+ ガード + IST1（16KiB）+ ガード + IST2（16KiB）。
 /// ガードは各スタックの下に置く（スタックは下へ伸びるので、溢れると下のガードに
 /// 当たる）。BSP の `StackBlock` と同じ並びである。
-const AP_STACK_STRIDE: u64 = (crate::stack::GUARD_SIZE
-    + crate::stack::KERNEL_STACK_SIZE
-    + crate::stack::GUARD_SIZE
-    + crate::stack::IST_STACK_SIZE
-    + crate::stack::GUARD_SIZE
-    + crate::stack::IST_STACK_SIZE) as u64;
+const AP_STACK_STRIDE: u64 = (crate::arch::x86_64::stack::GUARD_SIZE
+    + crate::arch::x86_64::stack::KERNEL_STACK_SIZE
+    + crate::arch::x86_64::stack::GUARD_SIZE
+    + crate::arch::x86_64::stack::IST_STACK_SIZE
+    + crate::arch::x86_64::stack::GUARD_SIZE
+    + crate::arch::x86_64::stack::IST_STACK_SIZE) as u64;
 
 /// AP 1 本ぶんのスタックの所在（S3-b-2b-2）。
 ///
@@ -1236,9 +1239,9 @@ pub unsafe fn map_ap_stacks<const CAP: usize>(
 
     // (ガードのページ数, 本体のバイト数) を下から順に。
     let layout = [
-        crate::stack::KERNEL_STACK_SIZE as u64,
-        crate::stack::IST_STACK_SIZE as u64,
-        crate::stack::IST_STACK_SIZE as u64,
+        crate::arch::x86_64::stack::KERNEL_STACK_SIZE as u64,
+        crate::arch::x86_64::stack::IST_STACK_SIZE as u64,
+        crate::arch::x86_64::stack::IST_STACK_SIZE as u64,
     ];
 
     let mut cursor = base;
@@ -1246,7 +1249,7 @@ pub unsafe fn map_ap_stacks<const CAP: usize>(
     let free_before = allocator.free_frame_count();
     for (index, size) in layout.iter().enumerate() {
         // ガードぶんを空けたまま進める（マップしないので穴になる）。
-        cursor += crate::stack::GUARD_SIZE as u64;
+        cursor += crate::arch::x86_64::stack::GUARD_SIZE as u64;
         let bottom = cursor;
         let mut offset = 0;
         while offset < *size {
@@ -1354,7 +1357,7 @@ pub fn ap_kernel_stack_range(slot: usize) -> Option<(u64, u64)> {
 /// 実行時に照合されない記述なので、誤りを捕まえられるのはホストテストだけである。
 const fn kernel_stack_bounds_from_top(kernel_top: u64) -> (u64, u64) {
     (
-        kernel_top - crate::stack::KERNEL_STACK_SIZE as u64,
+        kernel_top - crate::arch::x86_64::stack::KERNEL_STACK_SIZE as u64,
         kernel_top,
     )
 }
@@ -1429,7 +1432,7 @@ unsafe fn bring_up_application_processor(info: ApBringUp) -> ! {
     // テーブルの VA なので、CR3 を移した後にしか実際には触れないが、
     // TSS へ書くだけならここで問題ない。割り込みは禁止のままである。
     unsafe {
-        crate::gdt::init_for_cpu(
+        crate::arch::x86_64::gdt::init_for_cpu(
             info.slot,
             info.stacks.double_fault_top,
             info.stacks.page_fault_top,

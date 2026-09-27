@@ -153,7 +153,6 @@ pub const PATH_RULES: &[PathRule] = &[
             "kernel/src/frame_allocator.rs",
             "kernel/src/memory_map.rs",
             "kernel/src/paging/**",
-            "kernel/src/gdt/**",
             "kernel/src/heap/**",
             // **割り込みの配送とタスクの切り替え**——**タイマの割り込みとスケジューラは、どのグループの項目も
             // 通る**（AP の `ap-touch-scheduler`・シェルの台本の眠り）。
@@ -194,11 +193,7 @@ pub const PATH_RULES: &[PathRule] = &[
     PathRule {
         // **プロセスごとの空間・返したフレームの置き場・カーネルのスタック**——**どの Ring 3 のプログラムも
         // 通り、AP も持つ。**
-        patterns: &[
-            "kernel/src/address_space.rs",
-            "kernel/src/quarantine.rs",
-            "kernel/src/stack.rs",
-        ],
+        patterns: &["kernel/src/address_space.rs", "kernel/src/quarantine.rs"],
         reach: Reach::Families(&[
             Family::Boot,
             Family::Memory,

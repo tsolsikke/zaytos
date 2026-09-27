@@ -14,7 +14,7 @@ use common::arch::x86_64::cpu;
 use common::log::Logger;
 use common::machine::pc::serial::SerialPort;
 
-use crate::gdt;
+use crate::arch::x86_64::gdt;
 use crate::idt;
 use crate::irq;
 

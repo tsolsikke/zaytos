@@ -8,7 +8,7 @@
 //! アドレス」へ飛ぶ。どこへ飛んだかは事後には分からないため、符号化と
 //! 復号を両方テストして固定する。
 
-use crate::gdt::layout::SegmentSelector;
+use crate::arch::x86_64::gdt::layout::SegmentSelector;
 
 /// ゲート種別。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -212,7 +212,7 @@ pub fn stub_jump_target(bytes: &[u8], stub_address: u64) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gdt::KERNEL_CODE_SELECTOR;
+    use crate::arch::x86_64::gdt::KERNEL_CODE_SELECTOR;
 
     /// 例外のスタブの形（`push 0` / `push 14` / `jmp rel32`）。飛び先は後ろへ 0x1000。
     #[test]

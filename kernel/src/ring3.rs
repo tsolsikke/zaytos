@@ -39,7 +39,7 @@
 use core::ptr::{addr_of, addr_of_mut};
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use crate::gdt;
+use crate::arch::x86_64::gdt;
 
 /// ユーザーコードの仮想アドレス（`PML4[USER_PML4_INDEX]` サブツリー。M5-e-2 が
 /// 残した中間テーブルを再利用する）。`cli` 1 命令を置く。
@@ -69,7 +69,7 @@ pub const USER_STACK_TOP: u64 = USER_STACK_VIRT + 4096;
 /// **溢れた先は静的領域で、[`ExcursionState::depth`] が壊れた**（実測。
 /// `docs/troubleshooting.md`）。**メインのカーネルスタックと同じ 64 KiB にする**
 /// ——起動時の `load_user_program` はあちらの上で問題なく走っており、
-/// **同じ処理が乗るなら同じ大きさが要る**（`kernel/src/stack.rs`）。
+/// **同じ処理が乗るなら同じ大きさが要る**（`kernel/src/arch/x86_64/stack.rs`）。
 ///
 /// **実際に使う量は毎起動測って判定行に出す**（[`fill_excursion_stack`] と
 /// [`excursion_stack_high_water`]）。**推測ではなく観測で持つ。**

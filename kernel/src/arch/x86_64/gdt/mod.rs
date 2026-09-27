@@ -11,7 +11,7 @@
 //!
 //! GDT・TSS ともに `.bss` の静的領域に置く。フレームアロケータより前に
 //! ロードできること、kernel イメージの一部として既にマップ済み・予約済みで
-//! あることが理由（[`crate::stack`] と同じ）。
+//! あることが理由（[`crate::arch::x86_64::stack`] と同じ）。
 
 pub mod layout;
 
@@ -164,7 +164,9 @@ pub unsafe fn init_for_cpu(index: usize, double_fault_stack_top: u64, page_fault
         // ユーザーモードを導入する M5 以降まで実際には効かないが、
         // 0 のままにしておくと、その時点で気づきにくい形で壊れる。
         // 現時点では通常のカーネルスタックと同じ場所を指しておく。
-        (*tss).privilege_stack_table[0] = crate::stack::kernel_stack_range().top.as_u64();
+        (*tss).privilege_stack_table[0] = crate::arch::x86_64::stack::kernel_stack_range()
+            .top
+            .as_u64();
     }
 
     // SAFETY: 同上（起動時の単一文脈、自コアのスロット）。読み取り目的で

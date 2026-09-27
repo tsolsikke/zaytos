@@ -19489,7 +19489,7 @@ const DIRECT_SERIAL_PORT_ALLOWLIST: &[DirectSerialPortSite] = &[
         reason: "ロガーを組み立てる起点。BKL はまだ無い",
     },
     DirectSerialPortSite {
-        file: "kernel/src/gdt/mod.rs",
+        file: "kernel/src/arch/x86_64/gdt/mod.rs",
         item: "cpu_id_from_gdtr",
         reason: "cpu_id() 自身の失敗経路。BKL は cpu_id に依存する",
     },
@@ -20295,6 +20295,8 @@ const DOC_PATH_MOVES: &[(&str, &str)] = &[
         "kernel/src/arch/x86_64/cpu_state.rs",
     ),
     ("kernel/src/fp.rs", "kernel/src/arch/x86_64/fp.rs"),
+    ("kernel/src/gdt/", "kernel/src/arch/x86_64/gdt/"),
+    ("kernel/src/stack.rs", "kernel/src/arch/x86_64/stack.rs"),
 ];
 
 /// 以前の置き場を指すパスを、読み替えの表で今の置き場へ読み替えて、追跡下に在るかを見る（ファイルでも
@@ -23071,7 +23073,7 @@ fn e2fsck_complaint_lines(image: &Path) -> Result<Vec<String>> {
 /// **`build.rs` がビルドしたイメージ**（S10-a）と、**ZaytOS が RAM に持っているイメージを
 /// 取り出したもの**（S12-a）である。**同じ道具で、見る相手が違う。**
 /// **寄せたのは、ガードページを 2 か所で設けていたのと同じ形を作らないためである**
-/// （`kernel::stack::install_guard_page` の doc）。
+/// （`kernel::arch::x86_64::stack::install_guard_page` の doc）。
 fn run_e2fsck(image: &Path) -> Result<String> {
     // `-f` は clean でも全パスを走らせる（`s_state` を信用しない）。`-n` は
     // 何も直さず、直す必要があれば失敗で返す。**イメージを書き換えさせない。**
