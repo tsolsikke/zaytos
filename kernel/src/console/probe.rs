@@ -579,7 +579,7 @@ fn observe_draw_stats(serial: &mut SerialPort, console: &mut crate::console::Con
         stats.transferred_bytes,
         stats.flush_cycles_total,
         stats.full_screen_flush_count,
-        crate::idt::timer_ticks(),
+        crate::arch::x86_64::idt::timer_ticks(),
         stats.repaint_count,
         stats.repaint_cells,
         stats.repaint_cycles,

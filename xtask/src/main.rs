@@ -14641,7 +14641,7 @@ fn judge_shell_session(
     // **方向フラグの前提（2026-09-24）。** **`spin` は `std` の後で空回りする**ので、止められるまでに
     // 来たタイマはどれも DF=1 の文脈から入る（`kernel/userland/spin.rs`）。**カーネルは止めたときに
     // その数を出す。** **0 なら、IRQ の入口が DF を降ろすという主張は何も確かめていない**
-    // （`kernel/src/idt/mod.rs` の `check_direction_flag`）。**破壊テスト（`irq-entry-keeps-df-test`）では
+    // （`kernel/src/arch/x86_64/idt/mod.rs` の `check_direction_flag`）。**破壊テスト（`irq-entry-keeps-df-test`）では
     // 最初のタイマで止まり、この行は出ない。**
     let spin_interrupts_from_df = after_shell.lines().find_map(|line| {
         line.split("direction flag: /bin/spin was interrupted from a context with DF=1 ")
@@ -15274,7 +15274,7 @@ fn judge_shell_session(
     //
     // **畳んだ側ではなく弾いた側を数えている。** **畳んだ側では破壊が捕まらない**
     // ——**深さ 1 で Ring 3 に居るウィンドウが μs 単位で、打鍵の間隔 32 ミリ秒に対して 1% 未満の
-    // 見込みだからである**（`kernel/src/idt` の `DEPTH_ONE_NOT_FOLDED` の doc）。
+    // 見込みだからである**（`kernel/src/arch/x86_64/idt` の `DEPTH_ONE_NOT_FOLDED` の doc）。
     let depth_one_was_not_folded = depth_one_not_folded.is_some_and(|count| count >= 1);
     // **判定 7——単調な時刻が進む（W2-d+。`ADR-0062`）。**
     let clock_advanced = match (clock_from, clock_to) {
@@ -19452,17 +19452,17 @@ const DIRECT_SERIAL_PORT_ALLOWLIST: &[DirectSerialPortSite] = &[
         reason: "パニックハンドラ（ADR-0004 の halt and dump、ADR-0023 で BKL を取らない）",
     },
     DirectSerialPortSite {
-        file: "kernel/src/idt/mod.rs",
+        file: "kernel/src/arch/x86_64/idt/mod.rs",
         item: "exception_entry",
         reason: "例外ハンドラ。依存を最小にする（ADR-0018）",
     },
     DirectSerialPortSite {
-        file: "kernel/src/idt/mod.rs",
+        file: "kernel/src/arch/x86_64/idt/mod.rs",
         item: "check_stack_alignment",
         reason: "スタブ入口の境界違反の報告。違反した状態で呼び出しを増やさない",
     },
     DirectSerialPortSite {
-        file: "kernel/src/idt/mod.rs",
+        file: "kernel/src/arch/x86_64/idt/mod.rs",
         item: "check_direction_flag",
         reason: "スタブ入口で DF=1 が Rust へ届いた報告。BKL を取る前に呼び、停止する経路である",
     },
@@ -19516,7 +19516,7 @@ const DIRECT_SERIAL_PORT_ALLOWLIST: &[DirectSerialPortSite] = &[
     },
     // (e) 同時進入の報告。**BKL の外にいることを報せる行なので、取れない。**
     DirectSerialPortSite {
-        file: "kernel/src/idt/mod.rs",
+        file: "kernel/src/arch/x86_64/idt/mod.rs",
         item: "report_concurrent_entry_once",
         reason: "カーネル内の同時進入の報告。BKL の外にいることが報告内容である",
     },
@@ -20297,6 +20297,7 @@ const DOC_PATH_MOVES: &[(&str, &str)] = &[
     ("kernel/src/fp.rs", "kernel/src/arch/x86_64/fp.rs"),
     ("kernel/src/gdt/", "kernel/src/arch/x86_64/gdt/"),
     ("kernel/src/stack.rs", "kernel/src/arch/x86_64/stack.rs"),
+    ("kernel/src/idt/", "kernel/src/arch/x86_64/idt/"),
 ];
 
 /// 以前の置き場を指すパスを、読み替えの表で今の置き場へ読み替えて、追跡下に在るかを見る（ファイルでも
@@ -23688,7 +23689,7 @@ fn refuse_if_something_else_is_running(what: &str) -> Result<()> {
 ///
 /// # `FOLDABLE_VECTORS` はここに出ない
 ///
-/// **あれは `kernel/src/idt` に在り、`xtask` は kernel に依存せずビルドするだけなので
+/// **あれは `kernel/src/arch/x86_64/idt` に在り、`xtask` は kernel に依存せずビルドするだけなので
 /// `.len()` が取れない。** **ソースを読んで数える形にすると、この検査自身が列挙で
 /// 守られることになる**（新しい脆さ）。**表に「手で数えた（日付つき）」で残してある。**
 fn report_enumeration_counts() {
@@ -23731,7 +23732,7 @@ fn report_enumeration_counts() {
         .map(|(name, size)| format!("{name}={size}"))
         .collect();
     println!(
-        "--- enumeration counts: OK ({} listed here; FOLDABLE_VECTORS lives in kernel/src/idt and \
+        "--- enumeration counts: OK ({} listed here; FOLDABLE_VECTORS lives in kernel/src/arch/x86_64/idt and \
          is counted by hand in docs/verification-coverage.md; reported, not enforced) {}",
         counts.len(),
         rendered.join(" ")

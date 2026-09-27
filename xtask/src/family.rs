@@ -156,7 +156,6 @@ pub const PATH_RULES: &[PathRule] = &[
             "kernel/src/heap/**",
             // **割り込みの配送とタスクの切り替え**——**タイマの割り込みとスケジューラは、どのグループの項目も
             // 通る**（AP の `ap-touch-scheduler`・シェルの台本の眠り）。
-            "kernel/src/idt/**",
             "kernel/src/irq/**",
             "kernel/src/interrupts.rs",
             "kernel/src/apic.rs",

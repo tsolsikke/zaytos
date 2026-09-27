@@ -267,7 +267,7 @@ mod tests {
     /// 積むのに `None` を返すと、エラーコードが表示されなくなる。
     #[test]
     fn the_kind_matches_the_error_code_table() {
-        use crate::idt::layout::pushes_error_code;
+        use crate::arch::x86_64::idt::layout::pushes_error_code;
         for vector in 0..=255u8 {
             let kind = error_code_kind(vector);
             let pushes = pushes_error_code(vector);

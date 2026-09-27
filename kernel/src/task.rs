@@ -28,7 +28,7 @@ use common::machine::pc::serial::SerialPort;
 use common::percpu::{PerCpu, MAX_CPUS};
 
 use crate::arch::x86_64::gdt;
-use crate::idt::YIELD_VECTOR;
+use crate::arch::x86_64::idt::YIELD_VECTOR;
 
 /// ワーカータスクの本数（M5-c は 2 本）。
 pub const WORKER_COUNT: usize = 2;
@@ -2289,7 +2289,9 @@ pub fn on_timer_tick(current_rsp: u64) -> u64 {
     }
 
     // 締切に達したらワーカーを走行不可にする。次の pick_next がメインを選ぶ。
-    if scheduler::demo_active() && crate::idt::timer_ticks() >= scheduler::demo_deadline() {
+    if scheduler::demo_active()
+        && crate::arch::x86_64::idt::timer_ticks() >= scheduler::demo_deadline()
+    {
         for w in 0..WORKER_COUNT {
             // 締切で止めるだけで、ラウンドを終えたわけではない。
             scheduler::set_state(1 + w, TaskState::Blocked);
@@ -3041,7 +3043,7 @@ unsafe fn setup_preemptive_tasks() {
         );
     }
     scheduler::set_demo_active(true);
-    scheduler::set_demo_deadline(crate::idt::timer_ticks() + PREEMPTIVE_DEMO_TICKS);
+    scheduler::set_demo_deadline(crate::arch::x86_64::idt::timer_ticks() + PREEMPTIVE_DEMO_TICKS);
     PREEMPT_IN_WINDOW.store(0, Ordering::Relaxed);
     // _guard の drop でここを抜けると割り込みが復元される（元が IF=1 なら sti）。
 }

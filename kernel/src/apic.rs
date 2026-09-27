@@ -1116,7 +1116,7 @@ const ICR_DELIVERY_STARTUP: u32 = 0b110 << 8;
 /// # 何のためにあるか
 ///
 /// 「IPI が届くか」を測るためだけのものである。宛先のコアは
-/// [`crate::idt::IPI_PROBE_VECTOR`] のハンドラへ入り、per-CPU の受信カウンタを
+/// [`crate::arch::x86_64::idt::IPI_PROBE_VECTOR`] のハンドラへ入り、per-CPU の受信カウンタを
 /// 増やして EOI を送るだけである。BKL は要求しない——BKL 待ちと IPI の
 /// 相性は未解決なので、その罠を踏まない形にしてある。
 ///
@@ -1513,7 +1513,7 @@ pub fn set_spurious_vector(logger: &mut Logger<SerialPort>, mapped: &MappedApic)
     // （起動ログの `idt: 256 entries, all present=true`）、`0xFF` にも既に
     // スタブが入っている。したがってここで確かめるのは「足したこと」ではなく
     // 「既にあること」である。
-    match crate::idt::entry(SPURIOUS_VECTOR as usize) {
+    match crate::arch::x86_64::idt::entry(SPURIOUS_VECTOR as usize) {
         Some(entry) if entry.is_present() => logger.info(format_args!(
             "apic: the IDT gate for the spurious vector {SPURIOUS_VECTOR:#04x} is present \
              (gate type {:#x}, DPL {}); it was already there because the IDT fills all 256 \
@@ -1731,7 +1731,7 @@ impl TimerCalibration {
 /// カウンタに対して ±1 ティック = ±10ms の誤差が乗る。N=10 のウィンドウなら ±10% で、
 /// 較正としては使えない。変化した瞬間を捉えれば、誤差は µs 級へ落ちる。
 ///
-/// 読みは [`crate::idt::timer_ticks`] を通す。`AtomicU64` のロードなので、
+/// 読みは [`crate::arch::x86_64::idt::timer_ticks`] を通す。`AtomicU64` のロードなので、
 /// コンパイラがループの外へ持ち上げることはない。素の読みだと持ち上げられて
 /// 無限ループになりうる（`verification-coverage.md` の「待ちループでの読み」）。
 ///
@@ -1746,10 +1746,10 @@ fn wait_for_tick_edge() -> Option<(u64, u64)> {
 /// 上限を指定してエッジを待つ（HW-c）。**最初のエッジだけ短い上限を使う**
 /// （[`FIRST_EDGE_TIMEOUT_CYCLES`]）。
 fn wait_for_tick_edge_within(deadline_cycles: u64) -> Option<(u64, u64)> {
-    let start = crate::idt::timer_ticks();
+    let start = crate::arch::x86_64::idt::timer_ticks();
     let deadline_base = cpu::read_timestamp_counter();
     loop {
-        let now = crate::idt::timer_ticks();
+        let now = crate::arch::x86_64::idt::timer_ticks();
         if now != start {
             return Some((now, now.wrapping_sub(start)));
         }

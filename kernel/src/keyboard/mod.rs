@@ -16,7 +16,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 ///
 /// これは 8259 の採番表が与える値であって、現在どこへ届くかではない。
 /// IRQ1 は I/O APIC 経由へ移してあるので、実際の配送先は
-/// [`crate::idt::IOAPIC_KEYBOARD_VECTOR`] である。
+/// [`crate::arch::x86_64::idt::IOAPIC_KEYBOARD_VECTOR`] である。
 /// 現在の配送先は [`delivery_vector`] で得る。
 pub const PIC_KEYBOARD_VECTOR: usize = match crate::irq::vector_for(KEYBOARD_IRQ) {
     Some(vector) => vector as usize,

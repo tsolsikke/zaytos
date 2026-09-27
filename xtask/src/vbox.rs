@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 
-/// I/O APIC 経由のキーボードのベクタ（`kernel/src/idt` の `IOAPIC_KEYBOARD_VECTOR`）。
+/// I/O APIC 経由のキーボードのベクタ（`kernel/src/arch/x86_64/idt` の `IOAPIC_KEYBOARD_VECTOR`）。
 pub const KEYBOARD_VECTOR: u8 = 0x42;
 
 /// 8259 から来うるベクタの範囲（PIC を `0x20` へ再マップしている。主と従で 16 本）。

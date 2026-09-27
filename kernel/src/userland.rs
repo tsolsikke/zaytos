@@ -1065,8 +1065,8 @@ pub fn load_user_program(
     // **`wait-window-is-wide` と同じ「機会を作る」形である。**
     #[cfg(feature = "spawn-detached-returns-early")]
     if crate::ring3::current_slot() == crate::task::detached_slot() {
-        let opened = crate::idt::monotonic_ticks();
-        while crate::idt::monotonic_ticks().saturating_sub(opened) < 2 {
+        let opened = crate::arch::x86_64::idt::monotonic_ticks();
+        while crate::arch::x86_64::idt::monotonic_ticks().saturating_sub(opened) < 2 {
             core::hint::spin_loop();
         }
     }
@@ -1848,7 +1848,7 @@ unsafe fn run_loaded_program(
     // **前の中断要求を持ち越さない（S12 前の手当て、C）。**
     //
     // **深さ 1 で Ctrl+C を押すと、フラグは立つが誰も消費しない**——
-    // **終了させる地点は深さ 2 以上でしか発火しない**（`crate::idt` の
+    // **終了させる地点は深さ 2 以上でしか発火しない**（`crate::arch::x86_64::idt` の
     // `fold_if_interrupted`）。**降ろさずに子を起動すると、その子が
     // 起動した瞬間に止まる。**
     //
@@ -1887,8 +1887,9 @@ unsafe fn run_loaded_program(
 
     // **DF=1 の文脈から入った割り込みを数える起点（2026-09-24）。** **`spin` は `std` の後で
     // 空回りする**ので、止められるまでに来たタイマはどれも DF=1 の文脈から入る（下の判定行）。
-    let irq_entries_from_df_before =
-        crate::idt::entries_from_direction_flag_set(crate::idt::EntryPath::Irq);
+    let irq_entries_from_df_before = crate::arch::x86_64::idt::entries_from_direction_flag_set(
+        crate::arch::x86_64::idt::EntryPath::Irq,
+    );
     // SAFETY: entry と stack は今マップしたユーザーページで、`ud2` が必ずフォルト
     // する。main_rsp0_top はメインのカーネルスタック上端。単一実行文脈である。
     unsafe {
@@ -1930,10 +1931,10 @@ unsafe fn run_loaded_program(
         ));
         // **方向フラグの前提（2026-09-24）。** **`--shell-test` が止める `spin` が作る。**
         // **0 なら、IRQ の入口が DF を降ろすという主張は何も確かめていない**
-        // （`crate::idt::check_direction_flag`）。**判定は `xtask` が行う。**
-        let irq_entries_from_df =
-            crate::idt::entries_from_direction_flag_set(crate::idt::EntryPath::Irq)
-                - irq_entries_from_df_before;
+        // （`crate::arch::x86_64::idt::check_direction_flag`）。**判定は `xtask` が行う。**
+        let irq_entries_from_df = crate::arch::x86_64::idt::entries_from_direction_flag_set(
+            crate::arch::x86_64::idt::EntryPath::Irq,
+        ) - irq_entries_from_df_before;
         logger.info(format_args!(
             "direction flag: {} was interrupted from a context with DF=1 {irq_entries_from_df} \
              time(s) while it ran, and every handler ran with DF=0 (the stub clears it; a \
@@ -2701,8 +2702,8 @@ pub fn wait_for_ring3_task(handle: u64) -> ChildStatus {
         }
         #[cfg(feature = "wait-window-is-wide")]
         {
-            let opened = crate::idt::monotonic_ticks();
-            while crate::idt::monotonic_ticks().saturating_sub(opened) < 2 {
+            let opened = crate::arch::x86_64::idt::monotonic_ticks();
+            while crate::arch::x86_64::idt::monotonic_ticks().saturating_sub(opened) < 2 {
                 core::hint::spin_loop();
             }
         }

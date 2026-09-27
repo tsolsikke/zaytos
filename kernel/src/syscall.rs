@@ -8,7 +8,7 @@
 //!
 //! # 入口の機構
 //!
-//! ベクタ 0x80 の IDT ゲートを DPL=3 の割り込みゲートにし、[`crate::idt`] の
+//! ベクタ 0x80 の IDT ゲートを DPL=3 の割り込みゲートにし、[`crate::arch::x86_64::idt`] の
 //! `zaytos_syscall_stub` へ向ける。スタブは IRQ スタイルの復元経路をコピーした
 //! `zaytos_syscall_common` へ jmp し、GPR 15 本を退避して [`syscall_entry`] を
 //! 呼ぶ。Ring 3 からの `int 0x80` は特権変化（3→0）なので、CPU が TSS.RSP0 の
@@ -31,14 +31,14 @@
 //!   読む。R10 規約の実証（記録した第 4 引数が期待値と食い違う）。
 //! - `syscall-test-drop-retval`: 戻り値の `context.rax` 書き戻しを落とす。ユーザーが
 //!   期待した戻り値を受け取れない（ユーザースタックへ store した値が食い違う）。
-//! - `syscall-test-gate-dpl0`: ゲートを DPL=0 にする（[`crate::idt`] 側）。Ring 3 から
+//! - `syscall-test-gate-dpl0`: ゲートを DPL=0 にする（[`crate::arch::x86_64::idt`] 側）。Ring 3 から
 //!   の `int 0x80` がゲート DPL<CPL で #GP になり、`syscall_entry` に到達しない。
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use common::addr::{DirectMap, PhysAddr};
 
-use crate::idt::context::IrqContext;
+use crate::arch::x86_64::idt::context::IrqContext;
 
 /// `-ENOSYS`（未実装システムコール）の errno。失敗は `-errno` で返す。
 pub const ENOSYS: i64 = 38;
@@ -3051,13 +3051,13 @@ unsafe fn spawn_detached_from_ring3(
     }
     #[cfg(not(feature = "spawn-detached-returns-early"))]
     {
-        let since = crate::idt::timer_ticks();
+        let since = crate::arch::x86_64::idt::timer_ticks();
         drop(bkl.take());
         while !(crate::task::ring3_task_in_excursion() || crate::task::ring3_task_finished()) {
             crate::task::yield_now();
         }
         *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
-        let waited = crate::idt::timer_ticks().saturating_sub(since);
+        let waited = crate::arch::x86_64::idt::timer_ticks().saturating_sub(since);
         DETACHED_ENTRY_WAIT_TICKS_MAX.fetch_max(waited, Ordering::Relaxed);
     }
     handle
@@ -3273,10 +3273,14 @@ unsafe fn spawn_from_ring3(
 /// `context` はスタブが積んだ有効な [`IrqContext`] を指していること。
 /// `rsp_at_call` はスタブが `call` 直前に読んだ RSP であること。
 pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
-    // **方向フラグを何より先に見る（2026-09-24）。** `crate::idt::check_direction_flag` の doc。
+    // **方向フラグを何より先に見る（2026-09-24）。** `crate::arch::x86_64::idt::check_direction_flag` の doc。
     // SAFETY: スタブが直前に積んだ有効な IrqContext を指す。読み取りのみ。
     let (vector, rflags) = unsafe { ((*context).vector, (*context).rflags) };
-    crate::idt::check_direction_flag(crate::idt::EntryPath::Syscall, vector, rflags);
+    crate::arch::x86_64::idt::check_direction_flag(
+        crate::arch::x86_64::idt::EntryPath::Syscall,
+        vector,
+        rflags,
+    );
 
     // **BKL を取る（S4-b-2）。** 割り込みゲート経由なので入場時点で IF=0 だが、
     // BKL の保持区間であることを型で表すためにガードを取る。
@@ -3311,7 +3315,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     let ctx = unsafe { &mut *context };
 
     // 既存の境界計算が syscall 経路でも正しいことの裏取り（IRQ と同じ検査）。
-    crate::idt::check_stack_alignment(rsp_at_call, "syscall", ctx.vector);
+    crate::arch::x86_64::idt::check_stack_alignment(rsp_at_call, "syscall", ctx.vector);
 
     // 番号は RAX。**書き戻しの前に読む。**
     let number = ctx.rax;
@@ -3503,7 +3507,7 @@ pub fn slow_waits() -> u64 {
 #[cfg_attr(feature = "read-never-waits", allow(dead_code))]
 fn wait_for_keyboard(bkl: &mut Option<crate::bkl::BklGuard>) -> bool {
     KEYBOARD_WAITS.fetch_add(1, Ordering::Relaxed);
-    let since = crate::idt::timer_ticks();
+    let since = crate::arch::x86_64::idt::timer_ticks();
 
     // **欄を `Waiting` にする。** **ここは IF=0 で、まだ BKL を持っている。**
     crate::task::set_current_waiting(crate::task::Wait::Keyboard);
@@ -3521,7 +3525,7 @@ fn wait_for_keyboard(bkl: &mut Option<crate::bkl::BklGuard>) -> bool {
     // 直接シリアルの許可リストに項目が増える**（`xtask` の `DIRECT_SERIAL_PORT_ALLOWLIST`）。
     // **報せる先は既存の計測の行でよい**——**`init` がセッションの後に出す行がこの数を読む。**
     // **そもそも主たる検出は関係のほうである**（`keyboard::pushed_without_waking`）。
-    let waited = crate::idt::timer_ticks().saturating_sub(since);
+    let waited = crate::arch::x86_64::idt::timer_ticks().saturating_sub(since);
     if waited > SLOW_WAIT_TICKS {
         SLOW_WAITS.fetch_add(1, Ordering::Relaxed);
     }
@@ -4527,7 +4531,7 @@ unsafe fn sys_clock_gettime(
     if clockid != CLOCK_MONOTONIC {
         return (-EINVAL) as u64;
     }
-    let ticks = crate::idt::monotonic_ticks();
+    let ticks = crate::arch::x86_64::idt::monotonic_ticks();
     // 破壊テスト (W2-d+, clock-goes-backwards): 呼ぶたびに減る値を返す。**単調さが壊れる。**
     // **値はもっともらしいまま進むので、2 回読んで比べる検算でしか検出されない。**
     #[cfg(feature = "clock-goes-backwards")]
@@ -4620,15 +4624,15 @@ unsafe fn sys_nanosleep(
     ) else {
         return (-EINVAL) as u64;
     };
-    let deadline = crate::idt::monotonic_ticks().saturating_add(ticks);
+    let deadline = crate::arch::x86_64::idt::monotonic_ticks().saturating_add(ticks);
 
-    while crate::idt::monotonic_ticks() < deadline {
+    while crate::arch::x86_64::idt::monotonic_ticks() < deadline {
         TIMER_WAITS.fetch_add(1, Ordering::Relaxed);
         crate::task::set_current_waiting(crate::task::Wait::Timer { deadline });
         drop(bkl.take());
         crate::task::yield_now();
         *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
-        if crate::idt::monotonic_ticks() < deadline {
+        if crate::arch::x86_64::idt::monotonic_ticks() < deadline {
             EARLY_TIMER_WAKES.fetch_add(1, Ordering::Relaxed);
         }
     }

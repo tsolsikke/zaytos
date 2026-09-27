@@ -1106,9 +1106,9 @@ pub fn check_aps_match_bsp(logger: &mut Logger<SerialPort>, started: usize) {
     let registers = [Register::Cr0, Register::Cr4, Register::Efer];
     let mut failed = false;
     for slot in 1..=started.min(MAX_CPUS - 1) {
-        let start = crate::idt::timer_ticks();
+        let start = crate::arch::x86_64::idt::timer_ticks();
         while !AP_RECORDED[slot].load(Ordering::SeqCst)
-            && crate::idt::timer_ticks().wrapping_sub(start) < AP_RECORD_WAIT_TICKS
+            && crate::arch::x86_64::idt::timer_ticks().wrapping_sub(start) < AP_RECORD_WAIT_TICKS
         {
             core::hint::spin_loop();
         }

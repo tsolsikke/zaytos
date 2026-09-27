@@ -21,11 +21,11 @@ use kernel::console::Console;
 
 use kernel::arch::x86_64::fp;
 use kernel::arch::x86_64::gdt;
+use kernel::arch::x86_64::idt;
 use kernel::arch::x86_64::stack;
 use kernel::frame_allocator;
 use kernel::graphics::{Color, Framebuffer, FramebufferLayout};
 use kernel::heap;
-use kernel::idt;
 use kernel::interrupts;
 use kernel::irq;
 use kernel::keyboard;
@@ -2242,7 +2242,7 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
         // **台本を作動させる（zi-d。`zi-test` のときだけ効く）。**
         // **起動シーケンスの検算より後である**（`kernel::input::arm_input_script`）。
         // **セッションの開始のティックを控える（W2-d+）。** **終わった後との差を計測に出す。**
-        let clock_at_start = kernel::idt::monotonic_ticks();
+        let clock_at_start = kernel::arch::x86_64::idt::monotonic_ticks();
         kernel::input::arm_input_script();
         let outcome = {
             let _foreground = console
@@ -2315,7 +2315,7 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
                 logger.info(format_args!(
                     "clock: monotonic ticks went from {} to {} during this session (1 tick = {} ms)",
                     clock_at_start,
-                    kernel::idt::monotonic_ticks(),
+                    kernel::arch::x86_64::idt::monotonic_ticks(),
                     1000 / u64::from(kernel::irq::timer_frequency_hz())
                 ));
                 // **タイマの待ちと起こし（W2-d+）。** **判定はこの行を読む。**
@@ -2334,7 +2334,7 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
                 ));
                 logger.info(format_args!(
                     "fold: depth one was not folded {} time(s) during this session",
-                    kernel::idt::depth_one_not_folded()
+                    kernel::arch::x86_64::idt::depth_one_not_folded()
                 ));
                 // **パイプの計測（`ADR-0063` の (b3)）。** **既定の起動では全部 0 である**
                 // ——**`|` を打つ者が居ない。** **台本のグループ（`pipe-test`）が読む。**
@@ -2600,7 +2600,7 @@ fn start_socket_server(logger: &mut Logger<SerialPort>, console: Option<&mut Con
     const ENTER_LIMIT_TICKS: u64 = 2_000;
 
     let mut console = console;
-    let started = kernel::idt::timer_ticks();
+    let started = kernel::arch::x86_64::idt::timer_ticks();
     let Some(handle) = kernel::userland::start_detached(b"/bin/sockd", b"sockd\0", 1, None, None)
     else {
         log_both(
@@ -2612,7 +2612,7 @@ fn start_socket_server(logger: &mut Logger<SerialPort>, console: Option<&mut Con
         cpu::halt_forever();
     };
     while !kernel::task::ring3_task_in_excursion() {
-        if kernel::idt::timer_ticks().saturating_sub(started) > ENTER_LIMIT_TICKS {
+        if kernel::arch::x86_64::idt::timer_ticks().saturating_sub(started) > ENTER_LIMIT_TICKS {
             log_both(
                 logger,
                 console.as_deref_mut(),
@@ -2632,7 +2632,7 @@ fn start_socket_server(logger: &mut Logger<SerialPort>, console: Option<&mut Con
         LogLevel::Info,
         format_args!(
             "socket-test: /bin/sockd entered Ring 3 after {} tick(s); starting the shell",
-            kernel::idt::timer_ticks().saturating_sub(started)
+            kernel::arch::x86_64::idt::timer_ticks().saturating_sub(started)
         ),
     );
     handle
@@ -2645,7 +2645,7 @@ fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Con
 
     let mut console = console;
     let ring3_task = kernel::task::ring3_task_index();
-    let started = kernel::idt::timer_ticks();
+    let started = kernel::arch::x86_64::idt::timer_ticks();
     let Some(handle) =
         kernel::userland::start_detached(b"/bin/tickera", b"tickera\0", 1, None, None)
     else {
@@ -2658,7 +2658,7 @@ fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Con
         cpu::halt_forever();
     };
     while !kernel::task::ring3_task_in_excursion() {
-        if kernel::idt::timer_ticks().saturating_sub(started) > ENTER_LIMIT_TICKS {
+        if kernel::arch::x86_64::idt::timer_ticks().saturating_sub(started) > ENTER_LIMIT_TICKS {
             log_both(
                 logger,
                 console.as_deref_mut(),
@@ -2672,7 +2672,7 @@ fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Con
         }
         kernel::task::yield_now();
     }
-    let entered = kernel::idt::timer_ticks();
+    let entered = kernel::arch::x86_64::idt::timer_ticks();
     log_both(
         logger,
         console.as_deref_mut(),
@@ -2685,7 +2685,7 @@ fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Con
     );
 
     let outcome = kernel::userland::spawn(b"/bin/tickerb", b"tickerb\0", 1, None);
-    let b_ended = kernel::idt::timer_ticks();
+    let b_ended = kernel::arch::x86_64::idt::timer_ticks();
     let a_still_running = !kernel::task::ring3_task_finished();
     log_both(
         logger,
@@ -2703,7 +2703,7 @@ fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Con
     let a_status = kernel::userland::wait_for_ring3_task(handle);
     // **この時点で取る。** **下の行はこの後の再起動を挟んでから出るので、そこで測ると
     // 2 本目の実行を含んでしまう。**
-    let a_finished = kernel::idt::timer_ticks();
+    let a_finished = kernel::arch::x86_64::idt::timer_ticks();
     log_both(
         logger,
         console.as_deref_mut(),
@@ -8583,9 +8583,9 @@ struct UserProgram {
     /// **方向フラグ（DF=1）のまま、どの入口からカーネルへ入るか**（2026-09-24）。
     ///
     /// **入口が DF を降ろすという主張の前提を作る。** 走らせた後に、その入口の計測
-    /// （`kernel::idt::entries_from_direction_flag_set`）が増えたことを見る。
+    /// （`kernel::arch::x86_64::idt::entries_from_direction_flag_set`）が増えたことを見る。
     /// **増えていなければ、監視は何も確かめていない**ので止まる。
-    enters_with_direction_flag: Option<kernel::idt::EntryPath>,
+    enters_with_direction_flag: Option<kernel::arch::x86_64::idt::EntryPath>,
 }
 
 /// 走らせるプログラムの一覧（S9-b-3-1、S9-b-3-2a で期待を持たせた）。
@@ -8627,7 +8627,7 @@ const USER_PROGRAMS: &[UserProgram] = &[
         status_meanings: &[],
         argv: &[b"fault-test"],
         // **`std` の後で #PF を起こす**（`kernel/userland/fault-test.rs`）。
-        enters_with_direction_flag: Some(kernel::idt::EntryPath::Exception),
+        enters_with_direction_flag: Some(kernel::arch::x86_64::idt::EntryPath::Exception),
     },
     UserProgram {
         name: "syscall-test",
@@ -8641,13 +8641,13 @@ const USER_PROGRAMS: &[UserProgram] = &[
         // **「積んでいない」と「1 つ積んだ」が区別できない。**
         argv: &[b"syscall-test", b"alpha"],
         // **`std` の後で `int 0x80` を打つ**（`kernel/userland/syscall-test.rs` の 69 番）。
-        enters_with_direction_flag: Some(kernel::idt::EntryPath::Syscall),
+        enters_with_direction_flag: Some(kernel::arch::x86_64::idt::EntryPath::Syscall),
     },
 ];
 
 /// **方向フラグの前提が作れたこと**（2026-09-24。[`UserProgram::enters_with_direction_flag`]）。
 ///
-/// **監視（`kernel::idt::check_direction_flag`）は DF=1 が Rust へ届いたときにしか鳴らない。**
+/// **監視（`kernel::arch::x86_64::idt::check_direction_flag`）は DF=1 が Rust へ届いたときにしか鳴らない。**
 /// **DF=1 のまま入る入場が 1 度も無ければ、スタブが降ろしていなくても黙って通る。**
 fn check_direction_flag_premise(
     logger: &mut Logger<SerialPort>,
@@ -8658,7 +8658,7 @@ fn check_direction_flag_premise(
         return;
     };
     let name = program.name;
-    let entries = kernel::idt::entries_from_direction_flag_set(path) - before;
+    let entries = kernel::arch::x86_64::idt::entries_from_direction_flag_set(path) - before;
     if entries == 0 {
         logger.error(format_args!(
             "direction flag: {name} was to enter the kernel through the {} entry with DF=1, but \
@@ -8724,7 +8724,7 @@ fn load_embedded_user_program(logger: &mut Logger<SerialPort>) -> Result<(), Use
         let window = kernel::userland::open_spawn_window();
         let df_entries_before = program
             .enters_with_direction_flag
-            .map(kernel::idt::entries_from_direction_flag_set);
+            .map(kernel::arch::x86_64::idt::entries_from_direction_flag_set);
         let (outcome, held, leaked, taken) =
             load_user_program(logger, program.image, true, name, program.argv, None);
         let crossed = kernel::userland::close_spawn_window(window);

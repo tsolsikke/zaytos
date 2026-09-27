@@ -3,5 +3,6 @@
 pub mod cpu_state;
 pub mod fp;
 pub mod gdt;
+pub mod idt;
 pub mod paging;
 pub mod stack;

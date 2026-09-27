@@ -44,7 +44,6 @@ pub mod console;
 pub mod frame_allocator;
 pub mod graphics;
 pub mod heap;
-pub mod idt;
 pub mod input;
 pub mod interrupts;
 pub mod irq;

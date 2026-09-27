@@ -15,7 +15,7 @@ use common::log::Logger;
 use common::machine::pc::serial::SerialPort;
 
 use crate::arch::x86_64::gdt;
-use crate::idt;
+use crate::arch::x86_64::idt;
 use crate::irq;
 
 /// 探りの各段で待つスピン上限（S5-c）。上限の無い待ちを書かない。

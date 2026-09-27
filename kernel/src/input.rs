@@ -69,7 +69,7 @@ static DELIVERED: AtomicU64 = AtomicU64::new(0);
 ///
 /// # 消費するのは 1 か所である
 ///
-/// **終了させる地点だけが消費する**（`crate::idt` の LAPIC タイマの分岐）。
+/// **終了させる地点だけが消費する**（`crate::arch::x86_64::idt` の LAPIC タイマの分岐）。
 /// **深さ 1 では消費されず、立ったまま残る。** それでよい——
 /// **終了させる地点は深さ 2 以上でしか発火しないので、残っていても何も起きない。**
 /// **次に子を起こすとき、`crate::userland` が起こす直前に降ろす**
@@ -365,7 +365,7 @@ pub fn read_events(dst: &mut [u8]) -> usize {
     let ticks = if cfg!(feature = "input-events-zero-the-time") {
         0
     } else {
-        crate::idt::monotonic_ticks()
+        crate::arch::x86_64::idt::monotonic_ticks()
     };
     let hz = u64::from(crate::irq::timer_frequency_hz());
     let (secs, nanos) = common::time::timespec_from_ticks(ticks, hz);
