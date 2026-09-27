@@ -27,7 +27,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use common::addr::VirtAddr;
 use common::critical::critical_nesting_depth;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::open_direct_serial;
 use common::percpu::{PerCpu, MAX_CPUS};
 
 use crate::arch::x86_64::{
@@ -1859,12 +1859,11 @@ extern "C" {
     static zaytos_worker_body: u8;
 }
 
-/// COM1 へ 1 行書く小さな補助。デモの出力はメインループの外の複数文脈から
-/// 出るので、確保もロックも介さずシリアルへ直接書く（ADR-0019 §4、パニック
+/// 観測用のシリアル（PC では COM1）へ 1 行書く小さな補助。デモの出力はメインループの外の複数文脈から
+/// 出るので、確保もロガーも BKL も介さずにシリアルへ直接書く（ADR-0019 §4、パニック
 /// 経路と同じ作法）。
 fn serial_line(args: core::fmt::Arguments) {
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
-    serial.init();
+    let mut serial = open_direct_serial();
     let _ = writeln!(serial, "{args}");
 }
 
