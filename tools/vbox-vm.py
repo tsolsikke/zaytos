@@ -91,7 +91,7 @@ import time
 # **`.pyc` を書かせない**（隣を import すると `tools/__pycache__/` ができ、`git status` に出る）。
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-# **全検査の間は VM を起こさない**（`tools/check_lock.py`。2026-09-25。検査の体系の改善の ③）。
+# **全検査の間は VM を起動しない**（`tools/check_lock.py`。2026-09-25。検査の体系の改善の ③）。
 import check_lock  # noqa: E402
 
 #: 名前の形。**`zaytos-` で始まり、続きは小文字・数字・`-` で 1〜24 文字。**
@@ -106,10 +106,10 @@ DEFAULT_BASEFOLDER = r"D:\Users\User\VirtualBox VMs"
 #: 記憶の制御器の名前（この道具が作る VM の中だけの名前である）。
 CONTROLLER = "SATA"
 
-#: シリアルの口（カーネルは 0x3F8 を見る）。
+#: シリアルポート（カーネルは 0x3F8 を見る）。
 SERIAL_PORT, SERIAL_IRQ = "0x3f8", "4"
 
-#: 走行の記録の置き場（リポジトリの `target/` の下。**公開物ではない**）。
+#: 実行の記録の置き場（リポジトリの `target/` の下。**公開物ではない**）。
 RECORD_ROOT = os.path.join("target", "vbox")
 
 #: `run` が送る打鍵: `a` と Enter の押下と解放（PS/2 のセット 1）。**4 バイトである。**
@@ -256,7 +256,7 @@ def create(vm, image, memory, cpus, replace):
             "--basefolder", vm.basefolder_windows,
         ]
     )
-    # **像を置き場へ写してから直す。** **WSL の側の道（`\\\\wsl.localhost\\...`）を
+    # **イメージを置き場へコピーしてから直す。** **WSL の側の道（`\\\\wsl.localhost\\...`）を
     # VirtualBox へ渡さない**——**UNC の道は遅く、失敗の切り分けが増える。**
     shutil.copyfile(image, vm.raw)
     if os.path.isfile(vm.vdi):
@@ -274,7 +274,7 @@ def create(vm, image, memory, cpus, replace):
             "--firmware", "efi64",
             "--memory", str(memory),
             "--cpus", str(cpus),
-            # **PS/2 のキーボードで確かめる段である**（USB は HW-f）。
+            # **PS/2 のキーボードで確かめる段階である**（USB は HW-f）。
             "--keyboard", "ps2",
             "--mouse", "ps2",
             "--audio-enabled", "off",
@@ -307,8 +307,8 @@ def create(vm, image, memory, cpus, replace):
             "--medium", windows_path(vm.vdi),
         ]
     )
-    # **作ったときの記録を残す**（2-2）。**`run` がこれを写す**——**VM の中の像がどの木から
-    # 建ったかを、走行の記録から辿れるようにする。**
+    # **作ったときの記録を残す**（2-2）。**`run` がこれをコピーする**——**VM の中のイメージがどのツリーから
+    # ビルドされたかを、実行の記録から辿れるようにする。**
     stamp = time.strftime("%Y%m%d-%H%M%S")
     folder = os.path.join(RECORD_ROOT, vm.name)
     os.makedirs(folder, exist_ok=True)
@@ -331,9 +331,9 @@ def create(vm, image, memory, cpus, replace):
 
 
 def start(vm, gui):
-    # **錠を先に見る**——**全検査の間は、`VBoxManage` を 1 度も呼ばずに 75 で断る**（2026-09-25）。
-    # **起こしたまま終わるので錠を持ち続けられない。** **「起こしたまま」の印を残し、`stop` で消す**
-    # ——**全検査の入口は、印が在れば断る**（`tools/check_lock.py`）。
+    # **ロックを先に見る**——**全検査の間は、`VBoxManage` を 1 度も呼ばずに 75 で断る**（2026-09-25）。
+    # **起こしたまま終わるのでロックを持ち続けられない。** **「起こしたまま」の目印を残し、`stop` で消す**
+    # ——**全検査の入口は、目印が在れば断る**（`tools/check_lock.py`）。
     check_lock.hold_shared_or_exit(f"tools/vbox-vm.py start --name {vm.name}")
     if not vm.exists():
         raise Refused(f"{vm.name} が無い（先に `create` を回すこと）")
@@ -382,7 +382,7 @@ def delete(vm):
         vboxmanage(["unregistervm", vm.name, "--delete"], check=False)
     check_lock.clear_vbox_running(vm.name)
     # **道具が置いたものも消す**（2-2）。**`unregistervm --delete` は VirtualBox の知っている
-    # ファイルしか消さない**——**シリアルの写しと画面が残り、フォルダが空にならなかった**（実測）。
+    # ファイルしか消さない**——**シリアルのコピーと画面が残り、フォルダが空にならなかった**（実測）。
     for leftover in (vm.raw, vm.vdi, vm.serial, os.path.join(vm.folder, "screen.png")):
         if os.path.isfile(leftover):
             os.unlink(leftover)
@@ -420,8 +420,8 @@ def run(vm, image, timeout):
     起こす → プロンプトを待つ → 計数を読む → 打鍵を送る → シェルの答えを待つ → 計数を読む → 止める
     → 写す。**待ちには上限がある**（`timeout` 秒。出なければ、そこまでの記録を残して止める）。
     """
-    # **錠を先に見る**——**全検査の間は、`VBoxManage` を 1 度も呼ばずに 75 で断る**（2026-09-25）。
-    # **走る間は錠を持つ**（プロセスが終わるまで）。
+    # **ロックを先に見る**——**全検査の間は、`VBoxManage` を 1 度も呼ばずに 75 で断る**（2026-09-25）。
+    # **走る間はロックを持つ**（プロセスが終わるまで）。
     check_lock.hold_shared_or_exit(f"tools/vbox-vm.py run --name {vm.name}")
     if not vm.exists():
         raise Refused(f"{vm.name} が無い（先に `create` を回すこと）")
@@ -467,7 +467,7 @@ def run(vm, image, timeout):
             write_lines(os.path.join(record, "counters-after.txt"), [read_counters(vm).rstrip()])
     finally:
         vboxmanage(["controlvm", vm.name, "poweroff"], check=False)
-        # **止まりきるまで待つ**（`VBox.log` を写すため）。上限つき。
+        # **止まりきるまで待つ**（`VBox.log` をコピーするため）。上限つき。
         stop_deadline = time.monotonic() + 30
         while time.monotonic() < stop_deadline:
             state = vboxmanage(["showvminfo", vm.name, "--machinereadable"], check=False).stdout
@@ -575,7 +575,7 @@ def selftest():
     )
 
 
-#: 別のプロセスとして錠を排他で持つ（`lock_refusals` が使う）。**上限 30 秒で自分で降りる。**
+#: 別のプロセスとしてロックを排他で持つ（`lock_refusals` が使う）。**上限 30 秒で自分で終了する。**
 HOLD_EXCLUSIVELY = (
     "import fcntl, sys, time\n"
     "handle = open(sys.argv[1], 'a+')\n"
@@ -649,7 +649,7 @@ def main(argv=None):
     parser.add_argument("--memory", type=int, default=2048, help="メモリ（MiB）")
     # **既定は 4 個**（運用者の判断 3。2026-09-24）。**VirtualBox の EFI は 2 個と 3 個で落ちる**
     # （1 個と 4 個は起動する。実測。2026-09-23）。**カーネルの `MAX_CPUS` は 2 なので、4 個では
-    # AP を 1 つ起こして SMP で走る。**
+    # AP を 1 つ起動して SMP で走る。**
     parser.add_argument("--cpus", type=int, default=4, help="CPU の数（2 と 3 は EFI が落ちる）")
     parser.add_argument("--gui", action="store_true", help="画面を開いて起こす")
     parser.add_argument("--replace", action="store_true", help="在る VM を消してから作る")

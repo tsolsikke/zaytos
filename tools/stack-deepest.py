@@ -50,15 +50,15 @@ import signal
 # **`.pyc` を書かせない**（隣を import すると `tools/__pycache__/` ができ、`git status` に出る）。
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-# **全検査の間は QEMU を起こさない**（`tools/check_lock.py`。2026-09-25。検査の体系の改善の ③）。
+# **全検査の間は QEMU を起動しない**（`tools/check_lock.py`。2026-09-25。検査の体系の改善の ③）。
 # **全検査の中から呼ばれたとき（`--full` の道具の確かめ）は、持ち主の下で取らずに進む。**
 import check_lock  # noqa: E402
 
 
-# **QEMU は xtask の起動の口（`xtask/src/launch.rs`）と同じ形で起こす**（2026-09-24。ホストの保護）。
-# 書く側の上限を prlimit の fsize でカーネルに持たせ、SIGXFSZ を無視して起こす（越えた書き込みは
+# **QEMU は xtask の起動の入口（`xtask/src/launch.rs`）と同じ形で起動する**（2026-09-24。ホストの保護）。
+# 書く側の上限を prlimit の fsize でカーネルに持たせ、SIGXFSZ を無視して起動する（越えた書き込みは
 # EFBIG で失敗するだけで、コアを吐かない。WSL の core_pattern はパイプで、RLIMIT_CORE が届かない）。
-# 自分の組で起こし、止めるときは組ごと SIGKILL を送る。
+# 自分の組で起動し、止めるときは組ごと SIGKILL を送る。
 QEMU_FILE_LIMIT = 4 << 30
 CAPPED = ["sh", "-c", "trap '' XFSZ; exec \"$@\"", "zaytos-qemu", "prlimit",
           f"--fsize={QEMU_FILE_LIMIT}", "--core=0", "--"]
@@ -255,7 +255,7 @@ def unwind(remote, rsp, rip):
         cfa = sp + offset
         if cfa > TOP:
             return chain
-        # 1 つ前の関数（いま `pc` が居る関数）の枠の大きさを、その行に添える。
+        # 1 つ前の関数（いま `pc` が居る関数）のフレームの大きさを、その行に添える。
         chain[-1] = chain[-1][:3] + (offset - 8,)
         ra = word(cfa - 8)
         if ra not in RETURN_SITES:

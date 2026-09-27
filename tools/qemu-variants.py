@@ -60,14 +60,14 @@ import signal
 # **`.pyc` を書かせない**（隣を import すると `tools/__pycache__/` ができ、`git status` に出る）。
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-# **全検査の間は QEMU を起こさない**（`tools/check_lock.py`。2026-09-25。検査の体系の改善の ③）。
+# **全検査の間は QEMU を起動しない**（`tools/check_lock.py`。2026-09-25。検査の体系の改善の ③）。
 import check_lock  # noqa: E402
 
 
-# **QEMU は xtask の起動の口（`xtask/src/launch.rs`）と同じ形で起こす**（2026-09-24。ホストの保護）。
-# 書く側の上限を prlimit の fsize でカーネルに持たせ、SIGXFSZ を無視して起こす（越えた書き込みは
+# **QEMU は xtask の起動の入口（`xtask/src/launch.rs`）と同じ形で起動する**（2026-09-24。ホストの保護）。
+# 書く側の上限を prlimit の fsize でカーネルに持たせ、SIGXFSZ を無視して起動する（越えた書き込みは
 # EFBIG で失敗するだけで、コアを吐かない。WSL の core_pattern はパイプで、RLIMIT_CORE が届かない）。
-# 自分の組で起こし、止めるときは組ごと SIGKILL を送る。
+# 自分の組で起動し、止めるときは組ごと SIGKILL を送る。
 QEMU_FILE_LIMIT = 4 << 30
 CAPPED = ["sh", "-c", "trap '' XFSZ; exec \"$@\"", "zaytos-qemu", "prlimit",
           f"--fsize={QEMU_FILE_LIMIT}", "--core=0", "--"]
@@ -138,7 +138,7 @@ def run_variant(name, wait):
     shutil.copy(os.path.join(ROOT, "target", "disk0.img"), os.path.join(out, "disk0.img"))
     shutil.copy(OVMF_VARS, os.path.join(out, "vars.fd"))
     # **socket のパスは短く保つ**（`sun_path` は 108 バイト。`xtask` の `ensure_socket_path_fits`）。
-    # **pid を入れる**（2026-09-25）——**/tmp はホスト全体で共有され、同じ変種を 2 つ起こすとぶつかる。**
+    # **pid を入れる**（2026-09-25）——**/tmp はホスト全体で共有され、同じ変種を 2 つ起動するとぶつかる。**
     sock = f"/tmp/zaytos-variant-{name}-{os.getpid()}.sock"
     if os.path.exists(sock):
         os.remove(sock)
@@ -152,8 +152,8 @@ def run_variant(name, wait):
     if cpu != "-":
         args += ["-cpu", cpu]
     # **ESP の渡し方（`ADR-0068` の HW-e）。** **`media` の変種は、GPT と FAT32 を自分で書いた
-    # 1 つの像を渡す**（VirtualBox と実機と同じ形）——**`fat:rw:` は QEMU だけの道である。**
-    # **像は `cargo xtask image` が置く。**
+    # 1 つのイメージを渡す**（VirtualBox と実機と同じ形）——**`fat:rw:` は QEMU だけの道である。**
+    # **イメージは `cargo xtask image` が置く。**
     if esp == "media":
         image = os.path.join(ROOT, "target", "media", "zaytos.img")
         shutil.copy(image, os.path.join(out, "zaytos.img"))
@@ -220,7 +220,7 @@ def main():
     options = parser.parse_args()
     if options.list:
         # **表の欄は 6 つである**（2026-09-24 に CPU の欄を足した）。**5 つで開いていたので、
-        # 足した後ずっと `--list` が落ちていた**（2026-09-25 に基底の確かめを置いて見つけた）。
+        # 足した後ずっと `--list` が落ちていた**（2026-09-25 に基本の検査の確かめを設けて見つけた）。
         for name, (machine, mem, serial, disk, esp, cpu) in VARIANTS.items():
             print(
                 f"{name}: -machine {machine} -m {mem} -serial {serial} "

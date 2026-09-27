@@ -104,8 +104,8 @@ def main():
                         help="基底の版を建てず、作業木の枠だけを読む（`cargo xtask check` の軽い確かめが使う）")
     options = parser.parse_args()
 
-    # **基底の版を建てない形**（2026-09-25）。**基底の版の取り出しと建てには分の単位が掛かる**ので、
-    # **`cargo xtask check` の基底は、作業木の `.debug_frame` を読めることだけを見る。**
+    # **基底の版をビルドしない形**（2026-09-25）。**基底の版のチェックアウトとビルドには分の単位が掛かる**ので、
+    # **`cargo xtask check` の基本の検査は、作業ツリーの `.debug_frame` を読めることだけを見る。**
     if options.working_tree_only:
         after = frames(build(ROOT, options.features))
         print(f"the working tree only; frame = max CFA offset - 8 (byte); {len(after)} function(s)")

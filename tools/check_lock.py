@@ -36,7 +36,7 @@ OWNER_ENV = "ZAYTOS_CHECK_LOCK_OWNER"
 REFUSED_EXIT_CODE = 75
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-#: 取った錠（プロセスが終わるまで開いたまま持つ。閉じると放れる）。
+#: 取ったロック（プロセスが終わるまで開いたまま持つ。閉じると放れる）。
 _HELD = []
 
 #: **確かめのときだけ**置き場を差し替える（`tools/vbox-vm.py selftest`）。**同じプロセスの中からしか
@@ -138,8 +138,8 @@ def probe(directory):
     path = os.path.join(directory, f"probe-{os.getpid()}")
     try:
         with open(path, "a+") as first, open(path, "a+") as second:
-            # **錠の fd が子へ継がれないこと**（2026-09-26。4.(3)）。**Python は既定で継がせない**（PEP 446）
-            # **が、確かめてから使う**——**継がれると、QEMU の子が錠を持ち続ける。**
+            # **ロックの fd が子へ継がれないこと**（2026-09-26。4.(3)）。**Python は既定で継がせない**（PEP 446）
+            # **が、確かめてから使う**——**継がれると、QEMU の子がロックを持ち続ける。**
             if os.get_inheritable(first.fileno()):
                 raise RuntimeError("錠のファイルの fd が子へ継がれる形で開いた")
             fcntl.flock(first, fcntl.LOCK_EX | fcntl.LOCK_NB)
