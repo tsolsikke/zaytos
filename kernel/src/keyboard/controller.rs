@@ -52,7 +52,7 @@ pub const CONFIG_TRANSLATION: u8 = 1 << 6;
 /// ポーリングの上限回数。
 ///
 /// **上限のない待機ループを書かない。** コントローラが応答しない場合に
-/// 無限に回ると、ハングと区別がつかなくなる。回数で打ち切り、呼び出し側が
+/// 無限に空回りすると、ハングと区別がつかなくなる。回数で打ち切り、呼び出し側が
 /// fail-fast できるよう [`ControllerError`] を返す。
 const POLL_LIMIT: usize = 10_000;
 
@@ -62,7 +62,7 @@ const POLL_LIMIT: usize = 10_000;
 /// 誰かがキーを押しっぱなしにしている。
 const DRAIN_LIMIT: usize = 32;
 
-/// フラッシュ時に「まだ出てこないか」を見張る回数。
+/// フラッシュ時に「まだ出てこないか」を監視する回数。
 ///
 /// **瞬間の OBF だけを見ても足りない。** 実際、その場では空でも、IRQ1 の
 /// マスクを外した直後に 1 バイト届く事象が観測された（ファームウェアが
@@ -188,7 +188,7 @@ pub unsafe fn write_config(value: u8) -> Result<(), ControllerError> {
 /// 出力バッファを消費する。IRQ1 がマスクされている間に呼ぶこと。
 pub unsafe fn drain_output_buffer() -> usize {
     let mut discarded = 0;
-    // 瞬間の OBF だけでなく、少しのあいだ見張る（DRAIN_SETTLE_ITERATIONS の
+    // 瞬間の OBF だけでなく、少しのあいだ監視する（DRAIN_SETTLE_ITERATIONS の
     // コメント参照）。上限つきなので、応答しないコントローラでも止まらない。
     for _ in 0..DRAIN_SETTLE_ITERATIONS {
         if output_buffer_full() {

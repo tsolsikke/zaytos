@@ -115,8 +115,8 @@ core::arch::global_asm!(
     ".globl zaytos_exception_stubs_end",
     "zaytos_exception_stubs_end:",
     ".p2align 4",
-    // **ラベルを公開する（2026-09-24）。** 全ゲートの飛び先を突き合わせる見張り
-    // （[`check_gates_lead_to_common_entries`]）が、この番地を読む。
+    // **ラベルを公開する（2026-09-24）。** 全ゲートの飛び先を突き合わせる監視
+    // （[`check_gates_lead_to_common_entries`]）が、このアドレスを読む。
     ".globl zaytos_exception_common",
     "zaytos_exception_common:",
     // ここに来た時点のスタック:
@@ -148,8 +148,8 @@ core::arch::global_asm!(
     "  push rax",
     // **方向フラグを降ろす（2026-09-24）。** **割り込みと例外は DF を変えずに入る**ので、
     // 割り込まれた側の DF=1 がそのまま Rust へ届く。**SysV ABI は関数の入口で DF=0 を
-    // 前提にしており、`rep movs` が逆向きに写す**——**ユーザーの `memmove` の逆向きの
-    // 写しの最中にタイマが入り、カーネルがスタックを越えて `.bss` の末尾まで写した**
+    // 前提にしており、`rep movs` が逆向きにコピーする**——**ユーザーの `memmove` の逆向きの
+    // コピーの最中にタイマが入り、カーネルがスタックを越えて `.bss` の末尾までコピーした**
     // （実測。`docs/troubleshooting.md`）。**`iretq` が RFLAGS を戻すので、割り込まれた側の
     // DF はそのまま返る。** **3 つの入口に同じものが在る**（IRQ とシステムコール）。
     "  .if {clear_df}",
@@ -162,7 +162,7 @@ core::arch::global_asm!(
     "  sub rsp, {adjust}",
     // 実測: 調整後の RSP そのものを第 2 引数として渡す。手計算の再現
     // ではなくレジスタの実値を渡すので、計算が間違っていれば handler 側の
-    // 検証で捕まる。
+    // 検証で検出される。
     "  mov rsi, rsp",
     "  call {handler}",
     // handler は戻らない契約。万一戻ってきたら未定義命令で止める。
@@ -213,7 +213,7 @@ const STACK_ALIGN_ADJUST: usize = 0;
 
 /// 共通の入口が方向フラグ（DF）を降ろすか（2026-09-24）。**1 なら `cld` を出す。**
 ///
-/// **`.if` で出し入れするのは、破壊の feature で系統ごとに抜くためである**
+/// **`.if` で出し入れするのは、破壊テストの feature で系統ごとに抜くためである**
 /// ——**3 つの入口は別々の `global_asm!` なので、1 つを抜いても他の 2 つは残る。**
 const CLEAR_DF_ON_EXCEPTION_ENTRY: usize = if cfg!(feature = "exception-entry-keeps-df-test") {
     0
@@ -226,7 +226,7 @@ const CLEAR_DF_ON_IRQ_ENTRY: usize = if cfg!(feature = "irq-entry-keeps-df-test"
 } else {
     1
 };
-/// 破壊 `idt-stub-skips-common-entry-test` が立っているか（1 なら、測定用 IPI のスタブが共通の
+/// 破壊テスト `idt-stub-skips-common-entry-test` が立っているか（1 なら、測定用 IPI のスタブが共通の
 /// 入口を飛ばす）。**`.if` で出し入れする**（[`CLEAR_DF_ON_EXCEPTION_ENTRY`] と同じ理由）。
 const STUB_SKIPS_COMMON_ENTRY: usize = if cfg!(feature = "idt-stub-skips-common-entry-test") {
     1
@@ -351,9 +351,9 @@ core::arch::global_asm!(
     ".globl zaytos_ipi_probe_stub",
     "zaytos_ipi_probe_stub:",
     "  .byte 0x68, 0x43, 0x00, 0x00, 0x00",
-    // 破壊 (2026-09-24, idt-stub-skips-common-entry): 共通の入口を通らず、Rust の `irq_entry` へ
+    // 破壊テスト (2026-09-24, idt-stub-skips-common-entry): 共通の入口を通らず、Rust の `irq_entry` へ
     // 直に飛ぶ。**`cld` も退避も飛ばす入口が 1 つ増えた形である。** **ゲートはこのスタブを指した
-    // ままなので、ゲートとスタブの既存の検査は通り、飛び先の見張りだけが捕まえる。**
+    // ままなので、ゲートとスタブの既存の検査は通り、飛び先の監視だけが検出する。**
     "  .if {stub_skips_common_entry}",
     "  jmp {skipped_to}",
     "  .else",
@@ -450,7 +450,7 @@ extern "C" {
 
 // システムコール（int 0x80）用のスタブと共通経路（M5-f-1、ADR-0020）。
 //
-// IRQ スタイルの復元経路（zaytos_irq_common）を写した別ブロックである。
+// IRQ スタイルの復元経路（zaytos_irq_common）をコピーした別ブロックである。
 // 退避・整列・call・復元・iretq の骨格は同じで、違うのは call 先が
 // `crate::syscall::syscall_entry` で、context を *mut で渡し、戻り値を RAX へ
 // 書き戻す点だけである。本番 IRQ 経路（irq_entry）へ syscall 固有の分岐を
@@ -490,7 +490,7 @@ core::arch::global_asm!(
     "  push rbx",
     "  push rax",
     // **方向フラグを降ろす（2026-09-24）。** 理由は例外の共通ルーチンの同じ行にある。
-    // **ユーザーは `std` の後に `int 0x80` を打てる**——**降ろさなければ、カーネルの写しの
+    // **ユーザーは `std` の後に `int 0x80` を打てる**——**降ろさなければ、カーネルのコピーの
     // 向きをユーザーが決められる。**
     "  .if {clear_df}",
     "  cld",
@@ -664,7 +664,7 @@ pub const IOAPIC_KEYBOARD_VECTOR: usize = 0x42;
 
 /// I/O APIC 経由の virtio-blk 用ベクタ（S13-d）。
 ///
-/// キーボード（`0x42`）・IPI 測定（`0x43`）と同じ「表の外の専用スタブ」の族で、
+/// キーボード（`0x42`）・IPI 測定（`0x43`）と同じ「表の外の専用スタブ」の種類で、
 /// 次の空きが `0x44` である。優先度クラスはキーボードと同じ 4。
 pub const IOAPIC_VIRTIO_VECTOR: usize = 0x44;
 
@@ -702,10 +702,10 @@ pub const SYSCALL_VECTOR: usize = 0x80;
 /// 条件である。起動時の DPL 配置検査（`main.rs`）もこの値を期待値として使うので、
 /// ゲート登録と検査の期待値が単一の定数から出る。
 ///
-/// 破壊 (M5-f-1-2, gate-dpl0): DPL=0 にする。Ring 3 からの int 0x80 がゲート
+/// 破壊テスト (M5-f-1-2, gate-dpl0): DPL=0 にする。Ring 3 からの int 0x80 がゲート
 /// DPL<CPL で #GP になり、`syscall_entry` に到達しない。起動時検査は期待値も 0 に
 /// なるので通り、異常は int 0x80 発行時の #GP として runtime に現れる（M5-e-1 の
-/// user-desc-dpl0 と同じ作りで、検査を先に発火させず runtime で捕まえる）。
+/// user-desc-dpl0 と同じ作りで、検査を先に発火させず runtime で検出する）。
 #[cfg(not(feature = "syscall-test-gate-dpl0"))]
 pub const SYSCALL_GATE_DPL: u8 = 3;
 #[cfg(feature = "syscall-test-gate-dpl0")]
@@ -745,9 +745,9 @@ static INTERRUPT_COUNTS: [AtomicU64; IDT_ENTRY_COUNT] =
 /// である）。
 static TIMER_TICKS: PerCpu<AtomicU64> = PerCpu::new([const { AtomicU64::new(0) }; MAX_CPUS]);
 
-/// 破壊 (S4-a, smp-ap-timer-share-ticks): per-CPU をやめて 1 つを共有する。
+/// 破壊テスト (S4-a, smp-ap-timer-share-ticks): per-CPU をやめて 1 つを共有する。
 ///
-/// per-CPU 化が「済んだように見えて共有のまま」という形を捕まえる
+/// per-CPU 化が「済んだように見えて共有のまま」という形を検出する
 /// （`GPR_BUF` で見たのと同じ形である）。共有すると 2 コアぶんが 1 つの
 /// カウンタへ入るので、コアごとの合計がベクタ別カウンタの 2 倍になる。
 #[cfg(feature = "smp-ap-timer-share-ticks-test")]
@@ -948,10 +948,10 @@ const TIMER_ACCOUNTING_SLACK: u64 = (MAX_CPUS as u64) * 2;
 
 /// コアごとのティックの合計と、配送された本数が一致するか（S4-a）。
 ///
-/// `smp-ap-timer-share-ticks` が捕まる先はここである。per-CPU をやめて
+/// `smp-ap-timer-share-ticks` が検出される場所はここである。per-CPU をやめて
 /// 1 つを共有すると、合計が配送数のおよそ 2 倍になり、[`TIMER_ACCOUNTING_SLACK`]
 /// をはるかに超える。「per-CPU 化が済んだように見えて共有のまま」を、
-/// 名前ではなく数で捕まえる。
+/// 名前ではなく数で検出する。
 pub fn timer_accounting_balances() -> bool {
     timer_ticks_total().abs_diff(timer_delivery_count()) <= TIMER_ACCOUNTING_SLACK
 }
@@ -972,7 +972,7 @@ pub fn interrupt_count(vector: usize) -> u64 {
     INTERRUPT_COUNTS[vector].load(Ordering::Relaxed)
 }
 
-/// 現時点の全ベクタのカウンタを写し取る。
+/// 現時点の全ベクタのカウンタをコピーする。
 ///
 /// 「この時点より後に何か届いたか」を見るための基準点。絶対値で
 /// 「全部 0 か」を見てはいけない。起動シーケンスの中でソフトウェア
@@ -1023,7 +1023,7 @@ pub fn interrupt_total_and_first_nonzero() -> (u64, Option<usize>) {
 ///
 /// 手計算の再現ではない。スタブが `call` の直前にレジスタから読んだ
 /// 実値を受け取って検査する。境界計算（[`STACK_ALIGN_ADJUST`] の導出）が
-/// 間違っていれば、ここで捕まる。
+/// 間違っていれば、ここで検出される。
 ///
 /// SysV ABI が要求するのは `call` 実行時点で `RSP % 16 == 0` であること。
 /// 関数入口では戻りアドレスの分だけずれて `RSP % 16 == 8` になるため、
@@ -1062,7 +1062,7 @@ pub(crate) fn check_stack_alignment(rsp_at_call: u64, path: &str, vector: u64) {
 /// RFLAGS の方向フラグ（DF, bit 10）。
 const RFLAGS_DIRECTION_FLAG: u64 = 1 << 10;
 
-/// カーネルへの入口の系統（2026-09-24）。**方向フラグの計器の添字である。**
+/// カーネルへの入口の系統（2026-09-24）。**方向フラグの計測の添字である。**
 #[derive(Clone, Copy)]
 pub enum EntryPath {
     Exception,
@@ -1083,8 +1083,8 @@ impl EntryPath {
 
 /// 割り込まれた側が DF=1 だった入場の数（2026-09-24。系統ごと）。
 ///
-/// **前提の計器である。** **0 なら、入口が DF を降ろすという主張は何も確かめていない**
-/// ——**普段のプログラムは DF=1 の窓がごく短い**（`memmove` の逆向きの写しの間だけ）。
+/// **前提の計測である。** **0 なら、入口が DF を降ろすという主張は何も確かめていない**
+/// ——**普段のプログラムは DF=1 のウィンドウがごく短い**（`memmove` の逆向きのコピーの間だけ）。
 /// **前提を作るのは `fault-test`・`syscall-test`・`spin` である。**
 static ENTRIES_FROM_DF_SET: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 
@@ -1097,15 +1097,15 @@ pub fn entries_from_direction_flag_set(path: EntryPath) -> u64 {
 ///
 /// # なぜ先頭なのか
 ///
-/// **DF=1 のまま走った Rust は、構造体の写しや配列の初期化の `rep movs` を逆向きに
+/// **DF=1 のまま走った Rust は、構造体のコピーや配列の初期化の `rep movs` を逆向きに
 /// 走らせる。** **実測で、`scheduler::states` の配列の初期化が自分のループの終わりの
-/// 番地を潰し、`.bss` の末尾まで写した**（`docs/troubleshooting.md`）。**何かを写すより
+/// アドレスを潰し、`.bss` の末尾までコピーした**（`docs/troubleshooting.md`）。**何かをコピーするより
 /// 前に見る。**
 ///
 /// # 見つけたら止まる
 ///
 /// **スタブが降ろさなかったのはカーネルの誤りである**（Halt and Dump）。**書式の組み立ても
-/// 写しを使いうるので、報告より先に降ろす。**
+/// コピーを使いうるので、報告より先に降ろす。**
 pub(crate) fn check_direction_flag(path: EntryPath, vector: u64, interrupted_rflags: u64) {
     if interrupted_rflags & RFLAGS_DIRECTION_FLAG != 0 {
         ENTRIES_FROM_DF_SET[path as usize].fetch_add(1, Ordering::Relaxed);
@@ -1154,7 +1154,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     // yield ベクタのときだけ別タスクの RSP を返す（下の分岐）。
     let no_switch_rsp = context as u64;
 
-    // **破壊（B-d）**——**カーネルへ入った時点で FP の状態を塗る。**
+    // **破壊テスト（B-d）**——**カーネルへ入った時点で FP の状態を塗る。**
     // **`ADR-0058` の Decision 2（カーネルは FP を使わないので、入って同じ
     // タスクへ戻るだけなら退避が要らない）の反証である。**
     //
@@ -1162,7 +1162,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     // **XMM のレジスタが生きているところへ入れるのは、非同期に入るこちら
     // だけである**（C の呼び出し規約では XMM は全部 caller-saved で、
     // `malloc` を跨ぐ時点で呼ぶ側が既に退避している）。**一方で、こちらが
-    // 描画の途中に入るかどうかは時機に依る**（実測で、1 文字の描画は
+    // 描画の途中に入るかどうかはタイミングに依る**（実測で、1 文字の描画は
     // 100 マイクロ秒ほど、ティックは 10 ミリ秒）。**必ず入るのは
     // システムコールの側である。**
     #[cfg(feature = "fp-clobber-on-kernel-entry-test")]
@@ -1191,11 +1191,11 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     //
     // 同時進入は BKL の中で数える（S4-b-3）。ここで別に数えると、
     // 定義が 2 つになる。
-    // 破壊 (S4-b-4, bkl-skip-timer-entry): ロックを取らず計数だけ行う。
+    // 破壊テスト (S4-b-4, bkl-skip-timer-entry): ロックを取らず計数だけ行う。
     // 数えているものが本番と違う（`acquire_counting_only` の doc）。
     //
     // **`Option` にしてあるのは、出口を通らない経路が 1 つあるからである**
-    // （S12 前の手当て、C）——**中断による畳み**は longjmp で出ていくので
+    // （S12 前の手当て、C）——**中断による終了処理**は longjmp で出ていくので
     // `Drop` が走らない。**`syscall_entry` が [`SYS_EXIT`] と `SYS_SPAWN` の
     // ために同じ形にしているのに倣う。**
     #[cfg(feature = "bkl-skip-timer-entry-test")]
@@ -1205,7 +1205,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     #[cfg(not(feature = "bkl-skip-timer-entry-test"))]
     let mut bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Irq));
 
-    // 破壊 (S4-b-4, bkl-widen-entry-window): 入口の保持区間を広げる。
+    // 破壊テスト (S4-b-4, bkl-widen-entry-window): 入口の保持区間を広げる。
     // 重なりの増幅器であって、素の重なりの頻度とは別である（feature の doc）。
     #[cfg(feature = "bkl-widen-entry-window-test")]
     for _ in 0..crate::bkl::WIDENED_ENTRY_WINDOW_SPINS {
@@ -1278,7 +1278,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         unsafe {
             crate::irq::end_of_interrupt_for_lapic_timer();
         }
-        // **中断（Ctrl+C）で遠征を畳む地点はここである（S12 前の手当て、C）。**
+        // **中断（Ctrl+C）で遠征を終了させる地点はここである（S12 前の手当て、C）。**
         //
         // **EOI を送った後でなければならない。** 下は longjmp で出ていくので、
         // **EOI より前に置くと、割り込みを終えないまま抜ける。**
@@ -1286,7 +1286,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         // ハンドラより後ろにあり、そこから抜けるとキーボードが二度と来ない。
         //
         // SAFETY: `context` はスタブが積んだ有効なフレームで、読み取りのみ。
-        // 畳む条件が揃ったときだけ longjmp する（戻らない）。
+        // 終了させる条件が揃ったときだけ longjmp する（戻らない）。
         unsafe { fold_if_interrupted(context, &mut bkl) };
         // AP もスケジューラへ入る（S4-c-3-2b）。
         //
@@ -1295,8 +1295,8 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         // ある。S4-c-3-2b で AP に担当タスク（AP 用アイドルタスク）ができ、
         // 起動時に sentinel を解くようになったので、その分岐は不要になった。
         //
-        // 破壊 `smp-ap-enter-scheduler` はここで引退した。分岐そのものが
-        // 無くなったので「分岐を外す」破壊は構成できない。役目
+        // 破壊テスト `smp-ap-enter-scheduler` はここで引退した。分岐そのものが
+        // 無くなったので「分岐を外す」破壊テストは構成できない。役目
         // （sentinel が止めることの実証）は `smp-ap-no-sentinel-clear` が
         // 引き継いでいる（あちらは分岐ではなく sentinel の解除を落とす）。
         return crate::task::on_timer_tick(no_switch_rsp);
@@ -1355,7 +1355,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         // 割り込みを上げられるようになる。宛先は純粋ロジックが決める
         // （スプリアスの扱いはマスタ側とスレーブ側で非対称）。
         //
-        // 破壊 (S13-d, virtio-skip-eoi-test): virtio の IRQ にだけ EOI を
+        // 破壊テスト (S13-d, virtio-skip-eoi-test): virtio の IRQ にだけ EOI を
         // 送らない。LAPIC の ISR ビットが立ったままになり、同じ優先度
         // クラス以下の割り込みが以後届かなくなる形を狙う。
         #[cfg(feature = "virtio-skip-eoi-test")]
@@ -1404,7 +1404,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
 /// [`crate::keyboard::delivery_vector`] を分けたのと同じ形である。
 ///
 /// `match` で剥がしているのは、失敗時のメッセージが読めるためである
-/// （`unwrap()` も固定トールチェインで const 評価できることは確認済み）。
+/// （`unwrap()` も固定ツールチェインで const 評価できることは確認済み）。
 pub const PIC_TIMER_VECTOR: usize = match crate::irq::vector_for(0) {
     Some(vector) => vector as usize,
     None => panic!("the timer IRQ has no vector"),
@@ -1533,10 +1533,10 @@ const SABOTAGED_STUB_INDEX: usize = PIC_VECTOR_SPAN - 1;
 
 /// `n` 番目の IRQ スタブのアドレス。
 ///
-/// 破壊（S6-a、`idt-irq-stub-offset-test`）: [`SABOTAGED_STUB_INDEX`] のときだけ
+/// 破壊テスト（S6-a、`idt-irq-stub-offset-test`）: [`SABOTAGED_STUB_INDEX`] のときだけ
 /// 1 本先を指す。[`check_irq_stub_table`] の `entries_ok` を落とすためのもので
 /// ある。この検査は「落ちるところを一度も見ていない」側だったので、
-/// 見るための破壊を置いた（`verification-coverage.md`）。
+/// 見るための破壊テストを用意した（`verification-coverage.md`）。
 fn irq_stub_address(index: usize) -> u64 {
     #[cfg(feature = "idt-irq-stub-offset-test")]
     let index = if index == SABOTAGED_STUB_INDEX {
@@ -1656,7 +1656,7 @@ pub struct CommonEntryCheck {
     pub irq: usize,
     /// システムコールの共通の入口へ行くゲートの数。
     pub syscall: usize,
-    /// どれにも行かなかった最初のゲート（ベクタ・ゲートの指す番地・読めた飛び先）。
+    /// どれにも行かなかった最初のゲート（ベクタ・ゲートの指すアドレス・読めた飛び先）。
     pub first_stray: Option<(usize, u64, Option<u64>)>,
 }
 
@@ -1668,7 +1668,7 @@ impl CommonEntryCheck {
 }
 
 /// **IDT の全ゲートが、3 つの共通の入口のどれかへ行くことを確かめる**（2026-09-24。`ADR-0018` の
-/// Addendum 9 の棚卸しの見張り）。
+/// Addendum 9 の棚卸しの監視）。
 ///
 /// # なぜ要るのか
 ///
@@ -1679,9 +1679,9 @@ impl CommonEntryCheck {
 ///
 /// # 読むのは既知のスタブだけである
 ///
-/// **ゲートの指す番地が、例外のスタブの表・IRQ のスタブの表・専用のスタブのどれかであるときだけ、
-/// その先の 16 バイトを読む。** **それ以外の番地は読まずに「どれにも行かない」とする**——任意の
-/// 番地を読んで #PF にしない。
+/// **ゲートの指すアドレスが、例外のスタブの表・IRQ のスタブの表・専用のスタブのどれかであるときだけ、
+/// その先の 16 バイトを読む。** **それ以外のアドレスは読まずに「どれにも行かない」とする**——任意の
+/// アドレスを読んで #PF にしない。
 pub fn check_gates_lead_to_common_entries() -> CommonEntryCheck {
     let exception_common = addr_of!(zaytos_exception_common) as u64;
     let irq_common = addr_of!(zaytos_irq_common) as u64;
@@ -1702,8 +1702,8 @@ pub fn check_gates_lead_to_common_entries() -> CommonEntryCheck {
             || irq_table.contains(&handler)
             || dedicated.iter().any(|&(_, stub)| stub == handler);
         let target = if known_stub {
-            // SAFETY: `handler` はこのカーネルの `.text` に在るスタブの番地である（上の 3 つの
-            // どれかと一致した）。スタブは 16 バイトの枠に収まっており（`STUB_SIZE`）、読むだけで
+            // SAFETY: `handler` はこのカーネルの `.text` に在るスタブのアドレスである（上の 3 つの
+            // どれかと一致した）。スタブは 16 バイトのスロットに収まっており（`STUB_SIZE`）、読むだけで
             // 書かない。
             let bytes = unsafe { core::slice::from_raw_parts(handler as *const u8, STUB_SIZE) };
             layout::stub_jump_target(bytes, handler)
@@ -1733,7 +1733,7 @@ pub fn check_gates_lead_to_common_entries() -> CommonEntryCheck {
 /// 突き合わせる。
 ///
 /// スタブに命令を 1 つ足して 16 バイトを超えると、終端までの距離が
-/// `256 * STUB_SIZE` からずれるため、ここで捕まる。
+/// `256 * STUB_SIZE` からずれるため、ここで検出される。
 pub fn check_stub_table() -> StubTableCheck {
     let base = addr_of!(zaytos_exception_stubs) as u64;
     let end = addr_of!(zaytos_exception_stubs_end) as u64;
@@ -2045,7 +2045,7 @@ pub unsafe fn clear_present(vector: usize) {
     }
 }
 
-/// Ring 3 由来なら畳むベクタ（S8-d）。#DE・#UD・#GP・#PF の 4 つ。
+/// Ring 3 由来ならプログラムを終了させて処理するベクタ（S8-d）。#DE・#UD・#GP・#PF の 4 つ。
 ///
 /// **Ring 3 の通常の違反はこの 4 つに現れる。** 選んだ理由はベクタごとに違う。
 ///
@@ -2057,31 +2057,31 @@ pub unsafe fn clear_present(vector: usize) {
 /// **#DF（8）は入れない。** 例外処理そのものが失敗した状態で、Ring 3 の違反では
 /// なくカーネルの前提が崩れている。ADR-0004 の fail-fast のままにする。
 ///
-/// # 反証をベクタごとに置かない理由
+/// # 反証をベクタごとに用意しない理由
 ///
-/// **畳みの条件はベクタごとに分岐しない。** 1 つのフラグ（[`crate::ring3`] の
-/// `IN_RING3`）と 1 つの分岐を 4 ベクタが共有している。したがって畳みを落とす破壊は
-/// **共有機構について 1 本**置く。**壊れ方がベクタで分岐しないものを、ベクタごとに
+/// **例外による終了処理の条件はベクタごとに分岐しない。** 1 つのフラグ（[`crate::ring3`] の
+/// `IN_RING3`）と 1 つの分岐を 4 ベクタが共有している。したがって例外による終了処理を落とす破壊テストは
+/// **共有機構について 1 本**用意する。**壊れ方がベクタで分岐しないものを、ベクタごとに
 /// 反証しても新しい情報が出ない。**
 ///
-/// **採らなかった案**——ベクタを選べる破壊を 4 本置く。費用は `--full` が 3 項目と
+/// **採らなかった案**——ベクタを選べる破壊テストを 4 本用意する。費用は `--full` が 3 項目と
 /// QEMU の実行 3 回ぶん増える。得られるのは既に共有機構で示したことの繰り返しで、
 /// 割に合わない。**「4 ベクタとも畳まれないことを確かめた」とは書かない。**
 /// 確かめたのは共有機構が生きていることで、4 ベクタ個別の肯定的な観測は
 /// 4 本の判定行が持つ。
 ///
-/// **失効条件——畳みの条件がベクタごとに分岐するようになったら、4 本置く案を
+/// **失効条件——例外による終了処理の条件がベクタごとに分岐するようになったら、4 本用意する案を
 /// 再検討すること。** S9 でシグナルやプロセス終了が入ると、ベクタごとに処理が
 /// 分かれる可能性がある。分かれた時点で「共有機構だから 1 本でよい」が崩れる。
 const FOLDABLE_VECTORS: [u8; FOLDABLE_VECTOR_COUNT] = FOLDABLE_VECTORS_VALUE;
 
-/// 畳めるベクタの本数。
+/// プログラムを終了させて処理できるベクタの本数。
 #[cfg(not(feature = "fp-mf-not-foldable-test"))]
 pub const FOLDABLE_VECTOR_COUNT: usize = 7;
 #[cfg(feature = "fp-mf-not-foldable-test")]
 pub const FOLDABLE_VECTOR_COUNT: usize = 6;
 
-/// 畳めるベクタ（`ADR-0058` で 2 つ増えた）。
+/// プログラムを終了させて処理できるベクタ（`ADR-0058` で 2 つ増えた）。
 ///
 /// # なぜ `#MF`(16) と `#XM`(19) を足したのか
 ///
@@ -2090,7 +2090,7 @@ pub const FOLDABLE_VECTOR_COUNT: usize = 6;
 /// Ring 3 のプログラムは `ldmxcsr` でマスクを外せる**——**利用者の操作で
 /// 到達できる経路である。**
 ///
-/// **足さないと、Ring 3 の 1 命令でカーネルが止まる**（畳めない例外は
+/// **足さないと、Ring 3 の 1 命令でカーネルが止まる**（プログラムを終了させて処理できない例外は
 /// dump+halt へ落ちる）。
 ///
 /// # 観測できるのは `#MF` の側だけである
@@ -2098,7 +2098,7 @@ pub const FOLDABLE_VECTOR_COUNT: usize = 6;
 /// **`#XM` は QEMU の TCG では上がらない**（実測。2026-09-07。**`MXCSR` の
 /// マスクを外して 0 で割っても何も起きない**——**同じコードはホストで
 /// `SIGFPE` になる**）。**`#MF`（x87）は上がる**ので、**判定と破壊テストはそちらに
-/// 置いた**（`--fp-test` の `/bin/fpfault`）。
+/// 用意した**（`--fp-test` の `/bin/fpfault`）。
 ///
 /// **`#XM` は実機のために入れてある。** **観測できないので、観測できないと
 /// 書く。**
@@ -2106,27 +2106,27 @@ pub const FOLDABLE_VECTOR_COUNT: usize = 6;
 /// # `#DB`(1) は掃きで見つけた
 ///
 /// **`EFLAGS.TF` は Ring 3 から `popfq` で立てられる**（`IF` と違って IOPL を
-/// 見ない）。**立てると次の命令の後に `#DB` が上がり、畳めないので
+/// 見ない）。**立てると次の命令の後に `#DB` が上がり、プログラムを終了させて処理できないので
 /// カーネルが止まっていた**（実測。2026-09-07。`/bin/dbfault`）。
 ///
 /// **ハードウェアブレークポイント（`DR` レジスタ）は Ring 3 から触れない**
 /// ので、**この経路は単一ステップだけである。** **カーネル由来の `#DB` は
-/// 畳まれない**（条件 2 の `CS.RPL == 3` が弾く）。
+/// 終了処理されない**（条件 2 の `CS.RPL == 3` が弾く）。
 #[cfg(not(feature = "fp-mf-not-foldable-test"))]
 const FOLDABLE_VECTORS_VALUE: [u8; FOLDABLE_VECTOR_COUNT] = [0, 1, 6, 13, 14, 16, 19];
-/// 破壊確認: `#MF` を畳めなくする（`ADR-0058`）。**Ring 3 の浮動小数点の
+/// 破壊テストでの確認: `#MF` でプログラムを終了させられなくする（`ADR-0058`）。**Ring 3 の浮動小数点の
 /// 例外で、カーネルが止まる形へ戻る**——**台本が最後まで進まない。**
 #[cfg(feature = "fp-mf-not-foldable-test")]
 const FOLDABLE_VECTORS_VALUE: [u8; FOLDABLE_VECTOR_COUNT] = [0, 1, 6, 13, 14, 19];
 
-/// 中断（Ctrl+C）が要求されていれば、走っている子の遠征を畳む（S12 前の手当て、C）。
+/// 中断（Ctrl+C）が要求されていれば、走っている子の遠征を終了させる（S12 前の手当て、C）。
 ///
 /// **条件が揃わなければ何もせずに戻る。揃えば戻らない。**
 ///
 /// # ここが「深さで分ける」唯一の場所である
 ///
-/// **旗を立てる側は深さを見ない**（`crate::input::note_scancode_for_interrupt`）。
-/// **消費する側もここだけである。** 深さ 1 では消費されず、旗は立ったまま残るが、
+/// **フラグを立てる側は深さを見ない**（`crate::input::note_scancode_for_interrupt`）。
+/// **消費する側もここだけである。** 深さ 1 では消費されず、フラグは立ったまま残るが、
 /// **子を起こす直前に降りる**（`crate::userland` が呼ぶ
 /// `crate::input::clear_interrupt_request`）ので持ち越さない。
 ///
@@ -2135,21 +2135,21 @@ const FOLDABLE_VECTORS_VALUE: [u8; FOLDABLE_VECTOR_COUNT] = [0, 1, 6, 13, 14, 19
 ///
 /// # 条件の順序に意味がある
 ///
-/// **旗を消費するのは最後である。** 先に消費すると、深さ 1 や
-/// カーネル由来の割り込みで**旗だけが消えて畳まれない。**
+/// **フラグを消費するのは最後である。** 先に消費すると、深さ 1 や
+/// カーネル由来の割り込みで**フラグだけが消えて終了させられない。**
 ///
 /// # 3 つの条件
 ///
-/// - **深さが 2 以上**（子が走っている）。深さ 1 はシェル自身なので畳まない
+/// - **深さが 2 以上**（子が走っている）。深さ 1 はシェル自身なので終了させない
 /// - **その割り込みが Ring 3 から来た**（`CS` の RPL が 3）。例外側の条件 (2) と
 ///   同じ形で、**CPU が積んだ事実だけを見る**
-/// - **旗が立っている**（そして降ろす）
+/// - **フラグが立っている**（そして降ろす）
 ///
 /// # Safety
 ///
 /// `context` が有効な [`IrqContext`] を指すこと。遠征中（深さ 2 以上）なら
 /// `RECOVERY` は `ring3::enter` が保存済みである。EOI を送った後に呼ぶこと。
-/// 起動からの単調なティック（W2-d+。時刻の口が読む）。
+/// 起動からの単調なティック（W2-d+。時刻の入口が読む）。
 ///
 /// # 既存のカウンタは時刻に使えない
 ///
@@ -2180,7 +2180,7 @@ pub fn monotonic_ticks() -> u64 {
 
 /// 単調なティックを 1 つ進める（W2-d+）。**BSP だけが進める**（[`MONOTONIC_TICKS`] の doc）。
 fn advance_monotonic_ticks() {
-    // 破壊 (W2-d+, clock-ap-also-ticks): AP も進める。**時刻がコア数倍の速さで進む。**
+    // 破壊テスト (W2-d+, clock-ap-also-ticks): AP も進める。**時刻がコア数倍の速さで進む。**
     // **`-smp 2` では約 2 倍になるので、単調さではなく速さが壊れる。**
     #[cfg(feature = "clock-ap-also-ticks")]
     MONOTONIC_TICKS.fetch_add(1, Ordering::Relaxed);
@@ -2203,37 +2203,37 @@ fn advance_monotonic_ticks() {
 /// **シェルは遠征中（深さ 1）にタイマ IRQ を受け続けるので、ここを通る。**
 /// **打鍵にも待ちにも依らない**——**タイマは 100Hz で入り、セッションは数十秒ある。**
 ///
-/// # 破壊では 0 になる
+/// # 破壊テストでは 0 になる
 ///
 /// **`kill-fold-at-depth-one-test` は [`MINIMUM_DEPTH`] を 1 にするので、深さ 1 は
 /// この分岐へ来ない。**
 ///
 /// # なぜ「深さ 1 で畳んだ回数」を数えないのか
 ///
-/// **それでは破壊が捕まらない。** **畳むには「深さ 1」と「Ring 3 から来た IRQ」の
+/// **それでは破壊が捕まらない。** **終了させるには「深さ 1」と「Ring 3 から来た IRQ」の
 /// 両方が要るが、待つ形ではシェルが Ring 3 に居るのは `read(0)` が戻ってから次の
 /// `read(0)` へ入るまでの μs 単位しかない**——**打鍵の間隔 32 ミリ秒に対して 1% 未満の
-/// 見込みで、破壊を立てても 0 のままになる**（`ADR-0061`。**実測で 4 回続けて
-/// 捕まらなかった**）。**弾いた側を数えると、その窓に依らない。**
+/// 見込みで、破壊テストを立てても 0 のままになる**（`ADR-0061`。**実測で 4 回続けて
+/// 検出されなかった**）。**弾いた側を数えると、そのウィンドウに依らない。**
 static DEPTH_ONE_NOT_FOLDED: AtomicU64 = AtomicU64::new(0);
 
-/// [`DEPTH_ONE_NOT_FOLDED`] の値（W2-c-2 の手当て。`init` がセッションの後に出す）。
+/// [`DEPTH_ONE_NOT_FOLDED`] の値（W2-c-2 の対策。`init` がセッションの後に出す）。
 pub fn depth_one_not_folded() -> u64 {
     DEPTH_ONE_NOT_FOLDED.load(Ordering::Relaxed)
 }
 
 unsafe fn fold_if_interrupted(context: &IrqContext, bkl: &mut Option<crate::bkl::BklGuard>) {
-    // 破壊 (S12 前の手当て C, kill-fold-at-depth-one): 深さ 1 でも畳む。
-    // **シェル自身が Ctrl+C で死ぬ**ので、`init` が起こし直す回数が増える。
+    // 破壊テスト (S12 前の手当て C, kill-fold-at-depth-one): 深さ 1 でも終了させる。
+    // **シェル自身が Ctrl+C で死ぬ**ので、`init` が起動し直す回数が増える。
     #[cfg(feature = "kill-fold-at-depth-one-test")]
     const MINIMUM_DEPTH: usize = 1;
     #[cfg(not(feature = "kill-fold-at-depth-one-test"))]
     const MINIMUM_DEPTH: usize = 2;
 
     let depth = crate::ring3::depth();
-    // **起こしっぱなしのスロットは深さ 1 でも畳む（`ADR-0063` の (b3)）。** **そこに居るのは
+    // **切り離して起動するスロットは深さ 1 でも終了させる（`ADR-0063` の (b3)）。** **そこに居るのは
     // 常に子で、シェルは居ない**——**`spin | cat` の `spin` はスロット 1 の深さ 1 である。**
-    // **1 回の押しで畳むのは 1 本である**（旗は `take` で 1 回だけ消費される）。**両方が
+    // **1 回の押しで終了させるのは 1 本である**（フラグは `take` で 1 回だけ消費される）。**両方が
     // Ring 3 で回っていれば 2 回押す。** **カーネルの中で待っている子には届かない**
     // （`ADR-0063` の (b3) の限界）。
     let minimum_depth = if crate::ring3::current_slot() == crate::task::detached_slot() {
@@ -2242,8 +2242,8 @@ unsafe fn fold_if_interrupted(context: &IrqContext, bkl: &mut Option<crate::bkl:
         MINIMUM_DEPTH
     };
     if depth < minimum_depth {
-        // **深さ 1 を弾いたことを数える（W2-c-2 の手当て）。**
-        // **既定では 1 以上、破壊では 0 である**（[`DEPTH_ONE_NOT_FOLDED`] の doc）。
+        // **深さ 1 を弾いたことを数える（W2-c-2 の対策）。**
+        // **既定では 1 以上、破壊テストでは 0 である**（[`DEPTH_ONE_NOT_FOLDED`] の doc）。
         if depth == 1 {
             DEPTH_ONE_NOT_FOLDED.fetch_add(1, Ordering::Relaxed);
         }
@@ -2262,8 +2262,8 @@ unsafe fn fold_if_interrupted(context: &IrqContext, bkl: &mut Option<crate::bkl:
     // **取ったまま出ると二度と解かれない**（`syscall_entry` の [`SYS_EXIT`] と
     // まったく同じ形である）。
     //
-    // 破壊 (S12 前の手当て C, kill-fold-keep-bkl): 解かずに畳む。次に BKL を
-    // 取る者が、同じコアの再取得として捕まえる。**`user-exit-keep-bkl` と
+    // 破壊テスト (S12 前の手当て C, kill-fold-keep-bkl): 解かずに終了させる。次に BKL を
+    // 取る者が、同じコアの再取得として検出する。**`user-exit-keep-bkl` と
     // 同じ機序で、入口が `Syscall` ではなく `Irq` である点だけが違う。**
     #[cfg(not(feature = "kill-fold-keep-bkl-test"))]
     drop(bkl.take());
@@ -2274,10 +2274,10 @@ unsafe fn fold_if_interrupted(context: &IrqContext, bkl: &mut Option<crate::bkl:
     unsafe { crate::ring3::leave_ring3() }
 }
 
-/// 畳むと決めたフレームが信用できるかを見る（S8-c）。
+/// 終了処理すると決めたフレームが信用できるかを見る（S8-c）。
 ///
-/// 畳みは例外ハンドラの外へ制御を戻す唯一の経路なので、**戻る先を決めるのに使う値が
-/// 信用できないなら畳まない。** 畳まなければ従来どおり dump+halt へ落ちる。
+/// 例外による終了処理は例外ハンドラの外へ制御を戻す唯一の経路なので、**戻る先を決めるのに使う値が
+/// 信用できないなら終了処理をしない。** 終了処理をしなければ従来どおり dump+halt へ落ちる。
 ///
 /// # 判定に使う量の選び方
 ///
@@ -2297,19 +2297,19 @@ unsafe fn fold_if_interrupted(context: &IrqContext, bkl: &mut Option<crate::bkl:
 /// # 期待するスタックは IDT のゲートから引く
 ///
 /// 行き先を決めるのは **そのベクタのゲートの IST 番号**である。IST を持つなら
-/// その IST スタック、持たないなら TSS.RSP0 で、畳む区間の RSP0 は遠征専用
+/// その IST スタック、持たないなら TSS.RSP0 で、終了処理する区間の RSP0 は遠征専用
 /// スタックである。
 ///
 /// **ベクタから直に決め打たない。** 最初はそう書いて落ちた——`stack-overflow-df-test`
 /// は **#PF に IST を与えない**構成で、その build では Ring 3 の #PF が RSP0 へ
-/// 切り替わる。IST2 を決め打つと正当なフレームを破損と判定し、畳めるはずの #PF が
-/// 畳まれなくなる。**期待は、実際に構成した側と同じ出所から引く。**
+/// 切り替わる。IST2 を決め打つと正当なフレームを破損と判定し、プログラムを終了させて処理できるはずの #PF が
+/// 終了処理されなくなる。**期待は、実際に構成した側と同じ出所から引く。**
 ///
 /// **枝は 3 つある。** IST1 / IST2 / IST 無しの 3 つに加えて、
 /// **「IST 番号を持つが、その番号のスタックを据えていない」場合は偽を返す。**
 /// 据えているのは IST1（#DF）と IST2（#PF）の 2 本だけなので、それ以外の番号を
 /// 指すゲートがあれば**期待するスタックが決められない。** 決められないまま
-/// 畳むより、畳まずに dump+halt へ落とすほうが安全側である。
+/// 終了処理するより、終了処理せずに dump+halt へ落とすほうが安全側である。
 fn exception_frame_is_trustworthy(vector: u8, cs: u64, handler_rsp: u64) -> bool {
     let cs_is_known = cs == crate::gdt::USER_CODE_SELECTOR.bits() as u64
         || cs == crate::gdt::USER_CODE32_SELECTOR.bits() as u64;
@@ -2333,7 +2333,7 @@ fn exception_frame_is_trustworthy(vector: u8, cs: u64, handler_rsp: u64) -> bool
     handler_rsp >= bottom && handler_rsp < top
 }
 
-/// 例外の共通処理。Ring 3 由来の 4 ベクタは畳んで遠征の呼び出し元へ戻し（S8）、
+/// 例外の共通処理。Ring 3 由来の 4 ベクタは終了処理して遠征の呼び出し元へ戻し（S8）、
 /// それ以外はレジスタ一式をシリアルへ出して停止する。
 ///
 /// スタブから `extern "sysv64"` で呼ばれる。Rust の既定 ABI はレイアウトが
@@ -2368,16 +2368,16 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
     //   (1) ベクタが FOLDABLE_VECTORS のいずれか
     //   (2) 例外フレームの CS の RPL==3（Ring 3 由来。カーネル由来は CS.RPL=0 で
     //       ここで弾かれる）
-    //   (3) 今 Ring 3 にいる（カーネルの中で起きたものは畳まない）
+    //   (3) 今 Ring 3 にいる（カーネルの中で起きたものは終了処理の対象にしない）
     // (3) は crate::ring3::should_fold が見る。
     //
-    // S8-a: フォルト RIP の厳密一致を条件から外した。畳んだ位置は記録して、
+    // S8-a: フォルト RIP の厳密一致を条件から外した。終了させた位置は記録して、
     // 予期と合っているかは遠征の呼び出し側が主張する（ring3.rs のモジュール doc）。
     //
-    // S8-c: 3 条件を満たしても、フレームが信用できなければ畳まない。
+    // S8-c: 3 条件を満たしても、フレームが信用できなければ終了処理の対象にしない。
     //
-    // 破壊 (S8-c, corrupt-frame-cs): フレームの CS を既知でない値へ差し替える。
-    // 0x33 は GDT の index 6（TSS の枠）で RPL=3。コードセレクタとして載ることは
+    // 破壊テスト (S8-c, corrupt-frame-cs): フレームの CS を既知でない値へ差し替える。
+    // 0x33 は GDT の index 6（TSS のスロット）で RPL=3。コードセレクタとして載ることは
     // 無いので「フレームが壊れている」の代表になる。RPL=3 は保つので条件 (2) は
     // 通り、落ちるのが健全性判定であることが分かる。
     #[cfg(not(feature = "ring3-test-corrupt-frame-cs"))]
@@ -2404,9 +2404,9 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
                 );
             }
         }
-        // 畳める形の例外だが、フレームが信用できない。畳まずに下の dump+halt へ落ちる。
+        // 終了処理できる形の例外だが、フレームが信用できない。終了処理せずに下の dump+halt へ落ちる。
         // **この行が「畳めたはずなのに畳まなかった」ことの唯一の手がかりである。**
-        // 出さないと、もともと畳まない例外との区別がログから付かない。
+        // 出さないと、もともと終了処理の対象でない例外との区別がログから付かない。
         let _ = writeln!(
             serial,
             "[ERROR] exception frame is not trustworthy (cs={frame_cs:#x}, handler \

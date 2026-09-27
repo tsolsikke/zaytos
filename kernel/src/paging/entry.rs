@@ -62,7 +62,7 @@ pub const PDE_HUGE_PAT: u64 = 1 << 12;
 /// Global。CR4.PGE が有効なとき、CR3 リロードでも TLB から追い出されない。
 pub const PTE_GLOBAL: u64 = 1 << 8;
 
-/// 共有メモリの印（ソフトウェア用の空きビット 9。`ADR-0065`）。**CPU は無視する。**
+/// 共有メモリの目印（ソフトウェア用の空きビット 9。`ADR-0065`）。**CPU は無視する。**
 /// **`AddressSpace::destroy` が「この葉はアロケータのものではない（`crate::shm` が
 /// 参照数で返す）」を見分けるのに使う。** **Linux も `struct page` 相当の管理に空きビットを
 /// 使う思想である**（`docs/architecture.md` の「ABIの形は合わせる」）。
@@ -177,7 +177,7 @@ pub const fn split_child_entry(huge_entry: u64, index: usize) -> u64 {
     }
 
     // 検証用に、わざと PCD を落とす（`paging-test-drop-pcd`）。
-    // 読み戻し照合が実際にキャッシュ属性の変化を捕まえるかを確かめるための
+    // 読み戻し照合が実際にキャッシュ属性の変化を検出するかを確かめるための
     // もので、通常ビルドには入らない。
     #[cfg(feature = "paging-test-drop-pcd")]
     let flags = flags & !PTE_PCD;

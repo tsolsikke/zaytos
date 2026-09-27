@@ -48,7 +48,7 @@ pub struct Resolved {
     pub huge: bool,
     /// 解決に使った葉のエントリの生の値（S9-b-1）。
     ///
-    /// **フラグを読み戻すために持つ。** 張った側とは独立にここまで降りてきた
+    /// **フラグを読み戻すために持つ。** マップした側とは独立にここまで降りてきた
     /// 値なので、`W` や `U` が実際に立っているかをこの値で照合できる。
     pub entry: u64,
 }
@@ -273,9 +273,9 @@ pub unsafe fn walk_user_accessible(
         if entry & bits::PRESENT == 0 {
             return Err(UserAccessError::NotPresent);
         }
-        // 破壊 (M5-f-2-1, skip-us): U=1 判定を外す。ユーザー範囲内で present だが U=0 の
+        // 破壊テスト (M5-f-2-1, skip-us): U=1 判定を外す。ユーザー範囲内で present だが U=0 の
         // ページ（無効3）が誤って受理され、battery が「拒否すべきを受理」を検出して halt
-        // する。walk_user_accessible を新設した中核（U 判定）そのものの破壊確認。
+        // する。walk_user_accessible を新設した中核（U 判定）そのものの破壊テストでの確認。
         #[cfg(not(feature = "syscall-test-validate-skip-us"))]
         if entry & bits::USER == 0 {
             return Err(UserAccessError::SupervisorOnly);
@@ -333,8 +333,8 @@ pub unsafe fn read_pml4_entry(pml4_phys: PhysAddr, direct_map: DirectMap, index:
 /// 恒等除去（B-2b-4）のフレーム会計に使う。`PML4[0]` 配下の何枚が到達不能に
 /// なるか（意図的リーク）、また `PML4[0]/[256]/[511]` 各配下のフレーム集合が
 /// 交わらないか（共有があると「落とせば到達不能になる」前提が崩れる。bootstrap
-/// 表は PD_shared を `[0]` と `[511]` で共有していた前例がある）を、落とす前に
-/// 実測する。重複除去しているので、共有された表フレームがあっても二重に数えない。
+/// テーブルは PD_shared を `[0]` と `[511]` で共有していた前例がある）を、落とす前に
+/// 実測する。重複除去しているので、共有されたテーブルフレームがあっても二重に数えない。
 ///
 /// # Safety
 ///
@@ -396,7 +396,7 @@ pub(crate) unsafe fn collect_subtree_table_frames(
             }
             let pt = PhysAddr::new_const(pde & bits::ADDR_4K);
             push(pt, &mut count)?;
-            // PT 配下は 4KiB 葉のみ。表フレームではないので降りない。
+            // PT 配下は 4KiB 葉のみ。テーブルフレームではないので降りない。
         }
     }
 

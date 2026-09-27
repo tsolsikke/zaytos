@@ -1,10 +1,10 @@
-//! APIC の MMIO を direct map 窓へ写像し、Local APIC を読めることを確かめる（S1-c）。
+//! APIC の MMIO を direct map ウィンドウへマップし、Local APIC を読めることを確かめる（S1-c）。
 //!
-//! # この段でやらないこと
+//! # この段階でやらないこと
 //!
 //! APIC へは移行しない。割り込みは PIC のままである（S2 が移行する）。
-//! ここでやるのは写像と、写像が効いていることの確認だけで、APIC のレジスタへ
-//! 一切書き込まない。AP 起こし（S3）、per-CPU、IPI も範囲外である。
+//! ここでやるのはマッピングと、マッピングが効いていることの確認だけで、APIC のレジスタへ
+//! 一切書き込まない。AP 起動（S3）、per-CPU、IPI も範囲外である。
 //!
 //! # 粒度が 4KiB であることは、書いた結果ではなく構造で決まる
 //!
@@ -12,23 +12,23 @@
 //! したがって「意図せず 2MiB で張ってしまう」形はここには書けない。
 //!
 //! 対照的に、ページテーブル構築時の `extra`（`paging::plan`）へ足す形は採らない。
-//! 順序が合わない（MADT を読むのは写像計画を組み立てた後である）ことに加えて、
+//! 順序が合わない（MADT を読むのはマッピング計画を組み立てた後である）ことに加えて、
 //! `MappedRanges::build` の隣接結合を通るため、将来 `0xFEC00000` や
 //! `0xFEE01000` に隣接する MMIO 記述子を出すファームウェアでは、結合された
 //! 範囲の 2MiB 整列した核が huge へ昇格しうる。実測の構成では起きないが、
 //! 起きない理由が「今のファームウェアがそう出すから」になる。ここを通せば、
 //! その依存が構造的に消える。
 //!
-//! # なぜ 2MiB で張らないのか
+//! # なぜ 2MiB でマップしないのか
 //!
 //! Local APIC（実測 `0xFEE00000`）も IO-APIC（実測 `0xFEC00000`）も 2MiB 境界に
-//! 載っているので、2MiB で張ること自体はできる。しかしそうすると HPET など
-//! 近傍のデバイス MMIO まで巻き込んで写す。属性が PCD なので直ちに害は無いが、
-//! 意図していない領域を写すことになる（`deferred-decisions.md`）。
+//! 載っているので、2MiB でマップすること自体はできる。しかしそうすると HPET など
+//! 近傍のデバイス MMIO まで巻き込んでマップする。属性が PCD なので直ちに害は無いが、
+//! 意図していない領域をマップすることになる（`deferred-decisions.md`）。
 //!
 //! # 異常はすべて報告して継続する
 //!
-//! `acpi` と同じである。S1 は情報を集める段で、APIC を触れないだけで単一コアの
+//! `acpi` と同じである。S1 は情報を集める段階で、APIC を触れないだけで単一コアの
 //! カーネルが起動しなくなるのは機能的な後退である。致命へ格上げするのは S2 である。
 
 use common::addr::PhysAddr;
@@ -62,40 +62,40 @@ const LAPIC_ID_SHIFT: u32 = 24;
 /// 個数として持つ形は採らない。どこで +1 したかを追う必要が出るためである。
 const LAPIC_MAX_LVT_SHIFT: u32 = 16;
 
-/// 写像と確認の結果。ログに出す以上のことはしない。
+/// マッピングと確認の結果。ログに出す以上のことはしない。
 struct MappedPage {
-    /// 写像を新しく張ったのか、既に張られていたのか。
+    /// マッピングを新しく作ったのか、既に作られていたのか。
     already_mapped: bool,
 }
 
-/// 写像できた APIC の MMIO。S2-a のレジスタ読みが使う。
+/// マップできた APIC の MMIO。S2-a のレジスタ読みが使う。
 ///
 /// `acpi::ApicMmio` が「MADT が名乗った所在」であるのに対し、こちらは
-/// 実際に写像を確認できた所在である。読む側が「MADT にあったが写像に
+/// 実際にマッピングを確認できた所在である。読む側が「MADT にあったが写像に
 /// 失敗したもの」を触らないよう、区別してある。
 pub struct MappedApic {
     local_apic: PhysAddr,
     io_apics: [Option<IoApicLocation>; MAX_MAPPED_IO_APICS],
     io_apic_count: usize,
-    /// この写像を作る元になった MADT の読み取り結果。
+    /// このマッピングを作る元になった MADT の読み取り結果。
     ///
     /// Interrupt Source Override の解決表（S2-d-0）を運ぶために持つ。
     /// 割り込み層の APIC 実装は「IRQ をどの redirection entry へ向けるか」を
-    /// 決めるのにこの表が要る。写像とセットで渡せば、呼び出し側が 2 つの値を
+    /// 決めるのにこの表が要る。マッピングとセットで渡せば、呼び出し側が 2 つの値を
     /// 持ち回って取り違える形にならない。
     mmio: ApicMmio,
 }
 
-/// 写像を記録する I/O APIC の上限。`acpi` 側の上限と同じ理由で置く。
+/// マッピングを記録する I/O APIC の上限。`acpi` 側の上限と同じ理由で置く。
 const MAX_MAPPED_IO_APICS: usize = 4;
 
 impl MappedApic {
-    /// Local APIC の MMIO 物理アドレス。写像が確認できたものである。
+    /// Local APIC の MMIO 物理アドレス。マッピングが確認できたものである。
     pub(crate) const fn local_apic_phys(&self) -> PhysAddr {
         self.local_apic
     }
 
-    /// 最初の I/O APIC の所在。1 台も写像できていなければ `None`。
+    /// 最初の I/O APIC の所在。1 台もマップできていなければ `None`。
     ///
     /// 1 台目だけを返す。レガシー IRQ（GSI 0 から 15）を担当するのは
     /// GSI base が 0 の 1 台で、実測でもこの系には 1 台しか無い。複数台の
@@ -108,14 +108,14 @@ impl MappedApic {
             .find_map(|slot| *slot)
     }
 
-    /// この写像を作る元になった MADT の読み取り結果（Interrupt Source Override
+    /// このマッピングを作る元になった MADT の読み取り結果（Interrupt Source Override
     /// の解決表を含む）。
     pub const fn mmio(&self) -> ApicMmio {
         self.mmio
     }
 }
 
-/// APIC の MMIO を写像し、Local APIC を読めることを確かめる。
+/// APIC の MMIO をマップし、Local APIC を読めることを確かめる。
 ///
 /// # 呼ぶ位置
 ///
@@ -123,7 +123,7 @@ impl MappedApic {
 /// 値の産地と利用点を離さない。`survey` と違って恒等除去より前である必要は
 /// 無い（UEFI メモリマップのスライスを使わないため）が、離す理由も無い。
 ///
-/// direct map 窓が高位で稼働していること（A-2 より後）は必要である。
+/// direct map ウィンドウが高位で稼働していること（A-2 より後）は必要である。
 pub fn map_and_probe<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
     allocator: &mut FrameAllocator<CAP>,
@@ -149,7 +149,7 @@ pub fn map_and_probe<const CAP: usize>(
         return None;
     };
 
-    // 破壊確認（突き合わせ）。既定ビルドでは受け取った値をそのまま返す。
+    // 破壊テストでの確認（突き合わせ）。既定ビルドでは受け取った値をそのまま返す。
     let lapic_phys = sabotage_local_apic_address(logger, lapic_phys);
 
     // --- 2. MMIO で触ってよい状態かを確かめる ---
@@ -168,10 +168,10 @@ pub fn map_and_probe<const CAP: usize>(
 
     // --- 3. MSR と MADT を突き合わせる ---
     //
-    // 食い違ったら写像もしない。「MADT のアドレスに Local APIC が無い
-    // かもしれない」と判断した直後にそのアドレスを PCD で写像すると、後段が
+    // 食い違ったらマップもしない。「MADT のアドレスに Local APIC が無い
+    // かもしれない」と判断した直後にそのアドレスを PCD でマップすると、後段が
     // 「写っているのだから正しいのだろう」と読む余地を作る。正当化できない
-    // 写像を残さない。S1 は情報を集める段なので、食い違いという情報が
+    // マッピングを残さない。S1 は情報を集める段階なので、食い違いという情報が
     // 得られた時点で目的は達している。
     if base.base != lapic_phys.as_u64() {
         logger.error(format_args!(
@@ -187,7 +187,7 @@ pub fn map_and_probe<const CAP: usize>(
         lapic_phys.as_u64()
     ));
 
-    // --- 4. 写像する。フレーム会計を前後で取る ---
+    // --- 4. マップする。フレーム会計を前後で取る ---
     let frames_before = allocator.free_frame_count();
 
     let lapic_mapping = map_mmio_page(logger, allocator, "the local APIC", lapic_phys);
@@ -200,14 +200,14 @@ pub fn map_and_probe<const CAP: usize>(
     };
 
     for io_apic in mmio.io_apics() {
-        // 写像はするが読まない（S1-c の範囲）。IO-APIC のレジスタを読むには
+        // マップはするが読まない（S1-c の範囲）。IO-APIC のレジスタを読むには
         // IOREGSEL へ書いてから IOWIN を読む必要があり、それは書き込みである。
         // セレクタであって割り込みの設定ではないと主張はできるが、書き込みで
-        // あることは事実なので、この段では避ける。
+        // あることは事実なので、この段階では避ける。
         //
         // したがって IO-APIC の MMIO が本当にデコードされるかは S2-a の
         // レジスタ読みまで未確認である。ここで確かめられるのは翻訳が
-        // 張られたことだけである。
+        // 作られたことだけである。
         if map_mmio_page(logger, allocator, "an I/O APIC", io_apic.phys).is_some() {
             if let Some(slot) = mapped.io_apics.get_mut(mapped.io_apic_count) {
                 *slot = Some(io_apic);
@@ -225,7 +225,7 @@ pub fn map_and_probe<const CAP: usize>(
         mmio.io_apics_dropped()
     ));
 
-    // --- 5. Local APIC を読む。写像できたときだけである ---
+    // --- 5. Local APIC を読む。マップできたときだけである ---
     let Some(mapping) = lapic_mapping else {
         logger.error(format_args!(
             "apic: the local APIC MMIO page is not mapped, so its registers are NOT read"
@@ -244,11 +244,11 @@ pub fn map_and_probe<const CAP: usize>(
     Some(mapped)
 }
 
-/// MMIO の 1 ページを direct map 窓へ 4KiB・PCD で張る。
+/// MMIO の 1 ページを direct map ウィンドウへ 4KiB・PCD でマップする。
 ///
-/// 張る前と張った後の両方で `translate` を撮る。前が「未マップ」で後が
+/// マップする前とマップした後の両方で `translate` を撮る。前が「未マップ」で後が
 /// 「期待の物理」であることの対が、写像が実際に何かを変えたことの観測になる
-/// （破壊 feature を使わずに済む形である）。
+/// （破壊テストの feature を使わずに済む形である）。
 fn map_mmio_page<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
     allocator: &mut FrameAllocator<CAP>,
@@ -277,7 +277,7 @@ fn map_mmio_page<const CAP: usize>(
     let virt = direct_map.phys_to_virt(phys);
 
     // SAFETY: 呼び出し位置の契約（`map_and_probe` の doc）により、CR3 は自前の
-    // ページテーブルを指し、登録 direct map 窓は高位で稼働している。
+    // ページテーブルを指し、登録 direct map ウィンドウは高位で稼働している。
     let mut table = unsafe { ActivePageTable::current(direct_map) };
 
     // --- 張る前 ---
@@ -307,10 +307,10 @@ fn map_mmio_page<const CAP: usize>(
 
     let mut already_mapped = false;
     if skip_mapping(logger, what) {
-        // 破壊確認（写像の省略）。下の「張った後」の確認が捕まえる。
+        // 破壊テストでの確認（マッピングの省略）。下の「張った後」の確認が検出する。
     } else {
         let target = sabotage_map_target(logger, what, phys);
-        // SAFETY: `virt` は direct map 窓の中の 4KiB 境界に載ったアドレスで、
+        // SAFETY: `virt` は direct map ウィンドウの中の 4KiB 境界に載ったアドレスで、
         // `target` は有効な物理フレーム。`user=false` なのでカーネルの中間
         // テーブルへ U ビットを混ぜない。`cacheable=false` により PCD が立つ
         // （MMIO では読み書きの順序と副作用が意味を持つため。ADR-0015）。
@@ -397,7 +397,7 @@ fn probe_local_apic(
     let direct_map = common::addr::direct_map();
     let base_virt = direct_map.phys_to_virt(lapic_phys);
 
-    // SAFETY: 直前に写像を確認したページの中を読む。APIC のレジスタは 32 ビット
+    // SAFETY: 直前にマッピングを確認したページの中を読む。APIC のレジスタは 32 ビット
     // 幅で、境界に載った 32 ビットアクセスでなければならない（ID は +0x20、
     // Version は +0x30 で、いずれも 16 バイト境界に載っている）。`read_volatile`
     // なのでコンパイラが読みをまとめたり消したりしない。MMIO なので、まとめられ
@@ -459,10 +459,10 @@ fn probe_local_apic(
     }
 }
 
-/// 破壊確認: MADT が名乗る Local APIC のアドレスをずらす。
+/// 破壊テストでの確認: MADT が名乗る Local APIC のアドレスをずらす。
 ///
-/// MSR との突き合わせ（`map_and_probe` の 3）が捕まえる経路を見る。
-/// ずらす量は 1 ページで、`0x1000` を足す。窓の中に留まるので「窓の外」の
+/// MSR との突き合わせ（`map_and_probe` の 3）が検出する経路を見る。
+/// ずらす量は 1 ページで、`0x1000` を足す。ウィンドウの中に留まるので「窓の外」の
 /// 経路とは混ざらない。
 fn sabotage_local_apic_address(logger: &mut Logger<SerialPort>, phys: PhysAddr) -> PhysAddr {
     let _ = &logger;
@@ -489,9 +489,9 @@ fn sabotage_local_apic_address(logger: &mut Logger<SerialPort>, phys: PhysAddr) 
     phys
 }
 
-/// 破壊確認: 写像そのものを省く。
+/// 破壊テストでの確認: マッピングそのものを省く。
 ///
-/// 「張った後」の `translate` が捕まえる経路を見る。読みが写像に依存して
+/// 「張った後」の `translate` が検出する経路を見る。読みがマッピングに依存して
 /// いることの証明になる。
 fn skip_mapping(logger: &mut Logger<SerialPort>, what: &str) -> bool {
     let _ = (&logger, what);
@@ -510,23 +510,23 @@ fn skip_mapping(logger: &mut Logger<SerialPort>, what: &str) -> bool {
     }
 }
 
-/// 破壊確認: 写像先の物理だけを差し替える。
+/// 破壊テストでの確認: マップ先の物理だけを差し替える。
 ///
-/// 「期待の物理を指しているか」の確認が捕まえる経路を見る。翻訳は張られる
+/// 「期待の物理を指しているか」の確認が検出する経路を見る。翻訳は作られる
 /// ので、「翻訳がある」だけを見る検査では通ってしまう形である。
 ///
 /// 差し替え先はリテラルで持たず、PML4 の物理を使う。稼働中のページテーブル
-/// そのものなので、必ず存在し、必ず写像済みで、APIC ではないことが確実である。
+/// そのものなので、必ず存在し、必ずマップ済みで、APIC ではないことが確実である。
 ///
-/// # この手法は破壊専用である。通常経路へ持ち込まないこと
+/// # この手法は破壊テスト専用である。通常経路へ持ち込まないこと
 ///
 /// ここで作るのは、同一物理ページに対するメモリ型の異なる別名である。PML4 の
 /// フレームは本流の direct map 窓から WB で写っているので、そこへ PCD の写像を
-/// 重ねることになる。x86 では同一物理ページに異なるメモリ型の別名を張ることは
+/// 重ねることになる。x86 では同一物理ページに異なるメモリ型の別名を作ることは
 /// 未定義の領域である。
 ///
 /// サボタージュビルド限定で、しかも直後の照合が検出して読みへ進まないため、
-/// 破壊の手段としてはこのまま採ってよい。便利な手筋として通常の写像経路へ
+/// 破壊テストの手段としてはこのまま採ってよい。便利な手筋として通常のマッピング経路へ
 /// 再利用しないこと。静かな不具合の温床になる。
 fn sabotage_map_target(logger: &mut Logger<SerialPort>, what: &str, phys: PhysAddr) -> PhysAddr {
     let _ = (&logger, what, phys);
@@ -555,7 +555,7 @@ pub(crate) const LVT_TIMER_PERIODIC: u32 = 1 << LVT_TIMER_MODE_SHIFT;
 ///
 /// # Safety
 ///
-/// `lapic_virt` が写像済みの Local APIC ページの先頭であること。
+/// `lapic_virt` がマップ済みの Local APIC ページの先頭であること。
 pub(crate) unsafe fn read_lvt_timer(lapic_virt: u64) -> u32 {
     // SAFETY: 呼び出し元契約。読み取りのみ。
     unsafe { read_lapic(lapic_virt, LAPIC_REGISTER_LVT_TIMER) }
@@ -569,7 +569,7 @@ pub(crate) unsafe fn read_lvt_timer(lapic_virt: u64) -> u32 {
 ///
 /// # Safety
 ///
-/// - `lapic_virt` が写像済みの Local APIC ページの先頭であること。
+/// - `lapic_virt` がマップ済みの Local APIC ページの先頭であること。
 /// - `lvt_timer` のマスクを外す場合、そのベクタに戻れるハンドラが IDT に
 ///   入っていること。
 pub(crate) unsafe fn program_timer(
@@ -709,7 +709,7 @@ const fn timer_mode_name(mode: u32) -> &'static str {
     }
 }
 
-/// 配送モードの名前。ExtINT かどうかが S2-d の刻みを左右するので、
+/// 配送モードの名前。ExtINT かどうかが S2-d の手順を左右するので、
 /// 数値だけでなく名前で出す。
 const fn delivery_mode_name(mode: u32) -> &'static str {
     match mode {
@@ -734,7 +734,7 @@ pub(crate) const fn destination_mode_name(low: u32) -> &'static str {
     }
 }
 
-/// I/O APIC の IOREGSEL（書き込む添字）と IOWIN（読み書きする窓）。
+/// I/O APIC の IOREGSEL（書き込む添字）と IOWIN（読み書きするウィンドウ）。
 const IOAPIC_REGISTER_SELECT: u64 = 0x00;
 const IOAPIC_REGISTER_WINDOW: u64 = 0x10;
 
@@ -768,7 +768,7 @@ pub fn survey_registers(logger: &mut Logger<SerialPort>, mapped: &MappedApic) {
 
     // --- Local APIC ---
     //
-    // SAFETY: `map_and_probe` が写像を確認したページの中だけを読む。APIC の
+    // SAFETY: `map_and_probe` がマッピングを確認したページの中だけを読む。APIC の
     // レジスタは 16 バイト境界に載った 32 ビット幅で、`read_volatile` なので
     // コンパイラが読みをまとめたり消したりしない。書き込みは行わない。
     let (svr, tpr, version_raw) = unsafe {
@@ -787,7 +787,7 @@ pub fn survey_registers(logger: &mut Logger<SerialPort>, mapped: &MappedApic) {
         svr & ENTRY_VECTOR_MASK
     ));
 
-    // LINT0 が ExtINT かどうかが S2-d の刻みを決める。LAPIC を
+    // LINT0 が ExtINT かどうかが S2-d の手順を決める。LAPIC を
     // ソフトウェア有効化した後も 8259 経由の割り込みが届くのは、LINT0 が
     // ExtINT に設定されている場合（virtual wire mode）だけである。
     logger.info(format_args!(
@@ -895,7 +895,7 @@ struct IoApicVerdict {
 ///
 /// **VirtualBox は ID レジスタを 0 のまま置き、MADT は CPU の数を ID にする**（実測。CPU 1 個で 1、
 /// 4 個で 4）。**それでも IRQ1 はこの I/O APIC を通ってベクタ 0x42 で届く**（VirtualBox のデバッガの
-/// ベクタごとの計数。`docs/hardware-inventory.md`）。**写像の証拠は版のレジスタと、IRQ1 の GSI を
+/// ベクタごとの計数。`docs/hardware-inventory.md`）。**マッピングの証拠は版のレジスタと、IRQ1 の GSI を
 /// 覆うこと**（[`covers_gsi`]）、**配送の証拠は最初の打鍵のベクタ**（`crate::keyboard`）である。
 fn io_apic_verdict(version_raw: u32, id_raw: u32, madt_id: u8) -> IoApicVerdict {
     let decoded = version_raw != 0 && version_raw != u32::MAX;
@@ -927,14 +927,14 @@ fn survey_io_apic(
     base_virt: u64,
     io_apic: &IoApicLocation,
 ) -> Option<u32> {
-    // 破壊 (HW-e-2, ioapic-reads-the-wrong-register): 版を ID の添字で読む。**QEMU の I/O APIC の ID
-    // レジスタは 0 なので、版が 0（未デコードの見え方）に見え、写像の判定で止まる。**
+    // 破壊テスト (HW-e-2, ioapic-reads-the-wrong-register): 版を ID の添字で読む。**QEMU の I/O APIC の ID
+    // レジスタは 0 なので、版が 0（未デコードの見え方）に見え、マッピングの判定で止まる。**
     let version_index = if cfg!(feature = "ioapic-reads-the-wrong-register") {
         IOAPIC_INDEX_ID
     } else {
         IOAPIC_INDEX_VERSION
     };
-    // SAFETY: `map_and_probe` が写像を確認したページの中だけを触る。
+    // SAFETY: `map_and_probe` がマッピングを確認したページの中だけを触る。
     // IOREGSEL への書き込みと IOWIN からの読み出しは、この 1 ページに閉じる。
     let (id_raw, version_raw) = unsafe {
         (
@@ -960,10 +960,10 @@ fn survey_io_apic(
 
     // 判定を 3 つに分ける（HW-e-2。`ADR-0068`）。S1-c では「IO-APIC の MMIO が実際にデコード
     // されるか」を未確認のまま残し、S2-a で「版がもっともらしい」かつ「ID レジスタ＝MADT の ID」で
-    // 閉じた。**後者は写像の証拠にならなかった**——**VirtualBox は ID レジスタを 0 のまま置く**
+    // 閉じた。**後者はマッピングの証拠にならなかった**——**VirtualBox は ID レジスタを 0 のまま置く**
     // （[`io_apic_verdict`] の doc）。
     //
-    // - 写像——版のレジスタが未デコードの見え方でない（ここ）と、IRQ1 の GSI を覆う（呼び出し側）。
+    // - マッピング——版のレジスタが未デコードの見え方でない（ここ）と、IRQ1 の GSI を覆う（呼び出し側）。
     // - 配送——最初の打鍵が I/O APIC のベクタで届いた（`crate::keyboard`）。
     // - ID——不一致は [WARN]。**ID レジスタは書かない**（警告を消すために書き換えない）。
     //
@@ -1033,7 +1033,7 @@ fn survey_io_apic(
 // ===========================================================================
 // S3-b-1: per-CPU スロットの境界を起動時に保証する
 //
-// `cpu_id()` の実 ID 化はこの段では行わない。器（`common::percpu` の
+// `cpu_id()` の実 ID 化はこの段階では行わない。器（`common::percpu` の
 // `install_cpu_id_reader`）だけを置き、実装を据えるのは S3-b-2a である。
 //
 // 理由は実測である。Local APIC の ID レジスタを `cpu_id()` から読む形を実装して
@@ -1045,39 +1045,39 @@ fn survey_io_apic(
 //
 // `MAX_CPUS = 1` の間、この読みは費用だけで便益がゼロである（答えは常に 0）。
 // 安い機構は 2 つあり、どちらも S3-b-2a の設備を要する（per-CPU スタックから
-// RSP で導く形、または GS ベース）。便益が生じる段で、安い機構と一緒に入れる。
+// RSP で導く形、または GS ベース）。便益が生じる段階で、安い機構と一緒に入れる。
 // 詳細は `docs/deferred-decisions.md` と `docs/roadmap.md` の S3-b。
 // ===========================================================================
 
 /// per-CPU スロットが、起動しうるコア数を覆っているかを報告する（S3-b-1）。
 ///
-/// # この段では停止しない。警告だけである。理由を正確に書く
+/// # この段階では停止しない。警告だけである。理由を正確に書く
 ///
 /// [`common::percpu::PerCpu::this_cpu_ptr`] は `cpu_id()` 分ポインタを進めるので、
-/// `cpu_id() >= MAX_CPUS` だと配列外でありUBである。しかしこの段では
+/// `cpu_id() >= MAX_CPUS` だと配列外でありUBである。しかしこの段階では
 /// `cpu_id()` は定数 `0` を返し、カーネルコードを実行するのは bootstrap
-/// processor だけである。AP は起こしていない。したがって
+/// processor だけである。AP は起動していない。したがって
 /// 列挙されたコアが `MAX_CPUS` を超えていても、配列外の索引は発生しない。
 ///
 /// 当初ここで停止させたが、それは過剰だった。`-smp 2` で起動すると
 /// 「2 コア列挙 / スロット 1」で停止し、それまで完走していた構成が起動
 /// しなくなった。しかも `acpi-smp-test smp2-enumeration` は MADT の行だけを
-/// 見ているので、検査は緑のままだった（`verification-coverage.md` の
+/// 見ているので、検査はすべて通ったままだった（`verification-coverage.md` の
 /// 「検査が緑でも、系が悪くなっていることはある」）。
 ///
-/// 停止が正しくなるのは `cpu_id()` が非 `0` を返しうる段（S3-b-2a）である。
+/// 停止が正しくなるのは `cpu_id()` が非 `0` を返しうる段階（S3-b-2a）である。
 /// そこで初めて「スロットが足りない」が「配列外を索引する」に直結する。
-/// 保証をその段へ置き、ここでは事実を報告するだけにする。
+/// 保証をその段階へ置き、ここでは事実を報告するだけにする。
 ///
 /// # それでもここに置く価値
 ///
-/// `MAX_CPUS` を上げ忘れたまま AP を起こす段へ進むことを、起動ログで見える
+/// `MAX_CPUS` を上げ忘れたまま AP を起動する段階へ進むことを、起動ログで見える
 /// ようにしておく。`-smp 2` / `-smp 4` の構成で警告が出るので、
 /// S3-b-2a に入る時点で気づける。
 ///
 /// # いまの形（2026-09-24。HW-e の締めで文言を直した）
 ///
-/// **AP は起き、CPU の番号は GDTR から引く**（S3 の後）。**スロットの無い CPU は起こさない**（`smp` の行の
+/// **AP は起動し、CPU の番号は GDTR から引く**（S3 の後）。**スロットの無い CPU は起動しない**（`smp` の行の
 /// 「skipped」）ので、配列外の索引は起きない。**行の文言は S3 の前の「cpu_id() は定数 0 で、AP は起こさない」
 /// のまま残っていた**ので、事実に合わせた。**検査が待つ WARN の行の頭（there are more usable CPUs than
 /// per-CPU slots）は変えていない。**
@@ -1122,14 +1122,14 @@ const ICR_DELIVERY_STARTUP: u32 = 0b110 << 8;
 ///
 /// # Safety
 ///
-/// `lapic_virt` が写像済みの Local APIC ページの先頭であること。
+/// `lapic_virt` がマップ済みの Local APIC ページの先頭であること。
 pub unsafe fn send_fixed_ipi(lapic_virt: u64, apic_id: u8, vector: u8) -> bool {
     // SAFETY: 呼び出し元契約。delivery mode は Fixed（`000`）なので、
     // ビットを足さずにベクタだけを載せる。
     unsafe { send_ipi(lapic_virt, apic_id, ICR_LEVEL_ASSERT | u32::from(vector)) }
 }
 
-/// AP を起こす IPI を 1 本送る（S3-b-2b-1）。
+/// AP を起動する IPI を 1 本送る（S3-b-2b-1）。
 ///
 /// # なぜ送信完了を待つのか
 ///
@@ -1139,7 +1139,7 @@ pub unsafe fn send_fixed_ipi(lapic_virt: u64, apic_id: u8, vector: u8) -> bool {
 ///
 /// # Safety
 ///
-/// `lapic_virt` が写像済みの Local APIC ページの先頭であること。
+/// `lapic_virt` がマップ済みの Local APIC ページの先頭であること。
 unsafe fn send_ipi(lapic_virt: u64, apic_id: u8, command: u32) -> bool {
     // SAFETY: 呼び出し元契約。宛先を先に書き、次に command を書くと送信される。
     unsafe {
@@ -1210,7 +1210,7 @@ pub fn lapic_virt_of(mapped: &MappedApic) -> u64 {
 ///
 /// # Safety
 ///
-/// `base_virt` が写像済みの Local APIC ページの先頭で、`offset` がその
+/// `base_virt` がマップ済みの Local APIC ページの先頭で、`offset` がその
 /// ページ内の 16 バイト境界に載ったレジスタであること。
 unsafe fn read_lapic(base_virt: u64, offset: u64) -> u32 {
     // SAFETY: 呼び出し元契約。MMIO なので `read_volatile` で読む。
@@ -1224,12 +1224,12 @@ unsafe fn read_lapic(base_virt: u64, offset: u64) -> u32 {
 ///
 /// # Safety
 ///
-/// `base_virt` が写像済みの I/O APIC ページの先頭であること。
+/// `base_virt` がマップ済みの I/O APIC ページの先頭であること。
 /// 他の実行文脈が同時に同じ I/O APIC を触っていないこと（IOREGSEL は
 /// 台ごとに 1 本しかない共有の状態なので、割り込まれると読む対象が変わる）。
 /// 現在は単一コアで、この経路は割り込み禁止の起動シーケンス中にだけ通る。
 unsafe fn read_io_apic(base_virt: u64, index: u8) -> u32 {
-    // SAFETY: 呼び出し元契約。添字を選んでから窓を読む、の順序が必須である。
+    // SAFETY: 呼び出し元契約。添字を選んでからウィンドウを読む、の順序が必須である。
     unsafe {
         ((base_virt + IOAPIC_REGISTER_SELECT) as *mut u32).write_volatile(index as u32);
         ((base_virt + IOAPIC_REGISTER_WINDOW) as *const u32).read_volatile()
@@ -1242,7 +1242,7 @@ unsafe fn read_io_apic(base_virt: u64, index: u8) -> u32 {
 ///
 /// [`read_io_apic`] と同じ。加えて、書いた内容が割り込みの配送を変える。
 unsafe fn write_io_apic(base_virt: u64, index: u8, value: u32) {
-    // SAFETY: 呼び出し元契約。添字を選んでから窓を書く、の順序が必須である。
+    // SAFETY: 呼び出し元契約。添字を選んでからウィンドウを書く、の順序が必須である。
     unsafe {
         ((base_virt + IOAPIC_REGISTER_SELECT) as *mut u32).write_volatile(index as u32);
         ((base_virt + IOAPIC_REGISTER_WINDOW) as *mut u32).write_volatile(value);
@@ -1295,7 +1295,7 @@ pub(crate) unsafe fn read_redirection_entry_high(io_apic_virt: u64, entry: u8) -
     unsafe { read_io_apic(io_apic_virt, redirection_entry_index(entry).wrapping_add(1)) }
 }
 
-/// redirection entry の high dword を書く。破壊 feature 専用である。
+/// redirection entry の high dword を書く。破壊テストの feature 専用である。
 ///
 /// # 既定ビルドには宛先を書く経路が無い
 ///
@@ -1350,7 +1350,7 @@ const LAPIC_REGISTER_EOI: u64 = 0xB0;
 ///
 /// # Safety
 ///
-/// `lapic_virt` が写像済みの Local APIC ページの先頭であること。
+/// `lapic_virt` がマップ済みの Local APIC ページの先頭であること。
 /// 実際に配送された割り込みのハンドラの中からのみ呼ぶこと。配送されて
 /// いない状態で書くと、別の割り込みを誤って完了させる。
 pub(crate) unsafe fn send_end_of_interrupt(lapic_virt: u64) {
@@ -1414,7 +1414,7 @@ impl SpuriousVectorWrite {
 /// そこで bit 8 を書き換えるのは危険だけで、利得が無い（落とすと LINT0
 /// 経由の 8259 配送が即座に止まる）。だから BSP は [`Self::Preserve`] である。
 ///
-/// AP は違う。INIT-SIPI で起こしたコアの Local APIC はリセット状態から
+/// AP は違う。INIT-SIPI で起動したコアの Local APIC はリセット状態から
 /// 始まり、SVR は `0x000000FF`、すなわち bit 8 が落ちている。
 /// 実測でそうだった——AP が [`Self::Preserve`] で書いたところ、読み戻しが
 /// `software_enabled=false` になり、LVT が 1 本も届かない状態のまま進もうと
@@ -1431,7 +1431,7 @@ pub(crate) enum SoftwareEnable {
 ///
 /// # Safety
 ///
-/// `lapic_virt` が写像済みの Local APIC ページの先頭であること。書き込みは
+/// `lapic_virt` がマップ済みの Local APIC ページの先頭であること。書き込みは
 /// ベクタ欄と、`enable` が [`SoftwareEnable::Set`] のときの bit 8 だけである。
 /// 同じコアから同時に別の文脈が SVR を触っていないこと。
 pub(crate) unsafe fn write_spurious_vector(
@@ -1477,7 +1477,7 @@ pub fn set_spurious_vector(logger: &mut Logger<SerialPort>, mapped: &MappedApic)
     let direct_map = common::addr::direct_map();
     let lapic_virt = direct_map.phys_to_virt(mapped.local_apic).as_u64();
 
-    // SAFETY: `map_and_probe` が写像を確認したページである。書き込みはベクタ欄
+    // SAFETY: `map_and_probe` がマッピングを確認したページである。書き込みはベクタ欄
     // だけで、起動シーケンス中の単一文脈から呼ぶ。
     // BSP は bit 8 を保つ。ファームウェアが既に有効にして引き渡してくるので、
     // ここで書き換えるのは危険だけで利得が無い（[`SoftwareEnable`] の doc）。
@@ -1564,32 +1564,32 @@ const LAPIC_REGISTER_TIMER_DIVIDE: u64 = 0x3E0;
 
 /// 16 分周（Divide Configuration Register のビット 3・1・0 で `0b0011`）。
 ///
-/// 32 ビットのカウンタが窓の間に一周しないことが条件である。仮に APIC の
+/// 32 ビットのカウンタがウィンドウの間に一周しないことが条件である。仮に APIC の
 /// 入力が 1GHz でも 16 分周で 62.5MHz、`u32::MAX` からの数え下がりは約 68 秒
-/// もつ。較正窓（下記）は 100ms なので、桁が 2 つ以上余っている。
+/// もつ。較正ウィンドウ（下記）は 100ms なので、桁が 2 つ以上余っている。
 const LAPIC_TIMER_DIVIDE_BY_16: u32 = 0b0011;
 
-/// 分周なし（Divide Configuration Register の `0b1011`）。破壊専用である。
+/// 分周なし（Divide Configuration Register の `0b1011`）。破壊テスト専用である。
 #[cfg(feature = "lapic-timer-wrong-divide-test")]
 const LAPIC_TIMER_DIVIDE_BY_1: u32 = 0b1011;
 
-/// 較正結果を壊すときの倍率。破壊専用である。
+/// 較正結果を壊すときの倍率。破壊テスト専用である。
 ///
 /// 2 倍にすると実効周波数が 200Hz になり、許容幅（±0.5%）の外へ確実に出る。
 #[cfg(feature = "lapic-timer-scale-calibration-test")]
 const CALIBRATION_SABOTAGE_SCALE: u64 = 2;
 
-/// 較正窓に使う PIT ティック数。
+/// 較正ウィンドウに使う PIT ティック数。
 ///
 /// # なぜ 10 なのか（先に決めていない。誤差の見積りから決めた）
 ///
-/// 窓の両端をティックのエッジで揃えるので、窓の実時間は
+/// ウィンドウの両端をティックのエッジで揃えるので、ウィンドウの実時間は
 /// `N × 10ms ± (エッジ検出の遅延 + 割り込み遅延のばらつき + 読み取り粒度)` になる。
 /// 片端の見積りは、`timer_ticks()` のポーリング粒度を 5µs、割り込み遅延の
 /// ばらつきを 10µs（TCG なので大きめに見る）、Current Count の読み取り粒度を
 /// 1µs として 16µs、両端で 32µs である。
 ///
-/// | N | 窓 | 相対誤差の上限 |
+/// | N | ウィンドウ | 相対誤差の上限 |
 /// |---|---|---|
 /// | 1 | 10ms | 0.32% |
 /// | 5 | 50ms | 0.064% |
@@ -1597,7 +1597,7 @@ const CALIBRATION_SABOTAGE_SCALE: u64 = 2;
 /// | 20 | 200ms | 0.016% |
 ///
 /// 較正自身の誤差が、許容幅の下限を決める。0.032% は起動ごとのばらつきより
-/// 十分小さいと見込めるので、これ以上窓を伸ばして起動を遅くする理由が無い。
+/// 十分小さいと見込めるので、これ以上ウィンドウを伸ばして起動を遅くする理由が無い。
 const CALIBRATION_WINDOW_TICKS: u64 = 10;
 
 /// 1 回の起動で取る標本数。
@@ -1618,7 +1618,7 @@ const CALIBRATION_SAMPLES: usize = 5;
 /// エッジ待ちの上限（TSC サイクル）。
 ///
 /// 上限のない待機ループを書かない。ティックが来なければ較正を諦めて報告する。
-/// 停止はしない（S2 は情報を集める段の延長である）。10ms のティックに対して
+/// 停止はしない（S2 は情報を集める段階の延長である）。10ms のティックに対して
 /// 十分に長く、かつ人が待てる範囲にしてある。
 const CALIBRATION_EDGE_TIMEOUT_CYCLES: u64 = 10_000_000_000;
 
@@ -1630,13 +1630,13 @@ const CALIBRATION_EDGE_TIMEOUT_CYCLES: u64 = 10_000_000_000;
 ///
 /// **10^9 サイクルにする。** **TSC が 1GHz なら 1 秒、4GHz なら 0.25 秒で、100Hz のティック
 /// （10ms 周期）に対して 25 周期以上の余裕がある。** **ここで待つのは「1 本目が来るか」だけで、
-/// 窓の中の待ちには上の長い上限をそのまま使う**（取りこぼしの回を諦めさせない）。
+/// ウィンドウの中の待ちには上の長い上限をそのまま使う**（取りこぼしの回を諦めさせない）。
 const FIRST_EDGE_TIMEOUT_CYCLES: u64 = 1_000_000_000;
 
 /// 較正の基準（HW-c。`ADR-0068`）。**どちらで測ったかを、戻り値と行に載せる。**
 ///
 /// **PIT を既定にする。** **PM タイマへ倒すのは、PIT のティックが 1 本も来なかったときだけである**
-/// ——**倒す条件を「較正が失敗した」に広げない**（PIT が刻んでいるのに窓が閉じなかった回は、
+/// ——**倒す条件を「較正が失敗した」に広げない**（PIT が刻んでいるのにウィンドウが閉じなかった回は、
 /// 今までどおり較正を諦めて PIT のまま進む）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CalibrationReference {
@@ -1655,17 +1655,17 @@ impl core::fmt::Display for CalibrationReference {
     }
 }
 
-/// PM タイマで測る窓の長さ（刻み）。**PIT の窓（10 ティック = 100ms）と同じ実時間にする。**
+/// PM タイマで測るウィンドウの長さ（刻み）。**PIT のウィンドウ（10 ティック = 100ms）と同じ実時間にする。**
 const PM_CALIBRATION_WINDOW_TICKS: u32 = (crate::pmtimer::HZ / 10) as u32;
 
-/// **窓は、いちばん狭い幅（24 ビット）の一周より十分短くなければならない。**
+/// **ウィンドウは、いちばん狭い幅（24 ビット）の一周より十分短くなければならない。**
 ///
 /// **幅で包み込む差は、一周までしか正しくない**（`crate::pmtimer::elapsed_with_width`）——
-/// **24 ビットは約 4.7 秒で一周するので、窓がそれに近づくと「一周した窓」を短い窓と読み、
-/// 較正が過大になる。** **構造で守る**（レビューの確かめ。2026-09-23）——**窓を広げるか
-/// 周波数の定数を変えたら、ここが建たない。**
+/// **24 ビットは約 4.7 秒で一周するので、ウィンドウがそれに近づくと「一周した窓」を短いウィンドウと読み、
+/// 較正が過大になる。** **構造で守る**（レビューの確かめ。2026-09-23）——**ウィンドウを広げるか
+/// 周波数の定数を変えたら、ここがビルドできない。**
 ///
-/// **余裕は 10 倍に取る。** **実測の窓は 357,954 刻み（100ms）で、24 ビットの一周は
+/// **余裕は 10 倍に取る。** **実測のウィンドウは 357,954 刻み（100ms）で、24 ビットの一周は
 /// 16,777,216 刻み（約 4.7 秒）である**（比は約 46.9）。
 const _: () = assert!(
     PM_CALIBRATION_WINDOW_TICKS as u64 * 10 <= 1 << crate::pmtimer::NARROWEST_WIDTH_BITS,
@@ -1728,7 +1728,7 @@ impl TimerCalibration {
 /// `timer_ticks()` が 1 つ進むまで待ち、進んだ直後の値を返す。
 ///
 /// エッジで揃えるための関数である。任意の時点でサンプルすると、10ms 刻みの
-/// カウンタに対して ±1 ティック = ±10ms の誤差が乗る。N=10 の窓なら ±10% で、
+/// カウンタに対して ±1 ティック = ±10ms の誤差が乗る。N=10 のウィンドウなら ±10% で、
 /// 較正としては使えない。変化した瞬間を捉えれば、誤差は µs 級へ落ちる。
 ///
 /// 読みは [`crate::idt::timer_ticks`] を通す。`AtomicU64` のロードなので、
@@ -1772,7 +1772,7 @@ enum PitSampling {
     },
     /// 最初のエッジが来なかった。**PIT が刻んでいない。**
     NoTickAtAll,
-    /// エッジは来たが、窓が締切までに閉じなかった。
+    /// エッジは来たが、ウィンドウが締切までに閉じなかった。
     WindowIncomplete,
 }
 
@@ -1786,7 +1786,7 @@ fn sample_with_pit(logger: &mut Logger<SerialPort>, lapic: u64) -> PitSampling {
     // 書いてしまったので、較正の中で自前に数える形へ直した。
     let mut widest_edge_advance = 0u64;
     for (index, slot) in samples.iter_mut().enumerate() {
-        // 窓の始まりをティックのエッジへ揃える。
+        // ウィンドウの始まりをティックのエッジへ揃える。
         // **1 本目だけ短い上限で待つ**（HW-c）——**刻まない機械の起動を、その差だけ縮める。**
         let deadline = if index == 0 {
             FIRST_EDGE_TIMEOUT_CYCLES
@@ -1808,10 +1808,10 @@ fn sample_with_pit(logger: &mut Logger<SerialPort>, lapic: u64) -> PitSampling {
             ));
             return PitSampling::WindowIncomplete;
         };
-        // SAFETY: `calibrate_timer` が写像を確認したページの中を読む。読み取りのみ。
+        // SAFETY: `calibrate_timer` がマッピングを確認したページの中を読む。読み取りのみ。
         let count_begin = unsafe { read_lapic(lapic, LAPIC_REGISTER_TIMER_CURRENT_COUNT) };
 
-        // 窓の終わりも同じくエッジで揃える。
+        // ウィンドウの終わりも同じくエッジで揃える。
         let count_end;
         let elapsed_ticks;
         loop {
@@ -1828,7 +1828,7 @@ fn sample_with_pit(logger: &mut Logger<SerialPort>, lapic: u64) -> PitSampling {
             if now.wrapping_sub(begin_tick) >= CALIBRATION_WINDOW_TICKS {
                 count_end = observed;
                 // 名目の N ではなく、実際に進んだティック数で割る。
-                // 取りこぼして N を飛び越えた場合、窓の実時間は N×10ms より長い。
+                // 取りこぼして N を飛び越えた場合、ウィンドウの実時間は N×10ms より長い。
                 // 名目で割ると較正結果が過大になる。実測で割れば、飛び越えても
                 // 結果は正しいままである（系統誤差が構造的に消える）。
                 elapsed_ticks = now.wrapping_sub(begin_tick);
@@ -1838,7 +1838,7 @@ fn sample_with_pit(logger: &mut Logger<SerialPort>, lapic: u64) -> PitSampling {
 
         // 数え下がりなので begin > end。
         let elapsed_counts = u64::from(count_begin.wrapping_sub(count_end));
-        // 窓は elapsed_ticks × (1 / timer_frequency_hz) 秒である。
+        // ウィンドウは elapsed_ticks × (1 / timer_frequency_hz) 秒である。
         // PIT の周波数もリテラルで持たない。境界の問いから取る。
         let reference_hz = u64::from(crate::irq::timer_frequency_hz());
         *slot = elapsed_counts * reference_hz / elapsed_ticks;
@@ -1851,10 +1851,10 @@ fn sample_with_pit(logger: &mut Logger<SerialPort>, lapic: u64) -> PitSampling {
 
 /// ACPI の PM タイマを基準に標本を取る（HW-c。`ADR-0068`）。
 ///
-/// **割り込みを使わない。** **ポートを読んで窓を測るだけで、PIT が刻まなくても進む。**
+/// **割り込みを使わない。** **ポートを読んでウィンドウを測るだけで、PIT が刻まなくても進む。**
 /// **進まなければ `None` を返す**（上限は TSC で掛ける。**上限のない待機を書かない**）。
 ///
-/// **式は PIT 基準と同じ形である**——**窓の実時間（PM タイマの刻み）で割る。**
+/// **式は PIT 基準と同じ形である**——**ウィンドウの実時間（PM タイマの刻み）で割る。**
 fn sample_with_pm_timer(
     lapic: u64,
     pm_timer: crate::pmtimer::PmTimer,
@@ -1862,7 +1862,7 @@ fn sample_with_pm_timer(
     let mut samples = [0u64; CALIBRATION_SAMPLES];
     for slot in samples.iter_mut() {
         let begin_pm = pm_timer.read();
-        // SAFETY: `calibrate_timer` が写像を確認したページの中を読む。読み取りのみ。
+        // SAFETY: `calibrate_timer` がマッピングを確認したページの中を読む。読み取りのみ。
         let count_begin = unsafe { read_lapic(lapic, LAPIC_REGISTER_TIMER_CURRENT_COUNT) };
         let deadline_base = cpu::read_timestamp_counter();
         let elapsed_pm;
@@ -1899,8 +1899,8 @@ fn sample_with_pm_timer(
 /// まま）。LINT0 と SVR には触らない。呼び出しの前後で読み戻して確かめる。
 ///
 /// LVT Timer がマスクされているので、Initial Count を書いて数え下がりが始まっても
-/// 割り込みは 1 本も発生しない。窓（100ms）はカウンタの一周（数十秒規模）より
-/// 遥かに短いので、periodic のままでも窓の途中で再装填されない。
+/// 割り込みは 1 本も発生しない。ウィンドウ（100ms）はカウンタの一周（数十秒規模）より
+/// 遥かに短いので、periodic のままでもウィンドウの途中で再装填されない。
 ///
 /// # 呼ぶ位置
 ///
@@ -1917,7 +1917,7 @@ pub fn calibrate_timer(
     let lapic = direct_map.phys_to_virt(mapped.local_apic).as_u64();
 
     // 触らないことにしたレジスタを、触らなかったことを示すために控える。
-    // SAFETY: `map_and_probe` が写像を確認したページの中を読む。
+    // SAFETY: `map_and_probe` がマッピングを確認したページの中を読む。
     let (svr_before, lint0_before, lvt_timer_before) = unsafe {
         (
             read_lapic(lapic, LAPIC_REGISTER_SVR),
@@ -1934,7 +1934,7 @@ pub fn calibrate_timer(
         return None;
     }
 
-    // 破壊 (S2-d-2, lapic-timer-wrong-divide): 較正で書く分周と、戻り値に
+    // 破壊テスト (S2-d-2, lapic-timer-wrong-divide): 較正で書く分周と、戻り値に
     // 載せる分周を食い違わせる。戻り値に含める形が塞いでいる罠を、
     // 構造ごと壊して確かめる。
     let divide = LAPIC_TIMER_DIVIDE_BY_16;
@@ -1957,7 +1957,7 @@ pub fn calibrate_timer(
             samples,
             widest_edge_advance,
         } => {
-            // 取りこぼしは較正を過大評価させる。窓の実時間が名目より長くなり、
+            // 取りこぼしは較正を過大評価させる。ウィンドウの実時間が名目より長くなり、
             // そのぶん減少量が増えるためである。上の計算は実測ティック数で割っている
             // ので系統誤差は構造的に消えているが、取りこぼしが起きたかどうかは
             // それ自体が観測に値するので出す。1 なら 1 ティックずつ捉えている。
@@ -1968,13 +1968,13 @@ pub fn calibrate_timer(
             ));
             (samples, CalibrationReference::Pit)
         }
-        // **PIT は刻んでいるが窓が閉じなかった回**——**今までどおり較正を諦める。**
+        // **PIT は刻んでいるがウィンドウが閉じなかった回**——**今までどおり較正を諦める。**
         // **PM タイマへ倒さない**（刻んでいるのに基準を替えると、替えた理由が消える）。
         PitSampling::WindowIncomplete => return None,
         PitSampling::NoTickAtAll => {
             let Some(pm_timer) = pm_timer else {
                 // **両方無い。** **理由を出して止まる**（運用者の決定。2026-09-22）——
-                // **この先はティックを待つ所で黙るので、黙るより止まるほうが多くを言う。**
+                // **この先はティックを待つ所で黙るので、黙るより止まるほうが多くを示す。**
                 logger.error(format_args!(
                     "apic: the PIT did not tick and the FADT names no PM timer, so there is no \
                      time reference to calibrate the local APIC timer against; halting"
@@ -1987,7 +1987,7 @@ pub fn calibrate_timer(
                 pm_timer.port(),
                 pm_timer.bits()
             ));
-            // 破壊 (HW-c, pm-timer-double-frequency): PM タイマの周波数の定数を 2 倍にする。
+            // 破壊テスト (HW-c, pm-timer-double-frequency): PM タイマの周波数の定数を 2 倍にする。
             // **カーネル内の比は自己無矛盾のまま、実時間との比が半分になる**（`lapic-timer-test`
             // の `scaled-calibration` と同じ検出経路）。**当たったことを出す**——**出ていなければ
             // 空振りなので、判定の側が落とす。**
@@ -2000,7 +2000,7 @@ pub fn calibrate_timer(
             match sample_with_pm_timer(lapic, pm_timer) {
                 Some(samples) => (samples, CalibrationReference::PmTimer),
                 None => {
-                    // **PM タイマが在ると FADT が言ったのに進まない。** **止まる**（同上）。
+                    // **PM タイマが在ると FADT が示したのに進まない。** **止まる**（同上）。
                     logger.error(format_args!(
                         "apic: the PIT did not tick and the PM timer at port {:#06x} did not \
                          advance within the deadline either; there is no time reference to \
@@ -2018,16 +2018,16 @@ pub fn calibrate_timer(
     let median_hz = sorted[CALIBRATION_SAMPLES / 2];
     let spread_hz = sorted[CALIBRATION_SAMPLES - 1] - sorted[0];
 
-    // 破壊 (S2-d-2, lapic-timer-scale-calibration): 較正の戻り値を 2 倍にする。
+    // 破壊テスト (S2-d-2, lapic-timer-scale-calibration): 較正の戻り値を 2 倍にする。
     // 初期カウントが 2 倍になるので、タイマは半分の速さで走る（実測の比は
     // 0.500）。カーネル内の比（要求 100Hz と実効周波数）は自己無矛盾のまま
     // 変わらないので、ホストの実時間と突き合わせて初めて見える。
     // これが「較正値が初期カウントへ実際に流れている」ことの証明になる。
     //
-    // この破壊が空振りする経路を塞ぐ。較正が呼ばれなくなった構成では、
-    // このフックは踏まれない。踏まれなければ破壊ビルドが正常に見えて
-    // 緑になる（壊したつもりで緑）。適用したことを出力し、xtask 側で
-    // 出ていなければ落とす。ACPI の未マップ破壊で採ったのと同じ形である。
+    // この破壊テストが空振りする経路を塞ぐ。較正が呼ばれなくなった構成では、
+    // このフックは踏まれない。踏まれなければ破壊テストのビルドが正常に見えて
+    // すべて通る（壊したつもりで緑）。適用したことを出力し、xtask 側で
+    // 出ていなければ落とす。ACPI の未マップ破壊テストで採ったのと同じ形である。
     #[cfg(feature = "lapic-timer-scale-calibration-test")]
     let median_hz = {
         logger.warn(format_args!(
@@ -2099,7 +2099,7 @@ unsafe fn write_lapic(base_virt: u64, offset: u64, value: u32) {
 mod tests {
     use super::*;
 
-    /// **VirtualBox の読み**（実測。版 0x00170020・ID レジスタ 0・MADT の ID 1）——**写っていて、
+    /// **VirtualBox の読み**（実測。版 0x00170020・ID レジスタ 0・MADT の ID 1）——**マップされていて、
     /// ID だけが食い違う。**
     #[test]
     fn a_zero_id_register_with_a_plausible_version_still_decodes() {
@@ -2117,7 +2117,7 @@ mod tests {
         assert!(verdict.decoded && verdict.id_matches);
     }
 
-    /// **未デコードの見え方**（全 0・全 1）は写っていない。
+    /// **未デコードの見え方**（全 0・全 1）はマップされていない。
     #[test]
     fn all_zeros_and_all_ones_are_undecoded() {
         assert!(!io_apic_verdict(0, 0, 0).decoded);

@@ -272,14 +272,14 @@ impl<const CAP: usize> FrameAllocator<CAP> {
 
     /// 空きフレームを1つ確保する。確保順は先頭（最小のフレーム番号）から。
     ///
-    /// **範囲は [`Self::insert_free_range`] が番地の順に保つので、最も低い空きから配る。**
-    /// **切り替え前のページ表の組み立ては、この性質に寄りかかる**（`ADR-0068` の HW-a。
-    /// 静的な初期ページ表は [0, 1GiB) しか張らない）。
+    /// **範囲は [`Self::insert_free_range`] がアドレスの順に保つので、最も低い空きから配る。**
+    /// **切り替え前のページテーブルの組み立ては、この性質に寄りかかる**（`ADR-0068` の HW-a。
+    /// 静的な初期ページテーブルは [0, 1GiB) しかマップしない）。
     pub fn allocate_frame(&mut self) -> Option<PhysAddr> {
         if self.range_count == 0 {
             return None;
         }
-        // **高い側から配る形**（`ADR-0068` の HW-a）。破壊 `frame-allocator-hands-out-high-first` は
+        // **高い側から配る形**（`ADR-0068` の HW-a）。破壊テスト `frame-allocator-hands-out-high-first` は
         // 最初から、検査の構成 `frame-allocator-high-after-switch` は切り替えの後から、こちらを通る。
         #[cfg(any(
             feature = "frame-allocator-hands-out-high-first",
@@ -418,10 +418,10 @@ impl<const CAP: usize> FrameAllocator<CAP> {
 
 /// 高い側から配る形（`ADR-0068` の HW-a）。**既定のビルドには無い。**
 ///
-/// **破壊 `frame-allocator-hands-out-high-first`** は最初から通り、切り替え前のページ表を
-/// 初期ページ表の届く範囲の外から取らせる。**検査の構成 `frame-allocator-high-after-switch`**
-/// （破壊ではない）は自前のページ表へ切り替えた後から通り、ヒープ・ユーザーのページ・ページ表・
-/// virtio のリングを 4GiB の上から取らせる——**番地を 32 ビットへ切り詰める箇所を表に出すため。**
+/// **破壊テスト `frame-allocator-hands-out-high-first`** は最初から通り、切り替え前のページテーブルを
+/// 初期ページテーブルの届く範囲の外から取らせる。**検査の構成 `frame-allocator-high-after-switch`**
+/// （破壊ではない）は自前のページテーブルへ切り替えた後から通り、ヒープ・ユーザーのページ・ページテーブル・
+/// virtio のリングを 4GiB の上から取らせる——**アドレスを 32 ビットへ切り詰める箇所を表に出すため。**
 #[cfg(any(
     feature = "frame-allocator-hands-out-high-first",
     feature = "frame-allocator-high-after-switch"
@@ -431,7 +431,7 @@ impl<const CAP: usize> FrameAllocator<CAP> {
         self.allocate_contiguous_aligned_high(1, 1)
     }
 
-    /// 最も高い番地に収まる、`align_frames` に揃った `count` 枚を取る。
+    /// 最も高いアドレスに収まる、`align_frames` に揃った `count` 枚を取る。
     fn allocate_contiguous_aligned_high(
         &mut self,
         count: u64,
@@ -481,7 +481,7 @@ impl<const CAP: usize> FrameAllocator<CAP> {
     }
 }
 
-/// 高い側から配るか（`ADR-0068` の HW-a）。**破壊では最初から立ち、検査の構成では切り替えの後に立つ。**
+/// 高い側から配るか（`ADR-0068` の HW-a）。**破壊テストでは最初から立ち、検査の構成では切り替えの後に立つ。**
 #[cfg(any(
     feature = "frame-allocator-hands-out-high-first",
     feature = "frame-allocator-high-after-switch"
@@ -491,13 +491,13 @@ static HIGH_FIRST: AtomicBool =
 
 /// ここから高い側から配る（検査の構成 `frame-allocator-high-after-switch`。`ADR-0068` の HW-a）。
 ///
-/// **自前のページ表へ切り替えた後に 1 度呼ぶ。** **切り替え前は初期ページ表の届く範囲しか触れない。**
+/// **自前のページテーブルへ切り替えた後に 1 度呼ぶ。** **切り替え前は初期ページテーブルの届く範囲しか触れない。**
 #[cfg(feature = "frame-allocator-high-after-switch")]
 pub fn hand_out_high_first_from_now() {
     HIGH_FIRST.store(true, Ordering::Relaxed);
 }
 
-/// 4GiB の上から配ったフレームの枚数（`ADR-0068` の HW-a の計器）。
+/// 4GiB の上から配ったフレームの枚数（`ADR-0068` の HW-a の計測）。
 #[cfg(any(
     feature = "frame-allocator-hands-out-high-first",
     feature = "frame-allocator-high-after-switch"
@@ -521,7 +521,7 @@ fn count_frames_above_4gib(start_frame: u64, count: u64) {
     FRAMES_ABOVE_4GIB.fetch_add(above, Ordering::Relaxed);
 }
 
-/// 4GiB の上から配ったフレームの枚数を返す（`ADR-0068` の HW-a の計器）。**0 なら、4GiB の上は
+/// 4GiB の上から配ったフレームの枚数を返す（`ADR-0068` の HW-a の計測）。**0 なら、4GiB の上は
 /// 配られていない**——**検査の構成で 0 なら、その回は何も確かめていない。**
 #[cfg(any(
     feature = "frame-allocator-hands-out-high-first",
@@ -570,7 +570,7 @@ static mut STORAGE: FrameAllocator = FrameAllocator::new();
 /// 実体が預けられているか（S11-3）。**起動の最初は空である。**
 static PRESENT: AtomicBool = AtomicBool::new(false);
 
-/// 貸し出し中か（S11-3）。**排他はこの旗が持つ。**
+/// 貸し出し中か（S11-3）。**排他はこのフラグが持つ。**
 static ON_LOAN: AtomicBool = AtomicBool::new(false);
 
 /// [`take`] が成功した回数（S11-3）。
@@ -623,7 +623,7 @@ pub fn take() -> Option<&'static mut FrameAllocator> {
     }
     TAKEN.fetch_add(1, Ordering::SeqCst);
     // SAFETY: **`compare_exchange` が成功した者だけがここへ来る。**
-    // 旗は [`give_back`] が戻すまで立ったままなので、**この `&mut` は唯一である。**
+    // フラグは [`give_back`] が戻すまで立ったままなので、**この `&mut` は唯一である。**
     Some(unsafe { &mut *core::ptr::addr_of_mut!(STORAGE) })
 }
 
@@ -776,7 +776,7 @@ mod tests {
 
     /// 範囲が 1 つ増えるため、容量が尽きていたら確保しない。
     ///
-    /// 握りつぶして「揃っていない位置」を返すより、取れないと言う方がよい。
+    /// 握りつぶして「揃っていない位置」を返すより、取れないと示す方がよい。
     #[test]
     fn aligned_allocation_respects_the_capacity_limit() {
         let mut allocator = FrameAllocator::<2>::new();
@@ -813,9 +813,9 @@ mod tests {
         assert_eq!(allocator.allocate_frame(), None);
     }
 
-    /// **メモリマップが番地の順でなくても、範囲は番地の順に保たれ、最も低い空きから配る**
+    /// **メモリマップがアドレスの順でなくても、範囲はアドレスの順に保たれ、最も低い空きから配る**
     /// （`ADR-0068` の HW-a）。**UEFI の仕様はマップの並びを約束しない。** **切り替え前の
-    /// ページ表の組み立ては、この性質で初期ページ表の届く範囲（[0, 1GiB)）に収まる。**
+    /// ページテーブルの組み立ては、この性質で初期ページテーブルの届く範囲（[0, 1GiB)）に収まる。**
     /// UEFI の記述子を 1 本作る（`descriptor_size` は実測の 48）。
     fn descriptor(memory_type: u32, phys_start: u64, page_count: u64) -> Vec<u8> {
         let mut bytes = vec![0u8; 48];
@@ -827,7 +827,7 @@ mod tests {
 
     /// **受け渡しの領域は、空きの表に一度も入らない**（`ADR-0068` の HW-a）。
     ///
-    /// **ブートローダは BootInfo とメモリマップの写しを `LOADER_DATA` として取る**
+    /// **ブートローダは BootInfo とメモリマップのコピーを `LOADER_DATA` として取る**
     /// （1GiB のすぐ下。実測で `0x3ffef000..0x40000000` の 17 ページ）。**切り替えの後に
     /// カーネルがそこを読むので、配られてはならない。** **`classify` の側もホストテストで
     /// 固定してある**（`memory_map` の `the_handoff_area_is_never_free`）——**こちらは
@@ -867,7 +867,7 @@ mod tests {
     #[test]
     fn ranges_stay_in_address_order_whatever_the_map_order() {
         let mut allocator = FrameAllocator::<8>::new();
-        // 高い番地から入れる（4GiB の上、2GiB の辺り、1MiB の辺り）。
+        // 高いアドレスから入れる（4GiB の上、2GiB の辺り、1MiB の辺り）。
         allocator.insert_free_range(0x10_0000, 16).unwrap();
         allocator.insert_free_range(0x8_0000, 16).unwrap();
         allocator.insert_free_range(0x100, 16).unwrap();
@@ -1015,7 +1015,7 @@ mod tests {
     /// **52 ビットを超えるフレームは確保できない。**
     ///
     /// T-2c で確保 API が `PhysAddr` を返すようになった結果の新しい不変条件。
-    /// 表せないアドレスを返すくらいなら、確保できないと言うほうがよい。
+    /// 表せないアドレスを返すくらいなら、確保できないと示すほうがよい。
     /// ページテーブルへ書いた時点で CPU が弾く値を、その前に止められる。
     #[test]
     fn frames_beyond_the_physical_address_limit_cannot_be_allocated() {

@@ -44,13 +44,13 @@ impl Framebuffer {
         // **1 画素ずつ `write_volatile` で書いていた**——**MMIO の規則を
         // RAM の面へも当てていた**（`super::framebuffer::SurfaceKind` の doc）。
         // **背景を塗る形（コンソールが使う側）では、1 行が連続した 8 画素に
-        // なるので、組み立てて 1 回で写せる。**
+        // なるので、組み立てて 1 回でコピーできる。**
         //
         // **重ね描き（`background` が `None`）は 1 画素ずつのままである**
         // ——**穴が開くので連続にならない。** **利用者はデモの経路だけで、
         // コンソールは必ず背景を塗る。**
         //
-        // 破壊 (PERF-c, draw-pixel-by-pixel-test): まとめずに 1 画素ずつ書く。
+        // 破壊テスト (PERF-c, draw-pixel-by-pixel-test): まとめずに 1 画素ずつ書く。
         if let (Some(background), false) = (
             background,
             cfg!(feature = "draw-pixel-by-pixel-test")
@@ -77,7 +77,7 @@ impl Framebuffer {
 
     /// グリフを 1 行ずつまとめて書く（PERF-c）。**RAM の面だけが通る。**
     ///
-    /// **`MAX_GLYPH_WIDTH` 画素までを組み立てて、行ごとに 1 回で写す。**
+    /// **`MAX_GLYPH_WIDTH` 画素までを組み立てて、行ごとに 1 回でコピーする。**
     fn draw_glyph_rows(
         &mut self,
         x: u32,

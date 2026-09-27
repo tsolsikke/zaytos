@@ -10,13 +10,13 @@
 //!
 //! # 何をしないか
 //!
-//! - **時計として使わない。** **較正の窓を測るためだけに読む**（`crate::apic`）。
+//! - **時計として使わない。** **較正のウィンドウを測るためだけに読む**（`crate::apic`）。
 //! - **書かない。** **PM タイマは読み出し専用のカウンタである。**
-//! - **在りかは決めない。** **ポートと幅は FADT が言う**（`crate::acpi`）——**既定値を焼き込まない。**
+//! - **在りかは決めない。** **ポートと幅は FADT が示す**（`crate::acpi`）——**既定値を焼き込まない。**
 //!
 //! # 幅は 24 か 32 である
 //!
-//! **FADT の `Flags` の TMR_VAL_EXT が言う。** **24 ビットなら約 4.7 秒で一周する**
+//! **FADT の `Flags` の TMR_VAL_EXT が示す。** **24 ビットなら約 4.7 秒で一周する**
 //! （3.579545MHz）。**差を取るときは幅で包み込む**（[`PmTimer::elapsed`]）——**忘れると、
 //! 一周した窓で巨大な差が出て、較正が過大になる。**
 
@@ -24,7 +24,7 @@ use common::port::inl;
 
 /// PM タイマの周波数（ACPI が定める値）。**機械に依らない。**
 ///
-/// 破壊 (HW-c, pm-timer-double-frequency): **2 倍にする。** **較正が 2 倍に出て、タイマは半分の
+/// 破壊テスト (HW-c, pm-timer-double-frequency): **2 倍にする。** **較正が 2 倍に出て、タイマは半分の
 /// 速さで走る。** **カーネル内の比は自己無矛盾のままなので、実時間と突き合わせて初めて見える**
 /// （`lapic-timer-test` の速さの判定）。
 pub const HZ: u64 = if cfg!(feature = "pm-timer-double-frequency") {
@@ -35,7 +35,7 @@ pub const HZ: u64 = if cfg!(feature = "pm-timer-double-frequency") {
 
 /// いちばん狭い幅（ビット）。**24 ビットの PM タイマは約 4.7 秒で一周する。**
 ///
-/// **較正の窓がこの一周より十分短いことを、`crate::apic` が const assert で守る。**
+/// **較正のウィンドウがこの一周より十分短いことを、`crate::apic` が const assert で守る。**
 pub const NARROWEST_WIDTH_BITS: u32 = 24;
 
 /// PM タイマの所在。**FADT から作る**（`crate::acpi`）。
@@ -46,7 +46,7 @@ pub struct PmTimer {
 }
 
 impl PmTimer {
-    /// FADT が言ったポートと幅で作る。
+    /// FADT が示したポートと幅で作る。
     pub const fn new(port: u16, bits: u8) -> Self {
         Self { port, bits }
     }
@@ -90,7 +90,7 @@ pub const fn elapsed_with_width(before: u32, after: u32, bits: u8) -> u32 {
 
 /// Local APIC タイマの周波数（Hz）を、減った数と PM タイマの刻みから求める（純粋ロジック）。
 ///
-/// **PIT 基準の式と同じ形である**——**窓の実時間で割る**（`crate::apic` の較正）。
+/// **PIT 基準の式と同じ形である**——**ウィンドウの実時間で割る**（`crate::apic` の較正）。
 /// **刻みが 0 なら 0 を返す**（割らない）。
 pub const fn lapic_hz_from_ticks(lapic_counts: u64, pm_ticks: u64) -> u64 {
     if pm_ticks == 0 {
@@ -103,7 +103,7 @@ pub const fn lapic_hz_from_ticks(lapic_counts: u64, pm_ticks: u64) -> u64 {
 mod tests {
     use super::*;
 
-    /// **幅で包み込む。** 24 ビットの一周を跨いだ窓でも、差は窓の長さである。
+    /// **幅で包み込む。** 24 ビットの一周を跨いだウィンドウでも、差はウィンドウの長さである。
     #[test]
     fn the_difference_wraps_at_the_declared_width() {
         let timer = PmTimer::new(0x608, 24);
@@ -128,10 +128,10 @@ mod tests {
         );
     }
 
-    /// **周波数は窓の実時間で割る。**
+    /// **周波数はウィンドウの実時間で割る。**
     #[test]
     fn the_frequency_comes_from_the_observed_window() {
-        // 100ms の窓（PM タイマの刻み 357,954）で 1,000,000 数え下がれば約 10MHz。
+        // 100ms のウィンドウ（PM タイマの刻み 357,954）で 1,000,000 数え下がれば約 10MHz。
         assert_eq!(lapic_hz_from_ticks(1_000_000, 357_954), 10_000_013);
         assert_eq!(lapic_hz_from_ticks(1_000_000, 0), 0, "割らない");
     }

@@ -19,7 +19,7 @@ use super::layout::{ClippedRect, FramebufferLayout, BYTES_PER_PIXEL};
 ///
 /// # ここが線である
 ///
-/// **フレームバッファは MMIO である**——**PCD（キャッシュ無効）で張っており、
+/// **フレームバッファは MMIO である**——**PCD（キャッシュ無効）でマップしており、
 /// 書き込みは `write_volatile` でなければならない**（通常の代入は最適化で
 /// 消えたり並べ替えられたりしうる。このモジュールの doc）。
 ///
@@ -212,9 +212,9 @@ impl Framebuffer {
             // 書く必要が無い**（[`SurfaceKind`] の doc）。**実測で、ここが
             // 描画の費用の6割を占めていた。**
             //
-            // 破壊 (PERF-c, draw-pixel-by-pixel-test): RAM でも 1 画素ずつ書く。
+            // 破壊テスト (PERF-c, draw-pixel-by-pixel-test): RAM でも 1 画素ずつ書く。
             // **PERF-c の前の形そのものである**——**出る絵は同じで、費用だけが
-            // 桁で増える。** **描く費用の判定が捕まえる。**
+            // 桁で増える。** **描く費用の判定が検出する。**
             #[cfg(not(feature = "draw-pixel-by-pixel-test"))]
             if self.kind == SurfaceKind::Ram {
                 // SAFETY: row_offset は検証済みで、この行の rect.width 画素は

@@ -1,6 +1,6 @@
-//! SMP の下ごしらえ（S1）。この段では情報を集めるだけで、AP は起こさない。
+//! SMP の下ごしらえ（S1）。この段階では情報を集めるだけで、AP は起動しない。
 //!
-//! ここが持つのは、S3（AP 起こし）で要るがS1 の時点でしか確保できないものである。
+//! ここが持つのは、S3（AP の起動）で要るがS1 の時点でしか確保できないものである。
 //! 現在はトランポリン用フレームだけが該当する。
 
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +21,7 @@ use crate::frame_allocator::{FrameAllocator, FRAME_SIZE};
 ///
 /// # なぜ 1MiB 未満なのか
 ///
-/// AP は SIPI（Startup IPI）で起こす。SIPI が運べるのは8 ビットのベクタだけで、
+/// AP は SIPI（Startup IPI）で起動する。SIPI が運べるのは8 ビットのベクタだけで、
 /// AP はリアルモードで `vector << 12` から実行を始める。したがって開始アドレスは
 /// 物理 `0x00000`〜`0xFF000` に限られる。ZaytOS のカーネルイメージは物理
 /// `0x100000`（ちょうど 1MiB）から始まるので、トランポリンはイメージの外、
@@ -35,7 +35,7 @@ use crate::frame_allocator::{FrameAllocator, FRAME_SIZE};
 /// 1 ページぶんの余裕を残すために `0x9F000` にしてある。トランポリンのコードが
 /// 1 ページに収まらなかった場合、次のページへ跨ぐ余地が要るためである。
 ///
-/// 収まらない場合の隣接ページの確保は、この段では扱わない。S1 は 1 枚しか
+/// 収まらない場合の隣接ページの確保は、この段階では扱わない。S1 は 1 枚しか
 /// 予約せず、隣が空いている保証も与えない（S3 の到達条件へ送った）。
 pub const TRAMPOLINE_MAX_START: u64 = 0x9F000;
 
@@ -67,10 +67,10 @@ pub enum TrampolineError {
 ///
 /// # 失敗しても停止しない
 ///
-/// S1 は情報を集める段であり、AP はまだ起こさない。ここで停止すると、現在
+/// S1 は情報を集める段階であり、AP はまだ起動しない。ここで停止すると、現在
 /// 単一コアで動いているカーネルが「トランポリン用の 1 枚が取れない」だけで
 /// 起動しなくなり、機能的な後退になる。失敗は大きく報告して継続する。
-/// 致命として扱うのは S3（AP 起こし）である。
+/// 致命として扱うのは S3（AP の起動）である。
 pub fn reserve_trampoline_frame<const CAP: usize>(
     allocator: &mut FrameAllocator<CAP>,
 ) -> Result<PhysAddr, TrampolineError> {
@@ -90,7 +90,7 @@ pub fn reserve_trampoline_frame<const CAP: usize>(
 ///
 /// S1 の時点では誰も呼ばない。それでも `dead_code` にならないのは `pub` だから
 /// であって、使われているからではない（公開範囲が広いと未使用が見えない、という
-/// 一般則をここでは意図的に使っている）。S3 で実際に読まれることを、その段の
+/// 一般則をここでは意図的に使っている）。S3 で実際に読まれることを、その段階の
 /// 到達条件にしてある（`roadmap.md`）。そうしないと、使い忘れても誰も気づかない。
 pub fn trampoline_frame() -> Option<PhysAddr> {
     match TRAMPOLINE_FRAME.load(Ordering::Relaxed) {
@@ -122,7 +122,7 @@ mod tests {
         allocator
     }
 
-    /// `map_ap_stacks` が実際に張る並びから、通常スタックの頂点を導く。
+    /// `map_ap_stacks` が実際にマップする並びから、通常スタックの頂点を導く。
     ///
     /// 本番のコードではなくテスト側に置いてある。production 側に同じ式を
     /// 2 本持つと片方だけが古くなるので、照合する側にだけ独立に書く。
@@ -134,7 +134,7 @@ mod tests {
             + crate::stack::KERNEL_STACK_SIZE as u64
     }
 
-    /// AP 用アイドルタスクへ記述する範囲が、実際に張った通常スタックと一致する
+    /// AP 用アイドルタスクへ記述する範囲が、実際にマップした通常スタックと一致する
     /// （S4-c-3-2a）。
     ///
     /// # なぜホストテストで守るのか
@@ -157,7 +157,7 @@ mod tests {
             crate::stack::KERNEL_STACK_SIZE as u64
         );
 
-        // 下端はガードの穴より上にある。ガードは張らない穴なので、
+        // 下端はガードの穴より上にある。ガードはマップしない穴なので、
         // 範囲がそこへ食い込むと「ガードの上で走ってよい」と記述したことになる。
         let slot_base = AP_STACK_REGION_BASE + (slot as u64) * AP_STACK_STRIDE;
         assert_eq!(bottom, slot_base + crate::stack::GUARD_SIZE as u64);
@@ -240,7 +240,7 @@ mod tests {
 // `PML4[511]`（高位）を持つ。
 //
 // `PML4[256]`（direct map）は持たない。したがって AP のスタックは恒等側の
-// VA（物理 == 仮想）でなければならない。direct map 窓の VA を渡すと、
+// VA（物理 == 仮想）でなければならない。direct map ウィンドウの VA を渡すと、
 // 64 ビットへ入った直後の最初の push で落ちる。
 // ===========================================================================
 
@@ -347,7 +347,7 @@ core::arch::global_asm!(
     "  mov rsp, [rip + zaytos_ap_tramp_data_rsp]",
     // 自分の索引を第 1 引数へ。GDT に依存しない身元の出所である。
     "  mov rdi, [rip + zaytos_ap_tramp_data_index]",
-    // 起きたことを BSP へ知らせる。BSP はこれをポーリングして次の AP へ進む。
+    // 起動したことを BSP へ知らせる。BSP はこれをポーリングして次の AP へ進む。
     "  mov qword ptr [rip + zaytos_ap_tramp_data_started], 1",
     // 高位 VA の Rust の入口へ。戻らない。
     "  mov rax, [rip + zaytos_ap_tramp_data_entry]",
@@ -388,7 +388,7 @@ core::arch::global_asm!(
 ///
 /// # なぜ起動最初期に予約するのか
 ///
-/// AP を起こすのは `run_timer_loop` の中（`sti` より後）だが、そこには
+/// AP を起動するのは `run_timer_loop` の中（`sti` より後）だが、そこには
 /// フレームアロケータが無い。トランポリン用フレームと同じ理由で、
 /// 取れる位置で取っておく。
 ///
@@ -399,10 +399,10 @@ core::arch::global_asm!(
 /// 恒等が覆うのは低位 1GiB なので、予約したフレームがそこに入ることを確かめる。
 static AP_STACK_FRAMES: [AtomicU64; MAX_APS] = [const { AtomicU64::new(NO_FRAME) }; MAX_APS];
 
-/// 起こしうる AP の本数（bootstrap processor を除く）。
+/// 起動しうる AP の本数（bootstrap processor を除く）。
 const MAX_APS: usize = common::percpu::MAX_CPUS - 1;
 
-/// 恒等写像が覆う上限。静的初期テーブルの `PML4[0]` は 2MiB ページ 512 本で
+/// 恒等マッピングが覆う上限。静的初期テーブルの `PML4[0]` は 2MiB ページ 512 本で
 /// 低位 1GiB を覆う（`kernel/src/main.rs` の `zaytos_boot_pd_shared`）。
 const IDENTITY_LIMIT: u64 = 1024 * 1024 * 1024;
 
@@ -447,11 +447,11 @@ pub fn ap_stack_frame(index: usize) -> Option<PhysAddr> {
 /// ポート I/O（シリアル）と、高位 VA の静的データである。
 ///
 /// `cpu_id()` を呼ばない。`sgdt` 由来の実装は自コアの GDT がロードされた後
-/// でなければ正しくないが、この段の AP は per-CPU GDT を持たない
+/// でなければ正しくないが、この段階の AP は per-CPU GDT を持たない
 /// （`kernel/src/gdt/mod.rs` の載荷条件）。身元は引数で受け取る。
 ///
 /// ロックを取らない。`Logger` と `SerialPort` にロックは無いので、
-/// BSP が 1 つずつ起こすことで混線を避けている（同時に書くとバイトが混ざる）。
+/// BSP が 1 つずつ起動することで混線を避けている（同時に書くとバイトが混ざる）。
 #[no_mangle]
 pub extern "C" fn zaytos_ap_entry(index: u64) -> ! {
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
@@ -485,7 +485,7 @@ pub extern "C" fn zaytos_ap_entry(index: u64) -> ! {
 /// 起動署名を出した AP の本数。BSP が会計に使う。
 static AP_STARTED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// 起こした AP の APIC ID（S5-a）。スロット 1 以降ぶん。`u16` の番兵で
+/// 起動した AP の APIC ID（S5-a）。スロット 1 以降ぶん。`u16` の番兵で
 /// 「未設定」を表す（APIC ID は `u8` なので `0` も有効な値である）。
 static STARTED_AP_APIC_ID: [core::sync::atomic::AtomicU16; MAX_APS] =
     [const { core::sync::atomic::AtomicU16::new(NO_APIC_ID) }; MAX_APS];
@@ -494,18 +494,18 @@ static STARTED_AP_APIC_ID: [core::sync::atomic::AtomicU16; MAX_APS] =
 const NO_APIC_ID: u16 = u16::MAX;
 
 /// 探り用ページの仮想アドレス（S5-c）。AP スタックの領域とは別の PML4 の穴に
-/// 置く（`PML4[258]` の遥か上）。本番の写像と重ならない場所を選ぶ。
+/// 置く（`PML4[258]` の遥か上）。本番のマッピングと重ならない場所を選ぶ。
 #[cfg(feature = "smp-tlb-shootdown-probe")]
 const SHOOTDOWN_PROBE_VIRT: u64 = 0xffff_8180_0000_0000;
 
-/// 探り用ページを 1 枚張る（S5-c）。BSP が起動時、アロケータのある場所で呼ぶ。
+/// 探り用ページを 1 枚マップする（S5-c）。BSP が起動時、アロケータのある場所で呼ぶ。
 ///
-/// 定常ループにはアロケータが無いので、張るのはここでしかできない。
+/// 定常ループにはアロケータが無いので、マップするのはここでしかできない。
 /// 外すのは定常ループ側である（`unmap_4kib` はアロケータを要らない）。
 ///
 /// # Safety
 ///
-/// 本番テーブルへ切り替え済みで、direct map 窓が使えること。
+/// 本番テーブルへ切り替え済みで、direct map ウィンドウが使えること。
 #[cfg(feature = "smp-tlb-shootdown-probe")]
 pub unsafe fn prepare_shootdown_probe<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
@@ -527,7 +527,7 @@ pub unsafe fn prepare_shootdown_probe<const CAP: usize>(
         cacheable: true,
         shared: false,
     };
-    // SAFETY: 稼働中のテーブルへ、まだ誰も使っていない VA を張る。
+    // SAFETY: 稼働中のテーブルへ、まだ誰も使っていない VA をマップする。
     if let Err(error) = unsafe { table.map_4kib(virt, frame, attributes, allocator) } {
         logger.error(format_args!(
             "smp: could not map the shootdown probe page: {error:?}"
@@ -553,8 +553,8 @@ pub unsafe fn prepare_shootdown_probe<const CAP: usize>(
 ///
 /// 1. AP がそのアドレスを触る（翻訳を TLB へ載せる）
 /// 2. 触れたことを確かめる（載せられなかったら以降の比較は無意味である）
-/// 3. bootstrap processor が BKL を保持したまま写像を外し、世代を上げる
-///    （破壊構成では世代を上げない）
+/// 3. bootstrap processor が BKL を保持したままマッピングを外し、世代を上げる
+///    （破壊テストの構成では世代を上げない）
 /// 4. AP がもう一度触る——世代が上がっていれば次の取得でフラッシュ済みなので
 ///    #PF、上がっていなければ古い翻訳で成功する
 ///
@@ -569,7 +569,7 @@ pub mod shootdown_probe {
     pub const IDLE: u32 = 0;
     /// 触れ（1 回目。翻訳を TLB へ載せる）。
     pub const TOUCH_FIRST: u32 = 1;
-    /// 触れ（2 回目。写像を外した後）。
+    /// 触れ（2 回目。マッピングを外した後）。
     pub const TOUCH_AGAIN: u32 = 2;
 
     static COMMAND: AtomicU32 = AtomicU32::new(IDLE);
@@ -614,7 +614,7 @@ pub mod shootdown_probe {
     ///
     /// # Safety
     ///
-    /// `PROBE_VIRT` が写像済みであること（外された後に呼ぶと #PF になる。
+    /// `PROBE_VIRT` がマップ済みであること（外された後に呼ぶと #PF になる。
     /// それがこの探りの目的である）。
     pub unsafe fn service() {
         let cmd = COMMAND.load(Ordering::SeqCst);
@@ -635,7 +635,7 @@ pub mod shootdown_probe {
     }
 }
 
-/// 起こした AP の APIC ID を返す（S5-a）。起こしていなければ `None`。
+/// 起動した AP の APIC ID を返す（S5-a）。起動していなければ `None`。
 pub fn started_ap_apic_id(slot: usize) -> Option<u8> {
     let raw = STARTED_AP_APIC_ID
         .get(slot.checked_sub(1)?)?
@@ -648,19 +648,19 @@ pub fn started_ap_count() -> usize {
     AP_STARTED.load(Ordering::SeqCst)
 }
 
-/// AP を起こした結果（S3-b-2b-1）。
+/// AP を起動した結果（S3-b-2b-1）。
 pub struct WakeReport {
     /// MADT が報告した使用可能なコア数（bootstrap processor を含む）。
     pub usable: usize,
-    /// 起こそうとした AP の本数。
+    /// 起動しようとした AP の本数。
     pub attempted: usize,
     /// 起動署名を出した AP の本数。
     pub started: usize,
-    /// `MAX_CPUS` を超えるので起こさなかった AP の本数。
+    /// `MAX_CPUS` を超えるので起動しなかった AP の本数。
     pub skipped_no_slot: usize,
 }
 
-/// AP を起こす（S3-b-2b-1）。1 本ずつ起こし、次へ進む前に完了を待つ。
+/// AP を起動する（S3-b-2b-1）。1 本ずつ起動し、次へ進む前に完了を待つ。
 ///
 /// # なぜ 1 本ずつなのか
 ///
@@ -668,11 +668,11 @@ pub struct WakeReport {
 /// バイトが混ざる。そしてどの AP が失敗したかを切り分けられなくなる。
 /// 直列にする費用はコア数 × 10ms 程度で、実害が無い。
 ///
-/// # 起こす本数は `MAX_CPUS` で制限する
+/// # 起動する本数は `MAX_CPUS` で制限する
 ///
 /// `MAX_CPUS` を超えるコアは起こさない（`roadmap.md` の S3-b-2b-1）。
-/// 超えた分を起こすと、per-CPU スロットを持てない AP が生まれる。
-/// 起こさなかった本数を返して、検査がそれを主張できるようにする。
+/// 超えた分を起動すると、per-CPU スロットを持てない AP が生まれる。
+/// 起動しなかった本数を返して、検査がそれを主張できるようにする。
 ///
 /// # 待ち時間
 ///
@@ -682,7 +682,7 @@ pub struct WakeReport {
 ///
 /// # Safety
 ///
-/// - `mapped` が写像済みの Local APIC を指すこと。
+/// - `mapped` がマップ済みの Local APIC を指すこと。
 /// - タイマが動いていること（10ms の待ちをティックのエッジで作る）。
 /// - 起動時に 1 回だけ呼ぶこと。
 pub unsafe fn wake_application_processors(
@@ -718,7 +718,7 @@ pub unsafe fn wake_application_processors(
     // だけで、判定には使っていない。
     //
     // 直さない判断と解禁条件は `docs/deferred-decisions.md` にある。要点は、
-    // QEMU で MADT の並びを変える手段が無く、破壊確認を構成できないことである。
+    // QEMU で MADT の並びを変える手段が無く、破壊テストでの確認を構成できないことである。
     let bsp = mmio.bsp_candidate_apic_id();
     let mut report = WakeReport {
         usable,
@@ -727,7 +727,7 @@ pub unsafe fn wake_application_processors(
         skipped_no_slot: 0,
     };
 
-    // bootstrap processor を除いた AP を、MADT の並び順で起こす。
+    // bootstrap processor を除いた AP を、MADT の並び順で起動する。
     let mut slot = 1usize;
     for apic_id in mmio.local_apic_ids() {
         if Some(apic_id) == bsp {
@@ -771,7 +771,7 @@ pub unsafe fn wake_application_processors(
             installed.cr3
         ));
 
-        // INIT → 待つ → SIPI → 待つ → まだ起きていなければもう 1 回 SIPI。
+        // INIT → 待つ → SIPI → 待つ → まだ起動していなければもう 1 回 SIPI。
         //
         // 2 回目を無条件に送ってはならない。既に走り出した AP へ SIPI を
         // 送ると、long mode で走っている最中に開始ベクタから再実行させる
@@ -779,7 +779,7 @@ pub unsafe fn wake_application_processors(
         // トリプルフォルトする。実際に踏んだ（CPU 1 が CS64・GDTR=0 で
         // オフセット 0x15 に落ちた）。規格が 2 回目を許すのは「1 回目が
         // 届かなかった場合」であって、常に 2 回送れという意味ではない。
-        // SAFETY: 写像済みの Local APIC。起動時の 1 回だけ。
+        // SAFETY: マップ済みの Local APIC。起動時の 1 回だけ。
         let ok = unsafe {
             crate::apic::send_init_ipi(lapic_virt, apic_id) && {
                 wait_ticks(AP_WAKE_WAIT_TICKS);
@@ -789,7 +789,7 @@ pub unsafe fn wake_application_processors(
         wait_ticks(AP_WAKE_WAIT_TICKS);
         let ok = ok
             && (started_ap_count() > before || {
-                // SAFETY: 同上。まだ起きていないときだけ送る。
+                // SAFETY: 同上。まだ起動していないときだけ送る。
                 unsafe { crate::apic::send_startup_ipi(lapic_virt, apic_id, installed.sipi_vector) }
             });
         if !ok {
@@ -827,7 +827,7 @@ pub unsafe fn wake_application_processors(
 ///
 /// **混線は稀である**（実測で 8 回に 3 回。S4-b-4 では 5 回に 1 回）。
 /// **稀な事象を判定にするには、確実にする必要がある**——**2 コアが同時に
-/// 何百行も書けば、錠が無ければ必ず混ざる。**
+/// 何百行も書けば、ロックが無ければ必ず混ざる。**
 ///
 /// **本数は測って決めた**（`docs/verification-coverage.md` の「シリアルの排他」）。
 #[cfg(feature = "serial-stress-test")]
@@ -835,7 +835,7 @@ pub const SERIAL_STRESS_LINES: u32 = 200;
 
 /// 演習の合図。**BSP が立て、AP が待つ。**
 ///
-/// **揃えないと重ならない**——**AP が先に書き終えてしまえば、錠が無くても
+/// **揃えないと重ならない**——**AP が先に書き終えてしまえば、ロックが無くても
 /// 混ざらない。**
 #[cfg(feature = "serial-stress-test")]
 pub static SERIAL_STRESS_GO: core::sync::atomic::AtomicBool =
@@ -883,7 +883,7 @@ fn run_serial_stress_on_ap(serial: &mut SerialPort, slot: usize) {
 #[cfg(feature = "serial-stress-test")]
 const WAIT_TIMEOUT_CYCLES: u64 = 20_000_000_000;
 
-/// AP を起こすときの各段の待ちティック数。1 ティック = 10ms（100Hz）。
+/// AP を起動するときの各段の待ちティック数。1 ティック = 10ms（100Hz）。
 const AP_WAKE_WAIT_TICKS: u64 = 1;
 /// 起動署名を待つ上限（ティック）。
 const AP_START_WAIT_TICKS: u64 = 50;
@@ -919,7 +919,7 @@ impl InstalledTrampoline {
     /// 対象の AP がまだ走っていないこと。走っている AP のデータブロックを
     /// 書き換えてはならない。
     pub unsafe fn set_ap_parameters(&self, stack_top_identity: u64, index: u64) {
-        // SAFETY: direct_map_base は写像済みの予約フレームの先頭で、
+        // SAFETY: direct_map_base はマップ済みの予約フレームの先頭で、
         // オフセットはレイアウト定数の範囲内である。
         unsafe {
             self.write_u64(layout::DATA + layout::DATA_RSP, stack_top_identity);
@@ -973,7 +973,7 @@ impl InstalledTrampoline {
 /// - long mode へ入った直後の far jump の飛び先
 ///
 /// BSP がフレームの物理アドレスを知っているので、コピー後に書き込む。
-/// 恒等写像の下では物理 == 線形なので、そのまま使える。
+/// 恒等マッピングの下では物理 == 線形なので、そのまま使える。
 ///
 /// # Safety
 ///
@@ -996,7 +996,7 @@ unsafe fn install_trampoline(
     let len = end - src;
 
     // 1 ページに収まることを確かめる。収まらない場合の隣接ページの確保は
-    // S1 から送った申し送りで、この段で致命として扱う。
+    // S1 から送った申し送りで、この段階で致命として扱う。
     if len > FRAME_SIZE {
         logger.error(format_args!(
             "smp: the AP trampoline is {len} bytes, which does not fit in the reserved {FRAME_SIZE} \
@@ -1049,8 +1049,8 @@ unsafe fn install_trampoline(
         );
     }
 
-    // 破壊 (S3-b-2b-1, smp-tramp-corrupt-copy): 設置済みのコピーを 1 バイト壊す。
-    // パッチされる 3 領域の外を狙うので、雛形との比較が捕まえるはずである。
+    // 破壊テスト (S3-b-2b-1, smp-tramp-corrupt-copy): 設置済みのコピーを 1 バイト壊す。
+    // パッチされる 3 領域の外を狙うので、雛形との比較が検出するはずである。
     #[cfg(feature = "smp-tramp-corrupt-copy-test")]
     // SAFETY: コピー済みのフレーム内。オフセット 0 は `cli` のバイトである。
     unsafe {
@@ -1079,11 +1079,11 @@ unsafe fn install_trampoline(
 ///
 /// # なぜ要るのか
 ///
-/// この段の実装では、16 ビット / 64 ビットの符号化の取り違えを 4 件踏んだ
+/// この段階の実装では、16 ビット / 64 ビットの符号化の取り違えを 4 件踏んだ
 /// （`.org` の詰め物が `mov cr0` の直後に入る、`lgdtw` になる、整列を仮定した
 /// 書き込み、64 ビットの `[disp32]` が RIP 相対になる）。いずれも AP 側でしか
 /// 落ちず、BSP 側は正常に見える。コードを触ったときに静かに戻るのを、
-/// 設置後のバイト比較で捕まえる。
+/// 設置後のバイト比較で検出する。
 ///
 /// # 比較の形。パッチされる箇所は除外し、位置はシンボルから導く
 ///
@@ -1163,7 +1163,7 @@ fn verify_installed_trampoline(
 }
 
 // ===========================================================================
-// S3-b-2b-2: AP の per-CPU スタックを PML4[258] へ張る
+// S3-b-2b-2: AP の per-CPU スタックを PML4[258] へマップする
 // ===========================================================================
 
 /// AP の per-CPU スタックを置く仮想アドレス空間の先頭（`PML4[258]`）。
@@ -1172,8 +1172,8 @@ fn verify_installed_trampoline(
 ///
 /// `[257..510]` は SMP の per-CPU 用に温存してきた範囲で、ここがその目的どおりの
 /// 初使用である。しかし `PML4[257]`（`0xffff808000000000`）は使えない。
-/// あれは破壊 feature `highhalf-remove-verify-fail` のサボタージュ VA そのもので、
-/// あの破壊は「そこが空であること」に依存している。使うと破壊が静かに意味を失う
+/// あれは破壊テストの feature `highhalf-remove-verify-fail` のサボタージュ VA そのもので、
+/// あの破壊テストは「そこが空であること」に依存している。使うと破壊テストが静かに意味を失う
 /// （`docs/verification-coverage.md` と `docs/deferred-decisions.md` の 2 箇所に
 /// 警告がある）。サボタージュ VA を移さずに済むほうを選んだ。
 ///
@@ -1181,7 +1181,7 @@ fn verify_installed_trampoline(
 ///
 /// `StackBlock` は 108.0 KiB で、静的に二重化すると `MAX_CPUS = 4` で 2MiB 境界を
 /// 越える（`common/src/percpu.rs` の `MAX_CPUS` の doc）。フレームアロケータから
-/// 取って写像すればイメージが増えない。
+/// 取ってマップすればイメージが増えない。
 const AP_STACK_REGION_BASE: u64 = 0xffff_8100_0000_0000;
 
 /// 1 コアぶんのスタック領域の大きさ。BSP の `StackBlock` と同じ構成にする。
@@ -1210,25 +1210,25 @@ pub struct ApStacks {
     pub page_fault_top: u64,
 }
 
-/// AP 用スタックを写像する（S3-b-2b-2）。
+/// AP 用スタックをマップする（S3-b-2b-2）。
 ///
-/// # ガードページは張らずに「開けておく」
+/// # ガードページはマップせずに「開けておく」
 ///
-/// 3 本のスタックの下に 1 ページずつ、写像しない穴を残す。BSP 側は静的配置の
-/// 上で `unmap_4kib` して穴を開けているが、こちらは最初から張らないので
+/// 3 本のスタックの下に 1 ページずつ、マップしない穴を残す。BSP 側は静的配置の
+/// 上で `unmap_4kib` して穴を開けているが、こちらは最初からマップしないので
 /// 分割も解除も要らない。direct map（2MiB ページ）に手を入れずに済むのが、
 /// この置き方を選んだ理由の 1 つである。
 ///
 /// # Safety
 ///
-/// 起動時の単一文脈から、AP を起こす前に呼ぶこと。
+/// 起動時の単一文脈から、AP を起動する前に呼ぶこと。
 pub unsafe fn map_ap_stacks<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
     slot: usize,
     allocator: &mut FrameAllocator<CAP>,
 ) -> Option<ApStacks> {
     let base = AP_STACK_REGION_BASE + (slot as u64) * AP_STACK_STRIDE;
-    // SAFETY: CR3 は本番テーブルを指しており、その配下は direct map 窓から
+    // SAFETY: CR3 は本番テーブルを指しており、その配下は direct map ウィンドウから
     // 読み書きできる。起動時の単一文脈で、AP はまだ走っていない。
     let mut table = unsafe { ActivePageTable::current(common::addr::direct_map()) };
 
@@ -1243,7 +1243,7 @@ pub unsafe fn map_ap_stacks<const CAP: usize>(
     let mut tops = [0u64; 3];
     let free_before = allocator.free_frame_count();
     for (index, size) in layout.iter().enumerate() {
-        // ガードぶんを空けたまま進める（張らないので穴になる）。
+        // ガードぶんを空けたまま進める（マップしないので穴になる）。
         cursor += crate::stack::GUARD_SIZE as u64;
         let bottom = cursor;
         let mut offset = 0;
@@ -1262,7 +1262,7 @@ pub unsafe fn map_ap_stacks<const CAP: usize>(
                 cacheable: true,
                 shared: false,
             };
-            // SAFETY: 稼働中のテーブルへ、まだ誰も使っていない VA を張る。
+            // SAFETY: 稼働中のテーブルへ、まだ誰も使っていない VA をマップする。
             if let Err(error) = unsafe { table.map_4kib(virt, frame, attributes, allocator) } {
                 logger.error(format_args!(
                     "smp: could not map the per-CPU stack page at {:#x} for slot {slot}: \
@@ -1393,7 +1393,7 @@ fn load_bringup(slot: usize) -> Option<ApBringUp> {
 /// （どちらも `PML4[511]` を持つ）。切り替えの前に載せれば、`cpu_id()` が
 /// 早く正しくなる。
 ///
-/// # IDTR を載せてから CR3 を切り替えるまでの窓（受け入れて記録する）
+/// # IDTR を載せてから CR3 を切り替えるまでのウィンドウ（受け入れて記録する）
 ///
 /// IDTR を載せた後、CR3 を切り替えるまでの数命令の間、IST の VA（本番テーブルに
 /// しか無い）はまだ見えない。そこで IST 経由の例外（`#DF` / `#PF`）が起きると
@@ -1404,7 +1404,7 @@ fn load_bringup(slot: usize) -> Option<ApBringUp> {
 /// - この区間に例外を起こす操作を置いていない（`mov cr3` / `mov rsp` / `jmp` だけ）
 /// - 順序を入れ替える案（IST なしの IDT を先に載せ、CR3 の後で差し替える）は
 ///   IDT を 2 回載せることになり、「IDT は 1 本を共有する」という単純さを壊す
-/// - 窓は数命令で、b-2b-1 の教訓どおり間に何も置かない形にしてある
+/// - ウィンドウは数命令で、b-2b-1 の教訓どおり間に何も置かない形にしてある
 ///
 /// この区間に命令を足すときは、この判断を再評価すること。上の 1 つ目の理由は
 /// 「今は mov が 3 つだけ」に依存している。足した瞬間に前提が崩れる。
@@ -1413,9 +1413,9 @@ fn load_bringup(slot: usize) -> Option<ApBringUp> {
 ///
 /// AP 自身から、b-2b-1 のトランポリンで入った直後に 1 回だけ呼ぶこと。
 unsafe fn bring_up_application_processor(info: ApBringUp) -> ! {
-    // 0. **BSP の CR0・CR4・EFER を写す**（2026-09-24。`kernel::cpu_state`）。**トランポリンは INIT の直後の
+    // 0. **BSP の CR0・CR4・EFER をコピーする**（2026-09-24。`kernel::cpu_state`）。**トランポリンは INIT の直後の
     //    値に PAE・LME・PG と PE しか足さない**——**CD と NW が 1（キャッシュが効かない）で、WP と NE が 0 の
-    //    まま走っていた**（実測）。**何より先に写す**——この先のコードをキャッシュと WP の下で走らせる。
+    //    まま走っていた**（実測）。**何より先にコピーする**——この先のコードをキャッシュと WP の下で走らせる。
     // SAFETY: AP の起動の途中で、長モードに居て、割り込みは禁止のままである。
     unsafe {
         crate::cpu_state::adopt_bsp_state_on_this_ap();
@@ -1454,7 +1454,7 @@ unsafe fn bring_up_application_processor(info: ApBringUp) -> ! {
         crate::fp::enable_on_this_cpu();
     }
     {
-        // **読み戻して言う。** **BSP の行は AP について何も言わない**ので、
+        // **読み戻して出力する。** **BSP の行は AP について何も示さない**ので、
         // **コアごとに 1 行ずつ出す。**
         let state = crate::fp::enabled_state();
         let mut port = SerialPort::new(SerialPort::COM1_BASE);
@@ -1539,8 +1539,8 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
         cpu::halt_forever();
     }
 
-    // 破壊 (S3-b-2b-2, smp-ap-touch-scheduler): AP からスケジューラの現在タスクを
-    // 読む。この段は AP でタスクを実行しないので、sentinel を読んで落ちるのが
+    // 破壊テスト (S3-b-2b-2, smp-ap-touch-scheduler): AP からスケジューラの現在タスクを
+    // 読む。この段階は AP でタスクを実行しないので、sentinel を読んで落ちるのが
     // 正しい。丸めていたら「タスク 0 が走っている」と静かに答えていた。
     #[cfg(feature = "smp-ap-touch-scheduler-test")]
     {
@@ -1567,11 +1567,11 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
     //
     // 取る区間は書き込みだけに絞る。この関数はシリアルを直に使っており、
     // そこは BKL の外のままである（S6 のログ規約の許可リストの対象であって、
-    // この段の対象ではない）。
+    // この段階の対象ではない）。
     //
-    // 破壊 (S4-c-3-2b, smp-ap-no-sentinel-clear): この解除を落とす。AP は最初の
+    // 破壊テスト (S4-c-3-2b, smp-ap-no-sentinel-clear): この解除を落とす。AP は最初の
     // ティックで sentinel を読んで停止する。S4-a の `smp-ap-enter-scheduler`
-    // から役目を引き継いだ破壊である。
+    // から役目を引き継いだ破壊テストである。
     #[cfg(not(feature = "smp-ap-no-sentinel-clear"))]
     {
         let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::ApBringUp);
@@ -1589,7 +1589,7 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
     #[cfg(feature = "serial-stress-test")]
     run_serial_stress_on_ap(&mut serial, slot);
 
-    // 破壊 (S4-c-4-1, smp-ap-runs-preemptive-demo): AP にデモを呼ばせる。
+    // 破壊テスト (S4-c-4-1, smp-ap-runs-preemptive-demo): AP にデモを呼ばせる。
     //
     // tripwire の機序の直接観測である。`require_bootstrap_processor` は
     // `run_preemptive_demo` の入口にあり、ワーカーの継続では鳴らない。開始で
@@ -1599,8 +1599,8 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
     //
     // 止まるのは入口である。`require_bootstrap_processor` が
     // `halt_forever` するので、`setup_preemptive_tasks` へは到達しない。
-    // したがってワーカーは `Ready` にならず、二重選択の窓も生まれない。
-    // 窓が要るのは S4-c-4-2 で、あちらはこの tripwire を外した構成である
+    // したがってワーカーは `Ready` にならず、二重選択のウィンドウも生まれない。
+    // ウィンドウが要るのは S4-c-4-2 で、あちらはこの tripwire を外した構成である
     // （`docs/verification-coverage.md`。同じ起動では両立しない——
     // 一方は tripwire が在ることを、他方は無いことを要求する）。
     //
@@ -1639,7 +1639,7 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
 /// BSP が測った分周と初期カウントをそのまま自分の LVT へ書く。これは
 /// 「Local APIC タイマの周波数がコア間で同じ」という仮定である。
 /// 仮定なので、AP 側のティックのレートをホストの実時間と突き合わせて実測検証
-/// する（`lapic-timer-test` と同型の独立基準）。仮定が崩れる環境ではそこで捕まる。
+/// する（`lapic-timer-test` と同型の独立基準）。仮定が崩れる環境ではそこで検出される。
 ///
 /// # Safety
 ///
@@ -1648,7 +1648,7 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
 unsafe fn start_local_timer(serial: &mut SerialPort, slot: usize) -> ! {
     // 1. 自分の Local APIC を有効にする。
     //
-    // 破壊 (S4-a, smp-ap-timer-no-svr): ここを飛ばす。BSP が書いた SVR は
+    // 破壊テスト (S4-a, smp-ap-timer-no-svr): ここを飛ばす。BSP が書いた SVR は
     // このコアには効いていないので、ティックが 1 本も来ない。
     #[cfg(not(feature = "smp-ap-timer-no-svr-test"))]
     {
@@ -1715,12 +1715,12 @@ unsafe fn start_local_timer(serial: &mut SerialPort, slot: usize) -> ! {
     // S3 ではここが `cli; hlt` だった。BKL が無いので AP は待つだけで、
     // 割り込みを有効化しなかった。S4-a で前提が変わる。
     //
-    // BKL はまだ無い。この段の安全は「AP のハンドラが触るものが per-CPU か
+    // BKL はまだ無い。この段階の安全は「AP のハンドラが触るものが per-CPU か
     // アトミックだけである」ことに依存する条件つきのものである（`roadmap.md` の
     // S4-a に一覧がある）。S4-b で BKL が入れば、この一覧は不要になる。
-    // 破壊 (S4-b-4, bkl-hold-forever): AP が BKL を取ったまま二度と離さない。
+    // 破壊テスト (S4-b-4, bkl-hold-forever): AP が BKL を取ったまま二度と離さない。
     // BSP がタイムアウトして原因を出す。再帰検出ではなく待ちの上限を通す
-    // 唯一の形である（既存の 2 破壊はどちらも同じコアが取り直すので再帰が先に鳴る）。
+    // 唯一の形である（既存の 2 つの破壊テストはどちらも同じコアが取り直すので再帰が先に鳴る）。
     #[cfg(feature = "bkl-hold-forever-test")]
     crate::bkl::sabotage_hold_forever();
 
@@ -1746,7 +1746,7 @@ fn ap_heartbeat_loop(serial: &mut SerialPort, slot: usize) -> ! {
     let mut next_heartbeat = crate::interrupts::HEARTBEAT_TICKS;
     loop {
         let ticks = crate::idt::timer_ticks_for(slot);
-        // **観測が締まっていれば出さない（S11-11）。** BSP がシェルへ渡した後も
+        // **観測が完了していれば出さない（S11-11）。** BSP がシェルへ渡した後も
         // 出し続けると、**起動ログの長さが実時間に依存する。**
         if ticks >= next_heartbeat && !crate::interrupts::steady_observation_is_closed() {
             next_heartbeat = ticks + crate::interrupts::HEARTBEAT_TICKS;
@@ -1757,7 +1757,7 @@ fn ap_heartbeat_loop(serial: &mut SerialPort, slot: usize) -> ! {
             );
         }
         // TLB シュートダウンの探り（S5-c）。指示があるときだけ触る。
-        // SAFETY: 探り用ページは BSP が起動時に写像している。外された後に触ると
+        // SAFETY: 探り用ページは BSP が起動時にマップしている。外された後に触ると
         // #PF になるが、それがこの探りの目的である。
         #[cfg(feature = "smp-tlb-shootdown-probe")]
         unsafe {
@@ -1765,7 +1765,7 @@ fn ap_heartbeat_loop(serial: &mut SerialPort, slot: usize) -> ! {
         };
 
         // SAFETY: 自コアの IDT は載っており、タイマのハンドラは EOI を送って戻る。
-        // `sti; hlt` が隣接しているので、有効化と停止の間に窓が開かない。
+        // `sti; hlt` が隣接しているので、有効化と停止の間にウィンドウが開かない。
         unsafe {
             cpu::enable_interrupts_and_halt();
         }
@@ -1784,13 +1784,13 @@ pub fn brought_up_ap_count() -> usize {
 ///
 /// # なぜここで用意するのか
 ///
-/// フレームアロケータと本番テーブルの両方が要る。AP を起こすのは
+/// フレームアロケータと本番テーブルの両方が要る。AP を起動するのは
 /// `run_timer_loop` の中だが、そこにはアロケータが無い（トランポリン用フレームと
 /// AP スタック用フレームを最初期に予約したのと同じ理由）。
 ///
 /// # Safety
 ///
-/// 起動時の単一文脈から、本番テーブルへ切り替えた後・AP を起こす前に 1 回だけ呼ぶこと。
+/// 起動時の単一文脈から、本番テーブルへ切り替えた後・AP を起動する前に 1 回だけ呼ぶこと。
 pub unsafe fn prepare_ap_per_cpu<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
     allocator: &mut FrameAllocator<CAP>,

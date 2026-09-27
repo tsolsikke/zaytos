@@ -18,7 +18,7 @@
 //! 未マップの物理アドレスは、**メモリマップから実行時に導く。** 実測で
 //! `EfiReservedMemoryType` の穴は `0xf6ed000..0xf76d000` にあるが、この範囲は
 //! 起動ごとに揺れる（`descriptors_len` が 130〜132 で変わることが実測済みである）。
-//! リテラルで持つと、穴が動いた起動で**破壊が破壊にならず、検査が静かに通る。**
+//! リテラルで持つと、穴が動いた起動で**破壊テストが破壊にならず、検査が静かに通る。**
 //! 時点依存の数字を導出元から離れた場所に書かない、の適用である。
 
 use common::addr::PhysAddr;
@@ -32,14 +32,14 @@ pub enum Target {
     /// XSDT / RSDT。
     RootTable,
     Madt,
-    /// FADT（HW-b）。**壊す破壊は無い**（`read_and_verify_table` が対象を要るので名前を持つ）。
+    /// FADT（HW-b）。**壊す破壊テストは無い**（`read_and_verify_table` が対象を要るので名前を持つ）。
     Fadt,
 }
 
-/// ヘッダを読んだ直後、検証の直前に効かせる破壊（署名・長さ）。
+/// ヘッダを読んだ直後、検証の直前に効かせる破壊テスト（署名・長さ）。
 ///
 /// 既定ビルドでは何もしない。引数を使わないことによる警告を避けるため、
-/// 冒頭で明示的に触れておく（借用なので、後続の破壊コードが使える）。
+/// 冒頭で明示的に触れておく（借用なので、後続の破壊テストのコードが使える）。
 pub fn corrupt_table_header(target: Target, bytes: &mut [u8]) {
     let _ = (target, &bytes);
 
@@ -58,13 +58,13 @@ pub fn corrupt_table_header(target: Target, bytes: &mut [u8]) {
     }
 }
 
-/// 本体を読んだ直後、チェックサム検算の直前に効かせる破壊
+/// 本体を読んだ直後、チェックサム検算の直前に効かせる破壊テスト
 /// （チェックサム・エントリ長 0）。
 pub fn corrupt_table_body(target: Target, bytes: &mut [u8]) {
     let _ = (target, &bytes);
 
     // 末尾の 1 バイトを変える。署名も長さも無傷なので、チェックサムだけが
-    // 破れる。**署名の破壊と経路が違うことを、この位置で保証している。**
+    // 破れる。**署名の破壊テストと経路が違うことを、この位置で保証している。**
     #[cfg(feature = "acpi-test-bad-checksum")]
     if target == Target::Madt && !bytes.is_empty() {
         let last = bytes.len() - 1;
@@ -120,8 +120,8 @@ pub fn redirect_rsdp(
         }
     }
 
-    // direct map 窓が覆っていないアドレスを渡す。窓長そのものが「窓の外の
-    // 最初のアドレス」である（`covers` は `phys < length`）。**窓長から導くので、
+    // direct map ウィンドウが覆っていないアドレスを渡す。ウィンドウ長そのものが「窓の外の
+    // 最初のアドレス」である（`covers` は `phys < length`）。**ウィンドウ長から導くので、
     // ここにリテラルは無い。**
     #[cfg(feature = "acpi-test-rsdp-outside-window")]
     {
@@ -150,7 +150,7 @@ pub fn redirect_rsdp(
 ///
 /// **中点を採るのは、端では足りないためである。** マッピングは 2MiB ページを
 /// 使うので、マップ済みの範囲に隣接する未マップ領域の先頭は、隣の huge page に
-/// 巻き込まれて写っていることがありうる。最大の記述子（実測では 12GiB 規模）の
+/// 巻き込まれてマップされていることがありうる。最大の記述子（実測では 12GiB 規模）の
 /// 中点なら、その可能性が構造的に無い。
 #[cfg(feature = "acpi-test-unmapped-rsdp")]
 fn largest_unmapped_midpoint(memory_map_bytes: &[u8], descriptor_size: u64) -> Option<PhysAddr> {

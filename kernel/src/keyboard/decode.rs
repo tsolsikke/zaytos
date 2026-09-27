@@ -40,11 +40,11 @@
 //! **`0x40` の外に居る 2 つは、範囲の判定より先に引く経路が要る**ので、
 //! **その経路が繋がっているかは、実機の消費者まで通さないと言えない。**
 //!
-//! **消費者は 2 つあり、判定も 2 つ置いてある**（`xtask`）——
+//! **消費者は 2 つあり、判定も 2 つ設けてある**（`xtask`）——
 //! `--interrupt-test keyboard` がカーネル側（`crate::interrupts` の
 //! `drain_keyboard`）を、`--shell-test` が Ring 3 の前景経路を見る。
 //! **前景が取られている間、前者は 1 バイトも取り出さない**ので、
-//! **片方が緑でも、もう片方は何も言っていない。**
+//! **片方が成功しても、もう片方は何も言っていない。**
 //!
 //! ## `¥` キーは `\` を出す
 //!
@@ -108,7 +108,7 @@ pub enum KeyEvent {
     /// カーソル上（zi-a）。
     ///
     /// **左右を入れたとき「上下は分けない。使う者がいない機構は検算が置けない」と
-    /// 書いた。** 使う者（`zi`。vision から段になった）が決まったので分けた。
+    /// 書いた。** 使う者（`zi`。vision から段階になった）が決まったので分けた。
     ArrowUp,
     /// Delete（zi-f）。**カーソル位置の字を消す。**
     ///
@@ -256,11 +256,11 @@ const TABLE_LEN: usize = 0x40;
 
 /// いま引く配列（f-1b。`ADR-0052` の `KEYMAP`）。
 ///
-/// # なぜ錠ではなく atomic なのか
+/// # なぜロックではなく atomic なのか
 ///
 /// **読むのは割り込みの文脈である**（キー割り込みからデコーダが引く）。
 /// **`Locked<T>` は持っている間ずっと割り込みを止めるので、
-/// 割り込みハンドラの中で取るのは形が違う。** **原子で足りる**——
+/// 割り込みハンドラの中で取るのは形が違う。** **アトミックで足りる**——
 /// **書くのは起動時の 1 回だけで、読むのは字を作るときだけである。**
 ///
 /// **既定は JIS である**（`false`）。**設定ファイルが無いときに
@@ -272,11 +272,11 @@ pub(crate) fn set_us_layout(us: bool) {
     USE_US_LAYOUT.store(us, core::sync::atomic::Ordering::Relaxed);
 }
 
-/// 破壊 (f-1b, keymap-always-jis-test): **`KEYMAP` を見ずに常に JIS を引く。**
+/// 破壊テスト (f-1b, keymap-always-jis-test): **`KEYMAP` を見ずに常に JIS を引く。**
 ///
-/// **`set_us_layout` は呼ばれており、原子にも入っている**——**引く側だけが
+/// **`set_us_layout` は呼ばれており、アトミックにも入っている**——**引く側だけが
 /// 見ない形である。** **出る字が JIS のままなので、`sendkey` で同じ物理キーを
-/// 打って出る字が変わることを見る判定が捕まえる。**
+/// 打って出る字が変わることを見る判定が検出する。**
 fn use_us_layout() -> bool {
     #[cfg(feature = "keymap-always-jis-test")]
     return false;
@@ -368,7 +368,7 @@ const JIS_SHIFTED: [char; TABLE_LEN] = [
     '\0', ' ', '\0', '\0', '\0', '\0', '\0', '\0', // 0x38-0x3F
 ];
 
-// **US の表（f-1b。以前は `keyboard-us-layout-test` という破壊だった）。**
+// **US の表（f-1b。以前は `keyboard-us-layout-test` という破壊テストだった）。**
 //
 // **実行時に選べるようになったので、「US を選ぶ」は正常な経路である**
 // ——**破壊ではない。** **代わりに `keymap-always-jis-test`（引く側が
@@ -487,7 +487,7 @@ impl Decoder {
                 // 拡張キーのうち**左右の矢印だけを扱う**（S12 前の手当て）。
                 // 残り（上下・Home・End・右 Ctrl/Alt など）は未対応のままである。
                 //
-                // 破壊 (S12 前の手当て, keyboard-drop-arrows): 矢印を未対応へ戻す。
+                // 破壊テスト (S12 前の手当て, keyboard-drop-arrows): 矢印を未対応へ戻す。
                 // **シェルの挿入点が動かなくなる**ので、`--shell-test` の
                 // 「左へ動かしてから入れた」判定が落ちる。
                 #[cfg(not(feature = "keyboard-drop-arrows-test"))]
@@ -498,8 +498,8 @@ impl Decoder {
                 if code == SCANCODE_ARROW_RIGHT {
                     return Some(KeyEvent::ArrowRight);
                 }
-                // **上下も同じ feature の下に置く（zi-a）。** 破壊の意味を
-                // 「矢印を未対応へ戻す」の 1 つに保つ——鍵ごとに feature を
+                // **上下も同じ feature の下に置く（zi-a）。** 破壊テストの意味を
+                // 「矢印を未対応へ戻す」の 1 つに保つ——キーごとに feature を
                 // 分けると、名前が主張する範囲と実際の範囲がずれていく。
                 #[cfg(not(feature = "keyboard-drop-arrows-test"))]
                 if code == SCANCODE_ARROW_UP {
@@ -510,16 +510,16 @@ impl Decoder {
                     return Some(KeyEvent::ArrowDown);
                 }
                 // **Delete（zi-f）。** **`keyboard-drop-arrows-test` の下に
-                // 置かない**——**あの破壊の意味は「矢印を未対応へ戻す」の
+                // 置かない**——**あの破壊テストの意味は「矢印を未対応へ戻す」の
                 // 1 つである**（名前が主張する範囲と実際の範囲をずらさない）。
                 if code == SCANCODE_DELETE {
                     return Some(KeyEvent::Delete);
                 }
-                // **Home と End（SE-a。`ADR-0050`）。** **矢印の破壊の下に
-                // 置かない**——**あの破壊の意味は「矢印を未対応へ戻す」の
+                // **Home と End（SE-a。`ADR-0050`）。** **矢印の破壊テストの下に
+                // 置かない**——**あの破壊テストの意味は「矢印を未対応へ戻す」の
                 // 1 つである**（Delete と同じ判断）。
                 //
-                // 破壊 (SE-a, keyboard-drop-home-end-test): 種を返さず
+                // 破壊テスト (SE-a, keyboard-drop-home-end-test): 種を返さず
                 // `Unsupported` へ落とす。**`--shell-test` の「Home と End が
                 // 挿入点を端へ動かした」判定が落ちる。**
                 #[cfg(not(feature = "keyboard-drop-home-end-test"))]
@@ -605,25 +605,25 @@ impl Decoder {
         // **Ctrl+英字を制御文字へ落とす（SE-a。`ADR-0050`）。**
         //
         // **以前は Ctrl+C だけを落としており、「使う道ができた時点で広げること」と
-        // 書いてあった。** **SE 段の `Ctrl+A` / `Ctrl+E` がその道である。**
+        // 書いてあった。** **SE 段階の `Ctrl+A` / `Ctrl+E` がその道である。**
         //
         // **一般化は機構を増やさない。** **既に在った例外（Ctrl+C だけ特別）を
         // 規則へ畳む**——**2 文字だけ通す形にすると、例外の表が育つ。**
         //
         // **種を足さず `Char` で出す。** Ctrl は修飾であって、キーではない——
         // **矢印（B）で種を足したのは、あれがキーそのものだったからである。**
-        // 修飾の族は Shift と Caps Lock で、どちらも種を持たない。
+        // 修飾の種類は Shift と Caps Lock で、どちらも種を持たない。
         #[cfg(not(feature = "keyboard-drop-ctrl-letters-test"))]
         if self.ctrl {
             if let Some(byte) = control_byte_for(key) {
                 return Some(KeyEvent::Char(byte as char));
             }
         }
-        // 破壊 (SE-a, keyboard-drop-ctrl-letters-test): 一般化を外し、
+        // 破壊テスト (SE-a, keyboard-drop-ctrl-letters-test): 一般化を外し、
         // Ctrl+C だけに戻す。**`--shell-test` の「Ctrl+A と Ctrl+E が
         // 挿入点を端へ動かした」判定が落ちる。**
         //
-        // **止めた子の判定は緑のままである**——**中断の旗は
+        // **止めた子の判定は成功のままである**——**中断のフラグは
         // `kernel/src/input.rs` の割り込み側が立てており、こちらとは
         // 独立の経路である**（`ADR-0050` の条件 1）。
         #[cfg(feature = "keyboard-drop-ctrl-letters-test")]
@@ -635,7 +635,7 @@ impl Decoder {
             SCANCODE_ENTER => Some(KeyEvent::Enter),
             SCANCODE_BACKSPACE => Some(KeyEvent::Backspace),
             SCANCODE_TAB => Some(KeyEvent::Char('\t')),
-            // 破壊 (zi-a, keyboard-drop-esc-test): Esc を未対応へ戻す。
+            // 破壊テスト (zi-a, keyboard-drop-esc-test): Esc を未対応へ戻す。
             // **Ring 3 へ `\x1b` が届かなくなる**ので、`--shell-test` の
             // 「Esc `[` `D` の実打鍵が挿入点を動かした」判定が落ちる。
             #[cfg(not(feature = "keyboard-drop-esc-test"))]
@@ -700,10 +700,10 @@ mod tests {
     ///
     /// # 数を主張にする
     ///
-    /// **以前はこれを破壊（`keyboard-us-layout-test`）で見ていた**
+    /// **以前はこれを破壊テスト（`keyboard-us-layout-test`）で見ていた**
     /// ——**US の表へ倒すと、JIS を主張する単体テストが 6 本落ちた。**
     /// **実行時に選べるようになると「US を選ぶ」は正常な経路になり、
-    /// 破壊ではなくなる**ので、**差そのものを主張する形へ移した。**
+    /// 破壊テストではなくなる**ので、**差そのものを主張する形へ移した。**
     ///
     /// **数え方**——**`UNSHIFTED` と `SHIFTED` の項を 1 つずつ突き合わせ、
     /// 違う位置を数えた。** **表の外の 2 キーは別に数える。**
@@ -724,7 +724,7 @@ mod tests {
         assert_eq!(JIS_ONLY_KEYS_JIS.len(), 2, "表の外の JIS 固有キー");
         assert!(JIS_ONLY_KEYS_US.is_empty(), "US には対応するキーが無い");
 
-        // **判定が打つ 2 つの鍵を名指しで固定する。**
+        // **判定が打つ 2 つのキーを名指しで固定する。**
         // **片方は素の側、もう片方は Shift の側で、`character_for` の
         // 別の経路を通る。**
         assert_eq!((JIS_UNSHIFTED[0x1A], US_UNSHIFTED[0x1A]), ('@', '['));
@@ -911,7 +911,7 @@ mod tests {
     ///
     /// **未対応の代表は 2 度差し替えている。** 上矢印は zi-a で種を得たので
     /// Home へ移し、**Home も SE-a で種を得た**ので PageUp（`0xE0 0x49`）へ移した。
-    /// **この差し替えが要るのは、扱う鍵が増えるたびである**——
+    /// **この差し替えが要るのは、扱うキーが増えるたびである**——
     /// **代表が種を得ると、この判定は「未対応の代表」を主張しなくなる。**
     #[test]
     fn extended_keys_are_reported_once_on_press() {
@@ -1067,11 +1067,11 @@ mod tests {
         }
     }
 
-    /// **US と JIS で結果が変わる鍵を名指しで並べる。**
+    /// **US と JIS で結果が変わるキーを名指しで並べる。**
     ///
     /// # なぜ一覧で持つのか
     ///
-    /// **表を差し替えた段の主張そのものだからである。** 「JIS になった」は
+    /// **表を差し替えた段階の主張そのものだからである。** 「JIS になった」は
     /// 表全体を見ても言えず、**US と違う位置を数え上げて初めて言える。**
     /// **US では何だったかを同じ行に置く**——差し替えを戻したくなった人が、
     /// **どこが動くのかをこの一覧だけで読める。**

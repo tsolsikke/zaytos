@@ -22,10 +22,10 @@
 //! 「タイマだけ APIC、マスクだけ PIC」という中間状態を表現するために
 //! 境界が 2 つとも歪む。
 //!
-//! # この段（S0-a）では何をしていないか
+//! # この段階（S0-a）では何をしていないか
 //!
 //! - APIC / IO-APIC への移行はしない（S2）。PIC のまま境界だけ作る。
-//! - `trait` は切らない。実装が 1 つしかない段で切ると形を誤る。差し替え点が
+//! - `trait` は切らない。実装が 1 つしかない段階で切ると形を誤る。差し替え点が
 //!   1 箇所へ集まっていることが seam の実質であり、`trait` は APIC 実装が
 //!   現れる S2 で切る。
 //! - IPI は含めない（S5）。PIC に等価物が無く、見越して抽象化すると PIC 側に
@@ -58,8 +58,8 @@
 //! | [`check_masks`] | [`Controller`] へ委譲 | 同上 |
 //! | [`configure_timer`] | [`TimerSource`] へ委譲 | 同上 |
 //! | [`init`] | PIC 専用 | 8259 の再マップ（ICW1 から ICW4）そのもので、APIC 側に対応物が無い。I/O APIC 側の初期設定は形が違うので、S2-d-1c で `init` の扱いと合わせて改めて判断する |
-//! | [`service_snapshot`] | PIC 専用 | 8259 の ISR を読む診断であり、LAPIC の ISR は 8 本で形が違う。配送が移る段（S2-d-1c 以降）で形を決める |
-//! | [`vector_for`] | モジュール関数 | `const fn` である。固定トールチェイン（1.97.1）で const trait method が安定しておらず、trait へ入れると [`crate::idt::PIC_TIMER_VECTOR`] が定義できない |
+//! | [`service_snapshot`] | PIC 専用 | 8259 の ISR を読む診断であり、LAPIC の ISR は 8 本で形が違う。配送が移る段階（S2-d-1c 以降）で形を決める |
+//! | [`vector_for`] | モジュール関数 | `const fn` である。固定ツールチェイン（1.97.1）で const trait method が安定しておらず、trait へ入れると [`crate::idt::PIC_TIMER_VECTOR`] が定義できない |
 //! | [`irq_for`] | モジュール関数 | 同上 |
 //! | [`managed_vectors`] | モジュール関数 | 同上 |
 //! | [`timer_frequency_hz`] | モジュール関数 | 同上 |
@@ -76,18 +76,18 @@
 //! 遅らせなかった理由は、2 本の trait を責務で対にして決めたことにある。
 //! 片方だけ S2-d-2 まで遅らせると、[`configure_timer`] だけがモジュール関数
 //! として残り、上の公開面の表がもう 1 種類増える。切り分けの軸としては、
-//! 「trait 化」を 1 回で終えて「実装を足す」を別の段に置くほうが読みやすい。
+//! 「trait 化」を 1 回で終えて「実装を足す」を別の段階に置くほうが読みやすい。
 //!
-//! Local APIC タイマの実装をこの段で書かなかった理由は `irq/apic.rs` の
+//! Local APIC タイマの実装をこの段階で書かなかった理由は `irq/apic.rs` の
 //! 末尾にある（初期カウントは較正の戻り値から求めるもので、較正値を持たない
-//! この段では正しい値を書けない）。
+//! この段階では正しい値を書けない）。
 //!
 //! # 境界の外に、境界が所有すべき書き込み操作がある（未解決）
 //!
 //! S0-a の「IMR への書き込みは境界の内側だけに存在する」は、PIC については
 //! 真だが、I/O APIC については偽である。redirection entry を読み書きする
 //! 操作は [`crate::apic`] にあり、割り込み層の外である。可視性の静的検査は
-//! `kernel/src/irq/` の内側だけを見るので、ここは捕まらない。
+//! `kernel/src/irq/` の内側だけを見るので、ここは検出されない。
 //!
 //! 守れない箇所を守れると書かないために、非対称を明示しておく。
 //! レジスタの配置を知るモジュールを 1 つに保つほうを優先した結果であり、
@@ -103,7 +103,7 @@
 //! ので、APIC 側には置き場が無い。
 //!
 //! `unmask` の中でついでに設定する形にしないこと。マスクを外す操作と
-//! 経路を設定する操作を 1 つに畳むことになり、後で分けたくなったときに高くつく
+//! 経路を設定する操作を 1 つにまとめることになり、後で分けたくなったときに高くつく
 //! （マスクの開け閉めは何度も起きるが、経路の設定は 1 回である）。
 //! S2-d-1c で `init` の扱いと合わせて決める。
 
@@ -238,7 +238,7 @@ pub fn irq_for_vector(vector: u8) -> Option<u8> {
 /// # なぜ 2 本に分けるのか
 ///
 /// 「LAPIC タイマが LAPIC の一部である」のは実装の事情であって責務では
-/// ない。1 本に畳むと、I/O APIC が「タイマ源でもある」ことを強いられる。
+/// ない。1 本にまとめると、I/O APIC が「タイマ源でもある」ことを強いられる。
 /// 1 つの型が両方を実装すればよいので、分けても手間は増えない。
 trait Controller {
     /// 指定した IRQ 1 本を解禁する。
@@ -277,7 +277,7 @@ trait Controller {
     /// # マスクを外す操作と分けてある
     ///
     /// [`Controller::unmask`] は何度も起きるが、経路の設定は 1 回である。
-    /// 1 つに畳むと、後で分けたくなったときに高くつく。
+    /// 1 つにまとめると、後で分けたくなったときに高くつく。
     ///
     /// # Safety
     ///
@@ -385,8 +385,8 @@ impl TimerSource for Legacy {
 ///
 /// 切り替えが実行時に起きる以上、最終的な dispatch は列挙子になる
 /// （関連型では実行時の切り替えを跨げず、trait object は値として返せない）。
-/// ただし S2-d-1b は切り替えない段である。状態が 1 つしか無いうちに
-/// 列挙子を置くと、選ばれることのない腕を先回りで作ることになる。
+/// ただし S2-d-1b は切り替えない段階である。状態が 1 つしか無いうちに
+/// 列挙子を置くと、選ばれることのない分岐を先回りで作ることになる。
 /// 使うから足すのであって、将来のために足すのではない。
 /// 列挙子は、実際に 2 つの状態を持つ S2-d-1c で入れる。
 const ACTIVE: Legacy = Legacy;
@@ -409,14 +409,14 @@ impl fmt::Debug for InitError {
 /// [`configure_timer`] の失敗。`Debug` の扱いは [`InitError`] と同じ。
 ///
 /// 列挙にしたのは実装が 2 つになったためである（S2-d-2）。PIT の失敗は
-/// 分周値の範囲、Local APIC タイマの失敗は写像と初期カウントの範囲で、
-/// 原因が違う。PIT の腕の `Debug` は既存の文言をそのまま委譲するので、
+/// 分周値の範囲、Local APIC タイマの失敗はマッピングと初期カウントの範囲で、
+/// 原因が違う。PIT の分岐の `Debug` は既存の文言をそのまま委譲するので、
 /// PIT 側のログは変わらない。
 pub struct TimerError(TimerErrorKind);
 
 enum TimerErrorKind {
     Pit(pit::FrequencyError),
-    /// Local APIC が写像できていない。
+    /// Local APIC がマップできていない。
     LapicNotMapped,
     /// 要求周波数から妥当な初期カウントを作れない。
     FrequencyOutOfRange,
@@ -491,7 +491,7 @@ impl fmt::Display for Programming {
 ///
 /// `const fn` を保つ。[`crate::idt::PIC_TIMER_VECTOR`] と
 /// [`crate::keyboard::PIC_KEYBOARD_VECTOR`] が `const` であり、実行時関数にすると
-/// 定義できなくなる。固定トールチェイン（1.97.1）で `match` による剥がしが
+/// 定義できなくなる。固定ツールチェイン（1.97.1）で `match` による剥がしが
 /// const 評価できることは確認済みである。`unwrap()` も通るが、不正な IRQ を
 /// 渡したときのメッセージが読める `match` を使う。
 pub const fn vector_for(irq: u8) -> Option<u8> {
@@ -544,21 +544,21 @@ pub fn check_masks(unmasked: &[u8]) -> MaskCheck {
 
 /// 2 つ目のコントローラ実装（Local APIC / I/O APIC）でマスクを読み、その観測を返す。
 ///
-/// 切り替えない。読むだけである。S2-d-1b は振る舞い不変の段で、配送は
+/// 切り替えない。読むだけである。S2-d-1b は振る舞い不変の段階で、配送は
 /// PIC / PIT のままである。
 ///
 /// # なぜ読むのか
 ///
 /// 2 つ目の実装を書いても、どこからも呼ばなければ実ハードウェアを正しく
-/// 読めるかが分からないまま S2-d-1c へ入る。1c は配送が変わる段なので、
+/// 読めるかが分からないまま S2-d-1c へ入る。1c は配送が変わる段階なので、
 /// そこで初めて落ちると「切り替えが悪いのか、実装が悪いのか」を切り分け
-/// られない。振る舞いを変えない段のうちに、読めることだけを確かめておく。
+/// られない。振る舞いを変えない段階のうちに、読めることだけを確かめておく。
 /// S1-c で「写像したうえで読んで確かめた」のと同じ形である。
 ///
 /// 読むのは I/O APIC の redirection entry のマスクビットだけで、書き込みは
 /// 一切しない。S2-a が同じレジスタを読んでいるので、新しい危険は無い。
 ///
-/// I/O APIC が 1 台も写像できていなければ `None`。
+/// I/O APIC が 1 台もマップできていなければ `None`。
 pub fn survey_apic_masks(mapped: &crate::apic::MappedApic, unmasked: &[u8]) -> Option<MaskCheck> {
     let controller = apic::Apic::new(mapped)?;
     Some(controller.check_masks(unmasked))
@@ -719,7 +719,7 @@ pub unsafe fn route_to_apic(
         // SAFETY: 8259 側のマスクを立てるだけ。新経路はまだマスクされている
         // ので、この瞬間からこの IRQ はどこにも届かない。
         //
-        // 破壊 (S2-d-1c, ioapic-keep-pic-irq1): ここを飛ばすと両経路が開き、
+        // 破壊テスト (S2-d-1c, ioapic-keep-pic-irq1): ここを飛ばすと両経路が開き、
         // 二重配送になる。経路ごとにベクタが違うので、旧ベクタで届いたキーが
         // あることとして観測できるはずである。
         #[cfg(not(feature = "ioapic-keep-pic-irq1-test"))]
@@ -734,7 +734,7 @@ pub unsafe fn route_to_apic(
         // 4. 新経路を開ける。
         // SAFETY: ゲートは用意済みで、状態も立っている。ここから届いてよい。
         //
-        // 破壊 (S2-d-1c, ioapic-skip-unmask): ここを飛ばすと、設定は正しいが
+        // 破壊テスト (S2-d-1c, ioapic-skip-unmask): ここを飛ばすと、設定は正しいが
         // 配送されない。読み戻しの主張は通り、到達の主張だけが落ちる。
         #[cfg(not(feature = "ioapic-skip-unmask-test"))]
         unsafe {
@@ -890,7 +890,7 @@ pub unsafe fn switch_timer_to_lapic(
 
         // 2. 旧経路を黙らせる。ここから 4 までティックは 1 本も来ない。
         //
-        // 破壊 (S2-d-2, lapic-timer-no-mask-all): ここを飛ばすと PIT と
+        // 破壊テスト (S2-d-2, lapic-timer-no-mask-all): ここを飛ばすと PIT と
         // Local APIC タイマの両方が届き、二重にティックが来る。
         //
         // SAFETY: 呼び出し側の契約。この直後に Local APIC タイマを開けるので、
@@ -1009,7 +1009,7 @@ impl fmt::Display for LvtTimerView {
     }
 }
 
-/// LVT Timer を読み戻す。Local APIC が写像できていなければ `None`。
+/// LVT Timer を読み戻す。Local APIC がマップできていなければ `None`。
 pub fn lvt_timer_readback() -> Option<LvtTimerView> {
     apic::read_lvt_timer().map(|raw| LvtTimerView { raw })
 }
@@ -1019,7 +1019,7 @@ pub fn lvt_timer_readback() -> Option<LvtTimerView> {
 pub enum RouteError {
     /// レガシー IRQ の範囲外。
     IrqOutOfRange,
-    /// I/O APIC が 1 台も写像できていない。
+    /// I/O APIC が 1 台もマップできていない。
     NoIoApic,
     /// 番兵と衝突するベクタ（0）を指定した。
     VectorReserved,
@@ -1050,7 +1050,7 @@ pub const fn timer_frequency_hz() -> u32 {
 /// 差分をここへ閉じ込める。
 ///
 /// 2 つ目の実装が来ても、この列挙子に 1 つ足すだけで済む。既存の列挙子と
-/// その `Display` の腕は触らないので、PIT の出力する文字列は変わらない。
+/// その `Display` の分岐は触らないので、PIT の出力する文字列は変わらない。
 /// 振る舞い不変のリファクタを 2 度行わずに済ませるための形である。
 ///
 /// trait の関連型にしない理由は、切り替えが実行時に起きるためである。
@@ -1124,7 +1124,7 @@ impl TimerSetup {
 impl fmt::Display for TimerSetup {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.source {
-            // この腕の文字列を変えない。`interrupt-test no-eoi` が
+            // この分岐の文字列を変えない。`interrupt-test no-eoi` が
             // `divisor=11932` に一致を取っている。
             TimerSourceSetup::Pit { divisor } => write!(
                 f,
@@ -1180,7 +1180,7 @@ pub struct MaskCheck {
 /// IMR の 2 バイトという形は PIC 固有で、IO-APIC の redirection table では
 /// 成り立たない（実測で 24 本ある）。[`TimerSourceSetup`] と同じ理由で、
 /// 2 つ目の実装が来ても列挙子を 1 つ足すだけで済む形にしてある。
-/// 既存の腕を触らないので、PIC の出力する文字列は変わらない。
+/// 既存の分岐を触らないので、PIC の出力する文字列は変わらない。
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum MaskState {
     Pic {
@@ -1249,7 +1249,7 @@ pub struct ObservedMasks {
 impl fmt::Display for ObservedMasks {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.state {
-            // この腕の文字列を変えない。
+            // この分岐の文字列を変えない。
             MaskState::Pic { master, slave } => {
                 if self.with_bits {
                     write!(
@@ -1317,7 +1317,7 @@ pub const fn managed_vectors() -> (u8, u8) {
 
 impl fmt::Display for MaskCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // この腕の文字列を変えない。`interrupt-test timer` と
+        // この分岐の文字列を変えない。`interrupt-test timer` と
         // `interrupt-test alt-offset` が `master=0xfe slave=0xff` に一致を取っている。
         match (self.observed, self.expected) {
             (
@@ -1345,7 +1345,7 @@ impl fmt::Display for MaskCheck {
                 write!(f, ") [read back from hardware]")
             }
             // 実装をまたいだ比較は行わない。観測と期待は同じ
-            // `check_masks` の呼び出しから作るので、腕が食い違うことはない。
+            // `check_masks` の呼び出しから作るので、分岐が食い違うことはない。
             // 食い違ったら実装の誤りなので、黙って一致扱いにせず明示する。
             _ => write!(f, "observed and expected come from different controllers"),
         }

@@ -40,9 +40,9 @@ pub enum PageTableError {
     UnexpectedHugePageEntry,
     /// 範囲の長さが 4KiB の倍数でない、または加算が範囲を出る。
     MisalignedRange,
-    /// フレームアロケータが配ったテーブルのフレームが、今の窓で触れる範囲の外だった
-    /// （`ADR-0068` の HW-a）。**自前のページ表へ切り替える前は、静的な初期ページ表が恒等で
-    /// 張る範囲（`BOOT_IDENTITY_REACH` の下）しか触れない。** **書く前に止める。**
+    /// フレームアロケータが配ったテーブルのフレームが、今のウィンドウで触れる範囲の外だった
+    /// （`ADR-0068` の HW-a）。**自前のページテーブルへ切り替える前は、静的な初期ページテーブルが恒等で
+    /// マップする範囲（`BOOT_IDENTITY_REACH` の下）しか触れない。** **書く前に止める。**
     FrameBeyondReach {
         /// 配られたフレームの物理アドレス。
         phys: u64,
@@ -91,10 +91,10 @@ unsafe fn write_entry(direct_map: DirectMap, table_phys: PhysAddr, index: usize,
 /// 恒等マッピング（`PML4[0]`）を落とすために、稼働中 PML4 の1エントリを 0 にする。
 ///
 /// **恒等除去（B-2b-4）専用。汎用のエントリ書き込みではない。** 新しい
-/// マッピングを張る用途にはこれを使わず、[`PageTableBuilder`] の
+/// マッピングを作る用途にはこれを使わず、[`PageTableBuilder`] の
 /// [`map_range`][PageTableBuilder::map_range] /
 /// [`map_page`][PageTableBuilder::map_page] を使う。この関数は値を 0 にする
-/// （present を落とす）ことしかできないので、誤って別の写像を作れない。読み出しは
+/// （present を落とす）ことしかできないので、誤って別のマッピングを作れない。読み出しは
 /// [`super::verify::read_pml4_entry`] と対になり、引数の並びも合わせてある。
 ///
 /// # Safety
@@ -125,7 +125,7 @@ pub(crate) unsafe fn clear_pml4_entry(pml4_phys: PhysAddr, direct_map: DirectMap
 /// [`clear_pml4_entry`] と同じ契約。加えて `saved` が、そのエントリを
 /// [`clear_pml4_entry`] で落とす直前に [`super::verify::read_pml4_entry`] で
 /// 控えた値であること。**それ以外の値を渡さないこと。** `clear` は 0 しか
-/// 書けないので構造的に別写像を作れないが、`restore` は任意の `saved` を
+/// 書けないので構造的に別のマッピングを作れないが、`restore` は任意の `saved` を
 /// 書けるため、名前が意図を示すだけで craft する経路は型では塞がれていない。
 /// この一行の契約で塞ぐ（`pub(crate)`・`unsafe`・呼び出し箇所が恒等除去の
 /// 1 箇所のみ、で実リスクは低い）。
@@ -144,20 +144,20 @@ pub struct PageTableBuilder<'a, const CAP: usize> {
     frames: &'a mut FrameAllocator<CAP>,
     pml4_phys: PhysAddr,
     frames_used: u64,
-    /// テーブルのフレームを読み書きするための窓。
+    /// テーブルのフレームを読み書きするためのウィンドウ。
     ///
     /// **構築時に受け取った値を保持する。** higher-half 移行では、
-    /// 恒等の窓で新しいテーブルを組み立ててから CR3 を切り替え、
+    /// 恒等のウィンドウで新しいテーブルを組み立ててから CR3 を切り替え、
     /// 高位へ飛んでから恒等を外す。つまり組み立ての間は「古い窓」が
     /// 正しく、切り替え後の [`super::active::ActivePageTable`] は
-    /// 「新しい窓」で辿る。**2 つの窓が同時に正しい期間がある**ため、
+    /// 「新しい窓」で辿る。**2 つのウィンドウが同時に正しい期間がある**ため、
     /// グローバルな `direct_map()` を毎回引く形では表せない
     /// （`docs/deferred-decisions.md`）。
     direct_map: DirectMap,
     /// テーブルのフレームとして受け取ってよい物理の範囲の終わり（排他。`ADR-0068` の HW-a）。
     ///
-    /// **`None` は「窓が配られるフレームを全部覆う」である**（自前のページ表へ切り替えた後）。
-    /// **切り替え前の組み立ては、初期ページ表が恒等で張る `BOOT_IDENTITY_REACH` を渡す。**
+    /// **`None` は「窓が配られるフレームを全部覆う」である**（自前のページテーブルへ切り替えた後）。
+    /// **切り替え前の組み立ては、初期ページテーブルが恒等でマップする `BOOT_IDENTITY_REACH` を渡す。**
     reach: Option<u64>,
 }
 
@@ -172,8 +172,8 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
 
     /// 触れる範囲を限って構築を始める（`ADR-0068` の HW-a）。
     ///
-    /// **自前のページ表へ切り替える前の組み立てで使う。** **配られたフレームが `reach` の外なら、
-    /// 書く前に [`PageTableError::FrameBeyondReach`] を返す**——**窓の外へ書けば、その場で
+    /// **自前のページテーブルへ切り替える前の組み立てで使う。** **配られたフレームが `reach` の外なら、
+    /// 書く前に [`PageTableError::FrameBeyondReach`] を返す**——**ウィンドウの外へ書けば、その場で
     /// #PF になり、理由が残らない。**
     pub fn new_within_reach(
         frames: &'a mut FrameAllocator<CAP>,
@@ -222,13 +222,13 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
             }
         }
         // SAFETY: `phys` は今このフレームアロケータから確保したばかりの、
-        // 他の誰も参照していないフレームである。**今の窓でこのアドレスへ届くことは、
+        // 他の誰も参照していないフレームである。**今のウィンドウでこのアドレスへ届くことは、
         // 呼び出し側が決めた `reach` で上で確かめた**（`ADR-0068` の HW-a）。**`reach` が
-        // `None` なのは、窓が配られるフレームを全部覆うとき（自前のページ表へ切り替えた後）
+        // `None` なのは、窓が配られるフレームを全部覆うとき（自前のページテーブルへ切り替えた後）
         // だけである**——**フレームアロケータの空き集合は `crate::memory_map::classify` の
-        // `Free` 判定に由来し、`super::plan` が同じ判定でこの領域も張っている（ADR-0009）。**
+        // `Free` 判定に由来し、`super::plan` が同じ判定でこの領域もマップしている（ADR-0009）。**
         // **以前は「現在有効な（UEFI 由来の）ページテーブル」と書いていたが、切り替え前に
-        // 有効なのはカーネルの静的な初期ページ表で、[0, 1GiB) しか張らない。**
+        // 有効なのはカーネルの静的な初期ページテーブルで、[0, 1GiB) しかマップしない。**
         // 1 ページ分をゼロ初期化することで、未初期化のゴミが
         // Present ビットの立った不正なエントリとして解釈されるのを
         // 防ぐ。
@@ -280,7 +280,7 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
 
     /// 仮想アドレスと物理アドレスの対応を明示して、範囲をマップする。
     ///
-    /// # 恒等ではない対応を張るための API
+    /// # 恒等ではない対応を作るための API
     ///
     /// 既存の [`Self::map_page`] は恒等前提で、物理アドレス 1 つしか
     /// 受け取らない。higher-half 移行では「仮想と物理が異なる対応」が
@@ -293,7 +293,7 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
     /// **どちらか一方だけでは足りない。** 恒等マッピングでは仮想 = 物理
     /// なので、片方を見れば済んでしまう。対応がずれた瞬間、たとえば
     /// 物理が 2MiB 境界でも仮想がそうでない場合に、PD エントリへ
-    /// 「仮想の下位ビットを落とした」誤ったマッピングを張ることになる。
+    /// 「仮想の下位ビットを落とした」誤ったマッピングを作ることになる。
     /// 恒等の間は決して顕在化しない誤りなので、最初から両方を見る。
     ///
     /// `len` は 4KiB の倍数であること。
@@ -330,7 +330,7 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
         Ok(())
     }
 
-    /// 対応を明示して 1 ページ張る。[`Self::map_range`] の中核。
+    /// 対応を明示して 1 ページマップする。[`Self::map_range`] の中核。
     fn map_one(
         &mut self,
         virt: VirtAddr,

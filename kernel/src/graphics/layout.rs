@@ -1,6 +1,6 @@
 //! フレームバッファの形状の検証と座標計算（M3-a）。
 //!
-//! bootloader から渡される [`FramebufferInfo`] は、GOP がそう言っていると
+//! bootloader から渡される [`FramebufferInfo`] は、GOP がそう示していると
 //! いうだけの値であり、kernel 側で裏を取っていない。ここを素通しすると、
 //! 描画時に確保範囲外へ書き込んで無言でメモリを壊す。そのため
 //! [`FramebufferLayout::from_info`] で全項目を検証し、通らなければ
@@ -53,11 +53,11 @@ pub struct FramebufferLayout {
 
 impl FramebufferLayout {
     /// bootloader から受け取った情報を検証する。
-    /// # 保持した窓は古くなりうる
+    /// # 保持したウィンドウは古くなりうる
     ///
     /// ここで受け取った `direct_map` の変換結果を `base` として保持する。
     /// higher-half 移行で `common::addr::replace_direct_map` を呼ぶと、
-    /// **この `base` は古い窓で計算された値のまま残る。**
+    /// **この `base` は古いウィンドウで計算された値のまま残る。**
     /// 移行後は必ずこの型を作り直すこと。作り直さないと、正規形ではあるが
     /// 誤った仮想アドレスを指したまま描画を続ける。
     /// 詳細と対処案は `docs/deferred-decisions.md` を参照。
@@ -105,7 +105,7 @@ impl FramebufferLayout {
             });
         }
 
-        // 物理アドレスを、direct physical map を通して仮想アドレスへ写す。
+        // 物理アドレスを、direct physical map を通して仮想アドレスへマップする。
         // **ここが型分離の効いている箇所である。** 生の値をポインタにする
         // 経路が無いので、変換を通さずに描画へ進むことができない。
         let base = direct_map.phys_to_virt(info.physical_address);
@@ -224,8 +224,8 @@ mod tests {
     use super::*;
     use common::addr::PhysAddr;
 
-    /// テスト用の恒等窓。static を直接参照せずに済むよう、`from_info` は
-    /// 窓を引数で受け取る形にしてある。
+    /// テスト用の恒等ウィンドウ。static を直接参照せずに済むよう、`from_info` は
+    /// ウィンドウを引数で受け取る形にしてある。
     fn test_map() -> DirectMap {
         DirectMap::identity(DirectMap::IDENTITY_MAX_LENGTH).unwrap()
     }

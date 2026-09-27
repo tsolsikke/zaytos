@@ -84,7 +84,7 @@ pub const USER_DATA_ACCESS: u8 = KERNEL_DATA_ACCESS | access::DPL_RING3;
 /// （`DEFAULT_OPERAND_32` は立てず `LONG_MODE`）。
 pub const USER_CODE64_FLAGS: u8 = KERNEL_CODE_FLAGS;
 /// ユーザー 32bit コードセグメントのフラグ。SYSRET の STAR 互換順を満たす
-/// ためだけの枠で、M5-e/f では実際には使わない。32bit コードなので
+/// ためだけのスロットで、M5-e/f では実際には使わない。32bit コードなので
 /// `DEFAULT_OPERAND_32` を立て `LONG_MODE` は立てない。妥当なディスクリプタに
 /// はする（`P`・コード・DPL=3）。
 pub const USER_CODE32_FLAGS: u8 = flags::GRANULARITY_4K | flags::DEFAULT_OPERAND_32;

@@ -37,7 +37,7 @@ const GDT_ENTRY_COUNT: usize = 8;
 pub const NULL_INDEX: u16 = 0;
 pub const KERNEL_CODE_INDEX: u16 = 1;
 pub const KERNEL_DATA_INDEX: u16 = 2;
-/// ユーザー 32bit コード。STAR 互換順を満たす枠で、M5-e/f では使わない。
+/// ユーザー 32bit コード。STAR 互換順を満たすスロットで、M5-e/f では使わない。
 pub const USER_CODE32_INDEX: u16 = 3;
 /// ユーザーデータ（SYSRET では STAR 基準 +8）。
 pub const USER_DATA_INDEX: u16 = 4;
@@ -65,8 +65,8 @@ pub const USER_DATA_SELECTOR: SegmentSelector = SegmentSelector::new(USER_DATA_I
 ///
 /// # なぜ載せないものに実体があるのか
 ///
-/// **枠は SYSRET の STAR 互換順（ADR-0020）が要求する**ので空けられない。
-/// **その枠を null で埋めず妥当なディスクリプタにしたのは意図的な選択である**
+/// **スロットは SYSRET の STAR 互換順（ADR-0020）が要求する**ので空けられない。
+/// **そのスロットを null で埋めず妥当なディスクリプタにしたのは意図的な選択である**
 /// （[`layout::USER_CODE32_FLAGS`] の doc。「妥当なディスクリプタにはする」）。
 /// M5-e-1（`3b44274`）で入った。
 /// **「使っていないから消す」は成立しない。** 消すと STAR 互換順が崩れる。
@@ -182,7 +182,7 @@ pub unsafe fn init_for_cpu(index: usize, double_fault_stack_top: u64, page_fault
         (*gdt)[KERNEL_DATA_INDEX as usize] =
             user_segment_descriptor(KERNEL_DATA_ACCESS, KERNEL_DATA_FLAGS);
         // ユーザー用（Ring 3、DPL=3）。並びは STAR 互換順（ADR-0020）。M5-e-3 が
-        // 使うのは ucode64 と udata で、ucode32 は枠を埋めるためだけに置く。
+        // 使うのは ucode64 と udata で、ucode32 はスロットを埋めるためだけに置く。
         (*gdt)[USER_CODE32_INDEX as usize] =
             user_segment_descriptor(USER_CODE_ACCESS, USER_CODE32_FLAGS);
         (*gdt)[USER_DATA_INDEX as usize] =
@@ -192,7 +192,7 @@ pub unsafe fn init_for_cpu(index: usize, double_fault_stack_top: u64, page_fault
             (*gdt)[USER_CODE64_INDEX as usize] =
                 user_segment_descriptor(USER_CODE_ACCESS, USER_CODE64_FLAGS);
         }
-        // 破壊 (M5-e-4): ucode64 の DPL を 0 にする（KERNEL_CODE_ACCESS）。RPL=3 の
+        // 破壊テスト (M5-e-4): ucode64 の DPL を 0 にする（KERNEL_CODE_ACCESS）。RPL=3 の
         // セレクタで iretq すると iretq 自身が #GP になり、Ring 3 に落ちない。
         #[cfg(feature = "ring3-test-user-desc-dpl0")]
         {
@@ -436,7 +436,7 @@ pub fn privilege_stack_top() -> u64 {
 /// これがこの機構の載荷条件である。**`lgdt` より前に呼ぶと、GDTR は
 /// ファームウェア（UEFI）の GDT を指しているので、引き算が無意味な値になる。**
 ///
-/// bootstrap processor ではこの窓を「[`install_cpu_id_from_gdtr`] を [`init`] の
+/// bootstrap processor ではこのウィンドウを「[`install_cpu_id_from_gdtr`] を [`init`] の
 /// 後に据える」で閉じている。据える前の `cpu_id()` は定数 `0` を返す経路を通り、
 /// **その時点で走っているのは bootstrap processor だけなので `0` が正しい。**
 ///
@@ -444,7 +444,7 @@ pub fn privilege_stack_top() -> u64 {
 ///
 /// この非対称を明記しておく。AP は自分の GDT をロードするまで自分の番号を
 /// この経路から得られず、**フォールバックの `0` は「bootstrap processor の
-/// スロット」を指すので誤りである。** つまり **AP では窓が再び開く。**
+/// スロット」を指すので誤りである。** つまり **AP ではウィンドウが再び開く。**
 ///
 /// b-2b では「AP が `cpu_id()` を呼ぶ前に自分の GDT をロードする」順序を守るか、
 /// **身元の出所を別に用意する**必要がある（`roadmap.md` の S3-b-2b への申し送り）。

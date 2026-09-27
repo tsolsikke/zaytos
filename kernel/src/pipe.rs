@@ -5,17 +5,17 @@
 //! **利用者はシェルの `a | b` だけである。** **2 本目の Ring 3 が 1 本しか無いので、
 //! `a | b | c` は作れない**——**[`MAX_PIPES`] は 1 である。**
 //!
-//! **輪は 256 バイトにした**（[`PIPE_RING`]）。**Linux の 4 KiB を採らない理由は、像に
+//! **輪は 256 バイトにした**（[`PIPE_RING`]）。**Linux の 4 KiB を採らない理由は、イメージに
 //! 4 KiB を超える種が無く、書き手が待つ機会が作れないことである**（「機会が無い」）。
-//! **256 なら `/data/big`（2181 バイト）で書き手が 8 回待つ機会が出る。** **私物の口なので、
+//! **256 なら `/data/big`（2181 バイト）で書き手が 8 回待つ機会が出る。** **私物の入口なので、
 //! 大きさを Linux に合わせる義務は無い**（`docs/architecture.md` の「ABI の形は合わせる」）。
 //!
 //! # 読み手の予約
 //!
-//! **`a | b` は左を先に起こす。** **左が右より先に書くと、読み手が居ないので `-EPIPE` に
-//! なる**——**それを防ぐために、右が起きるまで読み手を「予約」しておく**
+//! **`a | b` は左を先に起動する。** **左が右より先に書くと、読み手が居ないので `-EPIPE` に
+//! なる**——**それを防ぐために、右が起動するまで読み手を「予約」しておく**
 //! （[`create`] の `reserve_reader`）。**予約は右の `spawn` が消費する。** **右が起きなかった
-//! とき（見つからなかったとき）は、待つ口（`SYS_WAIT_CHILD`）が予約を消す**——**消さないと、
+//! とき（見つからなかったとき）は、待つ入口（`SYS_WAIT_CHILD`）が予約を消す**——**消さないと、
 //! 左が満杯で永久に待つ。**
 //!
 //! # 起こすのはここである
@@ -50,7 +50,7 @@ struct Pipe {
     readers: u8,
     /// 書き端を持つ者の数。
     writers: u8,
-    /// 読み手がまだ起きていないが、来ることが決まっている。
+    /// 読み手がまだ起動していないが、来ることが決まっている。
     reserved_reader: bool,
     /// 使われているか。**両端が閉じ、予約も無ければ空く。**
     in_use: bool,
@@ -74,19 +74,19 @@ impl Pipe {
 
 static PIPES: [Locked<Pipe>; MAX_PIPES] = [Locked::new(Pipe::EMPTY)];
 
-/// 読み手が空で待った回数（計器）。
+/// 読み手が空で待った回数（計測）。
 static READER_WAITS: AtomicU64 = AtomicU64::new(0);
-/// 書き手が満杯で待った回数（計器）。
+/// 書き手が満杯で待った回数（計測）。
 static WRITER_WAITS: AtomicU64 = AtomicU64::new(0);
-/// 読み手の居ないパイプへ書こうとした回数（計器。`-EPIPE`）。
+/// 読み手の居ないパイプへ書こうとした回数（計測。`-EPIPE`）。
 static EPIPE_SEEN: AtomicU64 = AtomicU64::new(0);
-/// 作ったパイプの本数（計器）。
+/// 作ったパイプの本数（計測）。
 static CREATED: AtomicU64 = AtomicU64::new(0);
-/// 待つ口が消した予約の数（計器）。**右が起きなかった回数である。**
+/// 待つ入口が消した予約の数（計測）。**右が起きなかった回数である。**
 static RESERVATIONS_DROPPED: AtomicU64 = AtomicU64::new(0);
-/// 書きが起こした読み手の数（計器）。
+/// 書きが起こした読み手の数（計測）。
 ///
-/// **破壊 `pipe-write-does-not-wake-reader` はこれで落とす。** **止まる形では落ちなかった**
+/// **破壊テスト `pipe-write-does-not-wake-reader` はこれで落とす。** **止まる形では落ちなかった**
 /// ——**読み手が「空」で待っている最中に書きが来る場面は `sleep 0.2 | cat` の末尾の 1 行だけで、
 /// そこは書き手がすぐ閉じるので、閉じの起こしが書きの起こしを肩代わりして通る**（実測。
 /// 3 回のうち 1 回しか落ちなかった）。**「誰が起こしたか」を数えれば、肩代わりは見える。**
@@ -130,7 +130,7 @@ pub fn note_writer_wait() {
 ///
 /// **`reserve_reader` が真なら、読み手が来ることを予約する**（モジュールの doc）。
 ///
-/// 破壊 (`ADR-0063` の (b3), pipe-reader-not-reserved): 予約しない。**右が起きる前の
+/// 破壊テスト (`ADR-0063` の (b3), pipe-reader-not-reserved): 予約しない。**右が起動する前の
 /// 左の書きが `-EPIPE` になる**——**`hello` が届かない。**
 pub fn create(reserve_reader: bool) -> Option<u8> {
     for (index, slot) in PIPES.iter().enumerate() {
@@ -155,7 +155,7 @@ pub fn create(reserve_reader: bool) -> Option<u8> {
     None
 }
 
-/// 予約していた読み手が起きた。**予約を読み端 1 つへ変える。** **予約が無ければ偽。**
+/// 予約していた読み手が起動した。**予約を読み端 1 つへ変える。** **予約が無ければ偽。**
 pub fn claim_reserved_reader(pipe: u8) -> bool {
     let Some(slot) = PIPES.get(pipe as usize) else {
         return false;
@@ -205,7 +205,7 @@ pub enum ReadOutcome {
 
 /// 溜まっているバイトを `dst` へ移す。**取れたら書き手を起こす**（空きができた）。
 ///
-/// 破壊 (`ADR-0063` の (b3), pipe-read-empty-returns-zero): 空を EOF と誤る。
+/// 破壊テスト (`ADR-0063` の (b3), pipe-read-empty-returns-zero): 空を EOF と誤る。
 /// **読み手が途中で終わり、`hello` が欠ける。**
 pub fn read_into(pipe: u8, dst: &mut [u8]) -> ReadOutcome {
     let Some(slot) = PIPES.get(pipe as usize) else {
@@ -247,12 +247,12 @@ pub enum WriteOutcome {
 
 /// `src` を入るだけ入れる。**入ったら読み手を起こす。**
 ///
-/// 破壊 (`ADR-0063` の (b3), pipe-write-does-not-wake-reader): 起こさない。**閉じの起こしが
+/// 破壊テスト (`ADR-0063` の (b3), pipe-write-does-not-wake-reader): 起こさない。**閉じの起こしが
 /// 肩代わりするので止まる形では落ちにくい**（[`READERS_WOKEN_BY_WRITE`] の doc）——**「書きが
-/// 起こした読み手」の計器が 0 になることで落ちる。** **読み手が空で待っている最中に書き手が
+/// 起こした読み手」の計測が 0 になることで落ちる。** **読み手が空で待っている最中に書き手が
 /// 満杯まで書けば止まる形でも落ちる**（3 回のうち 1 回はそれで止まった。実測）。
 ///
-/// 破壊 (`ADR-0063` の (b3), pipe-write-ignores-full): 満杯を見ずに上書きする。
+/// 破壊テスト (`ADR-0063` の (b3), pipe-write-ignores-full): 満杯を見ずに上書きする。
 /// **`/data/big` の中身が食い違う。**
 pub fn write_from(pipe: u8, src: &[u8]) -> WriteOutcome {
     let Some(slot) = PIPES.get(pipe as usize) else {
@@ -306,7 +306,7 @@ pub fn close_read_end(pipe: u8) {
 
 /// 書き端を 1 つ閉じる。**最後の書き手なら読み手を起こす**（EOF を見に行かせる）。
 ///
-/// 破壊 (`ADR-0063` の (b3), pipe-close-keeps-writer-count): 数を減らさない。
+/// 破壊テスト (`ADR-0063` の (b3), pipe-close-keeps-writer-count): 数を減らさない。
 /// **EOF が来ず、読み手が永久に待つ。**
 pub fn close_write_end(pipe: u8) {
     let Some(slot) = PIPES.get(pipe as usize) else {

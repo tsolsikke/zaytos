@@ -95,7 +95,7 @@ impl Drop for ForegroundConsole<'_> {
         // **溜まっている描画を送ってから手放す（ADR-0047）。**
         // **次のプログラムへ持ち越さない**——**手放した後は誰も送れない。**
         //
-        // **この経路にも判定が置けない**（`crate::syscall` の `SYS_EXIT` と
+        // **この経路にも判定を設けられない**（`crate::syscall` の `SYS_EXIT` と
         // 同じ理由。**次に据える者が書いて読む**）。**受け皿として置く。**
         self.console.flush();
         FOREGROUND.store(core::ptr::null_mut(), Ordering::Release);
@@ -107,15 +107,15 @@ impl Drop for ForegroundConsole<'_> {
 /// # なぜ静的が要るのか
 ///
 /// **1 つの CSI 列が 2 回の `write` に割れて届くことがある**（システムコールは
-/// ページ単位で刻む）。状態は `write` をまたいで保つ必要があり、
+/// ページ単位で分けて進める）。状態は `write` をまたいで保つ必要があり、
 /// [`FOREGROUND`] と同じ理由で静的に置く。
 ///
-/// # 取り方——写して返す
+/// # 取り方——コピーして返す
 ///
 /// **[`write_foreground_bytes`] はロックを保持したまま描かない。**
 /// `Locked` は保持中の割り込みを禁じるが、1 行の描画と転送は 1 ティックの
-/// 半分ほど掛かる（この関数の doc）。**入るときに写しを取り、描き終えてから
-/// 書き戻す。** 写しで済むのは書き手が 1 つだからである（[`FOREGROUND`] の
+/// 半分ほど掛かる（この関数の doc）。**入るときにコピーを取り、描き終えてから
+/// 書き戻す。** コピーで済むのは書き手が 1 つだからである（[`FOREGROUND`] の
 /// doc の保証と同じ根拠。同時に 2 つの `write` は走らない）。
 static FOREGROUND_ANSI: common::critical::Locked<common::ansi::AnsiParser> =
     common::critical::Locked::new(common::ansi::AnsiParser::new());
@@ -125,7 +125,7 @@ static FOREGROUND_ANSI: common::critical::Locked<common::ansi::AnsiParser> =
 /// # なぜ静的が要るのか
 ///
 /// **[`FOREGROUND_ANSI`] と同じ理由である**——**1 字が 2 回の `write` に割れて
-/// 届くことがある**（システムコールはページ単位で刻む）。**状態は `write` を
+/// 届くことがある**（システムコールはページ単位で分けて進める）。**状態は `write` を
 /// またいで保つ必要がある。**
 ///
 /// # 以前は `write` ごとに閉じていた
@@ -148,17 +148,17 @@ static FOREGROUND_UTF8: common::critical::Locked<common::text::Utf8Decoder> =
 ///
 /// **したがって `.bss` の静的へ移した。** **[`FOREGROUND_ANSI`] と同じ形である。**
 ///
-/// # 錠は [`FOREGROUND_ANSI`] と同じ根拠で足りる
+/// # ロックは [`FOREGROUND_ANSI`] と同じ根拠で足りる
 ///
 /// **書き手は 1 つである**（[`FOREGROUND`] の doc の保証）。**同時に 2 つの
 /// `write` は走らない。** **`Locked` は保持中の割り込みを禁じる**ので、
-/// **保持したまま描かない**——写しを取ってから描く（[`flush_pending_to_screen`]）。
+/// **保持したまま描かない**——コピーを取ってから描く（[`flush_pending_to_screen`]）。
 static PENDING: common::critical::Locked<pending::Pending> =
     common::critical::Locked::new(pending::Pending::new());
 
 /// 字の途中で捨てたバイトを報せる（`ADR-0054` の Decision 4）。
 ///
-/// # なぜ口を直に開けるのか
+/// # なぜポートを直に開けるのか
 ///
 /// **この `lib` からロガーへ届かない**（`probe::observe` と同じ事情である）。
 /// **`xtask` の許可リストへ載せてある。**
@@ -183,7 +183,7 @@ fn report_dropped_mid_character(dropped: usize) {
 pub fn install_foreground(console: &mut Console) -> ForegroundConsole<'_> {
     // **ANSI の状態を最初へ戻す（zi-b）。** 前のプログラムが CSI 列の途中で
     // 死んでいても、次のプログラムの 1 字目が列の続きに化けない
-    // （`release_foreground` が溜まった入力を捨てるのと同じ向きの手当て）。
+    // （`release_foreground` が溜まった入力を捨てるのと同じ向きの対策）。
     FOREGROUND_ANSI.lock().reset();
     // **字の途中のバイトも捨てる（`ADR-0054` の Decision 4）。**
     // **前のプログラムが多バイトの字の途中で死んでいても、その 1〜3 バイトが
@@ -228,7 +228,7 @@ pub fn foreground_installed() -> bool {
 ///
 /// # 書き込みと同じ根拠で読む
 ///
-/// **速い。** 桁と行はセルの表の形で、フレームバッファの形状も値の写しである。
+/// **速い。** 桁と行はセルの表の形で、フレームバッファの形状も値のコピーである。
 /// **[`write_foreground_bytes`] と違って BKL を解く理由が無い**——
 /// あちらが解くのは描画と転送が 1 ティックの半分ほど掛かるためである。
 pub fn foreground_geometry() -> Option<(u32, u32, u32, u32)> {
@@ -257,7 +257,7 @@ pub fn foreground_geometry() -> Option<(u32, u32, u32, u32)> {
 /// # 溜めるのは速い
 ///
 /// **BKL を解かない。** 解くのは描画と転送が 1 ティックの半分ほど掛かる
-/// ためで（[`write_foreground_bytes`] の doc）、**こちらは写すだけである。**
+/// ためで（[`write_foreground_bytes`] の doc）、**こちらはコピーするだけである。**
 pub fn push_pending_if_alternate(bytes: &[u8]) -> bool {
     let console = FOREGROUND.load(Ordering::Acquire);
     if console.is_null() {
@@ -294,9 +294,9 @@ pub fn take_pending(out: &mut [u8; pending::ZDIAG_LEN]) {
 /// **`put_char` へ直に置く。** **ANSI の状態機械を通さない**——
 /// **エラーの文言に CSI が混ざっていても、画面を動かす権利は無い。**
 ///
-/// # 錠を保持したまま描かない
+/// # ロックを保持したまま描かない
 ///
-/// **写しを取ってから描く**（[`PENDING`] の doc）。
+/// **コピーを取ってから描く**（[`PENDING`] の doc）。
 fn flush_pending_to_screen(console: &mut Console) {
     let mut text = [0u8; pending::ZDIAG_TEXT];
     let length = {
@@ -320,7 +320,7 @@ fn flush_pending_to_screen(console: &mut Console) {
 
 /// 端末への `write`（システムコール 1 回）を数える（PERF-b）。
 ///
-/// **刻む前に 1 回だけ呼ぶこと**（`crate::syscall` の `sys_write`）。
+/// **分けて進める前に 1 回だけ呼ぶこと**（`crate::syscall` の `sys_write`）。
 pub fn note_terminal_write() {
     let console = FOREGROUND.load(Ordering::Acquire);
     if console.is_null() {
@@ -370,7 +370,7 @@ static GRAPHICS_ACTIVE: AtomicBool = AtomicBool::new(false);
 static GRAPHICS_ENTERED: AtomicU64 = AtomicU64::new(0);
 /// 図形モードから抜けた回数（判定行）。
 static GRAPHICS_LEFT: AtomicU64 = AtomicU64::new(0);
-/// `present` で写した回数（判定行）。
+/// `present` でコピーした回数（判定行）。
 static GRAPHICS_PRESENTS: AtomicU64 = AtomicU64::new(0);
 
 /// 図形モードに居るか（`ADR-0066` の Y-c）。
@@ -430,9 +430,9 @@ pub fn enter_graphics() -> Result<GraphicsSurface, GraphicsError> {
     Ok(surface)
 }
 
-/// 図形モードの矩形を MMIO へ写す（`ADR-0066` の Y-c）。**写したバイト数を返す。**
+/// 図形モードの矩形を MMIO へコピーする（`ADR-0066` の Y-c）。**コピーしたバイト数を返す。**
 ///
-/// **切り替えではない**——**裏バッファの矩形を前へ写す**（Q1）。**図形モードでなければ 0。**
+/// **切り替えではない**——**裏バッファの矩形を前へコピーする**（Q1）。**図形モードでなければ 0。**
 ///
 /// # 呼ぶ側の前提
 ///
@@ -446,7 +446,7 @@ pub fn present_graphics(x: u32, y: u32, width: u32, height: u32) -> u64 {
         return 0;
     }
     GRAPHICS_PRESENTS.fetch_add(1, Ordering::Relaxed);
-    // 破壊 (Y-c, screen-present-does-not-copy): 写さない。**Ring 3 は画素を書いたが、画面へは
+    // 破壊テスト (Y-c, screen-present-does-not-copy): コピーしない。**Ring 3 は画素を書いたが、画面へは
     // 届かない**——**判定「書いた画素が MMIO に届いた」だけが落ちる。**
     if cfg!(feature = "screen-present-does-not-copy") {
         return 0;
@@ -461,7 +461,7 @@ pub fn present_graphics(x: u32, y: u32, width: u32, height: u32) -> u64 {
 /// # 描き直しは次の流しで行う
 ///
 /// **呼ばれるのは fd の解放**（`close` か、プロセスの終わりの表の解放）**で、BKL を持っている。**
-/// **ここでは印を立てるだけで、セルからの描き直しと転送は次の [`flush_foreground`]
+/// **ここでは目印を立てるだけで、セルからの描き直しと転送は次の [`flush_foreground`]
 /// （プロセスの終わりか前景の手放しで必ず来る）が行う**（`Console::request_repaint`）。
 pub fn leave_graphics() {
     if GRAPHICS_ACTIVE
@@ -471,7 +471,7 @@ pub fn leave_graphics() {
         return;
     }
     GRAPHICS_LEFT.fetch_add(1, Ordering::Relaxed);
-    // 破壊 (Y-c, screen-leave-does-not-repaint): 描き直さない。**文字の経路は戻るが、画面には
+    // 破壊テスト (Y-c, screen-leave-does-not-repaint): 描き直さない。**文字の経路は戻るが、画面には
     // Ring 3 の画素が残る**——**判定「文字コンソールが戻った」だけが落ちる。**
     if cfg!(feature = "screen-leave-does-not-repaint") {
         return;
@@ -480,7 +480,7 @@ pub fn leave_graphics() {
     if console.is_null() {
         return;
     }
-    // SAFETY: [`flush_foreground`] と同じ根拠。**印を立てるだけで、描かない。**
+    // SAFETY: [`flush_foreground`] と同じ根拠。**目印を立てるだけで、描かない。**
     let console = unsafe { &mut *console };
     console.request_repaint();
 }
@@ -521,7 +521,7 @@ pub fn flush_foreground() {
 /// **1 行の描画と転送は 1 ティックの半分ほど掛かる**ので、保持したまま呼ぶと
 /// その間もう一方のコアがカーネルへ入れない（実測は `console:` の判定行にある）。
 pub fn write_foreground_bytes(bytes: &[u8]) {
-    // **破壊ビルドだけが `write_str` を使う**（既定はパーサ経由で `put_char`）。
+    // **破壊テストのビルドだけが `write_str` を使う**（既定はパーサ経由で `put_char`）。
     #[cfg(feature = "ansi-console-skip-parse-test")]
     use core::fmt::Write as _;
 
@@ -547,7 +547,7 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
     // 同じ立場）——**復号できないバイトは 1 つにつき 1 つの置換文字にする。**
     // **丸ごと落とさない**——**1 バイトの不正で画面が真っ白になっていた。**
     {
-        // 破壊 (zi-b, ansi-console-skip-parse-test): パーサを通さず素のまま描く。
+        // 破壊テスト (zi-b, ansi-console-skip-parse-test): パーサを通さず素のまま描く。
         // **zi-b 前の接続そのものである**——パーサは在るのに前景経路が呼ばない。
         // CSI がグリフとして画面に出る（`[2;5H` が化けて見える）ので、
         // `ansi-test` のカーソル位置とセルの判定が落ちる。
@@ -558,7 +558,7 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
         // 通らない——ログの行に CSI は無く、通す理由が無い。
         #[cfg(not(feature = "ansi-console-skip-parse-test"))]
         {
-            // 破壊 (ADR-0054, console-drop-invalid-chunk-test): **不正なバイトを含む
+            // 破壊テスト (ADR-0054, console-drop-invalid-chunk-test): **不正なバイトを含む
             // `write` を丸ごと落とす。** **`ADR-0054` の前の形そのものである。**
             // **画面から 1 行が消えるので、`utf8-test` の「壊れたバイトが行を
             // 消さない」判定が落ちる。**
@@ -568,7 +568,7 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
             }
             // **描く費用を測る（PERF-c の測定）。** **転送とは別の層である。**
             let started = common::cpu::read_timestamp_counter();
-            // **写しを取り、描き終えてから書き戻す**（[`FOREGROUND_ANSI`] の doc）。
+            // **コピーを取り、描き終えてから書き戻す**（[`FOREGROUND_ANSI`] の doc）。
             let mut parser = *FOREGROUND_ANSI.lock();
             let mut decoder = *FOREGROUND_UTF8.lock();
             for byte in bytes {
@@ -584,7 +584,7 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
                 });
                 for c in &decoded[..count] {
                     let c = *c;
-                    // 破壊 (zi-b, ansi-console-skip-parse-test): パーサを通さず素のまま描く。
+                    // 破壊テスト (zi-b, ansi-console-skip-parse-test): パーサを通さず素のまま描く。
                     // **zi-b 前の接続そのものである**——パーサは在るのに前景経路が呼ばない。
                     // CSI がグリフとして画面に出る（`[2;5H` が化けて見える）ので、
                     // `ansi-test` のカーソル位置とセルの判定が落ちる。
@@ -606,7 +606,7 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
                         }
                         // **行の挿入と削除（PERF-d）。** **全画面のアプリが
                         // 1 行ぶんだけ画面をずらすために要る**——**ずらせないと、
-                        // 窓が 1 行動くたびに全画面を描き直すことになる。**
+                        // ウィンドウが 1 行動くたびに全画面を描き直すことになる。**
                         Some(common::ansi::AnsiAction::InsertLines(count)) => {
                             console.insert_lines(count)
                         }
@@ -643,7 +643,7 @@ pub fn write_foreground_bytes(bytes: &[u8]) {
             // Ring 3 の 1,529 バイトに対して 6MB を送っていた**（`less` の
             // 1 回の移動。ADR-0047 の表）。
             //
-            // 破壊 (PERF-a, flush-every-write-test): ここで送る。**ADR-0047 の
+            // 破壊テスト (PERF-a, flush-every-write-test): ここで送る。**ADR-0047 の
             // 前の形そのものである**——**転送の回数と量が桁で増える。**
             #[cfg(feature = "flush-every-write-test")]
             console.flush();

@@ -198,7 +198,7 @@ pub enum DeclaredLength {
 /// 拡張部が名乗る長さを読む。
 ///
 /// **チェックサムの検証より前に要る。** 何バイト読めばよいかがこの値で決まる
-/// ため、独立した段にしてある。読み足す前にここで区分を決めないと、名乗った
+/// ため、独立した段階にしてある。読み足す前にここで区分を決めないと、名乗った
 /// 長さをそのまま信じて範囲外を読みに行くことになる。
 pub fn declared_length(bytes: &[u8]) -> Result<DeclaredLength, RsdpError> {
     if bytes.len() < LENGTH_FIELD_END {

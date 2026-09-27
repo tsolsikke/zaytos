@@ -81,13 +81,13 @@ fn main() {
     println!("cargo:rustc-link-arg=-T{manifest_dir}/link.ld");
 }
 
-/// 埋め込むユーザープログラムを `rustc` で直接建て、`OUT_DIR` へ置く（S9-b-1）。
+/// 埋め込むユーザープログラムを `rustc` で直接ビルドし、`OUT_DIR` へ置く（S9-b-1）。
 ///
 /// # なぜ cargo を入れ子にしないか
 ///
 /// ユーザープログラムを別の crate にして build script から `cargo` を呼ぶ形は、
 /// **`OUT_DIR` が feature 構成ごとに別なので、`cargo xtask check --full` が
-/// kernel を何十回も建てるたびに丸ごと建て直すことになる。**
+/// kernel を何十回もビルドするたびに丸ごとビルドし直すことになる。**
 /// `rustc` を 1 回呼ぶだけなら crate もワークスペースからの除外も要らず、
 /// 依存も増えない。ツールチェインに必ずある道具だけで済む。
 ///
@@ -139,13 +139,13 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
     ];
 
     // **共有する包み（S11-9）。** `ls` と `cat` が `mod userlib;` で取り込む。
-    // **`PROGRAMS` には入れない**——単独では建たない（`_start` はあるが
-    // `zaytos_main` が無い）。**変わったら建て直す必要はあるので、ここで見る。**
+    // **`PROGRAMS` には入れない**——単独ではビルドできない（`_start` はあるが
+    // `zaytos_main` が無い）。**変わったらビルドし直す必要はあるので、ここで見る。**
     println!("cargo:rerun-if-changed={manifest_dir}/userland/userlib.rs");
 
     // **`common` から取り込む純粋な論理（VIEW-a。ADR-0045 の決定 3）。**
     //
-    // **載せないと、`common` 側を直してもユーザープログラムが建て直されない。**
+    // **載せないと、`common` 側を直してもユーザープログラムがビルドし直されない。**
     // **`userlib.rs` を載せているのと同じ理由である。**
     println!("cargo:rerun-if-changed={manifest_dir}/../common/src/window.rs");
     println!("cargo:rerun-if-changed={manifest_dir}/../common/src/env.rs");
@@ -153,7 +153,7 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
     let script = format!("{manifest_dir}/userland/user.ld");
     println!("cargo:rerun-if-changed={script}");
 
-    // **受け皿の位置は `user.ld` が唯一の出所である**（S10-b の締め）。
+    // **受け皿の位置は `user.ld` が唯一の出所である**（S10-b の完了）。
     // 以前はアセンブリの `.org` と Rust の定数の 2 か所にあり、**検算を足して
     // コードが伸びるたびに両方を直していた**（3 度起きた）。ここで読んで
     // 生成すれば、**直す場所は `user.ld` の 1 行だけになる。**
@@ -169,8 +169,8 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
     )
     .expect("failed to write userland_layout.rs");
 
-    // **ユーザープログラムは `rustc` を直に呼んで建てる**ので、cargo の
-    // feature は届かない。**破壊 feature を渡すには `--cfg` を明示する。**
+    // **ユーザープログラムは `rustc` を直に呼んでビルドする**ので、cargo の
+    // feature は届かない。**破壊テストの feature を渡すには `--cfg` を明示する。**
     //
     // **kernel の feature 環境変数から引く**（`CARGO_FEATURE_*`）。ここに
     // 載せた分だけがユーザー側へ届く形で、**列挙が全部である**——足すときは
@@ -195,7 +195,7 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
         // **`utf8-test` も `zi` の診断を要る**（`ADR-0054` の判定 3 が
         // `scol=` を読む）。**同じ cfg を 2 つの feature から立てる。**
         ("CARGO_FEATURE_UTF8_TEST", "zi_diagnostics"),
-        // **`zi` の桁の計算も同じ破壊を受ける**（`ADR-0054`）。
+        // **`zi` の桁の計算も同じ破壊テストを受ける**（`ADR-0054`）。
         // **カーネル側だけ幅を 1 にすると、画面と `scol=` が食い違う。**
         ("CARGO_FEATURE_WIDTH_ALWAYS_ONE_TEST", "width_always_one"),
         ("CARGO_FEATURE_ZI_APPEND_BY_BYTE_TEST", "zi_append_by_byte"),
@@ -286,9 +286,9 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
             "CARGO_FEATURE_ZI_APPEND_LIKE_INSERT_TEST",
             "zi_append_like_insert",
         ),
-        // **破壊そのものはカーネル側に在る（EV）。** **ここで渡すのは
+        // **破壊テストそのものはカーネル側に在る（EV）。** **ここで渡すのは
         // `syscall-test` の期待値を合わせるためである**——**環境が空の構成で
-        // ABI の検算が落ちると、破壊が別の理由で捕まったことになる。**
+        // ABI の検算が落ちると、破壊テストが別の理由で検出されたことになる。**
         ("CARGO_FEATURE_ENV_DROP_TERM_TEST", "env_drop_term"),
         ("CARGO_FEATURE_ENV_DROP_PATH_TEST", "env_drop_path"),
         (
@@ -354,15 +354,15 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
                 "2021",
                 "--target",
                 "x86_64-unknown-none",
-                // **像をチェックアウト先から切り離す（2026-09-06）。**
+                // **イメージをチェックアウト先から切り離す（2026-09-06）。**
                 //
                 // **原本を絶対パスで渡しているので、`panic` の位置がその
-                // まま `.rodata` へ載る。** **像のバイトがチェックアウト先で
+                // まま `.rodata` へ載る。** **イメージのバイトがチェックアウト先で
                 // 変わり、起動ログの checksum の判定が別の機械で落ちた**
                 // （CI の実測。`docs/troubleshooting.md` の 2026-09-06）。
                 //
-                // **`mke2fs` の出力を決定的にしたのと同じ族である**——
-                // **決定的にする範囲に、建てる場所も入る。**
+                // **`mke2fs` の出力を決定的にしたのと同じ種類である**——
+                // **決定的にする範囲に、ビルドする場所も入る。**
                 "--remap-path-prefix",
                 &format!("{manifest_dir}=kernel"),
                 "-C",
@@ -389,12 +389,12 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
     build_c_programs(manifest_dir, out_dir, &script);
 }
 
-/// C で書いたユーザープログラムを `gcc` で建てる（C-a。`ADR-0057`）。
+/// C で書いたユーザープログラムを `gcc` でビルドする（C-a。`ADR-0057`）。
 ///
-/// # 建て方は 1 箇所に保つ
+/// # ビルドの仕方は 1 箇所に保つ
 ///
 /// **`ADR-0057` の Decision 4 である。** **ABI のフラグ（`-mno-sse` ほか）は
-/// 選択なので、libc も利用側も同じもので建てなければならない**——
+/// 選択なので、libc も利用側も同じものでビルドしなければならない**——
 /// **散らすと黙って食い違う。** **`rustc` を呼ぶ箇所と同じこのファイルへ置く。**
 ///
 /// # フラグの理由
@@ -403,20 +403,20 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
 /// - `-no-pie` / `-static`——**ELF ローダが `ET_EXEC` しか受けない**
 ///   （`common/src/elf.rs`）
 /// - `-T{script}`——**Rust のユーザープログラムと同じ `user.ld` である。**
-///   **付けないと `PT_LOAD` が 3 つになり、1 つが像より下の `0x3ff000` へ出る**
+///   **付けないと `PT_LOAD` が 3 つになり、1 つがイメージより下の `0x3ff000` へ出る**
 ///   （実測。2026-09-06）
 /// - **SSE は使う（`ADR-0058`。2026-09-07 に切り替えた）。**
 ///   **`ADR-0057` の Decision 3（`-mno-sse -mno-mmx -mno-80387`）は、外の C を
-///   持ってくる段で役目を終えた**——**`stb_truetype` は `-mno-sse` では建たない。**
+///   持ってくる段階で役目を終えた**——**`stb_truetype` は `-mno-sse` ではビルドできない。**
 ///   **カーネルが SSE を有効にし、切り替えと遠征で FP の状態を退避するように
 ///   なったので、フラグを外した。** **ABI の選択なので、libc も利用側も
 ///   同じフラグで建てる**（Decision 4 はそのまま生きている）
 /// - `-fno-stack-protector`——**守りの実体（カナリアの置き場）が無い**
-/// - `-Os`——**B-d で `-O2` から替えた。** **`SYS_SPAWN` が受け取る像の上限が
+/// - `-Os`——**B-d で `-O2` から替えた。** **`SYS_SPAWN` が受け取るイメージの上限が
 ///   32 KiB で、`stb_truetype` を抱えた `/bin/ttfglyph` が `-O2` では越えた**
 ///   （実測）。**最適化を切る形は採らない**——**C は切ると `memcpy` の
 ///   呼び出しが増える。** **既存の `chello` は 9,888 から 9,696 へ縮んだ**
-///   （実測。**像の checksum が動くので、起動ログの参照を録り直す**）
+///   （実測。**イメージの checksum が動くので、起動ログの参照を録り直す**）
 /// - `-ffunction-sections` / `-fdata-sections` / `-Wl,--gc-sections`——
 ///   **`ttfglyph.c` が `stb_truetype` の SDF 用の 4 つを「宣言だけ」置き、
 ///   ここが「どこからも届かない」を証明する**（あちらの doc）
@@ -426,7 +426,7 @@ fn build_c_programs(manifest_dir: &str, out_dir: &str, script: &str) {
         "chello", "fptest", "fpchild", "fpfault", "dbfault", "ttfglyph", "tickera", "tickerb",
     ];
 
-    /// 自前の libc（C-c。`ADR-0057`）。**すべての C のプログラムと一緒に建てる。**
+    /// 自前の libc（C-c。`ADR-0057`）。**すべての C のプログラムと一緒にビルドする。**
     const LIBC_SOURCES: &[&str] = &["libc.c", "libc_string.c", "libc_math.c"];
 
     for source in LIBC_SOURCES {
@@ -450,8 +450,8 @@ fn build_c_programs(manifest_dir: &str, out_dir: &str, script: &str) {
                 "-no-pie",
                 "-static",
                 "-fno-stack-protector",
-                // **`-Os` にした（B-d）。** **像の中の 32 KiB の上限へ効く**
-                // ——`SYS_SPAWN` が受け取る像の上限である。**実測で、
+                // **`-Os` にした（B-d）。** **イメージの中の 32 KiB の上限へ効く**
+                // ——`SYS_SPAWN` が受け取るイメージの上限である。**実測で、
                 // `stb_truetype` を抱えた `ttfglyph` は `-O2` で上限を
                 // 越えていた。** **既存の `chello` も 9,888 から 9,696 へ縮む。**
                 "-Os",
@@ -510,13 +510,13 @@ fn parse_symbol(script: &str, name: &str) -> Option<u64> {
     None
 }
 
-/// ext2 の像を `mke2fs` で建て、決定的にしてから `OUT_DIR` へ置く（S10-a）。
+/// ext2 のイメージを `mke2fs` でビルドし、決定的にしてから `OUT_DIR` へ置く（S10-a）。
 ///
 /// # なぜ `mke2fs` を呼ぶか
 ///
 /// **`roadmap.md` の S10 の到達条件が「`mke2fs` で作ったイメージを読めること」で
-/// ある。** 自作の書き手が作った像を読めても、それは自分の理解どうしの一致しか
-/// 言わない。**外の道具が作った像を読むことが主張の中身である。**
+/// ある。** 自作の書き手が作ったイメージを読めても、それは自分の理解どうしの一致しか
+/// 言わない。**外の道具が作ったイメージを読むことが主張の中身である。**
 ///
 /// # 出力は決定的にする
 ///
@@ -534,32 +534,32 @@ fn parse_symbol(script: &str, name: &str) -> Option<u64> {
 ///
 /// | 軸 | 状態 | 確かめ方（実測） |
 /// |---|---|---|
-/// | 時刻 | 潰した | 同じ場所で 2 回建てて md5 が一致する |
-/// | 場所 | 潰した | 長さの違う 2 つのパスへクローンして建て、md5 が一致した |
-/// | 人 | 潰した | uid 1000（手元）と uid 0（コンテナ）で建て、md5 が一致した |
+/// | 時刻 | 潰した | 同じ場所で 2 回ビルドして md5 が一致する |
+/// | 場所 | 潰した | 長さの違う 2 つのパスへクローンしてビルドし、md5 が一致した |
+/// | 人 | 潰した | uid 1000（手元）と uid 0（コンテナ）でビルドし、md5 が一致した |
 /// | 順序 | 依っていない | 下記 |
 ///
 /// **順序は潰していない。依っていないことを測った。** **`mke2fs -d` は種の
 /// ディレクトリを名前の順で読む**——**tmpfs の上に、readdir の順が互いに逆に
-/// なる 2 つの木を作り**（`ls -U` で確かめた）**、割り当てられた inode 番号が
+/// なる 2 つのツリーを作り**（`ls -U` で確かめた）**、割り当てられた inode 番号が
 /// 両方とも名前の順で一致した**（e2fsprogs 1.47.0）。**上の 3 つの確かめ方では
-/// 捕まらない軸である**——**どちらの側も同じ順序で読むので、一致して当たり前に
-/// なる。** **版が変わって並べ替えをやめたら、像の checksum が動いて出る。**
+/// 検出されない軸である**——**どちらの側も同じ順序で読むので、一致して当たり前に
+/// なる。** **版が変わって並べ替えをやめたら、イメージの checksum が動いて出る。**
 ///
-/// **並列は効かない。** **プログラムは固定の配列を順に建て**（`PROGRAMS`）、
+/// **並列は効かない。** **プログラムは固定の配列を順にビルドし**（`PROGRAMS`）、
 /// **feature の構成ごとに `OUT_DIR` が分かれる。**
 ///
 /// **ロケールは固定してある**（[`external_tool`]。`LC_ALL=C`）。
 ///
 /// # 残る入力は道具の版である
 ///
-/// **同じ木・同じ道具なら同じ像が出る、までが言えることである。** **`rustc` は
+/// **同じツリー・同じ道具なら同じイメージが出る、までが言えることである。** **`rustc` は
 /// `rust-toolchain.toml` で固定できる。** **`mke2fs` は固定できないので、版を
 /// 起動ログの判定行に出している。** **`cc` は固定も表示もしていない**
-/// ——**版が変われば像の checksum だけが動き、理由は言わない**
+/// ——**版が変わればイメージの checksum だけが動き、理由は示さない**
 /// （`docs/deferred-decisions.md` に行がある）。
 ///
-/// **残る差は建てた後に 0 で上書きする**（[`zero_image_build_traces`]）。
+/// **残る差はビルドした後に 0 で上書きする**（[`zero_image_build_traces`]）。
 /// **時刻と所有者である**——**所有者は 2026-09-06 に足した。** **「同じ機械で
 /// 2 回建てて一致する」では見えず、CI で初めて出た**（`docs/troubleshooting.md`）。
 /// **ext2 にはチェックサムが無い**ので、バイトを書き換えても整合は崩れない
@@ -572,15 +572,15 @@ fn parse_symbol(script: &str, name: &str) -> Option<u64> {
 /// e2fsprogs は要る**（`ADR-0025`）。不在のときは、何が要るかと何のために
 /// 要るかを出して止まる。
 fn build_fs_image(manifest_dir: &str, out_dir: &str) {
-    /// 像の大きさ。
+    /// イメージの大きさ。
     ///
     /// # 8 MiB は起動しない。実測で決めた
     ///
     /// **`AllocatePages(Address(0x100000))` が `NOT_FOUND` で落ちる。**
-    /// bootloader はカーネル像を固定アドレスへ置く（ADR-0009）ので、
-    /// **像が大きいほど、その 1 回の確保が大きくなる。**
+    /// bootloader はカーネルイメージを固定アドレスへ置く（ADR-0009）ので、
+    /// **イメージが大きいほど、その 1 回の確保が大きくなる。**
     ///
-    /// 実測（像の大きさ → 起動）——**6 MiB は起動し、7 MiB は落ちた**
+    /// 実測（イメージの大きさ → 起動）——**6 MiB は起動し、7 MiB は落ちた**
     /// （落ちた側の要求は 2030 ページ = 約 7.9 MiB）。**空き領域は
     /// `0x100000` から 7 MiB ほどで尽きる。**
     ///
@@ -591,7 +591,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     /// カーネルが数百 KiB 増えた時点で起動しなくなる。**
     ///
     /// **中身は 59 ブロックしか使っていない**（`e2fsck` の実測。512 ブロック中）。
-    /// **像を大きくしても中身は増えない。**
+    /// **イメージを大きくしても中身は増えない。**
     const IMAGE_BYTES: u64 = 2 * 1024 * 1024;
     /// `/data/writable` の初期の大きさ（S12-c）。**ブロック境界にしない。**
     const WRITABLE_SEED_BYTES: usize = 100;
@@ -601,7 +601,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     let seed = format!("{manifest_dir}/fsimage/seed");
     println!("cargo:rerun-if-changed={seed}");
 
-    // 種を OUT_DIR へ写し、生成するファイルを足す。**リポジトリへバイナリを
+    // 種を OUT_DIR へコピーし、生成するファイルを足す。**リポジトリへバイナリを
     // 置かない**（種はテキストだけで、大きいものはここで作る）。
     let staging = format!("{out_dir}/fsimage-root");
     let _ = std::fs::remove_dir_all(&staging);
@@ -616,7 +616,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     //
     // **`spawn-test` は `USER_PROGRAMS` に載っていない。** 上から走らせると
     // 深さ 1 になり、孫の `spawn` が成功してしまう。**`syscall-test` が
-    // 深さ 2 で起こすためだけに、像の中に居る。**
+    // 深さ 2 で起動するためだけに、イメージの中に居る。**
     for name in [
         "hello",
         "spawn-test",
@@ -649,7 +649,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         // **画面・入力・ソケット・共有メモリを 1 つの組で通す（`ADR-0066` の Y-d）。**
         "compd",
         "compc",
-        // **C で書いたもの（C-a。`ADR-0057`）。** **`gcc` が建てる。**
+        // **C で書いたもの（C-a。`ADR-0057`）。** **`gcc` がビルドする。**
         "chello",
         // **FP の状態の判定（B-a。`ADR-0058`）。** **親と子の 2 本で 1 組である。**
         "fptest",
@@ -672,16 +672,16 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     // **単一間接ブロックの境界を挟む 2 本。** 直接ブロックは 12 個なので、
     // 12 ブロックちょうどは間接を使わず、1 バイト超えると使う。
     // **`/tmp` を作る（DIR-1c。ADR-0042）。** **中身は置かない**——
-    // **一時ファイルの置き場であって、像に焼くものではない。**
+    // **一時ファイルの置き場であって、イメージに焼くものではない。**
     // **ADR-0042 が「作る」と決めた唯一のものである。**
     std::fs::create_dir_all(format!("{staging}/tmp"))
         .expect("failed to create /tmp in the staging");
 
     // **`/lib` を作り、既定のフォントを置く（B-d。`ADR-0042` の Addendum）。**
     //
-    // **`ADR-0042` は `/lib` を「作らない。保留」にして、契機を予告していた**
+    // **`ADR-0042` は `/lib` を「作らない。保留」にして、見直すきっかけを予告していた**
     // ——**「GUI の段でプログラム側がフォントを読む形になれば、置き場が要る」。**
-    // **B-d がその契機である。**
+    // **B-d がそのきっかけである。**
     //
     // # 名前を `font.ttf` にする
     //
@@ -689,10 +689,10 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     // **2 本目が来たら、そのとき名前で分ける**（`/lib/font.ttf` は既定のまま
     // 残せる）。
     //
-    // # 種の木を通らない
+    // # 種のツリーを通らない
     //
-    // **`kernel/fsimage/seed` はテキストだけである**（像の ASCII の検査が
-    // 種の木を見る）。**フォントは `third_party/` から直接ここへ写す**ので、
+    // **`kernel/fsimage/seed` はテキストだけである**（イメージの ASCII の検査が
+    // 種のツリーを見る）。**フォントは `third_party/` から直接ここへコピーする**ので、
     // **あの検査の範囲に入らない**（`docs/verification-coverage.md` の
     // 「追跡下を走る道具が、バイナリをどう扱うか」）。
     std::fs::create_dir_all(format!("{staging}/lib"))
@@ -703,7 +703,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         .expect("failed to place the default font into the staging");
 
     // **`/root` を作る（f-1。`ADR-0042` と `ADR-0052`）。** **中身は置かない**
-    // ——**`root` のホームであって、像に焼くものではない。**
+    // ——**`root` のホームであって、イメージに焼くものではない。**
     // **`git` は空のディレクトリを追跡しないので、種ではなくここで作る**
     // （`/tmp` と同じ理由）。
     std::fs::create_dir_all(format!("{staging}/root"))
@@ -724,7 +724,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
 
     // **多バイトの字の判定に使う（`ADR-0054`）。**
     //
-    // **種の木へは置かない**——**`kernel/fsimage/seed/` は ASCII だけと決めてある**
+    // **種のツリーへは置かない**——**`kernel/fsimage/seed/` は ASCII だけと決めてある**
     // （`docs/coding-standards.md` の「像へ入れるテキストはASCIIに限る」）。
     // **ここは `build.rs` が書くので、あの検査の範囲の外である。**
     //
@@ -759,9 +759,9 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     // （b-1 までの 1 行の上限は 128 バイトだった）。
     //
     // **大きさは約 1 ブロックである**（実測で 2181 バイト。ブロックは 4096）。
-    // **像を 1 ブロック太らせるだけで、上限の両方に触れる。**
+    // **イメージを 1 ブロック太らせるだけで、上限の両方に触れる。**
     //
-    // **中身は決定的である。** **判定は像の中身を定数として持たない**
+    // **中身は決定的である。** **判定はイメージの中身を定数として持たない**
     // ——**`cat` を編集の前後で 2 回撮り、差が編集の分だけであることを見る。**
     {
         const BIG_LINES: usize = 100;
@@ -788,7 +788,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     // **常設する理由は「無検査へ戻さない」ことである。** 穴を読む能力は
     // `/bin/zi` がたまたま穴を持ったことで発覚したが、**zi が伸びて穴が
     // 消えれば、その能力は誰も検査しない機構に戻る。** ここに 1 本置けば、
-    // 像の作り方が変わらない限り穴は在り続ける。
+    // イメージの作り方が変わらない限り穴は在り続ける。
     {
         const SPARSE_BLOCK: usize = 4096;
         let mut sparse = vec![0u8; SPARSE_BLOCK * 3];
@@ -826,7 +826,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     std::fs::write(format!("{staging}/data/writable"), &writable[..])
         .expect("failed to write the writable target");
 
-    // 像の器を作る（ゼロ埋め）。
+    // イメージの器を作る（ゼロ埋め）。
     let image = format!("{out_dir}/fs.img");
     let file = std::fs::File::create(&image).expect("failed to create the image file");
     file.set_len(IMAGE_BYTES)
@@ -871,7 +871,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     // 書き写すと、模様を変えたときに片方だけが古くなる。
     let direct_max_last = pattern[DIRECT_MAX_BYTES - 1];
     let indirect_first_last = pattern[DIRECT_MAX_BYTES];
-    // **像の中の番号を、建てた直後に外の道具から測る（e-4 の手当て）。**
+    // **イメージの中の番号を、ビルドした直後に外の道具から測る（e-4 の対策）。**
     let motd = stat_of(&image, "/etc/motd");
     let indirect = stat_of(&image, "/data/indirect-first");
     let motd_inode = motd
@@ -884,12 +884,12 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         .indirect_block
         .expect("debugfs did not report the single indirect block");
     let first_free = first_free_block(&image);
-    // **使用上端 + 1（`ADR-0066` の Y-c）。** **カーネルが壊した像の器の大きさをここから導く**
+    // **使用上端 + 1（`ADR-0066` の Y-c）。** **カーネルが壊したイメージの器の大きさをここから導く**
     // （`kernel_main` の `CORRUPT_FS_BLOCKS`）。**`first_free` とは別に測る**——**あちらは「最初の
     // 空きの範囲の始まり」で、途中に穴があれば上端より手前になる。**
     let used_blocks = used_blocks(&image);
-    // **像の検査値（`ADR-0068` の HW-d）。** **カーネルが、渡された RAM ディスクの像がこの像で
-    // あることを確かめるのに使う**——**長さが同じで中身が古い `fs.img` は長さでは捕まらない**
+    // **イメージの検査値（`ADR-0068` の HW-d）。** **カーネルが、渡された RAM ディスクのイメージがこのイメージで
+    // あることを確かめるのに使う**——**長さが同じで中身が古い `fs.img` は長さでは検出されない**
     // （VDI の作り直し忘れ、ESP の片方だけの差し替え。レビューの指摘。2026-09-23）。
     // **式はカーネルの `image_checksum` と同じ重み付き和である**（`byte * (index + 1)` の総和を
     // ラップさせて足す）。**2 つに増やさない。**
@@ -925,7 +925,7 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
     .expect("failed to write fsimage_info.rs");
 }
 
-/// 出力を解析する外の道具を呼ぶ（e-4 の後の手当て）。**言語を固定する。**
+/// 出力を解析する外の道具を呼ぶ（e-4 の後の対策）。**言語を固定する。**
 ///
 /// **`xtask` の `external_tool` と同じ形である**（あちらの doc に理由がある）。
 /// **2 つの crate にまたがるので、入口は 2 つある**——**寄せられるのは
@@ -936,24 +936,24 @@ fn external_tool(name: &str) -> std::process::Command {
     command
 }
 
-/// `debugfs -R "stat <path>"` から拾う番号（e-4 の手当て）。
+/// `debugfs -R "stat <path>"` から拾う番号（e-4 の対策）。
 struct ImageStat {
     inode: Option<usize>,
     first_block: Option<usize>,
     indirect_block: Option<usize>,
 }
 
-/// 像の中の番号を `debugfs` に訊く（e-4 の手当て）。
+/// イメージの中の番号を `debugfs` に訊く（e-4 の対策）。
 ///
 /// # なぜ build.rs が測るのか
 ///
-/// **像の中の inode 番号とブロック番号は、像の中身で決まる。**
+/// **イメージの中の inode 番号とブロック番号は、イメージの中身で決まる。**
 /// **ユーザープログラムを変える feature（`USER_PROGRAM_CFGS`）を立てると
-/// 像が変わる**ので、**構成ごとに番号が違う。**
+/// イメージが変わる**ので、**構成ごとに番号が違う。**
 ///
 /// **手で測って定数へ書く形は、その構成の分しか合わない。** 実際に踏んだ——
 /// **`zi` が e-4 で 1 ブロック太り、`zi-test` の構成でだけ番号がずれて、
-/// 壊した像の検算が「壊れていない」と言った**（`docs/troubleshooting.md`）。
+/// 壊したイメージの検算が「壊れていない」と示した**（`docs/troubleshooting.md`）。
 ///
 /// **`user.ld` から受け皿の位置を読んで生成しているのと同じ形である**
 /// （直す場所を 1 つにする）。**道具は増えていない**——`debugfs` は
@@ -993,10 +993,10 @@ fn stat_of(image: &str, path: &str) -> ImageStat {
     stat
 }
 
-/// 最初の空きブロック（`dumpe2fs` の `Free blocks:` の先頭。e-4 の手当て）。
+/// 最初の空きブロック（`dumpe2fs` の `Free blocks:` の先頭。e-4 の対策）。
 ///
-/// **使用しているブロックの上端 + 1 である。** 壊した像の検算は、
-/// **ここまでを写せば像が読み切れる。**
+/// **使用しているブロックの上端 + 1 である。** 壊したイメージの検算は、
+/// **ここまでをコピーすればイメージが読み切れる。**
 fn first_free_block(image: &str) -> usize {
     let output = external_tool("dumpe2fs")
         .arg(image)
@@ -1026,10 +1026,10 @@ fn first_free_block(image: &str) -> usize {
     panic!("dumpe2fs did not report a free block range for the image")
 }
 
-/// 像の使用上端 + 1（`ADR-0066` の Y-c）。**最後の空きの範囲の始まりである。**
+/// イメージの使用上端 + 1（`ADR-0066` の Y-c）。**最後の空きの範囲の始まりである。**
 ///
 /// **`dumpe2fs` の群の節の `Free blocks:` は `93-100, 293-511` のように範囲を並べる。** **最後の範囲は
-/// 像の終わりまで続く空きなので、その始まりが「使っている最後のブロック + 1」になる**——**途中の
+/// イメージの終わりまで続く空きなので、その始まりが「使っている最後のブロック + 1」になる**——**途中の
 /// 穴に惑わされない**（[`first_free_block`] は最初の範囲を読むので、穴があると手前を返す）。
 fn used_blocks(image: &str) -> usize {
     let output = external_tool("dumpe2fs")
@@ -1061,7 +1061,7 @@ fn used_blocks(image: &str) -> usize {
 /// `mke2fs -V` の 1 行目。**版を記録に残すためだけに読む。**
 fn mke2fs_version() -> String {
     // `mke2fs -V` は版をコード 1 で標準エラーへ出す。**成否は見ない**——
-    // 実際に建てるときの失敗が、不在の診断を出す側である。
+    // 実際にビルドするときの失敗が、不在の診断を出す側である。
     let output = external_tool("mke2fs").arg("-V").output();
     match output {
         Ok(o) => {
@@ -1076,18 +1076,18 @@ fn mke2fs_version() -> String {
 ///
 /// # なぜ載せるか
 ///
-/// **`mke2fs` の版を載せているのと同じ理由である。** **像の checksum が
-/// 赤になったとき、木に変更が無ければ、人は「何が変わったのか」を探す**
+/// **`mke2fs` の版を載せているのと同じ理由である。** **イメージの checksum が
+/// 失敗したとき、作業ツリーに変更が無ければ、人は「何が変わったのか」を探す**
 /// ——**残る入力は道具の版である。**
 ///
-/// **`docs/deferred-decisions.md` にこの行が在った。** **契機は「像の
+/// **`docs/deferred-decisions.md` にこの行が在った。** **見直すきっかけは「像の
 /// checksum が赤になり、木に変更が無いとき」としてあったが、B-d で先に
-/// 来た**——**`/bin` の C が 6 本になり、像の中の C のバイトが 343 KiB の
+/// 来た**——**`/bin` の C が 6 本になり、イメージの中の C のバイトが 343 KiB の
 /// フォントの次に大きい塊になった。** **さらに B-d の判定そのものが、
-/// 同じ `cc` で建てた 2 つを突き合わせる形である。**
+/// 同じ `cc` でビルドした 2 つを突き合わせる形である。**
 fn cc_version() -> String {
     let compiler = std::env::var("CC").unwrap_or_else(|_| "cc".into());
-    // **`mke2fs -V` と同じ形である**——**成否は見ない。** **実際に建てる
+    // **`mke2fs -V` と同じ形である**——**成否は見ない。** **実際にビルドする
     // ときの失敗が、不在の診断を出す側である。**
     let output = external_tool(&compiler).arg("--version").output();
     match output {
@@ -1099,7 +1099,7 @@ fn cc_version() -> String {
     }
 }
 
-/// 種のディレクトリを丸ごと写す。**シンボリックリンクは扱わない**
+/// 種のディレクトリを丸ごとコピーする。**シンボリックリンクは扱わない**
 /// （`roadmap.md` の S10 が symlink を範囲外と書いている）。
 fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
     std::fs::create_dir_all(to).expect("failed to create a staging directory");
@@ -1121,7 +1121,7 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
     }
 }
 
-/// 像の時刻フィールドを 0 にして、出力を決定的にする（S10-a）。
+/// イメージの時刻フィールドを 0 にして、出力を決定的にする（S10-a）。
 ///
 /// **触るのは superblock の 4 つと、全 inode の 4 つ + 所有者である。**
 /// superblock: `s_mtime`(44) / `s_wtime`(48) / `s_lastcheck`(64) / `s_mkfs_time`(264)。
@@ -1131,12 +1131,12 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
 ///
 /// # 所有者は「誰が建てたか」である（2026-09-06 に足した）
 ///
-/// **`mke2fs -d` は種のファイルの所有者をそのまま像へ写す。** **手元では
+/// **`mke2fs -d` は種のファイルの所有者をそのままイメージへコピーする。** **手元では
 /// uid 1000、CI では別の uid になるので、像のバイトが建てた人で変わる。**
-/// **実測で見つけた**——CI が赤になり、コンテナで再現し、`cmp -l` の位置が
+/// **実測で見つけた**——CI が失敗し、コンテナで再現し、`cmp -l` の位置が
 /// 全 inode の 2 と 24 に揃っていた（`docs/troubleshooting.md` の 2026-09-06）。
 ///
-/// **`chown` は使えない**（root でなければ 0 にできない）。**建てた後に
+/// **`chown` は使えない**（root でなければ 0 にできない）。**ビルドした後に
 /// 0 で上書きするのは、時刻と同じ形である。** **利用者の概念がまだ無いので、
 /// 0 にして失うものは無い。**
 ///
@@ -1166,7 +1166,7 @@ fn zero_image_build_traces(image: &str) {
     let group_count = inodes_count.div_ceil(inodes_per_group);
 
     // `s_mtime`(44) / `s_wtime`(48) / `s_lastcheck`(64) / `s_mkfs_time`(264)。
-    // **`s_mkfs_time` は実測で見つけた**——最初は 3 つだけ潰し、2 回建てて
+    // **`s_mkfs_time` は実測で見つけた**——最初は 3 つだけ潰し、2 回ビルドして
     // md5 が食い違ったので `cmp` で位置を出した（バイト 1288 = superblock+264）。
     for offset in [44usize, 48, 64, 264] {
         bytes[sb + offset..sb + offset + 4].copy_from_slice(&0u32.to_le_bytes());
@@ -1195,7 +1195,7 @@ fn zero_image_build_traces(image: &str) {
             // **256 バイトの inode は、128 バイトの外に時刻をもう 5 つ持つ。**
             // `i_ctime_extra`(132) / `i_mtime_extra`(136) / `i_atime_extra`(140) /
             // **`i_crtime`(144)** / `i_crtime_extra`(148)。
-            // **`i_crtime` も実測で見つけた**——2 回建てて 10 バイトだけ食い違い、
+            // **`i_crtime` も実測で見つけた**——2 回ビルドして 10 バイトだけ食い違い、
             // `cmp -l` の位置が inode の 144 に揃っていた。
             if inode_size >= 152 {
                 for offset in [132usize, 136, 140, 144, 148] {

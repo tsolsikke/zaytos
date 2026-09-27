@@ -45,7 +45,7 @@ impl<const CAP: usize> MappedRanges<CAP> {
     /// UEFI メモリマップの生バイト列から構築する。
     ///
     /// - `RegionPolicy::Unmapped` の範囲（`EfiReservedMemoryType` 等。
-    ///   PCI 64bit MMIO 窓のような、実測で 1TB 規模になりうる予約領域を
+    ///   PCI 64bit MMIO ウィンドウのような、実測で 1TB 規模になりうる予約領域を
     ///   含む）はマップ対象に含めない。
     /// - 物理アドレス 0 を含むページは、型に関わらずマップしない
     ///   （フレームアロケータ側のヌルページ除外と対応させ、実際に

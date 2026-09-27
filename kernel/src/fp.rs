@@ -63,14 +63,14 @@ impl FpArea {
         Self(bytes)
     }
 
-    /// XMM0 の下位 8 バイトを書く（破壊だけが使う。B-d）。
+    /// XMM0 の下位 8 バイトを書く（破壊テストだけが使う。B-d）。
     #[cfg(feature = "fp-clobber-on-kernel-entry-test")]
     fn set_xmm0_low(&mut self, value: u64) {
         const XMM0_OFFSET: usize = 160;
         self.0[XMM0_OFFSET..XMM0_OFFSET + 8].copy_from_slice(&value.to_le_bytes());
     }
 
-    /// MXCSR を書く（破壊だけが使う。B-d）。
+    /// MXCSR を書く（破壊テストだけが使う。B-d）。
     #[cfg(feature = "fp-clobber-on-kernel-entry-test")]
     fn set_mxcsr(&mut self, value: u32) {
         self.0[Self::MXCSR_OFFSET..Self::MXCSR_OFFSET + 4].copy_from_slice(&value.to_le_bytes());
@@ -87,7 +87,7 @@ impl FpArea {
     }
 }
 
-/// システムコールの入口で FP の状態を塗る（破壊。B-d）。
+/// システムコールの入口で FP の状態を塗る（破壊テスト。B-d）。
 ///
 /// # 何を反証するか
 ///
@@ -99,9 +99,9 @@ impl FpArea {
 ///
 /// # 2 つ塗る——レジスタと MXCSR
 ///
-/// **XMM0 だけでは、落ちるかどうかが時機に依った**（実測。2026-09-11。
+/// **XMM0 だけでは、落ちるかどうかがタイミングに依った**（実測。2026-09-11。
 /// **3 回走らせて 1 回しか落ちなかった**）。**理由は、C の呼び出し規約では
-/// XMM が全部 caller-saved で、ユーザーの FP がレジスタに生きている窓が
+/// XMM が全部 caller-saved で、ユーザーの FP がレジスタに生きているウィンドウが
 /// 1 文字の描画の中では 100 マイクロ秒ほどしかないことである**
 /// （**ティックは 10 ミリ秒**）。
 ///
@@ -156,7 +156,7 @@ pub unsafe fn enable_on_this_cpu() {
 
 /// いまこのコアで SSE が有効かを、レジスタから読んで返す（判定行に出すため）。
 ///
-/// **書いたつもりではなく、読み戻した値で言う**（`gdt::set_rsp0` の読み戻しと
+/// **書いたつもりではなく、読み戻した値で示す**（`gdt::set_rsp0` の読み戻しと
 /// 同じ形である）。**AP でも呼ぶ**——**CR0 と CR4 はコアごとなので、
 /// 「BSP で立てたから大丈夫」は言えない。**
 pub fn enabled_state() -> Enabled {

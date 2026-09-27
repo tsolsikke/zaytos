@@ -3,7 +3,7 @@
 //! # 何をする module か
 //!
 //! **bus 0 を列挙し、見つけた装置を判定行に出し、virtio-blk を数える。**
-//! それだけである。BAR の写像・割り込みの設定・装置の利用はすべて後段で、
+//! それだけである。BAR のマッピング・割り込みの設定・装置の利用はすべて後の段階で、
 //! **ここでは構成空間を読む以外のことをしない**（virtio-blk の BAR0 だけは
 //! S13-b が使うので、[`VirtioBlkLocation`] として返す）。
 //!
@@ -41,7 +41,7 @@ const VIRTIO_VENDOR: u16 = 0x1AF4;
 const VIRTIO_BLK_TRANSITIONAL: u16 = 0x1001;
 
 /// virtio-blk のデバイス ID（modern only。`0x1040 + 1`）。
-/// **今の QEMU 構成では現れないが、ID の族としては正当なので受ける。**
+/// **今の QEMU 構成では現れないが、ID の種類としては正当なので受ける。**
 const VIRTIO_BLK_MODERN: u16 = 0x1041;
 
 /// 1 つの bus に載る device の数（PCI の規定。device 番号は 5 ビット）。
@@ -55,11 +55,11 @@ const VENDOR_ABSENT: u16 = 0xFFFF;
 
 /// 見つけた virtio-blk の所在（S13-b で返す形にした）。
 ///
-/// **S13-a では返さなかった**——利用者が居ない機構には検算が置けないためである。
+/// **S13-a では返さなかった**——利用者が居ない機構には検算が用意できないためである。
 /// **S13-b（virtqueue）が最初の利用者になったので、要るものだけを返す。**
 /// S13-d で割り込みの配線に `irq_line` が要るようになり、2 つになった。
 pub struct VirtioBlkLocation {
-    /// BAR0 の I/O 窓の先頭（下位 2 ビットの種別フラグは落としてある）。
+    /// BAR0 の I/O ウィンドウの先頭（下位 2 ビットの種別フラグは落としてある）。
     pub io_base: u16,
     /// 構成空間の Interrupt Line（S13-d で割り込みの配線に使う。実測で 11）。
     pub irq_line: u8,
@@ -101,14 +101,14 @@ unsafe fn config_read(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
 /// # bus 0 だけを見る
 ///
 /// 実測で全装置が bus 0 に居る（QEMU の i440FX は単一ホストブリッジ）。
-/// **この前提が崩れたことは、機械が言う**——ブリッジの先に装置が居る構成なら
+/// **この前提が崩れたことは、機械が示す**——ブリッジの先に装置が居る構成なら
 /// `info pci` は別の bus として列挙し、**こちらの集合が欠けて突き合わせが
 /// 落ちる。** ブリッジ用の注記の枝は置かない——**今の構成では一度も走らず、
 /// 走らない枝を持つのは「利用者の居ない機構を持たない」に反する**
 /// （S13-a で装置を保持しなかったのと同じ判断である。**保持のほうは S13-b で
 /// 利用者が来たので、返す形になった**——[`VirtioBlkLocation`]）。
 /// **停止性はループの形そのものにある**（最大 32 device
-/// かける 8 function の読みで、外部の値に依存しない。S10 の線 4 の族だが、
+/// かける 8 function の読みで、外部の値に依存しない。S10 の線 4 と同じ種類だが、
 /// 上限が構造で決まるので打ち切りの機構は要らない）。
 pub unsafe fn scan_bus0(logger: &mut Logger<SerialPort>) -> Option<VirtioBlkLocation> {
     let mut functions = 0u32;
@@ -127,7 +127,7 @@ pub unsafe fn scan_bus0(logger: &mut Logger<SerialPort>) -> Option<VirtioBlkLoca
         let header = unsafe { config_read(0, device, 0, 0x0C) };
         let multifunction = header & 0x0080_0000 != 0;
 
-        // 破壊 (S13-a, pci-ignore-multifunction-test): multifunction を見ない。
+        // 破壊テスト (S13-a, pci-ignore-multifunction-test): multifunction を見ない。
         // **i440FX では device 1 の function 1（IDE）と 3（bridge）が消える**
         // ので、`info pci` との集合の突き合わせが落ちる（実測が保証する）。
         #[cfg(feature = "pci-ignore-multifunction-test")]
@@ -174,7 +174,7 @@ pub unsafe fn scan_bus0(logger: &mut Logger<SerialPort>) -> Option<VirtioBlkLoca
                 && (device_id == VIRTIO_BLK_TRANSITIONAL || device_id == VIRTIO_BLK_MODERN)
             {
                 virtio_blk += 1;
-                // **BAR0 が I/O 窓（ビット 0 = 1）のときだけ返す**——legacy で
+                // **BAR0 が I/O ウィンドウ（ビット 0 = 1）のときだけ返す**——legacy で
                 // 話す（ADR-0033）ための唯一の入口である。最初の 1 つを採る
                 // （2 つ以上は下の判定行の数で見える）。
                 if found.is_none() && bars[0] & 0x1 == 1 {
@@ -186,7 +186,7 @@ pub unsafe fn scan_bus0(logger: &mut Logger<SerialPort>) -> Option<VirtioBlkLoca
             }
         }
 
-        // 破壊 (S13-a, pci-stop-at-first-test): 最初に見つけた device で列挙を
+        // 破壊テスト (S13-a, pci-stop-at-first-test): 最初に見つけた device で列挙を
         // やめる。**集合が host bridge の 1 つに痩せる**ので、突き合わせが落ちる。
         #[cfg(feature = "pci-stop-at-first-test")]
         if functions > 0 {
@@ -208,7 +208,7 @@ pub unsafe fn scan_bus0(logger: &mut Logger<SerialPort>) -> Option<VirtioBlkLoca
 ///
 /// [`config_read`] の契約そのまま。
 unsafe fn read_id(bus: u8, device: u8, function: u8) -> u32 {
-    // 破壊 (S13-a, pci-config-offset-test): ID の読みを 1 レジスタ（4 バイト）
+    // 破壊テスト (S13-a, pci-config-offset-test): ID の読みを 1 レジスタ（4 バイト）
     // ずらす。**command/status が ID として読まれ、全装置の ID が壊れる**ので、
     // `info pci` との突き合わせが落ちる。
     #[cfg(not(feature = "pci-config-offset-test"))]

@@ -85,7 +85,7 @@ const AP_IDLE_TASK: usize = WORKER_COUNT + 1;
 ///
 /// **`pick_next` の巡回はワーカーと [`RING3_TASK`] しか見ず、落ち先は [`default_task_for`] が
 /// 返すメインである。** **したがって登録しても選ばれない**——**S4-c-2 で AP 用アイドルを
-/// 「登録するが誰も走らせない」段として入れたのと同じ形である。**
+/// 「登録するが誰も走らせない」段階として入れたのと同じ形である。**
 /// **選ぶようにするのは W2-c で、待つ者が出てからである。**
 const BSP_IDLE_TASK: usize = TASK_COUNT - 1;
 
@@ -140,12 +140,12 @@ const TASK_STACK_SIZE: usize = 16 * 1024;
 /// スタックの直下に置くガードページの大きさ（1 ページ）。
 const GUARD_SIZE: usize = 4096;
 
-/// 各ワーカーが GPR 照合を回すラウンド数。
+/// 各ワーカーが GPR 照合を実行するラウンド数。
 const ROUNDS_PER_WORKER: u64 = 3;
 
 /// M5-d のワーカーが「窓」を広げる遅延ループの回数。プリエンプトが set と store の
-/// 間に落ちる確率を上げ、統計的レジスタ検証の窓カウントを N > 0 に保つためである
-/// （条件1）。widen feature で長くして、窓カウントが増えることで判定が正しく働くことを
+/// 間に落ちる確率を上げ、統計的レジスタ検証のウィンドウカウントを N > 0 に保つためである
+/// （条件1）。widen feature で長くして、ウィンドウカウントが増えることで判定が正しく働くことを
 /// 確かめる。
 ///
 /// NOP そりではなくメモリカウンタの遅延ループにしている。NOP そりだと巨大なそりが
@@ -157,7 +157,7 @@ const PREEMPT_WINDOW_SLED: usize = 4_000_000;
 #[cfg(not(feature = "task-widen-preempt-window"))]
 const PREEMPT_WINDOW_SLED: usize = 200_000;
 
-/// 窓を広げる遅延ループのカウンタ（メモリ上。レジスタを使わずに回すため）。
+/// ウィンドウを広げる遅延ループのカウンタ（メモリ上。レジスタを使わずに回すため）。
 static mut PREEMPT_DELAY: u64 = 0;
 
 /// `IrqContext` のバイト数（21 個の `u64`）。偽コンテキストの大きさに使う。
@@ -184,13 +184,13 @@ static mut GPR_BUF: [u64; 15] = [0; 15];
 /// （条件1）。この回数が 0 なら統計的レジスタ検証は何も検証していない。
 static mut IN_GPR_WINDOW: u8 = 0;
 
-/// set と store の窓でプリエンプトが起きた回数（条件1）。デモ後に報告し、
+/// set と store のウィンドウでプリエンプトが起きた回数（条件1）。デモ後に報告し、
 /// 0 でないことを確かめる。
 static PREEMPT_IN_WINDOW: AtomicU64 = AtomicU64::new(0);
 
-/// preempt-in-critical の破壊確認で、ワーカーが競合する共有ロック。
+/// preempt-in-critical の破壊テストでの確認で、ワーカーが競合する共有ロック。
 ///
-/// 破壊ビルドでは InterruptGuard が cli を落とす（IF=1 のまま）ので、ワーカー A が
+/// 破壊テストのビルドでは InterruptGuard が cli を落とす（IF=1 のまま）ので、ワーカー A が
 /// これを保持したままスピンする間に timer がプリエンプトし、ワーカー B が同じ
 /// ロックを取ろうとして二重取得検出が発火する。正常ビルドでは cli により保持中は
 /// IF=0 で timer が来ないため、この競合は起きない。
@@ -251,7 +251,7 @@ enum TaskState {
     ///
     /// # W2-b では誰もこの状態にならない
     ///
-    /// **欄と遷移の置き場だけを足した段である。** **待たせるのは W2-c で、`read(0)` が
+    /// **欄と遷移の置き場だけを足した段階である。** **待たせるのは W2-c で、`read(0)` が
     /// 前景の持ち主を待たせるときである。** **起こすのは IRQ1 のハンドラである。**
     ///
     /// # W2-b では 1 理由だったが、Y-b で集合になった
@@ -277,12 +277,12 @@ enum TaskState {
 pub enum Wait {
     /// 端末からのバイトを待っている（前景の持ち主だけがこの状態になる。`ADR-0061` の決定 1）。
     Keyboard,
-    /// 起こしっぱなしにした子が終わるのを待っている（`ADR-0063` の (b2)）。
+    /// 切り離して起動した子が終わるのを待っている（`ADR-0063` の (b2)）。
     ///
-    /// **手形は世代つきである**——**`(世代 << 8) | スロット`。** **終わった子の手形で次の子を
+    /// **ハンドルは世代つきである**——**`(世代 << 8) | スロット`。** **終わった子のハンドルで次の子を
     /// 待つ形を、構造で防ぐ**（[`ring3_task_handle`] の doc）。
     Child {
-        /// 待っている子の手形。
+        /// 待っている子のハンドル。
         handle: u64,
     },
     /// パイプにバイトが溜まるのを待っている（`ADR-0063` の (b3)）。**書き手が起こす。**
@@ -336,14 +336,14 @@ pub enum Wait {
 /// （[`crate::socket::MAX_CONNECTIONS`]）**＝ 4 である。** **これが `poll` に渡せる fd の
 /// 上限でもある**（`crate::syscall` の `MAX_POLL_FDS`）。
 ///
-/// **2 つ目——写しの費用。** **[`TaskState`] は `Copy` で、[`scheduler::states`] が配列で
-/// 返す**ので、**この型の大きさが `schedule_switch` の枠に乗る。** **実測**（`size_of` の
-/// 写しで測った。2026-09-21）——**`[TaskState; TASK_COUNT]` は 96 バイト（いまの 1 理由）/
+/// **2 つ目——コピーの費用。** **[`TaskState`] は `Copy` で、[`scheduler::states`] が配列で
+/// 返す**ので、**この型の大きさが `schedule_switch` のフレームに乗る。** **実測**（`size_of` の
+/// コピーで測った。2026-09-21）——**`[TaskState; TASK_COUNT]` は 96 バイト（いまの 1 理由）/
 /// 432 バイト（4 本）/ 816 バイト（8 本）。** **遠征スタックの高水位は残り 904 バイトである**
 /// （`ADR-0066` の Q4）——**8 本は入らない。**
 ///
-/// **契機**——**[`crate::socket::MAX_CONNECTIONS`] を広げるとき。** **同じ段で一緒に上げること**
-/// （**上げると `[TaskState; TASK_COUNT]` の写しも伸びるので、遠征スタックを測り直す**）。
+/// **見直すきっかけ**——**[`crate::socket::MAX_CONNECTIONS`] を広げるとき。** **同じ段階で一緒に上げること**
+/// （**上げると `[TaskState; TASK_COUNT]` のコピーも伸びるので、遠征スタックを測り直す**）。
 pub const MAX_WAIT_REASONS: usize = 4;
 
 /// 待っている理由の集合（`ADR-0066` の Q3）。**起こす条件は「`on ∈ S`」である。**
@@ -362,7 +362,7 @@ pub const MAX_WAIT_REASONS: usize = 4;
 ///
 /// # 固定長で、並べ替えない
 ///
-/// **ヒープは無い。** **余った枠には前の値が残るので、生きているのは先頭 `len` 本だけである**
+/// **ヒープは無い。** **余ったスロットには前の値が残るので、生きているのは先頭 `len` 本だけである**
 /// ——**比較と表示は前列だけを見る**（下の `PartialEq` と `Debug`）。
 #[derive(Clone, Copy)]
 pub struct WaitSet {
@@ -432,7 +432,7 @@ impl WaitSet {
 }
 
 impl PartialEq for WaitSet {
-    /// **生きている前列だけを比べる**（余った枠には前の値が残るので、全部を比べると嘘になる）。
+    /// **生きている前列だけを比べる**（余ったスロットには前の値が残るので、全部を比べると嘘になる）。
     ///
     /// **並びも見る**——**同じ理由を違う順で入れた 2 つは等しくない。** **組む場所は 1 つで、
     /// 順は渡された fd の順である**ので、v1 では区別が要る場面が無い。
@@ -445,7 +445,7 @@ impl PartialEq for WaitSet {
 impl Eq for WaitSet {}
 
 impl core::fmt::Debug for WaitSet {
-    /// **生きている前列だけを出す**（余った枠を出すと、ログに死んだ理由が並ぶ）。
+    /// **生きている前列だけを出す**（余ったスロットを出すと、ログに死んだ理由が並ぶ）。
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_list()
@@ -474,7 +474,7 @@ struct Task {
     saved_rsp: u64,
     /// このタスクのカーネルスタック頂点（RSP0 用。§2.2、およびスタック範囲の
     /// 上端）。
-    // no-swap の破壊ビルドではスイッチしないので RSP0 更新へ進まず未読になる。
+    // no-swap の破壊テストのビルドではスイッチしないので RSP0 更新へ進まず未読になる。
     #[cfg_attr(feature = "task-switch-no-swap", allow(dead_code))]
     stack_top: u64,
     /// このタスクのカーネルスタック下端（スタック混在検査に使う）。
@@ -483,14 +483,14 @@ struct Task {
     /// このタスクの状態（S3-a）。
     ///
     /// 以前は `runnable: bool` だった。`false` が「メイン（ワーカー終了時のみ戻る）」と
-    /// 「終了済み」の 2 つの意味を畳んでいたので、状態機械へ広げて分けた。
+    /// 「終了済み」の 2 つの意味をまとめていたので、状態機械へ広げて分けた。
     /// 選択可否は [`TaskState::is_runnable`] が決める。
     state: TaskState,
     /// GPR 照合の基準値（タスク固有）。ワーカーのみ使う。
     base: u64,
     /// 残りラウンド数（M5-c の協調デモ用）。0 になったら終了する。
     rounds_left: u64,
-    /// このタスクが照合を回した回数（進捗の会計用）。
+    /// このタスクが照合を実行した回数（進捗の会計用）。
     iterations: u64,
     /// このタスクが再開された回数（会計用）。
     resumes: u64,
@@ -544,8 +544,8 @@ struct Task {
     ///
     /// - **遠征の戻りが必ず元の値へ戻す**（`userland::run_loaded_program`）。
     ///   **載せてから戻すまでの間に抜ける経路は `halt_forever` の 2 つだけで、
-    ///   そこでは以後何も走らない**（実測）。**`ring3::enter` は終了と畳みの
-    ///   2 つの longjmp でしか戻らず、Ctrl+C も畳みとして戻る。**
+    ///   そこでは以後何も走らない**（実測）。**`ring3::enter` は終了と、例外による終了処理の
+    ///   2 つの longjmp でしか戻らず、Ctrl+C も終了処理として戻る。**
     /// - **破棄の経路が、その空間を指したままのタスクを見つけたら消す**
     ///   （[`forget_cr3_if`]。**ユーザープロセスの空間を破棄する箇所は 1 つだけである**。実測）。
     ///   **入れ子の `spawn` は同じタスクの上で走るので、無条件には消さない**
@@ -558,7 +558,7 @@ struct Task {
     /// # これも「値」である
     ///
     /// **`CURRENT_RECOVERY` はアセンブラが `[rip + sym]` で読む**（実測。
-    /// `kernel/src/ring3.rs` の 2 つの `global_asm!`）。**単一の既知の番地で
+    /// `kernel/src/ring3.rs` の 2 つの `global_asm!`）。**単一の既知のアドレスで
     /// なければならないので、スロットで引く形にできない。**
     ///
     /// **W1-b で使い始めた**（`schedule_switch` が入れ替える）。
@@ -577,7 +577,7 @@ struct Task {
     /// 第 2 層（候補が他コアの `CURRENT` に入っていないこと）は S4-c-3 で入れる予定で、
     /// 本番では発火条件が無い構造的なガードになる。
     ///
-    /// この段（S4-c-1）では全タスクが bootstrap processor の担当なので、候補集合は
+    /// この段階（S4-c-1）では全タスクが bootstrap processor の担当なので、候補集合は
     /// 今までと同じで振る舞いは変わらない。
     owner: usize,
 }
@@ -668,7 +668,7 @@ const EMPTY_TASK: Task = Task {
 static CURRENT: PerCpu<AtomicUsize> =
     PerCpu::new([const { AtomicUsize::new(NO_CURRENT_TASK) }; MAX_CPUS]);
 
-/// 破壊確認から現在タスクを読む（S3-b-2b-2、`smp-ap-touch-scheduler-test`）。
+/// 破壊テストでの確認から現在タスクを読む（S3-b-2b-2、`smp-ap-touch-scheduler-test`）。
 ///
 /// AP から呼ぶと sentinel を読んで停止するのが正しい。
 #[cfg(feature = "smp-ap-touch-scheduler-test")]
@@ -724,7 +724,7 @@ pub const fn ring3_task_index() -> usize {
     RING3_TASK
 }
 
-/// 遠征の最中に切り替えで出た回数、タスクごと（W1-c-4 の計器）。
+/// 遠征の最中に切り替えで出た回数、タスクごと（W1-c-4 の計測）。
 ///
 /// **2 本が同時に進んだことの観測である。** **出る側のタスクの深さの欄が 0 でないときに数える**
 /// ——**そのタスクは Ring 3 に居るか、Ring 3 から入ったカーネルの中に居る。**
@@ -732,17 +732,17 @@ pub const fn ring3_task_index() -> usize {
 static SWITCHES_OUT_OF_EXCURSION: [AtomicU64; TASK_COUNT] =
     [const { AtomicU64::new(0) }; TASK_COUNT];
 
-/// 切り替えが CR3 を載せ替えた回数（W1-c-4 の計器。`docs/wayland-inventory.md` の #5）。
+/// 切り替えが CR3 を載せ替えた回数（W1-c-4 の計測。`docs/wayland-inventory.md` の #5）。
 static CR3_LOADS_ON_SWITCH: AtomicU64 = AtomicU64::new(0);
 
-/// BSP 用アイドルタスクが `hlt` した回数（W2-c-1 の計器）。
+/// BSP 用アイドルタスクが `hlt` した回数（W2-c-1 の計測）。
 ///
 /// **W2-c-1 では 0 のままである**——**誰も待たないので、アイドルが選ばれない。**
 /// **0 を先に記録しておくと、W2-c-2 の主張が「1 以上である」ではなく
 /// 「0 から 1 以上へ変わった」になる**（運用者の指摘。2026-09-16）。
 static IDLE_HALTS: AtomicU64 = AtomicU64::new(0);
 
-/// 切り替えが BSP 用アイドルを選んだ回数（W2-c-1 の計器）。**こちらも W2-c-1 では 0 である。**
+/// 切り替えが BSP 用アイドルを選んだ回数（W2-c-1 の計測）。**こちらも W2-c-1 では 0 である。**
 static IDLE_SELECTIONS: AtomicU64 = AtomicU64::new(0);
 
 /// BSP 用アイドルが `hlt` した回数（W2-c-1）。
@@ -767,7 +767,7 @@ pub fn cr3_loads_on_switch() -> u64 {
     CR3_LOADS_ON_SWITCH.load(Ordering::Relaxed)
 }
 
-/// 出る側が遠征の最中なら数える（W1-c-4）。**`schedule_switch` の枠を広げないため、別の関数にしてある。**
+/// 出る側が遠征の最中なら数える（W1-c-4）。**`schedule_switch` のフレームを広げないため、別の関数にしてある。**
 #[inline(never)]
 fn count_switch_out_of_excursion(current: usize) {
     if scheduler::excursion_depth(current) != 0 {
@@ -786,7 +786,7 @@ const RING3_TASK_STACK_SIZE: usize = 64 * 1024;
 ///
 /// **既定の起動にも置く（`ADR-0063` の (a)。2026-09-18）。** **W1-c-4 では `concurrent-test` の構成にだけ
 /// 置き、「既定の起動に 68 KiB の `.bss` とガードページを足さない」としていた。** **パイプの `|` が
-/// 2 本を同時に走らせるので、既定の起動へ出した。** **登録はしない**——**起こすのは
+/// 2 本を同時に走らせるので、既定の起動へ出した。** **登録はしない**——**起動するのは
 /// [`start_ring3_task`] を呼んだときだけで、それまで `pick_next` は選ばない（`Uninitialized`）。**
 #[repr(C, align(4096))]
 struct Ring3TaskStack {
@@ -809,13 +809,13 @@ fn ring3_task_stack_bounds() -> (VirtAddr, VirtAddr) {
     (guard, top)
 }
 
-/// 足した 1 本の世代（`ADR-0063` の (b2)）。**起こすたびに 1 つ進む。**
+/// 足した 1 本の世代（`ADR-0063` の (b2)）。**起動するたびに 1 つ進む。**
 static RING3_TASK_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// 回収されていない子が居るために、起こすのを断った回数（`ADR-0063` の (b2) の計器）。
+/// 回収されていない子が居るために、起動するのを断った回数（`ADR-0063` の (b2) の計測）。
 ///
 /// **本番では 0 である。** **0 でなければ、誰も待たずに終わった子が残っている**
-/// ——**2 本目が二度と起こせない形なので、詰まったときの理由になる**（運用者の指摘）。
+/// ——**2 本目が二度と起動できない形なので、詰まったときの理由になる**（運用者の指摘）。
 static UNREAPED_REFUSALS: AtomicU64 = AtomicU64::new(0);
 
 /// 回収されていない子が居るために断った回数（`ADR-0063` の (b2)）。
@@ -823,35 +823,35 @@ pub fn unreaped_refusals() -> u64 {
     UNREAPED_REFUSALS.load(Ordering::Relaxed)
 }
 
-/// 回収されていない子が居るか（`ADR-0063` の (b2) の計器）。
+/// 回収されていない子が居るか（`ADR-0063` の (b2) の計測）。
 pub fn has_unreaped_child() -> bool {
     scheduler::state(RING3_TASK) == TaskState::Finished
 }
 
-/// 足した 1 本の手形（`ADR-0063` の (b2)）。
+/// 足した 1 本のハンドル（`ADR-0063` の (b2)）。
 ///
 /// # 世代つきにする理由
 ///
-/// **スロット番号そのものを手形にすると、終わった子の手形で次の子を待てる。**
+/// **スロット番号そのものをハンドルにすると、終わった子のハンドルで次の子を待てる。**
 /// **世代を上の桁へ載せておけば、待つ側の世代が合わないことで分かる**——**`-ECHILD` になる。**
 /// **終わった後の二重待ちも同じ返り値になる。**
 pub fn ring3_task_handle(generation: u64) -> u64 {
     (generation << 8) | ring3_slot_of(RING3_TASK) as u64
 }
 
-/// 足した 1 本の、いまの手形（`ADR-0063` の (b2)）。
+/// 足した 1 本の、いまのハンドル（`ADR-0063` の (b2)）。
 pub fn current_ring3_task_handle() -> u64 {
     ring3_task_handle(RING3_TASK_GENERATION.load(Ordering::Relaxed))
 }
 
-/// 足した 1 本（[`RING3_TASK`]）を起こす（W1-c-4。`ADR-0063` の (b2) で作り直した）。
+/// 足した 1 本（[`RING3_TASK`]）を起動する（W1-c-4。`ADR-0063` の (b2) で作り直した）。
 ///
-/// **呼ぶのは `userland::start_detached` だけである。** **起こせたら手形を返す。**
+/// **呼ぶのは `userland::start_detached` だけである。** **起動できたらハンドルを返す。**
 ///
 /// # 回収してから起こす
 ///
 /// **終わった子を回収していなければ断る**（`Finished` のまま残っている形）。**黙って上書きすると、
-/// 使い終わったスタックの上に次の文脈を積むことになる。** **回収は待つ口が行う**
+/// 使い終わったスタックの上に次の文脈を積むことになる。** **回収は待つ入口が行う**
 /// （`userland::wait_for_ring3_task`）。**走っている最中も断る**——**2 本目のタスクは 1 本だけである。**
 ///
 /// **W1-c-4 では「1 回しか起こせない」で、2 回目は止めていた。** **`|` が 2 回打たれるので、
@@ -888,7 +888,7 @@ pub fn start_ring3_task() -> Option<u64> {
         )
     };
     let entry = addr_of!(zaytos_ring3_task_body) as u64;
-    // SAFETY: top はガードページを張った静的スタックの頂点で、まだ誰も使っていない。
+    // SAFETY: top はガードページを設けた静的スタックの頂点で、まだ誰も使っていない。
     // 4KiB 境界（`align(4096)` の構造体の末尾）に載っている。
     let saved_rsp = unsafe { build_initial_context(top, entry) };
     // **登録から `Ready` までを割り込みを止めて一続きにする**——**書きかけの欄を切り替えが読まないため。**
@@ -910,10 +910,10 @@ pub fn start_ring3_task() -> Option<u64> {
 
 /// 足した 1 本を回収する（`ADR-0063` の (b2)）。
 ///
-/// **`Finished` かつ手形が合えば、`Uninitialized` へ戻して真を返す**——**戻せば次の `|` で
-/// 起こせる。** **合わなければ何もしない。**
+/// **`Finished` かつハンドルが合えば、`Uninitialized` へ戻して真を返す**——**戻せば次の `|` で
+/// 起動できる。** **合わなければ何もしない。**
 ///
-/// 破壊 (`ADR-0063` の (b2), reap-does-not-reset): 戻さない。**次の起こしが断られる**
+/// 破壊テスト (`ADR-0063` の (b2), reap-does-not-reset): 戻さない。**次の起動が断られる**
 /// ——**「回収してから起こす」の主張が落ちる。**
 pub fn reap_ring3_task(handle: u64) -> bool {
     if scheduler::state(RING3_TASK) != TaskState::Finished || !handle_is_current(handle) {
@@ -924,10 +924,10 @@ pub fn reap_ring3_task(handle: u64) -> bool {
     true
 }
 
-/// その手形が、いまの子のものか（`ADR-0063` の (b2)）。
+/// そのハンドルが、いまの子のものか（`ADR-0063` の (b2)）。
 ///
-/// 破壊 (`ADR-0063` の (b2), wait-ignores-the-generation): 世代を見ない。
-/// **終わった子の手形で、次の子を待てる形になる。**
+/// 破壊テスト (`ADR-0063` の (b2), wait-ignores-the-generation): 世代を見ない。
+/// **終わった子のハンドルで、次の子を待てる形になる。**
 pub fn handle_is_current(handle: u64) -> bool {
     #[cfg(feature = "wait-ignores-the-generation")]
     {
@@ -956,7 +956,7 @@ extern "C" {
 }
 
 // 足した 1 本の入口（W1-c-4）。**`call` で Rust へ入る**——**`iretq` した直後の RSP はスタック頂点
-// （16 の倍数）で、`call` が戻り番地を積むと、呼ばれた側の入口で 16 の倍数 - 8 になる**（System V の約束）。
+// （16 の倍数）で、`call` が戻りアドレスを積むと、呼ばれた側の入口で 16 の倍数 - 8 になる**（System V の約束）。
 // **戻らない。** 戻ったら `ud2` で落とす。
 core::arch::global_asm!(
     ".section .text",
@@ -990,7 +990,7 @@ extern "sysv64" fn ring3_task_main() -> ! {
     // **欄を `Finished` にしてから起こす（`ADR-0063` の (b2)）**——**起こしてから書くと、
     // 起きた親がまだ `Finished` でない欄を読む。**
     scheduler::set_state(RING3_TASK, TaskState::Finished);
-    // 破壊 (`ADR-0063` の (b2), finish-does-not-wake): 起こさない。**親が永久に待つ。**
+    // 破壊テスト (`ADR-0063` の (b2), finish-does-not-wake): 起こさない。**親が永久に待つ。**
     #[cfg(not(feature = "finish-does-not-wake"))]
     wake_tasks_waiting_on(Wait::Child { handle });
     loop {
@@ -1013,7 +1013,7 @@ fn ring3_task_stack_high_water() -> usize {
 
 /// 切り替えで入るタスクの `rsp0` の欄が 0 だった（W1-c-3c）。**止める。**
 ///
-/// **別の関数にしてある理由**——**`schedule_switch` の枠を広げないため**
+/// **別の関数にしてある理由**——**`schedule_switch` のフレームを広げないため**
 /// （[`swap_cr3_for_switch`] と同じ形）。
 #[inline(never)]
 #[cold]
@@ -1027,7 +1027,7 @@ fn report_zero_rsp0_on_switch(next: usize) -> ! {
 
 /// 載った回復点が、入るタスクのスロットの行の外だった（W1-c-4）。**止める。**
 ///
-/// **別の関数にしてある理由**——**`schedule_switch` の枠を広げないため**（`format_args!` の一時値）。
+/// **別の関数にしてある理由**——**`schedule_switch` のフレームを広げないため**（`format_args!` の一時値）。
 #[inline(never)]
 #[cold]
 fn report_foreign_recovery_on_switch(next: usize, recovery: u64) -> ! {
@@ -1114,7 +1114,7 @@ static KERNEL_CR3: AtomicU64 = AtomicU64::new(0);
 /// その後に本番の表は変わらない。** **最初の切り替え（協調デモ）より前である。**
 ///
 /// **判定行は出さない。** **同じ値は起動ログの `identity-removal: begin. live PML4=` が出している**
-/// ——**行を足すと、この段の「番地だけ」が崩れる。**
+/// ——**行を足すと、この段階の「番地だけ」が崩れる。**
 pub fn record_kernel_cr3() {
     KERNEL_CR3.store(crate::paging::switch::read_cr3().as_u64(), Ordering::SeqCst);
 }
@@ -1141,7 +1141,7 @@ const fn cr3_to_load(field: u64, kernel_cr3: u64) -> u64 {
 ///
 /// # 別の関数にしてある理由
 ///
-/// **`run_loaded_program` の枠を広げないため**——**あの枠は `spawn` の子が走っている間ずっと
+/// **`run_loaded_program` のフレームを広げないため**——**あのフレームは `spawn` の子が走っている間ずっと
 /// 深さ 0 の遠征スタックに載る**（W1-b-2 の実測。`docs/coding-standards.md`）。
 ///
 /// # Safety
@@ -1168,12 +1168,12 @@ pub unsafe fn switch_cr3_and_note(load: common::addr::PhysAddr, noted: u64) {
 ///
 /// **遠征中に切り替えが起きないので、切り替えるタスクの欄はどれも 0 である。** **違う値になるのは W1-c-4 からである。**
 /// **W1-c-4 の `concurrent-test` では実際に載せ替える**（実測で 82 回。`CR3_LOADS_ON_SWITCH`）。
-/// **それでも検算を置くのは、「起きない見込み」を観測に変えるためである**——**起動時の空間の演習に
+/// **それでも検算を設けるのは、「起きない見込み」を観測に変えるためである**——**起動時の空間の演習に
 /// 切り替えが割り込む形が在れば、ここで止まる。**
 ///
 /// # 別の関数にしてある理由
 ///
-/// **`schedule_switch` の枠を広げないため**（`format_args!` の一時値。`report_double_selection` と同じ形）。
+/// **`schedule_switch` のフレームを広げないため**（`format_args!` の一時値。`report_double_selection` と同じ形）。
 #[inline(never)]
 fn swap_cr3_for_switch(current: usize, next: usize) {
     let kernel_cr3 = KERNEL_CR3.load(Ordering::SeqCst);
@@ -1199,7 +1199,7 @@ fn swap_cr3_for_switch(current: usize, next: usize) {
         ));
         common::cpu::halt_forever();
     };
-    // 破壊 (W1-c-4, task-switch-no-cr3): 載せない。**入ったタスクが出る側の空間で走り、次に出るときの
+    // 破壊テスト (W1-c-4, task-switch-no-cr3): 載せない。**入ったタスクが出る側の空間で走り、次に出るときの
     // 検算（上）が「欄と実物が違う」を見て止まる。**
     #[cfg(not(feature = "task-switch-no-cr3"))]
     {
@@ -1255,8 +1255,8 @@ pub fn note_current_excursion_depth(depth: usize) {
 /// 誰も起こさないまま眠る。** **W2-c-2 で確かめた**——**呼ぶのは `sys_read` で、`int 0x80` は
 /// 割り込みゲートなので IF=0 である。** **BKL を解いても IF は戻らない**
 /// （`EntryInterruptGuard` は保存した RFLAGS が IF=1 のときだけ戻す。実測）——**だから
-/// 窓は構造で閉じている。**
-// 破壊 `read-never-waits` では待たないので、呼ぶ者が居なくなる。
+/// ウィンドウは構造で閉じている。**
+// 破壊テスト `read-never-waits` では待たないので、呼ぶ者が居なくなる。
 #[cfg_attr(feature = "read-never-waits", allow(dead_code))]
 pub(crate) fn set_current_waiting(on: Wait) {
     set_current_waiting_set(WaitSet::single(on));
@@ -1264,7 +1264,7 @@ pub(crate) fn set_current_waiting(on: Wait) {
 
 /// 今のタスクを、理由の集合で待たせる（`ADR-0066` の Y-b）。**呼ぶのは `poll` である。**
 ///
-/// **1 理由の口（[`set_current_waiting`]）はこれを 1 本の集合で呼ぶ**——**欄を据える場所を
+/// **1 理由の入口（[`set_current_waiting`]）はこれを 1 本の集合で呼ぶ**——**欄を据える場所を
 /// 2 つに分けない。**
 ///
 /// # 眠るのは呼び出し側である。割り込みを止めた文脈から呼ぶこと
@@ -1274,10 +1274,10 @@ pub(crate) fn set_current_waiting_set(set: WaitSet) {
     let Some(index) = current_index_if_any() else {
         return;
     };
-    // **集合に入った本数の最大を数える（Y-b の計器）。** **大きさを実測で決めるためである**
+    // **集合に入った本数の最大を数える（Y-b の計測）。** **大きさを実測で決めるためである**
     // （[`MAX_WAIT_REASONS`] の doc）。**判定も読む**（`poll` の検査の判定「集合に 2 本入った」）。
     MAX_WAIT_SET_LEN.fetch_max(set.len() as u64, Ordering::Relaxed);
-    // **2 本が同時に待つ形を数える（`ADR-0063` の (b3) の計器）。** **他のタスクが既に
+    // **2 本が同時に待つ形を数える（`ADR-0063` の (b3) の計測）。** **他のタスクが既に
     // 待っていれば 1 つ足す。** **`sleep 0.2 | cat` で初めて出る**——**持ち越しの行
     // 「作っても出ない」が偽になる観測である**（`docs/deferred-decisions.md`）。
     let another_is_waiting = (0..TASK_COUNT)
@@ -1289,15 +1289,15 @@ pub(crate) fn set_current_waiting_set(set: WaitSet) {
     scheduler::set_state(index, TaskState::Waiting(set));
 }
 
-/// 待ちの集合に入った理由の最大本数（`ADR-0066` の Y-b の計器）。
+/// 待ちの集合に入った理由の最大本数（`ADR-0066` の Y-b の計測）。
 static MAX_WAIT_SET_LEN: AtomicU64 = AtomicU64::new(0);
 
-/// 待ちの集合に入った理由の最大本数（`ADR-0066` の Y-b）。**`init` が検査の締めに出す。**
+/// 待ちの集合に入った理由の最大本数（`ADR-0066` の Y-b）。**`init` が検査の完了時に出す。**
 pub fn max_wait_set_len() -> u64 {
     MAX_WAIT_SET_LEN.load(Ordering::Relaxed)
 }
 
-/// 待ちの欄を据えたとき、他のタスクも既に待っていた回数（`ADR-0063` の (b3) の計器）。
+/// 待ちの欄を据えたとき、他のタスクも既に待っていた回数（`ADR-0063` の (b3) の計測）。
 static WAITING_TOGETHER: AtomicU64 = AtomicU64::new(0);
 
 /// [`WAITING_TOGETHER`] の値。**`init` がセッションの後に出す。**
@@ -1305,9 +1305,9 @@ pub fn waiting_together() -> u64 {
     WAITING_TOGETHER.load(Ordering::Relaxed)
 }
 
-/// 起こしっぱなしの 1 本が走る Ring 3 のスロット（`ADR-0063` の (b3)）。
+/// 切り離して起動した 1 本が走る Ring 3 のスロット（`ADR-0063` の (b3)）。
 ///
-/// **このスロットに居るのは常に子である**（シェルはスロット 0 の深さ 1）。**Ctrl+C の畳みが
+/// **このスロットに居るのは常に子である**（シェルはスロット 0 の深さ 1）。**Ctrl+C の終了処理が
 /// 深さ 1 でも効くのはここだけである**（`idt::fold_if_interrupted`）。
 pub fn detached_slot() -> usize {
     ring3_slot_of(RING3_TASK)
@@ -1326,7 +1326,7 @@ pub fn detached_slot() -> usize {
 /// 読み手のバイトにならない合図が在るためである。**
 /// **呼ぶのは IRQ1 のハンドラである**（W2-c-2）。**IF=0 かつ BKL の内側で、切り替えが
 /// 状態を書くのと同じ文脈である。**
-// 破壊 `keyboard-does-not-wake` では呼ぶ者が居なくなる。
+// 破壊テスト `keyboard-does-not-wake` では呼ぶ者が居なくなる。
 #[cfg_attr(feature = "keyboard-does-not-wake", allow(dead_code))]
 pub(crate) fn wake_tasks_waiting_on(on: Wait) -> usize {
     let mut woken = 0;
@@ -1334,8 +1334,8 @@ pub(crate) fn wake_tasks_waiting_on(on: Wait) -> usize {
         let state = scheduler::state(index);
         // **合図で引く。**
         //
-        // 破壊 (W2-d+, wake-ignores-the-reason): 合図を見ずに、待っている者を全部起こす。
-        // **W2-c-2 では置けなかった**——**合図が 1 つしか無かったので、見なくても結果が
+        // 破壊テスト (W2-d+, wake-ignores-the-reason): 合図を見ずに、待っている者を全部起こす。
+        // **W2-c-2 では用意できなかった**——**合図が 1 つしか無かったので、見なくても結果が
         // 同じだった**（緑を出す道の「変化が無い」）。**タイマの待ちが入ったので、打鍵が
         // 眠っている者を起こす形で初めて効く。**
         #[cfg(not(feature = "wake-ignores-the-reason"))]
@@ -1379,7 +1379,7 @@ fn waits_on(state: TaskState, on: Wait) -> bool {
     matches!(state, TaskState::Waiting(set) if set.contains(on))
 }
 
-/// 起こした本数の累計（W2-c-2 の計器）。**「積んだが起こさなかった」との関係で見る。**
+/// 起こした本数の累計（W2-c-2 の計測）。**「積んだが起こさなかった」との関係で見る。**
 static WAKES_ISSUED: AtomicU64 = AtomicU64::new(0);
 
 /// 起こした本数の累計（W2-c-2）。
@@ -1426,7 +1426,7 @@ pub(crate) fn wake_expired_timers(now: u64) -> usize {
     let mut woken = 0;
     for index in 0..TASK_COUNT {
         // **集合からタイマの理由を引く（`ADR-0066` の Y-b）。** **`nanosleep` は 1 本の集合で
-        // 待つが、引き方は集合のままにしておく**——**`poll` にタイマを入れる段が来ても、
+        // 待つが、引き方は集合のままにしておく**——**`poll` にタイマを入れる段階が来ても、
         // ここは変わらない。**
         let TaskState::Waiting(set) = scheduler::state(index) else {
             continue;
@@ -1434,14 +1434,14 @@ pub(crate) fn wake_expired_timers(now: u64) -> usize {
         let Some(deadline) = set.timer_deadline() else {
             continue;
         };
-        // 破壊 (W2-d+, timer-never-wakes): 誰も起こさない。**眠った者が戻らず、セッションが
+        // 破壊テスト (W2-d+, timer-never-wakes): 誰も起こさない。**眠った者が戻らず、セッションが
         // 終わらない。**
         #[cfg(feature = "timer-never-wakes")]
         let expired = {
             let _ = deadline;
             false
         };
-        // 破壊 (W2-d+, timer-wakes-before-deadline): 締切を見ずに毎ティック起こす。
+        // 破壊テスト (W2-d+, timer-wakes-before-deadline): 締切を見ずに毎ティック起こす。
         // **眠った側は締切を見直して待ち直すので、所要は変わらない**——**下の検出器でしか
         // 見えない。**
         #[cfg(feature = "timer-wakes-before-deadline")]
@@ -1465,7 +1465,7 @@ pub(crate) fn wake_expired_timers(now: u64) -> usize {
 
 /// 今のタスクの回復点の欄を据える（W1-b。遠征の出入りが呼ぶ）。
 ///
-/// **`CURRENT_RECOVERY` は単一の既知の番地でなければならない**
+/// **`CURRENT_RECOVERY` は単一の既知のアドレスでなければならない**
 /// （アセンブラが `[rip + sym]` で読む。`ADR-0060`）。**だからタスクは
 /// 「値」を持ち、切り替えが入れ替える。**
 pub fn note_current_recovery(value: u64) {
@@ -1497,7 +1497,7 @@ const NO_CURRENT_TASK: usize = usize::MAX;
 fn current_index() -> usize {
     let value = CURRENT.this_cpu().load(Ordering::Relaxed);
     if value == NO_CURRENT_TASK {
-        // このコアはまだタスクを割り当てられていない。S3-b-2b-2 の段では AP はタスクを
+        // このコアはまだタスクを割り当てられていない。S3-b-2b-2 の段階では AP はタスクを
         // 実行しないので、ここへ来るのは AP がスケジューラへ入ったことを意味する。
         // 丸めず、落とす。
         serial_line(format_args!(
@@ -1539,7 +1539,7 @@ static mut WORKER_STACKS: [WorkerStack; WORKER_COUNT] = [EMPTY_WORKER_STACK; WOR
 /// BSP 用アイドルタスクのスタック（ガードページ + スタック本体。W2-a）。
 ///
 /// **大きさはワーカーと同じ [`TASK_STACK_SIZE`] にした**——**本体は `sti; hlt` のループだけで
-/// 浅いが、割り込みが乗る**（ハンドラの枠と、ここから呼ばれるハートビートは無い）。
+/// 浅いが、割り込みが乗る**（ハンドラのフレームと、ここから呼ばれるハートビートは無い）。
 /// **深さを測る道具は置いていない**——**W2-c で待つ者が出て、実際に眠るようになってから測る。**
 #[repr(C, align(4096))]
 struct BspIdleStack {
@@ -1568,7 +1568,7 @@ extern "C" {
 }
 
 // BSP 用アイドルタスクの入口（W2-a）。**`call` で Rust へ入る**——**`iretq` した直後の RSP は
-// スタック頂点（16 の倍数）で、`call` が戻り番地を積むと呼ばれた側の入口で 16 の倍数 - 8 になる。**
+// スタック頂点（16 の倍数）で、`call` が戻りアドレスを積むと呼ばれた側の入口で 16 の倍数 - 8 になる。**
 // **戻らない。** 戻ったら `ud2` で落とす。
 core::arch::global_asm!(
     ".section .text",
@@ -1582,7 +1582,7 @@ core::arch::global_asm!(
 
 /// BSP 用アイドルタスクの本体（W2-a）。**割り込みを許して眠るだけである。**
 ///
-/// # 錠を持ち込まない
+/// # ロックを持ち込まない
 ///
 /// **BKL も `Locked` も取らない。** **保持したまま `hlt` すると、次に自分が入口へ入るときに
 /// 再帰取得になって止まる**（`bkl-hold-across-hlt-test` がその形を実証している）。
@@ -1593,13 +1593,13 @@ core::arch::global_asm!(
 /// **[`common::cpu::enable_interrupts_and_halt`] を使う**（`ADR-0018` のチェックリスト 10）。
 /// **条件を確かめてから眠る形にはしていない**——**このタスクが選ばれるのは「走行可能な者が
 /// 居ない」ときだけで、起こすのは割り込みである。** **W2-c で待つ者が出たら、起こす側が
-/// `Ready` にしてから割り込みを終えるので、取りこぼしは生じない**（あちらで判定を置く）。
+/// `Ready` にしてから割り込みを終えるので、取りこぼしは生じない**（あちらで判定を設ける）。
 extern "sysv64" fn bsp_idle_main() -> ! {
     loop {
-        // **眠った回数を数える（W2-c-1 の計器）。** **眠る前に数える**——**起きてから
+        // **眠った回数を数える（W2-c-1 の計測）。** **眠る前に数える**——**起きてから
         // 数えると、起こした割り込みの中で読む値が 1 つ足りない。**
         IDLE_HALTS.fetch_add(1, Ordering::Relaxed);
-        // 破壊 (W2-c-2, idle-holds-bkl-across-hlt): BKL を取ったまま眠る。
+        // 破壊テスト (W2-c-2, idle-holds-bkl-across-hlt): BKL を取ったまま眠る。
         // **次に自分が入口へ入るときに再帰取得になって止まる**（`bkl` の検出器）。
         //
         // **`bkl-hold-across-hlt-test` は流用できない**（実測。2026-09-16）
@@ -1607,7 +1607,7 @@ extern "sysv64" fn bsp_idle_main() -> ! {
         // ここが観測されない。** **だから別の feature を立てた。**
         #[cfg(feature = "idle-holds-bkl-across-hlt")]
         let _held_across_hlt = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
-        // SAFETY: 割り込みを許して眠るだけである。錠は 1 つも持っていない。
+        // SAFETY: 割り込みを許して眠るだけである。ロックは 1 つも持っていない。
         // ハンドラは登録済みで、このタスクのスタックはガードページ付きである。
         unsafe { common::cpu::enable_interrupts_and_halt() };
     }
@@ -1628,7 +1628,7 @@ extern "sysv64" fn bsp_idle_main() -> ! {
 ///
 /// 区別できる量に置き換えた。これは [`schedule_switch`] を通った回数で、早期リターンが
 /// 残っている間、AP のスロットは 0 のままである（AP は `irq_entry` で手前に戻るので
-/// `schedule_switch` へ到達しない）。0 であることを実測してから、次段で外す。
+/// `schedule_switch` へ到達しない）。0 であることを実測してから、次の段階で外す。
 static SCHEDULE_PASSES: PerCpu<AtomicU64> = PerCpu::new([const { AtomicU64::new(0) }; MAX_CPUS]);
 
 /// AP（スロット 1）がスケジューラを通った回数（S4-c-3-2a）。ハートビートが読む。
@@ -1640,7 +1640,7 @@ static SCHEDULE_PASSES: PerCpu<AtomicU64> = PerCpu::new([const { AtomicU64::new(
 ///
 /// 折り返しは実用上起きない（`u64`）。それでも差は `wrapping_sub` で取る。
 ///
-/// この段では 0 でなければならない。早期リターンがあるので AP は `schedule_switch` へ
+/// この段階では 0 でなければならない。早期リターンがあるので AP は `schedule_switch` へ
 /// 到達しない。0 でなければ、外したつもりのない経路から入っている。
 pub fn ap_schedule_passes() -> u64 {
     SCHEDULE_PASSES
@@ -1653,7 +1653,7 @@ pub fn ap_schedule_passes() -> u64 {
 /// 「割り当てられた」の観測である。参加は [`ap_schedule_passes`] が示す。
 /// sentinel のままなら、まだ何も割り当てられていない。
 ///
-/// こちらは早期リターンの有無で変わる（sentinel から添字へ動くのは次段で sentinel を
+/// こちらは早期リターンの有無で変わる（sentinel から添字へ動くのは次の段階で sentinel を
 /// 解いたときである）ので、到達条件として有効である。
 ///
 /// これは表現を返す。ログへ出すのは [`ap_current_display`] のほうである。
@@ -1700,7 +1700,7 @@ pub fn ap_current_display() -> ApCurrent {
 ///
 /// S4-c-2 は専用のループ（`ap_idle_entry`）と専用のスタック（`AP_IDLE_STACK`、
 /// 20,480 バイト）を用意し、初期コンテキストを組んで登録していた。「登録するが誰も
-/// 走らせない」段だったので、走らせ方が決まる前に形を決めていた。
+/// 走らせない」段階だったので、走らせ方が決まる前に形を決めていた。
 ///
 /// 走らせ方を決めた時点で、その形では走らないと分かった。AP の `CURRENT` へこの添字を
 /// 書くと、AP の最初のティックで [`schedule_switch`] は「現タスク = 次タスク」になり
@@ -1714,8 +1714,8 @@ pub fn ap_current_display() -> ApCurrent {
 /// # ガードページはどこへ行ったか
 ///
 /// 失われていない。出所が変わった。S4-c-2 は `AP_IDLE_STACK` の直下へ
-/// `install_worker_guard_page` で穴を開けていた。per-CPU スタックには最初から張らない
-/// 穴が下にある（`smp::map_ap_stacks`）。写像の不在で作ったガードなので、こちらのほうが
+/// `install_worker_guard_page` で穴を開けていた。per-CPU スタックには最初からマップしない
+/// 穴が下にある（`smp::map_ap_stacks`）。マッピングの不在で作ったガードなので、こちらのほうが
 /// 解除の手数が少ない。
 ///
 /// # 呼び出しの前提（メモリ安全性の契約ではない）
@@ -1723,7 +1723,7 @@ pub fn ap_current_display() -> ApCurrent {
 /// S4-c-3-2a まで `unsafe fn` だった。外した。当時の `unsafe` は
 /// `install_worker_guard_page` と `build_initial_context` を呼ぶためのもので、どちらも
 /// 本関数から消えたので守るべき義務が 1 つも残っていない。義務の無い `unsafe fn` は
-/// 「呼ぶ側に守るものがある」と誤って伝える。積もると `unsafe` の印そのものが読み
+/// 「呼ぶ側に守るものがある」と誤って伝える。積もると `unsafe` の目印そのものが読み
 /// 飛ばされるので、外す。
 ///
 /// 前提は 2 つあるが、いずれも正しさの前提であって、メモリ安全性の前提ではない。
@@ -1738,7 +1738,7 @@ pub fn ap_current_display() -> ApCurrent {
 pub fn init_ap_idle_task() {
     // 本当に走るスタックを記述する。ここを嘘にすると、`schedule_switch` の「保存 RSP が
     // そのタスクのスタック範囲内か」の検査が、切り替えが起きたときにだけ誤って落ちる
-    // （この段では切り替えが起きないので鳴らない）。
+    // （この段階では切り替えが起きないので鳴らない）。
     //
     // 実際に保存される値がこの範囲へ入ることも確かめてある。保存されるのは割り込み入口の
     // `rsp` なので、タイマのベクタが IST を使うなら範囲の外へ出る。`idt::init` が IST を
@@ -1808,13 +1808,13 @@ pub fn init_ap_idle_task() {
 ///
 /// `on_timer_tick` の締切分岐を無効にすると、起動が進まない。[`run_preemptive_demo`] は
 /// ワーカーが走行不可になることで戻るので、締切を止めると bootstrap processor がデモから
-/// 戻らず、その後ろにある AP 起こしへ到達しない。AP が起きなければ窓も生まれない。
-/// そこでデモは普通に終わらせ、AP が起きた後で戻す形にした。
+/// 戻らず、その後ろにある AP の起動へ到達しない。AP が起動しなければウィンドウも生まれない。
+/// そこでデモは普通に終わらせ、AP が起動した後で戻す形にした。
 ///
-/// # 窓の長さ
+/// # ウィンドウの長さ
 ///
 /// 戻した後はずっと開いている。`demo_active` は既に `false` なので締切分岐は走らず、
-/// 誰もワーカーを `Blocked` へ戻さない。一度きりの短い窓を狙う構成と違い、取り逃しにくい。
+/// 誰もワーカーを `Blocked` へ戻さない。一度きりの短いウィンドウを狙う構成と違い、取り逃しにくい。
 #[cfg(feature = "sched-keep-workers-runnable")]
 pub fn rearm_workers_for_smp_stimulus() {
     let _guard = common::critical::InterruptGuard::enter();
@@ -1881,32 +1881,32 @@ fn serial_line(args: core::fmt::Arguments) {
 /// # この検査の性格
 ///
 /// 現在は常に成立する。`MAX_CPUS = 1` で [`common::percpu::cpu_id`] が常に `0` を返す
-/// ためである。目的は AP がタスクを実行し始めた段で落ちることであって、今なにかを
-/// 捕まえることではない。
+/// ためである。目的は AP がタスクを実行し始めた段階で落ちることであって、今なにかを
+/// 検出することではない。
 ///
-/// 破壊確認は現時点では構成できない。`cpu_id()` に非 `0` を返させる手段がまだ無い。
+/// 破壊テストでの確認は現時点では構成できない。`cpu_id()` に非 `0` を返させる手段がまだ無い。
 /// S3-b で `cpu_id()` が実 ID を返すようになった時点で構成可能になるので、S3-b の
 /// 到達条件に入れてある（`roadmap.md`）。`smp::trampoline_frame()` や
 /// `irq::mask_all()` と同じ扱いである。
 fn require_bootstrap_processor(what: &str) {
-    // 破壊 (percpu-fake-nonzero-cpu-id): この tripwire が見る値だけを偽る（S3-a）。
+    // 破壊テスト (percpu-fake-nonzero-cpu-id): この tripwire が見る値だけを偽る（S3-a）。
     //
     // `cpu_id()` そのものを偽る形は S3-b-2a で使えなくなった。`cpu_id()` が GDTR 由来に
     // なったので、「`cpu_id()` は 1 と言うが GDTR はスロット 0 を指している」は本物の
-    // 不整合であり、`gdt::init` の読み戻しがこの tripwire より前に捕まえて停止する。
+    // 不整合であり、`gdt::init` の読み戻しがこの tripwire より前に検出して停止する。
     // より基本的な検査が先に働く。
     //
-    // したがって破壊は tripwire が読む値に限定する。そうしないと、「tripwire の分岐が
+    // したがって破壊テストは tripwire が読む値に限定する。そうしないと、「tripwire の分岐が
     // 働くこと」ではなく「GDT の読み戻しが働くこと」を確かめてしまう。何を確かめたいかで
-    // 破壊の位置が決まる。
+    // 破壊テストの位置が決まる。
     #[cfg(feature = "percpu-fake-nonzero-cpu-id")]
     let cpu = 1usize;
     #[cfg(not(feature = "percpu-fake-nonzero-cpu-id"))]
     let cpu = common::percpu::cpu_id();
-    // 破壊 (sched-ignore-bootstrap-tripwire): この見張りを外す（S4-c-4-2）。
+    // 破壊テスト (sched-ignore-bootstrap-tripwire): この見張りを外す（S4-c-4-2）。
     //
     // 単独では意味を持たない。`smp-ap-runs-preemptive-demo` と組んで初めて「AP がデモを
-    // 実際に走らせる」形になり、そこで二重選択の窓が生まれる。S4-c-4-1 は逆にこの見張りが
+    // 実際に走らせる」形になり、そこで二重選択のウィンドウが生まれる。S4-c-4-1 は逆にこの見張りが
     // 在ることを要求するので、同じ起動では両立しない。
     #[cfg(feature = "sched-ignore-bootstrap-tripwire")]
     let _ = cpu;
@@ -1925,7 +1925,7 @@ fn require_bootstrap_processor(what: &str) {
 ///
 /// **本体は [`crate::stack::install_guard_page`] にある**（S12 前の手当ての C で寄せた）。
 /// **カーネルスタック側と同じ 1 本を通る**——**分けていたときに、分割の対処が
-/// あちらにしか入らず、像が育ったときにこちらが止めた。**
+/// あちらにしか入らず、イメージが育ったときにこちらが止めた。**
 ///
 /// # Safety
 ///
@@ -1993,7 +1993,7 @@ unsafe fn build_initial_context(top: VirtAddr, entry: u64) -> u64 {
 
 /// 協調的マルチタスクのデモと検証を実行する（M5-c）。
 ///
-/// メイン（タスク 0）が 2 本のワーカーを起こし、初回スイッチで往復を始める。
+/// メイン（タスク 0）が 2 本のワーカーを起動し、初回スイッチで往復を始める。
 /// 両ワーカーが終了するとメインへ戻り、会計を閉じて戻る。呼び出し後、起動
 /// シーケンスは続行する（タイマループへ進む）。
 // yield-in-critical のビルドでは fail-fast で halt するため、その先の会計が
@@ -2011,7 +2011,7 @@ pub fn run_cooperative_demo(allocator: &mut crate::frame_allocator::FrameAllocat
          {ROUNDS_PER_WORKER} rounds each"
     ));
 
-    // yield-in-critical の破壊確認: InterruptGuard を保持したまま yield を
+    // yield-in-critical の破壊テストでの確認: InterruptGuard を保持したまま yield を
     // 呼び、on_yield のガードが fail-fast することを確かめる。戻らない。
     #[cfg(feature = "task-switch-yield-in-critical")]
     {
@@ -2032,7 +2032,7 @@ pub fn run_cooperative_demo(allocator: &mut crate::frame_allocator::FrameAllocat
     yield_now();
 
     // --- 会計を閉じる ---
-    // ワーカーは終了済みで、走行中はメインだけ。フィールド単位で読む
+    // ワーカーは終了済みで、実行中はメインだけ。フィールド単位で読む
     // （配列全体への参照を作らない。S0-b）。
     let switches = scheduler::switches();
     let resume_sum: u64 = (0..TASK_COUNT).map(scheduler::resumes).sum();
@@ -2068,7 +2068,7 @@ pub fn run_cooperative_demo(allocator: &mut crate::frame_allocator::FrameAllocat
     serial_line(format_args!("task: cooperative switch verified"));
 }
 
-/// タスク表を初期化し、2 本のワーカーを起こす。
+/// タスク表を初期化し、2 本のワーカーを起動する。
 ///
 /// # Safety
 ///
@@ -2077,7 +2077,7 @@ pub fn run_cooperative_demo(allocator: &mut crate::frame_allocator::FrameAllocat
 unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
     let entry = addr_of!(zaytos_worker_body) as u64;
 
-    // タスク 0 = メイン。走行中なので saved_rsp は初回 yield で埋まる。
+    // タスク 0 = メイン。実行中なので saved_rsp は初回 yield で埋まる。
     // メインのスタック頂点は通常のカーネルスタック（RSP0 用）。
     let main_top = crate::stack::kernel_stack_range().top.as_u64();
 
@@ -2091,7 +2091,7 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
             // **遠征に入っていないタスクの RSP0 はカーネルスタック頂点である**
             // （W1-b）。**`EMPTY_TASK` の 0 のままにすると、メインへ戻る切り替えが
             // TSS へ 0 を書く**——**実測で踏んだ**（`TSS.RSP0 ... now 0x0 ...
-            // match=false`。起動ログの突き合わせが捕まえた）。
+            // match=false`。起動ログの突き合わせが検出した）。
             rsp0: main_top,
             // メインはワーカーが尽きたときだけ戻る。終了済みではない。
             state: TaskState::Blocked,
@@ -2106,7 +2106,7 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
         unsafe {
             install_worker_guard_page(guard, allocator);
         }
-        // SAFETY: top は今ガードページを張ったワーカースタックの頂点で、
+        // SAFETY: top は今ガードページを設けたワーカースタックの頂点で、
         // まだ誰も使っていない。16 バイト境界（4KiB 境界）に載っている。
         let saved_rsp = unsafe { build_initial_context(top, entry) };
         // タスク固有の base。A=0xA1A1_0000、B=0xB2B2_0000 のように区別する。
@@ -2136,9 +2136,9 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
         );
     }
 
-    // **足した 1 本のカーネルスタックにもガードページを張る（W1-c-4）。** **張るにはアロケータが要り、
-    // 預ける前に張れるのはここである**（ワーカーと同じ）。
-    // **既定の起動でも張る（`ADR-0063` の (a)）**——**起動ログに 2 行増える。**
+    // **足した 1 本のカーネルスタックにもガードページを設ける（W1-c-4）。** **設けるにはアロケータが要り、
+    // 預ける前に設けられるのはここである**（ワーカーと同じ）。
+    // **既定の起動でも設ける（`ADR-0063` の (a)）**——**起動ログに 2 行増える。**
     {
         let (guard, _) = ring3_task_stack_bounds();
         // SAFETY: 起動時、自前のページテーブル上。足した 1 本のスタックの直下 1 ページで、以後ここへ
@@ -2173,7 +2173,7 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
             );
         }
         let entry = addr_of!(zaytos_bsp_idle_body) as u64;
-        // SAFETY: top は今ガードページを張った静的スタックの頂点で、まだ誰も使っていない。
+        // SAFETY: top は今ガードページを設けた静的スタックの頂点で、まだ誰も使っていない。
         // 4KiB 境界（`align(4096)` の構造体の末尾）に載っている。
         let saved_rsp = unsafe { build_initial_context(top, entry) };
         scheduler::init_task(
@@ -2262,16 +2262,16 @@ pub fn on_timer_tick(current_rsp: u64) -> u64 {
     if critical_nesting_depth() != 0 {
         return current_rsp;
     }
-    // preempt-in-critical の破壊確認では、サボタージュが arm されている間だけこの
+    // preempt-in-critical の破壊テストでの確認では、サボタージュが arm されている間だけこの
     // 防御を bypass して、cli 落とし（IF=1 のまま）と併せてプリエンプトをクリティカル
-    // 区間へ食い込ませる。arm 窓の外（デモ開始など）は通常どおり守るので startup
+    // 区間へ食い込ませる。arm ウィンドウの外（デモ開始など）は通常どおり守るので startup
     // レースが起きない（かつては大域的に外していた。verification-coverage 参照）。
     #[cfg(feature = "task-preempt-in-critical")]
     if critical_nesting_depth() != 0 && !common::critical::sabotage_armed() {
         return current_rsp;
     }
 
-    // set と store の窓（ワーカーが 15 GPR を保持している区間）でプリエンプト
+    // set と store のウィンドウ（ワーカーが 15 GPR を保持している区間）でプリエンプト
     // したかを数える（条件1）。この回数が 0 なら統計的レジスタ検証は何も
     // 検証していない。
     // SAFETY: 読み取りのみ。ワーカー本体が rip 相対で書くフラグ。
@@ -2296,12 +2296,12 @@ pub fn on_timer_tick(current_rsp: u64) -> u64 {
 fn schedule_switch(current_rsp: u64) -> u64 {
     // このコアがスケジューラを通った回数（S4-c-3-2a）。`current_index()` より前で
     // 数える。あちらは sentinel を読むと停止するので、後ろに置くと「入ったが数えられて
-    // いない」が生じる（`smp-ap-no-sentinel-clear` の破壊はまさにその形で止まる）。
+    // いない」が生じる（`smp-ap-no-sentinel-clear` の破壊テストはまさにその形で止まる）。
     SCHEDULE_PASSES.this_cpu().fetch_add(1, Ordering::Relaxed);
     let current = current_index();
     scheduler::set_saved_rsp(current, current_rsp);
 
-    // 破壊確認 (ii): RSP の差し替えを省く。現タスクの RSP を返すのでスイッチが
+    // 破壊テストでの確認 (ii): RSP の差し替えを省く。現タスクの RSP を返すのでスイッチが
     // 起きず、同じタスクが回り続ける。デモの会計・進捗で検出する。
     #[cfg(feature = "task-switch-no-swap")]
     {
@@ -2339,7 +2339,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         // BKL の内側である。`irq_entry` が入口で取っており、ここはその中である。
         //
         // **「BKL の外の行は判定に使えない」（S4-b-4）は、この位置を選んだ理由の
-        // 1 つだった。** **`ADR-0059` で錠を入れたので、その理由は失効した。**
+        // 1 つだった。** **`ADR-0059` でロックを入れたので、その理由は失効した。**
         // **位置は変えない**——**ここに在るべき理由は「フィルタより後」であって、
         // 混線ではない**（下の段落）。
         //
@@ -2352,15 +2352,15 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         if next == current {
             return current_rsp;
         }
-        // 破壊 (W1-c-4, task-switch-holds-back-ring3-task): 出る側が遠征の最中なら、足した 1 本へ
+        // 破壊テスト (W1-c-4, task-switch-holds-back-ring3-task): 出る側が遠征の最中なら、足した 1 本へ
         // 切り替えない。**2 本は交互には走るが、2 本とも Ring 3 に居る間は進まない**——**判定 1
         // （遠征の最中の切り替えが両方 1 以上）だけを落とす形である。** **他の判定は通るはずである**
-        // （先に起こした 1 本はメインが待っている間に進み、もう 1 本の間は止まっているので後に終わる）。
+        // （先に起動した 1 本はメインが待っている間に進み、もう 1 本の間は止まっているので後に終わる）。
         #[cfg(feature = "task-switch-holds-back-ring3-task")]
         if next == RING3_TASK && scheduler::excursion_depth(current) != 0 {
             return current_rsp;
         }
-        // **アイドルを選んだ回数を数える（W2-c-1 の計器）。** **早い戻りより後に置く**
+        // **アイドルを選んだ回数を数える（W2-c-1 の計測）。** **早い戻りより後に置く**
         // ——**`next == current` で戻る形を数えると、「選び直した」ではなく
         // 「既に乗っている」を数えてしまう。**
         //
@@ -2369,7 +2369,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         if next == BSP_IDLE_TASK {
             IDLE_SELECTIONS.fetch_add(1, Ordering::Relaxed);
         }
-        // **遠征の最中に出たかを数える（W1-c-4 の計器）。**
+        // **遠征の最中に出たかを数える（W1-c-4 の計測）。**
         count_switch_out_of_excursion(current);
 
         // スタックが混ざっていないこと。次タスクの保存 RSP がそのタスクの
@@ -2386,7 +2386,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         //
         // **主張は鋭くなっている。** **広げる前が「自分のカーネルスタックに
         // 在る」だったのに対し、いまは「自分の、いまの深さのスタックに在る」を
-        // 見る**——**深さとスタックが食い違っている形も捕まえる。**
+        // 見る**——**深さとスタックが食い違っている形も検出する。**
         // **失ったのは「遠征中のタスクは中断されない」だけで、それは W1 が
         // 合法にするものである。**
         //
@@ -2413,7 +2413,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
             // 落とした**（実測。2026-09-14）——**検出は効いていたのに、
             // マーカーだけが外れた。** **`docs/coding-standards.md` の
             // 「期待マーカーを合わせるのを忘れると……その破壊の項目だけが落ちる」
-            // の族である。** **両方を残したまま深さを足すこと。**
+            // の種類である。** **両方を残したまま深さを足すこと。**
             serial_line(format_args!(
                 "[ERROR] task: task {next} saved_rsp {next_rsp:#x} is outside its stack for \
                  excursion depth {next_depth} [{:#x}, {:#x}); stacks are mixed; halting",
@@ -2430,14 +2430,14 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         // **回復点を入れ替える（W1-b。`ADR-0060`）。**
         //
         // **`CURRENT_RECOVERY` はアセンブラが `[rip + sym]` で読むので、
-        // 単一の番地でなければならない。** **スロットで引けない。**
+        // 単一のアドレスでなければならない。** **スロットで引けない。**
         // **したがって、出る側の値を控え、入る側の値を載せる。**
         //
         // **既定の起動では同じ値を書き戻す**——**遠征中に切り替えが起きないので、
         // 両方とも 0 である。** **違う値になるのは W1-c-4 の `concurrent-test` である。**
         //
-        // 破壊 (W1-c-4, task-switch-keep-recovery): 入れ替えない。**後から遠征へ入った側の回復点が
-        // 載ったまま残り、先に入った側が畳まれると、他方の回復点へ跳ぶ。**
+        // 破壊テスト (W1-c-4, task-switch-keep-recovery): 入れ替えない。**後から遠征へ入った側の回復点が
+        // 載ったまま残り、先に入った側が終了させられると、他方の回復点へ跳ぶ。**
         #[cfg(not(feature = "task-switch-keep-recovery"))]
         {
             scheduler::set_current_recovery(current, crate::ring3::current_recovery());
@@ -2446,8 +2446,8 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         // **載った回復点が、入るタスクのスロットの行の中に在ること（W1-c-4）。**
         //
         // **`stacks are mixed` と同じ形の検算である**（`ring3::recovery_belongs_to_slot` の doc）。
-        // **入れ替えを省く破壊を落とすのはここである**——**畳みの側では落ちなかった。**
-        // **2 本が同時に走っても、畳みが起きるのは相手が Ring 3 を出た後だったので、
+        // **入れ替えを省く破壊テストを落とすのはここである**——**例外による終了処理の側では落ちなかった。**
+        // **2 本が同時に走っても、例外による終了処理が起きるのは相手が Ring 3 を出た後だったので、
         // `enter` 自身の控えと戻しが辻褄を合わせてしまった**（`ADR-0060` の W1-c-4 の Addendum）。
         let recovery = crate::ring3::current_recovery();
         if !crate::ring3::recovery_belongs_to_slot(recovery, ring3_slot_of(next)) {
@@ -2469,7 +2469,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         unsafe {
             let areas = &mut *core::ptr::addr_of_mut!(FP_AREAS);
             crate::fp::save(&mut areas[current]);
-            // 破壊 (W1-c-4, fp-switch-no-restore): 載せない（保存は残す）。**入ったタスクが出た側の
+            // 破壊テスト (W1-c-4, fp-switch-no-restore): 載せない（保存は残す）。**入ったタスクが出た側の
             // XMM の値のまま走る。**
             #[cfg(not(feature = "fp-switch-no-restore"))]
             crate::fp::restore(&areas[next]);
@@ -2480,7 +2480,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         scheduler::add_resume(next);
 
         // RSP0 を次タスクのスタック頂点へ更新する（§2.2、効くのは M5-e）。
-        // 破壊確認: drop-rsp0 では更新を落とす。読み戻し検査で捕まる。
+        // 破壊テストでの確認: drop-rsp0 では更新を落とす。読み戻し検査で検出される。
         //
         // **W1-b で、次のタスクの欄から取る形にした。** **かつては
         // `stack_top(next)` を書いていた**——**そのタスクが Ring 3 の遠征に
@@ -2496,7 +2496,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         let expected_rsp0 = scheduler::rsp0(next);
         // **0 なら止める（W1-c-3c）。** **下の読み戻しは「書いた値が載ったか」を見るので、
         // 欄が 0 なら 0 と 0 を比べて通る**——**W1-b でメインのタスクの `rsp0` を 0 のまま
-        // 残した形を、起動ログの突き合わせだけが捕まえた**（`docs/verification-coverage.md`）。
+        // 残した形を、起動ログの突き合わせだけが検出した**（`docs/verification-coverage.md`）。
         // **同じ形が、W1-c-1 で足した 1 本（`RING3_TASK`）で繰り返しうる**
         // （`docs/wayland-inventory.md` の「W1-c-4 で一斉に発火するもの」の #2）。
         if expected_rsp0 == 0 {
@@ -2521,7 +2521,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
             common::cpu::halt_forever();
         }
 
-        // 破壊確認 (i): 次タスクの保存コンテキストの rbx スロットを壊す。
+        // 破壊テストでの確認 (i): 次タスクの保存コンテキストの rbx スロットを壊す。
         // 復帰した次タスクは rbx が base+1 と食い違うのを GPR 照合で検出する。
         #[cfg(feature = "task-switch-drop-reg")]
         // SAFETY: next_rsp は次タスクの IrqContext 先頭。+8 は rbx のスロット。
@@ -2539,7 +2539,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
 ///
 /// # この述語自体には `cfg` を付けない
 ///
-/// 破壊 `sched-ignore-current` が無効にするのはフィルタでの参照だけで、検出器の参照は
+/// 破壊テスト `sched-ignore-current` が無効にするのはフィルタでの参照だけで、検出器の参照は
 /// 生かす。述語ごと `cfg` で消すと検出器も一緒に死に、2 層とも壊した構成で主マーカーが
 /// 出なくなる。壊したい対象は「フィルタが見ること」であって「見る手段が在ること」では
 /// ない。
@@ -2644,7 +2644,7 @@ static DOUBLE_SELECTION_REPORTED: AtomicBool = AtomicBool::new(false);
 /// 「コードが無い」を区別できるように、`cargo xtask check` が既定ビルドのバイナリに
 /// このシンボルが在ることを見る（`detector-symbol-present`）。
 ///
-/// 主たる論拠は構造の側にある。破壊 `sched-ignore-current` が触るのは [`pick_next`] の
+/// 主たる論拠は構造の側にある。破壊テスト `sched-ignore-current` が触るのは [`pick_next`] の
 /// フィルタでの参照だけで、ここの呼び出しに `cfg` は付かない。よって検出器は構成に
 /// よらず全ビルドに在る。シンボル検査はその裏取りである。
 ///
@@ -2668,7 +2668,7 @@ fn report_double_selection(next: usize, cpu: usize, currents: &[usize; MAX_CPUS]
 
 /// 次に走らせるタスクを選ぶ。ワーカーを巡回し、走行可能なものが無ければ
 /// メイン（0）へ戻る。
-// no-swap の破壊ビルドではスイッチしないので、次タスクを選ばず未使用になる。
+// no-swap の破壊テストのビルドではスイッチしないので、次タスクを選ばず未使用になる。
 #[cfg_attr(feature = "task-switch-no-swap", allow(dead_code))]
 fn pick_next(
     states: [TaskState; TASK_COUNT],
@@ -2685,8 +2685,8 @@ fn pick_next(
         };
         // 第 1 層: 自コアが担当のタスクだけを候補にする（S4-c-1）。
         //
-        // 破壊 (sched-ignore-owner): この層だけを外す。それだけでは二重選択は起きない。
-        // 第 2 層が防ぐ。第 2 層が働いていることの実証がこの破壊の役目である。
+        // 破壊テスト (sched-ignore-owner): この層だけを外す。それだけでは二重選択は起きない。
+        // 第 2 層が防ぐ。第 2 層が働いていることの実証がこの破壊テストの役目である。
         #[cfg(not(feature = "sched-ignore-owner"))]
         if owners[cand] != cpu {
             continue;
@@ -2697,14 +2697,14 @@ fn pick_next(
         // `CURRENT` に入ることがない。発火条件が無いことに意味があるので、本番ビルドにも
         // 置く。
         //
-        // 破壊 (sched-ignore-current): ここの参照だけを外す。述語も検出器もそのまま残る
+        // 破壊テスト (sched-ignore-current): ここの参照だけを外す。述語も検出器もそのまま残る
         // （[`is_running_on_another_cpu`] の doc）。
         #[cfg(not(feature = "sched-ignore-current"))]
         if is_running_on_another_cpu(cand, cpu, &currents) {
             // 第 2 層が実際に働いたことを記録する（S4-c-4-3）。
             //
             // ここでは行を出さない。`pick_next` は純粋関数でホストテストが直に呼ぶので、
-            // シリアルへ触ると host で動かなくなる。旗だけ立てて、行は
+            // シリアルへ触ると host で動かなくなる。フラグだけ立てて、行は
             // `schedule_switch` から出す。
             //
             // 「鳴らないこと」ではなく「働いたこと」を観測するために要る。競合中に別の
@@ -2718,7 +2718,7 @@ fn pick_next(
         }
     }
     // **足した 1 本（W1-c-4）。** **ワーカーの巡回より後に見る**——**デモの間は選ばれない**
-    // （デモは `init` より前に終わり、足した 1 本はその後に起こす）。
+    // （デモは `init` より前に終わり、足した 1 本はその後に起動する）。
     //
     // **今のタスクがそれでなければ選び、それなら落ち先へ戻す**——**メインと交互に走る。**
     // **2 層は同じ形で掛ける。** **担当は BSP なので、AP からは選ばれない。**
@@ -2880,7 +2880,7 @@ core::arch::global_asm!(
 // M5-d: プリエンプティブ化（タイマからのスケジューリング）
 // ============================================================================
 
-/// プリエンプティブデモを回すティック数（100Hz なので 200 ≒ 2 秒）。
+/// プリエンプティブデモを実行するティック数（100Hz なので 200 ≒ 2 秒）。
 const PREEMPTIVE_DEMO_TICKS: u64 = 200;
 
 extern "C" {
@@ -2892,9 +2892,9 @@ extern "C" {
 /// プリエンプティブデモを実行し、検証する（M5-d）。
 ///
 /// timer が動いている状態（sti 済み）で呼ぶこと。2 本のビジーループワーカーを
-/// 起こし、初回スイッチ（yield）でワーカーへ入る。以後 timer がワーカー間を
+/// 起動し、初回スイッチ（yield）でワーカーへ入る。以後 timer がワーカー間を
 /// プリエンプトで回す。締切に達すると [`on_timer_tick`] がワーカーを走行不可に
-/// してメインへ戻し、この関数が会計・進捗・レジスタ照合・窓カウントを検査して
+/// してメインへ戻し、この関数が会計・進捗・レジスタ照合・ウィンドウカウントを検査して
 /// 戻る。
 pub fn run_preemptive_demo() {
     require_bootstrap_processor("the preemptive demo");
@@ -2913,7 +2913,7 @@ pub fn run_preemptive_demo() {
     // 締切で on_timer_tick がここへ戻す。
     yield_now();
 
-    // --- 会計・進捗・窓カウントを閉じる ---
+    // --- 会計・進捗・ウィンドウカウントを閉じる ---
     // ワーカーは走行不可だがタイマは動き続けているので、`switches` と
     // `resumes` は IF=0 の経路が加算しうる。フィールド単位の volatile な
     // 読みで取る（S0-b。`scheduler` の表を参照）。
@@ -2933,7 +2933,7 @@ pub fn run_preemptive_demo() {
     let progress = a_iters > 0 && b_iters > 0;
     // 会計: 各スイッチが 1 タスクを再開したので合計が一致する（非決定的順序でも）。
     let accounting = switches == resume_sum;
-    // 統計的レジスタ検証が実際に窓を捉えたこと（条件1）。捉えていなければ、
+    // 統計的レジスタ検証が実際にウィンドウを捉えたこと（条件1）。捉えていなければ、
     // レジスタ照合は何も検証していない。
     let window_meaningful = window_preempts > 0;
 
@@ -2965,7 +2965,7 @@ pub fn run_preemptive_demo() {
 }
 
 /// プリエンプティブデモ用にスケジューラを組み直し、2 本のビジーループワーカーを
-/// 起こす。
+/// 起動する。
 ///
 /// # Safety
 ///
@@ -2993,7 +2993,7 @@ unsafe fn setup_preemptive_tasks() {
             // 0 のままで、デモの締切でメインへ戻る切り替えが TSS.RSP0 へ 0 を書いていた。**
             // **`setup_tasks` は W1-b で同じ欄を埋めた**（あちらの注記）**が、この再初期化で
             // 0 に戻っていた。** **読み戻しは 0 と 0 を比べて通り、`init` が最初の遠征の戻り先
-            // として TSS から 0 を読んでいた。** **W1-c-3c の「0 なら止める」が起動の中で捕まえた。**
+            // として TSS から 0 を読んでいた。** **W1-c-3c の「0 なら止める」が起動の中で検出した。**
             rsp0: main_top,
             state: TaskState::Blocked,
             ..EMPTY_TASK
@@ -3059,15 +3059,15 @@ extern "sysv64" fn verify_preemptive_gprs() {
 /// プリエンプティブなワーカー本体のループ先頭から呼ばれる。現タスクの base を
 /// 返す。IF=1 の地点である。
 ///
-/// preempt-in-critical の破壊確認では、ここで共有ロックを保持したまま少し
-/// スピンする。破壊ビルドでは InterruptGuard が cli を落とすので、保持中も IF=1 の
+/// preempt-in-critical の破壊テストでの確認では、ここで共有ロックを保持したまま少し
+/// スピンする。破壊テストのビルドでは InterruptGuard が cli を落とすので、保持中も IF=1 の
 /// ままになり、timer がプリエンプトして別ワーカーが同じロックを取ろうとし、
 /// 二重取得検出が発火する。正常ビルドではこの経路は cfg で消える。
 extern "sysv64" fn preemptive_loop_top() -> u64 {
     #[cfg(feature = "task-preempt-in-critical")]
     {
-        // サボタージュをこの保持窓の間だけ arm する（Drop で disarm）。arm 中だけ
-        // Locked の cli が省かれ、on_timer_tick の防御スキップが bypass される。arm 窓の
+        // サボタージュをこの保持ウィンドウの間だけ arm する（Drop で disarm）。arm 中だけ
+        // Locked の cli が省かれ、on_timer_tick の防御スキップが bypass される。arm ウィンドウの
         // 外＝デモ開始は正常な cli の下で走るので startup レースが起きない（かつては
         // 大域的に壊していた。verification-coverage 参照）。
         let _armed = common::critical::arm_sabotage();
@@ -3075,7 +3075,7 @@ extern "sysv64" fn preemptive_loop_top() -> u64 {
         let current = current_index();
         *held = current as u64;
         // timer ティックが 1 つ跨ぐ程度スピンして、保持中のプリエンプトを誘う。arm 中
-        // なので IF=1 のままで、この窓で timer が食い込み、別ワーカーが同じ DEMO_LOCK を
+        // なので IF=1 のままで、このウィンドウで timer が食い込み、別ワーカーが同じ DEMO_LOCK を
         // 取って二重取得検出が発火する。
         for _ in 0..2_000_000u64 {
             core::hint::spin_loop();
@@ -3093,7 +3093,7 @@ extern "sysv64" fn preemptive_loop_top() -> u64 {
 //   1. current_task_base() で自分の base を得る（rax）
 //   2. 15 本の GPR へ base + tag を入れる
 //   3. IN_GPR_WINDOW を 1 にする（rip 相対、レジスタを使わない）
-//   4. NOP そりを挟んで窓を広げる（条件1: プリエンプトが窓に落ちる確率を上げ、
+//   4. NOP そりを挟んでウィンドウを広げる（条件1: プリエンプトがウィンドウに落ちる確率を上げ、
 //      N > 0 を保証する。widen feature でそりを長くして N が増えることを確かめる）
 //   5. 15 本を GPR_BUF へ書き出す
 //   6. IN_GPR_WINDOW を 0 にする
@@ -3110,7 +3110,7 @@ core::arch::global_asm!(
     "zaytos_preemptive_body:",
     "2:",
     // ループ先頭（IF=1、プリエンプト可）。base を得る。preempt-in-critical の
-    // 破壊確認では、ここで DEMO_LOCK を保持したままスピンする（IF=1 なので
+    // 破壊テストでの確認では、ここで DEMO_LOCK を保持したままスピンする（IF=1 なので
     // timer が食い込む。正常ビルドでは何もしない）。
     "  call {loop_top}",
     "  lea rbx, [rax + 1]",
@@ -3127,10 +3127,10 @@ core::arch::global_asm!(
     "  lea r13, [rax + 13]",
     "  lea r14, [rax + 14]",
     "  lea r15, [rax + 15]",
-    // 窓に入る。ここから cli までの間にプリエンプトすると、保存・復元の検査に
+    // ウィンドウに入る。ここから cli までの間にプリエンプトすると、保存・復元の検査に
     // なる（15 本を保持したまま切り替わる）。
     "  mov byte ptr [rip + {window}], 1",
-    // メモリカウンタの遅延ループで窓を広げる。dec/jnz はフラグしか使わず
+    // メモリカウンタの遅延ループでウィンドウを広げる。dec/jnz はフラグしか使わず
     // （フラグは IrqContext の rflags で保存・復元される）、pattern の 15 本は
     // 触らない。カウンタはメモリなのでレジスタも使わない。コードは数命令で、
     // そりの長さが .text を膨らませない。
@@ -3141,7 +3141,7 @@ core::arch::global_asm!(
     // cli で store と照合を保護する。GPR_BUF は A/B 共有なので、store の後
     // 照合の前にプリエンプトされると別ワーカーが上書きし、他タスクの値を読んで
     // しまう。cli してから store・照合すれば、その区間は別タスクが割り込めない。
-    // 検査対象の窓（set から cli まで）は cli の前なのでプリエンプト可のまま。
+    // 検査対象のウィンドウ（set から cli まで）は cli の前なのでプリエンプト可のまま。
     "  cli",
     "  mov byte ptr [rip + {window}], 0",
     "  mov qword ptr [rip + {buf} + 0],   rax",
@@ -3184,7 +3184,7 @@ mod tests {
     /// 本番では起こらない構成になったということである。
     ///
     /// それでも残す。下の [`pick_next`] を通る既存の表明は「担当が全部
-    /// 自コアなら、担当コアを入れる前と同じに振る舞う」ことを言っており、
+    /// 自コアなら、担当コアを入れる前と同じに振る舞う」ことを示しており、
     /// その主張自体は本番と一致するかどうかに依らない。ただし
     /// 一致していると読まれると困るので、一致が切れたことを書いておく。
     const ALL_BSP: [usize; TASK_COUNT] = [common::percpu::BOOTSTRAP_PROCESSOR_SLOT; TASK_COUNT];
@@ -3254,7 +3254,7 @@ mod tests {
     /// 担当コアを既定（全部 BSP）にして bootstrap processor から呼ぶ短縮。
     ///
     /// 既存の契約を書き換えないための薄い包みである。S4-c-1 は振る舞い
-    /// 不変の段なので、既存の表明はそのまま残し、担当コアつきの表明を足す。
+    /// 不変の段階なので、既存の表明はそのまま残し、担当コアつきの表明を足す。
     ///
     /// # この包みを通る表明が拘束する範囲は狭い
     ///
@@ -3268,7 +3268,7 @@ mod tests {
     /// 担当が混ざる場合や AP から呼ぶ場合は覆っていない。そちらは
     /// `super::pick_next` を直に呼ぶ表明（`a_task_owned_by_another_cpu_is_not_a_candidate`
     /// と `only_the_tasks_owned_by_this_cpu_are_rotated`）が別に持つ。
-    /// 包みを通る表明が全部緑でも、担当コアの振る舞いは何も言えない。
+    /// 包みを通る表明がすべて通っても、担当コアの振る舞いは何も言えない。
     fn pick_next(states: [TaskState; TASK_COUNT], current: usize) -> usize {
         super::pick_next(
             states,
@@ -3304,7 +3304,7 @@ mod tests {
     /// 落ちるのは退行ではなく、この表明が仕事をしたということである。
     /// 通すために表明のほうを弱めないこと——`0..MAX_CPUS` を
     /// `0..2` に狭めたり、AP 側を除外したりすると、危険がそのまま残って
-    /// 検査だけが緑になる。正しい直し方は
+    /// 検査だけがすべて通る。正しい直し方は
     /// コアごとにアイドルタスクを持たせることで、それは `MAX_CPUS` を
     /// 上げる作業に含まれる（`docs/deferred-decisions.md` の当該項目）。
     #[test]
@@ -3489,7 +3489,7 @@ mod tests {
         );
     }
 
-    /// タスク 0（メイン）は候補として巡回されない。走行可能と印を付けても
+    /// タスク 0（メイン）は候補として巡回されない。走行可能と目印を付けても
     /// 選ばれるのは「他に誰もいないとき」の帰り先としてだけである。
     #[test]
     fn main_is_never_picked_as_a_rotation_candidate() {
@@ -3717,9 +3717,9 @@ mod tests {
         assert_eq!(set.len(), super::MAX_WAIT_REASONS);
     }
 
-    /// 余った枠に残る前の値を、比較と締切の引き方が見ない。
+    /// 余ったスロットに残る前の値を、比較と締切の引き方が見ない。
     ///
-    /// **固定長なので、`push` していない枠には前の値が残る**（[`super::WaitSet`] の doc）。
+    /// **固定長なので、`push` していないスロットには前の値が残る**（[`super::WaitSet`] の doc）。
     /// **全部を比べると「1 本の集合」と「2 本の集合」が等しくなりうる。**
     #[test]
     fn a_wait_set_only_looks_at_the_reasons_it_holds() {
@@ -3734,10 +3734,10 @@ mod tests {
         assert_eq!(one, super::WaitSet::single(super::Wait::Keyboard));
     }
 
-    /// 状態の欄が `schedule_switch` の枠で運べる大きさに収まっている。
+    /// 状態の欄が `schedule_switch` のフレームで運べる大きさに収まっている。
     ///
     /// **[`super::MAX_WAIT_REASONS`] の 2 つ目の根拠を機械で留める**——**`scheduler::states()`
-    /// は `[TaskState; TASK_COUNT]` を値で返すので、この大きさがそのまま枠に乗る。**
+    /// は `[TaskState; TASK_COUNT]` を値で返すので、この大きさがそのままフレームに乗る。**
     /// **遠征スタックの残りは 904 バイトである**（`ADR-0066` の Q4）。**理由を 8 本に増やすと
     /// 816 バイトになり、ここが落ちる。**
     #[test]
@@ -3761,7 +3761,7 @@ mod tests {
     }
 
     /// `Blocked` と `Finished` は選択可否では区別されない。区別が要るのは
-    /// 会計と記録であって、選択ではない（畳んでいた `false` を分けた目的）。
+    /// 会計と記録であって、選択ではない（まとめていた `false` を分けた目的）。
     #[test]
     fn blocked_and_finished_are_both_unselectable_but_distinct() {
         let mut with_blocked = [TaskState::Blocked; TASK_COUNT];

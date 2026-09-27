@@ -172,7 +172,7 @@ impl EntryWidth {
 /// ヘッダが 36 バイトなので、**XSDT の 64 ビットエントリの配列は 8 バイト境界に
 /// 載らない**（36 は 8 の倍数ではない）。ここはバイトスライスから
 /// `from_le_bytes` で読むので、そもそも整列の要件が無い。物理メモリ側でも
-/// [`super::PhysReader`] がバッファへ写してから解釈するので、未整列の生ポインタは
+/// [`super::PhysReader`] がバッファへコピーしてから解釈するので、未整列の生ポインタは
 /// 経路のどこにも現れない。
 #[derive(Debug, Clone, Copy)]
 pub struct RootEntries<'a> {

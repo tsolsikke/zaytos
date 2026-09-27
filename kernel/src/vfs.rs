@@ -36,18 +36,18 @@ use common::ext2;
 ///
 /// # 毎回組み立て直す
 ///
-/// **`Ext2` は状態を持たない**——像を借り、superblock から読んだ値を写しているだけ
+/// **`Ext2` は状態を持たない**——イメージを借り、superblock から読んだ値をコピーしているだけ
 /// である。**組み立ては superblock を 1 回読むだけなので、静的に持ち回るより安い。**
 /// **借用を `static` へ置かずに済む**ぶん、形も単純になる。
 pub fn root_filesystem() -> Result<ext2::Ext2<'static>, ext2::Ext2Error> {
     ext2::Ext2::parse(root_image())
 }
 
-/// 根の像の在り処（S12-b の 1 段目）。**0 なら、まだ複製へ向いていない。**
+/// 根のイメージの在り処（S12-b の 1 段目）。**0 なら、まだ複製へ向いていない。**
 ///
 /// # なぜ差し替えるのか
 ///
-/// **書く先と読む先を同じにするためである。** S12-a は像をフレームへ複製したが、
+/// **書く先と読む先を同じにするためである。** S12-a はイメージをフレームへ複製したが、
 /// **読む側は `.rodata` の埋め込みを見たままだった。**
 /// **そのまま書き始めると、書いた先と読む先が別物になる。**
 ///
@@ -59,7 +59,7 @@ static ROOT_IMAGE_PTR: core::sync::atomic::AtomicUsize = core::sync::atomic::Ato
 /// [`ROOT_IMAGE_PTR`] が指す長さ。
 static ROOT_IMAGE_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// 根の像を複製へ向ける（S12-b の 1 段目）。**複製した側が 1 度だけ呼ぶ。**
+/// 根のイメージを複製へ向ける（S12-b の 1 段目）。**複製した側が 1 度だけ呼ぶ。**
 pub fn set_root_image(image: &'static [u8]) {
     ROOT_IMAGE_LEN.store(image.len(), core::sync::atomic::Ordering::SeqCst);
     ROOT_IMAGE_PTR.store(
@@ -68,17 +68,17 @@ pub fn set_root_image(image: &'static [u8]) {
     );
 }
 
-/// いま読んでいる像。
+/// いま読んでいるイメージ。
 ///
-/// # 埋め込み像は外した（P-e。`ADR-0034` の Addendum）
+/// # 埋め込みイメージは外した（P-e。`ADR-0034` の Addendum）
 ///
-/// **像の源は装置だけである。** **複製へ向く前は空を返す**——
+/// **イメージの出どころは装置だけである。** **複製へ向く前は空を返す**——
 /// **以前は埋め込みの側を返していたが、その埋め込みが無い。**
 /// **空なら [`root_filesystem`] が `TooShort` で返るので、黙って別のものを
 /// 読むことにはならない**（ホストのテストビルドと同じ形である）。
 ///
-/// **破壊 `fs-read-from-rodata-test` は消した。** **戻す先が無い**——
-/// **読む先が 1 つしかないので、あの破壊が守っていた性質は構造的に真である**
+/// **破壊テスト `fs-read-from-rodata-test` は消した。** **戻す先が無い**——
+/// **読む先が 1 つしかないので、あの破壊テストが守っていた性質は構造的に真である**
 /// （`ADR-0034` の Addendum の引き継ぎの表）。
 pub fn root_image() -> &'static [u8] {
     let ptr = ROOT_IMAGE_PTR.load(core::sync::atomic::Ordering::SeqCst);
@@ -93,24 +93,24 @@ pub fn root_image() -> &'static [u8] {
 
 /// RAM 複製を可変で貸す（zi-c。ADR-0037 の「書き手の口」）。
 ///
-/// **複製前（[`ROOT_IMAGE_PTR`] が 0）は `None` である。** **そのとき読める像は
+/// **複製前（[`ROOT_IMAGE_PTR`] が 0）は `None` である。** **そのとき読めるイメージは
 /// 無い**（P-e で埋め込みを外した。`ADR-0034` の Addendum）——
 /// **貸す対象そのものが存在しない。**
 ///
 /// # Safety（&mut と & の重なりが無いことの、参照生成箇所の全数列挙）
 ///
-/// この像への参照が生成される場所は、次で全部である（zi-c で数えた。
-/// **像への参照を作る経路を足すときは、この列挙へ足すこと**）。
+/// このイメージへの参照が生成される場所は、次で全部である（zi-c で数えた。
+/// **イメージへの参照を作る経路を足すときは、この列挙へ足すこと**）。
 ///
 /// 1. [`root_filesystem`]（唯一の共有借用の構成点。`Ext2::parse(root_image())`）。
 ///    呼び出し元は 5 つで、**いずれも自分の呼び出しの中で借りて落とす**——
 ///    `sys_open` / `sys_read` / `sys_getdents64` / `sys_stat`
 ///    （`kernel/src/syscall.rs`）、`load_user_program`
-///    （`kernel/src/userland.rs`。ELF を `SPAWN_IMAGES` へ写してから落とす——
+///    （`kernel/src/userland.rs`。ELF を `SPAWN_IMAGES` へコピーしてから落とす——
 ///    **借りたまま Ring 3 へ入らないことは、あちらの「像をブロックごとに写す。
 ///    借りたままにできない」の doc が根拠である**）
 /// 2. [`root_image`] の直接の呼び出し元は `kernel/src/main.rs` の判定行 1 箇所で、
-///    **番地の値だけを読む**（参照を保持しない）
+///    **アドレスの値だけを読む**（参照を保持しない）
 /// 3. 起動シーケンス（`copy_fs_image_to_frames` と exercise 群）。**スケジューラ
 ///    より前・Ring 3 より前の単一文脈**で、syscall はまだ来ない
 ///
@@ -189,7 +189,7 @@ pub fn with_current_files<R>(body: impl FnOnce(&mut FileTable) -> R) -> R {
 /// ——ヒープに載せると、開閉を繰り返す経路が新しい漂流の面になる。
 ///
 /// **`ADR-0012` にもヒープにも触れずに閉じている。** S10-a はヒープを 1 バイトも
-/// 使っておらず、この段でも使わない。
+/// 使っておらず、この段階でも使わない。
 ///
 /// # 足りなくなったら
 ///
@@ -209,7 +209,7 @@ pub const STDERR_FD: usize = 2;
 /// 開いている実体（ファイルまたはディレクトリ）。
 ///
 /// **中身は [`common::ext2::Inode`] を直に持つ。** Linux が `ext2_inode_info` で
-/// 繋いでいる場所を、**実装が 1 つしかない今は繋がずに畳んでいる。**
+/// 繋いでいる場所を、**実装が 1 つしかない今は繋がずにまとめている。**
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Inode {
     ext2: ext2::Inode,
@@ -307,7 +307,7 @@ pub enum File {
     /// # エラーの出口かどうかを持つ（ADR-0046）
     ///
     /// **`errors`が真なのは`STDERR_FD`だけである。**
-    /// **全画面のアプリが動く間、この口へ来たものはカーネルが溜める**
+    /// **全画面のアプリが動く間、この出口へ来たものはカーネルが溜める**
     /// （`crate::syscall`の`sys_write`）。
     ///
     /// **番号（2）で見ない。** **表の中身で分岐するのはS11-10からの形で、
@@ -325,21 +325,21 @@ pub enum File {
     /// `accept`、または `socket` → `connect` で、状態がその場で進む**（[`FileTable::replace`]）。
     Socket { state: SocketState },
     /// 共有メモリ（`ADR-0065`）。**`shm` は `crate::shm` の表の添字。** **`memfd_create` が作り、
-    /// `mmap` が自分の空間へ張り、`sendmsg` の `SCM_RIGHTS` で相手の表へ写る。**
+    /// `mmap` が自分の空間へマップし、`sendmsg` の `SCM_RIGHTS` で相手の表へコピーされる。**
     Shm { shm: u8 },
     /// 入力の生イベント（`ADR-0066` の Y-a）。**`read` が `struct input_event` を返す。**
     ///
     /// **前景の持ち主だけが `open_input` で開ける**（開く時点の1箇所で守る。`ADR-0066` の
     /// 「入力 fd の前景の関所」）。**キーボードは1つなので添字を持たない。** **`SCM_RIGHTS` は
-    /// shm の fd だけを運ぶので、この fd は相手の表へ写らない**（開いた持ち主に留まる）。
+    /// shm の fd だけを運ぶので、この fd は相手の表へコピーされない**（開いた持ち主に留まる）。
     Input,
     /// 画面（`ADR-0066` の Y-c）。**持っている間は図形モードである。**
     ///
     /// **前景の系統だけが `open_screen` で開ける**（`crate::input::caller_is_foreground`）。
     /// **開くと図形モードへ入り、解放（`close` かプロセスの終わり）で抜ける**
-    /// （[`File::release_end`]）。**`mmap` が裏バッファを張り、`ioctl` が形を答えて写す。**
+    /// （[`File::release_end`]）。**`mmap` が裏バッファをマップし、`ioctl` が形を答えてコピーする。**
     /// **画面は 1 つなので添字を持たない。** **`SCM_RIGHTS` は shm の fd だけを運ぶので、
-    /// この fd も相手の表へ写らない。**
+    /// この fd も相手の表へコピーされない。**
     Screen,
 }
 
@@ -414,7 +414,7 @@ impl File {
 
     /// 書き込みで開く（zi-c。`O_WRONLY|O_TRUNC` の形だけがここへ来る）。
     ///
-    /// **`inode` は open 時点の写しである。** 切った後の大きさ（0）とは
+    /// **`inode` は open 時点のコピーである。** 切った後の大きさ（0）とは
     /// 食い違うが、**書きで開いた fd は読まない**（read は `-EBADF`）ので、
     /// 位置の飽和（`advance` が `i_size` で切る形）に使われることは無い。
     pub fn writable(inode: Inode) -> Self {
@@ -484,7 +484,7 @@ impl File {
         }
     }
 
-    /// 位置を直に置く（`lseek` 相当。**この段では呼ばない**）。
+    /// 位置を直に置く（`lseek` 相当。**この段階では呼ばない**）。
     pub fn seek_to(&mut self, to: u64) {
         if let Self::Regular { inode, offset, .. } = self {
             *offset = to.min(inode.size());
@@ -569,7 +569,7 @@ impl FileTable {
     /// **0 / 1 / 2 は `Some` であり、開いている。**
     ///
     /// **`init` が開く形（Linux）は採らない。** **開く相手が無い**——
-    /// デバイスノードを置く仕組みが無く、`/dev/console` は像に存在しない。
+    /// デバイスノードを置く仕組みが無く、`/dev/console` はイメージに存在しない。
     /// **存在しないパスを特別扱いするほうが、番号を据えるより見えにくい。**
     ///
     /// **`docs/roadmap.md` が「予約するか、シェルが自分で開くか」と書いた判断は、
@@ -661,7 +661,7 @@ impl FileTable {
 mod tests {
     use super::*;
 
-    /// 試験用の inode。**ext2 の像を組み立てずに作る**（表の論理だけを見る）。
+    /// 試験用の inode。**ext2 のイメージを組み立てずに作る**（表の論理だけを見る）。
     fn inode(number: u32, size: u64, mode: u16) -> Inode {
         Inode::from_ext2(ext2::Inode {
             number,
@@ -682,7 +682,7 @@ mod tests {
     ///
     /// **判断の材料として測っておく**（`MAX_OPEN_FILES` の doc）。
     /// **ここが落ちたら、`File` の中身が増えたということである。**
-    /// **開いた向きの印（zi-c）。** 読みで開けば偽、書きで開けば真。
+    /// **開いた向きの目印（zi-c）。** 読みで開けば偽、書きで開けば真。
     /// 端末は偽である（あちらは常に書ける——向きの概念が無い）。
     #[test]
     fn the_writable_mark_follows_how_the_file_was_opened() {
@@ -701,10 +701,10 @@ mod tests {
         // 大きさを決めているのは `Regular` のほうである）。
         assert_eq!(core::mem::size_of::<File>(), 96);
         // **`Option` は増やさない。** 列挙になったことで**空き表現ができた**
-        // ——判別子の使っていない値を `None` に使える。**枠 1 つは 96 バイトのまま
+        // ——判別子の使っていない値を `None` に使える。**スロット 1 つは 96 バイトのまま
         // である**（S11-10 の前は 88 + 8 = 96 だった）。
         assert_eq!(core::mem::size_of::<Option<File>>(), 96);
-        // 表は枠 16 個 + 累計のカウンタ 8 バイトである。
+        // 表はスロット 16 個 + 累計のカウンタ 8 バイトである。
         assert_eq!(
             core::mem::size_of::<FileTable>(),
             96 * MAX_OPEN_FILES + core::mem::size_of::<usize>()

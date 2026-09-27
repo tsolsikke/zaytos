@@ -15,13 +15,13 @@
 //! |---|---|
 //! | プロセスを作って走らせる機構 | 何を走らせ、何を期待するかの記述 |
 //! | [`UserProcess`]・[`UserLoadError`] | `USER_PROGRAMS` の表 |
-//! | [`load_user_program`] と写像・遠征 | 終わり方の判定と会計の判定行 |
+//! | [`load_user_program`] とマッピング・遠征 | 終わり方の判定と会計の判定行 |
 //!
 //! **`common::ext2`（パーサ）と `crate::vfs`（使い方）を分けた線と同じ形である。**
 //!
 //! # `errno` は知らない
 //!
-//! [`UserLoadError`] は `errno` を持たない。**写すのは `syscall` の側である**
+//! [`UserLoadError`] は `errno` を持たない。**マップするのは `syscall` の側である**
 //! （`common::ext2::Ext2Error` と `vfs::FileTableError` に続く 3 つ目）。
 
 use common::critical::Locked;
@@ -42,9 +42,9 @@ use crate::syscall::{MAX_ARGV_BYTES, MAX_ENVP_BYTES, MAX_EXECUTABLE_SIZE, PATH_M
 /// 新しい空間の下位は空なので関係が無い。**
 pub const USER_PROGRAM_PML4_INDEX: usize = 0;
 
-/// ユーザープログラムのスタックの上端（S9-b-1）。1 ページだけ張る。
+/// ユーザープログラムのスタックの上端（S9-b-1）。1 ページだけマップする。
 ///
-/// `hello` の像は `0x400000` から 2 ページなので、十分離れた位置に置く。
+/// `hello` のイメージは `0x400000` から 2 ページなので、十分離れた位置に置く。
 const USER_PROGRAM_STACK_TOP: u64 = 0x0080_0000;
 
 /// 1 プロセスに渡せる `argv` の要素数の上限（S11-1）。
@@ -74,7 +74,7 @@ pub use common::env::{ENV_LINE_MAX, MAX_ENVP};
 ///
 /// **読む者が居ないものを積まない。** `PS1` も `KEYMAP` も入れない
 /// （`docs/verification-coverage.md` の「使う者がいない機構は検算が置けない」）。
-/// **どちらも読む側を同じ段で作った**——`zash` が `TERM` で色を決め、
+/// **どちらも読む側を同じ段階で作った**——`zash` が `TERM` で色を決め、
 /// `PATH` で語を探す。
 ///
 /// **`PATH` は DIR-1 で入った**（ADR-0043）。**`DEFAULT_DIR` の固定の既定を
@@ -92,7 +92,7 @@ pub use common::env::{ENV_LINE_MAX, MAX_ENVP};
 /// **`TERM` を先に置く。** **`syscall-test` が `envp[0]` を突き合わせている**
 /// ので、入れ替えるとあちらが落ちる（**落ちてよい。契約だからである**）。
 ///
-/// 破壊 (EV, env-drop-term-test): **`TERM` だけを落とす。** `zash` は `TERM` を見つけられず、
+/// 破壊テスト (EV, env-drop-term-test): **`TERM` だけを落とす。** `zash` は `TERM` を見つけられず、
 /// **プロンプトの色を既定へ落とす。**
 ///
 /// **落ちるのは 3 本である**（実測。**「1 本だけ」ではない**）——色の判定・
@@ -100,13 +100,13 @@ pub use common::env::{ENV_LINE_MAX, MAX_ENVP};
 /// 「プロンプトの色付きの連なり」を目印にしている**（`crate::console::probe` の
 /// `find_colored_run_in_row`）。
 ///
-/// **この破壊が固有に捕まえるものを書いておく。** **`TERM` を読まずに
+/// **この破壊テストが固有に検出するものを書いておく。** **`TERM` を読まずに
 /// 常に色を付ける形である**——**既定の構成ではどの判定も落ちないので、
-/// この破壊が無ければ「環境が色を決めている」ことを誰も主張していない。**
+/// この破壊テストが無ければ「環境が色を決めている」ことを誰も主張していない。**
 /// **`zash-prompt-drop-color` は送る側を壊す**ので、こちらとは別の形である。
 ///
-/// 破壊 (DIR-1, env-drop-path-test): **`PATH` だけを落とす。** **名前だけで
-/// 打った語が起こせなくなる**——**`--shell-test` の
+/// 破壊テスト (DIR-1, env-drop-path-test): **`PATH` だけを落とす。** **名前だけで
+/// 打った語が起動できなくなる**——**`--shell-test` の
 /// 「bare names resolved under /bin」がそのまま受け止める。**
 /// **`/bin/ls` のようにパスを直に打つ形は動く**ので、**落ちるのは
 /// 探索の判定だけである。**
@@ -125,7 +125,7 @@ const DEFAULT_ENVIRONMENT: &[&[u8]] = &[b"TERM=zaytos", b"HOME=/root"];
 #[cfg(all(feature = "env-drop-term-test", feature = "env-drop-path-test"))]
 const DEFAULT_ENVIRONMENT: &[&[u8]] = &[b"HOME=/root"];
 
-/// 環境の源のパス（f-1。`ADR-0052` の Decision 1）。
+/// 環境の出どころのパス（f-1。`ADR-0052` の Decision 1）。
 const ENV_SOURCE: &[u8] = b"/etc/environment";
 
 /// 積む環境の実体（f-1。`ADR-0052`）。
@@ -153,16 +153,16 @@ impl Environment {
 
 static ENVIRONMENT: Locked<Environment> = Locked::new(Environment::new());
 
-/// 環境の源を読む（f-1。`ADR-0052`）。
+/// 環境の出どころを読む（f-1。`ADR-0052`）。
 ///
 /// # 呼ぶ位置
 ///
-/// **像の複製の直後・最初の Ring 3 の前である**（`ADR-0052` の Decision 2）。
-/// **窓は実測で挟まっている**——`kernel/src/main.rs` で、像の複製が
+/// **イメージの複製の直後・最初の Ring 3 の前である**（`ADR-0052` の Decision 2）。
+/// **ウィンドウは実測で挟まっている**——`kernel/src/main.rs` で、イメージの複製が
 /// `copy_fs_image_to_frames`、最初の Ring 3 が `verify_bss_is_mapped` である。
 ///
-/// **置き場が主張を決める。** **P-e で像の検査を 1 つ後ろに置いていたために
-/// `exercise` が書き換えた後を見ていた、という族と同じである**
+/// **置き場が主張を決める。** **P-e でイメージの検査を 1 つ後ろに置いていたために
+/// `exercise` が書き換えた後を見ていた、という種類と同じである**
 /// （`docs/troubleshooting.md`）。**動かすときは何が変わるかを見ること。**
 ///
 /// # 落ちる道は 1 つに閉じる
@@ -175,11 +175,11 @@ pub fn load_environment(logger: &mut Logger<SerialPort>) {
     let mut dropped = 0usize;
     let mut from_file = false;
 
-    // 破壊 (f-1, env-ignore-file-test): 源を読まず、既定へ落ちる。
+    // 破壊テスト (f-1, env-ignore-file-test): 出どころを読まず、既定へ落ちる。
     // **`ADR-0052` の Decision 1 が主張しているのは「源はファイルである」で、
     // それを直接否定する形である。** **出る環境は種と同じなので、
     // 値を見る判定は 1 つも落ちない**——**`from_file` を見る判定と、
-    // 書き換えが 2 度目に効く判定でしか捕まらない。**
+    // 書き換えが 2 度目に効く判定でしか検出されない。**
     #[cfg(feature = "env-ignore-file-test")]
     let source: Option<&'static [u8]> = None;
     #[cfg(not(feature = "env-ignore-file-test"))]
@@ -193,15 +193,15 @@ pub fn load_environment(logger: &mut Logger<SerialPort>) {
             match classify_env_line(line) {
                 EnvLine::Ignore => {}
                 EnvLine::Take => {
-                    // 破壊 (EV, env-drop-term-test / env-drop-path-test):
+                    // 破壊テスト (EV, env-drop-term-test / env-drop-path-test):
                     // **その名前の行を落とす。**
                     //
                     // **f-1 で場所を移した。** **以前は既定の表の側だけを
-                    // 削っていたが、源がファイルになって効かなくなった**
+                    // 削っていたが、出どころがファイルになって効かなくなった**
                     // ——**ファイルが在れば既定は使われない**（実測。
-                    // 2026-08-31。**破壊を入れても `envc=3` のままだった**）。
-                    // **SE-d の族である**——**性質が構造的に真になった破壊は、
-                    // 残すと嘘の安心になる。** **ここは源を問わず必ず通る。**
+                    // 2026-08-31。**破壊テストを入れても `envc=3` のままだった**）。
+                    // **SE-d の種類である**——**性質が構造的に真になった破壊テストは、
+                    // 残すと嘘の安心になる。** **ここは出どころを問わず必ず通る。**
                     if drop_by_sabotage(line) {
                         dropped += 1;
                         continue;
@@ -224,7 +224,7 @@ pub fn load_environment(logger: &mut Logger<SerialPort>) {
     }
 
     // **1 行も採れなければ既定へ落ちる。** **「読めたが空だった」も同じ扱い
-    // である**——**環境が空のまま Ring 3 を起こすと、`PATH` が無くなって
+    // である**——**環境が空のまま Ring 3 を起動すると、`PATH` が無くなって
     // 名前でコマンドを引けなくなる。**
     if taken == 0 {
         let mut environment = ENVIRONMENT.lock();
@@ -267,11 +267,11 @@ pub fn load_environment(logger: &mut Logger<SerialPort>) {
 ///
 /// **環境を組んだ直後である。** **キー割り込みが来るのは `start_timer` より
 /// 後なので、それより前に決まっていれば足りる**（実測。
-/// `kernel/src/main.rs` で、環境を読むのが像の複製の直後、
+/// `kernel/src/main.rs` で、環境を読むのがイメージの複製の直後、
 /// `start_timer` はその下である）。
 fn apply_keymap(logger: &mut Logger<SerialPort>) {
     const KEYMAP: &[u8] = b"KEYMAP=";
-    // **錠の下では写しだけを取る。** **借りたまま `drop` できない。**
+    // **ロックの下ではコピーだけを取る。** **借りたまま `drop` できない。**
     let mut value = [0u8; ENV_LINE_MAX];
     let mut length = None;
     {
@@ -309,7 +309,7 @@ fn apply_keymap(logger: &mut Logger<SerialPort>) {
     ));
 }
 
-/// 破壊が落とす名前か（EV。f-1 で場所を移した）。
+/// 破壊テストが落とす名前か（EV。f-1 で場所を移した）。
 ///
 /// **既定の構成では常に偽である。**
 fn drop_by_sabotage(line: &[u8]) -> bool {
@@ -325,13 +325,13 @@ fn drop_by_sabotage(line: &[u8]) -> bool {
     false
 }
 
-/// 源を読む（f-1）。**開けなければ `None` で、そのことを出す。**
+/// 出どころを読む（f-1）。**開けなければ `None` で、そのことを出す。**
 ///
 /// # 器を作らない
 ///
-/// **像はカーネルが抱えている複製で、寿命は `'static` である**
+/// **イメージはカーネルが抱えている複製で、寿命は `'static` である**
 /// （`crate::vfs::root_image`）。**ブロックをそのまま借りればよい。**
-/// **カーネルにヒープが無いので、写す先を固定で取る形も考えたが、要らない。**
+/// **カーネルにヒープが無いので、コピー先を固定で取る形も考えたが、要らない。**
 ///
 /// # 先頭の 1 ブロックだけを読む
 ///
@@ -388,7 +388,7 @@ const HEAP_PAGE_SIZE: u64 = 4096;
 ///
 /// # 深さの配列にしない
 ///
-/// **最初は `MAX_EXCURSION_DEPTH` の配列にした。** **書く側（像を読む時点）と
+/// **最初は `MAX_EXCURSION_DEPTH` の配列にした。** **書く側（イメージを読む時点）と
 /// 読む側（システムコールの中）で深さが違い、索引がずれた**（実測。
 /// `brk(0)` が答えられなかった）。
 ///
@@ -405,7 +405,7 @@ static CURRENT_HEAP: [Locked<Heap>; crate::ring3::RING3_SLOTS] =
 
 /// 載せた後にアロケータから取った中間ページテーブルの数（スロットごと。`ADR-0065` の (a)）。
 ///
-/// **`mmap` が新しい領域へ張ると中間表を取るが、`AddressSpace::frames_taken` は載せた時点で
+/// **`mmap` が新しい領域へマップすると中間表を取るが、`AddressSpace::frames_taken` は載せた時点で
 /// 測るので入らない。** **破棄の会計の `taken` にこれを足す**——**さもないと `collected > taken`
 /// になる。** **`mmap` のためではなく、載せた後に PT を取る経路すべてのためである**——**`brk` が
 /// 境を越えれば同じ穴を踏むので、同時に閉じる。**
@@ -430,7 +430,7 @@ fn take_post_load_frames(slot: usize) -> usize {
 /// ヒープの下端と上端（H-a）。
 #[derive(Clone, Copy)]
 pub struct Heap {
-    /// 像の末尾の次のページ。**`brk` はここより下げられない。**
+    /// イメージの末尾の次のページ。**`brk` はここより下げられない。**
     start: u64,
     /// いまの上端。
     break_at: u64,
@@ -439,7 +439,7 @@ pub struct Heap {
     /// # 空きフレームの全体を数えない
     ///
     /// **最初は遠征の前後で `free_frame_count()` を比べた。** **釣り合わなかった**
-    /// ——**`syscall-test` は子を起こすので、子の空間のフレームが隔離
+    /// ——**`syscall-test` は子を起動するので、子の空間のフレームが隔離
     /// （quarantine）へ入り、まだ空きへ戻っていない**（実測で 44 フレームの差）。
     ///
     /// **`brk` 自身が取った数と返した数を数える。** **他の活動に汚されない。**
@@ -451,7 +451,7 @@ pub struct Heap {
 }
 
 impl Heap {
-    /// 張っていない状態。**`start` が 0 である。**
+    /// マップしていない状態。**`start` が 0 である。**
     pub const EMPTY: Self = Self {
         start: 0,
         break_at: 0,
@@ -459,9 +459,9 @@ impl Heap {
         given: 0,
     };
 
-    /// 像の末尾から作る（H-a）。**次のページの先頭から始まる。**
+    /// イメージの末尾から作る（H-a）。**次のページの先頭から始まる。**
     ///
-    /// **固定の番地にしない**——**像の大きさはプログラムごとに違う**
+    /// **固定のアドレスにしない**——**イメージの大きさはプログラムごとに違う**
     /// （実測で `hello` が `0x401012`、`zi` が `0x40a289`。ADR-0044）。
     pub fn from_image_end(image_end: u64) -> Self {
         let start = (image_end + HEAP_PAGE_SIZE - 1) & !(HEAP_PAGE_SIZE - 1);
@@ -483,12 +483,12 @@ impl Heap {
         self.break_at
     }
 
-    /// 上端を置く。**写像を変えた後で呼ぶ。**
+    /// 上端を置く。**マッピングを変えた後で呼ぶ。**
     pub fn set_break(&mut self, value: u64) {
         self.break_at = value;
     }
 
-    /// 張っているか。
+    /// マップしているか。
     pub const fn is_mapped(&self) -> bool {
         self.start != 0
     }
@@ -550,11 +550,11 @@ const USER_STACK_FILL: u8 = 0xA5;
 /// # なぜ `Result` にしたか
 ///
 /// **S9-b-1 では失敗のたびに `halt_forever` していた。** 相手が自分のビルドの
-/// 作った像だったので、壊れていればカーネルの不具合であり、止まるのが正しかった。
-/// **S9-b-2 は壊した像を意図的に渡すので、止まってはいけない。**
+/// 作ったイメージだったので、壊れていればカーネルの不具合であり、止まるのが正しかった。
+/// **S9-b-2 は壊したイメージを意図的に渡すので、止まってはいけない。**
 ///
-/// **この段では呼び出し側がまだ止める。** 既定の `hello` は成功するので、
-/// 振る舞いは変わらない。壊した像を渡すのは S9-b-2 の 2 つ目である。
+/// **この段階では呼び出し側がまだ止める。** 既定の `hello` は成功するので、
+/// 振る舞いは変わらない。壊したイメージを渡すのは S9-b-2 の 2 つ目である。
 ///
 /// # `ElfError` の 11 種をどう扱うか
 ///
@@ -572,7 +572,7 @@ const USER_STACK_FILL: u8 = 0xA5;
 ///   `SegmentAddressOverflow`: 区画の数値。**`p_offset` / `p_filesz` / `p_memsz` /
 ///   `p_vaddr` の書き換えで作れる**
 ///
-/// **11 種とも、既定の像の 1 バイトから 8 バイトを書き換えれば作れる。**
+/// **11 種とも、既定のイメージの 1 バイトから 8 バイトを書き換えれば作れる。**
 /// S9-b-2 の 2 つ目で壊し方を選ぶときの材料である。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserLoadError {
@@ -583,50 +583,50 @@ pub enum UserLoadError {
     AllocatorUnavailable,
     /// `argv` と表と文字列が、スタックの 1 ページに収まらない（S11-1）。
     ArgumentsTooLong,
-    /// `Elf::parse` が拒んだ。**像がバイト列として壊れている。**
+    /// `Elf::parse` が拒んだ。**イメージがバイト列として壊れている。**
     Parse(common::elf::ElfError),
-    /// `Elf::segment_data` が拒んだ。**区画のファイル内範囲が像の外にある。**
+    /// `Elf::segment_data` が拒んだ。**区画のファイル内範囲がイメージの外にある。**
     ///
     /// **`parse` も同じことを見ているので、通常はここへ来ない。** 来るとしたら
     /// 呼び出し側が `parse` を通さないヘッダを渡したときで、**多層防御の 2 枚目が
     /// 効いた形である。**
     SegmentData(common::elf::ElfError),
-    /// 新しいアドレス空間を作れなかった。**像ではなくカーネル側の事情である。**
+    /// 新しいアドレス空間を作れなかった。**イメージではなくカーネル側の事情である。**
     AddressSpace(crate::address_space::AddressSpaceError),
-    /// フレームが尽きた。**像ではなくカーネル側の事情である。**
+    /// フレームが尽きた。**イメージではなくカーネル側の事情である。**
     OutOfFrames,
-    /// 張ろうとした仮想アドレスが正準形でない。
+    /// マップしようとした仮想アドレスが正準形でない。
     NotCanonical(u64),
-    /// 写像に失敗した。**区画が同じページを共有していると、後から来たほうがここへ来る。**
+    /// マッピングに失敗した。**区画が同じページを共有していると、後から来たほうがここへ来る。**
     Mapping {
         virt: u64,
         error: crate::address_space::AddressSpaceError,
     },
-    /// 張った葉のフラグが、区画の権限と食い違った。**カーネル側の不具合である。**
+    /// マップした葉のフラグが、区画の権限と食い違った。**カーネル側の不具合である。**
     LeafFlags { count: usize },
-    /// 終了せずに畳まれた（S9-b-3-1）。**`exit` が効かなかったということである。**
+    /// 終了せずに例外で終了させられた（S9-b-3-1）。**`exit` が効かなかったということである。**
     ///
     /// `hello` は `exit` の直後に `ud2` を置いてあるので、**効かなければ確定的に
     /// ここへ来る**（`HELLO_UD2_OFFSET` の doc）。
     DidNotExit,
-    /// 終了でも畳みでもなく Ring 3 から戻ってきた。**カーネル側の不具合である。**
+    /// 終了でも例外による終了処理でもなく Ring 3 から戻ってきた。**カーネル側の不具合である。**
     ///
     /// `ring3::enter` はこの 2 つの longjmp でしか戻らないので、**通常は構成でき
     /// ない。** 記録の側が壊れたときの受け皿である。
     NoExitNoFold,
     /// 終了状態が予期と違った。`hello` は 0 で終わる。
     ExitStatus(u64),
-    /// 畳まれて終わるはずのプロセスが、終了して戻った（S9-b-3-2a）。
+    /// 終了させられるはずのプロセスが、終了して戻った（S9-b-3-2a）。
     ///
     /// **起こすはずの違反が起きなかったということである。**
     DidNotFold,
-    /// 畳まれたが、ベクタ・RIP・CS・CR2・エラーコードのどれかが予期と違った
+    /// 終了させられたが、ベクタ・RIP・CS・CR2・エラーコードのどれかが予期と違った
     /// （S9-b-3-2a）。**どれが違うかは直前の ERROR 行に出ている。**
     FoldMismatch,
     /// ユーザーが組み立てた引数が、`ADR-0020` の規約どおりに届かなかった
     /// （S9-b-3-2a）。**probe が呼ばれなかった場合も含む。**
     AbiMismatch,
-    /// 畳んだ会計が合わなかった（S9-b-3-1）。**空間を畳んでも、消えたフレームが
+    /// 破棄の会計が合わなかった（S9-b-3-1）。**空間を破棄しても、消えたフレームが
     /// 隔離へ届いていない。**
     DestroyAccounting {
         consumed: usize,
@@ -660,7 +660,7 @@ pub enum UserLoadError {
 /// **`envp` は EV で中身が入った**（ADR-0041）。**並びは変えていない**
 /// ——S11-1 が終端だけ置いていた場所に、ポインタ列が入っただけである。
 ///
-/// **`auxv` の中身は Linux バイナリを動かす段で要るものである。**
+/// **`auxv` の中身は Linux バイナリを動かす段階で要るものである。**
 /// **自作のプログラムは読まないので、終端だけ置く。**
 /// **形を合わせておくのは、後から中身を足すときに入口が変わらないからである**
 /// ——そして **C の `crt0` がそのまま書ける**（`docs/vision.md` の C の構想）。
@@ -688,7 +688,7 @@ unsafe fn build_initial_stack(
     const FIXED_WORDS: usize = 1 + 1 + 1 + 2;
     /// `auxv` の終端。
     const AT_NULL: u64 = 0;
-    /// スタックページの大きさ。**1 枚だけ張ってある**（呼び出し側）。
+    /// スタックページの大きさ。**1 枚だけマップしてある**（呼び出し側）。
     const PAGE_SIZE: usize = 4096;
 
     if argv.len() > MAX_ARGV || envp.len() > MAX_ENVP {
@@ -745,7 +745,7 @@ unsafe fn build_initial_stack(
     }
     put(0, &mut at); // envp の終端
 
-    // 破壊 (S11-1, no-auxv-terminator): `auxv` に項目を 1 つ足して、
+    // 破壊テスト (S11-1, no-auxv-terminator): `auxv` に項目を 1 つ足して、
     // **終端を書かない。** `AT_PHDR` は Linux バイナリが読む型で、
     // **自作のプログラムは `auxv` を読まないので、足しても誰も困らないように見える。**
     // **終端が無いことは、終端まで歩いた者にしか分からない。**
@@ -772,25 +772,25 @@ unsafe fn build_initial_stack(
 /// **`spawn` は遠征の中からしか呼べない**（`dispatch` へ来るのは Ring 3 からだけで、
 /// Ring 3 は遠征の中にしかない）。**したがって呼ばれた時点の深さは 1 以上である。**
 /// そして [`spawn`] は深さが [`MAX_EXCURSION_DEPTH`] 以上なら断るので、
-/// **実際に子を起こせるのは深さ 1 から `MAX_EXCURSION_DEPTH - 1` までである。**
+/// **実際に子を起動できるのは深さ 1 から `MAX_EXCURSION_DEPTH - 1` までである。**
 ///
 /// **その本数だけ緩衝を持てば、入れ子で上書きされない。**
 /// **`MAX_EXCURSION_DEPTH` を上げれば、ここも自動で増える。**
 ///
 /// **S11-11 で 1 本増えた。** `init` がカーネルの直線上（深さ 0）から
-/// シェルを起こすようになったので、**深さ 0 から `MAX_EXCURSION_DEPTH - 1` まで
-/// が起こす側になる。**
+/// シェルを起動するようになったので、**深さ 0 から `MAX_EXCURSION_DEPTH - 1` まで
+/// が起動する側になる。**
 const MAX_SPAWN_IN_FLIGHT: usize = MAX_EXCURSION_DEPTH;
 
-/// `spawn` が読んだ像を置く場所（S11-5）。
+/// `spawn` が読んだイメージを置く場所（S11-5）。
 ///
-/// # なぜ像を写すのか。ブロックは借りられるのに
+/// # なぜイメージをコピーするのか。ブロックは借りられるのに
 ///
-/// **`common::ext2::Ext2::file_block` が返すのは像を借りたバイト列である**
+/// **`common::ext2::Ext2::file_block` が返すのはイメージを借りたバイト列である**
 /// （[`crate::vfs::FS_IMAGE`] は `&'static [u8]`）。**1 ブロックで足りるなら
-/// 写さずに済む**——しかし **ELF は 4096 バイトを超え、ブロックが像の中で
+/// コピーせずに済む**——しかし **ELF は 4096 バイトを超え、ブロックがイメージの中で
 /// 連続している保証は無い。** `hello` は 8496 バイトで 3 ブロックである。
-/// **繋がっていないものを 1 本のバイト列として渡すには、写すしかない。**
+/// **繋がっていないものを 1 本のバイト列として渡すには、コピーするしかない。**
 ///
 /// # スタックへ置かない
 ///
@@ -814,21 +814,21 @@ static mut SPAWN_IMAGES: [[[u8; MAX_EXECUTABLE_SIZE]; MAX_SPAWN_IN_FLIGHT];
 /// （判定行に出す名前と、初期スタックへ積む `argv[0]`）。**ユーザーから来た
 /// パスはカーネルスタックのローカルなので、そのままでは渡せない。**
 ///
-/// **像と同じく、スロットと深さごとに 1 本ずつ持つ**（[`MAX_SPAWN_IN_FLIGHT`]。
+/// **イメージと同じく、スロットと深さごとに 1 本ずつ持つ**（[`MAX_SPAWN_IN_FLIGHT`]。
 /// スロットは W1-c-1 で足した。[`SPAWN_IMAGES`] の doc）。
 static mut SPAWN_PATHS: [[[u8; PATH_MAX]; MAX_SPAWN_IN_FLIGHT]; crate::ring3::RING3_SLOTS] =
     [[[0; PATH_MAX]; MAX_SPAWN_IN_FLIGHT]; crate::ring3::RING3_SLOTS];
 
-/// [`spawn`] が起こした子が隔離へ入れたフレームの累計（S11-5）。
+/// [`spawn`] が起動した子が隔離へ入れたフレームの累計（S11-5）。
 ///
 /// # なぜ要るのか。**親の会計が閉じなくなる**
 ///
 /// 起動時の会計は「このプログラムを走らせる前後で空きフレームがいくつ減ったか」と
 /// 「そのプログラムの空間を畳んで隔離へ何枚入れたか」を突き合わせる。
-/// **子を起こすと、子のぶんも前者に乗る**——隔離へ入ったフレームは世代が退くまで
+/// **子を起動すると、子のぶんも前者に乗る**——隔離へ入ったフレームは世代が退くまで
 /// アロケータへ戻らないので、**親から見ると「消えたまま」である。**
 ///
-/// **実測で踏んだ**（S11-5）。`syscall-test` が 2 本の子を起こしたところ、
+/// **実測で踏んだ**（S11-5）。`syscall-test` が 2 本の子を起動したところ、
 /// **24 枚消えて自分の隔離は 8 枚**になった。差の 16 枚が子 2 本のぶんである。
 ///
 /// **子の側で数えて、親が足す。** 親が子の内訳を知る必要はない。
@@ -863,7 +863,7 @@ static SPAWN_QUARANTINED: core::sync::atomic::AtomicUsize = core::sync::atomic::
 static mut SPAWN_QUARANTINE: [crate::quarantine::Quarantine; crate::ring3::RING3_SLOTS] =
     [const { crate::quarantine::Quarantine::new() }; crate::ring3::RING3_SLOTS];
 
-/// [`spawn`] が起こした子が漏らしたフレームの累計（S11-5）。
+/// [`spawn`] が起動した子が漏らしたフレームの累計（S11-5）。
 static SPAWN_LEAKED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// 子の会計を 0 に戻す（S11-5）。**プログラムを 1 本走らせる直前に呼ぶ。**
@@ -900,7 +900,7 @@ static mut SPAWN_ENVPS: [[[u8; MAX_ENVP_BYTES]; MAX_SPAWN_IN_FLIGHT]; crate::rin
 
 /// [`spawn`] が拒む形（S11-5）。
 ///
-/// **`errno` を知らない。** 写すのは `crate::syscall` の側である
+/// **`errno` を知らない。** マップするのは `crate::syscall` の側である
 /// （[`UserLoadError`] と同じ線。module の doc）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnError {
@@ -912,18 +912,18 @@ pub enum SpawnError {
     IsDirectory,
     /// 引けたが通常ファイルではなかった（デバイスファイル等）。
     NotRegularFile,
-    /// 写した `argv` のバイト列が、要素数と食い違った（S11-7）。
+    /// コピーした `argv` のバイト列が、要素数と食い違った（S11-7）。
     ///
     /// **カーネル側の不具合である**——`copy_user_string_array` は要素ごとに NUL を付けて
     /// 並べるので、**要素数だけ NUL があるはずである。**
     ArgvMalformed,
-    /// 像が [`MAX_EXECUTABLE_SIZE`] に収まらない。
+    /// イメージが [`MAX_EXECUTABLE_SIZE`] に収まらない。
     TooLarge(u64),
-    /// 像を読んでいる途中でブロックが引けなかった。
+    /// イメージを読んでいる途中でブロックが引けなかった。
     Read(common::ext2::Ext2Error),
     /// 載せられなかった、または期待どおりに終わらなかった。
     Load(UserLoadError),
-    /// 子を畳んだ会計が合わなかった。**カーネル側の不具合である。**
+    /// 子を破棄した会計が合わなかった。**カーネル側の不具合である。**
     DestroyAccounting {
         consumed: usize,
         quarantined: usize,
@@ -936,7 +936,7 @@ pub enum SpawnError {
 pub enum SpawnOutcome {
     /// `exit(status)` で終わった。
     Exited(u64),
-    /// Ring 3 の違反が畳まれて終わった。**ベクタを持つ。**
+    /// Ring 3 の違反が終了処理されて終わった。**ベクタを持つ。**
     Folded(u64),
     /// 外から止められた（Ctrl+C。S12 前の手当て、C）。
     ///
@@ -957,8 +957,8 @@ pub enum SpawnOutcome {
 /// 終わらせる。**表を先に作るのは先回りの抽象化になる**（`vision.md` の規定）。
 /// **以前ここは「同時に生きているプロセスは 1 つである」と言い切っていた**——**S11 の入れ子の
 /// `spawn` で親と子が並び、W1-c-4 で 2 本が同時に走る。** **表はまだ作っていない**（各 `UserProcess` は
-/// 起こした側の枠が持つ）。
-/// 同時生存が複数になる段（S11 のシェル）で表にすればよく、**そのときこの型は
+/// 起動した側のフレームが持つ）。
+/// 同時生存が複数になる段階（S11 のシェル）で表にすればよく、**そのときこの型は
 /// そのまま使える。**
 ///
 /// # 「走らせるプログラムの一覧」とは別物である
@@ -967,7 +967,7 @@ pub enum SpawnOutcome {
 /// `build.rs` の `PROGRAMS` と同じ性質）。**混ぜると、一覧の長さが管理構造の
 /// 容量に見える。** こちらは管理構造で、長さは常に 1 である。
 pub struct UserProcess {
-    /// このプロセスのアドレス空間。**終了で畳む。**
+    /// このプロセスのアドレス空間。**終了で破棄する。**
     space: crate::address_space::AddressSpace,
     /// 最初に飛ぶ先（ELF の entry）。
     entry: u64,
@@ -978,7 +978,7 @@ pub struct UserProcess {
     /// **`run_loaded_program` が [`swap_current_heap`] で据え、戻ったら
     /// 引き取る**（`files` と同じ形）。
     heap: Heap,
-    /// ユーザースタックのページを、direct map 越しに指す番地（EV）。
+    /// ユーザースタックのページを、direct map 越しに指すアドレス（EV）。
     ///
     /// # なぜ持つのか
     ///
@@ -987,7 +987,7 @@ pub struct UserProcess {
     /// **direct map はどの空間からも同じ場所を指すので、こちらを控える。**
     ///
     /// **0 は「まだ張っていない」である**（[`load_user_program`] が 0 で作り、
-    /// 張った側が埋める）。
+    /// マップした側が埋める）。
     stack_scratch: u64,
     /// 判定行に出す名前。
     name: &'static str,
@@ -995,7 +995,7 @@ pub struct UserProcess {
     ///
     /// # まだ誰も開かない
     ///
-    /// **この刻みでは表を置くだけである。** 開くのは次の刻み（`open`/`close`）で、
+    /// **この手順では表を置くだけである。** 開くのは次の手順（`open`/`close`）で、
     /// **ここが未使用なのはそのためである。** `#[allow(dead_code)]` を付けている
     /// のは、**「要らないものを置いた」のではなく「使い方をまだ実装していない」**
     /// 側だからである（S9-b-3-1 で立てた判定。未使用の警告はそのどちらかを指す）。
@@ -1013,20 +1013,20 @@ pub struct UserProcess {
     files: crate::vfs::FileTable,
 }
 
-/// 像を 1 つ、専用のアドレス空間へ載せて（`run` なら走らせて）畳む（S9-b-2）。
+/// イメージを 1 つ、専用のアドレス空間へ載せて（`run` なら走らせて）破棄する（S9-b-2）。
 ///
-/// **失敗しても空間を畳む。** 途中で落ちた場合、**そこまでに張った写像と
-/// 中間テーブルが残っている。** 畳まずに戻ると、そのフレームは誰にも
+/// **失敗しても空間を破棄する。** 途中で落ちた場合、**そこまでに作ったマッピングと
+/// 中間テーブルが残っている。** 破棄せずに戻ると、そのフレームは誰にも
 /// 返らない。**「壊した像でカーネルが止まらない」は、後始末まで含めて
 /// 初めて言える。**
 ///
-/// 畳んだ結果（隔離へ入れた本数と、隔離が溢れて漏らした本数）を返す。
+/// 破棄した結果（隔離へ入れた本数と、隔離が溢れて漏らした本数）を返す。
 /// **後始末が正しいことは、この会計で主張する。**
 ///
 /// # `envp` は「誰が積むか」で分かれる（f-2。`ADR-0053`）
 ///
 /// **`None` なら起動時の環境を積む**——**カーネルの表である。**
-/// **`init` が起こす `/bin/zash` と、起動シーケンスの直線上のプログラムが
+/// **`init` が起動する `/bin/zash` と、起動シーケンスの直線上のプログラムが
 /// これに当たる。**
 ///
 /// **`Some` なら親が渡したものを積む**——**シェルが `spawn` の第 3 引数で
@@ -1034,9 +1034,9 @@ pub struct UserProcess {
 ///
 /// # 終わり方は判定しない（S9-b-3-2a）
 ///
-/// 走らせた場合、返すのは像の entry である。**どう終わったかの判定は
+/// 走らせた場合、返すのはイメージの entry である。**どう終わったかの判定は
 /// [`check_user_program_outcome`] が行う**——プログラムごとに正しい終わり方が
-/// 違い、それは呼び出し側の知識だからである（`ring3::enter` が畳んだ位置を
+/// 違い、それは呼び出し側の知識だからである（`ring3::enter` が終了させた位置を
 /// 主張しないのと同じ形）。`run` が偽なら 0 を返す。
 pub fn load_user_program(
     logger: &mut Logger<SerialPort>,
@@ -1051,17 +1051,17 @@ pub fn load_user_program(
     let direct_map = common::addr::direct_map();
     let production = crate::paging::switch::read_cr3();
 
-    // **アロケータを借りる（S11-3。`ADR-0030`）。** 写像の間だけ持ち、
+    // **アロケータを借りる（S11-3。`ADR-0030`）。** マッピングの間だけ持ち、
     // **Ring 3 へ落ちる前に返す。**
     let Some(allocator) = crate::frame_allocator::take() else {
         return (Err(UserLoadError::AllocatorUnavailable), 0, 0, 0);
     };
 
-    // 破壊 (`ADR-0063` の (b3), spawn-detached-returns-early): **起こしっぱなしのスロット（左）の
-    // 読み込みが、貸し出しを持ったまま 2 ティック回る。** **起こす口が入場を待たずに譲る形と
+    // 破壊テスト (`ADR-0063` の (b3), spawn-detached-returns-early): **切り離して起動するスロット（左）の
+    // 読み込みが、貸し出しを持ったまま 2 ティック空回りする。** **起動する入口が入場を待たずに譲る形と
     // 組で、貸し出しが重なる機会を作る**——**このタスクはカーネルのタスクで IF=1 なので、
     // ティックでシェルへ切り替わり、シェルが右を `spawn` して `AllocatorUnavailable` に当たる。**
-    // **右（スロット 0。システムコールの中）に置くと IF=0 で永久に回る**（実測）。
+    // **右（スロット 0。システムコールの中）に置くと IF=0 で永久に空回りする**（実測）。
     // **`wait-window-is-wide` と同じ「機会を作る」形である。**
     #[cfg(feature = "spawn-detached-returns-early")]
     if crate::ring3::current_slot() == crate::task::detached_slot() {
@@ -1071,7 +1071,7 @@ pub fn load_user_program(
         }
     }
 
-    // SAFETY: production は稼働中の PML4、direct_map は登録済みの窓。
+    // SAFETY: production は稼働中の PML4、direct_map は登録済みのウィンドウ。
     let space = match unsafe {
         AddressSpace::new(allocator, direct_map, production, USER_PROGRAM_PML4_INDEX)
     } {
@@ -1086,8 +1086,8 @@ pub fn load_user_program(
         }
     };
 
-    // **ここからプロセスである。** stack_top は張る前から決まっているが、entry は
-    // 像を読むまで分からないので、0 で作り load_user_program_into が埋める。
+    // **ここからプロセスである。** stack_top はマップする前から決まっているが、entry は
+    // イメージを読むまで分からないので、0 で作り load_user_program_into が埋める。
     let mut process = UserProcess {
         space,
         entry: 0,
@@ -1110,7 +1110,7 @@ pub fn load_user_program(
         },
     };
 
-    // **写像まではアロケータが要る。遠征では要らない。**
+    // **マッピングまではアロケータが要る。遠征では要らない。**
     let mapped = load_user_program_into(logger, allocator, image, &mut process, argv, envp);
     // **ここで返す。** 以降は Ring 3 の遠征があり、**その間はアロケータが
     // `static` に在るので、システムコールから取り出せる**（`ADR-0030` の要）。
@@ -1121,7 +1121,7 @@ pub fn load_user_program(
     let outcome = mapped
         .and_then(|()| {
             if run {
-                // SAFETY: 写像は済んでおり、entry と stack は張ったユーザーページ。
+                // SAFETY: マッピングは済んでおり、entry と stack はマップしたユーザーページ。
                 unsafe { run_loaded_program(logger, &mut process) }
             } else {
                 Ok(())
@@ -1131,7 +1131,7 @@ pub fn load_user_program(
 
     // **`brk` が取った数と返した数を出す（H-a。ADR-0044 の到達条件）。**
     //
-    // **空きフレームの全体を数えない**——**子を起こすプログラムでは、
+    // **空きフレームの全体を数えない**——**子を起動するプログラムでは、
     // 子の空間のフレームが隔離へ入り、まだ空きへ戻っていない**
     // （実測で 44 フレームの差が出た）。**`brk` 自身を数えれば、他の活動に
     // 汚されない。**
@@ -1147,9 +1147,9 @@ pub fn load_user_program(
              will not be equal, and that is not a failure)",
             process.name
         ));
-        // **書き戻しの計器（P-c-1）。**
+        // **書き戻しの計測（P-c-1）。**
         //
-        // **回数と量は揺れない**（書きで開いた口を閉じた数と、像の長さで決まる）。
+        // **回数と量は揺れない**（書きで開いたファイルを閉じた数と、イメージの長さで決まる）。
         // **サイクルと `hlt` の数は揺れる**ので `(info)` の側に置く
         // ——**判定に載せない**（`docs/coding-standards.md` の「揺れる値と主張は、
         // 同じ行に載せない」）。
@@ -1167,15 +1167,15 @@ pub fn load_user_program(
         }
     }
 
-    // **成否によらず畳む。** 破棄は S7-d の経路（下位を隔離へ入れ、世代が
-    // 退くまで返さない）をそのまま通る。**プロセスが終了したなら、畳むのはここ
+    // **成否によらず破棄する。** 破棄は S7-d の経路（下位を隔離へ入れ、世代が
+    // 退くまで返さない）をそのまま通る。**プロセスが終了したなら、破棄するのはここ
     // である**（S9-b-3-1。終了の記録は `syscall` 側、空間の始末はこちら）。
     //
-    // 破壊 (S9-b-3-1, user-exit-keep-space): 畳まない。**消えたフレーム数と隔離へ
-    // 入れた数の会計が合わなくなり、呼び出し側が捕まえる**（`AddressSpace` は
+    // 破壊テスト (S9-b-3-1, user-exit-keep-space): 破棄しない。**消えたフレーム数と隔離へ
+    // 入れた数の会計が合わなくなり、呼び出し側が検出する**（`AddressSpace` は
     // `Drop` を持たないので、落とすだけではフレームは戻らない）。
     //
-    // **走らせたときだけ飛ばす。** 壊した像の後始末（S9-b-2）はこの破壊の対象では
+    // **走らせたときだけ飛ばす。** 壊したイメージの後始末（S9-b-2）はこの破壊テストの対象では
     // なく、そちらまで飛ばすと**あちらの会計が先に落ちて、終了の側を観測できない。**
     // **実測で踏んだ**——先に落ちるほうだけを見ていた。
     // **破棄の前に、この空間が取った本数を聞く（`ADR-0063` の (b1)）。**
@@ -1204,10 +1204,10 @@ pub fn load_user_program(
     };
 
     // **空間ごとの会計（`ADR-0063` の (b1)）。** **取った本数と、破棄が集めた本数が
-    // 一致すること。** **大域の空きフレーム数の差と違って、2 本の窓が交差しても閉じる。**
+    // 一致すること。** **大域の空きフレーム数の差と違って、2 本のウィンドウが交差しても閉じる。**
     //
-    // **破壊 `user-exit-keep-space` では畳まないので、集めた本数が 0 になって落ちる**
-    // ——**大域の差の側と同じ形で捕まる。**
+    // **破壊テスト `user-exit-keep-space` では破棄しないので、集めた本数が 0 になって落ちる**
+    // ——**大域の差の側と同じ形で検出される。**
     let collected = held + leaked;
     if !keep_space && collected != taken {
         SPACE_ACCOUNTING_MISMATCHES.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
@@ -1228,13 +1228,13 @@ pub fn space_accounting_mismatches() -> u64 {
     SPACE_ACCOUNTING_MISMATCHES.load(core::sync::atomic::Ordering::SeqCst)
 }
 
-/// いま開いている `spawn` の窓の数、Ring 3 のスロットごと（`ADR-0063` の (b1)）。
+/// いま開いている `spawn` のウィンドウの数、Ring 3 のスロットごと（`ADR-0063` の (b1)）。
 ///
 /// # なぜスロットごとに数えるのか
 ///
-/// **入れ子と交差を分けるためである。** **入れ子（親の窓の中で子の窓が開く）では、大域の差は
+/// **入れ子と交差を分けるためである。** **入れ子（親のウィンドウの中で子のウィンドウが開く）では、大域の差は
 /// 閉じる**——**外側の差に内側の分が両辺とも入る**（`spawn` の doc）。**閉じないのは交差、
-/// すなわち別のタスクの窓と半分だけ重なる形である。**
+/// すなわち別のタスクのウィンドウと半分だけ重なる形である。**
 ///
 /// **入れ子は同じスロットの中で起きる**（`spawn` は同じタスクの上で遠征が入れ子になる）。
 /// **交差は別のスロットどうしで起きる**（足した 1 本はスロット 1 を使う）。
@@ -1242,7 +1242,7 @@ pub fn space_accounting_mismatches() -> u64 {
 static SPAWN_WINDOWS_OPEN: [core::sync::atomic::AtomicUsize; crate::ring3::RING3_SLOTS] =
     [const { core::sync::atomic::AtomicUsize::new(0) }; crate::ring3::RING3_SLOTS];
 
-/// これまでに開いた `spawn` の窓の数、スロットごと（`ADR-0063` の (b1)）。
+/// これまでに開いた `spawn` のウィンドウの数、スロットごと（`ADR-0063` の (b1)）。
 static SPAWN_WINDOW_STARTS: [core::sync::atomic::AtomicU64; crate::ring3::RING3_SLOTS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; crate::ring3::RING3_SLOTS];
 
@@ -1250,23 +1250,23 @@ static SPAWN_WINDOW_STARTS: [core::sync::atomic::AtomicU64; crate::ring3::RING3_
 ///
 /// # 数える理由
 ///
-/// **条件つきの判定は、条件が満たされなくなれば「確かめなかった」と書きながら緑のまま死ぬ**
+/// **条件つきの判定は、条件が満たされなくなれば「確かめなかった」と書きながら成功のまま死ぬ**
 /// （運用者の指摘。2026-09-18）。**`FLAKY_EXCLUDED` と手で回す形の前例と同じ族である。**
 /// **回数を行へ出し、参照が固定する**——**0 になれば差分で出る。**
 static GLOBAL_DIFFERENCE_CHECKS: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
-/// `spawn` の会計の窓（`ADR-0063` の (b1)）。**開いたときの様子を控える。**
+/// `spawn` の会計のウィンドウ（`ADR-0063` の (b1)）。**開いたときの様子を控える。**
 pub struct SpawnWindow {
     /// 開いたときのスロット。**閉じるときも同じスロットである。**
     slot: usize,
-    /// 開いたとき、他のスロットで開いていた窓の数。
+    /// 開いたとき、他のスロットで開いていたウィンドウの数。
     open_elsewhere_at_entry: usize,
-    /// 開いたときの、他のスロットの窓の累計。
+    /// 開いたときの、他のスロットのウィンドウの累計。
     starts_elsewhere_at_entry: u64,
 }
 
-/// 他のスロットで開いている窓の数と、その累計（`ADR-0063` の (b1)）。
+/// 他のスロットで開いているウィンドウの数と、その累計（`ADR-0063` の (b1)）。
 fn windows_elsewhere(slot: usize) -> (usize, u64) {
     let mut open = 0usize;
     let mut starts = 0u64;
@@ -1280,7 +1280,7 @@ fn windows_elsewhere(slot: usize) -> (usize, u64) {
     (open, starts)
 }
 
-/// 会計の窓を開く（`ADR-0063` の (b1)）。
+/// 会計のウィンドウを開く（`ADR-0063` の (b1)）。
 pub fn open_spawn_window() -> SpawnWindow {
     let slot = crate::ring3::current_slot();
     let (open_elsewhere_at_entry, starts_elsewhere_at_entry) = windows_elsewhere(slot);
@@ -1293,10 +1293,10 @@ pub fn open_spawn_window() -> SpawnWindow {
     }
 }
 
-/// 会計の窓を閉じる（`ADR-0063` の (b1)）。**他の窓と交差したかを返す。**
+/// 会計のウィンドウを閉じる（`ADR-0063` の (b1)）。**他のウィンドウと交差したかを返す。**
 ///
-/// **交差の見方は 3 つである**——**開いたときに他のスロットの窓が開いていたか、閉じるときに
-/// 開いているか、自分の間に他のスロットの窓が開いたか。** **どれかなら、大域の差は相手の分を
+/// **交差の見方は 3 つである**——**開いたときに他のスロットのウィンドウが開いていたか、閉じるときに
+/// 開いているか、自分の間に他のスロットのウィンドウが開いたか。** **どれかなら、大域の差は相手の分を
 /// 取り込んでいる。** **同じスロットの入れ子は交差ではない**（[`SPAWN_WINDOWS_OPEN`] の doc）。
 pub fn close_spawn_window(window: SpawnWindow) -> bool {
     SPAWN_WINDOWS_OPEN[window.slot].fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
@@ -1317,16 +1317,16 @@ pub fn global_difference_checks() -> u64 {
 
 /// 破棄する空間を指したままのタスクがあれば消し、声を出す（W1-b-2）。
 ///
-/// # 別の関数にしてある理由——**遠征スタックの枠を広げないため**
+/// # 別の関数にしてある理由——**遠征スタックのフレームを広げないため**
 ///
-/// **`load_user_program` の枠は、`spawn` の子が走っている間ずっと深さ 0 の
+/// **`load_user_program` のフレームは、`spawn` の子が走っている間ずっと深さ 0 の
 /// 遠征スタックに載る。** **`dev` では、通らない分岐の `format_args!` の一時値も
-/// その枠に場所を取る。** **ここへ出して `#[inline(never)]` にすれば、一時値は
-/// この関数の枠にだけ載り、呼んでいる間しか場所を取らない**——**呼ぶのは子が
+/// そのフレームに場所を取る。** **ここへ出して `#[inline(never)]` にすれば、一時値は
+/// この関数のフレームにだけ載り、呼んでいる間しか場所を取らない**——**呼ぶのは子が
 /// 走り終えた後である。**
 ///
 /// **引数は `&UserProcess` の 1 つだけにしてある。** **名前と PML4 を呼ぶ側で
-/// 取り出して渡すと、その一時値が `load_user_program` の枠を 16 バイト広げた**
+/// 取り出して渡すと、その一時値が `load_user_program` のフレームを 16 バイト広げた**
 /// （実測。`objdump` で前置きの `sub rsp` を読んだ。4,288 → 4,304 バイト）。
 #[inline(never)]
 fn forget_task_cr3_before_destroy(logger: &mut Logger<SerialPort>, process: &UserProcess) {
@@ -1341,30 +1341,30 @@ fn forget_task_cr3_before_destroy(logger: &mut Logger<SerialPort>, process: &Use
     }
 }
 
-/// 像を新しいアドレス空間へ写像し、`run` なら Ring 3 で走らせる（S9-b-1）。
+/// イメージを新しいアドレス空間へマップし、`run` なら Ring 3 で走らせる（S9-b-1）。
 ///
 /// # 走らせるかは引数で決まる
 ///
-/// `run` が偽なら写像して戻る。**壊した像の扱い（S9-b-2）がこちらを使う**
-/// ——張れるところまで張って拒まれることを見るので、走らせる必要が無い。
+/// `run` が偽ならマップして戻る。**壊したイメージの扱い（S9-b-2）がこちらを使う**
+/// ——マップできるところまでマップして拒まれることを見るので、走らせる必要が無い。
 ///
 /// # 区画の権限をそのまま葉へ落とす
 ///
 /// `PT_LOAD` の `p_flags` の W を [`PageAttributes::writable`] へ渡す。`hello` の
 /// 2 区画はどちらも書き込み不可なので、**ここが `writable: false` の最初の実利用に
 /// なる**（S9-a で足した引数が、S9-b の本命の経路で使われる）。
-/// スタックだけは `writable: true` で張る。
+/// スタックだけは `writable: true` でマップする。
 ///
 /// # 失敗しても止まらない。**呼び出し側が決める**
 ///
-/// **かつてはここで止めていた**（相手が自分のビルドの像だけだった S9-b-1 まで）。
-/// **S9-b-2 で `Result` にした。** 信頼できない像を読む経路ができたので、
-/// **止めるかどうかは像の出所を知っている側の判断になった**——埋め込んだ 3 本の
-/// 失敗はカーネルの不具合なので呼び出し側が止め、壊した像の失敗は期待どおりなので
+/// **かつてはここで止めていた**（相手が自分のビルドのイメージだけだった S9-b-1 まで）。
+/// **S9-b-2 で `Result` にした。** 信頼できないイメージを読む経路ができたので、
+/// **止めるかどうかはイメージの出所を知っている側の判断になった**——埋め込んだ 3 本の
+/// 失敗はカーネルの不具合なので呼び出し側が止め、壊したイメージの失敗は期待どおりなので
 /// 止めない。**`docs/roadmap.md` の S9 が「いかなる入力に対しても fail-fast
 /// させない」と言っているのは、後者についてである。**
 ///
-/// # 区画が同じページを共有していると張れない
+/// # 区画が同じページを共有しているとマップできない
 ///
 /// **後から来た区画が `Mapping { AlreadyMapped }` で拒まれる**（S9-b-3-2b）。
 ///
@@ -1374,7 +1374,7 @@ fn forget_task_cr3_before_destroy(logger: &mut Logger<SerialPort>, process: &Use
 /// 使う [`crate::address_space::AddressSpace::map_user_4kib`] は葉の present を
 /// 見ずに書いていた。** 契約を片側だけ見て、もう片側のものとして書いていた形で
 /// ある（S9-b-3-2b の数え直しで実測した）。**実測では両方「張れた」ことになり、
-/// 1 つ目のフレームが写像から外れて 1 枚漏れた**（14 枚消えて隔離へ 13 枚）。
+/// 1 つ目のフレームがマッピングから外れて 1 枚漏れた**（14 枚消えて隔離へ 13 枚）。
 /// **漏れは会計に出てカーネルを止めるので、S9 の「いかなる入力でもカーネルを
 /// fail-fast させない」に反していた。** 判定を足して直してある。
 ///
@@ -1404,10 +1404,10 @@ fn load_user_program_into(
         Err(e) => return Err(UserLoadError::Parse(e)),
     };
 
-    // 張った VA と、期待する W を覚えておく（後で読み戻して照合する）。
+    // マップした VA と、期待する W を覚えておく（後で読み戻して照合する）。
     let mut mapped: [(u64, bool); 8] = [(0, false); 8];
     let mut mapped_count = 0usize;
-    // 実際に写像し終えた区画の本数（ADR-0039 の判定行）。
+    // 実際にマップし終えた区画の本数（ADR-0039 の判定行）。
     let mut loaded_segments = 0usize;
     // 共有として飛ばしたページの数（ADR-0039 の判定行）。
     let mut shared_pages = 0usize;
@@ -1421,14 +1421,14 @@ fn load_user_program_into(
     // **「張った本数」だけでは足りない。** 3 行出たとき、**それが正しい 3 本
     // なのか、4 本のうち 1 本を落とした 3 本なのかが行から読めない**
     // ——実際にその区別が付かず、切り分けが遠回りになった。
-    // **本数の対（持っている / 張った）を同じ行に出す。**
+    // **本数の対（持っている / マップした）を同じ行に出す。**
     let declared_segments = elf.load_segments().count();
 
     for ph in elf.load_segments() {
         let writable = ph.p_flags & 0x2 != 0;
         let first_page = ph.p_vaddr & !(PAGE_SIZE - 1);
-        // 破壊 (ADR-0039, user-load-filesz-only): `memsz` ではなく `filesz` で
-        // 最終ページを出す。**`.bss` が張られない**——`/bin/bss-test` が
+        // 破壊テスト (ADR-0039, user-load-filesz-only): `memsz` ではなく `filesz` で
+        // 最終ページを出す。**`.bss` がマップされない**——`/bin/bss-test` が
         // ゼロを読もうとして落ちる（この変更が入る前の欠落そのものである）。
         #[cfg(feature = "user-load-filesz-only")]
         let last_page = (ph.p_vaddr + ph.p_filesz.max(1) - 1) & !(PAGE_SIZE - 1);
@@ -1454,9 +1454,9 @@ fn load_user_program_into(
             //    共有する形は正当である。**
             //
             // **2 つ目が要る。** 1 つ目だけだと、`user-load-corrupt` の
-            // 「前の区画のページへ `p_vaddr` を動かす」破壊が通ってしまう
+            // 「前の区画のページへ `p_vaddr` を動かす」破壊テストが通ってしまう
             // （**実測でそうなった**）——`hello` の 1 本目は 0x42 バイトしか
-            // 無いので**最終ページが先頭ページと同じ**で、破壊が狙う
+            // 無いので**最終ページが先頭ページと同じ**で、破壊テストが狙う
             // `0x400030` も同じページに落ちる。**違うのは、あちらが直前の
             // 区画の中身の内側（終端 0x400042 より前）を指すことである。**
             //
@@ -1484,7 +1484,7 @@ fn load_user_program_into(
             // このページが覆うファイル内の範囲を切り出して書く。
             let page_start_in_segment = page.saturating_sub(ph.p_vaddr);
             let offset_in_page = ph.p_vaddr.saturating_sub(page);
-            // 破壊 (S9-b-1, user-run-skip-load): ファイルの中身を写さない。ページは
+            // 破壊テスト (S9-b-1, user-run-skip-load): ファイルの中身をコピーしない。ページは
             // ゼロのままになり、Ring 3 が entry からゼロを実行して ud2 へ届かない。
             if page_start_in_segment < ph.p_filesz && !cfg!(feature = "user-run-skip-load") {
                 let remaining = ph.p_filesz - page_start_in_segment;
@@ -1505,8 +1505,8 @@ fn load_user_program_into(
             let Some(virt) = common::addr::VirtAddr::new(page) else {
                 return Err(UserLoadError::NotCanonical(page));
             };
-            // 破壊 (S9-b-1, user-run-writable-text): 区画の権限を無視して書けるように
-            // 張る。**読み取り専用のはずの葉が W=1 になり、下の読み戻しが捕まえる。**
+            // 破壊テスト (S9-b-1, user-run-writable-text): 区画の権限を無視して書けるように
+            // マップする。**読み取り専用のはずの葉が W=1 になり、下の読み戻しが検出する。**
             let attributes = PageAttributes {
                 user: true,
                 writable: writable || cfg!(feature = "user-run-writable-text"),
@@ -1519,7 +1519,7 @@ fn load_user_program_into(
                     .space
                     .map_user_4kib(allocator, direct_map, virt, frame, attributes)
             } {
-                // **張れなかったフレームは、ここで返す。** 空間へ繋がっていないので
+                // **マップできなかったフレームは、ここで返す。** 空間へ繋がっていないので
                 // `AddressSpace::destroy` からは見えず、返さないと誰にも戻らない。
                 // **実測で気づいた**——失敗の経路で空きフレームが 7 枚減るのに、
                 // 隔離へ入ったのは 6 枚だった。差の 1 枚がこれである。
@@ -1555,10 +1555,10 @@ fn load_user_program_into(
         previous_end = ph.p_vaddr + ph.p_memsz;
     }
 
-    // **ヒープの初期値を控える（H-a。ADR-0044）。** **像の末尾の次のページである。**
+    // **ヒープの初期値を控える（H-a。ADR-0044）。** **イメージの末尾の次のページである。**
     //
     // **`previous_end` は最後の区画の末尾である**（上のループが毎回入れている）。
-    // **区画は番地の順に並んでいる**ので、これが像の末尾になる
+    // **区画はアドレスの順に並んでいる**ので、これがイメージの末尾になる
     // （並びは `Elf::load_segments` が保証する。ADR-0039）。
     process.heap = Heap::from_image_end(previous_end);
 
@@ -1606,18 +1606,18 @@ fn load_user_program_into(
         "user-load: mapped the user stack {stack_page:#x}..{USER_PROGRAM_STACK_TOP:#x} (w=true)"
     ));
 
-    // **環境を積む前に、錠の外へ写す（f-1）。**
+    // **環境を積む前に、ロックの外へコピーする（f-1）。**
     //
-    // **`build_initial_stack` を錠の下で呼ばない**——**`Locked` は持っている
+    // **`build_initial_stack` をロックの下で呼ばない**——**`Locked` は持っている
     // 間ずっと割り込みを止める**ので、1 ページを書く間ずっと止めることになる。
-    // **写しは 1KiB で、カーネルスタックの余裕（実測で 65,328 バイト）の
+    // **コピーは 1KiB で、カーネルスタックの余裕（実測で 65,328 バイト）の
     // 中に収まる。**
     let mut env_store = [[0u8; ENV_LINE_MAX]; MAX_ENVP];
     let mut env_lens = [0usize; MAX_ENVP];
     let mut env_slices: [&[u8]; MAX_ENVP] = [b""; MAX_ENVP];
     let envp: &[&[u8]] = match envp {
-        // **親が渡したものをそのまま積む（f-2）。** 写しはもう取ってある
-        // （`spawn` が `SPAWN_ENVPS` へ控えている）ので、ここでは写さない。
+        // **親が渡したものをそのまま積む（f-2）。** コピーはもう取ってある
+        // （`spawn` が `SPAWN_ENVPS` へ控えている）ので、ここではコピーしない。
         Some(from_parent) => from_parent,
         None => {
             let env_count = {
@@ -1637,7 +1637,7 @@ fn load_user_program_into(
     };
 
     // **初期スタックを Linux の形で積む（S11-1）。**
-    // SAFETY: `dst` はいま張ったスタックページの direct map 越しの先頭で、
+    // SAFETY: `dst` はいまマップしたスタックページの direct map 越しの先頭で、
     // 1 ページぶん書ける。単一実行文脈である。
     let Some(initial_rsp) = (unsafe { build_initial_stack(dst, stack_page, argv, envp) }) else {
         return Err(UserLoadError::ArgumentsTooLong);
@@ -1664,7 +1664,7 @@ fn load_user_program_into(
         initial_rsp % 16 == 0
     ));
 
-    // **張った側とは独立に降りて、葉のフラグを読み戻す。**
+    // **マップした側とは独立に降りて、葉のフラグを読み戻す。**
     // これが S9-a で足した `writable` が実際に W を落としていることの、
     // この経路での観測である（`ring3-vectors` の 6 本目はもう一方の経路を見ている）。
     let mut mismatches = 0usize;
@@ -1702,8 +1702,8 @@ fn load_user_program_into(
     //
     // **CR3 を差し替えてから iretq で落ちる。** 上位は共有なのでカーネルは動き
     // 続ける（S7-c の到達条件 4 が、実プログラムで初めて使われる）。
-    // 戻りは `ud2` の #UD を S8 の畳みが受ける。
-    // 破壊 (S9-b-1, user-run-wrong-entry): entry ではなく最初の PT_LOAD の先頭へ
+    // 戻りは `ud2` の #UD を S8 の例外による終了処理が受ける。
+    // 破壊テスト (S9-b-1, user-run-wrong-entry): entry ではなく最初の PT_LOAD の先頭へ
     // 飛ぶ。**詰め物の ud2 で即座に #UD になり、フォルト RIP が期待と食い違う。**
     // 詰め物が生きていることは verify_embedded_user_elf が主張している。
     #[cfg(not(feature = "user-run-wrong-entry"))]
@@ -1721,11 +1721,11 @@ fn load_user_program_into(
     Ok(())
 }
 
-/// 写像済みのプロセスを Ring 3 で走らせる（S11-3 で切り出した）。
+/// マップ済みのプロセスを Ring 3 で走らせる（S11-3 で切り出した）。
 ///
 /// # なぜ切り出したか
 ///
-/// **アロケータを遠征の前に返すためである**（`ADR-0030`）。写像には要るが、
+/// **アロケータを遠征の前に返すためである**（`ADR-0030`）。マッピングには要るが、
 /// 遠征には要らない。**切り口は元からあった `if !run` の位置である。**
 ///
 /// **あの分岐は S9-b-2 で「壊した像を写像だけして走らせない」ために作った。**
@@ -1734,7 +1734,7 @@ fn load_user_program_into(
 ///
 /// # Safety
 ///
-/// `process` の写像が済んでおり、entry と stack が張ったユーザーページであること。
+/// `process` のマッピングが済んでおり、entry と stack がマップしたユーザーページであること。
 /// 起動時の単一実行文脈から呼ぶこと。
 /// ユーザースタックの高水位を判定行に出す（EV。ADR-0041）。
 ///
@@ -1746,13 +1746,13 @@ fn load_user_program_into(
 ///
 /// **止めない。** **超えても壊れてはいない**——**判断が要るだけである。**
 /// **壊れる側（ガードページを踏む）は、そもそもこのページの下が
-/// 写像されていないので `#PF` になる。**
+/// マップされていないので `#PF` になる。**
 fn report_user_stack_high_water(logger: &mut Logger<SerialPort>, process: &UserProcess) {
-    /// スタックページの大きさ。**1 枚だけ張ってある。**
+    /// スタックページの大きさ。**1 枚だけマップしてある。**
     const PAGE_SIZE: usize = 4096;
 
     if process.stack_scratch == 0 {
-        // **張っていない。** 走らせずに戻る経路（`run` が偽）がここへ来る。
+        // **マップしていない。** 走らせずに戻る経路（`run` が偽）がここへ来る。
         return;
     }
 
@@ -1778,11 +1778,11 @@ fn report_user_stack_high_water(logger: &mut Logger<SerialPort>, process: &UserP
 
 /// カーネルスタックの高水位を 1 行出す（`ADR-0068` の (c)）。
 ///
-/// **`#[inline(never)]` にしてある**——**`format_args!` の一時値を [`run_loaded_program`] の枠へ
-/// 乗せないためである。** **`dev` では、通らない分岐の一時値も呼び出しの引数の一時値も、そのまま枠を
+/// **`#[inline(never)]` にしてある**——**`format_args!` の一時値を [`run_loaded_program`] のフレームへ
+/// 乗せないためである。** **`dev` では、通らない分岐の一時値も呼び出しの引数の一時値も、そのままフレームを
 /// 広げる**（`docs/coding-standards.md` の「番地以外が動いたら、まず枠の大きさを静的に読む」）。
-/// **乗せた形を 1 度実測した**——**計器自身がカーネルスタックの高水位と遠征スタックの高水位を
-/// 208 バイトずつ深くした**（2026-09-23。`tools/frame-sizes.py` で枠を読んだ）。
+/// **乗せた形を 1 度実測した**——**計測自身がカーネルスタックの高水位と遠征スタックの高水位を
+/// 208 バイトずつ深くした**（2026-09-23。`tools/frame-sizes.py` でフレームを読んだ）。
 #[inline(never)]
 fn report_stack_water_before_ring3(logger: &mut Logger<SerialPort>, name: &'static str) {
     let used = crate::stack::kernel_stack_high_water();
@@ -1810,11 +1810,11 @@ unsafe fn run_loaded_program(
     //
     // **深さから引ける値なので、引数で受け取らない。**
     //
-    // 破壊 (S11-5, spawn-child-rsp0): 親の遠征スタックではなく、**子自身の**
+    // 破壊テスト (S11-5, spawn-child-rsp0): 親の遠征スタックではなく、**子自身の**
     // 遠征スタックの上端へ戻す。**入れ子でないうちはこの行を通らないので、
     // 入れ子になった瞬間だけ壊れる。** 親が次にカーネルへ入るときの RSP0 が
-    // 子のスタックを指し、**次に子を起こしたときに親のフレームを踏む。**
-    // **`spawn` が戻り先の RSP0 を突き合わせて捕まえる。**
+    // 子のスタックを指し、**次に子を起動したときに親のフレームを踏む。**
+    // **`spawn` が戻り先の RSP0 を突き合わせて検出する。**
     let main_rsp0_top = if crate::ring3::depth() == 0 {
         crate::gdt::privilege_stack_top()
     } else if cfg!(feature = "spawn-child-rsp0") {
@@ -1846,22 +1846,22 @@ unsafe fn run_loaded_program(
     let claimed_foreground = crate::input::claim_foreground();
     // **前の中断要求を持ち越さない（S12 前の手当て、C）。**
     //
-    // **深さ 1 で Ctrl+C を押すと、旗は立つが誰も消費しない**——
-    // **畳む地点は深さ 2 以上でしか発火しない**（`crate::idt` の
-    // `fold_if_interrupted`）。**降ろさずに子を起こすと、その子が
-    // 起きた瞬間に止まる。**
+    // **深さ 1 で Ctrl+C を押すと、フラグは立つが誰も消費しない**——
+    // **終了させる地点は深さ 2 以上でしか発火しない**（`crate::idt` の
+    // `fold_if_interrupted`）。**降ろさずに子を起動すると、その子が
+    // 起動した瞬間に止まる。**
     //
-    // 破壊 (S12 前の手当て C, kill-keep-stale-interrupt): 降ろさない。
-    // **シェルで Ctrl+C を押した後、次に起こした子が即座に止まる。**
+    // 破壊テスト (S12 前の手当て C, kill-keep-stale-interrupt): 降ろさない。
+    // **シェルで Ctrl+C を押した後、次に起動した子が即座に止まる。**
     #[cfg(not(feature = "kill-keep-stale-interrupt-test"))]
     crate::input::clear_interrupt_request();
     // **どの深さの遠征スタックを使うかを控える（S11-5）。** 戻った後は深さが
     // 元へ戻っているので、そのときには引けない。
     let entered_at_depth = crate::ring3::depth();
-    // **起こすプログラムの FP は既定値から始める（`ADR-0058` の Decision 4）。**
+    // **起動するプログラムの FP は既定値から始める（`ADR-0058` の Decision 4）。**
     // **前のプログラムが XMM へ残した値が、次のプログラムから読めてはならない。**
     //
-    // 破壊確認: `fp-no-fresh-state` では戻さない。**前の値がそのまま見える。**
+    // 破壊テストでの確認: `fp-no-fresh-state` では戻さない。**前の値がそのまま見える。**
     #[cfg(not(feature = "fp-no-fresh-state"))]
     // SAFETY: [`crate::fp::FpArea::fresh`] は `fxsave` の形に沿った並びで、
     // MXCSR も予約ビットを立てていない（`#GP` にならない）。
@@ -1885,10 +1885,10 @@ unsafe fn run_loaded_program(
     }
 
     // **DF=1 の文脈から入った割り込みを数える起点（2026-09-24）。** **`spin` は `std` の後で
-    // 回る**ので、止められるまでに来たタイマはどれも DF=1 の文脈から入る（下の判定行）。
+    // 空回りする**ので、止められるまでに来たタイマはどれも DF=1 の文脈から入る（下の判定行）。
     let irq_entries_from_df_before =
         crate::idt::entries_from_direction_flag_set(crate::idt::EntryPath::Irq);
-    // SAFETY: entry と stack は今張ったユーザーページで、`ud2` が必ずフォルト
+    // SAFETY: entry と stack は今マップしたユーザーページで、`ud2` が必ずフォルト
     // する。main_rsp0_top はメインのカーネルスタック上端。単一実行文脈である。
     unsafe {
         crate::ring3::enter(
@@ -1898,7 +1898,7 @@ unsafe fn run_loaded_program(
             crate::syscall::window_for_subtree(USER_PROGRAM_PML4_INDEX),
         )
     };
-    // **引き取る。** 遠征が畳みで戻っても `exit` で戻ってもここを通る
+    // **引き取る。** 遠征が例外による終了処理で戻っても `exit` で戻ってもここを通る
     // （`ring3::enter` はこの 2 つの longjmp でしか戻らない）。
     // **前景を返す。** 取った者だけが返す（入れ子の子は取れていない）。
     if claimed_foreground {
@@ -1916,7 +1916,7 @@ unsafe fn run_loaded_program(
         // **止めた打鍵そのものを捨てる。** 残すと、次にシェルが読んだときに
         // `^C` がもう 1 つ出る（実測。[`crate::input::discard_typed_input`]）。
         //
-        // 破壊 (S12 前の手当て C, kill-keep-typed-input): 捨てない。
+        // 破壊テスト (S12 前の手当て C, kill-keep-typed-input): 捨てない。
         // **止めた直後のプロンプトに `^C` が余分に出る。**
         #[cfg(not(feature = "kill-keep-typed-input-test"))]
         crate::input::discard_typed_input();
@@ -1946,7 +1946,7 @@ unsafe fn run_loaded_program(
     // 決める材料が、これまで 1 つも無かった**——**遠征スタックには高水位が
     // 在るのに、こちらには無かった。**
     //
-    // **測りかたは遠征スタックと同じである**——**張るときに既知のバイトで埋め、
+    // **測りかたは遠征スタックと同じである**——**マップするときに既知のバイトで埋め、
     // 戻ってから、毒値でない一番下のバイトを探す。** 使用量は上端からそこまでである。
     //
     // **限界も同じである**——**プログラムが毒値そのものを書いたら、使ったとは
@@ -2016,8 +2016,8 @@ unsafe fn run_loaded_program(
     // 入れ子なら入口で読んだ `production`（親の空間）である。** **上の
     // `main_rsp0_top` と同じ読み方で、控えの局所変数を持たない。**
     // **控えを持つ形にしたら、遠征スタックの高水位が 96 バイト増えた**（実測。
-    // `tools/boot-log-compare.py` が捕まえた。**`dev` では局所変数がそのまま
-    // 枠を広げ、この枠は子が走っている間ずっと深さ 0 のスタックに載る**）。
+    // `tools/boot-log-compare.py` が検出した。**`dev` では局所変数がそのまま
+    // フレームを広げ、このフレームは子が走っている間ずっと深さ 0 のスタックに載る**）。
     // **`ring3::enter` は深さを戻してから返るので、ここで読む深さは入口と同じである。**
     // SAFETY: 本番のテーブルへ戻す。上位は同じなので連続して実行できる。
     unsafe {
@@ -2034,13 +2034,13 @@ unsafe fn run_loaded_program(
     Ok(())
 }
 
-/// ファイルシステムから像を読み、子プロセスとして走らせ、**終わるまで待つ**（S11-5）。
+/// ファイルシステムからイメージを読み、子プロセスとして走らせ、**終わるまで待つ**（S11-5）。
 ///
 /// # 同期である
 ///
 /// **戻るのは子が終わった後である。** 親（呼び出し元の Ring 3）は、その間
 /// 入れ子の遠征の下で止まっている。**この関数は同期のままである。**
-/// **待たない形は別の口にした**——**W1-c-4 の `start_detached`（`concurrent-test` の構成だけ）が、
+/// **待たない形は別の関数にした**——**W1-c-4 の `start_detached`（`concurrent-test` の構成だけ）が、
 /// 足した 1 本のタスクの上でこの関数を呼ぶ。** **以前ここは「非同期にするにはスケジューラが要り、
 /// それはまだ無い」と書いていた**（`docs/roadmap.md` の S11）。
 ///
@@ -2062,12 +2062,12 @@ unsafe fn run_loaded_program(
 /// 子は [`crate::syscall::reset_counters`] を通り、自分の `write` と `exit` を
 /// 記録する。**親の記録はここで控えて戻す**（`crate::syscall::Records` と
 /// [`crate::ring3::FoldRecord`]）。
-/// 起こせる像かを、起こす前に確かめる（`ADR-0063` の (b3)）。
+/// 起動できるイメージかを、起動する前に確かめる（`ADR-0063` の (b3)）。
 ///
 /// **[`spawn`] の探索と同じ 4 つを見る**——**在る・ディレクトリでない・通常ファイル・大きさ。**
-/// **起こしっぱなしの口が「見つからなければ同期で `-ENOENT`」を返すために切り出した**
+/// **切り離して起動する入口が「見つからなければ同期で `-ENOENT`」を返すために切り出した**
 /// ——**子の中で探すと、`-ENOENT` が親へ届くのは子が終わった後になり、シェルの `PATH` の輪が
-/// 回せない。** **子はもう一度探す**（[`spawn`] の中）。**2 度探す費用は、像の索引を読むだけである。**
+/// 回せない。** **子はもう一度探す**（[`spawn`] の中）。**2 度探す費用は、イメージの索引を読むだけである。**
 pub fn probe_program(path: &[u8]) -> Result<(), SpawnError> {
     let fs = crate::vfs::root_filesystem().map_err(SpawnError::Lookup)?;
     let inode = fs.lookup(path).map_err(SpawnError::Lookup)?;
@@ -2106,7 +2106,7 @@ static INHERITED_ENDS: [common::critical::Locked<InheritedEnds>; crate::ring3::R
 ];
 
 /// 予約した読み端のうち、まだ次の `spawn` に渡していないもの（`ADR-0063` の (b3)）。
-/// **スロットごとに 1 つ**——**シェルが `a | b` の左を起こしてから右を起こすまでの間、ここに在る。**
+/// **スロットごとに 1 つ**——**シェルが `a | b` の左を起動してから右を起動するまでの間、ここに在る。**
 static PENDING_STDIN: [common::critical::Locked<Option<u8>>; crate::ring3::RING3_SLOTS] = [
     common::critical::Locked::new(None),
     common::critical::Locked::new(None),
@@ -2160,7 +2160,7 @@ pub fn spawn(
     // **上の判定が `depth < MAX_EXCURSION_DEPTH` を保証しているので、範囲内である。**
     //
     // **深さ 0 からも呼べる（S11-11）。** `init` がカーネルの直線上から
-    // シェルを起こす。**S11-5 の時点では `dispatch` からしか来なかったので、
+    // シェルを起動する。**S11-5 の時点では `dispatch` からしか来なかったので、
     // 深さ 0 を不具合として拒んでいた。** 呼び出し側が増えたので、その判定を外した。
     // **この `slot` は深さの番号である。** 遠征のスロット（W1-c-1）は
     // `crate::ring3::current_slot` で引く。
@@ -2227,9 +2227,9 @@ pub fn spawn(
         }
     }
     // **`size` で切る。** 32 KiB 全体を渡すと、**前回の `spawn` が残した
-    // バイト列が像の続きとして読める**——`common::elf` の範囲検査は
+    // バイト列がイメージの続きとして読める**——`common::elf` の範囲検査は
     // 渡されたバイト列の長さに対して行うので、**長さを偽ると検査も緩む**
-    // （線3。参照が像の外を指さないことは、像の端がどこかに依る）。
+    // （線3。参照がイメージの外を指さないことは、イメージの端がどこかに依る）。
     let image: &'static [u8] = &image_slot[..size];
 
     // **親の遠征スタックの残りを測る（S11-5）。**
@@ -2240,12 +2240,12 @@ pub fn spawn(
     // 隣を静かに書く。**推測せずに測って出す。**
     // **深さ 0 の親は遠征スタックの上に居ない（S11-11 で直した）。**
     // **親は自分のタスクのカーネルスタック（ガードページ付き）の上に居る**——
-    // `init` ならメインのカーネルスタック、起こしっぱなしの 1 本（W1-c-4）なら
+    // `init` ならメインのカーネルスタック、切り離して起動した 1 本（W1-c-4）なら
     // そのタスクのスタックである。**そちらは測らない**——
     // **測る値打ちがあるのは、ガードの無い遠征スタックのほうである。**
     //
     // **行の文言は W1-c-4 の後に直した。** **以前は「the main kernel stack」と書いており、
-    // 起こしっぱなしの 1 本から呼んだときに嘘になった**（運用者の指摘。2026-09-16）。
+    // 切り離して起動した 1 本から呼んだときに嘘になった**（運用者の指摘。2026-09-16）。
     let stack_probe = 0u8;
     let rsp_now = &stack_probe as *const u8 as u64;
     if depth == 0 {
@@ -2268,15 +2268,15 @@ pub fn spawn(
         ));
     }
 
-    // **子が起こした孫の隔離を控える（S11-11）。**
+    // **子が起動した孫の隔離を控える（S11-11）。**
     //
     // **S11-5 で起動時の会計に同じ穴があり、そこは直した**——隔離のフレームは
     // 世代が退くまでアロケータへ戻らないので、**親から見ると消えたままである。**
     // **`spawn` 自身の会計にも同じ穴が残っていた。**
-    // **シェルが `ls` と `cat` と `hello` を起こしたところで出た**——
+    // **シェルが `ls` と `cat` と `hello` を起動したところで出た**——
     // 実測で 35 枚消えて、シェル自身の隔離は 9 枚だった（9 + 9 + 9 + 8）。
     let (children_before, leaked_before) = spawn_accounting();
-    // **会計の窓を開く（`ADR-0063` の (b1)）。** **他の窓と交差したら、大域の差は主張しない。**
+    // **会計のウィンドウを開く（`ADR-0063` の (b1)）。** **他のウィンドウと交差したら、大域の差は主張しない。**
     let window = open_spawn_window();
 
     // **戻ってくるべき RSP0 を控える（S11-11 で直した）。**
@@ -2295,7 +2295,7 @@ pub fn spawn(
     let saved_fold = crate::ring3::save_fold_record();
 
     // **会計のために借りて、すぐ返す**（`ADR-0030`）。**借りられなければ
-    // 子も起こせない**ので、そのまま [`UserLoadError::AllocatorUnavailable`] へ落とす。
+    // 子も起動できない**ので、そのまま [`UserLoadError::AllocatorUnavailable`] へ落とす。
     let shared_before = crate::shm::frames_held();
     let free_before = match crate::frame_allocator::take() {
         Some(allocator) => {
@@ -2323,10 +2323,10 @@ pub fn spawn(
     argv_slot[..argv_bytes.len()].copy_from_slice(argv_bytes);
     let stored: &'static [u8] = &argv_slot[..argv_bytes.len()];
 
-    // 破壊 (S11-7, spawn-argv-drop-last): 最後の 1 本を落とす。
+    // 破壊テスト (S11-7, spawn-argv-drop-last): 最後の 1 本を落とす。
     // **終端の扱いを 1 つずらす形で、雑に見ると「ちゃんと切り分けている」ように
     // 見える。** 子が受け取る `argc` が 1 つ少なくなり、`spawn-test` の検算が
-    // 食い違いを捕まえる。
+    // 食い違いを検出する。
     let argv_count = if cfg!(feature = "spawn-argv-drop-last") {
         argv_count.saturating_sub(1)
     } else {
@@ -2352,7 +2352,7 @@ pub fn spawn(
 
     // **`envp` も同じ形で控えて切り分ける（f-2。`ADR-0053`）。**
     //
-    // **`None` はカーネル側の呼び出しである**（`init` が `/bin/zash` を起こす形）。
+    // **`None` はカーネル側の呼び出しである**（`init` が `/bin/zash` を起動する形）。
     // **そのときは起動時の環境を積む**——`load_user_program` が表から採る。
     // **Ring 3 から来た `spawn` は必ず配列を渡す**（`copy_user_string_array` が
     // NULL を `-EFAULT` で断る。`ADR-0053` の Decision 2）。
@@ -2397,7 +2397,7 @@ pub fn spawn(
     // 切り替えの退避（[`crate::task`]）では守れない。** 子が XMM を使えば、
     // 親が Ring 3 に持っていた値はそのまま消える。
     //
-    // 破壊確認: `fp-spawn-no-save` では控えない。**親が `spawn` を跨いで
+    // 破壊テストでの確認: `fp-spawn-no-save` では控えない。**親が `spawn` を跨いで
     // 浮動小数点の値を保てなくなる。**
     #[cfg(not(feature = "fp-spawn-no-save"))]
     let parent_fp = {
@@ -2419,7 +2419,7 @@ pub fn spawn(
     };
 
     // **子の終わり方をここで読む。** 戻す前に読まなければ、親のもので上書きされる。
-    // **中断を先に見る（S12 前の手当て、C）。** **`exit` も畳みも通っていない**
+    // **中断を先に見る（S12 前の手当て、C）。** **`exit` も例外による終了処理も通っていない**
     // ので、先に見なければ `Folded(0)` に化ける。
     let child = if crate::ring3::interrupted() {
         SpawnOutcome::Interrupted
@@ -2440,7 +2440,7 @@ pub fn spawn(
     //
     // **ここが違うと、親が次にカーネルへ入るときのスタックが変わる。**
     // **すぐには壊れない**——親はそのまま Ring 3 へ返り、次のシステムコールで
-    // 別のスタックに乗る。**壊れるのは、次に子を起こして親のフレームを踏んだ
+    // 別のスタックに乗る。**壊れるのは、次に子を起動して親のフレームを踏んだ
     // ときである。** 原因から遠いので、ここで突き合わせる。
     let rsp0_after = crate::gdt::privilege_stack_top();
     if rsp0_after != rsp0_before {
@@ -2466,26 +2466,26 @@ pub fn spawn(
 
     // **親の記録を戻す。**
     //
-    // 破壊 (S11-5, spawn-keep-child-records): 戻さない。**子が送ったバイト列と
+    // 破壊テスト (S11-5, spawn-keep-child-records): 戻さない。**子が送ったバイト列と
     // 終了状態が、親のものとして判定行に出る。** 親（`syscall-test`）の
-    // `write` の突き合わせが食い違って捕まえる。
+    // `write` の突き合わせが食い違って検出する。
     #[cfg(not(feature = "spawn-keep-child-records"))]
     {
         crate::syscall::restore_records(saved_records);
         crate::ring3::restore_fold_record(saved_fold);
     }
 
-    // **共有フレームを `consumed` から除く（`ADR-0065` の (A-3)）。** **窓の間にアロケータから
+    // **共有フレームを `consumed` から除く（`ADR-0065` の (A-3)）。** **ウィンドウの間にアロケータから
     // 取ったまま返っていない共有フレームは、`consumed` に入るが `destroy` が飛ばして
     // `quarantined` に入らない**——**その差を消す。** **(E) では 0**（プールはアロケータの外）。
     // **失うもの**——**`consumed == quarantined` の素の等式（共有分について）。**
-    // **覆う判定**——**`shm` の created==released（フレームは参照数で返る。`shm:` の計器）。**
+    // **覆う判定**——**`shm` の created==released（フレームは参照数で返る。`shm:` の計測）。**
     let shared_after = crate::shm::frames_held();
     let shared_net = shared_after.saturating_sub(shared_before) as usize;
     let consumed = (free_before.saturating_sub(free_after) as usize).saturating_sub(shared_net);
-    // **窓を閉じる。** **交差していたら、大域の差は相手の分を取り込んでいる**（`ADR-0063` の (b1)）。
+    // **ウィンドウを閉じる。** **交差していたら、大域の差は相手の分を取り込んでいる**（`ADR-0063` の (b1)）。
     let crossed = close_spawn_window(window);
-    // **孫のぶんを足す。** 子が更に起こしていれば、そのぶんも消えている。
+    // **孫のぶんを足す。** 子が更に起動していれば、そのぶんも消えている。
     let (children_after, leaked_after) = spawn_accounting();
     let quarantined = held + children_after.saturating_sub(children_before);
     let all_leaked = leaked + leaked_after.saturating_sub(leaked_before);
@@ -2556,12 +2556,12 @@ pub fn spawn(
     Ok(child)
 }
 
-/// 起こしっぱなしで走らせる 1 本の依頼（W1-c-4）。**パスと `argv` と要素数である。**
-/// 起こしっぱなしの依頼（`ADR-0063` の (b3) で置き場つきに作り直した）。
+/// 切り離して走らせる 1 本の依頼（W1-c-4）。**パスと `argv` と要素数である。**
+/// 切り離して起動する依頼（`ADR-0063` の (b3) で置き場つきに作り直した）。
 ///
-/// **W1-c-4 では `&'static [u8]` の 3 つ組だった**（依頼するのが `init` で、像の中の文字列を
-/// 渡せた）。**Ring 3 から来る `path` / `argv` / `envp` はシステムコールのスタックの写しなので、
-/// 静的な置き場が要る。** **大きさは `spawn_from_ring3` の写しと同じである**（256 + 1024 + 1024）。
+/// **W1-c-4 では `&'static [u8]` の 3 つ組だった**（依頼するのが `init` で、イメージの中の文字列を
+/// 渡せた）。**Ring 3 から来る `path` / `argv` / `envp` はシステムコールのスタックのコピーなので、
+/// 静的な置き場が要る。** **大きさは `spawn_from_ring3` のコピーと同じである**（256 + 1024 + 1024）。
 ///
 /// **`Locked` の中に置くので `.data` へ行く**（(b2) の実測と同じ機序。
 /// `docs/coding-standards.md` の「コードが増える段では」の 3）。
@@ -2598,7 +2598,7 @@ impl DetachedRequest {
 static DETACHED_REQUEST: common::critical::Locked<Option<DetachedRequest>> =
     common::critical::Locked::new(None);
 
-/// プログラムを起こしっぱなしで走らせる（W1-c-4。`ADR-0060`）。**終わるのを待たずに戻る。**
+/// プログラムを切り離して走らせる（W1-c-4。`ADR-0060`）。**終わるのを待たずに戻る。**
 ///
 /// # [`spawn`] との違い
 ///
@@ -2641,40 +2641,40 @@ pub fn start_detached(
     *DETACHED_REQUEST.lock() = Some(request);
     let handle = crate::task::start_ring3_task();
     if handle.is_none() {
-        // **起こせなかったら依頼を片づける**——**次に起こす者が古い依頼を走らせないため。**
+        // **起動できなかったら依頼を片づける**——**次に起動する者が古い依頼を走らせないため。**
         *DETACHED_REQUEST.lock() = None;
     }
     handle
 }
 
-/// 起こしっぱなしにした子の終わり方（`ADR-0063` の (b2)）。**手形と一緒に置く。**
+/// 切り離して起動した子の終わり方（`ADR-0063` の (b2)）。**ハンドルと一緒に置く。**
 ///
 /// **`SpawnOutcome` をそのまま置かない**——**`SpawnError` は `Copy` ではない。**
 /// **待つ側が要るのは「終わったこと」と「終わり方」なので、`SYS_SPAWN` と同じ形の
-/// ビットへ畳む**（[`crate::syscall::SPAWN_FOLDED_FLAG`]）。
+/// ビットへまとめる**（[`crate::syscall::SPAWN_FOLDED_FLAG`]）。
 static DETACHED_STATUS: common::critical::Locked<Option<(u64, u64)>> =
     common::critical::Locked::new(None);
 
-/// 待つ口が返す、子の終わり方（`ADR-0063` の (b2)）。
+/// 待つ入口が返す、子の終わり方（`ADR-0063` の (b2)）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildStatus {
     /// 終わり方のビット（`SYS_SPAWN` と同じ形）。
     Ended(u64),
-    /// 手形が合わない（終わった後の二重待ちも、これである）。
+    /// ハンドルが合わない（終わった後の二重待ちも、これである）。
     NoSuchChild,
 }
 
-/// 起こしっぱなしにした子が終わるのを待ち、回収する（`ADR-0063` の (b2)）。
+/// 切り離して起動した子が終わるのを待ち、回収する（`ADR-0063` の (b2)）。
 ///
 /// # 上限は置かない
 ///
-/// **本番の待ちは上限で止めない**（`ADR-0061`）。**回り続ける子を待つと永久に待つ**
+/// **本番の待ちは上限で止めない**（`ADR-0061`）。**空回りし続ける子を待つと永久に待つ**
 /// ——**(b2) の限界として `ADR-0063` に書いた。**
 ///
 /// # 回収してから戻る
 ///
 /// **`Finished` になったら終わり方を読み、タスクを `Uninitialized` へ戻す**
-/// （`crate::task::reap_ring3_task`）。**戻せば次の `|` で起こせる。**
+/// （`crate::task::reap_ring3_task`）。**戻せば次の `|` で起動できる。**
 pub fn wait_for_ring3_task(handle: u64) -> ChildStatus {
     if !crate::task::handle_is_current(handle) {
         return ChildStatus::NoSuchChild;
@@ -2684,14 +2684,14 @@ pub fn wait_for_ring3_task(handle: u64) -> ChildStatus {
         //
         // **`set_current_waiting` の doc が「割り込みを止めた文脈から呼ぶこと」と書いている。**
         // **`sys_read` と `sys_nanosleep` は `int 0x80`（割り込みゲート）の内側なので IF=0 だが、
-        // ここは `init` のカーネル文脈で IF=1 である**——**窓が開く。**
+        // ここは `init` のカーネル文脈で IF=1 である**——**ウィンドウが開く。**
         //
         // **逃すと永久に待つ**——**打鍵やティックと違って、子の終わりは 1 度しか起こさない。**
         // **見てから据えるまでにティックが食い込み、その先で子が終わって起こすと、まだ待って
         // いない親は見つからない。** **その後に親が「待っている」と書くと、二度と起きない。**
-        // 破壊 (`ADR-0063` の (b2), wait-window-is-wide): 窓を広げる。**ガードを取らず、
+        // 破壊テスト (`ADR-0063` の (b2), wait-window-is-wide): ウィンドウを広げる。**ガードを取らず、
         // ティックが 2 つ入るまで空回りする**——**その間に子が終わると、起こしが取りこぼされる。**
-        // **「機会が無い」破壊を、機会を作って落とす形である**（`docs/coding-standards.md` の
+        // **「機会が無い」破壊テストを、機会を作って落とす形である**（`docs/coding-standards.md` の
         // 「破壊テストが「機会が無い」になるなら、用意する前に機会を作れないかを見る」）。
         #[cfg(not(feature = "wait-window-is-wide"))]
         let guard = common::critical::InterruptGuard::enter();
@@ -2706,7 +2706,7 @@ pub fn wait_for_ring3_task(handle: u64) -> ChildStatus {
             }
         }
         crate::task::set_current_waiting(crate::task::Wait::Child { handle });
-        // **譲る前に割り込みを戻す。** **据えた後の窓は無害である**——**親は既に「待っている」
+        // **譲る前に割り込みを戻す。** **据えた後のウィンドウは無害である**——**親は既に「待っている」
         // ので、そこで起こされれば走行可能へ戻り、譲ってもすぐ選ばれる。**
         #[cfg(not(feature = "wait-window-is-wide"))]
         drop(guard);
@@ -2729,7 +2729,7 @@ pub fn wait_for_ring3_task(handle: u64) -> ChildStatus {
 pub fn run_detached_request() {
     // **依頼は静的の置き場から借りる。値で取らない（`ADR-0063` の (b3)）。** **値で取ると
     // 約 2.4 KiB がこのタスクのカーネルスタックに 2 度乗り**（`take()` と `let Some(..)` で、
-    // dev プロファイルは畳まない）**、高水位が半分の見張りを越えて止まった**（実測。
+    // dev プロファイルはまとめない）**、高水位が半分の見張りを越えて止まった**（実測。
     // 33,864 / 65,536 バイト）。
     let request: *const DetachedRequest = match &*DETACHED_REQUEST.lock() {
         Some(request) => request as *const DetachedRequest,
@@ -2744,9 +2744,9 @@ pub fn run_detached_request() {
         ));
         common::cpu::halt_forever();
     }
-    // SAFETY: 置き場は `static` なので番地は生き続ける。**書く者は `start_detached` だけで、
-    // このタスクが走っている間は `start_ring3_task` が起こしを断る**ので、読んでいる間に
-    // 書き換えられることは無い。**錠は上で外してある**（持ったまま `spawn` へ入ると、
+    // SAFETY: 置き場は `static` なのでアドレスは生き続ける。**書く者は `start_detached` だけで、
+    // このタスクが走っている間は `start_ring3_task` が起動を断る**ので、読んでいる間に
+    // 書き換えられることは無い。**ロックは上で外してある**（持ったまま `spawn` へ入ると、
     // `Locked` が割り込みを止めたままになる）。
     let request: &DetachedRequest = unsafe { &*request };
     let path = &request.path[..request.path_len];
@@ -2770,7 +2770,7 @@ pub fn run_detached_request() {
     if let Some(unused) = take_inherit_stdout(slot) {
         crate::pipe::close_write_end(unused);
     }
-    // **終わり方を手形と一緒に置く（`ADR-0063` の (b2)）。** **待つ側がこれを読む。**
+    // **終わり方をハンドルと一緒に置く（`ADR-0063` の (b2)）。** **待つ側がこれを読む。**
     let bits = match &outcome {
         Ok(SpawnOutcome::Exited(status)) => *status,
         Ok(SpawnOutcome::Folded(vector)) => crate::syscall::SPAWN_FOLDED_FLAG | *vector,

@@ -4,14 +4,14 @@
 //! すれば書き戻して復帰できる前段を持つ。** A-1/B-1 が確立した「落とす→独立
 //! walker で検証→駄目なら巻き戻し→良ければ確定」の型を除去へ適用する。
 //!
-//! 除去点そのもの（呼び出し位置）は `main.rs` の `_start` にある。恒等窓を握る
+//! 除去点そのもの（呼び出し位置）は `main.rs` の `_start` にある。恒等ウィンドウを握る
 //! 全検証サイトと boot_info の消費が済んだ後でなければならない（順序依存）。
 //! 手順と恒等前提の網羅列挙は docs/verification-coverage.md の
 //! 「higher-half B-2b」を参照。
 //!
 //! # なぜ本流ロジックを lib 側に置くか
 //! 書き込み primitive（[`super::table::clear_pml4_entry`] /
-//! [`super::table::restore_pml4_entry`]）と表フレーム走査
+//! [`super::table::restore_pml4_entry`]）とテーブルフレーム走査
 //! （[`super::verify::collect_subtree_table_frames`]）を `pub(crate)` に保ちつつ
 //! 呼ぶには、呼び出し側も同じ lib クレート内である必要がある（`main.rs` は別の
 //! bin クレートで、lib の `pub(crate)` は見えない）。鋭利な道具の可視性を lib 内へ
@@ -29,7 +29,7 @@ use super::{switch, table, verify};
 ///
 /// **恒等が無くても解決できねばならない領域。** ここに挙げた VA が除去後に独立
 /// walker で present な葉へ解決すれば、CR3 リロード（全 TLB フラッシュ）へ進んで
-/// よい。RIP・RSP・direct map 窓・カーネルイメージは lib が自分で導けるので
+/// よい。RIP・RSP・direct map ウィンドウ・カーネルイメージは lib が自分で導けるので
 /// [`remove_identity`] が内部で足す。呼び出し側が渡すのは lib からは知り得ない
 /// 高位 VA（ヒープ・フレームバッファ）だけである。
 pub struct RequiredRegion {
@@ -44,14 +44,14 @@ pub struct RequiredRegion {
 /// `PML4[0]` 配下の中間テーブルフレーム数を数えてログに出し（何枚が到達不能に
 /// なるか＝意図的リーク）、`PML4[0]/[256]/[511]` 各配下のフレーム集合が互いに
 /// 交わらないことを実測する。交わり（共有）があると「`PML4[0]` を落とせば配下が
-/// 到達不能になる」前提が崩れ、リーク数が過大になる（bootstrap 表は PD_shared を
+/// 到達不能になる」前提が崩れ、リーク数が過大になる（bootstrap テーブルは PD_shared を
 /// `[0]` と `[511]` で共有していた前例がある）。
 fn frame_accounting_before_removal(
     logger: &mut Logger<SerialPort>,
     cr3: PhysAddr,
     direct_map: DirectMap,
 ) {
-    // QEMU 既定構成では各サブツリーの表フレームは 1 桁〜十数枚に収まる（恒等
+    // QEMU 既定構成では各サブツリーのテーブルフレームは 1 桁〜十数枚に収まる（恒等
     // ≒2GiB、direct map ≒物理全域を 2MiB ページ、kernel ≒数百 KiB）。溢れるのは
     // 物理が極端に大きい構成のときで、その場合は (3) の除去より前にここで halt
     // するので恒等は保たれたまま安全に失敗する。ブートスタック（16KiB）を圧迫
@@ -61,7 +61,7 @@ fn frame_accounting_before_removal(
     let mut buf256 = [PhysAddr::new_const(0); CAP];
     let mut buf511 = [PhysAddr::new_const(0); CAP];
 
-    // SAFETY: cr3 は稼働中の自前テーブルを指し、direct_map（高位窓）で配下の
+    // SAFETY: cr3 は稼働中の自前テーブルを指し、direct_map（高位ウィンドウ）で配下の
     // テーブルを読める。読み取りのみ。
     let counts = unsafe {
         (
@@ -98,7 +98,7 @@ fn frame_accounting_before_removal(
 
     if !(d0_256 && d0_511 && d256_511) {
         // 共有があってもリーク数が過大になるだけで除去自体は安全（落とすのは
-        // PML4[0] の1エントリのみで、共有された表フレームは他経路から到達可能な
+        // PML4[0] の1エントリのみで、共有されたテーブルフレームは他経路から到達可能な
         // まま残る）。会計が狂うので目立つ形で警告する。
         logger.warn(format_args!(
             "identity-removal: subtree table frames are NOT pairwise disjoint; the unreachable-frame \
@@ -113,7 +113,7 @@ fn frame_accounting_before_removal(
 ///
 /// `high_mapped` は「恒等が無くても解決できねばならない、高位化した低位ポインタ」
 /// のうち **lib からは知り得ないもの**（ヒープの高位 VA・フレームバッファの高位
-/// VA）。RIP・RSP・direct map 窓・カーネルイメージは lib が自分で導けるので内部で
+/// VA）。RIP・RSP・direct map ウィンドウ・カーネルイメージは lib が自分で導けるので内部で
 /// 足す（下記の同期の穴を減らすため）。
 ///
 /// # 必須領域リストの同期（安全網の前提）
@@ -131,8 +131,8 @@ fn frame_accounting_before_removal(
 /// よる sweep に依存する）。
 ///
 /// # Safety
-/// 稼働中の CR3 が自前テーブルを指し、`direct_map`（高位窓）でその配下を読み書き
-/// できること。呼び出し時点で恒等窓を握る全検証サイトと boot_info の消費が
+/// 稼働中の CR3 が自前テーブルを指し、`direct_map`（高位ウィンドウ）でその配下を読み書き
+/// できること。呼び出し時点で恒等ウィンドウを握る全検証サイトと boot_info の消費が
 /// 済んでいること（順序依存。除去点より前に走ること）。
 pub unsafe fn remove_identity(
     logger: &mut Logger<SerialPort>,
@@ -144,7 +144,7 @@ pub unsafe fn remove_identity(
 
     // (1) 稼働 PML4 と PML4[0] を控える。
     let cr3 = switch::read_cr3();
-    // SAFETY: cr3 は稼働中の自前テーブル、direct_map（高位窓）でそのフレームを
+    // SAFETY: cr3 は稼働中の自前テーブル、direct_map（高位ウィンドウ）でそのフレームを
     // 読める。読み取りのみ。
     let saved0 = unsafe { verify::read_pml4_entry(cr3, direct_map, IDENTITY_INDEX) };
     logger.info(format_args!(
@@ -163,9 +163,9 @@ pub unsafe fn remove_identity(
     // 生きたまま恒等が復活する。
     unsafe { table::clear_pml4_entry(cr3, direct_map, IDENTITY_INDEX) };
 
-    // (4) 独立 walker で必須領域を検証する。RIP/RSP/direct map 窓/カーネルイメージ
+    // (4) 独立 walker で必須領域を検証する。RIP/RSP/direct map ウィンドウ/カーネルイメージ
     // は lib が導けるので内部で足す。high_mapped（ヒープ・FB）は呼び出し側が渡す。
-    // 低位の一点（恒等が覆っていた VA）を後の確認用に控える。恒等窓では phys==virt
+    // 低位の一点（恒等が覆っていた VA）を後の確認用に控える。恒等ウィンドウでは phys==virt
     // なので、PML4 フレームの物理値をそのまま低位 VA として使う。
     let rip = cpu::read_rip();
     let rsp = cpu::read_rsp();

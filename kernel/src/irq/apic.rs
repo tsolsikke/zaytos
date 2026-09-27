@@ -1,6 +1,6 @@
 //! Local APIC / I/O APIC によるコントローラ実装（S2-d-1b）。
 //!
-//! **2 つ目の実装である。まだ選ばれない。** S2-d-1b は振る舞い不変の段で、
+//! **2 つ目の実装である。まだ選ばれない。** S2-d-1b は振る舞い不変の段階で、
 //! 配送は PIC / PIT のままである。切り替えは S2-d-1c（キーボード）と
 //! S2-d-2（タイマ）で行う。
 //!
@@ -57,10 +57,10 @@ pub(super) unsafe fn end_of_interrupt_for_routed_irq(spurious: bool) {
     if base == NOT_INSTALLED {
         // 経路が移っているのにアドレスが無い、という組み合わせは
         // `route_to_apic` の順序では起こらない（`Apic::new` が先に走る）。
-        // それでも黙って 0 番地へ書かないよう、ここで止める。
+        // それでも黙ってアドレス 0 へ書かないよう、ここで止める。
         return;
     }
-    // SAFETY: `Apic::new` が写像を確認した Local APIC のページ先頭を入れている。
+    // SAFETY: `Apic::new` がマッピングを確認した Local APIC のページ先頭を入れている。
     unsafe { crate::apic::send_end_of_interrupt(base) }
 }
 
@@ -80,9 +80,9 @@ pub(super) unsafe fn spurious_for_routed_irq(_irq: u8) -> bool {
 ///
 /// # 不変条件
 ///
-/// `io_apic_virt` は、[`crate::apic::map_and_probe`] が写像を確認したページの
+/// `io_apic_virt` は、[`crate::apic::map_and_probe`] がマッピングを確認したページの
 /// 先頭である。**この型を作れるのは [`Self::new`] だけ**で、そこが
-/// `MappedApic` を要求するので、写像されていないアドレスから作ることはできない。
+/// `MappedApic` を要求するので、マップされていないアドレスから作ることはできない。
 ///
 /// # Local APIC のアドレスを持たない
 ///
@@ -101,16 +101,16 @@ pub struct Apic {
 }
 
 impl Apic {
-    /// 写像済みの APIC からコントローラを作る。I/O APIC が無ければ `None`。
+    /// マップ済みの APIC からコントローラを作る。I/O APIC が無ければ `None`。
     ///
     /// **`MappedApic` を要求するのが安全性の要である。** 生のアドレスを
-    /// 受け取る形にすると、写像していないページを渡せてしまう。
+    /// 受け取る形にすると、マップしていないページを渡せてしまう。
     pub fn new(mapped: &crate::apic::MappedApic) -> Option<Self> {
         let direct_map = common::addr::direct_map();
         let io_apic = mapped.first_io_apic()?;
         let io_apic_virt = direct_map.phys_to_virt(io_apic.phys).as_u64();
 
-        // SAFETY: `map_and_probe` が写像を確認したページの先頭である。読み取りのみ
+        // SAFETY: `map_and_probe` がマッピングを確認したページの先頭である。読み取りのみ
         // （IOREGSEL への添字の書き込みを伴うが、割り込みの設定は変えない）。
         // 単一コアで、他の実行文脈がこの I/O APIC を触っていない。
         let entry_count = unsafe { crate::apic::redirection_entry_count(io_apic_virt) };
@@ -145,7 +145,7 @@ impl Apic {
     /// この IRQ の redirection entry を読み戻す。担当外なら `None`。
     pub(super) fn read_entry(&self, irq: u8) -> Option<super::RedirectionEntryView> {
         let entry = self.entry_for_irq(irq)?;
-        // SAFETY: 型の不変条件により写像済みのページである。読み取りのみ。
+        // SAFETY: 型の不変条件によりマップ済みのページである。読み取りのみ。
         let low = unsafe { crate::apic::read_redirection_entry_low(self.io_apic_virt, entry) };
         // **high dword も読む（S4-a）。宛先はこちらにある。**
         // SAFETY: 同上。読み取りのみ。
@@ -157,7 +157,7 @@ impl Apic {
     ///
     /// # Safety
     ///
-    /// 写像済みのページであること（型の不変条件）。他の実行文脈が同じ
+    /// マップ済みのページであること（型の不変条件）。他の実行文脈が同じ
     /// I/O APIC を触っていないこと。
     unsafe fn read_mask_bitmap(&self) -> [u64; MASK_BITMAP_WORDS] {
         let mut masked = [0u64; MASK_BITMAP_WORDS];
@@ -186,7 +186,7 @@ impl Controller for Apic {
         let Some(entry) = self.entry_for_irq(irq) else {
             return;
         };
-        // SAFETY: 型の不変条件により写像済みのページである。マスクビットだけを
+        // SAFETY: 型の不変条件によりマップ済みのページである。マスクビットだけを
         // 落とす read-modify-write で、ベクタ欄と配送設定は保つ。
         unsafe {
             let low = crate::apic::read_redirection_entry_low(self.io_apic_virt, entry);
@@ -271,9 +271,9 @@ impl Controller for Apic {
                 }
             }
         };
-        // 破壊 (S13-d, virtio-intx-edge-test): 宣言も申告も無視して、生の
+        // 破壊テスト (S13-d, virtio-intx-edge-test): 宣言も申告も無視して、生の
         // エッジ・ハイで書く。**実測で、QEMU では届いてしまう**（極性と
-        // トリガを厳密に模っていない）——**捕まえるのは読み戻しである**
+        // トリガを厳密に模っていない）——**検出するのは読み戻しである**
         // （entry の level が宣言と食い違う）。
         #[cfg(feature = "virtio-intx-edge-test")]
         let signaling_flags = {
@@ -282,17 +282,17 @@ impl Controller for Apic {
         };
         let low = u32::from(vector) | signaling_flags | crate::apic::ENTRY_MASKED_BIT;
 
-        // 破壊 (S4-a, ioapic-keyboard-broadcast): 宛先を logical の broadcast に
+        // 破壊テスト (S4-a, ioapic-keyboard-broadcast): 宛先を logical の broadcast に
         // する。**確実に落ちるのは読み戻しの主張のほうである。** 配送が実際に
         // どうなるか（AP が受けて共有リングバッファへ積むか）は観測していない。
         #[cfg(feature = "ioapic-keyboard-broadcast-test")]
         let low = low | crate::apic::ENTRY_DESTINATION_MODE_BIT;
 
-        // SAFETY: 型の不変条件により写像済みのページである。**マスクビットを
+        // SAFETY: 型の不変条件によりマップ済みのページである。**マスクビットを
         // 立てたまま書く**ので、この書き込みで割り込みが届き始めることはない。
         unsafe { crate::apic::write_redirection_entry_low(self.io_apic_virt, entry, low) }
 
-        // 破壊 (S4-a, ioapic-keyboard-broadcast): high dword の宛先も broadcast へ。
+        // 破壊テスト (S4-a, ioapic-keyboard-broadcast): high dword の宛先も broadcast へ。
         // SAFETY: 同上。既定ビルドではこのブロックごと消える。
         #[cfg(feature = "ioapic-keyboard-broadcast-test")]
         unsafe {
@@ -301,7 +301,7 @@ impl Controller for Apic {
     }
 
     fn check_masks(&self, unmasked: &[u8]) -> MaskCheck {
-        // SAFETY: 型の不変条件により写像済みのページである。読み取りのみで、
+        // SAFETY: 型の不変条件によりマップ済みのページである。読み取りのみで、
         // 単一コアの起動シーケンス中にだけ通る。
         let observed = unsafe { self.read_mask_bitmap() };
 
@@ -391,7 +391,7 @@ impl super::TimerSource for LapicTimer {
             | crate::apic::LVT_TIMER_PERIODIC
             | crate::apic::ENTRY_MASKED_BIT;
 
-        // SAFETY: `base` は `Apic::new` が写像を確認した Local APIC のページ
+        // SAFETY: `base` は `Apic::new` がマッピングを確認した Local APIC のページ
         // 先頭である。マスクを立てたまま書くので、ここでティックは始まらない。
         unsafe { crate::apic::program_timer(base, divide, lvt, initial_count) };
 
@@ -421,7 +421,7 @@ impl super::TimerSource for LapicTimer {
 ///
 /// **分周と初期カウントは対でなければ意味を持たない**（`TimerCalibration` の
 /// doc と同じ理由である）。別々のアトミックにすると、AP が「新しい分周と古い
-/// 初期カウント」を読む窓が開く。**1 語なら、その組み合わせは作れない。**
+/// 初期カウント」を読むウィンドウが開く。**1 語なら、その組み合わせは作れない。**
 static LAPIC_TIMER_PROGRAM: AtomicU64 = AtomicU64::new(NOT_PROGRAMMED);
 
 /// [`LAPIC_TIMER_PROGRAM`] の「まだ設定されていない」。
@@ -453,8 +453,8 @@ pub(super) unsafe fn set_spurious_vector_for_this_cpu() -> Option<crate::apic::S
     if base == NOT_INSTALLED {
         return None;
     }
-    // SAFETY: `Apic::new` が写像を確認したページである。書き込みはベクタ欄だけ。
-    // **AP は bit 8 を立てる。** INIT-SIPI で起きたコアの Local APIC はリセット
+    // SAFETY: `Apic::new` がマッピングを確認したページである。書き込みはベクタ欄だけ。
+    // **AP は bit 8 を立てる。** INIT-SIPI で起動したコアの Local APIC はリセット
     // 状態から始まり、SVR は `0x000000FF` で **bit 8 が落ちている**。
     // 実測でそうだった（`SoftwareEnable` の doc）。
     Some(unsafe { crate::apic::write_spurious_vector(base, crate::apic::SoftwareEnable::Set) })
@@ -519,7 +519,7 @@ pub(super) fn read_lvt_timer() -> Option<u32> {
     if base == NOT_INSTALLED {
         return None;
     }
-    // SAFETY: `Apic::new` が写像を確認したページである。読み取りのみ。
+    // SAFETY: `Apic::new` がマッピングを確認したページである。読み取りのみ。
     Some(unsafe { crate::apic::read_lvt_timer(base) })
 }
 

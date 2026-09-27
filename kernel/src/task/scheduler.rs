@@ -172,7 +172,7 @@ pub(super) fn set_cr3(index: usize, value: u64) {
     unsafe { addr_of_mut!((*slot(index)).cr3).write(value) }
 }
 
-// 破壊 `task-switch-keep-recovery` では切り替えが入れ替えないので、読む者が居なくなる。
+// 破壊テスト `task-switch-keep-recovery` では切り替えが入れ替えないので、読む者が居なくなる。
 #[cfg_attr(feature = "task-switch-keep-recovery", allow(dead_code))]
 pub(super) fn current_recovery(index: usize) -> u64 {
     // SAFETY: 同上。

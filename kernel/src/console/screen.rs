@@ -345,7 +345,7 @@ impl Console {
     /// （`0x10,0x10,0x18`）とも既定前景（`0xD0,0xD8,0xE0`）とも、
     /// ES-b の判定色（緑 `(0,200,0)` と赤 `(200,0,0)`）とも、
     /// RGB のどれかの軸で 150 以上離れている。**
-    /// **見た目の好みで変えないこと**——近い色にすると判定は緑のまま鈍る。
+    /// **見た目の好みで変えないこと**——近い色にすると判定は成功のまま鈍る。
     const CURSOR_COLOR: Color = Color::rgb(0, 255, 255);
     /// カーソルの下線の厚み（ピクセル）。
     const CURSOR_THICKNESS: u32 = 2;
@@ -398,13 +398,13 @@ impl Console {
         // # なぜ要るのか
         //
         // **`flush` は毎回ここを通り、ここは毎回カーソルを消して描き直して
-        // いた**——**どちらも未転送の印を付けるので、「何も変わっていない」
+        // いた**——**どちらも未転送の目印を付けるので、「何も変わっていない」
         // 回でも転送が走る。**
         //
         // **`ADR-0047` で「読むたびに掃く」形にしたので、空回りの `read` が
         // そのまま転送になった**——**実測で、空読み 1 回につき転送 1 回・
         // 64 バイト・49,968 サイクルである。** **アプリは `-EAGAIN` で
-        // 毎秒 39,000 回ほど回る**（`CLAUDE.md` の実測）ので、
+        // 毎秒 39,000 回ほど空回りする**（`CLAUDE.md` の実測）ので、
         // **CPU の半分以上をこれが食っていた。**
         //
         // # 「描き直さない」であって「描かない」ではない
@@ -414,15 +414,15 @@ impl Console {
         // 必ず描き直される。** **ここで止まるのは、跡が現在位置にあり、
         // 表示の状態も同じときだけである。**
         //
-        // 破壊 (PERF-f, cursor-repaint-always-test): 変わっていなくても
+        // 破壊テスト (PERF-f, cursor-repaint-always-test): 変わっていなくても
         // 描き直す。**PERF-f の前の形そのものである**——**絵は同じで、
-        // 空読みのたびに転送が走る。** **空読みの判定が捕まえる。**
+        // 空読みのたびに転送が走る。** **空読みの判定が検出する。**
         #[cfg(not(feature = "cursor-repaint-always-test"))]
         if self.cursor_visible && self.cursor_drawn_at == Some(self.grid.cursor()) {
             return;
         }
         self.erase_drawn_cursor();
-        // 破壊 (ES-c, ansi-cursor-ignore-hide): 隠す指示を無視して常に描く。
+        // 破壊テスト (ES-c, ansi-cursor-ignore-hide): 隠す指示を無視して常に描く。
         // **DECTCEM が届いていても画面から消えない**ので、ansi-test の
         // 「隠した後にカーソルが無い」判定が落ちる。
         //
@@ -431,8 +431,8 @@ impl Console {
         // ところに描かれる」「出し直すと戻る」「動いたら跡が消えて新しい
         // 場所に在る」の 3 つは、**どれも「描かれている」ことを画面の実物で
         // 見ている。** 描かない形を作れば**その 3 つが同時に落ちる**ので、
-        // **feature を足しても捕まえる先が増えない。**
-        // **破壊は「その形でしか落ちない判定がある」ときに足す。**
+        // **feature を足しても検出する先が増えない。**
+        // **破壊テストは「その形でしか落ちない判定がある」ときに足す。**
         #[cfg(feature = "ansi-cursor-ignore-hide-test")]
         let visible = true;
         #[cfg(not(feature = "ansi-cursor-ignore-hide-test"))]
@@ -523,7 +523,7 @@ impl Console {
             self.grid.reset(Self::rgb(self.background));
             self.dirty.mark_all();
         } else {
-            // 破壊 (e-3, alt-screen-skip-repaint): 面は戻すが描き直さない。
+            // 破壊テスト (e-3, alt-screen-skip-repaint): 面は戻すが描き直さない。
             // **セルは元の画面のもの、ピクセルは代替画面のまま**になる——
             // **状態と画面が食い違う形そのものである。**
             // **判定は画面の実物を読むので落ちる**（セルだけを読む判定では
@@ -545,10 +545,10 @@ impl Console {
     /// # 全角の右半分を飛ばす
     ///
     /// **右半分は `' '` として記録されている**ので、**素朴に描くと左の
-    /// セルが描いた全角の右半分を空白で潰す。** **印（[`Cell::CONTINUATION`]）
+    /// セルが描いた全角の右半分を空白で潰す。** **目印（[`Cell::CONTINUATION`]）
     /// の在るセルは飛ばす**——**左のセルが 2 桁ぶんを描いている。**
     //
-    // **破壊ビルドでは呼ばれない**（唯一の呼び出し側が消えるため）。
+    // **破壊テストのビルドでは呼ばれない**（唯一の呼び出し側が消えるため）。
     // **未使用の警告を止めるだけで、既定ビルドの形は変えない。**
     #[cfg_attr(feature = "alt-screen-skip-repaint-test", allow(dead_code))]
     fn repaint_from_cells(&mut self) {
@@ -573,11 +573,11 @@ impl Console {
                 // [`common::screen::Cell::needs_repaint_after_clear`] が持ち、
                 // ホストで固定してある。
                 //
-                // 破壊 (PERF-h, repaint-blank-cells-test): 飛ばさない。
+                // 破壊テスト (PERF-h, repaint-blank-cells-test): 飛ばさない。
                 // **PERF-h の前の形そのものである**——**出る絵は同じで、
                 // 描くセルが 1,180 から 8,000 へ増える**（実測）。
                 // **画面を読む判定は 1 つも落ちない**ので、
-                // **描いたセルの数を見る判定でしか捕まらない。**
+                // **描いたセルの数を見る判定でしか検出されない。**
                 #[cfg(not(feature = "repaint-blank-cells-test"))]
                 if !cell.needs_repaint_after_clear(Self::rgb(self.background)) {
                     continue;
@@ -604,9 +604,9 @@ impl Console {
     /// **ここで変わるのは「これから描く色」だけである。** 既に描いたセルは
     /// 変わらない——**端末の規約どおりで、SGR は遡らない。**
     pub fn set_graphics(&mut self, graphics: common::ansi::Graphics) {
-        // 破壊 (ES-b, ansi-sgr-ignore-color): 受けても色を変えない。
+        // 破壊テスト (ES-b, ansi-sgr-ignore-color): 受けても色を変えない。
         // **パーサは正しく展開しており、状態も届いている**——**渡す先だけが
-        // 欠けている形である**（zi-b の「接続の取り違え」と同じ族）。
+        // 欠けている形である**（zi-b の「接続の取り違え」と同じ種類）。
         // **セルの色も画面の色も既定のままになる**ので、ansi-test の
         // 2 判定が落ちる。
         #[cfg(feature = "ansi-sgr-ignore-color-test")]
@@ -724,7 +724,7 @@ impl Console {
     /// # 全面を未転送にする
     ///
     /// **ずらした範囲は画面のどこでも変わりうる。** **矩形1つで表せるので、
-    /// `mark_all`ではなく動かした範囲だけを印にする。**
+    /// `mark_all`ではなく動かした範囲だけに目印を付ける。**
     pub fn delete_lines(&mut self, count: u32) {
         let (_, row) = self.grid.cursor();
         self.erase_drawn_cursor();
@@ -804,7 +804,7 @@ impl Console {
                 //
                 // **実測で見つかった。** 画面の字をセルから読み出したところ、
                 // **`ED(2)` の後の行に、消えたはずの起動ログが残っていた**
-                // （ピクセルは消えている）。**セルを読む判定を置くなら、
+                // （ピクセルは消えている）。**セルを読む判定を設けるなら、
                 // ここが合っていなければ嘘を読む。**
                 //
                 // **カーソルは動かさない。** `Screen::reset` は左上へ戻すので、
@@ -894,23 +894,23 @@ impl Console {
         }
     }
 
-    /// 裏バッファの位置と大きさ（`ADR-0066` の Y-c）。**図形モードで Ring 3 へ張る面である。**
+    /// 裏バッファの位置と大きさ（`ADR-0066` の Y-c）。**図形モードで Ring 3 へマップする面である。**
     ///
-    /// **返すのは direct map の番地とバイト数である。** **物理位置は呼ぶ側が
+    /// **返すのは direct map のアドレスとバイト数である。** **物理位置は呼ぶ側が
     /// direct map を引き戻して得る**（裏バッファは起動時に連続のフレームで取ってある。
     /// `kernel_main` の `init_console`）。
     pub fn back_buffer_region(&self) -> (VirtAddr, u64) {
         (self.back.base(), self.back.layout().size_bytes())
     }
 
-    /// 図形モードの間の転送（`ADR-0066` の Y-c）。**矩形を裏バッファから MMIO へ写す。**
+    /// 図形モードの間の転送（`ADR-0066` の Y-c）。**矩形を裏バッファから MMIO へコピーする。**
     ///
     /// # カーソルを描かない
     ///
     /// **[`Self::flush`] は送る前にカーソルを描く**（ES-c）——**図形モードでそれをすると、
-    /// Ring 3 の画素の上に下線が乗る。** **ここは画素をそのまま写すだけである。**
+    /// Ring 3 の画素の上に下線が乗る。** **ここは画素をそのままコピーするだけである。**
     ///
-    /// **矩形は画面へ切り詰める**（[`DirtyRegion::mark`] と同じ規則）。**写したバイト数を返す。**
+    /// **矩形は画面へ切り詰める**（[`DirtyRegion::mark`] と同じ規則）。**コピーしたバイト数を返す。**
     pub fn present(&mut self, x: u32, y: u32, width: u32, height: u32) -> u64 {
         let mut region = DirtyRegion::new(self.back.layout().width(), self.back.layout().height());
         region.mark(x, y, width, height);
@@ -927,7 +927,7 @@ impl Console {
         }
     }
 
-    /// 図形モードから戻る印を立てる（`ADR-0066` の Y-c）。**描き直しは次の [`Self::flush`] で行う。**
+    /// 図形モードから戻る目印を立てる（`ADR-0066` の Y-c）。**描き直しは次の [`Self::flush`] で行う。**
     ///
     /// **カーソルの跡を忘れる**——**図形モードの間に Ring 3 が上書きしているので、
     /// 消そうとして元の画素を戻すと、Ring 3 の画素を画面に残す。**

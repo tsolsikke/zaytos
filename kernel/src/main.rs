@@ -54,9 +54,9 @@ extern "C" {
 // mov cr3 の直後は、次の命令フェッチが新テーブルで RIP はまだ低位なので、
 // 静的テーブルの PML4[0] 恒等（1GiB）がトランポリンの低位 VA を覆う。
 // 切り替えた後に高位 `_start` へ jmp し、以降を高位で実行する。
-// === higher-half の破壊 feature ===
+// === higher-half の破壊テストの feature ===
 //
-// 静的初期テーブルとトランポリンはリンク時計算の global_asm なので、破壊は
+// 静的初期テーブルとトランポリンはリンク時計算の global_asm なので、破壊テストは
 // const オペランド（(a)(b)）と、同一 asm へ 1 行挿入するマクロ（(d)）で行う。
 // 検査対象の asm を複製せずに済む。
 
@@ -84,7 +84,7 @@ const BOOT_PDPT_HIGH_AFTER: u64 = if cfg!(feature = "highhalf-bad-high-slot") {
 };
 
 /// (d) highhalf-trampoline-absolute-ref: トランポリンに絶対メモリ参照命令を 1 行
-/// 挿入する。**実行時ではなく静的なバイト単位一致検査で捕まえる。** 既定は空文字列
+/// 挿入する。**実行時ではなく静的なバイト単位一致検査で検出する。** 既定は空文字列
 /// で、トランポリンのバイト列は不変。feature 時のみ `mov rbx, [0x2000]`（disp32 の
 /// 絶対参照）が入り、コード先頭 24 バイトが期待リテラルと食い違う。同一 asm 内の
 /// 1 行なので、トランポリン本体を変えたときに sabotage 側が置き去りにならない。
@@ -125,11 +125,11 @@ core::arch::global_asm!(
 //   PDPT_low[0]   -> PD_shared
 //   PDPT_high[510]-> PD_shared （**同一 PD を共有**）
 //   PD_shared[i]  = (i << 21) | 0x83   物理 i*2MiB、P|RW|PS
-// PD エントリは「物理ターゲット + フラグ」だけを符号化するので、恒等窓と高位窓が
-// 1 枚の PD を共有できる。両窓ともフラグが同一（cacheable RW、NX なし）で成立する。
+// PD エントリは「物理ターゲット + フラグ」だけを符号化するので、恒等ウィンドウと高位ウィンドウが
+// 1 枚の PD を共有できる。両ウィンドウともフラグが同一（cacheable RW、NX なし）で成立する。
 // フレームバッファ（物理 2GiB）は [0,1GiB) の外なので、キャッシュ属性の別名は
 // 生じない（ADR-0021）。
-// 高位窓が [0,1GiB) を覆うのはイメージに要る範囲を超えるが、この表を使うのは
+// 高位ウィンドウが [0,1GiB) を覆うのはイメージに要る範囲を超えるが、この表を使うのは
 // 本流テーブルへの切り替えまでで、その間に触れる高位 VA はすべてイメージ内である。
 core::arch::global_asm!(
     ".section .data.bootpt,\"aw\",@progbits",
@@ -161,7 +161,7 @@ core::arch::global_asm!(
     hi_after = const BOOT_PDPT_HIGH_AFTER,
 );
 
-// **初期ページ表が恒等で張る範囲は、`BOOT_IDENTITY_REACH` と一致する**（`ADR-0068` の HW-a）。
+// **初期ページテーブルが恒等でマップする範囲は、`BOOT_IDENTITY_REACH` と一致する**（`ADR-0068` の HW-a）。
 // **2MiB ページ 512 枚（`.rept 512`）で 1GiB である。** **ブートローダはこの値の下へ受け渡しを置く**
 // ——**片方だけが動けば、受け渡しが恒等の外へ出る。**
 const _: () = assert!(common::boot_info::BOOT_IDENTITY_REACH == 512 * (2 << 20));
@@ -337,7 +337,7 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
     // IDT をロードする。ここも .bss の静的領域だけで完結する。
     // 例外は RFLAGS.IF に関係なく発生するので、sti する前でもハンドラは働く。
     //
-    // 破壊 (stack-overflow-df-test): #PF に IST を与えない。ガードページに触れた
+    // 破壊テスト (stack-overflow-df-test): #PF に IST を与えない。ガードページに触れた
     // #PF が壊れたスタックの上で動こうとし、そこでさらに #PF が起きて #DF へ
     // 昇格する経路を、本来のスタックオーバーフローで出すためである。
     #[cfg(feature = "stack-overflow-df-test")]
@@ -352,7 +352,7 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
     }
 
     // **カーネルが要る CR0 のビットを、BSP で自分で立てる・落とす**（2026-09-24。`kernel::cpu_state`）。
-    // **ファームウェアが良い値で渡していたので動いていただけである。** **AP は BSP を丸ごと写す。**
+    // **ファームウェアが良い値で渡していたので動いていただけである。** **AP は BSP を丸ごとコピーする。**
     // SAFETY: 起動の最初期に BSP で 1 回だけである。PE と PG には触れない。
     unsafe {
         kernel::cpu_state::establish_required_bits_on_bsp();
@@ -416,10 +416,10 @@ static mut BOOT_HANDOFF: BootHandoff = BootHandoff {
     allow(unreachable_code)
 )]
 extern "sysv64" fn kernel_main() -> ! {
-    // 破壊 (ADR-0046 の Addendum, stack-overflow-before-guard-test):
+    // 破壊テスト (ADR-0046 の Addendum, stack-overflow-before-guard-test):
     // **起動時のカーネルスタックをわざと深くする。**
     //
-    // **`kernel_main` のローカルとして置く**——**この関数の枠は起動の間ずっと
+    // **`kernel_main` のローカルとして置く**——**この関数のフレームは起動の間ずっと
     // 生きているので、いちばん深いところがそのぶん深くなる。** **ADR-0046 で
     // 踏んだ形そのものである**（256 バイトの構造体を `Console` へ足したら
     // 64KiB を越えた）。
@@ -434,7 +434,7 @@ extern "sysv64" fn kernel_main() -> ! {
     //   （`kernel::stack` のモジュール doc）
     //
     // **スタックの大きさに結び付けてある。** **広げるたびに手で測り直さない**
-    // ——**余裕は「大きさ - 使用量」である。** **使用量は 2 つの行が言う**
+    // ——**余裕は「大きさ - 使用量」である。** **使用量は 2 つの行が示す**
     // （`stack-water:`。2026-09-23 に 2 つにした）——**`init` の前までが 66,816 バイト、
     // Ring 3 へ落ちる直前（`/bin/zash`）が 70,968 バイトである**（実測）。
     // **半分（65,536）は `init` の前の余裕（64,256）より 1,280 バイト大きい**
@@ -456,9 +456,9 @@ extern "sysv64" fn kernel_main() -> ! {
 
     logger.info(format_args!("ZaytOS kernel: entered _start"));
 
-    // **どの像が走ったかを、起動ログの先頭で言う（S12 前の手当て）。**
+    // **どの像が走ったかを、起動ログの先頭で示す（S12 前の手当て）。**
     //
-    // **破壊 feature の項目が落ちたとき、判定行だけでは 2 つを分けられない**
+    // **破壊テストの feature の項目が落ちたとき、判定行だけでは 2 つを分けられない**
     // ——「破壊が効かなかった」のか「破壊の無い像が走った」のか
     // （`docs/verification-coverage.md` の該当節）。この行があれば分かれる。
     //
@@ -477,10 +477,10 @@ extern "sysv64" fn kernel_main() -> ! {
     // **カーネルが要る CR0 のビットを BSP で立てた前後を出す**（2026-09-24）。
     kernel::cpu_state::report_established_bits(&mut logger);
 
-    // **SSE が有効になっていることを、レジスタから読んで言う**（`ADR-0058`）。
+    // **SSE が有効になっていることを、レジスタから読んで示す**（`ADR-0058`）。
     // **立てたのは `_start` の側で、ここは読み戻しである**——**書いたつもりでは
     // なく、いまの状態を見る。** **AP の側は `smp` が同じ行を出す**
-    // （**CR0 と CR4 はコアごとなので、BSP の行は AP について何も言わない**）。
+    // （**CR0 と CR4 はコアごとなので、BSP の行は AP について何も示さない**）。
     {
         let state = fp::enabled_state();
         logger.info(format_args!(
@@ -509,7 +509,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // ここまで遅らせても正しい——それより前の `cpu_id()` は定数 0 を返し、
     // その間走っているのは bootstrap processor だけである。
     //
-    // AP では窓が再び開く。フォールバックの 0 は AP では別コアのスロットを指す
+    // AP ではウィンドウが再び開く。フォールバックの 0 は AP では別コアのスロットを指す
     // ので誤りである（`docs/roadmap.md`）。
     // SAFETY: `gdt::init` は既に戻っており、自コアの GDT はロード済みである。
     unsafe {
@@ -538,7 +538,7 @@ extern "sysv64" fn kernel_main() -> ! {
 
     // **未解決の恒等前提。** handoff.boot_info は UEFI が低位に置いた物理ポインタで、
     // 恒等マッピングの間だけ低位 VA として参照できる。B-2b で恒等を外す前に
-    // direct map 高位窓経由へ移す（恒等前提の網羅列挙は
+    // direct map 高位ウィンドウ経由へ移す（恒等前提の網羅列挙は
     // docs/verification-coverage.md の「higher-half B-2b」を参照）。
     // SAFETY: 呼び出し元契約（`_start` の # Safety）により、boot_info は
     // 有効な BootInfo を指す。ここでは読み取り専用の参照を作るのみ。
@@ -546,12 +546,12 @@ extern "sysv64" fn kernel_main() -> ! {
 
     // direct physical map を登録する（T-2a）。
     //
-    // **恒等マッピングの間は、窓が物理空間全体を覆う。** 覆う長さを
+    // **恒等マッピングの間は、ウィンドウが物理空間全体を覆う。** 覆う長さを
     // `classify()` の返す最大物理アドレスから決めるのは higher-half 移行の
     // 時点である。ここでそれを求めようとしても、メモリマップを読むために
     // まず `descriptors_ptr` を変換する必要があり、順序が循環する。
     //
-    // 長さを定数として型やコードに埋め込んではいない。窓は値として持ち回り、
+    // 長さを定数として型やコードに埋め込んではいない。ウィンドウは値として持ち回り、
     // 移行時に新しい base と実測した長さで作り直す（`replace_direct_map`）。
     let direct_map =
         common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
@@ -572,8 +572,8 @@ extern "sysv64" fn kernel_main() -> ! {
 
     // S1-a: bootloader が引いた RSDP の物理アドレス。**この時点では検証も走査も
     // していない。** 署名・チェックサム・revision の検査と辿る先の決定は、
-    // 起動シーケンスの後方（direct map 窓の高位化より後）で `acpi::survey` が行う。
-    // ここへ持ってこられないのは、物理を読むのに窓と稼働中のページテーブルが要るためである。
+    // 起動シーケンスの後方（direct map ウィンドウの高位化より後）で `acpi::survey` が行う。
+    // ここへ持ってこられないのは、物理を読むのにウィンドウと稼働中のページテーブルが要るためである。
     if boot_info.acpi_rsdp.as_u64() == 0 {
         logger.error(format_args!(
             "acpi: the bootloader reported no RSDP; S2 (APIC) will need it"
@@ -632,8 +632,8 @@ extern "sysv64" fn kernel_main() -> ! {
     // 抽出済みの値だけで完結させる。`raw_map` も同じ理由で既に抽出済みである。
     let acpi_rsdp = boot_info.acpi_rsdp;
     let memory_map_descriptor_size = boot_info.memory_map.descriptor_size;
-    // **RAM ディスクの像の範囲も、ここで抜き出す**（`ADR-0068` の HW-d。上と同じ理由）。
-    // **読むのは自前のページ表へ切り替えた後である**（direct map 窓を通す）。
+    // **RAM ディスクのイメージの範囲も、ここで抜き出す**（`ADR-0068` の HW-d。上と同じ理由）。
+    // **読むのは自前のページテーブルへ切り替えた後である**（direct map ウィンドウを通す）。
     let fs_image_range = boot_info.fs_image_range();
 
     let (mut allocator, stats) =
@@ -721,8 +721,8 @@ extern "sysv64" fn kernel_main() -> ! {
     // 8 ビットで、AP は `vector << 12` から走り始めるため、トランポリンは物理
     // 1MiB 未満に要る（`smp::TRAMPOLINE_MAX_START` の doc を参照）。
     //
-    // **失敗しても停止しない。** S1 は情報を集める段で、AP はまだ起こさない。
-    // 致命として扱うのは S3（AP 起こし）である。
+    // **失敗しても停止しない。** S1 は情報を集める段階で、AP はまだ起動しない。
+    // 致命として扱うのは S3（AP の起動）である。
     match kernel::smp::reserve_trampoline_frame(&mut allocator) {
         Ok(frame) => logger.info(format_args!(
             "smp: reserved the AP trampoline frame at {:#x} (below {:#x}, SIPI-addressable={})",
@@ -825,9 +825,9 @@ extern "sysv64" fn kernel_main() -> ! {
 
     // ここから実際にページテーブルへ書き込む（`paging::table`）。
     //
-    // **切り替え前なので、触れるのは静的な初期ページ表が恒等で張る範囲だけである**
+    // **切り替え前なので、触れるのは静的な初期ページテーブルが恒等でマップする範囲だけである**
     // （`ADR-0068` の HW-a）。**配られたフレームがその外なら、書く前に止めて理由を出す。**
-    // **アロケータは範囲を番地の順に保ち（`insert_free_range`）、先頭から配るので、
+    // **アロケータは範囲をアドレスの順に保ち（`insert_free_range`）、先頭から配るので、
     // 低い RAM から配られる。** **この確かめは、その性質が崩れたときに声を出すためのものである。**
     let mut builder = PageTableBuilder::new_within_reach(
         &mut allocator,
@@ -872,8 +872,8 @@ extern "sysv64" fn kernel_main() -> ! {
         cpu::halt_forever();
     }
 
-    // higher-half（B-2a）: kernel イメージを高位（KERNEL_VIRT_BASE + phys）にも張る。
-    // base=0 では高位 VA == 恒等 VA で、既にこのビルダーが恒等で張った 4KiB PT を
+    // higher-half（B-2a）: kernel イメージを高位（KERNEL_VIRT_BASE + phys）にもマップする。
+    // base=0 では高位 VA == 恒等 VA で、既にこのビルダーが恒等でマップした 4KiB PT を
     // 同一物理・同一フラグで上書きするだけ（冪等、新規フレーム 0）。イメージは
     // [0x100000, 0x200000) の 4KiB 領域に収まるので、2MiB huge との衝突
     // （ensure_child の UnexpectedHugePageEntry）は起きない。再リンク（B-2a-3）後は
@@ -1009,8 +1009,8 @@ extern "sysv64" fn kernel_main() -> ! {
     // direct_map() が base=0 を返すので、phys_to_virt しても同じ低位 VA になる
     // （handoff.boot_info の「未解決の恒等前提」が高位化できなかったのと同じ構造）。
     // したがって高位化できず、恒等除去（B-2b-4）より前に走ることに依存する。
-    // 反転関門（DirectMap::new の IDENTITY_REMOVED）は DirectMap の構築を捕まえるが、
-    // この生の低位 read は経由しないので捕まえない。
+    // 反転関門（DirectMap::new の IDENTITY_REMOVED）は DirectMap の構築を検出するが、
+    // この生の低位 read は経由しないので検出しない。
     // 順序要件: kernel_first_byte_before と kernel_first_byte_after が恒等除去点より
     // 後ろへ来ないこと。read を除去点の後ろへ動かすのも、除去点をこの read の前へ
     // 動かすのも違反である（除去点をさらに後ろへ動かすのは安全）。
@@ -1120,8 +1120,8 @@ extern "sysv64" fn kernel_main() -> ! {
         "paging: CR3 switch verified. now running under self-built page tables."
     ));
     // **検査の構成（破壊ではない。`ADR-0068` の HW-a）**——**ここから高い側から配る。**
-    // **ヒープ・ユーザーのページ・ページ表・virtio のリングが 4GiB の上から取られ、番地を
-    // 32 ビットへ切り詰める箇所が表に出る。** **切り替え前は初期ページ表の届く範囲しか触れないので、
+    // **ヒープ・ユーザーのページ・ページテーブル・virtio のリングが 4GiB の上から取られ、アドレスを
+    // 32 ビットへ切り詰める箇所が表に出る。** **切り替え前は初期ページテーブルの届く範囲しか触れないので、
     // この位置より前には置けない。**
     #[cfg(feature = "frame-allocator-high-after-switch")]
     {
@@ -1134,13 +1134,13 @@ extern "sysv64" fn kernel_main() -> ! {
 
     // === higher-half A-1: direct physical map の導入 ===
     //
-    // 恒等と direct map 窓（DIRECT_MAP_BASE + phys）の両方を持つ新テーブルを構築し、
+    // 恒等と direct map ウィンドウ（DIRECT_MAP_BASE + phys）の両方を持つ新テーブルを構築し、
     // CR3 を切り替える。恒等は外さない（B の領域）。登録 DirectMap も恒等のまま
     // （差し替えは A-2 の replace_direct_map）。ヒープ初期化より前なので、載せ替える
     // べき低位ポインタはまだ無い（ADR-0021 の Addendum、判断2）。
     build_and_switch_direct_map(&mut logger, &mut allocator, &mapped_ranges);
 
-    // === higher-half A-2: 登録 DirectMap を高位窓へ差し替える ===
+    // === higher-half A-2: 登録 DirectMap を高位ウィンドウへ差し替える ===
     //
     // これ以降 direct_map().phys_to_virt は高位を返す（恒等は残す）。差し替え後に
     // phys_to_virt を呼ぶ経路（init_console の base_virt など）は自動的に高位になる。
@@ -1150,9 +1150,9 @@ extern "sysv64" fn kernel_main() -> ! {
     rehome_framebuffer_to_window(&mut logger, &mut framebuffer, boot_info);
     // boot_info の最終利用はここ（rehome）で、以降は触らない。低位 VA
     // （handoff.boot_info、恒等前提）なので恒等除去（B-2b-4）後は無効になる。有用な
-    // データは抽出済み（memory_map はフレームアロケータへ、framebuffer は高位窓へ）。
+    // データは抽出済み（memory_map はフレームアロケータへ、framebuffer は高位ウィンドウへ）。
     // 除去点より後ろで boot_info を参照するコードを足さないこと。反転関門は生の低位
-    // 参照を捕まえない（docs/verification-coverage.md の「higher-half B-2b」）。
+    // 参照を検出しない（docs/verification-coverage.md の「higher-half B-2b」）。
 
     // === M3-c-3: 画面コンソール ===
     //
@@ -1223,7 +1223,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // **解消済みの恒等前提（B-2b-2で解消）。** かつては heap_start（物理値）をその
     // ままヒープ基底 VA として渡していた。恒等の間だけ通り、恒等除去（B-2b-4）後は
     // デレフでフォルトする。ヒープは除去後もタイマループ・タスク・コンソールの全
-    // アロケーションで使われるので、direct map の高位窓へ載せる。以降アロケーションは
+    // アロケーションで使われるので、direct map の高位ウィンドウへ載せる。以降アロケーションは
     // 高位 VA を返し、除去を跨いで生き残る。
     // 網羅列挙は docs/verification-coverage.md の「higher-half B-2b」。
     let heap_virt_base = common::addr::direct_map()
@@ -1232,7 +1232,7 @@ extern "sysv64" fn kernel_main() -> ! {
                 .expect("heap arena is a valid physical address"),
         )
         .as_u64();
-    // 破壊 (highhalf-remove-before-highify): ヒープ基底を低位（heap_start=物理）へ戻し、
+    // 破壊テスト (highhalf-remove-before-highify): ヒープ基底を低位（heap_start=物理）へ戻し、
     // 除去より前に高位化する順序の必要性を実証する（B-2b-4(e)）。heap_virt_base は下の
     // 恒等除去の必須領域チェックでも使うので、このビルドでも計算だけ残す。したがって
     // step4 は高位 VA で通り除去は完了し、死ぬのは除去後に低位ヒープを触った瞬間である。
@@ -1242,7 +1242,7 @@ extern "sysv64" fn kernel_main() -> ! {
     let heap_init_base = heap_start;
     // SAFETY: [heap_start, heap_end) は今アロケータから切り出した、他の誰も使って
     // いない領域で、直前に mapped_ranges でマップ済みを確認した。既定の heap_init_base
-    // はその物理を direct map 高位窓へ写した VA で、窓は RW・マップ済み。`init` の
+    // はその物理を direct map 高位ウィンドウへマップした VA で、ウィンドウは RW・マップ済み。`init` の
     // 呼び出しはこれが最初で最後である。
     unsafe {
         ALLOCATOR.init(heap_init_base, heap_size);
@@ -1301,28 +1301,28 @@ extern "sysv64" fn kernel_main() -> ! {
     install_kernel_stack_guard_page(&mut logger, &mut allocator);
 
     // ユーザーページのマッピング能力の検証（M5-e-2）。専用サブツリー
-    // PML4[USER_PML4_INDEX] へ U=1 ページを張り、両側 U/S 監査で権限分離を実状態で
+    // PML4[USER_PML4_INDEX] へ U=1 ページをマップし、両側 U/S 監査で権限分離を実状態で
     // 確かめ、葉だけ落として中間は M5-e-3 のために残す。paging-test ビルドでは
     // unmap を全体破壊するので載せない（関数側で cfg 済み）。
     #[cfg(not(feature = "paging-test"))]
     verify_user_page_mapping(&mut logger, &mut allocator);
 
     // Ring 3 への単発遠征の検証（M5-e-3）。M5-e-2 が残した PML4 サブツリーへ
-    // ユーザーコード/スタックを張り、iretq で Ring 3 へ落ち、cli の #GP を
-    // 予期の畳みでカーネルへ戻す。RSP0 が実挙動で初めて効く。
+    // ユーザーコード/スタックをマップし、iretq で Ring 3 へ落ち、cli の #GP を
+    // 予期した終了処理でカーネルへ戻す。RSP0 が実挙動で初めて効く。
     #[cfg(not(feature = "paging-test"))]
     verify_ring3_excursion(&mut logger, &mut allocator);
 
     // int 0x80 システムコールの往復の検証（M5-f-1）。verify_ring3_excursion が残した
     // ユーザーページを再利用する。Ring 3 から int 0x80 を発行し、syscall_entry
     // （空ディスパッチャ）が RSP0 スタックで走り、iretq で Ring 3 へ戻り、続く cli の
-    // #GP を予期の畳みでカーネルへ戻すまでを確かめる。
+    // #GP を予期した終了処理でカーネルへ戻すまでを確かめる。
     #[cfg(not(feature = "paging-test"))]
     verify_syscall_roundtrip(&mut logger);
 
     // ユーザーポインタ検証の検証（M5-f-2-1）。Ring 3 が (buf, len) を渡す syscall で、
     // カーネルが読み書きに踏み込む前に範囲を実 PTE で検証する。正常系と異常系5ケースを
-    // 回す。
+    // 実行する。
     #[cfg(not(feature = "paging-test"))]
     verify_syscall_pointer(&mut logger, &mut allocator);
 
@@ -1333,7 +1333,7 @@ extern "sysv64" fn kernel_main() -> ! {
     verify_syscall_checksum(&mut logger);
 
     // Ring 3 の4ベクタが中断され、カーネルが継続することの検証（S8-d-2）。
-    // verify_ring3_excursion が残したユーザーページを使い回す。アロケータも恒等窓も
+    // verify_ring3_excursion が残したユーザーページを使い回す。アロケータも恒等ウィンドウも
     // 要らない（既にあるページへ命令列を書くだけで、#PF の対象は未マップのまま使う）。
     #[cfg(not(feature = "paging-test"))]
     verify_ring3_fault_vectors(&mut logger);
@@ -1341,15 +1341,15 @@ extern "sysv64" fn kernel_main() -> ! {
     // === S1-b-1: ACPI テーブルの検証つき走査 ===
     //
     // 置ける区間が上下から挟まれている。
-    //   - 下限は A-2（direct map 窓の高位化）。物理を読むのに窓を使う。
+    //   - 下限は A-2（direct map ウィンドウの高位化）。物理を読むのにウィンドウを使う。
     //   - 上限は恒等除去（すぐ下）。`raw_map` は低位 VA のスライスで、除去後は無効に
     //     なる。ACPI の物理アドレスがどのメモリ型に載るかを見るのに使う。
-    // 検査そのものは高位窓の翻訳を見るので、除去を跨いでも結論は変わらない（除去が
+    // 検査そのものは高位ウィンドウの翻訳を見るので、除去を跨いでも結論は変わらない（除去が
     // 落とすのは `PML4[0]` だけ）。呼び出し位置を動かすときは両方の境界を確かめること。
     // どちらを踏み外しても、症状は「ACPI が読めない」ではなく低位 VA のデレフによる
     // #PF になる。
     //
-    // 異常があっても停止しない。S1 は情報を集める段で、ACPI が読めないだけで単一コアの
+    // 異常があっても停止しない。S1 は情報を集める段階で、ACPI が読めないだけで単一コアの
     // カーネルが起動しなくなるのは機能的な後退である。致命へ格上げするのは S2 である。
     //
     // ログはシリアルのみ（`log_both` を使わない）。近傍の検証サイトはいずれもシリアル
@@ -1360,14 +1360,14 @@ extern "sysv64" fn kernel_main() -> ! {
         fadt: fadt_facts,
     } = kernel::acpi::survey(&mut logger, acpi_rsdp, raw_map, memory_map_descriptor_size);
 
-    // === S1-c: APIC MMIO を direct map 窓へ 4KiB 粒度で写像する ===
+    // === S1-c: APIC MMIO を direct map ウィンドウへ 4KiB 粒度でマップする ===
     //
-    // survey の直後に置く。写像に使う所在は survey が返した値そのもので、産地と利用点を
+    // survey の直後に置く。マッピングに使う所在は survey が返した値そのもので、産地と利用点を
     // 離さないため。survey と違って恒等除去より前である必要は無いが（UEFI メモリマップの
     // スライスを使わない）、離す理由も無い。
     //
     // APIC へは移行しない。割り込みは PIC のままである（移行は S2）。ここでやるのは
-    // 写像と、Local APIC を読めることの確認だけで、レジスタへは書き込まない。
+    // マッピングと、Local APIC を読めることの確認だけで、レジスタへは書き込まない。
     let mapped_apic = kernel::apic::map_and_probe(&mut logger, &mut allocator, &apic_mmio);
 
     // === S13-a: PCI bus 0 の列挙と virtio-blk の発見 ===
@@ -1375,7 +1375,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // **位置が契約である。** `scan_bus0` は `0xCF8`/`0xCFC` の対を使い、
     // 対の間に別の書き込みが挟まらないことを要求する。ここは
     //   - BSP だけが走っている（AP の起床はこの後の S3-b-2b-2 以降）
-    //   - 割り込みは無効のまま（`sti` は割り込みの検査の段まで先である）
+    //   - 割り込みは無効のまま（`sti` は割り込みの検査の段階まで先である）
     // なので、同一コアの再入も他コアの並行も無い。
     //
     // ACPI の走査の後に置くのは、直前の判定行（MCFG の数）が
@@ -1388,17 +1388,17 @@ extern "sysv64" fn kernel_main() -> ! {
     // === S13-b: virtqueue を 1 本立て、ポーリングで superblock の sector を読む ===
     //
     // 位置の契約は S13-a と同じ（BSP のみ・IF=0・AP 起床前）。ADR-0033 の
-    // legacy interface で話す。**判定はホスト側にある**——像は `stage_esp` が
+    // legacy interface で話す。**判定はホスト側にある**——イメージは `stage_esp` が
     // ディスクへ置いており、xtask が同じ 512 バイトから同じ計算をして
     // 突き合わせる。ここで出すのは観測（checksum と先頭バイト）である。
     //
-    // **設定した装置は保持し、後段（S13-c の像の全ロード。ADR-0034）へ渡す。**
+    // **設定した装置は保持し、後段（S13-c のイメージの全ロード。ADR-0034）へ渡す。**
     // ロードの位置（`copy_fs_image_to_frames`）も AP 起床と `sti` より前なので、
     // 契約（BSP のみ・IF=0）はそこまで崩れない。
     let mut virtio_disk = match virtio_blk {
         Some(virtio) => {
             // SAFETY: 上の pci scan と同じ位置（BSP のみ・IF=0）。`virtio` は
-            // `scan_bus0` が返した BAR0 の I/O 窓そのものである。
+            // `scan_bus0` が返した BAR0 の I/O ウィンドウそのものである。
             let outcome = unsafe { kernel::virtio::setup(&mut logger, &virtio, &mut allocator) }
                 .and_then(|mut blk| {
                     // SAFETY: 同じ位置。読み先は器（リングの末尾ページ）の中である。
@@ -1442,7 +1442,7 @@ extern "sysv64" fn kernel_main() -> ! {
             }
         }
         None => {
-            // **装置が無くても、ブートローダが像を渡していれば続ける**（`ADR-0068` の HW-d）。
+            // **装置が無くても、ブートローダがイメージを渡していれば続ける**（`ADR-0068` の HW-d）。
             // **VirtualBox と実機には virtio-blk が無い**——**RAM ディスクで起動する道である。**
             // **どちらも無ければ止まる**（直す前と同じ。**黙って進まない**）。
             report_no_virtio_device(&mut logger, fs_image_range);
@@ -1453,7 +1453,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // === S3-b-2b-2: AP の per-CPU 資産を用意する ===
     //
     // 位置が正しさの条件である。要るのは2つ。
-    //   - フレームアロケータ（`run_timer_loop` には無い。AP を起こすのはそこである）
+    //   - フレームアロケータ（`run_timer_loop` には無い。AP を起動するのはそこである）
     //   - 本番テーブルが CR3 に載っていること
     //
     // 早すぎると壊れる。実際に踏んだ。最初はトランポリン用フレームの予約の直後
@@ -1461,13 +1461,13 @@ extern "sysv64" fn kernel_main() -> ! {
     // 返し、AP をそちらへ移してしまった。AP は自分のスタック（PML4[258]）までは
     // 動いたが、direct map（PML4[256]）が無いので最初の参照で #PF になった。
     //
-    // PML4[258] へ張る（`PML4[257]` は破壊 feature のサボタージュ VA）。
+    // PML4[258] へマップする（`PML4[257]` は破壊テストの feature のサボタージュ VA）。
     // SAFETY: A-1 の切り替えが済んで本番テーブルが CR3 に載っており、起動時の
     // 単一文脈で AP はまだ走っていない。
     unsafe {
         kernel::smp::prepare_ap_per_cpu(&mut logger, &mut allocator);
-        // 探り用ページは、アロケータのあるここで張る（S5-c）。
-        // SAFETY: 本番テーブルへ切り替え済みで、direct map 窓が使える。
+        // 探り用ページは、アロケータのあるここでマップする（S5-c）。
+        // SAFETY: 本番テーブルへ切り替え済みで、direct map ウィンドウが使える。
         #[cfg(feature = "smp-tlb-shootdown-probe")]
         unsafe {
             kernel::smp::prepare_shootdown_probe(&mut logger, &mut allocator)
@@ -1476,7 +1476,7 @@ extern "sysv64" fn kernel_main() -> ! {
 
     // === S2-a: APIC のレジスタを読んで現在値を記録する ===
     //
-    // 読むだけの段で、割り込みの経路は変えない（PIC / PIT のまま）。I/O APIC の
+    // 読むだけの段階で、割り込みの経路は変えない（PIC / PIT のまま）。I/O APIC の
     // IOREGSEL への書き込みだけは伴う。読みたいレジスタを選ぶセレクタで割り込みの
     // 設定ではないが、S2 で最初の書き込みはここである。
     if let Some(mapped_apic) = mapped_apic.as_ref() {
@@ -1493,24 +1493,24 @@ extern "sysv64" fn kernel_main() -> ! {
         // === S3-b-1: cpu_id() を Local APIC ID 由来へ差し替える ===
         //
         // ここより前は cpu_id() が定数 0 を返す経路である。gdt::init が this_cpu_ptr を
-        // 通るのは Local APIC を写像するより前なので、据わる前に呼ばれるのは避けられ
+        // 通るのは Local APIC をマップするより前なので、据わる前に呼ばれるのは避けられ
         // ない。MAX_CPUS = 1 では据える前も後も 0 で振る舞いは変わらない。GS ベースは
         // 使わない（apic.rs の該当節）。
     }
 
     // === S3-b-1: per-CPU スロットが起動しうるコア数を覆っているかを報告する ===
     //
-    // 停止はしない。この段では cpu_id() が定数 0 で、走るのは bootstrap processor
+    // 停止はしない。この段階では cpu_id() が定数 0 で、走るのは bootstrap processor
     // だけなので、列挙が MAX_CPUS を超えても配列外の索引は起きない。停止が正しく
     // なるのは cpu_id() が非 0 を返しうる S3-b-2a である（当初ここで停止させたら
     // -smp 2 の起動が止まった。apic.rs の doc）。
     // `mapped_apic` の有無に依らず行う。覆えているかを問うのはコア数と MAX_CPUS の
-    // 関係で、APIC の写像が成功したかとは別である。
+    // 関係で、APIC のマッピングが成功したかとは別である。
     kernel::apic::report_per_cpu_slot_coverage(&mut logger, apic_mmio.usable_local_apics());
 
     // === higher-half B-2b-4（恒等除去） ===
     //
-    // ここが恒等（PML4[0]）を外す点。恒等窓を握る4検証サイト（verify_user_page_mapping /
+    // ここが恒等（PML4[0]）を外す点。恒等ウィンドウを握る4検証サイト（verify_user_page_mapping /
     // verify_ring3_excursion / verify_syscall_roundtrip / verify_syscall_pointer）と
     // verify_syscall_checksum が全て走り終えた後、start_timer より前。この時点で
     // boot_info は無効である（低位 VA、最終利用は上の rehome）。順序依存の詳細と除去
@@ -1528,7 +1528,7 @@ extern "sysv64" fn kernel_main() -> ! {
 
         let direct_map = common::addr::direct_map();
 
-        // lib が導ける領域（RIP/RSP/direct map 窓/カーネルイメージ）は remove_identity が
+        // lib が導ける領域（RIP/RSP/direct map ウィンドウ/カーネルイメージ）は remove_identity が
         // 内部で足す。ここで渡すのは lib が知り得ない高位 VA だけである。
         //   - ヒープの高位 VA（heap_virt_base、B-2b-2）
         //   - フレームバッファの高位 VA。`framebuffer` 変数は console へ move 済みなので、
@@ -1536,7 +1536,7 @@ extern "sysv64" fn kernel_main() -> ! {
         // 新しく低位ポインタを高位化したら、この列にも足すこと
         // （verification-coverage の「解消済み」群と同期）。
         //
-        // 破壊 (highhalf-remove-verify-fail): 解決不能な高位 VA（空の PML4[257]）へ
+        // 破壊テスト (highhalf-remove-verify-fail): 解決不能な高位 VA（空の PML4[257]）へ
         // 差し替え、step4 を失敗させて 5a の復帰経路を実証する。既定は heap_virt_base。
         #[cfg(not(feature = "highhalf-remove-verify-fail"))]
         let heap_high_va = VirtAddr::new(heap_virt_base).expect("the heap high VA is canonical");
@@ -1587,8 +1587,8 @@ extern "sysv64" fn kernel_main() -> ! {
         let n = if fb_start != 0 { 2 } else { 1 };
         let high_mapped: &[RequiredRegion] = &regions[..n];
 
-        // SAFETY: 恒等窓を握る全検証サイトと boot_info の消費、除去点より前に走るべき
-        // 生の低位 read（kernel_start）はいずれも終えている。direct_map は登録高位窓で、
+        // SAFETY: 恒等ウィンドウを握る全検証サイトと boot_info の消費、除去点より前に走るべき
+        // 生の低位 read（kernel_start）はいずれも終えている。direct_map は登録高位ウィンドウで、
         // 稼働 PML4 配下を読み書きできる。順序前提は上のコメントと
         // docs/verification-coverage.md の「higher-half B-2b」に従う。
         unsafe {
@@ -1601,7 +1601,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // **`paging-test` の構成は除去を通らないが、本番の表はこの時点で同じである。**
     kernel::task::record_kernel_cr3();
 
-    // 破壊 (highhalf-panic-after-remove): 恒等除去の直後に意図的 panic する。パニック経路
+    // 破壊テスト (highhalf-panic-after-remove): 恒等除去の直後に意図的 panic する。パニック経路
     // （シリアル I/O・レジスタ値のみ・walk なし。ADR-0003）が恒等非依存であることを、
     // 恒等を外した実状態で確認する（B-2b-4(e)）。
     #[cfg(feature = "highhalf-panic-after-remove")]
@@ -1613,8 +1613,8 @@ extern "sysv64" fn kernel_main() -> ! {
     report_lock_interrupt_state(&mut logger);
 
     // 実地スモークテスト: Vec/Box/String を確保・追記・解放する。
-    // ヒープは direct map 高位窓上にある（B-2b-2）ので、確保したポインタは高位 VA。
-    // `range_is_mapped` は物理範囲を見るので、高位窓経由で物理へ戻してから照合する
+    // ヒープは direct map 高位ウィンドウ上にある（B-2b-2）ので、確保したポインタは高位 VA。
+    // `range_is_mapped` は物理範囲を見るので、高位ウィンドウ経由で物理へ戻してから照合する
     // （恒等の間は高位 VA と低位 VA が同じ物理を指すので結果は不変）。
     let heap_mapped = |va: u64, len: u64| -> bool {
         match common::addr::VirtAddr::new(va)
@@ -1741,7 +1741,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // 各タスクの全 GPR が切り替えを跨いで保たれることを確認する。戻ってくると
     // 起動シーケンスは続行する。
     // **アロケータを渡す（S12 前の手当ての C の途中）。** ワーカーのガードページが
-    // 2MiB ページに載っていたら、張る前に分割するために要る
+    // 2MiB ページに載っていたら、設ける前に分割するために要る
     // （`kernel::stack::install_guard_page`）。
     kernel::task::run_cooperative_demo(&mut allocator);
 
@@ -1767,37 +1767,37 @@ extern "sysv64" fn kernel_main() -> ! {
     // === S7-c: プロセス別アドレス空間の切り替えを1往復する ===
     //
     // 到達条件4（CR3切り替え後もカーネルが動くこと）の観測である。新しい PML4 を作り、
-    // カーネルの上位だけを写し、切り替え、戻す。
+    // カーネルの上位だけをコピーし、切り替え、戻す。
     //
     // ここに置くのは、下位を失っても困らない位置だからである。ring3 と syscall のデモは
-    // 終わっており、AP はまだ起きていない。新しい空間の下位は空なので、切り替えている
+    // 終わっており、AP はまだ起動していない。新しい空間の下位は空なので、切り替えている
     // 間にユーザー空間へ触ると #PF になる。触らない。
     demo_address_space_switch(&mut logger, &mut allocator);
 
     // **ここでフレームアロケータを預ける（S11-3。`ADR-0030`）。**
     // 起動の組み立てはここまでで終わり、**以降はユーザープログラムの
-    // 写像だけがフレームを要る。** あちらは借りて、**Ring 3 へ落ちる前に返す。**
+    // マッピングだけがフレームを要る。** あちらは借りて、**Ring 3 へ落ちる前に返す。**
     //
     // **`deposit` は「返却」ではない**——ここは借りずに預ける唯一の場所である。
     // SAFETY: 起動シーケンスの単一実行文脈で一度だけ。まだ誰も借りていない。
     unsafe { kernel::frame_allocator::deposit(allocator) };
 
-    // === S9-b-1: 埋め込んだユーザープログラムの ELF を読み、写像する ===
+    // === S9-b-1: 埋め込んだユーザープログラムの ELF を読み、マップする ===
     //
-    // **まだ走らせない**（Ring 3 への遷移は次の刻み）。ここまでで、像が読めること、
-    // 新しいアドレス空間へ区画が張れること、**張った葉の W が区画の権限どおりで
+    // **まだ走らせない**（Ring 3 への遷移は次の手順）。ここまでで、イメージが読めること、
+    // 新しいアドレス空間へ区画がマップできること、**マップした葉の W が区画の権限どおりで
     // あること**を見る。
-    // **像の検査は複製の中へ移した（P-e）。** **埋め込みを外したので、複製する前に
-    // 読める像が無い**（`ADR-0034` の Addendum）。**置き場は複製の直後・`exercise` の
+    // **イメージの検査は複製の中へ移した（P-e）。** **埋め込みを外したので、複製する前に
+    // 読めるイメージが無い**（`ADR-0034` の Addendum）。**置き場は複製の直後・`exercise` の
     // 前である**——[`try_copy_fs_image_to_frames`] にある。
     let (image_phys, image_bytes) =
         copy_fs_image_to_frames(&mut logger, virtio_disk.as_mut(), fs_image_range);
 
-    // **環境の源を読む（f-1。`ADR-0052` の Decision 2）。**
+    // **環境の出どころを読む（f-1。`ADR-0052` の Decision 2）。**
     //
     // **位置がこの 2 行の間である理由**——**上でファイルシステムが使える
     // ようになり、下の `verify_bss_is_mapped` が最初の Ring 3 である。**
-    // **環境はプロセスを起こすときに積むので、それより前に決まっていれば
+    // **環境はプロセスを起動するときに積むので、それより前に決まっていれば
     // 足りる。**
     kernel::userland::load_environment(&mut logger);
     verify_corrupt_fs_image_is_rejected(&mut logger);
@@ -1817,8 +1817,8 @@ extern "sysv64" fn kernel_main() -> ! {
     kernel::cpu_state::check_and_report(&mut logger);
 
     if let Err(error) = load_embedded_user_program(&mut logger) {
-        // **この段ではまだ止める。** 既定の `hello` は成功するので、ここへは来ない。
-        // 壊した像を渡してプロセスだけを失敗させるのは S9-b-2 の 2 つ目である。
+        // **この段階ではまだ止める。** 既定の `hello` は成功するので、ここへは来ない。
+        // 壊したイメージを渡してプロセスだけを失敗させるのは S9-b-2 の 2 つ目である。
         logger.error(format_args!(
             "user-load: loading the embedded hello failed: {error:?}; halting"
         ));
@@ -1836,7 +1836,7 @@ extern "sysv64" fn kernel_main() -> ! {
          {returned_after} time(s), balanced={}, present={present_after}",
         taken_after == returned_after
     ));
-    // **検査の構成の計器（`ADR-0068` の HW-a）**——**4GiB の上から配った枚数。** **0 なら、その回は
+    // **検査の構成の計測（`ADR-0068` の HW-a）**——**4GiB の上から配った枚数。** **0 なら、その回は
     // 4GiB の上の扱いを何も確かめていない**（`xtask` の判定が見る）。
     #[cfg(feature = "frame-allocator-high-after-switch")]
     logger.info(format_args!(
@@ -1874,7 +1874,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // **ガードは `run_init` の間ずっと生きる**——**あちらは戻らないので、
     // 実際に落ちることは無い。** **それでもガードにするのは、借用が静的に
     // 効くからである**（据えている間、こちらは `&mut` を手放したままになる）。
-    // 破壊 (P-c-1, virtio-skip-install-test): 据えない。**シェルの文脈から装置へ
+    // 破壊テスト (P-c-1, virtio-skip-install-test): 据えない。**シェルの文脈から装置へ
     // 届かなくなる**——**書き戻しは黙って飛ばされる**（据えられていなければ
     // 書き戻さない形にしてあるため）。**`--zi-test` の「保存が装置へ届いた」
     // 判定が落ちる。** **据え忘れが黙る形を、これで塞ぐ。**
@@ -1892,9 +1892,9 @@ extern "sysv64" fn kernel_main() -> ! {
     #[cfg(feature = "virtio-skip-install-test")]
     let _ = (virtio_disk.as_mut(), image_phys, image_bytes);
 
-    // **カーネルスタックの高水位を出す（P-c-1 の手当て）。**
+    // **カーネルスタックの高水位を出す（P-c-1 の対策）。**
     //
-    // **ガードは真偽しか言わない**——**「踏んだか」は分かるが、「どれだけ
+    // **ガードは真偽しか示さない**——**「踏んだか」は分かるが、「どれだけ
     // 余っているか」は分からない。** **緑であることと、余裕があることは違う。**
     //
     // **遠征スタックには同じ形が既に在った**（`ring3:` の行）。
@@ -1914,13 +1914,13 @@ extern "sysv64" fn kernel_main() -> ! {
         ));
     }
 
-    // === S11-11: init がシェルを起こす ===
+    // === S11-11: init がシェルを起動する ===
     //
     // **ここから戻らない。**
     //
     // **`console` を渡す（S12 前の手当て）。** メインループが抜けて画面の書き手が
     // 居なくなったので、**`init` が引き取る**（`run_init` の doc）。
-    // **`.bss` が張られていることを見る（ADR-0039 の到達条件 2）。**
+    // **`.bss` がマップされていることを見る（ADR-0039 の到達条件 2）。**
     // **`init` へ入る前である**——あちらは戻らない。
     verify_bss_is_mapped(&mut logger);
 
@@ -1960,7 +1960,7 @@ const SHELL_AFTER_HEARTBEATS: u64 = if cfg!(feature = "keep-steady-loop") {
     2
 };
 
-/// `init`（S11-11）。**シェルを起こし、終わったら起こし直す。**
+/// `init`（S11-11）。**シェルを起動し、終わったら起動し直す。**
 ///
 /// # なぜカーネル側に置くのか
 ///
@@ -1983,9 +1983,9 @@ const SHELL_AFTER_HEARTBEATS: u64 = if cfg!(feature = "keep-steady-loop") {
 ///
 /// # PID 1 が死んだら
 ///
-/// **起こし直す。** `docs/vision.md` は「再起動・rescue・停止のいずれか」と
-/// 書いている。**起こし直しを選ぶのは、シェルが落ちても触り続けられるからである。**
-/// **起こせなくなったら止まる**——**同じ失敗を無限に繰り返さない。**
+/// **起動し直す。** `docs/vision.md` は「再起動・rescue・停止のいずれか」と
+/// 書いている。**起動し直しを選ぶのは、シェルが落ちても触り続けられるからである。**
+/// **起動できなくなったら止まる**——**同じ失敗を無限に繰り返さない。**
 ///
 /// # 画面への書き手は、ここから `init` 1 つである（S12 前の手当て）
 ///
@@ -2017,13 +2017,13 @@ const SHELL_AFTER_HEARTBEATS: u64 = if cfg!(feature = "keep-steady-loop") {
 /// **2 つ目——`&mut` で渡している以上、「同時に 2 人が書けない」は
 /// 借用検査が既に保証している。** [`Console`] は静的ではなく `kernel_main` の
 /// 局所で、ここへは `Option<&mut Console>` として渡る。
-/// **判定行を置いても、型が保証しているものを実行時に測り直すだけになる。**
+/// **判定行を設けても、型が保証しているものを実行時に測り直すだけになる。**
 ///
 /// **2 つの理由は、次に触る人にとって別のことを言っている。**
 /// **1 つ目だけを読むと「実行時に測れないから諦めた」に見えるが、
 /// 実際は「型が既に保証しているから要らない」である。**
 /// **したがって [`Console`] を静的へ移すなら、そのとき型の保証が消える**
-/// ——静的にした瞬間、書き手が 1 つであることを言うものが何も無くなる。
+/// ——静的にした瞬間、書き手が 1 つであることを示すものが何も無くなる。
 /// **そこが、この判断をやり直す場所である。**
 ///
 /// **`deferred-decisions.md` の行が、条件としてこの doc を指している。**
@@ -2049,8 +2049,8 @@ const SHELL_AFTER_HEARTBEATS: u64 = if cfg!(feature = "keep-steady-loop") {
 /// だった。**いまは `write` が画面へも届く**（上の節）。
 /// **`init` の 3 種類は変わらずこの関数が書く**——据えるのは `spawn` の間だけである。
 fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> ! {
-    /// 起こし直す上限。**同じ失敗を無限に繰り返さない。**
-    /// **`input-test` と `poll-test` はシェルを起こさない**ので、そのときは使われない
+    /// 起動し直す上限。**同じ失敗を無限に繰り返さない。**
+    /// **`input-test` と `poll-test` はシェルを起動しない**ので、そのときは使われない
     /// （`ADR-0066` の Y-a / Y-b）。
     #[cfg_attr(
         any(
@@ -2077,13 +2077,13 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
     )]
     let mut console = console;
 
-    // **`init` が `/bin/fptest` を 1 度だけ起こす（B-a。`ADR-0058`）。**
+    // **`init` が `/bin/fptest` を 1 度だけ起動する（B-a。`ADR-0058`）。**
     //
-    // **深さのためである。** **シェルから起こすと `fptest` は深さ 2 になり、
-    // 子を起こせない**（`MAX_EXCURSION_DEPTH` = 2。**実測で `-EAGAIN` を見た**）。
+    // **深さのためである。** **シェルから起動すると `fptest` は深さ 2 になり、
+    // 子を起動できない**（`MAX_EXCURSION_DEPTH` = 2。**実測で `-EAGAIN` を見た**）。
     // **ここは深さ 0 なので、`fptest` が 1、その子が 2 に収まる。**
     //
-    // **台本の側でも 1 度起こす**（`input.rs` の `SCRIPT`）——**あちらは
+    // **台本の側でも 1 度起動する**（`input.rs` の `SCRIPT`）——**あちらは
     // 「起こされた時点の XMM が 0」を、この 1 回目が残した目印に対して見る。**
     #[cfg(feature = "fp-test")]
     {
@@ -2100,13 +2100,13 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
     #[cfg(feature = "concurrent-test")]
     run_concurrent_test(logger, console.as_deref_mut());
 
-    // **ソケットのサーバーを起こしっぱなしで起こす（`ADR-0064`）。** **シェルより前に 1 度だけ。**
-    // **手形はセッションの締めで待つ。**
+    // **ソケットのサーバーを切り離して起動する（`ADR-0064`）。** **シェルより前に 1 度だけ。**
+    // **ハンドルはセッションの完了時に待つ。**
     #[cfg(feature = "socket-test")]
     let socket_server = start_socket_server(logger, console.as_deref_mut());
 
     // **入力の生イベントの fd を検査する（`ADR-0066` の Y-a）。** **`inputd` を前景で 1 度
-    // 起こして締める**——**シェルは起こさない**（入力の消費者は 1 つで、`inputd` が読む）。
+    // 起動して終える**——**シェルは起動しない**（入力の消費者は 1 つで、`inputd` が読む）。
     #[cfg(feature = "input-test")]
     {
         run_input_test(logger, console);
@@ -2114,15 +2114,15 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
     }
 
     // **入力とソケットを同時に待つ形を検査する（`ADR-0066` の Y-b）。** **`polld` を前景で 1 度
-    // 起こして締める**——**`input-test` と同じ形で、シェルは起こさない。**
+    // 起動して終える**——**`input-test` と同じ形で、シェルは起動しない。**
     #[cfg(feature = "poll-test")]
     {
         run_poll_test(logger, console);
         cpu::halt_forever()
     }
 
-    // **画面へ画素を出す形を検査する（`ADR-0066` の Y-c）。** **`gfxd` を前景で 1 度起こして締める**
-    // ——**`input-test` と同じ形で、シェルは起こさない。**
+    // **画面へ画素を出す形を検査する（`ADR-0066` の Y-c）。** **`gfxd` を前景で 1 度起動して終える**
+    // ——**`input-test` と同じ形で、シェルは起動しない。**
     #[cfg(feature = "screen-test")]
     {
         run_screen_test(logger, console);
@@ -2130,7 +2130,7 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
     }
 
     // **画面・入力・ソケット・共有メモリを 1 つの組で通す（`ADR-0066` の Y-d）。** **`compd` を
-    // 前景で 1 度起こして締める**——**シェルは起こさない。**
+    // 前景で 1 度起動して終える**——**シェルは起動しない。**
     #[cfg(feature = "compose-test")]
     {
         run_compose_test(logger, console);
@@ -2161,11 +2161,11 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
         //
         // **据えている間、この関数は画面へ書けない**——`&mut Console` をガードへ
         // 預けるので、借用検査がそれを見る。**「書き手は 1 つ」はそこが保証する。**
-        // **外す時機は `spawn` が戻った直後である**（この束の終わり）。
+        // **外すタイミングは `spawn` が戻った直後である**（この束の終わり）。
         // その後の `init` の行は、また `init` が書く。
         // **台本を作動させる（zi-d。`zi-test` のときだけ効く）。**
         // **起動シーケンスの検算より後である**（`kernel::input::arm_input_script`）。
-        // **セッションの開始のティックを控える（W2-d+）。** **終わった後との差を計器に出す。**
+        // **セッションの開始のティックを控える（W2-d+）。** **終わった後との差を計測に出す。**
         let clock_at_start = kernel::idt::monotonic_ticks();
         kernel::input::arm_input_script();
         let outcome = {
@@ -2194,7 +2194,7 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
                         kernel::input::delivered_count()
                     ),
                 );
-                // **アイドルの計器を出す（W2-c-1）。** **シリアルだけへ出す**
+                // **アイドルの計測を出す（W2-c-1）。** **シリアルだけへ出す**
                 // ——**画面の書き手を増やさない。**
                 //
                 // **シェルが終わった後に出す。** **既定の起動ではシェルが終わらないので、
@@ -2207,7 +2207,7 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
                     kernel::task::idle_halts(),
                     kernel::task::idle_selections()
                 ));
-                // **待ちと起こしの計器（W2-c-2）。** **判定はこの行を読む。**
+                // **待ちと起こしの計測（W2-c-2）。** **判定はこの行を読む。**
                 //
                 // **`pushed without waking` が関係の検出器である**——**待っている者が居たのに
                 // 起こさなかった回数で、本番では 0 である。** **時間の上限では見ない**（`ADR-0061`）。
@@ -2220,10 +2220,10 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
                     kernel::task::wakes_issued(),
                     kernel::keyboard::pushed_without_waking()
                 ));
-                // **「深さ 1 では畳まない」が働いた回数（W2-c-2 の手当て）。**
-                // **判定はこの行を読む。** **既定では 1 以上、破壊では 0 である。**
+                // **「深さ 1 では畳まない」が働いた回数（W2-c-2 の対策）。**
+                // **判定はこの行を読む。** **既定では 1 以上、破壊テストでは 0 である。**
                 //
-                // **置いた理由は、覆いが 1 本だけだったことである**——**`kill-fold-at-depth-one`
+                // **設けた理由は、覆いが 1 本だけだったことである**——**`kill-fold-at-depth-one`
                 // を落としていたのは `the shell was restarted exactly once` だけで、待つ形に
                 // したら真へ倒れて素通りした**（`ADR-0061`）。
                 // **単調な時刻が進んだこと（W2-d+）。** **判定はこの行を読む。**
@@ -2231,7 +2231,7 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
                 // **関係で見る**——**ティックの増加は、上の `fold:` の回数と同じ桁になる。**
                 // **どちらも BSP のタイマ割り込みで増えるからである**（あちらは遠征中の
                 // 割り込みを弾いた回数、こちらは割り込みそのものの回数）。
-                // **破壊 `clock-ap-also-ticks` を立てると、ティックだけがコア数倍になるので
+                // **破壊テスト `clock-ap-also-ticks` を立てると、ティックだけがコア数倍になるので
                 // 食い違う。** **時間では見ない。**
                 //
                 // **既定の起動では出ない**（シェルが終わらない）ので、**起動ログの参照には
@@ -2260,8 +2260,8 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
                     "fold: depth one was not folded {} time(s) during this session",
                     kernel::idt::depth_one_not_folded()
                 ));
-                // **パイプの計器（`ADR-0063` の (b3)）。** **既定の起動では全部 0 である**
-                // ——**`|` を打つ者が居ない。** **台本の族（`pipe-test`）が読む。**
+                // **パイプの計測（`ADR-0063` の (b3)）。** **既定の起動では全部 0 である**
+                // ——**`|` を打つ者が居ない。** **台本のグループ（`pipe-test`）が読む。**
                 logger.info(format_args!(
                     "pipe: created {}, readers waited {} time(s) and were woken by a write {} \
                      time(s), writers waited {} time(s), writes without a reader {}, \
@@ -2279,9 +2279,9 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
                     kernel::syscall::detached_entry_wait_ticks_max(),
                     kernel::syscall::terminal_writes_from_detached()
                 ));
-                // **ソケットの計器（`ADR-0064`）。** **台本の族（`socket-test`）が読む。**
+                // **ソケットの計測（`ADR-0064`）。** **台本のグループ（`socket-test`）が読む。**
                 //
-                // **計器は大域である**——**起動時の `syscall-test`（65・66 番）の分も乗る。**
+                // **計測は大域である**——**起動時の `syscall-test`（65・66 番）の分も乗る。**
                 // **66 番が無い名前へ `connect` するので、既定の起動でも `connect refused` は 1 で、
                 // `socket-test` の `sockc nobody` と合わせて 2 になる**（実測。一時のログで
                 // "nobody" が 2 回来ることを確かめた）。**だから `socket-test` の判定 5 は
@@ -2310,8 +2310,8 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
                     kernel::socket::epipe_seen(),
                     kernel::socket::eof_seen()
                 ));
-                // **共有メモリの計器（`ADR-0065`）。** **既定の起動では `syscall-test` の
-                // mmap の検査の分だけ動く。** **台本の族（`socket-test`）が読む。**
+                // **共有メモリの計測（`ADR-0065`）。** **既定の起動では `syscall-test` の
+                // mmap の検査の分だけ動く。** **台本のグループ（`socket-test`）が読む。**
                 logger.info(format_args!(
                     "shm: created {}, released {}, mapped pages {}; fds sent {}, received {}",
                     kernel::shm::created(),
@@ -2320,9 +2320,9 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
                     kernel::shm::fds_sent(),
                     kernel::shm::fds_received()
                 ));
-                // **`socket-test` のサーバーを手形で待って回収する（`ADR-0064`）。** **台本は
+                // **`socket-test` のサーバーをハンドルで待って回収する（`ADR-0064`）。** **台本は
                 // `quit` を打ってから `exit` するので、ここでは既に終わっている。** **終わっていない
-                // なら（破壊）永久に待ち、`xtask` の「出力が伸びない」上限が落とす。**
+                // なら（破壊テスト）永久に待ち、`xtask` の「出力が伸びない」上限が落とす。**
                 #[cfg(feature = "socket-test")]
                 if restarts == 0 {
                     let status = kernel::userland::wait_for_ring3_task(socket_server);
@@ -2355,14 +2355,14 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
     }
 }
 
-/// 入力の生イベントの fd を検査する（`ADR-0066` の Y-a）。**`/bin/inputd` を前景で 1 度起こし、
-/// 締めに計器を出す。** **シェルは起こさない**（`init` が `input-test` のとき、これで締める）。
+/// 入力の生イベントの fd を検査する（`ADR-0066` の Y-a）。**`/bin/inputd` を前景で 1 度起動し、
+/// 完了時に計測を出す。** **シェルは起動しない**（`init` が `input-test` のとき、これで終える）。
 ///
 /// **`inputd` は入力の fd を開いて `read` で待ち、本物の打鍵（`sendkey`）が起こす。** **判定は
-/// `xtask` の `input-test` が、印字したイベントと計器の行を読んで行う。**
+/// `xtask` の `input-test` が、印字したイベントと計測の行を読んで行う。**
 ///
-/// **`keyboard waited` は `read(0)` と入力 fd で共有の計器である**（`wait_for_keyboard`）。
-/// **この構成はシェルを起こさないので、`inputd` の待ちだけが乗る。**
+/// **`keyboard waited` は `read(0)` と入力 fd で共有の計測である**（`wait_for_keyboard`）。
+/// **この構成はシェルを起動しないので、`inputd` の待ちだけが乗る。**
 #[cfg(feature = "input-test")]
 fn run_input_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) {
     let mut console = console;
@@ -2386,16 +2386,16 @@ fn run_input_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>
 }
 
 /// 入力とソケットを同時に待つ形を検査する（`ADR-0066` の Y-b）。**`/bin/polld` を前景で 1 度
-/// 起こし、締めに計器を出す。** **シェルは起こさない**（`init` が `poll-test` のとき、これで締める）。
+/// 起動し、完了時に計測を出す。** **シェルは起動しない**（`init` が `poll-test` のとき、これで終える）。
 ///
-/// **`polld` が自分で `/bin/pollc` を起こしっぱなしで起こす**——**Ring 3 のスロットは 2 で、
-/// `a | b` と同じ形である**（`ADR-0063` の (b3)）。**待つ側が先に待ち受けてから起こすので、
-/// 繋ぎ直しの回しが要らない。**
+/// **`polld` が自分で `/bin/pollc` を切り離して起動する**——**Ring 3 のスロットは 2 で、
+/// `a | b` と同じ形である**（`ADR-0063` の (b3)）。**待つ側が先に待ち受けてから起動するので、
+/// 繋ぎ直しの繰り返しが要らない。**
 ///
 /// **前景はこの関数が据える**——**`polld` が入力の fd を開けるのは前景が取られている間だけ
 /// である**（`ADR-0066` の「入力 fd の前景の関所」）。
 ///
-/// **判定は `xtask` の `poll-test` が、印字した行と計器の行を読んで行う。**
+/// **判定は `xtask` の `poll-test` が、印字した行と計測の行を読んで行う。**
 #[cfg(feature = "poll-test")]
 fn run_poll_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) {
     let mut console = console;
@@ -2413,7 +2413,7 @@ fn run_poll_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>)
     );
     // **判定が読む 3 つの数を 1 行に出す。**
     //
-    // - **`poll waited`**——**眠った回数**（待たない破壊では 0）。
+    // - **`poll waited`**——**眠った回数**（待たない破壊テストでは 0）。
     // - **`max wait set`**——**集合に入った理由の最大本数**（**大きさを実測で決めた根拠でもある**。
     //   `task::MAX_WAIT_REASONS` の doc）。
     // - **`woken outside the set`**——**`on ∉ S` の者を起こした回数**（**本番では構造で 0**。
@@ -2431,11 +2431,11 @@ fn run_poll_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>)
     ));
 }
 
-/// 画面へ画素を出す形を検査する（`ADR-0066` の Y-c）。**`/bin/gfxd` を前景で 1 度起こし、締めに
-/// 計器を出す。** **シェルは起こさない**（`init` が `screen-test` のとき、これで締める）。
+/// 画面へ画素を出す形を検査する（`ADR-0066` の Y-c）。**`/bin/gfxd` を前景で 1 度起動し、完了時に
+/// 計測を出す。** **シェルは起動しない**（`init` が `screen-test` のとき、これで終える）。
 ///
 /// **前景はこの関数が据える**——**`gfxd` が画面を開けるのは前景の系統だけである**
-/// （`input::caller_is_foreground`）。**`gfxd` が起こす `gfxc`（スロット 1）は開けない。**
+/// （`input::caller_is_foreground`）。**`gfxd` が起動する `gfxc`（スロット 1）は開けない。**
 ///
 /// **判定は `xtask` の `screen-test` が、画面の読み戻し（`screendump`）と行を読んで行う。**
 #[cfg(feature = "screen-test")]
@@ -2461,9 +2461,9 @@ fn run_screen_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console
 }
 
 /// 画面・入力・ソケット・共有メモリを 1 つの組で通す（`ADR-0066` の Y-d。設計 Q5）。
-/// **`/bin/compd` を前景で 1 度起こし、締めに計器を出す。** **シェルは起こさない。**
+/// **`/bin/compd` を前景で 1 度起動し、完了時に計測を出す。** **シェルは起動しない。**
 ///
-/// **`compd` が `/bin/compc` を起こしっぱなしで起こす**（`a | b` と同じスロットの形）。**クライアントが
+/// **`compd` が `/bin/compc` を切り離して起動する**（`a | b` と同じスロットの形）。**クライアントが
 /// shm のプールを `SCM_RIGHTS` で送り、`compd` が {入力, listener, クライアント} の集合で待って受け、
 /// 裏バッファへ合成して `present` する。** **打鍵で終わる。**
 ///
@@ -2499,25 +2499,25 @@ fn run_compose_test(logger: &mut Logger<SerialPort>, console: Option<&mut Consol
 ///
 /// # 順序で守っているもの
 ///
-/// 1. **`/bin/tickera` を起こしっぱなしで起こし、Ring 3 へ入るまで待つ。** **フレームアロケータの
+/// 1. **`/bin/tickera` を切り離して起動し、Ring 3 へ入るまで待つ。** **フレームアロケータの
 ///    貸し出しは大域に 1 つである**（`docs/wayland-inventory.md` の #4）——**2 本の読み込みを重ねない。**
-/// 2. **`/bin/tickerb` を `spawn` で起こす。** 終わるまで戻らない。
-/// 3. **`/bin/tickera` を手形で待って回収する**（`ADR-0063` の (b2)）。**`tickera` のほうが長く回る**
+/// 2. **`/bin/tickerb` を `spawn` で起動する。** 終わるまで戻らない。
+/// 3. **`/bin/tickera` をハンドルで待って回収する**（`ADR-0063` の (b2)）。**`tickera` のほうが長く回る**
 ///    ——**`spawn` の会計は空きフレームの大域の差で閉じるので、`tickerb` の間に `tickera` が
 ///    破棄されると合わなくなる。** **その前提が成り立ったかを行に出す**（`was still running = `）。
-/// 4. **回収したので、`/bin/tickera` をもう一度起こして待つ。** **`|` は 2 回打たれる**
+/// 4. **回収したので、`/bin/tickera` をもう一度起動して待つ。** **`|` は 2 回打たれる**
 ///    ——**再起動できることを見る。**
-/// 5. **古い手形で待ち、断られることを見る。** **世代を見ているからである。**
+/// 5. **古いハンドルで待ち、断られることを見る。** **世代を見ているからである。**
 ///
 /// **待つ間は `yield_now` で譲る。** **Ring 3 へ入るまでの待ちには上限を置く**——**上限の無い待ちは、
 /// ハングと区別が付かない。** **終わるまでの待ちには置かない**——**本番の待ちに上限は置かない**
 /// （`ADR-0061`）。**この検査そのものの上限は、`cargo xtask check --concurrent-test` の側が持つ。**
-/// `socket-test` のサーバー（`/bin/sockd`）を起こしっぱなしで起こし、Ring 3 へ入るまで待つ
-/// （`ADR-0064`）。**手形を返す。**
+/// `socket-test` のサーバー（`/bin/sockd`）を切り離して起動し、Ring 3 へ入るまで待つ
+/// （`ADR-0064`）。**ハンドルを返す。**
 ///
-/// **`concurrent-test` の `tickera` と同じ形である**——**シェルより前に 1 度だけ起こす。**
-/// **回収はセッションの締めで行う**（`run_init`）。**Seinas が来たときの形の予行である**
-/// ——**コンポジタは起動時に起こされ、名前で待ち、クライアントはシェルから名前で繋ぐ。**
+/// **`concurrent-test` の `tickera` と同じ形である**——**シェルより前に 1 度だけ起動する。**
+/// **回収はセッションの完了時に行う**（`run_init`）。**Seinas が来たときの形の予行である**
+/// ——**コンポジタは起動時に立ち上げられ、名前で待ち、クライアントはシェルから名前で繋ぐ。**
 #[cfg(feature = "socket-test")]
 fn start_socket_server(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> u64 {
     /// Ring 3 へ入るまで待つ上限（ティック）。
@@ -2622,11 +2622,11 @@ fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Con
         ),
     );
 
-    // **手形で待って回収する（`ADR-0063` の (b2)）。** **ティックの上限で回す形はやめた**
+    // **ハンドルで待って回収する（`ADR-0063` の (b2)）。** **ティックの上限で回す形はやめた**
     // ——**本番の待ちに上限は置かない**（`ADR-0061`）。**上限は `--concurrent-test` の側が持つ。**
     let a_status = kernel::userland::wait_for_ring3_task(handle);
     // **この時点で取る。** **下の行はこの後の再起動を挟んでから出るので、そこで測ると
-    // 2 本目の走行を含んでしまう。**
+    // 2 本目の実行を含んでしまう。**
     let a_finished = kernel::idt::timer_ticks();
     log_both(
         logger,
@@ -2640,15 +2640,15 @@ fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Con
         ),
     );
 
-    // **回収したので、2 本目をもう一度起こせる（`ADR-0063` の (b2)）。**
+    // **回収したので、2 本目をもう一度起動できる（`ADR-0063` の (b2)）。**
     // **`|` は 2 回打たれるので、再起動できることを見る。**
     let restarted = kernel::userland::start_detached(b"/bin/tickera", b"tickera\0", 1, None, None);
     let second_status = match restarted {
         Some(second) => Some(kernel::userland::wait_for_ring3_task(second)),
         None => None,
     };
-    // **古い手形で待つと断られる（`ADR-0063` の (b2)）。** **世代を見ているからである**
-    // ——**破壊 `wait-ignores-the-generation` はここで落ちる。**
+    // **古いハンドルで待つと断られる（`ADR-0063` の (b2)）。** **世代を見ているからである**
+    // ——**破壊テスト `wait-ignores-the-generation` はここで落ちる。**
     let stale = kernel::userland::wait_for_ring3_task(handle);
     log_both(
         logger,
@@ -2682,8 +2682,8 @@ fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Con
     );
 }
 
-/// シェルの像のパス。**NUL は付けない**（`spawn` はスライスを取る）。
-/// **`input-test` と `poll-test` はシェルを起こさない**ので、そのときは使われない
+/// シェルのイメージのパス。**NUL は付けない**（`spawn` はスライスを取る）。
+/// **`input-test` と `poll-test` はシェルを起動しない**ので、そのときは使われない
 /// （`ADR-0066` の Y-a / Y-b）。
 #[cfg_attr(
     any(
@@ -3005,7 +3005,7 @@ fn init_console(
 ///
 /// **`write_foreground_bytes` へ渡す**——`sys_write` が使うのと同じ入口である。
 /// `Console` のメソッドを直に呼ぶと、**「パーサが居ても前景経路が呼ばない」
-/// 破壊（`ansi-console-skip-parse-test`。接続の取り違え）がすり抜ける。**
+/// 破壊テスト（`ansi-console-skip-parse-test`。接続の取り違え）がすり抜ける。**
 ///
 /// # 判定はバックバッファとカーソルで行う
 ///
@@ -3021,7 +3021,7 @@ fn init_console(
 fn exercise_ansi_console(logger: &mut Logger<SerialPort>, console: &mut Console) {
     // まっさらから始める。判定を既知の状態に固定する。
     console.clear();
-    // **カーソルを隠してから始める（ES-c で足した手当て）。**
+    // **カーソルを隠してから始める（ES-c で足した対策）。**
     //
     // **`cell_has_ink` はセルの全ピクセルを見る**ので、**カーソルの下線を
     // インクとして拾う**（実測で EL(0) と SGR の判定が落ちた）。
@@ -3116,9 +3116,9 @@ fn exercise_ansi_console(logger: &mut Logger<SerialPort>, console: &mut Console)
         "ansi-test: EL(1) erased left of the cursor = {el1}"
     ));
 
-    // (5c) ED(0) と ED(1)。行 7・8・9 の頭に印を置き、カーソルを行 8 の
+    // (5c) ED(0) と ED(1)。行 7・8・9 の頭に目印を置き、カーソルを行 8 の
     // セル 1 へ。ED(0) は**下（行 9）と行 8 のカーソル以後**を消し、
-    // **上（行 7）と行 8 のカーソルより左（セル 0 の印）を残す。**
+    // **上（行 7）と行 8 のカーソルより左（セル 0 の目印）を残す。**
     let foreground = kernel::console::install_foreground(console);
     kernel::console::write_foreground_bytes(b"\x1b[7;1Hp\x1b[8;1Hq\x1b[9;1Hr\x1b[8;2H\x1b[0J");
     drop(foreground);
@@ -3159,7 +3159,7 @@ fn exercise_ansi_console(logger: &mut Logger<SerialPort>, console: &mut Console)
     // `0xE0,0xE0,0xE0`（ほぼ白）である**（実測。`kernel_main` の定数）。
     // **選んだのは truecolor の `(0, 200, 0)`（緑）と `(200, 0, 0)`（赤）で、
     // どちらも背景・既定前景・互いに、RGB のどの軸でも 150 以上離れている。**
-    // **見た目の好みで変えないこと**——近い色にすると判定は緑のまま鈍る。
+    // **見た目の好みで変えないこと**——近い色にすると判定は成功のまま鈍る。
     console.clear();
     let foreground = kernel::console::install_foreground(console);
     // 前景を緑、背景を赤にして 1 字置く。
@@ -3204,7 +3204,7 @@ fn exercise_ansi_console(logger: &mut Logger<SerialPort>, console: &mut Console)
     // ES-b の判定色（緑と赤）のどれとも RGB のどれかの軸で 150 以上離れて
     // いる（`Console::CURSOR_COLOR` の doc）。**判定は色を写さず訊く。**
     console.clear();
-    // **ここからはカーソルを見る**ので、出し直す（上の手当ての対）。
+    // **ここからはカーソルを見る**ので、出し直す（上の対策の対）。
     let foreground = kernel::console::install_foreground(console);
     kernel::console::write_foreground_bytes(b"\x1b[?25h\x1b[3;5H");
     drop(foreground);
@@ -3250,7 +3250,7 @@ fn exercise_ansi_console(logger: &mut Logger<SerialPort>, console: &mut Console)
          (old {old_spot:?}, new {new_spot:?})"
     ));
 
-    // 締めてから通常の起動へ戻る。画面に実演の残骸を残さない。
+    // 終えてから通常の起動へ戻る。画面に実演の残骸を残さない。
     console.clear();
     logger.info(format_args!("ansi-test: done"));
 }
@@ -3320,7 +3320,7 @@ fn verify_gdt_descriptors(logger: &mut Logger<SerialPort>, gdt_limit: u16) {
         USER_DATA_ACCESS, USER_DATA_FLAGS,
     };
 
-    // limit は「サイズ - 1」。並びを変えて枠が増えた分、値も変わる。
+    // limit は「サイズ - 1」。並びを変えてスロットが増えた分、値も変わる。
     let expected_limit = gdt::expected_gdt_limit();
     logger.info(format_args!(
         "gdt: limit={gdt_limit} (expected {expected_limit})"
@@ -3390,8 +3390,8 @@ fn verify_gdt_descriptors(logger: &mut Logger<SerialPort>, gdt_limit: u16) {
              accessed={accessed} (expected {expected:#018x}, accessed bit is CPU-managed)"
         ));
         let matches = (loaded & !ACCESSED) == (expected & !ACCESSED) && dpl == expected_dpl;
-        // 破壊 (ring3-test-user-desc-dpl0): ucode64 の DPL を 0 に落とすので、この
-        // 読み戻しで先に halt させない。遠征の runtime で iretq の #GP として捕まえる
+        // 破壊テスト (ring3-test-user-desc-dpl0): ucode64 の DPL を 0 に落とすので、この
+        // 読み戻しで先に halt させない。遠征の runtime で iretq の #GP として検出する
         // （M5-e-1 の申し送り）。この feature のときだけ ucode64 を素通しにする。
         #[cfg(feature = "ring3-test-user-desc-dpl0")]
         let matches = matches || name == "ucode64";
@@ -3493,7 +3493,7 @@ fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
     logger.info(format_args!(
         "stack: old RSP={old_rsp:#x} (UEFI-derived), new RSP={current_rsp:#x}"
     ));
-    // **使っていない側へ目印を敷く（P-c-1 の手当て）。**
+    // **使っていない側へ目印を敷く（P-c-1 の対策）。**
     //
     // **ここが敷ける最初の場所である**——**切り替えた直後で、下は誰も
     // 使っていない。** **高水位はこの後の全部を含む。**
@@ -3690,7 +3690,7 @@ fn report_idt(logger: &mut Logger<SerialPort>) {
         all_present &= entry.is_present();
         all_interrupt_gates &= entry.gate_type() == 0xE;
         // syscall ベクタの期待 DPL はゲート登録と同じ定数から出す（gate-dpl0 の
-        // 破壊では両方が 0 になり、この検査は通って runtime で #GP になる）。
+        // 破壊テストでは両方が 0 になり、この検査は通って runtime で #GP になる）。
         let expected_dpl = if vector == idt::SYSCALL_VECTOR {
             idt::SYSCALL_GATE_DPL
         } else {
@@ -3747,7 +3747,7 @@ fn report_idt(logger: &mut Logger<SerialPort>) {
     //
     // 上の検査はこれらのベクタを除外しており、除外したものについては何も見ない。
     // ゲートの代入を落としても既定の例外スタブを指したまま静かに通るので、肯定的な
-    // 主張を別に置く。yield と syscall は「戻らない」経路へ落ち、スプリアスは S2-b
+    // 主張を別に設ける。yield と syscall は「戻らない」経路へ落ち、スプリアスは S2-b
     // 以前の「起きたら止まる」状態へ戻る。
     let dedicated = idt::check_dedicated_stubs();
     let dedicated_ok = dedicated.iter().all(idt::DedicatedStubCheck::is_ok);
@@ -3925,7 +3925,7 @@ unsafe extern "sysv64" fn trigger_invalid_opcode_with_known_registers() -> ! {
 
 /// ページフォルトを起こすために読みに行くアドレス。
 ///
-/// 実装している物理メモリ（256MiB）からも、フレームバッファや MMIO の窓からも遠い値を
+/// 実装している物理メモリ（256MiB）からも、フレームバッファや MMIO のウィンドウからも遠い値を
 /// 選ぶ。上位ビットが符号拡張された正準アドレスなので、#GP ではなく #PF になる。
 ///
 /// 使う前に `MappedRanges::contains_range` でマップされていないことを確認する。偶然
@@ -4375,7 +4375,7 @@ fn verify_irq_path_restores_registers(logger: &mut Logger<SerialPort>) {
     //
     // rbx と rbp は検査できない。LLVM がこの 2 本を内部的に予約しており、`asm!` の
     // オペランドに指定できない。検査できるのは残る 13 本である。順序の取り違えは
-    // 13 本の相異なる値で捕まり、本数の過不足は RSP がずれて `iretq` の時点で壊れる
+    // 13 本の相異なる値で検出され、本数の過不足は RSP がずれて `iretq` の時点で壊れる
     // ので、この 2 本が抜けても検査の意味は保たれる。
     let mut regs: [u64; 13] = [
         0x0101_0101_0101_0101, // rax
@@ -4463,7 +4463,7 @@ fn verify_irq_path_restores_registers(logger: &mut Logger<SerialPort>) {
 /// デモのアドレス空間が使うユーザーサブツリーの添字（S7-e）。
 ///
 /// `DEMO_VIRT` の添字と一致していなければならない。一致しないと `map_user_4kib` が
-/// `NotPrivate` で弾く。弾くのが正しい。別の添字へ張れば、その空間の監査の主張が破れる。
+/// `NotPrivate` で弾く。弾くのが正しい。別の添字へマップすれば、その空間の監査の主張が破れる。
 ///
 /// 本番の `USER_PML4_INDEX` とは別でよい。プロセスごとにアドレス空間が分かれる以上、
 /// ユーザーサブツリーの添字も空間ごとの性質である（S7-e）。
@@ -4475,7 +4475,7 @@ const DEMO_USER_PML4_INDEX: usize = 0;
 /// 切り替えた後にこの関数がログを出せること自体が証拠になる。命令フェッチもスタックも
 /// direct map も、新しい CR3 の下で引き続き翻訳できているということである。
 ///
-/// 破壊 (addrspace-no-kernel-share): 上位を写さない。切り替えた瞬間に死ぬので、
+/// 破壊テスト (addrspace-no-kernel-share): 上位をコピーしない。切り替えた瞬間に死ぬので、
 /// 「切り替えた後」の行が出ない（S7-c）。
 fn demo_address_space_switch(
     logger: &mut Logger<SerialPort>,
@@ -4484,8 +4484,8 @@ fn demo_address_space_switch(
     let direct_map = common::addr::direct_map();
     let production = kernel::paging::switch::read_cr3();
 
-    // SAFETY: 稼働中の PML4 を読み、direct map が覆っている新しいフレームへ写すだけ。
-    // AP はまだ起きておらず、他コアが写像を変えることはない。
+    // SAFETY: 稼働中の PML4 を読み、direct map が覆っている新しいフレームへコピーするだけ。
+    // AP はまだ起動しておらず、他コアがマッピングを変えることはない。
     let space = match unsafe {
         kernel::address_space::AddressSpace::new(
             allocator,
@@ -4510,7 +4510,7 @@ fn demo_address_space_switch(
         production.as_u64()
     ));
 
-    // SAFETY: 上位 256 本を写してあるので、実行中のコード・スタック・direct map は
+    // SAFETY: 上位 256 本をコピーしてあるので、実行中のコード・スタック・direct map は
     // 同じ物理を指し続ける。下位は空だが、この区間ではユーザー空間へ触らない。
     unsafe { space.activate() };
 
@@ -4539,12 +4539,12 @@ fn demo_address_space_switch(
     demo_two_address_spaces(logger, allocator, direct_map, production, space);
 }
 
-/// 2 つのアドレス空間を作り、同じ VA を別の物理へ張って読み分ける（S7-d）。
+/// 2 つのアドレス空間を作り、同じ VA を別の物理へマップして読み分ける（S7-d）。
 ///
 /// 到達条件 1（同じ VA が別の物理を指す）・2（A の書き込みが B から見えない）・
 /// 6（共有カーネル部分が一致する）・5（破棄後に古い翻訳で触れない）の観測である。
 ///
-/// ユーザーモードへは行かない。張るのはユーザーページだが、読むのは Ring 0 からである。
+/// ユーザーモードへは行かない。マップするのはユーザーページだが、読むのは Ring 0 からである。
 /// 権限の検査は S8 以降の仕事で、ここで見たいのは翻訳が別であることだけである。
 fn demo_two_address_spaces(
     logger: &mut Logger<SerialPort>,
@@ -4559,7 +4559,7 @@ fn demo_two_address_spaces(
     // 下位の、どのデモとも重ならない VA。
     //
     // 添字は 0 である（`0x1_0000_0000 >> 39 == 0`）。S7-d の時点では「PML4[2] は
-    // 誰も使っていない」と書いていたが、算が誤っていた。通ったのは恒等除去（B-2b）で
+    // 誰も使っていない」と書いていたが、計算が誤っていた。通ったのは恒等除去（B-2b）で
     // PML4[0] が空いていたからであって、書いてあった理由によるのではない。
     // S7-e で訂正した。
     const DEMO_VIRT: u64 = 0x1_0000_0000;
@@ -4573,7 +4573,7 @@ fn demo_two_address_spaces(
         cpu::halt_forever();
     };
 
-    // SAFETY: 稼働中の PML4 を読み、direct map が覆う新しいフレームへ写すだけ。
+    // SAFETY: 稼働中の PML4 を読み、direct map が覆う新しいフレームへコピーするだけ。
     let mut space_b =
         match unsafe { AddressSpace::new(allocator, direct_map, production, DEMO_USER_PML4_INDEX) }
         {
@@ -4630,7 +4630,7 @@ fn demo_two_address_spaces(
 
     // 到達条件 1・2: 切り替えて読み分ける。
     let ptr = DEMO_VIRT as *const u64;
-    // SAFETY: 上位を共有しているので切り替えてもカーネルは動く。読むのは張った VA。
+    // SAFETY: 上位を共有しているので切り替えてもカーネルは動く。読むのはマップした VA。
     let read_a = unsafe {
         space_a.activate();
         ptr.read_volatile()
@@ -4890,7 +4890,7 @@ fn start_timer(
 ///
 /// 順序に意味がある。
 ///
-/// 0. FADT が「無い」と言っていれば探らない。**探って答えが無ければ、無いとして続ける**
+/// 0. FADT が「無い」と示していれば探らない。**探って答えが無ければ、無いとして続ける**
 /// 1. コンフィグバイトを読んで、翻訳（セット 1）と割り込みが有効かを見る
 /// 2. 落ちていれば立てて書き戻し、読み直して一致を確認する
 /// 3. 出力バッファの残留データを読み捨てる
@@ -4906,7 +4906,7 @@ fn start_timer(
 /// **i8042 の無い機械は在りうる**（推測。`docs/hardware-inventory.md`）。**キーボードが無くても、
 /// シェルのプロンプトまでは進める**——入力の無いシェルは使えないが、止まって何も出さないより
 /// 多くが見える（USB の入力は HW-f）。**在るのに答えない場合は止めない代わりに `[ERROR]` を出す**
-/// （FADT が「在る」と言ったとき）。
+/// （FADT が「在る」と示したとき）。
 fn setup_keyboard(logger: &mut Logger<SerialPort>, i8042: kernel::acpi::I8042Presence) -> bool {
     use kernel::acpi::I8042Presence;
     use keyboard::controller;
@@ -4934,7 +4934,7 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>, i8042: kernel::acpi::I8042Pre
     let config = match unsafe { controller::read_config() } {
         Ok(config) => config,
         Err(error) => {
-            // **破壊 `i8042-halts-when-absent`**——直す前の形（探って答えが無ければ止める）。
+            // **破壊テスト `i8042-halts-when-absent`**——直す前の形（探って答えが無ければ止める）。
             if cfg!(feature = "i8042-halts-when-absent") {
                 logger.error(format_args!(
                     "i8042: failed to read the configuration byte ({error:?}); halting"
@@ -5027,7 +5027,7 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>, i8042: kernel::acpi::I8042Pre
 
 /// キーボード（IRQ1）の配送を I/O APIC 経由へ切り替える（S2-d-1c）。
 ///
-/// 配送が変わる。この段で最も危険な一手である。
+/// 配送が変わる。この段階で最も危険な一手である。
 ///
 /// # 呼ぶ位置
 ///
@@ -5068,7 +5068,7 @@ fn switch_virtio_to_io_apic(
     // 勝つ**——実測で QEMU の MADT は IRQ 11 に override を持ち、level・
     // active-high と宣言している。申告が効くのは override が無い platform
     // だけである（`irq/apic.rs` の route。ADR-0035 の Addendum）。
-    // 破壊 virtio-intx-edge-test は route の側に居る——宣言も申告も無視して
+    // 破壊テスト virtio-intx-edge-test は route の側に居る——宣言も申告も無視して
     // 生のエッジ・ハイで書く。
     let signaling = irq::RouteSignaling::LevelLow;
 
@@ -5128,7 +5128,7 @@ fn switch_keyboard_to_io_apic(
         return;
     };
 
-    // 破壊 (ioapic-wrong-vector-test): ゲートの無いベクタへ向ける。読み戻しの主張と
+    // 破壊テスト (ioapic-wrong-vector-test): ゲートの無いベクタへ向ける。読み戻しの主張と
     // 到達の主張が両方落ちる（S2-d-1c）。
     #[cfg(not(feature = "ioapic-wrong-vector-test"))]
     let vector = idt::IOAPIC_KEYBOARD_VECTOR as u8;
@@ -5160,7 +5160,7 @@ fn switch_keyboard_to_io_apic(
         Some(entry) => {
             let vector_ok = entry.vector() == vector;
             // 宛先を主張にする（S4-a）。「キーボードは bootstrap processor にしか
-            // 届かない」は、AP が割り込みを受けられるようになった段の安全の根拠で
+            // 届かない」は、AP が割り込みを受けられるようになった段階の安全の根拠で
             // ある。それまでは起動時の棚卸しのログに `destination=0x00` が出ている
             // だけで、実測の記憶であって主張ではなかった。
             //
@@ -5214,7 +5214,7 @@ static HELLO_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello.elf"))
 
 /// 埋め込んだユーザープログラム `fault-test` の ELF（S9-b-3-2a）。
 ///
-/// 出所は [`HELLO_ELF`] と同じで、`kernel/userland/fault-test.rs` を建てたものである。
+/// 出所は [`HELLO_ELF`] と同じで、`kernel/userland/fault-test.rs` をビルドしたものである。
 static FAULT_TEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fault-test.elf"));
 
 /// 埋め込んだユーザープログラム `syscall-test` の ELF（S9-b-3-2a）。
@@ -5222,19 +5222,19 @@ static SYSCALL_TEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sysca
 
 use kernel::userland::{load_user_program, UserLoadError};
 
-/// `build.rs` が生成した、像を建てた道具の版と大きさ（S10-a）。
+/// `build.rs` が生成した、イメージをビルドした道具の版と大きさ（S10-a）。
 ///
 /// # 位置の定数は、カーネルからは使わない（2026-09-03）
 ///
 /// **`MOTD_INODE` / `MOTD_DATA_BLOCK` / `INDIRECT_TABLE_BLOCK` /
 /// `FIRST_FREE_BLOCK` は、構成ごとに違う値になる**——**壊す位置に使うと、
-/// 別の構成が建てた像を読む回で当たらない**（[`map_corrupt_fs`] の doc）。
-/// **カーネルは像を歩いて求める。**
+/// 別の構成がビルドしたイメージを読む回で当たらない**（[`map_corrupt_fs`] の doc）。
+/// **カーネルはイメージを歩いて求める。**
 ///
 /// **生成をやめない。** **`xtask` が判定行へ出しており、人が「像がどう動いたか」
 /// を読む材料である**（`fs image e2fsck` の行）。**機械が寄りかからないだけである。**
 ///
-/// **例外が 1 つある**——**`USED_BLOCKS` は壊した像の器の大きさに使う**（[`CORRUPT_FS_BLOCKS`]。
+/// **例外が 1 つある**——**`USED_BLOCKS` は壊したイメージの器の大きさに使う**（[`CORRUPT_FS_BLOCKS`]。
 /// `ADR-0066` の Y-c）。**位置ではなく大きさなので、構成による揺れは余裕で吸える。**
 #[allow(dead_code)]
 mod fsimage_info {
@@ -5243,7 +5243,7 @@ mod fsimage_info {
 
 /// 埋め込んだユーザープログラムの ELF を読み、会計を出す（S9-b-1）。
 ///
-/// **写像もしないし走らせもしない。** 像が在って、`common::elf` が受理し、
+/// **マップもしないし走らせもしない。** イメージが在って、`common::elf` が受理し、
 /// 中身が期待どおりであることまでを見る。
 ///
 /// # entry がセグメントの先頭と一致しないことを主張する
@@ -5251,7 +5251,7 @@ mod fsimage_info {
 /// `hello` は `.text.prepad` を entry の手前へ置いてある。**リンカスクリプトの
 /// `KEEP` を外すと、詰め物は到達不能なのでセクション回収に落ち、entry が
 /// セグメントの先頭に戻る。実際に一度落ちた。** そうなると「entry ではなく
-/// セグメントの先頭へ飛ぶ」破壊が破壊にならなくなるので、ここで主張しておく。
+/// セグメントの先頭へ飛ぶ」破壊テストが破壊にならなくなるので、ここで主張しておく。
 fn verify_embedded_user_elf(logger: &mut Logger<SerialPort>) {
     use common::elf::Elf;
 
@@ -5306,8 +5306,8 @@ fn verify_embedded_user_elf(logger: &mut Logger<SerialPort>) {
         cpu::halt_forever();
     };
 
-    // 詰め物が生きていること。**破壊のためだけではない**——`.text` の前に別の節が
-    // 来るほうが普通で、entry とセグメントの先頭が一致するのは極小の像だけである。
+    // 詰め物が生きていること。**破壊テストのためだけではない**——`.text` の前に別の節が
+    // 来るほうが普通で、entry とセグメントの先頭が一致するのは極小のイメージだけである。
     if elf.entry_point == entry_segment.p_vaddr {
         logger.error(format_args!(
             "user-elf: the entry point {:#x} equals the start of its PT_LOAD; the .text.prepad \
@@ -5325,47 +5325,47 @@ fn verify_embedded_user_elf(logger: &mut Logger<SerialPort>) {
     ));
 }
 
-/// 埋め込んだ ext2 の像を読み、superblock と group descriptor を主張する（S10-a）。
+/// 埋め込んだ ext2 のイメージを読み、superblock と group descriptor を主張する（S10-a）。
 ///
 /// # 何を主張しているか
 ///
-/// **外の道具（`mke2fs`）が作った像を、こちらのパーサが同じに読めることである。**
-/// 自作の書き手が作った像を読めても、**自分の理解どうしの一致しか言わない。**
+/// **外の道具（`mke2fs`）が作ったイメージを、こちらのパーサが同じに読めることである。**
+/// 自作の書き手が作ったイメージを読めても、**自分の理解どうしの一致しか示さない。**
 ///
 /// # 版を出す
 ///
 /// **`mke2fs` の版が変わると既定値が動きうる**（ブロックサイズ、inode サイズ）。
 /// 判定行に載せておくと、**将来ここが落ちたときに「像の作り手が変わった」を
 /// 最初に疑える。**
-/// 埋め込んだ ext2 の像を、書ける場所（フレーム）へ複製する（S12-a）。
+/// 埋め込んだ ext2 のイメージを、書ける場所（フレーム）へ複製する（S12-a）。
 ///
 /// # なぜ複製するのか。**`.rodata` だからではない**
 ///
-/// **保護の話ではない。** 像を含むカーネル像の写像は読み書き可で、`W^X` は
+/// **保護の話ではない。** イメージを含むカーネルイメージのマッピングは読み書き可で、`W^X` は
 /// 未実装である（棚卸しで実測した）。**書けないのは [`FS_IMAGE`] が
 /// `&'static [u8]` だからで、型の話である。**
 ///
 /// **それでも複製する。** `static mut` にしてその場で書く案は
-/// **「不可能」ではなく「採らない」である**——**埋め込んだ像は
-/// `build.rs` が建てたものと同一であることが検査の前提**で
+/// **「不可能」ではなく「採らない」である**——**埋め込んだイメージは
+/// `build.rs` がビルドしたものと同一であることが検査の前提**で
 /// （`--full` の `fs image e2fsck`）、**その前提を実行時に壊すと、
 /// 「建てた像」と「動かした像」が同じものを指さなくなる。**
 ///
 /// # S12-a では書き換えない
 ///
 /// **作るのは経路だけである。** 複製して、物理の位置を判定行に出し、
-/// **ホスト側が取り出して元の像と突き合わせる**ところまでを見る。
+/// **ホスト側が取り出して元のイメージと突き合わせる**ところまでを見る。
 ///
 /// **書き換えを入れると、経路の誤りと書き込みの誤りが混ざる。**
 /// **S12-a が主張するのは「複製と取り出しが 1 バイトも落とさないこと」だけである。**
 ///
 /// # 返さないフレームである
 ///
-/// **取ったきり返さない。** 像は起動中ずっと生きる。
+/// **取ったきり返さない。** イメージは起動中ずっと生きる。
 /// **`spawn` の会計（`leaked`）には出ない**——あちらはプロセスの
-/// アドレス空間の畳みを、`spawn` の前後で測っている。**ここは spawn より前で、
-/// 窓の外である**（実測で確かめた）。
-/// 像を装置から複製する。**複製先の物理の置き場と長さを返す（P-c-1）。**
+/// アドレス空間の破棄を、`spawn` の前後で測っている。**ここは spawn より前で、
+/// ウィンドウの外である**（実測で確かめた）。
+/// イメージを装置から複製する。**複製先の物理の置き場と長さを返す（P-c-1）。**
 ///
 /// **返すのは、後で書き戻す者へ渡すためである**（`kernel::virtio::install`）。
 /// ファイルシステムが RAM だけに在ることを 1 行出す（`ADR-0068` の HW-d）。
@@ -5379,9 +5379,9 @@ fn report_ram_only_file_system(logger: &mut Logger<SerialPort>) {
     ));
 }
 
-/// virtio-blk が無いことを 1 行出す（`ADR-0068` の HW-d）。**RAM の像も無ければ止まる。**
+/// virtio-blk が無いことを 1 行出す（`ADR-0068` の HW-d）。**RAM のイメージも無ければ止まる。**
 ///
-/// **`#[inline(never)]` にしてある**——**`format_args!` の一時値を `kernel_main` の枠へ
+/// **`#[inline(never)]` にしてある**——**`format_args!` の一時値を `kernel_main` のフレームへ
 /// 乗せないためである。** **乗せた形を実測した**——**起動時のスタックの高水位が 208 バイト
 /// 深くなった**（`kernel_main` は最深の経路の上に在る。`ADR-0068` の「起動時のスタックの
 /// 最深経路」と (c)）。
@@ -5462,10 +5462,10 @@ fn copy_fs_image_to_frames(
     cpu::halt_forever();
 }
 
-/// 像の検査値（P-e。`ADR-0034` の Addendum）。
+/// イメージの検査値（P-e。`ADR-0034` の Addendum）。
 ///
 /// **virtio の読みの検査値と同じ式である**——`byte * (index + 1)` の総和を
-/// ラップさせて足す。**位置を見るので、順序の入れ替えも捕まえる。**
+/// ラップさせて足す。**位置を見るので、順序の入れ替えも検出する。**
 ///
 /// **ホストが `disk0.img` から同じ計算を独立に行い、突き合わせる。**
 fn image_checksum(bytes: &[u8]) -> u32 {
@@ -5481,7 +5481,7 @@ fn image_checksum(bytes: &[u8]) -> u32 {
 /// # なぜ列挙にするのか
 ///
 /// **文言を1文字も変えないためである。** 止める文言は場所ごとに違い、
-/// **書式に値が入る**（フレーム数、番地）。**`&'static str` 1 本では持てないので、
+/// **書式に値が入る**（フレーム数、アドレス）。**`&'static str` 1 本では持てないので、
 /// 場所ごとの変種に値を持たせる。**
 ///
 /// # 止めるのは呼び出し側である
@@ -5501,25 +5501,25 @@ enum FsImageCopyError {
     DeviceReadFailed {
         error: kernel::virtio::VirtioBlkError,
     },
-    /// 装置への書き戻しが失敗した（S13-e。全像フラッシュ。ADR-0034 の Addendum）。
+    /// 装置への書き戻しが失敗した（S13-e。イメージ全体のフラッシュ。ADR-0034 の Addendum）。
     DeviceWriteFailed {
         error: kernel::virtio::VirtioBlkError,
     },
-    /// 装置も RAM の像も無い（`ADR-0068` の HW-d）。**読む源が 1 つも無い。**
+    /// 装置も RAM のイメージも無い（`ADR-0068` の HW-d）。**読む出どころが 1 つも無い。**
     NoSource,
-    /// 渡された像の長さが、この像を建てたときの長さと違う（同）。
+    /// 渡されたイメージの長さが、このイメージをビルドしたときの長さと違う（同）。
     RamImageWrongSize { handed: u64, expected: u64 },
-    /// direct map が渡された像を覆っていない（同）。**写す前に確かめる。**
+    /// direct map が渡されたイメージを覆っていない（同）。**コピーする前に確かめる。**
     RamImageNotCovered { base: u64, last: u64 },
-    /// 渡された像の検査値が、建てたときの値と違う（同）。**長さが同じでも中身が古い形を捕まえる。**
+    /// 渡されたイメージの検査値が、ビルドしたときの値と違う（同）。**長さが同じでも中身が古い形を検出する。**
     RamImageChecksumMismatch { found: u32, expected: u32 },
 }
 
-/// 像をフレームへ複製する検査部（T3-1）。**止めない。`Err` を返す。**
+/// イメージをフレームへ複製する検査部（T3-1）。**止めない。`Err` を返す。**
 ///
 /// **判定行（`logger.info`）はここに残る。** **検査と検査の間に、検査した値を
 /// 使って出ているからである**——外へ出すと順序か文言が変わる。
-/// 最終形の像を装置へ 4KiB ずつ書き戻す（S13-e。ADR-0034 の Addendum）。
+/// 最終形のイメージを装置へ 4KiB ずつ書き戻す（S13-e。ADR-0034 の Addendum）。
 ///
 /// **[`try_copy_fs_image_to_frames`] のロードの対称である**——あちらが装置から
 /// フレームへ読み、こちらがフレームから装置へ書く。`base` は複製先の物理先頭。
@@ -5533,8 +5533,8 @@ fn flush_fs_image_to_device(
     while offset < bytes {
         let chunk = 4096u32.min((bytes - offset) as u32);
 
-        // 破壊 (S13-e, virtio-flush-short-test): 先頭の 4KiB を書き戻さない。
-        // **末尾を欠く形は罠である**——像 2MiB の 512 チャンクのうち中身が
+        // 破壊テスト (S13-e, virtio-flush-short-test): 先頭の 4KiB を書き戻さない。
+        // **末尾を欠く形は罠である**——イメージ 2MiB の 512 チャンクのうち中身が
         // あるのは先頭 80 だけで、末尾は全 0（S12-a の罠。実測。中身の最後は
         // チャンク 79）。末尾を欠いても `disk0.img` は変わらず、「状態が
         // 変わらない」で立たない。**先頭チャンクは superblock（オフセット
@@ -5547,7 +5547,7 @@ fn flush_fs_image_to_device(
             continue;
         }
 
-        // 破壊 (S13-e, fs-flush-skip-test): 装置へ書かない。**RAM の複製は
+        // 破壊テスト (S13-e, fs-flush-skip-test): 装置へ書かない。**RAM の複製は
         // 正しいが `disk0.img` は古いまま**——ホストの `e2fsck` が keep 変種で
         // 差を見る（S13-c の取り違えと対の形）。
         #[cfg(not(feature = "fs-flush-skip-test"))]
@@ -5569,9 +5569,9 @@ fn flush_fs_image_to_device(
     Ok(())
 }
 
-/// 像を装置から読むときの 1 回ぶんの大きさ（S13-c）。
+/// イメージを装置から読むときの 1 回ぶんの大きさ（S13-c）。
 ///
-/// **破壊 `virtio-load-skip-first-test` がこの値に依存している**——
+/// **破壊テスト `virtio-load-skip-first-test` がこの値に依存している**——
 /// **「先頭の 1 かたまりを飛ばす」ので、飛ばす量と読む量が同じでなければ
 /// ならない。** **2 箇所に書かないこと。**
 const FS_LOAD_CHUNK: u32 = 4096;
@@ -5590,12 +5590,12 @@ fn try_copy_fs_image_to_frames(
     };
 
     // **大きさの出所は `build.rs` の定数である（P-e）。**
-    // **以前は埋め込み像の長さだった**——外したので、建てたときの数を直に使う
+    // **以前は埋め込みイメージの長さだった**——外したので、ビルドしたときの数を直に使う
     // （`ADR-0034` の Addendum）。
     let bytes = fsimage_info::IMAGE_BYTES;
     let frames = bytes.div_ceil(FRAME_SIZE);
     // **2 MiB 境界へ揃える。** いま要るのは取り出しだけで、揃える必要は無い。
-    // **引数 1 つで済むので揃えておく**——後で 2MiB ページ 1 枚で張り直す道が残る。
+    // **引数 1 つで済むので揃えておく**——後で 2MiB ページ 1 枚でマップし直す道が残る。
     const HUGE_PAGE_FRAMES: u64 = (2 * 1024 * 1024) / FRAME_SIZE;
 
     let Some(base) = allocator.allocate_contiguous_aligned(frames, HUGE_PAGE_FRAMES) else {
@@ -5622,24 +5622,24 @@ fn try_copy_fs_image_to_frames(
     // 4KiB ずつ逐次読む。**読み先は複製先そのもの**（装置が DMA で直接書く）ので、
     // 読み終えた時点で複製が済んでいる。
     //
-    // **破壊 `fs-load-from-embedded-test` は消した（P-e）。** **装置以外の源が
+    // **破壊テスト `fs-load-from-embedded-test` は消した（P-e）。** **装置以外の出どころが
     // 無いので、戻す先が無い**（`ADR-0034` の Addendum の引き継ぎの表）。
     //
-    // **HW-d で源が 2 つになった**（`ADR-0068`）——**装置が無ければ、ブートローダが
-    // 渡した RAM の像から写す。** **どちらも無ければ `NoSource` で止まる。**
+    // **HW-d で出どころが 2 つになった**（`ADR-0068`）——**装置が無ければ、ブートローダが
+    // 渡した RAM のイメージからコピーする。** **どちらも無ければ `NoSource` で止まる。**
     // **判定の側から見ると、行が違う**（`fs-image-load:` の文言）。
     let mut blk = blk;
-    // **どちらから写したかを控える**（下の検査値の照合で見る）。
+    // **どちらからコピーしたかを控える**（下の検査値の照合で見る）。
     let copied_from_ram = blk.is_none();
     if let Some(blk) = blk.as_deref_mut() {
-        // 破壊 (S13-c, virtio-load-skip-first-test): 先頭の 1 かたまりを読まない。
+        // 破壊テスト (S13-c, virtio-load-skip-first-test): 先頭の 1 かたまりを読まない。
         // **superblock（オフセット 1024）が 0 のままになり、突き合わせが落ちる。**
-        // **末尾を欠く形にしない**——像の末尾は 0 なので（S12-a の実測）、
-        // 欠けても変わらず、破壊にならない（族の 1 つ目）。
+        // **末尾を欠く形にしない**——イメージの末尾は 0 なので（S12-a の実測）、
+        // 欠けても変わらず、破壊テストにならない（種類の 1 つ目）。
         //
         // **かたまりの大きさは [`FS_LOAD_CHUNK`] から取る。**
         // **以前は `4096` を 2 箇所に書いていた**——**片方だけを変えると、
-        // 破壊が「先頭のかたまり」を飛ばさなくなる**（効き目が別の定数に
+        // 破壊テストが「先頭のかたまり」を飛ばさなくなる**（効き目が別の定数に
         // 依存する形。2026-08-28 の洗い出しで見つけた）。
         #[cfg(not(feature = "virtio-load-skip-first-test"))]
         let start_chunk = 0u64;
@@ -5669,16 +5669,16 @@ fn try_copy_fs_image_to_frames(
             bytes - start_chunk * 4096
         ));
     } else {
-        // **RAM の像から写す**（`ADR-0068` の HW-d）。**装置は無い。**
+        // **RAM のイメージからコピーする**（`ADR-0068` の HW-d）。**装置は無い。**
         //
-        // 破壊 (HW-d, fs-ram-image-ignored): 像を見ない。**装置も像も無い形になり、
+        // 破壊テスト (HW-d, fs-ram-image-ignored): イメージを見ない。**装置も像も無い形になり、
         // `NoSource` で止まる**——**RAM ディスクの道が実際に使われていることの証明である。**
         let ignored = cfg!(feature = "fs-ram-image-ignored");
         let Some((image_phys, handed)) = ram_image.filter(|_| !ignored) else {
             return Err(FsImageCopyError::NoSource);
         };
-        // **長さが違えば止める。** **建てたときの長さで器を取っているので、
-        // 短い像を黙って写すと後ろが 0 のまま残り、ext2 の読みが別の所で落ちる。**
+        // **長さが違えば止める。** **ビルドしたときの長さで器を取っているので、
+        // 短いイメージを黙ってコピーすると後ろが 0 のまま残り、ext2 の読みが別の所で落ちる。**
         if handed != bytes {
             return Err(FsImageCopyError::RamImageWrongSize {
                 handed,
@@ -5715,14 +5715,14 @@ fn try_copy_fs_image_to_frames(
     // **書いたものを読み戻して突き合わせる。** 複製したことを主張の根拠にしない
     // （`install_guard_page` が split の後に粒度を読み直すのと同じ形）。
     //
-    // 破壊 (S12-a, fs-copy-corrupt-tail): 末尾の 1 バイトを 0xFF で潰す。
+    // 破壊テスト (S12-a, fs-copy-corrupt-tail): 末尾の 1 バイトを 0xFF で潰す。
     // **読み戻しがここで落ちる。** 落とさなければホスト側の突き合わせが落ちる。
     //
-    // **0 で潰す形は破壊にならない。** 像の末尾は既に 0 なので、書いても何も
-    // 変わらない（**実測でそうなった**——破壊を立てたのに項目が通った）。
-    // **「壊したつもりで壊れていない」を、破壊を走らせて捕まえた例である。**
+    // **0 で潰す形は破壊テストにならない。** イメージの末尾は既に 0 なので、書いても何も
+    // 変わらない（**実測でそうなった**——破壊テストを立てたのに項目が通った）。
+    // **「壊したつもりで壊れていない」を、破壊テストを走らせて検出した例である。**
     #[cfg(feature = "fs-copy-corrupt-tail-test")]
-    // SAFETY: 上と同じ範囲。破壊のために末尾を 1 バイトだけ変える。
+    // SAFETY: 上と同じ範囲。破壊テストのために末尾を 1 バイトだけ変える。
     unsafe {
         destination.add(bytes as usize - 1).write(0xFF);
     }
@@ -5731,9 +5731,9 @@ fn try_copy_fs_image_to_frames(
     let copied = unsafe { core::slice::from_raw_parts(destination as *const u8, bytes as usize) };
     // **検査値を出す（P-e。`ADR-0034` の Addendum）。**
     //
-    // **以前は埋め込み像とのバイト一致を見ていた。** **その埋め込みを外したので、
+    // **以前は埋め込みイメージとのバイト一致を見ていた。** **その埋め込みを外したので、
     // 突き合わせる相手をホストへ移した**——**ホストが `disk0.img` から同じ計算を
-    // 独立に行う。** **源が独立である**（ファイルを直に読む側と、virtio を通って
+    // 独立に行う。** **出どころが独立である**（ファイルを直に読む側と、virtio を通って
     // 読む側）。**持ち越しでも成立する**（毎回中身が変わってよい）。
     //
     // **ハッシュではない。重み付き和である**（`byte * (index + 1)` の総和）。
@@ -5742,14 +5742,14 @@ fn try_copy_fs_image_to_frames(
     // **費用は前と同じ位である**——**前も 2MiB のスライス比較で 2MiB を歩いていた。**
     let checksum = image_checksum(copied);
 
-    // **RAM の像から写した回は、検査値でも照合する**（`ADR-0068` の HW-d。レビューの 1 点）。
+    // **RAM のイメージからコピーした回は、検査値でも照合する**（`ADR-0068` の HW-d。レビューの 1 点）。
     //
-    // **長さが同じで中身が古い `fs.img` は、長さでは捕まらない**——**VDI の作り直し忘れや、
-    // ESP の片方だけの差し替えで起きる**（HW-e で VirtualBox を回し始めると起きやすい）。
-    // **建てたときの値は `build.rs` が出している**（`fsimage_info::IMAGE_CHECKSUM`）。
+    // **長さが同じで中身が古い `fs.img` は、長さでは検出されない**——**VDI の作り直し忘れや、
+    // ESP の片方だけの差し替えで起きる**（HW-e で VirtualBox を実行し始めると起きやすい）。
+    // **ビルドしたときの値は `build.rs` が出している**（`fsimage_info::IMAGE_CHECKSUM`）。
     //
-    // **装置から読んだ回は照合しない**——**持ち越しの構成（`--keep-disk` の族）では、`disk0.img` が
-    // 前の起動で書いた中身を持っており、建てたときの値と違うのが正しい。** **そちらはホストが
+    // **装置から読んだ回は照合しない**——**持ち越しの構成（`--keep-disk` のグループ）では、`disk0.img` が
+    // 前の起動で書いた中身を持っており、ビルドしたときの値と違うのが正しい。** **そちらはホストが
     // `disk0.img` から独立に計算して突き合わせる**（上の doc）。
     if copied_from_ram && checksum != fsimage_info::IMAGE_CHECKSUM {
         return Err(FsImageCopyError::RamImageChecksumMismatch {
@@ -5765,24 +5765,24 @@ fn try_copy_fs_image_to_frames(
     // **書く先と読む先を同じにする**——向けないまま書き始めると、
     // 書いた先と読む先が別物になる。
     //
-    // SAFETY: このフレームは起動中ずっと生き、返さない。中身はいま書いた像である。
+    // SAFETY: このフレームは起動中ずっと生き、返さない。中身はいま書いたイメージである。
     let copied_static: &'static [u8] =
         unsafe { core::slice::from_raw_parts(destination as *const u8, bytes as usize) };
     kernel::vfs::set_root_image(copied_static);
 
-    // **像の検査は、複製した直後・`exercise` より前である（P-e）。**
+    // **イメージの検査は、複製した直後・`exercise` より前である（P-e）。**
     //
     // **見るのは「装置から読んだ像がそのまま使えること」である。**
     // **`exercise` の後に置くと、書き換えた後の像を見ることになり、
-    // 判定行の空き数が建てたときの数と食い違う**——**実測で踏んだ**
+    // 判定行の空き数がビルドしたときの数と食い違う**——**実測で踏んだ**
     // （2026-08-28。`--full` で keep 系の 5 項目が落ちた）。
     verify_root_fs_image(logger);
 
     // **どこを読んでいるかを出す。** **向けたことを主張できるようにする**——
-    // **複製は元の像とバイト単位で一致しているので、向けても向けなくても
+    // **複製は元のイメージとバイト単位で一致しているので、向けても向けなくても
     // 読めるものが変わらない。** 番地だけが違う。
     //
-    // **番地は、実際に返ってくるスライスから取る。** 控えた値を出し直すと、
+    // **アドレスは、実際に返ってくるスライスから取る。** 控えた値を出し直すと、
     // **比べ方を間違えても必ず一致してしまう。**
     let reading = kernel::vfs::root_image().as_ptr() as u64;
     let reading_phys = reading.wrapping_sub(direct_map.base().as_u64());
@@ -5790,9 +5790,9 @@ fn try_copy_fs_image_to_frames(
         "fs-image-source: root_filesystem reads from virt {reading:#x} (phys {reading_phys:#x})"
     ));
 
-    // **カーネル像の物理範囲も一緒に出す。** ホスト側が「複製先がカーネル像の
+    // **カーネルイメージの物理範囲も一緒に出す。** ホスト側が「複製先がカーネル像の
     // 外にあること」を見る——**出さないと「複製した」が反証できない**
-    // （複製せずに `.rodata` の番地を出す形が通ってしまう）。
+    // （複製せずに `.rodata` のアドレスを出す形が通ってしまう）。
     let (image_start, image_end) = kernel_image_phys_range();
     logger.info(format_args!(
         "fs-image-copy: copied {bytes} byte(s) to phys {:#x}..{:#x} ({frames} frame(s), \
@@ -5805,22 +5805,22 @@ fn try_copy_fs_image_to_frames(
     ));
 
     // SAFETY: 複製先のフレームは起動中ずっと生き、いま誰も読んでいない。
-    // 中身は像そのものである。**書けるのはここが初めてである。**
+    // 中身はイメージそのものである。**書けるのはここが初めてである。**
     let writable: &'static mut [u8] =
         unsafe { core::slice::from_raw_parts_mut(destination, bytes as usize) };
     // **穴を全 0 として読めることを毎起動で見る（ADR-0038 の到達条件 2）。**
-    // **`exercise_*` より前である**——あちらは像を書き換えるので、
-    // **建てたままの状態で見る。**
+    // **`exercise_*` より前である**——あちらはイメージを書き換えるので、
+    // **ビルドしたままの状態で見る。**
     verify_sparse_hole_reads_as_zeros(logger);
     exercise_block_bitmap(logger, writable);
 
-    // === S13-e: 最終形の像を装置へ書き戻す（ADR-0034 の Addendum。全像フラッシュ）===
+    // === S13-e: 最終形のイメージを装置へ書き戻す（ADR-0034 の Addendum。イメージ全体のフラッシュ）===
     //
     // **exercise の後・`fs-image-ready` の前である。** keep 系変種では最終形が
-    // 「書いたまま」の像で、`disk0.img` へ書き戻すとホストが QEMU の外で
-    // `e2fsck` を当てられる。既定ビルドでは最終形が建てた像と同じなので、
+    // 「書いたまま」のイメージで、`disk0.img` へ書き戻すとホストが QEMU の外で
+    // `e2fsck` を当てられる。既定ビルドでは最終形がビルドしたイメージと同じなので、
     // 書き戻しても `disk0.img` は変わらない——**flush は既定でも走る。閉じては
-    // いない**（破壊は `fs-flush-skip`。keep 変種のとき `disk0.img` の差で捕まる）。
+    // いない**（破壊テストは `fs-flush-skip`。keep 変種のとき `disk0.img` の差で検出される）。
     //
     // **装置が無い回（RAM ディスク。`ADR-0068` の HW-d）は書き戻さない。** **1 行出して飛ばす**
     // ——**黙って飛ばすと、「書き戻したのに残らない」と「書き戻していない」が区別できない。**
@@ -5836,15 +5836,15 @@ fn try_copy_fs_image_to_frames(
         )),
     }
 
-    // **像がこの起動での最終形になったことを告げる（S12-d）。**
+    // **イメージがこの起動での最終形になったことを告げる（S12-d）。**
     //
     // **ホスト側はこの行を待ってから取り出す。**
     // **`fs-image-copy` の行を合図にしてはならない**——**あれは複製した直後に出る**
     // ので、**その後の割り当て・追記・縮めが終わる前に取り出しうる。**
     //
     // **実測で踏んだ**——S12-d で作業が伸びたとき、
-    // **追記 1 の直後（300 バイト）の像を取り出していた。**
-    // **それまでの段で表に出なかったのは、作業が短くて間に合っていただけである。**
+    // **追記 1 の直後（300 バイト）のイメージを取り出していた。**
+    // **それまでの段階で表に出なかったのは、作業が短くて間に合っていただけである。**
     logger.info(format_args!(
         "fs-image-ready: the image is in its final state for this run"
     ));
@@ -5856,16 +5856,16 @@ fn try_copy_fs_image_to_frames(
 /// # 何を主張するか
 ///
 /// **割り当てが 3 つとも直し、解放がちょうど逆へ戻すこと**である。
-/// **像の中の番号には依存しない**——取れた番号は出すだけで、
+/// **イメージの中の番号には依存しない**——取れた番号は出すだけで、
 /// **どれが取れるべきかは主張しない**（`docs/verification-coverage.md`）。
 ///
-/// # 既定では像を元へ戻す
+/// # 既定ではイメージを元へ戻す
 ///
 /// **既定ビルドは割り当てて解放する。** 戻すので、
-/// **取り出した像は建てた像とバイト単位で一致するはずである。**
+/// **取り出したイメージはビルドしたイメージとバイト単位で一致するはずである。**
 ///
 /// **`fs-alloc-keep-test` は解放を飛ばす**（壊す feature ではなく変種である。
-/// `paging-test` と同じ形）。**割り当てたままの像を取り出して、
+/// `paging-test` と同じ形）。**割り当てたままのイメージを取り出して、
 /// `e2fsck` の不満がちょうど 1 本であることを見るために要る。**
 /// **2 つの状態は同じ起動では取れない**ので、**構成で分ける。**
 /// 穴のあるファイルが全 0 として読めることを見る（ADR-0038 の到達条件 2）。
@@ -5879,18 +5879,18 @@ fn try_copy_fs_image_to_frames(
 ///
 /// **止めない。`Err` を返さず判定行を出す**——読めなければ判定が偽になり、
 /// ホスト側（`--full` の項目）が落とす。
-/// `.bss` が張られていることを見る（ADR-0039 の到達条件 2）。
+/// `.bss` がマップされていることを見る（ADR-0039 の到達条件 2）。
 ///
-/// **`/bin/bss-test` を起こし、その終了状態を判定行に出す。**
+/// **`/bin/bss-test` を起動し、その終了状態を判定行に出す。**
 /// あちらは 3 つを主張する——`.bss` がゼロで読めること、書けること、
 /// **`.data` とページを共有していること**（共有していなければ、
-/// この判定は「`.bss` は読める」しか言えず、ADR-0039 が入れた経路を
+/// この判定は「`.bss` は読める」しか示せず、ADR-0039 が入れた経路を
 /// 通っていない）。
 ///
 /// **止めない。判定行を出すだけである**——ホスト側（`--full` の項目と
 /// 起動ログの参照）が落とす。
 fn verify_bss_is_mapped(logger: &mut Logger<SerialPort>) {
-    /// 検査用プログラム。**`build.rs` が像へ置く。**
+    /// 検査用プログラム。**`build.rs` がイメージへ置く。**
     const BSS_TEST_PATH: &[u8] = b"/bin/bss-test";
 
     /// `argv`。**NUL 終端の 1 本である**（`SHELL_ARGV` と同じ形）。
@@ -6030,15 +6030,15 @@ fn exercise_block_bitmap(logger: &mut Logger<SerialPort>, image: &'static mut [u
 /// **数珠つなぎの途中であって、止まる先を分ける理由が無い**
 /// （(b) の [`verify_fs_content_mismatch_is_noticed`] と同じ判断である）。
 ///
-/// # (a) へは畳まない
+/// # (a) へはまとめない
 ///
 /// **[`exercise_block_bitmap`] 自身も呼ばれる先は 1 つだが、そこは
 /// [`try_copy_fs_image_to_frames`]、つまり (a) の中である。**
-/// **由来の違う群なので畳まない**——**(a) は像の複製、こちらは書き込みの実演である。**
-/// **畳むと、閉じた群の列挙を後から太らせることになる。**
-/// **誤りの族が 2 つ混じる。** **読む側は [`common::ext2::Ext2Error`]、
+/// **由来の違う群なのでまとめない**——**(a) はイメージの複製、こちらは書き込みの実演である。**
+/// **まとめると、閉じた群の列挙を後から太らせることになる。**
+/// **誤りの種類が 2 つ混じる。** **読む側は [`common::ext2::Ext2Error`]、
 /// 書く側は [`common::ext2::AllocError`] を返す**——**この群は読んで書くので、
-/// 1 つの列挙が両方を運ぶ。** **(a)(b) は読む側だけだったので 1 族で足りていた。**
+/// 1 つの列挙が両方を運ぶ。** **(a)(b) は読む側だけだったので 1 種類で足りていた。**
 /// **揃えるために片方を包み直すことはしない**——**包むと `{e:?}` の出す文言が変わる。**
 enum WriteExerciseError {
     /// 複製が解析できない。
@@ -6116,7 +6116,7 @@ fn try_exercise_block_bitmap(
     };
 
     // **取れた後の空き数を出す。** ホスト側は外の道具（`dumpe2fs`）から
-    // 同じ値を読んで突き合わせる——**自分で「減らした」と言うだけにしない。**
+    // 同じ値を読んで突き合わせる——**自分で「減らした」と示すだけにしない。**
     let (after_sb, after_bg) = match Ext2::parse(image) {
         Ok(fs) => (
             fs.free_blocks_count(),
@@ -6133,7 +6133,7 @@ fn try_exercise_block_bitmap(
          group0={after_bg}"
     ));
 
-    // 変種 (S12-b, fs-alloc-keep): 解放しない。**像は割り当てたまま取り出される。**
+    // 変種 (S12-b, fs-alloc-keep): 解放しない。**イメージは割り当てたまま取り出される。**
     #[cfg(feature = "fs-alloc-keep-test")]
     {
         logger.info(format_args!(
@@ -6141,8 +6141,8 @@ fn try_exercise_block_bitmap(
         ));
     }
 
-    // **解放する。** 破壊は `common::ext2::free_block` の中に置いてある——
-    // **動作のある場所に置かないと、破壊にならない**（実測で踏んだ。
+    // **解放する。** 破壊テストは `common::ext2::free_block` の中に設けてある——
+    // **動作のある場所に設けないと、破壊テストにならない**（実測で踏んだ。
     // ここで正しく呼んでいたので、feature を立てても何も変わらなかった）。
     //
     // **`return` を使わずに `cfg(not(...))` の 1 つの塊へまとめてある**
@@ -6170,12 +6170,12 @@ fn try_exercise_block_bitmap(
 /// **`/data/writable` の初期の大きさ（100 バイト）は、その 2 つの道を
 /// 1 本のファイルで通すために選んである**（`kernel/build.rs`）。
 ///
-/// **1 回目の道に観測する者を置いてある**——**全体で空き数が 1 つだけ減ること**を
+/// **1 回目の道に観測する者を用意してある**——**全体で空き数が 1 つだけ減ること**を
 /// ホスト側が外の道具から見る。**2 つ減っていれば、1 回目でも割り当てている。**
 ///
 /// # 既定では戻す
 ///
-/// **書いて、消して、元へ戻す。** 戻すので、**取り出した像は建てた像と
+/// **書いて、消して、元へ戻す。** 戻すので、**取り出したイメージはビルドしたイメージと
 /// バイト単位で一致するはずである。**
 /// **`fs-write-keep-test` は戻さない**（変種。壊さない）——
 /// **書いたままの像で `e2fsck` と中身を見るために要る。**
@@ -6216,7 +6216,7 @@ fn exercise_file_append(
     // **飛ばしても黙らない。** **既定の起動では `fs-write: append 1` から
     // `fs-truncate: restored` までがシリアルに出ており、
     // `xtask/reference/boot-log-smp2.txt` がその行を持っている**——
-    // **建てたままの像で飛べば、起動ログの突き合わせが落ちる。**
+    // **ビルドしたままのイメージで飛べば、起動ログの突き合わせが落ちる。**
     // **「前提が消えたときだけ静かに飛ぶ」形である。**
     if u64::from(original_size) != fsimage_info::WRITABLE_SEED_BYTES {
         logger.info(format_args!(
@@ -6285,7 +6285,7 @@ fn exercise_file_append(
 /// # 最後に元へ戻す
 ///
 /// **0 まで縮めてから、初めの中身を書き直す。**
-/// **戻すので、取り出した像は建てた像とバイト単位で一致するはずである。**
+/// **戻すので、取り出したイメージはビルドしたイメージとバイト単位で一致するはずである。**
 fn exercise_truncate(
     logger: &mut Logger<SerialPort>,
     image: &mut [u8],
@@ -6299,7 +6299,7 @@ fn exercise_truncate(
     ///
     /// **0 はここに入れない。** **0 まで縮めるとブロック全体が 0 で埋まり、
     /// 「切った先を埋めなかった」痕跡が消える**（実測で踏んだ——
-    /// `keep-tail` と `off-by-one` が捕まらなかった）。
+    /// `keep-tail` と `off-by-one` が検出されなかった）。
     /// **0 は戻さない変種の側で通す。**
     const TARGETS: &[u32] = &[8192, 4097, 4096, 4000];
 
@@ -6365,7 +6365,7 @@ fn exercise_truncate(
         //
         // **0 を経由しない。** 経由すると**ブロック全体が 0 で埋まり、
         // 「切った先を埋めなかった」痕跡が消える**（実測で踏んだ）。
-        // **ここを通ると埋め損ねが像に残る**ので、往復のバイト一致が見る。
+        // **ここを通ると埋め損ねがイメージに残る**ので、往復のバイト一致が見る。
         //
         // **中身を書き直す必要も無い**——初めの 100 バイトは一度も上書きしていない。
         if let Err(error) = common::ext2::truncate_to(image, layout, ino, original_size) {
@@ -6383,10 +6383,10 @@ fn exercise_truncate(
 
 /// `/data` にファイルを 1 つ作り、既定では消す（S12-e）。
 ///
-/// # 作ると消すを同じ段に置く
+/// # 作ると消すを同じ段階に置く
 ///
 /// **削除は作成の逆で、往復が両方を同時に見る。** 分けると、
-/// **作った状態を戻す手段が無いまま段が終わる。**
+/// **作った状態を戻す手段が無いまま段階が終わる。**
 ///
 /// # 中身も書く
 ///
@@ -6396,11 +6396,11 @@ fn exercise_truncate(
 ///
 /// # 既定では戻す
 ///
-/// **作って、書いて、消す。** 戻すので、**取り出した像は建てた像と
+/// **作って、書いて、消す。** 戻すので、**取り出したイメージはビルドしたイメージと
 /// バイト単位で一致するはずである。**
 /// **`fs-create-keep-test` は消さない**（変種。壊さない）——
 /// **1 回の起動だと最終状態が「消した後」になり、作成の誤りが削除で消える。**
-/// **作ったままの像でしか、中身も会計も見られない**（S12-d で踏んだ形である）。
+/// **作ったままのイメージでしか、中身も会計も見られない**（S12-d で踏んだ形である）。
 fn exercise_create_and_unlink(
     logger: &mut Logger<SerialPort>,
     image: &mut [u8],
@@ -6455,7 +6455,7 @@ fn exercise_create_and_unlink(
          free blocks={blocks} inodes={inodes}, i_extra_isize={extra}"
     ));
 
-    // 変種 (S12-e, fs-create-keep): 消さない。**作ったままの像を取り出す。**
+    // 変種 (S12-e, fs-create-keep): 消さない。**作ったままのイメージを取り出す。**
     #[cfg(feature = "fs-create-keep-test")]
     {
         logger.info(format_args!(
@@ -6486,12 +6486,12 @@ fn exercise_create_and_unlink(
 /// # `e2fsck` にしか見えないものが 3 つある
 ///
 /// **`.` と `..`、親の `i_links_count`、群の `bg_used_dirs_count` である。**
-/// **どれも「読めるか」では分からない**——**像として整合しているかを、
+/// **どれも「読めるか」では分からない**——**イメージとして整合しているかを、
 /// 外の道具に訊くしかない。**
 ///
 /// # 既定では戻す。**残す構成も要る**
 ///
-/// **戻すので、取り出した像は建てた像とバイト単位で一致するはずである。**
+/// **戻すので、取り出したイメージはビルドしたイメージとバイト単位で一致するはずである。**
 /// **`fs-mkdir-keep-test` は消さない**（変種。壊さない）——
 /// **生きたディレクトリを `e2fsck` に見せるのは、その構成だけである。**
 /// **`fs-create-keep-test` と同じ理由である**（S12-d で踏んだ形）。
@@ -6554,7 +6554,7 @@ fn exercise_mkdir_and_rmdir(
         return Err(WriteExerciseError::CreateCouldNotUnlink { error });
     }
 
-    // 変種 (DIR-1c, fs-mkdir-keep): 消さない。**作ったままの像を取り出す。**
+    // 変種 (DIR-1c, fs-mkdir-keep): 消さない。**作ったままのイメージを取り出す。**
     #[cfg(feature = "fs-mkdir-keep-test")]
     {
         logger.info(format_args!(
@@ -6700,18 +6700,18 @@ fn verify_root_fs_image(logger: &mut Logger<SerialPort>) {
 /// [`verify_single_indirect_boundary`] は、**どれも呼ばれる先が 1 つで、
 /// その 1 つがこの群の中にある。** **止まる先を分ける理由が無い。**
 ///
-/// **(c) と違うのは、数珠つなぎではなく木であることだけである**——
+/// **(c) と違うのは、数珠つなぎではなくツリーであることだけである**——
 /// [`verify_embedded_fs_image`] が 3 つを呼び、[`verify_root_inode`] が
 /// [`verify_root_directory_walk`] を呼ぶ。**枝分かれしても基準は変わらない。**
 ///
-/// # 誤りの族は 1 つである
+/// # 誤りの種類は 1 つである
 ///
 /// **すべて [`common::ext2::Ext2Error`] である**——**この群は読むだけで、書かない。**
-/// **(c) は読んで書くので 2 族を運んでいた。** **その違いがそのまま出ている。**
+/// **(c) は読んで書くので 2 種類を運んでいた。** **その違いがそのまま出ている。**
 enum FsReadCheckError {
-    /// 抱えている像が解析できない。
+    /// 抱えているイメージが解析できない。
     EmbeddedImageDidNotParse { error: common::ext2::Ext2Error },
-    /// 抱えている像の大きさが `build.rs` の作ったものと食い違う。
+    /// 抱えているイメージの大きさが `build.rs` の作ったものと食い違う。
     ImageSizeMismatch,
     /// 群 descriptor が読めない。
     GroupDescriptorNotUsable {
@@ -6775,20 +6775,20 @@ enum FsReadCheckError {
     },
 }
 
-/// 抱えている像を読み切れることを見る検査部（T3-1）。**止めない。`Err` を返す。**
+/// 抱えているイメージを読み切れることを見る検査部（T3-1）。**止めない。`Err` を返す。**
 fn try_verify_root_fs_image(logger: &mut Logger<SerialPort>) -> Result<(), FsReadCheckError> {
     use common::ext2::Ext2;
 
     // **見るのは装置から読んだ複製である（P-e）。**
-    // **以前は埋め込み像だった**——外したので、実際に使う像を見る形になった。
+    // **以前は埋め込みイメージだった**——外したので、実際に使うイメージを見る形になった。
     let image = kernel::vfs::root_image();
     let fs = match Ext2::parse(image) {
         Ok(fs) => fs,
         Err(error) => return Err(FsReadCheckError::EmbeddedImageDidNotParse { error }),
     };
 
-    // **道具の版を 2 つとも出す（B-d）。** **像の checksum が赤になり、木に
-    // 変更が無いとき、残る入力は道具の版である**——**`mke2fs` は像の形を、
+    // **道具の版を 2 つとも出す（B-d）。** **イメージの checksum が失敗し、ツリーに
+    // 変更が無いとき、残る入力は道具の版である**——**`mke2fs` はイメージの形を、
     // `cc` は `/bin` の C のバイトを決める。**
     logger.info(format_args!(
         "ext2: image {} byte(s) built by {:?} and {:?}",
@@ -6823,13 +6823,13 @@ fn try_verify_root_fs_image(logger: &mut Logger<SerialPort>) -> Result<(), FsRea
         fs.free_inodes_count()
     ));
 
-    // **像の大きさは build.rs が知っている値と一致するはず。** 食い違えば、
+    // **イメージの大きさは build.rs が知っている値と一致するはず。** 食い違えば、
     // 抱えた像と建てた像が別物である。
     if image.len() as u64 != fsimage_info::IMAGE_BYTES {
         return Err(FsReadCheckError::ImageSizeMismatch);
     }
 
-    // group descriptor を全部読む。**3 つのブロック番号が像の外を指していない
+    // group descriptor を全部読む。**3 つのブロック番号がイメージの外を指していない
     // ことは `group_descriptor` が見ている**（線3）。
     for group in 0..fs.group_count() {
         match fs.group_descriptor(group) {
@@ -6839,8 +6839,8 @@ fn try_verify_root_fs_image(logger: &mut Logger<SerialPort>) -> Result<(), FsRea
                     descriptor.block_bitmap, descriptor.inode_bitmap, descriptor.inode_table
                 ));
                 // **空き数を出す（S12-b）。** **これを解析しただけでは、
-                // 正しく読めているかを自分では言えない**——**外の道具
-                // （`dumpe2fs`）が同じ像について答えを持っているので、
+                // 正しく読めているかを自分では示せない**——**外の道具
+                // （`dumpe2fs`）が同じイメージについて答えを持っているので、
                 // xtask がそれと突き合わせる。**
                 logger.info(format_args!(
                     "ext2: group {group} free counts: blocks={} inodes={} dirs={}",
@@ -6861,38 +6861,38 @@ fn try_verify_root_fs_image(logger: &mut Logger<SerialPort>) -> Result<(), FsRea
     Ok(())
 }
 
-/// 壊した ext2 の像を組み立てる作業領域（S10-a）。
+/// 壊した ext2 のイメージを組み立てる作業領域（S10-a）。
 ///
-/// # 像全体（2 MiB）を抱えない
+/// # イメージ全体（2 MiB）を抱えない
 ///
 /// **`.bss` が 2 MiB 増えると、bootloader が `0x100000` へ確保する量がそのぶん
 /// 増える。** 起動する上限は 6 MiB と 7 MiB のあいだにあると実測してあり
-/// （`kernel/build.rs` の `IMAGE_BYTES`）、**像を 2 MiB に決めたときの余裕を
+/// （`kernel/build.rs` の `IMAGE_BYTES`）、**イメージを 2 MiB に決めたときの余裕を
 /// ここで食い潰しては、決めた意味が無くなる。**
 ///
-/// # 先頭 80 ブロックだけで、読み切れる像になる
+/// # 先頭 80 ブロックだけで、読み切れるイメージになる
 ///
 /// **`s_blocks_count` を 80 に直せば、切り出した先頭がそれ自体で完結する。**
 /// 実際に参照されている最大のブロックは 74 だからである（実測。`/etc/motd` の
 /// データブロック）。**80 に余裕を取ってあるので、種が少し増えても収まる。**
 /// **収まらなくなったら健全な対照（下）が最初に落ちる。**
 ///
-/// **S11-9 で 64 から 80 へ上げた。** 像へ `/bin/ls` と `/bin/cat` を足したので、
+/// **S11-9 で 64 から 80 へ上げた。** イメージへ `/bin/ls` と `/bin/cat` を足したので、
 /// **後ろのブロック番号がすべてずれた**（58 → 69）。**「収まらなくなったら対照が
 /// 落ちる」が実際に働く前に、測って直した。**
 ///
-/// **ADR-0038 で 80 から 96 へ上げた。** 像へ `/data/sparse-hole` を足したので
+/// **ADR-0038 で 80 から 96 へ上げた。** イメージへ `/data/sparse-hole` を足したので
 /// 使用ブロックが 80 から 82 へ増えた。**96 は余裕**——像へ 1 本足すたびに
 /// 直さずに済む幅である。
 static mut CORRUPT_FS_IMAGE: [u8; CORRUPT_FS_LEN] = [0; CORRUPT_FS_LEN];
 
-/// 切り出した像のバイト数。
-/// 壊した像の作業領域の容量（2026-09-03 に「長さ」から「容量」へ変えた）。
+/// 切り出したイメージのバイト数。
+/// 壊したイメージの作業領域の容量（2026-09-03 に「長さ」から「容量」へ変えた）。
 ///
-/// **写す長さは像から求める**（[`map_corrupt_fs`] の doc）。**ここは器の大きさで、
-/// 像の使用上端がこれを超えたら演習は落ちる**——**黙って足りない写しを作らない。**
+/// **コピーする長さはイメージから求める**（[`map_corrupt_fs`] の doc）。**ここは器の大きさで、
+/// イメージの使用上端がこれを超えたら演習は落ちる**——**黙って足りないコピーを作らない。**
 ///
-/// **根拠は実測である**——**いまの使用上端は 247 で、`build.rs` が像へ
+/// **根拠は実測である**——**いまの使用上端は 247 で、`build.rs` がイメージへ
 /// ファイルを足すたびに増える**（**VIM-1 で `/data/vimops` を、PR-1 で
 /// `/etc/profile` と `/root/.profile` を足し、HI-1 で `zash` が 1 ブロック
 /// 太って、134 から 4 つ上がった**）。**ファイルを足さなくても、
@@ -6903,49 +6903,49 @@ static mut CORRUPT_FS_IMAGE: [u8; CORRUPT_FS_LEN] = [0; CORRUPT_FS_LEN];
 /// **ここまで、この定数は「1 か 2 ずつ増える」前提で余裕を取っていた**
 /// ——**1 本で 85 ブロック増える形は初めてである。**
 ///
-/// **落ちたときの読み方は、その場の診断が言う**（**B-d では「raise CORRUPT_FS_BLOCKS」と
-/// 言っていた。** Y-c から「disk を作り直すか、余裕を上げよ」になった）。**実際、B-d で最初に
+/// **落ちたときの読み方は、その場の診断が示す**（**B-d では「raise CORRUPT_FS_BLOCKS」と
+/// 出力していた。** Y-c から「disk を作り直すか、余裕を上げよ」になった）。**実際、B-d で最初に
 /// 落ちたのはこれだった。**
 ///
-/// # 定数をやめて、像から導く（`ADR-0066` の Y-c。運用者の指摘）
+/// # 定数をやめて、イメージから導く（`ADR-0066` の Y-c。運用者の指摘）
 ///
-/// **Y-c で器を越えた**——**像へ `/bin/gfxd` と `/bin/gfxc` を足し、使用上端が 284 から 293 へ上がって
+/// **Y-c で器を越えた**——**イメージへ `/bin/gfxd` と `/bin/gfxc` を足し、使用上端が 284 から 293 へ上がって
 /// 288 を越え、起動がこの診断で止まった**（実測）。**1 組（2 本）で +9 ブロックである。**
 /// **これは「像が太ると動く器」で、手で余裕を取る限り、プログラムを足すたびにまた越える。**
 ///
 /// **そこで `build.rs` が測った使用上端（`fsimage_info::USED_BLOCKS`）に余裕を足して導く。**
-/// **像が太れば器も同じだけ伸びる**——**`.bss` の増分は像の増分そのものになる。** **余裕が覆うもの
+/// **イメージが太れば器も同じだけ伸びる**——**`.bss` の増分はイメージの増分そのものになる。** **余裕が覆うもの
 /// は [`CORRUPT_FS_SLACK_BLOCKS`] の doc にある。**
 ///
 /// **`fsimage_info` の位置の定数は使わない規則がある**（[`fsimage_info`] の doc）。**使わないのは
 /// 「壊す位置」で、ここは「器の大きさ」である**——**位置は構成ごとにずれると当たらなくなるが、
-/// 大きさは余裕で揺れを吸える。** **吸えなければこの診断で止まる**（黙って足りない写しを作らない）。
+/// 大きさは余裕で揺れを吸える。** **吸えなければこの診断で止まる**（黙って足りないコピーを作らない）。
 const CORRUPT_FS_BLOCKS: usize = fsimage_info::USED_BLOCKS + CORRUPT_FS_SLACK_BLOCKS;
 
-/// 壊した像の器の余裕（ブロック。`ADR-0066` の Y-c）。
+/// 壊したイメージの器の余裕（ブロック。`ADR-0066` の Y-c）。
 ///
-/// **起動時に読む像の使用上端が、建てた像の使用上端より大きくなる場合を吸う。** **2 つある**——
+/// **起動時に読むイメージの使用上端が、ビルドしたイメージの使用上端より大きくなる場合を吸う。** **2 つある**——
 ///
-/// - **構成による揺れ**——**同じ木から建った 175 構成で、使用上端は 284 か 285 だった**（実測。
-///   2026-09-21。**破壊が `userlib` を太らせる構成がある**）。**検査は毎回その構成の像から
-///   `disk0.img` を作り直すので、揺れが効くのは他の構成の像を持ち越す回だけである。**
+/// - **構成による揺れ**——**同じツリーからビルドされた 175 構成で、使用上端は 284 か 285 だった**（実測。
+///   2026-09-21。**破壊テストが `userlib` を太らせる構成がある**）。**検査は毎回その構成のイメージから
+///   `disk0.img` を作り直すので、揺れが効くのは他の構成のイメージを持ち越す回だけである。**
 /// - **持ち越しの回が書いたぶん**——**persist の 2 項目と `--manual` は、前の起動が書いた
 ///   `disk0.img` を持ち越す。**
 ///
-/// **使っている量と器の大きさは、毎起動の締めの行に出る**（`ext2-corrupt: all ... refused`）。
+/// **使っている量と器の大きさは、毎起動のまとめの行に出る**（`ext2-corrupt: all ... refused`）。
 ///
-/// **16 は実測から決めた**（2026-09-21）——**persist の 3 項目の 6 回の起動で、起動時に読んだ像の
-/// 使用上端は 293〜297、建てた像との差は最大 +4 だった**（persist-zi の 2 回目。297 を 309 の器で
+/// **16 は実測から決めた**（2026-09-21）——**persist の 3 項目の 6 回の起動で、起動時に読んだイメージの
+/// 使用上端は 293〜297、ビルドしたイメージとの差は最大 +4 だった**（persist-zi の 2 回目。297 を 309 の器で
 /// 読んだ）。**構成による揺れは +1。** **16 は実測の最大の 4 倍である。**
 const CORRUPT_FS_SLACK_BLOCKS: usize = 16;
 
 /// 作業領域のバイト数。
 const CORRUPT_FS_LEN: usize = CORRUPT_FS_BLOCKS * FS_BLOCK_SIZE;
 
-/// 像のブロックサイズ（`mke2fs` の既定。判定行で毎起動確かめている）。
+/// イメージのブロックサイズ（`mke2fs` の既定。判定行で毎起動確かめている）。
 const FS_BLOCK_SIZE: usize = 4096;
 
-/// superblock の像内オフセット。**ブロックサイズに依らず固定である。**
+/// superblock のイメージ内オフセット。**ブロックサイズに依らず固定である。**
 const FS_SUPERBLOCK: usize = 1024;
 
 /// group descriptor テーブルの先頭（`s_first_data_block` が 0 なのでブロック 1）。
@@ -6957,27 +6957,27 @@ const FS_INODE_TABLE: usize = 4 * FS_BLOCK_SIZE;
 /// inode 1 つのバイト数（`s_inode_size`。判定行に出ている）。
 const FS_INODE_SIZE: usize = 256;
 
-/// inode `ino` の像内オフセット。
+/// inode `ino` のイメージ内オフセット。
 const fn fs_inode_at(ino: usize) -> usize {
     FS_INODE_TABLE + (ino - 1) * FS_INODE_SIZE
 }
 
-/// ルート inode の像内オフセット。
+/// ルート inode のイメージ内オフセット。
 const FS_ROOT_INODE_AT: usize = fs_inode_at(2);
 
-/// 種のファイルと同じ木にある `/etc/motd` の中身（S10-a）。
+/// 種のファイルと同じツリーにある `/etc/motd` の中身（S10-a）。
 ///
-/// **像の中の `/etc/motd` は、このファイルを `mke2fs -d` が写したものである。**
+/// **イメージの中の `/etc/motd` は、このファイルを `mke2fs -d` がコピーしたものである。**
 /// **写しを 2 つ持たない**——期待値をカーネルへ書き写すと、種を変えたときに
 /// 片方だけが古くなる（**単一間接の期待値を `build.rs` から出したのと同じ理由**）。
-/// `kernel/build.rs` が種の木に `rerun-if-changed` を張っているので、
-/// **この定数と像は同じ 1 本のファイルから来る。**
+/// `kernel/build.rs` が種のツリーに `rerun-if-changed` を張っているので、
+/// **この定数とイメージは同じ 1 本のファイルから来る。**
 static MOTD_SEED: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fsimage/seed/etc/motd"
 ));
 
-/// [`MOTD_SEED`] が像の中で置かれている場所（S10-a）。
+/// [`MOTD_SEED`] がイメージの中で置かれている場所（S10-a）。
 ///
 /// **[`verify_path_lookup`] の中の定数だったが、T3-1 で外へ出した。**
 /// **止まる文言が `{MOTD_PATH}` という行内の捕捉で書かれているため、
@@ -6989,13 +6989,13 @@ const MOTD_PATH: &str = "/etc/motd";
 ///
 /// # `hello` の `write` と同じ形の主張である
 ///
-/// **既知のバイト列と一致することを言う。** ここまでの判定行は「読めた」「形が
-/// 合っている」を言ってきたが、**中身そのものを突き合わせるのはこれが最初である。**
+/// **既知のバイト列と一致することを示す。** ここまでの判定行は「読めた」「形が
+/// 合っている」を示してきたが、**中身そのものを突き合わせるのはこれが最初である。**
 ///
 /// # 毎回ルートから辿る
 ///
 /// **`dentry` を置かない**（`docs/roadmap.md` の S10）。引く回数が問題になって
-/// いない段では、**キャッシュを持つ理由が無い。**
+/// いない段階では、**キャッシュを持つ理由が無い。**
 fn verify_path_lookup(
     logger: &mut Logger<SerialPort>,
     fs: &common::ext2::Ext2<'_>,
@@ -7042,12 +7042,12 @@ fn verify_path_lookup(
 ///
 /// **番号で辿れるのがルートだけだからである。** ext2 のルートは 2 番で固定
 /// （`common::ext2::ROOT_INODE`）で、**それ以外の inode へは名前からしか届かない。**
-/// ディレクトリの走査とパス解決は次の 2 刻みなので、ここではまだ名前を引けない。
+/// ディレクトリの走査とパス解決は次の 2 つの手順なので、ここではまだ名前を引けない。
 ///
 /// # ここが主張するのは「届いた」ところまでである
 ///
 /// **「4096 バイト読めた」だけでは、読めたブロックがルートの中身だとは言えない。**
-/// **正しいものが読めたことは [`verify_root_directory_walk`] が言う**——先頭の
+/// **正しいものが読めたことは [`verify_root_directory_walk`] が示す**——先頭の
 /// エントリが `.` で、その inode 番号が自分自身であることを、走査の結果として
 /// 見る。**以前はここで先頭 4 バイトだけを覗いていたが、走査を書いたので
 /// そちらへ寄せた。**
@@ -7098,7 +7098,7 @@ fn verify_root_inode(
 ///
 /// # 残りの名前をここで固定しない
 ///
-/// **`lost+found` は `mke2fs` が作り、`bin`・`data`・`etc` は種の木が決めている。**
+/// **`lost+found` は `mke2fs` が作り、`bin`・`data`・`etc` は種のツリーが決めている。**
 /// カーネルへ書き写すと、種を変えたときに片方だけが古くなる（**単一間接の
 /// 期待値を `build.rs` から出したのと同じ理由**）。**一覧を固定しているのは
 /// 起動ログの参照である**——`xtask/reference/boot-log-smp2.txt` が行単位で
@@ -7272,9 +7272,9 @@ fn verify_single_indirect_boundary(
     Ok(())
 }
 
-/// 壊した像に対して走らせる観測（S10-a）。
+/// 壊したイメージに対して走らせる観測（S10-a）。
 ///
-/// **すべて `Result<(), Ext2Error>` へ畳む。** 成功したら反証が失敗である。
+/// **すべて `Result<(), Ext2Error>` へまとめる。** 成功したら反証が失敗である。
 type FsProbe = fn(&common::ext2::Ext2<'_>) -> Result<(), common::ext2::Ext2Error>;
 
 /// 書き換え 1 か所。
@@ -7288,17 +7288,17 @@ struct FsPatch {
 ///
 /// **原則として 1 か所だけを壊す**（S9-b-2 と同じ。2 か所壊すと、どちらで拒まれた
 /// のかが分からない）。**例外は「1 つの論理的な変更が 2 つの欄にまたがる」場合だけ**
-/// で、inode テーブルを像の外へ伸ばす case がそれに当たる（`s_inodes_count` と
+/// で、inode テーブルをイメージの外へ伸ばす case がそれに当たる（`s_inodes_count` と
 /// `s_inodes_per_group` を揃えて動かさないと、別の検査に先に当たる）。
 struct CorruptFsCase<'a> {
     /// 判定行に出す壊し方の説明。**「何をしたか」を書く。**
     what: &'static str,
     /// 書き換え（空なら [`CorruptFsCase::truncate_to`] だけを使う）。
     ///
-    /// **`'static` ではない（2026-09-03）。** **壊す位置を像から求めるように
+    /// **`'static` ではない（2026-09-03）。** **壊す位置をイメージから求めるように
     /// したので、表はその場で組み立てる**（[`map_corrupt_fs`] の doc）。
     patches: &'a [FsPatch],
-    /// 像をこの長さへ切り詰める（0 なら切り詰めない）。
+    /// イメージをこの長さへ切り詰める（0 なら切り詰めない）。
     truncate_to: usize,
     /// `parse` が通った後に走らせる観測。
     probe: FsProbe,
@@ -7359,17 +7359,17 @@ fn fs_read_whole_file(
     Ok(())
 }
 
-/// 壊した ext2 の像が拒まれ、**カーネルが止まらない**ことを確かめる（S10-a）。
+/// 壊した ext2 のイメージが拒まれ、**カーネルが止まらない**ことを確かめる（S10-a）。
 ///
 /// # 既定ビルドで毎起動走らせる
 ///
-/// **壊す対象がデータなので、破壊 feature ではなく像を壊す**（S9-b-2 と同じ形。
-/// `docs/roadmap.md` の S10）。**破壊 feature の中だけで壊すと、「壊す処理そのものが
+/// **壊す対象がデータなので、破壊テストの feature ではなくイメージを壊す**（S9-b-2 と同じ形。
+/// `docs/roadmap.md` の S10）。**破壊テストの feature の中だけで壊すと、「壊す処理そのものが
 /// 壊れている」ことに気づけない。**
 ///
 /// # 4 つの線に対する反証である
 ///
-/// - **線1**: 切り詰めた像。**切り出しが範囲外へ出ない**
+/// - **線1**: 切り詰めたイメージ。**切り出しが範囲外へ出ない**
 /// - **線2**: ブロックサイズの桁あふれ、inode テーブルの位置の算術
 /// - **線3**: group descriptor・`i_block`・dirent・間接ブロックの、4 種類の参照
 /// - **線4**: `rec_len` が 0。**「止まらないこと」は「エラーが返ること」で観測する**
@@ -7384,8 +7384,8 @@ fn fs_read_whole_file(
 ///   何も起きない。**検査していないものを壊しても反証にならない**
 /// - **`s_state` が clean でない**: **読み取りは拒まない**（Linux も読み取り専用
 ///   マウントは許す）。**拒まないと決めたものを、拒むことの反証にはできない**
-/// - **二重・三重間接と穴**: **この像には作れない。** 二重間接が要るのは 4 MiB 超の
-///   ファイルからで 2 MiB の像に入らず、`mke2fs -d` は穴を作らない。
+/// - **二重・三重間接と穴**: **このイメージには作れない。** 二重間接が要るのは 4 MiB 超の
+///   ファイルからで 2 MiB のイメージに入らず、`mke2fs -d` は穴を作らない。
 ///   **ホストテストが見ている**（`common::ext2` の
 ///   `refuses_a_file_that_uses_the_double_or_triple_indirect_slots` ほか）
 fn verify_corrupt_fs_image_is_rejected(logger: &mut Logger<SerialPort>) {
@@ -7452,18 +7452,18 @@ enum CorruptFsCheckError {
     },
     /// 短くした前置きが、そもそも解析できない。
     PrefixDidNotParse { error: common::ext2::Ext2Error },
-    /// 壊した像が受理された。
+    /// 壊したイメージが受理された。
     CaseAccepted {
         what: &'static str,
         expected: common::ext2::Ext2Error,
     },
-    /// 壊した像は拒まれたが、理由が違う。
+    /// 壊したイメージは拒まれたが、理由が違う。
     CaseWrongReason {
         what: &'static str,
         error: common::ext2::Ext2Error,
         expected: common::ext2::Ext2Error,
     },
-    /// 壊す処理の後で、抱えている像が読めなくなった。
+    /// 壊す処理の後で、抱えているイメージが読めなくなった。
     EmbeddedImageBroken,
     /// 中身の食い違いを見る例なのに、解析そのものが通らない。
     MismatchUnparseable { what: &'static str },
@@ -7476,43 +7476,43 @@ enum CorruptFsCheckError {
     MismatchStillSeed { what: &'static str },
 }
 
-/// 壊した像が拒まれることを見る検査部（T3-1）。**止めない。`Err` を返す。**
-/// 壊す位置を、像を歩いて求める（2026-09-03。`--full` が 1 件落ちて分かった）。
+/// 壊したイメージが拒まれることを見る検査部（T3-1）。**止めない。`Err` を返す。**
+/// 壊す位置を、イメージを歩いて求める（2026-09-03。`--full` が 1 件落ちて分かった）。
 ///
 /// # なぜ定数を捨てるのか
 ///
-/// **`build.rs` が測った番号は、その構成の像のものである。**
-/// **`persist (zi)` は 1 度目を `zi-test` で建て、2 度目を `persist-check-test` で
-/// 建てる**——**構成が違うと `/bin/zi` の大きさが変わり、ブロックの並びがずれる。**
-/// **2 度目は 1 度目が装置へ書いた像を読むので、自分の定数が指す先に目的の表が無い。**
+/// **`build.rs` が測った番号は、その構成のイメージのものである。**
+/// **`persist (zi)` は 1 度目を `zi-test` でビルドし、2 度目を `persist-check-test` で
+/// ビルドする**——**構成が違うと `/bin/zi` の大きさが変わり、ブロックの並びがずれる。**
+/// **2 度目は 1 度目が装置へ書いたイメージを読むので、自分の定数が指す先に目的の表が無い。**
 ///
 /// **実測で踏んだ**（2026-09-03。**`INDIRECT_TABLE_BLOCK` が既定の構成で 121、
 /// `persist-check-test` で 122 だった**）。**演習は「範囲外の項目が拒まれる」と
-/// 言うつもりで、壊れていない像を読んで「拒まれなかった」と言った。**
+/// 示すつもりで、壊れていないイメージを読んで「拒まれなかった」と出力した。**
 ///
-/// **歩けば、どの像でも当たる。** **f-1 で「終端は歩いて探す」と直したのと
+/// **歩けば、どのイメージでも当たる。** **f-1 で「終端は歩いて探す」と直したのと
 /// 同じ形である**（`docs/troubleshooting.md`）。
 ///
 /// # 主張は変わらない
 ///
 /// **歩くのは位置を見つけるためで、壊し方も期待も同じである。**
 struct CorruptFsMap {
-    /// 写すブロック数（使用の上端 + 1）。
+    /// コピーするブロック数（使用の上端 + 1）。
     blocks: usize,
     /// ルートのディレクトリブロックの中の、`etc` の項の位置。
     root_etc_entry: usize,
-    /// `/etc/motd` の inode の像内オフセット。
+    /// `/etc/motd` の inode のイメージ内オフセット。
     motd_inode_at: usize,
-    /// `/etc/motd` の最初のデータブロックの像内オフセット。
+    /// `/etc/motd` の最初のデータブロックのイメージ内オフセット。
     motd_data_at: usize,
-    /// `/data/indirect-first` の単一間接表の像内オフセット。
+    /// `/data/indirect-first` の単一間接表のイメージ内オフセット。
     indirect_table_at: usize,
 }
 
-/// 像を歩いて [`CorruptFsMap`] を作る（2026-09-03）。
+/// イメージを歩いて [`CorruptFsMap`] を作る（2026-09-03）。
 ///
-/// **見つからなければ `None` を返す。** **呼ぶ側は止める**——**歩けない像で
-/// 演習を続けると、当たらない位置を壊して「拒まれなかった」と言うことになる。**
+/// **見つからなければ `None` を返す。** **呼ぶ側は止める**——**歩けないイメージで
+/// 演習を続けると、当たらない位置を壊して「拒まれなかった」と出力することになる。**
 fn map_corrupt_fs(image: &[u8]) -> Option<CorruptFsMap> {
     use common::ext2::Ext2;
 
@@ -7530,7 +7530,7 @@ fn map_corrupt_fs(image: &[u8]) -> Option<CorruptFsMap> {
 
     // **`etc` の項を、ルートのディレクトリブロックの中で探す。**
     //
-    // **位置を数えない**——**項の並びは像の建て方で変わる。**
+    // **位置を数えない**——**項の並びはイメージのビルドの仕方で変わる。**
     // **`rec_len` で歩き、名前で見つける**（`common::ext2` の走査と同じ形で、
     // 進む量が正であることを確かめる）。
     let dir = image.get(root_dir_block * FS_BLOCK_SIZE..(root_dir_block + 1) * FS_BLOCK_SIZE)?;
@@ -7557,9 +7557,9 @@ fn map_corrupt_fs(image: &[u8]) -> Option<CorruptFsMap> {
     let bitmap_block =
         u32::from_le_bytes([descriptor[0], descriptor[1], descriptor[2], descriptor[3]]) as usize;
     let bitmap = image.get(bitmap_block * FS_BLOCK_SIZE..(bitmap_block + 1) * FS_BLOCK_SIZE)?;
-    // **ビットマップの余りは 1 で埋まっている**（ext2 の作法。**像のブロック数を
+    // **ビットマップの余りは 1 で埋まっている**（ext2 の作法。**イメージのブロック数を
     // 超える位置は「使用中」として置かれる**）。**実測で踏んだ**——**数えると
-    // 32,767 ブロック目まで使用中に見え、器に入らないと言って落ちた**
+    // 32,767 ブロック目まで使用中に見え、器に入らないと出力して落ちた**
     // （2026-09-03）。**superblock の `s_blocks_count` で切る。**
     let counts = image.get(FS_SUPERBLOCK + 4..FS_SUPERBLOCK + 8)?;
     let blocks_count = u32::from_le_bytes([counts[0], counts[1], counts[2], counts[3]]) as usize;
@@ -7601,7 +7601,7 @@ fn try_verify_corrupt_fs_image_is_rejected(
     const HUGE_INODE_END: u64 =
         FS_INODE_TABLE as u64 + (HUGE_INODE_COUNT - 1) * FS_INODE_SIZE as u64 + 128;
 
-    // **壊す位置は像から求める（2026-09-03）。** **`build.rs` の定数は使わない**
+    // **壊す位置はイメージから求める（2026-09-03）。** **`build.rs` の定数は使わない**
     // ——[`map_corrupt_fs`] の doc。
     // **見るのは装置から読んだ複製である**（`build_truncated_fs_image` と同じ出所）。
     let Some(map) = map_corrupt_fs(kernel::vfs::root_image()) else {
@@ -7609,8 +7609,8 @@ fn try_verify_corrupt_fs_image_is_rejected(
             error: Ext2Error::NotFound,
         });
     };
-    // **器に入らなければ落ちる。** **足りない写しで演習を続けると、
-    // 当たらない位置を壊して「拒まれなかった」と言うことになる。**
+    // **器に入らなければ落ちる。** **足りないコピーで演習を続けると、
+    // 当たらない位置を壊して「拒まれなかった」と出力することになる。**
     if map.blocks > CORRUPT_FS_BLOCKS {
         return Err(CorruptFsCheckError::PrefixProbeFailed {
             name: "the working buffer is smaller than the image in use",
@@ -7781,13 +7781,13 @@ fn try_verify_corrupt_fs_image_is_rejected(
             probe: fs_probe_root_walk,
             expected: Ext2Error::NotADirectory(2),
         },
-        // **捕まえ方が ADR-0038 で変わった。** かつては穴が `SparseBlock` で
+        // **検出の仕方が ADR-0038 で変わった。** かつては穴が `SparseBlock` で
         // 拒まれたが、**穴は全 0 として読めるようになった。**
-        // **それでも捕まる**——`i_size` を信じて 2 ブロック目を歩くと、
+        // **それでも検出される**——`i_size` を信じて 2 ブロック目を歩くと、
         // **全 0 のブロックをディレクトリとして読むことになり**、
         // `rec_len` が 0 で「進まないエントリ」として拒まれる（実測）。
         // **主張は変わっていない**（`i_size` の水増しは通らない）。
-        // **捕まえ方の見込みが外れても内容で捕まる形は、`virtio-short-desc` と
+        // **検出の仕方の見込みが外れても内容で検出される形は、`virtio-short-desc` と
         // `virtio-intx-edge` に続いて 3 度目である。**
         CorruptFsCase {
             what: "the root inode's i_size grown past its blocks",
@@ -7855,10 +7855,10 @@ fn try_verify_corrupt_fs_image_is_rejected(
         // **黙って消さずに理由を残す**（`docs/coding-standards.md` の
         // 「行は消さず状態を書き換える」と同じ趣旨である）。
         //
-        // **穴が全 0 として読めるようになると、この破壊は正当な疎ファイルと
+        // **穴が全 0 として読めるようになると、この破壊テストは正当な疎ファイルと
         // 同じ状態になる**——ext2 において「`i_size` が割り当て済みブロックより
         // 大きい通常ファイル」は、まさに疎ファイルの定義そのものである。
-        // **ext2 の側にも区別が付かない。** 壊れた像を作れていないので、
+        // **ext2 の側にも区別が付かない。** 壊れたイメージを作れていないので、
         // 拒まれないのが正しい。
         //
         // **ディレクトリの側（上の「the root inode's i_size grown past its
@@ -7867,7 +7867,7 @@ fn try_verify_corrupt_fs_image_is_rejected(
         // **構造を持つ側だけが、水増しを検出できる。**
     ];
 
-    // **健全な対照を先に走らせる。** 切り出した先頭が、それ自体で読み切れる像で
+    // **健全な対照を先に走らせる。** 切り出した先頭が、それ自体で読み切れるイメージで
     // あることを確かめる。**ここが落ちたら、壊す側ではなく切り出す長さが足りない。**
     // SAFETY: 起動時の単一実行文脈で、この静的領域を触るのはこの関数だけである。
     let control = unsafe {
@@ -7897,7 +7897,7 @@ fn try_verify_corrupt_fs_image_is_rejected(
 
     let mut rejected = 0usize;
     for case in cases {
-        // 毎回、健全な像から作り直す。**前の壊し方が残らないようにする。**
+        // 毎回、健全なイメージから作り直す。**前の壊し方が残らないようにする。**
         // SAFETY: 起動時の単一実行文脈で、この静的領域を触るのはこの関数だけである。
         let image = unsafe {
             let buf = &mut *core::ptr::addr_of_mut!(CORRUPT_FS_IMAGE);
@@ -7948,8 +7948,8 @@ fn try_verify_corrupt_fs_image_is_rejected(
         map.blocks
     ));
 
-    // 壊した後も、抱えている像が読めること。**壊す処理が元を汚していないことの主張。**
-    // **複製元は装置から読んだ複製である（P-e）。** **以前は埋め込み像だった。**
+    // 壊した後も、抱えているイメージが読めること。**壊す処理が元を汚していないことの主張。**
+    // **複製元は装置から読んだ複製である（P-e）。** **以前は埋め込みイメージだった。**
     if Ext2::parse(kernel::vfs::root_image()).is_err() {
         return Err(CorruptFsCheckError::EmbeddedImageBroken);
     }
@@ -8029,8 +8029,8 @@ fn verify_fs_content_mismatch_is_noticed(
     Ok(())
 }
 
-/// 抱えている像の先頭 [`CORRUPT_FS_BLOCKS`] ブロックを写し、それ自体で読み切れる
-/// 像に直す（S10-a）。
+/// 抱えているイメージの先頭 [`CORRUPT_FS_BLOCKS`] ブロックをコピーし、それ自体で読み切れる
+/// イメージに直す（S10-a）。
 ///
 /// **`s_blocks_count` を切り出した長さへ合わせる。** 直さないと `parse` が
 /// [`common::ext2::Ext2Error::ImageTooSmall`] で拒み、**壊し方に関係なく
@@ -8038,12 +8038,12 @@ fn verify_fs_content_mismatch_is_noticed(
 fn build_truncated_fs_image(buf: &mut [u8; CORRUPT_FS_LEN], blocks: usize) {
     // **複製元は装置から読んだ複製である（P-e。`ADR-0034` の Addendum）。**
     //
-    // **前提を書く。** **この破壊の検査は、作り直した像でしか走らない。**
+    // **前提を書く。** **この破壊テストは、作り直した像でしか走らない。**
     // **持ち越す構成では、装置の中身の使用上端が起動ごとに動きうるので、
     // `CORRUPT_FS_LEN`（`build.rs` の定数）が実態と合わなくなる。**
     // **以前は偶然そうなっているだけで、前提として書かれていなかった。**
-    // **長さは像から求める（2026-09-03）。** **`build.rs` の定数は容量にしか
-    // 使わない**——[`map_corrupt_fs`] の doc。**持ち越した像でも当たる。**
+    // **長さはイメージから求める（2026-09-03）。** **`build.rs` の定数は容量にしか
+    // 使わない**——[`map_corrupt_fs`] の doc。**持ち越したイメージでも当たる。**
     let length = blocks * FS_BLOCK_SIZE;
     buf[..length].copy_from_slice(&kernel::vfs::root_image()[..length]);
     // **余りは 0 で埋める。** **前の回の中身が残ると、切り詰めの主張が濁る。**
@@ -8051,7 +8051,7 @@ fn build_truncated_fs_image(buf: &mut [u8; CORRUPT_FS_LEN], blocks: usize) {
     buf[FS_SUPERBLOCK + 4..FS_SUPERBLOCK + 8].copy_from_slice(&(blocks as u32).to_le_bytes());
 }
 
-/// 壊した像を組み立てる作業領域（S9-b-2）。
+/// 壊したイメージを組み立てる作業領域（S9-b-2）。
 ///
 /// **スタックへ置かない。** 8 KiB を超える単一のローカル配列は
 /// `docs/deferred-decisions.md` の「大きなスタック配列とガード幅」の解禁条件に
@@ -8070,24 +8070,24 @@ struct CorruptCase {
     value: u64,
     /// 書き込む幅（バイト）。0 なら書き換えない。
     width: usize,
-    /// 像をこの長さへ切り詰める（0 なら切り詰めない）。
+    /// イメージをこの長さへ切り詰める（0 なら切り詰めない）。
     truncate_to: usize,
     /// 期待する拒否理由。
     expected: common::elf::ElfError,
 }
 
-/// 壊した像がパーサに拒まれることを確かめる（S9-b-2）。
+/// 壊したイメージがパーサに拒まれることを確かめる（S9-b-2）。
 ///
 /// # 既定ビルドで常に走らせる
 ///
-/// **破壊 feature の中だけで壊すと、「壊す処理そのものが壊れている」ことに
+/// **破壊テストの feature の中だけで壊すと、「壊す処理そのものが壊れている」ことに
 /// 気づけない。** 既定で毎回壊し、毎回拒まれることを主張すれば、
 /// **壊す側と拒む側の両方が守られる。**
 ///
-/// # 像は 1 つ。壊すのは実行時である
+/// # イメージは 1 つ。壊すのは実行時である
 ///
-/// 壊した像を埋め込みで増やす案は採らなかった。**`ElfError` は 11 種あり、
-/// 種類ごとに像を持つと本数がそのまま費用になる**（`rustc` の呼び出しも
+/// 壊したイメージを埋め込みで増やす案は採らなかった。**`ElfError` は 11 種あり、
+/// 種類ごとにイメージを持つと本数がそのまま費用になる**（`rustc` の呼び出しも
 /// イメージの大きさも）。実行時に 1 バイトから 8 バイト書き換えれば全種を作れる。
 ///
 /// **「壊した像がどこから来たか読めない」という欠点は、判定行に壊し方を
@@ -8201,7 +8201,7 @@ fn verify_corrupt_user_elf_is_rejected(logger: &mut Logger<SerialPort>) {
 
     let mut rejected = 0usize;
     for case in cases {
-        // 毎回、健全な像から作り直す。**前の壊し方が残らないようにする。**
+        // 毎回、健全なイメージから作り直す。**前の壊し方が残らないようにする。**
         // SAFETY: 起動時の単一実行文脈で、この静的領域を触るのはここだけである。
         let image = unsafe {
             let buf = &mut *core::ptr::addr_of_mut!(CORRUPT_IMAGE);
@@ -8244,7 +8244,7 @@ fn verify_corrupt_user_elf_is_rejected(logger: &mut Logger<SerialPort>) {
          fresh copy)"
     ));
 
-    // 壊した後も健全な像が読めること。**壊す処理が元を汚していないことの主張である。**
+    // 壊した後も健全なイメージが読めること。**壊す処理が元を汚していないことの主張である。**
     if Elf::parse(HELLO_ELF).is_err() {
         logger.error(format_args!(
             "user-elf-corrupt: the good image no longer parses after the corruption pass; halting"
@@ -8258,7 +8258,7 @@ fn verify_corrupt_user_elf_is_rejected(logger: &mut Logger<SerialPort>) {
 /// **`kernel/userland/hello.rs` の `.org 0x30` と対になっている。** 値を 2 か所で
 /// 持つが、**食い違えば下の判定行が落ちる**ので静かには残らない。
 ///
-/// **役割が変わった。** S9-b-1 では `hello` の出口そのもの（畳んで戻る）だったが、
+/// **役割が変わった。** S9-b-1 では `hello` の出口そのもの（終了させて戻る）だったが、
 /// S9-b-3-1 で出口は `exit` になった。**いまは `exit` が効かなかったときの受け皿で
 /// ある。** 既定ビルドでここへは来ない。来たら `user-run` の判定行が止める。
 const HELLO_UD2_OFFSET: u64 = 0x30;
@@ -8266,7 +8266,7 @@ const HELLO_UD2_OFFSET: u64 = 0x30;
 /// `hello` が `write` で送るはずのバイト列（S9-b-1）。
 const HELLO_MESSAGE: &str = "hello from ring 3\n";
 
-/// `fault-test` が書きに行く番地（S9-b-3-2a）。**自分の `.text` の先頭である。**
+/// `fault-test` が書きに行くアドレス（S9-b-3-2a）。**自分の `.text` の先頭である。**
 ///
 /// **`kernel/userland/user.ld` のリンク先と、`fault-test.rs` の即値と対になって
 /// いる。** 3 か所で同じ値を持つが、**食い違えば CR2 の突き合わせが落ちる。**
@@ -8288,7 +8288,7 @@ const SYSCALL_TEST_MESSAGE: &str = "syscall-test wrote this\n";
 
 /// `syscall-test` の受け皿の `ud2` が entry から何バイト目にあるか（S9-b-3-2a）。
 ///
-/// # 出所は `user.ld` 1 つである（S10-b の締めで直した）
+/// # 出所は `user.ld` 1 つである（S10-b の完了時に直した）
 ///
 /// **以前は `.org` の即値と、この定数の 2 か所に同じ値があった。**
 /// 検算を足してコードが伸びるたびに両方を直すことになり、**S10-b で 3 度起きた**
@@ -8439,7 +8439,7 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
 /// `fault-test` が起こす #PF のエラーコード（S9-b-3-2a）。
 ///
 /// `P`（bit 0）| `W`（bit 1）| `U`（bit 2）= 7。**「不在」ではなく「権限違反」で
-/// あることを、この値で言っている**——ページは在る（`P=1`）が、書けない
+/// あることを、この値で示している**——ページは在る（`P=1`）が、書けない
 /// （`W=1` は書きでの違反を指す）。**S7 の到達条件 3 の観測が使っているのと
 /// 同じ区別である。**
 const FAULT_TEST_ERROR_CODE: u64 = 0b111;
@@ -8449,7 +8449,7 @@ const FAULT_TEST_ERROR_CODE: u64 = 0b111;
 /// # なぜ表に持たせるか
 ///
 /// **プログラムごとに正しい終わり方が違う。** `hello` は `exit(0)` で終わるのが
-/// 正しく、`fault-test` は畳まれて終わるのが正しい。**「畳んで戻った」を一律に
+/// 正しく、`fault-test` は終了させられるのが正しい。**「畳んで戻った」を一律に
 /// 失敗として扱うと、後者を正しく終わらせられない。**
 ///
 /// **終わり方は観測される量であって、判定はここが持つ。** 観測は
@@ -8460,7 +8460,7 @@ enum UserProgramOutcome {
         /// 期待する終了状態。
         status: u64,
     },
-    /// Ring 3 の違反が畳まれて終わる。
+    /// Ring 3 の違反による終了処理で終わる。
     Fold {
         /// 期待するベクタ。
         vector: u64,
@@ -8479,7 +8479,7 @@ enum UserProgramOutcome {
 struct UserProgram {
     /// 判定行に出す名前。
     name: &'static str,
-    /// 埋め込んだ像。
+    /// 埋め込んだイメージ。
     image: &'static [u8],
     /// 期待する終わり方。
     outcome: UserProgramOutcome,
@@ -8506,9 +8506,9 @@ struct UserProgram {
     argv: &'static [&'static [u8]],
     /// **方向フラグ（DF=1）のまま、どの入口からカーネルへ入るか**（2026-09-24）。
     ///
-    /// **入口が DF を降ろすという主張の前提を作る。** 走らせた後に、その入口の計器
+    /// **入口が DF を降ろすという主張の前提を作る。** 走らせた後に、その入口の計測
     /// （`kernel::idt::entries_from_direction_flag_set`）が増えたことを見る。
-    /// **増えていなければ、見張りは何も確かめていない**ので止まる。
+    /// **増えていなければ、監視は何も確かめていない**ので止まる。
     enters_with_direction_flag: Option<kernel::idt::EntryPath>,
 }
 
@@ -8518,9 +8518,9 @@ struct UserProgram {
 ///
 /// # 順序に意味がある
 ///
-/// **畳まれて終わるプログラムの後ろに、正常に終わるプログラムを置く。**
+/// **終了させられるプログラムの後ろに、正常に終わるプログラムを置く。**
 /// そうすると「1 本が畳まれて終わり、**次の 1 本が始まって**正常に終わる」が
-/// 1 回の起動で観測できる。**逆順では、畳んだ後に何かが始まるところを見せられない。**
+/// 1 回の起動で観測できる。**逆順では、終了させた後に何かが始まるところを見せられない。**
 /// これは S8 が言い換えた到達条件（中断ではなく終了であること）の観測にあたる。
 ///
 /// `syscall-test` は S9-b-3-2a の 2 本目で足し、`fault-test` の後ろに置く。
@@ -8571,7 +8571,7 @@ const USER_PROGRAMS: &[UserProgram] = &[
 
 /// **方向フラグの前提が作れたこと**（2026-09-24。[`UserProgram::enters_with_direction_flag`]）。
 ///
-/// **見張り（`kernel::idt::check_direction_flag`）は DF=1 が Rust へ届いたときにしか鳴らない。**
+/// **監視（`kernel::idt::check_direction_flag`）は DF=1 が Rust へ届いたときにしか鳴らない。**
 /// **DF=1 のまま入る入場が 1 度も無ければ、スタブが降ろしていなくても黙って通る。**
 fn check_direction_flag_premise(
     logger: &mut Logger<SerialPort>,
@@ -8633,17 +8633,17 @@ fn free_range_count_now(logger: &mut Logger<SerialPort>) -> usize {
 /// 埋め込んだユーザープログラムを順に走らせる（S9-b-1、S9-b-3-2a で複数になった）。
 ///
 /// **1 本ずつ、生成から破棄まで閉じてから次へ行く。** 期待どおりに終わった
-/// プログラムは失敗ではない——`fault-test` は畳まれて終わるのが正しい
+/// プログラムは失敗ではない——`fault-test` は終了させられるのが正しい
 /// （[`USER_PROGRAMS`]）。**期待と違う終わり方をしたときだけ止まる。**
 fn load_embedded_user_program(logger: &mut Logger<SerialPort>) -> Result<(), UserLoadError> {
     for program in USER_PROGRAMS {
         let name = program.name;
         // **会計のために短く借りる（S11-3）。** 読むだけなので、すぐ返す。
         let free_before = frame_count_now(logger);
-        // **子の会計を 0 に戻す（S11-5）。** このプログラムが `spawn` で起こした
+        // **子の会計を 0 に戻す（S11-5）。** このプログラムが `spawn` で起動した
         // 子の隔離は、下の突き合わせで足す。
         kernel::userland::reset_spawn_accounting();
-        // **会計の窓を開く（`ADR-0063` の (b1)）。** **起動時は交差しないが、同じ形で数える**
+        // **会計のウィンドウを開く（`ADR-0063` の (b1)）。** **起動時は交差しないが、同じ形で数える**
         // ——**「確かめた回数」を 1 か所で数えるためである。**
         let window = kernel::userland::open_spawn_window();
         let df_entries_before = program
@@ -8655,19 +8655,19 @@ fn load_embedded_user_program(logger: &mut Logger<SerialPort>) -> Result<(), Use
         let (child_held, child_leaked) = kernel::userland::spawn_accounting();
         let entry = outcome?;
 
-        // **終わり方を判定する。** ここで止まっても空間は既に畳まれている
-        // （`load_user_program` が成否によらず畳む）ので、会計はこの後で見られる。
+        // **終わり方を判定する。** ここで止まっても空間は既に破棄されている
+        // （`load_user_program` が成否によらず破棄する）ので、会計はこの後で見られる。
         check_user_program_outcome(logger, program, entry)?;
         check_direction_flag_premise(logger, program, df_entries_before);
 
-        // **畳んだ会計。** 消えた枚数と隔離へ入れた枚数が一致すること。
+        // **破棄の会計。** 消えた枚数と隔離へ入れた枚数が一致すること。
         // **空きフレームの絶対値は出さない**（コア数で変わる。
         // `verify_corrupt_user_program_is_not_loaded` が同じ理由で差だけを出している）。
         // **主張の前に確かめる。** 先に「畳んだ」と書くと、会計が合わない場合に
         // **その行が偽のまま残る。**
         // **子が隔離へ入れたぶんを足す（S11-5）。** 隔離のフレームは世代が退くまで
         // アロケータへ戻らないので、**親から見ると消えたままである。**
-        // **実測で踏んだ**——`syscall-test` が子を 2 本起こしたところ、24 枚消えて
+        // **実測で踏んだ**——`syscall-test` が子を 2 本起動したところ、24 枚消えて
         // 自分の隔離は 8 枚だった。差の 16 枚が子 2 本のぶんである。
         let consumed = (free_before - frame_count_now(logger)) as usize;
         let quarantined = held + child_held;
@@ -8717,7 +8717,7 @@ fn load_embedded_user_program(logger: &mut Logger<SerialPort>) -> Result<(), Use
 
         // **空き範囲の数を別の行で出す。** フレームアロケータの容量（256）の
         // 見直しは「プロセスが任意の順で終了する形になるとき」が条件で、
-        // **この段ではまだ足りている**（順に 1 本ずつなので同時生存は 1）。
+        // **この段階ではまだ足りている**（順に 1 本ずつなので同時生存は 1）。
         // **増え方が見えていなければ、足りなくなる時期も見えない。**
         //
         // **行を分けてあるのは、この値が起動ごとに揺れるからである**（UEFI の
@@ -8732,7 +8732,7 @@ fn load_embedded_user_program(logger: &mut Logger<SerialPort>) -> Result<(), Use
     Ok(())
 }
 
-/// **壊した像がローダーの中で拒まれ、後始末まで済むことを確かめる（S9-b-2）。**
+/// **壊したイメージがローダーの中で拒まれ、後始末まで済むことを確かめる（S9-b-2）。**
 ///
 /// # パーサで止まる種類とは別の経路である
 ///
@@ -8740,19 +8740,19 @@ fn load_embedded_user_program(logger: &mut Logger<SerialPort>) -> Result<(), Use
 /// **あれらはローダーへ入らないので、`UserLoadError` の経路を 1 度も通らない。**
 /// **`Result` にした意味はここで初めて出る。**
 ///
-/// 3 つ置く。**落ちる場所が違う。**
+/// 3 つ用意する。**落ちる場所が違う。**
 ///
-/// - 入口で落ちる（`Parse`）。写像は 1 枚も張られていない
-/// - **途中で落ちる（`Mapping { NotPrivate }`）。** 1 本目の区画は張り終わって
-///   おり、**2 本目で拒まれる。そこまでに張ったものの後始末が要る**
+/// - 入口で落ちる（`Parse`）。ページは 1 枚もマップされていない
+/// - **途中で落ちる（`Mapping { NotPrivate }`）。** 1 本目の区画はマップし終わって
+///   おり、**2 本目で拒まれる。そこまでにマップしたものの後始末が要る**
 /// - **途中で落ちる（`Mapping { AlreadyMapped }`、S9-b-3-2b）。** 区画が同じ
-///   4KiB ページを共有する像である。**以前はこれが拒まれず、上書きして
+///   4KiB ページを共有するイメージである。**以前はこれが拒まれず、上書きして
 ///   1 枚漏らしていた**（`docs/verification-coverage.md` の「ELF の検査を
 ///   3 つに分ける」）
 ///
-/// 途中で落ちる像は、**2 本目の `p_vaddr` を動かして作る。** パーサは `p_vaddr`
+/// 途中で落ちるイメージは、**2 本目の `p_vaddr` を動かして作る。** パーサは `p_vaddr`
 /// の範囲も区画の重なりも見ない（配置の方針を知らないため。`common::elf` の
-/// モジュール doc）ので、**パースは通り、写像で拒まれる。** 行き先は
+/// モジュール doc）ので、**パースは通り、マッピングで拒まれる。** 行き先は
 /// ユーザーサブツリーの外（`PML4[1]`）と、1 本目の区画のページの中である。
 fn verify_corrupt_user_program_is_not_loaded(logger: &mut Logger<SerialPort>) {
     /// 先頭のプログラムヘッダの位置（`hello` の `e_phoff` は 64）。
@@ -8851,7 +8851,7 @@ fn verify_corrupt_user_program_is_not_loaded(logger: &mut Logger<SerialPort>) {
 ///
 /// # 戻ってきた理由は 2 つに 1 つである
 ///
-/// **終了**（`exit` が `ring3::leave_ring3` を呼んだ）か、**畳み**（Ring 3 由来の
+/// **終了**（`exit` が `ring3::leave_ring3` を呼んだ）か、**例外による終了処理**（Ring 3 由来の
 /// 違反を S8 の機構が受けた）である。`ring3::enter` はこの 2 つの longjmp でしか
 /// 戻らない。どちらであるべきかは [`UserProgram::outcome`] が持つ。
 ///
@@ -8859,7 +8859,7 @@ fn verify_corrupt_user_program_is_not_loaded(logger: &mut Logger<SerialPort>) {
 ///
 /// 観測は [`kernel::ring3`] と [`kernel::syscall`] の記録から読む。**走らせる側
 /// （`load_user_program_into`）は判定しない**——プログラムごとに正しい終わり方が
-/// 違い、それは一覧を持つ側の知識である。`ring3::enter` が畳んだ位置を主張せず
+/// 違い、それは一覧を持つ側の知識である。`ring3::enter` が終了させた位置を主張せず
 /// 呼び出し側に委ねているのと同じ形である。
 fn check_user_program_outcome(
     logger: &mut Logger<SerialPort>,
@@ -9049,7 +9049,7 @@ pub const USER_PML4_INDEX: usize = 1;
 /// ユーザーページのマッピング能力を検証する（M5-e-2）。
 ///
 /// 専用サブツリー（空き PML4[[`USER_PML4_INDEX`]]、仮想ベース 512 GiB）へ
-/// [`ActivePageTable::map_4kib`] で U=1 のテストページを 1 枚張り、独立 walker で
+/// [`ActivePageTable::map_4kib`] で U=1 のテストページを 1 枚マップし、独立 walker で
 /// 「ユーザーサブツリー全階層 U=1・カーネル側全 U=0」を実走査で確かめ、Ring 0 から
 /// 既知値を書いて読み戻し、葉だけをアンマップする。中間テーブルは残す（M5-e-3 が
 /// 同じサブツリーを再利用する。判断 b-i）。Ring 3 からのアクセスはまだ試さない。
@@ -9070,9 +9070,9 @@ fn verify_user_page_mapping<const CAP: usize>(
     /// Ring 0 から書いて読み戻す既知値。
     const KNOWN: u64 = 0x00E2_C0DE_1234_5678;
 
-    // テーブルの読み書きは恒等窓で行う（フレームはすべて恒等マッピング済み。
+    // テーブルの読み書きは恒等ウィンドウで行う（フレームはすべて恒等マッピング済み。
     // verify_split_and_unmap と同じ理由。テスト対象の U/S 照合は恒等に依存しない
-    // ので B で恒等を外しても、窓を高位へ差し替えるだけでよい）。
+    // ので B で恒等を外しても、ウィンドウを高位へ差し替えるだけでよい）。
     let identity = common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
         .expect("the identity window is canonical");
 
@@ -9086,11 +9086,11 @@ fn verify_user_page_mapping<const CAP: usize>(
     let virt = common::addr::VirtAddr::new(USER_TEST_VIRT)
         .expect("the user test virtual address is canonical");
 
-    // SAFETY: CR3 は自前テーブルへ切り替え済みで、配下は恒等窓で読み書きできる。
+    // SAFETY: CR3 は自前テーブルへ切り替え済みで、配下は恒等ウィンドウで読み書きできる。
     let mut table = unsafe { ActivePageTable::current(identity) };
     let pml4_phys = table.pml4_phys();
 
-    // --- 張る（専用サブツリー、user=true で全階層 U=1） ---
+    // --- マップする（専用サブツリー、user=true で全階層 U=1） ---
     let attributes = PageAttributes {
         user: true,
         writable: true,
@@ -9107,7 +9107,7 @@ fn verify_user_page_mapping<const CAP: usize>(
     }
 
     // --- 独立 walker で物理対応を照合（構築側とは別のループ） ---
-    // SAFETY: pml4_phys は稼働中 PML4、identity 窓でテーブルを読める。
+    // SAFETY: pml4_phys は稼働中 PML4、identity ウィンドウでテーブルを読める。
     match unsafe { verify::walk(pml4_phys, identity, virt) } {
         Ok(r) if r.phys.as_u64() == leaf_phys.as_u64() && !r.huge => {}
         other => {
@@ -9137,7 +9137,7 @@ fn verify_user_page_mapping<const CAP: usize>(
     }
 
     // --- Ring 0 から既知値を書いて読み戻す（present・writable・到達可能） ---
-    // SAFETY: virt は今張ったばかりの writable なページ。SMAP は未有効なので Ring 0 から
+    // SAFETY: virt は今マップしたばかりの writable なページ。SMAP は未有効なので Ring 0 から
     // ユーザーページへアクセスできる。
     unsafe {
         core::ptr::write_volatile(virt.as_mut_ptr::<u64>(), KNOWN);
@@ -9153,7 +9153,7 @@ fn verify_user_page_mapping<const CAP: usize>(
     }
 
     // --- 葉だけアンマップ。中間テーブルは残す（M5-e-3 が再利用） ---
-    // SAFETY: virt は今張った 4KiB ページ。以後この仮想アドレスへはアクセスしない
+    // SAFETY: virt は今マップした 4KiB ページ。以後この仮想アドレスへはアクセスしない
     // （葉を落とした後の walk は TLB ではなくテーブルを読む）。
     if let Err(e) = unsafe { table.unmap_4kib(virt) } {
         logger.error(format_args!("user-map: unmap_4kib failed: {e:?}; halting"));
@@ -9196,12 +9196,12 @@ fn verify_user_page_mapping<const CAP: usize>(
     ));
 }
 
-/// 畳みが予期した位置で起きたかを主張する（S8-a）。
+/// 終了処理が予期した位置で起きたかを主張する（S8-a）。
 ///
-/// 畳みの判定はベクタと CS.RPL と遠征フラグだけを見る。**どこで畳まれたかを知って
+/// 終了処理の判定はベクタと CS.RPL と遠征フラグだけを見る。**どこで終了させられたかを知って
 /// いるのは遠征を組み立てた側なので、突き合わせはここで行う。**
 /// 食い違ったら、記録した3つ（ベクタ・RIP・CS）を出して停止する。ハンドラの dump は
-/// 畳んだ時点で通っていないため、この行が唯一の手がかりになる。
+/// 終了させた時点で通っていないため、この行が唯一の手がかりになる。
 ///
 /// `what` はログの接頭辞（遠征ごとに `ring3` / `syscall` と使い分ける）。
 ///
@@ -9232,8 +9232,8 @@ fn assert_folded_at(
 /// Ring 3 への単発遠征を検証する（M5-e-3）。
 ///
 /// M5-e-2 が残した PML4[[`USER_PML4_INDEX`]] サブツリーへ、ユーザーコード（`cli` 1 命令）
-/// とユーザースタックの 2 ページを U=1 で張る。iretq で Ring 3 へ落ち、`cli` が #GP を
-/// 起こし、`exception_entry` が予期と判定して畳んでここへ戻る。確かめるのは、RSP0 が
+/// とユーザースタックの 2 ページを U=1 でマップする。iretq で Ring 3 へ落ち、`cli` が #GP を
+/// 起こし、`exception_entry` が予期と判定して終了させてここへ戻る。確かめるのは、RSP0 が
 /// 実挙動で効くこと（#GP が遠征専用スタックへ切り替わったこと）、Ring 3 に落ちたこと、
 /// 両側 U/S 監査が成立し続けることの3つである。
 ///
@@ -9269,18 +9269,18 @@ fn verify_ring3_excursion<const CAP: usize>(
     let readonly_virt = common::addr::VirtAddr::new(ring3::USER_READONLY_VIRT)
         .expect("the read-only user virtual address is canonical");
 
-    // SAFETY: CR3 は自前テーブル。配下は恒等窓で読み書きできる。
+    // SAFETY: CR3 は自前テーブル。配下は恒等ウィンドウで読み書きできる。
     let mut table = unsafe { ActivePageTable::current(identity) };
     let pml4_phys = table.pml4_phys();
 
-    // 2 ページを U=1 で張る（M5-e-2 残置の中間テーブルを再利用）。
-    // 破壊 (ring3-test-user-page-supervisor): USER を落とす（U=0）。遠征前の両側監査が
-    // user violation として捕まえる。
+    // 2 ページを U=1 でマップする（M5-e-2 残置の中間テーブルを再利用）。
+    // 破壊テスト (ring3-test-user-page-supervisor): USER を落とす（U=0）。遠征前の両側監査が
+    // user violation として検出する。
     #[cfg(not(feature = "ring3-test-user-page-supervisor"))]
     let user_flag = true;
     #[cfg(feature = "ring3-test-user-page-supervisor")]
     let user_flag = false;
-    // 3 枚目は writable=false で張る（S9-a）。**Ring 3 からの書き込みが #PF に
+    // 3 枚目は writable=false でマップする（S9-a）。**Ring 3 からの書き込みが #PF に
     // なることを ring3-vectors の 6 本目が確かめる的である。**
     for (virt, phys, writable, what) in [
         (code_virt, code_phys, true, "code"),
@@ -9303,13 +9303,13 @@ fn verify_ring3_excursion<const CAP: usize>(
     }
 
     // ユーザーコードへ cli(0xFA) を書き込む。NX を立てていないので実行可能。
-    // SAFETY: code_virt は今張った writable なユーザーページ。SMAP は未有効。
+    // SAFETY: code_virt は今マップした writable なユーザーページ。SMAP は未有効。
     unsafe {
         core::ptr::write_volatile(code_virt.as_mut_ptr::<u8>(), 0xFA);
     }
 
-    // 張った直後の両側 U/S 監査（遠征前）。
-    // SAFETY: pml4_phys は稼働中 PML4、identity 窓で読める。
+    // マップした直後の両側 U/S 監査（遠征前）。
+    // SAFETY: pml4_phys は稼働中 PML4、identity ウィンドウで読める。
     let before = unsafe { verify::audit_user_supervisor(pml4_phys, identity, USER_PML4_INDEX) };
     if before.user_violations != 0 || before.kernel_violations != 0 {
         logger.error(format_args!(
@@ -9331,10 +9331,10 @@ fn verify_ring3_excursion<const CAP: usize>(
         ring3::USER_STACK_TOP
     ));
 
-    // --- 遠征。iretq -> Ring 3 -> cli -> #GP -> 畳み -> ここへ戻る ---
+    // --- 遠征。iretq -> Ring 3 -> cli -> #GP -> 終了処理 -> ここへ戻る ---
     // cli はユーザーコード入口（USER_CODE_VIRT）に置いてあるので、予期する #GP の
     // フォルト RIP はそこである。
-    // SAFETY: ユーザーページは張り済み。main_rsp0_top はメインの上端なので、遠征後に
+    // SAFETY: ユーザーページはマップ済み。main_rsp0_top はメインの上端なので、遠征後に
     // RSP0 をそこへ戻せる。起動時の単一実行文脈から 1 回だけ呼ぶ。
     unsafe {
         ring3::enter(
@@ -9353,7 +9353,7 @@ fn verify_ring3_excursion<const CAP: usize>(
         cpu::halt_forever();
     }
 
-    // 畳んだ位置の主張（S8-a）。判定側は位置を見ないので、予期と突き合わせるのは
+    // 終了させた位置の主張（S8-a）。判定側は位置を見ないので、予期と突き合わせるのは
     // ここである。cli はユーザーコード入口に置いたので、そこで #GP になるはず。
     assert_folded_at(logger, "ring3", 13, ring3::USER_CODE_VIRT);
 
@@ -9431,7 +9431,7 @@ fn verify_ring3_excursion<const CAP: usize>(
 /// 書き換え、Ring 3 から probe システムコールを 1 回発行する。syscall_entry は
 /// 番号と 6 引数を記録し、既知の戻り値 [`syscall::PROBE_RETURN`] を返す。iretq で
 /// Ring 3 へ戻ると、その戻り値がユーザー RAX に入り、ユーザーがスタックへ store する。
-/// 続く cli の #GP を予期の畳みでカーネルへ戻す。
+/// 続く cli の #GP を予期した終了処理でカーネルへ戻す。
 ///
 /// 確かめること。
 ///
@@ -9441,7 +9441,7 @@ fn verify_ring3_excursion<const CAP: usize>(
 /// - 戻り値が RAX で Ring 3 へ返ったこと（ユーザースタックへ store された値が
 ///   [`syscall::PROBE_RETURN`] と一致）
 /// - syscall_entry が RSP0（遠征）スタックで走ったこと
-/// - 畳みで戻り RSP0 が復帰したこと
+/// - 終了処理で戻り RSP0 が復帰したこと
 fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     use kernel::paging::active::{ActivePageTable, PageSize};
     use kernel::ring3;
@@ -9453,10 +9453,10 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     let code_virt = common::addr::VirtAddr::new(ring3::USER_CODE_VIRT)
         .expect("the user code virtual address is canonical");
 
-    // verify_ring3_excursion が張ったユーザーコードページを再利用する。前段の副作用に
+    // verify_ring3_excursion がマップしたユーザーコードページを再利用する。前段の副作用に
     // 暗黙依存しないよう、実状態を読んで 4KiB でマップされていることを確かめてから
     // 書き換える。外れていれば静かに壊れる代わりに止まる。
-    // SAFETY: CR3 は自前テーブル。配下は恒等窓で読める。
+    // SAFETY: CR3 は自前テーブル。配下は恒等ウィンドウで読める。
     let table = unsafe { ActivePageTable::current(identity) };
     match table.translate(code_virt) {
         Ok(Some(t)) if t.page_size == PageSize::Size4KiB => {}
@@ -9481,7 +9481,7 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     //   mov eax, NUMBER      B8 id            RAX = 番号
     //   int 0x80             CD 80
     //   mov [rsp-8], rax     48 89 44 24 F8   戻り値をユーザースタックへ store
-    //   cli                  FA               予期の #GP（畳み出口）
+    //   cli                  FA               予期の #GP（終了処理の出口）
     // mov r32, imm32 は 64bit で上位ゼロ拡張されるので、32bit に収まる既知値をそのまま使う。
     let mut code = [0u8; 64];
     let mut n = 0usize;
@@ -9533,7 +9533,7 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     let int_rip = ring3::USER_CODE_VIRT + int_offset as u64;
 
     // ユーザーが戻り値を store する先（ユーザースタック頂点の直下）。事前に毒値を入れて
-    // おき、畳み後に読み戻す。毒値のままなら store が起きていない。
+    // おき、終了処理の後に読み戻す。毒値のままなら store が起きていない。
     let store_slot = ring3::USER_STACK_TOP - 8;
     const STORE_POISON: u64 = 0x0BAD_0BAD_0BAD_0BAD;
     // SAFETY: store_slot はマップ済みのユーザースタックページ内。SMAP 未有効。
@@ -9553,10 +9553,10 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     ));
 
     // --- 遠征。iretq -> Ring 3 -> 6 引数セット -> int 0x80 -> syscall_entry -> iretq ->
-    //     戻り値 store -> cli -> #GP -> 畳み -> ここへ戻る ---
+    //     戻り値 store -> cli -> #GP -> 終了処理 -> ここへ戻る ---
     // int 0x80 は 1 回だけ発行する。probe の記録はこの単一の呼び出しのものである
     // （invocations=1 と整合）。
-    // SAFETY: ユーザーページは張り済み。Ring 3 は cli_rip で cli を実行して #GP を起こす。
+    // SAFETY: ユーザーページはマップ済み。Ring 3 は cli_rip で cli を実行して #GP を起こす。
     // main_rsp0_top はメインの上端。起動時の単一実行文脈から 1 回だけ呼ぶ。
     unsafe {
         ring3::enter(
@@ -9575,7 +9575,7 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
         cpu::halt_forever();
     }
 
-    // 畳んだ位置の主張（S8-a）。int 0x80 の直後に置いた cli で #GP になるはず。
+    // 終了させた位置の主張（S8-a）。int 0x80 の直後に置いた cli で #GP になるはず。
     // ここが int_rip なら、往復せずに int の時点で落ちている。
     assert_folded_at(logger, "syscall", 13, cli_rip);
 
@@ -9647,7 +9647,7 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     // この主張の反証で示した範囲を書いておく。note_kernel_entry が常に false を返す
     // 形へ壊して、ここが止まることを確かめた。**示したのは「主張が真の値に固定されて
     // おらず、偽の値が来れば止まる」ことである。「enter が立て損ねたときに止まる」ことは、
-    // この破壊では示していない**——その道は ring3-test no-fold-flag が塞いでおり、
+    // この破壊テストでは示していない**——その道は ring3-test no-fold-flag が塞いでおり、
     // あちらは最初の遠征で止まるのでここまで到達しない。同じ性質を 2 つの検査が
     // 別々の場所で見ている。
     if !syscall::in_ring3_at_entry() {
@@ -9683,8 +9683,8 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
 /// ポインタ系 syscall（`number`）を (buf, len) で 1 回発行し、ユーザーが store した
 /// 戻り値を返す（M5-f-2-1 / M5-f-2-2）。
 ///
-/// 遠征機構（enter → int 0x80 → 戻り値 store → cli 畳み）は verify_syscall_roundtrip と
-/// 同じものを使う。ユーザーコード/スタックページは verify_ring3_excursion が張ったものを
+/// 遠征機構（enter → int 0x80 → 戻り値 store → cli による終了処理）は verify_syscall_roundtrip と
+/// 同じものを使う。ユーザーコード/スタックページは verify_ring3_excursion がマップしたものを
 /// 再利用する（呼び出し側が確認済みであることが前提）。
 fn issue_ptr_len_syscall(logger: &mut Logger<SerialPort>, number: u64, buf: u64, len: u64) -> u64 {
     use kernel::ring3;
@@ -9714,7 +9714,7 @@ fn issue_ptr_len_syscall(logger: &mut Logger<SerialPort>, number: u64, buf: u64,
     emit(&[0xFA], &mut code, &mut n); // cli
     let code_len = n;
 
-    // SAFETY: code_virt は verify_ring3_excursion が張ったユーザーコードページ。NX 未設定で
+    // SAFETY: code_virt は verify_ring3_excursion がマップしたユーザーコードページ。NX 未設定で
     // 実行可能、SMAP 未有効で書き込み可能。code_len <= 64 <= 4096。
     unsafe {
         let p = code_virt.as_mut_ptr::<u8>();
@@ -9734,7 +9734,7 @@ fn issue_ptr_len_syscall(logger: &mut Logger<SerialPort>, number: u64, buf: u64,
     syscall::reset_counters();
     let main_rsp0_top = gdt::privilege_stack_top();
 
-    // SAFETY: ユーザーページは張り済み。Ring 3 は cli_rip で cli を実行して #GP を起こす。
+    // SAFETY: ユーザーページはマップ済み。Ring 3 は cli_rip で cli を実行して #GP を起こす。
     // main_rsp0_top はメインの上端。起動時の単一実行文脈から呼ぶ。
     unsafe {
         ring3::enter(
@@ -9752,7 +9752,7 @@ fn issue_ptr_len_syscall(logger: &mut Logger<SerialPort>, number: u64, buf: u64,
         cpu::halt_forever();
     }
 
-    // 畳んだ位置の主張（S8-a）。
+    // 終了させた位置の主張（S8-a）。
     assert_folded_at(logger, "syscall", 13, cli_rip);
     if syscall::invocation_count() != 1 {
         logger.error(format_args!(
@@ -9765,14 +9765,14 @@ fn issue_ptr_len_syscall(logger: &mut Logger<SerialPort>, number: u64, buf: u64,
     unsafe { core::ptr::read_volatile(store_slot as *const u64) }
 }
 
-/// ユーザーポインタ検証の検証（M5-f-2-1）。正常系と異常系5ケースを回す。
+/// ユーザーポインタ検証の検証（M5-f-2-1）。正常系と異常系5ケースを実行する。
 ///
 /// verify_ring3_excursion が残したユーザーページを再利用し、無効3（supervisor in user
-/// range）のために U=0 ページを1枚張る。各ケースで SYS_CHECK_PTR を発行し、有効ポインタは
-/// 受理（戻り値 0）、無効ポインタは拒否（-EFAULT）されることを確かめる。この段は copy が
+/// range）のために U=0 ページを1枚マップする。各ケースで SYS_CHECK_PTR を発行し、有効ポインタは
+/// 受理（戻り値 0）、無効ポインタは拒否（-EFAULT）されることを確かめる。この段階は copy が
 /// 未実装なので、拒否は「踏み込む前に弾いた」ことそのものである。バイトを読む経路が無い。
 ///
-/// 異常系は多層防御のどのチェックが弾いても拒否は成立する。単独チェックの隔離破壊は
+/// 異常系は多層防御のどのチェックが弾いても拒否は成立する。単独チェックの隔離破壊テストは
 /// skip-us / skip-laststep / skip-all（verification-coverage）。
 fn verify_syscall_pointer<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
@@ -9788,7 +9788,7 @@ fn verify_syscall_pointer<const CAP: usize>(
         .expect("the user code virtual address is canonical");
 
     // ユーザーコードページが再利用できることを実状態で確認する。
-    // SAFETY: CR3 は自前テーブル。配下は恒等窓で読める。
+    // SAFETY: CR3 は自前テーブル。配下は恒等ウィンドウで読める。
     let mut table = unsafe { ActivePageTable::current(identity) };
     match table.translate(code_virt) {
         Ok(Some(t)) if t.page_size == PageSize::Size4KiB => {}
@@ -9801,7 +9801,7 @@ fn verify_syscall_pointer<const CAP: usize>(
         }
     }
 
-    // 無効3の setup: ユーザー範囲内に U=0（supervisor）のページを1枚張る。code/stack が
+    // 無効3の setup: ユーザー範囲内に U=0（supervisor）のページを1枚マップする。code/stack が
     // 載る PD[0]（オフセット 0〜2MiB）とは別の 2MiB 領域、PD[1]（オフセット 2MiB）の
     // 0x8000200000 に置く。map_4kib(user=false) なので中間 PD[1] も葉も U=0 になる。
     let sup = common::addr::VirtAddr::new(0x8000200000).expect("SUP_VIRT is canonical");
@@ -9817,7 +9817,7 @@ fn verify_syscall_pointer<const CAP: usize>(
         cacheable: true,
         shared: false,
     };
-    // SAFETY: sup はユーザーサブツリー内の未マップ VA。user=false で張るので Ring 3 から
+    // SAFETY: sup はユーザーサブツリー内の未マップ VA。user=false でマップするので Ring 3 から
     // 到達不可（walk_user_accessible が SupervisorOnly で弾く）。frame は未使用。
     if let Err(e) = unsafe { table.map_4kib(sup, sup_phys, sup_attributes, allocator) } {
         logger.error(format_args!(
@@ -9880,7 +9880,7 @@ fn verify_syscall_pointer<const CAP: usize>(
     }
 
     // 無効3の teardown: 葉を落とす（中間は残す）。
-    // SAFETY: sup は今張ったユーザーページ。以後アクセスしない。
+    // SAFETY: sup は今マップしたユーザーページ。以後アクセスしない。
     if let Err(e) = unsafe { table.unmap_4kib(sup) } {
         logger.error(format_args!(
             "syscall: failed to unmap the supervisor test page: {e:?}; halting"
@@ -9900,7 +9900,7 @@ fn verify_syscall_pointer<const CAP: usize>(
 /// カーネルが既知内容をユーザーバッファへ書き、SYS_CHECKSUM を発行する。バッファは
 /// ユーザースタックページの下部に置く（Ring 3 の RSP は頂点付近しか使わないので空き）。
 /// カーネルは検証 → copy_from_user → バイト総和を返す。ユーザーが store し、カーネルが
-/// 畳み後に読み戻して、発行側の既知内容から計算した期待総和と一致することを確かめる。
+/// 終了処理の後に読み戻して、発行側の既知内容から計算した期待総和と一致することを確かめる。
 /// 自己検算ではなく、発行側の既知値とカーネルの独立読みの突き合わせである。
 /// あわせて、カーネルポインタを渡すと copy 前の検証で -EFAULT が返る（読みに踏み込まない）
 /// ことを確かめる。
@@ -9916,7 +9916,7 @@ fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
     const OVERRUN_MARK: u8 = 0xEE;
 
     // カーネルが既知内容と余分バイトをユーザーバッファへ書く（マップ済み、SMAP 未有効）。
-    // SAFETY: buf_va は verify_ring3_excursion が張ったユーザースタックページ内で、
+    // SAFETY: buf_va は verify_ring3_excursion がマップしたユーザースタックページ内で、
     // N+1 はページに収まる。
     unsafe {
         for (i, b) in content.iter().enumerate() {
@@ -9987,7 +9987,7 @@ fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
 
 /// Ring 3 の 4 ベクタが中断され、カーネルが続くことを確かめる（S8-d-2）。
 ///
-/// #DE・#UD・#GP・#PF を 1 つずつ Ring 3 で起こし、それぞれ畳んでここへ戻る。
+/// #DE・#UD・#GP・#PF を 1 つずつ Ring 3 で起こし、それぞれ終了させてここへ戻る。
 /// **4 本を 4 つの判定行に分ける。** 1 つにまとめると、どのベクタで落ちたかが
 /// 判定行から読めない。
 ///
@@ -9995,9 +9995,9 @@ fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
 ///
 /// この 6 本はいずれも [`ring3::USER_CODE_VIRT`] を飛び先として [`ring3::enter`] へ
 /// 渡すので、遠征のたびにそのページの先頭へ別の命令列を書く。**ページが書き込み可能なのは、
-/// `verify_ring3_excursion` がコードページを `writable: true` で張っているから
+/// `verify_ring3_excursion` がコードページを `writable: true` でマップしているから
 /// である。** S9-a より前は `map_4kib` が葉を常に W=1 で作っており、選ぶ余地が
-/// 無かった。**6 本目（`#PF-write-ro`）だけは `writable: false` で張った別の
+/// 無かった。**6 本目（`#PF-write-ro`）だけは `writable: false` でマップした別の
 /// ページを的にする。**
 ///
 /// # カーネルが継続したことの観測
@@ -10007,17 +10007,17 @@ fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
 /// そのまま続く。
 ///
 /// `paging-test` ビルドでは載せない（[`verify_ring3_excursion`] と同じ理由で、
-/// ユーザーページがそちらで張られるため）。
+/// ユーザーページがそちらでマップされるため）。
 #[cfg(not(feature = "paging-test"))]
 fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
     use kernel::ring3;
 
     // ユーザーサブツリー内の未マップ VA。#PF の対象にする。
-    // verify_ring3_excursion が張ったのはコード（+0）とスタック（+1 MiB）だけなので、
+    // verify_ring3_excursion がマップしたのはコード（+0）とスタック（+1 MiB）だけなので、
     // その間のこの位置は空いている。
     const UNMAPPED_USER_VIRT: u64 = ring3::USER_CODE_VIRT + 0x2000;
 
-    // カーネル像の先頭。張られていて（present）、U=0 である。Ring 3 から読むと
+    // カーネルイメージの先頭。マップされていて（present）、U=0 である。Ring 3 から読むと
     // 権限違反の #PF になる（S8-e。S7 の到達条件 3 の観測対象）。
     const KERNEL_TARGET_VIRT: u64 = 0xffff_ffff_8010_0000;
 
@@ -10030,11 +10030,11 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
     // 5 本目（S8-e）は S7 の到達条件 3（ユーザーからカーネル領域へアクセス
     // できない）の観測である。S7 は Ring 3 へ一度も行かず、構造の監査（U=1 が
     // ユーザーサブツリーの外に無い）までで閉じた。**「Ring 3 から触って #PF に
-    // なる」はここが初めての直接の観測である。** 対象はカーネル像の先頭
-    // （張られていて U=0）。エラーコードの期待が 4 本目と違う——未マップは
+    // なる」はここが初めての直接の観測である。** 対象はカーネルイメージの先頭
+    // （マップされていて U=0）。エラーコードの期待が 4 本目と違う——未マップは
     // 0x4（不在・ユーザー・読み）、こちらは **0x5（存在・ユーザー・読み）**で、
     // **「穴に落ちた」ではなく「権限で拒まれた」ことをエラーコードが区別する。**
-    // 読み取り専用で張ったユーザーページ（S9-a）。Ring 3 が書くと #PF になる。
+    // 読み取り専用でマップしたユーザーページ（S9-a）。Ring 3 が書くと #PF になる。
     // エラーコードは 0x7（存在・ユーザー・**書き**）で、4 本目（0x4）とも
     // 5 本目（0x5）とも違う。**3 本の #PF が、不在・権限（読み）・権限（書き）を
     // エラーコードで撃ち分けている。**
@@ -10067,13 +10067,13 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
         // 存在・ユーザー・読み（権限違反）。
         ("#PF-kernel", 14, &[], 10, KERNEL_TARGET_VIRT, 0x5, false),
         // #PF-write-ro: movabs rax, <書き先>/ mov [rax],al / ud2。書き先は
-        // writable=false で張ったユーザーページ。エラーコード 0x7 =
+        // writable=false でマップしたユーザーページ。エラーコード 0x7 =
         // 存在・ユーザー・書き。
         //
-        // **末尾の ud2 が破壊の受け皿である。** W=0 が効いていれば書きが落ちる
+        // **末尾の ud2 が破壊テストの受け皿である。** W=0 が効いていれば書きが落ちる
         // （+10、ベクタ 14）。効いていなければ書きが通り、+12 の ud2 で
-        // ベクタ 6 が畳まれる。**どちらでも遠征は戻るので、判定行が
-        // 「ベクタが違う」と言える。** 受け皿を置かないと、書きが通った後に
+        // ベクタ 6 が終了処理される。**どちらでも遠征は戻るので、判定行が
+        // 「ベクタが違う」と示せる。** 受け皿を置かないと、書きが通った後に
         // ページ上のゼロを命令として実行し始め、落ち方が決まらない。
         ("#PF-write-ro", 14, &[], 10, READONLY_USER_VIRT, 0x7, true),
     ];
@@ -10084,7 +10084,7 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
     for (name, expected_vector, bytes, fault_offset, load_target, expected_error, is_store) in cases
     {
         // ユーザーコードページの先頭を、この遠征の命令列で埋める。
-        // SAFETY: verify_ring3_excursion が張った U=1 / W=1 のユーザーページ。
+        // SAFETY: verify_ring3_excursion がマップした U=1 / W=1 のユーザーページ。
         // 書くのは先頭の数バイトだけで、4KiB に収まる。SMAP は未有効。
         unsafe {
             if expected_vector == 14 {
@@ -10110,7 +10110,7 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
             }
         }
 
-        // SAFETY: ユーザーページは張り済みで、今書いた命令列が必ずフォルトする。
+        // SAFETY: ユーザーページはマップ済みで、今書いた命令列が必ずフォルトする。
         // main_rsp0_top はメインの上端。起動時の単一実行文脈から呼ぶ。
         unsafe {
             ring3::enter(
@@ -10273,14 +10273,14 @@ fn verify_split_and_unmap<const CAP: usize>(
         SCRATCH_BYTES / 1024
     ));
 
-    // 登録 direct map の高位窓を使う（B-0）。A-2 以降 direct_map() は高位窓
+    // 登録 direct map の高位ウィンドウを使う（B-0）。A-2 以降 direct_map() は高位ウィンドウ
     // （DIRECT_MAP_BASE + phys、PML4[256]、B でも残る）を返す。分割/アンマップの対象と
-    // 読み戻しを高位窓へ移し、照合を「phys == 高位窓の virt_to_phys(virt)」へ一般化した
-    // （恒等窓を base=0 の特殊ケースとして含む形）。B で恒等（PML4[0]）を外しても
+    // 読み戻しを高位ウィンドウへ移し、照合を「phys == 高位窓の virt_to_phys(virt)」へ一般化した
+    // （恒等ウィンドウを base=0 の特殊ケースとして含む形）。B で恒等（PML4[0]）を外しても
     // このテストは生き残る。
     let table_map = common::addr::direct_map();
-    // SAFETY: CR3 は自前のテーブルへ切り替え済みで、テーブルフレームは高位窓で読み書き
-    // できる（窓は全マップ範囲を覆い、テーブルフレームは空き RAM 上にある）。
+    // SAFETY: CR3 は自前のテーブルへ切り替え済みで、テーブルフレームは高位ウィンドウで読み書き
+    // できる（ウィンドウは全マップ範囲を覆い、テーブルフレームは空き RAM 上にある）。
     let mut table = unsafe { ActivePageTable::current(table_map) };
 
     // --- 分割前の状態を記録する ---
@@ -10337,7 +10337,7 @@ fn verify_split_and_unmap<const CAP: usize>(
                 if translation.page_size != PageSize::Size4KiB {
                     mismatches += 1;
                 } else if table_map.virt_to_phys(virt) != Some(translation.phys) {
-                    // 高位窓なので phys == 窓の virt_to_phys(virt)（恒等窓 base=0 を含む一般形）。
+                    // 高位ウィンドウなので phys == ウィンドウの virt_to_phys(virt)（恒等ウィンドウ base=0 を含む一般形）。
                     mismatches += 1;
                 } else {
                     // 属性が分割前と一致すること。PS は 4KiB では PAT の意味になるので、
@@ -12157,12 +12157,12 @@ fn run_paging_test<const CAP: usize>(
 
     const FRAMES_PER_2M: u64 = entry::PAGE_SIZE_2M / frame_allocator::FRAME_SIZE;
 
-    // 登録 direct map の高位窓を使う（B-0、verify_split_and_unmap と同じ）。この経路の
-    // スクラッチ VA は既に窓相対（test_map.phys_to_virt）なので、窓を高位へ替えるだけで
-    // 恒等前提が外れ、対象が高位窓の split/unmap になる。B で恒等（PML4[0]）を外しても
+    // 登録 direct map の高位ウィンドウを使う（B-0、verify_split_and_unmap と同じ）。この経路の
+    // スクラッチ VA は既にウィンドウ相対（test_map.phys_to_virt）なので、ウィンドウを高位へ替えるだけで
+    // 恒等前提が外れ、対象が高位ウィンドウの split/unmap になる。B で恒等（PML4[0]）を外しても
     // この経路は生き残る。
     let test_map = common::addr::direct_map();
-    // SAFETY: CR3 は自前のテーブルへ切り替え済み。テーブルフレームは高位窓で読める。
+    // SAFETY: CR3 は自前のテーブルへ切り替え済み。テーブルフレームは高位ウィンドウで読める。
     let mut table = unsafe { ActivePageTable::current(test_map) };
 
     // --- PCD 付きの 2MiB ページを分割する ---
@@ -12334,7 +12334,7 @@ fn report_mapping_granularity(
     let table = unsafe { ActivePageTable::current(common::addr::direct_map()) };
 
     // RIP と RSP は測定時点の実値を読む。リンカスクリプトのシンボルやスタックの静的配列の
-    // 番地から計算すると、「そう配置したはず」の値を見ることになり、実際に実行している
+    // アドレスから計算すると、「そう配置したはず」の値を見ることになり、実際に実行している
     // アドレスの確認にならない。
     let probes: [(&str, u64); 4] = [
         ("executing code (RIP)", cpu::read_rip()),
@@ -12394,12 +12394,12 @@ fn report_mapping_granularity(
     }
 }
 
-/// higher-half A-1: 恒等と direct map 窓の両方を持つ新テーブルを構築し、
+/// higher-half A-1: 恒等と direct map ウィンドウの両方を持つ新テーブルを構築し、
 /// CR3 を切り替える（ADR-0021 の Addendum）。
 ///
 /// # やること・やらないこと
 ///
-/// 恒等マッピングは外さない。direct map 窓（`DIRECT_MAP_BASE + phys`）を足すだけで、
+/// 恒等マッピングは外さない。direct map ウィンドウ（`DIRECT_MAP_BASE + phys`）を足すだけで、
 /// RSP・ヒープ・boot_info はすべて低位のまま動き続ける。恒等の除去はカーネルイメージの
 /// 高位化（B）と不可分なので、A では行わない。
 ///
@@ -12408,7 +12408,7 @@ fn report_mapping_granularity(
 /// 到達可能なままである。
 ///
 /// kernel イメージの高位マッピングは含めない。それは H-2 が別テーブルで扱う。ここが
-/// 張るのは恒等と direct map 窓の 2 つだけである。
+/// マップするのは恒等と direct map ウィンドウの 2 つだけである。
 ///
 /// # 検証の独立性
 ///
@@ -12419,8 +12419,8 @@ fn report_mapping_granularity(
 ///
 /// # 移設の余地
 ///
-/// B でこの窓構築を bootloader 側へ移す可能性があるので、kernel 専用のグローバル状態に
-/// 依存させず、引数（テーブルアクセス用の窓・アロケータ・マップ範囲）だけで完結させて
+/// B でこのウィンドウの構築を bootloader 側へ移す可能性があるので、kernel 専用のグローバル状態に
+/// 依存させず、引数（テーブルアクセス用のウィンドウ・アロケータ・マップ範囲）だけで完結させて
 /// ある。登録 `direct_map()` はテーブルフレームのアクセスにのみ引く。
 fn build_and_switch_direct_map(
     logger: &mut Logger<SerialPort>,
@@ -12430,7 +12430,7 @@ fn build_and_switch_direct_map(
     use common::addr::{DirectMap, VirtAddr};
     use kernel::paging::{active::ActivePageTable, verify};
 
-    // 構築中のテーブルフレームは、登録済みの窓（現在は恒等）を通して読み書きする。
+    // 構築中のテーブルフレームは、登録済みのウィンドウ（現在は恒等）を通して読み書きする。
     // M2-d のビルダーと同じ経路である。
     let access = common::addr::direct_map();
 
@@ -12459,15 +12459,15 @@ fn build_and_switch_direct_map(
         cpu::halt_forever();
     }
 
-    // --- direct map 窓（DIRECT_MAP_BASE + phys） ---
+    // --- direct map ウィンドウ（DIRECT_MAP_BASE + phys） ---
     //
     // cacheable は classify 由来をそのまま引き継ぐ（フレームバッファ・MMIO は PCD）。
     // `map_range` が仮想・物理の両方のアラインメントで 2MiB 昇格を判定する。G ビットと
     // NX（bit 63）は立てない（EFER.NXE 未有効。ADR-0021）。
     //
-    // 破壊 (paging-test-directmap-low-window): 窓を高位ではなく低位（phys、恒等と同じ）で
-    // 張る。恒等が既に phys->phys を張っているので起動は検証手前まで進むが、切り替え前の
-    // walker 検証が DIRECT_MAP_BASE + phys を辿って NotPresent で捕まえる。高位窓が
+    // 破壊テスト (paging-test-directmap-low-window): ウィンドウを高位ではなく低位（phys、恒等と同じ）で
+    // マップする。恒等が既に phys->phys をマップしているので起動は検証手前まで進むが、切り替え前の
+    // walker 検証が DIRECT_MAP_BASE + phys を辿って NotPresent で検出する。高位ウィンドウが
     // 存在すること自体を検査していることの証明である。
     let window_base = if cfg!(feature = "paging-test-directmap-low-window") {
         0
@@ -12494,10 +12494,10 @@ fn build_and_switch_direct_map(
         }
     }
 
-    // higher-half（B-2a）: この本流テーブルにも kernel イメージの高位マッピングを張る。
+    // higher-half（B-2a）: この本流テーブルにも kernel イメージの高位マッピングを作る。
     // base=0 では冪等（新規フレーム 0）。base=高位（B-2a-3）では再リンク後にこのテーブルへ
     // CR3 を切り替えても高位コードが見え続けるようにする。
-    // 破壊 (highhalf-no-kernel-high-in-live-table): A-1 の本流テーブルからも外す。
+    // 破壊テスト (highhalf-no-kernel-high-in-live-table): A-1 の本流テーブルからも外す。
     #[cfg(not(feature = "highhalf-no-kernel-high-in-live-table"))]
     map_kernel_high_half(&mut builder, logger);
 
@@ -12513,8 +12513,8 @@ fn build_and_switch_direct_map(
 
     // --- 切り替え前の独立検証（新テーブルはまだ稼働していない） ---
     //
-    // 新テーブルのフレームは、現在稼働中の恒等マッピングで読める。ここで壊れた窓
-    // （low-window）を捕まえ、壊れていれば切り替えずに停止する。
+    // 新テーブルのフレームは、現在稼働中の恒等マッピングで読める。ここで壊れたウィンドウ
+    // （low-window）を検出し、壊れていれば切り替えずに停止する。
     // SAFETY: 現在の CR3 は M2-d の恒等テーブルを指しており、その配下は恒等で読める
     // （`current` の契約）。
     let live = unsafe { ActivePageTable::current(access) };
@@ -12527,7 +12527,7 @@ fn build_and_switch_direct_map(
 
     for r in mapped.iter() {
         // 各範囲について、先頭・末尾直前・内部の 2MiB 境界を標本にする。
-        // 2MiB 境界は昇格した窓ページ（huge=true）を踏むための位置である。
+        // 2MiB 境界は昇格したウィンドウのページ（huge=true）を踏むための位置である。
         let last = r.end.checked_sub(1).unwrap_or(r.start);
         let mut probes = [Some(r.start), Some(last), None];
         if let Some(boundary) = r.start.align_up(kernel::paging::plan::PAGE_SIZE_2M) {
@@ -12562,8 +12562,8 @@ fn build_and_switch_direct_map(
                 }
             }
 
-            // 窓側: DIRECT_MAP_BASE + phys が phys へ解決すること。窓の base は常に高位で
-            // 辿る。構築が低位で張られていれば、ここで NotPresent になって捕まる。
+            // ウィンドウ側: DIRECT_MAP_BASE + phys が phys へ解決すること。ウィンドウの base は常に高位で
+            // 辿る。構築が低位でマップされていれば、ここで NotPresent になって検出される。
             if let Some(virt) =
                 VirtAddr::new(DirectMap::DIRECT_MAP_BASE.wrapping_add(probe.as_u64()))
             {
@@ -12656,7 +12656,7 @@ fn build_and_switch_direct_map(
     ));
     post_ok &= identity_alive;
 
-    // (d) 窓経由の読み取りが、恒等経由と同じ物理を指すこと。
+    // (d) ウィンドウ経由の読み取りが、恒等経由と同じ物理を指すこと。
     let Some(kernel_window_virt) =
         VirtAddr::new(DirectMap::DIRECT_MAP_BASE.wrapping_add(kernel_start))
     else {
@@ -12665,9 +12665,9 @@ fn build_and_switch_direct_map(
         ));
         cpu::halt_forever();
     };
-    // SAFETY: kernel_start は kernel image の範囲内で、その範囲は窓の構築対象である
+    // SAFETY: kernel_start は kernel image の範囲内で、その範囲はウィンドウの構築対象である
     // （map_range で全ページを張る）。切り替え前の窓プローブがその範囲の境界で解決を
-    // 確認している。当該アドレス自体をプローブしているのではなく、範囲を全張りした構築と
+    // 確認している。当該アドレス自体をプローブしているのではなく、範囲をすべてマップした構築と
     // 境界での独立検証に依る。読み取りのみ。
     let kernel_byte_via_window =
         unsafe { core::ptr::read_volatile(kernel_window_virt.as_ptr::<u8>()) };
@@ -12678,7 +12678,7 @@ fn build_and_switch_direct_map(
     ));
     post_ok &= window_read_ok;
 
-    // (e) 別名の直接証明。窓経由で書いて、恒等経由で読む。同じ物理が 2 つの仮想から
+    // (e) 別名の直接証明。ウィンドウ経由で書いて、恒等経由で読む。同じ物理が 2 つの仮想から
     // 見えることの直接の証明で、ADR-0021 の移行が機能する核心である。
     if let Some(scratch) = allocator.allocate_frame() {
         let scratch_phys = scratch.as_u64();
@@ -12691,8 +12691,8 @@ fn build_and_switch_direct_map(
             cpu::halt_forever();
         };
         const ALIAS_PATTERN: u64 = 0xA11A_5000_D1EC_7000;
-        // SAFETY: scratch は今確保した空きフレームで、恒等側にも窓側にもマップ済み
-        // （切り替え前検証で恒等を、窓の probe で高位を確認した範囲に属する空き RAM）。
+        // SAFETY: scratch は今確保した空きフレームで、恒等側にもウィンドウ側にもマップ済み
+        // （切り替え前検証で恒等を、ウィンドウの probe で高位を確認した範囲に属する空き RAM）。
         // 他の誰も参照していない。書いて読むだけで、このあと解放する。
         let (via_identity, via_window) = unsafe {
             core::ptr::write_volatile(scratch_window_virt.as_mut_ptr::<u64>(), ALIAS_PATTERN);
@@ -12730,16 +12730,16 @@ fn build_and_switch_direct_map(
     ));
 }
 
-/// higher-half A-2: 登録 DirectMap を恒等から高位窓へ差し替える。
+/// higher-half A-2: 登録 DirectMap を恒等から高位ウィンドウへ差し替える。
 ///
-/// A-1 で高位窓を張り CR3 も切り替えてあるので、差し替えた瞬間から
+/// A-1 で高位ウィンドウをマップし CR3 も切り替えてあるので、差し替えた瞬間から
 /// `direct_map().phys_to_virt` が高位を返し、その高位アドレスは有効である。恒等は残す
 /// （A では外さない）。`replace_direct_map` の # Safety が要求する「CR3 を新窓のテーブルへ
 /// 切り替えた後で呼ぶこと」を満たしている。
 ///
-/// 破壊 (paging-test-directmap-wrong-base): 差し替える窓の base をわざと 1 ページずらす。
-/// 直後の phys_to_virt 検証が期待値と食い違うのを捕まえ、以降の経路（フレームバッファ・
-/// コンソール）が誤った高位を触る前に停止する。A-1 の low-window（窓の構築を壊す）とは
+/// 破壊テスト (paging-test-directmap-wrong-base): 差し替えるウィンドウの base をわざと 1 ページずらす。
+/// 直後の phys_to_virt 検証が期待値と食い違うのを検出し、以降の経路（フレームバッファ・
+/// コンソール）が誤った高位を触る前に停止する。A-1 の low-window（ウィンドウの構築を壊す）とは
 /// 層が違い、こちらは登録値を壊す。
 fn activate_direct_map_window(logger: &mut Logger<SerialPort>) {
     use common::addr::{DirectMap, PhysAddr, VirtAddr};
@@ -12776,11 +12776,11 @@ fn activate_direct_map_window(logger: &mut Logger<SerialPort>) {
         cpu::halt_forever();
     };
 
-    // SAFETY: A-1 が高位窓を張り CR3 を新テーブルへ切り替え済みで、恒等も残っている。
+    // SAFETY: A-1 が高位ウィンドウをマップし CR3 を新テーブルへ切り替え済みで、恒等も残っている。
     // replace_direct_map の # Safety（新窓のテーブルへ切り替えた後で呼ぶこと）を満たす。
-    // この区間に他の実行文脈は無い。AP を起こすのは `run_timer_loop` の中
+    // この区間に他の実行文脈は無い。AP を起動するのは `run_timer_loop` の中
     // （`interrupts.rs`）で、ここより後である。**この根拠は起動順に依っている。
-    // AP を起こす位置がこの区間より前へ動くなら、書き直すこと。**
+    // AP を起動する位置がこの区間より前へ動くなら、書き直すこと。**
     if let Err(e) = unsafe { common::addr::replace_direct_map(high) } {
         logger.error(format_args!(
             "direct-map A-2: replace_direct_map failed: {e:?}; halting"
@@ -12790,7 +12790,7 @@ fn activate_direct_map_window(logger: &mut Logger<SerialPort>) {
 
     // 差し替え後、phys_to_virt が DIRECT_MAP_BASE + phys を返すことを数点で確かめる。
     // 期待値は常に正しい base（DIRECT_MAP_BASE）で計算するので、wrong-base の版はここで
-    // 食い違って捕まり、以降の高位アクセスへ進まない。
+    // 食い違って検出され、以降の高位アクセスへ進まない。
     let now = common::addr::direct_map();
     let mut mismatches = 0u32;
     for raw in [0x1000u64, 0x20_0000, 0x8000_0000] {
@@ -12821,10 +12821,10 @@ fn activate_direct_map_window(logger: &mut Logger<SerialPort>) {
     ));
 }
 
-/// 切り替え前のページ表の組み立てが失敗した理由を出す（`ADR-0068` の HW-a）。
+/// 切り替え前のページテーブルの組み立てが失敗した理由を出す（`ADR-0068` の HW-a）。
 ///
-/// **届く範囲の外のフレームだけは、専用の 1 行を出す**——**`xtask` の機械の変種の破壊
-/// （配りを高い番地からにする）が、狙いどおりにここで止まったことを判定に使う。**
+/// **届く範囲の外のフレームだけは、専用の 1 行を出す**——**`xtask` の機械の変種の破壊テスト
+/// （配りを高いアドレスからにする）が、狙いどおりにここで止まったことを判定に使う。**
 fn report_page_table_error_before_switch(
     logger: &mut Logger<SerialPort>,
     what: &str,
@@ -12867,7 +12867,7 @@ fn rehome_framebuffer_to_window(
 
     // 高位 base が実際にフレームバッファの物理を指すことを、稼働中テーブルを
     // 独立に辿って確かめる（arithmetic だけでなくマッピングの存在を見る）。
-    // SAFETY: CR3 は A-1 のテーブルを指し、その配下は高位窓でも読める（窓は
+    // SAFETY: CR3 は A-1 のテーブルを指し、その配下は高位ウィンドウでも読める（ウィンドウは
     // 全マップ範囲を覆い、テーブルフレームは空き RAM 上にある）。
     let live = unsafe { ActivePageTable::current(common::addr::direct_map()) };
     match live.translate(high_base) {
@@ -12894,13 +12894,13 @@ fn rehome_framebuffer_to_window(
         }
     };
 
-    // SAFETY: new_layout は with_base の再検証を通り、high_base..end が高位窓でマップ済み
+    // SAFETY: new_layout は with_base の再検証を通り、high_base..end が高位ウィンドウでマップ済み
     // であることを直前に translate で確認した。フレームバッファは排他所有で、ここで旧
     // ハンドル（恒等 base）を捨てて新ハンドルへ差し替える。同じ物理を指す仮想が恒等と
     // 高位の 2 つあるが、書き込み手段はこの 1 個に統一する。
     let mut high_fb = unsafe { Framebuffer::new(new_layout) };
 
-    // 高位 base 経由で書き、高位と恒等の両方から読み戻して、同じ物理が両窓から見える
+    // 高位 base 経由で書き、高位と恒等の両方から読み戻して、同じ物理が両方のウィンドウから見える
     // ことを直接確かめる（A-1 の別名証明のフレームバッファ版）。この画素は直後の
     // コンソール全面クリアで消える。
     const PROOF: Color = Color::rgb(0xC0, 0x40, 0x80);
@@ -12943,13 +12943,13 @@ fn rehome_framebuffer_to_window(
 /// # 2MiB ページに載っていたら、先に split する（S11-5 で配線した）
 ///
 /// `StackBlock` は長らく `0x100000`〜`0x200000` の 4KiB フリンジにあり、`kernel_guard` は
-/// 4KiB ページで張られていた。だから split せずに `unmap_4kib` だけで落とせた。
+/// 4KiB ページでマップされていた。だから split せずに `unmap_4kib` だけで落とせた。
 /// **M5-b では「使わない分岐を今書かない」ためにここで fail-fast させ、
 /// `deferred-decisions.md` の「ガードページの split 化」へ条件を登録してあった。**
 ///
 /// **S11-5 でその条件が発火した。** `spawn` のために遠征スタックを 16KiB から 64KiB へ
-/// 広げ、像の緩衝（32KiB）を足したところ、**`interrupt-test` の構成で像が `0x400000` を
-/// 越え、`0x200000..0x400000` が丸ごと 2MiB ページで張られるようになった**——
+/// 広げ、イメージの緩衝（32KiB）を足したところ、**`interrupt-test` の構成でイメージが `0x400000` を
+/// 越え、`0x200000..0x400000` が丸ごと 2MiB ページでマップされるようになった**——
 /// `StackBlock` はその中に居る。**登録しておいた条件が、まったく別の変更で現実になった**
 /// （M5-d の NOP そりで同じことが起きている。`docs/troubleshooting.md`）。
 ///
@@ -12960,7 +12960,7 @@ fn install_kernel_stack_guard_page(
     allocator: &mut kernel::frame_allocator::FrameAllocator,
 ) {
     let guard_virt = stack::kernel_guard_page().bottom;
-    // **張る手順は `kernel::stack::install_guard_page` が持つ**（S12 前の手当ての C で
+    // **設ける手順は `kernel::stack::install_guard_page` が持つ**（S12 前の手当ての C で
     // 寄せた）。**ワーカースタック側と同じ 1 本を通る**——あちらの doc に、
     // 2 つに分かれていたときに対処が片側にしか入らなかった経緯がある。
     //
@@ -12977,9 +12977,9 @@ fn install_kernel_stack_guard_page(
     }
 }
 
-/// kernel イメージを高位（`KERNEL_VIRT_BASE + phys`）へ張る（B-2a）。
+/// kernel イメージを高位（`KERNEL_VIRT_BASE + phys`）へマップする（B-2a）。
 ///
-/// M2-d・A-1 の両テーブルで共通に使う。base=0 では、ビルダーが既に恒等で張った 4KiB PT を
+/// M2-d・A-1 の両テーブルで共通に使う。base=0 では、ビルダーが既に恒等でマップした 4KiB PT を
 /// 同一物理・同一フラグで上書きするだけで冪等になる（新規フレーム 0）。イメージは
 /// `[0x100000, 0x200000)` の 4KiB 領域に収まるので、2MiB huge との衝突（`ensure_child` の
 /// `UnexpectedHugePageEntry`）は起きない。base=高位（B-2a-3）では `PML4[511]` 配下に実
@@ -12994,7 +12994,7 @@ fn map_kernel_high_half<const CAP: usize>(
         (image_end.as_u64() - image_start.as_u64()).next_multiple_of(frame_allocator::FRAME_SIZE);
     let high_start = kernel::kernel_virt_from_phys(image_start);
     // 高位マッピングが消費した中間テーブルのフレーム数を会計する。base=0 では恒等が
-    // 既に張った PT を上書きするだけなので 0 のはずで、それをログで確かめる。base=高位
+    // 既にマップした PT を上書きするだけなので 0 のはずで、それをログで確かめる。base=高位
     // （B-2a-3）では PML4[511] 配下の新規部分木の分だけ増える。
     let frames_before = builder.frames_used();
     if let Err(e) = builder.map_range(high_start, image_start, image_len, true) {
@@ -13027,7 +13027,7 @@ fn map_kernel_high_half<const CAP: usize>(
 /// 稼働中のテーブルには一切手を加えない。新しいテーブルを別に作る。構築の前後で稼働中
 /// テーブルの PML4 を読み戻し、変わっていないことを確かめる。
 ///
-/// direct map の高位窓はこの段階の対象外である。作るのは kernel イメージの高位マッピング
+/// direct map の高位ウィンドウはこの段階の対象外である。作るのは kernel イメージの高位マッピング
 /// （`KERNEL_VIRT_BASE + (phys - LMA)`）だけで、これは direct map とは別の対応である。
 /// ログでもそう明示する。
 fn build_and_verify_high_half(
@@ -13073,9 +13073,9 @@ fn build_and_verify_high_half(
         cpu::halt_forever();
     }
 
-    // --- kernel イメージの高位マッピングを張る ---
+    // --- kernel イメージの高位マッピングを作る ---
     //
-    // 対応は virt = phys + KERNEL_VIRT_BASE。direct map の窓とは別の対応である。
+    // 対応は virt = phys + KERNEL_VIRT_BASE。direct map のウィンドウとは別の対応である。
     let (image_start, image_end) = kernel_image_phys_range();
     let image_len = image_end.as_u64() - image_start.as_u64();
     let image_len = image_len.next_multiple_of(frame_allocator::FRAME_SIZE);
@@ -13202,7 +13202,7 @@ const fn entry_count() -> usize {
 ///
 /// **direct physical map 経由の変換とは別の関係である。** kernel イメージの
 /// 物理位置は「リンクアドレスとロードアドレスの差」で決まる。bootloader が
-/// ELF をどこへ置いたかで決まるものであって、direct map の窓とは無関係で
+/// ELF をどこへ置いたかで決まるものであって、direct map のウィンドウとは無関係で
 /// ある。その差を引くのは `kernel::kernel_phys_from_virt` で、値は `link.ld` の
 /// `KERNEL_VIRT_BASE` から生成される。
 /// 詳細は `docs/deferred-decisions.md` を参照。

@@ -4,7 +4,7 @@
 //!
 //! **「ユーザーが変えられて、カーネルが前提にしている CPU の状態」の棚卸しは、いまの形に依って
 //! いる**——CR0.AM・CR4.SMAP・CR4.FSGSBASE・CR4.PKE・CR4.OSXSAVE・EFER.SCE が 0 であること。
-//! **どれかを立てる変更をすると、棚卸しの結論が黙って偽になる**（通る理由が変わる族）。
+//! **どれかを立てる変更をすると、棚卸しの結論が黙って偽になる**（通る理由が変わる種類）。
 //! **ここで起動のたびに読み、立っていたら止める。** **値は起動ログの参照にも載る**
 //! ——**棚卸しに関わらないビット（SMEP・UMIP など）が変わっても、参照の突き合わせが落ちる。**
 //!
@@ -13,10 +13,10 @@
 //! **AP の CR0・CR4・EFER は、BSP とは別の経路（トランポリン）で作られる。** **INIT の直後の値から
 //! 始まり、トランポリンは PAE・LME・PG と PE しか立てない**——**実測で、AP は CD と NW が 1（キャッシュが
 //! 効かない形）で、WP と NE が 0 のまま走っていた**（`docs/troubleshooting.md`）。**棚卸しの結論は全 CPU に
-//! ついてなので、見張りも全 CPU に要る。**
+//! ついてなので、監視も全 CPU に要る。**
 //!
-//! **AP は起きた直後に BSP の値を写し**（[`adopt_bsp_state_on_this_ap`]）、**起動の終わりに自分の値を
-//! 読んで控える**（[`record_this_ap`]）。**BSP は、起きた AP の値が自分の値と一致することを確かめ、
+//! **AP は起動した直後に BSP の値をコピーし**（[`adopt_bsp_state_on_this_ap`]）、**起動の終わりに自分の値を
+//! 読んで控える**（[`record_this_ap`]）。**BSP は、起動した AP の値が自分の値と一致することを確かめ、
 //! 食い違えば止まる**（[`check_aps_match_bsp`]）。
 
 use core::fmt;
@@ -174,13 +174,13 @@ impl Scope {
 /// - **MP・EM・OSFXSR・OSXMMEXCPT は `fp::enable_on_this_cpu` が持つ**（`ADR-0058`）。
 /// - **PE・PG・PAE・LME・LMA は、長モードで走っている時点で立っている**（ブートローダとトランポリン）。
 /// - **「0 であるべき」の残りは、カーネルが立てないビットである**——**ファームウェアが立てて渡したら止まる。**
-/// - **AP は BSP を丸ごと写す**（[`adopt_bsp_state_on_this_ap`]）。
+/// - **AP は BSP を丸ごとコピーする**（[`adopt_bsp_state_on_this_ap`]）。
 ///
 /// # NXE を入れていない理由
 ///
-/// **カーネルのページ表は実行禁止のビット（XD。63 番）を使っていない**（`kernel/src/paging`）。
+/// **カーネルのページテーブルは実行禁止のビット（XD。63 番）を使っていない**（`kernel/src/paging`）。
 /// **NXE が 0 なら XD は予約のビットになる**（Intel SDM Vol.3A）が、**立てていないので落ちない。**
-/// **実行禁止の保護を入れる段で「1 であるべき」に移す**（`docs/deferred-decisions.md`）。
+/// **実行禁止の保護を入れる段階で「1 であるべき」に移す**（`docs/deferred-decisions.md`）。
 pub const REQUIRED_BITS: [(Register, u32, &str, bool, Scope, &str); 24] = [
     (
         Register::Cr0,
@@ -383,7 +383,7 @@ pub const REQUIRED_BITS: [(Register, u32, &str, bool, Scope, &str); 24] = [
         "fxsave at CPL 0 would skip XMM0-15, so the user FP state (ADR-0058) would not be saved",
     ),
     // TCE——「Page table management software must be written in a way that takes this behavior into
-    // account」（3.1.7）。**カーネルのページ表の扱いは、それを前提に書いていない。**
+    // account」（3.1.7）。**カーネルのページテーブルの扱いは、それを前提に書いていない。**
     (
         Register::Efer,
         15,
@@ -711,7 +711,7 @@ pub fn unclassified_set(
     })
 }
 
-/// その製造元で「分類していない」最初のビット（破壊 `cpu-state-sees-an-unclassified-bit` が立てる）。
+/// その製造元で「分類していない」最初のビット（破壊テスト `cpu-state-sees-an-unclassified-bit` が立てる）。
 pub fn first_unclassified(vendor: Vendor) -> Option<(Register, u32)> {
     REGISTERS.into_iter().find_map(|register| {
         (0..64u32)
@@ -770,8 +770,8 @@ pub unsafe fn establish_required_bits_on_bsp() {
     let before = read_cr0();
     let after = (before | CR0_WRITE_PROTECT | CR0_NUMERIC_ERROR)
         & !(CR0_CACHE_DISABLE | CR0_NOT_WRITE_THROUGH);
-    // 破壊 (2026-09-24, bsp-keeps-cd): **ファームウェアが CD を立てて渡し、カーネルが落とさない形**を
-    // 作る。**OVMF と VirtualBox の EFI は CD を落として渡すので、立てて作る。** **見張りが CR0.CD を
+    // 破壊テスト (2026-09-24, bsp-keeps-cd): **ファームウェアが CD を立てて渡し、カーネルが落とさない形**を
+    // 作る。**OVMF と VirtualBox の EFI は CD を落として渡すので、立てて作る。** **監視が CR0.CD を
     // 名指しして止まる。**
     #[cfg(feature = "bsp-keeps-cd-test")]
     let after = after | CR0_CACHE_DISABLE;
@@ -803,7 +803,7 @@ pub fn inventory_violations(
         .filter(move |(register, bit, _, _)| value_of(*register, values) & (1u64 << bit) != 0)
 }
 
-/// BSP の CR0・CR4・EFER（[`check_and_report`] が控える。**AP が写し、BSP が突き合わせる元**）。
+/// BSP の CR0・CR4・EFER（[`check_and_report`] が控える。**AP がコピーし、BSP が突き合わせる元**）。
 static BSP_STATE: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 /// BSP の値を控えたか。
 static BSP_RECORDED: AtomicBool = AtomicBool::new(false);
@@ -833,11 +833,11 @@ pub fn check_and_report(logger: &mut Logger<SerialPort>) {
     BSP_RECORDED.store(true, Ordering::SeqCst);
     let signature = read_vendor_signature();
     let vendor = Vendor::from_signature(&signature);
-    // 破壊 (2026-09-24, cpu-state-sees-sce): EFER.SCE が立っているものとして判定する。
+    // 破壊テスト (2026-09-24, cpu-state-sees-sce): EFER.SCE が立っているものとして判定する。
     // **MSR は書かない**——**`syscall` 命令が本当に入口になる形は作らない。**
     #[cfg(feature = "cpu-state-sees-sce-test")]
     let efer = efer | common::cpu::Efer::SYSCALL_ENABLE;
-    // 破壊 (2026-09-24, cpu-state-sees-an-unclassified-bit): **その製造元で「分類していない」最初のビット**が
+    // 破壊テスト (2026-09-24, cpu-state-sees-an-unclassified-bit): **その製造元で「分類していない」最初のビット**が
     // 立っているものとして判定する（レジスタは書かない）。**[WARN] が名前つきで出て、起動は止まらない。**
     // **QEMU の既定（AMD）では EFER.SVME である。**
     #[cfg(feature = "cpu-state-sees-an-unclassified-bit-test")]
@@ -849,12 +849,12 @@ pub fn check_and_report(logger: &mut Logger<SerialPort>) {
         }
         None => [cr0, cr4, efer],
     };
-    // 破壊 (2026-09-24, cpu-state-sees-ffxsr): EFER.FFXSR（14 番。AMD では「0 であるべき」）が立っている
+    // 破壊テスト (2026-09-24, cpu-state-sees-ffxsr): EFER.FFXSR（14 番。AMD では「0 であるべき」）が立っている
     // ものとして判定する（MSR は書かない。**QEMU の TCG は FFXSR を持たない**——実測）。
     #[cfg(feature = "cpu-state-sees-ffxsr-test")]
     let efer = efer | 1 << 14;
-    // 破壊 (2026-09-24, kernel-uses-gs): `gs:` を読む関数を像に残す（呼ばない）。
-    // **基底の項目（逆アセンブルで `fs:`・`gs:` を数える）が捕まえる。**
+    // 破壊テスト (2026-09-24, kernel-uses-gs): `gs:` を読む関数をイメージに残す（呼ばない）。
+    // **基本の検査の項目（逆アセンブルで `fs:`・`gs:` を数える）が検出する。**
     #[cfg(feature = "kernel-uses-gs-test")]
     core::hint::black_box(read_through_gs as fn() -> u64);
     let values = [cr0, cr4, efer];
@@ -914,9 +914,9 @@ pub fn check_and_report(logger: &mut Logger<SerialPort>) {
         logger.error(format_args!("cpu-state: halting"));
         common::cpu::halt_forever();
     }
-    // 破壊 (2026-09-24, mce-off-after-the-check): **判定の後で** BSP の CR4.MCE を落とす（AP は控えた値を
-    // 写すので 1 のまま。注入は CPU 0 へ行う）。
-    // **起動は進み、注入した機械チェックが #MC にならず shutdown になる**——**機械の変種の判定が捕まえる。**
+    // 破壊テスト (2026-09-24, mce-off-after-the-check): **判定の後で** BSP の CR4.MCE を落とす（AP は控えた値を
+    // コピーするので 1 のまま。注入は CPU 0 へ行う）。
+    // **起動は進み、注入した機械チェックが #MC にならず shutdown になる**——**機械の変種の判定が検出する。**
     #[cfg(feature = "mce-off-after-the-check-test")]
     // SAFETY: MCE だけを落とす。起動の途中の BSP で、割り込みは禁止のままである。
     unsafe {
@@ -924,9 +924,9 @@ pub fn check_and_report(logger: &mut Logger<SerialPort>) {
     }
 }
 
-/// AP が BSP の CR0・CR4・EFER を写す（2026-09-24）。**AP の Rust の入口の最初で 1 回だけ呼ぶ。**
+/// AP が BSP の CR0・CR4・EFER をコピーする（2026-09-24）。**AP の Rust の入口の最初で 1 回だけ呼ぶ。**
 ///
-/// **写す順は CR4 → EFER → CR0 である**——**CR0 で CD と NW を落とし（キャッシュが効く）、WP を立てる**
+/// **コピーする順は CR4 → EFER → CR0 である**——**CR0 で CD と NW を落とし（キャッシュが効く）、WP を立てる**
 /// のを最後にする。**BSP の値が控えられていなければ何もしない**（突き合わせが、控えが無いことで止まる）。
 ///
 /// # Safety
@@ -934,7 +934,7 @@ pub fn check_and_report(logger: &mut Logger<SerialPort>) {
 /// **AP の起動の途中で、長モードに居て、割り込みが禁止されていること。** **BSP の値は同じカーネルの
 /// 同じ長モードの値である**（PG・PE・PAE・LME は BSP でも立っている）。
 pub unsafe fn adopt_bsp_state_on_this_ap() {
-    // 破壊 (2026-09-24, ap-keeps-its-own-control-registers): 写さない。**直す前の形である**——
+    // 破壊テスト (2026-09-24, ap-keeps-its-own-control-registers): コピーしない。**直す前の形である**——
     // **AP は INIT の直後の CR0（CD・NW が 1、WP・NE が 0）のまま走り、突き合わせで止まる。**
     if cfg!(feature = "ap-keeps-its-own-control-registers-test") {
         return;
@@ -1098,7 +1098,7 @@ impl fmt::Display for DifferingBits {
     }
 }
 
-/// **起きた AP の CR0・CR4・EFER が、BSP の値と一致することを確かめる**（2026-09-24）。
+/// **起動した AP の CR0・CR4・EFER が、BSP の値と一致することを確かめる**（2026-09-24）。
 /// **食い違えば、違うビットの名前を出して止まる。** **AP の控えは上限つきで待つ。**
 pub fn check_aps_match_bsp(logger: &mut Logger<SerialPort>, started: usize) {
     let bsp = [0, 1, 2].map(|index| BSP_STATE[index].load(Ordering::SeqCst));
@@ -1156,11 +1156,11 @@ pub fn check_aps_match_bsp(logger: &mut Logger<SerialPort>, started: usize) {
     ));
 }
 
-/// 破壊 `kernel-uses-gs-test` の本体。**呼ばない**（像に残すだけ）。
+/// 破壊テスト `kernel-uses-gs-test` の本体。**呼ばない**（イメージに残すだけ）。
 #[cfg(feature = "kernel-uses-gs-test")]
 fn read_through_gs() -> u64 {
     let value: u64;
-    // SAFETY: 呼ばれない（`check_and_report` が番地を取るだけ）。呼ばれた場合も GS の基底 + 0 を
+    // SAFETY: 呼ばれない（`check_and_report` がアドレスを取るだけ）。呼ばれた場合も GS の基底 + 0 を
     // 読むだけで、書かない。
     unsafe {
         core::arch::asm!("mov {}, gs:[0]", out(reg) value, options(nostack, readonly, preserves_flags));
@@ -1400,7 +1400,7 @@ mod tests {
         );
     }
 
-    /// 破壊 `cpu-state-sees-an-unclassified-bit` が立てるビット。**Intel の表には「分類していない」が無い。**
+    /// 破壊テスト `cpu-state-sees-an-unclassified-bit` が立てるビット。**Intel の表には「分類していない」が無い。**
     #[test]
     fn the_first_unclassified_bit_is_what_the_sabotage_sets() {
         assert_eq!(first_unclassified(Vendor::Amd), Some((Register::Efer, 12)));

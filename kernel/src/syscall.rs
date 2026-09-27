@@ -3,13 +3,13 @@
 //! ADR-0020 のとおり、レジスタ規約は Linux x86-64 に合わせる。番号は RAX、
 //! 戻り値は RAX、第 1〜6 引数は RDI/RSI/RDX/R10/R8/R9、失敗は `-errno`
 //! （`-1..-4095`）。**第 4 引数は RCX ではなく R10** である。`int 0x80` の間は
-//! RCX/R11 は実際には保存されるが、`syscall`/`sysret` へ移る段でこれらは命令が
+//! RCX/R11 は実際には保存されるが、`syscall`/`sysret` へ移る段階でこれらは命令が
 //! 破壊するため、**保存に依存しない**（ユーザー側ラッパはクロバー扱いにする）。
 //!
 //! # 入口の機構
 //!
 //! ベクタ 0x80 の IDT ゲートを DPL=3 の割り込みゲートにし、[`crate::idt`] の
-//! `zaytos_syscall_stub` へ向ける。スタブは IRQ スタイルの復元経路を写した
+//! `zaytos_syscall_stub` へ向ける。スタブは IRQ スタイルの復元経路をコピーした
 //! `zaytos_syscall_common` へ jmp し、GPR 15 本を退避して [`syscall_entry`] を
 //! 呼ぶ。Ring 3 からの `int 0x80` は特権変化（3→0）なので、CPU が TSS.RSP0 の
 //! スタックへ自動で切り替える（M5-c/d で更新している RSP0 がここで効く）。
@@ -23,9 +23,9 @@
 //! ディスパッチャは検証用の probe システムコール 1 つだけを持つ（M5-f-1-2）。
 //! probe は 6 引数と番号を静的領域へ記録し、既知の戻り値 [`PROBE_RETURN`] を返す。
 //! これにより「6 引数が規約どおり届き、戻り値が RAX で Ring 3 へ返る」ことを実証
-//! する。ユーザーポインタを取るシステムコールは後段（M5-f-2）で足す。
+//! する。ユーザーポインタを取るシステムコールは後の段階（M5-f-2）で足す。
 //!
-//! # 破壊 feature（M5-f-1-2）
+//! # 破壊テストの feature（M5-f-1-2）
 //!
 //! - `syscall-test-arg4-rcx`: 第 4 引数を `context.r10` でなく `context.rcx` から
 //!   読む。R10 規約の実証（記録した第 4 引数が期待値と食い違う）。
@@ -64,7 +64,7 @@ pub const ENOTDIR: i64 = 20;
 
 /// `-EISDIR`（ディレクトリに対して許されない操作）の errno（S10-b）。
 ///
-/// **この段では返さない。** `read` がディレクトリを拒む段（4 本目）で使う。
+/// **この段階では返さない。** `read` がディレクトリを拒む段階（4 本目）で使う。
 /// **先に置いてあるのは、`Ext2Error` の対応表を 1 度で書き切るためである。**
 pub const EISDIR: i64 = 21;
 
@@ -73,7 +73,7 @@ pub const EMFILE: i64 = 24;
 
 /// `-EBUSY`（装置が使用中）の errno（P-c-1）。
 ///
-/// **`close` が像を書き戻そうとして、装置の占有が取れなかったときに返す。**
+/// **`close` がイメージを書き戻そうとして、装置の占有が取れなかったときに返す。**
 /// **止めるより断るほうが観測できる。**
 pub const EBUSY: i64 = 16;
 
@@ -88,7 +88,7 @@ pub const ENAMETOOLONG: i64 = 36;
 
 /// `-EIO`（入出力エラー）の errno（S10-b）。
 ///
-/// **像そのものが読めない形をここへ落とす。** 呼び出し側の引数の問題ではないので、
+/// **イメージそのものが読めない形をここへ落とす。** 呼び出し側の引数の問題ではないので、
 /// **`EINVAL` でも `ENOENT` でもない。**
 pub const EIO: i64 = 5;
 
@@ -101,8 +101,8 @@ pub const EAGAIN: i64 = 11;
 /// 32 である。**`SIGPIPE` は送らない**——**シグナルを持たない**（`crate::pipe` の doc）。
 pub const EPIPE: i64 = 32;
 
-/// `-ECHILD`（その手形の子は居ない）の errno（`ADR-0063` の (b3)）。値は Linux と同じ 10 である。
-/// **終わった後の二重待ちも同じ値である**（手形の世代が合わない。`crate::task::ring3_task_handle`）。
+/// `-ECHILD`（そのハンドルの子は居ない）の errno（`ADR-0063` の (b3)）。値は Linux と同じ 10 である。
+/// **終わった後の二重待ちも同じ値である**（ハンドルの世代が合わない。`crate::task::ring3_task_handle`）。
 pub const ECHILD: i64 = 10;
 
 /// **端末に対する要求ではない**（Linux の `ENOTTY` = 25。実測。
@@ -115,7 +115,7 @@ pub const ENOTTY: i64 = 25;
 /// **場所が無い**（Linux の `ENOSPC` = 28。実測。
 /// `/usr/include/asm-generic/errno-base.h`）。
 ///
-/// **e-5 で入った**——**`O_CREAT` は像の空きを使う。** 空き inode が尽きた、
+/// **e-5 で入った**——**`O_CREAT` はイメージの空きを使う。** 空き inode が尽きた、
 /// 空きブロックが尽きた、ディレクトリに隙間が無い、のどれでもこれである。
 pub const ENOSPC: i64 = 28;
 
@@ -132,7 +132,7 @@ pub const ENOTEMPTY: i64 = 39;
 /// **その名前は既に在る**（Linux の `EEXIST` = 17。実測）。
 ///
 /// **e-5 で入った。** **`O_CREAT` の経路は「無いとき」しか通らない**ので、
-/// **ここへ来るのは像の側が食い違っているときだけである**（引けなかったのに
+/// **ここへ来るのはイメージの側が食い違っているときだけである**（引けなかったのに
 /// 作ろうとしたら在った）。
 pub const EEXIST: i64 = 17;
 
@@ -153,8 +153,8 @@ pub const E2BIG: i64 = 7;
 
 /// `-ENOMEM`（入れる場所が無い）の errno（S11-5）。
 ///
-/// **像が [`MAX_EXECUTABLE_SIZE`] に収まらないとき、およびフレームが尽きたときに
-/// 返す。** **`EINVAL` ではない**——像は正しく、こちらの器が足りていない。
+/// **イメージが [`MAX_EXECUTABLE_SIZE`] に収まらないとき、およびフレームが尽きたときに
+/// 返す。** **`EINVAL` ではない**——イメージは正しく、こちらの器が足りていない。
 pub const ENOMEM: i64 = 12;
 
 /// ZaytOS 独自のシステムコール番号の基点（S9-a）。
@@ -180,7 +180,7 @@ pub const ZAYTOS_PRIVATE_BASE: u64 = 0x1000;
 
 /// ユーザーポインタを取る検証用システムコールの番号（M5-f-2-1）。
 /// 第 1 引数(RDI)=buf、第 2 引数(RSI)=len。範囲が Ring 3 からアクセス可能なら 0、
-/// 不可なら -EFAULT を返す（**この段はバイトを読まない**。copy は M5-f-2-2）。
+/// 不可なら -EFAULT を返す（**この段階はバイトを読まない**。copy は M5-f-2-2）。
 pub const SYS_CHECK_PTR: u64 = ZAYTOS_PRIVATE_BASE + 1;
 
 /// ユーザーバッファのバイト総和（チェックサム）を返すシステムコールの番号
@@ -201,13 +201,13 @@ pub const CHECKSUM_BUF_LEN: usize = 64;
 /// # 理由が変わった。値は変わっていない
 ///
 /// **S9-b-1 でこの値を置いた理由は、起動順の偶然だった。** ポインタ検証の battery は
-/// 恒等除去より前に走るので、その時点の低位 VA にはカーネルの恒等写像が居る。
-/// 下限を 0 にすると `0x100000`（カーネル像）が範囲の検査を通ってしまい、
-/// **U=1 の判定だけが拒否の根拠になる**（`validate-skip-us` の破壊で受理された）。
+/// 恒等除去より前に走るので、その時点の低位 VA にはカーネルの恒等マッピングが居る。
+/// 下限を 0 にすると `0x100000`（カーネルイメージ）が範囲の検査を通ってしまい、
+/// **U=1 の判定だけが拒否の根拠になる**（`validate-skip-us` の破壊テストで受理された）。
 ///
-/// **S9-b-3-2b で窓を 1 つに畳んだので、その理由は当たらなくなった。** 起動時の
-/// battery が使う窓は本番の空間のユーザーサブツリー（`PML4[1]` = 512 GiB 以上）で、
-/// カーネル像はそもそも窓の外である。
+/// **S9-b-3-2b でウィンドウを 1 つにまとめたので、その理由は当たらなくなった。** 起動時の
+/// battery が使うウィンドウは本番の空間のユーザーサブツリー（`PML4[1]` = 512 GiB 以上）で、
+/// カーネルイメージはそもそもウィンドウの外である。
 ///
 /// **それでも 0 にしない。** null 近傍を**範囲の側でも**拒む層を残す。Linux の
 /// `mmap_min_addr` が低位を空けておくのと同じ向きで、**層を 1 枚減らすには
@@ -219,7 +219,7 @@ pub const USER_MIN_ADDR: u64 = 0x40_0000;
 /// PML4 の添字 1 つ分が覆う仮想範囲の大きさ（512 GiB）。
 const PML4_ENTRY_SPAN: u64 = 1 << 39;
 
-/// ユーザーサブツリーの添字から、ポインタ検証の窓を導く（S9-b-3-2b）。
+/// ユーザーサブツリーの添字から、ポインタ検証のウィンドウを導く（S9-b-3-2b）。
 ///
 /// 返すのは `[start, end)` で、`start` は [`USER_MIN_ADDR`] で床を打ってある。
 ///
@@ -229,10 +229,10 @@ const PML4_ENTRY_SPAN: u64 = 1 << 39;
 /// プログラム用）。どちらか一方に収まっていれば受理する形で、**またぐ範囲を
 /// 受理しない条件を明示的に書く必要があった。**
 ///
-/// **1 つに畳むと、その条件は消える。** またぐ範囲が受理されないのは、
+/// **1 つにまとめると、その条件は消える。** またぐ範囲が受理されないのは、
 /// **窓が 1 つしかないからである**（書かれた条件ではなく、構造の帰結になった）。
 ///
-/// # 窓が有限であることが、走査の停止性を与えている
+/// # ウィンドウが有限であることが、走査の停止性を与えている
 ///
 /// 「下位半分すべて」へ広げてはならない。広げると長さの上限が消え、
 /// `over-long` のような呼び出しでページ走査が何百万回もまわる。
@@ -265,7 +265,7 @@ pub const WRITE_BUF_LEN: usize = 64;
 /// あちらは「呼んだスレッドが属するスレッドグループ全体を終わらせる」呼び出しで、
 /// **ZaytOS にはスレッドの概念が無い。** 番号を用意しても、`exit` と区別できる
 /// 振る舞いが書けない。**同じ振る舞いの入口を 2 つ置くと、どちらが正なのかが
-/// 呼び出し側にも実装側にも決まらない。** スレッドを作る段で足す。
+/// 呼び出し側にも実装側にも決まらない。** スレッドを作る段階で足す。
 ///
 /// # 戻らない
 ///
@@ -394,7 +394,7 @@ pub const SYS_NANOSLEEP: u64 = 35;
 /// **ZaytOS には作業ディレクトリが無い**ので、`dirfd` に渡すものが無い。
 /// **`AT_FDCWD` を受けるだけの引数を置いても、区別できる振る舞いが書けない**
 /// （[`SYS_EXIT`] が `exit_group` を採らない理由と同じ形である）。
-/// **作業ディレクトリを持つ段で足す。**
+/// **作業ディレクトリを持つ段階で足す。**
 pub const SYS_OPEN: u64 = 2;
 
 /// `close(fd)`（S10-b）。**Linux の番号 3 をそのまま使う。**
@@ -409,7 +409,7 @@ pub const SYS_CLOSE: u64 = 3;
 /// **何を入れ、何を入れないかを決めてある**——**受けるのは端末の問い合わせだけ**
 /// で、**設定の変更（`termios` 相当・`TIOCSWINSZ`）は別の判断とする。**
 /// **知らない要求は `-ENOTTY` で断る**ので、**入口が黙って広がることはない。**
-/// **決定の記録は `docs/deferred-decisions.md` にある**（解禁の契機は
+/// **決定の記録は `docs/deferred-decisions.md` にある**（解禁のきっかけは
 /// 「設定の変更を要求する利用者が来たとき」。**C の移植で必ず来る**）。
 pub const SYS_IOCTL: u64 = 16;
 
@@ -428,7 +428,7 @@ pub const TIOCGWINSZ: u64 = 0x5413;
 ///
 /// **新しい syscall 番号は作らない**——**`ADR-0020`は番号を Linux から
 /// 採ると決めており、相当する番号が無い。** **`ioctl`は端末固有の操作の
-/// ための口である。**
+/// ための入口である。**
 pub const TIOCZTAKE: u64 = 0x5A01;
 
 /// `TIOCZLOG`——1 行をログ（シリアル）へ出す要求（ADR-0046）。
@@ -471,7 +471,7 @@ pub const O_CREAT: u64 = 0o100;
 /// 入口を置いていなかった**（`docs/foundation-inventory.md` が
 /// 「部品は在るが入口が無い」として挙げていた 2 つのうちの 1 つ）。
 ///
-/// **利用者は `/bin/tail` である**（DIR-1b で同じ段に作った）。
+/// **利用者は `/bin/tail` である**（DIR-1b で同じ段階に作った）。
 pub const SYS_LSEEK: u64 = 8;
 
 /// `mkdir` の番号（Linux と同じ。DIR-1c）。**利用者は `/bin/mkdir` である。**
@@ -519,9 +519,9 @@ pub const O_WRITE_INTENT: u64 = 0o100 | 0o1000 | 0o2000;
 ///
 /// # Linux の `PATH_MAX`（4096）より小さい
 ///
-/// **像の中で最も長いパスは `/data/indirect-first` の 20 バイトである。**
+/// **イメージの中で最も長いパスは `/data/indirect-first` の 20 バイトである。**
 /// 256 はその 10 倍を超える。**4096 にしない理由は置き場所である**——
-/// パスは `dispatch` の中でカーネルスタックへ写すので、
+/// パスは `dispatch` の中でカーネルスタックへコピーするので、
 /// **4096 バイトの単一のローカル配列は `deferred-decisions.md` の
 /// 「大きなスタック配列とガード幅」の解禁条件に当たる。**
 ///
@@ -534,7 +534,7 @@ pub const O_WRITE_INTENT: u64 = 0o100 | 0o1000 | 0o2000;
 /// ならなかった**）。
 pub const PATH_MAX: usize = 256;
 
-/// `spawn(path)`——像を読み、子プロセスを起こし、**終わるまで待つ**（S11-5。ZaytOS 独自）。
+/// `spawn(path)`——イメージを読み、子プロセスを起動し、**終わるまで待つ**（S11-5。ZaytOS 独自）。
 ///
 /// # なぜ `fork`（57）と `execve`（59）の番号を採らないか
 ///
@@ -542,7 +542,7 @@ pub const PATH_MAX: usize = 256;
 /// **Linux の意味を持たない振る舞いに Linux の名前が付く。**
 ///
 /// - **`fork` は呼び出し側を複製する。** ここが作るのは複製ではなく、
-///   **別の像から起こした別のプロセスである。** 写像も `argv` も引き継がない
+///   **別のイメージから起動した別のプロセスである。** マッピングも `argv` も引き継がない
 /// - **`execve` は呼び出し側を置き換える。** ここは置き換えない——
 ///   **親はそのまま在り、子が終わるのを待って続きを実行する**
 /// - **どちらも「戻る」の意味が違う。** `fork` は 2 回戻り、`execve` は成功したら
@@ -559,14 +559,14 @@ pub const PATH_MAX: usize = 256;
 /// # 戻り値
 ///
 /// 子が `exit(status)` で終わったなら `status & 0xFF`。
-/// 畳まれて終わったなら [`SPAWN_FOLDED_FLAG`] とベクタ。
-/// 起こせなかったなら `-errno`。**`docs/coding-standards.md` の「`-errno` の範囲と
+/// 終了させられたなら [`SPAWN_FOLDED_FLAG`] とベクタ。
+/// 起動できなかったなら `-errno`。**`docs/coding-standards.md` の「`-errno` の範囲と
 /// 紛れない値にする」に従い、正の側は 0x1FFF を越えない。**
 pub const SYS_SPAWN: u64 = ZAYTOS_PRIVATE_BASE + 4;
 
 /// [`SYS_SPAWN`] の戻り値のうち「子は終了ではなく畳まれて終わった」を表すビット。
 ///
-/// **下位 8 ビットは終了状態なので、その上に置く。** 畳まれた場合は
+/// **下位 8 ビットは終了状態なので、その上に置く。** 終了させられた場合は
 /// `SPAWN_FOLDED_FLAG | (vector << 9)` を返す。
 ///
 /// # Linux の `wait` の符号化には合わせない
@@ -588,13 +588,13 @@ pub const SPAWN_FOLDED_FLAG: u64 = 0x100;
 /// **`spawn` は Linux に対応するものが無い**（[`SPAWN_FOLDED_FLAG`] の doc）。
 /// **加えて、まだシグナルが無い**——番号を持たないものに `128 + signo` の形を
 /// 与えると、**「`SIGINT` が配送された」と読める値を、配送していないのに返す。**
-/// **シグナルを実装する段（(4)）で、そのとき改めて決めること。**
+/// **シグナルを実装する段階（(4)）で、そのとき改めて決めること。**
 pub const SPAWN_INTERRUPTED_FLAG: u64 = 0x200;
 
-/// 起こしっぱなしで子を起こす（`ADR-0063` の (b3)）。**私物である**（[`SYS_SPAWN`] と同じ判断
-/// ——Linux に同じ意味の口が無い。`posix_spawn` はライブラリの関数で、システムコールではない）。
+/// 子を切り離して起動する（`ADR-0063` の (b3)）。**私物である**（[`SYS_SPAWN`] と同じ判断
+/// ——Linux に同じ意味の入口が無い。`posix_spawn` はライブラリの関数で、システムコールではない）。
 ///
-/// 引数は `path` / `argv` / `envp` / `flags`（[`DETACHED_STDOUT_TO_PIPE`]）。**戻り値は手形**
+/// 引数は `path` / `argv` / `envp` / `flags`（[`DETACHED_STDOUT_TO_PIPE`]）。**戻り値はハンドル**
 /// （`crate::task::ring3_task_handle`。(b2) の形）**か `-errno`。**
 ///
 /// # 子が Ring 3 へ入るか終わるまで戻らない
@@ -602,12 +602,12 @@ pub const SPAWN_INTERRUPTED_FLAG: u64 = 0x200;
 /// **フレームアロケータの貸し出しは大域に 1 つである**（`docs/wayland-inventory.md` の #4）。
 /// **戻ってすぐシェルが右を `spawn` すると、左の読み込みと重なって `AllocatorUnavailable` に
 /// なる。** **`concurrent-test` が「1 本を Ring 3 へ入れてから次を起こす」で避けたのと同じ順序を、
-/// 口の中で守る。** **待ちは `Wait` を使わず、譲るの繰り返しである**——**`Wait::ChildStarted` を
+/// 入口の中で守る。** **待ちは `Wait` を使わず、譲るの繰り返しである**——**`Wait::ChildStarted` を
 /// 作れば起こす側も作れる（子が入った時点で起こす）が、待つ長さが読み込み 1 回ぶん
-/// （ティックの桁）なので足さない。** **待ったティック数は計器に出す**
+/// （ティックの桁）なので足さない。** **待ったティック数は計測に出す**
 /// （[`detached_entry_wait_ticks_max`]）。**上限は置かない**——**読み込みは必ず成功か失敗で終わる。**
 ///
-/// **見つからなければ同期で `-ENOENT` を返す**（起こす前に探す。`crate::userland::probe_program`）
+/// **見つからなければ同期で `-ENOENT` を返す**（起動する前に探す。`crate::userland::probe_program`）
 /// ——**シェルの `PATH` の輪が次の要素へ進める。**
 pub const SYS_SPAWN_DETACHED: u64 = ZAYTOS_PRIVATE_BASE + 5;
 
@@ -615,17 +615,17 @@ pub const SYS_SPAWN_DETACHED: u64 = ZAYTOS_PRIVATE_BASE + 5;
 /// （`crate::pipe` の doc の「読み手の予約」）。
 pub const DETACHED_STDOUT_TO_PIPE: u64 = 1;
 
-/// 予約したパイプの読み端を fd 0 にして、入れ子で起こす（`ADR-0063` の (b3)）。**私物。**
+/// 予約したパイプの読み端を fd 0 にして、入れ子で起動する（`ADR-0063` の (b3)）。**私物。**
 ///
 /// **[`SYS_SPAWN`] と同じ形で戻る**（終わり方のビット）。**予約が無ければ `-EINVAL`。**
 /// **[`SYS_SPAWN`] に `flags` を足さない理由**——**既存の呼び手は `r10` を置かないので、
 /// 4 つ目の引数を見る形にすると、置いていない値を読む。**
 pub const SYS_SPAWN_WITH_PIPED_STDIN: u64 = ZAYTOS_PRIVATE_BASE + 6;
 
-/// 起こしっぱなしの子を待って回収する（`ADR-0063` の (b3)）。**私物。**
+/// 切り離して起動した子を待って回収する（`ADR-0063` の (b3)）。**私物。**
 ///
-/// **引数は手形。** **戻り値は終わり方のビット**（[`SYS_SPAWN`] と同じ）**か `-ECHILD`**
-/// （手形が合わない・終わった後の二重待ち）。**`wait4` を採らない**——**形が合わない**
+/// **引数はハンドル。** **戻り値は終わり方のビット**（[`SYS_SPAWN`] と同じ）**か `-ECHILD`**
+/// （ハンドルが合わない・終わった後の二重待ち）。**`wait4` を採らない**——**形が合わない**
 /// （`docs/architecture.md` の「合わせるのは合わせられる形について」）。
 ///
 /// **使われなかった読み手の予約は、ここで消す**——**右が見つからなかったとき、左が満杯で
@@ -642,7 +642,7 @@ pub const SYS_WAIT_CHILD: u64 = ZAYTOS_PRIVATE_BASE + 7;
 /// 「入力 fd の前景の関所」）。**読みは `read` が `struct input_event` を返す。**
 pub const SYS_OPEN_INPUT: u64 = ZAYTOS_PRIVATE_BASE + 8;
 
-/// 画面を開く口の番号（`ADR-0066` の Y-c）。**開くと図形モードへ入る。**
+/// 画面を開く入口の番号（`ADR-0066` の Y-c）。**開くと図形モードへ入る。**
 ///
 /// **Linux に対応する syscall が無い**——**あちらは `/dev/fb0`（fbdev）か `/dev/dri/card0`（DRM）を
 /// `open` する**が、ZaytOS に装置のファイルシステムは無い。**番号は私物にする**（[`SYS_OPEN_INPUT`] と
@@ -657,10 +657,10 @@ pub const SYS_OPEN_SCREEN: u64 = ZAYTOS_PRIVATE_BASE + 9;
 pub const FBIOGET_VSCREENINFO: u64 = 0x4600;
 /// `FBIOGET_FSCREENINFO`（Linux の fbdev）。**`struct fb_fix_screeninfo` を返す。**
 pub const FBIOGET_FSCREENINFO: u64 = 0x4602;
-/// 画面の矩形を写す要求（ZaytOS 独自。`ADR-0066` の Y-c）。**引数は `struct drm_clip_rect`。**
+/// 画面の矩形をコピーする要求（ZaytOS 独自。`ADR-0066` の Y-c）。**引数は `struct drm_clip_rect`。**
 ///
-/// **fbdev に対応するものが無い**——**fbdev は実物のフレームバッファを張るので、写す必要が無い。**
-/// **ZaytOS は裏バッファを張る**（Q1。MMIO を Ring 3 へ出さない）**ので、写す口が要る。**
+/// **fbdev に対応するものが無い**——**fbdev は実物のフレームバッファをマップするので、コピーする必要が無い。**
+/// **ZaytOS は裏バッファをマップする**（Q1。MMIO を Ring 3 へ出さない）**ので、コピーする入口が要る。**
 /// **Linux で近いのは DRM の `DRM_IOCTL_MODE_DIRTYFB` で、矩形の配置（`struct drm_clip_rect`）だけを
 /// 採る**——**DIRTYFB そのものは DRM の大きな ABI の一部なので採らない。** **番号は [`TIOCZTAKE`] と
 /// 同じ `'Z'` の帯に置く。**
@@ -721,8 +721,8 @@ pub fn fb_var_screeninfo(width: u32, height: u32, bgr: bool) -> [u8; FB_VAR_SCRE
 /// **欄の位置は `offsetof` で測った**——`id` 0（16 バイト）/ `smem_start` 16 / `smem_len` 24 /
 /// `type` 28 / `visual` 36 / `line_length` 48（2026-09-21）。
 ///
-/// **`smem_start`（物理番地）は 0 にする**——**合わせなかった。** **Ring 3 へ物理番地を出す理由が
-/// 無い**（`mmap` は fd から張るので、番地を知らなくてよい）。
+/// **`smem_start`（物理アドレス）は 0 にする**——**合わせなかった。** **Ring 3 へ物理アドレスを出す理由が
+/// 無い**（`mmap` は fd からマップするので、アドレスを知らなくてよい）。
 pub fn fb_fix_screeninfo(size_bytes: u32, line_length: u32) -> [u8; FB_FIX_SCREENINFO_LEN] {
     let mut out = [0u8; FB_FIX_SCREENINFO_LEN];
     let id = b"zaytos-fb";
@@ -736,7 +736,7 @@ pub fn fb_fix_screeninfo(size_bytes: u32, line_length: u32) -> [u8; FB_FIX_SCREE
 
 /// `struct drm_clip_rect` を読む（`ADR-0066` の Y-c）。**`(x, y, 幅, 高さ)` を返す。空なら `None`。**
 ///
-/// **x2・y2 は含まない**（DRM の DIRTYFB と同じ半開区間）。**画面への切り詰めは写す側が行う**
+/// **x2・y2 は含まない**（DRM の DIRTYFB と同じ半開区間）。**画面への切り詰めはコピーする側が行う**
 /// （`Console::present`）。
 pub fn parse_clip_rect(raw: &[u8; DRM_CLIP_RECT_LEN]) -> Option<(u32, u32, u32, u32)> {
     let x1 = u32::from(u16::from_le_bytes([raw[0], raw[1]]));
@@ -750,11 +750,11 @@ pub fn parse_clip_rect(raw: &[u8; DRM_CLIP_RECT_LEN]) -> Option<(u32, u32, u32, 
 }
 
 /// `socket` の番号（Linux x86-64。`ADR-0064`）。**番号と `sockaddr_un` の配置は Linux から採る**
-/// （`ADR-0020`。**私物にしない**——**パイプの口が私物だったのは `spawn` の形に付いたからで、
+/// （`ADR-0020`。**私物にしない**——**パイプの入口が私物だったのは `spawn` の形に付いたからで、
 /// ソケットは Linux の形そのものが在る**）。
 ///
-/// **受けるのは `socket(AF_UNIX, SOCK_STREAM, 0)` だけである。** **`type` の旗
-/// （`SOCK_CLOEXEC` / `SOCK_NONBLOCK`）も `-EINVAL` で断る**（限界。契機は `ADR-0064`）。
+/// **受けるのは `socket(AF_UNIX, SOCK_STREAM, 0)` だけである。** **`type` のフラグ
+/// （`SOCK_CLOEXEC` / `SOCK_NONBLOCK`）も `-EINVAL` で断る**（限界。見直すきっかけは `ADR-0064`）。
 pub const SYS_SOCKET: u64 = 41;
 /// `connect` の番号（`ADR-0064`）。**名前で繋ぐ。** **待ち受けが無ければ `-ECONNREFUSED`、
 /// 待ち行列が満杯なら `-EAGAIN`。**
@@ -783,7 +783,7 @@ pub const EPROTONOSUPPORT: i64 = 93;
 pub const EAFNOSUPPORT: i64 = 97;
 /// `EADDRINUSE`（名前が取られている）。
 pub const EADDRINUSE: i64 = 98;
-/// `ENOBUFS`（listener の枠が無い）。
+/// `ENOBUFS`（listener のスロットが無い）。
 pub const ENOBUFS: i64 = 105;
 /// `EISCONN`（繋がっている fd への `connect`）。
 pub const EISCONN: i64 = 106;
@@ -792,12 +792,12 @@ pub const ENOTCONN: i64 = 107;
 /// `ECONNREFUSED`（その名前で待ち受けている者が居ない）。
 pub const ECONNREFUSED: i64 = 111;
 
-/// [`SYS_SPAWN`] が受け入れる像の最大の大きさ（S11-5）。
+/// [`SYS_SPAWN`] が受け入れるイメージの最大の大きさ（S11-5）。
 ///
 /// # 32 KiB の根拠は実測である
 ///
-/// **いま像として置いてあるのは `hello` が 8496 バイト、`syscall-test` が
-/// 8648 バイトである**（`kernel/build.rs` が `rustc` で建てたもの）。
+/// **いまイメージとして置いてあるのは `hello` が 8496 バイト、`syscall-test` が
+/// 8648 バイトである**（`kernel/build.rs` が `rustc` でビルドしたもの）。
 /// **32 KiB はその 3.7 倍で、ユーザープログラムが 3 倍を超えて育つまで届かない。**
 ///
 /// # スタックへ置かない
@@ -814,7 +814,7 @@ pub const MAX_EXECUTABLE_SIZE: usize = 32 * 1024;
 ///
 /// # 本当の上限はページである
 ///
-/// **初期スタックは 1 ページしか張っていない**（`crate::userland` の
+/// **初期スタックは 1 ページしかマップしていない**（`crate::userland` の
 /// `build_initial_stack`）。表と文字列はその中に収める。**その判定は既にあり、
 /// 入らなければ `checked_sub` が `None` を返して `ArgumentsTooLong` になる。**
 ///
@@ -826,7 +826,7 @@ pub const MAX_EXECUTABLE_SIZE: usize = 32 * 1024;
 /// # スタックへ置く
 ///
 /// **`spawn_from_ring3` のローカルである。** 1024 バイトは
-/// `deferred-decisions.md` の「大きなスタック配列とガード幅」が言う 4096 バイトを
+/// `deferred-decisions.md` の「大きなスタック配列とガード幅」が示す 4096 バイトを
 /// 越えない。**越えるなら `static` へ移す**（`MAX_EXECUTABLE_SIZE` と同じ形）。
 pub const MAX_ARGV_BYTES: usize = 1024;
 
@@ -863,13 +863,13 @@ pub const PROBE_NUMBER: u64 = ZAYTOS_PRIVATE_BASE;
 pub const SYS_NEVER_IMPLEMENTED: u64 = ZAYTOS_PRIVATE_BASE + 0xFF;
 
 /// probe が返す既知の戻り値。ユーザーはこれを RAX で受け取り、ユーザースタックへ
-/// store する。カーネルが畳み後に読み戻して一致を確かめることで、戻り値が RAX 経由で
+/// store する。カーネルが例外による終了処理の後に読み戻して一致を確かめることで、戻り値が RAX 経由で
 /// Ring 3 へ渡ったことを実証する。`-errno` の範囲（`-1..-4095`）と紛れない値にする。
 pub const PROBE_RETURN: u64 = 0x00C0_FFEE;
 
 /// probe の呼び出しでユーザーが各引数レジスタ（RDI/RSI/RDX/R10/R8/R9）へ入れる
 /// 既知値。**レジスタごとに区別できる値**にする（第 4 引数を R10 でなく RCX から
-/// 読む破壊が、記録した第 4 引数の食い違いとして必ず現れるように）。
+/// 読む破壊テストが、記録した第 4 引数の食い違いとして必ず現れるように）。
 pub const PROBE_ARGS: [u64; 6] = [
     0x1111_1111,
     0x2222_2222,
@@ -906,14 +906,14 @@ struct SyscallState {
     /// ここへ来ることはない**——[`validate_user_range`] を呼ぶのは [`dispatch`] だけで、
     /// あちらは `syscall_entry` からしか来ず、`syscall_entry` は Ring 3 からしか来ない。
     ///
-    /// # 既定値は空の窓である
+    /// # 既定値は空のウィンドウである
     ///
     /// `(0, 0)` は**どんな長さ 1 以上の範囲も受理しない。** 据え忘れたときに黙って
     /// 通る形にしない。**安全側は「窓が無ければ何も通さない」である。**
     user_window_start: AtomicU64,
     user_window_end: AtomicU64,
     /// [`SYS_EXIT`] を受け取ったか（S9-b-3-1）。**呼び出し側は、遠征から戻った理由が
-    /// 終了なのか畳みなのかをこれで区別する。**
+    /// 終了なのか例外による終了処理なのかをこれで区別する。**
     process_exited: AtomicBool,
     /// [`SYS_EXIT`] が受け取った終了状態（RDI）。[`SyscallState::process_exited`] が真のときだけ意味を持つ。
     process_exit_status: AtomicU64,
@@ -1005,9 +1005,9 @@ static PROBE_SEEN_ARGS: [AtomicU64; 6] = [
 /// この保証はモジュール境界に依存する。同一 `syscall.rs` モジュール内からは private
 /// フィールドに触れるため `UserSlice { .. }` を直接構築できてしまう。したがって:
 /// - モジュール外: 検証を経ないと `UserSlice` が作れない（型で保証）。
-/// - モジュール内: 直接構築は `copy-skip-validate` 破壊 feature 専用であり、通常コードでは
+/// - モジュール内: 直接構築は `copy-skip-validate` 破壊テストの feature 専用であり、通常コードでは
 ///   行わない（この規律は型ではなくレビューで守る）。`copy-skip-validate` はまさにこの境界を
-///   突く破壊である。
+///   突く破壊テストである。
 ///
 /// # 有効期間
 ///
@@ -1046,7 +1046,7 @@ impl UserSlice {
 ///   (c) 範囲を跨ぐ全 4KiB ページが present && 全階層 U=1
 ///       （[`crate::paging::verify::walk_user_accessible`]）。
 ///
-/// (a)(b)(c-present) は多層防御として (c-U=1) に冗長で、単独では隔離した破壊確認が
+/// (a)(b)(c-present) は多層防御として (c-U=1) に冗長で、単独では隔離した破壊テストでの確認が
 /// できない（詳細は verification-coverage）。それらは default battery の first-line
 /// 拒否者として実運用・実証される。
 ///
@@ -1059,7 +1059,7 @@ pub unsafe fn validate_user_range(
     buf: u64,
     len: u64,
 ) -> Option<UserSlice> {
-    // 破壊 (M5-f-2-1, skip-all): 検証器を常に受理にする。検証器の全体機能停止を
+    // 破壊テスト (M5-f-2-1, skip-all): 検証器を常に受理にする。検証器の全体機能停止を
     // battery が検出して halt する（多層防御の最後の砦の確認）。
     #[cfg(feature = "syscall-test-validate-skip-all")]
     {
@@ -1074,9 +1074,9 @@ pub unsafe fn validate_user_range(
         }
         // (a) 加算オーバーフロー無し。end は排他的上端（buf+len）。
         let end = buf.checked_add(len)?;
-        // (b) 範囲が**今の窓**に収まっていること（S9-b-3-2b で 1 つに畳んだ）。
-        // **またぐ範囲が受理されないのは、窓が 1 つしかないからである**（S9-b-1 から
-        // S9-b-3-2a までは窓が 2 つあり、「またいだものは受理しない」と書いて
+        // (b) 範囲が**今のウィンドウ**に収まっていること（S9-b-3-2b で 1 つにまとめた）。
+        // **またぐ範囲が受理されないのは、ウィンドウが 1 つしかないからである**（S9-b-1 から
+        // S9-b-3-2a まではウィンドウが 2 つあり、「またいだものは受理しない」と書いて
         // いた。いまは書く条件ではなく構造の帰結である）。
         let (window_start, window_end) = user_window();
         if buf < window_start || end > window_end {
@@ -1085,7 +1085,7 @@ pub unsafe fn validate_user_range(
         // (c) 範囲を跨ぐ全 4KiB ページを walk。境界非整列でも先頭・末尾を覆う。
         let first_page = buf & !0xFFF;
         let full_last_page = (end - 1) & !0xFFF;
-        // 破壊 (M5-f-2-1, skip-laststep): 走査上端を先頭ページに潰し、先頭ページだけを
+        // 破壊テスト (M5-f-2-1, skip-laststep): 走査上端を先頭ページに潰し、先頭ページだけを
         // 検証する。無効4（跨ぎ）の末尾無効を取り逃し、battery が検出して halt する。
         let last_page = if cfg!(feature = "syscall-test-validate-skip-laststep") {
             first_page
@@ -1131,7 +1131,7 @@ pub unsafe fn user_range_accessible(
 ///
 /// **TOCTOU について。** 検証と読みが実質アトミックなのは、syscall_entry が割り込みゲート
 /// （IF=0）で入りプリエンプトが来ないこと、**BKL を保持したままユーザーメモリへ触ること**
-/// （`spawn` は途中で BKL を解くが、パスと `argv` を写す区間は解く前に置いてある）、
+/// （`spawn` は途中で BKL を解くが、パスと `argv` をコピーする区間は解く前に置いてある）、
 /// ユーザーページをアンマップする経路が syscall 中に走らないこと、の構造条件に依存する。将来 IF を立てる
 /// syscall（長時間ブロッキング等）を入れると、この前提が崩れ TOCTOU（検証後・読み前に
 /// アンマップ/再マップ）が現実化するため再検証が要る（verification-coverage の申し送り）。
@@ -1141,7 +1141,7 @@ pub unsafe fn user_range_accessible(
 /// `slice` が現在のアドレス空間に対して有効に検証されていること（[`validate_user_range`]
 /// が返したものであること）。`dst` が読むバイト数を収められること。
 pub unsafe fn copy_from_user(dst: &mut [u8], slice: &UserSlice) -> usize {
-    // 破壊 (M5-f-2-2, copy-overrun): len を 1 バイト超えて読む。末尾の有効ページ内に置いた
+    // 破壊テスト (M5-f-2-2, copy-overrun): len を 1 バイト超えて読む。末尾の有効ページ内に置いた
     // 余分な既知バイトが総和へ混ざり、内容往復のチェックサムが決定的に食い違う（#PF は副次）。
     let n = slice.len as usize
         + if cfg!(feature = "syscall-test-copy-overrun") {
@@ -1165,7 +1165,7 @@ pub unsafe fn copy_from_user(dst: &mut [u8], slice: &UserSlice) -> usize {
 ///
 /// # なぜ `at` を取るか
 ///
-/// **`read` は 1 回の呼び出しで複数のブロックから写す。** ブロックごとに
+/// **`read` は 1 回の呼び出しで複数のブロックからコピーする。** ブロックごとに
 /// トークンを作り直すと、**作り直すたびに検証を通さなければ意味が無い**
 /// （通さずに作れば `UserSlice` の保証が崩れる）。**1 つのトークンの中を
 /// 進む形にすれば、検証は 1 回で足りる。**
@@ -1175,7 +1175,7 @@ pub unsafe fn copy_from_user(dst: &mut [u8], slice: &UserSlice) -> usize {
 /// `slice` が [`validate_user_range`] を通った検証済みトークンであること。
 /// **その範囲は present かつ U=1 で、書き込み可能であること**——`read` が
 /// 書く先はユーザーのバッファで、[`crate::paging`] が `writable: true` で
-/// 張ったページである。
+/// マップしたページである。
 pub unsafe fn copy_to_user(slice: &UserSlice, at: u64, src: &[u8]) -> usize {
     let Some(room) = slice.len().checked_sub(at) else {
         return 0;
@@ -1228,7 +1228,7 @@ unsafe fn dispatch(
         SYS_CHECK_PTR => {
             let buf = args[0];
             let len = args[1];
-            // **踏み込む前に**範囲を検証する。可なら 0、不可なら -EFAULT。この段は
+            // **踏み込む前に**範囲を検証する。可なら 0、不可なら -EFAULT。この段階は
             // バイトを読まない（copy は M5-f-2-2）。
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
             if unsafe { user_range_accessible(pml4_phys, direct_map, buf, len) } {
@@ -1247,8 +1247,8 @@ unsafe fn dispatch(
             // 長さがカーネルバッファを超える。**アドレスの問題ではないので
             // -EINVAL であって -EFAULT ではない**（S9-a で分けた）。
             //
-            // 破壊 (S9-a, einval-as-efault): 分ける前の -EFAULT へ戻す。長さの誤りと
-            // アドレスの誤りが同じ errno へ潰れ、over-long の判定行が捕まえる。
+            // 破壊テスト (S9-a, einval-as-efault): 分ける前の -EFAULT へ戻す。長さの誤りと
+            // アドレスの誤りが同じ errno へ潰れ、over-long の判定行が検出する。
             if len as usize > CHECKSUM_BUF_LEN {
                 #[cfg(not(feature = "syscall-test-einval-as-efault"))]
                 let errno = EINVAL;
@@ -1260,7 +1260,7 @@ unsafe fn dispatch(
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
             #[cfg(not(feature = "syscall-test-copy-skip-validate"))]
             let slice = unsafe { validate_user_range(pml4_phys, direct_map, buf, len) };
-            // 破壊 (M5-f-2-2, copy-skip-validate): 検証を経ずに UserSlice をモジュール内で
+            // 破壊テスト (M5-f-2-2, copy-skip-validate): 検証を経ずに UserSlice をモジュール内で
             // 直接構築する（型保証の境界を突く。モジュール内なので private フィールドに触れる）。
             // カーネルポインタを渡すと、-EFAULT のはずが総和が返り verify が検出して halt する。
             #[cfg(feature = "syscall-test-copy-skip-validate")]
@@ -1299,8 +1299,8 @@ unsafe fn dispatch(
             unsafe { sys_open(args[0], args[1], pml4_phys, direct_map) }
         }
         SYS_IOCTL => {
-            // **画面の fd は別の口（`ADR-0066` の Y-c）。** **`present` は BKL を解いて写す**ので、
-            // ガードを渡せる口へ分ける。**`#[inline(never)]` で、写しは `dispatch` の枠に乗らない。**
+            // **画面の fd は別の関数（`ADR-0066` の Y-c）。** **`present` は BKL を解いてコピーする**ので、
+            // ガードを渡せる関数へ分ける。**`#[inline(never)]` で、コピーは `dispatch` の枠に乗らない。**
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
             match unsafe {
                 screen_ioctl_from_ring3(args[0], args[1], args[2], pml4_phys, direct_map, bkl)
@@ -1341,7 +1341,7 @@ unsafe fn dispatch(
         // **`spawn` の経路には載っていないので、`syscall-test` の高水位は動かない見込みである。**
         SYS_OPEN_INPUT => open_input_from_ring3(),
         SYS_OPEN_SCREEN => open_screen_from_ring3(),
-        // **多重待ち（`ADR-0066` の Y-b）。** **`#[inline(never)]` で、写しは `dispatch` の
+        // **多重待ち（`ADR-0066` の Y-b）。** **`#[inline(never)]` で、コピーは `dispatch` の
         // 枠に乗らない。**
         // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
         SYS_POLL => unsafe {
@@ -1367,7 +1367,7 @@ unsafe fn dispatch(
         // SAFETY: 同上。
         SYS_RECVMSG => unsafe { recvmsg_from_ring3(args[0], args[1], pml4_phys, direct_map, bkl) },
         SYS_CLOSE => {
-            // **書きで開いた口を閉じたら、像を装置へ書き戻す（P-c-1）。**
+            // **書きで開いたファイルを閉じたら、イメージを装置へ書き戻す（P-c-1）。**
             //
             // **ここを選んだ理由は、`zi` の `:w` が「開く・書く・閉じる」で
             // 1 回の保存になるからである**——**書きのたびに書き戻すと、
@@ -1397,10 +1397,10 @@ unsafe fn dispatch(
             // **記録するだけである。** Ring 3 へ返らない分岐は `syscall_entry` が
             // 持つ（[`SYS_EXIT`] の doc）。**戻り値は読まれない。**
             //
-            // 破壊 (S9-b-3-1, user-exit-wrong-status): 終了状態を第 1 引数（RDI）
+            // 破壊テスト (S9-b-3-1, user-exit-wrong-status): 終了状態を第 1 引数（RDI）
             // ではなく第 2 引数（RSI）から読む。**`arg4-rcx` と同じ、引数レジスタを
             // 1 本取り違える形である。** `hello` は `exit` の直前に RSI を
-            // 触らない（`write` へ渡したバイト列の番地が残っている）ので、
+            // 触らない（`write` へ渡したバイト列のアドレスが残っている）ので、
             // **0 でない既知の値が終了状態として記録される。**
             #[cfg(not(feature = "user-exit-wrong-status"))]
             let status = args[0];
@@ -1413,10 +1413,10 @@ unsafe fn dispatch(
             // **待たずに終わるプログラムを取りこぼさない**——`cat` と `ls` は
             // 書いて、読まずに終わる。**入力を待つ時点が来ない。**
             //
-            // **この経路には判定が置けない。** **次に読む者が必ず居るので、
+            // **この経路には判定を設けられない。** **次に読む者が必ず居るので、
             // 掃かなくても1つ後の `read` で送られる**（`zash` が待つ）。
             // **受け皿として置く**——**「誰も読まないまま終わる」形が来たら、
-            // ここだけが残る。** **観測できないので、破壊も立てない**
+            // ここだけが残る。** **観測できないので、破壊テストも用意しない**
             // （`docs/verification-coverage.md`）。
             if crate::console::foreground_installed() {
                 drop(bkl.take());
@@ -1453,27 +1453,27 @@ unsafe fn dispatch(
 ///
 /// - **子のシステムコール**が [`syscall_entry`] へ入り、**同じコアが BKL を
 ///   取り直す。** `bkl::acquire` は再帰取得を検出して停止する
-/// - **Ring 3 は `RFLAGS = 0x202`（IF=1）で走る**ので、タイマが動いている段では
+/// - **Ring 3 は `RFLAGS = 0x202`（IF=1）で走る**ので、タイマが動いている段階では
 ///   `irq_entry` が同じことをする。**`ADR-0023` の Addendum §4 の不変条件
 ///   「BKL を保持する区間 = IF=0 の区間」に、保持したままの降下は直接反する**
 ///
 /// # 解く区間はどこか
 ///
-/// **パスを写し終えてから解く。** ユーザーメモリへ触るのは [`copy_user_path`] だけで、
+/// **パスをコピーし終えてから解く。** ユーザーメモリへ触るのは [`copy_user_path`] だけで、
 /// **あれは「検証と読みが実質アトミック」であることに依っている**（[`copy_from_user`] の
 /// TOCTOU の注記）。**その区間は BKL の内側に残す。**
 ///
-/// **写像も畳みも BKL の外で走る。** これは新しい形ではない——**起動時の
-/// `load_user_program` は最初から BKL を保持せずに写像している**（`kernel_main` は
+/// **マッピングも破棄も BKL の外で走る。** これは新しい形ではない——**起動時の
+/// `load_user_program` は最初から BKL を保持せずにマップしている**（`kernel_main` は
 /// ガードを持たない）。**`crate::userland::load_user_program` はそのまま呼べる**
-/// ——中で畳みのために自分で BKL を取るので、**保持したまま入ると、そこで
+/// ——中で破棄のために自分で BKL を取るので、**保持したまま入ると、そこで
 /// 再帰取得になる。**
 ///
 /// # Safety
 ///
 /// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 /// `bkl` が、いま保持している BKL のガードであること。
-/// 像を装置へ書き戻す（P-c-1）。**シェルの文脈から呼ぶ唯一の口である。**
+/// イメージを装置へ書き戻す（P-c-1）。**シェルの文脈から呼ぶ唯一の入口である。**
 ///
 /// # BKL の踊り
 ///
@@ -1484,7 +1484,7 @@ unsafe fn dispatch(
 ///
 /// # 装置は占有で守る
 ///
-/// **BKL を解いている間、他のコアが同じ装置へ入りうる。** **占有の旗が
+/// **BKL を解いている間、他のコアが同じ装置へ入りうる。** **占有のフラグが
 /// 止める**（`kernel::virtio::claim`）。**取れなければ `-EBUSY` を返す**
 /// ——**止めるより断るほうが観測できる。**
 ///
@@ -1492,29 +1492,29 @@ unsafe fn dispatch(
 ///
 /// **いま断られる形は起きない**——**Ring 3 を走らせているのは前景の 1 本だけで、
 /// AP は利用者を走らせていない**（実測。起動ログの `ap_sched_passes=0`）。
-/// **それでも旗を置くのは、解いている間の守りが BKL では作れないからである。**
+/// **それでもフラグを置くのは、解いている間の守りが BKL では作れないからである。**
 ///
 /// # Safety
 ///
 /// `bkl` が、いま保持している BKL のガードであること。
-/// 破壊 `flush-waits-without-device` の締切（TSC サイクル）。**約 0.3 秒**（実測で TSC は約 3.5GHz）。
+/// 破壊テスト `flush-waits-without-device` の締切（TSC サイクル）。**約 0.3 秒**（実測で TSC は約 3.5GHz）。
 ///
-/// **破壊にだけ在る。** **既定のビルドでは、装置が無ければ待たずに戻る。**
+/// **破壊テストにだけ在る。** **既定のビルドでは、装置が無ければ待たずに戻る。**
 #[cfg_attr(not(feature = "flush-waits-without-device"), allow(dead_code))]
 const FLUSH_WITHOUT_DEVICE_DEADLINE_CYCLES: u64 = 1_000_000_000;
 
 unsafe fn flush_root_image(bkl: &mut Option<crate::bkl::BklGuard>) -> Result<(), i64> {
     // **据えられていなければ書き戻さない（P-c-1）。**
     //
-    // **起動シーケンスの中でもユーザープログラムが走り、書きで開いた口を閉じる。**
+    // **起動シーケンスの中でもユーザープログラムが走り、書きで開いたファイルを閉じる。**
     // **あれらは据える前に走る**——**断ると起動が止まる**（実測。2026-08-28）。
     // **起動シーケンスが最後に自分で書き戻すので、失われるものが無い。**
     if !crate::virtio::installed() {
-        // 破壊 (HW-d, flush-waits-without-device): **装置が無いのに完了を待つ**（待ちを残した形）。
+        // 破壊テスト (HW-d, flush-waits-without-device): **装置が無いのに完了を待つ**（待ちを残した形）。
         // **RAM ディスクで動く VirtualBox では、これが「黙って固まる」形になる**——**完了割り込みは
         // 永遠に来ない。** **締切を置いて止まる形にしてある**（黙る形を、行にして見えるようにする）。
         //
-        // **声は panic で出す**——**`syscall.rs` にシリアルの口は無い**（開けると直接シリアルの
+        // **声は panic で出す**——**`syscall.rs` にシリアルポートは無い**（開けると直接シリアルの
         // 許可リストに項目が増える）。**パニックの方針は Halt and Dump である**（`ADR-0004`）。
         if cfg!(feature = "flush-waits-without-device") {
             let started = common::cpu::read_timestamp_counter();
@@ -1552,7 +1552,7 @@ unsafe fn flush_root_image(bkl: &mut Option<crate::bkl::BklGuard>) -> Result<(),
     }
 }
 
-/// 起こしっぱなしのスロットから端末へ書いた回数（`ADR-0063` の (b3) の計器）。
+/// 切り離して起動するスロットから端末へ書いた回数（`ADR-0063` の (b3) の計測）。
 static TERMINAL_WRITES_FROM_DETACHED: AtomicU64 = AtomicU64::new(0);
 
 /// [`TERMINAL_WRITES_FROM_DETACHED`] の値。
@@ -1560,11 +1560,11 @@ pub fn terminal_writes_from_detached() -> u64 {
     TERMINAL_WRITES_FROM_DETACHED.load(Ordering::Relaxed)
 }
 
-/// [`SYS_SPAWN_DETACHED`] が子の入場を待ったティック数の最大（計器）。**桁で小さいことを
+/// [`SYS_SPAWN_DETACHED`] が子の入場を待ったティック数の最大（計測）。**桁で小さいことを
 /// 示すために持つ**（`Wait` を足さない根拠。[`SYS_SPAWN_DETACHED`] の doc）。
 static DETACHED_ENTRY_WAIT_TICKS_MAX: AtomicU64 = AtomicU64::new(0);
 
-/// [`SYS_SPAWN_DETACHED`] を通った回数（計器）。
+/// [`SYS_SPAWN_DETACHED`] を通った回数（計測）。
 static DETACHED_STARTS: AtomicU64 = AtomicU64::new(0);
 
 /// [`DETACHED_ENTRY_WAIT_TICKS_MAX`] の値。
@@ -1579,7 +1579,7 @@ pub fn detached_starts() -> u64 {
 
 /// パイプの読み端から読む（`ADR-0063` の (b3)）。**空なら待つ。**
 ///
-/// # 窓は構造で閉じている
+/// # ウィンドウは構造で閉じている
 ///
 /// **`int 0x80` は割り込みゲートなので IF=0 である**——**「空だと見てから `Waiting` にする」
 /// までに書き手の起こしは入らない**（`sys_read` の端末の待ちと同じ）。**BKL は解いてから譲る**
@@ -1680,7 +1680,7 @@ fn socket_state_of(fd: u64) -> Result<crate::vfs::SocketState, u64> {
     }
 }
 
-/// `sockaddr_un` を読み、名前を `name` へ写す。**長さを返す。失敗は `-errno`。**
+/// `sockaddr_un` を読み、名前を `name` へコピーする。**長さを返す。失敗は `-errno`。**
 ///
 /// **`sun_path` の先頭から最初の NUL まで、または `addrlen - 2` までが名前である**（Linux の形）。
 /// **空と抽象名（先頭 NUL）は `-EINVAL`、`NAME_MAX` を超えれば `-ENAMETOOLONG`。**
@@ -1761,12 +1761,12 @@ const INPUT_READ_MAX: usize = 96;
 ///
 /// **呼んだ者が前景の系統でなければ `-EBADF`**（`crate::input::caller_is_foreground`。**Y-a では
 /// 大域の `foreground_is_claimed` を見ていた**——Y-c で直した）。**前景は
-/// プログラムの走行の間ずっと持たれる**ので、fd が前景より長生きしない。**`SCM_RIGHTS` は
-/// shm の fd だけを運ぶので、この fd は相手の表へ写らない**（`ADR-0066` の「前景の関所」）。
+/// プログラムの実行の間ずっと持たれる**ので、fd が前景より長生きしない。**`SCM_RIGHTS` は
+/// shm の fd だけを運ぶので、この fd は相手の表へコピーされない**（`ADR-0066` の「前景の関所」）。
 #[inline(never)]
 fn open_input_from_ring3() -> u64 {
-    // **呼んだ者が前景の系統かを見る（Y-c で直した）。** **Y-a では大域の印を見ていたので、
-    // 起こしっぱなしの 1 本でも開けた**（`crate::input::caller_is_foreground` の doc）。
+    // **呼んだ者が前景の系統かを見る（Y-c で直した）。** **Y-a では大域の目印を見ていたので、
+    // 切り離して起動した 1 本でも開けた**（`crate::input::caller_is_foreground` の doc）。
     if !crate::input::caller_is_foreground() {
         return (-EBADF) as u64;
     }
@@ -1817,14 +1817,14 @@ unsafe fn read_input_events(
             break got;
         }
         // **待つ条件は端末と同じ**（`sys_read` の端末分岐の doc）。**据えられていない・台本が
-        // 駆動している間は待たない**——**起動シーケンスと台本の族が止まらないように。**
+        // 駆動している間は待たない**——**起動シーケンスと台本のグループが止まらないように。**
         if !crate::console::foreground_installed() {
             return (-EAGAIN) as u64;
         }
         if crate::input::script_drives_input() {
             return (-EAGAIN) as u64;
         }
-        // 破壊 (Y-a, input-read-never-waits): 待たずに `-EAGAIN` を返す。**回して待つ形へ戻る**
+        // 破壊テスト (Y-a, input-read-never-waits): 待たずに `-EAGAIN` を返す。**回して待つ形へ戻る**
         // ——**判定「打鍵で起きる」が落ちる。**
         #[cfg(feature = "input-read-never-waits")]
         return (-EAGAIN) as u64;
@@ -1847,8 +1847,8 @@ unsafe fn read_input_events(
 /// # 前景の関所は開く時点の 1 箇所
 ///
 /// **[`open_input_from_ring3`] と同じ形である**——**呼んだ者が前景の系統でなければ `-EBADF`。**
-/// **fd は前景より長生きしない**（前景はプログラムの走行の間ずっと持たれる）**し、`SCM_RIGHTS` は
-/// shm の fd だけを運ぶので相手の表へ写らない。**
+/// **fd は前景より長生きしない**（前景はプログラムの実行の間ずっと持たれる）**し、`SCM_RIGHTS` は
+/// shm の fd だけを運ぶので相手の表へコピーされない。**
 ///
 /// # 表に入らなければ抜ける
 ///
@@ -1888,16 +1888,16 @@ fn is_screen_fd(fd: u64) -> bool {
 ///
 /// - [`FBIOGET_VSCREENINFO`]——`struct fb_var_screeninfo`（Linux の配置）
 /// - [`FBIOGET_FSCREENINFO`]——`struct fb_fix_screeninfo`（Linux の配置）
-/// - [`FBIOZPRESENT`]——`struct drm_clip_rect` の矩形を MMIO へ写す（ZaytOS 独自）
+/// - [`FBIOZPRESENT`]——`struct drm_clip_rect` の矩形を MMIO へコピーする（ZaytOS 独自）
 ///
 /// **それ以外は `-ENOTTY`**（Linux の fbdev と同じ）。
 ///
-/// # BKL を解いて写す
+/// # BKL を解いてコピーする
 ///
 /// **全面の転送は 5.05M サイクル掛かる**（`crate::console::flush_foreground` の doc）。**保持したまま
-/// 写すと、その間もう一方のコアがカーネルへ入れない**（`ADR-0023` の Addendum）。
+/// コピーすると、その間もう一方のコアがカーネルへ入れない**（`ADR-0023` の Addendum）。
 ///
-/// # 深い枠に写しを置かない
+/// # 深い枠にコピーを置かない
 ///
 /// **`#[inline(never)]` である**——**160 バイトの構造体は `dispatch` の枠に乗らない**（`ADR-0066` の Q4）。
 ///
@@ -1960,7 +1960,7 @@ unsafe fn screen_ioctl_from_ring3(
             let Some((x, y, width, height)) = parse_clip_rect(&raw) else {
                 return Some((-EINVAL) as u64);
             };
-            // **BKL を解いて写す**（この関数の doc）。
+            // **BKL を解いてコピーする**（この関数の doc）。
             drop(bkl.take());
             crate::console::present_graphics(x, y, width, height);
             *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
@@ -1970,19 +1970,19 @@ unsafe fn screen_ioctl_from_ring3(
     }
 }
 
-/// 画面の `mmap` で張ったページの累計（`ADR-0066` の Y-c の計器）。
+/// 画面の `mmap` でマップしたページの累計（`ADR-0066` の Y-c の計測）。
 static SCREEN_PAGES_MAPPED: AtomicU64 = AtomicU64::new(0);
 
-/// 画面の `mmap` で張ったページの累計（`ADR-0066` の Y-c）。
+/// 画面の `mmap` でマップしたページの累計（`ADR-0066` の Y-c）。
 pub fn screen_pages_mapped() -> u64 {
     SCREEN_PAGES_MAPPED.load(Ordering::Relaxed)
 }
 
-/// 画面の fd の `mmap`（`ADR-0066` の Y-c）。**裏バッファを自分の空間の `MMAP_BASE` から上へ張る。**
+/// 画面の fd の `mmap`（`ADR-0066` の Y-c）。**裏バッファを自分の空間の `MMAP_BASE` から上へマップする。**
 ///
-/// # 共有メモリと同じ張り方である
+/// # 共有メモリと同じマップの仕方である
 ///
-/// **葉に `PTE_SHARED` の印を立てる**（`ADR-0065`）——**`destroy` は印の在る葉を集めない**ので、
+/// **葉に `PTE_SHARED` の目印を立てる**（`ADR-0065`）——**`destroy` は目印の在る葉を集めない**ので、
 /// **プロセスが終わっても裏バッファのフレームはアロケータへ返らない。** **返すのはコンソールで、
 /// 返さない**（起動時に取って、ずっと持つ）。**参照数は使わない**（Q1。カーネル常駐）。
 ///
@@ -2014,7 +2014,7 @@ unsafe fn mmap_screen_from_ring3(len: u64, prot: u64, direct_map: DirectMap) -> 
         writable: prot & PROT_WRITE != 0,
         // **裏バッファは普通の RAM である**（MMIO ではない。`BackBuffer` の doc）。
         cacheable: true,
-        // **印を立てる**——**`destroy` が集めない**（この関数の doc）。
+        // **目印を立てる**——**`destroy` が集めない**（この関数の doc）。
         shared: true,
     };
     // SAFETY: 遠征の中なので CR3 はこのプロセスの表である。
@@ -2033,7 +2033,7 @@ unsafe fn mmap_screen_from_ring3(len: u64, prot: u64, direct_map: DirectMap) -> 
             outcome = (-EINVAL) as u64;
             break;
         };
-        // SAFETY: 稼働中の表へ、ユーザーの範囲を、裏バッファの物理ページで張る。**裏バッファは
+        // SAFETY: 稼働中の表へ、ユーザーの範囲を、裏バッファの物理ページでマップする。**裏バッファは
         // 起動時に `pages` ぶん以上を連続で取ってある**（`limit` で切った）。
         if unsafe { table.map_4kib(virt, frame, attributes, allocator) }.is_err() {
             outcome = (-ENOMEM) as u64;
@@ -2052,7 +2052,7 @@ unsafe fn mmap_screen_from_ring3(len: u64, prot: u64, direct_map: DirectMap) -> 
 /// # 番号と配置は Linux から採る。意味は最小の部分集合である
 ///
 /// **`ADR-0020` に従う**——**`poll`(7) と `struct pollfd`（`fd` 4＋`events` 2＋`revents` 2）を
-/// そのまま採る。** **独自番号にしない**（**Linux に対応する口が在るので、`ZAYTOS_PRIVATE_BASE`
+/// そのまま採る。** **独自番号にしない**（**Linux に対応する入口が在るので、`ZAYTOS_PRIVATE_BASE`
 /// は使わない**。`ADR-0066` の「番号」）。
 ///
 /// **`ADR-0066` の Q3 は「一般の `poll` は作らない」と決めた。** **作らないのは意味の側である**
@@ -2070,7 +2070,7 @@ const POLLIN: u16 = 0x001;
 /// （[`crate::task::MAX_WAIT_REASONS`]。**集合に入らない数の fd を受けても待てない**）。
 const MAX_POLL_FDS: usize = crate::task::MAX_WAIT_REASONS;
 
-/// `poll` が待った回数（`ADR-0066` の Y-b の計器）。**判定「`poll` が待った」が読む。**
+/// `poll` が待った回数（`ADR-0066` の Y-b の計測）。**判定「`poll` が待った」が読む。**
 static POLL_WAITS: AtomicU64 = AtomicU64::new(0);
 
 /// `poll` が待った回数（`ADR-0066` の Y-b）。
@@ -2084,7 +2084,7 @@ pub fn poll_waits() -> u64 {
 /// `SocketAcceptable`。** **`Wait` の種類は減らない**（`ADR-0066` の刻みの注）——
 /// **対応づけるだけである。**
 ///
-/// **パイプと端末は v1 では受けない**（`None` を返して `-EBADF`）。**契機：パイプを待つ
+/// **パイプと端末は v1 では受けない**（`None` を返して `-EBADF`）。**見直すきっかけ：パイプを待つ
 /// プログラムが出たとき。**
 fn poll_reason_of(fd: u64) -> Option<crate::task::Wait> {
     crate::vfs::with_current_files(|files| {
@@ -2126,25 +2126,25 @@ fn poll_is_ready(reason: crate::task::Wait) -> bool {
 /// **起こされたら集合の各理由を覗き直す**——**空振りで起こしてよい**（`ADR-0061`）。
 /// **BKL は解いてから譲り、起きたら取り直す**（`ADR-0036`）。
 ///
-/// # 窓は構造で閉じている
+/// # ウィンドウは構造で閉じている
 ///
 /// **`int 0x80` は割り込みゲートなので IF=0 である。** **BKL を解いても IF は戻らない**
 /// （`EntryInterruptGuard` は保存した RFLAGS が IF=1 のときだけ戻す。実測）——**「空だと
 /// 見てから `Waiting` にする」までに合図は入らない。**
 ///
-/// # 深い枠に写しを置かない
+/// # 深い枠にコピーを置かない
 ///
-/// **`#[inline(never)]` である**（`ADR-0063` の口 3 つと同じ手）。**`struct pollfd` の写しは
+/// **`#[inline(never)]` である**（`ADR-0063` の入口 3 つと同じ手）。**`struct pollfd` のコピーは
 /// [`MAX_POLL_FDS`] 個ぶんの 32 バイトで、`dispatch` の枠には乗らない**（`ADR-0066` の Q4）。
 ///
 /// # v1 の限界（見直すきっかけつき）
 ///
 /// - **`events` は [`POLLIN`] だけを受ける**（`POLLOUT` などは `-EINVAL`）。**黙って無視すると、
-///   書ける待ちを頼んだ側が読める待ちで眠る。** **契機：書ける待ちが要るとき。**
-/// - **`timeout` は -1 と 0 だけを受ける。** **契機：締切つきの待ちが要るとき**
+///   書ける待ちを頼んだ側が読める待ちで眠る。** **見直すきっかけ：書ける待ちが要るとき。**
+/// - **`timeout` は -1 と 0 だけを受ける。** **見直すきっかけ：締切つきの待ちが要るとき**
 ///   （**集合に [`crate::task::Wait::Timer`] を入れれば足りる**）。
 /// - **開いていない fd は `-EBADF` である**（Linux は `revents` に `POLLNVAL` を立てて
-///   その 1 件だけを失敗にする）。**契機：混ざった集合を渡す利用者が出たとき。**
+///   その 1 件だけを失敗にする）。**見直すきっかけ：混ざった集合を渡す利用者が出たとき。**
 ///
 /// # Safety
 ///
@@ -2204,7 +2204,7 @@ unsafe fn poll_from_ring3(
             if !poll_is_ready(reason) {
                 continue;
             }
-            // 破壊 (Y-b, poll-mistakes-the-member): 隣の欄へ印を付ける。**待ちも起こしも
+            // 破壊テスト (Y-b, poll-mistakes-the-member): 隣の欄へ目印を付ける。**待ちも起こしも
             // 正しいままで、「どの fd が読めるか」だけが入れ替わる**——**判定「listener で
             // 起きた」「ソケットで起きた」が落ちる。**
             let at = if cfg!(feature = "poll-mistakes-the-member") {
@@ -2230,7 +2230,7 @@ unsafe fn poll_from_ring3(
         }
         // **待つ条件は端末の `read(0)` と同じである**（`sys_read` の端末分岐の doc）。
         // **対話の口が据えられていない間と、台本が入力を駆動している間は待たない**
-        // ——**起動シーケンスと台本の族が止まらないようにするためである。**
+        // ——**起動シーケンスと台本のグループが止まらないようにするためである。**
         // **呼ぶ側は `-EAGAIN` を回して待つ**（`polld` と `inputd` の形）。
         if !crate::console::foreground_installed() || crate::input::script_drives_input() {
             return (-EAGAIN) as u64;
@@ -2238,9 +2238,9 @@ unsafe fn poll_from_ring3(
         // **理由の集合を組む。**
         let mut set = crate::task::WaitSet::empty();
         for slot in reasons.iter().take(count) {
-            // 破壊 (Y-b, poll-waits-on-one-member): 集合へ入れるのは最初の 1 本だけにする。
+            // 破壊テスト (Y-b, poll-waits-on-one-member): 集合へ入れるのは最初の 1 本だけにする。
             // **落ちた合図では誰も起こさないので `polld` が戻らない**——**判定「集合に 2 本
-            // 入った」が落ち、戻らないので計器の行も出ない**（`ADR-0066` の Y-b の表）。
+            // 入った」が落ち、戻らないので計測の行も出ない**（`ADR-0066` の Y-b の表）。
             if cfg!(feature = "poll-waits-on-one-member") && !set.is_empty() {
                 break;
             }
@@ -2252,7 +2252,7 @@ unsafe fn poll_from_ring3(
                 return (-EINVAL) as u64;
             }
         }
-        // 破壊 (Y-b, poll-never-waits): 待たずに 0 を返す。**呼ぶ側が回して待つ形へ戻る**
+        // 破壊テスト (Y-b, poll-never-waits): 待たずに 0 を返す。**呼ぶ側が回して待つ形へ戻る**
         // ——**判定「`poll` が待った」だけが落ちる。** **`cfg!` で書くのは、`#[cfg]` の早い
         // 戻りにすると「回らない回し」になって `clippy` が止めるためである。**
         if cfg!(feature = "poll-never-waits") {
@@ -2326,7 +2326,7 @@ fn listen_from_ring3(fd: u64, _backlog: u64) -> u64 {
 
 /// [`SYS_ACCEPT`] の本体。**待ち行列が空なら待つ。** **繋がった接続を新しい fd に置く。**
 ///
-/// 破壊 (`ADR-0064`, socket-accept-does-not-wait): 待たずに `-EAGAIN` を返す。
+/// 破壊テスト (`ADR-0064`, socket-accept-does-not-wait): 待たずに `-EAGAIN` を返す。
 /// **`sockd` が `accept failed` で終わる。**
 #[inline(never)]
 fn accept_from_ring3(fd: u64, addr: u64, bkl: &mut Option<crate::bkl::BklGuard>) -> u64 {
@@ -2470,7 +2470,7 @@ unsafe fn read_from_socket(
 /// ソケットのその側が読める（データか EOF）か、接続が無くなるまで待つ（2026-09-23）。
 ///
 /// **読みはしない**——**続く [`read_from_socket`] が読む。** **待ち方は [`read_from_socket`] と同じで、
-/// 待ちの数も同じ計器へ数える。** **接続が無ければ待たない**（続く読みが `-ENOTCONN` を返す）。
+/// 待ちの数も同じ計測へ数える。** **接続が無ければ待たない**（続く読みが `-ENOTCONN` を返す）。
 #[cfg_attr(feature = "socket-recvmsg-takes-fd-first", allow(dead_code))]
 fn wait_until_readable(
     conn: u8,
@@ -2533,7 +2533,7 @@ unsafe fn write_to_socket(
     }
 }
 
-/// `mmap` の番号（Linux x86-64。`ADR-0065`）。**共有メモリの fd を自分の空間へ張る。**
+/// `mmap` の番号（Linux x86-64。`ADR-0065`）。**共有メモリの fd を自分の空間へマップする。**
 pub const SYS_MMAP: u64 = 9;
 /// `ftruncate` の番号。**共有メモリの大きさを据える（ページを取る）。**
 pub const SYS_FTRUNCATE: u64 = 77;
@@ -2544,7 +2544,7 @@ pub const SYS_RECVMSG: u64 = 47;
 /// `memfd_create` の番号。**無名の共有メモリを作り fd を返す。**
 pub const SYS_MEMFD_CREATE: u64 = 319;
 
-/// `PROT_WRITE`（`mmap`。書ける葉を張る）。
+/// `PROT_WRITE`（`mmap`。書ける葉を作る）。
 const PROT_WRITE: u64 = 2;
 /// `SOL_SOCKET`（`cmsghdr` の level）。
 const SOL_SOCKET: u32 = 1;
@@ -2553,11 +2553,11 @@ const SCM_RIGHTS: u32 = 1;
 /// `EMSGSIZE`（補助データが規定の形でない）。
 const EMSGSIZE: i64 = 90;
 
-/// `mmap` が張る基点（プロセスごと）。**像・ヒープ・スタックは `0x400000..0x800000` に
-/// 収まっているので、その上（PML4[0] の空き）へ順に張る**（`ADR-0065`。窓の拡張は要らない）。
+/// `mmap` がマップする基点（プロセスごと）。**イメージ・ヒープ・スタックは `0x400000..0x800000` に
+/// 収まっているので、その上（PML4[0] の空き）へ順にマップする**（`ADR-0065`。ウィンドウの拡張は要らない）。
 const MMAP_BASE: u64 = 0x1000_0000;
 
-/// 次に `mmap` で張る番地（スロットごと。`MMAP_BASE` から上へ）。
+/// 次に `mmap` でマップするアドレス（スロットごと。`MMAP_BASE` から上へ）。
 static MMAP_NEXT: [core::sync::atomic::AtomicU64; crate::ring3::RING3_SLOTS] =
     [const { core::sync::atomic::AtomicU64::new(MMAP_BASE) }; crate::ring3::RING3_SLOTS];
 
@@ -2573,7 +2573,7 @@ fn shm_of(fd: u64) -> Result<u8, u64> {
 }
 
 /// [`SYS_MEMFD_CREATE`] の本体。**無名の共有メモリを作り、最小の空き fd に据える。**
-/// **名前と旗は見ない**（最小のため。Linux は名前をデバッグに使うだけ）。
+/// **名前とフラグは見ない**（最小のため。Linux は名前をデバッグに使うだけ）。
 #[inline(never)]
 fn memfd_create_from_ring3() -> u64 {
     let Some(shm) = crate::shm::create() else {
@@ -2607,8 +2607,8 @@ fn ftruncate_from_ring3(fd: u64, size: u64) -> u64 {
     }
 }
 
-/// [`SYS_MMAP`] の本体。**共有メモリの fd を自分の空間の `MMAP_BASE` から上へ張る。**
-/// **`addr` は見ない（張る場所はカーネルが決める）。`offset` は 0 だけ。**
+/// [`SYS_MMAP`] の本体。**共有メモリの fd を自分の空間の `MMAP_BASE` から上へマップする。**
+/// **`addr` は見ない（マップする場所はカーネルが決める）。`offset` は 0 だけ。**
 ///
 /// 破壊 (`ADR-0065`, shm-mmap-maps-nothing): 張らずに番地だけ返す。**読み書きが #PF になり、
 /// 往復が成り立たない。**
@@ -2623,7 +2623,7 @@ unsafe fn mmap_from_ring3(len: u64, prot: u64, fd: u64, offset: u64, direct_map:
     if offset != 0 {
         return (-EINVAL) as u64;
     }
-    // **画面の fd なら裏バッファを張る（`ADR-0066` の Y-c）。** **張り方は共有メモリと同じ**
+    // **画面の fd なら裏バッファをマップする（`ADR-0066` の Y-c）。** **マップの仕方は共有メモリと同じ**
     // （`PTE_SHARED`）。
     if is_screen_fd(fd) {
         // SAFETY: 呼び出し元契約をそのまま渡す。
@@ -2654,7 +2654,7 @@ unsafe fn mmap_from_ring3(len: u64, prot: u64, fd: u64, offset: u64, direct_map:
         user: true,
         writable: prot & PROT_WRITE != 0,
         cacheable: true,
-        // **共有メモリの葉に印を立てる（`ADR-0065`）。** **`destroy` が集めず、`crate::shm` が
+        // **共有メモリの葉に目印を立てる（`ADR-0065`）。** **`destroy` が集めず、`crate::shm` が
         // 参照数で返す。**
         shared: true,
     };
@@ -2675,10 +2675,10 @@ unsafe fn mmap_from_ring3(len: u64, prot: u64, fd: u64, offset: u64, direct_map:
             outcome = (-EINVAL) as u64;
             break;
         };
-        // 破壊 (`ADR-0065`, shm-mmap-maps-nothing): 張らない。
+        // 破壊テスト (`ADR-0065`, shm-mmap-maps-nothing): マップしない。
         #[cfg(not(feature = "shm-mmap-maps-nothing"))]
         {
-            // SAFETY: 稼働中の表へ、ユーザーの範囲を、共有メモリの物理ページで張る。
+            // SAFETY: 稼働中の表へ、ユーザーの範囲を、共有メモリの物理ページでマップする。
             if unsafe { table.map_4kib(virt, *frame, attributes, allocator) }.is_err() {
                 outcome = (-ENOMEM) as u64;
                 break;
@@ -2741,7 +2741,7 @@ unsafe fn read_msghdr(
     }
     // **`msg_iovlen` は 1 だけ**（散らばり集めは持たない）。
     //
-    // 破壊 (`ADR-0065`, socket-msghdr-ignores-iovlen): これを見ない。**iovlen が 2 でも受けて
+    // 破壊テスト (`ADR-0065`, socket-msghdr-ignores-iovlen): これを見ない。**iovlen が 2 でも受けて
     // 1 本目だけ送る**——**`sockc` の badmsg が `-EINVAL` を得られず、送ったバイト数が返る。**
     #[cfg(not(feature = "socket-msghdr-ignores-iovlen"))]
     if iovlen != 1 {
@@ -2869,7 +2869,7 @@ unsafe fn recvmsg_from_ring3(
     // 1 度落ちた。`docs/troubleshooting.md` の 2026-09-23 の項）。**送り手は fd を先に置くので、
     // データが読めるなら fd は既に置かれている。**
     //
-    // 破壊 (2026-09-23, socket-recvmsg-takes-fd-first): 待たずに取る（直す前の形）。**受け手が先に
+    // 破壊テスト (2026-09-23, socket-recvmsg-takes-fd-first): 待たずに取る（直す前の形）。**受け手が先に
     // 待つ台本（`sockc shmlate`）で fd が届かず、`shm-ok` が返らない。**
     #[cfg(not(feature = "socket-recvmsg-takes-fd-first"))]
     wait_until_readable(conn, side, bkl);
@@ -2924,7 +2924,7 @@ unsafe fn recvmsg_from_ring3(
     }
 }
 
-/// [`SYS_SPAWN_DETACHED`] の本体。**引数の写しは [`spawn_from_ring3`] と同じ形である。**
+/// [`SYS_SPAWN_DETACHED`] の本体。**引数のコピーは [`spawn_from_ring3`] と同じ形である。**
 ///
 /// # 安全性
 ///
@@ -2976,7 +2976,7 @@ unsafe fn spawn_detached_from_ring3(
         Err(errno) => return (-errno) as u64,
     };
 
-    // **起こす前に探す。** **無ければ同期で `-ENOENT`**（シェルの `PATH` の輪が次へ進む）。
+    // **起動する前に探す。** **無ければ同期で `-ENOENT`**（シェルの `PATH` の輪が次へ進む）。
     if let Err(error) = crate::userland::probe_program(&buf[..len]) {
         return (-errno_for_spawn(error)) as u64;
     }
@@ -2997,7 +2997,7 @@ unsafe fn spawn_detached_from_ring3(
         Some((&envp_bytes[..envp_used], envp_count)),
         stdout_pipe,
     ) else {
-        // **起こせなかった**（回収されていない子が居る・走っている最中）。**作ったパイプを
+        // **起動できなかった**（回収されていない子が居る・走っている最中）。**作ったパイプを
         // 片づける**——**書き端と予約の両方を返す。**
         if let Some(pipe) = stdout_pipe {
             crate::pipe::drop_reservation(pipe);
@@ -3012,13 +3012,13 @@ unsafe fn spawn_detached_from_ring3(
 
     // **子が Ring 3 へ入るか終わるまで戻らない**（[`SYS_SPAWN_DETACHED`] の doc）。
     //
-    // 破壊 (`ADR-0063` の (b3), spawn-detached-returns-early): **入場を待たず、1 度だけ譲って
+    // 破壊テスト (`ADR-0063` の (b3), spawn-detached-returns-early): **入場を待たず、1 度だけ譲って
     // 戻る。** **左が読み込みに入った直後にシェルへ戻し、左の読み込み（`load_user_program`。
-    // 同じ破壊が貸し出しを持ったまま 2 ティック回る）の最中に右を `spawn` させる**——
-    // **右が `AllocatorUnavailable` で起こせない。** **「機会を作る」形である**——**待たない
+    // 同じ破壊テストが貸し出しを持ったまま 2 ティック空回りする）の最中に右を `spawn` させる**——
+    // **右が `AllocatorUnavailable` で起動できない。** **「機会を作る」形である**——**待たない
     // だけでは、右の `spawn` は左が走り出す前（μs）に終わり、21 本の `|` で 1 度も重ならなかった。**
-    // **右の読み込みに回りを置く形は誤りだった**——**システムコールの中は BKL を解いても IF=0 の
-    // ままで、ティックを見られずに永久に回った**（実測。`docs/troubleshooting.md`）。
+    // **右の読み込みに空回りを置く形は誤りだった**——**システムコールの中は BKL を解いても IF=0 の
+    // ままで、ティックを見られずに永久に空回りした**（実測。`docs/troubleshooting.md`）。
     #[cfg(feature = "spawn-detached-returns-early")]
     {
         drop(bkl.take());
@@ -3129,7 +3129,7 @@ unsafe fn spawn_with_piped_stdin_from_ring3(
 fn wait_child_from_ring3(handle: u64, bkl: &mut Option<crate::bkl::BklGuard>) -> u64 {
     // **使われなかった予約を消す**（[`SYS_WAIT_CHILD`] の doc）。
     //
-    // 破壊 (`ADR-0063` の (b3), wait-child-keeps-reservation): 消さない。**右が見つからなかった
+    // 破壊テスト (`ADR-0063` の (b3), wait-child-keeps-reservation): 消さない。**右が見つからなかった
     // 回の後、パイプが空かず、次の `|` が `-EBUSY` になる。**
     #[cfg(not(feature = "wait-child-keeps-reservation"))]
     if let Some(pipe) = crate::userland::take_pending_stdin(crate::ring3::current_slot()) {
@@ -3139,8 +3139,8 @@ fn wait_child_from_ring3(handle: u64, bkl: &mut Option<crate::bkl::BklGuard>) ->
     let status = crate::userland::wait_for_ring3_task(handle);
     *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
     match status {
-        // **起こせなかった子は `u64::MAX` で記録されている**（`run_detached_request`）。
-        // **`-errno` の範囲と紛れない値にする**——**`-EIO` へ写す。**
+        // **起動できなかった子は `u64::MAX` で記録されている**（`run_detached_request`）。
+        // **`-errno` の範囲と紛れない値にする**——**`-EIO` へマップする。**
         crate::userland::ChildStatus::Ended(u64::MAX) => (-EIO) as u64,
         crate::userland::ChildStatus::Ended(bits) => bits,
         crate::userland::ChildStatus::NoSuchChild => (-ECHILD) as u64,
@@ -3155,7 +3155,7 @@ unsafe fn spawn_from_ring3(
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
-    // **パスと `argv` を写す。BKL を保持したままである。**
+    // **パスと `argv` をコピーする。BKL を保持したままである。**
     // **ユーザーメモリへ触るのはここだけで、区間ごと BKL の内側に残す**
     // （`copy_from_user` の TOCTOU の注記）。
     let mut buf = [0u8; PATH_MAX];
@@ -3179,7 +3179,7 @@ unsafe fn spawn_from_ring3(
         Err(errno) => return (-errno) as u64,
     };
 
-    // **`envp` も同じ形で写す（f-2。`ADR-0053` の Decision 2）。**
+    // **`envp` も同じ形でコピーする（f-2。`ADR-0053` の Decision 2）。**
     //
     // **NULL は `-EFAULT` である**——`argv` と同じ規則を使う。**「環境が無い」は
     // 空の配列（先頭が NULL）で表す。** **新しい規則を作らない。**
@@ -3213,7 +3213,7 @@ unsafe fn spawn_from_ring3(
         Ok(crate::userland::SpawnOutcome::Folded(vector)) => SPAWN_FOLDED_FLAG | (vector << 9),
         Ok(crate::userland::SpawnOutcome::Interrupted) => SPAWN_INTERRUPTED_FLAG,
         Err(error) => {
-            // 破壊 (S11-5, spawn-eagain-as-enosys): 深さで断ったことを
+            // 破壊テスト (S11-5, spawn-eagain-as-enosys): 深さで断ったことを
             // `-ENOSYS` として返す。**どちらも「できない」を意味するので、
             // 雑に見ると同じに見える。** `-ENOSYS` は「その番号は無い」で、
             // `-EAGAIN` は「その番号は在るが、今は受け付けられない」である。
@@ -3264,7 +3264,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     // **`Option` にしてあるのは、出口以外で手放す経路が 2 つあるからである**
     // ——[`SYS_EXIT`]（longjmp で出ていくので `Drop` が走らない）と
     // [`SYS_SPAWN`]（Ring 3 へ降りている間は保持しない。`ADR-0023` §1）。
-    // **破壊（B-d）**——**カーネルへ入った時点で FP の状態を塗る。**
+    // **破壊テスト（B-d）**——**カーネルへ入った時点で FP の状態を塗る。**
     // **`ADR-0058` の Decision 2（カーネルは FP を壊さない）の反証である。**
     //
     // **割り込みの入口にも同じものが在る**（`idt::irq_entry`）。**2 つとも要る**
@@ -3279,7 +3279,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     // 立て直す。降ろす前の値を記録しておき、往復の検証で突き合わせる（Ring 3 から
     // 来たのなら真のはず）。
     // **今のタスクのシステムコール側の状態を 1 回だけ引く（W1-c-3）。** **引く箇所ごとに
-    // `state()` を呼ぶと、`dev` では呼んだ箇所の数だけ一時値が枠を広げた**（実測。この関数の枠が
+    // `state()` を呼ぶと、`dev` では呼んだ箇所の数だけ一時値がフレームを広げた**（実測。この関数のフレームが
     // 408 から 616 バイトになった）。
     let state = state();
     state
@@ -3297,7 +3297,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     let number = ctx.rax;
 
     // 第 4 引数は R10（RCX ではない。ADR-0020）。
-    // 破壊 (M5-f-1-2, arg4-rcx): 第 4 引数を RCX から読む。記録した第 4 引数が
+    // 破壊テスト (M5-f-1-2, arg4-rcx): 第 4 引数を RCX から読む。記録した第 4 引数が
     // PROBE_ARGS[3] と食い違い、R10 規約であることが実証される。
     #[cfg(not(feature = "syscall-test-arg4-rcx"))]
     let arg3 = ctx.r10;
@@ -3326,8 +3326,8 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
         // SAFETY: 同上。`bkl` はいま保持しているガードである。
         unsafe { spawn_from_ring3(args[0], args[1], args[2], pml4_phys, direct_map, &mut bkl) }
     } else if number == SYS_SPAWN_DETACHED {
-        // **`spawn_from_ring3` と同じ理由で `dispatch` の外に置く**——**写しの枠（2.3 KiB）を
-        // `dispatch` の枠に乗せない。**
+        // **`spawn_from_ring3` と同じ理由で `dispatch` の外に置く**——**コピーのフレーム（2.3 KiB）を
+        // `dispatch` のフレームに乗せない。**
         // SAFETY: 同上。
         unsafe {
             spawn_detached_from_ring3(
@@ -3350,15 +3350,15 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
 
     // **exit だけは Ring 3 へ返らない。**
     //
-    // 破壊 (S9-b-3-1, user-exit-ignored): 終了させずに Ring 3 へ返す。プロセスは
-    // `exit` の直後に置いた `ud2` へ落ち、ベクタ 6 の畳みとして現れる。
+    // 破壊テスト (S9-b-3-1, user-exit-ignored): 終了させずに Ring 3 へ返す。プロセスは
+    // `exit` の直後に置いた `ud2` へ落ち、ベクタ 6 の例外による終了処理として現れる。
     #[cfg(not(feature = "user-exit-ignored"))]
     if number == SYS_EXIT {
         // **BKL は自分で解く。** 下の `leave_ring3` は longjmp で、`Drop` を
         // 走らせない。**取ったまま戻ると、二度と解かれない。**
         //
-        // 破壊 (S9-b-3-1, user-exit-keep-bkl): 解かずに戻る。次に BKL を取る者
-        // （空間を畳む側）が、同じコアの再取得として捕まえる。
+        // 破壊テスト (S9-b-3-1, user-exit-keep-bkl): 解かずに戻る。次に BKL を取る者
+        // （空間を破棄する側）が、同じコアの再取得として検出する。
         #[cfg(not(feature = "user-exit-keep-bkl"))]
         drop(bkl.take());
         // SAFETY: Ring 3 から `int 0x80` で入った文脈で、RECOVERY は
@@ -3367,7 +3367,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     }
 
     // 戻り値を RAX へ書き戻す。復元経路の pop rax がこれをユーザー RAX へ載せる。
-    // 破壊 (M5-f-1-2, drop-retval): 書き戻しを落とす。ctx.rax は番号のままで、
+    // 破壊テスト (M5-f-1-2, drop-retval): 書き戻しを落とす。ctx.rax は番号のままで、
     // ユーザーは期待した戻り値を受け取れない。
     #[cfg(not(feature = "syscall-test-drop-retval"))]
     {
@@ -3377,7 +3377,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     let _ = ret;
 
     // Ring 3 へ返る（stub の復元経路が iretq する）。立て直す（S8-b）。
-    // 立て直してから実際に iretq するまでは Ring 0 なのに真だが、畳みの判定は
+    // 立て直してから実際に iretq するまでは Ring 0 なのに真だが、例外による終了処理の判定は
     // CS.RPL=0 を弾くので届かない（ring3.rs の IN_RING3 の doc）。
     crate::ring3::note_return_to_ring3();
 
@@ -3389,8 +3389,8 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
 ///
 /// # `i_size` の手前で止まる
 ///
-/// **返すのは要求された長さではなく、実際に写した長さである。**
-/// 残り（`i_size` - 位置）より多くは写さず、**末尾に達していれば 0 を返す**
+/// **返すのは要求された長さではなく、実際にコピーした長さである。**
+/// 残り（`i_size` - 位置）より多くはコピーせず、**末尾に達していれば 0 を返す**
 /// （Linux と同じ EOF の表し方）。
 ///
 /// # 線2 がここでも当たる
@@ -3402,18 +3402,18 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
 /// - **ブロック内のオフセット**——`pos % block_size` はブロック長未満で、
 ///   `block.len()` との差は飽和引き算で出す
 ///
-/// # 借りたバイト列から写す
+/// # 借りたバイト列からコピーする
 ///
-/// `common::ext2::Ext2::file_block` が返すのは**像を借りたバイト列**である。
-/// **位置から必要な範囲を切り出して写す**ので、カーネル側に中継のバッファは要らない。
+/// `common::ext2::Ext2::file_block` が返すのは**イメージを借りたバイト列**である。
+/// **位置から必要な範囲を切り出してコピーする**ので、カーネル側に中継のバッファは要らない。
 ///
 /// # Safety
 ///
 /// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
-/// `read(0)` が待った回数（W2-c-2 の計器）。
+/// `read(0)` が待った回数（W2-c-2 の計測）。
 static KEYBOARD_WAITS: AtomicU64 = AtomicU64::new(0);
 
-/// 起こされたが読めなかった回数（W2-c-2 の計器）。**空振りの起床である。**
+/// 起こされたが読めなかった回数（W2-c-2 の計測）。**空振りの起床である。**
 ///
 /// **0 でなくてよい**——**離鍵のように、積まれてもバイトにならない合図が在る**（`ADR-0061`）。
 static EMPTY_WAKES: AtomicU64 = AtomicU64::new(0);
@@ -3421,7 +3421,7 @@ static EMPTY_WAKES: AtomicU64 = AtomicU64::new(0);
 /// 安全網に当たった回数（W2-c-2）。**止めない。数えるだけである。**
 ///
 /// **本番でも 0 でないことがある**——**人が席を外せば当たる。** **だから判定に使わない**
-/// （`ADR-0061`。時間の判定を避ける）。**計器の行に出すだけである。**
+/// （`ADR-0061`。時間の判定を避ける）。**計測の行に出すだけである。**
 static SLOW_WAITS: AtomicU64 = AtomicU64::new(0);
 
 /// 安全網の上限（W2-c-2。`ADR-0061`）。**6,000 ティック = 60 秒**（100Hz。実測の
@@ -3437,7 +3437,7 @@ static SLOW_WAITS: AtomicU64 = AtomicU64::new(0);
 /// **起こす経路が壊れたことは、関係で見る**——**`keyboard::pushed_without_waking` が、
 /// 待っている者が居たのに起こさなかった回数を数える。** **1 回目の打鍵で出るので、
 /// 時間を待つ必要が無い。** **こちらは念のための網である。**
-// 破壊 `read-never-waits` では待たないので、上限も待つ関数も読まれない。
+// 破壊テスト `read-never-waits` では待たないので、上限も待つ関数も読まれない。
 #[cfg_attr(feature = "read-never-waits", allow(dead_code))]
 const SLOW_WAIT_TICKS: u64 = 6_000;
 
@@ -3451,7 +3451,7 @@ pub fn empty_wakes() -> u64 {
     EMPTY_WAKES.load(Ordering::Relaxed)
 }
 
-/// 安全網に当たった回数（W2-c-2）。**判定には使わない**（計器である）。
+/// 安全網に当たった回数（W2-c-2）。**判定には使わない**（計測である）。
 pub fn slow_waits() -> u64 {
     SLOW_WAITS.load(Ordering::Relaxed)
 }
@@ -3463,14 +3463,14 @@ pub fn slow_waits() -> u64 {
 // 残りが出る**（実測で 76 と出た。同じ回のシェルの実数は 2,969 である）。
 //
 // **判定が読むべき数は、既に在る行が持っている**——**`spawn: /bin/zash ended ... after N
-// syscall(s)` は、親のものへ戻す前に読んでいる。** **新しい計器を足さず、あの行を読む。**
+// syscall(s)` は、親のものへ戻す前に読んでいる。** **新しい計測を足さず、あの行を読む。**
 
 /// 端末のバイトが来るまで待つ（W2-c-2。`ADR-0061`）。**起こされたら `true` を返す。**
 ///
 /// **前景を失っていたら `false` を返す**——**呼び出し側は `-EBADF` を返す。**
 /// **待ち続けない**（前景を持たない者は読めない。決定 1）。
 ///
-/// # 窓は構造で閉じている
+/// # ウィンドウは構造で閉じている
 ///
 /// **呼ばれるのは IF=0 の文脈である**（`int 0x80` は割り込みゲート）。**BKL を解いても
 /// IF は戻らない**（`EntryInterruptGuard` は保存した RFLAGS が IF=1 のときだけ戻す。実測）
@@ -3479,7 +3479,7 @@ pub fn slow_waits() -> u64 {
 /// # BKL を解いてから譲る
 ///
 /// **`ADR-0036` の「保持したまま眠らない・待たない」に従う。** **起きたら取り直す。**
-// 破壊 `read-never-waits` では呼ばれない（あちらは `-EAGAIN` を返して回る）。
+// 破壊テスト `read-never-waits` では呼ばれない（あちらは `-EAGAIN` を返して空回りする）。
 #[cfg_attr(feature = "read-never-waits", allow(dead_code))]
 fn wait_for_keyboard(bkl: &mut Option<crate::bkl::BklGuard>) -> bool {
     KEYBOARD_WAITS.fetch_add(1, Ordering::Relaxed);
@@ -3497,9 +3497,9 @@ fn wait_for_keyboard(bkl: &mut Option<crate::bkl::BklGuard>) -> bool {
 
     // **安全網（`ADR-0061`）。止めない。数えるだけである。**
     //
-    // **行を出さない形にした（W2-c-2）。** **`syscall.rs` にシリアルの口は無く、開けると
+    // **行を出さない形にした（W2-c-2）。** **`syscall.rs` にシリアルポートは無く、開けると
     // 直接シリアルの許可リストに項目が増える**（`xtask` の `DIRECT_SERIAL_PORT_ALLOWLIST`）。
-    // **報せる先は既存の計器の行でよい**——**`init` がセッションの後に出す行がこの数を読む。**
+    // **報せる先は既存の計測の行でよい**——**`init` がセッションの後に出す行がこの数を読む。**
     // **そもそも主たる検出は関係のほうである**（`keyboard::pushed_without_waking`）。
     let waited = crate::idt::timer_ticks().saturating_sub(since);
     if waited > SLOW_WAIT_TICKS {
@@ -3522,7 +3522,7 @@ unsafe fn sys_read(
     //
     // **ここが「Ring 3 が入力を待つ側へ回る直前」である。** **返す値が入力でも
     // `-EAGAIN` でも掃く**——**溜まっていなければ `flush` は何もしない**ので、
-    // `-EAGAIN` で回り続ける形でも費用は増えない。
+    // `-EAGAIN` で空回りし続ける形でも費用は増えない。
     //
     // **BKL を解いてから呼ぶ**（`crate::console::flush_foreground` の doc。
     // **全面転送は 5.05M サイクル掛かる**——実測）。
@@ -3531,7 +3531,7 @@ unsafe fn sys_read(
     // どの fd から読むかではない**——**ファイルを読む前に画面が古いままである
     // 理由も無い。**
     //
-    // 破壊 (PERF-a, read-skip-flush-test): ここで送らない。**溜めたまま
+    // 破壊テスト (PERF-a, read-skip-flush-test): ここで送らない。**溜めたまま
     // 入力を待つ**ので、**画面が古いまま止まる**——**次に誰かが送るまで
     // 出ない。** **画面を読む判定が軒並み落ちる。**
     #[cfg(not(feature = "read-skip-flush-test"))]
@@ -3596,7 +3596,7 @@ unsafe fn sys_read(
         return (-EINVAL) as u64;
     }
 
-    // **表を握る区間を短くする。** ここでは inode と位置の写しだけを取り、
+    // **表を握る区間を短くする。** ここでは inode と位置のコピーだけを取り、
     // 検証とブロックの読み出しは外で行う（`Locked` は割り込みを禁止する）。
     let opened = crate::vfs::with_current_files(|files| {
         files.get(fd as usize).map(|file| {
@@ -3629,7 +3629,7 @@ unsafe fn sys_read(
             // **以前は `-EAGAIN` を返し、シェルが `continue` で回していた**
             // ——**1 セッションで 1,377,679 回のシステムコールを出していた**（実測。W2-c-1）。
             //
-            // # 窓は構造で閉じている
+            // # ウィンドウは構造で閉じている
             //
             // **`int 0x80` は割り込みゲートなので、ここは IF=0 である。** **BKL を解いても
             // IF は戻らない**（`EntryInterruptGuard` は保存した RFLAGS が IF=1 のときだけ戻す。実測）。
@@ -3645,7 +3645,7 @@ unsafe fn sys_read(
             // **大域の「誰かが待ったことがあるか」では数えられない**——**それだと、次の
             // `read(0)` の 1 周目（まだ待っていない空振り）を空振りの起床として数えてしまう。**
             // **数えたいのは「起こされたのに読めなかった」であって、「空だった」ではない。**
-            // 破壊 `read-never-waits` では待たないので、書き換わらない。
+            // 破壊テスト `read-never-waits` では待たないので、書き換わらない。
             #[cfg_attr(feature = "read-never-waits", allow(unused_mut))]
             let mut waited_once = false;
             let got = loop {
@@ -3670,7 +3670,7 @@ unsafe fn sys_read(
                 // **実測で踏んだ**——**無条件に待つ形にしたら、起動がそこで止まり、
                 // シェルまで届かなかった**（`docs/troubleshooting.md`）。
                 //
-                // **コンソールの前景が据えられているのは、`init` がシェルを起こす区間だけである**
+                // **コンソールの前景が据えられているのは、`init` がシェルを起動する区間だけである**
                 // （`console::install_foreground`）。**そこだけが「誰かが打つ」場所である。**
                 if !crate::console::foreground_installed() {
                     return (-EAGAIN) as u64;
@@ -3681,14 +3681,14 @@ unsafe fn sys_read(
                 // **どれも「もう入力は無い」であって、`-EAGAIN` がその答えだった**
                 // （`crate::input::script_drives_input` の doc）。
                 // **待つ形にしたら、誰も打たないので待ちが終わらず、`--full` が上限に
-                // 当たった**（実測。台本の族 6 項目が落ちた。`docs/troubleshooting.md`）。
+                // 当たった**（実測。台本のグループの 6 項目が落ちた。`docs/troubleshooting.md`）。
                 //
-                // **待ちを見るのは、本物の打鍵を使う `--shell-test` の族だけである**
+                // **待ちを見るのは、本物の打鍵を使う `--shell-test` のグループだけである**
                 // （`docs/verification-coverage.md` の「待ちの経路を通る項目」）。
                 if crate::input::script_drives_input() {
                     return (-EAGAIN) as u64;
                 }
-                // 破壊 (W2-c-2, read-never-waits): 待たずに `-EAGAIN` を返す。**回して待つ形へ戻る**
+                // 破壊テスト (W2-c-2, read-never-waits): 待たずに `-EAGAIN` を返す。**回して待つ形へ戻る**
                 // ——**判定 1（回さずに待つ）が落ちる。**
                 #[cfg(feature = "read-never-waits")]
                 return (-EAGAIN) as u64;
@@ -3712,7 +3712,7 @@ unsafe fn sys_read(
     };
     // **書きで開いた fd への read は -EBADF である**（zi-c。ADR-0037。
     // 読みで開いた fd への write と対称——fd の向きの取り違えは両方向とも
-    // -EBADF）。inode の写しは open 時点の大きさのままで、切った後の実寸とも
+    // -EBADF）。inode のコピーは open 時点の大きさのままで、切った後の実寸とも
     // 食い違う——**読ませない理由は形（Linux の向きの規約）と実装（古い
     // i_size で読むと切る前の長さを信じる）の両方にある。**
     if writable {
@@ -3721,11 +3721,11 @@ unsafe fn sys_read(
     // **ディレクトリは `read` で読めない。** 中身は `getdents64` で返す形である
     // （Linux も同じで、`read(2)` は `EISDIR` を返す）。
     //
-    // 破壊 (S10-b, eisdir-as-enotdir): 対応表を 1 つ取り違え、`-ENOTDIR` を返す。
+    // 破壊テスト (S10-b, eisdir-as-enotdir): 対応表を 1 つ取り違え、`-ENOTDIR` を返す。
     // **どちらも「種別が違う」を意味するので、雑に見ると同じに見える。**
     // Linux は分けている——`read` がディレクトリに当たったら `EISDIR`、
     // パスの途中がディレクトリでなければ `ENOTDIR` である。
-    // **syscall-test の検算が食い違いを捕まえる。**
+    // **syscall-test の検算が食い違いを検出する。**
     if inode.is_directory() {
         #[cfg(not(feature = "syscall-test-eisdir-as-enotdir"))]
         let errno = EISDIR;
@@ -3740,7 +3740,7 @@ unsafe fn sys_read(
         // 末尾に達しているか、0 バイト要求された。**どちらも 0 である。**
         return 0;
     }
-    // **踏み込む前に検証する。** 写す長さは `want` で確定している。
+    // **踏み込む前に検証する。** コピーする長さは `want` で確定している。
     // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
     let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, buf, want) }) else {
         return (-EFAULT) as u64;
@@ -3767,7 +3767,7 @@ unsafe fn sys_read(
         // その長さを越えることがある。**飽和で引く。**
         let available = block.len().saturating_sub(within);
         if available == 0 {
-            // 進めない。**`i_size` と実際のブロックが食い違っている像である。**
+            // 進めない。**`i_size` と実際のブロックが食い違っているイメージである。**
             return (-EIO) as u64;
         }
         let chunk = (want - done).min(available as u64) as usize;
@@ -3779,10 +3779,10 @@ unsafe fn sys_read(
         done += written as u64;
     }
 
-    // **位置を進めるのは、写し終えた後である。** 途中で失敗したら進めない
+    // **位置を進めるのは、コピーし終えた後である。** 途中で失敗したら進めない
     // （呼び出し側から見て「読めなかったぶんは読めていない」）。
     //
-    // 破壊 (S10-b, read-no-advance): 位置を進めない。**1 回だけ読むぶんには
+    // 破壊テスト (S10-b, read-no-advance): 位置を進めない。**1 回だけ読むぶんには
     // 正しく見える**——短く読んでから続きを読む検算だけが食い違う。
     #[cfg(not(feature = "syscall-test-read-no-advance"))]
     crate::vfs::with_current_files(|files| {
@@ -3803,7 +3803,7 @@ unsafe fn sys_read(
 ///
 /// # パスはユーザー空間から来る
 ///
-/// **`UserSlice` と窓がそのまま効く**（S9-b-3-2b で 1 つに畳んだ窓）。
+/// **`UserSlice` とウィンドウがそのまま効く**（S9-b-3-2b で 1 つに畳んだウィンドウ）。
 /// NUL 終端なので長さが先に分からないが、**ページ単位で検証しながら進む**ので、
 /// **踏み込む前に検証するという契約は崩れない。**
 ///
@@ -3825,7 +3825,7 @@ unsafe fn sys_read(
 /// # 作った後にもう一度引く
 ///
 /// **`create_file` は inode 番号を返すが、開く側が要るのは [`common::ext2::Inode`]
-/// である。** **像を書き換えた後に引き直す**ので、**作った結果そのものを見る**
+/// である。** **イメージを書き換えた後に引き直す**ので、**作った結果そのものを見る**
 /// ——**書けたつもりで引けない形が、ここで落ちる。**
 fn create_and_lookup(path: &[u8]) -> Result<common::ext2::Inode, i64> {
     let (parent, name) = split_parent_and_name(path)?;
@@ -3841,7 +3841,7 @@ fn create_and_lookup(path: &[u8]) -> Result<common::ext2::Inode, i64> {
         return Err(ENOTDIR);
     }
 
-    // 破壊 (e-5, open-ignore-create-test): O_CREAT を受けても作らない。
+    // 破壊テスト (e-5, open-ignore-create-test): O_CREAT を受けても作らない。
     // **戻り値は「無い」のままなので、開く側から見ると受理していないのと
     // 同じである**——**新しいファイルが作れることの判定だけが落ちる。**
     #[cfg(feature = "open-ignore-create-test")]
@@ -3900,23 +3900,23 @@ fn errno_for_alloc(error: common::ext2::AllocError) -> i64 {
         // **その名前は無い**（DIR-1b。`unlink` が使う）。
         AllocError::NoSuchEntry => ENOENT,
         // **ディレクトリだった**（DIR-1b）。**`rm` はこれで「ディレクトリだ」
-        // と分かり、`rmdir` を使えと言える。**
+        // と分かり、`rmdir` を使えと示せる。**
         AllocError::NotARegularFile(_) => EISDIR,
         // **ディレクトリでなかった**（DIR-1c。`rmdir` が通常ファイルを見た）。
         AllocError::NotADirectory(_) => ENOTDIR,
         // **空でなかった**（DIR-1c。Linux も `rmdir` にこれを返す）。
         AllocError::DirectoryNotEmpty(_) => ENOTEMPTY,
-        // **像の側の食い違いは、使う側の入力では直らない。**
+        // **イメージの側の食い違いは、使う側の入力では直らない。**
         _ => EIO,
     }
 }
 
 /// `brk(addr)` の本体（H-a。ADR-0044）。
 ///
-/// # 上げれば写す。下げれば外して返す
+/// # 上げればマップする。下げれば外して返す
 ///
 /// **ページ単位で動く。** **要求は 1 バイト単位で受けるが、
-/// 写すのはページである**（Linux も同じ）。
+/// マップするのはページである**（Linux も同じ）。
 ///
 /// # 上限で断る
 ///
@@ -3924,7 +3924,7 @@ fn errno_for_alloc(error: common::ext2::AllocError) -> i64 {
 /// **ガードページは置かない**——**スタックの下端そのものが境界なので、
 /// 越えなければ衝突しない**（ADR-0044 の決定 4）。
 ///
-/// # 稼働中の表へ写す
+/// # 稼働中の表へマップする
 ///
 /// **遠征の中では CR3 がこのプロセスのものである**
 /// （`crate::userland` の `run_loaded_program` が `switch_to` してから入る）。
@@ -3933,7 +3933,7 @@ fn errno_for_alloc(error: common::ext2::AllocError) -> i64 {
 ///
 /// # 途中で足りなくなったら、そこまでで止める
 ///
-/// **写せた分は残す。** **`-ENOMEM` を返すが、上端はそこまで進んでいる**
+/// **マップできた分は残す。** **`-ENOMEM` を返すが、上端はそこまで進んでいる**
 /// ——**巻き戻すと、巻き戻しの途中で失敗したときに何も言えなくなる。**
 /// **呼ぶ側は `brk(0)` で確かめられる。**
 ///
@@ -3947,7 +3947,7 @@ unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
         (heap.is_mapped(), heap.break_at(), heap.start())
     });
     if !mapped {
-        // **像を読む前には答えられない。** ここへ来るのは異常である。
+        // **イメージを読む前には答えられない。** ここへ来るのは異常である。
         return (-ENOMEM) as u64;
     }
 
@@ -3955,7 +3955,7 @@ unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
     if requested == 0 {
         return current;
     }
-    // **像の末尾より下げられない。** **下は像とスタックの外である。**
+    // **イメージの末尾より下げられない。** **下はイメージとスタックの外である。**
     if requested < start || requested > crate::userland::HEAP_LIMIT {
         return (-ENOMEM) as u64;
     }
@@ -3982,7 +3982,7 @@ unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
 
     let mut outcome = requested;
     if want > have {
-        // **伸ばす。** 1 ページずつ写す。
+        // **伸ばす。** 1 ページずつマップする。
         let mut page = have;
         while page < want {
             let Some(frame) = allocator.allocate_frame() else {
@@ -3994,7 +3994,7 @@ unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
                 outcome = (-ENOMEM) as u64;
                 break;
             };
-            // **中身を 0 にしてから写す。** **前の住人の中身をユーザーへ渡さない。**
+            // **中身を 0 にしてからマップする。** **前の住人の中身をユーザーへ渡さない。**
             // SAFETY: いま取ったフレームで、direct map が覆っている。
             unsafe {
                 core::ptr::write_bytes(
@@ -4003,7 +4003,7 @@ unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
                     PAGE_SIZE as usize,
                 )
             };
-            // SAFETY: 稼働中の表へ、ユーザーの範囲を写す。
+            // SAFETY: 稼働中の表へ、ユーザーの範囲をマップする。
             if unsafe { table.map_4kib(virt, frame, attributes, allocator) }.is_err() {
                 let _ = allocator.deallocate_frame(frame);
                 outcome = (-ENOMEM) as u64;
@@ -4012,7 +4012,7 @@ unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
             crate::userland::with_current_heap(|heap| heap.note_taken());
             page += PAGE_SIZE;
         }
-        // **写せた分までを上端にする**（doc の「そこまでで止める」）。
+        // **マップできた分までを上端にする**（doc の「そこまでで止める」）。
         let reached = if outcome == requested {
             requested
         } else {
@@ -4020,7 +4020,7 @@ unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
         };
         crate::userland::with_current_heap(|heap| heap.set_break(reached));
     } else {
-        // 破壊 (H-a, brk-skip-shrink-test): 下げる要求で外さない。
+        // 破壊テスト (H-a, brk-skip-shrink-test): 下げる要求で外さない。
         // **上端だけ下がり、フレームは返らない。** **`brk(0)` は下がった値を
         // 返すので、使う側からは成功に見える**——**落ちるのは
         // 「伸ばして縮めたら空きフレームの数が元へ戻る」判定だけである。**
@@ -4032,7 +4032,7 @@ unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
                 if let Some(virt) = common::addr::VirtAddr::new(page) {
                     // SAFETY: 稼働中の表から外し、フレームを返す。
                     if let Ok(frame) = unsafe { table.unmap_4kib(virt) } {
-                        // **`unmap_4kib` は物理番地を `u64` で返す。**
+                        // **`unmap_4kib` は物理アドレスを `u64` で返す。**
                         if let Some(frame) = PhysAddr::new(frame) {
                             let _ = allocator.deallocate_frame(frame);
                             crate::userland::with_current_heap(|heap| heap.note_given());
@@ -4124,8 +4124,8 @@ unsafe fn sys_unlink(path: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -> u
         return (-ENOTDIR) as u64;
     }
 
-    // 破壊 (DIR-1b, unlink-ignore-request-test): 消さずに 0 を返す。
-    // **戻り値は成功のままなので、`rm` は何も言わない**——**落ちるのは
+    // 破壊テスト (DIR-1b, unlink-ignore-request-test): 消さずに 0 を返す。
+    // **戻り値は成功のままなので、`rm` は何も出力しない**——**落ちるのは
     // 「消した後の `ls` に名前が無い」判定だけである。**
     #[cfg(feature = "unlink-ignore-request-test")]
     return 0;
@@ -4157,7 +4157,7 @@ enum DirectoryOp {
 /// # 1 つにまとめてある
 ///
 /// **違うのは `common::ext2` のどちらを呼ぶかだけである。**
-/// **パスの写し・親と名前への割り・親がディレクトリであることの確認は同じ**
+/// **パスのコピー・親と名前への割り・親がディレクトリであることの確認は同じ**
 /// ——**分けると、同じ手順を 2 つ持つことになる。**
 ///
 /// # `mkdir -p` は無い
@@ -4214,12 +4214,12 @@ unsafe fn sys_directory(
 }
 
 unsafe fn sys_open(path: u64, flags: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -> u64 {
-    // **受理は 2 形だけである（zi-c。ADR-0037）**——O_RDONLY と
+    // **受理は 2 つの形だけである（zi-c。ADR-0037）**——O_RDONLY と
     // O_WRONLY|O_TRUNC。**それ以外は従来どおり -EROFS**（bare O_WRONLY も
     // 拒む——位置書きの部品が無く、:w の全置換には O_TRUNC の形が対応する。
     // O_CREAT / O_APPEND は「決めないこと」である）。
     // **e-5 で `O_CREAT` が加わった**（ADR-0037 の Addendum）。**受理するのは
-    // `O_WRONLY|O_TRUNC` と `O_WRONLY|O_CREAT|O_TRUNC` の 2 形である。**
+    // `O_WRONLY|O_TRUNC` と `O_WRONLY|O_CREAT|O_TRUNC` の 2 つの形である。**
     // **`O_CREAT` 単独は受けない**——**位置書きの部品が無いので、
     // 作った後にできるのは全置換だけである**（`O_TRUNC` と同じ形になる）。
     let create = flags & O_CREAT != 0;
@@ -4244,7 +4244,7 @@ unsafe fn sys_open(path: u64, flags: u64, pml4_phys: PhysAddr, direct_map: Direc
         Ok(inode) => inode,
         // **無ければ作る（e-5。`O_CREAT`）。** **作るのは書きの形のときだけである。**
         Err(common::ext2::Ext2Error::NotFound) if write_form && create => {
-            // SAFETY: この関数は Ring 3 からの入口で、像は BKL の内側にある。
+            // SAFETY: この関数は Ring 3 からの入口で、イメージは BKL の内側にある。
             match create_and_lookup(&buf[..len]) {
                 Ok(inode) => inode,
                 Err(errno) => return (-errno) as u64,
@@ -4262,16 +4262,16 @@ unsafe fn sys_open(path: u64, flags: u64, pml4_phys: PhysAddr, direct_map: Direc
         }
         // **open の時点で長さ 0 へ切る（O_TRUNC の意味）。**
         //
-        // 破壊 (zi-c, open-skip-truncate-test): 切らない。**古い中身の後ろへ
+        // 破壊テスト (zi-c, open-skip-truncate-test): 切らない。**古い中身の後ろへ
         // 追記され、読み戻しが「古い+新しい」の連結になる**——syscall-test の
-        // 読み戻しの検算（58 番）が捕まえる。
+        // 読み戻しの検算（58 番）が検出する。
         #[cfg(not(feature = "open-skip-truncate-test"))]
         {
             let layout = match crate::vfs::root_filesystem() {
                 Ok(fs) => fs.layout(),
                 Err(e) => return (-errno_for_ext2(e)) as u64,
             };
-            // **共有借用はもう生きていない。** `layout` は `Copy` の写しで、
+            // **共有借用はもう生きていない。** `layout` は `Copy` のコピーで、
             // `fs` は上の束で落ちている（`common::ext2::Layout` の doc の形）。
             let truncated = crate::vfs::with_root_image_mut(|image| {
                 common::ext2::truncate_to(image, &layout, inode.number, 0)
@@ -4298,14 +4298,14 @@ unsafe fn sys_open(path: u64, flags: u64, pml4_phys: PhysAddr, direct_map: Direc
 /// # 値が違う
 ///
 /// **ext2 は 1=REG・2=DIR、`d_type` は 8=REG・4=DIR である。**
-/// **番号が別の体系なので、写すのではなく引き当てる。** Linux も同じことを
+/// **番号が別の体系なので、コピーするのではなく引き当てる。** Linux も同じことを
 /// している（`fs_ftype_to_dtype`）。
 ///
 /// # 表に無い値は [`DT_UNKNOWN`] である
 ///
 /// **`d_type` は「分からない」を表せる**ので、知らない種別は 0 で返す。
 /// **symlink（ext2 の 7）は載せていない**——**この値を実測で確かめていない**
-/// （像に symlink が無く、`ext2fs` のヘッダもこの環境に無い）。
+/// （イメージに symlink が無く、`ext2fs` のヘッダもこの環境に無い）。
 /// **確かめていないものを表に書かない。** symlink は実装しないと宣言してある
 /// （`docs/roadmap.md` の S10）ので、載せなくても `DT_UNKNOWN` で正しく答える。
 fn dirent_type_for(file_type: u8) -> u8 {
@@ -4386,9 +4386,9 @@ unsafe fn sys_getdents64(
 
         // レコードの長さ。**名前の NUL 終端を数え、8 バイト境界へ切り上げる。**
         //
-        // 破壊 (S10-b, dirent-no-align): 切り上げをやめる。**こちらの走査は
+        // 破壊テスト (S10-b, dirent-no-align): 切り上げをやめる。**こちらの走査は
         // `d_reclen` を頼りに歩くので、外しても自分では気づけない。** 整列は
-        // 呼び出し側との約束なので、**約束を見ている検算だけが捕まえる。**
+        // 呼び出し側との約束なので、**約束を見ている検算だけが検出する。**
         //
         // **S10-b の他の 3 つとは種類が違う。** `eisdir-as-enotdir`・
         // `read-no-advance`・`stat-blocks-in-bytes` は**値が間違っている**形で、
@@ -4464,12 +4464,12 @@ const DIRENT64_MAX_RECORD: usize = (DIRENT64_HEADER_LEN + 255 + 1).next_multiple
 /// **0 は未実装であって値ではない。** 内訳は次のとおりで、
 /// **どれも「0 という値を持っている」のではない。**
 ///
-/// - `st_dev` / `st_rdev`——**デバイス番号の体系が無い。** 像は 1 つで、
+/// - `st_dev` / `st_rdev`——**デバイス番号の体系が無い。** イメージは 1 つで、
 ///   `BlockDevice` の trait も引いていない（`docs/roadmap.md` の S10 の締め）
 /// - `st_blksize`——**入出力の推奨単位という概念が無い。** ブロックサイズなら
 ///   `Ext2::block_size` で分かるが、**`st_blksize` はそれとは別の意味である**
 ///   ので、分かる値で埋めない
-/// - `st_atim` / `st_mtim` / `st_ctim`——**像の時刻を 0 に潰してある。**
+/// - `st_atim` / `st_mtim` / `st_ctim`——**イメージの時刻を 0 に潰してある。**
 ///   `kernel/build.rs` の `zero_image_timestamps` が superblock の 3 つと全 inode の
 ///   4 つを 0 で上書きしており、**`mke2fs` の出力を決定的にするための帰結である。**
 ///   **なぜ 0 なのかは、そこに 1 箇所ある**
@@ -4479,7 +4479,7 @@ const DIRENT64_MAX_RECORD: usize = (DIRENT64_HEADER_LEN + 255 + 1).next_multiple
 /// # `st_blocks` の単位
 ///
 /// **512 バイト単位である**（ブロックサイズ単位ではない）。**ext2 の `i_blocks` も
-/// 同じ単位なので、そのまま写す**（実測で確かめた。`common::ext2::Inode` の
+/// 同じ単位なので、そのままコピーする**（実測で確かめた。`common::ext2::Inode` の
 /// `blocks_512` の doc）。
 ///
 /// # Safety
@@ -4493,7 +4493,7 @@ const DIRENT64_MAX_RECORD: usize = (DIRENT64_HEADER_LEN + 255 + 1).next_multiple
 /// ——**定数を写すと、周波数を変えた日に片方だけが古くなる。**
 ///
 /// **粒度は 10ms のままである。** **Wayland のミリ秒の分解能は形式として満たすが、
-/// 入力の時刻印を付ける段で足りるかを判断すること**（`ADR-0062`）。
+/// 入力の時刻印を付ける段階で足りるかを判断すること**（`ADR-0062`）。
 ///
 /// # Safety
 ///
@@ -4508,8 +4508,8 @@ unsafe fn sys_clock_gettime(
         return (-EINVAL) as u64;
     }
     let ticks = crate::idt::monotonic_ticks();
-    // 破壊 (W2-d+, clock-goes-backwards): 呼ぶたびに減る値を返す。**単調さが壊れる。**
-    // **値はもっともらしいまま進むので、2 回読んで比べる検算でしか捕まらない。**
+    // 破壊テスト (W2-d+, clock-goes-backwards): 呼ぶたびに減る値を返す。**単調さが壊れる。**
+    // **値はもっともらしいまま進むので、2 回読んで比べる検算でしか検出されない。**
     #[cfg(feature = "clock-goes-backwards")]
     let ticks = u64::MAX - ticks;
     let hz = u64::from(crate::irq::timer_frequency_hz());
@@ -4532,10 +4532,10 @@ unsafe fn sys_clock_gettime(
     0
 }
 
-/// `nanosleep` が待ちに入った回数（W2-d+ の計器）。
+/// `nanosleep` が待ちに入った回数（W2-d+ の計測）。
 static TIMER_WAITS: AtomicU64 = AtomicU64::new(0);
 
-/// 眠った側が、起こされた時点でまだ締切に届いていなかった回数（W2-d+ の計器）。
+/// 眠った側が、起こされた時点でまだ締切に届いていなかった回数（W2-d+ の計測）。
 ///
 /// **本番では 0 である**——**起こすのはタイマで、締切を過ぎてから起こす。**
 /// **0 でなければ、誰かが締切より前に起こした**（合図を取り違えた起こし、または締切を
@@ -4558,7 +4558,7 @@ pub fn early_timer_wakes() -> u64 {
 ///
 /// **欄を `Waiting` にし、BKL を解いて譲り、起きたら取り直す**（`wait_for_keyboard`）。
 /// **呼ばれるのは IF=0 の文脈なので、「欄を変えてから譲る」までにタイマは入らない**
-/// ——**窓は構造で閉じている**（W2-c-2 で実測した理由と同じ）。
+/// ——**ウィンドウは構造で閉じている**（W2-c-2 で実測した理由と同じ）。
 ///
 /// # 上限は置かない
 ///
@@ -4639,9 +4639,9 @@ unsafe fn sys_stat(path: u64, statbuf: u64, pml4_phys: PhysAddr, direct_map: Dir
     out[STAT_NLINK..STAT_NLINK + 8].copy_from_slice(&u64::from(inode.links_count).to_le_bytes());
     out[STAT_MODE..STAT_MODE + 4].copy_from_slice(&u32::from(inode.mode).to_le_bytes());
     out[STAT_SIZE..STAT_SIZE + 8].copy_from_slice(&inode.size.to_le_bytes());
-    // 破壊 (S10-b, stat-blocks-in-bytes): `st_blocks` を 512 バイト単位ではなく
+    // 破壊テスト (S10-b, stat-blocks-in-bytes): `st_blocks` を 512 バイト単位ではなく
     // バイト数で書く。**単位の取り違えは値が「もっともらしい」ままなので、
-    // 突き合わせる相手が無いと気づけない。** syscall-test の検算が捕まえる。
+    // 突き合わせる相手が無いと気づけない。** syscall-test の検算が検出する。
     #[cfg(not(feature = "syscall-test-stat-blocks-in-bytes"))]
     let blocks = u64::from(inode.blocks_512);
     #[cfg(feature = "syscall-test-stat-blocks-in-bytes")]
@@ -4721,11 +4721,11 @@ unsafe fn sys_ioctl(
     // **画面が無ければ 0 のままである。**
     let mut out = [0u8; WINSIZE_LEN];
     if let Some((columns, rows, width, height)) = crate::console::foreground_geometry() {
-        // 破壊 (e-1, ioctl-winsize-swap): 行と桁を入れ替えて返す。
+        // 破壊テスト (e-1, ioctl-winsize-swap): 行と桁を入れ替えて返す。
         // **どちらももっともらしい数のままなので、受けた側だけでは気づけない**
-        // （`stat` の `st_blocks` を単位違いで返す破壊と同じ族である）。
+        // （`stat` の `st_blocks` を単位違いで返す破壊テストと同じ種類である）。
         // **画面は正方形ではない**（160x50。実測）ので、入れ替えれば必ず違う値になる。
-        // **カーネルが自分の値を判定行に出しており、突き合わせが捕まえる。**
+        // **カーネルが自分の値を判定行に出しており、突き合わせが検出する。**
         #[cfg(feature = "ioctl-winsize-swap-test")]
         let (rows, columns) = (columns, rows);
         // **`u16` へ収める。** **越えることは無い**——桁も行もセルの数で、
@@ -4827,9 +4827,9 @@ unsafe fn ioctl_log_line(arg: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -
         port.write_byte(*byte);
     }
 
-    // 破壊 (ADR-0046, stderr-on-screen-test): 診断を画面へも書く。
+    // 破壊テスト (ADR-0046, stderr-on-screen-test): 診断を画面へも書く。
     // **ADR-0046 の前の振る舞いそのものである**——**カーソルの居る行の本文が
-    // 診断行に化ける。** **`screen-window` が画面の行 0 を読んで捕まえる。**
+    // 診断行に化ける。** **`screen-window` が画面の行 0 を読んで検出する。**
     #[cfg(feature = "stderr-on-screen-test")]
     if crate::console::foreground_installed() {
         crate::console::write_foreground_bytes(&buf[ZDIAG_TEXT_OFFSET..ZDIAG_TEXT_OFFSET + length]);
@@ -4838,7 +4838,7 @@ unsafe fn ioctl_log_line(arg: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -
     0
 }
 
-/// ユーザー空間の NUL 終端のパスを、カーネルのバッファへ写す（S10-b）。
+/// ユーザー空間の NUL 終端のパスを、カーネルのバッファへコピーする（S10-b）。
 ///
 /// 返るのは NUL を含まない長さである。
 ///
@@ -4888,7 +4888,7 @@ unsafe fn copy_user_path(
     Err(ENAMETOOLONG)
 }
 
-/// 端末からの `read` で 1 回に写す最大バイト数（S11-10）。
+/// 端末からの `read` で 1 回にコピーする最大バイト数（S11-10）。
 ///
 /// **カーネルスタックへ置く緩衝の大きさである。** 端末は溜まっている分しか
 /// 返さないので、**大きくしても意味が無い**——**1 回の `read` で取り切れなければ、
@@ -4964,7 +4964,7 @@ unsafe fn sys_write(
     // **ファイルへの書き込みはまだ無い**ので、端末でなければ `-EROFS` である
     // （読み取り専用のファイルシステム。`open` が書き込みを拒むのと同じ理由）。
     //
-    // 破壊 (S11-8, write-ignores-fd): 表を引かず、何番でも出す。
+    // 破壊テスト (S11-8, write-ignores-fd): 表を引かず、何番でも出す。
     // **出力はそのまま現れるので、雑に見ると正しく動いているように見える。**
     // **見えないのは「開いていない番号が拒まれること」のほうである。**
     //
@@ -5028,7 +5028,7 @@ unsafe fn sys_write(
     #[cfg(feature = "write-ignores-fd")]
     let errors = false;
 
-    // 破壊 (S11-9, write-half-only): 要求された長さの半分だけ書いて返す。
+    // 破壊テスト (S11-9, write-half-only): 要求された長さの半分だけ書いて返す。
     //
     // **主張は「`write` は要求した長さを全部書く。書けなければ呼び出し側が
     // 繰り返す」である。** 短い書き込みが返るのは Linux でも起きるので、
@@ -5038,9 +5038,9 @@ unsafe fn sys_write(
     // **24 バイト以下は半分にしない。** 既存の 4 本（`hello` と `syscall-test` と
     // `fault-test` と `spawn-test`）は asm で直に `write` を呼んでおり、
     // **繰り返しを持たない。** あれらが使う最大の長さが 24 である。
-    // **そこを半分にすると、`ls` と `cat` が起こされる前に止まってしまい、
+    // **そこを半分にすると、`ls` と `cat` が起動される前に止まってしまい、
     // 繰り返しの経路が一度も通らない。**
-    // **破壊の目的は 2 つある**——**短い書き込みが検出されること**（`syscall-test` の
+    // **破壊テストの目的は 2 つある**——**短い書き込みが検出されること**（`syscall-test` の
     // 47 番、68 バイトの行）と、**繰り返しの経路が実際に通ること**（`ls` の
     // 30 バイトの一覧が 2 周で出る）。
     #[cfg(feature = "write-half-only")]
@@ -5049,7 +5049,7 @@ unsafe fn sys_write(
     // **システムコールの回数を数える（PERF-b）。** **刻む前に 1 回だけである**
     // ——**刻んだ後の回数は `foreground_writes` が別に持つ。**
     crate::console::note_terminal_write();
-    // **起こしっぱなしのスロットから端末へ書いた回数（`ADR-0063` の (b3) の計器）。**
+    // **切り離して起動したスロットから端末へ書いた回数（`ADR-0063` の (b3) の計測）。**
     // **`a | b` の左は端末へ書かないはずである**——**判定が「0」を見る。**
     if crate::ring3::current_slot() == crate::task::detached_slot() {
         TERMINAL_WRITES_FROM_DETACHED.fetch_add(1, Ordering::Relaxed);
@@ -5108,9 +5108,9 @@ unsafe fn sys_write(
         // **描くのはアプリである**——取り出してエコーエリアへ出す
         // （`ioctl(TIOCZTAKE)`）。**カーネルが割り込んで描くと絵が壊れる。**
         //
-        // 破壊 (ADR-0046, stderr-on-screen-test): 溜めずに、いままでどおり画面へ書く。
+        // 破壊テスト (ADR-0046, stderr-on-screen-test): 溜めずに、いままでどおり画面へ書く。
         // **`zi`の本文がカーソルの居る行ごと上書きされる形そのものである。**
-        // **`screen-echo`が最下行を読んで捕まえる**（エラーがエコーエリアに
+        // **`screen-echo`が最下行を読んで検出する**（エラーがエコーエリアに
         // 出ていないことのほうが主張である）。
         #[cfg(not(feature = "stderr-on-screen-test"))]
         let deferred = errors && crate::console::push_pending_if_alternate(&kbuf[..read]);
@@ -5151,12 +5151,12 @@ unsafe fn sys_write(
 ///
 /// **fd は `O_WRONLY|O_TRUNC` で開かれており、open の時点で長さ 0 に切って
 /// ある。** したがって**追記（`append_to_file`）が全置換の後半である。**
-/// 位置（offset）は使わない——追記は像の中の `i_size` から続き、
+/// 位置（offset）は使わない——追記はイメージの中の `i_size` から続き、
 /// **読みは `-EBADF` なので位置を読む者も居ない。**
 ///
 /// # 検証の形はシリアルの側と同じである
 ///
-/// **ページごとに検証し、検証済みトークン（`UserSlice`）から一時緩衝へ写し、
+/// **ページごとに検証し、検証済みトークン（`UserSlice`）から一時緩衝へコピーし、
 /// そこから複製へ足す。** 踏み込む前に検証する契約は崩れない。
 ///
 /// # シリアルへも画面へも出さない
@@ -5178,7 +5178,7 @@ unsafe fn sys_write_to_file(
     /// ページの大きさ。**検証の単位である。**
     const PAGE: u64 = 0x1000;
 
-    // **配置の写しを先に取る。** `Layout` は `Copy` で、`fs`（共有借用）は
+    // **配置のコピーを先に取る。** `Layout` は `Copy` で、`fs`（共有借用）は
     // この束で落ちる——`with_root_image_mut` の可変借用と重ならない
     // （`crate::vfs::with_root_image_mut` の doc の列挙）。
     let layout = match crate::vfs::root_filesystem() {
@@ -5186,9 +5186,9 @@ unsafe fn sys_write_to_file(
         Err(e) => return (-errno_for_ext2(e)) as u64,
     };
 
-    // 破壊 (zi-c, write-file-wrong-inode-test): 別の inode へ足す。
+    // 破壊テスト (zi-c, write-file-wrong-inode-test): 別の inode へ足す。
     // **戻り値もシリアルも正しく見える**——的のファイルだけが空のままになり、
-    // syscall-test の読み戻し（58 番）が捕まえる。
+    // syscall-test の読み戻し（58 番）が検出する。
     #[cfg(feature = "write-file-wrong-inode-test")]
     let ino = ino + 1;
 
@@ -5215,9 +5215,9 @@ unsafe fn sys_write_to_file(
             return if done == 0 { (-EFAULT) as u64 } else { done };
         }
 
-        // 破壊 (zi-c, write-file-skip-append-test): 複製へ足さない。
+        // 破壊テスト (zi-c, write-file-skip-append-test): 複製へ足さない。
         // **検証も戻り値も正しい**——書いたつもりが複製に届いていない形で、
-        // 戻り値では捕まらない。syscall-test の読み戻し（58 番）が捕まえる。
+        // 戻り値では検出されない。syscall-test の読み戻し（58 番）が検出する。
         #[cfg(not(feature = "write-file-skip-append-test"))]
         {
             let appended = crate::vfs::with_root_image_mut(|image| {
@@ -5239,9 +5239,9 @@ unsafe fn sys_write_to_file(
     done
 }
 
-/// NUL 終端のユーザー文字列を 1 本写す（S11-7）。
+/// NUL 終端のユーザー文字列を 1 本コピーする（S11-7）。
 ///
-/// 写したバイト数（**NUL を含む**）を返す。**`dst` に収まらなければ `-E2BIG` である**
+/// コピーしたバイト数（**NUL を含む**）を返す。**`dst` に収まらなければ `-E2BIG` である**
 /// ——アドレスの誤りではなく量の問題なので、`-EFAULT` でも `-EINVAL` でもない。
 ///
 /// # [`copy_user_path`] と同じ形である
@@ -5285,9 +5285,9 @@ unsafe fn copy_user_string(
     Err(E2BIG)
 }
 
-/// ユーザーの `argv` / `envp`（NULL 終端のポインタ配列）を写す（S11-7。f-2 で一般化）。
+/// ユーザーの `argv` / `envp`（NULL 終端のポインタ配列）をコピーする（S11-7。f-2 で一般化）。
 ///
-/// 写したバイト列を `dst` へ NUL 区切りで並べ、`(要素数, 使ったバイト数)` を返す。
+/// コピーしたバイト列を `dst` へ NUL 区切りで並べ、`(要素数, 使ったバイト数)` を返す。
 ///
 /// # 線が当たる場所は 4 つある
 ///
@@ -5345,10 +5345,10 @@ unsafe fn copy_user_string_array(
             return Ok((count, used));
         }
         if count == max_count {
-            // 破壊 (S11-7, spawn-e2big-as-einval): 量の問題を `-EINVAL` で返す。
+            // 破壊テスト (S11-7, spawn-e2big-as-einval): 量の問題を `-EINVAL` で返す。
             // **どちらも「引数が受け付けられない」なので、雑に見ると同じに見える。**
             // **Linux は分けている**——`execve` は長すぎる引数に `E2BIG` を返す。
-            // **`syscall-test` の検算が食い違いを捕まえる。**
+            // **`syscall-test` の検算が食い違いを検出する。**
             #[cfg(not(feature = "spawn-e2big-as-einval"))]
             let errno = E2BIG;
             #[cfg(feature = "spawn-e2big-as-einval")]
@@ -5359,7 +5359,7 @@ unsafe fn copy_user_string_array(
         let written =
             match unsafe { copy_user_string(&mut dst[used..], pointer, pml4_phys, direct_map) } {
                 Ok(written) => written,
-                // 破壊 (S11-7, spawn-e2big-as-einval): こちらの経路も同じく潰す。
+                // 破壊テスト (S11-7, spawn-e2big-as-einval): こちらの経路も同じく潰す。
                 // **要素数と長さは別の場所で落ちるので、両方を同じ形にする。**
                 #[cfg(feature = "spawn-e2big-as-einval")]
                 Err(E2BIG) => return Err(EINVAL),
@@ -5385,7 +5385,7 @@ unsafe fn copy_user_string_array(
 fn errno_for_ext2(error: common::ext2::Ext2Error) -> i64 {
     use common::ext2::Ext2Error as E;
     match error {
-        // 像そのものが読めない。**呼び出し側の引数の問題ではない。**
+        // イメージそのものが読めない。**呼び出し側の引数の問題ではない。**
         E::TooShort
         | E::BadMagic
         | E::UnsupportedRevision(_)
@@ -5422,7 +5422,7 @@ fn errno_for_ext2(error: common::ext2::Ext2Error) -> i64 {
 ///
 /// # 大半は「カーネル側の不具合」である
 ///
-/// **`Parse` と `SegmentData` だけが、渡された像に対する答えである**——
+/// **`Parse` と `SegmentData` だけが、渡されたイメージに対する答えである**——
 /// 像が壊れているので `-ENOEXEC`……**ではなく `-EINVAL` を返す。**
 /// `ENOEXEC`（8）をまだ持っておらず、**1 つの用途のために errno を増やすより、
 /// 「引数が受け付けられない」に落とすほうが小さい。** 分ける必要が出たら足す。
@@ -5484,7 +5484,7 @@ pub fn last_write_len() -> usize {
     state().write_len.load(Ordering::SeqCst) as usize
 }
 
-/// [`SYS_WRITE`] が最後に記録したバイト列を `dst` へ写す。写した長さを返す。
+/// [`SYS_WRITE`] が最後に記録したバイト列を `dst` へコピーする。コピーした長さを返す。
 pub fn last_write_bytes(dst: &mut [u8]) -> usize {
     let len = last_write_len().min(dst.len()).min(WRITE_BUF_LEN);
     for (slot, value) in dst.iter_mut().zip(state().write_buf.iter()).take(len) {
@@ -5540,14 +5540,14 @@ pub fn reset_counters() {
 /// **[`reset_counters`] で親の記録を 0 にし、自分の `write` と `exit` を上書きする。**
 /// **親の判定行は、子が送ったバイト列を親のものとして読む。**
 ///
-/// **控えて戻す**（`crate::ring3::FoldRecord` と同じ形。あちらは畳みの記録である）。
+/// **控えて戻す**（`crate::ring3::FoldRecord` と同じ形。あちらは例外による終了処理の記録である）。
 ///
 /// # 大きさは 256 バイトに満たない
 ///
 /// **スタックへ置く**（[`MAX_EXECUTABLE_SIZE`] とは扱いが違う）。
 /// 内訳は `u64` が 10 個、`[u64; 6]` が 2 つ、`[u8; 64]` が 1 つ、`bool` が 3 つで、
 /// **詰め物を含めても 232 バイトである。**
-/// **`deferred-decisions.md` の「大きなスタック配列とガード幅」が言う 4096 バイトの
+/// **`deferred-decisions.md` の「大きなスタック配列とガード幅」が示す 4096 バイトの
 /// 前提を破らない。**
 #[derive(Debug, Clone, Copy)]
 pub struct Records {
@@ -5641,12 +5641,12 @@ pub fn user_window() -> (u64, u64) {
     )
 }
 
-/// 窓を据え、**据える前の値を返す**（S9-b-3-2b）。
+/// ウィンドウを据え、**据える前の値を返す**（S9-b-3-2b）。
 ///
 /// **戻すのは呼び出し側の責任である。** 現在の呼び出し元は
 /// [`crate::ring3::enter`] だけで、あちらが遠征の前後で対にしている。
 /// **入れ子になる**（S11 の `spawn` から。**以前ここは「入れ子にならない」と書いていた**）。
-/// **前の値を返す形にしてあるので、入れ子でも壊れない。** **W1-c-3 から窓はスロットごとに持つので、
+/// **前の値を返す形にしてあるので、入れ子でも壊れない。** **W1-c-3 からウィンドウはスロットごとに持つので、
 /// W1-c-4 で 2 本が同時に走っても据え合わない。**
 pub fn set_user_window(start: u64, end: u64) -> (u64, u64) {
     let previous_start = state().user_window_start.swap(start, Ordering::SeqCst);
@@ -5739,7 +5739,7 @@ mod tests {
         assert_eq!(u32_at(&out, 56), 16, "blue.offset for Rgb");
     }
 
-    /// `struct fb_fix_screeninfo` の欄の位置。**物理番地（`smem_start`）は 0 のままである。**
+    /// `struct fb_fix_screeninfo` の欄の位置。**物理アドレス（`smem_start`）は 0 のままである。**
     #[test]
     fn the_fixed_screen_info_follows_the_linux_layout() {
         let out = fb_fix_screeninfo(4_096_000, 5120);

@@ -1,21 +1,21 @@
 //! 共有メモリの実体（`ADR-0065`）。**アロケータから取ったフレームを fd で持ち、
-//! 複数のプロセスが同じ物理フレームを自分の空間へ張る。**
+//! 複数のプロセスが同じ物理フレームを自分の空間へマップする。**
 //!
 //! # `wl_shm.create_pool` の逆算
 //!
 //! **Wayland が要求する fd は `wl_shm.create_pool` の1つだけである**（`docs/wayland-inventory.md`）。
 //! **クライアントが `size` バイトの無名の共有メモリを作り（`memfd_create`＋`ftruncate`）、
 //! `mmap` して模様を書き、fd をソケットの補助データ（`SCM_RIGHTS`）で送る。**
-//! **サーバーはその fd を `mmap` して読む。** **同じ物理フレームが両方の空間に張られるので共有になる。**
+//! **サーバーはその fd を `mmap` して読む。** **同じ物理フレームが両方の空間にマップされるので共有になる。**
 //!
 //! # 共有フレームの寿命（`ADR-0065` の「共有フレームの寿命」。Linux の思想）
 //!
 //! **フレームは通常どおりアロケータから取る**（`ftruncate`）。**共有であることは
-//! 葉の PTE の空きビット 9 で印す**（`mmap` が `map_4kib` に `shared: true` で頼む）。
-//! **`AddressSpace::destroy` は印の立った葉を集めない**——**Linux が `struct page` 相当の
+//! 葉の PTE の空きビット 9 で目印を付ける**（`mmap` が `map_4kib` に `shared: true` で頼む）。
+//! **`AddressSpace::destroy` は目印の立った葉を集めない**——**Linux が `struct page` 相当の
 //! 管理で空きビットを使うのと同じ思想である**（規模が合わないので `struct page` 相当の表は
 //! 持たず、ここが参照数を持つ）。**最後の fd が閉じたときにアロケータへ返す。** **`spawn` の
-//! 会計は共有フレームを除く**（(A-3)。窓の間に取ったまま返っていない分を `consumed` から引く）。
+//! 会計は共有フレームを除く**（(A-3)。ウィンドウの間に取ったまま返っていない分を `consumed` から引く）。
 //!
 //! # `detach` は自分でアロケータを借りる（`close` と `Drop` の両方から来る）
 //!
@@ -36,7 +36,7 @@ pub const PAGE_SIZE: usize = 4096;
 pub const MAX_SHM: usize = 2;
 
 /// 1 つの共有メモリのページ数の上限（32 KiB）。**Wayland の初手に足る見込み。**
-/// **FHD の枚（8 MiB）は入らない**（`ADR-0065` の限界。契機は画面と入力の受け渡しの段）。
+/// **FHD の枚（8 MiB）は入らない**（`ADR-0065` の限界。見直すきっかけは画面と入力の受け渡しの段階）。
 pub const MAX_SHM_PAGES: usize = 8;
 
 /// 共有メモリ 1 つ。
@@ -72,8 +72,8 @@ static FDS_SENT: AtomicU64 = AtomicU64::new(0);
 static FDS_RECEIVED: AtomicU64 = AtomicU64::new(0);
 /// **いまアロケータから取ったままの共有フレームの数（`ADR-0065` の (A-3)）。**
 ///
-/// **`spawn` の会計が窓の差で読む**——**共有フレームはアロケータから出る（`consumed` に入る）
-/// が `destroy` が飛ばす（`quarantined` に入らない）ので、窓の間に増えた分を `consumed` から引く。**
+/// **`spawn` の会計がウィンドウの差で読む**——**共有フレームはアロケータから出る（`consumed` に入る）
+/// が `destroy` が飛ばす（`quarantined` に入らない）ので、ウィンドウの間に増えた分を `consumed` から引く。**
 static SHARED_FRAMES_HELD: AtomicU64 = AtomicU64::new(0);
 
 macro_rules! gauge {
@@ -88,7 +88,7 @@ gauge!(released, RELEASED);
 gauge!(mapped_pages, MAPPED_PAGES);
 gauge!(fds_sent, FDS_SENT);
 gauge!(fds_received, FDS_RECEIVED);
-/// いまアロケータから取ったままの共有フレームの数（`ADR-0065` の (A-3)。会計が窓の差で読む）。
+/// いまアロケータから取ったままの共有フレームの数（`ADR-0065` の (A-3)。会計がウィンドウの差で読む）。
 pub fn frames_held() -> u64 {
     SHARED_FRAMES_HELD.load(Ordering::Relaxed)
 }
@@ -134,7 +134,7 @@ pub fn pages_for(size: u64) -> usize {
 
 /// 大きさを据え、アロケータからフレームを取る。**中身は 0 にする。** **自分でアロケータを借りる。**
 ///
-/// 破壊 (`ADR-0065`, shm-ftruncate-ignores-size): 何ページ要っても 1 ページしか取らない。
+/// 破壊テスト (`ADR-0065`, shm-ftruncate-ignores-size): 何ページ要っても 1 ページしか取らない。
 /// **模様の後ろが欠け、往復のバイト比べが落ちる。**
 pub fn set_size(shm: u8, size: u64) -> TruncateOutcome {
     let index = shm as usize;
@@ -193,7 +193,7 @@ pub fn set_size(shm: u8, size: u64) -> TruncateOutcome {
     TruncateOutcome::Pages(want)
 }
 
-/// `mmap` のために、フレームの物理番地と大きさを写して返す。**張るのは呼び出し側。**
+/// `mmap` のために、フレームの物理アドレスと大きさをコピーして返す。**マップするのは呼び出し側。**
 pub fn frames_of(shm: u8, out: &mut [PhysAddr; MAX_SHM_PAGES]) -> Option<(usize, u64)> {
     let index = shm as usize;
     let shms = SHMS.lock();
@@ -219,7 +219,7 @@ pub fn attach(shm: u8) -> bool {
 /// 参照を 1 つ減らす。**0 でアロケータへフレームを返す。** **自分でアロケータを借りる**
 /// （`close` と表の `Drop` の両方から来る）。
 ///
-/// 破壊 (`ADR-0065`, shm-close-keeps-refs): 参照を減らさない。**フレームが返らず、
+/// 破壊テスト (`ADR-0065`, shm-close-keeps-refs): 参照を減らさない。**フレームが返らず、
 /// 作った数と返した数が合わない。**
 pub fn detach(shm: u8) {
     let index = shm as usize;

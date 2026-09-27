@@ -4,12 +4,12 @@
 //!
 //! **接続はストリームソケットで、端点は名前である**（`docs/wayland-inventory.md`）。
 //! **`bind` / `listen` / `accept` / `connect` と、繋がった後の `read` / `write` / `close`。**
-//! **fd の運搬（`SCM_RIGHTS`）と `poll` はこの段では作らない。**
+//! **fd の運搬（`SCM_RIGHTS`）と `poll` はこの段階では作らない。**
 //!
 //! # パイプの核を再利用する
 //!
 //! **輪は [`crate::ring::Ring`]（パイプから切り出した）。** **待つ側と起こす側の形は
-//! パイプと同じで、違うのは向きが 2 本あることと、端が数ではなく旗であることである**
+//! パイプと同じで、違うのは向きが 2 本あることと、端が数ではなくフラグであることである**
 //! ——**端は各側に 1 つしか無い**（`dup` も fd の運搬も無い）。
 //!
 //! # 容量
@@ -130,35 +130,35 @@ static CONNECTIONS: [Locked<Connection>; MAX_CONNECTIONS] = [
     Locked::new(Connection::EMPTY),
 ];
 
-/// `bind` した回数（計器）。
+/// `bind` した回数（計測）。
 static BOUND: AtomicU64 = AtomicU64::new(0);
-/// 名前が取られていて `bind` を断った回数（計器。`-EADDRINUSE`）。
+/// 名前が取られていて `bind` を断った回数（計測。`-EADDRINUSE`）。
 static BIND_REFUSED: AtomicU64 = AtomicU64::new(0);
-/// listener を閉じて名前を返した回数（計器）。
+/// listener を閉じて名前を返した回数（計測）。
 static LISTENERS_RELEASED: AtomicU64 = AtomicU64::new(0);
-/// 作った接続の数（計器）。
+/// 作った接続の数（計測）。
 static CONNECTIONS_CREATED: AtomicU64 = AtomicU64::new(0);
-/// 同時に在った接続の最大（計器）。
+/// 同時に在った接続の最大（計測）。
 static CONNECTIONS_AT_ONCE_MAX: AtomicU64 = AtomicU64::new(0);
-/// 両端が閉じて枠を返した回数（計器）。
+/// 両端が閉じてスロットを返した回数（計測）。
 static CONNECTIONS_RELEASED: AtomicU64 = AtomicU64::new(0);
-/// 名前の listener が無くて `connect` を断った回数（計器。`-ECONNREFUSED`）。
+/// 名前の listener が無くて `connect` を断った回数（計測。`-ECONNREFUSED`）。
 static CONNECT_REFUSED: AtomicU64 = AtomicU64::new(0);
-/// 待ち行列が満杯で `connect` を断った回数（計器。`-EAGAIN`）。
+/// 待ち行列が満杯で `connect` を断った回数（計測。`-EAGAIN`）。
 static CONNECT_BACKLOG_FULL: AtomicU64 = AtomicU64::new(0);
-/// `accept` が待った回数（計器）。
+/// `accept` が待った回数（計測）。
 static ACCEPT_WAITS: AtomicU64 = AtomicU64::new(0);
-/// 読み手が空で待った回数（計器）。
+/// 読み手が空で待った回数（計測）。
 static READER_WAITS: AtomicU64 = AtomicU64::new(0);
-/// 書きが起こした読み手の数（計器）。**閉じの起こしの肩代わりを見分ける**（`pipe.rs` と同じ）。
+/// 書きが起こした読み手の数（計測）。**閉じの起こしの肩代わりを見分ける**（`pipe.rs` と同じ）。
 static READERS_WOKEN_BY_WRITE: AtomicU64 = AtomicU64::new(0);
-/// 書き手が満杯で待った回数（計器）。
+/// 書き手が満杯で待った回数（計測）。
 static WRITER_WAITS: AtomicU64 = AtomicU64::new(0);
-/// 読みが起こした書き手の数（計器）。
+/// 読みが起こした書き手の数（計測）。
 static WRITERS_WOKEN_BY_READ: AtomicU64 = AtomicU64::new(0);
-/// 相手側が閉じているのに書こうとした回数（計器。`-EPIPE`）。
+/// 相手側が閉じているのに書こうとした回数（計測。`-EPIPE`）。
 static EPIPE_SEEN: AtomicU64 = AtomicU64::new(0);
-/// 相手側が閉じて EOF を返した回数（計器）。
+/// 相手側が閉じて EOF を返した回数（計測）。
 static EOF_SEEN: AtomicU64 = AtomicU64::new(0);
 
 macro_rules! gauge {
@@ -205,14 +205,14 @@ pub fn note_writer_wait() {
 pub enum BindError {
     /// その名前は取られている（`-EADDRINUSE`）。
     NameTaken,
-    /// listener の枠が無い（`-ENOBUFS`）。
+    /// listener のスロットが無い（`-ENOBUFS`）。
     NoRoom,
 }
 
 /// 名前を取る。**`listen` はまだである。** **名前の検証（空・長さ・先頭 NUL）は呼び出し側が
 /// 済ませている。**
 ///
-/// 破壊 (`ADR-0064`, socket-bind-ignores-taken-name): 取られている名前を見ない。
+/// 破壊テスト (`ADR-0064`, socket-bind-ignores-taken-name): 取られている名前を見ない。
 /// **同じ名前の 2 本目が `-EADDRINUSE` にならない。**
 pub fn bind(name: &[u8]) -> Result<u8, BindError> {
     debug_assert!(!name.is_empty() && name.len() <= NAME_MAX);
@@ -257,13 +257,13 @@ pub fn listen(listener: u8) -> bool {
 pub enum ConnectError {
     /// その名前で待ち受けている者が居ない（`-ECONNREFUSED`）。
     NoListener,
-    /// 接続の枠が無い（`-EAGAIN`）。
+    /// 接続のスロットが無い（`-EAGAIN`）。
     NoRoom,
 }
 
 /// 名前で繋ぐ。**接続を 1 つ作り、client 側の添字を返す。** **accept で待つ者を起こす。**
 ///
-/// 破壊 (`ADR-0064`, socket-connect-ignores-name): 名前を見ずに、待ち受けている最初の
+/// 破壊テスト (`ADR-0064`, socket-connect-ignores-name): 名前を見ずに、待ち受けている最初の
 /// listener へ繋ぐ。**無い名前への `connect` が `-ECONNREFUSED` にならない。**
 pub fn connect(name: &[u8]) -> Result<u8, ConnectError> {
     let listener = LISTENERS.iter().position(|slot| {
@@ -402,7 +402,7 @@ pub enum ReadOutcome {
 
 /// `side` へ流れてきたバイトを `dst` へ移す。**取れたら相手側の書き手を起こす**（空きができた）。
 ///
-/// 破壊 (`ADR-0064`, socket-read-empty-returns-zero): 空を EOF と誤る。**返事が届く前に
+/// 破壊テスト (`ADR-0064`, socket-read-empty-returns-zero): 空を EOF と誤る。**返事が届く前に
 /// クライアントが終わる。**
 pub fn read_into(conn: u8, side: Side, dst: &mut [u8]) -> ReadOutcome {
     let Some(slot) = CONNECTIONS.get(conn as usize) else {
@@ -458,10 +458,10 @@ pub enum WriteOutcome {
 
 /// `side` から相手側へ `src` を入るだけ入れる。**入ったら相手側の読み手を起こす。**
 ///
-/// 破壊 (`ADR-0064`, socket-write-ignores-peer-closed): 相手側が閉じているのを見ない。
+/// 破壊テスト (`ADR-0064`, socket-write-ignores-peer-closed): 相手側が閉じているのを見ない。
 /// **閉じた相手への書きが `-EPIPE` にならず、輪へ入って数を返す。**
 ///
-/// 破壊 (`ADR-0064`, socket-write-does-not-wake-reader): 起こさない。**返事を待つ側と
+/// 破壊テスト (`ADR-0064`, socket-write-does-not-wake-reader): 起こさない。**返事を待つ側と
 /// 要求を待つ側が両方待ち、出力が伸びなくなる。**
 pub fn write_from(conn: u8, side: Side, src: &[u8]) -> WriteOutcome {
     let Some(slot) = CONNECTIONS.get(conn as usize) else {
@@ -499,12 +499,12 @@ pub fn write_from(conn: u8, side: Side, src: &[u8]) -> WriteOutcome {
 }
 
 /// 端を 1 つ閉じる。**相手側の読み手（EOF を見に行かせる）と書き手（`-EPIPE` を見に行かせる）を
-/// 起こす。** **両端が閉じたら枠を返す。**
+/// 起こす。** **両端が閉じたらスロットを返す。**
 ///
-/// 破壊 (`ADR-0064`, socket-close-keeps-peer-open): 端を閉じたことにしない。**相手側に
+/// 破壊テスト (`ADR-0064`, socket-close-keeps-peer-open): 端を閉じたことにしない。**相手側に
 /// EOF が来ず、サーバーが永久に待つ。**
 ///
-/// 破壊 (`ADR-0064`, socket-release-keeps-slot): 両端が閉じても枠を返さない。**3 つ目の
+/// 破壊テスト (`ADR-0064`, socket-release-keeps-slot): 両端が閉じてもスロットを返さない。**3 つ目の
 /// 接続が `-EAGAIN` になる。**
 pub fn close_end(conn: u8, side: Side) {
     let Some(slot) = CONNECTIONS.get(conn as usize) else {

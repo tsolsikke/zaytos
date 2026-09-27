@@ -2,7 +2,7 @@
 //!
 //! # なぜ `smp` の下に置かないのか
 //!
-//! MADT の消費者は S3（AP 起こし）だけではなく、S2 の割り込み層（`irq`）でも
+//! MADT の消費者は S3（AP 起動）だけではなく、S2 の割り込み層（`irq`）でも
 //! ある。`smp::acpi` にすると `irq` が `smp` に依存することになり、責務の線と
 //! しては向きが逆になる。ACPI は「ファームウェアが提示する構成表」であって
 //! SMP の一部ではないので、`smp` と並ぶ独立したモジュールにしてある。
@@ -15,7 +15,7 @@
 //!
 //! S1-b の時点で外から要る問いは「ACPI に何があったか」だけで、それはログに
 //! 出ていたので、この関数は何も返していなかった。**S1-c で最初の消費者が
-//! 現れた。** APIC の MMIO を写像するには物理アドレスそのものが要るので、
+//! 現れた。** APIC の MMIO をマップするには物理アドレスそのものが要るので、
 //! [`ApicMmio`] として出す。**したがって「物理アドレスは境界の中に留まる」は
 //! もう成り立たない。** 留まるのは生バイトとパーサの型である。
 //!
@@ -24,20 +24,20 @@
 //! FADT の生の値は出さない。
 //!
 //! **物理アドレスなら出してよい理由。** 物理アドレスは `acpi` と `paging` が
-//! 共有する語彙であり、**写像する側がそれを受け取らなければ仕事ができない。**
+//! 共有する語彙であり、**マップする側がそれを受け取らなければ仕事ができない。**
 //! 境界が隠すべきなのは、その境界の内側だけで意味を持つ表現（テーブルの生バイト、
 //! パーサの型、エントリの並び）である。S0-a で `managed_vectors` がベクタ番号を
 //! 露出してよかったのと同じ理由で、ベクタ番号は `irq` と `idt` が共有する語彙
 //! だった。**「生の値を出さない」を、共有語彙まで隠す意味に取らないこと。**
 //! 取ると、受け渡すためだけの抽象を挟むことになる。
 //!
-//! 出すのは写像に要る所在だけで、エントリの解釈（Interrupt Source Override の
+//! 出すのはマッピングに要る所在だけで、エントリの解釈（Interrupt Source Override の
 //! 対応付けなど）は出さない。それが要るのは S2 で、そのとき S2 が必要とする形で
 //! 足す。
 //!
 //! # 異常はすべて報告して継続する
 //!
-//! S1 は情報を集める段である。**ACPI が読めないだけで、単一コアで動いている
+//! S1 は情報を集める段階である。**ACPI が読めないだけで、単一コアで動いている
 //! カーネルが起動しなくなるのは機能的な後退である。** したがってこのモジュール
 //! は検出したものを大きく報告するだけで、`halt` しない。致命へ格上げするのは
 //! ACPI 無しでは進めなくなる S2（APIC 移行）である（`roadmap.md`）。
@@ -114,12 +114,12 @@ pub struct IoApicLocation {
     pub global_system_interrupt_base: u32,
 }
 
-/// S1-c が写像するために必要な APIC の MMIO の所在。
+/// S1-c がマップするために必要な APIC の MMIO の所在。
 ///
 /// **`survey` が MADT から読み取った値だけを持つ。** 既定値のハードコードは
 /// 一切含まない。MADT が読めなかった場合や壊れていた場合は、すべて空になる
 /// （[`ApicMmio::empty`]）。**「読めなかった」と「無かった」を、呼び出し側が
-/// 区別する必要はない。** どちらの場合も写像すべきものが無いという結論は同じで、
+/// 区別する必要はない。** どちらの場合もマップすべきものが無いという結論は同じで、
 /// 理由はすでに `survey` がログへ出している。
 #[derive(Debug, Clone, Copy)]
 pub struct ApicMmio {
@@ -130,7 +130,7 @@ pub struct ApicMmio {
     interrupt_source_overrides:
         [Option<madt::InterruptSourceOverride>; MAX_INTERRUPT_SOURCE_OVERRIDES],
     interrupt_source_overrides_found: usize,
-    /// 使用可能な Local APIC の ID（S3-b-2b-1）。**AP を起こすのに要る。**
+    /// 使用可能な Local APIC の ID（S3-b-2b-1）。**AP を起動するのに要る。**
     ///
     /// 先頭は bootstrap processor の候補である（MADT の並び順）。
     local_apic_ids: [Option<u8>; MAX_LOCAL_APIC_IDS],
@@ -189,7 +189,7 @@ impl ApicMmio {
     /// そもそも I/O APIC を経由せず IRQ0 の上書きを使わない。
     ///
     /// **したがって「この関数が配送経路で効いていること」は、この構成では
-    /// 破壊確認で示せない。** 無視する実装に差し替えても、配送に使う IRQ1 では
+    /// 破壊テストでの確認で示せない。** 無視する実装に差し替えても、配送に使う IRQ1 では
     /// 同じ答えになるからである。非恒等の枝はホストテストで固定してあり、
     /// 起動時には解決結果をログへ出して表が読めていることを示す。
     /// **示せる範囲を超えて主張しないこと**（`verification-coverage.md` の
@@ -352,14 +352,14 @@ fn as_text(bytes: &[u8]) -> &str {
 }
 
 /// 物理メモリを読もうとして断念した理由。**「読めなかった」を一色に丸めない。**
-/// 窓の外・未マップ・別の物理を指している、は原因も対処も違う。
+/// ウィンドウの外・未マップ・別の物理を指している、は原因も対処も違う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReadError {
-    /// direct map 窓が覆っていない物理アドレス。
+    /// direct map ウィンドウが覆っていない物理アドレス。
     OutsideWindow { page: PhysAddr },
-    /// 窓の中だが、稼働中のページテーブルに翻訳が無い。
+    /// ウィンドウの中だが、稼働中のページテーブルに翻訳が無い。
     NotMapped { page: PhysAddr },
-    /// 翻訳はあるが、写っている物理が食い違う。窓が別名になっている。
+    /// 翻訳はあるが、マップされている物理が食い違う。ウィンドウが別名になっている。
     Aliased { page: PhysAddr, got: PhysAddr },
     /// walker が扱えない形（1GiB ページ等）。
     Untranslatable {
@@ -370,7 +370,7 @@ enum ReadError {
     RangeOverflow { start: PhysAddr, len: usize },
 }
 
-/// direct map 窓経由の物理メモリ読み取り器。
+/// direct map ウィンドウ経由の物理メモリ読み取り器。
 ///
 /// **読む前に必ず walk する**（モジュールの doc を参照）。読み取りは
 /// `read_volatile` で 1 バイトずつ行う。ACPI テーブルは通常の RAM 上にあるが、
@@ -384,9 +384,9 @@ struct PhysReader {
 impl PhysReader {
     /// # Safety
     ///
-    /// CR3 が指す稼働中のページテーブルを、登録済みの direct map 窓経由で
+    /// CR3 が指す稼働中のページテーブルを、登録済みの direct map ウィンドウ経由で
     /// 読めること（[`ActivePageTable::current`] の契約）。呼び出し位置は
-    /// A-2（窓の高位化）より後でなければならない。
+    /// A-2（ウィンドウの高位化）より後でなければならない。
     unsafe fn new() -> Self {
         let direct_map = common::addr::direct_map();
         Self {
@@ -396,14 +396,14 @@ impl PhysReader {
         }
     }
 
-    /// `page`（4KiB 境界）が窓経由で読めるかを、実テーブルを辿って確かめる。
+    /// `page`（4KiB 境界）がウィンドウ経由で読めるかを、実テーブルを辿って確かめる。
     fn check_page(&self, page: PhysAddr) -> Result<(), ReadError> {
         if !self.direct_map.covers(page) {
             return Err(ReadError::OutsideWindow { page });
         }
         let virt = self.direct_map.phys_to_virt(page);
         match self.table.translate(virt) {
-            // 窓は phys_to_virt(p) = base + p なので、翻訳結果は p そのものに
+            // ウィンドウは phys_to_virt(p) = base + p なので、翻訳結果は p そのものに
             // なるはずである。**一致まで見る。** 「present だった」だけでは、
             // 別の物理を読んでいても気づけない。
             Ok(Some(translation)) if translation.phys == page => Ok(()),
@@ -447,21 +447,21 @@ impl PhysReader {
             page = next;
         }
 
-        // **1 バイトずつバッファへ写す。この形を単純化して戻さないこと。**
+        // **1 バイトずつバッファへコピーする。この形を単純化して戻さないこと。**
         //
         // ACPI のテーブルは 16 バイト境界にしか整列しておらず、しかもヘッダが
         // 36 バイトなので、XSDT の 64 ビットエントリの配列は**8 バイト境界に
         // 載らない**（36 は 8 の倍数ではない）。`*const u64` を作って素直に読むと
         // 未定義動作になる。`read_unaligned` を使えば安全に書けるが、それは
         // 「正しく使えば安全」であって、**この形は間違えようがない**。
-        // バッファへ写してから `from_le_bytes` でスライスとして解釈する限り、
+        // バッファへコピーしてから `from_le_bytes` でスライスとして解釈する限り、
         // 未整列の生ポインタ参照は構造的に発生しない（型として作れない）。
         // 短く書けるからと `*const u64` や `read_unaligned` へ寄せると、
         // 「規律で守る」形に戻る。
         let src = self.direct_map.phys_to_virt(start).as_ptr::<u8>();
         for (index, out) in dest.iter_mut().enumerate() {
             // SAFETY: 上のループで [start, start+len) が載る全ページについて、
-            // 稼働中のページテーブルに窓経由の翻訳があり、その翻訳が当の物理
+            // 稼働中のページテーブルにウィンドウ経由の翻訳があり、その翻訳が当の物理
             // ページを指していることを確かめてある。読み取りのみで、
             // ファームウェアが置いたテーブルの内容を変更しない。u8 の読みなので
             // 整列の要件も無い。
@@ -506,7 +506,7 @@ fn report_read_error(logger: &mut Logger<SerialPort>, what: &str, error: ReadErr
 ///
 /// **`classify()` は型を見てマップするかを決める。** したがって型が分かれば、
 /// その領域がマップされるかは構造的に決まる。`EfiACPIReclaimMemory` /
-/// `EfiACPIMemoryNVS` なら常に写り、`EfiReservedMemoryType` なら常に写らない。
+/// `EfiACPIMemoryNVS` なら常にマップされ、`EfiReservedMemoryType` なら常にマップされない。
 /// メモリマップの細部（各領域の大きさや個数）が起動ごとに揺れても、この関係は
 /// 動かない。
 ///
@@ -548,10 +548,10 @@ fn report_memory_type(
 ///
 /// # 呼ぶ位置
 ///
-/// - **A-2（direct map 窓の高位化）より後。** 窓経由で物理を読むため。
+/// - **A-2（direct map ウィンドウの高位化）より後。** ウィンドウ経由で物理を読むため。
 /// - **恒等除去（B-2b-4）より前。** `memory_map_bytes` は低位 VA のスライスで、
 ///   除去後は無効になる。**この制約は呼び出し側のコメントにも書いてある。**
-///   検査そのものは高位窓の翻訳を見るので、除去を跨いでも結論は変わらない
+///   検査そのものは高位ウィンドウの翻訳を見るので、除去を跨いでも結論は変わらない
 ///   （除去が落とすのは `PML4[0]` だけである）。
 ///
 /// `rsdp_phys` が 0 のときは bootloader が RSDP を見つけられなかった場合で、
@@ -559,7 +559,7 @@ fn report_memory_type(
 ///
 /// # 戻り値
 ///
-/// 見つかった APIC の MMIO の所在（S1-c が写像に使う）と、FADT が i8042 について
+/// 見つかった APIC の MMIO の所在（S1-c がマッピングに使う）と、FADT が i8042 について
 /// 言っていること（HW-b）。走査のどこかで断念した場合は、それぞれ空と
 /// 「言っていない」を返す。**理由はこの関数がログへ出しているので、
 /// 呼び出し側が「なぜ空か」を再構成する必要はない。**
@@ -576,11 +576,11 @@ pub fn survey(
         return Survey::empty();
     }
 
-    // 破壊確認（未マップ / 窓の外）。既定ビルドでは受け取った値をそのまま返す。
+    // 破壊テストでの確認（未マップ / ウィンドウの外）。既定ビルドでは受け取った値をそのまま返す。
     let rsdp_phys = sabotage::redirect_rsdp(logger, rsdp_phys, memory_map_bytes, descriptor_size);
 
     // SAFETY: 呼び出し位置の契約（この関数の doc）により、CR3 は自前の
-    // ページテーブルを指し、登録 direct map 窓は高位で稼働している。
+    // ページテーブルを指し、登録 direct map ウィンドウは高位で稼働している。
     let reader = unsafe { PhysReader::new() };
 
     report_memory_type(
@@ -707,13 +707,13 @@ fn checked_phys(logger: &mut Logger<SerialPort>, what: &str, raw: u64) -> Option
 ///
 /// **`length` が示す範囲全体を読むことが、そのまま「全体がマップ済み」の確認に
 /// なる。** [`PhysReader::read`] が跨ぐページを 1 枚ずつ walk するので、範囲の
-/// どこか一部だけが未マップという状態はここで捕まる。
+/// どこか一部だけが未マップという状態はここで検出される。
 ///
 /// 戻り値は検証済みの長さ。バッファの `..length` が使える。
 struct TableRequest<'a> {
     /// ログに出す表示名。
     what: &'a str,
-    /// 破壊確認の対象。**表示名では照合しない**（`sabotage::Target` の doc を参照）。
+    /// 破壊テストでの確認の対象。**表示名では照合しない**（`sabotage::Target` の doc を参照）。
     target: sabotage::Target,
     phys: PhysAddr,
     expected_signature: &'a [u8; sdt::SIGNATURE_LENGTH],
@@ -739,7 +739,7 @@ fn read_and_verify_table(
         return None;
     }
 
-    // 破壊確認（署名 / 長さ）はヘッダを読んだ直後、検証の直前に効かせる。
+    // 破壊テストでの確認（署名 / 長さ）はヘッダを読んだ直後、検証の直前に効かせる。
     sabotage::corrupt_table_header(target, &mut buffer[..sdt::HEADER_LENGTH]);
 
     let header = match sdt::parse_header(&buffer[..sdt::HEADER_LENGTH], minimum_length) {
@@ -779,7 +779,7 @@ fn read_and_verify_table(
         return None;
     }
 
-    // 破壊確認（チェックサム / エントリ長 0）は本体を読んだ直後、検算の直前。
+    // 破壊テストでの確認（チェックサム / エントリ長 0）は本体を読んだ直後、検算の直前。
     sabotage::corrupt_table_body(target, &mut buffer[..length]);
 
     if let Err(e) = sdt::verify_checksum(&buffer[..length], header.length) {
@@ -1252,7 +1252,7 @@ fn walk_madt(
                 if let Some(address) = madt::parse_local_apic_address_override(&entry) {
                     // **固定部の値を置き換える。** 64 ビット幅なので、表せない
                     // 値が来たら `checked_phys` が報告して `None` にする。その
-                    // 場合は写像すべき所在が無いという結論になり、固定部の値へ
+                    // 場合はマップすべき所在が無いという結論になり、固定部の値へ
                     // 戻さない（壊れた表の一部だけを信じる形を作らない）。
                     mmio.local_apic =
                         checked_phys(logger, "the MADT Local APIC Address Override", address);
@@ -1278,7 +1278,7 @@ fn walk_madt(
     }
 
     if stopped_early {
-        // **完了行を出さない。** 破壊確認はこの行が出ないことを見る。
+        // **完了行を出さない。** 破壊テストでの確認はこの行が出ないことを見る。
         //
         // **所在も返さない。** 走査が途中で止まったということは、後続の
         // エントリを読めていないということである。Local APIC Address Override

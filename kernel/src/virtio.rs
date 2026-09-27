@@ -2,15 +2,15 @@
 //!
 //! # 話し方は legacy である（ADR-0033）
 //!
-//! BAR0 の I/O ポート越しにレジスタを読み書きする。MMIO の写像は使わない。
+//! BAR0 の I/O ポート越しにレジスタを読み書きする。MMIO のマッピングは使わない。
 //! feature は何も受けずに交渉する（装置側の bit は読んで判定行に出す）。
 //!
 //! # 範囲（S13-c まで）
 //!
 //! **queue を 1 本立て、ポーリングで読む。それだけである。**
 //! 要求は逐次 1 つずつ（同時に複数を出さない）。割り込み（ISR も読まない）・
-//! MSI-X・書き込み・ext2 のキャッシュ化は後段で、ここには入れない。
-//! S13-c は像の全ロード（ADR-0034）のためにこの読みを 4KiB ずつ繰り返す。
+//! MSI-X・書き込み・ext2 のキャッシュ化は後の段階で、ここには入れない。
+//! S13-c はイメージ全体のロード（ADR-0034）のためにこの読みを 4KiB ずつ繰り返す。
 //!
 //! # 装置はこちらのメモリを読む側の観測者である
 //!
@@ -22,7 +22,7 @@
 //! notify の間に [`core::sync::atomic::fence`] を置く**（x86 では命令を出さず、
 //! コンパイラの再順序化だけを断つ）。
 //!
-//! **この契約の破壊は立てられない。** 順序を崩しても決定的に落ちる形が
+//! **この契約の破壊テストは立てられない。** 順序を崩しても決定的に落ちる形が
 //! 作れない——「崩しても大抵は動く」のが、まさにこの危険の性質である。
 //! 立てると「緑だが何も検査していない」項目になる。
 
@@ -79,7 +79,7 @@ pub const SECTOR_BYTES: u64 = 512;
 /// ポーリングの上限（スピン回数）。
 ///
 /// **上限のない待機ループを書かない**（`CLAUDE.md` のシェルの規則と同じ理由が
-/// カーネル内にも当たる——notify を落とす破壊はここで止まる）。時計は
+/// カーネル内にも当たる——notify を落とす破壊テストはここで止まる）。時計は
 /// まだ無いので、回数で切る。既定の QEMU では数百スピンまでに完了する（実測は
 /// 判定行の `spins` に出る）。**TCG で数秒に収まる大きさにしてある。**
 const POLL_SPIN_LIMIT: u64 = 20_000_000;
@@ -102,7 +102,7 @@ pub enum VirtioBlkError {
 /// 設定の済んだ virtio-blk（S13-c で保持する形にした）。
 ///
 /// **S13-b では設定と読みが 1 つの関数で、リングは使い捨てだった。**
-/// **像の全ロード（ADR-0034）が 2 人目の利用者になったので、設定を分けて
+/// **イメージ全体のロード（ADR-0034）が 2 人目の利用者になったので、設定を分けて
 /// 保持する**——`VirtioBlkLocation` を返す形にしたときと同じ進み方である。
 pub struct VirtioBlk {
     io_base: u16,
@@ -132,9 +132,9 @@ pub struct VirtioBlk {
 /// [`crate::pci::scan_bus0`] と同じ契約である——**BSP だけが走っており
 /// （AP 起床前）、割り込みが無効である位置から呼ぶこと。** 加えて:
 ///
-/// - `virtio.io_base` が virtio-blk の BAR0 の I/O 窓であること
+/// - `virtio.io_base` が virtio-blk の BAR0 の I/O ウィンドウであること
 ///   （呼び出し側は `scan_bus0` の返り値をそのまま渡す）
-/// - このポート窓とリングの物理領域を触るのは、返した [`VirtioBlk`] だけで
+/// - このポートウィンドウとリングの物理領域を触るのは、返した [`VirtioBlk`] だけで
 ///   あること（複製を作らない）
 pub unsafe fn setup(
     logger: &mut Logger<SerialPort>,
@@ -144,7 +144,7 @@ pub unsafe fn setup(
     let io = virtio.io_base;
 
     // === 握手（legacy）。reset -> ACKNOWLEDGE -> DRIVER ===
-    // SAFETY: この関数の契約（doc）どおり、ポート窓は virtio-blk の BAR0 で、
+    // SAFETY: この関数の契約（doc）どおり、ポートウィンドウは virtio-blk の BAR0 で、
     // 触るのはこの module だけである（以下のポート I/O すべて同じ）。
     unsafe {
         port::outb(io + REG_DEVICE_STATUS, 0);
@@ -175,7 +175,7 @@ pub unsafe fn setup(
         "virtio-blk: handshake: ACKNOWLEDGE -> DRIVER; capacity={capacity} sector(s)"
     ));
 
-    // === queue 0 のリングを建てる ===
+    // === queue 0 のリングを作る ===
     // SAFETY: 同上。
     unsafe { port::outw(io + REG_QUEUE_SELECT, 0) };
     // SAFETY: 同上。
@@ -209,7 +209,7 @@ pub unsafe fn setup(
     // は帳簿だけを動かし、中身には触れない（実測。本体に書き込みが無い）。
     // **装置は used の索引など、こちらが書かない欄も読む**ので、全体を 0 に
     // してから渡す。埋める前の非 0 の数は「ゼロ埋めを飛ばす破壊が効くか」の
-    // 判定材料として出す（0 なら、その破壊は族の 1 つ目で立てられない）。
+    // 判定材料として出す（0 なら、その破壊テストは種類の 1 つ目で立てられない）。
     let nonzero_before = ring.iter().filter(|&&b| b != 0).count();
     ring.fill(0);
 
@@ -222,11 +222,11 @@ pub unsafe fn setup(
         pages * 4096,
     ));
 
-    // === リングの住所を装置へ告げ、DRIVER_OK にする ===
+    // === リングのアドレスを装置へ告げ、DRIVER_OK にする ===
     //
-    // **要求の公開より先である。** 逆にすると、装置は住所を知った時点で
-    // 公開済みの要求を見つけて処理してしまい、**notify を落とす破壊が
-    // 効かなくなる**（実測で踏んだ。破壊が緑を出す族の「機会が無い」——
+    // **要求の公開より先である。** 逆にすると、装置はアドレスを知った時点で
+    // 公開済みの要求を見つけて処理してしまい、**notify を落とす破壊テストが
+    // 効かなくなる**（実測で踏んだ。破壊テストがすべて通る種類の「機会が無い」——
     // notify とは別の機序が同じ仕事を済ませていた）。
     //
     // SAFETY: ポート I/O は冒頭と同じ契約。PFN は 4096 整列を上で確かめた値。
@@ -284,7 +284,7 @@ impl VirtioBlk {
     }
 
     /// `first_sector` から `bytes` バイトを物理 `data_phys` **へ書き戻す**
-    /// （S13-e。ADR-0034 の Addendum の全像フラッシュが使う）。
+    /// （S13-e。ADR-0034 の Addendum のイメージ全体のフラッシュが使う）。
     ///
     /// **[`read_at`](Self::read_at) と対称である**——向きだけが逆で、装置が
     /// `data_phys` から読み、ディスクへ書く。`bytes` は 512 の倍数であること。
@@ -335,7 +335,7 @@ impl VirtioBlk {
     /// **シェルの文脈は BKL を保持して入る。** **`ADR-0036` が「BKL を保持した
     /// まま待たない」と決めているので、発行だけを BKL 下で行い、待ちは解いた後に
     /// 行う必要がある。** **割る前は [`request_at`] が中で完了まで回しており、
-    /// 発行だけを取り出す口が無かった。**
+    /// 発行だけを取り出す入口が無かった。**
     ///
     /// **起動シーケンスは [`request_at`] のまま**（発行と待ちを続けて行う）
     /// ——**あちらは BKL を持っていない。**
@@ -386,7 +386,7 @@ impl VirtioBlk {
         // **公開が notify より先に装置から見えること**（module doc の契約）。
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
-        // 破壊 (S13-b, virtio-skip-notify-test): notify を書かない。
+        // 破壊テスト (S13-b, virtio-skip-notify-test): notify を書かない。
         // **要求は公開されたままで、装置は読まない。** ポーリングが上限に
         // 達して止まる——**上限のある待機だけが、この形を観測へ変える。**
         //
@@ -450,7 +450,7 @@ impl VirtioBlk {
     ///
     /// # Safety
     ///
-    /// リングは [`setup`] が建てた自前の領域で、`index * 16 + 16` がその中に
+    /// リングは [`setup`] が作った自前の領域で、`index * 16 + 16` がその中に
     /// 収まること。
     unsafe fn write_desc(&self, index: u64, addr: u64, len: u32, flags: u16, next: u16) {
         let at = self.ring_virt + index * 16;
@@ -475,7 +475,7 @@ static ARMED_IRQ_PLUS_ONE: core::sync::atomic::AtomicU8 = core::sync::atomic::At
 /// 自分宛（ISR の bit0 が立っていた）の届いた数。
 static IRQ_DELIVERED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
-/// 据えてある装置（P-c-1）。**シェルの文脈から届く唯一の口である。**
+/// 据えてある装置（P-c-1）。**シェルの文脈から届く唯一の入口である。**
 ///
 /// # なぜ静的な家が要るのか
 ///
@@ -490,23 +490,23 @@ static DEVICE: core::sync::atomic::AtomicPtr<VirtioBlk> =
 
 /// 装置を占有しているか（P-c-1）。
 ///
-/// # なぜ旗が要るのか。**BKL では足りない**
+/// # なぜフラグが要るのか。**BKL では足りない**
 ///
 /// **`ADR-0036` は「BKL を解いてから眠る」と決めている。** **解いている間、
 /// 他のコアが同じ装置へ入りうる。** **BKL は解いた時点で守りにならない。**
 ///
-/// **旗は待つ間も持ったままにする。** **`Locked<T>` の族と考え方は同じだが、
+/// **フラグは待つ間も持ったままにする。** **`Locked<T>` の種類と考え方は同じだが、
 /// あちらは競合したら待たずに停止する**（fail-fast。`ADR-0004`）。
 /// **こちらは断って返す**（`-EBUSY`）——**シェルの文脈なので、止めるより
 /// 断るほうが観測できる。**
 static DEVICE_IN_USE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-/// 像の物理の置き場（P-c-1）。**据えるときに控える。**
+/// イメージの物理の置き場（P-c-1）。**据えるときに控える。**
 static IMAGE_PHYS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-/// 像の長さ。
+/// イメージの長さ。
 static IMAGE_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// 書き戻した回数（P-c-1 の計器）。
+/// 書き戻した回数（P-c-1 の計測）。
 static FLUSHES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// 書き戻したバイト数。
 static FLUSHED_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -530,7 +530,7 @@ impl Drop for InstalledDevice<'_> {
 
 /// 装置を据える（P-c-1）。**起動シーケンスが 1 度だけ呼ぶ。**
 ///
-/// **像の置き場も一緒に控える**——**書き戻す者が、どこを書けばよいかを
+/// **イメージの置き場も一緒に控える**——**書き戻す者が、どこを書けばよいかを
 /// 知る必要がある。**
 pub fn install(device: &mut VirtioBlk, image_phys: u64, image_bytes: u64) -> InstalledDevice<'_> {
     IMAGE_PHYS.store(image_phys, core::sync::atomic::Ordering::Release);
@@ -542,9 +542,9 @@ pub fn install(device: &mut VirtioBlk, image_phys: u64, image_bytes: u64) -> Ins
     InstalledDevice { device }
 }
 
-/// 装置の占有（P-c-1）。**落ちるときに旗を降ろす。**
+/// 装置の占有（P-c-1）。**落ちるときにフラグを降ろす。**
 pub struct DeviceClaim {
-    /// 待った回数（`hlt` を踏んだ数）。**計器へ足すために持つ。**
+    /// 待った回数（`hlt` を踏んだ数）。**計測へ足すために持つ。**
     halts: u64,
 }
 
@@ -560,7 +560,7 @@ impl Drop for DeviceClaim {
 /// # なぜ「占有が取れない」と分ける必要があるのか
 ///
 /// **起動シーケンスの中でもユーザープログラムが走る**（`syscall-test` など）。
-/// **あれらは据える前に走り、書きで開いた口を閉じる。** **据えられていない時点で
+/// **あれらは据える前に走り、書きで開いたファイルを閉じる。** **据えられていない時点で
 /// 断ると、起動が止まる**（実測。2026-08-28。`close(3) after writing did not
 /// return 0` で `syscall-test` が落ちた）。
 ///
@@ -593,7 +593,7 @@ pub fn claim() -> Option<DeviceClaim> {
 }
 
 impl DeviceClaim {
-    /// 像の全体を書き戻す要求を発行する（P-c-1）。**完了は待たない。**
+    /// イメージの全体を書き戻す要求を発行する（P-c-1）。**完了は待たない。**
     ///
     /// **1 回の要求で全部を書く。** **装置は 1 回の要求の上限を申告していない**
     /// （`ADR-0033` の Addendum。`VIRTIO_BLK_F_SIZE_MAX` が提示されていない）。
@@ -601,7 +601,7 @@ impl DeviceClaim {
     /// # Safety
     ///
     /// **BKL を保持して呼ぶこと。** 発行はリングを触るので、他の入口と重ならない
-    /// ことが要る（旗は他コアを止めるが、同じコアの再入は BKL が止める）。
+    /// ことが要る（フラグは他コアを止めるが、同じコアの再入は BKL が止める）。
     pub unsafe fn issue_image_write(&mut self) -> Option<(u16, u64, u32)> {
         let phys = IMAGE_PHYS.load(core::sync::atomic::Ordering::Acquire);
         let bytes = IMAGE_BYTES.load(core::sync::atomic::Ordering::Acquire);
@@ -612,11 +612,11 @@ impl DeviceClaim {
         if device.is_null() {
             return None;
         }
-        // SAFETY: 旗を持っているので、他のコアはここへ入れない。
+        // SAFETY: フラグを持っているので、他のコアはここへ入れない。
         // 据えたガードが生きているので、指す先も生きている（[`DEVICE`] の doc）。
         let device = unsafe { &mut *device };
         let before = IRQ_DELIVERED.load(core::sync::atomic::Ordering::Acquire);
-        // SAFETY: 像は連続する物理範囲で、装置が読む向きである。
+        // SAFETY: イメージは連続する物理範囲で、装置が読む向きである。
         let expected = unsafe { device.issue_at(0, bytes as u32, phys, true) };
         Some((expected, u64::from(before), bytes as u32))
     }
@@ -655,7 +655,7 @@ impl DeviceClaim {
         if device.is_null() {
             return Err(VirtioBlkError::QueueSizeZero);
         }
-        // SAFETY: 旗を持っている間、指す先はこの占有だけのものである。
+        // SAFETY: フラグを持っている間、指す先はこの占有だけのものである。
         let device = unsafe { &mut *device };
         // SAFETY: 直前に発行した要求である。**眠っている間に完了しているはずだが、
         // 上限で起きた場合もあるので、ここで確かめる。**
@@ -663,14 +663,14 @@ impl DeviceClaim {
     }
 }
 
-/// 計器を足す（P-c-1）。**書き戻しが 1 回済んだときに呼ぶ。**
+/// 計測を足す（P-c-1）。**書き戻しが 1 回済んだときに呼ぶ。**
 pub fn note_flush(bytes: u32, cycles: u64) {
     FLUSHES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     FLUSHED_BYTES.fetch_add(u64::from(bytes), core::sync::atomic::Ordering::Relaxed);
     FLUSH_CYCLES.fetch_add(cycles, core::sync::atomic::Ordering::Relaxed);
 }
 
-/// 計器を読んで、0 へ戻す（P-c-1）。**プログラムが終わるたびに読む。**
+/// 計測を読んで、0 へ戻す（P-c-1）。**プログラムが終わるたびに読む。**
 pub fn take_flush_stats() -> (u64, u64, u64, u64) {
     (
         FLUSHES.swap(0, core::sync::atomic::Ordering::Relaxed),
@@ -722,7 +722,7 @@ pub fn handle_irq() {
     if isr_port == 0 {
         return;
     }
-    // 破壊 (S13-d, virtio-skip-isr-read-test): ISR を読まない。レベルの線が
+    // 破壊テスト (S13-d, virtio-skip-isr-read-test): ISR を読まない。レベルの線が
     // deassert されず、EOI の後に同じ割り込みが再送され続ける形を狙う。
     #[cfg(feature = "virtio-skip-isr-read-test")]
     {
@@ -752,13 +752,13 @@ pub fn handle_irq() {
 ///
 /// - 配線（`route_to_apic`）と武装（[`arm_interrupt`]）が済み、IF=1 であること
 /// - [`read_at`](VirtioBlk::read_at) と同じ排他（この struct だけが
-///   リングとポート窓を触る。**ISR ポートだけはハンドラと共有し、
+///   リングとポートウィンドウを触る。**ISR ポートだけはハンドラと共有し、
 ///   それは意図した相互作用である**——装置が上げ、ハンドラが読んで下ろす）
 pub unsafe fn exercise_interrupt_read(
     logger: &mut Logger<SerialPort>,
     blk: &mut VirtioBlk,
 ) -> Result<(), VirtioBlkError> {
-    // **読みは 2 回である。** 1 回では EOI を落とす破壊が見えない——実測で、
+    // **読みは 2 回である。** 1 回では EOI を落とす破壊テストが見えない——実測で、
     // 1 発目は届いて数えられ、timer（優先度クラス 15）は生きたままなので
     // 起動も続いてしまう。**2 発目が LAPIC の ISR ビットに塞がれて届かない**
     // ことが、EOI の欠落を観測へ変える（下の待ちが上限で落とす）。
@@ -796,7 +796,7 @@ pub unsafe fn exercise_interrupt_read(
 ///
 /// **時計が無いのでティックで数える。** 100Hz なので 200 は 2 秒である。
 /// `hlt` はタイマ割り込みでも起きるので、完了 IRQ が来なくてもここへ戻って
-/// 上限を見られる（起こし忘れの破壊はこの上限で捕まる）。
+/// 上限を見られる（起こし忘れの破壊テストはこの上限で検出される）。
 const BLOCKING_WAIT_TICKS: u64 = 200;
 
 /// **BKL を解いて眠り、割り込みで起きる**ことを実演する（S13-d-2。ADR-0036）。
@@ -811,12 +811,12 @@ const BLOCKING_WAIT_TICKS: u64 = 200;
 /// 完了フラグの検査を `cli` 下（[`EntryInterruptGuard`]）で行い、未完了なら
 /// **`sti; hlt` を隣接させて眠る**（[`common::cpu::enable_interrupts_and_halt`]）。
 /// 検査から `hlt` まで IF=0 なので、「検査したら未完了と見てから眠るまでの間に
-/// 完了 IRQ が来て取り逃す」窓が開かない。
+/// 完了 IRQ が来て取り逃す」ウィンドウが開かない。
 ///
 /// # Safety
 ///
 /// [`exercise_interrupt_read`] と同じ位置の契約（配線・武装済み、IF=1、
-/// この struct だけがリングとポート窓を触る）。
+/// この struct だけがリングとポートウィンドウを触る）。
 pub unsafe fn exercise_blocking_read(
     logger: &mut Logger<SerialPort>,
     blk: &mut VirtioBlk,
@@ -829,10 +829,10 @@ pub unsafe fn exercise_blocking_read(
     // BKL を解いた後にする。**
     {
         let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
-        // 破壊 (S13-d, virtio-wait-holding-bkl-test): BKL を解かずに待ちへ入る。
+        // 破壊テスト (S13-d, virtio-wait-holding-bkl-test): BKL を解かずに待ちへ入る。
         // **§6 違反そのものである。** 保持したまま下の hlt へ進むと、BKL 下は
         // IF=0 なので完了 IRQ が来ず、他コアも永久に待つ。**次に BKL を取る者が
-        // 同じコアの再取得として捕まえる**見込み（`kill-fold-keep-bkl` の族）。
+        // 同じコアの再取得として検出する**見込み（`kill-fold-keep-bkl` と同じ種類）。
         #[cfg(feature = "virtio-wait-holding-bkl-test")]
         {
             // SAFETY: read_at の契約は exercise 側の doc が満たす。
@@ -861,8 +861,8 @@ pub unsafe fn exercise_blocking_read(
             drop(guard);
             return Err(VirtioBlkError::RequestTimedOut { spins: halts });
         }
-        // 破壊 (S13-d, virtio-open-wakeup-window-test): 検査の後・hlt の前で
-        // IF を開ける（窓を開く）。**cli 下の検査で見た「未完了」と hlt の間に
+        // 破壊テスト (S13-d, virtio-open-wakeup-window-test): 検査の後・hlt の前で
+        // IF を開ける（ウィンドウを開く）。**cli 下の検査で見た「未完了」と hlt の間に
         // 完了 IRQ が入ると、その IRQ を処理してから眠り、次の IRQ まで起きない**
         // ——lost wakeup。ただし QEMU で決定的に踏めるかは実測（下の報告）。
         #[cfg(feature = "virtio-open-wakeup-window-test")]
@@ -898,9 +898,9 @@ pub unsafe fn exercise_blocking_read(
 ///
 /// **sector 2 を読む**（オフセット 1024。ext2 の superblock で、`s_magic` を
 /// 含むので必ず非 0 である）。**S13-b では sector 0 を読んでいたが、S13-c で
-/// ディスクの中身が ext2 の像になり、sector 0 は boot 領域の全 0 になった**
-/// ——「0 を読んでも、読めていなくても 0」（破壊が緑を出す族の 1 つ目）を
-/// 避けるため、必ず非 0 の場所へ移した。判定はホスト側（xtask）が像の
+/// ディスクの中身が ext2 のイメージになり、sector 0 は boot 領域の全 0 になった**
+/// ——「0 を読んでも、読めていなくても 0」（破壊テストがすべて通る種類の 1 つ目）を
+/// 避けるため、必ず非 0 の場所へ移した。判定はホスト側（xtask）がイメージの
 /// ファイルの同じ 512 バイトから同じ計算をする。
 ///
 /// # Safety
@@ -910,7 +910,7 @@ pub unsafe fn exercise_read(
     logger: &mut Logger<SerialPort>,
     blk: &mut VirtioBlk,
 ) -> Result<(), VirtioBlkError> {
-    // 破壊 (S13-b, virtio-wrong-sector-test): 隣の sector を要求する。
+    // 破壊テスト (S13-b, virtio-wrong-sector-test): 隣の sector を要求する。
     // **superblock の前半（非 0）と後半（ほぼ 0）で中身が違う**ので、
     // ホスト側の突き合わせが落ちる。
     #[cfg(not(feature = "virtio-wrong-sector-test"))]
@@ -918,13 +918,13 @@ pub unsafe fn exercise_read(
     #[cfg(feature = "virtio-wrong-sector-test")]
     let sector = 3u64;
 
-    // 破壊 (S13-b, virtio-short-desc-test): データ記述子の長さを 511 にする。
+    // 破壊テスト (S13-b, virtio-short-desc-test): データ記述子の長さを 511 にする。
     // **見込みは「装置は黙って 511 バイトだけ書く」だったが、実測では QEMU が
-    // 要求ごと拒む**——status に 1（IOERR）が書かれ、status の検査が捕まえる。
+    // 要求ごと拒む**——status に 1（IOERR）が書かれ、status の検査が検出する。
     // 中身の突き合わせまで届かない。**捕まえ方の見込みは外れたが、捕まる。**
     //
     // **正しい長さから 1 を引く形で書く。** **以前は `512` と `511` を別々に
-    // 書いていた**——**正しい側を変えると、破壊が「1 バイト短い」でなくなる**
+    // 書いていた**——**正しい側を変えると、破壊テストが「1 バイト短い」でなくなる**
     // （効き目が別の定数に依存する形。2026-08-28 の洗い出しで見つけた）。
     const EXERCISE_READ_BYTES: u32 = 512;
     #[cfg(not(feature = "virtio-short-desc-test"))]

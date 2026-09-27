@@ -76,7 +76,7 @@ use core::ptr::addr_of;
 
 /// 通常実行用のカーネルスタックの大きさ。
 ///
-/// # なぜ 128KiB か（P-c-1 の手当て。2026-08-28）
+/// # なぜ 128KiB か（P-c-1 の対策。2026-08-28）
 ///
 /// **測って決めた。** **起動の経路が要るのは 65,744 バイトである**
 /// （128KiB へ広げて高水位を読んだ。2 回続けて同じ値だった）。
@@ -85,13 +85,13 @@ use core::ptr::addr_of;
 /// **64KiB だった間、余裕はほぼ 0 だった。** **`ADR-0046` が既に
 /// 「起動時のカーネルスタックに余裕が無い」と書いており、256 バイトの
 /// 構造体 1 つで越えることを実測している。** **緑であることと、余裕が
-/// あることは違う**——**ガードは真偽しか言わず、数を誰も見ていなかった。**
+/// あることは違う**——**ガードは真偽しか示さず、数を誰も見ていなかった。**
 ///
 /// **128KiB にすると余裕は 65,328 バイトになる**（必要量とほぼ同じだけ余る）。
 /// **96KiB も採れるが、余裕が 30KiB では次の 1 回の変更でまた縁へ来る。**
 ///
-/// **内訳も測った。** **`kernel_main` の枠だけで 36,864 バイト（36KiB）で、
-/// 他の関数は 1 つも 4KiB を超えない。** **1 つの枠が 56% を占める形は
+/// **内訳も測った。** **`kernel_main` のフレームだけで 36,864 バイト（36KiB）で、
+/// 他の関数は 1 つも 4KiB を超えない。** **1 つのフレームが 56% を占める形は
 /// それ自体が良くないが、減らすのは起動シーケンスの構造に触る作業なので
 /// 分けた**（`deferred-decisions.md` に行がある）。
 pub const KERNEL_STACK_SIZE: usize = 128 * 1024;
@@ -123,7 +123,7 @@ pub const CANARY_BYTE: u8 = 0xC5;
 #[repr(C, align(4096))]
 struct StackBlock {
     /// カーネルスタックのガードページ。**M5-b でこの 1 ページを unmap し、
-    /// 溢れた瞬間に #PF（CR2 = このページ）として捕まえる。** それまでは
+    /// 溢れた瞬間に #PF（CR2 = このページ）として検出する。** それまでは
     /// マップされたまま（unmap は起動シーケンスの中で行う）。カナリアは
     /// 敷かない（ガードページ化がカナリアの役割を引き継ぐ）。
     kernel_guard: [u8; GUARD_SIZE],
@@ -198,7 +198,7 @@ pub fn kernel_stack_range() -> StackRange {
     range_from(bottom, KERNEL_STACK_SIZE as u64)
 }
 
-/// カーネルスタックへ敷く目印（P-c-1 の手当て）。
+/// カーネルスタックへ敷く目印（P-c-1 の対策）。
 ///
 /// **`.bss` は 0 で埋まっているが、0 では高水位が測れない**——**スタックが
 /// 書く値にも 0 が混ざるので、「どこまで使ったか」を 0 では区切れない。**
@@ -207,7 +207,7 @@ pub fn kernel_stack_range() -> StackRange {
 /// **2 つ作らず、同じ考え方を借りる。**
 pub const KERNEL_STACK_FILL: u8 = 0xA5;
 
-/// いま使っていない側へ目印を敷く（P-c-1 の手当て）。
+/// いま使っていない側へ目印を敷く（P-c-1 の対策）。
 ///
 /// # なぜ「いま使っていない側」だけなのか
 ///
@@ -222,7 +222,7 @@ pub unsafe fn paint_unused_kernel_stack(rsp: u64) {
     let range = kernel_stack_range();
     let bottom = range.bottom.as_u64();
     // **`rsp` の下に余白を置く。** 呼び出しの途中で下へ伸びうるので、
-    // **いま生きている枠を塗り潰さない。**
+    // **いま生きているフレームを塗り潰さない。**
     let slack = 512u64;
     if rsp <= bottom + slack {
         return;
@@ -232,7 +232,7 @@ pub unsafe fn paint_unused_kernel_stack(rsp: u64) {
     unsafe { core::ptr::write_bytes(bottom as *mut u8, KERNEL_STACK_FILL, length) };
 }
 
-/// カーネルスタックの高水位（P-c-1 の手当て）。**底から目印でない最初の位置を探す。**
+/// カーネルスタックの高水位（P-c-1 の対策）。**底から目印でない最初の位置を探す。**
 ///
 /// **返すのは「使ったバイト数」である。** **敷いていなければ容量が返る**
 /// （底が目印でないため）——**敷き忘れは、使い切ったように見える。**
@@ -363,7 +363,7 @@ pub unsafe fn switch_to_kernel_stack_and_run(continuation: extern "sysv64" fn() 
 ///
 /// `jmp` ではなく `call` にしているのは、SysV ABI のスタック境界を守るため。
 /// ABI は「呼び出し側が `call` を実行する直前に RSP が 16 バイト境界」で
-/// あることを要求する。`call` が戻り番地 8 バイトを積むので、呼ばれた側の
+/// あることを要求する。`call` が戻りアドレス 8 バイトを積むので、呼ばれた側の
 /// 入口では RSP % 16 == 8 になる。`jmp` にすると入口で RSP % 16 == 0 と
 /// なり規約から外れる。
 ///
@@ -387,20 +387,20 @@ unsafe extern "sysv64" fn switch_stack_and_call(
     );
 }
 
-/// ガードページを 1 枚張る（S12 前の手当て、C の途中で寄せた）。
+/// ガードページを 1 枚設ける（S12 前の手当て、C の途中で寄せた）。
 ///
 /// **粒度を確かめ、2MiB なら分割し、分割後にもう一度読み直してから unmap する。**
 ///
 /// # なぜ 1 つに寄せたのか。**同じことをする関数が 2 つあり、対処が片方にしか入らなかった**
 ///
-/// **かつてガードページを張る場所は 2 つあった**——カーネルスタック
+/// **かつてガードページを設ける場所は 2 つあった**——カーネルスタック
 /// （`kernel/src/main.rs` の `install_kernel_stack_guard_page`）と、
 /// ワーカースタック（`kernel/src/task.rs` の `install_worker_guard_page`）である。
 ///
 /// **`docs/deferred-decisions.md` の「ガードページの split 化」は S11-5 で発火し、
 /// そのとき分割の分岐が配線された。ところが入ったのはカーネルスタックの側だけだった。**
 /// **ワーカーの側は「4KiB でなければ止める」のまま残り、S12 前の手当ての C で
-/// 像が育ったときに、そちらが止めた。**
+/// イメージが育ったときに、そちらが止めた。**
 ///
 /// **根は「分割が無かったこと」ではない。「同じ不変を守る場所が 2 つあり、
 /// 対処が片側にだけ入ったこと」である。** 配線して終わりにすると、
@@ -428,15 +428,15 @@ pub unsafe fn install_guard_page(
 ) {
     use crate::paging::active::{ActivePageTable, PageSize};
 
-    // SAFETY: CR3 は自前のテーブルを指し、その配下は登録窓で読み書きできる。
+    // SAFETY: CR3 は自前のテーブルを指し、その配下は登録ウィンドウで読み書きできる。
     let mut table = unsafe { ActivePageTable::current(common::addr::direct_map()) };
 
     match table.translate(guard_virt) {
         Ok(Some(t)) if t.page_size == PageSize::Size4KiB => {}
         Ok(Some(_)) => {
             // **2MiB ページに載っている。** unmap の前に split する（S11-5）。
-            // SAFETY: 稼働中のテーブルで、対象はカーネルの高位写像の中である。
-            // split は写像内容を変えず、粒度だけを 4KiB へ落とす。
+            // SAFETY: 稼働中のテーブルで、対象はカーネルの高位マッピングの中である。
+            // split はマッピング内容を変えず、粒度だけを 4KiB へ落とす。
             match unsafe { table.split_huge_page(guard_virt, allocator) } {
                 Ok(outcome) => log(format_args!(
                     "{tag}: {what} {:#x} was on a 2MiB page; split {:#x}..+2MiB into 4KiB via a \
@@ -457,7 +457,7 @@ pub unsafe fn install_guard_page(
             }
             // **split の後に、粒度をもう一度読み直す。**
             // **split したことを主張の根拠にしない**——実状態で 4KiB になっている
-            // ことを、張った側とは独立に確かめる。
+            // ことを、マップした側とは独立に確かめる。
             match table.translate(guard_virt) {
                 Ok(Some(t)) if t.page_size == PageSize::Size4KiB => {}
                 other => {
@@ -479,11 +479,11 @@ pub unsafe fn install_guard_page(
         }
     }
 
-    // **張る前に、ガードページが手つかずかを見る（ADR-0046 の Addendum）。**
+    // **設ける前に、ガードページが手つかずかを見る（ADR-0046 の Addendum）。**
     //
     // # なぜ要るのか
     //
-    // **ガードページは張った後しか効かない。** **張る前に溢れても黙って通る。**
+    // **ガードページは設けた後しか効かない。** **設ける前に溢れても黙って通る。**
     // **実際に踏んだ**——ADR-0046 の実装で、起動時のカーネルスタックが 64KiB を
     // 越えてここへ 15 バイト書き込んでいた（実測）。**壊れたものは無い**
     // （踏んだ先はまさに犠牲領域である）が、**気づいたのは起動ログの `old pte` に
@@ -494,16 +494,16 @@ pub unsafe fn install_guard_page(
     //
     // **`.bss` の一部なので、起動時に 0 で埋められている。** **非ゼロが 1 つでも
     // あれば、誰かが書いたということである。** **0 を書いた場合は見えない**が、
-    // **スタックが積む値が全部 0 になる形は考えにくい**（戻り番地とフレーム
+    // **スタックが積む値が全部 0 になる形は考えにくい**（戻りアドレスとフレーム
     // ポインタが載る）。
     //
     // # 停止しない。報せる
     //
     // **踏んだ先は犠牲領域で、壊れたものは無い**（`StackBlock` の doc）。
     // **IST のカナリアの判定と同じ立場である**——**報せて、起動ログの参照が
-    // 差として捕まえる。**
+    // 差として検出する。**
     {
-        // SAFETY: guard_virt はまだ張られており、1 ページぶんを読むだけである。
+        // SAFETY: guard_virt はまだマップされており、1 ページぶんを読むだけである。
         let bytes =
             unsafe { core::slice::from_raw_parts(guard_virt.as_u64() as *const u8, GUARD_SIZE) };
         let nonzero = bytes.iter().filter(|byte| **byte != 0).count();
@@ -521,7 +521,7 @@ pub unsafe fn install_guard_page(
     // アロケータの管理外。M5-a-2 の仕様どおり unmap はフレームを返さない）。
     // SAFETY: guard_virt はスタックの直下のガードページで、スタック本体とは別の
     // 1 ページ。今後このページへ正規のアクセスは無く、触れたら溢れとして #PF で
-    // 捕まえるのが目的である。
+    // 検出するのが目的である。
     match unsafe { table.unmap_4kib(guard_virt) } {
         Ok(old_pte) => {
             // 会計: unmap 後にこのページが解決不能になっていること（ガードが効いて
