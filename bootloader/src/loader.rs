@@ -24,7 +24,7 @@ use uefi::table::cfg::ConfigTableEntry;
 
 const PAGE_SIZE: u64 = 4096;
 const KERNEL_ELF_PATH: &uefi::CStr16 = cstr16!("\\zaytos\\kernel.elf");
-/// RAM ディスクの像（`ADR-0068` の HW-d）。**無ければ渡さない**——**カーネルは virtio-blk を使う。**
+/// RAM ディスクのイメージ（`ADR-0068` の HW-d）。**無ければ渡さない**——**カーネルは virtio-blk を使う。**
 const FS_IMAGE_PATH: &uefi::CStr16 = cstr16!("\\zaytos\\fs.img");
 
 fn align_down(addr: u64, align: u64) -> u64 {
@@ -42,7 +42,7 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
     // fs/elf_bytes/elf はこのブロックの終わりでスコープを抜けて破棄される。
     // elf_bytes は Boot Services のプールアロケータ（Vec）に由来するため、
     // ExitBootServices より前に破棄しておく必要がある。
-    // **像はブロックの中で読み、ブロックの外へ持ち出す**（`ADR-0068` の HW-d）
+    // **イメージはブロックの中で読み、ブロックの外へ持ち出す**（`ADR-0068` の HW-d）
     // ——**ファイルシステムはこのブロックの終わりで閉じる。**
     let fs_image;
     let entry_point = {
@@ -53,7 +53,7 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
         let elf_bytes = fs
             .read(Path::new(KERNEL_ELF_PATH))
             .expect("failed to read \\zaytos\\kernel.elf from the ESP");
-        // **RAM ディスクの像を読む（`ADR-0068` の HW-d）。** **ここでしか読めない**
+        // **RAM ディスクのイメージを読む（`ADR-0068` の HW-d）。** **ここでしか読めない**
         // ——**ExitBootServices の後はファイルシステムが無い。** **無ければ空のまま進む。**
         fs_image = read_fs_image(&mut logger, &mut fs);
 
@@ -152,7 +152,7 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
         ));
 
         // entry_point は VMA（higher-half では高位のリンクアドレス）である。
-        // bootloader は物理メモリの上で動いており、まだ高位マッピングを張って
+        // bootloader は物理メモリの上で動いており、まだ高位マッピングを作って
         // いないため、飛び先は LMA に変換した低位アドレスにする。恒等リンクでは
         // load_delta=0 なので素通しで、entry_point と一致する。higher-half では
         // これがトランポリンの低位アドレスになる。
@@ -240,8 +240,8 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
 
     // --- 3. 受け渡しの領域の確保（`ADR-0068` の HW-a）---
     //
-    // **BootInfo とメモリマップの写しを、カーネルの静的な初期ページ表が恒等で張る範囲
-    // （`BOOT_IDENTITY_REACH` の下）に置く。** **カーネルは自前のページ表へ切り替えるまで、
+    // **BootInfo とメモリマップのコピーを、カーネルの静的な初期ページテーブルが恒等でマップする範囲
+    // （`BOOT_IDENTITY_REACH` の下）に置く。** **カーネルは自前のページテーブルへ切り替えるまで、
     // その範囲しか恒等で触れない。** **`AnyPages` はファームウェアの配り方しだいで上へ行き、
     // メモリが 1GiB を超えると、カーネルが最初に BootInfo を読む所で #PF になった**
     // （`tools/qemu-variants.py` の `q35-1500m`）。
@@ -271,14 +271,14 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
     logger.info(format_args!("ExitBootServices: done"));
 
     let meta = memory_map.meta();
-    // **メモリマップを受け渡しの領域へ写す**（`ADR-0068` の HW-a）。**uefi-rs のバッファは
+    // **メモリマップを受け渡しの領域へコピーする**（`ADR-0068` の HW-a）。**uefi-rs のバッファは
     // ファームウェアの配り方しだいで 1GiB の上に在りうる。** ExitBootServices の後も、
-    // ブートローダはファームウェアの恒等写像の下で動いているので、両方とも読み書きできる。
+    // ブートローダはファームウェアの恒等マッピングの下で動いているので、両方とも読み書きできる。
     let descriptors_ptr = handoff.take_memory_map(&mut logger, memory_map.buffer(), meta.map_size);
 
     // SAFETY: boot_info_ptr は `allocate_handoff` が AllocatePages で確保した受け渡しの
     // 領域の先頭の `BOOT_INFO_PAGE_COUNT` ページを指し、他に誰も参照していない
-    // （メモリマップの写しはその後ろのページである）。BootInfo 一つ分の書き込みは
+    // （メモリマップのコピーはその後ろのページである）。BootInfo 一つ分の書き込みは
     // そのページ内に収まる (size_of::<BootInfo>() < BOOT_INFO_PAGE_COUNT * 4096)。
     unsafe {
         boot_info_ptr.write(BootInfo {
@@ -323,19 +323,19 @@ pub fn run(mut logger: Logger<SerialPort>) -> ! {
     unsafe { entry(boot_info_ptr) }
 }
 
-/// 受け渡しの領域（`ADR-0068` の HW-a）。**BootInfo を先頭の 1 ページに、メモリマップの写しを
+/// 受け渡しの領域（`ADR-0068` の HW-a）。**BootInfo を先頭の 1 ページに、メモリマップのコピーを
 /// その後ろに置く。**
 struct Handoff {
     boot_info: *mut BootInfo,
-    /// メモリマップの写しの先頭。**破壊 `handoff-anywhere` では null で、写さない。**
+    /// メモリマップのコピーの先頭。**破壊テスト `handoff-anywhere` では null で、コピーしない。**
     memory_map: *mut u8,
 }
 
 impl Handoff {
-    /// メモリマップの写しに使えるバイト数。
+    /// メモリマップのコピーに使えるバイト数。
     const MEMORY_MAP_CAPACITY: usize = HANDOFF_MEMORY_MAP_PAGES * PAGE_SIZE as usize;
 
-    /// ExitBootServices が返したメモリマップを領域へ写し、写しの物理アドレスを返す。
+    /// ExitBootServices が返したメモリマップを領域へコピーし、コピーの物理アドレスを返す。
     ///
     /// **入りきらなければ、飛ぶ前に止まり、理由を出す。** **ExitBootServices の後は確保できない。**
     fn take_memory_map(
@@ -345,7 +345,7 @@ impl Handoff {
         map_size: usize,
     ) -> PhysAddr {
         if self.memory_map.is_null() {
-            // **破壊 `handoff-anywhere`**——uefi-rs のバッファをそのまま渡す（直す前の形）。
+            // **破壊テスト `handoff-anywhere`**——uefi-rs のバッファをそのまま渡す（直す前の形）。
             return PhysAddr::new(buffer.as_ptr() as u64)
                 .expect("the memory map buffer address does not fit in 52 bits");
         }
@@ -357,10 +357,10 @@ impl Handoff {
             ));
             panic!("the memory map does not fit in the handoff area");
         }
-        // SAFETY: 写し先は `allocate_handoff` が LOADER_DATA で確保した、他に誰も参照していない
-        // 領域で、`MEMORY_MAP_CAPACITY` バイトある（上で大きさを確かめた）。写し元は
+        // SAFETY: コピー先は `allocate_handoff` が LOADER_DATA で確保した、他に誰も参照していない
+        // 領域で、`MEMORY_MAP_CAPACITY` バイトある（上で大きさを確かめた）。コピー元は
         // ExitBootServices が返したバッファで、`map_size` バイトは `buffer` の内側である。
-        // 2 つは別々の確保なので重ならない。ブートローダは恒等写像の下で動いている。
+        // 2 つは別々の確保なので重ならない。ブートローダは恒等マッピングの下で動いている。
         unsafe {
             core::ptr::copy_nonoverlapping(buffer.as_ptr(), self.memory_map, map_size);
         }
@@ -376,11 +376,11 @@ impl Handoff {
     }
 }
 
-/// 受け渡しの領域を、カーネルの初期ページ表が恒等で張る範囲の下に確保する（`ADR-0068` の HW-a）。
+/// 受け渡しの領域を、カーネルの初期ページテーブルが恒等でマップする範囲の下に確保する（`ADR-0068` の HW-a）。
 ///
 /// **`AllocateType::MaxAddress` は「この番地以下に置く」である**（UEFI の仕様）。
 /// **確保できなければ止まる**——**上に置けば、カーネルが最初の一読で #PF になる。**
-/// ブートローダが渡す RAM ディスクの像（`ADR-0068` の HW-d）。
+/// ブートローダが渡す RAM ディスクのイメージ（`ADR-0068` の HW-d）。
 struct FsImage {
     phys: PhysAddr,
     bytes: u64,
@@ -400,12 +400,12 @@ impl FsImage {
 /// **無ければ空を返す**（起動は続く。カーネルが virtio-blk を使う）。**中身は検証しない**
 /// ——**ext2 として読めるかはカーネルが見る**（`ADR-0008` 「ローダは薄く」）。
 ///
-/// **置き場は `AnyPages` でよい。** **受け渡し（BootInfo とメモリマップの写し）と違い、
-/// カーネルが像を読むのは自前のページ表へ切り替えた後である**——**1GiB の下である必要は無い。**
+/// **置き場は `AnyPages` でよい。** **受け渡し（BootInfo とメモリマップのコピー）と違い、
+/// カーネルがイメージを読むのは自前のページテーブルへ切り替えた後である**——**1GiB の下である必要は無い。**
 /// **`LOADER_DATA` なので、アロケータは配らない**（`memory_map::classify`。HW-a の実測）。
 ///
-/// **読めたのに置けなかったときは止める。** **像が在るのに黙って無いことにすると、
-/// カーネルは「装置も像も無い」と言って止まり、理由が 1 段ずれる。**
+/// **読めたのに置けなかったときは止める。** **イメージが在るのに黙って無いことにすると、
+/// カーネルは「装置も像も無い」と出力して止まり、理由が 1 段ずれる。**
 fn read_fs_image(logger: &mut Logger<SerialPort>, fs: &mut FileSystem) -> FsImage {
     let bytes = match fs.read(Path::new(FS_IMAGE_PATH)) {
         Ok(bytes) => bytes,
@@ -437,7 +437,7 @@ fn read_fs_image(logger: &mut Logger<SerialPort>, fs: &mut FileSystem) -> FsImag
         ));
         panic!("failed to allocate pages for the RAM disk image");
     });
-    // SAFETY: いま確保した `pages` ページ（>= bytes.len()）の先頭へ、読んだ像をそのまま写す。
+    // SAFETY: いま確保した `pages` ページ（>= bytes.len()）の先頭へ、読んだイメージをそのままコピーする。
     // 他に誰もこの領域を参照していない。
     unsafe {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.as_ptr(), bytes.len());
@@ -460,8 +460,8 @@ fn read_fs_image(logger: &mut Logger<SerialPort>, fs: &mut FileSystem) -> FsImag
 fn allocate_handoff(logger: &mut Logger<SerialPort>) -> Handoff {
     #[cfg(feature = "handoff-anywhere")]
     {
-        // **破壊 `handoff-anywhere`（`ADR-0068` の HW-a）**——BootInfo を `AnyPages` で取り、
-        // メモリマップは写さない（直す前の形）。**6GiB の起動が、BootInfo の最初の一読で
+        // **破壊テスト `handoff-anywhere`（`ADR-0068` の HW-a）**——BootInfo を `AnyPages` で取り、
+        // メモリマップはコピーしない（直す前の形）。**6GiB の起動が、BootInfo の最初の一読で
         // #PF になることを見る。**
         let boot_info = uefi::boot::allocate_pages(
             AllocateType::AnyPages,
@@ -509,7 +509,7 @@ fn allocate_handoff(logger: &mut Logger<SerialPort>) -> Handoff {
             end <= BOOT_IDENTITY_REACH
         ));
         // SAFETY: `base` は今確保した `pages` ページの先頭で、先頭の `BOOT_INFO_PAGE_COUNT` ページを
-        // BootInfo に、その後ろをメモリマップの写しに使う。足し算は確保した範囲の内側である。
+        // BootInfo に、その後ろをメモリマップのコピーに使う。足し算は確保した範囲の内側である。
         let memory_map = unsafe { base.add(BOOT_INFO_PAGE_COUNT * PAGE_SIZE as usize) };
         Handoff {
             boot_info: base.cast::<BootInfo>(),
@@ -530,10 +530,10 @@ fn allocate_handoff(logger: &mut Logger<SerialPort>) -> Handoff {
 /// 静かに「ACPI 無し」になるのを避けるためである。どちらで見つけたかはログへ出す。
 ///
 /// configuration table が持つのはポインタだが、**ExitBootServices より前の UEFI は
-/// 恒等写像なので、その値をそのまま物理アドレスとして扱える。** 自明ではないうえ、
+/// 恒等マッピングなので、その値をそのまま物理アドレスとして扱える。** 自明ではないうえ、
 /// 前提が崩れれば静かに間違ったアドレスを渡すことになるので明記する。
 ///
-/// 見つからなければ 0 を返す。**停止しない**（S1 は情報を集める段で、ACPI が
+/// 見つからなければ 0 を返す。**停止しない**（S1 は情報を集める段階で、ACPI が
 /// 無くても現在のカーネルは動く。致命として扱うのは S2 である）。
 fn find_acpi_rsdp(logger: &mut Logger<SerialPort>) -> PhysAddr {
     let found = uefi::system::with_config_table(|entries| {
