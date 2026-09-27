@@ -34,9 +34,11 @@ pub mod enabled_features {
     include!(concat!(env!("OUT_DIR"), "/enabled_features.rs"));
 }
 
+pub mod abi;
 pub mod acpi;
 pub mod address_space;
 pub mod apic;
+pub mod arch;
 pub mod bkl;
 pub mod console;
 pub mod cpu_state;
@@ -50,6 +52,7 @@ pub mod input;
 pub mod interrupts;
 pub mod irq;
 pub mod keyboard;
+pub mod machine;
 pub mod memory_map;
 pub mod paging;
 pub mod pci;

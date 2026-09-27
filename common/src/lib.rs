@@ -11,6 +11,7 @@
 
 pub mod addr;
 pub mod ansi;
+pub mod arch;
 pub mod boot_info;
 pub mod complete;
 pub mod cpu;
@@ -19,6 +20,7 @@ pub mod elf;
 pub mod env;
 pub mod ext2;
 pub mod log;
+pub mod machine;
 pub mod percpu;
 pub mod port;
 pub mod screen;
