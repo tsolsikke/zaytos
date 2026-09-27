@@ -8539,7 +8539,7 @@ const FAULT_TEST_ERROR_CODE: u64 = 0b111;
 /// 失敗として扱うと、後者を正しく終わらせられない。**
 ///
 /// **終わり方は観測される量であって、判定はここが持つ。** 観測は
-/// [`kernel::ring3`] と [`kernel::syscall`] の記録から読む。
+/// [`kernel::arch::x86_64::ring3`] と [`kernel::syscall`] の記録から読む。
 enum UserProgramOutcome {
     /// `exit(status)` で終わる。
     Exit {
@@ -8943,7 +8943,7 @@ fn verify_corrupt_user_program_is_not_loaded(logger: &mut Logger<SerialPort>) {
 ///
 /// # 観測と判定を分けてある
 ///
-/// 観測は [`kernel::ring3`] と [`kernel::syscall`] の記録から読む。**走らせる側
+/// 観測は [`kernel::arch::x86_64::ring3`] と [`kernel::syscall`] の記録から読む。**走らせる側
 /// （`load_user_program_into`）は判定しない**——プログラムごとに正しい終わり方が
 /// 違い、それは一覧を持つ側の知識である。`ring3::enter` が終了させた位置を主張せず
 /// 呼び出し側に委ねているのと同じ形である。
@@ -8955,12 +8955,12 @@ fn check_user_program_outcome(
     let name = program.name;
     let exited = kernel::syscall::process_exited();
     let status = kernel::syscall::process_exit_status();
-    let folded = kernel::ring3::folded();
-    let vector = kernel::ring3::fault_vector();
-    let rip = kernel::ring3::fault_rip();
-    let cs = kernel::ring3::fault_cs();
-    let cr2 = kernel::ring3::fault_cr2();
-    let error_code = kernel::ring3::fault_error_code();
+    let folded = kernel::arch::x86_64::ring3::folded();
+    let vector = kernel::arch::x86_64::ring3::fault_vector();
+    let rip = kernel::arch::x86_64::ring3::fault_rip();
+    let cs = kernel::arch::x86_64::ring3::fault_cs();
+    let cr2 = kernel::arch::x86_64::ring3::fault_cr2();
+    let error_code = kernel::arch::x86_64::ring3::fault_error_code();
     let mut bytes = [0u8; kernel::syscall::WRITE_BUF_LEN];
     let written = kernel::syscall::last_write_bytes(&mut bytes);
     let message = core::str::from_utf8(&bytes[..written]).unwrap_or("<not utf-8>");
@@ -9300,7 +9300,7 @@ fn assert_folded_at(
     expected_vector: u64,
     expected_rip: u64,
 ) {
-    use kernel::ring3;
+    use kernel::arch::x86_64::ring3;
 
     let vector = ring3::fault_vector();
     let rip = ring3::fault_rip();
@@ -9331,7 +9331,7 @@ fn verify_ring3_excursion<const CAP: usize>(
 ) {
     use kernel::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
     use kernel::arch::x86_64::paging::verify;
-    use kernel::ring3;
+    use kernel::arch::x86_64::ring3;
 
     let identity = common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
         .expect("the identity window is canonical");
@@ -9530,7 +9530,7 @@ fn verify_ring3_excursion<const CAP: usize>(
 /// - 終了処理で戻り RSP0 が復帰したこと
 fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     use kernel::arch::x86_64::paging::active::{ActivePageTable, PageSize};
-    use kernel::ring3;
+    use kernel::arch::x86_64::ring3;
     use kernel::syscall;
 
     let identity = common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
@@ -9773,7 +9773,7 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
 /// 同じものを使う。ユーザーコード/スタックページは verify_ring3_excursion がマップしたものを
 /// 再利用する（呼び出し側が確認済みであることが前提）。
 fn issue_ptr_len_syscall(logger: &mut Logger<SerialPort>, number: u64, buf: u64, len: u64) -> u64 {
-    use kernel::ring3;
+    use kernel::arch::x86_64::ring3;
     use kernel::syscall;
 
     let code_virt = common::addr::VirtAddr::new(ring3::USER_CODE_VIRT)
@@ -9865,7 +9865,7 @@ fn verify_syscall_pointer<const CAP: usize>(
     allocator: &mut frame_allocator::FrameAllocator<CAP>,
 ) {
     use kernel::arch::x86_64::paging::active::{ActivePageTable, PageAttributes, PageSize};
-    use kernel::ring3;
+    use kernel::arch::x86_64::ring3;
     use kernel::syscall;
 
     let identity = common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
@@ -9991,7 +9991,7 @@ fn verify_syscall_pointer<const CAP: usize>(
 /// あわせて、カーネルポインタを渡すと copy 前の検証で -EFAULT が返る（読みに踏み込まない）
 /// ことを確かめる。
 fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
-    use kernel::ring3;
+    use kernel::arch::x86_64::ring3;
     use kernel::syscall;
 
     // 内容バッファはユーザースタックページの下部に置く。余分バイトは copy-overrun の
@@ -10096,7 +10096,7 @@ fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
 /// ユーザーページがそちらでマップされるため）。
 #[cfg(not(feature = "paging-test"))]
 fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
-    use kernel::ring3;
+    use kernel::arch::x86_64::ring3;
 
     // ユーザーサブツリー内の未マップ VA。#PF の対象にする。
     // verify_ring3_excursion がマップしたのはコード（+0）とスタック（+1 MiB）だけなので、

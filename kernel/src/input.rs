@@ -242,7 +242,7 @@ pub fn claim_foreground() -> bool {
     // 1 本が前景を取る。** **断った回数が 0 になり、判定 6 だけが落ちるはずである**（後から起動した
     // 1 本は取れないまま走り、取った側が終わるときに返す）。
     #[cfg(not(feature = "foreground-claimable-from-any-slot"))]
-    if crate::ring3::current_slot() != 0 {
+    if crate::arch::x86_64::ring3::current_slot() != 0 {
         FOREGROUND_REFUSED.fetch_add(1, Ordering::SeqCst);
         return false;
     }
@@ -252,7 +252,7 @@ pub fn claim_foreground() -> bool {
     if claimed {
         // **取れた深さを控える（S12 前の手当て、C）。** 中断の判定行が、
         // **持ち主（最も外側）と止めた相手（最も内側）を並べて出す。**
-        FOREGROUND_DEPTH.store(crate::ring3::depth(), Ordering::SeqCst);
+        FOREGROUND_DEPTH.store(crate::arch::x86_64::ring3::depth(), Ordering::SeqCst);
     }
     claimed
 }
@@ -309,7 +309,7 @@ pub fn caller_is_foreground() -> bool {
     if cfg!(feature = "foreground-ignores-the-slot") {
         return foreground_is_claimed();
     }
-    foreground_is_claimed() && crate::ring3::current_slot() == 0
+    foreground_is_claimed() && crate::arch::x86_64::ring3::current_slot() == 0
 }
 
 /// Ring 3 へ届けたバイトの累計（判定行）。

@@ -926,7 +926,7 @@ struct SyscallState {
     ///
     /// # 据えるのは Ring 3 へ落ちる側である
     ///
-    /// [`crate::ring3::enter`] が遠征の間だけ据え、戻るときに元へ戻す。**据えないまま
+    /// [`crate::arch::x86_64::ring3::enter`] が遠征の間だけ据え、戻るときに元へ戻す。**据えないまま
     /// ここへ来ることはない**——[`validate_user_range`] を呼ぶのは [`dispatch`] だけで、
     /// あちらは `syscall_entry` からしか来ず、`syscall_entry` は Ring 3 からしか来ない。
     ///
@@ -949,7 +949,7 @@ struct SyscallState {
     last_args: [AtomicU64; 6],
     /// `syscall_entry` が走ったときの RSP（RSP0 スタックのはず）。読み戻し検証に使う。
     handler_rsp: AtomicU64,
-    /// 入場時点の [`crate::ring3`] の「今 Ring 3 にいる」の値（S8-b）。**Ring 3 から
+    /// 入場時点の [`crate::arch::x86_64::ring3`] の「今 Ring 3 にいる」の値（S8-b）。**Ring 3 から
     /// 来たのなら真のはず**で、往復検証が突き合わせる。
     in_ring3_at_entry: AtomicBool,
     /// [`SYS_WRITE`] が最後に受け取った fd。
@@ -980,16 +980,16 @@ impl SyscallState {
 }
 
 /// システムコール側の状態、スロットごと（W1-a）。
-static SYSCALL_STATE: [SyscallState; crate::ring3::RING3_SLOTS] =
-    [const { SyscallState::new() }; crate::ring3::RING3_SLOTS];
+static SYSCALL_STATE: [SyscallState; crate::arch::x86_64::ring3::RING3_SLOTS] =
+    [const { SyscallState::new() }; crate::arch::x86_64::ring3::RING3_SLOTS];
 
 /// 今のタスクのシステムコール側の状態を引く（W1-a。W1-c-3 でタスクのスロットから引く形にした）。
 ///
-/// **既定の起動では必ずスロット 0 である**（`crate::ring3::current_slot`。**W1-c-4 の
+/// **既定の起動では必ずスロット 0 である**（`crate::arch::x86_64::ring3::current_slot`。**W1-c-4 の
 /// `concurrent-test` では足した 1 本がスロット 1 を引く**）。
 #[inline(always)]
 fn state() -> &'static SyscallState {
-    &SYSCALL_STATE[crate::ring3::current_slot()]
+    &SYSCALL_STATE[crate::arch::x86_64::ring3::current_slot()]
 }
 
 /// [`PROBE_NUMBER`] を受け取ったか（S9-b-3-2a）。
@@ -2035,7 +2035,7 @@ unsafe fn mmap_screen_from_ring3(len: u64, prot: u64, direct_map: DirectMap) -> 
         return (-EINVAL) as u64;
     }
     let pages = len.div_ceil(PAGE);
-    let slot = crate::ring3::current_slot();
+    let slot = crate::arch::x86_64::ring3::current_slot();
     let base = MMAP_NEXT[slot].fetch_add(pages * PAGE, Ordering::SeqCst);
     let attributes = PageAttributes {
         user: true,
@@ -2586,8 +2586,9 @@ const EMSGSIZE: i64 = 90;
 const MMAP_BASE: u64 = 0x1000_0000;
 
 /// 次に `mmap` でマップするアドレス（スロットごと。`MMAP_BASE` から上へ）。
-static MMAP_NEXT: [core::sync::atomic::AtomicU64; crate::ring3::RING3_SLOTS] =
-    [const { core::sync::atomic::AtomicU64::new(MMAP_BASE) }; crate::ring3::RING3_SLOTS];
+static MMAP_NEXT: [core::sync::atomic::AtomicU64; crate::arch::x86_64::ring3::RING3_SLOTS] =
+    [const { core::sync::atomic::AtomicU64::new(MMAP_BASE) };
+        crate::arch::x86_64::ring3::RING3_SLOTS];
 
 /// fd から共有メモリの添字を引く。**共有メモリでなければ `Err(-EBADF)`。**
 fn shm_of(fd: u64) -> Result<u8, u64> {
@@ -2673,7 +2674,7 @@ unsafe fn mmap_from_ring3(len: u64, prot: u64, fd: u64, offset: u64, direct_map:
     if want_pages > pages {
         return (-EINVAL) as u64;
     }
-    let slot = crate::ring3::current_slot();
+    let slot = crate::arch::x86_64::ring3::current_slot();
     let base = MMAP_NEXT[slot].fetch_add(
         (want_pages * crate::shm::PAGE_SIZE) as u64,
         core::sync::atomic::Ordering::SeqCst,
@@ -2720,7 +2721,10 @@ unsafe fn mmap_from_ring3(len: u64, prot: u64, fd: u64, offset: u64, direct_map:
     }
     let tables_taken = free_before_map.saturating_sub(allocator.free_frame_count());
     crate::frame_allocator::give_back(allocator);
-    crate::userland::note_post_load_frames(crate::ring3::current_slot(), tables_taken as usize);
+    crate::userland::note_post_load_frames(
+        crate::arch::x86_64::ring3::current_slot(),
+        tables_taken as usize,
+    );
     outcome
 }
 
@@ -3034,7 +3038,7 @@ unsafe fn spawn_detached_from_ring3(
         return (-EAGAIN) as u64;
     };
     if let Some(pipe) = stdout_pipe {
-        crate::userland::set_pending_stdin(crate::ring3::current_slot(), pipe);
+        crate::userland::set_pending_stdin(crate::arch::x86_64::ring3::current_slot(), pipe);
     }
     DETACHED_STARTS.fetch_add(1, Ordering::Relaxed);
 
@@ -3082,7 +3086,7 @@ unsafe fn spawn_with_piped_stdin_from_ring3(
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
-    let slot = crate::ring3::current_slot();
+    let slot = crate::arch::x86_64::ring3::current_slot();
     let Some(pipe) = crate::userland::peek_pending_stdin(slot) else {
         return (-EINVAL) as u64;
     };
@@ -3158,7 +3162,9 @@ fn wait_child_from_ring3(handle: u64, bkl: &mut Option<crate::bkl::BklGuard>) ->
     // 破壊テスト (`ADR-0063` の (b3), wait-child-keeps-reservation): 消さない。**右が見つからなかった
     // 回の後、パイプが空かず、次の `|` が `-EBUSY` になる。**
     #[cfg(not(feature = "wait-child-keeps-reservation"))]
-    if let Some(pipe) = crate::userland::take_pending_stdin(crate::ring3::current_slot()) {
+    if let Some(pipe) =
+        crate::userland::take_pending_stdin(crate::arch::x86_64::ring3::current_slot())
+    {
         crate::pipe::drop_reservation(pipe);
     }
     drop(bkl.take());
@@ -3310,9 +3316,10 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     // `state()` を呼ぶと、`dev` では呼んだ箇所の数だけ一時値がフレームを広げた**（実測。この関数のフレームが
     // 408 から 616 バイトになった）。
     let state = state();
-    state
-        .in_ring3_at_entry
-        .store(crate::ring3::note_kernel_entry(), Ordering::SeqCst);
+    state.in_ring3_at_entry.store(
+        crate::arch::x86_64::ring3::note_kernel_entry(),
+        Ordering::SeqCst,
+    );
 
     // SAFETY: スタブが直前に積んだ有効な IrqContext を指す。読み書きともこの
     // フレームに限る。
@@ -3392,7 +3399,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
         drop(bkl.take());
         // SAFETY: Ring 3 から `int 0x80` で入った文脈で、RECOVERY は
         // `ring3::enter` が保存済みである。BKL は上で解いてある。
-        unsafe { crate::ring3::leave_ring3() }
+        unsafe { crate::arch::x86_64::ring3::leave_ring3() }
     }
 
     // 戻り値を RAX へ書き戻す。復元経路の pop rax がこれをユーザー RAX へ載せる。
@@ -3408,7 +3415,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     // Ring 3 へ返る（stub の復元経路が iretq する）。立て直す（S8-b）。
     // 立て直してから実際に iretq するまでは Ring 0 なのに真だが、例外による終了処理の判定は
     // CS.RPL=0 を弾くので届かない（ring3.rs の IN_RING3 の doc）。
-    crate::ring3::note_return_to_ring3();
+    crate::arch::x86_64::ring3::note_return_to_ring3();
 
     // M5-f-1 は切り替えない。入場時の IrqContext 先頭を返す。
     context as u64
@@ -5082,7 +5089,7 @@ unsafe fn sys_write(
     crate::console::note_terminal_write();
     // **切り離して起動したスロットから端末へ書いた回数（`ADR-0063` の (b3) の計測）。**
     // **`a | b` の左は端末へ書かないはずである**——**判定が「0」を見る。**
-    if crate::ring3::current_slot() == crate::task::detached_slot() {
+    if crate::arch::x86_64::ring3::current_slot() == crate::task::detached_slot() {
         TERMINAL_WRITES_FROM_DETACHED.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -5573,7 +5580,7 @@ pub fn reset_counters() {
 /// **[`reset_counters`] で親の記録を 0 にし、自分の `write` と `exit` を上書きする。**
 /// **親の判定行は、子が送ったバイト列を親のものとして読む。**
 ///
-/// **控えて戻す**（`crate::ring3::FoldRecord` と同じ形。あちらは例外による終了処理の記録である）。
+/// **控えて戻す**（`crate::arch::x86_64::ring3::FoldRecord` と同じ形。あちらは例外による終了処理の記録である）。
 ///
 /// # 大きさは 256 バイトに満たない
 ///
@@ -5677,7 +5684,7 @@ pub fn user_window() -> (u64, u64) {
 /// ウィンドウを据え、**据える前の値を返す**（S9-b-3-2b）。
 ///
 /// **戻すのは呼び出し側の責任である。** 現在の呼び出し元は
-/// [`crate::ring3::enter`] だけで、あちらが遠征の前後で対にしている。
+/// [`crate::arch::x86_64::ring3::enter`] だけで、あちらが遠征の前後で対にしている。
 /// **入れ子になる**（S11 の `spawn` から。**以前ここは「入れ子にならない」と書いていた**）。
 /// **前の値を返す形にしてあるので、入れ子でも壊れない。** **W1-c-3 からウィンドウはスロットごとに持つので、
 /// W1-c-4 で 2 本が同時に走っても据え合わない。**

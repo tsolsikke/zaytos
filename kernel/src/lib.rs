@@ -56,7 +56,6 @@ pub mod pipe;
 pub mod pmtimer;
 pub mod quarantine;
 pub mod ring;
-pub mod ring3;
 pub mod shm;
 pub mod smp;
 pub mod socket;

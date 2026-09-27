@@ -559,7 +559,7 @@ struct Task {
     /// # これも「値」である
     ///
     /// **`CURRENT_RECOVERY` はアセンブラが `[rip + sym]` で読む**（実測。
-    /// `kernel/src/ring3.rs` の 2 つの `global_asm!`）。**単一の既知のアドレスで
+    /// `kernel/src/arch/x86_64/ring3.rs` の 2 つの `global_asm!`）。**単一の既知のアドレスで
     /// なければならないので、スロットで引く形にできない。**
     ///
     /// **W1-b で使い始めた**（`schedule_switch` が入れ替える）。
@@ -2417,7 +2417,7 @@ fn schedule_switch(current_rsp: u64) -> u64 {
             ExpectedStack::Kernel => (scheduler::stack_bottom(next), scheduler::stack_top(next)),
             ExpectedStack::Excursion { index } => {
                 // **入る側のタスクのスロットで引く（W1-c-3）。** 今のタスクのものではない。
-                crate::ring3::excursion_stack_range_of(ring3_slot_of(next), index)
+                crate::arch::x86_64::ring3::excursion_stack_range_of(ring3_slot_of(next), index)
             }
         };
         if next_rsp < next_bottom || next_rsp >= next_top {
@@ -2454,8 +2454,11 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         // 載ったまま残り、先に入った側が終了させられると、他方の回復点へ跳ぶ。**
         #[cfg(not(feature = "task-switch-keep-recovery"))]
         {
-            scheduler::set_current_recovery(current, crate::ring3::current_recovery());
-            crate::ring3::set_current_recovery(scheduler::current_recovery(next));
+            scheduler::set_current_recovery(
+                current,
+                crate::arch::x86_64::ring3::current_recovery(),
+            );
+            crate::arch::x86_64::ring3::set_current_recovery(scheduler::current_recovery(next));
         }
         // **載った回復点が、入るタスクのスロットの行の中に在ること（W1-c-4）。**
         //
@@ -2463,8 +2466,8 @@ fn schedule_switch(current_rsp: u64) -> u64 {
         // **入れ替えを省く破壊テストを落とすのはここである**——**例外による終了処理の側では落ちなかった。**
         // **2 本が同時に走っても、例外による終了処理が起きるのは相手が Ring 3 を出た後だったので、
         // `enter` 自身の控えと戻しが辻褄を合わせてしまった**（`ADR-0060` の W1-c-4 の Addendum）。
-        let recovery = crate::ring3::current_recovery();
-        if !crate::ring3::recovery_belongs_to_slot(recovery, ring3_slot_of(next)) {
+        let recovery = crate::arch::x86_64::ring3::current_recovery();
+        if !crate::arch::x86_64::ring3::recovery_belongs_to_slot(recovery, ring3_slot_of(next)) {
             report_foreign_recovery_on_switch(next, recovery);
         }
 
@@ -3810,7 +3813,7 @@ mod tests {
             let expected = if task == super::RING3_TASK { 1 } else { 0 };
             assert_eq!(super::ring3_slot_of(task), expected, "task {task}");
         }
-        assert!(super::ring3_slot_of(super::RING3_TASK) < crate::ring3::RING3_SLOTS);
+        assert!(super::ring3_slot_of(super::RING3_TASK) < crate::arch::x86_64::ring3::RING3_SLOTS);
         assert_eq!(super::ring3_slot_of(super::BSP_IDLE_TASK), 0);
     }
 

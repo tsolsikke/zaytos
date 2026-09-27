@@ -2059,7 +2059,7 @@ pub unsafe fn clear_present(vector: usize) {
 ///
 /// # 反証をベクタごとに用意しない理由
 ///
-/// **例外による終了処理の条件はベクタごとに分岐しない。** 1 つのフラグ（[`crate::ring3`] の
+/// **例外による終了処理の条件はベクタごとに分岐しない。** 1 つのフラグ（[`crate::arch::x86_64::ring3`] の
 /// `IN_RING3`）と 1 つの分岐を 4 ベクタが共有している。したがって例外による終了処理を落とす破壊テストは
 /// **共有機構について 1 本**用意する。**壊れ方がベクタで分岐しないものを、ベクタごとに
 /// 反証しても新しい情報が出ない。**
@@ -2230,17 +2230,18 @@ unsafe fn fold_if_interrupted(context: &IrqContext, bkl: &mut Option<crate::bkl:
     #[cfg(not(feature = "kill-fold-at-depth-one-test"))]
     const MINIMUM_DEPTH: usize = 2;
 
-    let depth = crate::ring3::depth();
+    let depth = crate::arch::x86_64::ring3::depth();
     // **切り離して起動するスロットは深さ 1 でも終了させる（`ADR-0063` の (b3)）。** **そこに居るのは
     // 常に子で、シェルは居ない**——**`spin | cat` の `spin` はスロット 1 の深さ 1 である。**
     // **1 回の押しで終了させるのは 1 本である**（フラグは `take` で 1 回だけ消費される）。**両方が
     // Ring 3 で回っていれば 2 回押す。** **カーネルの中で待っている子には届かない**
     // （`ADR-0063` の (b3) の限界）。
-    let minimum_depth = if crate::ring3::current_slot() == crate::task::detached_slot() {
-        1
-    } else {
-        MINIMUM_DEPTH
-    };
+    let minimum_depth =
+        if crate::arch::x86_64::ring3::current_slot() == crate::task::detached_slot() {
+            1
+        } else {
+            MINIMUM_DEPTH
+        };
     if depth < minimum_depth {
         // **深さ 1 を弾いたことを数える（W2-c-2 の対策）。**
         // **既定では 1 以上、破壊テストでは 0 である**（[`DEPTH_ONE_NOT_FOLDED`] の doc）。
@@ -2256,7 +2257,7 @@ unsafe fn fold_if_interrupted(context: &IrqContext, bkl: &mut Option<crate::bkl:
         return;
     }
 
-    crate::ring3::note_interrupted();
+    crate::arch::x86_64::ring3::note_interrupted();
 
     // **BKL は自分で解く。** 下は longjmp で `Drop` を走らせない。
     // **取ったまま出ると二度と解かれない**（`syscall_entry` の [`SYS_EXIT`] と
@@ -2271,7 +2272,7 @@ unsafe fn fold_if_interrupted(context: &IrqContext, bkl: &mut Option<crate::bkl:
     let _ = bkl;
 
     // SAFETY: 深さ 2 以上なので遠征中で、RECOVERY は保存済み。BKL は上で解いた。
-    unsafe { crate::ring3::leave_ring3() }
+    unsafe { crate::arch::x86_64::ring3::leave_ring3() }
 }
 
 /// 終了処理すると決めたフレームが信用できるかを見る（S8-c）。
@@ -2328,7 +2329,7 @@ fn exception_frame_is_trustworthy(vector: u8, cs: u64, handler_rsp: u64) -> bool
         }
         // 据えていない IST 番号を指すゲートは、こちらの想定が崩れている。
         Some(_) => return false,
-        None => crate::ring3::excursion_stack_range(),
+        None => crate::arch::x86_64::ring3::excursion_stack_range(),
     };
     handler_rsp >= bottom && handler_rsp < top
 }
@@ -2369,7 +2370,7 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
     //   (2) 例外フレームの CS の RPL==3（Ring 3 由来。カーネル由来は CS.RPL=0 で
     //       ここで弾かれる）
     //   (3) 今 Ring 3 にいる（カーネルの中で起きたものは終了処理の対象にしない）
-    // (3) は crate::ring3::should_fold が見る。
+    // (3) は crate::arch::x86_64::ring3::should_fold が見る。
     //
     // S8-a: フォルト RIP の厳密一致を条件から外した。終了させた位置は記録して、
     // 予期と合っているかは遠征の呼び出し側が主張する（ring3.rs のモジュール doc）。
@@ -2387,13 +2388,13 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
 
     if FOLDABLE_VECTORS.contains(&(context.vector as u8))
         && (frame_cs & 0b11) == 3
-        && crate::ring3::should_fold()
+        && crate::arch::x86_64::ring3::should_fold()
     {
         if exception_frame_is_trustworthy(context.vector as u8, frame_cs, rsp_at_call) {
             // SAFETY: 上の 3 条件が全て真で、フレームも信用できる。遠征中で RECOVERY は
             // 保存済み。longjmp で遠征の呼び出し元へ戻る（戻らない）。dump は行わない。
             unsafe {
-                crate::ring3::record_and_fold(
+                crate::arch::x86_64::ring3::record_and_fold(
                     context.vector,
                     frame_cs,
                     context.rip,

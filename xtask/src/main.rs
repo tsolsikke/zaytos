@@ -19612,7 +19612,7 @@ const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
                  呼び出し側が解いてある",
     },
     DirectInterruptControlSite {
-        file: "kernel/src/ring3.rs",
+        file: "kernel/src/arch/x86_64/ring3.rs",
         item: "enter",
         reason: "遠征の入口で、タスクの欄（RSP0・深さ）を据えてから iretq までの窓を閉じる \
                  cli（W1-c-3b。ADR-0060）。InterruptGuard を使うと Ring 3 に居る間ずっと \
@@ -20322,6 +20322,7 @@ const DOC_PATH_MOVES: &[(&str, &str)] = &[
         "kernel/src/paging/verify.rs",
         "kernel/src/arch/x86_64/paging/verify.rs",
     ),
+    ("kernel/src/ring3.rs", "kernel/src/arch/x86_64/ring3.rs"),
 ];
 
 /// 以前の置き場を指すパスを、読み替えの表で今の置き場へ読み替えて、追跡下に在るかを見る（ファイルでも
