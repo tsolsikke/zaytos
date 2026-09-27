@@ -4,7 +4,7 @@
 //! フレームを確保・初期化し、x86_64 の PML4/PDPT/PD/PT エントリを
 //! 直接書き込む。ここは意図的にホスト `cargo test` の対象にしていない
 //! （実在しない物理アドレスへの生ポインタアクセスになるため）。マップ
-//! すべき範囲・ページサイズの計算（テスト可能な部分）は [`super::plan`]
+//! すべき範囲・ページサイズの計算（テスト可能な部分）は [`crate::paging::plan`]
 //! に分離してある。
 //!
 //! # 前提（呼び出し側が保証すること）
@@ -226,7 +226,7 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
         // 呼び出し側が決めた `reach` で上で確かめた**（`ADR-0068` の HW-a）。**`reach` が
         // `None` なのは、窓が配られるフレームを全部覆うとき（自前のページテーブルへ切り替えた後）
         // だけである**——**フレームアロケータの空き集合は `crate::memory_map::classify` の
-        // `Free` 判定に由来し、`super::plan` が同じ判定でこの領域もマップしている（ADR-0009）。**
+        // `Free` 判定に由来し、`crate::paging::plan` が同じ判定でこの領域もマップしている（ADR-0009）。**
         // **以前は「現在有効な（UEFI 由来の）ページテーブル」と書いていたが、切り替え前に
         // 有効なのはカーネルの静的な初期ページテーブルで、[0, 1GiB) しかマップしない。**
         // 1 ページ分をゼロ初期化することで、未初期化のゴミが
@@ -402,7 +402,7 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
         if huge {
             // SAFETY: `pd` はこのビルダーが構築した、有効な PD テーブル。
             // `pd_index` は 512 未満。`phys_addr` は 2MiB アラインされて
-            // いることを呼び出し元（`super::plan::resolve_pages` の核部分）
+            // いることを呼び出し元（`crate::paging::plan::resolve_pages` の核部分）
             // が保証する。PS ビットは PD レベルにのみ立てている。
             unsafe {
                 write_entry(

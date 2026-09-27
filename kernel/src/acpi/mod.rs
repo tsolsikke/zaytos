@@ -44,7 +44,7 @@
 //!
 //! # 物理アドレスへ触る前に必ず walk する
 //!
-//! 参照する物理アドレスは、[`crate::paging::active::ActivePageTable::translate`]
+//! 参照する物理アドレスは、[`crate::arch::x86_64::paging::active::ActivePageTable::translate`]
 //! で**実際に稼働中のページテーブルを辿って**マップ済みを確かめてから読む。
 //! 計画（`MappedRanges::contains_range`）を見るだけでは「計画にあるが実際には
 //! 張られていない」を見逃す（B-2a-5 が実証した穴と同じ性質である）。ACPI
@@ -62,9 +62,9 @@ use common::addr::{DirectMap, PhysAddr};
 use common::log::Logger;
 use common::machine::pc::serial::SerialPort;
 
+use crate::arch::x86_64::paging::active::{ActivePageTable, TranslateError};
 use crate::frame_allocator::FRAME_SIZE;
 use crate::memory_map;
-use crate::paging::active::{ActivePageTable, TranslateError};
 
 /// テーブル 1 つを読むためのバッファの大きさ。
 ///

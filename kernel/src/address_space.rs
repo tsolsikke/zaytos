@@ -25,8 +25,8 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::arch::x86_64::paging::active::PageAttributes;
 use crate::frame_allocator::FrameAllocator;
-use crate::paging::active::PageAttributes;
 use common::addr::{DirectMap, PhysAddr};
 
 /// PML4 のエントリ数。
@@ -286,14 +286,14 @@ impl AddressSpace {
     ///
     /// # Safety
     ///
-    /// [`crate::paging::verify::audit_user_supervisor`] と同じ契約。
+    /// [`crate::arch::x86_64::paging::verify::audit_user_supervisor`] と同じ契約。
     pub unsafe fn audit_user_supervisor(
         &self,
         direct_map: DirectMap,
-    ) -> crate::paging::verify::UserSupervisorAudit {
+    ) -> crate::arch::x86_64::paging::verify::UserSupervisorAudit {
         // SAFETY: 呼び出し元契約。添字はこの空間のものである。
         unsafe {
-            crate::paging::verify::audit_user_supervisor(
+            crate::arch::x86_64::paging::verify::audit_user_supervisor(
                 self.pml4,
                 direct_map,
                 self.user_pml4_index,
@@ -313,7 +313,7 @@ impl AddressSpace {
     /// 他コアが同時に変えていないことに依存する。
     pub unsafe fn activate(&self) {
         // SAFETY: 上記の契約。上位をコピーしてあるので、実行中のコードとスタックは見え続ける。
-        unsafe { crate::paging::switch::switch_to(self.pml4) }
+        unsafe { crate::arch::x86_64::paging::switch::switch_to(self.pml4) }
     }
 }
 
@@ -360,14 +360,14 @@ impl AddressSpace {
     /// ある。** 取るのは [`PageAttributes::writable`] と
     /// [`PageAttributes::cacheable`] である。
     ///
-    /// **W は葉だけに効く。中間へは伝播しない**（[`crate::paging::active::ActivePageTable::map_4kib`] と
+    /// **W は葉だけに効く。中間へは伝播しない**（[`crate::arch::x86_64::paging::active::ActivePageTable::map_4kib`] と
     /// 同じ理由。中間を W=0 にすると配下の葉が 1 枚残らず読み取り専用になる）。
     ///
     /// **NX は無い。** `EFER.NXE` が未有効である（別項の解禁条件に従う）。
     ///
     /// # 写像の経路が 2 つあることについて
     ///
-    /// **同じ「4KiB を 1 枚張る」を、この関数と [`crate::paging::active::ActivePageTable::map_4kib`] の
+    /// **同じ「4KiB を 1 枚張る」を、この関数と [`crate::arch::x86_64::paging::active::ActivePageTable::map_4kib`] の
     /// 2 か所が別々に実装している。** 前者は稼働していない空間のテーブルを
     /// direct map 越しに書き、後者は稼働中のテーブルを書いて `invlpg` する。
     /// **S9-b では統合せず、両方に同じ属性を通す。**
@@ -396,7 +396,7 @@ impl AddressSpace {
         frame: PhysAddr,
         attributes: PageAttributes,
     ) -> Result<(), AddressSpaceError> {
-        use crate::paging::entry;
+        use crate::arch::x86_64::paging::entry;
 
         // **この空間のユーザーサブツリーの中でなければ弾く（S7-e）。**
         // 共有側でないことだけでは足りない——**別の添字へマップすると、監査の主張
@@ -515,7 +515,7 @@ impl AddressSpace {
         quarantine: &mut crate::quarantine::Quarantine,
         _guard: &crate::bkl::BklGuard,
     ) -> (usize, usize) {
-        use crate::paging::entry;
+        use crate::arch::x86_64::paging::entry;
 
         // **順序が要である。** (1) マッピングを外し、(2) 集め終えてから世代を上げ、
         // (3) その世代で隔離へ入れる。
@@ -631,7 +631,7 @@ unsafe fn write_entry(direct_map: DirectMap, table: PhysAddr, index: usize, valu
 /// # Safety
 /// `table` を `direct_map` が覆っていること。
 unsafe fn zero_table(direct_map: DirectMap, table: PhysAddr) {
-    for index in 0..crate::paging::entry::ENTRIES_PER_TABLE {
+    for index in 0..crate::arch::x86_64::paging::entry::ENTRIES_PER_TABLE {
         // SAFETY: 呼び出し元契約。添字は 512 未満。
         unsafe { write_entry(direct_map, table, index, 0) };
     }

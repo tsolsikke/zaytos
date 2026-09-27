@@ -426,7 +426,7 @@ pub unsafe fn install_guard_page(
     what: &str,
     log: &mut dyn FnMut(core::fmt::Arguments),
 ) {
-    use crate::paging::active::{ActivePageTable, PageSize};
+    use crate::arch::x86_64::paging::active::{ActivePageTable, PageSize};
 
     // SAFETY: CR3 は自前のテーブルを指し、その配下は登録ウィンドウで読み書きできる。
     let mut table = unsafe { ActivePageTable::current(common::addr::direct_map()) };

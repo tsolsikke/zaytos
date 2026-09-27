@@ -1068,7 +1068,7 @@ impl UserSlice {
 ///   (a) 長さの加算にオーバーフローが無い（`checked_add`）。
 ///   (b) 範囲が**今 Ring 3 が使っている窓**に収まる（[`user_window`]）。
 ///   (c) 範囲を跨ぐ全 4KiB ページが present && 全階層 U=1
-///       （[`crate::paging::verify::walk_user_accessible`]）。
+///       （[`crate::arch::x86_64::paging::verify::walk_user_accessible`]）。
 ///
 /// (a)(b)(c-present) は多層防御として (c-U=1) に冗長で、単独では隔離した破壊テストでの確認が
 /// できない（詳細は verification-coverage）。それらは default battery の first-line
@@ -1120,8 +1120,12 @@ pub unsafe fn validate_user_range(
         while page <= last_page {
             let virt = common::addr::VirtAddr::new(page)?;
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。読み取りのみ。
-            if unsafe { crate::paging::verify::walk_user_accessible(pml4_phys, direct_map, virt) }
-                .is_err()
+            if unsafe {
+                crate::arch::x86_64::paging::verify::walk_user_accessible(
+                    pml4_phys, direct_map, virt,
+                )
+            }
+            .is_err()
             {
                 return None;
             }
@@ -2020,7 +2024,7 @@ pub fn screen_pages_mapped() -> u64 {
 /// `direct_map` が有効であること（遠征の中で呼ぶ）。
 #[inline(never)]
 unsafe fn mmap_screen_from_ring3(len: u64, prot: u64, direct_map: DirectMap) -> u64 {
-    use crate::paging::active::{ActivePageTable, PageAttributes};
+    use crate::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
 
     let Some(surface) = crate::console::graphics_surface() else {
         return (-ENODEV) as u64;
@@ -2642,7 +2646,7 @@ fn ftruncate_from_ring3(fd: u64, size: u64) -> u64 {
 /// 呼び出し元契約により `direct_map` は有効で、遠征の中なので CR3 はこのプロセスのもの。
 #[inline(never)]
 unsafe fn mmap_from_ring3(len: u64, prot: u64, fd: u64, offset: u64, direct_map: DirectMap) -> u64 {
-    use crate::paging::active::{ActivePageTable, PageAttributes};
+    use crate::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
 
     if offset != 0 {
         return (-EINVAL) as u64;
@@ -3340,7 +3344,8 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     let direct_map = common::addr::direct_map();
     // SAFETY: CR3 を読んで現在のテーブルを構築するだけ（読み取り）。IF=0 の単一文脈。
     let pml4_phys =
-        unsafe { crate::paging::active::ActivePageTable::current(direct_map) }.pml4_phys();
+        unsafe { crate::arch::x86_64::paging::active::ActivePageTable::current(direct_map) }
+            .pml4_phys();
 
     // **[`SYS_SPAWN`] だけは、この関数が持つ。** BKL を解いてから入る必要があり、
     // ガードはここのローカルである（[`spawn_from_ring3`]）。
@@ -3952,7 +3957,7 @@ fn errno_for_alloc(error: common::ext2::AllocError) -> i64 {
 ///
 /// **遠征の中では CR3 がこのプロセスのものである**
 /// （`crate::userland` の `run_loaded_program` が `switch_to` してから入る）。
-/// **したがって [`crate::paging::active::ActivePageTable::current`] が
+/// **したがって [`crate::arch::x86_64::paging::active::ActivePageTable::current`] が
 /// 指すのはユーザーの表である。** **新しい経路を作らない**（ADR-0044）。
 ///
 /// # 途中で足りなくなったら、そこまでで止める
@@ -3965,7 +3970,7 @@ fn errno_for_alloc(error: common::ext2::AllocError) -> i64 {
 ///
 /// `direct_map` が有効で、遠征の中（CR3 がユーザーの表）から呼ばれること。
 unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
-    use crate::paging::active::{ActivePageTable, PageAttributes};
+    use crate::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
 
     let (mapped, current, start) = crate::userland::with_current_heap(|heap| {
         (heap.is_mapped(), heap.break_at(), heap.start())

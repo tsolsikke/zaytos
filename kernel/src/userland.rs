@@ -1049,7 +1049,7 @@ pub fn load_user_program(
     use crate::address_space::AddressSpace;
 
     let direct_map = common::addr::direct_map();
-    let production = crate::paging::switch::read_cr3();
+    let production = crate::arch::x86_64::paging::switch::read_cr3();
 
     // **アロケータを借りる（S11-3。`ADR-0030`）。** マッピングの間だけ持ち、
     // **Ring 3 へ落ちる前に返す。**
@@ -1371,7 +1371,7 @@ fn forget_task_cr3_before_destroy(logger: &mut Logger<SerialPort>, process: &Use
 ///
 /// **一度は誤っていた。** ここには以前も「`AlreadyMapped` 相当で弾かれる」と
 /// 書いてあったが、**それを持っていたのは
-/// [`crate::paging::active::ActivePageTable::map_4kib`] の側だけで、ローダーが
+/// [`crate::arch::x86_64::paging::active::ActivePageTable::map_4kib`] の側だけで、ローダーが
 /// 使う [`crate::address_space::AddressSpace::map_user_4kib`] は葉の present を
 /// 見ずに書いていた。** 契約を片側だけ見て、もう片側のものとして書いていた形で
 /// ある（S9-b-3-2b の数え直しで実測した）。**実測では両方「張れた」ことになり、
@@ -1392,8 +1392,8 @@ fn load_user_program_into(
     argv: &[&[u8]],
     envp: Option<&[&[u8]]>,
 ) -> Result<(), UserLoadError> {
-    use crate::paging::active::PageAttributes;
-    use crate::paging::verify;
+    use crate::arch::x86_64::paging::active::PageAttributes;
+    use crate::arch::x86_64::paging::verify;
     use common::elf::Elf;
 
     const PAGE_SIZE: u64 = 4096;
@@ -1676,8 +1676,9 @@ fn load_user_program_into(
         // SAFETY: この空間の PML4 は有効で、direct map が配下を覆っている。読み取りのみ。
         match unsafe { verify::walk(process.space.pml4(), direct_map, virt) } {
             Ok(resolved) => {
-                let writable = resolved.entry & crate::paging::entry::PTE_WRITABLE != 0;
-                let user = resolved.entry & crate::paging::entry::PTE_USER != 0;
+                let writable =
+                    resolved.entry & crate::arch::x86_64::paging::entry::PTE_WRITABLE != 0;
+                let user = resolved.entry & crate::arch::x86_64::paging::entry::PTE_USER != 0;
                 if writable != expected_writable || !user {
                     mismatches += 1;
                     logger.error(format_args!(
@@ -1799,7 +1800,7 @@ unsafe fn run_loaded_program(
     logger: &mut Logger<SerialPort>,
     process: &mut UserProcess,
 ) -> Result<(), UserLoadError> {
-    let production = crate::paging::switch::read_cr3();
+    let production = crate::arch::x86_64::paging::switch::read_cr3();
 
     crate::syscall::reset_counters();
     // **戻す RSP0 は「今この処理が乗っているカーネルスタックの上端」である。**

@@ -251,7 +251,7 @@ impl VirtAddr {
 
     // ページテーブルの各階層の添字。
     //
-    // **T-2 で `kernel::paging::entry` 側の同等の実装をこれに統合する。**
+    // **T-2 で `kernel::arch::x86_64::paging::entry` 側の同等の実装をこれに統合する。**
     // 二重に持つと、片方だけ直したときに食い違う。統合の際は、既存の実装と
     // ここが同じ結果を返すことを確かめること。
     pub const fn pml4_index(self) -> usize {
@@ -367,7 +367,7 @@ impl DirectMap {
     /// **ウィンドウの範囲内であることだけを意味する。そのアドレスが実際にマップ
     /// されているかについては何も示さない。** マッピングの有無は
     /// `kernel::paging::plan::MappedRanges::contains_range`（計画の側）か
-    /// `kernel::paging::active::translate`（実テーブルの側）で見る。
+    /// `kernel::arch::x86_64::paging::active::translate`（実テーブルの側）で見る。
     ///
     /// 混同すると「covers が真だから触れるはず」という誤った推論が入り込む。
     /// 恒等マッピングの間はウィンドウが下位半分全体を覆っているため、この誤りは
@@ -393,7 +393,7 @@ impl DirectMap {
     ///
     /// ウィンドウの外の仮想アドレス（カーネルイメージ、MMIO の別のウィンドウなど）は
     /// このマッピングでは物理アドレスを決められない。ページテーブルを辿る必要が
-    /// あり、それは `kernel::paging::active::translate` の仕事である。
+    /// あり、それは `kernel::arch::x86_64::paging::active::translate` の仕事である。
     pub const fn virt_to_phys(self, virt: VirtAddr) -> Option<PhysAddr> {
         let base = self.base.as_u64();
         if virt.as_u64() < base {

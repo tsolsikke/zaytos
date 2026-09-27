@@ -20073,7 +20073,7 @@ fn find_unsafe_without_safety_comment(workspace_root: &Path) -> Result<Vec<Strin
     // 新しいファイルを書いてから検査を通し、その後に `git add` して
     // コミットする、という自然な順序だと、**そのファイルの最初の検査は
     // 追跡される前に走る。** 素通りしたまま「通った」と報告され、次に
-    // 検査が走るまで誰も気づかない。実際に `kernel/src/paging/verify.rs`
+    // 検査が走るまで誰も気づかない。実際に `kernel/src/arch/x86_64/paging/verify.rs`
     // がこれで 2 コミットのあいだ見逃されていた。
     //
     // `--cached --others --exclude-standard` にすると、追跡済みと、
@@ -20298,6 +20298,30 @@ const DOC_PATH_MOVES: &[(&str, &str)] = &[
     ("kernel/src/gdt/", "kernel/src/arch/x86_64/gdt/"),
     ("kernel/src/stack.rs", "kernel/src/arch/x86_64/stack.rs"),
     ("kernel/src/idt/", "kernel/src/arch/x86_64/idt/"),
+    (
+        "kernel/src/paging/active.rs",
+        "kernel/src/arch/x86_64/paging/active.rs",
+    ),
+    (
+        "kernel/src/paging/entry.rs",
+        "kernel/src/arch/x86_64/paging/entry.rs",
+    ),
+    (
+        "kernel/src/paging/remove.rs",
+        "kernel/src/arch/x86_64/paging/remove.rs",
+    ),
+    (
+        "kernel/src/paging/switch.rs",
+        "kernel/src/arch/x86_64/paging/switch.rs",
+    ),
+    (
+        "kernel/src/paging/table.rs",
+        "kernel/src/arch/x86_64/paging/table.rs",
+    ),
+    (
+        "kernel/src/paging/verify.rs",
+        "kernel/src/arch/x86_64/paging/verify.rs",
+    ),
 ];
 
 /// 以前の置き場を指すパスを、読み替えの表で今の置き場へ読み替えて、追跡下に在るかを見る（ファイルでも

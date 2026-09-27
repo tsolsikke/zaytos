@@ -37,9 +37,9 @@ use common::log::Logger;
 use common::machine::pc::serial::SerialPort;
 
 use crate::acpi::{ApicMmio, IoApicLocation};
+use crate::arch::x86_64::paging::active::{ActivePageTable, MapUpdateError, PageAttributes};
+use crate::arch::x86_64::paging::entry;
 use crate::frame_allocator::{FrameAllocator, FRAME_SIZE};
-use crate::paging::active::{ActivePageTable, MapUpdateError, PageAttributes};
-use crate::paging::entry;
 
 /// Local APIC の ID レジスタのオフセット。ID はビット 31:24 にある。
 const LAPIC_REGISTER_ID: u64 = 0x20;
@@ -533,7 +533,7 @@ fn sabotage_map_target(logger: &mut Logger<SerialPort>, what: &str, phys: PhysAd
 
     #[cfg(feature = "apic-test-wrong-target")]
     {
-        let pml4 = crate::paging::switch::read_cr3();
+        let pml4 = crate::arch::x86_64::paging::switch::read_cr3();
         logger.warn(format_args!(
             "apic: [apic-test-wrong-target] pointing the mapping of {what} at {:#x} \
              (the live PML4) instead of {:#x}",

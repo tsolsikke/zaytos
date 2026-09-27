@@ -1119,7 +1119,10 @@ static KERNEL_CR3: AtomicU64 = AtomicU64::new(0);
 /// **判定行は出さない。** **同じ値は起動ログの `identity-removal: begin. live PML4=` が出している**
 /// ——**行を足すと、この段階の「番地だけ」が崩れる。**
 pub fn record_kernel_cr3() {
-    KERNEL_CR3.store(crate::paging::switch::read_cr3().as_u64(), Ordering::SeqCst);
+    KERNEL_CR3.store(
+        crate::arch::x86_64::paging::switch::read_cr3().as_u64(),
+        Ordering::SeqCst,
+    );
 }
 
 /// 欄の値から、載せる CR3 を引く（W1-c-2）。
@@ -1149,13 +1152,13 @@ const fn cr3_to_load(field: u64, kernel_cr3: u64) -> u64 {
 ///
 /// # Safety
 ///
-/// [`crate::paging::switch::switch_to`] と同じ契約。**`noted` は、載せた後にこのタスクが
+/// [`crate::arch::x86_64::paging::switch::switch_to`] と同じ契約。**`noted` は、載せた後にこのタスクが
 /// 載せていることになる値である**（0 ならカーネルの表）。
 #[inline(never)]
 pub unsafe fn switch_cr3_and_note(load: common::addr::PhysAddr, noted: u64) {
     let _no_switch = common::critical::InterruptGuard::enter();
     // SAFETY: 呼び出し元契約。
-    unsafe { crate::paging::switch::switch_to(load) };
+    unsafe { crate::arch::x86_64::paging::switch::switch_to(load) };
     note_current_cr3(noted);
 }
 
@@ -1180,7 +1183,7 @@ pub unsafe fn switch_cr3_and_note(load: common::addr::PhysAddr, noted: u64) {
 #[inline(never)]
 fn swap_cr3_for_switch(current: usize, next: usize) {
     let kernel_cr3 = KERNEL_CR3.load(Ordering::SeqCst);
-    let live_cr3 = crate::paging::switch::read_cr3().as_u64();
+    let live_cr3 = crate::arch::x86_64::paging::switch::read_cr3().as_u64();
     let outgoing_cr3 = cr3_to_load(scheduler::cr3(current), kernel_cr3);
     if kernel_cr3 == 0 || live_cr3 != outgoing_cr3 {
         serial_line(format_args!(
@@ -1211,7 +1214,7 @@ fn swap_cr3_for_switch(current: usize, next: usize) {
         // 持つ値である（`Task::cr3` の不変条件）。どちらもカーネルの上位を共有するので、切り替えても
         // 実行中のコードと、いま乗っているカーネルスタックは見え続ける。呼ぶのは `schedule_switch`
         // だけで、IF=0 かつ BKL の内側である。
-        unsafe { crate::paging::switch::switch_to(table) };
+        unsafe { crate::arch::x86_64::paging::switch::switch_to(table) };
     }
     #[cfg(feature = "task-switch-no-cr3")]
     let _ = table;

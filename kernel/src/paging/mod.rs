@@ -2,13 +2,7 @@
 //!
 //! - [`plan`][mod@plan]: マップ対象範囲とページサイズの解決（純粋ロジック、
 //!   ホスト `cargo test` で検証）。
-//! - [`table`][mod@table]: 実際のページテーブルへの書き込み（unsafe）。
-//! - [`switch`][mod@switch]: CR3 の読み取り・切り替え（unsafe）。
+//! - [`table`][mod@crate::arch::x86_64::paging::table]: 実際のページテーブルへの書き込み（unsafe）。
+//! - [`switch`][mod@crate::arch::x86_64::paging::switch]: CR3 の読み取り・切り替え（unsafe）。
 
-pub mod active;
-pub mod entry;
 pub mod plan;
-pub mod remove;
-pub mod switch;
-pub mod table;
-pub mod verify;

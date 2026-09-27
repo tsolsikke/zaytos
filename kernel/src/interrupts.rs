@@ -932,7 +932,9 @@ pub unsafe fn run_timer_loop(
                     let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
                     // SAFETY: 稼働中のテーブルから、探り用にマップした 1 ページを外す。
                     let mut table = unsafe {
-                        crate::paging::active::ActivePageTable::current(common::addr::direct_map())
+                        crate::arch::x86_64::paging::active::ActivePageTable::current(
+                            common::addr::direct_map(),
+                        )
                     };
                     if let Some(virt) = common::addr::VirtAddr::new(shootdown_probe::virt()) {
                         // SAFETY: 探り用にマップしたページで、他の誰も使っていない。

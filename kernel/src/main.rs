@@ -22,6 +22,8 @@ use kernel::console::Console;
 use kernel::arch::x86_64::fp;
 use kernel::arch::x86_64::gdt;
 use kernel::arch::x86_64::idt;
+use kernel::arch::x86_64::paging;
+use kernel::arch::x86_64::paging::table::PageTableBuilder;
 use kernel::arch::x86_64::stack;
 use kernel::frame_allocator;
 use kernel::graphics::{Color, Framebuffer, FramebufferLayout};
@@ -29,9 +31,7 @@ use kernel::heap;
 use kernel::interrupts;
 use kernel::irq;
 use kernel::keyboard;
-use kernel::paging;
 use kernel::paging::plan::{resolve_pages, MappedRanges};
-use kernel::paging::table::PageTableBuilder;
 
 mod panic;
 
@@ -865,7 +865,7 @@ extern "sysv64" fn kernel_main() -> ! {
         ));
         if matches!(
             e,
-            kernel::paging::table::PageTableError::FrameBeyondReach { .. }
+            kernel::arch::x86_64::paging::table::PageTableError::FrameBeyondReach { .. }
         ) {
             report_page_table_error_before_switch(&mut logger, "map a planned page", e);
         }
@@ -1524,7 +1524,7 @@ extern "sysv64" fn kernel_main() -> ! {
     #[cfg(not(feature = "paging-test"))]
     {
         use common::addr::{PhysAddr, VirtAddr};
-        use kernel::paging::remove::{remove_identity, RequiredRegion};
+        use kernel::arch::x86_64::paging::remove::{remove_identity, RequiredRegion};
 
         let direct_map = common::addr::direct_map();
 
@@ -1930,7 +1930,7 @@ extern "sysv64" fn kernel_main() -> ! {
     match unsafe {
         kernel::address_space::freeze_kernel_top(
             common::addr::direct_map(),
-            kernel::paging::switch::read_cr3(),
+            kernel::arch::x86_64::paging::switch::read_cr3(),
         )
     } {
         Some(present) => logger.info(format_args!(
@@ -1966,7 +1966,7 @@ extern "sysv64" fn kernel_main() -> ! {
     feature = "kernel-top-write-unguarded-test"
 ))]
 fn write_a_kernel_half_entry_after_boot(logger: &mut Logger<SerialPort>) {
-    use kernel::paging::active::{ActivePageTable, PageAttributes};
+    use kernel::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
     let Some(allocator) = frame_allocator::take() else {
         logger.error(format_args!(
             "sabotage: the frame allocator is not available"
@@ -4558,7 +4558,7 @@ fn demo_address_space_switch(
     allocator: &mut kernel::frame_allocator::FrameAllocator,
 ) {
     let direct_map = common::addr::direct_map();
-    let production = kernel::paging::switch::read_cr3();
+    let production = kernel::arch::x86_64::paging::switch::read_cr3();
 
     // SAFETY: 稼働中の PML4 を読み、direct map が覆っている新しいフレームへコピーするだけ。
     // AP はまだ起動しておらず、他コアがマッピングを変えることはない。
@@ -4591,7 +4591,7 @@ fn demo_address_space_switch(
     unsafe { space.activate() };
 
     // この行が出ること自体が到達条件4の観測である。
-    let after = kernel::paging::switch::read_cr3();
+    let after = kernel::arch::x86_64::paging::switch::read_cr3();
     logger.info(format_args!(
         "address-space: still running after the switch (cr3 read back = {:#x}, expected {:#x}, \
          matches={})",
@@ -4601,9 +4601,9 @@ fn demo_address_space_switch(
     ));
 
     // SAFETY: 本番のテーブルへ戻すだけ。こちらは起動以来使っているものである。
-    unsafe { kernel::paging::switch::switch_to(production) };
+    unsafe { kernel::arch::x86_64::paging::switch::switch_to(production) };
 
-    let restored = kernel::paging::switch::read_cr3();
+    let restored = kernel::arch::x86_64::paging::switch::read_cr3();
     logger.info(format_args!(
         "address-space: switched back to the production table (cr3 read back = {:#x}, \
          matches={})",
@@ -4630,7 +4630,7 @@ fn demo_two_address_spaces(
     mut space_a: kernel::address_space::AddressSpace,
 ) {
     use kernel::address_space::{is_shared_kernel_index, AddressSpace, PML4_ENTRY_COUNT};
-    use kernel::paging::active::PageAttributes;
+    use kernel::arch::x86_64::paging::active::PageAttributes;
 
     // 下位の、どのデモとも重ならない VA。
     //
@@ -4717,7 +4717,7 @@ fn demo_two_address_spaces(
         ptr.read_volatile()
     };
     // SAFETY: 本番のテーブルへ戻す。
-    unsafe { kernel::paging::switch::switch_to(production) };
+    unsafe { kernel::arch::x86_64::paging::switch::switch_to(production) };
 
     logger.info(format_args!(
         "address-space: read {read_a:#x} in A and {read_b:#x} in B (A sees only its own={}, \
@@ -4735,9 +4735,19 @@ fn demo_two_address_spaces(
         // SAFETY: いずれも direct map が覆う稼働可能な PML4。添字は 512 未満。
         let (p, a, b) = unsafe {
             (
-                kernel::paging::verify::read_pml4_entry(production, direct_map, index),
-                kernel::paging::verify::read_pml4_entry(space_a.pml4(), direct_map, index),
-                kernel::paging::verify::read_pml4_entry(space_b.pml4(), direct_map, index),
+                kernel::arch::x86_64::paging::verify::read_pml4_entry(
+                    production, direct_map, index,
+                ),
+                kernel::arch::x86_64::paging::verify::read_pml4_entry(
+                    space_a.pml4(),
+                    direct_map,
+                    index,
+                ),
+                kernel::arch::x86_64::paging::verify::read_pml4_entry(
+                    space_b.pml4(),
+                    direct_map,
+                    index,
+                ),
             )
         };
         if p != a || p != b {
@@ -9138,8 +9148,8 @@ fn verify_user_page_mapping<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
     allocator: &mut frame_allocator::FrameAllocator<CAP>,
 ) {
-    use kernel::paging::active::{ActivePageTable, PageAttributes};
-    use kernel::paging::verify;
+    use kernel::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
+    use kernel::arch::x86_64::paging::verify;
 
     /// テストページの仮想アドレス（PML4[USER_PML4_INDEX] の先頭 = 512 GiB）。
     const USER_TEST_VIRT: u64 = 0x0000_0080_0000_0000;
@@ -9319,8 +9329,8 @@ fn verify_ring3_excursion<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
     allocator: &mut frame_allocator::FrameAllocator<CAP>,
 ) {
-    use kernel::paging::active::{ActivePageTable, PageAttributes};
-    use kernel::paging::verify;
+    use kernel::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
+    use kernel::arch::x86_64::paging::verify;
     use kernel::ring3;
 
     let identity = common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
@@ -9519,7 +9529,7 @@ fn verify_ring3_excursion<const CAP: usize>(
 /// - syscall_entry が RSP0（遠征）スタックで走ったこと
 /// - 終了処理で戻り RSP0 が復帰したこと
 fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
-    use kernel::paging::active::{ActivePageTable, PageSize};
+    use kernel::arch::x86_64::paging::active::{ActivePageTable, PageSize};
     use kernel::ring3;
     use kernel::syscall;
 
@@ -9854,7 +9864,7 @@ fn verify_syscall_pointer<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
     allocator: &mut frame_allocator::FrameAllocator<CAP>,
 ) {
-    use kernel::paging::active::{ActivePageTable, PageAttributes, PageSize};
+    use kernel::arch::x86_64::paging::active::{ActivePageTable, PageAttributes, PageSize};
     use kernel::ring3;
     use kernel::syscall;
 
@@ -10316,8 +10326,8 @@ fn verify_split_and_unmap<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
     allocator: &mut frame_allocator::FrameAllocator<CAP>,
 ) {
-    use kernel::paging::active::{ActivePageTable, MapUpdateError, PageSize};
-    use kernel::paging::entry;
+    use kernel::arch::x86_64::paging::active::{ActivePageTable, MapUpdateError, PageSize};
+    use kernel::arch::x86_64::paging::entry;
 
     const FRAMES_PER_2M: u64 = entry::PAGE_SIZE_2M / frame_allocator::FRAME_SIZE;
 
@@ -12243,8 +12253,8 @@ fn run_paging_test<const CAP: usize>(
     allocator: &mut frame_allocator::FrameAllocator<CAP>,
     heap_start: u64,
 ) {
-    use kernel::paging::active::{ActivePageTable, PageSize};
-    use kernel::paging::entry;
+    use kernel::arch::x86_64::paging::active::{ActivePageTable, PageSize};
+    use kernel::arch::x86_64::paging::entry;
 
     const FRAMES_PER_2M: u64 = entry::PAGE_SIZE_2M / frame_allocator::FRAME_SIZE;
 
@@ -12417,8 +12427,8 @@ fn report_mapping_granularity(
     heap_start: u64,
     framebuffer_phys: u64,
 ) {
-    use kernel::paging::active::{ActivePageTable, PageSize};
-    use kernel::paging::entry;
+    use kernel::arch::x86_64::paging::active::{ActivePageTable, PageSize};
+    use kernel::arch::x86_64::paging::entry;
 
     // SAFETY: CR3 は自前のテーブルへ切り替えて読み戻し済みで、テーブル自体は
     // 恒等マッピングで読める（`verify_page_tables` と同じ前提）。
@@ -12519,7 +12529,7 @@ fn build_and_switch_direct_map(
     mapped: &MappedRanges<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
 ) {
     use common::addr::{DirectMap, VirtAddr};
-    use kernel::paging::{active::ActivePageTable, verify};
+    use kernel::arch::x86_64::paging::{active::ActivePageTable, verify};
 
     // 構築中のテーブルフレームは、登録済みのウィンドウ（現在は恒等）を通して読み書きする。
     // M2-d のビルダーと同じ経路である。
@@ -12919,10 +12929,10 @@ fn activate_direct_map_window(logger: &mut Logger<SerialPort>) {
 fn report_page_table_error_before_switch(
     logger: &mut Logger<SerialPort>,
     what: &str,
-    error: kernel::paging::table::PageTableError,
+    error: kernel::arch::x86_64::paging::table::PageTableError,
 ) {
     match error {
-        kernel::paging::table::PageTableError::FrameBeyondReach { phys, reach } => {
+        kernel::arch::x86_64::paging::table::PageTableError::FrameBeyondReach { phys, reach } => {
             logger.error(format_args!(
                 "paging: the frame allocator handed out a page-table frame at {phys:#x} before the \
                  CR3 switch, but the boot page table reaches only below {reach:#x}; halting"
@@ -12947,7 +12957,7 @@ fn rehome_framebuffer_to_window(
     framebuffer: &mut Option<Framebuffer>,
     boot_info: &BootInfo,
 ) {
-    use kernel::paging::active::ActivePageTable;
+    use kernel::arch::x86_64::paging::active::ActivePageTable;
 
     let old_layout = match framebuffer.as_ref() {
         Some(fb) => *fb.layout(),
@@ -13127,12 +13137,13 @@ fn build_and_verify_high_half(
     mapped: &MappedRanges<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
     direct_map: common::addr::DirectMap,
 ) {
-    use kernel::paging::verify;
+    use kernel::arch::x86_64::paging::verify;
 
     // 稼働中テーブルの PML4 を、構築の前に控える。
     // SAFETY: CR3 は自前のテーブルを指しており、恒等マッピングで読める。
     let live_pml4 =
-        unsafe { kernel::paging::active::ActivePageTable::current(direct_map) }.pml4_phys();
+        unsafe { kernel::arch::x86_64::paging::active::ActivePageTable::current(direct_map) }
+            .pml4_phys();
     let live_before: [u64; entry_count()] = core::array::from_fn(|index| {
         // SAFETY: 稼働中の PML4 は有効なテーブルで、添字は 512 未満。
         unsafe { verify::read_pml4_entry(live_pml4, direct_map, index) }
@@ -13336,8 +13347,8 @@ fn verify_page_tables(
     logger: &mut Logger<SerialPort>,
     mapped: &MappedRanges<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
 ) {
-    use kernel::paging::active::{ActivePageTable, PageSize};
-    use kernel::paging::entry;
+    use kernel::arch::x86_64::paging::active::{ActivePageTable, PageSize};
+    use kernel::arch::x86_64::paging::entry;
 
     // SAFETY: CR3 は直前に自前のテーブルへ切り替えて読み戻し済みで、
     // 恒等マッピングによりテーブル自体を読める。
@@ -13348,7 +13359,7 @@ fn verify_page_tables(
     ));
 
     // --- TLB フラッシュの前提を実測する ---
-    let precondition = kernel::paging::active::tlb_flush_precondition();
+    let precondition = kernel::arch::x86_64::paging::active::tlb_flush_precondition();
     logger.info(format_args!(
         "paging: CR4 = {:#x}, PGE(bit 7) = {} - a CR3 reload flushes everything only when \
          PGE is off or no entry has the global bit",
