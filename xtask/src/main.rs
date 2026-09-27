@@ -20324,6 +20324,10 @@ const DOC_PATH_MOVES: &[(&str, &str)] = &[
         "kernel/src/arch/x86_64/paging/verify.rs",
     ),
     ("kernel/src/ring3.rs", "kernel/src/arch/x86_64/ring3.rs"),
+    (
+        "kernel/src/address_space.rs",
+        "kernel/src/arch/x86_64/paging/address_space.rs",
+    ),
 ];
 
 /// 以前の置き場を指すパスを、読み替えの表で今の置き場へ読み替えて、追跡下に在るかを見る（ファイルでも

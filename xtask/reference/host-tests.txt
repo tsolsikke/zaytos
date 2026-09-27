@@ -283,12 +283,6 @@ kernel::acpi::sdt::tests::rsdt_entries_are_read_as_32_bit_values_widened_to_64
 kernel::acpi::sdt::tests::the_checksum_covers_only_the_declared_length
 kernel::acpi::sdt::tests::the_minimum_length_is_the_callers_to_choose
 kernel::acpi::sdt::tests::xsdt_entries_are_read_as_64_bit_values
-kernel::address_space::tests::a_kernel_half_entry_is_refused_only_after_boot
-kernel::address_space::tests::indices_past_the_table_are_not_shared
-kernel::address_space::tests::the_kernel_top_digest_changes_with_any_entry_and_is_never_zero
-kernel::address_space::tests::the_lower_half_is_not_shared
-kernel::address_space::tests::the_split_is_exactly_half_of_the_table
-kernel::address_space::tests::the_upper_half_is_shared
 kernel::apic::tests::a_zero_id_register_with_a_plausible_version_still_decodes
 kernel::apic::tests::all_zeros_and_all_ones_are_undecoded
 kernel::apic::tests::coverage_counts_from_the_gsi_base
@@ -357,6 +351,12 @@ kernel::arch::x86_64::idt::layout::tests::the_handler_address_survives_a_round_t
 kernel::arch::x86_64::idt::layout::tests::the_ist_index_is_stored_in_the_low_three_bits
 kernel::arch::x86_64::idt::tests::the_limit_is_the_size_minus_one
 kernel::arch::x86_64::idt::tests::the_stub_stride_matches_the_alignment_used_in_assembly
+kernel::arch::x86_64::paging::address_space::tests::a_kernel_half_entry_is_refused_only_after_boot
+kernel::arch::x86_64::paging::address_space::tests::indices_past_the_table_are_not_shared
+kernel::arch::x86_64::paging::address_space::tests::the_kernel_top_digest_changes_with_any_entry_and_is_never_zero
+kernel::arch::x86_64::paging::address_space::tests::the_lower_half_is_not_shared
+kernel::arch::x86_64::paging::address_space::tests::the_split_is_exactly_half_of_the_table
+kernel::arch::x86_64::paging::address_space::tests::the_upper_half_is_shared
 kernel::arch::x86_64::paging::entry::tests::a_non_canonical_address_cannot_be_built
 kernel::arch::x86_64::paging::entry::tests::canonical_addresses_are_recognised_at_the_boundary
 kernel::arch::x86_64::paging::entry::tests::every_child_moves_the_pat_bit_and_keeps_the_address_intact

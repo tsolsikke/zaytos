@@ -667,14 +667,14 @@ impl ActivePageTable {
         // **書く側の守り**（2026-09-27。`ADR-0071` の決定 5）: **起動の後に、カーネル側の PML4 の項目を新しく
         // 作らない。作る前に名前つきで止める。** **作ると、先に作ったアドレス空間のコピーと食い違う**（突き合わせは
         // 次の `AddressSpace::new` で見つけるが、こちらは書く前に止める）。**起動の後かは、指紋を採ったかの 1 つの
-        // 目印で見る**（`crate::address_space::kernel_top_is_frozen`）。破壊テスト `kernel-top-write-after-boot-test`
+        // 目印で見る**（`crate::arch::x86_64::paging::address_space::kernel_top_is_frozen`）。破壊テスト `kernel-top-write-after-boot-test`
         // が、ここで止まることを見る。**破壊テスト `kernel-top-write-unguarded-test` は、この守りを外す**（突き合わせが
         // 実際に書かれた項目を見つけることを見る）。
         if !cfg!(feature = "kernel-top-write-unguarded-test")
             && table_phys == self.pml4_phys
-            && crate::address_space::kernel_top_write_is_refused(
+            && crate::arch::x86_64::paging::address_space::kernel_top_write_is_refused(
                 index,
-                crate::address_space::kernel_top_is_frozen(),
+                crate::arch::x86_64::paging::address_space::kernel_top_is_frozen(),
             )
         {
             panic!(

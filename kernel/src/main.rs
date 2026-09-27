@@ -1928,7 +1928,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // 項目を誰も変えない**——**`AddressSpace::new` が突き合わせる。**
     // SAFETY: 稼働中の PML4 を direct map 越しに読むだけ。
     match unsafe {
-        kernel::address_space::freeze_kernel_top(
+        kernel::arch::x86_64::paging::address_space::freeze_kernel_top(
             common::addr::direct_map(),
             kernel::arch::x86_64::paging::switch::read_cr3(),
         )
@@ -4563,7 +4563,7 @@ fn demo_address_space_switch(
     // SAFETY: 稼働中の PML4 を読み、direct map が覆っている新しいフレームへコピーするだけ。
     // AP はまだ起動しておらず、他コアがマッピングを変えることはない。
     let space = match unsafe {
-        kernel::address_space::AddressSpace::new(
+        kernel::arch::x86_64::paging::address_space::AddressSpace::new(
             allocator,
             direct_map,
             production,
@@ -4627,10 +4627,12 @@ fn demo_two_address_spaces(
     allocator: &mut kernel::frame_allocator::FrameAllocator,
     direct_map: common::addr::DirectMap,
     production: common::addr::PhysAddr,
-    mut space_a: kernel::address_space::AddressSpace,
+    mut space_a: kernel::arch::x86_64::paging::address_space::AddressSpace,
 ) {
-    use kernel::address_space::{is_shared_kernel_index, AddressSpace, PML4_ENTRY_COUNT};
     use kernel::arch::x86_64::paging::active::PageAttributes;
+    use kernel::arch::x86_64::paging::address_space::{
+        is_shared_kernel_index, AddressSpace, PML4_ENTRY_COUNT,
+    };
 
     // 下位の、どのデモとも重ならない VA。
     //
@@ -9117,7 +9119,7 @@ fn check_user_program_outcome(
 ///
 /// **かつての理由は「カーネルが PML4[0] に恒等で居るので PML4[0] を空けられない」
 /// だった。これは B-2b で成立しなくなっている**（カーネルは上位半分へ移り、恒等は
-/// 落ちている。[`kernel::address_space`] のモジュール doc）。**PML4[0] は空いており、
+/// 落ちている。[`kernel::arch::x86_64::paging::address_space`] のモジュール doc）。**PML4[0] は空いており、
 /// ユーザー空間を通常の低位へ広げること自体は今できる。**
 ///
 /// **それでも動かしていないのは、動かした先が正しいかを確かめる相手がいないため
@@ -9128,7 +9130,7 @@ fn check_user_program_outcome(
 ///
 /// # これは「本番の空間の」添字であって、「すべての空間の」ではない
 ///
-/// S7-e 以降、[`kernel::address_space::AddressSpace`] は自分のユーザーサブツリーの
+/// S7-e 以降、[`kernel::arch::x86_64::paging::address_space::AddressSpace`] は自分のユーザーサブツリーの
 /// 添字を持つ。**プロセスごとに違ってよい。** ここにあるのは本番の空間の値である。
 pub const USER_PML4_INDEX: usize = 1;
 

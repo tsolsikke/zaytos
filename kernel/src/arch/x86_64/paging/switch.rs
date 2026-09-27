@@ -39,7 +39,7 @@ pub fn read_cr3() -> PhysAddr {
 /// `CR2 == IP` の `#PF` から `#DF` を経てトリプルフォルトになる）。
 ///
 /// 満たし方は呼び出し側による。higher-half のカーネルでは上位 256 本の PML4
-/// エントリを共有すれば足りる（[`crate::address_space::AddressSpace`]）。
+/// エントリを共有すれば足りる（[`crate::arch::x86_64::paging::address_space::AddressSpace`]）。
 /// 恒等マッピングに依っていたのは B-2b で恒等を外す前の話である。
 ///
 /// `options` は意図的に指定しない。CR3 の書き換えは今後のロード/ストアが

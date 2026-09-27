@@ -15,10 +15,10 @@ Hello, ZaytOS!
 [INFO] fp: SSE is enabled on the bootstrap processor: CR0=0x80010033 (MP=true, EM=false),              CR4=0x668 (OSFXSR=true, OSXMMEXCPT=true), as intended = true [read back from the registers]
 [INFO] boot stack: 648 of 16384 bytes used (high-water; 15736 bytes poison intact)
 [INFO] higher-half: arrived at high VA. RIP=0xffffffff801e7248 in [0xffffffff80100000, 0xffffffff804bc8f8)=true, RSP=0xffffffff804a6130 high=true, CR3=0x25b000 == bootstrap PML4 0x25b000 = true, identity alive (phys 0x100000 read via low==high) = true
-[INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff80429148 first slot=0xffffffff80429148 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
+[INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff80428148 first slot=0xffffffff80428148 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
 [INFO] interrupts: RFLAGS.IF before cli = false (raw RFLAGS=0x96)
 [INFO] interrupts: RFLAGS.IF after cli = false (raw RFLAGS=0x96)
-[INFO] gdt: base=0xffffffff80429148 limit=63 (expected base=0xffffffff80429148)
+[INFO] gdt: base=0xffffffff80428148 limit=63 (expected base=0xffffffff80428148)
 [INFO] gdt: CS=0x8 (expected 0x8), TR=0x30 (expected 0x30)
 [INFO] gdt: limit=63 (expected 63)
 [INFO] gdt[1] kcode: 0x00af9a000000ffff DPL=0 present=1 kind=code accessed=0 (expected 0x00af9a000000ffff, accessed bit is CPU-managed)
@@ -133,12 +133,12 @@ Hello, ZaytOS!
 [INFO] user-map: U/S audit: user subtree PML4[1] entries=4 violations(U=0)=0, kernel entries=3806 violations(U=1)=0
 [INFO] user-map: after unmap: user subtree residue entries=3 (intermediates kept for M5-e-3), kernel violations(U=1)=0
 [INFO] user-map: user-page mapping verified (all levels U=1 for the user page, all kernel entries U=0, Ring 0 read-back held; leaf unmapped, subtree kept for M5-e-3)
-[INFO] ring3: entering Ring 3 (user code 0x8000000000 with cli, user stack top 0x8000101000, RSP0 -> excursion stack [0xffffffff8044e7f0, 0xffffffff8045e7f0))
-[INFO] ring3: folded expected #GP. fault CS=0x2b (RPL=3), fault RSP=0x8000101000 (in user stack=true), handler RSP=0xffffffff8045e730 (in excursion stack=true), RSP0 restored=true
+[INFO] ring3: entering Ring 3 (user code 0x8000000000 with cli, user stack top 0x8000101000, RSP0 -> excursion stack [0xffffffff8044d7f0, 0xffffffff8045d7f0))
+[INFO] ring3: folded expected #GP. fault CS=0x2b (RPL=3), fault RSP=0x8000101000 (in user stack=true), handler RSP=0xffffffff8045d730 (in excursion stack=true), RSP0 restored=true
 [INFO] ring3: U/S audit after the excursion: user subtree entries=6 violations=0, kernel entries=3806 violations=0
 [INFO] ring3: Ring 3 excursion verified (fell to Ring 3, cli faulted as #GP, RSP0 switched to the excursion stack, folded back to the kernel, permission split intact)
-[INFO] syscall: entering Ring 3 to issue probe int 0x80 (number=0x1000, int at 0x800000002b, cli fold at 0x8000000032, RSP0 -> excursion stack [0xffffffff8044e7f0, 0xffffffff8045e7f0))
-[INFO] syscall: probe int 0x80 returned. invocations=1 (issued exactly 1), number seen=0x1000 (expected 0x1000), handler RSP=0xffffffff8045e740 (on RSP0 excursion stack=true), in-Ring-3 flag at entry=true, RSP0 restored=true
+[INFO] syscall: entering Ring 3 to issue probe int 0x80 (number=0x1000, int at 0x800000002b, cli fold at 0x8000000032, RSP0 -> excursion stack [0xffffffff8044d7f0, 0xffffffff8045d7f0))
+[INFO] syscall: probe int 0x80 returned. invocations=1 (issued exactly 1), number seen=0x1000 (expected 0x1000), handler RSP=0xffffffff8045d740 (on RSP0 excursion stack=true), in-Ring-3 flag at entry=true, RSP0 restored=true
 [INFO] syscall: args seen=[0x11111111, 0x22222222, 0x33333333, 0x44444444, 0x55555555, 0x66666666], user stored=0xc0ffee (expected return 0xc0ffee)
 [INFO] syscall: probe int 0x80 round-trip verified (6 args reached syscall_entry per the R10 convention, the return value came back through RAX to Ring 3 and was stored, syscall_entry ran on the RSP0 stack, and the cli #GP folded back to the kernel)
 [INFO] syscall: ptr case 'valid page' buf=0x8000000000 len=0x1 -> stored=0x0 (expect accept(0), ok=true)
@@ -277,15 +277,15 @@ Hello, ZaytOS!
 [INFO] console: 12 flush(es), 4741696 bytes transferred
 [INFO] console: full-screen equivalent would be 49152000 bytes (9% actually sent)
 task: registered the AP idle task as index 3 owned by cpu 1 on its per-CPU stack [0xffff81000002c000, 0xffff81000004c000); the application processor adopts it at bring-up and schedules on it from then on
-task: the worker guard page was untouched before it was installed = true (nonzero bytes=0, first at None, page 0xffffffff80408000)
-task: unmapped the worker guard page 0xffffffff80408000 (old pte=0x408023); translate returns none=true. #PF now uses IST2.
-task: the worker guard page was untouched before it was installed = true (nonzero bytes=0, first at None, page 0xffffffff8040d000)
-task: unmapped the worker guard page 0xffffffff8040d000 (old pte=0x40d023); translate returns none=true. #PF now uses IST2.
-task: the ring3 task guard page was untouched before it was installed = true (nonzero bytes=0, first at None, page 0xffffffff80418000)
-task: unmapped the ring3 task guard page 0xffffffff80418000 (old pte=0x418023); translate returns none=true. #PF now uses IST2.
-task: the bsp idle task guard page was untouched before it was installed = true (nonzero bytes=0, first at None, page 0xffffffff80412000)
-task: unmapped the bsp idle task guard page 0xffffffff80412000 (old pte=0x412023); translate returns none=true. #PF now uses IST2.
-task: registered the bsp idle task as index 5 owned by cpu 0 on its own stack [0xffffffff80413000, 0xffffffff80417000); nothing picks it yet (W2-a)
+task: the worker guard page was untouched before it was installed = true (nonzero bytes=0, first at None, page 0xffffffff80407000)
+task: unmapped the worker guard page 0xffffffff80407000 (old pte=0x407023); translate returns none=true. #PF now uses IST2.
+task: the worker guard page was untouched before it was installed = true (nonzero bytes=0, first at None, page 0xffffffff8040c000)
+task: unmapped the worker guard page 0xffffffff8040c000 (old pte=0x40c023); translate returns none=true. #PF now uses IST2.
+task: the ring3 task guard page was untouched before it was installed = true (nonzero bytes=0, first at None, page 0xffffffff80417000)
+task: unmapped the ring3 task guard page 0xffffffff80417000 (old pte=0x417023); translate returns none=true. #PF now uses IST2.
+task: the bsp idle task guard page was untouched before it was installed = true (nonzero bytes=0, first at None, page 0xffffffff80411000)
+task: unmapped the bsp idle task guard page 0xffffffff80411000 (old pte=0x411023); translate returns none=true. #PF now uses IST2.
+task: registered the bsp idle task as index 5 owned by cpu 0 on its own stack [0xffffffff80412000, 0xffffffff80416000); nothing picks it yet (W2-a)
 task: starting cooperative demo with 2 workers, 3 rounds each
 task: A round 1/3: all 15 GPRs survived the switch (base=0xa1a10000)
 task: B round 1/3: all 15 GPRs survived the switch (base=0xb2b20000)
@@ -418,7 +418,7 @@ hello from ring 3
 [INFO] user-load: syscall-test initial stack at 0x7fff70 (argc=2, envc=3, 16-byte aligned=true,          initial data 144 of 4096 byte(s))
 [INFO] stack-water: before entering syscall-test in Ring 3, the kernel stack used 67024 of 131072 byte(s); 64048 left
 syscall-test wrote this
-[INFO] spawn: /bin/hello is 8576 byte(s) at inode 25; entering at depth 2 (the parent's excursion stack 0xffffffff8044e7f0..0xffffffff8045e7f0 has 10017 byte(s) used and 55519 left)
+[INFO] spawn: /bin/hello is 8576 byte(s) at inode 25; entering at depth 2 (the parent's excursion stack 0xffffffff8044d7f0..0xffffffff8045d7f0 has 10017 byte(s) used and 55519 left)
 [INFO] user-load: /bin/hello mapped PT_LOAD 0x400000..0x400042 (filesz=0x42 memsz=0x42 w=false) pages 0x400000..0x400000
 [INFO] user-load: /bin/hello mapped PT_LOAD 0x401000..0x401012 (filesz=0x12 memsz=0x12 w=false) pages 0x401000..0x401000
 [INFO] user-load: /bin/hello PT_LOAD segments: declared=2 mapped=2 (they must match; a gap means a segment was skipped), pages shared with the previous segment=0
@@ -429,8 +429,8 @@ hello from ring 3
 [INFO] ring3: /bin/hello used 2834 of 65536 byte(s) of the depth-1 excursion stack (4%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/hello opened 0 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
 [INFO] user-heap: /bin/hello had brk take 0 frame(s) and give back 0 (equal means the shrink actually returned them; a program that only grows will not be equal, and that is not a failure)
-[INFO] spawn: /bin/hello ended (Exited(0)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff8046e740 (inside its own excursion stack 0xffffffff8045e7f0..0xffffffff8046e7f0 = true); the space was destroyed (8 frame(s) left the allocator and 8 reached quarantine (8 its own + 0 from what it spawned), match=true leaked=0); the space took 8 frame(s) and the destroy collected 8 (match=true); the global difference was checked (checked 3 time(s) so far)
-[INFO] spawn: /bin/spawn-test is 12720 byte(s) at inode 38; entering at depth 2 (the parent's excursion stack 0xffffffff8044e7f0..0xffffffff8045e7f0 has 10017 byte(s) used and 55519 left)
+[INFO] spawn: /bin/hello ended (Exited(0)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff8046d740 (inside its own excursion stack 0xffffffff8045d7f0..0xffffffff8046d7f0 = true); the space was destroyed (8 frame(s) left the allocator and 8 reached quarantine (8 its own + 0 from what it spawned), match=true leaked=0); the space took 8 frame(s) and the destroy collected 8 (match=true); the global difference was checked (checked 3 time(s) so far)
+[INFO] spawn: /bin/spawn-test is 12720 byte(s) at inode 38; entering at depth 2 (the parent's excursion stack 0xffffffff8044d7f0..0xffffffff8045d7f0 has 10017 byte(s) used and 55519 left)
 [INFO] user-load: /bin/spawn-test mapped PT_LOAD 0x400000..0x401002 (filesz=0x1002 memsz=0x1002 w=false) pages 0x400000..0x401000
 [INFO] user-load: /bin/spawn-test mapped PT_LOAD 0x402000..0x40203e (filesz=0x3e memsz=0x3e w=false) pages 0x402000..0x402000
 [INFO] user-load: /bin/spawn-test PT_LOAD segments: declared=2 mapped=2 (they must match; a gap means a segment was skipped), pages shared with the previous segment=0
@@ -440,8 +440,8 @@ hello from ring 3
 [INFO] ring3: /bin/spawn-test used 12386 of 65536 byte(s) of the depth-1 excursion stack (18%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/spawn-test opened 0 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
 [INFO] user-heap: /bin/spawn-test had brk take 0 frame(s) and give back 0 (equal means the shrink actually returned them; a program that only grows will not be equal, and that is not a failure)
-[INFO] spawn: /bin/spawn-test ended (Exited(0)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff8046e740 (inside its own excursion stack 0xffffffff8045e7f0..0xffffffff8046e7f0 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0); the space took 9 frame(s) and the destroy collected 9 (match=true); the global difference was checked (checked 4 time(s) so far)
-[INFO] spawn: /bin/ls is 12784 byte(s) at inode 28; entering at depth 2 (the parent's excursion stack 0xffffffff8044e7f0..0xffffffff8045e7f0 has 10017 byte(s) used and 55519 left)
+[INFO] spawn: /bin/spawn-test ended (Exited(0)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff8046d740 (inside its own excursion stack 0xffffffff8045d7f0..0xffffffff8046d7f0 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0); the space took 9 frame(s) and the destroy collected 9 (match=true); the global difference was checked (checked 4 time(s) so far)
+[INFO] spawn: /bin/ls is 12784 byte(s) at inode 28; entering at depth 2 (the parent's excursion stack 0xffffffff8044d7f0..0xffffffff8045d7f0 has 10017 byte(s) used and 55519 left)
 [INFO] user-load: /bin/ls mapped PT_LOAD 0x400000..0x400eaf (filesz=0xeaf memsz=0xeaf w=false) pages 0x400000..0x400000
 [INFO] user-load: /bin/ls mapped PT_LOAD 0x401000..0x4012e8 (filesz=0x2e8 memsz=0x2e8 w=false) pages 0x401000..0x401000
 [INFO] user-load: /bin/ls mapped PT_LOAD 0x402000..0x402038 (filesz=0x38 memsz=0x38 w=true) pages 0x402000..0x402000
@@ -461,8 +461,8 @@ tmp
 [INFO] ring3: /bin/ls used 6064 of 65536 byte(s) of the depth-1 excursion stack (9%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/ls opened 1 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
 [INFO] user-heap: /bin/ls had brk take 0 frame(s) and give back 0 (equal means the shrink actually returned them; a program that only grows will not be equal, and that is not a failure)
-[INFO] spawn: /bin/ls ended (Exited(0)) after 6 syscall(s); its kernel entries ran on RSP 0xffffffff8046e740 (inside its own excursion stack 0xffffffff8045e7f0..0xffffffff8046e7f0 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0); the space took 9 frame(s) and the destroy collected 9 (match=true); the global difference was checked (checked 5 time(s) so far)
-[INFO] spawn: /bin/cat is 12776 byte(s) at inode 14; entering at depth 2 (the parent's excursion stack 0xffffffff8044e7f0..0xffffffff8045e7f0 has 10017 byte(s) used and 55519 left)
+[INFO] spawn: /bin/ls ended (Exited(0)) after 6 syscall(s); its kernel entries ran on RSP 0xffffffff8046d740 (inside its own excursion stack 0xffffffff8045d7f0..0xffffffff8046d7f0 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0); the space took 9 frame(s) and the destroy collected 9 (match=true); the global difference was checked (checked 5 time(s) so far)
+[INFO] spawn: /bin/cat is 12776 byte(s) at inode 14; entering at depth 2 (the parent's excursion stack 0xffffffff8044d7f0..0xffffffff8045d7f0 has 10017 byte(s) used and 55519 left)
 [INFO] user-load: /bin/cat mapped PT_LOAD 0x400000..0x400c05 (filesz=0xc05 memsz=0xc05 w=false) pages 0x400000..0x400000
 [INFO] user-load: /bin/cat mapped PT_LOAD 0x401000..0x401214 (filesz=0x214 memsz=0x214 w=false) pages 0x401000..0x401000
 [INFO] user-load: /bin/cat mapped PT_LOAD 0x402000..0x402030 (filesz=0x30 memsz=0x30 w=true) pages 0x402000..0x402000
@@ -474,8 +474,8 @@ welcome to ZaytOS
 [INFO] ring3: /bin/cat used 7328 of 65536 byte(s) of the depth-1 excursion stack (11%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/cat opened 1 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
 [INFO] user-heap: /bin/cat had brk take 0 frame(s) and give back 0 (equal means the shrink actually returned them; a program that only grows will not be equal, and that is not a failure)
-[INFO] spawn: /bin/cat ended (Exited(0)) after 6 syscall(s); its kernel entries ran on RSP 0xffffffff8046e740 (inside its own excursion stack 0xffffffff8045e7f0..0xffffffff8046e7f0 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0); the space took 9 frame(s) and the destroy collected 9 (match=true); the global difference was checked (checked 6 time(s) so far)
-[INFO] spawn: /bin/cat is 12776 byte(s) at inode 14; entering at depth 2 (the parent's excursion stack 0xffffffff8044e7f0..0xffffffff8045e7f0 has 10017 byte(s) used and 55519 left)
+[INFO] spawn: /bin/cat ended (Exited(0)) after 6 syscall(s); its kernel entries ran on RSP 0xffffffff8046d740 (inside its own excursion stack 0xffffffff8045d7f0..0xffffffff8046d7f0 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0); the space took 9 frame(s) and the destroy collected 9 (match=true); the global difference was checked (checked 6 time(s) so far)
+[INFO] spawn: /bin/cat is 12776 byte(s) at inode 14; entering at depth 2 (the parent's excursion stack 0xffffffff8044d7f0..0xffffffff8045d7f0 has 10017 byte(s) used and 55519 left)
 [INFO] user-load: /bin/cat mapped PT_LOAD 0x400000..0x400c05 (filesz=0xc05 memsz=0xc05 w=false) pages 0x400000..0x400000
 [INFO] user-load: /bin/cat mapped PT_LOAD 0x401000..0x401214 (filesz=0x214 memsz=0x214 w=false) pages 0x401000..0x401000
 [INFO] user-load: /bin/cat mapped PT_LOAD 0x402000..0x402030 (filesz=0x30 memsz=0x30 w=true) pages 0x402000..0x402000
@@ -487,7 +487,7 @@ cat: cannot open
 [INFO] ring3: /bin/cat used 7328 of 65536 byte(s) of the depth-1 excursion stack (11%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/cat opened 0 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
 [INFO] user-heap: /bin/cat had brk take 0 frame(s) and give back 0 (equal means the shrink actually returned them; a program that only grows will not be equal, and that is not a failure)
-[INFO] spawn: /bin/cat ended (Exited(1)) after 3 syscall(s); its kernel entries ran on RSP 0xffffffff8046e740 (inside its own excursion stack 0xffffffff8045e7f0..0xffffffff8046e7f0 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0); the space took 9 frame(s) and the destroy collected 9 (match=true); the global difference was checked (checked 7 time(s) so far)
+[INFO] spawn: /bin/cat ended (Exited(1)) after 3 syscall(s); its kernel entries ran on RSP 0xffffffff8046d740 (inside its own excursion stack 0xffffffff8045d7f0..0xffffffff8046d7f0 = true); the space was destroyed (9 frame(s) left the allocator and 9 reached quarantine (9 its own + 0 from what it spawned), match=true leaked=0); the space took 9 frame(s) and the destroy collected 9 (match=true); the global difference was checked (checked 7 time(s) so far)
 syscall-test wrote this
 syscall-test wrote this
 syscall-test is writing a line that does not fit the 64-byte record
@@ -513,7 +513,7 @@ syscall-test wrote this
 [INFO] ioapic: IRQ1 redirection entry read back: vector=0x42 masked=false level_triggered=false active_low=false destination_mode=physical destination=0x00, vector matches what we wrote (0x42) = true, destination is physical mode and equals the bootstrap processor (0x00) = true
 [INFO] ioapic: IRQ1 now goes through the I/O APIC as vector 0x42; the 8259 line is masked (the first key must arrive as that vector, which the 8259 cannot produce)
 [INFO] ioapic: virtio IRQ 11 routed: vector=0x44 (expected 0x44), level=true active-low=false masked=false; matches the platform's declaration = true [read back from hardware]
-[INFO] sti-check 1: GDT base=0xffffffff80429148 (expected 0xffffffff80429148), CS=0x0008 (expected 0x0008), DS=0x0010 SS=0x0010 (expected 0x0010)
+[INFO] sti-check 1: GDT base=0xffffffff80428148 (expected 0xffffffff80428148), CS=0x0008 (expected 0x0008), DS=0x0010 SS=0x0010 (expected 0x0010)
 [INFO] sti-check 2: TR=0x0030 (expected 0x0030), IST1 top=0xffffffff804b5000, #DF gate IST index=Some(1)
 [INFO] sti-check 3: IDT base=0xffffffff804ba899 limit=4095, first 32 gates ok=true, exception stub table ok=true, irq stub table ok=true (0xffffffff801db3a0..0xffffffff801db5b0, size=528 expected=528)
 [INFO] sti-check 3b: all 256 IDT gate(s) lead to one of the 3 common entries = true (exception 216, irq 39, syscall 1)
@@ -537,7 +537,7 @@ syscall-test wrote this
 [INFO] lapic-timer: the timer now arrives as vector 0xfe, which the 8259 cannot produce
 task: starting preemptive demo with 2 busy-loop workers for 200 ticks
 [INFO] smp: the installed AP trampoline matches the template outside the patched fields: 4048 byte(s) compared, 48 excluded (gdtr base at 0xf22, far jump target at 0x3b, data block 0xf40..0xf68), mismatches=0
-[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x25b000, rust entry 0xffffffff801a3a30
+[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x25b000, rust entry 0xffffffff801a26b0
 [INFO] smp: starting application processor apic id 1 as slot 1 (trampoline at 0x1000, vector 0x01, stack top 0x3000 identity-mapped, cr3 0x25b000 = the static boot page table)
 [INFO] smp: application processor 1 started (long mode reached, running on the static boot page table; no per-CPU GDT/TSS/IDT yet, so cpu_id() is not used here)
 [INFO] fp: SSE is enabled on ap 1: CR0=0x80010033 CR4=0x668, as intended = true [read back from the registers]
@@ -567,7 +567,7 @@ bss-test: the .bss reads as zero, keeps writes, and shares a page with .data
 [INFO] ring3: /bin/bss-test used 2834 of 65536 byte(s) of the depth-0 excursion stack (4%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/bss-test opened 0 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
 [INFO] user-heap: /bin/bss-test had brk take 0 frame(s) and give back 0 (equal means the shrink actually returned them; a program that only grows will not be equal, and that is not a failure)
-[INFO] spawn: /bin/bss-test ended (Exited(0)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff8045e740 (inside its own excursion stack 0xffffffff8044e7f0..0xffffffff8045e7f0 = true); the space was destroyed (11 frame(s) left the allocator and 11 reached quarantine (11 its own + 0 from what it spawned), match=true leaked=0); the space took 11 frame(s) and the destroy collected 11 (match=true); the global difference was checked (checked 9 time(s) so far)
+[INFO] spawn: /bin/bss-test ended (Exited(0)) after 2 syscall(s); its kernel entries ran on RSP 0xffffffff8045d740 (inside its own excursion stack 0xffffffff8044d7f0..0xffffffff8045d7f0 = true); the space was destroyed (11 frame(s) left the allocator and 11 reached quarantine (11 its own + 0 from what it spawned), match=true leaked=0); the space took 11 frame(s) and the destroy collected 11 (match=true); the global difference was checked (checked 9 time(s) so far)
 [INFO] bss-check: /bin/bss-test ended Ok(Exited(0)) (0 means the .bss reads as zero, keeps writes, and shares a page with .data)
 [INFO] address-space: froze the kernel half of the PML4 before init (3 present entries)
 [INFO] init: starting /bin/zash (restart 0 of 3)

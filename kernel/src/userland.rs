@@ -596,7 +596,7 @@ pub enum UserLoadError {
     /// 効いた形である。**
     SegmentData(common::elf::ElfError),
     /// 新しいアドレス空間を作れなかった。**イメージではなくカーネル側の事情である。**
-    AddressSpace(crate::address_space::AddressSpaceError),
+    AddressSpace(crate::arch::x86_64::paging::address_space::AddressSpaceError),
     /// フレームが尽きた。**イメージではなくカーネル側の事情である。**
     OutOfFrames,
     /// マップしようとした仮想アドレスが正準形でない。
@@ -604,7 +604,7 @@ pub enum UserLoadError {
     /// マッピングに失敗した。**区画が同じページを共有していると、後から来たほうがここへ来る。**
     Mapping {
         virt: u64,
-        error: crate::address_space::AddressSpaceError,
+        error: crate::arch::x86_64::paging::address_space::AddressSpaceError,
     },
     /// マップした葉のフラグが、区画の権限と食い違った。**カーネル側の不具合である。**
     LeafFlags { count: usize },
@@ -976,7 +976,7 @@ pub enum SpawnOutcome {
 /// 容量に見える。** こちらは管理構造で、長さは常に 1 である。
 pub struct UserProcess {
     /// このプロセスのアドレス空間。**終了で破棄する。**
-    space: crate::address_space::AddressSpace,
+    space: crate::arch::x86_64::paging::address_space::AddressSpace,
     /// 最初に飛ぶ先（ELF の entry）。
     entry: u64,
     /// ユーザースタックの上端。
@@ -1054,7 +1054,7 @@ pub fn load_user_program(
     argv: &[&[u8]],
     envp: Option<&[&[u8]]>,
 ) -> (Result<u64, UserLoadError>, usize, usize, usize) {
-    use crate::address_space::AddressSpace;
+    use crate::arch::x86_64::paging::address_space::AddressSpace;
 
     let direct_map = common::addr::direct_map();
     let production = crate::arch::x86_64::paging::switch::read_cr3();
@@ -1384,7 +1384,7 @@ fn forget_task_cr3_before_destroy(logger: &mut Logger<SerialPort>, process: &Use
 /// **一度は誤っていた。** ここには以前も「`AlreadyMapped` 相当で弾かれる」と
 /// 書いてあったが、**それを持っていたのは
 /// [`crate::arch::x86_64::paging::active::ActivePageTable::map_4kib`] の側だけで、ローダーが
-/// 使う [`crate::address_space::AddressSpace::map_user_4kib`] は葉の present を
+/// 使う [`crate::arch::x86_64::paging::address_space::AddressSpace::map_user_4kib`] は葉の present を
 /// 見ずに書いていた。** 契約を片側だけ見て、もう片側のものとして書いていた形で
 /// ある（S9-b-3-2b の数え直しで実測した）。**実測では両方「張れた」ことになり、
 /// 1 つ目のフレームがマッピングから外れて 1 枚漏れた**（14 枚消えて隔離へ 13 枚）。

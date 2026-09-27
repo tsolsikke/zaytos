@@ -189,9 +189,9 @@ pub const PATH_RULES: &[PathRule] = &[
         reach: Reach::Families(&[Family::Interrupts, Family::Smp, Family::Ipc, Family::Shell]),
     },
     PathRule {
-        // **プロセスごとの空間・返したフレームの置き場・カーネルのスタック**——**どの Ring 3 のプログラムも
-        // 通り、AP も持つ。**
-        patterns: &["kernel/src/address_space.rs", "kernel/src/quarantine.rs"],
+        // **返したフレームの置き場・カーネルのスタック**——**どの Ring 3 のプログラムも通り、AP も持つ。**
+        // **プロセスごとの空間（`address_space`）は `arch/x86_64/paging` へ移し、全部へ倒す**（2026-09-27）。
+        patterns: &["kernel/src/quarantine.rs"],
         reach: Reach::Families(&[
             Family::Boot,
             Family::Memory,

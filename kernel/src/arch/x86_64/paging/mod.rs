@@ -2,6 +2,7 @@
 //! **どの範囲をどの大きさでマップするかの計画は、共通の側（`crate::paging::plan`）に残る。**
 
 pub mod active;
+pub mod address_space;
 pub mod entry;
 pub mod remove;
 pub mod switch;
