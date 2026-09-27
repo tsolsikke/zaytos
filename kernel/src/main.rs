@@ -719,22 +719,22 @@ extern "sysv64" fn kernel_main() -> ! {
     // **ここでしか取れない。** `allocate_frame` は最小のフレーム番号から配るので、
     // この直後に始まるページテーブル構築が低位から食っていく。SIPI のベクタは
     // 8 ビットで、AP は `vector << 12` から走り始めるため、トランポリンは物理
-    // 1MiB 未満に要る（`smp::TRAMPOLINE_MAX_START` の doc を参照）。
+    // 1MiB 未満に要る（`arch::x86_64::ap_trampoline::TRAMPOLINE_MAX_START` の doc を参照）。
     //
     // **失敗しても停止しない。** S1 は情報を集める段階で、AP はまだ起動しない。
     // 致命として扱うのは S3（AP の起動）である。
-    match kernel::smp::reserve_trampoline_frame(&mut allocator) {
+    match kernel::arch::x86_64::ap_trampoline::reserve_trampoline_frame(&mut allocator) {
         Ok(frame) => logger.info(format_args!(
             "smp: reserved the AP trampoline frame at {:#x} (below {:#x}, SIPI-addressable={})",
             frame.as_u64(),
-            kernel::smp::TRAMPOLINE_MAX_START,
-            kernel::smp::is_sipi_addressable(frame)
+            kernel::arch::x86_64::ap_trampoline::TRAMPOLINE_MAX_START,
+            kernel::arch::x86_64::ap_trampoline::is_sipi_addressable(frame)
         )),
         Err(error) => logger.error(format_args!(
             "smp: could not reserve an AP trampoline frame ({error:?}); AP startup (S3) needs a \
              frame below {:#x} because the SIPI vector is 8 bits and the AP starts at vector << 12. \
              continuing: S1 only collects information and does not start APs",
-            kernel::smp::TRAMPOLINE_MAX_START
+            kernel::arch::x86_64::ap_trampoline::TRAMPOLINE_MAX_START
         )),
     }
 
@@ -743,7 +743,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // **ここで取るのは、`run_timer_loop` にフレームアロケータが無いからである**
     // （トランポリン用フレームと同じ理由）。**恒等 VA で使うので低位でなければ
     // ならず**、アロケータが最小のフレーム番号から配るうちに取る。
-    match kernel::smp::reserve_ap_stacks(&mut allocator) {
+    match kernel::arch::x86_64::ap_trampoline::reserve_ap_stacks(&mut allocator) {
         Ok(count) => logger.info(format_args!(
             "smp: reserved {count} AP stack frame(s), all below the identity limit"
         )),

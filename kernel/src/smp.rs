@@ -2,6 +2,10 @@
 //!
 //! ここが持つのは、S3（AP の起動）で要るがS1 の時点でしか確保できないものである。
 //! 現在はトランポリン用フレームだけが該当する。
+//!
+//! **トランポリン（置く枠と恒等のスタックの予約・雛形・設置・照合）は、[`crate::arch::x86_64::ap_trampoline`] へ
+//! 移した**（2026-09-28。境界の段階の手順 2）。**どの AP をいつ起こすかと、起きた AP が本番の世界へ入った後の
+//! 共通の部分は、ここに残る。**
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -10,117 +14,16 @@ use core::fmt::Write as _;
 use crate::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
 #[allow(unused_imports)]
 use crate::arch::x86_64::paging::verify;
-use common::addr::{PhysAddr, VirtAddr};
+use common::addr::VirtAddr;
 use common::arch::x86_64::cpu;
 use common::log::Logger;
 use common::machine::pc::serial::SerialPort;
 
 use crate::frame_allocator::{FrameAllocator, FRAME_SIZE};
 
-/// AP のトランポリンを置ける物理アドレスの上限（この値未満）。
-///
-/// # なぜ 1MiB 未満なのか
-///
-/// AP は SIPI（Startup IPI）で起動する。SIPI が運べるのは8 ビットのベクタだけで、
-/// AP はリアルモードで `vector << 12` から実行を始める。したがって開始アドレスは
-/// 物理 `0x00000`〜`0xFF000` に限られる。ZaytOS のカーネルイメージは物理
-/// `0x100000`（ちょうど 1MiB）から始まるので、トランポリンはイメージの外、
-/// 1MiB 未満に別途確保するしかない。
-///
-/// # なぜ `0xA0000` ではなく `0x9F000` なのか
-///
-/// 実測では、1MiB 未満の空きは `0x1000..0xA0000` の 159 フレームだけである
-/// （`0xA0000` 以降はレガシー領域で、UEFI メモリマップに `EfiConventionalMemory`
-/// として現れない）。上限を `0xA0000` にしても届く範囲としては足りるが、
-/// 1 ページぶんの余裕を残すために `0x9F000` にしてある。トランポリンのコードが
-/// 1 ページに収まらなかった場合、次のページへ跨ぐ余地が要るためである。
-///
-/// 収まらない場合の隣接ページの確保は、この段階では扱わない。S1 は 1 枚しか
-/// 予約せず、隣が空いている保証も与えない（S3 の到達条件へ送った）。
-pub const TRAMPOLINE_MAX_START: u64 = 0x9F000;
-
-/// 予約が無いことを表す値。物理アドレス 0 はフレームアロケータが必ず除外するので
-/// （ヌルポインタ対策）、有効な予約と衝突しない。
-const NO_FRAME: u64 = 0;
-
-/// S1-d で予約したトランポリン用フレームの物理アドレス。
-static TRAMPOLINE_FRAME: AtomicU64 = AtomicU64::new(NO_FRAME);
-
-/// トランポリン用フレームの予約に失敗した理由。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrampolineError {
-    /// 空きフレームが 1 枚も無い。
-    NoFreeFrame,
-    /// 取れたが 1MiB 未満ではない。取れたフレームはアロケータへ返してある
-    /// ので、この失敗で空きが減ることはない。
-    TooHigh { got: PhysAddr },
-}
-
-/// トランポリン用フレームを 1 枚予約する。
-///
-/// # 呼ぶ位置
-///
-/// フレームアロケータのスモークテストの直後、本流ページテーブルの構築より前。
-/// `allocate_frame` は常に最小のフレーム番号から配るので、ここが「1MiB 未満が
-/// まだ誰にも取られていない」唯一の地点である。これより後ろへ移すと、ページ
-/// テーブルが低位から食っていくため、取れなくなる。
-///
-/// # 失敗しても停止しない
-///
-/// S1 は情報を集める段階であり、AP はまだ起動しない。ここで停止すると、現在
-/// 単一コアで動いているカーネルが「トランポリン用の 1 枚が取れない」だけで
-/// 起動しなくなり、機能的な後退になる。失敗は大きく報告して継続する。
-/// 致命として扱うのは S3（AP の起動）である。
-pub fn reserve_trampoline_frame<const CAP: usize>(
-    allocator: &mut FrameAllocator<CAP>,
-) -> Result<PhysAddr, TrampolineError> {
-    let Some(frame) = allocator.allocate_frame() else {
-        return Err(TrampolineError::NoFreeFrame);
-    };
-    if frame.as_u64() >= TRAMPOLINE_MAX_START {
-        // 取ったものを返す。失敗で空きが減らないようにする。
-        let _ = allocator.deallocate_frame(frame);
-        return Err(TrampolineError::TooHigh { got: frame });
-    }
-    TRAMPOLINE_FRAME.store(frame.as_u64(), Ordering::Relaxed);
-    Ok(frame)
-}
-
-/// 予約済みのトランポリン用フレーム。まだ予約していなければ `None`。
-///
-/// S1 の時点では誰も呼ばない。それでも `dead_code` にならないのは `pub` だから
-/// であって、使われているからではない（公開範囲が広いと未使用が見えない、という
-/// 一般則をここでは意図的に使っている）。S3 で実際に読まれることを、その段階の
-/// 到達条件にしてある（`roadmap.md`）。そうしないと、使い忘れても誰も気づかない。
-pub fn trampoline_frame() -> Option<PhysAddr> {
-    match TRAMPOLINE_FRAME.load(Ordering::Relaxed) {
-        NO_FRAME => None,
-        value => PhysAddr::new(value),
-    }
-}
-
-/// 予約したフレームが SIPI のベクタとして表せるか（4KiB 境界にあるか）。
-///
-/// `allocate_frame` はフレーム単位で配るので、境界から外れることは通常起きない。
-/// 検査というより、SIPI のベクタ計算（`vector << 12`）が成立する前提を
-/// コードの形で残すためのものである。
-pub fn is_sipi_addressable(frame: PhysAddr) -> bool {
-    frame.as_u64().is_multiple_of(FRAME_SIZE) && frame.as_u64() < TRAMPOLINE_MAX_START
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 高位のフレームしか持たないアロケータ。失敗経路を判定側だけ閉じるための
-    /// もので、起動が継続することまでは確かめられない（それは S3 で致命へ格上げ
-    /// するときに見る）。
-    fn allocator_with_only_high_frames() -> FrameAllocator<4> {
-        let mut allocator = FrameAllocator::<4>::new();
-        // 物理 1MiB（フレーム番号 0x100）から 16 枚。
-        allocator.insert_free_range(0x100, 16).unwrap();
-        allocator
-    }
 
     /// `map_ap_stacks` が実際にマップする並びから、通常スタックの頂点を導く。
     ///
@@ -181,103 +84,10 @@ mod tests {
         assert_eq!(bottom, 0xffff_8100_0002_c000);
         assert_eq!(recorded_top, 0xffff_8100_0004_c000);
     }
-
-    #[test]
-    fn a_high_only_allocator_is_rejected() {
-        let mut allocator = allocator_with_only_high_frames();
-        let error = reserve_trampoline_frame(&mut allocator).unwrap_err();
-        match error {
-            TrampolineError::TooHigh { got } => assert_eq!(got.as_u64(), 0x100000),
-            other => panic!("expected TooHigh, got {other:?}"),
-        }
-        // 予約は成立していない。
-        assert_eq!(trampoline_frame(), None);
-        // 取ったフレームは返してあるので、空きは減っていない。
-        assert_eq!(allocator.free_frame_count(), 16);
-    }
-
-    #[test]
-    fn an_empty_allocator_reports_no_free_frame() {
-        let mut allocator = FrameAllocator::<4>::new();
-        assert_eq!(
-            reserve_trampoline_frame(&mut allocator).unwrap_err(),
-            TrampolineError::NoFreeFrame
-        );
-    }
-
-    #[test]
-    fn a_low_frame_is_sipi_addressable() {
-        assert!(is_sipi_addressable(PhysAddr::new(0x1000).unwrap()));
-        assert!(is_sipi_addressable(PhysAddr::new(0x9E000).unwrap()));
-    }
-
-    #[test]
-    fn the_limit_itself_is_not_addressable() {
-        // 上限は「この値未満」なので、境界そのものは弾く。
-        assert!(!is_sipi_addressable(
-            PhysAddr::new(TRAMPOLINE_MAX_START).unwrap()
-        ));
-    }
-
-    #[test]
-    fn a_frame_above_one_mib_is_not_addressable() {
-        assert!(!is_sipi_addressable(PhysAddr::new(0x100000).unwrap()));
-    }
 }
-
-/// AP 用スタックとして予約したフレーム（S3-b-2b-1）。`0` は未予約。
-///
-/// # なぜ起動最初期に予約するのか
-///
-/// AP を起動するのは `run_timer_loop` の中（`sti` より後）だが、そこには
-/// フレームアロケータが無い。トランポリン用フレームと同じ理由で、
-/// 取れる位置で取っておく。
-///
-/// # 恒等 VA で使う。だから低位でなければならない
-///
-/// AP の CR3 は静的初期テーブルで、そこには `PML4[256]`（direct map）が無い。
-/// したがって AP はこのフレームを恒等 VA（物理 == 仮想）で触る。
-/// 恒等が覆うのは低位 1GiB なので、予約したフレームがそこに入ることを確かめる。
-static AP_STACK_FRAMES: [AtomicU64; MAX_APS] = [const { AtomicU64::new(NO_FRAME) }; MAX_APS];
 
 /// 起動しうる AP の本数（bootstrap processor を除く）。
 const MAX_APS: usize = common::percpu::MAX_CPUS - 1;
-
-/// 恒等マッピングが覆う上限。静的初期テーブルの `PML4[0]` は 2MiB ページ 512 本で
-/// 低位 1GiB を覆う（`kernel/src/main.rs` の `zaytos_boot_pd_shared`）。
-const IDENTITY_LIMIT: u64 = 1024 * 1024 * 1024;
-
-/// AP 用スタックのフレームを予約する（S3-b-2b-1）。
-///
-/// # 呼ぶ位置
-///
-/// トランポリン用フレームの予約の直後。フレームアロケータが最小のフレーム
-/// 番号から配るうちに取る（恒等の範囲に入ることを確実にする）。
-pub fn reserve_ap_stacks<const CAP: usize>(
-    allocator: &mut FrameAllocator<CAP>,
-) -> Result<usize, TrampolineError> {
-    let mut reserved = 0;
-    for slot in AP_STACK_FRAMES.iter() {
-        let Some(frame) = allocator.allocate_frame() else {
-            return Err(TrampolineError::NoFreeFrame);
-        };
-        if frame.as_u64() >= IDENTITY_LIMIT {
-            let _ = allocator.deallocate_frame(frame);
-            return Err(TrampolineError::TooHigh { got: frame });
-        }
-        slot.store(frame.as_u64(), Ordering::Relaxed);
-        reserved += 1;
-    }
-    Ok(reserved)
-}
-
-/// 予約済みの AP 用スタックフレーム。
-pub fn ap_stack_frame(index: usize) -> Option<PhysAddr> {
-    match AP_STACK_FRAMES.get(index)?.load(Ordering::Relaxed) {
-        NO_FRAME => None,
-        value => PhysAddr::new(value),
-    }
-}
 
 /// AP が最初に入る Rust の関数（S3-b-2b-1）。戻らない。
 ///
@@ -534,7 +344,7 @@ pub unsafe fn wake_application_processors(
     let lapic_virt = crate::apic::lapic_virt_of(mapped);
     let usable = mmio.usable_local_apics();
 
-    let Some(frame) = trampoline_frame() else {
+    let Some(frame) = crate::arch::x86_64::trampoline_frame() else {
         logger.error(format_args!(
             "smp: no AP trampoline frame was reserved, so no AP can be started; halting \
              (S1 reserved this frame and S3-b-2b-1 makes the failure fatal)"
@@ -586,7 +396,7 @@ pub unsafe fn wake_application_processors(
             continue;
         }
 
-        let Some(stack) = ap_stack_frame(slot - 1) else {
+        let Some(stack) = crate::arch::x86_64::ap_stack_frame(slot - 1) else {
             logger.error(format_args!(
                 "smp: no stack frame was reserved for application processor slot {slot}; halting"
             ));
