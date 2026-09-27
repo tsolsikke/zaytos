@@ -1615,7 +1615,7 @@ extern "sysv64" fn bsp_idle_main() -> ! {
         // ——**あちらはハートビートのループに仕込み、`init` より前に発火するので、
         // ここが観測されない。** **だから別の feature を立てた。**
         #[cfg(feature = "idle-holds-bkl-across-hlt")]
-        let _held_across_hlt = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
+        let _held_across_halt = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
         // SAFETY: 割り込みを許して眠るだけである。ロックは 1 つも持っていない。
         // ハンドラは登録済みで、このタスクのスタックはガードページ付きである。
         unsafe { common::arch::x86_64::cpu::enable_interrupts_and_halt() };
