@@ -1646,6 +1646,13 @@ fn main() -> Result<()> {
        cargo xtask run --boot-log-diff [--update-reference [--allow-shrink] [--only-masked]]\n       cargo xtask run --tool-checks
        cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask image [--without-fs-image]   (ADR-0068 の HW-e。起動媒体の像を建てて確かめる)\n       cargo xtask gen-font\n       cargo xtask judge-vbox <記録>   (ADR-0068 の 2-2。tools/vbox-vm.py run が残した記録を判定する)";
 
+    // **コンパイルした木と別の木で動いていれば、何もせずに落ちる**（2026-09-27。[`built_elsewhere`]）。
+    if let Some(problem) = built_elsewhere(
+        env!("CARGO_MANIFEST_DIR"),
+        env::var("CARGO_MANIFEST_DIR").ok().as_deref(),
+    ) {
+        bail!("{problem}");
+    }
     let args: Vec<String> = env::args().skip(1).collect();
     // **QEMU を使う入口は、最初にロックを共有で取る**（`check_lock`。2026-09-25。検査の体系の改善の ③）。
     // **実行の途中で断られる形を避けるため、入口で取ってプロセスの終わりまで持つ。** **起動の入口
@@ -28246,6 +28253,34 @@ fn workspace_root() -> Result<PathBuf> {
         .context("failed to resolve workspace root from CARGO_MANIFEST_DIR")
 }
 
+/// xtask を、コンパイルした木とは別の木で動かしていないかを見る（2026-09-27。運用者の決定）。**食い違えば、両方の
+/// パスと作り直す手順を返す。**
+///
+/// **xtask は自分の置き場を、コンパイルした時の `CARGO_MANIFEST_DIR` から知る**（[`workspace_root`]）。**木を移しても、
+/// cargo は xtask を作り直さない**——**ソースもビルドの設定も変わらないからである。** **実行ファイルは以前の置き場の
+/// パスを持ったまま、以前の置き場を見る**（実験で確かめた。2026-09-27）。
+///
+/// **`cargo run`（`cargo xtask`）は実行時にも `CARGO_MANIFEST_DIR` を渡すので、2 つを比べる。** **同じ木をシンボリック
+/// リンクで指す形は、実在のパスに直してから比べる。** **実行ファイルを直に起こしたときは実行時の値が無く、見ない**
+/// ——**xtask が自分を子として起こす検査のロックの確かめがこの形で、親が同じ実行ファイルで先に確かめている。**
+fn built_elsewhere(built: &str, runtime: Option<&str>) -> Option<String> {
+    let runtime = runtime?;
+    if Path::new(built) == Path::new(runtime) {
+        return None;
+    }
+    if let (Ok(built), Ok(runtime)) = (fs::canonicalize(built), fs::canonicalize(runtime)) {
+        if built == runtime {
+            return None;
+        }
+    }
+    Some(format!(
+        "cargo xtask: this xtask was built for another tree: it was compiled in {built}, but cargo \
+         runs it from {runtime}, so its paths would point at the other tree (cargo does not rebuild \
+         xtask when a tree moves). Rebuild it in this tree with `cargo clean -p xtask`, then run the \
+         command again"
+    ))
+}
+
 /// OVMF の変数領域 (NVRAM) は QEMU が起動時に書き込むため、パッケージ配布物を
 /// そのまま渡さず target/ovmf/ 配下に書き込み可能なコピーを用意する。
 /// **失敗は検査装置の故障として包む**（`launch::classify`。2026-09-24）。
@@ -29614,6 +29649,38 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
             &moves
         )
         .is_empty());
+    }
+
+    /// **コンパイルした木と別の木で動けば、両方のパスと作り直す手順を出して落とす**（2026-09-27。運用者の決定）。
+    /// **実行時の値が無ければ見ない。** **同じ木をシンボリックリンクで指す形は通す。**
+    #[test]
+    fn an_xtask_built_for_another_tree_refuses_to_run() {
+        assert_eq!(
+            built_elsewhere("/w/zaytos/xtask", Some("/w/zaytos/xtask")),
+            None
+        );
+        assert_eq!(built_elsewhere("/w/zaytos/xtask", None), None);
+        let moved = built_elsewhere(
+            "/w/zaytos/target/full-check/wt/xtask",
+            Some("/w/zaytos-full-check/xtask"),
+        )
+        .expect("a moved tree is refused");
+        for part in [
+            "/w/zaytos/target/full-check/wt/xtask",
+            "/w/zaytos-full-check/xtask",
+            "cargo clean -p xtask",
+        ] {
+            assert!(moved.contains(part), "{moved}");
+        }
+        let dir =
+            std::env::temp_dir().join(format!("zaytos-built-elsewhere-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("tree").join("xtask")).unwrap();
+        std::os::unix::fs::symlink(dir.join("tree"), dir.join("link")).unwrap();
+        let real = dir.join("tree").join("xtask").display().to_string();
+        let linked = dir.join("link").join("xtask").display().to_string();
+        assert_eq!(built_elsewhere(&real, Some(&linked)), None);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// **x86 の言葉は、コードと `asm!` の中の文字列で数え、コメントとログの文言では数えない**（2026-09-27。
