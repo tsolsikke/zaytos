@@ -69,7 +69,7 @@ CR3（task・userland・bkl・syscall）、RSP0とTSS、IST、GDTのセレクタ
 - 調べた結果、**起動の後（`run_init`から）にカーネル側のPML4の項目（添字256〜511）を書く経路は無い。**
   - PML4の項目を書くのは`ActivePageTable::map_4kib`（中の`ensure_child`）だけである。`unmap_4kib`は葉だけを消し、`split_huge_page`はPDの段だけを書く。
   - 起動の後に`map_4kib`を呼ぶのは`kernel/src/syscall.rs`の3か所（フレームバッファ・共有メモリ・brk）で、どれもユーザー側のアドレス（そのプロセスのPML4の下位の添字）である。
-  - カーネル側に新しい項目を作るのは、APスタック（添字258。`kernel/src/smp.rs`の`map_ap_stacks`）と探り用のページ（添字259。同じく`prepare_shootdown_probe`）で、どちらも`kernel_main`の中で`run_init`より前に呼ぶ。
+  - カーネル側に新しい項目を作るのは、APのper-CPUの置き場とAPスタック（どちらも添字258。`kernel/src/smp.rs`の`prepare_ap_per_cpu`と`map_ap_stacks`）と、試しのfeature（`smp-tlb-shootdown-probe`）のときだけ作る探り用のページ（添字259。`prepare_shootdown_probe`）で、どれも`kernel_main`の中で`run_init`より前に呼ぶ。既定のビルドで起動の終わりにpresentな項目は、添字256（直接マッピング）・258・511（カーネルのイメージ）の3本である（案の差分を当てた起動で実測した）。
 - 前提を実際の保証（「起動の後は、カーネル側のPML4の項目を誰も変えない」）に書き直し、それを確かめる検査を設ける。**unsafeの前提の書き直しなので、差分を見せて承認を得てから入れる**（運用者の決定）。
 
 ## Alternatives Considered
