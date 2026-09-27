@@ -21,7 +21,7 @@
 //!
 //! # `errno` は知らない
 //!
-//! [`UserLoadError`] は `errno` を持たない。**マップするのは `syscall` の側である**
+//! [`UserLoadError`] は `errno` を持たない。**変換するのは `syscall` の側である**
 //! （`common::ext2::Ext2Error` と `vfs::FileTableError` に続く 3 つ目）。
 
 use common::critical::Locked;
@@ -908,7 +908,7 @@ static mut SPAWN_ENVPS: [[[u8; MAX_ENVP_BYTES]; MAX_SPAWN_IN_FLIGHT];
 
 /// [`spawn`] が拒む形（S11-5）。
 ///
-/// **`errno` を知らない。** マップするのは `crate::syscall` の側である
+/// **`errno` を知らない。** 変換するのは `crate::syscall` の側である
 /// （[`UserLoadError`] と同じ線。module の doc）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnError {
