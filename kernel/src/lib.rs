@@ -25,7 +25,7 @@ pub mod link_symbols {
 /// **どの像が走ったかを、起動ログだけで見分けるためである。**
 /// 破壊テストの feature の項目が落ちたとき、「破壊が効かなかった」のか
 /// **「破壊の無い像が走った」**のかが、判定行からは分からない
-/// （`docs/verification-coverage.md` の「破壊feature が効いていない形で
+/// （`docs/verification-coverage.md` の「破壊テストのfeature が効いていない形で
 /// 2 項目が落ち、単独では再現しなかった」）。
 ///
 /// **出すのは実際にコンパイルされた構成である。** `build.rs` が `CARGO_FEATURE_*`

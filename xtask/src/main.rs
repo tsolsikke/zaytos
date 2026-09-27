@@ -5020,7 +5020,7 @@ const SABOTAGE_STOP_REASONS: &[StopReason] = &[
 ///
 /// **検査の関数が自分の判定を反転させて「捕まえた」と返す破壊テストの行も、同じ表に置く**（2026-09-26。計器の外の
 /// 破壊を絞る段）——**[`report_inverted_judgement`] が引く。** **置く前に同じく 3 回実行し、3 回とも狙いの判定が
-/// 偽になったものだけを載せた。** **3 回の結果は `docs/verification-coverage.md` の「計器の外の破壊を狙いの
+/// 偽になったものだけを載せた。** **3 回の結果は `docs/verification-coverage.md` の「計測の外の破壊テストを狙いの
 /// 判定へ絞る」にある。** **止まる形の破壊テストは、カーネルが出力した停止の行（`the kernel reported`）を目印にした**
 /// ——**止まった理由が狙いの性質の検査であるときだけである。**
 struct NamedJudgement {
@@ -7330,7 +7330,7 @@ fn cmd_profile_test(features: &[&str], expect_pass: bool) -> Result<()> {
 ///
 /// # 値はイメージの語と当たらないものにしてある
 ///
-/// `docs/coding-standards.md` の「判定が探す値は、像とログの語と当たらない
+/// `docs/coding-standards.md` の「判定が探す値は、イメージとログの語と当たらない
 /// ものにする」。**`hist-one` / `hist-two` はイメージのどこにも無い。**
 /// `pipe-test` の上限（秒）。**既定は台本のグループの水準（約 10 秒）の見込みなので、その 10 倍。**
 const PIPE_TEST_TIMEOUT: Duration = Duration::from_secs(120);
@@ -21861,7 +21861,7 @@ fn check_fs_image_passes_e2fsck(workspace_root: &Path) -> Result<String> {
 ///
 /// **2 つとも、一度作って落ちることを確かめた**（`docs/coding-standards.md` の
 /// 「新しい静的な検査は、主張が偽の状態を一度作って落ちることを確かめてから
-/// 置く」）。**`kernel/build.rs` の `--remap-path-prefix` を外すと場所の側が、
+/// 設ける」）。**`kernel/build.rs` の `--remap-path-prefix` を外すと場所の側が、
 /// `zero_image_build_traces` の `i_uid` / `i_gid` の行を外すと人の側が落ちる。**
 fn check_image_has_no_build_traces(workspace_root: &Path) -> Result<String> {
     let out_dir = kernel_build_out_dir(workspace_root)?;
