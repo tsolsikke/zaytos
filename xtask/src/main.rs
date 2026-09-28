@@ -1440,12 +1440,16 @@ const HIGHHALF_TESTS: &[HighhalfTest] = &[
 /// トランポリンのコード先頭 24 バイト（B-2a-2/B-2a-3b で 2 度、再リンク・
 /// B-1 撤去を跨いで不変を実証した期待リテラル）。rel32 はすべて .text.trampoline
 /// 内なので、他の変更で動かない。sabotage (d) はここへ 1 命令挿入して食い違わせる。
+///
+/// **2026-09-28 に、高位の `_start` へ `jmp` ではなく `call` で入る形にした**（System V の入口の決まり。
+/// `jmp` では入口の RSP が 8 ずれていた）。`call` の後に `ud2` を足したので、データの置き場が 8 バイト下がり、
+/// rel32 が 3 つとも変わった。末尾の 1 バイトは `ud2` の先頭である（以前は `.p2align 3` の詰め物の `0x90`）。
 const EXPECTED_TRAMPOLINE_BYTES: [u8; 24] = [
-    0x48, 0x8b, 0x05, 0x11, 0x00, 0x00, 0x00, // mov rax, [rip + zaytos_tramp_pml4]
+    0x48, 0x8b, 0x05, 0x19, 0x00, 0x00, 0x00, // mov rax, [rip + zaytos_tramp_pml4]
     0x0f, 0x22, 0xd8, // mov cr3, rax
-    0x48, 0x8b, 0x25, 0x0f, 0x00, 0x00, 0x00, // mov rsp, [rip + zaytos_tramp_stack]
-    0xff, 0x25, 0x11, 0x00, 0x00, 0x00, // jmp [rip + zaytos_tramp_entry]
-    0x90, // p2align 3 のパディング
+    0x48, 0x8b, 0x25, 0x17, 0x00, 0x00, 0x00, // mov rsp, [rip + zaytos_tramp_stack]
+    0xff, 0x15, 0x19, 0x00, 0x00, 0x00, // call [rip + zaytos_tramp_entry]
+    0x0f, // ud2 の先頭（0F 0B）
 ];
 
 /// ビルド済み kernel.elf の入口（トランポリン）先頭 24 バイトを読む。

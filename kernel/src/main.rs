@@ -110,7 +110,10 @@ core::arch::global_asm!(
     "  mov cr3, rax",                          // 0F 22 D8: 切り替え
     tramp_sabotage!(),                         // (d) 既定は空。feature 時のみ絶対参照を 1 行挿入
     "  mov rsp, [rip + zaytos_tramp_stack]",   // 48 8B 25 <rel32>: 高位ブートスタック頂点を RSP へ
-    "  jmp [rip + zaytos_tramp_entry]",        // FF 25 <rel32>: 高位 _start へ間接 jmp
+    // 高位 _start へは `call` で入る（2026-09-28）。`jmp` で入ると、入口の RSP が System V の決まり（16 で割ると
+    // 8 余る）から 8 ずれる（スタックの頂点は 4 KiB 境界）。_start の先頭で確かめる。
+    "  call [rip + zaytos_tramp_entry]",       // FF 15 <rel32>: 高位 _start へ間接 call
+    "  ud2",                                   // 0F 0B: _start は戻らない。戻ったら落とす
     ".p2align 3",
     "zaytos_tramp_pml4:  .quad zaytos_boot_pml4 - {kvb}",   // PML4 の LMA（= 物理）
     "zaytos_tramp_stack: .quad zaytos_boot_stack_top",       // 高位 VA
@@ -294,7 +297,11 @@ static mut BSS_CANARY: [u8; 256] = [0; 256];
 /// ならない。
 #[no_mangle]
 pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
-    // ここはまだ UEFI 由来のスタックの上である。最小限だけ行い、自前のスタックへ
+    // **アセンブリ（起動のトランポリン）から入る入口なので、先に入り方の決まりを確かめる**（2026-09-28）。
+    kernel::arch::x86_64::check_entry_stack_alignment("_start");
+    // ここはまだ起動用のスタック（`.data.bootstack` の 16 KiB。起動のトランポリンが載せる）の上である
+    // （2026-09-28 に直した。以前は「UEFI 由来のスタック」と書いていたが、トランポリンが載せ替えている。起動ログの
+    // 「old RSP=… (UEFI-derived)」の文言も同じ意味で古いが、ログの文言は変えない）。最小限だけ行い、自前のスタックへ
     // 移ってから本番の起動シーケンスに入る。旧スタックの上に状態を積むほど、
     // 切り替えた後に「参照してはいけない領域」が増える。
     // 引き継ぐ値は BOOT_HANDOFF（静的領域）へ置く。スタック上だと切り替え後に
