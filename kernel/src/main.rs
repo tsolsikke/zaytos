@@ -101,6 +101,22 @@ macro_rules! tramp_sabotage {
     };
 }
 
+/// 破壊テスト（`bsp-entry-misalign-test`。2026-09-28）: 起動のトランポリンが載せる起動用のスタックの頂点を 8 下げ、
+/// `_start` の入口をずらす。入口の確かめ（`check_entry_stack_alignment`）が `_start` の名前つきで止めることを見る。
+/// 変えるのはデータの 1 語で、トランポリンのコードの先頭 24 バイト（期待のバイト列）は変わらない。
+#[cfg(feature = "bsp-entry-misalign-test")]
+macro_rules! tramp_stack_sabotage {
+    () => {
+        " - 8"
+    };
+}
+#[cfg(not(feature = "bsp-entry-misalign-test"))]
+macro_rules! tramp_stack_sabotage {
+    () => {
+        ""
+    };
+}
+
 core::arch::global_asm!(
     ".section .text.trampoline,\"ax\",@progbits",
     ".p2align 12",
@@ -116,7 +132,7 @@ core::arch::global_asm!(
     "  ud2",                                   // 0F 0B: _start は戻らない。戻ったら落とす
     ".p2align 3",
     "zaytos_tramp_pml4:  .quad zaytos_boot_pml4 - {kvb}",   // PML4 の LMA（= 物理）
-    "zaytos_tramp_stack: .quad zaytos_boot_stack_top",       // 高位 VA
+    concat!("zaytos_tramp_stack: .quad zaytos_boot_stack_top", tramp_stack_sabotage!()), // 高位 VA
     "zaytos_tramp_entry: .quad _start",                      // 高位 VA
     kvb = const kernel::link_symbols::KERNEL_VIRT_BASE,
 );
@@ -10550,6 +10566,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "misalign-test",
         cfg!(feature = "misalign-test"),
         "IRQ スタブのスタック 16 バイト調整を外す",
+    ),
+    (
+        "ap-entry-misalign-test",
+        cfg!(feature = "ap-entry-misalign-test"),
+        "AP のトランポリンが Rust の入口へ入る前に、スタックを 8 バイトずらす",
+    ),
+    (
+        "bsp-entry-misalign-test",
+        cfg!(feature = "bsp-entry-misalign-test"),
+        "起動用のスタックの頂点を 8 バイト下げ、_start の入口をずらす",
     ),
     (
         "idt-irq-stub-offset-test",

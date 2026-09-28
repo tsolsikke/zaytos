@@ -231,6 +231,23 @@ mod layout {
     pub const FARJMP_OPCODE_LEN: u64 = 2;
 }
 
+/// 破壊テスト（`ap-entry-misalign-test`。2026-09-28）: Rust の入口へ `call` する前に RSP を 8 ずらす。入口の確かめ
+/// （[`crate::arch::x86_64::check_entry_stack_alignment`]）が `zaytos_ap_entry` の名前つきで止めることを見る。
+/// 既定は空の文字列で、トランポリンのバイト列は変わらない。**雛形そのものを変えるので、設置の照合（コピーと雛形の
+/// 突き合わせ）は通る**——止めるのは入口の確かめである。
+#[cfg(feature = "ap-entry-misalign-test")]
+macro_rules! ap_entry_sabotage {
+    () => {
+        "  sub rsp, 8"
+    };
+}
+#[cfg(not(feature = "ap-entry-misalign-test"))]
+macro_rules! ap_entry_sabotage {
+    () => {
+        ""
+    };
+}
+
 core::arch::global_asm!(
     ".section .rodata.aptramp,\"a\",@progbits",
     ".p2align 12",
@@ -307,6 +324,7 @@ core::arch::global_asm!(
     // （16 で割ると 8 余る）から 8 ずれる**（スタックの頂点は 4 KiB 境界。2026-09-28 に直した）。入口の先頭で
     // 確かめる（`check_entry_stack_alignment`）。戻ったら `ud2` で落とす。
     "  mov rax, [rip + zaytos_ap_tramp_data_entry]",
+    ap_entry_sabotage!(), // 既定は空。feature のときだけ RSP を 8 ずらす
     "  call rax",
     "  ud2",
     // --- 一時 GDT と GDTR ---

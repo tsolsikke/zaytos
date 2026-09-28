@@ -57,6 +57,12 @@ interrupt-test-irq-path = ["interrupt-test"]
 # スタブの 16 バイト境界調整をわざと外し、境界検証が働くことを確認する。
 # 検証そのものを壊すテストなので、通常ビルドには絶対に入れないこと。
 misalign-test = []
+# 2026-09-28: AP のトランポリンが Rust の入口（zaytos_ap_entry）へ call する前に、RSP を 8 ずらす。
+# 入口の確かめ（check_entry_stack_alignment）が名前つきで止めることを確認する。`--smp-ap-test ap-entry-misaligned`。
+ap-entry-misalign-test = []
+# 2026-09-28: 起動のトランポリンが載せる起動用のスタックの頂点を 8 下げ、_start の入口をずらす。
+# 入口の確かめが名前つきで止めることを確認する。`--highhalf-test bsp-entry-misaligned`。
+bsp-entry-misalign-test = []
 
 # IRQ スタブ表の索引を 1 本ずらす。check_irq_stub_table の entries_ok を落とす。
 idt-irq-stub-offset-test = []

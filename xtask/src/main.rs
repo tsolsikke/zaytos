@@ -1435,6 +1435,18 @@ const HIGHHALF_TESTS: &[HighhalfTest] = &[
         ],
         absent_markers: &[],
     },
+    // 2026-09-28: 起動用のスタックの頂点を 8 下げ、`_start` の入口をずらす（`bsp-entry-misalign-test`）。**入口の確かめが
+    // `_start` の名前つきで止めること。** `_start` の最初のログより前に止まるので、起動したことはブートローダの行で見る
+    // （この表の走らせ方）。止まった目印（halting の行）を見たら抜け、期限まで待たない。
+    HighhalfTest {
+        name: "bsp-entry-misaligned",
+        feature: "bsp-entry-misalign-test",
+        present_markers: &[
+            "stack alignment: _start was entered with a stack that breaks the SysV ABI",
+            "halting (cli + hlt loop)",
+        ],
+        absent_markers: &["ZaytOS kernel: entered _start"],
+    },
 ];
 
 /// トランポリンのコード先頭 24 バイト（B-2a-2/B-2a-3b で 2 度、再リンク・
@@ -21277,6 +21289,19 @@ const COMMIT_BODY_LINES: core::ops::RangeInclusive<usize> = 2..=5;
 /// 正しく行われたか」なので、壊すべきはコピー側である。**
 /// AP の per-CPU 資産と CURRENT の sentinel の破壊テストでの確認（S3-b-2b-2）。
 const SMP_AP_TESTS: &[CriticalTest] = &[
+    // 2026-09-28: AP のトランポリンが Rust の入口へ `call` する前に RSP を 8 ずらす。**入口の確かめが
+    // `zaytos_ap_entry` の名前つきで止めること。** 止めた後は、AP の最初のログ（起動の署名の行）が出ない。
+    CriticalTest {
+        name: "ap-entry-misaligned",
+        feature: "ap-entry-misalign-test",
+        expected_markers: &[
+            "stack alignment: zaytos_ap_entry was entered with a stack that breaks the SysV ABI",
+            "halting (cli + hlt loop)",
+        ],
+        forbidden_markers: &["smp: application processor 1 started"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // **AP が BSP の CR0・CR4・EFER をコピーしない**（2026-09-24。`ADR-0018` の Addendum 9 の監視）。
     // **直す前の形そのものである**——**AP は INIT の直後の CR0 のまま走り、起床のまとめの後の突き合わせで
     // 止まる。** **狙いどおりの理由で止まったことを、違うビットの名前（CD）で見る。**
@@ -23386,6 +23411,8 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "ioapic-skip-unmask-test",
     "ioapic-keep-pic-irq1-test",
     "misalign-test",
+    "ap-entry-misalign-test",
+    "bsp-entry-misalign-test",
     "idt-irq-stub-offset-test",
     "addrspace-no-kernel-share",
     "kernel-top-digest-mismatch-test",
@@ -26526,7 +26553,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 52,
-    full: 416,
+    full: 418,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。
