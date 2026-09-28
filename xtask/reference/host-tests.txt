@@ -719,6 +719,10 @@ xtask::full_check::tests::the_push_gate_passes_recorded_commits_refuses_the_rest
 xtask::full_check::tests::the_rustc_fingerprint_is_read_from_cargo_s_record
 xtask::full_check::tests::the_sectors_written_are_read_from_diskstats
 xtask::full_check::tests::the_selection_names_its_base_and_falls_to_all_when_it_cannot_compare
+xtask::kernel_builds::tests::a_build_made_ahead_is_handed_over_without_building_again
+xtask::kernel_builds::tests::an_asked_build_goes_before_the_builds_ahead
+xtask::kernel_builds::tests::fingerprints_give_the_features_in_the_order_they_were_built
+xtask::kernel_builds::tests::keys_are_sorted_and_named
 xtask::launch::tests::a_cut_run_is_log_limit_before_anything_else
 xtask::launch::tests::a_declared_run_that_ran_to_its_limit_is_counted_apart
 xtask::launch::tests::a_harness_fault_survives_added_context

@@ -124,6 +124,7 @@ pub const PATH_RULES: &[PathRule] = &[
             "xtask/Cargo.toml",
             "xtask/src/main.rs",
             "xtask/src/launch.rs",
+            "xtask/src/kernel_builds.rs",
             "bootloader/**",
             "common/Cargo.toml",
             "common/src/lib.rs",

@@ -17,6 +17,7 @@ mod check_lock;
 mod family;
 mod font;
 mod full_check;
+mod kernel_builds;
 mod launch;
 mod media;
 mod metrics;
@@ -2978,6 +2979,25 @@ fn build_bootloader_with_features_unwrapped(
     workspace_root: &Path,
     features: &[&str],
 ) -> Result<PathBuf> {
+    // **全検査の間は、組ごとに 1 回だけ作って写しを使う**（2026-09-29。案 A。項目ごとに cargo を呼ぶと、
+    // 裏の流れが持つ `target/` の鍵を待たされる）。
+    kernel_builds::bootloader(
+        features,
+        || build_bootloader_now(workspace_root, features),
+        |key, built| {
+            keep_a_copy(
+                workspace_root,
+                "bootloader",
+                key,
+                built,
+                &format!("{BOOTLOADER_PACKAGE}.efi"),
+            )
+        },
+    )
+}
+
+/// ブートローダをその場でビルドする（[`build_bootloader_with_features_unwrapped`] が呼ぶ）。
+fn build_bootloader_now(workspace_root: &Path, features: &[&str]) -> Result<PathBuf> {
     let joined = features.join(",");
     let mut args = vec![
         "build",
@@ -23963,6 +23983,11 @@ fn run_e2fsck(image: &Path) -> Result<String> {
 /// **cargo の JSON 出力から引く。** `serde` は入れない——見るのは
 /// `build-script-executed` の行 1 種類で、必要な欄は 2 つだけである。
 fn kernel_build_out_dir(workspace_root: &Path) -> Result<PathBuf> {
+    // **全検査の間は裏の流れから受け取る**（2026-09-29。案 A）。**その場で cargo を呼ぶと、裏の流れが写す前の
+    // ELF を既定の構成で書き換えうる**（cargo は組によらず同じ置き場へ書く）。
+    if kernel_builds::is_running() {
+        return run_kernel_build(workspace_root, &[]).map(|build| build.out_dir);
+    }
     let output = Command::new("cargo")
         .current_dir(workspace_root)
         .args([
@@ -24922,6 +24947,8 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 .map(PathBuf::from)
                 .as_deref(),
         );
+        // **kernel のビルドを裏の流れにまとめる**（2026-09-29。案 A。`kernel_builds` の doc）。
+        start_kernel_builds(&root);
     } else if commit {
         refuse_if_something_else_is_running("--commit")?;
     }
@@ -25199,6 +25226,12 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 failed.push(short.to_string());
             }
         }
+    }
+
+    // **裏の流れが kernel を先に作り始める**（2026-09-29。案 A）。**基本の検査の項目が終わってから**——
+    // `cargo test` や `clippy` が `target/` の鍵を待たないように、QEMU の項目の手前で始める。
+    if full {
+        kernel_builds::build_ahead();
     }
 
     // **`--commit` はここで終わる**——基本の検査 + boot log diff の 1 項目。
@@ -27367,7 +27400,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     // **全検査の間に走った他の検査を数え、在れば遅さの行に「比べられない」を添える**（運用者の
     // 決定 (7)。2026-09-25。**遅さの計測は、他の重い実行が無いことを前提にしている**）。
     if full {
-        // **全検査の間のホストの様子をまとめる**（2026-09-29。案 0）。
+        // **裏の流れを止めて次の回の順を書き、全検査の間のホストの様子をまとめる**（2026-09-29。案 A と 0）。
+        for line in finish_kernel_builds(&workspace_root) {
+            println!("{line}");
+        }
         for line in sampling::stop() {
             println!("{line}");
         }
@@ -28550,7 +28586,12 @@ fn stop_if_over_the_time_limit() {
          got slower.",
         FULL_TIME_LIMIT.as_secs() / 60
     );
-    // **止まる前に、記録を閉じる**（2026-09-29。案 0）。
+    // **止まる前に、裏の流れと記録を閉じる**（2026-09-29。案 A と 0）。
+    if let Ok(root) = workspace_root() {
+        for line in finish_kernel_builds(&root) {
+            println!("{line}");
+        }
+    }
     for line in sampling::stop() {
         println!("{line}");
     }
@@ -28925,10 +28966,9 @@ fn run_kernel_build(workspace_root: &Path, features: &[&str]) -> Result<KernelBu
     })
 }
 
-/// 本体（[`run_kernel_build`] が包む）。
-fn run_kernel_build_unwrapped(workspace_root: &Path, features: &[&str]) -> Result<KernelBuild> {
-    let mut command = Command::new("cargo");
-    command.current_dir(workspace_root).args([
+/// kernel をビルドする cargo の引数（**その場のビルドと、裏の流れ（`kernel_builds`）が同じものを使う**）。
+fn kernel_cargo_args(features: &[&str]) -> Vec<String> {
+    let mut args: Vec<String> = [
         "build",
         "--target",
         KERNEL_TARGET,
@@ -28937,22 +28977,19 @@ fn run_kernel_build_unwrapped(workspace_root: &Path, features: &[&str]) -> Resul
         "--bin",
         KERNEL_PACKAGE,
         "--message-format=json-render-diagnostics",
-    ]);
+    ]
+    .iter()
+    .map(|arg| arg.to_string())
+    .collect();
     if !features.is_empty() {
-        command.args(["--features", &features.join(",")]);
+        args.push("--features".to_string());
+        args.push(features.join(","));
     }
-    // **診断はそのまま流す。** `--message-format=json-render-diagnostics` は
-    // 人が読む形の診断を stderr へ出すので、握らずに見せる。
-    let output = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .output()
-        .context("failed to invoke cargo to build the kernel")?;
-    if !output.status.success() {
-        bail!("kernel build failed ({})", output.status);
-    }
+    args
+}
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+/// cargo の JSON の出力から、kernel のビルドスクリプトの `OUT_DIR` を取る。
+fn kernel_out_dir_from_cargo_json(stdout: &str) -> Option<PathBuf> {
     let mut out_dir = None;
     for line in stdout.lines() {
         if !line.contains("\"reason\":\"build-script-executed\"") {
@@ -28966,16 +29003,299 @@ fn run_kernel_build_unwrapped(workspace_root: &Path, features: &[&str]) -> Resul
             out_dir = Some(PathBuf::from(dir));
         }
     }
-    let out_dir = out_dir.context(
-        "cargo did not report a build-script-executed message for the kernel; \
-         cannot locate OUT_DIR",
-    )?;
+    out_dir
+}
 
-    let elf = workspace_root
+/// cargo が kernel の ELF を書く置き場（**組によらず同じ**。`kernel_builds` の doc）。
+fn uplifted_kernel_elf(workspace_root: &Path) -> PathBuf {
+    workspace_root
         .join("target")
         .join(KERNEL_TARGET)
         .join("debug")
-        .join(KERNEL_PACKAGE);
+        .join(KERNEL_PACKAGE)
+}
+
+/// 裏の流れが作ったものを、項目の [`KernelBuild`] にする（2026-09-29。試験の時間を縮める案の A）。
+/// **cargo の出力と、先に作れたかの行は、その組を初めて受け取った項目の中でだけ出す。**
+fn received_kernel_build(
+    features: &[&str],
+    received: kernel_builds::Received,
+) -> Result<KernelBuild> {
+    if received.first {
+        let when = match received.ready_before {
+            Some(ahead) => format!(
+                "built ahead in the background, ready {:.1}s before it was asked for",
+                ahead.as_secs_f64()
+            ),
+            None => format!(
+                "built when asked (waited {:.1}s)",
+                received.waited.as_secs_f64()
+            ),
+        };
+        println!(
+            "(info) kernel build [{}]: {when}; cargo took {:.1}s",
+            features.join(","),
+            received.build_seconds
+        );
+    }
+    match received.result {
+        Ok(outcome) => {
+            if received.first {
+                eprint!("{}", outcome.cargo_output);
+            }
+            Ok(KernelBuild {
+                elf: outcome.elf,
+                out_dir: outcome.out_dir,
+            })
+        }
+        Err(error) => {
+            eprint!("{error}");
+            bail!("kernel build failed in the background (the cargo output is above)")
+        }
+    }
+}
+
+/// 裏の流れが kernel を 1 つ作る（2026-09-29。案 A）。**作った直後、次のビルドの前に、cargo の置き場の ELF を
+/// 組ごとの置き場へ写す**——同じ cargo の出力の `OUT_DIR` と対にして返す。**`nice` で優先度を下げる**
+/// （QEMU の試験の邪魔をしない）。
+fn build_kernel_in_the_background(
+    workspace_root: &Path,
+    key: &kernel_builds::Key,
+) -> std::result::Result<kernel_builds::Outcome, String> {
+    let features: Vec<&str> = key.iter().map(String::as_str).collect();
+    let output = Command::new("nice")
+        .current_dir(workspace_root)
+        .args(["-n", "10", "cargo"])
+        .args(kernel_cargo_args(&features))
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("failed to invoke cargo to build the kernel: {error}\n"))?;
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        return Err(format!("{stderr}kernel build failed ({})\n", output.status));
+    }
+    let out_dir = kernel_out_dir_from_cargo_json(&String::from_utf8_lossy(&output.stdout))
+        .ok_or_else(|| {
+            format!(
+                "{stderr}cargo did not report a build-script-executed message for the kernel; \
+                 cannot locate OUT_DIR\n"
+            )
+        })?;
+    let elf = keep_a_copy(
+        workspace_root,
+        "kernel",
+        key,
+        &uplifted_kernel_elf(workspace_root),
+        KERNEL_PACKAGE,
+    )
+    .map_err(|error| format!("{stderr}{error:#}\n"))?;
+    Ok(kernel_builds::Outcome {
+        elf,
+        out_dir,
+        cargo_output: stderr,
+    })
+}
+
+/// ビルドの成果物を、組ごとの置き場（`target/kernel-builds/<種類>/<組>/`）へ写す（案 A）。
+fn keep_a_copy(
+    workspace_root: &Path,
+    kind: &str,
+    key: &kernel_builds::Key,
+    built: &Path,
+    file_name: &str,
+) -> Result<PathBuf> {
+    if !built.exists() {
+        bail!(
+            "the build reported success but {} is missing",
+            built.display()
+        );
+    }
+    let directory = workspace_root
+        .join("target")
+        .join("kernel-builds")
+        .join(kind)
+        .join(kernel_builds::directory_name(key));
+    fs::create_dir_all(&directory)
+        .with_context(|| format!("failed to create {}", directory.display()))?;
+    let copy = directory.join(file_name);
+    fs::copy(built, &copy)
+        .with_context(|| format!("failed to copy {} to {}", built.display(), copy.display()))?;
+    Ok(copy)
+}
+
+/// 全検査が kernel を求めた順の記録の置き場（git の共通の置き場。`cargo clean` で消えない。案 A）。
+fn kernel_build_order_path(root: &Path) -> Result<PathBuf> {
+    Ok(check_lock::lock_dir_in(&check_lock::git_common_dir(root)?).join("kernel-build-order.txt"))
+}
+
+/// 裏の流れを始める（全検査の入口。案 A）。**順は前の全検査の記録から。無ければ cargo の fingerprint から。**
+fn start_kernel_builds(root: &Path) {
+    let recorded = kernel_build_order_path(root)
+        .ok()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .map(|text| kernel_builds::parse_order(&text))
+        .filter(|order| !order.is_empty());
+    let (ahead, source) = match recorded {
+        Some(order) => {
+            let source = format!(
+                "the order the last full check asked in ({} set(s))",
+                order.len()
+            );
+            (order, source)
+        }
+        None => {
+            let seeded = kernel_build_order_from_fingerprints(root);
+            let source = format!(
+                "the cargo fingerprints under target/ ({} set(s); no order was recorded yet)",
+                seeded.len()
+            );
+            (seeded, source)
+        }
+    };
+    let workspace = root.to_path_buf();
+    kernel_builds::start(
+        ahead,
+        source,
+        Box::new(move |key: &kernel_builds::Key| build_kernel_in_the_background(&workspace, key)),
+    );
+}
+
+/// 裏の流れを止め、次の回の順を書き、まとめの行を返す（全検査のまとめ。案 A。**動いていなければ空**）。
+fn finish_kernel_builds(root: &Path) -> Vec<String> {
+    let Some((requests, tally, source)) = kernel_builds::finish() else {
+        return Vec::new();
+    };
+    let mut lines = vec![format!(
+        "(info) kernel builds in the background: {} build(s), cargo {:.1} min ({} built ahead and used, {} built when \
+         asked, {} built ahead but not asked for ({:.1} min), {} failed); items asked {} time(s), {} found the build \
+         ready, and waited {:.1} min in total; the order came from {source}",
+        tally.builds,
+        tally.build_seconds / 60.0,
+        tally.built_ahead_and_used,
+        tally.built_when_asked,
+        tally.built_ahead_unused,
+        tally.unused_seconds / 60.0,
+        tally.failed,
+        tally.asks,
+        tally.ready_on_ask,
+        tally.waited.as_secs_f64() / 60.0
+    )];
+    match kernel_build_order_path(root) {
+        Ok(path) => {
+            let previous = fs::read_to_string(&path)
+                .map(|text| kernel_builds::parse_order(&text))
+                .unwrap_or_default();
+            match fs::write(&path, kernel_builds::render_order(&requests, &previous)) {
+                Ok(()) => lines.push(format!(
+                    "(info) kernel build order: {} set(s) asked in this run, written to {}",
+                    requests.len(),
+                    path.display()
+                )),
+                Err(error) => lines.push(format!(
+                    "(info) kernel build order: could not write {}: {error}",
+                    path.display()
+                )),
+            }
+        }
+        Err(error) => lines.push(format!(
+            "(info) kernel build order: no place to write it: {error:#}"
+        )),
+    }
+    lines
+}
+
+/// cargo の fingerprint から、前の全検査が kernel を作った順を戻す（案 A。**入れた後の最初の回のため**）。
+///
+/// **fingerprint が持つのは有効だった feature の全部**（`default` と、そこから辿れるもの、ほかから辿れるものを
+/// 含む）。**項目が求めた形へ戻す**——`default` から辿れるものを除き、ほかの feature から辿れるものを除く。
+/// **今は無い feature を含む組は捨てる**（外した破壊テストの名残）。
+fn kernel_build_order_from_fingerprints(root: &Path) -> Vec<kernel_builds::Key> {
+    let fingerprints = root
+        .join("target")
+        .join(KERNEL_TARGET)
+        .join("debug")
+        .join(".fingerprint");
+    let enabled_sets = kernel_builds::fingerprint_order(
+        &fingerprints,
+        std::time::Duration::from_secs(12 * 60 * 60),
+    );
+    let Ok(graphs) = feature_graphs(root) else {
+        return Vec::new();
+    };
+    let Some((_, kernel)) = graphs.iter().find(|(name, _)| *name == KERNEL_PACKAGE) else {
+        return Vec::new();
+    };
+    let declared: Vec<&str> = kernel.iter().map(|(name, _)| name.as_str()).collect();
+    let reached = |feature: &str| -> Vec<String> {
+        feature_closure(
+            &graphs,
+            vec![(KERNEL_PACKAGE.to_string(), feature.to_string())],
+        )
+        .into_iter()
+        .filter(|(crate_name, _)| crate_name == KERNEL_PACKAGE)
+        .map(|(_, name)| name)
+        .collect()
+    };
+    let from_default = reached("default");
+    let mut order = Vec::new();
+    for enabled in enabled_sets {
+        if enabled
+            .iter()
+            .any(|feature| !declared.contains(&feature.as_str()))
+        {
+            continue;
+        }
+        let candidates: Vec<&String> = enabled
+            .iter()
+            .filter(|feature| !from_default.contains(*feature))
+            .collect();
+        let minimal: Vec<&str> = candidates
+            .iter()
+            .copied()
+            .filter(|feature| {
+                !candidates
+                    .iter()
+                    .copied()
+                    .any(|other| other != *feature && reached(other.as_str()).contains(*feature))
+            })
+            .map(String::as_str)
+            .collect();
+        let key = kernel_builds::key_of(&minimal);
+        if !order.contains(&key) {
+            order.push(key);
+        }
+    }
+    order
+}
+
+/// 本体（[`run_kernel_build`] が包む）。
+fn run_kernel_build_unwrapped(workspace_root: &Path, features: &[&str]) -> Result<KernelBuild> {
+    // **全検査の間は、裏の流れが作ったものを受け取る**（2026-09-29。案 A。`kernel_builds` の doc）。
+    if let Some(received) = kernel_builds::kernel(features) {
+        return received_kernel_build(features, received);
+    }
+    let mut command = Command::new("cargo");
+    command
+        .current_dir(workspace_root)
+        .args(kernel_cargo_args(features));
+    // **診断はそのまま流す。** `--message-format=json-render-diagnostics` は
+    // 人が読む形の診断を stderr へ出すので、握らずに見せる。
+    let output = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .output()
+        .context("failed to invoke cargo to build the kernel")?;
+    if !output.status.success() {
+        bail!("kernel build failed ({})", output.status);
+    }
+
+    let out_dir = kernel_out_dir_from_cargo_json(&String::from_utf8_lossy(&output.stdout))
+        .context(
+            "cargo did not report a build-script-executed message for the kernel; \
+         cannot locate OUT_DIR",
+        )?;
+
+    let elf = uplifted_kernel_elf(workspace_root);
     if !elf.exists() {
         bail!(
             "kernel build reported success but {} is missing",
