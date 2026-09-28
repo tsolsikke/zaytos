@@ -748,6 +748,7 @@ xtask::tests::a_boot_log_reference_that_does_not_end_at_the_prompt_is_refused
 xtask::tests::a_boot_log_that_only_moved_code_differs_only_in_masked_items
 xtask::tests::a_current_state_document_names_items_where_they_are_defined
 xtask::tests::a_current_state_document_names_moved_files_by_their_new_place
+xtask::tests::a_feature_reached_only_through_another_crate_is_followed
 xtask::tests::a_gs_operand_in_the_instruction_field_is_found
 xtask::tests::a_line_opens_the_serial_port_through_the_port_or_the_machine_entry
 xtask::tests::a_listed_sabotage_counts_only_when_it_stops_for_the_intended_reason
@@ -767,6 +768,7 @@ xtask::tests::any_judgement_verdicts_are_counted_apart
 xtask::tests::ap_ticks_that_grow_across_the_observation_pass_even_when_the_ap_line_is_missing
 xtask::tests::ap_ticks_that_stay_at_zero_fail_the_way_ap_no_svr_would
 xtask::tests::both_forms_of_the_qemu_shutdown_line_are_read
+xtask::tests::declarations_are_read_through_their_qualifiers
 xtask::tests::declared_limit_runs_are_listed_with_their_items
 xtask::tests::disk0_rd_bytes_is_parsed_and_other_drives_are_ignored
 xtask::tests::disk0_wr_bytes_is_parsed_and_other_drives_are_ignored
@@ -796,6 +798,7 @@ xtask::tests::qemu_is_started_only_through_the_launch_module
 xtask::tests::sigign_is_read_for_sigxfsz
 xtask::tests::slowness_is_compared_without_the_cargo_time
 xtask::tests::smap_and_fsgsbase_instructions_are_found_but_symbol_names_are_not
+xtask::tests::strings_are_attributed_to_the_item_that_declares_them
 xtask::tests::the_agent_index_check_looks_both_ways
 xtask::tests::the_ap_heartbeat_line_is_not_read_as_a_bsp_row
 xtask::tests::the_capture_stops_only_when_the_prompt_follows_ready

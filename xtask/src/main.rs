@@ -23683,6 +23683,10 @@ const STRUCTURAL_GUARD_SYMBOL_FRAGMENTS: &[&str] = &[
 ///
 /// **既定ビルドにこれらが入ってはならない。** 入ったまま出荷すると、
 /// 壊れた状態で測った結果を正常な結果として扱うことになる。
+///
+/// **既定のビルドの検査は、2026-09-28 からこの名簿ではなく [`DEFAULT_FEATURES_ALLOWED`] で見る**（運用者の決定。
+/// 名簿に載っていない破壊も落とすため）。**この名簿を読むのは、名簿自身の死んだ行の検査と、列挙の件数の行だけで
+/// ある。** この後どう扱うかは、運用者が決める。
 const SABOTAGE_FEATURES: &[&str] = &[
     // W1-c-4。**`concurrent-test` は破壊ではないので入れない**（`fp-test` と同じ扱い）。
     "fp-switch-no-restore",
@@ -23940,52 +23944,71 @@ fn visibility_qualified_mod_or_use(trimmed: &str) -> Option<&'static str> {
     }
 }
 
-/// kernel の既定 feature に仕込みが混ざっていないことを確かめる。
+/// 既定のビルドに入ってよい feature（2026-09-28。運用者の決定）。**`default` から辿れる feature は、この一覧の
+/// ちょうど部分集合でなければならない**（[`check_default_features_are_clean`]）。
+const DEFAULT_FEATURES_ALLOWED: &[&str] = &["heap-poison"];
+
+/// どの試験からも回らない feature と、その理由（2026-09-28。運用者の決定）。**理由は必須である。** 試験から回るように
+/// なった行と、どのマニフェストにも無い feature の行は、検査が落とす（死んだ行。[`check_every_feature_is_run_by_a_test`]）。
+const NOT_RUN_BY_ANY_TEST: &[(&str, &str)] = &[
+    (
+        "clock-ap-also-ticks",
+        "--shell-test は 1 コアで走るので AP が居らず、壊しても効かない（ADR-0062）。-smp 2 で時刻を見る項目が\
+         できたときに見直す（持ち越しの一覧）。保証していないものとして残す",
+    ),
+    (
+        "keyboard-raw-log",
+        "破壊ではなく、生のスキャンコードをシリアルへ出す観測用の切り替えである。手で使う道具\
+         （build_kernel_for_key_probe）だけが使う",
+    ),
+    (
+        "virtio-open-wakeup-window-test",
+        "QEMU の TCG では実演が一度も眠らず、取り逃しの窓が開かないので、回しても何も確かめない（持ち越しの\
+         一覧の「I/O待ちの「取り逃しの窓」を開ける破壊テストが、QEMUでは決定的に踏めない」）",
+    ),
+];
+
+/// feature の名前が出ても、その feature を試験から回すことにならない所（2026-09-28）。**名前で並べる。**
 ///
-/// `default` から推移的に辿って、[`SABOTAGE_FEATURES`] のいずれかに
-/// 行き着かないことを見る。`[features]` を そのまま読む
+/// 名簿（[`SABOTAGE_FEATURES`]）、判定の表（破壊テストが何で落ちたかを引く表）、許可の表、不安定な試験の一覧、
+/// 既定のビルドの許した一覧とこの検査の例外の表、手で使う道具（試験ではない）である。xtask のテスト
+/// （`#[cfg(test)]` のモジュール）も数えない。無い項目の名前が載っていれば、検査が落とす。
+const PLACES_THAT_DO_NOT_RUN_FEATURES: &[&str] = &[
+    "SABOTAGE_FEATURES",
+    "SABOTAGE_JUDGEMENTS",
+    "SABOTAGE_STOP_REASONS",
+    "SABOTAGE_JUDGEMENTS_NOT_PLACED",
+    "TEST_HOOKS_EXCLUSIONS",
+    "DIRECT_SERIAL_PORT_ALLOWLIST",
+    "FLAKY_EXCLUDED",
+    "DEFAULT_FEATURES_ALLOWED",
+    "NOT_RUN_BY_ANY_TEST",
+    "build_kernel_for_key_probe",
+];
+
+/// feature を見るマニフェスト。**common の feature は kernel の feature から `common/…` の形で有効にする**ので、
+/// 辿る側で見る（xtask が common の feature を直に指定する所は無い）。
+const FEATURE_MANIFESTS: &[&str] = &["kernel", "bootloader", "common"];
+
+/// 1 つのマニフェストの feature の表（名前と、有効にする feature の並び）。`[features]` をそのまま読む
 /// （`name = ["a", "b"]` の形しか使っていない）。
-///
-/// **kernel と bootloader の両方を見る（S6-e で広げた）。** 以前は kernel だけを
-/// 読んでおり、**`panic-test`（bootloader の feature）は一覧にあっても照合の
-/// 対象に一度も入っていなかった。** **bootloader の `default` が壊す feature へ
-/// 行き着いても、誰も落とさない状態だった。**
-///
-/// **あわせて死んだエントリも見る**——[`SABOTAGE_FEATURES`] に、どちらの
-/// マニフェストにも無い名前が載っていないこと。**許可リストの死んだエントリと
-/// 同じ穴である**（S6-d）。
-fn check_default_features_are_clean(workspace_root: &Path) -> Result<Vec<String>> {
-    let mut findings = Vec::new();
-    let mut declared: Vec<String> = Vec::new();
-    for crate_name in ["kernel", "bootloader"] {
-        findings.extend(check_one_manifest_default_features(
-            workspace_root,
-            crate_name,
-            &mut declared,
-        )?);
+type FeatureGraph = Vec<(String, Vec<String>)>;
+
+/// [`FEATURE_MANIFESTS`] の順に、feature の表を読む。
+fn feature_graphs(workspace_root: &Path) -> Result<Vec<(&'static str, FeatureGraph)>> {
+    let mut graphs = Vec::new();
+    for crate_name in FEATURE_MANIFESTS {
+        let manifest = fs::read_to_string(workspace_root.join(crate_name).join("Cargo.toml"))
+            .with_context(|| format!("failed to read {crate_name}/Cargo.toml"))?;
+        graphs.push((*crate_name, parse_feature_graph(&manifest)));
     }
-    for feature in SABOTAGE_FEATURES {
-        if !declared.iter().any(|d| d == feature) {
-            findings.push(format!(
-                "dead SABOTAGE_FEATURES entry (no such feature in kernel/ or bootloader/): \
-                 `{feature}`"
-            ));
-        }
-    }
-    Ok(findings)
+    Ok(graphs)
 }
 
-/// 1 つのマニフェストについて上を行う。宣言されている feature 名を `declared` へ足す。
-fn check_one_manifest_default_features(
-    workspace_root: &Path,
-    crate_name: &str,
-    declared: &mut Vec<String>,
-) -> Result<Vec<String>> {
-    let manifest = fs::read_to_string(workspace_root.join(crate_name).join("Cargo.toml"))
-        .with_context(|| format!("failed to read {crate_name}/Cargo.toml"))?;
-
+/// マニフェストの `[features]` を読む（純粋な関数）。
+fn parse_feature_graph(manifest: &str) -> FeatureGraph {
     let mut in_features = false;
-    let mut graph: Vec<(String, Vec<String>)> = Vec::new();
+    let mut graph = Vec::new();
     for line in manifest.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
@@ -24008,33 +24031,335 @@ fn check_one_manifest_default_features(
             .collect();
         graph.push((name.trim().to_string(), deps));
     }
-    declared.extend(graph.iter().map(|(name, _)| name.clone()));
-    // **bootloader には `default` が無い。** 無い場合は「`default` から辿れる
-    // ものは何も無い」ので、辿る側の検査は空で正しい。
-    if !graph.iter().any(|(name, _)| name == "default") {
-        return Ok(Vec::new());
-    }
+    graph
+}
 
-    // `default` から推移的に辿る。
-    let mut reached: Vec<String> = vec!["default".to_string()];
+/// `start` から、有効にする feature を推移的に辿る（純粋な関数）。**crate をまたぐ指定（`common/…`）も辿る。**
+/// 返すのは（crate の名前, feature の名前）の並びで、どのマニフェストにも無い名前は入れない。
+fn feature_closure(
+    graphs: &[(&str, FeatureGraph)],
+    start: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let declared = |crate_name: &str, feature: &str| {
+        graphs
+            .iter()
+            .any(|(c, g)| *c == crate_name && g.iter().any(|(n, _)| n == feature))
+    };
+    let mut reached: Vec<(String, String)> =
+        start.into_iter().filter(|(c, f)| declared(c, f)).collect();
     let mut index = 0;
     while index < reached.len() {
-        let current = reached[index].clone();
+        let (crate_name, feature) = reached[index].clone();
         index += 1;
-        if let Some((_, deps)) = graph.iter().find(|(name, _)| *name == current) {
-            for dep in deps {
-                if !reached.contains(dep) {
-                    reached.push(dep.clone());
+        let deps = graphs
+            .iter()
+            .find(|(c, _)| *c == crate_name)
+            .and_then(|(_, g)| g.iter().find(|(n, _)| *n == feature))
+            .map(|(_, deps)| deps.clone())
+            .unwrap_or_default();
+        for dep in deps {
+            let target = match dep.split_once('/') {
+                Some((other, name)) => (other.to_string(), name.to_string()),
+                None => (crate_name.clone(), dep),
+            };
+            if declared(&target.0, &target.1) && !reached.contains(&target) {
+                reached.push(target);
+            }
+        }
+    }
+    reached
+}
+
+/// 既定のビルドに破壊が混ざっていないことを確かめる（2026-09-28 に見方を変えた。運用者の決定）。
+///
+/// **`default` から推移的に辿った feature が、[`DEFAULT_FEATURES_ALLOWED`] のちょうど部分集合であることを見る。**
+/// **以前は「辿った先に [`SABOTAGE_FEATURES`]（破壊テストの名簿）の名前が無いこと」を見ていた**が、名簿は破壊テストを
+/// 足すたびに書き足す必要があり、載っていない破壊は既定のビルドへ入っても名指しで落ちなかった（持ち越しの一覧の
+/// 「`SABOTAGE_FEATURES`の覆いが40項目で止まり、94のfeatureが届かない」）。許した一覧で見れば、名簿に載っていない
+/// feature が既定へ入っても落ちる。
+///
+/// **kernel・bootloader・common の 3 つを見る**（S6-e で bootloader まで広げた。**`panic-test`（bootloader の
+/// feature）は一覧にあっても照合の対象に一度も入っていなかった**）。`default` を持つのは今は kernel だけで、
+/// crate をまたぐ指定も辿る。
+///
+/// **あわせて死んだ行も見る**——[`DEFAULT_FEATURES_ALLOWED`] と [`SABOTAGE_FEATURES`] に、どのマニフェストにも
+/// 無い名前が載っていないこと（許可リストの死んだエントリと同じ穴である。S6-d）。
+fn check_default_features_are_clean(workspace_root: &Path) -> Result<Vec<String>> {
+    let graphs = feature_graphs(workspace_root)?;
+    let mut findings = Vec::new();
+    for (crate_name, graph) in &graphs {
+        if !graph.iter().any(|(name, _)| name == "default") {
+            continue;
+        }
+        let start = vec![(crate_name.to_string(), "default".to_string())];
+        for (reached_crate, feature) in feature_closure(&graphs, start) {
+            if reached_crate == *crate_name && feature == "default" {
+                continue;
+            }
+            if !DEFAULT_FEATURES_ALLOWED.contains(&feature.as_str()) {
+                findings.push(format!(
+                    "{crate_name}: `default` reaches `{reached_crate}/{feature}`, which is not in \
+                     DEFAULT_FEATURES_ALLOWED"
+                ));
+            }
+        }
+    }
+    let declared = |feature: &str| {
+        graphs
+            .iter()
+            .any(|(_, g)| g.iter().any(|(name, _)| name == feature))
+    };
+    for feature in DEFAULT_FEATURES_ALLOWED {
+        if !declared(feature) {
+            findings.push(format!(
+                "dead DEFAULT_FEATURES_ALLOWED entry (no such feature in {}): `{feature}`",
+                FEATURE_MANIFESTS.join(", ")
+            ));
+        }
+    }
+    for feature in SABOTAGE_FEATURES {
+        if !declared(feature) {
+            findings.push(format!(
+                "dead SABOTAGE_FEATURES entry (no such feature in {}): `{feature}`",
+                FEATURE_MANIFESTS.join(", ")
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+/// 各 feature が、どれかの試験から回るかを見る（2026-09-28。運用者の決定。持ち越しの一覧の「破壊テストのfeatureが
+/// 本当に実行されているかを機械で見るか」の、文字で見る部分）。
+///
+/// # 見方
+///
+/// - xtask のソース（`xtask/src/*.rs`。コメントと `#[cfg(test)]` のモジュールを除く）の文字列の字句を、`,` と空白で
+///   分けた語が kernel か bootloader の feature の名前と同じなら、その feature を試験から回るとみなす。ただし
+///   [`PLACES_THAT_DO_NOT_RUN_FEATURES`] の項目の中に出たものは数えない。
+/// - `default` と、回る feature から辿れる feature（crate をまたぐ `common/…` を含む）も回るとみなす。
+/// - 回らない feature は、[`NOT_RUN_BY_ANY_TEST`] に理由つきで載っていなければ落ちる。載っている行が、回るように
+///   なっていたり、どのマニフェストにも無かったり、理由が空だったりしても落ちる。
+///
+/// # 見ていないこと
+///
+/// **文字で見るだけである。** 名前が試験の表に在っても、`--full` がその構成を実際にビルドして回したかは見ていない
+/// （持ち越しの一覧に残してある）。名前を組み立てて渡す経路（`format!`）は、組み立てた後の名前が文字列に出ないので、
+/// その feature は回らない側に数えられる（2026-09-28 に数えた時点では 1 つも無い）。
+fn check_every_feature_is_run_by_a_test(workspace_root: &Path) -> Result<Vec<String>> {
+    let graphs = feature_graphs(workspace_root)?;
+    let mut start: Vec<(String, String)> = Vec::new();
+    let mut items_seen: Vec<String> = Vec::new();
+    let mut sources: Vec<PathBuf> = fs::read_dir(workspace_root.join("xtask").join("src"))
+        .context("failed to list xtask/src")?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .collect();
+    sources.sort();
+    for path in &sources {
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let found = string_literals_by_item(&text);
+        items_seen.extend(found.items);
+        for (item, content) in found.strings {
+            if PLACES_THAT_DO_NOT_RUN_FEATURES.contains(&item.as_str()) {
+                continue;
+            }
+            for token in content.split(|c: char| c == ',' || c.is_whitespace()) {
+                for (crate_name, graph) in &graphs {
+                    if *crate_name != "common" && graph.iter().any(|(name, _)| name == token) {
+                        start.push((crate_name.to_string(), token.to_string()));
+                    }
                 }
             }
         }
     }
+    for (crate_name, graph) in &graphs {
+        if graph.iter().any(|(name, _)| name == "default") {
+            start.push((crate_name.to_string(), "default".to_string()));
+        }
+    }
+    let run = feature_closure(&graphs, start);
+    let is_run = |feature: &str| run.iter().any(|(_, f)| f == feature);
 
-    Ok(reached
-        .into_iter()
-        .filter(|name| SABOTAGE_FEATURES.contains(&name.as_str()))
-        .map(|name| format!("{crate_name}: `default` reaches the sabotage feature `{name}`"))
-        .collect())
+    let mut findings = Vec::new();
+    for (crate_name, graph) in &graphs {
+        for (feature, _) in graph {
+            let excepted = NOT_RUN_BY_ANY_TEST.iter().any(|(f, _)| f == feature);
+            if !run.iter().any(|(c, f)| c == crate_name && f == feature) && !excepted {
+                findings.push(format!(
+                    "{crate_name}: `{feature}` is run by no test (no test table or command in xtask/src \
+                     names it, and nothing that runs pulls it in); name it where a test runs it, or add \
+                     a row with the reason to NOT_RUN_BY_ANY_TEST"
+                ));
+            }
+        }
+    }
+    for (feature, reason) in NOT_RUN_BY_ANY_TEST {
+        if reason.trim().is_empty() {
+            findings.push(format!("NOT_RUN_BY_ANY_TEST: `{feature}` has no reason"));
+        }
+        if !graphs
+            .iter()
+            .any(|(_, g)| g.iter().any(|(name, _)| name == feature))
+        {
+            findings.push(format!(
+                "dead NOT_RUN_BY_ANY_TEST entry (no such feature in {}): `{feature}`",
+                FEATURE_MANIFESTS.join(", ")
+            ));
+        } else if is_run(feature) {
+            findings.push(format!(
+                "dead NOT_RUN_BY_ANY_TEST entry: `{feature}` is run by a test now; remove the row"
+            ));
+        }
+    }
+    for place in PLACES_THAT_DO_NOT_RUN_FEATURES {
+        if !items_seen.iter().any(|item| item == place) {
+            findings.push(format!(
+                "dead PLACES_THAT_DO_NOT_RUN_FEATURES entry (no const, static or fn of that name in \
+                 xtask/src): `{place}`"
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+/// Rust のソースから取り出した文字列の字句（[`string_literals_by_item`]）。
+struct SourceStrings {
+    /// （囲む項目の名前, 字句の中身）。宣言より前の字句の項目の名前は空である。
+    strings: Vec<(String, String)>,
+    /// 宣言を見つけた項目の名前。
+    items: Vec<String>,
+}
+
+/// Rust のソースから、文字列の字句を囲む項目の名前と一緒に取り出す（純粋な関数。2026-09-28）。コメントと、
+/// `#[cfg(test)]` を付けたモジュールの中は取り出さない。
+///
+/// 囲む項目は、行の頭（字下げの後）に `const`・`static`・`fn`（前に `pub`・`unsafe`・`const fn` などが付いてよい）と
+/// 名前が来た所で切り替える（[`declared_item_name`]）。**入れ子は見ない**——次の宣言までの字句は、直前に宣言した
+/// 項目のものとみなす。テストのモジュールは、`mod … {` の行と同じ字下げの `}` の行までとみなす（`rustfmt` の形）。
+fn string_literals_by_item(text: &str) -> SourceStrings {
+    let chars: Vec<char> = text.chars().collect();
+    let is_identifier = |c: char| c.is_alphanumeric() || c == '_';
+    let mut strings = Vec::new();
+    let mut items = Vec::new();
+    let mut item = String::new();
+    let mut test_module_end: Option<String> = None;
+    let mut cfg_test_pending = false;
+    let mut at_line_start = true;
+    let mut i = 0;
+    while i < chars.len() {
+        if at_line_start {
+            at_line_start = false;
+            let line_end = chars[i..]
+                .iter()
+                .position(|&c| c == '\n')
+                .map_or(chars.len(), |p| i + p);
+            let line: String = chars[i..line_end].iter().collect();
+            let trimmed = line.trim_start();
+            if let Some(end) = &test_module_end {
+                if line == *end {
+                    test_module_end = None;
+                }
+                i = line_end + 1;
+                at_line_start = true;
+                continue;
+            }
+            if trimmed == "#[cfg(test)]" {
+                cfg_test_pending = true;
+            } else if cfg_test_pending && trimmed.starts_with("mod ") && trimmed.ends_with('{') {
+                test_module_end = Some(format!("{}}}", &line[..line.len() - trimmed.len()]));
+                cfg_test_pending = false;
+                i = line_end + 1;
+                at_line_start = true;
+                continue;
+            } else if !trimmed.is_empty()
+                && !trimmed.starts_with("#[")
+                && !trimmed.starts_with("//")
+            {
+                cfg_test_pending = false;
+            }
+            if let Some(name) = declared_item_name(trimmed) {
+                item = name;
+                items.push(item.clone());
+            }
+        }
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        if c == '\n' {
+            at_line_start = true;
+            i += 1;
+            continue;
+        }
+        if c == '/' && next == Some('/') {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == '/' && next == Some('*') {
+            let mut nest = 0usize;
+            while i < chars.len() {
+                if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+                    nest += 1;
+                    i += 2;
+                } else if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+                    nest -= 1;
+                    i += 2;
+                    if nest == 0 {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        let after_identifier = i > 0 && is_identifier(chars[i - 1]);
+        if !after_identifier && (c == '"' || c == 'b' || c == 'r') {
+            if let Some((content, end)) = string_literal_at(&chars, i) {
+                strings.push((item.clone(), content));
+                i = end;
+                continue;
+            }
+        }
+        if c == '\'' {
+            if let Some(end) = char_literal_end(&chars, i) {
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    SourceStrings { strings, items }
+}
+
+/// 行の頭の宣言から項目の名前を取り出す（純粋な関数）。見るのは `const`・`static`・`fn` で、前の `pub(…)`・`unsafe`・
+/// `async`・`extern "…"`・`const`（`const fn`）は読み飛ばす。`static mut` の `mut` も読み飛ばす。宣言でなければ `None`。
+fn declared_item_name(line: &str) -> Option<String> {
+    let mut words = line.split_whitespace().peekable();
+    loop {
+        let word = words.next()?;
+        let is_fn_next = words
+            .peek()
+            .is_some_and(|next| *next == "fn" || *next == "unsafe");
+        match word {
+            w if w == "pub" || w.starts_with("pub(") || w.starts_with('"') => {}
+            "unsafe" | "async" | "extern" => {}
+            "const" if is_fn_next => {}
+            "const" | "static" | "fn" => {
+                let mut name = words.next()?;
+                if word == "static" && name == "mut" {
+                    name = words.next()?;
+                }
+                let name: String = name
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                return (!name.is_empty()).then_some(name);
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// 並行実行している `xtask` / `qemu` を数える（2026-09-03）。
@@ -24201,6 +24526,12 @@ fn report_enumeration_counts() {
         ("X86_WORD_HOMES", X86_WORD_HOMES.len()),
         ("DOC_PATH_MOVES", DOC_PATH_MOVES.len()),
         ("CURRENT_STATE_DOCS", CURRENT_STATE_DOCS.len()),
+        ("DEFAULT_FEATURES_ALLOWED", DEFAULT_FEATURES_ALLOWED.len()),
+        ("NOT_RUN_BY_ANY_TEST", NOT_RUN_BY_ANY_TEST.len()),
+        (
+            "PLACES_THAT_DO_NOT_RUN_FEATURES",
+            PLACES_THAT_DO_NOT_RUN_FEATURES.len(),
+        ),
     ];
     let rendered: Vec<String> = counts
         .iter()
@@ -26031,13 +26362,38 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     );
     let sabotage = check_default_features_are_clean(&workspace_root)?;
     if sabotage.is_empty() {
-        println!("--- default features: OK");
+        println!(
+            "--- default features: OK (every feature reached from `default` is in \
+             DEFAULT_FEATURES_ALLOWED: {})",
+            DEFAULT_FEATURES_ALLOWED.join(", ")
+        );
     } else {
         for finding in &sabotage {
             println!("    {finding}");
         }
         println!("--- default features: FAILED");
         failed.push("default features".to_string());
+    }
+
+    // **どの feature も、どれかの試験から回るか、回らない理由が表にあること**（2026-09-28。運用者の決定）。
+    total += 1;
+    begin_item(
+        Family::Base,
+        "every feature is run by some test, or NOT_RUN_BY_ANY_TEST says why",
+    );
+    let not_run = check_every_feature_is_run_by_a_test(&workspace_root)?;
+    if not_run.is_empty() {
+        println!(
+            "--- features run by tests: OK ({} feature(s) not run by any test, each with a reason in \
+             NOT_RUN_BY_ANY_TEST)",
+            NOT_RUN_BY_ANY_TEST.len()
+        );
+    } else {
+        for finding in &not_run {
+            println!("    {finding}");
+        }
+        println!("--- features run by tests: FAILED");
+        failed.push("features run by tests".to_string());
     }
 
     total += 1;
@@ -26852,8 +27208,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 52,
-    full: 420,
+    base: 53,
+    full: 421,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -30469,5 +30825,67 @@ fn read_cr3() -> u64 {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn a_feature_reached_only_through_another_crate_is_followed() {
+        let kernel = parse_feature_graph(
+            "[package]\nname = \"k\"\n\n[features]\ndefault = [\"heap-poison\"]\nheap-poison = []\n\
+             a-test = [\"common/a-break\"]\n# comment\nb-test = [\"a-test\"]\n",
+        );
+        let common = parse_feature_graph("[features]\na-break = []\nunused = []\n");
+        let graphs = vec![("kernel", kernel), ("common", common)];
+        let reached = feature_closure(&graphs, vec![("kernel".to_string(), "b-test".to_string())]);
+        assert_eq!(
+            reached,
+            vec![
+                ("kernel".to_string(), "b-test".to_string()),
+                ("kernel".to_string(), "a-test".to_string()),
+                ("common".to_string(), "a-break".to_string()),
+            ]
+        );
+        let from_default =
+            feature_closure(&graphs, vec![("kernel".to_string(), "default".to_string())]);
+        assert_eq!(from_default.len(), 2);
+    }
+
+    #[test]
+    fn strings_are_attributed_to_the_item_that_declares_them() {
+        let source = "const TABLE: &[&str] = &[\n    \"a-test\", // \"not-this\"\n    \"b-test,c-test\",\n];\n\n\
+                      /* \"in-a-block\" */\npub(crate) unsafe fn runner() {\n    let x = 'x';\n    run(\"d-test\");\n}\n\n\
+                      #[cfg(test)]\nmod tests {\n    const HIDDEN: &str = \"e-test\";\n}\n\nstatic mut LAST: &str = r#\"f-test\"#;\n";
+        let found = string_literals_by_item(source);
+        assert_eq!(
+            found.strings,
+            vec![
+                ("TABLE".to_string(), "a-test".to_string()),
+                ("TABLE".to_string(), "b-test,c-test".to_string()),
+                ("runner".to_string(), "d-test".to_string()),
+                ("LAST".to_string(), "f-test".to_string()),
+            ]
+        );
+        assert_eq!(found.items, vec!["TABLE", "runner", "LAST"]);
+    }
+
+    #[test]
+    fn declarations_are_read_through_their_qualifiers() {
+        assert_eq!(
+            declared_item_name("pub const fn build() {").as_deref(),
+            Some("build")
+        );
+        assert_eq!(
+            declared_item_name("pub(super) unsafe fn go(x: u8) {").as_deref(),
+            Some("go")
+        );
+        assert_eq!(
+            declared_item_name("static mut COUNT: u32 = 0;").as_deref(),
+            Some("COUNT")
+        );
+        assert_eq!(
+            declared_item_name("const NAMES: &[&str] = &[").as_deref(),
+            Some("NAMES")
+        );
+        assert_eq!(declared_item_name("let x = 1;"), None);
+        assert_eq!(declared_item_name("// fn not_this() {"), None);
     }
 }
