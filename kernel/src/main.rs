@@ -423,6 +423,8 @@ static mut BOOT_HANDOFF: BootHandoff = BootHandoff {
     allow(unreachable_code)
 )]
 extern "sysv64" fn kernel_main() -> ! {
+    // **アセンブリ（スタックを切り替えて call する所）から入る入口なので、先に入り方の決まりを確かめる**（2026-09-28）。
+    kernel::arch::x86_64::check_entry_stack_alignment("kernel_main");
     // 破壊テスト (ADR-0046 の Addendum, stack-overflow-before-guard-test):
     // **起動時のカーネルスタックをわざと深くする。**
     //

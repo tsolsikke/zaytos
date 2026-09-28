@@ -972,6 +972,8 @@ core::arch::global_asm!(
 
 /// 足した 1 本の本体（W1-c-4）。**依頼された 1 本を走らせ、終わったら二度と選ばれない。**
 extern "sysv64" fn ring3_task_main() -> ! {
+    // **アセンブリから入る入口なので、先に入り方の決まりを確かめる**（2026-09-28）。
+    crate::arch::x86_64::check_entry_stack_alignment("ring3_task_main");
     crate::userland::run_detached_request();
     let used = ring3_task_stack_high_water();
     serial_line(format_args!(
@@ -1600,6 +1602,8 @@ core::arch::global_asm!(
 /// 居ない」ときだけで、起こすのは割り込みである。** **W2-c で待つ者が出たら、起こす側が
 /// `Ready` にしてから割り込みを終えるので、取りこぼしは生じない**（あちらで判定を設ける）。
 extern "sysv64" fn bsp_idle_main() -> ! {
+    // **アセンブリから入る入口なので、先に入り方の決まりを確かめる**（2026-09-28）。
+    crate::arch::x86_64::check_entry_stack_alignment("bsp_idle_main");
     loop {
         // **眠った回数を数える（W2-c-1 の計測）。** **眠る前に数える**——**起きてから
         // 数えると、起こした割り込みの中で読む値が 1 つ足りない。**
