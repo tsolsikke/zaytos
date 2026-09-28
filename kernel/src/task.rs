@@ -1724,7 +1724,7 @@ pub fn ap_current_display() -> ApCurrent {
 ///
 /// 失われていない。出所が変わった。S4-c-2 は `AP_IDLE_STACK` の直下へ
 /// `install_worker_guard_page` で穴を開けていた。per-CPU スタックには最初からマップしない
-/// 穴が下にある（`smp::map_ap_stacks`）。マッピングの不在で作ったガードなので、こちらのほうが
+/// 穴が下にある（`smp::map_ap_stacks`。今は `arch::x86_64::map_ap_stacks`）。マッピングの不在で作ったガードなので、こちらのほうが
 /// 解除の手数が少ない。
 ///
 /// # 呼び出しの前提（メモリ安全性の契約ではない）
