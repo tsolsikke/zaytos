@@ -1894,7 +1894,7 @@ fn serial_line(args: core::fmt::Arguments) {
 ///
 /// 破壊テストでの確認は現時点では構成できない。`cpu_id()` に非 `0` を返させる手段がまだ無い。
 /// S3-b で `cpu_id()` が実 ID を返すようになった時点で構成可能になるので、S3-b の
-/// 到達条件に入れてある（`roadmap.md`）。`smp::trampoline_frame()` や
+/// 到達条件に入れてある（`roadmap.md`）。`smp::trampoline_frame()`（今は `arch::x86_64::trampoline_frame()`）や
 /// `irq::mask_all()` と同じ扱いである。
 fn require_bootstrap_processor(what: &str) {
     // 破壊テスト (percpu-fake-nonzero-cpu-id): この tripwire が見る値だけを偽る（S3-a）。
