@@ -85,7 +85,7 @@ pub fn max_tick_jump() -> u64 {
 /// 持つ。ここはその前後の観測に徹する。
 fn switch_timer_to_lapic(
     logger: &mut Logger<SerialPort>,
-    calibration: crate::apic::TimerCalibration,
+    calibration: crate::machine::pc::apic::TimerCalibration,
 ) {
     let requested_hz = crate::irq::timer_frequency_hz();
     let median_hz = calibration.median_hz();
@@ -227,7 +227,7 @@ pub unsafe fn run_timer_loop(
     console: Option<&mut crate::console::Console>,
     stop_after_ticks: u64,
     shell_after_heartbeats: u64,
-    apic: Option<&crate::apic::MappedApic>,
+    apic: Option<&crate::machine::pc::apic::MappedApic>,
     virtio: Option<&mut crate::virtio::VirtioBlk>,
     pm_timer: Option<crate::pmtimer::PmTimer>,
 ) {
@@ -275,7 +275,7 @@ pub unsafe fn run_timer_loop(
         } else {
             pm_timer
         };
-        let calibration = crate::apic::calibrate_timer(logger, apic, pm_timer);
+        let calibration = crate::machine::pc::apic::calibrate_timer(logger, apic, pm_timer);
 
         // === S2-d-1b: 2 つ目のコントローラ実装を 1 回だけ読ませる ===
         //
@@ -319,7 +319,7 @@ pub unsafe fn run_timer_loop(
         // **較正の基準を見て決める**（`None` を一色に扱うと、ICW2 の誤りと PIT の不在が混ざる）。
         pit_never_ticked = matches!(
             calibration.as_ref().map(|value| value.reference()),
-            Some(crate::apic::CalibrationReference::PmTimer)
+            Some(crate::machine::pc::apic::CalibrationReference::PmTimer)
         );
         if let Some(calibration) = calibration {
             switch_timer_to_lapic(logger, calibration);
@@ -619,8 +619,8 @@ pub unsafe fn run_timer_loop(
                         let before = idt::ipi_probe_received_for(slot);
                         // SAFETY: `apic` はマップ済みで、宛先は起動を確認した AP である。
                         let accepted = unsafe {
-                            crate::apic::send_fixed_ipi(
-                                crate::apic::lapic_virt_of(apic),
+                            crate::machine::pc::apic::send_fixed_ipi(
+                                crate::machine::pc::apic::lapic_virt_of(apic),
                                 apic_id,
                                 idt::IPI_PROBE_VECTOR as u8,
                             )

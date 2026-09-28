@@ -310,7 +310,7 @@ core::arch::global_asm!(
     // Local APIC のスプリアス割り込み用スタブ（S2-d-1）。表の外に置く。
     //
     // 表は `0x20` から 33 本の連続範囲しか覆っておらず、スプリアスの
-    // `0xFF`（`crate::apic::SPURIOUS_VECTOR`）は範囲外である。`zaytos_yield_stub` と
+    // `0xFF`（`crate::machine::pc::apic::SPURIOUS_VECTOR`）は範囲外である。`zaytos_yield_stub` と
     // `zaytos_syscall_stub` が同じ形の前例で、非連続のベクタには専用スタブを置いて
     // `zaytos_irq_common` へ合流させる。
     //
@@ -1252,7 +1252,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     //
     // 回数は PIC のスプリアス（IRQ7 / IRQ15）とは別に数える。機序が違い、
     // 合流させるとどちらが起きたのかハートビートから分からなくなる。
-    if vector == crate::apic::SPURIOUS_VECTOR as usize {
+    if vector == crate::machine::pc::apic::SPURIOUS_VECTOR as usize {
         LAPIC_SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
         return no_switch_rsp;
     }
@@ -1587,7 +1587,7 @@ fn dedicated_stubs() -> [(usize, u64); DEDICATED_STUB_COUNT] {
         (YIELD_VECTOR, addr_of!(zaytos_yield_stub) as u64),
         (SYSCALL_VECTOR, addr_of!(zaytos_syscall_stub) as u64),
         (
-            crate::apic::SPURIOUS_VECTOR as usize,
+            crate::machine::pc::apic::SPURIOUS_VECTOR as usize,
             addr_of!(zaytos_spurious_stub) as u64,
         ),
         (
@@ -1880,7 +1880,7 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
         // 起きるとダンプして停止する。Local APIC が配送を担い始めるとスプリアスは
         // 実際に起こりうるので、戻れる経路へ移す（EOI は送らない。判定は
         // `irq_entry` にある）。
-        (*idt)[crate::apic::SPURIOUS_VECTOR as usize] = IdtEntry::new(
+        (*idt)[crate::machine::pc::apic::SPURIOUS_VECTOR as usize] = IdtEntry::new(
             addr_of!(zaytos_spurious_stub) as u64,
             KERNEL_CODE_SELECTOR,
             GateType::Interrupt,

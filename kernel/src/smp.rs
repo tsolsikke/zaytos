@@ -279,7 +279,7 @@ pub struct WakeReport {
 /// - 起動時に 1 回だけ呼ぶこと。
 pub unsafe fn wake_application_processors(
     logger: &mut Logger<SerialPort>,
-    mapped: &crate::apic::MappedApic,
+    mapped: &crate::machine::pc::apic::MappedApic,
     mmio: &crate::acpi::ApicMmio,
 ) -> WakeReport {
     let usable = mmio.usable_local_apics();
@@ -306,7 +306,7 @@ pub unsafe fn wake_application_processors(
     //
     // 権威のある出所は 2 つあり、どちらも既に読んでいる——`IA32_APIC_BASE` の
     // bit 8（`common::arch::x86_64::cpu::ApicBase::bootstrap_processor`）と、自コアの Local APIC
-    // ID レジスタ（[`crate::apic`] が読んでいる）である。どちらも今はログへ出す
+    // ID レジスタ（[`crate::machine::pc::apic`] が読んでいる）である。どちらも今はログへ出す
     // だけで、判定には使っていない。
     //
     // 直さない判断と解禁条件は `docs/deferred-decisions.md` にある。要点は、

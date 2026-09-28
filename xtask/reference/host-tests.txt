@@ -283,11 +283,6 @@ kernel::acpi::sdt::tests::rsdt_entries_are_read_as_32_bit_values_widened_to_64
 kernel::acpi::sdt::tests::the_checksum_covers_only_the_declared_length
 kernel::acpi::sdt::tests::the_minimum_length_is_the_callers_to_choose
 kernel::acpi::sdt::tests::xsdt_entries_are_read_as_64_bit_values
-kernel::apic::tests::a_zero_id_register_with_a_plausible_version_still_decodes
-kernel::apic::tests::all_zeros_and_all_ones_are_undecoded
-kernel::apic::tests::coverage_counts_from_the_gsi_base
-kernel::apic::tests::qemu_matches_its_madt
-kernel::apic::tests::the_id_comes_from_bits_27_to_24
 kernel::arch::x86_64::ap_stacks::tests::the_recorded_ap_kernel_stack_range_matches_the_mapped_layout
 kernel::arch::x86_64::ap_trampoline::tests::a_frame_above_one_mib_is_not_addressable
 kernel::arch::x86_64::ap_trampoline::tests::a_high_only_allocator_is_rejected
@@ -565,6 +560,11 @@ kernel::keyboard::decode::tests::the_two_tables_agree_except_at_the_one_key_that
 kernel::keyboard::decode::tests::unsupported_scancodes_are_reported_not_silently_dropped
 kernel::link_symbol_tests::the_conversion_round_trips_at_the_boundaries
 kernel::link_symbol_tests::the_conversion_uses_the_high_link_base
+kernel::machine::pc::apic::tests::a_zero_id_register_with_a_plausible_version_still_decodes
+kernel::machine::pc::apic::tests::all_zeros_and_all_ones_are_undecoded
+kernel::machine::pc::apic::tests::coverage_counts_from_the_gsi_base
+kernel::machine::pc::apic::tests::qemu_matches_its_madt
+kernel::machine::pc::apic::tests::the_id_comes_from_bits_27_to_24
 kernel::memory_map::tests::classify_conventional_is_free
 kernel::memory_map::tests::classify_mmio_types_are_uncacheable_reserved_but_mapped
 kernel::memory_map::tests::classify_ram_like_reserved_types_are_cacheable_reserved_but_mapped

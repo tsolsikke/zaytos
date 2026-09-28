@@ -1393,7 +1393,8 @@ extern "sysv64" fn kernel_main() -> ! {
     //
     // APIC へは移行しない。割り込みは PIC のままである（移行は S2）。ここでやるのは
     // マッピングと、Local APIC を読めることの確認だけで、レジスタへは書き込まない。
-    let mapped_apic = kernel::apic::map_and_probe(&mut logger, &mut allocator, &apic_mmio);
+    let mapped_apic =
+        kernel::machine::pc::apic::map_and_probe(&mut logger, &mut allocator, &apic_mmio);
 
     // === S13-a: PCI bus 0 の列挙と virtio-blk の発見 ===
     //
@@ -1505,7 +1506,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // IOREGSEL への書き込みだけは伴う。読みたいレジスタを選ぶセレクタで割り込みの
     // 設定ではないが、S2 で最初の書き込みはここである。
     if let Some(mapped_apic) = mapped_apic.as_ref() {
-        kernel::apic::survey_registers(&mut logger, mapped_apic);
+        kernel::machine::pc::apic::survey_registers(&mut logger, mapped_apic);
 
         // === S2-b: スプリアスベクタを予約例外ベクタの外へ移す ===
         //
@@ -1513,7 +1514,7 @@ extern "sysv64" fn kernel_main() -> ! {
         // bit 8（有効化）は読んだ値から保つ。bit 8 を落とすと LINT0 経由で届いて
         // いる 8259 の IRQ0 が止まる。危険なのは bit 8 であってベクタ欄ではない。
         // 振る舞いは変わらない（スプリアスは現在発生しない）。
-        kernel::apic::set_spurious_vector(&mut logger, mapped_apic);
+        kernel::machine::pc::apic::set_spurious_vector(&mut logger, mapped_apic);
 
         // === S3-b-1: cpu_id() を Local APIC ID 由来へ差し替える ===
         //
@@ -1531,7 +1532,10 @@ extern "sysv64" fn kernel_main() -> ! {
     // -smp 2 の起動が止まった。apic.rs の doc）。
     // `mapped_apic` の有無に依らず行う。覆えているかを問うのはコア数と MAX_CPUS の
     // 関係で、APIC のマッピングが成功したかとは別である。
-    kernel::apic::report_per_cpu_slot_coverage(&mut logger, apic_mmio.usable_local_apics());
+    kernel::machine::pc::apic::report_per_cpu_slot_coverage(
+        &mut logger,
+        apic_mmio.usable_local_apics(),
+    );
 
     // === higher-half B-2b-4（恒等除去） ===
     //
@@ -4882,7 +4886,7 @@ fn start_timer(
     console: Option<&mut Console>,
     stop_after_ticks: u64,
     shell_after_heartbeats: u64,
-    apic: Option<&kernel::apic::MappedApic>,
+    apic: Option<&kernel::machine::pc::apic::MappedApic>,
     mut virtio: Option<&mut kernel::virtio::VirtioBlk>,
     fadt: kernel::acpi::FadtFacts,
 ) {
@@ -5164,7 +5168,7 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>, i8042: kernel::acpi::I8042Pre
 /// 実演の数に混ざる）である。
 fn switch_virtio_to_io_apic(
     logger: &mut Logger<SerialPort>,
-    apic: Option<&kernel::apic::MappedApic>,
+    apic: Option<&kernel::machine::pc::apic::MappedApic>,
     virtio: &mut kernel::virtio::VirtioBlk,
 ) {
     let Some(mapped) = apic else {
@@ -5236,7 +5240,7 @@ fn switch_virtio_to_io_apic(
 
 fn switch_keyboard_to_io_apic(
     logger: &mut Logger<SerialPort>,
-    mapped: Option<&kernel::apic::MappedApic>,
+    mapped: Option<&kernel::machine::pc::apic::MappedApic>,
 ) {
     let Some(mapped) = mapped else {
         logger.warn(format_args!(

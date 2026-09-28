@@ -25,13 +25,13 @@ const AP_WAKE_WAIT_TICKS: u64 = 1;
 /// `mapped` がマップ済みの Local APIC を指し、`sipi_vector << 12` に実行できるトランポリンが置かれていること。
 /// 起動時に、この AP へ 1 回だけ呼ぶこと。
 pub unsafe fn start_application_processor(
-    mapped: &crate::apic::MappedApic,
+    mapped: &crate::machine::pc::apic::MappedApic,
     apic_id: u8,
     sipi_vector: u8,
     wait_ticks: fn(u64),
     has_started: impl Fn() -> bool,
 ) -> bool {
-    let lapic_virt = crate::apic::lapic_virt_of(mapped);
+    let lapic_virt = crate::machine::pc::apic::lapic_virt_of(mapped);
     // INIT → 待つ → SIPI → 待つ → まだ起動していなければもう 1 回 SIPI。
     //
     // 2 回目を無条件に送ってはならない。既に走り出した AP へ SIPI を
@@ -42,14 +42,14 @@ pub unsafe fn start_application_processor(
     // 届かなかった場合」であって、常に 2 回送れという意味ではない。
     // SAFETY: マップ済みの Local APIC。起動時の 1 回だけ。
     let ok = unsafe {
-        crate::apic::send_init_ipi(lapic_virt, apic_id) && {
+        crate::machine::pc::apic::send_init_ipi(lapic_virt, apic_id) && {
             wait_ticks(AP_WAKE_WAIT_TICKS);
-            crate::apic::send_startup_ipi(lapic_virt, apic_id, sipi_vector)
+            crate::machine::pc::apic::send_startup_ipi(lapic_virt, apic_id, sipi_vector)
         }
     };
     wait_ticks(AP_WAKE_WAIT_TICKS);
     ok && (has_started() || {
         // SAFETY: 同上。まだ起動していないときだけ送る。
-        unsafe { crate::apic::send_startup_ipi(lapic_virt, apic_id, sipi_vector) }
+        unsafe { crate::machine::pc::apic::send_startup_ipi(lapic_virt, apic_id, sipi_vector) }
     })
 }

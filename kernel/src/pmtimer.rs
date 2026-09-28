@@ -10,7 +10,7 @@
 //!
 //! # 何をしないか
 //!
-//! - **時計として使わない。** **較正のウィンドウを測るためだけに読む**（`crate::apic`）。
+//! - **時計として使わない。** **較正のウィンドウを測るためだけに読む**（`crate::machine::pc::apic`）。
 //! - **書かない。** **PM タイマは読み出し専用のカウンタである。**
 //! - **在りかは決めない。** **ポートと幅は FADT が示す**（`crate::acpi`）——**既定値を焼き込まない。**
 //!
@@ -35,7 +35,7 @@ pub const HZ: u64 = if cfg!(feature = "pm-timer-double-frequency") {
 
 /// いちばん狭い幅（ビット）。**24 ビットの PM タイマは約 4.7 秒で一周する。**
 ///
-/// **較正のウィンドウがこの一周より十分短いことを、`crate::apic` が const assert で守る。**
+/// **較正のウィンドウがこの一周より十分短いことを、`crate::machine::pc::apic` が const assert で守る。**
 pub const NARROWEST_WIDTH_BITS: u32 = 24;
 
 /// PM タイマの所在。**FADT から作る**（`crate::acpi`）。
@@ -90,7 +90,7 @@ pub const fn elapsed_with_width(before: u32, after: u32, bits: u8) -> u32 {
 
 /// Local APIC タイマの周波数（Hz）を、減った数と PM タイマの刻みから求める（純粋ロジック）。
 ///
-/// **PIT 基準の式と同じ形である**——**ウィンドウの実時間で割る**（`crate::apic` の較正）。
+/// **PIT 基準の式と同じ形である**——**ウィンドウの実時間で割る**（`crate::machine::pc::apic` の較正）。
 /// **刻みが 0 なら 0 を返す**（割らない）。
 pub const fn lapic_hz_from_ticks(lapic_counts: u64, pm_ticks: u64) -> u64 {
     if pm_ticks == 0 {

@@ -228,7 +228,7 @@ impl ApicMmio {
     /// 常にこの関数を通す。** この構成の IRQ1 には上書きが無く戻り値は 0 に
     /// なるが、上書きのある IRQ を扱った瞬間に静かに誤る形を避ける。
     ///
-    /// 返すのは `crate::apic` の redirection entry のビット位置に合わせた値で、
+    /// 返すのは `crate::machine::pc::apic` の redirection entry のビット位置に合わせた値で、
     /// **MADT の生の flags ではない。** 両者はビット位置が違う。
     pub fn redirection_flags_for_irq(&self, irq: u8) -> u32 {
         let mut flags = 0;
@@ -237,10 +237,10 @@ impl ApicMmio {
                 continue;
             }
             if iso.active_low() {
-                flags |= crate::apic::ENTRY_ACTIVE_LOW_BIT;
+                flags |= crate::machine::pc::apic::ENTRY_ACTIVE_LOW_BIT;
             }
             if iso.level_triggered() {
-                flags |= crate::apic::ENTRY_LEVEL_TRIGGERED_BIT;
+                flags |= crate::machine::pc::apic::ENTRY_LEVEL_TRIGGERED_BIT;
             }
             break;
         }
@@ -288,7 +288,7 @@ impl ApicMmio {
     ///
     /// **BSP の ID とは限らない。** MADT のエントリ順が BSP を先頭にする保証は
     /// 仕様に無い。読み取った Local APIC ID との突き合わせに使うが、
-    /// **この突き合わせは弱い**（[`crate::apic`] の該当箇所に理由がある）。
+    /// **この突き合わせは弱い**（[`crate::machine::pc::apic`] の該当箇所に理由がある）。
     pub const fn bsp_candidate_apic_id(&self) -> Option<u8> {
         self.bsp_candidate_apic_id
     }

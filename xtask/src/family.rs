@@ -158,7 +158,6 @@ pub const PATH_RULES: &[PathRule] = &[
             // 通る**（AP の `ap-touch-scheduler`・シェルの台本の眠り）。
             "kernel/src/irq/**",
             "kernel/src/interrupts.rs",
-            "kernel/src/apic.rs",
             "kernel/src/task.rs",
             "kernel/src/task/**",
             // **Ring 3 の核**——**既定の起動が `init` とシェルと起動時の `syscall-test` を走らせ、SMP の

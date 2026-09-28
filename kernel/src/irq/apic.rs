@@ -14,7 +14,7 @@
 //!
 //! # レジスタの配置を知っているのはここではない
 //!
-//! オフセットとビット位置は [`crate::apic`] が持ち、こちらはそこが出す
+//! オフセットとビット位置は [`crate::machine::pc::apic`] が持ち、こちらはそこが出す
 //! 名前付きの操作だけを呼ぶ。**同じ事実を 2 箇所に置かない。**
 
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -61,7 +61,7 @@ pub(super) unsafe fn end_of_interrupt_for_routed_irq(spurious: bool) {
         return;
     }
     // SAFETY: `Apic::new` がマッピングを確認した Local APIC のページ先頭を入れている。
-    unsafe { crate::apic::send_end_of_interrupt(base) }
+    unsafe { crate::machine::pc::apic::send_end_of_interrupt(base) }
 }
 
 /// I/O APIC 経由へ移した IRQ がスプリアスか。**常に `false` である。**
@@ -80,7 +80,7 @@ pub(super) unsafe fn spurious_for_routed_irq(_irq: u8) -> bool {
 ///
 /// # 不変条件
 ///
-/// `io_apic_virt` は、[`crate::apic::map_and_probe`] がマッピングを確認したページの
+/// `io_apic_virt` は、[`crate::machine::pc::apic::map_and_probe`] がマッピングを確認したページの
 /// 先頭である。**この型を作れるのは [`Self::new`] だけ**で、そこが
 /// `MappedApic` を要求するので、マップされていないアドレスから作ることはできない。
 ///
@@ -105,7 +105,7 @@ impl Apic {
     ///
     /// **`MappedApic` を要求するのが安全性の要である。** 生のアドレスを
     /// 受け取る形にすると、マップしていないページを渡せてしまう。
-    pub fn new(mapped: &crate::apic::MappedApic) -> Option<Self> {
+    pub fn new(mapped: &crate::machine::pc::apic::MappedApic) -> Option<Self> {
         let direct_map = common::addr::direct_map();
         let io_apic = mapped.first_io_apic()?;
         let io_apic_virt = direct_map.phys_to_virt(io_apic.phys).as_u64();
@@ -113,7 +113,8 @@ impl Apic {
         // SAFETY: `map_and_probe` がマッピングを確認したページの先頭である。読み取りのみ
         // （IOREGSEL への添字の書き込みを伴うが、割り込みの設定は変えない）。
         // 単一コアで、他の実行文脈がこの I/O APIC を触っていない。
-        let entry_count = unsafe { crate::apic::redirection_entry_count(io_apic_virt) };
+        let entry_count =
+            unsafe { crate::machine::pc::apic::redirection_entry_count(io_apic_virt) };
 
         let lapic_virt = direct_map.phys_to_virt(mapped.local_apic_phys()).as_u64();
         // 割り込み文脈から EOI を送るために控える（S2-d-1c）。
@@ -146,10 +147,14 @@ impl Apic {
     pub(super) fn read_entry(&self, irq: u8) -> Option<super::RedirectionEntryView> {
         let entry = self.entry_for_irq(irq)?;
         // SAFETY: 型の不変条件によりマップ済みのページである。読み取りのみ。
-        let low = unsafe { crate::apic::read_redirection_entry_low(self.io_apic_virt, entry) };
+        let low = unsafe {
+            crate::machine::pc::apic::read_redirection_entry_low(self.io_apic_virt, entry)
+        };
         // **high dword も読む（S4-a）。宛先はこちらにある。**
         // SAFETY: 同上。読み取りのみ。
-        let high = unsafe { crate::apic::read_redirection_entry_high(self.io_apic_virt, entry) };
+        let high = unsafe {
+            crate::machine::pc::apic::read_redirection_entry_high(self.io_apic_virt, entry)
+        };
         Some(super::RedirectionEntryView::new(low, high))
     }
 
@@ -166,8 +171,10 @@ impl Apic {
                 break;
             };
             // SAFETY: 呼び出し元契約。読み取りのみ。
-            let low = unsafe { crate::apic::read_redirection_entry_low(self.io_apic_virt, entry) };
-            if low & crate::apic::ENTRY_MASKED_BIT != 0 {
+            let low = unsafe {
+                crate::machine::pc::apic::read_redirection_entry_low(self.io_apic_virt, entry)
+            };
+            if low & crate::machine::pc::apic::ENTRY_MASKED_BIT != 0 {
                 set_bit(&mut masked, entry);
             }
         }
@@ -189,11 +196,12 @@ impl Controller for Apic {
         // SAFETY: 型の不変条件によりマップ済みのページである。マスクビットだけを
         // 落とす read-modify-write で、ベクタ欄と配送設定は保つ。
         unsafe {
-            let low = crate::apic::read_redirection_entry_low(self.io_apic_virt, entry);
-            crate::apic::write_redirection_entry_low(
+            let low =
+                crate::machine::pc::apic::read_redirection_entry_low(self.io_apic_virt, entry);
+            crate::machine::pc::apic::write_redirection_entry_low(
                 self.io_apic_virt,
                 entry,
-                low & !crate::apic::ENTRY_MASKED_BIT,
+                low & !crate::machine::pc::apic::ENTRY_MASKED_BIT,
             );
         }
     }
@@ -205,11 +213,12 @@ impl Controller for Apic {
             };
             // SAFETY: 上と同じ。マスクビットだけを立てる。
             unsafe {
-                let low = crate::apic::read_redirection_entry_low(self.io_apic_virt, entry);
-                crate::apic::write_redirection_entry_low(
+                let low =
+                    crate::machine::pc::apic::read_redirection_entry_low(self.io_apic_virt, entry);
+                crate::machine::pc::apic::write_redirection_entry_low(
                     self.io_apic_virt,
                     entry,
-                    low | crate::apic::ENTRY_MASKED_BIT,
+                    low | crate::machine::pc::apic::ENTRY_MASKED_BIT,
                 );
             }
         }
@@ -231,7 +240,7 @@ impl Controller for Apic {
         //    割り込み要求が INTA サイクルまでに取り下げられると、既定の IRQ
         //    番号で偽の割り込みを上げる。LAPIC はその形の偽装を持たない。
         // 2. **LAPIC のスプリアスはベクタで判定される。** SVR のベクタ欄
-        //    （`crate::apic::SPURIOUS_VECTOR`）で上がり、`idt::irq_entry` が
+        //    （`crate::machine::pc::apic::SPURIOUS_VECTOR`）で上がり、`idt::irq_entry` が
         //    IRQ 番号へ変換する手前で名指しに判定して返す（S2-d-1a）。
         //    **したがってこの経路までスプリアスは降りてこない。**
         //
@@ -267,7 +276,8 @@ impl Controller for Apic {
             match signaling {
                 super::RouteSignaling::EdgeHigh => 0,
                 super::RouteSignaling::LevelLow => {
-                    crate::apic::ENTRY_LEVEL_TRIGGERED_BIT | crate::apic::ENTRY_ACTIVE_LOW_BIT
+                    crate::machine::pc::apic::ENTRY_LEVEL_TRIGGERED_BIT
+                        | crate::machine::pc::apic::ENTRY_ACTIVE_LOW_BIT
                 }
             }
         };
@@ -280,23 +290,29 @@ impl Controller for Apic {
             let _ = signaling_flags;
             0
         };
-        let low = u32::from(vector) | signaling_flags | crate::apic::ENTRY_MASKED_BIT;
+        let low = u32::from(vector) | signaling_flags | crate::machine::pc::apic::ENTRY_MASKED_BIT;
 
         // 破壊テスト (S4-a, ioapic-keyboard-broadcast): 宛先を logical の broadcast に
         // する。**確実に落ちるのは読み戻しの主張のほうである。** 配送が実際に
         // どうなるか（AP が受けて共有リングバッファへ積むか）は観測していない。
         #[cfg(feature = "ioapic-keyboard-broadcast-test")]
-        let low = low | crate::apic::ENTRY_DESTINATION_MODE_BIT;
+        let low = low | crate::machine::pc::apic::ENTRY_DESTINATION_MODE_BIT;
 
         // SAFETY: 型の不変条件によりマップ済みのページである。**マスクビットを
         // 立てたまま書く**ので、この書き込みで割り込みが届き始めることはない。
-        unsafe { crate::apic::write_redirection_entry_low(self.io_apic_virt, entry, low) }
+        unsafe {
+            crate::machine::pc::apic::write_redirection_entry_low(self.io_apic_virt, entry, low)
+        }
 
         // 破壊テスト (S4-a, ioapic-keyboard-broadcast): high dword の宛先も broadcast へ。
         // SAFETY: 同上。既定ビルドではこのブロックごと消える。
         #[cfg(feature = "ioapic-keyboard-broadcast-test")]
         unsafe {
-            crate::apic::write_redirection_entry_high(self.io_apic_virt, entry, 0xFF00_0000)
+            crate::machine::pc::apic::write_redirection_entry_high(
+                self.io_apic_virt,
+                entry,
+                0xFF00_0000,
+            )
         }
     }
 
@@ -346,7 +362,7 @@ fn clear_bit(bitmap: &mut [u64; MASK_BITMAP_WORDS], index: u8) {
 /// 周波数だけを受け取る形にしない。**分周設定と対で持たないと、較正時と
 /// 運用時で分周が食い違う罠が開く**（`TimerCalibration` の doc）。
 pub struct LapicTimer {
-    calibration: crate::apic::TimerCalibration,
+    calibration: crate::machine::pc::apic::TimerCalibration,
 }
 
 impl LapicTimer {
@@ -354,7 +370,7 @@ impl LapicTimer {
     ///
     /// **`Apic::new` が先に走っていること**（Local APIC のアドレスを
     /// [`LAPIC_EOI_BASE`] へ入れるのはあちらである）。
-    pub(super) const fn new(calibration: crate::apic::TimerCalibration) -> Self {
+    pub(super) const fn new(calibration: crate::machine::pc::apic::TimerCalibration) -> Self {
         Self { calibration }
     }
 }
@@ -388,12 +404,12 @@ impl super::TimerSource for LapicTimer {
         // **マスクしたまま設定する。** 解禁は別（`unmask_timer`）で、
         // その前に PIC を全マスクする必要がある。
         let lvt = super::LAPIC_TIMER_VECTOR_BITS
-            | crate::apic::LVT_TIMER_PERIODIC
-            | crate::apic::ENTRY_MASKED_BIT;
+            | crate::machine::pc::apic::LVT_TIMER_PERIODIC
+            | crate::machine::pc::apic::ENTRY_MASKED_BIT;
 
         // SAFETY: `base` は `Apic::new` がマッピングを確認した Local APIC のページ
         // 先頭である。マスクを立てたまま書くので、ここでティックは始まらない。
-        unsafe { crate::apic::program_timer(base, divide, lvt, initial_count) };
+        unsafe { crate::machine::pc::apic::program_timer(base, divide, lvt, initial_count) };
 
         // **AP が同じ設定を自分の LVT へ書けるように控える（S4-a）。**
         // **較正はやり直さない。** BSP の較正値を共有するのは「LAPIC タイマの
@@ -447,8 +463,8 @@ const fn unpack_timer_program(packed: u64) -> (u32, u32) {
 /// # Safety
 ///
 /// 自コアの単一文脈から、割り込み禁止で呼ぶこと。
-pub(super) unsafe fn set_spurious_vector_for_this_cpu() -> Option<crate::apic::SpuriousVectorWrite>
-{
+pub(super) unsafe fn set_spurious_vector_for_this_cpu(
+) -> Option<crate::machine::pc::apic::SpuriousVectorWrite> {
     let base = LAPIC_EOI_BASE.load(Ordering::Relaxed);
     if base == NOT_INSTALLED {
         return None;
@@ -457,7 +473,12 @@ pub(super) unsafe fn set_spurious_vector_for_this_cpu() -> Option<crate::apic::S
     // **AP は bit 8 を立てる。** INIT-SIPI で起動したコアの Local APIC はリセット
     // 状態から始まり、SVR は `0x000000FF` で **bit 8 が落ちている**。
     // 実測でそうだった（`SoftwareEnable` の doc）。
-    Some(unsafe { crate::apic::write_spurious_vector(base, crate::apic::SoftwareEnable::Set) })
+    Some(unsafe {
+        crate::machine::pc::apic::write_spurious_vector(
+            base,
+            crate::machine::pc::apic::SoftwareEnable::Set,
+        )
+    })
 }
 
 /// このコアの Local APIC タイマを、BSP と同じ設定で開ける（S4-a）。
@@ -485,15 +506,15 @@ pub(super) unsafe fn arm_timer_for_this_cpu() -> Option<(u32, u32)> {
     let (divide, initial_count) = unpack_timer_program(packed);
 
     let lvt = super::LAPIC_TIMER_VECTOR_BITS
-        | crate::apic::LVT_TIMER_PERIODIC
-        | crate::apic::ENTRY_MASKED_BIT;
+        | crate::machine::pc::apic::LVT_TIMER_PERIODIC
+        | crate::machine::pc::apic::ENTRY_MASKED_BIT;
 
     // SAFETY: 呼び出し元契約。**マスクを立てたまま設定してから外す**ので、
     // ベクタが載る前に満了することはない。base は自コアの Local APIC を指す
     // （この物理アドレスは実行中のコア自身の LAPIC に別名づけられている）。
     unsafe {
-        crate::apic::program_timer(base, divide, lvt, initial_count);
-        crate::apic::unmask_lvt_timer(base);
+        crate::machine::pc::apic::program_timer(base, divide, lvt, initial_count);
+        crate::machine::pc::apic::unmask_lvt_timer(base);
     }
     Some((divide, initial_count))
 }
@@ -510,7 +531,7 @@ pub(super) unsafe fn unmask_timer() {
         return;
     }
     // SAFETY: 呼び出し元契約。マスクビットだけを落とす。
-    unsafe { crate::apic::unmask_lvt_timer(base) }
+    unsafe { crate::machine::pc::apic::unmask_lvt_timer(base) }
 }
 
 /// LVT Timer の現在値を読み戻す（S2-d-2）。
@@ -520,7 +541,7 @@ pub(super) fn read_lvt_timer() -> Option<u32> {
         return None;
     }
     // SAFETY: `Apic::new` がマッピングを確認したページである。読み取りのみ。
-    Some(unsafe { crate::apic::read_lvt_timer(base) })
+    Some(unsafe { crate::machine::pc::apic::read_lvt_timer(base) })
 }
 
 #[cfg(test)]

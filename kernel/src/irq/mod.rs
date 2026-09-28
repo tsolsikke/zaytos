@@ -86,7 +86,7 @@
 //!
 //! S0-a の「IMR への書き込みは境界の内側だけに存在する」は、PIC については
 //! 真だが、I/O APIC については偽である。redirection entry を読み書きする
-//! 操作は [`crate::apic`] にあり、割り込み層の外である。可視性の静的検査は
+//! 操作は [`crate::machine::pc::apic`] にあり、割り込み層の外である。可視性の静的検査は
 //! `kernel/src/irq/` の内側だけを見るので、ここは検出されない。
 //!
 //! 守れない箇所を守れると書かないために、非対称を明示しておく。
@@ -559,7 +559,10 @@ pub fn check_masks(unmasked: &[u8]) -> MaskCheck {
 /// 一切しない。S2-a が同じレジスタを読んでいるので、新しい危険は無い。
 ///
 /// I/O APIC が 1 台もマップできていなければ `None`。
-pub fn survey_apic_masks(mapped: &crate::apic::MappedApic, unmasked: &[u8]) -> Option<MaskCheck> {
+pub fn survey_apic_masks(
+    mapped: &crate::machine::pc::apic::MappedApic,
+    unmasked: &[u8],
+) -> Option<MaskCheck> {
     let controller = apic::Apic::new(mapped)?;
     Some(controller.check_masks(unmasked))
 }
@@ -693,7 +696,7 @@ pub unsafe fn end_of_interrupt(irq: u8, spurious: bool) {
 /// - 配送先のベクタに、戻れるハンドラが IDT に入っていること。
 /// - 起動時に呼ぶこと（この関数は割り込みを一時的に禁止する）。
 pub unsafe fn route_to_apic(
-    mapped: &crate::apic::MappedApic,
+    mapped: &crate::machine::pc::apic::MappedApic,
     irq: u8,
     vector: u8,
     signaling: RouteSignaling,
@@ -756,20 +759,20 @@ pub unsafe fn route_to_apic(
 ///
 /// `Some((level, active_low))` を返す。override が無ければ `None`——
 /// そのとき何を既定とするかは呼び出し側の判断である（PCI なら level・low）。
-/// **ビット定数は `crate::apic` の内側に留める**（あの到達範囲を広げない）。
+/// **ビット定数は `crate::machine::pc::apic` の内側に留める**（あの到達範囲を広げない）。
 pub fn declared_signaling(mmio: &crate::acpi::ApicMmio, irq: u8) -> Option<(bool, bool)> {
     if !mmio.has_override_for_irq(irq) {
         return None;
     }
     let flags = mmio.redirection_flags_for_irq(irq);
     Some((
-        flags & crate::apic::ENTRY_LEVEL_TRIGGERED_BIT != 0,
-        flags & crate::apic::ENTRY_ACTIVE_LOW_BIT != 0,
+        flags & crate::machine::pc::apic::ENTRY_LEVEL_TRIGGERED_BIT != 0,
+        flags & crate::machine::pc::apic::ENTRY_ACTIVE_LOW_BIT != 0,
     ))
 }
 
 pub fn routed_entry_readback(
-    mapped: &crate::apic::MappedApic,
+    mapped: &crate::machine::pc::apic::MappedApic,
     irq: u8,
 ) -> Option<RedirectionEntryView> {
     if !routed_to_apic(irq) {
@@ -800,17 +803,17 @@ impl RedirectionEntryView {
 
     /// この entry はマスクされているか。
     pub fn masked(&self) -> bool {
-        self.low & crate::apic::ENTRY_MASKED_BIT != 0
+        self.low & crate::machine::pc::apic::ENTRY_MASKED_BIT != 0
     }
 
     /// レベルトリガか（S13-d。PCI の INTx の読み戻しに使う）。
     pub fn level_triggered(&self) -> bool {
-        self.low & crate::apic::ENTRY_LEVEL_TRIGGERED_BIT != 0
+        self.low & crate::machine::pc::apic::ENTRY_LEVEL_TRIGGERED_BIT != 0
     }
 
     /// アクティブローか（S13-d）。
     pub fn active_low(&self) -> bool {
-        self.low & crate::apic::ENTRY_ACTIVE_LOW_BIT != 0
+        self.low & crate::machine::pc::apic::ENTRY_ACTIVE_LOW_BIT != 0
     }
 
     /// 宛先が physical モードか（S4-a）。
@@ -819,12 +822,12 @@ impl RedirectionEntryView {
     /// processor なら、この IRQ は AP へ届かない。logical になると宛先の解釈が
     /// 変わり、その前提が崩れる。
     pub fn physical_destination_mode(&self) -> bool {
-        self.low & crate::apic::ENTRY_DESTINATION_MODE_BIT == 0
+        self.low & crate::machine::pc::apic::ENTRY_DESTINATION_MODE_BIT == 0
     }
 
     /// 宛先（high dword の bit 31:24）。physical モードなら Local APIC ID である。
     pub const fn destination(&self) -> u8 {
-        crate::apic::redirection_destination(self.high)
+        crate::machine::pc::apic::redirection_destination(self.high)
     }
 }
 
@@ -836,9 +839,9 @@ impl fmt::Display for RedirectionEntryView {
              destination={:#04x}",
             self.vector(),
             self.masked(),
-            self.low & crate::apic::ENTRY_LEVEL_TRIGGERED_BIT != 0,
-            self.low & crate::apic::ENTRY_ACTIVE_LOW_BIT != 0,
-            crate::apic::destination_mode_name(self.low),
+            self.low & crate::machine::pc::apic::ENTRY_LEVEL_TRIGGERED_BIT != 0,
+            self.low & crate::machine::pc::apic::ENTRY_ACTIVE_LOW_BIT != 0,
+            crate::machine::pc::apic::destination_mode_name(self.low),
             self.destination()
         )
     }
@@ -876,7 +879,7 @@ impl fmt::Display for RedirectionEntryView {
 /// - [`crate::arch::x86_64::idt::LAPIC_TIMER_VECTOR`] に戻れるハンドラが IDT にあること。
 /// - 起動時に 1 回だけ呼ぶこと（割り込みを一時的に禁止する）。
 pub unsafe fn switch_timer_to_lapic(
-    calibration: crate::apic::TimerCalibration,
+    calibration: crate::machine::pc::apic::TimerCalibration,
     frequency_hz: u32,
 ) -> Result<TimerSetup, TimerError> {
     let source = apic::LapicTimer::new(calibration);
@@ -988,12 +991,12 @@ impl LvtTimerView {
 
     /// マスクされているか。
     pub fn masked(&self) -> bool {
-        self.raw & crate::apic::ENTRY_MASKED_BIT != 0
+        self.raw & crate::machine::pc::apic::ENTRY_MASKED_BIT != 0
     }
 
     /// periodic モードか。
     pub fn periodic(&self) -> bool {
-        self.raw & crate::apic::LVT_TIMER_PERIODIC != 0
+        self.raw & crate::machine::pc::apic::LVT_TIMER_PERIODIC != 0
     }
 }
 

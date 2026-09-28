@@ -20336,6 +20336,7 @@ const DOC_PATH_MOVES: &[(&str, &str)] = &[
         "kernel/src/address_space.rs",
         "kernel/src/arch/x86_64/paging/address_space.rs",
     ),
+    ("kernel/src/apic.rs", "kernel/src/machine/pc/apic.rs"),
 ];
 
 /// 以前の置き場を指すパスを、読み替えの表で今の置き場へ読み替えて、追跡下に在るかを見る（ファイルでも
