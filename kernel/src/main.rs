@@ -2363,7 +2363,7 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
                 ));
                 logger.info(format_args!(
                     "fold: depth one was not folded {} time(s) during this session",
-                    kernel::arch::x86_64::idt::depth_one_not_folded()
+                    kernel::interrupts::depth_one_not_folded()
                 ));
                 // **パイプの計測（`ADR-0063` の (b3)）。** **既定の起動では全部 0 である**
                 // ——**`|` を打つ者が居ない。** **台本のグループ（`pipe-test`）が読む。**

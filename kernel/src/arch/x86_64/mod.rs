@@ -21,9 +21,7 @@ pub use ap_stacks::{kernel_stack_bounds_from_top, map_ap_stacks};
 pub use ap_trampoline::{ap_stack_frame, install_trampoline, trampoline_frame};
 pub use fp::{restore_fp_state, save_fp_state, FpArea};
 pub use gdt::{active_kernel_entry_stack_top, set_active_kernel_entry_stack_top};
-pub use idt::{
-    advance_monotonic_ticks, count_timer_tick, fold_if_interrupted, timer_ticks, Interrupted,
-};
+pub use idt::{advance_monotonic_ticks, count_timer_tick, timer_ticks, ExitAction, Interrupted};
 pub use paging::switch::{active_page_table_root, set_active_page_table_root};
 pub use ring3::{
     current_excursion_recovery, excursion_recovery_belongs_to_slot, excursion_stack_range_of,

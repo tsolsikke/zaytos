@@ -1216,11 +1216,17 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     }
 
     // 外からの割り込みは、共通の側の 1 つの入口関数へ渡す（`ADR-0072` の 1）。受け取りから完了まで、BKL、
-    // ティック、装置の処理、切り替えはそちらが持つ。ベクタは IDT の添字なので 8 ビットに収まる（収まらない値は
-    // 来ないが、来たら何もせずに戻る）。
-    match u8::try_from(vector) {
-        Ok(arrival) => crate::interrupts::on_external_interrupt(arrival, &interrupted),
-        Err(_) => interrupted.stack_pointer(),
+    // ティック、装置の処理、切り替え、遠征を畳むかどうかはそちらが持ち、出口の動きを返す。ここはそれを行う
+    // （9d-3）。ベクタは IDT の添字なので 8 ビットに収まる（収まらない値は来ないが、来たら何もせずに戻る）。
+    let Ok(arrival) = u8::try_from(vector) else {
+        return interrupted.stack_pointer();
+    };
+    match crate::interrupts::on_external_interrupt(arrival, &interrupted) {
+        ExitAction::Resume(stack_pointer) => stack_pointer,
+        // SAFETY: 共通の側の入口関数は、Local APIC のタイマを完了させた後にだけ畳むと決め、戻るときに BKL の
+        // ガードを解いている（破壊テスト `kill-fold-keep-bkl-test` だけは解かない）。遠征があることと
+        // ユーザーから来たことは、`fold_excursion` が確かめ直す。
+        ExitAction::FoldExcursion => unsafe { fold_excursion(&interrupted) },
     }
 }
 
@@ -1228,8 +1234,9 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
 ///
 /// # 契約（境界の型。2026-09-28）
 ///
-/// - 共通の側は中身を読まない。使うのは、切り替えないときに返すスタックポインタ（[`Self::stack_pointer`]）と、
-///   遠征を畳む判定（[`fold_if_interrupted`]）へそのまま渡すことだけである。
+/// - 共通の側が読むのは、切り替えないときに返すスタックポインタ（[`Self::stack_pointer`]）と、遠征を畳むかを
+///   決めるための 3 つの事実（[`Self::from_user`]・[`Self::excursion_depth`]・[`Self::excursion_slot`]）だけで
+///   ある（9d-3）。レジスタやベクタは読ませない。
 /// - 作れるのは入口だけで（中身は外から見えない）、入口の関数の中でだけ生きる（入口のスタブが積んだ文脈を
 ///   借りている）。
 pub struct Interrupted<'a> {
@@ -1243,6 +1250,38 @@ impl Interrupted<'_> {
     pub fn stack_pointer(&self) -> u64 {
         core::ptr::from_ref(self.context) as u64
     }
+
+    /// 割り込まれたのがユーザーの文脈か（`CS` の RPL が 3）。**CPU が積んだ事実だけを見る**（例外の側の条件 (2) と
+    /// 同じ形）。
+    pub fn from_user(&self) -> bool {
+        (self.context.cs & 0b11) == 3
+    }
+
+    /// 割り込まれたときの遠征の深さ（0 はどの遠征にも居ない。シェルは深さ 1）。
+    pub fn excursion_depth(&self) -> usize {
+        crate::arch::x86_64::ring3::depth()
+    }
+
+    /// 割り込まれたときの遠征のスロット。
+    pub fn excursion_slot(&self) -> usize {
+        crate::arch::x86_64::ring3::current_slot()
+    }
+}
+
+/// 外からの割り込みの入口関数が決め、入口が行う出口の動き（`ADR-0072` の 1。2026-09-28。9d-3）。
+///
+/// # 契約（境界の型。2026-09-28）
+///
+/// - [`ExitAction::Resume`] は、そのスタックポインタへ戻る（切り替えないなら割り込まれた文脈のもの、切り替える
+///   なら次のタスクのもの）。
+/// - [`ExitAction::FoldExcursion`] は、走っている子の遠征を畳む（中断。Ctrl+C）。入口は、入口関数が戻った後
+///   （完了させ、BKL のガードを解いた後）に、遠征の呼び出し元へ longjmp する。**途中の枠を飛び越えないので、
+///   共通の側の値の後始末（Drop）は、ふつうに走る**（`ADR-0072` の 4 の「途中で戻る道」）。
+pub enum ExitAction {
+    /// このスタックポインタへ戻る。
+    Resume(u64),
+    /// 走っている子の遠征を畳む。
+    FoldExcursion,
 }
 
 /// タイマ（IRQ0）の8259 でのベクタ。
@@ -1994,125 +2033,31 @@ pub fn advance_monotonic_ticks() -> Option<u64> {
     }
 }
 
-/// 深さがちょうど 1 だったので畳まなかった回数（W2-c-2 の手当て。`ADR-0061`）。
+/// 走っている子の遠征を畳む（中断。Ctrl+C。S12 前の手当て、C）。共通の側の入口関数が
+/// [`ExitAction::FoldExcursion`] を返したときに、入口が呼ぶ（2026-09-28。9d-3。それまでは
+/// `fold_if_interrupted` が、畳むかどうかを決めることと畳むことを両方持っていた）。
 ///
-/// **「深さ 1 では畳まない」が働いたことの観測である。** **判定は「1 以上」を見る。**
-///
-/// # 既定では必ず 1 以上になる
-///
-/// **シェルは遠征中（深さ 1）にタイマ IRQ を受け続けるので、ここを通る。**
-/// **打鍵にも待ちにも依らない**——**タイマは 100Hz で入り、セッションは数十秒ある。**
-///
-/// # 破壊テストでは 0 になる
-///
-/// **`kill-fold-at-depth-one-test` は [`MINIMUM_DEPTH`] を 1 にするので、深さ 1 は
-/// この分岐へ来ない。**
-///
-/// # なぜ「深さ 1 で畳んだ回数」を数えないのか
-///
-/// **それでは破壊が捕まらない。** **終了させるには「深さ 1」と「Ring 3 から来た IRQ」の
-/// 両方が要るが、待つ形ではシェルが Ring 3 に居るのは `read(0)` が戻ってから次の
-/// `read(0)` へ入るまでの μs 単位しかない**——**打鍵の間隔 32 ミリ秒に対して 1% 未満の
-/// 見込みで、破壊テストを立てても 0 のままになる**（`ADR-0061`。**実測で 4 回続けて
-/// 検出されなかった**）。**弾いた側を数えると、そのウィンドウに依らない。**
-static DEPTH_ONE_NOT_FOLDED: AtomicU64 = AtomicU64::new(0);
-
-/// [`DEPTH_ONE_NOT_FOLDED`] の値（W2-c-2 の対策。`init` がセッションの後に出す）。
-pub fn depth_one_not_folded() -> u64 {
-    DEPTH_ONE_NOT_FOLDED.load(Ordering::Relaxed)
-}
-
-/// 中断（Ctrl+C）が要求されていれば、走っている子の遠征を終了させる（S12 前の手当て、C）。
-///
-/// **条件が揃わなければ何もせずに戻る。揃えば戻らない。**
-///
-/// # ここが「深さで分ける」唯一の場所である
-///
-/// **フラグを立てる側は深さを見ない**（`crate::input::note_scancode_for_interrupt`）。
-/// **消費する側もここだけである。** 深さ 1 では消費されず、フラグは立ったまま残るが、
-/// **子を起こす直前に降りる**（`crate::userland` が呼ぶ
-/// `crate::input::clear_interrupt_request`）ので持ち越さない。
-///
-/// **深さ 1 の 0x03 は、この経路をまったく通らない。** `Decoder` が
-/// 制御文字として出し、前景を通してシェルへ届く。**行を捨てるのはシェルの仕事である。**
-///
-/// # 条件の順序に意味がある
-///
-/// **フラグを消費するのは最後である。** 先に消費すると、深さ 1 や
-/// カーネル由来の割り込みで**フラグだけが消えて終了させられない。**
-///
-/// # 3 つの条件
-///
-/// - **深さが 2 以上**（子が走っている）。深さ 1 はシェル自身なので終了させない
-/// - **その割り込みが Ring 3 から来た**（`CS` の RPL が 3）。例外側の条件 (2) と
-///   同じ形で、**CPU が積んだ事実だけを見る**
-/// - **フラグが立っている**（そして降ろす）
-///
-/// # 契約（境界の関数。2026-09-28。9d-2 で共通の側から呼ぶ形にした）
-///
-/// - 呼ぶのは外からの割り込みの入口関数（`crate::interrupts::on_external_interrupt`）だけで、Local APIC の
-///   タイマを完了させた後、スケジューラへ渡す前に呼ぶ。条件が揃わなければ何もせずに戻り、揃えば BKL を解いて
-///   戻らない。
-/// - 畳むかどうかの方針（中断の要求・切り離したスロット）も、まだここにある。方針を共通の側へ移し、畳むのを
-///   出口の動きにするのは 9d-3 である（`ADR-0072` の 4 の「途中で戻る道」）。
+/// 畳む前に、遠征があることとユーザーから来たことを確かめ直す。どちらかが外れていたら、畳まずに名前を出して
+/// 止まる（`ensure_child` と同じく panic で止める。Halt and Dump。`ADR-0004`）——**共通の側の方針の誤りで、
+/// 遠征の外へ longjmp しないため。**
 ///
 /// # Safety
 ///
-/// `interrupted` は入口が作った文脈であること（[`Interrupted`] を作れるのは入口だけである）。遠征中
-/// （深さ 2 以上）なら `RECOVERY` は `ring3::enter` が保存済みである。EOI を送った後に呼ぶこと。
-pub unsafe fn fold_if_interrupted(
-    interrupted: &Interrupted<'_>,
-    bkl: &mut Option<crate::bkl::BklGuard>,
-) {
-    // 破壊テスト (S12 前の手当て C, kill-fold-at-depth-one): 深さ 1 でも終了させる。
-    // **シェル自身が Ctrl+C で死ぬ**ので、`init` が起動し直す回数が増える。
-    #[cfg(feature = "kill-fold-at-depth-one-test")]
-    const MINIMUM_DEPTH: usize = 1;
-    #[cfg(not(feature = "kill-fold-at-depth-one-test"))]
-    const MINIMUM_DEPTH: usize = 2;
-
-    let depth = crate::arch::x86_64::ring3::depth();
-    // **切り離して起動するスロットは深さ 1 でも終了させる（`ADR-0063` の (b3)）。** **そこに居るのは
-    // 常に子で、シェルは居ない**——**`spin | cat` の `spin` はスロット 1 の深さ 1 である。**
-    // **1 回の押しで終了させるのは 1 本である**（フラグは `take` で 1 回だけ消費される）。**両方が
-    // Ring 3 で回っていれば 2 回押す。** **カーネルの中で待っている子には届かない**
-    // （`ADR-0063` の (b3) の限界）。
-    let minimum_depth =
-        if crate::arch::x86_64::ring3::current_slot() == crate::task::detached_slot() {
-            1
-        } else {
-            MINIMUM_DEPTH
-        };
-    if depth < minimum_depth {
-        // **深さ 1 を弾いたことを数える（W2-c-2 の対策）。**
-        // **既定では 1 以上、破壊テストでは 0 である**（[`DEPTH_ONE_NOT_FOLDED`] の doc）。
-        if depth == 1 {
-            DEPTH_ONE_NOT_FOLDED.fetch_add(1, Ordering::Relaxed);
-        }
-        return;
-    }
-    if (interrupted.context.cs & 0b11) != 3 {
-        return;
-    }
-    if !crate::input::take_interrupt_request() {
-        return;
+/// 共通の側の入口関数が戻った後（Local APIC のタイマを完了させ、BKL のガードを解いた後）に呼ぶこと。
+unsafe fn fold_excursion(interrupted: &Interrupted<'_>) -> ! {
+    if interrupted.excursion_depth() == 0 || !interrupted.from_user() {
+        panic!(
+            "fold: the common side asked to fold an excursion, but the interrupted context is not in \
+             one (depth {}, from user {})",
+            interrupted.excursion_depth(),
+            interrupted.from_user()
+        );
     }
 
     crate::arch::x86_64::ring3::note_interrupted();
 
-    // **BKL は自分で解く。** 下は longjmp で `Drop` を走らせない。
-    // **取ったまま出ると二度と解かれない**（`syscall_entry` の [`SYS_EXIT`] と
-    // まったく同じ形である）。
-    //
-    // 破壊テスト (S12 前の手当て C, kill-fold-keep-bkl): 解かずに終了させる。次に BKL を
-    // 取る者が、同じコアの再取得として検出する。**`user-exit-keep-bkl` と
-    // 同じ機序で、入口が `Syscall` ではなく `Irq` である点だけが違う。**
-    #[cfg(not(feature = "kill-fold-keep-bkl-test"))]
-    drop(bkl.take());
-    #[cfg(feature = "kill-fold-keep-bkl-test")]
-    let _ = bkl;
-
-    // SAFETY: 深さ 2 以上なので遠征中で、RECOVERY は保存済み。BKL は上で解いた。
+    // SAFETY: 遠征の中（深さ 1 以上）でユーザーの文脈から入っているので、RECOVERY は保存済みである（上で
+    // 確かめた）。EOI は送り、BKL のガードは解いてある（この関数の契約）。
     unsafe { crate::arch::x86_64::ring3::leave_ring3() }
 }
 

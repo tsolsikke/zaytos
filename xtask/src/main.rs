@@ -15297,7 +15297,7 @@ fn judge_shell_session(
     //
     // **畳んだ側ではなく弾いた側を数えている。** **畳んだ側では破壊が捕まらない**
     // ——**深さ 1 で Ring 3 に居るウィンドウが μs 単位で、打鍵の間隔 32 ミリ秒に対して 1% 未満の
-    // 見込みだからである**（`kernel/src/arch/x86_64/idt` の `DEPTH_ONE_NOT_FOLDED` の doc）。
+    // 見込みだからである**（`kernel/src/interrupts.rs` の `DEPTH_ONE_NOT_FOLDED` の doc）。
     let depth_one_was_not_folded = depth_one_not_folded.is_some_and(|count| count >= 1);
     // **判定 7——単調な時刻が進む（W2-d+。`ADR-0062`）。**
     let clock_advanced = match (clock_from, clock_to) {

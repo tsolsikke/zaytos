@@ -13,7 +13,7 @@ use common::arch::x86_64::cpu;
 use common::log::Logger;
 use common::machine::pc::serial::SerialPort;
 
-use crate::arch::x86_64::idt;
+use crate::arch::x86_64::{idt, ExitAction};
 
 /// 探りの各段で待つスピン上限（S5-c）。上限の無い待ちを書かない。
 #[cfg(feature = "smp-tlb-shootdown-probe")]
@@ -97,14 +97,15 @@ pub fn max_tick_jump() -> u64 {
 /// - `arrival` は、入口のスタブが積んだ到着の番号（x86 ではベクタ）である。ここでは読まずに、`machine` の受け取る
 ///   （[`crate::machine::pc::claim`]）と、キーボードの最初の到着の記録へ渡すだけである（番号の型を分けるのは
 ///   `ADR-0072` の 3。9e）。
-/// - 戻り値は、入口が戻るときに使うスタックポインタである。切り替えないなら割り込まれた文脈のもの、切り替えるなら
-///   次のタスクのものを返す。遠征を畳むときは戻らない。
+/// - 戻り値は出口の動きである（9d-3）。ふつうは入口が戻るときに使うスタックポインタ（切り替えないなら割り込まれた
+///   文脈のもの、切り替えるなら次のタスクのもの）を返し、遠征を畳むと決めたら [`ExitAction::FoldExcursion`] を
+///   返す。畳むのは入口が、この関数が戻った後に行う。
 /// - BKL を取らない種類（IPI の探り）は、受け取った直後に分けて、BKL を取らずに完了させる。それ以外は BKL の中で
-///   扱い、BKL は戻る直前に解く（遠征を畳むときは、畳む関数が解く）。
+///   扱い、BKL は戻るときに解く（遠征を畳むときも同じ）。
 pub fn on_external_interrupt(
     arrival: u8,
     interrupted: &crate::arch::x86_64::Interrupted<'_>,
-) -> u64 {
+) -> ExitAction {
     use crate::machine::pc::Claim;
 
     let current_sp = interrupted.stack_pointer();
@@ -122,14 +123,12 @@ pub fn on_external_interrupt(
     if claimed == Claim::IpiProbe {
         // SAFETY: 実際に配送された割り込みに対してのみ、自コアの LAPIC へ送る。
         unsafe { crate::machine::pc::complete(claimed) };
-        return current_sp;
+        return ExitAction::Resume(current_sp);
     }
 
-    // **`Option` にしてあるのは、出口を通らない経路が 1 つあるからである**
-    // （S12 前の手当て、C）——**中断による終了処理**は longjmp で出ていくので
-    // `Drop` が走らない。**`syscall_entry` が [`SYS_EXIT`] と `SYS_SPAWN` の
-    // ために同じ形にしているのに倣う。**
-    let mut bkl = Some(acquire_bkl_for_interrupt());
+    // BKL のガードは、この関数から戻るときに解く。遠征を畳むときも、畳むのは入口がこの関数から戻った後なので、
+    // ガードはふつうに解かれる（9d-3。それまでは、畳む関数が longjmp の前に自分で解いていた）。
+    let _bkl = acquire_bkl_for_interrupt();
 
     match claimed {
         // Local APIC のスプリアス割り込み（S2-d-1）。EOI を送らずに戻る。
@@ -141,7 +140,7 @@ pub fn on_external_interrupt(
         //
         // 回数は PIC のスプリアス（IRQ7 / IRQ15）とは別に、受け取る側（`claim`）が数える。機序が違い、
         // 合流させるとどちらが起きたのかハートビートから分からなくなる。
-        Claim::Spurious => return current_sp,
+        Claim::Spurious => return ExitAction::Resume(current_sp),
         // Local APIC タイマ（S2-d-2）。LVT 由来なので IRQ 番号を持たない。
         //
         // 判定の順序（LVT 由来を IRQ の表より先に見る）は、受け取る側（`claim`）が固定している。
@@ -161,15 +160,21 @@ pub fn on_external_interrupt(
             unsafe { crate::machine::pc::complete(claimed) };
             // **中断（Ctrl+C）で遠征を終了させる地点はここである（S12 前の手当て、C）。**
             //
-            // **EOI を送った後でなければならない。** 下は longjmp で出ていくので、
+            // **EOI を送った後でなければならない。** 畳むのは longjmp で出ていく形なので、
             // **EOI より前に置くと、割り込みを終えないまま抜ける。**
             // **IRQ1 の側に置けないのはこれが理由である**——あちらの EOI は
             // ハンドラより後ろにあり、そこから抜けるとキーボードが二度と来ない。
             //
-            // SAFETY: `interrupted` は入口が作った文脈で、読み取りのみ。Local APIC のタイマは上で完了させた。
-            // 終了させる条件が揃ったときだけ longjmp する（戻らない）。
-            // この枠（`on_external_interrupt`）には、BKL のガードのほかに Drop を持つ値を置かない（9d-3 で畳むのを出口の動きにするまで）。
-            unsafe { crate::arch::x86_64::fold_if_interrupted(interrupted, &mut bkl) };
+            //
+            // 畳むと決めたら、出口の動きとして返す。longjmp は入口が、この関数から戻った後に行う（9d-3）。
+            if should_fold_excursion(interrupted) {
+                // 破壊テスト (S12 前の手当て C, kill-fold-keep-bkl): 解かずに終了させる。次に BKL を
+                // 取る者が、同じコアの再取得として検出する。**`user-exit-keep-bkl` と
+                // 同じ機序で、入口が `Syscall` ではなく `Irq` である点だけが違う。**
+                #[cfg(feature = "kill-fold-keep-bkl-test")]
+                core::mem::forget(_bkl);
+                return ExitAction::FoldExcursion;
+            }
             // AP もスケジューラへ入る（S4-c-3-2b）。
             //
             // S4-a から S4-c-3-2a までは、ここで AP を手前へ返していた。当時の AP は
@@ -181,7 +186,7 @@ pub fn on_external_interrupt(
             // 無くなったので「分岐を外す」破壊テストは構成できない。役目
             // （sentinel が止めることの実証）は `smp-ap-no-sentinel-clear` が
             // 引き継いでいる（あちらは分岐ではなく sentinel の解除を落とす）。
-            return crate::task::on_timer_tick(current_sp);
+            return ExitAction::Resume(crate::task::on_timer_tick(current_sp));
         }
         // この系に 1 つのタイマ（8259 経由の PIT）。較正より前と、Local APIC のタイマへ移れなかった機械で届く。
         // 今のタイマかどうかは、受け取る側（`claim`）が見分けてある（8259 の採番ではなく、現在の配送先を問う）。
@@ -195,7 +200,7 @@ pub fn on_external_interrupt(
             unsafe { crate::machine::pc::complete(claimed) };
             // タイマはプリエンプティブに切り替える（M5-d）。EOI はここより前で送っているので、次タスクは
             // IF=1 で次ティックを受けられる。遠征を畳むのは Local APIC のタイマの側だけである（今までどおり）。
-            return crate::task::on_timer_tick(current_sp);
+            return ExitAction::Resume(crate::task::on_timer_tick(current_sp));
         }
         // このベクタはどの IRQ か。移行済みの経路も含めて、受け取る側（`claim`）が引いてある（S2-d-1c）。
         //
@@ -247,7 +252,7 @@ pub fn on_external_interrupt(
     }
 
     // キーボードやテストベクタは切り替えない（入場時の RSP を返す）。
-    current_sp
+    ExitAction::Resume(current_sp)
 }
 
 /// yield の入口関数（`ADR-0072` の 1 のソフトの入口。2026-09-28。境界の段階の手順 2 の 9d-2）。
@@ -295,6 +300,93 @@ fn advance_clock() {
         // ——**IF=0 かつ BKL の内側である**（外からの割り込みの入口関数が取っている）。
         crate::task::wake_expired_timers(now);
     }
+}
+
+/// 中断（Ctrl+C）が要求されていれば、走っている子の遠征を畳むと決める（S12 前の手当て、C）。
+///
+/// **条件が揃わなければ偽を返す。揃えば真を返し、畳むのは入口が行う**（出口の動き。2026-09-28。9d-3。それまでは
+/// `arch` の `fold_if_interrupted` が、決めることと畳むことを両方持っていた）。
+///
+/// # ここが「深さで分ける」唯一の場所である
+///
+/// **フラグを立てる側は深さを見ない**（`crate::input::note_scancode_for_interrupt`）。
+/// **消費する側もここだけである。** 深さ 1 では消費されず、フラグは立ったまま残るが、
+/// **子を起こす直前に降りる**（`crate::userland` が呼ぶ
+/// `crate::input::clear_interrupt_request`）ので持ち越さない。
+///
+/// **深さ 1 の 0x03 は、この経路をまったく通らない。** `Decoder` が
+/// 制御文字として出し、前景を通してシェルへ届く。**行を捨てるのはシェルの仕事である。**
+///
+/// # 条件の順序に意味がある
+///
+/// **フラグを消費するのは最後である。** 先に消費すると、深さ 1 や
+/// カーネル由来の割り込みで**フラグだけが消えて終了させられない。**
+///
+/// # 3 つの条件
+///
+/// - **深さが 2 以上**（子が走っている）。深さ 1 はシェル自身なので終了させない
+/// - **その割り込みが Ring 3 から来た**（`CS` の RPL が 3）。例外側の条件 (2) と
+///   同じ形で、**CPU が積んだ事実だけを見る**
+/// - **フラグが立っている**（そして降ろす）
+fn should_fold_excursion(interrupted: &crate::arch::x86_64::Interrupted<'_>) -> bool {
+    // 破壊テスト (S12 前の手当て C, kill-fold-at-depth-one): 深さ 1 でも終了させる。
+    // **シェル自身が Ctrl+C で死ぬ**ので、`init` が起動し直す回数が増える。
+    #[cfg(feature = "kill-fold-at-depth-one-test")]
+    const MINIMUM_DEPTH: usize = 1;
+    #[cfg(not(feature = "kill-fold-at-depth-one-test"))]
+    const MINIMUM_DEPTH: usize = 2;
+
+    let depth = interrupted.excursion_depth();
+    // **切り離して起動するスロットは深さ 1 でも終了させる（`ADR-0063` の (b3)）。** **そこに居るのは
+    // 常に子で、シェルは居ない**——**`spin | cat` の `spin` はスロット 1 の深さ 1 である。**
+    // **1 回の押しで終了させるのは 1 本である**（フラグは `take` で 1 回だけ消費される）。**両方が
+    // Ring 3 で回っていれば 2 回押す。** **カーネルの中で待っている子には届かない**
+    // （`ADR-0063` の (b3) の限界）。
+    let minimum_depth = if interrupted.excursion_slot() == crate::task::detached_slot() {
+        1
+    } else {
+        MINIMUM_DEPTH
+    };
+    if depth < minimum_depth {
+        // **深さ 1 を弾いたことを数える（W2-c-2 の対策）。**
+        // **既定では 1 以上、破壊テストでは 0 である**（[`DEPTH_ONE_NOT_FOLDED`] の doc）。
+        if depth == 1 {
+            DEPTH_ONE_NOT_FOLDED.fetch_add(1, Ordering::Relaxed);
+        }
+        return false;
+    }
+    if !interrupted.from_user() {
+        return false;
+    }
+    crate::input::take_interrupt_request()
+}
+
+/// 深さがちょうど 1 だったので畳まなかった回数（W2-c-2 の手当て。`ADR-0061`）。
+///
+/// **「深さ 1 では畳まない」が働いたことの観測である。** **判定は「1 以上」を見る。**
+///
+/// # 既定では必ず 1 以上になる
+///
+/// **シェルは遠征中（深さ 1）にタイマ IRQ を受け続けるので、ここを通る。**
+/// **打鍵にも待ちにも依らない**——**タイマは 100Hz で入り、セッションは数十秒ある。**
+///
+/// # 破壊テストでは 0 になる
+///
+/// **`kill-fold-at-depth-one-test` は [`MINIMUM_DEPTH`] を 1 にするので、深さ 1 は
+/// この分岐へ来ない。**
+///
+/// # なぜ「深さ 1 で畳んだ回数」を数えないのか
+///
+/// **それでは破壊が捕まらない。** **終了させるには「深さ 1」と「Ring 3 から来た IRQ」の
+/// 両方が要るが、待つ形ではシェルが Ring 3 に居るのは `read(0)` が戻ってから次の
+/// `read(0)` へ入るまでの μs 単位しかない**——**打鍵の間隔 32 ミリ秒に対して 1% 未満の
+/// 見込みで、破壊テストを立てても 0 のままになる**（`ADR-0061`。**実測で 4 回続けて
+/// 検出されなかった**）。**弾いた側を数えると、そのウィンドウに依らない。**
+static DEPTH_ONE_NOT_FOLDED: AtomicU64 = AtomicU64::new(0);
+
+/// [`DEPTH_ONE_NOT_FOLDED`] の値（W2-c-2 の対策。`init` がセッションの後に出す）。
+pub fn depth_one_not_folded() -> u64 {
+    DEPTH_ONE_NOT_FOLDED.load(Ordering::Relaxed)
 }
 
 /// タイマ割り込みで駆動されるメインループ。

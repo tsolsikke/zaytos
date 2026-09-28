@@ -1864,8 +1864,8 @@ unsafe fn run_loaded_program(
     // **前の中断要求を持ち越さない（S12 前の手当て、C）。**
     //
     // **深さ 1 で Ctrl+C を押すと、フラグは立つが誰も消費しない**——
-    // **終了させる地点は深さ 2 以上でしか発火しない**（`crate::arch::x86_64::idt` の
-    // `fold_if_interrupted`）。**降ろさずに子を起動すると、その子が
+    // **終了させる地点は深さ 2 以上でしか発火しない**（`crate::interrupts` の
+    // `should_fold_excursion`）。**降ろさずに子を起動すると、その子が
     // 起動した瞬間に止まる。**
     //
     // 破壊テスト (S12 前の手当て C, kill-keep-stale-interrupt): 降ろさない。

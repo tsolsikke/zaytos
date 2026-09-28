@@ -1315,7 +1315,7 @@ pub fn waiting_together() -> u64 {
 /// 切り離して起動した 1 本が走る Ring 3 のスロット（`ADR-0063` の (b3)）。
 ///
 /// **このスロットに居るのは常に子である**（シェルはスロット 0 の深さ 1）。**Ctrl+C の終了処理が
-/// 深さ 1 でも効くのはここだけである**（`idt::fold_if_interrupted`）。
+/// 深さ 1 でも効くのはここだけである**（`interrupts::should_fold_excursion`）。
 pub fn detached_slot() -> usize {
     ring3_slot_of(RING3_TASK)
 }
