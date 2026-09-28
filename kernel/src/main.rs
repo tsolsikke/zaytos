@@ -4979,7 +4979,12 @@ fn start_timer(
     }
 
     // --- 5. sti 前 7 項目を再検証する ---
-    let report = kernel::arch::x86_64::interrupt_readiness::verify_ready_for_sti_with_timer(logger);
+    // 開いていてよい源は、タイマと、処理を登録した源である（9d-5。今はキーボードと virtio-blk）。
+    let registered = kernel::interrupts::registered_interrupt_sources();
+    let report = kernel::arch::x86_64::interrupt_readiness::verify_ready_for_sti_with_timer(
+        logger,
+        registered.as_slice(),
+    );
     if !report.may_enable_interrupts() {
         logger.error(format_args!(
             "interrupt-test: the pre-sti checks did not pass; refusing to sti (ADR-0018 §2)"

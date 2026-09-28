@@ -442,11 +442,20 @@ impl HandlerTable {
     /// 登録を閉じ、処理のある源の一覧を返す。
     fn close(&self) -> RegisteredSources {
         self.closed.store(true, Ordering::Release);
-        let mut sources = [false; INTERRUPT_SOURCES];
-        for (registered, slot) in sources.iter_mut().zip(&self.handlers) {
-            *registered = slot.load(Ordering::Acquire) != 0;
+        self.sources()
+    }
+
+    /// 処理のある源の一覧（小さい順）。登録は閉じない。
+    fn sources(&self) -> RegisteredSources {
+        let mut sources = [0; INTERRUPT_SOURCES];
+        let mut count = 0;
+        for (source, slot) in (0..).zip(&self.handlers) {
+            if slot.load(Ordering::Acquire) != 0 {
+                sources[count] = source;
+                count += 1;
+            }
         }
-        RegisteredSources(sources)
+        RegisteredSources { sources, count }
     }
 
     /// 源に登録した処理（無ければ `None`）。
@@ -467,18 +476,27 @@ impl HandlerTable {
     }
 }
 
-/// 処理のある源の一覧（起動ログの行に出す）。
+/// 処理のある源の一覧（小さい順）。起動ログの行に出し、割り込みを許してよい源の期待に使う（9d-5）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RegisteredSources([bool; INTERRUPT_SOURCES]);
+pub struct RegisteredSources {
+    sources: [u8; INTERRUPT_SOURCES],
+    count: usize,
+}
+
+impl RegisteredSources {
+    /// 処理のある源（小さい順）。
+    pub fn as_slice(&self) -> &[u8] {
+        &self.sources[..self.count]
+    }
+}
 
 impl core::fmt::Display for RegisteredSources {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let mut sources = (0..INTERRUPT_SOURCES).filter(|&source| self.0[source]);
-        let Some(first) = sources.next() else {
+        let Some((first, rest)) = self.as_slice().split_first() else {
             return f.write_str("none");
         };
         write!(f, "{first}")?;
-        for source in sources {
+        for source in rest {
             write!(f, ", {source}")?;
         }
         Ok(())
@@ -567,6 +585,15 @@ pub fn report_arrivals_without_handler_once<W: core::fmt::Write>(logger: &mut Lo
 /// 登録は名前つきで止まる。戻り値は、処理のある源の一覧である（起動ログの行に出す）。
 pub fn close_interrupt_handler_registration() -> RegisteredSources {
     INTERRUPT_HANDLERS.close()
+}
+
+/// 処理を登録してある源の一覧（小さい順。`ADR-0072` の 5。2026-09-28。9d-5）。登録は閉じない。
+///
+/// 割り込みを許してよい源を確かめる所（`sti` の前の確かめと、較正の中の I/O APIC の読み）が、期待に使う。
+/// 源は処理を登録してから許可するので、開いていてよいのはこの一覧の源だけである（タイマは別の種類で、
+/// ここには入らない）。
+pub fn registered_interrupt_sources() -> RegisteredSources {
+    INTERRUPT_HANDLERS.sources()
 }
 
 /// タイマ割り込みで駆動されるメインループ。
@@ -658,17 +685,15 @@ pub unsafe fn run_timer_loop(
         // 呼ばずに S2-d-1c（配送が変わる段階）へ入ると、そこで落ちたときに
         // 「切り替えが悪いのか、実装が悪いのか」を切り分けられない。
         //
-        // 期待は「I/O APIC 経由へ移した IRQ だけが開いている」である。
-        // PIC のマスク状態をここへ持ち込まないこと。別のコントローラの
-        // 状態である。S2-d-1c で IRQ1 を移したので、開いているのはそれだけに
-        // なる。期待は呼び出し側が持つ（境界が独自に期待を持たない）。
-        let routed: &[u8] =
-            if crate::machine::pc::irq::routed_to_apic(crate::keyboard::KEYBOARD_IRQ) {
-                &[crate::keyboard::KEYBOARD_IRQ]
-            } else {
-                &[]
-            };
-        match crate::machine::pc::irq::survey_apic_masks(apic, routed) {
+        // 期待は「処理を登録した源だけが開いている」である（9d-5。2026-09-28）。源は処理を登録してから許可し、
+        // I/O APIC がある構成では、処理を登録した源はすべて I/O APIC 経由へ移してある（キーボードと
+        // virtio-blk）。PIC のマスク状態をここへ持ち込まないこと。別のコントローラの状態である。期待は
+        // 呼び出し側が持つ（境界が独自に期待を持たない）。
+        //
+        // **9d-5 までは、期待にキーボードの IRQ1 だけを渡していた。** virtio-blk の IRQ 11 も開いているので、
+        // 下の行は「only the routed IRQs are open=false」だった。
+        let registered = registered_interrupt_sources();
+        match crate::machine::pc::irq::survey_apic_masks(apic, registered.as_slice()) {
             Some(check) => logger.info(format_args!(
                 "apic: the I/O APIC controller reads its redirection entries: {check}, \
                  only the routed IRQs are open={} (the PIC still owns every other line)",
@@ -1668,5 +1693,16 @@ mod tests {
         assert_eq!(table.register(11, ignore), Ok(()));
         assert_eq!(table.register(1, ignore), Ok(()));
         assert_eq!(format!("{}", table.close()), "1, 11");
+    }
+
+    #[test]
+    fn the_sources_can_be_listed_without_closing() {
+        fn ignore(_arrival: u8) {}
+        let table = HandlerTable::new();
+        assert_eq!(table.register(11, ignore), Ok(()));
+        assert_eq!(table.register(1, ignore), Ok(()));
+        assert_eq!(table.sources().as_slice(), &[1, 11]);
+        assert_eq!(table.register(5, ignore), Ok(()));
+        assert_eq!(table.close().as_slice(), &[1, 5, 11]);
     }
 }

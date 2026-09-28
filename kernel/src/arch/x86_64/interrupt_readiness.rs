@@ -118,31 +118,42 @@ pub fn verify_ready_for_sti(logger: &mut Logger<SerialPort>) -> ReadinessReport 
     verify_ready(logger, &[], false)
 }
 
-/// タイマとキーボードを解禁した後の 7 項目検証。
+/// タイマと、処理を登録した源を解禁した後の 7 項目検証。
 ///
 /// [`verify_ready_for_sti`] との違いは 2 点だけ。項目 5 の期待値が
-/// 「全マスク」から「IRQ0 だけ解除」へ変わることと、項目 7（EOI）が
+/// 「全マスク」から「IRQ0 と、処理を登録した源だけ解除」へ変わることと、項目 7（EOI）が
 /// `Unverifiable` ではなくなることである。項目 7 が `Verified` へ移るのは
 /// 実際にティックが増え続けたときなので、この時点では
 /// 「実装済み・これから検証」として扱う。
-pub fn verify_ready_for_sti_with_timer(logger: &mut Logger<SerialPort>) -> ReadinessReport {
-    // IRQ0（タイマ）と IRQ1（キーボード）を解禁した状態。ハンドラを書いた
+///
+/// `sources_with_handler` は、共通の側が処理を登録した源（`interrupts::registered_interrupt_sources`）である
+/// （9d-5。2026-09-28。それまでは、ここでキーボードの IRQ1 を名指ししていた）。
+pub fn verify_ready_for_sti_with_timer(
+    logger: &mut Logger<SerialPort>,
+    sources_with_handler: &[u8],
+) -> ReadinessReport {
+    // IRQ0（タイマ）と、処理を登録した源を解禁した状態。ハンドラを書いた
     // ベクタだけが開いていることを、実際の IMR と突き合わせる。
     //
-    // 8259 に残っている IRQ だけを数える（S2-d-1c）。IRQ1 を I/O APIC 経由へ
-    // 移すと、8259 側ではマスクされているのが正しい。移行後も IRQ1 を
-    // 「開いているはず」と期待すると、正しい状態でこの検査が落ちる。
+    // 8259 に残っている IRQ だけを数える（S2-d-1c）。I/O APIC 経由へ移した源は、
+    // 8259 側ではマスクされているのが正しい。移行後も「開いているはず」と
+    // 期待すると、正しい状態でこの検査が落ちる。
     // 移行状態を見て期待を作るので、移行の前後どちらでも成立する。
     //
-    // **i8042 が無ければ IRQ1 は開けていない**（HW-b。`ADR-0068`）。8259 でも閉じている
-    // のが正しい。
-    if crate::machine::pc::irq::routed_to_apic(crate::keyboard::KEYBOARD_IRQ)
-        || !crate::keyboard::controller_present()
-    {
-        return verify_ready(logger, &[0], true);
+    // 入りきらない源は期待に入れない。その源が開いていれば食い違いになり、`sti` を拒む側へ倒れる。
+    let mut open = [0; MAX_OPEN_AT_THE_PIC];
+    let mut count = 1; // 先頭は IRQ0（タイマ）。
+    for &source in sources_with_handler {
+        if !irq::routed_to_apic(source) && count < open.len() {
+            open[count] = source;
+            count += 1;
+        }
     }
-    verify_ready(logger, &[0, crate::keyboard::KEYBOARD_IRQ], true)
+    verify_ready(logger, &open[..count], true)
 }
+
+/// 8259 で開いているはずの IRQ の数の上限（タイマの IRQ0 と、ISA の IRQ 16 本）。
+const MAX_OPEN_AT_THE_PIC: usize = 17;
 
 fn verify_ready(
     logger: &mut Logger<SerialPort>,
