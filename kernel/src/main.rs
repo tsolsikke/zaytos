@@ -5147,6 +5147,10 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>, i8042: kernel::acpi::I8042Pre
     // 開ける前に、在ることを記録する（`sti` 前の検証と心拍の行がこれを見る）。
     keyboard::mark_controller_present();
     // 開ける前に、割り込みの処理を登録する（`ADR-0072` の 5。処理を登録してから源を許可する）。
+    //
+    // 破壊テスト (2026-09-28, keyboard-handler-not-registered-test): 登録しない。最初の IRQ1 が処理の無い源として
+    // 届き、`machine` がその源を禁止してから完了させ、共通の側が数えて 1 度だけ出す（`ADR-0072` の 4。9d-4b）。
+    #[cfg(not(feature = "keyboard-handler-not-registered-test"))]
     keyboard::register_irq_handler();
     // SAFETY: ベクタ 0x21 には IRQ スタイルのスタブが入っており、直前に登録した処理がデータ
     // ポートを読み切ってから、EOI が送られる。
@@ -10647,6 +10651,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "interrupt-handler-register-after-boot-test",
         cfg!(feature = "interrupt-handler-register-after-boot-test"),
         "起動の後に、割り込みの処理を登録しに行く",
+    ),
+    (
+        "keyboard-handler-not-registered-test",
+        cfg!(feature = "keyboard-handler-not-registered-test"),
+        "キーボードの割り込みの処理を登録しない",
     ),
     (
         "keyboard-drop-arrows-test",

@@ -17,7 +17,7 @@
 //! オフセットとビット位置は [`crate::machine::pc::apic`] が持ち、こちらはそこが出す
 //! 名前付きの操作だけを呼ぶ。**同じ事実を 2 箇所に置かない。**
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 
 use super::{Controller, MaskCheck, MaskState, MASK_BITMAP_WORDS};
 
@@ -37,6 +37,20 @@ static LAPIC_EOI_BASE: AtomicU64 = AtomicU64::new(NOT_INSTALLED);
 
 /// [`LAPIC_EOI_BASE`] の「未設定」。Local APIC が物理アドレス 0 に載ることは無い。
 const NOT_INSTALLED: u64 = 0;
+
+/// 割り込み文脈から、I/O APIC へ移した IRQ を禁止するための I/O APIC のページ先頭（2026-09-28。9d-4b）。
+///
+/// [`LAPIC_EOI_BASE`] と同じ形である。禁止は割り込みハンドラの中から行い（処理の無い源。`ADR-0072` の 4）、
+/// 要るのは I/O APIC のページ先頭と、その IRQ の redirection entry の添字（[`ROUTED_ENTRY`]）だけなので、
+/// それだけをアトミックで持つ。[`Apic::new`] が設定する。[`NOT_INSTALLED`] は「まだ設定されていない」。
+static IO_APIC_BASE: AtomicU64 = AtomicU64::new(NOT_INSTALLED);
+
+/// I/O APIC へ移した IRQ ごとの redirection entry の添字（2026-09-28。9d-4b）。`route` が、許可より前に書く。
+static ROUTED_ENTRY: [AtomicU16; super::MAX_LEGACY_IRQS] =
+    [const { AtomicU16::new(NO_ENTRY) }; super::MAX_LEGACY_IRQS];
+
+/// [`ROUTED_ENTRY`] の「移していない」。redirection entry の添字は 8 ビットに収まるので、この値にはならない。
+const NO_ENTRY: u16 = u16::MAX;
 
 /// I/O APIC 経由へ移した IRQ の EOI を送る。
 ///
@@ -74,6 +88,41 @@ pub(super) unsafe fn end_of_interrupt_for_routed_irq(spurious: bool) {
 /// ので危険は無いが、シグネチャを揃えてある。
 pub(super) unsafe fn spurious_for_routed_irq(_irq: u8) -> bool {
     false
+}
+
+/// I/O APIC へ移した IRQ を禁止する（2026-09-28。`ADR-0072` の 4。9d-4b）。redirection entry のマスクビットだけを
+/// 立て、ベクタ欄と配送設定は保つ。
+///
+/// 控え（[`IO_APIC_BASE`] と [`ROUTED_ENTRY`]）が無ければ、名前つきで止まる。I/O APIC へ移した IRQ には `route` が
+/// 許可より前に控えを書くので、無いのは内部の食い違いである。黙って戻ると、下ろす者の居ないレベルの源が
+/// 鳴り続ける。
+///
+/// # Safety
+///
+/// 実際に配送された割り込みのハンドラの中から、割り込みを止めたまま呼ぶこと。ほかの CPU が同時に同じ
+/// I/O APIC を触っていないこと（BKL の中で呼ぶ）。
+pub(super) unsafe fn mask_routed_irq(irq: u8) {
+    let base = IO_APIC_BASE.load(Ordering::Relaxed);
+    let entry = ROUTED_ENTRY
+        .get(usize::from(irq))
+        .map_or(NO_ENTRY, |slot| slot.load(Ordering::Relaxed));
+    let (Ok(entry), false) = (u8::try_from(entry), base == NOT_INSTALLED) else {
+        panic!(
+            "irq: cannot disable IRQ {irq}: it is routed to the I/O APIC, but the I/O APIC or its \
+             redirection entry was not recorded"
+        );
+    };
+    // SAFETY: `Apic::new` がマッピングを確認した I/O APIC のページ先頭と、`route` がこの IRQ に書いた添字である。
+    // マスクビットだけを立てる read-modify-write で、ベクタ欄と配送設定は保つ。番号の選択と窓の読み書きの 2 手は、
+    // 読み書きする関数がこのCPUの割り込みを止めて行う。ほかの CPU とは BKL で排他する（呼び出し側の契約）。
+    unsafe {
+        let low = crate::machine::pc::apic::read_redirection_entry_low(base, entry);
+        crate::machine::pc::apic::write_redirection_entry_low(
+            base,
+            entry,
+            low | crate::machine::pc::apic::ENTRY_MASKED_BIT,
+        );
+    }
 }
 
 /// Local APIC と I/O APIC の組。
@@ -119,6 +168,8 @@ impl Apic {
         let lapic_virt = direct_map.phys_to_virt(mapped.local_apic_phys()).as_u64();
         // 割り込み文脈から EOI を送るために控える（S2-d-1c）。
         LAPIC_EOI_BASE.store(lapic_virt, Ordering::Relaxed);
+        // 割り込み文脈から、処理の無い源を禁止するために控える（9d-4b）。
+        IO_APIC_BASE.store(io_apic_virt, Ordering::Relaxed);
 
         Some(Self {
             io_apic_virt,
@@ -302,6 +353,11 @@ impl Controller for Apic {
         // 立てたまま書く**ので、この書き込みで割り込みが届き始めることはない。
         unsafe {
             crate::machine::pc::apic::write_redirection_entry_low(self.io_apic_virt, entry, low)
+        }
+        // 割り込み文脈から禁止するために、この IRQ の添字を控える（9d-4b）。**許可より前に控える**——許可するのは
+        // 呼び出し側（`route_to_apic`）で、この後である。
+        if let Some(slot) = ROUTED_ENTRY.get(usize::from(irq)) {
+            slot.store(u16::from(entry), Ordering::Relaxed);
         }
 
         // 破壊テスト (S4-a, ioapic-keyboard-broadcast): high dword の宛先も broadcast へ。

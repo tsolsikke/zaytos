@@ -2192,6 +2192,8 @@ pub fn spawn(
     // **シェルの後の最初の打鍵の配送を、ここで 1 度だけ報せる**（HW-e-2。`ADR-0068`）——**シェルが Enter の
     // エコーを終えた後なので、行の途中に入らない。** **パスを引く前なので、無い名前を打った回でも出る。**
     crate::keyboard::report_first_delivery_once(&mut logger);
+    // **処理の無い源を禁止したことも、ここで 1 度だけ報せる**（2026-09-28。`ADR-0072` の 4。9d-4b）。
+    crate::interrupts::report_arrivals_without_handler_once(&mut logger);
 
     let fs = crate::vfs::root_filesystem().map_err(SpawnError::Lookup)?;
     let inode = fs.lookup(path).map_err(SpawnError::Lookup)?;

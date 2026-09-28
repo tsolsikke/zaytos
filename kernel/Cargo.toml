@@ -91,6 +91,9 @@ alt-offset-test = ["interrupt-test-timer"]
 # 2026-09-28（`ADR-0072` の 5）: 起動の後に、割り込みの処理を登録しに行く。登録する側が名前つきで止める。
 # `--interrupt-test handler-after-boot`。
 interrupt-handler-register-after-boot-test = []
+# 2026-09-28（`ADR-0072` の 4）: キーボードの割り込みの処理を登録しない。最初の IRQ1 が処理の無い源として届き、
+# 禁止されて数えられる。`--ioapic-test keyboard-without-handler`。
+keyboard-handler-not-registered-test = []
 # リングバッファを極小にし、オーバーフロー検出が働くことを確認する。
 tiny-key-buffer = []
 # 生のスキャンコードをシリアルへ出す。エコーと二重になって読みにくいので

@@ -67,6 +67,7 @@
 //! | [`claim`] | モジュール関数 | 受け取るの判定はベクタと、表と今のタイマ（どちらもアトミック）だけで決まり、実装ごとに変わらない（`ADR-0072` の 2。2026-09-28） |
 //! | [`complete`] | 委譲する関数を束ねる | 完了の中身（EOI とスプリアスの見分け）は [`end_of_interrupt`] と [`is_spurious`] が実装へ委譲する（同上） |
 //! | [`spurious_counts`] | モジュール関数 | 観測値である。数えるのは [`claim`] と [`complete`] の中である（同上） |
+//! | [`disable_and_complete`] | 委譲する関数を束ねる | 処理の無い源の禁止（I/O APIC へ移した IRQ は redirection entry、8259 の IRQ は IMR）と、[`complete`] と同じ完了を束ねる（`ADR-0072` の 4。9d-4b） |
 //!
 //! # `TimerSource` は実装が 1 つしかない。これは原則の例外である
 //!
@@ -693,7 +694,8 @@ pub enum Claim {
     /// BSP にだけ届く。今のタイマでなくなった後に遅れて届いた 1 本は、ただの [`Claim::Irq`] として受け取る。
     GlobalTimer,
     /// ISA の IRQ（8259 経由か I/O APIC 経由）。**8259 の 7 番と 15 番がスプリアスかどうかは、ここではまだ
-    /// 分からない**（In-Service Register を読むのは [`complete`] の中である）。源の番号の型にするのは 9e である。
+    /// 分からない**（In-Service Register を読むのは [`complete`] と [`disable_and_complete`] の中である）。源の番号の
+    /// 型にするのは 9e である。
     Irq(u8),
     /// 受け取れない到着（試しのベクタや yield などのソフトの `int`）。数えるだけで、完了させない。
     Unclaimed,
@@ -756,7 +758,7 @@ fn classify(vector: u8, global_timer: Option<u8>, lookup: impl Fn(u8) -> Option<
 /// # 契約（境界の関数。2026-09-28）
 ///
 /// - [`claim`] が返したものに、処理が戻った後でちょうど 1 回呼ぶ。戻らない動き（切り替え、遠征を畳むこと）より
-///   前に呼ぶ。
+///   前に呼ぶ。処理の無い源には、代わりに [`disable_and_complete`] を呼ぶ。
 /// - [`Claim::Spurious`] と [`Claim::Unclaimed`] には呼ばない（呼んでも何もしない）。
 /// - [`Claim::GlobalTimer`] と [`Claim::Irq`] では、8259 の 7 番と 15 番がスプリアスかをここで見分け、
 ///   コントローラの決まりに従う（スプリアスなら数え、EOI はスレーブのスプリアスのときにマスタへだけ送る）。
@@ -779,29 +781,80 @@ pub unsafe fn complete(claimed: Claim) {
                 end_of_interrupt_for_lapic_timer();
             }
         }
-        // SAFETY: 呼び出し側の契約（8259 を同時に触る文脈が無いことを含む）。
-        Claim::GlobalTimer => unsafe { complete_isa_irq(GLOBAL_TIMER_IRQ) },
-        // SAFETY: 呼び出し側の契約（8259 を同時に触る文脈が無いことを含む）。
-        Claim::Irq(irq) => unsafe { complete_isa_irq(irq) },
+        Claim::GlobalTimer => {
+            // SAFETY: 呼び出し側の契約（8259 を同時に触る文脈が無いことを含む）。
+            unsafe { complete_isa_irq(GLOBAL_TIMER_IRQ, false) };
+        }
+        Claim::Irq(irq) => {
+            // SAFETY: 呼び出し側の契約（8259 を同時に触る文脈が無いことを含む）。
+            unsafe { complete_isa_irq(irq, false) };
+        }
         Claim::Spurious | Claim::Unclaimed => {}
     }
 }
 
-/// ISA の IRQ を完了させる（[`complete`] の中身）。8259 の 7 番と 15 番のスプリアスの見分けを含む。
+/// 処理の無い源を禁止してから完了させる（`ADR-0072` の 4。2026-09-28。境界の段階の手順 2 の 9d-4b）。
+///
+/// # 契約（境界の関数。2026-09-28）
+///
+/// - [`claim`] が [`Claim::Irq`] を返し、共通の側にその源の処理が登録されていなかったときに、[`complete`] の
+///   代わりにちょうど 1 回呼ぶ。ほかの種類を渡したときは [`complete`] と同じに扱い、`false` を返す。
+/// - 8259 の 7 番と 15 番のスプリアスなら、禁止せずに [`complete`] と同じく扱い（数えて、コントローラの決まりに
+///   従う）、`false` を返す。スプリアスは源ではない。
+/// - それ以外は、その源を禁止してから完了させ、`true` を返す。I/O APIC へ移した IRQ は redirection entry の
+///   マスクを、8259 の IRQ は IMR を立てる。以後その源は届かないので、下ろす者の居ないレベルの源が鳴り続けない。
+/// - 数えて出すのは共通の側である。破壊テスト `no-eoi-test` では EOI を送らない（[`complete`] と同じ）。
 ///
 /// # Safety
 ///
-/// [`complete`] と同じ（8259 を同時に触る文脈が無いことを含む）。
-unsafe fn complete_isa_irq(irq: u8) {
+/// [`complete`] と同じ。加えて、ほかの CPU が同時に同じ I/O APIC を触っていないこと（BKL の中で呼ぶ）。
+pub unsafe fn disable_and_complete(claimed: Claim) -> bool {
+    let Claim::Irq(irq) = claimed else {
+        // SAFETY: 呼び出し側の契約。
+        unsafe { complete(claimed) };
+        return false;
+    };
+    // SAFETY: 呼び出し側の契約（8259 と I/O APIC を同時に触る文脈が無いことを含む）。
+    !unsafe { complete_isa_irq(irq, true) }
+}
+
+/// ISA の IRQ を完了させる（[`complete`] と [`disable_and_complete`] の中身）。8259 の 7 番と 15 番のスプリアスの
+/// 見分けを含む。`disable` が真で、スプリアスでなければ、完了させる前にその源を禁止する。スプリアスだったかを返す。
+///
+/// # Safety
+///
+/// [`complete`] と同じ（8259 を同時に触る文脈が無いことを含む）。`disable` が真なら [`disable_and_complete`] と
+/// 同じ。
+unsafe fn complete_isa_irq(irq: u8, disable: bool) -> bool {
     // SAFETY: 呼び出し側の契約（8259 を同時に触る文脈が無いことを含む）。
     let spurious = unsafe { is_spurious(irq) };
     if spurious {
         SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
+    } else if disable {
+        // SAFETY: 呼び出し側の契約。完了させる前に禁止するので、完了の後に同じ源が上がり直さない。
+        unsafe { disable_irq(irq) };
     }
     // SAFETY: 呼び出し側の契約。宛先の決定は境界の内側の純粋ロジックが行う。
     #[cfg(not(feature = "no-eoi-test"))]
     unsafe {
         end_of_interrupt(irq, spurious);
+    }
+    spurious
+}
+
+/// IRQ を 1 本禁止する（[`disable_and_complete`] の中身）。I/O APIC へ移した IRQ は redirection entry のマスクを、
+/// 8259 の IRQ は IMR を立てる。
+///
+/// # Safety
+///
+/// [`disable_and_complete`] と同じ。
+unsafe fn disable_irq(irq: u8) {
+    if routed_to_apic(irq) {
+        // SAFETY: 呼び出し側の契約。
+        unsafe { apic::mask_routed_irq(irq) };
+    } else {
+        // SAFETY: 呼び出し側の契約。マスクビットを立てるだけ。
+        unsafe { pic::mask_irq(irq) };
     }
 }
 

@@ -1222,13 +1222,26 @@ unsafe fn read_lapic(base_virt: u64, offset: u64) -> u32 {
 /// IOREGSEL への書き込みを伴う。これが S2 で最初の書き込みである。
 /// 書くのは「次に窓から読む対象」を選ぶ添字だけで、割り込みの設定ではない。
 ///
+/// **添字の選択と窓の読みの 2 手の間、このCPUの割り込みを止める**（2026-09-28。9d-4b）。IOREGSEL は台ごとに
+/// 1 本しかない共有の状態なので、2 手の間に割り込まれると読む対象が変わる。9d-4b から、処理の無い源を禁止する
+/// ために、割り込みの中でも I/O APIC を読み書きする。**以前は「この経路は割り込み禁止の起動シーケンス中にだけ
+/// 通る」と書いていたが、較正の中の読み（`survey_apic_masks`）は `sti` の後に通る。**
+///
 /// # Safety
 ///
 /// `base_virt` がマップ済みの I/O APIC ページの先頭であること。
-/// 他の実行文脈が同時に同じ I/O APIC を触っていないこと（IOREGSEL は
-/// 台ごとに 1 本しかない共有の状態なので、割り込まれると読む対象が変わる）。
-/// 現在は単一コアで、この経路は割り込み禁止の起動シーケンス中にだけ通る。
+///
+/// **このCPUの割り込みは、この関数が止める。ほかの CPU との排他は、呼ぶ側が与える。** `InterruptGuard` が
+/// 止めるのはこのCPUの割り込みだけで（`ADR-0072` の 6）、ほかの CPU が同時に同じ I/O APIC の番号のレジスタを
+/// 書けば、同じ食い違いが起きる。今の呼ぶ側と、排他を与えているもの（2026-09-28 に経路ごとに確かめた）:
+///
+/// - 起動の早い所の調べ（[`survey_registers`]）、経路の設定（`irq::route_to_apic`）、その読み戻し
+///   （`irq::routed_entry_readback`）、較正の中の読み（`irq::survey_apic_masks`）: AP を起こす
+///   （`smp::wake_application_processors`）より前なので、走っている CPU は 1 つである。
+/// - 処理の無い源の禁止（`irq::disable_and_complete` から）: 割り込みの中で、BKL の中から呼ぶ（外からの割り込みの
+///   入口関数が、BKL を取ってから呼ぶ）。AP は I/O APIC を触らない。
 unsafe fn read_io_apic(base_virt: u64, index: u8) -> u32 {
+    let _interrupts_off = common::critical::InterruptGuard::enter();
     // SAFETY: 呼び出し元契約。添字を選んでからウィンドウを読む、の順序が必須である。
     unsafe {
         ((base_virt + IOAPIC_REGISTER_SELECT) as *mut u32).write_volatile(index as u32);
@@ -1236,12 +1249,13 @@ unsafe fn read_io_apic(base_virt: u64, index: u8) -> u32 {
     }
 }
 
-/// I/O APIC の内部レジスタを 1 本書く。
+/// I/O APIC の内部レジスタを 1 本書く。2 手の間、このCPUの割り込みを止める（[`read_io_apic`] と同じ）。
 ///
 /// # Safety
 ///
 /// [`read_io_apic`] と同じ。加えて、書いた内容が割り込みの配送を変える。
 unsafe fn write_io_apic(base_virt: u64, index: u8, value: u32) {
+    let _interrupts_off = common::critical::InterruptGuard::enter();
     // SAFETY: 呼び出し元契約。添字を選んでからウィンドウを書く、の順序が必須である。
     unsafe {
         ((base_virt + IOAPIC_REGISTER_SELECT) as *mut u32).write_volatile(index as u32);

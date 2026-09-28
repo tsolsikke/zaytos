@@ -3120,6 +3120,10 @@ struct KeyboardAssertions {
     /// **正常な起動では `false` である。** 破壊テストでの確認で「何も届かない」だけを
     /// 見ると、原因を問わず通ってしまう。**どこで止まったかを名指しする。**
     refused_sti: bool,
+    /// 処理の無い源として IRQ1 を禁止した行が出たか（2026-09-28。`ADR-0072` の 4。9d-4b）。
+    ///
+    /// **正常な起動では `false` である**——キーボードは IRQ1 を開ける前に処理を登録する。
+    disabled_without_handler: bool,
 }
 
 impl KeyboardAssertions {
@@ -3132,6 +3136,7 @@ impl KeyboardAssertions {
             && self.count
             && self.balanced
             && !self.refused_sti
+            && !self.disabled_without_handler
     }
 }
 
@@ -15880,6 +15885,15 @@ fn run_keyboard_test(features: &[&str]) -> Result<KeyboardAssertions> {
     );
     ok &= !df_present;
 
+    // 7. 処理の無い源として IRQ1 を禁止した行（2026-09-28。`ADR-0072` の 4。9d-4b）。**正常な起動では出ない**
+    // ——キーボードは IRQ1 を開ける前に処理を登録するので、処理の無い源は届かない。
+    let disabled_without_handler =
+        serial.contains("interrupts: disabled source 1, which arrived with no handler registered");
+    println!(
+        "{context}: IRQ1 was disabled for arriving with no handler = {disabled_without_handler} (a normal \
+         boot never prints it)"
+    );
+
     // ready / no_drop / heartbeats / 例外の 4 つは、どの構成でも成り立つべき
     // 前提として `line` へまとめている。破壊テストでの確認が見分けたいのは、
     // 到達・二重配送・読み戻し・本数の 4 つである。
@@ -15892,6 +15906,7 @@ fn run_keyboard_test(features: &[&str]) -> Result<KeyboardAssertions> {
         count: count_ok,
         balanced: balanced_ok,
         refused_sti: serial.contains("refusing to sti"),
+        disabled_without_handler,
     };
     println!(
         "{context}: {}",
@@ -16640,6 +16655,7 @@ const IOAPIC_SABOTAGE_TESTS: &[IoApicSabotage] = &[
             count: false,
             balanced: false,
             refused_sti: false,
+            disabled_without_handler: false,
         },
     },
     // I/O APIC 側のマスクを外さない。**設定は正しいので読み戻しは通り、
@@ -16656,6 +16672,7 @@ const IOAPIC_SABOTAGE_TESTS: &[IoApicSabotage] = &[
             count: false,
             balanced: false,
             refused_sti: false,
+            disabled_without_handler: false,
         },
     },
     // PIC 側の IRQ1 をマスクしない。
@@ -16688,6 +16705,28 @@ const IOAPIC_SABOTAGE_TESTS: &[IoApicSabotage] = &[
             count: false,
             balanced: false,
             refused_sti: true,
+            disabled_without_handler: false,
+        },
+    },
+    // 2026-09-28（`ADR-0072` の 4。9d-4b）: キーボードの割り込みの処理を登録しない。
+    //
+    // **最初の IRQ1 が処理の無い源として届き、`machine` がその源（I/O APIC の redirection entry）を禁止してから
+    // 完了させ、共通の側が数えて 1 度だけ出す。** 以後の打鍵は届かない。経路の設定は正しいので読み戻しは通り、
+    // 到達（最初の打鍵のベクタの行は、キーボードの処理が出す）と本数が落ちる。この破壊テストはキーボードの
+    // 試験を使うので、この表に置いた（I/O APIC の経路の破壊テストではない）。
+    IoApicSabotage {
+        name: "keyboard-without-handler",
+        feature: "keyboard-handler-not-registered-test",
+        expected: KeyboardAssertions {
+            line: false,
+            arrived_on_new_vector: false,
+            no_legacy_delivery: true,
+            readback_vector: true,
+            readback_unmasked: true,
+            count: false,
+            balanced: false,
+            refused_sti: false,
+            disabled_without_handler: true,
         },
     },
 ];
@@ -16703,7 +16742,7 @@ fn cmd_ioapic_sabotage(name: &str, feature: &str, expected: KeyboardAssertions) 
     println!("=== {context}: building with feature {feature:?} ===");
     let actual = run_keyboard_test(&[feature])?;
 
-    let checks: [(&str, bool, bool); 6] = [
+    let checks: [(&str, bool, bool); 7] = [
         (
             "arrived on the new vector",
             actual.arrived_on_new_vector,
@@ -16729,6 +16768,11 @@ fn cmd_ioapic_sabotage(name: &str, feature: &str, expected: KeyboardAssertions) 
             "refused to sti before enabling interrupts",
             actual.refused_sti,
             expected.refused_sti,
+        ),
+        (
+            "disabled IRQ1 for arriving with no handler",
+            actual.disabled_without_handler,
+            expected.disabled_without_handler,
         ),
     ];
 
@@ -23690,6 +23734,7 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "no-eoi-test",
     "alt-offset-test",
     "interrupt-handler-register-after-boot-test",
+    "keyboard-handler-not-registered-test",
     "tiny-key-buffer",
     "paging-test",
     "exception-test",

@@ -10,7 +10,7 @@
 //! **外からの割り込みの処理の表（`ADR-0072` の 5）も、ここに置く**（2026-09-28。9d-4）。装置のドライバが起動の
 //! 間に処理を登録し、起動の終わりに登録を閉じる。
 
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 
 use common::arch::x86_64::cpu;
 use common::log::Logger;
@@ -213,11 +213,18 @@ pub fn on_external_interrupt(
             // 下ろしてから戻る（キーボードはデータポートを読み切り、virtio-blk は ISR を読む。`ADR-0072` の 4）。
             // 登録は起動の間だけで、起動の後は表が変わらないので、ここで読むのにロックは要らない。
             //
-            // 処理の無い源は、今は完了させるだけである（`ADR-0072` の 4 の、源を禁止して数える形は、まだ入れて
-            // いない）。
-            if let Some(handler) = INTERRUPT_HANDLERS.handler(source) {
-                handler(arrival);
-            }
+            // 処理の無い源は、`machine` がその源を禁止してから完了させ、ここで数える（`ADR-0072` の 4。9d-4b）。
+            // 禁止しないと、下ろす者の居ないレベルの源が鳴り続ける。数は 1 度だけ出す行に出す
+            // （[`report_arrivals_without_handler_once`]）。
+            let Some(handler) = INTERRUPT_HANDLERS.handler(source) else {
+                // SAFETY: 実際に発生した割り込みに対してのみ、完了させる代わりに 1 回呼ぶ。割り込みゲート経由で
+                // 入場したので IF=0 で、BKL の中なので、ほかの実行文脈が同時に 8259 と I/O APIC を触ることはない。
+                if unsafe { crate::machine::pc::disable_and_complete(claimed) } {
+                    note_arrival_without_handler(source);
+                }
+                return ExitAction::Resume(current_sp);
+            };
+            handler(arrival);
 
             // 処理を終えてから完了させる（`complete`）。スプリアス（偽）割り込みの判定もそこで行う。
             // IRQ7 / IRQ15 でしか起きず、本物なら ISR の該当ビットが立っている。EOI の宛先は純粋ロジックが
@@ -507,6 +514,51 @@ pub fn register_interrupt_handler(source: u8, handler: fn(u8)) {
             "interrupts: refused to register a second handler for source {source}; it already has one"
         ),
     }
+}
+
+/// 処理の無い源が届いた回数（`ADR-0072` の 4。2026-09-28。9d-4b）。`machine` がその源を禁止してから完了させた
+/// 回数で、スプリアス（8259 の 7 番と 15 番）は数えない。**正常な起動では 0 である**——源は処理を登録してから
+/// 許可する（`ADR-0072` の 5）。
+static ARRIVALS_WITHOUT_HANDLER: AtomicU64 = AtomicU64::new(0);
+
+/// 処理の無いまま届いた最初の源。まだなら [`NO_SOURCE_YET`]。
+static FIRST_SOURCE_WITHOUT_HANDLER: AtomicU16 = AtomicU16::new(NO_SOURCE_YET);
+
+/// [`FIRST_SOURCE_WITHOUT_HANDLER`] の「まだ無い」。源の番号は 8 ビットに収まるので、この値にはならない。
+const NO_SOURCE_YET: u16 = u16::MAX;
+
+/// [`report_arrivals_without_handler_once`] が既に出したか。
+static ARRIVALS_WITHOUT_HANDLER_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// 処理の無い源が届いたことを数え、最初の源を控える（割り込みの中から呼ぶ。出力しない。ADR-0018 §5）。
+///
+/// 源を控えてから数を増やす（Release）ので、数が 0 でないのを見た読み手（Acquire）には源が見える。
+fn note_arrival_without_handler(source: u8) {
+    let _ = FIRST_SOURCE_WITHOUT_HANDLER.compare_exchange(
+        NO_SOURCE_YET,
+        u16::from(source),
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    );
+    ARRIVALS_WITHOUT_HANDLER.fetch_add(1, Ordering::Release);
+}
+
+/// 処理の無い源を禁止したことを、1 度だけ出す（`ADR-0072` の 4。2026-09-28。9d-4b）。数が 0 なら何も出さない。
+///
+/// **心拍の行には載せない**——心拍の行の文言は多くの判定が見ているので、変える所を増やさない（運用者の決定）。
+/// **行の境目から呼ぶ**——定常ループの 1 周ごとと、プログラムを起動する入口（`userland::spawn`）の 2 か所で、
+/// キーボードの最初の到着の行（`keyboard::report_first_delivery_once`）と同じ所である。書き先の型は名指ししない
+/// （共通の側で機械の言葉を増やさないため。どちらの呼び手もシリアルへ出す）。
+pub fn report_arrivals_without_handler_once<W: core::fmt::Write>(logger: &mut Logger<W>) {
+    let arrivals = ARRIVALS_WITHOUT_HANDLER.load(Ordering::Acquire);
+    if arrivals == 0 || ARRIVALS_WITHOUT_HANDLER_REPORTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let source = FIRST_SOURCE_WITHOUT_HANDLER.load(Ordering::Relaxed);
+    logger.warn(format_args!(
+        "interrupts: disabled source {source}, which arrived with no handler registered ({arrivals} \
+         arrival(s) without a handler so far)"
+    ));
 }
 
 /// 割り込みの処理の登録を閉じる（`ADR-0072` の 5。2026-09-28。9d-4）。
@@ -1108,6 +1160,9 @@ pub unsafe fn run_timer_loop(
                 &mut decoder,
                 &mut line,
             );
+
+            // 処理の無い源を禁止したことを 1 度だけ出す（9d-4b。心拍の行には載せない）。
+            report_arrivals_without_handler_once(logger);
 
             if ticks >= next_heartbeat {
                 next_heartbeat = ticks + HEARTBEAT_TICKS;
