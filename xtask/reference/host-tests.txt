@@ -490,6 +490,11 @@ kernel::heap::plan::tests::plan_allocation_zero_size_request_still_produces_a_va
 kernel::input::tests::esc_is_a_bare_byte_and_arrows_are_csi_sequences
 kernel::input::tests::home_and_end_are_csi_number_tilde
 kernel::input::tests::plain_bytes_and_dropped_events_are_unchanged
+kernel::interrupts::tests::a_registered_handler_is_found_by_its_source
+kernel::interrupts::tests::a_second_handler_for_the_same_source_is_refused
+kernel::interrupts::tests::a_source_outside_the_table_is_refused
+kernel::interrupts::tests::closing_lists_the_sources_with_a_handler
+kernel::interrupts::tests::registration_is_refused_after_the_table_is_closed
 kernel::keyboard::buffer::tests::an_empty_ring_yields_nothing
 kernel::keyboard::buffer::tests::bytes_come_out_in_the_order_they_went_in
 kernel::keyboard::buffer::tests::overflow_drops_the_newest_and_keeps_a_valid_prefix

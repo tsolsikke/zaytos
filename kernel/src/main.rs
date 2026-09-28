@@ -1973,6 +1973,14 @@ extern "sysv64" fn kernel_main() -> ! {
         }
     }
 
+    // **割り込みの処理の登録を閉じる**（2026-09-28。`ADR-0072` の 5）。**カーネル側の PML4 の指紋を採ったのと同じ
+    // 時点である。** **ここから後は、処理の表を誰も変えない**——割り込みの中で表を読むのにロックが要らないのは、
+    // これが理由である。この後の登録は名前つきで止まる。
+    let registered = kernel::interrupts::close_interrupt_handler_registration();
+    logger.info(format_args!(
+        "interrupts: closed handler registration before init (sources with a handler: {registered})"
+    ));
+
     // 破壊テスト (2026-09-27, kernel-top-write-after-boot-test): **起動の後に、カーネル側の PML4 の空いた添字
     // （260）へマップしに行く。** **書く側の守りが、項目を作る前に名前つきで止めることを確かめる。**
     // **`kernel-top-write-unguarded-test` は、書く側の守りを外して同じ書き込みをする**——**次の
@@ -1982,6 +1990,22 @@ extern "sysv64" fn kernel_main() -> ! {
         feature = "kernel-top-write-unguarded-test"
     ))]
     write_a_kernel_half_entry_after_boot(&mut logger);
+
+    // 破壊テスト (2026-09-28, interrupt-handler-register-after-boot-test): **起動の後に、割り込みの処理を登録しに
+    // 行く。** **登録を閉じてあれば、登録する側が名前つきで止め、この塊の後ろへは進まない。** **進んだら、登録が
+    // 通ったことを出す**（試験は、その行とシェルの起動を禁じている）。源の番号は 5 にする。QEMU の既定の構成では、
+    // 誰も処理を登録しない番号である（2 つ目の登録として断られる形と混ざらない）。
+    #[cfg(feature = "interrupt-handler-register-after-boot-test")]
+    {
+        const UNUSED_SOURCE: u8 = 5;
+        logger.info(format_args!(
+            "sabotage: registering an interrupt handler for source {UNUSED_SOURCE} after boot"
+        ));
+        kernel::interrupts::register_interrupt_handler(UNUSED_SOURCE, |_arrival| {});
+        logger.error(format_args!(
+            "sabotage: the registration went through; the handler table was not closed"
+        ));
+    }
 
     run_init(&mut logger, console.as_mut());
 }
@@ -5122,8 +5146,10 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>, i8042: kernel::acpi::I8042Pre
     // --- 4. IRQ1 を解禁する ---
     // 開ける前に、在ることを記録する（`sti` 前の検証と心拍の行がこれを見る）。
     keyboard::mark_controller_present();
-    // SAFETY: ベクタ 0x21 には IRQ スタイルのスタブが入っており、ハンドラはデータ
-    // ポートを読み切ってから EOI を送る。
+    // 開ける前に、割り込みの処理を登録する（`ADR-0072` の 5。処理を登録してから源を許可する）。
+    keyboard::register_irq_handler();
+    // SAFETY: ベクタ 0x21 には IRQ スタイルのスタブが入っており、直前に登録した処理がデータ
+    // ポートを読み切ってから、EOI が送られる。
     unsafe {
         irq::unmask(keyboard::KEYBOARD_IRQ);
     }
@@ -5181,6 +5207,7 @@ fn switch_virtio_to_io_apic(
     };
 
     let irq = virtio.irq_line();
+    // 武装は、割り込みの処理の登録も兼ねる（`ADR-0072` の 5。配線して許可するより前である）。
     // SAFETY: BSP のみ・IF=0 の位置（`sti` はこの後段）。ISR の読み捨ては
     // 武装の契約どおり。
     unsafe { kernel::virtio::arm_interrupt(virtio, irq) };
@@ -10615,6 +10642,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "alt-offset-test",
         cfg!(feature = "alt-offset-test"),
         "PIC を 0x30-0x3F へ再マップする",
+    ),
+    (
+        "interrupt-handler-register-after-boot-test",
+        cfg!(feature = "interrupt-handler-register-after-boot-test"),
+        "起動の後に、割り込みの処理を登録しに行く",
     ),
     (
         "keyboard-drop-arrows-test",

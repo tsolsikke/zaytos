@@ -53,6 +53,14 @@ pub fn controller_present() -> bool {
     CONTROLLER_PRESENT.load(Ordering::Relaxed)
 }
 
+/// IRQ1 の処理（`handle_irq`）を、割り込みの処理の表へ登録する（`ADR-0072` の 5。2026-09-28）。
+///
+/// **起動の途中で、IRQ1 を開ける前に 1 回だけ呼ぶ**（処理を登録してから源を許可する）。起動の後に呼ぶと、
+/// 登録する側（[`crate::interrupts::register_interrupt_handler`]）が名前つきで止める。
+pub fn register_irq_handler() {
+    crate::interrupts::register_interrupt_handler(KEYBOARD_IRQ, handle_irq);
+}
+
 /// 最初のキー入力が届いたベクタ番号。まだなら [`NO_VECTOR_YET`]。
 ///
 /// 配送経路の証拠になる。I/O APIC 経由へ移してからは 8259 が出しえない
@@ -112,10 +120,11 @@ pub fn report_first_delivery_once(
     }
 }
 
-/// IRQ1 のハンドラ本体。割り込みハンドラから呼ばれる。
+/// IRQ1 の処理の本体。割り込みの処理の表から呼ばれる（[`register_irq_handler`] が登録する。`ADR-0072` の 5）。
 ///
 /// 出力しない（ADR-0018 §5）。共有状態を更新するだけで、表示はメインループが行う。
-/// EOI は呼び出し元（`idt::irq_entry`）がこの関数から戻った後に送る。
+/// 完了（EOI）は、共通の側の入口関数（`crate::interrupts::on_external_interrupt`）が、この関数から戻った後に
+/// `machine` へ頼む。
 ///
 /// # データポートを必ず読み切ること
 ///
@@ -148,11 +157,11 @@ pub fn report_first_delivery_once(
 ///
 /// 揺れる機序は突き止めていない（`docs/deferred-decisions.md`）。常に 0 にすると
 /// 「増え続けるか」という指標を失うので、揺れたまま使う。
-pub(crate) fn handle_irq(vector: u64) {
-    // 最初の 1 回だけベクタ番号を記録する。
+fn handle_irq(arrival: u8) {
+    // 最初の 1 回だけ、到着の番号（x86 ではベクタ）を記録する。
     let _ = FIRST_KEYBOARD_VECTOR.compare_exchange(
         NO_VECTOR_YET,
-        vector,
+        u64::from(arrival),
         Ordering::Relaxed,
         Ordering::Relaxed,
     );

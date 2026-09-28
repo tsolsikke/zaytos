@@ -88,6 +88,9 @@ no-eoi-test = ["interrupt-test-timer"]
 # ことを同時に示す。IRQ スタブ表は 0x20-0x3F を覆っており、テスト用ベクタは
 # その外（0x40）にあるため、irq-path と排他にする必要は無い。
 alt-offset-test = ["interrupt-test-timer"]
+# 2026-09-28（`ADR-0072` の 5）: 起動の後に、割り込みの処理を登録しに行く。登録する側が名前つきで止める。
+# `--interrupt-test handler-after-boot`。
+interrupt-handler-register-after-boot-test = []
 # リングバッファを極小にし、オーバーフロー検出が働くことを確認する。
 tiny-key-buffer = []
 # 生のスキャンコードをシリアルへ出す。エコーと二重になって読みにくいので

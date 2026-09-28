@@ -467,7 +467,7 @@ impl VirtioBlk {
 
 /// 割り込みで観測する準備が済んだ virtio の所在（S13-d）。
 ///
-/// **IRQ ハンドラ（`idt::irq_entry`）から届く必要があるので static である。**
+/// **割り込みの処理（[`handle_irq`]。処理の表から呼ばれる）から届く必要があるので static である。**
 /// 0 は「まだ武装していない」を表す（I/O ポート 0 は PCI の BAR に現れない）。
 static ARMED_ISR_PORT: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
 /// 武装した IRQ 番号（+1 で保持。0 = 未武装）。
@@ -687,10 +687,12 @@ static IRQ_NOT_MINE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU
 /// legacy レジスタ: ISR（読み）。**読むと割り込みが deassert される。**
 const REG_ISR: u16 = 0x13;
 
-/// IRQ ハンドラが ISR を読めるように武装する（S13-d）。
+/// IRQ ハンドラが ISR を読めるように武装し、割り込みの処理（`handle_irq`）を登録する（S13-d。登録は
+/// `ADR-0072` の 5。2026-09-28）。
 ///
 /// **配線（route）の前に呼ぶこと。** 逆だと、武装前に届いた割り込みを
-/// ハンドラが読めず、レベルの線が上がったまま残る。
+/// ハンドラが読めず、レベルの線が上がったまま残る。処理を登録してから源を許可する（`ADR-0072` の 5）のも、
+/// この順で満たす。起動の後に呼ぶと、登録する側が名前つきで止める。
 ///
 /// # Safety
 ///
@@ -703,9 +705,12 @@ pub unsafe fn arm_interrupt(blk: &VirtioBlk, irq_line: u8) {
     let _stale = unsafe { port::inb(blk.io_base + REG_ISR) };
     ARMED_ISR_PORT.store(blk.io_base + REG_ISR, core::sync::atomic::Ordering::Relaxed);
     ARMED_IRQ_PLUS_ONE.store(irq_line + 1, core::sync::atomic::Ordering::Relaxed);
+    // IRQ 番号は固定しない——`scan_bus0` が構成空間から読んだ値で登録する。
+    crate::interrupts::register_interrupt_handler(irq_line, handle_irq);
 }
 
-/// 武装済みの IRQ 番号（未武装なら `None`）。`idt::irq_entry` の分岐が使う。
+/// 武装済みの IRQ 番号（未武装なら `None`）。実演の判断（`crate::interrupts::run_timer_loop`）と、破壊テスト
+/// `virtio-skip-eoi-test`（共通の側の入口関数）が使う。
 pub fn armed_irq() -> Option<u8> {
     match ARMED_IRQ_PLUS_ONE.load(core::sync::atomic::Ordering::Relaxed) {
         0 => None,
@@ -713,11 +718,12 @@ pub fn armed_irq() -> Option<u8> {
     }
 }
 
-/// IRQ ハンドラ本体（S13-d）。**ISR を読んで deassert し、数える。**
+/// IRQ ハンドラ本体（S13-d）。**ISR を読んで deassert し、数える。** 割り込みの処理の表から呼ばれる
+/// （[`arm_interrupt`] が登録する。`ADR-0072` の 5）。到着の番号は使わない。
 ///
 /// ログは出さない（ADR-0018 §5。ハンドラ内の出力はティックを取りこぼす）。
 /// 観測はメインループ側が [`exercise_interrupt_read`] でカウンタ越しに行う。
-pub fn handle_irq() {
+fn handle_irq(_arrival: u8) {
     let isr_port = ARMED_ISR_PORT.load(core::sync::atomic::Ordering::Relaxed);
     if isr_port == 0 {
         return;

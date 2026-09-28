@@ -6,8 +6,11 @@
 //!
 //! **外からの割り込みと yield の入口関数（`ADR-0072` の 1 の C）も、ここに置く**（2026-09-28。境界の段階の
 //! 手順 2 の 9d-2）。**`arch` の入口は、入口の確かめとベクタごとの数えを済ませて、ここを呼ぶ。**
+//!
+//! **外からの割り込みの処理の表（`ADR-0072` の 5）も、ここに置く**（2026-09-28。9d-4）。装置のドライバが起動の
+//! 間に処理を登録し、起動の終わりに登録を閉じる。
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use common::arch::x86_64::cpu;
 use common::log::Logger;
@@ -95,8 +98,8 @@ pub fn max_tick_jump() -> u64 {
 /// - 呼ぶのは `arch` の割り込みの入口だけで、割り込みを止めたまま、入口の確かめ（方向フラグ・スタックの境界・
 ///   ベクタごとの数え）を済ませた後に呼ぶ。yield はここへ来ない（[`on_yield_interrupt`]）。
 /// - `arrival` は、入口のスタブが積んだ到着の番号（x86 ではベクタ）である。ここでは読まずに、`machine` の受け取る
-///   （[`crate::machine::pc::claim`]）と、キーボードの最初の到着の記録へ渡すだけである（番号の型を分けるのは
-///   `ADR-0072` の 3。9e）。
+///   （[`crate::machine::pc::claim`]）と、登録した処理（キーボードは最初の到着を記録する）へ渡すだけである
+///   （番号の型を分けるのは `ADR-0072` の 3。9e）。
 /// - 戻り値は出口の動きである（9d-3）。ふつうは入口が戻るときに使うスタックポインタ（切り替えないなら割り込まれた
 ///   文脈のもの、切り替えるなら次のタスクのもの）を返し、遠征を畳むと決めたら [`ExitAction::FoldExcursion`] を
 ///   返す。畳むのは入口が、この関数が戻った後に行う。
@@ -202,29 +205,18 @@ pub fn on_external_interrupt(
             // IF=1 で次ティックを受けられる。遠征を畳むのは Local APIC のタイマの側だけである（今までどおり）。
             return ExitAction::Resume(crate::task::on_timer_tick(current_sp));
         }
-        // このベクタはどの IRQ か。移行済みの経路も含めて、受け取る側（`claim`）が引いてある（S2-d-1c）。
-        //
-        // ここは EOI の入口ではなく、IRQ 処理全体の入口である。下の
-        // ブロックにはキーボードのハンドラも入っており、
-        // 引けなければハンドラごと呼ばれない。I/O APIC 経由のベクタは
-        // PIC の採番表に載っていないので、`irq::irq_for` では引けない。
-        Claim::Irq(irq) => {
-            // キーボード（IRQ1）。EOI より先に呼ぶ。この中でデータポートを
-            // 読み切らないと、コントローラの出力バッファが空かず次の IRQ1 が
-            // 来なくなる。
+        // このベクタはどの源か。移行済みの経路も含めて、受け取る側（`claim`）が引いてある（S2-d-1c。I/O APIC
+        // 経由のベクタは 8259 の採番表に載っていない）。源の番号は、配送先のベクタが 8259 経由と I/O APIC 経由で
+        // 違っても変わらない。
+        Claim::Irq(source) => {
+            // 源に登録した処理を呼ぶ（`ADR-0072` の 5。9d-4）。完了させる前に呼ぶ。レベルで鳴る源は、処理が源を
+            // 下ろしてから戻る（キーボードはデータポートを読み切り、virtio-blk は ISR を読む。`ADR-0072` の 4）。
+            // 登録は起動の間だけで、起動の後は表が変わらないので、ここで読むのにロックは要らない。
             //
-            // ベクタではなく IRQ 番号で判定する（S2-d-1c）。配送先ベクタは
-            // 8259 経由と I/O APIC 経由で違うが、IRQ 番号は移行しても変わらない。
-            if irq == crate::keyboard::KEYBOARD_IRQ {
-                crate::keyboard::handle_irq(u64::from(arrival));
-            }
-
-            // virtio-blk（S13-d）。**ISR を読んで deassert する**（レベルトリガの
-            // 要件。読まないと EOI の後に同じ割り込みが再送され続ける）。
-            // IRQ 番号は固定しない——`scan_bus0` が構成空間から読んだ値を
-            // `virtio::arm_interrupt` が控えており、それと突き合わせる。
-            if crate::virtio::armed_irq() == Some(irq) {
-                crate::virtio::handle_irq();
+            // 処理の無い源は、今は完了させるだけである（`ADR-0072` の 4 の、源を禁止して数える形は、まだ入れて
+            // いない）。
+            if let Some(handler) = INTERRUPT_HANDLERS.handler(source) {
+                handler(arrival);
             }
 
             // 処理を終えてから完了させる（`complete`）。スプリアス（偽）割り込みの判定もそこで行う。
@@ -236,7 +228,7 @@ pub fn on_external_interrupt(
             // 送らない。LAPIC の ISR ビットが立ったままになり、同じ優先度
             // クラス以下の割り込みが以後届かなくなる形を狙う。
             #[cfg(feature = "virtio-skip-eoi-test")]
-            let skip_eoi = crate::virtio::armed_irq() == Some(irq);
+            let skip_eoi = crate::virtio::armed_irq() == Some(source);
             #[cfg(not(feature = "virtio-skip-eoi-test"))]
             let skip_eoi = false;
 
@@ -387,6 +379,142 @@ static DEPTH_ONE_NOT_FOLDED: AtomicU64 = AtomicU64::new(0);
 /// [`DEPTH_ONE_NOT_FOLDED`] の値（W2-c-2 の対策。`init` がセッションの後に出す）。
 pub fn depth_one_not_folded() -> u64 {
     DEPTH_ONE_NOT_FOLDED.load(Ordering::Relaxed)
+}
+
+/// 処理の表の大きさ（源の数。`ADR-0072` の 5。2026-09-28。境界の段階の手順 2 の 9d-4）。
+///
+/// 源の番号は、今は ISA の IRQ の番号（2 台の 8259 の 16 本）である。I/O APIC へ移した IRQ も、同じ番号で
+/// 受け取る（[`crate::machine::pc::claim`]）。番号の型を分けるのは `ADR-0072` の 3（9e）。
+const INTERRUPT_SOURCES: usize = 16;
+
+/// 外からの割り込みの処理の表（`ADR-0072` の 5。2026-09-28。9d-4）。添字は源の番号である。
+///
+/// 登録は起動の間だけで、閉じた（[`Self::close`]）後は断る。起動の後は表が変わらないので、割り込みの中で
+/// 読むのにロックが要らない（BKL を取らない種類からも読める）。
+///
+/// 処理を整数で持つのは、`common::percpu` の `install_cpu_id_reader` と同じ形である（0 は「登録なし」。
+/// 関数のポインタは 0 にならない）。
+struct HandlerTable {
+    handlers: [AtomicUsize; INTERRUPT_SOURCES],
+    closed: AtomicBool,
+}
+
+/// 登録を断った理由。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refusal {
+    /// 登録を閉じた後（起動の後）だった。
+    AfterBoot,
+    /// 表の外の番号だった。
+    OutsideTable,
+    /// その源には、もう処理がある。黙って置き換えない。
+    AlreadyRegistered,
+}
+
+impl HandlerTable {
+    const fn new() -> Self {
+        Self {
+            handlers: [const { AtomicUsize::new(0) }; INTERRUPT_SOURCES],
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    /// 源に処理を登録する。閉じた後・表の外・2 つ目は断る。
+    fn register(&self, source: u8, handler: fn(u8)) -> Result<(), Refusal> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Refusal::AfterBoot);
+        }
+        let slot = self
+            .handlers
+            .get(usize::from(source))
+            .ok_or(Refusal::OutsideTable)?;
+        slot.compare_exchange(0, handler as usize, Ordering::Release, Ordering::Relaxed)
+            .map(|_| ())
+            .map_err(|_| Refusal::AlreadyRegistered)
+    }
+
+    /// 登録を閉じ、処理のある源の一覧を返す。
+    fn close(&self) -> RegisteredSources {
+        self.closed.store(true, Ordering::Release);
+        let mut sources = [false; INTERRUPT_SOURCES];
+        for (registered, slot) in sources.iter_mut().zip(&self.handlers) {
+            *registered = slot.load(Ordering::Acquire) != 0;
+        }
+        RegisteredSources(sources)
+    }
+
+    /// 源に登録した処理（無ければ `None`）。
+    fn handler(&self, source: u8) -> Option<fn(u8)> {
+        let address = self
+            .handlers
+            .get(usize::from(source))?
+            .load(Ordering::Acquire);
+        if address == 0 {
+            return None;
+        }
+        // SAFETY: 0 でない値を書くのは `register` だけで、書くのは `fn(u8)` を `usize` へ変えた値である。関数の
+        // ポインタは `usize` と同じ大きさで、0 にならない。書く側と読む側の順序: 書くのは起動の間の登録だけで、
+        // その源を許可する前に書く（Release）。読むのは、その源を許可した後に届いた割り込みの中である（Acquire。
+        // 起動の途中に届いた割り込みでも読む）。起動の後は誰も書かない。読み書きは原子的なので、読めるのは 0 か、
+        // 書き終えた値だけである。
+        Some(unsafe { core::mem::transmute::<usize, fn(u8)>(address) })
+    }
+}
+
+/// 処理のある源の一覧（起動ログの行に出す）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegisteredSources([bool; INTERRUPT_SOURCES]);
+
+impl core::fmt::Display for RegisteredSources {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut sources = (0..INTERRUPT_SOURCES).filter(|&source| self.0[source]);
+        let Some(first) = sources.next() else {
+            return f.write_str("none");
+        };
+        write!(f, "{first}")?;
+        for source in sources {
+            write!(f, ", {source}")?;
+        }
+        Ok(())
+    }
+}
+
+/// 外からの割り込みの処理の表の本体。
+static INTERRUPT_HANDLERS: HandlerTable = HandlerTable::new();
+
+/// 外からの割り込みの源に、処理を登録する（`ADR-0072` の 5。2026-09-28。境界の段階の手順 2 の 9d-4）。
+///
+/// # 契約（2026-09-28）
+///
+/// - 呼ぶのは装置のドライバで、起動の途中、その源を許可する前に 1 回だけ呼ぶ（処理を登録してから源を許可する）。
+///   今の呼び手（キーボードと virtio-blk の用意）は、ほかの CPU が走り出す前で、割り込みを止めた所にいる。
+/// - 起動の後（[`close_interrupt_handler_registration`] の後）に呼ぶと、名前つきで止まる。書く側の守り（ページ
+///   テーブルの `ensure_child`）と同じ形である。表の外の番号と、同じ源への 2 つ目の登録も、名前つきで止まる。
+/// - 登録した処理は、その源の割り込みが届くたびに、BKL の中で、完了させる前に呼ばれる。引数は到着の番号
+///   （[`on_external_interrupt`] の `arrival`）である。レベルで鳴る源の処理は、源を下ろしてから戻ること
+///   （`ADR-0072` の 4）。
+pub fn register_interrupt_handler(source: u8, handler: fn(u8)) {
+    match INTERRUPT_HANDLERS.register(source, handler) {
+        Ok(()) => {}
+        Err(Refusal::AfterBoot) => panic!(
+            "interrupts: refused to register a handler for source {source} after boot; the handler table \
+             is fixed before init (ADR-0072)"
+        ),
+        Err(Refusal::OutsideTable) => panic!(
+            "interrupts: refused to register a handler for source {source}; the table has \
+             {INTERRUPT_SOURCES} sources"
+        ),
+        Err(Refusal::AlreadyRegistered) => panic!(
+            "interrupts: refused to register a second handler for source {source}; it already has one"
+        ),
+    }
+}
+
+/// 割り込みの処理の登録を閉じる（`ADR-0072` の 5。2026-09-28。9d-4）。
+///
+/// **起動の終わり、カーネル側の PML4 の指紋を採った直後に 1 回だけ呼ぶ**（`ADR-0072` の 5 が決めた時点）。この後の
+/// 登録は名前つきで止まる。戻り値は、処理のある源の一覧である（起動ログの行に出す）。
+pub fn close_interrupt_handler_registration() -> RegisteredSources {
+    INTERRUPT_HANDLERS.close()
 }
 
 /// タイマ割り込みで駆動されるメインループ。
@@ -1421,5 +1549,69 @@ impl TypedLine {
     fn as_str(&self) -> &str {
         // SAFETY: push で ASCII だけを入れているため、常に有効な UTF-8。
         core::str::from_utf8(&self.buffer[..self.len]).unwrap_or("<invalid>")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_registered_handler_is_found_by_its_source() {
+        static ARRIVED: AtomicU64 = AtomicU64::new(0);
+        fn record(arrival: u8) {
+            ARRIVED.store(u64::from(arrival), Ordering::Relaxed);
+        }
+        let table = HandlerTable::new();
+        assert_eq!(table.register(1, record), Ok(()));
+        assert!(table.handler(2).is_none());
+        let handler = table
+            .handler(1)
+            .expect("the handler registered for source 1");
+        handler(0x21);
+        assert_eq!(ARRIVED.load(Ordering::Relaxed), 0x21);
+    }
+
+    #[test]
+    fn registration_is_refused_after_the_table_is_closed() {
+        fn ignore(_arrival: u8) {}
+        let table = HandlerTable::new();
+        assert_eq!(table.register(1, ignore), Ok(()));
+        let _ = table.close();
+        assert_eq!(table.register(11, ignore), Err(Refusal::AfterBoot));
+        assert!(table.handler(1).is_some());
+        assert!(table.handler(11).is_none());
+    }
+
+    #[test]
+    fn a_second_handler_for_the_same_source_is_refused() {
+        static FIRST_CALLED: AtomicBool = AtomicBool::new(false);
+        fn first(_arrival: u8) {
+            FIRST_CALLED.store(true, Ordering::Relaxed);
+        }
+        fn second(_arrival: u8) {}
+        let table = HandlerTable::new();
+        assert_eq!(table.register(11, first), Ok(()));
+        assert_eq!(table.register(11, second), Err(Refusal::AlreadyRegistered));
+        table.handler(11).expect("the first handler stays")(0);
+        assert!(FIRST_CALLED.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_source_outside_the_table_is_refused() {
+        fn ignore(_arrival: u8) {}
+        let table = HandlerTable::new();
+        assert_eq!(table.register(16, ignore), Err(Refusal::OutsideTable));
+        assert!(table.handler(16).is_none());
+    }
+
+    #[test]
+    fn closing_lists_the_sources_with_a_handler() {
+        fn ignore(_arrival: u8) {}
+        assert_eq!(format!("{}", HandlerTable::new().close()), "none");
+        let table = HandlerTable::new();
+        assert_eq!(table.register(11, ignore), Ok(()));
+        assert_eq!(table.register(1, ignore), Ok(()));
+        assert_eq!(format!("{}", table.close()), "1, 11");
     }
 }

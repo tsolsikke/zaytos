@@ -1,2 +1,2 @@
-common 775
+common 773
 kernel/src/main.rs 721

@@ -525,6 +525,22 @@ const INTERRUPT_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // 2026-09-28（`ADR-0072` の 5）: 起動の後に、割り込みの処理を登録しに行く。
+    //
+    // **登録する側（`interrupts::register_interrupt_handler`）が、名前つきで止める。** 登録を閉じるのは、カーネル側の
+    // PML4 の指紋を採った直後である。**閉じる所が破壊より後ろへずれると、登録が通ってこの試験が落ちる。**
+    CriticalTest {
+        name: "handler-after-boot",
+        feature: "interrupt-handler-register-after-boot-test",
+        expected_markers: &[
+            "sabotage: registering an interrupt handler for source 5 after boot",
+            "interrupts: refused to register a handler for source 5 after boot",
+            "halting (cli + hlt loop)",
+        ],
+        forbidden_markers: &["the handler table was not closed", "zash: ready"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
 ];
 
 /// ページテーブルの分割・アンマップの回帰チェック（`--paging-test <kind>`）。
@@ -23673,6 +23689,7 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "kernel-top-write-unguarded-test",
     "no-eoi-test",
     "alt-offset-test",
+    "interrupt-handler-register-after-boot-test",
     "tiny-key-buffer",
     "paging-test",
     "exception-test",
