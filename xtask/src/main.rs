@@ -19513,7 +19513,7 @@ const DIRECT_SERIAL_PORT_ALLOWLIST: &[DirectSerialPortSite] = &[
         reason: "AP の入口。per-CPU もスタックもまだ整っていない",
     },
     DirectSerialPortSite {
-        file: "kernel/src/smp.rs",
+        file: "kernel/src/arch/x86_64/ap_bring_up.rs",
         item: "bring_up_application_processor",
         reason: "AP の起こし。BKL へ参加する前の経過を出す",
     },
