@@ -11683,11 +11683,6 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "止めた後の入力を捨てず、次のプロンプトに ^C を余分に出す",
     ),
     (
-        "tiny-key-buffer",
-        cfg!(feature = "tiny-key-buffer"),
-        "キーバッファを極小にする",
-    ),
-    (
         "paging-test",
         cfg!(feature = "paging-test"),
         "ページテーブルの追加検証を走らせる（それ自体は壊さない）",

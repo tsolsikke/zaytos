@@ -37,13 +37,12 @@ use common::critical::Locked;
 ///
 /// 100Hz で回るメインループに対し、人間の打鍵速度では溢れない。溢れたら
 /// 実装側の問題である。
-#[cfg(not(feature = "tiny-key-buffer"))]
+///
+/// 溢れたときの扱い（新しい方を捨て、先頭から連続した前半を残す）は、ホストのテスト
+/// （`overflow_drops_the_newest_and_keeps_a_valid_prefix`）が見ている。**容量を極小にしてビルドする破壊
+/// テスト（`tiny-key-buffer`）は 2026-09-28 に外した**——どの試験からも回っておらず、説明が指していた
+/// `--interrupt-test keyboard-overflow` は作られていなかった（運用者の決定）。
 pub const CAPACITY: usize = 128;
-
-/// オーバーフローの検出が実際に働くかを確かめるための極小容量
-/// （`--interrupt-test keyboard-overflow`）。
-#[cfg(feature = "tiny-key-buffer")]
-pub const CAPACITY: usize = 4;
 
 /// 固定長のリングバッファ。
 ///

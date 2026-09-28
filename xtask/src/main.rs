@@ -23735,7 +23735,6 @@ const SABOTAGE_FEATURES: &[&str] = &[
     "alt-offset-test",
     "interrupt-handler-register-after-boot-test",
     "keyboard-handler-not-registered-test",
-    "tiny-key-buffer",
     "paging-test",
     "exception-test",
     "critical-test",
