@@ -288,6 +288,7 @@ kernel::apic::tests::all_zeros_and_all_ones_are_undecoded
 kernel::apic::tests::coverage_counts_from_the_gsi_base
 kernel::apic::tests::qemu_matches_its_madt
 kernel::apic::tests::the_id_comes_from_bits_27_to_24
+kernel::arch::x86_64::ap_stacks::tests::the_recorded_ap_kernel_stack_range_matches_the_mapped_layout
 kernel::arch::x86_64::ap_trampoline::tests::a_frame_above_one_mib_is_not_addressable
 kernel::arch::x86_64::ap_trampoline::tests::a_high_only_allocator_is_rejected
 kernel::arch::x86_64::ap_trampoline::tests::a_low_frame_is_sipi_addressable
@@ -603,7 +604,6 @@ kernel::ring::tests::a_full_ring_takes_nothing_more
 kernel::ring::tests::the_capacity_is_the_parameter
 kernel::ring::tests::the_ring_wraps_without_losing_order
 kernel::shm::tests::pages_round_up
-kernel::smp::tests::the_recorded_ap_kernel_stack_range_matches_the_mapped_layout
 kernel::socket::tests::a_connection_starts_open_on_both_sides_and_is_not_accepted
 kernel::socket::tests::the_listener_name_is_the_recorded_length
 kernel::socket::tests::the_side_and_its_peer_index_the_two_rings
