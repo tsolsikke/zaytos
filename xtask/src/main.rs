@@ -9307,7 +9307,7 @@ fn qemu_shut_the_machine_down(debug: &str) -> bool {
     debug.contains("Triple fault") || debug.contains("raising triple fault")
 }
 
-/// 機械の変種の検査の構成（`ADR-0068`）。**破壊ではない**——**`SABOTAGE_FEATURES` に入れない。**
+/// 機械の変種の検査の構成（`ADR-0068`）。**破壊ではない。**
 ///
 /// (変種の名前, カーネルの feature, 何が起きれば正しいか)
 ///
@@ -23736,112 +23736,6 @@ const STRUCTURAL_GUARD_SYMBOL_FRAGMENTS: &[&str] = &[
     "flush_if_generation_is_stale",
 ];
 
-/// 意図的に壊した経路を有効にする feature の名前。
-///
-/// **接頭辞ではない。** 照合は完全一致である（`contains`）。**以前この doc は
-/// 「接頭辞・名前」と書いていたが、コードは一度も接頭辞として扱っていない**（S6-e）。
-///
-/// **既定ビルドにこれらが入ってはならない。** 入ったまま出荷すると、
-/// 壊れた状態で測った結果を正常な結果として扱うことになる。
-///
-/// **既定のビルドの検査は、2026-09-28 からこの名簿ではなく [`DEFAULT_FEATURES_ALLOWED`] で見る**（運用者の決定。
-/// 名簿に載っていない破壊も落とすため）。**この名簿を読むのは、名簿自身の死んだ行の検査と、列挙の件数の行だけで
-/// ある。** この後どう扱うかは、運用者が決める。
-const SABOTAGE_FEATURES: &[&str] = &[
-    // W1-c-4。**`concurrent-test` は破壊ではないので入れない**（`fp-test` と同じ扱い）。
-    "fp-switch-no-restore",
-    "task-switch-keep-recovery",
-    "task-switch-no-cr3",
-    "ring3-slot-always-zero",
-    "task-switch-holds-back-ring3-task",
-    "foreground-claimable-from-any-slot",
-    // W2-c-2。**待ちと起こしの破壊テストである。**
-    "read-never-waits",
-    "keyboard-does-not-wake",
-    "idle-holds-bkl-across-hlt",
-    // W2-d+。**時刻の入口の破壊テスト。** **どちらも値がもっともらしいまま壊れる。**
-    "clock-goes-backwards",
-    "clock-ap-also-ticks",
-    "wake-ignores-the-reason",
-    "timer-never-wakes",
-    "timer-wakes-before-deadline",
-    // `ADR-0063` の (b2)。**ハンドルと回収の破壊テストと、取りこぼしのウィンドウを広げる破壊テスト。**
-    "wait-ignores-the-generation",
-    "finish-does-not-wake",
-    "reap-does-not-reset",
-    "wait-window-is-wide",
-    // `ADR-0063` の (b3)。**パイプと入口の破壊テスト。**
-    "pipe-write-does-not-wake-reader",
-    "pipe-close-keeps-writer-count",
-    "pipe-read-empty-returns-zero",
-    "pipe-write-ignores-full",
-    "pipe-reader-not-reserved",
-    "spawn-detached-returns-early",
-    "wait-child-keeps-reservation",
-    "percpu-fake-nonzero-cpu-id",
-    "smp-tramp-corrupt-copy-test",
-    "smp-ap-touch-scheduler-test",
-    "lapic-timer-scale-calibration-test",
-    "lapic-timer-wrong-divide-test",
-    "lapic-timer-no-mask-all-test",
-    "ioapic-wrong-vector-test",
-    "ioapic-skip-unmask-test",
-    "ioapic-keep-pic-irq1-test",
-    "misalign-test",
-    "ap-entry-misalign-test",
-    "bsp-entry-misalign-test",
-    "idt-irq-stub-offset-test",
-    "addrspace-no-kernel-share",
-    "kernel-top-digest-mismatch-test",
-    "kernel-top-write-after-boot-test",
-    "kernel-top-write-unguarded-test",
-    "no-eoi-test",
-    "alt-offset-test",
-    "interrupt-handler-register-after-boot-test",
-    "keyboard-handler-not-registered-test",
-    "paging-test",
-    "exception-test",
-    "critical-test",
-    "interrupt-test",
-    "panic-test",
-    "gfx-test-pattern",
-    "highhalf-no-identity-in-boot-pt",
-    "highhalf-bad-high-slot",
-    "highhalf-no-kernel-high-in-live-table",
-    "highhalf-trampoline-absolute-ref",
-    "highhalf-remove-verify-fail",
-    "highhalf-remove-before-highify",
-    "highhalf-panic-after-remove",
-    "acpi-test",
-    "apic-test",
-    "smp-ap-no-sentinel-clear",
-    "sched-ignore-owner",
-    "sched-ignore-current",
-    "smp-ap-runs-preemptive-demo",
-    "sched-ignore-bootstrap-tripwire",
-    "sched-keep-workers-runnable",
-    "smp-ipi-probe",
-    "smp-tlb-generation-probe",
-    "smp-tlb-shootdown-probe",
-    "smp-tlb-no-generation-bump",
-    // `ADR-0068` の HW-a。**受け渡しを上へ戻す（ブートローダ）と、配りを高いアドレスからにする。**
-    // **`frame-allocator-high-after-switch` は入れない**——**破壊テストではなく検査の構成である**
-    // （`MACHINE_VARIANT_CONFIGS`。`concurrent-test` と同じ扱い）。
-    "handoff-anywhere",
-    "frame-allocator-hands-out-high-first",
-    // `ADR-0068` の HW-b。**i8042 を探って答えが無ければ止める（直す前の形）。**
-    "i8042-halts-when-absent",
-    // `ADR-0068` の HW-c。**ACPI の PM タイマを無いものとして扱う**（変種で見る）**と、
-    // 周波数の定数を 2 倍にする**（速さの判定で見る）。
-    "pm-timer-treated-as-absent",
-    "pm-timer-double-frequency",
-    // `ADR-0068` の HW-d。**ブートローダが渡した RAM ディスクのイメージを見ない**と、**装置が無いのに
-    // 書き戻しの完了を待つ。** **`ram-disk-write-test` は台本で、破壊ではない**（`concurrent-test`
-    // と同じ扱い）。
-    "fs-ram-image-ignored",
-    "flush-waits-without-device",
-];
-
 /// 内部を隠す約束のディレクトリ。
 ///
 /// - `kernel/src/machine/pc/irq/`: 割り込みコントローラとタイマ源の境界（S0-a）。外から
@@ -24006,6 +23900,9 @@ fn visibility_qualified_mod_or_use(trimmed: &str) -> Option<&'static str> {
 
 /// 既定のビルドに入ってよい feature（2026-09-28。運用者の決定）。**`default` から辿れる feature は、この一覧の
 /// ちょうど部分集合でなければならない**（[`check_default_features_are_clean`]）。
+///
+/// **既定のビルドに破壊が入ってはならない。** 入ったまま出荷すると、壊れた状態で測った結果を正常な結果として
+/// 扱うことになる（2026-09-29 に外した名簿 `SABOTAGE_FEATURES` の doc から移した）。
 const DEFAULT_FEATURES_ALLOWED: &[&str] = &["heap-poison"];
 
 /// どの試験からも回らない feature と、その理由（2026-09-28。運用者の決定）。**理由は必須である。** 試験から回るように
@@ -24030,11 +23927,10 @@ const NOT_RUN_BY_ANY_TEST: &[(&str, &str)] = &[
 
 /// feature の名前が出ても、その feature を試験から回すことにならない所（2026-09-28）。**名前で並べる。**
 ///
-/// 名簿（[`SABOTAGE_FEATURES`]）、判定の表（破壊テストが何で落ちたかを引く表）、許可の表、不安定な試験の一覧、
+/// 判定の表（破壊テストが何で落ちたかを引く表）、許可の表、不安定な試験の一覧、
 /// 既定のビルドの許した一覧とこの検査の例外の表、手で使う道具（試験ではない）である。xtask のテスト
 /// （`#[cfg(test)]` のモジュール）も数えない。無い項目の名前が載っていれば、検査が落とす。
 const PLACES_THAT_DO_NOT_RUN_FEATURES: &[&str] = &[
-    "SABOTAGE_FEATURES",
     "SABOTAGE_JUDGEMENTS",
     "SABOTAGE_STOP_REASONS",
     "SABOTAGE_JUDGEMENTS_NOT_PLACED",
@@ -24133,17 +24029,17 @@ fn feature_closure(
 /// 既定のビルドに破壊が混ざっていないことを確かめる（2026-09-28 に見方を変えた。運用者の決定）。
 ///
 /// **`default` から推移的に辿った feature が、[`DEFAULT_FEATURES_ALLOWED`] のちょうど部分集合であることを見る。**
-/// **以前は「辿った先に [`SABOTAGE_FEATURES`]（破壊テストの名簿）の名前が無いこと」を見ていた**が、名簿は破壊テストを
+/// **以前は「辿った先に `SABOTAGE_FEATURES`（破壊テストの名簿）の名前が無いこと」を見ていた**が、名簿は破壊テストを
 /// 足すたびに書き足す必要があり、載っていない破壊は既定のビルドへ入っても名指しで落ちなかった（持ち越しの一覧の
 /// 「`SABOTAGE_FEATURES`の覆いが40項目で止まり、94のfeatureが届かない」）。許した一覧で見れば、名簿に載っていない
-/// feature が既定へ入っても落ちる。
+/// feature が既定へ入っても落ちる。**名簿は、読む検査が無くなったので 2026-09-29 に外した**（運用者の決定）。
 ///
 /// **kernel・bootloader・common の 3 つを見る**（S6-e で bootloader まで広げた。**`panic-test`（bootloader の
 /// feature）は一覧にあっても照合の対象に一度も入っていなかった**）。`default` を持つのは今は kernel だけで、
 /// crate をまたぐ指定も辿る。
 ///
-/// **あわせて死んだ行も見る**——[`DEFAULT_FEATURES_ALLOWED`] と [`SABOTAGE_FEATURES`] に、どのマニフェストにも
-/// 無い名前が載っていないこと（許可リストの死んだエントリと同じ穴である。S6-d）。
+/// **あわせて死んだ行も見る**——[`DEFAULT_FEATURES_ALLOWED`] に、どのマニフェストにも無い名前が載っていないこと
+/// （許可リストの死んだエントリと同じ穴である。S6-d）。
 fn check_default_features_are_clean(workspace_root: &Path) -> Result<Vec<String>> {
     let graphs = feature_graphs(workspace_root)?;
     let mut findings = Vec::new();
@@ -24173,14 +24069,6 @@ fn check_default_features_are_clean(workspace_root: &Path) -> Result<Vec<String>
         if !declared(feature) {
             findings.push(format!(
                 "dead DEFAULT_FEATURES_ALLOWED entry (no such feature in {}): `{feature}`",
-                FEATURE_MANIFESTS.join(", ")
-            ));
-        }
-    }
-    for feature in SABOTAGE_FEATURES {
-        if !declared(feature) {
-            findings.push(format!(
-                "dead SABOTAGE_FEATURES entry (no such feature in {}): `{feature}`",
                 FEATURE_MANIFESTS.join(", ")
             ));
         }
@@ -24530,8 +24418,8 @@ fn refuse_if_something_else_is_running(what: &str) -> Result<()> {
 ///
 /// # なぜ検査しないのか
 ///
-/// **増えるのが正常である**——**破壊テストを足せば `SABOTAGE_FEATURES` が増え、許可リストは
-/// 場所が増えれば増える。** **固定すると、1 件足すたびに定数を直す作業が生まれる**
+/// **増えるのが正常である**——**許可リストは場所が増えれば増える。** **固定すると、1 件足すたびに
+/// 定数を直す作業が生まれる**
 /// （`check_deferred_state_markers` と同じ判断。**`EXPECTED_CHECK_COUNT` と同じ種類にしない**）。
 ///
 /// # なぜ出すのか
@@ -24556,7 +24444,6 @@ fn report_enumeration_counts() {
         ("PARSED_EXTERNAL_TOOLS", PARSED_EXTERNAL_TOOLS.len()),
         ("PRIVATE_BOUNDARY_DIRS", PRIVATE_BOUNDARY_DIRS.len()),
         ("DOC_PATH_PREFIXES", DOC_PATH_PREFIXES.len()),
-        ("SABOTAGE_FEATURES", SABOTAGE_FEATURES.len()),
         (
             "DIRECT_INTERRUPT_CONTROL_ALLOWLIST",
             DIRECT_INTERRUPT_CONTROL_ALLOWLIST.len(),
