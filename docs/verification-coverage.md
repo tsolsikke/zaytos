@@ -518,7 +518,7 @@ git clone -q file:///path/to/zaytos /tmp/clean && cd /tmp/clean && cargo xtask c
 完全であること」が何かの主張を担っているものを挙げる。** **残りは検査の献立で、
 落ちれば`EXPECTED_CHECK_COUNT`と会計行が示す。**
 
-**件数は表に持たない（2026-09-17に外した）。** **`cargo xtask check`が`enumeration counts`の行で出す**——**14件を`.len()`で数え、出すだけで検査しない**（**増えるのが正常なので、固定すると1件足すたびに定数を直す作業が生まれる。** 持ち越しの数と同じ扱いである）。**表が古くなる形そのものを消すためである**——**実測で`SABOTAGE_FEATURES`が40と書かれていたが49だった**（2026-09-17）。
+**件数は表に持たない（2026-09-17に外した）。** **`cargo xtask check`が`enumeration counts`の行で出す**——**`.len()`で数え（2026-09-17に14件、2026-09-28に24件）、出すだけで検査しない**（**増えるのが正常なので、固定すると1件足すたびに定数を直す作業が生まれる。** 持ち越しの数と同じ扱いである）。**表が古くなる形そのものを消すためである**——**実測で`SABOTAGE_FEATURES`が40と書かれていたが49だった**（2026-09-17）。
 
 **`FOLDABLE_VECTORS`だけは道具に出せない。** **`kernel/src/idt`に在り、`xtask`はkernelに依存せずビルドするだけなので`.len()`が取れない。** **ソースを読んで数える形にすると、その検査自身が列挙で守られることになる**（新しい脆さ）。**これだけは手で数えた値と日付を表に残す。**
 
@@ -528,7 +528,7 @@ git clone -q file:///path/to/zaytos /tmp/clean && cd /tmp/clean && cargo xtask c
 | `PARSED_EXTERNAL_TOOLS` | **静か**——その道具の直呼びを検査が見ない | 無害（当たらないだけ） |
 | `PRIVATE_BOUNDARY_DIRS` | **静か**——その配下の可視性の漏れを見ない | 自分で言う（どのファイルにも当たらない項を落とす。2026-09-27。以前は無害と書いたが、ディレクトリを移すと黙って何も見なくなっていた） |
 | `DOC_PATH_PREFIXES` | **静か**——その形のパスが「パス」として見られない | 自分で言う（誤検出で落ちる） |
-| `SABOTAGE_FEATURES` | **静か**——破壊テストのfeatureが既定ビルドへ混ざっても気づかない | 自分で言う（死んだ項の検査が在る） |
+| `SABOTAGE_FEATURES` | 無害——**2026-09-28から、既定のビルドの検査はこの名簿ではなく`DEFAULT_FEATURES_ALLOWED`で見る**（名簿を読むのは、死んだ項の検査と件数の行だけ。以前は「静か——破壊テストのfeatureが既定ビルドへ混ざっても気づかない」だった） | 自分で言う（死んだ項の検査が在る） |
 | `DIRECT_INTERRUPT_CONTROL_ALLOWLIST` | 自分で言う（許可されていない`cli`/`sti`で落ちる） | **静か**——消えた箇所を許し続ける |
 | `DIRECT_SERIAL_PORT_ALLOWLIST` | 自分で言う | **静か** |
 | `DOC_PATH_ALLOWLIST` | 自分で言う（参照が落ちる） | **静か** |
@@ -544,6 +544,9 @@ git clone -q file:///path/to/zaytos /tmp/clean && cd /tmp/clean && cargo xtask c
 | `X86_WORD_HOMES`（2026-09-27） | 自分で言う（置き場へ移した言葉が共通の側として数えられ、基準を超える） | 静かだが害は無い（無い置き場を許し続ける） |
 | `X86_WORDS`・`X86_WORDS_WITH_NUMBERS`（2026-09-27） | **静か**——載っていない言葉は、共通の側へ戻っても数えない | 無害（当たらないだけ） |
 | `MASKED_SIZE_ANCHORS`（2026-09-27） | 自分で言う（伏せるべき大きさが違いとして残り、記録し直しが断られる） | **静か**——その所の数が変わっても伏せ続ける |
+| `DEFAULT_FEATURES_ALLOWED`（2026-09-28） | 自分で言う（既定から辿れるfeatureが載っていなければ落ちる） | 静かだが害は無い（既定から外したfeatureの名前が残っても、許すだけである。どのマニフェストにも無い名前は死んだ項として落とす） |
+| `NOT_RUN_BY_ANY_TEST`（2026-09-28） | 自分で言う（どの試験からも回らないfeatureが載っていなければ落ちる） | 自分で言う（回るようになった項と、無いfeatureの項と、理由の無い項を落とす） |
+| `PLACES_THAT_DO_NOT_RUN_FEATURES`（2026-09-28） | **静か**——名前を並べるだけの表が載っていないと、その中のfeatureの名前を「試験から回る」と数え、回らないことを見逃す | 自分で言う（xtaskのソースに無い項目の名前を落とす） |
 
 **外した時点で、5件が食い違っていた**（実測。2026-09-17）——**`SABOTAGE_FEATURES`が40対49、`DIRECT_INTERRUPT_CONTROL_ALLOWLIST`が12対14、`DIRECT_SERIAL_PORT_ALLOWLIST`が24対25、`BOOT_LOG_VOLATILE_MARKERS`が18対19、`TEST_HOOKS_EXCLUSIONS`が6対3である。** **一致していたのは9件である。**
 
