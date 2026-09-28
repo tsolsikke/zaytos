@@ -83,7 +83,7 @@ pub fn max_tick_jump() -> u64 {
 ///
 /// 順序と割り込み禁止区間の扱いは [`crate::machine::pc::irq::switch_timer_to_lapic`] が
 /// 持つ。ここはその前後の観測に徹する。
-fn switch_timer_to_lapic(
+fn switch_to_local_timer(
     logger: &mut Logger<SerialPort>,
     calibration: crate::machine::pc::apic::TimerCalibration,
 ) {
@@ -325,7 +325,7 @@ pub unsafe fn run_timer_loop(
             Some(crate::machine::pc::apic::CalibrationReference::PmTimer)
         );
         if let Some(calibration) = calibration {
-            switch_timer_to_lapic(logger, calibration);
+            switch_to_local_timer(logger, calibration);
         } else {
             logger.warn(format_args!(
                 "apic: the local APIC timer was not calibrated, so the timer stays on the PIT; \

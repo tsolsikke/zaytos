@@ -945,7 +945,7 @@ impl LocalApicEnable {
 /// # Safety
 ///
 /// 自コアの単一文脈から、割り込み禁止で呼ぶこと。
-pub unsafe fn enable_local_apic_for_this_cpu() -> Option<LocalApicEnable> {
+pub unsafe fn enable_interrupt_controller_for_this_cpu() -> Option<LocalApicEnable> {
     // SAFETY: 呼び出し側の契約をそのまま引き継ぐ。
     let write = unsafe { apic::set_spurious_vector_for_this_cpu() }?;
     Some(LocalApicEnable {
@@ -966,7 +966,7 @@ pub unsafe fn enable_local_apic_for_this_cpu() -> Option<LocalApicEnable> {
 ///
 /// [`apic::arm_timer_for_this_cpu`] の契約をそのまま引き継ぐ。戻った時点から
 /// ティックが届きうる。
-pub unsafe fn arm_lapic_timer_for_this_cpu() -> Option<(u32, u32)> {
+pub unsafe fn enable_local_timer_for_this_cpu() -> Option<(u32, u32)> {
     // SAFETY: 呼び出し側の契約をそのまま引き継ぐ。
     unsafe { apic::arm_timer_for_this_cpu() }
 }

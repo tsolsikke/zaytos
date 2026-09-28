@@ -686,7 +686,7 @@ unsafe fn start_local_timer(serial: &mut SerialPort, slot: usize) -> ! {
     #[cfg(not(feature = "smp-ap-timer-no-svr-test"))]
     {
         // SAFETY: 自コアの単一文脈で、割り込みは禁止されている。
-        match unsafe { crate::machine::pc::irq::enable_local_apic_for_this_cpu() } {
+        match unsafe { crate::machine::pc::irq::enable_interrupt_controller_for_this_cpu() } {
             Some(enable) => {
                 let _ = writeln!(
                     serial,
@@ -723,7 +723,7 @@ unsafe fn start_local_timer(serial: &mut SerialPort, slot: usize) -> ! {
     // 2. 自分の LVT Timer を、BSP と同じ設定で開ける。
     // SAFETY: 自コアの IDT は載っており、LAPIC_TIMER_VECTOR には戻れるハンドラが
     // ある。割り込みはまだ禁止されているので、`sti` するまでは届かない。
-    match unsafe { crate::machine::pc::irq::arm_lapic_timer_for_this_cpu() } {
+    match unsafe { crate::machine::pc::irq::enable_local_timer_for_this_cpu() } {
         Some((divide, initial_count)) => {
             let _ = writeln!(
                 serial,
