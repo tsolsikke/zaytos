@@ -148,17 +148,27 @@ pub fn halt_forever() -> ! {
 ///     let work = shared_state_snapshot();
 ///     drop(guard);                           // ここではまだ処理しない
 ///     if work.is_empty() {
-///         unsafe { enable_interrupts_and_halt() };
+///         unsafe { enable_interrupts_and_wait() };
 ///     }
 /// }
 /// ```
+///
+/// # 契約（境界の関数。2026-09-28。`enable_interrupts_and_halt` から名前を変え、直下に並べた）
+///
+/// - 効くのはこの CPU だけである。ほかの CPU の割り込みの状態は変えない。ほかの CPU との排他も、メモリの順序も与えない。
+/// - 呼んでよいのはカーネルの文脈で、BKL・`Locked`・`InterruptGuard` を持っていないときである（持ったまま呼ぶと、
+///   割り込みを止めているはずの区間で割り込みを許すことになる）。IF は 0 でも 1 でもよい。0 のまま呼ぶのは、`cli` の下で
+///   条件を確かめた直後に眠る形である（`EntryInterruptGuard` で確かめたなら、ガードを `forget` してから呼ぶ）。
+/// - 戻るのは、割り込み（NMI を含む）の処理が戻った後で、IF=1 のままである。何が起こしたかは答えないので、呼ぶ側が
+///   条件を見直す。保証するのは、許してから止まるまでの間に割り込みを受けないこと（取りこぼさないこと）だけである。
+/// - NMI は止まらない。
 ///
 /// # Safety
 ///
 /// 割り込みを有効化する。呼び出し時点で、有効化されうるすべてのベクタに
 /// 対して正しく動作するハンドラが用意されていなければならない
 /// （ADR-0018 §2 の 7 項目）。
-pub unsafe fn enable_interrupts_and_halt() {
+pub unsafe fn enable_interrupts_and_wait() {
     // SAFETY: `sti` は IF を立て、`hlt` は次の割り込みまで CPU を止める。
     // 2 命令を 1 つの asm! に置いているため、コンパイラが間に何かを挟む
     // ことはなく、`sti` の 1 命令保留がそのまま `hlt` に掛かる。

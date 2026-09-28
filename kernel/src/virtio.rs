@@ -648,7 +648,7 @@ impl DeviceClaim {
             }
             core::mem::forget(guard);
             // SAFETY: [`exercise_blocking_read`] と同じ位置の契約である。
-            unsafe { common::arch::x86_64::cpu::enable_interrupts_and_halt() };
+            unsafe { common::arch::x86_64::enable_interrupts_and_wait() };
             self.halts += 1;
         }
         let device = DEVICE.load(core::sync::atomic::Ordering::Acquire);
@@ -809,7 +809,7 @@ const BLOCKING_WAIT_TICKS: u64 = 200;
 /// # 取り逃しの窓の閉じ（ADR-0036 の IF の規律）
 ///
 /// 完了フラグの検査を `cli` 下（[`EntryInterruptGuard`]）で行い、未完了なら
-/// **`sti; hlt` を隣接させて眠る**（[`common::arch::x86_64::cpu::enable_interrupts_and_halt`]）。
+/// **`sti; hlt` を隣接させて眠る**（[`common::arch::x86_64::enable_interrupts_and_wait`]）。
 /// 検査から `hlt` まで IF=0 なので、「検査したら未完了と見てから眠るまでの間に
 /// 完了 IRQ が来て取り逃す」ウィンドウが開かない。
 ///
@@ -874,7 +874,7 @@ pub unsafe fn exercise_blocking_read(
         //
         // SAFETY: 配線済みで、IF=1 で受けてよいベクタにハンドラが揃っている
         // （sti 前 7 項目は `start_timer` が検証済み）。
-        unsafe { common::arch::x86_64::cpu::enable_interrupts_and_halt() };
+        unsafe { common::arch::x86_64::enable_interrupts_and_wait() };
         halts += 1;
     }
 

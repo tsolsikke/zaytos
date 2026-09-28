@@ -393,7 +393,7 @@ pub fn loop_iterations() -> u64 {
 /// # なぜ M4-d-1 では `hlt` しないのか
 ///
 /// ADR-0018 §7 はメインループを `hlt` で待つ形にすると定めており、そのための
-/// [`cpu::enable_interrupts_and_halt`]（`sti; hlt` 隣接）も用意した。
+/// [`cpu::enable_interrupts_and_wait`]（`sti; hlt` 隣接）も用意した。
 /// しかし M4-d-1 でそれを使うと、確実にハングする。
 ///
 /// `hlt` は次の割り込みが来るまで CPU を止める命令である。M4-d-1 は全 IRQ を

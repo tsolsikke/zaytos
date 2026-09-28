@@ -765,7 +765,7 @@ unsafe fn start_local_timer(serial: &mut SerialPort, slot: usize) -> ! {
 ///
 /// # `sti; hlt` の隣接
 ///
-/// BSP の `run_timer_loop` と同じく `cpu::enable_interrupts_and_halt` を使う。
+/// BSP の `run_timer_loop` と同じく `common::arch::x86_64::enable_interrupts_and_wait` を使う。
 /// このループは眠るかどうかを条件で決めないので、条件確認と `hlt` の間で
 /// 仕事を取りこぼす形にならない（あちらの doc と同じ理由である）。
 ///
@@ -800,7 +800,7 @@ fn ap_heartbeat_loop(serial: &mut SerialPort, slot: usize) -> ! {
         // SAFETY: 自コアの IDT は載っており、タイマのハンドラは EOI を送って戻る。
         // `sti; hlt` が隣接しているので、有効化と停止の間にウィンドウが開かない。
         unsafe {
-            cpu::enable_interrupts_and_halt();
+            common::arch::x86_64::enable_interrupts_and_wait();
         }
     }
 }

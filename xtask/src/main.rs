@@ -19611,6 +19611,12 @@ const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
         item: "drop",
         reason: "InterruptGuard::drop の復元（排他の実装本体）",
     },
+    // (a') 境界の関数の並び（2026-09-28）。許して待つ関数を common の arch の直下に並べる 1 行。呼ぶ所は下の各項目が持つ。
+    DirectInterruptControlSite {
+        file: "common/src/arch/x86_64/mod.rs",
+        item: "<file scope>",
+        reason: "enable_interrupts_and_wait を直下に並べる 1 行（境界の関数の並び。呼ぶ所は各項目が持つ）",
+    },
     // (b) 起動の一度きり。スコープを抜けたら復元する意味を持たない恒久的な禁止。
     DirectInterruptControlSite {
         file: "kernel/src/main.rs",
@@ -19631,14 +19637,14 @@ const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
     DirectInterruptControlSite {
         file: "kernel/src/virtio.rs",
         item: "exercise_blocking_read",
-        reason: "I/O 待ちの sti;hlt 隣接（S13-d-2。ADR-0036）。cli 下で完了を検査し、                 未完了なら enable_interrupts_and_halt で眠る",
+        reason: "I/O 待ちの sti;hlt 隣接（S13-d-2。ADR-0036）。cli 下で完了を検査し、                 未完了なら enable_interrupts_and_wait で眠る",
     },
     DirectInterruptControlSite {
         file: "kernel/src/virtio.rs",
         item: "wait_for_image_write",
         reason: "I/O 待ちの sti;hlt 隣接（P-c-1。ADR-0036）。exercise_blocking_read と \
                  同じ形で、こちらはシェルの文脈から呼ばれる本番の利用者である。cli 下で \
-                 完了を検査し、未完了なら enable_interrupts_and_halt で眠る。BKL は \
+                 完了を検査し、未完了なら enable_interrupts_and_wait で眠る。BKL は \
                  呼び出し側が解いてある",
     },
     DirectInterruptControlSite {
@@ -19713,7 +19719,7 @@ const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
 /// 許可リストに無い直接の割り込み制御を探す。
 ///
 /// 対象は `cpu::disable_interrupts` / `cpu::enable_interrupts`
-/// （`enable_interrupts_and_halt` を含む）の呼び出しと、`asm!`/`global_asm!` 内の
+/// （`enable_interrupts_and_wait` を含む）の呼び出しと、`asm!`/`global_asm!` 内の
 /// 生の `"cli"` / `"sti"`。
 ///
 /// `common/src/arch/x86_64/cpu.rs` は除外する（primitive の定義本体で、命令そのものはここに

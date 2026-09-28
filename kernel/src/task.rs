@@ -1597,7 +1597,7 @@ core::arch::global_asm!(
 ///
 /// # `sti` と `hlt` を隣接させる
 ///
-/// **[`common::arch::x86_64::cpu::enable_interrupts_and_halt`] を使う**（`ADR-0018` のチェックリスト 10）。
+/// **[`common::arch::x86_64::enable_interrupts_and_wait`] を使う**（`ADR-0018` のチェックリスト 10）。
 /// **条件を確かめてから眠る形にはしていない**——**このタスクが選ばれるのは「走行可能な者が
 /// 居ない」ときだけで、起こすのは割り込みである。** **W2-c で待つ者が出たら、起こす側が
 /// `Ready` にしてから割り込みを終えるので、取りこぼしは生じない**（あちらで判定を設ける）。
@@ -1618,7 +1618,7 @@ extern "sysv64" fn bsp_idle_main() -> ! {
         let _held_across_halt = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
         // SAFETY: 割り込みを許して眠るだけである。ロックは 1 つも持っていない。
         // ハンドラは登録済みで、このタスクのスタックはガードページ付きである。
-        unsafe { common::arch::x86_64::cpu::enable_interrupts_and_halt() };
+        unsafe { common::arch::x86_64::enable_interrupts_and_wait() };
     }
 }
 

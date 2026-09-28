@@ -968,12 +968,12 @@ pub unsafe fn run_timer_loop(
         let _bkl_held_across_hlt = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
 
         // 次のティックまで眠る。`sti` は既に効いているが、
-        // `enable_interrupts_and_halt` を使うことで `sti; hlt` の隣接が
+        // `enable_interrupts_and_wait` を使うことで `sti; hlt` の隣接が
         // 常に保たれる（M5 で条件つきの形へ移す際もここを変えずに済む）。
         //
         // SAFETY: ハンドラは用意済みで、EOI も発行している。
         unsafe {
-            cpu::enable_interrupts_and_halt();
+            common::arch::x86_64::enable_interrupts_and_wait();
         }
     }
 }
