@@ -387,6 +387,53 @@ unsafe extern "sysv64" fn switch_stack_and_call(
     );
 }
 
+/// 呼んだ関数が、System V の決まりどおりのスタックで入られたかを確かめる（2026-09-28）。
+///
+/// **読むのは、呼んだ関数のフレームの中の RSP である**（`#[inline(always)]`）。Rust は、`nostack` を付けない `asm!` の
+/// 入口で、スタックが関数を呼べる境界（System V では 16 の倍数）に揃っていることを保証する——**その関数自身が決まり
+/// どおりに入られた（入口で RSP を 16 で割ると 8 余る）ときに限る。** アセンブリから `jmp` で入るなどして入口が 8 ずれて
+/// いると、ここで 16 で割ると 8 余る。**違えば理由を出して止まる。** 仮に呼んだ側へ展開されずに呼ばれても、呼んだ側の
+/// ずれが呼ばれた側へそのまま伝わるので、同じように見つかる。
+///
+/// 割り込みの経路の確かめ（`idt` の `check_stack_alignment`。スタブが `call` の直前に読んだ RSP を渡す）と同じことを、
+/// 入口の関数の中から確かめる形である。アセンブリの側に RSP を渡す命令を足さずに済む。
+///
+/// # 契約（境界の関数。2026-09-28）
+///
+/// - `entry` は、判定行に出す入口の名前である。
+/// - アセンブリから入る Rust の入口の先頭で呼ぶ。割り込みの状態・BKL・起動の途中か後かは問わない（報告はシリアルを
+///   直に開く）。
+/// - 境界が合っていれば何もしない。合っていなければ、この CPU を止める（戻らない）。
+/// - この CPU だけに効く。ほかの CPU との同期は含まない。
+#[inline(always)]
+pub fn check_entry_stack_alignment(entry: &str) {
+    let stack: u64;
+    // SAFETY: RSP を読むだけで、メモリにもフラグにも触れない。**`nostack` を付けない**——付けると、Rust がこの asm の
+    // 入口でスタックの境界を揃える保証が無くなり、この確かめの前提が消える。
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) stack, options(nomem, preserves_flags)) };
+    if !stack.is_multiple_of(16) {
+        report_misaligned_entry(entry, stack);
+    }
+}
+
+/// [`check_entry_stack_alignment`] が境界の違反を見つけたときの報告。**BSP の `_start` と AP の入口でも出すので、
+/// 渡されるロガーが無い。シリアルへ直に書いて止まる。**
+#[cold]
+#[inline(never)]
+fn report_misaligned_entry(entry: &str, stack: u64) -> ! {
+    use core::fmt::Write as _;
+    let mut serial = common::machine::pc::open_direct_serial();
+    let _ = writeln!(
+        serial,
+        "[ERROR] stack alignment: {entry} was entered with a stack that breaks the SysV ABI \
+         (rsp in its frame = {stack:#018x}, rsp % 16 = {}, must be 0); assembly probably jumped \
+         into it instead of calling it",
+        stack % 16
+    );
+    let _ = writeln!(serial, "[ERROR] halting (cli + hlt loop)");
+    common::arch::x86_64::cpu::halt_forever()
+}
+
 /// ガードページを 1 枚設ける（S12 前の手当て、C の途中で寄せた）。
 ///
 /// **粒度を確かめ、2MiB なら分割し、分割後にもう一度読み直してから unmap する。**

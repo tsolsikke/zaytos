@@ -303,9 +303,12 @@ core::arch::global_asm!(
     "  mov rdi, [rip + zaytos_ap_tramp_data_index]",
     // 起動したことを BSP へ知らせる。BSP はこれをポーリングして次の AP へ進む。
     "  mov qword ptr [rip + zaytos_ap_tramp_data_started], 1",
-    // 高位 VA の Rust の入口へ。戻らない。
+    // 高位 VA の Rust の入口へ `call` で入る。戻らない。**`jmp` で入ると、入口の RSP が System V の決まり
+    // （16 で割ると 8 余る）から 8 ずれる**（スタックの頂点は 4 KiB 境界。2026-09-28 に直した）。入口の先頭で
+    // 確かめる（`check_entry_stack_alignment`）。戻ったら `ud2` で落とす。
     "  mov rax, [rip + zaytos_ap_tramp_data_entry]",
-    "  jmp rax",
+    "  call rax",
+    "  ud2",
     // --- 一時 GDT と GDTR ---
     ".org 0xF00",
     "  .quad 0",                       // null
@@ -441,12 +444,11 @@ impl InstalledTrampoline {
 ///
 /// # 入口（`entry`）の契約
 ///
-/// - 呼び出し規約は `extern "C"`（System V）で、戻らない（`-> !`）。トランポリンの 64 ビットのコードから `jmp` で
-///   入る（`call` ではないので、戻り先は積まない）。第 1 引数（`rdi`）は `set_ap_parameters` で書いた番号である。
-/// - スタックは `set_ap_parameters` で渡した恒等のスタックの頂点である（1 フレーム、4 KiB 境界）。**入口の RSP は
-///   16 の倍数で、System V の関数の入口の決まり（RSP を 16 で割ると 8 余る）とは 8 ずれている**（2026-09-28 に
-///   分かった）。今は、カーネルのコードに整列を要る SSE の命令が出ず（ターゲットの機能は `fxsr` だけ）、この流れに
-///   16 バイト境界の局所の変数も無いので落ちない。
+/// - 呼び出し規約は `extern "C"`（System V）で、戻らない（`-> !`）。トランポリンの 64 ビットのコードから `call` で
+///   入る（戻り先を積む。戻ったら `ud2` で落とす）。第 1 引数（`rdi`）は `set_ap_parameters` で書いた番号である。
+/// - スタックは `set_ap_parameters` で渡した恒等のスタックの頂点である（1 フレーム、4 KiB 境界）。`call` が戻り先を
+///   積むので、入口の RSP は System V の決まりどおり 16 で割ると 8 余る（2026-09-28 までは `jmp` で入っていて、
+///   8 ずれていた）。入口の先頭で [`crate::arch::x86_64::check_entry_stack_alignment`] を呼ぶこと。
 /// - 割り込みは止まっている（トランポリンの先頭の `cli`）。IDT は載っていないので、例外が起きても行き先が無い。
 ///   NMI は `cli` では止まらない。
 /// - ページテーブルは起動の表（低位 1 GiB の恒等と、高位のカーネル。direct map は無い）で、自分の GDT も載っていない

@@ -19518,6 +19518,12 @@ const DIRECT_SERIAL_PORT_ALLOWLIST: &[DirectSerialPortSite] = &[
         reason: "AP の起こし。BKL へ参加する前の経過を出す",
     },
     DirectSerialPortSite {
+        file: "kernel/src/arch/x86_64/stack.rs",
+        item: "report_misaligned_entry",
+        reason: "入口のスタックの境界の違反の報告（2026-09-28）。BSP の _start と AP の入口でも出すので、\
+                 渡されるロガーが無い",
+    },
+    DirectSerialPortSite {
         file: "kernel/src/smp.rs",
         item: "ap_after_switch",
         reason: "AP がスタックを切り替えた直後。BKL を取る区間は書き込みだけに絞ってある",

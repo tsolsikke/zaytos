@@ -25,5 +25,7 @@ pub use ring3::{
     current_excursion_recovery, excursion_recovery_belongs_to_slot, excursion_stack_range_of,
     set_current_excursion_recovery,
 };
-pub use stack::{install_guard_page, kernel_stack_range, KERNEL_STACK_FILL};
+pub use stack::{
+    check_entry_stack_alignment, install_guard_page, kernel_stack_range, KERNEL_STACK_FILL,
+};
 pub use task_frame::{build_initial_context, raise_yield_interrupt};

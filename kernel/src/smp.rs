@@ -106,6 +106,8 @@ const MAX_APS: usize = common::percpu::MAX_CPUS - 1;
 /// BSP が 1 つずつ起動することで混線を避けている（同時に書くとバイトが混ざる）。
 #[no_mangle]
 pub extern "C" fn zaytos_ap_entry(index: u64) -> ! {
+    // **アセンブリから入る入口なので、先に入り方の決まりを確かめる**（2026-09-28）。
+    crate::arch::x86_64::check_entry_stack_alignment("zaytos_ap_entry");
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
     serial.init();
     let _ = writeln!(
@@ -741,6 +743,8 @@ fn load_bringup(slot: usize) -> Option<ApBringUp> {
 
 /// 本番 CR3 と per-CPU スタックへ移った後の AP（S3-b-2b-2）。戻らない。
 extern "C" fn ap_after_switch(slot: usize) -> ! {
+    // **アセンブリから入る入口なので、先に入り方の決まりを確かめる**（2026-09-28）。
+    crate::arch::x86_64::check_entry_stack_alignment("ap_after_switch");
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
     serial.init();
 
