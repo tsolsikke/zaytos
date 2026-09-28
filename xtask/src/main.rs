@@ -19735,25 +19735,11 @@ fn find_unapproved_interrupt_control(
     // **一覧が静かに狭くなることの鏡像である。**
     let mut used = vec![false; DIRECT_INTERRUPT_CONTROL_ALLOWLIST.len()];
     // SAFETY 検査と同じ理由で、追跡済みだけでなく未追跡のファイルも見る
-    // （新規ファイルの最初の検査が素通りするのを防ぐ）。
-    let output = Command::new("git")
-        .current_dir(workspace_root)
-        .args([
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "*.rs",
-        ])
-        .output()
-        .context("failed to list Rust sources")?;
-    if !output.status.success() {
-        bail!("git ls-files failed while collecting Rust sources");
-    }
-    let listing = String::from_utf8(output.stdout).context("git ls-files produced non-UTF-8")?;
+    // （新規ファイルの最初の検査が素通りするのを防ぐ。[`checked_files`]）。
+    let listing = checked_files(workspace_root, &["*.rs"])?;
 
     let mut findings = Vec::new();
-    for relative in listing.lines().filter(|l| !l.is_empty()) {
+    for relative in listing.iter().map(String::as_str) {
         // primitive の定義本体は対象外。
         if relative == "common/src/arch/x86_64/cpu.rs" {
             continue;
@@ -19911,24 +19897,10 @@ fn find_unapproved_direct_serial_ports(
 ) -> Result<Vec<String>> {
     // 死んだエントリも探す（`find_unapproved_interrupt_control` と同じ理由）。
     let mut used = vec![false; DIRECT_SERIAL_PORT_ALLOWLIST.len()];
-    let output = Command::new("git")
-        .current_dir(workspace_root)
-        .args([
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "*.rs",
-        ])
-        .output()
-        .context("failed to list Rust sources")?;
-    if !output.status.success() {
-        bail!("git ls-files failed while collecting Rust sources");
-    }
-    let listing = String::from_utf8(output.stdout).context("git ls-files produced non-UTF-8")?;
+    let listing = checked_files(workspace_root, &["*.rs"])?;
 
     let mut findings = Vec::new();
-    for relative in listing.lines().filter(|l| !l.is_empty()) {
+    for relative in listing.iter().map(String::as_str) {
         // 対象は kernel と common だけ（許可リストの doc の「bootloader が対象外で
         // ある理由」）。xtask はホスト側で、この検査自身の文字列リテラルも入る。
         if !(relative.starts_with("kernel/") || relative.starts_with("common/")) {
@@ -20122,25 +20094,11 @@ fn find_unsafe_without_safety_comment(workspace_root: &Path) -> Result<Vec<Strin
     //
     // `--cached --others --exclude-standard` にすると、追跡済みと、
     // 無視されていない未追跡の両方が出る。`--exclude-standard` を付けるのは
-    // `target/` の中を拾わないためである。
-    let output = Command::new("git")
-        .current_dir(workspace_root)
-        .args([
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "*.rs",
-        ])
-        .output()
-        .context("failed to list Rust sources")?;
-    if !output.status.success() {
-        bail!("git ls-files failed while collecting Rust sources");
-    }
-    let listing = String::from_utf8(output.stdout).context("git ls-files produced non-UTF-8")?;
+    // `target/` の中を拾わないためである（今は [`checked_files`] が集める）。
+    let listing = checked_files(workspace_root, &["*.rs"])?;
 
     let mut findings = Vec::new();
-    for relative in listing.lines().filter(|l| !l.is_empty()) {
+    for relative in listing.iter().map(String::as_str) {
         let path = workspace_root.join(relative);
         let source = fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
@@ -20587,8 +20545,16 @@ fn check_libc_host_tests(workspace_root: &Path) -> Result<String> {
 }
 
 fn check_markdown_references(workspace_root: &Path) -> Result<Vec<String>> {
+    // **参照の先は、追跡しているものだけを在るとみなす**（2026-09-28。運用者の決定）。追跡していないものを含めると、
+    // 参照の先を `git add` し忘れたまま文書だけをコミットしても手元の検査が通り、食い違いは CI まで見えない。
+    // **作業ツリーに在って追跡していないものを指したら、そう言う**——何をすればよいかが分かるように。
+    // **調べる側の文書は、追跡していない新しい文書も含める**（[`checked_files`]）。
     let tracked = tracked_paths(workspace_root, &["*"])?;
-    let markdown = tracked_paths(workspace_root, &["*.md"])?;
+    let untracked: Vec<String> = checked_files(workspace_root, &[])?
+        .into_iter()
+        .filter(|path| !tracked.contains(path))
+        .collect();
+    let markdown = checked_files(workspace_root, &["*.md"])?;
 
     // 見出しからアンカーを作る（`docstyle` の `S5` と同じ作り方）。
     let mut anchors: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -20641,7 +20607,17 @@ fn check_markdown_references(workspace_root: &Path) -> Result<Vec<String>> {
                         .any(|t| *t == normal || t.starts_with(&format!("{normal}/")))
                     && !moved_path_is_tracked(&normal, &tracked, DOC_PATH_MOVES)
                 {
-                    findings.push(format!("{rel}:{number}: リンク先が存在しない -> {target}"));
+                    if untracked
+                        .iter()
+                        .any(|t| *t == normal || t.starts_with(&format!("{normal}/")))
+                    {
+                        findings.push(format!(
+                            "{rel}:{number}: git add していないファイルを指している -> {target}\
+                             （作業ツリーには在るが、追跡していない。そのファイルを git add する）"
+                        ));
+                    } else {
+                        findings.push(format!("{rel}:{number}: リンク先が存在しない -> {target}"));
+                    }
                     continue;
                 }
                 if let Some(fragment) = fragment {
@@ -20673,9 +20649,19 @@ fn check_markdown_references(workspace_root: &Path) -> Result<Vec<String>> {
                         || moved_path_is_tracked(&full, &tracked, DOC_PATH_MOVES)
                 });
                 if !found {
-                    findings.push(format!(
-                        "{rel}:{number}: バックティックの中のパスが存在しない -> `{path}`"
-                    ));
+                    let not_added = DOC_PATH_PREFIXES
+                        .iter()
+                        .any(|prefix| untracked.contains(&format!("{prefix}{path}")));
+                    if not_added {
+                        findings.push(format!(
+                            "{rel}:{number}: git add していないファイルを指している -> `{path}`\
+                             （作業ツリーには在るが、追跡していない。そのファイルを git add する）"
+                        ));
+                    } else {
+                        findings.push(format!(
+                            "{rel}:{number}: バックティックの中のパスが存在しない -> `{path}`"
+                        ));
+                    }
                 }
             }
             // **今の状態を書く文書は、読み替えの表に頼らず今の置き場を書く**（2026-09-27。運用者の決定）。
@@ -20692,7 +20678,7 @@ fn check_markdown_references(workspace_root: &Path) -> Result<Vec<String>> {
     findings.extend(doc_path_move_problems(DOC_PATH_MOVES, &tracked));
     // **載せた文書が無くなったら落とす**——**改名すると、黙って何も見なくなる。**
     for (doc, _) in CURRENT_STATE_DOCS {
-        if !markdown.iter().any(|rel| rel == doc) {
+        if !tracked.iter().any(|rel| rel == doc) {
             findings.push(format!(
                 "CURRENT_STATE_DOCS: {doc} is not a tracked document"
             ));
@@ -20774,14 +20760,15 @@ fn backticked_paths(line: &str) -> Vec<String> {
     paths
 }
 
-/// 追跡下の `.md` の構造を見る（フェンスの対と、見出しレベルの飛び）。
+/// `.md` の構造を見る（フェンスの対と、見出しレベルの飛び）。
+/// 追跡していない新しい文書も見る（[`checked_files`]。2026-09-28）。
 ///
 /// # `tools/docstyle.py` から移した（2026-09-06）
 ///
 /// **`S4` も「レンダリング結果を見る必要がある」を理由に移していなかったが、
 /// 実装は行を数えるだけでレンダラを使っていない**（実測）。
 fn check_markdown_structure(workspace_root: &Path) -> Result<Vec<String>> {
-    let markdown = tracked_paths(workspace_root, &["*.md"])?;
+    let markdown = checked_files(workspace_root, &["*.md"])?;
     let mut findings = Vec::new();
     for rel in &markdown {
         let Ok(text) = fs::read_to_string(workspace_root.join(rel)) else {
@@ -20823,7 +20810,8 @@ fn check_markdown_structure(workspace_root: &Path) -> Result<Vec<String>> {
     Ok(findings)
 }
 
-/// `git ls-files` の結果を集める。
+/// `git ls-files` の結果を集める。**追跡しているものだけ**で、**参照の先**（リンクの先・バックティックの中のパス・
+/// 索引が名前を出すファイル）と、追跡下のバイナリの検査に使う。**中身を調べる側の一覧は [`checked_files`] である。**
 fn tracked_paths(workspace_root: &Path, patterns: &[&str]) -> Result<Vec<String>> {
     let mut args = vec!["ls-files"];
     args.extend_from_slice(patterns);
@@ -20843,19 +20831,47 @@ fn tracked_paths(workspace_root: &Path, patterns: &[&str]) -> Result<Vec<String>
         .collect())
 }
 
-fn check_markdown_prose_style(workspace_root: &Path) -> Result<Vec<String>> {
+/// 検査が中身を調べるファイルの一覧（2026-09-28。運用者の決定）。**追跡しているものと、無視されていない追跡外の
+/// もの**を集める（`git ls-files --cached --others --exclude-standard`）。`--exclude-standard` は `target/` の中を
+/// 拾わないためである。`pathspecs` が空なら全部を集める。
+///
+/// **検査ごとに一覧の作り方が違い、追跡していない新しいファイルを見る検査と見ない検査が混ざっていた**——x86 の
+/// 言葉は追跡下だけを数えていて、`git add` の前の検査を新しいファイルが素通りした（実測。2026-09-28）。
+/// **中身を調べる側は、これ 1 つで集める。** **参照の先は [`tracked_paths`] のまま**——追跡していないものを
+/// 含めると、参照の先を `git add` し忘れたまま文書だけをコミットしても手元の検査が通り、食い違いは CI まで
+/// 見えない。
+///
+/// 出力は `git ls-files` のままで、並べ替えも絞り込みもしない（まとめる前の 5 か所と同じ振る舞い）。
+fn checked_files(workspace_root: &Path, pathspecs: &[&str]) -> Result<Vec<String>> {
     let output = Command::new("git")
         .current_dir(workspace_root)
-        .args(["ls-files", "*.md"])
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+        ])
+        .args(pathspecs)
         .output()
-        .context("failed to run git ls-files for the markdown style check")?;
+        .context("failed to list the files the checks read")?;
     if !output.status.success() {
-        bail!("git ls-files failed for the markdown style check");
+        bail!("git ls-files failed while listing the files the checks read ({pathspecs:?})");
     }
-    let listing = String::from_utf8_lossy(&output.stdout);
+    Ok(String::from_utf8(output.stdout)
+        .context("git ls-files produced non-UTF-8")?
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn check_markdown_prose_style(workspace_root: &Path) -> Result<Vec<String>> {
+    // 追跡していない新しい文書も見る（[`checked_files`]。2026-09-28）。
+    let listing = checked_files(workspace_root, &["*.md"])?;
 
     let mut findings = Vec::new();
-    for rel in listing.lines().filter(|l| !l.trim().is_empty()) {
+    for rel in listing.iter().map(String::as_str) {
         let path = workspace_root.join(rel);
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
@@ -22508,14 +22524,16 @@ fn read_x86_word_baseline(text: &str) -> Result<(usize, usize)> {
 ///
 /// **増えたら落ちる。** **減ったら、基準を下げるまで落ちる**——**下げずに置くと、減った分だけ後で増えても
 /// 落ちなくなるため。** 下げるのは `--update-reference` で、**上げる向きには書き換えない**（上げるなら手で書き、
-/// 理由をコミットに書く）。**数えるのは `kernel/src` と `common/src` の追跡下の `.rs` で、コメントとログの文言は
-/// 数えない**（[`code_for_word_count`]）。置き場（[`X86_WORD_HOMES`]）の中の数は出すだけである。
+/// 理由をコミットに書く）。**数えるのは `kernel/src` と `common/src` の `.rs` で、コメントとログの文言は
+/// 数えない**（[`code_for_word_count`]）。**追跡していない新しいファイルも数える**（[`checked_files`]。2026-09-28。
+/// 以前は追跡下だけを数えていて、`git add` の前の検査を新しいファイルが素通りした）。
+/// 置き場（[`X86_WORD_HOMES`]）の中の数は出すだけである。
 fn check_x86_words(workspace_root: &Path, update: bool) -> Result<String> {
     let mut common = 0usize;
     let mut boot = 0usize;
     let mut homes = 0usize;
     let mut per_file: Vec<(String, BTreeMap<String, usize>)> = Vec::new();
-    for path in tracked_paths(workspace_root, &["kernel/src", "common/src"])? {
+    for path in checked_files(workspace_root, &["kernel/src", "common/src"])? {
         if !path.ends_with(".rs") {
             continue;
         }
@@ -23558,36 +23576,22 @@ static PRIVATE_BOUNDARY_DIRS: &[&str] = &[
 ///   変わるためで、その 1 文字の差を検査の外に置きたくない。
 fn find_boundary_visibility_leaks(workspace_root: &Path) -> Result<Vec<String>> {
     // 列挙は SAFETY 検査と同じ理由で `--cached --others --exclude-standard`
-    // にする。**未追跡の新規ファイルこそ検査が要る**（配下に新しいファイルを
+    // にする（[`checked_files`]）。**未追跡の新規ファイルこそ検査が要る**（配下に新しいファイルを
     // 作って再公開する経路が、追跡される前に素通りするのを防ぐ）。
-    let output = Command::new("git")
-        .current_dir(workspace_root)
-        .args([
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "*.rs",
-        ])
-        .output()
-        .context("failed to list Rust sources")?;
-    if !output.status.success() {
-        bail!("git ls-files failed while collecting Rust sources");
-    }
-    let listing = String::from_utf8(output.stdout).context("git ls-files produced non-UTF-8")?;
+    let listing = checked_files(workspace_root, &["*.rs"])?;
 
     let mut findings = Vec::new();
     // **どのファイルにも当たらない項を落とす**（2026-09-27。境界の段階の手順 2）。**ディレクトリを移すと、
     // 項が古いまま、この検査が黙って何も見なくなっていた。**
     for dir in PRIVATE_BOUNDARY_DIRS {
-        if !listing.lines().any(|relative| relative.starts_with(dir)) {
+        if !listing.iter().any(|relative| relative.starts_with(dir)) {
             findings.push(format!(
                 "PRIVATE_BOUNDARY_DIRS: {dir} matches no Rust source (moved? point the entry at \
                  the new place)"
             ));
         }
     }
-    for relative in listing.lines().filter(|l| !l.is_empty()) {
+    for relative in listing.iter().map(String::as_str) {
         if !PRIVATE_BOUNDARY_DIRS
             .iter()
             .any(|dir| relative.starts_with(dir))
@@ -25909,7 +25913,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     total += 1;
-    begin_item(Family::Base, "markdown prose style (tracked .md)");
+    begin_item(Family::Base, "markdown prose style (tracked and new .md)");
     let prose = check_markdown_prose_style(&workspace_root)?;
     if prose.is_empty() {
         println!("--- markdown prose style: OK");
@@ -25937,7 +25941,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     total += 1;
     begin_item(
         Family::Base,
-        "markdown links, anchors and backticked paths resolve (tracked .md)",
+        "markdown links, anchors and backticked paths in tracked and new .md resolve to tracked files",
     );
     let references = check_markdown_references(&workspace_root)?;
     if references.is_empty() {
@@ -25956,7 +25960,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     total += 1;
     begin_item(
         Family::Base,
-        "markdown structure (fence pairs and heading levels, tracked .md)",
+        "markdown structure (fence pairs and heading levels, tracked and new .md)",
     );
     let structure = check_markdown_structure(&workspace_root)?;
     if structure.is_empty() {
@@ -26638,19 +26642,11 @@ fn check_git_pre_push_hook(workspace_root: &Path) -> Result<String> {
 
 /// 変更したパスとグループの対応表が、追跡している全ファイルを覆うかを見る（2026-09-26。族にまとめる段）。
 ///
-/// **未追跡も見る**（`--others --exclude-standard`）——**新しいファイルは、コミットの前に落ちる。**
+/// **未追跡も見る**（`--others --exclude-standard`。[`checked_files`]）——**新しいファイルは、コミットの前に落ちる。**
 /// **判定は `family::table_problems`**（ホストのテストが覆う）。
 fn check_path_family_table(workspace_root: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .current_dir(workspace_root)
-        .args(["ls-files", "--cached", "--others", "--exclude-standard"])
-        .output()
-        .context("failed to list the files for the path-to-family table")?;
-    if !output.status.success() {
-        bail!("git ls-files failed while listing the files for the path-to-family table");
-    }
-    let listing = String::from_utf8(output.stdout).context("git ls-files produced non-UTF-8")?;
-    let paths: Vec<&str> = listing.lines().filter(|line| !line.is_empty()).collect();
+    let listing = checked_files(workspace_root, &[])?;
+    let paths: Vec<&str> = listing.iter().map(String::as_str).collect();
     let problems = family::table_problems(family::PATH_RULES, &paths);
     if !problems.is_empty() {
         bail!("{} problem(s): {}", problems.len(), problems.join("; "));
@@ -26901,18 +26897,32 @@ fn agent_paths_named_in(text: &str) -> Vec<String> {
 ///   **無いものを指した索引は、その場で嘘である**（公開文書は、リポジトリに
 ///   無いファイルを指してはならない。`CLAUDE.md` の「エージェント向け設定
 ///   ファイルの扱い」）。
-/// - **逆**: 追跡下の `.claude/…` が、すべて索引から指されていること。
+/// - **逆**: 追跡下の `.claude/…` が（追跡していない新しいものも）、すべて索引から指されていること。
 ///   **足したのに索引へ載せなければ、次のセッションはその存在を知れない**
 ///   （`ADR-0031` が追跡下へ入れた理由がこれである）。
 ///
-/// **追跡下かどうかで入力を決めるので、追跡外のものは両向きとも対象にならない。**
-/// `.claude/settings.local.json` が逆向きで落ちないのはそのためである
-/// （公開しないと決めてある。`ADR-0031`）。
-fn find_agent_index_mismatches(index_text: &str, tracked: &[String]) -> Vec<String> {
+/// **追跡しているかで入力を分ける**（2026-09-28。運用者の決定）。**順**は参照の先なので、追跡しているものだけを
+/// 在るとみなす——作業ツリーに在っても、`git add` していなければ落とし、そう言う。**逆**は調べる側なので、
+/// 追跡していない新しいファイル（`untracked`）も含める——足したファイルを索引へ載せ忘れると、`git add` の前に落ちる。
+/// `.claude/settings.local.json` が逆向きで落ちないのは、`.git/info/exclude` で除いてあり、どちらの一覧にも
+/// 入らないためである（公開しないと決めてある。`ADR-0031`）。
+fn find_agent_index_mismatches(
+    index_text: &str,
+    tracked: &[String],
+    untracked: &[String],
+) -> Vec<String> {
     let named = agent_paths_named_in(index_text);
     let mut findings = Vec::new();
     for path in &named {
-        if !tracked.iter().any(|t| t == path) {
+        if tracked.iter().any(|t| t == path) {
+            continue;
+        }
+        if untracked.iter().any(|u| u == path) {
+            findings.push(format!(
+                "CLAUDE.md names {path}, a file you have not git-added yet. Run git add {path}; the \
+                 index must not point at a file the repository does not have"
+            ));
+        } else {
             findings.push(format!(
                 "CLAUDE.md names {path}, which is not tracked. The index must not point at a \
                  file the repository does not have"
@@ -26927,38 +26937,35 @@ fn find_agent_index_mismatches(index_text: &str, tracked: &[String]) -> Vec<Stri
             ));
         }
     }
+    for path in untracked {
+        if !named.iter().any(|n| n == path) {
+            findings.push(format!(
+                "{path} is a new file (not tracked yet) and CLAUDE.md never names it. Put the \
+                 pointer in the index, or list the file in .git/info/exclude if it must stay \
+                 private (ADR-0031)"
+            ));
+        }
+    }
     findings
 }
 
-/// 上の判定へ入力を集める。**追跡下の一覧は `git ls-files` から取る。**
+/// 上の判定へ入力を集める。**追跡下の一覧は [`tracked_paths`]、追跡していない新しいファイルは
+/// [`checked_files`] から追跡下を除いて取る。**
 fn check_agent_index_links(workspace_root: &Path) -> Result<usize, Vec<String>> {
     let index = workspace_root.join("CLAUDE.md");
     let text = match fs::read_to_string(&index) {
         Ok(text) => text,
         Err(e) => return Err(vec![format!("could not read {}: {e}", index.display())]),
     };
-    let output = Command::new("git")
-        .current_dir(workspace_root)
-        .args(["ls-files", ".claude"])
-        .output();
-    let output = match output {
-        Ok(output) if output.status.success() => output,
-        Ok(output) => {
-            return Err(vec![format!(
-                "git ls-files .claude failed ({})",
-                output.status
-            )]);
-        }
-        Err(e) => return Err(vec![format!("could not run git ls-files: {e}")]),
-    };
-    let tracked: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
+    let tracked =
+        tracked_paths(workspace_root, &[".claude"]).map_err(|e| vec![format!("{e:#}")])?;
+    let untracked: Vec<String> = checked_files(workspace_root, &[".claude"])
+        .map_err(|e| vec![format!("{e:#}")])?
+        .into_iter()
+        .filter(|path| !tracked.contains(path))
         .collect();
 
-    let findings = find_agent_index_mismatches(&text, &tracked);
+    let findings = find_agent_index_mismatches(&text, &tracked, &untracked);
     if findings.is_empty() {
         Ok(tracked.len())
     } else {
@@ -29274,22 +29281,25 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
 
     /// 索引と `.claude/` の対応を、**両向きとも**見ていることを確かめる。
     ///
-    /// **`git` を動かさない。** 判定は純粋関数で、入力は索引の本文と追跡下の
-    /// 一覧の 2 つだけである（`.claude/rules/temporary-changes.md` の
+    /// **`git` を動かさない。** 判定は純粋関数で、入力は索引の本文と、追跡下と追跡していない
+    /// ものの一覧だけである（`.claude/rules/temporary-changes.md` の
     /// 「検査そのものを試すときは、リポジトリを動かさない」）。
     #[test]
     fn the_agent_index_check_looks_both_ways() {
-        let tracked = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let paths = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
         // 揃っている。**ディレクトリの言及は指し先として数えない。**
         let index = "本体は `.claude/rules/a.md` にある。`.claude/` の整備で移した。";
-        assert!(find_agent_index_mismatches(index, &tracked(&[".claude/rules/a.md"])).is_empty());
+        assert!(
+            find_agent_index_mismatches(index, &paths(&[".claude/rules/a.md"]), &[]).is_empty()
+        );
 
         // 順向き: 索引が追跡下に無いものを指している（改名がこの形で出る）。
         // **同時に逆向きも出る**——改名前の名前は索引から消えているためである。
         let renamed = find_agent_index_mismatches(
             "本体は `.claude/rules/b.md` にある。",
-            &tracked(&[".claude/rules/a.md"]),
+            &paths(&[".claude/rules/a.md"]),
+            &[],
         );
         assert_eq!(renamed.len(), 2, "{renamed:?}");
         assert!(
@@ -29301,12 +29311,33 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         // 逆向きだけ: 追跡下に在るのに、索引が名前を出していない。
         let unlisted = find_agent_index_mismatches(
             "本体は `.claude/rules/a.md` にある。",
-            &tracked(&[".claude/rules/a.md", ".claude/settings.json"]),
+            &paths(&[".claude/rules/a.md", ".claude/settings.json"]),
+            &[],
         );
         assert_eq!(unlisted.len(), 1, "{unlisted:?}");
         assert!(
             unlisted[0].contains(".claude/settings.json"),
             "{unlisted:?}"
+        );
+
+        // 追跡していない新しいファイル（2026-09-28）。**索引が名前を出していても、`git add` の前は落ちる**
+        // （参照の先は追跡しているものだけ）。**名前を出していなければ、逆向きで落ちる**（調べる側は含める）。
+        let not_added = find_agent_index_mismatches(
+            "本体は `.claude/rules/a.md` と `.claude/rules/new.md` にある。",
+            &paths(&[".claude/rules/a.md"]),
+            &paths(&[".claude/rules/new.md"]),
+        );
+        assert_eq!(not_added.len(), 1, "{not_added:?}");
+        assert!(not_added[0].contains("not git-added"), "{not_added:?}");
+        let new_unlisted = find_agent_index_mismatches(
+            "本体は `.claude/rules/a.md` にある。",
+            &paths(&[".claude/rules/a.md"]),
+            &paths(&[".claude/rules/new.md"]),
+        );
+        assert_eq!(new_unlisted.len(), 1, "{new_unlisted:?}");
+        assert!(
+            new_unlisted[0].contains("not tracked yet"),
+            "{new_unlisted:?}"
         );
     }
 
