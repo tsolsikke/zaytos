@@ -20,6 +20,7 @@ mod full_check;
 mod launch;
 mod media;
 mod metrics;
+mod sampling;
 mod tool_checks;
 mod vbox;
 
@@ -24913,6 +24914,14 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             ),
         }
         full_check::note_selection(&selected_before);
+        // **全検査の間のホストの様子を残し始める**（2026-09-29。試験の時間を縮める案の 0。`sampling` の doc）。
+        sampling::start(
+            &root,
+            env::var(full_check::LOG_ENV)
+                .ok()
+                .map(PathBuf::from)
+                .as_deref(),
+        );
     } else if commit {
         refuse_if_something_else_is_running("--commit")?;
     }
@@ -27358,6 +27367,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     // **全検査の間に走った他の検査を数え、在れば遅さの行に「比べられない」を添える**（運用者の
     // 決定 (7)。2026-09-25。**遅さの計測は、他の重い実行が無いことを前提にしている**）。
     if full {
+        // **全検査の間のホストの様子をまとめる**（2026-09-29。案 0）。
+        for line in sampling::stop() {
+            println!("{line}");
+        }
         let others = check_lock::other_runs_during_this_full().unwrap_or_default();
         // **記録にも書く**（2026-09-26）——**見込みの書く量は、他の実行が無い回を先にとる。**
         full_check::note_other_runs(others.len());
@@ -28506,6 +28519,8 @@ fn begin_item(family: Family, label: &str) {
     ITEMS_DONE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     stop_if_over_the_time_limit();
     println!("=== xtask check: {label}");
+    // **項目の始まりの時刻を残す**（2026-09-29。試験の時間を縮める案の 0。全検査の間だけ）。
+    sampling::note_item(label);
     if let Ok(mut clock) = ITEM_CLOCK.lock() {
         *clock = Some((Instant::now(), label.to_string(), family));
     }
@@ -28535,6 +28550,10 @@ fn stop_if_over_the_time_limit() {
          got slower.",
         FULL_TIME_LIMIT.as_secs() / 60
     );
+    // **止まる前に、記録を閉じる**（2026-09-29。案 0）。
+    for line in sampling::stop() {
+        println!("{line}");
+    }
     full_check::end("cut", Some(done), Some(item_time_total().as_secs_f64()));
     std::process::exit(3);
 }

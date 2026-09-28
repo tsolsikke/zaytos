@@ -351,6 +351,7 @@ pub const PATH_RULES: &[PathRule] = &[
             "xtask/src/font.rs",
             "xtask/src/full_check.rs",
             "xtask/src/metrics.rs",
+            "xtask/src/sampling.rs",
             "xtask/src/vbox.rs",
             "xtask/reference/host-tests.txt",
             "xtask/reference/kernel-layout.txt",
