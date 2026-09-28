@@ -757,6 +757,7 @@ xtask::tests::a_current_state_document_names_moved_files_by_their_new_place
 xtask::tests::a_difference_passes_only_with_a_reason_for_that_very_pair
 xtask::tests::a_failed_expectation_in_the_reference_is_caught
 xtask::tests::a_feature_reached_only_through_another_crate_is_followed
+xtask::tests::a_form_the_count_does_not_know_is_refused
 xtask::tests::a_gs_operand_in_the_instruction_field_is_found
 xtask::tests::a_line_opens_the_serial_port_through_the_port_or_the_machine_entry
 xtask::tests::a_listed_sabotage_counts_only_when_it_stops_for_the_intended_reason
@@ -775,6 +776,7 @@ xtask::tests::any_error_verdicts_are_counted_per_family
 xtask::tests::any_judgement_verdicts_are_counted_apart
 xtask::tests::ap_ticks_that_grow_across_the_observation_pass_even_when_the_ap_line_is_missing
 xtask::tests::ap_ticks_that_stay_at_zero_fail_the_way_ap_no_svr_would
+xtask::tests::array_elements_are_counted_outside_strings_and_brackets
 xtask::tests::both_forms_of_the_qemu_shutdown_line_are_read
 xtask::tests::declarations_are_read_through_their_qualifiers
 xtask::tests::declared_limit_runs_are_listed_with_their_items
@@ -785,6 +787,7 @@ xtask::tests::every_stop_reason_names_a_kernel_feature
 xtask::tests::expectations_in_the_form_are_read_right_after_their_value
 xtask::tests::expectations_out_of_the_form_say_what_is_out_of_it
 xtask::tests::info_pci_output_is_parsed_and_subsystem_lines_are_ignored
+xtask::tests::items_are_counted_from_the_source_by_the_forms_it_knows
 xtask::tests::kernel_pci_lines_are_parsed_and_other_pci_lines_are_ignored
 xtask::tests::kvm_still_keeps_the_failure_visibility_flags
 xtask::tests::lines_out_of_the_form_pass_only_while_listed_and_out_of_the_form

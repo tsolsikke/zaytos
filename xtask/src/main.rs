@@ -24944,6 +24944,7 @@ fn report_enumeration_counts() {
             "EXPECTATION_DIFFERENCES_EXPLAINED",
             EXPECTATION_DIFFERENCES_EXPLAINED.len(),
         ),
+        ("ITEM_TABLES", ITEM_TABLES.len()),
     ];
     let rendered: Vec<String> = counts
         .iter()
@@ -25343,6 +25344,67 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         Err(error) => {
             println!("--- boot log reference expectations: FAILED (failed to read the reference: {error})");
             failed.push("boot log reference expectations".to_string());
+        }
+    }
+
+    // **全検査の項目の数を、ソースの文字から数える**（2026-09-29。運用者の決定。[`count_items_from_the_source`]）。
+    // **全検査は基本の検査を先に回すので、上げ忘れは全検査の入口の数秒の所でも止まる。**
+    total += 1;
+    begin_item(
+        Family::Base,
+        "the item counts read from the source agree with EXPECTED_CHECK_COUNT",
+    );
+    match count_items_from_the_source(include_str!("main.rs"), ITEM_TABLES, FLAKY_EXCLUDED) {
+        Ok(counted) => {
+            let full_count = counted.base + counted.commit + counted.full_only;
+            let mut wrong = Vec::new();
+            if counted.base != EXPECTED_CHECK_COUNT.base {
+                wrong.push(format!(
+                    "the base check runs {} item(s) but EXPECTED_CHECK_COUNT.base is {}",
+                    counted.base, EXPECTED_CHECK_COUNT.base
+                ));
+            }
+            if counted.commit != 1 {
+                wrong.push(format!(
+                    "--commit adds {} item(s) but the count expects the base check plus 1",
+                    counted.commit
+                ));
+            }
+            if full_count != EXPECTED_CHECK_COUNT.full {
+                wrong.push(format!(
+                    "--full runs {full_count} item(s) but EXPECTED_CHECK_COUNT.full is {}",
+                    EXPECTED_CHECK_COUNT.full
+                ));
+            }
+            if wrong.is_empty() {
+                println!(
+                    "--- item counts read from the source: OK (base {}, --commit {}, --full {full_count}; \
+                     {} loop(s) over tables and arrays, {} single item(s))",
+                    counted.base,
+                    counted.base + counted.commit,
+                    counted.loops,
+                    counted.singles
+                );
+            } else {
+                for line in &wrong {
+                    println!("    {line}");
+                }
+                println!(
+                    "--- item counts read from the source: FAILED (raise EXPECTED_CHECK_COUNT and the \
+                     accounting line in docs/verification-coverage.md, with the stage that added the item(s))"
+                );
+                failed.push("item counts read from the source".to_string());
+            }
+        }
+        Err(findings) => {
+            for finding in &findings {
+                println!("    {finding}");
+            }
+            println!(
+                "--- item counts read from the source: FAILED ({} finding(s))",
+                findings.len()
+            );
+            failed.push("item counts read from the source".to_string());
         }
     }
 
@@ -27673,10 +27735,373 @@ struct ExpectedCheckCount {
     full: usize,
 }
 
+/// 全検査が回す表（`cmd_check` が `for … in 名前` で回し、行ごとに項目を 1 つ数える表）と、その行の数
+/// （2026-09-29。運用者の決定。[`count_items_from_the_source`] が読む）。**ソースのループとちょうど対にする**——
+/// 項目を数えるループの表がここに無ければ落ち、ここにある表を回すループがソースに無ければ死んだ行として落ちる。
+const ITEM_TABLES: &[(&str, usize)] = &[
+    ("CHECKS", CHECKS.len()),
+    ("TOOL_CHECKS_BASE", TOOL_CHECKS_BASE.len()),
+    ("TOOL_CHECKS_FULL", TOOL_CHECKS_FULL.len()),
+    ("UTF8_TEST_SABOTAGES", UTF8_TEST_SABOTAGES.len()),
+    ("PROFILE_TEST_SABOTAGES", PROFILE_TEST_SABOTAGES.len()),
+    ("HISTORY_TEST_SABOTAGES", HISTORY_TEST_SABOTAGES.len()),
+    ("PIPE_TEST_SABOTAGES", PIPE_TEST_SABOTAGES.len()),
+    ("SOCKET_TEST_SABOTAGES", SOCKET_TEST_SABOTAGES.len()),
+    ("INPUT_TEST_SABOTAGES", INPUT_TEST_SABOTAGES.len()),
+    ("POLL_TEST_SABOTAGES", POLL_TEST_SABOTAGES.len()),
+    ("SCREEN_TEST_SABOTAGES", SCREEN_TEST_SABOTAGES.len()),
+    ("COMPOSE_TEST_SABOTAGES", COMPOSE_TEST_SABOTAGES.len()),
+    ("MACHINE_VARIANT_CHECKS", MACHINE_VARIANT_CHECKS.len()),
+    ("MACHINE_VARIANT_CONFIGS", MACHINE_VARIANT_CONFIGS.len()),
+    ("MEDIA_SABOTAGES", MEDIA_SABOTAGES.len()),
+    ("MACHINE_VARIANT_SABOTAGES", MACHINE_VARIANT_SABOTAGES.len()),
+    ("COMPLETE_TEST_SABOTAGES", COMPLETE_TEST_SABOTAGES.len()),
+    ("FP_TEST_SABOTAGES", FP_TEST_SABOTAGES.len()),
+    ("CONCURRENT_TEST_SABOTAGES", CONCURRENT_TEST_SABOTAGES.len()),
+    ("TTF_TEST_SABOTAGES", TTF_TEST_SABOTAGES.len()),
+    ("SERIAL_TEST_SABOTAGES", SERIAL_TEST_SABOTAGES.len()),
+    ("FS_CREATE_SABOTAGES", FS_CREATE_SABOTAGES.len()),
+    ("FS_MKDIR_SABOTAGES", FS_MKDIR_SABOTAGES.len()),
+    ("FS_TRUNCATE_SABOTAGES", FS_TRUNCATE_SABOTAGES.len()),
+    ("FS_WRITE_SABOTAGES", FS_WRITE_SABOTAGES.len()),
+    ("FS_BITMAP_SABOTAGES", FS_BITMAP_SABOTAGES.len()),
+    ("PCI_SABOTAGES", PCI_SABOTAGES.len()),
+    ("VIRTIO_SABOTAGES", VIRTIO_SABOTAGES.len()),
+    ("FS_LOAD_SABOTAGES", FS_LOAD_SABOTAGES.len()),
+    ("SHELL_TEST_SABOTAGES", SHELL_TEST_SABOTAGES.len()),
+    ("SHELL_SCRIPT_SABOTAGES", SHELL_SCRIPT_SABOTAGES.len()),
+    ("EXCEPTION_TESTS", EXCEPTION_TESTS.len()),
+    ("CRITICAL_TESTS", CRITICAL_TESTS.len()),
+    ("PAGING_TESTS", PAGING_TESTS.len()),
+    ("STACK_TESTS", STACK_TESTS.len()),
+    ("TASK_TESTS", TASK_TESTS.len()),
+    ("RING3_TESTS", RING3_TESTS.len()),
+    ("SYSCALL_TESTS", SYSCALL_TESTS.len()),
+    ("ACPI_TESTS", ACPI_TESTS.len()),
+    ("ACPI_SMP_TESTS", ACPI_SMP_TESTS.len()),
+    ("BKL_TIMEOUT_TESTS", BKL_TIMEOUT_TESTS.len()),
+    ("BKL_TESTS", BKL_TESTS.len()),
+    ("ACPI_SMP4_TESTS", ACPI_SMP4_TESTS.len()),
+    ("APIC_TESTS", APIC_TESTS.len()),
+    ("APIC_DECODE_TESTS", APIC_DECODE_TESTS.len()),
+    ("INTERRUPT_TESTS", INTERRUPT_TESTS.len()),
+    ("LAPIC_TIMER_TESTS", LAPIC_TIMER_TESTS.len()),
+    ("SMP_AP_TESTS", SMP_AP_TESTS.len()),
+    ("SMP_TRAMP_TESTS", SMP_TRAMP_TESTS.len()),
+    ("PERCPU_TESTS", PERCPU_TESTS.len()),
+    ("IOAPIC_SABOTAGE_TESTS", IOAPIC_SABOTAGE_TESTS.len()),
+    ("HIGHHALF_TESTS", HIGHHALF_TESTS.len()),
+];
+
+/// ソースの文字から数えた項目の数（2026-09-29。[`count_items_from_the_source`]）。
+#[derive(Debug, Default, PartialEq)]
+struct CountedItems {
+    /// 基本の検査が回す項目。
+    base: usize,
+    /// `--commit` が足す項目。
+    commit: usize,
+    /// `--full` だけが足す項目。
+    full_only: usize,
+    /// 表か配列を回すループの数（`total += 1;` の行の数）。
+    loops: usize,
+    /// 1 つずつの項目の数（同じ）。
+    singles: usize,
+}
+
+/// 項目を数える段（[`count_items_from_the_source`] の中だけで使う）。
+#[derive(Clone, Copy, PartialEq)]
+enum ItemStage {
+    Base,
+    Commit,
+    Full,
+}
+
+/// `cmd_check` のソースの文字から、基本の検査・`--commit`・`--full` が回す項目の数を数える（2026-09-29。運用者の決定）。
+///
+/// # なぜ在るのか
+///
+/// **`cmd_check` は、項目を実行しながら `total += 1` で数える。** 実行する前の予定の一覧が無いので、全検査の項目の数
+/// （[`EXPECTED_CHECK_COUNT`] の `full`）は、全検査を最後まで走らせないと確かめられなかった。**9d-4 と 9d-4b で表に行を
+/// 足して定数を上げ忘れ、全検査の前に数え直して気づいた**（2026-09-28。そのままなら約 2 時間走った後に落ちていた）。
+/// **ソースを読めば、実行せずに数えられる。** 基本の検査の項目なので、**コミットの直後と、全検査の入口（全検査は基本の
+/// 検査を先に回す）の数秒の所で止まる。** 予定の一覧を作る組み替え（`total += 1` の 145 か所）はしていない。
+///
+/// # 数え方
+///
+/// `total += 1;` の行ごとに、字下げでそれを囲む行を内から外へ読む。**知っている形だけを数え、知らない形を見つけたら
+/// 落とす**（運用者の決定）——**新しい形の数え方を足したら、ここへ教える。**
+///
+/// - `for … in 表 {` —— 表の行の数（[`ITEM_TABLES`]）。ループの中で `if is_excluded_flaky("組", test.name) {` の中から
+///   `continue` する行は、[`FLAKY_EXCLUDED`] のその組の行を引く（1 つずつの項目として別に書いた行は除く）。**ほかの形で
+///   飛ばすループは落とす。**
+/// - `for … in [ … ] {`（1 行か、複数行の配列）—— 配列の要素の数。
+/// - `{`（ただの塊）—— 何も変えない。
+/// - `} else {` —— 直前の `if is_excluded_flaky("組", "名前") {` の else なら、外していないときだけ 1。
+/// - `if full {` と `if full || commit {` —— どの段で数えるか。
+///
+/// [`ITEM_TABLES`] の行は、項目を数えるループの表とちょうど対になっていなければ落ちる（載っていない表と、死んだ行）。
+fn count_items_from_the_source(
+    source: &str,
+    tables: &[(&str, usize)],
+    flaky: &[(&str, &str)],
+) -> std::result::Result<CountedItems, Vec<String>> {
+    let lines: Vec<&str> = source.lines().collect();
+    let Some(start) = lines
+        .iter()
+        .position(|line| line.starts_with("fn cmd_check("))
+    else {
+        return Err(vec![
+            "`fn cmd_check(` was not found in the source".to_string()
+        ]);
+    };
+    let Some(end) = lines[start + 1..]
+        .iter()
+        .position(|line| *line == "}")
+        .map(|offset| start + 1 + offset)
+    else {
+        return Err(vec!["the end of `fn cmd_check(` was not found".to_string()]);
+    };
+    let body = &lines[start..=end];
+    let indent = |line: &str| line.len() - line.trim_start_matches(' ').len();
+    // **1 つずつの項目として別に書いた、外せる項目**（`if is_excluded_flaky("組", "名前") {`）。
+    let flaky_singles: Vec<(String, String)> = body
+        .iter()
+        .filter_map(|line| flaky_single(line.trim()))
+        .collect();
+    let mut counted = CountedItems::default();
+    let mut findings = Vec::new();
+    let mut used_tables: Vec<&str> = Vec::new();
+    for (index, line) in body.iter().enumerate() {
+        let trimmed = line.trim();
+        if !trimmed.contains("total +=") {
+            continue;
+        }
+        let at = start + index + 1;
+        if trimmed != "total += 1;" {
+            findings.push(format!(
+                "main.rs:{at}: an increment that is not `total += 1;`: {trimmed}"
+            ));
+            continue;
+        }
+        let mut heads: Vec<(usize, &str)> = Vec::new();
+        let mut want = indent(line);
+        for above in (0..index).rev() {
+            let candidate = body[above];
+            if candidate.trim().is_empty() || indent(candidate) >= want {
+                continue;
+            }
+            want = indent(candidate);
+            if want == 0 {
+                break;
+            }
+            heads.push((above, candidate.trim()));
+        }
+        let mut count = 1usize;
+        let mut stage = ItemStage::Base;
+        let mut in_loop = false;
+        let mut unknown: Option<String> = None;
+        for (head_index, head) in &heads {
+            let head = *head;
+            if head == "if full {" {
+                stage = ItemStage::Full;
+            } else if head == "if full || commit {" {
+                if stage == ItemStage::Base {
+                    stage = ItemStage::Commit;
+                }
+            } else if head == "{" {
+            } else if head == "} else {" {
+                let condition = (0..*head_index)
+                    .rev()
+                    .map(|above| body[above])
+                    .find(|above| {
+                        !above.trim().is_empty() && indent(above) <= indent(body[*head_index])
+                    })
+                    .map(str::trim);
+                match condition.and_then(flaky_single) {
+                    Some((group, name)) => {
+                        if flaky.iter().any(|(g, n)| *g == group && *n == name) {
+                            count = 0;
+                        }
+                    }
+                    None => unknown = Some(head.to_string()),
+                }
+            } else if let Some(table) = table_loop(head) {
+                in_loop = true;
+                match tables.iter().find(|(name, _)| *name == table) {
+                    Some((name, rows)) => {
+                        if !used_tables.contains(name) {
+                            used_tables.push(name);
+                        }
+                        match skipped_groups(body, *head_index, index) {
+                            Ok(groups) => {
+                                let skipped = flaky
+                                    .iter()
+                                    .filter(|(group, name)| {
+                                        groups.iter().any(|g| g.as_str() == *group)
+                                            && !flaky_singles
+                                                .iter()
+                                                .any(|(g, n)| g == group && n == name)
+                                    })
+                                    .count();
+                                count *= rows.saturating_sub(skipped);
+                            }
+                            Err(why) => unknown = Some(format!("{head} ({why})")),
+                        }
+                    }
+                    None => {
+                        unknown = Some(format!(
+                            "{head} (a loop over `{table}`, which ITEM_TABLES does not list)"
+                        ))
+                    }
+                }
+            } else if head == "] {" {
+                in_loop = true;
+                let opening = (0..*head_index).rev().find(|above| {
+                    indent(body[*above]) == indent(body[*head_index])
+                        && body[*above].trim().starts_with("for ")
+                        && body[*above].trim().ends_with(" in [")
+                });
+                match opening {
+                    Some(opening) => {
+                        count *= count_elements(&body[opening + 1..*head_index].join("\n"));
+                    }
+                    None => unknown = Some(head.to_string()),
+                }
+            } else if let Some(array) = head
+                .strip_prefix("for ")
+                .and_then(|rest| rest.split_once(" in ["))
+                .and_then(|(_, rest)| rest.strip_suffix("] {"))
+            {
+                in_loop = true;
+                count *= count_elements(array);
+            } else {
+                unknown = Some(head.to_string());
+            }
+        }
+        if let Some(head) = unknown {
+            findings.push(format!(
+                "main.rs:{at}: the item count cannot be read from the source (an enclosing `{head}`); \
+                 teach count_items_from_the_source this form"
+            ));
+            continue;
+        }
+        match stage {
+            ItemStage::Base => counted.base += count,
+            ItemStage::Commit => counted.commit += count,
+            ItemStage::Full => counted.full_only += count,
+        }
+        if in_loop {
+            counted.loops += 1;
+        } else {
+            counted.singles += 1;
+        }
+    }
+    for (name, _) in tables {
+        if !used_tables.contains(name) {
+            findings.push(format!(
+                "dead ITEM_TABLES entry `{name}` (no loop in cmd_check counts an item per row of it)"
+            ));
+        }
+    }
+    if findings.is_empty() {
+        Ok(counted)
+    } else {
+        Err(findings)
+    }
+}
+
+/// `for … in 表 {` の表の名前（純粋な論理）。
+fn table_loop(head: &str) -> Option<&str> {
+    let (_, rest) = head.strip_prefix("for ")?.split_once(" in ")?;
+    let name = rest.strip_suffix(" {")?;
+    (!name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+    .then_some(name)
+}
+
+/// `if is_excluded_flaky("組", "名前") {` の組と名前（名前が文字で書いてあるときだけ。純粋な論理）。
+fn flaky_single(line: &str) -> Option<(String, String)> {
+    let inner = line
+        .strip_prefix("if is_excluded_flaky(\"")?
+        .strip_suffix("\") {")?;
+    let (group, name) = inner.split_once("\", \"")?;
+    Some((group.to_string(), name.to_string()))
+}
+
+/// ループの頭から項目を数える行までの間で、行を飛ばす `continue`・`break` が、どの組の外した項目のためかを返す
+/// （`if is_excluded_flaky("組", 行の名前) {` の中だけを知っている。純粋な論理）。
+fn skipped_groups(
+    body: &[&str],
+    head: usize,
+    increment: usize,
+) -> std::result::Result<Vec<String>, String> {
+    let indent = |line: &str| line.len() - line.trim_start_matches(' ').len();
+    let mut groups = Vec::new();
+    for index in head + 1..increment {
+        let trimmed = body[index].trim();
+        if trimmed != "continue;" && trimmed != "break;" {
+            continue;
+        }
+        let guard = (head + 1..index)
+            .rev()
+            .map(|above| body[above])
+            .find(|above| !above.trim().is_empty() && indent(above) < indent(body[index]))
+            .map(str::trim)
+            .unwrap_or_default();
+        let group = guard
+            .strip_prefix("if is_excluded_flaky(\"")
+            .and_then(|rest| rest.split_once("\", "))
+            .filter(|(_, name)| !name.starts_with('"'))
+            .map(|(group, _)| group.to_string());
+        match group {
+            Some(group) if trimmed == "continue;" => groups.push(group),
+            _ => return Err(format!("it skips rows under `{guard}`")),
+        }
+    }
+    Ok(groups)
+}
+
+/// 配列の中身の要素の数（外側の `,` を数える。文字列の中は数えない。純粋な論理）。
+fn count_elements(text: &str) -> usize {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut commas = 0;
+    let mut tail = String::new();
+    for c in text.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            tail.push(c);
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                commas += 1;
+                tail.clear();
+                continue;
+            }
+            _ => {}
+        }
+        tail.push(c);
+    }
+    commas + usize::from(!tail.trim().is_empty())
+}
+
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 54,
-    full: 423,
+    base: 55,
+    full: 424,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -31644,6 +32069,96 @@ fn read_cr3() -> u64 {
         );
         assert_eq!(declared_item_name("let x = 1;"), None);
         assert_eq!(declared_item_name("// fn not_this() {"), None);
+    }
+
+    #[test]
+    fn items_are_counted_from_the_source_by_the_forms_it_knows() {
+        let source = r#"fn cmd_check(full: bool, commit: bool) -> Result<()> {
+    for (name, args) in CHECKS {
+        total += 1;
+    }
+    total += 1;
+    if full || commit {
+        total += 1;
+    }
+    if full {
+        for test in SMP_AP_TESTS {
+            if is_excluded_flaky("smp-ap-test", test.name) {
+                println!("skipped");
+                continue;
+            }
+            total += 1;
+        }
+        if is_excluded_flaky("interrupt-test", "keyboard") {
+            println!("skipped");
+        } else {
+            total += 1;
+        }
+        for feature in [
+            "a-test",
+            "b-test, with a comma",
+        ] {
+            total += 1;
+        }
+        for (label, us) in [("x (a, b)", false), ("y", true)] {
+            total += 1;
+        }
+        {
+            total += 1;
+        }
+    }
+}
+"#;
+        let tables: &[(&str, usize)] = &[("CHECKS", 3), ("SMP_AP_TESTS", 5)];
+        let flaky: &[(&str, &str)] = &[("smp-ap-test", "x"), ("interrupt-test", "keyboard")];
+        // **base は表 3 行と 1 つ。`--commit` は 1 つ。`--full` は表 5 行から外した 1 行を引いた 4、外した 1 つずつの項目は 0、
+        // 配列 2 つで 2 と 2、塊の中の 1。**
+        assert_eq!(
+            count_items_from_the_source(source, tables, flaky),
+            Ok(CountedItems {
+                base: 4,
+                commit: 1,
+                full_only: 9,
+                loops: 4,
+                singles: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn a_form_the_count_does_not_know_is_refused() {
+        let source = "fn cmd_check() {\n    match x {\n        _ => {\n            total += 1;\n        }\n    }\n    \
+                      total += 2;\n    for t in OTHER {\n        total += 1;\n    }\n    for t in T {\n        if t.skip {\n            \
+                      continue;\n        }\n        total += 1;\n    }\n}\n";
+        let findings =
+            count_items_from_the_source(source, &[("T", 2), ("CHECKS", 1)], &[]).unwrap_err();
+        assert_eq!(findings.len(), 5, "{findings:?}");
+        assert!(findings[0].contains("an enclosing `"));
+        assert!(findings[1].contains("not `total += 1;`"));
+        assert!(findings[2].contains("which ITEM_TABLES does not list"));
+        assert!(findings[3].contains("it skips rows under `if t.skip {`"));
+        assert!(findings[4].contains("dead ITEM_TABLES entry `CHECKS`"));
+    }
+
+    #[test]
+    fn array_elements_are_counted_outside_strings_and_brackets() {
+        assert_eq!(
+            count_elements("\"a\",\n\"b, c\",\n(\"d\", &[\"e\", F][..]),\n"),
+            3
+        );
+        assert_eq!(count_elements("(\"x\", 1), (\"y\", 2)"), 2);
+        assert_eq!(count_elements("\"quote \\\" inside, still one\""), 1);
+        assert_eq!(count_elements("  \n"), 0);
+        assert_eq!(table_loop("for (name, args) in CHECKS {"), Some("CHECKS"));
+        assert!(table_loop("for feature in [").is_none());
+        assert_eq!(
+            flaky_single("if is_excluded_flaky(\"interrupt-test\", \"keyboard\") {"),
+            Some(("interrupt-test".to_string(), "keyboard".to_string()))
+        );
+        assert_eq!(
+            flaky_single("if is_excluded_flaky(\"smp-ap-test\", test.name) {"),
+            None
+        );
     }
 
     #[test]
