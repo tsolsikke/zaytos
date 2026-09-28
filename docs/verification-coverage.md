@@ -996,9 +996,10 @@ python3 tools/judgement-map.py /tmp/full.txt
 | `keyboard-drop-arrows-test` | 左右の矢印をデコーダで未対応（`Unsupported`）へ戻す | 矢印が前景へ届かないと挿入点が動かないこと。`--shell-test --drop-arrows`が、走る語が`pyq`ではなく`pqy`になることで見る |
 | `kill-ignore-interrupt-test` | Ctrl+Cのフラグを立てない | 走っている子が止まらなくなること。`spin`が回り続け、シェルが`spawn`から戻らない |
 | `kill-fold-at-depth-one-test` | 深さ1でも終了させる | シェル自身がCtrl+Cで死ぬこと。`init`の起動し直しが1回ではなく2回になる |
-| `kill-keep-stale-interrupt-test` | 子を起動する前に中断のフラグを降ろさない | 前のCtrl+Cが次の子へ持ち越されること。エコーの`^C`が1つではなく2つになる |
+| `kill-keep-stale-interrupt-test` | 子を起動する前に中断のフラグを降ろさない | 前のCtrl+Cが次の子へ持ち越されること。エコーの`^C`が1つではなく3つになる（2026-09-28に`spin \| cat`の行を足し、子を止めるCtrl+Cが2本になって、2つから3つになった） |
 | `kill-fold-keep-bkl-test` | BKLを解かずに終了させる | 次にBKLを取る者が同じコアの再取得として検出すること（`user-exit-keep-bkl`と同じ機序。入口が`Irq`である点だけが違う） |
-| `kill-keep-typed-input-test` | 止めた後に溜まっている入力を捨てない | 止めた打鍵そのものが残ること。エコーの`^C`が1つではなく2つになる |
+| `kill-keep-typed-input-test` | 止めた後に溜まっている入力を捨てない | 止めた打鍵そのものが残ること。エコーの`^C`が1つではなく3つになる（2026-09-28に`spin \| cat`の行を足し、子を止めるCtrl+Cが2本になって、2つから3つになった） |
+| `kill-fold-ignore-detached-slot-test` | 切り離したスロットも深さ1で弾く（2026-09-28） | `spin \| cat`に送ったCtrl+Cで、切り離したスロットの`spin`が止まらなくなり、`--shell-test`の「ctrl-c stopped the detached spin of a pipeline」が落ちること（深さ1でも畳むのは切り離したスロットだけで、その条件が9d-3で共通の側の`should_fold_excursion`へ移った） |
 | `fs-alloc-keep-test` | **壊さない。** 割り当てたブロックを解放せずに残す | 割り当て中のイメージを作る。**判定1（往復のバイト一致）と判定2（`e2fsck`の不満が1本）はイメージの状態が違うので、同じ起動では両方示せない**——構成で分ける |
 | `ext2-alloc-skip-sb-count-test` | 割り当てでsuperblockの空き数を直さない | `e2fsck`が群の番号**なし**で報告すること（`Free blocks count wrong (433, counted=432).`） |
 | `ext2-alloc-skip-bg-count-test` | 割り当てで群の空き数を直さない | `e2fsck`が群の番号**付き**で報告すること（`Free blocks count wrong for group #0 ...`）。**上と文言で区別できる**ので寄せない |
@@ -1918,6 +1919,8 @@ VirtualBoxの計数でベクタ0x42が打鍵4バイトで+4、8259のベクタ0x
 | apps | ttf test | `fp-clobber-on-kernel-entry-test` | `the glyph rasterised inside Ring 3 matches the host byte for byte = false` | A | 3回とも同じ | — |
 | smp | serial test | `serial-no-lock-test` | `every line the two cores wrote at the same time is intact = false` | A | 3回とも同じ | — |
 | ipc | socket test | `socket-read-empty-returns-zero` | （用意しない） | D | 狙いが回で変わった | 説明の狙い（判定1。`hello_went_round`）が3回のうち2回だけ偽 |
+
+**2026-09-28に目印を2つ変えた。** **`spin | cat`の行を足し、子を止めるCtrl+Cが2本になった**ので、`kill-keep-stale-interrupt-test`と`kill-keep-typed-input-test`の目印は`echoed ^C count = 3`になった（上の表は2026-09-26の計測の記録として残す）。
 
 **残した4件の扱い（2026-09-27。運用者の判断）。** **どれも合格済みの破壊テストとしては数えない**（今の計測のとおり）。**`socket-read-empty-returns-zero`は、ソケットのコードを次に変えるときに、返事の順序を固定するか読んだ時点を測る形で狙いの判定に届かせる。** **`shm-close-keeps-refs`と`shm-mmap-maps-nothing`は今のまま、「保証していない」として別に数え続ける。** **`keyboard-does-not-wake`の関係の検出器は、USBの段階でキーボードの入力の経路を作り直す前に、セッションが止まっても待ちの計測値を出す形にして届かせる。** **「3回とも同じ判定が偽」は狙いの判定で見る形のままにし、狙い以外の判定だけが回で変わった3件はそのまま載せる**（落ちた判定の組全体を期待の値にしない）。
 
