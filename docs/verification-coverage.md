@@ -918,6 +918,7 @@ python3 tools/judgement-map.py /tmp/full.txt
 | `interrupt-test-timer` | タイマを動かす | ティックが増え続けること |
 | `no-eoi-test` | タイマハンドラのEOI発行を落とす | ティックが1回で止まること |
 | `alt-offset-test` | PICを0x30-0x3Fへ再マップする | ICW2が実際に効いていること |
+| `interrupt-handler-register-after-boot-test` | 起動の後（割り込みの処理の登録を閉じた後）に、源5へ処理を登録しに行く（2026-09-28。`ADR-0072`の5） | 登録する側（`register_interrupt_handler`）が名前つきで止め、シェルが起動しないこと（`--interrupt-test handler-after-boot`） |
 | `tiny-key-buffer` | キーバッファを極小にする | オーバーフロー検出 |
 | `fs-mkdir-keep-test` | **壊さない。** 作ったディレクトリを消さずに残す（DIR-1c） | 生きたディレクトリを`e2fsck`に検算させる。**`.`と`..`・親の`i_links_count`・群の`bg_used_dirs_count`は、消してしまうと現れない**（`fs-create-keep-test`と同じ形）。**空きブロックと空きinodeが1つずつ減り、群のディレクトリ数が1増えることも見る**——**ファイルを作ったときは「ディレクトリ数が動かない」を主張していた。同じ欄を逆向きに使っている** |
 | `ext2-mkdir-skip-dot-dot` | `mkdir`が`..`を書かない（`.`の`rec_len`がブロック全部を吸うので走査は壊れない） | **`e2fsck`だけが検出する。** こちらは`..`について独立の判定を持っていない——**外の道具の文言に乗っている。観測していないことは観測していないと書く** |
