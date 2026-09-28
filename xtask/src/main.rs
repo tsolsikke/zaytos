@@ -4197,6 +4197,8 @@ enum ShellTestMode {
 const SCRIPT_SKIPS: &[&str] = &[
     // **`spin` と `ctrl-c` の行を外している**（Ctrl+C の終了処理は IRQ の経路）。
     "ctrl_c_stopped_the_child",
+    // **`spin | cat` と `ctrl-c` の行も外している**（同じ理由。2026-09-28）。
+    "ctrl_c_stopped_the_detached_spin",
     // **`spin` を起動しないので、方向フラグの前提も作られない**（2026-09-24）。
     "spin_was_interrupted_with_df_set",
     // **台本が駆動している間、`read(0)` は待たない**（空振りで起きる機会が無い）。
@@ -4414,6 +4416,9 @@ const SHELL_TEST_SABOTAGES: &[&str] = &[
     "kill-keep-stale-interrupt-test",
     "kill-fold-keep-bkl-test",
     "kill-keep-typed-input-test",
+    // **パイプラインの左側（切り離したスロット）を止める条件を外す（2026-09-28）。** 深さ 1 でも畳むのは切り離した
+    // スロットだけで、その条件が Ctrl+C の経路にある。
+    "kill-fold-ignore-detached-slot-test",
     // **デコーダを外す破壊テスト（SE-a / SE-b。`ADR-0050`）。** **台本はデコーダを通らないので、
     // 打鍵でしか効かない。** **落ちる判定は `keyboard-drop-home-end-test` が 1 本、
     // `keyboard-drop-ctrl-letters-test` が 2 本**（実測。2026-08-28）。
@@ -4539,6 +4544,15 @@ impl ShellTestMode {
     ///
     /// **US では何も出ない。** **運用者が目視で見る項目の 1 つでもある。**
     fn expects_the_jis_only_keys(self) -> bool {
+        !self.expects_the_us_layout()
+    }
+
+    /// `|` が打てることを期待するか（2026-09-28。`spin | cat` の行）。
+    ///
+    /// **US では `|` が打てない**——**台本は `shift-yen`（JIS の ¥ の Shift）で `|` を作っており、US にはそのキーが
+    /// 無い**（表の外の 2 キーと同じ）。**打った行は `spin  cat` になり、`spin` は深さ 2 の子として走って、
+    /// 同じ Ctrl+C で止まる。**
+    fn expects_the_pipe_to_be_typed(self) -> bool {
         !self.expects_the_us_layout()
     }
 
@@ -5904,10 +5918,11 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "",
         reached: true,
     },
+    // **`^C` は 3 つである**（2026-09-28。`spin | cat` の行を足して、子を止める Ctrl+C が 2 本になった）。
     NamedJudgement {
         check: "shell test",
         key: "kill-keep-stale-interrupt-test",
-        signs: &["ctrl-c stopped the spinning child = false", "echoed ^C count = 2"],
+        signs: &["ctrl-c stopped the spinning child = false", "echoed ^C count = 3"],
         note: "",
         reached: true,
     },
@@ -5918,10 +5933,18 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         note: "a stop: the kernel's recursive-acquisition check halts; the session judgements after it read None",
         reached: true,
     },
+    // **`^C` は 3 つである**（2026-09-28。`spin | cat` の行を足して、子を止める Ctrl+C が 2 本になった）。
     NamedJudgement {
         check: "shell test",
         key: "kill-keep-typed-input-test",
-        signs: &["ctrl-c stopped the spinning child = false", "echoed ^C count = 2"],
+        signs: &["ctrl-c stopped the spinning child = false", "echoed ^C count = 3"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "shell test",
+        key: "kill-fold-ignore-detached-slot-test",
+        signs: &["ctrl-c stopped the detached spin of a pipeline = false"],
         note: "",
         reached: true,
     },
@@ -14687,6 +14710,30 @@ fn judge_shell_session(
     // その数を出す。** **0 なら、IRQ の入口が DF を降ろすという主張は何も確かめていない**
     // （`kernel/src/arch/x86_64/idt/mod.rs` の `check_direction_flag`）。**破壊テスト（`irq-entry-keeps-df-test`）では
     // 最初のタイマで止まり、この行は出ない。**
+    // **Ctrl+C がパイプラインの左側（切り離したスロットで空回りする子）を止めたこと（2026-09-28）。**
+    //
+    // **`spin | cat` と打ち、Ctrl+C を送っている。** `spin` は切り離したスロット（Ring 3 のスロット 1）の深さ 1 で
+    // 空回りし、`cat` はパイプを待つ。**深さ 1 でも畳むのは、切り離したスロットだからである**
+    // （`kernel/src/interrupts.rs` の `should_fold_excursion`）。**止まれば、`cat` はパイプの終わりを読んで 0 で終わり、
+    // シェルが左側の終わりを報せる**（実測。2026-09-28）。**`cat` の終わりは、`spin` が止まった後のものだけを見る**
+    // ——セッションの前の方にも `cat` は走っている。
+    let detached_spin_started =
+        after_shell.contains("detached: starting /bin/spin on ring3 slot 1");
+    let detached_spin_stopped_at =
+        after_shell.find("detached: /bin/spin ended (Ok(Interrupted)) on ring3 slot 1");
+    let cat_read_the_end_of_the_pipe = detached_spin_stopped_at
+        .is_some_and(|at| after_shell[at..].contains("spawn: /bin/cat ended (Exited(0))"));
+    let shell_reported_the_left_side = after_shell.contains("zash: the left side ended with ");
+    //
+    // **期待は構成から決まる**——US では `|` が打てないので、パイプラインにならないことを期待する
+    // （[`ShellTestMode::expects_the_pipe_to_be_typed`]）。
+    let detached_spin_was_stopped = detached_spin_started
+        && detached_spin_stopped_at.is_some()
+        && cat_read_the_end_of_the_pipe
+        && shell_reported_the_left_side;
+    let ctrl_c_stopped_the_detached_spin =
+        detached_spin_was_stopped == mode.expects_the_pipe_to_be_typed();
+
     let spin_interrupts_from_df = after_shell.lines().find_map(|line| {
         line.split("direction flag: /bin/spin was interrupted from a context with DF=1 ")
             .nth(1)?
@@ -15217,6 +15264,15 @@ fn judge_shell_session(
          count = {echoed_ctrl_c_count}, wanted 1)"
     );
     println!(
+        "{context}: ctrl-c stopped the detached spin of a pipeline = \
+         {ctrl_c_stopped_the_detached_spin} (started in slot 1 = {detached_spin_started}, ended \
+         interrupted = {}, cat then read the end of the pipe = {cat_read_the_end_of_the_pipe}, the \
+         shell reported the left side = {shell_reported_the_left_side}; the pipe was expected to be \
+         typed = {})",
+        detached_spin_stopped_at.is_some(),
+        mode.expects_the_pipe_to_be_typed()
+    );
+    println!(
         "{context}: the timer interrupted the spinning child with DF=1 and the handlers ran with \
          DF=0 = {spin_was_interrupted_with_df_set} ({spin_interrupts_from_df:?} interrupt(s), \
          wanted at least 1)"
@@ -15505,6 +15561,10 @@ fn judge_shell_session(
         ("expanded_inside_a_word", expanded_inside_a_word),
         ("ctrl_c_discarded_the_line", ctrl_c_discarded_the_line),
         ("ctrl_c_stopped_the_child", ctrl_c_stopped_the_child),
+        (
+            "ctrl_c_stopped_the_detached_spin",
+            ctrl_c_stopped_the_detached_spin,
+        ),
         (
             "spin_was_interrupted_with_df_set",
             spin_was_interrupted_with_df_set,
@@ -27209,7 +27269,7 @@ struct ExpectedCheckCount {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 53,
-    full: 421,
+    full: 422,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -27235,7 +27295,7 @@ struct ExpectedShellSabotageSplit {
 
 /// 分け方の現在値。**破壊テストを移したら、一覧とは別の編集でここを直すこと。**
 const EXPECTED_SHELL_SABOTAGE_SPLIT: ExpectedShellSabotageSplit = ExpectedShellSabotageSplit {
-    sendkey: 11,
+    sendkey: 12,
     script: 10,
 };
 

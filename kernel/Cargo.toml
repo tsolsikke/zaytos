@@ -425,6 +425,9 @@ ext2-free-skip-bit-test = ["common/ext2-free-skip-bit-break"]
 # 破壊（S12 前の手当て、C）: 止めた後に溜まっている入力を捨てない。
 # 止めた打鍵そのものが残り、次のプロンプトに `^C` が余分に出る。
 kill-keep-typed-input-test = []
+# 破壊（2026-09-28）: 切り離したスロットも深さ 1 で弾く。`spin | cat` の `spin` が
+# Ctrl+C で止まらなくなる。`--shell-test` で落ちる。
+kill-fold-ignore-detached-slot-test = []
 # 破壊（S13-a）: PCI の ID の読みを 1 レジスタ（4 バイト）ずらす。
 # 全装置の ID が壊れ、`info pci` との突き合わせが落ちる。
 pci-config-offset-test = []

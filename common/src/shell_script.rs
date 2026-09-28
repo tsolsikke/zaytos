@@ -300,6 +300,22 @@ pub const LINES: &[Line] = &[
     // 空回りし続ける子を Ctrl+C で止める（深さ 2 の側。IRQ による終了処理が要る）
     keystrokes_only(&["s", "p", "i", "n", "ret"]),
     keystrokes_only(&["ctrl-c"]),
+    // パイプラインの左側を Ctrl+C で止める（`spin | cat`。2026-09-28）。`spin` は切り離したスロットの深さ 1 で
+    // 空回りし、`cat` はパイプを待つ。IRQ による終了処理が要る。`shift-yen` は JIS の `|` である
+    keystrokes_only(&[
+        "s",
+        "p",
+        "i",
+        "n",
+        "spc",
+        "shift-yen",
+        "spc",
+        "c",
+        "a",
+        "t",
+        "ret",
+    ]),
+    keystrokes_only(&["ctrl-c"]),
     // sleep 1（W2-d+）
     line(&["s", "l", "e", "e", "p", "spc", "1", "ret"]),
     // exit
@@ -592,7 +608,8 @@ mod tests {
             );
             i += 1;
         }
-        // Ctrl+C の終了処理が要る行の数は 2 である。
-        assert_eq!(LINES.iter().filter(|l| l.keystrokes_only).count(), 2);
+        // Ctrl+C の終了処理が要る行の数は 4 である（`spin` と `spin | cat`、それぞれを止める Ctrl+C。
+        // 2026-09-28 に `spin | cat` の 2 行を足した）。
+        assert_eq!(LINES.iter().filter(|l| l.keystrokes_only).count(), 4);
     }
 }

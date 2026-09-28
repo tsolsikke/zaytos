@@ -341,11 +341,18 @@ fn should_fold_excursion(interrupted: &crate::arch::x86_64::Interrupted<'_>) -> 
     // **1 回の押しで終了させるのは 1 本である**（フラグは `take` で 1 回だけ消費される）。**両方が
     // Ring 3 で回っていれば 2 回押す。** **カーネルの中で待っている子には届かない**
     // （`ADR-0063` の (b3) の限界）。
+    //
+    // 破壊テスト (2026-09-28, kill-fold-ignore-detached-slot-test): 切り離したスロットも深さ 1 で弾く。**`spin | cat`
+    // の `spin` が Ctrl+C で止まらなくなる**（`--shell-test` の「ctrl-c stopped the detached spin of a pipeline」が
+    // 落ちる）。既定のビルドの式は変えない。
+    #[cfg(not(feature = "kill-fold-ignore-detached-slot-test"))]
     let minimum_depth = if interrupted.excursion_slot() == crate::task::detached_slot() {
         1
     } else {
         MINIMUM_DEPTH
     };
+    #[cfg(feature = "kill-fold-ignore-detached-slot-test")]
+    let minimum_depth = MINIMUM_DEPTH;
     if depth < minimum_depth {
         // **深さ 1 を弾いたことを数える（W2-c-2 の対策）。**
         // **既定では 1 以上、破壊テストでは 0 である**（[`DEPTH_ONE_NOT_FOLDED`] の doc）。

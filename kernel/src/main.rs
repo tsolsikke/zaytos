@@ -11683,6 +11683,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "止めた後の入力を捨てず、次のプロンプトに ^C を余分に出す",
     ),
     (
+        "kill-fold-ignore-detached-slot-test",
+        cfg!(feature = "kill-fold-ignore-detached-slot-test"),
+        "切り離したスロットも深さ 1 で弾き、パイプラインの左側を Ctrl+C で止めない",
+    ),
+    (
         "paging-test",
         cfg!(feature = "paging-test"),
         "ページテーブルの追加検証を走らせる（それ自体は壊さない）",
