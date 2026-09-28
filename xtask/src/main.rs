@@ -14465,17 +14465,38 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
             Ok(mut stream) => {
                 // **到達条件の 3 つを順に打つ。** そのあと `exit` で終える。
                 // **`slash` と `spc` と `minus` は monitor のキー名である。**
-                for line in common::shell_script::LINES {
+                // **行の終わりは、プロンプトが戻るのを待つ**（2026-09-29。運用者の決定。試験の時間を縮める案の G）。
+                // **戻らない行は決まった待ちのまま**（[`waits_for_the_prompt`]）。
+                let mut line_ends = LineEnds::default();
+                for (index, line) in common::shell_script::LINES.iter().enumerate() {
+                    let before = count_fresh_prompts(&read_lossy(&serial_log));
                     for key in line.keys {
                         if writeln!(stream, "sendkey {key}").is_err() {
                             break;
                         }
                         metrics::sleep_fixed(SHELL_TEST_KEY_INTERVAL);
                     }
-                    // **子が走り終えるのを待つ。** `ls` と `cat` は
-                    // `spawn` で起動され、終わるまでシェルは戻らない。
-                    metrics::sleep_fixed(SHELL_TEST_LINE_INTERVAL);
+                    if !waits_for_the_prompt(line) || line_ends.gave_up() {
+                        // **子が走り終えるのを待つ。** `ls` と `cat` は
+                        // `spawn` で起動され、終わるまでシェルは戻らない。
+                        metrics::sleep_fixed(SHELL_TEST_LINE_INTERVAL);
+                        line_ends.fixed += 1;
+                        continue;
+                    }
+                    let started = Instant::now();
+                    let mut returned = false;
+                    while started.elapsed() < SHELL_TEST_PROMPT_WAIT && !child.was_cut() {
+                        if count_fresh_prompts(&read_lossy(&serial_log)) > before {
+                            returned = true;
+                            break;
+                        }
+                        metrics::sleep_poll(SHELL_TEST_PROMPT_POLL);
+                    }
+                    // **後から届く出力のために、短く空ける**（1 行で 2 度戻る行がある。Ctrl+C で捨てた後の Enter）。
+                    metrics::sleep_fixed(SHELL_TEST_PROMPT_SETTLE);
+                    line_ends.note(index, returned, started.elapsed());
                 }
+                println!("{}: {}", mode.context(), line_ends.line());
             }
             Err(e) => println!("shell-test: could not reach the QEMU monitor: {e}"),
         }
@@ -18504,6 +18525,117 @@ const SHELL_TEST_KEY_INTERVAL: Duration = Duration::from_millis(32);
 /// `ls` と `cat` は `spawn` で起動され、終わるまでシェルは戻らない。
 /// **根拠は [`SHELL_TEST_KEY_INTERVAL`] と同じ表に在る。**
 const SHELL_TEST_LINE_INTERVAL: Duration = Duration::from_millis(400);
+
+/// `--shell-test` が 1 行を打った後、プロンプトが戻るのを待つ上限（2026-09-29。試験の時間を縮める案の G）。
+/// **`sleep 1` の行より長くする**（その行は 1 秒後に戻る）。
+const SHELL_TEST_PROMPT_WAIT: Duration = Duration::from_secs(3);
+
+/// プロンプトが戻った後に空ける短い間（案 G）。**1 行で 2 度戻る行がある**——Ctrl+C で行を捨てた後の Enter。
+const SHELL_TEST_PROMPT_SETTLE: Duration = Duration::from_millis(60);
+
+/// プロンプトを見に行く間隔（案 G）。
+const SHELL_TEST_PROMPT_POLL: Duration = Duration::from_millis(20);
+
+/// 続けて何行戻らなければ、残りの行を決まった待ちへ戻すか（案 G）。**シェルが答えなくなった回**（打鍵が届かない
+/// 破壊テストなど）**で、上限の待ちを行の数だけ積まないため。**
+const SHELL_TEST_PROMPT_GIVE_UP: usize = 2;
+
+/// その行の終わりで、プロンプトが戻るのを待つか（案 G。純粋な論理）。**戻らない行は決まった待ちのまま**——
+/// 自分では終わらない子を起こす行（`spin` と `spin | cat`。台本では打たない行で、Enter で終わるもの）と、
+/// シェルを終える `exit` の行。**Ctrl+C の行は待つ**（止めた子が終わるとプロンプトが戻る）。
+fn waits_for_the_prompt(line: &common::shell_script::Line) -> bool {
+    let ends_with_enter = line.keys.last() == Some(&"ret");
+    let starts_a_child_that_does_not_end = line.keystrokes_only && ends_with_enter;
+    let exits = line.keys == ["e", "x", "i", "t", "ret"];
+    let stops_a_child = line.keys == ["ctrl-c"];
+    (ends_with_enter || stops_a_child) && !starts_a_child_that_does_not_end && !exits
+}
+
+/// 改行の直後に出たプロンプトの数（案 G。純粋な論理）。**コマンドが終わって戻ったプロンプトだけを数える**——
+/// Ctrl+L の描き直し（画面を消す制御の直後に出る）は数えない。
+fn count_fresh_prompts(serial: &str) -> usize {
+    let mut count = 0;
+    let mut from = 0;
+    while let Some(offset) = serial[from..].find(SHELL_PROMPT_TAIL) {
+        let at = from + offset;
+        let line_start = serial[..at].rfind('\n').map_or(0, |newline| newline + 1);
+        if only_colour_codes(&serial[line_start..at]) {
+            count += 1;
+        }
+        from = at + SHELL_PROMPT_TAIL.len();
+    }
+    count
+}
+
+/// 色の制御（`ESC [ 数 ; … m`）だけか（純粋な論理）。
+fn only_colour_codes(text: &str) -> bool {
+    let mut rest = text;
+    while !rest.is_empty() {
+        let Some(after) = rest.strip_prefix("\x1b[") else {
+            return false;
+        };
+        let Some(end) = after.find('m') else {
+            return false;
+        };
+        if !after[..end].chars().all(|c| c.is_ascii_digit() || c == ';') {
+            return false;
+        }
+        rest = &after[end + 1..];
+    }
+    true
+}
+
+/// 行の終わりの待ち方の数（案 G。**計測に出すだけ。判定は変えない**）。
+#[derive(Default)]
+struct LineEnds {
+    returned: usize,
+    returned_time: Duration,
+    longest: Duration,
+    fixed: usize,
+    missed: Vec<usize>,
+    in_a_row: usize,
+    gave_up_after: Option<usize>,
+}
+
+impl LineEnds {
+    fn note(&mut self, index: usize, returned: bool, waited: Duration) {
+        if returned {
+            self.returned += 1;
+            self.returned_time += waited;
+            self.longest = self.longest.max(waited);
+            self.in_a_row = 0;
+        } else {
+            self.missed.push(index);
+            self.in_a_row += 1;
+            if self.in_a_row >= SHELL_TEST_PROMPT_GIVE_UP && self.gave_up_after.is_none() {
+                self.gave_up_after = Some(index);
+            }
+        }
+    }
+
+    fn gave_up(&self) -> bool {
+        self.gave_up_after.is_some()
+    }
+
+    fn line(&self) -> String {
+        format!(
+            "(info) line ends: {} line(s) saw the prompt return ({:.1}s in all, the longest {:.2}s), {} kept the fixed \
+             wait of {}ms, {} did not see it within {}s (line index {:?}){}",
+            self.returned,
+            self.returned_time.as_secs_f64(),
+            self.longest.as_secs_f64(),
+            self.fixed,
+            SHELL_TEST_LINE_INTERVAL.as_millis(),
+            self.missed.len(),
+            SHELL_TEST_PROMPT_WAIT.as_secs(),
+            self.missed,
+            match self.gave_up_after {
+                Some(index) => format!("; after line index {index} the rest kept the fixed wait"),
+                None => String::new(),
+            }
+        )
+    }
+}
 
 /// `--shell-test` が、最後の `exit` の後に `init` の起動し直しを待つ上限。
 ///
@@ -31512,6 +31644,44 @@ fn read_cr3() -> u64 {
         );
         assert_eq!(declared_item_name("let x = 1;"), None);
         assert_eq!(declared_item_name("// fn not_this() {"), None);
+    }
+
+    #[test]
+    fn only_prompts_after_a_newline_are_counted() {
+        let prompt = "\x1b[38;2;0;200;0mzaytos\x1b[0m$ ";
+        let serial =
+            format!("zash: ready\n{prompt}ls\nbin etc\n{prompt}ll\x1b[2J\x1b[H{prompt}\n{prompt}");
+        // **Ctrl+L の描き直しは数えない**（画面を消す制御の直後）。
+        assert_eq!(count_fresh_prompts(&serial), 3);
+        assert_eq!(count_fresh_prompts("no prompt here\n"), 0);
+        assert!(only_colour_codes("\x1b[38;2;0;200;0m"));
+        assert!(!only_colour_codes("ll\x1b[2J\x1b[H\x1b[38;2;0;200;0m"));
+    }
+
+    #[test]
+    fn the_lines_that_start_a_child_that_does_not_end_keep_the_fixed_wait() {
+        let lines = common::shell_script::LINES;
+        let fixed: Vec<&[&str]> = lines
+            .iter()
+            .filter(|line| !waits_for_the_prompt(line))
+            .map(|line| line.keys)
+            .collect();
+        assert!(fixed.contains(&&["s", "p", "i", "n", "ret"][..]));
+        assert!(fixed.contains(&&["e", "x", "i", "t", "ret"][..]));
+        assert!(fixed.iter().all(|keys| keys.last() == Some(&"ret")));
+        assert!(lines
+            .iter()
+            .filter(|line| line.keys == ["ctrl-c"])
+            .all(waits_for_the_prompt));
+        let mut ends = LineEnds::default();
+        ends.note(0, true, Duration::from_millis(80));
+        ends.note(1, false, SHELL_TEST_PROMPT_WAIT);
+        assert!(!ends.gave_up());
+        ends.note(2, false, SHELL_TEST_PROMPT_WAIT);
+        assert!(ends.gave_up());
+        assert!(ends
+            .line()
+            .contains("after line index 2 the rest kept the fixed wait"));
     }
 
     #[test]

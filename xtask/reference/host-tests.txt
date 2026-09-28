@@ -792,6 +792,7 @@ xtask::tests::manual_runs_record_cpu_reset_but_not_every_interrupt
 xtask::tests::named_judgement_keys_name_a_sabotage_and_sit_in_one_table
 xtask::tests::no_bsp_heartbeat_fails_instead_of_reading_as_empty
 xtask::tests::no_keyboard_layout_is_ever_passed
+xtask::tests::only_prompts_after_a_newline_are_counted
 xtask::tests::only_the_manual_run_keeps_the_disk_by_default
 xtask::tests::opening_a_window_selects_sdl_and_gtk_stays_available
 xtask::tests::panic_markers_present_requires_both_markers
@@ -816,6 +817,7 @@ xtask::tests::the_capture_stops_only_when_the_prompt_follows_ready
 xtask::tests::the_commit_message_rules_catch_each_shape
 xtask::tests::the_commit_message_rules_pass_the_shapes_that_are_allowed
 xtask::tests::the_kernel_layout_names_each_section_and_its_two_mib_pages
+xtask::tests::the_lines_that_start_a_child_that_does_not_end_keep_the_fixed_wait
 xtask::tests::the_machine_variant_table_parses_and_rejects_broken_rows
 xtask::tests::the_range_flags_turn_the_rules_off
 xtask::tests::the_selection_score_separates_caught_from_complete
