@@ -18177,6 +18177,287 @@ fn boot_log_reference_ends_at_prompt(reference: &str) -> Result<String> {
     ))
 }
 
+/// 起動ログの参照の中で、期待を決めた形で書いていない行（2026-09-29。運用者の決定）。
+///
+/// **決めた形は「値 (expected 期待)」である**——期待はその値のすぐ後に置き、値と期待は同じ書き方の 1 語にする
+/// （`docs/coding-standards.md` の「確かめの行は、値のすぐ後に期待を書く」）。[`check_reference_expectations`] は
+/// この形だけを読み、形に合わない期待は、その行がここに載っていなければ落とす。
+///
+/// **表を作った日に参照にあった行の一覧である。触ったときに決めた形へ直し、表から落とす**——**決めた形に直った
+/// 行が残っていれば、死んだ行として落ちる。** (行を見分ける断片, どこが合わないか)。断片は参照のちょうど 1 行に当たる。
+const EXPECTATIONS_NOT_IN_THE_FORM: &[(&str, &str)] = &[
+    ("] gdt: base=", "期待の中に名前と値を並べている"),
+    ("gdt[1] kcode:", "値（行の頭の記述子）と期待が離れている"),
+    (
+        "gdt[2] kdata:",
+        "値（行の頭の記述子）と期待が離れている。アクセス済みのビットで期待と違う——決めた形に直すときは、\
+         EXPECTATION_DIFFERENCES_EXPLAINED へ理由つきで移す",
+    ),
+    ("gdt[3] ucode32:", "値（行の頭の記述子）と期待が離れている"),
+    ("gdt[4] udata:", "値（行の頭の記述子）と期待が離れている"),
+    ("gdt[5] ucode64:", "値（行の頭の記述子）と期待が離れている"),
+    ("] idt: base=", "期待の中に名前と値を並べている"),
+    ("pic: IMR after remap", "2 つの値の期待を / で並べている"),
+    ("user stored=", "期待に語（return）が入っている"),
+    ("checksum case 'valid buffer'", "期待に語（sum）が入っている"),
+    ("pic: IMR after unmasking IRQ0", "2 つの値の期待を / で並べている"),
+    ("pic: IMR after unmasking IRQ1", "2 つの値の期待を / で並べている"),
+    ("sti-check 1:", "DS と SS の 2 つの値が、1 つの期待を分け合っている"),
+    ("sti-check 5:", "2 つの値の期待を / で並べている"),
+    (
+        "timer: waiting for the first tick",
+        "確かめの行ではない（(expected を使わない言い方へ直す）",
+    ),
+    ("fully masked after mask_all()", "2 つの値の期待を / で並べている"),
+];
+
+/// 決めた形で書いた期待のうち、値が期待と違うのが正しいもの（2026-09-29。運用者の決定）。**理由は必須。**
+///
+/// **今は 0 行である。** 説明のある違い（GDT の kdata の記述子のアクセス済みのビット。CPU が立てる）の行は、まだ
+/// 決めた形で書いていないので [`EXPECTATIONS_NOT_IN_THE_FORM`] に載っている。決めた形に直したら、ここへ移す。
+/// 断片が参照のちょうど 1 行に当たらない行と、その行に値と期待の組が無くなった行は、死んだ行として落ちる。
+const EXPECTATION_DIFFERENCES_EXPLAINED: &[ExplainedDifference] = &[];
+
+/// [`EXPECTATION_DIFFERENCES_EXPLAINED`] の 1 行。
+struct ExplainedDifference {
+    /// 行を見分ける断片（参照のちょうど 1 行に当たる）。
+    line: &'static str,
+    /// 行に出ている値。
+    value: &'static str,
+    /// 行に書いてある期待。
+    expected: &'static str,
+    /// 違うのが正しい理由。
+    reason: &'static str,
+}
+
+/// 行の中の `(expected …)` の 1 か所を読んだ結果。
+#[derive(Debug, PartialEq)]
+enum Expectation<'a> {
+    /// 決めた形（値のすぐ後に `(expected 期待)`。値と期待が同じ書き方の 1 語）。
+    InTheForm { value: &'a str, expected: &'a str },
+    /// 決めた形でない。どこが合わないかを持つ。
+    NotInTheForm(&'static str),
+}
+
+/// 値と期待の書き方の種類。**種類が違えば決めた形ではない**（`0` と `0x…` を比べない）。
+#[derive(Debug, PartialEq)]
+enum ValueKind {
+    Hex,
+    Decimal,
+    Truth,
+    Word,
+}
+
+/// 1 語の書き方の種類を決める。
+fn value_kind(token: &str) -> ValueKind {
+    if let Some(digits) = token.strip_prefix("0x") {
+        if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_hexdigit()) {
+            return ValueKind::Hex;
+        }
+    }
+    if !token.is_empty() && token.chars().all(|c| c.is_ascii_digit()) {
+        return ValueKind::Decimal;
+    }
+    if token == "true" || token == "false" {
+        return ValueKind::Truth;
+    }
+    ValueKind::Word
+}
+
+/// 1 行の中の `(expected …)` を、前から順に読む。
+///
+/// 値は、`(expected` の前（前の `(expected …)` の後から）の最後の語で、`名前=値` なら `=` の後である。
+/// 期待は、`(expected ` の後から `,` か `)` までである（`(expected false, back to start)` の説明は読まない）。
+fn expectations_in_line(line: &str) -> Vec<Expectation<'_>> {
+    const MARKER: &str = "(expected ";
+    let mut found = Vec::new();
+    let mut segment_start = 0;
+    while let Some(offset) = line[segment_start..].find(MARKER) {
+        let at = segment_start + offset;
+        let body_start = at + MARKER.len();
+        let body = &line[body_start..];
+        let expected_end = body.find([',', ')']).unwrap_or(body.len());
+        let expected = body[..expected_end].trim();
+        found.push(read_expectation(&line[segment_start..at], expected));
+        match body.find(')') {
+            Some(close) => segment_start = body_start + close + 1,
+            None => break,
+        }
+    }
+    found
+}
+
+/// `(expected` の前の文（`before`）と期待の 1 語から、1 か所を読む。
+fn read_expectation<'a>(before: &'a str, expected: &'a str) -> Expectation<'a> {
+    if expected.is_empty() || expected.contains(|c: char| c.is_whitespace() || c == '=' || c == '/')
+    {
+        return Expectation::NotInTheForm("the expectation is not a single value");
+    }
+    let Some(last) = before.split_whitespace().last() else {
+        return Expectation::NotInTheForm("no value comes right before the expectation");
+    };
+    let value = last.rsplit('=').next().unwrap_or(last);
+    if value.is_empty() {
+        return Expectation::NotInTheForm("no value comes right before the expectation");
+    }
+    let kind = value_kind(value);
+    if kind != value_kind(expected) {
+        return Expectation::NotInTheForm("the value and the expectation are written differently");
+    }
+    let shared = before
+        .split_whitespace()
+        .rev()
+        .skip(1)
+        .filter_map(|token| {
+            token
+                .split_once('=')
+                .map(|(_, v)| v.trim_end_matches([',', ';']))
+        })
+        .any(|other| !other.is_empty() && value_kind(other) == kind);
+    if shared {
+        return Expectation::NotInTheForm("more than one value shares the expectation");
+    }
+    Expectation::InTheForm { value, expected }
+}
+
+/// 起動ログの参照に書いた期待が、どれも成り立っていることを見る（2026-09-29。運用者の決定）。
+///
+/// **参照の「only the routed IRQs are open=false」（9d-5 で直した行）が、偽のまま期待として記録され、基本の検査も
+/// `--commit` も毎回通していた。** **参照は `--commit` が実物と行ごとに突き合わせるので、参照に書いた期待を見れば、
+/// 実物に書いた期待を見たことになる。**
+///
+/// - 決めた形（[`Expectation::InTheForm`]）の期待は、値と期待が同じでなければ落とす。違うのが正しいものは
+///   `explained` に理由つきで載せる。
+/// - 決めた形でない期待は、その行が `not_in_the_form` に載っていなければ落とす。
+/// - 表の死んだ行も落とす: 参照のちょうど 1 行に当たらない断片、決めた形でない期待をもう持たない行、
+///   行に無い値と期待の組、理由の無い行。
+///
+/// **揺れる行（参照から外した行）は見ない。** 見るかは、この検査を入れた後の様子で決める（運用者の決定）。
+fn check_reference_expectations(
+    reference: &str,
+    not_in_the_form: &[(&str, &str)],
+    explained: &[ExplainedDifference],
+) -> std::result::Result<String, Vec<String>> {
+    let lines: Vec<&str> = reference.lines().collect();
+    let lines_with = |fragment: &str| -> Vec<usize> {
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains(fragment))
+            .map(|(index, _)| index)
+            .collect()
+    };
+    let mut findings = Vec::new();
+
+    let mut listed: Vec<(usize, &str)> = Vec::new();
+    for (fragment, why) in not_in_the_form {
+        if why.trim().is_empty() {
+            findings.push(format!(
+                "EXPECTATIONS_NOT_IN_THE_FORM entry {fragment:?} says nothing about what is out of the form"
+            ));
+        }
+        match lines_with(fragment).as_slice() {
+            [index] => listed.push((*index, *fragment)),
+            [] => findings.push(format!(
+                "dead EXPECTATIONS_NOT_IN_THE_FORM entry (no line of the reference contains {fragment:?})"
+            )),
+            many => findings.push(format!(
+                "EXPECTATIONS_NOT_IN_THE_FORM entry {fragment:?} matches {} lines; make it match one",
+                many.len()
+            )),
+        }
+    }
+    let mut explained_used = vec![false; explained.len()];
+    for (row, difference) in explained.iter().enumerate() {
+        if difference.reason.trim().is_empty() {
+            findings.push(format!(
+                "EXPECTATION_DIFFERENCES_EXPLAINED entry {:?} has no reason",
+                difference.line
+            ));
+        }
+        let hits = lines_with(difference.line).len();
+        if hits != 1 {
+            findings.push(format!(
+                "EXPECTATION_DIFFERENCES_EXPLAINED entry {:?} matches {hits} lines; make it match one",
+                difference.line
+            ));
+            explained_used[row] = true;
+        }
+    }
+
+    let mut in_the_form = 0usize;
+    let mut differ_with_reason = 0usize;
+    for (index, line) in lines.iter().enumerate() {
+        let expectations = expectations_in_line(line);
+        let listed_here = listed.iter().find(|(at, _)| *at == index).map(|(_, f)| *f);
+        let mut out_of_form = false;
+        for expectation in &expectations {
+            match expectation {
+                Expectation::InTheForm { value, expected } => {
+                    in_the_form += 1;
+                    if value == expected {
+                        continue;
+                    }
+                    let reason = explained.iter().position(|difference| {
+                        line.contains(difference.line)
+                            && difference.value == *value
+                            && difference.expected == *expected
+                    });
+                    match reason {
+                        Some(row) => {
+                            explained_used[row] = true;
+                            differ_with_reason += 1;
+                        }
+                        None => findings.push(format!(
+                            "line {}: the value {value} differs from its expectation {expected}: {line}",
+                            index + 1
+                        )),
+                    }
+                }
+                Expectation::NotInTheForm(why) => {
+                    out_of_form = true;
+                    if listed_here.is_none() {
+                        findings.push(format!(
+                            "line {}: an expectation not in the form `value (expected value)` ({why}); \
+                             write it in the form, or list the line in EXPECTATIONS_NOT_IN_THE_FORM: {line}",
+                            index + 1
+                        ));
+                    }
+                }
+            }
+        }
+        if let Some(fragment) = listed_here {
+            if !out_of_form {
+                findings.push(format!(
+                    "dead EXPECTATIONS_NOT_IN_THE_FORM entry {fragment:?}: line {} has no expectation out \
+                     of the form any more; drop the entry",
+                    index + 1
+                ));
+            }
+        }
+    }
+    for (difference, used) in explained.iter().zip(&explained_used) {
+        if !*used {
+            findings.push(format!(
+                "dead EXPECTATION_DIFFERENCES_EXPLAINED entry {:?} ({} against {}): the line no longer shows \
+                 that difference",
+                difference.line, difference.value, difference.expected
+            ));
+        }
+    }
+
+    if findings.is_empty() {
+        Ok(format!(
+            "{in_the_form} expectation(s) in the form hold, {differ_with_reason} of them differing with a \
+             reason in EXPECTATION_DIFFERENCES_EXPLAINED; {} line(s) not yet in the form are listed in \
+             EXPECTATIONS_NOT_IN_THE_FORM",
+            listed.len()
+        ))
+    } else {
+        Err(findings)
+    }
+}
+
 /// `--shell-test` が 1 キーごとに空ける間隔。
 ///
 /// # 根拠を書く（2026-09-12）
@@ -18270,6 +18551,9 @@ const BOOT_READY_TIMEOUT: Duration = Duration::from_secs(90);
 ///
 /// **`--only-masked` を付けると、伏せた項目（[`MaskedItem`]）だけが違うときに限って記録し直す**
 /// （2026-09-27。境界の段階の手順 2）。**ファイルを移すだけのコミットは、この形で記録し直す。**
+///
+/// **書く前に、新しい参照に書いた期待が成り立つかを見て、成り立たなければ記録しない**
+/// （[`check_reference_expectations`]。2026-09-29。運用者の決定）。
 fn cmd_boot_log_diff(update_reference: bool, allow_shrink: bool, only_masked: bool) -> Result<()> {
     if only_masked && !update_reference {
         bail!("boot log diff: --only-masked goes with --update-reference");
@@ -18329,6 +18613,21 @@ fn cmd_boot_log_diff(update_reference: bool, allow_shrink: bool, only_masked: bo
             println!(
                 "--- boot log diff: {} (listed in {MASKED_DIFFERENCES_LOG})",
                 comparison.summary()
+            );
+        }
+        // **期待が成り立たない参照は記録しない**（2026-09-29。運用者の決定）。**偽の確かめを期待として
+        // 記録すると、以後の突き合わせがそれを正しいものとして通し続ける。**
+        if let Err(findings) = check_reference_expectations(
+            &format!("{}\n", current.join("\n")),
+            EXPECTATIONS_NOT_IN_THE_FORM,
+            EXPECTATION_DIFFERENCES_EXPLAINED,
+        ) {
+            for finding in &findings {
+                println!("    {finding}");
+            }
+            bail!(
+                "boot log diff: refused to record a reference in which a written expectation does not \
+                 hold (the lines above); fix the kernel, or list the line with a reason"
             );
         }
         if let Some(parent) = reference_path.parent() {
@@ -24479,6 +24778,14 @@ fn report_enumeration_counts() {
             "PLACES_THAT_DO_NOT_RUN_FEATURES",
             PLACES_THAT_DO_NOT_RUN_FEATURES.len(),
         ),
+        (
+            "EXPECTATIONS_NOT_IN_THE_FORM",
+            EXPECTATIONS_NOT_IN_THE_FORM.len(),
+        ),
+        (
+            "EXPECTATION_DIFFERENCES_EXPLAINED",
+            EXPECTATION_DIFFERENCES_EXPLAINED.len(),
+        ),
     ];
     let rendered: Vec<String> = counts
         .iter()
@@ -24836,6 +25143,38 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         Err(error) => {
             println!("--- boot log reference end: FAILED ({error:#})");
             failed.push("boot log reference end".to_string());
+        }
+    }
+
+    // **起動ログの参照に書いた期待**（2026-09-29。運用者の決定）。**QEMU を起動せずに見る。**
+    total += 1;
+    begin_item(
+        Family::Base,
+        "every expectation written in the boot log reference holds",
+    );
+    match fs::read_to_string(workspace_root.join(REFERENCE_BOOT_LOG)) {
+        Ok(text) => match check_reference_expectations(
+            &text,
+            EXPECTATIONS_NOT_IN_THE_FORM,
+            EXPECTATION_DIFFERENCES_EXPLAINED,
+        ) {
+            Ok(message) => println!("--- boot log reference expectations: OK ({message})"),
+            Err(findings) => {
+                for finding in &findings {
+                    println!("    {finding}");
+                }
+                println!(
+                    "--- boot log reference expectations: FAILED ({} finding(s); a check line \
+                     recorded with a value that differs from its expectation is a failed check, not \
+                     an expected result)",
+                    findings.len()
+                );
+                failed.push("boot log reference expectations".to_string());
+            }
+        },
+        Err(error) => {
+            println!("--- boot log reference expectations: FAILED (failed to read the reference: {error})");
+            failed.push("boot log reference expectations".to_string());
         }
     }
 
@@ -27155,8 +27494,8 @@ struct ExpectedCheckCount {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 53,
-    full: 422,
+    base: 54,
+    full: 423,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -30834,5 +31173,153 @@ fn read_cr3() -> u64 {
         );
         assert_eq!(declared_item_name("let x = 1;"), None);
         assert_eq!(declared_item_name("// fn not_this() {"), None);
+    }
+
+    #[test]
+    fn expectations_in_the_form_are_read_right_after_their_value() {
+        assert_eq!(
+            expectations_in_line("[INFO] gdt: CS=0x8 (expected 0x8), TR=0x30 (expected 0x30)"),
+            vec![
+                Expectation::InTheForm {
+                    value: "0x8",
+                    expected: "0x8"
+                },
+                Expectation::InTheForm {
+                    value: "0x30",
+                    expected: "0x30"
+                },
+            ]
+        );
+        assert_eq!(
+            expectations_in_line("[INFO] critical: IF after all guards dropped = false (expected false, back to start)"),
+            vec![Expectation::InTheForm { value: "false", expected: "false" }]
+        );
+        assert_eq!(
+            expectations_in_line("[INFO] paging: CR3 readback 0x3000 (expected 0x3000)"),
+            vec![Expectation::InTheForm {
+                value: "0x3000",
+                expected: "0x3000"
+            }]
+        );
+        // **値の前の別の値は、種類が違えば期待を分け合わない**（件数と 16 進の値）。
+        assert_eq!(
+            expectations_in_line(
+                "[INFO] apic: entries=24 masked=0x00fd (expected 0x00ff) [read back]"
+            ),
+            vec![Expectation::InTheForm {
+                value: "0x00fd",
+                expected: "0x00ff"
+            }]
+        );
+        assert!(expectations_in_line("[INFO] no expectation here = true").is_empty());
+    }
+
+    #[test]
+    fn expectations_out_of_the_form_say_what_is_out_of_it() {
+        let why = |line: &str| match expectations_in_line(line).as_slice() {
+            [Expectation::NotInTheForm(why)] => *why,
+            other => panic!("{line}: {other:?}"),
+        };
+        assert_eq!(
+            why("[INFO] pic: IMR master=0xfe slave=0xff (expected 0xfe/0xff)"),
+            "the expectation is not a single value"
+        );
+        assert_eq!(
+            why("[INFO] gdt: base=0x10 limit=63 (expected base=0x10)"),
+            "the expectation is not a single value"
+        );
+        assert_eq!(
+            why("[INFO] syscall: stored=0xc0ffee (expected return 0xc0ffee)"),
+            "the expectation is not a single value"
+        );
+        assert_eq!(
+            why("gdt[2] kdata: 0x00cf93 DPL=0 accessed=1 (expected 0x00cf92, accessed bit is CPU-managed)"),
+            "the value and the expectation are written differently"
+        );
+        assert_eq!(
+            why("[INFO] sti-check 1: DS=0x0010 SS=0x0010 (expected 0x0010)"),
+            "more than one value shares the expectation"
+        );
+        assert_eq!(
+            why("(expected 5)"),
+            "no value comes right before the expectation"
+        );
+    }
+
+    #[test]
+    fn a_failed_expectation_in_the_reference_is_caught() {
+        // **9d-5 で直す前の参照の行**（open=false が期待として記録されていた）。
+        let before_the_fix = "[INFO] apic: the I/O APIC controller reads its redirection entries: entries=24 \
+                              masked=0x0000000000fff7fd (expected 0x0000000000fffffd) [read back from hardware], \
+                              only the routed IRQs are open=false\n";
+        let findings = check_reference_expectations(before_the_fix, &[], &[]).unwrap_err();
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].contains(
+            "the value 0x0000000000fff7fd differs from its expectation 0x0000000000fffffd"
+        ));
+        let fixed = before_the_fix.replace(
+            "(expected 0x0000000000fffffd)",
+            "(expected 0x0000000000fff7fd)",
+        );
+        assert!(check_reference_expectations(&fixed, &[], &[]).is_ok());
+    }
+
+    #[test]
+    fn lines_out_of_the_form_pass_only_while_listed_and_out_of_the_form() {
+        let reference = "[INFO] pic: IMR after remap master=0xff slave=0xff (expected 0xff/0xff)\n\
+                         [INFO] gdt: limit=63 (expected 63)\n";
+        let unlisted = check_reference_expectations(reference, &[], &[]).unwrap_err();
+        assert!(unlisted[0].contains("line 1: an expectation not in the form"));
+        let listed: &[(&str, &str)] = &[("IMR after remap", "2 つの値を / で並べている")];
+        assert!(check_reference_expectations(reference, listed, &[]).is_ok());
+        // **決めた形に直った行が表に残っていれば、死んだ行として落ちる。**
+        let fixed = reference.replace(
+            "master=0xff slave=0xff (expected 0xff/0xff)",
+            "mask=0xffff (expected 0xffff)",
+        );
+        let dead = check_reference_expectations(&fixed, listed, &[]).unwrap_err();
+        assert!(dead[0].contains("dead EXPECTATIONS_NOT_IN_THE_FORM entry"));
+        // **どの行にも当たらない断片と、2 行に当たる断片も落ちる。**
+        let nowhere: &[(&str, &str)] = &[("IMR after remap", "x"), ("no such line", "x")];
+        assert!(
+            check_reference_expectations(reference, nowhere, &[]).unwrap_err()[0]
+                .contains("no line")
+        );
+        let twice: &[(&str, &str)] = &[("[INFO]", "x")];
+        assert!(
+            check_reference_expectations(reference, twice, &[]).unwrap_err()[0]
+                .contains("matches 2 lines")
+        );
+        let silent: &[(&str, &str)] = &[("IMR after remap", " ")];
+        assert!(
+            check_reference_expectations(reference, silent, &[]).unwrap_err()[0]
+                .contains("says nothing")
+        );
+    }
+
+    #[test]
+    fn a_difference_passes_only_with_a_reason_for_that_very_pair() {
+        let reference = "gdt[2] kdata: descriptor=0x00cf93 (expected 0x00cf92, the CPU sets the accessed bit)\n";
+        assert!(check_reference_expectations(reference, &[], &[]).is_err());
+        let explained = [ExplainedDifference {
+            line: "gdt[2] kdata:",
+            value: "0x00cf93",
+            expected: "0x00cf92",
+            reason: "アクセス済みのビットは CPU が立てる",
+        }];
+        assert!(check_reference_expectations(reference, &[], &explained).is_ok());
+        // **組が変われば理由は効かず、理由の行は死んだ行になる。**
+        let other = reference.replace("0x00cf93", "0x00cf9b");
+        let findings = check_reference_expectations(&other, &[], &explained).unwrap_err();
+        assert_eq!(findings.len(), 2);
+        assert!(findings[1].contains("dead EXPECTATION_DIFFERENCES_EXPLAINED entry"));
+        let no_reason = [ExplainedDifference {
+            reason: "",
+            ..explained[0]
+        }];
+        assert!(
+            check_reference_expectations(reference, &[], &no_reason).unwrap_err()[0]
+                .contains("has no reason")
+        );
     }
 }
