@@ -64,7 +64,7 @@
 //! | [`managed_vectors`] | モジュール関数 | 同上 |
 //! | [`timer_frequency_hz`] | モジュール関数 | 同上 |
 //! | [`survey_apic_masks`] | どちらでもない | 2 つ目の実装を 1 回読ませるための一時的な入口（S2-d-1b）。切り替えが済めば要らなくなる |
-//! | [`claim`] | モジュール関数 | 受け取るの判定はベクタと表（アトミック）だけで決まり、実装ごとに変わらない（`ADR-0072` の 2。2026-09-28） |
+//! | [`claim`] | モジュール関数 | 受け取るの判定はベクタと、表と今のタイマ（どちらもアトミック）だけで決まり、実装ごとに変わらない（`ADR-0072` の 2。2026-09-28） |
 //! | [`complete`] | 委譲する関数を束ねる | 完了の中身（EOI とスプリアスの見分け）は [`end_of_interrupt`] と [`is_spurious`] が実装へ委譲する（同上） |
 //! | [`spurious_counts`] | モジュール関数 | 観測値である。数えるのは [`claim`] と [`complete`] の中である（同上） |
 //!
@@ -689,6 +689,9 @@ pub enum Claim {
     Spurious,
     /// このCPUのタイマ（Local APIC のタイマ）。
     LocalTimer,
+    /// この系に 1 つのタイマ（8259 経由の PIT。IRQ0）。較正より前と、Local APIC のタイマへ移れなかった機械で、
+    /// BSP にだけ届く。今のタイマでなくなった後に遅れて届いた 1 本は、ただの [`Claim::Irq`] として受け取る。
+    GlobalTimer,
     /// ISA の IRQ（8259 経由か I/O APIC 経由）。**8259 の 7 番と 15 番がスプリアスかどうかは、ここではまだ
     /// 分からない**（In-Service Register を読むのは [`complete`] の中である）。源の番号の型にするのは 9e である。
     Irq(u8),
@@ -701,19 +704,35 @@ pub enum Claim {
 /// # 契約（境界の関数。2026-09-28）
 ///
 /// - `vector` は、このCPUの入口のスタブが積んだベクタである。
-/// - BKL なしで呼べる。読むのは定数とアトミックだけで、I/O は無い。Local APIC のスプリアスは、ここで数える。
-/// - 判定の順は、IPI の探り、Local APIC のスプリアス、Local APIC のタイマ、IRQ の表の順に固定する。Local APIC
-///   由来のベクタを表より先に見るのは、そのベクタが 8259 の採番表に当たる構成でも取り違えないためである。
+/// - BKL なしで呼べる。触るのは定数とアトミックだけで、I/O は無い。Local APIC のスプリアスと、IPI の探りを
+///   受け取った本数は、ここで数える。
+/// - 判定の順は、IPI の探り、Local APIC のスプリアス、Local APIC のタイマ、この系に 1 つのタイマ（8259 経由の
+///   PIT が今のタイマのときだけ）、IRQ の表の順に固定する。Local APIC 由来のベクタを先に見るのは、そのベクタが
+///   8259 の採番表に当たる構成でも取り違えないためである。
 pub fn claim(vector: u8) -> Claim {
-    let claimed = classify(vector, irq_for_vector);
-    if claimed == Claim::Spurious {
-        LAPIC_SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
+    // 8259 経由の PIT が今のタイマなら、そのベクタで届いたものはこの系に 1 つのタイマである。
+    let global_timer = if timer_on_lapic() {
+        None
+    } else {
+        vector_for(GLOBAL_TIMER_IRQ)
+    };
+    let claimed = classify(vector, global_timer, irq_for_vector);
+    match claimed {
+        Claim::Spurious => {
+            LAPIC_SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        Claim::IpiProbe => crate::arch::x86_64::idt::note_ipi_probe_received(),
+        _ => {}
     }
     claimed
 }
 
-/// [`claim`] の判定（純粋な関数）。IRQ の表の引き方を外から渡すので、ホストで順を確かめられる。
-fn classify(vector: u8, lookup: impl Fn(u8) -> Option<u8>) -> Claim {
+/// この系に 1 つのタイマ（8259 経由の PIT）の ISA の IRQ 番号。
+const GLOBAL_TIMER_IRQ: u8 = 0;
+
+/// [`claim`] の判定（純粋な関数）。この系に 1 つのタイマのベクタ（今のタイマでなければ `None`）と、IRQ の表の
+/// 引き方を外から渡すので、ホストで順を確かめられる。
+fn classify(vector: u8, global_timer: Option<u8>, lookup: impl Fn(u8) -> Option<u8>) -> Claim {
     if usize::from(vector) == crate::arch::x86_64::idt::IPI_PROBE_VECTOR {
         return Claim::IpiProbe;
     }
@@ -722,6 +741,9 @@ fn classify(vector: u8, lookup: impl Fn(u8) -> Option<u8>) -> Claim {
     }
     if usize::from(vector) == crate::arch::x86_64::idt::LAPIC_TIMER_VECTOR {
         return Claim::LocalTimer;
+    }
+    if global_timer == Some(vector) {
+        return Claim::GlobalTimer;
     }
     match lookup(vector) {
         Some(irq) => Claim::Irq(irq),
@@ -736,14 +758,16 @@ fn classify(vector: u8, lookup: impl Fn(u8) -> Option<u8>) -> Claim {
 /// - [`claim`] が返したものに、処理が戻った後でちょうど 1 回呼ぶ。戻らない動き（切り替え、遠征を畳むこと）より
 ///   前に呼ぶ。
 /// - [`Claim::Spurious`] と [`Claim::Unclaimed`] には呼ばない（呼んでも何もしない）。
-/// - [`Claim::Irq`] では、8259 の 7 番と 15 番がスプリアスかをここで見分け、コントローラの決まりに従う
-///   （スプリアスなら数え、EOI はスレーブのスプリアスのときにマスタへだけ送る）。
+/// - [`Claim::GlobalTimer`] と [`Claim::Irq`] では、8259 の 7 番と 15 番がスプリアスかをここで見分け、
+///   コントローラの決まりに従う（スプリアスなら数え、EOI はスレーブのスプリアスのときにマスタへだけ送る）。
+///   この系に 1 つのタイマは、IRQ0 として完了させる。
 /// - 破壊テスト `no-eoi-test` では、IPI の探りを除いて EOI を送らない（数えるのは変わらない）。
 ///
 /// # Safety
 ///
 /// - 実際に配送された割り込みのハンドラの中から、割り込みを止めたまま呼ぶこと。
-/// - [`Claim::Irq`] では、ほかの実行文脈が同時に 8259 を触っていないこと（[`is_spurious`] の契約）。
+/// - [`Claim::GlobalTimer`] と [`Claim::Irq`] では、ほかの実行文脈が同時に 8259 を触っていないこと
+///   （[`is_spurious`] の契約）。
 pub unsafe fn complete(claimed: Claim) {
     match claimed {
         // SAFETY: 呼び出し側の契約。IPI の探りは自コアの Local APIC へ送る（`no-eoi-test` の対象にしない）。
@@ -755,19 +779,29 @@ pub unsafe fn complete(claimed: Claim) {
                 end_of_interrupt_for_lapic_timer();
             }
         }
-        Claim::Irq(irq) => {
-            // SAFETY: 呼び出し側の契約（8259 を同時に触る文脈が無いことを含む）。
-            let spurious = unsafe { is_spurious(irq) };
-            if spurious {
-                SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
-            }
-            // SAFETY: 呼び出し側の契約。宛先の決定は境界の内側の純粋ロジックが行う。
-            #[cfg(not(feature = "no-eoi-test"))]
-            unsafe {
-                end_of_interrupt(irq, spurious);
-            }
-        }
+        // SAFETY: 呼び出し側の契約（8259 を同時に触る文脈が無いことを含む）。
+        Claim::GlobalTimer => unsafe { complete_isa_irq(GLOBAL_TIMER_IRQ) },
+        // SAFETY: 呼び出し側の契約（8259 を同時に触る文脈が無いことを含む）。
+        Claim::Irq(irq) => unsafe { complete_isa_irq(irq) },
         Claim::Spurious | Claim::Unclaimed => {}
+    }
+}
+
+/// ISA の IRQ を完了させる（[`complete`] の中身）。8259 の 7 番と 15 番のスプリアスの見分けを含む。
+///
+/// # Safety
+///
+/// [`complete`] と同じ（8259 を同時に触る文脈が無いことを含む）。
+unsafe fn complete_isa_irq(irq: u8) {
+    // SAFETY: 呼び出し側の契約（8259 を同時に触る文脈が無いことを含む）。
+    let spurious = unsafe { is_spurious(irq) };
+    if spurious {
+        SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+    // SAFETY: 呼び出し側の契約。宛先の決定は境界の内側の純粋ロジックが行う。
+    #[cfg(not(feature = "no-eoi-test"))]
+    unsafe {
+        end_of_interrupt(irq, spurious);
     }
 }
 
@@ -1605,44 +1639,55 @@ mod tests {
         u8::try_from(vector).expect("an IDT vector fits in 8 bits")
     }
 
-    /// 受け取るの判定は、Local APIC 由来のベクタを IRQ の表より先に見る（`ADR-0072` の 2）。
+    /// 受け取るの判定は、Local APIC 由来のベクタを、この系に 1 つのタイマと IRQ の表より先に見る（`ADR-0072` の 2）。
     ///
-    /// どのベクタも IRQ の表に当たる構成を渡しても、IPI の探り・スプリアス・タイマとして受け取る。
-    /// 表を先に見る形に書き換えると、ここが落ちる。
+    /// どのベクタも IRQ の表に当たり、この系に 1 つのタイマのベクタでもある構成を渡しても、IPI の探り・スプリアス・
+    /// このCPUのタイマとして受け取る。表やこの系のタイマを先に見る形に書き換えると、ここが落ちる。
     #[test]
     fn local_apic_vectors_are_claimed_before_the_irq_table() {
         let every_vector_is_an_irq = |vector: u8| Some(vector);
-        assert_eq!(
-            classify(
+        for (vector, expected) in [
+            (
                 vector_u8(crate::arch::x86_64::idt::IPI_PROBE_VECTOR),
-                every_vector_is_an_irq
+                Claim::IpiProbe,
             ),
-            Claim::IpiProbe
-        );
-        assert_eq!(
-            classify(
-                crate::machine::pc::apic::SPURIOUS_VECTOR,
-                every_vector_is_an_irq
-            ),
-            Claim::Spurious
-        );
-        assert_eq!(
-            classify(
+            (crate::machine::pc::apic::SPURIOUS_VECTOR, Claim::Spurious),
+            (
                 vector_u8(crate::arch::x86_64::idt::LAPIC_TIMER_VECTOR),
-                every_vector_is_an_irq
+                Claim::LocalTimer,
             ),
-            Claim::LocalTimer
+        ] {
+            assert_eq!(
+                classify(vector, Some(vector), every_vector_is_an_irq),
+                expected
+            );
+        }
+    }
+
+    /// 8259 経由の PIT が今のタイマなら、そのベクタはこの系に 1 つのタイマとして受け取る。今のタイマでなければ
+    /// （Local APIC のタイマへ移った後に遅れて届いた 1 本など）、ただの IRQ として受け取る。
+    #[test]
+    fn the_global_timer_is_claimed_only_while_it_is_the_current_timer() {
+        let only_0x20_is_irq_0 = |vector: u8| (vector == 0x20).then_some(0);
+        assert_eq!(
+            classify(0x20, Some(0x20), only_0x20_is_irq_0),
+            Claim::GlobalTimer
         );
+        assert_eq!(classify(0x20, None, only_0x20_is_irq_0), Claim::Irq(0));
     }
 
     /// ほかのベクタは IRQ の表で引き、載っていなければ受け取れない到着として返す。
     #[test]
     fn other_vectors_are_looked_up_in_the_irq_table() {
         let only_0x21_is_irq_1 = |vector: u8| (vector == 0x21).then_some(1);
-        assert_eq!(classify(0x21, only_0x21_is_irq_1), Claim::Irq(1));
+        assert_eq!(
+            classify(0x21, Some(0x20), only_0x21_is_irq_1),
+            Claim::Irq(1)
+        );
         assert_eq!(
             classify(
                 vector_u8(crate::arch::x86_64::idt::TEST_VECTOR),
+                Some(0x20),
                 only_0x21_is_irq_1
             ),
             Claim::Unclaimed
@@ -1650,6 +1695,7 @@ mod tests {
         assert_eq!(
             classify(
                 vector_u8(crate::arch::x86_64::idt::YIELD_VECTOR),
+                Some(0x20),
                 only_0x21_is_irq_1
             ),
             Claim::Unclaimed

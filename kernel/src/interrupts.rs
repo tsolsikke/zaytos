@@ -3,6 +3,9 @@
 //! **`sti` の前の 7 項目の確かめ（ADR-0018 §2）は、[`crate::arch::x86_64::interrupt_readiness`] へ移した**
 //! （2026-09-27。境界の段階の手順 2）。**全 IRQ をマスクしたまま `sti` して期限つきで待つ確かめ（M4-d-1）も、
 //! 同じ所へ移した。**
+//!
+//! **外からの割り込みと yield の入口関数（`ADR-0072` の 1 の C）も、ここに置く**（2026-09-28。境界の段階の
+//! 手順 2 の 9d-2）。**`arch` の入口は、入口の確かめとベクタごとの数えを済ませて、ここを呼ぶ。**
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -77,6 +80,221 @@ static MAX_TICK_JUMP: AtomicU64 = AtomicU64::new(0);
 
 pub fn max_tick_jump() -> u64 {
     MAX_TICK_JUMP.load(Ordering::Relaxed)
+}
+
+/// 外からの割り込みの入口関数（`ADR-0072` の 1。2026-09-28。境界の段階の手順 2 の 9d-2）。
+///
+/// `arch` の入口（`idt::irq_entry`）から呼ばれる。受け取り（`machine`）から完了（`machine`）までの流れと、
+/// 方針（BKL・ティックと単調な時刻・装置の処理・切り替え）をここが持つ。
+///
+/// 出力しない。ADR-0018 §5 のとおり、ここでやるのは共有状態の更新だけである。100Hz で毎回ログを出すと
+/// 出力自体がハンドラの処理時間を支配し、ティックを取りこぼす。観測はメインループがカウンタ越しに行う。
+///
+/// # 契約（境界の関数。2026-09-28）
+///
+/// - 呼ぶのは `arch` の割り込みの入口だけで、割り込みを止めたまま、入口の確かめ（方向フラグ・スタックの境界・
+///   ベクタごとの数え）を済ませた後に呼ぶ。yield はここへ来ない（[`on_yield_interrupt`]）。
+/// - `arrival` は、入口のスタブが積んだ到着の番号（x86 ではベクタ）である。ここでは読まずに、`machine` の受け取る
+///   （[`crate::machine::pc::claim`]）と、キーボードの最初の到着の記録へ渡すだけである（番号の型を分けるのは
+///   `ADR-0072` の 3。9e）。
+/// - 戻り値は、入口が戻るときに使うスタックポインタである。切り替えないなら割り込まれた文脈のもの、切り替えるなら
+///   次のタスクのものを返す。遠征を畳むときは戻らない。
+/// - BKL を取らない種類（IPI の探り）は、受け取った直後に分けて、BKL を取らずに完了させる。それ以外は BKL の中で
+///   扱い、BKL は戻る直前に解く（遠征を畳むときは、畳む関数が解く）。
+pub fn on_external_interrupt(
+    arrival: u8,
+    interrupted: &crate::arch::x86_64::Interrupted<'_>,
+) -> u64 {
+    use crate::machine::pc::Claim;
+
+    let current_sp = interrupted.stack_pointer();
+    // 届いたものを受け取る（`ADR-0072` の 2）。**BKL なしで呼べる**ので、BKL を取らない種類（IPI の探り）を
+    // BKL の前に分けられる。
+    let claimed = crate::machine::pc::claim(arrival);
+
+    // 測定用 IPI（S5-a）は BKL を取る前に処理して戻る。
+    //
+    // BKL 待ちと IPI の相性は未解決である（`deferred-decisions.md` の
+    // 「BKL取得待ちのIF=0とIPIのデッドロック」）。ここで BKL を取ると、
+    // 測るためだけのベクタでその罠を踏むことになる。
+    // 触るのは自コアのカウンタと自コアの Local APIC だけなので、BKL は要らない。
+    // 受け取った本数は、受け取る側（`claim`）が数えてある。
+    if claimed == Claim::IpiProbe {
+        // SAFETY: 実際に配送された割り込みに対してのみ、自コアの LAPIC へ送る。
+        unsafe { crate::machine::pc::complete(claimed) };
+        return current_sp;
+    }
+
+    // **`Option` にしてあるのは、出口を通らない経路が 1 つあるからである**
+    // （S12 前の手当て、C）——**中断による終了処理**は longjmp で出ていくので
+    // `Drop` が走らない。**`syscall_entry` が [`SYS_EXIT`] と `SYS_SPAWN` の
+    // ために同じ形にしているのに倣う。**
+    let mut bkl = Some(acquire_bkl_for_interrupt());
+
+    match claimed {
+        // Local APIC のスプリアス割り込み（S2-d-1）。EOI を送らずに戻る。
+        //
+        // 判定を明示にした。以前このベクタに EOI が送られなかったのは
+        // 「PIC の担当範囲の外だから」であって、スプリアスだからではなかった。
+        // S2-d で Local APIC が配送を担うと LAPIC 由来のベクタには EOI が要るので、
+        // その偶然の一致は壊れる。ここで問いの形にしておく。
+        //
+        // 回数は PIC のスプリアス（IRQ7 / IRQ15）とは別に、受け取る側（`claim`）が数える。機序が違い、
+        // 合流させるとどちらが起きたのかハートビートから分からなくなる。
+        Claim::Spurious => return current_sp,
+        // Local APIC タイマ（S2-d-2）。LVT 由来なので IRQ 番号を持たない。
+        //
+        // 判定の順序（LVT 由来を IRQ の表より先に見る）は、受け取る側（`claim`）が固定している。
+        //
+        // EOI は Local APIC へ送る。8259 は関与しない。
+        Claim::LocalTimer => {
+            crate::arch::x86_64::count_timer_tick();
+            // **単調なティック（W2-d+）。** **較正の後はこちらが数える。**
+            advance_clock();
+            // SAFETY: 割り込みハンドラの中であり、割り込みゲート経由なので IF=0。
+            // 実際に配送された割り込みに対してのみ呼んでいる。
+            //
+            // EOI は自コアの Local APIC へ届く。送り先の VA は 1 つだが、
+            // その物理アドレスは実行しているコア自身の LAPIC に別名づけられている。
+            // 共有 IDT で両コアが同じハンドラに入っても、EOI の宛先は分かれる。
+            // EOI を省く破壊テスト（`no-eoi-test`）は、完了させる側（`complete`）の中にある。
+            unsafe { crate::machine::pc::complete(claimed) };
+            // **中断（Ctrl+C）で遠征を終了させる地点はここである（S12 前の手当て、C）。**
+            //
+            // **EOI を送った後でなければならない。** 下は longjmp で出ていくので、
+            // **EOI より前に置くと、割り込みを終えないまま抜ける。**
+            // **IRQ1 の側に置けないのはこれが理由である**——あちらの EOI は
+            // ハンドラより後ろにあり、そこから抜けるとキーボードが二度と来ない。
+            //
+            // SAFETY: `interrupted` は入口が作った文脈で、読み取りのみ。Local APIC のタイマは上で完了させた。
+            // 終了させる条件が揃ったときだけ longjmp する（戻らない）。
+            // この枠（`on_external_interrupt`）には、BKL のガードのほかに Drop を持つ値を置かない（9d-3 で畳むのを出口の動きにするまで）。
+            unsafe { crate::arch::x86_64::fold_if_interrupted(interrupted, &mut bkl) };
+            // AP もスケジューラへ入る（S4-c-3-2b）。
+            //
+            // S4-a から S4-c-3-2a までは、ここで AP を手前へ返していた。当時の AP は
+            // タスクを実行せず、入れば `CURRENT` の sentinel を読んで停止したためで
+            // ある。S4-c-3-2b で AP に担当タスク（AP 用アイドルタスク）ができ、
+            // 起動時に sentinel を解くようになったので、その分岐は不要になった。
+            //
+            // 破壊テスト `smp-ap-enter-scheduler` はここで引退した。分岐そのものが
+            // 無くなったので「分岐を外す」破壊テストは構成できない。役目
+            // （sentinel が止めることの実証）は `smp-ap-no-sentinel-clear` が
+            // 引き継いでいる（あちらは分岐ではなく sentinel の解除を落とす）。
+            return crate::task::on_timer_tick(current_sp);
+        }
+        // この系に 1 つのタイマ（8259 経由の PIT）。較正より前と、Local APIC のタイマへ移れなかった機械で届く。
+        // 今のタイマかどうかは、受け取る側（`claim`）が見分けてある（8259 の採番ではなく、現在の配送先を問う）。
+        Claim::GlobalTimer => {
+            crate::arch::x86_64::count_timer_tick();
+            // **単調なティック（W2-d+）。** **較正より前は 8259 経由なので、ここも数える**
+            // ——**2 箇所に置かないと、起動直後のティックが落ちる。**
+            advance_clock();
+            // SAFETY: 実際に発生した割り込みに対してのみ呼んでいる。割り込みゲート経由で入場したので
+            // IF=0 で、BKL の中なので、ほかの実行文脈が同時に 8259 を触ることはない。
+            unsafe { crate::machine::pc::complete(claimed) };
+            // タイマはプリエンプティブに切り替える（M5-d）。EOI はここより前で送っているので、次タスクは
+            // IF=1 で次ティックを受けられる。遠征を畳むのは Local APIC のタイマの側だけである（今までどおり）。
+            return crate::task::on_timer_tick(current_sp);
+        }
+        // このベクタはどの IRQ か。移行済みの経路も含めて、受け取る側（`claim`）が引いてある（S2-d-1c）。
+        //
+        // ここは EOI の入口ではなく、IRQ 処理全体の入口である。下の
+        // ブロックにはキーボードのハンドラも入っており、
+        // 引けなければハンドラごと呼ばれない。I/O APIC 経由のベクタは
+        // PIC の採番表に載っていないので、`irq::irq_for` では引けない。
+        Claim::Irq(irq) => {
+            // キーボード（IRQ1）。EOI より先に呼ぶ。この中でデータポートを
+            // 読み切らないと、コントローラの出力バッファが空かず次の IRQ1 が
+            // 来なくなる。
+            //
+            // ベクタではなく IRQ 番号で判定する（S2-d-1c）。配送先ベクタは
+            // 8259 経由と I/O APIC 経由で違うが、IRQ 番号は移行しても変わらない。
+            if irq == crate::keyboard::KEYBOARD_IRQ {
+                crate::keyboard::handle_irq(u64::from(arrival));
+            }
+
+            // virtio-blk（S13-d）。**ISR を読んで deassert する**（レベルトリガの
+            // 要件。読まないと EOI の後に同じ割り込みが再送され続ける）。
+            // IRQ 番号は固定しない——`scan_bus0` が構成空間から読んだ値を
+            // `virtio::arm_interrupt` が控えており、それと突き合わせる。
+            if crate::virtio::armed_irq() == Some(irq) {
+                crate::virtio::handle_irq();
+            }
+
+            // 処理を終えてから完了させる（`complete`）。スプリアス（偽）割り込みの判定もそこで行う。
+            // IRQ7 / IRQ15 でしか起きず、本物なら ISR の該当ビットが立っている。EOI の宛先は純粋ロジックが
+            // 決める（スプリアスの扱いはマスタ側とスレーブ側で非対称）。送った時点で PIC は次の同じ
+            // 割り込みを上げられるようになる。
+            //
+            // 破壊テスト (S13-d, virtio-skip-eoi-test): virtio の IRQ にだけ EOI を
+            // 送らない。LAPIC の ISR ビットが立ったままになり、同じ優先度
+            // クラス以下の割り込みが以後届かなくなる形を狙う。
+            #[cfg(feature = "virtio-skip-eoi-test")]
+            let skip_eoi = crate::virtio::armed_irq() == Some(irq);
+            #[cfg(not(feature = "virtio-skip-eoi-test"))]
+            let skip_eoi = false;
+
+            if !skip_eoi {
+                // SAFETY: 実際に発生した割り込みに対してのみ呼んでいる。割り込みゲート経由で入場したので
+                // IF=0 で、BKL の中なので、ほかの実行文脈が同時に 8259 を触ることはない。
+                unsafe { crate::machine::pc::complete(claimed) };
+            }
+        }
+        // テスト専用ベクタ（`0x40`、どちらの表にも無い）などの受け取れない到着は、数えるだけで
+        // 完了させない。EOI の論理が一切絡まない。IPI の探りは BKL の前で戻っている。
+        Claim::IpiProbe | Claim::Unclaimed => {}
+    }
+
+    // キーボードやテストベクタは切り替えない（入場時の RSP を返す）。
+    current_sp
+}
+
+/// yield の入口関数（`ADR-0072` の 1 のソフトの入口。2026-09-28。境界の段階の手順 2 の 9d-2）。
+///
+/// # 契約（境界の関数。2026-09-28）
+///
+/// - 呼ぶのは `arch` の割り込みの入口だけで、yield のベクタで入ったときに、割り込みを止めたまま呼ぶ。
+/// - BKL を取り、スケジューラに次のタスクを選ばせて、そのスタックポインタを返す（協調的 yield。M5-c）。
+///   BKL は戻る直前に解く。コントローラを通らないので、完了させるものは無い。
+pub fn on_yield_interrupt(interrupted: &crate::arch::x86_64::Interrupted<'_>) -> u64 {
+    let _bkl = acquire_bkl_for_interrupt();
+    crate::task::on_yield(interrupted.stack_pointer())
+}
+
+/// 割り込みの入口関数が BKL を取る（S4-b-2）。ガードを落とすまで、カーネルへ入れるのは 1 コアだけである。
+/// 早期 return が複数あるので RAII にする（解放を各 return の手前へ書くと、1 つ落としたときに保持したまま戻り、
+/// 系全体が止まる）。
+///
+/// 同時進入は BKL の中で数える（S4-b-3）。ここで別に数えると、定義が 2 つになる。
+fn acquire_bkl_for_interrupt() -> crate::bkl::BklGuard {
+    // 破壊テスト (S4-b-4, bkl-skip-timer-entry): ロックを取らず計数だけ行う。
+    // 数えているものが本番と違う（`acquire_counting_only` の doc）。
+    #[cfg(feature = "bkl-skip-timer-entry-test")]
+    let bkl = crate::bkl::acquire_counting_only(crate::bkl::KernelEntry::Irq);
+    #[cfg(not(feature = "bkl-skip-timer-entry-test"))]
+    let bkl = crate::bkl::acquire(crate::bkl::KernelEntry::Irq);
+    widen_entry_window();
+    bkl
+}
+
+/// 破壊テスト (S4-b-4, bkl-widen-entry-window): 入口の保持区間を広げる。
+/// 重なりの増幅器であって、素の重なりの頻度とは別である（feature の doc）。破壊テストでないときは何もしない。
+fn widen_entry_window() {
+    #[cfg(feature = "bkl-widen-entry-window-test")]
+    for _ in 0..crate::bkl::WIDENED_ENTRY_WINDOW_SPINS {
+        core::hint::spin_loop();
+    }
+}
+
+/// 単調なティックを進め、締切を過ぎたタイマの待ちを起こす（W2-d+）。進めるのは BSP だけである
+/// （[`crate::arch::x86_64::advance_monotonic_ticks`]）。
+fn advance_clock() {
+    if let Some(now) = crate::arch::x86_64::advance_monotonic_ticks() {
+        // **締切を過ぎたタイマの待ちを起こす（W2-d+）。** **進めた直後に、同じ文脈で起こす**
+        // ——**IF=0 かつ BKL の内側である**（外からの割り込みの入口関数が取っている）。
+        crate::task::wake_expired_timers(now);
+    }
 }
 
 /// タイマ割り込みで駆動されるメインループ。
