@@ -20337,6 +20337,7 @@ const DOC_PATH_MOVES: &[(&str, &str)] = &[
         "kernel/src/arch/x86_64/paging/address_space.rs",
     ),
     ("kernel/src/apic.rs", "kernel/src/machine/pc/apic.rs"),
+    ("kernel/src/irq/", "kernel/src/machine/pc/irq/"),
 ];
 
 /// 以前の置き場を指すパスを、読み替えの表で今の置き場へ読み替えて、追跡下に在るかを見る（ファイルでも
@@ -23718,7 +23719,7 @@ const SABOTAGE_FEATURES: &[&str] = &[
 
 /// 内部を隠す約束のディレクトリ。
 ///
-/// - `kernel/src/irq/`: 割り込みコントローラとタイマ源の境界（S0-a）。外から
+/// - `kernel/src/machine/pc/irq/`: 割り込みコントローラとタイマ源の境界（S0-a）。外から
 ///   `pic` / `pit` を参照できないことをコンパイラが保証する。
 /// - `kernel/src/task/`: スケジューラの実体（`static mut SCHEDULER`）。外から
 ///   構造体全体への参照を作れないことをコンパイラが保証する（S0-b）。
@@ -23747,7 +23748,7 @@ const SABOTAGE_FEATURES: &[&str] = &[
 /// **どちらも「コンパイラが保証し、検査はその保証が外されるのを防ぐ」形である。**
 /// 保証の作り方が同じなので、検査も 1 つで足りる。
 static PRIVATE_BOUNDARY_DIRS: &[&str] = &[
-    "kernel/src/irq/",
+    "kernel/src/machine/pc/irq/",
     "kernel/src/task/",
     "kernel/src/task.rs",
     "kernel/src/acpi/",

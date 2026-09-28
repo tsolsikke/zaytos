@@ -29,8 +29,8 @@ use kernel::frame_allocator;
 use kernel::graphics::{Color, Framebuffer, FramebufferLayout};
 use kernel::heap;
 use kernel::interrupts;
-use kernel::irq;
 use kernel::keyboard;
+use kernel::machine::pc::irq;
 use kernel::paging::plan::{resolve_pages, MappedRanges};
 
 mod panic;
@@ -2345,7 +2345,7 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
                     "clock: monotonic ticks went from {} to {} during this session (1 tick = {} ms)",
                     clock_at_start,
                     kernel::arch::x86_64::idt::monotonic_ticks(),
-                    1000 / u64::from(kernel::irq::timer_frequency_hz())
+                    1000 / u64::from(kernel::machine::pc::irq::timer_frequency_hz())
                 ));
                 // **タイマの待ちと起こし（W2-d+）。** **判定はこの行を読む。**
                 //

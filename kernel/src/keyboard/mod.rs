@@ -18,7 +18,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 /// IRQ1 は I/O APIC 経由へ移してあるので、実際の配送先は
 /// [`crate::arch::x86_64::idt::IOAPIC_KEYBOARD_VECTOR`] である。
 /// 現在の配送先は [`delivery_vector`] で得る。
-pub const PIC_KEYBOARD_VECTOR: usize = match crate::irq::vector_for(KEYBOARD_IRQ) {
+pub const PIC_KEYBOARD_VECTOR: usize = match crate::machine::pc::irq::vector_for(KEYBOARD_IRQ) {
     Some(vector) => vector as usize,
     None => panic!("the keyboard IRQ has no vector"),
 };
@@ -27,7 +27,7 @@ pub const PIC_KEYBOARD_VECTOR: usize = match crate::irq::vector_for(KEYBOARD_IRQ
 ///
 /// 経路の切り替えで変わるので `const` にできない。
 pub fn delivery_vector() -> usize {
-    match crate::irq::routed_vector(KEYBOARD_IRQ) {
+    match crate::machine::pc::irq::routed_vector(KEYBOARD_IRQ) {
         Some(vector) => vector as usize,
         None => PIC_KEYBOARD_VECTOR,
     }

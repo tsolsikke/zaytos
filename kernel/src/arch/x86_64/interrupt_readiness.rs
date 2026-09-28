@@ -23,7 +23,7 @@ use common::machine::pc::serial::SerialPort;
 
 use crate::arch::x86_64::gdt;
 use crate::arch::x86_64::idt;
-use crate::irq;
+use crate::machine::pc::irq;
 
 /// 検証項目 1 件の結果。
 ///
@@ -136,7 +136,7 @@ pub fn verify_ready_for_sti_with_timer(logger: &mut Logger<SerialPort>) -> Readi
     //
     // **i8042 が無ければ IRQ1 は開けていない**（HW-b。`ADR-0068`）。8259 でも閉じている
     // のが正しい。
-    if crate::irq::routed_to_apic(crate::keyboard::KEYBOARD_IRQ)
+    if crate::machine::pc::irq::routed_to_apic(crate::keyboard::KEYBOARD_IRQ)
         || !crate::keyboard::controller_present()
     {
         return verify_ready(logger, &[0], true);

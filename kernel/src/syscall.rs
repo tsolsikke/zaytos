@@ -4548,7 +4548,7 @@ unsafe fn sys_clock_gettime(
     // **値はもっともらしいまま進むので、2 回読んで比べる検算でしか検出されない。**
     #[cfg(feature = "clock-goes-backwards")]
     let ticks = u64::MAX - ticks;
-    let hz = u64::from(crate::irq::timer_frequency_hz());
+    let hz = u64::from(crate::machine::pc::irq::timer_frequency_hz());
     // **換算はホストで固定してある**（`common::time`）。
     let (secs, nsecs) = common::time::timespec_from_ticks(ticks, hz);
 
@@ -4628,7 +4628,7 @@ unsafe fn sys_nanosleep(
     let mut nanos = [0u8; 8];
     nanos.copy_from_slice(&raw[TIMESPEC_NSEC..]);
 
-    let hz = u64::from(crate::irq::timer_frequency_hz());
+    let hz = u64::from(crate::machine::pc::irq::timer_frequency_hz());
     let Ok(ticks) = common::time::ticks_for_duration(
         i64::from_le_bytes(seconds),
         i64::from_le_bytes(nanos),

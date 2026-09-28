@@ -44,7 +44,6 @@ pub mod graphics;
 pub mod heap;
 pub mod input;
 pub mod interrupts;
-pub mod irq;
 pub mod keyboard;
 pub mod machine;
 pub mod memory_map;

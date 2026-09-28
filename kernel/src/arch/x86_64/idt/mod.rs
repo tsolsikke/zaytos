@@ -1181,7 +1181,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
             .this_cpu()
             .fetch_add(1, Ordering::Relaxed);
         // SAFETY: 実際に配送された割り込みに対してのみ、自コアの LAPIC へ送る。
-        unsafe { crate::irq::end_of_interrupt_for_lapic_timer() };
+        unsafe { crate::machine::pc::irq::end_of_interrupt_for_lapic_timer() };
         return no_switch_rsp;
     }
 
@@ -1232,7 +1232,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     // PIC の範囲で最初に届いたベクタを 1 度だけ記録する。ICW2 の検証に使う。
     if u8::try_from(vector)
         .ok()
-        .and_then(crate::irq::irq_for)
+        .and_then(crate::machine::pc::irq::irq_for)
         .is_some()
     {
         let _ = FIRST_PIC_VECTOR.compare_exchange(
@@ -1276,7 +1276,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         // 共有 IDT で両コアが同じハンドラに入っても、EOI の宛先は分かれる。
         #[cfg(not(feature = "no-eoi-test"))]
         unsafe {
-            crate::irq::end_of_interrupt_for_lapic_timer();
+            crate::machine::pc::irq::end_of_interrupt_for_lapic_timer();
         }
         // **中断（Ctrl+C）で遠征を終了させる地点はここである（S12 前の手当て、C）。**
         //
@@ -1346,7 +1346,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         //
         // SAFETY: 割り込みハンドラの中であり、割り込みゲート経由で入場した
         // ため IF=0。他の実行文脈が同時にコントローラを触ることはない。
-        let spurious = unsafe { crate::irq::is_spurious(irq) };
+        let spurious = unsafe { crate::machine::pc::irq::is_spurious(irq) };
         if spurious {
             SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
         }
@@ -1368,7 +1368,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
             // SAFETY: 実際に発生した割り込みに対してのみ呼んでいる。宛先の決定は
             // 境界の内側の純粋ロジックが行う。
             unsafe {
-                crate::irq::end_of_interrupt(irq, spurious);
+                crate::machine::pc::irq::end_of_interrupt(irq, spurious);
             }
         }
     }
@@ -1405,7 +1405,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
 ///
 /// `match` で剥がしているのは、失敗時のメッセージが読めるためである
 /// （`unwrap()` も固定ツールチェインで const 評価できることは確認済み）。
-pub const PIC_TIMER_VECTOR: usize = match crate::irq::vector_for(0) {
+pub const PIC_TIMER_VECTOR: usize = match crate::machine::pc::irq::vector_for(0) {
     Some(vector) => vector as usize,
     None => panic!("the timer IRQ has no vector"),
 };
@@ -1430,7 +1430,7 @@ pub const PIC_TIMER_VECTOR: usize = match crate::irq::vector_for(0) {
 /// 立てるとビットマップの意味が「I/O APIC 経由である」から「PIC でなくなった」
 /// へ静かにずれる。S2-d-2 では別の器で持つ。
 pub fn timer_delivery_vector() -> usize {
-    if crate::irq::timer_on_lapic() {
+    if crate::machine::pc::irq::timer_on_lapic() {
         LAPIC_TIMER_VECTOR
     } else {
         PIC_TIMER_VECTOR
@@ -1473,7 +1473,7 @@ fn irq_for_vector(vector: usize) -> Option<u8> {
     if vector > u8::MAX as usize {
         return None;
     }
-    crate::irq::irq_for_vector(vector as u8)
+    crate::machine::pc::irq::irq_for_vector(vector as u8)
 }
 
 /// IRQ スタブ表の配置検証。

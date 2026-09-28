@@ -671,7 +671,7 @@ const LAPIC_LVT_ENTRIES: [(&str, u64); 6] = [
 /// 同じ事実が 2 箇所に出て片方だけが古くなる。
 ///
 /// `pub` ではなく `pub(crate)` である。現在の利用箇所は
-/// `kernel/src/irq/apic.rs` だけで、`main.rs`（別クレート）からは到達しない。
+/// `kernel/src/machine/pc/irq/apic.rs` だけで、`main.rs`（別クレート）からは到達しない。
 /// 到達範囲を狭めておくと、境界の外から触られる形が increment で増えない。
 /// 下の redirection entry と EOI の操作も同じ理由で `pub(crate)` にしてある。
 const ENTRY_VECTOR_MASK: u32 = 0xFF;
@@ -1840,7 +1840,7 @@ fn sample_with_pit(logger: &mut Logger<SerialPort>, lapic: u64) -> PitSampling {
         let elapsed_counts = u64::from(count_begin.wrapping_sub(count_end));
         // ウィンドウは elapsed_ticks × (1 / timer_frequency_hz) 秒である。
         // PIT の周波数もリテラルで持たない。境界の問いから取る。
-        let reference_hz = u64::from(crate::irq::timer_frequency_hz());
+        let reference_hz = u64::from(crate::machine::pc::irq::timer_frequency_hz());
         *slot = elapsed_counts * reference_hz / elapsed_ticks;
     }
     PitSampling::Done {

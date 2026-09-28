@@ -81,20 +81,22 @@ pub fn max_tick_jump() -> u64 {
 
 /// タイマを Local APIC タイマへ移し、結果を観測する（S2-d-2）。
 ///
-/// 順序と割り込み禁止区間の扱いは [`crate::irq::switch_timer_to_lapic`] が
+/// 順序と割り込み禁止区間の扱いは [`crate::machine::pc::irq::switch_timer_to_lapic`] が
 /// 持つ。ここはその前後の観測に徹する。
 fn switch_timer_to_lapic(
     logger: &mut Logger<SerialPort>,
     calibration: crate::machine::pc::apic::TimerCalibration,
 ) {
-    let requested_hz = crate::irq::timer_frequency_hz();
+    let requested_hz = crate::machine::pc::irq::timer_frequency_hz();
     let median_hz = calibration.median_hz();
     let divide = calibration.divide_configuration();
 
     // SAFETY: ベクタ LAPIC_TIMER_VECTOR には専用スタブのゲートが入っており
     // （`idt::init`）、ハンドラは EOI を Local APIC へ送って戻る。
     // 起動時の 1 回だけの呼び出しである。
-    let setup = match unsafe { crate::irq::switch_timer_to_lapic(calibration, requested_hz) } {
+    let setup = match unsafe {
+        crate::machine::pc::irq::switch_timer_to_lapic(calibration, requested_hz)
+    } {
         Ok(setup) => setup,
         Err(error) => {
             logger.error(format_args!(
@@ -114,7 +116,7 @@ fn switch_timer_to_lapic(
     // あちらは `sti` の手前の検査点の話で、その時点ではタイマはまだ 8259
     // 経由である（切り替えは較正の後、較正は `sti` の後）。ここで示せるのは
     // 「LVT については、設定した内容がどこかで検証されている」ことだけである。
-    match crate::irq::lvt_timer_readback() {
+    match crate::machine::pc::irq::lvt_timer_readback() {
         Some(lvt) => {
             let expected_vector = idt::LAPIC_TIMER_VECTOR as u8;
             let ok = lvt.vector() == expected_vector && !lvt.masked() && lvt.periodic();
@@ -139,7 +141,7 @@ fn switch_timer_to_lapic(
 
     // PIC が黙っていることを読み戻す。`irq::mask_all()` が実際に
     // 呼ばれたことの観測でもある（S2-b で足してから呼び出し元が無かった）。
-    let masks = crate::irq::check_masks(&[]);
+    let masks = crate::machine::pc::irq::check_masks(&[]);
     logger.info(format_args!(
         "lapic-timer: the 8259 is fully masked after mask_all(): {masks}, all masked={}",
         masks.matches()
@@ -291,12 +293,13 @@ pub unsafe fn run_timer_loop(
         // PIC のマスク状態をここへ持ち込まないこと。別のコントローラの
         // 状態である。S2-d-1c で IRQ1 を移したので、開いているのはそれだけに
         // なる。期待は呼び出し側が持つ（境界が独自に期待を持たない）。
-        let routed: &[u8] = if crate::irq::routed_to_apic(crate::keyboard::KEYBOARD_IRQ) {
-            &[crate::keyboard::KEYBOARD_IRQ]
-        } else {
-            &[]
-        };
-        match crate::irq::survey_apic_masks(apic, routed) {
+        let routed: &[u8] =
+            if crate::machine::pc::irq::routed_to_apic(crate::keyboard::KEYBOARD_IRQ) {
+                &[crate::keyboard::KEYBOARD_IRQ]
+            } else {
+                &[]
+            };
+        match crate::machine::pc::irq::survey_apic_masks(apic, routed) {
             Some(check) => logger.info(format_args!(
                 "apic: the I/O APIC controller reads its redirection entries: {check}, \
                  only the routed IRQs are open={} (the PIC still owns every other line)",
@@ -830,7 +833,7 @@ pub unsafe fn run_timer_loop(
                      stray={} spurious={} lapic_spurious={}, \
                      irq1={} balanced={}, max tick jump={}, i8042 OBF={}, PIC ISR={}, \
                      uart forced={} reentry={}",
-                        ticks / crate::irq::timer_frequency_hz() as u64,
+                        ticks / crate::machine::pc::irq::timer_frequency_hz() as u64,
                         common::percpu::cpu_id(),
                         ap_tick_summary(),
                         idt::timer_ticks_total(),
@@ -899,7 +902,7 @@ pub unsafe fn run_timer_loop(
                         // ISR を読んでも元に戻す必要がない読み出し専用の操作しか
                         // しないため、競合しても値がずれるだけで壊れない。
                         // **失効条件は「AP がこの経路へ入るようになるとき」である。**
-                        unsafe { crate::irq::service_snapshot() },
+                        unsafe { crate::machine::pc::irq::service_snapshot() },
                         // **UART のロックの計測（シリアルの排他の段）。**
                         //
                         // **どちらも 0 が正常である。** **`forced` が 0 でなければ
