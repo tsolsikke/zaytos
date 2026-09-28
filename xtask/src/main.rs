@@ -20355,6 +20355,12 @@ fn moved_path_is_tracked(path: &str, tracked: &[String], moves: &[(&str, &str)])
 ///
 /// **欄の番号を持つ文書は、状態の欄が `未` か `済` の表の行の、その欄だけを見る**——**`docs/deferred-decisions.md` の
 /// 出典の欄（3 番目）である。** **ほかの欄と、計測の記録の表は、書いた時点のまま残す。**
+///
+/// **「`パス`の`項目`」の項目は、そのファイルで定義されていること**（2026-09-28。運用者の決定）——**ファイルの中の項目が
+/// 別のファイルへ動くと、パスは今も在るので、上の読み替えの判定では捕まらない。** 定義の行で見て（[`rust_defines`]）、
+/// 呼ぶ所に名前があるだけでは「在る」としない。見るのは `.rs` だけである。**消えた項目を記録として指すときは、項目の
+/// 直後に「（YYYY-MM-DDに消えた）」を添える**（まとめて指すなら「（どれもYYYY-MM-DDに消えた）」。[`item_pointers`]）。
+/// 注記のある項目は見ないが、定義が在れば落とす（注記が古くなった形）。
 const CURRENT_STATE_DOCS: &[(&str, Option<usize>)] = &[
     ("docs/architecture.md", None),
     ("docs/coding-standards.md", None),
@@ -20415,6 +20421,194 @@ fn paths_before_a_move(part: &str, tracked: &[String], moves: &[(&str, &str)]) -
         }
     }
     found
+}
+
+/// 今の状態を書く文書の「`パス`の`項目`」の 1 組（2026-09-28。運用者の決定）。
+#[derive(Debug, PartialEq, Eq)]
+struct ItemPointer {
+    path: String,
+    item: String,
+    /// 「（YYYY-MM-DDに消えた）」の注記がある——消えた項目を記録として指している。
+    removed: bool,
+}
+
+/// 文の一部から「`パス`の`項目`」の組を集める（純粋な論理。2026-09-28）。
+///
+/// **パスは、`/` を含むか拡張子で終わる backtick である。** その直後の「の」に続く backtick が 1 つ目の項目で、`と`・`・`・
+/// `、`・`,` でつないだ backtick が続く項目である（次のパスの頭が来たら、そこからは別の組）。**項目の直後の
+/// 「（YYYY-MM-DDに消えた」は、その項目を消えたものとし、「（どれもYYYY-MM-DDに消えた」は、その組のそこまでの項目を
+/// すべて消えたものとする**（[`removal_note`]）。
+fn item_pointers(part: &str) -> Vec<ItemPointer> {
+    let mut tokens: Vec<(usize, usize)> = Vec::new();
+    let mut at = 0;
+    while let Some(open) = part[at..].find('`') {
+        let start = at + open;
+        let Some(close) = part[start + 1..].find('`') else {
+            break;
+        };
+        let end = start + 1 + close + 1;
+        tokens.push((start, end));
+        at = end;
+    }
+    let text = |index: usize| &part[tokens[index].0 + 1..tokens[index].1 - 1];
+    let looks_like_path = |candidate: &str| {
+        !candidate.contains(' ')
+            && (candidate.contains('/')
+                || candidate.rsplit_once('.').is_some_and(|(stem, extension)| {
+                    !stem.is_empty()
+                        && !extension.is_empty()
+                        && extension.chars().all(|c| c.is_ascii_lowercase())
+                }))
+    };
+    let is_head = |index: usize| {
+        looks_like_path(text(index))
+            && tokens
+                .get(index + 1)
+                .is_some_and(|next| part[tokens[index].1..next.0].trim() == "の")
+    };
+    let mut pointers = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if !is_head(i) {
+            i += 1;
+            continue;
+        }
+        let path = text(i);
+        let group = pointers.len();
+        let mut j = i + 1;
+        loop {
+            pointers.push(ItemPointer {
+                path: path.to_string(),
+                item: text(j).to_string(),
+                removed: false,
+            });
+            let mut after = tokens[j].1;
+            if let Some((every, length)) = removal_note(&part[after..]) {
+                let marked = if every { group } else { pointers.len() - 1 };
+                for pointer in &mut pointers[marked..] {
+                    pointer.removed = true;
+                }
+                after += length;
+            }
+            let Some(next) = tokens.get(j + 1) else {
+                break;
+            };
+            if next.0 < after
+                || !matches!(part[after..next.0].trim(), "と" | "・" | "、" | ",")
+                || is_head(j + 1)
+            {
+                break;
+            }
+            j += 1;
+        }
+        i = j + 1;
+    }
+    pointers
+}
+
+/// 項目の直後の「（YYYY-MM-DDに消えた…）」を読む（純粋な論理。2026-09-28）。`(どれもか, 注記の長さ)` を返す。
+fn removal_note(text: &str) -> Option<(bool, usize)> {
+    let body = text.strip_prefix('（')?;
+    let (every, body) = match body.strip_prefix("どれも") {
+        Some(rest) => (true, rest),
+        None => (false, body),
+    };
+    let date = body.get(..10)?;
+    let is_date = date.char_indices().all(|(index, c)| {
+        if index == 4 || index == 7 {
+            c == '-'
+        } else {
+            c.is_ascii_digit()
+        }
+    });
+    if !is_date || !body[10..].trim_start().starts_with("に消えた") {
+        return None;
+    }
+    let close = text.find('）')?;
+    Some((every, close + '）'.len_utf8()))
+}
+
+/// Rust のソースが項目を定義しているか（純粋な論理。2026-09-28）。**識別子でない項目は `None`（見ない）。**
+///
+/// **定義の行だけを数える**——`fn`・`const`・`static`・`struct`・`enum`・`union`・`trait`・`type`・`mod`・`macro_rules!`・
+/// `let` と、アセンブリのラベル（`"名前:`）と、`型::値` の列挙の値である。**呼ぶ所に名前があるだけでは「在る」としない。**
+/// `//` のコメントの中は数えない。`型::関数` は、関数の定義があれば在るとする。
+fn rust_defines(source: &str, item: &str) -> Option<bool> {
+    let item = item.trim().trim_end_matches("()").trim_end_matches('!');
+    let segments: Vec<&str> = item.split("::").collect();
+    let is_identifier = |segment: &str| {
+        segment
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    if !segments.iter().all(|segment| is_identifier(segment)) {
+        return None;
+    }
+    let code: Vec<&str> = source
+        .lines()
+        .map(|line| line.find("//").map_or(line, |at| &line[..at]))
+        .collect();
+    let is_identifier_char = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let defines = |keyword: &str, name: &str| {
+        code.iter().any(|line| {
+            line.match_indices(keyword).any(|(at, _)| {
+                if line[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(is_identifier_char)
+                {
+                    return false;
+                }
+                let after = &line[at + keyword.len()..];
+                if !keyword.ends_with('!') && !after.starts_with(char::is_whitespace) {
+                    return false;
+                }
+                let rest = after.trim_start();
+                let rest = rest.strip_prefix("mut ").map_or(rest, str::trim_start);
+                rest.strip_prefix(name)
+                    .is_some_and(|tail| !tail.starts_with(is_identifier_char))
+            })
+        })
+    };
+    let labels = |name: &str| {
+        code.iter().any(|line| {
+            line.match_indices(name).any(|(at, _)| {
+                line[..at].trim_end().ends_with('"') && line[at + name.len()..].starts_with(':')
+            })
+        })
+    };
+    let name = segments[segments.len() - 1];
+    const KEYWORDS: [&str; 11] = [
+        "fn",
+        "const",
+        "static",
+        "struct",
+        "enum",
+        "union",
+        "trait",
+        "type",
+        "mod",
+        "let",
+        "macro_rules!",
+    ];
+    if KEYWORDS.iter().any(|keyword| defines(keyword, name)) || labels(name) {
+        return Some(true);
+    }
+    if let [.., owner, _] = segments.as_slice() {
+        let variant = |line: &&str| {
+            line.trim_start()
+                .strip_prefix(name)
+                .is_some_and(|tail| tail.is_empty() || tail.starts_with([',', '(', '{', ' ', '=']))
+        };
+        if defines("enum", owner) && code.iter().any(variant) {
+            return Some(true);
+        }
+    }
+    Some(false)
 }
 
 /// 読み替えの表の問題（以前の置き場がまだ在る項、今の置き場が無い項）。
@@ -20575,6 +20769,8 @@ fn check_markdown_references(workspace_root: &Path) -> Result<Vec<String>> {
     }
 
     let mut findings = Vec::new();
+    // 項目の定義を見るときに読んだソース（同じファイルを何度も読まない）。
+    let mut sources: BTreeMap<String, Option<String>> = BTreeMap::new();
     for rel in &markdown {
         let Some(text) = bodies.get(rel) else {
             continue;
@@ -20671,6 +20867,37 @@ fn check_markdown_references(workspace_root: &Path) -> Result<Vec<String>> {
                         "{rel}:{number}: 今の状態を書く文書が、移したものを以前のパスで指している -> `{path}`\
                          （今の置き場を書く。CURRENT_STATE_DOCS）"
                     ));
+                }
+                // **項目がそのファイルで定義されていること**（2026-09-28。運用者の決定）。見るのは `.rs` だけである。
+                for pointer in item_pointers(part) {
+                    let Some(full) = DOC_PATH_PREFIXES
+                        .iter()
+                        .map(|prefix| format!("{prefix}{}", pointer.path))
+                        .find(|full| tracked.contains(full))
+                    else {
+                        continue;
+                    };
+                    if !full.ends_with(".rs") {
+                        continue;
+                    }
+                    let source = sources
+                        .entry(full.clone())
+                        .or_insert_with(|| fs::read_to_string(workspace_root.join(&full)).ok());
+                    let Some(source) = source.as_deref() else {
+                        continue;
+                    };
+                    let item = &pointer.item;
+                    match (rust_defines(source, item), pointer.removed) {
+                        (Some(false), false) => findings.push(format!(
+                            "{rel}:{number}: 今の状態を書く文書が、`{full}`で定義されていない項目を指している -> `{item}`\
+                             （今の在りかを書く。消えた項目なら「（YYYY-MM-DDに消えた）」を添える。CURRENT_STATE_DOCS）"
+                        )),
+                        (Some(true), true) => findings.push(format!(
+                            "{rel}:{number}: 消えたと注記した項目が、`{full}`で定義されている -> `{item}`\
+                             （注記を外すか、指す先を直す。CURRENT_STATE_DOCS）"
+                        )),
+                        _ => {}
+                    }
                 }
             }
         }
@@ -29732,6 +29959,67 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
             &moves
         )
         .is_empty());
+    }
+
+    /// **「`パス`の`項目`」の項目は、そのファイルで定義されていること**（2026-09-28。運用者の決定）。**呼ぶ所に名前が
+    /// あるだけでは「在る」としない。** **「（YYYY-MM-DDに消えた）」の注記がある項目は消えたものとして扱う**
+    /// （「どれも」なら、その組のそこまでを全部）。
+    #[test]
+    fn a_current_state_document_names_items_where_they_are_defined() {
+        let pointers = item_pointers(
+            "`kernel/src/a.rs`の`first`と`second`・`third`、`kernel/src/b.rs` の `gone`（2026-08-13に消えた）・`kept`、\
+             `c.rs`の`x`と`y`（どれも2026-08-23に消えた） / zi-eの6-2 / `d.md`の「節」 / `e.rs`の`z`（2026-08-23に`w`から置き換わった）",
+        );
+        let summary: Vec<(&str, &str, bool)> = pointers
+            .iter()
+            .map(|p| (p.path.as_str(), p.item.as_str(), p.removed))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("kernel/src/a.rs", "first", false),
+                ("kernel/src/a.rs", "second", false),
+                ("kernel/src/a.rs", "third", false),
+                ("kernel/src/b.rs", "gone", true),
+                ("kernel/src/b.rs", "kept", false),
+                ("c.rs", "x", true),
+                ("c.rs", "y", true),
+                ("e.rs", "z", false),
+            ]
+        );
+        let source = "pub fn defined_fn() {}\nconst LIMIT: u64 = 1;\nstatic mut STATE: u8 = 0;\nstruct Thing;\n\
+                      enum Kind {\n    First,\n    Second(u8),\n}\nmacro_rules! helper {\n    () => {};\n}\n\
+                      fn caller() {\n    let local_value = 1;\n    called_only_here(local_value);\n}\n\
+                      core::arch::global_asm!(\n    \"asm_label:\",\n);\n// fn in_a_comment() {}\n";
+        for item in [
+            "defined_fn",
+            "defined_fn()",
+            "LIMIT",
+            "STATE",
+            "Thing",
+            "Kind::Second",
+            "helper!",
+            "local_value",
+            "asm_label",
+        ] {
+            assert_eq!(rust_defines(source, item), Some(true), "{item}");
+        }
+        for item in [
+            "called_only_here",
+            "in_a_comment",
+            "Kind::Third",
+            "Other::First",
+        ] {
+            assert_eq!(rust_defines(source, item), Some(false), "{item}");
+        }
+        for item in [
+            "build:",
+            "-EAGAIN",
+            "virtio-open-wakeup-window-test",
+            ".org",
+        ] {
+            assert_eq!(rust_defines(source, item), None, "{item}");
+        }
     }
 
     /// **コンパイルした木と別の木で動けば、両方のパスと作り直す手順を出して落とす**（2026-09-27。運用者の決定）。
