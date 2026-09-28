@@ -282,7 +282,6 @@ pub unsafe fn wake_application_processors(
     mapped: &crate::apic::MappedApic,
     mmio: &crate::acpi::ApicMmio,
 ) -> WakeReport {
-    let lapic_virt = crate::apic::lapic_virt_of(mapped);
     let usable = mmio.usable_local_apics();
 
     let Some(frame) = crate::arch::x86_64::trampoline_frame() else {
@@ -364,27 +363,18 @@ pub unsafe fn wake_application_processors(
             installed.cr3
         ));
 
-        // INIT → 待つ → SIPI → 待つ → まだ起動していなければもう 1 回 SIPI。
-        //
-        // 2 回目を無条件に送ってはならない。既に走り出した AP へ SIPI を
-        // 送ると、long mode で走っている最中に開始ベクタから再実行させる
-        // ことになり、16 ビットのバイト列を 64 ビットとして解釈して #GP →
-        // トリプルフォルトする。実際に踏んだ（CPU 1 が CS64・GDTR=0 で
-        // オフセット 0x15 に落ちた）。規格が 2 回目を許すのは「1 回目が
-        // 届かなかった場合」であって、常に 2 回送れという意味ではない。
-        // SAFETY: マップ済みの Local APIC。起動時の 1 回だけ。
+        // INIT と SIPI を送る（順番と待ち、2 回目の SIPI を送る条件は machine の側が持つ）。
+        // SAFETY: mapped はマップ済みの Local APIC で、トランポリンは SIPI の開始のページに置いた
+        // （install_trampoline）。起動時に、この AP へ 1 回だけ送る。
         let ok = unsafe {
-            crate::apic::send_init_ipi(lapic_virt, apic_id) && {
-                wait_ticks(AP_WAKE_WAIT_TICKS);
-                crate::apic::send_startup_ipi(lapic_virt, apic_id, installed.sipi_vector)
-            }
+            crate::machine::pc::start_application_processor(
+                mapped,
+                apic_id,
+                installed.sipi_vector,
+                wait_ticks,
+                || started_ap_count() > before,
+            )
         };
-        wait_ticks(AP_WAKE_WAIT_TICKS);
-        let ok = ok
-            && (started_ap_count() > before || {
-                // SAFETY: 同上。まだ起動していないときだけ送る。
-                unsafe { crate::apic::send_startup_ipi(lapic_virt, apic_id, installed.sipi_vector) }
-            });
         if !ok {
             logger.error(format_args!(
                 "smp: an IPI to apic id {apic_id} never left the local APIC (delivery status \
@@ -478,8 +468,6 @@ fn run_serial_stress_on_ap(serial: &mut SerialPort, slot: usize) {
 #[cfg(feature = "serial-stress-test")]
 const WAIT_TIMEOUT_CYCLES: u64 = 20_000_000_000;
 
-/// AP を起動するときの各段の待ちティック数。1 ティック = 10ms（100Hz）。
-const AP_WAKE_WAIT_TICKS: u64 = 1;
 /// 起動署名を待つ上限（ティック）。
 const AP_START_WAIT_TICKS: u64 = 50;
 
