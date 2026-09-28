@@ -559,6 +559,8 @@ kernel::machine::pc::irq::pit::tests::frequencies_that_do_not_fit_in_sixteen_bit
 kernel::machine::pc::irq::pit::tests::rounding_goes_to_the_nearest_not_down
 kernel::machine::pc::irq::pit::tests::the_actual_frequency_differs_from_the_request
 kernel::machine::pc::irq::pit::tests::the_divisor_for_the_target_frequency_is_known
+kernel::machine::pc::irq::tests::local_apic_vectors_are_claimed_before_the_irq_table
+kernel::machine::pc::irq::tests::other_vectors_are_looked_up_in_the_irq_table
 kernel::machine::pc::irq::tests::the_expected_masks_open_only_the_requested_irqs
 kernel::machine::pc::irq::tests::the_mask_check_compares_values_rather_than_formatting
 kernel::machine::pc::irq::tests::the_slave_range_is_derived_from_its_own_offset

@@ -712,7 +712,7 @@ pub unsafe fn run_timer_loop(
                      ipi_sent={} ipi_recv_cpu1={}, tlb_gen={} flush_cpu1={}, \
                      heap_free={} heap_blocks={}, \
                      keys={} dropped={} \
-                     stray={} spurious={} lapic_spurious={}, \
+                     stray={} {}, \
                      irq1={} balanced={}, max tick jump={}, i8042 OBF={}, PIC ISR={}, \
                      uart forced={} reentry={}",
                         ticks / crate::machine::pc::irq::timer_frequency_hz() as u64,
@@ -755,8 +755,9 @@ pub unsafe fn run_timer_loop(
                         crate::keyboard::buffer::received_count(),
                         crate::keyboard::buffer::overflow_count(),
                         crate::keyboard::stray_irq_count(),
-                        idt::spurious_count(),
-                        idt::lapic_spurious_count(),
+                        // `spurious=… lapic_spurious=…`（8259 と Local APIC を分けて数えた観測値。表示は
+                        // machine/pc が持つ。2026-09-28 に `idt` から移した）。
+                        crate::machine::pc::spurious_counts(),
                         // 会計。irq1 は IDT 側のベクタ別カウンタ。
                         // keys + stray がこれと一致しなければ経路の取り違えがある。
                         idt::interrupt_count(crate::keyboard::delivery_vector()),

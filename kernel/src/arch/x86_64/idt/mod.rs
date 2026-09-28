@@ -1168,20 +1168,23 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     #[cfg(feature = "fp-clobber-on-kernel-entry-test")]
     crate::arch::x86_64::fp::clobber_on_kernel_entry();
 
+    // 届いたものを受け取る（`ADR-0072` の 2。2026-09-28）。**BKL なしで呼べる**ので、BKL を取らない種類
+    // （IPI の探り）を BKL の前に分けられる。ベクタは IDT の添字なので 8 ビットに収まる。
+    use crate::machine::pc::Claim;
+    let claimed = u8::try_from(vector).map_or(Claim::Unclaimed, crate::machine::pc::claim);
+
     // 測定用 IPI（S5-a）は BKL を取る前に処理して戻る。
     //
     // BKL 待ちと IPI の相性は未解決である（`deferred-decisions.md` の
     // 「BKL取得待ちのIF=0とIPIのデッドロック」）。ここで BKL を取ると、
     // 測るためだけのベクタでその罠を踏むことになる。
     // 触るのは自コアのカウンタと自コアの Local APIC だけなので、BKL は要らない。
-    //
-    // SAFETY: スタブが直前に積んだ有効な `IrqContext` を指す。読み取りのみ。
-    if unsafe { (*context).vector } as usize == IPI_PROBE_VECTOR {
+    if claimed == Claim::IpiProbe {
         IPI_PROBE_RECEIVED
             .this_cpu()
             .fetch_add(1, Ordering::Relaxed);
         // SAFETY: 実際に配送された割り込みに対してのみ、自コアの LAPIC へ送る。
-        unsafe { crate::machine::pc::irq::end_of_interrupt_for_lapic_timer() };
+        unsafe { crate::machine::pc::complete(claimed) };
         return no_switch_rsp;
     }
 
@@ -1243,134 +1246,113 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
         );
     }
 
-    // Local APIC のスプリアス割り込み（S2-d-1）。EOI を送らずに戻る。
-    //
-    // 判定を明示にした。以前このベクタに EOI が送られなかったのは
-    // 「PIC の担当範囲の外だから」であって、スプリアスだからではなかった。
-    // S2-d で Local APIC が配送を担うと LAPIC 由来のベクタには EOI が要るので、
-    // その偶然の一致は壊れる。ここで問いの形にしておく。
-    //
-    // 回数は PIC のスプリアス（IRQ7 / IRQ15）とは別に数える。機序が違い、
-    // 合流させるとどちらが起きたのかハートビートから分からなくなる。
-    if vector == crate::machine::pc::apic::SPURIOUS_VECTOR as usize {
-        LAPIC_SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
-        return no_switch_rsp;
-    }
-
-    // Local APIC タイマ（S2-d-2）。LVT 由来なので IRQ 番号を持たない。
-    //
-    // 判定の順序を固定する。LVT 由来を先に見る。後ろに置くと、
-    // このベクタが PIC の採番表に当たる構成で誤る。現行の 2 構成
-    // （`0x20`-`0x2F` と `0x30`-`0x3F`）では当たらないが、依存を残さない。
-    //
-    // EOI は Local APIC へ送る。8259 は関与しない。
-    if vector == LAPIC_TIMER_VECTOR {
-        timer_ticks_slot().fetch_add(1, Ordering::Relaxed);
-        // **単調なティック（W2-d+）。** **較正の後はこちらが数える。**
-        advance_monotonic_ticks();
-        // SAFETY: 割り込みハンドラの中であり、割り込みゲート経由なので IF=0。
-        // 実際に配送された割り込みに対してのみ呼んでいる。
+    match claimed {
+        // Local APIC のスプリアス割り込み（S2-d-1）。EOI を送らずに戻る。
         //
-        // EOI は自コアの Local APIC へ届く。送り先の VA は 1 つだが、
-        // その物理アドレスは実行しているコア自身の LAPIC に別名づけられている。
-        // 共有 IDT で両コアが同じハンドラに入っても、EOI の宛先は分かれる。
-        #[cfg(not(feature = "no-eoi-test"))]
-        unsafe {
-            crate::machine::pc::irq::end_of_interrupt_for_lapic_timer();
-        }
-        // **中断（Ctrl+C）で遠征を終了させる地点はここである（S12 前の手当て、C）。**
+        // 判定を明示にした。以前このベクタに EOI が送られなかったのは
+        // 「PIC の担当範囲の外だから」であって、スプリアスだからではなかった。
+        // S2-d で Local APIC が配送を担うと LAPIC 由来のベクタには EOI が要るので、
+        // その偶然の一致は壊れる。ここで問いの形にしておく。
         //
-        // **EOI を送った後でなければならない。** 下は longjmp で出ていくので、
-        // **EOI より前に置くと、割り込みを終えないまま抜ける。**
-        // **IRQ1 の側に置けないのはこれが理由である**——あちらの EOI は
-        // ハンドラより後ろにあり、そこから抜けるとキーボードが二度と来ない。
+        // 回数は PIC のスプリアス（IRQ7 / IRQ15）とは別に、受け取る側（`claim`）が数える。機序が違い、
+        // 合流させるとどちらが起きたのかハートビートから分からなくなる。
+        Claim::Spurious => return no_switch_rsp,
+        // Local APIC タイマ（S2-d-2）。LVT 由来なので IRQ 番号を持たない。
         //
-        // SAFETY: `context` はスタブが積んだ有効なフレームで、読み取りのみ。
-        // 終了させる条件が揃ったときだけ longjmp する（戻らない）。
-        unsafe { fold_if_interrupted(context, &mut bkl) };
-        // AP もスケジューラへ入る（S4-c-3-2b）。
+        // 判定の順序（LVT 由来を IRQ の表より先に見る）は、受け取る側（`claim`）が固定している。
         //
-        // S4-a から S4-c-3-2a までは、ここで AP を手前へ返していた。当時の AP は
-        // タスクを実行せず、入れば `CURRENT` の sentinel を読んで停止したためで
-        // ある。S4-c-3-2b で AP に担当タスク（AP 用アイドルタスク）ができ、
-        // 起動時に sentinel を解くようになったので、その分岐は不要になった。
-        //
-        // 破壊テスト `smp-ap-enter-scheduler` はここで引退した。分岐そのものが
-        // 無くなったので「分岐を外す」破壊テストは構成できない。役目
-        // （sentinel が止めることの実証）は `smp-ap-no-sentinel-clear` が
-        // 引き継いでいる（あちらは分岐ではなく sentinel の解除を落とす）。
-        return crate::task::on_timer_tick(no_switch_rsp);
-    }
-
-    // このベクタはどの IRQ か。移行済みの経路も含めて引く（S2-d-1c）。
-    //
-    // ここは EOI の入口ではなく、IRQ 処理全体の入口である。下の
-    // ブロックにはティックの加算もキーボードのハンドラも入っており、
-    // 引けなければハンドラごと呼ばれない。I/O APIC 経由のベクタは
-    // PIC の採番表に載っていないので、`irq::irq_for` では引けない。
-    //
-    // テスト専用ベクタ（`0x40`、どちらの表にも無い）はここに入らないので、
-    // EOI の論理が一切絡まない。
-    let delivered_irq = irq_for_vector(vector);
-
-    if let Some(irq) = delivered_irq {
-        // 配送先を問うので、8259 の採番ではなく現在の配送先を見る。
-        // 今は同じ値だが、S2-d-2 で Local APIC タイマへ移すと変わる。
-        if vector == timer_delivery_vector() {
+        // EOI は Local APIC へ送る。8259 は関与しない。
+        Claim::LocalTimer => {
             timer_ticks_slot().fetch_add(1, Ordering::Relaxed);
-            // **単調なティック（W2-d+）。** **較正より前は 8259 経由なので、ここも数える**
-            // ——**2 箇所に置かないと、起動直後のティックが落ちる。**
+            // **単調なティック（W2-d+）。** **較正の後はこちらが数える。**
             advance_monotonic_ticks();
+            // SAFETY: 割り込みハンドラの中であり、割り込みゲート経由なので IF=0。
+            // 実際に配送された割り込みに対してのみ呼んでいる。
+            //
+            // EOI は自コアの Local APIC へ届く。送り先の VA は 1 つだが、
+            // その物理アドレスは実行しているコア自身の LAPIC に別名づけられている。
+            // 共有 IDT で両コアが同じハンドラに入っても、EOI の宛先は分かれる。
+            // EOI を省く破壊テスト（`no-eoi-test`）は、完了させる側（`complete`）の中にある。
+            unsafe { crate::machine::pc::complete(claimed) };
+            // **中断（Ctrl+C）で遠征を終了させる地点はここである（S12 前の手当て、C）。**
+            //
+            // **EOI を送った後でなければならない。** 下は longjmp で出ていくので、
+            // **EOI より前に置くと、割り込みを終えないまま抜ける。**
+            // **IRQ1 の側に置けないのはこれが理由である**——あちらの EOI は
+            // ハンドラより後ろにあり、そこから抜けるとキーボードが二度と来ない。
+            //
+            // SAFETY: `context` はスタブが積んだ有効なフレームで、読み取りのみ。
+            // 終了させる条件が揃ったときだけ longjmp する（戻らない）。
+            unsafe { fold_if_interrupted(context, &mut bkl) };
+            // AP もスケジューラへ入る（S4-c-3-2b）。
+            //
+            // S4-a から S4-c-3-2a までは、ここで AP を手前へ返していた。当時の AP は
+            // タスクを実行せず、入れば `CURRENT` の sentinel を読んで停止したためで
+            // ある。S4-c-3-2b で AP に担当タスク（AP 用アイドルタスク）ができ、
+            // 起動時に sentinel を解くようになったので、その分岐は不要になった。
+            //
+            // 破壊テスト `smp-ap-enter-scheduler` はここで引退した。分岐そのものが
+            // 無くなったので「分岐を外す」破壊テストは構成できない。役目
+            // （sentinel が止めることの実証）は `smp-ap-no-sentinel-clear` が
+            // 引き継いでいる（あちらは分岐ではなく sentinel の解除を落とす）。
+            return crate::task::on_timer_tick(no_switch_rsp);
         }
-
-        // キーボード（IRQ1）。EOI より先に呼ぶ。この中でデータポートを
-        // 読み切らないと、コントローラの出力バッファが空かず次の IRQ1 が
-        // 来なくなる。
+        // このベクタはどの IRQ か。移行済みの経路も含めて、受け取る側（`claim`）が引いてある（S2-d-1c）。
         //
-        // ベクタではなく IRQ 番号で判定する（S2-d-1c）。配送先ベクタは
-        // 8259 経由と I/O APIC 経由で違うが、IRQ 番号は移行しても変わらない。
-        if irq == crate::keyboard::KEYBOARD_IRQ {
-            crate::keyboard::handle_irq(context.vector);
-        }
+        // ここは EOI の入口ではなく、IRQ 処理全体の入口である。下の
+        // ブロックにはティックの加算もキーボードのハンドラも入っており、
+        // 引けなければハンドラごと呼ばれない。I/O APIC 経由のベクタは
+        // PIC の採番表に載っていないので、`irq::irq_for` では引けない。
+        Claim::Irq(irq) => {
+            // 配送先を問うので、8259 の採番ではなく現在の配送先を見る。
+            // 今は同じ値だが、S2-d-2 で Local APIC タイマへ移すと変わる。
+            if vector == timer_delivery_vector() {
+                timer_ticks_slot().fetch_add(1, Ordering::Relaxed);
+                // **単調なティック（W2-d+）。** **較正より前は 8259 経由なので、ここも数える**
+                // ——**2 箇所に置かないと、起動直後のティックが落ちる。**
+                advance_monotonic_ticks();
+            }
 
-        // virtio-blk（S13-d）。**ISR を読んで deassert する**（レベルトリガの
-        // 要件。読まないと EOI の後に同じ割り込みが再送され続ける）。
-        // IRQ 番号は固定しない——`scan_bus0` が構成空間から読んだ値を
-        // `virtio::arm_interrupt` が控えており、それと突き合わせる。
-        if crate::virtio::armed_irq() == Some(irq) {
-            crate::virtio::handle_irq();
-        }
+            // キーボード（IRQ1）。EOI より先に呼ぶ。この中でデータポートを
+            // 読み切らないと、コントローラの出力バッファが空かず次の IRQ1 が
+            // 来なくなる。
+            //
+            // ベクタではなく IRQ 番号で判定する（S2-d-1c）。配送先ベクタは
+            // 8259 経由と I/O APIC 経由で違うが、IRQ 番号は移行しても変わらない。
+            if irq == crate::keyboard::KEYBOARD_IRQ {
+                crate::keyboard::handle_irq(context.vector);
+            }
 
-        // スプリアス（偽）割り込みの判定。IRQ7 / IRQ15 でしか起きない。
-        // 本物なら ISR の該当ビットが立っている。
-        //
-        // SAFETY: 割り込みハンドラの中であり、割り込みゲート経由で入場した
-        // ため IF=0。他の実行文脈が同時にコントローラを触ることはない。
-        let spurious = unsafe { crate::machine::pc::irq::is_spurious(irq) };
-        if spurious {
-            SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
-        }
+            // virtio-blk（S13-d）。**ISR を読んで deassert する**（レベルトリガの
+            // 要件。読まないと EOI の後に同じ割り込みが再送され続ける）。
+            // IRQ 番号は固定しない——`scan_bus0` が構成空間から読んだ値を
+            // `virtio::arm_interrupt` が控えており、それと突き合わせる。
+            if crate::virtio::armed_irq() == Some(irq) {
+                crate::virtio::handle_irq();
+            }
 
-        // 処理を終えてから EOI を送る。送った時点で PIC は次の同じ
-        // 割り込みを上げられるようになる。宛先は純粋ロジックが決める
-        // （スプリアスの扱いはマスタ側とスレーブ側で非対称）。
-        //
-        // 破壊テスト (S13-d, virtio-skip-eoi-test): virtio の IRQ にだけ EOI を
-        // 送らない。LAPIC の ISR ビットが立ったままになり、同じ優先度
-        // クラス以下の割り込みが以後届かなくなる形を狙う。
-        #[cfg(feature = "virtio-skip-eoi-test")]
-        let skip_eoi = crate::virtio::armed_irq() == Some(irq);
-        #[cfg(not(feature = "virtio-skip-eoi-test"))]
-        let skip_eoi = false;
+            // 処理を終えてから完了させる（`complete`）。スプリアス（偽）割り込みの判定もそこで行う。
+            // IRQ7 / IRQ15 でしか起きず、本物なら ISR の該当ビットが立っている。EOI の宛先は純粋ロジックが
+            // 決める（スプリアスの扱いはマスタ側とスレーブ側で非対称）。送った時点で PIC は次の同じ
+            // 割り込みを上げられるようになる。
+            //
+            // 破壊テスト (S13-d, virtio-skip-eoi-test): virtio の IRQ にだけ EOI を
+            // 送らない。LAPIC の ISR ビットが立ったままになり、同じ優先度
+            // クラス以下の割り込みが以後届かなくなる形を狙う。
+            #[cfg(feature = "virtio-skip-eoi-test")]
+            let skip_eoi = crate::virtio::armed_irq() == Some(irq);
+            #[cfg(not(feature = "virtio-skip-eoi-test"))]
+            let skip_eoi = false;
 
-        #[cfg(not(feature = "no-eoi-test"))]
-        if !skip_eoi {
-            // SAFETY: 実際に発生した割り込みに対してのみ呼んでいる。宛先の決定は
-            // 境界の内側の純粋ロジックが行う。
-            unsafe {
-                crate::machine::pc::irq::end_of_interrupt(irq, spurious);
+            if !skip_eoi {
+                // SAFETY: 実際に発生した割り込みに対してのみ呼んでいる。割り込みゲート経由で入場したので
+                // IF=0 で、BKL の中なので、ほかの実行文脈が同時に 8259 を触ることはない。
+                unsafe { crate::machine::pc::complete(claimed) };
             }
         }
+        // テスト専用ベクタ（`0x40`、どちらの表にも無い）などの受け取れない到着は、数えるだけで
+        // 完了させない。EOI の論理が一切絡まない。IPI の探りは BKL の前で戻っている。
+        Claim::IpiProbe | Claim::Unclaimed => {}
     }
 
     // ここで出力してはならない（ADR-0018 §5）。100Hz で毎回ログを出すと
@@ -1435,45 +1417,6 @@ pub fn timer_delivery_vector() -> usize {
     } else {
         PIC_TIMER_VECTOR
     }
-}
-
-/// スプリアス割り込みを受けた回数（ベクタ別ではなく合計）。
-///
-/// 8259A がノイズ等で上げる偽の割り込み。IRQ7 / IRQ15 として届く
-/// （ADR-0018 のチェックリスト 8）。EOI を送ってはいけないので、通常の
-/// 経路と分けて数える。
-static SPURIOUS_COUNT: AtomicU64 = AtomicU64::new(0);
-
-/// スプリアス割り込みを受けた回数。
-pub fn spurious_count() -> u64 {
-    SPURIOUS_COUNT.load(Ordering::Relaxed)
-}
-
-/// Local APIC のスプリアス割り込みを受けた回数（S2-d-1）。
-///
-/// [`SPURIOUS_COUNT`] とは別に数える。あちらは 8259A が IRQ7 / IRQ15 として
-/// 上げる偽の割り込みで、こちらは Local APIC が SVR のベクタで上げるものである。
-/// 機序が違うので合流させない。合流させると、ハートビートを見たときに
-/// どちらが起きたのか分からなくなる。
-static LAPIC_SPURIOUS_COUNT: AtomicU64 = AtomicU64::new(0);
-
-/// Local APIC のスプリアス割り込みを受けた回数。
-pub fn lapic_spurious_count() -> u64 {
-    LAPIC_SPURIOUS_COUNT.load(Ordering::Relaxed)
-}
-
-/// ベクタ番号から IRQ 番号を求める。どのコントローラにも属さなければ `None`。
-///
-/// `pic_irq_for` から改名した（S2-d-1c）。I/O APIC 経由へ移した IRQ も
-/// 引くようになり、「PIC 由来か」という名前が事実と合わなくなったためである。
-///
-/// テスト専用ベクタ（[`TEST_VECTOR`]）はどちらの表にも無いので `None` になり、
-/// EOI の経路へ入らない。
-fn irq_for_vector(vector: usize) -> Option<u8> {
-    if vector > u8::MAX as usize {
-        return None;
-    }
-    crate::machine::pc::irq::irq_for_vector(vector as u8)
 }
 
 /// IRQ スタブ表の配置検証。

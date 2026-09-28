@@ -64,6 +64,9 @@
 //! | [`managed_vectors`] | モジュール関数 | 同上 |
 //! | [`timer_frequency_hz`] | モジュール関数 | 同上 |
 //! | [`survey_apic_masks`] | どちらでもない | 2 つ目の実装を 1 回読ませるための一時的な入口（S2-d-1b）。切り替えが済めば要らなくなる |
+//! | [`claim`] | モジュール関数 | 受け取るの判定はベクタと表（アトミック）だけで決まり、実装ごとに変わらない（`ADR-0072` の 2。2026-09-28） |
+//! | [`complete`] | 委譲する関数を束ねる | 完了の中身（EOI とスプリアスの見分け）は [`end_of_interrupt`] と [`is_spurious`] が実装へ委譲する（同上） |
+//! | [`spurious_counts`] | モジュール関数 | 観測値である。数えるのは [`claim`] と [`complete`] の中である（同上） |
 //!
 //! # `TimerSource` は実装が 1 つしかない。これは原則の例外である
 //!
@@ -112,7 +115,7 @@ mod pic;
 mod pit;
 
 use core::fmt;
-use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 /// レガシー IRQ の本数（2 台の 8259 で 16 本）。移行状態の器の大きさを決める。
 const MAX_LEGACY_IRQS: usize = 16;
@@ -672,6 +675,144 @@ pub unsafe fn end_of_interrupt(irq: u8, spurious: bool) {
     }
     // SAFETY: 呼び出し側の契約をそのまま実装へ引き継ぐ。
     unsafe { ACTIVE.end_of_interrupt(irq, spurious) }
+}
+
+/// 届いた割り込みを受け取った結果（`ADR-0072` の 2。2026-09-28）。[`claim`] が返し、[`complete`] に渡す。
+///
+/// 例外・IPI・装置の割り込みを 1 つの番号の空間にまとめない（`ADR-0072` の 3）。IPI は種類として、
+/// このCPUのタイマは別の種類として、装置は IRQ 番号で持つ。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Claim {
+    /// IPI の探り（S5-a）。BKL を取らずに数えて、完了させる。
+    IpiProbe,
+    /// Local APIC のスプリアス。完了させない。数えるのは [`claim`] の中で済ませてある。
+    Spurious,
+    /// このCPUのタイマ（Local APIC のタイマ）。
+    LocalTimer,
+    /// ISA の IRQ（8259 経由か I/O APIC 経由）。**8259 の 7 番と 15 番がスプリアスかどうかは、ここではまだ
+    /// 分からない**（In-Service Register を読むのは [`complete`] の中である）。源の番号の型にするのは 9e である。
+    Irq(u8),
+    /// 受け取れない到着（試しのベクタや yield などのソフトの `int`）。数えるだけで、完了させない。
+    Unclaimed,
+}
+
+/// このCPUに届いた割り込みを 1 つ受け取る（`ADR-0072` の 2）。
+///
+/// # 契約（境界の関数。2026-09-28）
+///
+/// - `vector` は、このCPUの入口のスタブが積んだベクタである。
+/// - BKL なしで呼べる。読むのは定数とアトミックだけで、I/O は無い。Local APIC のスプリアスは、ここで数える。
+/// - 判定の順は、IPI の探り、Local APIC のスプリアス、Local APIC のタイマ、IRQ の表の順に固定する。Local APIC
+///   由来のベクタを表より先に見るのは、そのベクタが 8259 の採番表に当たる構成でも取り違えないためである。
+pub fn claim(vector: u8) -> Claim {
+    let claimed = classify(vector, irq_for_vector);
+    if claimed == Claim::Spurious {
+        LAPIC_SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+    claimed
+}
+
+/// [`claim`] の判定（純粋な関数）。IRQ の表の引き方を外から渡すので、ホストで順を確かめられる。
+fn classify(vector: u8, lookup: impl Fn(u8) -> Option<u8>) -> Claim {
+    if usize::from(vector) == crate::arch::x86_64::idt::IPI_PROBE_VECTOR {
+        return Claim::IpiProbe;
+    }
+    if vector == crate::machine::pc::apic::SPURIOUS_VECTOR {
+        return Claim::Spurious;
+    }
+    if usize::from(vector) == crate::arch::x86_64::idt::LAPIC_TIMER_VECTOR {
+        return Claim::LocalTimer;
+    }
+    match lookup(vector) {
+        Some(irq) => Claim::Irq(irq),
+        None => Claim::Unclaimed,
+    }
+}
+
+/// 受け取った割り込みを完了させる（`ADR-0072` の 2 と 4）。
+///
+/// # 契約（境界の関数。2026-09-28）
+///
+/// - [`claim`] が返したものに、処理が戻った後でちょうど 1 回呼ぶ。戻らない動き（切り替え、遠征を畳むこと）より
+///   前に呼ぶ。
+/// - [`Claim::Spurious`] と [`Claim::Unclaimed`] には呼ばない（呼んでも何もしない）。
+/// - [`Claim::Irq`] では、8259 の 7 番と 15 番がスプリアスかをここで見分け、コントローラの決まりに従う
+///   （スプリアスなら数え、EOI はスレーブのスプリアスのときにマスタへだけ送る）。
+/// - 破壊テスト `no-eoi-test` では、IPI の探りを除いて EOI を送らない（数えるのは変わらない）。
+///
+/// # Safety
+///
+/// - 実際に配送された割り込みのハンドラの中から、割り込みを止めたまま呼ぶこと。
+/// - [`Claim::Irq`] では、ほかの実行文脈が同時に 8259 を触っていないこと（[`is_spurious`] の契約）。
+pub unsafe fn complete(claimed: Claim) {
+    match claimed {
+        // SAFETY: 呼び出し側の契約。IPI の探りは自コアの Local APIC へ送る（`no-eoi-test` の対象にしない）。
+        Claim::IpiProbe => unsafe { end_of_interrupt_for_lapic_timer() },
+        Claim::LocalTimer => {
+            // SAFETY: 呼び出し側の契約。EOI は自コアの Local APIC へ届く。
+            #[cfg(not(feature = "no-eoi-test"))]
+            unsafe {
+                end_of_interrupt_for_lapic_timer();
+            }
+        }
+        Claim::Irq(irq) => {
+            // SAFETY: 呼び出し側の契約（8259 を同時に触る文脈が無いことを含む）。
+            let spurious = unsafe { is_spurious(irq) };
+            if spurious {
+                SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
+            // SAFETY: 呼び出し側の契約。宛先の決定は境界の内側の純粋ロジックが行う。
+            #[cfg(not(feature = "no-eoi-test"))]
+            unsafe {
+                end_of_interrupt(irq, spurious);
+            }
+        }
+        Claim::Spurious | Claim::Unclaimed => {}
+    }
+}
+
+/// 8259 のスプリアス割り込みを受けた回数（ベクタ別ではなく合計）。
+///
+/// 8259A がノイズ等で上げる偽の割り込み。IRQ7 / IRQ15 として届く
+/// （ADR-0018 のチェックリスト 8）。EOI を送ってはいけないので、通常の
+/// 経路と分けて数える。数えるのは [`complete`] の中である（2026-09-28 に `idt` から移した）。
+static SPURIOUS_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Local APIC のスプリアス割り込みを受けた回数（S2-d-1）。
+///
+/// [`SPURIOUS_COUNT`] とは別に数える。あちらは 8259A が IRQ7 / IRQ15 として
+/// 上げる偽の割り込みで、こちらは Local APIC が SVR のベクタで上げるものである。
+/// 機序が違うので合流させない。合流させると、ハートビートを見たときに
+/// どちらが起きたのか分からなくなる。数えるのは [`claim`] の中である（2026-09-28 に `idt` から移した）。
+static LAPIC_SPURIOUS_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// スプリアスを受けた回数（8259 と Local APIC を分けて持つ観測値）。
+///
+/// # 契約（境界の関数。2026-09-28）
+///
+/// - 読むだけで、何も変えない。どの文脈からでも呼べる。
+/// - 表示はハートビートの行の一部（`spurious=… lapic_spurious=…`）で、`idt` に置いていた頃と同じ文言である。
+pub fn spurious_counts() -> SpuriousCounts {
+    SpuriousCounts {
+        pic: SPURIOUS_COUNT.load(Ordering::Relaxed),
+        local_apic: LAPIC_SPURIOUS_COUNT.load(Ordering::Relaxed),
+    }
+}
+
+/// [`spurious_counts`] の観測値。境界は生の値を出さない（モジュールの説明）ので、表示だけを持つ。
+pub struct SpuriousCounts {
+    pic: u64,
+    local_apic: u64,
+}
+
+impl fmt::Display for SpuriousCounts {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "spurious={} lapic_spurious={}",
+            self.pic, self.local_apic
+        )
+    }
 }
 
 /// 1 本の IRQ を I/O APIC 経由へ移す（S2-d-1c）。
@@ -1456,6 +1597,62 @@ mod tests {
         assert_eq!(
             irq_for(slave_first + pic::IRQS_PER_PIC - 1),
             Some(2 * pic::IRQS_PER_PIC - 1)
+        );
+    }
+
+    /// 8 ビットに収めたベクタ（試験用）。
+    fn vector_u8(vector: usize) -> u8 {
+        u8::try_from(vector).expect("an IDT vector fits in 8 bits")
+    }
+
+    /// 受け取るの判定は、Local APIC 由来のベクタを IRQ の表より先に見る（`ADR-0072` の 2）。
+    ///
+    /// どのベクタも IRQ の表に当たる構成を渡しても、IPI の探り・スプリアス・タイマとして受け取る。
+    /// 表を先に見る形に書き換えると、ここが落ちる。
+    #[test]
+    fn local_apic_vectors_are_claimed_before_the_irq_table() {
+        let every_vector_is_an_irq = |vector: u8| Some(vector);
+        assert_eq!(
+            classify(
+                vector_u8(crate::arch::x86_64::idt::IPI_PROBE_VECTOR),
+                every_vector_is_an_irq
+            ),
+            Claim::IpiProbe
+        );
+        assert_eq!(
+            classify(
+                crate::machine::pc::apic::SPURIOUS_VECTOR,
+                every_vector_is_an_irq
+            ),
+            Claim::Spurious
+        );
+        assert_eq!(
+            classify(
+                vector_u8(crate::arch::x86_64::idt::LAPIC_TIMER_VECTOR),
+                every_vector_is_an_irq
+            ),
+            Claim::LocalTimer
+        );
+    }
+
+    /// ほかのベクタは IRQ の表で引き、載っていなければ受け取れない到着として返す。
+    #[test]
+    fn other_vectors_are_looked_up_in_the_irq_table() {
+        let only_0x21_is_irq_1 = |vector: u8| (vector == 0x21).then_some(1);
+        assert_eq!(classify(0x21, only_0x21_is_irq_1), Claim::Irq(1));
+        assert_eq!(
+            classify(
+                vector_u8(crate::arch::x86_64::idt::TEST_VECTOR),
+                only_0x21_is_irq_1
+            ),
+            Claim::Unclaimed
+        );
+        assert_eq!(
+            classify(
+                vector_u8(crate::arch::x86_64::idt::YIELD_VECTOR),
+                only_0x21_is_irq_1
+            ),
+            Claim::Unclaimed
         );
     }
 
