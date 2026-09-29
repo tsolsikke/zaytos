@@ -30221,7 +30221,56 @@ fn stage_esp_with_disk_unwrapped(
         }
     }
 
+    // **積んだ成果物の形を確かめてから返す**（2026-09-29。[`check_staged_file`]）——**外れたら QEMU を起こさない。**
+    check_staged_file(
+        &boot_efi,
+        b"MZ",
+        "a PE image (a UEFI application)",
+        bootloader_efi,
+    )?;
+    check_staged_file(&staged_kernel_elf, b"\x7fELF", "an ELF file", kernel_elf)?;
+
     Ok(esp_dir)
+}
+
+/// ESP に積んだファイルを確かめる（2026-09-29。案 B の ①の後の全検査では、空のブートローダを積んだ QEMU の項目が
+/// どれも「起動しない」で落ち、ログは環境のせいと言っていた）。**外れたら、どのファイルがどうだったかと写し元を
+/// 出して落とす**——**環境ではなく、作ったものの不具合として**（誤りは [`stage_esp_with_disk`] が検査装置の故障に
+/// 包む）。**読むのは大きさと先頭の数バイトだけである。**
+fn check_staged_file(staged: &Path, magic: &[u8], form: &str, source: &Path) -> Result<()> {
+    let file =
+        fs::File::open(staged).with_context(|| format!("failed to open {}", staged.display()))?;
+    let len = file
+        .metadata()
+        .with_context(|| format!("failed to read the size of {}", staged.display()))?
+        .len();
+    let mut head = Vec::new();
+    file.take(magic.len() as u64)
+        .read_to_end(&mut head)
+        .with_context(|| format!("failed to read {}", staged.display()))?;
+    if let Some(problem) = staged_file_problem(len, &head, magic, form) {
+        bail!(
+            "a built file on the ESP is broken (not the environment): {} {problem} (copied from {})",
+            staged.display(),
+            source.display()
+        );
+    }
+    Ok(())
+}
+
+/// ESP に積んだファイルの形の誤り（純粋な論理）。**空か、先頭が `magic` でなければ、どうだったかを返す。**
+fn staged_file_problem(len: u64, head: &[u8], magic: &[u8], form: &str) -> Option<String> {
+    if len == 0 {
+        return Some(format!("is empty (0 bytes); it must be {form}"));
+    }
+    if !head.starts_with(magic) {
+        return Some(format!(
+            "starts with \"{}\", not \"{}\" ({len} bytes); it must be {form}",
+            head.escape_ascii(),
+            magic.escape_ascii()
+        ));
+    }
+    None
 }
 
 /// 出力を解析する外の道具の一覧（e-4 の後の対策）。
@@ -31105,6 +31154,31 @@ mod tests {
         assert!(error.contains("onto itself"), "{error}");
         assert!(error.contains("bootloader.efi"), "{error}");
         assert_eq!(left, b"MZ kept");
+    }
+
+    /// **ESP に積んだファイルは、空でなく、先頭が形の印で始まること**（2026-09-29）。**外れたら、どうだったかを返す。**
+    #[test]
+    fn a_staged_file_must_be_non_empty_and_start_with_its_magic() {
+        assert_eq!(
+            staged_file_problem(159_232, b"MZ", b"MZ", "a PE image"),
+            None
+        );
+        assert_eq!(
+            staged_file_problem(7_939_144, b"\x7fELF", b"\x7fELF", "an ELF file"),
+            None
+        );
+        let empty = staged_file_problem(0, b"", b"MZ", "a PE image").unwrap();
+        assert!(empty.starts_with("is empty (0 bytes)"), "{empty}");
+        let wrong = staged_file_problem(4_096, b"\x7fE", b"MZ", "a PE image").unwrap();
+        assert!(
+            wrong.starts_with("starts with \"\\x7fE\", not \"MZ\""),
+            "{wrong}"
+        );
+        let short = staged_file_problem(1, b"M", b"MZ", "a PE image").unwrap();
+        assert!(
+            short.starts_with("starts with \"M\", not \"MZ\""),
+            "{short}"
+        );
     }
 
     #[test]
