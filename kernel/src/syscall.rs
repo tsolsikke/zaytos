@@ -4155,37 +4155,6 @@ unsafe fn sys_getdents64(
 /// 1 レコードの作業領域。**名前は ext2 の上限（255）まで。**
 const DIRENT64_MAX_RECORD: usize = (DIRENT64_HEADER_LEN + 255 + 1).next_multiple_of(DIRENT64_ALIGN);
 
-/// `stat(path, statbuf)` の本体（S10-b）。
-///
-/// # 埋まる欄は 5 つで、残りは 0 である
-///
-/// ext2 の inode から埋まるのは `st_ino`・`st_nlink`・`st_mode`・`st_size`・
-/// `st_blocks` である。**残りは 0 にする。**
-///
-/// **0 は未実装であって値ではない。** 内訳は次のとおりで、
-/// **どれも「0 という値を持っている」のではない。**
-///
-/// - `st_dev` / `st_rdev`——**デバイス番号の体系が無い。** イメージは 1 つで、
-///   `BlockDevice` の trait も引いていない（`docs/roadmap.md` の S10 の締め）
-/// - `st_blksize`——**入出力の推奨単位という概念が無い。** ブロックサイズなら
-///   `Ext2::block_size` で分かるが、**`st_blksize` はそれとは別の意味である**
-///   ので、分かる値で埋めない
-/// - `st_atim` / `st_mtim` / `st_ctim`——**イメージの時刻を 0 に潰してある。**
-///   `kernel/build.rs` の `zero_image_timestamps` が superblock の 3 つと全 inode の
-///   4 つを 0 で上書きしており、**`mke2fs` の出力を決定的にするための帰結である。**
-///   **なぜ 0 なのかは、そこに 1 箇所ある**
-/// - `st_uid` / `st_gid`——**利用者の概念が無い。** ext2 の inode は値を持っているが、
-///   **その値を照合する相手がカーネルの側に無い**ので、持っていることにしない
-///
-/// # `st_blocks` の単位
-///
-/// **512 バイト単位である**（ブロックサイズ単位ではない）。**ext2 の `i_blocks` も
-/// 同じ単位なので、そのままコピーする**（実測で確かめた。`common::ext2::Inode` の
-/// `blocks_512` の doc）。
-///
-/// # Safety
-///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 /// `clock_gettime`（W2-d+）。**`CLOCK_MONOTONIC` だけを答える。**
 ///
 /// # 秒とナノ秒は 1 本のティックから導く
@@ -4316,6 +4285,37 @@ unsafe fn sys_nanosleep(
     0
 }
 
+/// `stat(path, statbuf)` の本体（S10-b）。
+///
+/// # 埋まる欄は 5 つで、残りは 0 である
+///
+/// ext2 の inode から埋まるのは `st_ino`・`st_nlink`・`st_mode`・`st_size`・
+/// `st_blocks` である。**残りは 0 にする。**
+///
+/// **0 は未実装であって値ではない。** 内訳は次のとおりで、
+/// **どれも「0 という値を持っている」のではない。**
+///
+/// - `st_dev` / `st_rdev`——**デバイス番号の体系が無い。** イメージは 1 つで、
+///   `BlockDevice` の trait も引いていない（`docs/roadmap.md` の S10 の締め）
+/// - `st_blksize`——**入出力の推奨単位という概念が無い。** ブロックサイズなら
+///   `Ext2::block_size` で分かるが、**`st_blksize` はそれとは別の意味である**
+///   ので、分かる値で埋めない
+/// - `st_atim` / `st_mtim` / `st_ctim`——**イメージの時刻を 0 に潰してある。**
+///   `kernel/build.rs` の `zero_image_timestamps` が superblock の 3 つと全 inode の
+///   4 つを 0 で上書きしており、**`mke2fs` の出力を決定的にするための帰結である。**
+///   **なぜ 0 なのかは、そこに 1 箇所ある**
+/// - `st_uid` / `st_gid`——**利用者の概念が無い。** ext2 の inode は値を持っているが、
+///   **その値を照合する相手がカーネルの側に無い**ので、持っていることにしない
+///
+/// # `st_blocks` の単位
+///
+/// **512 バイト単位である**（ブロックサイズ単位ではない）。**ext2 の `i_blocks` も
+/// 同じ単位なので、そのままコピーする**（実測で確かめた。`common::ext2::Inode` の
+/// `blocks_512` の doc）。
+///
+/// # Safety
+///
+/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 unsafe fn sys_stat(path: u64, statbuf: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -> u64 {
     let mut name = [0u8; PATH_MAX];
     // SAFETY: 呼び出し元契約をそのまま渡す。
