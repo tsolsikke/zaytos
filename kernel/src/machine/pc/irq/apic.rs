@@ -19,7 +19,14 @@
 
 use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 
-use super::{Controller, MaskCheck, MaskState, MASK_BITMAP_WORDS};
+use super::{Controller, IsaIrq, MaskCheck, MaskState, MASK_BITMAP_WORDS};
+
+/// GSI（I/O APIC の入力の番号。`ADR-0072` の 3。2026-09-29。境界の段階の手順 2 の 9e）。
+///
+/// **ISA の IRQ 番号とは種類が違う**——上書きの表（MADT の Interrupt Source Override）が IRQ を GSI へ移す（実測で
+/// IRQ0 は GSI2）。変換はこのモジュールの中だけで行い、redirection entry の添字は GSI から引く。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Gsi(u32);
 
 /// 割り込み文脈から EOI を送るための Local APIC のアドレス（S2-d-1c）。
 ///
@@ -186,8 +193,12 @@ impl Apic {
     /// 通す経路そのものは常に通す。恒等を前提に書くと、上書きのある IRQ を
     /// 扱った瞬間に静かに誤る。
     fn entry_for_irq(&self, irq: u8) -> Option<u8> {
-        let gsi = self.mmio.gsi_for_irq(irq);
-        let index = gsi.checked_sub(self.gsi_base)?;
+        self.entry_for_gsi(Gsi(self.mmio.gsi_for_irq(irq)))
+    }
+
+    /// GSI に対応する redirection entry の添字。担当外なら `None`。
+    fn entry_for_gsi(&self, gsi: Gsi) -> Option<u8> {
+        let index = gsi.0.checked_sub(self.gsi_base)?;
         if index >= self.entry_count {
             return None;
         }
@@ -372,7 +383,7 @@ impl Controller for Apic {
         }
     }
 
-    fn check_masks(&self, unmasked: &[u8]) -> MaskCheck {
+    fn check_masks(&self, unmasked: &[IsaIrq]) -> MaskCheck {
         // SAFETY: 型の不変条件によりマップ済みのページである。読み取りのみで、
         // 単一コアの起動シーケンス中にだけ通る。
         let observed = unsafe { self.read_mask_bitmap() };
@@ -386,7 +397,7 @@ impl Controller for Apic {
             set_bit(&mut expected, entry);
         }
         for irq in unmasked {
-            if let Some(entry) = self.entry_for_irq(*irq) {
+            if let Some(entry) = self.entry_for_irq(irq.number()) {
                 clear_bit(&mut expected, entry);
             }
         }

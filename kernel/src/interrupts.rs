@@ -97,16 +97,16 @@ pub fn max_tick_jump() -> u64 {
 ///
 /// - 呼ぶのは `arch` の割り込みの入口だけで、割り込みを止めたまま、入口の確かめ（方向フラグ・スタックの境界・
 ///   ベクタごとの数え）を済ませた後に呼ぶ。yield はここへ来ない（[`on_yield_interrupt`]）。
-/// - `arrival` は、入口のスタブが積んだ到着の番号（x86 ではベクタ）である。ここでは読まずに、`machine` の受け取る
-///   （[`crate::machine::pc::claim`]）と、登録した処理（キーボードは最初の到着を記録する）へ渡すだけである
-///   （番号の型を分けるのは `ADR-0072` の 3。9e）。
+/// - `arrival` は、入口のスタブが積んだ到着（x86 ではベクタ）から `arch` が作ったものである。ここでは読まずに、
+///   `machine` の受け取る（[`crate::machine::pc::claim`]）へ渡すだけである（`ADR-0072` の 3。9e。ベクタを共通の側に
+///   出さない）。登録した処理へは源の番号を渡す。
 /// - 戻り値は出口の動きである（9d-3）。ふつうは入口が戻るときに使うスタックポインタ（切り替えないなら割り込まれた
 ///   文脈のもの、切り替えるなら次のタスクのもの）を返し、遠征を畳むと決めたら [`ExitAction::FoldExcursion`] を
 ///   返す。畳むのは入口が、この関数が戻った後に行う。
 /// - BKL を取らない種類（IPI の探り）は、受け取った直後に分けて、BKL を取らずに完了させる。それ以外は BKL の中で
 ///   扱い、BKL は戻るときに解く（遠征を畳むときも同じ）。
 pub fn on_external_interrupt(
-    arrival: u8,
+    arrival: crate::machine::pc::Arrival,
     interrupted: &crate::arch::x86_64::Interrupted<'_>,
 ) -> ExitAction {
     use crate::machine::pc::Claim;
@@ -208,7 +208,7 @@ pub fn on_external_interrupt(
         // このベクタはどの源か。移行済みの経路も含めて、受け取る側（`claim`）が引いてある（S2-d-1c。I/O APIC
         // 経由のベクタは 8259 の採番表に載っていない）。源の番号は、配送先のベクタが 8259 経由と I/O APIC 経由で
         // 違っても変わらない。
-        Claim::Irq(source) => {
+        Claim::Source { source, .. } => {
             // 源に登録した処理を呼ぶ（`ADR-0072` の 5。9d-4）。完了させる前に呼ぶ。レベルで鳴る源は、処理が源を
             // 下ろしてから戻る（キーボードはデータポートを読み切り、virtio-blk は ISR を読む。`ADR-0072` の 4）。
             // 登録は起動の間だけで、起動の後は表が変わらないので、ここで読むのにロックは要らない。
@@ -224,7 +224,7 @@ pub fn on_external_interrupt(
                 }
                 return ExitAction::Resume(current_sp);
             };
-            handler(arrival);
+            handler(source);
 
             // 処理を終えてから完了させる（`complete`）。スプリアス（偽）割り込みの判定もそこで行う。
             // IRQ7 / IRQ15 でしか起きず、本物なら ISR の該当ビットが立っている。EOI の宛先は純粋ロジックが
@@ -235,7 +235,7 @@ pub fn on_external_interrupt(
             // 送らない。LAPIC の ISR ビットが立ったままになり、同じ優先度
             // クラス以下の割り込みが以後届かなくなる形を狙う。
             #[cfg(feature = "virtio-skip-eoi-test")]
-            let skip_eoi = crate::virtio::armed_irq() == Some(source);
+            let skip_eoi = crate::virtio::armed_source() == Some(source);
             #[cfg(not(feature = "virtio-skip-eoi-test"))]
             let skip_eoi = false;
 
@@ -397,9 +397,40 @@ pub fn depth_one_not_folded() -> u64 {
 
 /// 処理の表の大きさ（源の数。`ADR-0072` の 5。2026-09-28。境界の段階の手順 2 の 9d-4）。
 ///
-/// 源の番号は、今は ISA の IRQ の番号（2 台の 8259 の 16 本）である。I/O APIC へ移した IRQ も、同じ番号で
-/// 受け取る（[`crate::machine::pc::claim`]）。番号の型を分けるのは `ADR-0072` の 3（9e）。
+/// 源の番号は `machine` が採番する（[`InterruptSource`]）。今の採番は ISA の IRQ の番号（2 台の 8259 の 16 本）で、
+/// I/O APIC へ移した IRQ も同じ番号で受け取る（[`crate::machine::pc::claim`]）。
 const INTERRUPT_SOURCES: usize = 16;
+
+/// 外からの割り込みの源の番号（カーネルの登録番号。`ADR-0072` の 3。2026-09-29。境界の段階の手順 2 の 9e）。
+///
+/// # 契約（境界の型。2026-09-29）
+///
+/// - **`machine` が装置の割り込みを解決して返す**（ISA の IRQ は [`crate::machine::pc::source_for_isa_irq`]、PCI の
+///   INTx は [`crate::machine::pc::source_for_pci_intx`]）。受け取った割り込みも、源の番号で届く
+///   （[`crate::machine::pc::Claim`]）。
+/// - **共通の側は、番号を作らず、読まない**——処理の表の添字に使うのと、起動ログの行に番号を出す（`Display`）
+///   だけである。ISA の IRQ 番号・GSI・PCI の割り込み線・ベクタとは別の型で、取り違えを型で防ぐ。
+/// - 例外・IPI・タイマは源の番号を持たない（別の入口か、受け取りの種類である）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct InterruptSource(u8);
+
+impl InterruptSource {
+    /// `machine` が源を解決したときに作る（共通の側は作らない。処理の表は、自分の添字から一覧を作るときだけ作る）。
+    pub(crate) const fn assigned_by_machine(index: u8) -> Self {
+        Self(index)
+    }
+
+    /// 処理の表の添字（この表と、源を ISA の IRQ に直す `machine` だけが使う）。
+    pub(crate) const fn table_index(self) -> u8 {
+        self.0
+    }
+}
+
+impl core::fmt::Display for InterruptSource {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// 外からの割り込みの処理の表（`ADR-0072` の 5。2026-09-28。9d-4）。添字は源の番号である。
 ///
@@ -433,13 +464,17 @@ impl HandlerTable {
     }
 
     /// 源に処理を登録する。閉じた後・表の外・2 つ目は断る。
-    fn register(&self, source: u8, handler: fn(u8)) -> Result<(), Refusal> {
+    fn register(
+        &self,
+        source: InterruptSource,
+        handler: fn(InterruptSource),
+    ) -> Result<(), Refusal> {
         if self.closed.load(Ordering::Acquire) {
             return Err(Refusal::AfterBoot);
         }
         let slot = self
             .handlers
-            .get(usize::from(source))
+            .get(usize::from(source.table_index()))
             .ok_or(Refusal::OutsideTable)?;
         slot.compare_exchange(0, handler as usize, Ordering::Release, Ordering::Relaxed)
             .map(|_| ())
@@ -454,11 +489,12 @@ impl HandlerTable {
 
     /// 処理のある源の一覧（小さい順）。登録は閉じない。
     fn sources(&self) -> RegisteredSources {
-        let mut sources = [0; INTERRUPT_SOURCES];
+        let mut sources = [InterruptSource::assigned_by_machine(0); INTERRUPT_SOURCES];
         let mut count = 0;
-        for (source, slot) in (0..).zip(&self.handlers) {
+        for (index, slot) in (0..).zip(&self.handlers) {
             if slot.load(Ordering::Acquire) != 0 {
-                sources[count] = source;
+                // 表の添字が源の番号である（`machine` の採番をそのまま添字にしている）。
+                sources[count] = InterruptSource::assigned_by_machine(index);
                 count += 1;
             }
         }
@@ -466,33 +502,33 @@ impl HandlerTable {
     }
 
     /// 源に登録した処理（無ければ `None`）。
-    fn handler(&self, source: u8) -> Option<fn(u8)> {
+    fn handler(&self, source: InterruptSource) -> Option<fn(InterruptSource)> {
         let address = self
             .handlers
-            .get(usize::from(source))?
+            .get(usize::from(source.table_index()))?
             .load(Ordering::Acquire);
         if address == 0 {
             return None;
         }
-        // SAFETY: 0 でない値を書くのは `register` だけで、書くのは `fn(u8)` を `usize` へ変えた値である。関数の
-        // ポインタは `usize` と同じ大きさで、0 にならない。書く側と読む側の順序: 書くのは起動の間の登録だけで、
+        // SAFETY: 0 でない値を書くのは `register` だけで、書くのは `fn(InterruptSource)` を `usize` へ変えた値である。
+        // 関数のポインタは `usize` と同じ大きさで、0 にならない。書く側と読む側の順序: 書くのは起動の間の登録だけで、
         // その源を許可する前に書く（Release）。読むのは、その源を許可した後に届いた割り込みの中である（Acquire。
         // 起動の途中に届いた割り込みでも読む）。起動の後は誰も書かない。読み書きは原子的なので、読めるのは 0 か、
         // 書き終えた値だけである。
-        Some(unsafe { core::mem::transmute::<usize, fn(u8)>(address) })
+        Some(unsafe { core::mem::transmute::<usize, fn(InterruptSource)>(address) })
     }
 }
 
 /// 処理のある源の一覧（小さい順）。起動ログの行に出し、割り込みを許してよい源の期待に使う（9d-5）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegisteredSources {
-    sources: [u8; INTERRUPT_SOURCES],
+    sources: [InterruptSource; INTERRUPT_SOURCES],
     count: usize,
 }
 
 impl RegisteredSources {
     /// 処理のある源（小さい順）。
-    pub fn as_slice(&self) -> &[u8] {
+    pub fn as_slice(&self) -> &[InterruptSource] {
         &self.sources[..self.count]
     }
 }
@@ -521,10 +557,10 @@ static INTERRUPT_HANDLERS: HandlerTable = HandlerTable::new();
 ///   今の呼び手（キーボードと virtio-blk の用意）は、ほかの CPU が走り出す前で、割り込みを止めた所にいる。
 /// - 起動の後（[`close_interrupt_handler_registration`] の後）に呼ぶと、名前つきで止まる。書く側の守り（ページ
 ///   テーブルの `ensure_child`）と同じ形である。表の外の番号と、同じ源への 2 つ目の登録も、名前つきで止まる。
-/// - 登録した処理は、その源の割り込みが届くたびに、BKL の中で、完了させる前に呼ばれる。引数は到着の番号
-///   （[`on_external_interrupt`] の `arrival`）である。レベルで鳴る源の処理は、源を下ろしてから戻ること
+/// - 登録した処理は、その源の割り込みが届くたびに、BKL の中で、完了させる前に呼ばれる。引数は源の番号である
+///   （9e。それまでは到着の番号（x86 ではベクタ）だった）。レベルで鳴る源の処理は、源を下ろしてから戻ること
 ///   （`ADR-0072` の 4）。
-pub fn register_interrupt_handler(source: u8, handler: fn(u8)) {
+pub fn register_interrupt_handler(source: InterruptSource, handler: fn(InterruptSource)) {
     match INTERRUPT_HANDLERS.register(source, handler) {
         Ok(()) => {}
         Err(Refusal::AfterBoot) => panic!(
@@ -558,10 +594,10 @@ static ARRIVALS_WITHOUT_HANDLER_REPORTED: AtomicBool = AtomicBool::new(false);
 /// 処理の無い源が届いたことを数え、最初の源を控える（割り込みの中から呼ぶ。出力しない。ADR-0018 §5）。
 ///
 /// 源を控えてから数を増やす（Release）ので、数が 0 でないのを見た読み手（Acquire）には源が見える。
-fn note_arrival_without_handler(source: u8) {
+fn note_arrival_without_handler(source: InterruptSource) {
     let _ = FIRST_SOURCE_WITHOUT_HANDLER.compare_exchange(
         NO_SOURCE_YET,
-        u16::from(source),
+        u16::from(source.table_index()),
         Ordering::Relaxed,
         Ordering::Relaxed,
     );
@@ -797,7 +833,7 @@ pub unsafe fn run_timer_loop(
         // 一群）では配線されておらず、待っても届かない——あの構成の主張は
         // 「ACPI が読めなくても起動は続く」なので、ここで止めてはならない。
         // 閉じたままであることは `start_timer` が判定行に出している。
-        if crate::virtio::armed_irq().is_some() {
+        if crate::virtio::armed_source().is_some() {
             if let Some(virtio) = virtio {
                 // SAFETY: 配線と武装は `start_timer` が `sti` より前に済ませ、
                 // いま IF=1 である。リングとポートウィンドウはこの struct だけが触り、
@@ -1283,9 +1319,10 @@ pub unsafe fn run_timer_loop(
                         // `spurious=… lapic_spurious=…`（8259 と Local APIC を分けて数えた観測値。表示は
                         // machine/pc が持つ。2026-09-28 に `idt` から移した）。
                         crate::machine::pc::spurious_counts(),
-                        // 会計。irq1 は IDT 側のベクタ別カウンタ。
+                        // 会計。irq1 は IDT 側のベクタ別カウンタで、今の配送先のベクタの数である（数えるのは
+                        // `arch` の入口。どのベクタかは `machine` が引く。9e）。
                         // keys + stray がこれと一致しなければ経路の取り違えがある。
-                        idt::interrupt_count(crate::keyboard::delivery_vector()),
+                        crate::machine::pc::delivered_count(crate::keyboard::interrupt_source()),
                         crate::keyboard::accounting_balances(),
                         max_tick_jump(),
                         // 止まった理由の切り分け材料。キーが来なくなったとき、
@@ -1643,73 +1680,87 @@ impl TypedLine {
 mod tests {
     use super::*;
 
+    /// 試験の中で源の番号を作る（本物は `machine` が作る）。
+    fn source(index: u8) -> InterruptSource {
+        InterruptSource::assigned_by_machine(index)
+    }
+
     #[test]
     fn a_registered_handler_is_found_by_its_source() {
         static ARRIVED: AtomicU64 = AtomicU64::new(0);
-        fn record(arrival: u8) {
-            ARRIVED.store(u64::from(arrival), Ordering::Relaxed);
+        fn record(source: InterruptSource) {
+            ARRIVED.store(u64::from(source.table_index()) + 100, Ordering::Relaxed);
         }
         let table = HandlerTable::new();
-        assert_eq!(table.register(1, record), Ok(()));
-        assert!(table.handler(2).is_none());
+        assert_eq!(table.register(source(1), record), Ok(()));
+        assert!(table.handler(source(2)).is_none());
         let handler = table
-            .handler(1)
+            .handler(source(1))
             .expect("the handler registered for source 1");
-        handler(0x21);
-        assert_eq!(ARRIVED.load(Ordering::Relaxed), 0x21);
+        handler(source(1));
+        assert_eq!(ARRIVED.load(Ordering::Relaxed), 101);
     }
 
     #[test]
     fn registration_is_refused_after_the_table_is_closed() {
-        fn ignore(_arrival: u8) {}
+        fn ignore(_source: InterruptSource) {}
         let table = HandlerTable::new();
-        assert_eq!(table.register(1, ignore), Ok(()));
+        assert_eq!(table.register(source(1), ignore), Ok(()));
         let _ = table.close();
-        assert_eq!(table.register(11, ignore), Err(Refusal::AfterBoot));
-        assert!(table.handler(1).is_some());
-        assert!(table.handler(11).is_none());
+        assert_eq!(table.register(source(11), ignore), Err(Refusal::AfterBoot));
+        assert!(table.handler(source(1)).is_some());
+        assert!(table.handler(source(11)).is_none());
     }
 
     #[test]
     fn a_second_handler_for_the_same_source_is_refused() {
         static FIRST_CALLED: AtomicBool = AtomicBool::new(false);
-        fn first(_arrival: u8) {
+        fn first(_source: InterruptSource) {
             FIRST_CALLED.store(true, Ordering::Relaxed);
         }
-        fn second(_arrival: u8) {}
+        fn second(_source: InterruptSource) {}
         let table = HandlerTable::new();
-        assert_eq!(table.register(11, first), Ok(()));
-        assert_eq!(table.register(11, second), Err(Refusal::AlreadyRegistered));
-        table.handler(11).expect("the first handler stays")(0);
+        assert_eq!(table.register(source(11), first), Ok(()));
+        assert_eq!(
+            table.register(source(11), second),
+            Err(Refusal::AlreadyRegistered)
+        );
+        table.handler(source(11)).expect("the first handler stays")(source(11));
         assert!(FIRST_CALLED.load(Ordering::Relaxed));
     }
 
     #[test]
     fn a_source_outside_the_table_is_refused() {
-        fn ignore(_arrival: u8) {}
+        fn ignore(_source: InterruptSource) {}
         let table = HandlerTable::new();
-        assert_eq!(table.register(16, ignore), Err(Refusal::OutsideTable));
-        assert!(table.handler(16).is_none());
+        assert_eq!(
+            table.register(source(16), ignore),
+            Err(Refusal::OutsideTable)
+        );
+        assert!(table.handler(source(16)).is_none());
     }
 
     #[test]
     fn closing_lists_the_sources_with_a_handler() {
-        fn ignore(_arrival: u8) {}
+        fn ignore(_source: InterruptSource) {}
         assert_eq!(format!("{}", HandlerTable::new().close()), "none");
         let table = HandlerTable::new();
-        assert_eq!(table.register(11, ignore), Ok(()));
-        assert_eq!(table.register(1, ignore), Ok(()));
+        assert_eq!(table.register(source(11), ignore), Ok(()));
+        assert_eq!(table.register(source(1), ignore), Ok(()));
         assert_eq!(format!("{}", table.close()), "1, 11");
     }
 
     #[test]
     fn the_sources_can_be_listed_without_closing() {
-        fn ignore(_arrival: u8) {}
+        fn ignore(_source: InterruptSource) {}
         let table = HandlerTable::new();
-        assert_eq!(table.register(11, ignore), Ok(()));
-        assert_eq!(table.register(1, ignore), Ok(()));
-        assert_eq!(table.sources().as_slice(), &[1, 11]);
-        assert_eq!(table.register(5, ignore), Ok(()));
-        assert_eq!(table.close().as_slice(), &[1, 5, 11]);
+        assert_eq!(table.register(source(11), ignore), Ok(()));
+        assert_eq!(table.register(source(1), ignore), Ok(()));
+        assert_eq!(table.sources().as_slice(), &[source(1), source(11)]);
+        assert_eq!(table.register(source(5), ignore), Ok(()));
+        assert_eq!(
+            table.close().as_slice(),
+            &[source(1), source(5), source(11)]
+        );
     }
 }

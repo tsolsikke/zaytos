@@ -1997,11 +1997,13 @@ extern "sysv64" fn kernel_main() -> ! {
     // 誰も処理を登録しない番号である（2 つ目の登録として断られる形と混ざらない）。
     #[cfg(feature = "interrupt-handler-register-after-boot-test")]
     {
-        const UNUSED_SOURCE: u8 = 5;
+        // 源の番号は `machine` が解決する（9e）。
+        let unused_source =
+            kernel::machine::pc::source_for_isa_irq(kernel::machine::pc::IsaIrq::new(5));
         logger.info(format_args!(
-            "sabotage: registering an interrupt handler for source {UNUSED_SOURCE} after boot"
+            "sabotage: registering an interrupt handler for source {unused_source} after boot"
         ));
-        kernel::interrupts::register_interrupt_handler(UNUSED_SOURCE, |_arrival| {});
+        kernel::interrupts::register_interrupt_handler(unused_source, |_source| {});
         logger.error(format_args!(
             "sabotage: the registration went through; the handler table was not closed"
         ));
@@ -4946,11 +4948,11 @@ fn start_timer(
     // SAFETY: ベクタ 0x20 には IRQ スタイルのスタブが入っており（起動時に
     // check_irq_stub_table で検証済み）、ハンドラは EOI を発行する。
     unsafe {
-        irq::unmask(0);
+        irq::unmask(irq::GLOBAL_TIMER_IRQ);
     }
 
     // --- 4. 解禁の結果を読み戻す ---
-    let after_unmask = irq::check_masks(&[0]);
+    let after_unmask = irq::check_masks(&[irq::GLOBAL_TIMER_IRQ]);
     logger.info(format_args!("pic: IMR after unmasking IRQ0 {after_unmask}"));
     if !after_unmask.matches() {
         logger.error(format_args!(
@@ -4980,10 +4982,12 @@ fn start_timer(
 
     // --- 5. sti 前 7 項目を再検証する ---
     // 開いていてよい源は、タイマと、処理を登録した源である（9d-5。今はキーボードと virtio-blk）。
+    // 源を ISA の IRQ へ直すのは `machine` である（9e。割り込みの入口の側を共通の側の型に依らせない）。
     let registered = kernel::interrupts::registered_interrupt_sources();
+    let irqs_with_handler = irq::isa_irqs_for_sources(registered.as_slice());
     let report = kernel::arch::x86_64::interrupt_readiness::verify_ready_for_sti_with_timer(
         logger,
-        registered.as_slice(),
+        irqs_with_handler.as_slice(),
     );
     if !report.may_enable_interrupts() {
         logger.error(format_args!(
@@ -5164,7 +5168,7 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>, i8042: kernel::acpi::I8042Pre
     }
 
     // --- 5. IMR を読み戻す ---
-    let after_unmask = irq::check_masks(&[0, keyboard::KEYBOARD_IRQ]);
+    let after_unmask = irq::check_masks(&[irq::GLOBAL_TIMER_IRQ, keyboard::KEYBOARD_IRQ]);
     logger.info(format_args!("pic: IMR after unmasking IRQ1 {after_unmask}"));
     if !after_unmask.matches() {
         logger.error(format_args!(
@@ -5176,7 +5180,7 @@ fn setup_keyboard(logger: &mut Logger<SerialPort>, i8042: kernel::acpi::I8042Pre
     logger.info(format_args!(
         "keyboard: IRQ1 is unmasked on the 8259; the delivery vector is {:#04x} for now \
          (S2-d-1c re-routes it through the I/O APIC before sti, which changes the vector)",
-        keyboard::delivery_vector()
+        irq::delivery_vector(keyboard::KEYBOARD_IRQ)
     ));
     true
 }
@@ -5215,11 +5219,18 @@ fn switch_virtio_to_io_apic(
         return;
     };
 
-    let irq = virtio.irq_line();
     // 武装は、割り込みの処理の登録も兼ねる（`ADR-0072` の 5。配線して許可するより前である）。
     // SAFETY: BSP のみ・IF=0 の位置（`sti` はこの後段）。ISR の読み捨ては
     // 武装の契約どおり。
-    unsafe { kernel::virtio::arm_interrupt(virtio, irq) };
+    unsafe { kernel::virtio::arm_interrupt(virtio) };
+    // PCI の INTx を、配線する ISA の IRQ に直す（`machine` の中の解決。`irq::PciIntx` の doc。9e）。16 以上の
+    // 割り込み線は、上の武装（処理の登録）が名前つきで止めるので、ここへは来ない。
+    let Some(irq) = irq::isa_irq_for_pci_intx(virtio.interrupt()) else {
+        logger.error(format_args!(
+            "ioapic: the virtio interrupt line is not an ISA IRQ, so it cannot be routed; halting"
+        ));
+        cpu::halt_forever();
+    };
 
     // 申告は PCI の規定（レベル・アクティブロー）。**ただし firmware の宣言が
     // 勝つ**——実測で QEMU の MADT は IRQ 11 に override を持ち、level・
@@ -5358,7 +5369,7 @@ fn switch_keyboard_to_io_apic(
     logger.info(format_args!(
         "ioapic: IRQ1 now goes through the I/O APIC as vector {:#04x}; the 8259 line is \
          masked (the first key must arrive as that vector, which the 8259 cannot produce)",
-        keyboard::delivery_vector()
+        irq::delivery_vector(keyboard::KEYBOARD_IRQ)
     ));
 }
 

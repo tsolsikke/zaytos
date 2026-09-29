@@ -567,7 +567,9 @@ kernel::machine::pc::irq::pit::tests::the_actual_frequency_differs_from_the_requ
 kernel::machine::pc::irq::pit::tests::the_divisor_for_the_target_frequency_is_known
 kernel::machine::pc::irq::tests::local_apic_vectors_are_claimed_before_the_irq_table
 kernel::machine::pc::irq::tests::other_vectors_are_looked_up_in_the_irq_table
+kernel::machine::pc::irq::tests::sources_isa_irqs_and_pci_intx_convert_only_through_the_machine
 kernel::machine::pc::irq::tests::the_expected_masks_open_only_the_requested_irqs
+kernel::machine::pc::irq::tests::the_first_arrival_prints_the_words_the_keyboard_line_used
 kernel::machine::pc::irq::tests::the_global_timer_is_claimed_only_while_it_is_the_current_timer
 kernel::machine::pc::irq::tests::the_mask_check_compares_values_rather_than_formatting
 kernel::machine::pc::irq::tests::the_slave_range_is_derived_from_its_own_offset

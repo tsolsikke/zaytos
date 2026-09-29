@@ -1218,9 +1218,11 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     // 外からの割り込みは、共通の側の 1 つの入口関数へ渡す（`ADR-0072` の 1）。受け取りから完了まで、BKL、
     // ティック、装置の処理、切り替え、遠征を畳むかどうかはそちらが持ち、出口の動きを返す。ここはそれを行う
     // （9d-3）。ベクタは IDT の添字なので 8 ビットに収まる（収まらない値は来ないが、来たら何もせずに戻る）。
-    let Ok(arrival) = u8::try_from(vector) else {
+    // **ベクタは到着（`machine` の型）に包んで渡す**——共通の側は中を読まない（`ADR-0072` の 3。9e）。
+    let Ok(vector) = u8::try_from(vector) else {
         return interrupted.stack_pointer();
     };
+    let arrival = crate::machine::pc::Arrival::from_vector(vector);
     match crate::interrupts::on_external_interrupt(arrival, &interrupted) {
         ExitAction::Resume(stack_pointer) => stack_pointer,
         // SAFETY: 共通の側の入口関数は、Local APIC のタイマを完了させた後にだけ畳むと決め、戻るときに BKL の
@@ -1297,15 +1299,16 @@ pub enum ExitAction {
 /// （8259 の採番表が与える値である、というのは移行前から真である）。
 ///
 /// 現在の配送先を知りたい場合は [`timer_delivery_vector`] を使うこと。
-/// キーボードについて [`crate::keyboard::PIC_KEYBOARD_VECTOR`] と
-/// [`crate::keyboard::delivery_vector`] を分けたのと同じ形である。
+/// キーボードについて、8259 の採番（`crate::machine::pc::irq::vector_for`）と今の配送先
+/// （`crate::machine::pc::irq::delivery_vector`）を分けたのと同じ形である。
 ///
 /// `match` で剥がしているのは、失敗時のメッセージが読めるためである
 /// （`unwrap()` も固定ツールチェインで const 評価できることは確認済み）。
-pub const PIC_TIMER_VECTOR: usize = match crate::machine::pc::irq::vector_for(0) {
-    Some(vector) => vector as usize,
-    None => panic!("the timer IRQ has no vector"),
-};
+pub const PIC_TIMER_VECTOR: usize =
+    match crate::machine::pc::irq::vector_for(crate::machine::pc::irq::GLOBAL_TIMER_IRQ) {
+        Some(vector) => vector as usize,
+        None => panic!("the timer IRQ has no vector"),
+    };
 
 /// タイマ割り込みが現在届くベクタ。
 ///

@@ -126,11 +126,12 @@ pub fn verify_ready_for_sti(logger: &mut Logger<SerialPort>) -> ReadinessReport 
 /// 実際にティックが増え続けたときなので、この時点では
 /// 「実装済み・これから検証」として扱う。
 ///
-/// `sources_with_handler` は、共通の側が処理を登録した源（`interrupts::registered_interrupt_sources`）である
-/// （9d-5。2026-09-28。それまでは、ここでキーボードの IRQ1 を名指ししていた）。
+/// `irqs_with_handler` は、共通の側が処理を登録した源（`interrupts::registered_interrupt_sources`）の ISA の IRQ
+/// である（9d-5。2026-09-28。それまでは、ここでキーボードの IRQ1 を名指ししていた）。**源から ISA の IRQ へ直すのは
+/// 起動の順（`main.rs`）が `machine` に頼む**（2026-09-29。9e）——割り込みの入口の側を共通の側の型に依らせない。
 pub fn verify_ready_for_sti_with_timer(
     logger: &mut Logger<SerialPort>,
-    sources_with_handler: &[u8],
+    irqs_with_handler: &[irq::IsaIrq],
 ) -> ReadinessReport {
     // IRQ0（タイマ）と、処理を登録した源を解禁した状態。ハンドラを書いた
     // ベクタだけが開いていることを、実際の IMR と突き合わせる。
@@ -141,11 +142,11 @@ pub fn verify_ready_for_sti_with_timer(
     // 移行状態を見て期待を作るので、移行の前後どちらでも成立する。
     //
     // 入りきらない源は期待に入れない。その源が開いていれば食い違いになり、`sti` を拒む側へ倒れる。
-    let mut open = [0; MAX_OPEN_AT_THE_PIC];
+    let mut open = [irq::GLOBAL_TIMER_IRQ; MAX_OPEN_AT_THE_PIC];
     let mut count = 1; // 先頭は IRQ0（タイマ）。
-    for &source in sources_with_handler {
-        if !irq::routed_to_apic(source) && count < open.len() {
-            open[count] = source;
+    for &line in irqs_with_handler {
+        if !irq::routed_to_apic(line) && count < open.len() {
+            open[count] = line;
             count += 1;
         }
     }
@@ -157,7 +158,7 @@ const MAX_OPEN_AT_THE_PIC: usize = 17;
 
 fn verify_ready(
     logger: &mut Logger<SerialPort>,
-    unmasked: &[u8],
+    unmasked: &[irq::IsaIrq],
     timer_enabled: bool,
 ) -> ReadinessReport {
     // --- 1. GDT と CS/DS/SS ---

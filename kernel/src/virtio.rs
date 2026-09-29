@@ -253,9 +253,9 @@ pub unsafe fn setup(
 }
 
 impl VirtioBlk {
-    /// 構成空間の Interrupt Line（S13-d）。
-    pub fn irq_line(&self) -> u8 {
-        self.irq_line
+    /// この装置の割り込み（PCI の INTx。構成空間の Interrupt Line から作る。S13-d。型にしたのは 2026-09-29 の 9e）。
+    pub fn interrupt(&self) -> crate::machine::pc::PciIntx {
+        crate::machine::pc::PciIntx::from_interrupt_line(self.irq_line)
     }
 
     /// 要求の器（末尾ページ）の仮想アドレス。
@@ -470,8 +470,9 @@ impl VirtioBlk {
 /// **割り込みの処理（[`handle_irq`]。処理の表から呼ばれる）から届く必要があるので static である。**
 /// 0 は「まだ武装していない」を表す（I/O ポート 0 は PCI の BAR に現れない）。
 static ARMED_ISR_PORT: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
-/// 武装した IRQ 番号（+1 で保持。0 = 未武装）。
-static ARMED_IRQ_PLUS_ONE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+/// 武装した装置の構成空間の Interrupt Line（+1 で保持。0 = 未武装）。源の番号は、ここから `machine` が解決する
+/// （[`armed_source`]）。
+static ARMED_LINE_PLUS_ONE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 /// 自分宛（ISR の bit0 が立っていた）の届いた数。
 static IRQ_DELIVERED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
@@ -700,30 +701,35 @@ const REG_ISR: u16 = 0x13;
 /// 捨てる**——S13-b/c の要求は完了のたびに ISR を立てており、読まれずに
 /// 溜まっている。読まずに線を開くと、開いた瞬間に過去のぶんが 1 回届き、
 /// 「届いた数」の判定が実演と混ざる。
-pub unsafe fn arm_interrupt(blk: &VirtioBlk, irq_line: u8) {
+pub unsafe fn arm_interrupt(blk: &VirtioBlk) {
     // SAFETY: この関数の契約。ISR の読みは deassert の副作用を意図している。
     let _stale = unsafe { port::inb(blk.io_base + REG_ISR) };
     ARMED_ISR_PORT.store(blk.io_base + REG_ISR, core::sync::atomic::Ordering::Relaxed);
-    ARMED_IRQ_PLUS_ONE.store(irq_line + 1, core::sync::atomic::Ordering::Relaxed);
-    // IRQ 番号は固定しない——`scan_bus0` が構成空間から読んだ値で登録する。
-    crate::interrupts::register_interrupt_handler(irq_line, handle_irq);
+    ARMED_LINE_PLUS_ONE.store(blk.irq_line + 1, core::sync::atomic::Ordering::Relaxed);
+    // 源の番号は固定しない——`scan_bus0` が構成空間から読んだ値の INTx を、`machine` が解決する（`ADR-0072` の 7）。
+    crate::interrupts::register_interrupt_handler(
+        crate::machine::pc::source_for_pci_intx(blk.interrupt()),
+        handle_irq,
+    );
 }
 
-/// 武装済みの IRQ 番号（未武装なら `None`）。実演の判断（`crate::interrupts::run_timer_loop`）と、破壊テスト
-/// `virtio-skip-eoi-test`（共通の側の入口関数）が使う。
-pub fn armed_irq() -> Option<u8> {
-    match ARMED_IRQ_PLUS_ONE.load(core::sync::atomic::Ordering::Relaxed) {
+/// 武装済みの装置の割り込みの源（未武装なら `None`）。実演の判断（`crate::interrupts::run_timer_loop`）と、破壊
+/// テスト `virtio-skip-eoi-test`（共通の側の入口関数）が使う。
+pub fn armed_source() -> Option<crate::interrupts::InterruptSource> {
+    match ARMED_LINE_PLUS_ONE.load(core::sync::atomic::Ordering::Relaxed) {
         0 => None,
-        plus_one => Some(plus_one - 1),
+        plus_one => Some(crate::machine::pc::source_for_pci_intx(
+            crate::machine::pc::PciIntx::from_interrupt_line(plus_one - 1),
+        )),
     }
 }
 
 /// IRQ ハンドラ本体（S13-d）。**ISR を読んで deassert し、数える。** 割り込みの処理の表から呼ばれる
-/// （[`arm_interrupt`] が登録する。`ADR-0072` の 5）。到着の番号は使わない。
+/// （[`arm_interrupt`] が登録する。`ADR-0072` の 5）。源の番号は使わない。
 ///
 /// ログは出さない（ADR-0018 §5。ハンドラ内の出力はティックを取りこぼす）。
 /// 観測はメインループ側が [`exercise_interrupt_read`] でカウンタ越しに行う。
-fn handle_irq(_arrival: u8) {
+fn handle_irq(_source: crate::interrupts::InterruptSource) {
     let isr_port = ARMED_ISR_PORT.load(core::sync::atomic::Ordering::Relaxed);
     if isr_port == 0 {
         return;

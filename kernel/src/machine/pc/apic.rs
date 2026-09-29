@@ -854,7 +854,9 @@ pub fn survey_registers(logger: &mut Logger<SerialPort>, mapped: &MappedApic) {
     // **IRQ1 の GSI を、デコードされた I/O APIC の項目が覆うこと**（HW-e-2。`ADR-0068`）——
     // **覆わなければ、キーボードの転送を書いても届かない。** **止めて名前を出す。**
     // **I/O APIC が 1 台も無い機械は、ここでは止めない**（前からの振る舞い。IRQ を移す側が扱う）。
-    let irq1_gsi = mapped.mmio.gsi_for_irq(crate::keyboard::KEYBOARD_IRQ);
+    let irq1_gsi = mapped
+        .mmio
+        .gsi_for_irq(crate::keyboard::KEYBOARD_IRQ.number());
     let mut irq1_covered = false;
     for slot in mapped.io_apics.iter().take(mapped.io_apic_count) {
         let Some(io_apic) = slot else { continue };

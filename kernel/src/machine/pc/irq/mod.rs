@@ -68,6 +68,13 @@
 //! | [`complete`] | 委譲する関数を束ねる | 完了の中身（EOI とスプリアスの見分け）は [`end_of_interrupt`] と [`is_spurious`] が実装へ委譲する（同上） |
 //! | [`spurious_counts`] | モジュール関数 | 観測値である。数えるのは [`claim`] と [`complete`] の中である（同上） |
 //! | [`disable_and_complete`] | 委譲する関数を束ねる | 処理の無い源の禁止（I/O APIC へ移した IRQ は redirection entry、8259 の IRQ は IMR）と、[`complete`] と同じ完了を束ねる（`ADR-0072` の 4。9d-4b） |
+//! | [`source_for_isa_irq`] | モジュール関数 | 源の番号の解決（`ADR-0072` の 3。2026-09-29。9e）。今の採番は 8259 の入力の番号と同じで、実装ごとに変わらない |
+//! | [`source_for_pci_intx`] | モジュール関数 | 同上 |
+//! | [`isa_irq_for_pci_intx`] | モジュール関数 | 番号の種類の変換（同上）。今の QEMU の配線に乗った解決である（[`PciIntx`] の doc） |
+//! | [`isa_irqs_for_sources`] | モジュール関数 | 同上。`sti` の前の確かめへ渡す起動の順が使う |
+//! | [`first_arrival`] | モジュール関数 | 観測値である。記録するのは [`complete`] の中である（同上） |
+//! | [`delivery_vector`] | モジュール関数 | 今の配送先を、移行の表と 8259 の採番から引く。実装ごとに変わらない（同上） |
+//! | [`delivered_count`] | モジュール関数 | 観測値である。数えるのは `arch` の入口のベクタごとの数えである（同上） |
 //!
 //! # `TimerSource` は実装が 1 つしかない。これは原則の例外である
 //!
@@ -118,6 +125,8 @@ mod pit;
 use core::fmt;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 
+use crate::interrupts::InterruptSource;
+
 /// レガシー IRQ の本数（2 台の 8259 で 16 本）。移行状態の器の大きさを決める。
 const MAX_LEGACY_IRQS: usize = 16;
 
@@ -158,6 +167,200 @@ static ROUTED_VECTOR: [AtomicU8; MAX_LEGACY_IRQS] =
 /// 割り込みの配送先として現れることはない。
 const NO_ROUTED_VECTOR: u8 = 0;
 
+/// ISA の IRQ 番号（2 台の 8259 の入力の番号。0〜15。`ADR-0072` の 3。2026-09-29。境界の段階の手順 2 の 9e）。
+///
+/// **装置と足の番号は、種類ごとに型を分ける**——ISA の IRQ 番号、GSI（I/O APIC の入力。`irq/apic.rs` の `Gsi`）、
+/// PCI の INTx（[`PciIntx`]）である。互いの変換は `machine` の中だけで行う。**番号を読めるのは `machine` の中だけ**
+/// で、外へは表示（`Display`）しか出さない。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct IsaIrq(u8);
+
+impl IsaIrq {
+    /// 番号から作る。16 以上は作れない（`const` の文脈でも止まる）。
+    pub const fn new(number: u8) -> Self {
+        assert!(
+            (number as usize) < MAX_LEGACY_IRQS,
+            "an ISA IRQ number is below 16"
+        );
+        Self(number)
+    }
+
+    /// 番号（`machine` の中だけで使う）。
+    pub(in crate::machine) const fn number(self) -> u8 {
+        self.0
+    }
+}
+
+impl fmt::Display for IsaIrq {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// この系に 1 つのタイマ（8259 経由の PIT）の ISA の IRQ。
+pub const GLOBAL_TIMER_IRQ: IsaIrq = IsaIrq::new(0);
+
+/// PCI の装置の INTx（構成空間の割り込み線の値。`ADR-0072` の 3。9e）。
+///
+/// **割り込み線の値を GSI として受け取る関数は作らない**（`ADR-0072` の 3）。値は、ファームウェアが 8259 の入力として
+/// 割り当てた ISA の IRQ の番号で、[`isa_irq_for_pci_intx`] が ISA の IRQ に直す（GSI と鳴り方は、ISA の IRQ として
+/// 上書きの表で引く）。**これは今の QEMU の配線に乗った解決である**——VirtualBox では INTA# が I/O APIC の 20〜23 番へ
+/// 行く。ACPI の表で正しく引くのは、持ち越しの行（「PCI の INTx を『割り込み線の値＝GSI』で配線している」）の条件が
+/// 来たときにする。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PciIntx {
+    line: u8,
+}
+
+impl PciIntx {
+    /// 構成空間の割り込み線（0x3C）の値から作る。
+    pub const fn from_interrupt_line(line: u8) -> Self {
+        Self { line }
+    }
+}
+
+/// 入口に届いた割り込みの到着（`ADR-0072` の 3。9e）。x86 では、入口のスタブが積んだベクタである。
+///
+/// **`arch` の入口が作り、共通の側の入口関数は中を読まずに [`claim`] へ渡す**——ベクタを共通の側に出さない。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Arrival(u8);
+
+impl Arrival {
+    /// 入口のスタブが積んだベクタから作る（`arch` の入口だけが呼ぶ）。
+    pub const fn from_vector(vector: u8) -> Self {
+        Self(vector)
+    }
+}
+
+/// ISA の IRQ の源の番号を解決する（`ADR-0072` の 1 の B と 3。9e）。**今の採番は 8259 の入力の番号と同じである**
+/// （起動ログの源の一覧の値を変えない）。
+pub fn source_for_isa_irq(irq: IsaIrq) -> InterruptSource {
+    InterruptSource::assigned_by_machine(irq.0)
+}
+
+/// PCI の装置の INTx の源の番号を解決する（9e）。採番は [`source_for_isa_irq`] と同じで、割り込み線の値が
+/// そのまま番号になる（[`PciIntx`] の doc の解決）。16 以上の値も番号にはなり、処理の表が名前つきで断る。
+pub fn source_for_pci_intx(intx: PciIntx) -> InterruptSource {
+    InterruptSource::assigned_by_machine(intx.line)
+}
+
+/// PCI の装置の INTx を、ファームウェアが割り当てた ISA の IRQ に直す（[`PciIntx`] の doc。今の QEMU の配線に乗った
+/// 解決）。16 以上の値（割り当ての無い 0xFF など）は `None`。
+pub fn isa_irq_for_pci_intx(intx: PciIntx) -> Option<IsaIrq> {
+    ((intx.line as usize) < MAX_LEGACY_IRQS).then_some(IsaIrq(intx.line))
+}
+
+/// 源の番号を、その源の ISA の IRQ に直す（`machine` の中の採番の逆）。表の外なら `None`。
+fn isa_irq_for_source(source: InterruptSource) -> Option<IsaIrq> {
+    let number = source.table_index();
+    ((number as usize) < MAX_LEGACY_IRQS).then_some(IsaIrq(number))
+}
+
+/// 源の一覧を、ISA の IRQ の一覧に直す（9e）。**`sti` の前の確かめへ渡すのは、起動の順（`main.rs`）が直した
+/// 一覧である**——割り込みの入口の側（`interrupt_readiness`）を、共通の側の型に依らせないため。
+pub fn isa_irqs_for_sources(sources: &[InterruptSource]) -> IsaIrqs {
+    let mut irqs = IsaIrqs {
+        irqs: [GLOBAL_TIMER_IRQ; MAX_LEGACY_IRQS],
+        count: 0,
+    };
+    for irq in sources
+        .iter()
+        .filter_map(|source| isa_irq_for_source(*source))
+    {
+        if irqs.count < MAX_LEGACY_IRQS {
+            irqs.irqs[irqs.count] = irq;
+            irqs.count += 1;
+        }
+    }
+    irqs
+}
+
+/// [`isa_irqs_for_sources`] の結果。
+pub struct IsaIrqs {
+    irqs: [IsaIrq; MAX_LEGACY_IRQS],
+    count: usize,
+}
+
+impl IsaIrqs {
+    /// ISA の IRQ の一覧（源の一覧の順）。
+    pub fn as_slice(&self) -> &[IsaIrq] {
+        &self.irqs[..self.count]
+    }
+}
+
+/// 源ごとの、処理のある最初の到着のベクタ（キーボードの配送経路の証明に使う。HW-e-2。`ADR-0068`）。まだなら
+/// [`NO_ROUTED_VECTOR`]（ベクタ 0 は到着にならない）。
+///
+/// **記録するのは [`complete`] の中である**——処理のある源だけを完了させるので、処理の無い源の到着は記録しない
+/// （9d-4b の破壊テスト `keyboard-handler-not-registered-test` は、最初の打鍵の行が出ないことを見ている）。
+/// 2026-09-29（9e）にキーボードの処理から移した。ベクタを共通の側に出さないためである。
+static FIRST_HANDLED_VECTOR: [AtomicU8; MAX_LEGACY_IRQS] =
+    [const { AtomicU8::new(NO_ROUTED_VECTOR) }; MAX_LEGACY_IRQS];
+
+/// 源に届いた最初の到着の観測（[`first_arrival`]）。**境界は生の値を出さない**（モジュールの説明）ので、判定と
+/// 表示だけを持つ。
+pub struct FirstArrival {
+    vector: u8,
+    expected: u8,
+}
+
+impl FirstArrival {
+    /// 今の配送先のベクタで届いたか。
+    pub fn came_on_the_delivery_vector(&self) -> bool {
+        self.vector == self.expected
+    }
+
+    /// 食い違ったときの表示（`vector Some(33), expected 0x42` の形。以前のキーボードの行と同じ文言）。
+    pub fn mismatch(&self) -> impl fmt::Display + '_ {
+        struct Mismatch<'a>(&'a FirstArrival);
+        impl fmt::Display for Mismatch<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(
+                    f,
+                    "vector {:?}, expected {:#04x}",
+                    Some(self.0.vector),
+                    self.0.expected
+                )
+            }
+        }
+        Mismatch(self)
+    }
+}
+
+impl fmt::Display for FirstArrival {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "vector {:#04x}", self.vector)
+    }
+}
+
+/// 源に届いた、処理のある最初の到着（9e）。まだ届いていなければ `None`。期待する配送先は、呼んだ時点の配送先
+/// （[`delivery_vector`]）である。
+pub fn first_arrival(source: InterruptSource) -> Option<FirstArrival> {
+    let irq = isa_irq_for_source(source)?;
+    match FIRST_HANDLED_VECTOR[usize::from(irq.0)].load(Ordering::Relaxed) {
+        NO_ROUTED_VECTOR => None,
+        vector => Some(FirstArrival {
+            vector,
+            expected: delivery_vector(irq),
+        }),
+    }
+}
+
+/// この IRQ が今届くベクタ（9e）。I/O APIC 経由へ移していればその配送先、移していなければ 8259 の採番である。
+pub fn delivery_vector(irq: IsaIrq) -> u8 {
+    routed_vector(irq)
+        .or(vector_for(irq))
+        .unwrap_or(NO_ROUTED_VECTOR)
+}
+
+/// 源が今の配送先のベクタで届いた回数（9e。心拍の行の会計に使う）。数えているのは `arch` の入口のベクタごとの
+/// 数えで、移した後は移した先のベクタの数である（以前の `keyboard::delivery_vector` と同じ）。
+pub fn delivered_count(source: InterruptSource) -> u64 {
+    isa_irq_for_source(source).map_or(0, |irq| {
+        crate::arch::x86_64::idt::interrupt_count(usize::from(delivery_vector(irq)))
+    })
+}
+
 /// タイマが Local APIC タイマへ移ったか（S2-d-2）。
 ///
 /// # なぜ [`ROUTED_TO_APIC`] に乗せないのか
@@ -188,19 +391,13 @@ pub unsafe fn end_of_interrupt_for_lapic_timer() {
 }
 
 /// この IRQ が I/O APIC 経由へ移っているか。
-pub fn routed_to_apic(irq: u8) -> bool {
-    if irq as usize >= MAX_LEGACY_IRQS {
-        return false;
-    }
-    ROUTED_TO_APIC.load(Ordering::Relaxed) & (1u32 << irq) != 0
+pub fn routed_to_apic(irq: IsaIrq) -> bool {
+    ROUTED_TO_APIC.load(Ordering::Relaxed) & (1u32 << irq.0) != 0
 }
 
 /// この IRQ の配送先ベクタ。移していなければ `None`。
-pub fn routed_vector(irq: u8) -> Option<u8> {
-    if irq as usize >= MAX_LEGACY_IRQS {
-        return None;
-    }
-    match ROUTED_VECTOR[irq as usize].load(Ordering::Relaxed) {
+pub fn routed_vector(irq: IsaIrq) -> Option<u8> {
+    match ROUTED_VECTOR[usize::from(irq.0)].load(Ordering::Relaxed) {
         NO_ROUTED_VECTOR => None,
         vector => Some(vector),
     }
@@ -221,10 +418,10 @@ pub fn routed_vector(irq: u8) -> Option<u8> {
 /// 引けなければ、キーボードのハンドラごと呼ばれない。
 ///
 /// 移行済みの表を先に見るのは、そちらが現在の事実だからである。
-pub fn irq_for_vector(vector: u8) -> Option<u8> {
-    for (irq, slot) in ROUTED_VECTOR.iter().enumerate() {
+pub fn irq_for_vector(vector: u8) -> Option<IsaIrq> {
+    for (irq, slot) in (0..).zip(ROUTED_VECTOR.iter()) {
         if slot.load(Ordering::Relaxed) == vector && vector != NO_ROUTED_VECTOR {
-            return u8::try_from(irq).ok();
+            return Some(IsaIrq(irq));
         }
     }
     irq_for(vector)
@@ -274,7 +471,7 @@ trait Controller {
     unsafe fn is_spurious(&self, irq: u8) -> bool;
 
     /// マスクの実状態を 1 回読み、`unmasked` だけが開いているかを判定する。
-    fn check_masks(&self, unmasked: &[u8]) -> MaskCheck;
+    fn check_masks(&self, unmasked: &[IsaIrq]) -> MaskCheck;
 
     /// この IRQ の配送先ベクタを設定する。マスクは触らない。
     ///
@@ -357,7 +554,7 @@ impl Controller for Legacy {
         // である。役割が違うので同じ名前へ寄せていない。
     }
 
-    fn check_masks(&self, unmasked: &[u8]) -> MaskCheck {
+    fn check_masks(&self, unmasked: &[IsaIrq]) -> MaskCheck {
         let (master, slave) = pic::read_masks();
         let (expected_master, expected_slave) = expected_masks(unmasked);
         MaskCheck {
@@ -493,13 +690,12 @@ impl fmt::Display for Programming {
 
 /// IRQ 番号に対応するベクタ番号。範囲外なら `None`。
 ///
-/// `const fn` を保つ。[`crate::arch::x86_64::idt::PIC_TIMER_VECTOR`] と
-/// [`crate::keyboard::PIC_KEYBOARD_VECTOR`] が `const` であり、実行時関数にすると
-/// 定義できなくなる。固定ツールチェイン（1.97.1）で `match` による剥がしが
+/// `const fn` を保つ。[`crate::arch::x86_64::idt::PIC_TIMER_VECTOR`] が `const` であり、実行時関数にすると
+/// 定義できなくなる（キーボードの 8259 でのベクタの `const` は、9e でキーボードから外した）。固定ツールチェイン（1.97.1）で `match` による剥がしが
 /// const 評価できることは確認済みである。`unwrap()` も通るが、不正な IRQ を
 /// 渡したときのメッセージが読める `match` を使う。
-pub const fn vector_for(irq: u8) -> Option<u8> {
-    pic::irq_vector(irq)
+pub const fn vector_for(irq: IsaIrq) -> Option<u8> {
+    pic::irq_vector(irq.0)
 }
 
 /// ベクタ番号に対応する IRQ 番号。このコントローラ由来でなければ `None`。
@@ -516,13 +712,15 @@ pub const fn vector_for(irq: u8) -> Option<u8> {
 ///
 /// 2 つのオフセットを別々に見るので、スレーブがマスタ + 8 でなくても正しい。
 /// 現行の 2 構成では結果が以前と一致する（どちらもスレーブ = マスタ + 8）。
-pub const fn irq_for(vector: u8) -> Option<u8> {
+pub const fn irq_for(vector: u8) -> Option<IsaIrq> {
     if vector >= pic::MASTER_VECTOR_OFFSET && vector < pic::MASTER_VECTOR_OFFSET + pic::IRQS_PER_PIC
     {
-        return Some(vector - pic::MASTER_VECTOR_OFFSET);
+        return Some(IsaIrq(vector - pic::MASTER_VECTOR_OFFSET));
     }
     if vector >= pic::SLAVE_VECTOR_OFFSET && vector < pic::SLAVE_VECTOR_OFFSET + pic::IRQS_PER_PIC {
-        return Some(pic::IRQS_PER_PIC + (vector - pic::SLAVE_VECTOR_OFFSET));
+        return Some(IsaIrq(
+            pic::IRQS_PER_PIC + (vector - pic::SLAVE_VECTOR_OFFSET),
+        ));
     }
     None
 }
@@ -542,7 +740,7 @@ pub const fn irq_for(vector: u8) -> Option<u8> {
 ///
 /// `unmasked` がスライスなのは、S2 の IO-APIC が 24 本以上を扱うためである。
 /// `u16` のビットマップにすると「16 本」をシグネチャに焼き込むことになる。
-pub fn check_masks(unmasked: &[u8]) -> MaskCheck {
+pub fn check_masks(unmasked: &[IsaIrq]) -> MaskCheck {
     ACTIVE.check_masks(unmasked)
 }
 
@@ -563,20 +761,21 @@ pub fn check_masks(unmasked: &[u8]) -> MaskCheck {
 /// 一切しない。S2-a が同じレジスタを読んでいるので、新しい危険は無い。
 ///
 /// I/O APIC が 1 台もマップできていなければ `None`。
+/// `sources` は、開いているはずの源である（共通の側の処理のある源。9e で源の番号の型にした）。
 pub fn survey_apic_masks(
     mapped: &crate::machine::pc::apic::MappedApic,
-    unmasked: &[u8],
+    sources: &[InterruptSource],
 ) -> Option<MaskCheck> {
     let controller = apic::Apic::new(mapped)?;
-    Some(controller.check_masks(unmasked))
+    Some(controller.check_masks(isa_irqs_for_sources(sources).as_slice()))
 }
 
 /// `unmasked` を開けたときに IMR がとるはずの値（純粋な計算）。
-fn expected_masks(unmasked: &[u8]) -> (u8, u8) {
+fn expected_masks(unmasked: &[IsaIrq]) -> (u8, u8) {
     let mut masks = (pic::MASK_ALL, pic::MASK_ALL);
     let mut index = 0;
     while index < unmasked.len() {
-        masks = pic::masks_with_irq_unmasked(masks, unmasked[index]);
+        masks = pic::masks_with_irq_unmasked(masks, unmasked[index].0);
         index += 1;
     }
     masks
@@ -588,9 +787,9 @@ fn expected_masks(unmasked: &[u8]) -> (u8, u8) {
 ///
 /// 解禁する IRQ には、EOI を発行するハンドラが IDT に入っていること
 /// （ADR-0018 §2 の項目 5 / 7）。
-pub unsafe fn unmask(irq: u8) {
+pub unsafe fn unmask(irq: IsaIrq) {
     // SAFETY: 呼び出し側の契約をそのまま実装へ引き継ぐ。
-    unsafe { ACTIVE.unmask(irq) }
+    unsafe { ACTIVE.unmask(irq.0) }
 }
 
 /// すべての IRQ をマスクする。
@@ -636,7 +835,7 @@ pub unsafe fn mask_all() {
 ///
 /// コマンドポートの読み出し対象を変更する。他の実行文脈が同時に
 /// コントローラを触っていないこと。
-pub unsafe fn is_spurious(irq: u8) -> bool {
+pub unsafe fn is_spurious(irq: IsaIrq) -> bool {
     // 移行済みの IRQ を、もう所有していないコントローラに問い合わせない。
     //
     // # 予測は外れた。外れたことを書いておく
@@ -654,10 +853,10 @@ pub unsafe fn is_spurious(irq: u8) -> bool {
     // 「必要だから入れた」ではなく「今は効果を観測できない」と書く。
     if routed_to_apic(irq) {
         // SAFETY: 呼び出し側の契約をそのまま実装へ引き継ぐ。
-        return unsafe { apic::spurious_for_routed_irq(irq) };
+        return unsafe { apic::spurious_for_routed_irq(irq.0) };
     }
     // SAFETY: 呼び出し側の契約をそのまま実装へ引き継ぐ。
-    unsafe { ACTIVE.is_spurious(irq) }
+    unsafe { ACTIVE.is_spurious(irq.0) }
 }
 
 /// 割り込みの後始末。スプリアスなら偽の割り込みへ応答しない。
@@ -665,7 +864,7 @@ pub unsafe fn is_spurious(irq: u8) -> bool {
 /// # Safety
 ///
 /// 実際に発生した割り込みに対してのみ呼ぶこと。
-pub unsafe fn end_of_interrupt(irq: u8, spurious: bool) {
+pub unsafe fn end_of_interrupt(irq: IsaIrq, spurious: bool) {
     // 宛先は IRQ 単位で決まる。中間状態では 8259 経由と I/O APIC 経由が
     // 併存し、前者は 8259 への EOI、後者は LAPIC への EOI が要る。
     // 単一の状態で切り替えると、倒した瞬間にもう片方が EOI を受け取らなくなる。
@@ -675,13 +874,13 @@ pub unsafe fn end_of_interrupt(irq: u8, spurious: bool) {
         return;
     }
     // SAFETY: 呼び出し側の契約をそのまま実装へ引き継ぐ。
-    unsafe { ACTIVE.end_of_interrupt(irq, spurious) }
+    unsafe { ACTIVE.end_of_interrupt(irq.0, spurious) }
 }
 
 /// 届いた割り込みを受け取った結果（`ADR-0072` の 2。2026-09-28）。[`claim`] が返し、[`complete`] に渡す。
 ///
 /// 例外・IPI・装置の割り込みを 1 つの番号の空間にまとめない（`ADR-0072` の 3）。IPI は種類として、
-/// このCPUのタイマは別の種類として、装置は IRQ 番号で持つ。
+/// このCPUのタイマは別の種類として、装置は源の番号で持つ（9e）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Claim {
     /// IPI の探り（S5-a）。BKL を取らずに数えて、完了させる。
@@ -691,12 +890,15 @@ pub enum Claim {
     /// このCPUのタイマ（Local APIC のタイマ）。
     LocalTimer,
     /// この系に 1 つのタイマ（8259 経由の PIT。IRQ0）。較正より前と、Local APIC のタイマへ移れなかった機械で、
-    /// BSP にだけ届く。今のタイマでなくなった後に遅れて届いた 1 本は、ただの [`Claim::Irq`] として受け取る。
+    /// BSP にだけ届く。今のタイマでなくなった後に遅れて届いた 1 本は、ただの [`Claim::Source`] として受け取る。
     GlobalTimer,
-    /// ISA の IRQ（8259 経由か I/O APIC 経由）。**8259 の 7 番と 15 番がスプリアスかどうかは、ここではまだ
-    /// 分からない**（In-Service Register を読むのは [`complete`] と [`disable_and_complete`] の中である）。源の番号の
-    /// 型にするのは 9e である。
-    Irq(u8),
+    /// 装置の割り込みの源（ISA の IRQ。8259 経由か I/O APIC 経由）。**8259 の 7 番と 15 番がスプリアスかどうかは、
+    /// ここではまだ分からない**（In-Service Register を読むのは [`complete`] と [`disable_and_complete`] の中である）。
+    /// `arrival` は、完了させるときに最初の到着を記録するために持つ（[`first_arrival`]。共通の側は読まない）。
+    Source {
+        source: InterruptSource,
+        arrival: Arrival,
+    },
     /// 受け取れない到着（試しのベクタや yield などのソフトの `int`）。数えるだけで、完了させない。
     Unclaimed,
 }
@@ -705,20 +907,20 @@ pub enum Claim {
 ///
 /// # 契約（境界の関数。2026-09-28）
 ///
-/// - `vector` は、このCPUの入口のスタブが積んだベクタである。
+/// - `arrival` は、このCPUの入口のスタブが積んだベクタから `arch` が作ったものである（[`Arrival`]）。
 /// - BKL なしで呼べる。触るのは定数とアトミックだけで、I/O は無い。Local APIC のスプリアスと、IPI の探りを
 ///   受け取った本数は、ここで数える。
 /// - 判定の順は、IPI の探り、Local APIC のスプリアス、Local APIC のタイマ、この系に 1 つのタイマ（8259 経由の
 ///   PIT が今のタイマのときだけ）、IRQ の表の順に固定する。Local APIC 由来のベクタを先に見るのは、そのベクタが
 ///   8259 の採番表に当たる構成でも取り違えないためである。
-pub fn claim(vector: u8) -> Claim {
+pub fn claim(arrival: Arrival) -> Claim {
     // 8259 経由の PIT が今のタイマなら、そのベクタで届いたものはこの系に 1 つのタイマである。
     let global_timer = if timer_on_lapic() {
         None
     } else {
         vector_for(GLOBAL_TIMER_IRQ)
     };
-    let claimed = classify(vector, global_timer, irq_for_vector);
+    let claimed = classify(arrival.0, global_timer, irq_for_vector);
     match claimed {
         Claim::Spurious => {
             LAPIC_SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -729,12 +931,9 @@ pub fn claim(vector: u8) -> Claim {
     claimed
 }
 
-/// この系に 1 つのタイマ（8259 経由の PIT）の ISA の IRQ 番号。
-const GLOBAL_TIMER_IRQ: u8 = 0;
-
 /// [`claim`] の判定（純粋な関数）。この系に 1 つのタイマのベクタ（今のタイマでなければ `None`）と、IRQ の表の
 /// 引き方を外から渡すので、ホストで順を確かめられる。
-fn classify(vector: u8, global_timer: Option<u8>, lookup: impl Fn(u8) -> Option<u8>) -> Claim {
+fn classify(vector: u8, global_timer: Option<u8>, lookup: impl Fn(u8) -> Option<IsaIrq>) -> Claim {
     if usize::from(vector) == crate::arch::x86_64::idt::IPI_PROBE_VECTOR {
         return Claim::IpiProbe;
     }
@@ -748,7 +947,10 @@ fn classify(vector: u8, global_timer: Option<u8>, lookup: impl Fn(u8) -> Option<
         return Claim::GlobalTimer;
     }
     match lookup(vector) {
-        Some(irq) => Claim::Irq(irq),
+        Some(irq) => Claim::Source {
+            source: source_for_isa_irq(irq),
+            arrival: Arrival(vector),
+        },
         None => Claim::Unclaimed,
     }
 }
@@ -760,15 +962,17 @@ fn classify(vector: u8, global_timer: Option<u8>, lookup: impl Fn(u8) -> Option<
 /// - [`claim`] が返したものに、処理が戻った後でちょうど 1 回呼ぶ。戻らない動き（切り替え、遠征を畳むこと）より
 ///   前に呼ぶ。処理の無い源には、代わりに [`disable_and_complete`] を呼ぶ。
 /// - [`Claim::Spurious`] と [`Claim::Unclaimed`] には呼ばない（呼んでも何もしない）。
-/// - [`Claim::GlobalTimer`] と [`Claim::Irq`] では、8259 の 7 番と 15 番がスプリアスかをここで見分け、
+/// - [`Claim::GlobalTimer`] と [`Claim::Source`] では、8259 の 7 番と 15 番がスプリアスかをここで見分け、
 ///   コントローラの決まりに従う（スプリアスなら数え、EOI はスレーブのスプリアスのときにマスタへだけ送る）。
 ///   この系に 1 つのタイマは、IRQ0 として完了させる。
+/// - [`Claim::Source`] では、その源の最初の到着のベクタを記録する（[`first_arrival`]。9e）。処理のある源だけを
+///   完了させるので、記録されるのは処理のある到着だけである。
 /// - 破壊テスト `no-eoi-test` では、IPI の探りを除いて EOI を送らない（数えるのは変わらない）。
 ///
 /// # Safety
 ///
 /// - 実際に配送された割り込みのハンドラの中から、割り込みを止めたまま呼ぶこと。
-/// - [`Claim::GlobalTimer`] と [`Claim::Irq`] では、ほかの実行文脈が同時に 8259 を触っていないこと
+/// - [`Claim::GlobalTimer`] と [`Claim::Source`] では、ほかの実行文脈が同時に 8259 を触っていないこと
 ///   （[`is_spurious`] の契約）。
 pub unsafe fn complete(claimed: Claim) {
     match claimed {
@@ -785,7 +989,16 @@ pub unsafe fn complete(claimed: Claim) {
             // SAFETY: 呼び出し側の契約（8259 を同時に触る文脈が無いことを含む）。
             unsafe { complete_isa_irq(GLOBAL_TIMER_IRQ, false) };
         }
-        Claim::Irq(irq) => {
+        Claim::Source { source, arrival } => {
+            let Some(irq) = isa_irq_for_source(source) else {
+                return;
+            };
+            let _ = FIRST_HANDLED_VECTOR[usize::from(irq.0)].compare_exchange(
+                NO_ROUTED_VECTOR,
+                arrival.0,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
             // SAFETY: 呼び出し側の契約（8259 を同時に触る文脈が無いことを含む）。
             unsafe { complete_isa_irq(irq, false) };
         }
@@ -797,7 +1010,7 @@ pub unsafe fn complete(claimed: Claim) {
 ///
 /// # 契約（境界の関数。2026-09-28）
 ///
-/// - [`claim`] が [`Claim::Irq`] を返し、共通の側にその源の処理が登録されていなかったときに、[`complete`] の
+/// - [`claim`] が [`Claim::Source`] を返し、共通の側にその源の処理が登録されていなかったときに、[`complete`] の
 ///   代わりにちょうど 1 回呼ぶ。ほかの種類を渡したときは [`complete`] と同じに扱い、`false` を返す。
 /// - 8259 の 7 番と 15 番のスプリアスなら、禁止せずに [`complete`] と同じく扱い（数えて、コントローラの決まりに
 ///   従う）、`false` を返す。スプリアスは源ではない。
@@ -809,7 +1022,10 @@ pub unsafe fn complete(claimed: Claim) {
 ///
 /// [`complete`] と同じ。加えて、ほかの CPU が同時に同じ I/O APIC を触っていないこと（BKL の中で呼ぶ）。
 pub unsafe fn disable_and_complete(claimed: Claim) -> bool {
-    let Claim::Irq(irq) = claimed else {
+    let Some(irq) = (match claimed {
+        Claim::Source { source, .. } => isa_irq_for_source(source),
+        _ => None,
+    }) else {
         // SAFETY: 呼び出し側の契約。
         unsafe { complete(claimed) };
         return false;
@@ -825,7 +1041,7 @@ pub unsafe fn disable_and_complete(claimed: Claim) -> bool {
 ///
 /// [`complete`] と同じ（8259 を同時に触る文脈が無いことを含む）。`disable` が真なら [`disable_and_complete`] と
 /// 同じ。
-unsafe fn complete_isa_irq(irq: u8, disable: bool) -> bool {
+unsafe fn complete_isa_irq(irq: IsaIrq, disable: bool) -> bool {
     // SAFETY: 呼び出し側の契約（8259 を同時に触る文脈が無いことを含む）。
     let spurious = unsafe { is_spurious(irq) };
     if spurious {
@@ -848,13 +1064,13 @@ unsafe fn complete_isa_irq(irq: u8, disable: bool) -> bool {
 /// # Safety
 ///
 /// [`disable_and_complete`] と同じ。
-unsafe fn disable_irq(irq: u8) {
+unsafe fn disable_irq(irq: IsaIrq) {
     if routed_to_apic(irq) {
         // SAFETY: 呼び出し側の契約。
-        unsafe { apic::mask_routed_irq(irq) };
+        unsafe { apic::mask_routed_irq(irq.0) };
     } else {
         // SAFETY: 呼び出し側の契約。マスクビットを立てるだけ。
-        unsafe { pic::mask_irq(irq) };
+        unsafe { pic::mask_irq(irq.0) };
     }
 }
 
@@ -925,13 +1141,10 @@ impl fmt::Display for SpuriousCounts {
 /// - 起動時に呼ぶこと（この関数は割り込みを一時的に禁止する）。
 pub unsafe fn route_to_apic(
     mapped: &crate::machine::pc::apic::MappedApic,
-    irq: u8,
+    irq: IsaIrq,
     vector: u8,
     signaling: RouteSignaling,
 ) -> Result<(), RouteError> {
-    if irq as usize >= MAX_LEGACY_IRQS {
-        return Err(RouteError::IrqOutOfRange);
-    }
     if vector == NO_ROUTED_VECTOR {
         return Err(RouteError::VectorReserved);
     }
@@ -940,7 +1153,7 @@ pub unsafe fn route_to_apic(
     // 1. 経路を設定する。マスクは立てたままなので、まだ届かない。
     // SAFETY: ゲートの用意は呼び出し側の契約。この IRQ は I/O APIC 側で
     // マスクされたままである（起動時の redirection entry は全本マスク）。
-    unsafe { controller.route(irq, vector, signaling) };
+    unsafe { controller.route(irq.0, vector, signaling) };
 
     // 2 から 4 をひとまとめにする。区間内でログも確保も行わない。
     {
@@ -955,12 +1168,12 @@ pub unsafe fn route_to_apic(
         // あることとして観測できるはずである。
         #[cfg(not(feature = "ioapic-keep-pic-irq1-test"))]
         unsafe {
-            pic::mask_irq(irq)
+            pic::mask_irq(irq.0)
         };
 
         // 3. 状態を立てる。旧経路を閉じた後、新経路を開ける前である。
-        ROUTED_VECTOR[irq as usize].store(vector, Ordering::Relaxed);
-        ROUTED_TO_APIC.fetch_or(1u32 << irq, Ordering::Relaxed);
+        ROUTED_VECTOR[usize::from(irq.0)].store(vector, Ordering::Relaxed);
+        ROUTED_TO_APIC.fetch_or(1u32 << irq.0, Ordering::Relaxed);
 
         // 4. 新経路を開ける。
         // SAFETY: ゲートは用意済みで、状態も立っている。ここから届いてよい。
@@ -969,7 +1182,7 @@ pub unsafe fn route_to_apic(
         // 配送されない。読み戻しの主張は通り、到達の主張だけが落ちる。
         #[cfg(not(feature = "ioapic-skip-unmask-test"))]
         unsafe {
-            controller.unmask(irq)
+            controller.unmask(irq.0)
         };
     }
     Ok(())
@@ -988,11 +1201,11 @@ pub unsafe fn route_to_apic(
 /// `Some((level, active_low))` を返す。override が無ければ `None`——
 /// そのとき何を既定とするかは呼び出し側の判断である（PCI なら level・low）。
 /// **ビット定数は `crate::machine::pc::apic` の内側に留める**（あの到達範囲を広げない）。
-pub fn declared_signaling(mmio: &crate::acpi::ApicMmio, irq: u8) -> Option<(bool, bool)> {
-    if !mmio.has_override_for_irq(irq) {
+pub fn declared_signaling(mmio: &crate::acpi::ApicMmio, irq: IsaIrq) -> Option<(bool, bool)> {
+    if !mmio.has_override_for_irq(irq.0) {
         return None;
     }
-    let flags = mmio.redirection_flags_for_irq(irq);
+    let flags = mmio.redirection_flags_for_irq(irq.0);
     Some((
         flags & crate::machine::pc::apic::ENTRY_LEVEL_TRIGGERED_BIT != 0,
         flags & crate::machine::pc::apic::ENTRY_ACTIVE_LOW_BIT != 0,
@@ -1001,12 +1214,12 @@ pub fn declared_signaling(mmio: &crate::acpi::ApicMmio, irq: u8) -> Option<(bool
 
 pub fn routed_entry_readback(
     mapped: &crate::machine::pc::apic::MappedApic,
-    irq: u8,
+    irq: IsaIrq,
 ) -> Option<RedirectionEntryView> {
     if !routed_to_apic(irq) {
         return None;
     }
-    apic::Apic::new(mapped)?.read_entry(irq)
+    apic::Apic::new(mapped)?.read_entry(irq.0)
 }
 
 /// redirection entry 1 本の観測値（[`routed_entry_readback`]）。
@@ -1262,8 +1475,6 @@ pub fn lvt_timer_readback() -> Option<LvtTimerView> {
 /// [`route_to_apic`] の失敗。
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum RouteError {
-    /// レガシー IRQ の範囲外。
-    IrqOutOfRange,
     /// I/O APIC が 1 台もマップできていない。
     NoIoApic,
     /// 番兵と衝突するベクタ（0）を指定した。
@@ -1639,7 +1850,8 @@ mod tests {
     /// 片方だけを見るテストだと、両方を同じ向きに間違えたときに通ってしまう。
     #[test]
     fn the_vector_and_irq_mappings_are_inverses() {
-        for irq in 0..2 * pic::IRQS_PER_PIC {
+        for number in 0..2 * pic::IRQS_PER_PIC {
+            let irq = IsaIrq::new(number);
             let vector = vector_for(irq).expect("every IRQ of the two PICs has a vector");
             assert_eq!(
                 irq_for(vector),
@@ -1676,14 +1888,17 @@ mod tests {
         let master_last = pic::MASTER_VECTOR_OFFSET + pic::IRQS_PER_PIC - 1;
         let slave_first = pic::SLAVE_VECTOR_OFFSET;
 
-        assert_eq!(irq_for(master_last), Some(pic::IRQS_PER_PIC - 1));
-        assert_eq!(irq_for(slave_first), Some(pic::IRQS_PER_PIC));
+        assert_eq!(
+            irq_for(master_last),
+            Some(IsaIrq::new(pic::IRQS_PER_PIC - 1))
+        );
+        assert_eq!(irq_for(slave_first), Some(IsaIrq::new(pic::IRQS_PER_PIC)));
 
         // スレーブの先頭は、マスタのオフセットからの距離ではなく
         // スレーブ自身のオフセットから導かれている。
         assert_eq!(
             irq_for(slave_first + pic::IRQS_PER_PIC - 1),
-            Some(2 * pic::IRQS_PER_PIC - 1)
+            Some(IsaIrq::new(2 * pic::IRQS_PER_PIC - 1))
         );
     }
 
@@ -1698,7 +1913,7 @@ mod tests {
     /// このCPUのタイマとして受け取る。表やこの系のタイマを先に見る形に書き換えると、ここが落ちる。
     #[test]
     fn local_apic_vectors_are_claimed_before_the_irq_table() {
-        let every_vector_is_an_irq = |vector: u8| Some(vector);
+        let every_vector_is_an_irq = |vector: u8| Some(IsaIrq(vector % 16));
         for (vector, expected) in [
             (
                 vector_u8(crate::arch::x86_64::idt::IPI_PROBE_VECTOR),
@@ -1721,21 +1936,30 @@ mod tests {
     /// （Local APIC のタイマへ移った後に遅れて届いた 1 本など）、ただの IRQ として受け取る。
     #[test]
     fn the_global_timer_is_claimed_only_while_it_is_the_current_timer() {
-        let only_0x20_is_irq_0 = |vector: u8| (vector == 0x20).then_some(0);
+        let only_0x20_is_irq_0 = |vector: u8| (vector == 0x20).then_some(GLOBAL_TIMER_IRQ);
         assert_eq!(
             classify(0x20, Some(0x20), only_0x20_is_irq_0),
             Claim::GlobalTimer
         );
-        assert_eq!(classify(0x20, None, only_0x20_is_irq_0), Claim::Irq(0));
+        assert_eq!(
+            classify(0x20, None, only_0x20_is_irq_0),
+            Claim::Source {
+                source: source_for_isa_irq(GLOBAL_TIMER_IRQ),
+                arrival: Arrival::from_vector(0x20),
+            }
+        );
     }
 
     /// ほかのベクタは IRQ の表で引き、載っていなければ受け取れない到着として返す。
     #[test]
     fn other_vectors_are_looked_up_in_the_irq_table() {
-        let only_0x21_is_irq_1 = |vector: u8| (vector == 0x21).then_some(1);
+        let only_0x21_is_irq_1 = |vector: u8| (vector == 0x21).then_some(IsaIrq::new(1));
         assert_eq!(
             classify(0x21, Some(0x20), only_0x21_is_irq_1),
-            Claim::Irq(1)
+            Claim::Source {
+                source: source_for_isa_irq(IsaIrq::new(1)),
+                arrival: Arrival::from_vector(0x21),
+            }
         );
         assert_eq!(
             classify(
@@ -1759,8 +1983,52 @@ mod tests {
     #[test]
     fn the_expected_masks_open_only_the_requested_irqs() {
         assert_eq!(expected_masks(&[]), (pic::MASK_ALL, pic::MASK_ALL));
-        let (master, slave) = expected_masks(&[0]);
+        let (master, slave) = expected_masks(&[GLOBAL_TIMER_IRQ]);
         assert_eq!((master, slave), (0xFE, pic::MASK_ALL));
+    }
+
+    /// 源の番号・ISA の IRQ・PCI の INTx の変換（`ADR-0072` の 3。9e）。**今の採番は 8259 の入力の番号と同じで、
+    /// 16 以上の割り込み線は ISA の IRQ にならない**（源の番号にはなり、処理の表が名前つきで断る）。
+    #[test]
+    fn sources_isa_irqs_and_pci_intx_convert_only_through_the_machine() {
+        let keyboard = source_for_isa_irq(IsaIrq::new(1));
+        assert_eq!(isa_irq_for_source(keyboard), Some(IsaIrq::new(1)));
+        let intx = PciIntx::from_interrupt_line(11);
+        assert_eq!(isa_irq_for_pci_intx(intx), Some(IsaIrq::new(11)));
+        assert_eq!(
+            isa_irq_for_source(source_for_pci_intx(intx)),
+            Some(IsaIrq::new(11))
+        );
+        let unassigned = PciIntx::from_interrupt_line(0xFF);
+        assert_eq!(isa_irq_for_pci_intx(unassigned), None);
+        assert_eq!(isa_irq_for_source(source_for_pci_intx(unassigned)), None);
+        let irqs = isa_irqs_for_sources(&[
+            source_for_pci_intx(intx),
+            source_for_pci_intx(unassigned),
+            keyboard,
+        ]);
+        assert_eq!(irqs.as_slice(), &[IsaIrq::new(11), IsaIrq::new(1)]);
+        assert_eq!(format!("{}", IsaIrq::new(11)), "11");
+    }
+
+    /// 最初の到着の表示は、以前のキーボードの行と同じ文言になる（xtask が `first key arrived as vector 0x42` を見る）。
+    #[test]
+    fn the_first_arrival_prints_the_words_the_keyboard_line_used() {
+        let routed = FirstArrival {
+            vector: 0x42,
+            expected: 0x42,
+        };
+        assert!(routed.came_on_the_delivery_vector());
+        assert_eq!(format!("{routed}"), "vector 0x42");
+        let legacy = FirstArrival {
+            vector: 0x21,
+            expected: 0x42,
+        };
+        assert!(!legacy.came_on_the_delivery_vector());
+        assert_eq!(
+            format!("{}", legacy.mismatch()),
+            "vector Some(33), expected 0x42"
+        );
     }
 
     /// `TimerSetup` の問いは、実装固有の値と別に取り出せる。

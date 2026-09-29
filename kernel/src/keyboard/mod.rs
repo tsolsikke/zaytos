@@ -12,29 +12,20 @@ pub mod decode;
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-/// キーボード（IRQ1）の 8259 でのベクタ。
-///
-/// これは 8259 の採番表が与える値であって、現在どこへ届くかではない。
-/// IRQ1 は I/O APIC 経由へ移してあるので、実際の配送先は
-/// [`crate::arch::x86_64::idt::IOAPIC_KEYBOARD_VECTOR`] である。
-/// 現在の配送先は [`delivery_vector`] で得る。
-pub const PIC_KEYBOARD_VECTOR: usize = match crate::machine::pc::irq::vector_for(KEYBOARD_IRQ) {
-    Some(vector) => vector as usize,
-    None => panic!("the keyboard IRQ has no vector"),
-};
+use crate::interrupts::InterruptSource;
+use crate::machine::pc::IsaIrq;
 
-/// キーボード割り込みが現在届くベクタ。
+/// キーボード（i8042）が上げる ISA の IRQ（`ADR-0072` の 7 の PS/2）。
 ///
-/// 経路の切り替えで変わるので `const` にできない。
-pub fn delivery_vector() -> usize {
-    match crate::machine::pc::irq::routed_vector(KEYBOARD_IRQ) {
-        Some(vector) => vector as usize,
-        None => PIC_KEYBOARD_VECTOR,
-    }
+/// **ベクタはここに置かない**（2026-09-29。9e。`ADR-0072` の 3。ベクタを共通の側に出さない）。以前は 8259 での
+/// ベクタ（`PIC_KEYBOARD_VECTOR`）と今の配送先（`delivery_vector`）をここで持っていた。今の配送先は `machine` が
+/// 引く（`crate::machine::pc::irq::delivery_vector`）。
+pub const KEYBOARD_IRQ: IsaIrq = IsaIrq::new(1);
+
+/// キーボードの割り込みの源の番号（`machine` が [`KEYBOARD_IRQ`] から解決する。`ADR-0072` の 7）。
+pub fn interrupt_source() -> InterruptSource {
+    crate::machine::pc::source_for_isa_irq(KEYBOARD_IRQ)
 }
-
-/// キーボードの IRQ 番号。
-pub const KEYBOARD_IRQ: u8 = 1;
 
 /// i8042 を確かめて IRQ1 を開けたか（HW-b。`ADR-0068`）。**`setup_keyboard` が開ける直前に立てる。**
 ///
@@ -58,24 +49,7 @@ pub fn controller_present() -> bool {
 /// **起動の途中で、IRQ1 を開ける前に 1 回だけ呼ぶ**（処理を登録してから源を許可する）。起動の後に呼ぶと、
 /// 登録する側（[`crate::interrupts::register_interrupt_handler`]）が名前つきで止める。
 pub fn register_irq_handler() {
-    crate::interrupts::register_interrupt_handler(KEYBOARD_IRQ, handle_irq);
-}
-
-/// 最初のキー入力が届いたベクタ番号。まだなら [`NO_VECTOR_YET`]。
-///
-/// 配送経路の証拠になる。I/O APIC 経由へ移してからは 8259 が出しえない
-/// ベクタになるので、値そのものが経路を示す。
-static FIRST_KEYBOARD_VECTOR: AtomicU64 = AtomicU64::new(NO_VECTOR_YET);
-
-/// 「まだ届いていない」を表す番兵。
-pub const NO_VECTOR_YET: u64 = u64::MAX;
-
-/// 最初のキー入力が届いたベクタ番号。
-pub fn first_keyboard_vector() -> Option<u64> {
-    match FIRST_KEYBOARD_VECTOR.load(Ordering::Relaxed) {
-        NO_VECTOR_YET => None,
-        vector => Some(vector),
-    }
+    crate::interrupts::register_interrupt_handler(interrupt_source(), handle_irq);
 }
 
 /// [`report_first_delivery_once`] が既に出したか。
@@ -96,25 +70,27 @@ static FIRST_DELIVERY_REPORTED: AtomicBool = AtomicBool::new(false);
 ///
 /// **違うベクタで届いていたら止める**（今までどおり）。**8259 経由（0x21）なら、I/O APIC へ移したはずの
 /// IRQ1 が 8259 から来たことになる。**
+///
+/// **最初の到着を記録し、今の配送先と比べるのは `machine` である**（`crate::machine::pc::first_arrival`。2026-09-29。
+/// 9e。ベクタを共通の側に出さない）。記録は処理のある源の完了のときだけなので、処理を登録しなかった回
+/// （破壊テスト `keyboard-handler-not-registered-test`）では、今までどおりこの行は出ない。
 pub fn report_first_delivery_once(
     logger: &mut common::log::Logger<common::machine::pc::serial::SerialPort>,
 ) {
-    let Some(vector) = first_keyboard_vector() else {
+    let Some(first) = crate::machine::pc::first_arrival(interrupt_source()) else {
         return;
     };
     if FIRST_DELIVERY_REPORTED.swap(true, Ordering::Relaxed) {
         return;
     }
-    if vector as usize == delivery_vector() {
+    if first.came_on_the_delivery_vector() {
         logger.info(format_args!(
-            "keyboard: first key arrived as vector {vector:#04x} - IRQ1 is wired through our \
-             stub correctly"
+            "keyboard: first key arrived as {first} - IRQ1 is wired through our stub correctly"
         ));
     } else {
         logger.error(format_args!(
-            "keyboard: the first key arrived as vector {:?}, expected {:#04x}; halting",
-            Some(vector),
-            delivery_vector()
+            "keyboard: the first key arrived as {}; halting",
+            first.mismatch()
         ));
         common::arch::x86_64::cpu::halt_forever();
     }
@@ -157,15 +133,7 @@ pub fn report_first_delivery_once(
 ///
 /// 揺れる機序は突き止めていない（`docs/deferred-decisions.md`）。常に 0 にすると
 /// 「増え続けるか」という指標を失うので、揺れたまま使う。
-fn handle_irq(arrival: u8) {
-    // 最初の 1 回だけ、到着の番号（x86 ではベクタ）を記録する。
-    let _ = FIRST_KEYBOARD_VECTOR.compare_exchange(
-        NO_VECTOR_YET,
-        u64::from(arrival),
-        Ordering::Relaxed,
-        Ordering::Relaxed,
-    );
-
+fn handle_irq(_source: InterruptSource) {
     HANDLER_INVOCATIONS.fetch_add(1, Ordering::Relaxed);
 
     // データを伴う割り込みかどうかを、読む前に見ておく。
