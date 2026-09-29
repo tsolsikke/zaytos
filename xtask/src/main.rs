@@ -3020,28 +3020,31 @@ fn build_bootloader_now(workspace_root: &Path, features: &[&str]) -> Result<Path
         args.push(&joined);
     }
 
-    let status = Command::new("cargo")
-        .current_dir(workspace_root)
-        .args(&args)
-        .status()
-        .context("failed to invoke cargo to build the bootloader")?;
+    // **組ごとの写しから取る**（2026-09-29。案 B の ①。kernel と同じ理由。[`with_build_lock`]）。
+    with_build_lock(workspace_root, "bootloader", || {
+        let status = Command::new("cargo")
+            .current_dir(workspace_root)
+            .args(&args)
+            .status()
+            .context("failed to invoke cargo to build the bootloader")?;
 
-    if !status.success() {
-        bail!("bootloader build failed ({status})");
-    }
+        if !status.success() {
+            bail!("bootloader build failed ({status})");
+        }
 
-    let efi_path = workspace_root
-        .join("target")
-        .join(UEFI_TARGET)
-        .join("debug")
-        .join(format!("{BOOTLOADER_PACKAGE}.efi"));
-    if !efi_path.exists() {
-        bail!(
-            "bootloader build reported success but {} is missing",
-            efi_path.display()
-        );
-    }
-    Ok(efi_path)
+        let efi_path = workspace_root
+            .join("target")
+            .join(UEFI_TARGET)
+            .join("debug")
+            .join(format!("{BOOTLOADER_PACKAGE}.efi"));
+        keep_a_copy(
+            workspace_root,
+            "bootloader",
+            &kernel_builds::key_of(features),
+            &efi_path,
+            &format!("{BOOTLOADER_PACKAGE}.efi"),
+        )
+    })
 }
 
 /// `kernel` パッケージを `x86_64-unknown-none` ターゲット向けにビルドし、
@@ -29619,6 +29622,33 @@ fn build_kernel_in_the_background(
     })
 }
 
+/// ビルドしてから組ごとの写しを取るまでを、同じ種類のほかのビルドと重ねない錠（2026-09-29。案 B の ①）。
+///
+/// **cargo は組によらず同じ置き場へ成果物を書き直す**ので、同時に走るほかのプロセスが別の組をビルドすると、
+/// ビルドしてから写すまでの間に写すものが入れ替わりうる。**錠を持つ間にビルドと写しを済ませる**（プロセスが終われば、
+/// 殺された場合も、カーネルが錠を放す）。錠のファイルは写しの置き場（`target/kernel-builds/`）に置く。
+fn with_build_lock<T>(
+    workspace_root: &Path,
+    kind: &str,
+    work: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let directory = workspace_root.join("target").join("kernel-builds");
+    fs::create_dir_all(&directory)
+        .with_context(|| format!("failed to create {}", directory.display()))?;
+    let lock_path = directory.join(format!("{kind}.lock"));
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open {}", lock_path.display()))?;
+    lock.lock()
+        .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+    let result = work();
+    drop(lock);
+    result
+}
+
 /// ビルドの成果物を、組ごとの置き場（`target/kernel-builds/<種類>/<組>/`）へ写す（案 A）。
 fn keep_a_copy(
     workspace_root: &Path,
@@ -29842,19 +29872,47 @@ fn run_kernel_build_unwrapped(workspace_root: &Path, features: &[&str]) -> Resul
     if let Some(received) = kernel_builds::kernel(features) {
         return received_kernel_build(features, received);
     }
-    let mut command = Command::new("cargo");
-    command
-        .current_dir(workspace_root)
-        .args(kernel_cargo_args(features));
-    // **診断はそのまま流す。** `--message-format=json-render-diagnostics` は
-    // 人が読む形の診断を stderr へ出すので、握らずに見せる。
-    let output = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .output()
-        .context("failed to invoke cargo to build the kernel")?;
-    if !output.status.success() {
-        bail!("kernel build failed ({})", output.status);
+    // **組ごとの写しから取る**（2026-09-29。案 B の ①。案 A の写しの守りと同じ考え方）——**同時に走るほかの
+    // プロセスが、組によらず同じ置き場の ELF を別の組で書き直しても取り違えない。** ビルドと写しは錠の中で行い
+    // （[`with_build_lock`]）、写しがその組の cargo の成果物と同じかを確かめる（[`kernel_builds::confirm_the_copy`]）。
+    let table = KernelFeatures::read(workspace_root)?;
+    let key = kernel_builds::canonical_key(features, &|feature: &str| table.reached(feature));
+    let (output, elf) = with_build_lock(workspace_root, "kernel", || {
+        let mut command = Command::new("cargo");
+        command
+            .current_dir(workspace_root)
+            .args(kernel_cargo_args(features));
+        // **診断はそのまま流す。** `--message-format=json-render-diagnostics` は
+        // 人が読む形の診断を stderr へ出すので、握らずに見せる。
+        let output = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .output()
+            .context("failed to invoke cargo to build the kernel")?;
+        if !output.status.success() {
+            bail!("kernel build failed ({})", output.status);
+        }
+        let elf = keep_a_copy(
+            workspace_root,
+            "kernel",
+            &key,
+            &uplifted_kernel_elf(workspace_root),
+            KERNEL_PACKAGE,
+        )?;
+        Ok((output, elf))
+    })?;
+    let artifacts = kernel_builds::Artifacts::new(
+        &workspace_root
+            .join("target")
+            .join(KERNEL_TARGET)
+            .join("debug"),
+    );
+    if let Err(error) = kernel_builds::confirm_the_copy(&artifacts, &table.resolved(&key), &elf) {
+        let _ = fs::remove_file(&elf);
+        bail!(
+            "the kernel for [{}] was not handed over: {error}",
+            key.join(",")
+        );
     }
 
     let out_dir = kernel_out_dir_from_cargo_json(&String::from_utf8_lossy(&output.stdout))
@@ -29863,13 +29921,6 @@ fn run_kernel_build_unwrapped(workspace_root: &Path, features: &[&str]) -> Resul
          cannot locate OUT_DIR",
         )?;
 
-    let elf = uplifted_kernel_elf(workspace_root);
-    if !elf.exists() {
-        bail!(
-            "kernel build reported success but {} is missing",
-            elf.display()
-        );
-    }
     Ok(KernelBuild { elf, out_dir })
 }
 
