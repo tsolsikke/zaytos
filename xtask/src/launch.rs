@@ -40,7 +40,7 @@ use std::fmt;
 use std::fs;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -597,6 +597,8 @@ pub struct QemuRun {
     what: String,
     status: Option<ExitStatus>,
     recorded: bool,
+    /// QEMU の標準出力と標準エラーを項目の塊へ積む糸（**塊を持つ糸から起こしたときだけ**。`crate::item_log`）。
+    readers: Vec<JoinHandle<()>>,
 }
 
 /// 起動方法。
@@ -686,7 +688,13 @@ pub fn spawn(spec: &Spec<'_>) -> Result<QemuRun> {
     if spec.group == Group::Own {
         command.process_group(0);
     }
-    let child = command.spawn().map_err(|error| {
+    // **項目の塊を持つ糸から起こしたら、QEMU の出力を受け取って塊へ積む**（2026-09-29。SCRUM-31）——受け継ぐと、
+    // 同時に走るほかの項目の塊の間に混ざる。**持たなければ、今までどおり受け継ぐ。**
+    let sink = crate::item_log::sink();
+    if sink.is_some() {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    }
+    let mut child = command.spawn().map_err(|error| {
         anyhow::Error::new(HarnessFault(format!(
             "{}: failed to launch {} under prlimit ({error}); are qemu-system-x86 and util-linux \
              installed?",
@@ -694,6 +702,15 @@ pub fn spawn(spec: &Spec<'_>) -> Result<QemuRun> {
         )))
     })?;
     RUNS_STARTED.fetch_add(1, Ordering::SeqCst);
+    let mut readers = Vec::new();
+    if let Some(sink) = sink {
+        if let Some(stdout) = child.stdout.take() {
+            readers.push(crate::item_log::forward(stdout, sink.clone()));
+        }
+        if let Some(stderr) = child.stderr.take() {
+            readers.push(crate::item_log::forward(stderr, sink));
+        }
+    }
     let target = match spec.group {
         Group::Own => KillTarget::Group(child.id()),
         Group::Terminal => KillTarget::Process(child.id()),
@@ -720,6 +737,7 @@ pub fn spawn(spec: &Spec<'_>) -> Result<QemuRun> {
         what: spec.what.to_string(),
         status: None,
         recorded: false,
+        readers,
     })
 }
 
@@ -836,6 +854,10 @@ impl QemuRun {
         self.watch.stop.store(true, Ordering::SeqCst);
         if let Some(watcher) = self.watcher.take() {
             let _ = watcher.join();
+        }
+        // **QEMU の出力を読み終えてから記録する**（QEMU は終わっているので、出力は閉じている）。
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
         }
         let elapsed = self.started.elapsed();
         RUNS_NANOS.fetch_add(

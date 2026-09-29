@@ -726,6 +726,8 @@ xtask::full_check::tests::the_push_gate_passes_recorded_commits_refuses_the_rest
 xtask::full_check::tests::the_rustc_fingerprint_is_read_from_cargo_s_record
 xtask::full_check::tests::the_sectors_written_are_read_from_diskstats
 xtask::full_check::tests::the_selection_names_its_base_and_falls_to_all_when_it_cannot_compare
+xtask::item_log::tests::a_block_keeps_both_streams_in_the_order_they_were_written
+xtask::item_log::tests::a_child_output_is_forwarded_into_the_block
 xtask::kernel_builds::tests::a_build_made_ahead_is_handed_over_without_building_again
 xtask::kernel_builds::tests::a_copy_is_accepted_only_when_it_is_a_build_of_its_set
 xtask::kernel_builds::tests::an_asked_build_goes_before_the_builds_ahead
@@ -767,6 +769,7 @@ xtask::sampling::tests::typeperf_rows_are_read_and_the_header_is_skipped
 xtask::tests::a_boot_log_difference_on_the_cpu_state_line_asks_to_redo_the_inventory
 xtask::tests::a_boot_log_reference_that_does_not_end_at_the_prompt_is_refused
 xtask::tests::a_boot_log_that_only_moved_code_differs_only_in_masked_items
+xtask::tests::a_child_started_inside_a_block_writes_into_the_block
 xtask::tests::a_copy_is_written_aside_and_then_put_in_place
 xtask::tests::a_copy_onto_itself_is_refused_and_the_file_is_kept
 xtask::tests::a_current_state_document_names_items_where_they_are_defined

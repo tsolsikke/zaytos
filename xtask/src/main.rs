@@ -15,10 +15,47 @@ use anyhow::{bail, Context, Result};
 use family::Family;
 use run_dir::RunDir;
 
+/// 出力の置き換え（2026-09-29。SCRUM-31）。**項目を走らせる糸が塊を持つ間は、その塊へ積む**（[`item_log`]）。
+/// **持たなければ、今までどおりその場で書く。** **モジュールの宣言より前に置いて、全部のモジュールに効かせる**
+/// ——同時に走る項目の行を、ほかの項目の塊の間に混ぜない。
+macro_rules! print {
+    ($($arg:tt)*) => {
+        $crate::item_log::out(&format!($($arg)*))
+    };
+}
+
+/// [`print!`] と同じ置き換え（行の終わりを足す）。
+macro_rules! println {
+    () => {
+        $crate::item_log::out("\n")
+    };
+    ($($arg:tt)*) => {
+        $crate::item_log::out(&format!("{}\n", format_args!($($arg)*)))
+    };
+}
+
+/// [`print!`] と同じ置き換え（標準エラー）。
+macro_rules! eprint {
+    ($($arg:tt)*) => {
+        $crate::item_log::err(&format!($($arg)*))
+    };
+}
+
+/// [`print!`] と同じ置き換え（標準エラー。行の終わりを足す）。
+macro_rules! eprintln {
+    () => {
+        $crate::item_log::err("\n")
+    };
+    ($($arg:tt)*) => {
+        $crate::item_log::err(&format!("{}\n", format_args!($($arg)*)))
+    };
+}
+
 mod check_lock;
 mod family;
 mod font;
 mod full_check;
+mod item_log;
 mod kernel_builds;
 mod launch;
 mod media;
@@ -32,18 +69,19 @@ mod vbox;
 /// `println!` を、出したうえで項目の出力のコピー（[`item_output_copy`]）へも積む形に置き換える（2026-09-26。
 /// 族にまとめる段）。
 ///
-/// **出す行は前と同じである。** **名前つきの判定で検出される破壊テストが、狙いの判定の行を探すため**
+/// **出す行は前と同じである**（出す先は上の置き換えと同じ。項目の塊を持つ糸なら塊へ積む）。
+/// **名前つきの判定で検出される破壊テストが、狙いの判定の行を探すため**
 /// （[`SABOTAGE_JUDGEMENTS`]）。**判定の行を出す場所は 150 を越え、判定を出す助け（`screen-color:` 等）
 /// も別の関数に在る**——**呼ぶ側を書き換えると、1 つ漏れた判定だけが黙って見えなくなる**（`begin_item`
 /// が項目の終わりを呼ぶ側に書かせないのと同じ理由である）。**このファイルの中だけに効く**
 /// （モジュールの宣言より後に置いた）。
 macro_rules! println {
     () => {
-        std::println!()
+        crate::item_log::out("\n")
     };
     ($($arg:tt)*) => {{
         let line = format!($($arg)*);
-        std::println!("{line}");
+        crate::item_log::out(&format!("{line}\n"));
         crate::copy_to_item_output(&line);
     }};
 }
@@ -3014,11 +3052,12 @@ fn build_bootloader_now(workspace_root: &Path, features: &[&str]) -> Result<Path
 
     // **組ごとの写しから取る**（2026-09-29。案 B の ①。kernel と同じ理由。[`with_build_lock`]）。
     with_build_lock(workspace_root, "bootloader", || {
-        let status = Command::new("cargo")
-            .current_dir(workspace_root)
-            .args(&args)
-            .status()
-            .context("failed to invoke cargo to build the bootloader")?;
+        let status = status_into_item_log(
+            Command::new("cargo")
+                .current_dir(workspace_root)
+                .args(&args),
+        )
+        .context("failed to invoke cargo to build the bootloader")?;
 
         if !status.success() {
             bail!("bootloader build failed ({status})");
@@ -29698,6 +29737,18 @@ fn build_kernel_in_the_background(
     })
 }
 
+/// 子を走らせ、終わりを待つ（2026-09-29。SCRUM-31）。**項目の塊を持つ糸から呼んだら、出力を受け取って塊へ積む**
+/// （[`item_log`]）。**持たなければ、今までどおり出力を受け継ぐ**（`Command::status` と同じ）。
+fn status_into_item_log(command: &mut Command) -> std::io::Result<std::process::ExitStatus> {
+    if item_log::sink().is_none() {
+        return command.status();
+    }
+    let output = command.output()?;
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    Ok(output.status)
+}
+
 /// ビルドしてから組ごとの写しを取るまでを、同じ種類のほかのビルドと重ねない錠（2026-09-29。案 B の ①）。
 ///
 /// **cargo は組によらず同じ置き場へ成果物を書き直す**ので、同時に走るほかのプロセスが別の組をビルドすると、
@@ -29994,12 +30045,19 @@ fn run_kernel_build_unwrapped(workspace_root: &Path, features: &[&str]) -> Resul
             .current_dir(workspace_root)
             .args(kernel_cargo_args(features));
         // **診断はそのまま流す。** `--message-format=json-render-diagnostics` は
-        // 人が読む形の診断を stderr へ出すので、握らずに見せる。
+        // 人が読む形の診断を stderr へ出すので、握らずに見せる。**項目の塊を持つ糸なら、受け取って塊へ積む**
+        // （[`item_log`]。2026-09-29。SCRUM-31）。
+        let into_block = item_log::sink().is_some();
         let output = command
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(if into_block {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
             .output()
             .context("failed to invoke cargo to build the kernel")?;
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
         if !output.status.success() {
             bail!("kernel build failed ({})", output.status);
         }
@@ -31148,6 +31206,23 @@ mod tests {
         assert_eq!(found.len(), 2, "{found:?}");
         assert!(found[0].starts_with("xtask/src/main.rs:1: the QEMU -d log"));
         assert!(found[1].starts_with("tools/x.py:1: the ESP directory"));
+    }
+
+    /// **項目の塊を持つ糸から起こした子の出力は、塊へ積む**（2026-09-29。SCRUM-31）。**持たなければ受け継ぐ。**
+    #[test]
+    fn a_child_started_inside_a_block_writes_into_the_block() {
+        let mut status = None;
+        let block = item_log::with_block(|| {
+            status = Some(
+                status_into_item_log(
+                    Command::new("sh").args(["-c", "echo to-stdout; echo to-stderr >&2; exit 3"]),
+                )
+                .unwrap(),
+            );
+        });
+        let status = status.unwrap();
+        assert_eq!(status.code(), Some(3));
+        assert_eq!(block, "to-stdout\nto-stderr\n");
     }
 
     /// **写しは別の名前へ写してから置き換える**——**書き終えた中身だけが写しの名前に現れ、途中の名前は残らない**
