@@ -35,17 +35,18 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use common::addr::{DirectMap, PhysAddr};
 
-use crate::abi::linux::x86_64::{
+use crate::abi::linux::x86_64::{stat_bytes, STAT_LEN};
+use crate::abi::linux::{
     dirent64_record, dirent64_record_len, fb_fix_screeninfo_bytes, fb_var_screeninfo_bytes,
     parse_drm_clip_rect, parse_pollfd, parse_sockaddr_un, parse_timespec, set_pollfd_revents,
-    stat_bytes, timespec_bytes, winsize_bytes, Dirent64, DrmClipRect, FbBitfield, FbFixScreeninfo,
+    timespec_bytes, winsize_bytes, Dirent64, DrmClipRect, FbBitfield, FbFixScreeninfo,
     FbVarScreeninfo, Stat, Timespec, Winsize, AF_UNIX, CLOCK_MONOTONIC, DIRENT64_ALIGN,
     DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, DT_DIR, DT_REG, DT_UNKNOWN, FBIOGET_FSCREENINFO,
     FBIOGET_VSCREENINFO, FB_TYPE_PACKED_PIXELS, FB_VISUAL_TRUECOLOR, O_ACCMODE, O_CREAT, O_RDONLY,
     O_TRUNC, O_WRONLY, POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET, SOCKADDR_UN_LEN,
-    SOCK_STREAM, SOL_SOCKET, STAT_LEN, TIMESPEC_LEN, TIOCGWINSZ, WINSIZE_LEN,
+    SOCK_STREAM, SOL_SOCKET, TIMESPEC_LEN, TIOCGWINSZ, WINSIZE_LEN,
 };
-use crate::abi::linux::x86_64::{
+use crate::abi::linux::{
     E2BIG, EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, EBUSY, ECHILD, ECONNREFUSED, EEXIST,
     EFAULT, EINVAL, EIO, EISCONN, EISDIR, EMFILE, EMSGSIZE, ENAMETOOLONG, ENOBUFS, ENODEV, ENOENT,
     ENOMEM, ENOSPC, ENOSYS, ENOTCONN, ENOTDIR, ENOTEMPTY, ENOTSOCK, ENOTTY, EPIPE, EPROTONOSUPPORT,

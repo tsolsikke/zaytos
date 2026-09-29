@@ -16,13 +16,8 @@
 //! - `syscall-test-drop-retval`: 戻り値の `context.rax` 書き戻しを落とす。ユーザーが
 //!   期待した戻り値を受け取れない（ユーザースタックへ store した値が食い違う）。
 
+use crate::abi::linux::SyscallRequest;
 use crate::arch::x86_64::idt::context::IrqContext;
-
-/// システムコールの番号と 6 つの引数（入口の文脈から読んだもの）。
-pub struct SyscallRequest {
-    pub number: u64,
-    pub args: [u64; 6],
-}
 
 /// 入口の文脈から、番号と 6 つの引数を読む。**戻り値を書き戻す前に読む**（書き戻すと、番号の RAX が上書きされる）。
 pub fn read_request(context: &IrqContext) -> SyscallRequest {

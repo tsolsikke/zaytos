@@ -9914,7 +9914,7 @@ fn verify_syscall_pointer<const CAP: usize>(
         cpu::halt_forever();
     }
 
-    let efault = (-kernel::abi::linux::x86_64::EFAULT) as u64;
+    let efault = (-kernel::abi::linux::EFAULT) as u64;
     let kernel_ptr: u64 = 0x10_0000; // カーネルイメージ領域（PML4[0]、U=0、範囲下限外）
     let unmapped: u64 = 0x8000400000; // PML4[1]、PD[2]、未マップ
                                       // **窓の上端を超える長さ。** 窓は 1 つになったので、上端は今の遠征の窓から
@@ -10029,7 +10029,7 @@ fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
     }
 
     // 異常系: カーネルポインタは copy 前の検証で -EFAULT。読みに踏み込まない。
-    let efault = (-kernel::abi::linux::x86_64::EFAULT) as u64;
+    let efault = (-kernel::abi::linux::EFAULT) as u64;
     let kernel_ptr: u64 = 0x10_0000;
     let bad = issue_ptr_len_syscall(logger, syscall::SYS_CHECKSUM, kernel_ptr, N as u64);
     logger.info(format_args!(
@@ -10050,7 +10050,7 @@ fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
     // **S9-a より前、この経路は一度も通っていなかった。** 検証はどちらの場合も
     // len=8 しか渡しておらず、容量超過の分岐は書かれているだけだった。errno を
     // 分けるなら、分けた側が実際に返ることを見る必要がある。
-    let einval = (-kernel::abi::linux::x86_64::EINVAL) as u64;
+    let einval = (-kernel::abi::linux::EINVAL) as u64;
     let too_long = (syscall::CHECKSUM_BUF_LEN + 1) as u64;
     let over = issue_ptr_len_syscall(logger, syscall::SYS_CHECKSUM, buf_va, too_long);
     logger.info(format_args!(

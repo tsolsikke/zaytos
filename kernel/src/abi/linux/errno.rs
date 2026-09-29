@@ -1,7 +1,8 @@
 //! errno（Linux と同じ値。`ADR-0020` の Addendum で、errno の値を Linux に合わせると決めた）。**失敗は `-errno` で
 //! 返す**（`crate::syscall`）。
 //!
-//! **x86_64 の Linux の値である**（`ADR-0071` の決定 1 の 2 で、`crate::syscall` から移した。2026-09-30）。
+//! **CPU によらない**——x86_64 と aarch64 で同じ値である（`asm/errno.h` を `gcc` と `aarch64-linux-gnu-gcc` で測って
+//! 確かめた。2026-09-30）。`ADR-0071` の決定 1 の 2 で、`crate::syscall` から移し、`abi/linux/x86_64` から分けた。
 //! 並びと doc は移す前のまま。
 
 /// `-ENOSYS`（未実装システムコール）の errno。失敗は `-errno` で返す。

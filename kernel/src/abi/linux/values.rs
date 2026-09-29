@@ -1,6 +1,11 @@
 //! Linux の値（`d_type`・時計の番号・`ioctl` の要求・`open` のフラグ・`whence`・fbdev・ソケット・`poll`・`mmap`・
-//! `cmsghdr`。x86_64 の Linux の値。`ADR-0071` の決定 1 の 2 で、`crate::syscall` から移した。2026-09-30）。
+//! `cmsghdr`。`ADR-0071` の決定 1 の 2 で、`crate::syscall` から移し、`abi/linux/x86_64` から分けた。2026-09-30）。
 //! 並びと doc は移す前のまま。
+//!
+//! **CPU によらない**——ここにある値は、x86_64 と aarch64 で同じである（UAPI と glibc のヘッダを `gcc` と
+//! `aarch64-linux-gnu-gcc` で測って確かめた。2026-09-30）。**`open` のフラグには CPU によって値の違うものがある**
+//! （`O_DIRECTORY`・`O_NOFOLLOW`・`O_DIRECT`・`O_LARGEFILE` は x86_64 と aarch64 で違った）。足すときは 1 つずつ測り、
+//! 違うものは CPU ごとの置き場へ置くこと。
 
 /// `d_type`: 不明。**対応表に無い値はこれにする。**
 pub const DT_UNKNOWN: u8 = 0;
