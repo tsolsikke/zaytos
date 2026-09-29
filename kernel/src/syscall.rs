@@ -36,13 +36,14 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use common::addr::{DirectMap, PhysAddr};
 
 use crate::abi::linux::x86_64::{
-    dirent64_record, dirent64_record_len, fb_fix_screeninfo, fb_var_screeninfo, parse_clip_rect,
-    parse_pollfd, parse_sockaddr_un, parse_timespec, set_pollfd_revents, stat_bytes,
-    timespec_bytes, winsize_bytes, Dirent64, Stat, Timespec, Winsize, AF_UNIX, CLOCK_MONOTONIC,
-    DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, DT_DIR, DT_REG, DT_UNKNOWN,
-    FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, O_ACCMODE, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY,
-    POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET, SOCKADDR_UN_LEN, SOCK_STREAM, SOL_SOCKET,
-    STAT_LEN, TIMESPEC_LEN, TIOCGWINSZ, WINSIZE_LEN,
+    dirent64_record, dirent64_record_len, fb_fix_screeninfo_bytes, fb_var_screeninfo_bytes,
+    parse_drm_clip_rect, parse_pollfd, parse_sockaddr_un, parse_timespec, set_pollfd_revents,
+    stat_bytes, timespec_bytes, winsize_bytes, Dirent64, DrmClipRect, FbBitfield, FbFixScreeninfo,
+    FbVarScreeninfo, Stat, Timespec, Winsize, AF_UNIX, CLOCK_MONOTONIC, DIRENT64_ALIGN,
+    DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, DT_DIR, DT_REG, DT_UNKNOWN, FBIOGET_FSCREENINFO,
+    FBIOGET_VSCREENINFO, FB_TYPE_PACKED_PIXELS, FB_VISUAL_TRUECOLOR, O_ACCMODE, O_CREAT, O_RDONLY,
+    O_TRUNC, O_WRONLY, POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET, SOCKADDR_UN_LEN,
+    SOCK_STREAM, SOL_SOCKET, STAT_LEN, TIMESPEC_LEN, TIOCGWINSZ, WINSIZE_LEN,
 };
 use crate::abi::linux::x86_64::{
     E2BIG, EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, EBUSY, ECHILD, ECONNREFUSED, EEXIST,
@@ -465,6 +466,78 @@ pub const SYS_OPEN_SCREEN: u64 = ZAYTOS_PRIVATE_BASE + 9;
 /// 採る**——**DIRTYFB そのものは DRM の大きな ABI の一部なので採らない。** **番号は [`TIOCZTAKE`] と
 /// 同じ `'Z'` の帯に置く。**
 pub const FBIOZPRESENT: u64 = 0x5A03;
+
+/// 画素の色の並び（`struct fb_bitfield` の `offset`）。**青・緑・赤の順に返す。**
+///
+/// **UEFI の `Bgr` は「バイト 0 が青」、`Rgb` は「バイト 0 が赤」である**（`PixelFormat` の doc）。
+/// **リトルエンディアンの 32 ビットで読むので、バイトの位置 × 8 がビットの位置になる。**
+pub const fn fb_color_offsets(bgr: bool) -> (u32, u32, u32) {
+    if bgr {
+        (0, 8, 16)
+    } else {
+        (16, 8, 0)
+    }
+}
+
+/// `FBIOGET_VSCREENINFO` が返す値（`ADR-0066` の Y-c）。**引数だけで決める**（ホストで固定する）。
+///
+/// **画素は 32 ビットで、色は 8 ビットずつである。** **仮想の大きさは見える大きさと同じ**（パンも回転も持たない）。
+/// **欄の位置へ書くのは abi の `fb_var_screeninfo_bytes` である**（`ADR-0071` の決定 1 の 2 で分けた。2026-09-30）。
+fn screen_var_info(width: u32, height: u32, bgr: bool) -> FbVarScreeninfo {
+    let (blue, green, red) = fb_color_offsets(bgr);
+    FbVarScreeninfo {
+        xres: width,
+        yres: height,
+        xres_virtual: width,
+        yres_virtual: height,
+        bits_per_pixel: 32,
+        red: FbBitfield {
+            offset: red,
+            length: 8,
+        },
+        green: FbBitfield {
+            offset: green,
+            length: 8,
+        },
+        blue: FbBitfield {
+            offset: blue,
+            length: 8,
+        },
+    }
+}
+
+/// `FBIOGET_FSCREENINFO` が返す値（`ADR-0066` の Y-c）。**引数だけで決める。**
+///
+/// **`smem_start`（物理アドレス）は 0 にする**——**合わせなかった。** **Ring 3 へ物理アドレスを出す理由が
+/// 無い**（`mmap` は fd からマップするので、アドレスを知らなくてよい）。
+/// **欄の位置へ書くのは abi の `fb_fix_screeninfo_bytes` である**（`ADR-0071` の決定 1 の 2 で分けた。2026-09-30）。
+fn screen_fix_info(size_bytes: u32, line_length: u32) -> FbFixScreeninfo {
+    let mut id = [0u8; 16];
+    let name = b"zaytos-fb";
+    id[..name.len()].copy_from_slice(name);
+    FbFixScreeninfo {
+        id,
+        smem_start: 0,
+        smem_len: size_bytes,
+        kind: FB_TYPE_PACKED_PIXELS,
+        visual: FB_VISUAL_TRUECOLOR,
+        line_length,
+    }
+}
+
+/// `FBIOZPRESENT` の矩形を `(x, y, 幅, 高さ)` にする（`ADR-0066` の Y-c）。**空なら `None`**（断る）。
+///
+/// **x2・y2 は含まない**（DRM の DIRTYFB と同じ半開区間）。**画面への切り詰めはコピーする側が行う**
+/// （`Console::present`）。**欄から読むのは abi の `parse_drm_clip_rect` である**（`ADR-0071` の決定 1 の 2 で分けた。
+/// 2026-09-30）。
+fn clip_rect_area(rect: &DrmClipRect) -> Option<(u32, u32, u32, u32)> {
+    let (x1, y1) = (u32::from(rect.x1), u32::from(rect.y1));
+    let (x2, y2) = (u32::from(rect.x2), u32::from(rect.y2));
+    if x2 <= x1 || y2 <= y1 {
+        return None;
+    }
+    Some((x1, y1, x2 - x1, y2 - y1))
+}
 
 /// `socket` の番号（Linux x86-64。`ADR-0064`）。**番号と `sockaddr_un` の配置は Linux から採る**
 /// （`ADR-0020`。**私物にしない**——**パイプの入口が私物だったのは `spawn` の形に付いたからで、
@@ -1620,7 +1693,7 @@ unsafe fn screen_ioctl_from_ring3(
     let bgr = matches!(surface.format, common::boot_info::PixelFormat::Bgr);
     match request {
         FBIOGET_VSCREENINFO => {
-            let out = fb_var_screeninfo(surface.width, surface.height, bgr);
+            let out = fb_var_screeninfo_bytes(&screen_var_info(surface.width, surface.height, bgr));
             // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
             let Some(slice) =
                 (unsafe { validate_user_range(pml4_phys, direct_map, arg, out.len() as u64) })
@@ -1632,7 +1705,10 @@ unsafe fn screen_ioctl_from_ring3(
             Some(0)
         }
         FBIOGET_FSCREENINFO => {
-            let out = fb_fix_screeninfo(surface.size_bytes as u32, surface.stride * 4);
+            let out = fb_fix_screeninfo_bytes(&screen_fix_info(
+                surface.size_bytes as u32,
+                surface.stride * 4,
+            ));
             // SAFETY: 同上。
             let Some(slice) =
                 (unsafe { validate_user_range(pml4_phys, direct_map, arg, out.len() as u64) })
@@ -1655,7 +1731,7 @@ unsafe fn screen_ioctl_from_ring3(
             if unsafe { copy_from_user(&mut raw, &slice) } != DRM_CLIP_RECT_LEN {
                 return Some((-EFAULT) as u64);
             }
-            let Some((x, y, width, height)) = parse_clip_rect(&raw) else {
+            let Some((x, y, width, height)) = clip_rect_area(&parse_drm_clip_rect(&raw)) else {
                 return Some((-EINVAL) as u64);
             };
             // **BKL を解いてコピーする**（この関数の doc）。
@@ -5443,5 +5519,59 @@ mod tests {
             spawn_status(&SpawnOutcome::Interrupted),
             SPAWN_INTERRUPTED_FLAG
         );
+    }
+
+    /// **`Bgr` は「バイト 0 が青」——青 0・緑 8・赤 16。** `Rgb` では赤と青の位置が入れ替わる。
+    /// **画素は 32 ビットで、色は 8 ビットずつ。仮想の大きさは見える大きさと同じである。**
+    #[test]
+    fn the_color_offsets_follow_the_pixel_order() {
+        assert_eq!(fb_color_offsets(true), (0, 8, 16));
+        assert_eq!(fb_color_offsets(false), (16, 8, 0));
+        let bgr = screen_var_info(1280, 800, true);
+        assert_eq!(
+            (bgr.xres, bgr.yres, bgr.xres_virtual, bgr.yres_virtual),
+            (1280, 800, 1280, 800)
+        );
+        assert_eq!(bgr.bits_per_pixel, 32);
+        assert_eq!(
+            (bgr.red.offset, bgr.green.offset, bgr.blue.offset),
+            (16, 8, 0)
+        );
+        assert_eq!(
+            (bgr.red.length, bgr.green.length, bgr.blue.length),
+            (8, 8, 8)
+        );
+        let rgb = screen_var_info(1280, 800, false);
+        assert_eq!(
+            (rgb.red.offset, rgb.green.offset, rgb.blue.offset),
+            (0, 8, 16)
+        );
+    }
+
+    /// **物理アドレス（`smem_start`）は 0 のままである。**
+    #[test]
+    fn the_screen_fix_info_does_not_give_out_the_physical_address() {
+        let info = screen_fix_info(4_096_000, 5120);
+        assert_eq!(&info.id[..9], b"zaytos-fb", "id");
+        assert_eq!(&info.id[9..], &[0u8; 7], "the rest of id is 0");
+        assert_eq!(info.smem_start, 0, "smem_start is not given out");
+        assert_eq!((info.smem_len, info.line_length), (4_096_000, 5120));
+        assert_eq!(
+            (info.kind, info.visual),
+            (FB_TYPE_PACKED_PIXELS, FB_VISUAL_TRUECOLOR)
+        );
+    }
+
+    /// `struct drm_clip_rect` は半開区間である。**空の矩形は断る。**
+    #[test]
+    fn a_clip_rect_is_half_open_and_refuses_empty_ones() {
+        let rect = |x1, y1, x2, y2| DrmClipRect { x1, y1, x2, y2 };
+        assert_eq!(
+            clip_rect_area(&rect(200, 200, 360, 360)),
+            Some((200, 200, 160, 160))
+        );
+        assert_eq!(clip_rect_area(&rect(0, 0, 1, 1)), Some((0, 0, 1, 1)));
+        assert_eq!(clip_rect_area(&rect(10, 10, 10, 20)), None, "width 0");
+        assert_eq!(clip_rect_area(&rect(10, 20, 20, 10)), None, "upside down");
     }
 }

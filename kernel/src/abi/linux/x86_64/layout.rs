@@ -1,8 +1,6 @@
 //! Linux の構造体の配置（長さと欄の位置、構造体を組む関数と読む関数。x86_64 の Linux の値。
 //! `ADR-0071` の決定 1 の 2 で、`crate::syscall` から移した。2026-09-30）。移したものの並びと doc は移す前のまま。
 
-use super::values::{FB_TYPE_PACKED_PIXELS, FB_VISUAL_TRUECOLOR};
-
 /// `linux_dirent64` の固定部のバイト数。**実測で確かめた**（`d_name` の `offsetof`）。
 ///
 /// `d_ino`(8) + `d_off`(8) + `d_reclen`(2) + `d_type`(1) = 19 である。
@@ -290,74 +288,118 @@ pub fn dirent64_record(entry: &Dirent64, out: &mut [u8]) -> Option<usize> {
     Some(reclen)
 }
 
-/// 画素の色の並び（`struct fb_bitfield` の `offset`）。**青・緑・赤の順に返す。**
-///
-/// **UEFI の `Bgr` は「バイト 0 が青」、`Rgb` は「バイト 0 が赤」である**（`PixelFormat` の doc）。
-/// **リトルエンディアンの 32 ビットで読むので、バイトの位置 × 8 がビットの位置になる。**
-pub const fn fb_color_offsets(bgr: bool) -> (u32, u32, u32) {
-    if bgr {
-        (0, 8, 16)
-    } else {
-        (16, 8, 0)
-    }
+/// `struct fb_bitfield` に書く値（色の 1 つ。`msb_right` は 0 のまま）。
+pub struct FbBitfield {
+    /// `offset`（ビットの位置）。
+    pub offset: u32,
+    /// `length`（ビットの数）。
+    pub length: u32,
 }
 
-/// `struct fb_var_screeninfo` を組む（`ADR-0066` の Y-c）。**引数だけで決める**（ホストで固定する）。
+/// `struct fb_var_screeninfo` に書く値。**ZaytOS が持つ欄だけである**（ほかの欄は 0 のまま返す）。
+///
+/// **値を決めるのは共通の側で、[`fb_var_screeninfo_bytes`] は欄の位置へ書くだけである**（`ADR-0071` の決定 1 の 2 で、
+/// `crate::syscall` の画面の `ioctl` から分けた。2026-09-30）。
+pub struct FbVarScreeninfo {
+    /// `xres`（横の画素の数）。
+    pub xres: u32,
+    /// `yres`（縦の画素の数）。
+    pub yres: u32,
+    /// `xres_virtual`。
+    pub xres_virtual: u32,
+    /// `yres_virtual`。
+    pub yres_virtual: u32,
+    /// `bits_per_pixel`。
+    pub bits_per_pixel: u32,
+    /// `red`。
+    pub red: FbBitfield,
+    /// `green`。
+    pub green: FbBitfield,
+    /// `blue`。
+    pub blue: FbBitfield,
+}
+
+/// `struct fb_var_screeninfo` を組む（`ADR-0066` の Y-c）。
 ///
 /// **欄の位置は `cc` の `offsetof` で測った**（2026-09-21。`cc` 13.3.0。`<linux/fb.h>`）——
 /// `xres` 0 / `yres` 4 / `xres_virtual` 8 / `yres_virtual` 12 / `bits_per_pixel` 24 /
 /// `red` 32 / `green` 44 / `blue` 56 / `transp` 68（`struct fb_bitfield` は `offset` 0・`length` 4・
-/// `msb_right` 8 の 12 バイト）。**それ以外の欄は 0 である**（パンも回転も持たない）。
-pub fn fb_var_screeninfo(width: u32, height: u32, bgr: bool) -> [u8; FB_VAR_SCREENINFO_LEN] {
+/// `msb_right` 8 の 12 バイト）。**それ以外の欄は 0 である。**
+pub fn fb_var_screeninfo_bytes(info: &FbVarScreeninfo) -> [u8; FB_VAR_SCREENINFO_LEN] {
     let mut out = [0u8; FB_VAR_SCREENINFO_LEN];
     let mut put = |at: usize, value: u32| out[at..at + 4].copy_from_slice(&value.to_le_bytes());
-    put(0, width);
-    put(4, height);
-    put(8, width);
-    put(12, height);
-    put(24, 32);
-    let (blue, green, red) = fb_color_offsets(bgr);
+    put(0, info.xres);
+    put(4, info.yres);
+    put(8, info.xres_virtual);
+    put(12, info.yres_virtual);
+    put(24, info.bits_per_pixel);
     // **`struct fb_bitfield` は `offset`・`length`・`msb_right` の順である。**
-    put(32, red);
-    put(36, 8);
-    put(44, green);
-    put(48, 8);
-    put(56, blue);
-    put(60, 8);
+    put(32, info.red.offset);
+    put(36, info.red.length);
+    put(44, info.green.offset);
+    put(48, info.green.length);
+    put(56, info.blue.offset);
+    put(60, info.blue.length);
     out
 }
 
-/// `struct fb_fix_screeninfo` を組む（`ADR-0066` の Y-c）。**引数だけで決める。**
+/// `struct fb_fix_screeninfo` に書く値。**ZaytOS が持つ欄だけである**（ほかの欄は 0 のまま返す）。
+///
+/// **値を決めるのは共通の側で、[`fb_fix_screeninfo_bytes`] は欄の位置へ書くだけである**（`ADR-0071` の決定 1 の 2 で、
+/// `crate::syscall` の画面の `ioctl` から分けた。2026-09-30）。
+pub struct FbFixScreeninfo {
+    /// `id`（名前。16 バイトに満たない分は 0）。
+    pub id: [u8; 16],
+    /// `smem_start`（フレームバッファの物理アドレス）。
+    pub smem_start: u64,
+    /// `smem_len`（バイト数）。
+    pub smem_len: u32,
+    /// `type`（`FB_TYPE_PACKED_PIXELS` など）。
+    pub kind: u32,
+    /// `visual`（`FB_VISUAL_TRUECOLOR` など）。
+    pub visual: u32,
+    /// `line_length`（1 行のバイト数）。
+    pub line_length: u32,
+}
+
+/// `struct fb_fix_screeninfo` を組む（`ADR-0066` の Y-c）。
 ///
 /// **欄の位置は `offsetof` で測った**——`id` 0（16 バイト）/ `smem_start` 16 / `smem_len` 24 /
-/// `type` 28 / `visual` 36 / `line_length` 48（2026-09-21）。
-///
-/// **`smem_start`（物理アドレス）は 0 にする**——**合わせなかった。** **Ring 3 へ物理アドレスを出す理由が
-/// 無い**（`mmap` は fd からマップするので、アドレスを知らなくてよい）。
-pub fn fb_fix_screeninfo(size_bytes: u32, line_length: u32) -> [u8; FB_FIX_SCREENINFO_LEN] {
+/// `type` 28 / `visual` 36 / `line_length` 48（2026-09-21）。**それ以外の欄は 0 である。**
+pub fn fb_fix_screeninfo_bytes(info: &FbFixScreeninfo) -> [u8; FB_FIX_SCREENINFO_LEN] {
     let mut out = [0u8; FB_FIX_SCREENINFO_LEN];
-    let id = b"zaytos-fb";
-    out[..id.len()].copy_from_slice(id);
-    out[24..28].copy_from_slice(&size_bytes.to_le_bytes());
-    out[28..32].copy_from_slice(&FB_TYPE_PACKED_PIXELS.to_le_bytes());
-    out[36..40].copy_from_slice(&FB_VISUAL_TRUECOLOR.to_le_bytes());
-    out[48..52].copy_from_slice(&line_length.to_le_bytes());
+    out[..16].copy_from_slice(&info.id);
+    out[16..24].copy_from_slice(&info.smem_start.to_le_bytes());
+    out[24..28].copy_from_slice(&info.smem_len.to_le_bytes());
+    out[28..32].copy_from_slice(&info.kind.to_le_bytes());
+    out[36..40].copy_from_slice(&info.visual.to_le_bytes());
+    out[48..52].copy_from_slice(&info.line_length.to_le_bytes());
     out
 }
 
-/// `struct drm_clip_rect` を読む（`ADR-0066` の Y-c）。**`(x, y, 幅, 高さ)` を返す。空なら `None`。**
+/// `struct drm_clip_rect` から読んだ値（`ADR-0066` の Y-c）。**x2・y2 は含まない**（DRM の DIRTYFB と同じ半開区間）。
 ///
-/// **x2・y2 は含まない**（DRM の DIRTYFB と同じ半開区間）。**画面への切り詰めはコピーする側が行う**
-/// （`Console::present`）。
-pub fn parse_clip_rect(raw: &[u8; DRM_CLIP_RECT_LEN]) -> Option<(u32, u32, u32, u32)> {
-    let x1 = u32::from(u16::from_le_bytes([raw[0], raw[1]]));
-    let y1 = u32::from(u16::from_le_bytes([raw[2], raw[3]]));
-    let x2 = u32::from(u16::from_le_bytes([raw[4], raw[5]]));
-    let y2 = u32::from(u16::from_le_bytes([raw[6], raw[7]]));
-    if x2 <= x1 || y2 <= y1 {
-        return None;
+/// **欄から読むのはここで、空の矩形を断るのと、幅と高さを求めるのは共通の側である**（`ADR-0071` の決定 1 の 2 で、
+/// `crate::syscall` の画面の `ioctl` から分けた。2026-09-30）。
+pub struct DrmClipRect {
+    /// `x1`。
+    pub x1: u16,
+    /// `y1`。
+    pub y1: u16,
+    /// `x2`。
+    pub x2: u16,
+    /// `y2`。
+    pub y2: u16,
+}
+
+/// `struct drm_clip_rect` を読む（`u16` の x1・y1・x2・y2。[`DRM_CLIP_RECT_LEN`]）。
+pub fn parse_drm_clip_rect(raw: &[u8; DRM_CLIP_RECT_LEN]) -> DrmClipRect {
+    DrmClipRect {
+        x1: u16::from_le_bytes([raw[0], raw[1]]),
+        y1: u16::from_le_bytes([raw[2], raw[3]]),
+        x2: u16::from_le_bytes([raw[4], raw[5]]),
+        y2: u16::from_le_bytes([raw[6], raw[7]]),
     }
-    Some((x1, y1, x2 - x1, y2 - y1))
 }
 
 #[cfg(test)]
@@ -537,64 +579,88 @@ mod tests {
         );
     }
 
-    /// `struct fb_var_screeninfo` の欄の位置（`offsetof` の値）。
+    /// `struct fb_var_screeninfo` の欄の位置（`offsetof` の値）。**値は、どのバイトも 0 でなく、欄ごとに違う形にする**
+    /// （stat のテストと同じ理由）。**書かない欄は 0 である。**
     #[test]
     fn the_variable_screen_info_follows_the_linux_layout() {
-        let out = fb_var_screeninfo(1280, 800, true);
+        let out = fb_var_screeninfo_bytes(&FbVarScreeninfo {
+            xres: 0x0102_0304,
+            yres: 0x1112_1314,
+            xres_virtual: 0x2122_2324,
+            yres_virtual: 0x3132_3334,
+            bits_per_pixel: 0x4142_4344,
+            red: FbBitfield {
+                offset: 0x5152_5354,
+                length: 0x6162_6364,
+            },
+            green: FbBitfield {
+                offset: 0x7172_7374,
+                length: 0x8182_8384,
+            },
+            blue: FbBitfield {
+                offset: 0x9192_9394,
+                length: 0xA1A2_A3A4,
+            },
+        });
         assert_eq!(out.len(), 160, "sizeof(struct fb_var_screeninfo)");
-        assert_eq!(u32_at(&out, 0), 1280, "xres @0");
-        assert_eq!(u32_at(&out, 4), 800, "yres @4");
-        assert_eq!(u32_at(&out, 8), 1280, "xres_virtual @8");
-        assert_eq!(u32_at(&out, 12), 800, "yres_virtual @12");
-        assert_eq!(u32_at(&out, 24), 32, "bits_per_pixel @24");
-        // **`Bgr` は「バイト 0 が青」——青 0・緑 8・赤 16。**
-        assert_eq!(u32_at(&out, 32), 16, "red.offset @32");
-        assert_eq!(u32_at(&out, 36), 8, "red.length @36");
-        assert_eq!(u32_at(&out, 44), 8, "green.offset @44");
-        assert_eq!(u32_at(&out, 56), 0, "blue.offset @56");
-        assert_eq!(u32_at(&out, 60), 8, "blue.length @60");
+        let fields = [
+            (0, 0x0102_0304, "xres @0"),
+            (4, 0x1112_1314, "yres @4"),
+            (8, 0x2122_2324, "xres_virtual @8"),
+            (12, 0x3132_3334, "yres_virtual @12"),
+            (24, 0x4142_4344, "bits_per_pixel @24"),
+            (32, 0x5152_5354, "red.offset @32"),
+            (36, 0x6162_6364, "red.length @36"),
+            (44, 0x7172_7374, "green.offset @44"),
+            (48, 0x8182_8384, "green.length @48"),
+            (56, 0x9192_9394, "blue.offset @56"),
+            (60, 0xA1A2_A3A4, "blue.length @60"),
+        ];
+        let mut rest = out;
+        for (at, value, name) in fields {
+            assert_eq!(u32_at(&out, at), value, "{name}");
+            rest[at..at + 4].fill(0);
+        }
+        assert_eq!(rest, [0u8; 160], "the other fields are 0");
     }
 
-    /// `Rgb` では赤と青の位置が入れ替わる。
-    #[test]
-    fn the_color_offsets_follow_the_pixel_order() {
-        assert_eq!(fb_color_offsets(true), (0, 8, 16));
-        assert_eq!(fb_color_offsets(false), (16, 8, 0));
-        let out = fb_var_screeninfo(1280, 800, false);
-        assert_eq!(u32_at(&out, 32), 0, "red.offset for Rgb");
-        assert_eq!(u32_at(&out, 56), 16, "blue.offset for Rgb");
-    }
-
-    /// `struct fb_fix_screeninfo` の欄の位置。**物理アドレス（`smem_start`）は 0 のままである。**
+    /// `struct fb_fix_screeninfo` の欄の位置（`offsetof` の値）。**値は、どのバイトも 0 でなく、欄ごとに違う形にする。**
+    /// **書かない欄は 0 である。**
     #[test]
     fn the_fixed_screen_info_follows_the_linux_layout() {
-        let out = fb_fix_screeninfo(4_096_000, 5120);
+        let id = [
+            0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD,
+            0xBE, 0xBF,
+        ];
+        let out = fb_fix_screeninfo_bytes(&FbFixScreeninfo {
+            id,
+            smem_start: 0x0102_0304_0506_0708,
+            smem_len: 0x1112_1314,
+            kind: 0x2122_2324,
+            visual: 0x3132_3334,
+            line_length: 0x4142_4344,
+        });
         assert_eq!(out.len(), 80, "sizeof(struct fb_fix_screeninfo)");
-        assert_eq!(&out[..9], b"zaytos-fb", "id @0");
-        assert_eq!(&out[16..24], &[0u8; 8], "smem_start @16 is not given out");
-        assert_eq!(u32_at(&out, 24), 4_096_000, "smem_len @24");
-        assert_eq!(u32_at(&out, 28), FB_TYPE_PACKED_PIXELS, "type @28");
-        assert_eq!(u32_at(&out, 36), FB_VISUAL_TRUECOLOR, "visual @36");
-        assert_eq!(u32_at(&out, 48), 5120, "line_length @48");
+        assert_eq!(&out[..16], &id, "id @0");
+        assert_eq!(u64_at(&out, 16), 0x0102_0304_0506_0708, "smem_start @16");
+        assert_eq!(u32_at(&out, 24), 0x1112_1314, "smem_len @24");
+        assert_eq!(u32_at(&out, 28), 0x2122_2324, "type @28");
+        assert_eq!(u32_at(&out, 36), 0x3132_3334, "visual @36");
+        assert_eq!(u32_at(&out, 48), 0x4142_4344, "line_length @48");
+        let mut rest = out;
+        for (at, len) in [(0, 16), (16, 8), (24, 4), (28, 4), (36, 4), (48, 4)] {
+            rest[at..at + len].fill(0);
+        }
+        assert_eq!(rest, [0u8; 80], "the other fields are 0");
     }
 
-    /// `struct drm_clip_rect` は半開区間である。**空の矩形は断る。**
+    /// `struct drm_clip_rect` の欄の位置（`u16` が 4 つ。x1・y1・x2・y2 の順）。
     #[test]
-    fn a_clip_rect_is_half_open_and_refuses_empty_ones() {
-        let rect = |x1: u16, y1: u16, x2: u16, y2: u16| {
-            let mut raw = [0u8; DRM_CLIP_RECT_LEN];
-            raw[0..2].copy_from_slice(&x1.to_le_bytes());
-            raw[2..4].copy_from_slice(&y1.to_le_bytes());
-            raw[4..6].copy_from_slice(&x2.to_le_bytes());
-            raw[6..8].copy_from_slice(&y2.to_le_bytes());
-            raw
-        };
+    fn a_drm_clip_rect_is_read_as_four_u16s() {
+        let read = parse_drm_clip_rect(&[0x01, 0x02, 0x11, 0x12, 0x21, 0x22, 0x31, 0x32]);
         assert_eq!(
-            parse_clip_rect(&rect(200, 200, 360, 360)),
-            Some((200, 200, 160, 160))
+            (read.x1, read.y1, read.x2, read.y2),
+            (0x0201, 0x1211, 0x2221, 0x3231)
         );
-        assert_eq!(parse_clip_rect(&rect(0, 0, 1, 1)), Some((0, 0, 1, 1)));
-        assert_eq!(parse_clip_rect(&rect(10, 10, 10, 20)), None, "width 0");
-        assert_eq!(parse_clip_rect(&rect(10, 20, 20, 10)), None, "upside down");
     }
 }

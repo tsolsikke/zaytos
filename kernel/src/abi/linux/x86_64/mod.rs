@@ -13,11 +13,12 @@ pub use errno::{
 mod layout;
 
 pub use layout::{
-    dirent64_record, dirent64_record_len, fb_fix_screeninfo, fb_var_screeninfo, parse_clip_rect,
-    parse_pollfd, parse_sockaddr_un, parse_timespec, set_pollfd_revents, stat_bytes,
-    timespec_bytes, winsize_bytes, Dirent64, Pollfd, SockaddrUn, Stat, Timespec, Winsize,
-    DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, FB_FIX_SCREENINFO_LEN,
-    FB_VAR_SCREENINFO_LEN, POLLFD_LEN, SOCKADDR_UN_LEN, STAT_LEN, TIMESPEC_LEN, WINSIZE_LEN,
+    dirent64_record, dirent64_record_len, fb_fix_screeninfo_bytes, fb_var_screeninfo_bytes,
+    parse_drm_clip_rect, parse_pollfd, parse_sockaddr_un, parse_timespec, set_pollfd_revents,
+    stat_bytes, timespec_bytes, winsize_bytes, Dirent64, DrmClipRect, FbBitfield, FbFixScreeninfo,
+    FbVarScreeninfo, Pollfd, SockaddrUn, Stat, Timespec, Winsize, DIRENT64_ALIGN,
+    DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, FB_FIX_SCREENINFO_LEN, FB_VAR_SCREENINFO_LEN,
+    POLLFD_LEN, SOCKADDR_UN_LEN, STAT_LEN, TIMESPEC_LEN, WINSIZE_LEN,
 };
 
 mod values;
