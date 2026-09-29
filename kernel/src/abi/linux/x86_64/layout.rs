@@ -216,22 +216,26 @@ mod tests {
         u64::from_le_bytes(raw)
     }
 
-    /// `struct stat` の欄の位置（[`STAT_LEN`] の表の値を、定数を通さずに書く）。**書かない欄は 0 である。**
+    /// `struct stat` の欄の位置（[`STAT_LEN`] の表の値を、定数を通さずに書く。Linux の x86_64 の `asm/stat.h` を `gcc` の
+    /// `offsetof` で測って確かめた。2026-09-30。`linux-libc-dev` 6.8.0。`sys/stat.h` も同じ）。**書かない欄は 0 である。**
+    ///
+    /// **値は、どのバイトも 0 でなく、欄ごとに違う形にする。** 小さい値では上のバイトが 0 になり、欄の幅の途中までしか
+    /// 書かない誤りが見えない（`st_size` の下位 4 バイトだけを書く形で、以前の値 5000 は通った）。
     #[test]
     fn the_stat_bytes_follow_the_linux_layout() {
         let out = stat_bytes(&Stat {
-            ino: 12,
-            nlink: 2,
-            mode: 0o100_644,
-            size: 5000,
-            blocks: 16,
+            ino: 0x0102_0304_0506_0708,
+            nlink: 0x1112_1314_1516_1718,
+            mode: 0x2122_2324,
+            size: 0x3132_3334_3536_3738,
+            blocks: 0x4142_4344_4546_4748,
         });
         assert_eq!(out.len(), 144, "sizeof(struct stat)");
-        assert_eq!(u64_at(&out, 8), 12, "st_ino @8");
-        assert_eq!(u64_at(&out, 16), 2, "st_nlink @16");
-        assert_eq!(u32_at(&out, 24), 0o100_644, "st_mode @24");
-        assert_eq!(u64_at(&out, 48), 5000, "st_size @48");
-        assert_eq!(u64_at(&out, 64), 16, "st_blocks @64");
+        assert_eq!(u64_at(&out, 8), 0x0102_0304_0506_0708, "st_ino @8");
+        assert_eq!(u64_at(&out, 16), 0x1112_1314_1516_1718, "st_nlink @16");
+        assert_eq!(u32_at(&out, 24), 0x2122_2324, "st_mode @24");
+        assert_eq!(u64_at(&out, 48), 0x3132_3334_3536_3738, "st_size @48");
+        assert_eq!(u64_at(&out, 64), 0x4142_4344_4546_4748, "st_blocks @64");
         let mut rest = out;
         for (at, len) in [(8, 8), (16, 8), (24, 4), (48, 8), (64, 8)] {
             rest[at..at + len].fill(0);
