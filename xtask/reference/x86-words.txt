@@ -1,2 +1,2 @@
-common 502
+common 495
 kernel/src/main.rs 721

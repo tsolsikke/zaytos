@@ -870,7 +870,7 @@ fn walk_root_table(
     let mut fadt_phys: Option<PhysAddr> = None;
     let mut fadt_count = 0usize;
     // MCFG（PCIe の ECAM）の数（S13-a）。**読むのは数だけで、中身は解釈しない。**
-    // PCI の走査（`kernel::pci`）はポート（`0xCF8`/`0xCFC`）を使っており、
+    // PCI の走査（`kernel::machine::pc::pci`）はポート（`0xCF8`/`0xCFC`）を使っており、
     // **その前提「i440FX に ECAM は無い」が崩れたらこの判定行で見える。**
     let mut mcfg_count = 0usize;
     let mut header_buffer = [0u8; sdt::HEADER_LENGTH];

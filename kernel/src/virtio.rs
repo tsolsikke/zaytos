@@ -32,7 +32,7 @@ use common::log::Logger;
 use common::machine::pc::serial::SerialPort;
 
 use crate::frame_allocator::FrameAllocator;
-use crate::pci::VirtioBlkLocation;
+use crate::machine::pc::pci::VirtioBlkLocation;
 
 /// legacy レジスタ: 装置側の feature bits（読み）。
 const REG_HOST_FEATURES: u16 = 0x00;
@@ -129,7 +129,7 @@ pub struct VirtioBlk {
 ///
 /// # Safety
 ///
-/// [`crate::pci::scan_bus0`] と同じ契約である——**BSP だけが走っており
+/// [`crate::machine::pc::pci::scan_bus0`] と同じ契約である——**BSP だけが走っており
 /// （AP 起床前）、割り込みが無効である位置から呼ぶこと。** 加えて:
 ///
 /// - `virtio.io_base` が virtio-blk の BAR0 の I/O ウィンドウであること

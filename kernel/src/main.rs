@@ -1413,8 +1413,8 @@ extern "sysv64" fn kernel_main() -> ! {
     // 「ポートで読む」という前提の観測だからである。産地と利用点を離さない。
     //
     // SAFETY: 上記のとおり、BSP のみ・IF=0 の位置である。このポート対を
-    // 触るのは `kernel::pci` だけである（grep で確認済み）。
-    let virtio_blk = unsafe { kernel::pci::scan_bus0(&mut logger) };
+    // 触るのは `kernel::machine::pc::pci` だけである（grep で確認済み）。
+    let virtio_blk = unsafe { kernel::machine::pc::pci::scan_bus0(&mut logger) };
 
     // === S13-b: virtqueue を 1 本立て、ポーリングで superblock の sector を読む ===
     //

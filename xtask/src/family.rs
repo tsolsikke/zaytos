@@ -311,7 +311,7 @@ pub const PATH_RULES: &[PathRule] = &[
     },
     PathRule {
         // **`zi` の保存は装置まで届いたかを見る**（`virtio-skip-install-test`）。
-        patterns: &["kernel/src/pci.rs", "kernel/src/virtio.rs"],
+        patterns: &["kernel/src/virtio.rs"],
         reach: Reach::Families(&[Family::Boot, Family::Apps, Family::Fs, Family::Devices]),
     },
     PathRule {

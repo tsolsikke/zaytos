@@ -47,7 +47,6 @@ pub mod keyboard;
 pub mod machine;
 pub mod memory_map;
 pub mod paging;
-pub mod pci;
 pub mod pipe;
 pub mod pmtimer;
 pub mod quarantine;
