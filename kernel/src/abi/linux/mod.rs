@@ -12,6 +12,10 @@ pub use errno::{
     EROFS, ESPIPE,
 };
 
+mod initial_stack;
+
+pub use initial_stack::build_initial_stack;
+
 mod layout;
 
 pub use layout::{

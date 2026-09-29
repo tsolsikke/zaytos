@@ -641,132 +641,35 @@ pub enum UserLoadError {
     WriteMismatch,
 }
 
-/// ユーザープログラムの初期スタックを **Linux と同じ形で**積む（S11-1）。
+/// ユーザープログラムの初期スタックを **Linux と同じ形で**積む（S11-1）。**形と積むものは
+/// [`crate::abi::linux::build_initial_stack`] にある**（`ADR-0071` の決定 1 の 2 で分けた。2026-09-30）。ここは `argv` と
+/// `envp` の数の上限を見て、スタックページを切り出して渡す。
 ///
 /// 返すのは entry へ入るときの `rsp`（`argc` を指す）。
-///
-/// # 形は実測で確かめた
-///
-/// **ホストで、`_start` から `rsp` をたどる自作の静的バイナリを走らせて観測した。**
-/// `rsp` の指す先から順に——`argc`、`argv` のポインタ、NULL、`envp` のポインタ、
-/// NULL、そして `auxv` の `(type, value)` の対が続き、`type == 0`（`AT_NULL`）で
-/// 終わる。**文字列そのものはこの表より上（高位）に置かれる。**
-///
-/// **記憶で書かない**（`docs/coding-standards.md` の「実測値は、測った条件が
-/// 変わると古くなる」）。`docs/vision.md` の表は**Linux バイナリを動かすための
-/// 記述**で、そこには `AT_PHDR` などが要るとある。**こちらが積むのは自作の
-/// プログラム向けなので、要るものが違う。**
-///
-/// # 何を積み、何を積まないか
-///
-/// **`argc` と `argv` と `envp` を積む。** `auxv` は **`AT_NULL` だけ**である。
-///
-/// **`envp` は EV で中身が入った**（ADR-0041）。**並びは変えていない**
-/// ——S11-1 が終端だけ置いていた場所に、ポインタ列が入っただけである。
-///
-/// **`auxv` の中身は Linux バイナリを動かす段階で要るものである。**
-/// **自作のプログラムは読まないので、終端だけ置く。**
-/// **形を合わせておくのは、後から中身を足すときに入口が変わらないからである**
-/// ——そして **C の `crt0` がそのまま書ける**（`docs/vision.md` の C の構想）。
-///
-/// # 16 バイト整列
-///
-/// **`rsp` は entry の時点で 16 の倍数である**（SysV の規約。Linux もそう積む）。
-/// **詰め物は表と文字列の間に入る。**
 ///
 /// # Safety
 ///
 /// `page` がスタックページの先頭を direct map 越しに指しており、
-/// 4096 バイト書けること。単一実行文脈から呼ぶこと。
+/// 4096 バイト書けること。単一実行文脈から呼ぶこと。**このページを指す参照がほかに無いこと**——
+/// 呼び出し元が新しく確保し、まだ稼働していない空間にマップしただけで、どこにも渡していないページであること
+/// （`argv` と `envp` の文字列も、このページを指さないこと）。
 unsafe fn build_initial_stack(
     page: *mut u8,
     page_base: u64,
     argv: &[&[u8]],
     envp: &[&[u8]],
 ) -> Option<u64> {
-    /// 表の項の大きさ。
-    const WORD: usize = 8;
-    /// 表の固定部——`argc`・`argv` の終端・`envp` の終端・`AT_NULL` の対。
-    ///
-    /// **`argv` と `envp` の本体はここに入らない。** 呼ぶ側が要素数を足す。
-    const FIXED_WORDS: usize = 1 + 1 + 1 + 2;
-    /// `auxv` の終端。
-    const AT_NULL: u64 = 0;
     /// スタックページの大きさ。**1 枚だけマップしてある**（呼び出し側）。
     const PAGE_SIZE: usize = 4096;
 
     if argv.len() > MAX_ARGV || envp.len() > MAX_ENVP {
         return None;
     }
-
-    let mut cursor = PAGE_SIZE;
-
-    // **文字列を上から詰める。** 置いたユーザー VA を控える。
-    //
-    // **`argv` と `envp` を同じ手順で詰める（EV）。** **並びの上では
-    // `argv` の表が先に来るが、文字列の置き場に順序の要求は無い**
-    // ——ポインタで指すためである。
-    let put_strings = |items: &[&[u8]], addrs: &mut [u64], cursor: &mut usize| -> Option<()> {
-        for (index, item) in items.iter().enumerate() {
-            let bytes = *item;
-            // NUL 終端のぶんを含めて下げる。
-            *cursor = cursor.checked_sub(bytes.len() + 1)?;
-            // SAFETY: cursor はページ内で、`bytes.len() + 1` バイト書ける。
-            unsafe {
-                core::ptr::copy_nonoverlapping(bytes.as_ptr(), page.add(*cursor), bytes.len());
-                page.add(*cursor + bytes.len()).write(0);
-            }
-            addrs[index] = page_base + *cursor as u64;
-        }
-        Some(())
-    };
-
-    let mut argv_addrs = [0u64; MAX_ARGV];
-    put_strings(argv, &mut argv_addrs, &mut cursor)?;
-    let mut envp_addrs = [0u64; MAX_ENVP];
-    put_strings(envp, &mut envp_addrs, &mut cursor)?;
-
-    // 表を置く位置。**表の先頭が 16 の倍数になるように下げる。**
-    cursor &= !0xF;
-    cursor = cursor.checked_sub((FIXED_WORDS + argv.len() + envp.len()) * WORD)?;
-    cursor &= !0xF;
-
-    let mut at = cursor;
-    let put = |value: u64, at: &mut usize| {
-        // SAFETY: `at` は上で確保した範囲の中で、8 バイト書ける。
-        unsafe { page.add(*at).cast::<u64>().write_unaligned(value) };
-        *at += WORD;
-    };
-    put(argv.len() as u64, &mut at);
-    for address in argv_addrs.iter().take(argv.len()) {
-        put(*address, &mut at);
-    }
-    put(0, &mut at); // argv の終端
-                     // **環境（EV。ADR-0041）。** **並びは変えていない**——ここに中身が入った
-                     // だけである。**空なら終端だけになり、S11-1 の形と同じである。**
-    for address in envp_addrs.iter().take(envp.len()) {
-        put(*address, &mut at);
-    }
-    put(0, &mut at); // envp の終端
-
-    // 破壊テスト (S11-1, no-auxv-terminator): `auxv` に項目を 1 つ足して、
-    // **終端を書かない。** `AT_PHDR` は Linux バイナリが読む型で、
-    // **自作のプログラムは `auxv` を読まないので、足しても誰も困らないように見える。**
-    // **終端が無いことは、終端まで歩いた者にしか分からない。**
-    #[cfg(feature = "syscall-test-no-auxv-terminator")]
-    {
-        /// `AT_PHDR`。**値そのものに意味は要らない**——終端の有無が主張である。
-        const AT_PHDR: u64 = 3;
-        put(AT_PHDR, &mut at);
-        put(0, &mut at);
-    }
-    #[cfg(not(feature = "syscall-test-no-auxv-terminator"))]
-    {
-        put(AT_NULL, &mut at); // auxv の終端（type）
-        put(0, &mut at); //                 （value）
-    }
-
-    Some(page_base + cursor as u64)
+    // SAFETY: 呼び出し元の契約により、`page` はスタックページの先頭を direct map 越しに指しており、`PAGE_SIZE`
+    // バイト書ける。新しく確保して、まだどこにも渡していないページなので、切り出した `&mut [u8]` を使う間、
+    // このページを指す参照はほかに無い（`argv` と `envp` もこのページを指さない）。
+    let page = unsafe { core::slice::from_raw_parts_mut(page, PAGE_SIZE) };
+    crate::abi::linux::build_initial_stack(page, page_base, argv, envp)
 }
 
 /// 同時に飛べる `spawn` の本数（S11-5）。
@@ -1651,7 +1554,9 @@ fn load_user_program_into(
 
     // **初期スタックを Linux の形で積む（S11-1）。**
     // SAFETY: `dst` はいまマップしたスタックページの direct map 越しの先頭で、
-    // 1 ページぶん書ける。単一実行文脈である。
+    // 1 ページぶん書ける。単一実行文脈である。フレームは上で確保したばかりで、ほかに指しているのは
+    // まだ稼働していない空間のマップだけである。`argv` と `envp` は、このフレームを確保する前に作った
+    // カーネルの側の控えで、このページを指さない。
     let Some(initial_rsp) = (unsafe { build_initial_stack(dst, stack_page, argv, envp) }) else {
         return Err(UserLoadError::ArgumentsTooLong);
     };
