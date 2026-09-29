@@ -42,7 +42,7 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -212,6 +212,88 @@ std::thread_local! {
 static RUNS_STARTED: AtomicU64 = AtomicU64::new(0);
 /// 実行の時間の合計（ナノ秒。全体。計測のため）。
 static RUNS_NANOS: AtomicU64 = AtomicU64::new(0);
+
+/// 同時に走る QEMU の vCPU の数の上限（2026-09-29。SCRUM-31。運用者の決定）。**全検査で並べた行（項目の塊を持つ糸）
+/// から起こす QEMU だけが数える**——順に回すときは 1 本ずつなので数えない。**`-smp 2`・`4` の回は、その数だけ取る**
+/// （上限より多ければ上限だけ取る。独りで走る）。並べる糸の数の既定（`main.rs` の `FULL_CHECK_JOBS`）と同じ値にした——
+/// **糸の数を `ZAYTOS_CHECK_JOBS` で増やしても、同時に走る vCPU はこの数を越えない。**
+pub const VCPU_BUDGET: usize = 4;
+
+/// 使っている vCPU の数と、頼んだ順の札（**頼んだ順に渡す**——`-smp 4` の回が、後から来た 1 つの回に追い越され
+/// 続けない）。
+struct Vcpus {
+    in_use: usize,
+    next_ticket: u64,
+    serving: u64,
+}
+
+static VCPUS: Mutex<Vcpus> = Mutex::new(Vcpus {
+    in_use: 0,
+    next_ticket: 0,
+    serving: 0,
+});
+static VCPUS_CHANGED: Condvar = Condvar::new();
+
+std::thread_local! {
+    /// この糸が持っている vCPU の数（**持っている糸は待たずに取る**——1 つの項目が QEMU を 2 つ同時に起こしても、
+    /// 自分の返しを待って止まらない）。
+    static HELD_HERE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// QEMU の引数から vCPU の数を読む（純粋な論理）。**`-smp N` と `-smp cpus=N,…` を読み、無ければ 1。**
+pub fn vcpus_of(args: &[std::ffi::OsString]) -> usize {
+    let Some(at) = args.iter().position(|arg| arg == "-smp") else {
+        return 1;
+    };
+    let Some(value) = args.get(at + 1).and_then(|value| value.to_str()) else {
+        return 1;
+    };
+    let count = value
+        .split(',')
+        .find_map(|part| match part.strip_prefix("cpus=") {
+            Some(count) => count.parse().ok(),
+            None => part.parse().ok(),
+        })
+        .unwrap_or(1);
+    count.max(1)
+}
+
+/// vCPU を取る（取った数を返す。**上限より多く頼んだら、上限だけ取る**）。
+fn take_vcpus(asked: usize) -> usize {
+    let count = asked.clamp(1, VCPU_BUDGET);
+    let mut state = VCPUS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if HELD_HERE.with(|held| held.get()) > 0 {
+        state.in_use += count;
+    } else {
+        let ticket = state.next_ticket;
+        state.next_ticket += 1;
+        while state.serving != ticket || state.in_use + count > VCPU_BUDGET {
+            state = VCPUS_CHANGED
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        state.serving += 1;
+        state.in_use += count;
+    }
+    HELD_HERE.with(|held| held.set(held.get() + count));
+    VCPUS_CHANGED.notify_all();
+    count
+}
+
+/// 取った vCPU を返す。
+fn give_back_vcpus(count: usize) {
+    if count == 0 {
+        return;
+    }
+    let mut state = VCPUS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.in_use = state.in_use.saturating_sub(count);
+    HELD_HERE.with(|held| held.set(held.get().saturating_sub(count)));
+    VCPUS_CHANGED.notify_all();
+}
 
 /// 項目の始めに、その項目の実行の記録を空にする。
 pub fn reset_item_runs() {
@@ -599,6 +681,8 @@ pub struct QemuRun {
     recorded: bool,
     /// QEMU の標準出力と標準エラーを項目の塊へ積む糸（**塊を持つ糸から起こしたときだけ**。`crate::item_log`）。
     readers: Vec<JoinHandle<()>>,
+    /// 取った vCPU の数（**塊を持つ糸から起こしたときだけ**。[`VCPU_BUDGET`]。終わったら返す）。
+    vcpus: usize,
 }
 
 /// 起動方法。
@@ -694,7 +778,17 @@ pub fn spawn(spec: &Spec<'_>) -> Result<QemuRun> {
     if sink.is_some() {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
     }
-    let mut child = command.spawn().map_err(|error| {
+    // **並べた行では、vCPU の数の上限の中で起こす**（[`VCPU_BUDGET`]。2026-09-29。SCRUM-31）。
+    let vcpus = if sink.is_some() {
+        take_vcpus(vcpus_of(spec.args))
+    } else {
+        0
+    };
+    let spawned = command.spawn();
+    if spawned.is_err() {
+        give_back_vcpus(vcpus);
+    }
+    let mut child = spawned.map_err(|error| {
         anyhow::Error::new(HarnessFault(format!(
             "{}: failed to launch {} under prlimit ({error}); are qemu-system-x86 and util-linux \
              installed?",
@@ -738,6 +832,7 @@ pub fn spawn(spec: &Spec<'_>) -> Result<QemuRun> {
         status: None,
         recorded: false,
         readers,
+        vcpus,
     })
 }
 
@@ -859,6 +954,7 @@ impl QemuRun {
         for reader in self.readers.drain(..) {
             let _ = reader.join();
         }
+        give_back_vcpus(std::mem::take(&mut self.vcpus));
         let elapsed = self.started.elapsed();
         RUNS_NANOS.fetch_add(
             elapsed.as_nanos().min(u128::from(u64::MAX)) as u64,
@@ -925,6 +1021,32 @@ impl Drop for QemuRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **vCPU の数は `-smp` の値から読む**（`N` と `cpus=N,…`）。**無ければ 1。**
+    #[test]
+    fn the_vcpu_count_is_read_from_smp() {
+        let args = |list: &[&str]| -> Vec<std::ffi::OsString> {
+            list.iter().map(std::ffi::OsString::from).collect()
+        };
+        assert_eq!(vcpus_of(&args(&["-m", "256M"])), 1);
+        assert_eq!(vcpus_of(&args(&["-smp", "2", "-m", "256M"])), 2);
+        assert_eq!(vcpus_of(&args(&["-smp", "cpus=4,sockets=1"])), 4);
+        assert_eq!(vcpus_of(&args(&["-smp", "4,sockets=1,cores=4"])), 4);
+        assert_eq!(vcpus_of(&args(&["-smp"])), 1);
+    }
+
+    /// **上限より多く頼んだら、上限だけ取る。** **持っている糸は待たずに重ねて取れる。** **返したら 0 に戻る。**
+    #[test]
+    fn vcpus_are_taken_within_the_budget_and_given_back() {
+        let first = take_vcpus(VCPU_BUDGET + 4);
+        assert_eq!(first, VCPU_BUDGET);
+        let second = take_vcpus(1);
+        assert_eq!(second, 1);
+        give_back_vcpus(second);
+        give_back_vcpus(first);
+        assert_eq!(HELD_HERE.with(|held| held.get()), 0);
+        assert_eq!(VCPUS.lock().unwrap().in_use, 0);
+    }
 
     fn run(cut: Option<Cut>, reached_deadline: bool) -> RunRecord {
         RunRecord {

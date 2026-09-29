@@ -12,7 +12,7 @@
 //! 塊の間に混ざる。子の出力を読む糸へは [`sink`] を渡す（[`append_to`]）。
 
 use std::cell::RefCell;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -76,15 +76,34 @@ pub fn forward(from: impl Read + Send + 'static, sink: Sink) -> JoinHandle<()> {
     })
 }
 
-/// 塊を持つ間に `body` を走らせ、塊の中身を返す（**テストの中だけで使う**。塊を始めて書く形は、並べる変更で足す）。
+/// 塊を始める（並べた行を走らせる糸が、行の始めに呼ぶ。`crate::batch`）。
+pub fn begin() {
+    BLOCK.with(|block| *block.borrow_mut() = Some(Arc::new(Mutex::new(String::new()))));
+}
+
+/// 塊を終え、中身を返す（**持っていなければ `None`**）。
+pub fn take() -> Option<String> {
+    let sink = BLOCK.with(|block| block.borrow_mut().take())?;
+    let text = sink
+        .lock()
+        .map(|mut text| std::mem::take(&mut *text))
+        .unwrap_or_default();
+    Some(text)
+}
+
+/// 塊をまとめて標準出力へ書く（**ほかの糸の出力と、塊の途中で混ざらない**——標準出力の錠を持って 1 度に書く）。
+pub fn write(text: &str) {
+    let mut stdout = std::io::stdout().lock();
+    let _ = stdout.write_all(text.as_bytes());
+    let _ = stdout.flush();
+}
+
+/// 塊を持つ間に `body` を走らせ、塊の中身を返す（テストの中だけで使う）。
 #[cfg(test)]
 pub fn with_block(body: impl FnOnce()) -> String {
-    let sink: Sink = Arc::new(Mutex::new(String::new()));
-    BLOCK.with(|block| *block.borrow_mut() = Some(sink.clone()));
+    begin();
     body();
-    BLOCK.with(|block| *block.borrow_mut() = None);
-    let text = sink.lock().map(|text| text.clone()).unwrap_or_default();
-    text
+    take().unwrap_or_default()
 }
 
 #[cfg(test)]

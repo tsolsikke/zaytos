@@ -674,6 +674,9 @@ kernel::vfs::tests::the_table_is_small_enough_to_live_inside_a_process
 kernel::vfs::tests::the_writable_mark_follows_how_the_file_was_opened
 kernel::vfs::tests::two_descriptors_on_one_inode_keep_separate_offsets
 kernel::vfs::tests::unopened_and_out_of_range_descriptors_are_refused
+xtask::batch::tests::a_concurrent_row_holds_its_own_block_only_when_rows_are_spread
+xtask::batch::tests::results_come_back_in_the_order_of_the_table
+xtask::batch::tests::rows_not_yet_started_are_left_when_told_to_stop
 xtask::check_lock::tests::a_refusal_names_the_holder_and_shows_only_its_own_content
 xtask::check_lock::tests::device_numbers_split_as_glibc_does
 xtask::check_lock::tests::flock_lines_are_read_from_proc_locks
@@ -743,8 +746,10 @@ xtask::launch::tests::df_avail_is_read_from_the_last_line
 xtask::launch::tests::the_file_limit_exceeds_every_other_write
 xtask::launch::tests::the_host_floor_is_judged_in_four_ways
 xtask::launch::tests::the_registry_names_each_distribution_and_its_base_path
+xtask::launch::tests::the_vcpu_count_is_read_from_smp
 xtask::launch::tests::the_watched_drive_is_matched_against_the_registry
 xtask::launch::tests::the_wrapper_ignores_sigxfsz_before_exec
+xtask::launch::tests::vcpus_are_taken_within_the_budget_and_given_back
 xtask::launch::tests::wsl_is_told_from_the_kernel_release
 xtask::media::tests::a_broken_gpt_crc_is_caught
 xtask::media::tests::a_chain_without_an_end_is_caught
@@ -818,6 +823,7 @@ xtask::tests::manual_runs_record_cpu_reset_but_not_every_interrupt
 xtask::tests::named_judgement_keys_name_a_sabotage_and_sit_in_one_table
 xtask::tests::no_bsp_heartbeat_fails_instead_of_reading_as_empty
 xtask::tests::no_keyboard_layout_is_ever_passed
+xtask::tests::not_concurrent_rows_name_rows_of_batched_tables
 xtask::tests::only_prompts_after_a_newline_are_counted
 xtask::tests::only_the_manual_run_keeps_the_disk_by_default
 xtask::tests::opening_a_window_selects_sdl_and_gtk_stays_available

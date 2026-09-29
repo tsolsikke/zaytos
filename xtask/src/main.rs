@@ -51,6 +51,7 @@ macro_rules! eprintln {
     };
 }
 
+mod batch;
 mod check_lock;
 mod family;
 mod font;
@@ -25098,6 +25099,10 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
     // 外した確率的な項目の一覧が実態を指しているかを先に見る（列挙の腐りを防ぐ）。
     check_flaky_list_matches_tables()?;
+    // **同時に走らせない表の死んだ行も、先に落とす**（2026-09-29。SCRUM-31）。
+    check_not_concurrent_rows()?;
+    // **並べる糸の数は全検査の間だけ**（[`full_check_jobs`]）。
+    PARALLEL.store(full, std::sync::atomic::Ordering::SeqCst);
 
     // **並行実行を機械で断る（2026-09-03）。** **規律で守ろうとして 1 回目で失敗した**
     // （[`refuse_if_something_else_is_running`] の doc）。
@@ -25540,21 +25545,25 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 failed.push("utf8 test".to_string());
             }
         }
+        let mut batch = Batch::new("UTF8_TEST_SABOTAGES");
         for sabotage in UTF8_TEST_SABOTAGES {
             total += 1;
-            let label = format!("utf8-test {sabotage}");
-            begin_item(Family::Shell, &label);
-            match cmd_utf8_test(&[sabotage], false) {
-                Ok(()) => report_inverted_judgement("utf8 test", sabotage, &label, &mut failed),
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
+            batch.add(sabotage, move |failed, _retries| {
+                let label = format!("utf8-test {sabotage}");
+                begin_item(Family::Shell, &label);
+                match cmd_utf8_test(&[sabotage], false) {
+                    Ok(()) => report_inverted_judgement("utf8 test", sabotage, &label, failed),
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                    }
                 }
-            }
+            });
         }
+        batch.run(&mut failed);
 
         // **起動時の設定が走ること（PR-1）。**
         //
@@ -25577,21 +25586,25 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 failed.push("profile test".to_string());
             }
         }
+        let mut batch = Batch::new("PROFILE_TEST_SABOTAGES");
         for sabotage in PROFILE_TEST_SABOTAGES {
             total += 1;
-            let label = format!("profile-test {sabotage}");
-            begin_item(Family::Shell, &label);
-            match cmd_profile_test(&[sabotage], false) {
-                Ok(()) => report_inverted_judgement("profile test", sabotage, &label, &mut failed),
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
+            batch.add(sabotage, move |failed, _retries| {
+                let label = format!("profile-test {sabotage}");
+                begin_item(Family::Shell, &label);
+                match cmd_profile_test(&[sabotage], false) {
+                    Ok(()) => report_inverted_judgement("profile test", sabotage, &label, failed),
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                    }
                 }
-            }
+            });
         }
+        batch.run(&mut failed);
 
         // **履歴がファイルで持ち越されること（HI-1）。**
         //
@@ -25607,21 +25620,25 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 failed.push("history test".to_string());
             }
         }
+        let mut batch = Batch::new("HISTORY_TEST_SABOTAGES");
         for sabotage in HISTORY_TEST_SABOTAGES {
             total += 1;
-            let label = format!("history-test {sabotage}");
-            begin_item(Family::Shell, &label);
-            match cmd_history_test(&[sabotage], false) {
-                Ok(()) => report_inverted_judgement("history test", sabotage, &label, &mut failed),
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
+            batch.add(sabotage, move |failed, _retries| {
+                let label = format!("history-test {sabotage}");
+                begin_item(Family::Shell, &label);
+                match cmd_history_test(&[sabotage], false) {
+                    Ok(()) => report_inverted_judgement("history test", sabotage, &label, failed),
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                    }
                 }
-            }
+            });
         }
+        batch.run(&mut failed);
 
         // **シェルの `|`（`ADR-0063` の (b3)）。** **台本のグループで、1 回の起動で 7 本の `|` を見る。**
         // **破壊テストは 7 つで、落ちる判定がそれぞれ違う**（`PIPE_TEST_SABOTAGES` の doc）。
@@ -25637,21 +25654,25 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 failed.push("pipe test".to_string());
             }
         }
+        let mut batch = Batch::new("PIPE_TEST_SABOTAGES");
         for sabotage in PIPE_TEST_SABOTAGES {
             total += 1;
-            let label = format!("pipe-test {sabotage}");
-            begin_item(Family::Ipc, &label);
-            match cmd_pipe_test(&[sabotage], false) {
-                Ok(()) => report_inverted_judgement("pipe test", sabotage, &label, &mut failed),
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
+            batch.add(sabotage, move |failed, _retries| {
+                let label = format!("pipe-test {sabotage}");
+                begin_item(Family::Ipc, &label);
+                match cmd_pipe_test(&[sabotage], false) {
+                    Ok(()) => report_inverted_judgement("pipe test", sabotage, &label, failed),
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                    }
                 }
-            }
+            });
         }
+        batch.run(&mut failed);
 
         // **unix ドメインのストリームソケット（`ADR-0064`）。** **台本のグループで、1 回の起動で
         // `sockc` の 6 つの形を見る。** **破壊テストは 8 つで、落ちる判定がそれぞれ違う**
@@ -25668,21 +25689,25 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 failed.push("socket test".to_string());
             }
         }
+        let mut batch = Batch::new("SOCKET_TEST_SABOTAGES");
         for sabotage in SOCKET_TEST_SABOTAGES {
             total += 1;
-            let label = format!("socket-test {sabotage}");
-            begin_item(Family::Ipc, &label);
-            match cmd_socket_test(&[sabotage], false) {
-                Ok(()) => report_inverted_judgement("socket test", sabotage, &label, &mut failed),
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
+            batch.add(sabotage, move |failed, _retries| {
+                let label = format!("socket-test {sabotage}");
+                begin_item(Family::Ipc, &label);
+                match cmd_socket_test(&[sabotage], false) {
+                    Ok(()) => report_inverted_judgement("socket test", sabotage, &label, failed),
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                    }
                 }
-            }
+            });
         }
+        batch.run(&mut failed);
 
         // **入力の生イベントの fd（`ADR-0066` の Y-a）。** **`inputd` を前景で起動し、`sendkey` で
         // 本物の打鍵を送り、生イベントが届いて `read` が待ったかを見る。** **破壊テストは 3 つで、
@@ -25699,21 +25724,25 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 failed.push("input test".to_string());
             }
         }
+        let mut batch = Batch::new("INPUT_TEST_SABOTAGES");
         for sabotage in INPUT_TEST_SABOTAGES {
             total += 1;
-            let label = format!("input-test {sabotage}");
-            begin_item(Family::Ipc, &label);
-            match cmd_input_test(&[sabotage], false) {
-                Ok(()) => report_inverted_judgement("input test", sabotage, &label, &mut failed),
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
+            batch.add(sabotage, move |failed, _retries| {
+                let label = format!("input-test {sabotage}");
+                begin_item(Family::Ipc, &label);
+                match cmd_input_test(&[sabotage], false) {
+                    Ok(()) => report_inverted_judgement("input test", sabotage, &label, failed),
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                    }
                 }
-            }
+            });
         }
+        batch.run(&mut failed);
 
         // **入力とソケットを同時に待つ形（`ADR-0066` の Y-b）。** **`polld` が同じ集合で 3 回待ち、
         // 2 回はソケット側、1 回は本物の打鍵で起きる。** **破壊テストは 3 つ**（`POLL_TEST_SABOTAGES`）。
@@ -25729,21 +25758,25 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 failed.push("poll test".to_string());
             }
         }
+        let mut batch = Batch::new("POLL_TEST_SABOTAGES");
         for sabotage in POLL_TEST_SABOTAGES {
             total += 1;
-            let label = format!("poll-test {sabotage}");
-            begin_item(Family::Ipc, &label);
-            match cmd_poll_test(&[sabotage], false) {
-                Ok(()) => report_inverted_judgement("poll test", sabotage, &label, &mut failed),
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
+            batch.add(sabotage, move |failed, _retries| {
+                let label = format!("poll-test {sabotage}");
+                begin_item(Family::Ipc, &label);
+                match cmd_poll_test(&[sabotage], false) {
+                    Ok(()) => report_inverted_judgement("poll test", sabotage, &label, failed),
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                    }
                 }
-            }
+            });
         }
+        batch.run(&mut failed);
 
         // **画面へ画素を出す形（`ADR-0066` の Y-c）。** **`gfxd` が裏バッファを `mmap` して四角を塗り、
         // `present` でコピーする。`screendump` で 2 度読み戻す。** **破壊テストは 3 つ**（`SCREEN_TEST_SABOTAGES`）。
@@ -25759,21 +25792,25 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 failed.push("screen test".to_string());
             }
         }
+        let mut batch = Batch::new("SCREEN_TEST_SABOTAGES");
         for sabotage in SCREEN_TEST_SABOTAGES {
             total += 1;
-            let label = format!("screen-test {sabotage}");
-            begin_item(Family::Ipc, &label);
-            match cmd_screen_test(&[sabotage], false) {
-                Ok(()) => report_inverted_judgement("screen test", sabotage, &label, &mut failed),
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
+            batch.add(sabotage, move |failed, _retries| {
+                let label = format!("screen-test {sabotage}");
+                begin_item(Family::Ipc, &label);
+                match cmd_screen_test(&[sabotage], false) {
+                    Ok(()) => report_inverted_judgement("screen test", sabotage, &label, failed),
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                    }
                 }
-            }
+            });
         }
+        batch.run(&mut failed);
 
         // **画面・入力・ソケット・共有メモリを 1 つの組で通す（`ADR-0066` の Y-d。第1段階の締め）。**
         // **破壊テストは各段階の既存のものを 4 つ、組の中でもう 1 度実行する**（`COMPOSE_TEST_SABOTAGES`）。
@@ -25789,94 +25826,119 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 failed.push("compose test".to_string());
             }
         }
+        let mut batch = Batch::new("COMPOSE_TEST_SABOTAGES");
         for sabotage in COMPOSE_TEST_SABOTAGES {
             total += 1;
-            let label = format!("compose-test {sabotage}");
-            begin_item(Family::Ipc, &label);
-            match cmd_compose_test(&[sabotage], false) {
-                Ok(()) => report_inverted_judgement("compose test", sabotage, &label, &mut failed),
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
+            batch.add(sabotage, move |failed, _retries| {
+                let label = format!("compose-test {sabotage}");
+                begin_item(Family::Ipc, &label);
+                match cmd_compose_test(&[sabotage], false) {
+                    Ok(()) => report_inverted_judgement("compose test", sabotage, &label, failed),
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                    }
                 }
-            }
+            });
         }
+        batch.run(&mut failed);
 
         // **機械の変種（`ADR-0068`）。** **既定のイメージを、QEMU の機械の属性だけを変えて起動する。**
         // **1GiB を超える構成を検査に足すのは必須である**（運用者の決定。**1GiB の壁が隠れていた
         // 理由である**）。**破壊テストは、狙いどおりの所で止まったことまでを見る。**
+        let mut batch = Batch::new("MACHINE_VARIANT_CHECKS");
         for &(name, expect) in MACHINE_VARIANT_CHECKS {
             total += 1;
-            let label = format!("machine-variant {name}");
-            begin_item(Family::Boot, &label);
-            match machine_variant(name).and_then(|variant| {
-                cmd_machine_variant(&variant, &[], &[], MediaContents::Complete, expect)
-            }) {
-                Ok(()) => println!("--- {label}: OK"),
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
+            batch.add(name, move |failed, _retries| {
+                let label = format!("machine-variant {name}");
+                begin_item(Family::Boot, &label);
+                match machine_variant(name).and_then(|variant| {
+                    cmd_machine_variant(&variant, &[], &[], MediaContents::Complete, expect)
+                }) {
+                    Ok(()) => println!("--- {label}: OK"),
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                    }
                 }
-            }
+            });
         }
+        batch.run(&mut failed);
+        let mut batch = Batch::new("MACHINE_VARIANT_CONFIGS");
         for &(name, feature, expect) in MACHINE_VARIANT_CONFIGS {
             total += 1;
-            let label = format!("machine-variant {name} {feature}");
-            begin_item(Family::Boot, &label);
-            let variant = match machine_variant(name) {
-                Ok(variant) => variant,
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
-                    continue;
+            batch.add(&format!("{name} {feature}"), move |failed, _retries| {
+                let label = format!("machine-variant {name} {feature}");
+                begin_item(Family::Boot, &label);
+                let variant = match machine_variant(name) {
+                    Ok(variant) => variant,
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                        return;
+                    }
+                };
+                match cmd_machine_variant(
+                    &variant,
+                    &[feature],
+                    &[],
+                    MediaContents::Complete,
+                    expect,
+                ) {
+                    Ok(()) => println!("--- {label}: OK"),
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                    }
                 }
-            };
-            match cmd_machine_variant(&variant, &[feature], &[], MediaContents::Complete, expect) {
-                Ok(()) => println!("--- {label}: OK"),
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
-                }
-            }
+            });
         }
+        batch.run(&mut failed);
+        let mut batch = Batch::new("MEDIA_SABOTAGES");
         for &(name, contents, expect) in MEDIA_SABOTAGES {
             total += 1;
-            let label = format!("machine-variant {name} {}", contents.label());
-            begin_item(Family::Boot, &label);
-            let variant = match machine_variant(name) {
-                Ok(variant) => variant,
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
-                    continue;
-                }
-            };
-            match cmd_machine_variant(&variant, &[], &[], contents, expect) {
-                Ok(()) => println!("--- {label}: OK"),
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
-                }
-            }
+            batch.add(
+                &format!("{name} {}", contents.label()),
+                move |failed, _retries| {
+                    let label = format!("machine-variant {name} {}", contents.label());
+                    begin_item(Family::Boot, &label);
+                    let variant = match machine_variant(name) {
+                        Ok(variant) => variant,
+                        Err(error) => {
+                            println!(
+                                "--- {label}: FAILED [{}] ({error})",
+                                failure_category(&error)
+                            );
+                            failed.push(label.to_string());
+                            return;
+                        }
+                    };
+                    match cmd_machine_variant(&variant, &[], &[], contents, expect) {
+                        Ok(()) => println!("--- {label}: OK"),
+                        Err(error) => {
+                            println!(
+                                "--- {label}: FAILED [{}] ({error})",
+                                failure_category(&error)
+                            );
+                            failed.push(label.to_string());
+                        }
+                    }
+                },
+            );
         }
+        batch.run(&mut failed);
         // **書く側の上限が QEMU を止め、コアを吐かせない**（2026-09-24。ホストの保護。レビューの足す1点）。
         {
             total += 1;
@@ -25893,37 +25955,41 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 }
             }
         }
+        let mut batch = Batch::new("MACHINE_VARIANT_SABOTAGES");
         for &(name, feature, bootloader, expect) in MACHINE_VARIANT_SABOTAGES {
             total += 1;
-            let label = format!("machine-variant {name} {feature}");
-            begin_item(Family::Boot, &label);
-            let variant = match machine_variant(name) {
-                Ok(variant) => variant,
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
-                    continue;
+            batch.add(&format!("{name} {feature}"), move |failed, _retries| {
+                let label = format!("machine-variant {name} {feature}");
+                begin_item(Family::Boot, &label);
+                let variant = match machine_variant(name) {
+                    Ok(variant) => variant,
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                        return;
+                    }
+                };
+                let (kernel, boot): (&[&str], &[&str]) = if bootloader {
+                    (&[], &[feature])
+                } else {
+                    (&[feature], &[])
+                };
+                match cmd_machine_variant(&variant, kernel, boot, MediaContents::Complete, expect) {
+                    Ok(()) => println!("--- {label}: OK"),
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                    }
                 }
-            };
-            let (kernel, boot): (&[&str], &[&str]) = if bootloader {
-                (&[], &[feature])
-            } else {
-                (&[feature], &[])
-            };
-            match cmd_machine_variant(&variant, kernel, boot, MediaContents::Complete, expect) {
-                Ok(()) => println!("--- {label}: OK"),
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
-                }
-            }
+            });
         }
+        batch.run(&mut failed);
 
         // **Tab の補完（TAB-1）。**
         //
@@ -25939,21 +26005,25 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 failed.push("complete test".to_string());
             }
         }
+        let mut batch = Batch::new("COMPLETE_TEST_SABOTAGES");
         for sabotage in COMPLETE_TEST_SABOTAGES {
             total += 1;
-            let label = format!("complete-test {sabotage}");
-            begin_item(Family::Shell, &label);
-            match cmd_complete_test(&[sabotage], false) {
-                Ok(()) => report_inverted_judgement("complete test", sabotage, &label, &mut failed),
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
+            batch.add(sabotage, move |failed, _retries| {
+                let label = format!("complete-test {sabotage}");
+                begin_item(Family::Shell, &label);
+                match cmd_complete_test(&[sabotage], false) {
+                    Ok(()) => report_inverted_judgement("complete test", sabotage, &label, failed),
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                    }
                 }
-            }
+            });
         }
+        batch.run(&mut failed);
 
         // **FP の状態（B-a。`ADR-0058`）。**
         //
@@ -25972,24 +26042,28 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 failed.push("fp test".to_string());
             }
         }
+        let mut batch = Batch::new("FP_TEST_SABOTAGES");
         for sabotage in FP_TEST_SABOTAGES {
             total += 1;
-            let label = format!("fp-test {sabotage}");
-            begin_item(Family::Process, &label);
-            match cmd_fp_test(&[sabotage], false) {
-                // **止まった理由の行で絞ったもの**（`fp-mf-not-foldable-test`。[`SABOTAGE_STOP_REASONS`]）
-                // **は数えない**——**関数の中で理由を見ている。**
-                Ok(()) if stop_reason_for(&[sabotage]).is_some() => println!("--- {label}: OK"),
-                Ok(()) => report_inverted_judgement("fp test", sabotage, &label, &mut failed),
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
+            batch.add(sabotage, move |failed, _retries| {
+                let label = format!("fp-test {sabotage}");
+                begin_item(Family::Process, &label);
+                match cmd_fp_test(&[sabotage], false) {
+                    // **止まった理由の行で絞ったもの**（`fp-mf-not-foldable-test`。[`SABOTAGE_STOP_REASONS`]）
+                    // **は数えない**——**関数の中で理由を見ている。**
+                    Ok(()) if stop_reason_for(&[sabotage]).is_some() => println!("--- {label}: OK"),
+                    Ok(()) => report_inverted_judgement("fp test", sabotage, &label, failed),
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                    }
                 }
-            }
+            });
         }
+        batch.run(&mut failed);
 
         // **2 本の Ring 3 を同時に走らせる（W1-c-4。`ADR-0060`）。**
         //
@@ -26004,23 +26078,27 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 failed.push("concurrent test".to_string());
             }
         }
+        let mut batch = Batch::new("CONCURRENT_TEST_SABOTAGES");
         for sabotage in CONCURRENT_TEST_SABOTAGES {
             total += 1;
-            let label = format!("concurrent-test {sabotage}");
-            begin_item(Family::Process, &label);
-            match cmd_concurrent_test(&[sabotage], false) {
-                Ok(()) => {
-                    report_inverted_judgement("concurrent test", sabotage, &label, &mut failed)
+            batch.add(sabotage, move |failed, _retries| {
+                let label = format!("concurrent-test {sabotage}");
+                begin_item(Family::Process, &label);
+                match cmd_concurrent_test(&[sabotage], false) {
+                    Ok(()) => {
+                        report_inverted_judgement("concurrent test", sabotage, &label, failed)
+                    }
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                    }
                 }
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
-                }
-            }
+            });
         }
+        batch.run(&mut failed);
 
         // **フォントをイメージへ（B-d）。**
         //
@@ -26039,21 +26117,25 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 failed.push("ttf test".to_string());
             }
         }
+        let mut batch = Batch::new("TTF_TEST_SABOTAGES");
         for sabotage in TTF_TEST_SABOTAGES {
             total += 1;
-            let label = format!("ttf-test {sabotage}");
-            begin_item(Family::Apps, &label);
-            match cmd_ttf_test(&[sabotage], false) {
-                Ok(()) => report_inverted_judgement("ttf test", sabotage, &label, &mut failed),
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
+            batch.add(sabotage, move |failed, _retries| {
+                let label = format!("ttf-test {sabotage}");
+                begin_item(Family::Apps, &label);
+                match cmd_ttf_test(&[sabotage], false) {
+                    Ok(()) => report_inverted_judgement("ttf test", sabotage, &label, failed),
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                    }
                 }
-            }
+            });
         }
+        batch.run(&mut failed);
 
         // **シリアルの排他（シリアルの排他の段）。**
         //
@@ -26071,21 +26153,25 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 failed.push("serial test".to_string());
             }
         }
+        let mut batch = Batch::new("SERIAL_TEST_SABOTAGES");
         for sabotage in SERIAL_TEST_SABOTAGES {
             total += 1;
-            let label = format!("serial-test {sabotage}");
-            begin_item(Family::Smp, &label);
-            match cmd_serial_test(&[sabotage], false) {
-                Ok(()) => report_inverted_judgement("serial test", sabotage, &label, &mut failed),
-                Err(error) => {
-                    println!(
-                        "--- {label}: FAILED [{}] ({error})",
-                        failure_category(&error)
-                    );
-                    failed.push(label.to_string());
+            batch.add(sabotage, move |failed, _retries| {
+                let label = format!("serial-test {sabotage}");
+                begin_item(Family::Smp, &label);
+                match cmd_serial_test(&[sabotage], false) {
+                    Ok(()) => report_inverted_judgement("serial test", sabotage, &label, failed),
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                    }
                 }
-            }
+            });
         }
+        batch.run(&mut failed);
 
         total += 1;
         begin_item(
@@ -26589,12 +26675,16 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }
         }
 
+        let mut batch = Batch::new("FS_CREATE_SABOTAGES");
         for (label, features) in FS_CREATE_SABOTAGES {
             total += 1;
-            begin_item(Family::Fs, &format!("the fs create check catches {label}"));
-            let result = cmd_fs_image_extract(features);
-            report_sabotage_verdict("fs create", label, features, &result, &mut failed);
+            batch.add(label, move |failed, _retries| {
+                begin_item(Family::Fs, &format!("the fs create check catches {label}"));
+                let result = cmd_fs_image_extract(features);
+                report_sabotage_verdict("fs create", label, features, &result, failed);
+            });
         }
+        batch.run(&mut failed);
 
         // **ディレクトリの作成と削除（DIR-1c）。**
         total += 1;
@@ -26610,36 +26700,52 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }
         }
 
+        let mut batch = Batch::new("FS_MKDIR_SABOTAGES");
         for (label, features) in FS_MKDIR_SABOTAGES {
             total += 1;
-            begin_item(Family::Fs, &format!("the fs mkdir check catches {label}"));
-            let result = cmd_fs_image_extract(features);
-            report_sabotage_verdict("fs mkdir", label, features, &result, &mut failed);
+            batch.add(label, move |failed, _retries| {
+                begin_item(Family::Fs, &format!("the fs mkdir check catches {label}"));
+                let result = cmd_fs_image_extract(features);
+                report_sabotage_verdict("fs mkdir", label, features, &result, failed);
+            });
         }
+        batch.run(&mut failed);
 
+        let mut batch = Batch::new("FS_TRUNCATE_SABOTAGES");
         for (label, features) in FS_TRUNCATE_SABOTAGES {
             total += 1;
-            begin_item(
-                Family::Fs,
-                &format!("the fs truncate check catches {label}"),
-            );
-            let result = cmd_fs_image_extract(features);
-            report_sabotage_verdict("fs truncate", label, features, &result, &mut failed);
+            batch.add(label, move |failed, _retries| {
+                begin_item(
+                    Family::Fs,
+                    &format!("the fs truncate check catches {label}"),
+                );
+                let result = cmd_fs_image_extract(features);
+                report_sabotage_verdict("fs truncate", label, features, &result, failed);
+            });
         }
+        batch.run(&mut failed);
 
+        let mut batch = Batch::new("FS_WRITE_SABOTAGES");
         for (label, features) in FS_WRITE_SABOTAGES {
             total += 1;
-            begin_item(Family::Fs, &format!("the fs write check catches {label}"));
-            let result = cmd_fs_image_extract(features);
-            report_sabotage_verdict("fs write", label, features, &result, &mut failed);
+            batch.add(label, move |failed, _retries| {
+                begin_item(Family::Fs, &format!("the fs write check catches {label}"));
+                let result = cmd_fs_image_extract(features);
+                report_sabotage_verdict("fs write", label, features, &result, failed);
+            });
         }
+        batch.run(&mut failed);
 
+        let mut batch = Batch::new("FS_BITMAP_SABOTAGES");
         for (label, features) in FS_BITMAP_SABOTAGES {
             total += 1;
-            begin_item(Family::Fs, &format!("the fs bitmap check catches {label}"));
-            let result = cmd_fs_image_extract(features);
-            report_sabotage_verdict("fs bitmap", label, features, &result, &mut failed);
+            batch.add(label, move |failed, _retries| {
+                begin_item(Family::Fs, &format!("the fs bitmap check catches {label}"));
+                let result = cmd_fs_image_extract(features);
+                report_sabotage_verdict("fs bitmap", label, features, &result, failed);
+            });
         }
+        batch.run(&mut failed);
 
         // **PCI の列挙（S13-a）。** 判定は QEMU 自身の帳簿（`info pci`）との
         // 突き合わせで、期待値の定数を持たない。
@@ -26656,15 +26762,19 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }
         }
 
+        let mut batch = Batch::new("PCI_SABOTAGES");
         for (label, feature) in PCI_SABOTAGES {
             total += 1;
-            begin_item(
-                Family::Devices,
-                &format!("the pci enumeration catches {label}"),
-            );
-            let result = cmd_pci_test(&[feature]);
-            report_sabotage_verdict("pci enumeration", label, &[feature], &result, &mut failed);
+            batch.add(label, move |failed, _retries| {
+                begin_item(
+                    Family::Devices,
+                    &format!("the pci enumeration catches {label}"),
+                );
+                let result = cmd_pci_test(&[feature]);
+                report_sabotage_verdict("pci enumeration", label, &[feature], &result, failed);
+            });
         }
+        batch.run(&mut failed);
 
         // **virtio-blk の読み（S13-b）。** 判定はホスト側のイメージのファイルとの
         // 突き合わせで、期待値の定数を持たない。
@@ -26681,15 +26791,19 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             }
         }
 
+        let mut batch = Batch::new("VIRTIO_SABOTAGES");
         for (label, feature) in VIRTIO_SABOTAGES {
             total += 1;
-            begin_item(
-                Family::Devices,
-                &format!("the virtio-blk read catches {label}"),
-            );
-            let result = cmd_virtio_test(&[feature]);
-            report_sabotage_verdict("virtio blk read", label, &[feature], &result, &mut failed);
+            batch.add(label, move |failed, _retries| {
+                begin_item(
+                    Family::Devices,
+                    &format!("the virtio-blk read catches {label}"),
+                );
+                let result = cmd_virtio_test(&[feature]);
+                report_sabotage_verdict("virtio blk read", label, &[feature], &result, failed);
+            });
         }
+        batch.run(&mut failed);
 
         // **割り込みの配送（S13-d）。** 判定は配線の読み戻し（level と
         // active-low がハードウェアに載っている）と、届いた数である。
@@ -26740,12 +26854,16 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // ext2 の解析が `BadMagic` で起動を止める**（2026-09-25 の実測。5.b）。**名前の検査
         // （バイト一致）には届いていない**——`docs/verification-coverage.md` の「用意できない破壊テストの一覧」。
         // **判定は止まった理由の行で見る**（[`SABOTAGE_STOP_REASONS`]）。
+        let mut batch = Batch::new("FS_LOAD_SABOTAGES");
         for (label, feature) in FS_LOAD_SABOTAGES {
             total += 1;
-            begin_item(Family::Fs, &format!("the fs image load catches {label}"));
-            let result = cmd_fs_image_extract(&[feature]);
-            report_sabotage_verdict("fs image load", label, &[feature], &result, &mut failed);
+            batch.add(label, move |failed, _retries| {
+                begin_item(Family::Fs, &format!("the fs image load catches {label}"));
+                let result = cmd_fs_image_extract(&[feature]);
+                report_sabotage_verdict("fs image load", label, &[feature], &result, failed);
+            });
         }
+        batch.run(&mut failed);
 
         // **書き戻し（flush）の破壊テスト（S13-e）。** keep 変種と組む——最終形が
         // 「割り当てたまま」のイメージで、flush を飛ばすと disk0.img がビルドしたイメージの
@@ -26769,25 +26887,29 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             report_sabotage_verdict("fs image flush", label, features, &result, &mut failed);
         }
 
+        let mut batch = Batch::new("SHELL_TEST_SABOTAGES");
         for feature in SHELL_TEST_SABOTAGES {
             total += 1;
-            begin_item(
-                Family::Shell,
-                &format!("the shell test catches the sabotage {feature}"),
-            );
-            match cmd_shell_test(ShellTestMode::MustFail(feature)) {
-                Ok(()) => report_inverted_judgement(
-                    "shell test",
-                    feature,
-                    &format!("shell test ({feature})"),
-                    &mut failed,
-                ),
-                Err(error) => {
-                    println!("--- shell test ({feature}): FAILED ({error})");
-                    failed.push(format!("shell test ({feature})"));
+            batch.add(feature, move |failed, _retries| {
+                begin_item(
+                    Family::Shell,
+                    &format!("the shell test catches the sabotage {feature}"),
+                );
+                match cmd_shell_test(ShellTestMode::MustFail(feature)) {
+                    Ok(()) => report_inverted_judgement(
+                        "shell test",
+                        feature,
+                        &format!("shell test ({feature})"),
+                        failed,
+                    ),
+                    Err(error) => {
+                        println!("--- shell test ({feature}): FAILED ({error})");
+                        failed.push(format!("shell test ({feature})"));
+                    }
                 }
-            }
+            });
         }
+        batch.run(&mut failed);
 
         // **同じ台本を台本のグループで実行する（`ADR-0063` の (b3) の (b)）。** **打鍵を見ない破壊テストは
         // こちらで落とす**——**1 本あたり約 50 秒縮む。**
@@ -26803,25 +26925,29 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 failed.push("shell script test".to_string());
             }
         }
+        let mut batch = Batch::new("SHELL_SCRIPT_SABOTAGES");
         for feature in SHELL_SCRIPT_SABOTAGES {
             total += 1;
-            begin_item(
-                Family::Shell,
-                &format!("the shell script test catches the sabotage {feature}"),
-            );
-            match cmd_shell_script_test(ShellTestMode::ScriptMustFail(feature)) {
-                Ok(()) => report_inverted_judgement(
-                    "shell script test",
-                    feature,
-                    &format!("shell script test ({feature})"),
-                    &mut failed,
-                ),
-                Err(error) => {
-                    println!("--- shell script test ({feature}): FAILED ({error})");
-                    failed.push(format!("shell script test ({feature})"));
+            batch.add(feature, move |failed, _retries| {
+                begin_item(
+                    Family::Shell,
+                    &format!("the shell script test catches the sabotage {feature}"),
+                );
+                match cmd_shell_script_test(ShellTestMode::ScriptMustFail(feature)) {
+                    Ok(()) => report_inverted_judgement(
+                        "shell script test",
+                        feature,
+                        &format!("shell script test ({feature})"),
+                        failed,
+                    ),
+                    Err(error) => {
+                        println!("--- shell script test ({feature}): FAILED ({error})");
+                        failed.push(format!("shell script test ({feature})"));
+                    }
                 }
-            }
+            });
         }
+        batch.run(&mut failed);
     }
 
     total += 1;
@@ -27388,20 +27514,28 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // 起動するため重い。既定では走らせない。段階の完了時、`unsafe`・
         // 割り込み・ページテーブル・GDT・IDT に触れた変更のコミット前、
         // ツールチェインやビルド設定を変更したときに走らせる。
+        let mut batch = Batch::new("EXCEPTION_TESTS");
         for test in EXCEPTION_TESTS {
             total += 1;
-            let name = format!("exception-test {}", test.name);
-            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
-                cmd_exception_test(test.name)
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("exception-test {}", test.name);
+                run_regression(Family::Interrupts, &name, failed, retries, || {
+                    cmd_exception_test(test.name)
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
+        let mut batch = Batch::new("CRITICAL_TESTS");
         for test in CRITICAL_TESTS {
             total += 1;
-            let name = format!("critical-test {}", test.name);
-            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
-                cmd_marker_test(CRITICAL_TESTS, "critical-test", test.name, None)
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("critical-test {}", test.name);
+                run_regression(Family::Interrupts, &name, failed, retries, || {
+                    cmd_marker_test(CRITICAL_TESTS, "critical-test", test.name, None)
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
         // **静的な監視の破壊テスト（2026-09-24。`ADR-0018` の Addendum 9）。** **`gs:` を読む関数をイメージに
         // 残した版で、基本の検査の項目が `%gs:` を名指しして落ちること。**
         total += 1;
@@ -27420,55 +27554,83 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 Ok(summary) => bail!("the sabotage was NOT caught ({summary})"),
             },
         );
+        let mut batch = Batch::new("PAGING_TESTS");
         for test in PAGING_TESTS {
             total += 1;
-            let name = format!("paging-test {}", test.name);
-            run_regression(Family::Memory, &name, &mut failed, &mut retries, || {
-                cmd_marker_test(PAGING_TESTS, "paging-test", test.name, None)
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("paging-test {}", test.name);
+                run_regression(Family::Memory, &name, failed, retries, || {
+                    cmd_marker_test(PAGING_TESTS, "paging-test", test.name, None)
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
+        let mut batch = Batch::new("STACK_TESTS");
         for test in STACK_TESTS {
             total += 1;
-            let name = format!("stack-test {}", test.name);
-            run_regression(Family::Memory, &name, &mut failed, &mut retries, || {
-                cmd_marker_test(STACK_TESTS, "stack-test", test.name, None)
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("stack-test {}", test.name);
+                run_regression(Family::Memory, &name, failed, retries, || {
+                    cmd_marker_test(STACK_TESTS, "stack-test", test.name, None)
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
+        let mut batch = Batch::new("TASK_TESTS");
         for test in TASK_TESTS {
             total += 1;
-            let name = format!("task-test {}", test.name);
-            run_regression(Family::Process, &name, &mut failed, &mut retries, || {
-                cmd_marker_test(TASK_TESTS, "task-test", test.name, None)
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("task-test {}", test.name);
+                run_regression(Family::Process, &name, failed, retries, || {
+                    cmd_marker_test(TASK_TESTS, "task-test", test.name, None)
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
+        let mut batch = Batch::new("RING3_TESTS");
         for test in RING3_TESTS {
             total += 1;
-            let name = format!("ring3-test {}", test.name);
-            run_regression(Family::Process, &name, &mut failed, &mut retries, || {
-                cmd_marker_test(RING3_TESTS, "ring3-test", test.name, None)
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("ring3-test {}", test.name);
+                run_regression(Family::Process, &name, failed, retries, || {
+                    cmd_marker_test(RING3_TESTS, "ring3-test", test.name, None)
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
+        let mut batch = Batch::new("SYSCALL_TESTS");
         for test in SYSCALL_TESTS {
             total += 1;
-            let name = format!("syscall-test {}", test.name);
-            run_regression(Family::Process, &name, &mut failed, &mut retries, || {
-                cmd_marker_test(SYSCALL_TESTS, "syscall-test", test.name, None)
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("syscall-test {}", test.name);
+                run_regression(Family::Process, &name, failed, retries, || {
+                    cmd_marker_test(SYSCALL_TESTS, "syscall-test", test.name, None)
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
+        let mut batch = Batch::new("ACPI_TESTS");
         for test in ACPI_TESTS {
             total += 1;
-            let name = format!("acpi-test {}", test.name);
-            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
-                cmd_marker_test(ACPI_TESTS, "acpi-test", test.name, None)
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("acpi-test {}", test.name);
+                run_regression(Family::Interrupts, &name, failed, retries, || {
+                    cmd_marker_test(ACPI_TESTS, "acpi-test", test.name, None)
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
+        let mut batch = Batch::new("ACPI_SMP_TESTS");
         for test in ACPI_SMP_TESTS {
             total += 1;
-            let name = format!("acpi-smp-test {}", test.name);
-            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
-                cmd_marker_test(ACPI_SMP_TESTS, "acpi-smp-test", test.name, Some(2))
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("acpi-smp-test {}", test.name);
+                run_regression(Family::Interrupts, &name, failed, retries, || {
+                    cmd_marker_test(ACPI_SMP_TESTS, "acpi-smp-test", test.name, Some(2))
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
         // **BKL の相互排除の証明（S4-b-4）。KVM を要する。**
         total += 1;
         run_regression(
@@ -27479,21 +27641,29 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             cmd_bkl_exclusion_proof,
         );
         // BKL 待ちのタイムアウト（S4-b-4）。**-smp 2 が要る**（別コアが保持する）。
+        let mut batch = Batch::new("BKL_TIMEOUT_TESTS");
         for test in BKL_TIMEOUT_TESTS {
             total += 1;
-            let name = format!("bkl-test {}", test.name);
-            run_regression(Family::Smp, &name, &mut failed, &mut retries, || {
-                cmd_marker_test(BKL_TIMEOUT_TESTS, "bkl-test", test.name, Some(2))
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("bkl-test {}", test.name);
+                run_regression(Family::Smp, &name, failed, retries, || {
+                    cmd_marker_test(BKL_TIMEOUT_TESTS, "bkl-test", test.name, Some(2))
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
         // BKL の破壊テスト（S4-b-2）。
+        let mut batch = Batch::new("BKL_TESTS");
         for test in BKL_TESTS {
             total += 1;
-            let name = format!("bkl-test {}", test.name);
-            run_regression(Family::Smp, &name, &mut failed, &mut retries, || {
-                cmd_marker_test(BKL_TESTS, "bkl-test", test.name, None)
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("bkl-test {}", test.name);
+                run_regression(Family::Smp, &name, failed, retries, || {
+                    cmd_marker_test(BKL_TESTS, "bkl-test", test.name, None)
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
         // **AP のティックのレートをホストの実時間と突き合わせる（S4-a）。**
         // 較正値を BSP と共有するのは仮定なので、**カーネルの外の基準で確かめる。**
         total += 1;
@@ -27506,27 +27676,40 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         );
         // per-CPU スロットが足りない構成（S3-b-2a）。覆いの報告の `false` 側を
         // 評価する構成をここで残す。
+        let mut batch = Batch::new("ACPI_SMP4_TESTS");
         for test in ACPI_SMP4_TESTS {
             total += 1;
-            let name = format!("acpi-smp-test {}", test.name);
-            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
-                cmd_marker_test(ACPI_SMP4_TESTS, "acpi-smp-test", test.name, Some(4))
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("acpi-smp-test {}", test.name);
+                run_regression(Family::Interrupts, &name, failed, retries, || {
+                    cmd_marker_test(ACPI_SMP4_TESTS, "acpi-smp-test", test.name, Some(4))
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
+        let mut batch = Batch::new("APIC_TESTS");
         for test in APIC_TESTS {
             total += 1;
-            let name = format!("apic-test {}", test.name);
-            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
-                cmd_marker_test(APIC_TESTS, "apic-test", test.name, None)
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("apic-test {}", test.name);
+                run_regression(Family::Interrupts, &name, failed, retries, || {
+                    cmd_marker_test(APIC_TESTS, "apic-test", test.name, None)
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
+        let mut batch = Batch::new("APIC_DECODE_TESTS");
         for test in APIC_DECODE_TESTS {
             total += 1;
-            let name = format!("apic-decode-test {}", test.name);
-            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
-                cmd_marker_test(APIC_DECODE_TESTS, "apic-decode-test", test.name, None)
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("apic-decode-test {}", test.name);
+                run_regression(Family::Interrupts, &name, failed, retries, || {
+                    cmd_marker_test(APIC_DECODE_TESTS, "apic-decode-test", test.name, None)
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
+        let mut batch = Batch::new("INTERRUPT_TESTS");
         for test in INTERRUPT_TESTS {
             if is_excluded_flaky("interrupt-test", test.name) {
                 println!(
@@ -27536,11 +27719,14 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 continue;
             }
             total += 1;
-            let name = format!("interrupt-test {}", test.name);
-            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
-                cmd_marker_test(INTERRUPT_TESTS, "interrupt-test", test.name, None)
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("interrupt-test {}", test.name);
+                run_regression(Family::Interrupts, &name, failed, retries, || {
+                    cmd_marker_test(INTERRUPT_TESTS, "interrupt-test", test.name, None)
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
         if is_excluded_flaky("interrupt-test", "keyboard") {
             println!(
                 "=== xtask check: interrupt-test keyboard は確率的なので --full から外してある（cargo xtask flaky）"
@@ -27557,14 +27743,19 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         }
         // S2-d-2 の検査と破壊テストでの確認。**健全な `rate` を先頭に置いてある**ので、
         // 破壊テストが意図した経路だけを壊していることまで確かめられる。
+        let mut batch = Batch::new("LAPIC_TIMER_TESTS");
         for test in LAPIC_TIMER_TESTS {
             total += 1;
-            let name = format!("lapic-timer-test {}", test.name);
-            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
-                cmd_lapic_timer_test(test.name)
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("lapic-timer-test {}", test.name);
+                run_regression(Family::Interrupts, &name, failed, retries, || {
+                    cmd_lapic_timer_test(test.name)
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
         // S3-b-2b-2 の sentinel の破壊テストでの確認。
+        let mut batch = Batch::new("SMP_AP_TESTS");
         for test in SMP_AP_TESTS {
             if is_excluded_flaky("smp-ap-test", test.name) {
                 println!(
@@ -27574,37 +27765,52 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
                 continue;
             }
             total += 1;
-            let name = format!("smp-ap-test {}", test.name);
-            run_regression(Family::Smp, &name, &mut failed, &mut retries, || {
-                cmd_marker_test(SMP_AP_TESTS, "smp-ap-test", test.name, Some(2))
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("smp-ap-test {}", test.name);
+                run_regression(Family::Smp, &name, failed, retries, || {
+                    cmd_marker_test(SMP_AP_TESTS, "smp-ap-test", test.name, Some(2))
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
         // S3-b-2b-1 の雛形一致検査の破壊テストでの確認。
+        let mut batch = Batch::new("SMP_TRAMP_TESTS");
         for test in SMP_TRAMP_TESTS {
             total += 1;
-            let name = format!("smp-tramp-test {}", test.name);
-            run_regression(Family::Boot, &name, &mut failed, &mut retries, || {
-                cmd_marker_test(SMP_TRAMP_TESTS, "smp-tramp-test", test.name, Some(2))
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("smp-tramp-test {}", test.name);
+                run_regression(Family::Boot, &name, failed, retries, || {
+                    cmd_marker_test(SMP_TRAMP_TESTS, "smp-tramp-test", test.name, Some(2))
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
         // S3-b-2a の tripwire の破壊テストでの確認。
+        let mut batch = Batch::new("PERCPU_TESTS");
         for test in PERCPU_TESTS {
             total += 1;
-            let name = format!("percpu-test {}", test.name);
-            run_regression(Family::Smp, &name, &mut failed, &mut retries, || {
-                cmd_marker_test(PERCPU_TESTS, "percpu-test", test.name, None)
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("percpu-test {}", test.name);
+                run_regression(Family::Smp, &name, failed, retries, || {
+                    cmd_marker_test(PERCPU_TESTS, "percpu-test", test.name, None)
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
         // S2-d-1c の破壊テストでの確認。**落ちるべき主張だけが落ちること**を見る。
         // 健全な側も並べて指定しているので、破壊テストが意図した経路だけを
         // 壊していることまで確かめられる。
+        let mut batch = Batch::new("IOAPIC_SABOTAGE_TESTS");
         for sabotage in IOAPIC_SABOTAGE_TESTS {
             total += 1;
-            let name = format!("ioapic-test {}", sabotage.name);
-            run_regression(Family::Interrupts, &name, &mut failed, &mut retries, || {
-                cmd_ioapic_sabotage(sabotage.name, sabotage.feature, sabotage.expected)
+            batch.add(sabotage.name, move |failed, retries| {
+                let name = format!("ioapic-test {}", sabotage.name);
+                run_regression(Family::Interrupts, &name, failed, retries, || {
+                    cmd_ioapic_sabotage(sabotage.name, sabotage.feature, sabotage.expected)
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
         total += 1;
         run_regression(
             Family::Boot,
@@ -27628,13 +27834,17 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         );
         // higher-half の破壊テストでの確認（B-2a-5）。(a)(b)(c) は QEMU で位置署名 + 定常未到達を
         // 判定、(d) はビルド + トランポリンのバイト不一致を静的に判定。
+        let mut batch = Batch::new("HIGHHALF_TESTS");
         for test in HIGHHALF_TESTS {
             total += 1;
-            let name = format!("highhalf-test {}", test.name);
-            run_regression(Family::Boot, &name, &mut failed, &mut retries, || {
-                cmd_highhalf_test(test.name)
+            batch.add(test.name, move |failed, retries| {
+                let name = format!("highhalf-test {}", test.name);
+                run_regression(Family::Boot, &name, failed, retries, || {
+                    cmd_highhalf_test(test.name)
+                });
             });
         }
+        retries.extend(batch.run(&mut failed));
         total += 1;
         run_regression(
             Family::Boot,
@@ -28877,6 +29087,12 @@ impl Failures {
         self.list.push(name);
     }
 
+    /// ほかの入れ物の落ちた項目を、並びを保って後ろへ移す（2026-09-29。SCRUM-31。並べた行の分を表の順に集める）。
+    fn extend(&mut self, other: Failures) {
+        self.list.extend(other.list);
+        self.kinds.extend(other.kinds);
+    }
+
     fn is_empty(&self) -> bool {
         self.list.is_empty()
     }
@@ -29190,7 +29406,11 @@ fn begin_item(family: Family, label: &str) {
     // **失敗の分け方も項目ごとに空にする**（当たりの計測が読む）。
     ITEM_FAILURE_CATEGORY.with(|slot| slot.set(None));
     ITEMS_DONE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    stop_if_over_the_time_limit();
+    // **並べた行（項目の塊を持つ糸）では、ここで止めない**——ほかの糸の QEMU を残したまま終わることになる。上限は、
+    // 並べる側が行を始める前に見る（[`Batch::run`]。2026-09-29。SCRUM-31）。
+    if item_log::sink().is_none() {
+        stop_if_over_the_time_limit();
+    }
     println!("=== xtask check: {label}");
     // **項目の始まりの時刻を残す**（2026-09-29。試験の時間を縮める案の 0。全検査の間だけ）。
     sampling::note_item(label);
@@ -29205,12 +29425,7 @@ fn begin_item(family: Family, label: &str) {
 /// 「ここまでは緑」と言える。** **終了の値も分ける**——
 /// **検査の失敗は 1、上限で切れたのは 3 である。**
 fn stop_if_over_the_time_limit() {
-    let over = TIME_LIMIT
-        .lock()
-        .ok()
-        .and_then(|limit| *limit)
-        .is_some_and(|(started, limit)| started.elapsed() > limit);
-    if !over {
+    if !over_the_time_limit() {
         return;
     }
     let done = ITEMS_DONE.load(std::sync::atomic::Ordering::SeqCst) - 1;
@@ -29232,6 +29447,15 @@ fn stop_if_over_the_time_limit() {
     }
     full_check::end("cut", Some(done), Some(item_time_total().as_secs_f64()));
     std::process::exit(3);
+}
+
+/// `--full` の上限を過ぎたか（2026-09-29。SCRUM-31。**並べる側が、行を始める前にも見る**）。
+fn over_the_time_limit() -> bool {
+    TIME_LIMIT
+        .lock()
+        .ok()
+        .and_then(|limit| *limit)
+        .is_some_and(|(started, limit)| started.elapsed() > limit)
 }
 
 /// 走っている項目の所要を出す（VIEW-b の後）。**走っていなければ何もしない。**
@@ -29520,6 +29744,250 @@ impl SelectionScore {
             self.log_limit,
             self.harness
         )
+    }
+}
+
+/// 全検査で並べる糸の数（2026-09-29。SCRUM-31。運用者の決定）。**既定は 4**（QEMU の vCPU の上限
+/// [`launch::VCPU_BUDGET`] と同じ）。**`ZAYTOS_CHECK_JOBS` で変えられる**——1 なら順に回す（比べと切り分けのため）。
+const FULL_CHECK_JOBS: usize = 4;
+
+/// 並べる糸の数を変える環境変数（[`FULL_CHECK_JOBS`]）。
+const CHECK_JOBS_ENV: &str = "ZAYTOS_CHECK_JOBS";
+
+/// 全検査の間か（`cmd_check` の入口が決める。**全検査の外では並べない**）。
+static PARALLEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 並べる糸の数（**全検査の外は 1**）。
+fn full_check_jobs() -> usize {
+    if !PARALLEL.load(std::sync::atomic::Ordering::SeqCst) {
+        return 1;
+    }
+    env::var(CHECK_JOBS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|jobs| *jobs >= 1)
+        .unwrap_or(FULL_CHECK_JOBS)
+}
+
+/// 全検査で同時に走らせない表の行と、その理由（2026-09-29。SCRUM-31。運用者の決定）。**`*` はその表の全部の行。**
+///
+/// **読んで分けた行**（sendkey で打つシェルの試験、ホストの時間と比べる試験、台本で駆動するシェルの試験、宣言した上限
+/// まで走る実行）と、**走らせて分けた行**（候補を 4 本ずつで回して、判定が変わったか、余裕が揺れの幅を越えて減った行）
+/// を載せる。**死んだ行は落とす**（[`check_not_concurrent_rows`]。全検査の入口で見る）。**表に載らない表のループと、
+/// 1 つずつの項目は、今までどおり順に回る。**
+const NOT_CONCURRENT: &[(&str, &str, &str)] = &[
+    (
+        "SHELL_TEST_SABOTAGES",
+        "*",
+        "sendkey で打つシェルの試験（打鍵の間隔 32 ms は取りこぼしの境目で決めた値で、負荷で崩れうる）",
+    ),
+    (
+        "SHELL_SCRIPT_SABOTAGES",
+        "*",
+        "台本で駆動するシェルの試験（時計・sleep の長さをホストの時間と比べる判定を含む）",
+    ),
+    ("LAPIC_TIMER_TESTS", "rate", "ホストの時間と比べる（ティックの速さの比）"),
+    (
+        "LAPIC_TIMER_TESTS",
+        "scaled-calibration",
+        "ホストの時間と比べる（ティックの速さの比）",
+    ),
+    (
+        "LAPIC_TIMER_TESTS",
+        "rate-on-pm-timer",
+        "ホストの時間と比べる（ティックの速さの比）",
+    ),
+    (
+        "LAPIC_TIMER_TESTS",
+        "pm-timer-double-frequency",
+        "ホストの時間と比べる（ティックの速さの比）",
+    ),
+    (
+        "PAGING_TESTS",
+        "addrspace-no-kernel-share",
+        "宣言した上限まで走る実行（決まった時間の間に起きないことを見る）",
+    ),
+    (
+        "INTERRUPT_TESTS",
+        "no-eoi",
+        "宣言した上限まで走る実行（決まった時間の間に起きないことを見る）",
+    ),
+    (
+        "SMP_AP_TESTS",
+        "ap-forced-current-range-check",
+        "宣言した上限まで走る実行（決まった時間の間に起きないことを見る）",
+    ),
+    (
+        "SMP_AP_TESTS",
+        "smp-stimulus-only",
+        "宣言した上限まで走る実行（決まった時間の間に起きないことを見る）",
+    ),
+    (
+        "SMP_AP_TESTS",
+        "tlb-no-shootdown",
+        "宣言した上限まで走る実行（決まった時間の間に起きないことを見る）",
+    ),
+    // **走らせて分けた行**（2026-09-29。候補の 242 行を 4 本ずつで 5 回、8 本ずつで 1 回回した）。
+    (
+        "COMPOSE_TEST_SABOTAGES",
+        "poll-waits-on-one-member",
+        "同時に走らせると、入力と客の準備が同時に揃う形が出て、狙いでない判定も落ち、待ちが 60 秒延びた",
+    ),
+];
+
+/// その行を同時に走らせないか（[`NOT_CONCURRENT`]）。
+fn is_not_concurrent(table: &str, row: &str) -> bool {
+    NOT_CONCURRENT
+        .iter()
+        .any(|(t, r, _)| *t == table && (*r == "*" || *r == row))
+}
+
+/// 並べる表の行の名前（[`NOT_CONCURRENT`] と突き合わせる名前。**`cmd_check` の `Batch::add` に渡す名前と同じ形**）。
+/// **並べない表は `None`。**
+fn batched_table_rows(table: &str) -> Option<Vec<String>> {
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| name.to_string()).collect()
+    }
+    fn cases<T>(list: &[T], name: impl Fn(&T) -> &str) -> Vec<String> {
+        list.iter().map(|case| name(case).to_string()).collect()
+    }
+    Some(match table {
+        "UTF8_TEST_SABOTAGES" => names(UTF8_TEST_SABOTAGES),
+        "PROFILE_TEST_SABOTAGES" => names(PROFILE_TEST_SABOTAGES),
+        "HISTORY_TEST_SABOTAGES" => names(HISTORY_TEST_SABOTAGES),
+        "PIPE_TEST_SABOTAGES" => names(PIPE_TEST_SABOTAGES),
+        "SOCKET_TEST_SABOTAGES" => names(SOCKET_TEST_SABOTAGES),
+        "INPUT_TEST_SABOTAGES" => names(INPUT_TEST_SABOTAGES),
+        "POLL_TEST_SABOTAGES" => names(POLL_TEST_SABOTAGES),
+        "SCREEN_TEST_SABOTAGES" => names(SCREEN_TEST_SABOTAGES),
+        "COMPOSE_TEST_SABOTAGES" => names(COMPOSE_TEST_SABOTAGES),
+        "MACHINE_VARIANT_CHECKS" => cases(MACHINE_VARIANT_CHECKS, |(name, _)| name),
+        "MACHINE_VARIANT_CONFIGS" => MACHINE_VARIANT_CONFIGS
+            .iter()
+            .map(|(name, feature, _)| format!("{name} {feature}"))
+            .collect(),
+        "MEDIA_SABOTAGES" => MEDIA_SABOTAGES
+            .iter()
+            .map(|(name, contents, _)| format!("{name} {}", contents.label()))
+            .collect(),
+        "MACHINE_VARIANT_SABOTAGES" => MACHINE_VARIANT_SABOTAGES
+            .iter()
+            .map(|(name, feature, _, _)| format!("{name} {feature}"))
+            .collect(),
+        "COMPLETE_TEST_SABOTAGES" => names(COMPLETE_TEST_SABOTAGES),
+        "FP_TEST_SABOTAGES" => names(FP_TEST_SABOTAGES),
+        "CONCURRENT_TEST_SABOTAGES" => names(CONCURRENT_TEST_SABOTAGES),
+        "TTF_TEST_SABOTAGES" => names(TTF_TEST_SABOTAGES),
+        "SERIAL_TEST_SABOTAGES" => names(SERIAL_TEST_SABOTAGES),
+        "FS_CREATE_SABOTAGES" => cases(FS_CREATE_SABOTAGES, |(label, _)| label),
+        "FS_MKDIR_SABOTAGES" => cases(FS_MKDIR_SABOTAGES, |(label, _)| label),
+        "FS_TRUNCATE_SABOTAGES" => cases(FS_TRUNCATE_SABOTAGES, |(label, _)| label),
+        "FS_WRITE_SABOTAGES" => cases(FS_WRITE_SABOTAGES, |(label, _)| label),
+        "FS_BITMAP_SABOTAGES" => cases(FS_BITMAP_SABOTAGES, |(label, _)| label),
+        "PCI_SABOTAGES" => cases(PCI_SABOTAGES, |(label, _)| label),
+        "VIRTIO_SABOTAGES" => cases(VIRTIO_SABOTAGES, |(label, _)| label),
+        "FS_LOAD_SABOTAGES" => cases(FS_LOAD_SABOTAGES, |(label, _)| label),
+        "SHELL_TEST_SABOTAGES" => names(SHELL_TEST_SABOTAGES),
+        "SHELL_SCRIPT_SABOTAGES" => names(SHELL_SCRIPT_SABOTAGES),
+        "EXCEPTION_TESTS" => cases(EXCEPTION_TESTS, |test| test.name),
+        "CRITICAL_TESTS" => cases(CRITICAL_TESTS, |test| test.name),
+        "PAGING_TESTS" => cases(PAGING_TESTS, |test| test.name),
+        "STACK_TESTS" => cases(STACK_TESTS, |test| test.name),
+        "TASK_TESTS" => cases(TASK_TESTS, |test| test.name),
+        "RING3_TESTS" => cases(RING3_TESTS, |test| test.name),
+        "SYSCALL_TESTS" => cases(SYSCALL_TESTS, |test| test.name),
+        "ACPI_TESTS" => cases(ACPI_TESTS, |test| test.name),
+        "ACPI_SMP_TESTS" => cases(ACPI_SMP_TESTS, |test| test.name),
+        "BKL_TIMEOUT_TESTS" => cases(BKL_TIMEOUT_TESTS, |test| test.name),
+        "BKL_TESTS" => cases(BKL_TESTS, |test| test.name),
+        "ACPI_SMP4_TESTS" => cases(ACPI_SMP4_TESTS, |test| test.name),
+        "APIC_TESTS" => cases(APIC_TESTS, |test| test.name),
+        "APIC_DECODE_TESTS" => cases(APIC_DECODE_TESTS, |test| test.name),
+        "INTERRUPT_TESTS" => cases(INTERRUPT_TESTS, |test| test.name),
+        "LAPIC_TIMER_TESTS" => cases(LAPIC_TIMER_TESTS, |test| test.name),
+        "SMP_AP_TESTS" => cases(SMP_AP_TESTS, |test| test.name),
+        "SMP_TRAMP_TESTS" => cases(SMP_TRAMP_TESTS, |test| test.name),
+        "PERCPU_TESTS" => cases(PERCPU_TESTS, |test| test.name),
+        "IOAPIC_SABOTAGE_TESTS" => cases(IOAPIC_SABOTAGE_TESTS, |test| test.name),
+        "HIGHHALF_TESTS" => cases(HIGHHALF_TESTS, |test| test.name),
+        _ => return None,
+    })
+}
+
+/// [`NOT_CONCURRENT`] の行が、並べる表の行を指しているか（純粋な論理。**死んだ行を返す**）。
+fn dead_not_concurrent_rows(
+    rows: &[(&str, &str, &str)],
+    table_rows: impl Fn(&str) -> Option<Vec<String>>,
+) -> Vec<String> {
+    rows.iter()
+        .filter_map(|(table, row, _)| match table_rows(table) {
+            None => Some(format!(
+                "{table} {row} (the table is not run by rows at a time)"
+            )),
+            Some(names) if *row != "*" && !names.iter().any(|name| name == row) => {
+                Some(format!("{table} {row} (the table has no such row)"))
+            }
+            Some(_) => None,
+        })
+        .collect()
+}
+
+/// [`NOT_CONCURRENT`] に死んだ行が在れば落とす（全検査の入口。[`check_flaky_list_matches_tables`] と同じ形）。
+fn check_not_concurrent_rows() -> Result<()> {
+    let dead = dead_not_concurrent_rows(NOT_CONCURRENT, batched_table_rows);
+    if !dead.is_empty() {
+        bail!("NOT_CONCURRENT has dead rows: {}", dead.join("; "));
+    }
+    Ok(())
+}
+
+/// 全検査の表のループを並べる入れ物（2026-09-29。SCRUM-31。[`batch`]）。**表のループは、行ごとの項目をここへ積み、
+/// ループの後で [`Batch::run`] を呼ぶ。** 項目の本体は、落ちた項目と再試行を、行ごとの入れ物へ積む（終わってから、
+/// 表の順に全体へ移す）。
+struct Batch<'a> {
+    table: &'static str,
+    jobs: Vec<batch::Job<'a, (Failures, Vec<String>)>>,
+}
+
+impl<'a> Batch<'a> {
+    fn new(table: &'static str) -> Self {
+        Batch {
+            table,
+            jobs: Vec::new(),
+        }
+    }
+
+    /// 行を積む（`row` は [`NOT_CONCURRENT`] と突き合わせる名前。[`batched_table_rows`] と同じ形）。
+    fn add(&mut self, row: &str, body: impl FnOnce(&mut Failures, &mut Vec<String>) + Send + 'a) {
+        self.jobs.push(batch::Job {
+            concurrent: !is_not_concurrent(self.table, row),
+            run: Box::new(move || {
+                let mut failed = Failures::default();
+                let mut retries = Vec::new();
+                body(&mut failed, &mut retries);
+                // **項目の所要の行を、項目の中で出す**（並べた行は、次の見出しが前の項目の終わりにならない）。
+                finish_item();
+                (failed, retries)
+            }),
+        });
+    }
+
+    /// 積んだ行を走らせ、落ちた項目を表の順に移す（**再試行の名前を返す**）。**上限を過ぎたら、残りを始めずにそこで
+    /// 止める**（[`stop_if_over_the_time_limit`]）。
+    fn run(self, failed: &mut Failures) -> Vec<String> {
+        // **前の項目の所要を、ここで閉じる**——並べた行の間、呼んだ糸の時計が走り続けないように。
+        finish_item();
+        let mut retries = Vec::new();
+        for (item_failed, item_retries) in
+            batch::run(self.jobs, full_check_jobs(), &over_the_time_limit)
+                .into_iter()
+                .flatten()
+        {
+            failed.extend(item_failed);
+            retries.extend(item_retries);
+        }
+        stop_if_over_the_time_limit();
+        retries
     }
 }
 
@@ -31274,6 +31742,30 @@ mod tests {
         assert!(error.contains("onto itself"), "{error}");
         assert!(error.contains("bootloader.efi"), "{error}");
         assert_eq!(left, b"MZ kept");
+    }
+
+    /// **同時に走らせない表の行は、並べる表の行を指す**（2026-09-29。SCRUM-31）。**死んだ行を名前つきで返す。**
+    #[test]
+    fn not_concurrent_rows_name_rows_of_batched_tables() {
+        assert_eq!(
+            dead_not_concurrent_rows(NOT_CONCURRENT, batched_table_rows),
+            Vec::<String>::new()
+        );
+        let rows = [
+            ("PAGING_TESTS", "no-such-row", ""),
+            ("CHECKS", "*", ""),
+            ("SHELL_TEST_SABOTAGES", "*", ""),
+        ];
+        let dead = dead_not_concurrent_rows(&rows, batched_table_rows);
+        assert_eq!(dead.len(), 2, "{dead:?}");
+        assert!(dead[0].starts_with("PAGING_TESTS no-such-row"));
+        assert!(dead[1].starts_with("CHECKS *"));
+        assert!(is_not_concurrent("SHELL_TEST_SABOTAGES", "anything"));
+        assert!(is_not_concurrent(
+            "PAGING_TESTS",
+            "addrspace-no-kernel-share"
+        ));
+        assert!(!is_not_concurrent("PAGING_TESTS", "pcd"));
     }
 
     /// **ESP に積んだファイルは、空でなく、先頭が形の印で始まること**（2026-09-29）。**外れたら、どうだったかを返す。**
