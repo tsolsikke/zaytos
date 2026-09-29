@@ -39,6 +39,14 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use common::addr::{DirectMap, PhysAddr};
 
 use crate::abi::linux::x86_64::{
+    AF_UNIX, CLOCK_MONOTONIC, DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, DT_DIR,
+    DT_REG, DT_UNKNOWN, FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, FB_FIX_SCREENINFO_LEN,
+    FB_TYPE_PACKED_PIXELS, FB_VAR_SCREENINFO_LEN, FB_VISUAL_TRUECOLOR, O_ACCMODE, O_CREAT,
+    O_RDONLY, O_TRUNC, O_WRONLY, POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET,
+    SOCKADDR_UN_LEN, SOCK_STREAM, SOL_SOCKET, STAT_BLOCKS, STAT_INO, STAT_LEN, STAT_MODE,
+    STAT_NLINK, STAT_SIZE, TIMESPEC_LEN, TIMESPEC_NSEC, TIOCGWINSZ, WINSIZE_LEN,
+};
+use crate::abi::linux::x86_64::{
     E2BIG, EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, EBUSY, ECHILD, ECONNREFUSED, EEXIST,
     EFAULT, EINVAL, EIO, EISCONN, EISDIR, EMFILE, EMSGSIZE, ENAMETOOLONG, ENOBUFS, ENODEV, ENOENT,
     ENOMEM, ENOSPC, ENOSYS, ENOTCONN, ENOTDIR, ENOTEMPTY, ENOTSOCK, ENOTTY, EPIPE, EPROTONOSUPPORT,
@@ -169,27 +177,6 @@ pub const SYS_READ: u64 = 0;
 /// `getdents64(fd, dirp, count)`（S10-b）。**Linux の番号 217 をそのまま使う。**
 pub const SYS_GETDENTS64: u64 = 217;
 
-/// `linux_dirent64` の固定部のバイト数。**実測で確かめた**（`d_name` の `offsetof`）。
-///
-/// `d_ino`(8) + `d_off`(8) + `d_reclen`(2) + `d_type`(1) = 19 である。
-///
-/// # `sizeof(struct dirent)` は 280 だが、それは別物である
-///
-/// **あれは受け皿の型の大きさ**（`d_name[256]` を含む）で、
-/// **`getdents64` が書くレコードの大きさではない。** レコードは可変長で、
-/// 長さは `d_reclen` が持つ。**280 を定数として持ち込まない。**
-pub const DIRENT64_HEADER_LEN: usize = 19;
-
-/// `linux_dirent64` のレコードの整列。**8 バイト境界へ切り上げる**（実測で確かめた）。
-const DIRENT64_ALIGN: usize = 8;
-
-/// `d_type`: 不明。**対応表に無い値はこれにする。**
-pub const DT_UNKNOWN: u8 = 0;
-/// `d_type`: ディレクトリ（実測）。
-pub const DT_DIR: u8 = 4;
-/// `d_type`: 通常ファイル（実測）。
-pub const DT_REG: u8 = 8;
-
 /// `stat(path, statbuf)`（S10-b）。**Linux の番号 4 をそのまま使う。**
 ///
 /// # `fstat`（5）は置かない
@@ -197,40 +184,6 @@ pub const DT_REG: u8 = 8;
 /// あちらは fd を取る。**表の中の inode を返すだけなので実装は短いが、
 /// 要ると分かってから足す**（S10-b の棚卸しの判断）。
 pub const SYS_STAT: u64 = 4;
-
-/// `struct stat` のバイト数（x86-64 の Linux）。**実測で確かめた。**
-///
-/// # 欄の位置
-///
-/// `gcc` の `offsetof` で測った値である（`sys/stat.h`）。
-/// **記憶から書かない**（`docs/coding-standards.md` の「実測値は、測った条件が
-/// 変わると古くなる」）。
-///
-/// | 欄 | 位置 | 幅 |
-/// |---|---|---|
-/// | `st_dev` | 0 | 8 |
-/// | `st_ino` | 8 | 8 |
-/// | `st_nlink` | 16 | 8 |
-/// | `st_mode` | 24 | 4 |
-/// | `st_uid` | 28 | 4 |
-/// | `st_gid` | 32 | 4 |
-/// | `st_rdev` | 40 | 8 |
-/// | `st_size` | 48 | 8 |
-/// | `st_blksize` | 56 | 8 |
-/// | `st_blocks` | 64 | 8 |
-/// | `st_atim` | 72 | 16 |
-/// | `st_mtim` | 88 | 16 |
-/// | `st_ctim` | 104 | 16 |
-///
-/// 36..40 と 120..144 は詰め物である（`__pad0` と `__unused[3]`）。
-pub const STAT_LEN: usize = 144;
-
-/// `struct stat` の欄の位置。**上の表と対になっている。**
-const STAT_INO: usize = 8;
-const STAT_NLINK: usize = 16;
-const STAT_MODE: usize = 24;
-const STAT_SIZE: usize = 48;
-const STAT_BLOCKS: usize = 64;
 
 /// `clock_gettime(clockid, timespec)`（W2-d+）。**Linux の番号 228 をそのまま使う。**
 ///
@@ -240,33 +193,6 @@ const STAT_BLOCKS: usize = 64;
 /// （RTC は未実装。`docs/deferred-decisions.md` の「時刻の欄」）。
 /// **0 を返して黙って答えると嘘の時刻が広がる**ので、`-EINVAL` を返す。
 pub const SYS_CLOCK_GETTIME: u64 = 228;
-
-/// `CLOCK_MONOTONIC`（Linux x86-64 の値）。**実測で確かめた**——
-/// `/usr/include/x86_64-linux-gnu/bits/time.h` が `1` と定義している（確認日 2026-09-17。
-/// **`CLOCK_REALTIME` は `0` である**）。
-pub const CLOCK_MONOTONIC: u64 = 1;
-
-/// `struct timespec` のバイト数（x86-64 の Linux）。**実測で確かめた。**
-///
-/// # 欄の位置
-///
-/// `gcc` の `offsetof` で測った値である（`cc` 13.3.0。確認日 2026-09-17）。
-/// **記憶から書かない**（[`STAT_LEN`] と同じ手順である）。
-///
-/// | 欄 | 位置 | 幅 |
-/// |---|---|---|
-/// | `tv_sec` | 0 | 8 |
-/// | `tv_nsec` | 8 | 8 |
-///
-/// **どちらも符号つき 64 ビットで、詰め物は無い**（`__time_t` と `__syscall_slong_t` が
-/// ともに `__SYSCALL_SLONG_TYPE` である）。
-///
-/// **[`STAT_LEN`] の表の `st_atim`（位置 72、幅 16）と整合する**——**あちらが既に
-/// この配置を前提にしていた。**
-pub const TIMESPEC_LEN: usize = 16;
-
-/// `struct timespec` の `tv_nsec` の位置。**上の表と対になっている。**
-const TIMESPEC_NSEC: usize = 8;
 
 /// `nanosleep(req, rem)`（W2-d+）。**Linux の番号 35 をそのまま使う。**
 ///
@@ -302,10 +228,6 @@ pub const SYS_CLOSE: u64 = 3;
 /// 「設定の変更を要求する利用者が来たとき」。**C の移植で必ず来る**）。
 pub const SYS_IOCTL: u64 = 16;
 
-/// `TIOCGWINSZ`——端末の大きさを訊く要求（e-1）。**Linux の値をそのまま使う**
-/// （実測。`/usr/include/asm-generic/ioctls.h` の `0x5413`）。
-pub const TIOCGWINSZ: u64 = 0x5413;
-
 /// `TIOCZTAKE`——溜まっているエラーを取り出す要求（ADR-0046）。
 ///
 /// # ZaytOS の値である。Linux の値ではない
@@ -331,26 +253,6 @@ pub const ZDIAG_LEN: usize = crate::console::pending::ZDIAG_LEN;
 
 /// その構造の本文が始まる位置（ADR-0046）。**手前の 4 バイトは長さと捨てた数である。**
 pub const ZDIAG_TEXT_OFFSET: usize = 4;
-
-/// `struct winsize` の大きさ（e-1）。**`u16` が 4 つである**
-/// （実測。`/usr/include/x86_64-linux-gnu/bits/ioctl-types.h`。
-/// 順に `ws_row` / `ws_col` / `ws_xpixel` / `ws_ypixel`）。
-pub const WINSIZE_LEN: usize = 8;
-
-/// `open` の第 2 引数のうち、アクセスモードを表すビット（Linux の `O_ACCMODE`）。
-pub const O_ACCMODE: u64 = 0o3;
-
-/// 読み取りで開く（Linux の `O_RDONLY`）。**受理するのはこれだけである。**
-pub const O_RDONLY: u64 = 0o0;
-
-/// 書き込みで開く（Linux の `O_WRONLY`）。zi-c で受理に加わった。
-pub const O_WRONLY: u64 = 0o1;
-
-/// 開くと同時に長さ 0 へ切る（Linux の `O_TRUNC`）。zi-c で受理に加わった。
-pub const O_TRUNC: u64 = 0o1000;
-
-/// 無ければ作る（Linux の `O_CREAT`）。e-5 で受理に加わった（ADR-0037 の Addendum）。
-pub const O_CREAT: u64 = 0o100;
 
 /// `lseek` の番号（Linux と同じ。DIR-1b）。
 ///
@@ -388,15 +290,6 @@ pub const SYS_BRK: u64 = 12;
 /// **`common::ext2::unlink_file` が S12-e から在り、入口が無かっただけである。**
 /// **利用者は `/bin/rm` である。**
 pub const SYS_UNLINK: u64 = 87;
-
-/// `lseek` の `whence`——先頭からの絶対位置（`SEEK_SET`）。
-///
-/// # ここだけ受ける
-///
-/// **`SEEK_CUR` と `SEEK_END` は受けない**（`-EINVAL`）。
-/// **使う者が居ない**——`/bin/tail` は `stat` で大きさを取ってから
-/// `SEEK_SET` で跳ぶ。**要る者が来たら足す。**
-pub const SEEK_SET: u64 = 0;
 
 /// 書き込みを伴う `open` のフラグ（`O_CREAT` / `O_TRUNC` / `O_APPEND`）。
 ///
@@ -566,10 +459,6 @@ pub const SYS_OPEN_INPUT: u64 = ZAYTOS_PRIVATE_BASE + 8;
 /// **既に誰かが図形モードなら `-EBUSY`、画面が無ければ `-ENODEV`。**
 pub const SYS_OPEN_SCREEN: u64 = ZAYTOS_PRIVATE_BASE + 9;
 
-/// `FBIOGET_VSCREENINFO`（Linux の fbdev。`<linux/fb.h>`）。**`struct fb_var_screeninfo` を返す。**
-pub const FBIOGET_VSCREENINFO: u64 = 0x4600;
-/// `FBIOGET_FSCREENINFO`（Linux の fbdev）。**`struct fb_fix_screeninfo` を返す。**
-pub const FBIOGET_FSCREENINFO: u64 = 0x4602;
 /// 画面の矩形をコピーする要求（ZaytOS 独自。`ADR-0066` の Y-c）。**引数は `struct drm_clip_rect`。**
 ///
 /// **fbdev に対応するものが無い**——**fbdev は実物のフレームバッファをマップするので、コピーする必要が無い。**
@@ -578,17 +467,6 @@ pub const FBIOGET_FSCREENINFO: u64 = 0x4602;
 /// 採る**——**DIRTYFB そのものは DRM の大きな ABI の一部なので採らない。** **番号は [`TIOCZTAKE`] と
 /// 同じ `'Z'` の帯に置く。**
 pub const FBIOZPRESENT: u64 = 0x5A03;
-
-/// `struct fb_var_screeninfo` のバイト数（`cc` の `sizeof` で測った。2026-09-21）。
-pub const FB_VAR_SCREENINFO_LEN: usize = 160;
-/// `struct fb_fix_screeninfo` のバイト数（同上）。
-pub const FB_FIX_SCREENINFO_LEN: usize = 80;
-/// `struct drm_clip_rect` のバイト数（同上。`u16` の x1・y1・x2・y2）。
-pub const DRM_CLIP_RECT_LEN: usize = 8;
-/// `FB_TYPE_PACKED_PIXELS`（`<linux/fb.h>`）。
-const FB_TYPE_PACKED_PIXELS: u32 = 0;
-/// `FB_VISUAL_TRUECOLOR`（`<linux/fb.h>`）。
-const FB_VISUAL_TRUECOLOR: u32 = 2;
 
 /// 画素の色の並び（`struct fb_bitfield` の `offset`）。**青・緑・赤の順に返す。**
 ///
@@ -678,13 +556,6 @@ pub const SYS_ACCEPT: u64 = 43;
 pub const SYS_BIND: u64 = 49;
 /// `listen` の番号（`ADR-0064`）。**`backlog` は接続の上限で頭を切る**（Linux の `somaxconn` と同じ形）。
 pub const SYS_LISTEN: u64 = 50;
-
-/// `AF_UNIX`（Linux の値）。
-pub const AF_UNIX: u64 = 1;
-/// `SOCK_STREAM`（Linux の値）。
-pub const SOCK_STREAM: u64 = 1;
-/// `sockaddr_un` の大きさ（`sa_family_t` 2 + `sun_path` 108。Linux の配置）。
-pub const SOCKADDR_UN_LEN: u64 = 110;
 
 /// [`SYS_SPAWN`] が受け入れるイメージの最大の大きさ（S11-5）。
 ///
@@ -1958,12 +1829,6 @@ unsafe fn mmap_screen_from_ring3(len: u64, prot: u64, direct_map: DirectMap) -> 
 /// **それ以外は `-EINVAL` である**（下の限界）。
 pub const SYS_POLL: u64 = 7;
 
-/// `struct pollfd` のバイト数（`fd` 4＋`events` 2＋`revents` 2。Linux の配置）。
-const POLLFD_LEN: usize = 8;
-
-/// `POLLIN`（読めるようになった）。**v1 が見る唯一のビットである。**
-const POLLIN: u16 = 0x001;
-
 /// 1 回の `poll` に渡せる fd の数。**待ちの集合の大きさと同じである**
 /// （[`crate::task::MAX_WAIT_REASONS`]。**集合に入らない数の fd を受けても待てない**）。
 const MAX_POLL_FDS: usize = crate::task::MAX_WAIT_REASONS;
@@ -2441,13 +2306,6 @@ pub const SYS_SENDMSG: u64 = 46;
 pub const SYS_RECVMSG: u64 = 47;
 /// `memfd_create` の番号。**無名の共有メモリを作り fd を返す。**
 pub const SYS_MEMFD_CREATE: u64 = 319;
-
-/// `PROT_WRITE`（`mmap`。書ける葉を作る）。
-const PROT_WRITE: u64 = 2;
-/// `SOL_SOCKET`（`cmsghdr` の level）。
-const SOL_SOCKET: u32 = 1;
-/// `SCM_RIGHTS`（`cmsghdr` の type。fd を運ぶ）。
-const SCM_RIGHTS: u32 = 1;
 
 /// `mmap` がマップする基点（プロセスごと）。**イメージ・ヒープ・スタックは `0x400000..0x800000` に
 /// 収まっているので、その上（PML4[0] の空き）へ順にマップする**（`ADR-0065`。ウィンドウの拡張は要らない）。
