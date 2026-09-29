@@ -36,12 +36,11 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use common::addr::{DirectMap, PhysAddr};
 
 use crate::abi::linux::x86_64::{
-    fb_fix_screeninfo, fb_var_screeninfo, parse_clip_rect, AF_UNIX, CLOCK_MONOTONIC,
-    DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, DT_DIR, DT_REG, DT_UNKNOWN,
-    FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, O_ACCMODE, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY,
-    POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET, SOCKADDR_UN_LEN, SOCK_STREAM, SOL_SOCKET,
-    STAT_BLOCKS, STAT_INO, STAT_LEN, STAT_MODE, STAT_NLINK, STAT_SIZE, TIMESPEC_LEN, TIMESPEC_NSEC,
-    TIOCGWINSZ, WINSIZE_LEN,
+    fb_fix_screeninfo, fb_var_screeninfo, parse_clip_rect, stat_bytes, Stat, AF_UNIX,
+    CLOCK_MONOTONIC, DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, DT_DIR, DT_REG,
+    DT_UNKNOWN, FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, O_ACCMODE, O_CREAT, O_RDONLY, O_TRUNC,
+    O_WRONLY, POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET, SOCKADDR_UN_LEN, SOCK_STREAM,
+    SOL_SOCKET, STAT_LEN, TIMESPEC_LEN, TIMESPEC_NSEC, TIOCGWINSZ, WINSIZE_LEN,
 };
 use crate::abi::linux::x86_64::{
     E2BIG, EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, EBUSY, ECHILD, ECONNREFUSED, EEXIST,
@@ -4334,13 +4333,8 @@ unsafe fn sys_stat(path: u64, statbuf: u64, pml4_phys: PhysAddr, direct_map: Dir
         Err(e) => return (-errno_for_ext2(e)) as u64,
     };
 
-    // **0 で埋めてから、分かる欄だけを書く。** 「書かなかった欄は 0」が
-    // 構造で決まるので、埋め忘れが未定義の値として出ない。
-    let mut out = [0u8; STAT_LEN];
-    out[STAT_INO..STAT_INO + 8].copy_from_slice(&u64::from(inode.number).to_le_bytes());
-    out[STAT_NLINK..STAT_NLINK + 8].copy_from_slice(&u64::from(inode.links_count).to_le_bytes());
-    out[STAT_MODE..STAT_MODE + 4].copy_from_slice(&u32::from(inode.mode).to_le_bytes());
-    out[STAT_SIZE..STAT_SIZE + 8].copy_from_slice(&inode.size.to_le_bytes());
+    // **値はここで決め、`struct stat` の欄へ書くのは abi の `stat_bytes` に任せる**（`ADR-0071` の決定 1 の 2 で
+    // 分けた。2026-09-30）。
     // 破壊テスト (S10-b, stat-blocks-in-bytes): `st_blocks` を 512 バイト単位ではなく
     // バイト数で書く。**単位の取り違えは値が「もっともらしい」ままなので、
     // 突き合わせる相手が無いと気づけない。** syscall-test の検算が検出する。
@@ -4348,7 +4342,13 @@ unsafe fn sys_stat(path: u64, statbuf: u64, pml4_phys: PhysAddr, direct_map: Dir
     let blocks = u64::from(inode.blocks_512);
     #[cfg(feature = "syscall-test-stat-blocks-in-bytes")]
     let blocks = u64::from(inode.blocks_512) * 512;
-    out[STAT_BLOCKS..STAT_BLOCKS + 8].copy_from_slice(&blocks.to_le_bytes());
+    let out = stat_bytes(&Stat {
+        ino: u64::from(inode.number),
+        nlink: u64::from(inode.links_count),
+        mode: u32::from(inode.mode),
+        size: inode.size,
+        blocks,
+    });
 
     // **踏み込む前に検証する。**
     // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。

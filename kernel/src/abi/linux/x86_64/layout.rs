@@ -1,5 +1,5 @@
-//! Linux の構造体の配置（長さと欄の位置、画面の `ioctl` の構造体を組む関数と読む関数。x86_64 の Linux の値。
-//! `ADR-0071` の決定 1 の 2 で、`crate::syscall` から移した。2026-09-30）。並びと doc は移す前のまま。
+//! Linux の構造体の配置（長さと欄の位置、構造体を組む関数と読む関数。x86_64 の Linux の値。
+//! `ADR-0071` の決定 1 の 2 で、`crate::syscall` から移した。2026-09-30）。移したものの並びと doc は移す前のまま。
 
 use super::values::{FB_TYPE_PACKED_PIXELS, FB_VISUAL_TRUECOLOR};
 
@@ -97,6 +97,37 @@ pub const SOCKADDR_UN_LEN: u64 = 110;
 /// `struct pollfd` のバイト数（`fd` 4＋`events` 2＋`revents` 2。Linux の配置）。
 pub const POLLFD_LEN: usize = 8;
 
+/// `struct stat` に書く値。**ZaytOS が持つ欄だけである**（ほかの欄は 0 のまま返す）。
+///
+/// **値を決めるのは共通の側で、[`stat_bytes`] は欄の位置へ書くだけである**（`ADR-0071` の決定 1 の 2 で、
+/// `crate::syscall` の `sys_stat` から分けた。2026-09-30）。
+pub struct Stat {
+    /// `st_ino`（inode の番号）。
+    pub ino: u64,
+    /// `st_nlink`（リンクの数）。
+    pub nlink: u64,
+    /// `st_mode`（種類と許可のビット）。
+    pub mode: u32,
+    /// `st_size`（バイト数）。
+    pub size: u64,
+    /// `st_blocks`（**512 バイト単位の数**）。
+    pub blocks: u64,
+}
+
+/// `struct stat` を組む（欄の位置は [`STAT_LEN`] の表）。
+///
+/// **0 で埋めてから、分かる欄だけを書く。** 「書かなかった欄は 0」が
+/// 構造で決まるので、埋め忘れが未定義の値として出ない。
+pub fn stat_bytes(stat: &Stat) -> [u8; STAT_LEN] {
+    let mut out = [0u8; STAT_LEN];
+    out[STAT_INO..STAT_INO + 8].copy_from_slice(&stat.ino.to_le_bytes());
+    out[STAT_NLINK..STAT_NLINK + 8].copy_from_slice(&stat.nlink.to_le_bytes());
+    out[STAT_MODE..STAT_MODE + 4].copy_from_slice(&stat.mode.to_le_bytes());
+    out[STAT_SIZE..STAT_SIZE + 8].copy_from_slice(&stat.size.to_le_bytes());
+    out[STAT_BLOCKS..STAT_BLOCKS + 8].copy_from_slice(&stat.blocks.to_le_bytes());
+    out
+}
+
 /// 画素の色の並び（`struct fb_bitfield` の `offset`）。**青・緑・赤の順に返す。**
 ///
 /// **UEFI の `Bgr` は「バイト 0 が青」、`Rgb` は「バイト 0 が赤」である**（`PixelFormat` の doc）。
@@ -169,14 +200,43 @@ pub fn parse_clip_rect(raw: &[u8; DRM_CLIP_RECT_LEN]) -> Option<(u32, u32, u32, 
 
 #[cfg(test)]
 mod tests {
-    //! 画面の `ioctl` が返す構造体の配置（`ADR-0066` の Y-c）。**`cc` の `offsetof` で測った値を
-    //! 機械で留める**（2026-09-21。`cc` 13.3.0。`<linux/fb.h>` と `<drm/drm.h>`）。**欄の位置を
+    //! 構造体の配置。**`cc` の `offsetof` で測った値を機械で留める**（画面の `ioctl` の構造体は `ADR-0066` の Y-c。
+    //! 2026-09-21。`cc` 13.3.0。`<linux/fb.h>` と `<drm/drm.h>`。`struct stat` は [`STAT_LEN`] の表）。**欄の位置を
     //! 動かすと、Linux の配置から外れたことがここで分かる。**
 
     use super::*;
 
     fn u32_at(bytes: &[u8], at: usize) -> u32 {
         u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+    }
+
+    fn u64_at(bytes: &[u8], at: usize) -> u64 {
+        let mut raw = [0u8; 8];
+        raw.copy_from_slice(&bytes[at..at + 8]);
+        u64::from_le_bytes(raw)
+    }
+
+    /// `struct stat` の欄の位置（[`STAT_LEN`] の表の値を、定数を通さずに書く）。**書かない欄は 0 である。**
+    #[test]
+    fn the_stat_bytes_follow_the_linux_layout() {
+        let out = stat_bytes(&Stat {
+            ino: 12,
+            nlink: 2,
+            mode: 0o100_644,
+            size: 5000,
+            blocks: 16,
+        });
+        assert_eq!(out.len(), 144, "sizeof(struct stat)");
+        assert_eq!(u64_at(&out, 8), 12, "st_ino @8");
+        assert_eq!(u64_at(&out, 16), 2, "st_nlink @16");
+        assert_eq!(u32_at(&out, 24), 0o100_644, "st_mode @24");
+        assert_eq!(u64_at(&out, 48), 5000, "st_size @48");
+        assert_eq!(u64_at(&out, 64), 16, "st_blocks @64");
+        let mut rest = out;
+        for (at, len) in [(8, 8), (16, 8), (24, 4), (48, 8), (64, 8)] {
+            rest[at..at + len].fill(0);
+        }
+        assert_eq!(rest, [0u8; 144], "the other fields are 0");
     }
 
     /// `struct fb_var_screeninfo` の欄の位置（`offsetof` の値）。
