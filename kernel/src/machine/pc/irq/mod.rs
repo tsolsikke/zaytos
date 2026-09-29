@@ -1244,7 +1244,10 @@ pub unsafe fn route_to_apic(
 /// `Some((level, active_low))` を返す。override が無ければ `None`——
 /// そのとき何を既定とするかは呼び出し側の判断である（PCI なら level・low）。
 /// **ビット定数は `crate::machine::pc::apic` の内側に留める**（あの到達範囲を広げない）。
-pub fn declared_signaling(mmio: &crate::acpi::ApicMmio, irq: IsaIrq) -> Option<(bool, bool)> {
+pub fn declared_signaling(
+    mmio: &crate::machine::pc::acpi::ApicMmio,
+    irq: IsaIrq,
+) -> Option<(bool, bool)> {
     if !mmio.has_override_for_irq(irq.0) {
         return None;
     }

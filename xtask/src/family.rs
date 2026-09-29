@@ -172,10 +172,6 @@ pub const PATH_RULES: &[PathRule] = &[
     },
     // ── 割り込み・SMP・メモリ ──
     PathRule {
-        patterns: &["kernel/src/acpi/**"],
-        reach: Reach::Families(&[Family::Boot, Family::Interrupts, Family::Smp]),
-    },
-    PathRule {
         patterns: &["kernel/src/pmtimer.rs"],
         reach: Reach::Families(&[Family::Interrupts, Family::Smp]),
     },

@@ -36,10 +36,10 @@ use common::arch::x86_64::cpu;
 use common::log::Logger;
 use common::machine::pc::serial::SerialPort;
 
-use crate::acpi::{ApicMmio, IoApicLocation};
 use crate::arch::x86_64::paging::active::{ActivePageTable, MapUpdateError, PageAttributes};
 use crate::arch::x86_64::paging::entry;
 use crate::frame_allocator::{FrameAllocator, FRAME_SIZE};
+use crate::machine::pc::acpi::{ApicMmio, IoApicLocation};
 
 /// Local APIC の ID レジスタのオフセット。ID はビット 31:24 にある。
 const LAPIC_REGISTER_ID: u64 = 0x20;
@@ -119,7 +119,7 @@ impl MappedApic {
 ///
 /// # 呼ぶ位置
 ///
-/// [`crate::acpi::survey`] の直後。survey が返した所在をそのまま使うので、
+/// [`crate::machine::pc::acpi::survey`] の直後。survey が返した所在をそのまま使うので、
 /// 値の産地と利用点を離さない。`survey` と違って恒等除去より前である必要は
 /// 無い（UEFI メモリマップのスライスを使わないため）が、離す理由も無い。
 ///

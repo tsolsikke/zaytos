@@ -12,7 +12,7 @@
 //!
 //! - **時計として使わない。** **較正のウィンドウを測るためだけに読む**（`crate::machine::pc::apic`）。
 //! - **書かない。** **PM タイマは読み出し専用のカウンタである。**
-//! - **在りかは決めない。** **ポートと幅は FADT が示す**（`crate::acpi`）——**既定値を焼き込まない。**
+//! - **在りかは決めない。** **ポートと幅は FADT が示す**（`crate::machine::pc::acpi`）——**既定値を焼き込まない。**
 //!
 //! # 幅は 24 か 32 である
 //!
@@ -38,7 +38,7 @@ pub const HZ: u64 = if cfg!(feature = "pm-timer-double-frequency") {
 /// **較正のウィンドウがこの一周より十分短いことを、`crate::machine::pc::apic` が const assert で守る。**
 pub const NARROWEST_WIDTH_BITS: u32 = 24;
 
-/// PM タイマの所在。**FADT から作る**（`crate::acpi`）。
+/// PM タイマの所在。**FADT から作る**（`crate::machine::pc::acpi`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PmTimer {
     port: u16,

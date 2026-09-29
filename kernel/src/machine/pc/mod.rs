@@ -1,5 +1,6 @@
 //! PC に固有のコード（ACPI・APIC・8259・PIT・PCI・i8042。`ADR-0071` の決定 1 の 2 で、共通の側から移す）。
 
+pub mod acpi;
 pub mod ap_start;
 pub mod apic;
 pub mod irq;

@@ -20911,6 +20911,7 @@ const DOC_PATH_MOVES: &[(&str, &str)] = &[
     ),
     ("kernel/src/apic.rs", "kernel/src/machine/pc/apic.rs"),
     ("kernel/src/irq/", "kernel/src/machine/pc/irq/"),
+    ("kernel/src/acpi/", "kernel/src/machine/pc/acpi/"),
 ];
 
 /// 以前の置き場を指すパスを、読み替えの表で今の置き場へ読み替えて、追跡下に在るかを見る（ファイルでも
@@ -24200,7 +24201,7 @@ const STRUCTURAL_GUARD_SYMBOL_FRAGMENTS: &[&str] = &[
 ///   `pic` / `pit` を参照できないことをコンパイラが保証する。
 /// - `kernel/src/task/`: スケジューラの実体（`static mut SCHEDULER`）。外から
 ///   構造体全体への参照を作れないことをコンパイラが保証する（S0-b）。
-/// - `kernel/src/acpi/`: ファームウェアが提示する構成表の境界（S1-b）。
+/// - `kernel/src/machine/pc/acpi/`: ファームウェアが提示する構成表の境界（S1-b）。
 ///   テーブルの生バイトとパーサの型は境界の中に留まる。**物理アドレスは
 ///   S1-c で出るようになった**（`ApicMmio`。APIC の MMIO をマップするには
 ///   所在そのものが要る）ので、「物理アドレスも留まる」はもう成り立たない。
@@ -24228,7 +24229,7 @@ static PRIVATE_BOUNDARY_DIRS: &[&str] = &[
     "kernel/src/machine/pc/irq/",
     "kernel/src/task/",
     "kernel/src/task.rs",
-    "kernel/src/acpi/",
+    "kernel/src/machine/pc/acpi/",
 ];
 
 /// 内部を隠す約束のモジュール（[`PRIVATE_BOUNDARY_DIRS`]）が、その内部を外へ

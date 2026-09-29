@@ -153,7 +153,7 @@ pub struct Apic {
     /// redirection entry の**本数**（添字の最大値ではない）。
     entry_count: u32,
     /// IRQ から GSI への解決表（S2-d-0）。
-    mmio: crate::acpi::ApicMmio,
+    mmio: crate::machine::pc::acpi::ApicMmio,
 }
 
 impl Apic {

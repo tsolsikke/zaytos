@@ -52,7 +52,7 @@ pub const MIN_ENTRY_LENGTH: usize = 2;
 // 解釈するエントリ種別。ここに無いものは「未知」として type と length を
 // ログへ出す（黙って読み飛ばさない）。
 //
-// **入れ子の `pub mod entry_type` へ戻さないこと。** この境界（`kernel/src/acpi/`）は
+// **入れ子の `pub mod entry_type` へ戻さないこと。** この境界（`kernel/src/machine/pc/acpi/`）は
 // 可視性の静的検査の対象で、配下の `mod` 宣言に可視性修飾を付けられない。
 // 実効可視性としては親が非公開なので外からは触れないが、`mod madt` を `pub` に
 // する 1 文字で漏れる形へ変わるため、検査は保守的に禁じている。**実際にここで

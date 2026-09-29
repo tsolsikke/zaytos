@@ -1380,10 +1380,15 @@ extern "sysv64" fn kernel_main() -> ! {
     // ログはシリアルのみ（`log_both` を使わない）。近傍の検証サイトはいずれもシリアル
     // のみで、`log_both` は人が読む要約に使っている。ACPI の走査は検証の材料なので
     // 前者へ揃える。
-    let kernel::acpi::Survey {
+    let kernel::machine::pc::acpi::Survey {
         apic: apic_mmio,
         fadt: fadt_facts,
-    } = kernel::acpi::survey(&mut logger, acpi_rsdp, raw_map, memory_map_descriptor_size);
+    } = kernel::machine::pc::acpi::survey(
+        &mut logger,
+        acpi_rsdp,
+        raw_map,
+        memory_map_descriptor_size,
+    );
 
     // === S1-c: APIC MMIO を direct map ウィンドウへ 4KiB 粒度でマップする ===
     //
@@ -4423,7 +4428,7 @@ fn trigger_interrupt_test(
             0,
             None,
             None,
-            kernel::acpi::FadtFacts::unknown(),
+            kernel::machine::pc::acpi::FadtFacts::unknown(),
         );
     }
 
@@ -4914,7 +4919,7 @@ fn start_timer(
     shell_after_heartbeats: u64,
     apic: Option<&kernel::machine::pc::apic::MappedApic>,
     mut virtio: Option<&mut kernel::virtio::VirtioBlk>,
-    fadt: kernel::acpi::FadtFacts,
+    fadt: kernel::machine::pc::acpi::FadtFacts,
 ) {
     // --- 1. PIT を設定する ---
     // SAFETY: 起動時に 1 回だけ。この時点で IRQ0 はマスクされている
@@ -5061,8 +5066,11 @@ fn start_timer(
 /// シェルのプロンプトまでは進める**——入力の無いシェルは使えないが、止まって何も出さないより
 /// 多くが見える（USB の入力は HW-f）。**在るのに答えない場合は止めない代わりに `[ERROR]` を出す**
 /// （FADT が「在る」と示したとき）。
-fn setup_keyboard(logger: &mut Logger<SerialPort>, i8042: kernel::acpi::I8042Presence) -> bool {
-    use kernel::acpi::I8042Presence;
+fn setup_keyboard(
+    logger: &mut Logger<SerialPort>,
+    i8042: kernel::machine::pc::acpi::I8042Presence,
+) -> bool {
+    use kernel::machine::pc::acpi::I8042Presence;
     use keyboard::controller;
 
     // --- 0. FADT の答えを見る（HW-b）---

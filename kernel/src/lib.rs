@@ -35,7 +35,6 @@ pub mod enabled_features {
 }
 
 pub mod abi;
-pub mod acpi;
 pub mod arch;
 pub mod bkl;
 pub mod console;

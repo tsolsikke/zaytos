@@ -281,7 +281,7 @@ pub struct WakeReport {
 pub unsafe fn wake_application_processors(
     logger: &mut Logger<SerialPort>,
     mapped: &crate::machine::pc::apic::MappedApic,
-    mmio: &crate::acpi::ApicMmio,
+    mmio: &crate::machine::pc::acpi::ApicMmio,
 ) -> WakeReport {
     let usable = mmio.usable_local_apics();
 
@@ -301,7 +301,7 @@ pub unsafe fn wake_application_processors(
 
     // この値は BSP の ID とは限らない。MADT の最初の使用可能な Local APIC
     // エントリであって、エントリ順が BSP を先頭にする保証は仕様に無い
-    // （[`crate::acpi::ApicMmio::bsp_candidate_apic_id`] の doc）。BSP が先頭で
+    // （[`crate::machine::pc::acpi::ApicMmio::bsp_candidate_apic_id`] の doc）。BSP が先頭で
     // ない実装では、下の `continue` が BSP を素通りさせ、BSP 自身へ INIT-SIPI を
     // 送ることになる。
     //
