@@ -24,17 +24,18 @@
 
 # 使い方
 
-    cargo xtask run --boot-log-diff                 # 既定の像を target/esp と target/disk0.img へ置く
+    cargo xtask run --boot-log-diff                 # 既定の像を回の置き場へ置き、target/runs/default-image をその印にする
     python3 tools/qemu-variants.py                  # 全部の変種（1 つ 60 秒）
     python3 tools/qemu-variants.py q35-6g pc-6g     # 選んだ変種だけ
     python3 tools/qemu-variants.py --wait 45 q35-2g # 待つ秒数を変える
     python3 tools/qemu-variants.py --list           # 変種の一覧
+    python3 tools/qemu-variants.py --image target/runs/<番号> q35-6g   # 別の回の像を起こす
 
-**像は直前に置かれたものを使う。** **`--full` や破壊の回の後は、破壊の構成の像が残って
+**像は、既定の像の印（`target/runs/default-image`）が指す回の置き場のものを使う**（`--image` で別の回を選べる）。 **`--full` や破壊の回の後は、破壊の構成の像が残って
 いることがある**——**先に `cargo xtask run --boot-log-diff` で既定の像を置き直すこと。**
 **どの像だったかは、各変種の `build:` の行に出る。**
 
-**`target/` と `disk0.img` を `xtask` と共有するので、`--full` と並べて走らせない**
+**`target/` を `xtask` と共有するので、`--full` と並べて走らせない**
 （`CLAUDE.md` の絶対ルール 1）。**全検査の間は錠で断る**（`tools/check_lock.py`。終了の値 75。
 2026-09-25）——**変種を起こす前に、検査の錠を共有で取る。** **`--list` は QEMU を起こさないので取らない。****ESP・ディスク・OVMF の変数は変種ごとに
 `target/hw/<変種>/` へ写してから使う**（元を汚さない）。
@@ -129,13 +130,13 @@ def ppm_to_png(ppm_path, png_path):
     open(png_path, "wb").write(png)
 
 
-def run_variant(name, wait):
+def run_variant(name, wait, image):
     machine, mem, serial, disk, esp, cpu = VARIANTS[name]
     out = os.path.join(OUT, name)
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(out)
-    shutil.copytree(os.path.join(ROOT, "target", "esp"), os.path.join(out, "esp"))
-    shutil.copy(os.path.join(ROOT, "target", "disk0.img"), os.path.join(out, "disk0.img"))
+    shutil.copytree(os.path.join(image, "esp"), os.path.join(out, "esp"))
+    shutil.copy(os.path.join(image, "disk0.img"), os.path.join(out, "disk0.img"))
     shutil.copy(OVMF_VARS, os.path.join(out, "vars.fd"))
     # **socket のパスは短く保つ**（`sun_path` は 108 バイト。`xtask` の `ensure_socket_path_fits`）。
     # **pid を入れる**（2026-09-25）——**/tmp はホスト全体で共有され、同じ変種を 2 つ起動するとぶつかる。**
@@ -217,6 +218,9 @@ def main():
     parser.add_argument("variants", nargs="*", help="変種の名前（省くと全部）")
     parser.add_argument("--wait", type=int, default=60, help="画面を読み戻すまでの秒数（既定 60）")
     parser.add_argument("--list", action="store_true", help="変種の一覧を出して終わる")
+    # **像は回の置き場から取る**（`xtask` の `RunDir`。2026-09-29）。印は最初に 1 度だけ辿る。
+    parser.add_argument("--image", default=os.path.join(ROOT, "target", "runs", "default-image"),
+                        help="像の置き場（回の置き場。既定は target/runs/default-image）")
     options = parser.parse_args()
     if options.list:
         # **表の欄は 6 つである**（2026-09-24 に CPU の欄を足した）。**5 つで開いていたので、
@@ -231,14 +235,15 @@ def main():
         if name not in VARIANTS:
             print(f"unknown variant {name!r}; see --list", file=sys.stderr)
             return 2
-    for need in (os.path.join(ROOT, "target", "esp"), os.path.join(ROOT, "target", "disk0.img")):
+    image = os.path.realpath(options.image)
+    for need in (os.path.join(image, "esp"), os.path.join(image, "disk0.img")):
         if not os.path.exists(need):
             print(f"{need} is missing; run `cargo xtask run --boot-log-diff` first", file=sys.stderr)
             return 2
     names = options.variants or list(VARIANTS)
     check_lock.hold_shared_or_exit("tools/qemu-variants.py " + " ".join(names))
     for name in names:
-        run_variant(name, options.wait)
+        run_variant(name, options.wait, image)
     return 0
 
 

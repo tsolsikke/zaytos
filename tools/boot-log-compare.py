@@ -77,7 +77,8 @@
     python3 tools/boot-log-compare.py <古い方> <新しい方>
 
 **参照と突き合わせるなら、古い方に `xtask/reference/boot-log-smp2.txt` を、
-新しい方に `target/boot-log-smp2.log` を渡す。**
+新しい方に `cargo xtask run --boot-log-diff` が取った -smp 2 の回の `serial.log` を渡す**
+（回の置き場 `target/runs/<番号>/`。番号は実行の出力の `(info) run` の行に出る）。
 """
 
 import re

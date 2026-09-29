@@ -124,6 +124,8 @@ pub const PATH_RULES: &[PathRule] = &[
             "xtask/Cargo.toml",
             "xtask/src/main.rs",
             "xtask/src/launch.rs",
+            // **回の置き場**（案 B の ①）——**QEMU を起動するどの項目も通る。**
+            "xtask/src/run_dir.rs",
             "xtask/src/kernel_builds.rs",
             "bootloader/**",
             "common/Cargo.toml",

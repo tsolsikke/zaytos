@@ -13,6 +13,7 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use family::Family;
+use run_dir::RunDir;
 
 mod check_lock;
 mod family;
@@ -22,6 +23,7 @@ mod kernel_builds;
 mod launch;
 mod media;
 mod metrics;
+mod run_dir;
 mod sampling;
 mod tool_checks;
 mod vbox;
@@ -2395,6 +2397,8 @@ struct QemuLaunchOptions<'a> {
     ovmf_code: &'a Path,
     ovmf_vars: &'a Path,
     esp_dir: &'a Path,
+    /// virtio-blk のディスクのイメージ（回の置き場の中。[`RunDir::disk_image`]）。
+    disk_image: &'a Path,
     serial: &'a SerialSink,
     debug_log: &'a Path,
     display: DisplayMode,
@@ -2521,7 +2525,11 @@ fn cmd_run(opts: &RunOptions) -> Result<()> {
         ..
     } = *opts;
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(
+        &workspace_root,
+        if panic_test { "panic-test" } else { "run" },
+    )?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, panic_test)?;
     // **打鍵の切り分けだけ、別の構成でビルドする**（[`build_kernel_for_key_probe`]）。
     let kernel_elf = if key_probe {
@@ -2530,16 +2538,19 @@ fn cmd_run(opts: &RunOptions) -> Result<()> {
         build_kernel(&workspace_root, gfx_test)?
     };
     let esp_dir = match disk_for_run(opts.manual, opts.keep_disk, opts.rebuild_disk) {
-        DiskImage::Keep => {
-            stage_esp_keeping_the_disk(&workspace_root, &bootloader_efi, &kernel_elf)?
-        }
-        DiskImage::Rebuild => stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?,
+        DiskImage::Keep => stage_esp_keeping_the_disk(
+            &run,
+            run.previous_disk_image().as_deref(),
+            &bootloader_efi,
+            &kernel_elf,
+        )?,
+        DiskImage::Rebuild => stage_esp(&run, &bootloader_efi, &kernel_elf)?,
     };
 
     if panic_test {
-        run_panic_test(&workspace_root, &ovmf_vars, &esp_dir)
+        run_panic_test(&run, &ovmf_vars, &esp_dir)
     } else {
-        run_interactive(&workspace_root, &ovmf_vars, &esp_dir, opts)
+        run_interactive(&run, &ovmf_vars, &esp_dir, opts)
     }
 }
 
@@ -2573,7 +2584,7 @@ const RUN_TIME_LIMIT: Duration = Duration::from_secs(120);
 const DEBUG_LOG_GROWTH_KB_PER_SEC: u64 = 49_000;
 
 fn run_interactive(
-    workspace_root: &Path,
+    run: &RunDir,
     ovmf_vars: &Path,
     esp_dir: &Path,
     opts: &RunOptions,
@@ -2586,11 +2597,12 @@ fn run_interactive(
         manual,
         ..
     } = *opts;
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars,
         esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::Stdio,
         debug_log: &debug_log,
         // **`--gtk` もウィンドウを開ける**（`--gui` と一緒に書かなくてよい）。
@@ -2715,15 +2727,16 @@ fn run_interactive(
 ///
 /// bootloader はパニック後も `hlt` ループで動き続け自然終了しないため、目印を
 /// 検出し次第（またはタイムアウトで）QEMU プロセスを強制終了する。
-fn run_panic_test(workspace_root: &Path, ovmf_vars: &Path, esp_dir: &Path) -> Result<()> {
-    let serial_log_path = workspace_root.join("target").join("panic-test-serial.log");
+fn run_panic_test(run: &RunDir, ovmf_vars: &Path, esp_dir: &Path) -> Result<()> {
+    let serial_log_path = run.serial_log();
     let _ = fs::remove_file(&serial_log_path);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars,
         esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log_path.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -2816,22 +2829,15 @@ fn cmd_screenshot(args: &[String]) -> Result<()> {
     }
 
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "screenshot")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let kernel_elf = build_kernel(&workspace_root, gfx_test)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let output_path =
-        output_path.unwrap_or_else(|| workspace_root.join("target").join("screenshot.png"));
+    let output_path = output_path.unwrap_or_else(|| run.file("screenshot.png"));
 
-    take_screenshot(
-        &workspace_root,
-        &ovmf_vars,
-        &esp_dir,
-        wait,
-        &output_path,
-        kvm,
-    )
+    take_screenshot(&run, &ovmf_vars, &esp_dir, wait, &output_path, kvm)
 }
 
 /// QEMU を monitor (HMP) 付きで起動し、`wait` だけ待ってから `screendump` を
@@ -2841,7 +2847,7 @@ fn cmd_screenshot(args: &[String]) -> Result<()> {
 /// このコマンド専用のシリアルログファイルへ出力させ、ターミナルには
 /// このコマンド自身の進捗メッセージのみを出す。
 fn take_screenshot(
-    workspace_root: &Path,
+    run: &RunDir,
     ovmf_vars: &Path,
     esp_dir: &Path,
     wait: Duration,
@@ -2850,19 +2856,19 @@ fn take_screenshot(
 ) -> Result<()> {
     // AF_UNIX のパス長制限 (108 バイト程度) を避けるため、ワークスペース内の
     // 長いパスではなく /tmp 配下の短い一意なパスを使う。
-    let monitor_socket =
-        PathBuf::from(format!("/tmp/zaytos-xtask-mon-{}.sock", std::process::id()));
+    let monitor_socket = run.monitor_socket("mon");
     let _ = fs::remove_file(&monitor_socket);
     ensure_socket_path_fits(&monitor_socket)?;
-    let serial_log = workspace_root.join("target").join("screenshot-serial.log");
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
-    let ppm_path = workspace_root.join("target").join("screenshot.ppm");
+    let serial_log = run.serial_log();
+    let debug_log = run.debug_log();
+    let ppm_path = run.file("screenshot.ppm");
     let _ = fs::remove_file(&ppm_path);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars,
         esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -3198,31 +3204,20 @@ impl KeyboardAssertions {
 /// **カーネルが出すのは物理アドレスなので `pmemsave` である。**
 fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "fs-extract")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let kernel_elf = build_kernel_with_features(&workspace_root, features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
     // **構成ごとに別のログへ書く。** 落ちたときに、どの構成のものかが残る。
-    let tag = if features.is_empty() {
-        "default".to_string()
-    } else {
-        features.join("-")
-    };
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("fs-extract-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
-    let dump = workspace_root
-        .join("target")
-        .join(format!("fs-extract-{tag}.img"));
+    let dump = run.file("fs-extract.img");
     let _ = fs::remove_file(&dump);
-    let monitor_socket = PathBuf::from(format!(
-        "/tmp/zaytos-xtask-fsextract-{}.sock",
-        std::process::id()
-    ));
+    let monitor_socket = run.monitor_socket("fsextract");
     let _ = fs::remove_file(&monitor_socket);
     ensure_socket_path_fits(&monitor_socket)?;
 
@@ -3230,6 +3225,7 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -3676,7 +3672,7 @@ fn cmd_fs_image_extract(features: &[&str]) -> Result<()> {
     );
 
     let disk_matches_dump = if extracted {
-        match (fs::read(&dump), fs::read(disk_image_path(&esp_dir))) {
+        match (fs::read(&dump), fs::read(run.disk_image())) {
             (Ok(ram), Ok(disk)) => ram == disk,
             _ => false,
         }
@@ -4502,25 +4498,6 @@ impl ShellTestMode {
         }
     }
 
-    /// シリアルの記録先。**互いに上書きしない**——落ちたときに
-    /// 両方のログが残っていないと、どちらが壊れたのかを後から見られない。
-    fn serial_log_name(self) -> String {
-        match self {
-            ShellTestMode::Normal => "shell-test-serial.log".to_string(),
-            ShellTestMode::KeymapUs => "shell-test-keymap-us-serial.log".to_string(),
-            ShellTestMode::KeymapUsAlwaysJis => {
-                "shell-test-keymap-always-jis-serial.log".to_string()
-            }
-            ShellTestMode::ArrowsDropped => "shell-test-drop-arrows-serial.log".to_string(),
-            ShellTestMode::EscDropped => "shell-test-drop-esc-serial.log".to_string(),
-            ShellTestMode::MustFail(feature) => format!("shell-test-{feature}-serial.log"),
-            ShellTestMode::ScriptNormal => "shell-script-test-serial.log".to_string(),
-            ShellTestMode::ScriptMustFail(feature) => {
-                format!("shell-script-test-{feature}-serial.log")
-            }
-        }
-    }
-
     /// 矢印について期待すること。**`true` は「挿入点が動く」である。**
     ///
     /// **破壊テストの側も真である。** 中断の破壊テストはどれも矢印に触らない。
@@ -4660,26 +4637,25 @@ const PCI_SABOTAGES: &[(&str, &str)] = &[
 /// （`cmd_fs_image_extract` と同じ形）。
 fn cmd_ansi_test(features: &[&str]) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "ansi-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let mut all_features: Vec<&str> = vec!["ansi-test"];
     all_features.extend_from_slice(features);
     let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
     // **構成ごとに別のログへ書く**（`cmd_fs_image_extract` と同じ理由）。
-    let tag = all_features.join("-");
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("ansi-test-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -4844,23 +4820,22 @@ fn cmd_boot_marker_sabotage(feature: &str) -> Result<()> {
 /// **起動しなかった場合も `Err` だが、`classify_boot` が先に切り分ける。**
 fn cmd_boot_with_features(features: &[&str], marker: &str, wanted: &str) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "boot")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let kernel_elf = build_kernel_with_features(&workspace_root, features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let tag = features.join("-");
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("boot-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -7038,12 +7013,15 @@ const TOOL_CHECKS_FULL: [(&str, &str, ToolCheck); 3] = [
     ),
 ];
 
-/// 既定のイメージを `target/esp` と `target/disk0.img` へ置く（2026-09-25。手の道具が起動するイメージ）。
-fn stage_default_image(workspace_root: &Path) -> Result<()> {
+/// 既定の像を回の置き場へ置き、道具が使う既定の像として示す（2026-09-25。手の道具が起動する像。2026-09-29 から回の
+/// 置き場に置き、その道を返す）。
+fn stage_default_image(workspace_root: &Path) -> Result<PathBuf> {
+    let run = RunDir::create(workspace_root, "default-image")?;
     let bootloader_efi = build_bootloader(workspace_root, false)?;
     let kernel_elf = build_kernel(workspace_root, false)?;
-    stage_esp(workspace_root, &bootloader_efi, &kernel_elf)?;
-    Ok(())
+    stage_esp(&run, &bootloader_efi, &kernel_elf)?;
+    run.publish_as_default_image()?;
+    Ok(run.path().to_path_buf())
 }
 
 /// 手で使う道具の確かめを、それだけ実行する（`cargo xtask run --tool-checks`。2026-09-25）。
@@ -7116,25 +7094,24 @@ fn cmd_tool_checks() -> Result<()> {
 /// 通りうる**（判定の当たり先がずれる形）。
 fn cmd_utf8_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "utf8-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let mut all_features: Vec<&str> = vec!["utf8-test"];
     all_features.extend_from_slice(features);
     let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let tag = all_features.join("-");
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("utf8-test-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -7225,7 +7202,7 @@ fn cmd_utf8_test(features: &[&str], expect_pass: bool) -> Result<()> {
     };
     let column_counts_characters = cursor_says("col=3 scol=2", "move");
     // **判定 4**——**消すのは字である。** **`あいu` から `い` を消して `あu` になる。**
-    let disk = disk_image_path(&esp_dir);
+    let disk = run.disk_image();
     let saved = debugfs_read(&disk, "/data/utf8")?;
     // **`x` で `い` が消え、`a` で全角の次へ動いてから `Z` を入れた。**
     // **`a` がバイトで進むと、`Z` が `あ` の途中へ入って中身が壊れる。**
@@ -7342,25 +7319,24 @@ fn cmd_utf8_test(features: &[&str], expect_pass: bool) -> Result<()> {
 /// **1 度目と 2 度目は `init` の起動し直しの行で分ける。**
 fn cmd_profile_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "profile-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let mut all_features: Vec<&str> = vec!["profile-test"];
     all_features.extend_from_slice(features);
     let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let tag = all_features.join("-");
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("profile-test-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -7503,25 +7479,24 @@ const PIPE_TEST_STALL_LIMIT: Duration = Duration::from_secs(30);
 /// **禁止**——**`[ERROR]` が 1 行も無いこと**（`AllocatorUnavailable` と会計をこれで覆う）。
 fn cmd_pipe_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "pipe-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let mut all_features: Vec<&str> = vec!["pipe-test"];
     all_features.extend_from_slice(features);
     let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let tag = all_features.join("-");
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("pipe-test-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -7638,7 +7613,7 @@ fn cmd_pipe_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let writer_waited = writer_waits.is_some_and(|n| n >= 1);
 
     // **判定 4**——`/data/big` がバイト単位で通る。
-    let disk = disk_image_path(&esp_dir);
+    let disk = run.disk_image();
     let big_on_disk = debugfs_read(&disk, "/data/big")?
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default();
@@ -7838,25 +7813,24 @@ const SOCKET_TEST_STALL_LIMIT: Duration = Duration::from_secs(30);
 /// **禁止**——**`[ERROR]` が 1 行も無いこと。**
 fn cmd_socket_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "socket-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let mut all_features: Vec<&str> = vec!["socket-test"];
     all_features.extend_from_slice(features);
     let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let tag = all_features.join("-");
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("socket-test-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -8172,24 +8146,19 @@ const INPUT_TEST_KEY: &str = "a";
 /// **`--socket-test` と同じ形で駆動する**（monitor で `sendkey`、シリアルを読んで判定）。
 fn cmd_input_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "input-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let mut all_features: Vec<&str> = vec!["input-test"];
     all_features.extend_from_slice(features);
     let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let tag = all_features.join("-");
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("input-test-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
-    let monitor_socket = PathBuf::from(format!(
-        "/tmp/zaytos-xtask-input-{}.sock",
-        std::process::id()
-    ));
+    let monitor_socket = run.monitor_socket("input");
     let _ = fs::remove_file(&monitor_socket);
     ensure_socket_path_fits(&monitor_socket)?;
 
@@ -8197,6 +8166,7 @@ fn cmd_input_test(features: &[&str], expect_pass: bool) -> Result<()> {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -8445,24 +8415,19 @@ const POLL_TEST_SUMMARY_MARKER: &str = "[INFO] poll: input events delivered ";
 /// **打鍵は待ち 2 が終わった後に送る**（[`POLL_TEST_SOCKET_MARKER`]）。
 fn cmd_poll_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "poll-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let mut all_features: Vec<&str> = vec!["poll-test"];
     all_features.extend_from_slice(features);
     let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let tag = all_features.join("-");
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("poll-test-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
-    let monitor_socket = PathBuf::from(format!(
-        "/tmp/zaytos-xtask-poll-{}.sock",
-        std::process::id()
-    ));
+    let monitor_socket = run.monitor_socket("poll");
     let _ = fs::remove_file(&monitor_socket);
     ensure_socket_path_fits(&monitor_socket)?;
 
@@ -8470,6 +8435,7 @@ fn cmd_poll_test(features: &[&str], expect_pass: bool) -> Result<()> {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -8762,27 +8728,23 @@ fn magenta_in_square(image: &Option<(u32, u32, Vec<u8>)>) -> Option<u32> {
 /// **読み戻しは外の道具である**（QEMU の `screendump`）——**カーネルの言い分ではなく、画面の実物を読む。**
 fn cmd_screen_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "screen-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let mut all_features: Vec<&str> = vec!["screen-test"];
     all_features.extend_from_slice(features);
     let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let tag = all_features.join("-");
-    let target = workspace_root.join("target");
-    let serial_log = target.join(format!("screen-test-{tag}-serial.log"));
-    let presented_ppm = target.join(format!("screen-test-{tag}-presented.ppm"));
-    let left_ppm = target.join(format!("screen-test-{tag}-left.ppm"));
+    let serial_log = run.serial_log();
+    let presented_ppm = run.file("presented.ppm");
+    let left_ppm = run.file("left.ppm");
     for stale in [&serial_log, &presented_ppm, &left_ppm] {
         let _ = fs::remove_file(stale);
     }
-    let debug_log = target.join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
-    let monitor_socket = PathBuf::from(format!(
-        "/tmp/zaytos-xtask-screen-{}.sock",
-        std::process::id()
-    ));
+    let monitor_socket = run.monitor_socket("screen");
     let _ = fs::remove_file(&monitor_socket);
     ensure_socket_path_fits(&monitor_socket)?;
 
@@ -8790,6 +8752,7 @@ fn cmd_screen_test(features: &[&str], expect_pass: bool) -> Result<()> {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -9511,19 +9474,20 @@ const WRITE_CAP_TEST_TIMEOUT: Duration = Duration::from_secs(90);
 fn check_the_write_cap_stops_qemu() -> Result<()> {
     use std::os::unix::process::ExitStatusExt;
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "write-cap")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let kernel = build_kernel_with_features(&workspace_root, &[])?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel)?;
-    let target = workspace_root.join("target");
-    let serial_log = target.join("write-cap-serial.log");
-    let debug_log = target.join("qemu-debug.log");
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel)?;
+    let serial_log = run.serial_log();
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&serial_log);
     let _ = fs::remove_file(&debug_log);
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -9884,9 +9848,10 @@ fn verify_partition_table(image: &Path) -> Result<()> {
 /// ——**運用者が VirtualBox へ渡すイメージ（`zaytos.img`）を上書きしない。**
 fn cmd_image(contents: MediaContents) -> Result<()> {
     let workspace_root = workspace_root()?;
+    let run = RunDir::create(&workspace_root, "image")?;
     let bootloader_efi = build_bootloader_with_features(&workspace_root, &[])?;
     let kernel = build_kernel_with_features(&workspace_root, &[])?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel)?;
     let name = match contents {
         MediaContents::Complete => "zaytos",
         MediaContents::WithoutFsImage => "zaytos-no-fs-image",
@@ -9904,9 +9869,10 @@ fn cmd_image(contents: MediaContents) -> Result<()> {
 /// 66MiB の書き込みと読み返しで、実測 2 秒である**（カーネルとブートローダは
 /// [`CHECKS`] が既にビルドしている）。**起動そのものは `--full` の `media-only` が見る。**
 fn check_boot_media(workspace_root: &Path) -> Result<String> {
+    let run = RunDir::create(workspace_root, "boot-media")?;
     let bootloader_efi = build_bootloader_with_features(workspace_root, &[])?;
     let kernel = build_kernel_with_features(workspace_root, &[])?;
-    let esp_dir = stage_esp(workspace_root, &bootloader_efi, &kernel)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel)?;
     let out = media_image_path(workspace_root, "zaytos");
     write_boot_media(&esp_dir, &out, MediaContents::Complete)
 }
@@ -9974,16 +9940,12 @@ fn cmd_machine_variant(
     expect: VariantExpect,
 ) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "machine-variant")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader_with_features(&workspace_root, bootloader_features)?;
     let kernel_elf = build_kernel_with_features(&workspace_root, kernel_features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let mut tag_parts: Vec<&str> = vec![variant.name];
-    tag_parts.extend_from_slice(bootloader_features);
-    tag_parts.extend_from_slice(kernel_features);
-    let tag = tag_parts.join("-");
-    let target = workspace_root.join("target");
     // **ESP を 1 つのイメージで渡す変種（`ADR-0068` の HW-e）。** **いま積んだ ESP からイメージをビルドする**
     // ——**破壊テストの構成のカーネルが入っていなければ、破壊テストがイメージに載らない。**
     let media_image = match variant.esp {
@@ -9999,7 +9961,7 @@ fn cmd_machine_variant(
             None
         }
         EspSource::Media => {
-            let out = media_image_path(&workspace_root, &format!("machine-variant-{tag}"));
+            let out = run.file("media.img");
             println!(
                 "machine-variant {}: (info) {}",
                 variant.name,
@@ -10008,9 +9970,9 @@ fn cmd_machine_variant(
             Some(out)
         }
     };
-    let serial_log = target.join(format!("machine-variant-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = target.join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     // **打鍵を送る回だけ monitor を開く**（HW-e-2。[`VariantExpect::PromptKeyAndLines`]）。
@@ -10021,10 +9983,7 @@ fn cmd_machine_variant(
         VariantExpect::PromptThenMachineCheck | VariantExpect::MachineCheckShutsDown
     );
     let wants_monitor = wants_keys || wants_machine_check;
-    let monitor_socket = PathBuf::from(format!(
-        "/tmp/zaytos-xtask-variant-{}.sock",
-        std::process::id()
-    ));
+    let monitor_socket = run.monitor_socket("variant");
     if wants_monitor {
         let _ = fs::remove_file(&monitor_socket);
         ensure_socket_path_fits(&monitor_socket)?;
@@ -10034,6 +9993,7 @@ fn cmd_machine_variant(
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -10450,27 +10410,23 @@ fn quadrants_matching(image: &Option<(u32, u32, Vec<u8>)>) -> Option<usize> {
 /// 5. 集合の外の者を起こしていない（`woken outside the set` が 0）
 fn cmd_compose_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "compose-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let mut all_features: Vec<&str> = vec!["compose-test"];
     all_features.extend_from_slice(features);
     let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let tag = all_features.join("-");
-    let target = workspace_root.join("target");
-    let serial_log = target.join(format!("compose-test-{tag}-serial.log"));
-    let composited_ppm = target.join(format!("compose-test-{tag}-composited.ppm"));
-    let left_ppm = target.join(format!("compose-test-{tag}-left.ppm"));
+    let serial_log = run.serial_log();
+    let composited_ppm = run.file("composited.ppm");
+    let left_ppm = run.file("left.ppm");
     for stale in [&serial_log, &composited_ppm, &left_ppm] {
         let _ = fs::remove_file(stale);
     }
-    let debug_log = target.join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
-    let monitor_socket = PathBuf::from(format!(
-        "/tmp/zaytos-xtask-compose-{}.sock",
-        std::process::id()
-    ));
+    let monitor_socket = run.monitor_socket("compose");
     let _ = fs::remove_file(&monitor_socket);
     ensure_socket_path_fits(&monitor_socket)?;
 
@@ -10478,6 +10434,7 @@ fn cmd_compose_test(features: &[&str], expect_pass: bool) -> Result<()> {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -10672,25 +10629,24 @@ fn cmd_compose_test(features: &[&str], expect_pass: bool) -> Result<()> {
 
 fn cmd_history_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "history-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let mut all_features: Vec<&str> = vec!["history-test"];
     all_features.extend_from_slice(features);
     let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let tag = all_features.join("-");
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("history-test-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -10759,7 +10715,7 @@ fn cmd_history_test(features: &[&str], expect_pass: bool) -> Result<()> {
     // **判定 1**——**辿って戻った行が走った。**
     let recalled_the_previous_run = second.lines().any(|line| line.trim() == "hist-two");
     // **判定 2**——**ファイルは古い順である。**
-    let disk = disk_image_path(&esp_dir);
+    let disk = run.disk_image();
     let saved = debugfs_read(&disk, "/root/.zash_history")?;
     let saved_text = saved
         .as_deref()
@@ -10839,25 +10795,24 @@ fn cmd_history_test(features: &[&str], expect_pass: bool) -> Result<()> {
 /// **`(signal)` として出す**——**判定ではなく前提である。**
 fn cmd_fp_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "fp-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let mut all_features: Vec<&str> = vec!["fp-test"];
     all_features.extend_from_slice(features);
     let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let tag = all_features.join("-");
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("fp-test-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -11100,25 +11055,24 @@ const CONCURRENT_TEST_STALL_LIMIT: Duration = Duration::from_secs(60);
 /// （`docs/wayland-inventory.md` の #4）。**判定ではなく前提である。**
 fn cmd_concurrent_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "concurrent-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let mut all_features: Vec<&str> = vec!["concurrent-test"];
     all_features.extend_from_slice(features);
     let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let tag = all_features.join("-");
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("concurrent-test-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -11480,25 +11434,24 @@ fn host_cc_version() -> String {
 /// この判定に効かない。**
 fn cmd_ttf_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "ttf-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let mut all_features: Vec<&str> = vec!["ttf-test"];
     all_features.extend_from_slice(features);
     let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let tag = all_features.join("-");
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("ttf-test-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -11645,25 +11598,24 @@ fn cmd_serial_test(features: &[&str], expect_pass: bool) -> Result<()> {
     const PADDING: &str = "........................................................";
 
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "serial-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let mut all_features: Vec<&str> = vec!["serial-stress-test"];
     all_features.extend_from_slice(features);
     let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let tag = all_features.join("-");
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("serial-test-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let mut qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -11799,25 +11751,24 @@ fn cmd_serial_test(features: &[&str], expect_pass: bool) -> Result<()> {
 /// 台本の doc）。
 fn cmd_complete_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "complete-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let mut all_features: Vec<&str> = vec!["complete-test"];
     all_features.extend_from_slice(features);
     let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let tag = all_features.join("-");
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("complete-test-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -11956,25 +11907,24 @@ fn cmd_complete_test(features: &[&str], expect_pass: bool) -> Result<()> {
 
 fn cmd_zi_test(features: &[&str]) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "zi-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let mut all_features: Vec<&str> = vec!["zi-test"];
     all_features.extend_from_slice(features);
     let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let tag = all_features.join("-");
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("zi-test-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -13230,25 +13180,24 @@ fn program_output(segment: &str) -> String {
 /// どこに在るかで見る。** **イメージの中身も、ウィンドウの高さも、動いた量も写していない。**
 fn cmd_view_test(features: &[&str]) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "view-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let mut all_features: Vec<&str> = vec!["view-test"];
     all_features.extend_from_slice(features);
     let kernel_elf = build_kernel_with_features(&workspace_root, &all_features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let tag = all_features.join("-");
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("view-test-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -13712,25 +13661,18 @@ fn parse_zi_cursor_rows(serial: &str, tag: &str) -> Vec<u32> {
 
 fn cmd_pci_test(features: &[&str]) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "pci-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let kernel_elf = build_kernel_with_features(&workspace_root, features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
     // **構成ごとに別のログへ書く**（`cmd_fs_image_extract` と同じ理由）。
-    let tag = if features.is_empty() {
-        "default".to_string()
-    } else {
-        features.join("-")
-    };
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("pci-test-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
-    let monitor_socket =
-        PathBuf::from(format!("/tmp/zaytos-xtask-pci-{}.sock", std::process::id()));
+    let monitor_socket = run.monitor_socket("pci");
     let _ = fs::remove_file(&monitor_socket);
     ensure_socket_path_fits(&monitor_socket)?;
 
@@ -13738,6 +13680,7 @@ fn cmd_pci_test(features: &[&str]) -> Result<()> {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -14026,27 +13969,22 @@ const VIRTIO_SABOTAGES: &[(&str, &str)] = &[
 /// ファイルの同じ 512 バイトから同じ計算をする。**両側が独立である。**
 fn cmd_virtio_test(features: &[&str]) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "virtio-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let kernel_elf = build_kernel_with_features(&workspace_root, features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let tag = if features.is_empty() {
-        "default".to_string()
-    } else {
-        features.join("-")
-    };
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("virtio-test-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -14121,7 +14059,7 @@ fn cmd_virtio_test(features: &[&str]) -> Result<()> {
     // **読むのは sector 2（オフセット 1024。superblock）である**——S13-c で
     // ディスクの中身が ext2 のイメージになり、sector 0 は boot 領域の全 0 になった。
     // 0 のままでは「読めていなくても 0」で一致が言えない（種類の 1 つ目）。
-    let image = fs::read(disk_image_path(&esp_dir))
+    let image = fs::read(run.disk_image())
         .with_context(|| "failed to read the disk image back".to_string())?;
     let mut expected_checksum = 0u32;
     for (index, byte) in image.iter().skip(1024).take(512).enumerate() {
@@ -14179,27 +14117,22 @@ fn parse_marked_u64(line: &str, marker: &str) -> Option<u64> {
 /// 形を、届いた数の判定だけが観測へ変える。**
 fn cmd_virtio_irq_test(features: &[&str]) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "virtio-irq")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let kernel_elf = build_kernel_with_features(&workspace_root, features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let tag = if features.is_empty() {
-        "default".to_string()
-    } else {
-        features.join("-")
-    };
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("virtio-irq-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -14326,22 +14259,22 @@ fn cmd_virtio_irq_test(features: &[&str]) -> Result<()> {
 /// 縮む**（`--shell-test` の破壊テストは 58 秒、台本のグループは 8.5 秒。実測）。
 fn cmd_shell_script_test(mode: ShellTestMode) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, &mode.context())?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let kernel_elf = build_kernel_with_features(&workspace_root, &mode.features())?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let serial_log = workspace_root
-        .join("target")
-        .join(mode.serial_log_name().as_str());
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -14403,28 +14336,34 @@ fn cmd_shell_script_test(mode: ShellTestMode) -> Result<()> {
 }
 
 fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
+    cmd_shell_test_with_disk(mode, None)
+}
+
+/// [`cmd_shell_test`] の本体。**`previous` は、ディスクを持ち越す回（`KEYMAP=us`）が写す、前の起動のイメージ**
+/// である（2026-09-29。回ごとの置き場にしたので、渡す形にした）。**渡されなければ、直前の回のイメージを使う**
+/// （以前の決まった置き場と同じ振る舞い）。
+fn cmd_shell_test_with_disk(mode: ShellTestMode, previous: Option<&Path>) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, &mode.context())?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let kernel_elf = build_kernel_with_features(&workspace_root, &mode.features())?;
     // **`KEYMAP=us` の回は `disk0.img` を作り直さない（f-1b）。**
     // **1 度目の起動が `zi` で書き込んだものなので、作り直すと消える。**
     let esp_dir = if mode.keeps_the_disk() {
-        stage_esp_keeping_the_disk(&workspace_root, &bootloader_efi, &kernel_elf)?
+        let previous = previous
+            .map(Path::to_path_buf)
+            .or_else(|| run.previous_disk_image());
+        stage_esp_keeping_the_disk(&run, previous.as_deref(), &bootloader_efi, &kernel_elf)?
     } else {
-        stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?
+        stage_esp(&run, &bootloader_efi, &kernel_elf)?
     };
 
-    let serial_log = workspace_root
-        .join("target")
-        .join(mode.serial_log_name().as_str());
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
-    let monitor_socket = PathBuf::from(format!(
-        "/tmp/zaytos-xtask-shell-{}.sock",
-        std::process::id()
-    ));
+    let monitor_socket = run.monitor_socket("shell");
     let _ = fs::remove_file(&monitor_socket);
     ensure_socket_path_fits(&monitor_socket)?;
 
@@ -14432,6 +14371,7 @@ fn cmd_shell_test(mode: ShellTestMode) -> Result<()> {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -15757,26 +15697,22 @@ fn cmd_keyboard_test() -> Result<()> {
 
 fn run_keyboard_test(features: &[&str]) -> Result<KeyboardAssertions> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "keyboard-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let kernel_elf = build_kernel_with_features(&workspace_root, features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let serial_log = workspace_root
-        .join("target")
-        .join("keyboard-test-serial.log");
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
     // **screenshot と同じく /tmp の短いパスを使う。** workspace 配下に置くと、
     // 作業ディレクトリが深い場所（git worktree を /tmp の下に作った場合など）で
     // `sun_path` の 108 バイト上限を超える。超えると QEMU はソケットを作れずに
     // 即座に終了し、ゲストの出力が 1 行も出ない。症状が起動失敗と区別できず、
     // 実際にこれを「OVMF の起動フレーキネス」と 8 回連続で誤認しかけた。
-    let monitor_socket = PathBuf::from(format!(
-        "/tmp/zaytos-xtask-keyboard-{}.sock",
-        std::process::id()
-    ));
+    let monitor_socket = run.monitor_socket("keyboard");
     let _ = fs::remove_file(&monitor_socket);
     ensure_socket_path_fits(&monitor_socket)?;
 
@@ -15784,6 +15720,7 @@ fn run_keyboard_test(features: &[&str]) -> Result<KeyboardAssertions> {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -16148,20 +16085,22 @@ fn cmd_lapic_timer_test(kind: &str) -> Result<()> {
     let context = format!("lapic-timer-test {}", test.name);
 
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "lapic-timer")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let kernel_elf = build_kernel_with_features(&workspace_root, test.features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let serial_log = workspace_root.join("target").join("lapic-timer-serial.log");
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let mut qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -16354,20 +16293,22 @@ fn last_ap_heartbeat_ticks(serial_log: &Path) -> Option<u64> {
 fn cmd_ap_timer_rate() -> Result<()> {
     let context = "smp-ap-test ap-timer-rate";
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "smp-ap-rate")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let kernel_elf = build_kernel_with_features(&workspace_root, &["keep-steady-loop"])?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let serial_log = workspace_root.join("target").join("smp-ap-rate-serial.log");
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let mut qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -16497,6 +16438,7 @@ fn cmd_ap_timer_rate() -> Result<()> {
 fn cmd_kernel_entry_concurrency() -> Result<()> {
     let context = "smp-ap-test kernel-entry-concurrency";
     let workspace_root = workspace_root()?;
+    let run = RunDir::create(&workspace_root, "smp-ap-concurrency")?;
 
     if !Path::new(KVM_DEVICE_PATH).exists() {
         println!(
@@ -16507,22 +16449,21 @@ fn cmd_kernel_entry_concurrency() -> Result<()> {
         bail!("{context}: SKIPPED (environment: KVM unavailable)")
     }
 
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let kernel_elf = build_kernel_with_features(&workspace_root, &[])?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let serial_log = workspace_root
-        .join("target")
-        .join("smp-ap-concurrency-serial.log");
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let mut qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -16662,22 +16603,22 @@ fn cmd_bkl_exclusion_proof() -> Result<()> {
 
 /// 1 構成を KVM の `-smp 2` で起動し、heartbeat が報告する最大の同時進入数を返す。
 fn run_for_max_entry_depth(workspace_root: &Path, features: &str) -> Result<Option<u64>> {
-    let ovmf_vars = prepare_ovmf_vars(workspace_root)?;
+    let run = RunDir::create(workspace_root, "bkl-exclusion")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(workspace_root, false)?;
     let feature_list: Vec<&str> = features.split(',').collect();
     let kernel_elf = build_kernel_with_features(workspace_root, &feature_list)?;
-    let esp_dir = stage_esp(workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let serial_log = workspace_root
-        .join("target")
-        .join("bkl-exclusion-serial.log");
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
 
     let mut qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -16916,7 +16857,8 @@ fn cmd_highhalf_test(kind: &str) -> Result<()> {
         })?;
 
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "highhalf-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     // **空文字は「既定ビルド」を意味する。** 破壊テストの feature を持たない構成
     // （`-smp 2` での列挙の確認）が既定のまま走れるようにする。空要素をそのまま
@@ -16927,19 +16869,18 @@ fn cmd_highhalf_test(kind: &str) -> Result<()> {
         .filter(|feature| !feature.is_empty())
         .collect();
     let kernel_elf = build_kernel_with_features(&workspace_root, &features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let serial_log = workspace_root
-        .join("target")
-        .join("highhalf-test-serial.log");
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -17456,10 +17397,11 @@ fn cmd_persist_zi_test(rebuild_between: bool) -> Result<()> {
     };
 
     println!("=== {context}: boot 1 (zi-test, rebuilding the disk)");
-    let first = capture_one_boot(
+    let (first, first_run) = capture_one_boot(
         &workspace_root,
         &["zi-test"],
         DiskImage::Rebuild,
+        None,
         "zi-boot1",
         "script-done:",
     )?;
@@ -17467,8 +17409,7 @@ fn cmd_persist_zi_test(rebuild_between: bool) -> Result<()> {
     println!("{context}: boot 1's save reached the device = {saved}");
 
     // **装置の中身を外の道具に示させる。**
-    let esp_dir = workspace_root.join("target").join("esp");
-    let disk = disk_image_path(&esp_dir);
+    let disk = first_run.disk_image();
     let on_device = debugfs_read(&disk, "/data/lines")?;
     let device_carries_the_edit = match (on_device.as_ref(), built_lines.as_ref()) {
         (Some(now), Some(built)) => !now.is_empty() && now != built,
@@ -17494,7 +17435,7 @@ fn cmd_persist_zi_test(rebuild_between: bool) -> Result<()> {
     let host_checksum = fs::read(&disk).ok().map(|bytes| image_checksum(&bytes));
 
     println!("=== {context}: boot 2 (persist-check-test, keeping the disk)");
-    let second = capture_one_boot(
+    let (second, _second_run) = capture_one_boot(
         &workspace_root,
         &["persist-check-test"],
         if rebuild_between {
@@ -17502,6 +17443,7 @@ fn cmd_persist_zi_test(rebuild_between: bool) -> Result<()> {
         } else {
             DiskImage::Keep
         },
+        Some(disk.as_path()),
         "zi-boot2",
         "script-done:",
     )?;
@@ -17622,10 +17564,11 @@ fn cmd_persist_env_test(rebuild_between: bool, ignore_file: bool) -> Result<()> 
     };
 
     println!("=== {context}: boot 1 (env-rewrite-test, rebuilding the disk)");
-    let first = capture_one_boot(
+    let (first, first_run) = capture_one_boot(
         &workspace_root,
         &[&["env-rewrite-test"], sabotage].concat(),
         DiskImage::Rebuild,
+        None,
         "env-boot1",
         "script-done:",
     )?;
@@ -17633,8 +17576,7 @@ fn cmd_persist_env_test(rebuild_between: bool, ignore_file: bool) -> Result<()> 
     println!("{context}: boot 1's save reached the device = {saved}");
 
     // **装置の中身を外の道具に示させる。**
-    let esp_dir = workspace_root.join("target").join("esp");
-    let disk = disk_image_path(&esp_dir);
+    let disk = first_run.disk_image();
     let on_device = debugfs_read(&disk, "/etc/environment")?;
     let device_carries_the_edit = on_device
         .as_ref()
@@ -17650,7 +17592,7 @@ fn cmd_persist_env_test(rebuild_between: bool, ignore_file: bool) -> Result<()> 
     );
 
     println!("=== {context}: boot 2 (persist-check-test, keeping the disk)");
-    let second = capture_one_boot(
+    let (second, _second_run) = capture_one_boot(
         &workspace_root,
         &[&["persist-check-test"], sabotage].concat(),
         if rebuild_between {
@@ -17658,6 +17600,7 @@ fn cmd_persist_env_test(rebuild_between: bool, ignore_file: bool) -> Result<()> 
         } else {
             DiskImage::Keep
         },
+        Some(disk.as_path()),
         "env-boot2",
         "script-done:",
     )?;
@@ -17739,18 +17682,18 @@ fn cmd_keymap_test(sabotage: bool) -> Result<()> {
     };
 
     println!("=== {context}: boot 1 (keymap-rewrite-test, rebuilding the disk)");
-    let first = capture_one_boot(
+    let (first, first_run) = capture_one_boot(
         &workspace_root,
         &["keymap-rewrite-test"],
         DiskImage::Rebuild,
+        None,
         "keymap-boot1",
         "script-done:",
     )?;
     let saved = first.contains("user-flush: /bin/zi wrote the image back");
     println!("{context}: boot 1's save reached the device = {saved}");
 
-    let esp_dir = workspace_root.join("target").join("esp");
-    let disk = disk_image_path(&esp_dir);
+    let disk = first_run.disk_image();
     let on_device = debugfs_read(&disk, "/etc/environment")?;
     let device_carries_the_keymap = on_device
         .as_ref()
@@ -17768,11 +17711,14 @@ fn cmd_keymap_test(sabotage: bool) -> Result<()> {
     }
 
     println!("=== {context}: boot 2 (sendkey, keeping the disk)");
-    let outcome = cmd_shell_test(if sabotage {
-        ShellTestMode::KeymapUsAlwaysJis
-    } else {
-        ShellTestMode::KeymapUs
-    });
+    let outcome = cmd_shell_test_with_disk(
+        if sabotage {
+            ShellTestMode::KeymapUsAlwaysJis
+        } else {
+            ShellTestMode::KeymapUs
+        },
+        Some(disk.as_path()),
+    );
     match outcome {
         Ok(()) => {
             println!("{context}: PASS");
@@ -17796,28 +17742,29 @@ fn capture_one_boot(
     workspace_root: &Path,
     features: &[&str],
     disk: DiskImage,
+    previous: Option<&Path>,
     tag: &str,
     until: &str,
-) -> Result<String> {
-    let ovmf_vars = prepare_ovmf_vars(workspace_root)?;
+) -> Result<(String, RunDir)> {
+    let run = RunDir::create(workspace_root, &format!("persist {tag}"))?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(workspace_root, false)?;
     let kernel = build_kernel_with_features(workspace_root, features)?;
     let esp_dir = match disk {
-        DiskImage::Rebuild => stage_esp(workspace_root, &bootloader_efi, &kernel)?,
-        DiskImage::Keep => stage_esp_keeping_the_disk(workspace_root, &bootloader_efi, &kernel)?,
+        DiskImage::Rebuild => stage_esp(&run, &bootloader_efi, &kernel)?,
+        DiskImage::Keep => stage_esp_keeping_the_disk(&run, previous, &bootloader_efi, &kernel)?,
     };
 
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("persist-{tag}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -17851,7 +17798,7 @@ fn capture_one_boot(
     metrics::sleep_fixed(Duration::from_millis(500));
     let _ = child.kill();
     let _ = child.wait();
-    Ok(read_lossy(&serial_log))
+    Ok((read_lossy(&serial_log), run))
 }
 
 /// 持ち越しの判定（P-a）。**2 度起動して、1 度目に作った変化が 2 度目に見えることを主張する。**
@@ -17920,10 +17867,11 @@ fn cmd_persist_test(rebuild_between: bool) -> Result<()> {
         "persist-test"
     };
     println!("=== {context}: boot 1 (fs-alloc-keep-test, rebuilding the disk)");
-    let first = capture_one_boot(
+    let (first, first_run) = capture_one_boot(
         &workspace_root,
         &["fs-alloc-keep-test"],
         DiskImage::Rebuild,
+        None,
         "boot1",
         "fs-image-ready",
     )?;
@@ -17935,8 +17883,7 @@ fn cmd_persist_test(rebuild_between: bool) -> Result<()> {
     );
 
     // **装置の中身を外の道具に示させる。** **自分で書いて自分で読む形にしない。**
-    let esp_dir = workspace_root.join("target").join("esp");
-    let disk = disk_image_path(&esp_dir);
+    let disk = first_run.disk_image();
     let output = external_tool("dumpe2fs")
         .arg("-h")
         .arg(&disk)
@@ -17981,23 +17928,17 @@ fn cmd_persist_test(rebuild_between: bool) -> Result<()> {
     } else {
         DiskImage::Keep
     };
-    let second = capture_one_boot(
+    let (second, _second_run) = capture_one_boot(
         &workspace_root,
         &[],
         disk_for_second,
+        Some(disk.as_path()),
         "boot2",
         "fs-image-ready",
     )?;
 
     // **間で像を作り直していないこと。** **`stage_esp` が出す行で見る。**
-    let kept_the_disk = second.contains("persist: kept")
-        || fs::read_to_string(
-            workspace_root
-                .join("target")
-                .join("persist-boot2-serial.log"),
-        )
-        .map(|_| false)
-        .unwrap_or(false);
+    let kept_the_disk = second.contains("persist: kept");
     // **行はシリアルではなく標準出力に出る**ので、モードから導く。
     let kept_the_disk = kept_the_disk || !rebuild_between;
     let did_not_halt = second.contains("fs-image-ready");
@@ -18068,22 +18009,24 @@ fn capture_boot_log(
     tag: &str,
     quiet_after_prompt: Option<Duration>,
 ) -> Result<String> {
-    let ovmf_vars = prepare_ovmf_vars(workspace_root)?;
+    let run = RunDir::create(workspace_root, &format!("boot-log {tag}"))?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(workspace_root, false)?;
     let kernel_elf = build_kernel(workspace_root, false)?;
-    let esp_dir = stage_esp(workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
+    // **既定の構成の像なので、道具（`tools/stack-deepest.py` など）が使う既定の像として示す。**
+    run.publish_as_default_image()?;
 
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("boot-log-{tag}.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let mut qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -19198,7 +19141,8 @@ const DRIFT_SAMPLE_STRIDE: usize = 10;
 /// 見えない。**フレームアロケータの量は測っていない**（下記）。
 fn cmd_drift_test(minutes: u64, smp: Option<u32>) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "drift")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     // **定常のループを保つ構成で起動する**（2026-09-25）。**既定の構成はハートビート 2 本でシェルへ渡し、
     // その後はハートビートを出さない**（S11-11。`kernel/src/main.rs` の `SHELL_AFTER_HEARTBEATS`）。
@@ -19207,17 +19151,18 @@ fn cmd_drift_test(minutes: u64, smp: Option<u32>) -> Result<()> {
     // `docs/troubleshooting.md`）。**`keep-steady-loop` は、LAPIC タイマの速さの項目が同じ理由で
     // 使っている構成である。**
     let kernel_elf = build_kernel_with_features(&workspace_root, &["keep-steady-loop"])?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let serial_log = workspace_root.join("target").join("drift-serial.log");
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let mut qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -19365,23 +19310,23 @@ fn cmd_marker_test(
     })?;
 
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "marker-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let features: Vec<&str> = test.feature.split(',').collect();
     let kernel_elf = build_kernel_with_features(&workspace_root, &features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("{kind_label}-serial.log"));
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     let mut qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -19592,17 +19537,16 @@ fn cmd_exception_test(kind: &str) -> Result<()> {
         })?;
 
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run = RunDir::create(&workspace_root, "exception-test")?;
+    let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let features: Vec<&str> = test.feature.split(',').collect();
     let kernel_elf = build_kernel_with_features(&workspace_root, &features)?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
 
-    let serial_log = workspace_root
-        .join("target")
-        .join("exception-test-serial.log");
+    let serial_log = run.serial_log();
     let _ = fs::remove_file(&serial_log);
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
 
     // 例外の記録が要るので、この検証は常に TCG で行う。
@@ -19610,6 +19554,7 @@ fn cmd_exception_test(kind: &str) -> Result<()> {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -22775,22 +22720,22 @@ fn parse_labelled_number(line: &str, label: &str) -> Option<u64> {
 /// 集める（`verification-coverage.md` の「値は既定ビルドの起動ログから取ること」）。
 fn capture_serial_for_calibration(run: usize) -> Result<String> {
     let workspace_root = workspace_root()?;
-    let ovmf_vars = prepare_ovmf_vars(&workspace_root)?;
+    let run_dir = RunDir::create(&workspace_root, &format!("calibration {run}"))?;
+    let ovmf_vars = prepare_ovmf_vars(&run_dir)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let kernel_elf = build_kernel_with_features(&workspace_root, &[])?;
-    let esp_dir = stage_esp(&workspace_root, &bootloader_efi, &kernel_elf)?;
+    let esp_dir = stage_esp(&run_dir, &bootloader_efi, &kernel_elf)?;
 
-    let serial_log = workspace_root
-        .join("target")
-        .join(format!("serial-calibration-{run}.log"));
+    let serial_log = run_dir.serial_log();
     let _ = fs::remove_file(&serial_log);
 
-    let debug_log = workspace_root.join("target").join("qemu-debug.log");
+    let debug_log = run_dir.debug_log();
     let _ = fs::remove_file(&debug_log);
     let qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
         ovmf_vars: &ovmf_vars,
         esp_dir: &esp_dir,
+        disk_image: &run_dir.disk_image(),
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
@@ -29980,21 +29925,6 @@ fn build_kernel_for_key_probe(workspace_root: &Path, gfx_test: bool) -> Result<K
 /// bootloader.efi をチェインロードする。
 const STARTUP_NSH: &str = "FS0:\\EFI\\BOOT\\BOOTX64.EFI\r\n";
 
-/// OVMF の既定の起動パス（`\EFI\BOOT\BOOTX64.EFI`）に bootloader.efi を配置
-/// した ESP (EFI System Partition) 相当のディレクトリを用意する。QEMU の
-/// `fat:` ドライバでこのディレクトリをそのまま仮想 FAT ドライブとして渡せる
-/// ため、ディスクイメージファイルを別途作成する必要はない。
-/// virtio ディスクのイメージの置き場所（S13-a）。
-///
-/// **`esp_dir` から導く**——起動に使う成果物を 1 つの根（`target/`）に集め、
-/// [`stage_esp`]（作る側）と [`qemu_launch_args`]（渡す側）が同じ導出を使う。
-fn disk_image_path(esp_dir: &Path) -> PathBuf {
-    esp_dir
-        .parent()
-        .expect("the esp dir always lives under target/")
-        .join("disk0.img")
-}
-
 /// `stage_esp` が `disk0.img` をどう扱うか（P-a）。
 ///
 /// # なぜ入口を分けるのか
@@ -30014,31 +29944,34 @@ enum DiskImage {
 ///
 /// **2 度目の起動で使う。** **1 度目が書いた装置の中身を、そのまま持ち越す。**
 fn stage_esp_keeping_the_disk(
-    workspace_root: &Path,
+    run: &RunDir,
+    previous: Option<&Path>,
     bootloader_efi: &Path,
     kernel: &KernelBuild,
 ) -> Result<PathBuf> {
-    stage_esp_with_disk(workspace_root, bootloader_efi, kernel, DiskImage::Keep)
+    stage_esp_with_disk(run, bootloader_efi, kernel, DiskImage::Keep, previous)
 }
 
-fn stage_esp(
-    workspace_root: &Path,
-    bootloader_efi: &Path,
-    kernel: &KernelBuild,
-) -> Result<PathBuf> {
-    stage_esp_with_disk(workspace_root, bootloader_efi, kernel, DiskImage::Rebuild)
+/// OVMF の既定の起動パス（`\EFI\BOOT\BOOTX64.EFI`）に bootloader.efi を配置
+/// した ESP (EFI System Partition) 相当のディレクトリを用意する。QEMU の
+/// `fat:` ドライバでこのディレクトリをそのまま仮想 FAT ドライブとして渡せる
+/// ため、ディスクイメージファイルを別途作成する必要はない。
+/// **置き場は回の置き場の中である**（[`RunDir::esp`]。2026-09-29）。
+fn stage_esp(run: &RunDir, bootloader_efi: &Path, kernel: &KernelBuild) -> Result<PathBuf> {
+    stage_esp_with_disk(run, bootloader_efi, kernel, DiskImage::Rebuild, None)
 }
 
 /// **失敗は検査装置の故障として包む**（`launch::classify`。2026-09-24）。
 fn stage_esp_with_disk(
-    workspace_root: &Path,
+    run: &RunDir,
     bootloader_efi: &Path,
     kernel: &KernelBuild,
     disk: DiskImage,
+    previous: Option<&Path>,
 ) -> Result<PathBuf> {
     metrics::timed(metrics::Kind::Stage, || {
         launch::as_harness(
-            stage_esp_with_disk_unwrapped(workspace_root, bootloader_efi, kernel, disk),
+            stage_esp_with_disk_unwrapped(run, bootloader_efi, kernel, disk, previous),
             "staging the ESP",
         )
     })
@@ -30046,13 +29979,14 @@ fn stage_esp_with_disk(
 
 /// 本体（[`stage_esp_with_disk`] が包む）。
 fn stage_esp_with_disk_unwrapped(
-    workspace_root: &Path,
+    run: &RunDir,
     bootloader_efi: &Path,
     kernel: &KernelBuild,
     disk: DiskImage,
+    previous: Option<&Path>,
 ) -> Result<PathBuf> {
     let kernel_elf = kernel.elf.as_path();
-    let esp_dir = workspace_root.join("target").join("esp");
+    let esp_dir = run.esp();
     let boot_dir = esp_dir.join("EFI").join("BOOT");
     fs::create_dir_all(&boot_dir)
         .with_context(|| format!("failed to create {}", boot_dir.display()))?;
@@ -30108,27 +30042,38 @@ fn stage_esp_with_disk_unwrapped(
         )
     })?;
 
-    let disk_image = disk_image_path(&esp_dir);
+    let disk_image = run.disk_image();
     // **載せるイメージは、いま積んだカーネルが埋め込んでいるものと同じである**
     // （[`KernelBuild`] の doc）。**別の構成のイメージを載せると、カーネルの
     // 突き合わせが落ちて、シェルが起動する前に停止する。**
     let built = kernel.out_dir.join(FS_IMAGE_NAME);
-    // **持ち越す起動では、在るものに触れない（P-a）。**
+    // **持ち越す起動では、前の起動が書いたイメージを、この回の置き場へ写す（P-a）。**
     // **無ければ作り直す**——1 度目の起動はここを通る。
-    if disk == DiskImage::Rebuild || !disk_image.exists() {
-        fs::copy(&built, &disk_image).with_context(|| {
-            format!(
-                "failed to copy {} to {}",
-                built.display(),
-                disk_image.display()
-            )
-        })?;
-    } else {
-        println!(
-            "persist: kept {} as it is (not rebuilt from {})",
-            disk_image.display(),
-            built.display()
-        );
+    match (disk, previous) {
+        (DiskImage::Keep, Some(previous)) if previous.is_file() => {
+            fs::copy(previous, &disk_image).with_context(|| {
+                format!(
+                    "failed to copy {} to {}",
+                    previous.display(),
+                    disk_image.display()
+                )
+            })?;
+            println!(
+                "persist: kept {} as {} (not rebuilt from {})",
+                previous.display(),
+                disk_image.display(),
+                built.display()
+            );
+        }
+        _ => {
+            fs::copy(&built, &disk_image).with_context(|| {
+                format!(
+                    "failed to copy {} to {}",
+                    built.display(),
+                    disk_image.display()
+                )
+            })?;
+        }
     }
 
     Ok(esp_dir)
@@ -30243,21 +30188,17 @@ fn built_elsewhere(built: &str, runtime: Option<&str>) -> Option<String> {
 /// OVMF の変数領域 (NVRAM) は QEMU が起動時に書き込むため、パッケージ配布物を
 /// そのまま渡さず target/ovmf/ 配下に書き込み可能なコピーを用意する。
 /// **失敗は検査装置の故障として包む**（`launch::classify`。2026-09-24）。
-fn prepare_ovmf_vars(workspace_root: &Path) -> Result<PathBuf> {
+fn prepare_ovmf_vars(run: &RunDir) -> Result<PathBuf> {
     metrics::timed(metrics::Kind::Stage, || {
         launch::as_harness(
-            prepare_ovmf_vars_unwrapped(workspace_root),
+            prepare_ovmf_vars_unwrapped(run),
             "preparing the OVMF variables",
         )
     })
 }
 
 /// 本体（[`prepare_ovmf_vars`] が包む）。
-fn prepare_ovmf_vars_unwrapped(workspace_root: &Path) -> Result<PathBuf> {
-    let ovmf_dir = workspace_root.join("target").join("ovmf");
-    fs::create_dir_all(&ovmf_dir)
-        .with_context(|| format!("failed to create {}", ovmf_dir.display()))?;
-
+fn prepare_ovmf_vars_unwrapped(run: &RunDir) -> Result<PathBuf> {
     // **毎回テンプレートから作り直す。** OVMF はこの varstore を書き換える
     // ので、使い回すと起動項目（`EFI Internal Shell`、PXE、HTTP boot）が
     // 蓄積し、実行を重ねるほど条件が変わっていく。実際、初回だけコピーする
@@ -30270,7 +30211,7 @@ fn prepare_ovmf_vars_unwrapped(workspace_root: &Path) -> Result<PathBuf> {
     // 不確実性であり、無くしておく価値がある。費用はファイルコピー 1 回で、
     // 失うのは前回の起動で OVMF が覚えた設定だけである。ZaytOS は毎回同じ
     // ESP から同じ構成で起動するので、覚えていてほしいものは無い。
-    let vars_copy = ovmf_dir.join("OVMF_VARS_4M.fd");
+    let vars_copy = run.ovmf_vars();
     {
         fs::copy(OVMF_VARS_TEMPLATE_PATH, &vars_copy).with_context(|| {
             format!(
@@ -30313,7 +30254,7 @@ fn qemu_launch_args(opts: &QemuLaunchOptions) -> Vec<OsString> {
         "-drive".into(),
         format!(
             "if=none,id=disk0,format=raw,file={}",
-            disk_image_path(opts.esp_dir).display()
+            opts.disk_image.display()
         )
         .into(),
         "-device".into(),
@@ -30957,6 +30898,7 @@ mod tests {
             ovmf_code: Path::new("/x/CODE.fd"),
             ovmf_vars: Path::new("/y/VARS.fd"),
             esp_dir: Path::new("/z/esp"),
+            disk_image: Path::new("/z/disk0.img"),
             serial,
             debug_log,
             display: DisplayMode::None,
@@ -31114,8 +31056,8 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         assert_eq!(count_virtio_blk(&parsed), 1);
     }
 
-    /// virtio ディスクが常設であること（S13-a）。**イメージの経路は `stage_esp` の
-    /// 作る側と同じ導出**（[`disk_image_path`]）であることも、ここで固定する。
+    /// virtio ディスクが常設であること（S13-a）。**イメージの経路は、渡したもの（回の置き場の `disk0.img`。
+    /// [`RunDir::disk_image`]）がそのまま入る**ことも、ここで固定する。
     #[test]
     fn qemu_args_always_include_the_virtio_disk() {
         let debug_log = PathBuf::from("/dummy/qemu-debug.log");
