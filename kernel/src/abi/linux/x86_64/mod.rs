@@ -25,3 +25,7 @@ pub use values::{
     FB_TYPE_PACKED_PIXELS, FB_VISUAL_TRUECOLOR, O_ACCMODE, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY,
     POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET, SOCK_STREAM, SOL_SOCKET, TIOCGWINSZ,
 };
+
+mod registers;
+
+pub use registers::{read_request, write_return, SyscallRequest};

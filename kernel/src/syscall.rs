@@ -1,10 +1,8 @@
 //! システムコール（`int 0x80`）の入口（M5-f-1）。
 //!
-//! ADR-0020 のとおり、レジスタ規約は Linux x86-64 に合わせる。番号は RAX、
-//! 戻り値は RAX、第 1〜6 引数は RDI/RSI/RDX/R10/R8/R9、失敗は `-errno`
-//! （`-1..-4095`）。**第 4 引数は RCX ではなく R10** である。`int 0x80` の間は
-//! RCX/R11 は実際には保存されるが、`syscall`/`sysret` へ移る段階でこれらは命令が
-//! 破壊するため、**保存に依存しない**（ユーザー側ラッパはクロバー扱いにする）。
+//! ADR-0020 のとおり、レジスタ規約は Linux に合わせる。**番号と 6 つの引数を入口の文脈から読み、戻り値を書き戻すのは
+//! [`crate::abi::linux::x86_64`] である**（レジスタの形。`ADR-0071` の決定 1 の 2 で分けた。2026-09-30）。この入口は、
+//! 読んだ番号と引数で振り分け、戻り値をあちらへ渡す。失敗は `-errno` で返す。
 //!
 //! # 入口の機構
 //!
@@ -27,12 +25,11 @@
 //!
 //! # 破壊テストの feature（M5-f-1-2）
 //!
-//! - `syscall-test-arg4-rcx`: 第 4 引数を `context.r10` でなく `context.rcx` から
-//!   読む。R10 規約の実証（記録した第 4 引数が期待値と食い違う）。
-//! - `syscall-test-drop-retval`: 戻り値の `context.rax` 書き戻しを落とす。ユーザーが
-//!   期待した戻り値を受け取れない（ユーザースタックへ store した値が食い違う）。
 //! - `syscall-test-gate-dpl0`: ゲートを DPL=0 にする（[`crate::arch::x86_64::idt`] 側）。Ring 3 から
 //!   の `int 0x80` がゲート DPL<CPL で #GP になり、`syscall_entry` に到達しない。
+//!
+//! **第 4 引数を RCX から読む `syscall-test-arg4-rcx` と、戻り値の書き戻しを落とす `syscall-test-drop-retval` は、
+//! レジスタの形と一緒に [`crate::abi::linux::x86_64`] にある。**
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
@@ -2995,11 +2992,10 @@ unsafe fn spawn_from_ring3(
 /// `drop` する。**BKL を取る入口に、出口を通らない経路ができたのはここが初めて
 /// である**（`bkl.rs` の [`crate::bkl::NON_ACQUIRING_ENTRIES`] の隣の注記）。
 ///
-/// 番号（RAX）と 6 引数（RDI/RSI/RDX/R10/R8/R9）を読み、記録し、ディスパッチして、
-/// 戻り値を `context.rax` へ書き戻し、復元経路が使う RSP を返す。M5-f-1 は切り替え
+/// 番号と 6 引数を読み（[`crate::abi::linux::x86_64::read_request`]）、記録し、ディスパッチして、
+/// 戻り値を書き戻し（[`crate::abi::linux::x86_64::write_return`]）、復元経路が使う RSP を返す。M5-f-1 は切り替え
 /// ないので入場時の `IrqContext` 先頭をそのまま返す（`irq_entry` の no-switch と
-/// 同じ）。復元経路が `pop rax` で `context.rax` を復元するので、書き戻した戻り値が
-/// ユーザーの RAX に入る。
+/// 同じ）。
 ///
 /// **出力しない。** 例外・IRQ ハンドラと同じく、ここでは共有状態の更新だけを行う。
 /// 観測は畳んで戻った後にカーネルが記録越しに行う。
@@ -3055,21 +3051,13 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     // 既存の境界計算が syscall 経路でも正しいことの裏取り（IRQ と同じ検査。ベクタは `arch` が文脈から読む。9e-2）。
     ctx.check_stack_alignment(rsp_at_call, "syscall");
 
-    // 番号は RAX。**書き戻しの前に読む。**
-    let number = ctx.rax;
-
-    // 第 4 引数は R10（RCX ではない。ADR-0020）。
-    // 破壊テスト (M5-f-1-2, arg4-rcx): 第 4 引数を RCX から読む。記録した第 4 引数が
-    // PROBE_ARGS[3] と食い違い、R10 規約であることが実証される。
-    #[cfg(not(feature = "syscall-test-arg4-rcx"))]
-    let arg3 = ctx.r10;
-    #[cfg(feature = "syscall-test-arg4-rcx")]
-    let arg3 = ctx.rcx;
-    let args = [ctx.rdi, ctx.rsi, ctx.rdx, arg3, ctx.r8, ctx.r9];
+    // 番号と 6 つの引数を、Linux のレジスタの形で読む（`abi`）。**書き戻しの前に読む。** **読んだ結果は写し直さずに
+    // 使う**——最適化しないビルドでは、写し直した分だけこの関数のスタックが増える（`hello` の遠征のスタックで見た）。
+    let request = crate::abi::linux::x86_64::read_request(ctx);
 
     state.invocation_count.fetch_add(1, Ordering::SeqCst);
-    state.last_number.store(number, Ordering::SeqCst);
-    for (slot, value) in state.last_args.iter().zip(args.iter()) {
+    state.last_number.store(request.number, Ordering::SeqCst);
+    for (slot, value) in state.last_args.iter().zip(request.args.iter()) {
         slot.store(*value, Ordering::SeqCst);
     }
     state.handler_rsp.store(rsp_at_call, Ordering::SeqCst);
@@ -3085,30 +3073,58 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     // ガードはここのローカルである（[`spawn_from_ring3`]）。
     //
     // SAFETY: pml4_phys / direct_map は稼働中テーブルのもので、walk の契約を満たす。
-    let ret = if number == SYS_SPAWN {
+    let ret = if request.number == SYS_SPAWN {
         // SAFETY: 同上。`bkl` はいま保持しているガードである。
-        unsafe { spawn_from_ring3(args[0], args[1], args[2], pml4_phys, direct_map, &mut bkl) }
-    } else if number == SYS_SPAWN_DETACHED {
+        unsafe {
+            spawn_from_ring3(
+                request.args[0],
+                request.args[1],
+                request.args[2],
+                pml4_phys,
+                direct_map,
+                &mut bkl,
+            )
+        }
+    } else if request.number == SYS_SPAWN_DETACHED {
         // **`spawn_from_ring3` と同じ理由で `dispatch` の外に置く**——**コピーのフレーム（2.3 KiB）を
         // `dispatch` のフレームに乗せない。**
         // SAFETY: 同上。
         unsafe {
             spawn_detached_from_ring3(
-                args[0], args[1], args[2], args[3], pml4_phys, direct_map, &mut bkl,
+                request.args[0],
+                request.args[1],
+                request.args[2],
+                request.args[3],
+                pml4_phys,
+                direct_map,
+                &mut bkl,
             )
         }
-    } else if number == SYS_SPAWN_WITH_PIPED_STDIN {
+    } else if request.number == SYS_SPAWN_WITH_PIPED_STDIN {
         // SAFETY: 同上。
         unsafe {
             spawn_with_piped_stdin_from_ring3(
-                args[0], args[1], args[2], pml4_phys, direct_map, &mut bkl,
+                request.args[0],
+                request.args[1],
+                request.args[2],
+                pml4_phys,
+                direct_map,
+                &mut bkl,
             )
         }
-    } else if number == SYS_WAIT_CHILD {
-        wait_child_from_ring3(args[0], &mut bkl)
+    } else if request.number == SYS_WAIT_CHILD {
+        wait_child_from_ring3(request.args[0], &mut bkl)
     } else {
         // SAFETY: pml4_phys / direct_map は稼働中テーブルのもので、walk の契約を満たす。
-        unsafe { dispatch(number, &args, pml4_phys, direct_map, &mut bkl) }
+        unsafe {
+            dispatch(
+                request.number,
+                &request.args,
+                pml4_phys,
+                direct_map,
+                &mut bkl,
+            )
+        }
     };
 
     // **exit だけは Ring 3 へ返らない。**
@@ -3116,7 +3132,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     // 破壊テスト (S9-b-3-1, user-exit-ignored): 終了させずに Ring 3 へ返す。プロセスは
     // `exit` の直後に置いた `ud2` へ落ち、ベクタ 6 の例外による終了処理として現れる。
     #[cfg(not(feature = "user-exit-ignored"))]
-    if number == SYS_EXIT {
+    if request.number == SYS_EXIT {
         // **BKL は自分で解く。** 下の `leave_ring3` は longjmp で、`Drop` を
         // 走らせない。**取ったまま戻ると、二度と解かれない。**
         //
@@ -3129,15 +3145,8 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
         unsafe { crate::arch::x86_64::ring3::leave_ring3() }
     }
 
-    // 戻り値を RAX へ書き戻す。復元経路の pop rax がこれをユーザー RAX へ載せる。
-    // 破壊テスト (M5-f-1-2, drop-retval): 書き戻しを落とす。ctx.rax は番号のままで、
-    // ユーザーは期待した戻り値を受け取れない。
-    #[cfg(not(feature = "syscall-test-drop-retval"))]
-    {
-        ctx.rax = ret;
-    }
-    #[cfg(feature = "syscall-test-drop-retval")]
-    let _ = ret;
+    // 戻り値を、Linux のレジスタの形で書き戻す（`abi`）。
+    crate::abi::linux::x86_64::write_return(ctx, ret);
 
     // Ring 3 へ返る（stub の復元経路が iretq する）。立て直す（S8-b）。
     // 立て直してから実際に iretq するまでは Ring 0 なのに真だが、例外による終了処理の判定は
