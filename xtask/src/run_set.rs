@@ -10,6 +10,10 @@
 //! 1 行に、`cargo xtask` に渡す引数を 1 つ分書く（例: `run --smp-ap-test ap-timer`）。空の行と `#` で始まる行は
 //! 読まない。引数は空白で分ける（引用符は読まない）。
 //!
+//! **行の頭に `!` を書いた行は、落ちるのが正しい行である**（破壊テストなど。例: `!run --virtio-irq-test --sabotage
+//! virtio-skip-eoi-test`）。落ちたら通過と数え、**通ったら落ちと数える**——落ちるはずの行が通ったのは、破壊テストが
+//! 働いていないことだからである（2026-09-29。SCRUM-31。運用者の決定）。
+//!
 //! # 出力
 //!
 //! 子の標準出力と標準エラーは、子ごとの回の置き場の `xtask.log` に残す（子が QEMU を起動するときは、その回の
@@ -48,6 +52,8 @@ pub struct Entry {
     /// 一覧に書いたとおりの行（結果の行に出す）。
     pub line: String,
     pub args: Vec<String>,
+    /// 落ちるのが正しい行か（行の頭の `!`）。
+    pub expect_failure: bool,
 }
 
 /// 一覧を読む（純粋な論理）。
@@ -55,11 +61,34 @@ pub fn parse_list(text: &str) -> Vec<Entry> {
     text.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|line| Entry {
-            line: line.to_string(),
-            args: line.split_whitespace().map(str::to_string).collect(),
+        .map(|line| {
+            let (expect_failure, command) = match line.strip_prefix('!') {
+                Some(rest) => (true, rest),
+                None => (false, line),
+            };
+            Entry {
+                line: line.to_string(),
+                args: command.split_whitespace().map(str::to_string).collect(),
+                expect_failure,
+            }
         })
         .collect()
+}
+
+/// 1 本の判定（純粋な論理）。**落ちるのが正しい行は、落ちたら通過、通ったら落ちである。** シグナルで終わった行と、
+/// 上限を越えて止めた行は、どちらの行でも落ちとする（終わった理由が試験の判定ではない）。
+fn verdict(outcome: &Outcome, expect_failure: bool) -> (bool, String) {
+    match (outcome, expect_failure) {
+        (Outcome::Exited(0), false) => (true, "PASS".to_string()),
+        (Outcome::Exited(code), false) => (false, format!("FAIL (exit {code})")),
+        (Outcome::Exited(0), true) => (false, "FAIL (exit 0, but it must fail)".to_string()),
+        (Outcome::Exited(code), true) => (true, format!("PASS (failed as it must, exit {code})")),
+        (Outcome::Signalled, _) => (false, "FAIL (killed by a signal)".to_string()),
+        (Outcome::TimedOut, _) => (
+            false,
+            format!("FAIL (over {} s; stopped)", PER_TEST_LIMIT.as_secs()),
+        ),
+    }
 }
 
 /// 1 本の結果。
@@ -182,21 +211,10 @@ pub fn cmd_run_set(workspace_root: &Path, args: &[String]) -> Result<()> {
             continue;
         };
         sum += result.took;
-        let verdict = match result.outcome {
-            Outcome::Exited(0) => "PASS".to_string(),
-            Outcome::Exited(code) => {
-                failed += 1;
-                format!("FAIL (exit {code})")
-            }
-            Outcome::Signalled => {
-                failed += 1;
-                "FAIL (killed by a signal)".to_string()
-            }
-            Outcome::TimedOut => {
-                failed += 1;
-                format!("FAIL (over {} s; stopped)", PER_TEST_LIMIT.as_secs())
-            }
-        };
+        let (passed, verdict) = verdict(&result.outcome, entry.expect_failure);
+        if !passed {
+            failed += 1;
+        }
         println!(
             "{verdict:<28} {:>7.1}s  {}  ({})",
             result.took.as_secs_f64(),
@@ -322,6 +340,33 @@ mod tests {
         assert_eq!(entries[0].args, vec!["run", "--acpi-smp-test"]);
         assert_eq!(entries[1].line, "run --smp-ap-test ap-timer");
         assert_eq!(entries[1].args, vec!["run", "--smp-ap-test", "ap-timer"]);
+        assert!(!entries[1].expect_failure);
+    }
+
+    /// **行の頭の `!` は、落ちるのが正しい行である。** **落ちたら通過、通ったら落ち。** シグナルと上限は、どちらでも落ち。
+    #[test]
+    fn a_row_marked_to_fail_passes_only_when_it_fails() {
+        let entries = parse_list("!run --pipe-test --sabotage pipe-reader-not-reserved\n");
+        assert!(entries[0].expect_failure);
+        assert_eq!(
+            entries[0].args,
+            vec![
+                "run",
+                "--pipe-test",
+                "--sabotage",
+                "pipe-reader-not-reserved"
+            ]
+        );
+        assert_eq!(
+            entries[0].line,
+            "!run --pipe-test --sabotage pipe-reader-not-reserved"
+        );
+        assert!(verdict(&Outcome::Exited(1), true).0);
+        assert!(!verdict(&Outcome::Exited(0), true).0);
+        assert!(verdict(&Outcome::Exited(0), false).0);
+        assert!(!verdict(&Outcome::Exited(1), false).0);
+        assert!(!verdict(&Outcome::Signalled, true).0);
+        assert!(!verdict(&Outcome::TimedOut, true).0);
     }
 
     /// **親の pid は名前の括弧の後から読む。** **子孫は深い方から並び、自分の組で走る QEMU も入る。**
