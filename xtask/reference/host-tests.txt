@@ -581,6 +581,9 @@ kernel::machine::pc::irq::tests::the_svr_and_probe_displays_print_the_words_the_
 kernel::machine::pc::irq::tests::the_timer_setup_exposes_implementation_independent_questions
 kernel::machine::pc::irq::tests::the_vector_and_irq_mappings_are_inverses
 kernel::machine::pc::irq::tests::vectors_outside_the_managed_range_have_no_irq
+kernel::machine::pc::pmtimer::tests::bits_above_the_width_do_not_reach_the_difference
+kernel::machine::pc::pmtimer::tests::the_difference_wraps_at_the_declared_width
+kernel::machine::pc::pmtimer::tests::the_frequency_comes_from_the_observed_window
 kernel::memory_map::tests::classify_conventional_is_free
 kernel::memory_map::tests::classify_mmio_types_are_uncacheable_reserved_but_mapped
 kernel::memory_map::tests::classify_ram_like_reserved_types_are_cacheable_reserved_but_mapped
@@ -608,9 +611,6 @@ kernel::paging::plan::tests::resolve_pages_never_produces_zero_size_gaps_between
 kernel::paging::plan::tests::resolve_pages_uses_2mib_core_and_4kib_fringe
 kernel::paging::plan::tests::unmapped_types_are_excluded
 kernel::pipe::tests::the_pipe_frees_itself_only_when_both_ends_and_the_reservation_are_gone
-kernel::pmtimer::tests::bits_above_the_width_do_not_reach_the_difference
-kernel::pmtimer::tests::the_difference_wraps_at_the_declared_width
-kernel::pmtimer::tests::the_frequency_comes_from_the_observed_window
 kernel::quarantine::tests::a_frame_is_not_returned_while_its_generation_is_still_live
 kernel::quarantine::tests::a_frame_is_returned_once_every_core_has_passed_its_generation
 kernel::quarantine::tests::a_released_slot_can_be_reused_by_a_later_free

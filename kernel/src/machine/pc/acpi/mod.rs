@@ -314,7 +314,7 @@ pub struct FadtFacts {
     pub i8042: I8042Presence,
     /// **読めるポートが在るときだけ `Some` である**——**「無い」と「読めない形」は
     /// どちらも `None` で、理由はログに出す。**
-    pub pm_timer: Option<crate::pmtimer::PmTimer>,
+    pub pm_timer: Option<crate::machine::pc::pmtimer::PmTimer>,
 }
 
 impl FadtFacts {
@@ -1015,7 +1015,7 @@ fn read_pm_timer(
     logger: &mut Logger<SerialPort>,
     table_bytes: &[u8],
     revision: u8,
-) -> Option<crate::pmtimer::PmTimer> {
+) -> Option<crate::machine::pc::pmtimer::PmTimer> {
     match fadt::pm_timer_block(table_bytes, revision) {
         fadt::PmTimerBlock::Port {
             port,
@@ -1029,9 +1029,9 @@ fn read_pm_timer(
                 } else {
                     "PM_TMR_BLK"
                 },
-                crate::pmtimer::HZ
+                crate::machine::pc::pmtimer::HZ
             ));
-            Some(crate::pmtimer::PmTimer::new(port, bits))
+            Some(crate::machine::pc::pmtimer::PmTimer::new(port, bits))
         }
         fadt::PmTimerBlock::Absent => {
             logger.info(format_args!(

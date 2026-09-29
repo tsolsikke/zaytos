@@ -1658,7 +1658,7 @@ const FIRST_EDGE_TIMEOUT_CYCLES: u64 = 1_000_000_000;
 pub enum CalibrationReference {
     /// PIT の IRQ0 のティック（既定）。
     Pit,
-    /// ACPI の PM タイマ（`crate::pmtimer`）。**割り込みを要らず、ポートを読むだけである。**
+    /// ACPI の PM タイマ（`crate::machine::pc::pmtimer`）。**割り込みを要らず、ポートを読むだけである。**
     PmTimer,
 }
 
@@ -1672,11 +1672,11 @@ impl core::fmt::Display for CalibrationReference {
 }
 
 /// PM タイマで測るウィンドウの長さ（刻み）。**PIT のウィンドウ（10 ティック = 100ms）と同じ実時間にする。**
-const PM_CALIBRATION_WINDOW_TICKS: u32 = (crate::pmtimer::HZ / 10) as u32;
+const PM_CALIBRATION_WINDOW_TICKS: u32 = (crate::machine::pc::pmtimer::HZ / 10) as u32;
 
 /// **ウィンドウは、いちばん狭い幅（24 ビット）の一周より十分短くなければならない。**
 ///
-/// **幅で包み込む差は、一周までしか正しくない**（`crate::pmtimer::elapsed_with_width`）——
+/// **幅で包み込む差は、一周までしか正しくない**（`crate::machine::pc::pmtimer::elapsed_with_width`）——
 /// **24 ビットは約 4.7 秒で一周するので、ウィンドウがそれに近づくと「一周した窓」を短いウィンドウと読み、
 /// 較正が過大になる。** **構造で守る**（レビューの確かめ。2026-09-23）——**ウィンドウを広げるか
 /// 周波数の定数を変えたら、ここがビルドできない。**
@@ -1684,7 +1684,8 @@ const PM_CALIBRATION_WINDOW_TICKS: u32 = (crate::pmtimer::HZ / 10) as u32;
 /// **余裕は 10 倍に取る。** **実測のウィンドウは 357,954 刻み（100ms）で、24 ビットの一周は
 /// 16,777,216 刻み（約 4.7 秒）である**（比は約 46.9）。
 const _: () = assert!(
-    PM_CALIBRATION_WINDOW_TICKS as u64 * 10 <= 1 << crate::pmtimer::NARROWEST_WIDTH_BITS,
+    PM_CALIBRATION_WINDOW_TICKS as u64 * 10
+        <= 1 << crate::machine::pc::pmtimer::NARROWEST_WIDTH_BITS,
     "the PM timer calibration window must stay far below the 24-bit wrap (about 4.7 s)"
 );
 
@@ -1873,7 +1874,7 @@ fn sample_with_pit(logger: &mut Logger<SerialPort>, lapic: u64) -> PitSampling {
 /// **式は PIT 基準と同じ形である**——**ウィンドウの実時間（PM タイマの刻み）で割る。**
 fn sample_with_pm_timer(
     lapic: u64,
-    pm_timer: crate::pmtimer::PmTimer,
+    pm_timer: crate::machine::pc::pmtimer::PmTimer,
 ) -> Option<[u64; CALIBRATION_SAMPLES]> {
     let mut samples = [0u64; CALIBRATION_SAMPLES];
     for slot in samples.iter_mut() {
@@ -1901,7 +1902,8 @@ fn sample_with_pm_timer(
         }
         // 数え下がりなので begin > end。
         let elapsed_counts = u64::from(count_begin.wrapping_sub(count_end));
-        *slot = crate::pmtimer::lapic_hz_from_ticks(elapsed_counts, u64::from(elapsed_pm));
+        *slot =
+            crate::machine::pc::pmtimer::lapic_hz_from_ticks(elapsed_counts, u64::from(elapsed_pm));
     }
     Some(samples)
 }
@@ -1927,7 +1929,7 @@ fn sample_with_pm_timer(
 pub fn calibrate_timer(
     logger: &mut Logger<SerialPort>,
     mapped: &MappedApic,
-    pm_timer: Option<crate::pmtimer::PmTimer>,
+    pm_timer: Option<crate::machine::pc::pmtimer::PmTimer>,
 ) -> Option<TimerCalibration> {
     let direct_map = common::addr::direct_map();
     let lapic = direct_map.phys_to_virt(mapped.local_apic).as_u64();
@@ -2011,7 +2013,7 @@ pub fn calibrate_timer(
             logger.warn(format_args!(
                 "apic: SABOTAGE applied - the PM timer frequency constant is doubled \
                  ({} Hz instead of the specification's 3579545 Hz)",
-                crate::pmtimer::HZ
+                crate::machine::pc::pmtimer::HZ
             ));
             match sample_with_pm_timer(lapic, pm_timer) {
                 Some(samples) => (samples, CalibrationReference::PmTimer),

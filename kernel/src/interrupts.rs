@@ -670,7 +670,7 @@ pub unsafe fn run_timer_loop(
     shell_after_heartbeats: u64,
     apic: Option<&crate::machine::pc::apic::MappedApic>,
     virtio: Option<&mut crate::virtio::VirtioBlk>,
-    pm_timer: Option<crate::pmtimer::PmTimer>,
+    pm_timer: Option<crate::machine::pc::pmtimer::PmTimer>,
 ) {
     // 最初のティックが来るまで何も出ないとハングと区別できないので、
     // 待ちに入ることを先に宣言する。

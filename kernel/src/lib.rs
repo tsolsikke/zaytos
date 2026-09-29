@@ -48,7 +48,6 @@ pub mod machine;
 pub mod memory_map;
 pub mod paging;
 pub mod pipe;
-pub mod pmtimer;
 pub mod quarantine;
 pub mod ring;
 pub mod shm;
