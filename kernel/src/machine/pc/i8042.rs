@@ -27,7 +27,9 @@
 //! 読み直して一致を確認する。この検証によって、`crate::keyboard::decode` がセット 1 だけを
 //! 扱えばよいことが保証される。
 
+use common::arch::x86_64::cpu;
 use common::arch::x86_64::port::{inb, io_wait, outb};
+use common::log::Logger;
 
 /// データポート。スキャンコードはここから読む。
 const DATA_PORT: u16 = 0x60;
@@ -217,6 +219,116 @@ pub const fn config_with_keyboard_enabled(current: u8) -> u8 {
 /// コンフィグバイトが必要な状態になっているか（純粋ロジック）。
 pub const fn config_is_ready(config: u8) -> bool {
     config & CONFIG_KEYBOARD_INTERRUPT != 0 && config & CONFIG_TRANSLATION != 0
+}
+
+/// i8042 を探って確かめ、キーボードの割り込みとセット 1 への翻訳を立て、残ったバイトを読み捨てる
+/// （`setup_keyboard` の手順の 0〜3。i8042 に固有の手順）。**i8042 が無いと分かったら `false` を返す**
+/// （HW-b。`ADR-0068`）。
+///
+/// # 無いときに止めない理由
+///
+/// **i8042 の無い機械は在りうる**（推測。`docs/hardware-inventory.md`）。**キーボードが無くても、
+/// シェルのプロンプトまでは進める**——入力の無いシェルは使えないが、止まって何も出さないより
+/// 多くが見える（USB の入力は HW-f）。**在るのに答えない場合は止めない代わりに `[ERROR]` を出す**
+/// （FADT が「在る」と示したとき）。
+///
+/// # Safety
+///
+/// 起動シーケンスの中で、IRQ1 をマスクしたまま呼ぶこと。他の実行文脈が i8042 を触っていないこと
+/// （`read_config` と同じ）。
+pub unsafe fn prepare<W: core::fmt::Write>(
+    logger: &mut Logger<W>,
+    presence: crate::machine::pc::acpi::I8042Presence,
+) -> bool {
+    use crate::machine::pc::acpi::I8042Presence;
+
+    // --- 0. FADT の答えを見る（HW-b）---
+    match presence {
+        I8042Presence::Absent => {
+            logger.info(format_args!(
+                "i8042: the FADT says there is no 8042 controller; not probing ports 0x60/0x64, \
+                 continuing without a PS/2 keyboard (IRQ1 stays closed)"
+            ));
+            return false;
+        }
+        I8042Presence::Present => logger.info(format_args!(
+            "i8042: the FADT says there is an 8042 controller; probing it"
+        )),
+        I8042Presence::NotStated => logger.info(format_args!(
+            "i8042: the FADT does not say whether there is an 8042 controller; probing it"
+        )),
+    }
+
+    // --- 1. コンフィグバイトを読む ---
+    // SAFETY: この関数の契約（起動シーケンス中で IRQ1 はマスクされており、他の実行文脈が i8042 を
+    // 触っていない）。
+    let config = match unsafe { read_config() } {
+        Ok(config) => config,
+        Err(error) => {
+            // **破壊テスト `i8042-halts-when-absent`**——直す前の形（探って答えが無ければ止める）。
+            if cfg!(feature = "i8042-halts-when-absent") {
+                logger.error(format_args!(
+                    "i8042: failed to read the configuration byte ({error:?}); halting"
+                ));
+                cpu::halt_forever();
+            }
+            let status = status();
+            if presence == I8042Presence::Present {
+                logger.error(format_args!(
+                    "i8042: the FADT says there is an 8042 controller, but it did not answer \
+                     ({error:?}, status {status:#04x}); continuing without a PS/2 keyboard \
+                     (IRQ1 stays closed)"
+                ));
+            } else {
+                logger.warn(format_args!(
+                    "i8042: no controller answered on ports 0x60/0x64 ({error:?}, status \
+                     {status:#04x}); taking it as absent and continuing without a PS/2 keyboard \
+                     (IRQ1 stays closed)"
+                ));
+            }
+            return false;
+        }
+    };
+    logger.info(format_args!(
+        "i8042: configuration byte = {config:#010b} (keyboard interrupt={}, translation to set 1={})",
+        config & CONFIG_KEYBOARD_INTERRUPT != 0,
+        config & CONFIG_TRANSLATION != 0
+    ));
+
+    // --- 2. 必要なら立てて、読み直して確認する ---
+    if !config_is_ready(config) {
+        let updated = config_with_keyboard_enabled(config);
+        logger.info(format_args!(
+            "i8042: enabling the missing bits ({config:#04x} -> {updated:#04x})"
+        ));
+        // SAFETY: 同上。書いた後に読み直して照合する。
+        if let Err(error) = unsafe { write_config(updated) } {
+            logger.error(format_args!(
+                "i8042: the configuration byte did not stick ({error:?}); halting"
+            ));
+            cpu::halt_forever();
+        }
+        logger.info(format_args!(
+            "i8042: configuration byte verified by reading it back"
+        ));
+    } else {
+        logger.info(format_args!(
+            "i8042: the configuration byte is already what we need; leaving it alone"
+        ));
+    }
+
+    // --- 3. 残留データを読み捨てる ---
+    // SAFETY: IRQ1 はまだマスクされている。
+    let discarded = unsafe { drain_output_buffer() };
+    if discarded > 0 {
+        logger.info(format_args!(
+            "i8042: discarded {discarded} stale byte(s) left in the output buffer by the firmware \
+             (they would otherwise look like the first keypress)"
+        ));
+    } else {
+        logger.info(format_args!("i8042: the output buffer was already empty"));
+    }
+    true
 }
 
 #[cfg(test)]

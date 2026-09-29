@@ -446,10 +446,6 @@ kernel::keyboard::buffer::tests::bytes_come_out_in_the_order_they_went_in
 kernel::keyboard::buffer::tests::overflow_drops_the_newest_and_keeps_a_valid_prefix
 kernel::keyboard::buffer::tests::partial_drains_keep_the_order_across_the_wrap
 kernel::keyboard::buffer::tests::the_ring_wraps_around_without_losing_bytes
-kernel::keyboard::controller::tests::a_config_without_the_keyboard_interrupt_is_not_ready
-kernel::keyboard::controller::tests::a_config_without_translation_is_not_ready
-kernel::keyboard::controller::tests::already_correct_config_is_left_alone
-kernel::keyboard::controller::tests::the_required_bits_are_added_without_touching_the_others
 kernel::keyboard::decode::tests::a_colon_needs_no_shift_on_jis
 kernel::keyboard::decode::tests::a_normal_key_after_an_extended_sequence_still_decodes
 kernel::keyboard::decode::tests::a_plain_letter_is_lowercase
@@ -546,6 +542,10 @@ kernel::machine::pc::apic::tests::all_zeros_and_all_ones_are_undecoded
 kernel::machine::pc::apic::tests::coverage_counts_from_the_gsi_base
 kernel::machine::pc::apic::tests::qemu_matches_its_madt
 kernel::machine::pc::apic::tests::the_id_comes_from_bits_27_to_24
+kernel::machine::pc::i8042::tests::a_config_without_the_keyboard_interrupt_is_not_ready
+kernel::machine::pc::i8042::tests::a_config_without_translation_is_not_ready
+kernel::machine::pc::i8042::tests::already_correct_config_is_left_alone
+kernel::machine::pc::i8042::tests::the_required_bits_are_added_without_touching_the_others
 kernel::machine::pc::irq::apic::tests::the_bitmap_addresses_the_right_word_and_bit
 kernel::machine::pc::irq::pic::tests::a_real_interrupt_gets_eoi_on_the_right_pics
 kernel::machine::pc::irq::pic::tests::a_real_irq15_has_its_bit_set_in_the_slave_isr

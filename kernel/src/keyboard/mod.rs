@@ -3,17 +3,16 @@
 //! - [`decode`][mod@decode]: スキャンコードから文字への変換（純粋ロジック）。
 //!   ハードウェアに一切触れないので、実機で問題が出たときに
 //!   「デコードは正しいのだからハードウェア側だ」と切り分けられる。
-//! - [`controller`][mod@controller]: i8042 の検証とポートアクセス。
+//! - i8042 の検証とポートアクセスは、機械に固有なので [`crate::machine::pc::i8042`] に置く。
 //! - [`buffer`][mod@buffer]: 受け取ったスキャンコードのリングバッファ。
 
 pub mod buffer;
-pub mod controller;
 pub mod decode;
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::interrupts::InterruptSource;
-use crate::machine::pc::IsaIrq;
+use crate::machine::pc::{i8042, IsaIrq};
 
 /// キーボード（i8042）が上げる ISA の IRQ（`ADR-0072` の 7 の PS/2）。
 ///
@@ -137,12 +136,12 @@ fn handle_irq(_source: InterruptSource) {
     HANDLER_INVOCATIONS.fetch_add(1, Ordering::Relaxed);
 
     // データを伴う割り込みかどうかを、読む前に見ておく。
-    let has_data = controller::output_buffer_full();
+    let has_data = i8042::output_buffer_full();
 
     // 必ず読む。条件分岐の後ろに置いてはならない（doc の「必ず読み切ること」）。
     // 読み飛ばす分岐を作らないことで、「満杯だから読まない」が将来入り込む余地を消す。
     // SAFETY: 0x60 の読み出しは 1 バイト消費するだけ。値は下で処理する。
-    let code = unsafe { controller::read_data() };
+    let code = unsafe { i8042::read_data() };
 
     if has_data {
         // **中断（Ctrl+C）を、積むより先に見る（S12 前の手当て、C）。**

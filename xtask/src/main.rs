@@ -20914,6 +20914,10 @@ const DOC_PATH_MOVES: &[(&str, &str)] = &[
     ("kernel/src/acpi/", "kernel/src/machine/pc/acpi/"),
     ("kernel/src/pci.rs", "kernel/src/machine/pc/pci.rs"),
     ("kernel/src/pmtimer.rs", "kernel/src/machine/pc/pmtimer.rs"),
+    (
+        "kernel/src/keyboard/controller.rs",
+        "kernel/src/machine/pc/i8042.rs",
+    ),
 ];
 
 /// 以前の置き場を指すパスを、読み替えの表で今の置き場へ読み替えて、追跡下に在るかを見る（ファイルでも

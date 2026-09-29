@@ -1326,7 +1326,7 @@ pub unsafe fn run_timer_loop(
                         // ポートを叩かない）。
                         if !crate::keyboard::controller_present() {
                             "absent"
-                        } else if crate::keyboard::controller::output_buffer_full() {
+                        } else if crate::machine::pc::i8042::output_buffer_full() {
                             "1"
                         } else {
                             "0"

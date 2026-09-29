@@ -3,6 +3,7 @@
 pub mod acpi;
 pub mod ap_start;
 pub mod apic;
+pub mod i8042;
 pub mod irq;
 pub mod lapic_timer;
 pub mod pci;
