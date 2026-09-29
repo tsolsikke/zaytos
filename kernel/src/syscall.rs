@@ -3991,7 +3991,7 @@ fn sys_lseek(fd: u64, offset: u64, whence: u64) -> u64 {
 /// # 消せるのは通常ファイルだけである
 ///
 /// **`common::ext2::unlink_file` がディレクトリを断る**
-/// （`NotARegularFile`）。**`-EISDIR` へ写す**ので、`rm` は
+/// （`NotARegularFile`）。**`-EISDIR` へ変換する**ので、`rm` は
 /// 「ディレクトリだった」と分かる。
 ///
 /// # 開いている fd は気にしない
@@ -5285,7 +5285,7 @@ unsafe fn copy_user_string_array(
 ///
 /// **`common` は errno を知らない。** あちらは `no_std` の純粋ロジックで、
 /// Linux の番号体系に依存しない（`common::elf` と同じ線である）。
-/// **写すのは、Linux の形で答える責任を持つ側である。**
+/// **変換するのは、Linux の形で答える責任を持つ側である。**
 ///
 /// # 全 20 種を明示する
 ///
