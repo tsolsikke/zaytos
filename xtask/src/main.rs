@@ -6988,7 +6988,7 @@ fn report_sabotage_verdict(
 type ToolCheck = fn(&Path) -> Result<String>;
 
 /// 基本の検査に置く、手で使う道具の軽い確かめ（2026-09-25。QEMU を起動しない）。
-const TOOL_CHECKS_BASE: [(&str, &str, ToolCheck); 7] = [
+const TOOL_CHECKS_BASE: [(&str, &str, ToolCheck); 8] = [
     (
         "tools/boot-log-compare.py still compares boot logs",
         "boot-log-compare tool",
@@ -7024,6 +7024,11 @@ const TOOL_CHECKS_BASE: [(&str, &str, ToolCheck); 7] = [
         "gen-font",
         font::check_generated_is_committed,
     ),
+    (
+        "cargo xtask run-set still runs a list and counts a row marked to fail",
+        "run-set tool",
+        tool_checks::run_set,
+    ),
 ];
 
 /// `--full` に置く、QEMU を起動する手の道具の確かめ（2026-09-25）。
@@ -7058,7 +7063,7 @@ fn stage_default_image(workspace_root: &Path) -> Result<PathBuf> {
 
 /// 手で使う道具の確かめを、それだけ実行する（`cargo xtask run --tool-checks`。2026-09-25）。
 ///
-/// **基本の検査の 7 つと `--full` の 3 つを、検査の本体と同じ表で実行する。**
+/// **基本の検査の 8 つと `--full` の 3 つを、検査の本体と同じ表で実行する。**
 fn cmd_tool_checks() -> Result<()> {
     let workspace_root = workspace_root()?;
     let mut failed = Vec::new();
@@ -28171,8 +28176,8 @@ fn count_elements(text: &str) -> usize {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 56,
-    full: 425,
+    base: 57,
+    full: 426,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。

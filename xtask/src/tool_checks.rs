@@ -53,6 +53,51 @@ fn succeeded(script: &str, output: &Output) -> Result<String> {
     Ok(stdout)
 }
 
+/// `cargo xtask run-set`——**通る行と、`!` を付けた落ちるのが正しい行の 2 行を 2 本ずつで回し、2 行とも通過と数えて
+/// まとめの行を出すこと**（2026-09-29。SCRUM-31。運用者の決定）。**QEMU を起動しない行だけで組む**——通る行は
+/// `full --status`（読むだけ）、落ちる行は知らない命令である（知らない引数は、`run` が既定の起動に読み替える）。
+pub(super) fn run_set(root: &Path) -> Result<String> {
+    let list = scratch_dir(root)?.join("run-set-list.txt");
+    fs::write(
+        &list,
+        "# 手で使う道具の軽い確かめ（run-set）\nfull --status\n!not-a-command-for-the-tool-check\n",
+    )
+    .with_context(|| format!("failed to write {}", list.display()))?;
+    let program = std::env::current_exe().context("could not find the xtask binary")?;
+    let mut command = std::process::Command::new(program);
+    command
+        .args(["run-set", "--jobs", "2"])
+        .arg(&list)
+        .current_dir(root);
+    crate::check_lock::pass_owner(&mut command);
+    let output = command
+        .output()
+        .context("failed to run cargo xtask run-set")?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    if !output.status.success() {
+        bail!(
+            "cargo xtask run-set exited with {}: {}{}",
+            output.status,
+            stdout.chars().take(600).collect::<String>(),
+            String::from_utf8_lossy(&output.stderr)
+                .chars()
+                .take(400)
+                .collect::<String>()
+        );
+    }
+    if !stdout
+        .lines()
+        .any(|line| line.starts_with("PASS (failed as it must"))
+    {
+        bail!("the row marked with ! was not counted as a pass: {stdout}");
+    }
+    let summary = stdout
+        .lines()
+        .find(|line| line.starts_with("run-set: 2 test(s), 2 passed, 0 failed"))
+        .with_context(|| format!("no summary line of 2 passed rows: {stdout}"))?;
+    Ok(summary.to_string())
+}
+
 /// `tools/boot-log-compare.py`——**参照をそれ自身と比べて 0 行、1 行だけ変えたコピーと比べて 1 行。**
 pub(super) fn boot_log_compare(root: &Path) -> Result<String> {
     let reference = root.join(REFERENCE_BOOT_LOG);
