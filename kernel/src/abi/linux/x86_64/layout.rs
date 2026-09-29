@@ -1,5 +1,7 @@
-//! Linux の構造体の配置（長さと欄の位置。x86_64 の Linux の値。`ADR-0071` の決定 1 の 2 で、`crate::syscall` から
-//! 移した。2026-09-30）。並びと doc は移す前のまま。
+//! Linux の構造体の配置（長さと欄の位置、画面の `ioctl` の構造体を組む関数と読む関数。x86_64 の Linux の値。
+//! `ADR-0071` の決定 1 の 2 で、`crate::syscall` から移した。2026-09-30）。並びと doc は移す前のまま。
+
+use super::values::{FB_TYPE_PACKED_PIXELS, FB_VISUAL_TRUECOLOR};
 
 /// `linux_dirent64` の固定部のバイト数。**実測で確かめた**（`d_name` の `offsetof`）。
 ///
@@ -94,3 +96,147 @@ pub const SOCKADDR_UN_LEN: u64 = 110;
 
 /// `struct pollfd` のバイト数（`fd` 4＋`events` 2＋`revents` 2。Linux の配置）。
 pub const POLLFD_LEN: usize = 8;
+
+/// 画素の色の並び（`struct fb_bitfield` の `offset`）。**青・緑・赤の順に返す。**
+///
+/// **UEFI の `Bgr` は「バイト 0 が青」、`Rgb` は「バイト 0 が赤」である**（`PixelFormat` の doc）。
+/// **リトルエンディアンの 32 ビットで読むので、バイトの位置 × 8 がビットの位置になる。**
+pub const fn fb_color_offsets(bgr: bool) -> (u32, u32, u32) {
+    if bgr {
+        (0, 8, 16)
+    } else {
+        (16, 8, 0)
+    }
+}
+
+/// `struct fb_var_screeninfo` を組む（`ADR-0066` の Y-c）。**引数だけで決める**（ホストで固定する）。
+///
+/// **欄の位置は `cc` の `offsetof` で測った**（2026-09-21。`cc` 13.3.0。`<linux/fb.h>`）——
+/// `xres` 0 / `yres` 4 / `xres_virtual` 8 / `yres_virtual` 12 / `bits_per_pixel` 24 /
+/// `red` 32 / `green` 44 / `blue` 56 / `transp` 68（`struct fb_bitfield` は `offset` 0・`length` 4・
+/// `msb_right` 8 の 12 バイト）。**それ以外の欄は 0 である**（パンも回転も持たない）。
+pub fn fb_var_screeninfo(width: u32, height: u32, bgr: bool) -> [u8; FB_VAR_SCREENINFO_LEN] {
+    let mut out = [0u8; FB_VAR_SCREENINFO_LEN];
+    let mut put = |at: usize, value: u32| out[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    put(0, width);
+    put(4, height);
+    put(8, width);
+    put(12, height);
+    put(24, 32);
+    let (blue, green, red) = fb_color_offsets(bgr);
+    // **`struct fb_bitfield` は `offset`・`length`・`msb_right` の順である。**
+    put(32, red);
+    put(36, 8);
+    put(44, green);
+    put(48, 8);
+    put(56, blue);
+    put(60, 8);
+    out
+}
+
+/// `struct fb_fix_screeninfo` を組む（`ADR-0066` の Y-c）。**引数だけで決める。**
+///
+/// **欄の位置は `offsetof` で測った**——`id` 0（16 バイト）/ `smem_start` 16 / `smem_len` 24 /
+/// `type` 28 / `visual` 36 / `line_length` 48（2026-09-21）。
+///
+/// **`smem_start`（物理アドレス）は 0 にする**——**合わせなかった。** **Ring 3 へ物理アドレスを出す理由が
+/// 無い**（`mmap` は fd からマップするので、アドレスを知らなくてよい）。
+pub fn fb_fix_screeninfo(size_bytes: u32, line_length: u32) -> [u8; FB_FIX_SCREENINFO_LEN] {
+    let mut out = [0u8; FB_FIX_SCREENINFO_LEN];
+    let id = b"zaytos-fb";
+    out[..id.len()].copy_from_slice(id);
+    out[24..28].copy_from_slice(&size_bytes.to_le_bytes());
+    out[28..32].copy_from_slice(&FB_TYPE_PACKED_PIXELS.to_le_bytes());
+    out[36..40].copy_from_slice(&FB_VISUAL_TRUECOLOR.to_le_bytes());
+    out[48..52].copy_from_slice(&line_length.to_le_bytes());
+    out
+}
+
+/// `struct drm_clip_rect` を読む（`ADR-0066` の Y-c）。**`(x, y, 幅, 高さ)` を返す。空なら `None`。**
+///
+/// **x2・y2 は含まない**（DRM の DIRTYFB と同じ半開区間）。**画面への切り詰めはコピーする側が行う**
+/// （`Console::present`）。
+pub fn parse_clip_rect(raw: &[u8; DRM_CLIP_RECT_LEN]) -> Option<(u32, u32, u32, u32)> {
+    let x1 = u32::from(u16::from_le_bytes([raw[0], raw[1]]));
+    let y1 = u32::from(u16::from_le_bytes([raw[2], raw[3]]));
+    let x2 = u32::from(u16::from_le_bytes([raw[4], raw[5]]));
+    let y2 = u32::from(u16::from_le_bytes([raw[6], raw[7]]));
+    if x2 <= x1 || y2 <= y1 {
+        return None;
+    }
+    Some((x1, y1, x2 - x1, y2 - y1))
+}
+
+#[cfg(test)]
+mod tests {
+    //! 画面の `ioctl` が返す構造体の配置（`ADR-0066` の Y-c）。**`cc` の `offsetof` で測った値を
+    //! 機械で留める**（2026-09-21。`cc` 13.3.0。`<linux/fb.h>` と `<drm/drm.h>`）。**欄の位置を
+    //! 動かすと、Linux の配置から外れたことがここで分かる。**
+
+    use super::*;
+
+    fn u32_at(bytes: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+    }
+
+    /// `struct fb_var_screeninfo` の欄の位置（`offsetof` の値）。
+    #[test]
+    fn the_variable_screen_info_follows_the_linux_layout() {
+        let out = fb_var_screeninfo(1280, 800, true);
+        assert_eq!(out.len(), 160, "sizeof(struct fb_var_screeninfo)");
+        assert_eq!(u32_at(&out, 0), 1280, "xres @0");
+        assert_eq!(u32_at(&out, 4), 800, "yres @4");
+        assert_eq!(u32_at(&out, 8), 1280, "xres_virtual @8");
+        assert_eq!(u32_at(&out, 12), 800, "yres_virtual @12");
+        assert_eq!(u32_at(&out, 24), 32, "bits_per_pixel @24");
+        // **`Bgr` は「バイト 0 が青」——青 0・緑 8・赤 16。**
+        assert_eq!(u32_at(&out, 32), 16, "red.offset @32");
+        assert_eq!(u32_at(&out, 36), 8, "red.length @36");
+        assert_eq!(u32_at(&out, 44), 8, "green.offset @44");
+        assert_eq!(u32_at(&out, 56), 0, "blue.offset @56");
+        assert_eq!(u32_at(&out, 60), 8, "blue.length @60");
+    }
+
+    /// `Rgb` では赤と青の位置が入れ替わる。
+    #[test]
+    fn the_color_offsets_follow_the_pixel_order() {
+        assert_eq!(fb_color_offsets(true), (0, 8, 16));
+        assert_eq!(fb_color_offsets(false), (16, 8, 0));
+        let out = fb_var_screeninfo(1280, 800, false);
+        assert_eq!(u32_at(&out, 32), 0, "red.offset for Rgb");
+        assert_eq!(u32_at(&out, 56), 16, "blue.offset for Rgb");
+    }
+
+    /// `struct fb_fix_screeninfo` の欄の位置。**物理アドレス（`smem_start`）は 0 のままである。**
+    #[test]
+    fn the_fixed_screen_info_follows_the_linux_layout() {
+        let out = fb_fix_screeninfo(4_096_000, 5120);
+        assert_eq!(out.len(), 80, "sizeof(struct fb_fix_screeninfo)");
+        assert_eq!(&out[..9], b"zaytos-fb", "id @0");
+        assert_eq!(&out[16..24], &[0u8; 8], "smem_start @16 is not given out");
+        assert_eq!(u32_at(&out, 24), 4_096_000, "smem_len @24");
+        assert_eq!(u32_at(&out, 28), FB_TYPE_PACKED_PIXELS, "type @28");
+        assert_eq!(u32_at(&out, 36), FB_VISUAL_TRUECOLOR, "visual @36");
+        assert_eq!(u32_at(&out, 48), 5120, "line_length @48");
+    }
+
+    /// `struct drm_clip_rect` は半開区間である。**空の矩形は断る。**
+    #[test]
+    fn a_clip_rect_is_half_open_and_refuses_empty_ones() {
+        let rect = |x1: u16, y1: u16, x2: u16, y2: u16| {
+            let mut raw = [0u8; DRM_CLIP_RECT_LEN];
+            raw[0..2].copy_from_slice(&x1.to_le_bytes());
+            raw[2..4].copy_from_slice(&y1.to_le_bytes());
+            raw[4..6].copy_from_slice(&x2.to_le_bytes());
+            raw[6..8].copy_from_slice(&y2.to_le_bytes());
+            raw
+        };
+        assert_eq!(
+            parse_clip_rect(&rect(200, 200, 360, 360)),
+            Some((200, 200, 160, 160))
+        );
+        assert_eq!(parse_clip_rect(&rect(0, 0, 1, 1)), Some((0, 0, 1, 1)));
+        assert_eq!(parse_clip_rect(&rect(10, 10, 10, 20)), None, "width 0");
+        assert_eq!(parse_clip_rect(&rect(10, 20, 20, 10)), None, "upside down");
+    }
+}
