@@ -24,7 +24,7 @@
 //! キーボードが出すのはセット 2 だが、コンフィグバイトの **bit6
 //! （translation）が 1 ならコントローラがセット 1 へ翻訳する**。BIOS/UEFI は
 //! 有効のまま渡すのが普通だが、**確かめる**。落ちていれば立てて書き戻し、
-//! 読み直して一致を確認する。この検証によって、`decode` がセット 1 だけを
+//! 読み直して一致を確認する。この検証によって、`crate::keyboard::decode` がセット 1 だけを
 //! 扱えばよいことが保証される。
 
 use common::arch::x86_64::port::{inb, io_wait, outb};
@@ -244,7 +244,7 @@ mod tests {
         assert!(config_is_ready(current));
     }
 
-    /// 翻訳が落ちているとセット 2 が届き、`decode` の前提が崩れる。
+    /// 翻訳が落ちているとセット 2 が届き、`crate::keyboard::decode` の前提が崩れる。
     #[test]
     fn a_config_without_translation_is_not_ready() {
         assert!(!config_is_ready(CONFIG_KEYBOARD_INTERRUPT));

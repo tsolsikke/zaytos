@@ -5060,21 +5060,76 @@ fn start_timer(
 /// 現れる事故を防ぐ。OVMF はブートメニューでキーを扱っているので、何か残っていても
 /// おかしくない。
 ///
+/// 0〜3 は i8042 に固有の手順で、[`prepare_keyboard_controller`] が行う（無いときに止めない理由も、そちらの
+/// doc にある）。
+fn setup_keyboard(
+    logger: &mut Logger<SerialPort>,
+    i8042: kernel::machine::pc::acpi::I8042Presence,
+) -> bool {
+    // --- 0〜3. i8042 を探って確かめ、残ったバイトを読み捨てる ---
+    // SAFETY: 起動シーケンス中で IRQ1 はマスクされており、他の実行文脈が i8042 を
+    // 触っていない。
+    if !unsafe { prepare_keyboard_controller(logger, i8042) } {
+        return false;
+    }
+
+    // --- 4. IRQ1 を解禁する ---
+    // 開ける前に、在ることを記録する（`sti` 前の検証と心拍の行がこれを見る）。
+    keyboard::mark_controller_present();
+    // 開ける前に、割り込みの処理を登録する（`ADR-0072` の 5。処理を登録してから源を許可する）。
+    //
+    // 破壊テスト (2026-09-28, keyboard-handler-not-registered-test): 登録しない。最初の IRQ1 が処理の無い源として
+    // 届き、`machine` がその源を禁止してから完了させ、共通の側が数えて 1 度だけ出す（`ADR-0072` の 4。9d-4b）。
+    #[cfg(not(feature = "keyboard-handler-not-registered-test"))]
+    keyboard::register_irq_handler();
+    // SAFETY: ベクタ 0x21 には IRQ スタイルのスタブが入っており、直前に登録した処理がデータ
+    // ポートを読み切ってから、EOI が送られる。
+    unsafe {
+        irq::unmask(keyboard::KEYBOARD_IRQ);
+    }
+
+    // --- 5. IMR を読み戻す ---
+    let after_unmask = irq::check_masks(&[irq::GLOBAL_TIMER_IRQ, keyboard::KEYBOARD_IRQ]);
+    logger.info(format_args!("pic: IMR after unmasking IRQ1 {after_unmask}"));
+    if !after_unmask.matches() {
+        logger.error(format_args!(
+            "pic: the mask read-back after unmasking IRQ1 does not match; halting"
+        ));
+        cpu::halt_forever();
+    }
+
+    logger.info(format_args!(
+        "keyboard: IRQ1 is unmasked on the 8259; the delivery vector is {:#04x} for now \
+         (S2-d-1c re-routes it through the I/O APIC before sti, which changes the vector)",
+        irq::delivery_vector(keyboard::KEYBOARD_IRQ)
+    ));
+    true
+}
+
+/// i8042 を探って確かめ、キーボードの割り込みとセット 1 への翻訳を立て、残ったバイトを読み捨てる
+/// （`setup_keyboard` の手順の 0〜3。i8042 に固有の手順）。**i8042 が無いと分かったら `false` を返す**
+/// （HW-b。`ADR-0068`）。
+///
 /// # 無いときに止めない理由
 ///
 /// **i8042 の無い機械は在りうる**（推測。`docs/hardware-inventory.md`）。**キーボードが無くても、
 /// シェルのプロンプトまでは進める**——入力の無いシェルは使えないが、止まって何も出さないより
 /// 多くが見える（USB の入力は HW-f）。**在るのに答えない場合は止めない代わりに `[ERROR]` を出す**
 /// （FADT が「在る」と示したとき）。
-fn setup_keyboard(
-    logger: &mut Logger<SerialPort>,
-    i8042: kernel::machine::pc::acpi::I8042Presence,
+///
+/// # Safety
+///
+/// 起動シーケンスの中で、IRQ1 をマスクしたまま呼ぶこと。他の実行文脈が i8042 を触っていないこと
+/// （`read_config` と同じ）。
+unsafe fn prepare_keyboard_controller<W: core::fmt::Write>(
+    logger: &mut Logger<W>,
+    presence: kernel::machine::pc::acpi::I8042Presence,
 ) -> bool {
     use kernel::machine::pc::acpi::I8042Presence;
     use keyboard::controller;
 
     // --- 0. FADT の答えを見る（HW-b）---
-    match i8042 {
+    match presence {
         I8042Presence::Absent => {
             logger.info(format_args!(
                 "i8042: the FADT says there is no 8042 controller; not probing ports 0x60/0x64, \
@@ -5091,8 +5146,8 @@ fn setup_keyboard(
     }
 
     // --- 1. コンフィグバイトを読む ---
-    // SAFETY: 起動シーケンス中で IRQ1 はマスクされており、他の実行文脈が i8042 を
-    // 触っていない。
+    // SAFETY: この関数の契約（起動シーケンス中で IRQ1 はマスクされており、他の実行文脈が i8042 を
+    // 触っていない）。
     let config = match unsafe { controller::read_config() } {
         Ok(config) => config,
         Err(error) => {
@@ -5104,7 +5159,7 @@ fn setup_keyboard(
                 cpu::halt_forever();
             }
             let status = controller::status();
-            if i8042 == I8042Presence::Present {
+            if presence == I8042Presence::Present {
                 logger.error(format_args!(
                     "i8042: the FADT says there is an 8042 controller, but it did not answer \
                      ({error:?}, status {status:#04x}); continuing without a PS/2 keyboard \
@@ -5159,37 +5214,6 @@ fn setup_keyboard(
     } else {
         logger.info(format_args!("i8042: the output buffer was already empty"));
     }
-
-    // --- 4. IRQ1 を解禁する ---
-    // 開ける前に、在ることを記録する（`sti` 前の検証と心拍の行がこれを見る）。
-    keyboard::mark_controller_present();
-    // 開ける前に、割り込みの処理を登録する（`ADR-0072` の 5。処理を登録してから源を許可する）。
-    //
-    // 破壊テスト (2026-09-28, keyboard-handler-not-registered-test): 登録しない。最初の IRQ1 が処理の無い源として
-    // 届き、`machine` がその源を禁止してから完了させ、共通の側が数えて 1 度だけ出す（`ADR-0072` の 4。9d-4b）。
-    #[cfg(not(feature = "keyboard-handler-not-registered-test"))]
-    keyboard::register_irq_handler();
-    // SAFETY: ベクタ 0x21 には IRQ スタイルのスタブが入っており、直前に登録した処理がデータ
-    // ポートを読み切ってから、EOI が送られる。
-    unsafe {
-        irq::unmask(keyboard::KEYBOARD_IRQ);
-    }
-
-    // --- 5. IMR を読み戻す ---
-    let after_unmask = irq::check_masks(&[irq::GLOBAL_TIMER_IRQ, keyboard::KEYBOARD_IRQ]);
-    logger.info(format_args!("pic: IMR after unmasking IRQ1 {after_unmask}"));
-    if !after_unmask.matches() {
-        logger.error(format_args!(
-            "pic: the mask read-back after unmasking IRQ1 does not match; halting"
-        ));
-        cpu::halt_forever();
-    }
-
-    logger.info(format_args!(
-        "keyboard: IRQ1 is unmasked on the 8259; the delivery vector is {:#04x} for now \
-         (S2-d-1c re-routes it through the I/O APIC before sti, which changes the vector)",
-        irq::delivery_vector(keyboard::KEYBOARD_IRQ)
-    ));
     true
 }
 
