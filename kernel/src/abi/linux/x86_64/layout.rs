@@ -153,6 +153,38 @@ pub fn winsize_bytes(winsize: &Winsize) -> [u8; WINSIZE_LEN] {
     out
 }
 
+/// `struct timespec` の値（`clock_gettime` が書き、`nanosleep` が読む）。
+///
+/// **値を決めるのも、値の範囲を見るのも共通の側で、[`timespec_bytes`] と [`parse_timespec`] は欄の位置との間で
+/// 変換するだけである**（`ADR-0071` の決定 1 の 2 で、`crate::syscall` の `sys_clock_gettime` と `sys_nanosleep` から
+/// 分けた。2026-09-30）。
+pub struct Timespec {
+    /// `tv_sec`（秒）。
+    pub sec: i64,
+    /// `tv_nsec`（ナノ秒）。
+    pub nsec: i64,
+}
+
+/// `struct timespec` を組む（欄の位置は [`TIMESPEC_LEN`] の表）。
+pub fn timespec_bytes(timespec: &Timespec) -> [u8; TIMESPEC_LEN] {
+    let mut out = [0u8; TIMESPEC_LEN];
+    out[..TIMESPEC_NSEC].copy_from_slice(&timespec.sec.to_le_bytes());
+    out[TIMESPEC_NSEC..].copy_from_slice(&timespec.nsec.to_le_bytes());
+    out
+}
+
+/// `struct timespec` を読む（欄の位置は [`TIMESPEC_LEN`] の表）。
+pub fn parse_timespec(raw: &[u8; TIMESPEC_LEN]) -> Timespec {
+    let mut sec = [0u8; 8];
+    sec.copy_from_slice(&raw[..TIMESPEC_NSEC]);
+    let mut nsec = [0u8; 8];
+    nsec.copy_from_slice(&raw[TIMESPEC_NSEC..]);
+    Timespec {
+        sec: i64::from_le_bytes(sec),
+        nsec: i64::from_le_bytes(nsec),
+    }
+}
+
 /// 画素の色の並び（`struct fb_bitfield` の `offset`）。**青・緑・赤の順に返す。**
 ///
 /// **UEFI の `Bgr` は「バイト 0 が青」、`Rgb` は「バイト 0 が赤」である**（`PixelFormat` の doc）。
@@ -287,6 +319,31 @@ mod tests {
         assert_eq!(u16_at(&out, 2), 0x1112, "ws_col @2");
         assert_eq!(u16_at(&out, 4), 0x2122, "ws_xpixel @4");
         assert_eq!(u16_at(&out, 6), 0x3132, "ws_ypixel @6");
+    }
+
+    /// `struct timespec` の欄の位置（Linux の x86_64 の `linux/time_types.h` の `__kernel_timespec` を `gcc` の `offsetof` で
+    /// 測って確かめた。2026-09-30。`time.h` の `struct timespec` も同じ）。**値は、どのバイトも 0 でなく、欄ごとに違う形に
+    /// する**（stat のテストと同じ理由）。**読む側は、書いた値をそのまま返す**（どちらの欄も符号つきである）。
+    #[test]
+    fn the_timespec_bytes_follow_the_linux_layout() {
+        let out = timespec_bytes(&Timespec {
+            sec: 0x0102_0304_0506_0708,
+            nsec: 0x1112_1314_1516_1718,
+        });
+        assert_eq!(out.len(), 16, "sizeof(struct timespec)");
+        assert_eq!(u64_at(&out, 0), 0x0102_0304_0506_0708, "tv_sec @0");
+        assert_eq!(u64_at(&out, 8), 0x1112_1314_1516_1718, "tv_nsec @8");
+        let read = parse_timespec(&out);
+        assert_eq!(
+            (read.sec, read.nsec),
+            (0x0102_0304_0506_0708, 0x1112_1314_1516_1718)
+        );
+        let negative = parse_timespec(&timespec_bytes(&Timespec { sec: -1, nsec: -2 }));
+        assert_eq!(
+            (negative.sec, negative.nsec),
+            (-1, -2),
+            "the fields are signed"
+        );
     }
 
     /// `struct fb_var_screeninfo` の欄の位置（`offsetof` の値）。

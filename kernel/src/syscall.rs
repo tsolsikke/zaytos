@@ -36,12 +36,12 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use common::addr::{DirectMap, PhysAddr};
 
 use crate::abi::linux::x86_64::{
-    fb_fix_screeninfo, fb_var_screeninfo, parse_clip_rect, stat_bytes, winsize_bytes, Stat,
-    Winsize, AF_UNIX, CLOCK_MONOTONIC, DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN,
-    DT_DIR, DT_REG, DT_UNKNOWN, FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, O_ACCMODE, O_CREAT,
-    O_RDONLY, O_TRUNC, O_WRONLY, POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET,
-    SOCKADDR_UN_LEN, SOCK_STREAM, SOL_SOCKET, STAT_LEN, TIMESPEC_LEN, TIMESPEC_NSEC, TIOCGWINSZ,
-    WINSIZE_LEN,
+    fb_fix_screeninfo, fb_var_screeninfo, parse_clip_rect, parse_timespec, stat_bytes,
+    timespec_bytes, winsize_bytes, Stat, Timespec, Winsize, AF_UNIX, CLOCK_MONOTONIC,
+    DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, DT_DIR, DT_REG, DT_UNKNOWN,
+    FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, O_ACCMODE, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY,
+    POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET, SOCKADDR_UN_LEN, SOCK_STREAM, SOL_SOCKET,
+    STAT_LEN, TIMESPEC_LEN, TIOCGWINSZ, WINSIZE_LEN,
 };
 use crate::abi::linux::x86_64::{
     E2BIG, EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, EBUSY, ECHILD, ECONNREFUSED, EEXIST,
@@ -4187,9 +4187,13 @@ unsafe fn sys_clock_gettime(
     // **換算はホストで固定してある**（`common::time`）。
     let (secs, nsecs) = common::time::timespec_from_ticks(ticks, hz);
 
-    let mut buf = [0u8; TIMESPEC_LEN];
-    buf[..TIMESPEC_NSEC].copy_from_slice(&secs.to_le_bytes());
-    buf[TIMESPEC_NSEC..].copy_from_slice(&nsecs.to_le_bytes());
+    // **値はここで決め、`struct timespec` の欄へ書くのは abi の `timespec_bytes` に任せる**（`ADR-0071` の決定 1 の 2 で
+    // 分けた。2026-09-30）。**符号つきへ移しても値は変わらない**——秒の数はティックの数を周波数で割った値で、
+    // `i64` の上限に届かない。
+    let buf = timespec_bytes(&Timespec {
+        sec: secs as i64,
+        nsec: nsecs as i64,
+    });
 
     // **踏み込む前に検証する。**
     // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
@@ -4258,17 +4262,11 @@ unsafe fn sys_nanosleep(
     let mut raw = [0u8; TIMESPEC_LEN];
     // SAFETY: slice は検証済みで、長さは TIMESPEC_LEN ちょうどである。
     unsafe { copy_from_user(&mut raw, &slice) };
-    let mut seconds = [0u8; 8];
-    seconds.copy_from_slice(&raw[..TIMESPEC_NSEC]);
-    let mut nanos = [0u8; 8];
-    nanos.copy_from_slice(&raw[TIMESPEC_NSEC..]);
+    // **欄から値へ変換するのは abi の `parse_timespec` で、値の範囲を見るのはここである**（`common::time`）。
+    let request = parse_timespec(&raw);
 
     let hz = u64::from(crate::machine::pc::irq::timer_frequency_hz());
-    let Ok(ticks) = common::time::ticks_for_duration(
-        i64::from_le_bytes(seconds),
-        i64::from_le_bytes(nanos),
-        hz,
-    ) else {
+    let Ok(ticks) = common::time::ticks_for_duration(request.sec, request.nsec, hz) else {
         return (-EINVAL) as u64;
     };
     let deadline = crate::arch::x86_64::idt::monotonic_ticks().saturating_add(ticks);
