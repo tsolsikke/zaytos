@@ -77,13 +77,13 @@ pub extern "C" fn zaytos_ap_entry(index: u64) -> ! {
 /// 起動署名を出した AP の本数。BSP が会計に使う。
 static AP_STARTED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// 起動した AP の APIC ID（S5-a）。スロット 1 以降ぶん。`u16` の番兵で
-/// 「未設定」を表す（APIC ID は `u8` なので `0` も有効な値である）。
-static STARTED_AP_APIC_ID: [core::sync::atomic::AtomicU16; MAX_APS] =
-    [const { core::sync::atomic::AtomicU16::new(NO_APIC_ID) }; MAX_APS];
+/// 起動した AP のハードウェアの番号（S5-a。ファームウェアが示した番号で、今は Local APIC ID）。スロット 1 以降ぶん。
+/// `u16` の番兵で「未設定」を表す（番号は `u8` なので `0` も有効な値である）。
+static STARTED_PROCESSOR_ID: [core::sync::atomic::AtomicU16; MAX_APS] =
+    [const { core::sync::atomic::AtomicU16::new(NO_PROCESSOR_ID) }; MAX_APS];
 
 /// 「まだ起こしていない」を表す番兵（S5-a）。
-const NO_APIC_ID: u16 = u16::MAX;
+const NO_PROCESSOR_ID: u16 = u16::MAX;
 
 /// 探り用ページの仮想アドレス（S5-c）。AP スタックの領域とは別の PML4 の穴に
 /// 置く（`PML4[258]` の遥か上）。本番のマッピングと重ならない場所を選ぶ。
@@ -227,12 +227,13 @@ pub mod shootdown_probe {
     }
 }
 
-/// 起動した AP の APIC ID を返す（S5-a）。起動していなければ `None`。
-pub fn started_ap_apic_id(slot: usize) -> Option<u8> {
-    let raw = STARTED_AP_APIC_ID
+/// 起動した AP のハードウェアの番号を返す（S5-a。型は 2026-09-29 の 9f で `machine` の番号の型にした）。起動して
+/// いなければ `None`。
+pub fn started_processor(slot: usize) -> Option<crate::machine::pc::ProcessorId> {
+    let raw = STARTED_PROCESSOR_ID
         .get(slot.checked_sub(1)?)?
         .load(Ordering::SeqCst);
-    (raw != NO_APIC_ID).then_some(raw as u8)
+    (raw != NO_PROCESSOR_ID).then(|| crate::machine::pc::ProcessorId::from_hardware_id(raw as u8))
 }
 
 /// 起動署名を出した AP の本数。
@@ -351,26 +352,27 @@ pub unsafe fn wake_application_processors(
         unsafe { installed.set_ap_parameters(stack_top_identity, slot as u64) };
 
         report.attempted += 1;
-        STARTED_AP_APIC_ID[slot - 1].store(u16::from(apic_id), Ordering::SeqCst);
+        STARTED_PROCESSOR_ID[slot - 1].store(u16::from(apic_id), Ordering::SeqCst);
         let before = started_ap_count();
+        // 開始の場所の表示（SIPI のベクタ）は `machine` が持つ（9f。ベクタを共通の側に出さない）。
         logger.info(format_args!(
             "smp: starting application processor apic id {apic_id} as slot {slot} \
-             (trampoline at {:#x}, vector {:#04x}, stack top {:#x} identity-mapped, \
+             (trampoline at {:#x}, {}, stack top {:#x} identity-mapped, \
              cr3 {:#x} = the static boot page table)",
             frame.as_u64(),
-            installed.sipi_vector,
+            installed.start,
             stack_top_identity,
             installed.cr3
         ));
 
         // INIT と SIPI を送る（順番と待ち、2 回目の SIPI を送る条件は machine の側が持つ）。
-        // SAFETY: mapped はマップ済みの Local APIC で、トランポリンは SIPI の開始のページに置いた
+        // SAFETY: mapped はマップ済みの Local APIC で、トランポリンは開始のページに置いた
         // （install_trampoline）。起動時に、この AP へ 1 回だけ送る。
         let ok = unsafe {
-            crate::machine::pc::start_application_processor(
+            crate::machine::pc::start_processor(
                 mapped,
-                apic_id,
-                installed.sipi_vector,
+                crate::machine::pc::ProcessorId::from_hardware_id(apic_id),
+                installed.start,
                 wait_ticks,
                 || started_ap_count() > before,
             )

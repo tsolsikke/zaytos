@@ -940,13 +940,17 @@ pub fn claim(arrival: Arrival) -> Claim {
 ///
 /// # Safety
 ///
-/// `mapped` がマップ済みの Local APIC を指し、`apic_id` が起動を確かめた AP であること。
-pub unsafe fn send_ipi_probe(mapped: &crate::machine::pc::apic::MappedApic, apic_id: u8) -> bool {
+/// `mapped` がマップ済みの Local APIC を指し、`processor` が起動を確かめた AP であること。宛先の型は 9f で
+/// [`crate::machine::pc::ProcessorId`] にした（AP を起こす関数と同じ）。
+pub unsafe fn send_ipi_probe(
+    mapped: &crate::machine::pc::apic::MappedApic,
+    processor: crate::machine::pc::ProcessorId,
+) -> bool {
     // SAFETY: 呼び出し側の契約をそのまま引き継ぐ。探りのベクタには専用のスタブのゲートが入っている（`idt::init`）。
     unsafe {
         crate::machine::pc::apic::send_fixed_ipi(
             crate::machine::pc::apic::lapic_virt_of(mapped),
-            apic_id,
+            processor.local_apic_id(),
             crate::arch::x86_64::idt::IPI_PROBE_VECTOR as u8,
         )
     }

@@ -10,7 +10,7 @@ pub mod lapic_timer;
 //
 // **`IsaIrq` と `PciIntx` はバスの番号の名前である**（2026-09-29。9e。`ADR-0072` の 3）。装置のドライバが「この装置の
 // 割り込み」を解決させるのに名指しする（キーボードは ISA の IRQ 1、virtio-blk は PCI の INTx）。CPU の名前ではない。
-pub use ap_start::start_application_processor;
+pub use ap_start::{start_processor, ProcessorId, StartAddress};
 pub use irq::{
     claim, complete, delivered_count, disable_and_complete,
     enable_interrupt_controller_for_this_cpu, enable_local_timer_for_this_cpu, first_arrival,

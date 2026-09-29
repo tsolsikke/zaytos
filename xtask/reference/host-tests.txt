@@ -538,6 +538,9 @@ kernel::keyboard::decode::tests::the_two_tables_agree_except_at_the_one_key_that
 kernel::keyboard::decode::tests::unsupported_scancodes_are_reported_not_silently_dropped
 kernel::link_symbol_tests::the_conversion_round_trips_at_the_boundaries
 kernel::link_symbol_tests::the_conversion_uses_the_high_link_base
+kernel::machine::pc::ap_start::tests::a_start_address_above_1_mib_is_refused
+kernel::machine::pc::ap_start::tests::a_start_address_is_the_page_number_below_1_mib
+kernel::machine::pc::ap_start::tests::a_start_address_off_a_page_boundary_is_refused
 kernel::machine::pc::apic::tests::a_zero_id_register_with_a_plausible_version_still_decodes
 kernel::machine::pc::apic::tests::all_zeros_and_all_ones_are_undecoded
 kernel::machine::pc::apic::tests::coverage_counts_from_the_gsi_base

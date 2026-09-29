@@ -365,8 +365,9 @@ pub struct InstalledTrampoline {
     direct_map_base: u64,
     /// AP に渡す CR3（静的初期テーブルの物理）。
     pub cr3: u64,
-    /// SIPI に載せるベクタ。`vector << 12` が開始物理アドレスになる。
-    pub sipi_vector: u8,
+    /// AP が最初に実行する場所（トランポリンを置いたページ。SIPI に載せる。2026-09-29 の 9f で、SIPI のベクタの値から
+    /// `machine` の型にした）。
+    pub start: crate::machine::pc::StartAddress,
 }
 
 impl InstalledTrampoline {
@@ -526,8 +527,8 @@ pub unsafe fn install_trampoline(
     let installed = InstalledTrampoline {
         direct_map_base,
         cr3,
-        // `vector << 12` が開始物理アドレスになる。
-        sipi_vector: (frame.as_u64() >> 12) as u8,
+        // SIPI のベクタ（ページの番号）にするのは `machine` である（4 KiB の境界で 1 MiB より下かも確かめる）。
+        start: crate::machine::pc::StartAddress::of_page(frame),
     };
 
     // 恒等の下では物理がそのまま線形アドレスである。AP はその世界で走る。

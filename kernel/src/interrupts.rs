@@ -1050,7 +1050,7 @@ pub unsafe fn run_timer_loop(
             // 同じで、後者が測りたいものである。
             if let Some(apic) = apic {
                 for slot in 1..common::percpu::MAX_CPUS {
-                    let Some(apic_id) = crate::smp::started_ap_apic_id(slot) else {
+                    let Some(processor) = crate::smp::started_processor(slot) else {
                         continue;
                     };
                     // 1 本ずつ、受け取りを確かめてから次を送る。
@@ -1063,10 +1063,11 @@ pub unsafe fn run_timer_loop(
                         let before = idt::ipi_probe_received_for(slot);
                         // SAFETY: `apic` はマップ済みで、宛先は起動を確認した AP である。送る所とベクタは
                         // `machine` が持つ（`ADR-0072` の 7。9e-2）。
-                        let accepted = unsafe { crate::machine::pc::send_ipi_probe(apic, apic_id) };
+                        let accepted =
+                            unsafe { crate::machine::pc::send_ipi_probe(apic, processor) };
                         if !accepted {
                             logger.error(format_args!(
-                                "smp: the ICR did not accept a probe IPI for apic id {apic_id}"
+                                "smp: the ICR did not accept a probe IPI for apic id {processor}"
                             ));
                             break;
                         }
@@ -1081,14 +1082,14 @@ pub unsafe fn run_timer_loop(
                         }
                         if idt::ipi_probe_received_for(slot) == before {
                             logger.error(format_args!(
-                                "smp: a probe IPI to apic id {apic_id} was accepted by the ICR but \
+                                "smp: a probe IPI to apic id {processor} was accepted by the ICR but \
                                  the target did not handle it within the spin limit"
                             ));
                             break;
                         }
                     }
                     logger.info(format_args!(
-                        "smp: probe IPI ({}) to apic id {apic_id}: sent={} received={} \
+                        "smp: probe IPI ({}) to apic id {processor}: sent={} received={} \
                          (one at a time; the same vector coalesces in the IRR if sent faster than \
                          it is handled, so they are not batched)",
                         crate::machine::pc::probe_ipi(),
