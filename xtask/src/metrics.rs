@@ -66,13 +66,6 @@ impl Counter {
         );
     }
 
-    fn take(&self) -> (u64, Duration) {
-        (
-            self.count.swap(0, Ordering::SeqCst),
-            Duration::from_nanos(self.nanos.swap(0, Ordering::SeqCst)),
-        )
-    }
-
     fn read(&self) -> (u64, Duration) {
         (
             self.count.load(Ordering::SeqCst),
@@ -81,14 +74,21 @@ impl Counter {
     }
 }
 
-/// いまの項目の分（`finish_item` が読んで空にする）。
-static ITEM: [Counter; 5] = [const { Counter::new() }; 5];
+std::thread_local! {
+    /// いまの項目の分（`finish_item` が読んで空にする）。**項目を走らせる糸ごとに持つ**（2026-09-29。SCRUM-31）——同時に走る項目の計数を混ぜない。
+    static ITEM: std::cell::RefCell<[(u64, Duration); 5]> =
+        const { std::cell::RefCell::new([(0, Duration::ZERO); 5]) };
+}
 /// 全体の分。
 static TOTAL: [Counter; 5] = [const { Counter::new() }; 5];
 
 /// 1 回分を足す。
 pub fn record(kind: Kind, elapsed: Duration) {
-    ITEM[kind as usize].add(elapsed);
+    ITEM.with(|item| {
+        let slot = &mut item.borrow_mut()[kind as usize];
+        slot.0 += 1;
+        slot.1 = slot.1.saturating_add(elapsed);
+    });
     TOTAL[kind as usize].add(elapsed);
 }
 
@@ -124,7 +124,7 @@ fn line(values: &[(u64, Duration); 5]) -> String {
 
 /// いまの項目の分を 1 行にして、空にする。
 pub fn take_item_line() -> String {
-    let values = [0, 1, 2, 3, 4].map(|index| ITEM[index].take());
+    let values = ITEM.with(|item| std::mem::take(&mut *item.borrow_mut()));
     line(&values)
 }
 

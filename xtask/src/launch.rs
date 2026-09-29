@@ -204,8 +204,10 @@ pub struct RunRecord {
     pub largest_output: u64,
 }
 
-/// 項目の中の実行（`begin_item` で空にする）。
-static ITEM_RUNS: Mutex<Vec<RunRecord>> = Mutex::new(Vec::new());
+std::thread_local! {
+    /// 項目の中の実行（`begin_item` で空にする）。**項目を走らせる糸ごとに持つ**（2026-09-29。SCRUM-31）——同時に走る項目の実行を混ぜない。
+    static ITEM_RUNS: std::cell::RefCell<Vec<RunRecord>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 /// 起動した実行の数（全体。計測のため）。
 static RUNS_STARTED: AtomicU64 = AtomicU64::new(0);
 /// 実行の時間の合計（ナノ秒。全体。計測のため）。
@@ -213,17 +215,12 @@ static RUNS_NANOS: AtomicU64 = AtomicU64::new(0);
 
 /// 項目の始めに、その項目の実行の記録を空にする。
 pub fn reset_item_runs() {
-    if let Ok(mut runs) = ITEM_RUNS.lock() {
-        runs.clear();
-    }
+    ITEM_RUNS.with(|runs| runs.borrow_mut().clear());
 }
 
 /// いまの項目の実行の記録。
 pub fn item_runs() -> Vec<RunRecord> {
-    ITEM_RUNS
-        .lock()
-        .map(|runs| runs.clone())
-        .unwrap_or_default()
+    ITEM_RUNS.with(|runs| runs.borrow().clone())
 }
 
 /// 起動した実行の数（全体）。
@@ -871,17 +868,18 @@ impl QemuRun {
                 println!("{}: (warn) QEMU dumped core ({status})", self.what);
             }
         }
-        if let Ok(mut runs) = ITEM_RUNS.lock() {
-            runs.push(record);
-        }
+        ITEM_RUNS.with(|runs| runs.borrow_mut().push(record));
     }
 
     /// 実行の記録（`wait` の後）。
     pub fn record(&self) -> Option<RunRecord> {
-        ITEM_RUNS
-            .lock()
-            .ok()
-            .and_then(|runs| runs.iter().rev().find(|run| run.what == self.what).cloned())
+        ITEM_RUNS.with(|runs| {
+            runs.borrow()
+                .iter()
+                .rev()
+                .find(|run| run.what == self.what)
+                .cloned()
+        })
     }
 
     /// QEMU の pid（`/proc` を読む項目が使う）。

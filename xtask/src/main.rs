@@ -29,7 +29,7 @@ mod sampling;
 mod tool_checks;
 mod vbox;
 
-/// `println!` を、出したうえで項目の出力のコピー（[`ITEM_OUTPUT`]）へも積む形に置き換える（2026-09-26。
+/// `println!` を、出したうえで項目の出力のコピー（[`item_output_copy`]）へも積む形に置き換える（2026-09-26。
 /// 族にまとめる段）。
 ///
 /// **出す行は前と同じである。** **名前つきの判定で検出される破壊テストが、狙いの判定の行を探すため**
@@ -5108,7 +5108,7 @@ const SABOTAGE_STOP_REASONS: &[StopReason] = &[
 
 /// 名前つきの判定で検出される破壊テストと、狙いの判定の目印（2026-09-26。族にまとめる段。運用者の決定）。
 ///
-/// **この表に載る破壊テストは、「どの誤りでも捕まえた」とは数えない。** **項目の出力（[`ITEM_OUTPUT`]）か
+/// **この表に載る破壊テストは、「どの誤りでも捕まえた」とは数えない。** **項目の出力（[`item_output_copy`]）か
 /// 落ちた理由の 1 行に `signs` が全部在るときだけ検出したとする**——**`signs` は狙いの判定が偽になった
 /// 行の一部である**（判定の名前と `= false`。`e2fsck` の判定なら、不満の文言の頭も同じ行に在る）。
 /// **無ければ落とす**（別の判定で落ちた・止まった・ビルドされなかった）。
@@ -6525,9 +6525,7 @@ fn failed_on_the_run_side(name: &str, check: &str, keys: &[&str], failed: &mut F
     if let Some(count) = FAILURE_CATEGORIES.get(category as usize) {
         count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
-    if let Ok(mut slot) = ITEM_FAILURE_CATEGORY.lock() {
-        *slot = Some(category);
-    }
+    ITEM_FAILURE_CATEGORY.with(|slot| slot.set(Some(category)));
     println!(
         "--- {name}: FAILED [{}] (the sabotage run ended on the run side, so it is not counted as a \
          catch: {problem})",
@@ -28829,9 +28827,7 @@ impl Failures {
     fn push(&mut self, name: String) {
         FAILED_SO_FAR.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let category = ITEM_FAILURE_CATEGORY
-            .lock()
-            .ok()
-            .and_then(|slot| *slot)
+            .with(|slot| slot.get())
             .unwrap_or_else(|| launch::classify(false, &launch::item_runs()));
         self.kinds.push((current_family(), category));
         self.list.push(name);
@@ -29095,14 +29091,27 @@ fn slowness_lines(
 /// **項目の終わりを呼ぶ側に書かせない。** **`--full` の項目は51箇所から
 /// 見出しを出しており、終わりを1つずつ書かせると、書き忘れた項目だけが
 /// 黙って消える。** **次の見出しが前の項目の終わりである。**
-static ITEM_CLOCK: std::sync::Mutex<Option<(Instant, String, Family)>> =
-    std::sync::Mutex::new(None);
+///
+/// **項目を走らせる糸ごとに持つ**（2026-09-29。SCRUM-31）——同時に走る項目の時計を混ぜない。
+fn item_clock<T>(body: impl FnOnce(&mut Option<(Instant, String, Family)>) -> T) -> T {
+    std::thread_local! {
+        static ITEM_CLOCK: std::cell::RefCell<Option<(Instant, String, Family)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    ITEM_CLOCK.with(|clock| body(&mut clock.borrow_mut()))
+}
 
 /// 項目の出力のコピー（2026-09-26。族にまとめる段）。**名前つきの判定で検出される破壊テストが、狙いの判定の行を
 /// 探す**（[`SABOTAGE_JUDGEMENTS`]）。**`begin_item` が空にする。** **上限（[`ITEM_OUTPUT_LIMIT`]）を
 /// 越えたら積むのをやめ、越えたことを残す**——**項目を区切らない実行（`cargo xtask flaky` 等）で膨らませない。**
-static ITEM_OUTPUT: std::sync::Mutex<(String, bool)> =
-    std::sync::Mutex::new((String::new(), false));
+/// **項目を走らせる糸ごとに持つ**（2026-09-29。SCRUM-31）——同時に走る項目の出力を混ぜない。
+fn item_output_copy<T>(body: impl FnOnce(&mut (String, bool)) -> T) -> T {
+    std::thread_local! {
+        static ITEM_OUTPUT: std::cell::RefCell<(String, bool)> =
+            const { std::cell::RefCell::new((String::new(), false)) };
+    }
+    ITEM_OUTPUT.with(|output| body(&mut output.borrow_mut()))
+}
 
 /// 項目の出力のコピーの上限（2026-09-26）。**最も多く出す項目で 62KB だった**（`cargo` と QEMU の出力を
 /// 含めた項目の全体。`0249d12` の全検査のログ。`zi` の破壊テストの 1 つ）。**その 60 倍を越える。**
@@ -29110,22 +29119,19 @@ const ITEM_OUTPUT_LIMIT: usize = 4 << 20;
 
 /// 1 行を項目の出力のコピーへ積む（`println!` が呼ぶ）。
 fn copy_to_item_output(line: &str) {
-    if let Ok(mut output) = ITEM_OUTPUT.lock() {
-        let (text, overflowed) = &mut *output;
+    item_output_copy(|(text, overflowed)| {
         if text.len() + line.len() + 1 > ITEM_OUTPUT_LIMIT {
             *overflowed = true;
             return;
         }
         text.push_str(line);
         text.push('\n');
-    }
+    });
 }
 
 /// 項目の出力のコピー（越えていたら `None`）。
 fn item_output() -> Option<String> {
-    let output = ITEM_OUTPUT.lock().ok()?;
-    let (text, overflowed) = &*output;
-    (!overflowed).then(|| text.clone())
+    item_output_copy(|(text, overflowed)| (!*overflowed).then(|| text.clone()))
 }
 
 /// 項目の見出しを出し、時計を始める（VIEW-b の後）。
@@ -29136,21 +29142,15 @@ fn begin_item(family: Family, label: &str) {
     // **実行の記録は項目ごとに空にする**（失敗の分け方と計測が項目の単位で読む）。
     launch::reset_item_runs();
     // **出力のコピーも項目ごとに空にする**（名前つきの判定で検出される破壊テストが読む）。
-    if let Ok(mut output) = ITEM_OUTPUT.lock() {
-        *output = (String::new(), false);
-    }
+    item_output_copy(|output| *output = (String::new(), false));
     // **失敗の分け方も項目ごとに空にする**（当たりの計測が読む）。
-    if let Ok(mut slot) = ITEM_FAILURE_CATEGORY.lock() {
-        *slot = None;
-    }
+    ITEM_FAILURE_CATEGORY.with(|slot| slot.set(None));
     ITEMS_DONE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     stop_if_over_the_time_limit();
     println!("=== xtask check: {label}");
     // **項目の始まりの時刻を残す**（2026-09-29。試験の時間を縮める案の 0。全検査の間だけ）。
     sampling::note_item(label);
-    if let Ok(mut clock) = ITEM_CLOCK.lock() {
-        *clock = Some((Instant::now(), label.to_string(), family));
-    }
+    item_clock(|clock| *clock = Some((Instant::now(), label.to_string(), family)));
 }
 
 /// 上限を過ぎていたら、そこで止める（VIEW-c の後）。
@@ -29192,7 +29192,7 @@ fn stop_if_over_the_time_limit() {
 
 /// 走っている項目の所要を出す（VIEW-b の後）。**走っていなければ何もしない。**
 fn finish_item() {
-    let taken = ITEM_CLOCK.lock().ok().and_then(|mut clock| clock.take());
+    let taken = item_clock(|clock| clock.take());
     if let Some((started, label, family)) = taken {
         let elapsed = started.elapsed();
         ITEM_TIME_TOTAL_MS.fetch_add(
@@ -29277,10 +29277,7 @@ fn family_times_line() -> String {
 
 /// 走っている項目のグループ（2026-09-26）。**項目の外なら `None`。**
 fn current_family() -> Option<Family> {
-    ITEM_CLOCK
-        .lock()
-        .ok()
-        .and_then(|clock| clock.as_ref().map(|(_, _, family)| *family))
+    item_clock(|clock| clock.as_ref().map(|(_, _, family)| *family))
 }
 
 /// 宣言なしに期限で終わった待ちを持つ項目（2026-09-25。**完了時のまとめで一覧にする**）。
@@ -29341,15 +29338,16 @@ fn failure_category(error: &anyhow::Error) -> &'static str {
     }
     // **項目の失敗に分け方を持たせる**（2026-09-26。当たりの計測）——**検査装置の故障は、誤りの型で
     // しか見分けられないので、ここで決めた分け方を [`Failures::push`] が読む。**
-    if let Ok(mut slot) = ITEM_FAILURE_CATEGORY.lock() {
-        *slot = Some(category);
-    }
+    ITEM_FAILURE_CATEGORY.with(|slot| slot.set(Some(category)));
     category.label()
 }
 
-/// いまの項目の中で [`failure_category`] が決めた分け方（2026-09-26）。**`begin_item` が空にする。**
-static ITEM_FAILURE_CATEGORY: std::sync::Mutex<Option<launch::Category>> =
-    std::sync::Mutex::new(None);
+std::thread_local! {
+    /// いまの項目の中で [`failure_category`] が決めた分け方（2026-09-26）。**`begin_item` が空にする。**
+    /// **項目を走らせる糸ごとに持つ**（2026-09-29。SCRUM-31）——同時に走る項目の分け方を混ぜない。
+    static ITEM_FAILURE_CATEGORY: std::cell::Cell<Option<launch::Category>> =
+        const { std::cell::Cell::new(None) };
+}
 
 /// 当たりの計測の答え（2026-09-26。選ぶのを表示する段。第三者レビューの取り込み）。
 ///
