@@ -640,12 +640,12 @@ pub fn kernel(features: &[&str]) -> Option<Received> {
     service().map(|service| service.ask_features(features))
 }
 
-/// ブートローダの組を、全検査の間は 1 回だけ作る（`build` が作り、`copy` が写しの置き場を返す）。
+/// ブートローダの組を、全検査の間は 1 回だけ作る（`build` が作り、組ごとの写しの置き場を返す。**写しは `build` が
+/// ビルドと同じ錠の中で取る**——案 B の ①から。ここで写し直すと同じファイルへの写しになる）。
 /// **流れが動いていなければ、毎回 `build` を呼ぶ**（今までどおり）。
 pub fn bootloader(
     features: &[&str],
     build: impl FnOnce() -> anyhow::Result<PathBuf>,
-    copy: impl FnOnce(&Key, &Path) -> anyhow::Result<PathBuf>,
 ) -> anyhow::Result<PathBuf> {
     if !is_running() {
         return build();
@@ -659,11 +659,10 @@ pub fn bootloader(
         return Ok(path);
     }
     let built = build()?;
-    let copied = copy(&key, &built)?;
     if let Ok(mut made) = BOOTLOADERS.lock() {
-        made.push((key, copied.clone()));
+        made.push((key, built.clone()));
     }
-    Ok(copied)
+    Ok(built)
 }
 
 /// 流れを止めたときに返すもの（全検査のまとめ）。

@@ -2987,20 +2987,9 @@ fn build_bootloader_with_features_unwrapped(
     features: &[&str],
 ) -> Result<PathBuf> {
     // **全検査の間は、組ごとに 1 回だけ作って写しを使う**（2026-09-29。案 A。項目ごとに cargo を呼ぶと、
-    // 裏の流れが持つ `target/` の鍵を待たされる）。
-    kernel_builds::bootloader(
-        features,
-        || build_bootloader_now(workspace_root, features),
-        |key, built| {
-            keep_a_copy(
-                workspace_root,
-                "bootloader",
-                key,
-                built,
-                &format!("{BOOTLOADER_PACKAGE}.efi"),
-            )
-        },
-    )
+    // 裏の流れが持つ `target/` の鍵を待たされる）。**写しは [`build_bootloader_now`] が錠の中で作る**（案 B の ①）
+    // ——**ここでもう一度写すと、写し元と写し先が同じファイルになる**（[`keep_a_copy`] が断る）。
+    kernel_builds::bootloader(features, || build_bootloader_now(workspace_root, features))
 }
 
 /// ブートローダをその場でビルドする（[`build_bootloader_with_features_unwrapped`] が呼ぶ）。
@@ -29757,9 +29746,28 @@ fn keep_a_copy(
     fs::create_dir_all(&directory)
         .with_context(|| format!("failed to create {}", directory.display()))?;
     let copy = directory.join(file_name);
+    // **写し元と写し先が同じファイルなら、写さずに落ちる**（2026-09-29）。**`fs::copy` は写し先を空にしてから
+    // 写す**ので、同じファイルへ写すと、誤りを出さずに中身が空になる（案 B の ①の後の全検査では、空のブートローダを
+    // 積んだ QEMU の項目が、どれも起動せずに落ち続けた）。
+    if is_same_file(built, &copy) {
+        bail!(
+            "refusing to copy {} onto itself; it is already the kept copy of the {kind} for [{}]",
+            built.display(),
+            key.join(",")
+        );
+    }
     fs::copy(built, &copy)
         .with_context(|| format!("failed to copy {} to {}", built.display(), copy.display()))?;
     Ok(copy)
+}
+
+/// 2 つの道が同じファイルを指すか（**同じ装置の同じ inode**。リンクは辿る。**どちらかが読めなければ偽**）。
+fn is_same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
 }
 
 /// 全検査が kernel を求めた順の記録の置き場（git の共通の置き場。`cargo clean` で消えない。案 A）。
@@ -31074,6 +31082,29 @@ mod tests {
         assert_eq!(found.len(), 2, "{found:?}");
         assert!(found[0].starts_with("xtask/src/main.rs:1: the QEMU -d log"));
         assert!(found[1].starts_with("tools/x.py:1: the ESP directory"));
+    }
+
+    /// **写し元と写し先が同じファイルなら、写さずに落ちる。中身は残る**（2026-09-29。`fs::copy` は同じファイルへ
+    /// 写すと中身を空にする）。
+    #[test]
+    fn a_copy_onto_itself_is_refused_and_the_file_is_kept() {
+        let root = std::env::temp_dir().join(format!("zaytos-keep-a-copy-{}", std::process::id()));
+        let key = kernel_builds::key_of(&[]);
+        let kept = root
+            .join("target")
+            .join("kernel-builds")
+            .join("bootloader")
+            .join(kernel_builds::directory_name(&key));
+        fs::create_dir_all(&kept).unwrap();
+        let file = kept.join("bootloader.efi");
+        fs::write(&file, b"MZ kept").unwrap();
+        let result = keep_a_copy(&root, "bootloader", &key, &file, "bootloader.efi");
+        let left = fs::read(&file).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        let error = format!("{:#}", result.unwrap_err());
+        assert!(error.contains("onto itself"), "{error}");
+        assert!(error.contains("bootloader.efi"), "{error}");
+        assert_eq!(left, b"MZ kept");
     }
 
     #[test]
