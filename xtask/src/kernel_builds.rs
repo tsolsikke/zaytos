@@ -10,10 +10,18 @@
 //!
 //! # 取り違えを起こさない形
 //!
-//! **cargo は、組によらず同じ置き場（`target/x86_64-unknown-none/debug/kernel`）へ ELF を書く。** **全検査の間は、
-//! kernel のビルドをこの流れだけが行う**（項目は結果を受け取るだけ）。**作った直後、次のビルドを始める前に、ELF を
-//! 組ごとの置き場へ写し、同じ cargo の出力から取った `OUT_DIR` と対にして返す**——`KernelBuild` の doc の
-//! 「ビルドした側と載せる側を対にして持つ」を保つ。
+//! **cargo は、組によらず同じ置き場（`target/x86_64-unknown-none/debug/kernel`）へ ELF を書く。** **全検査の QEMU の
+//! 区間では、kernel のビルドをこの流れだけが行う**（項目は結果を受け取るだけ）。**基本の検査の区間では、表 `CHECKS` の
+//! `build kernel (none)` と `tools/frame-sizes.py` も作業ツリーで kernel を作る**——流れはそのとき何も作っていない
+//! （先に作り始める前で、項目も求めていない）。**作った直後、次のビルドを始める前に、ELF を組ごとの置き場へ写し、
+//! 同じ cargo の出力から取った `OUT_DIR` と対にして返す**——`KernelBuild` の doc の「ビルドした側と載せる側を対にして
+//! 持つ」を保つ。
+//!
+//! **写した後、その組の features で作った cargo の成果物と同じ中身かを確かめ、違えば失敗にする**（[`confirm_the_copy`]。
+//! 2026-09-29。運用者の決定）。**上の前提は、読んで確かめたものでしかない**——この先、QEMU の区間でほかの cargo が
+//! kernel を作る項目が入ると、写す前に ELF が書き換わりうる。**そのとき、組と違う kernel で試験が走り、しかも通る、
+//! という気づけない形にしない。** 比べる相手は、組ごとに名前の違う成果物（`deps/kernel-<hash>`）で、同じ hash の
+//! fingerprint が有効だった features を持つ（[`Artifacts`]）。
 //!
 //! **ブートローダも、全検査の間は組ごとに 1 回だけ作って写しを使う**（[`bootloader`]）。**項目ごとに cargo を
 //! 呼ぶと、裏のビルドが持つ `target/` の鍵を待たされる**（2026-09-29 の実測で 7.84 秒）。
@@ -38,7 +46,8 @@
 //!
 //! **基本の検査・`--commit`・手の実行は、今までどおりその場でビルドする**（[`is_running`] が偽）。
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -468,6 +477,111 @@ fn order_by_time(mut found: Vec<(SystemTime, Vec<String>)>, window: Duration) ->
     ordered
 }
 
+/// cargo が組ごとに名前を変えて残す kernel の成果物の索引（`deps/kernel-<hash>`。同じ hash の fingerprint の
+/// `bin-kernel.json` が、有効だった features を持つ。2026-09-29）。**写しを確かめるのに使う**（[`confirm_the_copy`]）。
+///
+/// **1 つの組に成果物が 2 つ以上在ることがある**——rustc を上げる前に作ったものが残る（2026-09-29 に、隣の作業ツリーで
+/// 約 340 組に 672 個）。**どれか 1 つと同じ中身なら、その組の features で作ったものである。**
+pub struct Artifacts {
+    fingerprints: PathBuf,
+    deps: PathBuf,
+    index: Mutex<ArtifactIndex>,
+}
+
+#[derive(Default)]
+struct ArtifactIndex {
+    /// 読んだ fingerprint の置き場の名前（**同じ hash の features は変わらない**ので、読み直さない）。
+    seen: HashSet<OsString>,
+    /// features（並べ替えたもの）→ 成果物の道。
+    by_features: HashMap<Vec<String>, Vec<PathBuf>>,
+}
+
+impl Artifacts {
+    /// `debug` は `target/<標的>/debug`。
+    pub fn new(debug: &Path) -> Self {
+        Artifacts {
+            fingerprints: debug.join(".fingerprint"),
+            deps: debug.join("deps"),
+            index: Mutex::new(ArtifactIndex::default()),
+        }
+    }
+
+    /// その features で作った成果物の道（**まだ読んでいない fingerprint を読み足してから引く**）。
+    pub fn with_features(&self, features: &[String]) -> Vec<PathBuf> {
+        let mut wanted = features.to_vec();
+        wanted.sort();
+        let Ok(mut index) = self.index.lock() else {
+            return Vec::new();
+        };
+        if let Ok(entries) = fs::read_dir(&self.fingerprints) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if index.seen.contains(&name) {
+                    continue;
+                }
+                let text = name.to_string_lossy().to_string();
+                let Some(hash) = text.strip_prefix("kernel-") else {
+                    index.seen.insert(name);
+                    continue;
+                };
+                // **ライブラリとビルドスクリプトの置き場には `bin-kernel.json` が無い**（読んだことにはしない。
+                // 次に読み足すときも見る。1 つ当たり 1 回の読みの失敗で済む）。
+                let Ok(json_text) = fs::read_to_string(entry.path().join("bin-kernel.json")) else {
+                    continue;
+                };
+                let Some(mut enabled) = fingerprint_features(&json_text) else {
+                    continue;
+                };
+                enabled.sort();
+                let artifact = self.deps.join(format!("kernel-{hash}"));
+                index.by_features.entry(enabled).or_default().push(artifact);
+                index.seen.insert(name);
+            }
+        }
+        index.by_features.get(&wanted).cloned().unwrap_or_default()
+    }
+}
+
+/// 写しが、その組の features で作った成果物のどれかと同じ中身かを確かめ、同じだった成果物を返す（2026-09-29。
+/// 運用者の決定）。`features` は、その組で cargo が有効にする features の全部（`default` とそこから辿れるものを含む）。
+pub fn confirm_the_copy(
+    artifacts: &Artifacts,
+    features: &[String],
+    copy: &Path,
+) -> std::result::Result<PathBuf, String> {
+    // **成果物の無い fingerprint は除く**（`clippy` の検査の単位も同じ名前で fingerprint を残す）。
+    let candidates: Vec<PathBuf> = artifacts
+        .with_features(features)
+        .into_iter()
+        .filter(|candidate| candidate.is_file())
+        .collect();
+    if candidates.is_empty() {
+        return Err(format!(
+            "no cargo artifact was built with the features of this set (looked for {} whose fingerprint lists {:?})",
+            artifacts.deps.join("kernel-<hash>").display(),
+            features
+        ));
+    }
+    let copied =
+        fs::read(copy).map_err(|error| format!("could not read {}: {error}", copy.display()))?;
+    for candidate in &candidates {
+        if fs::read(candidate).is_ok_and(|built| built == copied) {
+            return Ok(candidate.clone());
+        }
+    }
+    Err(format!(
+        "{} is not a build of this set: it matches none of the {} cargo artifact(s) built with its features ({}); \
+         another cargo may have rewritten the ELF that cargo leaves at one place for every set before it was copied",
+        copy.display(),
+        candidates.len(),
+        candidates
+            .iter()
+            .map(|candidate| candidate.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
 /// 動いている流れ。
 struct Handle {
     service: Arc<Service>,
@@ -633,6 +747,90 @@ mod tests {
             pending.extend(deps.iter().map(|dep| dep.to_string()));
         }
         reached
+    }
+
+    /// **写しが、その組の features で作った成果物のどれかと同じ中身なら通し、違えば落とす。**
+    /// **後から作った組も、fingerprint を読み足して見つける。**
+    #[test]
+    fn a_copy_is_accepted_only_when_it_is_a_build_of_its_set() {
+        let debug =
+            std::env::temp_dir().join(format!("zaytos-artifacts-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&debug);
+        let write = |path: PathBuf, text: &str| {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        let fingerprint = |hash: &str, features: &[&str]| {
+            let listed = features
+                .iter()
+                .map(|feature| format!("\\\"{feature}\\\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            write(
+                debug
+                    .join(".fingerprint")
+                    .join(format!("kernel-{hash}"))
+                    .join("bin-kernel.json"),
+                &format!(
+                    "{{\"rustc\":1,\"features\":\"[{listed}]\",\"declared_features\":\"[]\"}}"
+                ),
+            );
+        };
+        let with_x = owned(&["default", "heap-poison", "x-test"]);
+        fingerprint("aaa", &["default", "heap-poison", "x-test"]);
+        write(debug.join("deps").join("kernel-aaa"), "x build");
+        // **rustc を上げる前の同じ組**（中身が違う）。
+        fingerprint("ccc", &["x-test", "heap-poison", "default"]);
+        write(
+            debug.join("deps").join("kernel-ccc"),
+            "x build with the old rustc",
+        );
+        fingerprint("bbb", &["default", "heap-poison"]);
+        write(debug.join("deps").join("kernel-bbb"), "default build");
+        // **ライブラリの置き場と、成果物の無い fingerprint（`clippy` の単位）は数えない。**
+        write(
+            debug
+                .join(".fingerprint")
+                .join("kernel-ddd")
+                .join("lib-kernel.json"),
+            "{}",
+        );
+        fingerprint("fff", &["default", "heap-poison", "x-test"]);
+        let artifacts = Artifacts::new(&debug);
+        let copy = debug.join("copy");
+        write(copy.clone(), "x build");
+        assert_eq!(
+            confirm_the_copy(&artifacts, &with_x, &copy),
+            Ok(debug.join("deps").join("kernel-aaa"))
+        );
+        // **既定の構成の ELF を x-test の組として写したら、落とす。**
+        write(copy.clone(), "default build");
+        let error = confirm_the_copy(&artifacts, &with_x, &copy).unwrap_err();
+        assert!(
+            error.contains("matches none of the 2 cargo artifact(s)"),
+            "{error}"
+        );
+        // **この回に初めて作った組は、後からできた fingerprint を読み足して見つける。**
+        fingerprint("eee", &["default", "heap-poison", "y-test"]);
+        write(debug.join("deps").join("kernel-eee"), "y build");
+        write(copy.clone(), "y build");
+        assert_eq!(
+            confirm_the_copy(
+                &artifacts,
+                &owned(&["default", "heap-poison", "y-test"]),
+                &copy
+            ),
+            Ok(debug.join("deps").join("kernel-eee"))
+        );
+        // **その features で作った成果物が 1 つも無ければ、落とす。**
+        let error = confirm_the_copy(
+            &artifacts,
+            &owned(&["default", "heap-poison", "z-test"]),
+            &copy,
+        )
+        .unwrap_err();
+        assert!(error.contains("no cargo artifact"), "{error}");
+        let _ = fs::remove_dir_all(&debug);
     }
 
     #[test]

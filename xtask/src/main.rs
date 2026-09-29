@@ -29615,10 +29615,13 @@ fn received_kernel_build(
 
 /// 裏の流れが kernel を 1 つ作る（2026-09-29。案 A）。**作った直後、次のビルドの前に、cargo の置き場の ELF を
 /// 組ごとの置き場へ写す**——同じ cargo の出力の `OUT_DIR` と対にして返す。**`nice` で優先度を下げる**
-/// （QEMU の試験の邪魔をしない）。
+/// （QEMU の試験の邪魔をしない）。**写した後、その組の features で作った成果物と同じ中身かを確かめる**
+/// （[`kernel_builds::confirm_the_copy`]。違えば、この組は失敗として項目に渡る）。
 fn build_kernel_in_the_background(
     workspace_root: &Path,
     key: &kernel_builds::Key,
+    kernel_features: &KernelFeatures,
+    artifacts: &kernel_builds::Artifacts,
 ) -> std::result::Result<kernel_builds::Outcome, String> {
     let features: Vec<&str> = key.iter().map(String::as_str).collect();
     let output = Command::new("nice")
@@ -29647,6 +29650,16 @@ fn build_kernel_in_the_background(
         KERNEL_PACKAGE,
     )
     .map_err(|error| format!("{stderr}{error:#}\n"))?;
+    // **違えば写しを消す**——組の置き場に、その組ではない ELF を残さない。
+    kernel_builds::confirm_the_copy(artifacts, &kernel_features.resolved(key), &elf).map_err(
+        |error| {
+            let _ = fs::remove_file(&elf);
+            format!(
+                "{stderr}the kernel for [{}] was not handed over: {error}\n",
+                key.join(",")
+            )
+        },
+    )?;
     Ok(kernel_builds::Outcome {
         elf,
         out_dir,
@@ -29718,6 +29731,18 @@ impl KernelFeatures {
         })
     }
 
+    /// その組で cargo が有効にする kernel の feature の全部（`default` とそこから辿れるものを含む。並べ替えたもの）。
+    /// **cargo の fingerprint の `features` と同じ形**——写しの確かめに使う（[`kernel_builds::confirm_the_copy`]）。
+    fn resolved(&self, key: &kernel_builds::Key) -> Vec<String> {
+        let mut enabled: Vec<String> = std::iter::once("default")
+            .chain(key.iter().map(String::as_str))
+            .flat_map(|feature| self.reached(feature))
+            .collect();
+        enabled.sort();
+        enabled.dedup();
+        enabled
+    }
+
     /// 組の名前を揃える関数（[`kernel_builds::canonical_key`]）。
     fn normalizer(self: &Arc<Self>) -> Arc<kernel_builds::Normalize> {
         let features = Arc::clone(self);
@@ -29767,10 +29792,14 @@ fn start_kernel_builds(root: &Path) {
         }
     };
     let workspace = root.to_path_buf();
+    let artifacts =
+        kernel_builds::Artifacts::new(&root.join("target").join(KERNEL_TARGET).join("debug"));
     kernel_builds::start(
         ahead,
         source,
-        Box::new(move |key: &kernel_builds::Key| build_kernel_in_the_background(&workspace, key)),
+        Box::new(move |key: &kernel_builds::Key| {
+            build_kernel_in_the_background(&workspace, key, &features, &artifacts)
+        }),
         normalize,
     );
 }
