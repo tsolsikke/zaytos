@@ -36,11 +36,12 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use common::addr::{DirectMap, PhysAddr};
 
 use crate::abi::linux::x86_64::{
-    fb_fix_screeninfo, fb_var_screeninfo, parse_clip_rect, stat_bytes, Stat, AF_UNIX,
-    CLOCK_MONOTONIC, DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, DT_DIR, DT_REG,
-    DT_UNKNOWN, FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, O_ACCMODE, O_CREAT, O_RDONLY, O_TRUNC,
-    O_WRONLY, POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET, SOCKADDR_UN_LEN, SOCK_STREAM,
-    SOL_SOCKET, STAT_LEN, TIMESPEC_LEN, TIMESPEC_NSEC, TIOCGWINSZ, WINSIZE_LEN,
+    fb_fix_screeninfo, fb_var_screeninfo, parse_clip_rect, stat_bytes, winsize_bytes, Stat,
+    Winsize, AF_UNIX, CLOCK_MONOTONIC, DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN,
+    DT_DIR, DT_REG, DT_UNKNOWN, FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, O_ACCMODE, O_CREAT,
+    O_RDONLY, O_TRUNC, O_WRONLY, POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET,
+    SOCKADDR_UN_LEN, SOCK_STREAM, SOL_SOCKET, STAT_LEN, TIMESPEC_LEN, TIMESPEC_NSEC, TIOCGWINSZ,
+    WINSIZE_LEN,
 };
 use crate::abi::linux::x86_64::{
     E2BIG, EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, EBUSY, ECHILD, ECONNREFUSED, EEXIST,
@@ -4419,24 +4420,34 @@ unsafe fn sys_ioctl(
         _ => return (-ENOTTY) as u64,
     }
 
-    // **0 で埋めてから、分かる欄だけを書く**（`sys_stat` と同じ形）。
-    // **画面が無ければ 0 のままである。**
-    let mut out = [0u8; WINSIZE_LEN];
-    if let Some((columns, rows, width, height)) = crate::console::foreground_geometry() {
-        // 破壊テスト (e-1, ioctl-winsize-swap): 行と桁を入れ替えて返す。
-        // **どちらももっともらしい数のままなので、受けた側だけでは気づけない**
-        // （`stat` の `st_blocks` を単位違いで返す破壊テストと同じ種類である）。
-        // **画面は正方形ではない**（160x50。実測）ので、入れ替えれば必ず違う値になる。
-        // **カーネルが自分の値を判定行に出しており、突き合わせが検出する。**
-        #[cfg(feature = "ioctl-winsize-swap-test")]
-        let (rows, columns) = (columns, rows);
-        // **`u16` へ収める。** **越えることは無い**——桁も行もセルの数で、
-        // 仮定する最大は 240x67 である（`kernel_main` の `MAX_TERMINAL_CELLS`）。
-        out[0..2].copy_from_slice(&(rows as u16).to_le_bytes());
-        out[2..4].copy_from_slice(&(columns as u16).to_le_bytes());
-        out[4..6].copy_from_slice(&(width as u16).to_le_bytes());
-        out[6..8].copy_from_slice(&(height as u16).to_le_bytes());
-    }
+    // **値はここで決め、`struct winsize` の欄へ書くのは abi の `winsize_bytes` に任せる**（`ADR-0071` の決定 1 の 2 で
+    // 分けた。2026-09-30）。**画面が無ければ、どの欄も 0 である。**
+    let winsize = match crate::console::foreground_geometry() {
+        Some((columns, rows, width, height)) => {
+            // 破壊テスト (e-1, ioctl-winsize-swap): 行と桁を入れ替えて返す。
+            // **どちらももっともらしい数のままなので、受けた側だけでは気づけない**
+            // （`stat` の `st_blocks` を単位違いで返す破壊テストと同じ種類である）。
+            // **画面は正方形ではない**（160x50。実測）ので、入れ替えれば必ず違う値になる。
+            // **カーネルが自分の値を判定行に出しており、突き合わせが検出する。**
+            #[cfg(feature = "ioctl-winsize-swap-test")]
+            let (rows, columns) = (columns, rows);
+            // **`u16` へ収める。** **越えることは無い**——桁も行もセルの数で、
+            // 仮定する最大は 240x67 である（`kernel_main` の `MAX_TERMINAL_CELLS`）。
+            Winsize {
+                row: rows as u16,
+                col: columns as u16,
+                xpixel: width as u16,
+                ypixel: height as u16,
+            }
+        }
+        None => Winsize {
+            row: 0,
+            col: 0,
+            xpixel: 0,
+            ypixel: 0,
+        },
+    };
+    let out = winsize_bytes(&winsize);
 
     // **踏み込む前に検証する。**
     // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。

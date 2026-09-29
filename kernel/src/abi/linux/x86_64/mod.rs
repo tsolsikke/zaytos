@@ -13,9 +13,10 @@ pub use errno::{
 mod layout;
 
 pub use layout::{
-    fb_fix_screeninfo, fb_var_screeninfo, parse_clip_rect, stat_bytes, Stat, DIRENT64_ALIGN,
-    DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, FB_FIX_SCREENINFO_LEN, FB_VAR_SCREENINFO_LEN,
-    POLLFD_LEN, SOCKADDR_UN_LEN, STAT_LEN, TIMESPEC_LEN, TIMESPEC_NSEC, WINSIZE_LEN,
+    fb_fix_screeninfo, fb_var_screeninfo, parse_clip_rect, stat_bytes, winsize_bytes, Stat,
+    Winsize, DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, FB_FIX_SCREENINFO_LEN,
+    FB_VAR_SCREENINFO_LEN, POLLFD_LEN, SOCKADDR_UN_LEN, STAT_LEN, TIMESPEC_LEN, TIMESPEC_NSEC,
+    WINSIZE_LEN,
 };
 
 mod values;

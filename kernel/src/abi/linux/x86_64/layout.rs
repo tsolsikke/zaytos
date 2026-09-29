@@ -128,6 +128,31 @@ pub fn stat_bytes(stat: &Stat) -> [u8; STAT_LEN] {
     out
 }
 
+/// `struct winsize` に書く値（`TIOCGWINSZ`）。
+///
+/// **値を決めるのは共通の側で、[`winsize_bytes`] は欄の位置へ書くだけである**（`ADR-0071` の決定 1 の 2 で、
+/// `crate::syscall` の `sys_ioctl` から分けた。2026-09-30）。
+pub struct Winsize {
+    /// `ws_row`（行の数）。
+    pub row: u16,
+    /// `ws_col`（桁の数）。
+    pub col: u16,
+    /// `ws_xpixel`（横の画素の数）。
+    pub xpixel: u16,
+    /// `ws_ypixel`（縦の画素の数）。
+    pub ypixel: u16,
+}
+
+/// `struct winsize` を組む（欄の並びは [`WINSIZE_LEN`] の doc）。
+pub fn winsize_bytes(winsize: &Winsize) -> [u8; WINSIZE_LEN] {
+    let mut out = [0u8; WINSIZE_LEN];
+    out[0..2].copy_from_slice(&winsize.row.to_le_bytes());
+    out[2..4].copy_from_slice(&winsize.col.to_le_bytes());
+    out[4..6].copy_from_slice(&winsize.xpixel.to_le_bytes());
+    out[6..8].copy_from_slice(&winsize.ypixel.to_le_bytes());
+    out
+}
+
 /// 画素の色の並び（`struct fb_bitfield` の `offset`）。**青・緑・赤の順に返す。**
 ///
 /// **UEFI の `Bgr` は「バイト 0 が青」、`Rgb` は「バイト 0 が赤」である**（`PixelFormat` の doc）。
@@ -206,6 +231,10 @@ mod tests {
 
     use super::*;
 
+    fn u16_at(bytes: &[u8], at: usize) -> u16 {
+        u16::from_le_bytes([bytes[at], bytes[at + 1]])
+    }
+
     fn u32_at(bytes: &[u8], at: usize) -> u32 {
         u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
     }
@@ -241,6 +270,23 @@ mod tests {
             rest[at..at + len].fill(0);
         }
         assert_eq!(rest, [0u8; 144], "the other fields are 0");
+    }
+
+    /// `struct winsize` の欄の位置（Linux の x86_64 の `asm/termios.h` を `gcc` の `offsetof` で測って確かめた。
+    /// 2026-09-30。`sys/ioctl.h` も同じ）。**値は、どのバイトも 0 でなく、欄ごとに違う形にする**（stat のテストと同じ理由）。
+    #[test]
+    fn the_winsize_bytes_follow_the_linux_layout() {
+        let out = winsize_bytes(&Winsize {
+            row: 0x0102,
+            col: 0x1112,
+            xpixel: 0x2122,
+            ypixel: 0x3132,
+        });
+        assert_eq!(out.len(), 8, "sizeof(struct winsize)");
+        assert_eq!(u16_at(&out, 0), 0x0102, "ws_row @0");
+        assert_eq!(u16_at(&out, 2), 0x1112, "ws_col @2");
+        assert_eq!(u16_at(&out, 4), 0x2122, "ws_xpixel @4");
+        assert_eq!(u16_at(&out, 6), 0x3132, "ws_ypixel @6");
     }
 
     /// `struct fb_var_screeninfo` の欄の位置（`offsetof` の値）。
