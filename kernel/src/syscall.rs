@@ -36,12 +36,12 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use common::addr::{DirectMap, PhysAddr};
 
 use crate::abi::linux::x86_64::{
-    fb_fix_screeninfo, fb_var_screeninfo, parse_clip_rect, parse_sockaddr_un, parse_timespec,
-    stat_bytes, timespec_bytes, winsize_bytes, Stat, Timespec, Winsize, AF_UNIX, CLOCK_MONOTONIC,
-    DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, DT_DIR, DT_REG, DT_UNKNOWN,
-    FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, O_ACCMODE, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY,
-    POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET, SOCKADDR_UN_LEN, SOCK_STREAM, SOL_SOCKET,
-    STAT_LEN, TIMESPEC_LEN, TIOCGWINSZ, WINSIZE_LEN,
+    fb_fix_screeninfo, fb_var_screeninfo, parse_clip_rect, parse_pollfd, parse_sockaddr_un,
+    parse_timespec, set_pollfd_revents, stat_bytes, timespec_bytes, winsize_bytes, Stat, Timespec,
+    Winsize, AF_UNIX, CLOCK_MONOTONIC, DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN,
+    DT_DIR, DT_REG, DT_UNKNOWN, FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, O_ACCMODE, O_CREAT,
+    O_RDONLY, O_TRUNC, O_WRONLY, POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET,
+    SOCKADDR_UN_LEN, SOCK_STREAM, SOL_SOCKET, STAT_LEN, TIMESPEC_LEN, TIOCGWINSZ, WINSIZE_LEN,
 };
 use crate::abi::linux::x86_64::{
     E2BIG, EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, EBUSY, ECHILD, ECONNREFUSED, EEXIST,
@@ -1870,16 +1870,16 @@ unsafe fn poll_from_ring3(
     if read != count * POLLFD_LEN {
         return (-EFAULT) as u64;
     }
-    // **欄を割って、待つ理由へ対応づける。**
+    // **欄を割るのは abi の `parse_pollfd` で、受けるかどうかを決めて待つ理由へ対応づけるのはここである**
+    // （`ADR-0071` の決定 1 の 2 で分けた。2026-09-30）。
+    let (fds, _) = raw.as_chunks::<POLLFD_LEN>();
     let mut reasons = [None; MAX_POLL_FDS];
     for (index, slot) in reasons.iter_mut().enumerate().take(count) {
-        let at = index * POLLFD_LEN;
-        let fd = i32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]);
-        let events = u16::from_le_bytes([raw[at + 4], raw[at + 5]]);
-        if fd < 0 || events != POLLIN {
+        let request = parse_pollfd(&fds[index]);
+        if request.fd < 0 || request.events != POLLIN {
             return (-EINVAL) as u64;
         }
-        let Some(reason) = poll_reason_of(fd as u64) else {
+        let Some(reason) = poll_reason_of(request.fd as u64) else {
             return (-EBADF) as u64;
         };
         *slot = Some(reason);
@@ -1907,9 +1907,9 @@ unsafe fn poll_from_ring3(
             ready += 1;
         }
         if ready > 0 {
+            let (fds, _) = raw.as_chunks_mut::<POLLFD_LEN>();
             for (index, revent) in revents.iter().enumerate().take(count) {
-                let at = index * POLLFD_LEN;
-                raw[at + 6..at + 8].copy_from_slice(&revent.to_le_bytes());
+                set_pollfd_revents(&mut fds[index], *revent);
             }
             // SAFETY: `slice` は検証済みで、書く長さは検証した `bytes` を越えない。
             unsafe { copy_to_user(&slice, 0, &raw[..count * POLLFD_LEN]) };

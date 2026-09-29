@@ -211,6 +211,30 @@ pub fn parse_sockaddr_un(raw: &[u8]) -> Option<SockaddrUn<'_>> {
     })
 }
 
+/// `struct pollfd` から読んだ値（`fd` と `events`。`ADR-0066` の Y-b）。
+///
+/// **欄から読むのと `revents` を書くのはここで、受けるかどうかと、どの欄に印を付けるかを決めるのは共通の側である**
+/// （`ADR-0071` の決定 1 の 2 で、`crate::syscall` の `poll_from_ring3` から分けた。2026-09-30）。
+pub struct Pollfd {
+    /// `fd`（符号つき 32 ビット）。
+    pub fd: i32,
+    /// `events`（待つ事象のビット）。
+    pub events: u16,
+}
+
+/// `struct pollfd` の `fd` と `events` を読む（欄の並びは [`POLLFD_LEN`] の doc）。
+pub fn parse_pollfd(raw: &[u8; POLLFD_LEN]) -> Pollfd {
+    Pollfd {
+        fd: i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
+        events: u16::from_le_bytes([raw[4], raw[5]]),
+    }
+}
+
+/// `struct pollfd` の `revents` を書く。**ほかの欄は触らない**（利用者へ書き戻すとき、`fd` と `events` は読んだまま）。
+pub fn set_pollfd_revents(raw: &mut [u8; POLLFD_LEN], revents: u16) {
+    raw[6..8].copy_from_slice(&revents.to_le_bytes());
+}
+
 /// 画素の色の並び（`struct fb_bitfield` の `offset`）。**青・緑・赤の順に返す。**
 ///
 /// **UEFI の `Bgr` は「バイト 0 が青」、`Rgb` は「バイト 0 が赤」である**（`PixelFormat` の doc）。
@@ -397,6 +421,23 @@ mod tests {
             parse_sockaddr_un(&raw[..1]).is_none(),
             "shorter than sun_family"
         );
+    }
+
+    /// `struct pollfd` の欄の位置（Linux の x86_64 の `asm/poll.h` を `gcc` の `offsetof` で測って確かめた。2026-09-30。
+    /// `poll.h` も同じ）。**`revents` を書いても、ほかの欄は変わらない。**
+    #[test]
+    fn the_pollfd_fields_follow_the_linux_layout() {
+        let mut raw = [0x01, 0x02, 0x03, 0x04, 0x11, 0x12, 0x21, 0x22];
+        let read = parse_pollfd(&raw);
+        assert_eq!(read.fd, 0x0403_0201, "fd @0");
+        assert_eq!(read.events, 0x1211, "events @4");
+        set_pollfd_revents(&mut raw, 0x3132);
+        assert_eq!(
+            raw,
+            [0x01, 0x02, 0x03, 0x04, 0x11, 0x12, 0x32, 0x31],
+            "revents @6, the rest unchanged"
+        );
+        assert_eq!(parse_pollfd(&[0xff; 8]).fd, -1, "fd is signed");
     }
 
     /// `struct fb_var_screeninfo` の欄の位置（`offsetof` の値）。
