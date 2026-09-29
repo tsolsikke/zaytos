@@ -75,7 +75,7 @@ impl Counter {
 }
 
 std::thread_local! {
-    /// いまの項目の分（`finish_item` が読んで空にする）。**項目を走らせる糸ごとに持つ**（2026-09-29。SCRUM-31）——同時に走る項目の計数を混ぜない。
+    /// いまの項目の分（`finish_item` が読んで空にする）。**項目を走らせる糸ごとに持つ**（2026-09-29）——同時に走る項目の計数を混ぜない。
     static ITEM: std::cell::RefCell<[(u64, Duration); 5]> =
         const { std::cell::RefCell::new([(0, Duration::ZERO); 5]) };
 }

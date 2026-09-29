@@ -1,6 +1,6 @@
 //! Linux の値（`d_type`・時計の番号・`ioctl` の要求・`open` のフラグ・`whence`・fbdev・ソケット・`poll`・`mmap`・
-//! `cmsghdr`。x86_64 の Linux の値。`ADR-0071` の決定 1 の 2 で、`crate::syscall` から移した。2026-09-30。
-//! SCRUM-19）。並びと doc は移す前のまま。
+//! `cmsghdr`。x86_64 の Linux の値。`ADR-0071` の決定 1 の 2 で、`crate::syscall` から移した。2026-09-30）。
+//! 並びと doc は移す前のまま。
 
 /// `d_type`: 不明。**対応表に無い値はこれにする。**
 pub const DT_UNKNOWN: u8 = 0;

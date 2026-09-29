@@ -1,7 +1,7 @@
 //! errno（Linux と同じ値。`ADR-0020` の Addendum で、errno の値を Linux に合わせると決めた）。**失敗は `-errno` で
 //! 返す**（`crate::syscall`）。
 //!
-//! **x86_64 の Linux の値である**（`ADR-0071` の決定 1 の 2 で、`crate::syscall` から移した。2026-09-30。SCRUM-19）。
+//! **x86_64 の Linux の値である**（`ADR-0071` の決定 1 の 2 で、`crate::syscall` から移した。2026-09-30）。
 //! 並びと doc は移す前のまま。
 
 /// `-ENOSYS`（未実装システムコール）の errno。失敗は `-errno` で返す。

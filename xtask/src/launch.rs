@@ -205,7 +205,7 @@ pub struct RunRecord {
 }
 
 std::thread_local! {
-    /// 項目の中の実行（`begin_item` で空にする）。**項目を走らせる糸ごとに持つ**（2026-09-29。SCRUM-31）——同時に走る項目の実行を混ぜない。
+    /// 項目の中の実行（`begin_item` で空にする）。**項目を走らせる糸ごとに持つ**（2026-09-29）——同時に走る項目の実行を混ぜない。
     static ITEM_RUNS: std::cell::RefCell<Vec<RunRecord>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 /// 起動した実行の数（全体。計測のため）。
@@ -213,7 +213,7 @@ static RUNS_STARTED: AtomicU64 = AtomicU64::new(0);
 /// 実行の時間の合計（ナノ秒。全体。計測のため）。
 static RUNS_NANOS: AtomicU64 = AtomicU64::new(0);
 
-/// 同時に走る QEMU の vCPU の数の上限（2026-09-29。SCRUM-31。運用者の決定）。**全検査で並べた行（項目の塊を持つ糸）
+/// 同時に走る QEMU の vCPU の数の上限（2026-09-29。運用者の決定）。**全検査で並べた行（項目の塊を持つ糸）
 /// から起こす QEMU だけが数える**——順に回すときは 1 本ずつなので数えない。**`-smp 2`・`4` の回は、その数だけ取る**
 /// （上限より多ければ上限だけ取る。独りで走る）。並べる糸の数の既定（`main.rs` の `FULL_CHECK_JOBS`）と同じ値にした——
 /// **糸の数を `ZAYTOS_CHECK_JOBS` で増やしても、同時に走る vCPU はこの数を越えない。**
@@ -772,13 +772,13 @@ pub fn spawn(spec: &Spec<'_>) -> Result<QemuRun> {
     if spec.group == Group::Own {
         command.process_group(0);
     }
-    // **項目の塊を持つ糸から起こしたら、QEMU の出力を受け取って塊へ積む**（2026-09-29。SCRUM-31）——受け継ぐと、
+    // **項目の塊を持つ糸から起こしたら、QEMU の出力を受け取って塊へ積む**（2026-09-29）——受け継ぐと、
     // 同時に走るほかの項目の塊の間に混ざる。**持たなければ、今までどおり受け継ぐ。**
     let sink = crate::item_log::sink();
     if sink.is_some() {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
     }
-    // **並べた行では、vCPU の数の上限の中で起こす**（[`VCPU_BUDGET`]。2026-09-29。SCRUM-31）。
+    // **並べた行では、vCPU の数の上限の中で起こす**（[`VCPU_BUDGET`]。2026-09-29）。
     let vcpus = if sink.is_some() {
         take_vcpus(vcpus_of(spec.args))
     } else {

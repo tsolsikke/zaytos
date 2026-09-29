@@ -54,7 +54,7 @@ fn succeeded(script: &str, output: &Output) -> Result<String> {
 }
 
 /// `cargo xtask run-set`——**通る行と、`!` を付けた落ちるのが正しい行の 2 行を 2 本ずつで回し、2 行とも通過と数えて
-/// まとめの行を出すこと**（2026-09-29。SCRUM-31。運用者の決定）。**QEMU を起動しない行だけで組む**——通る行は
+/// まとめの行を出すこと**（2026-09-29。運用者の決定）。**QEMU を起動しない行だけで組む**——通る行は
 /// `full --status`（読むだけ）、落ちる行は知らない命令である（知らない引数は、`run` が既定の起動に読み替える）。
 pub(super) fn run_set(root: &Path) -> Result<String> {
     let list = scratch_dir(root)?.join("run-set-list.txt");

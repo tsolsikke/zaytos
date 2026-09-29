@@ -15,7 +15,7 @@ use anyhow::{bail, Context, Result};
 use family::Family;
 use run_dir::RunDir;
 
-/// 出力の置き換え（2026-09-29。SCRUM-31）。**項目を走らせる糸が塊を持つ間は、その塊へ積む**（[`item_log`]）。
+/// 出力の置き換え（2026-09-29）。**項目を走らせる糸が塊を持つ間は、その塊へ積む**（[`item_log`]）。
 /// **持たなければ、今までどおりその場で書く。** **モジュールの宣言より前に置いて、全部のモジュールに効かせる**
 /// ——同時に走る項目の行を、ほかの項目の塊の間に混ぜない。
 macro_rules! print {
@@ -25099,7 +25099,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
 
     // 外した確率的な項目の一覧が実態を指しているかを先に見る（列挙の腐りを防ぐ）。
     check_flaky_list_matches_tables()?;
-    // **同時に走らせない表の死んだ行も、先に落とす**（2026-09-29。SCRUM-31）。
+    // **同時に走らせない表の死んだ行も、先に落とす**（2026-09-29）。
     check_not_concurrent_rows()?;
     // **並べる糸の数は全検査の間だけ**（[`full_check_jobs`]）。
     PARALLEL.store(full, std::sync::atomic::Ordering::SeqCst);
@@ -29087,7 +29087,7 @@ impl Failures {
         self.list.push(name);
     }
 
-    /// ほかの入れ物の落ちた項目を、並びを保って後ろへ移す（2026-09-29。SCRUM-31。並べた行の分を表の順に集める）。
+    /// ほかの入れ物の落ちた項目を、並びを保って後ろへ移す（2026-09-29。並べた行の分を表の順に集める）。
     fn extend(&mut self, other: Failures) {
         self.list.extend(other.list);
         self.kinds.extend(other.kinds);
@@ -29352,7 +29352,7 @@ fn slowness_lines(
 /// 見出しを出しており、終わりを1つずつ書かせると、書き忘れた項目だけが
 /// 黙って消える。** **次の見出しが前の項目の終わりである。**
 ///
-/// **項目を走らせる糸ごとに持つ**（2026-09-29。SCRUM-31）——同時に走る項目の時計を混ぜない。
+/// **項目を走らせる糸ごとに持つ**（2026-09-29）——同時に走る項目の時計を混ぜない。
 fn item_clock<T>(body: impl FnOnce(&mut Option<(Instant, String, Family)>) -> T) -> T {
     std::thread_local! {
         static ITEM_CLOCK: std::cell::RefCell<Option<(Instant, String, Family)>> =
@@ -29364,7 +29364,7 @@ fn item_clock<T>(body: impl FnOnce(&mut Option<(Instant, String, Family)>) -> T)
 /// 項目の出力のコピー（2026-09-26。族にまとめる段）。**名前つきの判定で検出される破壊テストが、狙いの判定の行を
 /// 探す**（[`SABOTAGE_JUDGEMENTS`]）。**`begin_item` が空にする。** **上限（[`ITEM_OUTPUT_LIMIT`]）を
 /// 越えたら積むのをやめ、越えたことを残す**——**項目を区切らない実行（`cargo xtask flaky` 等）で膨らませない。**
-/// **項目を走らせる糸ごとに持つ**（2026-09-29。SCRUM-31）——同時に走る項目の出力を混ぜない。
+/// **項目を走らせる糸ごとに持つ**（2026-09-29）——同時に走る項目の出力を混ぜない。
 fn item_output_copy<T>(body: impl FnOnce(&mut (String, bool)) -> T) -> T {
     std::thread_local! {
         static ITEM_OUTPUT: std::cell::RefCell<(String, bool)> =
@@ -29407,7 +29407,7 @@ fn begin_item(family: Family, label: &str) {
     ITEM_FAILURE_CATEGORY.with(|slot| slot.set(None));
     ITEMS_DONE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     // **並べた行（項目の塊を持つ糸）では、ここで止めない**——ほかの糸の QEMU を残したまま終わることになる。上限は、
-    // 並べる側が行を始める前に見る（[`Batch::run`]。2026-09-29。SCRUM-31）。
+    // 並べる側が行を始める前に見る（[`Batch::run`]。2026-09-29）。
     if item_log::sink().is_none() {
         stop_if_over_the_time_limit();
     }
@@ -29449,7 +29449,7 @@ fn stop_if_over_the_time_limit() {
     std::process::exit(3);
 }
 
-/// `--full` の上限を過ぎたか（2026-09-29。SCRUM-31。**並べる側が、行を始める前にも見る**）。
+/// `--full` の上限を過ぎたか（2026-09-29。**並べる側が、行を始める前にも見る**）。
 fn over_the_time_limit() -> bool {
     TIME_LIMIT
         .lock()
@@ -29612,7 +29612,7 @@ fn failure_category(error: &anyhow::Error) -> &'static str {
 
 std::thread_local! {
     /// いまの項目の中で [`failure_category`] が決めた分け方（2026-09-26）。**`begin_item` が空にする。**
-    /// **項目を走らせる糸ごとに持つ**（2026-09-29。SCRUM-31）——同時に走る項目の分け方を混ぜない。
+    /// **項目を走らせる糸ごとに持つ**（2026-09-29）——同時に走る項目の分け方を混ぜない。
     static ITEM_FAILURE_CATEGORY: std::cell::Cell<Option<launch::Category>> =
         const { std::cell::Cell::new(None) };
 }
@@ -29747,7 +29747,7 @@ impl SelectionScore {
     }
 }
 
-/// 全検査で並べる糸の数（2026-09-29。SCRUM-31。運用者の決定）。**既定は 4**（QEMU の vCPU の上限
+/// 全検査で並べる糸の数（2026-09-29。運用者の決定）。**既定は 4**（QEMU の vCPU の上限
 /// [`launch::VCPU_BUDGET`] と同じ）。**`ZAYTOS_CHECK_JOBS` で変えられる**——1 なら順に回す（比べと切り分けのため）。
 const FULL_CHECK_JOBS: usize = 4;
 
@@ -29769,7 +29769,7 @@ fn full_check_jobs() -> usize {
         .unwrap_or(FULL_CHECK_JOBS)
 }
 
-/// 全検査で同時に走らせない表の行と、その理由（2026-09-29。SCRUM-31。運用者の決定）。**`*` はその表の全部の行。**
+/// 全検査で同時に走らせない表の行と、その理由（2026-09-29。運用者の決定）。**`*` はその表の全部の行。**
 ///
 /// **読んで分けた行**（sendkey で打つシェルの試験、ホストの時間と比べる試験、台本で駆動するシェルの試験、宣言した上限
 /// まで走る実行）と、**走らせて分けた行**（候補を 4 本ずつで回して、判定が変わったか、余裕が揺れの幅を越えて減った行）
@@ -29941,7 +29941,7 @@ fn check_not_concurrent_rows() -> Result<()> {
     Ok(())
 }
 
-/// 全検査の表のループを並べる入れ物（2026-09-29。SCRUM-31。[`batch`]）。**表のループは、行ごとの項目をここへ積み、
+/// 全検査の表のループを並べる入れ物（2026-09-29。[`batch`]）。**表のループは、行ごとの項目をここへ積み、
 /// ループの後で [`Batch::run`] を呼ぶ。** 項目の本体は、落ちた項目と再試行を、行ごとの入れ物へ積む（終わってから、
 /// 表の順に全体へ移す）。
 struct Batch<'a> {
@@ -30210,7 +30210,7 @@ fn build_kernel_in_the_background(
     })
 }
 
-/// 子を走らせ、終わりを待つ（2026-09-29。SCRUM-31）。**項目の塊を持つ糸から呼んだら、出力を受け取って塊へ積む**
+/// 子を走らせ、終わりを待つ（2026-09-29）。**項目の塊を持つ糸から呼んだら、出力を受け取って塊へ積む**
 /// （[`item_log`]）。**持たなければ、今までどおり出力を受け継ぐ**（`Command::status` と同じ）。
 fn status_into_item_log(command: &mut Command) -> std::io::Result<std::process::ExitStatus> {
     if item_log::sink().is_none() {
@@ -30519,7 +30519,7 @@ fn run_kernel_build_unwrapped(workspace_root: &Path, features: &[&str]) -> Resul
             .args(kernel_cargo_args(features));
         // **診断はそのまま流す。** `--message-format=json-render-diagnostics` は
         // 人が読む形の診断を stderr へ出すので、握らずに見せる。**項目の塊を持つ糸なら、受け取って塊へ積む**
-        // （[`item_log`]。2026-09-29。SCRUM-31）。
+        // （[`item_log`]。2026-09-29）。
         let into_block = item_log::sink().is_some();
         let output = command
             .stdout(Stdio::piped())
@@ -31681,7 +31681,7 @@ mod tests {
         assert!(found[1].starts_with("tools/x.py:1: the ESP directory"));
     }
 
-    /// **項目の塊を持つ糸から起こした子の出力は、塊へ積む**（2026-09-29。SCRUM-31）。**持たなければ受け継ぐ。**
+    /// **項目の塊を持つ糸から起こした子の出力は、塊へ積む**（2026-09-29）。**持たなければ受け継ぐ。**
     #[test]
     fn a_child_started_inside_a_block_writes_into_the_block() {
         let mut status = None;
@@ -31744,7 +31744,7 @@ mod tests {
         assert_eq!(left, b"MZ kept");
     }
 
-    /// **同時に走らせない表の行は、並べる表の行を指す**（2026-09-29。SCRUM-31）。**死んだ行を名前つきで返す。**
+    /// **同時に走らせない表の行は、並べる表の行を指す**（2026-09-29）。**死んだ行を名前つきで返す。**
     #[test]
     fn not_concurrent_rows_name_rows_of_batched_tables() {
         assert_eq!(

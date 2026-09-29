@@ -126,9 +126,9 @@ pub const PATH_RULES: &[PathRule] = &[
             "xtask/src/launch.rs",
             // **回の置き場**（案 B の ①）——**QEMU を起動するどの項目も通る。**
             "xtask/src/run_dir.rs",
-            // **項目のログの塊**（SCRUM-31）——**どの項目の出力も通る。**
+            // **項目のログの塊**——**どの項目の出力も通る。**
             "xtask/src/item_log.rs",
-            // **全検査の表の行を同時に走らせる**（SCRUM-31）——**全検査の表のループの項目は全部通る。**
+            // **全検査の表の行を同時に走らせる**——**全検査の表のループの項目は全部通る。**
             "xtask/src/batch.rs",
             "xtask/src/kernel_builds.rs",
             "bootloader/**",
