@@ -40,6 +40,10 @@ pub const O_TRUNC: u64 = 0o1000;
 /// 無ければ作る（Linux の `O_CREAT`）。e-5 で受理に加わった（ADR-0037 の Addendum）。
 pub const O_CREAT: u64 = 0o100;
 
+/// 末尾へ書き足す（Linux の `O_APPEND`）。**受理しない**——書き込みを伴うフラグとして数える（`crate::syscall` の
+/// `O_WRITE_INTENT`）。
+pub const O_APPEND: u64 = 0o2000;
+
 /// `lseek` の `whence`——先頭からの絶対位置（`SEEK_SET`）。
 ///
 /// # ここだけ受ける
