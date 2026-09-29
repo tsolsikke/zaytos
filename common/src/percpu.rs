@@ -34,7 +34,8 @@ const READER_NOT_INSTALLED: usize = 0;
 
 /// 自コアのCPU番号を読む実装を据える。
 ///
-/// 実IDの出所は Local APIC で、そのアドレスとビット位置は `kernel` の知識である。
+/// 番号の求め方は `kernel` の知識である。x86 では、今の GDTR がどの CPU の GDT を指しているかから求める
+/// （`kernel` の `arch/x86_64/gdt` の `cpu_id_from_gdtr`。S3-b-2a から）。
 /// `common` は bootloader からも使うので、器だけをここに置き中身は `kernel` が据える。
 ///
 /// # Safety
