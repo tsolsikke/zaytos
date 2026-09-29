@@ -26,6 +26,14 @@
 //! **先に作り始めるのは [`build_ahead`] の後である**——基本の検査の項目（`cargo test` や `clippy`）が
 //! `target/` の鍵を待たないように、QEMU の項目の手前で始める。
 //!
+//! # 組の名前
+//!
+//! **同じビルドには 1 つの名前を付ける**（[`canonical_key`]。2026-09-29。運用者の決定）。**項目が求める組・順の
+//! 記録・fingerprint の 3 つが、同じ関数を通る**——空の名前と、既定の構成やほかの feature から辿れる feature を落とす。
+//! **入れた後の最初の全検査で、名前が食い違った**: fingerprint からは依存で縮めた名前（`pipe-write-does-not-wake-reader`）を、
+//! 項目は親も並べた名前（`pipe-test,pipe-write-does-not-wake-reader`）を使い、36 組を先に作ったのに使えず、求められてから
+//! 作り直した。`ACPI_SMP_TESTS` の `feature: ""` も、既定の構成と別の組として 2 度作った。
+//!
 //! # 全検査でだけ使う
 //!
 //! **基本の検査・`--commit`・手の実行は、今までどおりその場でビルドする**（[`is_running`] が偽）。
@@ -51,6 +59,9 @@ pub struct Outcome {
 
 /// ビルドする関数（本物は `main.rs` が渡す。テストは偽物を渡す）。
 pub type Builder = dyn Fn(&Key) -> std::result::Result<Outcome, String> + Send + Sync;
+
+/// 組の名前を揃える関数（本物は `main.rs` が feature の表から作り、[`canonical_key`] を呼ぶ）。
+pub type Normalize = dyn Fn(&[&str]) -> Key + Send + Sync;
 
 /// 項目が受け取るもの。
 #[derive(Debug)]
@@ -93,17 +104,26 @@ struct Queue {
 pub struct Service {
     queue: Mutex<Queue>,
     changed: Condvar,
+    /// 組の名前を揃える関数（**先に作る順と、項目が求める組の両方に使う**）。
+    normalize: Arc<Normalize>,
 }
 
 impl Service {
-    pub fn new(ahead: Vec<Key>) -> Self {
+    /// **先に作る順も、ここで名前を揃える**（記録や fingerprint がどんな名前で書いていても、求める側と同じ名前になる）。
+    pub fn new(ahead: Vec<Key>, normalize: Arc<Normalize>) -> Self {
         Service {
             queue: Mutex::new(Queue {
-                ahead: ahead.into(),
+                ahead: canonical_order(&ahead, normalize.as_ref()).into(),
                 ..Queue::default()
             }),
             changed: Condvar::new(),
+            normalize,
         }
+    }
+
+    /// feature の名前で組を求める（**名前を揃えてから [`Service::ask`] へ渡す**）。
+    pub fn ask_features(&self, features: &[&str]) -> Received {
+        self.ask((self.normalize)(features))
     }
 
     /// 先に作り始める。
@@ -298,6 +318,44 @@ pub fn key_of(features: &[&str]) -> Key {
     key
 }
 
+/// 同じビルドに 1 つの名前を付ける（2026-09-29。運用者の決定。純粋な論理）。
+///
+/// **落とすもの**: 空の名前（`""` は既定の構成）、既定の構成から辿れる feature（`default` と `heap-poison`）、
+/// 組の中のほかの feature から辿れる feature（`pipe-write-does-not-wake-reader` があれば `pipe-test`）。
+/// **cargo が有効にする feature の全部は変わらない**ので、同じ成果物になる。
+/// `reached` は、1 つの feature から辿れる kernel の feature の全部を返す（自分を含む。知らない名前は空）。
+/// **知らない名前は残す**——cargo が「その feature は無い」と落とす。
+pub fn canonical_key(features: &[&str], reached: &dyn Fn(&str) -> Vec<String>) -> Key {
+    let from_default = reached("default");
+    let named: Vec<&str> = features
+        .iter()
+        .map(|feature| feature.trim())
+        .filter(|feature| !feature.is_empty() && !from_default.iter().any(|d| d == feature))
+        .collect();
+    let minimal: Vec<&str> = named
+        .iter()
+        .copied()
+        .filter(|feature| {
+            !named
+                .iter()
+                .any(|other| other != feature && reached(other).iter().any(|name| name == feature))
+        })
+        .collect();
+    key_of(&minimal)
+}
+
+/// 並びの名前を揃え、揃えた後に重なった組は最初の 1 つだけを残す（順は保つ。純粋な論理）。
+pub fn canonical_order(keys: &[Key], normalize: &Normalize) -> Vec<Key> {
+    let mut ordered: Vec<Key> = Vec::new();
+    for key in keys {
+        let key = normalize(&key.iter().map(String::as_str).collect::<Vec<_>>());
+        if !ordered.contains(&key) {
+            ordered.push(key);
+        }
+    }
+    ordered
+}
+
 /// 組の写しの置き場の名前（**空は `default`**。純粋な論理）。
 pub fn directory_name(key: &Key) -> String {
     if key.is_empty() {
@@ -423,15 +481,16 @@ static RUNNING: Mutex<Option<Handle>> = Mutex::new(None);
 /// ブートローダの写し（組ごと。**全検査の間だけ**）。
 static BOOTLOADERS: Mutex<Vec<(Key, PathBuf)>> = Mutex::new(Vec::new());
 
-/// 流れを始める（全検査の入口。**先に作り始めるのは [`build_ahead`] の後**）。
-pub fn start(ahead: Vec<Key>, source: String, build: Box<Builder>) {
+/// 流れを始める（全検査の入口。**先に作り始めるのは [`build_ahead`] の後**）。**`normalize` は、先に作る順と、
+/// 項目が求める組の両方の名前を揃える。**
+pub fn start(ahead: Vec<Key>, source: String, build: Box<Builder>, normalize: Arc<Normalize>) {
     let Ok(mut running) = RUNNING.lock() else {
         return;
     };
     if running.is_some() {
         return;
     }
-    let service = Arc::new(Service::new(ahead));
+    let service = Arc::new(Service::new(ahead, normalize));
     let worker = {
         let service = Arc::clone(&service);
         std::thread::spawn(move || service.run(build.as_ref()))
@@ -462,9 +521,9 @@ fn service() -> Option<Arc<Service>> {
         .and_then(|running| running.as_ref().map(|handle| Arc::clone(&handle.service)))
 }
 
-/// kernel の組を求める（**流れが動いていなければ `None`**——呼ぶ側がその場でビルドする）。
+/// kernel の組を求める（**流れが動いていなければ `None`**——呼ぶ側がその場でビルドする）。**名前は流れが揃える。**
 pub fn kernel(features: &[&str]) -> Option<Received> {
-    service().map(|service| service.ask(key_of(features)))
+    service().map(|service| service.ask_features(features))
 }
 
 /// ブートローダの組を、全検査の間は 1 回だけ作る（`build` が作り、`copy` が写しの置き場を返す）。
@@ -493,19 +552,31 @@ pub fn bootloader(
     Ok(copied)
 }
 
+/// 流れを止めたときに返すもの（全検査のまとめ）。
+pub struct Finished {
+    /// 項目が初めて求めた順（揃えた名前）。
+    pub requests: Vec<Key>,
+    pub tally: Tally,
+    /// 順をどこから取ったか。
+    pub source: String,
+    /// 組の名前を揃える関数（**前の記録を、この回と同じ名前へ揃えてから書き直すため**）。
+    pub normalize: Arc<Normalize>,
+}
+
 /// 流れを止め、項目が求めた順と、まとめの数を返す（全検査のまとめ。**動いていなければ `None`**）。
-pub fn finish() -> Option<(Vec<Key>, Tally, String)> {
+pub fn finish() -> Option<Finished> {
     let handle = RUNNING.lock().ok().and_then(|mut running| running.take())?;
     handle.service.stop();
     let _ = handle.worker.join();
     if let Ok(mut made) = BOOTLOADERS.lock() {
         made.clear();
     }
-    Some((
-        handle.service.requests(),
-        handle.service.tally(),
-        handle.source,
-    ))
+    Some(Finished {
+        requests: handle.service.requests(),
+        tally: handle.service.tally(),
+        source: handle.source,
+        normalize: Arc::clone(&handle.service.normalize),
+    })
 }
 
 #[cfg(test)]
@@ -523,6 +594,148 @@ mod tests {
 
     fn keys(names: &[&str]) -> Vec<Key> {
         names.iter().map(|name| key_of(&[name])).collect()
+    }
+
+    fn owned(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| name.to_string()).collect()
+    }
+
+    /// 名前を並べ替えるだけの揃え方（feature の依存を持たない偽物）。
+    fn plain() -> Arc<Normalize> {
+        Arc::new(|features: &[&str]| key_of(features))
+    }
+
+    /// 小さな feature の表（`kernel/Cargo.toml` と同じ形の依存）で、1 つの feature から辿れるものを返す。
+    fn reached_in_a_small_graph(feature: &str) -> Vec<String> {
+        let graph: &[(&str, &[&str])] = &[
+            ("default", &["heap-poison"]),
+            ("heap-poison", &[]),
+            ("pipe-test", &[]),
+            ("pipe-write-does-not-wake-reader", &["pipe-test"]),
+            ("serial-stress-test", &[]),
+            (
+                "serial-no-lock-test",
+                &["serial-stress-test", "common/serial-no-lock"],
+            ),
+            ("a-test", &[]),
+            ("b-test", &[]),
+        ];
+        let mut reached: Vec<String> = Vec::new();
+        let mut pending = vec![feature.to_string()];
+        while let Some(name) = pending.pop() {
+            let Some((_, deps)) = graph.iter().find(|(declared, _)| *declared == name) else {
+                continue;
+            };
+            if reached.contains(&name) {
+                continue;
+            }
+            reached.push(name);
+            pending.extend(deps.iter().map(|dep| dep.to_string()));
+        }
+        reached
+    }
+
+    #[test]
+    fn one_build_gets_one_name() {
+        let canonical = |features: &[&str]| canonical_key(features, &reached_in_a_small_graph);
+        // **親を並べても、子だけの名前になる**（子から辿れる）。並びと重ねにもよらない。
+        let child = key_of(&["pipe-write-does-not-wake-reader"]);
+        assert_eq!(
+            canonical(&["pipe-test", "pipe-write-does-not-wake-reader"]),
+            child
+        );
+        assert_eq!(
+            canonical(&["pipe-write-does-not-wake-reader", "pipe-test", "pipe-test"]),
+            child
+        );
+        // **fingerprint が持つ全部（既定の構成と、そこから辿れるものを含む）も、同じ名前になる。**
+        assert_eq!(
+            canonical(&[
+                "default",
+                "heap-poison",
+                "pipe-test",
+                "pipe-write-does-not-wake-reader"
+            ]),
+            child
+        );
+        // **空の名前と、既定の構成から辿れるものは落ちる**（`feature: ""` は既定の構成）。
+        assert_eq!(canonical(&[""]), Key::new());
+        assert_eq!(canonical(&[" "]), Key::new());
+        assert_eq!(canonical(&["default", "heap-poison"]), Key::new());
+        assert_eq!(canonical(&[]), Key::new());
+        // **ほかの crate へ伸びる依存があっても、kernel の feature で揃う。**
+        assert_eq!(
+            canonical(&["serial-stress-test", "serial-no-lock-test"]),
+            key_of(&["serial-no-lock-test"])
+        );
+        // **依存の無い 2 つは両方残る。知らない名前も残す**（cargo が断る）。
+        assert_eq!(
+            canonical(&["b-test", "a-test"]),
+            key_of(&["a-test", "b-test"])
+        );
+        assert_eq!(
+            canonical(&["no-such-feature", ""]),
+            key_of(&["no-such-feature"])
+        );
+    }
+
+    #[test]
+    fn the_order_and_the_asks_meet_on_the_same_name() {
+        let normalize: Arc<Normalize> =
+            Arc::new(|features: &[&str]| canonical_key(features, &reached_in_a_small_graph));
+        // **先に作る順には、fingerprint の形（有効だった全部）と、前の記録の形（親も並べた名前・空の名前）が混ざりうる。**
+        let ahead = vec![
+            owned(&[
+                "default",
+                "heap-poison",
+                "pipe-test",
+                "pipe-write-does-not-wake-reader",
+            ]),
+            owned(&["pipe-test", "pipe-write-does-not-wake-reader"]),
+            owned(&[""]),
+            Key::new(),
+        ];
+        assert_eq!(
+            canonical_order(&ahead, normalize.as_ref()),
+            vec![key_of(&["pipe-write-does-not-wake-reader"]), Key::new()]
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let service = Arc::new(Service::new(ahead, Arc::clone(&normalize)));
+        let worker = {
+            let service = Arc::clone(&service);
+            let calls = Arc::clone(&calls);
+            std::thread::spawn(move || {
+                service.run(&move |key: &Key| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(outcome(key))
+                })
+            })
+        };
+        service.build_ahead();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while calls.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        // **項目は親も並べた名前で求めるが、先に作った組をそのまま受け取る。**
+        let pipe = service.ask_features(&["pipe-test", "pipe-write-does-not-wake-reader"]);
+        assert!(pipe.ready_before.is_some());
+        // **`""` と既定の構成は同じ組である**（2 度目は作らずに渡す）。
+        let empty = service.ask_features(&[""]);
+        assert!(empty.ready_before.is_some());
+        let default = service.ask_features(&[]);
+        assert!(!default.first);
+        service.stop();
+        worker.join().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let tally = service.tally();
+        assert_eq!(tally.built_ahead_and_used, 2);
+        assert_eq!(tally.built_ahead_unused, 0);
+        assert_eq!(tally.built_when_asked, 0);
+        assert_eq!(
+            service.requests(),
+            vec![key_of(&["pipe-write-does-not-wake-reader"]), Key::new()]
+        );
     }
 
     #[test]
@@ -574,7 +787,7 @@ mod tests {
 
     #[test]
     fn an_asked_build_goes_before_the_builds_ahead() {
-        let service = Arc::new(Service::new(keys(&["a", "b", "c"])));
+        let service = Arc::new(Service::new(keys(&["a", "b", "c"]), plain()));
         let built = Arc::new(Mutex::new(Vec::new()));
         let worker = {
             let service = Arc::clone(&service);
@@ -612,7 +825,7 @@ mod tests {
     #[test]
     fn a_build_made_ahead_is_handed_over_without_building_again() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let service = Arc::new(Service::new(keys(&["a", "b"])));
+        let service = Arc::new(Service::new(keys(&["a", "b"]), plain()));
         let worker = {
             let service = Arc::clone(&service);
             let calls = Arc::clone(&calls);

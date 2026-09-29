@@ -7,6 +7,7 @@ use std::{
     os::unix::{ffi::OsStrExt, net::UnixStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -29685,12 +29686,65 @@ fn kernel_build_order_path(root: &Path) -> Result<PathBuf> {
     Ok(check_lock::lock_dir_in(&check_lock::git_common_dir(root)?).join("kernel-build-order.txt"))
 }
 
+/// kernel の feature の表（案 A。**組の名前を揃える関数を、ここから 1 つだけ作る**——項目が求める組・順の記録・
+/// fingerprint の 3 つが同じものを通る。2026-09-29。運用者の決定）。
+struct KernelFeatures {
+    graphs: Vec<(&'static str, FeatureGraph)>,
+}
+
+impl KernelFeatures {
+    fn read(root: &Path) -> Result<Self> {
+        Ok(KernelFeatures {
+            graphs: feature_graphs(root)?,
+        })
+    }
+
+    /// 1 つの feature から辿れる kernel の feature の全部（自分を含む。知らない名前は空）。
+    fn reached(&self, feature: &str) -> Vec<String> {
+        feature_closure(
+            &self.graphs,
+            vec![(KERNEL_PACKAGE.to_string(), feature.to_string())],
+        )
+        .into_iter()
+        .filter(|(crate_name, _)| crate_name == KERNEL_PACKAGE)
+        .map(|(_, name)| name)
+        .collect()
+    }
+
+    /// kernel のマニフェストに在る feature か。
+    fn declared(&self, feature: &str) -> bool {
+        self.graphs.iter().any(|(name, graph)| {
+            *name == KERNEL_PACKAGE && graph.iter().any(|(declared, _)| declared == feature)
+        })
+    }
+
+    /// 組の名前を揃える関数（[`kernel_builds::canonical_key`]）。
+    fn normalizer(self: &Arc<Self>) -> Arc<kernel_builds::Normalize> {
+        let features = Arc::clone(self);
+        Arc::new(move |names: &[&str]| {
+            kernel_builds::canonical_key(names, &|feature: &str| features.reached(feature))
+        })
+    }
+}
+
 /// 裏の流れを始める（全検査の入口。案 A）。**順は前の全検査の記録から。無ければ cargo の fingerprint から。**
+/// **どちらの名前も、項目が求める組と同じ関数で揃える**（[`KernelFeatures::normalizer`]）。**feature の表が読めなければ
+/// 流れを始めない**——項目は今までどおりその場でビルドする。
 fn start_kernel_builds(root: &Path) {
+    let features = match KernelFeatures::read(root) {
+        Ok(features) => Arc::new(features),
+        Err(error) => {
+            println!("(info) kernel builds in the background: not started; the feature tables could not be read: {error:#}");
+            return;
+        }
+    };
+    let normalize = features.normalizer();
     let recorded = kernel_build_order_path(root)
         .ok()
         .and_then(|path| fs::read_to_string(path).ok())
-        .map(|text| kernel_builds::parse_order(&text))
+        .map(|text| {
+            kernel_builds::canonical_order(&kernel_builds::parse_order(&text), normalize.as_ref())
+        })
         .filter(|order| !order.is_empty());
     let (ahead, source) = match recorded {
         Some(order) => {
@@ -29701,7 +29755,10 @@ fn start_kernel_builds(root: &Path) {
             (order, source)
         }
         None => {
-            let seeded = kernel_build_order_from_fingerprints(root);
+            let seeded = kernel_builds::canonical_order(
+                &kernel_build_order_from_fingerprints(root, &features),
+                normalize.as_ref(),
+            );
             let source = format!(
                 "the cargo fingerprints under target/ ({} set(s); no order was recorded yet)",
                 seeded.len()
@@ -29714,12 +29771,19 @@ fn start_kernel_builds(root: &Path) {
         ahead,
         source,
         Box::new(move |key: &kernel_builds::Key| build_kernel_in_the_background(&workspace, key)),
+        normalize,
     );
 }
 
 /// 裏の流れを止め、次の回の順を書き、まとめの行を返す（全検査のまとめ。案 A。**動いていなければ空**）。
 fn finish_kernel_builds(root: &Path) -> Vec<String> {
-    let Some((requests, tally, source)) = kernel_builds::finish() else {
+    let Some(kernel_builds::Finished {
+        requests,
+        tally,
+        source,
+        normalize,
+    }) = kernel_builds::finish()
+    else {
         return Vec::new();
     };
     let mut lines = vec![format!(
@@ -29739,8 +29803,14 @@ fn finish_kernel_builds(root: &Path) -> Vec<String> {
     )];
     match kernel_build_order_path(root) {
         Ok(path) => {
+            // **前の記録も、この回と同じ名前へ揃えてから残す**（揃える前の名前で書いた記録が、同じ組を 2 度並べないように）。
             let previous = fs::read_to_string(&path)
-                .map(|text| kernel_builds::parse_order(&text))
+                .map(|text| {
+                    kernel_builds::canonical_order(
+                        &kernel_builds::parse_order(&text),
+                        normalize.as_ref(),
+                    )
+                })
                 .unwrap_or_default();
             match fs::write(&path, kernel_builds::render_order(&requests, &previous)) {
                 Ok(()) => lines.push(format!(
@@ -29764,9 +29834,12 @@ fn finish_kernel_builds(root: &Path) -> Vec<String> {
 /// cargo の fingerprint から、前の全検査が kernel を作った順を戻す（案 A。**入れた後の最初の回のため**）。
 ///
 /// **fingerprint が持つのは有効だった feature の全部**（`default` と、そこから辿れるもの、ほかから辿れるものを
-/// 含む）。**項目が求めた形へ戻す**——`default` から辿れるものを除き、ほかの feature から辿れるものを除く。
+/// 含む）。**名前は揃えずに返す**——呼ぶ側が、項目が求める組と同じ関数で揃える（[`KernelFeatures::normalizer`]）。
 /// **今は無い feature を含む組は捨てる**（外した破壊テストの名残）。
-fn kernel_build_order_from_fingerprints(root: &Path) -> Vec<kernel_builds::Key> {
+fn kernel_build_order_from_fingerprints(
+    root: &Path,
+    features: &KernelFeatures,
+) -> Vec<kernel_builds::Key> {
     let fingerprints = root
         .join("target")
         .join(KERNEL_TARGET)
@@ -29776,53 +29849,10 @@ fn kernel_build_order_from_fingerprints(root: &Path) -> Vec<kernel_builds::Key> 
         &fingerprints,
         std::time::Duration::from_secs(12 * 60 * 60),
     );
-    let Ok(graphs) = feature_graphs(root) else {
-        return Vec::new();
-    };
-    let Some((_, kernel)) = graphs.iter().find(|(name, _)| *name == KERNEL_PACKAGE) else {
-        return Vec::new();
-    };
-    let declared: Vec<&str> = kernel.iter().map(|(name, _)| name.as_str()).collect();
-    let reached = |feature: &str| -> Vec<String> {
-        feature_closure(
-            &graphs,
-            vec![(KERNEL_PACKAGE.to_string(), feature.to_string())],
-        )
+    enabled_sets
         .into_iter()
-        .filter(|(crate_name, _)| crate_name == KERNEL_PACKAGE)
-        .map(|(_, name)| name)
+        .filter(|enabled| enabled.iter().all(|feature| features.declared(feature)))
         .collect()
-    };
-    let from_default = reached("default");
-    let mut order = Vec::new();
-    for enabled in enabled_sets {
-        if enabled
-            .iter()
-            .any(|feature| !declared.contains(&feature.as_str()))
-        {
-            continue;
-        }
-        let candidates: Vec<&String> = enabled
-            .iter()
-            .filter(|feature| !from_default.contains(*feature))
-            .collect();
-        let minimal: Vec<&str> = candidates
-            .iter()
-            .copied()
-            .filter(|feature| {
-                !candidates
-                    .iter()
-                    .copied()
-                    .any(|other| other != *feature && reached(other.as_str()).contains(*feature))
-            })
-            .map(String::as_str)
-            .collect();
-        let key = kernel_builds::key_of(&minimal);
-        if !order.contains(&key) {
-            order.push(key);
-        }
-    }
-    order
 }
 
 /// 本体（[`run_kernel_build`] が包む）。
