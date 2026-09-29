@@ -29756,8 +29756,24 @@ fn keep_a_copy(
             key.join(",")
         );
     }
-    fs::copy(built, &copy)
-        .with_context(|| format!("failed to copy {} to {}", built.display(), copy.display()))?;
+    // **別の名前へ写してから置き換える**（2026-09-29。案 B の ②）——**同時に走るほかの実行が、同じ組の写しを
+    // ESP へ写している途中でも、書きかけを読ませない**（写しを ESP へ写すのは錠の外である）。rename は同じ
+    // ディレクトリの中なので、置き換えは一度に起きる。
+    let partial = directory.join(format!(".{file_name}.{}.partial", std::process::id()));
+    fs::copy(built, &partial).with_context(|| {
+        format!(
+            "failed to copy {} to {}",
+            built.display(),
+            partial.display()
+        )
+    })?;
+    fs::rename(&partial, &copy).with_context(|| {
+        format!(
+            "failed to replace {} with {}",
+            copy.display(),
+            partial.display()
+        )
+    })?;
     Ok(copy)
 }
 
@@ -31131,6 +31147,29 @@ mod tests {
         assert_eq!(found.len(), 2, "{found:?}");
         assert!(found[0].starts_with("xtask/src/main.rs:1: the QEMU -d log"));
         assert!(found[1].starts_with("tools/x.py:1: the ESP directory"));
+    }
+
+    /// **写しは別の名前へ写してから置き換える**——**書き終えた中身だけが写しの名前に現れ、途中の名前は残らない**
+    /// （2026-09-29。案 B の ②）。
+    #[test]
+    fn a_copy_is_written_aside_and_then_put_in_place() {
+        let root = std::env::temp_dir().join(format!("zaytos-copy-aside-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let built = root.join("built.efi");
+        fs::write(&built, b"MZ new").unwrap();
+        let key = kernel_builds::key_of(&[]);
+        let first = keep_a_copy(&root, "bootloader", &key, &built, "bootloader.efi").unwrap();
+        fs::write(&built, b"MZ newer").unwrap();
+        let second = keep_a_copy(&root, "bootloader", &key, &built, "bootloader.efi").unwrap();
+        let names: Vec<String> = fs::read_dir(second.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        let kept = fs::read(&second).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(first, second);
+        assert_eq!(kept, b"MZ newer");
+        assert_eq!(names, vec!["bootloader.efi".to_string()]);
     }
 
     /// **写し元と写し先が同じファイルなら、写さずに落ちる。中身は残る**（2026-09-29。`fs::copy` は同じファイルへ
