@@ -2394,7 +2394,7 @@ mod tests {
             fs::write(&file, path).unwrap();
         };
         write("docs/a b.md");
-        write("kernel/src/pci.rs");
+        write("kernel/src/virtio.rs");
         let green = commit("base");
         let env = environment_fingerprint(&repo);
         let base = Record {
@@ -2408,9 +2408,10 @@ mod tests {
             .lines()
             .iter()
             .any(|line| line.contains("no green full check")));
-        // **空白と改行を含む名前、移したファイル（前と後）、消したファイル。**
+        // **空白と改行を含む名前、移したファイル（前と後）、消したファイル。** 移した先は基本の検査だけの置き場なので、
+        // グループが選ばれるのは、前の置き場を数えたときだけである。
         write("docs/new\nline.md");
-        run(&["mv", "kernel/src/pci.rs", "kernel/src/virtio.rs"]);
+        run(&["mv", "kernel/src/virtio.rs", "docs/virtio.md"]);
         fs::remove_file(repo.join("docs/a b.md")).unwrap();
         let head = commit("change");
         let selected = select_for(&repo, std::slice::from_ref(&base), "HEAD").unwrap();

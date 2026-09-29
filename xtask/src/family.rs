@@ -668,7 +668,7 @@ mod tests {
             Some(PathReach::BaseOnly)
         );
         assert_eq!(
-            reach_of(PATH_RULES, "kernel/src/pci.rs"),
+            reach_of(PATH_RULES, "kernel/src/virtio.rs"),
             Some(PathReach::Families(vec![
                 Family::Boot,
                 Family::Apps,
