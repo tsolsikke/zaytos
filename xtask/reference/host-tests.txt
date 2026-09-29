@@ -228,6 +228,7 @@ common::window::tests::scrolling_up_stops_at_the_top
 common::window::tests::the_screen_row_is_none_outside_the_window
 common::window::tests::visible_never_passes_the_end
 kernel::abi::linux::x86_64::layout::tests::a_clip_rect_is_half_open_and_refuses_empty_ones
+kernel::abi::linux::x86_64::layout::tests::a_sockaddr_un_is_read_up_to_the_first_nul
 kernel::abi::linux::x86_64::layout::tests::the_color_offsets_follow_the_pixel_order
 kernel::abi::linux::x86_64::layout::tests::the_fixed_screen_info_follows_the_linux_layout
 kernel::abi::linux::x86_64::layout::tests::the_stat_bytes_follow_the_linux_layout

@@ -36,8 +36,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use common::addr::{DirectMap, PhysAddr};
 
 use crate::abi::linux::x86_64::{
-    fb_fix_screeninfo, fb_var_screeninfo, parse_clip_rect, parse_timespec, stat_bytes,
-    timespec_bytes, winsize_bytes, Stat, Timespec, Winsize, AF_UNIX, CLOCK_MONOTONIC,
+    fb_fix_screeninfo, fb_var_screeninfo, parse_clip_rect, parse_sockaddr_un, parse_timespec,
+    stat_bytes, timespec_bytes, winsize_bytes, Stat, Timespec, Winsize, AF_UNIX, CLOCK_MONOTONIC,
     DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, DT_DIR, DT_REG, DT_UNKNOWN,
     FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, O_ACCMODE, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY,
     POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET, SOCKADDR_UN_LEN, SOCK_STREAM, SOL_SOCKET,
@@ -1404,21 +1404,22 @@ unsafe fn read_socket_name(
     if read != addrlen as usize {
         return Err(EFAULT);
     }
-    if u16::from_le_bytes([raw[0], raw[1]]) != AF_UNIX as u16 {
+    // **欄から読むのは abi の `parse_sockaddr_un` で、断るかどうかを決めるのはここである**（`ADR-0071` の決定 1 の 2 で
+    // 分けた。2026-09-30）。**`addrlen` は上で 2 以上と確かめてあるので、読めないことは無い。**
+    let Some(address) = parse_sockaddr_un(&raw[..addrlen as usize]) else {
+        return Err(EINVAL);
+    };
+    if address.family != AF_UNIX as u16 {
         return Err(EINVAL);
     }
-    let path = &raw[2..addrlen as usize];
-    let len = path
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(path.len());
+    let len = address.path.len();
     if len == 0 {
         return Err(EINVAL);
     }
     if len > crate::socket::NAME_MAX {
         return Err(ENAMETOOLONG);
     }
-    name[..len].copy_from_slice(&path[..len]);
+    name[..len].copy_from_slice(address.path);
     Ok(len)
 }
 

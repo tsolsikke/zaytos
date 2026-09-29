@@ -185,6 +185,32 @@ pub fn parse_timespec(raw: &[u8; TIMESPEC_LEN]) -> Timespec {
     }
 }
 
+/// `sockaddr_un` から読んだ値（`bind` と `connect`。`ADR-0064`）。
+///
+/// **欄から読むのはここで、断るかどうか（種類・空の名前・長さ）を決めるのは共通の側である**（`ADR-0071` の決定 1 の 2 で、
+/// `crate::syscall` の `read_socket_name` から分けた。2026-09-30）。
+pub struct SockaddrUn<'a> {
+    /// `sun_family`。
+    pub family: u16,
+    /// `sun_path` の名前。**先頭から最初の NUL まで、NUL が無ければ渡された長さの終わりまでである**（Linux の形）。
+    /// **抽象名（先頭が NUL）は空になる。**
+    pub path: &'a [u8],
+}
+
+/// `sockaddr_un` を読む（`sun_family` 2 バイト、続いて `sun_path`。[`SOCKADDR_UN_LEN`]）。**`raw` は、利用者が渡した
+/// 長さ（`addrlen`）の分である。** `sun_family` に届かない長さなら `None`。
+pub fn parse_sockaddr_un(raw: &[u8]) -> Option<SockaddrUn<'_>> {
+    let (family, rest) = raw.split_first_chunk::<2>()?;
+    let len = rest
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(rest.len());
+    Some(SockaddrUn {
+        family: u16::from_le_bytes(*family),
+        path: &rest[..len],
+    })
+}
+
 /// 画素の色の並び（`struct fb_bitfield` の `offset`）。**青・緑・赤の順に返す。**
 ///
 /// **UEFI の `Bgr` は「バイト 0 が青」、`Rgb` は「バイト 0 が赤」である**（`PixelFormat` の doc）。
@@ -343,6 +369,33 @@ mod tests {
             (negative.sec, negative.nsec),
             (-1, -2),
             "the fields are signed"
+        );
+    }
+
+    /// `sockaddr_un` の欄の位置（Linux の x86_64 の `linux/un.h` を `gcc` の `offsetof` で測って確かめた。2026-09-30。
+    /// `sys/un.h` も同じ）。**名前は最初の NUL まで、NUL が無ければ渡された長さの終わりまでである。**
+    #[test]
+    fn a_sockaddr_un_is_read_up_to_the_first_nul() {
+        let mut raw = [0u8; 110];
+        raw[0..2].copy_from_slice(&0x0102u16.to_le_bytes());
+        raw[2..6].copy_from_slice(b"sock");
+        let read = parse_sockaddr_un(&raw).unwrap();
+        assert_eq!(read.family, 0x0102, "sun_family @0");
+        assert_eq!(read.path, b"sock", "sun_path @2, up to the first NUL");
+        let unterminated = parse_sockaddr_un(&raw[..5]).unwrap();
+        assert_eq!(
+            unterminated.path, b"soc",
+            "without a NUL, up to the given length"
+        );
+        raw[2] = 0;
+        assert_eq!(
+            parse_sockaddr_un(&raw).unwrap().path,
+            b"",
+            "an abstract name reads as empty"
+        );
+        assert!(
+            parse_sockaddr_un(&raw[..1]).is_none(),
+            "shorter than sun_family"
         );
     }
 
