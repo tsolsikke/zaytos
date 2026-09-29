@@ -750,6 +750,7 @@ xtask::media::tests::the_same_path_twice_is_refused
 xtask::media::tests::the_sixty_four_mib_partition_has_the_geometry_we_recorded
 xtask::metrics::tests::the_line_names_every_kind_even_at_zero
 xtask::sampling::tests::the_pressure_totals_and_meminfo_fields_are_read
+xtask::sampling::tests::the_windows_line_skips_values_typeperf_could_not_read
 xtask::sampling::tests::typeperf_rows_are_read_and_the_header_is_skipped
 xtask::tests::a_boot_log_difference_on_the_cpu_state_line_asks_to_redo_the_inventory
 xtask::tests::a_boot_log_reference_that_does_not_end_at_the_prompt_is_refused

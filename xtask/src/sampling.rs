@@ -407,33 +407,46 @@ fn samples_line(samples: &[Sample], path: &Path) -> String {
 }
 
 /// まとめの 2 行目（Windows の側）。各計数の中央値と最小・最大。
+///
+/// **`typeperf` が読めなかった値は数えない**——空の欄と `-1` である（どの計数も負にはならない）。**2026-09-29 の
+/// 全検査で、周波数の割合の 3 行が `-1` になり、まとめが「最小 -1.000」と出した。** 読めなかった数は、あれば欄の
+/// 後ろに出す。**ディスクの時間はミリ秒で出す**（秒の小数 3 桁では、全部 0.000 と出て読めなかった）。
 fn windows_line(rows: &[Vec<f64>], path: &Path) -> String {
     if rows.is_empty() {
         return format!("(info) Windows counters: no rows in {}", path.display());
     }
-    let names = [
-        "% Processor Performance",
-        "% Processor Utility",
-        "C: s/transfer",
-        "C: queue",
-        "D: s/transfer",
-        "D: queue",
+    // 名前、出すときに掛ける数、小数の桁。
+    let columns: [(&str, f64, usize); 6] = [
+        ("% Processor Performance", 1.0, 1),
+        ("% Processor Utility", 1.0, 1),
+        ("C: ms/transfer", 1000.0, 3),
+        ("C: queue", 1.0, 1),
+        ("D: ms/transfer", 1000.0, 3),
+        ("D: queue", 1.0, 1),
     ];
-    let columns: Vec<String> = names
+    let columns: Vec<String> = columns
         .iter()
         .enumerate()
-        .map(|(index, name)| {
-            let mut values: Vec<f64> = rows
+        .map(|(index, &(name, scale, digits))| {
+            let read: Vec<f64> = rows.iter().filter_map(|row| row.get(index).copied()).collect();
+            let mut values: Vec<f64> = read
                 .iter()
-                .filter_map(|row| row.get(index).copied())
-                .filter(|value| value.is_finite())
+                .copied()
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .map(|value| value * scale)
                 .collect();
+            let unread = read.len() - values.len();
             values.sort_by(f64::total_cmp);
+            let unread = if unread > 0 {
+                format!("; {unread} not read by typeperf")
+            } else {
+                String::new()
+            };
             match (values.first(), values.get(values.len() / 2), values.last()) {
-                (Some(low), Some(median), Some(high)) => {
-                    format!("{name} median {median:.3} (lowest {low:.3}, highest {high:.3})")
-                }
-                _ => format!("{name} -"),
+                (Some(low), Some(median), Some(high)) => format!(
+                    "{name} median {median:.digits$} (lowest {low:.digits$}, highest {high:.digits$}{unread})"
+                ),
+                _ => format!("{name} -{unread}"),
             }
         })
         .collect();
@@ -488,5 +501,43 @@ mod tests {
         assert!((values[0] - 131.596446).abs() < 1e-9);
         assert!(values[4].is_nan());
         assert_eq!(csv_values("\"too\",\"short\""), None);
+    }
+
+    /// **読めなかった値（`-1` と空）は数えず、数を出す。ディスクの時間はミリ秒で出す。**
+    #[test]
+    fn the_windows_line_skips_values_typeperf_could_not_read() {
+        let rows = vec![
+            vec![129.0, 20.0, 0.000066, 0.0, 0.000040, 0.0],
+            vec![-1.0, 22.0, 0.000319, 0.0, 0.001621, 0.0],
+            vec![f64::NAN, 18.0, 0.000029, 0.0, 0.000020, 1.0],
+            vec![131.5, 34.7, 0.000100, 0.0, 0.000050, 0.0],
+        ];
+        let line = windows_line(&rows, Path::new("w.csv"));
+        assert!(
+            line.contains(
+                "% Processor Performance median 131.5 (lowest 129.0, highest 131.5; 2 not read by typeperf)"
+            ),
+            "{line}"
+        );
+        assert!(
+            line.contains("% Processor Utility median 22.0 (lowest 18.0, highest 34.7)"),
+            "{line}"
+        );
+        assert!(
+            line.contains("C: ms/transfer median 0.100 (lowest 0.029, highest 0.319)"),
+            "{line}"
+        );
+        assert!(
+            line.contains("D: ms/transfer median 0.050 (lowest 0.020, highest 1.621)"),
+            "{line}"
+        );
+        assert!(
+            line.contains("D: queue median 0.0 (lowest 0.0, highest 1.0)"),
+            "{line}"
+        );
+        assert!(!line.contains("-1"), "{line}");
+        let unread = vec![vec![-1.0, f64::NAN, 0.0, 0.0, 0.0, 0.0]];
+        assert!(windows_line(&unread, Path::new("w.csv"))
+            .contains("% Processor Performance -; 1 not read by typeperf"));
     }
 }
