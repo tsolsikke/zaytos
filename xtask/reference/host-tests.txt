@@ -352,6 +352,7 @@ kernel::arch::x86_64::idt::layout::tests::the_handler_address_survives_a_round_t
 kernel::arch::x86_64::idt::layout::tests::the_ist_index_is_stored_in_the_low_three_bits
 kernel::arch::x86_64::idt::tests::the_limit_is_the_size_minus_one
 kernel::arch::x86_64::idt::tests::the_stub_stride_matches_the_alignment_used_in_assembly
+kernel::arch::x86_64::idt::tests::the_tick_displays_print_the_words_the_timer_lines_used
 kernel::arch::x86_64::paging::address_space::tests::a_kernel_half_entry_is_refused_only_after_boot
 kernel::arch::x86_64::paging::address_space::tests::indices_past_the_table_are_not_shared
 kernel::arch::x86_64::paging::address_space::tests::the_kernel_top_digest_changes_with_any_entry_and_is_never_zero
@@ -573,6 +574,7 @@ kernel::machine::pc::irq::tests::the_first_arrival_prints_the_words_the_keyboard
 kernel::machine::pc::irq::tests::the_global_timer_is_claimed_only_while_it_is_the_current_timer
 kernel::machine::pc::irq::tests::the_mask_check_compares_values_rather_than_formatting
 kernel::machine::pc::irq::tests::the_slave_range_is_derived_from_its_own_offset
+kernel::machine::pc::irq::tests::the_svr_and_probe_displays_print_the_words_the_lines_used
 kernel::machine::pc::irq::tests::the_timer_setup_exposes_implementation_independent_questions
 kernel::machine::pc::irq::tests::the_vector_and_irq_mappings_are_inverses
 kernel::machine::pc::irq::tests::vectors_outside_the_managed_range_have_no_irq

@@ -83,7 +83,7 @@ pub fn report_first_delivery_once(
     if FIRST_DELIVERY_REPORTED.swap(true, Ordering::Relaxed) {
         return;
     }
-    if first.came_on_the_delivery_vector() {
+    if first.arrived_on_the_current_route() {
         logger.info(format_args!(
             "keyboard: first key arrived as {first} - IRQ1 is wired through our stub correctly"
         ));

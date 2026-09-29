@@ -3284,13 +3284,14 @@ unsafe fn spawn_from_ring3(
 /// `rsp_at_call` はスタブが `call` 直前に読んだ RSP であること。
 pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     // **方向フラグを何より先に見る（2026-09-24）。** `crate::arch::x86_64::idt::check_direction_flag` の doc。
-    // SAFETY: スタブが直前に積んだ有効な IrqContext を指す。読み取りのみ。
-    let (vector, rflags) = unsafe { ((*context).vector, (*context).rflags) };
-    crate::arch::x86_64::idt::check_direction_flag(
-        crate::arch::x86_64::idt::EntryPath::Syscall,
-        vector,
-        rflags,
-    );
+    // **何を読むかは `arch` が決める**（`IrqContext` のメソッドが読む。ベクタを共通の側に出さない。`ADR-0072` の 3。
+    // 9e-2）。
+    // SAFETY: スタブが直前に積んだ有効な IrqContext を指す。読み取りのみ。**共有の参照は、この文の中だけの一時の値で、
+    // 文が終わると消える**——メソッドは RFLAGS とベクタの 2 つを値として読むだけで、参照を残さない。**この文の間に、
+    // 同じ文脈へ可変の参照を作る経路も、生のポインタを通して書く経路も無い**（可変の参照 `ctx` を作るのは、この文の
+    // 後、BKL を取った後である。割り込みゲートから入ったので IF=0 で、この CPU で割り込みは入らない。文脈はこのタスクの
+    // 入口のスタックに在るので、ほかの CPU は触らない）。
+    unsafe { &*context }.check_direction_flag(crate::arch::x86_64::idt::EntryPath::Syscall);
 
     // **BKL を取る（S4-b-2）。** 割り込みゲート経由なので入場時点で IF=0 だが、
     // BKL の保持区間であることを型で表すためにガードを取る。
@@ -3325,8 +3326,8 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     // フレームに限る。
     let ctx = unsafe { &mut *context };
 
-    // 既存の境界計算が syscall 経路でも正しいことの裏取り（IRQ と同じ検査）。
-    crate::arch::x86_64::idt::check_stack_alignment(rsp_at_call, "syscall", ctx.vector);
+    // 既存の境界計算が syscall 経路でも正しいことの裏取り（IRQ と同じ検査。ベクタは `arch` が文脈から読む。9e-2）。
+    ctx.check_stack_alignment(rsp_at_call, "syscall");
 
     // 番号は RAX。**書き戻しの前に読む。**
     let number = ctx.rax;

@@ -14,7 +14,7 @@ pub use ap_start::start_application_processor;
 pub use irq::{
     claim, complete, delivered_count, disable_and_complete,
     enable_interrupt_controller_for_this_cpu, enable_local_timer_for_this_cpu, first_arrival,
-    source_for_isa_irq, source_for_pci_intx, spurious_counts, Arrival, Claim, FirstArrival, IsaIrq,
-    PciIntx,
+    probe_ipi, send_ipi_probe, source_for_isa_irq, source_for_pci_intx, spurious_counts, Arrival,
+    Claim, FirstArrival, IsaIrq, PciIntx,
 };
 pub use lapic_timer::switch_to_local_timer;

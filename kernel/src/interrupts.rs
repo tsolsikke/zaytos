@@ -674,10 +674,11 @@ pub unsafe fn run_timer_loop(
 ) {
     // 最初のティックが来るまで何も出ないとハングと区別できないので、
     // 待ちに入ることを先に宣言する。
+    // どのベクタで届くはずかは `arch` が表示する（ベクタを共通の側に出さない。`ADR-0072` の 3。9e-2）。
     logger.info(format_args!(
-        "timer: waiting for the first tick (expected as vector {:#04x}); \
+        "timer: waiting for the first tick (expected as {}); \
          if nothing arrives, suspect the PIT setup, the IMR, or ICW2",
-        idt::timer_delivery_vector()
+        crate::arch::x86_64::timer_delivery()
     ));
 
     let mut console = console;
@@ -1060,14 +1061,9 @@ pub unsafe fn run_timer_loop(
                     // まとめられない送り方にする必要がある。
                     for _ in 0..IPI_PROBE_ROUNDS {
                         let before = idt::ipi_probe_received_for(slot);
-                        // SAFETY: `apic` はマップ済みで、宛先は起動を確認した AP である。
-                        let accepted = unsafe {
-                            crate::machine::pc::apic::send_fixed_ipi(
-                                crate::machine::pc::apic::lapic_virt_of(apic),
-                                apic_id,
-                                idt::IPI_PROBE_VECTOR as u8,
-                            )
-                        };
+                        // SAFETY: `apic` はマップ済みで、宛先は起動を確認した AP である。送る所とベクタは
+                        // `machine` が持つ（`ADR-0072` の 7。9e-2）。
+                        let accepted = unsafe { crate::machine::pc::send_ipi_probe(apic, apic_id) };
                         if !accepted {
                             logger.error(format_args!(
                                 "smp: the ICR did not accept a probe IPI for apic id {apic_id}"
@@ -1092,10 +1088,10 @@ pub unsafe fn run_timer_loop(
                         }
                     }
                     logger.info(format_args!(
-                        "smp: probe IPI (vector {:#04x}) to apic id {apic_id}: sent={} received={} \
+                        "smp: probe IPI ({}) to apic id {apic_id}: sent={} received={} \
                          (one at a time; the same vector coalesces in the IRR if sent faster than \
                          it is handled, so they are not batched)",
-                        idt::IPI_PROBE_VECTOR,
+                        crate::machine::pc::probe_ipi(),
                         idt::ipi_probe_sent(),
                         idt::ipi_probe_received_for(slot)
                     ));
@@ -1152,45 +1148,39 @@ pub unsafe fn run_timer_loop(
         if !announced_first {
             announced_first = true;
             // ICW2 の事後証明。実際に届いたベクタ番号を実値で確認する。
-            match idt::first_pic_vector() {
-                // 8259 の採番と突き合わせる。現在の配送先ではない。
-                //
-                // `first_pic_vector` が記録するのは「PIC の採番範囲で最初に
-                // 届いたベクタ」で、定義からして 8259 由来の観測である。
-                // S2-d-2 でタイマが Local APIC へ移った後も、移行より前に
-                // PIT が動いていた（較正が PIT のティックを使う）ので値は
-                // 残っており、ICW2 の事後証明としては依然として有効である。
-                //
-                // ここを `timer_delivery_vector()` にすると、移行後に
-                // `0x20` と `0xfe` を突き合わせて誤って落ちる。実際に落ちた。
-                Some(vector) if vector as usize == idt::PIC_TIMER_VECTOR => {
-                    log_both(
-                        logger,
-                        console.as_deref_mut(),
-                        format_args!(
-                            "timer: first tick arrived as vector {vector:#04x} - this is the \
-                             proof that ICW2 was written correctly (it cannot be read back)"
-                        ),
-                    );
-                }
+            //
+            // 8259 の採番と突き合わせる。現在の配送先ではない。**比べるのも表示するのも `arch` である**
+            // （[`crate::arch::x86_64::first_tick_arrival`]。ベクタを共通の側に出さない。`ADR-0072` の 3。9e-2）。
+            // 記録されているのは「PIC の採番範囲で最初に届いたベクタ」で、定義からして 8259 由来の観測である。
+            // S2-d-2 でタイマが Local APIC へ移った後も、移行より前に PIT が動いていた（較正が PIT のティックを
+            // 使う）ので値は残っており、ICW2 の事後証明としては依然として有効である。今の配送先と比べると、
+            // 移行後に `0x20` と `0xfe` を突き合わせて誤って落ちる。実際に落ちた。
+            let first = crate::arch::x86_64::first_tick_arrival();
+            if first.is_the_expected_tick() {
+                log_both(
+                    logger,
+                    console.as_deref_mut(),
+                    format_args!(
+                        "timer: first tick arrived as {first} - this is the \
+                         proof that ICW2 was written correctly (it cannot be read back)"
+                    ),
+                );
+            } else if first.none_arrived() && pit_never_ticked {
                 // **PIT が刻まない機械では、PIC の割り込みが 1 本も届かない**（HW-c）。
                 // **ICW2 の事後証明は取れない。** **止めない**——**言えないことを言えないと
                 // 書く**（`sti` 前の項目 4 と同じ立ち位置）。
-                None if pit_never_ticked => {
-                    logger.info(format_args!(
-                        "timer: no PIC interrupt ever arrived because the PIT does not tick on \
-                         this machine, so ICW2 has no after-the-fact proof; the timer runs on \
-                         the local APIC (the calibration used the ACPI PM timer)"
-                    ));
-                }
-                other => {
-                    logger.error(format_args!(
-                        "timer: the first PIC interrupt arrived as vector {other:?}, expected \
-                         {:#04x}; the PIC vector offset (ICW2) is wrong; halting",
-                        idt::PIC_TIMER_VECTOR
-                    ));
-                    cpu::halt_forever();
-                }
+                logger.info(format_args!(
+                    "timer: no PIC interrupt ever arrived because the PIT does not tick on \
+                     this machine, so ICW2 has no after-the-fact proof; the timer runs on \
+                     the local APIC (the calibration used the ACPI PM timer)"
+                ));
+            } else {
+                logger.error(format_args!(
+                    "timer: the first PIC interrupt arrived as {}; the PIC vector offset (ICW2) \
+                     is wrong; halting",
+                    first.mismatch()
+                ));
+                cpu::halt_forever();
             }
         }
 

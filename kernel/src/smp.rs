@@ -688,12 +688,11 @@ unsafe fn start_local_timer(serial: &mut SerialPort, slot: usize) -> ! {
         // SAFETY: 自コアの単一文脈で、割り込みは禁止されている。
         match unsafe { crate::machine::pc::enable_interrupt_controller_for_this_cpu() } {
             Some(enable) => {
+                // SVR の値の表示は `machine` が持つ（ベクタを共通の側に出さない。`ADR-0072` の 3。9e-2）。
                 let _ = writeln!(
                     serial,
-                    "[INFO] smp: ap {slot} wrote its own SVR: spurious vector {:#04x}, \
-                     software_enabled={} (the BSP's write only reached the BSP's local APIC)",
-                    enable.spurious_vector(),
-                    enable.software_enabled()
+                    "[INFO] smp: ap {slot} wrote its own SVR: {enable} (the BSP's write only reached \
+                     the BSP's local APIC)"
                 );
                 if !enable.software_enabled() {
                     let _ = writeln!(

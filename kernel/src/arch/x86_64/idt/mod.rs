@@ -984,6 +984,60 @@ pub fn first_pic_vector() -> Option<u64> {
     }
 }
 
+/// 最初のティックの到着の観測（ICW2 の事後証明。[`first_tick_arrival`]。2026-09-29。境界の段階の手順 2 の 9e-2）。
+///
+/// **ベクタを共通の側に出さない**（`ADR-0072` の 3）ので、判定と表示だけを持つ。比べる相手は 8259 の採番のタイマの
+/// ベクタ（[`PIC_TIMER_VECTOR`]）で、今の配送先ではない——タイマが Local APIC へ移った後も、移る前に PIT が刻んだ
+/// 最初の到着が残っているので、事後証明として有効である（今の配送先と比べると、移った後に `0x20` と `0xfe` を
+/// 比べて誤って落ちる。実際に落ちた）。
+pub struct FirstTickArrival {
+    vector: Option<u64>,
+}
+
+impl FirstTickArrival {
+    /// 8259 の採番の範囲で、まだ 1 本も届いていないか。
+    pub fn none_arrived(&self) -> bool {
+        self.vector.is_none()
+    }
+
+    /// 8259 の採番のタイマのベクタで届いたか（ICW2 を正しく書けた証明）。
+    pub fn is_the_expected_tick(&self) -> bool {
+        self.vector == Some(PIC_TIMER_VECTOR as u64)
+    }
+
+    /// 食い違ったときの表示（`vector Some(48), expected 0x20` の形。以前の行と同じ文言）。
+    pub fn mismatch(&self) -> impl core::fmt::Display + '_ {
+        struct Mismatch<'a>(&'a FirstTickArrival);
+        impl core::fmt::Display for Mismatch<'_> {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                write!(
+                    f,
+                    "vector {:?}, expected {:#04x}",
+                    self.0.vector, PIC_TIMER_VECTOR
+                )
+            }
+        }
+        Mismatch(self)
+    }
+}
+
+impl core::fmt::Display for FirstTickArrival {
+    /// 届いたベクタ（`vector 0x20` の形）。届いていなければ `vector None`。
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.vector {
+            Some(vector) => write!(f, "vector {vector:#04x}"),
+            None => write!(f, "vector None"),
+        }
+    }
+}
+
+/// 最初のティックの到着（9e-2）。共通の側のタイマのループが、ICW2 の事後証明に使う。
+pub fn first_tick_arrival() -> FirstTickArrival {
+    FirstTickArrival {
+        vector: first_pic_vector(),
+    }
+}
+
 /// 指定ベクタの割り込み回数を読む。
 pub fn interrupt_count(vector: usize) -> u64 {
     if vector >= IDT_ENTRY_COUNT {
@@ -1145,6 +1199,22 @@ pub(crate) fn check_direction_flag(path: EntryPath, vector: u64, interrupted_rfl
     );
     let _ = writeln!(serial, "[ERROR] halting (cli + hlt loop)");
     cpu::halt_forever();
+}
+
+impl IrqContext {
+    /// 入口の先頭の、方向フラグの確かめ（[`check_direction_flag`]。2026-09-29。9e-2）。
+    ///
+    /// **ベクタと RFLAGS は、この文脈から `arch` が読む**——入口の確かめは `arch` の責任で（`ADR-0072` の 1 の A）、
+    /// ベクタを共通の側に出さない（同 3）。**使うのは共通の側のシステムコールの入口**（`syscall::syscall_entry`）で、
+    /// 割り込みと例外の入口は `arch` の中なので、今までどおり値を直に渡す。
+    pub(crate) fn check_direction_flag(&self, path: EntryPath) {
+        check_direction_flag(path, self.vector, self.rflags);
+    }
+
+    /// スタックの境界の確かめ（[`check_stack_alignment`]。9e-2）。ベクタは、この文脈から読む（上と同じ理由）。
+    pub(crate) fn check_stack_alignment(&self, rsp_at_call: u64, path: &str) {
+        check_stack_alignment(rsp_at_call, path, self.vector);
+    }
 }
 
 /// IRQ の共通処理。戻る。
@@ -1335,6 +1405,22 @@ pub fn timer_delivery_vector() -> usize {
     } else {
         PIC_TIMER_VECTOR
     }
+}
+
+/// タイマが今届くベクタの表示（[`timer_delivery`]。2026-09-29。9e-2）。ベクタを共通の側に出さない（`ADR-0072` の 3）
+/// ので、表示だけを持つ。
+pub struct TimerDelivery(usize);
+
+impl core::fmt::Display for TimerDelivery {
+    /// `vector 0x20` の形。
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "vector {:#04x}", self.0)
+    }
+}
+
+/// タイマが今届くベクタ（[`timer_delivery_vector`]）の表示（9e-2）。共通の側の、最初のティックを待つ行が使う。
+pub fn timer_delivery() -> TimerDelivery {
+    TimerDelivery(timer_delivery_vector())
 }
 
 /// IRQ スタブ表の配置検証。
@@ -2369,5 +2455,34 @@ mod tests {
     #[test]
     fn the_stub_stride_matches_the_alignment_used_in_assembly() {
         assert_eq!(STUB_SIZE, 16);
+    }
+
+    /// 最初のティックの行とタイマを待つ行の表示は、以前の文言と同じになる（9e-2）。**xtask は
+    /// `timer: first tick arrived as vector 0x20` を起動の完了の目印に使う。**
+    #[test]
+    fn the_tick_displays_print_the_words_the_timer_lines_used() {
+        let expected = FirstTickArrival {
+            vector: Some(PIC_TIMER_VECTOR as u64),
+        };
+        assert!(expected.is_the_expected_tick());
+        assert!(!expected.none_arrived());
+        assert_eq!(format!("{expected}"), "vector 0x20");
+        let wrong = FirstTickArrival { vector: Some(0x30) };
+        assert!(!wrong.is_the_expected_tick());
+        assert_eq!(
+            format!("{}", wrong.mismatch()),
+            "vector Some(48), expected 0x20"
+        );
+        let none = FirstTickArrival { vector: None };
+        assert!(none.none_arrived());
+        assert_eq!(format!("{}", none.mismatch()), "vector None, expected 0x20");
+        assert_eq!(
+            format!("{}", TimerDelivery(PIC_TIMER_VECTOR)),
+            "vector 0x20"
+        );
+        assert_eq!(
+            format!("{}", TimerDelivery(LAPIC_TIMER_VECTOR)),
+            "vector 0xfe"
+        );
     }
 }

@@ -75,6 +75,8 @@
 //! | [`first_arrival`] | モジュール関数 | 観測値である。記録するのは [`complete`] の中である（同上） |
 //! | [`delivery_vector`] | モジュール関数 | 今の配送先を、移行の表と 8259 の採番から引く。実装ごとに変わらない（同上） |
 //! | [`delivered_count`] | モジュール関数 | 観測値である。数えるのは `arch` の入口のベクタごとの数えである（同上） |
+//! | [`send_ipi_probe`] | モジュール関数 | IPI を送る所（`ADR-0072` の 7。2026-09-29。9e-2）。宛先は Local APIC だけで、実装ごとに変わらない |
+//! | [`probe_ipi`] | モジュール関数 | 観測値の表示である（同上） |
 //!
 //! # `TimerSource` は実装が 1 つしかない。これは原則の例外である
 //!
@@ -305,8 +307,8 @@ pub struct FirstArrival {
 }
 
 impl FirstArrival {
-    /// 今の配送先のベクタで届いたか。
-    pub fn came_on_the_delivery_vector(&self) -> bool {
+    /// 今の配送先で届いたか（共通の側が呼ぶので、名前に機械の言葉を入れない。9e-2）。
+    pub fn arrived_on_the_current_route(&self) -> bool {
         self.vector == self.expected
     }
 
@@ -931,6 +933,43 @@ pub fn claim(arrival: Arrival) -> Claim {
     claimed
 }
 
+/// IPI の探り（S5-a）を 1 本、ほかの CPU へ送る（`ADR-0072` の 7。IPI を送る所は `machine` に置く。2026-09-29。
+/// 境界の段階の手順 2 の 9e-2）。ICR が受け付けたかを返す（相手が受け取ったかは答えない）。
+///
+/// **ベクタは `machine` の中で選ぶ**——共通の側は、送る相手と、受け取った数だけを見る（`ADR-0072` の 3）。
+///
+/// # Safety
+///
+/// `mapped` がマップ済みの Local APIC を指し、`apic_id` が起動を確かめた AP であること。
+pub unsafe fn send_ipi_probe(mapped: &crate::machine::pc::apic::MappedApic, apic_id: u8) -> bool {
+    // SAFETY: 呼び出し側の契約をそのまま引き継ぐ。探りのベクタには専用のスタブのゲートが入っている（`idt::init`）。
+    unsafe {
+        crate::machine::pc::apic::send_fixed_ipi(
+            crate::machine::pc::apic::lapic_virt_of(mapped),
+            apic_id,
+            crate::arch::x86_64::idt::IPI_PROBE_VECTOR as u8,
+        )
+    }
+}
+
+/// IPI の探りの表示（`vector 0x43` の形。[`probe_ipi`]。9e-2）。
+pub struct ProbeIpi;
+
+impl fmt::Display for ProbeIpi {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "vector {:#04x}",
+            crate::arch::x86_64::idt::IPI_PROBE_VECTOR
+        )
+    }
+}
+
+/// IPI の探りの表示（9e-2）。共通の側の、探りの結果の行が使う（ベクタの値を共通の側に出さない）。
+pub fn probe_ipi() -> ProbeIpi {
+    ProbeIpi
+}
+
 /// [`claim`] の判定（純粋な関数）。この系に 1 つのタイマのベクタ（今のタイマでなければ `None`）と、IRQ の表の
 /// 引き方を外から渡すので、ホストで順を確かめられる。
 fn classify(vector: u8, global_timer: Option<u8>, lookup: impl Fn(u8) -> Option<IsaIrq>) -> Claim {
@@ -1365,17 +1404,24 @@ pub struct LocalApicEnable {
 }
 
 impl LocalApicEnable {
-    /// SVR に載ったスプリアスベクタ。
-    pub const fn spurious_vector(&self) -> u8 {
-        self.vector
-    }
-
     /// bit 8（ソフトウェア有効化）が立っているか。
     ///
     /// 落ちていると LVT が 1 本も届かない。AP のタイマを開ける前に
     /// 確かめる先はここである。
     pub const fn software_enabled(&self) -> bool {
         self.software_enabled
+    }
+}
+
+impl fmt::Display for LocalApicEnable {
+    /// `spurious vector 0xff, software_enabled=true` の形（AP の起動の行。2026-09-29 の 9e-2 までは、共通の側が
+    /// スプリアスのベクタを受け取って同じ文言を組んでいた。ベクタを共通の側に出さない。`ADR-0072` の 3）。
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "spurious vector {:#04x}, software_enabled={}",
+            self.vector, self.software_enabled
+        )
     }
 }
 
@@ -2011,6 +2057,20 @@ mod tests {
         assert_eq!(format!("{}", IsaIrq::new(11)), "11");
     }
 
+    /// AP の SVR の行と、IPI の探りの行の表示は、以前の文言と同じになる（9e-2）。
+    #[test]
+    fn the_svr_and_probe_displays_print_the_words_the_lines_used() {
+        let enable = LocalApicEnable {
+            vector: 0xFF,
+            software_enabled: true,
+        };
+        assert_eq!(
+            format!("{enable}"),
+            "spurious vector 0xff, software_enabled=true"
+        );
+        assert_eq!(format!("{}", probe_ipi()), "vector 0x43");
+    }
+
     /// 最初の到着の表示は、以前のキーボードの行と同じ文言になる（xtask が `first key arrived as vector 0x42` を見る）。
     #[test]
     fn the_first_arrival_prints_the_words_the_keyboard_line_used() {
@@ -2018,13 +2078,13 @@ mod tests {
             vector: 0x42,
             expected: 0x42,
         };
-        assert!(routed.came_on_the_delivery_vector());
+        assert!(routed.arrived_on_the_current_route());
         assert_eq!(format!("{routed}"), "vector 0x42");
         let legacy = FirstArrival {
             vector: 0x21,
             expected: 0x42,
         };
-        assert!(!legacy.came_on_the_delivery_vector());
+        assert!(!legacy.arrived_on_the_current_route());
         assert_eq!(
             format!("{}", legacy.mismatch()),
             "vector Some(33), expected 0x42"
