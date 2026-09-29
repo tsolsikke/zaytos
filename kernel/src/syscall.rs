@@ -36,12 +36,13 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use common::addr::{DirectMap, PhysAddr};
 
 use crate::abi::linux::x86_64::{
-    fb_fix_screeninfo, fb_var_screeninfo, parse_clip_rect, parse_pollfd, parse_sockaddr_un,
-    parse_timespec, set_pollfd_revents, stat_bytes, timespec_bytes, winsize_bytes, Stat, Timespec,
-    Winsize, AF_UNIX, CLOCK_MONOTONIC, DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN,
-    DT_DIR, DT_REG, DT_UNKNOWN, FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, O_ACCMODE, O_CREAT,
-    O_RDONLY, O_TRUNC, O_WRONLY, POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET,
-    SOCKADDR_UN_LEN, SOCK_STREAM, SOL_SOCKET, STAT_LEN, TIMESPEC_LEN, TIOCGWINSZ, WINSIZE_LEN,
+    dirent64_record, dirent64_record_len, fb_fix_screeninfo, fb_var_screeninfo, parse_clip_rect,
+    parse_pollfd, parse_sockaddr_un, parse_timespec, set_pollfd_revents, stat_bytes,
+    timespec_bytes, winsize_bytes, Dirent64, Stat, Timespec, Winsize, AF_UNIX, CLOCK_MONOTONIC,
+    DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, DT_DIR, DT_REG, DT_UNKNOWN,
+    FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, O_ACCMODE, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY,
+    POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET, SOCKADDR_UN_LEN, SOCK_STREAM, SOL_SOCKET,
+    STAT_LEN, TIMESPEC_LEN, TIOCGWINSZ, WINSIZE_LEN,
 };
 use crate::abi::linux::x86_64::{
     E2BIG, EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, EBUSY, ECHILD, ECONNREFUSED, EEXIST,
@@ -4087,23 +4088,9 @@ unsafe fn sys_getdents64(
             Err(e) => return (-errno_for_ext2(e)) as u64,
         };
 
-        // レコードの長さ。**名前の NUL 終端を数え、8 バイト境界へ切り上げる。**
-        //
-        // 破壊テスト (S10-b, dirent-no-align): 切り上げをやめる。**こちらの走査は
-        // `d_reclen` を頼りに歩くので、外しても自分では気づけない。** 整列は
-        // 呼び出し側との約束なので、**約束を見ている検算だけが検出する。**
-        //
-        // **S10-b の他の 3 つとは種類が違う。** `eisdir-as-enotdir`・
-        // `read-no-advance`・`stat-blocks-in-bytes` は**値が間違っている**形で、
-        // 正しい値を知っていれば突き合わせられる。**こちらは値ではなく、
-        // 呼び出し側との約束の違反である**——どの値が返るかは変わらず、
-        // **返り方の規則だけが崩れる。** 突き合わせる相手は「正しい値」ではなく
-        // 「約束」なので、**約束を明文で検査していなければ、何も落ちない。**
-        let needed = DIRENT64_HEADER_LEN + entry.name.len() + 1;
-        #[cfg(not(feature = "syscall-test-dirent-no-align"))]
-        let reclen = needed.next_multiple_of(DIRENT64_ALIGN);
-        #[cfg(feature = "syscall-test-dirent-no-align")]
-        let reclen = needed;
+        // **長さの規則（NUL を数えて 8 バイト境界へ切り上げる）と欄の位置は abi の `dirent64_record_len` と
+        // `dirent64_record` で、値と、収まるかどうかの判断はここである**（`ADR-0071` の決定 1 の 2 で分けた。2026-09-30）。
+        let reclen = dirent64_record_len(entry.name.len());
 
         if written + reclen as u64 > count {
             // 収まらない。**書けたぶんで止める**（Linux と同じ）。
@@ -4111,17 +4098,19 @@ unsafe fn sys_getdents64(
         }
 
         let mut record = [0u8; DIRENT64_MAX_RECORD];
-        record[0..8].copy_from_slice(&u64::from(entry.inode).to_le_bytes());
-        record[8..16].copy_from_slice(&entry.next_offset.to_le_bytes());
-        record[16..18].copy_from_slice(&(reclen as u16).to_le_bytes());
-        record[18] = dirent_type_for(entry.file_type);
-        // 名前と NUL。**`reclen` に収まる長さしか書かない。**
-        let name_end = DIRENT64_HEADER_LEN + entry.name.len();
-        if name_end + 1 > record.len() {
+        let put_in_record = dirent64_record(
+            &Dirent64 {
+                ino: u64::from(entry.inode),
+                off: entry.next_offset,
+                kind: dirent_type_for(entry.file_type),
+                name: entry.name,
+            },
+            &mut record,
+        );
+        let Some(reclen) = put_in_record else {
             // 名前が長すぎてレコードに収まらない。**像が壊れている。**
             return (-EIO) as u64;
-        }
-        record[DIRENT64_HEADER_LEN..name_end].copy_from_slice(entry.name);
+        };
 
         // SAFETY: slice は検証済み。`written + reclen` は `count` を越えない。
         let put = unsafe { copy_to_user(&slice, written, &record[..reclen]) };

@@ -235,6 +235,61 @@ pub fn set_pollfd_revents(raw: &mut [u8; POLLFD_LEN], revents: u16) {
     raw[6..8].copy_from_slice(&revents.to_le_bytes());
 }
 
+/// `linux_dirent64` の 1 レコードに書く値（`getdents64`）。
+///
+/// **値と、収まるかどうかの判断は共通の側で、長さの規則（[`dirent64_record_len`]）と欄の位置（[`dirent64_record`]）は
+/// ここである**（`ADR-0071` の決定 1 の 2 で、`crate::syscall` の `sys_getdents64` から分けた。2026-09-30）。
+pub struct Dirent64<'a> {
+    /// `d_ino`（inode の番号）。
+    pub ino: u64,
+    /// `d_off`（次のレコードの位置）。
+    pub off: u64,
+    /// `d_type`（`DT_REG` など）。
+    pub kind: u8,
+    /// `d_name`（NUL を含まない。書くときに NUL を足す）。
+    pub name: &'a [u8],
+}
+
+/// 名前の長さから、レコードの長さ（`d_reclen`）を求める。**名前の NUL 終端を数え、8 バイト境界へ切り上げる**
+/// （[`DIRENT64_ALIGN`]）。
+pub fn dirent64_record_len(name_len: usize) -> usize {
+    let needed = DIRENT64_HEADER_LEN + name_len + 1;
+    // 破壊テスト (S10-b, dirent-no-align): 切り上げをやめる。**こちらの走査は
+    // `d_reclen` を頼りに歩くので、外しても自分では気づけない。** 整列は
+    // 呼び出し側との約束なので、**約束を見ている検算だけが検出する。**
+    //
+    // **S10-b の他の 3 つとは種類が違う。** `eisdir-as-enotdir`・
+    // `read-no-advance`・`stat-blocks-in-bytes` は**値が間違っている**形で、
+    // 正しい値を知っていれば突き合わせられる。**こちらは値ではなく、
+    // 呼び出し側との約束の違反である**——どの値が返るかは変わらず、
+    // **返り方の規則だけが崩れる。** 突き合わせる相手は「正しい値」ではなく
+    // 「約束」なので、**約束を明文で検査していなければ、何も落ちない。**
+    if cfg!(feature = "syscall-test-dirent-no-align") {
+        needed
+    } else {
+        needed.next_multiple_of(DIRENT64_ALIGN)
+    }
+}
+
+/// 1 レコードを `out` の頭へ書き、書いた長さ（`d_reclen`）を返す（欄の位置は [`DIRENT64_HEADER_LEN`] の doc）。
+///
+/// **書く範囲は先に 0 で埋める**（名前の後ろの NUL と詰め物）。**`out` に収まらなければ、何も書かずに `None`。**
+pub fn dirent64_record(entry: &Dirent64, out: &mut [u8]) -> Option<usize> {
+    let reclen = dirent64_record_len(entry.name.len());
+    let name_end = DIRENT64_HEADER_LEN + entry.name.len();
+    if name_end + 1 > out.len() || reclen > out.len() {
+        return None;
+    }
+    let record = &mut out[..reclen];
+    record.fill(0);
+    record[0..8].copy_from_slice(&entry.ino.to_le_bytes());
+    record[8..16].copy_from_slice(&entry.off.to_le_bytes());
+    record[16..18].copy_from_slice(&(reclen as u16).to_le_bytes());
+    record[18] = entry.kind;
+    record[DIRENT64_HEADER_LEN..name_end].copy_from_slice(entry.name);
+    Some(reclen)
+}
+
 /// 画素の色の並び（`struct fb_bitfield` の `offset`）。**青・緑・赤の順に返す。**
 ///
 /// **UEFI の `Bgr` は「バイト 0 が青」、`Rgb` は「バイト 0 が赤」である**（`PixelFormat` の doc）。
@@ -438,6 +493,48 @@ mod tests {
             "revents @6, the rest unchanged"
         );
         assert_eq!(parse_pollfd(&[0xff; 8]).fd, -1, "fd is signed");
+    }
+
+    /// `linux_dirent64` の欄の位置（`glibc` の `dirent.h` の `struct dirent64` を `gcc` の `offsetof` で測って確かめた。
+    /// 2026-09-30。Linux の UAPI のヘッダには無い）。**長さは NUL を数えて 8 バイト境界へ切り上げ、詰め物は 0 である。**
+    #[test]
+    fn a_dirent64_record_follows_the_linux_layout() {
+        assert_eq!(dirent64_record_len(0), 24, "19 + NUL, rounded up to 8");
+        assert_eq!(dirent64_record_len(4), 24, "19 + 4 + NUL");
+        assert_eq!(
+            dirent64_record_len(5),
+            32,
+            "19 + 5 + NUL = 25, rounded up to 32"
+        );
+        let mut out = [0xEE; 40];
+        let written = dirent64_record(
+            &Dirent64 {
+                ino: 0x0102_0304_0506_0708,
+                off: 0x1112_1314_1516_1718,
+                kind: 0x21,
+                name: b"ab",
+            },
+            &mut out,
+        );
+        assert_eq!(written, Some(24));
+        assert_eq!(u64_at(&out, 0), 0x0102_0304_0506_0708, "d_ino @0");
+        assert_eq!(u64_at(&out, 8), 0x1112_1314_1516_1718, "d_off @8");
+        assert_eq!(u16_at(&out, 16), 24, "d_reclen @16");
+        assert_eq!(out[18], 0x21, "d_type @18");
+        assert_eq!(&out[19..21], b"ab", "d_name @19");
+        assert_eq!(&out[21..24], &[0, 0, 0], "the NUL and the padding are 0");
+        assert_eq!(&out[24..], &[0xEE; 16], "nothing past d_reclen");
+        let long = Dirent64 {
+            ino: 1,
+            off: 2,
+            kind: 3,
+            name: b"abcdef",
+        };
+        assert_eq!(
+            dirent64_record(&long, &mut [0; 24]),
+            None,
+            "a record that does not fit"
+        );
     }
 
     /// `struct fb_var_screeninfo` の欄の位置（`offsetof` の値）。
