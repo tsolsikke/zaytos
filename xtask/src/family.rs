@@ -342,6 +342,8 @@ pub const PATH_RULES: &[PathRule] = &[
             ".github/**",
             "probes/**",
             "xtask/src/check_lock.rs",
+            // **手で使う、試験の一覧を並べて回す道具**（案 B の ②）——**全検査の項目は使わない。**
+            "xtask/src/run_set.rs",
             "xtask/src/family.rs",
             "xtask/src/font.rs",
             "xtask/src/full_check.rs",

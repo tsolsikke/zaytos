@@ -24,6 +24,7 @@ mod launch;
 mod media;
 mod metrics;
 mod run_dir;
+mod run_set;
 mod sampling;
 mod tool_checks;
 mod vbox;
@@ -1681,7 +1682,7 @@ fn main() -> Result<()> {
        cargo xtask run --machine-variant NAME [--sabotage FEATURE | --config FEATURE]   (ADR-0068。NAME は xtask/machine-variants.txt の名前)
        cargo xtask check [--update-reference]   (ホストテストの名前の集合を取り直す)
        cargo xtask run --boot-log-diff [--update-reference [--allow-shrink] [--only-masked]]\n       cargo xtask run --tool-checks
-       cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask image [--without-fs-image]   (ADR-0068 の HW-e。起動媒体の像を建てて確かめる)\n       cargo xtask gen-font\n       cargo xtask judge-vbox <記録>   (ADR-0068 の 2-2。tools/vbox-vm.py run が残した記録を判定する)";
+       cargo xtask run --calibration-spread [N]\n       cargo xtask run --highhalf-test <kind>\n       cargo xtask screenshot [output.png] [--wait-secs N] [--gfx-test] [--kvm]\n       cargo xtask run-set [--jobs K] <一覧のファイル>   (案 B の ②。一覧の試験を K 本ずつ同時に走らせる。1 行に xtask の引数を 1 つ分)\n       cargo xtask image [--without-fs-image]   (ADR-0068 の HW-e。起動媒体の像を建てて確かめる)\n       cargo xtask gen-font\n       cargo xtask judge-vbox <記録>   (ADR-0068 の 2-2。tools/vbox-vm.py run が残した記録を判定する)";
 
     // **コンパイルした木と別の木で動いていれば、何もせずに落ちる**（2026-09-27。[`built_elsewhere`]）。
     if let Some(problem) = built_elsewhere(
@@ -2326,6 +2327,8 @@ fn main() -> Result<()> {
         // なければ、外すことは「守らないと決める」ことになる。
         Some("flaky") => cmd_flaky(),
         Some("screenshot") => cmd_screenshot(&args[1..]),
+        // **試験の一覧を k 本ずつ同時に走らせる**（案 B の ②。2026-09-29。`run_set`）。
+        Some("run-set") => run_set::cmd_run_set(&workspace_root()?, &args[1..]),
         Some("gen-font") => font::generate(&workspace_root()?),
         // **VirtualBox の実行の記録を判定する（`ADR-0068` の 2-2）。** **判定は xtask だけが持つ。**
         Some("judge-vbox") => {

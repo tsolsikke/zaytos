@@ -759,6 +759,8 @@ xtask::media::tests::the_sixty_four_mib_partition_has_the_geometry_we_recorded
 xtask::metrics::tests::the_line_names_every_kind_even_at_zero
 xtask::run_dir::tests::the_names_in_a_run_directory_come_from_the_run
 xtask::run_dir::tests::the_newest_runs_are_kept_whole_and_the_oldest_are_removed
+xtask::run_set::tests::a_list_is_read_one_test_per_line
+xtask::run_set::tests::the_processes_below_a_child_are_listed_deepest_first
 xtask::sampling::tests::the_pressure_totals_and_meminfo_fields_are_read
 xtask::sampling::tests::the_windows_line_skips_values_typeperf_could_not_read
 xtask::sampling::tests::typeperf_rows_are_read_and_the_header_is_skipped
