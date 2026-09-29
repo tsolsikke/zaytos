@@ -21629,6 +21629,69 @@ fn checked_files(workspace_root: &Path, pathspecs: &[&str]) -> Result<Vec<String
         .collect())
 }
 
+/// 回の置き場の決まった名前（2026-09-29。案 B の ①）。**`xtask/src/run_dir.rs` の外に書かない**——書くと、
+/// 同時に走る実行が同じ名前を取り合う形へ戻る。**見るのは各ファイルのテストの前まで**（テストは置き場を作らない）。
+const FIXED_RUN_NAMES: &[(&str, &str)] = &[
+    ("\"qemu-debug.log\"", "the QEMU -d log"),
+    ("-serial.log\"", "a serial log"),
+    ("\"disk0.img\"", "the virtio-blk disk image"),
+    ("join(\"esp\")", "the ESP directory"),
+    ("join(\"ovmf\")", "the directory of the OVMF variables"),
+    ("\"OVMF_VARS_4M.fd\"", "the copy of the OVMF variables"),
+    // **分けて書く**——続けて書くと、この表の行そのものに当たる（ほかの型は引用符を `\"` で書くので当たらない）。
+    (concat!("/tmp/", "zaytos-xtask-"), "a monitor socket"),
+];
+
+/// 道具（`tools/*.py`）が、決まった置き場の像を読む形（2026-09-29。案 B の ①）。**道具は `--image` で回の置き場を
+/// 受け取る。**
+const FIXED_RUN_NAMES_IN_TOOLS: &[(&str, &str)] = &[
+    ("\"target\", \"esp\"", "the ESP directory"),
+    ("\"target\", \"disk0.img\"", "the virtio-blk disk image"),
+];
+
+/// 回の置き場の名前を組み立ててよいファイル（[`RunDir`]）。
+const RUN_NAME_HOME: &str = "xtask/src/run_dir.rs";
+
+/// 決まった名前を、回の置き場の型の外で書いた所（純粋な論理。`(ファイル, 本文)` を受け取る）。
+fn fixed_run_names_in(files: &[(String, String)]) -> Vec<String> {
+    let mut found = Vec::new();
+    for (rel, text) in files {
+        if rel == RUN_NAME_HOME {
+            continue;
+        }
+        let (table, body) = if rel.ends_with(".py") {
+            (FIXED_RUN_NAMES_IN_TOOLS, text.as_str())
+        } else {
+            let cut = text
+                .find("\n#[cfg(test)]\nmod tests {")
+                .unwrap_or(text.len());
+            (FIXED_RUN_NAMES, &text[..cut])
+        };
+        for (number, line) in body.lines().enumerate() {
+            for (pattern, what) in table {
+                if line.contains(pattern) {
+                    found.push(format!(
+                        "{rel}:{}: {what} written as {pattern}; take it from the run directory (RunDir)",
+                        number + 1
+                    ));
+                }
+            }
+        }
+    }
+    found
+}
+
+/// 回の置き場の決まった名前を、`xtask/src` と `tools` の中で探す（追跡していない新しいファイルも読む）。
+fn check_fixed_run_names(workspace_root: &Path) -> Result<Vec<String>> {
+    let mut files = Vec::new();
+    for rel in checked_files(workspace_root, &["xtask/src/*.rs", "tools/*.py"])? {
+        let text = fs::read_to_string(workspace_root.join(&rel))
+            .with_context(|| format!("could not read {rel}"))?;
+        files.push((rel, text));
+    }
+    Ok(fixed_run_names_in(&files))
+}
+
 fn check_markdown_prose_style(workspace_root: &Path) -> Result<Vec<String>> {
     // 追跡していない新しい文書も見る（[`checked_files`]。2026-09-28）。
     let listing = checked_files(workspace_root, &["*.md"])?;
@@ -27177,6 +27240,29 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         }
     }
 
+    // 回の置き場の決まった名前（2026-09-29。案 B の ①。運用者の決定）。**書けるのは回の置き場の型だけである。**
+    total += 1;
+    begin_item(
+        Family::Base,
+        "the fixed names of a run's files are written only in xtask/src/run_dir.rs",
+    );
+    match check_fixed_run_names(&workspace_root) {
+        Ok(found) if found.is_empty() => println!(
+            "--- fixed run names: OK (none outside {RUN_NAME_HOME}; xtask/src and tools read)"
+        ),
+        Ok(found) => {
+            for place in &found {
+                println!("    {place}");
+            }
+            println!("--- fixed run names: FAILED ({} place(s))", found.len());
+            failed.push("fixed run names".to_string());
+        }
+        Err(e) => {
+            println!("--- fixed run names: FAILED ({e:#})");
+            failed.push("fixed run names".to_string());
+        }
+    }
+
     // イメージへ入るテキストが ASCII だけであること（2026-08-31、静的）。
     total += 1;
     begin_item(Family::Base, "text that goes into the image is ASCII only");
@@ -28056,8 +28142,8 @@ fn count_elements(text: &str) -> usize {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 55,
-    full: 424,
+    base: 56,
+    full: 425,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -30963,6 +31049,31 @@ mod tests {
         args.iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
+    }
+
+    /// **決まった名前は、回の置き場の型の外でだけ数える。** **テストの中と、置き場の型の中は数えない。**
+    #[test]
+    fn fixed_run_names_are_counted_outside_the_run_directory_only() {
+        let files = vec![
+            (
+                "xtask/src/main.rs".to_string(),
+                "let a = root.join(\"target\").join(\"qemu-debug.log\");\n\n#[cfg(test)]\nmod tests {\n\
+                 let b = \"qemu-debug.log\";\n}\n"
+                    .to_string(),
+            ),
+            (
+                RUN_NAME_HOME.to_string(),
+                "self.path.join(\"qemu-debug.log\")".to_string(),
+            ),
+            (
+                "tools/x.py".to_string(),
+                "shutil.copytree(os.path.join(ROOT, \"target\", \"esp\"), out)".to_string(),
+            ),
+        ];
+        let found = fixed_run_names_in(&files);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found[0].starts_with("xtask/src/main.rs:1: the QEMU -d log"));
+        assert!(found[1].starts_with("tools/x.py:1: the ESP directory"));
     }
 
     #[test]

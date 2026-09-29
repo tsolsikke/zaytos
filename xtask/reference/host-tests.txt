@@ -799,6 +799,7 @@ xtask::tests::every_judged_machine_variant_is_in_the_table_with_a_serial_port
 xtask::tests::every_stop_reason_names_a_kernel_feature
 xtask::tests::expectations_in_the_form_are_read_right_after_their_value
 xtask::tests::expectations_out_of_the_form_say_what_is_out_of_it
+xtask::tests::fixed_run_names_are_counted_outside_the_run_directory_only
 xtask::tests::info_pci_output_is_parsed_and_subsystem_lines_are_ignored
 xtask::tests::items_are_counted_from_the_source_by_the_forms_it_knows
 xtask::tests::kernel_pci_lines_are_parsed_and_other_pci_lines_are_ignored
