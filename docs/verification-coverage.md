@@ -3156,7 +3156,7 @@ BKL本体で新しい検査を作るときも、まず検出経路を数え、�
   |---|---|---|
   | `ap-demo-layer1-holds` | `CURRENT`を外から0にされたときに範囲検査が止めること | `ap-forced-current-range-check` |
   | `detector symbol` | 構造的なガードのシンボルが既定ビルドに在ること | `guard symbols` |
-  | `serial writes outside the BKL` | `SerialPort::new(`を書いた箇所 | `direct serial ports` |
+  | `serial writes outside the BKL` | `Serial::new(`・`Serial::primary(`・`open_direct_serial(`を書いた箇所 | `direct serial ports` |
 
   **3度とも、名前は動機を指していた。** 第1層を保ちたい、検出器が在ることを担保したい、BKLの外からの書き込みを絞りたい。**動機は検査を書く理由であって、検査が見ているものではない。**
 
@@ -3655,6 +3655,8 @@ ADR-0022が「f-3で型（世代/CR3を持たせる等）またはdocで担保�
 **2方向を確かめたのは、この検査が守るものが2つあるからである**——**一覧が静かに狭くなること**と、**新しい入口が静かに開くこと**。1方向だけでは、もう片方が空振りしていても分からない。どちらも確かめた後にバイト単位で書き戻した（`md5sum`一致）。
 
 **見る字面に、machineの入口`open_direct_serial(`の呼び出しを足した**（2026-09-28。境界の段階の手順2）。共通の側を、`SerialPort::new(`を書かずに入口からポートを受け取る形へ寄せると、寄せた行が許可リストから抜けるためである。許可リストの行と、見る粒度（ファイルと所属名の対）は変えていない。字面の一覧は`xtask`の`DIRECT_SERIAL_PORT_OPENERS`にある。**空振りしないことを、入口を足した後に2方向で確かめた。** 許可リストに無い関数（`kernel/src/task.rs`の`on_yield`）に入口を呼ぶ行を1つ足すと、その行が未許可として出て落ちた。字面の一覧から入口を外すと、許可リストの`kernel/src/task.rs`の`serial_line`の行が何にも当たらなくなって落ちた。どちらも確かめた後に書き戻した（`md5sum`一致）。
+
+**型の名前を`SerialPort`から`Serial`に変えた**（2026-09-30。境界の段階の手順2）。共通の側は、COM1の番号を名指しする`new(COM1_BASE)`の代わりに、ログに使う1本目のシリアルを返す`Serial::primary()`で組む。**見る字面は`Serial::new(`・`Serial::primary(`・`open_direct_serial(`になった**（許可リストの項目の数は変わらない）。
 
 #### 静的な検査の棚卸しと、スタブ表の配置検証の空振り点検（S6-a）
 
