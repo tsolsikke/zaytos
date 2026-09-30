@@ -67,12 +67,16 @@ pub fn read_rflags() -> u64 {
 /// 限る。
 ///
 /// `preserves_flags` は付けない。`cli` は RFLAGS.IF を変更するため。
+///
+/// **`nomem` も付けない**（2026-09-30）。付けると、コンパイラが前後のメモリの読み書きを `cli` の向こうへ
+/// 動かしてよいことになり、止めた後に行うはずの読み書きが、止める前へ出うる（最適化したビルドで）。
+/// [`save_and_disable_interrupts`] と同じ理由である。
 pub unsafe fn disable_interrupts() {
     // SAFETY: 呼び出し側の契約により、割り込みを禁止してよい文脈で呼ばれる。
     // `cli` はマスク可能割り込みの受付を止めるだけで、メモリレイアウトや
     // 制御フローを変えない。
     unsafe {
-        core::arch::asm!("cli", options(nomem, nostack));
+        core::arch::asm!("cli", options(nostack));
     }
 }
 
@@ -82,14 +86,17 @@ pub unsafe fn disable_interrupts() {
 ///
 /// 割り込みを有効化してよい文脈でのみ呼ぶこと。「もともと禁止されていた
 /// 文脈」で呼ぶと、呼び出し元が守っていた排他性が失われる。無条件に呼んで
-/// はならない。通常は [`crate::critical::InterruptGuard`] の Drop が、保存
-/// した状態に応じて呼ぶ。
+/// はならない。通常は [`crate::critical::InterruptGuard`] を使うこと（ガードの Drop は、保存した状態に応じて
+/// [`restore_interrupts`] で戻す）。
 ///
 /// `preserves_flags` は付けない。`sti` は RFLAGS.IF を変更するため。
+///
+/// **`nomem` も付けない**（2026-09-30）。付けると、区間の中の読み書きを、コンパイラが `sti` の後へ動かしてよいことに
+/// なる（最適化したビルドで）。[`disable_interrupts`] と同じ理由である。
 pub unsafe fn enable_interrupts() {
     // SAFETY: 呼び出し側の契約により、割り込みを有効化してよい文脈で呼ばれる。
     unsafe {
-        core::arch::asm!("sti", options(nomem, nostack));
+        core::arch::asm!("sti", options(nostack));
     }
 }
 
@@ -259,9 +266,10 @@ pub unsafe fn enable_interrupts_and_wait() {
     // SAFETY: `sti` は IF を立て、`hlt` は次の割り込みまで CPU を止める。
     // 2 命令を 1 つの asm! に置いているため、コンパイラが間に何かを挟む
     // ことはなく、`sti` の 1 命令保留がそのまま `hlt` に掛かる。
-    // ハンドラの用意は呼び出し側の契約。
+    // ハンドラの用意は呼び出し側の契約。`nomem` を付けない理由は [`disable_interrupts`] と同じで、
+    // 眠る前の読み書き（`cli` の下での条件の確かめなど）を、`sti` の後へ動かさないためである（2026-09-30）。
     unsafe {
-        core::arch::asm!("sti", "hlt", options(nomem, nostack));
+        core::arch::asm!("sti", "hlt", options(nostack));
     }
 }
 
