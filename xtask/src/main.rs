@@ -21135,6 +21135,11 @@ const DOC_PATH_ALLOWLIST: &[(&str, &str)] = &[
 /// **前方一致で読み替える**（ディレクトリは `/` で終える）。**以前の置き場がまだ在る項と、今の置き場が無い
 /// 項は落とす**（[`doc_path_move_problems`]）——**読み替えが実際の移動を指していることを保つ。**
 const DOC_PATH_MOVES: &[(&str, &str)] = &[
+    // 報告の書式のファイル名（2026-10-01。OS の名前を変える段階の R1。記録の文書は旧い名前のまま残す）。
+    (
+        ".claude/output-styles/zaytos-report.md",
+        ".claude/output-styles/zeikos-report.md",
+    ),
     ("common/src/cpu.rs", "common/src/arch/x86_64/cpu.rs"),
     ("common/src/port.rs", "common/src/arch/x86_64/port.rs"),
     ("common/src/serial.rs", "common/src/machine/pc/serial.rs"),

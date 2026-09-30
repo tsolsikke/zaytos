@@ -286,7 +286,7 @@ commit・次ステップへ進む。
 
 ### 13.3.1 報告の形式
 
-本体は `.claude/output-styles/zaytos-report.md` にある。
+本体は `.claude/output-styles/zeikos-report.md` にある。
 
 ### 13.3.2 報告の頻度
 
