@@ -47,7 +47,13 @@ pub struct PmTimer {
 
 impl PmTimer {
     /// FADT が示したポートと幅で作る。
-    pub const fn new(port: u16, bits: u8) -> Self {
+    ///
+    /// # Safety
+    ///
+    /// `port` が、FADT が PM タイマの在りかとして名乗ったポートであること。**[`Self::read`] は安全な関数で、この
+    /// ポートを読む**——ほかのポートを渡すと、安全な関数から任意のポートを読めてしまう（2026-09-30 に、作れるのを
+    /// `machine` の中だけにした）。
+    pub(in crate::machine) const unsafe fn new(port: u16, bits: u8) -> Self {
         Self { port, bits }
     }
 
@@ -67,7 +73,7 @@ impl PmTimer {
     /// （仕様。**こちらで切らない**——**切ると「上位にゴミを返す機械」を隠す。** 差は
     /// [`Self::elapsed`] が幅で包み込む）。
     pub fn read(&self) -> u32 {
-        // SAFETY: FADT が PM タイマの在りかとして名乗ったポートを読むだけである。
+        // SAFETY: 作る所の契約（`new` の # Safety）で、FADT が PM タイマの在りかとして名乗ったポートを読むだけである。
         // **書かない。** 読み出しはカウンタの値を返すだけで、装置の状態を変えない。
         unsafe { inl(self.port) }
     }
@@ -106,11 +112,14 @@ mod tests {
     /// **幅で包み込む。** 24 ビットの一周を跨いだウィンドウでも、差はウィンドウの長さである。
     #[test]
     fn the_difference_wraps_at_the_declared_width() {
-        let timer = PmTimer::new(0x608, 24);
+        // SAFETY: 作るだけで、ポートは読まない（`elapsed` は純粋な計算である）。以下のテストも同じ。
+        let timer = unsafe { PmTimer::new(0x608, 24) };
         assert_eq!(timer.elapsed(10, 30), 20);
         assert_eq!(timer.elapsed(0xff_fff0, 0x10), 0x20, "24 ビットで一周した");
+        // SAFETY: 上と同じ。
+        let wide = unsafe { PmTimer::new(0x608, 32) };
         assert_eq!(
-            PmTimer::new(0x608, 32).elapsed(0xff_fff0, 0x10),
+            wide.elapsed(0xff_fff0, 0x10),
             0xff00_0020,
             "32 ビットなら同じ値は一周していない"
         );
@@ -119,7 +128,8 @@ mod tests {
     /// **幅の外のビットは差に混ぜない**（上位にゴミを返す機械でも、24 ビットぶんだけを見る）。
     #[test]
     fn bits_above_the_width_do_not_reach_the_difference() {
-        let timer = PmTimer::new(0x608, 24);
+        // SAFETY: 作るだけで、ポートは読まない。
+        let timer = unsafe { PmTimer::new(0x608, 24) };
         // 幅の外（上位 8 ビット）が違っていても、差は下位 24 ビットの差である。
         assert_eq!(timer.elapsed(0xdead_0010, 0xbeef_0030), 0x42_0020);
         assert_eq!(

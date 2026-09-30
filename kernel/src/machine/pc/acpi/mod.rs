@@ -1046,7 +1046,9 @@ fn read_pm_timer(
                 },
                 crate::machine::pc::pmtimer::HZ
             ));
-            Some(crate::machine::pc::pmtimer::PmTimer::new(port, bits))
+            // SAFETY: `port` は、FADT が PM タイマの在りかとして名乗ったポート（上の行の PM_TMR_BLK か X_PM_TMR_BLK）
+            // である。
+            Some(unsafe { crate::machine::pc::pmtimer::PmTimer::new(port, bits) })
         }
         fadt::PmTimerBlock::Absent => {
             logger.info(format_args!(

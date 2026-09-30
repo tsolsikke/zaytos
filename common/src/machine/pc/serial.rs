@@ -223,7 +223,9 @@ const BAUD_DIVISOR: u16 = (UART_CLOCK_HZ / BAUD_RATE) as u16;
 
 /// COM1 シリアルポートのドライバ。
 ///
-/// `new` はポート番号を記憶するだけで実機には触れないため安全。実際の
+/// **作れるのは、決まった番地の 1 本目のシリアルだけである**（[`Serial::primary`] と [`open_direct_serial`]。
+/// 2026-09-30 に `new` を外へ出さない形にした）。**任意のポートを受ける入口を外に置くと、安全な関数の
+/// `init`・`write_byte` から任意のポートへ書けてしまう。** 実際の
 /// ハードウェアアクセスは [`crate::arch::x86_64::port`] の `outb` / `inb` に閉じ込め、
 /// `init` / `write_byte` はその契約（固定の既知オフセットのみを、決められた
 /// 16550 初期化手順どおりに叩く）を自身で満たすことで安全な API として
@@ -232,7 +234,8 @@ const BAUD_DIVISOR: u16 = (UART_CLOCK_HZ / BAUD_RATE) as u16;
 /// # 契約（境界の型。2026-09-30）
 ///
 /// - 共通の側が作るのは [`Serial::primary`]（ログに使う 1 本目のシリアル）と
-///   [`open_direct_serial`]（初期化して返す）だけである。直に開ける所は、xtask の許可の表で数える。
+///   [`open_direct_serial`]（初期化して返す）だけである（`new` は外へ出していない）。直に開ける所は、
+///   xtask の許可の表で数える。
 /// - 行を書く間の排他は `write_fmt` の中のロックが持つ（最内側。取れなければ、混ざるのを承知で
 ///   書く）。割り込みは止めない。
 /// - 割り込みの処理からは書かない（規約。モジュールの doc の「UART を書いている間の排他」）。
@@ -241,7 +244,9 @@ pub struct Serial {
 }
 
 impl Serial {
-    pub const fn new(base: u16) -> Self {
+    /// 番地 `base` の 16550 を指す（**この module の中だけで使う**。外へは [`Self::primary`] と
+    /// [`open_direct_serial`] だけを出す）。
+    const fn new(base: u16) -> Self {
         Self { base }
     }
 

@@ -246,7 +246,8 @@ pub fn map_and_probe<const CAP: usize>(
         ));
     }
 
-    probe_local_apic(logger, lapic_phys, mmio.boot_processor_candidate_id());
+    // SAFETY: `lapic_phys` は、上の `map_mmio_page` がマッピングを確かめたページである（`lapic_mapping` が Some）。
+    unsafe { probe_local_apic(logger, lapic_phys, mmio.boot_processor_candidate_id()) };
 
     Some(mapped)
 }
@@ -396,7 +397,12 @@ fn map_mmio_page<const CAP: usize>(
 }
 
 /// Local APIC の ID と Version を読む。読むだけで、何も書かない。
-fn probe_local_apic(
+///
+/// # Safety
+///
+/// `lapic_phys` が、マッピングを確かめた Local APIC の MMIO のページであること（2026-09-30 に、番地を受ける
+/// 安全な関数から unsafe fn にした）。
+unsafe fn probe_local_apic(
     logger: &mut Logger<Serial>,
     lapic_phys: PhysAddr,
     bsp_candidate_apic_id: Option<crate::machine::pc::ProcessorId>,
@@ -404,7 +410,7 @@ fn probe_local_apic(
     let direct_map = common::addr::direct_map();
     let base_virt = direct_map.phys_to_virt(lapic_phys);
 
-    // SAFETY: 直前にマッピングを確認したページの中を読む。APIC のレジスタは 32 ビット
+    // SAFETY: 呼び出し元の契約（この関数の # Safety）で、マッピングを確認したページの中を読む。APIC のレジスタは 32 ビット
     // 幅で、境界に載った 32 ビットアクセスでなければならない（ID は +0x20、
     // Version は +0x30 で、いずれも 16 バイト境界に載っている）。`read_volatile`
     // なのでコンパイラが読みをまとめたり消したりしない。MMIO なので、まとめられ
@@ -867,11 +873,15 @@ pub fn survey_registers(logger: &mut Logger<Serial>, mapped: &MappedInterruptCon
     let mut irq1_covered = false;
     for slot in mapped.io_apics.iter().take(mapped.io_apic_count) {
         let Some(io_apic) = slot else { continue };
-        let entries = survey_io_apic(
-            logger,
-            direct_map.phys_to_virt(io_apic.phys).as_u64(),
-            io_apic,
-        );
+        // SAFETY: `mapped` の I/O APIC は、`map_and_probe` がマッピングを確かめたものである。その物理の番地を
+        // direct map で写した仮想番地を渡す。
+        let entries = unsafe {
+            survey_io_apic(
+                logger,
+                direct_map.phys_to_virt(io_apic.phys).as_u64(),
+                io_apic,
+            )
+        };
         if covers_gsi(io_apic.global_system_interrupt_base, entries, irq1_gsi) {
             irq1_covered = true;
         }
@@ -931,7 +941,12 @@ fn covers_gsi(gsi_base: u32, entries: Option<u32>, gsi: u32) -> bool {
 ///
 /// **デコードされていなければ止める**（HW-e-2）——**転送の項目を書いても届かないので、先へ進むと
 /// 割り込みが来ない所で黙る。**
-fn survey_io_apic(
+///
+/// # Safety
+///
+/// `base_virt` が、`io_apic` の MMIO のページを写した、マッピングを確かめた仮想番地であること（2026-09-30 に、
+/// 番地を受ける安全な関数から unsafe fn にした。読むときに選択のレジスタへ書く）。
+unsafe fn survey_io_apic(
     logger: &mut Logger<Serial>,
     base_virt: u64,
     io_apic: &IoApicLocation,
@@ -943,7 +958,7 @@ fn survey_io_apic(
     } else {
         IOAPIC_INDEX_VERSION
     };
-    // SAFETY: `map_and_probe` がマッピングを確認したページの中だけを触る。
+    // SAFETY: 呼び出し元の契約（この関数の # Safety）で、マッピングを確認したページの中だけを触る。
     // IOREGSEL への書き込みと IOWIN からの読み出しは、この 1 ページに閉じる。
     let (id_raw, version_raw) = unsafe {
         (
@@ -1806,7 +1821,12 @@ enum PitSampling {
 }
 
 /// PIT のティックを基準に標本を取る（S2-c の本体を関数へ出したもの）。
-fn sample_with_pit(logger: &mut Logger<Serial>, lapic: u64) -> PitSampling {
+///
+/// # Safety
+///
+/// `lapic` が、マッピングを確かめた Local APIC のページの仮想番地であること（2026-09-30 に、番地を受ける
+/// 安全な関数から unsafe fn にした）。
+unsafe fn sample_with_pit(logger: &mut Logger<Serial>, lapic: u64) -> PitSampling {
     let mut samples = [0u64; CALIBRATION_SAMPLES];
     // 較正自身が取りこぼしを見る。`interrupts::max_tick_jump()` はこの時点では
     // 使えない。あれを更新するのは `run_timer_loop` の定常ループで、較正はその
@@ -1837,7 +1857,7 @@ fn sample_with_pit(logger: &mut Logger<Serial>, lapic: u64) -> PitSampling {
             ));
             return PitSampling::WindowIncomplete;
         };
-        // SAFETY: `calibrate_local_timer` がマッピングを確認したページの中を読む。読み取りのみ。
+        // SAFETY: 呼び出し元の契約（この関数の # Safety）で、マッピングを確認したページの中を読む。読み取りのみ。
         let count_begin = unsafe { read_lapic(lapic, LAPIC_REGISTER_TIMER_CURRENT_COUNT) };
 
         // ウィンドウの終わりも同じくエッジで揃える。
@@ -1884,14 +1904,19 @@ fn sample_with_pit(logger: &mut Logger<Serial>, lapic: u64) -> PitSampling {
 /// **進まなければ `None` を返す**（上限は TSC で掛ける。**上限のない待機を書かない**）。
 ///
 /// **式は PIT 基準と同じ形である**——**ウィンドウの実時間（PM タイマの刻み）で割る。**
-fn sample_with_pm_timer(
+///
+/// # Safety
+///
+/// `lapic` が、マッピングを確かめた Local APIC のページの仮想番地であること（2026-09-30 に、番地を受ける
+/// 安全な関数から unsafe fn にした）。
+unsafe fn sample_with_pm_timer(
     lapic: u64,
     pm_timer: crate::machine::pc::pmtimer::PmTimer,
 ) -> Option<[u64; CALIBRATION_SAMPLES]> {
     let mut samples = [0u64; CALIBRATION_SAMPLES];
     for slot in samples.iter_mut() {
         let begin_pm = pm_timer.read();
-        // SAFETY: `calibrate_local_timer` がマッピングを確認したページの中を読む。読み取りのみ。
+        // SAFETY: 呼び出し元の契約（この関数の # Safety）で、マッピングを確認したページの中を読む。読み取りのみ。
         let count_begin = unsafe { read_lapic(lapic, LAPIC_REGISTER_TIMER_CURRENT_COUNT) };
         let deadline_base = cpu::read_timestamp_counter();
         let elapsed_pm;
@@ -1990,7 +2015,9 @@ pub fn calibrate_local_timer(
 
     // **標本を取る。** **PIT のティックを基準にするのが既定である**（S2-c）。
     // **ティックが 1 本も来なければ、ACPI の PM タイマへ倒す**（HW-c。`ADR-0068`）。
-    let (samples, reference) = match sample_with_pit(logger, lapic) {
+    // SAFETY: `lapic` は `mapped` の Local APIC のページを direct map で写した番地で、`map_and_probe` がマッピングを
+    // 確かめた（下の PM タイマの側も同じ）。
+    let (samples, reference) = match unsafe { sample_with_pit(logger, lapic) } {
         PitSampling::Done {
             samples,
             widest_edge_advance,
@@ -2035,7 +2062,8 @@ pub fn calibrate_local_timer(
                  ({} Hz instead of the specification's 3579545 Hz)",
                 crate::machine::pc::pmtimer::HZ
             ));
-            match sample_with_pm_timer(lapic, pm_timer) {
+            // SAFETY: 上の `sample_with_pit` と同じ番地である。
+            match unsafe { sample_with_pm_timer(lapic, pm_timer) } {
                 Some(samples) => (samples, CalibrationReference::PmTimer),
                 None => {
                     // **PM タイマが在ると FADT が示したのに進まない。** **止まる**（同上）。
