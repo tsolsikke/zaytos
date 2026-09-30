@@ -23924,6 +23924,160 @@ fn item_of(workspace_root: &Path, segments: &[String]) -> Vec<String> {
     item
 }
 
+/// 置き場の直下（共通の側が名前で呼ぶ所。`ADR-0071` の決定 1 の 2）。
+struct BoundaryRoot {
+    /// 直下のファイル（`mod` の宣言を読む）。
+    file: &'static str,
+    /// クレート（`kernel` か `common`）。
+    krate: &'static str,
+    /// クレートの中の、直下のモジュールのパス。
+    path: &'static [&'static str],
+}
+
+/// 共通の側が名前で呼ぶ、置き場の直下（2026-09-30。境界の段階の手順 2 の区切り。運用者の決定）。
+///
+/// **共通の側（`main.rs` を除く）は、直下のファイルが宣言したモジュールを直に指さない**——直下に並べた名前で呼ぶ
+/// （[`find_direct_module_paths`]）。`main.rs` は起動の順として深いパスで呼んでよい（`ADR-0071` の決定 1 の 2）。
+/// ほかの直下になっているモジュール（`abi/linux` の下の `x86_64`）は指してよい。
+const BOUNDARY_ROOTS: &[BoundaryRoot] = &[
+    BoundaryRoot {
+        file: "kernel/src/arch/x86_64/mod.rs",
+        krate: "kernel",
+        path: &["arch", "x86_64"],
+    },
+    BoundaryRoot {
+        file: "kernel/src/machine/pc/mod.rs",
+        krate: "kernel",
+        path: &["machine", "pc"],
+    },
+    BoundaryRoot {
+        file: "kernel/src/abi/linux/mod.rs",
+        krate: "kernel",
+        path: &["abi", "linux"],
+    },
+    BoundaryRoot {
+        file: "kernel/src/abi/linux/x86_64/mod.rs",
+        krate: "kernel",
+        path: &["abi", "linux", "x86_64"],
+    },
+    BoundaryRoot {
+        file: "common/src/arch/x86_64/mod.rs",
+        krate: "common",
+        path: &["arch", "x86_64"],
+    },
+    BoundaryRoot {
+        file: "common/src/machine/pc/mod.rs",
+        krate: "common",
+        path: &["machine", "pc"],
+    },
+];
+
+/// 直下のファイルが宣言したモジュールの名前（ほかの直下になっているものを除く）。
+fn modules_under_root(workspace_root: &Path, root: &BoundaryRoot) -> Result<BTreeSet<String>> {
+    let path = workspace_root.join(root.file);
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut names = BTreeSet::new();
+    for line in code_with_lines_kept(&text).lines() {
+        let mut rest = line.trim_start();
+        if let Some(after) = rest.strip_prefix("pub") {
+            rest = after.trim_start();
+            if let Some(after) = rest.strip_prefix('(') {
+                rest = after
+                    .split_once(')')
+                    .map_or("", |(_, after)| after)
+                    .trim_start();
+            }
+        }
+        let Some(after) = rest.strip_prefix("mod ") else {
+            continue;
+        };
+        let name: String = after
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if !name.is_empty() {
+            names.insert(name);
+        }
+    }
+    for other in BOUNDARY_ROOTS {
+        if other.krate == root.krate
+            && other.path.len() == root.path.len() + 1
+            && other.path.starts_with(root.path)
+        {
+            names.remove(other.path[root.path.len()]);
+        }
+    }
+    Ok(names)
+}
+
+/// 1 つの共通の側のファイルで、置き場の直下の下のモジュールを直に指している所（`modules` は [`BOUNDARY_ROOTS`] と
+/// 同じ並びの、直下ごとのモジュールの名前）。**`use 直下::*` も落とす**——下のモジュールまで取り込むため。
+fn direct_module_paths_in(relative: &str, text: &str, modules: &[BTreeSet<String>]) -> Vec<String> {
+    let mut findings = Vec::new();
+    for found in path_uses(relative, text) {
+        let Some((krate, rest)) = found.segments.split_first() else {
+            continue;
+        };
+        for (root, names) in BOUNDARY_ROOTS.iter().zip(modules) {
+            let under_root = krate == root.krate
+                && rest.len() >= root.path.len()
+                && rest
+                    .iter()
+                    .zip(root.path)
+                    .all(|(segment, expected)| segment == expected);
+            if !under_root {
+                continue;
+            }
+            let below = &rest[root.path.len()..];
+            let root_path = format!("{}::{}", root.krate, root.path.join("::"));
+            if found.glob && below.is_empty() {
+                findings.push(format!(
+                    "{relative}:{}: `use {root_path}::*` also takes in the modules under the root; take in the \
+                     names listed at the root one by one",
+                    found.line
+                ));
+            } else if let Some(module) = below.first().filter(|name| names.contains(name.as_str()))
+            {
+                findings.push(format!(
+                    "{relative}:{}: `{}` points at the module `{module}` under `{root_path}`; call the name \
+                     listed at the root instead (list it there first if it is not)",
+                    found.line,
+                    found.segments.join("::")
+                ));
+            }
+        }
+    }
+    findings
+}
+
+/// 共通の側（置き場の外。`main.rs` を除く）が、置き場の直下の下のモジュールを直に指している所を探す
+/// （[`BOUNDARY_ROOTS`]）。読んだ共通の側のファイルの数を `files_read` に足す。
+fn find_direct_module_paths(workspace_root: &Path, files_read: &mut usize) -> Result<Vec<String>> {
+    let modules = BOUNDARY_ROOTS
+        .iter()
+        .map(|root| modules_under_root(workspace_root, root))
+        .collect::<Result<Vec<_>>>()?;
+    let mut findings = Vec::new();
+    for relative in checked_files(workspace_root, &["*.rs"])? {
+        // **`main.rs` は起動の順として深いパスで呼んでよい**（x86 の言葉の数で分けて扱うのと同じファイル）。
+        let common_side = (relative.starts_with("kernel/src/")
+            || relative.starts_with("common/src/"))
+            && !is_home_file(&relative)
+            && relative != X86_WORDS_BOOT_SEQUENCE;
+        if !common_side {
+            continue;
+        }
+        let path = workspace_root.join(&relative);
+        let text = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        *files_read += 1;
+        findings.extend(direct_module_paths_in(&relative, &text, &modules));
+    }
+    Ok(findings)
+}
+
 /// 置き場の下のコードが、共通の側の公開していない名前を使っている所を探す（[`COMMON_ITEMS_FOR_HOMES`]）。
 /// **死んだ名前も探す。** 表に載った名前を使った参照の数を `published_uses` に足す。
 fn find_unpublished_common_uses(
@@ -26419,6 +26573,32 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             unpublished.len()
         );
         failed.push("common side published to homes".to_string());
+    }
+
+    // **共通の側は、置き場を直下に並べた名前で呼ぶ**（2026-09-30。境界の段階の手順 2 の区切り。運用者の決定）。
+    total += 1;
+    begin_item(
+        Family::Base,
+        "the common side calls arch, machine and abi only through the names at their roots",
+    );
+    let mut common_side_files = 0usize;
+    let direct_module_paths = find_direct_module_paths(&workspace_root, &mut common_side_files)?;
+    if direct_module_paths.is_empty() {
+        println!(
+            "--- common side through roots: OK ({common_side_files} common-side file(s) read, {} root(s) = \
+             BOUNDARY_ROOTS)",
+            BOUNDARY_ROOTS.len()
+        );
+    } else {
+        for finding in &direct_module_paths {
+            println!("    {finding}");
+        }
+        println!(
+            "--- common side through roots: FAILED ({} path(s) point at a module under a root; only main.rs \
+             may, as the boot sequence)",
+            direct_module_paths.len()
+        );
+        failed.push("common side through roots".to_string());
     }
 
     // **起動ログの参照の終わり**（5.a の監視の (iii)。2026-09-25）。**QEMU を起動せずに見る。**
@@ -29451,8 +29631,8 @@ fn count_elements(text: &str) -> usize {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 59,
-    full: 428,
+    base: 60,
+    full: 429,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -33716,6 +33896,33 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
                 ),
                 (8, "kernel::syscall::x".to_string(), false, true),
             ]
+        );
+    }
+
+    /// **共通の側が直下の下のモジュールを指す所は、`use` の木の中でも別名の先でも見つかり、直下に並べた名前は通る**
+    /// （2026-09-30）。
+    #[test]
+    fn a_path_through_a_module_under_a_root_is_found_and_a_root_name_is_not() {
+        let modules: Vec<BTreeSet<String>> = BOUNDARY_ROOTS
+            .iter()
+            .map(|root| {
+                if root.krate == "kernel" && root.path == ["arch", "x86_64"] {
+                    ["paging", "ring3"].map(String::from).into()
+                } else {
+                    BTreeSet::new()
+                }
+            })
+            .collect();
+        let text = "use crate::arch::x86_64::{set_active_page_table_root, paging::switch};\n\
+                    use crate::arch::x86_64 as arch;\n\
+                    fn f() { crate::arch::x86_64::timer_ticks(); arch::ring3::depth(); }\n";
+        let findings = direct_module_paths_in("kernel/src/task.rs", text, &modules);
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert!(
+            findings[0].starts_with("kernel/src/task.rs:1: `kernel::arch::x86_64::paging::switch`")
+        );
+        assert!(
+            findings[1].starts_with("kernel/src/task.rs:3: `kernel::arch::x86_64::ring3::depth`")
         );
     }
 
