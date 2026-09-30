@@ -40,7 +40,7 @@ use crate::syscall::{MAX_ARGV_BYTES, MAX_ENVP_BYTES, MAX_EXECUTABLE_SIZE, PATH_M
 /// 0 を採るのは、`hello` を `0x400000` へリンクしているからである（Linux の
 /// 非 PIE の既定と同じ）。**本番の空間の `PML4[0]` には恒等除去まで恒等が居るが、
 /// 新しい空間の下位は空なので関係が無い。**
-pub const USER_PROGRAM_PML4_INDEX: usize = 0;
+pub const USER_PROGRAM_SUBTREE_INDEX: usize = 0;
 
 /// ユーザープログラムのスタックの上端（S9-b-1）。1 ページだけマップする。
 ///
@@ -985,7 +985,12 @@ pub fn load_user_program(
     // SAFETY: production は稼働中の PML4、direct_map は登録済みのウィンドウ。**起動の後なので、カーネル側の
     // PML4 の項目は誰も変えない**（`AddressSpace::new` の前提。起動の終わりの指紋と突き合わせる）。BKL は持っていない。
     let space = match unsafe {
-        AddressSpace::new(allocator, direct_map, production, USER_PROGRAM_PML4_INDEX)
+        AddressSpace::new(
+            allocator,
+            direct_map,
+            production,
+            USER_PROGRAM_SUBTREE_INDEX,
+        )
     } {
         Ok(space) => space,
         Err(e) => {
@@ -1112,7 +1117,7 @@ pub fn load_user_program(
         // **遠征の戻りが元の値へ戻していれば、何も見つからない。** **見つかったら
         // 不変条件が破れかけていたので、消してから声を出す**——**死んだテーブルを
         // 載せる形は静かに効くので、黙って直さない。**
-        forget_task_cr3_before_destroy(logger, &process);
+        forget_task_root_before_destroy(logger, &process);
         // SAFETY: この空間はどのコアでも稼働していない。direct map は覆っている。
         unsafe { process.space.destroy(direct_map, quarantine, &guard) }
     };
@@ -1245,7 +1250,7 @@ pub fn global_difference_checks() -> u64 {
 /// 取り出して渡すと、その一時値が `load_user_program` のフレームを 16 バイト広げた**
 /// （実測。`objdump` で前置きの `sub rsp` を読んだ。4,288 → 4,304 バイト）。
 #[inline(never)]
-fn forget_task_cr3_before_destroy(logger: &mut Logger<SerialPort>, process: &UserProcess) {
+fn forget_task_root_before_destroy(logger: &mut Logger<SerialPort>, process: &UserProcess) {
     let name = process.name;
     let root = process.space.pml4().as_u64();
     if crate::task::forget_page_table_root_if(root) {
@@ -1817,7 +1822,7 @@ unsafe fn run_loaded_program(
             main_entry_stack_top,
             process.entry,
             process.stack_top,
-            crate::syscall::window_for_subtree(USER_PROGRAM_PML4_INDEX),
+            crate::syscall::window_for_subtree(USER_PROGRAM_SUBTREE_INDEX),
         )
     };
     // **引き取る。** 遠征が例外による終了処理で戻っても `exit` で戻ってもここを通る
@@ -2383,7 +2388,7 @@ pub fn spawn(
         common::arch::x86_64::cpu::halt_forever();
     }
 
-    let child_handler_sp = crate::syscall::handler_rsp();
+    let child_handler_sp = crate::syscall::handler_sp();
     let (child_bottom, child_top) = crate::arch::x86_64::ring3::excursion_stack_range_at(depth);
     let handler_on_child_stack = child_handler_sp >= child_bottom && child_handler_sp < child_top;
 

@@ -159,7 +159,7 @@ struct BigKernelLock {
     /// 保持者が入った入口。**診断専用。**
     holder_entry: AtomicU64,
     /// 取得した時刻（TSC）。**診断専用。**
-    acquired_tsc: AtomicU64,
+    acquired_cycles: AtomicU64,
 }
 
 /// [`BigKernelLock::holder_cpu`] の「誰も保持していない」。
@@ -170,7 +170,7 @@ static BKL: BigKernelLock = BigKernelLock {
     held: AtomicBool::new(false),
     holder_cpu: AtomicUsize::new(NO_HOLDER),
     holder_entry: AtomicU64::new(0),
-    acquired_tsc: AtomicU64::new(0),
+    acquired_cycles: AtomicU64::new(0),
 };
 
 /// 待ちの上限（TSC サイクル）。
@@ -456,7 +456,7 @@ pub fn acquire(entry: KernelEntry) -> BklGuard {
     // 3. 勝った側だけがここへ来る。診断フィールドを埋める。
     BKL.holder_cpu.store(cpu_id(), Ordering::Relaxed);
     BKL.holder_entry.store(entry.as_u64(), Ordering::Relaxed);
-    BKL.acquired_tsc.store(
+    BKL.acquired_cycles.store(
         common::arch::x86_64::cpu::read_timestamp_counter(),
         Ordering::Relaxed,
     );
@@ -497,7 +497,7 @@ fn holder_snapshot() -> (usize, &'static str, u64) {
     let cpu = BKL.holder_cpu.load(Ordering::Relaxed);
     let entry = KernelEntry::from_u64(BKL.holder_entry.load(Ordering::Relaxed))
         .map_or("<unknown>", KernelEntry::name);
-    (cpu, entry, BKL.acquired_tsc.load(Ordering::Relaxed))
+    (cpu, entry, BKL.acquired_cycles.load(Ordering::Relaxed))
 }
 
 /// 同じコアが保持したまま再取得したことを報告して停止する。

@@ -9593,7 +9593,7 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     emit(&a[5].to_le_bytes(), &mut code, &mut n);
     emit(&[0xB9], &mut code, &mut n);
     emit(
-        &(syscall::SENTINEL_RCX as u32).to_le_bytes(),
+        &(kernel::abi::linux::x86_64::SENTINEL_RCX as u32).to_le_bytes(),
         &mut code,
         &mut n,
     );
@@ -9671,7 +9671,7 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     let count = syscall::invocation_count();
     let seen_number = syscall::last_number();
     let seen_args = syscall::last_args();
-    let handler_rsp = syscall::handler_rsp();
+    let handler_rsp = syscall::handler_sp();
     let handler_in_rsp0 = handler_rsp >= exc_bottom && handler_rsp < exc_top;
     let rsp0_restored = gdt::active_kernel_entry_stack_top() == main_rsp0_top;
     // SAFETY: store_slot はマップ済みのユーザースタックページ内。読み取りのみ。

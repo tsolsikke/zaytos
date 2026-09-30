@@ -16,4 +16,4 @@ pub use numbers::{
 
 mod registers;
 
-pub use registers::{read_request, write_return};
+pub use registers::{read_request, write_return, SENTINEL_RCX};

@@ -19,6 +19,13 @@
 use crate::abi::linux::SyscallRequest;
 use crate::arch::x86_64::idt::context::IrqContext;
 
+/// probe の呼び出しでユーザーが RCX へ入れる番兵。RCX は引数ではない（クロバー扱い）。
+/// `syscall-test-arg4-rcx` が第 4 引数を RCX から読むと、この値が第 4 引数として
+/// 記録され、`crate::syscall::PROBE_ARGS[3]` と決定的に食い違う。
+///
+/// **x86_64 のレジスタの約束の試しの値である**（`ADR-0071` の決定 1 の 2 で `crate::syscall` から移した。2026-09-30）。
+pub const SENTINEL_RCX: u64 = 0xCCCC_CCCC;
+
 /// 入口の文脈から、番号と 6 つの引数を読む。**戻り値を書き戻す前に読む**（書き戻すと、番号の RAX が上書きされる）。
 pub fn read_request(context: &IrqContext) -> SyscallRequest {
     // 第 4 引数は R10（RCX ではない。ADR-0020）。

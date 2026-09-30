@@ -95,7 +95,7 @@ pub const CHECKSUM_BUF_LEN: usize = 64;
 pub const USER_MIN_ADDR: u64 = 0x40_0000;
 
 /// PML4 の添字 1 つ分が覆う仮想範囲の大きさ（512 GiB）。
-const PML4_ENTRY_SPAN: u64 = 1 << 39;
+const SUBTREE_SPAN: u64 = 1 << 39;
 
 /// ユーザーサブツリーの添字から、ポインタ検証のウィンドウを導く（S9-b-3-2b）。
 ///
@@ -115,8 +115,8 @@ const PML4_ENTRY_SPAN: u64 = 1 << 39;
 /// 「下位半分すべて」へ広げてはならない。広げると長さの上限が消え、
 /// `over-long` のような呼び出しでページ走査が何百万回もまわる。
 pub const fn window_for_subtree(index: usize) -> (u64, u64) {
-    let start = (index as u64) * PML4_ENTRY_SPAN;
-    let end = start + PML4_ENTRY_SPAN;
+    let start = (index as u64) * SUBTREE_SPAN;
+    let end = start + SUBTREE_SPAN;
     if start < USER_MIN_ADDR {
         (USER_MIN_ADDR, end)
     } else {
@@ -320,11 +320,6 @@ pub const PROBE_ARGS: [u64; 6] = [
     0x6666_6666,
 ];
 
-/// probe の呼び出しでユーザーが RCX へ入れる番兵。RCX は引数ではない（クロバー扱い）。
-/// `syscall-test-arg4-rcx` が第 4 引数を RCX から読むと、この値が第 4 引数として
-/// 記録され、`PROBE_ARGS[3]` と決定的に食い違う。
-pub const SENTINEL_RCX: u64 = 0xCCCC_CCCC;
-
 /// 遠征の 1 本が持つ、システムコール側の状態（W1-a。W1-c-3 で記録も加えた）。
 ///
 /// # 記録は W1-c-3 でここへ移した
@@ -365,7 +360,7 @@ struct SyscallState {
     /// 直近に受け取った 6 引数（RDI/RSI/RDX/R10/R8/R9）。PROBE_ARGS と突き合わせる。
     last_args: [AtomicU64; 6],
     /// `syscall_entry` が走ったときの RSP（RSP0 スタックのはず）。読み戻し検証に使う。
-    handler_rsp: AtomicU64,
+    handler_sp: AtomicU64,
     /// 入場時点の [`crate::arch::x86_64::ring3`] の「今 Ring 3 にいる」の値（S8-b）。**Ring 3 から
     /// 来たのなら真のはず**で、往復検証が突き合わせる。
     in_ring3_at_entry: AtomicBool,
@@ -387,7 +382,7 @@ impl SyscallState {
             invocation_count: AtomicU64::new(0),
             last_number: AtomicU64::new(0),
             last_args: [const { AtomicU64::new(0) }; 6],
-            handler_rsp: AtomicU64::new(0),
+            handler_sp: AtomicU64::new(0),
             in_ring3_at_entry: AtomicBool::new(false),
             write_fd: AtomicU64::new(0),
             write_len: AtomicU64::new(0),
@@ -2813,7 +2808,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, sp_at_call: u64) -> u64 {
     for (slot, value) in state.last_args.iter().zip(request.args.iter()) {
         slot.store(*value, Ordering::SeqCst);
     }
-    state.handler_rsp.store(sp_at_call, Ordering::SeqCst);
+    state.handler_sp.store(sp_at_call, Ordering::SeqCst);
 
     // ポインタ検証のため、稼働中テーブルの PML4 物理と登録 direct map を用意する。
     let direct_map = common::addr::direct_map();
@@ -5113,7 +5108,7 @@ pub fn reset_counters() {
     for slot in state.last_args.iter() {
         slot.store(0, Ordering::SeqCst);
     }
-    state.handler_rsp.store(0, Ordering::SeqCst);
+    state.handler_sp.store(0, Ordering::SeqCst);
     state.in_ring3_at_entry.store(false, Ordering::SeqCst);
     state.process_exited.store(false, Ordering::SeqCst);
     state.process_exit_status.store(0, Ordering::SeqCst);
@@ -5156,7 +5151,7 @@ pub struct Records {
     invocation_count: u64,
     last_number: u64,
     last_args: [u64; 6],
-    handler_rsp: u64,
+    handler_sp: u64,
     in_ring3_at_entry: bool,
     process_exited: bool,
     process_exit_status: u64,
@@ -5187,7 +5182,7 @@ pub fn save_records() -> Records {
         invocation_count: state.invocation_count.load(Ordering::SeqCst),
         last_number: state.last_number.load(Ordering::SeqCst),
         last_args,
-        handler_rsp: state.handler_rsp.load(Ordering::SeqCst),
+        handler_sp: state.handler_sp.load(Ordering::SeqCst),
         in_ring3_at_entry: state.in_ring3_at_entry.load(Ordering::SeqCst),
         process_exited: state.process_exited.load(Ordering::SeqCst),
         process_exit_status: state.process_exit_status.load(Ordering::SeqCst),
@@ -5212,9 +5207,7 @@ pub fn restore_records(records: Records) {
     for (slot, value) in state.last_args.iter().zip(records.last_args.iter()) {
         slot.store(*value, Ordering::SeqCst);
     }
-    state
-        .handler_rsp
-        .store(records.handler_rsp, Ordering::SeqCst);
+    state.handler_sp.store(records.handler_sp, Ordering::SeqCst);
     state
         .in_ring3_at_entry
         .store(records.in_ring3_at_entry, Ordering::SeqCst);
@@ -5292,8 +5285,8 @@ pub fn last_args() -> [u64; 6] {
 }
 
 /// `syscall_entry` が走ったときの RSP。RSP0 スタック範囲との照合に使う。
-pub fn handler_rsp() -> u64 {
-    state().handler_rsp.load(Ordering::SeqCst)
+pub fn handler_sp() -> u64 {
+    state().handler_sp.load(Ordering::SeqCst)
 }
 
 /// 入場時点で「今 Ring 3 にいる」が立っていたか（S8-b）。
