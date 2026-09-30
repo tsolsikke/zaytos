@@ -5250,8 +5250,12 @@ fn switch_keyboard_to_io_apic(
             //
             // physical モードなら high dword の宛先は Local APIC ID そのものである。
             // BSP の APIC ID は MADT の最初の使用可能なエントリから取る（その値が
-            // BSP とは限らないという制約は `smp.rs` の該当箇所）。
-            let expected_destination = mapped.mmio().boot_processor_candidate_id().unwrap_or(0);
+            // BSP とは限らないという制約は `smp.rs` の該当箇所）。候補が無ければ番号 0 と比べる
+            // （`ProcessorId` の既定の値。2026-09-30 に番号の型にした）。
+            let expected_destination = mapped
+                .mmio()
+                .boot_processor_candidate_id()
+                .unwrap_or_default();
             let destination_ok =
                 entry.physical_destination_mode() && entry.destination() == expected_destination;
             logger.info(format_args!(

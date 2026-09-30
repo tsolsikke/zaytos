@@ -5,6 +5,7 @@
 //! 待つ所は `smp` に残る**（起きたかは呼ぶ側が答える）。
 
 use core::fmt;
+use core::sync::atomic::{AtomicU16, Ordering};
 
 use common::addr::PhysAddr;
 
@@ -15,13 +16,17 @@ const AP_WAKE_WAIT_TICKS: u64 = 1;
 ///
 /// x86 では、ファームウェア（MADT）が示す Local APIC ID である（AArch64 では MPIDR の値になる）。**CPU のスロットの
 /// 番号（`cpu_id()`）とは別の番号である**——取り違えを型で防ぐ。番号を読めるのは `machine` の中だけで、外へは
-/// 表示（`Display`）しか出さない。
+/// 表示（`Display` と `LowerHex`）しか出さない。
+///
+/// **作るのも `machine` の中だけである**（2026-09-30。MADT の走査と、起動した AP の表と、I/O APIC の宛先の読み戻しが
+/// 返す）。**共通の側は番号の数値を持たない**ので、中身を広げるとき（x2APIC・MPIDR）に変わるのは `machine` の中だけ
+/// である。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ProcessorId(u8);
 
 impl ProcessorId {
-    /// ファームウェアが示したハードウェアの番号から作る（今は MADT の Local APIC ID）。
-    pub const fn from_hardware_id(id: u8) -> Self {
+    /// ファームウェアが示したハードウェアの番号から作る（今は MADT の Local APIC ID。`machine` の中だけで使う）。
+    pub(in crate::machine) const fn from_hardware_id(id: u8) -> Self {
         Self(id)
     }
 
@@ -35,6 +40,62 @@ impl fmt::Display for ProcessorId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
+}
+
+impl fmt::LowerHex for ProcessorId {
+    /// `{:#04x}` の形（I/O APIC の宛先の読み戻しの行。以前は番号の数値をそのまま出していた）。
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+
+impl Default for ProcessorId {
+    /// 番号 0 を返す。MADT に候補が無いときの比べる相手に使う（起動の順序（`main.rs`）の、I/O APIC の宛先の読み戻しの
+    /// 確かめ。以前の `unwrap_or(0)`）。番号 0 に特別な意味は無い。
+    fn default() -> Self {
+        Self(0)
+    }
+}
+
+/// 起こした AP の数の上限（bootstrap processor を除いた per-CPU のスロットの数）。
+const MAX_APS: usize = common::percpu::MAX_CPUS - 1;
+
+/// 起動した AP のハードウェアの番号（S5-a。ファームウェアが示した番号で、今は Local APIC ID）。スロット 1 以降ぶん。
+/// `u16` の番兵で「未設定」を表す（番号は `u8` なので `0` も有効な値である）。
+///
+/// **2026-09-30 に `smp.rs` から移した**——番号の数値を持つのは `machine` の中だけにする（[`ProcessorId`] の doc）。
+static STARTED_PROCESSOR_ID: [AtomicU16; MAX_APS] =
+    [const { AtomicU16::new(NO_PROCESSOR_ID) }; MAX_APS];
+
+/// 「まだ起こしていない」を表す番兵（S5-a）。
+const NO_PROCESSOR_ID: u16 = u16::MAX;
+
+/// スロット `slot`（1 以降）の AP を、番号 `processor` で起こすと控える（S5-a。2026-09-30 に `smp.rs` から移した）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 呼ぶのは BSP が、AP を起こす途中の単一の文脈で、スロットごとに 1 回である
+///   （`crate::smp::wake_application_processors`）。
+/// - `slot` は 1 以上、`MAX_CPUS` 未満である（外れたら止まる。カーネルの誤りである）。
+/// - **起こす前に控える。** 起きたかどうかは控えない（呼ぶ側が起動の署名の数で見る）。
+pub fn record_started_processor(slot: usize, processor: ProcessorId) {
+    STARTED_PROCESSOR_ID[slot - 1].store(u16::from(processor.0), Ordering::SeqCst);
+}
+
+/// スロット `slot` で起こした AP のハードウェアの番号を返す（S5-a。型は 2026-09-29 の 9f で `machine` の番号の型に
+/// した。表と一緒に 2026-09-30 に `smp.rs` から移した）。控えていなければ `None`。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - どの CPU からも、BKL なしで呼んでよい（表は原子的な値で、控えるのも読むのも SeqCst である）。
+/// - `slot` が範囲の外（0 か `MAX_CPUS` 以上）なら `None` を返す。控える前も `None` である。
+/// - 返すのは、そのスロットで起こすと控えた番号である。**控えるのは起こす前なので、起こすのに失敗したスロットも
+///   番号を返す**（起きた AP の数は `crate::smp::started_ap_count` が答える）。
+pub fn started_processor(slot: usize) -> Option<ProcessorId> {
+    let raw = STARTED_PROCESSOR_ID
+        .get(slot.checked_sub(1)?)?
+        .load(Ordering::SeqCst);
+    (raw != NO_PROCESSOR_ID).then(|| ProcessorId::from_hardware_id(raw as u8))
 }
 
 /// 起こした CPU が最初に実行する場所（9f）。x86 では SIPI のベクタ（開始のページの番号）で、`page << 12` が最初に
@@ -137,6 +198,8 @@ mod tests {
             "vector 0x9e"
         );
         assert_eq!(format!("{}", ProcessorId::from_hardware_id(1)), "1");
+        assert_eq!(format!("{:#04x}", ProcessorId::from_hardware_id(1)), "0x01");
+        assert_eq!(format!("{:#04x}", ProcessorId::default()), "0x00");
     }
 
     /// 4 KiB の境界に無いページは、SIPI では指せない（作るときに止まる）。

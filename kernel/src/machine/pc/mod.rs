@@ -15,7 +15,9 @@ pub mod pmtimer;
 // **`IsaIrq` と `PciIntx` はバスの番号の名前である**（2026-09-29。9e。`ADR-0072` の 3）。装置のドライバが「この装置の
 // 割り込み」を解決させるのに名指しする（キーボードは ISA の IRQ 1、virtio-blk は PCI の INTx）。CPU の名前ではない。
 pub use acpi::MadtSurvey;
-pub use ap_start::{start_processor, ProcessorId, StartAddress};
+pub use ap_start::{
+    record_started_processor, start_processor, started_processor, ProcessorId, StartAddress,
+};
 pub use apic::{calibrate_local_timer, CalibrationReference, MappedInterruptController};
 pub use i8042::{keyboard_data_ready, read_keyboard_data};
 pub use irq::{

@@ -1051,7 +1051,7 @@ pub unsafe fn run_timer_loop(
             // 同じで、後者が測りたいものである。
             if let Some(controller) = controller {
                 for slot in 1..common::percpu::MAX_CPUS {
-                    let Some(processor) = crate::smp::started_processor(slot) else {
+                    let Some(processor) = crate::machine::pc::started_processor(slot) else {
                         continue;
                     };
                     // 1 本ずつ、受け取りを確かめてから次を送る。

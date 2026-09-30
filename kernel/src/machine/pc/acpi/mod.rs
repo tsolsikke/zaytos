@@ -64,6 +64,7 @@ use common::machine::pc::serial::Serial;
 
 use crate::arch::x86_64::paging::active::{ActivePageTable, TranslateError};
 use crate::frame_allocator::FRAME_SIZE;
+use crate::machine::pc::ProcessorId;
 use crate::memory_map;
 
 /// テーブル 1 つを読むためのバッファの大きさ。
@@ -158,11 +159,15 @@ impl MadtSurvey {
         }
     }
 
-    /// 使用可能な Local APIC の ID を、MADT の並び順で返す。
+    /// 使用可能な CPU のハードウェアの番号（Local APIC ID）を、MADT の並び順で返す（2026-09-30 に、8 ビットの値から
+    /// [`ProcessorId`] にした）。
     ///
     /// **先頭が bootstrap processor の候補である。** AP はそれ以降である。
-    pub fn processor_hardware_ids(&self) -> impl Iterator<Item = u8> + '_ {
-        self.local_apic_ids.iter().flatten().copied()
+    pub fn processor_hardware_ids(&self) -> impl Iterator<Item = ProcessorId> + '_ {
+        self.local_apic_ids
+            .iter()
+            .flatten()
+            .map(|&id| ProcessorId::from_hardware_id(id))
     }
 
     /// 記録できずに落とした Local APIC ID の本数。
@@ -284,13 +289,17 @@ impl MadtSurvey {
         self.io_apics_found.saturating_sub(MAX_IO_APICS)
     }
 
-    /// 最初の使用可能な Local APIC の ID。
+    /// 最初の使用可能な CPU のハードウェアの番号（Local APIC ID。2026-09-30 に、8 ビットの値から [`ProcessorId`] に
+    /// した）。
     ///
     /// **BSP の ID とは限らない。** MADT のエントリ順が BSP を先頭にする保証は
     /// 仕様に無い。読み取った Local APIC ID との突き合わせに使うが、
     /// **この突き合わせは弱い**（[`crate::machine::pc::apic`] の該当箇所に理由がある）。
-    pub const fn boot_processor_candidate_id(&self) -> Option<u8> {
-        self.bsp_candidate_apic_id
+    pub const fn boot_processor_candidate_id(&self) -> Option<ProcessorId> {
+        match self.bsp_candidate_apic_id {
+            Some(id) => Some(ProcessorId::from_hardware_id(id)),
+            None => None,
+        }
     }
 }
 

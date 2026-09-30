@@ -1312,9 +1312,13 @@ impl RedirectionEntryView {
         self.low & crate::machine::pc::apic::ENTRY_DESTINATION_MODE_BIT == 0
     }
 
-    /// 宛先（high dword の bit 31:24）。physical モードなら Local APIC ID である。
-    pub const fn destination(&self) -> u8 {
-        crate::machine::pc::apic::redirection_destination(self.high)
+    /// 宛先（high dword の bit 31:24）。physical モードなら Local APIC ID である（2026-09-30 に、8 ビットの値から
+    /// CPU の番号の型にした）。**logical モードでは CPU の集合で、1 つの CPU の番号ではない**——CPU の番号として
+    /// 比べるのは、physical モードのときだけにすること。
+    pub const fn destination(&self) -> crate::machine::pc::ProcessorId {
+        crate::machine::pc::ProcessorId::from_hardware_id(
+            crate::machine::pc::apic::redirection_destination(self.high),
+        )
     }
 }
 

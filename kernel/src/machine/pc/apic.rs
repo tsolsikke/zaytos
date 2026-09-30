@@ -392,7 +392,7 @@ fn map_mmio_page<const CAP: usize>(
 fn probe_local_apic(
     logger: &mut Logger<Serial>,
     lapic_phys: PhysAddr,
-    bsp_candidate_apic_id: Option<u8>,
+    bsp_candidate_apic_id: Option<crate::machine::pc::ProcessorId>,
 ) {
     let direct_map = common::addr::direct_map();
     let base_virt = direct_map.phys_to_virt(lapic_phys);
@@ -443,7 +443,7 @@ fn probe_local_apic(
     // 「読みが APIC へ届いていない」のいずれでも通ってしまう。「ID が一致した
     // から届いている」とは読まないこと。届いていることの根拠は上の Version で
     // ある。この比較が意味を持つのは、ID が 0 でないコアが現れる S3 以降である。
-    match bsp_candidate_apic_id {
+    match bsp_candidate_apic_id.map(crate::machine::pc::ProcessorId::local_apic_id) {
         Some(expected) if u32::from(expected) == apic_id => logger.info(format_args!(
             "apic: the local APIC ID {apic_id} matches the first usable MADT entry \
              (both are {apic_id}; on the BSP this comparison is degenerate, see the code)"

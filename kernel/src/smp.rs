@@ -77,14 +77,6 @@ pub extern "C" fn zaytos_ap_entry(index: u64) -> ! {
 /// 起動署名を出した AP の本数。BSP が会計に使う。
 static AP_STARTED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// 起動した AP のハードウェアの番号（S5-a。ファームウェアが示した番号で、今は Local APIC ID）。スロット 1 以降ぶん。
-/// `u16` の番兵で「未設定」を表す（番号は `u8` なので `0` も有効な値である）。
-static STARTED_PROCESSOR_ID: [core::sync::atomic::AtomicU16; MAX_APS] =
-    [const { core::sync::atomic::AtomicU16::new(NO_PROCESSOR_ID) }; MAX_APS];
-
-/// 「まだ起こしていない」を表す番兵（S5-a）。
-const NO_PROCESSOR_ID: u16 = u16::MAX;
-
 /// 探り用ページの仮想アドレス（S5-c）。AP スタックの領域とは別の PML4 の穴に
 /// 置く（`PML4[258]` の遥か上）。本番のマッピングと重ならない場所を選ぶ。
 #[cfg(feature = "smp-tlb-shootdown-probe")]
@@ -227,15 +219,6 @@ pub mod shootdown_probe {
     }
 }
 
-/// 起動した AP のハードウェアの番号を返す（S5-a。型は 2026-09-29 の 9f で `machine` の番号の型にした）。起動して
-/// いなければ `None`。
-pub fn started_processor(slot: usize) -> Option<crate::machine::pc::ProcessorId> {
-    let raw = STARTED_PROCESSOR_ID
-        .get(slot.checked_sub(1)?)?
-        .load(Ordering::SeqCst);
-    (raw != NO_PROCESSOR_ID).then(|| crate::machine::pc::ProcessorId::from_hardware_id(raw as u8))
-}
-
 /// 起動署名を出した AP の本数。
 pub fn started_ap_count() -> usize {
     AP_STARTED.load(Ordering::SeqCst)
@@ -301,7 +284,7 @@ pub unsafe fn wake_application_processors(
 
     // この値は BSP の ID とは限らない。MADT の最初の使用可能な Local APIC
     // エントリであって、エントリ順が BSP を先頭にする保証は仕様に無い
-    // （[`crate::machine::pc::acpi::MadtSurvey::bsp_candidate_apic_id`] の doc）。BSP が先頭で
+    // （[`crate::machine::pc::MadtSurvey::boot_processor_candidate_id`] の doc）。BSP が先頭で
     // ない実装では、下の `continue` が BSP を素通りさせ、BSP 自身へ INIT-SIPI を
     // 送ることになる。
     //
@@ -322,14 +305,14 @@ pub unsafe fn wake_application_processors(
 
     // bootstrap processor を除いた AP を、MADT の並び順で起動する。
     let mut slot = 1usize;
-    for hardware_id in mmio.processor_hardware_ids() {
-        if Some(hardware_id) == bsp {
+    for processor in mmio.processor_hardware_ids() {
+        if Some(processor) == bsp {
             continue;
         }
         if slot >= common::percpu::MAX_CPUS {
             report.skipped_no_slot += 1;
             logger.warn(format_args!(
-                "smp: not starting the application processor with apic id {hardware_id}: there are \
+                "smp: not starting the application processor with apic id {processor}: there are \
                  only {} per-CPU slot(s) and slot {slot} would be out of range. This is the \
                  documented policy (do not start more CPUs than MAX_CPUS)",
                 common::percpu::MAX_CPUS
@@ -352,11 +335,12 @@ pub unsafe fn wake_application_processors(
         unsafe { installed.set_ap_parameters(stack_top_identity, slot as u64) };
 
         report.attempted += 1;
-        STARTED_PROCESSOR_ID[slot - 1].store(u16::from(hardware_id), Ordering::SeqCst);
+        // 起動した AP の番号の表は `machine` が持つ（2026-09-30。共通の側は番号の数値を持たない）。
+        crate::machine::pc::record_started_processor(slot, processor);
         let before = started_ap_count();
         // 開始の場所の表示（SIPI のベクタ）は `machine` が持つ（9f。ベクタを共通の側に出さない）。
         logger.info(format_args!(
-            "smp: starting application processor apic id {hardware_id} as slot {slot} \
+            "smp: starting application processor apic id {processor} as slot {slot} \
              (trampoline at {:#x}, {}, stack top {:#x} identity-mapped, \
              cr3 {:#x} = the static boot page table)",
             frame.as_u64(),
@@ -371,7 +355,7 @@ pub unsafe fn wake_application_processors(
         let ok = unsafe {
             crate::machine::pc::start_processor(
                 mapped,
-                crate::machine::pc::ProcessorId::from_hardware_id(hardware_id),
+                processor,
                 installed.start,
                 wait_ticks,
                 || started_ap_count() > before,
@@ -379,7 +363,7 @@ pub unsafe fn wake_application_processors(
         };
         if !ok {
             logger.error(format_args!(
-                "smp: an IPI to apic id {hardware_id} never left the local APIC (delivery status \
+                "smp: an IPI to apic id {processor} never left the local APIC (delivery status \
                  stayed set); halting"
             ));
             cpu::halt_forever();
@@ -398,7 +382,7 @@ pub unsafe fn wake_application_processors(
             report.started += 1;
         } else {
             logger.error(format_args!(
-                "smp: application processor apic id {hardware_id} did not report its start signature \
+                "smp: application processor apic id {processor} did not report its start signature \
                  within {AP_START_WAIT_TICKS} tick(s)"
             ));
         }
