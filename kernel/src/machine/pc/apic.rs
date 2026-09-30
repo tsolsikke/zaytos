@@ -73,6 +73,13 @@ struct MappedPage {
 /// `acpi::MadtSurvey` が「MADT が名乗った所在」であるのに対し、こちらは
 /// 実際にマッピングを確認できた所在である。読む側が「MADT にあったが写像に
 /// 失敗したもの」を触らないよう、区別してある。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - 作るのは `machine` の `map_and_probe` だけである（MADT が名乗り、マッピングを確かめた所在）。
+/// - 共通の側が使うのは、MADT の読み取りの結果（`mmio`。[`MadtSurvey`]）と、`machine` の境界の関数
+///   （`start_processor`・`send_ipi_probe`・[`calibrate_local_timer`]・`survey_interrupt_masks` など）へ
+///   参照を渡すことだけで、中の番地は読まない。
 pub struct MappedInterruptController {
     local_apic: PhysAddr,
     io_apics: [Option<IoApicLocation>; MAX_MAPPED_IO_APICS],
@@ -1654,6 +1661,11 @@ const FIRST_EDGE_TIMEOUT_CYCLES: u64 = 1_000_000_000;
 /// **PIT を既定にする。** **PM タイマへ倒すのは、PIT のティックが 1 本も来なかったときだけである**
 /// ——**倒す条件を「較正が失敗した」に広げない**（PIT が刻んでいるのにウィンドウが閉じなかった回は、
 /// 今までどおり較正を諦めて PIT のまま進む）。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - 較正の基準で、[`calibrate_local_timer`] の結果に載る。共通の側は、PIT が刻んだかを決めるのに
+///   読むだけである（PM タイマで測った回は、PIT のティックが 1 本も来なかった回である）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CalibrationReference {
     /// PIT の IRQ0 のティック（既定）。
@@ -1926,6 +1938,14 @@ fn sample_with_pm_timer(
 /// 増やすので、割り込みが有効でないと進まない。`run_timer_loop` が `sti` した
 /// 直後、定常ループへ入る前に呼ぶ。この位置は APIC 関連の他の処理（`kmain` の
 /// 前半）から離れている。離れている理由はこれである。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 呼ぶのは BSP が、`sti` の後（PIT のティックが進む）、定常ループへ入る前に 1 回である。
+/// - 書くのはこの CPU の Local APIC の Divide Configuration と Initial Count だけである。
+///   LVT Timer・LINT0・SVR は前後で読み戻して、触っていないことを確かめる。
+/// - 待ちには上限があり、測れなければ `None` を返して止まらない（タイマは PIT のまま進む）。
+///   PIT のティックが 1 本も来なければ、PM タイマで測る（`pm_timer` があるとき）。
 pub fn calibrate_local_timer(
     logger: &mut Logger<Serial>,
     mapped: &MappedInterruptController,

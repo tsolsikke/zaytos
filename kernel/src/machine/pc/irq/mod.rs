@@ -764,6 +764,12 @@ pub fn check_masks(unmasked: &[IsaIrq]) -> MaskCheck {
 ///
 /// I/O APIC が 1 台もマップできていなければ `None`。
 /// `sources` は、開いているはずの源である（共通の側の処理のある源。9e で源の番号の型にした）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 読むだけで、書かない（I/O APIC の redirection entry のマスクを読む）。I/O APIC が 1 台も
+///   マップできていなければ `None` を返す。
+/// - `sources` は、共通の側に処理が登録された源（開いているはずの源）である。
 pub fn survey_interrupt_masks(
     mapped: &crate::machine::pc::apic::MappedInterruptController,
     sources: &[InterruptSource],

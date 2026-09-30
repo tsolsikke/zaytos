@@ -122,6 +122,12 @@ pub struct IoApicLocation {
 /// （[`MadtSurvey::empty`]）。**「読めなかった」と「無かった」を、呼び出し側が
 /// 区別する必要はない。** どちらの場合もマップすべきものが無いという結論は同じで、
 /// 理由はすでに `survey` がログへ出している。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - 作るのは `machine` の ACPI の走査だけで、MADT から読んだ値だけを持つ（既定値を持たない）。
+/// - 共通の側が問うのは、使える CPU の数と、CPU のハードウェアの番号（[`ProcessorId`]）だけである
+///   （`usable_processor_count`・`processor_hardware_ids`・`boot_processor_candidate_id`）。
 #[derive(Debug, Clone, Copy)]
 pub struct MadtSurvey {
     local_apic: Option<PhysAddr>,

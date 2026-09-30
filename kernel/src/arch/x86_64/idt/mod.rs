@@ -607,16 +607,33 @@ static IPI_PROBE_RECEIVED: PerCpu<AtomicU64> = PerCpu::new([const { AtomicU64::n
 static IPI_PROBE_SENT: AtomicU64 = AtomicU64::new(0);
 
 /// 測定用 IPI を送ったことを記録する（S5-a）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 送る側が、探りの IPI を 1 本送るたびに 1 回呼ぶ（今は BSP の定常ループの探りだけが送る）。
+/// - アトミックに足すだけで、BKL は要らない。送る側が 1 つなので、合計を受け取った本数
+///   （[`ipi_probe_received_for`]）と比べられる。
 pub fn record_ipi_probe_sent() {
     IPI_PROBE_SENT.fetch_add(1, Ordering::Relaxed);
 }
 
 /// 送った本数（S5-a）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - どの CPU からも、BKL なしで呼んでよい（アトミックを読むだけ）。値は [`record_ipi_probe_sent`] で
+///   足した本数である。
 pub fn ipi_probe_sent() -> u64 {
     IPI_PROBE_SENT.load(Ordering::Relaxed)
 }
 
 /// 指定コアが受け取った本数（S5-a）。範囲外は 0。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - どの CPU からも、BKL なしで呼んでよい（アトミックを読むだけ）。
+/// - `cpu` は per-CPU のスロットの番号で、範囲の外は 0 を返す。足すのは受け取った CPU の `machine` の
+///   `claim` で、BKL を取る前である。
 pub fn ipi_probe_received_for(cpu: usize) -> u64 {
     IPI_PROBE_RECEIVED
         .slot(cpu)
@@ -819,6 +836,14 @@ static MAX_KERNEL_ENTRY_DEPTH: AtomicU64 = AtomicU64::new(0);
 ///
 /// S4-b-3 で、作る場所を BKL の中へ移した。入口が増えても数える場所は
 /// 1 つのままである（BKL を取る入口はすべてここを通る）。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - 作るのは BKL を取る所（`crate::bkl`）だけで、保持している間だけ「入口の中」として数える
+///   （Drop で 1 つ減らす）。
+/// - `!Send`・`!Sync` である（数える区間はコアに固定である）。数えるだけで、ほかの CPU との排他は
+///   与えない（排他は BKL が受け持つ）。
+/// - 2 つ以上の CPU が同時に中に居たら、1 度だけシリアルへ報告する。
 pub struct KernelEntryGuard {
     /// `!Send` + `!Sync` にするためのマーカー。この区間はコアに固定である。
     _not_send_sync: core::marker::PhantomData<*const ()>,
@@ -846,6 +871,10 @@ impl Drop for KernelEntryGuard {
 }
 
 /// 同時進入数のこれまでの最大値（S4-a）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - どの CPU からも、BKL なしで呼んでよい（アトミックを読むだけ）。値は起動からの最大で、下がらない。
 pub fn max_kernel_entry_depth() -> u64 {
     MAX_KERNEL_ENTRY_DEPTH.load(Ordering::Relaxed)
 }
@@ -914,6 +943,14 @@ pub fn count_timer_tick() {
 /// 指定したコアのティック数（S4-a）。ハートビートと会計が使う。
 ///
 /// 範囲外は `0` を返す。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - どの CPU からも、BKL なしで呼んでよい（アトミックを読むだけ）。
+/// - `cpu` は per-CPU のスロットの番号で、範囲の外は 0 を返す。足すのは、そのコアがタイマの
+///   ティックを受けた入口である（[`count_timer_tick`]）。
+/// - 破壊テスト `smp-ap-timer-share-ticks-test` のビルドでは、全コアで共有する 1 つの値を返す
+///   （会計が閉じなくなることを確かめるため）。
 pub fn timer_ticks_for(cpu: usize) -> u64 {
     #[cfg(feature = "smp-ap-timer-share-ticks-test")]
     {
@@ -939,6 +976,13 @@ pub fn timer_ticks_for(cpu: usize) -> u64 {
 ///
 /// 厳密な同時刻の一致は取れない。2 つの値を続けて読む間にも両コアが
 /// 数えるので、進行中のぶんだけずれる。ずれの上限はコア数程度である。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - どの CPU からも、BKL なしで呼んでよい。全スロットを続けて読むので、読む間に進んだぶんだけ
+///   実際とずれる（上限はコア数程度）。
+/// - 会計の片辺である（もう片辺は [`timer_delivery_count`]。比べるのは
+///   [`timer_accounting_balances`]）。
 pub fn timer_ticks_total() -> u64 {
     let mut total = 0;
     for cpu in 0..MAX_CPUS {
@@ -955,6 +999,12 @@ pub fn timer_ticks_total() -> u64 {
 /// タイマへ移る（S2-d-2）。したがって移行より前のティックは
 /// [`PIC_TIMER_VECTOR`] に、後のティックは [`LAPIC_TIMER_VECTOR`] に積まれる。
 /// 片方だけを見ると、移行前のぶんが丸ごと欠けて会計が閉じない。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - どの CPU からも、BKL なしで呼んでよい（アトミックを読むだけ）。
+/// - 値は、タイマとして配送された割り込みの総数である（PIT と Local APIC のタイマの、2 本の
+///   ベクタの合計）。
 pub fn timer_delivery_count() -> u64 {
     interrupt_count(PIC_TIMER_VECTOR) + interrupt_count(LAPIC_TIMER_VECTOR)
 }
@@ -972,6 +1022,12 @@ const TIMER_ACCOUNTING_SLACK: u64 = (MAX_CPUS as u64) * 2;
 /// 1 つを共有すると、合計が配送数のおよそ 2 倍になり、[`TIMER_ACCOUNTING_SLACK`]
 /// をはるかに超える。「per-CPU 化が済んだように見えて共有のまま」を、
 /// 名前ではなく数で検出する。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - どの CPU からも、BKL なしで呼んでよい。読むだけで、何も変えない。
+/// - コアごとのティックの合計と、配送された本数の差が、許す幅（`TIMER_ACCOUNTING_SLACK`。
+///   コア数の 2 倍）の中なら `true` を返す。
 pub fn timer_accounting_balances() -> bool {
     timer_ticks_total().abs_diff(timer_delivery_count()) <= TIMER_ACCOUNTING_SLACK
 }
@@ -1137,6 +1193,12 @@ pub(crate) fn check_stack_alignment(rsp_at_call: u64, path: &str, vector: u64) {
 const RFLAGS_DIRECTION_FLAG: u64 = 1 << 10;
 
 /// カーネルへの入口の系統（2026-09-24）。**方向フラグの計測の添字である。**
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - 共通の側は、方向フラグの数を読む所と確かめる所で、入口の系統を名指すのに使う（システムコールの
+///   入口と、遠征の判定行）。
+/// - 値は 3 つで、系統ごとの数の表の添字である（添字として使うのは `arch` の中だけである）。
 #[derive(Clone, Copy)]
 pub enum EntryPath {
     Exception,
@@ -1164,6 +1226,12 @@ static ENTRIES_FROM_DF_SET: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 
 /// 入口の系統 `path` から、割り込まれた側が DF=1 のまま入ってきた回数（[`ENTRIES_FROM_DF_SET`]）。**読むだけで、
 /// 数を変えない。**
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - どの CPU からも、BKL なしで呼んでよい（アトミックを読むだけで、数を変えない）。
+/// - 値は、すべての CPU の合計である。足すのは入口の方向フラグの確かめで、割り込まれた側が DF=1 の
+///   まま入ってきたときに 1 つ足す。
 pub fn entries_from_direction_flag_set(path: EntryPath) -> u64 {
     ENTRIES_FROM_DF_SET[path as usize].load(Ordering::Relaxed)
 }
@@ -2092,6 +2160,12 @@ const FOLDABLE_VECTORS_VALUE: [u8; FOLDABLE_VECTOR_COUNT] = [0, 1, 6, 13, 14, 19
 static MONOTONIC_TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// 起動からの単調なティック数（W2-d+）。**1 ティックは 10ms である。**
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - どの CPU からも、BKL なしで呼んでよい（アトミックを読むだけ）。
+/// - 値は起動からの単調なティック数で、減らない。1 ティックは 10ms で、進めるのは BSP だけである
+///   （[`advance_monotonic_ticks`]）。
 pub fn monotonic_ticks() -> u64 {
     MONOTONIC_TICKS.load(Ordering::Relaxed)
 }
