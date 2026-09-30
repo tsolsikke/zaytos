@@ -7507,7 +7507,9 @@ const PIPE_TEST_STALL_LIMIT: Duration = Duration::from_secs(30);
 /// 1. **中身がパイプを通る**——`hello` / `one two` / `again` が 1 回ずつ出て、
 ///    **切り離して起動したスロットは端末へ 1 度も書かない**（計測）
 /// 2. **読み手が先に待つ形が出た**——読み手の待ちが 1 以上、**書きが読み手を起こした回数が 1 以上**、
-///    **かつ 2 本が同時に待った回数が 1 以上**（`sleep 0.2 | cat`）
+///    **かつ 2 本が同時に待った回数が 1 以上**（`sleep 0.2 | cat`）。**1 つ目のセッションの計測の行で読む**
+///    （2026-09-30。台本は `sleep 0.2 | cat` の後で 1 度 `exit` する。**`/data/big` のパイプで止まる破壊テストでも、
+///    この値は出ている**）。**ほかの判定は最後の計測の行（起動からの合計）で読む。**
 /// 3. **書き手が待つ形が出た**——書き手の待ちが 1 以上（`/data/big` は輪の 8.5 倍）
 /// 4. **`/data/big` がバイト単位で通る**（イメージから `debugfs` で読んだものと同じ）
 /// 5. **読み手が読まずに終わると、書き手は `-EPIPE` を見る**——計測が 1 以上、`cat` が 4 で終わる
@@ -7616,18 +7618,32 @@ fn cmd_pipe_test(features: &[&str], expect_pass: bool) -> Result<()> {
         let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
         digits.parse().ok()
     };
-    let gauge = lines
+    // **計測の行はセッションごとに出る**（台本が 2 回 `exit` する）。**判定 2 は 1 つ目の行、ほかは最後の行を読む。**
+    // **1 つ目の行は、`/data/big` のパイプの行より前に出たものだけを使う**——**そのパイプで止まった回でも、この行は
+    // 出ている。** 台本の 1 つ目の `exit` が抜けると、1 つ目の行がパイプの後になり、判定 2 の値は無い形で落ちる。
+    let big_pipe_at = lines
         .iter()
-        .find(|line| line.contains("[INFO] pipe: created "))
-        .copied();
+        .position(|line| line.contains("/bin/cat /data/big | /bin/cat"));
+    let gauges: Vec<(usize, &str)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains("[INFO] pipe: created "))
+        .map(|(at, line)| (at, *line))
+        .collect();
+    let first_gauge = gauges
+        .first()
+        .filter(|(at, _)| big_pipe_at.is_none_or(|big| *at < big))
+        .map(|(_, line)| *line);
+    let gauge = gauges.last().map(|(_, line)| *line);
     let g = |key: &str| gauge.and_then(|line| number_after(line, key));
+    let g_first = |key: &str| first_gauge.and_then(|line| number_after(line, key));
     let created = g("created ");
-    let reader_waits = g("readers waited ");
-    let readers_woken_by_write = g("woken by a write ");
+    let reader_waits = g_first("readers waited ");
+    let readers_woken_by_write = g_first("woken by a write ");
     let writer_waits = g("writers waited ");
     let epipe = g("writes without a reader ");
     let reservations_dropped = g("reservations dropped ");
-    let waiting_together = g("waiting at once ");
+    let waiting_together = g_first("waiting at once ");
     let detached_starts = g("detached starts ");
     let entry_wait_ticks = g("waited at most ");
     let terminal_writes = g("wrote to the terminal ");

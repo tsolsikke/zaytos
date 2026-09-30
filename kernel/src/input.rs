@@ -1195,7 +1195,12 @@ pub(crate) mod script {
     /// - **`echo x | nonexist`** は右が居ない形（予約が消え、左が回収される）
     /// - **`echo again | cat`** は 2 本目が起動し直せる形
     ///
-    /// **`exit` を最後に打つ**——**計測の行（`pipe:`）はセッションが終わってから出る。**
+    /// **`exit` を 2 回打つ**——**計測の行（`pipe:`）はセッションが終わってから出る。**
+    /// **1 回目は `sleep 0.2 | cat` の後である**（2026-09-30）——**判定 2 はこの行を読む。** **破壊テスト
+    /// `pipe-write-does-not-wake-reader` では、`cat /data/big | cat` で読み手と書き手の両方が待って止まる回が
+    /// ある**（読み手が空で待った後に書き手が輪を満たすと、起こす者が居ない。実測で 12 回に 4 回）。**止まると
+    /// 最後の計測の行が出ないので、判定 2 の値をその前で出しておく。** **1 つ目のセッションの書きは、どれも
+    /// 輪に収まるので止まらない。** 2 回目は最後で、計測は起動からの合計である（ほかの判定が読む）。
     /// **起こし直したシェルが読んだところで `\x0c` が `script-done:` を出す。**
     /// 台本（`ADR-0063` の (b3) の (b)）。**`--shell-test` と同じ行を、キーごとに 1 回の休止を
     /// 挟んで写したものである**（`common::shell_script`）。**打鍵を見ない破壊テストをここで落とす。**
@@ -1226,6 +1231,7 @@ pub(crate) mod script {
     const SCRIPT: &[u8] = b"/bin/echo hello | /bin/cat\n\
         echo one two | cat\n\
         /bin/sleep 0.2 | /bin/cat\n\
+        exit\n\
         /bin/cat /data/big | /bin/cat\n\
         /bin/cat /data/big | /bin/hello\n\
         /bin/echo x | /bin/nonexist\n\
