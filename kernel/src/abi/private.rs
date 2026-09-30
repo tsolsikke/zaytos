@@ -1,4 +1,4 @@
-//! Linux の ABI ではない、ZaytOS だけの外部の決まり（`ADR-0071` の決定 1 の 2 で `crate::syscall` から移した。
+//! Linux の ABI ではない、ZeikOS だけの外部の決まり（`ADR-0071` の決定 1 の 2 で `crate::syscall` から移した。
 //! 2026-09-30）。
 //!
 //! 独自のシステムコールの番号、独自の `ioctl` の要求、`spawn` と子の待ちが返す値のビットと `flags` を置く。
@@ -11,14 +11,14 @@
 //! **置くのは、値と値の決め方（番号の範囲、独自にした理由、引数と戻り値の形、ビットの位置）である。** 断り方や
 //! 待ち方などの振る舞いの説明は、`crate::syscall` の処理の側にある。
 
-/// ZaytOS 独自のシステムコール番号の基点（S9-a）。
+/// ZeikOS 独自のシステムコール番号の基点（S9-a）。
 ///
 /// # なぜ Linux の番号表から離すのか
 ///
 /// ADR-0020 の Addendum で「番号の割り当ては Linux x86-64 から採る」と決めた。
 /// **`read`=0 や `write`=1 のように Linux に対応するものがある呼び出しは、その
 /// 番号を使う。** 問題は、対応するものが無い呼び出しである。下記の検証用
-/// システムコールは ZaytOS 固有で、Linux に相当するものが未来にも現れない。
+/// システムコールは ZeikOS 固有で、Linux に相当するものが未来にも現れない。
 ///
 /// **かつては 0x2A・0x2B・0x2C に置いており、Linux の 42（`connect`）・
 /// 43（`accept`）・44（`sendto`）と衝突していた。** 番号表の中の空きに置くと、
@@ -36,7 +36,7 @@
 /// **独自の呼び出しを足すときは、必ずこの基点より上に置くこと。**
 pub const ZAYTOS_PRIVATE_BASE: u64 = 0x1000;
 
-/// 検証用 probe システムコールの番号（ZaytOS 独自。[`ZAYTOS_PRIVATE_BASE`]）。
+/// 検証用 probe システムコールの番号（ZeikOS 独自。[`ZAYTOS_PRIVATE_BASE`]）。
 pub const PROBE_NUMBER: u64 = ZAYTOS_PRIVATE_BASE;
 
 /// ユーザーポインタを取る検証用システムコールの番号（M5-f-2-1）。第 1 引数が `buf`、第 2 引数が `len`。
@@ -46,7 +46,7 @@ pub const SYS_CHECK_PTR: u64 = ZAYTOS_PRIVATE_BASE + 1;
 /// 第 2 引数が `len`。
 pub const SYS_CHECKSUM: u64 = ZAYTOS_PRIVATE_BASE + 2;
 
-/// `spawn(path, argv, envp)`——イメージを読み、子プロセスを起動し、**終わるまで待つ**（S11-5。ZaytOS 独自）。
+/// `spawn(path, argv, envp)`——イメージを読み、子プロセスを起動し、**終わるまで待つ**（S11-5。ZeikOS 独自）。
 ///
 /// # なぜ `fork`（57）と `execve`（59）の番号を採らないか
 ///
@@ -131,7 +131,7 @@ pub const SYS_WAIT_CHILD: u64 = ZAYTOS_PRIVATE_BASE + 7;
 /// 入力の生イベントの fd を開く（`ADR-0066` の Y-a）。**私物。**
 ///
 /// **Linux に対応する syscall が無い**——**あちらは `/dev/input/eventX` を `open` する**が、
-/// ZaytOS に装置のファイルシステムは無い。**したがって番号は私物にする**（`SYS_SPAWN` 等と
+/// ZeikOS に装置のファイルシステムは無い。**したがって番号は私物にする**（`SYS_SPAWN` 等と
 /// 同じ。`ADR-0020` の「合わせられる形について合わせる」）。
 ///
 /// **読みは `read` が `struct input_event` を返す。**
@@ -140,7 +140,7 @@ pub const SYS_OPEN_INPUT: u64 = ZAYTOS_PRIVATE_BASE + 8;
 /// 画面を開く入口の番号（`ADR-0066` の Y-c）。**開くと図形モードへ入る。**
 ///
 /// **Linux に対応する syscall が無い**——**あちらは `/dev/fb0`（fbdev）か `/dev/dri/card0`（DRM）を
-/// `open` する**が、ZaytOS に装置のファイルシステムは無い。**番号は私物にする**（[`SYS_OPEN_INPUT`] と
+/// `open` する**が、ZeikOS に装置のファイルシステムは無い。**番号は私物にする**（[`SYS_OPEN_INPUT`] と
 /// 同じ理由）。**開いた後の形は Linux の fbdev に合わせる**——**形は `ioctl` の
 /// [`FBIOGET_VSCREENINFO`](crate::abi::linux::FBIOGET_VSCREENINFO) /
 /// [`FBIOGET_FSCREENINFO`](crate::abi::linux::FBIOGET_FSCREENINFO)、画素は `mmap`。**
@@ -160,7 +160,7 @@ pub const SYS_NEVER_IMPLEMENTED: u64 = ZAYTOS_PRIVATE_BASE + 0xFF;
 
 /// `TIOCZTAKE`——溜まっているエラーを取り出す要求（ADR-0046）。
 ///
-/// # ZaytOS の値である。Linux の値ではない
+/// # ZeikOS の値である。Linux の値ではない
 ///
 /// **Linux にこの操作は無い**ので、**`TIOC` の空間の外に置く**
 /// （`0x5A` は `Z`。`TIOCGWINSZ` の `0x5413` と衝突しない）。
@@ -207,10 +207,10 @@ pub fn zdiag_text_len(raw: &[u8; ZDIAG_LEN]) -> usize {
     usize::from(u16::from_le_bytes([raw[0], raw[1]]))
 }
 
-/// 画面の矩形をコピーする要求（ZaytOS 独自。`ADR-0066` の Y-c）。**引数は `struct drm_clip_rect`。**
+/// 画面の矩形をコピーする要求（ZeikOS 独自。`ADR-0066` の Y-c）。**引数は `struct drm_clip_rect`。**
 ///
 /// **fbdev に対応するものが無い**——**fbdev は実物のフレームバッファをマップするので、コピーする必要が無い。**
-/// **ZaytOS は裏バッファをマップする**（Q1。MMIO を Ring 3 へ出さない）**ので、コピーする入口が要る。**
+/// **ZeikOS は裏バッファをマップする**（Q1。MMIO を Ring 3 へ出さない）**ので、コピーする入口が要る。**
 /// **Linux で近いのは DRM の `DRM_IOCTL_MODE_DIRTYFB` で、矩形の配置（`struct drm_clip_rect`）だけを
 /// 採る**——**DIRTYFB そのものは DRM の大きな ABI の一部なので採らない。** **番号は [`TIOCZTAKE`] と
 /// 同じ `'Z'` の帯に置く。**

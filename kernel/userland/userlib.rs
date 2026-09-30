@@ -600,7 +600,7 @@ pub const SYS_OPEN_SCREEN: u64 = 0x1009;
 pub const FBIOGET_VSCREENINFO: u64 = 0x4600;
 /// `FBIOGET_FSCREENINFO`（Linux の fbdev）。
 pub const FBIOGET_FSCREENINFO: u64 = 0x4602;
-/// 画面の矩形をコピーする要求（ZaytOS 独自。引数は `struct drm_clip_rect`）。
+/// 画面の矩形をコピーする要求（ZeikOS 独自。引数は `struct drm_clip_rect`）。
 pub const FBIOZPRESENT: u64 = 0x5A03;
 
 /// 画面を開く（`ADR-0066` の Y-c）。**開くと図形モードへ入り、`close` で抜ける。**
@@ -682,7 +682,7 @@ pub fn getdents64(fd: u64, buf: &mut [u8]) -> i64 {
     }
 }
 
-/// `spawn` の番号（`ZAYTOS_PRIVATE_BASE + 4`。ZaytOS 独自）。
+/// `spawn` の番号（`ZAYTOS_PRIVATE_BASE + 4`。ZeikOS 独自）。
 pub const SYS_SPAWN: u64 = 0x1004;
 
 /// 切り離して起動する入口の番号（`ZAYTOS_PRIVATE_BASE + 5`。`ADR-0063` の (b3)）。

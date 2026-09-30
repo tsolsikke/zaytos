@@ -79,7 +79,7 @@ impl Resolved {
 pub enum WalkError {
     /// 途中の階層のエントリが不在。
     NotPresent,
-    /// PDPT レベルで 1GiB ページに当たった。ZaytOS は作らない。
+    /// PDPT レベルで 1GiB ページに当たった。ZeikOS は作らない。
     GiantPage,
 }
 
@@ -266,7 +266,7 @@ pub enum UserAccessError {
     /// present だが、ある階層で U=0（Ring 3 から到達不可）。**U/S は全階層の AND**
     /// なので、中間階層が U=0 でも Ring 3 からは届かない。
     SupervisorOnly,
-    /// PDPT レベルで 1GiB ページ。ZaytOS は作らない。
+    /// PDPT レベルで 1GiB ページ。ZeikOS は作らない。
     GiantPage,
     /// PD レベルで 2MiB ページ。ユーザーページは 4KiB のみを想定し、想定外として弾く。
     HugePage,

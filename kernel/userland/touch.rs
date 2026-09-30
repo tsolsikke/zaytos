@@ -18,7 +18,7 @@
 //!
 //! # 時刻は更新しない
 //!
-//! **Linux の `touch` は `mtime` を更新する。** **ZaytOS には壁時計のソースが
+//! **Linux の `touch` は `mtime` を更新する。** **ZeikOS には壁時計のソースが
 //! 1 つも無い**（`docs/foundation-inventory.md`。実測）。**したがって
 //! 既存のファイルに対しては、本当に何もしない。**
 //!

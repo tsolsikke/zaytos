@@ -393,7 +393,7 @@ impl AnsiParser {
 
 /// 標準8色と明るい8色（ES-b）。
 ///
-/// **xtermの慣行の値を使う。** **ZaytOSはコンソールもウィンドウも同じ
+/// **xtermの慣行の値を使う。** **ZeikOSはコンソールもウィンドウも同じ
 /// フレームバッファへ描くので、量子化も別プロファイルも持たない**
 /// （ADR-0040）。
 const fn base_color(index: u32, bright: bool) -> Rgb {

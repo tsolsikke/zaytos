@@ -97,7 +97,7 @@ pub const ESP_TYPE_GUID_TEXT: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
 /// 同じであることを、チェックサムで言えなくなる**（`kernel/build.rs` が ext2 の時刻を
 /// 潰しているのと同じ理由）。
 ///
-/// **失うもの**——**同じ機械に ZaytOS の媒体を 2 つ繋ぐと、GUID がぶつかる。** **1 つずつ
+/// **失うもの**——**同じ機械に ZeikOS の媒体を 2 つ繋ぐと、GUID がぶつかる。** **1 つずつ
 /// 使う前提である。** **VirtualBox は媒体を自分の UUID で見分けるので、そちらとは関係が無い**
 /// （VDI の UUID は `convertfromraw` が振る）。
 const DISK_GUID: [u8; 16] = [

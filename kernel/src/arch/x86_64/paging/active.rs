@@ -66,7 +66,7 @@ impl PageSize {
 pub enum TranslateError {
     /// PDPT レベルで 1GiB ページ（PS=1）に当たった。**未対応。**
     ///
-    /// ZaytOS は 1GiB ページを作らないが、確認せずに PD へ降りると
+    /// ZeikOS は 1GiB ページを作らないが、確認せずに PD へ降りると
     /// **1GiB ページのアドレスを PD のアドレスとして解釈する**ため、
     /// 明示的に弾く。
     UnsupportedGiantPage,
@@ -98,7 +98,7 @@ impl ActivePageTable {
     /// # Safety
     ///
     /// CR3 が指すページテーブルが恒等マッピングされており、その物理アドレスを
-    /// そのままポインタとして読めること。ZaytOS は M2-d 以降このとおりに
+    /// そのままポインタとして読めること。ZeikOS は M2-d 以降このとおりに
     /// なっている。
     pub unsafe fn current(direct_map: DirectMap) -> Self {
         Self {
@@ -198,7 +198,7 @@ pub enum MapUpdateError {
     NotMapped,
     /// PDPT レベルで 1GiB ページに当たった。**分割に対応していない。**
     ///
-    /// ZaytOS は 1GiB ページを作らないが、確認せずに PD へ降りると
+    /// ZeikOS は 1GiB ページを作らないが、確認せずに PD へ降りると
     /// 1GiB ページのアドレスを PD のアドレスとして解釈する。
     NotSplittable,
     /// 既に 4KiB でマップされている。分割の必要が無い。
@@ -210,7 +210,7 @@ pub enum MapUpdateError {
     ///
     /// この手順は分割後の TLB 無効化を CR3 リロードで行う。G ビットの
     /// 付いた翻訳は CR3 リロードでも残るため、前提が成立しない。
-    /// ZaytOS は G ビットを一切立てない（起動時に検証している）ので、
+    /// ZeikOS は G ビットを一切立てない（起動時に検証している）ので、
     /// ここに来るなら前提が崩れている。
     GlobalPagePresent,
     /// ページテーブル用のフレームを確保できなかった。
@@ -739,7 +739,7 @@ pub struct TlbFlushPrecondition {
 /// なので、当然そうなる）。その場合は `invlpg` を個別に発行するか、
 /// CR4.PGE を一度落として立て直す必要がある。
 ///
-/// ZaytOS は `PageTableBuilder` でも `entry::PTE_GLOBAL` を一切立てていない
+/// ZeikOS は `PageTableBuilder` でも `entry::PTE_GLOBAL` を一切立てていない
 /// ため、PGE の状態に関わらず現状は成立する。ただし**将来 G ビットを使い
 /// 始めたら、この前提は黙って崩れる**ので実測して記録しておく。
 pub fn tlb_flush_precondition() -> TlbFlushPrecondition {

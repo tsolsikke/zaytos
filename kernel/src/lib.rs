@@ -1,4 +1,4 @@
-//! ZaytOS kernel の共有ロジック。
+//! ZeikOS kernel の共有ロジック。
 //!
 //! ハードウェア依存部（`main.rs` の `_start`/`panic.rs`）と純粋ロジック
 //! （[`memory_map`], [`frame_allocator`]）を分離し、後者はホスト上の

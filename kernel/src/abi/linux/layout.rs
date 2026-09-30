@@ -79,7 +79,7 @@ pub const CMSG_ONE_FD_LEN: usize = 20;
 /// 配置に合わせる**（`ADR-0020`。`tv_sec`(8)＋`tv_usec`(8)＋`type`(2)＋`code`(2)＋`value`(4)）。
 pub const INPUT_EVENT_LEN: usize = 24;
 
-/// `struct stat` に書く値。**ZaytOS が持つ欄だけである**（ほかの欄は 0 のまま返す）。
+/// `struct stat` に書く値。**ZeikOS が持つ欄だけである**（ほかの欄は 0 のまま返す）。
 ///
 /// **値を決めるのは共通の側で、[`stat_bytes`](super::x86_64::stat_bytes) は欄の位置へ書くだけである**（`ADR-0071` の決定 1 の 2 で、
 /// `crate::syscall` の `sys_stat` から分けた。2026-09-30）。
@@ -266,7 +266,7 @@ pub struct FbBitfield {
     pub length: u32,
 }
 
-/// `struct fb_var_screeninfo` に書く値。**ZaytOS が持つ欄だけである**（ほかの欄は 0 のまま返す）。
+/// `struct fb_var_screeninfo` に書く値。**ZeikOS が持つ欄だけである**（ほかの欄は 0 のまま返す）。
 ///
 /// **値を決めるのは共通の側で、[`fb_var_screeninfo_bytes`] は欄の位置へ書くだけである**（`ADR-0071` の決定 1 の 2 で、
 /// `crate::syscall` の画面の `ioctl` から分けた。2026-09-30）。
@@ -313,7 +313,7 @@ pub fn fb_var_screeninfo_bytes(info: &FbVarScreeninfo) -> [u8; FB_VAR_SCREENINFO
     out
 }
 
-/// `struct fb_fix_screeninfo` に書く値。**ZaytOS が持つ欄だけである**（ほかの欄は 0 のまま返す）。
+/// `struct fb_fix_screeninfo` に書く値。**ZeikOS が持つ欄だけである**（ほかの欄は 0 のまま返す）。
 ///
 /// **値を決めるのは共通の側で、[`fb_fix_screeninfo_bytes`] は欄の位置へ書くだけである**（`ADR-0071` の決定 1 の 2 で、
 /// `crate::syscall` の画面の `ioctl` から分けた。2026-09-30）。

@@ -2,7 +2,7 @@
  *
  * # 1 本を 2 度ビルドする（`libc_string.c` / `libc_math.c` と同じ形）
  *
- *   1. ZaytOS 向け（freestanding）——`/lib/font.ttf` を読み、fd 1 へ出す
+ *   1. ZeikOS 向け（freestanding）——`/lib/font.ttf` を読み、fd 1 へ出す
  *   2. ホスト——同じソースを同じ書式で出し、`xtask` が 2 つをバイト単位で
  *      突き合わせる
  *
@@ -167,8 +167,8 @@ int main(void) {
     if (font == NULL) {
         return give_up("malloc");
     }
-    /* **読みの回数はここで数えない。** **数えて出すと、ホストと ZaytOS で
-     * 食い違う**（ホストは 1 回で返し、ZaytOS はブロックごとに返しうる）
+    /* **読みの回数はここで数えない。** **数えて出すと、ホストと ZeikOS で
+     * 食い違う**（ホストは 1 回で返し、ZeikOS はブロックごとに返しうる）
      * ——**突き合わせるのはビットマップだけである。** **回数はカーネル側の
      * `vfs:` の計測が起動ログへ出す。** */
     long filled = 0;

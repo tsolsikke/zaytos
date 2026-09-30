@@ -581,7 +581,7 @@ pub(crate) fn bytes_for_event(event: crate::keyboard::decode::KeyEvent) -> Deliv
         // **(1) `\x1b[3~` と同じ「CSI 数字 ~」の種類で揃い、入力を解釈する側の
         // 形が 1 つで済む。** **(2) `\x1b[H` は出力側の CUP と終端が同じで、
         // 次に読む者が入力と出力を取り違える**（`ADR-0029`）。
-        // **(3) 端末は ZaytOS 自身なので xterm 互換の利得が無い**——
+        // **(3) 端末は ZeikOS 自身なので xterm 互換の利得が無い**——
         // **Delete は全端末で `3~` だが、Home / End は端末によって割れている。**
         KeyEvent::Home => DeliveredBytes::Csi(b"\x1b[1~"),
         KeyEvent::End => DeliveredBytes::Csi(b"\x1b[4~"),
@@ -1292,7 +1292,7 @@ pub(crate) mod script {
 
     /// フォントを読んで 1 文字ラスタライズする（B-d）。
     ///
-    /// **1 本しか打たない。** **主張は「ホストで建てたものと、ZaytOS で
+    /// **1 本しか打たない。** **主張は「ホストで建てたものと、ZeikOS で
     /// 建てたものが、バイト単位で一致する」ことだけで、回数を増やしても
     /// 主張は増えない。**
     #[cfg(feature = "ttf-test")]

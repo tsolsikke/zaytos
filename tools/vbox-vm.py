@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ZaytOS の起動媒体で VirtualBox の VM を作り、起こし、消す（`ADR-0068` の HW-e。2026-09-23）。
+"""ZeikOS の起動媒体で VirtualBox の VM を作り、起こし、消す（`ADR-0068` の HW-e。2026-09-23）。
 
 **運用者の機械の設定を触る道具である。** **だから、できることを先に狭めてある。**
 
@@ -222,7 +222,7 @@ def write_lines(path, lines):
 
 
 def check_image(image):
-    """像が ZaytOS の起動媒体の形であることを、繋ぐ前に見る。
+    """像が ZeikOS の起動媒体の形であることを、繋ぐ前に見る。
 
     **保護 MBR の型が 0xEE で、LBA 1 に `EFI PART` が在ること。** **中身まで検める道具では
     ない**（それは `cargo xtask image` が読み返しで行う）——**別のファイルを渡した事故を
@@ -635,7 +635,7 @@ def lock_refusals():
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="ZaytOS の起動媒体で VirtualBox の VM を扱う（zaytos- で始まる名前だけ）",
+        description="ZeikOS の起動媒体で VirtualBox の VM を扱う（zaytos- で始まる名前だけ）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )

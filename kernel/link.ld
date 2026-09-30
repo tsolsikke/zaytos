@@ -1,5 +1,5 @@
 /*
- * ZaytOS kernel リンカスクリプト。
+ * ZeikOS kernel リンカスクリプト。
  *
  * KERNEL_LOAD_ADDR は ADR-0009 で確定した低位固定ロードアドレス（LMA）。
  *

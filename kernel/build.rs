@@ -490,7 +490,7 @@ fn build_c_programs(manifest_dir: &str, out_dir: &str, script: &str) {
 
 /// `NAME = 0x...;` の形の代入から値を読む。
 ///
-/// リンカスクリプトの完全な構文解析はしない。ZaytOS の `link.ld` が使って
+/// リンカスクリプトの完全な構文解析はしない。ZeikOS の `link.ld` が使って
 /// いる形だけを見る。形が変わったら `None` になり、`expect` で落ちる。
 /// 黙って既定値へ倒れるより、そこで止まるほうがよい。
 fn parse_symbol(script: &str, name: &str) -> Option<u64> {

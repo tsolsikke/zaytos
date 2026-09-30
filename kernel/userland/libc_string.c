@@ -4,7 +4,7 @@
  *
  * このファイルは 2 度ビルドする。
  *
- *   1. ZaytOS 向け（freestanding）——`libc.c` が標準の名前で包む
+ *   1. ZeikOS 向け（freestanding）——`libc.c` が標準の名前で包む
  *   2. ホスト（`cargo xtask check` の項目）——ホストの libc と一緒にリンクし、
  *      単体テストを走らせる
  *

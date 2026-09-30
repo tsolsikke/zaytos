@@ -10,7 +10,7 @@
  *
  * # 2 度ビルドする（`libc_string.c` と同じ形）
  *
- *   1. ZaytOS 向け（freestanding）——`libc.c` が標準の名前で包む
+ *   1. ZeikOS 向け（freestanding）——`libc.c` が標準の名前で包む
  *   2. ホスト——ホストの libc と一緒にリンクして単体テストを走らせる
  *
  * **だから中身は `zt_` の名前で持つ。** 標準の名前で定義するとホストの libc と

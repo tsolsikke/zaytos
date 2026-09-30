@@ -11,7 +11,7 @@
 
 #include "libc.h"
 
-/* ZaytOS 固有のシステムコール（`kernel/src/syscall.rs`）。 */
+/* ZeikOS 固有のシステムコール（`kernel/src/syscall.rs`）。 */
 #define SYS_SPAWN 0x1004
 
 /* 親が置く目印。**子の値とも、目印タスクの値とも違うものにする。** */

@@ -652,7 +652,7 @@ pub unsafe fn copy_to_user(slice: &UserSlice, at: u64, src: &[u8]) -> usize {
 /// # `exit_group`（231）は採らない
 ///
 /// あちらは「呼んだスレッドが属するスレッドグループ全体を終わらせる」呼び出しで、
-/// **ZaytOS にはスレッドの概念が無い。** 番号を用意しても、`exit` と区別できる
+/// **ZeikOS にはスレッドの概念が無い。** 番号を用意しても、`exit` と区別できる
 /// 振る舞いが書けない。**同じ振る舞いの入口を 2 つ置くと、どちらが正なのかが
 /// 呼び出し側にも実装側にも決まらない。** スレッドを作る段階で足す。
 ///
@@ -1322,7 +1322,7 @@ fn is_screen_fd(fd: u64) -> bool {
 ///
 /// - [`FBIOGET_VSCREENINFO`]——`struct fb_var_screeninfo`（Linux の配置）
 /// - [`FBIOGET_FSCREENINFO`]——`struct fb_fix_screeninfo`（Linux の配置）
-/// - [`FBIOZPRESENT`]——`struct drm_clip_rect` の矩形を MMIO へコピーする（ZaytOS 独自）
+/// - [`FBIOZPRESENT`]——`struct drm_clip_rect` の矩形を MMIO へコピーする（ZeikOS 独自）
 ///
 /// **それ以外は `-ENOTTY`**（Linux の fbdev と同じ）。
 ///
@@ -3746,7 +3746,7 @@ unsafe fn sys_directory(
 ///
 /// # `openat`（257）は採らない
 ///
-/// **ZaytOS には作業ディレクトリが無い**ので、`dirfd` に渡すものが無い。
+/// **ZeikOS には作業ディレクトリが無い**ので、`dirfd` に渡すものが無い。
 /// **`AT_FDCWD` を受けるだけの引数を置いても、区別できる振る舞いが書けない**
 /// （`exit` が `exit_group` を採らない理由（[`dispatch`] の doc）と同じ形である）。
 /// **作業ディレクトリを持つ段階で足す。**
@@ -4000,7 +4000,7 @@ const DIRENT64_MAX_RECORD: usize = (DIRENT64_HEADER_LEN + 255 + 1).next_multiple
 ///
 /// # `CLOCK_MONOTONIC` だけを実装する
 ///
-/// **壁時計（`CLOCK_REALTIME` = 0）は持てない**——**ZaytOS に実時刻の出所が無い**
+/// **壁時計（`CLOCK_REALTIME` = 0）は持てない**——**ZeikOS に実時刻の出所が無い**
 /// （RTC は未実装。`docs/deferred-decisions.md` の「時刻の欄」）。
 /// **0 を返して黙って答えると嘘の時刻が広がる**ので、`-EINVAL` を返す。
 ///
@@ -4078,7 +4078,7 @@ pub fn early_timer_wakes() -> u64 {
 /// # `rem` には書かない
 ///
 /// **Linux が `rem` へ書くのは、シグナルで割り込まれて `EINTR` を返すときだけである。**
-/// **ZaytOS にシグナルは無い**ので、**割り込まれて戻る道が無い。** **受け取って読まない。**
+/// **ZeikOS にシグナルは無い**ので、**割り込まれて戻る道が無い。** **受け取って読まない。**
 ///
 /// # 待ち方は `read(0)` と同じ踊りである
 ///
