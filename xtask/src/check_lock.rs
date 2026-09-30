@@ -56,7 +56,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use crate::launch::HarnessFault;
 
 /// 子へ持ち主の pid を渡す環境変数。**置き場は決めない**（置き場は git の共通の置き場だけで決まる）。
-pub const OWNER_ENV: &str = "ZAYTOS_CHECK_LOCK_OWNER";
+/// 旧い名前は [`crate::old_env_names`] にある。
+pub const OWNER_ENV: &str = "ZEIKOS_CHECK_LOCK_OWNER";
 
 /// ロックが取れずに断ったときの終了の値（`EX_TEMPFAIL`）。**検査の失敗（1）とも上限（3）とも分ける。**
 pub const REFUSED_EXIT_CODE: i32 = 75;
@@ -354,7 +355,7 @@ fn attempt(path: &Path, mode: Mode, content: Option<&str>) -> Result<Attempt> {
     fs::create_dir_all(dir).with_context(|| format!("could not create {}", dir.display()))?;
     probe(dir)?;
     let file = open(path)?;
-    let named = std::env::var(OWNER_ENV).ok();
+    let named = crate::old_env_names::var(OWNER_ENV);
     if let Some(owner) = covering_owner(named.as_deref(), &ancestors(), &holders_of(&file), mode) {
         return Ok(Attempt::Taken(State::Covered { owner }));
     }
@@ -588,10 +589,11 @@ pub fn owner_for_children() -> Option<u32> {
     }
 }
 
-/// 子のコマンドへ持ち主の pid を渡す（持っていなければ何もしない）。
+/// 子のコマンドへ持ち主の pid を渡す（持っていなければ何もしない）。**R5 の間だけ旧い名前でも渡す**
+/// （[`crate::old_env_names`]）。
 pub fn pass_owner(command: &mut Command) {
     if let Some(owner) = owner_for_children() {
-        command.env(OWNER_ENV, owner.to_string());
+        crate::old_env_names::env(command, OWNER_ENV, owner.to_string());
     }
 }
 
@@ -602,7 +604,7 @@ fn full_check_state(root: &Path) -> Option<(bool, bool)> {
     let file = OpenOptions::new().read(true).open(&path).ok()?;
     let holders = holders_of(&file);
     let running = holders.iter().any(|(_, mode)| *mode == Mode::Exclusive);
-    let named = std::env::var(OWNER_ENV).ok();
+    let named = crate::old_env_names::var(OWNER_ENV);
     let covered = covering_owner(named.as_deref(), &ancestors(), &holders, Mode::Shared).is_some();
     Some((running, covered))
 }
@@ -822,12 +824,30 @@ pub fn self_check(root: &Path) -> Result<String> {
     if !report.contains("xtask child: covered by") || !report.contains("python child: covered by") {
         bail!("a child of the holder did not go ahead under it: {report}");
     }
+
+    // (8) 持ち主を旧い名前で渡しても、持ち主の子は取らずに進む（R5 の間だけ。[`crate::old_env_names`]）。
+    let mut parent = spawn_holder(
+        &exe,
+        &lock,
+        &["--then-try", "shared", "--owner-by-old-name"],
+    )?;
+    let waited = read_line_within(
+        parent.stdout.take().context("no stdout from the holder")?,
+        Duration::from_secs(40),
+        3,
+    );
+    let _ = parent.kill();
+    let _ = parent.wait();
+    let report = waited.map(|lines| lines.join(" / ")).unwrap_or_default();
+    if !report.contains("xtask child: covered by") || !report.contains("python child: covered by") {
+        bail!("a child of the holder did not go ahead when the owner came under the old name: {report}");
+    }
     let _ = fs::remove_dir_all(&scratch);
     Ok(format!(
         "one path from {}; flock works there; a refusal ended with {REFUSED_EXIT_CODE} and named the \
          holder, in xtask and tools/check_lock.py, also for a non-descendant naming it; a killed \
          holder's lock was released; a VM marked as running refused the full check; only descendants \
-         of the holder went ahead without taking it",
+         of the holder went ahead without taking it, also when the owner came under the old name",
         places.join(", ")
     ))
 }
@@ -889,12 +909,14 @@ fn make_repo_with_worktree(scratch: &Path) -> Result<(PathBuf, PathBuf)> {
 
 /// 一時のロックを排他で持つ子を起動し、持ったことを確かめる。
 fn spawn_holder(exe: &Path, lock: &Path, extra: &[&str]) -> Result<std::process::Child> {
-    let mut child = Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .args(["check-lock", "hold"])
         .arg(lock)
         .arg("exclusive")
-        .args(extra)
-        .env_remove(OWNER_ENV)
+        .args(extra);
+    crate::old_env_names::env_remove(&mut command, OWNER_ENV);
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -947,8 +969,8 @@ fn try_in_child(
     child
         .args(["check-lock", "try"])
         .arg(lock)
-        .arg(mode.label())
-        .env_remove(OWNER_ENV);
+        .arg(mode.label());
+    crate::old_env_names::env_remove(&mut child, OWNER_ENV);
     if let Some(named) = named {
         child.env(OWNER_ENV, named.to_string());
     }
@@ -963,7 +985,8 @@ fn try_in_child(
 /// Python の道具で一時のロックを共有で取ってみる（終了の値と標準エラー）。
 fn try_in_python(tool: &Path, lock: &Path, named: Option<u32>) -> Result<(Option<i32>, String)> {
     let mut child = Command::new("python3");
-    child.arg(tool).arg("try").arg(lock).env_remove(OWNER_ENV);
+    child.arg(tool).arg("try").arg(lock);
+    crate::old_env_names::env_remove(&mut child, OWNER_ENV);
     if let Some(named) = named {
         child.env(OWNER_ENV, named.to_string());
     }
@@ -1017,8 +1040,9 @@ pub fn output_within(command: &mut Command, limit: Duration) -> Result<std::proc
 /// 隠したサブコマンド `cargo xtask check-lock ...`（基本の検査の確かめが使う）。
 ///
 /// - `path [--root DIR]`——ロックの道を出す。
-/// - `hold FILE MODE [--then-try MODE]`——一時のロックを持ち、`held` と出して眠る（上限 60 秒）。
-///   `--then-try` なら、持ったまま自分の子に同じロックを取らせ、その結果を出す。
+/// - `hold FILE MODE [--then-try MODE [--owner-by-old-name]]`——一時のロックを持ち、`held` と出して眠る（上限 60 秒）。
+///   `--then-try` なら、持ったまま自分の子に同じロックを取らせ、その結果を出す。`--owner-by-old-name` なら、
+///   持ち主を旧い名前の環境変数で渡す（R5 の間だけ。[`crate::old_env_names`]）。
 /// - `try FILE MODE`——一時のロックを取ってみる（取れれば 0、断られれば 75）。
 pub fn command(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
@@ -1044,6 +1068,8 @@ pub fn command(args: &[String]) -> Result<()> {
                 .position(|arg| arg == "--then-try")
                 .and_then(|index| args.get(index + 1))
                 .and_then(|text| Mode::parse(text));
+            // **旧い名前で持ち主を渡す形**（`--owner-by-old-name`。R5 の間だけ。[`crate::old_env_names`]）。
+            let by_old_name = args.iter().any(|arg| arg == "--owner-by-old-name");
             println!("held");
             std::io::stdout().flush().ok();
             if let Some(then) = then {
@@ -1055,7 +1081,12 @@ pub fn command(args: &[String]) -> Result<()> {
                 let mut python = Command::new("python3");
                 python.arg(tool).arg("try").arg(&file);
                 for (who, mut child) in [("xtask", xtask), ("python", python)] {
-                    child.env(OWNER_ENV, std::process::id().to_string());
+                    let pid = std::process::id().to_string();
+                    crate::old_env_names::env_remove(&mut child, OWNER_ENV);
+                    match crate::old_env_names::old_name(OWNER_ENV).filter(|_| by_old_name) {
+                        Some(old) => child.env(old, pid),
+                        None => child.env(OWNER_ENV, pid),
+                    };
                     let output = output_within(&mut child, Duration::from_secs(20))?;
                     println!(
                         "{who} child: {} (exit {:?})",

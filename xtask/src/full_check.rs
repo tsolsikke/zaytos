@@ -45,15 +45,15 @@ use crate::family;
 use crate::launch::{self, HarnessFault, HOST_SYSTEM_DRIVE, HOST_VHD_DRIVE};
 
 /// `cargo xtask full` が子の全検査へログのパスを渡す環境変数（ロックの中身と記録に書くだけ）。
-pub const LOG_ENV: &str = "ZAYTOS_CHECK_LOG";
+pub const LOG_ENV: &str = "ZEIKOS_CHECK_LOG";
 
 /// `cargo xtask full` が子の全検査へ、始めに読んだ WSL の置き場の書いたセクタ数を渡す環境変数
 /// （2026-09-25）。**作業ツリーのチェックアウトの分も、その全検査の書いた量に含めるため。**
-pub const DISK_START_ENV: &str = "ZAYTOS_CHECK_DISK_START";
+pub const DISK_START_ENV: &str = "ZEIKOS_CHECK_DISK_START";
 
 /// `cargo xtask full` が子の全検査へ、作業ツリーが冷えていたか（`cold`／`warm`）を渡す環境変数（2026-09-26。
 /// 記録に書くだけ）。
-pub const START_STATE_ENV: &str = "ZAYTOS_CHECK_START_STATE";
+pub const START_STATE_ENV: &str = "ZEIKOS_CHECK_START_STATE";
 
 /// 作業ツリーの `target/` がメインの作業ツリーの `target/` のこの分の 1 より小さければ「冷えた」とみなす（2026-09-26。運用者の
 /// 足す1点。値は案）。**1 回走った後の作業ツリーはメインの作業ツリーの 54% だった**（実測。30.7 GiB／56.8 GiB）。**incremental を
@@ -793,8 +793,7 @@ pub fn begin(root: &Path, level: Level) {
         });
     let (unix, when) = check_lock::now();
     // **`cargo xtask full` の子なら、親が始めに読んだ値を使う**（作業ツリーのチェックアウトの分も含める）。
-    let disk_start = std::env::var(DISK_START_ENV)
-        .ok()
+    let disk_start = crate::old_env_names::var(DISK_START_ENV)
         .and_then(|value| value.parse().ok())
         .or_else(|| sectors_written(root));
     if let Ok(mut start) = START.lock() {
@@ -848,7 +847,7 @@ pub fn end(outcome: &str, items: Option<usize>, item_seconds: Option<f64>) {
                 host_free,
                 system_free,
                 start_state: (start.level == Level::Full)
-                    .then(|| std::env::var(START_STATE_ENV).ok())
+                    .then(|| crate::old_env_names::var(START_STATE_ENV))
                     .flatten()
                     .filter(|state| !state.is_empty()),
                 other_runs: OTHER_RUNS.lock().ok().and_then(|slot| *slot),
@@ -861,7 +860,7 @@ pub fn end(outcome: &str, items: Option<usize>, item_seconds: Option<f64>) {
                         .display()
                         .to_string(),
                 ),
-                note: std::env::var(LOG_ENV).unwrap_or_else(|_| "-".to_string()),
+                note: crate::old_env_names::var(LOG_ENV).unwrap_or_else(|| "-".to_string()),
             },
         ))
     }) else {
@@ -1778,17 +1777,21 @@ fn run(target: &str) -> Result<()> {
     child
         .args(["xtask", "check", "--full"])
         .current_dir(&worktree)
-        .env(check_lock::OWNER_ENV, std::process::id().to_string())
-        .env(LOG_ENV, &log)
-        .env(
-            DISK_START_ENV,
-            disk_start.map_or(String::new(), |sectors| sectors.to_string()),
-        )
-        .env(START_STATE_ENV, state.label())
         .stdin(Stdio::null())
         .stdout(file.try_clone().context("could not share the log")?)
         .stderr(file)
         .process_group(0);
+    // **子へ渡すものは、R5 の間だけ旧い名前でも渡す**——**子は確かめるコミットの木からビルドする**ので、
+    // 名前を変える前のコミットの子は旧い名前しか読まない（[`crate::old_env_names`]）。
+    let owner = std::process::id().to_string();
+    crate::old_env_names::env(&mut child, check_lock::OWNER_ENV, owner);
+    crate::old_env_names::env(&mut child, LOG_ENV, &log);
+    let sectors = disk_start.map_or(String::new(), |sectors| sectors.to_string());
+    crate::old_env_names::env(&mut child, DISK_START_ENV, sectors);
+    crate::old_env_names::env(&mut child, START_STATE_ENV, state.label());
+    if let Some(jobs) = crate::old_env_names::var(crate::CHECK_JOBS_ENV) {
+        crate::old_env_names::env(&mut child, crate::CHECK_JOBS_ENV, jobs);
+    }
     // **子の git が別の作業ツリーを見ないように、`GIT_*` を外す**（ロックのパスと同じ理由）。
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_") {
@@ -2083,14 +2086,15 @@ fn report_gate(gate: &Gate, main: &Path) -> Result<()> {
     bail!(
         "push gate: {} of {} commit(s) to push have no passing record of the check they need \
          (listed above with how to check them). Only when the check cannot be run afterwards, ask the \
-         operator and push with ZAYTOS_PUSH_UNCHECKED='<reason>' (recorded; for that push only)",
+         operator and push with ZEIKOS_PUSH_UNCHECKED='<reason>' (recorded; for that push only)",
         gate.missing.len(),
         gate.pending
     )
 }
 
 /// push の前の関門をフラグで越えるときの環境変数（理由を入れる）。**Claude Code の hook も同じ名前を読む。**
-const OVERRIDE_ENV: &str = "ZAYTOS_PUSH_UNCHECKED";
+/// 旧い名前は [`crate::old_env_names`] にある。
+pub(crate) const OVERRIDE_ENV: &str = "ZEIKOS_PUSH_UNCHECKED";
 
 /// `cargo xtask full [<コミット>] | --status | --select | --gate [--override <理由>] [--pre-push]`。
 pub fn command(args: &[String]) -> Result<()> {
@@ -2115,13 +2119,14 @@ pub fn command(args: &[String]) -> Result<()> {
         let root = crate::workspace_root()?;
         let main = check_lock::main_tree(&root)?;
         // **Git の pre-push から呼ばれた形**（`.githooks/pre-push`。2026-09-26）——**標準入力の ref の行を
-        // 読む。** **フラグは環境変数で受ける**（`ZAYTOS_PUSH_UNCHECKED='<理由>' git push`。空の理由は断る）。
+        // 読む。** **フラグは環境変数で受ける**（`ZEIKOS_PUSH_UNCHECKED='<理由>' git push`。空の理由は断る）。
         if args.iter().any(|arg| arg == "--pre-push") {
-            let from_env = std::env::var(OVERRIDE_ENV).ok();
-            let reason = match (reason, from_env.as_deref().map(str::trim)) {
+            let from_env = crate::old_env_names::read(OVERRIDE_ENV);
+            let named = from_env.as_ref().map(|(name, value)| (*name, value.trim()));
+            let reason = match (reason, named) {
                 (Some(reason), _) => Some(reason),
-                (None, Some("")) => bail!("{OVERRIDE_ENV} is set but empty; give the reason"),
-                (None, other) => other,
+                (None, Some((name, ""))) => bail!("{name} is set but empty; give the reason"),
+                (None, other) => other.map(|(_, value)| value),
             };
             let mut input = String::new();
             std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)

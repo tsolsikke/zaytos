@@ -346,6 +346,8 @@ pub const PATH_RULES: &[PathRule] = &[
             ".github/**",
             "probes/**",
             "xtask/src/check_lock.rs",
+            // **環境変数の旧い名前**（R5 の間だけ）——**ホストのテストと、錠の確かめが覆う。**
+            "xtask/src/old_env_names.rs",
             // **手で使う、試験の一覧を並べて回す道具**（案 B の ②）——**全検査の項目は使わない。**
             "xtask/src/run_set.rs",
             "xtask/src/family.rs",

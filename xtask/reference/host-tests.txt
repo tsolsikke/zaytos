@@ -783,6 +783,12 @@ xtask::media::tests::the_media_reads_back_what_was_written
 xtask::media::tests::the_same_path_twice_is_refused
 xtask::media::tests::the_sixty_four_mib_partition_has_the_geometry_we_recorded
 xtask::metrics::tests::the_line_names_every_kind_even_at_zero
+xtask::old_env_names::tests::a_name_without_an_old_name_reads_only_itself
+xtask::old_env_names::tests::an_empty_value_is_read_under_either_name
+xtask::old_env_names::tests::env_passes_the_value_under_both_names
+xtask::old_env_names::tests::env_remove_removes_both_names
+xtask::old_env_names::tests::every_renamed_variable_has_its_old_name
+xtask::old_env_names::tests::reads_the_new_name_first_and_the_old_name_only_when_the_new_one_is_absent
 xtask::run_dir::tests::the_names_in_a_run_directory_come_from_the_run
 xtask::run_dir::tests::the_newest_runs_are_kept_whole_and_the_oldest_are_removed
 xtask::run_set::tests::a_list_is_read_one_test_per_line

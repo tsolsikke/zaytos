@@ -12,8 +12,9 @@
 
 # 全検査の中から呼ばれたときは取らない
 
-**`ZAYTOS_CHECK_LOCK_OWNER` の pid が自分の祖先で、`/proc/locks` でこの錠を持っているときだけ**
-取らずに進む（`xtask` と同じ規則）。
+**`ZEIKOS_CHECK_LOCK_OWNER` の pid が自分の祖先で、`/proc/locks` でこの錠を持っているときだけ**
+取らずに進む（`xtask` と同じ規則）。**旧い名前 `ZAYTOS_CHECK_LOCK_OWNER` も、OS の名前を変える段階の
+R5 の間だけ読む**（[`OLD_OWNER_ENV`]。R5 の最後に外す）。
 
 # VirtualBox の VM を起こしたまま残すとき
 
@@ -32,7 +33,9 @@ import subprocess
 import sys
 import time
 
-OWNER_ENV = "ZAYTOS_CHECK_LOCK_OWNER"
+OWNER_ENV = "ZEIKOS_CHECK_LOCK_OWNER"
+#: 旧い名前（R5 の間だけ読む。`xtask/src/old_env_names.rs` と同じときに外す）。
+OLD_OWNER_ENV = "ZAYTOS_CHECK_LOCK_OWNER"
 REFUSED_EXIT_CODE = 75
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -198,11 +201,24 @@ def log_run(what, outcome, root=ROOT):
         pass
 
 
+def named_owner():
+    """持ち主を名乗る値。**新しい名前を先に読み、無ければ旧い名前を読んで、そのことを 1 行出す。**"""
+    value = os.environ.get(OWNER_ENV)
+    if value is None and os.environ.get(OLD_OWNER_ENV) is not None:
+        value = os.environ[OLD_OWNER_ENV]
+        print(
+            f"(info) read the old name {OLD_OWNER_ENV}; the new name is {OWNER_ENV} "
+            "(the old name is read only until the end of the rename stage R5)",
+            file=sys.stderr,
+        )
+    return value
+
+
 def attempt_shared(path):
     """共有で取ってみる。**(取れたか, 持ち主の下か, 断りの中身)** を返す。**取れたら持ち続ける。**"""
     probe(os.path.dirname(path))
     handle = open(path, "a+")
-    owner = covering_owner(os.environ.get(OWNER_ENV), ancestors(), holders_of(handle))
+    owner = covering_owner(named_owner(), ancestors(), holders_of(handle))
     if owner is not None:
         handle.close()
         return True, owner, None

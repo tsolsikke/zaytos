@@ -61,6 +61,7 @@ mod kernel_builds;
 mod launch;
 mod media;
 mod metrics;
+mod old_env_names;
 mod run_dir;
 mod run_set;
 mod sampling;
@@ -26233,8 +26234,8 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     );
     let refused = if full {
         let (commit, tree) = full_check::started_commit_and_tree().unwrap_or_default();
-        let log =
-            env::var(full_check::LOG_ENV).unwrap_or_else(|_| "(this process's output)".into());
+        let log = old_env_names::var(full_check::LOG_ENV)
+            .unwrap_or_else(|| "(this process's output)".into());
         check_lock::hold(
             check_lock::Mode::Exclusive,
             &command,
@@ -26288,8 +26289,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         // **全検査の間のホストの様子を残し始める**（2026-09-29。試験の時間を縮める案の 0。`sampling` の doc）。
         sampling::start(
             &root,
-            env::var(full_check::LOG_ENV)
-                .ok()
+            old_env_names::var(full_check::LOG_ENV)
                 .map(PathBuf::from)
                 .as_deref(),
         );
@@ -30998,11 +30998,11 @@ impl SelectionScore {
 }
 
 /// 全検査で並べる糸の数（2026-09-29。運用者の決定）。**既定は 4**（QEMU の vCPU の上限
-/// [`launch::VCPU_BUDGET`] と同じ）。**`ZAYTOS_CHECK_JOBS` で変えられる**——1 なら順に回す（比べと切り分けのため）。
+/// [`launch::VCPU_BUDGET`] と同じ）。**`ZEIKOS_CHECK_JOBS` で変えられる**——1 なら順に回す（比べと切り分けのため）。
 const FULL_CHECK_JOBS: usize = 4;
 
 /// 並べる糸の数を変える環境変数（[`FULL_CHECK_JOBS`]）。
-const CHECK_JOBS_ENV: &str = "ZAYTOS_CHECK_JOBS";
+const CHECK_JOBS_ENV: &str = "ZEIKOS_CHECK_JOBS";
 
 /// 全検査の間か（`cmd_check` の入口が決める。**全検査の外では並べない**）。
 static PARALLEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -31012,8 +31012,7 @@ fn full_check_jobs() -> usize {
     if !PARALLEL.load(std::sync::atomic::Ordering::SeqCst) {
         return 1;
     }
-    env::var(CHECK_JOBS_ENV)
-        .ok()
+    old_env_names::var(CHECK_JOBS_ENV)
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|jobs| *jobs >= 1)
         .unwrap_or(FULL_CHECK_JOBS)

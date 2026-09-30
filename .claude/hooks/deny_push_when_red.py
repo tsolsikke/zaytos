@@ -51,7 +51,8 @@
 在るかを見る。** **無ければ、足りない検査とコミットを出して拒む。** **読むのは
 `cargo xtask full --status` と同じ記録である**（git の共通の置き場の `zaytos/records.tsv`。2026-09-27 に移した）。
 
-**旗で越えられる**——**`ZAYTOS_PUSH_UNCHECKED='<理由>' git push ...`**（理由は空にできない）。
+**旗で越えられる**——**`ZEIKOS_PUSH_UNCHECKED='<理由>' git push ...`**（理由は空にできない）。
+**旧い名前 `ZAYTOS_PUSH_UNCHECKED` も、OS の名前を変える段階の R5 の間だけ受ける**（[`OLD_FLAG`]。R5 の最後に外す）。
 **越えたコミットは、理由と一緒に記録へ「override」として残る。** **使うのは、要る検査を後から
 回せないときだけである**（例: 全検査の間に積んだコミットで、HEAD が先へ進んだ）。**旗はその push だけに
 効き、合格としては数えない**（2026-09-26。運用者の決定 1 の ③。**以前は記録がそのコミットを後まで満たした**）。
@@ -101,8 +102,13 @@ GATE_TIMEOUT_SECONDS = 50
 
 # **旗**（この doc の「要る検査を済ませていないコミットを止める」）。**実行の形に在ることを見てから、
 # 理由を元の文から読む**——**引用は実行の形では空白に落ちる。**
-OVERRIDE = re.compile(START + r"ZAYTOS_PUSH_UNCHECKED=\S*\s+git\s+(?:-\S+\s+\S+\s+|-\S+\s+)*push\b")
-OVERRIDE_REASON = re.compile(r"ZAYTOS_PUSH_UNCHECKED=(?:'([^']*)'|\"([^\"]*)\"|(\S+))")
+FLAG = "ZEIKOS_PUSH_UNCHECKED"
+# **旧い名前**（R5 の間だけ受ける。`xtask/src/old_env_names.rs` と同じときに外す）。
+OLD_FLAG = "ZAYTOS_PUSH_UNCHECKED"
+OVERRIDE = re.compile(
+    START + f"(?P<flag>{FLAG}|{OLD_FLAG})" + r"=\S*\s+git\s+(?:-\S+\s+\S+\s+|-\S+\s+)*push\b"
+)
+OVERRIDE_REASON = re.compile(f"(?:{FLAG}|{OLD_FLAG})" + r"=(?:'([^']*)'|\"([^\"]*)\"|(\S+))")
 
 
 def invokes_git_push(command: str) -> bool:
@@ -127,6 +133,12 @@ def override_reason(command: str) -> str | None:
     if match is None:
         return ""
     return next((group for group in match.groups() if group is not None), "").strip()
+
+
+def override_flag(command: str) -> str | None:
+    """旗に使った名前（旗が無ければ `None`）。**self-test が覆う。**"""
+    match = OVERRIDE.search(executable_part(command))
+    return match.group("flag") if match else None
 
 
 def same_tree_builds(processes: list, binary: str) -> list:
@@ -208,9 +220,10 @@ def main() -> int:
     # **旗は理由を要る**（空の理由では越えさせない）。
     reason = override_reason(command)
     if reason == "":
+        used = override_flag(command)
         return deny(
-            "ZAYTOS_PUSH_UNCHECKED の理由が空である。要る検査を後から回せない理由を書くこと"
-            "（記録に残る）"
+            f"{used} の理由が空である。要る検査を後から回せない理由を書くこと（記録に残る）"
+            + (f"。{used} は旧い名前で、R5 の間だけ受ける。新しい名前は {FLAG}" if used == OLD_FLAG else "")
         )
 
     root = os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or "."
@@ -255,7 +268,7 @@ def main() -> int:
                 "push の前の関門: 要る検査の合格の記録が無いコミットがある（コミットは既に"
                 "積まれている）。そのコミットが HEAD のうちに要る検査を回すか、cargo xtask full "
                 "<コミット> で確かめること。後から回せないときだけ、運用者に確かめて "
-                "ZAYTOS_PUSH_UNCHECKED='<理由>' git push で越える（記録に残る）:\n  "
+                f"{FLAG}='<理由>' git push で越える（記録に残る）:\n  "
                 + "\n  ".join((lines + reasons)[:20])
             )
         # **緑も言う**（2026-09-21。運用者の足す1点）。**黙って通すと、hook が読み込まれて
@@ -306,7 +319,8 @@ def self_test() -> int:
         ("cargo xtask check", False),
         # **代入を前に置いた形も当てる**（2026-09-25。**以前は発火しなかった**）。
         (f"X=1 git {push}", True),
-        (f"ZAYTOS_PUSH_UNCHECKED='the reason' git {push} origin main", True),
+        (f"{FLAG}='the reason' git {push} origin main", True),
+        (f"{OLD_FLAG}='the reason' git {push} origin main", True),
         (f"cd /x && A=1 B=2 git {push}", True),
         (f"echo 'X=1 git {push}'", False),
         # **前に命令を置いた形も当てる**（2026-09-25）。
@@ -337,17 +351,25 @@ def self_test() -> int:
         (f"cat <<'EOF'\ngit {commit} -m x\nEOF\ngit {push}", False),
     ]
     # **旗の理由**（2026-09-25）。**実行の形に在るときだけ読み、引用の中の言及は旗にしない。**
-    flag = "ZAYTOS_PUSH_UNCHECKED"
-    overrides = [
-        (f"{flag}='refused during a full' git {push} origin main", "refused during a full"),
-        (f'{flag}="two words" git {push}', "two words"),
-        (f"{flag}=plain git {push}", "plain"),
-        (f"{flag}='' git {push}", ""),
-        (f"{flag}='  ' git {push}", ""),
-        (f"git {push}", None),
-        (f"echo '{flag}=x git {push}'", None),
-        (f"{flag}=x cargo xtask check", None),
-    ]
+    overrides = []
+    flags = []
+    # **新しい名前と旧い名前の両方**（旧い名前は R5 の間だけ受ける）。
+    for flag in (FLAG, OLD_FLAG):
+        overrides += [
+            (f"{flag}='refused during a full' git {push} origin main", "refused during a full"),
+            (f'{flag}="two words" git {push}', "two words"),
+            (f"{flag}=plain git {push}", "plain"),
+            (f"{flag}='' git {push}", ""),
+            (f"{flag}='  ' git {push}", ""),
+            (f"git {push}", None),
+            (f"echo '{flag}=x git {push}'", None),
+            (f"{flag}=x cargo xtask check", None),
+        ]
+        # **どちらの名前で越えようとしたかを、拒むときの文面に出す**（[`override_flag`]）。
+        flags += [
+            (f"{flag}='' git {push} --dry-run origin main", flag),
+            (f"echo '{flag}=x git {push}'", None),
+        ]
     # **同じ木の `xtask` だけを数える**（2026-09-25）。**消えた本体も同じ木に数え、別の木と QEMU は
     # 数えない。**
     binary = "/r/target/debug/xtask"
@@ -365,6 +387,11 @@ def self_test() -> int:
         got = override_reason(command)
         if got != want:
             print(f"self-test (override): {command!r} wanted {want!r} but got {got!r}")
+            failures += 1
+    for command, want in flags:
+        got = override_flag(command)
+        if got != want:
+            print(f"self-test (flag name): {command!r} wanted {want!r} but got {got!r}")
             failures += 1
     same = same_tree_builds(processes, binary)
     if same != ["xtask (pid 1)", "xtask (pid 2)"]:
@@ -399,7 +426,7 @@ def self_test() -> int:
         failures += 1
     if failures:
         return 1
-    total = len(cases) + len(combined) + len(overrides) + 1 + 2
+    total = len(cases) + len(combined) + len(overrides) + len(flags) + 1 + 2
     print(f"self-test: {total} case(s) decided as expected")
     return 0
 
