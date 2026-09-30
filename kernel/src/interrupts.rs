@@ -12,7 +12,6 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 
-use common::arch::x86_64::cpu;
 use common::log::Logger;
 use common::machine::pc::Serial;
 
@@ -682,7 +681,7 @@ pub unsafe fn run_timer_loop(
     ));
 
     let mut console = console;
-    let started = cpu::read_timestamp_counter();
+    let started = common::arch::x86_64::read_timestamp_counter();
 
     // SAFETY: 呼び出し側の契約により、7 項目の検証とタイマ設定が済んでいる。
     //
@@ -691,7 +690,7 @@ pub unsafe fn run_timer_loop(
     // こちらが「`hlt` で待つ本来の形」で、起こしてくれるタイマが実在する
     // M4-d-2 で初めて成立した（ADR-0018 Addendum 2 §3）。
     unsafe {
-        cpu::enable_interrupts();
+        common::arch::x86_64::enable_interrupts();
     }
 
     // **PIT が 1 本も刻まなかったか**（HW-c。`ADR-0068`）。**較正の基準で決まる。**
@@ -815,7 +814,7 @@ pub unsafe fn run_timer_loop(
             }
             // **起動した AP の CR0・CR4・EFER が BSP と一致すること**（2026-09-24。`ADR-0018` の
             // Addendum 9 の監視。**棚卸しの結論は全 CPU についてである**）。
-            crate::arch::x86_64::cpu_state::check_aps_match_bsp(logger, report.started);
+            crate::arch::x86_64::check_aps_match_bsp(logger, report.started);
 
             // **シリアルの排他の演習（BSP 側）。** **合図を立ててから、AP と
             // 同時に既知の行を書く。** **`kernel/src/smp.rs` の
@@ -846,7 +845,7 @@ pub unsafe fn run_timer_loop(
                     logger.error(format_args!(
                         "virtio-blk: the interrupt exercise failed ({reason:?}); halting"
                     ));
-                    common::arch::x86_64::cpu::halt_forever();
+                    common::arch::x86_64::halt_forever();
                 }
                 // d-2: BKL を解いて眠り、割り込みで起きる（ADR-0036）。
                 // SAFETY: 上と同じ位置（配線・武装済み、IF=1）。
@@ -856,7 +855,7 @@ pub unsafe fn run_timer_loop(
                     logger.error(format_args!(
                         "virtio-blk: the blocking read failed ({reason:?}); halting"
                     ));
-                    common::arch::x86_64::cpu::halt_forever();
+                    common::arch::x86_64::halt_forever();
                 }
             }
         }
@@ -904,9 +903,7 @@ pub unsafe fn run_timer_loop(
                     let _bkl = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
                     // SAFETY: 稼働中のテーブルから、探り用にマップした 1 ページを外す。
                     let mut table = unsafe {
-                        crate::arch::x86_64::paging::active::ActivePageTable::current(
-                            common::addr::direct_map(),
-                        )
+                        crate::arch::x86_64::ActivePageTable::current(common::addr::direct_map())
                     };
                     if let Some(virt) = common::addr::VirtAddr::new(shootdown_probe::virt()) {
                         // SAFETY: 探り用にマップしたページで、他の誰も使っていない。
@@ -1119,7 +1116,7 @@ pub unsafe fn run_timer_loop(
     // **1 本目は `0` が出る。** ループへ入る時点で既に閾値を越えているので、
     // 最初のハートビートは基準と同じティックで出る（差が 0 なので
     // `checked_div` が `None` を返す）。**値が乗るのは 2 本目からである。**
-    let mut last_heartbeat_cycles = cpu::read_timestamp_counter();
+    let mut last_heartbeat_cycles = common::arch::x86_64::read_timestamp_counter();
     let mut last_heartbeat_ticks = crate::arch::x86_64::timer_ticks();
     // 出したハートビートの本数（S11-11）。**シェルへ渡すタイミングを決める。**
     let mut heartbeats = 0u64;
@@ -1132,13 +1129,14 @@ pub unsafe fn run_timer_loop(
         let ticks = crate::arch::x86_64::timer_ticks();
 
         if ticks == 0 {
-            if cpu::read_timestamp_counter() - started > FIRST_TICK_TIMEOUT_CYCLES {
+            if common::arch::x86_64::read_timestamp_counter() - started > FIRST_TICK_TIMEOUT_CYCLES
+            {
                 logger.error(format_args!(
                     "timer: no tick arrived before the deadline; halting. \
                      Check the PIT divisor write, the IMR (IRQ0 must be unmasked), \
                      and the PIC vector offset (ICW2)"
                 ));
-                cpu::halt_forever();
+                common::arch::x86_64::halt_forever();
             }
             // まだ 1 件も来ていない。`hlt` すると、タイマが動いていない場合に
             // 永久に眠ってしまい上の期限判定へ戻れない。最初の 1 件だけは
@@ -1182,7 +1180,7 @@ pub unsafe fn run_timer_loop(
                      is wrong; halting",
                     first.mismatch()
                 ));
-                cpu::halt_forever();
+                common::arch::x86_64::halt_forever();
             }
         }
 
@@ -1227,7 +1225,7 @@ pub unsafe fn run_timer_loop(
             if ticks >= next_heartbeat {
                 next_heartbeat = ticks + HEARTBEAT_TICKS;
                 heartbeats += 1;
-                let now_cycles = cpu::read_timestamp_counter();
+                let now_cycles = common::arch::x86_64::read_timestamp_counter();
                 let elapsed_ticks = ticks.wrapping_sub(last_heartbeat_ticks);
                 let cycles_per_tick = now_cycles
                     .wrapping_sub(last_heartbeat_cycles)
@@ -1396,7 +1394,7 @@ pub unsafe fn run_timer_loop(
             ));
             // SAFETY: 観測が終わったので、割り込みを禁止した既知の状態へ戻す。
             unsafe {
-                cpu::disable_interrupts();
+                common::arch::x86_64::disable_interrupts();
             }
             return;
         }
@@ -1466,11 +1464,9 @@ fn run_serial_stress_on_bsp(logger: &mut Logger<Serial>) {
         ));
     }
     // **上限つきで待つ。**
-    let started = common::arch::x86_64::cpu::read_timestamp_counter();
+    let started = common::arch::x86_64::read_timestamp_counter();
     while !crate::smp::SERIAL_STRESS_AP_DONE.load(Ordering::Acquire) {
-        if common::arch::x86_64::cpu::read_timestamp_counter().wrapping_sub(started)
-            > 20_000_000_000
-        {
+        if common::arch::x86_64::read_timestamp_counter().wrapping_sub(started) > 20_000_000_000 {
             logger.error(format_args!(
                 "serial-stress: the application processor never finished; the exercise asserts \
                  nothing"

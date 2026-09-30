@@ -89,7 +89,7 @@ pub fn report_first_delivery_once(logger: &mut common::log::Logger<common::machi
             "keyboard: the first key arrived as {}; halting",
             first.mismatch()
         ));
-        common::arch::x86_64::cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     }
 }
 

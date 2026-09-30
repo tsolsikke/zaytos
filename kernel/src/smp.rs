@@ -12,13 +12,12 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use core::fmt::Write as _;
 
-#[cfg(feature = "smp-tlb-shootdown-probe")]
-use crate::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
 #[allow(unused_imports)]
 use crate::arch::x86_64::paging::verify;
 #[cfg(feature = "smp-tlb-shootdown-probe")]
+use crate::arch::x86_64::{ActivePageTable, PageAttributes};
+#[cfg(feature = "smp-tlb-shootdown-probe")]
 use common::addr::VirtAddr;
-use common::arch::x86_64::cpu;
 use common::log::Logger;
 use common::machine::pc::Serial;
 
@@ -71,7 +70,7 @@ pub extern "C" fn zaytos_ap_entry(index: u64) -> ! {
          page table and halts here"
     );
     // 割り込みは有効化しない。IDT を持たないので、来ても行き先が無い。
-    cpu::halt_forever()
+    common::arch::x86_64::halt_forever()
 }
 
 /// 起動署名を出した AP の本数。BSP が会計に使う。
@@ -273,7 +272,7 @@ pub unsafe fn wake_application_processors(
             "smp: no AP trampoline frame was reserved, so no AP can be started; halting \
              (S1 reserved this frame and S3-b-2b-1 makes the failure fatal)"
         ));
-        cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     };
 
     // トランポリンを予約フレームへコピーし、絶対値を書き込む。
@@ -324,7 +323,7 @@ pub unsafe fn wake_application_processors(
             logger.error(format_args!(
                 "smp: no stack frame was reserved for application processor slot {slot}; halting"
             ));
-            cpu::halt_forever();
+            common::arch::x86_64::halt_forever();
         };
 
         // スタック頂点は恒等 VA である。静的初期テーブルに direct map が
@@ -366,7 +365,7 @@ pub unsafe fn wake_application_processors(
                 "smp: an IPI to apic id {processor} never left the local APIC (delivery status \
                  stayed set); halting"
             ));
-            cpu::halt_forever();
+            common::arch::x86_64::halt_forever();
         }
 
         // 起動署名を待つ。上限つきで待つ（CLAUDE.md の「シェルコマンドの制約」）。
@@ -427,9 +426,9 @@ fn run_serial_stress_on_ap(serial: &mut Serial, slot: usize) {
     use core::sync::atomic::Ordering;
 
     // **上限つきで待つ**（`CLAUDE.md` の「上限のない待機ループを書かない」）。
-    let started = common::arch::x86_64::cpu::read_timestamp_counter();
+    let started = common::arch::x86_64::read_timestamp_counter();
     while !SERIAL_STRESS_GO.load(Ordering::Acquire) {
-        if common::arch::x86_64::cpu::read_timestamp_counter().wrapping_sub(started)
+        if common::arch::x86_64::read_timestamp_counter().wrapping_sub(started)
             > WAIT_TIMEOUT_CYCLES
         {
             let _ = writeln!(
@@ -530,7 +529,7 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
 
     // 恒等が無いことを AP 側で読み戻す（b-2b-1 から移した到達条件）。
     // SAFETY: 稼働中のテーブルを読むだけ。
-    let root_phys = crate::arch::x86_64::paging::switch::active_page_table_root();
+    let root_phys = crate::arch::x86_64::active_page_table_root();
     let root = root_phys.as_u64();
     // SAFETY: 稼働中のテーブルを direct map 越しに読むだけ（本番テーブルには
     // direct map がある）。読み取りのみ。
@@ -555,7 +554,7 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
             "[ERROR] smp: ap {slot} still sees an identity mapping in the production table; \
              halting"
         );
-        cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     }
 
     // 破壊テスト (S3-b-2b-2, smp-ap-touch-scheduler): AP からスケジューラの現在タスクを
@@ -571,7 +570,7 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
     }
 
     // **自分の CR0・CR4・EFER を控える**（2026-09-24）。**BSP が起床のまとめの後で突き合わせる。**
-    crate::arch::x86_64::cpu_state::record_this_ap(slot);
+    crate::arch::x86_64::record_this_ap(slot);
     AP_BROUGHT_UP.fetch_add(1, Ordering::SeqCst);
 
     // === S4-c-3-2b: このコアの `CURRENT` を sentinel から解く ===
@@ -637,7 +636,7 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
             "[ERROR] smp: ap {slot} returned from the preemptive demo; the tripwire did not \
              fire; halting"
         );
-        cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     }
 
     // === S4-a: 自分の Local APIC とタイマを開ける ===
@@ -686,7 +685,7 @@ unsafe fn start_local_timer(serial: &mut Serial, slot: usize) -> ! {
                         "[ERROR] smp: ap {slot} has its local APIC software-disabled, so no LVT \
                          interrupt can be delivered; halting"
                     );
-                    cpu::halt_forever();
+                    common::arch::x86_64::halt_forever();
                 }
             }
             None => {
@@ -695,7 +694,7 @@ unsafe fn start_local_timer(serial: &mut Serial, slot: usize) -> ! {
                     "[ERROR] smp: ap {slot} could not reach its local APIC to write the SVR; \
                      halting"
                 );
-                cpu::halt_forever();
+                common::arch::x86_64::halt_forever();
             }
         }
     }
@@ -724,7 +723,7 @@ unsafe fn start_local_timer(serial: &mut Serial, slot: usize) -> ! {
                 "[ERROR] smp: ap {slot} could not arm its LAPIC timer (the BSP has not moved the \
                  timer to the local APIC yet); halting"
             );
-            cpu::halt_forever();
+            common::arch::x86_64::halt_forever();
         }
     }
 
@@ -771,7 +770,7 @@ fn ap_heartbeat_loop(serial: &mut Serial, slot: usize) -> ! {
             let _ = writeln!(
                 serial,
                 "[INFO] smp: ap heartbeat: cpu={slot} ticks={ticks} tsc={}",
-                cpu::read_timestamp_counter()
+                common::arch::x86_64::read_timestamp_counter()
             );
         }
         // TLB シュートダウンの探り（S5-c）。指示があるときだけ触る。
@@ -813,7 +812,7 @@ pub unsafe fn prepare_ap_per_cpu<const CAP: usize>(
     logger: &mut Logger<Serial>,
     allocator: &mut FrameAllocator<CAP>,
 ) {
-    let production_root = crate::arch::x86_64::paging::switch::active_page_table_root().as_u64();
+    let production_root = crate::arch::x86_64::active_page_table_root().as_u64();
     for slot in 1..common::percpu::MAX_CPUS {
         // SAFETY: 呼び出し元契約。まだ AP は走っていない。
         let Some(stacks) = (unsafe { crate::arch::x86_64::map_ap_stacks(logger, slot, allocator) })

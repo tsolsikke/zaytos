@@ -1153,7 +1153,7 @@ const fn page_table_root_to_load(field: u64, kernel_root: u64) -> u64 {
 ///
 /// # Safety
 ///
-/// [`crate::arch::x86_64::paging::switch::set_active_page_table_root`] と同じ契約。**`noted` は、載せた後にこのタスクが
+/// [`crate::arch::x86_64::set_active_page_table_root`] と同じ契約。**`noted` は、載せた後にこのタスクが
 /// 載せていることになる値である**（0 ならカーネルの表）。
 #[inline(never)]
 pub unsafe fn switch_page_table_root_and_note(load: common::addr::PhysAddr, noted: u64) {

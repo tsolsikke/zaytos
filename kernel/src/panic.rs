@@ -16,7 +16,6 @@
 use core::fmt::Write;
 use core::panic::PanicInfo;
 
-use common::arch::x86_64::cpu;
 use common::machine::pc::Serial;
 
 #[panic_handler]
@@ -24,11 +23,11 @@ fn panic(info: &PanicInfo) -> ! {
     let mut serial = Serial::primary();
     serial.init();
 
-    let sp = cpu::read_stack_pointer();
+    let sp = common::arch::x86_64::read_stack_pointer();
 
     let _ = writeln!(serial, "[ERROR] panic: {info}");
     let _ = writeln!(serial, "[ERROR]   rsp = {sp:#018x}");
     let _ = writeln!(serial, "[ERROR] halting (cli + hlt loop)");
 
-    cpu::halt_forever();
+    common::arch::x86_64::halt_forever();
 }

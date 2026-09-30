@@ -952,6 +952,11 @@ pub unsafe fn adopt_bsp_state_on_this_ap() {
 }
 
 /// AP が自分の CR0・CR4・EFER を読んで控える（2026-09-24。起動の終わりに呼ぶ）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - AP が、自分のスロットへ自分の値を控える。ほかのスロットには書かず、範囲外のスロットでは何もしない。
+/// - 呼ぶのは AP の起動の終わり（`crate::smp`）である。
 pub fn record_this_ap(slot: usize) {
     if slot >= MAX_CPUS {
         return;
@@ -1100,6 +1105,11 @@ impl fmt::Display for DifferingBits {
 
 /// **起動した AP の CR0・CR4・EFER が、BSP の値と一致することを確かめる**（2026-09-24）。
 /// **食い違えば、違うビットの名前を出して止まる。** **AP の控えは上限つきで待つ。**
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 呼ぶのは BSP で、AP を起こした後の起動の文脈（`crate::interrupts`）から 1 回呼ぶ。
+/// - AP の控え（[`record_this_ap`]）を上限つきで待ち、BSP の値と比べる。食い違うか、時間内に控えが無ければ止まる。
 pub fn check_aps_match_bsp(logger: &mut Logger<Serial>, started: usize) {
     let bsp = [0, 1, 2].map(|index| BSP_STATE[index].load(Ordering::SeqCst));
     let names = ["CR0", "CR4", "EFER"];

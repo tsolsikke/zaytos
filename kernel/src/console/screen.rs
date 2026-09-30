@@ -17,7 +17,6 @@
 use common::addr::VirtAddr;
 use core::fmt;
 
-use common::arch::x86_64::cpu;
 use common::machine::pc::Serial;
 
 use crate::graphics::font;
@@ -45,7 +44,7 @@ pub struct FlushStats {
     pub full_screen_bytes: u64,
     /// 転送に費やした TSC サイクルの合計（S12 前の手当て）。
     ///
-    /// **時刻ではなく、回る量の目安である**（`common::arch::x86_64::cpu::read_timestamp_counter`）。
+    /// **時刻ではなく、回る量の目安である**（`common::arch::x86_64::read_timestamp_counter`）。
     /// **測る理由は、転送が BKL を保持している区間へ入るかを判断するためである**
     /// ——`sys_write` は BKL の内側で走る（`kernel/src/syscall.rs`）。
     pub flush_cycles_total: u64,
@@ -531,10 +530,10 @@ impl Console {
             #[cfg(not(feature = "alt-screen-skip-repaint-test"))]
             {
                 // **測るためだけに囲んである（P-c-2）。**
-                let started = common::arch::x86_64::cpu::read_timestamp_counter();
+                let started = common::arch::x86_64::read_timestamp_counter();
                 self.repaint_from_cells();
                 self.stats.repaint_cycles +=
-                    common::arch::x86_64::cpu::read_timestamp_counter().wrapping_sub(started);
+                    common::arch::x86_64::read_timestamp_counter().wrapping_sub(started);
                 self.stats.repaint_count += 1;
             }
         }
@@ -756,7 +755,7 @@ impl Console {
     /// セルを含む。
     pub fn erase_in_line(&mut self, scope: common::ansi::EraseScope) {
         use common::ansi::EraseScope;
-        let started = common::arch::x86_64::cpu::read_timestamp_counter();
+        let started = common::arch::x86_64::read_timestamp_counter();
         let single_before = self.back.surface_mut().single_pixel_writes();
         let (column, row) = self.grid.cursor();
         let columns = self.grid.columns();
@@ -766,7 +765,7 @@ impl Console {
             EraseScope::All => self.erase_cells(row, 0, columns),
         }
         self.stats.erase_cycles +=
-            common::arch::x86_64::cpu::read_timestamp_counter().wrapping_sub(started);
+            common::arch::x86_64::read_timestamp_counter().wrapping_sub(started);
         self.stats.erase_single_pixels += self
             .back
             .surface_mut()
@@ -779,7 +778,7 @@ impl Console {
     /// CUP を送る）。
     pub fn erase_in_display(&mut self, scope: common::ansi::EraseScope) {
         use common::ansi::EraseScope;
-        let started = common::arch::x86_64::cpu::read_timestamp_counter();
+        let started = common::arch::x86_64::read_timestamp_counter();
         let single_before = self.back.surface_mut().single_pixel_writes();
         let (column, row) = self.grid.cursor();
         let (columns, rows) = (self.grid.columns(), self.grid.rows());
@@ -816,7 +815,7 @@ impl Console {
             }
         }
         self.stats.erase_cycles +=
-            common::arch::x86_64::cpu::read_timestamp_counter().wrapping_sub(started);
+            common::arch::x86_64::read_timestamp_counter().wrapping_sub(started);
         self.stats.erase_single_pixels += self
             .back
             .surface_mut()
@@ -877,11 +876,10 @@ impl Console {
         let Some(rect) = self.dirty.take() else {
             return;
         };
-        let started = common::arch::x86_64::cpu::read_timestamp_counter();
+        let started = common::arch::x86_64::read_timestamp_counter();
         match self.back.flush_rect(&mut self.front, rect) {
             Ok(transferred) => {
-                let elapsed =
-                    common::arch::x86_64::cpu::read_timestamp_counter().wrapping_sub(started);
+                let elapsed = common::arch::x86_64::read_timestamp_counter().wrapping_sub(started);
                 self.stats.flush_count += 1;
                 self.stats.transferred_bytes += transferred;
                 self.stats.flush_cycles_total += elapsed;
@@ -988,12 +986,12 @@ impl Console {
             );
             let x = placement.column * font::CELL_WIDTH;
             let y = placement.row * font::GLYPH_HEIGHT;
-            let started = common::arch::x86_64::cpu::read_timestamp_counter();
+            let started = common::arch::x86_64::read_timestamp_counter();
             self.back
                 .surface_mut()
                 .draw_glyph(x, y, glyph, foreground, Some(background));
             self.stats.glyph_cycles +=
-                common::arch::x86_64::cpu::read_timestamp_counter().wrapping_sub(started);
+                common::arch::x86_64::read_timestamp_counter().wrapping_sub(started);
             self.dirty
                 .mark(x, y, glyph.width_pixels(), glyph.height_pixels());
         }
@@ -1020,10 +1018,10 @@ impl fmt::Write for Console {
     /// はログ 1 行を `writeln!` 1 回で書くので、この形でログ 1 行 =
     /// 転送 1 回になる（ADR-0017）。
     fn write_fmt(&mut self, args: fmt::Arguments<'_>) -> fmt::Result {
-        let started = common::arch::x86_64::cpu::read_timestamp_counter();
+        let started = common::arch::x86_64::read_timestamp_counter();
         let result = fmt::write(self, args);
         self.flush();
-        let elapsed = common::arch::x86_64::cpu::read_timestamp_counter().wrapping_sub(started);
+        let elapsed = common::arch::x86_64::read_timestamp_counter().wrapping_sub(started);
         self.stats.write_cycles_total += elapsed;
         self.stats.write_cycles_max = self.stats.write_cycles_max.max(elapsed);
         self.stats.write_count += 1;
@@ -1063,7 +1061,7 @@ fn report_flush_failure_and_halt(error: &FlushRangeError) -> ! {
     );
     let _ = writeln!(serial, "[ERROR] halting (cli + hlt loop)");
 
-    cpu::halt_forever();
+    common::arch::x86_64::halt_forever();
 }
 
 #[cfg(test)]

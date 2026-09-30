@@ -52,6 +52,11 @@ pub const fn is_shared_kernel_index(index: usize) -> bool {
 }
 
 /// アドレス空間の作成でしくじる形。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - アドレス空間を作るときや写像を足すときのしくじりの形である。共通の側は、読み込みの誤りの中に包んで
+///   ログへ出す（`crate::userland`）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AddressSpaceError {
     /// PML4 用のフレームが取れなかった。
@@ -154,6 +159,11 @@ pub unsafe fn freeze_kernel_top(direct_map: DirectMap, current_pml4: PhysAddr) -
 /// **まだ破棄を持たない。** 破棄は S7-d である。**持たせないのは、破棄が隔離
 /// （[`crate::quarantine`]）と一体だからで、片方だけ先に作ると「返してよい」判断が
 /// 無いまま返す形が書けてしまう。**
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - プロセス 1 つ分のアドレス空間である。作るのはプログラムを読み込む所（`crate::userland`）である。
+/// - 壊すときは、BKL を持っていることを引数で示す（[`crate::bkl::BklGuard`]）。
 pub struct AddressSpace {
     pml4: PhysAddr,
     /// **この空間のユーザーサブツリーの添字（S7-e）。**

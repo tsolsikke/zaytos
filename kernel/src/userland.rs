@@ -28,7 +28,7 @@ use common::critical::Locked;
 use common::log::{LogLevel, Logger};
 use common::machine::pc::Serial;
 
-use crate::arch::x86_64::ring3::MAX_EXCURSION_DEPTH;
+use crate::arch::x86_64::MAX_EXCURSION_DEPTH;
 use crate::syscall::{MAX_ARGV_BYTES, MAX_ENVP_BYTES, MAX_EXECUTABLE_SIZE, PATH_MAX};
 
 /// ユーザープログラムを走らせる空間のユーザーサブツリーの添字（S9-b-1）。
@@ -596,7 +596,7 @@ pub enum UserLoadError {
     /// 効いた形である。**
     SegmentData(common::elf::ElfError),
     /// 新しいアドレス空間を作れなかった。**イメージではなくカーネル側の事情である。**
-    AddressSpace(crate::arch::x86_64::paging::address_space::AddressSpaceError),
+    AddressSpace(crate::arch::x86_64::AddressSpaceError),
     /// フレームが尽きた。**イメージではなくカーネル側の事情である。**
     OutOfFrames,
     /// マップしようとした仮想アドレスが正準形でない。
@@ -604,7 +604,7 @@ pub enum UserLoadError {
     /// マッピングに失敗した。**区画が同じページを共有していると、後から来たほうがここへ来る。**
     Mapping {
         virt: u64,
-        error: crate::arch::x86_64::paging::address_space::AddressSpaceError,
+        error: crate::arch::x86_64::AddressSpaceError,
     },
     /// マップした葉のフラグが、区画の権限と食い違った。**カーネル側の不具合である。**
     LeafFlags { count: usize },
@@ -879,7 +879,7 @@ pub enum SpawnOutcome {
 /// 容量に見える。** こちらは管理構造で、長さは常に 1 である。
 pub struct UserProcess {
     /// このプロセスのアドレス空間。**終了で破棄する。**
-    space: crate::arch::x86_64::paging::address_space::AddressSpace,
+    space: crate::arch::x86_64::AddressSpace,
     /// 最初に飛ぶ先（ELF の entry）。
     entry: u64,
     /// ユーザースタックの上端。
@@ -957,10 +957,10 @@ pub fn load_user_program(
     argv: &[&[u8]],
     envp: Option<&[&[u8]]>,
 ) -> (Result<u64, UserLoadError>, usize, usize, usize) {
-    use crate::arch::x86_64::paging::address_space::AddressSpace;
+    use crate::arch::x86_64::AddressSpace;
 
     let direct_map = common::addr::direct_map();
-    let production = crate::arch::x86_64::paging::switch::active_page_table_root();
+    let production = crate::arch::x86_64::active_page_table_root();
 
     // **アロケータを借りる（S11-3。`ADR-0030`）。** マッピングの間だけ持ち、
     // **Ring 3 へ落ちる前に返す。**
@@ -1291,8 +1291,8 @@ fn forget_task_root_before_destroy(logger: &mut Logger<Serial>, process: &UserPr
 ///
 /// **一度は誤っていた。** ここには以前も「`AlreadyMapped` 相当で弾かれる」と
 /// 書いてあったが、**それを持っていたのは
-/// [`crate::arch::x86_64::paging::active::ActivePageTable::map_4kib`] の側だけで、ローダーが
-/// 使う [`crate::arch::x86_64::paging::address_space::AddressSpace::map_user_4kib`] は葉の present を
+/// [`crate::arch::x86_64::ActivePageTable::map_4kib`] の側だけで、ローダーが
+/// 使う [`crate::arch::x86_64::AddressSpace::map_user_4kib`] は葉の present を
 /// 見ずに書いていた。** 契約を片側だけ見て、もう片側のものとして書いていた形で
 /// ある（S9-b-3-2b の数え直しで実測した）。**実測では両方「張れた」ことになり、
 /// 1 つ目のフレームがマッピングから外れて 1 枚漏れた**（14 枚消えて隔離へ 13 枚）。
@@ -1312,8 +1312,8 @@ fn load_user_program_into(
     argv: &[&[u8]],
     envp: Option<&[&[u8]]>,
 ) -> Result<(), UserLoadError> {
-    use crate::arch::x86_64::paging::active::PageAttributes;
     use crate::arch::x86_64::paging::verify;
+    use crate::arch::x86_64::PageAttributes;
     use common::elf::Elf;
 
     const PAGE_SIZE: u64 = 4096;
@@ -1694,8 +1694,8 @@ fn report_user_stack_high_water(logger: &mut Logger<Serial>, process: &UserProce
 /// 208 バイトずつ深くした**（2026-09-23。`tools/frame-sizes.py` でフレームを読んだ）。
 #[inline(never)]
 fn report_stack_water_before_ring3(logger: &mut Logger<Serial>, name: &'static str) {
-    let used = crate::arch::x86_64::stack::kernel_stack_high_water();
-    let capacity = crate::arch::x86_64::stack::kernel_stack_capacity();
+    let used = crate::arch::x86_64::kernel_stack_high_water();
+    let capacity = crate::arch::x86_64::kernel_stack_capacity();
     logger.info(format_args!(
         "stack-water: before entering {name} in Ring 3, the kernel stack used {used} of \
          {capacity} byte(s); {} left",
@@ -1722,7 +1722,7 @@ unsafe fn run_loaded_program(
     logger: &mut Logger<Serial>,
     process: &mut UserProcess,
 ) -> Result<(), UserLoadError> {
-    let production = crate::arch::x86_64::paging::switch::active_page_table_root();
+    let production = crate::arch::x86_64::active_page_table_root();
 
     crate::syscall::reset_counters();
     // **戻す RSP0 は「今この処理が乗っているカーネルスタックの上端」である。**
@@ -1742,9 +1742,9 @@ unsafe fn run_loaded_program(
     let main_entry_stack_top = if crate::arch::x86_64::ring3::depth() == 0 {
         crate::arch::x86_64::active_kernel_entry_stack_top()
     } else if cfg!(feature = "spawn-child-rsp0") {
-        crate::arch::x86_64::ring3::excursion_stack_range_at(crate::arch::x86_64::ring3::depth()).1
+        crate::arch::x86_64::excursion_stack_range_at(crate::arch::x86_64::ring3::depth()).1
     } else {
-        crate::arch::x86_64::ring3::excursion_stack_range().1
+        crate::arch::x86_64::excursion_stack_range().1
     };
 
     // **載せて、タスクの CR3 の欄を据える（W1-b-2。W1-c-2 で割り込みを止めて一続きにした）。**
@@ -1790,10 +1790,10 @@ unsafe fn run_loaded_program(
     //
     // 破壊テストでの確認: `fp-no-fresh-state` では戻さない。**前の値がそのまま見える。**
     #[cfg(not(feature = "fp-no-fresh-state"))]
-    // SAFETY: [`crate::arch::x86_64::fp::FpArea::fresh`] は `fxsave` の形に沿った並びで、
+    // SAFETY: [`crate::arch::x86_64::FpArea::fresh`] は `fxsave` の形に沿った並びで、
     // MXCSR も予約ビットを立てていない（`#GP` にならない）。
     unsafe {
-        crate::arch::x86_64::fp::restore_fp_state(&crate::arch::x86_64::fp::FpArea::fresh())
+        crate::arch::x86_64::restore_fp_state(&crate::arch::x86_64::FpArea::fresh())
     };
     // **カーネルスタックの高水位を、Ring 3 へ落ちる直前にも出す**（`ADR-0068` の (c)。
     // 運用者の決定。2026-09-23）。
@@ -1885,9 +1885,9 @@ unsafe fn run_loaded_program(
     // **このスタックにはガードページが無い**（`.bss` の配列である）ので、
     // **溢れは静かに起きて、下の静的領域を書く。** 実測で `EXCURSION_DEPTH` を
     // 壊した（`docs/troubleshooting.md`）。**推測せずに毎起動測る。**
-    let used = crate::arch::x86_64::ring3::excursion_stack_high_water(entered_at_depth);
-    let capacity = crate::arch::x86_64::ring3::excursion_stack_capacity();
-    let intact = crate::arch::x86_64::ring3::excursion_stack_canary_intact(entered_at_depth);
+    let used = crate::arch::x86_64::excursion_stack_high_water(entered_at_depth);
+    let capacity = crate::arch::x86_64::excursion_stack_capacity();
+    let intact = crate::arch::x86_64::excursion_stack_canary_intact(entered_at_depth);
     logger.info(format_args!(
         "ring3: {} used {used} of {capacity} byte(s) of the depth-{entered_at_depth} \
          excursion stack ({}%), the canary at its bottom is intact={intact}",
@@ -1899,7 +1899,7 @@ unsafe fn run_loaded_program(
             "ring3: the depth-{entered_at_depth} excursion stack ran into its bottom canary; \
              it has no guard page, so anything below it may already be overwritten. halting"
         ));
-        common::arch::x86_64::cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     }
     // **解禁条件を機械にする（S11-6）。**
     //
@@ -1913,14 +1913,14 @@ unsafe fn run_loaded_program(
     //
     // **見張り区間で止まるのでは遅い。** あれが偽になるのは残り 256 バイトまで
     // 使い切ったときで、**そこまで来たら判断する余地が無い。**
-    if !crate::arch::x86_64::ring3::excursion_stack_within_budget(entered_at_depth) {
+    if !crate::arch::x86_64::excursion_stack_within_budget(entered_at_depth) {
         logger.error(format_args!(
             "ring3: the depth-{entered_at_depth} excursion stack is more than half used \
              ({used} of {capacity}); the deferred decision about these stacks having no guard \
              page says to decide here - either map them the way StackBlock is mapped (page \
              aligned, one page below unmapped) or raise the capacity with a measurement. halting"
         ));
-        common::arch::x86_64::cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     }
 
     // **表が動いたことの観測（S10-b）。** 開いたまま戻ったものが何本あるかを出す。
@@ -2190,7 +2190,7 @@ pub fn spawn(
             depth + 1
         ));
     } else {
-        let (excursion_bottom, excursion_top) = crate::arch::x86_64::ring3::excursion_stack_range();
+        let (excursion_bottom, excursion_top) = crate::arch::x86_64::excursion_stack_range();
         let stack_used = excursion_top.saturating_sub(sp_now);
         let stack_left = sp_now.saturating_sub(excursion_bottom);
         logger.info(format_args!(
@@ -2226,7 +2226,7 @@ pub fn spawn(
 
     // **親の記録を控える。** 子は `reset_counters` を通る。
     let saved_records = crate::syscall::save_records();
-    let saved_fold = crate::arch::x86_64::ring3::save_fold_record();
+    let saved_fold = crate::arch::x86_64::save_fold_record();
 
     // **会計のために借りて、すぐ返す**（`ADR-0030`）。**借りられなければ
     // 子も起動できない**ので、そのまま [`UserLoadError::AllocatorUnavailable`] へ落とす。
@@ -2239,7 +2239,7 @@ pub fn spawn(
         }
         None => {
             crate::syscall::restore_records(saved_records);
-            crate::arch::x86_64::ring3::restore_fold_record(saved_fold);
+            crate::arch::x86_64::restore_fold_record(saved_fold);
             return Err(SpawnError::Load(UserLoadError::AllocatorUnavailable));
         }
     };
@@ -2278,7 +2278,7 @@ pub fn spawn(
             .map(|i| at + i)
         else {
             crate::syscall::restore_records(saved_records);
-            crate::arch::x86_64::ring3::restore_fold_record(saved_fold);
+            crate::arch::x86_64::restore_fold_record(saved_fold);
             return Err(SpawnError::ArgvMalformed);
         };
         *slice = &stored[at..end];
@@ -2317,7 +2317,7 @@ pub fn spawn(
                     .map(|i| env_at + i)
                 else {
                     crate::syscall::restore_records(saved_records);
-                    crate::arch::x86_64::ring3::restore_fold_record(saved_fold);
+                    crate::arch::x86_64::restore_fold_record(saved_fold);
                     return Err(SpawnError::ArgvMalformed);
                 };
                 *slice = &env_stored[env_at..end];
@@ -2338,9 +2338,9 @@ pub fn spawn(
     // 浮動小数点の値を保てなくなる。**
     #[cfg(not(feature = "fp-spawn-no-save"))]
     let parent_fp = {
-        let mut area = crate::arch::x86_64::fp::FpArea::fresh();
+        let mut area = crate::arch::x86_64::FpArea::fresh();
         // SAFETY: 単一の実行文脈で、この領域はこの関数の中にしかない。
-        unsafe { crate::arch::x86_64::fp::save_fp_state(&mut area) };
+        unsafe { crate::arch::x86_64::save_fp_state(&mut area) };
         area
     };
 
@@ -2352,7 +2352,7 @@ pub fn spawn(
     #[cfg(not(feature = "fp-spawn-no-save"))]
     // SAFETY: `parent_fp` は直前に `fxsave` が書いた 512 バイトである。
     unsafe {
-        crate::arch::x86_64::fp::restore_fp_state(&parent_fp)
+        crate::arch::x86_64::restore_fp_state(&parent_fp)
     };
 
     // **子の終わり方をここで読む。** 戻す前に読まなければ、親のもので上書きされる。
@@ -2385,11 +2385,11 @@ pub fn spawn(
             "spawn: RSP0 came back as {entry_stack_after:#x} but it was {entry_stack_before:#x} before the \
              child ran; the parent's next kernel entry would land on the wrong stack. halting"
         ));
-        common::arch::x86_64::cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     }
 
     let child_handler_sp = crate::syscall::handler_sp();
-    let (child_bottom, child_top) = crate::arch::x86_64::ring3::excursion_stack_range_at(depth);
+    let (child_bottom, child_top) = crate::arch::x86_64::excursion_stack_range_at(depth);
     let handler_on_child_stack = child_handler_sp >= child_bottom && child_handler_sp < child_top;
 
     let free_after = match crate::frame_allocator::take() {
@@ -2409,7 +2409,7 @@ pub fn spawn(
     #[cfg(not(feature = "spawn-keep-child-records"))]
     {
         crate::syscall::restore_records(saved_records);
-        crate::arch::x86_64::ring3::restore_fold_record(saved_fold);
+        crate::arch::x86_64::restore_fold_record(saved_fold);
     }
 
     // **共有フレームを `consumed` から除く（`ADR-0065` の (A-3)）。** **ウィンドウの間にアロケータから
@@ -2679,7 +2679,7 @@ pub fn run_detached_request() {
         logger.error(format_args!(
             "detached: the ring3 task started without a request; halting"
         ));
-        common::arch::x86_64::cpu::halt_forever();
+        common::arch::x86_64::halt_forever();
     }
     // SAFETY: 置き場は `static` なのでアドレスは生き続ける。**書く者は `start_detached` だけで、
     // このタスクが走っている間は `start_ring3_task` が起動を断る**ので、読んでいる間に

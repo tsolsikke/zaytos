@@ -73,6 +73,12 @@ pub enum TranslateError {
 }
 
 /// 稼働中（CR3 が指している）のページテーブル。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - この CPU が今使っているページテーブルを指す。作るのは [`ActivePageTable::current`] で、前提はその
+///   `# Safety` にある。
+/// - 共通の側は、ページを足す所と外す所（`crate::syscall`・`crate::smp`・`crate::interrupts` の探り）で使う。
 pub struct ActivePageTable {
     pml4_phys: PhysAddr,
     /// テーブルのフレームを読むためのウィンドウ。
@@ -229,6 +235,11 @@ pub enum MapUpdateError {
 /// 次第。AP は BSP の値をコピーする）ので、NXE が 0 のコアで立てると予約ビット違反の #PF になる。
 /// 有効化は別項の解禁条件に従う（`docs/deferred-decisions.md`）。
 /// G と PWT と PAT も無い。前者は立てない方針、後の 2 つは要求が出ていない。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - 共通の側は、ページを足すときの属性を欄の名前で書いて渡す（`crate::syscall`・`crate::smp`・
+///   `crate::userland`）。欄の意味をページテーブルのビットへ直すのは `arch` である。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageAttributes {
     /// Ring 3 から到達できるか（U/S）。**中間エントリへも伝播する。**

@@ -132,6 +132,10 @@ struct ExcursionStack([u8; EXCURSION_STACK_SIZE]);
 /// **[`enter`] の契約である。** 呼び出し側が [`depth`] で確かめてから呼ぶ。
 /// **越えて呼ぶと、上限を越えた添字で静的配列に触ることになるので、
 /// 呼び出し側が防ぐ**（`spawn` は `-EAGAIN` を返す形になる）。
+///
+/// # 契約（境界の定数。2026-09-30）
+///
+/// - 共通の側は、遠征に入る前に今の深さと比べ、越えるなら入らない（`spawn` は断る）。
 pub const MAX_EXCURSION_DEPTH: usize = 2;
 
 /// 遠征専用のカーネルスタック（`.bss`）。IST スタックと同じ静的確保。
@@ -493,6 +497,10 @@ core::arch::global_asm!(
 );
 
 /// 遠征専用カーネルスタックの (下端, 上端)。RSP0 とハンドラ RSP の照合に使う。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 読むだけで、何も変えない（今いちばん内側の遠征のスタックで、遠征に入っていなければ深さ 0 のもの）。
 pub fn excursion_stack_range() -> (u64, u64) {
     // **今いちばん内側の遠征のスタック。** 遠征に入っていなければ深さ 0 のもの
     // （かつての唯一のスタックと同じ）である。
@@ -502,6 +510,10 @@ pub fn excursion_stack_range() -> (u64, u64) {
 /// 深さ `depth` の遠征スタックの (下端, 上端)（S11-2）。
 ///
 /// 範囲外の `depth` では止まる（[`excursion_stack_range_of`] が止める。W1-c-3c までは深さ 0 のものを返していた）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 読むだけで、何も変えない。範囲外の深さでは止まる（[`excursion_stack_range_of`] が止める）。
 #[inline(always)]
 pub fn excursion_stack_range_at(depth: usize) -> (u64, u64) {
     excursion_stack_range_of(current_slot(), depth)
@@ -557,6 +569,10 @@ unsafe fn fill_excursion_stack(depth: usize) {
 ///
 /// **[`fill_excursion_stack`] を通っていないスタックについては意味を持たない**
 /// （埋めていないので、走査は 0 バイト目で止まる）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 遠征スタックの目印を底から読むだけで、何も変えない。範囲外の深さでは止まる。
 pub fn excursion_stack_high_water(depth: usize) -> usize {
     // **範囲外は止める（W1-c-3c）。** **以前は 0 を返していた**——**「0 バイト使った」と
     // 読める値を、使っていない添字について出していた。**
@@ -579,11 +595,19 @@ pub fn excursion_stack_high_water(depth: usize) -> usize {
 /// **偽なら、そのスタックを使い切って下の静的領域まで書いた疑いがある。**
 /// **溢れは静かに起きる**——このスタックにはガードページが無い
 /// （[`EXCURSION_STACK_CANARY`]）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 読むだけの判定で、何も変えない。呼ぶのは、遠征から戻った後の判定の行（`crate::userland`）である。
 pub fn excursion_stack_canary_intact(depth: usize) -> bool {
     excursion_stack_high_water(depth) <= EXCURSION_STACK_SIZE - EXCURSION_STACK_CANARY
 }
 
 /// 遠征スタック 1 本の容量（判定行に出す。S11-5）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 決まった大きさを返すだけで、何も変えない。判定の行に出す（`crate::userland`）。
 pub fn excursion_stack_capacity() -> usize {
     EXCURSION_STACK_SIZE
 }
@@ -607,6 +631,10 @@ pub fn excursion_stack_capacity() -> usize {
 /// **まだ壊れていない。** それでも止めるのは、**越えた状態で先へ進むと、
 /// 次に何かを足した人が「前から越えていた」ものとして扱うからである。**
 /// **解禁条件は、発火した時点で判断を求めるためにある。**
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 読むだけの判定で、何も変えない。偽なら、呼んだ側（`crate::userland`）が止まる。
 pub fn excursion_stack_within_budget(depth: usize) -> bool {
     excursion_stack_high_water(depth) * 2 <= EXCURSION_STACK_SIZE
 }
@@ -1025,6 +1053,11 @@ pub struct FoldRecord {
 }
 
 /// 今の例外による終了処理の記録を控える（S11-5）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 今の遠征の終了処理の記録を写して返すだけで、何も変えない。
+/// - 呼ぶのは `spawn`（`crate::userland`）で、子の遠征の前に親の記録を控える（戻すのは [`restore_fold_record`]）。
 pub fn save_fold_record() -> FoldRecord {
     // **1 回だけ引く（W1-c-3。[`enter`] の同じ箇所の注記）。**
     let state = state();
@@ -1042,6 +1075,11 @@ pub fn save_fold_record() -> FoldRecord {
 }
 
 /// 控えた例外による終了処理の記録を戻す（S11-5）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 控えた記録を書き戻す。呼ぶのは `spawn`（`crate::userland`）で、子の遠征から戻った後に、親の記録を
+///   元へ戻す。
 pub fn restore_fold_record(record: FoldRecord) {
     // **1 回だけ引く（W1-c-3。[`enter`] の同じ箇所の注記）。**
     let state = state();

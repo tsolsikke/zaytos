@@ -245,6 +245,11 @@ pub unsafe fn paint_unused_kernel_stack(rsp: u64) {
 ///
 /// **返すのは「使ったバイト数」である。** **敷いていなければ容量が返る**
 /// （底が目印でないため）——**敷き忘れは、使い切ったように見える。**
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - カーネルスタックの目印を底から読むだけで、何も変えない。呼ぶのは、ユーザーへ落ちる前の判定の行
+///   （`crate::userland`）である。
 pub fn kernel_stack_high_water() -> usize {
     let range = kernel_stack_range();
     let bottom = range.bottom.as_u64() as *const u8;
@@ -258,6 +263,10 @@ pub fn kernel_stack_high_water() -> usize {
 }
 
 /// カーネルスタックの容量（判定行に出す）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 決まった大きさを返すだけで、何も変えない。判定の行に出す（`crate::userland`）。
 pub fn kernel_stack_capacity() -> usize {
     KERNEL_STACK_SIZE
 }

@@ -933,8 +933,8 @@ unsafe fn flush_root_image(bkl: &mut Option<crate::bkl::BklGuard>) -> Result<(),
         // **声は panic で出す**——**`syscall.rs` にシリアルポートは無い**（開けると直接シリアルの
         // 許可リストに項目が増える）。**パニックの方針は Halt and Dump である**（`ADR-0004`）。
         if cfg!(feature = "flush-waits-without-device") {
-            let started = common::arch::x86_64::cpu::read_timestamp_counter();
-            while common::arch::x86_64::cpu::read_timestamp_counter().wrapping_sub(started)
+            let started = common::arch::x86_64::read_timestamp_counter();
+            while common::arch::x86_64::read_timestamp_counter().wrapping_sub(started)
                 < FLUSH_WITHOUT_DEVICE_DEADLINE_CYCLES
             {
                 core::hint::spin_loop();
@@ -949,7 +949,7 @@ unsafe fn flush_root_image(bkl: &mut Option<crate::bkl::BklGuard>) -> Result<(),
     let Some(mut claim) = crate::virtio::claim() else {
         return Err(EBUSY);
     };
-    let started = common::arch::x86_64::cpu::read_timestamp_counter();
+    let started = common::arch::x86_64::read_timestamp_counter();
     // **発行は BKL の下で行う。** リングを触るので、同じコアの再入も止める。
     // SAFETY: 呼び出し元契約により BKL を保持している。
     let Some((expected, before, bytes)) = (unsafe { claim.issue_image_write() }) else {
@@ -960,7 +960,7 @@ unsafe fn flush_root_image(bkl: &mut Option<crate::bkl::BklGuard>) -> Result<(),
     // SAFETY: BKL は解いてある。`expected` は直前の発行が返した値である。
     let outcome = unsafe { claim.wait_for_image_write(expected, before) };
     *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
-    let cycles = common::arch::x86_64::cpu::read_timestamp_counter().wrapping_sub(started);
+    let cycles = common::arch::x86_64::read_timestamp_counter().wrapping_sub(started);
     crate::virtio::note_flush(bytes, cycles);
     match outcome {
         Ok(()) => Ok(()),
@@ -1433,7 +1433,7 @@ pub fn screen_pages_mapped() -> u64 {
 /// `direct_map` が有効であること（遠征の中で呼ぶ）。
 #[inline(never)]
 unsafe fn mmap_screen_from_ring3(len: u64, prot: u64, direct_map: DirectMap) -> u64 {
-    use crate::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
+    use crate::arch::x86_64::{ActivePageTable, PageAttributes};
 
     let Some(surface) = crate::console::graphics_surface() else {
         return (-ENODEV) as u64;
@@ -2040,7 +2040,7 @@ fn ftruncate_from_ring3(fd: u64, size: u64) -> u64 {
 /// 呼び出し元契約により `direct_map` は有効で、遠征の中なので CR3 はこのプロセスのもの。
 #[inline(never)]
 unsafe fn mmap_from_ring3(len: u64, prot: u64, fd: u64, offset: u64, direct_map: DirectMap) -> u64 {
-    use crate::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
+    use crate::arch::x86_64::{ActivePageTable, PageAttributes};
 
     if offset != 0 {
         return (-EINVAL) as u64;
@@ -2814,7 +2814,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, sp_at_call: u64) -> u64 {
     let direct_map = common::addr::direct_map();
     // SAFETY: CR3 を読んで現在のテーブルを構築するだけ（読み取り）。IF=0 の単一文脈。
     let page_table_root =
-        unsafe { crate::arch::x86_64::paging::active::ActivePageTable::current(direct_map) }.root();
+        unsafe { crate::arch::x86_64::ActivePageTable::current(direct_map) }.root();
 
     // **[`SYS_SPAWN`] だけは、この関数が持つ。** BKL を解いてから入る必要があり、
     // ガードはここのローカルである（[`spawn_from_ring3`]）。
@@ -3445,7 +3445,7 @@ fn errno_for_alloc(error: common::ext2::AllocError) -> i64 {
 ///
 /// **遠征の中では CR3 がこのプロセスのものである**
 /// （`crate::userland` の `run_loaded_program` が `set_active_page_table_root` してから入る）。
-/// **したがって [`crate::arch::x86_64::paging::active::ActivePageTable::current`] が
+/// **したがって [`crate::arch::x86_64::ActivePageTable::current`] が
 /// 指すのはユーザーの表である。** **新しい経路を作らない**（ADR-0044）。
 ///
 /// # 途中で足りなくなったら、そこまでで止める
@@ -3458,7 +3458,7 @@ fn errno_for_alloc(error: common::ext2::AllocError) -> i64 {
 ///
 /// `direct_map` が有効で、遠征の中（CR3 がユーザーの表）から呼ばれること。
 unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
-    use crate::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
+    use crate::arch::x86_64::{ActivePageTable, PageAttributes};
 
     let (mapped, current, start) = crate::userland::with_current_heap(|heap| {
         (heap.is_mapped(), heap.break_at(), heap.start())
