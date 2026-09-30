@@ -168,7 +168,7 @@ pub unsafe fn remove_identity(
     // 低位の一点（恒等が覆っていた VA）を後の確認用に控える。恒等ウィンドウでは phys==virt
     // なので、PML4 フレームの物理値をそのまま低位 VA として使う。
     let rip = cpu::read_rip();
-    let rsp = cpu::read_rsp();
+    let rsp = cpu::read_stack_pointer();
     let dm_window = direct_map.phys_to_virt(cr3);
     // カーネルイメージ先頭 VMA。lib が link_symbols から導ける（main.rs の
     // image_lo と同じ式）ので、忘れないよう内部で持つ。

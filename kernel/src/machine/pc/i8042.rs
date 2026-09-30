@@ -89,8 +89,9 @@ pub fn status() -> u8 {
     unsafe { inb(STATUS_COMMAND_PORT) }
 }
 
-/// 出力バッファに読むべきデータがあるか。
-pub fn output_buffer_full() -> bool {
+/// 出力バッファに読むべきデータ（キーボードからのバイト）があるか。**読まない**（ステータスを見るだけで、
+/// バッファを消費しない）。
+pub fn keyboard_data_ready() -> bool {
     status() & STATUS_OUTPUT_FULL != 0
 }
 
@@ -105,7 +106,7 @@ pub fn output_buffer_full() -> bool {
 ///
 /// 読み出しは出力バッファを消費する副作用を持つ。同じバイトを 2 回読むことは
 /// できないので、呼び出し側は読んだ値を必ず処理すること。
-pub unsafe fn read_data() -> u8 {
+pub unsafe fn read_keyboard_data() -> u8 {
     // SAFETY: 0x60 は i8042 のデータポート。読み出しで 1 バイト消費する。
     unsafe { inb(DATA_PORT) }
 }
@@ -124,7 +125,7 @@ fn wait_input_clear() -> Result<(), ControllerError> {
 /// 出力バッファにデータが来るまで待つ（上限つき）。
 fn wait_output_ready() -> Result<(), ControllerError> {
     for _ in 0..POLL_LIMIT {
-        if output_buffer_full() {
+        if keyboard_data_ready() {
             return Ok(());
         }
         io_wait();
@@ -146,7 +147,7 @@ pub unsafe fn read_config() -> Result<u8, ControllerError> {
     }
     wait_output_ready()?;
     // SAFETY: 直前に OBF が立つのを確認した。
-    Ok(unsafe { read_data() })
+    Ok(unsafe { read_keyboard_data() })
 }
 
 /// コンフィグバイトを書き、**読み直して一致を確認する**。
@@ -193,10 +194,10 @@ pub unsafe fn drain_output_buffer() -> usize {
     // 瞬間の OBF だけでなく、少しのあいだ監視する（DRAIN_SETTLE_ITERATIONS の
     // コメント参照）。上限つきなので、応答しないコントローラでも止まらない。
     for _ in 0..DRAIN_SETTLE_ITERATIONS {
-        if output_buffer_full() {
+        if keyboard_data_ready() {
             // SAFETY: OBF が立っていることを直前に確認した。
             unsafe {
-                read_data();
+                read_keyboard_data();
             }
             discarded += 1;
             if discarded >= DRAIN_LIMIT {

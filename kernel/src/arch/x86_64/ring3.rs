@@ -615,7 +615,7 @@ pub fn depth() -> usize {
 /// [`USER_CODE_VIRT`] と [`USER_STACK_TOP`] を渡す。変えたのは、値が固定である
 /// ことをやめた点だけである。
 ///
-/// **どこで終了させられたかは呼び出し側が主張する。** [`folded`]・[`fault_vector`]・
+/// **どこで終了させられたかは呼び出し側が主張する。** [`folded`]・[`fault_number`]・
 /// [`fault_rip`] を読み、自分が置いた命令の位置と突き合わせること。この関数は
 /// 突き合わせない（遠征ごとに予期する位置が違い、それは呼び出し側の知識である）。
 ///
@@ -1057,8 +1057,8 @@ pub fn fault_cs() -> u64 {
     state().fault_cs.load(Ordering::SeqCst)
 }
 
-/// 終了処理した例外のベクタ。呼び出し側が予期と突き合わせる。
-pub fn fault_vector() -> u64 {
+/// 終了処理した例外の番号（x86 ではベクタ）。呼び出し側が予期と突き合わせる。
+pub fn fault_number() -> u64 {
     state().fault_vector.load(Ordering::SeqCst)
 }
 

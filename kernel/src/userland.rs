@@ -2363,7 +2363,7 @@ pub fn spawn(
     } else if crate::syscall::process_exited() {
         SpawnOutcome::Exited(crate::syscall::process_exit_status())
     } else {
-        SpawnOutcome::Folded(crate::arch::x86_64::ring3::fault_vector())
+        SpawnOutcome::Folded(crate::arch::x86_64::ring3::fault_number())
     };
     let syscalls = crate::syscall::invocation_count();
 

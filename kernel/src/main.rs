@@ -246,7 +246,7 @@ fn report_high_half_arrival(logger: &mut Logger<SerialPort>) {
     use common::addr::VirtAddr;
 
     let rip = cpu::read_rip();
-    let rsp = cpu::read_rsp();
+    let rsp = cpu::read_stack_pointer();
     let cr3 = paging::switch::active_page_table_root();
 
     // 期待する高位範囲（イメージの VMA）。
@@ -336,7 +336,7 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
     }
     let rflags_after = cpu::read_rflags();
 
-    let old_rsp = cpu::read_rsp();
+    let old_rsp = cpu::read_stack_pointer();
 
     // スタックのカナリアを先に敷く。ここから下で自前スタックを使い始める。
     // SAFETY: 起動時の単一実行文脈であり、まだ誰もこれらのスタックを
@@ -938,7 +938,7 @@ extern "sysv64" fn kernel_main() -> ! {
         .checked_add(boot_info.memory_map.descriptors_len)
         .expect("the memory map buffer stays within the physical address range");
     // fb_start/fb_end は上（extra_ranges 構築時）で計算済みのものを使う。
-    let current_rsp = cpu::read_rsp();
+    let current_rsp = cpu::read_stack_pointer();
     let current_rip = cpu::read_rip();
     let pml4_phys = builder.root();
 
@@ -1096,7 +1096,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // 少し下（生きているスタックフレームより低い未使用側）へ生ポインタで書いて
     // 読み戻す。
     logger.info(format_args!("paging: about to test: stack read/write"));
-    let stack_probe_addr = cpu::read_rsp().wrapping_sub(256);
+    let stack_probe_addr = cpu::read_stack_pointer().wrapping_sub(256);
     const STACK_PROBE_PATTERN: u64 = 0xDEAD_BEEF_CAFE_0000;
     // SAFETY: stack_probe_addr は現在の RSP より低い未使用側で、使用中のスタック
     // フレームには重ならない。必須領域検証の "current RSP" と同じマップ済み範囲にある。
@@ -3624,7 +3624,7 @@ fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
     // --- スタック切り替えの検証 ---
     let kernel_stack = stack::kernel_stack_range();
     let double_fault_stack = stack::double_fault_stack_range();
-    let current_rsp = cpu::read_rsp();
+    let current_rsp = cpu::read_stack_pointer();
 
     logger.info(format_args!(
         "stack: old RSP={old_rsp:#x} (UEFI-derived), new RSP={current_rsp:#x}"
@@ -8957,7 +8957,7 @@ fn check_user_program_outcome(
     let exited = kernel::syscall::process_exited();
     let status = kernel::syscall::process_exit_status();
     let folded = kernel::arch::x86_64::ring3::folded();
-    let vector = kernel::arch::x86_64::ring3::fault_vector();
+    let vector = kernel::arch::x86_64::ring3::fault_number();
     let rip = kernel::arch::x86_64::ring3::fault_rip();
     let cs = kernel::arch::x86_64::ring3::fault_cs();
     let cr2 = kernel::arch::x86_64::ring3::fault_cr2();
@@ -9303,7 +9303,7 @@ fn assert_folded_at(
 ) {
     use kernel::arch::x86_64::ring3;
 
-    let vector = ring3::fault_vector();
+    let vector = ring3::fault_number();
     let rip = ring3::fault_rip();
     if vector == expected_vector && rip == expected_rip {
         return;
@@ -10218,7 +10218,7 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
             cpu::halt_forever();
         }
 
-        let vector = ring3::fault_vector();
+        let vector = ring3::fault_number();
         let rip = ring3::fault_rip();
         let cs = ring3::fault_cs();
         let expected_rip = ring3::USER_CODE_VIRT + fault_offset;
@@ -12465,7 +12465,7 @@ fn report_mapping_granularity(
     // アドレスの確認にならない。
     let probes: [(&str, u64); 4] = [
         ("executing code (RIP)", cpu::read_rip()),
-        ("kernel stack (RSP)", cpu::read_rsp()),
+        ("kernel stack (RSP)", cpu::read_stack_pointer()),
         ("heap arena", heap_start),
         ("framebuffer", framebuffer_phys),
     ];

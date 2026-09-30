@@ -24,7 +24,7 @@ fn panic(info: &PanicInfo) -> ! {
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
     serial.init();
 
-    let sp = cpu::read_rsp();
+    let sp = cpu::read_stack_pointer();
 
     let _ = writeln!(serial, "[ERROR] panic: {info}");
     let _ = writeln!(serial, "[ERROR]   rsp = {sp:#018x}");
