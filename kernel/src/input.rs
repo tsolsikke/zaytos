@@ -47,6 +47,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use common::critical::Locked;
 
+use crate::abi::linux::{input_event_bytes, InputEvent, EV_KEY, INPUT_EVENT_LEN};
+
 /// Ring 3 が前景を持っているか（S11-10）。
 ///
 /// **真のあいだ、カーネル側の消費者（`drain_keyboard`）は取り出さない。**
@@ -317,13 +319,6 @@ pub fn delivered_count() -> u64 {
     DELIVERED.load(Ordering::SeqCst)
 }
 
-/// 生入力イベント 1 つのバイト数（`ADR-0066` の Y-a）。**Linux の `struct input_event` の
-/// 配置に合わせる**（`ADR-0020`。`tv_sec`(8)＋`tv_usec`(8)＋`type`(2)＋`code`(2)＋`value`(4)）。
-pub const INPUT_EVENT_LEN: usize = 24;
-
-/// `EV_KEY`（`struct input_event` の `type`）。
-const EV_KEY: u16 = 1;
-
 /// Ring 3 へ届けた生入力イベントの累計（`ADR-0066` の Y-a。判定行）。
 static INPUT_EVENTS_DELIVERED: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
@@ -389,11 +384,14 @@ pub fn read_events(dst: &mut [u8]) -> usize {
             u16::from(code & 0x7F)
         };
         let value: i32 = if released { 0 } else { 1 };
-        dst[written..written + 8].copy_from_slice(&secs.to_le_bytes());
-        dst[written + 8..written + 16].copy_from_slice(&usecs.to_le_bytes());
-        dst[written + 16..written + 18].copy_from_slice(&EV_KEY.to_le_bytes());
-        dst[written + 18..written + 20].copy_from_slice(&keycode.to_le_bytes());
-        dst[written + 20..written + 24].copy_from_slice(&value.to_le_bytes());
+        let event = InputEvent {
+            sec: secs,
+            usec: usecs,
+            kind: EV_KEY,
+            code: keycode,
+            value,
+        };
+        dst[written..written + INPUT_EVENT_LEN].copy_from_slice(&input_event_bytes(&event));
         written += INPUT_EVENT_LEN;
         INPUT_EVENTS_DELIVERED.fetch_add(1, Ordering::SeqCst);
     }

@@ -49,9 +49,9 @@ use crate::abi::linux::{
     Iovec, Msghdr, Stat, Timespec, Winsize, AF_UNIX, CLOCK_MONOTONIC, CMSG_ONE_FD_LEN,
     DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, DT_DIR, DT_REG, DT_UNKNOWN,
     FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, FB_TYPE_PACKED_PIXELS, FB_VISUAL_TRUECOLOR,
-    IOVEC_LEN, MSGHDR_LEN, O_ACCMODE, O_APPEND, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY, POLLFD_LEN,
-    POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET, SOCKADDR_UN_LEN, SOCK_STREAM, SOL_SOCKET,
-    TIMESPEC_LEN, TIOCGWINSZ, WINSIZE_LEN,
+    INPUT_EVENT_LEN, IOVEC_LEN, MSGHDR_LEN, O_ACCMODE, O_APPEND, O_CREAT, O_RDONLY, O_TRUNC,
+    O_WRONLY, POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET, SOCKADDR_UN_LEN, SOCK_STREAM,
+    SOL_SOCKET, TIMESPEC_LEN, TIOCGWINSZ, WINSIZE_LEN,
 };
 use crate::abi::linux::{
     E2BIG, EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, EBUSY, ECHILD, ECONNREFUSED, EEXIST,
@@ -1175,7 +1175,7 @@ fn socket_from_ring3(domain: u64, kind: u64, protocol: u64) -> u64 {
 }
 
 /// 1 回の入力読みで返す最大バイト数（`ADR-0066` の Y-a）。**イベントの整数倍**
-/// （4 つ。[`crate::input::INPUT_EVENT_LEN`] × 4）。
+/// （4 つ。[`INPUT_EVENT_LEN`] × 4）。
 const INPUT_READ_MAX: usize = 96;
 
 /// [`SYS_OPEN_INPUT`] の本体（`ADR-0066` の Y-a）。**前景の持ち主にだけ入力の生イベントの
@@ -1225,12 +1225,12 @@ unsafe fn read_input_events(
         return 0;
     }
     // **イベント 1 つに満たない要求は断る**（半端なイベントは返せない）。
-    if count < crate::input::INPUT_EVENT_LEN as u64 {
+    if count < INPUT_EVENT_LEN as u64 {
         return (-EINVAL) as u64;
     }
     let want = count.min(INPUT_READ_MAX as u64);
     // **イベントの整数倍に切り下げる。**
-    let cap = (want as usize / crate::input::INPUT_EVENT_LEN) * crate::input::INPUT_EVENT_LEN;
+    let cap = (want as usize / INPUT_EVENT_LEN) * INPUT_EVENT_LEN;
     // **踏み込む前に検証する。**
     // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
     let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, buf, cap as u64) })

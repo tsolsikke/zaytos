@@ -20,12 +20,13 @@ mod layout;
 
 pub use layout::{
     cmsg_one_fd_bytes, dirent64_record, dirent64_record_len, fb_fix_screeninfo_bytes,
-    fb_var_screeninfo_bytes, parse_cmsg_one_fd, parse_drm_clip_rect, parse_iovec, parse_msghdr,
-    parse_pollfd, parse_sockaddr_un, parse_timespec, set_pollfd_revents, timespec_bytes,
-    winsize_bytes, CmsgOneFd, Dirent64, DrmClipRect, FbBitfield, FbFixScreeninfo, FbVarScreeninfo,
-    Iovec, Msghdr, Pollfd, SockaddrUn, Stat, Timespec, Winsize, CMSG_ONE_FD_LEN, DIRENT64_ALIGN,
-    DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, FB_FIX_SCREENINFO_LEN, FB_VAR_SCREENINFO_LEN,
-    IOVEC_LEN, MSGHDR_LEN, POLLFD_LEN, SOCKADDR_UN_LEN, TIMESPEC_LEN, WINSIZE_LEN,
+    fb_var_screeninfo_bytes, input_event_bytes, parse_cmsg_one_fd, parse_drm_clip_rect,
+    parse_iovec, parse_msghdr, parse_pollfd, parse_sockaddr_un, parse_timespec, set_pollfd_revents,
+    timespec_bytes, winsize_bytes, CmsgOneFd, Dirent64, DrmClipRect, FbBitfield, FbFixScreeninfo,
+    FbVarScreeninfo, InputEvent, Iovec, Msghdr, Pollfd, SockaddrUn, Stat, Timespec, Winsize,
+    CMSG_ONE_FD_LEN, DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, FB_FIX_SCREENINFO_LEN,
+    FB_VAR_SCREENINFO_LEN, INPUT_EVENT_LEN, IOVEC_LEN, MSGHDR_LEN, POLLFD_LEN, SOCKADDR_UN_LEN,
+    TIMESPEC_LEN, WINSIZE_LEN,
 };
 
 mod request;
@@ -35,9 +36,10 @@ pub use request::SyscallRequest;
 mod values;
 
 pub use values::{
-    AF_UNIX, CLOCK_MONOTONIC, DT_DIR, DT_REG, DT_UNKNOWN, FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO,
-    FB_TYPE_PACKED_PIXELS, FB_VISUAL_TRUECOLOR, O_ACCMODE, O_APPEND, O_CREAT, O_RDONLY, O_TRUNC,
-    O_WRONLY, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET, SOCK_STREAM, SOL_SOCKET, TIOCGWINSZ,
+    AF_UNIX, CLOCK_MONOTONIC, DT_DIR, DT_REG, DT_UNKNOWN, EV_KEY, FBIOGET_FSCREENINFO,
+    FBIOGET_VSCREENINFO, FB_TYPE_PACKED_PIXELS, FB_VISUAL_TRUECOLOR, O_ACCMODE, O_APPEND, O_CREAT,
+    O_RDONLY, O_TRUNC, O_WRONLY, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET, SOCK_STREAM, SOL_SOCKET,
+    TIOCGWINSZ,
 };
 
 pub mod x86_64;

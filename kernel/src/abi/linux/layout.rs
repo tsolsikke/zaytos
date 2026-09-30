@@ -72,6 +72,10 @@ pub const IOVEC_LEN: usize = 16;
 /// `cmsg_type` 12 の 16 バイト。glibc の `bits/socket.h`）と、fd の 4 バイトである。
 pub const CMSG_ONE_FD_LEN: usize = 20;
 
+/// 生入力イベント 1 つのバイト数（`ADR-0066` の Y-a）。**Linux の `struct input_event` の
+/// 配置に合わせる**（`ADR-0020`。`tv_sec`(8)＋`tv_usec`(8)＋`type`(2)＋`code`(2)＋`value`(4)）。
+pub const INPUT_EVENT_LEN: usize = 24;
+
 /// `struct stat` に書く値。**ZaytOS が持つ欄だけである**（ほかの欄は 0 のまま返す）。
 ///
 /// **値を決めるのは共通の側で、[`stat_bytes`](super::x86_64::stat_bytes) は欄の位置へ書くだけである**（`ADR-0071` の決定 1 の 2 で、
@@ -441,6 +445,34 @@ pub fn cmsg_one_fd_bytes(cmsg: &CmsgOneFd) -> [u8; CMSG_ONE_FD_LEN] {
     out
 }
 
+/// `struct input_event` に書く値（`ADR-0066` の Y-a）。
+///
+/// **値（時刻・キーの番号・押下か離鍵か）を決めるのは共通の側で、欄の位置へ書くのはここである**（`ADR-0071` の決定 1 の 2
+/// で、`crate::input` の `read_events` から分けた。2026-09-30）。
+pub struct InputEvent {
+    /// `time.tv_sec`。
+    pub sec: u64,
+    /// `time.tv_usec`。
+    pub usec: u64,
+    /// `type`。
+    pub kind: u16,
+    /// `code`。
+    pub code: u16,
+    /// `value`。
+    pub value: i32,
+}
+
+/// `struct input_event` を組む（欄の並びは [`INPUT_EVENT_LEN`] の doc）。
+pub fn input_event_bytes(event: &InputEvent) -> [u8; INPUT_EVENT_LEN] {
+    let mut out = [0u8; INPUT_EVENT_LEN];
+    out[0..8].copy_from_slice(&event.sec.to_le_bytes());
+    out[8..16].copy_from_slice(&event.usec.to_le_bytes());
+    out[16..18].copy_from_slice(&event.kind.to_le_bytes());
+    out[18..20].copy_from_slice(&event.code.to_le_bytes());
+    out[20..24].copy_from_slice(&event.value.to_le_bytes());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     //! 構造体の配置。**`cc` の `offsetof` で測った値を機械で留める**（画面の `ioctl` の構造体は `ADR-0066` の Y-c。
@@ -723,5 +755,23 @@ mod tests {
             (read.level, read.kind, read.fd),
             (cmsg.level, cmsg.kind, cmsg.fd)
         );
+    }
+
+    /// `struct input_event` の欄の位置（`linux/input.h` を `gcc` と `aarch64-linux-gnu-gcc` の `offsetof` で測って確かめた。
+    /// 2026-09-30。両方で同じ）。**値は、どのバイトも 0 でなく、欄ごとに違う形にする。**
+    #[test]
+    fn an_input_event_follows_the_linux_layout() {
+        let bytes = input_event_bytes(&InputEvent {
+            sec: 0x0807_0605_0403_0201,
+            usec: 0x1817_1615_1413_1211,
+            kind: 0x2221,
+            code: 0x3231,
+            value: 0x4443_4241,
+        });
+        assert_eq!(u64_at(&bytes, 0), 0x0807_0605_0403_0201, "time.tv_sec @0");
+        assert_eq!(u64_at(&bytes, 8), 0x1817_1615_1413_1211, "time.tv_usec @8");
+        assert_eq!(u16_at(&bytes, 16), 0x2221, "type @16");
+        assert_eq!(u16_at(&bytes, 18), 0x3231, "code @18");
+        assert_eq!(u32_at(&bytes, 20), 0x4443_4241, "value @20");
     }
 }

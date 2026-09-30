@@ -234,6 +234,7 @@ kernel::abi::linux::layout::tests::a_dirent64_record_follows_the_linux_layout
 kernel::abi::linux::layout::tests::a_drm_clip_rect_is_read_as_four_u16s
 kernel::abi::linux::layout::tests::a_msghdr_is_read_from_the_linux_positions
 kernel::abi::linux::layout::tests::a_sockaddr_un_is_read_up_to_the_first_nul
+kernel::abi::linux::layout::tests::an_input_event_follows_the_linux_layout
 kernel::abi::linux::layout::tests::an_iovec_is_read_from_the_linux_positions
 kernel::abi::linux::layout::tests::the_fixed_screen_info_follows_the_linux_layout
 kernel::abi::linux::layout::tests::the_pollfd_fields_follow_the_linux_layout

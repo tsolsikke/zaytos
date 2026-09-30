@@ -82,3 +82,6 @@ pub const SOL_SOCKET: u32 = 1;
 
 /// `SCM_RIGHTS`（`cmsghdr` の type。fd を運ぶ）。
 pub const SCM_RIGHTS: u32 = 1;
+
+/// `EV_KEY`（`struct input_event` の `type`。`linux/input-event-codes.h`）。
+pub const EV_KEY: u16 = 1;
