@@ -22,7 +22,7 @@ SOFTWARE.
 
 ---
 
-Note: this license covers the ZaytOS source tree except for the contents of
+Note: this license covers the ZeikOS source tree except for the contents of
 third_party/, which are distributed under their own licenses. The bundled
 GNU Unifont glyph data (third_party/unifont/) is used under the SIL Open
 Font License 1.1; see third_party/unifont/COPYING for the full text.

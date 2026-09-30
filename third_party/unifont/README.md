@@ -1,6 +1,6 @@
 # GNU Unifont
 
-ZaytOS のコンソールフォントとして GNU Unifont のビットマップグリフを使う。
+ZeikOS のコンソールフォントとして GNU Unifont のビットマップグリフを使う。
 
 - 取得元: <https://ftp.gnu.org/gnu/unifont/unifont-17.0.05/>
 - バージョン: 17.0.05
@@ -9,7 +9,7 @@ ZaytOS のコンソールフォントとして GNU Unifont のビットマップ
 ## ライセンス
 
 グリフデータは SIL Open Font License 1.1 と、GNU GPL v2 以降（フォント埋め込み
-例外つき）のデュアルライセンス。ZaytOS では **SIL OFL 1.1** の条件で利用する。
+例外つき）のデュアルライセンス。ZeikOS では **SIL OFL 1.1** の条件で利用する。
 全文は `COPYING`（配布物の同名ファイルをそのまま置いたもの）を参照。
 
 なお日本語の漢字グリフを収録する `jiskan16` 由来の部分はパブリックドメインで
@@ -19,7 +19,7 @@ Reserved Font Name の宣言は無い。
 
 `unifont-subset.hex` と、そこから生成される
 `kernel/src/graphics/font/unifont_glyphs.rs` は、いずれも Unifont の派生物
-として OFL 1.1 の下にある。ZaytOS 自身のコードとは切り分けて扱うこと。
+として OFL 1.1 の下にある。ZeikOS 自身のコードとは切り分けて扱うこと。
 
 ## unifont-subset.hex
 

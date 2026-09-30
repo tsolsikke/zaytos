@@ -1,14 +1,17 @@
-# ZaytOS
+# ZeikOS
 
 [![check](https://github.com/tsolsikke/zaytos/actions/workflows/check.yml/badge.svg)](https://github.com/tsolsikke/zaytos/actions/workflows/check.yml)
 
-ZaytOS is an educational x86_64 operating system written in Rust, featuring a
+ZeikOS is an educational x86_64 operating system written in Rust, featuring a
 custom UEFI bootloader, SMP, Ring 3 user space, persistent ext2 storage, a shell,
 and a text editor.
 
 x86_64向けの、学習目的の自作OS。Rust製のモノリシックカーネルである。
 UEFIで起動し、マルチコアで動き、Ring 3のユーザープログラムを走らせ、
 ext2のディスクへ書いたものが再起動をまたいで残る。
+
+ZeikOS（ぜいくおーえす／ぜいこす）は、Zeit（時間）とTuikku（小さな灯り）に着想を得た造語である。
+Zには、アルファベットの最後の文字という意味も重ねている。
 
 Linuxディストリビューションや実用品の代替を目指すものではない。
 対象はx86_64で、動かす先はQEMU + OVMFとVirtualBoxである。AArch64へは、QEMUで起動してシェルが動くまでの浅い仮対応を予定している。
@@ -115,11 +118,11 @@ cargo xtask run --gui --manual
 
 ## 検査
 
-ZaytOSは「検査そのものが働いていること」を確かめる形を取っている。
+ZeikOSは「検査そのものが働いていること」を確かめる形を取っている。
 考え方は5つである。
 
 - **外の道具で結果を確かめる。** `e2fsck`・`dumpe2fs`・`debugfs`・QEMUのmonitorを使い、
-  ZaytOSが書いたイメージをLinuxで実際にmountする手順も残してある。
+  ZeikOSが書いたイメージをLinuxで実際にmountする手順も残してある。
   自分で書いた読み手だけで成功を判定すると、自分の理解どうしの一致しか言えない
 - **わざと壊して、検査が落ちることを確かめる。** 意図的に振る舞いを変える構成
   （破壊テストのfeature）を用意し、「その構成でだけ落ちる判定が在る」ことを確かめてから設ける
@@ -201,7 +204,7 @@ pushの前の関門は、Git自身のhook（`.githooks/pre-push`）にも設け�
 | [stb_truetype](third_party/stb/) | TrueTypeの読み取りとラスタライズ | MIT（パブリックドメインとの選択制） |
 | [DejaVu Sans Mono](third_party/dejavu/) | `stb_truetype`が読むフォント | Bitstream Vera |
 
-GNU UnifontのグリフデータはSIL Open Font License 1.1とGNU GPL v2以降（フォント埋め込み例外つき）のデュアルライセンスで、ZaytOSはOFL 1.1の条件で利用している。
+GNU UnifontのグリフデータはSIL Open Font License 1.1とGNU GPL v2以降（フォント埋め込み例外つき）のデュアルライセンスで、ZeikOSはOFL 1.1の条件で利用している。
 日本語漢字グリフの元になっているjiskan16由来の部分はパブリックドメイン。
 出典・ライセンス全文・収録範囲の広げ方は[third_party/unifont/](third_party/unifont/)を参照。
 
