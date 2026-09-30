@@ -3621,9 +3621,7 @@ mod tests {
             let expected = if task == super::RING3_TASK { 1 } else { 0 };
             assert_eq!(super::ring3_slot_of(task), expected, "task {task}");
         }
-        assert!(
-            super::ring3_slot_of(super::RING3_TASK) < crate::arch::x86_64::ring3::USER_TASK_SLOTS
-        );
+        assert!(super::ring3_slot_of(super::RING3_TASK) < crate::arch::x86_64::USER_TASK_SLOTS);
         assert_eq!(super::ring3_slot_of(super::BSP_IDLE_TASK), 0);
     }
 

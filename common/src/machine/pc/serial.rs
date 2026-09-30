@@ -184,6 +184,10 @@ fn lock_identity() -> usize {
 }
 
 /// 上限を越えて、ロックを取らずに書いた回数（計測）。**判定にしない**——**揺れる。**
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 上限を越えて、最内側のロックを取らずに書いた回数を読むだけで、何も変えない（計測で、判定にしない）。
 pub fn serial_forced_write_count() -> u64 {
     UART_LOCK.forced.load(Ordering::Relaxed)
 }
@@ -192,6 +196,10 @@ pub fn serial_forced_write_count() -> u64 {
 ///
 /// **0 でなければ、「割り込みハンドラは何も出力しない」が破られている。**
 /// **あの規約は検査されていないので、これが事後の観測になる。**
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 割り込みハンドラの中からシリアルへ書いた回数を読むだけで、何も変えない。
 pub fn serial_reentry_count() -> u64 {
     UART_LOCK.reentered.load(Ordering::Relaxed)
 }

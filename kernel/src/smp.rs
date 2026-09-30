@@ -12,8 +12,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use core::fmt::Write as _;
 
-#[allow(unused_imports)]
-use crate::arch::x86_64::paging::verify;
 #[cfg(feature = "smp-tlb-shootdown-probe")]
 use crate::arch::x86_64::{ActivePageTable, PageAttributes};
 #[cfg(feature = "smp-tlb-shootdown-probe")]
@@ -534,11 +532,7 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
     // SAFETY: 稼働中のテーブルを direct map 越しに読むだけ（本番テーブルには
     // direct map がある）。読み取りのみ。
     let first_top_entry = unsafe {
-        crate::arch::x86_64::paging::verify::read_top_level_entry(
-            root_phys,
-            common::addr::direct_map(),
-            0,
-        )
+        crate::arch::x86_64::read_top_level_entry(root_phys, common::addr::direct_map(), 0)
     };
     let identity_gone = first_top_entry & 1 == 0;
 

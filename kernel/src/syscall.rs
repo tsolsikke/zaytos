@@ -338,7 +338,7 @@ struct SyscallState {
     ///
     /// # 据えるのは Ring 3 へ落ちる側である
     ///
-    /// [`crate::arch::x86_64::ring3::run_excursion`] が遠征の間だけ据え、戻るときに元へ戻す。**据えないまま
+    /// [`crate::arch::x86_64::run_excursion`] が遠征の間だけ据え、戻るときに元へ戻す。**据えないまま
     /// ここへ来ることはない**——[`validate_user_range`] を呼ぶのは [`dispatch`] だけで、
     /// あちらは `syscall_entry` からしか来ず、`syscall_entry` は Ring 3 からしか来ない。
     ///
@@ -392,16 +392,16 @@ impl SyscallState {
 }
 
 /// システムコール側の状態、スロットごと（W1-a）。
-static SYSCALL_STATE: [SyscallState; crate::arch::x86_64::ring3::USER_TASK_SLOTS] =
-    [const { SyscallState::new() }; crate::arch::x86_64::ring3::USER_TASK_SLOTS];
+static SYSCALL_STATE: [SyscallState; crate::arch::x86_64::USER_TASK_SLOTS] =
+    [const { SyscallState::new() }; crate::arch::x86_64::USER_TASK_SLOTS];
 
 /// 今のタスクのシステムコール側の状態を引く（W1-a。W1-c-3 でタスクのスロットから引く形にした）。
 ///
-/// **既定の起動では必ずスロット 0 である**（`crate::arch::x86_64::ring3::current_excursion_slot`。**W1-c-4 の
+/// **既定の起動では必ずスロット 0 である**（`crate::arch::x86_64::current_excursion_slot`。**W1-c-4 の
 /// `concurrent-test` では足した 1 本がスロット 1 を引く**）。
 #[inline(always)]
 fn state() -> &'static SyscallState {
-    &SYSCALL_STATE[crate::arch::x86_64::ring3::current_excursion_slot()]
+    &SYSCALL_STATE[crate::arch::x86_64::current_excursion_slot()]
 }
 
 /// [`PROBE_NUMBER`] を受け取ったか（S9-b-3-2a）。
@@ -480,7 +480,7 @@ impl UserSlice {
 ///   (a) 長さの加算にオーバーフローが無い（`checked_add`）。
 ///   (b) 範囲が**今 Ring 3 が使っている窓**に収まる（[`user_window`]）。
 ///   (c) 範囲を跨ぐ全 4KiB ページが present && 全階層 U=1
-///       （[`crate::arch::x86_64::paging::verify::walk_page_table_user_accessible`]）。
+///       （[`crate::arch::x86_64::walk_page_table_user_accessible`]）。
 ///
 /// (a)(b)(c-present) は多層防御として (c-U=1) に冗長で、単独では隔離した破壊テストでの確認が
 /// できない（詳細は verification-coverage）。それらは default battery の first-line
@@ -533,7 +533,7 @@ pub unsafe fn validate_user_range(
             let virt = common::addr::VirtAddr::new(page)?;
             // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。読み取りのみ。
             if unsafe {
-                crate::arch::x86_64::paging::verify::walk_page_table_user_accessible(
+                crate::arch::x86_64::walk_page_table_user_accessible(
                     page_table_root,
                     direct_map,
                     virt,
@@ -1444,7 +1444,7 @@ unsafe fn mmap_screen_from_ring3(len: u64, prot: u64, direct_map: DirectMap) -> 
         return (-EINVAL) as u64;
     }
     let pages = len.div_ceil(PAGE);
-    let slot = crate::arch::x86_64::ring3::current_excursion_slot();
+    let slot = crate::arch::x86_64::current_excursion_slot();
     let base = MMAP_NEXT[slot].fetch_add(pages * PAGE, Ordering::SeqCst);
     let attributes = PageAttributes {
         user: true,
@@ -1979,9 +1979,8 @@ unsafe fn write_to_socket(
 const MMAP_BASE: u64 = 0x1000_0000;
 
 /// 次に `mmap` でマップするアドレス（スロットごと。`MMAP_BASE` から上へ）。
-static MMAP_NEXT: [core::sync::atomic::AtomicU64; crate::arch::x86_64::ring3::USER_TASK_SLOTS] =
-    [const { core::sync::atomic::AtomicU64::new(MMAP_BASE) };
-        crate::arch::x86_64::ring3::USER_TASK_SLOTS];
+static MMAP_NEXT: [core::sync::atomic::AtomicU64; crate::arch::x86_64::USER_TASK_SLOTS] =
+    [const { core::sync::atomic::AtomicU64::new(MMAP_BASE) }; crate::arch::x86_64::USER_TASK_SLOTS];
 
 /// fd から共有メモリの添字を引く。**共有メモリでなければ `Err(-EBADF)`。**
 fn shm_of(fd: u64) -> Result<u8, u64> {
@@ -2067,7 +2066,7 @@ unsafe fn mmap_from_ring3(len: u64, prot: u64, fd: u64, offset: u64, direct_map:
     if want_pages > pages {
         return (-EINVAL) as u64;
     }
-    let slot = crate::arch::x86_64::ring3::current_excursion_slot();
+    let slot = crate::arch::x86_64::current_excursion_slot();
     let base = MMAP_NEXT[slot].fetch_add(
         (want_pages * crate::shm::PAGE_SIZE) as u64,
         core::sync::atomic::Ordering::SeqCst,
@@ -2115,7 +2114,7 @@ unsafe fn mmap_from_ring3(len: u64, prot: u64, fd: u64, offset: u64, direct_map:
     let tables_taken = free_before_map.saturating_sub(allocator.free_frame_count());
     crate::frame_allocator::give_back(allocator);
     crate::userland::note_post_load_frames(
-        crate::arch::x86_64::ring3::current_excursion_slot(),
+        crate::arch::x86_64::current_excursion_slot(),
         tables_taken as usize,
     );
     outcome
@@ -2463,10 +2462,7 @@ unsafe fn spawn_detached_from_ring3(
         return (-EAGAIN) as u64;
     };
     if let Some(pipe) = stdout_pipe {
-        crate::userland::set_pending_stdin(
-            crate::arch::x86_64::ring3::current_excursion_slot(),
-            pipe,
-        );
+        crate::userland::set_pending_stdin(crate::arch::x86_64::current_excursion_slot(), pipe);
     }
     DETACHED_STARTS.fetch_add(1, Ordering::Relaxed);
 
@@ -2514,7 +2510,7 @@ unsafe fn spawn_with_piped_stdin_from_ring3(
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
-    let slot = crate::arch::x86_64::ring3::current_excursion_slot();
+    let slot = crate::arch::x86_64::current_excursion_slot();
     let Some(pipe) = crate::userland::peek_pending_stdin(slot) else {
         return (-EINVAL) as u64;
     };
@@ -2594,7 +2590,7 @@ fn wait_child_from_ring3(handle: u64, bkl: &mut Option<crate::bkl::BklGuard>) ->
     // 回の後、パイプが空かず、次の `|` が `-EBUSY` になる。**
     #[cfg(not(feature = "wait-child-keeps-reservation"))]
     if let Some(pipe) =
-        crate::userland::take_pending_stdin(crate::arch::x86_64::ring3::current_excursion_slot())
+        crate::userland::take_pending_stdin(crate::arch::x86_64::current_excursion_slot())
     {
         crate::pipe::drop_reservation(pipe);
     }
@@ -2779,7 +2775,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, sp_at_call: u64) -> u64 {
     // ——**こちらは「必ず入る」側**（描画の途中で `malloc` が `brk` を呼ぶ）、
     // **あちらは「レジスタが生きているところへ入る」側**である。
     #[cfg(feature = "fp-clobber-on-kernel-entry-test")]
-    crate::arch::x86_64::fp::clobber_fp_state_on_kernel_entry();
+    crate::arch::x86_64::clobber_fp_state_on_kernel_entry();
 
     let mut bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
 
@@ -2791,7 +2787,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, sp_at_call: u64) -> u64 {
     // 408 から 616 バイトになった）。
     let state = state();
     state.in_ring3_at_entry.store(
-        crate::arch::x86_64::ring3::note_kernel_entry_from_user(),
+        crate::arch::x86_64::note_kernel_entry_from_user(),
         Ordering::SeqCst,
     );
 
@@ -2892,7 +2888,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, sp_at_call: u64) -> u64 {
         drop(bkl.take());
         // SAFETY: Ring 3 から `int 0x80` で入った文脈で、RECOVERY は
         // `ring3::run_excursion` が保存済みである。BKL は上で解いてある。
-        unsafe { crate::arch::x86_64::ring3::leave_user_mode() }
+        unsafe { crate::arch::x86_64::leave_user_mode() }
     }
 
     // 戻り値を、Linux のレジスタの形で書き戻す（`abi`）。
@@ -2901,7 +2897,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, sp_at_call: u64) -> u64 {
     // Ring 3 へ返る（stub の復元経路が iretq する）。立て直す（S8-b）。
     // 立て直してから実際に iretq するまでは Ring 0 なのに真だが、例外による終了処理の判定は
     // CS.RPL=0 を弾くので届かない（ring3.rs の IN_RING3 の doc）。
-    crate::arch::x86_64::ring3::note_return_to_user();
+    crate::arch::x86_64::note_return_to_user();
 
     // M5-f-1 は切り替えない。入場時の IrqContext 先頭を返す。
     context as u64
@@ -4643,7 +4639,7 @@ unsafe fn sys_write(
     crate::console::note_terminal_write();
     // **切り離して起動したスロットから端末へ書いた回数（`ADR-0063` の (b3) の計測）。**
     // **`a | b` の左は端末へ書かないはずである**——**判定が「0」を見る。**
-    if crate::arch::x86_64::ring3::current_excursion_slot() == crate::task::detached_slot() {
+    if crate::arch::x86_64::current_excursion_slot() == crate::task::detached_slot() {
         TERMINAL_WRITES_FROM_DETACHED.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -5237,7 +5233,7 @@ pub fn user_window() -> (u64, u64) {
 /// ウィンドウを据え、**据える前の値を返す**（S9-b-3-2b）。
 ///
 /// **戻すのは呼び出し側の責任である。** 現在の呼び出し元は
-/// [`crate::arch::x86_64::ring3::run_excursion`] だけで、あちらが遠征の前後で対にしている。
+/// [`crate::arch::x86_64::run_excursion`] だけで、あちらが遠征の前後で対にしている。
 /// **入れ子になる**（S11 の `spawn` から。**以前ここは「入れ子にならない」と書いていた**）。
 /// **前の値を返す形にしてあるので、入れ子でも壊れない。** **W1-c-3 からウィンドウはスロットごとに持つので、
 /// W1-c-4 で 2 本が同時に走っても据え合わない。**

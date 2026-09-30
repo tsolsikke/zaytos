@@ -20,6 +20,8 @@ pub use ap_bring_up::{bring_up_application_processor, ApBringUp, ApStacks};
 pub use ap_stacks::{kernel_stack_bounds_from_top, map_ap_stacks};
 pub use ap_trampoline::{ap_stack_frame, install_trampoline, trampoline_frame};
 pub use cpu_state::{check_aps_match_bsp, record_this_ap};
+#[cfg(feature = "fp-clobber-on-kernel-entry-test")]
+pub use fp::clobber_fp_state_on_kernel_entry;
 pub use fp::{restore_fp_state, save_fp_state, FpArea};
 pub use gdt::{active_kernel_entry_stack_top, set_active_kernel_entry_stack_top};
 pub use idt::context::IrqContext;
@@ -33,11 +35,15 @@ pub use idt::{
 pub use paging::active::{ActivePageTable, PageAttributes};
 pub use paging::address_space::{AddressSpace, AddressSpaceError};
 pub use paging::switch::{active_page_table_root, set_active_page_table_root};
+pub use paging::verify::{read_top_level_entry, walk_page_table, walk_page_table_user_accessible};
+pub(crate) use ring3::current_excursion_slot;
 pub use ring3::{
-    current_excursion_recovery, excursion_recovery_belongs_to_slot, excursion_stack_canary_intact,
-    excursion_stack_capacity, excursion_stack_high_water, excursion_stack_range,
-    excursion_stack_range_at, excursion_stack_range_of, excursion_stack_within_budget,
-    restore_fold_record, save_fold_record, set_current_excursion_recovery, MAX_EXCURSION_DEPTH,
+    current_excursion_recovery, excursion_depth, excursion_fault_number, excursion_interrupted,
+    excursion_recovery_belongs_to_slot, excursion_stack_canary_intact, excursion_stack_capacity,
+    excursion_stack_high_water, excursion_stack_range, excursion_stack_range_at,
+    excursion_stack_range_of, excursion_stack_within_budget, leave_user_mode,
+    note_kernel_entry_from_user, note_return_to_user, restore_fold_record, run_excursion,
+    save_fold_record, set_current_excursion_recovery, MAX_EXCURSION_DEPTH, USER_TASK_SLOTS,
 };
 pub use stack::{
     check_entry_stack_alignment, install_guard_page, kernel_stack_capacity,

@@ -211,6 +211,11 @@ static CURRENT_RECOVERY: AtomicU64 = AtomicU64::new(0);
 /// W1-c-3 でタスクから引く形になった後も、W1-c-3c までは必ず 0 を返した。** **W1-c-4 から、
 /// `concurrent-test` の構成の足した 1 本だけが 1 を返す。**
 /// **大きさだけを変えた段階である**（遠征スタックが 128 KiB 増える。あちらの表）。
+///
+/// # 契約（境界の定数。2026-09-30）
+///
+/// - 共通の側は、スロットごとの表（システムコールの状態・ヒープ・開いたファイル・`spawn` の控え）の大きさに使う。
+///   スロットの番号は `current_excursion_slot` が返す。
 pub const USER_TASK_SLOTS: usize = 2;
 
 /// 1 本の遠征が持つ状態のうち、**置き場を分けられるもの**（W1-a）。
@@ -406,6 +411,12 @@ pub fn excursion_recovery_belongs_to_slot(recovery: u64, slot: usize) -> bool {
 /// **`#[inline(always)]` にすると、呼ぶ箇所ごとにタスクを引く処理が展開され、`dev` では
 /// その一時値が呼んだ側のフレームに場所を取った**（実測。`ring3::run_excursion` のフレームが 216 から 328 バイト）。
 /// **呼ぶ箇所のフレームには、呼び出しと戻り値だけが残る形にする。**
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 今のタスクから引いたスロットの番号を返すだけで、何も変えない（既定の起動では必ず 0。上の段落）。
+/// - 共通の側は、スロットごとの表を引く添字に使う（`crate::syscall`・`crate::userland`・`crate::vfs`・
+///   `crate::input`）。
 #[inline(never)]
 pub(crate) fn current_excursion_slot() -> usize {
     // 破壊テスト (W1-c-4, ring3-slot-always-zero): 足した 1 本にもスロット 0 を返す。**2 本が同じ遠征の
@@ -642,6 +653,11 @@ pub fn excursion_stack_within_budget(depth: usize) -> bool {
 /// 今の遠征の深さ（S11-2）。**0 なら遠征に入っていない。**
 ///
 /// **入れ子で呼ぶ側は、これで上限を確かめてから [`run_excursion`] を呼ぶ。**
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 今の遠征の深さを読むだけで、何も変えない（0 なら遠征に入っていない）。
+/// - 共通の側は、遠征に入る前に [`MAX_EXCURSION_DEPTH`] と比べる。
 pub fn excursion_depth() -> usize {
     state().depth.load(Ordering::SeqCst)
 }
@@ -702,6 +718,14 @@ pub fn excursion_depth() -> usize {
 /// 「段を閉じるときは、その段の名前で全 docs を grep する」が、
 /// 段階の名前で書いた条件について同じ形を 7 件記録している）。
 /// **Ring 3 への入口は 1 つなので、ここに書けば通る者が必ず読む。**
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 1 回の遠征を走らせ、終了処理か `exit` で戻ってくる。戻った後の会計は [`excursion_interrupted`]・
+///   [`excursion_fault_number`] などで読む。
+/// - 呼ぶのは、プログラムを走らせる所（`crate::userland`）と、起動の確かめ（`main.rs`）である。今は BSP だけが
+///   呼ぶ（上の節）。
+/// - 深さが [`MAX_EXCURSION_DEPTH`] に達しているときに呼ぶと止まる（呼ぶ側が [`excursion_depth`] で確かめる）。
 ///
 /// # Safety
 ///
@@ -934,11 +958,20 @@ pub fn should_fold() -> bool {
 ///
 /// 現在の呼び出し元は `syscall_entry` だけである。例外の側は
 /// [`record_and_fold`] が同じことを行う（あちらは戻らないので分けてある）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - ユーザーからカーネルへ入ったことを記し、前の値を返す。呼ぶのはシステムコールの入口（`crate::syscall`）で、
+///   入ってすぐに呼ぶ。
 pub fn note_kernel_entry_from_user() -> bool {
     state().in_ring3.swap(false, Ordering::SeqCst)
 }
 
 /// Ring 3 へ返ることを記す（S8-b）。**iretq の直前で呼ぶこと。**
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - ユーザーへ返ることを記す。呼ぶのはシステムコールの入口の終わり（`crate::syscall`）で、戻る直前に呼ぶ。
 pub fn note_return_to_user() {
     state().in_ring3.store(true, Ordering::SeqCst);
 }
@@ -998,6 +1031,13 @@ pub unsafe fn record_and_fold(
 /// **切らずに `record_and_fold` を使い回すと、名前と doc が意味の外へ伸びる。**
 /// あれは「例外を畳む」関数で、**プロセスの終了は例外ではない。**
 ///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - ユーザーを出て、[`run_excursion`] の呼び出し元へ戻る（この関数からは戻らない）。出る理由の記録は、呼ぶ側が
+///   先に済ませる（上の節）。
+/// - 共通の側で呼ぶのは、プロセスの終了（`crate::syscall` の `exit`）だけである。longjmp で戻るので、BKL は
+///   呼ぶ前に解いておく（`crate::bkl` の `UNWINDLESS_RELEASE_ENTRIES`）。
+///
 /// # Safety
 ///
 /// [`RECOVERY`] が [`run_excursion`] で保存済みであること（遠征中なら必ずそう）。
@@ -1020,6 +1060,10 @@ pub fn note_interrupted() {
 }
 
 /// 中断で出たか（遠征後の会計）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 直前の遠征が中断で出たかを読むだけで、何も変えない。
 pub fn excursion_interrupted() -> bool {
     state().interrupted.load(Ordering::SeqCst)
 }
@@ -1116,6 +1160,10 @@ pub fn fault_cs() -> u64 {
 }
 
 /// 終了処理した例外の番号（x86 ではベクタ）。呼び出し側が予期と突き合わせる。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 直前の遠征の終了処理が記録した例外の番号を読むだけで、何も変えない。呼ぶ側が予期と突き合わせる。
 pub fn excursion_fault_number() -> u64 {
     state().fault_vector.load(Ordering::SeqCst)
 }

@@ -123,6 +123,11 @@ impl FpArea {
 /// **[`restore_fp_state`] で 512 バイトの並びを読み込ませる。** **XMM のレジスタ名を
 /// 書かないので、Decision 5 の静的検査と衝突しない**（このモジュールの
 /// 冒頭の注記と同じ手である）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 破壊テスト `fp-clobber-on-kernel-entry-test` のときだけ在る。呼ぶのはシステムコールの入口（`crate::syscall`）で、
+///   この CPU の FP の状態を塗り替える。
 #[cfg(feature = "fp-clobber-on-kernel-entry-test")]
 pub fn clobber_fp_state_on_kernel_entry() {
     /// 塗る値。**0 ではない**——**まっさらと見分けが付かなくなる。**
