@@ -23,13 +23,7 @@
 //! 272バイト深くなり、64KiBを越えてガードページを踏んだ**（実測。
 //! `crate::console::PENDING`の doc に経緯がある）。
 
-/// `ioctl`でやり取りする構造の大きさ（バイト）。
-///
-/// **`[0..2]`が長さ、`[2..4]`が捨てた数、`[4..]`が本文である。**
-pub(crate) const ZDIAG_LEN: usize = 256;
-
-/// 本文に使える大きさ（バイト）。
-pub(crate) const ZDIAG_TEXT: usize = ZDIAG_LEN - 4;
+use crate::abi::private::{write_zdiag, Zdiag, ZDIAG_LEN, ZDIAG_TEXT};
 
 /// 溜めてあるエラーの控え。
 pub(crate) struct Pending {
@@ -83,14 +77,18 @@ impl Pending {
         self.dropped = 0;
     }
 
-    /// `ioctl`が返す形へ書き出し、空にする。
+    /// `ioctl`が返す形へ書き出し、空にする。**欄の位置へ書くのは[`write_zdiag`]である。**
     ///
     /// **溜まっていなければ長さ 0 を返す。** **「無い」は誤りではない**——
     /// アプリは毎周訊きに来るので、**空で返るほうが普通である。**
     pub(crate) fn take_into(&mut self, out: &mut [u8; ZDIAG_LEN]) {
-        out[0..2].copy_from_slice(&(self.len as u16).to_le_bytes());
-        out[2..4].copy_from_slice(&self.dropped.to_le_bytes());
-        out[4..4 + self.len].copy_from_slice(&self.text[..self.len]);
+        write_zdiag(
+            &Zdiag {
+                text: &self.text[..self.len],
+                dropped: self.dropped,
+            },
+            out,
+        );
         self.clear();
     }
 }

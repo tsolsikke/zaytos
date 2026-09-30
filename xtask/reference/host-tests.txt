@@ -242,6 +242,7 @@ kernel::abi::linux::layout::tests::the_timespec_bytes_follow_the_linux_layout
 kernel::abi::linux::layout::tests::the_variable_screen_info_follows_the_linux_layout
 kernel::abi::linux::layout::tests::the_winsize_bytes_follow_the_linux_layout
 kernel::abi::linux::x86_64::layout::tests::the_stat_bytes_follow_the_linux_layout
+kernel::abi::private::tests::the_zdiag_structure_puts_each_field_in_place
 kernel::arch::x86_64::ap_stacks::tests::the_recorded_ap_kernel_stack_range_matches_the_mapped_layout
 kernel::arch::x86_64::ap_trampoline::tests::a_frame_above_one_mib_is_not_addressable
 kernel::arch::x86_64::ap_trampoline::tests::a_high_only_allocator_is_rejected

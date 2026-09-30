@@ -173,6 +173,40 @@ pub const TIOCZTAKE: u64 = 0x5A01;
 /// `TIOCZLOG`——1 行をログ（シリアル）へ出す要求（ADR-0046）。
 pub const TIOCZLOG: u64 = 0x5A02;
 
+/// [`TIOCZTAKE`] と [`TIOCZLOG`] がやり取りする構造の大きさ（バイト。ADR-0046）。
+///
+/// **`[0..2]`が長さ、`[2..4]`が捨てた数、`[4..]`が本文である。**
+pub const ZDIAG_LEN: usize = 256;
+
+/// その構造の本文が始まる位置（ADR-0046）。**手前の 4 バイトは長さと捨てた数である。**
+pub const ZDIAG_TEXT_OFFSET: usize = 4;
+
+/// 本文に使える大きさ（バイト）。
+pub const ZDIAG_TEXT: usize = ZDIAG_LEN - ZDIAG_TEXT_OFFSET;
+
+/// [`TIOCZTAKE`] が返す構造に書く値（ADR-0046）。
+///
+/// **溜めること・捨てた数を数えること・取り出したら空にすることは共通の側（`crate::console::pending`）で、欄の位置へ
+/// 書くのはここである**（`ADR-0071` の決定 1 の 2 で分けた。2026-09-30）。
+pub struct Zdiag<'a> {
+    /// 本文（[`ZDIAG_TEXT`] バイトまで）。
+    pub text: &'a [u8],
+    /// 入りきらずに捨てたバイト数。
+    pub dropped: u16,
+}
+
+/// 構造を書く（欄の並びは [`ZDIAG_LEN`] の doc）。**本文より後ろは触らない**（呼ぶ側が 0 で埋めて渡す）。
+pub fn write_zdiag(zdiag: &Zdiag, out: &mut [u8; ZDIAG_LEN]) {
+    out[0..2].copy_from_slice(&(zdiag.text.len() as u16).to_le_bytes());
+    out[2..4].copy_from_slice(&zdiag.dropped.to_le_bytes());
+    out[ZDIAG_TEXT_OFFSET..ZDIAG_TEXT_OFFSET + zdiag.text.len()].copy_from_slice(zdiag.text);
+}
+
+/// 構造から本文の長さを読む（[`TIOCZLOG`]。**捨てた数の欄は読まない**）。
+pub fn zdiag_text_len(raw: &[u8; ZDIAG_LEN]) -> usize {
+    usize::from(u16::from_le_bytes([raw[0], raw[1]]))
+}
+
 /// 画面の矩形をコピーする要求（ZaytOS 独自。`ADR-0066` の Y-c）。**引数は `struct drm_clip_rect`。**
 ///
 /// **fbdev に対応するものが無い**——**fbdev は実物のフレームバッファをマップするので、コピーする必要が無い。**
@@ -181,3 +215,31 @@ pub const TIOCZLOG: u64 = 0x5A02;
 /// 採る**——**DIRTYFB そのものは DRM の大きな ABI の一部なので採らない。** **番号は [`TIOCZTAKE`] と
 /// 同じ `'Z'` の帯に置く。**
 pub const FBIOZPRESENT: u64 = 0x5A03;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 構造の欄の位置（`[0..2]` 長さ・`[2..4]` 捨てた数・`[4..]` 本文）。**値は欄ごとに違う形にし、本文より後ろは
+    /// 触らないことも見る。**
+    #[test]
+    fn the_zdiag_structure_puts_each_field_in_place() {
+        let mut out = [0xEE; ZDIAG_LEN];
+        write_zdiag(
+            &Zdiag {
+                text: b"boom",
+                dropped: 0x0302,
+            },
+            &mut out,
+        );
+        assert_eq!(&out[0..2], &[4, 0], "the length @0");
+        assert_eq!(&out[2..4], &[0x02, 0x03], "the dropped count @2");
+        assert_eq!(&out[4..8], b"boom", "the text @4");
+        assert!(
+            out[8..].iter().all(|byte| *byte == 0xEE),
+            "nothing after the text"
+        );
+        assert_eq!(zdiag_text_len(&out), 4);
+        assert_eq!(ZDIAG_TEXT, 252);
+    }
+}

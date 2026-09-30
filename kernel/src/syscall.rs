@@ -60,9 +60,10 @@ use crate::abi::linux::{
     EROFS, ESPIPE,
 };
 use crate::abi::private::{
-    DETACHED_STDOUT_TO_PIPE, FBIOZPRESENT, PROBE_NUMBER, SPAWN_FOLDED_FLAG, SPAWN_INTERRUPTED_FLAG,
-    SYS_CHECKSUM, SYS_CHECK_PTR, SYS_OPEN_INPUT, SYS_OPEN_SCREEN, SYS_SPAWN, SYS_SPAWN_DETACHED,
-    SYS_SPAWN_WITH_PIPED_STDIN, SYS_WAIT_CHILD, TIOCZLOG, TIOCZTAKE,
+    zdiag_text_len, DETACHED_STDOUT_TO_PIPE, FBIOZPRESENT, PROBE_NUMBER, SPAWN_FOLDED_FLAG,
+    SPAWN_INTERRUPTED_FLAG, SYS_CHECKSUM, SYS_CHECK_PTR, SYS_OPEN_INPUT, SYS_OPEN_SCREEN,
+    SYS_SPAWN, SYS_SPAWN_DETACHED, SYS_SPAWN_WITH_PIPED_STDIN, SYS_WAIT_CHILD, TIOCZLOG, TIOCZTAKE,
+    ZDIAG_LEN, ZDIAG_TEXT_OFFSET,
 };
 use crate::arch::x86_64::idt::context::IrqContext;
 
@@ -125,12 +126,6 @@ pub const fn window_for_subtree(index: usize) -> (u64, u64) {
 
 /// [`SYS_WRITE`] が記録するバイト数の上限。
 pub const WRITE_BUF_LEN: usize = 64;
-
-/// `TIOCZTAKE` / `TIOCZLOG` がやり取りする構造の大きさ（ADR-0046）。
-pub const ZDIAG_LEN: usize = crate::console::pending::ZDIAG_LEN;
-
-/// その構造の本文が始まる位置（ADR-0046）。**手前の 4 バイトは長さと捨てた数である。**
-pub const ZDIAG_TEXT_OFFSET: usize = 4;
 
 /// 書き込みを伴う `open` のフラグ（`O_CREAT` / `O_TRUNC` / `O_APPEND`）。
 ///
@@ -4378,7 +4373,7 @@ unsafe fn ioctl_log_line(arg: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -
     if read != ZDIAG_LEN {
         return (-EFAULT) as u64;
     }
-    let length = u16::from_le_bytes([buf[0], buf[1]]) as usize;
+    let length = zdiag_text_len(&buf);
     if length > ZDIAG_LEN - ZDIAG_TEXT_OFFSET {
         return (-EINVAL) as u64;
     }

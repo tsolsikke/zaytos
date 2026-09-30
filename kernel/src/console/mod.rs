@@ -280,7 +280,7 @@ pub fn push_pending_if_alternate(bytes: &[u8]) -> bool {
 ///
 /// **前景が据えられていなければ、長さ 0 のまま返る**
 /// （[`foreground_geometry`] が 0 を返すのと同じ立場。**端末ではある**）。
-pub fn take_pending(out: &mut [u8; pending::ZDIAG_LEN]) {
+pub fn take_pending(out: &mut [u8; crate::abi::private::ZDIAG_LEN]) {
     PENDING.lock().take_into(out);
 }
 
@@ -300,7 +300,7 @@ pub fn take_pending(out: &mut [u8; pending::ZDIAG_LEN]) {
 ///
 /// **コピーを取ってから描く**（[`PENDING`] の doc）。
 fn flush_pending_to_screen(console: &mut Console) {
-    let mut text = [0u8; pending::ZDIAG_TEXT];
+    let mut text = [0u8; crate::abi::private::ZDIAG_TEXT];
     let length = {
         let mut guard = PENDING.lock();
         if guard.is_empty() {
