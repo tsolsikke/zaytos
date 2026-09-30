@@ -21,9 +21,10 @@
 //! 止めるのがその役目である。**失効したのは「それだけで排他になる」のほうで、
 //! 別コアは割り込み禁止では止まらない。**
 //!
-//! 復元の判断（保存時に IF=1 だった場合のみ `sti`）は純粋ロジックとして
-//! [`crate::arch::x86_64::cpu::should_restore_interrupts`] に切り出し、ホストテストで固定
-//! してある。ここはそれを使ってハードウェアを操作するだけ。
+//! **割り込みの状態を読む・保存して止める・元へ戻すのは `arch` の関数である**
+//! （[`crate::arch::x86_64::save_and_disable_interrupts`]・[`crate::arch::x86_64::restore_interrupts`]。
+//! 2026-09-30 に、ここで RFLAGS を読んで `cli`/`sti` していたのを移した）。復元の判断（保存時に許されていた
+//! 場合だけ許す）は `arch` の中の純粋ロジックで、ホストテストで固定してある。ここはその入口を使うだけである。
 
 use core::cell::UnsafeCell;
 use core::fmt::Write as _;
@@ -31,7 +32,10 @@ use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::arch::x86_64::cpu;
+// 保存して止める・元へ戻す 2 つは、呼ぶ所（2 つのガードの `enter` と `drop`）でパスごと書く。cli/sti の許可の表は
+// 関数の単位で見るので、取り込む行に名前を書くと、表に無い所で呼んだように見える（xtask の
+// `DIRECT_INTERRUPT_CONTROL_ALLOWLIST`）。
+use crate::arch::x86_64::{halt_forever, interrupt_state, InterruptState};
 use crate::machine::pc::Serial;
 use crate::percpu::{cpu_id, PerCpu, MAX_CPUS};
 
@@ -134,9 +138,8 @@ impl Drop for SabotageArmGuard {
 
 /// 割り込みを禁止するクリティカルセクションのガード。
 ///
-/// [`InterruptGuard::enter`] で現在の RFLAGS を保存して `cli` し、Drop で
-/// **保存時に IF=1 だった場合のみ** `sti` する。無条件に `sti` しないのが
-/// 入れ子の正しさの要である。
+/// [`InterruptGuard::enter`] で現在の割り込みの状態を保存して止め（x86 では RFLAGS を保存して `cli`）、Drop で
+/// **保存時に許されていた場合のみ**許す（`sti`）。無条件に許さないのが入れ子の正しさの要である。
 ///
 /// - 外側が IF=1 で `enter` → `cli`（保存値 IF=1）
 /// - 内側が `enter` → 既に IF=0 なので保存値 IF=0、Drop でも `sti` しない
@@ -153,7 +156,7 @@ impl Drop for SabotageArmGuard {
 /// いまは複数コアがそれぞれ独立に禁止区間を張っている。**
 /// 別コアや別タスクへ渡ると、`cli` した文脈と `sti` する文脈がずれる。
 pub struct InterruptGuard {
-    saved_rflags: u64,
+    saved: InterruptState,
     /// `!Send` + `!Sync` にするためのマーカー。値としては使わない。
     _not_send_sync: PhantomData<*const ()>,
 }
@@ -166,7 +169,6 @@ impl InterruptGuard {
     #[must_use = "the guard must be held for the critical section; dropping it immediately \
                   ends the section right away"]
     pub fn enter() -> Self {
-        let saved_rflags = cpu::read_rflags();
         // preempt-in-critical-break: サボタージュが arm されている間だけ cli を落とす。
         // Locked 保持中も IF=1 のままになり、timer プリエンプトがクリティカル区間へ
         // 食い込む（M5-d の破壊テストでの確認）。**かつては大域的に落としていたが、それだと
@@ -174,16 +176,17 @@ impl InterruptGuard {
         // 参照）。arm ウィンドウの外は通常どおり cli する。既定ビルドは feature オフなのでこの
         // 判定ごと消え、常に cli する = production は不変。
         #[cfg(feature = "preempt-in-critical-break")]
-        let drop_cli = SABOTAGE_ARMED.load(Ordering::Acquire);
+        let keep_enabled = SABOTAGE_ARMED.load(Ordering::Acquire);
         #[cfg(not(feature = "preempt-in-critical-break"))]
-        let drop_cli = false;
-        if !drop_cli {
+        let keep_enabled = false;
+        let saved = if keep_enabled {
+            // 破壊テストの arm の間だけ、状態を読むだけで止めない。
+            interrupt_state()
+        } else {
             // SAFETY: これはまさにクリティカルセクションへ入る操作であり、割り込みを
-            // 禁止してよい文脈。保存した状態は Drop で復元する。
-            unsafe {
-                cpu::disable_interrupts();
-            }
-        }
+            // 禁止してよい文脈。保存した状態は Drop で 1 回だけ復元する。
+            unsafe { crate::arch::x86_64::save_and_disable_interrupts() }
+        };
         // 入れ子深さを 1 増やす。**cli の後に触る**ので、この増分の最中に割り込みは
         // 入らない（cli を落とす破壊テストのビルド + arm 中を除く）。自コアのスロットだけを
         // 触る（[`PerCpu::this_cpu`]）。
@@ -191,14 +194,9 @@ impl InterruptGuard {
             .this_cpu()
             .fetch_add(1, Ordering::Relaxed);
         Self {
-            saved_rflags,
+            saved,
             _not_send_sync: PhantomData,
         }
-    }
-
-    /// 保存した RFLAGS（診断用）。
-    pub fn saved_rflags(&self) -> u64 {
-        self.saved_rflags
     }
 }
 
@@ -210,14 +208,10 @@ impl Drop for InterruptGuard {
         CRITICAL_NESTING_DEPTH
             .this_cpu()
             .fetch_sub(1, Ordering::Relaxed);
-        if cpu::should_restore_interrupts(self.saved_rflags) {
-            // SAFETY: enter した時点で IF=1 だった、つまり呼び出し元は割り込みが
-            // 有効な文脈にいた。その状態へ戻すだけなので有効化してよい。
-            // IF=0 だった場合はこの分岐に入らないため、勝手に有効化しない。
-            unsafe {
-                cpu::enable_interrupts();
-            }
-        }
+        // SAFETY: `enter` がこの CPU で保存した状態を、1 回だけ戻す（ガードは `!Send` で、ほかの CPU へ移らない）。
+        // 戻すのは保存したときに許されていた場合だけで、止まっていたなら止まったままにする（`restore_interrupts`
+        // の契約）。
+        unsafe { crate::arch::x86_64::restore_interrupts(self.saved) };
     }
 }
 
@@ -247,7 +241,7 @@ impl Drop for InterruptGuard {
 ///
 /// [`InterruptGuard`] と同じ理由で `!Send` かつ `!Sync` にしてある。
 pub struct EntryInterruptGuard {
-    saved_rflags: u64,
+    saved: InterruptState,
     _not_send_sync: PhantomData<*const ()>,
 }
 
@@ -256,32 +250,20 @@ impl EntryInterruptGuard {
     #[must_use = "the guard must be held for the entry; dropping it immediately ends the \
                   interrupt-disabled section right away"]
     pub fn enter() -> Self {
-        let saved_rflags = cpu::read_rflags();
         // SAFETY: カーネル入口の排他区間へ入る操作であり、割り込みを禁止して
-        // よい文脈である。保存した状態は Drop で復元する。
-        unsafe {
-            cpu::disable_interrupts();
-        }
+        // よい文脈である。保存した状態は Drop で 1 回だけ復元する。
+        let saved = unsafe { crate::arch::x86_64::save_and_disable_interrupts() };
         Self {
-            saved_rflags,
+            saved,
             _not_send_sync: PhantomData,
         }
-    }
-
-    /// 保存した RFLAGS（診断用）。
-    pub fn saved_rflags(&self) -> u64 {
-        self.saved_rflags
     }
 }
 
 impl Drop for EntryInterruptGuard {
     fn drop(&mut self) {
-        if cpu::should_restore_interrupts(self.saved_rflags) {
-            // SAFETY: enter した時点で IF=1 だった文脈へ戻すだけである。
-            unsafe {
-                cpu::enable_interrupts();
-            }
-        }
+        // SAFETY: `enter` がこの CPU で保存した状態を、1 回だけ戻す（[`InterruptGuard`] の Drop と同じ）。
+        unsafe { crate::arch::x86_64::restore_interrupts(self.saved) };
     }
 }
 
@@ -350,7 +332,7 @@ impl<T> Locked<T> {
     /// （ring 0）であり、ユーザー空間で実行すると #GP になる。したがって
     /// ロックの実動作は実機で検証する（`cargo xtask run --critical-test`）。
     /// ホストで検証できるのは、フィールドの drop 順と
-    /// [`cpu::should_restore_interrupts`] の判断だけ。
+    /// [`InterruptState::enabled`] の判断だけ。
     ///
     /// 二重取得（同じロックを保持したまま再度呼ぶ）を検出した場合は、
     /// **panic ではなく**シリアルへ直接エラーを出して停止する。ヒープの
@@ -484,7 +466,7 @@ fn report_contended_lock_and_halt(holder: usize) -> ! {
          so the fix is exclusion between cores, not a re-entrant call path"
     );
     let _ = writeln!(serial, "[ERROR] halting (cli + hlt loop)");
-    cpu::halt_forever();
+    halt_forever();
 }
 
 fn report_double_lock_and_halt() -> ! {
@@ -499,7 +481,7 @@ fn report_double_lock_and_halt() -> ! {
         "[ERROR]   this is a bug: some code path holds the lock and tries to lock it again"
     );
     let _ = writeln!(serial, "[ERROR] halting (cli + hlt loop)");
-    cpu::halt_forever();
+    halt_forever();
 }
 
 /// `InterruptGuard` が `Send` でも `Sync` でもないことをコンパイル時に固定する。

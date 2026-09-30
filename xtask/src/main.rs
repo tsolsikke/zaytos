@@ -20157,21 +20157,25 @@ const DIRECT_SERIAL_PORT_ALLOWLIST: &[DirectSerialPortSite] = &[
 /// 直接 `cli`/`sti` の許可リスト（[`DirectInterruptControlSite`] 参照）。
 const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
     // (a) 排他の実装本体。ここが「排他の所在」であり、他は全部これを使う。
+    // **保存して止める・元へ戻すのは arch の関数である**（2026-09-30。`save_and_disable_interrupts`・
+    // `restore_interrupts`）。ここはその入口を呼ぶ 2 つのガード（`InterruptGuard` と `EntryInterruptGuard`）である。
     DirectInterruptControlSite {
         file: "common/src/critical.rs",
         item: "enter",
-        reason: "InterruptGuard::enter そのもの（排他の実装本体）",
+        reason: "InterruptGuard::enter そのもの（排他の実装本体。arch の save_and_disable_interrupts を呼ぶ）",
     },
     DirectInterruptControlSite {
         file: "common/src/critical.rs",
         item: "drop",
-        reason: "InterruptGuard::drop の復元（排他の実装本体）",
+        reason: "InterruptGuard::drop の復元（排他の実装本体。arch の restore_interrupts を呼ぶ）",
     },
-    // (a') 境界の関数の並び（2026-09-28）。許して待つ関数を common の arch の直下に並べる 1 行。呼ぶ所は下の各項目が持つ。
+    // (a') 境界の関数の並び（2026-09-28）。割り込みの状態を変える関数を common の arch の直下に並べる行。呼ぶ所は
+    // 下の各項目が持つ。
     DirectInterruptControlSite {
         file: "common/src/arch/x86_64/mod.rs",
         item: "<file scope>",
-        reason: "enable_interrupts_and_wait を直下に並べる 1 行（境界の関数の並び。呼ぶ所は各項目が持つ）",
+        reason: "enable_interrupts_and_wait・save_and_disable_interrupts・restore_interrupts を直下に並べる行 \
+                 （境界の関数の並び。2026-09-30 に後の 2 つを足した。呼ぶ所は各項目が持つ）",
     },
     // (b) 起動の一度きり。スコープを抜けたら復元する意味を持たない恒久的な禁止。
     DirectInterruptControlSite {
@@ -20275,7 +20279,8 @@ const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
 /// 許可リストに無い直接の割り込み制御を探す。
 ///
 /// 対象は `cpu::disable_interrupts` / `cpu::enable_interrupts`
-/// （`enable_interrupts_and_wait` を含む）の呼び出しと、`asm!`/`global_asm!` 内の
+/// （`enable_interrupts_and_wait` を含む）と、`save_and_disable_interrupts` / `restore_interrupts`
+/// （2026-09-30。`common::critical` から移した境界の関数）の呼び出しと、`asm!`/`global_asm!` 内の
 /// 生の `"cli"` / `"sti"`。
 ///
 /// `common/src/arch/x86_64/cpu.rs` は除外する（primitive の定義本体で、命令そのものはここに
@@ -20585,25 +20590,30 @@ fn mentions_raw_instruction(line: &str) -> bool {
 /// `may_enable_interrupts` のような別の識別子の一部を拾わないよう、直前の文字が
 /// 識別子構成文字でないことを確かめる。
 fn mentions_interrupt_primitive(line: &str) -> bool {
-    ["disable_interrupts", "enable_interrupts"]
-        .iter()
-        .any(|needle| {
-            let mut rest = line;
-            let mut base = 0usize;
-            while let Some(position) = rest.find(needle) {
-                let absolute = base + position;
-                let preceded_by_identifier = line[..absolute]
-                    .chars()
-                    .next_back()
-                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
-                if !preceded_by_identifier {
-                    return true;
-                }
-                base = absolute + needle.len();
-                rest = &line[base..];
+    [
+        "disable_interrupts",
+        "enable_interrupts",
+        "save_and_disable_interrupts",
+        "restore_interrupts",
+    ]
+    .iter()
+    .any(|needle| {
+        let mut rest = line;
+        let mut base = 0usize;
+        while let Some(position) = rest.find(needle) {
+            let absolute = base + position;
+            let preceded_by_identifier = line[..absolute]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
+            if !preceded_by_identifier {
+                return true;
             }
-            false
-        })
+            base = absolute + needle.len();
+            rest = &line[base..];
+        }
+        false
+    })
 }
 
 /// その行が宣言している関数名（`fn` の直後の識別子）。宣言でなければ `None`。
@@ -32645,6 +32655,27 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         ] {
             assert!(!opens_serial_port_directly(line), "{line}");
         }
+    }
+
+    /// **cli/sti の許可の表の走査は、arch の保存して止める・元へ戻す入口も拾う**（2026-09-30。`common::critical` から
+    /// 移した境界の関数）。**ほかの識別子の一部は拾わない**（`should_restore_interrupts` は判断だけの純粋な関数）。
+    #[test]
+    fn the_interrupt_control_scan_sees_the_save_and_restore_entry_points() {
+        assert!(mentions_interrupt_primitive(
+            "let saved = crate::arch::x86_64::save_and_disable_interrupts();"
+        ));
+        assert!(mentions_interrupt_primitive(
+            "crate::arch::x86_64::restore_interrupts(self.saved);"
+        ));
+        assert!(mentions_interrupt_primitive(
+            "common::arch::x86_64::enable_interrupts_and_wait();"
+        ));
+        assert!(!mentions_interrupt_primitive(
+            "if should_restore_interrupts(saved) {"
+        ));
+        assert!(!mentions_interrupt_primitive(
+            "let allowed = may_enable_interrupts();"
+        ));
     }
 
     /// **例外の表の識別子は、そのファイルで数えない。** **ほかの識別子の同じ語は数える。** **表の行がファイルの

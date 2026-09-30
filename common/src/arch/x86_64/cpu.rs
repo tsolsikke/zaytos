@@ -104,6 +104,93 @@ pub const fn should_restore_interrupts(saved_rflags: u64) -> bool {
     saved_rflags & RFLAGS_INTERRUPT_FLAG != 0
 }
 
+/// この CPU の割り込みの状態（2026-09-30。境界の段階の手順 2）。保存して止め、元へ戻すための値である。
+///
+/// x86 では、保存したときの RFLAGS である（使うのは IF だけ）。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - 作るのはこの module の関数だけである（[`interrupt_state`]・[`save_and_disable_interrupts`]）。共通の側は中身を
+///   読まず、許されていたかだけを問う（[`InterruptState::enabled`]）。
+/// - 値は、それを返した CPU のものである。ほかの CPU へ渡して戻してはならない（`common::critical` のガードが
+///   `!Send` なのはこのため）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct InterruptState {
+    rflags: u64,
+}
+
+impl InterruptState {
+    /// 割り込みが許されていたか（保存したときの状態。判断は [`should_restore_interrupts`] の純粋ロジック）。
+    pub const fn enabled(self) -> bool {
+        should_restore_interrupts(self.rflags)
+    }
+}
+
+/// この CPU の割り込みの状態を読む（変えない）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 読むのはこの CPU の状態だけで、何も変えない。
+pub fn interrupt_state() -> InterruptState {
+    InterruptState {
+        rflags: read_rflags(),
+    }
+}
+
+/// この CPU の割り込みの状態を保存してから、割り込みを止める。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - **この CPU だけに効く。** ほかの CPU の割り込みは止めない。ほかの CPU との排他も、ほかの CPU から見たメモリの
+///   順序も与えない（排他は `common::critical` の `Locked` の `swap` と BKL が受け持つ）。
+/// - **NMI は止まらない。** 止まるのは、マスクできる割り込みだけである。
+/// - **既に止まっている所で呼んでもよい。** そのとき返す状態は「止まっていた」で、[`restore_interrupts`] は何も
+///   しない。入れ子のどの深さでも、戻すと呼ぶ前の状態に戻る。
+/// - コンパイラの並べ替えは止める。前後のメモリの読み書きを、この呼び出しの向こうへ動かさない（区間の中の
+///   読み書きが、止める前へ出ないため）。
+///
+/// # Safety
+///
+/// 割り込みを止めてよい文脈であること。返した状態は、同じ CPU で [`restore_interrupts`] へちょうど 1 回渡すこと
+/// （入れ子なら、後に保存したものから先に戻す）。
+#[must_use = "the saved state must be handed back to restore_interrupts"]
+pub unsafe fn save_and_disable_interrupts() -> InterruptState {
+    let rflags: u64;
+    // SAFETY: `pushfq`・`pop` で RFLAGS を読み、`cli` でマスクできる割り込みの受付を止めるだけで、メモリの配置も
+    // 制御の流れも変えない。止めてよい文脈であることは、呼び出し側の契約である。スタックを一時的に使うので
+    // `nostack` を付けない。**`nomem` も付けない**——コンパイラが前後のメモリの読み書きを、この命令の向こうへ
+    // 動かさないようにする。
+    unsafe {
+        core::arch::asm!("pushfq", "pop {}", "cli", out(reg) rflags);
+    }
+    InterruptState { rflags }
+}
+
+/// 保存した状態へ戻す（保存したときに許されていたときだけ、割り込みを許す）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - **この CPU だけに効く。** ほかの CPU との排他も、ほかの CPU から見たメモリの順序も与えない。
+/// - **元の状態へ戻す。** 保存したときに止まっていたなら何もしない（無条件に許すと、入れ子の外側の区間を壊す）。
+/// - コンパイラの並べ替えは止める（区間の中のメモリの読み書きを、戻した後へ動かさない）。許すときも、止まった
+///   ままのときも同じである。
+///
+/// # Safety
+///
+/// `state` は、この CPU の [`save_and_disable_interrupts`] が返したもので、まだ戻していないこと。入れ子なら、後に
+/// 保存したものから先に戻すこと。
+pub unsafe fn restore_interrupts(state: InterruptState) {
+    if state.enabled() {
+        // SAFETY: 保存したときに許されていた文脈へ戻すだけである（呼び出し側の契約）。`nomem` を付けない理由は
+        // [`save_and_disable_interrupts`] と同じ。
+        unsafe {
+            core::arch::asm!("sti", options(nostack));
+        }
+    } else {
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// 割り込みを禁止し、`hlt` ループで停止し続ける。
 ///
 /// ADR-0004 の fail-fast 方針（パニック時は即停止する）と、M1 の
@@ -656,6 +743,12 @@ mod tests {
         assert!(should_restore_interrupts(RFLAGS_INTERRUPT_FLAG));
         // IF=0 で入ったなら（入れ子の内側など）、抜けても復元しない。
         assert!(!should_restore_interrupts(0));
+        // 保存した状態の問いは、同じ判断で答える（2026-09-30）。
+        assert!(InterruptState {
+            rflags: RFLAGS_INTERRUPT_FLAG
+        }
+        .enabled());
+        assert!(!InterruptState { rflags: 0 }.enabled());
     }
 
     /// IF 以外のビットが立っていても、判断は IF ビットだけで行う。
