@@ -9599,7 +9599,7 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     );
     emit(&[0xB8], &mut code, &mut n);
     emit(
-        &(syscall::PROBE_NUMBER as u32).to_le_bytes(),
+        &(kernel::abi::private::PROBE_NUMBER as u32).to_le_bytes(),
         &mut code,
         &mut n,
     );
@@ -9638,7 +9638,7 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
     logger.info(format_args!(
         "syscall: entering Ring 3 to issue probe int 0x80 (number={:#x}, int at {int_rip:#x}, \
          cli fold at {cli_rip:#x}, RSP0 -> excursion stack [{exc_bottom:#x}, {exc_top:#x}))",
-        syscall::PROBE_NUMBER
+        kernel::abi::private::PROBE_NUMBER
     ));
 
     // --- 遠征。iretq -> Ring 3 -> 6 引数セット -> int 0x80 -> syscall_entry -> iretq ->
@@ -9682,7 +9682,7 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
          seen={seen_number:#x} (expected {:#x}), handler RSP={handler_rsp:#x} (on RSP0 \
          excursion stack={handler_in_rsp0}), in-Ring-3 flag at entry={}, RSP0 \
          restored={rsp0_restored}",
-        syscall::PROBE_NUMBER,
+        kernel::abi::private::PROBE_NUMBER,
         syscall::in_ring3_at_entry()
     ));
     logger.info(format_args!(
@@ -9703,11 +9703,11 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
         ));
         cpu::halt_forever();
     }
-    if seen_number != syscall::PROBE_NUMBER {
+    if seen_number != kernel::abi::private::PROBE_NUMBER {
         logger.error(format_args!(
             "syscall: number seen {seen_number:#x} != expected {:#x}; RAX did not carry the \
              number; halting",
-            syscall::PROBE_NUMBER
+            kernel::abi::private::PROBE_NUMBER
         ));
         cpu::halt_forever();
     }
@@ -9940,7 +9940,7 @@ fn verify_syscall_pointer<const CAP: usize>(
     ];
 
     for (buf, len, expect_accept, name) in cases {
-        let stored = issue_ptr_len_syscall(logger, kernel::syscall::SYS_CHECK_PTR, buf, len);
+        let stored = issue_ptr_len_syscall(logger, kernel::abi::private::SYS_CHECK_PTR, buf, len);
         let accepted = stored == 0;
         let rejected = stored == efault;
         let ok = if expect_accept { accepted } else { rejected };
@@ -10015,7 +10015,8 @@ fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
     let expected_sum: u64 = content.iter().map(|b| *b as u64).sum();
 
     // 正常系: 検証を通し、total を返す。
-    let stored = issue_ptr_len_syscall(logger, syscall::SYS_CHECKSUM, buf_va, N as u64);
+    let stored =
+        issue_ptr_len_syscall(logger, kernel::abi::private::SYS_CHECKSUM, buf_va, N as u64);
     logger.info(format_args!(
         "syscall: checksum case 'valid buffer' buf={buf_va:#x} len={N} -> stored={stored:#x} \
          (expected sum {expected_sum:#x})"
@@ -10031,7 +10032,12 @@ fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
     // 異常系: カーネルポインタは copy 前の検証で -EFAULT。読みに踏み込まない。
     let efault = (-kernel::abi::linux::EFAULT) as u64;
     let kernel_ptr: u64 = 0x10_0000;
-    let bad = issue_ptr_len_syscall(logger, syscall::SYS_CHECKSUM, kernel_ptr, N as u64);
+    let bad = issue_ptr_len_syscall(
+        logger,
+        kernel::abi::private::SYS_CHECKSUM,
+        kernel_ptr,
+        N as u64,
+    );
     logger.info(format_args!(
         "syscall: checksum case 'kernel pointer' buf={kernel_ptr:#x} len={N} -> stored={bad:#x} \
          (expect -EFAULT {efault:#x})"
@@ -10052,7 +10058,7 @@ fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
     // 分けるなら、分けた側が実際に返ることを見る必要がある。
     let einval = (-kernel::abi::linux::EINVAL) as u64;
     let too_long = (syscall::CHECKSUM_BUF_LEN + 1) as u64;
-    let over = issue_ptr_len_syscall(logger, syscall::SYS_CHECKSUM, buf_va, too_long);
+    let over = issue_ptr_len_syscall(logger, kernel::abi::private::SYS_CHECKSUM, buf_va, too_long);
     logger.info(format_args!(
         "syscall: checksum case 'over-long' buf={buf_va:#x} len={too_long} -> stored={over:#x} \
          (expect -EINVAL {einval:#x}, not -EFAULT {efault:#x}; the address is fine, the length \

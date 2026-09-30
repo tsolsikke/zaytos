@@ -35,7 +35,12 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use common::addr::{DirectMap, PhysAddr};
 
-use crate::abi::linux::x86_64::{stat_bytes, STAT_LEN};
+use crate::abi::linux::x86_64::{
+    stat_bytes, STAT_LEN, SYS_ACCEPT, SYS_BIND, SYS_BRK, SYS_CLOCK_GETTIME, SYS_CLOSE, SYS_CONNECT,
+    SYS_EXIT, SYS_FTRUNCATE, SYS_GETDENTS64, SYS_IOCTL, SYS_LISTEN, SYS_LSEEK, SYS_MEMFD_CREATE,
+    SYS_MKDIR, SYS_MMAP, SYS_NANOSLEEP, SYS_OPEN, SYS_POLL, SYS_READ, SYS_RECVMSG, SYS_RMDIR,
+    SYS_SENDMSG, SYS_SOCKET, SYS_STAT, SYS_UNLINK, SYS_WRITE,
+};
 use crate::abi::linux::{
     dirent64_record, dirent64_record_len, fb_fix_screeninfo_bytes, fb_var_screeninfo_bytes,
     parse_drm_clip_rect, parse_pollfd, parse_sockaddr_un, parse_timespec, set_pollfd_revents,
@@ -52,39 +57,12 @@ use crate::abi::linux::{
     ENOMEM, ENOSPC, ENOSYS, ENOTCONN, ENOTDIR, ENOTEMPTY, ENOTSOCK, ENOTTY, EPIPE, EPROTONOSUPPORT,
     EROFS, ESPIPE,
 };
+use crate::abi::private::{
+    DETACHED_STDOUT_TO_PIPE, FBIOZPRESENT, PROBE_NUMBER, SPAWN_FOLDED_FLAG, SPAWN_INTERRUPTED_FLAG,
+    SYS_CHECKSUM, SYS_CHECK_PTR, SYS_OPEN_INPUT, SYS_OPEN_SCREEN, SYS_SPAWN, SYS_SPAWN_DETACHED,
+    SYS_SPAWN_WITH_PIPED_STDIN, SYS_WAIT_CHILD, TIOCZLOG, TIOCZTAKE,
+};
 use crate::arch::x86_64::idt::context::IrqContext;
-
-/// ZaytOS 独自のシステムコール番号の基点（S9-a）。
-///
-/// # なぜ Linux の番号表から離すのか
-///
-/// ADR-0020 の Addendum で「番号の割り当ては Linux x86-64 から採る」と決めた。
-/// **`read`=0 や `write`=1 のように Linux に対応するものがある呼び出しは、その
-/// 番号を使う。** 問題は、対応するものが無い呼び出しである。下記の検証用
-/// システムコールは ZaytOS 固有で、Linux に相当するものが未来にも現れない。
-///
-/// **かつては 0x2A・0x2B・0x2C に置いており、Linux の 42（`connect`）・
-/// 43（`accept`）・44（`sendto`）と衝突していた。** 番号表の中の空きに置くと、
-/// Linux がそこを埋めた時点で衝突する（歴史的に未実装のまま空いている番号も、
-/// 将来 Linux が再利用しうる）。**表の中に安全な空きは無い。**
-///
-/// そこで表の外へまとめる。Linux x86-64 の番号は現在 500 未満で、増え方は年に
-/// 数本である。**0x1000（4096）なら当面ぶつからない。** x32 ABI が使う
-/// `0x4000_0000` のビットとも重ならない。
-///
-/// **独自の呼び出しを足すときは、必ずこの基点より上に置くこと。**
-pub const ZAYTOS_PRIVATE_BASE: u64 = 0x1000;
-
-/// ユーザーポインタを取る検証用システムコールの番号（M5-f-2-1）。
-/// 第 1 引数(RDI)=buf、第 2 引数(RSI)=len。範囲が Ring 3 からアクセス可能なら 0、
-/// 不可なら -EFAULT を返す（**この段階はバイトを読まない**。copy は M5-f-2-2）。
-pub const SYS_CHECK_PTR: u64 = ZAYTOS_PRIVATE_BASE + 1;
-
-/// ユーザーバッファのバイト総和（チェックサム）を返すシステムコールの番号
-/// （M5-f-2-2）。第 1 引数(RDI)=buf、第 2 引数(RSI)=len。範囲を検証してから
-/// 範囲内バイトを読み総和を返す。不正な範囲なら -EFAULT、長さが
-/// [`CHECKSUM_BUF_LEN`] を超えるなら -EINVAL。
-pub const SYS_CHECKSUM: u64 = ZAYTOS_PRIVATE_BASE + 2;
 
 /// SYS_CHECKSUM がユーザーバイトを読み込む固定カーネルバッファの大きさ。
 ///
@@ -143,153 +121,14 @@ pub const fn window_for_subtree(index: usize) -> (u64, u64) {
     }
 }
 
-/// `write(fd, buf, len)`（S9-b-1）。**Linux の番号 1 をそのまま使う**
-/// （ADR-0020 の Addendum。対応するものがある呼び出しは Linux の番号を採る）。
-///
-/// 現在の実装は `fd` を見ず、**バイト列を静的領域へ記録して長さを返すだけである。**
-/// シリアルへは出さない。`syscall_entry` は出力しないという既存の方針
-/// （例外・IRQ ハンドラと同じ）に従い、**観測は畳んで戻った後に呼び出し側が
-/// 記録越しに行う。**
-pub const SYS_WRITE: u64 = 1;
-
 /// [`SYS_WRITE`] が記録するバイト数の上限。
 pub const WRITE_BUF_LEN: usize = 64;
-
-/// `exit(status)`（S9-b-3-1）。**Linux の番号 60 をそのまま使う。**
-///
-/// # `exit_group`（231）は採らない
-///
-/// あちらは「呼んだスレッドが属するスレッドグループ全体を終わらせる」呼び出しで、
-/// **ZaytOS にはスレッドの概念が無い。** 番号を用意しても、`exit` と区別できる
-/// 振る舞いが書けない。**同じ振る舞いの入口を 2 つ置くと、どちらが正なのかが
-/// 呼び出し側にも実装側にも決まらない。** スレッドを作る段階で足す。
-///
-/// # 戻らない
-///
-/// **[`dispatch`] の戻り値では「戻らない」を表せない**ので、記録だけをあちらで
-/// 行い、**Ring 3 へ返らない分岐は [`syscall_entry`] が持つ**（あちらの
-/// 「exit は出口を通らない」の節）。
-pub const SYS_EXIT: u64 = 60;
-
-/// `read(fd, buf, count)`（S10-b）。**Linux の番号 0 をそのまま使う。**
-pub const SYS_READ: u64 = 0;
-
-/// `getdents64(fd, dirp, count)`（S10-b）。**Linux の番号 217 をそのまま使う。**
-pub const SYS_GETDENTS64: u64 = 217;
-
-/// `stat(path, statbuf)`（S10-b）。**Linux の番号 4 をそのまま使う。**
-///
-/// # `fstat`（5）は置かない
-///
-/// あちらは fd を取る。**表の中の inode を返すだけなので実装は短いが、
-/// 要ると分かってから足す**（S10-b の棚卸しの判断）。
-pub const SYS_STAT: u64 = 4;
-
-/// `clock_gettime(clockid, timespec)`（W2-d+）。**Linux の番号 228 をそのまま使う。**
-///
-/// # `CLOCK_MONOTONIC` だけを実装する
-///
-/// **壁時計（`CLOCK_REALTIME` = 0）は持てない**——**ZaytOS に実時刻の出所が無い**
-/// （RTC は未実装。`docs/deferred-decisions.md` の「時刻の欄」）。
-/// **0 を返して黙って答えると嘘の時刻が広がる**ので、`-EINVAL` を返す。
-pub const SYS_CLOCK_GETTIME: u64 = 228;
-
-/// `nanosleep(req, rem)`（W2-d+）。**Linux の番号 35 をそのまま使う。**
-///
-/// # `rem` には書かない
-///
-/// **Linux が `rem` へ書くのは、シグナルで割り込まれて `EINTR` を返すときだけである。**
-/// **ZaytOS にシグナルは無い**ので、**割り込まれて戻る道が無い。** **受け取って読まない。**
-pub const SYS_NANOSLEEP: u64 = 35;
-
-/// `open(path, flags, mode)`（S10-b）。**Linux の番号 2 をそのまま使う。**
-///
-/// # `openat`（257）は採らない
-///
-/// **ZaytOS には作業ディレクトリが無い**ので、`dirfd` に渡すものが無い。
-/// **`AT_FDCWD` を受けるだけの引数を置いても、区別できる振る舞いが書けない**
-/// （[`SYS_EXIT`] が `exit_group` を採らない理由と同じ形である）。
-/// **作業ディレクトリを持つ段階で足す。**
-pub const SYS_OPEN: u64 = 2;
-
-/// `close(fd)`（S10-b）。**Linux の番号 3 をそのまま使う。**
-pub const SYS_CLOSE: u64 = 3;
-
-/// `ioctl(fd, request, arg)`（e-1）。**Linux の番号 16 をそのまま使う**
-/// （実測。`/usr/include/x86_64-linux-gnu/asm/unistd_64.h` の `__NR_ioctl`）。
-///
-/// # 入口の方針——端末の問い合わせに限る
-///
-/// **`ioctl` は「何でも入る雑多な入口」である。** 最初の1つを入れる時点で
-/// **何を入れ、何を入れないかを決めてある**——**受けるのは端末の問い合わせだけ**
-/// で、**設定の変更（`termios` 相当・`TIOCSWINSZ`）は別の判断とする。**
-/// **知らない要求は `-ENOTTY` で断る**ので、**入口が黙って広がることはない。**
-/// **決定の記録は `docs/deferred-decisions.md` にある**（解禁のきっかけは
-/// 「設定の変更を要求する利用者が来たとき」。**C の移植で必ず来る**）。
-pub const SYS_IOCTL: u64 = 16;
-
-/// `TIOCZTAKE`——溜まっているエラーを取り出す要求（ADR-0046）。
-///
-/// # ZaytOS の値である。Linux の値ではない
-///
-/// **全画面のアプリが動く間、`fd 2`はカーネルが溜める。** **アプリが
-/// これで取り出し、自分のエコーエリアへ描く**（ADR-0046）。
-/// **Linux にこの操作は無い**ので、**`TIOC` の空間の外に置く**
-/// （`0x5A` は `Z`。`TIOCGWINSZ` の `0x5413` と衝突しない）。
-///
-/// **新しい syscall 番号は作らない**——**`ADR-0020`は番号を Linux から
-/// 採ると決めており、相当する番号が無い。** **`ioctl`は端末固有の操作の
-/// ための入口である。**
-pub const TIOCZTAKE: u64 = 0x5A01;
-
-/// `TIOCZLOG`——1 行をログ（シリアル）へ出す要求（ADR-0046）。
-///
-/// **画面へは出さない。** **検査のための診断の出口であり、読み手は
-/// ホスト側の判定である**（ADR-0046 の「線はどこに在るか」）。
-pub const TIOCZLOG: u64 = 0x5A02;
 
 /// `TIOCZTAKE` / `TIOCZLOG` がやり取りする構造の大きさ（ADR-0046）。
 pub const ZDIAG_LEN: usize = crate::console::pending::ZDIAG_LEN;
 
 /// その構造の本文が始まる位置（ADR-0046）。**手前の 4 バイトは長さと捨てた数である。**
 pub const ZDIAG_TEXT_OFFSET: usize = 4;
-
-/// `lseek` の番号（Linux と同じ。DIR-1b）。
-///
-/// # 部品は S10-b から在り、入口が無かっただけである
-///
-/// **`crate::vfs::File::seek_to` が最初から在る。** **使う者が居なかったので
-/// 入口を置いていなかった**（`docs/foundation-inventory.md` が
-/// 「部品は在るが入口が無い」として挙げていた 2 つのうちの 1 つ）。
-///
-/// **利用者は `/bin/tail` である**（DIR-1b で同じ段階に作った）。
-pub const SYS_LSEEK: u64 = 8;
-
-/// `mkdir` の番号（Linux と同じ。DIR-1c）。**利用者は `/bin/mkdir` である。**
-pub const SYS_MKDIR: u64 = 83;
-
-/// `rmdir` の番号（Linux と同じ。DIR-1c）。**利用者は `/bin/rmdir` である。**
-pub const SYS_RMDIR: u64 = 84;
-
-/// `brk` の番号（Linux と同じ。H-a。ADR-0044）。
-///
-/// # `brk(0)` は問い合わせである
-///
-/// **Linux と同じ形にする**——**0 を渡すと、いまの上端が返る。**
-/// **別の番号を用意しない**（`sbrk` は libc の側の話である）。
-///
-/// # 返すのは新しい上端である
-///
-/// **失敗しても `-errno` を返す**（**Linux は失敗すると古い上端を返す**が、
-/// **こちらは `-errno` にする**——**「動かなかった」と「そこまでしか
-/// 伸びなかった」を、呼ぶ側が区別できる形にする**）。
-pub const SYS_BRK: u64 = 12;
-
-/// `unlink` の番号（Linux と同じ。DIR-1b）。
-///
-/// **`common::ext2::unlink_file` が S12-e から在り、入口が無かっただけである。**
-/// **利用者は `/bin/rm` である。**
-pub const SYS_UNLINK: u64 = 87;
 
 /// 書き込みを伴う `open` のフラグ（`O_CREAT` / `O_TRUNC` / `O_APPEND`）。
 ///
@@ -316,63 +155,6 @@ pub const O_WRITE_INTENT: u64 = O_CREAT | O_TRUNC | O_APPEND;
 /// ならなかった**）。
 pub const PATH_MAX: usize = 256;
 
-/// `spawn(path)`——イメージを読み、子プロセスを起動し、**終わるまで待つ**（S11-5。ZaytOS 独自）。
-///
-/// # なぜ `fork`（57）と `execve`（59）の番号を採らないか
-///
-/// **これは `fork` でも `execve` でもない。** 番号だけ借りると、
-/// **Linux の意味を持たない振る舞いに Linux の名前が付く。**
-///
-/// - **`fork` は呼び出し側を複製する。** ここが作るのは複製ではなく、
-///   **別のイメージから起動した別のプロセスである。** マッピングも `argv` も引き継がない
-/// - **`execve` は呼び出し側を置き換える。** ここは置き換えない——
-///   **親はそのまま在り、子が終わるのを待って続きを実行する**
-/// - **どちらも「戻る」の意味が違う。** `fork` は 2 回戻り、`execve` は成功したら
-///   戻らない。**`spawn` は 1 回戻り、戻り値は子の終わり方である**
-///
-/// **`SYS_OPEN`（2）が `openat`（257）を採らなかったのと同じ判断である**
-/// ——「振る舞いが違うなら、番号も分ける」。**あちらは作業ディレクトリが無いから
-/// `openat` を採らず、こちらは意味が違うから 57 と 59 を採らない。**
-///
-/// **予約もしない。** [`SYS_NEVER_IMPLEMENTED`] のような「永久に実装しない」宣言では
-/// なく、**`fork` と `execve` は将来ふつうに実装しうる**（`docs/vision.md` の
-/// Linux バイナリを動かす構想）。**空けておけば、そのとき Linux の意味で使える。**
-///
-/// # 戻り値
-///
-/// 子が `exit(status)` で終わったなら `status & 0xFF`。
-/// 終了させられたなら [`SPAWN_FOLDED_FLAG`] とベクタ。
-/// 起動できなかったなら `-errno`。**`docs/coding-standards.md` の「`-errno` の範囲と
-/// 紛れない値にする」に従い、正の側は 0x1FFF を越えない。**
-pub const SYS_SPAWN: u64 = ZAYTOS_PRIVATE_BASE + 4;
-
-/// [`SYS_SPAWN`] の戻り値のうち「子は終了ではなく畳まれて終わった」を表すビット。
-///
-/// **下位 8 ビットは終了状態なので、その上に置く。** 終了させられた場合は
-/// `SPAWN_FOLDED_FLAG | vector` を返す（[`spawn_status`]）。
-///
-/// # Linux の `wait` の符号化には合わせない
-///
-/// **`spawn` は Linux に対応するものが無い**ので、`W*` マクロの形を真似ても
-/// 互換にはならない。**外から見える形を Linux に合わせるのは、Linux に同じものが
-/// あるときの規則である。**
-pub const SPAWN_FOLDED_FLAG: u64 = 0x100;
-
-/// [`SYS_SPAWN`] の戻り値のうち「子は外から止められた」を表すビット
-/// （Ctrl+C。S12 前の手当て、C）。
-///
-/// **[`SPAWN_FOLDED_FLAG`] の隣に置く。** 下位 8 ビットは終了状態なので、
-/// **その上のビットで「終了以外の終わり方」を並べる形である。**
-/// **`0x1FFF` を越えないので `-errno` と紛れない**（`SYS_SPAWN` の doc）。
-///
-/// # Linux の `128 + signo` を採らない
-///
-/// **`spawn` は Linux に対応するものが無い**（[`SPAWN_FOLDED_FLAG`] の doc）。
-/// **加えて、まだシグナルが無い**——番号を持たないものに `128 + signo` の形を
-/// 与えると、**「`SIGINT` が配送された」と読める値を、配送していないのに返す。**
-/// **シグナルを実装する段階（(4)）で、そのとき改めて決めること。**
-pub const SPAWN_INTERRUPTED_FLAG: u64 = 0x200;
-
 /// 子の終わり方を、[`SYS_SPAWN`] と [`SYS_WAIT_CHILD`] が返す値にする（純粋な論理。2026-09-27 に 1 通りに揃えた）。
 ///
 /// - `exit(status)` で終わった: `status & 0xFF`（下位 8 ビット）
@@ -396,77 +178,6 @@ pub fn spawn_status(outcome: &crate::userland::SpawnOutcome) -> u64 {
         crate::userland::SpawnOutcome::Interrupted => SPAWN_INTERRUPTED_FLAG,
     }
 }
-
-/// 子を切り離して起動する（`ADR-0063` の (b3)）。**私物である**（[`SYS_SPAWN`] と同じ判断
-/// ——Linux に同じ意味の入口が無い。`posix_spawn` はライブラリの関数で、システムコールではない）。
-///
-/// 引数は `path` / `argv` / `envp` / `flags`（[`DETACHED_STDOUT_TO_PIPE`]）。**戻り値はハンドル**
-/// （`crate::task::ring3_task_handle`。(b2) の形）**か `-errno`。**
-///
-/// # 子が Ring 3 へ入るか終わるまで戻らない
-///
-/// **フレームアロケータの貸し出しは大域に 1 つである**（`docs/wayland-inventory.md` の #4）。
-/// **戻ってすぐシェルが右を `spawn` すると、左の読み込みと重なって `AllocatorUnavailable` に
-/// なる。** **`concurrent-test` が「1 本を Ring 3 へ入れてから次を起こす」で避けたのと同じ順序を、
-/// 入口の中で守る。** **待ちは `Wait` を使わず、譲るの繰り返しである**——**`Wait::ChildStarted` を
-/// 作れば起こす側も作れる（子が入った時点で起こす）が、待つ長さが読み込み 1 回ぶん
-/// （ティックの桁）なので足さない。** **待ったティック数は計測に出す**
-/// （[`detached_entry_wait_ticks_max`]）。**上限は置かない**——**読み込みは必ず成功か失敗で終わる。**
-///
-/// **見つからなければ同期で `-ENOENT` を返す**（起動する前に探す。`crate::userland::probe_program`）
-/// ——**シェルの `PATH` の輪が次の要素へ進める。**
-pub const SYS_SPAWN_DETACHED: u64 = ZAYTOS_PRIVATE_BASE + 5;
-
-/// [`SYS_SPAWN_DETACHED`] の `flags`——子の fd 1 をパイプの書き端にし、読み手を予約する
-/// （`crate::pipe` の doc の「読み手の予約」）。
-pub const DETACHED_STDOUT_TO_PIPE: u64 = 1;
-
-/// 予約したパイプの読み端を fd 0 にして、入れ子で起動する（`ADR-0063` の (b3)）。**私物。**
-///
-/// **[`SYS_SPAWN`] と同じ形で戻る**（終わり方のビット）。**予約が無ければ `-EINVAL`。**
-/// **[`SYS_SPAWN`] に `flags` を足さない理由**——**既存の呼び手は `r10` を置かないので、
-/// 4 つ目の引数を見る形にすると、置いていない値を読む。**
-pub const SYS_SPAWN_WITH_PIPED_STDIN: u64 = ZAYTOS_PRIVATE_BASE + 6;
-
-/// 切り離して起動した子を待って回収する（`ADR-0063` の (b3)）。**私物。**
-///
-/// **引数はハンドル。** **戻り値は終わり方のビット**（[`SYS_SPAWN`] と同じ）**か `-ECHILD`**
-/// （ハンドルが合わない・終わった後の二重待ち）。**`wait4` を採らない**——**形が合わない**
-/// （`docs/architecture.md` の「合わせるのは合わせられる形について」）。
-///
-/// **使われなかった読み手の予約は、ここで消す**——**右が見つからなかったとき、左が満杯で
-/// 永久に待つのを防ぐ**（`crate::pipe::drop_reservation`）。
-pub const SYS_WAIT_CHILD: u64 = ZAYTOS_PRIVATE_BASE + 7;
-
-/// 入力の生イベントの fd を開く（`ADR-0066` の Y-a）。**私物。**
-///
-/// **Linux に対応する syscall が無い**——**あちらは `/dev/input/eventX` を `open` する**が、
-/// ZaytOS に装置のファイルシステムは無い。**したがって番号は私物にする**（`SYS_SPAWN` 等と
-/// 同じ。`ADR-0020` の「合わせられる形について合わせる」）。
-///
-/// **前景の持ち主でなければ `-EBADF`**（開く時点の1箇所で守る。`ADR-0066` の
-/// 「入力 fd の前景の関所」）。**読みは `read` が `struct input_event` を返す。**
-pub const SYS_OPEN_INPUT: u64 = ZAYTOS_PRIVATE_BASE + 8;
-
-/// 画面を開く入口の番号（`ADR-0066` の Y-c）。**開くと図形モードへ入る。**
-///
-/// **Linux に対応する syscall が無い**——**あちらは `/dev/fb0`（fbdev）か `/dev/dri/card0`（DRM）を
-/// `open` する**が、ZaytOS に装置のファイルシステムは無い。**番号は私物にする**（[`SYS_OPEN_INPUT`] と
-/// 同じ理由）。**開いた後の形は Linux の fbdev に合わせる**——**形は `ioctl` の
-/// [`FBIOGET_VSCREENINFO`] / [`FBIOGET_FSCREENINFO`]、画素は `mmap`。**
-///
-/// **呼んだ者が前景の系統でなければ `-EBADF`**（`crate::input::caller_is_foreground`）。
-/// **既に誰かが図形モードなら `-EBUSY`、画面が無ければ `-ENODEV`。**
-pub const SYS_OPEN_SCREEN: u64 = ZAYTOS_PRIVATE_BASE + 9;
-
-/// 画面の矩形をコピーする要求（ZaytOS 独自。`ADR-0066` の Y-c）。**引数は `struct drm_clip_rect`。**
-///
-/// **fbdev に対応するものが無い**——**fbdev は実物のフレームバッファをマップするので、コピーする必要が無い。**
-/// **ZaytOS は裏バッファをマップする**（Q1。MMIO を Ring 3 へ出さない）**ので、コピーする入口が要る。**
-/// **Linux で近いのは DRM の `DRM_IOCTL_MODE_DIRTYFB` で、矩形の配置（`struct drm_clip_rect`）だけを
-/// 採る**——**DIRTYFB そのものは DRM の大きな ABI の一部なので採らない。** **番号は [`TIOCZTAKE`] と
-/// 同じ `'Z'` の帯に置く。**
-pub const FBIOZPRESENT: u64 = 0x5A03;
 
 /// 画素の色の並び（`struct fb_bitfield` の `offset`）。**青・緑・赤の順に返す。**
 ///
@@ -540,25 +251,6 @@ fn clip_rect_area(rect: &DrmClipRect) -> Option<(u32, u32, u32, u32)> {
     Some((x1, y1, x2 - x1, y2 - y1))
 }
 
-/// `socket` の番号（Linux x86-64。`ADR-0064`）。**番号と `sockaddr_un` の配置は Linux から採る**
-/// （`ADR-0020`。**私物にしない**——**パイプの入口が私物だったのは `spawn` の形に付いたからで、
-/// ソケットは Linux の形そのものが在る**）。
-///
-/// **受けるのは `socket(AF_UNIX, SOCK_STREAM, 0)` だけである。** **`type` のフラグ
-/// （`SOCK_CLOEXEC` / `SOCK_NONBLOCK`）も `-EINVAL` で断る**（限界。見直すきっかけは `ADR-0064`）。
-pub const SYS_SOCKET: u64 = 41;
-/// `connect` の番号（`ADR-0064`）。**名前で繋ぐ。** **待ち受けが無ければ `-ECONNREFUSED`、
-/// 待ち行列が満杯なら `-EAGAIN`。**
-pub const SYS_CONNECT: u64 = 42;
-/// `accept` の番号（`ADR-0064`）。**待ち行列が空なら待つ**（[`crate::task::Wait::SocketAcceptable`]）。
-/// **`addr` は NULL しか受けない**（相手の名前は返さない。限界）。
-pub const SYS_ACCEPT: u64 = 43;
-/// `bind` の番号（`ADR-0064`）。**名前はカーネルの表に置く**——**ファイルシステムに inode は
-/// 作らない。** **抽象名（先頭 NUL）は `-EINVAL`。**
-pub const SYS_BIND: u64 = 49;
-/// `listen` の番号（`ADR-0064`）。**`backlog` は接続の上限で頭を切る**（Linux の `somaxconn` と同じ形）。
-pub const SYS_LISTEN: u64 = 50;
-
 /// [`SYS_SPAWN`] が受け入れるイメージの最大の大きさ（S11-5）。
 ///
 /// # 32 KiB の根拠は実測である
@@ -613,21 +305,6 @@ pub const MAX_ARGV_BYTES: usize = 1024;
 /// **残りはプログラム自身のスタックなので、`user-stack` の `over_half` を見ること**
 /// （`ADR-0041` の Decision 4）。
 pub const MAX_ENVP_BYTES: usize = 1024;
-
-/// 検証用 probe システムコールの番号（ZaytOS 独自。[`ZAYTOS_PRIVATE_BASE`]）。
-pub const PROBE_NUMBER: u64 = ZAYTOS_PRIVATE_BASE;
-
-/// **永久に実装しない番号**（S9-b-3-2a）。`-ENOSYS` の的である。
-///
-/// # なぜ「空いている番号」で済ませないか
-///
-/// **未実装の番号は、いつか実装される。** そのとき、`-ENOSYS` が返ることを
-/// 確かめていた検査は静かに別のものを見はじめる（戻り値が変わるので落ちはするが、
-/// **落ちた理由が「実装したから」だと分かる材料がどこにも無い**）。
-///
-/// **予約しておけば、実装しようとした人がこの doc を読む。** [`ZAYTOS_PRIVATE_BASE`]
-/// の上に置くので、Linux の番号表とも衝突しない。
-pub const SYS_NEVER_IMPLEMENTED: u64 = ZAYTOS_PRIVATE_BASE + 0xFF;
 
 /// probe が返す既知の戻り値。ユーザーはこれを RAX で受け取り、ユーザースタックへ
 /// store する。カーネルが例外による終了処理の後に読み戻して一致を確かめることで、戻り値が RAX 経由で
@@ -968,13 +645,22 @@ pub unsafe fn copy_to_user(slice: &UserSlice, at: u64, src: &[u8]) -> usize {
 /// 番号を実装へ振り分ける（M5-f-1-2 / M5-f-2-1）。
 ///
 /// probe は既知の戻り値 [`PROBE_RETURN`] を返す。SYS_CHECK_PTR はユーザーポインタの
-/// 範囲を検証し、可なら 0、不可なら -EFAULT を返す（**バイトは読まない**）。それ以外は
-/// 未実装で `-ENOSYS`。
+/// 範囲を検証し、可なら 0、不可なら -EFAULT を返す（**バイトは読まない**。copy は M5-f-2-2）。
+/// SYS_CHECKSUM は範囲を検証してから範囲内バイトを読み総和を返す。不正な範囲なら -EFAULT、長さが
+/// [`CHECKSUM_BUF_LEN`] を超えるなら -EINVAL。知らない番号は `-ENOSYS`。
 ///
 /// **[`SYS_EXIT`] だけは記録して終わる**（S9-b-3-1）。**戻り値では「戻らない」を
-/// 表せない**ので、Ring 3 へ返さない分岐は [`syscall_entry`] が持つ。
+/// 表せない**ので、Ring 3 へ返さない分岐は [`syscall_entry`] が持つ（あちらの
+/// 「exit は出口を通らない」の節）。
 ///`pml4_phys` / `direct_map` は稼働中テーブルのもの（syscall_entry
 /// が用意する）で、ポインタ検証にのみ使う。
+///
+/// # `exit_group`（231）は採らない
+///
+/// あちらは「呼んだスレッドが属するスレッドグループ全体を終わらせる」呼び出しで、
+/// **ZaytOS にはスレッドの概念が無い。** 番号を用意しても、`exit` と区別できる
+/// 振る舞いが書けない。**同じ振る舞いの入口を 2 つ置くと、どちらが正なのかが
+/// 呼び出し側にも実装側にも決まらない。** スレッドを作る段階で足す。
 ///
 /// # Safety
 ///
@@ -1166,7 +852,7 @@ unsafe fn dispatch(
         }
         SYS_EXIT => {
             // **記録するだけである。** Ring 3 へ返らない分岐は `syscall_entry` が
-            // 持つ（[`SYS_EXIT`] の doc）。**戻り値は読まれない。**
+            // 持つ（この関数の doc）。**戻り値は読まれない。**
             //
             // 破壊テスト (S9-b-3-1, user-exit-wrong-status): 終了状態を第 1 引数（RDI）
             // ではなく第 2 引数（RSI）から読む。**`arg4-rcx` と同じ、引数レジスタを
@@ -1289,7 +975,7 @@ pub fn terminal_writes_from_detached() -> u64 {
 }
 
 /// [`SYS_SPAWN_DETACHED`] が子の入場を待ったティック数の最大（計測）。**桁で小さいことを
-/// 示すために持つ**（`Wait` を足さない根拠。[`SYS_SPAWN_DETACHED`] の doc）。
+/// 示すために持つ**（`Wait` を足さない根拠。[`spawn_detached_from_ring3`] の doc）。
 static DETACHED_ENTRY_WAIT_TICKS_MAX: AtomicU64 = AtomicU64::new(0);
 
 /// [`SYS_SPAWN_DETACHED`] を通った回数（計測）。
@@ -1457,6 +1143,13 @@ unsafe fn read_socket_name(
 
 /// [`SYS_SOCKET`] の本体。**`AF_UNIX` の `SOCK_STREAM` だけを受け、繋がっていない
 /// ソケットを最小の空き fd に置く。**
+///
+/// **番号と `sockaddr_un` の配置は Linux から採る**
+/// （`ADR-0020`。**私物にしない**——**パイプの入口が私物だったのは `spawn` の形に付いたからで、
+/// ソケットは Linux の形そのものが在る**）。
+///
+/// **受けるのは `socket(AF_UNIX, SOCK_STREAM, 0)` だけである。** **`type` のフラグ
+/// （`SOCK_CLOEXEC` / `SOCK_NONBLOCK`）も `-EINVAL` で断る**（限界。見直すきっかけは `ADR-0064`）。
 #[inline(never)]
 fn socket_from_ring3(domain: u64, kind: u64, protocol: u64) -> u64 {
     if domain != AF_UNIX {
@@ -1485,6 +1178,9 @@ const INPUT_READ_MAX: usize = 96;
 
 /// [`SYS_OPEN_INPUT`] の本体（`ADR-0066` の Y-a）。**前景の持ち主にだけ入力の生イベントの
 /// fd を渡す。**
+///
+/// **前景の持ち主でなければ `-EBADF`**（開く時点の1箇所で守る。`ADR-0066` の
+/// 「入力 fd の前景の関所」）。
 ///
 /// # 前景の関所は開く時点の 1 箇所
 ///
@@ -1572,6 +1268,9 @@ unsafe fn read_input_events(
 }
 
 /// [`SYS_OPEN_SCREEN`] の本体（`ADR-0066` の Y-c）。**前景の系統にだけ画面の fd を渡し、図形モードへ入る。**
+///
+/// **呼んだ者が前景の系統でなければ `-EBADF`**（`crate::input::caller_is_foreground`）。
+/// **既に誰かが図形モードなら `-EBUSY`、画面が無ければ `-ENODEV`。**
 ///
 /// # 前景の関所は開く時点の 1 箇所
 ///
@@ -1779,19 +1478,6 @@ unsafe fn mmap_screen_from_ring3(len: u64, prot: u64, direct_map: DirectMap) -> 
     outcome
 }
 
-/// `poll` の番号（Linux x86-64。`ADR-0066` の Y-b）。
-///
-/// # 番号と配置は Linux から採る。意味は最小の部分集合である
-///
-/// **`ADR-0020` に従う**——**`poll`(7) と `struct pollfd`（`fd` 4＋`events` 2＋`revents` 2）を
-/// そのまま採る。** **独自番号にしない**（**Linux に対応する入口が在るので、`ZAYTOS_PRIVATE_BASE`
-/// は使わない**。`ADR-0066` の「番号」）。
-///
-/// **`ADR-0066` の Q3 は「一般の `poll` は作らない」と決めた。** **作らないのは意味の側である**
-/// ——**v1 が見るのは [`POLLIN`] だけで、`timeout` は -1（無限）と 0（待たない）だけを受ける。**
-/// **それ以外は `-EINVAL` である**（下の限界）。
-pub const SYS_POLL: u64 = 7;
-
 /// 1 回の `poll` に渡せる fd の数。**待ちの集合の大きさと同じである**
 /// （[`crate::task::MAX_WAIT_REASONS`]。**集合に入らない数の fd を受けても待てない**）。
 const MAX_POLL_FDS: usize = crate::task::MAX_WAIT_REASONS;
@@ -1845,6 +1531,16 @@ fn poll_is_ready(reason: crate::task::Wait) -> bool {
 }
 
 /// [`SYS_POLL`] の本体（`ADR-0066` の Y-b）。**読める fd の数か `-errno` を返す。**
+///
+/// # 番号と配置は Linux から採る。意味は最小の部分集合である
+///
+/// **`ADR-0020` に従う**——**`poll`(7) と `struct pollfd`（`fd` 4＋`events` 2＋`revents` 2）を
+/// そのまま採る。** **独自番号にしない**（**Linux に対応する入口が在るので、`ZAYTOS_PRIVATE_BASE`
+/// は使わない**。`ADR-0066` の「番号」）。
+///
+/// **`ADR-0066` の Q3 は「一般の `poll` は作らない」と決めた。** **作らないのは意味の側である**
+/// ——**v1 が見るのは [`POLLIN`] だけで、`timeout` は -1（無限）と 0（待たない）だけを受ける。**
+/// **それ以外は `-EINVAL` である**（下の限界）。
 ///
 /// # 待つ形は W2-c からのものである
 ///
@@ -1994,6 +1690,9 @@ unsafe fn poll_from_ring3(
 
 /// [`SYS_BIND`] の本体。**名前を取り、fd を listener にする**（`listen` はまだ）。
 ///
+/// **名前はカーネルの表に置く**——**ファイルシステムに inode は
+/// 作らない。** **抽象名（先頭 NUL）は `-EINVAL`。**
+///
 /// # 安全性
 ///
 /// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
@@ -2034,7 +1733,7 @@ unsafe fn bind_from_ring3(
 }
 
 /// [`SYS_LISTEN`] の本体。**`bind` 済みの fd だけを受ける。** **`backlog` は見ない**
-/// （接続の上限で頭を切る）。
+/// （接続の上限で頭を切る。Linux の `somaxconn` と同じ形）。
 #[inline(never)]
 fn listen_from_ring3(fd: u64, _backlog: u64) -> u64 {
     match socket_state_of(fd) {
@@ -2050,7 +1749,10 @@ fn listen_from_ring3(fd: u64, _backlog: u64) -> u64 {
     }
 }
 
-/// [`SYS_ACCEPT`] の本体。**待ち行列が空なら待つ。** **繋がった接続を新しい fd に置く。**
+/// [`SYS_ACCEPT`] の本体。**待ち行列が空なら待つ**（[`crate::task::Wait::SocketAcceptable`]）。
+/// **繋がった接続を新しい fd に置く。**
+///
+/// **`addr` は NULL しか受けない**（相手の名前は返さない。限界）。
 ///
 /// 破壊テスト (`ADR-0064`, socket-accept-does-not-wait): 待たずに `-EAGAIN` を返す。
 /// **`sockd` が `accept failed` で終わる。**
@@ -2105,6 +1807,8 @@ fn accept_from_ring3(fd: u64, addr: u64, bkl: &mut Option<crate::bkl::BklGuard>)
 }
 
 /// [`SYS_CONNECT`] の本体。**名前で繋ぎ、fd をその場でストリームにする。**
+///
+/// **待ち受けが無ければ `-ECONNREFUSED`、待ち行列が満杯なら `-EAGAIN`。**
 ///
 /// # 安全性
 ///
@@ -2258,17 +1962,6 @@ unsafe fn write_to_socket(
         }
     }
 }
-
-/// `mmap` の番号（Linux x86-64。`ADR-0065`）。**共有メモリの fd を自分の空間へマップする。**
-pub const SYS_MMAP: u64 = 9;
-/// `ftruncate` の番号。**共有メモリの大きさを据える（ページを取る）。**
-pub const SYS_FTRUNCATE: u64 = 77;
-/// `sendmsg` の番号。**iov のバイトをソケットへ、`SCM_RIGHTS` の fd を相手の表へ。**
-pub const SYS_SENDMSG: u64 = 46;
-/// `recvmsg` の番号。**ソケットのバイトを iov へ、渡された fd を自分の表へ。**
-pub const SYS_RECVMSG: u64 = 47;
-/// `memfd_create` の番号。**無名の共有メモリを作り fd を返す。**
-pub const SYS_MEMFD_CREATE: u64 = 319;
 
 /// `mmap` がマップする基点（プロセスごと）。**イメージ・ヒープ・スタックは `0x400000..0x800000` に
 /// 収まっているので、その上（PML4[0] の空き）へ順にマップする**（`ADR-0065`。ウィンドウの拡張は要らない）。
@@ -2647,6 +2340,19 @@ unsafe fn recvmsg_from_ring3(
 
 /// [`SYS_SPAWN_DETACHED`] の本体。**引数のコピーは [`spawn_from_ring3`] と同じ形である。**
 ///
+/// # 子が Ring 3 へ入るか終わるまで戻らない
+///
+/// **フレームアロケータの貸し出しは大域に 1 つである**（`docs/wayland-inventory.md` の #4）。
+/// **戻ってすぐシェルが右を `spawn` すると、左の読み込みと重なって `AllocatorUnavailable` に
+/// なる。** **`concurrent-test` が「1 本を Ring 3 へ入れてから次を起こす」で避けたのと同じ順序を、
+/// 入口の中で守る。** **待ちは `Wait` を使わず、譲るの繰り返しである**——**`Wait::ChildStarted` を
+/// 作れば起こす側も作れる（子が入った時点で起こす）が、待つ長さが読み込み 1 回ぶん
+/// （ティックの桁）なので足さない。** **待ったティック数は計測に出す**
+/// （[`detached_entry_wait_ticks_max`]）。**上限は置かない**——**読み込みは必ず成功か失敗で終わる。**
+///
+/// **見つからなければ同期で `-ENOENT` を返す**（起動する前に探す。`crate::userland::probe_program`）
+/// ——**シェルの `PATH` の輪が次の要素へ進める。**
+///
 /// # 安全性
 ///
 /// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
@@ -2731,7 +2437,7 @@ unsafe fn spawn_detached_from_ring3(
     }
     DETACHED_STARTS.fetch_add(1, Ordering::Relaxed);
 
-    // **子が Ring 3 へ入るか終わるまで戻らない**（[`SYS_SPAWN_DETACHED`] の doc）。
+    // **子が Ring 3 へ入るか終わるまで戻らない**（この関数の doc）。
     //
     // 破壊テスト (`ADR-0063` の (b3), spawn-detached-returns-early): **入場を待たず、1 度だけ譲って
     // 戻る。** **左が読み込みに入った直後にシェルへ戻し、左の読み込み（`load_user_program`。
@@ -2760,7 +2466,7 @@ unsafe fn spawn_detached_from_ring3(
     handle
 }
 
-/// [`SYS_SPAWN_WITH_PIPED_STDIN`] の本体。
+/// [`SYS_SPAWN_WITH_PIPED_STDIN`] の本体。**予約が無ければ `-EINVAL`。**
 ///
 /// **予約の消費は探した後である**——**`PATH` の輪が `-ENOENT` で次へ進む間、予約は残る。**
 ///
@@ -2845,8 +2551,11 @@ unsafe fn spawn_with_piped_stdin_from_ring3(
 }
 
 /// [`SYS_WAIT_CHILD`] の本体。
+///
+/// **使われなかった読み手の予約は、ここで消す**——**右が見つからなかったとき、左が満杯で
+/// 永久に待つのを防ぐ**（`crate::pipe::drop_reservation`）。
 fn wait_child_from_ring3(handle: u64, bkl: &mut Option<crate::bkl::BklGuard>) -> u64 {
-    // **使われなかった予約を消す**（[`SYS_WAIT_CHILD`] の doc）。
+    // **使われなかった予約を消す**（この関数の doc）。
     //
     // 破壊テスト (`ADR-0063` の (b3), wait-child-keeps-reservation): 消さない。**右が見つからなかった
     // 回の後、パイプが空かず、次の `|` が `-EBUSY` になる。**
@@ -3677,6 +3386,17 @@ fn errno_for_alloc(error: common::ext2::AllocError) -> i64 {
 
 /// `brk(addr)` の本体（H-a。ADR-0044）。
 ///
+/// # `brk(0)` は問い合わせである
+///
+/// **Linux と同じ形にする**——**0 を渡すと、いまの上端が返る。**
+/// **別の番号を用意しない**（`sbrk` は libc の側の話である）。
+///
+/// # 返すのは新しい上端である
+///
+/// **失敗しても `-errno` を返す**（**Linux は失敗すると古い上端を返す**が、
+/// **こちらは `-errno` にする**——**「動かなかった」と「そこまでしか
+/// 伸びなかった」を、呼ぶ側が区別できる形にする**）。
+///
 /// # 上げればマップする。下げれば外して返す
 ///
 /// **ページ単位で動く。** **要求は 1 バイト単位で受けるが、
@@ -3814,6 +3534,14 @@ unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
 
 /// `lseek(fd, offset, whence)` の本体（DIR-1b）。
 ///
+/// # 部品は S10-b から在り、入口が無かっただけである
+///
+/// **`crate::vfs::File::seek_to` が最初から在る。** **使う者が居なかったので
+/// 入口を置いていなかった**（`docs/foundation-inventory.md` が
+/// 「部品は在るが入口が無い」として挙げていた 2 つのうちの 1 つ）。
+///
+/// **利用者は `/bin/tail` である**（DIR-1b で同じ段階に作った）。
+///
 /// # 受けるのは `SEEK_SET` だけである
 ///
 /// 理由は [`SEEK_SET`] の doc にある。**知らない `whence` は `-EINVAL`。**
@@ -3846,6 +3574,9 @@ fn sys_lseek(fd: u64, offset: u64, whence: u64) -> u64 {
 }
 
 /// `unlink(path)` の本体（DIR-1b）。
+///
+/// **`common::ext2::unlink_file` が S12-e から在り、入口が無かっただけである。**
+/// **利用者は `/bin/rm` である。**
 ///
 /// # 消せるのは通常ファイルだけである
 ///
@@ -3918,6 +3649,8 @@ enum DirectoryOp {
 
 /// `mkdir(path)` と `rmdir(path)` の本体（DIR-1c）。
 ///
+/// **利用者は `/bin/mkdir` と `/bin/rmdir` である。**
+///
 /// # 1 つにまとめてある
 ///
 /// **違うのは `common::ext2` のどちらを呼ぶかだけである。**
@@ -3978,6 +3711,13 @@ unsafe fn sys_directory(
 }
 
 /// `open(path, flags, mode)` の本体（S10-b）。
+///
+/// # `openat`（257）は採らない
+///
+/// **ZaytOS には作業ディレクトリが無い**ので、`dirfd` に渡すものが無い。
+/// **`AT_FDCWD` を受けるだけの引数を置いても、区別できる振る舞いが書けない**
+/// （`exit` が `exit_group` を採らない理由（[`dispatch`] の doc）と同じ形である）。
+/// **作業ディレクトリを持つ段階で足す。**
 ///
 /// # 順序に意味がある
 ///
@@ -4225,6 +3965,12 @@ const DIRENT64_MAX_RECORD: usize = (DIRENT64_HEADER_LEN + 255 + 1).next_multiple
 
 /// `clock_gettime`（W2-d+）。**`CLOCK_MONOTONIC` だけを答える。**
 ///
+/// # `CLOCK_MONOTONIC` だけを実装する
+///
+/// **壁時計（`CLOCK_REALTIME` = 0）は持てない**——**ZaytOS に実時刻の出所が無い**
+/// （RTC は未実装。`docs/deferred-decisions.md` の「時刻の欄」）。
+/// **0 を返して黙って答えると嘘の時刻が広がる**ので、`-EINVAL` を返す。
+///
 /// # 秒とナノ秒は 1 本のティックから導く
 ///
 /// **1 ティックは 10ms である**（実測で 100.000 Hz）。**周波数はカーネルの値を読む**
@@ -4296,6 +4042,11 @@ pub fn early_timer_wakes() -> u64 {
 
 /// `nanosleep`（W2-d+。`ADR-0062`）。**締切まで `Waiting(Timer)` で眠る。**
 ///
+/// # `rem` には書かない
+///
+/// **Linux が `rem` へ書くのは、シグナルで割り込まれて `EINTR` を返すときだけである。**
+/// **ZaytOS にシグナルは無い**ので、**割り込まれて戻る道が無い。** **受け取って読まない。**
+///
 /// # 待ち方は `read(0)` と同じ踊りである
 ///
 /// **欄を `Waiting` にし、BKL を解いて譲り、起きたら取り直す**（`wait_for_keyboard`）。
@@ -4352,6 +4103,11 @@ unsafe fn sys_nanosleep(
 }
 
 /// `stat(path, statbuf)` の本体（S10-b）。
+///
+/// # `fstat`（5）は置かない
+///
+/// あちらは fd を取る。**表の中の inode を返すだけなので実装は短いが、
+/// 要ると分かってから足す**（S10-b の棚卸しの判断）。
 ///
 /// # 埋まる欄は 5 つで、残りは 0 である
 ///
@@ -4433,9 +4189,18 @@ unsafe fn sys_stat(path: u64, statbuf: u64, pml4_phys: PhysAddr, direct_map: Dir
 
 /// `ioctl(fd, request, arg)`（e-1）。**端末の問い合わせだけを受ける。**
 ///
+/// # 入口の方針——端末の問い合わせに限る
+///
+/// **`ioctl` は「何でも入る雑多な入口」である。** 最初の1つを入れる時点で
+/// **何を入れ、何を入れないかを決めてある**——**受けるのは端末の問い合わせだけ**
+/// で、**設定の変更（`termios` 相当・`TIOCSWINSZ`）は別の判断とする。**
+/// **知らない要求は `-ENOTTY` で断る**ので、**入口が黙って広がることはない。**
+/// **決定の記録は `docs/deferred-decisions.md` にある**（解禁のきっかけは
+/// 「設定の変更を要求する利用者が来たとき」。**C の移植で必ず来る**）。
+///
 /// # 受けるのは `TIOCGWINSZ` だけである
 ///
-/// **入口の方針は [`SYS_IOCTL`] の doc にある**——端末の問い合わせに限り、
+/// **入口の方針は上の節にある**——端末の問い合わせに限り、
 /// 設定の変更は別の判断とする。**知らない要求は `-ENOTTY` で断る。**
 ///
 /// # 断り方は 3 つある
@@ -4530,6 +4295,9 @@ unsafe fn sys_ioctl(
 }
 
 /// 溜まっているエラーを `ioctl` の形で返す（`TIOCZTAKE`。ADR-0046）。
+///
+/// **全画面のアプリが動く間、`fd 2`はカーネルが溜める。** **アプリが
+/// これで取り出し、自分のエコーエリアへ描く**（ADR-0046）。
 ///
 /// # 何を返すか
 ///

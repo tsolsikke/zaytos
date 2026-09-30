@@ -2584,7 +2584,7 @@ pub fn start_detached(
 ///
 /// **`SpawnOutcome` をそのまま置かない**——**`SpawnError` は `Copy` ではない。**
 /// **待つ側が要るのは「終わったこと」と「終わり方」なので、`SYS_SPAWN` と同じ形の
-/// ビットへまとめる**（[`crate::syscall::SPAWN_FOLDED_FLAG`]）。
+/// ビットへまとめる**（[`crate::abi::private::SPAWN_FOLDED_FLAG`]）。
 static DETACHED_STATUS: common::critical::Locked<Option<(u64, u64)>> =
     common::critical::Locked::new(None);
 

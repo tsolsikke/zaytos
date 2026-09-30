@@ -103,7 +103,7 @@ pub const EEXIST: i64 = 17;
 
 /// `-EACCES`（許されない）の errno（S11-5）。
 ///
-/// **[`crate::syscall::SYS_SPAWN`] が通常ファイルでないものを渡されたときに返す。**
+/// **[`crate::abi::private::SYS_SPAWN`] が通常ファイルでないものを渡されたときに返す。**
 /// **Linux の `execve` も、実行できない相手に `EACCES` を返す。**
 pub const EACCES: i64 = 13;
 
