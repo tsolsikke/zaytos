@@ -9001,7 +9001,7 @@ struct MachineVariant {
     serial: bool,
     /// virtio-blk を付けるか（`ADR-0068` の HW-d）。
     ///
-    /// **付けない変種では、カーネルは ESP の `\zaytos\fs.img` を RAM ディスクとして使う**
+    /// **付けない変種では、カーネルは ESP の `\zeikos\fs.img` を RAM ディスクとして使う**
     /// ——**VirtualBox と実機には virtio-blk が無いので、その道を検査に入れる。**
     virtio_disk: bool,
     /// ESP をファームウェアへどう渡すか（`ADR-0068` の HW-e）。
@@ -9107,7 +9107,7 @@ fn machine_variant(name: &str) -> Result<MachineVariant> {
 /// - `pc-no-i8042`（HW-b）——**FADT（リビジョン 1）は何も示さない。探って答えが無く、続く行を見る。**
 ///   **`q35` だけでは探る側の道を通らない**（FADT が先に答える）ので、2 つ用意する。
 /// - `q35-no-pit`（HW-c）——**PIT が刻まない。** **ACPI の PM タイマで較正して進む行を見る。**
-/// - `pc-no-virtio`（HW-d）——**virtio-blk が無い。** **ESP の `\zaytos\fs.img` を RAM ディスクとして
+/// - `pc-no-virtio`（HW-d）——**virtio-blk が無い。** **ESP の `\zeikos\fs.img` を RAM ディスクとして
 ///   使って進む行を見る**（VirtualBox と実機に virtio-blk は無い）。
 const MACHINE_VARIANT_CHECKS: &[(&str, VariantExpect)] = &[
     ("q35-6g", VariantExpect::Prompt),
@@ -9171,7 +9171,7 @@ const MACHINE_VARIANT_CHECKS: &[(&str, VariantExpect)] = &[
 
 /// 起動媒体の破壊テスト（`ADR-0068` の HW-e）。**カーネルの feature ではなく、イメージの中身を変える。**
 ///
-/// **`\zaytos\fs.img` を入れずにイメージをビルドする**——**装置も像も無い形になり、起動の列挙の所で
+/// **`\zeikos\fs.img` を入れずにイメージをビルドする**——**装置も像も無い形になり、起動の列挙の所で
 /// 止まる。** **HW-d の破壊テスト（`fs-ram-image-ignored`）とは止まる所が違う**（実測。2026-09-23）
 /// ——**あちらはイメージを渡された上で見ないので、コピーする所まで進んで止まる。** **こちらはイメージそのものが
 /// 無いので、その前の「装置も像も無い」の検査で止まる。**
@@ -9188,7 +9188,7 @@ const MEDIA_SABOTAGES: &[(&str, MediaContents, VariantExpect)] = &[(
     VariantExpect::StopsWithReason {
         line: "virtio-blk: no device with an I/O BAR0 was found on bus 0, and the bootloader \
                handed over no RAM image",
-        reason: "fs-image: no \\zaytos\\fs.img on the ESP",
+        reason: "fs-image: no \\zeikos\\fs.img on the ESP",
     },
 )];
 
@@ -9715,7 +9715,7 @@ fn apply_machine_variant(
 enum MediaContents {
     /// 3 つの成果物と `startup.nsh` を全部入れる。
     Complete,
-    /// **`\zaytos\fs.img` を入れない**（破壊テスト。[`MEDIA_SABOTAGES`]）。
+    /// **`\zeikos\fs.img` を入れない**（破壊テスト。[`MEDIA_SABOTAGES`]）。
     WithoutFsImage,
 }
 
@@ -9734,12 +9734,12 @@ impl MediaContents {
         match self {
             MediaContents::Complete => &[
                 "EFI/BOOT/BOOTX64.EFI",
-                "zaytos/kernel.elf",
-                "zaytos/fs.img",
+                "zeikos/kernel.elf",
+                "zeikos/fs.img",
                 "startup.nsh",
             ],
             MediaContents::WithoutFsImage => {
-                &["EFI/BOOT/BOOTX64.EFI", "zaytos/kernel.elf", "startup.nsh"]
+                &["EFI/BOOT/BOOTX64.EFI", "zeikos/kernel.elf", "startup.nsh"]
             }
         }
     }
@@ -9809,7 +9809,7 @@ fn write_boot_media_unwrapped(
             built.layout
         );
     }
-    if read.label != "ZAYTOS" {
+    if read.label != "ZEIKOS" {
         bail!(
             "{}: the volume label reads back as {:?}",
             out.display(),
@@ -9899,7 +9899,7 @@ fn verify_partition_table(image: &Path) -> Result<()> {
 /// `cargo xtask image`（`ADR-0068` の HW-e）。**起動媒体のイメージをビルドして確かめる。**
 ///
 /// **`--without-fs-image` は破壊テストである**（[`MEDIA_SABOTAGES`]）。**別の名前のイメージを書く**
-/// ——**運用者が VirtualBox へ渡すイメージ（`zaytos.img`）を上書きしない。**
+/// ——**運用者が VirtualBox へ渡すイメージ（`zeikos.img`）を上書きしない。**
 fn cmd_image(contents: MediaContents) -> Result<()> {
     let workspace_root = workspace_root()?;
     let run = RunDir::create(&workspace_root, "image")?;
@@ -9907,8 +9907,8 @@ fn cmd_image(contents: MediaContents) -> Result<()> {
     let kernel = build_kernel_with_features(&workspace_root, &[])?;
     let esp_dir = stage_esp(&run, &bootloader_efi, &kernel)?;
     let name = match contents {
-        MediaContents::Complete => "zaytos",
-        MediaContents::WithoutFsImage => "zaytos-no-fs-image",
+        MediaContents::Complete => "zeikos",
+        MediaContents::WithoutFsImage => "zeikos-no-fs-image",
     };
     let out = media_image_path(&workspace_root, name);
     println!("image: {}", write_boot_media(&esp_dir, &out, contents)?);
@@ -9927,7 +9927,7 @@ fn check_boot_media(workspace_root: &Path) -> Result<String> {
     let bootloader_efi = build_bootloader_with_features(workspace_root, &[])?;
     let kernel = build_kernel_with_features(workspace_root, &[])?;
     let esp_dir = stage_esp(&run, &bootloader_efi, &kernel)?;
-    let out = media_image_path(workspace_root, "zaytos");
+    let out = media_image_path(workspace_root, "zeikos");
     write_boot_media(&esp_dir, &out, MediaContents::Complete)
 }
 
@@ -31949,7 +31949,7 @@ fn stage_esp_with_disk_unwrapped(
 
     // bootloader 側の ELF ローダー（bootloader/src/loader.rs）がここから
     // 読み込む（M2-0c）。
-    let kernel_dir = esp_dir.join("zaytos");
+    let kernel_dir = esp_dir.join("zeikos");
     fs::create_dir_all(&kernel_dir)
         .with_context(|| format!("failed to create {}", kernel_dir.display()))?;
     let staged_kernel_elf = kernel_dir.join("kernel.elf");
@@ -31973,7 +31973,7 @@ fn stage_esp_with_disk_unwrapped(
     // （16MiB に伸ばす根拠が無くなった）。
     // **RAM ディスクのイメージを ESP にも置く（`ADR-0068` の HW-d）。**
     //
-    // **ブートローダが `\zaytos\fs.img` として読み、BootInfo で渡す。** **virtio-blk が在る回は
+    // **ブートローダが `\zeikos\fs.img` として読み、BootInfo で渡す。** **virtio-blk が在る回は
     // 使われない**（カーネルは装置を優先する）——**それでも常に置く。** **VirtualBox と実機には
     // 装置が無く、起動媒体のイメージ（HW-e）にもこのファイルが入るからである。**
     // **中身は `disk0.img` と同じ、いま積んだカーネルがビルドしたイメージである。**

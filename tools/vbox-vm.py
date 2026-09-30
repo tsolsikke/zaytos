@@ -41,7 +41,7 @@
 # 使い方
 
     python3 tools/vbox-vm.py selftest
-    python3 tools/vbox-vm.py create --name zaytos-hw-e --image target/media/zaytos.img
+    python3 tools/vbox-vm.py create --name zaytos-hw-e --image target/media/zeikos.img
     python3 tools/vbox-vm.py run    --name zaytos-hw-e
     cargo xtask judge-vbox target/vbox/zaytos-hw-e/<時刻>
     python3 tools/vbox-vm.py start  --name zaytos-hw-e --gui
@@ -644,7 +644,7 @@ def main(argv=None):
         choices=["create", "start", "stop", "delete", "log", "screenshot", "run", "selftest"],
     )
     parser.add_argument("--name", help="VM の名前（zaytos- で始まること）")
-    parser.add_argument("--image", default="target/media/zaytos.img", help="起動媒体の像")
+    parser.add_argument("--image", default="target/media/zeikos.img", help="起動媒体の像")
     parser.add_argument("--basefolder", default=DEFAULT_BASEFOLDER, help="VDI と .vbox の置き場")
     parser.add_argument("--memory", type=int, default=2048, help="メモリ（MiB）")
     # **既定は 4 個**（運用者の判断 3。2026-09-24）。**VirtualBox の EFI は 2 個と 3 個で落ちる**

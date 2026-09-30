@@ -156,13 +156,13 @@ def run_variant(name, wait, image):
     # 1 つのイメージを渡す**（VirtualBox と実機と同じ形）——**`fat:rw:` は QEMU だけの道である。**
     # **イメージは `cargo xtask image` が置く。**
     if esp == "media":
-        image = os.path.join(ROOT, "target", "media", "zaytos.img")
-        shutil.copy(image, os.path.join(out, "zaytos.img"))
-        args += ["-drive", f"format=raw,file={out}/zaytos.img"]
+        image = os.path.join(ROOT, "target", "media", "zeikos.img")
+        shutil.copy(image, os.path.join(out, "zeikos.img"))
+        args += ["-drive", f"format=raw,file={out}/zeikos.img"]
     else:
         args += ["-drive", f"format=raw,file=fat:rw:{out}/esp"]
     # **ディスクが none の変種では virtio-blk を付けない**（`ADR-0068` の HW-d）。
-    # **カーネルは ESP の `\zaytos\fs.img` を RAM ディスクとして使う。**
+    # **カーネルは ESP の `\zeikos\fs.img` を RAM ディスクとして使う。**
     if disk == "virtio":
         args += ["-drive", f"if=none,id=disk0,format=raw,file={out}/disk0.img",
                  "-device", "virtio-blk-pci,drive=disk0"]

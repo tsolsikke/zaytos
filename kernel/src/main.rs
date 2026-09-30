@@ -5489,7 +5489,7 @@ fn report_no_virtio_device(
         None => {
             logger.error(format_args!(
                 "virtio-blk: no device with an I/O BAR0 was found on bus 0, and the bootloader \
-                 handed over no RAM image (\\zaytos\\fs.img); there is no file system to read; \
+                 handed over no RAM image (\\zeikos\\fs.img); there is no file system to read; \
                  halting"
             ));
             cpu::halt_forever()
@@ -5544,7 +5544,7 @@ fn copy_fs_image_to_frames(
         FsImageCopyError::RamImageChecksumMismatch { found, expected } => {
             logger.error(format_args!(
                 "fs-image: the handed-over image has checksum {found:#010x} but this kernel was \
-                 built for {expected:#010x} (the length matched, so the \\zaytos\\fs.img on the \
+                 built for {expected:#010x} (the length matched, so the \\zeikos\\fs.img on the \
                  boot medium is stale); halting"
             ))
         }

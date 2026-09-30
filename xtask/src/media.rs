@@ -122,10 +122,10 @@ const GPT_HEADER_BYTES: u32 = 92;
 const PARTITION_NAME: &str = "EFI System Partition";
 
 /// FAT のボリュームラベル（11 バイト。8.3 と同じ詰め方）。
-const VOLUME_LABEL: &[u8; 11] = b"ZAYTOS     ";
+const VOLUME_LABEL: &[u8; 11] = b"ZEIKOS     ";
 
-/// FAT のボリュームの番号。**固定である**（[`DISK_GUID`] と同じ理由）。
-const VOLUME_ID: u32 = 0x5a41_5954;
+/// FAT のボリュームの番号。**固定である**（[`DISK_GUID`] と同じ理由）。値は「ZEIK」の ASCII である。
+const VOLUME_ID: u32 = 0x5a45_494b;
 
 /// 予約セクタの数（FAT32 の慣行。0 が起動セクタ、1 が FSInfo、6 と 7 に控えが入る）。
 const RESERVED_SECTORS: u32 = 32;
@@ -298,7 +298,7 @@ fn is_short_name_char(byte: u8) -> bool {
 ///
 /// **FAT の名前の欄は大文字である。** **予約バイト（12 番）の 0x08 が「本体は小文字」、
 /// 0x10 が「拡張子は小文字」を表す**（Windows NT が足した慣行で、Linux の vfat も見る）。
-/// **`zaytos`・`kernel.elf`・`fs.img`・`startup.nsh` は、これで小文字のまま見える。**
+/// **`zeikos`・`kernel.elf`・`fs.img`・`startup.nsh` は、これで小文字のまま見える。**
 ///
 /// **ファームウェアがこのフラグを見なくても、探す側は困らない**——**FAT の名前の照合は
 /// 大文字小文字を区別しない**（UEFI 仕様の `EFI_FILE_PROTOCOL.Open`）。**フラグが無視されると、
@@ -1157,9 +1157,9 @@ mod tests {
                 "EFI/BOOT/BOOTX64.EFI",
                 (0..2_000u32).map(|i| i as u8).collect(),
             ),
-            ("zaytos/kernel.elf", vec![0x7f; 5_000]),
+            ("zeikos/kernel.elf", vec![0x7f; 5_000]),
             (
-                "zaytos/fs.img",
+                "zeikos/fs.img",
                 (0..1_024u32).map(|i| (i * 7) as u8).collect(),
             ),
             ("startup.nsh", b"FS0:\\EFI\\BOOT\\BOOTX64.EFI\r\n".to_vec()),
@@ -1182,7 +1182,7 @@ mod tests {
         assert_eq!(media.bytes.len(), IMAGE_SECTORS as usize * SECTOR_BYTES);
         let read = read_boot_media(&media.bytes).unwrap();
         assert_eq!(read.esp, (ESP_FIRST_LBA, ESP_SECTORS));
-        assert_eq!(read.label, "ZAYTOS");
+        assert_eq!(read.label, "ZEIKOS");
         assert_eq!(read.layout, media.layout);
         let mut expected: Vec<(String, Vec<u8>)> = files
             .iter()
@@ -1240,11 +1240,11 @@ mod tests {
         let bytes = [0u8; 4];
         let files = [
             MediaFile {
-                path: "zaytos/fs.img",
+                path: "zeikos/fs.img",
                 bytes: &bytes,
             },
             MediaFile {
-                path: "zaytos/fs.img",
+                path: "zeikos/fs.img",
                 bytes: &bytes,
             },
         ];

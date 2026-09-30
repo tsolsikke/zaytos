@@ -3,7 +3,7 @@
 # 起こし方だけを持つ。何が起きれば正しいか（判定）は xtask が持ち
 # （MACHINE_VARIANT_CHECKS ほか）、--full が回すのはそこに名前が在る変種だけである。
 # シリアルが none の変種は人が画面で読むためのもので、xtask は起こさない（判定がシリアルを読む）。
-# ディスクが none の変種では virtio-blk を付けない。カーネルは ESP の \zaytos\fs.img を
+# ディスクが none の変種では virtio-blk を付けない。カーネルは ESP の \zeikos\fs.img を
 # RAM ディスクとして使う（ADR-0068 の HW-d）。
 # ESP の欄は、ファームウェアへ ESP をどう渡すかである（ADR-0068 の HW-e）。
 #   dir   = QEMU の fat:rw: でディレクトリを FAT に見せる（既定。QEMU だけの道である）

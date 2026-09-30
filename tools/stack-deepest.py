@@ -97,7 +97,7 @@ def image_from_argv(argv):
 
 
 IMAGE = os.path.realpath(image_from_argv(sys.argv[1:]))
-ELF = os.path.join(IMAGE, "esp", "zaytos", "kernel.elf")
+ELF = os.path.join(IMAGE, "esp", "zeikos", "kernel.elf")
 
 
 def tool(args):

@@ -1,6 +1,6 @@
 //! ELF ローダー（M2-0c）。
 //!
-//! `\zaytos\kernel.elf` を ESP から読み込み、ELF64 の `PT_LOAD` セグメントを
+//! `\zeikos\kernel.elf` を ESP から読み込み、ELF64 の `PT_LOAD` セグメントを
 //! パースして物理メモリへ配置し、GOP フレームバッファ情報を取得したうえで
 //! ExitBootServices を実行し、kernel へ制御を渡す。
 
@@ -23,9 +23,9 @@ use uefi::proto::console::gop::{GraphicsOutput, PixelFormat as GopPixelFormat};
 use uefi::table::cfg::ConfigTableEntry;
 
 const PAGE_SIZE: u64 = 4096;
-const KERNEL_ELF_PATH: &uefi::CStr16 = cstr16!("\\zaytos\\kernel.elf");
+const KERNEL_ELF_PATH: &uefi::CStr16 = cstr16!("\\zeikos\\kernel.elf");
 /// RAM ディスクのイメージ（`ADR-0068` の HW-d）。**無ければ渡さない**——**カーネルは virtio-blk を使う。**
-const FS_IMAGE_PATH: &uefi::CStr16 = cstr16!("\\zaytos\\fs.img");
+const FS_IMAGE_PATH: &uefi::CStr16 = cstr16!("\\zeikos\\fs.img");
 
 fn align_down(addr: u64, align: u64) -> u64 {
     addr & !(align - 1)
@@ -52,7 +52,7 @@ pub fn run(mut logger: Logger<Serial>) -> ! {
         );
         let elf_bytes = fs
             .read(Path::new(KERNEL_ELF_PATH))
-            .expect("failed to read \\zaytos\\kernel.elf from the ESP");
+            .expect("failed to read \\zeikos\\kernel.elf from the ESP");
         // **RAM ディスクのイメージを読む（`ADR-0068` の HW-d）。** **ここでしか読めない**
         // ——**ExitBootServices の後はファイルシステムが無い。** **無ければ空のまま進む。**
         fs_image = read_fs_image(&mut logger, &mut fs);
@@ -395,7 +395,7 @@ impl FsImage {
     }
 }
 
-/// ESP の `\zaytos\fs.img` を読み、`LOADER_DATA` の連続ページへ置く（`ADR-0068` の HW-d）。
+/// ESP の `\zeikos\fs.img` を読み、`LOADER_DATA` の連続ページへ置く（`ADR-0068` の HW-d）。
 ///
 /// **無ければ空を返す**（起動は続く。カーネルが virtio-blk を使う）。**中身は検証しない**
 /// ——**ext2 として読めるかはカーネルが見る**（`ADR-0008` 「ローダは薄く」）。
@@ -411,7 +411,7 @@ fn read_fs_image(logger: &mut Logger<Serial>, fs: &mut FileSystem) -> FsImage {
         Ok(bytes) => bytes,
         Err(error) => {
             logger.info(format_args!(
-                "fs-image: no \\zaytos\\fs.img on the ESP ({error:?}); the kernel will need a \
+                "fs-image: no \\zeikos\\fs.img on the ESP ({error:?}); the kernel will need a \
                  virtio-blk device"
             ));
             return FsImage::empty();
@@ -419,7 +419,7 @@ fn read_fs_image(logger: &mut Logger<Serial>, fs: &mut FileSystem) -> FsImage {
     };
     if bytes.is_empty() {
         logger.warn(format_args!(
-            "fs-image: \\zaytos\\fs.img is empty, so it is not handed over"
+            "fs-image: \\zeikos\\fs.img is empty, so it is not handed over"
         ));
         return FsImage::empty();
     }
@@ -445,7 +445,7 @@ fn read_fs_image(logger: &mut Logger<Serial>, fs: &mut FileSystem) -> FsImage {
     let phys =
         PhysAddr::new(buffer.as_ptr() as u64).expect("the image address does not fit in 52 bits");
     logger.info(format_args!(
-        "fs-image: handed over {} byte(s) from \\zaytos\\fs.img at {:#x}..{:#x} ({pages} page(s), \
+        "fs-image: handed over {} byte(s) from \\zeikos\\fs.img at {:#x}..{:#x} ({pages} page(s), \
          LoaderData)",
         bytes.len(),
         phys.as_u64(),
