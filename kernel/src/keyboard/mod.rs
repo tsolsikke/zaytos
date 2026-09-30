@@ -73,9 +73,7 @@ static FIRST_DELIVERY_REPORTED: AtomicBool = AtomicBool::new(false);
 /// **最初の到着を記録し、今の配送先と比べるのは `machine` である**（`crate::machine::pc::first_arrival`。2026-09-29。
 /// 9e。ベクタを共通の側に出さない）。記録は処理のある源の完了のときだけなので、処理を登録しなかった回
 /// （破壊テスト `keyboard-handler-not-registered-test`）では、今までどおりこの行は出ない。
-pub fn report_first_delivery_once(
-    logger: &mut common::log::Logger<common::machine::pc::serial::SerialPort>,
-) {
+pub fn report_first_delivery_once(logger: &mut common::log::Logger<common::machine::pc::Serial>) {
     let Some(first) = crate::machine::pc::first_arrival(interrupt_source()) else {
         return;
     };

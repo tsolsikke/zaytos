@@ -14,7 +14,7 @@ use common::boot_info::{
 };
 use common::elf::Elf;
 use common::log::Logger;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::serial::Serial;
 use uefi::boot::{AllocateType, MemoryType};
 use uefi::cstr16;
 use uefi::fs::{FileSystem, Path};
@@ -37,7 +37,7 @@ fn align_up(addr: u64, align: u64) -> u64 {
 
 /// kernel.elf をロードし、ExitBootServices を経て kernel へジャンプする。
 /// 正常経路では戻らない。
-pub fn run(mut logger: Logger<SerialPort>) -> ! {
+pub fn run(mut logger: Logger<Serial>) -> ! {
     // --- 1. kernel.elf の読み込み・パース・セグメント配置 ---
     // fs/elf_bytes/elf はこのブロックの終わりでスコープを抜けて破棄される。
     // elf_bytes は Boot Services のプールアロケータ（Vec）に由来するため、
@@ -340,7 +340,7 @@ impl Handoff {
     /// **入りきらなければ、飛ぶ前に止まり、理由を出す。** **ExitBootServices の後は確保できない。**
     fn take_memory_map(
         &self,
-        logger: &mut Logger<SerialPort>,
+        logger: &mut Logger<Serial>,
         buffer: &[u8],
         map_size: usize,
     ) -> PhysAddr {
@@ -406,7 +406,7 @@ impl FsImage {
 ///
 /// **読めたのに置けなかったときは止める。** **イメージが在るのに黙って無いことにすると、
 /// カーネルは「装置も像も無い」と出力して止まり、理由が 1 段ずれる。**
-fn read_fs_image(logger: &mut Logger<SerialPort>, fs: &mut FileSystem) -> FsImage {
+fn read_fs_image(logger: &mut Logger<Serial>, fs: &mut FileSystem) -> FsImage {
     let bytes = match fs.read(Path::new(FS_IMAGE_PATH)) {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -457,7 +457,7 @@ fn read_fs_image(logger: &mut Logger<SerialPort>, fs: &mut FileSystem) -> FsImag
     }
 }
 
-fn allocate_handoff(logger: &mut Logger<SerialPort>) -> Handoff {
+fn allocate_handoff(logger: &mut Logger<Serial>) -> Handoff {
     #[cfg(feature = "handoff-anywhere")]
     {
         // **破壊テスト `handoff-anywhere`（`ADR-0068` の HW-a）**——BootInfo を `AnyPages` で取り、
@@ -535,7 +535,7 @@ fn allocate_handoff(logger: &mut Logger<SerialPort>) -> Handoff {
 ///
 /// 見つからなければ 0 を返す。**停止しない**（S1 は情報を集める段階で、ACPI が
 /// 無くても現在のカーネルは動く。致命として扱うのは S2 である）。
-fn find_acpi_rsdp(logger: &mut Logger<SerialPort>) -> PhysAddr {
+fn find_acpi_rsdp(logger: &mut Logger<Serial>) -> PhysAddr {
     let found = uefi::system::with_config_table(|entries| {
         let mut acpi1 = None;
         let mut acpi2 = None;

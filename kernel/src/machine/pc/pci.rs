@@ -25,7 +25,7 @@
 
 use common::arch::x86_64::port;
 use common::log::Logger;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::serial::Serial;
 
 /// `CONFIG_ADDRESS`。どの (bus, device, function, offset) を読むかを書く側。
 const CONFIG_ADDRESS: u16 = 0xCF8;
@@ -110,7 +110,7 @@ unsafe fn config_read(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
 /// **停止性はループの形そのものにある**（最大 32 device
 /// かける 8 function の読みで、外部の値に依存しない。S10 の線 4 と同じ種類だが、
 /// 上限が構造で決まるので打ち切りの機構は要らない）。
-pub unsafe fn scan_bus0(logger: &mut Logger<SerialPort>) -> Option<VirtioBlkLocation> {
+pub unsafe fn scan_bus0(logger: &mut Logger<Serial>) -> Option<VirtioBlkLocation> {
     let mut functions = 0u32;
     let mut virtio_blk = 0u32;
     let mut found: Option<VirtioBlkLocation> = None;

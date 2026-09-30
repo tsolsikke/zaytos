@@ -29,7 +29,7 @@
 use common::addr::direct_map;
 use common::arch::x86_64::port;
 use common::log::Logger;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::Serial;
 
 use crate::frame_allocator::FrameAllocator;
 use crate::machine::pc::pci::VirtioBlkLocation;
@@ -137,7 +137,7 @@ pub struct VirtioBlk {
 /// - このポートウィンドウとリングの物理領域を触るのは、返した [`VirtioBlk`] だけで
 ///   あること（複製を作らない）
 pub unsafe fn setup(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     virtio: &VirtioBlkLocation,
     allocator: &mut FrameAllocator,
 ) -> Result<VirtioBlk, VirtioBlkError> {
@@ -767,7 +767,7 @@ fn handle_irq(_source: crate::interrupts::InterruptSource) {
 ///   リングとポートウィンドウを触る。**ISR ポートだけはハンドラと共有し、
 ///   それは意図した相互作用である**——装置が上げ、ハンドラが読んで下ろす）
 pub unsafe fn exercise_interrupt_read(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     blk: &mut VirtioBlk,
 ) -> Result<(), VirtioBlkError> {
     // **読みは 2 回である。** 1 回では EOI を落とす破壊テストが見えない——実測で、
@@ -830,7 +830,7 @@ const BLOCKING_WAIT_TICKS: u64 = 200;
 /// [`exercise_interrupt_read`] と同じ位置の契約（配線・武装済み、IF=1、
 /// この struct だけがリングとポートウィンドウを触る）。
 pub unsafe fn exercise_blocking_read(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     blk: &mut VirtioBlk,
 ) -> Result<(), VirtioBlkError> {
     let before = IRQ_DELIVERED.load(core::sync::atomic::Ordering::Acquire);
@@ -919,7 +919,7 @@ pub unsafe fn exercise_blocking_read(
 ///
 /// [`setup`] と同じ位置の契約。
 pub unsafe fn exercise_read(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     blk: &mut VirtioBlk,
 ) -> Result<(), VirtioBlkError> {
     // 破壊テスト (S13-b, virtio-wrong-sector-test): 隣の sector を要求する。

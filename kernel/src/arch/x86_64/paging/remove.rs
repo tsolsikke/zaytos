@@ -21,7 +21,7 @@
 use common::addr::{DirectMap, PhysAddr, VirtAddr};
 use common::arch::x86_64::cpu;
 use common::log::Logger;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::serial::Serial;
 
 use super::{switch, table, verify};
 
@@ -47,7 +47,7 @@ pub struct RequiredRegion {
 /// 到達不能になる」前提が崩れ、リーク数が過大になる（bootstrap テーブルは PD_shared を
 /// `[0]` と `[511]` で共有していた前例がある）。
 fn frame_accounting_before_removal(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     cr3: PhysAddr,
     direct_map: DirectMap,
 ) {
@@ -135,7 +135,7 @@ fn frame_accounting_before_removal(
 /// できること。呼び出し時点で恒等ウィンドウを握る全検証サイトと boot_info の消費が
 /// 済んでいること（順序依存。除去点より前に走ること）。
 pub unsafe fn remove_identity(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     direct_map: DirectMap,
     high_mapped: &[RequiredRegion],
 ) {

@@ -26,7 +26,7 @@
 
 use common::critical::Locked;
 use common::log::{LogLevel, Logger};
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::Serial;
 
 use crate::arch::x86_64::ring3::MAX_EXCURSION_DEPTH;
 use crate::syscall::{MAX_ARGV_BYTES, MAX_ENVP_BYTES, MAX_EXECUTABLE_SIZE, PATH_MAX};
@@ -170,7 +170,7 @@ static ENVIRONMENT: Locked<Environment> = Locked::new(Environment::new());
 /// **開けない・読めない・1 行も採れない、のどれでも既定へ落ちる。**
 /// **止めない**——**利用者が `rm /etc/environment` を打てる**
 /// （`ADR-0052` の Decision 3）。
-pub fn load_environment(logger: &mut Logger<SerialPort>) {
+pub fn load_environment(logger: &mut Logger<Serial>) {
     let mut taken = 0usize;
     let mut dropped = 0usize;
     let mut from_file = false;
@@ -269,7 +269,7 @@ pub fn load_environment(logger: &mut Logger<SerialPort>) {
 /// 後なので、それより前に決まっていれば足りる**（実測。
 /// `kernel/src/main.rs` で、環境を読むのがイメージの複製の直後、
 /// `start_timer` はその下である）。
-fn apply_keymap(logger: &mut Logger<SerialPort>) {
+fn apply_keymap(logger: &mut Logger<Serial>) {
     const KEYMAP: &[u8] = b"KEYMAP=";
     // **ロックの下ではコピーだけを取る。** **借りたまま `drop` できない。**
     let mut value = [0u8; ENV_LINE_MAX];
@@ -339,7 +339,7 @@ fn drop_by_sabotage(line: &[u8]) -> bool {
 /// **`MAX_ENVP` が 8 で 1 行が [`ENV_LINE_MAX`] なので、採れるのは
 /// 高々 1KiB ぶんである**——**4096 バイトの中に、採れる行はすべて入る。**
 /// **越えたぶんは黙って読まれない**ので、**そのことを出す。**
-fn read_env_source(logger: &mut Logger<SerialPort>) -> Option<&'static [u8]> {
+fn read_env_source(logger: &mut Logger<Serial>) -> Option<&'static [u8]> {
     let filesystem = match crate::vfs::root_filesystem() {
         Ok(filesystem) => filesystem,
         Err(error) => {
@@ -950,7 +950,7 @@ pub struct UserProcess {
 /// 違い、それは呼び出し側の知識だからである（`ring3::enter` が終了させた位置を
 /// 主張しないのと同じ形）。`run` が偽なら 0 を返す。
 pub fn load_user_program(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     image: &[u8],
     run: bool,
     name: &'static str,
@@ -1250,7 +1250,7 @@ pub fn global_difference_checks() -> u64 {
 /// 取り出して渡すと、その一時値が `load_user_program` のフレームを 16 バイト広げた**
 /// （実測。`objdump` で前置きの `sub rsp` を読んだ。4,288 → 4,304 バイト）。
 #[inline(never)]
-fn forget_task_root_before_destroy(logger: &mut Logger<SerialPort>, process: &UserProcess) {
+fn forget_task_root_before_destroy(logger: &mut Logger<Serial>, process: &UserProcess) {
     let name = process.name;
     let root = process.space.root().as_u64();
     if crate::task::forget_page_table_root_if(root) {
@@ -1305,7 +1305,7 @@ fn forget_task_root_before_destroy(logger: &mut Logger<SerialPort>, process: &Us
 /// 揃える。**
 ///
 fn load_user_program_into(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     allocator: &mut crate::frame_allocator::FrameAllocator,
     image: &[u8],
     process: &mut UserProcess,
@@ -1656,7 +1656,7 @@ fn load_user_program_into(
 /// **止めない。** **超えても壊れてはいない**——**判断が要るだけである。**
 /// **壊れる側（ガードページを踏む）は、そもそもこのページの下が
 /// マップされていないので `#PF` になる。**
-fn report_user_stack_high_water(logger: &mut Logger<SerialPort>, process: &UserProcess) {
+fn report_user_stack_high_water(logger: &mut Logger<Serial>, process: &UserProcess) {
     /// スタックページの大きさ。**1 枚だけマップしてある。**
     const PAGE_SIZE: usize = 4096;
 
@@ -1693,7 +1693,7 @@ fn report_user_stack_high_water(logger: &mut Logger<SerialPort>, process: &UserP
 /// **乗せた形を 1 度実測した**——**計測自身がカーネルスタックの高水位と遠征スタックの高水位を
 /// 208 バイトずつ深くした**（2026-09-23。`tools/frame-sizes.py` でフレームを読んだ）。
 #[inline(never)]
-fn report_stack_water_before_ring3(logger: &mut Logger<SerialPort>, name: &'static str) {
+fn report_stack_water_before_ring3(logger: &mut Logger<Serial>, name: &'static str) {
     let used = crate::arch::x86_64::stack::kernel_stack_high_water();
     let capacity = crate::arch::x86_64::stack::kernel_stack_capacity();
     logger.info(format_args!(
@@ -1719,7 +1719,7 @@ fn report_stack_water_before_ring3(logger: &mut Logger<SerialPort>, name: &'stat
 /// `process` のマッピングが済んでおり、entry と stack がマップしたユーザーページであること。
 /// 起動時の単一実行文脈から呼ぶこと。
 unsafe fn run_loaded_program(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     process: &mut UserProcess,
 ) -> Result<(), UserLoadError> {
     let production = crate::arch::x86_64::paging::switch::active_page_table_root();
@@ -2095,7 +2095,7 @@ pub fn spawn(
     // `crate::arch::x86_64::ring3::current_slot` で引く。
     let slot = depth;
 
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
     let mut logger = Logger::new(serial, LogLevel::Trace);
     // **シェルの後の最初の打鍵の配送を、ここで 1 度だけ報せる**（HW-e-2。`ADR-0068`）——**シェルが Enter の
@@ -2672,7 +2672,7 @@ pub fn run_detached_request() {
         Some(request) => request as *const DetachedRequest,
         None => core::ptr::null(),
     };
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
     let mut logger = Logger::new(serial, LogLevel::Trace);
     if request.is_null() {

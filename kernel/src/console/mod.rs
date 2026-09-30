@@ -171,9 +171,7 @@ static PENDING: common::critical::Locked<pending::Pending> =
 fn report_dropped_mid_character(dropped: usize) {
     use core::fmt::Write as _;
 
-    let mut serial = common::machine::pc::serial::SerialPort::new(
-        common::machine::pc::serial::SerialPort::COM1_BASE,
-    );
+    let mut serial = common::machine::pc::Serial::primary();
     serial.init();
     let _ = writeln!(
         serial,

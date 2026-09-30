@@ -17,11 +17,11 @@ use core::fmt::Write;
 use core::panic::PanicInfo;
 
 use common::arch::x86_64::cpu;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::Serial;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
 
     let sp = cpu::read_stack_pointer();

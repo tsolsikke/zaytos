@@ -12,7 +12,7 @@ use core::mem::{align_of, size_of};
 use core::ptr::NonNull;
 
 use common::critical::Locked;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::Serial;
 
 use super::plan::{self, AllocPlan};
 
@@ -135,7 +135,7 @@ impl Default for LockedHeap {
 /// シリアルへ直接書く（OOM 状態でヒープ経由のログ機構を使うと、それ自体が
 /// 再帰的に確保を試みかねないため）。
 fn log_directly_to_serial(args: core::fmt::Arguments<'_>) {
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
     let _ = serial.write_fmt(args);
     let _ = serial.write_str("\n");

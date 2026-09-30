@@ -18,7 +18,7 @@ use common::addr::VirtAddr;
 use core::fmt;
 
 use common::arch::x86_64::cpu;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::Serial;
 
 use crate::graphics::font;
 use crate::graphics::{Color, Framebuffer};
@@ -1039,7 +1039,7 @@ impl fmt::Write for Console {
 fn report_flush_failure_and_halt(error: &FlushRangeError) -> ! {
     use core::fmt::Write;
 
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
 
     let _ = writeln!(

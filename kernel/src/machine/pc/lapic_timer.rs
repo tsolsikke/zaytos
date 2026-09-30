@@ -5,7 +5,7 @@
 
 use common::arch::x86_64::cpu;
 use common::log::Logger;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::serial::Serial;
 
 use crate::arch::x86_64::idt;
 
@@ -28,7 +28,7 @@ use crate::arch::x86_64::idt;
 /// - BSP が、起動の途中に 1 回だけ呼ぶこと。
 /// - IDT の [`idt::LAPIC_TIMER_VECTOR`] に、戻れるハンドラがあること。
 pub unsafe fn switch_to_local_timer(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     calibration: crate::machine::pc::apic::TimerCalibration,
 ) {
     let requested_hz = crate::machine::pc::irq::timer_frequency_hz();

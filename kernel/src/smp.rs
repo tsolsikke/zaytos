@@ -20,7 +20,7 @@ use crate::arch::x86_64::paging::verify;
 use common::addr::VirtAddr;
 use common::arch::x86_64::cpu;
 use common::log::Logger;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::Serial;
 
 use crate::arch::x86_64::{ApBringUp, ApStacks};
 use crate::frame_allocator::{FrameAllocator, FRAME_SIZE};
@@ -40,13 +40,13 @@ const MAX_APS: usize = common::percpu::MAX_CPUS - 1;
 /// でなければ正しくないが、この段階の AP は per-CPU GDT を持たない
 /// （`kernel/src/arch/x86_64/gdt/mod.rs` の載荷条件）。身元は引数で受け取る。
 ///
-/// ロックを取らない。`Logger` と `SerialPort` にロックは無いので、
+/// ロックを取らない。`Logger` と `Serial` にロックは無いので、
 /// BSP が 1 つずつ起動することで混線を避けている（同時に書くとバイトが混ざる）。
 #[no_mangle]
 pub extern "C" fn zaytos_ap_entry(index: u64) -> ! {
     // **アセンブリから入る入口なので、先に入り方の決まりを確かめる**（2026-09-28）。
     crate::arch::x86_64::check_entry_stack_alignment("zaytos_ap_entry");
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
     let _ = writeln!(
         serial,
@@ -100,7 +100,7 @@ const SHOOTDOWN_PROBE_VIRT: u64 = 0xffff_8180_0000_0000;
 /// 本番テーブルへ切り替え済みで、direct map ウィンドウが使えること。
 #[cfg(feature = "smp-tlb-shootdown-probe")]
 pub unsafe fn prepare_shootdown_probe<const CAP: usize>(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     allocator: &mut FrameAllocator<CAP>,
 ) {
     // SAFETY: 呼び出し側の契約。
@@ -257,7 +257,7 @@ pub struct WakeReport {
 ///
 /// # なぜ 1 本ずつなのか
 ///
-/// `Logger` と `SerialPort` にロックが無いので、2 つ以上の AP が同時に書くと
+/// `Logger` と `Serial` にロックが無いので、2 つ以上の AP が同時に書くと
 /// バイトが混ざる。そしてどの AP が失敗したかを切り分けられなくなる。
 /// 直列にする費用はコア数 × 10ms 程度で、実害が無い。
 ///
@@ -279,7 +279,7 @@ pub struct WakeReport {
 /// - タイマが動いていること（10ms の待ちをティックのエッジで作る）。
 /// - 起動時に 1 回だけ呼ぶこと。
 pub unsafe fn wake_application_processors(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     mapped: &crate::machine::pc::apic::MappedApic,
     mmio: &crate::machine::pc::acpi::ApicMmio,
 ) -> WakeReport {
@@ -439,7 +439,7 @@ pub const SERIAL_STRESS_PADDING: &str = ".......................................
 
 /// 演習の AP 側。**合図を待って書き、終わりを報せる。**
 #[cfg(feature = "serial-stress-test")]
-fn run_serial_stress_on_ap(serial: &mut SerialPort, slot: usize) {
+fn run_serial_stress_on_ap(serial: &mut Serial, slot: usize) {
     use core::sync::atomic::Ordering;
 
     // **上限つきで待つ**（`CLAUDE.md` の「上限のない待機ループを書かない」）。
@@ -541,7 +541,7 @@ fn load_bringup(slot: usize) -> Option<ApBringUp> {
 extern "C" fn ap_after_switch(slot: usize) -> ! {
     // **アセンブリから入る入口なので、先に入り方の決まりを確かめる**（2026-09-28）。
     crate::arch::x86_64::check_entry_stack_alignment("ap_after_switch");
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
 
     // 恒等が無いことを AP 側で読み戻す（b-2b-1 から移した到達条件）。
@@ -680,7 +680,7 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
 ///
 /// 自コアの GDT / TSS / IDT が載っており、本番 CR3 と per-CPU スタックへ
 /// 移った後であること。割り込みが禁止されていること。各コアにつき 1 回だけ。
-unsafe fn start_local_timer(serial: &mut SerialPort, slot: usize) -> ! {
+unsafe fn start_local_timer(serial: &mut Serial, slot: usize) -> ! {
     // 1. 自分の Local APIC を有効にする。
     //
     // 破壊テスト (S4-a, smp-ap-timer-no-svr): ここを飛ばす。BSP が書いた SVR は
@@ -776,7 +776,7 @@ unsafe fn start_local_timer(serial: &mut SerialPort, slot: usize) -> ! {
 /// BSP の出力と混線しうる。行頭にコア番号を必ず置くことで、混ざっても
 /// どのコアの行かが分かるようにしてある。行の途中で混ざることは防げない。
 #[cfg_attr(feature = "bkl-hold-forever-test", allow(dead_code))]
-fn ap_heartbeat_loop(serial: &mut SerialPort, slot: usize) -> ! {
+fn ap_heartbeat_loop(serial: &mut Serial, slot: usize) -> ! {
     let mut next_heartbeat = crate::interrupts::HEARTBEAT_TICKS;
     loop {
         let ticks = crate::arch::x86_64::timer_ticks_for(slot);
@@ -826,7 +826,7 @@ pub fn brought_up_ap_count() -> usize {
 ///
 /// 起動時の単一文脈から、本番テーブルへ切り替えた後・AP を起動する前に 1 回だけ呼ぶこと。
 pub unsafe fn prepare_ap_per_cpu<const CAP: usize>(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     allocator: &mut FrameAllocator<CAP>,
 ) {
     let production_root = crate::arch::x86_64::paging::switch::active_page_table_root().as_u64();

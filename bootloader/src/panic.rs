@@ -5,9 +5,9 @@
 //! この `main.rs` 側にのみ置く（`common` ライブラリ側はホスト向け
 //! `cargo test` でも使うため、ここには置けない）。
 //!
-//! 起動時に確立した `Logger`/`SerialPort` の状態がパニック発生時点で
+//! 起動時に確立した `Logger`/`Serial` の状態がパニック発生時点で
 //! 引き続き有効か保証できないため、ここでは COM1 用の新しい
-//! `SerialPort` を都度用意する。ハードウェア的には同じ COM1 を
+//! `Serial` を都度用意する。ハードウェア的には同じ COM1 を
 //! 再初期化するだけであり、実害はない。
 //!
 //! 注記: ここで出力できる「レジスタ状態」は、CPU 例外発生時に
@@ -21,11 +21,11 @@ use core::fmt::Write;
 use core::panic::PanicInfo;
 
 use common::arch::x86_64::cpu;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::serial::Serial;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
 
     let rsp = cpu::read_stack_pointer();

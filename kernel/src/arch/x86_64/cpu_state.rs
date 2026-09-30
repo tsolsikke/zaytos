@@ -23,7 +23,7 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use common::log::Logger;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::serial::Serial;
 use common::percpu::MAX_CPUS;
 
 /// 棚卸しが 0 であることに依っているビットの在りか。
@@ -784,7 +784,7 @@ pub unsafe fn establish_required_bits_on_bsp() {
 }
 
 /// [`establish_required_bits_on_bsp`] の前後の CR0 を 1 行出す（ロガーが使えるようになってから）。
-pub fn report_established_bits(logger: &mut Logger<SerialPort>) {
+pub fn report_established_bits(logger: &mut Logger<Serial>) {
     let before = ESTABLISHED_CR0[0].load(Ordering::SeqCst);
     let after = ESTABLISHED_CR0[1].load(Ordering::SeqCst);
     logger.info(format_args!(
@@ -825,7 +825,7 @@ fn read_this_cpu() -> [u64; 3] {
 
 /// CR0・CR4・EFER を読み、1 行出し、棚卸しを崩すビットが立っていれば止める。**BSP の値を控える。**
 /// **製造元を CPUID で見分け、その製造元の表で判定する**（2026-09-24。運用者の決定）。
-pub fn check_and_report(logger: &mut Logger<SerialPort>) {
+pub fn check_and_report(logger: &mut Logger<Serial>) {
     let [cr0, cr4, efer] = read_this_cpu();
     for (slot, value) in BSP_STATE.iter().zip([cr0, cr4, efer]) {
         slot.store(value, Ordering::SeqCst);
@@ -1100,7 +1100,7 @@ impl fmt::Display for DifferingBits {
 
 /// **起動した AP の CR0・CR4・EFER が、BSP の値と一致することを確かめる**（2026-09-24）。
 /// **食い違えば、違うビットの名前を出して止まる。** **AP の控えは上限つきで待つ。**
-pub fn check_aps_match_bsp(logger: &mut Logger<SerialPort>, started: usize) {
+pub fn check_aps_match_bsp(logger: &mut Logger<Serial>, started: usize) {
     let bsp = [0, 1, 2].map(|index| BSP_STATE[index].load(Ordering::SeqCst));
     let names = ["CR0", "CR4", "EFER"];
     let registers = [Register::Cr0, Register::Cr4, Register::Efer];

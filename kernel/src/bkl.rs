@@ -43,7 +43,7 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use common::critical::EntryInterruptGuard;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::Serial;
 use common::percpu::{cpu_id, PerCpu, MAX_CPUS};
 
 /// カーネル入口の分類（S4-b-2）。
@@ -503,7 +503,7 @@ fn holder_snapshot() -> (usize, &'static str, u64) {
 /// 同じコアが保持したまま再取得したことを報告して停止する。
 fn report_recursive_acquire_and_halt(entry: KernelEntry) -> ! {
     let (holder_cpu, holder_entry, since) = holder_snapshot();
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
     let _ = writeln!(
         serial,
@@ -543,7 +543,7 @@ fn report_recursive_acquire_and_halt(entry: KernelEntry) -> ! {
 fn report_timeout_and_halt(entry: KernelEntry, started: u64) -> ! {
     let waited = common::arch::x86_64::cpu::read_timestamp_counter().wrapping_sub(started);
     let (holder_cpu, holder_entry, since) = holder_snapshot();
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
     let _ = writeln!(
         serial,
@@ -607,7 +607,7 @@ pub fn acquire_counting_only(_entry: KernelEntry) -> BklGuard {
 #[cfg(feature = "bkl-hold-forever-test")]
 pub fn sabotage_hold_forever() -> ! {
     let guard = acquire(KernelEntry::ApBringUp);
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
     let _ = writeln!(
         serial,
@@ -631,7 +631,7 @@ pub fn sabotage_hold_forever() -> ! {
 /// BKL を保持している区間から呼ぶこと。**既定ビルドには存在しない。**
 #[cfg(feature = "bkl-hold-with-if-set-test")]
 pub unsafe fn sabotage_enable_interrupts_while_held() {
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
     let _ = writeln!(
         serial,
@@ -691,7 +691,7 @@ const SABOTAGE_TICK_WAIT_CYCLES: u64 = 1_000_000_000;
 /// 破壊テストが発火しなかったことを報告して停止する（S12 前の手当て）。
 #[cfg(feature = "bkl-hold-with-if-set-test")]
 fn report_sabotage_did_not_fire_and_halt(waited: u64) -> ! {
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
     let _ = writeln!(
         serial,

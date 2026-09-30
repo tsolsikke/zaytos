@@ -19,7 +19,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use common::arch::x86_64::cpu;
 use common::log::Logger;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::serial::Serial;
 
 use crate::arch::x86_64::gdt;
 use crate::arch::x86_64::idt;
@@ -114,7 +114,7 @@ impl ReadinessReport {
 /// - 項目 7（EOI）は `Unverifiable`。M4-d-1 では IRQ ハンドラを
 ///   マスク解除しないため、EOI を発行する対象そのものが存在しない。
 ///   M4-d-2 で実装と同時に `Verified` へ昇格させる。
-pub fn verify_ready_for_sti(logger: &mut Logger<SerialPort>) -> ReadinessReport {
+pub fn verify_ready_for_sti(logger: &mut Logger<Serial>) -> ReadinessReport {
     verify_ready(logger, &[], false)
 }
 
@@ -130,7 +130,7 @@ pub fn verify_ready_for_sti(logger: &mut Logger<SerialPort>) -> ReadinessReport 
 /// である（9d-5。2026-09-28。それまでは、ここでキーボードの IRQ1 を名指ししていた）。**源から ISA の IRQ へ直すのは
 /// 起動の順（`main.rs`）が `machine` に頼む**（2026-09-29。9e）——割り込みの入口の側を共通の側の型に依らせない。
 pub fn verify_ready_for_sti_with_timer(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     irqs_with_handler: &[irq::IsaIrq],
 ) -> ReadinessReport {
     // IRQ0（タイマ）と、処理を登録した源を解禁した状態。ハンドラを書いた
@@ -157,7 +157,7 @@ pub fn verify_ready_for_sti_with_timer(
 const MAX_OPEN_AT_THE_PIC: usize = 17;
 
 fn verify_ready(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     unmasked: &[irq::IsaIrq],
     timer_enabled: bool,
 ) -> ReadinessReport {
@@ -353,7 +353,7 @@ fn verify_ready(
 }
 
 /// ロックの保持中に実際に IF が落ちることを測る（項目 6）。
-fn verify_lock_disables_interrupts(logger: &mut Logger<SerialPort>) -> CheckState {
+fn verify_lock_disables_interrupts(logger: &mut Logger<Serial>) -> CheckState {
     use common::critical::Locked;
 
     static PROBE: Locked<u64> = Locked::new(0);
@@ -426,7 +426,7 @@ pub fn loop_iterations() -> u64 {
 /// [`ReadinessReport::may_enable_interrupts`](crate::arch::x86_64::interrupt_readiness::ReadinessReport::may_enable_interrupts)
 /// を返した後にのみ呼ぶこと。
 pub unsafe fn spin_with_interrupts_enabled(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     duration_tsc: u64,
     heartbeat_interval: u64,
 ) {

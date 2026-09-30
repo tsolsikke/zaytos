@@ -31,7 +31,7 @@ use crate::arch::x86_64::port::{inb, outb};
 /// | **このロック** | **最内側** | **無い** |
 ///
 /// **シリアルを持ったまま BKL も `Locked<T>` も取らない。** **保持区間は
-/// [`SerialPort::write_fmt`] の中だけで、そこから呼ぶのは整形と `outb` しかない。**
+/// [`Serial::write_fmt`] の中だけで、そこから呼ぶのは整形と `outb` しかない。**
 /// **逆向き（BKL を持ったままシリアルを取る）は正常である**——**ログは BKL の
 /// 内側からも外側からも出る。**
 ///
@@ -228,15 +228,20 @@ const BAUD_DIVISOR: u16 = (UART_CLOCK_HZ / BAUD_RATE) as u16;
 /// `init` / `write_byte` はその契約（固定の既知オフセットのみを、決められた
 /// 16550 初期化手順どおりに叩く）を自身で満たすことで安全な API として
 /// 公開する。
-pub struct SerialPort {
+pub struct Serial {
     base: u16,
 }
 
-impl SerialPort {
-    pub const COM1_BASE: u16 = COM1_BASE;
-
+impl Serial {
     pub const fn new(base: u16) -> Self {
         Self { base }
+    }
+
+    /// ログに使う 1 本目のシリアル（PC では COM1）。**初期化はしない**——起動の初めに 1 度だけ [`Self::init`] する
+    /// （[`open_direct_serial`] は初期化して返す）。**書く前に初期化が済んでいること。**
+    #[inline(always)]
+    pub const fn primary() -> Self {
+        Self::new(COM1_BASE)
     }
 
     /// 16550 UART の標準的な初期化手順（割り込み無効化 → ボーレート設定
@@ -282,7 +287,7 @@ impl SerialPort {
     }
 }
 
-impl fmt::Write for SerialPort {
+impl fmt::Write for Serial {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for byte in s.bytes() {
             // 端末での表示崩れを防ぐため、LF の前に CR を送出する。
@@ -303,7 +308,7 @@ impl fmt::Write for SerialPort {
     /// ホストで数えた）。**`write_str` 側で取ると、その 5 つの間に別のコアが
     /// 割り込める。**
     ///
-    /// **呼び出し側は 1 つも触らない。** **`SerialPort::new` を書いた箇所は
+    /// **呼び出し側は 1 つも触らない。** **`Serial::new` を書いた箇所は
     /// 25 あるが、どれも `write!` / `writeln!` を通るので、ここだけで覆える。**
     ///
     /// **覆えないものが 2 つある**（実測）——**`write_str` を直に呼ぶ箇所である。**
@@ -334,8 +339,8 @@ impl fmt::Write for SerialPort {
 ///
 /// **取るのは UART 自身の最内側のロックだけで、1 回の `write!` の間だけ持つ**（[`SerialLock`]）。
 /// **取れなければ、混ざるのを承知で書く**——ここで止めると、報せる手段そのものが消える。
-pub fn open_direct_serial() -> SerialPort {
-    let mut serial = SerialPort::new(COM1_BASE);
+pub fn open_direct_serial() -> Serial {
+    let mut serial = Serial::new(COM1_BASE);
     serial.init();
     serial
 }

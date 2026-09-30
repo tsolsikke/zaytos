@@ -34,7 +34,7 @@
 use common::addr::PhysAddr;
 use common::arch::x86_64::cpu;
 use common::log::Logger;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::serial::Serial;
 
 use crate::arch::x86_64::paging::active::{ActivePageTable, MapUpdateError, PageAttributes};
 use crate::arch::x86_64::paging::entry;
@@ -125,7 +125,7 @@ impl MappedApic {
 ///
 /// direct map ウィンドウが高位で稼働していること（A-2 より後）は必要である。
 pub fn map_and_probe<const CAP: usize>(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     allocator: &mut FrameAllocator<CAP>,
     mmio: &ApicMmio,
 ) -> Option<MappedApic> {
@@ -250,7 +250,7 @@ pub fn map_and_probe<const CAP: usize>(
 /// 「期待の物理」であることの対が、写像が実際に何かを変えたことの観測になる
 /// （破壊テストの feature を使わずに済む形である）。
 fn map_mmio_page<const CAP: usize>(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     allocator: &mut FrameAllocator<CAP>,
     what: &str,
     phys: PhysAddr,
@@ -390,7 +390,7 @@ fn map_mmio_page<const CAP: usize>(
 
 /// Local APIC の ID と Version を読む。読むだけで、何も書かない。
 fn probe_local_apic(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     lapic_phys: PhysAddr,
     bsp_candidate_apic_id: Option<u8>,
 ) {
@@ -464,7 +464,7 @@ fn probe_local_apic(
 /// MSR との突き合わせ（`map_and_probe` の 3）が検出する経路を見る。
 /// ずらす量は 1 ページで、`0x1000` を足す。ウィンドウの中に留まるので「窓の外」の
 /// 経路とは混ざらない。
-fn sabotage_local_apic_address(logger: &mut Logger<SerialPort>, phys: PhysAddr) -> PhysAddr {
+fn sabotage_local_apic_address(logger: &mut Logger<Serial>, phys: PhysAddr) -> PhysAddr {
     let _ = &logger;
 
     #[cfg(feature = "apic-test-base-mismatch")]
@@ -493,7 +493,7 @@ fn sabotage_local_apic_address(logger: &mut Logger<SerialPort>, phys: PhysAddr) 
 ///
 /// 「張った後」の `translate` が検出する経路を見る。読みがマッピングに依存して
 /// いることの証明になる。
-fn skip_mapping(logger: &mut Logger<SerialPort>, what: &str) -> bool {
+fn skip_mapping(logger: &mut Logger<Serial>, what: &str) -> bool {
     let _ = (&logger, what);
 
     #[cfg(feature = "apic-test-skip-map")]
@@ -528,7 +528,7 @@ fn skip_mapping(logger: &mut Logger<SerialPort>, what: &str) -> bool {
 /// サボタージュビルド限定で、しかも直後の照合が検出して読みへ進まないため、
 /// 破壊テストの手段としてはこのまま採ってよい。便利な手筋として通常のマッピング経路へ
 /// 再利用しないこと。静かな不具合の温床になる。
-fn sabotage_map_target(logger: &mut Logger<SerialPort>, what: &str, phys: PhysAddr) -> PhysAddr {
+fn sabotage_map_target(logger: &mut Logger<Serial>, what: &str, phys: PhysAddr) -> PhysAddr {
     let _ = (&logger, what, phys);
 
     #[cfg(feature = "apic-test-wrong-target")]
@@ -762,7 +762,7 @@ const IOAPIC_MAX_REDIRECTION_SHIFT: u32 = 16;
 /// I/O APIC へは IOREGSEL（添字レジスタ）にだけ書く。これは読みたい
 /// レジスタを選ぶセレクタで、割り込みの設定ではないが、書き込みである
 /// ことは事実である。S2 で最初の書き込みがここである。
-pub fn survey_registers(logger: &mut Logger<SerialPort>, mapped: &MappedApic) {
+pub fn survey_registers(logger: &mut Logger<Serial>, mapped: &MappedApic) {
     let direct_map = common::addr::direct_map();
     let lapic_virt = direct_map.phys_to_virt(mapped.local_apic);
 
@@ -925,7 +925,7 @@ fn covers_gsi(gsi_base: u32, entries: Option<u32>, gsi: u32) -> bool {
 /// **デコードされていなければ止める**（HW-e-2）——**転送の項目を書いても届かないので、先へ進むと
 /// 割り込みが来ない所で黙る。**
 fn survey_io_apic(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     base_virt: u64,
     io_apic: &IoApicLocation,
 ) -> Option<u32> {
@@ -1083,7 +1083,7 @@ fn survey_io_apic(
 /// 「skipped」）ので、配列外の索引は起きない。**行の文言は S3 の前の「cpu_id() は定数 0 で、AP は起こさない」
 /// のまま残っていた**ので、事実に合わせた。**検査が待つ WARN の行の頭（there are more usable CPUs than
 /// per-CPU slots）は変えていない。**
-pub fn report_per_cpu_slot_coverage(logger: &mut Logger<SerialPort>, enumerated_cpu_count: usize) {
+pub fn report_per_cpu_slot_coverage(logger: &mut Logger<Serial>, enumerated_cpu_count: usize) {
     let slots = common::percpu::MAX_CPUS;
     let covered = enumerated_cpu_count <= slots;
     logger.info(format_args!(
@@ -1489,7 +1489,7 @@ pub(crate) unsafe fn write_spurious_vector(
 /// 無効になり、LINT0 経由で届いている 8259 の IRQ0 が即座に止まる
 /// （`verification-coverage.md` の「APICのレジスタの現在値（S2-a）」）。
 /// 危険なのは bit 8 であって、ベクタ欄ではない。
-pub fn set_spurious_vector(logger: &mut Logger<SerialPort>, mapped: &MappedApic) {
+pub fn set_spurious_vector(logger: &mut Logger<Serial>, mapped: &MappedApic) {
     let direct_map = common::addr::direct_map();
     let lapic_virt = direct_map.phys_to_virt(mapped.local_apic).as_u64();
 
@@ -1794,7 +1794,7 @@ enum PitSampling {
 }
 
 /// PIT のティックを基準に標本を取る（S2-c の本体を関数へ出したもの）。
-fn sample_with_pit(logger: &mut Logger<SerialPort>, lapic: u64) -> PitSampling {
+fn sample_with_pit(logger: &mut Logger<Serial>, lapic: u64) -> PitSampling {
     let mut samples = [0u64; CALIBRATION_SAMPLES];
     // 較正自身が取りこぼしを見る。`interrupts::max_tick_jump()` はこの時点では
     // 使えない。あれを更新するのは `run_timer_loop` の定常ループで、較正はその
@@ -1927,7 +1927,7 @@ fn sample_with_pm_timer(
 /// 直後、定常ループへ入る前に呼ぶ。この位置は APIC 関連の他の処理（`kmain` の
 /// 前半）から離れている。離れている理由はこれである。
 pub fn calibrate_timer(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     mapped: &MappedApic,
     pm_timer: Option<crate::machine::pc::pmtimer::PmTimer>,
 ) -> Option<TimerCalibration> {

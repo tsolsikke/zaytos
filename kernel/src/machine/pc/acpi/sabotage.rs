@@ -23,7 +23,7 @@
 
 use common::addr::PhysAddr;
 use common::log::Logger;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::serial::Serial;
 
 /// 壊す対象のテーブル。**文字列で照合しない。** ログ用の表示名とは別に持つ。
 /// 表示名は文言を直した瞬間に一致しなくなるが、こちらは型で結び付く。
@@ -92,7 +92,7 @@ pub fn corrupt_table_body(target: Target, bytes: &mut [u8]) {
 ///
 /// 既定ビルドでは受け取った値をそのまま返す。
 pub fn redirect_rsdp(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     rsdp_phys: PhysAddr,
     memory_map_bytes: &[u8],
     descriptor_size: u64,

@@ -4406,9 +4406,7 @@ unsafe fn ioctl_log_line(arg: u64, page_table_root: PhysAddr, direct_map: Direct
         return (-EINVAL) as u64;
     }
 
-    let mut serial = common::machine::pc::serial::SerialPort::new(
-        common::machine::pc::serial::SerialPort::COM1_BASE,
-    );
+    let mut serial = common::machine::pc::Serial::primary();
     serial.init();
     for byte in &buf[ZDIAG_TEXT_OFFSET..ZDIAG_TEXT_OFFSET + length] {
         serial.write_byte(*byte);
@@ -4646,9 +4644,7 @@ unsafe fn sys_write(
         TERMINAL_WRITES_FROM_DETACHED.fetch_add(1, Ordering::Relaxed);
     }
 
-    let mut serial = common::machine::pc::serial::SerialPort::new(
-        common::machine::pc::serial::SerialPort::COM1_BASE,
-    );
+    let mut serial = common::machine::pc::Serial::primary();
     serial.init();
 
     let mut recorded = [0u8; WRITE_BUF_LEN];

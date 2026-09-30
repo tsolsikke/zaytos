@@ -32,7 +32,7 @@ use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::cpu;
-use crate::machine::pc::serial::SerialPort;
+use crate::machine::pc::Serial;
 use crate::percpu::{cpu_id, PerCpu, MAX_CPUS};
 
 /// 現在保持している [`InterruptGuard`] の数（クリティカルセクションの入れ子
@@ -470,7 +470,7 @@ impl<T> Drop for LockGuard<'_, T> {
 /// 本番経路で `Locked<T>` を触るのは bootstrap processor だけなので、
 /// **この関数はまだ呼ばれない。** 呼ばれうるのは BKL が入る段階からである。
 fn report_contended_lock_and_halt(holder: usize) -> ! {
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
     let _ = writeln!(
         serial,
@@ -488,7 +488,7 @@ fn report_contended_lock_and_halt(holder: usize) -> ! {
 }
 
 fn report_double_lock_and_halt() -> ! {
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
     let _ = writeln!(
         serial,

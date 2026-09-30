@@ -60,7 +60,7 @@ mod sdt;
 
 use common::addr::{DirectMap, PhysAddr};
 use common::log::Logger;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::serial::Serial;
 
 use crate::arch::x86_64::paging::active::{ActivePageTable, TranslateError};
 use crate::frame_allocator::FRAME_SIZE;
@@ -472,7 +472,7 @@ impl PhysReader {
 }
 
 /// 読み取りに失敗した理由をログへ出す。
-fn report_read_error(logger: &mut Logger<SerialPort>, what: &str, error: ReadError) {
+fn report_read_error(logger: &mut Logger<Serial>, what: &str, error: ReadError) {
     match error {
         ReadError::OutsideWindow { page } => logger.error(format_args!(
             "acpi: {what} lies at {:#x}, outside the direct map window; not read",
@@ -514,7 +514,7 @@ fn report_read_error(logger: &mut Logger<SerialPort>, what: &str, error: ReadErr
 /// プロジェクトが一度踏んだ型（20 回連続 PASS を根拠に基準を決め、真の率が
 /// 別だった）と同じである。**回数ではなく機序を記録する。**
 fn report_memory_type(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     what: &str,
     phys: PhysAddr,
     memory_map_bytes: &[u8],
@@ -564,7 +564,7 @@ fn report_memory_type(
 /// 「言っていない」を返す。**理由はこの関数がログへ出しているので、
 /// 呼び出し側が「なぜ空か」を再構成する必要はない。**
 pub fn survey(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     rsdp_phys: PhysAddr,
     memory_map_bytes: &[u8],
     descriptor_size: u64,
@@ -691,7 +691,7 @@ pub fn survey(
 ///
 /// **ファームウェアが書いた値をそのまま信じない。** `PhysAddr::new` は 52 ビットを
 /// 超える値を弾くので、ここで落ちるということは表として壊れているということである。
-fn checked_phys(logger: &mut Logger<SerialPort>, what: &str, raw: u64) -> Option<PhysAddr> {
+fn checked_phys(logger: &mut Logger<Serial>, what: &str, raw: u64) -> Option<PhysAddr> {
     match PhysAddr::new(raw) {
         Some(phys) => Some(phys),
         None => {
@@ -722,7 +722,7 @@ struct TableRequest<'a> {
 }
 
 fn read_and_verify_table(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     reader: &PhysReader,
     request: TableRequest<'_>,
     buffer: &mut [u8; TABLE_READ_BUFFER_LENGTH],
@@ -815,7 +815,7 @@ struct RootTables {
 /// **`None` はルートテーブル自体が読めなかったときである。** 表が見つからなかった
 /// ことは、それぞれ `None` の欄で返す。
 fn walk_root_table(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     reader: &PhysReader,
     root_phys: u64,
     width: sdt::EntryWidth,
@@ -967,7 +967,7 @@ fn walk_root_table(
 ///
 /// **読めなければ「言っていない」を返す**——**探る側が決める。** 理由はログへ出す。
 fn read_fadt(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     reader: &PhysReader,
     fadt_phys: PhysAddr,
     memory_map_bytes: &[u8],
@@ -1012,7 +1012,7 @@ fn read_fadt(
 
 /// PM タイマの所在をログへ出し、読めるものだけを返す（HW-c）。
 fn read_pm_timer(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     table_bytes: &[u8],
     revision: u8,
 ) -> Option<crate::machine::pc::pmtimer::PmTimer> {
@@ -1052,7 +1052,7 @@ fn read_pm_timer(
 }
 
 /// i8042 について言っていることをログへ出して返す（HW-b）。
-fn read_i8042_flag(logger: &mut Logger<SerialPort>, table: &fadt::Fadt) -> I8042Presence {
+fn read_i8042_flag(logger: &mut Logger<Serial>, table: &fadt::Fadt) -> I8042Presence {
     match (table.iapc_boot_arch, table.has_8042()) {
         (Some(flags), Some(present)) => {
             logger.info(format_args!(
@@ -1079,7 +1079,7 @@ fn read_i8042_flag(logger: &mut Logger<SerialPort>, table: &fadt::Fadt) -> I8042
 
 /// MADT を検証して列挙する。
 fn walk_madt(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     reader: &PhysReader,
     madt_phys: PhysAddr,
     memory_map_bytes: &[u8],
@@ -1328,7 +1328,7 @@ fn walk_madt(
 /// 拡張部（ACPI 2.0 以降）を読んで検証する。失敗しても `None` を返すだけで、
 /// 呼び出し側は RSDT へ落ちて続行する。
 fn read_extended(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     reader: &PhysReader,
     rsdp_phys: PhysAddr,
     buffer: &mut [u8; rsdp::READ_BUFFER_LENGTH],

@@ -6,7 +6,7 @@
 
 use common::addr::VirtAddr;
 use common::log::Logger;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::serial::Serial;
 
 use crate::arch::x86_64::ap_bring_up::ApStacks;
 use crate::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
@@ -135,7 +135,7 @@ const AP_STACK_STRIDE: u64 = (crate::arch::x86_64::stack::GUARD_SIZE
 ///
 /// 起動時の単一文脈から、AP を起動する前に呼ぶこと。
 pub unsafe fn map_ap_stacks<const CAP: usize>(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     slot: usize,
     allocator: &mut FrameAllocator<CAP>,
 ) -> Option<ApStacks> {

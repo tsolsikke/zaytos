@@ -20,7 +20,7 @@ use core::ptr::{addr_of, addr_of_mut};
 
 use common::arch::x86_64::cpu;
 use common::log::Logger;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::serial::Serial;
 use common::percpu::{PerCpu, MAX_CPUS};
 
 use layout::{
@@ -469,7 +469,7 @@ fn cpu_id_from_gdtr() -> usize {
         return index as usize;
     }
 
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
     let _ = writeln!(
         serial,
@@ -491,7 +491,7 @@ fn cpu_id_from_gdtr() -> usize {
 /// # Safety
 ///
 /// 自コアの GDT を `lgdt` でロード済みであること（[`init`] が戻っていること）。
-pub unsafe fn install_cpu_id_from_gdtr(logger: &mut Logger<SerialPort>) {
+pub unsafe fn install_cpu_id_from_gdtr(logger: &mut Logger<Serial>) {
     let (base, _limit) = current_gdt();
     let first = addr_of!(GDT) as u64;
     let stride = (GDT_ENTRY_COUNT * core::mem::size_of::<u64>()) as u64;

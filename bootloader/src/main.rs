@@ -4,7 +4,7 @@
 extern crate alloc;
 
 use common::log::{LogLevel, Logger};
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::serial::Serial;
 use uefi::prelude::*;
 use uefi::println;
 
@@ -14,7 +14,7 @@ mod panic;
 
 #[entry]
 fn efi_main() -> Status {
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
     let mut logger = Logger::new(serial, LogLevel::Trace);
 

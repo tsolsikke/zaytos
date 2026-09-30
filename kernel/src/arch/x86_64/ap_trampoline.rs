@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use common::addr::PhysAddr;
 use common::arch::x86_64::cpu;
 use common::log::Logger;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::serial::Serial;
 
 use crate::frame_allocator::{FrameAllocator, FRAME_SIZE};
 
@@ -479,7 +479,7 @@ impl InstalledTrampoline {
 ///
 /// `frame` が予約済みで 4KiB 境界にあり、誰も使っていないこと。
 pub unsafe fn install_trampoline(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     frame: PhysAddr,
     entry: extern "C" fn(u64) -> !,
 ) -> InstalledTrampoline {
@@ -595,7 +595,7 @@ pub unsafe fn install_trampoline(
 /// から決まり、コードを 1 バイト変えるたびに動く。実際に `0x40` と置いた
 /// 定数が実は `0x42` だった。シンボルから導けば、動いても追随する。
 fn verify_installed_trampoline(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     installed: &InstalledTrampoline,
     src: u64,
     len: u64,

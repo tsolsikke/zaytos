@@ -7,7 +7,7 @@
 use core::fmt::Write as _;
 
 use common::arch::x86_64::cpu;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::serial::Serial;
 
 /// AP 1 本ぶんのスタックの所在（S3-b-2b-2）。
 ///
@@ -145,7 +145,7 @@ pub unsafe fn bring_up_application_processor(
         // **読み戻して出力する。** **BSP の行は AP について何も示さない**ので、
         // **コアごとに 1 行ずつ出す。**
         let state = crate::arch::x86_64::fp::enabled_state();
-        let mut port = SerialPort::new(SerialPort::COM1_BASE);
+        let mut port = Serial::primary();
         port.init();
         let _ = writeln!(
             port,
@@ -158,7 +158,7 @@ pub unsafe fn bring_up_application_processor(
         );
     }
 
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
     let _ = writeln!(
         serial,

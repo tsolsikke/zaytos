@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use common::arch::x86_64::cpu;
 use common::boot_info::{BootInfo, BOOT_INFO_PAGE_COUNT};
 use common::log::{LogLevel, Logger};
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::serial::Serial;
 use core::ptr::addr_of;
 use kernel::console::Console;
 
@@ -220,7 +220,7 @@ extern "C" {
 ///
 /// 下端から連続する毒値（未使用バイト）を数えて使用量を出す。
 /// ガードページを持たないブートスタックの、オーバーフロー検出を兼ねた会計である。
-fn report_boot_stack_usage(logger: &mut Logger<SerialPort>) {
+fn report_boot_stack_usage(logger: &mut Logger<Serial>) {
     let base = addr_of!(zaytos_boot_stack);
     let mut unused = 0usize;
     while unused < BOOT_STACK_SIZE {
@@ -242,7 +242,7 @@ fn report_boot_stack_usage(logger: &mut Logger<SerialPort>) {
 ///
 /// 到達できていること自体が証拠だが、RIP/RSP/CR3 と恒等の生存を数字で残す。
 /// 本流テーブルへの CR3 切り替えより前に呼ぶこと（CR3 が静的初期 PML4 を指す間）。
-fn report_high_half_arrival(logger: &mut Logger<SerialPort>) {
+fn report_high_half_arrival(logger: &mut Logger<Serial>) {
     use common::addr::VirtAddr;
 
     let rip = cpu::read_rip();
@@ -475,7 +475,7 @@ extern "sysv64" fn kernel_main() -> ! {
     #[cfg(feature = "stack-overflow-before-guard-test")]
     core::hint::black_box(&mut deepen_the_boot_stack);
 
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
     let mut logger = Logger::new(serial, LogLevel::Trace);
 
@@ -2025,7 +2025,7 @@ extern "sysv64" fn kernel_main() -> ! {
     feature = "kernel-top-write-after-boot-test",
     feature = "kernel-top-write-unguarded-test"
 ))]
-fn write_a_kernel_half_entry_after_boot(logger: &mut Logger<SerialPort>) {
+fn write_a_kernel_half_entry_after_boot(logger: &mut Logger<Serial>) {
     use kernel::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
     let Some(allocator) = frame_allocator::take() else {
         logger.error(format_args!(
@@ -2184,7 +2184,7 @@ const SHELL_AFTER_HEARTBEATS: u64 = if cfg!(feature = "keep-steady-loop") {
 /// シリアルへ書き、**画面に出るのは「起こした / 終わった / 起こし直す」の 3 種類だけ**
 /// だった。**いまは `write` が画面へも届く**（上の節）。
 /// **`init` の 3 種類は変わらずこの関数が書く**——据えるのは `spawn` の間だけである。
-fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> ! {
+fn run_init(logger: &mut Logger<Serial>, console: Option<&mut Console>) -> ! {
     /// 起動し直す上限。**同じ失敗を無限に繰り返さない。**
     /// **`input-test` と `poll-test` はシェルを起動しない**ので、そのときは使われない
     /// （`ADR-0066` の Y-a / Y-b）。
@@ -2500,7 +2500,7 @@ fn run_init(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> !
 /// **`keyboard waited` は `read(0)` と入力 fd で共有の計測である**（`wait_for_keyboard`）。
 /// **この構成はシェルを起動しないので、`inputd` の待ちだけが乗る。**
 #[cfg(feature = "input-test")]
-fn run_input_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) {
+fn run_input_test(logger: &mut Logger<Serial>, console: Option<&mut Console>) {
     let mut console = console;
     let outcome = {
         let _foreground = console
@@ -2533,7 +2533,7 @@ fn run_input_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>
 ///
 /// **判定は `xtask` の `poll-test` が、印字した行と計測の行を読んで行う。**
 #[cfg(feature = "poll-test")]
-fn run_poll_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) {
+fn run_poll_test(logger: &mut Logger<Serial>, console: Option<&mut Console>) {
     let mut console = console;
     let outcome = {
         let _foreground = console
@@ -2575,7 +2575,7 @@ fn run_poll_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>)
 ///
 /// **判定は `xtask` の `screen-test` が、画面の読み戻し（`screendump`）と行を読んで行う。**
 #[cfg(feature = "screen-test")]
-fn run_screen_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) {
+fn run_screen_test(logger: &mut Logger<Serial>, console: Option<&mut Console>) {
     let mut console = console;
     let outcome = {
         let _foreground = console
@@ -2605,7 +2605,7 @@ fn run_screen_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console
 ///
 /// **判定は `xtask` の `compose-test` が、画面の読み戻し（`screendump`）と行を読んで行う。**
 #[cfg(feature = "compose-test")]
-fn run_compose_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) {
+fn run_compose_test(logger: &mut Logger<Serial>, console: Option<&mut Console>) {
     let mut console = console;
     let outcome = {
         let _foreground = console
@@ -2655,7 +2655,7 @@ fn run_compose_test(logger: &mut Logger<SerialPort>, console: Option<&mut Consol
 /// **回収はセッションの完了時に行う**（`run_init`）。**Seinas が来たときの形の予行である**
 /// ——**コンポジタは起動時に立ち上げられ、名前で待ち、クライアントはシェルから名前で繋ぐ。**
 #[cfg(feature = "socket-test")]
-fn start_socket_server(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) -> u64 {
+fn start_socket_server(logger: &mut Logger<Serial>, console: Option<&mut Console>) -> u64 {
     /// Ring 3 へ入るまで待つ上限（ティック）。
     const ENTER_LIMIT_TICKS: u64 = 2_000;
 
@@ -2699,7 +2699,7 @@ fn start_socket_server(logger: &mut Logger<SerialPort>, console: Option<&mut Con
 }
 
 #[cfg(feature = "concurrent-test")]
-fn run_concurrent_test(logger: &mut Logger<SerialPort>, console: Option<&mut Console>) {
+fn run_concurrent_test(logger: &mut Logger<Serial>, console: Option<&mut Console>) {
     /// Ring 3 へ入るまで待つ上限（ティック）。
     const ENTER_LIMIT_TICKS: u64 = 2_000;
 
@@ -2861,7 +2861,7 @@ const SHELL_ARGV: &[u8] = b"zash\0";
 /// フレームバッファが使えない環境でも起動シーケンスの診断ログを最後まで取りたいため
 /// （ADR-0013）。画面が主たる出力手段になる M3-c では方針を見直す。
 fn init_framebuffer(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     boot_info: &BootInfo,
     mapped_ranges: &MappedRanges,
 ) -> Option<Framebuffer> {
@@ -2916,7 +2916,7 @@ fn init_framebuffer(
 /// - 赤・緑・青の順に並ぶ: ピクセルフォーマット変換が正しい。Rgb/Bgr を取り違えて
 ///   いると赤と青が入れ替わる
 /// - 右下からはみ出した矩形が画面内の分だけ描かれる: 切り詰めが効いている
-fn draw_startup_test_pattern(logger: &mut Logger<SerialPort>, framebuffer: &mut Framebuffer) {
+fn draw_startup_test_pattern(logger: &mut Logger<Serial>, framebuffer: &mut Framebuffer) {
     const BACKGROUND: Color = Color::rgb(0x10, 0x10, 0x18);
     const BORDER: Color = Color::WHITE;
     const SWATCH_SIZE: u32 = 64;
@@ -3020,7 +3020,7 @@ fn draw_startup_text(framebuffer: &mut Framebuffer, background: Color) {
 /// フレーム総数・最大連続空き範囲）をログに出し、「空き自体が不足」と「空きはあるが
 /// 連続領域が足りない（断片化）」を判別できるようにする。
 fn init_console(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     framebuffer: Framebuffer,
     allocator: &mut frame_allocator::FrameAllocator,
     mapped_ranges: &MappedRanges,
@@ -3154,7 +3154,7 @@ fn init_console(
 ///
 /// タイミングに依存しない（`sendkey` を使わない）ので、判定は決定的である。
 #[cfg(feature = "ansi-test")]
-fn exercise_ansi_console(logger: &mut Logger<SerialPort>, console: &mut Console) {
+fn exercise_ansi_console(logger: &mut Logger<Serial>, console: &mut Console) {
     // まっさらから始める。判定を既知の状態に固定する。
     console.clear();
     // **カーソルを隠してから始める（ES-c で足した対策）。**
@@ -3400,7 +3400,7 @@ fn exercise_ansi_console(logger: &mut Logger<SerialPort>, console: &mut Console)
 /// `Logger` 自体には複数の出力先を持たせない。マルチシンクにするとシリアル出力の経路が
 /// 画面出力の経路に依存する（ADR-0017）。
 fn log_both(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     console: Option<&mut Console>,
     level: LogLevel,
     args: core::fmt::Arguments<'_>,
@@ -3420,7 +3420,7 @@ fn log_both(
 /// 画面だけを見た人が「ログが途中から始まっている」と誤解しないよう、ここより前の
 /// ログはシリアルにしか出ていないことと、その行数を明示する。
 #[cfg(not(feature = "gfx-test-pattern"))]
-fn announce_console_start(logger: &mut Logger<SerialPort>, console: &mut Console) {
+fn announce_console_start(logger: &mut Logger<Serial>, console: &mut Console) {
     use core::fmt::Write;
 
     // コンソール構築までに出力した行数。これが画面に出ていない分。
@@ -3449,7 +3449,7 @@ fn announce_console_start(logger: &mut Logger<SerialPort>, console: &mut Console
 /// カーネルコード/データに加え、M5-e で足したユーザー用（ucode32 / udata / ucode64、
 /// DPL=3、STAR 互換順）と TSS を確認する。Ring 3 遷移はまだ行わない（M5-e-3）。
 /// 読むのは GDT が今持っている値で、設計上の仮定ではなく実状態を見る。
-fn verify_gdt_descriptors(logger: &mut Logger<SerialPort>, gdt_limit: u16) {
+fn verify_gdt_descriptors(logger: &mut Logger<Serial>, gdt_limit: u16) {
     use gdt::layout::{
         user_segment_descriptor, KERNEL_CODE_ACCESS, KERNEL_CODE_FLAGS, KERNEL_DATA_ACCESS,
         KERNEL_DATA_FLAGS, USER_CODE32_FLAGS, USER_CODE64_FLAGS, USER_CODE_ACCESS,
@@ -3583,7 +3583,7 @@ fn verify_gdt_descriptors(logger: &mut Logger<SerialPort>, gdt_limit: u16) {
 ///
 /// M2-d の CR3 切り替えと同じ作法で、切り替え後に読み戻した値を出す。設定したつもりの
 /// 値ではなく、CPU が今参照している値を確認する。
-fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
+fn report_gdt_and_stack(logger: &mut Logger<Serial>, old_rsp: u64) {
     let (gdt_base, gdt_limit) = gdt::current_gdt();
     let code_selector = gdt::current_code_selector();
     let task_register = gdt::current_task_register();
@@ -3728,7 +3728,7 @@ fn report_gdt_and_stack(logger: &mut Logger<SerialPort>, old_rsp: u64) {
 /// 有効化されないこと」と「Drop 後に元の状態へ戻ること」である。IF=1 で `enter` する
 /// 経路は、PIC を全マスクした M4-c-3 の後に `--critical-test` で確かめる。それ以前に
 /// `sti` すると未検証のハンドラへ割り込みが飛ぶ。
-fn verify_critical_sections(logger: &mut Logger<SerialPort>) {
+fn verify_critical_sections(logger: &mut Logger<Serial>) {
     use common::critical::InterruptGuard;
 
     fn if_set() -> bool {
@@ -3794,7 +3794,7 @@ fn verify_critical_sections(logger: &mut Logger<SerialPort>) {
 ///
 /// GDT と同じ作法で、設定したつもりの値ではなく `sidt` で読み戻した値を
 /// 確認する。
-fn report_idt(logger: &mut Logger<SerialPort>) {
+fn report_idt(logger: &mut Logger<Serial>) {
     let (base, limit) = idt::current_idt();
     logger.info(format_args!(
         "idt: base={base:#x} limit={limit} (expected base={:#x} limit={})",
@@ -3916,7 +3916,7 @@ fn report_idt(logger: &mut Logger<SerialPort>) {
 /// 分からず、後で「誰も設定していないはずの IRQ が来る」と悩んだときの手掛かりになる
 /// （OVMF はアイドル中もタイマ割り込みを処理している。`docs/troubleshooting.md` の
 /// 起動ログのベースライン）。
-fn configure_pic(logger: &mut Logger<SerialPort>) {
+fn configure_pic(logger: &mut Logger<Serial>) {
     logger.info(format_args!(
         "pic: IMR before remap {} [0 = unmasked]",
         irq::check_masks(&[]).observed_with_bits()
@@ -4085,10 +4085,7 @@ const UNMAPPED_PROBE_ADDRESS: u64 = 0x0000_4000_0000_0000;
     allow(unused_variables)
 )]
 #[cfg_attr(feature = "exception-test-invalid-opcode", allow(unreachable_code))]
-fn trigger_exception_under_test(
-    logger: &mut Logger<SerialPort>,
-    mapped_ranges: &MappedRanges,
-) -> ! {
+fn trigger_exception_under_test(logger: &mut Logger<Serial>, mapped_ranges: &MappedRanges) -> ! {
     #[cfg(feature = "exception-test-divide-by-zero")]
     {
         logger.info(format_args!(
@@ -4203,7 +4200,7 @@ fn trigger_exception_under_test(
 /// 通常ビルドには含まれない。
 #[cfg(feature = "stack-guard-test")]
 #[allow(unreachable_code)]
-fn trigger_stack_guard_test(logger: &mut Logger<SerialPort>) -> ! {
+fn trigger_stack_guard_test(logger: &mut Logger<Serial>) -> ! {
     let guard = stack::kernel_guard_page();
     logger.info(format_args!(
         "stack-guard-test: kernel stack guard page {:#x}..{:#x}; about to overflow the stack on purpose",
@@ -4256,7 +4253,7 @@ fn overflow_the_stack(depth: u64) -> u64 {
 /// 対応する feature を有効にしてビルドする。
 #[cfg(feature = "critical-test")]
 #[allow(unreachable_code)]
-fn trigger_critical_test(logger: &mut Logger<SerialPort>) -> ! {
+fn trigger_critical_test(logger: &mut Logger<Serial>) -> ! {
     #[cfg(feature = "critical-test-double-lock")]
     {
         use common::critical::Locked;
@@ -4346,7 +4343,7 @@ fn trigger_critical_test(logger: &mut Logger<SerialPort>) -> ! {
 /// `Locked<T>` は取得中に `InterruptGuard` を保持する。その効果を実 RFLAGS で観測する。
 /// 現状は起動時から IF=0 なので、保持中も解放後も IF=0（元の状態）になる。IF=1 から
 /// 入る経路は `--critical-test restore-enabled` で確認する。
-fn report_lock_interrupt_state(logger: &mut Logger<SerialPort>) {
+fn report_lock_interrupt_state(logger: &mut Logger<Serial>) {
     use common::critical::Locked;
 
     fn if_set() -> bool {
@@ -4387,7 +4384,7 @@ fn report_lock_interrupt_state(logger: &mut Logger<SerialPort>) {
 #[cfg(feature = "interrupt-test")]
 #[allow(unreachable_code)]
 fn trigger_interrupt_test(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     #[allow(unused)] console: Option<&mut Console>,
 ) -> ! {
     /// スピンする長さと、ハートビートの間隔（TSC サイクル）。
@@ -4509,7 +4506,7 @@ fn trigger_interrupt_test(
 /// PIC の範囲外へ移すのが、本番経路に一切手を入れずに済む唯一の案だった
 /// （ADR-0018 Addendum 3）。
 #[cfg(feature = "interrupt-test-irq-path")]
-fn verify_irq_path_restores_registers(logger: &mut Logger<SerialPort>) {
+fn verify_irq_path_restores_registers(logger: &mut Logger<Serial>) {
     // レジスタごとに異なる既知値。値が入れ替わっても気づけるようにする
     // （M4-b-2 の GPR ダンプ検証と同じ考え方）。
     //
@@ -4618,7 +4615,7 @@ const DEMO_USER_PML4_INDEX: usize = 0;
 /// 破壊テスト (addrspace-no-kernel-share): 上位をコピーしない。切り替えた瞬間に死ぬので、
 /// 「切り替えた後」の行が出ない（S7-c）。
 fn demo_address_space_switch(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     allocator: &mut kernel::frame_allocator::FrameAllocator,
 ) {
     let direct_map = common::addr::direct_map();
@@ -4687,7 +4684,7 @@ fn demo_address_space_switch(
 /// ユーザーモードへは行かない。マップするのはユーザーページだが、読むのは Ring 0 からである。
 /// 権限の検査は S8 以降の仕事で、ここで見たいのは翻訳が別であることだけである。
 fn demo_two_address_spaces(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     allocator: &mut kernel::frame_allocator::FrameAllocator,
     direct_map: common::addr::DirectMap,
     production: common::addr::PhysAddr,
@@ -4911,7 +4908,7 @@ fn demo_two_address_spaces(
 /// 5. `sti` 前 7 項目を再検証する（項目 5 の期待値が 0xFF から 0xFE へ変わる）
 /// 6. `sti`（`run_timer_loop` の中で行う）
 fn start_timer(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     console: Option<&mut Console>,
     stop_after_ticks: u64,
     shell_after_heartbeats: u64,
@@ -5061,7 +5058,7 @@ fn start_timer(
 /// 0〜3 は i8042 に固有の手順で、[`kernel::machine::pc::i8042::prepare`] が行う（無いときに止めない理由も、そちらの
 /// doc にある）。
 fn setup_keyboard(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     i8042: kernel::machine::pc::acpi::I8042Presence,
 ) -> bool {
     // --- 0〜3. i8042 を探って確かめ、残ったバイトを読み捨てる ---
@@ -5125,7 +5122,7 @@ fn setup_keyboard(
 /// （S13-b/c の完了が ISR に溜まっており、読まずに開くと過去のぶんが
 /// 実演の数に混ざる）である。
 fn switch_virtio_to_io_apic(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     apic: Option<&kernel::machine::pc::apic::MappedApic>,
     virtio: &mut kernel::virtio::VirtioBlk,
 ) {
@@ -5205,7 +5202,7 @@ fn switch_virtio_to_io_apic(
 }
 
 fn switch_keyboard_to_io_apic(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     mapped: Option<&kernel::machine::pc::apic::MappedApic>,
 ) {
     let Some(mapped) = mapped else {
@@ -5339,7 +5336,7 @@ mod fsimage_info {
 /// `KEEP` を外すと、詰め物は到達不能なのでセクション回収に落ち、entry が
 /// セグメントの先頭に戻る。実際に一度落ちた。** そうなると「entry ではなく
 /// セグメントの先頭へ飛ぶ」破壊テストが破壊にならなくなるので、ここで主張しておく。
-fn verify_embedded_user_elf(logger: &mut Logger<SerialPort>) {
+fn verify_embedded_user_elf(logger: &mut Logger<Serial>) {
     use common::elf::Elf;
 
     let elf = match Elf::parse(HELLO_ELF) {
@@ -5459,7 +5456,7 @@ fn verify_embedded_user_elf(logger: &mut Logger<SerialPort>) {
 ///
 /// **`#[inline(never)]` の理由は [`report_no_virtio_device`] と同じである。**
 #[inline(never)]
-fn report_ram_only_file_system(logger: &mut Logger<SerialPort>) {
+fn report_ram_only_file_system(logger: &mut Logger<Serial>) {
     logger.info(format_args!(
         "fs-image: the file system lives in RAM only (no virtio-blk device), so the write-back \
          at the end is skipped and nothing persists"
@@ -5474,7 +5471,7 @@ fn report_ram_only_file_system(logger: &mut Logger<SerialPort>) {
 /// 最深経路」と (c)）。
 #[inline(never)]
 fn report_no_virtio_device(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     fs_image_range: Option<(common::addr::PhysAddr, u64)>,
 ) {
     match fs_image_range {
@@ -5495,7 +5492,7 @@ fn report_no_virtio_device(
 }
 
 fn copy_fs_image_to_frames(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     blk: Option<&mut kernel::virtio::VirtioBlk>,
     ram_image: Option<(common::addr::PhysAddr, u64)>,
 ) -> (u64, u64) {
@@ -5611,7 +5608,7 @@ enum FsImageCopyError {
 /// **[`try_copy_fs_image_to_frames`] のロードの対称である**——あちらが装置から
 /// フレームへ読み、こちらがフレームから装置へ書く。`base` は複製先の物理先頭。
 fn flush_fs_image_to_device(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     blk: &mut kernel::virtio::VirtioBlk,
     base: common::addr::PhysAddr,
     bytes: u64,
@@ -5664,7 +5661,7 @@ fn flush_fs_image_to_device(
 const FS_LOAD_CHUNK: u32 = 4096;
 
 fn try_copy_fs_image_to_frames(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     blk: Option<&mut kernel::virtio::VirtioBlk>,
     ram_image: Option<(common::addr::PhysAddr, u64)>,
 ) -> Result<(u64, u64), FsImageCopyError> {
@@ -5976,7 +5973,7 @@ fn try_copy_fs_image_to_frames(
 ///
 /// **止めない。判定行を出すだけである**——ホスト側（`--full` の項目と
 /// 起動ログの参照）が落とす。
-fn verify_bss_is_mapped(logger: &mut Logger<SerialPort>) {
+fn verify_bss_is_mapped(logger: &mut Logger<Serial>) {
     /// 検査用プログラム。**`build.rs` がイメージへ置く。**
     const BSS_TEST_PATH: &[u8] = b"/bin/bss-test";
 
@@ -5990,7 +5987,7 @@ fn verify_bss_is_mapped(logger: &mut Logger<SerialPort>) {
     ));
 }
 
-fn verify_sparse_hole_reads_as_zeros(logger: &mut Logger<SerialPort>) {
+fn verify_sparse_hole_reads_as_zeros(logger: &mut Logger<Serial>) {
     /// 穴のあるファイル。**`build.rs` が置く。**
     const SPARSE_PATH: &[u8] = b"/data/sparse-hole";
     /// 穴のブロックの添字（先頭・穴・末尾の 3 つのうち真ん中）。
@@ -6034,7 +6031,7 @@ fn verify_sparse_hole_reads_as_zeros(logger: &mut Logger<SerialPort>) {
     ));
 }
 
-fn exercise_block_bitmap(logger: &mut Logger<SerialPort>, image: &'static mut [u8]) {
+fn exercise_block_bitmap(logger: &mut Logger<Serial>, image: &'static mut [u8]) {
     let Err(reason) = try_exercise_block_bitmap(logger, image) else {
         return;
     };
@@ -6187,7 +6184,7 @@ enum WriteExerciseError {
 
 /// ブロックビットマップの往復を見る検査部（T3-1）。**止めない。`Err` を返す。**
 fn try_exercise_block_bitmap(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     image: &'static mut [u8],
 ) -> Result<(), WriteExerciseError> {
     use common::ext2::Ext2;
@@ -6267,7 +6264,7 @@ fn try_exercise_block_bitmap(
 /// **`fs-write-keep-test` は戻さない**（変種。壊さない）——
 /// **書いたままの像で `e2fsck` と中身を見るために要る。**
 fn exercise_file_append(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     image: &mut [u8],
     layout: &common::ext2::Layout,
 ) -> Result<(), WriteExerciseError> {
@@ -6374,7 +6371,7 @@ fn exercise_file_append(
 /// **0 まで縮めてから、初めの中身を書き直す。**
 /// **戻すので、取り出したイメージはビルドしたイメージとバイト単位で一致するはずである。**
 fn exercise_truncate(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     image: &mut [u8],
     layout: &common::ext2::Layout,
     ino: u32,
@@ -6489,7 +6486,7 @@ fn exercise_truncate(
 /// **1 回の起動だと最終状態が「消した後」になり、作成の誤りが削除で消える。**
 /// **作ったままのイメージでしか、中身も会計も見られない**（S12-d で踏んだ形である）。
 fn exercise_create_and_unlink(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     image: &mut [u8],
     layout: &common::ext2::Layout,
 ) -> Result<(), WriteExerciseError> {
@@ -6588,7 +6585,7 @@ fn exercise_create_and_unlink(
 /// **中に 1 つファイルを作ってから `rmdir` を呼ぶ。** **通れば異常である。**
 /// **消してから、改めて `rmdir` する。**
 fn exercise_mkdir_and_rmdir(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     image: &mut [u8],
     layout: &common::ext2::Layout,
 ) -> Result<(), WriteExerciseError> {
@@ -6672,7 +6669,7 @@ fn exercise_mkdir_and_rmdir(
     Ok(())
 }
 
-fn verify_root_fs_image(logger: &mut Logger<SerialPort>) {
+fn verify_root_fs_image(logger: &mut Logger<Serial>) {
     use common::ext2::ROOT_INODE;
 
     let Err(reason) = try_verify_root_fs_image(logger) else {
@@ -6863,7 +6860,7 @@ enum FsReadCheckError {
 }
 
 /// 抱えているイメージを読み切れることを見る検査部（T3-1）。**止めない。`Err` を返す。**
-fn try_verify_root_fs_image(logger: &mut Logger<SerialPort>) -> Result<(), FsReadCheckError> {
+fn try_verify_root_fs_image(logger: &mut Logger<Serial>) -> Result<(), FsReadCheckError> {
     use common::ext2::Ext2;
 
     // **見るのは装置から読んだ複製である（P-e）。**
@@ -7084,7 +7081,7 @@ const MOTD_PATH: &str = "/etc/motd";
 /// **`dentry` を置かない**（`docs/roadmap.md` の S10）。引く回数が問題になって
 /// いない段階では、**キャッシュを持つ理由が無い。**
 fn verify_path_lookup(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     fs: &common::ext2::Ext2<'_>,
 ) -> Result<(), FsReadCheckError> {
     let motd = match fs.lookup(MOTD_PATH.as_bytes()) {
@@ -7139,7 +7136,7 @@ fn verify_path_lookup(
 /// 見る。**以前はここで先頭 4 バイトだけを覗いていたが、走査を書いたので
 /// そちらへ寄せた。**
 fn verify_root_inode(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     fs: &common::ext2::Ext2<'_>,
 ) -> Result<(), FsReadCheckError> {
     use common::ext2::ROOT_INODE;
@@ -7197,7 +7194,7 @@ fn verify_root_inode(
 /// `an_all_zero_directory_block_ends_the_walk`）。**QEMU では「返ってこない」が
 /// タイムアウトとしてしか観測できないので、falsify できる場所へ寄せてある。**
 fn verify_root_directory_walk(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     fs: &common::ext2::Ext2<'_>,
     root: &common::ext2::Inode,
 ) -> Result<(), FsReadCheckError> {
@@ -7278,7 +7275,7 @@ fn verify_root_directory_walk(
 /// 外した**（S10-a の 6 本目）。**大きさの突き合わせは残してある**——番号ではなく
 /// 名前で届くようになっても、**届いた先が期待どおりのものかは別の主張である。**
 fn verify_single_indirect_boundary(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     fs: &common::ext2::Ext2<'_>,
 ) -> Result<(), FsReadCheckError> {
     use common::ext2::SINGLE_INDIRECT_SLOT;
@@ -7475,7 +7472,7 @@ fn fs_read_whole_file(
 ///   ファイルからで 2 MiB のイメージに入らず、`mke2fs -d` は穴を作らない。
 ///   **ホストテストが見ている**（`common::ext2` の
 ///   `refuses_a_file_that_uses_the_double_or_triple_indirect_slots` ほか）
-fn verify_corrupt_fs_image_is_rejected(logger: &mut Logger<SerialPort>) {
+fn verify_corrupt_fs_image_is_rejected(logger: &mut Logger<Serial>) {
     let Err(reason) = try_verify_corrupt_fs_image_is_rejected(logger) else {
         return;
     };
@@ -7676,7 +7673,7 @@ fn map_corrupt_fs(image: &[u8]) -> Option<CorruptFsMap> {
 }
 
 fn try_verify_corrupt_fs_image_is_rejected(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
 ) -> Result<(), CorruptFsCheckError> {
     use common::ext2::{Ext2, Ext2Error};
 
@@ -8054,7 +8051,7 @@ fn try_verify_corrupt_fs_image_is_rejected(
 /// **この 2 つを表に混ぜない。** 混ぜると「エラーが返る」と「値が違う」が
 /// 同じ主張に見える。
 fn verify_fs_content_mismatch_is_noticed(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     rejected: &mut usize,
     map: &CorruptFsMap,
 ) -> Result<(), CorruptFsCheckError> {
@@ -8179,7 +8176,7 @@ struct CorruptCase {
 ///
 /// **「壊した像がどこから来たか読めない」という欠点は、判定行に壊し方を
 /// 書いて消してある**（`what` の欄）。
-fn verify_corrupt_user_elf_is_rejected(logger: &mut Logger<SerialPort>) {
+fn verify_corrupt_user_elf_is_rejected(logger: &mut Logger<Serial>) {
     use common::elf::{Elf, ElfError};
 
     const EI_CLASS: usize = 4;
@@ -8661,7 +8658,7 @@ const USER_PROGRAMS: &[UserProgram] = &[
 /// **監視（`kernel::arch::x86_64::idt::check_direction_flag`）は DF=1 が Rust へ届いたときにしか鳴らない。**
 /// **DF=1 のまま入る入場が 1 度も無ければ、スタブが降ろしていなくても黙って通る。**
 fn check_direction_flag_premise(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     program: &UserProgram,
     before: Option<u64>,
 ) {
@@ -8690,7 +8687,7 @@ fn check_direction_flag_premise(
 ///
 /// **借りられないのは異常である**（`ADR-0030`）。起動シーケンスは単一コアの
 /// 直線なので、**ここで `None` が返るなら誰かが返し忘れている。**
-fn frame_count_now(logger: &mut Logger<SerialPort>) -> u64 {
+fn frame_count_now(logger: &mut Logger<Serial>) -> u64 {
     let Some(allocator) = kernel::frame_allocator::take() else {
         logger.error(format_args!(
             "frame-allocator: the allocator is on loan while the boot sequence needs it; \
@@ -8704,7 +8701,7 @@ fn frame_count_now(logger: &mut Logger<SerialPort>) -> u64 {
 }
 
 /// 今の空き範囲の数（S11-3）。**同じく短く借りて返す。**
-fn free_range_count_now(logger: &mut Logger<SerialPort>) -> usize {
+fn free_range_count_now(logger: &mut Logger<Serial>) -> usize {
     let Some(allocator) = kernel::frame_allocator::take() else {
         logger.error(format_args!(
             "frame-allocator: the allocator is on loan while the boot sequence needs it; \
@@ -8722,7 +8719,7 @@ fn free_range_count_now(logger: &mut Logger<SerialPort>) -> usize {
 /// **1 本ずつ、生成から破棄まで閉じてから次へ行く。** 期待どおりに終わった
 /// プログラムは失敗ではない——`fault-test` は終了させられるのが正しい
 /// （[`USER_PROGRAMS`]）。**期待と違う終わり方をしたときだけ止まる。**
-fn load_embedded_user_program(logger: &mut Logger<SerialPort>) -> Result<(), UserLoadError> {
+fn load_embedded_user_program(logger: &mut Logger<Serial>) -> Result<(), UserLoadError> {
     for program in USER_PROGRAMS {
         let name = program.name;
         // **会計のために短く借りる（S11-3）。** 読むだけなので、すぐ返す。
@@ -8841,7 +8838,7 @@ fn load_embedded_user_program(logger: &mut Logger<SerialPort>) -> Result<(), Use
 /// の範囲も区画の重なりも見ない（配置の方針を知らないため。`common::elf` の
 /// モジュール doc）ので、**パースは通り、マッピングで拒まれる。** 行き先は
 /// ユーザーサブツリーの外（`PML4[1]`）と、1 本目の区画のページの中である。
-fn verify_corrupt_user_program_is_not_loaded(logger: &mut Logger<SerialPort>) {
+fn verify_corrupt_user_program_is_not_loaded(logger: &mut Logger<Serial>) {
     /// 先頭のプログラムヘッダの位置（`hello` の `e_phoff` は 64）。
     const PHDR0: usize = 64;
     /// `Elf64_Phdr` の大きさ。
@@ -8949,7 +8946,7 @@ fn verify_corrupt_user_program_is_not_loaded(logger: &mut Logger<SerialPort>) {
 /// 違い、それは一覧を持つ側の知識である。`ring3::enter` が終了させた位置を主張せず
 /// 呼び出し側に委ねているのと同じ形である。
 fn check_user_program_outcome(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     program: &UserProgram,
     entry: u64,
 ) -> Result<(), UserLoadError> {
@@ -9146,7 +9143,7 @@ pub const USER_PML4_INDEX: usize = 1;
 /// 独立の関心事である。
 #[cfg(not(feature = "paging-test"))]
 fn verify_user_page_mapping<const CAP: usize>(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     allocator: &mut frame_allocator::FrameAllocator<CAP>,
 ) {
     use kernel::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
@@ -9296,7 +9293,7 @@ fn verify_user_page_mapping<const CAP: usize>(
 /// cfg で落ち、`verify_syscall_roundtrip` と [`issue_ptr_len_syscall`] は関数自体が
 /// 残る（落ちるのは呼び出し側）。ここを落とすとその2つがコンパイルできない。
 fn assert_folded_at(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     what: &str,
     expected_vector: u64,
     expected_rip: u64,
@@ -9327,7 +9324,7 @@ fn assert_folded_at(
 /// `paging-test` ビルドでは載せない（[`verify_user_page_mapping`] と同じ理由）。
 #[cfg(not(feature = "paging-test"))]
 fn verify_ring3_excursion<const CAP: usize>(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     allocator: &mut frame_allocator::FrameAllocator<CAP>,
 ) {
     use kernel::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
@@ -9529,7 +9526,7 @@ fn verify_ring3_excursion<const CAP: usize>(
 ///   [`syscall::PROBE_RETURN`] と一致）
 /// - syscall_entry が RSP0（遠征）スタックで走ったこと
 /// - 終了処理で戻り RSP0 が復帰したこと
-fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
+fn verify_syscall_roundtrip(logger: &mut Logger<Serial>) {
     use kernel::arch::x86_64::paging::active::{ActivePageTable, PageSize};
     use kernel::arch::x86_64::ring3;
     use kernel::syscall;
@@ -9773,7 +9770,7 @@ fn verify_syscall_roundtrip(logger: &mut Logger<SerialPort>) {
 /// 遠征機構（enter → int 0x80 → 戻り値 store → cli による終了処理）は verify_syscall_roundtrip と
 /// 同じものを使う。ユーザーコード/スタックページは verify_ring3_excursion がマップしたものを
 /// 再利用する（呼び出し側が確認済みであることが前提）。
-fn issue_ptr_len_syscall(logger: &mut Logger<SerialPort>, number: u64, buf: u64, len: u64) -> u64 {
+fn issue_ptr_len_syscall(logger: &mut Logger<Serial>, number: u64, buf: u64, len: u64) -> u64 {
     use kernel::arch::x86_64::ring3;
     use kernel::syscall;
 
@@ -9862,7 +9859,7 @@ fn issue_ptr_len_syscall(logger: &mut Logger<SerialPort>, number: u64, buf: u64,
 /// 異常系は多層防御のどのチェックが弾いても拒否は成立する。単独チェックの隔離破壊テストは
 /// skip-us / skip-laststep / skip-all（verification-coverage）。
 fn verify_syscall_pointer<const CAP: usize>(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     allocator: &mut frame_allocator::FrameAllocator<CAP>,
 ) {
     use kernel::arch::x86_64::paging::active::{ActivePageTable, PageAttributes, PageSize};
@@ -9990,7 +9987,7 @@ fn verify_syscall_pointer<const CAP: usize>(
 /// 自己検算ではなく、発行側の既知値とカーネルの独立読みの突き合わせである。
 /// あわせて、カーネルポインタを渡すと copy 前の検証で -EFAULT が返る（読みに踏み込まない）
 /// ことを確かめる。
-fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
+fn verify_syscall_checksum(logger: &mut Logger<Serial>) {
     use kernel::arch::x86_64::ring3;
     use kernel::syscall;
 
@@ -10101,7 +10098,7 @@ fn verify_syscall_checksum(logger: &mut Logger<SerialPort>) {
 /// `paging-test` ビルドでは載せない（[`verify_ring3_excursion`] と同じ理由で、
 /// ユーザーページがそちらでマップされるため）。
 #[cfg(not(feature = "paging-test"))]
-fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
+fn verify_ring3_fault_vectors(logger: &mut Logger<Serial>) {
     use kernel::arch::x86_64::ring3;
 
     // ユーザーサブツリー内の未マップ VA。#PF の対象にする。
@@ -10329,7 +10326,7 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<SerialPort>) {
 /// 2 回するだけである。`translate()` は実際のテーブルを辿るので、分割を行ったコードとは
 /// 独立している。こちらで見る。
 fn verify_split_and_unmap<const CAP: usize>(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     allocator: &mut frame_allocator::FrameAllocator<CAP>,
 ) {
     use kernel::arch::x86_64::paging::active::{ActivePageTable, MapUpdateError, PageSize};
@@ -12249,7 +12246,7 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
 /// 1 つでも有効なら WARN を出す。仕込みが有効なビルドで測った結果を正常な結果として
 /// 報告する事故を防ぐためである。何も有効でない場合も 1 行出す。「出ていない」と
 /// 「そもそも報告していない」を区別できるようにするため。
-fn report_test_hooks(logger: &mut Logger<SerialPort>) {
+fn report_test_hooks(logger: &mut Logger<Serial>) {
     let enabled: usize = TEST_HOOKS.iter().filter(|(_, on, _)| *on).count();
     if enabled == 0 {
         logger.info(format_args!(
@@ -12275,7 +12272,7 @@ fn report_test_hooks(logger: &mut Logger<SerialPort>) {
 /// 判定はシリアルのマーカー行で行い、xtask が突き合わせる。
 #[cfg(feature = "paging-test")]
 fn run_paging_test<const CAP: usize>(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     allocator: &mut frame_allocator::FrameAllocator<CAP>,
     heap_start: u64,
 ) {
@@ -12448,11 +12445,7 @@ fn run_paging_test<const CAP: usize>(
 ///
 /// 分割対象の選定材料であると同時に、恒等マッピングの現状把握でもある。ここに挙げた
 /// 4 つはカーネルが動き続けるために要る領域で、翻訳できなければ fail-fast する。
-fn report_mapping_granularity(
-    logger: &mut Logger<SerialPort>,
-    heap_start: u64,
-    framebuffer_phys: u64,
-) {
+fn report_mapping_granularity(logger: &mut Logger<Serial>, heap_start: u64, framebuffer_phys: u64) {
     use kernel::arch::x86_64::paging::active::{ActivePageTable, PageSize};
     use kernel::arch::x86_64::paging::entry;
 
@@ -12550,7 +12543,7 @@ fn report_mapping_granularity(
 /// 依存させず、引数（テーブルアクセス用のウィンドウ・アロケータ・マップ範囲）だけで完結させて
 /// ある。登録 `direct_map()` はテーブルフレームのアクセスにのみ引く。
 fn build_and_switch_direct_map(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     allocator: &mut frame_allocator::FrameAllocator<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
     mapped: &MappedRanges<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
 ) {
@@ -12868,7 +12861,7 @@ fn build_and_switch_direct_map(
 /// 直後の phys_to_virt 検証が期待値と食い違うのを検出し、以降の経路（フレームバッファ・
 /// コンソール）が誤った高位を触る前に停止する。A-1 の low-window（ウィンドウの構築を壊す）とは
 /// 層が違い、こちらは登録値を壊す。
-fn activate_direct_map_window(logger: &mut Logger<SerialPort>) {
+fn activate_direct_map_window(logger: &mut Logger<Serial>) {
     use common::addr::{DirectMap, PhysAddr, VirtAddr};
 
     // 差し替え前は恒等（base=0）であることを確かめる。
@@ -12953,7 +12946,7 @@ fn activate_direct_map_window(logger: &mut Logger<SerialPort>) {
 /// **届く範囲の外のフレームだけは、専用の 1 行を出す**——**`xtask` の機械の変種の破壊テスト
 /// （配りを高いアドレスからにする）が、狙いどおりにここで止まったことを判定に使う。**
 fn report_page_table_error_before_switch(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     what: &str,
     error: kernel::arch::x86_64::paging::table::PageTableError,
 ) {
@@ -12979,7 +12972,7 @@ fn report_page_table_error_before_switch(
 /// 自動的に高位になる。ヒープ・RSP・boot_info は恒等を直接使うので A では触らない
 /// （B で高位化する）。
 fn rehome_framebuffer_to_window(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     framebuffer: &mut Option<Framebuffer>,
     boot_info: &BootInfo,
 ) {
@@ -13083,7 +13076,7 @@ fn rehome_framebuffer_to_window(
 /// **分岐は登録のとおりに書いた**——2MiB なら `split_huge_page` を通してから `unmap_4kib`
 /// する。**機構は M5-a から在ったので、配線するだけである。**
 fn install_kernel_stack_guard_page(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     allocator: &mut kernel::frame_allocator::FrameAllocator,
 ) {
     let guard_virt = stack::kernel_guard_page().bottom;
@@ -13114,7 +13107,7 @@ fn install_kernel_stack_guard_page(
 /// 見え続けるようにする。丸めは 4KiB（H-2 と同一。要確認1）。
 fn map_kernel_high_half<const CAP: usize>(
     builder: &mut PageTableBuilder<'_, CAP>,
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
 ) {
     let (image_start, image_end) = kernel_image_phys_range();
     let image_len =
@@ -13158,7 +13151,7 @@ fn map_kernel_high_half<const CAP: usize>(
 /// （`KERNEL_VIRT_BASE + (phys - LMA)`）だけで、これは direct map とは別の対応である。
 /// ログでもそう明示する。
 fn build_and_verify_high_half(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     allocator: &mut frame_allocator::FrameAllocator<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
     mapped: &MappedRanges<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
     direct_map: common::addr::DirectMap,
@@ -13370,7 +13363,7 @@ fn range_is_mapped<const CAP: usize>(mapped: &MappedRanges<CAP>, start: u64, end
 ///
 /// あわせて、TLB の全フラッシュ（CR3 リロード）が成立する条件も実測する。
 fn verify_page_tables(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     mapped: &MappedRanges<{ kernel::paging::plan::DEFAULT_CAPACITY }>,
 ) {
     use kernel::arch::x86_64::paging::active::{ActivePageTable, PageSize};

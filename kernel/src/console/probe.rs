@@ -19,7 +19,7 @@
 //! （`docs/verification-coverage.md` の破壊が緑を出す道の 4 つ目）。
 
 use crate::graphics::Color;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::Serial;
 use core::fmt::Write as _;
 use core::sync::atomic::Ordering;
 
@@ -299,7 +299,7 @@ static LAST_STATUS: common::critical::Locked<StatusSnapshot> =
 /// **判定行が無いことを「まだ出ていない」と読める**（`--full` は行の有無で
 /// 見ている）。
 pub(crate) fn observe(kind: Observation) {
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
     let console = super::FOREGROUND.load(Ordering::Acquire);
     if console.is_null() {
@@ -435,7 +435,7 @@ fn ink_of_run(
 /// **色が記号へ漏れていないこと**（連なりの直後のセルが既定前景で、
 /// かつ字が在ること）。**後者は ES-d の目視で「白のはず」と決めた側である。**
 /// **既定前景は写さない。コンソールに訊く。**
-fn observe_prompt(serial: &mut SerialPort, console: &mut crate::console::Console) {
+fn observe_prompt(serial: &mut Serial, console: &mut crate::console::Console) {
     let format = console.framebuffer_layout().format();
     let want = PROMPT_COLOR.to_pixel(format);
     let (_, cursor_row) = console.cursor_cell();
@@ -500,7 +500,7 @@ fn observe_prompt(serial: &mut SerialPort, console: &mut crate::console::Console
 /// **行 0 を読むほうが主張が強い**——**ウィンドウの先頭そのものを見ている。**
 ///
 /// **破壊テスト `stderr-on-screen-test` は、まさにこの行を診断行へ戻す。**
-fn observe_zi_window(serial: &mut SerialPort, console: &mut crate::console::Console) {
+fn observe_zi_window(serial: &mut Serial, console: &mut crate::console::Console) {
     /// 読む画面の行（VIEW-a。ADR-0046 で 1 から戻した）。**ウィンドウの先頭である。**
     const ROW: u32 = 0;
     let (columns, _) = console.size();
@@ -529,7 +529,7 @@ fn observe_zi_window(serial: &mut SerialPort, console: &mut crate::console::Cons
 /// **この関数は主張しない。控えて出すだけである。**
 /// **突き合わせるのはホスト側である**——**動かす前と後で 2 回観測し、
 /// 「後の上端が、前の下端より後ろの行であること」を見る。**
-fn observe_view_window(serial: &mut SerialPort, console: &mut crate::console::Console) {
+fn observe_view_window(serial: &mut Serial, console: &mut crate::console::Console) {
     /// 本文の上端（`less` は画面の先頭から並べる）。
     const TOP: u32 = 0;
     let (_, rows) = console.size();
@@ -561,7 +561,7 @@ fn observe_view_window(serial: &mut SerialPort, console: &mut crate::console::Co
 /// `zi test (cursor-repaint-always-test)`）。
 /// **落ちたので気づけたが、番号がずれても値の形は同じなので、
 /// 別の項が偶然通る形もありうる。**
-fn observe_draw_stats(serial: &mut SerialPort, console: &mut crate::console::Console) {
+fn observe_draw_stats(serial: &mut Serial, console: &mut crate::console::Console) {
     let stats = console.stats();
     let _ = writeln!(
         serial,
@@ -595,7 +595,7 @@ fn observe_draw_stats(serial: &mut SerialPort, console: &mut crate::console::Con
 /// **この関数は主張しない。控えて出すだけである。**
 /// **突き合わせるのはホスト側である**——**`cat` が出した並びの中に、
 /// この 3 行のどれかが在ることを見る。** **期待値をこちらが持たない。**
-fn observe_more_output(serial: &mut SerialPort, console: &mut crate::console::Console) {
+fn observe_more_output(serial: &mut Serial, console: &mut crate::console::Console) {
     let (_, rows) = console.size();
     let mut text = [0u8; LABEL_MAX];
     for offset in 1..=3u32 {
@@ -630,7 +630,7 @@ fn read_row_text(console: &mut crate::console::Console, row: u32, out: &mut [u8]
 }
 
 /// 状態行の色と、モードに従って変わったことを見る。
-fn observe_status(serial: &mut SerialPort, console: &mut crate::console::Console) {
+fn observe_status(serial: &mut Serial, console: &mut crate::console::Console) {
     let format = console.framebuffer_layout().format();
     let want = STATUS_COLOR.to_pixel(format);
     let found = find_colored_run(console, STATUS_COLOR);
@@ -717,7 +717,7 @@ fn observe_status(serial: &mut SerialPort, console: &mut crate::console::Console
 }
 
 /// 代替画面へ入る前の画面を控える（e-3）。**判定は出さない。**
-fn observe_before_alternate(serial: &mut SerialPort, console: &mut crate::console::Console) {
+fn observe_before_alternate(serial: &mut Serial, console: &mut crate::console::Console) {
     let (_, cursor_row) = console.cursor_cell();
     let mut marks = BeforeAlternateMarks {
         seen: true,
@@ -784,7 +784,7 @@ fn first_ink_in_row(console: &mut crate::console::Console, row: u32) -> Option<(
 /// **控えた行をもう一度読む形だった。** **出力が増えて画面が流れると壊れる**
 /// ——**`less` を抜けた後にシェルが次のプロンプトを出すと 1 行流れる。**
 /// **VIEW-c の `more` は代替画面へ入らないので、なおさら流れる。**
-fn observe_after_alternate(serial: &mut SerialPort, console: &mut crate::console::Console) {
+fn observe_after_alternate(serial: &mut Serial, console: &mut crate::console::Console) {
     let before = *BEFORE_ALTERNATE.lock();
     if !before.seen {
         let _ = writeln!(
@@ -831,11 +831,7 @@ fn observe_after_alternate(serial: &mut SerialPort, console: &mut crate::console
 ///
 /// **判定するのはホスト側である**（`xtask`）。ここは画面から読んだ字を
 /// 出すだけで、**期待値を持たない。**
-fn observe_command_line(
-    serial: &mut SerialPort,
-    console: &mut crate::console::Console,
-    marker: &str,
-) {
+fn observe_command_line(serial: &mut Serial, console: &mut crate::console::Console, marker: &str) {
     let (columns, rows) = console.size();
     let row = rows - 1;
     let mut line = [0u8; 48];

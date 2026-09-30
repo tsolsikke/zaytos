@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering
 
 use common::arch::x86_64::cpu;
 use common::log::Logger;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::Serial;
 
 use crate::arch::x86_64::ExitAction;
 
@@ -664,7 +664,7 @@ pub fn registered_interrupt_sources() -> RegisteredSources {
 /// 割り込みを有効化する。[`verify_ready_for_sti`](crate::arch::x86_64::interrupt_readiness::verify_ready_for_sti) を通し、タイマの設定と
 /// IRQ0 の解禁が済んでいること。
 pub unsafe fn run_timer_loop(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     console: Option<&mut crate::console::Console>,
     stop_after_ticks: u64,
     shell_after_heartbeats: u64,
@@ -1454,7 +1454,7 @@ const fn ap_tick_summary() -> ApTickSummary {
 /// である**——**混ざると、判定が「錠が効いていない」と「起動の行が挟まった」を
 /// 区別できなくなる。**
 #[cfg(feature = "serial-stress-test")]
-fn run_serial_stress_on_bsp(logger: &mut Logger<SerialPort>) {
+fn run_serial_stress_on_bsp(logger: &mut Logger<Serial>) {
     use core::sync::atomic::Ordering;
 
     crate::smp::SERIAL_STRESS_GO.store(true, Ordering::Release);
@@ -1488,7 +1488,7 @@ fn run_serial_stress_on_bsp(logger: &mut Logger<SerialPort>) {
 }
 
 fn log_both(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     console: Option<&mut crate::console::Console>,
     args: core::fmt::Arguments,
 ) {
@@ -1506,7 +1506,7 @@ fn log_both(
 /// 「割り込みが届き、データポートが読めている」ことが確定する。以降の不具合は
 /// すべてデコード側の問題に絞り込める。
 fn drain_keyboard(
-    logger: &mut Logger<SerialPort>,
+    logger: &mut Logger<Serial>,
     console: Option<&mut crate::console::Console>,
     announced_first: &mut bool,
     decoder: &mut crate::keyboard::decode::Decoder,
@@ -1614,7 +1614,7 @@ pub fn unsupported_key_count() -> u64 {
 ///
 /// # シリアルへは 1 文字ずつ出さない
 ///
-/// シリアルへ 1 文字ずつ流すには `Logger` の内側の `SerialPort` を直接
+/// シリアルへ 1 文字ずつ流すには `Logger` の内側の `Serial` を直接
 /// 触る必要がある。そのためのアクセサを `Logger` に足すと、レベル判定と
 /// 接頭辞の書式を迂回する経路を全利用者に開くことになる。ADR-0017
 /// Addendum の反省（守るべき制約と、たまたま採った手段を混同しない）に

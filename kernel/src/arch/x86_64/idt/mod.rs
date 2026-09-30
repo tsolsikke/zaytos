@@ -43,7 +43,7 @@ use core::ptr::addr_of;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use common::arch::x86_64::cpu;
-use common::machine::pc::serial::SerialPort;
+use common::machine::pc::serial::Serial;
 use common::percpu::{PerCpu, MAX_CPUS};
 
 use crate::arch::x86_64::gdt::KERNEL_CODE_SELECTOR;
@@ -870,7 +870,7 @@ fn report_concurrent_entry_once(depth: u64) {
     if CONCURRENT_ENTRY_REPORTED.swap(true, Ordering::Relaxed) {
         return;
     }
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
     let _ = writeln!(
         serial,
@@ -1113,7 +1113,7 @@ pub(crate) fn check_stack_alignment(rsp_at_call: u64, path: &str, vector: u64) {
     if rsp_at_call % 16 == 0 {
         return;
     }
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
     use core::fmt::Write;
     let _ = writeln!(
@@ -1190,7 +1190,7 @@ pub(crate) fn check_direction_flag(path: EntryPath, vector: u64, interrupted_rfl
     }
     // SAFETY: `cld` は RFLAGS.DF を 0 にするだけで、メモリにもスタックにも触れない。
     unsafe { core::arch::asm!("cld", options(nomem, nostack)) };
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
     let _ = writeln!(
         serial,
@@ -2231,7 +2231,7 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
     let (vector, rflags) = unsafe { ((*context).vector, (*context).rflags) };
     check_direction_flag(EntryPath::Exception, vector, rflags);
 
-    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    let mut serial = Serial::primary();
     serial.init();
 
     use core::fmt::Write;
@@ -2379,7 +2379,7 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
 }
 
 /// エラーコードをベクタに応じて解釈して出す。
-fn dump_error_code(serial: &mut SerialPort, vector: u8, error_code: u64) {
+fn dump_error_code(serial: &mut Serial, vector: u8, error_code: u64) {
     use core::fmt::Write;
 
     match error_code_kind(vector) {
