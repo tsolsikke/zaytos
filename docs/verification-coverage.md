@@ -1033,12 +1033,12 @@ python3 tools/judgement-map.py /tmp/full.txt
 | `task-preempt-in-critical` | InterruptGuard の cli を落とし防御スキップも外す | Locked 保持中の timer プリエンプトで二重取得検出が発火すること |
 | `ring3-test-user-desc-dpl0` | ucode64 の DPL を 0 にする（M5-e-1 の DPL 読み戻しアサートも cfg で外す） | 遠征の iretq 自身が #GP になり Ring 3 に落ちないこと（フォルト元 Ring 0 なので終了させられず halt） |
 | `ring3-test-user-page-supervisor` | ユーザーページの USER を落とす（U=0） | 遠征前の両側 U/S 監査が user violation として検出して止まること |
-| `ring3-test-drop-rsp0` | 遠征の RSP0 据え付け（`ring3::enter` の set_rsp0）を落とす | #GP がメインのスタックで走り、handler_in_excursion が false になって止まること。**この検出は「踏み潰しが `verify_ring3_excursion` のフレームに届かない」という配置依存で成立する。将来スタック深さやフレーム配置が変わると成立が崩れうる。** M5-d の `task-switch-drop-rsp0`（schedule_switch 側）とは別物 |
+| `ring3-test-drop-rsp0` | 遠征の RSP0 据え付け（`ring3::run_excursion` の set_rsp0）を落とす | #GP がメインのスタックで走り、handler_in_excursion が false になって止まること。**この検出は「踏み潰しが `verify_ring3_excursion` のフレームに届かない」という配置依存で成立する。将来スタック深さやフレーム配置が変わると成立が崩れうる。** M5-d の `task-switch-drop-rsp0`（schedule_switch 側）とは別物 |
 | `ring3-test-no-fold-flag` | 遠征フラグ（EXCURSION_ACTIVE）を立てない | 終了処理の条件3が欠け、cli の #GP が終了処理されず dump+halt すること（終了処理が「立っていないのに畳む」ことがない実証） |
 | `syscall-test-arg4-rcx` | 第 4 引数を `context.r10` でなく `context.rcx` から読む | probe が記録した第 4 引数が期待値と食い違い、`argument register mismatch` で止まること（第 4 引数が R10 である規約の実証） |
 | `syscall-test-gate-dpl0` | syscall ゲート（0x80）の DPL を 0 にする（起動時 DPL 検査の期待値も同じ定数から 0 になるので検査は通る） | Ring 3 からの int 0x80 がゲート DPL<CPL で #GP になり `syscall_entry` に到達しないこと（`exception: vector=13` + halting。DPL=3 が Ring 3 から呼べる唯一の条件であることの実証） |
 | `syscall-test-drop-retval` | 戻り値の `context.rax` 書き戻しを落とす | ユーザーが store した値が `PROBE_RETURN` と食い違い、`return value mismatch` で止まること（戻り値が RAX 経由でユーザーへ返ることの実証） |
-| `syscall-test-validate-skip-us` | ユーザーポインタ検証の U=1 判定を外す | 無効3（supervisor in user range）が受理され、battery が `pointer validation battery failed` で止まること（U 判定の隔離実証。`walk_user_accessible` を新設した中核） |
+| `syscall-test-validate-skip-us` | ユーザーポインタ検証の U=1 判定を外す | 無効3（supervisor in user range）が受理され、battery が `pointer validation battery failed` で止まること（U 判定の隔離実証。`walk_page_table_user_accessible` を新設した中核） |
 | `syscall-test-validate-skip-laststep` | ページ走査を先頭ページだけで打ち切る | 無効4（straddle）の末尾無効を取り逃して受理され、battery が止まること（全ページ走査の隔離実証） |
 | `syscall-test-validate-skip-all` | 検証器を常に受理にする | 最初の拒否ケース（kernel pointer）が受理され、battery が止まること（検証器全体の機能停止を battery が検出する、最後の砦の実証） |
 | `syscall-test-copy-skip-validate` | `copy_from_user` が検証を経ず `UserSlice` をモジュール内で直接構築して読む | カーネルポインタで `-EFAULT` のはずが総和が返り、内容往復の検証が `checksum case 'kernel pointer' expected reject` で止まること（copy が検証を尊重することの実証） |
