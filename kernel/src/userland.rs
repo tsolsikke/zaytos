@@ -114,13 +114,13 @@ pub use common::env::{ENV_LINE_MAX, MAX_ENVP};
     not(feature = "env-drop-term-test"),
     not(feature = "env-drop-path-test")
 ))]
-const DEFAULT_ENVIRONMENT: &[&[u8]] = &[b"TERM=zaytos", b"PATH=/bin", b"HOME=/root"];
+const DEFAULT_ENVIRONMENT: &[&[u8]] = &[b"TERM=zeikos", b"PATH=/bin", b"HOME=/root"];
 
 #[cfg(all(feature = "env-drop-term-test", not(feature = "env-drop-path-test")))]
 const DEFAULT_ENVIRONMENT: &[&[u8]] = &[b"PATH=/bin", b"HOME=/root"];
 
 #[cfg(all(not(feature = "env-drop-term-test"), feature = "env-drop-path-test"))]
-const DEFAULT_ENVIRONMENT: &[&[u8]] = &[b"TERM=zaytos", b"HOME=/root"];
+const DEFAULT_ENVIRONMENT: &[&[u8]] = &[b"TERM=zeikos", b"HOME=/root"];
 
 #[cfg(all(feature = "env-drop-term-test", feature = "env-drop-path-test"))]
 const DEFAULT_ENVIRONMENT: &[&[u8]] = &[b"HOME=/root"];

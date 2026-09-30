@@ -479,7 +479,7 @@ extern "sysv64" fn kernel_main() -> ! {
     serial.init();
     let mut logger = Logger::new(serial, LogLevel::Trace);
 
-    logger.info(format_args!("ZaytOS kernel: entered _start"));
+    logger.info(format_args!("ZeikOS kernel: entered _start"));
 
     // **どの像が走ったかを、起動ログの先頭で示す（S12 前の手当て）。**
     //
@@ -1690,7 +1690,7 @@ extern "sysv64" fn kernel_main() -> ! {
     );
     drop(b);
 
-    let mut s = String::from("ZaytOS heap");
+    let mut s = String::from("ZeikOS heap");
     s.push_str(" is alive");
     let s_ptr = s.as_ptr() as u64;
     let s_len = s.len() as u64;
@@ -2977,7 +2977,7 @@ fn draw_startup_text(framebuffer: &mut Framebuffer, background: Color) {
     const ACCENT: Color = Color::rgb(0x66, 0xD0, 0xFF);
 
     let lines: [(&str, Color); 6] = [
-        ("ZaytOS", ACCENT),
+        ("ZeikOS", ACCENT),
         (" !\"#$%&'()*+,-./0123456789:;<=>?", FOREGROUND),
         ("@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_", FOREGROUND),
         ("`abcdefghijklmnopqrstuvwxyz{|}~", FOREGROUND),
@@ -3426,7 +3426,7 @@ fn announce_console_start(logger: &mut Logger<Serial>, console: &mut Console) {
     // コンソール構築までに出力した行数。これが画面に出ていない分。
     let skipped = logger.emitted_line_count();
 
-    let _ = writeln!(console, "=== ZaytOS console started ===");
+    let _ = writeln!(console, "=== ZeikOS console started ===");
     let _ = writeln!(
         console,
         "the {skipped} log line(s) above this point went to the serial port only"
@@ -8454,7 +8454,7 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
     (31, "argv[0] was not \"syscall-test\""),
     (32, "argv[1] was not \"alpha\""),
     (33, "the argv terminator was not NULL"),
-    (34, "envp[0] was not \"TERM=zaytos\""),
+    (34, "envp[0] was NULL"),
     (35, "the auxv terminator (AT_NULL) was missing"),
     (36, "spawn(\"/bin/hello\") did not return 0"),
     (37, "spawn(\"/nope\") did not return -ENOENT"),

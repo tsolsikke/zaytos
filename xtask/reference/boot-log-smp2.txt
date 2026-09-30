@@ -1,6 +1,6 @@
-[INFO] ZaytOS bootloader: serial log established (COM1)
-Hello, ZaytOS!
-[INFO] printed "Hello, ZaytOS!" to UEFI console
+[INFO] ZeikOS bootloader: serial log established (COM1)
+Hello, ZeikOS!
+[INFO] printed "Hello, ZeikOS!" to UEFI console
 [INFO] ELF parsed: entry point = 0xffffffff80100000
 [INFO] kernel segments placed and .bss zeroed (0x100000..0x4c3000)
 [INFO] kernel entry: VMA 0xffffffff80100000 -> load address 0x100000 (delta 0xffffffff80000000)
@@ -9,7 +9,7 @@ Hello, ZaytOS!
 [INFO] ExitBootServices: about to exit boot services
 [INFO] ExitBootServices: done
 [INFO] jumping to kernel entry point 0x100000
-[INFO] ZaytOS kernel: entered _start
+[INFO] ZeikOS kernel: entered _start
 [INFO] build: 2 cargo feature(s) enabled: default,heap-poison
 [INFO] cpu-state: the kernel set the CR0 bits it needs on the BSP (WP and NE set, CD and NW clear): CR0 0x80010033 -> 0x80010033 [read back]
 [INFO] fp: SSE is enabled on the bootstrap processor: CR0=0x80010033 (MP=true, EM=false),              CR4=0x668 (OSFXSR=true, OSXMMEXCPT=true), as intended = true [read back from the registers]
@@ -272,7 +272,7 @@ Hello, ZaytOS!
 [INFO] lock: interrupts are disabled while the guard is held and restored afterwards
 [INFO] heap smoke test: Vec<u32> len=10 ptr=0xffff8000004c3090 mapped=true
 [INFO] heap smoke test: Box<u32> value=0x12345678 ptr=0xffff8000004c3020 mapped=true
-[INFO] heap smoke test: String="ZaytOS heap is alive" ptr=0xffff8000004c3050 mapped=true
+[INFO] heap smoke test: String="ZeikOS heap is alive" ptr=0xffff8000004c3050 mapped=true
 [INFO] heap: after smoke test, 1048576 bytes free, 1 block(s)
 [INFO] console: 12 flush(es), 4741696 bytes transferred
 [INFO] console: full-screen equivalent would be 49152000 bytes (9% actually sent)
@@ -315,11 +315,11 @@ task: cooperative switch verified
 [INFO] ext2: root inode 2: mode=040755 size=4096 links=9 i_block[0]=20 directory=true
 [INFO] ext2: root directory block 0 of 1: 4096 byte(s) via the direct blocks
 [INFO] ext2: root directory: 9 entr(y/ies): . .. lost+found bin data etc lib root tmp
-[INFO] ext2: resolved /etc/motd to inode 59: 18 byte(s) = "welcome to ZaytOS" (trailing newline trimmed for this line only); matches the seed file byte for byte: true
+[INFO] ext2: resolved /etc/motd to inode 59: 18 byte(s) = "welcome to ZeikOS" (trailing newline trimmed for this line only); matches the seed file byte for byte: true
 [INFO] ext2: /data/direct-max inode=50 size=49152 blocks=12 single indirect=0 last byte=0xce (expected 0xce)
 [INFO] ext2: /data/indirect-first inode=51 size=49153 blocks=13 single indirect=201 last byte=0xcf (expected 0xcf)
 [INFO] fs-image-source: root_filesystem reads from virt 0xffff800001c00000 (phys 0x1c00000)
-[INFO] fs-image-copy: copied 2097152 byte(s) to phys 0x1c00000..0x1e00000 (512 frame(s), 2MiB-aligned=true), checksum=0x5a8e7348; the kernel image is 0x100000..0x4c2990
+[INFO] fs-image-copy: copied 2097152 byte(s) to phys 0x1c00000..0x1e00000 (512 frame(s), 2MiB-aligned=true), checksum=0x55bbeec2; the kernel image is 0x100000..0x4c2990
 [INFO] fs-sparse: /data/sparse-hole reads block 1 as a full block of zeros = true (the blocks around it have content: head=true tail=true); i_size=12288 i_blocks_512=16
 [INFO] fs-bitmap: allocated one block (number 302); free counts are now blocks=209 group0=209
 [INFO] fs-write: append 1 wrote 200 byte(s) to inode 56; free blocks are now 209
@@ -469,7 +469,7 @@ tmp
 [INFO] user-load: /bin/cat PT_LOAD segments: declared=3 mapped=3 (they must match; a gap means a segment was skipped), pages shared with the previous segment=0
 [INFO] user-load: mapped the user stack 0x7ff000..0x800000 (w=true)
 [INFO] user-load: /bin/cat initial stack at 0x7fffb0 (argc=2, envc=0, 16-byte aligned=true,          initial data 80 of 4096 byte(s))
-welcome to ZaytOS
+welcome to ZeikOS
 [INFO] user-stack: /bin/cat used 376 of 4096 byte(s) (9%), over half=false          (the initial argv/envp table is counted in; ADR-0041 says to decide about growing          the stack when this goes over half)
 [INFO] ring3: /bin/cat used 7296 of 65536 byte(s) of the depth-1 excursion stack (11%), the canary at its bottom is intact=true
 [INFO] vfs: /bin/cat opened 1 file(s) in total and left Ring 3 with 0 still open (MAX_OPEN_FILES=16); it was handed 0 byte(s) of input
@@ -582,4 +582,4 @@ bss-test: the .bss reads as zero, keeps writes, and shares a page with .data
 [INFO] user-load: /bin/zash initial stack at 0x7fff80 (argc=1, envc=3, 16-byte aligned=true,          initial data 128 of 4096 byte(s))
 [INFO] stack-water: before entering /bin/zash in Ring 3, the kernel stack used 71352 of 131072 byte(s); 59720 left
 zash: ready
-[38;2;0;200;0mzaytos[0m$ 
+[38;2;0;200;0mzeikos[0m$ 

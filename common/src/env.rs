@@ -114,7 +114,7 @@ mod tests {
     /// 何でも採る形が通る。**
     #[test]
     fn an_environment_line_is_taken_ignored_or_rejected() {
-        assert_eq!(classify_env_line(b"TERM=zaytos"), EnvLine::Take);
+        assert_eq!(classify_env_line(b"TERM=zeikos"), EnvLine::Take);
         assert_eq!(classify_env_line(b"_X=1"), EnvLine::Take);
         // **値は空でもよい。** `NAME=` は「空の値」である。
         assert_eq!(classify_env_line(b"EMPTY="), EnvLine::Take);
@@ -157,8 +157,8 @@ mod tests {
     /// **`\r` を落とすのは、イメージを外の道具で編集する道が在るためである。**
     #[test]
     fn an_environment_line_is_trimmed_on_both_sides() {
-        assert_eq!(trim_env_line(b"  TERM=zaytos  "), b"TERM=zaytos");
-        assert_eq!(trim_env_line(b"TERM=zaytos\r"), b"TERM=zaytos");
+        assert_eq!(trim_env_line(b"  TERM=zeikos  "), b"TERM=zeikos");
+        assert_eq!(trim_env_line(b"TERM=zeikos\r"), b"TERM=zeikos");
         assert_eq!(trim_env_line(b"\tA=1 \r"), b"A=1");
         // **値の中の空白は落とさない。** 端だけである。
         assert_eq!(trim_env_line(b"A=b c"), b"A=b c");
@@ -317,7 +317,7 @@ mod table_tests {
     #[test]
     fn setting_the_same_name_twice_overwrites_and_keeps_the_slot() {
         let mut table = EnvTable::new();
-        table.set(b"TERM=zaytos").unwrap();
+        table.set(b"TERM=zeikos").unwrap();
         assert_eq!(table.count(), 1);
         table.set(b"TERM=dumb").unwrap();
         assert_eq!(table.count(), 1);
@@ -368,8 +368,8 @@ mod table_tests {
         let mut table = EnvTable::new();
         table.set(b"TERMINFO=/usr").unwrap();
         assert_eq!(table.value(b"TERM"), None);
-        table.set(b"TERM=zaytos").unwrap();
-        assert_eq!(table.value(b"TERM"), Some(&b"zaytos"[..]));
+        table.set(b"TERM=zeikos").unwrap();
+        assert_eq!(table.value(b"TERM"), Some(&b"zeikos"[..]));
         // **空の値も引ける**（`NAME=` は「空の値」である）。
         table.set(b"EMPTY=").unwrap();
         assert_eq!(table.value(b"EMPTY"), Some(&b""[..]));

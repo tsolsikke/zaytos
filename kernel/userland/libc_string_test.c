@@ -32,7 +32,7 @@ static void check(int ok, const char *what) {
 
 int main(void) {
     check(zt_strlen("") == 0, "strlen of the empty string is 0");
-    check(zt_strlen("zaytos") == 6, "strlen counts bytes");
+    check(zt_strlen("zeikos") == 6, "strlen counts bytes");
 
     check(zt_strcmp("a", "a") == 0, "strcmp says equal");
     check(zt_strcmp("a", "b") < 0, "strcmp orders a before b");
@@ -42,9 +42,9 @@ int main(void) {
     check(zt_strcmp("\x80", "\x01") > 0, "strcmp compares as unsigned");
 
     char buffer[16];
-    char *returned = zt_strcpy(buffer, "zaytos");
+    char *returned = zt_strcpy(buffer, "zeikos");
     check(returned == buffer, "strcpy returns its destination");
-    check(strcmp(buffer, "zaytos") == 0, "strcpy copies the terminator too");
+    check(strcmp(buffer, "zeikos") == 0, "strcpy copies the terminator too");
 
     zt_memset(buffer, 'x', 4);
     check(buffer[0] == 'x' && buffer[3] == 'x', "memset fills");

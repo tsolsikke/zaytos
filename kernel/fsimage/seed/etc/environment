@@ -1,6 +1,6 @@
 # The environment source (ADR-0052). One NAME=VALUE per line.
 # Blank lines and lines starting with # are ignored. A broken line is
 # dropped on its own. ASCII only: the console font holds nothing else.
-TERM=zaytos
+TERM=zeikos
 PATH=/bin
 HOME=/root

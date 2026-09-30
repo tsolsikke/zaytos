@@ -853,10 +853,10 @@ fn build_fs_image(manifest_dir: &str, out_dir: &str) {
         .status()
         .unwrap_or_else(|e| {
             panic!(
-                "failed to run mke2fs: {e}. ZaytOS builds the ext2 test image with mke2fs \
+                "failed to run mke2fs: {e}. ZeikOS builds the ext2 test image with mke2fs \
                  (e2fsprogs); install it (for example `apt install e2fsprogs`). It is needed \
                  because roadmap S10 requires reading an image made by an outside tool, and \
-                 S12 will verify ZaytOS's writes with e2fsck from the same package."
+                 S12 will verify ZeikOS's writes with e2fsck from the same package."
             )
         });
     assert!(status.success(), "mke2fs failed for the ext2 test image");
@@ -963,7 +963,7 @@ fn stat_of(image: &str, path: &str) -> ImageStat {
         .args(["-R", &format!("stat {path}"), image])
         .output()
         .unwrap_or_else(|e| {
-            panic!("failed to run debugfs for {path}: {e}. ZaytOS measures the image numbers with debugfs (e2fsprogs)")
+            panic!("failed to run debugfs for {path}: {e}. ZeikOS measures the image numbers with debugfs (e2fsprogs)")
         });
     let text = String::from_utf8_lossy(&output.stdout);
     let mut stat = ImageStat {

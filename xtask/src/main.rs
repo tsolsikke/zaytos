@@ -1433,7 +1433,7 @@ const HIGHHALF_TESTS: &[HighhalfTest] = &[
         name: "no-identity-in-boot-pt",
         feature: "highhalf-no-identity-in-boot-pt",
         present_markers: &["kernel entry: VMA"],
-        absent_markers: &["ZaytOS kernel: entered _start"],
+        absent_markers: &["ZeikOS kernel: entered _start"],
     },
     // (b) PDPT_high のエントリを 510→509 へずらす。高位 _start への jmp 先が未マップで
     // #PF。署名は (a) と同じ。
@@ -1441,7 +1441,7 @@ const HIGHHALF_TESTS: &[HighhalfTest] = &[
         name: "bad-high-slot",
         feature: "highhalf-bad-high-slot",
         present_markers: &["kernel entry: VMA"],
-        absent_markers: &["ZaytOS kernel: entered _start"],
+        absent_markers: &["ZeikOS kernel: entered _start"],
     },
     // (c) 本流テーブルからカーネル高位マッピングを外す。高位到達し、切替前の必須マッピング
     // 検証も通過（それは物理範囲を見るので高位マッピングの欠落を検出しない。実測で確定）した
@@ -1506,7 +1506,7 @@ const HIGHHALF_TESTS: &[HighhalfTest] = &[
             "stack alignment: _start was entered with a stack that breaks the SysV ABI",
             "halting (cli + hlt loop)",
         ],
-        absent_markers: &["ZaytOS kernel: entered _start"],
+        absent_markers: &["ZeikOS kernel: entered _start"],
     },
 ];
 
@@ -1556,7 +1556,7 @@ fn trampoline_bytes(kernel_elf: &Path) -> Result<[u8; 24]> {
 ///
 /// kernel の `kernel_main` が最初に出す行（`common::log` の INFO 形式）。
 /// これがログに無ければ、カーネルは走っていない。
-const KERNEL_STARTED_MARKER: &str = "[INFO] ZaytOS kernel: entered _start";
+const KERNEL_STARTED_MARKER: &str = "[INFO] ZeikOS kernel: entered _start";
 
 /// カーネルが**起動しきった**ことを示す行。
 ///
@@ -1575,7 +1575,7 @@ const KERNEL_BOOT_COMPLETE_MARKER: &str = "timer: first tick arrived as vector 0
 ///
 /// panic-test は bootloader を検証するもので、kernel へ到達する前に panic
 /// する。したがって kernel の marker ではなくこちらで起動を判定する。
-const BOOTLOADER_STARTED_MARKER: &str = "[INFO] ZaytOS bootloader: serial log established";
+const BOOTLOADER_STARTED_MARKER: &str = "[INFO] ZeikOS bootloader: serial log established";
 
 /// OVMF がまれにカーネルを起動せず、シェルやアイドルループへフォールバック
 /// することがある（`docs/troubleshooting.md` 2026-07-19 の記録）。この場合
@@ -7680,7 +7680,7 @@ fn cmd_pipe_test(features: &[&str], expect_pass: bool) -> Result<()> {
             .split("/bin/cat /data/big | /bin/cat")
             .nth(1)
             .unwrap_or("")
-            .split("zaytos$")
+            .split("zeikos$")
             .next()
             .unwrap_or(""),
     ));
@@ -13212,7 +13212,7 @@ fn program_output(segment: &str) -> String {
     segment
         .lines()
         .map(|line| line.trim_end_matches('\r'))
-        .filter(|line| !line.starts_with('[') && !line.contains("zaytos$") && !line.is_empty())
+        .filter(|line| !line.starts_with('[') && !line.contains("zeikos$") && !line.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -13623,9 +13623,9 @@ fn cmd_view_test(features: &[&str]) -> Result<()> {
 /// # なぜ要るのか
 ///
 /// **ES-d でプロンプトに色が付いた**ので、`write` が出すバイト列は
-/// `\x1b[38;2;200;0;200mzaytos$ \x1b[0m` である。**シリアルはそれをそのまま
+/// `\x1b[38;2;200;0;200mzeikos$ \x1b[0m` である。**シリアルはそれをそのまま
 /// 記録する**（`sys_write` はバイトをコピーするだけである）ので、
-/// **`"zaytos$ /bin/ls"` のような「プロンプトの直後に打った語が続く」
+/// **`"zeikos$ /bin/ls"` のような「プロンプトの直後に打った語が続く」
 /// 目印が、色の列に割られて当たらなくなる。**
 ///
 /// # 隠したものを誰が見ているか
@@ -14557,7 +14557,7 @@ fn judge_shell_session(
 
     println!("--- {context}: relevant output ---");
     for line in serial.lines().filter(|l| {
-        l.contains("init:") || l.contains("sh:") || l.contains("zaytos$") || l.contains("spawn:")
+        l.contains("init:") || l.contains("sh:") || l.contains("zeikos$") || l.contains("spawn:")
     }) {
         println!("{line}");
     }
@@ -14603,10 +14603,10 @@ fn judge_shell_session(
     // （[`strip_ansi`] の doc に、隠したものを誰が見ているかを書いてある）。
     let after_shell_plain = strip_ansi(after_shell);
     let after_shell_plain = after_shell_plain.as_str();
-    let echoed = after_shell_plain.contains("zaytos$ /bin/ls");
+    let echoed = after_shell_plain.contains("zeikos$ /bin/ls");
     // **到達条件の 3 つ。** 出力そのものがシリアルに現れる。
     let ran_ls = after_shell.contains("lost+found");
-    let ran_cat = after_shell.contains("welcome to ZaytOS");
+    let ran_cat = after_shell.contains("welcome to ZeikOS");
     let ran_hello = after_shell.contains("hello from ring 3");
     // **C で書いたプログラムが走ったこと（C-a。`ADR-0057`）。**
     //
@@ -14633,8 +14633,8 @@ fn judge_shell_session(
     //
     // **出力そのもの（`lost+found` など）では区別できない**——
     // **`/bin/` を付けた側が同じものを出す。** 上の 3 判定と同じ理由である。
-    let typed_bare_ls = after_shell_plain.contains("zaytos$ ls\n");
-    let typed_bare_cat = after_shell_plain.contains("zaytos$ cat /etc/motd\n");
+    let typed_bare_ls = after_shell_plain.contains("zeikos$ ls\n");
+    let typed_bare_cat = after_shell_plain.contains("zeikos$ cat /etc/motd\n");
     // **「1 つも `cannot run` が出ていない」では見られなくなった（S12 前の手当て）。**
     // **行編集の判定が、わざと走らない語（`abx`）を打つためである。**
     // **名前を挙げて見る形へ狭めた**——ここが主張したいのは
@@ -14950,7 +14950,7 @@ fn judge_shell_session(
     // **判定 2**——**`set` が表を並べること。**
     // **`ZF2` だけを見ない**——**出どころから来た 3 本も出ていることを同時に見る。**
     // **US の回は `ZF2` が入らない**ので、そちら側を見る。
-    let set_listed_the_source = after_shell.contains("\nTERM=zaytos\n")
+    let set_listed_the_source = after_shell.contains("\nTERM=zeikos\n")
         && after_shell.contains("\nPATH=/bin\n")
         && after_shell.contains("\nHOME=/root\n");
     let set_listed_the_table = set_listed_the_source
@@ -14980,7 +14980,7 @@ fn judge_shell_session(
         !after_shell.contains("zash: hello: cannot run") && hello_runs == 3
     };
 
-    let typed_echo_path = after_shell_plain.contains("zaytos$ echo $PATH\n");
+    let typed_echo_path = after_shell_plain.contains("zeikos$ echo $PATH\n");
     let expanded_a_value = typed_echo_path && after_shell.contains("\n/bin\n");
     // **丸ごと空になった語が落ちたこと。** **空白の数を見る。**
     // **`argc` の並びも同時に見る**——**空白は `echo` の書き方に依るが、
@@ -14992,7 +14992,7 @@ fn judge_shell_session(
     let expanded_to_nothing = echo_argc("echo $UNSET") == Some(1);
     // **`$` の直後以外の字が壊れないこと。**
     let expanded_inside_a_word =
-        after_shell.contains("\nazaytos b\n") && echo_argcs.get(3) == Some(&3);
+        after_shell.contains("\nazeikos b\n") && echo_argcs.get(3) == Some(&3);
 
     // **履歴を矢印で辿れること（SE-c）。**
     //
@@ -17601,7 +17601,7 @@ fn cmd_persist_zi_test(rebuild_between: bool) -> Result<()> {
 /// # 破壊テスト
 ///
 /// **`rebuild_between` を立てると、2 度目の前にイメージを作り直す。**
-/// **2 度目は種のままの `TERM=zaytos` を読むので、3 層目が落ちる。**
+/// **2 度目は種のままの `TERM=zeikos` を読むので、3 層目が落ちる。**
 fn cmd_persist_env_test(rebuild_between: bool, ignore_file: bool) -> Result<()> {
     let workspace_root = workspace_root()?;
     let context = if rebuild_between {
@@ -17636,7 +17636,7 @@ fn cmd_persist_env_test(rebuild_between: bool, ignore_file: bool) -> Result<()> 
         .as_ref()
         .map(|bytes| {
             let text = String::from_utf8_lossy(bytes);
-            text.lines().any(|line| line.trim_end() == "TERM=zaytosX")
+            text.lines().any(|line| line.trim_end() == "TERM=zeikosX")
         })
         .unwrap_or(false);
     println!(
@@ -18657,7 +18657,7 @@ const SHELL_READY_MARKER: &str = "zash: ready";
 /// **起動ログを取り終える条件のもう片方である**（5.a。2026-09-25）。**プロンプトは改行で終わらない**
 /// ——**行としては取り出せないので、`zash: ready` の後ろに在るかで見る**（[`shell_prompt_follows_ready`]）。
 /// **参照の最後の行もこれで終わる**（基本の検査の項目が見る）。
-const SHELL_PROMPT_TAIL: &str = "zaytos\x1b[0m$ ";
+const SHELL_PROMPT_TAIL: &str = "zeikos\x1b[0m$ ";
 
 /// プロンプトの後に「新しい行が出ないこと」を見る長さ（5.a の (b)。2026-09-25。運用者の決定）。
 ///
@@ -32353,7 +32353,7 @@ mod tests {
     /// **`zash: ready` だけでは止めない**——**プロンプトの行が参照の最後の行である。**
     #[test]
     fn the_capture_stops_only_when_the_prompt_follows_ready() {
-        let prompt = "\x1b[38;2;0;200;0mzaytos\x1b[0m$ ";
+        let prompt = "\x1b[38;2;0;200;0mzeikos\x1b[0m$ ";
         assert!(!shell_prompt_follows_ready("[INFO] boot\nzash: ready\n"));
         assert!(shell_prompt_follows_ready(&format!(
             "[INFO] boot\nzash: ready\n{prompt}"
@@ -32817,7 +32817,7 @@ mod tests {
     /// プロンプトの後に行が続く参照。
     #[test]
     fn a_boot_log_reference_that_does_not_end_at_the_prompt_is_refused() {
-        let prompt = "\x1b[38;2;0;200;0mzaytos\x1b[0m$ ";
+        let prompt = "\x1b[38;2;0;200;0mzeikos\x1b[0m$ ";
         let good = format!("[INFO] boot\nzash: ready\n{prompt}\n");
         assert!(boot_log_reference_ends_at_prompt(&good).is_ok());
         assert!(boot_log_reference_ends_at_prompt("[INFO] boot\n[INFO] cut here\n").is_err());
@@ -34463,7 +34463,7 @@ fn read_cr3() -> u64 {
 
     #[test]
     fn only_prompts_after_a_newline_are_counted() {
-        let prompt = "\x1b[38;2;0;200;0mzaytos\x1b[0m$ ";
+        let prompt = "\x1b[38;2;0;200;0mzeikos\x1b[0m$ ";
         let serial =
             format!("zash: ready\n{prompt}ls\nbin etc\n{prompt}ll\x1b[2J\x1b[H{prompt}\n{prompt}");
         // **Ctrl+L の描き直しは数えない**（画面を消す制御の直後）。

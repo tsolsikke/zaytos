@@ -381,7 +381,7 @@ core::arch::global_asm!(
     //
     // **したがって、ここはカーネルが保証するものだけを見る**——
     // **`envp[0]` が在ること。** **値の突き合わせはホスト側へ移した**
-    // （`--shell-test` の `echo a$TERM b` が `azaytos b` を出すこと。
+    // （`--shell-test` の `echo a$TERM b` が `azeikos b` を出すこと。
     // **あちらは出どころがファイルでも定数でも、値そのものを見る**）。
     "  cmp qword ptr [rsp + 32], 0",
     "  mov edi, 34",
@@ -1421,7 +1421,7 @@ core::arch::global_asm!(
     "MOTD_BYTES:",
     "  .ascii \"welco\"",
     "MOTD_REST:",
-    "  .ascii \"me to ZaytOS\\n\"",
+    "  .ascii \"me to ZeikOS\\n\"",
     // **64 バイトを越える 1 本。** 記録用の緩衝より長いことが主張である。
     "LONG_MESSAGE:",
     "  .ascii \"syscall-test is writing a line that does not fit the 64-byte record\\n\"",

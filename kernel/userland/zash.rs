@@ -94,7 +94,7 @@ use userlib::{
 const LINE_MAX: usize = 128;
 
 /// プロンプトの名前の部分。**色が付く側である。**
-const PROMPT_NAME: &[u8] = b"zaytos";
+const PROMPT_NAME: &[u8] = b"zeikos";
 /// プロンプトの記号と区切り。**色を付けない側である。**
 ///
 /// # 記号は `$` のままである
@@ -104,8 +104,8 @@ const PROMPT_NAME: &[u8] = b"zaytos";
 const PROMPT_SYMBOL: &[u8] = b"$ ";
 /// プロンプト（名前 + 記号）。**判定行や目印が見る文字列はこの並びである。**
 ///
-/// **色を挟んでも、シリアルの上の並びは変わらない**（`zaytos$ `）。
-const PROMPT: &[u8] = b"zaytos$ ";
+/// **色を挟んでも、シリアルの上の並びは変わらない**（`zeikos$ `）。
+const PROMPT: &[u8] = b"zeikos$ ";
 /// 名前の部分の色。**SGR の truecolor で前景を指定する。**
 ///
 /// # 色は判定から選んだ
@@ -496,7 +496,7 @@ const BACKSPACES: [u8; LINE_MAX] = [BACKSPACE; LINE_MAX];
 /// **判定は入力待ちの時点で見るので、そこでは差が出ない**——それでも、
 /// **人が見る側で点滅させる理由が無い。**
 /// `TERM` がこの値なら色を付ける（EV。ADR-0041）。
-const TERM_WITH_COLOR: &[u8] = b"zaytos";
+const TERM_WITH_COLOR: &[u8] = b"zeikos";
 
 /// `TERM` を引く名前。
 const TERM_NAME: &[u8] = b"TERM";
@@ -721,7 +721,7 @@ unsafe fn spawn_via_path(
 ///
 /// # 突き合わせは NUL まで見る
 ///
-/// **前方一致で決めない**——`zaytos2` を `zaytos` として扱わない。
+/// **前方一致で決めない**——`zeikos2` を `zeikos` として扱わない。
 fn prompt_is_colored() -> bool {
     environment_value(TERM_NAME) == Some(TERM_WITH_COLOR)
 }

@@ -19,11 +19,11 @@ fn efi_main() -> Status {
     let mut logger = Logger::new(serial, LogLevel::Trace);
 
     logger.info(format_args!(
-        "ZaytOS bootloader: serial log established (COM1)"
+        "ZeikOS bootloader: serial log established (COM1)"
     ));
 
-    println!("Hello, ZaytOS!");
-    logger.info(format_args!("printed \"Hello, ZaytOS!\" to UEFI console"));
+    println!("Hello, ZeikOS!");
+    logger.info(format_args!("printed \"Hello, ZeikOS!\" to UEFI console"));
 
     // `cargo xtask run --panic-test` によるパニックハンドラの回帰チェック用。
     // 通常ビルドではこの分岐は含まれず、fail-fast 方針 (ADR-0004) に影響しない。

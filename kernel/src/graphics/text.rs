@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn the_width_of_ascii_is_eight_pixels_per_character() {
         assert_eq!(text_width_pixels("A"), 8);
-        assert_eq!(text_width_pixels("ZaytOS"), 6 * 8);
+        assert_eq!(text_width_pixels("ZeikOS"), 6 * 8);
     }
 
     #[test]
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn the_measured_width_matches_the_sum_of_the_glyph_widths() {
-        let text = "ZaytOS 0.1";
+        let text = "ZeikOS 0.1";
         let expected: u32 = text.chars().map(|c| font::glyph(c).width_pixels()).sum();
         assert_eq!(text_width_pixels(text), expected);
     }

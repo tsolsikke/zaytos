@@ -2493,7 +2493,7 @@ mod tests {
     const SHORT_FILE_INODE: u32 = 18;
     const SHORT_FILE_BLOCK: u32 = 58;
     /// その中身。**長さは実測したイメージの `motd` と同じ 18 バイトである。**
-    const SHORT_FILE_CONTENT: &[u8] = b"welcome to ZaytOS\n";
+    const SHORT_FILE_CONTENT: &[u8] = b"welcome to ZeikOS\n";
     /// ルート直下のディレクトリと `/bin/hello`（実測したイメージと同じ番号）。
     const LOST_FOUND_INODE: u32 = 11;
     const BIN_INODE: u32 = 12;

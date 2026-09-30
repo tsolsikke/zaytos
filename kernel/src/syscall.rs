@@ -222,7 +222,7 @@ fn screen_var_info(width: u32, height: u32, bgr: bool) -> FbVarScreeninfo {
 /// **欄の位置へ書くのは abi の `fb_fix_screeninfo_bytes` である**（`ADR-0071` の決定 1 の 2 で分けた。2026-09-30）。
 fn screen_fix_info(size_bytes: u32, line_length: u32) -> FbFixScreeninfo {
     let mut id = [0u8; 16];
-    let name = b"zaytos-fb";
+    let name = b"zeikos-fb";
     id[..name.len()].copy_from_slice(name);
     FbFixScreeninfo {
         id,
@@ -5360,7 +5360,7 @@ mod tests {
     #[test]
     fn the_screen_fix_info_does_not_give_out_the_physical_address() {
         let info = screen_fix_info(4_096_000, 5120);
-        assert_eq!(&info.id[..9], b"zaytos-fb", "id");
+        assert_eq!(&info.id[..9], b"zeikos-fb", "id");
         assert_eq!(&info.id[9..], &[0u8; 7], "the rest of id is 0");
         assert_eq!(info.smem_start, 0, "smem_start is not given out");
         assert_eq!((info.smem_len, info.line_length), (4_096_000, 5120));

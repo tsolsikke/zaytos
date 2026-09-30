@@ -19,11 +19,11 @@ int main(void) {
 
     /* 2. 文字列。**長さと比較と複製を 1 行で見せる。** */
     char copy[32];
-    strcpy(copy, "zaytos");
+    strcpy(copy, "zeikos");
     puts("strlen/strcmp/strcpy:");
     putu(strlen(copy));
     write(STDOUT, " ", 1);
-    putu((unsigned long)(strcmp(copy, "zaytos") == 0));
+    putu((unsigned long)(strcmp(copy, "zeikos") == 0));
     write(STDOUT, " ", 1);
     puts(copy);
 
