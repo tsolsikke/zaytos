@@ -352,6 +352,11 @@ impl fmt::Write for Serial {
 ///
 /// **取るのは UART 自身の最内側のロックだけで、1 回の `write!` の間だけ持つ**（[`SerialLock`]）。
 /// **取れなければ、混ざるのを承知で書く**——ここで止めると、報せる手段そのものが消える。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 呼ぶたびに UART を初期化し直して返す（送信の FIFO も空にする）。初期化の間は、最内側のロックを取らない。
+/// - 呼んでよい所と、書く間に取るロックは、上の 2 つの節のとおりである。
 pub fn open_direct_serial() -> Serial {
     let mut serial = Serial::new(COM1_BASE);
     serial.init();

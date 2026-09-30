@@ -20,6 +20,11 @@ use common::arch::x86_64::cpu;
 /// `fxsave` / `fxrstor` が使う領域（512 バイト・16 バイト境界）。
 ///
 /// **境界は命令の要求である。** **外すと `#GP` になる**ので、型で守る。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - 共通の側は [`FpArea::fresh`] で作り、[`save_fp_state`]・[`restore_fp_state`] へ渡すだけで、中を読まない
+///   （タスクごとの表、プログラムの起動、`spawn` の親の控え）。
 #[derive(Clone, Copy)]
 #[repr(C, align(16))]
 pub struct FpArea([u8; Self::BYTES]);
@@ -186,6 +191,11 @@ impl Enabled {
 
 /// いまの FP の状態を領域へ書き出す。
 ///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - この CPU の FP の状態を書き出す。ほかの CPU の状態には触れない。
+/// - 呼ぶのは、切り替え（`crate::task`）と、`spawn` で親の状態を控える所（`crate::userland`）である。
+///
 /// # Safety
 ///
 /// `area` は 16 バイト境界の 512 バイトであること（型が保証する）。
@@ -198,6 +208,11 @@ pub unsafe fn save_fp_state(area: &mut FpArea) {
 }
 
 /// 領域から FP の状態を戻す。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - この CPU の FP の状態を、領域から戻す。ほかの CPU の状態には触れない。
+/// - 呼ぶのは、切り替え（`crate::task`）と、プログラムの起動と `spawn` の終わり（`crate::userland`）である。
 ///
 /// # Safety
 ///

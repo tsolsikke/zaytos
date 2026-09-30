@@ -926,6 +926,12 @@ pub const NO_VECTOR_YET: u64 = u64::MAX;
 /// 較正（`apic::calibrate_local_timer`）も定常ループもこれを読む。どちらも BSP で
 /// 走り、そのとき数えているのも BSP のスロットなので、両辺が同じスロットで
 /// あり意味は変わらない。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - どの CPU からも、BKL なしで呼んでよい（アトミックを読むだけ）。読むのは呼んだコアのスロットである。
+/// - 足すのは、そのコアのタイマの入口である（[`count_timer_tick`]）。ほかのコアの数は [`timer_ticks_for`] で
+///   読む。
 pub fn timer_ticks() -> u64 {
     timer_ticks_slot().load(Ordering::Relaxed)
 }
@@ -1088,6 +1094,11 @@ impl core::fmt::Display for FirstTickArrival {
 }
 
 /// 最初のティックの到着（9e-2）。共通の側のタイマのループが、ICW2 の事後証明に使う。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - どの CPU からも、BKL なしで呼んでよい（アトミックを読むだけ）。何も変えない。
+/// - 返すのは判定と表示だけで、ベクタの値は共通の側に出さない（[`FirstTickArrival`]）。
 pub fn first_tick_arrival() -> FirstTickArrival {
     FirstTickArrival {
         vector: first_pic_vector(),
@@ -1488,6 +1499,10 @@ impl core::fmt::Display for TimerDelivery {
 }
 
 /// タイマが今届くベクタ（[`timer_delivery_vector`]）の表示（9e-2）。共通の側の、最初のティックを待つ行が使う。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 読むだけで、何も変えない。返すのは表示だけで、ベクタの値は共通の側に出さない（[`TimerDelivery`]）。
 pub fn timer_delivery() -> TimerDelivery {
     TimerDelivery(timer_delivery_vector())
 }

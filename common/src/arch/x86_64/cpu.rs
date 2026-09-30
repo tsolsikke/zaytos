@@ -202,6 +202,11 @@ pub unsafe fn restore_interrupts(state: InterruptState) {
 ///
 /// ADR-0004 の fail-fast 方針（パニック時は即停止する）と、M1 の
 /// 正常終了時（それ以上進む処理がない状態）の両方で使う停止処理。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - この CPU だけを止め続け、戻らない。ほかの CPU は止めない。
+/// - どこから呼んでもよい（パニック、fail-fast、それ以上進む処理が無いとき）。
 pub fn halt_forever() -> ! {
     loop {
         // SAFETY: `cli` はマスク可能割り込みを禁止し、`hlt` は次の割り込み

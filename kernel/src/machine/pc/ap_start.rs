@@ -21,6 +21,10 @@ const AP_WAKE_WAIT_TICKS: u64 = 1;
 /// **作るのも `machine` の中だけである**（2026-09-30。MADT の走査と、起動した AP の表と、I/O APIC の宛先の読み戻しが
 /// 返す）。**共通の側は番号の数値を持たない**ので、中身を広げるとき（x2APIC・MPIDR）に変わるのは `machine` の中だけ
 /// である。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - 作るのは `machine` の中だけで、共通の側は比べることと表示にだけ使う（番号の数値は持たない）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ProcessorId(u8);
 
@@ -104,6 +108,11 @@ pub fn started_processor(slot: usize) -> Option<ProcessorId> {
 /// **作るのは、トランポリンを置いた `arch` である**（[`StartAddress::of_page`]）。SIPI で指せるのは 4 KiB の境界で
 /// 1 MiB より下のページだけなので、作るときに確かめ、外れたら止まる（トランポリンを置く所の誤りで、カーネルの誤り
 /// である）。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - 作るのはトランポリンを置いた `arch` で（[`StartAddress::of_page`]）、共通の側（`crate::smp`）は
+///   [`start_processor`] へ渡すことと表示にだけ使う。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct StartAddress {
     page: u8,

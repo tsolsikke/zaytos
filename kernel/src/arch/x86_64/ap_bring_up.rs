@@ -13,6 +13,11 @@ use common::machine::pc::serial::Serial;
 ///
 /// 仮想アドレスは本番テーブルにしか存在しない。AP は本番 CR3 へ移った後に
 /// しか使えない（それより前は b-2b-1 の恒等 VA の 1 枚で走る）。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - 作るのは `arch`（per-CPU のスタックを写像する所）である。共通の側（`crate::smp`）は、引き継ぎの表へ入れて
+///   AP の側で組み立て直すことと、通常のスタックの範囲を `arch` の関数で導くことにだけ使う。
 #[derive(Clone, Copy)]
 pub struct ApStacks {
     /// 通常スタックの頂点。
@@ -27,6 +32,11 @@ pub struct ApStacks {
 ///
 /// 恒等 VA と本番 VA が混在する。どちらの空間の値かを名前で区別する
 /// （取り違えると BSP 側では正常に見え、AP 側でだけ落ちる）。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - 作るのは BSP（`crate::smp`）で、AP ごとに引き継ぎの表へ入れる。AP の側が組み立て直し、
+///   [`bring_up_application_processor`] へ渡す。
 #[derive(Clone, Copy)]
 pub struct ApBringUp {
     /// 本番テーブルの物理（`mov cr3` に載せる）。

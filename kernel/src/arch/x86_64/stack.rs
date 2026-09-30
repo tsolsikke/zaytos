@@ -191,6 +191,10 @@ fn range_from(bottom: VirtAddr, size: u64) -> StackRange {
 }
 
 /// 通常実行用スタックの範囲。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 読むだけで、何も変えない。範囲は静的な領域から導くので、いつ呼んでも同じ値である。
 pub fn kernel_stack_range() -> StackRange {
     let bottom = block_base()
         .checked_add(GUARD_SIZE as u64)
@@ -205,6 +209,11 @@ pub fn kernel_stack_range() -> StackRange {
 ///
 /// **遠征スタックが既に同じ形を採っている**（`ring3::EXCURSION_STACK_FILL`）。
 /// **2 つ作らず、同じ考え方を借りる。**
+///
+/// # 契約（境界の定数。2026-09-30）
+///
+/// - 共通の側（`crate::task`）は、タスクのスタックへ敷くときと、高水位を測るときに、この値を使う（敷く所と
+///   比べる所が同じ値を指す）。
 pub const KERNEL_STACK_FILL: u8 = 0xA5;
 
 /// いま使っていない側へ目印を敷く（P-c-1 の対策）。
@@ -461,6 +470,12 @@ fn report_misaligned_entry(entry: &str, stack: u64) -> ! {
 /// **2 つは分割の有無だけでなく、unmap の後の確かめ方も違っていた**——
 /// **カーネルスタック側は unmap 後に `translate` で解決不能になったことを見ており、
 /// ワーカー側は見ていなかった。** **強い側に揃えてある。**
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 今の根のページテーブルで `guard_virt` の 1 ページを外し、外した後に訳せないことを確かめる。変換の控え
+///   （TLB）から消すのはこの CPU の分だけである。
+/// - 呼ぶのは、カーネルスタック（`main.rs`）とタスクのスタック（`crate::task`）を用意する所である。
 ///
 /// # Safety
 ///

@@ -335,6 +335,11 @@ fn state() -> &'static ExcursionState {
 ///
 /// **`CURRENT_RECOVERY` は単一のアドレスでなければならない**（`ADR-0060`）。
 /// **切り替えはこれを控えて、入る側の値を載せる。**
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - どの CPU からも呼んでよい（アトミックを読むだけ）。何も変えない。
+/// - 共通の側で呼ぶのは切り替え（`crate::task::schedule_switch`）で、出る側の値を控えるのに使う。
 pub fn current_excursion_recovery() -> u64 {
     CURRENT_RECOVERY.load(Ordering::SeqCst)
 }
@@ -346,6 +351,11 @@ pub fn current_excursion_recovery() -> u64 {
 /// **`pub` だが、呼ぶのは `crate::task::schedule_switch` だけである**
 /// （切り替えの割り込み禁止区間）。**遠征の出入りは [`enter`] の中で
 /// 直に触る**——あちらは入れ子の控えと戻しを一続きで行う。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 載せる値は 0 か、入る側のタスクのスロットの行の中を指す値である（外を指すと、そのタスクが終了させられた
+///   ときに別のタスクの回復点へ跳ぶ。[`excursion_recovery_belongs_to_slot`] で確かめられる）。
 pub fn set_current_excursion_recovery(value: u64) {
     CURRENT_RECOVERY.store(value, Ordering::SeqCst);
 }
@@ -360,6 +370,11 @@ pub fn set_current_excursion_recovery(value: u64) {
 /// **「入れ替えで書いた値が載ったか」を見る形にしない**——**同じ代入を 2 度読むだけになる**
 /// （`0 と 0 を比べて通る` の種類である。W1-c-3c）。**これは `stacks are mixed` と同じ形の検算で、
 /// 入れ替えの実装とは独立な不変条件を見ている。**
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 読むだけの判定で、何も変えない（静的な表の行のアドレスと比べるだけ）。どの CPU からも呼んでよい。
+/// - `recovery` が 0 なら `true`、範囲外の `slot` なら `false` を返す。
 pub fn excursion_recovery_belongs_to_slot(recovery: u64, slot: usize) -> bool {
     if recovery == 0 {
         return true;
@@ -486,7 +501,7 @@ pub fn excursion_stack_range() -> (u64, u64) {
 
 /// 深さ `depth` の遠征スタックの (下端, 上端)（S11-2）。
 ///
-/// 範囲外の `depth` は深さ 0 のものを返す。**呼び出し側が上限を知らなくてよい。**
+/// 範囲外の `depth` では止まる（[`excursion_stack_range_of`] が止める。W1-c-3c までは深さ 0 のものを返していた）。
 #[inline(always)]
 pub fn excursion_stack_range_at(depth: usize) -> (u64, u64) {
     excursion_stack_range_of(current_slot(), depth)
@@ -495,7 +510,12 @@ pub fn excursion_stack_range_at(depth: usize) -> (u64, u64) {
 /// スロット `slot` の、深さ `depth` の遠征スタックの (下端, 上端)（W1-c-3）。
 ///
 /// **切り替えが使う**——**見たいのは入る側のタスクのスロットで、今のタスクのスロットではない。**
-/// 範囲外の `slot` と `depth` は 0 のものを返す（[`excursion_stack_range_at`] と同じ規則）。
+/// 範囲外の `slot` と `depth` では止まる（W1-c-3c。それまでは 0 のものを返していた）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 読むだけで、何も変えない（静的な表の要素のアドレスを返す）。
+/// - 範囲外の `slot` と `depth` では止まる（黙って別のスタックを返さない）。
 pub fn excursion_stack_range_of(slot: usize, depth: usize) -> (u64, u64) {
     // **範囲外は止める（W1-c-3c）。** **以前は 0 のものを返していた**——**間違った添字が来ると、
     // スロット 0 の深さ 0（シェルのスタック）と重なっても誰も言わなかった**

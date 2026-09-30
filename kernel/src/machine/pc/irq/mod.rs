@@ -174,6 +174,11 @@ const NO_ROUTED_VECTOR: u8 = 0;
 /// **装置と足の番号は、種類ごとに型を分ける**——ISA の IRQ 番号、GSI（I/O APIC の入力。`irq/apic.rs` の `Gsi`）、
 /// PCI の INTx（[`PciIntx`]）である。互いの変換は `machine` の中だけで行う。**番号を読めるのは `machine` の中だけ**
 /// で、外へは表示（`Display`）しか出さない。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - 作るのは装置のドライバで（[`IsaIrq::new`]。16 以上は作れない）、番号を読めるのは `machine` の中だけで
+///   ある。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct IsaIrq(u8);
 
@@ -209,6 +214,11 @@ pub const GLOBAL_TIMER_IRQ: IsaIrq = IsaIrq::new(0);
 /// 上書きの表で引く）。**これは今の QEMU の配線に乗った解決である**——VirtualBox では INTA# が I/O APIC の 20〜23 番へ
 /// 行く。ACPI の表で正しく引くのは、持ち越しの行（「PCI の INTx を『割り込み線の値＝GSI』で配線している」）の条件が
 /// 来たときにする。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - 作るのは装置のドライバで、構成空間の割り込み線の値から作る（[`PciIntx::from_interrupt_line`]）。源の
+///   番号への解決は `machine` が行う（[`source_for_pci_intx`]）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PciIntx {
     line: u8,
@@ -224,6 +234,11 @@ impl PciIntx {
 /// 入口に届いた割り込みの到着（`ADR-0072` の 3。9e）。x86 では、入口のスタブが積んだベクタである。
 ///
 /// **`arch` の入口が作り、共通の側の入口関数は中を読まずに [`claim`] へ渡す**——ベクタを共通の側に出さない。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - 作るのは `arch` の入口だけで（[`Arrival::from_vector`]）、共通の側の入口関数は中を読まずに [`claim`] へ
+///   渡す。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Arrival(u8);
 
@@ -236,12 +251,20 @@ impl Arrival {
 
 /// ISA の IRQ の源の番号を解決する（`ADR-0072` の 1 の B と 3。9e）。**今の採番は 8259 の入力の番号と同じである**
 /// （起動ログの源の一覧の値を変えない）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 対応を引くだけで、何も変えない（どこから呼んでもよい）。
 pub fn source_for_isa_irq(irq: IsaIrq) -> InterruptSource {
     InterruptSource::assigned_by_machine(irq.0)
 }
 
 /// PCI の装置の INTx の源の番号を解決する（9e）。採番は [`source_for_isa_irq`] と同じで、割り込み線の値が
 /// そのまま番号になる（[`PciIntx`] の doc の解決）。16 以上の値も番号にはなり、処理の表が名前つきで断る。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 対応を引くだけで、何も変えない（どこから呼んでもよい）。
 pub fn source_for_pci_intx(intx: PciIntx) -> InterruptSource {
     InterruptSource::assigned_by_machine(intx.line)
 }
@@ -301,6 +324,11 @@ static FIRST_HANDLED_VECTOR: [AtomicU8; MAX_LEGACY_IRQS] =
 
 /// 源に届いた最初の到着の観測（[`first_arrival`]）。**境界は生の値を出さない**（モジュールの説明）ので、判定と
 /// 表示だけを持つ。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - 作るのは [`first_arrival`] だけで、共通の側は判定（[`FirstArrival::arrived_on_the_current_route`]）と
+///   表示にだけ使う。
 pub struct FirstArrival {
     vector: u8,
     expected: u8,
@@ -337,6 +365,10 @@ impl fmt::Display for FirstArrival {
 
 /// 源に届いた、処理のある最初の到着（9e）。まだ届いていなければ `None`。期待する配送先は、呼んだ時点の配送先
 /// （[`delivery_vector`]）である。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - どの CPU からも、BKL なしで呼んでよい（アトミックを読むだけ）。何も変えない。
 pub fn first_arrival(source: InterruptSource) -> Option<FirstArrival> {
     let irq = isa_irq_for_source(source)?;
     match FIRST_HANDLED_VECTOR[usize::from(irq.0)].load(Ordering::Relaxed) {
@@ -357,6 +389,11 @@ pub fn delivery_vector(irq: IsaIrq) -> u8 {
 
 /// 源が今の配送先のベクタで届いた回数（9e。心拍の行の会計に使う）。数えているのは `arch` の入口のベクタごとの
 /// 数えで、移した後は移した先のベクタの数である（以前の `keyboard::delivery_vector` と同じ）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - どの CPU からも、BKL なしで呼んでよい（アトミックを読むだけ）。何も変えない。
+/// - 配送先を移した後は、移した先の数である（移す前の数は足さない）。
 pub fn delivered_count(source: InterruptSource) -> u64 {
     isa_irq_for_source(source).map_or(0, |irq| {
         crate::arch::x86_64::idt::interrupt_count(usize::from(delivery_vector(irq)))
@@ -889,6 +926,11 @@ pub unsafe fn end_of_interrupt(irq: IsaIrq, spurious: bool) {
 ///
 /// 例外・IPI・装置の割り込みを 1 つの番号の空間にまとめない（`ADR-0072` の 3）。IPI は種類として、
 /// このCPUのタイマは別の種類として、装置は源の番号で持つ（9e）。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - 作るのは [`claim`] だけである。受け取った入口関数は、[`complete`] か [`disable_and_complete`] へ渡す
+///   （渡し方の決まりは [`complete`] の契約）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Claim {
     /// IPI の探り（S5-a）。BKL を取らずに数えて、完了させる。
@@ -944,6 +986,12 @@ pub fn claim(arrival: Arrival) -> Claim {
 ///
 /// **ベクタは `machine` の中で選ぶ**——共通の側は、送る相手と、受け取った数だけを見る（`ADR-0072` の 3）。
 ///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - この CPU の Local APIC から送る。ベクタは `machine` の中で選び、共通の側には出さない。
+/// - 呼ぶのは共通の側の IPI の探り（`crate::interrupts`）で、受け取った数は
+///   [`crate::arch::x86_64::ipi_probe_received_for`] で読む。
+///
 /// # Safety
 ///
 /// `mapped` がマップ済みの Local APIC を指し、`processor` が起動を確かめた AP であること。宛先の型は 9f で
@@ -976,6 +1024,10 @@ impl fmt::Display for ProbeIpi {
 }
 
 /// IPI の探りの表示（9e-2）。共通の側の、探りの結果の行が使う（ベクタの値を共通の側に出さない）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 読むだけで、何も変えない。返すのは表示だけで、ベクタの値は共通の側に出さない。
 pub fn probe_ipi() -> ProbeIpi {
     ProbeIpi
 }

@@ -19,6 +19,11 @@ const IRQ_CONTEXT_BYTES: u64 = 21 * 8;
 /// `add rsp, 8` → `iretq` の経路が、あたかも割り込みから戻るように `entry` へ
 /// IF=1 で入る。
 ///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 書くのは `top` の直下の、割り込みの文脈 1 つぶんだけである（それより下には触れない）。
+/// - 呼ぶのはタスクを作る所（`crate::task`）で、返した値を、そのタスクの保存するスタックポインタにする。
+///
 /// # Safety
 ///
 /// `top` が有効でマップ済みのスタック頂点（16 バイト境界）であること。
@@ -49,6 +54,10 @@ pub unsafe fn build_initial_context(top: VirtAddr, entry: u64) -> u64 {
 /// yield のベクタへソフトウェア割り込みを出し、切り替えの経路へ入る（[`crate::task::yield_now`] の中身）。
 ///
 /// 次に呼び出し元のタスクが選ばれると、この `int` の直後へ戻る。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 呼ぶのは [`crate::task::yield_now`] だけである。戻るのは、次にこのタスクが選ばれたときである。
 #[inline(always)]
 pub fn raise_yield_interrupt() {
     // SAFETY: yield_vector のゲートは IDT に登録済みで、専用スタブ経由で
