@@ -814,6 +814,7 @@ xtask::tests::a_sabotage_run_that_ended_on_the_run_side_is_not_a_catch
 xtask::tests::a_single_bsp_heartbeat_cannot_show_growth_and_fails
 xtask::tests::a_staged_file_must_be_non_empty_and_start_with_its_magic
 xtask::tests::a_stop_sign_is_a_halting_line_or_a_triple_fault
+xtask::tests::a_use_tree_expands_into_paths_and_aliases
 xtask::tests::an_inverted_sabotage_counts_only_when_its_named_judgement_read_false
 xtask::tests::an_xtask_built_for_another_tree_refuses_to_run
 xtask::tests::any_error_verdicts_are_counted_per_family
@@ -865,6 +866,7 @@ xtask::tests::the_ap_heartbeat_line_is_not_read_as_a_bsp_row
 xtask::tests::the_capture_stops_only_when_the_prompt_follows_ready
 xtask::tests::the_commit_message_rules_catch_each_shape
 xtask::tests::the_commit_message_rules_pass_the_shapes_that_are_allowed
+xtask::tests::the_dependency_scan_reads_code_paths_through_aliases_only
 xtask::tests::the_interrupt_control_scan_sees_the_save_and_restore_entry_points
 xtask::tests::the_kernel_layout_names_each_section_and_its_two_mib_pages
 xtask::tests::the_lines_that_start_a_child_that_does_not_end_keep_the_fixed_wait

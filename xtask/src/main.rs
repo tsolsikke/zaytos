@@ -23383,6 +23383,624 @@ fn check_kernel_layout(workspace_root: &Path, update: bool) -> Result<String> {
     )
 }
 
+// ===========================================================================
+// 依存の向き（2026-09-30。境界の段階の手順 2 の区切り。運用者の決定）
+// ===========================================================================
+
+/// 置き場の下のディレクトリ（クレートのソースの置き場、クレートの名前、置き場の名前）。
+const HOME_DIRECTORIES: &[(&str, &str, &[&str])] = &[
+    ("kernel/src/", "kernel", &["arch", "machine", "abi"]),
+    ("common/src/", "common", &["arch", "machine"]),
+];
+
+/// 共通の側が置き場に公開するもの（[`COMMON_ITEMS_FOR_HOMES`] の 1 行）。
+struct CommonItemsForHomes {
+    /// 共通の側のモジュール（`kernel::task` の形。クレートの直下の項目なら `kernel`）。
+    module: &'static str,
+    /// 公開する名前（関数・型・定数・静的変数）。
+    items: &'static [&'static str],
+    /// 置き場が使う理由。
+    reason: &'static str,
+}
+
+/// 共通の側が置き場（`arch`・`machine`・`abi`）に公開するもの（2026-09-30。境界の段階の手順 2 の区切り。運用者の決定）。
+///
+/// **置き場の下のコードは、共通の側のうち、この表に載せた名前しか使わない。** 表に無い名前を使うと落ちる
+/// （[`find_unpublished_common_uses`]）。**使われていない名前も落ちる**（死んだ行）。試しのモジュール（`mod tests`）の
+/// 中は数えない。
+///
+/// 表に足すときは、置き場の都合（CPU や機械の言葉）が、共通の側の名前に入り込んでいないかを見る。
+const COMMON_ITEMS_FOR_HOMES: &[CommonItemsForHomes] = &[
+    CommonItemsForHomes {
+        module: "common::addr",
+        items: &[
+            "DirectMap",
+            "PhysAddr",
+            "VirtAddr",
+            "direct_map",
+            "is_canonical",
+            "mark_identity_removed",
+        ],
+        reason: "番地の型と、物理のメモリを読む窓（ページテーブル・ACPI の表・AP のスタックを扱う）",
+    },
+    CommonItemsForHomes {
+        module: "common::critical",
+        items: &["InterruptGuard", "Locked"],
+        reason: "割り込みを止める区間の道具（ページテーブル・8259・Local APIC を触る間と、割り込みの準備の確かめ）",
+    },
+    CommonItemsForHomes {
+        module: "common::log",
+        items: &["Logger"],
+        reason: "ログを出す",
+    },
+    CommonItemsForHomes {
+        module: "common::percpu",
+        items: &[
+            "MAX_CPUS",
+            "PerCpu",
+            "cpu_id",
+            "cpu_id_reader_installed",
+            "install_cpu_id_reader",
+            "is_bootstrap_processor",
+        ],
+        reason: "CPU ごとの表と、CPU の番号（番号の読み方は `arch` の GDT が入れる）",
+    },
+    CommonItemsForHomes {
+        module: "kernel",
+        items: &["kernel_phys_from_virt"],
+        reason: "カーネルの仮想番地から物理番地を得る（AP のトランポリンが、静的な起動のページテーブルの物理番地を渡す）",
+    },
+    CommonItemsForHomes {
+        module: "kernel::bkl",
+        items: &["BklGuard", "note_mapping_changed", "tlb_generation"],
+        reason: "アドレス空間を壊すときに BKL を持っていることの証しと、変換の控え（TLB）の世代",
+    },
+    CommonItemsForHomes {
+        module: "kernel::frame_allocator",
+        items: &["FRAME_SIZE", "FrameAllocator"],
+        reason: "物理のフレームを取る（ページテーブル・スタック・ACPI と Local APIC の窓）",
+    },
+    CommonItemsForHomes {
+        module: "kernel::interrupts",
+        items: &[
+            "InterruptSource",
+            "on_external_interrupt",
+            "on_yield_interrupt",
+        ],
+        reason: "`arch` の入口が呼ぶ共通の側の入口関数と、割り込みの源の番号（`machine` が作る）",
+    },
+    CommonItemsForHomes {
+        module: "kernel::keyboard",
+        items: &["KEYBOARD_IRQ"],
+        reason: "キーボードの IRQ（`machine` が I/O APIC へ配線する）",
+    },
+    CommonItemsForHomes {
+        module: "kernel::link_symbols",
+        items: &["KERNEL_LOAD_ADDR", "KERNEL_VIRT_BASE"],
+        reason: "カーネルのイメージの先頭の番地（恒等の写像を外す前に、必ず残す領域として導く）",
+    },
+    CommonItemsForHomes {
+        module: "kernel::memory_map",
+        items: &[
+            "RegionPolicy",
+            "UEFI_PAGE_SIZE",
+            "classify",
+            "find_entry",
+            "parse_entries",
+            "type_name",
+        ],
+        reason: "UEFI のメモリマップを読む（ACPI の表がどの種別の領域にあるかを出す。破壊テストが写像の無い所を選ぶ）",
+    },
+    CommonItemsForHomes {
+        module: "kernel::quarantine",
+        items: &["QUARANTINE_CAPACITY", "Quarantine"],
+        reason: "アドレス空間を壊すとき、外したフレームを、変換の控えが消えるまで返さずに置く",
+    },
+    CommonItemsForHomes {
+        module: "kernel::syscall",
+        items: &["set_user_window", "syscall_entry"],
+        reason: "`arch` の入口が呼ぶシステムコールの入口と、遠征の間のユーザーの窓の設定",
+    },
+    CommonItemsForHomes {
+        module: "kernel::task",
+        items: &[
+            "current_ring3_slot",
+            "note_current_excursion_depth",
+            "note_current_kernel_entry_stack_top",
+        ],
+        reason: "遠征が、今のタスクのスロットを引き、遠征の深さと入口のスタックの上端をタスクへ控える",
+    },
+    CommonItemsForHomes {
+        module: "kernel::task",
+        items: &[
+            "GPR_BUF",
+            "IN_GPR_WINDOW",
+            "PREEMPT_DELAY",
+            "PREEMPT_WINDOW_SLED",
+            "current_task_base",
+            "preemptive_loop_top",
+            "verify_gprs_and_advance",
+            "verify_preemptive_gprs",
+            "worker_done_and_yield",
+        ],
+        reason: "ワーカーの本体（`arch` の asm）が使う、レジスタの照合のデモの値と関数",
+    },
+];
+
+/// 識別子に使える 1 バイトか（このリポジトリの識別子は ASCII である）。
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// コメントと文字列と文字の字句を空白に置き換えたコードを返す。**改行は残す**ので、行の番号は元のファイルと同じである。
+fn code_with_lines_kept(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let blank = |c: char| if c == '\n' { '\n' } else { ' ' };
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        if c == '/' && next == Some('/') {
+            while i < chars.len() && chars[i] != '\n' {
+                out.push(' ');
+                i += 1;
+            }
+            continue;
+        }
+        if c == '/' && next == Some('*') {
+            let mut nest = 0usize;
+            while i < chars.len() {
+                if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+                    nest += 1;
+                    out.push_str("  ");
+                    i += 2;
+                } else if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+                    nest -= 1;
+                    out.push_str("  ");
+                    i += 2;
+                    if nest == 0 {
+                        break;
+                    }
+                } else {
+                    out.push(blank(chars[i]));
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        let after_identifier = i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_');
+        let literal_end = if !after_identifier && matches!(c, '"' | 'b' | 'r') {
+            string_literal_at(&chars, i).map(|(_, end)| end)
+        } else if c == '\'' {
+            char_literal_end(&chars, i)
+        } else {
+            None
+        };
+        if let Some(end) = literal_end {
+            out.extend(chars[i..end].iter().map(|&skipped| blank(skipped)));
+            i = end;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// ファイルのモジュールのパス（クレートの名前から始まる。`kernel/src/task.rs` なら `kernel::task`）。
+fn module_path_of(relative: &str) -> Option<Vec<String>> {
+    let (krate, rest) = if let Some(rest) = relative.strip_prefix("kernel/src/") {
+        ("kernel", rest)
+    } else {
+        ("common", relative.strip_prefix("common/src/")?)
+    };
+    let mut parts: Vec<String> = std::iter::once(krate)
+        .chain(rest.strip_suffix(".rs")?.split('/'))
+        .map(str::to_string)
+        .collect();
+    if matches!(
+        parts.last().map(String::as_str),
+        Some("lib" | "main" | "mod")
+    ) {
+        parts.pop();
+    }
+    Some(parts)
+}
+
+/// `use` の文（`use` の位置、`;` の次の位置、木）。`#[must_use]` のような識別子の一部は拾わない。
+fn use_statements(code: &str) -> Vec<(usize, usize, &str)> {
+    let bytes = code.as_bytes();
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(offset) = code[from..].find("use") {
+        let start = from + offset;
+        from = start + 3;
+        let stands_alone = (start == 0 || !is_identifier_byte(bytes[start - 1]))
+            && bytes.get(start + 3).is_some_and(u8::is_ascii_whitespace);
+        if !stands_alone {
+            continue;
+        }
+        let Some(semicolon) = code[start..].find(';') else {
+            break;
+        };
+        let end = start + semicolon + 1;
+        found.push((start, end, &code[start + 3..end - 1]));
+        from = end;
+    }
+    found
+}
+
+/// `use` の木（`a::{b, c::d as e, self}`）を、(パス, 別名) の並びに展開する。
+fn expand_use_tree(tree: &str) -> Vec<(String, Option<String>)> {
+    let mut compact = tree.split_whitespace().collect::<Vec<_>>().join(" ");
+    for token in ["::", "{", "}", ","] {
+        compact = compact
+            .replace(&format!(" {token}"), token)
+            .replace(&format!("{token} "), token);
+    }
+    let mut results = Vec::new();
+    expand_use_group("", &compact, &mut results);
+    results
+}
+
+/// [`expand_use_tree`] の 1 段（`{ … }` の中を `,` で分ける）。
+fn expand_use_group(prefix: &str, group: &str, results: &mut Vec<(String, Option<String>)>) {
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut parts = Vec::new();
+    for (index, c) in group.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(&group[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&group[start..]);
+    for part in parts.into_iter().filter(|part| !part.is_empty()) {
+        if let Some(open) = part.find('{').filter(|_| part.ends_with('}')) {
+            let inner_prefix = format!("{prefix}{}", &part[..open]);
+            expand_use_group(&inner_prefix, &part[open + 1..part.len() - 1], results);
+            continue;
+        }
+        let (path, alias) = match part.split_once(" as ") {
+            Some((path, alias)) => (path, Some(alias.to_string())),
+            None => (part, None),
+        };
+        if path == "self" {
+            results.push((prefix.trim_end_matches(':').to_string(), alias));
+        } else {
+            results.push((format!("{prefix}{path}"), alias));
+        }
+    }
+}
+
+/// パスを、クレートの名前から始まる絶対パスにする（`crate`・`self`・`super` を読み替える）。
+fn absolute_path(path: &str, here: &[String], krate: &str) -> Vec<String> {
+    let segments: Vec<&str> = path.split("::").collect();
+    let (mut base, rest) = match segments.first().copied() {
+        Some("crate") => (vec![krate.to_string()], &segments[1..]),
+        Some("self") => (here.to_vec(), &segments[1..]),
+        Some("super") => {
+            let climbs = segments
+                .iter()
+                .take_while(|segment| **segment == "super")
+                .count();
+            let kept = here.len().saturating_sub(climbs);
+            (here[..kept].to_vec(), &segments[climbs..])
+        }
+        _ => (Vec::new(), &segments[..]),
+    };
+    base.extend(rest.iter().map(|segment| segment.to_string()));
+    base
+}
+
+/// 中に書いたモジュール（`mod 名前 { … }`）の範囲（`{` の位置、`}` の位置、名前）。
+fn inline_module_spans(code: &str) -> Vec<(usize, usize, String)> {
+    let bytes = code.as_bytes();
+    let mut spans = Vec::new();
+    let mut open: Vec<(usize, Option<String>)> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => open.push((i, None)),
+            b'}' => {
+                if let Some((start, Some(name))) = open.pop() {
+                    spans.push((start, i, name));
+                }
+            }
+            b'm' if code[i..].starts_with("mod ")
+                && (i == 0 || !is_identifier_byte(bytes[i - 1])) =>
+            {
+                let after_keyword = code[i + 3..].trim_start();
+                let name_length = after_keyword
+                    .bytes()
+                    .take_while(|b| is_identifier_byte(*b))
+                    .count();
+                let after_name = after_keyword[name_length..].trim_start();
+                if name_length > 0 && after_name.starts_with('{') {
+                    let brace = code.len() - after_name.len();
+                    open.push((brace, Some(after_keyword[..name_length].to_string())));
+                    i = brace;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    spans
+}
+
+/// コードの中のパス（`a::b` の形で 2 つ以上の部分があるもの）と、その位置。
+fn code_paths(body: &str) -> Vec<(usize, &str)> {
+    let bytes = body.as_bytes();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let starts = (bytes[i].is_ascii_alphabetic() || bytes[i] == b'_')
+            && (i == 0 || !(is_identifier_byte(bytes[i - 1]) || bytes[i - 1] == b':'));
+        if !starts {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut parts = 0;
+        loop {
+            let length = bytes[i..]
+                .iter()
+                .take_while(|b| is_identifier_byte(**b))
+                .count();
+            if length == 0 {
+                break;
+            }
+            parts += 1;
+            i += length;
+            let continues = bytes[i..].starts_with(b"::")
+                && bytes
+                    .get(i + 2)
+                    .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_');
+            if !continues {
+                break;
+            }
+            i += 2;
+        }
+        if parts >= 2 {
+            found.push((start, &body[start..i]));
+        }
+    }
+    found
+}
+
+/// パスの 1 つの参照（依存の向きの検査が見る）。
+struct PathUse {
+    /// 1 から数えた行。
+    line: usize,
+    /// クレートの名前から始まる絶対パス（`kernel`・`common`・`core` など）。
+    segments: Vec<String>,
+    /// `use …::*` か。
+    glob: bool,
+    /// 試しのモジュール（`mod tests`）の中か。
+    in_tests: bool,
+}
+
+/// ファイルが使うパスを集める（`use` の木を展開し、別名と `crate`・`self`・`super` を読み替える。コメントと文字列の中は
+/// 見ない。形は `target/` の下の一時の道具で数えた一覧と同じ読み方である）。
+fn path_uses(relative: &str, text: &str) -> Vec<PathUse> {
+    let Some(file_module) = module_path_of(relative) else {
+        return Vec::new();
+    };
+    let krate = file_module[0].clone();
+    let code = code_with_lines_kept(text);
+    let spans = inline_module_spans(&code);
+    let line_of = |offset: usize| code[..offset].matches('\n').count() + 1;
+    let module_at = |offset: usize| {
+        let mut inner: Vec<&(usize, usize, String)> = spans
+            .iter()
+            .filter(|(start, end, _)| *start < offset && offset < *end)
+            .collect();
+        inner.sort_by_key(|(start, _, _)| *start);
+        let mut here = file_module.clone();
+        here.extend(inner.iter().map(|(_, _, name)| name.clone()));
+        let in_tests = inner.iter().any(|(_, _, name)| name == "tests");
+        (here, in_tests)
+    };
+    let mut uses = Vec::new();
+    let mut bindings: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut body = code.clone().into_bytes();
+    for (start, end, tree) in use_statements(&code) {
+        let (here, in_tests) = module_at(start);
+        for (entry, alias) in expand_use_tree(tree) {
+            let glob = entry.ends_with('*');
+            let entry = entry.trim_end_matches('*').trim_end_matches("::");
+            let segments = absolute_path(entry, &here, &krate);
+            if !glob {
+                let name = alias
+                    .or_else(|| segments.last().cloned())
+                    .unwrap_or_default();
+                if name != "_" {
+                    bindings.insert(name, segments.clone());
+                }
+            }
+            uses.push(PathUse {
+                line: line_of(start),
+                segments,
+                glob,
+                in_tests,
+            });
+        }
+        // **`use` の文は、後のパスの走査から外す**（同じ参照を 2 度数えない）。改行は残す。
+        for byte in &mut body[start..end] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+    let body = String::from_utf8(body).expect("only whole use statements were blanked");
+    for (offset, path) in code_paths(&body) {
+        let (here, in_tests) = module_at(offset);
+        let first = path.split("::").next().unwrap_or_default();
+        let segments = match first {
+            "crate" | "self" | "super" | "common" | "kernel" => absolute_path(path, &here, &krate),
+            _ => match bindings.get(first) {
+                Some(bound) => bound
+                    .iter()
+                    .cloned()
+                    .chain(path.split("::").skip(1).map(str::to_string))
+                    .collect(),
+                None => continue,
+            },
+        };
+        uses.push(PathUse {
+            line: line_of(offset),
+            segments,
+            glob: false,
+            in_tests,
+        });
+    }
+    uses
+}
+
+/// 置き場の下のファイルか。
+fn is_home_file(relative: &str) -> bool {
+    HOME_DIRECTORIES.iter().any(|(root, _, homes)| {
+        relative
+            .strip_prefix(root)
+            .and_then(|rest| rest.split('/').next())
+            .is_some_and(|first| homes.contains(&first))
+    })
+}
+
+/// 行き先が共通の側か（置き場と、ほかのクレートでなければ真）。
+fn is_common_side_destination(segments: &[String]) -> bool {
+    HOME_DIRECTORIES.iter().any(|(_, krate, homes)| {
+        segments.len() >= 2 && segments[0] == *krate && !homes.contains(&segments[1].as_str())
+    })
+}
+
+/// 共通の側のモジュールか（そのパスのファイルかディレクトリが在るか、親のファイルの中に `mod 名前 { … }` と書いてある）。
+fn is_module_path(workspace_root: &Path, segments: &[String]) -> bool {
+    let Some((krate, rest)) = segments.split_first() else {
+        return false;
+    };
+    let Some((last, parents)) = rest.split_last() else {
+        return true;
+    };
+    let base = parents
+        .iter()
+        .fold(workspace_root.join(krate).join("src"), |path, segment| {
+            path.join(segment)
+        });
+    if base.join(format!("{last}.rs")).is_file() || base.join(last).join("mod.rs").is_file() {
+        return true;
+    }
+    // **中に書いたモジュール**（`lib.rs` の `pub mod link_symbols { … }` など）。
+    let parent_file = if parents.is_empty() {
+        base.join("lib.rs")
+    } else if base.with_extension("rs").is_file() {
+        base.with_extension("rs")
+    } else {
+        base.join("mod.rs")
+    };
+    fs::read_to_string(parent_file).is_ok_and(|text| {
+        inline_module_spans(&code_with_lines_kept(&text))
+            .iter()
+            .any(|(_, _, name)| name == last)
+    })
+}
+
+/// 行き先の項目（モジュールの下の最初の名前まで。型の関連の関数や列挙子は、型の名前で止める）。
+fn item_of(workspace_root: &Path, segments: &[String]) -> Vec<String> {
+    let mut item = Vec::new();
+    for segment in segments {
+        item.push(segment.clone());
+        if item.len() >= 2 && !is_module_path(workspace_root, &item) {
+            break;
+        }
+    }
+    item
+}
+
+/// 置き場の下のコードが、共通の側の公開していない名前を使っている所を探す（[`COMMON_ITEMS_FOR_HOMES`]）。
+/// **死んだ名前も探す。** 表に載った名前を使った参照の数を `published_uses` に足す。
+fn find_unpublished_common_uses(
+    workspace_root: &Path,
+    published_uses: &mut usize,
+) -> Result<Vec<String>> {
+    let mut used: Vec<Vec<bool>> = COMMON_ITEMS_FOR_HOMES
+        .iter()
+        .map(|row| vec![false; row.items.len()])
+        .collect();
+    let mut findings = Vec::new();
+    for relative in checked_files(workspace_root, &["*.rs"])? {
+        if !is_home_file(&relative) {
+            continue;
+        }
+        let path = workspace_root.join(&relative);
+        let text = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        for found in path_uses(&relative, &text) {
+            if found.in_tests || !is_common_side_destination(&found.segments) {
+                continue;
+            }
+            if found.glob {
+                findings.push(format!(
+                    "{relative}:{}: `use {}::*` takes in the common side wholesale; name each published item",
+                    found.line,
+                    found.segments.join("::")
+                ));
+                continue;
+            }
+            let item = item_of(workspace_root, &found.segments);
+            if is_module_path(workspace_root, &item) {
+                continue;
+            }
+            let (name, module) = item.split_last().expect("an item has a name");
+            let module = module.join("::");
+            let hit = COMMON_ITEMS_FOR_HOMES
+                .iter()
+                .enumerate()
+                .find_map(|(row, entry)| {
+                    (entry.module == module)
+                        .then(|| {
+                            entry
+                                .items
+                                .iter()
+                                .position(|published| *published == name.as_str())
+                        })
+                        .flatten()
+                        .map(|column| (row, column))
+                });
+            match hit {
+                Some((row, column)) => {
+                    used[row][column] = true;
+                    *published_uses += 1;
+                }
+                None => findings.push(format!(
+                    "{relative}:{}: uses `{module}::{name}`, which the common side does not publish to arch, \
+                     machine or abi",
+                    found.line
+                )),
+            }
+        }
+    }
+    for (row, entry) in COMMON_ITEMS_FOR_HOMES.iter().enumerate() {
+        for (column, item) in entry.items.iter().enumerate() {
+            if !used[row][column] {
+                findings.push(format!(
+                    "dead entry: `{}::{item}` is published, but no code under arch, machine or abi uses it; \
+                     drop it from COMMON_ITEMS_FOR_HOMES",
+                    entry.module
+                ));
+            }
+        }
+    }
+    Ok(findings)
+}
+
 /// 共通の側と `main.rs` に出る x86 の言葉の数の基準（2026-09-27。境界の段階の手順 2。`ADR-0070` の 3 の (5)）。
 const REFERENCE_X86_WORDS: &str = "xtask/reference/x86-words.txt";
 
@@ -25761,6 +26379,46 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             unapproved_port_io.len()
         );
         failed.push("direct port I/O".to_string());
+    }
+
+    // **置き場が使う共通の側の名前は、公開の表に載せたものだけ**（2026-09-30。境界の段階の手順 2 の区切り。運用者の決定）。
+    total += 1;
+    begin_item(
+        Family::Base,
+        "arch, machine and abi use only the common-side names published to them",
+    );
+    let mut published_uses = 0usize;
+    let unpublished = find_unpublished_common_uses(&workspace_root, &mut published_uses)?;
+    if unpublished.is_empty() {
+        println!(
+            "--- common side published to homes: OK ({} name(s) in {} row(s) = COMMON_ITEMS_FOR_HOMES, used \
+             at {} place(s) = references outside mod tests)",
+            COMMON_ITEMS_FOR_HOMES
+                .iter()
+                .map(|row| row.items.len())
+                .sum::<usize>(),
+            COMMON_ITEMS_FOR_HOMES.len(),
+            published_uses
+        );
+    } else {
+        for finding in &unpublished {
+            println!("    {finding}");
+        }
+        println!("    published rows (module / names / reason):");
+        for row in COMMON_ITEMS_FOR_HOMES {
+            println!(
+                "      {} / {} / {}",
+                row.module,
+                row.items.join(", "),
+                row.reason
+            );
+        }
+        println!(
+            "--- common side published to homes: FAILED ({} finding(s); code under arch, machine and abi \
+             uses only the names in COMMON_ITEMS_FOR_HOMES, or add the name there with a reason)",
+            unpublished.len()
+        );
+        failed.push("common side published to homes".to_string());
     }
 
     // **起動ログの参照の終わり**（5.a の監視の (iii)。2026-09-25）。**QEMU を起動せずに見る。**
@@ -28793,8 +29451,8 @@ fn count_elements(text: &str) -> usize {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 58,
-    full: 427,
+    base: 59,
+    full: 428,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -32998,6 +33656,67 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
             r#"core::arch::asm!("in eax, dx", out("eax") value);"#
         ));
         assert!(!mentions_raw_port_instruction(r#"    "mov eax, 1","#));
+    }
+
+    /// **依存の向きの検査が読む `use` の木は、入れ子と別名と `self` まで展開する**（2026-09-30）。
+    #[test]
+    fn a_use_tree_expands_into_paths_and_aliases() {
+        assert_eq!(
+            expand_use_tree(
+                "crate::arch::x86_64::{\n    self,\n    paging::{switch, verify as v},\n}"
+            ),
+            vec![
+                ("crate::arch::x86_64".to_string(), None),
+                ("crate::arch::x86_64::paging::switch".to_string(), None),
+                (
+                    "crate::arch::x86_64::paging::verify".to_string(),
+                    Some("v".to_string())
+                ),
+            ]
+        );
+        assert_eq!(
+            expand_use_tree("super::*"),
+            vec![("super::*".to_string(), None)]
+        );
+    }
+
+    /// **依存の向きの検査は、コードの中のパスだけを読む**——コメントと文字列の中は読まず、別名と `super` を読み替え、
+    /// `mod tests` の中は印を付ける（2026-09-30）。
+    #[test]
+    fn the_dependency_scan_reads_code_paths_through_aliases_only() {
+        let text = "use crate::task as t;\n\
+                    // crate::bkl::in_a_comment\n\
+                    fn f() { let _ = \"crate::bkl::in_a_string\"; t::yield_now(); super::gdt::load(); }\n\
+                    #[must_use]\n\
+                    fn g() -> u8 { 0 }\n\
+                    mod tests {\n    use super::*;\n    fn h() { crate::syscall::x(); }\n}\n";
+        let found: Vec<(usize, String, bool, bool)> =
+            path_uses("kernel/src/arch/x86_64/idt/mod.rs", text)
+                .into_iter()
+                .map(|found| {
+                    (
+                        found.line,
+                        found.segments.join("::"),
+                        found.glob,
+                        found.in_tests,
+                    )
+                })
+                .collect();
+        assert_eq!(
+            found,
+            vec![
+                (1, "kernel::task".to_string(), false, false),
+                (7, "kernel::arch::x86_64::idt".to_string(), true, true),
+                (3, "kernel::task::yield_now".to_string(), false, false),
+                (
+                    3,
+                    "kernel::arch::x86_64::gdt::load".to_string(),
+                    false,
+                    false
+                ),
+                (8, "kernel::syscall::x".to_string(), false, true),
+            ]
+        );
     }
 
     /// **cli/sti の許可の表の走査は、arch の保存して止める・元へ戻す入口も拾う**（2026-09-30。`common::critical` から
