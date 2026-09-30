@@ -17,9 +17,9 @@
 //!
 //! # 記録
 //!
-//! **検査の記録は git の共通の置き場の `zaytos/records.tsv` に 1 回 1 行で残す**（2026-09-27 にメインの作業ツリーの
-//! `target/full-check/records.tsv` から移した。**`cargo clean` で消えないように**。**移す前の記録は、以前の置き場からも
-//! 読む**——1 段階だけ残す）——**基本の検査・`--commit`・
+//! **検査の記録は git の共通の置き場の `zeikos/records.tsv` に 1 回 1 行で残す**（2026-09-27 にメインの作業ツリーの
+//! `target/full-check/records.tsv` から移した。**`cargo clean` で消えないように**。**2026-10-01 に置き場の名前を `zaytos/`
+//! から変え、R5 の間は旧い置き場からも読む**——**`target/full-check/` を読む処理は、そのときに外した**）——**基本の検査・`--commit`・
 //! `--full` の全部と、断られた回**（`cmd_check` が書く）。**作業ツリーで走った全検査の記録もメインの作業ツリーへ集める。**
 //! **ツリーのハッシュと、走らせたときの作業ツリーの汚れ（`git status --porcelain` の行数）を持つ**——
 //! **汚れが 0 の記録だけが「その木そのものが通った」と言える。**
@@ -284,19 +284,16 @@ fn parse_legacy(fields: &[&str]) -> Option<Record> {
     })
 }
 
-/// 記録の置き場（git の共通の置き場の `zaytos/records.tsv`。ロックと同じ場所。2026-09-27）。**メインの作業ツリーと
+/// 記録の置き場（git の共通の置き場の `zeikos/records.tsv`。ロックと同じ場所。2026-09-27）。**メインの作業ツリーと
 /// どの作業ツリーからも同じパスになり、`cargo clean` で消えない。**
 pub fn records_path(root: &Path) -> Result<PathBuf> {
     Ok(check_lock::lock_dir_in(&check_lock::git_common_dir(root)?).join("records.tsv"))
 }
 
-/// 以前の記録の置き場（メインの作業ツリーの `target/full-check/records.tsv`）。**読むだけで、書かない。**
-/// **2026-09-27 に移した。移す前の合格の記録を失わないために、1 段階だけ読む**（次の段階で外す）。
-fn legacy_records_path(root: &Path) -> Result<PathBuf> {
-    Ok(check_lock::main_tree(root)?
-        .join("target")
-        .join("full-check")
-        .join("records.tsv"))
+/// 旧い置き場の記録（git の共通の置き場の `zaytos/records.tsv`）。**読むだけで、書かない。** **R5 の間だけ読む**
+/// （[`check_lock::old_lock_dir_in`]。片付けで外す）——**名前を変える前のコミットの全検査は、旧い置き場へ書く。**
+fn old_records_path(root: &Path) -> Result<PathBuf> {
+    Ok(check_lock::old_lock_dir_in(&check_lock::git_common_dir(root)?).join("records.tsv"))
 }
 
 /// 全検査の作業ツリーの置き場（2026-09-27。運用者の決定）。**メインの作業ツリーの隣の `<名前>-full-check`**
@@ -391,8 +388,8 @@ pub fn read_lines(text: &str) -> impl Iterator<Item = &str> {
 
 /// 記録を全部読む（無ければ空）。
 pub fn read_records(root: &Path) -> Result<Vec<Record>> {
-    // **以前の置き場の記録を先に読む**（移す前の記録なので、どれも新しい置き場の記録より古い）。
-    let mut records = read_records_at(&legacy_records_path(root)?)?;
+    // **旧い置き場の記録を先に読む**（名前を変える前の記録が多いので、先に並べる）。
+    let mut records = read_records_at(&old_records_path(root)?)?;
     records.extend(read_records_at(&records_path(root)?)?);
     Ok(records)
 }
@@ -1245,17 +1242,15 @@ const SELECTIONS_HEADER: &str = "# version\tunix\twhen\tcommit\ttree\tbase\tchan
 /// 選択の記録の形の版（行の頭の欄）。**終わりのマーカーは [`RECORD_END`] と同じである。**
 const SELECTION_VERSION: &str = "1";
 
-/// 選択の記録の置き場（git の共通の置き場の `zaytos/selections.tsv`。追跡しない。2026-09-27 に移した）。
+/// 選択の記録の置き場（git の共通の置き場の `zeikos/selections.tsv`。追跡しない。2026-09-27 に移した）。
 fn selections_path(main: &Path) -> Result<PathBuf> {
     Ok(check_lock::lock_dir_in(&check_lock::git_common_dir(main)?).join("selections.tsv"))
 }
 
-/// 以前の選択の記録の置き場（メインの作業ツリーの `target/full-check/selections.tsv`）。**読むだけ**
-/// （2026-09-27 に移した。1 段階だけ残す）。
-fn legacy_selections_path(main: &Path) -> PathBuf {
-    main.join("target")
-        .join("full-check")
-        .join("selections.tsv")
+/// 旧い置き場の選択の記録（git の共通の置き場の `zaytos/selections.tsv`）。**読むだけ。** **R5 の間だけ読む**
+/// （[`check_lock::old_lock_dir_in`]。片付けで外す）。
+fn old_selections_path(main: &Path) -> Result<PathBuf> {
+    Ok(check_lock::old_lock_dir_in(&check_lock::git_common_dir(main)?).join("selections.tsv"))
 }
 
 /// 選択を記録へ 1 行足す（2026-09-26）。**同じコミットは 1 度だけ**——**足したら `true`。** **当たりの
@@ -1270,11 +1265,14 @@ fn record_selection(main: &Path, selected: &Selected) -> Result<bool> {
                 && fields.get(3) == Some(&selected.target.as_str())
         })
     };
-    // **以前の置き場の選択も見る**——**移す前に残したコミットを、もう 1 度残さない。** **2 つのファイルは
+    // **旧い置き場の選択も見る**——**名前を変える前に残したコミットを、もう 1 度残さない。** **2 つのファイルは
     // つなげずに別々に見る**（前のファイルの途中で切れた最後の行が、次のファイルの頭の行と 1 行に見えないように）。
-    let legacy = fs::read_to_string(legacy_selections_path(main)).unwrap_or_default();
+    let old = old_selections_path(main)
+        .ok()
+        .and_then(|old| fs::read_to_string(old).ok())
+        .unwrap_or_default();
     let existing = fs::read_to_string(&path).unwrap_or_default();
-    if seen(&legacy) || seen(&existing) {
+    if seen(&old) || seen(&existing) {
         return Ok(false);
     }
     let (unix, when) = check_lock::now();
@@ -3094,8 +3092,8 @@ mod tests {
         let _ = fs::remove_dir_all(&scratch);
     }
 
-    /// **記録と選択の記録は git の共通の置き場の `zaytos/` に書き、以前の置き場（`target/full-check/`）の分も読む**
-    /// （2026-09-27。移す前の合格の記録を失わない）。**以前の置き場へは書かない。**
+    /// **記録と選択の記録は git の共通の置き場の `zeikos/` に書き、旧い置き場（`zaytos/`）の分も読む**
+    /// （R5 の間だけ。名前を変える前の合格の記録を失わない）。**旧い置き場へは書かない。**
     #[test]
     fn records_are_written_to_the_git_dir_and_the_old_place_is_still_read() {
         let scratch =
@@ -3108,15 +3106,15 @@ mod tests {
         let new_path = records_path(&repo).unwrap();
         assert_eq!(
             new_path,
-            repo.join(".git").join("zaytos").join("records.tsv")
+            repo.join(".git").join("zeikos").join("records.tsv")
         );
-        let old_path = legacy_records_path(&repo).unwrap();
+        let old_path = old_records_path(&repo).unwrap();
         assert_eq!(
             old_path,
-            repo.join("target").join("full-check").join("records.tsv")
+            repo.join(".git").join("zaytos").join("records.tsv")
         );
 
-        // **以前の置き場に 1 行だけ在る形を作り、新しい置き場へ 1 行足す。**
+        // **旧い置き場に 1 行だけ在る形を作り、新しい置き場へ 1 行足す。**
         append_line(
             &old_path,
             RECORDS_HEADER,
@@ -3133,10 +3131,10 @@ mod tests {
         let old_text = fs::read_to_string(&old_path).unwrap();
         assert!(!old_text.contains("\tnew\t"), "{old_text}");
 
-        // **選択の記録も、以前の置き場に在るコミットはもう 1 度残さない。** **新しいコミットは新しい置き場へ書く。**
+        // **選択の記録も、旧い置き場に在るコミットはもう 1 度残さない。** **新しいコミットは新しい置き場へ書く。**
         assert_eq!(
             selections_path(&repo).unwrap(),
-            repo.join(".git").join("zaytos").join("selections.tsv")
+            repo.join(".git").join("zeikos").join("selections.tsv")
         );
         let selected = |target: &str| Selected {
             target: target.to_string(),
@@ -3148,7 +3146,12 @@ mod tests {
         };
         let line =
             format!("{SELECTION_VERSION}\t1\tw\tseen\ttree\t-\t0\tall\t-\t-\t-\t{RECORD_END}\n");
-        append_line(&legacy_selections_path(&repo), SELECTIONS_HEADER, &line).unwrap();
+        append_line(
+            &old_selections_path(&repo).unwrap(),
+            SELECTIONS_HEADER,
+            &line,
+        )
+        .unwrap();
         assert!(!record_selection(&repo, &selected("seen")).unwrap());
         assert!(record_selection(&repo, &selected("fresh")).unwrap());
         let written = fs::read_to_string(selections_path(&repo).unwrap()).unwrap();
@@ -3156,7 +3159,7 @@ mod tests {
             written.contains("\tfresh\t") && !written.contains("\tseen\t"),
             "{written}"
         );
-        let old_selections = fs::read_to_string(legacy_selections_path(&repo)).unwrap();
+        let old_selections = fs::read_to_string(old_selections_path(&repo).unwrap()).unwrap();
         assert!(!old_selections.contains("\tfresh\t"), "{old_selections}");
         let _ = fs::remove_dir_all(&scratch);
     }

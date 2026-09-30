@@ -28,7 +28,7 @@
 //!
 //! # 順番
 //!
-//! **前回の全検査が kernel を求めた順で先に作る**（git の共通の置き場の `zaytos/kernel-build-order.txt`。
+//! **前回の全検査が kernel を求めた順で先に作る**（git の共通の置き場の `zeikos/kernel-build-order.txt`。
 //! 全検査の終わりに書く）。**無ければ、cargo が `target/` に残した組ごとの記録（fingerprint）を、作った時刻の
 //! 順に並べて使う**（入れた後の最初の回のため）。**当たらなかった組は、求められたときに先に作る。**
 //! **先に作り始めるのは [`build_ahead`] の後である**——基本の検査の項目（`cargo test` や `clippy`）が

@@ -49,7 +49,7 @@
 **そこで基底が緑のあと `cargo xtask full --gate` を回し、押すコミット（どのリモートにも無いもの）の
 それぞれに、要る検査（`kernel/` か `common/` に触れたものは `--commit`、他は基底）の合格の記録が
 在るかを見る。** **無ければ、足りない検査とコミットを出して拒む。** **読むのは
-`cargo xtask full --status` と同じ記録である**（git の共通の置き場の `zaytos/records.tsv`。2026-09-27 に移した）。
+`cargo xtask full --status` と同じ記録である**（git の共通の置き場の `zeikos/records.tsv`。2026-09-27 に移した）。
 
 **旗で越えられる**——**`ZEIKOS_PUSH_UNCHECKED='<理由>' git push ...`**（理由は空にできない）。
 **旧い名前 `ZAYTOS_PUSH_UNCHECKED` も、OS の名前を変える段階の R5 の間だけ受ける**（[`OLD_FLAG`]。R5 の最後に外す）。

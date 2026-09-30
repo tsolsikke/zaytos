@@ -9,7 +9,8 @@
 //!
 //! # 置き場は 1 つに固定する——git の共通の置き場の下
 //!
-//! **`<git rev-parse --git-common-dir>/zaytos/check.lock`**（運用者の回答 3。2026-09-25）。
+//! **`<git rev-parse --git-common-dir>/zeikos/check.lock`**（運用者の回答 3。2026-09-25）。**置き場の名前は 2026-10-01 に
+//! `zaytos/` から変えた**——**移す間は錠を 2 つ取り、記録は旧い置き場も読む**（[`old_lock_dir_in`]。R5 の間だけ）。
 //! **環境変数で置き場が変わる形は、排他を黙って外す**——**hook の環境に `XDG_RUNTIME_DIR` が無く、
 //! 全検査は `/run/user` 側を持つ、という形でロックが 2 つになりうる。**
 //!
@@ -92,7 +93,7 @@ impl Mode {
 enum State {
     /// 自分で持っている。**ファイルを開いたまま、プロセスが終わるまで持つ**（閉じると放れる）。
     Held {
-        _file: File,
+        _files: Vec<File>,
         mode: Mode,
         started_unix: u64,
     },
@@ -102,8 +103,16 @@ enum State {
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 
-/// ロックの置き場（純粋な論理）。**git の共通の置き場の下の `zaytos/`。**
+/// ロックの置き場（純粋な論理）。**git の共通の置き場の下の `zeikos/`。**
 pub fn lock_dir_in(common_dir: &Path) -> PathBuf {
+    common_dir.join("zeikos")
+}
+
+/// 旧い置き場（純粋な論理。OS の名前を変える段階の R5 の間だけ。`ADR-0073`）。**錠は移す間だけ両方を取り、
+/// 記録・選択・kernel の順・実行の記録・起こしたままの印は旧い置き場も読む**——**名前を変える前のコミットの木から
+/// 作った `xtask` と道具**（`cargo xtask full <コミット>` の子と、その子が起こす道具）**は旧い置き場だけを使う。**
+/// **R5 の最後の片付けで外す。**
+pub fn old_lock_dir_in(common_dir: &Path) -> PathBuf {
     common_dir.join("zaytos")
 }
 
@@ -149,6 +158,11 @@ pub fn git_common_dir(root: &Path) -> Result<PathBuf> {
 /// ロックのファイルの道。
 pub fn lock_path(root: &Path) -> Result<PathBuf> {
     Ok(lock_dir_in(&git_common_dir(root)?).join("check.lock"))
+}
+
+/// 旧い置き場のロックのファイルの道（R5 の間だけ。[`old_lock_dir_in`]）。
+pub fn old_lock_path(root: &Path) -> Result<PathBuf> {
+    Ok(old_lock_dir_in(&git_common_dir(root)?).join("check.lock"))
 }
 
 /// ロックを開く（無ければ作る。**中身は消さない**）。
@@ -392,7 +406,7 @@ fn attempt(path: &Path, mode: Mode, content: Option<&str>) -> Result<Attempt> {
                 write_content(&file, content)?;
             }
             Ok(Attempt::Taken(State::Held {
-                _file: file,
+                _files: vec![file],
                 mode,
                 started_unix: now().0,
             }))
@@ -402,6 +416,52 @@ fn attempt(path: &Path, mode: Mode, content: Option<&str>) -> Result<Attempt> {
             "could not try the check lock at {}: {error}",
             path.display()
         )))),
+    }
+}
+
+/// 新しい錠と旧い錠を順に取る（R5 の間だけ。[`old_lock_dir_in`]）。**新しい錠を先に、旧い錠を後に、同じ形で取る。**
+/// **旧い錠で断られたら、先に取った新しい錠を放して断る**（取った状態を落とせば放れる）。断りの文のために、
+/// 決めた方の錠の道も返す。
+fn attempt_both(
+    path: &Path,
+    old: &Path,
+    mode: Mode,
+    content: Option<&str>,
+) -> Result<(Attempt, PathBuf)> {
+    let first = match attempt(path, mode, content)? {
+        Attempt::Taken(state) => state,
+        refused => return Ok((refused, path.to_path_buf())),
+    };
+    match attempt(old, mode, content)? {
+        Attempt::Taken(second) => Ok((Attempt::Taken(joined(first, second)), path.to_path_buf())),
+        refused => {
+            drop(first);
+            Ok((refused, old.to_path_buf()))
+        }
+    }
+}
+
+/// 2 つの錠の状態を 1 つにする。**自分で持った錠は、どれも落とすまで持つ。**
+fn joined(first: State, second: State) -> State {
+    match (first, second) {
+        (
+            State::Held {
+                _files: mut files,
+                mode,
+                started_unix,
+            },
+            State::Held { _files: more, .. },
+        ) => {
+            files.extend(more);
+            State::Held {
+                _files: files,
+                mode,
+                started_unix,
+            }
+        }
+        (held @ State::Held { .. }, State::Covered { .. })
+        | (State::Covered { .. }, held @ State::Held { .. }) => held,
+        (covered @ State::Covered { .. }, State::Covered { .. }) => covered,
     }
 }
 
@@ -526,8 +586,14 @@ pub fn hold(mode: Mode, what: &str, content: Option<String>) -> Result<Option<St
             None => {}
         }
     }
-    let path = lock_path(&crate::workspace_root()?)?;
-    match attempt(&path, mode, content.as_deref())? {
+    let root = crate::workspace_root()?;
+    let (attempted, decided) = attempt_both(
+        &lock_path(&root)?,
+        &old_lock_path(&root)?,
+        mode,
+        content.as_deref(),
+    )?;
+    match attempted {
         Attempt::Taken(state) => {
             if let Ok(mut slot) = STATE.lock() {
                 *slot = Some(state);
@@ -536,7 +602,7 @@ pub fn hold(mode: Mode, what: &str, content: Option<String>) -> Result<Option<St
         }
         Attempt::Refused(refusal) => {
             log_run(what, "refused");
-            Ok(Some(refusal_message(what, &path, &refusal)))
+            Ok(Some(refusal_message(what, &decided, &refusal)))
         }
     }
 }
@@ -551,7 +617,7 @@ pub fn hold_or_exit(mode: Mode, what: &str, content: Option<String>) -> Result<(
 }
 
 /// メインの作業ツリー（git の共通の置き場の親）。**全検査のログはメインの作業ツリーの `target/full-check/logs/` に置く**——
-/// **作業ツリーで走った全検査のログも、メインの作業ツリーへ集める**（記録は 2026-09-27 から git の共通の置き場の `zaytos/`）。
+/// **作業ツリーで走った全検査のログも、メインの作業ツリーへ集める**（記録は git の共通の置き場の `zeikos/`）。
 pub fn main_tree(root: &Path) -> Result<PathBuf> {
     let common = git_common_dir(root)?;
     common
@@ -561,18 +627,42 @@ pub fn main_tree(root: &Path) -> Result<PathBuf> {
 }
 
 /// いまのロックの持ち主（`/proc/locks` から。`--status` が出す）と、排他の持ち主が書いた中身。
+/// **R5 の間は旧い置き場の錠も見る**（[`old_lock_dir_in`]）。
 pub fn current_holders(root: &Path) -> Result<(Vec<Holder>, String)> {
-    let path = lock_path(root)?;
-    let Ok(file) = OpenOptions::new().read(true).open(&path) else {
-        return Ok((Vec::new(), String::new()));
-    };
-    let refusal = refusal(&file);
-    Ok((refusal.holders, refusal.content))
+    let mut holders: Vec<Holder> = Vec::new();
+    let mut content = String::new();
+    for path in [lock_path(root)?, old_lock_path(root)?] {
+        let Ok(file) = OpenOptions::new().read(true).open(&path) else {
+            continue;
+        };
+        let refusal = refusal(&file);
+        for holder in refusal.holders {
+            if !holders
+                .iter()
+                .any(|(pid, mode, _)| *pid == holder.0 && *mode == holder.1)
+            {
+                holders.push(holder);
+            }
+        }
+        if content.is_empty() {
+            content = refusal.content;
+        }
+    }
+    Ok((holders, content))
 }
 
 /// `tools/vbox-vm.py start` が起こしたまま残した VM（`--status` が出す）。
+/// **R5 の間は旧い置き場の印も見る**（[`old_lock_dir_in`]）。
 pub fn vbox_marks(root: &Path) -> Result<Vec<String>> {
-    Ok(vbox_left_running(&lock_dir_in(&git_common_dir(root)?)))
+    let common = git_common_dir(root)?;
+    let mut names = vbox_left_running(&lock_dir_in(&common));
+    for name in vbox_left_running(&old_lock_dir_in(&common)) {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names.sort();
+    Ok(names)
 }
 
 /// QEMU を起動する前に呼ぶ（起動の入口の裏打ち）。**入口で取り損ねた経路も、ここで取る。**
@@ -599,14 +689,23 @@ pub fn pass_owner(command: &mut Command) {
 
 /// 全検査が走っているか（`/proc/locks` に排他の持ち主が居るか）と、その下で走っているか。
 /// **ロックは取らない**——**基本の検査はロックを取らずに走るので、見るだけである。**
+/// **R5 の間は旧い置き場の錠も見る**（[`old_lock_dir_in`]）。
 fn full_check_state(root: &Path) -> Option<(bool, bool)> {
-    let path = lock_path(root).ok()?;
-    let file = OpenOptions::new().read(true).open(&path).ok()?;
-    let holders = holders_of(&file);
-    let running = holders.iter().any(|(_, mode)| *mode == Mode::Exclusive);
     let named = crate::old_env_names::var(OWNER_ENV);
-    let covered = covering_owner(named.as_deref(), &ancestors(), &holders, Mode::Shared).is_some();
-    Some((running, covered))
+    let ancestors = ancestors();
+    let mut state = None;
+    for path in [lock_path(root).ok()?, old_lock_path(root).ok()?] {
+        let Ok(file) = OpenOptions::new().read(true).open(&path) else {
+            continue;
+        };
+        let holders = holders_of(&file);
+        let running = holders.iter().any(|(_, mode)| *mode == Mode::Exclusive);
+        let covered =
+            covering_owner(named.as_deref(), &ancestors, &holders, Mode::Shared).is_some();
+        let (was_running, was_covered) = state.unwrap_or((false, false));
+        state = Some((was_running || running, was_covered || covered));
+    }
+    state
 }
 
 /// 基本の検査の入口で呼ぶ。**全検査の間に走ったことだけを残す**（運用者の決定 (7)。止めない）。
@@ -668,8 +767,15 @@ pub fn other_runs_during_this_full() -> Option<Vec<String>> {
         }
         None => return None,
     };
-    let runs = fs::read_to_string(path.with_file_name("runs.tsv")).unwrap_or_default();
-    Some(runs_since(&runs, since))
+    // **R5 の間は旧い置き場の実行の記録も読む**（[`old_lock_dir_in`]。旧い版の道具は旧い置き場へ書く）。
+    let common = git_common_dir(&root).ok()?;
+    let mut found = Vec::new();
+    for dir in [lock_dir_in(&common), old_lock_dir_in(&common)] {
+        let runs = fs::read_to_string(dir.join("runs.tsv")).unwrap_or_default();
+        found.extend(runs_since(&runs, since));
+    }
+    found.sort();
+    Some(found)
 }
 
 /// 基本の検査の確かめ（2026-09-25。運用者の回答 3）。**ロックの道がメインの作業ツリー・作業ツリー・環境を減らした子で同じで
@@ -842,12 +948,95 @@ pub fn self_check(root: &Path) -> Result<String> {
     if !report.contains("xtask child: covered by") || !report.contains("python child: covered by") {
         bail!("a child of the holder did not go ahead when the owner came under the old name: {report}");
     }
+
+    // (9)(10) 錠は移す間だけ 2 つ取る（R5 の間だけ。[`old_lock_dir_in`]）。**(9) 旧い錠だけを持つ子（名前を変える前の
+    // 版を模す）が居ると、2 つを取る側（`xtask` も Python も）は断られ、持ち主を挙げる。** **(10) 2 つを持つ子が
+    // 居ると、旧い錠だけを取る側（名前を変える前の版を模す）が断られる。**
+    let old_lock = scratch.join("old").join("check.lock");
+    let old_dir = old_lock
+        .parent()
+        .context("the old lock path has no directory")?;
+    fs::create_dir_all(old_dir)
+        .with_context(|| format!("could not create {}", old_dir.display()))?;
+    let old_arg = old_lock
+        .to_str()
+        .context("the old lock path is not UTF-8")?
+        .to_string();
+    let mut holder = spawn_holder(&exe, &old_lock, &[])?;
+    let outcome = (|| -> Result<()> {
+        let named = format!("pid {}", holder.id());
+        for (who, tried) in [
+            (
+                "xtask taking both locks",
+                try_both_in_child(&exe, &lock, &old_lock, Mode::Shared)?,
+            ),
+            (
+                "tools/check_lock.py taking both locks",
+                try_both_in_python(&tool, &lock, &old_lock)?,
+            ),
+        ] {
+            if tried.0 != Some(REFUSED_EXIT_CODE) || !tried.1.contains(&named) {
+                bail!(
+                    "{who}: a try while a child held only the old lock ended with {:?}, not \
+                     {REFUSED_EXIT_CODE} naming the holder: {}",
+                    tried.0,
+                    tried.1
+                );
+            }
+        }
+        Ok(())
+    })();
+    let _ = holder.kill();
+    let _ = holder.wait();
+    outcome?;
+    let mut holder = spawn_holder(&exe, &lock, &["--old", &old_arg])?;
+    let held = read_line_within(
+        holder.stdout.take().context("no stdout from the holder")?,
+        Duration::from_secs(20),
+        1,
+    );
+    let outcome = (|| -> Result<()> {
+        if held
+            .as_deref()
+            .and_then(|lines| lines.first())
+            .map(String::as_str)
+            != Some("held")
+        {
+            bail!("the child did not report holding both locks within 20 s: {held:?}");
+        }
+        let named = format!("pid {}", holder.id());
+        for (who, tried) in [
+            (
+                "xtask taking only the old lock",
+                try_in_child(&exe, &old_lock, Mode::Shared, None)?,
+            ),
+            (
+                "tools/check_lock.py taking only the old lock",
+                try_in_python(&tool, &old_lock, None)?,
+            ),
+        ] {
+            if tried.0 != Some(REFUSED_EXIT_CODE) || !tried.1.contains(&named) {
+                bail!(
+                    "{who}: a try while a child held both locks ended with {:?}, not \
+                     {REFUSED_EXIT_CODE} naming the holder: {}",
+                    tried.0,
+                    tried.1
+                );
+            }
+        }
+        Ok(())
+    })();
+    let _ = holder.kill();
+    let _ = holder.wait();
+    outcome?;
     let _ = fs::remove_dir_all(&scratch);
     Ok(format!(
         "one path from {}; flock works there; a refusal ended with {REFUSED_EXIT_CODE} and named the \
          holder, in xtask and tools/check_lock.py, also for a non-descendant naming it; a killed \
          holder's lock was released; a VM marked as running refused the full check; only descendants \
-         of the holder went ahead without taking it, also when the owner came under the old name",
+         of the holder went ahead without taking it, also when the owner came under the old name; \
+         while moving the lock, a holder of the old lock alone refused a try of both, and a holder \
+         of both refused a try of the old lock alone",
         places.join(", ")
     ))
 }
@@ -982,6 +1171,42 @@ fn try_in_child(
     ))
 }
 
+/// 子で一時の 2 つの錠を取ってみる（R5 の間だけ。[`attempt_both`]。終了の値と標準エラー）。
+fn try_both_in_child(
+    exe: &Path,
+    lock: &Path,
+    old: &Path,
+    mode: Mode,
+) -> Result<(Option<i32>, String)> {
+    let mut child = Command::new(exe);
+    child
+        .args(["check-lock", "try"])
+        .arg(lock)
+        .arg(mode.label())
+        .arg("--old")
+        .arg(old);
+    crate::old_env_names::env_remove(&mut child, OWNER_ENV);
+    let output = output_within(&mut child, Duration::from_secs(20))
+        .context("could not run a child to try both locks")?;
+    Ok((
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
+}
+
+/// Python の道具で一時の 2 つの錠を共有で取ってみる（R5 の間だけ。終了の値と標準エラー）。
+fn try_both_in_python(tool: &Path, lock: &Path, old: &Path) -> Result<(Option<i32>, String)> {
+    let mut child = Command::new("python3");
+    child.arg(tool).arg("try").arg(lock).arg("--old").arg(old);
+    crate::old_env_names::env_remove(&mut child, OWNER_ENV);
+    let output = output_within(&mut child, Duration::from_secs(20))
+        .context("could not run tools/check_lock.py to try both locks")?;
+    Ok((
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
+}
+
 /// Python の道具で一時のロックを共有で取ってみる（終了の値と標準エラー）。
 fn try_in_python(tool: &Path, lock: &Path, named: Option<u32>) -> Result<(Option<i32>, String)> {
     let mut child = Command::new("python3");
@@ -1040,10 +1265,11 @@ pub fn output_within(command: &mut Command, limit: Duration) -> Result<std::proc
 /// 隠したサブコマンド `cargo xtask check-lock ...`（基本の検査の確かめが使う）。
 ///
 /// - `path [--root DIR]`——ロックの道を出す。
-/// - `hold FILE MODE [--then-try MODE [--owner-by-old-name]]`——一時のロックを持ち、`held` と出して眠る（上限 60 秒）。
+/// - `hold FILE MODE [--old FILE] [--then-try MODE [--owner-by-old-name]]`——一時のロックを持ち、`held` と出して眠る（上限 60 秒）。
+///   `--old` なら、旧い置き場の錠も同じ形で持つ（R5 の間だけ。[`attempt_both`]）。
 ///   `--then-try` なら、持ったまま自分の子に同じロックを取らせ、その結果を出す。`--owner-by-old-name` なら、
 ///   持ち主を旧い名前の環境変数で渡す（R5 の間だけ。[`crate::old_env_names`]）。
-/// - `try FILE MODE`——一時のロックを取ってみる（取れれば 0、断られれば 75）。
+/// - `try FILE MODE [--old FILE]`——一時のロックを取ってみる（取れれば 0、断られれば 75）。`--old` なら 2 つとも取る。
 pub fn command(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("path") => {
@@ -1060,7 +1286,17 @@ pub fn command(args: &[String]) -> Result<()> {
                 .get(2)
                 .and_then(|text| Mode::parse(text))
                 .context("hold needs shared or exclusive")?;
-            let Attempt::Taken(state) = attempt(&file, mode, Some("pid: held by a check\n"))? else {
+            let old = args
+                .iter()
+                .position(|arg| arg == "--old")
+                .and_then(|index| args.get(index + 1))
+                .map(PathBuf::from);
+            let content = Some("pid: held by a check\n");
+            let taken = match &old {
+                Some(old) => attempt_both(&file, old, mode, content)?.0,
+                None => attempt(&file, mode, content)?,
+            };
+            let Attempt::Taken(state) = taken else {
                 bail!("the lock was already held");
             };
             let then = args
@@ -1107,7 +1343,16 @@ pub fn command(args: &[String]) -> Result<()> {
                 .get(2)
                 .and_then(|text| Mode::parse(text))
                 .context("try needs shared or exclusive")?;
-            match attempt(&file, mode, None)? {
+            let old = args
+                .iter()
+                .position(|arg| arg == "--old")
+                .and_then(|index| args.get(index + 1))
+                .map(PathBuf::from);
+            let (attempted, decided) = match &old {
+                Some(old) => attempt_both(&file, old, mode, None)?,
+                None => (attempt(&file, mode, None)?, file.clone()),
+            };
+            match attempted {
                 Attempt::Taken(State::Covered { owner }) => {
                     println!("covered by {owner}");
                     Ok(())
@@ -1117,12 +1362,12 @@ pub fn command(args: &[String]) -> Result<()> {
                     Ok(())
                 }
                 Attempt::Refused(refusal) => {
-                    eprintln!("{}", refusal_message("check-lock try", &file, &refusal));
+                    eprintln!("{}", refusal_message("check-lock try", &decided, &refusal));
                     std::process::exit(REFUSED_EXIT_CODE);
                 }
             }
         }
-        _ => bail!("usage: cargo xtask check-lock path [--root DIR] | hold FILE MODE [--then-try MODE] | try FILE MODE"),
+        _ => bail!("usage: cargo xtask check-lock path [--root DIR] | hold FILE MODE [--old FILE] [--then-try MODE] | try FILE MODE [--old FILE]"),
     }
 }
 
@@ -1251,7 +1496,7 @@ mod tests {
     /// **断りの文は持ち主を挙げ、中身は今の排他の持ち主のものだけを見せる。**
     #[test]
     fn a_refusal_names_the_holder_and_shows_only_its_own_content() {
-        let path = Path::new("/r/.git/zaytos/check.lock");
+        let path = Path::new("/r/.git/zeikos/check.lock");
         let current = Refusal {
             holders: vec![(42, Mode::Exclusive, "xtask full".to_string())],
             content: "pid: 42\ncommit: abc\n".to_string(),
@@ -1281,5 +1526,56 @@ mod tests {
         assert!(text.contains("zaytos-hw-e"), "{text}");
         assert!(text.contains("tools/vbox-vm.py stop --name"), "{text}");
         assert!(text.contains("exit 75"), "{text}");
+    }
+
+    /// **錠を 2 つ取る形で、旧い錠で断られたら、先に取った新しい錠を放す**（R5 の間だけ。[`attempt_both`]）。
+    /// **旧い錠が空けば、2 つとも持つ。**
+    #[test]
+    fn taking_both_locks_releases_the_new_one_when_the_old_one_is_refused() {
+        let scratch =
+            std::env::temp_dir().join(format!("zeikos-both-locks-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&scratch);
+        let new = scratch.join("new").join("check.lock");
+        let old = scratch.join("old").join("check.lock");
+        // **旧い錠を別の開き方で排他に持つ**（名前を変える前の版を模す）。
+        fs::create_dir_all(old.parent().unwrap()).unwrap();
+        let other = open(&old).unwrap();
+        other.try_lock().unwrap();
+        let (attempted, decided) = attempt_both(&new, &old, Mode::Shared, None).unwrap();
+        assert!(matches!(attempted, Attempt::Refused(_)));
+        assert_eq!(decided, old);
+        // **新しい錠は放れている**（別の開き方で排他に取れる）。**少しの間だけ待つ**——**同じプロセスで別のテストの
+        // 糸が子を起こすと、子は exec するまで開いたファイルの写しを持ち、その間は錠が放れない**（上限 1 秒。
+        // 待たずに見ると、全体を回したときに 6 回に 1 回ほど落ちた）。
+        let check = open(&new).unwrap();
+        let freed = (0..200).any(|_| {
+            let taken = check.try_lock().is_ok();
+            if !taken {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            taken
+        });
+        assert!(
+            freed,
+            "the new lock stayed held for 1 s after the old one refused"
+        );
+        check.unlock().unwrap();
+        other.unlock().unwrap();
+        let (attempted, decided) =
+            attempt_both(&new, &old, Mode::Exclusive, Some("pid: test\n")).unwrap();
+        assert_eq!(decided, new);
+        let Attempt::Taken(State::Held { _files: files, .. }) = attempted else {
+            panic!("both locks were not taken once the old one was free");
+        };
+        assert_eq!(files.len(), 2);
+        // **持っている間は、どちらの錠も別の開き方では取れない。**
+        for path in [&new, &old] {
+            assert!(matches!(
+                open(path).unwrap().try_lock_shared(),
+                Err(TryLockError::WouldBlock)
+            ));
+        }
+        drop(files);
+        let _ = fs::remove_dir_all(&scratch);
     }
 }

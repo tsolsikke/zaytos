@@ -31565,6 +31565,18 @@ fn kernel_build_order_path(root: &Path) -> Result<PathBuf> {
     Ok(check_lock::lock_dir_in(&check_lock::git_common_dir(root)?).join("kernel-build-order.txt"))
 }
 
+/// 全検査が kernel を求めた順の記録を読む。**新しい置き場に無ければ、旧い置き場を読む**（R5 の間だけ。
+/// [`check_lock::old_lock_dir_in`]。片付けで外す）。
+fn read_kernel_build_order(root: &Path) -> Option<String> {
+    let common = check_lock::git_common_dir(root).ok()?;
+    [
+        check_lock::lock_dir_in(&common),
+        check_lock::old_lock_dir_in(&common),
+    ]
+    .iter()
+    .find_map(|dir| fs::read_to_string(dir.join("kernel-build-order.txt")).ok())
+}
+
 /// kernel の feature の表（案 A。**組の名前を揃える関数を、ここから 1 つだけ作る**——項目が求める組・順の記録・
 /// fingerprint の 3 つが同じものを通る。2026-09-29。運用者の決定）。
 struct KernelFeatures {
@@ -31630,9 +31642,7 @@ fn start_kernel_builds(root: &Path) {
         }
     };
     let normalize = features.normalizer();
-    let recorded = kernel_build_order_path(root)
-        .ok()
-        .and_then(|path| fs::read_to_string(path).ok())
+    let recorded = read_kernel_build_order(root)
         .map(|text| {
             kernel_builds::canonical_order(&kernel_builds::parse_order(&text), normalize.as_ref())
         })
@@ -31699,7 +31709,7 @@ fn finish_kernel_builds(root: &Path) -> Vec<String> {
     match kernel_build_order_path(root) {
         Ok(path) => {
             // **前の記録も、この回と同じ名前へ揃えてから残す**（揃える前の名前で書いた記録が、同じ組を 2 度並べないように）。
-            let previous = fs::read_to_string(&path)
+            let previous = read_kernel_build_order(root)
                 .map(|text| {
                     kernel_builds::canonical_order(
                         &kernel_builds::parse_order(&text),
