@@ -65,7 +65,7 @@ use crate::abi::private::{
     SYS_SPAWN, SYS_SPAWN_DETACHED, SYS_SPAWN_WITH_PIPED_STDIN, SYS_WAIT_CHILD, TIOCZLOG, TIOCZTAKE,
     ZDIAG_LEN, ZDIAG_TEXT_OFFSET,
 };
-use crate::arch::x86_64::idt::context::IrqContext;
+use crate::arch::x86_64::IrqContext;
 
 /// SYS_CHECKSUM がユーザーバイトを読み込む固定カーネルバッファの大きさ。
 ///
@@ -2489,13 +2489,13 @@ unsafe fn spawn_detached_from_ring3(
     }
     #[cfg(not(feature = "spawn-detached-returns-early"))]
     {
-        let since = crate::arch::x86_64::idt::timer_ticks();
+        let since = crate::arch::x86_64::timer_ticks();
         drop(bkl.take());
         while !(crate::task::ring3_task_in_excursion() || crate::task::ring3_task_finished()) {
             crate::task::yield_now();
         }
         *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
-        let waited = crate::arch::x86_64::idt::timer_ticks().saturating_sub(since);
+        let waited = crate::arch::x86_64::timer_ticks().saturating_sub(since);
         DETACHED_ENTRY_WAIT_TICKS_MAX.fetch_max(waited, Ordering::Relaxed);
     }
     handle
@@ -2766,7 +2766,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, sp_at_call: u64) -> u64 {
     // 同じ文脈へ可変の参照を作る経路も、生のポインタを通して書く経路も無い**（可変の参照 `ctx` を作るのは、この文の
     // 後、BKL を取った後である。割り込みゲートから入ったので IF=0 で、この CPU で割り込みは入らない。文脈はこのタスクの
     // 入口のスタックに在るので、ほかの CPU は触らない）。
-    unsafe { &*context }.check_direction_flag(crate::arch::x86_64::idt::EntryPath::Syscall);
+    unsafe { &*context }.check_direction_flag(crate::arch::x86_64::EntryPath::Syscall);
 
     // **BKL を取る（S4-b-2）。** 割り込みゲート経由なので入場時点で IF=0 だが、
     // BKL の保持区間であることを型で表すためにガードを取る。
@@ -2983,7 +2983,7 @@ pub fn slow_waits() -> u64 {
 #[cfg_attr(feature = "read-never-waits", allow(dead_code))]
 fn wait_for_keyboard(bkl: &mut Option<crate::bkl::BklGuard>) -> bool {
     KEYBOARD_WAITS.fetch_add(1, Ordering::Relaxed);
-    let since = crate::arch::x86_64::idt::timer_ticks();
+    let since = crate::arch::x86_64::timer_ticks();
 
     // **欄を `Waiting` にする。** **ここは IF=0 で、まだ BKL を持っている。**
     crate::task::set_current_waiting(crate::task::Wait::Keyboard);
@@ -3001,7 +3001,7 @@ fn wait_for_keyboard(bkl: &mut Option<crate::bkl::BklGuard>) -> bool {
     // 直接シリアルの許可リストに項目が増える**（`xtask` の `DIRECT_SERIAL_PORT_ALLOWLIST`）。
     // **報せる先は既存の計測の行でよい**——**`init` がセッションの後に出す行がこの数を読む。**
     // **そもそも主たる検出は関係のほうである**（`keyboard::pushed_without_waking`）。
-    let waited = crate::arch::x86_64::idt::timer_ticks().saturating_sub(since);
+    let waited = crate::arch::x86_64::timer_ticks().saturating_sub(since);
     if waited > SLOW_WAIT_TICKS {
         SLOW_WAITS.fetch_add(1, Ordering::Relaxed);
     }
@@ -4031,7 +4031,7 @@ unsafe fn sys_clock_gettime(
     if clockid != CLOCK_MONOTONIC {
         return (-EINVAL) as u64;
     }
-    let ticks = crate::arch::x86_64::idt::monotonic_ticks();
+    let ticks = crate::arch::x86_64::monotonic_ticks();
     // 破壊テスト (W2-d+, clock-goes-backwards): 呼ぶたびに減る値を返す。**単調さが壊れる。**
     // **値はもっともらしいまま進むので、2 回読んで比べる検算でしか検出されない。**
     #[cfg(feature = "clock-goes-backwards")]
@@ -4127,15 +4127,15 @@ unsafe fn sys_nanosleep(
     let Ok(ticks) = common::time::ticks_for_duration(request.sec, request.nsec, hz) else {
         return (-EINVAL) as u64;
     };
-    let deadline = crate::arch::x86_64::idt::monotonic_ticks().saturating_add(ticks);
+    let deadline = crate::arch::x86_64::monotonic_ticks().saturating_add(ticks);
 
-    while crate::arch::x86_64::idt::monotonic_ticks() < deadline {
+    while crate::arch::x86_64::monotonic_ticks() < deadline {
         TIMER_WAITS.fetch_add(1, Ordering::Relaxed);
         crate::task::set_current_waiting(crate::task::Wait::Timer { deadline });
         drop(bkl.take());
         crate::task::yield_now();
         *bkl = Some(crate::bkl::acquire(crate::bkl::KernelEntry::Syscall));
-        if crate::arch::x86_64::idt::monotonic_ticks() < deadline {
+        if crate::arch::x86_64::monotonic_ticks() < deadline {
             EARLY_TIMER_WAKES.fetch_add(1, Ordering::Relaxed);
         }
     }

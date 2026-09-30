@@ -976,8 +976,8 @@ pub fn load_user_program(
     // **`wait-window-is-wide` と同じ「機会を作る」形である。**
     #[cfg(feature = "spawn-detached-returns-early")]
     if crate::arch::x86_64::ring3::current_slot() == crate::task::detached_slot() {
-        let opened = crate::arch::x86_64::idt::monotonic_ticks();
-        while crate::arch::x86_64::idt::monotonic_ticks().saturating_sub(opened) < 2 {
+        let opened = crate::arch::x86_64::monotonic_ticks();
+        while crate::arch::x86_64::monotonic_ticks().saturating_sub(opened) < 2 {
             core::hint::spin_loop();
         }
     }
@@ -1735,7 +1735,7 @@ unsafe fn run_loaded_program(
     // 子のスタックを指し、**次に子を起動したときに親のフレームを踏む。**
     // **`spawn` が戻り先の RSP0 を突き合わせて検出する。**
     let main_entry_stack_top = if crate::arch::x86_64::ring3::depth() == 0 {
-        crate::arch::x86_64::gdt::active_kernel_entry_stack_top()
+        crate::arch::x86_64::active_kernel_entry_stack_top()
     } else if cfg!(feature = "spawn-child-rsp0") {
         crate::arch::x86_64::ring3::excursion_stack_range_at(crate::arch::x86_64::ring3::depth()).1
     } else {
@@ -1808,9 +1808,8 @@ unsafe fn run_loaded_program(
 
     // **DF=1 の文脈から入った割り込みを数える起点（2026-09-24）。** **`spin` は `std` の後で
     // 空回りする**ので、止められるまでに来たタイマはどれも DF=1 の文脈から入る（下の判定行）。
-    let irq_entries_from_df_before = crate::arch::x86_64::idt::entries_from_direction_flag_set(
-        crate::arch::x86_64::idt::EntryPath::Irq,
-    );
+    let irq_entries_from_df_before =
+        crate::arch::x86_64::entries_from_direction_flag_set(crate::arch::x86_64::EntryPath::Irq);
     // SAFETY: entry と stack は今マップしたユーザーページで、`ud2` が必ずフォルト
     // する。main_entry_stack_top はメインのカーネルスタック上端。単一実行文脈である。
     unsafe {
@@ -1853,8 +1852,8 @@ unsafe fn run_loaded_program(
         // **方向フラグの前提（2026-09-24）。** **`--shell-test` が止める `spin` が作る。**
         // **0 なら、IRQ の入口が DF を降ろすという主張は何も確かめていない**
         // （`crate::arch::x86_64::idt::check_direction_flag`）。**判定は `xtask` が行う。**
-        let irq_entries_from_df = crate::arch::x86_64::idt::entries_from_direction_flag_set(
-            crate::arch::x86_64::idt::EntryPath::Irq,
+        let irq_entries_from_df = crate::arch::x86_64::entries_from_direction_flag_set(
+            crate::arch::x86_64::EntryPath::Irq,
         ) - irq_entries_from_df_before;
         logger.info(format_args!(
             "direction flag: {} was interrupted from a context with DF=1 {irq_entries_from_df} \
@@ -2218,7 +2217,7 @@ pub fn spawn(
     //
     // **控えて突き合わせる形なら、どちらの深さでも同じ 1 行で言える**
     // ——**「子が走る前と後で RSP0 が変わっていない」。**
-    let entry_stack_before = crate::arch::x86_64::gdt::active_kernel_entry_stack_top();
+    let entry_stack_before = crate::arch::x86_64::active_kernel_entry_stack_top();
 
     // **親の記録を控える。** 子は `reset_counters` を通る。
     let saved_records = crate::syscall::save_records();
@@ -2375,7 +2374,7 @@ pub fn spawn(
     // **すぐには壊れない**——親はそのまま Ring 3 へ返り、次のシステムコールで
     // 別のスタックに乗る。**壊れるのは、次に子を起動して親のフレームを踏んだ
     // ときである。** 原因から遠いので、ここで突き合わせる。
-    let entry_stack_after = crate::arch::x86_64::gdt::active_kernel_entry_stack_top();
+    let entry_stack_after = crate::arch::x86_64::active_kernel_entry_stack_top();
     if entry_stack_after != entry_stack_before {
         logger.error(format_args!(
             "spawn: RSP0 came back as {entry_stack_after:#x} but it was {entry_stack_before:#x} before the \
@@ -2633,8 +2632,8 @@ pub fn wait_for_ring3_task(handle: u64) -> ChildStatus {
         }
         #[cfg(feature = "wait-window-is-wide")]
         {
-            let opened = crate::arch::x86_64::idt::monotonic_ticks();
-            while crate::arch::x86_64::idt::monotonic_ticks().saturating_sub(opened) < 2 {
+            let opened = crate::arch::x86_64::monotonic_ticks();
+            while crate::arch::x86_64::monotonic_ticks().saturating_sub(opened) < 2 {
                 core::hint::spin_loop();
             }
         }

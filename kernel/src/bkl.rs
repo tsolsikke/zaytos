@@ -232,7 +232,7 @@ pub struct BklGuard {
     ///
     /// `Option` にして [`Drop`] の先頭で `take()` すれば、**数から抜けてから
     /// フラグを落とす**順序を明示できる。
-    entered: Option<crate::arch::x86_64::idt::KernelEntryGuard>,
+    entered: Option<crate::arch::x86_64::KernelEntryGuard>,
     /// 読み出さないが、保持していること自体に意味がある（Drop で割り込みを復元する）。
     ///
     /// **最後のフィールドであることが drop 順の要件である。** BKL のフラグを
@@ -467,7 +467,7 @@ pub fn acquire(entry: KernelEntry) -> BklGuard {
 
     // **同時進入をここで数える（S4-b-3）。** 定義は「取得してから解放するまでの
     // 区間にいるコアの数」なので、**待っている間は入らない。**
-    let entered = Some(crate::arch::x86_64::idt::KernelEntryGuard::enter());
+    let entered = Some(crate::arch::x86_64::KernelEntryGuard::enter());
 
     BklGuard {
         entered,
@@ -583,7 +583,7 @@ fn report_timeout_and_halt(entry: KernelEntry, started: u64) -> ! {
 #[must_use = "ガードを保持している間だけ数えられる"]
 pub fn acquire_counting_only(_entry: KernelEntry) -> BklGuard {
     let interrupts = EntryInterruptGuard::enter();
-    let entered = Some(crate::arch::x86_64::idt::KernelEntryGuard::enter());
+    let entered = Some(crate::arch::x86_64::KernelEntryGuard::enter());
     BklGuard {
         entered,
         interrupts,

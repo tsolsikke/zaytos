@@ -16,7 +16,7 @@ use common::arch::x86_64::cpu;
 use common::log::Logger;
 use common::machine::pc::serial::SerialPort;
 
-use crate::arch::x86_64::{idt, ExitAction};
+use crate::arch::x86_64::ExitAction;
 
 /// 探りの各段で待つスピン上限（S5-c）。上限の無い待ちを書かない。
 #[cfg(feature = "smp-tlb-shootdown-probe")]
@@ -1060,7 +1060,7 @@ pub unsafe fn run_timer_loop(
                     // 「送った数と受け取った数が一致する」を主張したいなら、
                     // まとめられない送り方にする必要がある。
                     for _ in 0..IPI_PROBE_ROUNDS {
-                        let before = idt::ipi_probe_received_for(slot);
+                        let before = crate::arch::x86_64::ipi_probe_received_for(slot);
                         // SAFETY: `apic` はマップ済みで、宛先は起動を確認した AP である。送る所とベクタは
                         // `machine` が持つ（`ADR-0072` の 7。9e-2）。
                         let accepted =
@@ -1071,16 +1071,16 @@ pub unsafe fn run_timer_loop(
                             ));
                             break;
                         }
-                        idt::record_ipi_probe_sent();
+                        crate::arch::x86_64::record_ipi_probe_sent();
                         // 上限つきで待つ（上限の無い待ちを書かない）。
                         let mut spun = 0u32;
-                        while idt::ipi_probe_received_for(slot) == before
+                        while crate::arch::x86_64::ipi_probe_received_for(slot) == before
                             && spun < IPI_PROBE_WAIT_SPINS
                         {
                             core::hint::spin_loop();
                             spun += 1;
                         }
-                        if idt::ipi_probe_received_for(slot) == before {
+                        if crate::arch::x86_64::ipi_probe_received_for(slot) == before {
                             logger.error(format_args!(
                                 "smp: a probe IPI to apic id {processor} was accepted by the ICR but \
                                  the target did not handle it within the spin limit"
@@ -1093,8 +1093,8 @@ pub unsafe fn run_timer_loop(
                          (one at a time; the same vector coalesces in the IRR if sent faster than \
                          it is handled, so they are not batched)",
                         crate::machine::pc::probe_ipi(),
-                        idt::ipi_probe_sent(),
-                        idt::ipi_probe_received_for(slot)
+                        crate::arch::x86_64::ipi_probe_sent(),
+                        crate::arch::x86_64::ipi_probe_received_for(slot)
                     ));
                 }
             }
@@ -1119,7 +1119,7 @@ pub unsafe fn run_timer_loop(
     // 最初のハートビートは基準と同じティックで出る（差が 0 なので
     // `checked_div` が `None` を返す）。**値が乗るのは 2 本目からである。**
     let mut last_heartbeat_cycles = cpu::read_timestamp_counter();
-    let mut last_heartbeat_ticks = idt::timer_ticks();
+    let mut last_heartbeat_ticks = crate::arch::x86_64::timer_ticks();
     // 出したハートビートの本数（S11-11）。**シェルへ渡すタイミングを決める。**
     let mut heartbeats = 0u64;
     let mut announced_first = false;
@@ -1128,7 +1128,7 @@ pub unsafe fn run_timer_loop(
     let mut line = TypedLine::new();
 
     loop {
-        let ticks = idt::timer_ticks();
+        let ticks = crate::arch::x86_64::timer_ticks();
 
         if ticks == 0 {
             if cpu::read_timestamp_counter() - started > FIRST_TICK_TIMEOUT_CYCLES {
@@ -1270,12 +1270,12 @@ pub unsafe fn run_timer_loop(
                         ticks / crate::machine::pc::irq::timer_frequency_hz() as u64,
                         common::percpu::cpu_id(),
                         ap_tick_summary(),
-                        idt::timer_ticks_total(),
+                        crate::arch::x86_64::timer_ticks_total(),
                         // 合計で閉じる相手である。1 本のティックはどこか 1 コアの
                         // スロットと、このベクタ別カウンタの両方を増やす。
-                        idt::timer_delivery_count(),
-                        idt::timer_accounting_balances(),
-                        idt::max_kernel_entry_depth(),
+                        crate::arch::x86_64::timer_delivery_count(),
+                        crate::arch::x86_64::timer_accounting_balances(),
+                        crate::arch::x86_64::max_kernel_entry_depth(),
                         // 「割り当てられた」と「参加した」は別である（S4-c-2、
                         // 観測量は S4-c-3-2a で置き換えた）。占有は `CURRENT` が
                         // 示し、参加は `schedule_switch` を通った回数が示す。
@@ -1289,8 +1289,8 @@ pub unsafe fn run_timer_loop(
                         // できなかった。
                         crate::task::ap_current_display(),
                         crate::task::ap_schedule_passes(),
-                        idt::ipi_probe_sent(),
-                        idt::ipi_probe_received_for(1),
+                        crate::arch::x86_64::ipi_probe_sent(),
+                        crate::arch::x86_64::ipi_probe_received_for(1),
                         crate::bkl::tlb_generation(),
                         crate::bkl::generation_flushes_for(1),
                         // 漂流の観測量（S6-c）。定常状態では動かないはずの量で、
@@ -1384,7 +1384,7 @@ pub unsafe fn run_timer_loop(
             logger.info(format_args!(
                 "timer: this is the end of the steady-loop observation, \
                  timer_accounting_balanced={}; the shell takes the foreground from here",
-                idt::timer_accounting_balances()
+                crate::arch::x86_64::timer_accounting_balances()
             ));
             return;
         }
@@ -1431,7 +1431,7 @@ impl core::fmt::Display for ApTickSummary {
                 write!(f, " ")?;
             }
             first = false;
-            write!(f, "cpu{cpu}={}", idt::timer_ticks_for(cpu))?;
+            write!(f, "cpu{cpu}={}", crate::arch::x86_64::timer_ticks_for(cpu))?;
         }
         if first {
             write!(f, "none")?;

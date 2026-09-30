@@ -1162,7 +1162,8 @@ impl EntryPath {
 /// **前提を作るのは `fault-test`・`syscall-test`・`spin` である。**
 static ENTRIES_FROM_DF_SET: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 
-/// [`ENTRIES_FROM_DF_SET`] の今の値。
+/// 入口の系統 `path` から、割り込まれた側が DF=1 のまま入ってきた回数（[`ENTRIES_FROM_DF_SET`]）。**読むだけで、
+/// 数を変えない。**
 pub fn entries_from_direction_flag_set(path: EntryPath) -> u64 {
     ENTRIES_FROM_DF_SET[path as usize].load(Ordering::Relaxed)
 }

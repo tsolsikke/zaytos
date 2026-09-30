@@ -360,7 +360,7 @@ pub fn read_events(dst: &mut [u8]) -> usize {
     let ticks = if cfg!(feature = "input-events-zero-the-time") {
         0
     } else {
-        crate::arch::x86_64::idt::monotonic_ticks()
+        crate::arch::x86_64::monotonic_ticks()
     };
     let hz = u64::from(crate::machine::pc::irq::timer_frequency_hz());
     let (secs, nanos) = common::time::timespec_from_ticks(ticks, hz);

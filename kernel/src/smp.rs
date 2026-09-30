@@ -478,8 +478,8 @@ const AP_START_WAIT_TICKS: u64 = 50;
 /// 上限のない待ちにならない。ティックが止まっていれば進まないが、
 /// 呼び出し側が回数で上限を持つ。
 fn wait_ticks(count: u64) {
-    let start = crate::arch::x86_64::idt::timer_ticks();
-    while crate::arch::x86_64::idt::timer_ticks().wrapping_sub(start) < count {
+    let start = crate::arch::x86_64::timer_ticks();
+    while crate::arch::x86_64::timer_ticks().wrapping_sub(start) < count {
         core::hint::spin_loop();
     }
 }
@@ -779,7 +779,7 @@ unsafe fn start_local_timer(serial: &mut SerialPort, slot: usize) -> ! {
 fn ap_heartbeat_loop(serial: &mut SerialPort, slot: usize) -> ! {
     let mut next_heartbeat = crate::interrupts::HEARTBEAT_TICKS;
     loop {
-        let ticks = crate::arch::x86_64::idt::timer_ticks_for(slot);
+        let ticks = crate::arch::x86_64::timer_ticks_for(slot);
         // **観測が完了していれば出さない（S11-11）。** BSP がシェルへ渡した後も
         // 出し続けると、**起動ログの長さが実時間に依存する。**
         if ticks >= next_heartbeat && !crate::interrupts::steady_observation_is_closed() {

@@ -21,9 +21,13 @@ pub use ap_stacks::{kernel_stack_bounds_from_top, map_ap_stacks};
 pub use ap_trampoline::{ap_stack_frame, install_trampoline, trampoline_frame};
 pub use fp::{restore_fp_state, save_fp_state, FpArea};
 pub use gdt::{active_kernel_entry_stack_top, set_active_kernel_entry_stack_top};
+pub use idt::context::IrqContext;
 pub use idt::{
-    advance_monotonic_ticks, count_timer_tick, first_tick_arrival, timer_delivery, timer_ticks,
-    ExitAction, Interrupted,
+    advance_monotonic_ticks, count_timer_tick, entries_from_direction_flag_set, first_tick_arrival,
+    ipi_probe_received_for, ipi_probe_sent, max_kernel_entry_depth, monotonic_ticks,
+    record_ipi_probe_sent, timer_accounting_balances, timer_delivery, timer_delivery_count,
+    timer_ticks, timer_ticks_for, timer_ticks_total, EntryPath, ExitAction, Interrupted,
+    KernelEntryGuard,
 };
 pub use paging::switch::{active_page_table_root, set_active_page_table_root};
 pub use ring3::{

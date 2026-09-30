@@ -636,14 +636,14 @@ impl DeviceClaim {
         expected: u16,
         before: u64,
     ) -> Result<(), VirtioBlkError> {
-        let deadline = crate::arch::x86_64::idt::timer_ticks() + BLOCKING_WAIT_TICKS;
+        let deadline = crate::arch::x86_64::timer_ticks() + BLOCKING_WAIT_TICKS;
         loop {
             let guard = common::critical::EntryInterruptGuard::enter();
             if u64::from(IRQ_DELIVERED.load(core::sync::atomic::Ordering::Acquire)) > before {
                 drop(guard);
                 break;
             }
-            if crate::arch::x86_64::idt::timer_ticks() >= deadline {
+            if crate::arch::x86_64::timer_ticks() >= deadline {
                 drop(guard);
                 break;
             }
@@ -860,7 +860,7 @@ pub unsafe fn exercise_blocking_read(
     } // ここで BKL が解け、IF が発行前の値（=1）へ戻る。
 
     // === 完了を眠って待つ。上限つき（ティック）===
-    let deadline = crate::arch::x86_64::idt::timer_ticks() + BLOCKING_WAIT_TICKS;
+    let deadline = crate::arch::x86_64::timer_ticks() + BLOCKING_WAIT_TICKS;
     let mut halts = 0u64;
     loop {
         // cli 下で完了を検査する（取り逃しの窓を閉じる。ADR-0036）。
@@ -869,7 +869,7 @@ pub unsafe fn exercise_blocking_read(
             drop(guard);
             break;
         }
-        if crate::arch::x86_64::idt::timer_ticks() >= deadline {
+        if crate::arch::x86_64::timer_ticks() >= deadline {
             drop(guard);
             return Err(VirtioBlkError::RequestTimedOut { spins: halts });
         }
