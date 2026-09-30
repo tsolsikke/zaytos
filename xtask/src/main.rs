@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env,
     ffi::OsString,
     fs,
@@ -23140,6 +23140,30 @@ const X86_WORDS: &[&str] = &[
 /// 後ろに番号が付いても同じ言葉として数えるもの（`IST1`・`COM2`・`pic8259`）。
 const X86_WORDS_WITH_NUMBERS: &[&str] = &["ist", "com", "pic"];
 
+/// x86 の言葉の数から除く識別子（ファイル・識別子・理由。2026-09-30。境界の段階の手順 2。運用者の決定）。
+///
+/// **CPU によらない仕様の名前で、x86 の言葉を含むものだけを載せる。** **そのファイルのその識別子だけを除く**
+/// （ほかのファイルや、ほかの識別子の同じ語は数える）。**死んだ行は落とす**——そのファイルのコードに識別子が
+/// 無い行があれば、この検査が落ちる（[`dead_x86_word_exceptions`]）。
+const X86_WORD_EXCEPTIONS: &[(&str, &str, &str)] = &[
+    (
+        "kernel/src/memory_map.rs",
+        "MMIO_PORT_SPACE",
+        "UEFI の仕様の EFI_MEMORY_TYPE の 12（EfiMemoryMappedIOPortSpace）の名前。メモリマップを読むには、どの CPU でも\
+         この種別を知る必要があり、名前は仕様に合わせる",
+    ),
+    (
+        "kernel/src/frame_allocator.rs",
+        "MMIO_PORT_SPACE",
+        "memory_map.rs の同じ種別の名前を、ページを数えるときに使う",
+    ),
+    (
+        "kernel/src/frame_allocator.rs",
+        "mmio_port_space_pages",
+        "上の種別のページの数を数える欄（種別の名前に合わせた）",
+    ),
+];
+
 /// 語が x86 の言葉か。
 fn is_x86_word(word: &str) -> bool {
     if X86_WORDS.contains(&word) {
@@ -23321,9 +23345,15 @@ fn code_for_word_count(text: &str) -> String {
 }
 
 /// 1 つのファイルの x86 の言葉を、語ごとに数える（コメントとログの文言は数えない。[`code_for_word_count`]）。
-fn x86_words_in(text: &str) -> BTreeMap<String, usize> {
+/// **`skip` の識別子は数えない**（[`X86_WORD_EXCEPTIONS`]）。**除いた識別子と、その出た回数も返す**（死んだ行を
+/// 見つけるのと、除いた数を出すため）。
+fn x86_words_in_skipping(
+    text: &str,
+    skip: &[&str],
+) -> (BTreeMap<String, usize>, BTreeMap<String, usize>) {
     let code = code_for_word_count(text);
     let mut counts = BTreeMap::new();
+    let mut skipped = BTreeMap::new();
     let mut identifier = String::new();
     for c in code.chars().chain(std::iter::once(' ')) {
         if c.is_alphanumeric() || c == '_' {
@@ -23331,15 +23361,39 @@ fn x86_words_in(text: &str) -> BTreeMap<String, usize> {
             continue;
         }
         if identifier.starts_with(|c: char| c.is_alphabetic() || c == '_') {
-            for word in identifier_words(&identifier) {
-                if is_x86_word(&word) {
-                    *counts.entry(word).or_default() += 1;
+            if skip.contains(&identifier.as_str()) {
+                *skipped.entry(identifier.clone()).or_default() += 1;
+            } else {
+                for word in identifier_words(&identifier) {
+                    if is_x86_word(&word) {
+                        *counts.entry(word).or_default() += 1;
+                    }
                 }
             }
         }
         identifier.clear();
     }
-    counts
+    (counts, skipped)
+}
+
+/// ファイルに当てる [`X86_WORD_EXCEPTIONS`] の識別子。
+fn x86_word_exceptions_for(path: &str) -> Vec<&'static str> {
+    X86_WORD_EXCEPTIONS
+        .iter()
+        .filter(|(file, _, _)| *file == path)
+        .map(|(_, identifier, _)| *identifier)
+        .collect()
+}
+
+/// [`X86_WORD_EXCEPTIONS`] の行のうち、そのファイルのコードに識別子が無かったもの（純粋な論理。**死んだ行を返す**）。
+fn dead_x86_word_exceptions(
+    rows: &[(&str, &str, &str)],
+    seen: &BTreeSet<(String, String)>,
+) -> Vec<String> {
+    rows.iter()
+        .filter(|(file, identifier, _)| !seen.contains(&(file.to_string(), identifier.to_string())))
+        .map(|(file, identifier, _)| format!("{file} {identifier}"))
+        .collect()
 }
 
 /// ファイルが共通の側か、`main.rs` か、置き場か。
@@ -23396,6 +23450,8 @@ fn check_x86_words(workspace_root: &Path, update: bool) -> Result<String> {
     let mut common = 0usize;
     let mut boot = 0usize;
     let mut homes = 0usize;
+    let mut excepted = 0usize;
+    let mut seen_exceptions: BTreeSet<(String, String)> = BTreeSet::new();
     let mut per_file: Vec<(String, BTreeMap<String, usize>)> = Vec::new();
     for path in checked_files(workspace_root, &["kernel/src", "common/src"])? {
         if !path.ends_with(".rs") {
@@ -23403,7 +23459,11 @@ fn check_x86_words(workspace_root: &Path, update: bool) -> Result<String> {
         }
         let text = fs::read_to_string(workspace_root.join(&path))
             .with_context(|| format!("failed to read {path}"))?;
-        let counts = x86_words_in(&text);
+        let (counts, skipped) = x86_words_in_skipping(&text, &x86_word_exceptions_for(&path));
+        for (identifier, count) in skipped {
+            excepted += count;
+            seen_exceptions.insert((path.clone(), identifier));
+        }
         let total: usize = counts.values().sum();
         match x86_word_side(&path) {
             X86WordSide::Common => common += total,
@@ -23414,10 +23474,19 @@ fn check_x86_words(workspace_root: &Path, update: bool) -> Result<String> {
             per_file.push((path, counts));
         }
     }
+    let dead = dead_x86_word_exceptions(X86_WORD_EXCEPTIONS, &seen_exceptions);
+    if !dead.is_empty() {
+        bail!(
+            "X86_WORD_EXCEPTIONS has dead rows (the identifier is not in the file's code; remove the row): {}",
+            dead.join("; ")
+        );
+    }
     let reference = workspace_root.join(REFERENCE_X86_WORDS);
     let recorded = format!("common {common}\n{X86_WORDS_BOOT_SEQUENCE} {boot}\n");
     let summary = format!(
-        "common side {common}, {X86_WORDS_BOOT_SEQUENCE} {boot}, arch/machine/abi {homes} (not limited)"
+        "common side {common}, {X86_WORDS_BOOT_SEQUENCE} {boot}, arch/machine/abi {homes} (not limited); \
+         {excepted} word(s) of {} X86_WORD_EXCEPTIONS row(s) not counted",
+        X86_WORD_EXCEPTIONS.len()
     );
     let Ok(text) = fs::read_to_string(&reference) else {
         if update {
@@ -23441,7 +23510,13 @@ fn check_x86_words(workspace_root: &Path, update: bool) -> Result<String> {
                 .output()
                 .ok()
                 .filter(|output| output.status.success())
-                .map(|output| x86_words_in(&String::from_utf8_lossy(&output.stdout)))
+                .map(|output| {
+                    x86_words_in_skipping(
+                        &String::from_utf8_lossy(&output.stdout),
+                        &x86_word_exceptions_for(path),
+                    )
+                    .0
+                })
                 .unwrap_or_default();
             let grown: Vec<String> = counts
                 .iter()
@@ -32572,6 +32647,35 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         }
     }
 
+    /// **例外の表の識別子は、そのファイルで数えない。** **ほかの識別子の同じ語は数える。** **表の行がファイルの
+    /// コードに無ければ、死んだ行として返る**（2026-09-30）。
+    #[test]
+    fn x86_word_exceptions_skip_the_listed_identifier_and_find_dead_rows() {
+        let text = "const MMIO_PORT_SPACE: u32 = 12; let port = 0; let kind = MMIO_PORT_SPACE;";
+        let (counts, skipped) = x86_words_in_skipping(text, &["MMIO_PORT_SPACE"]);
+        assert_eq!(
+            counts.get("port"),
+            Some(&1),
+            "only the local `port`: {counts:?}"
+        );
+        assert_eq!(skipped.get("MMIO_PORT_SPACE"), Some(&2), "{skipped:?}");
+        let (counts, _) = x86_words_in_skipping(text, &[]);
+        assert_eq!(
+            counts.get("port"),
+            Some(&3),
+            "without the exception: {counts:?}"
+        );
+        let rows = [
+            ("a.rs", "MMIO_PORT_SPACE", "a reason"),
+            ("b.rs", "GONE_NAME", "a reason"),
+        ];
+        let seen: BTreeSet<(String, String)> =
+            [("a.rs".to_string(), "MMIO_PORT_SPACE".to_string())]
+                .into_iter()
+                .collect();
+        assert_eq!(dead_x86_word_exceptions(&rows, &seen), ["b.rs GONE_NAME"]);
+    }
+
     /// **x86 の言葉は、コードと `asm!` の中の文字列で数え、コメントとログの文言では数えない**（2026-09-27。
     /// 境界の段階の手順 2）。**識別子は語に分けて比べる**（`SerialPort` の `port`、`read_cr3` の `cr3`）。
     #[test]
@@ -32590,7 +32694,7 @@ fn read_cr3() -> u64 {
     value
 }
 "##;
-        let counts = x86_words_in(text);
+        let counts = x86_words_in_skipping(text, &[]).0;
         assert_eq!(counts.get("cr3"), Some(&2), "{counts:?}");
         assert_eq!(counts.get("port"), Some(&2), "{counts:?}");
         assert_eq!(counts.get("ist1"), Some(&1), "{counts:?}");

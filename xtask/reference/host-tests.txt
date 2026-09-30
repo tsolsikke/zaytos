@@ -871,6 +871,7 @@ xtask::tests::the_selection_score_separates_caught_from_complete
 xtask::tests::the_stop_watch_waits_one_more_round
 xtask::tests::the_two_s13b_markers_drop_their_lines_and_nothing_else
 xtask::tests::the_x86_word_sides_follow_the_homes
+xtask::tests::x86_word_exceptions_skip_the_listed_identifier_and_find_dead_rows
 xtask::tests::x86_words_are_counted_in_code_and_asm_but_not_in_comments_or_log_text
 xtask::tool_checks::tests::png_dimensions_are_read_from_the_header
 xtask::vbox::tests::a_keystroke_that_also_came_through_the_8259_fails
