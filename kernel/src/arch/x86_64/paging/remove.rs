@@ -146,7 +146,7 @@ pub unsafe fn remove_identity(
     let cr3 = switch::active_page_table_root();
     // SAFETY: cr3 は稼働中の自前テーブル、direct_map（高位ウィンドウ）でそのフレームを
     // 読める。読み取りのみ。
-    let saved0 = unsafe { verify::read_pml4_entry(cr3, direct_map, IDENTITY_INDEX) };
+    let saved0 = unsafe { verify::read_top_entry(cr3, direct_map, IDENTITY_INDEX) };
     logger.info(format_args!(
         "identity-removal: begin. live PML4={:#x}, saved PML4[0]={saved0:#x}",
         cr3.as_u64()
@@ -219,7 +219,7 @@ pub unsafe fn remove_identity(
     }
     // PML4[0] が空になったこと。
     // SAFETY: cr3 は稼働テーブル、direct_map で読める。読み取りのみ。
-    let pml4_0_after = unsafe { verify::read_pml4_entry(cr3, direct_map, IDENTITY_INDEX) };
+    let pml4_0_after = unsafe { verify::read_top_entry(cr3, direct_map, IDENTITY_INDEX) };
     let pml4_0_empty = pml4_0_after & PRESENT == 0;
     logger.info(format_args!(
         "identity-removal: PML4[0] after clear = {pml4_0_after:#x} (empty={pml4_0_empty})"

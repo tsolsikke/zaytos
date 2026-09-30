@@ -940,7 +940,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // fb_start/fb_end は上（extra_ranges 構築時）で計算済みのものを使う。
     let current_rsp = cpu::read_rsp();
     let current_rip = cpu::read_rip();
-    let pml4_phys = builder.pml4_phys();
+    let pml4_phys = builder.root();
 
     let mut all_required_ok = true;
     // 必須領域はいずれも物理アドレスの範囲である。マップ計画が物理で書かれているため。
@@ -4646,7 +4646,7 @@ fn demo_address_space_switch(
     logger.info(format_args!(
         "address-space: built a second address space (pml4={:#x}); the production one is {:#x}; \
          about to switch",
-        space.pml4().as_u64(),
+        space.root().as_u64(),
         production.as_u64()
     ));
 
@@ -4660,8 +4660,8 @@ fn demo_address_space_switch(
         "address-space: still running after the switch (cr3 read back = {:#x}, expected {:#x}, \
          matches={})",
         after.as_u64(),
-        space.pml4().as_u64(),
-        after.as_u64() == space.pml4().as_u64()
+        space.root().as_u64(),
+        after.as_u64() == space.root().as_u64()
     ));
 
     // SAFETY: 本番のテーブルへ戻すだけ。こちらは起動以来使っているものである。
@@ -4801,16 +4801,14 @@ fn demo_two_address_spaces(
         // SAFETY: いずれも direct map が覆う稼働可能な PML4。添字は 512 未満。
         let (p, a, b) = unsafe {
             (
-                kernel::arch::x86_64::paging::verify::read_pml4_entry(
-                    production, direct_map, index,
-                ),
-                kernel::arch::x86_64::paging::verify::read_pml4_entry(
-                    space_a.pml4(),
+                kernel::arch::x86_64::paging::verify::read_top_entry(production, direct_map, index),
+                kernel::arch::x86_64::paging::verify::read_top_entry(
+                    space_a.root(),
                     direct_map,
                     index,
                 ),
-                kernel::arch::x86_64::paging::verify::read_pml4_entry(
-                    space_b.pml4(),
+                kernel::arch::x86_64::paging::verify::read_top_entry(
+                    space_b.root(),
                     direct_map,
                     index,
                 ),
@@ -9177,7 +9175,7 @@ fn verify_user_page_mapping<const CAP: usize>(
 
     // SAFETY: CR3 は自前テーブルへ切り替え済みで、配下は恒等ウィンドウで読み書きできる。
     let mut table = unsafe { ActivePageTable::current(identity) };
-    let pml4_phys = table.pml4_phys();
+    let pml4_phys = table.root();
 
     // --- マップする（専用サブツリー、user=true で全階層 U=1） ---
     let attributes = PageAttributes {
@@ -9360,7 +9358,7 @@ fn verify_ring3_excursion<const CAP: usize>(
 
     // SAFETY: CR3 は自前テーブル。配下は恒等ウィンドウで読み書きできる。
     let mut table = unsafe { ActivePageTable::current(identity) };
-    let pml4_phys = table.pml4_phys();
+    let pml4_phys = table.root();
 
     // 2 ページを U=1 でマップする（M5-e-2 残置の中間テーブルを再利用）。
     // 破壊テスト (ring3-test-user-page-supervisor): USER を落とす（U=0）。遠征前の両側監査が
@@ -12630,7 +12628,7 @@ fn build_and_switch_direct_map(
     #[cfg(not(feature = "highhalf-no-kernel-high-in-live-table"))]
     map_kernel_high_half(&mut builder, logger);
 
-    let new_pml4 = builder.pml4_phys();
+    let new_pml4 = builder.root();
     let frames_used = builder.frames_used();
     logger.info(format_args!(
         "direct-map: built a new table at PML4 {:#x} using {frames_used} frame(s) ({} KiB), \
@@ -13171,10 +13169,10 @@ fn build_and_verify_high_half(
     // SAFETY: CR3 は自前のテーブルを指しており、恒等マッピングで読める。
     let live_pml4 =
         unsafe { kernel::arch::x86_64::paging::active::ActivePageTable::current(direct_map) }
-            .pml4_phys();
+            .root();
     let live_before: [u64; entry_count()] = core::array::from_fn(|index| {
         // SAFETY: 稼働中の PML4 は有効なテーブルで、添字は 512 未満。
-        unsafe { verify::read_pml4_entry(live_pml4, direct_map, index) }
+        unsafe { verify::read_top_entry(live_pml4, direct_map, index) }
     });
 
     let frames_before = allocator.free_frame_count();
@@ -13217,7 +13215,7 @@ fn build_and_verify_high_half(
         cpu::halt_forever();
     }
 
-    let new_pml4 = builder.pml4_phys();
+    let new_pml4 = builder.root();
     let frames_used = frames_before - allocator.free_frame_count();
     logger.info(format_args!(
         "high-half: built a new table at PML4 {:#x} using {frames_used} frame(s) ({} KiB)",
@@ -13296,7 +13294,7 @@ fn build_and_verify_high_half(
     // --- 稼働中テーブルが無傷であること ---
     let live_after: [u64; entry_count()] = core::array::from_fn(|index| {
         // SAFETY: 上記と同じ。
-        unsafe { verify::read_pml4_entry(live_pml4, direct_map, index) }
+        unsafe { verify::read_top_entry(live_pml4, direct_map, index) }
     });
     let live_untouched = live_before == live_after;
     logger.info(format_args!(
@@ -13383,7 +13381,7 @@ fn verify_page_tables(
     let table = unsafe { ActivePageTable::current(common::addr::direct_map()) };
     logger.info(format_args!(
         "paging: walking the live tables from PML4 {:#x}",
-        table.pml4_phys().as_u64()
+        table.root().as_u64()
     ));
 
     // --- TLB フラッシュの前提を実測する ---

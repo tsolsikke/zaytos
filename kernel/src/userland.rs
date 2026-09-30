@@ -1252,7 +1252,7 @@ pub fn global_difference_checks() -> u64 {
 #[inline(never)]
 fn forget_task_root_before_destroy(logger: &mut Logger<SerialPort>, process: &UserProcess) {
     let name = process.name;
-    let root = process.space.pml4().as_u64();
+    let root = process.space.root().as_u64();
     if crate::task::forget_page_table_root_if(root) {
         logger.error(format_args!(
             "task: a task still pointed its cr3 at {name}'s address space {root:#x} when the \
@@ -1596,7 +1596,7 @@ fn load_user_program_into(
             continue;
         };
         // SAFETY: この空間の PML4 は有効で、direct map が配下を覆っている。読み取りのみ。
-        match unsafe { verify::walk(process.space.pml4(), direct_map, virt) } {
+        match unsafe { verify::walk(process.space.root(), direct_map, virt) } {
             Ok(resolved) => {
                 let writable =
                     resolved.entry & crate::arch::x86_64::paging::entry::PTE_WRITABLE != 0;
@@ -1752,8 +1752,8 @@ unsafe fn run_loaded_program(
     // コードとスタックは見え続ける。
     unsafe {
         crate::task::switch_page_table_root_and_note(
-            process.space.pml4(),
-            process.space.pml4().as_u64(),
+            process.space.root(),
+            process.space.root().as_u64(),
         )
     };
     // **このプロセスの fd の表を据える（S10-b）。** `dispatch` はプロセスを

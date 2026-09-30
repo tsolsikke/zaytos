@@ -1,2 +1,2 @@
-common 202
-kernel/src/main.rs 715
+common 187
+kernel/src/main.rs 698

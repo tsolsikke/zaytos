@@ -362,7 +362,7 @@ pub unsafe fn wake_application_processors(
             frame.as_u64(),
             installed.start,
             stack_top_identity,
-            installed.cr3
+            installed.page_table_root
         ));
 
         // INIT と SIPI を送る（順番と待ち、2 回目の SIPI を送る条件は machine の側が持つ）。
@@ -490,7 +490,7 @@ static AP_BRINGUP: [AtomicU64; MAX_APS * 4] = [const { AtomicU64::new(0) }; MAX_
 /// 引き継ぎ表へ書く（BSP 側）。
 fn store_bringup(slot: usize, info: &ApBringUp) {
     let base = (slot - 1) * 4;
-    AP_BRINGUP[base].store(info.production_cr3, Ordering::SeqCst);
+    AP_BRINGUP[base].store(info.production_root, Ordering::SeqCst);
     AP_BRINGUP[base + 1].store(info.stacks.kernel_top, Ordering::SeqCst);
     AP_BRINGUP[base + 2].store(info.stacks.double_fault_top, Ordering::SeqCst);
     AP_BRINGUP[base + 3].store(info.stacks.page_fault_top, Ordering::SeqCst);
@@ -527,7 +527,7 @@ fn load_bringup(slot: usize) -> Option<ApBringUp> {
         return None;
     }
     Some(ApBringUp {
-        production_cr3: root,
+        production_root: root,
         stacks: ApStacks {
             kernel_top: AP_BRINGUP[base + 1].load(Ordering::SeqCst),
             double_fault_top: AP_BRINGUP[base + 2].load(Ordering::SeqCst),
@@ -551,7 +551,7 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
     // SAFETY: 稼働中のテーブルを direct map 越しに読むだけ（本番テーブルには
     // direct map がある）。読み取りのみ。
     let first_top_entry = unsafe {
-        crate::arch::x86_64::paging::verify::read_pml4_entry(
+        crate::arch::x86_64::paging::verify::read_top_entry(
             root_phys,
             common::addr::direct_map(),
             0,
@@ -829,7 +829,7 @@ pub unsafe fn prepare_ap_per_cpu<const CAP: usize>(
     logger: &mut Logger<SerialPort>,
     allocator: &mut FrameAllocator<CAP>,
 ) {
-    let production_cr3 = crate::arch::x86_64::paging::switch::active_page_table_root().as_u64();
+    let production_root = crate::arch::x86_64::paging::switch::active_page_table_root().as_u64();
     for slot in 1..common::percpu::MAX_CPUS {
         // SAFETY: 呼び出し元契約。まだ AP は走っていない。
         let Some(stacks) = (unsafe { crate::arch::x86_64::map_ap_stacks(logger, slot, allocator) })
@@ -843,7 +843,7 @@ pub unsafe fn prepare_ap_per_cpu<const CAP: usize>(
         store_bringup(
             slot,
             &ApBringUp {
-                production_cr3,
+                production_root,
                 stacks,
                 slot,
             },

@@ -265,7 +265,7 @@ impl AddressSpace {
     }
 
     /// この空間の PML4 の物理アドレス。
-    pub fn pml4(&self) -> PhysAddr {
+    pub fn root(&self) -> PhysAddr {
         self.pml4
     }
 

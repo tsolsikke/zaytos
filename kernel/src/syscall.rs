@@ -2814,8 +2814,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, sp_at_call: u64) -> u64 {
     let direct_map = common::addr::direct_map();
     // SAFETY: CR3 を読んで現在のテーブルを構築するだけ（読み取り）。IF=0 の単一文脈。
     let page_table_root =
-        unsafe { crate::arch::x86_64::paging::active::ActivePageTable::current(direct_map) }
-            .pml4_phys();
+        unsafe { crate::arch::x86_64::paging::active::ActivePageTable::current(direct_map) }.root();
 
     // **[`SYS_SPAWN`] だけは、この関数が持つ。** BKL を解いてから入る必要があり、
     // ガードはここのローカルである（[`spawn_from_ring3`]）。

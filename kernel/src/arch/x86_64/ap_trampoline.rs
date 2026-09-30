@@ -363,8 +363,8 @@ core::arch::global_asm!(
 pub struct InstalledTrampoline {
     /// BSP から見た書き込み先（direct map の VA）。
     direct_map_base: u64,
-    /// AP に渡す CR3（静的初期テーブルの物理）。
-    pub cr3: u64,
+    /// AP に渡すページテーブルの根（CR3 に載せる。静的初期テーブルの物理）。
+    pub page_table_root: u64,
     /// AP が最初に実行する場所（トランポリンを置いたページ。SIPI に載せる。2026-09-29 の 9f で、SIPI のベクタの値から
     /// `machine` の型にした）。
     pub start: crate::machine::pc::StartAddress,
@@ -526,7 +526,7 @@ pub unsafe fn install_trampoline(
 
     let installed = InstalledTrampoline {
         direct_map_base,
-        cr3,
+        page_table_root: cr3,
         // SIPI のベクタ（ページの番号）にするのは `machine` である（4 KiB の境界で 1 MiB より下かも確かめる）。
         start: crate::machine::pc::StartAddress::of_page(frame),
     };

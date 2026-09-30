@@ -124,16 +124,16 @@ pub const fn page_address_2m(entry: u64) -> PhysAddr {
 // **実装は `VirtAddr` 側に集約してある（T-2b）。** ここは呼び出しを
 // 中継するだけである。二重に持つと、片方だけ直したときに食い違う。
 pub const fn pml4_index(addr: VirtAddr) -> usize {
-    addr.pml4_index()
+    addr.top_index()
 }
 pub const fn pdpt_index(addr: VirtAddr) -> usize {
-    addr.pdpt_index()
+    addr.upper_index()
 }
 pub const fn pd_index(addr: VirtAddr) -> usize {
-    addr.pd_index()
+    addr.middle_index()
 }
 pub const fn pt_index(addr: VirtAddr) -> usize {
-    addr.pt_index()
+    addr.leaf_index()
 }
 
 /// x86_64 の仮想アドレスが正規形（canonical）か。

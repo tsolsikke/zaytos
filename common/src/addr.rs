@@ -249,21 +249,22 @@ impl VirtAddr {
         }
     }
 
-    // ページテーブルの各階層の添字。
+    // ページテーブルの各階層の添字。**上の段から top・upper・middle・leaf である**（x86 の PML4・PDPT・PD・PT、
+    // AArch64 の 4 KiB の粒度の L0〜L3。どちらも 9 ビットずつ）。
     //
     // **T-2 で `kernel::arch::x86_64::paging::entry` 側の同等の実装をこれに統合する。**
     // 二重に持つと、片方だけ直したときに食い違う。統合の際は、既存の実装と
     // ここが同じ結果を返すことを確かめること。
-    pub const fn pml4_index(self) -> usize {
+    pub const fn top_index(self) -> usize {
         ((self.0 >> 39) & 0x1FF) as usize
     }
-    pub const fn pdpt_index(self) -> usize {
+    pub const fn upper_index(self) -> usize {
         ((self.0 >> 30) & 0x1FF) as usize
     }
-    pub const fn pd_index(self) -> usize {
+    pub const fn middle_index(self) -> usize {
         ((self.0 >> 21) & 0x1FF) as usize
     }
-    pub const fn pt_index(self) -> usize {
+    pub const fn leaf_index(self) -> usize {
         ((self.0 >> 12) & 0x1FF) as usize
     }
 }
@@ -662,10 +663,10 @@ mod tests {
         // PML4=1, PDPT=2, PD=3, PT=4 になるアドレス。
         let raw = (1u64 << 39) | (2u64 << 30) | (3u64 << 21) | (4u64 << 12);
         let addr = VirtAddr::new(raw).unwrap();
-        assert_eq!(addr.pml4_index(), 1);
-        assert_eq!(addr.pdpt_index(), 2);
-        assert_eq!(addr.pd_index(), 3);
-        assert_eq!(addr.pt_index(), 4);
+        assert_eq!(addr.top_index(), 1);
+        assert_eq!(addr.upper_index(), 2);
+        assert_eq!(addr.middle_index(), 3);
+        assert_eq!(addr.leaf_index(), 4);
         assert_eq!(addr.page_offset(), 0);
         assert_eq!(VirtAddr::new(raw | 0xABC).unwrap().page_offset(), 0xABC);
     }

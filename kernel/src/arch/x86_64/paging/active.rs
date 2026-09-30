@@ -101,7 +101,7 @@ impl ActivePageTable {
         }
     }
 
-    pub const fn pml4_phys(&self) -> PhysAddr {
+    pub const fn root(&self) -> PhysAddr {
         self.pml4_phys
     }
 

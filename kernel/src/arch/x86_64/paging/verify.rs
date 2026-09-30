@@ -81,13 +81,13 @@ pub unsafe fn walk(
     };
 
     // **降り方をここに独立して書く。** 構築側のループとは別物である。
-    let pml4e = read(pml4_phys, virt.pml4_index());
+    let pml4e = read(pml4_phys, virt.top_index());
     if pml4e & bits::PRESENT == 0 {
         return Err(WalkError::NotPresent);
     }
 
     let pdpt = PhysAddr::new_const(pml4e & bits::ADDR_4K);
-    let pdpte = read(pdpt, virt.pdpt_index());
+    let pdpte = read(pdpt, virt.upper_index());
     if pdpte & bits::PRESENT == 0 {
         return Err(WalkError::NotPresent);
     }
@@ -96,7 +96,7 @@ pub unsafe fn walk(
     }
 
     let pd = PhysAddr::new_const(pdpte & bits::ADDR_4K);
-    let pde = read(pd, virt.pd_index());
+    let pde = read(pd, virt.middle_index());
     if pde & bits::PRESENT == 0 {
         return Err(WalkError::NotPresent);
     }
@@ -112,7 +112,7 @@ pub unsafe fn walk(
     }
 
     let pt = PhysAddr::new_const(pde & bits::ADDR_4K);
-    let pte = read(pt, virt.pt_index());
+    let pte = read(pt, virt.leaf_index());
     if pte & bits::PRESENT == 0 {
         return Err(WalkError::NotPresent);
     }
@@ -283,25 +283,25 @@ pub unsafe fn walk_user_accessible(
         Ok(())
     };
 
-    let pml4e = read(pml4_phys, virt.pml4_index());
+    let pml4e = read(pml4_phys, virt.top_index());
     present_and_user(pml4e)?;
 
     let pdpt = PhysAddr::new_const(pml4e & bits::ADDR_4K);
-    let pdpte = read(pdpt, virt.pdpt_index());
+    let pdpte = read(pdpt, virt.upper_index());
     present_and_user(pdpte)?;
     if pdpte & bits::PAGE_SIZE != 0 {
         return Err(UserAccessError::GiantPage);
     }
 
     let pd = PhysAddr::new_const(pdpte & bits::ADDR_4K);
-    let pde = read(pd, virt.pd_index());
+    let pde = read(pd, virt.middle_index());
     present_and_user(pde)?;
     if pde & bits::PAGE_SIZE != 0 {
         return Err(UserAccessError::HugePage);
     }
 
     let pt = PhysAddr::new_const(pde & bits::ADDR_4K);
-    let pte = read(pt, virt.pt_index());
+    let pte = read(pt, virt.leaf_index());
     present_and_user(pte)?;
 
     Ok(())
@@ -314,7 +314,7 @@ pub unsafe fn walk_user_accessible(
 /// # Safety
 ///
 /// [`walk`] と同じ契約。
-pub unsafe fn read_pml4_entry(pml4_phys: PhysAddr, direct_map: DirectMap, index: usize) -> u64 {
+pub unsafe fn read_top_entry(pml4_phys: PhysAddr, direct_map: DirectMap, index: usize) -> u64 {
     // SAFETY: 呼び出し元契約による。読み取りのみ。
     unsafe {
         core::ptr::read_volatile(

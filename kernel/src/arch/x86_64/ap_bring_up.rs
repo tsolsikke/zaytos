@@ -30,7 +30,7 @@ pub struct ApStacks {
 #[derive(Clone, Copy)]
 pub struct ApBringUp {
     /// 本番テーブルの物理（`mov cr3` に載せる）。
-    pub production_cr3: u64,
+    pub production_root: u64,
     /// 本番テーブルにしか存在しない per-CPU スタック。
     pub stacks: ApStacks,
     /// このコアのスロット。
@@ -76,7 +76,7 @@ pub struct ApBringUp {
 ///
 /// # 契約（境界の関数。2026-09-28）
 ///
-/// - `info.production_cr3` は本番のページテーブルの根の**物理アドレス**、`info.stacks` の 3 つの頂点は本番の
+/// - `info.production_root` は本番のページテーブルの根の**物理アドレス**、`info.stacks` の 3 つの頂点は本番の
 ///   ページテーブルにだけある**仮想アドレス**、`info.slot` はこの AP のスロットの番号（1 から）である。
 /// - 呼んでよいのは AP 自身だけで、トランポリンから入った直後（起動の表の上、割り込みは止まったまま、自分の GDT は
 ///   まだ載っていない）に 1 回だけである。BKL は要らない（共有するものにまだ触らない）。
@@ -180,7 +180,7 @@ pub unsafe fn bring_up_application_processor(
     }
 
     // 3. CR3 と RSP を隣接して切り替え、入口へ `call` で入る（System V の入口の決まりに合わせる。2026-09-28）。
-    // SAFETY: `production_cr3` は BSP が動いている本番テーブルの物理で、
+    // SAFETY: `production_root` は BSP が動いている本番テーブルの物理で、
     // `kernel_top` はそのテーブルに存在する VA である。間に何も置かない。
     // `call` が戻り先を積む先は切り替えた後のスタック（本番テーブルにある）で、入口は戻らない（戻ったら `ud2`）。
     unsafe {
@@ -189,7 +189,7 @@ pub unsafe fn bring_up_application_processor(
             "mov rsp, {rsp}",
             "call {entry}",
             "ud2",
-            cr3 = in(reg) info.production_cr3,
+            cr3 = in(reg) info.production_root,
             rsp = in(reg) info.stacks.kernel_top,
             entry = in(reg) entry,
             in("rdi") info.slot,
