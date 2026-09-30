@@ -3,6 +3,8 @@
 //! # 話し方は legacy である（ADR-0033）
 //!
 //! BAR0 の I/O ポート越しにレジスタを読み書きする。MMIO のマッピングは使わない。
+//! **読み書きは、`machine` が BAR0 から作ったレジスタの窓（[`RegisterWindow`]）で行う**（2026-09-30）。どの番地を
+//! 叩いてよいかの前提は、窓を作る所にある。
 //! feature は何も受けずに交渉する（装置側の bit は読んで判定行に出す）。
 //!
 //! # 範囲（S13-c まで）
@@ -27,12 +29,11 @@
 //! 立てると「緑だが何も検査していない」項目になる。
 
 use common::addr::direct_map;
-use common::arch::x86_64::port;
 use common::log::Logger;
 use common::machine::pc::Serial;
 
 use crate::frame_allocator::FrameAllocator;
-use crate::machine::pc::pci::VirtioBlkLocation;
+use crate::machine::pc::{RegisterCell, RegisterWindow, VirtioBlkLocation};
 
 /// legacy レジスタ: 装置側の feature bits（読み）。
 const REG_HOST_FEATURES: u16 = 0x00;
@@ -105,7 +106,8 @@ pub enum VirtioBlkError {
 /// **イメージ全体のロード（ADR-0034）が 2 人目の利用者になったので、設定を分けて
 /// 保持する**——`VirtioBlkLocation` を返す形にしたときと同じ進み方である。
 pub struct VirtioBlk {
-    io_base: u16,
+    /// BAR0 のレジスタの窓（所在から移した。複製は作れない）。
+    registers: RegisterWindow,
     queue_size: u64,
     /// リングの物理先頭（4096 整列）。
     ring_phys: u64,
@@ -132,37 +134,34 @@ pub struct VirtioBlk {
 /// [`crate::machine::pc::pci::scan_bus0`] と同じ契約である——**BSP だけが走っており
 /// （AP 起床前）、割り込みが無効である位置から呼ぶこと。** 加えて:
 ///
-/// - `virtio.io_base` が virtio-blk の BAR0 の I/O ウィンドウであること
-///   （呼び出し側は `scan_bus0` の返り値をそのまま渡す）
-/// - このポートウィンドウとリングの物理領域を触るのは、返した [`VirtioBlk`] だけで
-///   あること（複製を作らない）
+/// - リングの物理領域を触るのは、返した [`VirtioBlk`] だけであること（複製を作らない）。**リングの番地を
+///   装置へ告げると、装置がそこを読み書きする**——窓への書き込み（unsafe fn）は、この契約を根拠にする
+///
+/// 窓の前提（どの番地を叩いてよいか）は、窓を作る所にある（[`RegisterWindow`]。2026-09-30 に、ここの
+/// 「`io_base` が virtio-blk の BAR0 の I/O ウィンドウであること」から移した）。窓は所在から返す
+/// [`VirtioBlk`] へ移るので、複製は型が作らせない。
 pub unsafe fn setup(
     logger: &mut Logger<Serial>,
-    virtio: &VirtioBlkLocation,
+    virtio: VirtioBlkLocation,
     allocator: &mut FrameAllocator,
 ) -> Result<VirtioBlk, VirtioBlkError> {
-    let io = virtio.io_base;
+    let registers = virtio.registers;
 
     // === 握手（legacy）。reset -> ACKNOWLEDGE -> DRIVER ===
-    // SAFETY: この関数の契約（doc）どおり、ポートウィンドウは virtio-blk の BAR0 で、
-    // 触るのはこの module だけである（以下のポート I/O すべて同じ）。
+    // SAFETY: 状態の書き込みで、装置にメモリを読み書きさせない（reset は装置を止める。リングはまだ告げていない）。
     unsafe {
-        port::outb(io + REG_DEVICE_STATUS, 0);
-        port::outb(io + REG_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
-        port::outb(io + REG_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
+        registers.write8(REG_DEVICE_STATUS, 0);
+        registers.write8(REG_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
+        registers.write8(REG_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
     }
-    // SAFETY: 同上。
-    let host_features = unsafe { port::inl(io + REG_HOST_FEATURES) };
+    let host_features = registers.read32(REG_HOST_FEATURES);
     // **何も受けない**（ADR-0033）。
-    // SAFETY: 同上。
-    unsafe { port::outl(io + REG_GUEST_FEATURES, 0) };
+    // SAFETY: feature の書き込みで、装置にメモリを読み書きさせない。
+    unsafe { registers.write32(REG_GUEST_FEATURES, 0) };
 
     // capacity は装置固有領域の先頭（u64。512 バイト単位の数）。
-    // SAFETY: 同上。
-    let capacity = unsafe {
-        u64::from(port::inl(io + REG_DEVICE_CONFIG))
-            | (u64::from(port::inl(io + REG_DEVICE_CONFIG + 4)) << 32)
-    };
+    let capacity = u64::from(registers.read32(REG_DEVICE_CONFIG))
+        | (u64::from(registers.read32(REG_DEVICE_CONFIG + 4)) << 32);
     // **feature bits は行を分ける。** 実測で QEMU の virtio-blk の feature は
     // コア数で変わる（`-smp 1` と `-smp 2` で 0x1000 違う——キューの数が
     // vCPU 数に従うため）。**この行はコア数依存の標識に入っている**
@@ -176,10 +175,9 @@ pub unsafe fn setup(
     ));
 
     // === queue 0 のリングを作る ===
-    // SAFETY: 同上。
-    unsafe { port::outw(io + REG_QUEUE_SELECT, 0) };
-    // SAFETY: 同上。
-    let queue_size = u64::from(unsafe { port::inw(io + REG_QUEUE_SIZE) });
+    // SAFETY: queue の選択で、装置にメモリを読み書きさせない。
+    unsafe { registers.write16(REG_QUEUE_SELECT, 0) };
+    let queue_size = u64::from(registers.read16(REG_QUEUE_SIZE));
     if queue_size == 0 {
         return Err(VirtioBlkError::QueueSizeZero);
     }
@@ -229,17 +227,19 @@ pub unsafe fn setup(
     // 効かなくなる**（実測で踏んだ。破壊テストがすべて通る種類の「機会が無い」——
     // notify とは別の機序が同じ仕事を済ませていた）。
     //
-    // SAFETY: ポート I/O は冒頭と同じ契約。PFN は 4096 整列を上で確かめた値。
+    // SAFETY: ここから装置がリングを読み書きする。告げる番地は、いま確保して 0 で埋めた自前のリングで（PFN は
+    // 4096 整列を上で確かめた値）、この関数の契約で、返す `VirtioBlk` のほかには誰も触らない。DRIVER_OK の後に
+    // 装置が読み書きするのは、このリングと、要求の記述子が指す先（`read_at`・`write_at` の契約）だけである。
     unsafe {
-        port::outl(io + REG_QUEUE_ADDRESS, (ring_phys.as_u64() >> 12) as u32);
-        port::outb(
-            io + REG_DEVICE_STATUS,
+        registers.write32(REG_QUEUE_ADDRESS, (ring_phys.as_u64() >> 12) as u32);
+        registers.write8(
+            REG_DEVICE_STATUS,
             STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_DRIVER_OK,
         );
     }
 
     Ok(VirtioBlk {
-        io_base: io,
+        registers,
         queue_size,
         ring_phys: ring_phys.as_u64(),
         ring_virt: ring_virt.as_u64(),
@@ -390,10 +390,12 @@ impl VirtioBlk {
         // **要求は公開されたままで、装置は読まない。** ポーリングが上限に
         // 達して止まる——**上限のある待機だけが、この形を観測へ変える。**
         //
-        // SAFETY: ポート I/O は [`setup`] と同じ契約。
+        // SAFETY: 知らせると、装置が上で公開した記述子を読み、指す先を読み書きする。記述子が指すのは、器（`setup`
+        // が確保した自前のページ）と `data_phys` で、`data_phys` はこの関数の契約（`read_at`・`write_at` の
+        // `data_phys`）が保証する。
         #[cfg(not(feature = "virtio-skip-notify-test"))]
         unsafe {
-            port::outw(self.io_base + REG_QUEUE_NOTIFY, 0);
+            self.registers.write16(REG_QUEUE_NOTIFY, 0);
         }
 
         self.completed.wrapping_add(1)
@@ -465,11 +467,11 @@ impl VirtioBlk {
     }
 }
 
-/// 割り込みで観測する準備が済んだ virtio の所在（S13-d）。
+/// 割り込みで観測する準備が済んだ virtio の ISR（S13-d。2026-09-30 に、ISR のポートの番号から、窓と位置の控えにした）。
 ///
 /// **割り込みの処理（[`handle_irq`]。処理の表から呼ばれる）から届く必要があるので static である。**
-/// 0 は「まだ武装していない」を表す（I/O ポート 0 は PCI の BAR に現れない）。
-static ARMED_ISR_PORT: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
+/// 空は「まだ武装していない」を表す。**ハンドラは BKL を持たずに読む**（[`RegisterCell`] の契約）。
+static ARMED_ISR: RegisterCell = RegisterCell::empty();
 /// 武装した装置の構成空間の Interrupt Line（+1 で保持。0 = 未武装）。源の番号は、ここから `machine` が解決する
 /// （[`armed_source`]）。
 static ARMED_LINE_PLUS_ONE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
@@ -702,9 +704,9 @@ const REG_ISR: u16 = 0x13;
 /// 溜まっている。読まずに線を開くと、開いた瞬間に過去のぶんが 1 回届き、
 /// 「届いた数」の判定が実演と混ざる。
 pub unsafe fn arm_interrupt(blk: &VirtioBlk) {
-    // SAFETY: この関数の契約。ISR の読みは deassert の副作用を意図している。
-    let _stale = unsafe { port::inb(blk.io_base + REG_ISR) };
-    ARMED_ISR_PORT.store(blk.io_base + REG_ISR, core::sync::atomic::Ordering::Relaxed);
+    // ISR の読みは deassert の副作用を意図している。
+    let _stale = blk.registers.read8(REG_ISR);
+    ARMED_ISR.record(&blk.registers, REG_ISR);
     ARMED_LINE_PLUS_ONE.store(blk.irq_line + 1, core::sync::atomic::Ordering::Relaxed);
     // 源の番号は固定しない——`scan_bus0` が構成空間から読んだ値の INTx を、`machine` が解決する（`ADR-0072` の 7）。
     crate::interrupts::register_interrupt_handler(
@@ -730,21 +732,19 @@ pub fn armed_source() -> Option<crate::interrupts::InterruptSource> {
 /// ログは出さない（ADR-0018 §5。ハンドラ内の出力はティックを取りこぼす）。
 /// 観測はメインループ側が [`exercise_interrupt_read`] でカウンタ越しに行う。
 fn handle_irq(_source: crate::interrupts::InterruptSource) {
-    let isr_port = ARMED_ISR_PORT.load(core::sync::atomic::Ordering::Relaxed);
-    if isr_port == 0 {
-        return;
-    }
     // 破壊テスト (S13-d, virtio-skip-isr-read-test): ISR を読まない。レベルの線が
     // deassert されず、EOI の後に同じ割り込みが再送され続ける形を狙う。
     #[cfg(feature = "virtio-skip-isr-read-test")]
-    {
+    if ARMED_ISR.is_recorded() {
         IRQ_DELIVERED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
     #[cfg(not(feature = "virtio-skip-isr-read-test"))]
     {
-        // SAFETY: `arm_interrupt` が武装した ISR ポートで、読みは deassert の
-        // 副作用を意図している。割り込みゲート経由（IF=0）なので再入しない。
-        let isr = unsafe { port::inb(isr_port) };
+        // `arm_interrupt` が控えた ISR を読む（武装の前なら読まずに戻る）。読みは deassert の副作用を意図
+        // している。BKL は持たない（控える所の契約）。割り込みゲート経由（IF=0）なので再入しない。
+        let Some(isr) = ARMED_ISR.read8() else {
+            return;
+        };
         if isr & 0x1 != 0 {
             IRQ_DELIVERED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         } else {
@@ -764,7 +764,7 @@ fn handle_irq(_source: crate::interrupts::InterruptSource) {
 ///
 /// - 配線（`route_to_apic`）と武装（[`arm_interrupt`]）が済み、IF=1 であること
 /// - [`read_at`](VirtioBlk::read_at) と同じ排他（この struct だけが
-///   リングとポートウィンドウを触る。**ISR ポートだけはハンドラと共有し、
+///   リングとレジスタの窓を触る。**ISR だけは窓と位置を控えてハンドラと共有し、
 ///   それは意図した相互作用である**——装置が上げ、ハンドラが読んで下ろす）
 pub unsafe fn exercise_interrupt_read(
     logger: &mut Logger<Serial>,
@@ -828,7 +828,7 @@ const BLOCKING_WAIT_TICKS: u64 = 200;
 /// # Safety
 ///
 /// [`exercise_interrupt_read`] と同じ位置の契約（配線・武装済み、IF=1、
-/// この struct だけがリングとポートウィンドウを触る）。
+/// この struct だけがリングとレジスタの窓を触る）。
 pub unsafe fn exercise_blocking_read(
     logger: &mut Logger<Serial>,
     blk: &mut VirtioBlk,

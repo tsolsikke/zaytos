@@ -1,2 +1,2 @@
-common 52
+common 17
 kernel/src/main.rs 598

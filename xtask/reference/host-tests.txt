@@ -597,6 +597,8 @@ kernel::machine::pc::irq::tests::the_svr_and_probe_displays_print_the_words_the_
 kernel::machine::pc::irq::tests::the_timer_setup_exposes_implementation_independent_questions
 kernel::machine::pc::irq::tests::the_vector_and_irq_mappings_are_inverses
 kernel::machine::pc::irq::tests::vectors_outside_the_managed_range_have_no_irq
+kernel::machine::pc::pci::tests::a_register_window_admits_only_positions_inside_it
+kernel::machine::pc::pci::tests::a_register_window_is_made_only_inside_the_io_space
 kernel::machine::pc::pmtimer::tests::bits_above_the_width_do_not_reach_the_difference
 kernel::machine::pc::pmtimer::tests::the_difference_wraps_at_the_declared_width
 kernel::machine::pc::pmtimer::tests::the_frequency_comes_from_the_observed_window

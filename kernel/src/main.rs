@@ -1429,8 +1429,8 @@ extern "sysv64" fn kernel_main() -> ! {
     let mut virtio_disk = match virtio_blk {
         Some(virtio) => {
             // SAFETY: 上の pci scan と同じ位置（BSP のみ・IF=0）。`virtio` は
-            // `scan_bus0` が返した BAR0 の I/O ウィンドウそのものである。
-            let outcome = unsafe { kernel::virtio::setup(&mut logger, &virtio, &mut allocator) }
+            // `scan_bus0` が返した所在で、BAR0 のレジスタの窓ごと渡す。
+            let outcome = unsafe { kernel::virtio::setup(&mut logger, virtio, &mut allocator) }
                 .and_then(|mut blk| {
                     // SAFETY: 同じ位置。読み先は器（リングの末尾ページ）の中である。
                     unsafe { kernel::virtio::exercise_read(&mut logger, &mut blk) }?;

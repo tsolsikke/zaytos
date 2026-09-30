@@ -7,6 +7,10 @@
 //! **ここでは構成空間を読む以外のことをしない**（virtio-blk の BAR0 だけは
 //! S13-b が使うので、[`VirtioBlkLocation`] として返す）。
 //!
+//! **BAR0 は、レジスタの窓（[`RegisterWindow`]）にして返す**（2026-09-30）。**どの番地を叩いてよいかの前提は、
+//! 窓を作るここに 1 つにまとめてある**——窓の読み書きは、位置が窓の中であることを確かめる。読み出しは安全な関数で、
+//! 書き込みは、書く値の前提を呼ぶ側が持つ unsafe fn である。
+//!
 //! # アクセスはポート（`0xCF8` / `0xCFC`）である
 //!
 //! i440FX（QEMU の既定 machine。ADR-0007）は PCIe 以前の PCI で、
@@ -22,6 +26,8 @@
 //! （S12 の `dumpe2fs` と同じ形）。**期待値を定数で持たない**——
 //! bus 0 / device 4 のような位置は QEMU の並べ方に依存するので、
 //! **カーネルが主張するのは「見つけられた」ことだけで、位置は出すだけである。**
+
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use common::arch::x86_64::port;
 use common::log::Logger;
@@ -44,6 +50,14 @@ const VIRTIO_BLK_TRANSITIONAL: u16 = 0x1001;
 /// **今の QEMU 構成では現れないが、ID の種類としては正当なので受ける。**
 const VIRTIO_BLK_MODERN: u16 = 0x1041;
 
+/// virtio-blk の BAR0 に作る窓の長さ（バイト。2026-09-30）。
+///
+/// **virtio の仕様が BAR0 に必ず置くと決めている範囲だけを覆う**——legacy の共通のレジスタ（20 バイト。MSI-X を
+/// 有効にしない形。この module も `crate::virtio` も有効にしない）と、その後ろの装置固有領域の先頭の capacity
+/// （8 バイト。virtio-blk では常に在る）である。BAR の実際の大きさはこれ以上である（QEMU の既定の構成の実測で、
+/// virtio-blk の BAR0 が `0xc000` で、次の装置の I/O の BAR が `0xc080` から始まる）。
+const VIRTIO_BLK_WINDOW_BYTES: u16 = 20 + 8;
+
 /// 1 つの bus に載る device の数（PCI の規定。device 番号は 5 ビット）。
 const DEVICES_PER_BUS: u8 = 32;
 
@@ -58,11 +72,189 @@ const VENDOR_ABSENT: u16 = 0xFFFF;
 /// **S13-a では返さなかった**——利用者が居ない機構には検算が用意できないためである。
 /// **S13-b（virtqueue）が最初の利用者になったので、要るものだけを返す。**
 /// S13-d で割り込みの配線に `irq_line` が要るようになり、2 つになった。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - 作るのは [`scan_bus0`] だけである（BAR0 が I/O の空間を指す、最初の virtio-blk について 1 つ）。
+/// - 窓（`registers`）を取り出せるのは、このクレートの中だけである（受け取るのはドライバの `crate::virtio::setup`）。
+///   起動の順序（`main.rs`。別のクレート）は、所在をそのまま渡す。
+/// - `irq_line` は構成空間の Interrupt Line の値そのものである（割り込みの源への解決は `machine` が行う。
+///   [`crate::machine::pc::PciIntx`]）。
 pub struct VirtioBlkLocation {
-    /// BAR0 の I/O ウィンドウの先頭（下位 2 ビットの種別フラグは落としてある）。
-    pub io_base: u16,
+    /// BAR0 のレジスタの窓（2026-09-30 に、I/O ウィンドウの先頭の番地から窓にした）。**取り出せるのは、この
+    /// クレートの中だけである**——受け取るのはドライバ（`crate::virtio::setup`）で、起動の順序（`main.rs`。別の
+    /// クレート）は所在を渡すだけで、窓には触れない。
+    pub(crate) registers: RegisterWindow,
     /// 構成空間の Interrupt Line（S13-d で割り込みの配線に使う。実測で 11）。
     pub irq_line: u8,
+}
+
+/// 装置のレジスタの窓（2026-09-30。境界の段階の手順 2）。PC では、PCI の BAR が指す I/O の空間の範囲である。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - **窓の中の位置（先頭からのバイト数）で読み書きする。** 読み書きの関数は、位置と幅が窓に収まることを確かめ、
+///   収まらなければ止まる（カーネルの誤りである）。**窓の外を指せないので、読み出しの関数は安全な関数である。**
+/// - **どの番地を叩いてよいかの前提は、窓を作る所（`from_io_bar`。[`scan_bus0`] が BAR から作る）に 1 つに
+///   まとめてある。** 窓を作れるのは、この module だけである。
+/// - **複製できない**（`Clone` を持たない）。窓を持つ者が、その装置のレジスタを触る唯一の者である。割り込みの
+///   ハンドラが読むレジスタだけは、窓と位置を [`RegisterCell`] に控えて分け合う。
+/// - **書き込みの関数は unsafe fn である**（運用者の決定。2026-09-30）。書き込みには、装置にメモリを読み書きさせる
+///   ものがある（virtio では、リングの番地を告げる書き込みと、要求を知らせる書き込み）。安全な関数から呼べると、
+///   unsafe を書かずに装置へ任意の番地を読み書きさせられるので、その番地と中身が正しいことは呼ぶ側が保証する
+///   （根拠は、書くドライバの関数の契約である。`crate::virtio` の `setup` と `read_at`・`write_at`）。
+/// - 窓の読み書きは、その前後のメモリの読み書きとの順序を約束しない。装置に見せる順序が要る所は、ドライバが
+///   fence を置く（`crate::virtio` の `issue_at`）。
+pub struct RegisterWindow {
+    /// 窓の先頭（I/O の空間の番地。0 でない）。
+    base: u16,
+    /// 窓の長さ（バイト。先頭から数えて I/O の空間の中に収まる）。
+    len: u16,
+}
+
+impl RegisterWindow {
+    /// PCI の BAR が指す I/O の空間の番地 `address`（種別のビットは落とした値）から、長さ `len` の窓を作る。
+    /// 番地が 0（割り当てられていない）か、窓が I/O の空間（64 KiB）に収まらなければ `None`。
+    ///
+    /// # Safety
+    ///
+    /// **どの番地を叩いてよいかの前提は、ここに 1 つにまとめる。**
+    ///
+    /// - `address` から `len` バイトが、その装置のレジスタであること（BAR が指す範囲の中で、装置の仕様がそこに
+    ///   レジスタを置くと決めている範囲）
+    /// - その範囲を触るのは、返した窓（と、その窓から控えた [`RegisterCell`]）だけであること。**1 つの範囲に
+    ///   窓は 1 つだけ作る**
+    unsafe fn from_io_bar(address: u32, len: u16) -> Option<Self> {
+        let base = u16::try_from(address).ok().filter(|&base| base != 0)?;
+        (u32::from(base) + u32::from(len) <= 0x1_0000).then_some(Self { base, len })
+    }
+
+    /// 位置 `offset` から `width` バイトが窓に収まることを確かめる。収まらなければ止まる。
+    fn check(&self, offset: u16, width: u16) {
+        assert!(
+            fits(self.len, offset, width),
+            "register window: {width} byte(s) at offset {offset:#x} do not fit in the {}-byte window",
+            self.len
+        );
+    }
+
+    /// 位置 `offset` から `width` バイトの、I/O の空間の番地。窓に収まらなければ止まる。
+    fn at(&self, offset: u16, width: u16) -> u16 {
+        self.check(offset, width);
+        self.base + offset
+    }
+
+    /// 位置 `offset` の 1 バイトを読む。**読むと装置の状態が変わるレジスタもある**（virtio の ISR）。
+    pub fn read8(&self, offset: u16) -> u8 {
+        let at = self.at(offset, 1);
+        // SAFETY: `at` は窓の中（`at` が確かめた）で、窓の中は装置のレジスタである（窓を作る所の契約）。
+        unsafe { port::inb(at) }
+    }
+
+    /// 位置 `offset` の 2 バイトを読む。
+    pub fn read16(&self, offset: u16) -> u16 {
+        let at = self.at(offset, 2);
+        // SAFETY: [`Self::read8`] と同じ。
+        unsafe { port::inw(at) }
+    }
+
+    /// 位置 `offset` の 4 バイトを読む。
+    pub fn read32(&self, offset: u16) -> u32 {
+        let at = self.at(offset, 4);
+        // SAFETY: [`Self::read8`] と同じ。
+        unsafe { port::inl(at) }
+    }
+
+    /// 位置 `offset` へ 1 バイトを書く。位置が窓の中であることは、この関数が確かめる（窓の外なら止まる）。
+    ///
+    /// # Safety
+    ///
+    /// 書く値が装置にメモリへの読み書きをさせる場合（番地を告げる、要求を知らせる）、その番地と中身が正しいことを
+    /// 呼ぶ側が保証する。
+    pub unsafe fn write8(&self, offset: u16, value: u8) {
+        let at = self.at(offset, 1);
+        // SAFETY: `at` は窓の中（`at` が確かめた）で、窓の中は装置のレジスタである（窓を作る所の契約）。書く値が
+        // 装置にさせることは、呼ぶ側が保証する（この関数の # Safety）。
+        unsafe { port::outb(at, value) }
+    }
+
+    /// 位置 `offset` へ 2 バイトを書く。
+    ///
+    /// # Safety
+    ///
+    /// [`Self::write8`] と同じ。
+    pub unsafe fn write16(&self, offset: u16, value: u16) {
+        let at = self.at(offset, 2);
+        // SAFETY: [`Self::write8`] と同じ。
+        unsafe { port::outw(at, value) }
+    }
+
+    /// 位置 `offset` へ 4 バイトを書く。
+    ///
+    /// # Safety
+    ///
+    /// [`Self::write8`] と同じ。
+    pub unsafe fn write32(&self, offset: u16, value: u32) {
+        let at = self.at(offset, 4);
+        // SAFETY: [`Self::write8`] と同じ。
+        unsafe { port::outl(at, value) }
+    }
+}
+
+/// 位置 `offset` から `width` バイトが、長さ `len` の窓に収まるか（純粋な論理。ホストで確かめる）。
+const fn fits(len: u16, offset: u16, width: u16) -> bool {
+    offset < len && width <= len - offset
+}
+
+/// レジスタの窓の中の 1 バイトのレジスタを控える所（2026-09-30）。割り込みのハンドラが読むので、`static` に置く。
+///
+/// **控えるのは窓と位置である**（窓の先頭と、窓の中の位置）。控えるとき（[`RegisterCell::record`]）に位置が
+/// 窓の中であることを確かめるので、読む側（[`RegisterCell::read8`]）は確かめずに読める。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - **BKL なしで読める。** 割り込みのハンドラは、BKL を持たずに読む。窓と位置は 1 つの原子的な語に入っており、
+///   読む側が見るのは「空」（控える前）か「控えた窓と位置」のどちらかで、途中の値は見えない。**どちらでも安全で
+///   ある**——空なら読まずに `None` を返し、控えた値なら窓の中を読む。したがって読む側はロックを取らず、順序も
+///   Relaxed で足りる。
+/// - 控えるのは、その割り込みの源を許可する前の 1 回である（装置のドライバの武装。`crate::virtio::arm_interrupt`）。
+///   控え直しても、読む側が見るのは古い値か新しい値のどちらかで、どちらも窓の中である。
+/// - **読むと装置の状態が変わりうる**（virtio の ISR は、読むと割り込みの線を下ろす）。ハンドラと窓の持ち主の
+///   両方が同じレジスタを読むのは、意図した相互作用である（装置が上げ、ハンドラが読んで下ろす）。
+pub struct RegisterCell(AtomicU32);
+
+impl RegisterCell {
+    /// 空の控え（まだ何も控えていない）。
+    pub const fn empty() -> Self {
+        Self(AtomicU32::new(0))
+    }
+
+    /// 窓 `window` の位置 `offset` の 1 バイトのレジスタを控える。位置が窓に収まらなければ止まる。
+    pub fn record(&self, window: &RegisterWindow, offset: u16) {
+        window.check(offset, 1);
+        // 窓の先頭は 0 でない（窓を作る所が確かめる）ので、控えた値は空（0）と区別できる。
+        self.0.store(
+            (u32::from(window.base) << 16) | u32::from(offset),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// 控えてあるか（読まずに確かめる）。
+    pub fn is_recorded(&self) -> bool {
+        self.0.load(Ordering::Relaxed) != 0
+    }
+
+    /// 控えたレジスタを 1 バイト読む。控えていなければ読まずに `None` を返す。
+    pub fn read8(&self) -> Option<u8> {
+        let recorded = self.0.load(Ordering::Relaxed);
+        if recorded == 0 {
+            return None;
+        }
+        let at = (recorded >> 16) as u16 + (recorded & 0xFFFF) as u16;
+        // SAFETY: 控えた値を書くのは `record` だけで、`record` は窓（窓を作る所の契約で、中は装置のレジスタ）と、
+        // 窓の中と確かめた位置から作る。したがって `at` は窓の中である。
+        Some(unsafe { port::inb(at) })
+    }
 }
 
 /// 構成空間の 1 dword を読む。
@@ -178,10 +370,19 @@ pub unsafe fn scan_bus0(logger: &mut Logger<Serial>) -> Option<VirtioBlkLocation
                 // 話す（ADR-0033）ための唯一の入口である。最初の 1 つを採る
                 // （2 つ以上は下の判定行の数で見える）。
                 if found.is_none() && bars[0] & 0x1 == 1 {
-                    found = Some(VirtioBlkLocation {
-                        io_base: (bars[0] & !0x3) as u16,
-                        irq_line: (irq & 0xFF) as u8,
-                    });
+                    // SAFETY: BAR0 のビット 0 が 1 なので、BAR0 は I/O の空間の範囲を指す。transitional の
+                    // virtio-blk は legacy の口を BAR0 の I/O の空間に出すのが仕様で、その先頭の
+                    // `VIRTIO_BLK_WINDOW_BYTES` バイトは legacy の共通のレジスタと capacity である。窓はここで
+                    // 1 つだけ作り（最初の 1 つだけを採る）、返す所在が持つ。
+                    let registers = unsafe {
+                        RegisterWindow::from_io_bar(bars[0] & !0x3, VIRTIO_BLK_WINDOW_BYTES)
+                    };
+                    if let Some(registers) = registers {
+                        found = Some(VirtioBlkLocation {
+                            registers,
+                            irq_line: (irq & 0xFF) as u8,
+                        });
+                    }
                 }
             }
         }
@@ -237,4 +438,33 @@ unsafe fn read_details(bus: u8, device: u8, function: u8) -> (u32, u8, u32, [u32
         *bar = unsafe { config_read(bus, device, function, 0x10 + 4 * index as u8) };
     }
     (class, header_type, irq, bars)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 窓の読み書きは、位置と幅が窓に収まるときだけ通す（2026-09-30）。virtio-blk の窓では、使うレジスタの端
+    /// （capacity の上位の 4 バイト）と ISR は収まり、その 1 バイト先と窓の外は収まらない。
+    #[test]
+    fn a_register_window_admits_only_positions_inside_it() {
+        assert!(fits(VIRTIO_BLK_WINDOW_BYTES, 0x18, 4));
+        assert!(fits(VIRTIO_BLK_WINDOW_BYTES, 0x13, 1));
+        assert!(!fits(VIRTIO_BLK_WINDOW_BYTES, 0x19, 4));
+        assert!(!fits(VIRTIO_BLK_WINDOW_BYTES, VIRTIO_BLK_WINDOW_BYTES, 1));
+        assert!(!fits(VIRTIO_BLK_WINDOW_BYTES, u16::MAX, 2));
+    }
+
+    /// 窓は、割り当てられていない番地 0 と、I/O の空間（64 KiB）からはみ出す範囲からは作らない（2026-09-30）。
+    #[test]
+    fn a_register_window_is_made_only_inside_the_io_space() {
+        // SAFETY: 作るだけで、読み書きしない（ホストの検査）。
+        unsafe {
+            assert!(RegisterWindow::from_io_bar(0xc000, 28).is_some());
+            assert!(RegisterWindow::from_io_bar(0x1_0000 - 28, 28).is_some());
+            assert!(RegisterWindow::from_io_bar(0, 28).is_none());
+            assert!(RegisterWindow::from_io_bar(0xFFF0, 28).is_none());
+            assert!(RegisterWindow::from_io_bar(0x1_0000, 28).is_none());
+        }
+    }
 }
