@@ -124,7 +124,7 @@ impl FpArea {
 /// 書かないので、Decision 5 の静的検査と衝突しない**（このモジュールの
 /// 冒頭の注記と同じ手である）。
 #[cfg(feature = "fp-clobber-on-kernel-entry-test")]
-pub fn clobber_on_kernel_entry() {
+pub fn clobber_fp_state_on_kernel_entry() {
     /// 塗る値。**0 ではない**——**まっさらと見分けが付かなくなる。**
     const MARKER: u64 = 0xDEAD_BEEF_DEAD_BEEF;
     /// 丸めを 0 方向にした MXCSR（既定の `0x1F80` に RC の 2 ビットを足す）。

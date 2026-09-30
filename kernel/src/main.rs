@@ -4798,13 +4798,15 @@ fn demo_two_address_spaces(
         // SAFETY: いずれも direct map が覆う稼働可能な PML4。添字は 512 未満。
         let (p, a, b) = unsafe {
             (
-                kernel::arch::x86_64::paging::verify::read_top_entry(production, direct_map, index),
-                kernel::arch::x86_64::paging::verify::read_top_entry(
+                kernel::arch::x86_64::paging::verify::read_top_level_entry(
+                    production, direct_map, index,
+                ),
+                kernel::arch::x86_64::paging::verify::read_top_level_entry(
                     space_a.root(),
                     direct_map,
                     index,
                 ),
-                kernel::arch::x86_64::paging::verify::read_top_entry(
+                kernel::arch::x86_64::paging::verify::read_top_level_entry(
                     space_b.root(),
                     direct_map,
                     index,
@@ -8939,15 +8941,15 @@ fn verify_corrupt_user_program_is_not_loaded(logger: &mut Logger<Serial>) {
 ///
 /// # 戻ってきた理由は 2 つに 1 つである
 ///
-/// **終了**（`exit` が `ring3::leave_ring3` を呼んだ）か、**例外による終了処理**（Ring 3 由来の
-/// 違反を S8 の機構が受けた）である。`ring3::enter` はこの 2 つの longjmp でしか
+/// **終了**（`exit` が `ring3::leave_user_mode` を呼んだ）か、**例外による終了処理**（Ring 3 由来の
+/// 違反を S8 の機構が受けた）である。`ring3::run_excursion` はこの 2 つの longjmp でしか
 /// 戻らない。どちらであるべきかは [`UserProgram::outcome`] が持つ。
 ///
 /// # 観測と判定を分けてある
 ///
 /// 観測は [`kernel::arch::x86_64::ring3`] と [`kernel::syscall`] の記録から読む。**走らせる側
 /// （`load_user_program_into`）は判定しない**——プログラムごとに正しい終わり方が
-/// 違い、それは一覧を持つ側の知識である。`ring3::enter` が終了させた位置を主張せず
+/// 違い、それは一覧を持つ側の知識である。`ring3::run_excursion` が終了させた位置を主張せず
 /// 呼び出し側に委ねているのと同じ形である。
 fn check_user_program_outcome(
     logger: &mut Logger<Serial>,
@@ -8958,7 +8960,7 @@ fn check_user_program_outcome(
     let exited = kernel::syscall::process_exited();
     let status = kernel::syscall::process_exit_status();
     let folded = kernel::arch::x86_64::ring3::folded();
-    let vector = kernel::arch::x86_64::ring3::fault_number();
+    let vector = kernel::arch::x86_64::ring3::excursion_fault_number();
     let rip = kernel::arch::x86_64::ring3::fault_rip();
     let cs = kernel::arch::x86_64::ring3::fault_cs();
     let cr2 = kernel::arch::x86_64::ring3::fault_cr2();
@@ -9196,7 +9198,7 @@ fn verify_user_page_mapping<const CAP: usize>(
 
     // --- 独立 walker で物理対応を照合（構築側とは別のループ） ---
     // SAFETY: pml4_phys は稼働中 PML4、identity ウィンドウでテーブルを読める。
-    match unsafe { verify::walk(pml4_phys, identity, virt) } {
+    match unsafe { verify::walk_page_table(pml4_phys, identity, virt) } {
         Ok(r) if r.phys.as_u64() == leaf_phys.as_u64() && !r.huge => {}
         other => {
             logger.error(format_args!(
@@ -9252,7 +9254,7 @@ fn verify_user_page_mapping<const CAP: usize>(
 
     // 葉が消えたこと（独立 walk が NotPresent）。
     // SAFETY: 同上。
-    match unsafe { verify::walk(pml4_phys, identity, virt) } {
+    match unsafe { verify::walk_page_table(pml4_phys, identity, virt) } {
         Err(verify::WalkError::NotPresent) => {}
         other => {
             logger.error(format_args!(
@@ -9304,7 +9306,7 @@ fn assert_folded_at(
 ) {
     use kernel::arch::x86_64::ring3;
 
-    let vector = ring3::fault_number();
+    let vector = ring3::excursion_fault_number();
     let rip = ring3::fault_rip();
     if vector == expected_vector && rip == expected_rip {
         return;
@@ -9425,7 +9427,7 @@ fn verify_ring3_excursion<const CAP: usize>(
     // SAFETY: ユーザーページはマップ済み。main_rsp0_top はメインの上端なので、遠征後に
     // RSP0 をそこへ戻せる。起動時の単一実行文脈から 1 回だけ呼ぶ。
     unsafe {
-        ring3::enter(
+        ring3::run_excursion(
             main_rsp0_top,
             ring3::USER_CODE_VIRT,
             ring3::USER_STACK_TOP,
@@ -9647,7 +9649,7 @@ fn verify_syscall_roundtrip(logger: &mut Logger<Serial>) {
     // SAFETY: ユーザーページはマップ済み。Ring 3 は cli_rip で cli を実行して #GP を起こす。
     // main_rsp0_top はメインの上端。起動時の単一実行文脈から 1 回だけ呼ぶ。
     unsafe {
-        ring3::enter(
+        ring3::run_excursion(
             main_rsp0_top,
             ring3::USER_CODE_VIRT,
             ring3::USER_STACK_TOP,
@@ -9732,7 +9734,7 @@ fn verify_syscall_roundtrip(logger: &mut Logger<Serial>) {
     // 立っていたはずである（S8-b）。立っていなければ、Ring 3 へ落ちる経路か
     // 上げ下げの位置が壊れている。
     //
-    // この主張の反証で示した範囲を書いておく。note_kernel_entry が常に false を返す
+    // この主張の反証で示した範囲を書いておく。note_kernel_entry_from_user が常に false を返す
     // 形へ壊して、ここが止まることを確かめた。**示したのは「主張が真の値に固定されて
     // おらず、偽の値が来れば止まる」ことである。「enter が立て損ねたときに止まる」ことは、
     // この破壊テストでは示していない**——その道は ring3-test no-fold-flag が塞いでおり、
@@ -9825,7 +9827,7 @@ fn issue_ptr_len_syscall(logger: &mut Logger<Serial>, number: u64, buf: u64, len
     // SAFETY: ユーザーページはマップ済み。Ring 3 は cli_rip で cli を実行して #GP を起こす。
     // main_rsp0_top はメインの上端。起動時の単一実行文脈から呼ぶ。
     unsafe {
-        ring3::enter(
+        ring3::run_excursion(
             main_rsp0_top,
             ring3::USER_CODE_VIRT,
             ring3::USER_STACK_TOP,
@@ -9905,7 +9907,7 @@ fn verify_syscall_pointer<const CAP: usize>(
         shared: false,
     };
     // SAFETY: sup はユーザーサブツリー内の未マップ VA。user=false でマップするので Ring 3 から
-    // 到達不可（walk_user_accessible が SupervisorOnly で弾く）。frame は未使用。
+    // 到達不可（walk_page_table_user_accessible が SupervisorOnly で弾く）。frame は未使用。
     if let Err(e) = unsafe { table.map_4kib(sup, sup_phys, sup_attributes, allocator) } {
         logger.error(format_args!(
             "syscall: map_4kib for the supervisor test page failed: {e:?}; halting"
@@ -10086,7 +10088,7 @@ fn verify_syscall_checksum(logger: &mut Logger<Serial>) {
 ///
 /// # 4 本とも同じユーザーコードページを使い回す
 ///
-/// この 6 本はいずれも [`ring3::USER_CODE_VIRT`] を飛び先として [`ring3::enter`] へ
+/// この 6 本はいずれも [`ring3::USER_CODE_VIRT`] を飛び先として [`ring3::run_excursion`] へ
 /// 渡すので、遠征のたびにそのページの先頭へ別の命令列を書く。**ページが書き込み可能なのは、
 /// `verify_ring3_excursion` がコードページを `writable: true` でマップしているから
 /// である。** S9-a より前は `map_4kib` が葉を常に W=1 で作っており、選ぶ余地が
@@ -10206,7 +10208,7 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<Serial>) {
         // SAFETY: ユーザーページはマップ済みで、今書いた命令列が必ずフォルトする。
         // main_rsp0_top はメインの上端。起動時の単一実行文脈から呼ぶ。
         unsafe {
-            ring3::enter(
+            ring3::run_excursion(
                 main_rsp0_top,
                 ring3::USER_CODE_VIRT,
                 ring3::USER_STACK_TOP,
@@ -10219,7 +10221,7 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<Serial>) {
             cpu::halt_forever();
         }
 
-        let vector = ring3::fault_number();
+        let vector = ring3::excursion_fault_number();
         let rip = ring3::fault_rip();
         let cs = ring3::fault_cs();
         let expected_rip = ring3::USER_CODE_VIRT + fault_offset;
@@ -12536,7 +12538,7 @@ fn report_mapping_granularity(logger: &mut Logger<Serial>, heap_start: u64, fram
 ///
 /// # 検証の独立性
 ///
-/// 構築は `map_page` / `map_range`（`table` の式）で行い、検証は `verify::walk`
+/// 構築は `map_page` / `map_range`（`table` の式）で行い、検証は `verify::walk_page_table`
 /// （別に書き直した式）で辿る。恒等部分の照合は、入力の `mapped` とではなく、稼働中
 /// テーブル（M2-d が切り替えた実体）を `active::translate` で読み戻した実状態と突き
 /// 合わせる。同じ入力から同じ式で作ったものを検算しないためである。
@@ -12662,7 +12664,7 @@ fn build_and_switch_direct_map(
 
         for probe in probes.into_iter().flatten() {
             // 恒等側: 稼働中テーブルの実状態（active::translate、`entry` の式）と新テーブル
-            // （verify::walk、別の式）が、同じ物理へ解決すること。
+            // （verify::walk_page_table、別の式）が、同じ物理へ解決すること。
             if let Some(virt) = VirtAddr::new(probe.as_u64()) {
                 identity_checked += 1;
                 let live_phys = match live.translate(virt) {
@@ -12670,7 +12672,7 @@ fn build_and_switch_direct_map(
                     _ => None,
                 };
                 // SAFETY: new_pml4 は今構築したテーブルで、恒等で読める。
-                let new_phys = match unsafe { verify::walk(new_pml4, access, virt) } {
+                let new_phys = match unsafe { verify::walk_page_table(new_pml4, access, virt) } {
                     Ok(res) => Some(res.phys),
                     Err(_) => None,
                 };
@@ -12693,7 +12695,7 @@ fn build_and_switch_direct_map(
             {
                 window_checked += 1;
                 // SAFETY: 上と同じ。
-                match unsafe { verify::walk(new_pml4, access, virt) } {
+                match unsafe { verify::walk_page_table(new_pml4, access, virt) } {
                     Ok(res) if res.phys == probe => {
                         if res.huge {
                             huge_seen = true;
@@ -13169,7 +13171,7 @@ fn build_and_verify_high_half(
             .root();
     let live_before: [u64; entry_count()] = core::array::from_fn(|index| {
         // SAFETY: 稼働中の PML4 は有効なテーブルで、添字は 512 未満。
-        unsafe { verify::read_top_entry(live_pml4, direct_map, index) }
+        unsafe { verify::read_top_level_entry(live_pml4, direct_map, index) }
     });
 
     let frames_before = allocator.free_frame_count();
@@ -13229,7 +13231,7 @@ fn build_and_verify_high_half(
 
     // --- 独立 walker で読み戻す ---
     //
-    // 構築に使った関数は呼ばない。`verify::walk` は階層の降り方もビットの解釈も
+    // 構築に使った関数は呼ばない。`verify::walk_page_table` は階層の降り方もビットの解釈も
     // 別に書いてある。
     let mut checked = 0u32;
     let mut mismatches = 0u32;
@@ -13242,7 +13244,7 @@ fn build_and_verify_high_half(
         };
         let virt = kernel::kernel_virt_from_phys(phys);
         // SAFETY: `new_pml4` は今構築したテーブルで、恒等マッピングで読める。
-        match unsafe { verify::walk(new_pml4, direct_map, virt) } {
+        match unsafe { verify::walk_page_table(new_pml4, direct_map, virt) } {
             Ok(resolved) => {
                 checked += 1;
                 if resolved.phys != phys {
@@ -13278,7 +13280,7 @@ fn build_and_verify_high_half(
                 continue;
             };
             // SAFETY: 上記と同じ。
-            match unsafe { verify::walk(new_pml4, direct_map, virt) } {
+            match unsafe { verify::walk_page_table(new_pml4, direct_map, virt) } {
                 Ok(resolved) if resolved.phys == probe => {}
                 _ => identity_mismatches += 1,
             }
@@ -13291,7 +13293,7 @@ fn build_and_verify_high_half(
     // --- 稼働中テーブルが無傷であること ---
     let live_after: [u64; entry_count()] = core::array::from_fn(|index| {
         // SAFETY: 上記と同じ。
-        unsafe { verify::read_top_entry(live_pml4, direct_map, index) }
+        unsafe { verify::read_top_level_entry(live_pml4, direct_map, index) }
     });
     let live_untouched = live_before == live_after;
     logger.info(format_args!(

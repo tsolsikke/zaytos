@@ -20225,7 +20225,7 @@ const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
     },
     DirectInterruptControlSite {
         file: "kernel/src/arch/x86_64/ring3.rs",
-        item: "enter",
+        item: "run_excursion",
         reason: "遠征の入口で、タスクの欄（RSP0・深さ）を据えてから iretq までの窓を閉じる \
                  cli（W1-c-3b。ADR-0060）。InterruptGuard を使うと Ring 3 に居る間ずっと \
                  入れ子の深さが残り、タイマの切り替えが止まる。IF を戻すのは iretq の RFLAGS",

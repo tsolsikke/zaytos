@@ -95,7 +95,7 @@ unsafe fn write_entry(direct_map: DirectMap, table_phys: PhysAddr, index: usize,
 /// [`map_range`][PageTableBuilder::map_range] /
 /// [`map_page`][PageTableBuilder::map_page] を使う。この関数は値を 0 にする
 /// （present を落とす）ことしかできないので、誤って別のマッピングを作れない。読み出しは
-/// [`super::verify::read_top_entry`] と対になり、引数の並びも合わせてある。
+/// [`super::verify::read_top_level_entry`] と対になり、引数の並びも合わせてある。
 ///
 /// # Safety
 /// - `pml4_phys` は稼働中の有効な PML4 フレームを指し、`direct_map` でその
@@ -118,12 +118,12 @@ pub(crate) unsafe fn clear_pml4_entry(pml4_phys: PhysAddr, direct_map: DirectMap
 ///
 /// **恒等除去（B-2b-4）専用。** 検証に失敗したとき、または TLB フラッシュより
 /// 前に巻き戻すときに使う。`saved` は同じエントリを [`clear_pml4_entry`] で
-/// 落とす前に [`super::verify::read_top_entry`] で控えた値であること。任意の
+/// 落とす前に [`super::verify::read_top_level_entry`] で控えた値であること。任意の
 /// 値を書くための道具ではない。
 ///
 /// # Safety
 /// [`clear_pml4_entry`] と同じ契約。加えて `saved` が、そのエントリを
-/// [`clear_pml4_entry`] で落とす直前に [`super::verify::read_top_entry`] で
+/// [`clear_pml4_entry`] で落とす直前に [`super::verify::read_top_level_entry`] で
 /// 控えた値であること。**それ以外の値を渡さないこと。** `clear` は 0 しか
 /// 書けないので構造的に別のマッピングを作れないが、`restore` は任意の `saved` を
 /// 書けるため、名前が意図を示すだけで craft する経路は型では塞がれていない。

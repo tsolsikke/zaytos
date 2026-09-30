@@ -59,7 +59,7 @@ use crate::arch::x86_64::port::{inb, outb};
 ///
 /// **限界**——**その規約は検査されていない**（あの節自身がそう書いている）。
 /// **破られたら同一コアの混線は残る。** **そのときは今と同じであって、悪化しない。**
-/// **そして、破られたことは数えて出す**（[`reentry_count`]）。
+/// **そして、破られたことは数えて出す**（[`serial_reentry_count`]）。
 struct SerialLock {
     /// 保持しているコアの番号。誰も持っていなければ [`NO_HOLDER`]。
     holder: AtomicUsize,
@@ -184,7 +184,7 @@ fn lock_identity() -> usize {
 }
 
 /// 上限を越えて、ロックを取らずに書いた回数（計測）。**判定にしない**——**揺れる。**
-pub fn forced_write_count() -> u64 {
+pub fn serial_forced_write_count() -> u64 {
     UART_LOCK.forced.load(Ordering::Relaxed)
 }
 
@@ -192,7 +192,7 @@ pub fn forced_write_count() -> u64 {
 ///
 /// **0 でなければ、「割り込みハンドラは何も出力しない」が破られている。**
 /// **あの規約は検査されていないので、これが事後の観測になる。**
-pub fn reentry_count() -> u64 {
+pub fn serial_reentry_count() -> u64 {
     UART_LOCK.reentered.load(Ordering::Relaxed)
 }
 

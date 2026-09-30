@@ -1347,8 +1347,8 @@ pub unsafe fn run_timer_loop(
                         //
                         // **判定にしない。** **揺れる値なので、揺れる行へ相乗りする**
                         // （この行は `BOOT_LOG_VOLATILE_MARKERS` に在る）。
-                        common::machine::pc::serial::forced_write_count(),
-                        common::machine::pc::serial::reentry_count()
+                        common::machine::pc::serial::serial_forced_write_count(),
+                        common::machine::pc::serial::serial_reentry_count()
                     ),
                 );
             }
@@ -1479,8 +1479,8 @@ fn run_serial_stress_on_bsp(logger: &mut Logger<Serial>) {
     logger.info(format_args!(
         "serial-stress: done; the uart lock was forced {} time(s) and re-entered on the same \
          core {} time(s)",
-        common::machine::pc::serial::forced_write_count(),
-        common::machine::pc::serial::reentry_count()
+        common::machine::pc::serial::serial_forced_write_count(),
+        common::machine::pc::serial::serial_reentry_count()
     ));
 }
 

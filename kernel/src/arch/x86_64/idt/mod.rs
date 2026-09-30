@@ -1330,7 +1330,7 @@ extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u6
     // 100 マイクロ秒ほど、ティックは 10 ミリ秒）。**必ず入るのは
     // システムコールの側である。**
     #[cfg(feature = "fp-clobber-on-kernel-entry-test")]
-    crate::arch::x86_64::fp::clobber_on_kernel_entry();
+    crate::arch::x86_64::fp::clobber_fp_state_on_kernel_entry();
 
     // SAFETY: スタブが直前に積んだ有効な IrqContext を指す。読み取りのみ。
     let context = unsafe { &*context };
@@ -1411,12 +1411,12 @@ impl Interrupted<'_> {
 
     /// 割り込まれたときの遠征の深さ（0 はどの遠征にも居ない。シェルは深さ 1）。
     pub fn excursion_depth(&self) -> usize {
-        crate::arch::x86_64::ring3::depth()
+        crate::arch::x86_64::ring3::excursion_depth()
     }
 
     /// 割り込まれたときの遠征のスロット。
     pub fn excursion_slot(&self) -> usize {
-        crate::arch::x86_64::ring3::current_slot()
+        crate::arch::x86_64::ring3::current_excursion_slot()
     }
 }
 
@@ -2237,7 +2237,7 @@ unsafe fn fold_excursion(interrupted: &Interrupted<'_>) -> ! {
 
     // SAFETY: 遠征の中（深さ 1 以上）でユーザーの文脈から入っているので、RECOVERY は保存済みである（上で
     // 確かめた）。EOI は送り、BKL のガードは解いてある（この関数の契約）。
-    unsafe { crate::arch::x86_64::ring3::leave_ring3() }
+    unsafe { crate::arch::x86_64::ring3::leave_user_mode() }
 }
 
 /// 終了処理すると決めたフレームが信用できるかを見る（S8-c）。

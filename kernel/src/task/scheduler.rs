@@ -136,7 +136,7 @@ pub(super) fn set_saved_stack_pointer(index: usize, sp: u64) {
 
 pub(super) fn kernel_entry_stack_top(index: usize) -> u64 {
     // SAFETY: 有効なポインタ。読むのは切り替え（IF=0）で、書くのは起動時と遠征の出入りである。
-    // 遠征の入口は割り込みを止めてから書き（W1-c-3b。`ring3::enter` の `cli`）、出口は
+    // 遠征の入口は割り込みを止めてから書き（W1-c-3b。`ring3::run_excursion` の `cli`）、出口は
     // longjmp で IF=0 のまま戻ってから書く（同じ関数の検算）。タスクは BSP だけが持つので、
     // 同じコアの割り込みが入らなければ切り替えと重ならない。W1-b では「IF=0 の切り替え経路と、
     // 遠征の出入りからのみ触る」とだけ書いており、深さ 0 の入口が IF=1 で書く形を見ていなかった。

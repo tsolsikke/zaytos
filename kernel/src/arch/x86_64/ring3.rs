@@ -129,7 +129,7 @@ struct ExcursionStack([u8; EXCURSION_STACK_SIZE]);
 ///
 /// # 越えたらどうするか
 ///
-/// **[`enter`] の契約である。** 呼び出し側が [`depth`] で確かめてから呼ぶ。
+/// **[`run_excursion`] の契約である。** 呼び出し側が [`excursion_depth`] で確かめてから呼ぶ。
 /// **越えて呼ぶと、上限を越えた添字で静的配列に触ることになるので、
 /// 呼び出し側が防ぐ**（`spawn` は `-EAGAIN` を返す形になる）。
 ///
@@ -143,14 +143,14 @@ pub const MAX_EXCURSION_DEPTH: usize = 2;
 /// **深さごとに 1 本持つ（S11-2）。** 入れ子のとき、**子がカーネルへ入るときに
 /// 親のスタックへ切り替わってはならない**——親はそのスタックの上で
 /// `spawn` の処理をしている最中である。
-/// **W1-a でスロットごとに分けた。** **W1-a の時点では [`RING3_SLOTS`] が 1 で、
+/// **W1-a でスロットごとに分けた。** **W1-a の時点では [`USER_TASK_SLOTS`] が 1 で、
 /// 本数も置き場も変わらなかった**——**`.bss` は 1 バイトも増えなかった。**
-/// **W1-c-1 で [`RING3_SLOTS`] を 2 にしたので、本数が倍になった。**
+/// **W1-c-1 で [`USER_TASK_SLOTS`] を 2 にしたので、本数が倍になった。**
 /// **2 つ目のスロットを使うのは、足した 1 本のタスクだけである**（W1-c-4。**`concurrent-test` の
-/// 構成でだけ走る**。既定の起動では [`current_slot`] が必ず 0 を返す）。
-static mut EXCURSION_STACKS: [[ExcursionStack; MAX_EXCURSION_DEPTH]; RING3_SLOTS] =
+/// 構成でだけ走る**。既定の起動では [`current_excursion_slot`] が必ず 0 を返す）。
+static mut EXCURSION_STACKS: [[ExcursionStack; MAX_EXCURSION_DEPTH]; USER_TASK_SLOTS] =
     [const { [const { ExcursionStack([0; EXCURSION_STACK_SIZE]) }; MAX_EXCURSION_DEPTH] };
-        RING3_SLOTS];
+        USER_TASK_SLOTS];
 
 /// setjmp/longjmp 相当の回復点。**フィールドのオフセットは `global_asm!` の
 /// `[rax + N]` と一対一で対応している。** 並べ替えると asm が別の場所を読む。
@@ -170,7 +170,7 @@ struct Recovery {
 ///
 /// **1 つしか無いと、子の遠征に入った時点で親の回復点が上書きされ、
 /// 親が戻れなくなる。**
-static mut RECOVERIES: [[Recovery; MAX_EXCURSION_DEPTH]; RING3_SLOTS] = [const {
+static mut RECOVERIES: [[Recovery; MAX_EXCURSION_DEPTH]; USER_TASK_SLOTS] = [const {
     [const {
         Recovery {
             rsp: 0,
@@ -183,7 +183,7 @@ static mut RECOVERIES: [[Recovery; MAX_EXCURSION_DEPTH]; RING3_SLOTS] = [const {
             resume_rip: 0,
         }
     }; MAX_EXCURSION_DEPTH]
-}; RING3_SLOTS];
+}; USER_TASK_SLOTS];
 
 /// 今使っている回復点の**アドレス**（S11-2）。
 ///
@@ -207,11 +207,11 @@ static CURRENT_RECOVERY: AtomicU64 = AtomicU64::new(0);
 /// **W1-c で 2 本を同時に走らせるので、もう 1 本ぶんを持つ**
 /// （`task` の `TASK_COUNT` の末尾に足した 1 本と対になる）。
 ///
-/// **W1-c-1 では 2 つ目を誰も使わない**——**スロットを引く入口（[`current_slot`]）は、
+/// **W1-c-1 では 2 つ目を誰も使わない**——**スロットを引く入口（[`current_excursion_slot`]）は、
 /// W1-c-3 でタスクから引く形になった後も、W1-c-3c までは必ず 0 を返した。** **W1-c-4 から、
 /// `concurrent-test` の構成の足した 1 本だけが 1 を返す。**
 /// **大きさだけを変えた段階である**（遠征スタックが 128 KiB 増える。あちらの表）。
-pub const RING3_SLOTS: usize = 2;
+pub const USER_TASK_SLOTS: usize = 2;
 
 /// 1 本の遠征が持つ状態のうち、**置き場を分けられるもの**（W1-a）。
 ///
@@ -225,9 +225,9 @@ pub const RING3_SLOTS: usize = 2;
 ///
 /// # W1-a と W1-c-3 は振る舞いを変えない
 ///
-/// **W1-a では [`RING3_SLOTS`] が 1 で、引く先は常に同じ 1 つだった。**
+/// **W1-a では [`USER_TASK_SLOTS`] が 1 で、引く先は常に同じ 1 つだった。**
 /// **W1-c-3 で引く先をタスクのスロットにし、例外による終了処理の記録もここへ移したが、
-/// 既定の起動では常にスロット 0 である**（[`current_slot`]。**W1-c-4 の `concurrent-test` では
+/// 既定の起動では常にスロット 0 である**（[`current_excursion_slot`]。**W1-c-4 の `concurrent-test` では
 /// 足した 1 本がスロット 1 を引く**）。
 /// **変わるのは「どこから引くか」だけで、値も順序も変わらない。**
 struct ExcursionState {
@@ -245,9 +245,9 @@ struct ExcursionState {
     ///
     /// 上げ下げする点は3つある。
     ///
-    /// - [`enter`] が iretq の直前で立てる
+    /// - [`run_excursion`] が iretq の直前で立てる
     /// - `exception_entry` が終了処理すると決めた時点で降ろす（[`record_and_fold`] が
-    ///   [`leave_ring3`] を呼び、降ろすのはそちらである）
+    ///   [`leave_user_mode`] を呼び、降ろすのはそちらである）
     /// - `syscall_entry` が入口で降ろし、Ring 3 へ返る直前で立て直す
     ///
     /// # 今のところ振る舞いは変わらない
@@ -323,16 +323,16 @@ impl ExcursionState {
 }
 
 /// 遠征の状態、スロットごと（W1-a）。
-static EXCURSION_STATE: [ExcursionState; RING3_SLOTS] =
-    [const { ExcursionState::new() }; RING3_SLOTS];
+static EXCURSION_STATE: [ExcursionState; USER_TASK_SLOTS] =
+    [const { ExcursionState::new() }; USER_TASK_SLOTS];
 
 /// 今のタスクの遠征の状態を引く（W1-a。W1-c-3 でタスクのスロットから引く形にした）。
 ///
-/// **引く入口をここ 1 つに絞ってある**（[`current_slot`]）。**既定の起動では必ずスロット 0 である**
+/// **引く入口をここ 1 つに絞ってある**（[`current_excursion_slot`]）。**既定の起動では必ずスロット 0 である**
 /// （W1-c-4 の `concurrent-test` では足した 1 本がスロット 1 を引く）。
 #[inline(always)]
 fn state() -> &'static ExcursionState {
-    &EXCURSION_STATE[current_slot()]
+    &EXCURSION_STATE[current_excursion_slot()]
 }
 
 /// いま載っている回復点のアドレス（W1-b。切り替えが読む）。
@@ -353,7 +353,7 @@ pub fn current_excursion_recovery() -> u64 {
 /// # Safety の代わりに、呼べる場所を狭めてある
 ///
 /// **`pub` だが、呼ぶのは `crate::task::schedule_switch` だけである**
-/// （切り替えの割り込み禁止区間）。**遠征の出入りは [`enter`] の中で
+/// （切り替えの割り込み禁止区間）。**遠征の出入りは [`run_excursion`] の中で
 /// 直に触る**——あちらは入れ子の控えと戻しを一続きで行う。
 ///
 /// # 契約（境界の関数。2026-09-30）
@@ -383,7 +383,7 @@ pub fn excursion_recovery_belongs_to_slot(recovery: u64, slot: usize) -> bool {
     if recovery == 0 {
         return true;
     }
-    if slot >= RING3_SLOTS {
+    if slot >= USER_TASK_SLOTS {
         return false;
     }
     // SAFETY: 静的配列の行のアドレスを取るだけで、中身は読まない。
@@ -404,10 +404,10 @@ pub fn excursion_recovery_belongs_to_slot(recovery: u64, slot: usize) -> bool {
 /// # `#[inline(never)]` にしてある（W1-c-3 で測って決めた）
 ///
 /// **`#[inline(always)]` にすると、呼ぶ箇所ごとにタスクを引く処理が展開され、`dev` では
-/// その一時値が呼んだ側のフレームに場所を取った**（実測。`ring3::enter` のフレームが 216 から 328 バイト）。
+/// その一時値が呼んだ側のフレームに場所を取った**（実測。`ring3::run_excursion` のフレームが 216 から 328 バイト）。
 /// **呼ぶ箇所のフレームには、呼び出しと戻り値だけが残る形にする。**
 #[inline(never)]
-pub(crate) fn current_slot() -> usize {
+pub(crate) fn current_excursion_slot() -> usize {
     // 破壊テスト (W1-c-4, ring3-slot-always-zero): 足した 1 本にもスロット 0 を返す。**2 本が同じ遠征の
     // 状態とスタックを使う。** **切り替えの検算は入る側のタスクから引く（`task::ring3_slot_of`）ので、
     // こちらだけを壊すと食い違いが出る。**
@@ -516,7 +516,7 @@ pub fn excursion_stack_range() -> (u64, u64) {
 /// - 読むだけで、何も変えない。範囲外の深さでは止まる（[`excursion_stack_range_of`] が止める）。
 #[inline(always)]
 pub fn excursion_stack_range_at(depth: usize) -> (u64, u64) {
-    excursion_stack_range_of(current_slot(), depth)
+    excursion_stack_range_of(current_excursion_slot(), depth)
 }
 
 /// スロット `slot` の、深さ `depth` の遠征スタックの (下端, 上端)（W1-c-3）。
@@ -532,7 +532,7 @@ pub fn excursion_stack_range_of(slot: usize, depth: usize) -> (u64, u64) {
     // **範囲外は止める（W1-c-3c）。** **以前は 0 のものを返していた**——**間違った添字が来ると、
     // スロット 0 の深さ 0（シェルのスタック）と重なっても誰も言わなかった**
     // （`docs/wayland-inventory.md` の「W1-c-4 で一斉に発火するもの」の #10）。
-    if slot >= RING3_SLOTS || depth >= MAX_EXCURSION_DEPTH {
+    if slot >= USER_TASK_SLOTS || depth >= MAX_EXCURSION_DEPTH {
         report_excursion_index_out_of_range(slot, depth);
     }
     let index = depth;
@@ -544,7 +544,7 @@ pub fn excursion_stack_range_of(slot: usize, depth: usize) -> (u64, u64) {
 /// 深さ `depth` の遠征スタックを既知のバイトで埋める（S11-5）。
 ///
 /// **これから使うスタックを埋めるのであって、今乗っているスタックではない。**
-/// 深さ `d` の [`enter`] は深さ `d-1` のスタック（または メインのカーネルスタック）の
+/// 深さ `d` の [`run_excursion`] は深さ `d-1` のスタック（または メインのカーネルスタック）の
 /// 上で走るので、**自分の足元を消すことにはならない。**
 ///
 /// # Safety
@@ -553,11 +553,11 @@ pub fn excursion_stack_range_of(slot: usize, depth: usize) -> (u64, u64) {
 unsafe fn fill_excursion_stack(depth: usize) {
     // **範囲外は止める（W1-c-3c）。** **以前は黙って何もしなかった。**
     if depth >= MAX_EXCURSION_DEPTH {
-        report_excursion_index_out_of_range(current_slot(), depth);
+        report_excursion_index_out_of_range(current_excursion_slot(), depth);
     }
     // SAFETY: 呼び出し元契約により、この配列要素は今誰も使っていない。
     unsafe {
-        let stack = addr_of_mut!(EXCURSION_STACKS[current_slot()][depth]) as *mut u8;
+        let stack = addr_of_mut!(EXCURSION_STACKS[current_excursion_slot()][depth]) as *mut u8;
         core::ptr::write_bytes(stack, EXCURSION_STACK_FILL, EXCURSION_STACK_SIZE);
     }
 }
@@ -577,10 +577,10 @@ pub fn excursion_stack_high_water(depth: usize) -> usize {
     // **範囲外は止める（W1-c-3c）。** **以前は 0 を返していた**——**「0 バイト使った」と
     // 読める値を、使っていない添字について出していた。**
     if depth >= MAX_EXCURSION_DEPTH {
-        report_excursion_index_out_of_range(current_slot(), depth);
+        report_excursion_index_out_of_range(current_excursion_slot(), depth);
     }
     // SAFETY: 読み取りのみ。添字は上で範囲内にしてある。
-    let stack = unsafe { addr_of!(EXCURSION_STACKS[current_slot()][depth]) } as *const u8;
+    let stack = unsafe { addr_of!(EXCURSION_STACKS[current_excursion_slot()][depth]) } as *const u8;
     for offset in 0..EXCURSION_STACK_SIZE {
         // SAFETY: offset は配列の中である。
         if unsafe { stack.add(offset).read_volatile() } != EXCURSION_STACK_FILL {
@@ -641,8 +641,8 @@ pub fn excursion_stack_within_budget(depth: usize) -> bool {
 
 /// 今の遠征の深さ（S11-2）。**0 なら遠征に入っていない。**
 ///
-/// **入れ子で呼ぶ側は、これで上限を確かめてから [`enter`] を呼ぶ。**
-pub fn depth() -> usize {
+/// **入れ子で呼ぶ側は、これで上限を確かめてから [`run_excursion`] を呼ぶ。**
+pub fn excursion_depth() -> usize {
     state().depth.load(Ordering::SeqCst)
 }
 
@@ -663,7 +663,7 @@ pub fn depth() -> usize {
 /// [`USER_CODE_VIRT`] と [`USER_STACK_TOP`] を渡す。変えたのは、値が固定である
 /// ことをやめた点だけである。
 ///
-/// **どこで終了させられたかは呼び出し側が主張する。** [`folded`]・[`fault_number`]・
+/// **どこで終了させられたかは呼び出し側が主張する。** [`folded`]・[`excursion_fault_number`]・
 /// [`fault_rip`] を読み、自分が置いた命令の位置と突き合わせること。この関数は
 /// 突き合わせない（遠征ごとに予期する位置が違い、それは呼び出し側の知識である）。
 ///
@@ -710,7 +710,7 @@ pub fn depth() -> usize {
 /// `user_stack_top` は 1 ページ内の上端で、Ring 3 が push できること。
 /// `main_rsp0_top` が呼び出し元（メイン）のカーネルスタック上端で、遠征後に
 /// RSP0 をそこへ戻せること。起動時の単一実行文脈から呼ぶこと。
-pub unsafe fn enter(
+pub unsafe fn run_excursion(
     main_rsp0_top: u64,
     user_rip: u64,
     user_stack_top: u64,
@@ -721,12 +721,12 @@ pub unsafe fn enter(
     // 216 から 840 バイトになり、遠征スタックの高水位が動いた。`docs/coding-standards.md`
     // の「番地以外が動いたら」）。**この関数のフレームは、子が走っている間ずっと載っている。**
     let state = state();
-    // **この遠征の深さ（S11-2）。** 呼び出し側が [`depth`] で上限を確かめている。
+    // **この遠征の深さ（S11-2）。** 呼び出し側が [`excursion_depth`] で上限を確かめている。
     let depth = state.depth.load(Ordering::SeqCst);
     // **契約が破れていたら止める（W1-c-3c）。** **以前は回復点の添字を `depth.min(上限 - 1)` へ
     // 丸めていた**——**上限を越えて呼ばれると、親の回復点を黙って上書きした。**
     if depth >= MAX_EXCURSION_DEPTH {
-        report_excursion_index_out_of_range(current_slot(), depth);
+        report_excursion_index_out_of_range(current_excursion_slot(), depth);
     }
     // **戻す RSP0 が 0 なら止める（W1-c-3c）。** **0 のまま遠征から戻ると、次に Ring 3 から
     // カーネルへ入るとき RSP0=0 の上に積む。** **W1-b でメインのタスクの `kernel_entry_stack_top` を 0 のまま
@@ -738,7 +738,7 @@ pub unsafe fn enter(
 
     // **この深さの回復点を据える。** 戻すのはこの関数の末尾である。
     // SAFETY: 静的配列の要素のアドレスを取るだけである。深さは上限未満（契約）。
-    let slot = unsafe { addr_of_mut!(RECOVERIES[current_slot()][depth]) } as u64;
+    let slot = unsafe { addr_of_mut!(RECOVERIES[current_excursion_slot()][depth]) } as u64;
     let previous_recovery = CURRENT_RECOVERY.swap(slot, Ordering::SeqCst);
     state.depth.store(depth + 1, Ordering::SeqCst);
 
@@ -884,7 +884,7 @@ pub unsafe fn enter(
 #[cold]
 fn report_excursion_index_out_of_range(slot: usize, depth: usize) -> ! {
     panic!(
-        "ring3: excursion slot {slot} / depth {depth} is out of range (RING3_SLOTS = {RING3_SLOTS}, \
+        "ring3: excursion slot {slot} / depth {depth} is out of range (USER_TASK_SLOTS = {USER_TASK_SLOTS}, \
          MAX_EXCURSION_DEPTH = {MAX_EXCURSION_DEPTH}); it used to be clamped to 0 silently (W1-c-3c)"
     );
 }
@@ -905,10 +905,10 @@ const RFLAGS_INTERRUPT_FLAG: u64 = 1 << 9;
 /// 遠征から IF=1 で戻ってきた（W1-c-3b）。**止める。**
 ///
 /// **出口で欄を戻し終えるまでの窓が閉じているのは、戻った時点で IF=0 だからである**
-/// （[`enter`] の注記）。**それが崩れたら、切り替えが欄と実物の食い違う瞬間に入りうる**
+/// （[`run_excursion`] の注記）。**それが崩れたら、切り替えが欄と実物の食い違う瞬間に入りうる**
 /// ——**静かに効く側なので止める。**
 ///
-/// **別の関数にしてある理由**——**[`enter`] のフレームを広げないため**（`panic!` の一時値。
+/// **別の関数にしてある理由**——**[`run_excursion`] のフレームを広げないため**（`panic!` の一時値。
 /// `ADR-0060` の W1-c-3 の Addendum のフレームの表）。
 #[inline(never)]
 #[cold]
@@ -934,25 +934,25 @@ pub fn should_fold() -> bool {
 ///
 /// 現在の呼び出し元は `syscall_entry` だけである。例外の側は
 /// [`record_and_fold`] が同じことを行う（あちらは戻らないので分けてある）。
-pub fn note_kernel_entry() -> bool {
+pub fn note_kernel_entry_from_user() -> bool {
     state().in_ring3.swap(false, Ordering::SeqCst)
 }
 
 /// Ring 3 へ返ることを記す（S8-b）。**iretq の直前で呼ぶこと。**
-pub fn note_return_to_ring3() {
+pub fn note_return_to_user() {
     state().in_ring3.store(true, Ordering::SeqCst);
 }
 
 /// Ring 3 由来の例外を終了処理する。ベクタ・フォルト RIP・CS・RSP とハンドラ RSP を記録し、
-/// **[`leave_ring3`] で遠征の呼び出し元へ戻る。戻らない。**
+/// **[`leave_user_mode`] で遠征の呼び出し元へ戻る。戻らない。**
 ///
-/// **[`ExcursionState::in_ring3`] を降ろすのは [`leave_ring3`] の側である**（S9-b-3-1 で切り出した）。
+/// **[`ExcursionState::in_ring3`] を降ろすのは [`leave_user_mode`] の側である**（S9-b-3-1 で切り出した）。
 /// ここが持つのは「畳みに固有の記録」だけである。
 ///
 /// # Safety
 ///
 /// [`should_fold`] とベクタ/CS.RPL の判別が全て真のときだけ呼ぶこと。
-/// [`RECOVERY`] が [`enter`] で保存済みであること（遠征中なら必ずそう）。
+/// [`RECOVERY`] が [`run_excursion`] で保存済みであること（遠征中なら必ずそう）。
 pub unsafe fn record_and_fold(
     fault_vector: u64,
     fault_cs: u64,
@@ -962,7 +962,7 @@ pub unsafe fn record_and_fold(
     fault_error_code: u64,
     handler_rsp: u64,
 ) -> ! {
-    // **1 回だけ引く（W1-c-3。[`enter`] の同じ箇所の注記）。**
+    // **1 回だけ引く（W1-c-3。[`run_excursion`] の同じ箇所の注記）。**
     let state = state();
     state.fault_vector.store(fault_vector, Ordering::SeqCst);
     state.fault_rip.store(fault_rip, Ordering::SeqCst);
@@ -975,12 +975,12 @@ pub unsafe fn record_and_fold(
     state.handler_rsp.store(handler_rsp, Ordering::SeqCst);
     state.folded.store(true, Ordering::SeqCst);
     // SAFETY: 呼び出し側契約により遠征中で、RECOVERY は保存済み。
-    unsafe { leave_ring3() }
+    unsafe { leave_user_mode() }
 }
 
 /// Ring 3 を出てカーネルへ戻る（S9-b-3-1）。**戻らない。**
 ///
-/// [`ExcursionState::in_ring3`] を降ろし、longjmp で [`enter`] の呼び出し元へ帰る。
+/// [`ExcursionState::in_ring3`] を降ろし、longjmp で [`run_excursion`] の呼び出し元へ帰る。
 ///
 /// # 理由を問わない
 ///
@@ -1000,9 +1000,9 @@ pub unsafe fn record_and_fold(
 ///
 /// # Safety
 ///
-/// [`RECOVERY`] が [`enter`] で保存済みであること（遠征中なら必ずそう）。
+/// [`RECOVERY`] が [`run_excursion`] で保存済みであること（遠征中なら必ずそう）。
 /// Ring 3 から入ったカーネル文脈から呼ぶこと。
-pub unsafe fn leave_ring3() -> ! {
+pub unsafe fn leave_user_mode() -> ! {
     state().in_ring3.store(false, Ordering::SeqCst);
     // SAFETY: 呼び出し側契約により RECOVERY は保存済み。longjmp は RSP と
     // callee-saved を復元して復帰 RIP へ飛ぶ。戻らない。
@@ -1014,13 +1014,13 @@ pub fn folded() -> bool {
     state().folded.load(Ordering::SeqCst)
 }
 
-/// 中断で出ることを記す（S12 前の手当て、C）。**`leave_ring3` の直前に呼ぶ。**
+/// 中断で出ることを記す（S12 前の手当て、C）。**`leave_user_mode` の直前に呼ぶ。**
 pub fn note_interrupted() {
     state().interrupted.store(true, Ordering::SeqCst);
 }
 
 /// 中断で出たか（遠征後の会計）。
-pub fn interrupted() -> bool {
+pub fn excursion_interrupted() -> bool {
     state().interrupted.load(Ordering::SeqCst)
 }
 
@@ -1028,7 +1028,7 @@ pub fn interrupted() -> bool {
 ///
 /// # なぜ要るのか
 ///
-/// [`enter`] は入場時にこの一式を 0 へ戻し、**戻るときには復元しない。**
+/// [`run_excursion`] は入場時にこの一式を 0 へ戻し、**戻るときには復元しない。**
 /// 遠征が 1 段だけの間はそれで正しかった——**次の遠征が始まるまで、
 /// 誰も前の遠征の記録を必要としない。**
 ///
@@ -1059,7 +1059,7 @@ pub struct FoldRecord {
 /// - 今の遠征の終了処理の記録を写して返すだけで、何も変えない。
 /// - 呼ぶのは `spawn`（`crate::userland`）で、子の遠征の前に親の記録を控える（戻すのは [`restore_fold_record`]）。
 pub fn save_fold_record() -> FoldRecord {
-    // **1 回だけ引く（W1-c-3。[`enter`] の同じ箇所の注記）。**
+    // **1 回だけ引く（W1-c-3。[`run_excursion`] の同じ箇所の注記）。**
     let state = state();
     FoldRecord {
         folded: state.folded.load(Ordering::SeqCst),
@@ -1081,7 +1081,7 @@ pub fn save_fold_record() -> FoldRecord {
 /// - 控えた記録を書き戻す。呼ぶのは `spawn`（`crate::userland`）で、子の遠征から戻った後に、親の記録を
 ///   元へ戻す。
 pub fn restore_fold_record(record: FoldRecord) {
-    // **1 回だけ引く（W1-c-3。[`enter`] の同じ箇所の注記）。**
+    // **1 回だけ引く（W1-c-3。[`run_excursion`] の同じ箇所の注記）。**
     let state = state();
     state.folded.store(record.folded, Ordering::SeqCst);
     state
@@ -1116,7 +1116,7 @@ pub fn fault_cs() -> u64 {
 }
 
 /// 終了処理した例外の番号（x86 ではベクタ）。呼び出し側が予期と突き合わせる。
-pub fn fault_number() -> u64 {
+pub fn excursion_fault_number() -> u64 {
     state().fault_vector.load(Ordering::SeqCst)
 }
 

@@ -534,7 +534,7 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
     // SAFETY: 稼働中のテーブルを direct map 越しに読むだけ（本番テーブルには
     // direct map がある）。読み取りのみ。
     let first_top_entry = unsafe {
-        crate::arch::x86_64::paging::verify::read_top_entry(
+        crate::arch::x86_64::paging::verify::read_top_level_entry(
             root_phys,
             common::addr::direct_map(),
             0,

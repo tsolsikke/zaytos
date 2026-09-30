@@ -146,7 +146,7 @@ pub unsafe fn remove_identity(
     let cr3 = switch::active_page_table_root();
     // SAFETY: cr3 は稼働中の自前テーブル、direct_map（高位ウィンドウ）でそのフレームを
     // 読める。読み取りのみ。
-    let saved0 = unsafe { verify::read_top_entry(cr3, direct_map, IDENTITY_INDEX) };
+    let saved0 = unsafe { verify::read_top_level_entry(cr3, direct_map, IDENTITY_INDEX) };
     logger.info(format_args!(
         "identity-removal: begin. live PML4={:#x}, saved PML4[0]={saved0:#x}",
         cr3.as_u64()
@@ -199,7 +199,7 @@ pub unsafe fn remove_identity(
     let mut all_ok = true;
     for region in always.iter().chain(high_mapped.iter()) {
         // SAFETY: cr3 は稼働テーブル、direct_map で辿れる。読み取りのみ。
-        match unsafe { verify::walk(cr3, direct_map, region.va) } {
+        match unsafe { verify::walk_page_table(cr3, direct_map, region.va) } {
             Ok(res) => logger.info(format_args!(
                 "identity-removal: required [{}] {:#x} -> phys {:#x} (huge={}): OK",
                 region.name,
@@ -219,7 +219,7 @@ pub unsafe fn remove_identity(
     }
     // PML4[0] が空になったこと。
     // SAFETY: cr3 は稼働テーブル、direct_map で読める。読み取りのみ。
-    let pml4_0_after = unsafe { verify::read_top_entry(cr3, direct_map, IDENTITY_INDEX) };
+    let pml4_0_after = unsafe { verify::read_top_level_entry(cr3, direct_map, IDENTITY_INDEX) };
     let pml4_0_empty = pml4_0_after & PRESENT == 0;
     logger.info(format_args!(
         "identity-removal: PML4[0] after clear = {pml4_0_after:#x} (empty={pml4_0_empty})"
@@ -236,7 +236,7 @@ pub unsafe fn remove_identity(
         // 書き戻した後、低位 VA が walk で present に戻っていることを確認してから
         // halt する（「書き戻した」だけでなく「恒等が実際に復活した」ことまで見る）。
         // SAFETY: cr3 は稼働テーブル、direct_map で読める。読み取りのみ。
-        let low_after = unsafe { verify::walk(cr3, direct_map, low_probe) };
+        let low_after = unsafe { verify::walk_page_table(cr3, direct_map, low_probe) };
         let revived = low_after.is_ok();
         logger.error(format_args!(
             "identity-removal: verification FAILED. restored PML4[0]; low VA {:#x} walk after restore = \
@@ -258,7 +258,7 @@ pub unsafe fn remove_identity(
     let total_regions = always.len() + high_mapped.len();
     for region in always.iter().chain(high_mapped.iter()) {
         // SAFETY: cr3 は稼働テーブル、direct_map で辿れる。読み取りのみ。
-        match unsafe { verify::walk(cr3, direct_map, region.va) } {
+        match unsafe { verify::walk_page_table(cr3, direct_map, region.va) } {
             Ok(_) => reresolved += 1,
             Err(e) => {
                 post_ok = false;
@@ -277,7 +277,7 @@ pub unsafe fn remove_identity(
     ));
     // 低位 VA は未マップであること（デレフするとフォルトするので walk で読む）。
     // SAFETY: cr3 は稼働テーブル、direct_map で読める。読み取りのみ。
-    let low_after = unsafe { verify::walk(cr3, direct_map, low_probe) };
+    let low_after = unsafe { verify::walk_page_table(cr3, direct_map, low_probe) };
     let low_unmapped = matches!(low_after, Err(verify::WalkError::NotPresent));
     logger.info(format_args!(
         "identity-removal: post-flush low VA {:#x} walk = {low_after:?} (unmapped={low_unmapped})",

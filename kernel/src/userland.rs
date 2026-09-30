@@ -400,8 +400,8 @@ const HEAP_PAGE_SIZE: u64 = 4096;
 /// **スロットごとに持つ（W1-c-3）。** **今のタスクのスロットで引く**（`crate::vfs` の
 /// `CURRENT_FILES` と同じ形）。**既定の起動では必ずスロット 0 である**（W1-c-4 の
 /// `concurrent-test` では、足した 1 本がスロット 1 を使う）。
-static CURRENT_HEAP: [Locked<Heap>; crate::arch::x86_64::ring3::RING3_SLOTS] =
-    [const { Locked::new(Heap::EMPTY) }; crate::arch::x86_64::ring3::RING3_SLOTS];
+static CURRENT_HEAP: [Locked<Heap>; crate::arch::x86_64::ring3::USER_TASK_SLOTS] =
+    [const { Locked::new(Heap::EMPTY) }; crate::arch::x86_64::ring3::USER_TASK_SLOTS];
 
 /// 載せた後にアロケータから取った中間ページテーブルの数（スロットごと。`ADR-0065` の (a)）。
 ///
@@ -410,8 +410,8 @@ static CURRENT_HEAP: [Locked<Heap>; crate::arch::x86_64::ring3::RING3_SLOTS] =
 /// になる。** **`mmap` のためではなく、載せた後に PT を取る経路すべてのためである**——**`brk` が
 /// 境を越えれば同じ穴を踏むので、同時に閉じる。**
 static POST_LOAD_FRAMES: [core::sync::atomic::AtomicUsize;
-    crate::arch::x86_64::ring3::RING3_SLOTS] =
-    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::arch::x86_64::ring3::RING3_SLOTS];
+    crate::arch::x86_64::ring3::USER_TASK_SLOTS] = [const { core::sync::atomic::AtomicUsize::new(0) };
+    crate::arch::x86_64::ring3::USER_TASK_SLOTS];
 
 /// 載せた後に取った PT の数を足す（`crate::syscall` の `mmap` が呼ぶ）。
 pub fn note_post_load_frames(slot: usize, count: usize) {
@@ -513,14 +513,14 @@ impl Heap {
 /// 今のヒープを据え、前のものを返す（H-a）。**`swap_current_files` と同じ形。**
 pub fn swap_current_heap(heap: Heap) -> Heap {
     core::mem::replace(
-        &mut CURRENT_HEAP[crate::arch::x86_64::ring3::current_slot()].lock(),
+        &mut CURRENT_HEAP[crate::arch::x86_64::ring3::current_excursion_slot()].lock(),
         heap,
     )
 }
 
 /// 今のヒープへ触る（H-a）。**`sys_brk` が使う。**
 pub fn with_current_heap<R>(body: impl FnOnce(&mut Heap) -> R) -> R {
-    body(&mut CURRENT_HEAP[crate::arch::x86_64::ring3::current_slot()].lock())
+    body(&mut CURRENT_HEAP[crate::arch::x86_64::ring3::current_excursion_slot()].lock())
 }
 
 /// ヒープが越えられない上端（H-a。ADR-0044 の決定 4）。
@@ -615,7 +615,7 @@ pub enum UserLoadError {
     DidNotExit,
     /// 終了でも例外による終了処理でもなく Ring 3 から戻ってきた。**カーネル側の不具合である。**
     ///
-    /// `ring3::enter` はこの 2 つの longjmp でしか戻らないので、**通常は構成でき
+    /// `ring3::run_excursion` はこの 2 つの longjmp でしか戻らないので、**通常は構成でき
     /// ない。** 記録の側が壊れたときの受け皿である。
     NoExitNoFold,
     /// 終了状態が予期と違った。`hello` は 0 で終わる。
@@ -710,8 +710,8 @@ const MAX_SPAWN_IN_FLIGHT: usize = MAX_EXCURSION_DEPTH;
 /// タイマが切り替えうる。** **[`SPAWN_PATHS`]・[`SPAWN_ARGVS`]・[`SPAWN_ENVPS`] も同じである。**
 /// **2 つ目のスロットを使うのは、足した 1 本だけである**（W1-c-4。`concurrent-test` の構成でだけ走る）。
 static mut SPAWN_IMAGES: [[[u8; MAX_EXECUTABLE_SIZE]; MAX_SPAWN_IN_FLIGHT];
-    crate::arch::x86_64::ring3::RING3_SLOTS] =
-    [[[0; MAX_EXECUTABLE_SIZE]; MAX_SPAWN_IN_FLIGHT]; crate::arch::x86_64::ring3::RING3_SLOTS];
+    crate::arch::x86_64::ring3::USER_TASK_SLOTS] =
+    [[[0; MAX_EXECUTABLE_SIZE]; MAX_SPAWN_IN_FLIGHT]; crate::arch::x86_64::ring3::USER_TASK_SLOTS];
 
 /// `spawn` が受け取ったパスを置く場所（S11-5）。
 ///
@@ -724,8 +724,8 @@ static mut SPAWN_IMAGES: [[[u8; MAX_EXECUTABLE_SIZE]; MAX_SPAWN_IN_FLIGHT];
 /// **イメージと同じく、スロットと深さごとに 1 本ずつ持つ**（[`MAX_SPAWN_IN_FLIGHT`]。
 /// スロットは W1-c-1 で足した。[`SPAWN_IMAGES`] の doc）。
 static mut SPAWN_PATHS: [[[u8; PATH_MAX]; MAX_SPAWN_IN_FLIGHT];
-    crate::arch::x86_64::ring3::RING3_SLOTS] =
-    [[[0; PATH_MAX]; MAX_SPAWN_IN_FLIGHT]; crate::arch::x86_64::ring3::RING3_SLOTS];
+    crate::arch::x86_64::ring3::USER_TASK_SLOTS] =
+    [[[0; PATH_MAX]; MAX_SPAWN_IN_FLIGHT]; crate::arch::x86_64::ring3::USER_TASK_SLOTS];
 
 /// [`spawn`] が起動した子が隔離へ入れたフレームの累計（S11-5）。
 ///
@@ -769,8 +769,8 @@ static SPAWN_QUARANTINED: core::sync::atomic::AtomicUsize = core::sync::atomic::
 /// もう片方の途中の破棄を空にする。** **今のタスクのスロットで引く。** **既定の起動では必ずスロット 0
 /// である**（W1-c-4 の `concurrent-test` では、足した 1 本がスロット 1 を使う）。
 static mut SPAWN_QUARANTINE: [crate::quarantine::Quarantine;
-    crate::arch::x86_64::ring3::RING3_SLOTS] =
-    [const { crate::quarantine::Quarantine::new() }; crate::arch::x86_64::ring3::RING3_SLOTS];
+    crate::arch::x86_64::ring3::USER_TASK_SLOTS] =
+    [const { crate::quarantine::Quarantine::new() }; crate::arch::x86_64::ring3::USER_TASK_SLOTS];
 
 /// [`spawn`] が起動した子が漏らしたフレームの累計（S11-5）。
 static SPAWN_LEAKED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
@@ -796,8 +796,8 @@ pub fn spawn_accounting() -> (usize, usize) {
 /// 同じ理由）。**スロットと深さごとに 1 本ずつ持つ**（[`MAX_SPAWN_IN_FLIGHT`]。
 /// スロットは W1-c-1 で足した。[`SPAWN_IMAGES`] の doc）。
 static mut SPAWN_ARGVS: [[[u8; MAX_ARGV_BYTES]; MAX_SPAWN_IN_FLIGHT];
-    crate::arch::x86_64::ring3::RING3_SLOTS] =
-    [[[0; MAX_ARGV_BYTES]; MAX_SPAWN_IN_FLIGHT]; crate::arch::x86_64::ring3::RING3_SLOTS];
+    crate::arch::x86_64::ring3::USER_TASK_SLOTS] =
+    [[[0; MAX_ARGV_BYTES]; MAX_SPAWN_IN_FLIGHT]; crate::arch::x86_64::ring3::USER_TASK_SLOTS];
 
 /// `spawn` が受け取った `envp` を置く場所（f-2。`ADR-0053`）。
 ///
@@ -806,8 +806,8 @@ static mut SPAWN_ARGVS: [[[u8; MAX_ARGV_BYTES]; MAX_SPAWN_IN_FLIGHT];
 /// 別の理由で決まっているからである**（語の数と、環境の本数）。スロットは W1-c-1 で
 /// 足した（[`SPAWN_IMAGES`] の doc）。
 static mut SPAWN_ENVPS: [[[u8; MAX_ENVP_BYTES]; MAX_SPAWN_IN_FLIGHT];
-    crate::arch::x86_64::ring3::RING3_SLOTS] =
-    [[[0; MAX_ENVP_BYTES]; MAX_SPAWN_IN_FLIGHT]; crate::arch::x86_64::ring3::RING3_SLOTS];
+    crate::arch::x86_64::ring3::USER_TASK_SLOTS] =
+    [[[0; MAX_ENVP_BYTES]; MAX_SPAWN_IN_FLIGHT]; crate::arch::x86_64::ring3::USER_TASK_SLOTS];
 
 /// [`spawn`] が拒む形（S11-5）。
 ///
@@ -947,7 +947,7 @@ pub struct UserProcess {
 ///
 /// 走らせた場合、返すのはイメージの entry である。**どう終わったかの判定は
 /// [`check_user_program_outcome`] が行う**——プログラムごとに正しい終わり方が
-/// 違い、それは呼び出し側の知識だからである（`ring3::enter` が終了させた位置を
+/// 違い、それは呼び出し側の知識だからである（`ring3::run_excursion` が終了させた位置を
 /// 主張しないのと同じ形）。`run` が偽なら 0 を返す。
 pub fn load_user_program(
     logger: &mut Logger<Serial>,
@@ -975,7 +975,7 @@ pub fn load_user_program(
     // **右（スロット 0。システムコールの中）に置くと IF=0 で永久に空回りする**（実測）。
     // **`wait-window-is-wide` と同じ「機会を作る」形である。**
     #[cfg(feature = "spawn-detached-returns-early")]
-    if crate::arch::x86_64::ring3::current_slot() == crate::task::detached_slot() {
+    if crate::arch::x86_64::ring3::current_excursion_slot() == crate::task::detached_slot() {
         let opened = crate::arch::x86_64::monotonic_ticks();
         while crate::arch::x86_64::monotonic_ticks().saturating_sub(opened) < 2 {
             core::hint::spin_loop();
@@ -1016,7 +1016,7 @@ pub fn load_user_program(
             // **次の `spawn` へ渡す端を据える（`ADR-0063` の (b3)）。** **`a | b` の右は
             // fd 0 が読み端、左は fd 1 が書き端になる。** **端末の欄を差し替える。**
             let mut files = crate::vfs::FileTable::new();
-            let slot = crate::arch::x86_64::ring3::current_slot();
+            let slot = crate::arch::x86_64::ring3::current_excursion_slot();
             if let Some(pipe) = take_inherit_stdin(slot) {
                 files.replace(crate::vfs::STDIN_FD, crate::vfs::File::PipeRead { pipe });
             }
@@ -1100,7 +1100,7 @@ pub fn load_user_program(
     // **載せた後に `mmap` が取った PT を足す（`ADR-0065` の (a)）。** **`frames_taken` は
     // 載せた時点の分だけなので、これを足さないと `collected > taken` になる。**
     let taken = process.space.frames_taken()
-        + take_post_load_frames(crate::arch::x86_64::ring3::current_slot());
+        + take_post_load_frames(crate::arch::x86_64::ring3::current_excursion_slot());
     let keep_space = cfg!(feature = "user-exit-keep-space") && run;
     let (held, leaked) = if keep_space {
         (0, 0)
@@ -1110,7 +1110,7 @@ pub fn load_user_program(
         // 入れ子にならない**（[`SPAWN_QUARANTINE`] の doc）。
         let quarantine = unsafe {
             &mut (*core::ptr::addr_of_mut!(SPAWN_QUARANTINE))
-                [crate::arch::x86_64::ring3::current_slot()]
+                [crate::arch::x86_64::ring3::current_excursion_slot()]
         };
         quarantine.reset();
         // **破棄する前に、この空間を指したままのタスクが無いかを見る（W1-b-2）。**
@@ -1159,13 +1159,13 @@ pub fn space_accounting_mismatches() -> u64 {
 /// **交差は別のスロットどうしで起きる**（足した 1 本はスロット 1 を使う）。
 /// **実測で踏んだ**——**スロットを見ずに数えたら、既定の起動の入れ子 6 つが「交差」と出た。**
 static SPAWN_WINDOWS_OPEN: [core::sync::atomic::AtomicUsize;
-    crate::arch::x86_64::ring3::RING3_SLOTS] =
-    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::arch::x86_64::ring3::RING3_SLOTS];
+    crate::arch::x86_64::ring3::USER_TASK_SLOTS] = [const { core::sync::atomic::AtomicUsize::new(0) };
+    crate::arch::x86_64::ring3::USER_TASK_SLOTS];
 
 /// これまでに開いた `spawn` のウィンドウの数、スロットごと（`ADR-0063` の (b1)）。
 static SPAWN_WINDOW_STARTS: [core::sync::atomic::AtomicU64;
-    crate::arch::x86_64::ring3::RING3_SLOTS] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; crate::arch::x86_64::ring3::RING3_SLOTS];
+    crate::arch::x86_64::ring3::USER_TASK_SLOTS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::arch::x86_64::ring3::USER_TASK_SLOTS];
 
 /// 大域の差を実際に主張した回数（`ADR-0063` の (b1)）。
 ///
@@ -1191,7 +1191,7 @@ pub struct SpawnWindow {
 fn windows_elsewhere(slot: usize) -> (usize, u64) {
     let mut open = 0usize;
     let mut starts = 0u64;
-    for other in 0..crate::arch::x86_64::ring3::RING3_SLOTS {
+    for other in 0..crate::arch::x86_64::ring3::USER_TASK_SLOTS {
         if other == slot {
             continue;
         }
@@ -1203,7 +1203,7 @@ fn windows_elsewhere(slot: usize) -> (usize, u64) {
 
 /// 会計のウィンドウを開く（`ADR-0063` の (b1)）。
 pub fn open_spawn_window() -> SpawnWindow {
-    let slot = crate::arch::x86_64::ring3::current_slot();
+    let slot = crate::arch::x86_64::ring3::current_excursion_slot();
     let (open_elsewhere_at_entry, starts_elsewhere_at_entry) = windows_elsewhere(slot);
     SPAWN_WINDOW_STARTS[slot].fetch_add(1, core::sync::atomic::Ordering::SeqCst);
     SPAWN_WINDOWS_OPEN[slot].fetch_add(1, core::sync::atomic::Ordering::SeqCst);
@@ -1596,7 +1596,7 @@ fn load_user_program_into(
             continue;
         };
         // SAFETY: この空間の PML4 は有効で、direct map が配下を覆っている。読み取りのみ。
-        match unsafe { verify::walk(process.space.root(), direct_map, virt) } {
+        match unsafe { verify::walk_page_table(process.space.root(), direct_map, virt) } {
             Ok(resolved) => {
                 let writable =
                     resolved.entry & crate::arch::x86_64::paging::entry::PTE_WRITABLE != 0;
@@ -1739,10 +1739,11 @@ unsafe fn run_loaded_program(
     // 入れ子になった瞬間だけ壊れる。** 親が次にカーネルへ入るときの RSP0 が
     // 子のスタックを指し、**次に子を起動したときに親のフレームを踏む。**
     // **`spawn` が戻り先の RSP0 を突き合わせて検出する。**
-    let main_entry_stack_top = if crate::arch::x86_64::ring3::depth() == 0 {
+    let main_entry_stack_top = if crate::arch::x86_64::ring3::excursion_depth() == 0 {
         crate::arch::x86_64::active_kernel_entry_stack_top()
     } else if cfg!(feature = "spawn-child-rsp0") {
-        crate::arch::x86_64::excursion_stack_range_at(crate::arch::x86_64::ring3::depth()).1
+        crate::arch::x86_64::excursion_stack_range_at(crate::arch::x86_64::ring3::excursion_depth())
+            .1
     } else {
         crate::arch::x86_64::excursion_stack_range().1
     };
@@ -1784,7 +1785,7 @@ unsafe fn run_loaded_program(
     crate::input::clear_interrupt_request();
     // **どの深さの遠征スタックを使うかを控える（S11-5）。** 戻った後は深さが
     // 元へ戻っているので、そのときには引けない。
-    let entered_at_depth = crate::arch::x86_64::ring3::depth();
+    let entered_at_depth = crate::arch::x86_64::ring3::excursion_depth();
     // **起動するプログラムの FP は既定値から始める（`ADR-0058` の Decision 4）。**
     // **前のプログラムが XMM へ残した値が、次のプログラムから読めてはならない。**
     //
@@ -1807,7 +1808,7 @@ unsafe fn run_loaded_program(
     //
     // **Ring 3 へ落ちた後、そのプログラムのカーネル入場は遠征スタックに乗る**ので、
     // **この値は、そのプログラムが走っている間ずっとの値である。**
-    if crate::arch::x86_64::ring3::depth() == 0 {
+    if crate::arch::x86_64::ring3::excursion_depth() == 0 {
         report_stack_water_before_ring3(logger, process.name);
     }
 
@@ -1818,7 +1819,7 @@ unsafe fn run_loaded_program(
     // SAFETY: entry と stack は今マップしたユーザーページで、`ud2` が必ずフォルト
     // する。main_entry_stack_top はメインのカーネルスタック上端。単一実行文脈である。
     unsafe {
-        crate::arch::x86_64::ring3::enter(
+        crate::arch::x86_64::ring3::run_excursion(
             main_entry_stack_top,
             process.entry,
             process.stack_top,
@@ -1826,7 +1827,7 @@ unsafe fn run_loaded_program(
         )
     };
     // **引き取る。** 遠征が例外による終了処理で戻っても `exit` で戻ってもここを通る
-    // （`ring3::enter` はこの 2 つの longjmp でしか戻らない）。
+    // （`ring3::run_excursion` はこの 2 つの longjmp でしか戻らない）。
     // **前景を返す。** 取った者だけが返す（入れ子の子は取れていない）。
     if claimed_foreground {
         crate::input::release_foreground();
@@ -1839,7 +1840,7 @@ unsafe fn run_loaded_program(
     // （シェル）で、**止めるのは最も内側（子）である。**
     // `claim_foreground` は入れ子では偽を返し、**親が持ったまま子はその前景を
     // 通して読む。** **どこにも書かれていなかったので、判定行に出す。**
-    if crate::arch::x86_64::ring3::interrupted() {
+    if crate::arch::x86_64::ring3::excursion_interrupted() {
         // **止めた打鍵そのものを捨てる。** 残すと、次にシェルが読んだときに
         // `^C` がもう 1 つ出る（実測。[`crate::input::discard_typed_input`]）。
         //
@@ -1945,12 +1946,12 @@ unsafe fn run_loaded_program(
     // **控えを持つ形にしたら、遠征スタックの高水位が 96 バイト増えた**（実測。
     // `tools/boot-log-compare.py` が検出した。**`dev` では局所変数がそのまま
     // フレームを広げ、このフレームは子が走っている間ずっと深さ 0 のスタックに載る**）。
-    // **`ring3::enter` は深さを戻してから返るので、ここで読む深さは入口と同じである。**
+    // **`ring3::run_excursion` は深さを戻してから返るので、ここで読む深さは入口と同じである。**
     // SAFETY: 本番のテーブルへ戻す。上位は同じなので連続して実行できる。
     unsafe {
         crate::task::switch_page_table_root_and_note(
             production,
-            if crate::arch::x86_64::ring3::depth() == 0 {
+            if crate::arch::x86_64::ring3::excursion_depth() == 0 {
                 0
             } else {
                 production.as_u64()
@@ -1974,7 +1975,7 @@ unsafe fn run_loaded_program(
 /// # 深さで断る
 ///
 /// [`MAX_EXCURSION_DEPTH`] に達していたら [`SpawnError::TooDeep`] を返す。
-/// **入る前に断る**——[`crate::arch::x86_64::ring3::enter`] は上限を越えた深さで呼ばれると
+/// **入る前に断る**——[`crate::arch::x86_64::ring3::run_excursion`] は上限を越えた深さで呼ばれると
 /// 遠征スタックと回復点を index 0 へ丸めるので、**親のものを踏む。**
 /// **その状態には判定行が無い**ので、**踏ませずに断る側で閉じる。**
 ///
@@ -2022,7 +2023,7 @@ struct InheritedEnds {
 }
 
 static INHERITED_ENDS: [common::critical::Locked<InheritedEnds>;
-    crate::arch::x86_64::ring3::RING3_SLOTS] = [
+    crate::arch::x86_64::ring3::USER_TASK_SLOTS] = [
     common::critical::Locked::new(InheritedEnds {
         stdin: None,
         stdout: None,
@@ -2036,7 +2037,7 @@ static INHERITED_ENDS: [common::critical::Locked<InheritedEnds>;
 /// 予約した読み端のうち、まだ次の `spawn` に渡していないもの（`ADR-0063` の (b3)）。
 /// **スロットごとに 1 つ**——**シェルが `a | b` の左を起動してから右を起動するまでの間、ここに在る。**
 static PENDING_STDIN: [common::critical::Locked<Option<u8>>;
-    crate::arch::x86_64::ring3::RING3_SLOTS] = [
+    crate::arch::x86_64::ring3::USER_TASK_SLOTS] = [
     common::critical::Locked::new(None),
     common::critical::Locked::new(None),
 ];
@@ -2081,7 +2082,7 @@ pub fn spawn(
     envp: Option<(&[u8], usize)>,
 ) -> Result<SpawnOutcome, SpawnError> {
     // **深さの上限。入る前に断る。**
-    let depth = crate::arch::x86_64::ring3::depth();
+    let depth = crate::arch::x86_64::ring3::excursion_depth();
     if depth >= MAX_EXCURSION_DEPTH {
         return Err(SpawnError::TooDeep);
     }
@@ -2092,7 +2093,7 @@ pub fn spawn(
     // シェルを起動する。**S11-5 の時点では `dispatch` からしか来なかったので、
     // 深さ 0 を不具合として拒んでいた。** 呼び出し側が増えたので、その判定を外した。
     // **この `slot` は深さの番号である。** 遠征のスロット（W1-c-1）は
-    // `crate::arch::x86_64::ring3::current_slot` で引く。
+    // `crate::arch::x86_64::ring3::current_excursion_slot` で引く。
     let slot = depth;
 
     let mut serial = Serial::primary();
@@ -2125,8 +2126,8 @@ pub fn spawn(
     // のはこの 1 本だけである（深さの判定が入れ子の重なりを禁じている）。
     // 単一コアの実行文脈で、割り込みハンドラはここへ来ない。
     let path_slot: &'static mut [u8; PATH_MAX] = unsafe {
-        &mut (*core::ptr::addr_of_mut!(SPAWN_PATHS))[crate::arch::x86_64::ring3::current_slot()]
-            [slot]
+        &mut (*core::ptr::addr_of_mut!(SPAWN_PATHS))
+            [crate::arch::x86_64::ring3::current_excursion_slot()][slot]
     };
     path_slot[..name_len].copy_from_slice(&path[..name_len]);
     let name_bytes: &'static [u8] = &path_slot[..name_len];
@@ -2138,8 +2139,8 @@ pub fn spawn(
     // **像をブロックごとに写す。** 借りたままにできない理由は [`SPAWN_IMAGES`]。
     // SAFETY: `slot` は範囲内で、その深さで使うのはこの 1 本だけである（上と同じ）。
     let image_slot: &'static mut [u8; MAX_EXECUTABLE_SIZE] = unsafe {
-        &mut (*core::ptr::addr_of_mut!(SPAWN_IMAGES))[crate::arch::x86_64::ring3::current_slot()]
-            [slot]
+        &mut (*core::ptr::addr_of_mut!(SPAWN_IMAGES))
+            [crate::arch::x86_64::ring3::current_excursion_slot()][slot]
     };
     {
         let block_size = fs.block_size() as usize;
@@ -2253,8 +2254,8 @@ pub fn spawn(
     // のはこの 1 本だけである（深さの判定が入れ子の重なりを禁じている）。
     // 単一コアの実行文脈で、割り込みハンドラはここへ来ない。
     let argv_slot: &'static mut [u8; MAX_ARGV_BYTES] = unsafe {
-        &mut (*core::ptr::addr_of_mut!(SPAWN_ARGVS))[crate::arch::x86_64::ring3::current_slot()]
-            [slot]
+        &mut (*core::ptr::addr_of_mut!(SPAWN_ARGVS))
+            [crate::arch::x86_64::ring3::current_excursion_slot()][slot]
     };
     argv_slot[..argv_bytes.len()].copy_from_slice(argv_bytes);
     let stored: &'static [u8] = &argv_slot[..argv_bytes.len()];
@@ -2304,7 +2305,7 @@ pub fn spawn(
             // 単一コアの実行文脈で、割り込みハンドラはここへ来ない。
             let envp_slot: &'static mut [u8; MAX_ENVP_BYTES] = unsafe {
                 &mut (*core::ptr::addr_of_mut!(SPAWN_ENVPS))
-                    [crate::arch::x86_64::ring3::current_slot()][slot]
+                    [crate::arch::x86_64::ring3::current_excursion_slot()][slot]
             };
             envp_slot[..envp_bytes.len()].copy_from_slice(envp_bytes);
             let env_stored: &'static [u8] = &envp_slot[..envp_bytes.len()];
@@ -2358,12 +2359,12 @@ pub fn spawn(
     // **子の終わり方をここで読む。** 戻す前に読まなければ、親のもので上書きされる。
     // **中断を先に見る（S12 前の手当て、C）。** **`exit` も例外による終了処理も通っていない**
     // ので、先に見なければ `Folded(0)` に化ける。
-    let child = if crate::arch::x86_64::ring3::interrupted() {
+    let child = if crate::arch::x86_64::ring3::excursion_interrupted() {
         SpawnOutcome::Interrupted
     } else if crate::syscall::process_exited() {
         SpawnOutcome::Exited(crate::syscall::process_exit_status())
     } else {
-        SpawnOutcome::Folded(crate::arch::x86_64::ring3::fault_number())
+        SpawnOutcome::Folded(crate::arch::x86_64::ring3::excursion_fault_number())
     };
     let syscalls = crate::syscall::invocation_count();
 
@@ -2693,7 +2694,7 @@ pub fn run_detached_request() {
         .has_envp
         .then_some((&request.envp[..request.envp_used], request.envp_count));
     let name = core::str::from_utf8(path).unwrap_or("<not utf-8>");
-    let slot = crate::arch::x86_64::ring3::current_slot();
+    let slot = crate::arch::x86_64::ring3::current_excursion_slot();
     logger.info(format_args!(
         "detached: starting {name} on ring3 slot {slot}"
     ));

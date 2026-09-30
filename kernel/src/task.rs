@@ -45,7 +45,7 @@ pub const WORKER_COUNT: usize = 2;
 /// bootstrap processor の担当である。
 ///
 /// **W1-c-1 でもう 1 つ増えた（末尾）。** **2 本の Ring 3 を同時に走らせるには、
-/// メインの他にもう 1 本が要る**（`ring3::RING3_SLOTS` が 2 であることと対になる）。
+/// メインの他にもう 1 本が要る**（`ring3::USER_TASK_SLOTS` が 2 であることと対になる）。
 /// **W1-c-1 では誰も使わない**——**`Uninitialized` のままで、`pick_next` の走査範囲
 /// （`1..=WORKER_COUNT`）の外にある。** **既存の添字は動かない**（AP 用アイドルは 3 のまま）。
 /// **W1-c-3 で名前を付けた**（`RING3_TASK`）——**スロットを引くのに使い始めたので、
@@ -546,7 +546,7 @@ struct Task {
     ///
     /// - **遠征の戻りが必ず元の値へ戻す**（`userland::run_loaded_program`）。
     ///   **載せてから戻すまでの間に抜ける経路は `halt_forever` の 2 つだけで、
-    ///   そこでは以後何も走らない**（実測）。**`ring3::enter` は終了と、例外による終了処理の
+    ///   そこでは以後何も走らない**（実測）。**`ring3::run_excursion` は終了と、例外による終了処理の
     ///   2 つの longjmp でしか戻らず、Ctrl+C も終了処理として戻る。**
     /// - **破棄の経路が、その空間を指したままのタスクを見つけたら消す**
     ///   （[`forget_page_table_root_if`]。**ユーザープロセスの空間を破棄する箇所は 1 つだけである**。実測）。
@@ -1056,7 +1056,7 @@ enum ExpectedStack {
 /// 深さの欄（入っている遠征の数）から、期待するスタックを引く（W1-c-3b）。
 ///
 /// **0 は遠征に入っていない。** **`n` 個入っているなら、いちばん内側の遠征のカーネル入場は
-/// 添字 `n - 1` の遠征スタックに載る**（`ring3::enter` は深さ `d` の遠征の RSP0 を
+/// 添字 `n - 1` の遠征スタックに載る**（`ring3::run_excursion` は深さ `d` の遠征の RSP0 を
 /// 添字 `d` のスタックの上端へ据え、その後で数を `d + 1` にする）。
 const fn expected_stack(depth_count: usize) -> ExpectedStack {
     if depth_count == 0 {
@@ -1085,7 +1085,7 @@ pub fn current_ring3_slot() -> usize {
 
 /// 今のタスクの `RSP0` の欄を据える（W1-b。遠征の出入りが呼ぶ）。
 ///
-/// **`ring3::enter` が `gdt::set_active_kernel_entry_stack_top` を呼ぶのと対である**——**あちらは
+/// **`ring3::run_excursion` が `gdt::set_active_kernel_entry_stack_top` を呼ぶのと対である**——**あちらは
 /// TSS を書き、こちらは「次にこのタスクへ戻るとき、何を書くか」を残す。**
 /// **切り替えはこの欄を読む**（`schedule_switch`）。
 pub fn note_current_kernel_entry_stack_top(top: u64) {
@@ -3621,7 +3621,9 @@ mod tests {
             let expected = if task == super::RING3_TASK { 1 } else { 0 };
             assert_eq!(super::ring3_slot_of(task), expected, "task {task}");
         }
-        assert!(super::ring3_slot_of(super::RING3_TASK) < crate::arch::x86_64::ring3::RING3_SLOTS);
+        assert!(
+            super::ring3_slot_of(super::RING3_TASK) < crate::arch::x86_64::ring3::USER_TASK_SLOTS
+        );
         assert_eq!(super::ring3_slot_of(super::BSP_IDLE_TASK), 0);
     }
 

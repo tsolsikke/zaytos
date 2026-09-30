@@ -68,7 +68,7 @@ pub enum WalkError {
 ///
 /// `pml4_phys` が有効なページテーブルフレームを指し、`direct_map` を通して
 /// そのフレームと配下のテーブルが読めること。
-pub unsafe fn walk(
+pub unsafe fn walk_page_table(
     pml4_phys: PhysAddr,
     direct_map: DirectMap,
     virt: VirtAddr,
@@ -153,7 +153,7 @@ pub struct UserSupervisorAudit {
 ///
 /// # Safety
 ///
-/// [`walk`] と同じ契約。
+/// [`walk_page_table`] と同じ契約。
 pub unsafe fn audit_user_supervisor(
     pml4_phys: PhysAddr,
     direct_map: DirectMap,
@@ -248,15 +248,15 @@ pub enum UserAccessError {
 /// 指定 VA が Ring 3 からアクセス可能な 4KiB ユーザーページに解決されることを、
 /// **各階層で present かつ U=1** を確かめながら独立に walk して判定する（M5-f-2-1）。
 ///
-/// 既存の [`walk`] は present のみを見る（M5-e-2 の呼び出し元がそれを前提にする）ため
+/// 既存の [`walk_page_table`] は present のみを見る（M5-e-2 の呼び出し元がそれを前提にする）ため
 /// 別関数にする。**U/S は全階層の AND であり、葉の U だけを見る `translate` では中間
 /// 階層の U=0 を見逃す。** ここは PML4→PT の全階層で U=1 を要求してその穴を塞ぐ。
 /// 既存 walk / audit_user_supervisor の契約は一切変えない。
 ///
 /// # Safety
 ///
-/// [`walk`] と同じ契約。
-pub unsafe fn walk_user_accessible(
+/// [`walk_page_table`] と同じ契約。
+pub unsafe fn walk_page_table_user_accessible(
     pml4_phys: PhysAddr,
     direct_map: DirectMap,
     virt: VirtAddr,
@@ -275,7 +275,7 @@ pub unsafe fn walk_user_accessible(
         }
         // 破壊テスト (M5-f-2-1, skip-us): U=1 判定を外す。ユーザー範囲内で present だが U=0 の
         // ページ（無効3）が誤って受理され、battery が「拒否すべきを受理」を検出して halt
-        // する。walk_user_accessible を新設した中核（U 判定）そのものの破壊テストでの確認。
+        // する。walk_page_table_user_accessible を新設した中核（U 判定）そのものの破壊テストでの確認。
         #[cfg(not(feature = "syscall-test-validate-skip-us"))]
         if entry & bits::USER == 0 {
             return Err(UserAccessError::SupervisorOnly);
@@ -313,8 +313,12 @@ pub unsafe fn walk_user_accessible(
 ///
 /// # Safety
 ///
-/// [`walk`] と同じ契約。
-pub unsafe fn read_top_entry(pml4_phys: PhysAddr, direct_map: DirectMap, index: usize) -> u64 {
+/// [`walk_page_table`] と同じ契約。
+pub unsafe fn read_top_level_entry(
+    pml4_phys: PhysAddr,
+    direct_map: DirectMap,
+    index: usize,
+) -> u64 {
     // SAFETY: 呼び出し元契約による。読み取りのみ。
     unsafe {
         core::ptr::read_volatile(
@@ -338,7 +342,7 @@ pub unsafe fn read_top_entry(pml4_phys: PhysAddr, direct_map: DirectMap, index: 
 ///
 /// # Safety
 ///
-/// [`walk`] と同じ契約。
+/// [`walk_page_table`] と同じ契約。
 pub(crate) unsafe fn collect_subtree_table_frames(
     pml4_phys: PhysAddr,
     direct_map: DirectMap,

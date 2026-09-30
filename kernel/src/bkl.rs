@@ -140,13 +140,13 @@ pub const NON_ACQUIRING_ENTRIES: &[(&str, &str)] = &[
 ///
 /// # 解いてから出るまでが触るもの
 ///
-/// `ring3::leave_ring3` が触るのは `IN_RING3` と `RECOVERY` だけで、**どちらも
+/// `ring3::leave_user_mode` が触るのは `IN_RING3` と `RECOVERY` だけで、**どちらも
 /// 遠征に固有である。** 遠征は AP を起動するより前の単一コア区間に閉じているので、
 /// 解放から longjmp までの区間で他コアと競合しない。**この前提は上の一覧の
 /// `exception` の理由と同じもので、失効するとしたら同時に失効する。**
 pub const UNWINDLESS_RELEASE_ENTRIES: &[(&str, &str)] = &[(
     "syscall_entry (SYS_EXIT)",
-    "ring3::leave_ring3 は longjmp で Drop を走らせないので、分岐の中で明示的に \
+    "ring3::leave_user_mode は longjmp で Drop を走らせないので、分岐の中で明示的に \
      drop する。触るのは IN_RING3 と RECOVERY だけで、遠征の単一コア区間に閉じている",
 )];
 
